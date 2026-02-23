@@ -1,0 +1,8 @@
+[package]
+name = "melange-primitives"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "DSP building blocks for real-time circuit simulation: filters, oversampling, NR solvers"
+
+[dependencies]

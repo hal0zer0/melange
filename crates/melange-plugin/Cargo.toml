@@ -1,0 +1,10 @@
+[package]
+name = "melange-plugin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "nih-plug integration helpers: voice management, oversampling decisions, parameter mapping"
+
+[dependencies]
+melange-primitives = { workspace = true }
+melange-solver = { workspace = true }

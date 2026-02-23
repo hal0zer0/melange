@@ -1,0 +1,24 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/melange-primitives",
+    "crates/melange-devices",
+    "crates/melange-solver",
+    "crates/melange-validate",
+    "crates/melange-plugin",
+    "tools/melange-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/FIXME/melange"
+description = "Circuit simulation toolkit for real-time audio DSP"
+
+[workspace.dependencies]
+melange-primitives = { path = "crates/melange-primitives" }
+melange-devices = { path = "crates/melange-devices" }
+melange-solver = { path = "crates/melange-solver" }
+melange-validate = { path = "crates/melange-validate" }
+melange-plugin = { path = "crates/melange-plugin" }

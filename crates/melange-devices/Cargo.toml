@@ -1,0 +1,9 @@
+[package]
+name = "melange-devices"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Parameterized nonlinear component models: BJT, tube, diode, MOSFET, CdS LDR, opamp"
+
+[dependencies]
+melange-primitives = { workspace = true }

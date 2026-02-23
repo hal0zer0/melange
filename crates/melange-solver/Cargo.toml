@@ -1,0 +1,10 @@
+[package]
+name = "melange-solver"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "MNA/DK-method circuit solver with netlist parsing and optimized code generation"
+
+[dependencies]
+melange-primitives = { workspace = true }
+melange-devices = { workspace = true }

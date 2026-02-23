@@ -1,0 +1,12 @@
+[package]
+name = "melange-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "CLI tool for circuit compilation, validation, and benchmarking"
+
+[dependencies]
+melange-primitives = { workspace = true }
+melange-devices = { workspace = true }
+melange-solver = { workspace = true }
+melange-validate = { workspace = true }

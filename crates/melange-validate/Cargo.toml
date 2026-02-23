@@ -1,0 +1,10 @@
+[package]
+name = "melange-validate"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SPICE-to-Rust validation pipeline: automated comparison, tolerance testing, diagnostics"
+
+[dependencies]
+melange-primitives = { workspace = true }
+melange-solver = { workspace = true }
