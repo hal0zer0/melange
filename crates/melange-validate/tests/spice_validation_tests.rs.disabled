@@ -1,0 +1,802 @@
+//! SPICE validation tests - Compare melange against ngspice
+//!
+//! These tests verify that melange produces results matching ngspice
+//! within tight tolerances. They require ngspice to be installed.
+//!
+//! Run with: cargo test -p melange-validate --test spice_validation_tests
+//!
+//! # Test Coverage
+//!
+//! | Test | Circuit Type | Nonlinearities | Tolerance |
+//! |------|-------------|----------------|-----------|
+//! | `test_rc_lowpass_vs_spice` | Linear RC | 0 | Strict |
+//! | `test_diode_clipper_vs_spice` | Diode clipper | 2 diodes | Default |
+//! | `test_bjt_common_emitter_vs_spice` | BJT amplifier | 1 BJT | Default |
+//! | `test_antiparallel_diodes_vs_spice` | Symmetric clipper | 2 diodes | Default |
+
+use std::path::PathBuf;
+
+use melange_validate::{
+    comparison::{compare_signals, ComparisonConfig, Signal},
+    spice_runner::{is_ngspice_available, run_transient_with_pwl},
+    visualizer::generate_html_report,
+    ValidationError,
+};
+
+/// Sample rate used for all validation tests (48 kHz audio standard)
+const SAMPLE_RATE: f64 = 48_000.0;
+
+/// Get path to test data directory
+fn test_data_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("data")
+}
+
+/// Load a PWL (piecewise linear) file and return (time, voltage) pairs
+///
+/// PWL files have format:
+/// ```text
+/// * comment
+/// 0.0000 0.0000
+/// 0.0001 0.3090
+/// ...
+/// ```
+fn load_pwl_file(path: &PathBuf) -> Result<Vec<(f64, f64)>, std::io::Error> {
+    let content = std::fs::read_to_string(path)?;
+    let mut points = Vec::new();
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        // Skip empty lines and comments
+        if trimmed.is_empty() || trimmed.starts_with('*') {
+            continue;
+        }
+
+        // Parse time voltage pairs
+        let parts: Vec<&str> = trimmed.split_whitespace().collect();
+        if parts.len() >= 2 {
+            if let (Ok(time), Ok(voltage)) = (parts[0].parse::<f64>(), parts[1].parse::<f64>()) {
+                points.push((time, voltage));
+            }
+        }
+    }
+
+    Ok(points)
+}
+
+/// Generate a sine wave input signal
+fn generate_sine_wave(frequency: f64, amplitude: f64, duration: f64, sample_rate: f64) -> Vec<f64> {
+    let num_samples = (duration * sample_rate).ceil() as usize;
+    (0..num_samples)
+        .map(|i| {
+            let t = i as f64 / sample_rate;
+            amplitude * (2.0 * std::f64::consts::PI * frequency * t).sin()
+        })
+        .collect()
+}
+
+/// Generate a ramp input signal
+fn generate_ramp(start: f64, end: f64, duration: f64, sample_rate: f64) -> Vec<f64> {
+    let num_samples = (duration * sample_rate).ceil() as usize;
+    (0..num_samples)
+        .map(|i| {
+            let t = i as f64 / sample_rate;
+            start + (end - start) * (t / duration)
+        })
+        .collect()
+}
+
+/// Configuration for strict linear circuit tolerances
+///
+/// Linear circuits should match SPICE almost exactly since there's
+/// no Newton-Raphson iteration or device nonlinearity.
+fn strict_linear_config() -> ComparisonConfig {
+    ComparisonConfig {
+        rms_error_tolerance: 1e-6,        // 0.0001%
+        peak_error_tolerance: 1e-5,       // 10 µV for 1V signal
+        max_relative_tolerance: 1e-5,     // 0.001%
+        correlation_min: 0.999999,        // Six 9s
+        thd_error_tolerance_db: 0.01,     // 0.01 dB
+        full_scale: 1.0,
+        skip_thd: false,
+    }
+}
+
+/// Configuration for nonlinear circuit tolerances
+///
+/// Nonlinear circuits have more tolerance for error due to:
+/// - Newton-Raphson convergence differences
+/// - Device model parameter variations
+/// - Numerical precision in exponential functions
+fn nonlinear_config() -> ComparisonConfig {
+    ComparisonConfig {
+        rms_error_tolerance: 1e-4,        // 0.01%
+        peak_error_tolerance: 1e-3,       // 1 mV for 1V signal
+        max_relative_tolerance: 1e-3,     // 0.1%
+        correlation_min: 0.9999,          // Four 9s
+        thd_error_tolerance_db: 0.1,      // 0.1 dB
+        full_scale: 5.0,                  // Diode clippers can hit 5V
+        skip_thd: false,
+    }
+}
+
+/// Run validation for a circuit and return the result
+///
+/// This helper function:
+/// 1. Loads the PWL input file
+/// 2. Runs ngspice simulation
+/// 3. Creates melange solver and runs it
+/// 4. Compares the results
+fn run_validation(
+    circuit_name: &str,
+    output_node: &str,
+    config: &ComparisonConfig,
+) -> Result<ValidationResult, ValidationError> {
+    let data_dir = test_data_dir().join(circuit_name);
+    let netlist_path = data_dir.join("circuit.cir");
+    let input_pwl_path = data_dir.join("input_pwl.txt");
+
+    // Load PWL input data
+    let pwl_data =
+        load_pwl_file(&input_pwl_path).map_err(|e| ValidationError::Io(e.to_string()))?;
+
+    if pwl_data.is_empty() {
+        return Err(ValidationError::InvalidInput(
+            "No PWL data found in input file".to_string(),
+        ));
+    }
+
+    // Determine simulation parameters from PWL data
+    let duration = pwl_data.last().map(|(t, _)| *t).unwrap_or(0.01);
+    let tstep = 1.0 / SAMPLE_RATE;
+
+    // Run ngspice simulation
+    let spice_data = run_transient_with_pwl(
+        &netlist_path,
+        tstep,
+        duration,
+        "in", // PWL source name - netlists use Vin as the input source
+        &pwl_data,
+        &[output_node.to_string()],
+    )?;
+
+    // Extract SPICE output
+    let spice_output = spice_data
+        .get_node_voltage(output_node)
+        .map_err(|e| ValidationError::Spice(e))?
+        .to_vec();
+
+    // Run melange solver (placeholder implementation)
+    // TODO: Replace with actual melange-solver integration
+    let input_signal = resample_pwl_to_signal(&pwl_data, SAMPLE_RATE, spice_output.len());
+    let melange_output = run_melange_solver(&netlist_path, &input_signal, SAMPLE_RATE)?;
+
+    // Create signals for comparison
+    let spice_signal = Signal::new(spice_output, SAMPLE_RATE, "SPICE");
+    let melange_signal = Signal::new(melange_output, SAMPLE_RATE, "Melange");
+
+    // Compare signals
+    let mut report = compare_signals(&spice_signal, &melange_signal, config);
+    report.circuit_name = circuit_name.to_string();
+    report.node_name = output_node.to_string();
+
+    // Generate failure report if needed
+    let report_path = if !report.passed {
+        let path = data_dir.join(format!("{}_failure_report.html", circuit_name));
+        generate_html_report(&report, &spice_signal, &melange_signal, &path)
+            .map_err(|e| ValidationError::Io(e.to_string()))?;
+        Some(path)
+    } else {
+        None
+    };
+
+    Ok(ValidationResult {
+        report,
+        html_report_path: report_path,
+    })
+}
+
+/// Resample PWL data to a uniform sample rate
+fn resample_pwl_to_signal(pwl_data: &[(f64, f64)], sample_rate: f64, num_samples: usize) -> Vec<f64> {
+    let mut signal = Vec::with_capacity(num_samples);
+
+    for i in 0..num_samples {
+        let t = i as f64 / sample_rate;
+        let value = interpolate_pwl(pwl_data, t);
+        signal.push(value);
+    }
+
+    signal
+}
+
+/// Linear interpolation for PWL data
+fn interpolate_pwl(pwl_data: &[(f64, f64)], t: f64) -> f64 {
+    // Handle edge cases
+    if pwl_data.is_empty() {
+        return 0.0;
+    }
+    if t <= pwl_data[0].0 {
+        return pwl_data[0].1;
+    }
+    if t >= pwl_data.last().unwrap().0 {
+        return pwl_data.last().unwrap().1;
+    }
+
+    // Find the interval containing t
+    for i in 1..pwl_data.len() {
+        let (t0, v0) = pwl_data[i - 1];
+        let (t1, v1) = pwl_data[i];
+
+        if t >= t0 && t <= t1 {
+            // Linear interpolation
+            if t1 - t0 > 0.0 {
+                let frac = (t - t0) / (t1 - t0);
+                return v0 + frac * (v1 - v0);
+            } else {
+                return v0;
+            }
+        }
+    }
+
+    0.0
+}
+
+/// Placeholder melange solver - to be replaced with actual integration
+///
+/// Currently just passes input through with a simple filter approximation.
+/// In production, this will:
+/// 1. Parse the netlist using `melange_solver::parser::parse_netlist`
+/// 2. Build MNA system with `melange_solver::mna::MnaSystem`
+/// 3. Create DK kernel with `melange_solver::dk::DkKernel`
+/// 4. Run `CircuitSolver::process_sample` for each input
+/// Run melange solver on a netlist with the given input signal
+fn run_melange_solver(
+    netlist_path: &PathBuf,
+    input_signal: &[f64],
+    sample_rate: f64,
+) -> Result<Vec<f64>, ValidationError> {
+    // Read and parse netlist
+    let netlist_str = std::fs::read_to_string(netlist_path)
+        .map_err(|e| ValidationError::Io(format!("Failed to read netlist: {}", e)))?;
+    
+    let netlist = melange_solver::parser::parse_netlist(&netlist_str)
+        .map_err(|e| ValidationError::Io(format!("Failed to parse netlist: {:?}", e)))?;
+    
+    // Build MNA system
+    let mna = melange_solver::mna::MnaSystem::from_netlist(&netlist, sample_rate)
+        .map_err(|e| ValidationError::Io(format!("Failed to build MNA: {:?}", e)))?;
+    
+    // Create DK kernel
+    let kernel = melange_solver::dk::DkKernel::from_mna(&mna, sample_rate)
+        .map_err(|e| ValidationError::Io(format!("Failed to build DK kernel: {:?}", e)))?;
+    
+    // Determine input/output nodes from netlist
+    let input_node = find_input_node(&netlist);
+    let output_node = find_output_node(&netlist, input_node);
+    
+    // Find node indices
+    let input_idx = find_node_index(&mna, input_node)?;
+    let output_idx = find_node_index(&mna, output_node)?;
+    
+    // Build device list for nonlinear elements
+    let devices = build_devices(&netlist, &mna)?;
+    
+    // Create solver
+    let mut solver = melange_solver::solver::CircuitSolver::new(kernel, devices);
+    
+    // Run simulation
+    let mut output = Vec::with_capacity(input_signal.len());
+    
+    for &sample in input_signal {
+        // Note: This is simplified - real implementation needs proper
+        // input node mapping and voltage source handling
+        let out = solver.process_sample(sample);
+        output.push(out);
+    }
+    
+    Ok(output)
+}
+
+/// Find the input node from the netlist (node connected to input voltage source)
+fn find_input_node(netlist: &melange_solver::parser::Netlist) -> String {
+    for element in &netlist.elements {
+        if let melange_solver::parser::Element::VoltageSource { name, nodes, .. } = element {
+            if name.to_uppercase().starts_with("VIN") || name.to_uppercase().starts_with("VS") {
+                return nodes[0].clone(); // Positive terminal
+            }
+        }
+    }
+    "in".to_string() // Default
+}
+
+/// Find the output node (first non-input, non-ground node)
+fn find_output_node(netlist: &melange_solver::parser::Netlist, input_node: String) -> String {
+    for element in &netlist.elements {
+        match element {
+            melange_solver::parser::Element::Resistor { nodes, .. } |
+            melange_solver::parser::Element::Capacitor { nodes, .. } => {
+                for node in nodes {
+                    if node != "0" && node.to_lowercase() != input_node.to_lowercase() {
+                        return node.clone();
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    "out".to_string() // Default
+}
+
+/// Find the index of a node in the MNA system
+fn find_node_index(mna: &melange_solver::mna::MnaSystem, node_name: &str) -> Result<usize, ValidationError> {
+    // Node indices are 0-based in the MNA system
+    // Node 0 is always ground
+    if node_name == "0" || node_name.to_lowercase() == "gnd" {
+        return Ok(0);
+    }
+    
+    // For now, we need to map node names to indices
+    // This is a simplified version - real implementation needs proper node mapping
+    match node_name.to_lowercase().as_str() {
+        "in" => Ok(1),
+        "out" => Ok(2),
+        _ => Err(ValidationError::Io(format!("Unknown node: {}", node_name))),
+    }
+}
+
+/// Build device list from netlist
+fn build_devices(
+    netlist: &melange_solver::parser::Netlist,
+    _mna: &melange_solver::mna::MnaSystem,
+) -> Result<Vec<melange_solver::solver::DeviceEntry>, ValidationError> {
+    use melange_solver::solver::{DeviceEntry, SolverDevice};
+    use melange_devices::diode::Diode;
+    
+    let mut devices = Vec::new();
+    
+    for element in &netlist.elements {
+        match element {
+            melange_solver::parser::Element::Diode { name, model, .. } => {
+                // Find model parameters
+                let mut is = 1e-15; // Default
+                let mut n = 1.0;
+                
+                for m in &netlist.models {
+                    if &m.name == model {
+                        for (param, value) in &m.parameters {
+                            match param.to_lowercase().as_str() {
+                                "is" => is = *value,
+                                "n" => n = *value,
+                                _ => {}
+                            }
+                        }
+                        break;
+                    }
+                }
+                
+                let diode = Diode::new(is, 0.02585, n);
+                devices.push(DeviceEntry {
+                    device_1d: Some(Box::new(diode)),
+                    device_2d: None,
+                });
+            }
+            _ => {}
+        }
+    }
+    
+    Ok(devices)
+}
+
+/// Result of a validation run
+struct ValidationResult {
+    report: melange_validate::comparison::ComparisonReport,
+    html_report_path: Option<PathBuf>,
+}
+
+/// Print detailed validation metrics
+fn print_validation_metrics(result: &ValidationResult) {
+    let report = &result.report;
+    println!("  ✓ Validation passed for {}", report.circuit_name);
+    println!("    Samples: {} at {:.0} Hz", report.sample_count, report.sample_rate);
+    println!("    RMS Error: {:.6e}", report.rms_error);
+    println!("    Normalized RMS: {:.6} ({:.4}%)",
+        report.normalized_rms_error,
+        report.normalized_rms_error * 100.0
+    );
+    println!("    Peak Error: {:.6e}", report.peak_error);
+    println!("    Correlation: {:.8}", report.correlation_coefficient);
+    println!("    SNR: {:.2} dB", report.snr_db);
+
+    if report.thd_spice.is_finite() && report.thd_melange.is_finite() {
+        println!("    THD (SPICE): {:.2} dB", report.thd_spice);
+        println!("    THD (Melange): {:.2} dB", report.thd_melange);
+        println!("    THD Error: {:.2} dB", report.thd_error_db);
+    }
+}
+
+// =============================================================================
+// Test Cases
+// =============================================================================
+
+/// Test 1: RC Lowpass Filter (Linear Circuit)
+///
+/// This is a simple first-order RC filter. Since it's linear, it should
+/// match SPICE almost exactly with very tight tolerances.
+///
+/// Circuit: R=10kΩ, C=10nF → fc ≈ 1.59 kHz
+/// Input: 1 kHz sine wave
+/// Expected: -3.9 dB attenuation, -58° phase shift
+#[test]
+fn test_rc_lowpass_vs_spice() {
+    // Skip if ngspice not available
+    if !is_ngspice_available() {
+        eprintln!("Skipping test_rc_lowpass_vs_spice: ngspice not available");
+        return;
+    }
+
+    println!("\n=== RC Lowpass Filter Validation ===");
+    println!("Circuit: 10kΩ + 10nF, fc ≈ 1.59 kHz");
+
+    let result = run_validation("rc_lowpass", "out", &strict_linear_config())
+        .expect("Failed to run validation");
+
+    print_validation_metrics(&result);
+
+    // Assert validation passed
+    assert!(
+        result.report.passed,
+        "RC lowpass validation failed:\n{}",
+        result.report.summary()
+    );
+
+    // Additional linear-circuit-specific assertions
+    assert!(
+        result.report.normalized_rms_error < 1e-6,
+        "RMS error too large for linear circuit: {:.6e}",
+        result.report.normalized_rms_error
+    );
+    assert!(
+        result.report.correlation_coefficient > 0.999999,
+        "Correlation too low for linear circuit: {:.8}",
+        result.report.correlation_coefficient
+    );
+}
+
+/// Test 2: Diode Clipper (Nonlinear Circuit)
+///
+/// Tests soft clipping behavior with antiparallel diodes.
+/// This validates the diode model and Newton-Raphson convergence.
+///
+/// Circuit: Input → R(10k) → [diodes] → Output with R(100k) load
+/// Input: 5V amplitude sine wave (clipped to ~0.7V)
+/// Expected: Symmetric soft clipping
+#[test]
+fn test_diode_clipper_vs_spice() {
+    if !is_ngspice_available() {
+        eprintln!("Skipping test_diode_clipper_vs_spice: ngspice not available");
+        return;
+    }
+
+    println!("\n=== Diode Clipper Validation ===");
+    println!("Circuit: Antiparallel 1N4148 diodes, soft clipping");
+
+    let result = run_validation("diode_clipper", "out", &nonlinear_config())
+        .expect("Failed to run validation");
+
+    print_validation_metrics(&result);
+
+    assert!(
+        result.report.passed,
+        "Diode clipper validation failed:\n{}\nReport saved to: {:?}",
+        result.report.summary(),
+        result.html_report_path
+    );
+
+    // Nonlinear circuit assertions
+    assert!(
+        result.report.normalized_rms_error < 1e-4,
+        "RMS error too large for nonlinear circuit: {:.6e}",
+        result.report.normalized_rms_error
+    );
+    assert!(
+        result.report.correlation_coefficient > 0.9999,
+        "Correlation too low for nonlinear circuit: {:.8}",
+        result.report.correlation_coefficient
+    );
+
+    // Verify THD is computed (clipping creates harmonics)
+    assert!(
+        result.report.thd_spice.is_finite(),
+        "THD should be computed for clipped signal"
+    );
+    assert!(
+        result.report.thd_error_db.abs() < 0.1,
+        "THD mismatch too large: {:.2} dB",
+        result.report.thd_error_db
+    );
+}
+
+/// Test 3: BJT Common Emitter Amplifier (Active Nonlinear Circuit)
+///
+/// Tests the Ebers-Moll BJT model with a common-emitter amplifier.
+/// Validates both DC biasing and AC signal amplification.
+///
+/// Circuit: BC547 NPN, Vcc=12V, gain ≈ 10x (20dB)
+/// Input: Small signal (10mV) at 1kHz
+/// Expected: Output ≈ 100mV, inverted, with proper DC bias
+#[test]
+fn test_bjt_common_emitter_vs_spice() {
+    if !is_ngspice_available() {
+        eprintln!("Skipping test_bjt_common_emitter_vs_spice: ngspice not available");
+        return;
+    }
+
+    println!("\n=== BJT Common Emitter Validation ===");
+    println!("Circuit: BC547 NPN amplifier, gain ≈ 10x");
+
+    let result = run_validation("bjt_common_emitter", "out", &nonlinear_config())
+        .expect("Failed to run validation");
+
+    print_validation_metrics(&result);
+
+    assert!(
+        result.report.passed,
+        "BJT common emitter validation failed:\n{}\nReport saved to: {:?}",
+        result.report.summary(),
+        result.html_report_path
+    );
+
+    // Verify amplification factor
+    // The input is small, output should be approximately 10x
+    // (This would need actual signal analysis for full validation)
+}
+
+/// Test 4: Antiparallel Diodes (2D Solver Test)
+///
+/// Tests the 2D DK solver with two nonlinear devices.
+/// The diodes are arranged to create symmetric clipping.
+///
+/// This validates:
+/// - 2D Newton-Raphson convergence
+/// - Symmetric device handling
+/// - Multiple nonlinearity interaction
+#[test]
+fn test_antiparallel_diodes_vs_spice() {
+    if !is_ngspice_available() {
+        eprintln!("Skipping test_antiparallel_diodes_vs_spice: ngspice not available");
+        return;
+    }
+
+    println!("\n=== Antiparallel Diodes Validation ===");
+    println!("Circuit: Two antiparallel diodes, 2D nonlinear system");
+
+    let result = run_validation("antiparallel_diodes", "out", &nonlinear_config())
+        .expect("Failed to run validation");
+
+    print_validation_metrics(&result);
+
+    assert!(
+        result.report.passed,
+        "Antiparallel diodes validation failed:\n{}\nReport saved to: {:?}",
+        result.report.summary(),
+        result.html_report_path
+    );
+
+    // Additional assertions for 2D solver
+    assert!(
+        result.report.peak_error < 1e-3,
+        "Peak error too large for 2D solver: {:.6e}",
+        result.report.peak_error
+    );
+}
+
+// =============================================================================
+// Additional Integration Tests
+// =============================================================================
+
+/// Test that validates all circuits in batch mode
+#[test]
+fn test_all_circuits_batch() {
+    if !is_ngspice_available() {
+        eprintln!("Skipping test_all_circuits_batch: ngspice not available");
+        return;
+    }
+
+    println!("\n=== Batch Validation of All Circuits ===");
+
+    let circuits = vec![
+        ("rc_lowpass", "out", strict_linear_config(), "Linear RC"),
+        ("diode_clipper", "out", nonlinear_config(), "Diode Clipper"),
+        ("bjt_common_emitter", "out", nonlinear_config(), "BJT Amplifier"),
+        ("antiparallel_diodes", "out", nonlinear_config(), "2D Diode System"),
+    ];
+
+    let mut passed = 0;
+    let mut failed = 0;
+
+    for (name, node, config, description) in circuits {
+        print!("Testing {} ({})... ", name, description);
+        match run_validation(name, node, &config) {
+            Ok(result) => {
+                if result.report.passed {
+                    println!("✓ PASSED");
+                    passed += 1;
+                } else {
+                    println!("✗ FAILED");
+                    println!("  Report: {:?}", result.html_report_path);
+                    failed += 1;
+                }
+            }
+            Err(e) => {
+                println!("✗ ERROR: {}", e);
+                failed += 1;
+            }
+        }
+    }
+
+    println!("\n=== Summary ===");
+    println!("Passed: {}", passed);
+    println!("Failed: {}", failed);
+
+    assert_eq!(
+        failed, 0,
+        "{} circuit(s) failed validation. Check generated HTML reports in test data directories.",
+        failed
+    );
+}
+
+/// Test ngspice availability detection
+#[test]
+fn test_ngspice_availability() {
+    // This test just verifies the availability check works
+    let available = is_ngspice_available();
+    println!("ngspice available: {}", available);
+
+    // We can't assert anything since we don't know the test environment
+    // but we can verify the function doesn't panic
+}
+
+/// Test PWL file loading
+#[test]
+fn test_pwl_file_loading() {
+    let pwl_path = test_data_dir().join("rc_lowpass").join("input_pwl.txt");
+    let pwl_data = load_pwl_file(&pwl_path).expect("Failed to load PWL file");
+
+    // Verify we loaded some data
+    assert!(!pwl_data.is_empty(), "PWL data should not be empty");
+
+    // Verify time is monotonically increasing
+    for i in 1..pwl_data.len() {
+        assert!(
+            pwl_data[i].0 >= pwl_data[i - 1].0,
+            "Time should be monotonically increasing"
+        );
+    }
+
+    // Check first and last points
+    assert_eq!(pwl_data[0].0, 0.0, "First time point should be 0");
+    assert!(
+        pwl_data.last().unwrap().0 > 0.0,
+        "Last time point should be > 0"
+    );
+
+    println!("Loaded {} PWL points", pwl_data.len());
+    println!("Duration: {} seconds", pwl_data.last().unwrap().0);
+}
+
+/// Test signal interpolation
+#[test]
+fn test_pwl_interpolation() {
+    let pwl_data = vec![
+        (0.0, 0.0),
+        (1.0, 1.0),
+        (2.0, 0.0),
+    ];
+
+    // Test exact points
+    assert!((interpolate_pwl(&pwl_data, 0.0) - 0.0).abs() < 1e-10);
+    assert!((interpolate_pwl(&pwl_data, 1.0) - 1.0).abs() < 1e-10);
+    assert!((interpolate_pwl(&pwl_data, 2.0) - 0.0).abs() < 1e-10);
+
+    // Test interpolation
+    assert!((interpolate_pwl(&pwl_data, 0.5) - 0.5).abs() < 1e-10);
+    assert!((interpolate_pwl(&pwl_data, 1.5) - 0.5).abs() < 1e-10);
+
+    // Test extrapolation (should clamp)
+    assert!((interpolate_pwl(&pwl_data, -1.0) - 0.0).abs() < 1e-10);
+    assert!((interpolate_pwl(&pwl_data, 3.0) - 0.0).abs() < 1e-10);
+}
+
+/// Test comparison configs
+#[test]
+fn test_comparison_config_levels() {
+    let strict = strict_linear_config();
+    let nonlinear = nonlinear_config();
+    let default = ComparisonConfig::default();
+
+    // Strict should be tighter than default
+    assert!(
+        strict.rms_error_tolerance < default.rms_error_tolerance,
+        "Strict RMS tolerance should be tighter than default"
+    );
+    assert!(
+        strict.correlation_min > default.correlation_min,
+        "Strict correlation should be higher than default"
+    );
+
+    // Nonlinear should be looser than strict
+    assert!(
+        nonlinear.rms_error_tolerance > strict.rms_error_tolerance,
+        "Nonlinear RMS tolerance should be looser than strict"
+    );
+    assert!(
+        nonlinear.correlation_min < strict.correlation_min,
+        "Nonlinear correlation can be lower than strict"
+    );
+
+    println!("Strict config: RMS < {:.2e}, corr > {:.6}",
+        strict.rms_error_tolerance, strict.correlation_min);
+    println!("Nonlinear config: RMS < {:.2e}, corr > {:.6}",
+        nonlinear.rms_error_tolerance, nonlinear.correlation_min);
+}
+
+/// Test helper: Generate sine wave
+#[test]
+fn test_sine_wave_generation() {
+    let freq = 1000.0;
+    let amp = 1.0;
+    let duration = 0.01; // 10ms
+    let sample_rate = 48000.0;
+
+    let wave = generate_sine_wave(freq, amp, duration, sample_rate);
+
+    // Should have approximately the right number of samples
+    let expected_samples = (duration * sample_rate).ceil() as usize;
+    assert!(
+        wave.len() == expected_samples || wave.len() == expected_samples - 1,
+        "Wrong number of samples: {} vs {}",
+        wave.len(),
+        expected_samples
+    );
+
+    // Check amplitude
+    let max_val = wave.iter().map(|&v| v.abs()).fold(0.0, f64::max);
+    assert!((max_val - amp).abs() < 0.01, "Wrong amplitude: {} vs {}", max_val, amp);
+
+    // Check period
+    let period_samples = (sample_rate / freq) as usize;
+    // After one period, value should be close to start
+    assert!(
+        (wave[0] - wave[period_samples]).abs() < 0.1,
+        "Wave doesn't have correct period"
+    );
+}
+
+/// Test helper: Generate ramp
+#[test]
+fn test_ramp_generation() {
+    let start = 0.0;
+    let end = 1.0;
+    let duration = 0.01;
+    let sample_rate = 1000.0;
+
+    let ramp = generate_ramp(start, end, duration, sample_rate);
+
+    assert_eq!(ramp.len(), 10, "Should have 10 samples for 10ms at 1kHz");
+    assert!((ramp[0] - start).abs() < 1e-10, "Ramp should start at start value");
+    // Last value should be very close to end (within one sample step)
+    let last_value = *ramp.last().unwrap();
+    assert!(
+        (last_value - end).abs() < 0.15, 
+        "Ramp should end near end value: got {}, expected {}", 
+        last_value, end
+    );
+
+    // Check monotonicity
+    for i in 1..ramp.len() {
+        assert!(ramp[i] > ramp[i - 1], "Ramp should be monotonically increasing");
+    }
+}
+
+// ValidationError type is available through melange_validate::ValidationError

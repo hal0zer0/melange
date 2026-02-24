@@ -1,0 +1,18 @@
+* Diode Clipper Circuit
+* Soft clipping using antiparallel diodes
+* Typical guitar pedal input stage
+
+VIN in 0 DC 0 AC 1
+R1 in mid 10k
+D1 mid out D1N4148
+D2 out mid D1N4148
+R2 out 0 100k
+
+* Diode model (1N4148 approx)
+.MODEL D1N4148 D(IS=2.52e-9 RS=0.568 N=1.752 TT=4.32e-9 CJO=1.95e-12 VJ=0.4 M=0.38 EG=1.11 XTI=3 KF=0 AF=1 FC=0.5 BV=100 IBV=1e-6)
+
+* Control statements
+.TRAN 1u 10m
+.PRINT TRAN V(out) V(in) V(mid)
+
+.END

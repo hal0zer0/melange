@@ -1,0 +1,7 @@
+
+Note: No compatibility mode selected!
+
+
+Circuit: * rc lowpass filter
+
+Note: No ".plot", ".print", or ".fourier" lines; no simulations run

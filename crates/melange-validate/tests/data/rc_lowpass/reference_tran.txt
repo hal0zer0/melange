@@ -1,0 +1,14 @@
+* Reference ngspice transient output for RC lowpass filter
+* Format: time V(in) V(out)
+*
+* Note: This is placeholder data. Generate real reference data with:
+* ngspice -b -o reference_tran.txt circuit.cir
+*
+* Expected: 1kHz sine wave with amplitude attenuated by ~0.7 at 1.6kHz cutoff
+
+0.0000e+00 0.0000e+00 0.0000e+00
+1.0000e-06 3.0900e-01 3.0900e-01
+2.0000e-06 5.8780e-01 5.8780e-01
+3.0000e-06 8.0900e-01 8.0900e-01
+4.0000e-06 9.5110e-01 9.5110e-01
+5.0000e-06 1.0000e+00 1.0000e+00

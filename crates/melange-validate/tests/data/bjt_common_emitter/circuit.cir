@@ -1,0 +1,35 @@
+* BJT Common Emitter Amplifier
+* Classic single-transistor amplifier stage
+* Voltage gain: ~10x (20dB)
+* Q-point: Vc ~ 6V, Ic ~ 1mA
+
+VCC vcc 0 DC 12
+
+* Input coupling and biasing
+C1 in base 10u
+R1 vcc base 100k
+R2 base 0 22k
+
+* Transistor stage
+Q1 coll base emit BC547
+RC vcc coll 6.8k
+RE emit 0 1k
+CE emit 0 100u
+
+* Output coupling
+C2 coll out 10u
+Rload out 0 100k
+
+* BJT Model (BC547 approx - NPN silicon)
+.MODEL BC547 NPN(IS=1.8e-14 BF=400 NF=0.995 VAF=100 IKF=0.14 ISE=1.25e-14 
++ NE=1.46 BR=35.5 NR=1.005 VAR=12.5 IKR=0.03 ISC=8.7e-13 NC=1.27 RB=13 RE=0.4
++ RC=0.6 CJE=1.15e-11 TF=4.75e-10 CJC=4.6e-12 VJC=0.58 MJC=0.318 TR=2.35e-7)
+
+* Input signal source (placeholder - PWL injected during validation)
+*VIN in 0 SIN(0 0.01 1000)
+
+* Control statements
+.TRAN 1u 10m
+.PRINT TRAN V(out) V(in) V(coll) V(base)
+
+.END

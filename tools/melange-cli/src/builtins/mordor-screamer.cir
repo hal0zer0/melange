@@ -1,0 +1,39 @@
+* The Mordor Screamer - High-Gain Distortion Pedal
+* Forged in the fires of Mount Doom (and melange)
+*
+* Circuit: Hard-clipping shunt diode clipper with tone control
+* Anti-parallel 1N4148 diodes clip the signal to ~±0.5V
+*
+* This implementation: Copyright (c) 2026 Melange Contributors
+* License: MIT OR Apache-2.0
+
+* Diode model - standard silicon signal diode
+.model D1N4148 D(IS=2.52e-9 RS=0.568 N=1.906)
+
+* Input coupling cap (DC blocking, passes audio)
+C1 in n1 0.1u
+
+* Pulldown resistor (prevents floating node when no input)
+R1 n1 0 1meg
+
+* Drive resistor - sets clipping hardness
+* Lower value = harder clipping, more distortion
+R2 n1 n2 4.7k
+
+* Anti-parallel diode clipper (the distortion!)
+* Clips signal to approximately ±0.5V
+D1 n2 0 D1N4148
+D2 0 n2 D1N4148
+
+* Anti-aliasing / stability capacitor
+C2 n2 0 100p
+
+* Tone control - simple lowpass
+C3 n2 n3 0.022u
+R3 n3 0 10k
+
+* Output buffer
+R4 n2 out 100
+C4 out 0 0.1u
+
+.END

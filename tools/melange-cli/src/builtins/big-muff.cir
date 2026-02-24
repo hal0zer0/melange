@@ -1,0 +1,63 @@
+* Big Muff Pi Style Fuzz
+* Inspired by the Electro-Harmonix Big Muff Pi circuit topology
+* This implementation: Copyright (c) 2026 Melange Contributors
+* License: MIT OR Apache-2.0
+*
+* Note: This is a clean-room implementation of a well-known
+* circuit topology. "Big Muff" is a trademark of Electro-Harmonix.
+*
+* 4-transistor fuzz with multiple clipping stages
+* Known for its "violin-like" sustain and harmonic richness
+
+* Input stage
+C1 in 1 0.1u
+R1 1 2 100k
+R2 2 0 470k
+
+* Q1 - First gain stage
+Q1 3 2 4 QNPN
+R3 3 vcc 150k
+R4 4 0 470
+C2 4 0 4.7u
+
+* Clipping stage 1 (diode clipper)
+D1 3 5 D1N4148
+D2 5 3 D1N4148
+C3 3 5 470p
+
+* Q2 - Second gain stage
+Q2 6 3 7 QNPN
+R5 6 vcc 150k
+R6 7 0 470
+C4 7 0 4.7u
+
+* Tone control (simplified Big Muff tone stack)
+C5 6 8 0.004u
+R7 8 9 22k
+C6 6 9 0.01u
+R8 9 10 22k
+RV1 10 0 100k
+
+* Q3 - Third gain stage
+Q3 11 9 12 QNPN
+R9 11 vcc 150k
+R10 12 0 470
+
+* Q4 - Output stage
+Q4 out 11 13 QNPN
+R11 out vcc 15k
+R12 13 0 10k
+
+* Sustain control (inter-stage network)
+RV2 3 6 100k
+RV3 9 11 100k
+
+* Power supply
+VCC vcc 0 9V
+C7 vcc 0 100u
+
+* Device models
+.model QNPN NPN(IS=1e-15 BF=300 NF=1 VAF=200 IKF=0.1 ISE=1e-12 NE=1.3 BR=2 NR=1 VAR=100 IKR=0.1 ISC=1e-12 NC=1.5 RB=5 RE=0.5 RC=0.5 CJE=15p CJC=8p TF=500p TR=50n EG=1.11 XTI=3)
+.model D1N4148 D(IS=2.52n RS=0.568 N=1.752 TT=4.32n CJO=1.95p VJ=0.4 M=0.38 EG=1.11 XTI=3 BV=100 IBV=1e-07)
+
+.END

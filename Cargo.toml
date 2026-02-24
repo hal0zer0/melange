@@ -13,7 +13,7 @@ members = [
 version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/FIXME/melange"
+repository = "https://github.com/melange-audio/melange"
 description = "Circuit simulation toolkit for real-time audio DSP"
 
 [workspace.dependencies]

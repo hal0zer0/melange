@@ -1,0 +1,42 @@
+* Fuzz Face Style Fuzz Pedal
+* Inspired by the Arbiter Fuzz Face circuit topology
+* This implementation: Copyright (c) 2026 Melange Contributors
+* License: MIT OR Apache-2.0
+*
+* Note: This is a clean-room implementation of a well-known
+* circuit topology. "Fuzz Face" is a trademark of Dallas Arbiter.
+*
+* Classic 2-transistor NPN fuzz circuit
+* Q1: Input buffer/gain, Q2: Output driver
+
+* Input coupling and biasing
+C1 in 1 2.2u
+R1 1 2 33k
+R2 2 3 33k
+R3 3 0 470
+
+* Volume control
+RV1 4 out 500k
+
+* Q1 - First transistor (AC128/2N2222 equivalent)
+Q1 2 1 3 QNPN
+
+* Q2 - Second transistor
+Q2 out 4 5 QNPN
+R4 5 0 470
+
+* Feedback network
+C2 4 2 10u
+R5 4 vcc 100k
+
+* Power supply and filtering
+VCC vcc 0 9V
+C3 vcc 0 100u
+
+* Fuzz control (inter-stage resistor)
+RV2 3 4 1k
+
+* Device models
+.model QNPN NPN(IS=1e-15 BF=200 NF=1 VAF=100 IKF=0.3 ISE=1e-12 NE=1.5 BR=1 NR=1 VAR=100 IKR=0.3 ISC=1e-12 NC=1.5 RB=10 RE=1 RC=1 CJE=20p CJC=10p TF=1n TR=100n EG=1.11 XTI=3 XTB=0)
+
+.END

@@ -7,4 +7,18 @@
 // - Per-instance variation (deterministic hash-based detuning)
 // - Companion model helpers (trapezoidal/bilinear discretization)
 
-#![no_std]
+// Note: no_std support planned for embedded targets
+// For now, we use std for floating-point math methods
+// #![no_std]
+
+pub mod filters;
+pub mod oversampling;
+pub mod nr;
+pub mod companion;
+pub mod util;
+
+pub use filters::*;
+pub use oversampling::*;
+pub use nr::*;
+pub use companion::*;
+pub use util::*;
