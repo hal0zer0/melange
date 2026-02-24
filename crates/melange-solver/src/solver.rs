@@ -187,6 +187,9 @@ impl DeviceEntry {
     }
 }
 
+/// Pivot threshold for detecting singular matrices in Gaussian elimination.
+const SINGULARITY_THRESHOLD: f64 = 1e-15;
+
 /// Solve linear system A*x = b in place using Gaussian elimination with partial pivoting.
 ///
 /// On return, `b` contains the solution x. Both `a` and `b` are modified.
@@ -207,7 +210,7 @@ fn gauss_solve_inplace(a: &mut [f64], b: &mut [f64], n: usize) -> bool {
                 max_row = row;
             }
         }
-        if max_val < 1e-15 {
+        if max_val < SINGULARITY_THRESHOLD {
             return false;
         }
 
@@ -253,6 +256,10 @@ fn gauss_solve_inplace(a: &mut [f64], b: &mut [f64], n: usize) -> bool {
 ///
 /// Maintains all state needed for sample-by-sample simulation.
 /// Uses pre-allocated buffers to avoid heap allocation during processing.
+///
+/// This struct intentionally has many fields: each buffer is pre-allocated at
+/// construction time so that [`process_sample`](Self::process_sample) performs
+/// zero heap allocations, which is required for real-time audio safety.
 #[derive(Clone)]
 pub struct CircuitSolver {
     /// DK kernel
@@ -294,6 +301,8 @@ pub struct CircuitSolver {
     pub output_node: usize,
     /// Input conductance (1/R_in) for proper Thevenin source modeling
     pub input_conductance: f64,
+    /// Previous input sample for trapezoidal integration
+    input_prev: f64,
     /// Maximum NR iterations per sample
     pub max_iter: u32,
     /// NR tolerance
@@ -367,6 +376,7 @@ impl CircuitSolver {
             input_node,
             output_node,
             input_conductance: 1.0, // Default 1/1Ω (near-ideal voltage source) — caller should set from netlist
+            input_prev: 0.0,
             max_iter: 20,
             tol: 1e-10,
             clamp: 0.1,
@@ -487,11 +497,13 @@ impl CircuitSolver {
         }
 
         // Add input source (Thevenin: V_in through R_in)
-        // For trapezoidal rule, contribution is 2 * V_in * G_in
-        // where G_in = 1/R_in is the input conductance (already stamped in G/A)
+        // Trapezoidal rule: contribution is (V_in(n+1) + V_in(n)) * G_in
+        // where V_in(n+1) is the current input and V_in(n) is the previous input.
+        // G_in = 1/R_in is the input conductance (already stamped in G/A).
         if self.input_node < n {
-            self.rhs[self.input_node] += 2.0 * input * self.input_conductance;
+            self.rhs[self.input_node] += (input + self.input_prev) * self.input_conductance;
         }
+        self.input_prev = input;
     }
 
     /// Compute linear prediction into pre-allocated buffer.
@@ -772,6 +784,8 @@ pub struct LinearSolver {
     output_node: usize,
     /// Input conductance (1/R_in) for proper Thevenin source modeling
     pub input_conductance: f64,
+    /// Previous input sample for trapezoidal integration
+    input_prev: f64,
 }
 
 impl LinearSolver {
@@ -786,6 +800,7 @@ impl LinearSolver {
             input_node,
             output_node,
             input_conductance: 1.0, // Default 1/1Ω (near-ideal voltage source) — caller should set from netlist
+            input_prev: 0.0,
         }
     }
 
@@ -805,10 +820,11 @@ impl LinearSolver {
         }
 
         // Add input source (Thevenin: V_in through R_in)
-        // For trapezoidal rule, contribution is 2 * V_in * G_in
+        // Trapezoidal rule: contribution is (V_in(n+1) + V_in(n)) * G_in
         if self.input_node < n {
-            self.rhs[self.input_node] += 2.0 * input * self.input_conductance;
+            self.rhs[self.input_node] += (input + self.input_prev) * self.input_conductance;
         }
+        self.input_prev = input;
 
         // Predict: v_pred = S * rhs
         for i in 0..n {

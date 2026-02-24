@@ -392,7 +392,7 @@ fn run_melange_solver(
 
     // 2. Build MNA system
     let mna = melange_solver::mna::MnaSystem::from_netlist(&netlist)
-        .map_err(|e| ValidationError::Solver(format!("MNA error: {}", e.message)))?;
+        .map_err(|e| ValidationError::Solver(format!("MNA error: {}", e)))?;
 
     // 3. Create DK kernel
     let kernel = melange_solver::dk::DkKernel::from_mna(&mna, sample_rate)

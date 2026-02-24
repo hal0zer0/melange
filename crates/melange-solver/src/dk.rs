@@ -63,39 +63,64 @@ pub struct DkKernel {
 
 /// Error type for DK reduction.
 #[derive(Debug, Clone)]
-pub struct DkError {
-    pub message: String,
+pub enum DkError {
+    /// The A matrix is singular or nearly singular and cannot be inverted.
+    SingularMatrix(String),
+    /// An invalid parameter was provided (e.g., non-positive sample rate).
+    InvalidParameter(String),
+    /// An inductor has a non-positive inductance value.
+    InvalidInductance { name: String, value: f64 },
 }
 
 impl std::fmt::Display for DkError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "DK error: {}", self.message)
+        match self {
+            DkError::SingularMatrix(msg) => write!(f, "DK error: {}", msg),
+            DkError::InvalidParameter(msg) => write!(f, "DK error: {}", msg),
+            DkError::InvalidInductance { name, value } => {
+                write!(f, "DK error: inductor '{}' has non-positive inductance: {}", name, value)
+            }
+        }
     }
 }
 
 impl std::error::Error for DkError {}
 
+/// Maximum supported nonlinear dimension (sum of all device dimensions).
+///
+/// Circuits with more than MAX_M nonlinear dimensions are rejected to prevent
+/// unbounded allocation and O(M^3) NR solve cost.
+pub const MAX_M: usize = 8;
+
 impl DkKernel {
     /// Build DK kernel from MNA system.
     ///
     /// # Errors
-    /// Returns an error if the A matrix cannot be inverted (singular or near-singular).
-    ///
-    /// # Panics
-    /// Panics if `sample_rate` is not positive and finite.
+    /// Returns an error if `sample_rate` is not positive and finite, if the
+    /// A matrix is singular, if any inductor has non-positive inductance,
+    /// or if the total nonlinear dimension exceeds [`MAX_M`].
     pub fn from_mna(mna: &MnaSystem, sample_rate: f64) -> Result<Self, DkError> {
-        assert!(sample_rate > 0.0 && sample_rate.is_finite(),
-                "sample_rate must be positive and finite, got {}", sample_rate);
-        
+        if !(sample_rate > 0.0 && sample_rate.is_finite()) {
+            return Err(DkError::InvalidParameter(
+                format!("sample_rate must be positive and finite, got {}", sample_rate)
+            ));
+        }
+
         let n = mna.n;
         let m = mna.m;
+
+        if m > MAX_M {
+            return Err(DkError::InvalidParameter(
+                format!("nonlinear dimension m={} exceeds MAX_M={}", m, MAX_M)
+            ));
+        }
 
         // Get A matrix
         let a = mna.get_a_matrix(sample_rate);
 
         // Invert A to get S
         let s_2d = invert_matrix(&a)
-            .map_err(|e| DkError { message: format!("Failed to invert A matrix: {}", e) })?;
+            .map_err(|e| DkError::SingularMatrix(format!("Failed to invert A matrix: {}", e)))?;
         let s = flatten_matrix(&s_2d, n, n);
 
         // Compute K = N_v * S * N_i  (M x M)
@@ -125,13 +150,16 @@ impl DkKernel {
 
         // Initialize inductor companion models
         let t = 1.0 / sample_rate;
-        let inductors: Vec<InductorInfo> = mna.inductors.iter().map(|ind| {
+        let mut inductors = Vec::with_capacity(mna.inductors.len());
+        for ind in &mna.inductors {
             if ind.value <= 0.0 {
-                panic!("Inductor '{}' has non-positive inductance: {}. Inductance must be > 0.", 
-                       ind.name, ind.value);
+                return Err(DkError::InvalidInductance {
+                    name: ind.name.clone(),
+                    value: ind.value,
+                });
             }
             let g_eq = t / (2.0 * ind.value);  // T/(2L)
-            InductorInfo {
+            inductors.push(InductorInfo {
                 name: Arc::from(ind.name.clone().into_boxed_str()),
                 node_i: ind.node_i,
                 node_j: ind.node_j,
@@ -140,8 +168,8 @@ impl DkKernel {
                 i_hist: 0.0,
                 i_prev: 0.0,
                 v_prev: 0.0,
-            }
-        }).collect();
+            });
+        }
 
         Ok(Self {
             n,
@@ -378,6 +406,9 @@ fn flatten_matrix(matrix: &[Vec<f64>], rows: usize, cols: usize) -> Vec<f64> {
     flat
 }
 
+/// Pivot threshold for detecting singular matrices in Gaussian elimination.
+const SINGULARITY_THRESHOLD: f64 = 1e-15;
+
 /// Matrix inversion using Gaussian elimination.
 ///
 /// For small matrices (N ≤ 8), this is acceptable.
@@ -409,7 +440,7 @@ pub(crate) fn invert_matrix(a: &[Vec<f64>]) -> Result<Vec<Vec<f64>>, String> {
             }
         }
 
-        if max_val < 1e-15 {
+        if max_val < SINGULARITY_THRESHOLD {
             return Err("Matrix is singular or nearly singular".to_string());
         }
 

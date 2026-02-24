@@ -161,14 +161,23 @@ impl MnaSystem {
     /// For trapezoidal: Geq = T/(2L), Ieq = i_L(t) + (T/2L)*v_L(t)
     /// This stamps only the conductance part into G.
     ///
-    /// # Panics
-    /// Panics if `sample_rate` is not positive and finite, or if `inductance` is negative.
-    pub fn stamp_inductor(&mut self, i: usize, j: usize, inductance: f64, sample_rate: f64) {
-        assert!(sample_rate > 0.0 && sample_rate.is_finite(),
-                "sample_rate must be positive and finite");
-        assert!(inductance >= 0.0, "inductance must be non-negative, got {}", inductance);
+    /// # Errors
+    /// Returns an error if `sample_rate` is not positive and finite, or if `inductance` is negative.
+    pub fn stamp_inductor(&mut self, i: usize, j: usize, inductance: f64, sample_rate: f64) -> Result<(), MnaError> {
+        if !(sample_rate > 0.0 && sample_rate.is_finite()) {
+            return Err(MnaError::InvalidParameter(
+                "sample_rate must be positive and finite".to_string()
+            ));
+        }
+        if inductance < 0.0 {
+            return Err(MnaError::InvalidComponentValue {
+                component: "inductor".to_string(),
+                value: inductance,
+                reason: "inductance must be non-negative".to_string(),
+            });
+        }
         if inductance == 0.0 {
-            return; // Treat as short
+            return Ok(()); // Treat as short
         }
         let t = 1.0 / sample_rate;
         let g_eq = t / (2.0 * inductance);
@@ -178,6 +187,7 @@ impl MnaSystem {
         self.g[j][j] += g_eq;
         self.g[i][j] -= g_eq;
         self.g[j][i] -= g_eq;
+        Ok(())
     }
 
     /// Stamp input conductance to ground at a node.
@@ -335,13 +345,28 @@ impl MnaSystem {
 
 /// Error type for MNA assembly.
 #[derive(Debug, Clone)]
-pub struct MnaError {
-    pub message: String,
+pub enum MnaError {
+    /// A component has an invalid value (e.g., negative resistance).
+    InvalidComponentValue {
+        component: String,
+        value: f64,
+        reason: String,
+    },
+    /// An invalid parameter was provided.
+    InvalidParameter(String),
+    /// A circuit topology error (e.g., unknown node reference).
+    TopologyError(String),
 }
 
 impl std::fmt::Display for MnaError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "MNA error: {}", self.message)
+        match self {
+            MnaError::InvalidComponentValue { component, value, reason } => {
+                write!(f, "MNA error: invalid value for '{}': {} ({})", component, value, reason)
+            }
+            MnaError::InvalidParameter(msg) => write!(f, "MNA error: {}", msg),
+            MnaError::TopologyError(msg) => write!(f, "MNA error: {}", msg),
+        }
     }
 }
 
@@ -431,6 +456,9 @@ impl MnaBuilder {
                         let node_i = elem.nodes[0];
                         let node_j = elem.nodes[1];
                         let r = elem.value;
+                        if r == 0.0 {
+                            continue; // Short circuit - skip to avoid division by zero
+                        }
 
                         // Handle resistor to ground
                         if node_i == 0 && node_j > 0 {
@@ -516,10 +544,10 @@ impl MnaBuilder {
                         // If anode grounded (v_i=0): v_d = -v_j, so N_v[j] = -1 extracts -v_j
                         // If cathode grounded (v_j=0): v_d = v_i, so N_v[i] = 1 extracts v_i
                         //
-                        // N_i convention: positive = current LEAVING node
+                        // N_i convention: positive = current INJECTED INTO node
                         // For current i_d flowing anode→cathode:
-                        // - Leaves anode: N_i[anode] = +1 (but anode is ground, no KCL eq)
-                        // - Enters cathode: N_i[cathode] = -1 (leaving = -i_d)
+                        // - Extracted from anode: N_i[anode] = -1
+                        // - Injected into cathode: N_i[cathode] = +1
                         if node_i == 0 && node_j > 0 {
                             let j = node_j - 1;
                             mna.n_v[start_idx][j] = -1.0;  // v_d = 0 - v_j = -v_j

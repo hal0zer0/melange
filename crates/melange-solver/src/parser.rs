@@ -409,12 +409,18 @@ impl Parser {
         if parts.len() < 4 {
             return Err(self.error("Resistor requires: Rname n+ n- value"));
         }
+        let value = parse_value(parts[3])
+            .map_err(|_| self.error(format!("Invalid resistor value: {}", parts[3])))?;
+        if value <= 0.0 || !value.is_finite() {
+            return Err(self.error(format!(
+                "Resistor value must be positive and finite, got {}", value
+            )));
+        }
         Ok(Element::Resistor {
             name: parts[0].to_string(),
             n_plus: parts[1].to_string(),
             n_minus: parts[2].to_string(),
-            value: parse_value(parts[3])
-                .map_err(|_| self.error(format!("Invalid resistor value: {}", parts[3])))?,
+            value,
         })
     }
 
@@ -422,7 +428,15 @@ impl Parser {
         if parts.len() < 4 {
             return Err(self.error("Capacitor requires: Cname n+ n- value"));
         }
-        
+
+        let value = parse_value(parts[3])
+            .map_err(|_| self.error(format!("Invalid capacitor value: {}", parts[3])))?;
+        if value < 0.0 || !value.is_finite() {
+            return Err(self.error(format!(
+                "Capacitor value must be non-negative and finite, got {}", value
+            )));
+        }
+
         let mut ic = None;
         for part in &parts[4..] {
             if part.to_uppercase().starts_with("IC=") {
@@ -436,8 +450,7 @@ impl Parser {
             name: parts[0].to_string(),
             n_plus: parts[1].to_string(),
             n_minus: parts[2].to_string(),
-            value: parse_value(parts[3])
-                .map_err(|_| self.error(format!("Invalid capacitor value: {}", parts[3])))?,
+            value,
             ic,
         })
     }
@@ -446,12 +459,18 @@ impl Parser {
         if parts.len() < 4 {
             return Err(self.error("Inductor requires: Lname n+ n- value"));
         }
+        let value = parse_value(parts[3])
+            .map_err(|_| self.error(format!("Invalid inductor value: {}", parts[3])))?;
+        if value <= 0.0 || !value.is_finite() {
+            return Err(self.error(format!(
+                "Inductor value must be positive and finite, got {}", value
+            )));
+        }
         Ok(Element::Inductor {
             name: parts[0].to_string(),
             n_plus: parts[1].to_string(),
             n_minus: parts[2].to_string(),
-            value: parse_value(parts[3])
-                .map_err(|_| self.error(format!("Invalid inductor value: {}", parts[3])))?,
+            value,
         })
     }
 
@@ -663,7 +682,11 @@ fn parse_value(s: &str) -> Result<f64, ParseFloatError> {
     }
 
     let value: f64 = num_part.parse().map_err(|_| ParseFloatError)?;
-    Ok(value * scale)
+    let result = value * scale;
+    if !result.is_finite() {
+        return Err(ParseFloatError);
+    }
+    Ok(result)
 }
 
 /// Error type for float parsing failures.
@@ -731,6 +754,63 @@ mod tests {
         assert_eq!(parse_value("4.7u").unwrap(), 4.7e-6);
         assert_eq!(parse_value("10pF").unwrap(), 10e-12);
         assert_eq!(parse_value("1MEG").unwrap(), 1e6);
+    }
+
+    #[test]
+    fn test_parse_valid_scale_suffixes() {
+        assert!((parse_value("1T").unwrap() - 1e12).abs() < 1e3);
+        assert!((parse_value("1G").unwrap() - 1e9).abs() < 1.0);
+        assert!((parse_value("1MEG").unwrap() - 1e6).abs() < 1.0);
+        assert!((parse_value("1k").unwrap() - 1e3).abs() < 1e-6);
+        assert!((parse_value("1m").unwrap() - 1e-3).abs() < 1e-12);
+        assert!((parse_value("1u").unwrap() - 1e-6).abs() < 1e-15);
+        assert!((parse_value("1n").unwrap() - 1e-9).abs() < 1e-18);
+        assert!((parse_value("1p").unwrap() - 1e-12).abs() < 1e-21);
+        // "1f" is ambiguous with Farad unit suffix; femto requires no unit suffix after it
+        // "1F" = 1.0 Farad (F is unit, not scale), by design
+        assert!((parse_value("1F").unwrap() - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_parse_negative_resistance_rejected() {
+        let result = Netlist::parse("Test\nR1 1 0 -1k\n");
+        assert!(result.is_err(), "Negative resistance should be rejected");
+    }
+
+    #[test]
+    fn test_parse_zero_resistance_rejected() {
+        let result = Netlist::parse("Test\nR1 1 0 0\n");
+        assert!(result.is_err(), "Zero resistance should be rejected");
+    }
+
+    #[test]
+    fn test_parse_nan_value_rejected() {
+        let result = parse_value("NaN");
+        assert!(result.is_err(), "NaN value should be rejected");
+    }
+
+    #[test]
+    fn test_parse_inf_value_rejected() {
+        let result = parse_value("inf");
+        assert!(result.is_err(), "Infinity value should be rejected");
+    }
+
+    #[test]
+    fn test_parse_negative_capacitance_rejected() {
+        let result = Netlist::parse("Test\nC1 1 0 -1u\n");
+        assert!(result.is_err(), "Negative capacitance should be rejected");
+    }
+
+    #[test]
+    fn test_parse_zero_inductance_rejected() {
+        let result = Netlist::parse("Test\nL1 1 0 0\n");
+        assert!(result.is_err(), "Zero inductance should be rejected");
+    }
+
+    #[test]
+    fn test_parse_missing_value() {
+        let result = Netlist::parse("Test\nR1 1 0\n");
+        assert!(result.is_err(), "Missing value should be rejected");
     }
 
     #[test]

@@ -7,8 +7,8 @@ use melange_solver::codegen::{CodeGenerator, CodegenConfig};
 
 /// Maximum safe output levels for audio
 const MAX_SAFE_VOLTAGE: f64 = 10.0;
-const MAX_SAFE_DC_OFFSET: f64 = 0.1;
-const MAX_ABSOLUTE_OUTPUT: f64 = 100.0;
+const _MAX_SAFE_DC_OFFSET: f64 = 0.1;
+const _MAX_ABSOLUTE_OUTPUT: f64 = 100.0;
 
 /// Validates S matrix is well-conditioned
 pub fn validate_s_matrix(kernel: &DkKernel) -> Result<(), String> {
@@ -111,7 +111,7 @@ pub fn validate_circuit_safe(netlist_str: &str, sample_rate: f64) -> Result<(Mna
     }
     
     let kernel = DkKernel::from_mna(&mna, sample_rate)
-        .map_err(|e| format!("DK kernel error: {}", e.message))?;
+        .map_err(|e| format!("DK kernel error: {}", e))?;
     
     validate_s_matrix(&kernel)?;
     validate_k_matrix(&kernel)?;

@@ -634,3 +634,176 @@ fn test_zero_input_produces_zero_output() {
         );
     }
 }
+
+// ============================================================================
+// Error-path tests
+// ============================================================================
+
+/// Verify that feeding NaN input produces finite output (solver should clamp/sanitize).
+#[test]
+fn test_solver_handles_nan_input() {
+    let spice = "NaN Test\nRin in out 1k\nD1 out 0 D1N4148\nC1 out 0 1u\n.model D1N4148 D(IS=1e-15)\n";
+    let netlist = Netlist::parse(spice).unwrap();
+    let mna = MnaSystem::from_netlist(&netlist).unwrap();
+    let kernel = DkKernel::from_mna(&mna, SAMPLE_RATE).unwrap();
+
+    let in_idx = *mna.node_map.get("in").unwrap() - 1;
+    let out_idx = *mna.node_map.get("out").unwrap() - 1;
+
+    let diode = DiodeShockley::new_room_temp(1e-15, 1.0);
+    let devices = vec![DeviceEntry::new_diode(diode, 0)];
+
+    let mut solver = CircuitSolver::new(kernel, devices, in_idx, out_idx);
+    solver.input_conductance = 0.001;
+
+    // Process normal samples first
+    for _ in 0..10 {
+        let out = solver.process_sample(1.0);
+        assert!(out.is_finite(), "Normal input should produce finite output");
+    }
+
+    // Feed NaN - solver should produce finite output (clamped)
+    let out_nan = solver.process_sample(f64::NAN);
+    assert!(out_nan.is_finite(), "NaN input should produce finite output, got {}", out_nan);
+
+    // Feed Inf - solver should produce finite output (clamped)
+    let out_inf = solver.process_sample(f64::INFINITY);
+    assert!(out_inf.is_finite(), "Inf input should produce finite output, got {}", out_inf);
+
+    // Should recover after bad inputs
+    for _ in 0..50 {
+        let out = solver.process_sample(0.0);
+        assert!(out.is_finite(), "Should recover after bad input, got {}", out);
+    }
+}
+
+/// DK kernel should reject zero sample rate.
+#[test]
+fn test_dk_kernel_rejects_zero_sample_rate() {
+    let spice = "RC\nR1 in 0 1k\nC1 in 0 1u\n";
+    let netlist = Netlist::parse(spice).unwrap();
+    let mna = MnaSystem::from_netlist(&netlist).unwrap();
+    let result = DkKernel::from_mna(&mna, 0.0);
+    assert!(result.is_err(), "Zero sample rate should be rejected");
+}
+
+/// DK kernel should reject negative sample rate.
+#[test]
+fn test_dk_kernel_rejects_negative_sample_rate() {
+    let spice = "RC\nR1 in 0 1k\nC1 in 0 1u\n";
+    let netlist = Netlist::parse(spice).unwrap();
+    let mna = MnaSystem::from_netlist(&netlist).unwrap();
+    let result = DkKernel::from_mna(&mna, -44100.0);
+    assert!(result.is_err(), "Negative sample rate should be rejected");
+}
+
+/// DK kernel should reject NaN sample rate.
+#[test]
+fn test_dk_kernel_rejects_nan_sample_rate() {
+    let spice = "RC\nR1 in 0 1k\nC1 in 0 1u\n";
+    let netlist = Netlist::parse(spice).unwrap();
+    let mna = MnaSystem::from_netlist(&netlist).unwrap();
+    let result = DkKernel::from_mna(&mna, f64::NAN);
+    assert!(result.is_err(), "NaN sample rate should be rejected");
+}
+
+// ============================================================================
+// Inductor test
+// ============================================================================
+
+/// Verify that an RL circuit produces finite, bounded output.
+#[test]
+fn test_inductor_rl_circuit_finite_output() {
+    let spice = "RL Circuit\nR1 in out 1k\nL1 out 0 10m\nC1 out 0 100p\n";
+    let netlist = Netlist::parse(spice).unwrap();
+    let mna = MnaSystem::from_netlist(&netlist).unwrap();
+    let kernel = DkKernel::from_mna(&mna, SAMPLE_RATE).unwrap();
+
+    let in_idx = *mna.node_map.get("in").unwrap() - 1;
+    let out_idx = *mna.node_map.get("out").unwrap() - 1;
+
+    let mut solver = LinearSolver::new(kernel, in_idx, out_idx);
+    solver.input_conductance = 0.001; // 1/1k
+
+    // Apply 1V DC step for 500 samples
+    let num_samples = 500;
+    for _ in 0..num_samples {
+        let output = solver.process_sample(1.0);
+        assert!(
+            output.is_finite(),
+            "RL circuit output must be finite"
+        );
+        assert!(
+            output.abs() < 10.0,
+            "RL circuit output must be bounded, got {:.4}",
+            output
+        );
+    }
+}
+
+// ============================================================================
+// M>2 convergence tests
+// ============================================================================
+
+/// Verify that a 3-diode circuit (M=3) converges and produces finite output.
+#[test]
+fn test_m3_three_diodes_converges() {
+    let spice = "Three Diodes\nRin in 0 1k\nD1 in m1 D1N4148\nD2 m1 m2 D1N4148\nD3 m2 out D1N4148\nR1 m1 0 10k\nR2 m2 0 10k\nC1 out 0 1u\n.model D1N4148 D(IS=1e-15)\n";
+    let netlist = Netlist::parse(spice).unwrap();
+    let mna = MnaSystem::from_netlist(&netlist).unwrap();
+    let kernel = DkKernel::from_mna(&mna, SAMPLE_RATE).unwrap();
+
+    assert_eq!(kernel.m, 3, "Three diodes should produce m=3");
+
+    let in_idx = *mna.node_map.get("in").unwrap() - 1;
+    let out_idx = *mna.node_map.get("out").unwrap() - 1;
+
+    let devices = vec![
+        DeviceEntry::new_diode(DiodeShockley::new_room_temp(1e-15, 1.0), 0),
+        DeviceEntry::new_diode(DiodeShockley::new_room_temp(1e-15, 1.0), 1),
+        DeviceEntry::new_diode(DiodeShockley::new_room_temp(1e-15, 1.0), 2),
+    ];
+
+    let mut solver = CircuitSolver::new(kernel, devices, in_idx, out_idx);
+    solver.input_conductance = 0.001;
+
+    for i in 0..200 {
+        let output = solver.process_sample(1.0);
+        assert!(
+            output.is_finite(),
+            "M=3 output[{}] = {} is not finite", i, output
+        );
+    }
+}
+
+/// Verify that a 4-diode circuit (M=4) converges and produces finite output.
+#[test]
+fn test_m4_four_diodes_converges() {
+    let spice = "Four Diodes\nRin in 0 1k\nD1 in m1 D1N4148\nD2 m1 m2 D1N4148\nD3 m2 m3 D1N4148\nD4 m3 out D1N4148\nR1 m1 0 10k\nR2 m2 0 10k\nR3 m3 0 10k\nC1 out 0 1u\n.model D1N4148 D(IS=1e-15)\n";
+    let netlist = Netlist::parse(spice).unwrap();
+    let mna = MnaSystem::from_netlist(&netlist).unwrap();
+    let kernel = DkKernel::from_mna(&mna, SAMPLE_RATE).unwrap();
+
+    assert_eq!(kernel.m, 4, "Four diodes should produce m=4");
+
+    let in_idx = *mna.node_map.get("in").unwrap() - 1;
+    let out_idx = *mna.node_map.get("out").unwrap() - 1;
+
+    let devices = vec![
+        DeviceEntry::new_diode(DiodeShockley::new_room_temp(1e-15, 1.0), 0),
+        DeviceEntry::new_diode(DiodeShockley::new_room_temp(1e-15, 1.0), 1),
+        DeviceEntry::new_diode(DiodeShockley::new_room_temp(1e-15, 1.0), 2),
+        DeviceEntry::new_diode(DiodeShockley::new_room_temp(1e-15, 1.0), 3),
+    ];
+
+    let mut solver = CircuitSolver::new(kernel, devices, in_idx, out_idx);
+    solver.input_conductance = 0.001;
+
+    for i in 0..200 {
+        let output = solver.process_sample(1.0);
+        assert!(
+            output.is_finite(),
+            "M=4 output[{}] = {} is not finite", i, output
+        );
+    }
+}

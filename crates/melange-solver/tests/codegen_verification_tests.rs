@@ -9,6 +9,7 @@ use melange_solver::codegen::{CodeGenerator, CodegenConfig};
 use melange_solver::parser::Netlist;
 use melange_solver::mna::MnaSystem;
 use melange_solver::dk::DkKernel;
+use std::io::Write;
 
 // ---------------------------------------------------------------------------
 // Helper: build kernel pipeline from a SPICE string
@@ -802,4 +803,57 @@ fn test_codegen_default_input_conductance() {
         config.input_conductance, 1.0,
         "Default input_conductance should be 1.0 (1/1Ω)"
     );
+}
+
+// ==========================================================================
+// Test: Generated code actually compiles with rustc
+// ==========================================================================
+
+/// Verify that the generated code for each circuit type compiles as valid Rust.
+///
+/// This catches any syntax errors, missing imports, or type mismatches in the
+/// code generator output that string-matching tests would miss.
+#[test]
+fn test_generated_code_compiles() {
+    let circuits: &[(&str, &str)] = &[
+        ("rc_linear", RC_CIRCUIT_SPICE),
+        ("diode_clipper", DIODE_CLIPPER_SPICE),
+        ("two_diode", TWO_DIODE_SPICE),
+        ("bjt", BJT_SPICE),
+    ];
+
+    for (name, spice) in circuits {
+        let (code, _netlist, _mna, _kernel) = generate_code(spice);
+
+        // Write to a temp file
+        let tmp_dir = std::env::temp_dir();
+        let tmp_path = tmp_dir.join(format!("melange_codegen_test_{}.rs", name));
+
+        {
+            let mut f = std::fs::File::create(&tmp_path)
+                .expect("failed to create temp file");
+            f.write_all(code.as_bytes())
+                .expect("failed to write temp file");
+        }
+
+        // Compile as a library crate
+        let output = std::process::Command::new("rustc")
+            .args(["--edition", "2024", "--crate-type", "lib", "-o"])
+            .arg(tmp_dir.join(format!("melange_codegen_test_{}.rlib", name)))
+            .arg(&tmp_path)
+            .output()
+            .expect("failed to run rustc");
+
+        // Clean up temp files regardless of result
+        let _ = std::fs::remove_file(&tmp_path);
+        let _ = std::fs::remove_file(tmp_dir.join(format!("melange_codegen_test_{}.rlib", name)));
+        let _ = std::fs::remove_file(tmp_dir.join(format!("libmelange_codegen_test_{}.rlib", name)));
+
+        assert!(
+            output.status.success(),
+            "Generated code for '{}' failed to compile:\n{}",
+            name,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }
