@@ -65,6 +65,10 @@ enum Commands {
         /// Output format
         #[arg(short = 'f', long, value_enum, default_value = "code")]
         format: OutputFormat,
+
+        /// Add Input Level and Output Level parameters to the plugin
+        #[arg(long)]
+        with_level_params: bool,
     },
 
     /// Validate circuit against SPICE reference
@@ -190,6 +194,7 @@ fn main() -> Result<()> {
             max_iter,
             tolerance,
             format,
+            with_level_params,
         } => {
             let circuit_source = circuits::resolve(&input)?;
             println!("Resolved circuit: {}", circuit_source.name());
@@ -202,6 +207,7 @@ fn main() -> Result<()> {
                 max_iter,
                 tolerance,
                 format,
+                with_level_params,
             )
         }
         Commands::Validate {
@@ -244,6 +250,7 @@ fn compile_circuit_source(
     max_iter: usize,
     tolerance: f64,
     format: OutputFormat,
+    with_level_params: bool,
 ) -> Result<()> {
     use melange_solver::{
         codegen::{CodegenConfig, CodeGenerator},
@@ -295,7 +302,10 @@ fn compile_circuit_source(
         .node_map
         .get(input_node)
         .copied()
-        .unwrap_or(1)
+        .ok_or_else(|| anyhow::anyhow!(
+            "Input node '{}' not found in circuit. Available: {:?}",
+            input_node, mna.node_map.keys().collect::<Vec<_>>()
+        ))?
         .saturating_sub(1);
     // Use 1Ω input impedance so the input signal appears directly at the input node.
     // In a DAW plugin context, the input represents the actual voltage, not a source
@@ -322,18 +332,14 @@ fn compile_circuit_source(
         .unwrap_or("circuit")
         .to_string();
 
-    let input_node_idx = mna
-        .node_map
-        .get(input_node)
-        .copied()
-        .unwrap_or(1)
-        .saturating_sub(1);
-
     let output_node_idx = mna
         .node_map
         .get(output_node)
         .copied()
-        .unwrap_or(2)
+        .ok_or_else(|| anyhow::anyhow!(
+            "Output node '{}' not found in circuit. Available: {:?}",
+            output_node, mna.node_map.keys().collect::<Vec<_>>()
+        ))?
         .saturating_sub(1);
 
     let config = CodegenConfig {
@@ -341,13 +347,10 @@ fn compile_circuit_source(
         input_node: input_node_idx,
         output_node: output_node_idx,
         sample_rate,
-        max_iter,
         max_iterations: max_iter,
-        tol: tolerance,
         tolerance,
         include_dc_op: true,
-        input_conductance,  // Matches the G matrix stamping above
-        input_resistance,   // 10kΩ - proper voltage divider with circuit input
+        input_resistance,   // 1Ω (near-ideal voltage source)
     };
 
     let generator = CodeGenerator::new(config);
@@ -391,20 +394,25 @@ fn compile_circuit_source(
                 .unwrap_or("circuit")
                 .to_string();
 
-            plugin_template::generate_plugin_project(&project_dir, &generated.code, &circuit_name)?;
+            plugin_template::generate_plugin_project(&project_dir, &generated.code, &circuit_name, with_level_params)?;
 
             println!("  ✓ Done!");
             println!();
             println!("Generated plugin project at: {}", project_dir.display());
             println!();
-            println!("To build and run:");
+            println!("To build the plugin (CLAP + VST3):");
             println!("  cd {}", project_dir.file_name().unwrap().to_str().unwrap());
-            println!("  cargo run --release --bin {}-standalone", circuit_name);
+            println!("  cargo build --release");
             println!();
-            println!("To build plugin formats (CLAP, VST3):");
-            println!("  cargo xtask bundle {} --release", circuit_name);
+            println!("The compiled plugin will be at:");
+            println!("  target/release/lib{}.so", circuit_name.replace("-", "_"));
             println!();
-            println!("See README.md in the project directory for more information.");
+            println!("To install the CLAP plugin:");
+            println!("  mkdir -p ~/.clap");
+            println!("  cp target/release/lib{}.so ~/.clap/{}.clap", 
+                     circuit_name.replace("-", "_"), circuit_name);
+            println!();
+            println!("The VST3 plugin is included in the same binary.");
         }
     }
 

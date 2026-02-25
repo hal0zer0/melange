@@ -8,21 +8,22 @@ pub fn generate_plugin_project(
     output_dir: &Path,
     circuit_code: &str,
     circuit_name: &str,
+    with_level_params: bool,
 ) -> Result<()> {
     // Create directory structure
     std::fs::create_dir_all(output_dir.join("src"))?;
-    
+
     // Write Cargo.toml
     let cargo_toml = generate_cargo_toml(circuit_name);
     std::fs::write(output_dir.join("Cargo.toml"), cargo_toml)?;
-    
+
     // Write circuit.rs (the generated code)
     std::fs::write(output_dir.join("src/circuit.rs"), circuit_code)?;
-    
+
     // Write lib.rs (plugin wrapper)
-    let lib_rs = generate_lib_rs(circuit_name);
+    let lib_rs = generate_lib_rs(circuit_name, with_level_params);
     std::fs::write(output_dir.join("src/lib.rs"), lib_rs)?;
-    
+
     Ok(())
 }
 
@@ -33,14 +34,14 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-nih_plug = {{ git = "https://github.com/robbert-vdh/nih-plug.git" }}
+nih_plug = {{ git = "https://github.com/robbert-vdh/nih-plug.git", rev = "28b149e" }}
 
 [lib]
 crate-type = ["cdylib"]
 "#, circuit_name)
 }
 
-fn generate_lib_rs(circuit_name: &str) -> String {
+fn generate_lib_rs(circuit_name: &str, with_level_params: bool) -> String {
     // Convert to a display-friendly name (e.g., "mordor-screamer" -> "Mordor Screamer")
     let display_name = circuit_name
         .split('-')
@@ -53,51 +54,121 @@ fn generate_lib_rs(circuit_name: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ");
-    
-    // Create unique CLAP ID and VST3 ID based on circuit name
+
+    // Create unique CLAP ID based on circuit name
     let clap_id = format!("com.melange.{}", circuit_name);
-    // VST3 ID must be exactly 16 bytes
-    let vst3_base = circuit_name.replace("-", "").to_uppercase();
-    let vst3_id = format!("{: <16}", &vst3_base[..vst3_base.len().min(16)]);
-    let vst3_id_str = vst3_id;
-    
-    format!(r#"use nih_plug::prelude::*;
+
+    // Compute a stable 16-byte VST3 ID from circuit name using XOR hash
+    let mut hash = [0u8; 16];
+    let name_bytes = circuit_name.as_bytes();
+    for (i, &b) in name_bytes.iter().enumerate() {
+        hash[i % 16] ^= b;
+    }
+    // Ensure all bytes are printable ASCII for b"..." literal
+    for h in hash.iter_mut() {
+        *h = b'A' + (*h % 26);
+    }
+    let vst3_id_str = String::from_utf8(hash.to_vec()).unwrap();
+
+    let (params_struct, process_loop) = if with_level_params {
+        (
+            r#"#[derive(Params)]
+pub struct CircuitParams {
+    #[id = "input_level"]
+    pub input_level: FloatParam,
+    #[id = "output_level"]
+    pub output_level: FloatParam,
+}
+
+impl Default for CircuitParams {
+    fn default() -> Self {
+        Self {
+            input_level: FloatParam::new(
+                "Input Level",
+                util::db_to_gain(0.0),
+                FloatRange::Skewed {
+                    min: util::db_to_gain(-12.0),
+                    max: util::db_to_gain(12.0),
+                    factor: FloatRange::gain_skew_factor(-12.0, 12.0),
+                },
+            )
+            .with_smoother(SmoothingStyle::Logarithmic(50.0))
+            .with_unit(" dB")
+            .with_value_to_string(formatters::v2s_f32_gain_to_db(1))
+            .with_string_to_value(formatters::s2v_f32_gain_to_db()),
+
+            output_level: FloatParam::new(
+                "Output Level",
+                util::db_to_gain(0.0),
+                FloatRange::Skewed {
+                    min: util::db_to_gain(-30.0),
+                    max: util::db_to_gain(12.0),
+                    factor: FloatRange::gain_skew_factor(-30.0, 12.0),
+                },
+            )
+            .with_smoother(SmoothingStyle::Logarithmic(50.0))
+            .with_unit(" dB")
+            .with_value_to_string(formatters::v2s_f32_gain_to_db(1))
+            .with_string_to_value(formatters::s2v_f32_gain_to_db()),
+        }
+    }
+}"#,
+            r#"        for channel_samples in buffer.iter_samples() {
+            let input_gain = self.params.input_level.smoothed.next();
+            let output_gain = self.params.output_level.smoothed.next();
+            for (ch, sample) in channel_samples.into_iter().enumerate() {
+                let state = &mut self.circuit_states[ch];
+                let input = *sample as f64 * input_gain as f64;
+                let out = process_sample(input, state) as f32;
+                let out = out * output_gain;
+                *sample = if out.is_finite() { out.clamp(-1.0, 1.0) } else { 0.0 };
+            }
+        }"#,
+        )
+    } else {
+        (
+            r#"#[derive(Params, Default)]
+pub struct CircuitParams {}"#,
+            r#"        for channel_samples in buffer.iter_samples() {
+            for (ch, sample) in channel_samples.into_iter().enumerate() {
+                let state = &mut self.circuit_states[ch];
+                let out = process_sample(*sample as f64, state) as f32;
+                *sample = if out.is_finite() { out.clamp(-1.0, 1.0) } else { 0.0 };
+            }
+        }"#,
+        )
+    };
+
+    format!(
+        r#"use nih_plug::prelude::*;
 use std::sync::Arc;
 
 mod circuit;
 use circuit::{{process_sample, CircuitState}};
 
-#[derive(Default)]
 pub struct CircuitPlugin {{
     params: Arc<CircuitParams>,
-    circuit_state: CircuitState,
+    circuit_states: Vec<CircuitState>,
 }}
 
-#[derive(Params)]
-pub struct CircuitParams {{
-    #[id = "gain"]
-    pub gain: FloatParam,
-}}
-
-impl Default for CircuitParams {{
+impl Default for CircuitPlugin {{
     fn default() -> Self {{
         Self {{
-            gain: FloatParam::new(
-                "Gain",
-                0.5,
-                FloatRange::Linear {{ min: 0.0, max: 1.0 }},
-            ),
+            params: Arc::new(CircuitParams::default()),
+            circuit_states: vec![CircuitState::default(); 2],
         }}
     }}
 }}
 
+{params_struct}
+
 impl Plugin for CircuitPlugin {{
-    const NAME: &'static str = "{}";
+    const NAME: &'static str = "{display_name}";
     const VENDOR: &'static str = "Melange";
     const URL: &'static str = "https://github.com/melange";
     const EMAIL: &'static str = "dev@melange.audio";
     const VERSION: &'static str = env!("CARGO_PKG_VERSION");
-    
+
     const AUDIO_IO_LAYOUTS: &'static [AudioIOLayout] = &[
         AudioIOLayout {{
             main_input_channels: NonZeroU32::new(2),
@@ -107,53 +178,51 @@ impl Plugin for CircuitPlugin {{
             names: PortNames::const_default(),
         }},
     ];
-    
+
     const SAMPLE_ACCURATE_AUTOMATION: bool = true;
-    
+
     type SysExMessage = ();
     type BackgroundTask = ();
-    
+
     fn params(&self) -> Arc<dyn Params> {{
         self.params.clone()
     }}
-    
+
     fn initialize(
         &mut self,
-        _audio_io_layout: &AudioIOLayout,
+        audio_io_layout: &AudioIOLayout,
         _buffer_config: &BufferConfig,
         _context: &mut impl InitContext<Self>,
     ) -> bool {{
-        self.circuit_state = CircuitState::default();
+        let num_channels = audio_io_layout.main_input_channels
+            .map(|c| c.get() as usize).unwrap_or(2);
+        self.circuit_states = (0..num_channels).map(|_| CircuitState::default()).collect();
         true
     }}
-    
+
     fn reset(&mut self) {{
-        self.circuit_state = CircuitState::default();
+        for state in &mut self.circuit_states {{
+            *state = CircuitState::default();
+        }}
     }}
-    
+
     fn process(
         &mut self,
         buffer: &mut Buffer,
         _aux: &mut AuxiliaryBuffers,
         _context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {{
-        for channel_samples in buffer.iter_samples() {{
-            for sample in channel_samples {{
-                let out = process_sample(*sample as f64, &mut self.circuit_state) as f32;
-                // Safety: clamp output and replace NaN/inf with silence
-                *sample = if out.is_finite() {{ out.clamp(-10.0, 10.0) }} else {{ 0.0 }};
-            }}
-        }}
+{process_loop}
         ProcessStatus::Normal
     }}
 }}
 
 impl ClapPlugin for CircuitPlugin {{
-    const CLAP_ID: &'static str = "{}";
+    const CLAP_ID: &'static str = "{clap_id}";
     const CLAP_DESCRIPTION: Option<&'static str> = Some("Circuit modeled with Melange");
     const CLAP_MANUAL_URL: Option<&'static str> = Some(Self::URL);
     const CLAP_SUPPORT_URL: Option<&'static str> = None;
-    
+
     const CLAP_FEATURES: &'static [ClapFeature] = &[
         ClapFeature::AudioEffect,
         ClapFeature::Stereo,
@@ -161,8 +230,8 @@ impl ClapPlugin for CircuitPlugin {{
 }}
 
 impl Vst3Plugin for CircuitPlugin {{
-    const VST3_CLASS_ID: [u8; 16] = *b"{}";
-    
+    const VST3_CLASS_ID: [u8; 16] = *b"{vst3_id_str}";
+
     const VST3_SUBCATEGORIES: &'static [Vst3SubCategory] = &[
         Vst3SubCategory::Fx,
     ];
@@ -170,5 +239,6 @@ impl Vst3Plugin for CircuitPlugin {{
 
 nih_export_clap!(CircuitPlugin);
 nih_export_vst3!(CircuitPlugin);
-"#, display_name, clap_id, vst3_id_str)
+"#
+    )
 }
