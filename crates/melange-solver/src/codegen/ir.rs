@@ -327,6 +327,16 @@ impl CircuitIR {
             }
         }
 
+        // Current sources: same sign convention as dk.rs build_rhs_const
+        for src in &mna.current_sources {
+            if src.n_plus_idx > 0 {
+                b_dc[src.n_plus_idx - 1] += src.dc_value;
+            }
+            if src.n_minus_idx > 0 {
+                b_dc[src.n_minus_idx - 1] -= src.dc_value;
+            }
+        }
+
         // If no DC sources, return zeros
         if b_dc.iter().all(|&v| v == 0.0) {
             return vec![0.0; n];

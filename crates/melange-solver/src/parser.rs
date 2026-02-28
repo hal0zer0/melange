@@ -348,9 +348,9 @@ impl Parser {
 
         // Extract model type: everything before the first '('
         let model_type = if let Some(paren_pos) = rest.find('(') {
-            rest[..paren_pos].trim().to_string()
+            rest[..paren_pos].trim().to_ascii_uppercase()
         } else {
-            rest.trim().to_string()
+            rest.trim().to_ascii_uppercase()
         };
 
         // Extract params from between parentheses (if any)
@@ -358,7 +358,7 @@ impl Parser {
             let params_str = &rest[open + 1..close];
             for token in params_str.split_whitespace() {
                 if let Some(eq_pos) = token.find('=') {
-                    let key = token[..eq_pos].to_string();
+                    let key = token[..eq_pos].to_ascii_uppercase();
                     let value_str = &token[eq_pos + 1..];
                     let value = parse_value(value_str)
                         .map_err(|_| self.error(format!("Invalid model parameter value: {}", value_str)))?;

@@ -799,6 +799,10 @@ impl RustEmitter {
         code.push_str("                state.last_nr_iterations = iter as u32;\n");
         code.push_str("                return i_nl;\n");
         code.push_str("            }\n");
+        code.push_str("        } else {\n");
+        code.push_str("            // Singular Jacobian — return best guess\n");
+        code.push_str("            state.last_nr_iterations = MAX_ITER as u32;\n");
+        code.push_str("            return i_nl;\n");
         code.push_str("        }\n");
     }
 }

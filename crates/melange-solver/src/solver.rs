@@ -602,7 +602,7 @@ impl CircuitSolver {
             1.0 - self.kernel.k(1, 1) * g
         };
 
-        let (v1, v2, _) = nr_solve_2d(
+        let (v1, v2, result) = nr_solve_2d(
             f1, f2,
             df1_dv1, df1_dv2,
             df2_dv1, df2_dv2,
@@ -612,8 +612,20 @@ impl CircuitSolver {
             self.clamp,
         );
 
-        self.v_nl[0] = v1;
-        self.v_nl[1] = v2;
+        match result {
+            melange_primitives::nr::NrResult::Converged { .. } => {
+                self.v_nl[0] = v1;
+                self.v_nl[1] = v2;
+            }
+            melange_primitives::nr::NrResult::MaxIterations { .. } => {
+                self.v_nl[0] = v1.clamp(-1.0, 1.0);
+                self.v_nl[1] = v2.clamp(-1.0, 1.0);
+            }
+            melange_primitives::nr::NrResult::Divergence => {
+                self.v_nl[0] = self.v_nl_prev[0];
+                self.v_nl[1] = self.v_nl_prev[1];
+            }
+        }
     }
 
     /// Solve M-dimensional nonlinear system using Newton-Raphson with full Jacobian.
@@ -650,7 +662,7 @@ impl CircuitSolver {
                         self.i_nl_temp[start_idx] = currents[0];
                         self.i_nl_temp[start_idx + 1] = currents[1];
                     }
-                    _ => {}
+                    _ => unreachable!("unsupported device dimension"),
                 }
             }
 
@@ -688,7 +700,7 @@ impl CircuitSolver {
                         self.g_dev[(s + 1) * m + s] = jac[2];       // dI1/dV0
                         self.g_dev[(s + 1) * m + s + 1] = jac[3];   // dI1/dV1
                     }
-                    _ => {}
+                    _ => unreachable!("unsupported device dimension"),
                 }
             }
 
@@ -724,6 +736,12 @@ impl CircuitSolver {
                 let step = self.delta[i].clamp(-self.clamp, self.clamp);
                 self.v_nl[i] -= step;
             }
+
+            // NaN/Inf detection: if any v_nl is non-finite, restore from previous and break
+            if self.v_nl[..m].iter().any(|v| !v.is_finite()) {
+                self.v_nl[..m].copy_from_slice(&self.v_nl_prev[..m]);
+                break;
+            }
         }
     }
 
@@ -743,7 +761,7 @@ impl CircuitSolver {
                     self.i_nl[start_idx] = currents[0];
                     self.i_nl[start_idx + 1] = currents[1];
                 }
-                _ => {}
+                _ => unreachable!("unsupported device dimension"),
             }
         }
     }
@@ -760,6 +778,7 @@ impl CircuitSolver {
         self.v_prev.fill(0.0);
         self.v_nl_prev.fill(0.0);
         self.i_nl_prev.fill(0.0);
+        self.input_prev = 0.0;
     }
 
     /// Process a block of samples.
@@ -819,6 +838,17 @@ impl LinearSolver {
             self.rhs[i] = sum;
         }
 
+        // Add inductor history contribution
+        for ind in &self.kernel.inductors {
+            let i_hist = ind.i_hist;
+            if ind.node_i > 0 {
+                self.rhs[ind.node_i - 1] -= i_hist;
+            }
+            if ind.node_j > 0 {
+                self.rhs[ind.node_j - 1] += i_hist;
+            }
+        }
+
         // Add input source (Thevenin: V_in through R_in)
         // Trapezoidal rule: contribution is (V_in(n+1) + V_in(n)) * G_in
         if self.input_node < n {
@@ -838,6 +868,9 @@ impl LinearSolver {
 
         // Swap v_prev and v_pred
         std::mem::swap(&mut self.v_prev, &mut self.v_pred);
+
+        // Update inductor companion model state
+        self.kernel.update_inductors(&self.v_prev);
 
         // Sanitize state: if any value is NaN/inf, reset to prevent poisoning
         if self.v_prev.iter().any(|v| !v.is_finite()) {
@@ -861,6 +894,7 @@ impl LinearSolver {
     /// Reset solver state.
     pub fn reset(&mut self) {
         self.v_prev.fill(0.0);
+        self.input_prev = 0.0;
     }
 }
 

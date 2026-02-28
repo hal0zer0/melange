@@ -358,12 +358,14 @@ fn build_rhs_const(mna: &MnaSystem, _sample_rate: f64) -> Vec<f64> {
     let mut rhs = vec![0.0; mna.n];
 
     // Current sources: contribute I to RHS
+    // Convention: current flows from n_plus to n_minus (into n_plus, out of n_minus)
+    // RHS injection: positive at n_plus (current enters), negative at n_minus (current leaves)
     for src in &mna.current_sources {
         if src.n_plus_idx > 0 {
-            rhs[src.n_plus_idx - 1] -= src.dc_value;
+            rhs[src.n_plus_idx - 1] += src.dc_value;
         }
         if src.n_minus_idx > 0 {
-            rhs[src.n_minus_idx - 1] += src.dc_value;
+            rhs[src.n_minus_idx - 1] -= src.dc_value;
         }
     }
 

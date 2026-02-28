@@ -123,8 +123,11 @@ impl DiodeWithRs {
 
     /// Conductance with series resistance.
     pub fn conductance_at(&self, v: f64) -> f64 {
+        // Evaluate at the corrected junction voltage (consistent with current_at)
+        let i_approx = self.diode.current_at(v);
+        let v_diode = v - i_approx * self.rs;
         // g_total = g_diode / (1 + g_diode * Rs)
-        let g_d = self.diode.conductance_at(v);
+        let g_d = self.diode.conductance_at(v_diode);
         g_d / (1.0 + g_d * self.rs)
     }
 }

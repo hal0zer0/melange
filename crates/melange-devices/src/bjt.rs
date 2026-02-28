@@ -238,7 +238,11 @@ impl BjtGummelPoon {
         let vbc_eff = s * vbc;
 
         // Early effect
-        let q1 = 1.0 / (1.0 - vbe_eff / self.var - vbc_eff / self.vaf);
+        let q1_denom = 1.0 - vbe_eff / self.var - vbc_eff / self.vaf;
+        if q1_denom.abs() < 1e-30 {
+            return 1.0;
+        }
+        let q1 = 1.0 / q1_denom;
 
         // High-level injection
         let i_cc = self.base.is * ((vbe_eff / self.base.vt).exp() - (vbc_eff / self.base.vt).exp());

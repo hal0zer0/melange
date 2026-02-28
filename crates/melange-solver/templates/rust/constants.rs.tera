@@ -2,10 +2,10 @@
 // CONSTANTS: Compile-time circuit topology
 // =============================================================================
 
-/// Number of circuit nodes (including ground reference)
+/// Number of circuit nodes (excluding ground reference)
 pub const N: usize = {{ n }};
 
-/// Number of nonlinear devices
+/// Total nonlinear dimension (sum of device dimensions)
 pub const M: usize = {{ m }};
 
 /// Sample rate (Hz)
@@ -38,7 +38,7 @@ pub const A_NEG: [[f64; N]; N] = [
 /// Added to RHS every sample (Norton equivalent of voltage sources)
 pub const RHS_CONST: [f64; N] = [{{ rhs_const_values }}];
 
-{% endif %}/// K matrix: Nonlinear kernel K = N_v * S * N_i^T
+{% endif %}/// K matrix: Nonlinear kernel K = N_v * S * N_i
 pub const K: [[f64; M]; M] = [
 {% for row in k_rows %}    [{{ row }}],
 {% endfor %}];

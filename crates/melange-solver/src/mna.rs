@@ -565,55 +565,65 @@ impl MnaBuilder {
                 }
                 NonlinearDeviceType::Bjt => {
                     if node_indices.len() >= 3 {
-                        let nc = node_indices[0].saturating_sub(1);
-                        let nb = node_indices[1].saturating_sub(1);
-                        let ne = node_indices[2].saturating_sub(1);
+                        let c_raw = node_indices[0];
+                        let b_raw = node_indices[1];
+                        let e_raw = node_indices[2];
 
-                        if node_indices[0] > 0 && node_indices[1] > 0 && node_indices[2] > 0 {
-                            mna.stamp_bjt(start_idx, nc, nb, ne);
+                        // Reject all-grounded BJT
+                        if c_raw == 0 && b_raw == 0 && e_raw == 0 {
+                            // All terminals grounded — skip (no contribution)
+                        } else if c_raw > 0 && b_raw > 0 && e_raw > 0 {
+                            // No grounded terminals — use standard stamp
+                            mna.stamp_bjt(start_idx, c_raw - 1, b_raw - 1, e_raw - 1);
+                        } else {
+                            // Per-terminal ground handling
+                            // N_v row 0 (Vbe): +1 at B, -1 at E
+                            if b_raw > 0 { mna.n_v[start_idx][b_raw - 1] = 1.0; }
+                            if e_raw > 0 { mna.n_v[start_idx][e_raw - 1] = -1.0; }
+                            // N_v row 1 (Vbc): +1 at B, -1 at C
+                            if b_raw > 0 { mna.n_v[start_idx + 1][b_raw - 1] = 1.0; }
+                            if c_raw > 0 { mna.n_v[start_idx + 1][c_raw - 1] = -1.0; }
+                            // N_i col 0 (Ic): -1 at C, +1 at E
+                            if c_raw > 0 { mna.n_i[c_raw - 1][start_idx] = -1.0; }
+                            if e_raw > 0 { mna.n_i[e_raw - 1][start_idx] = 1.0; }
+                            // N_i col 1 (Ib): -1 at B, +1 at E
+                            if b_raw > 0 { mna.n_i[b_raw - 1][start_idx + 1] = -1.0; }
+                            if e_raw > 0 { mna.n_i[e_raw - 1][start_idx + 1] = 1.0; }
                         }
                     }
                 }
                 NonlinearDeviceType::Jfet => {
                     // JFET: controlling voltage Vgs, drain current Id
                     // Nodes: [nd, ng, ns]
-                    if node_indices.len() >= 3
-                        && node_indices[0] > 0
-                        && node_indices[1] > 0
-                        && node_indices[2] > 0
-                    {
-                        let nd = node_indices[0] - 1;
-                        let ng = node_indices[1] - 1;
-                        let ns = node_indices[2] - 1;
+                    if node_indices.len() >= 3 {
+                        let d_raw = node_indices[0];
+                        let g_raw = node_indices[1];
+                        let s_raw = node_indices[2];
 
                         // N_v: Vgs = Vg - Vs (controlling voltage)
-                        mna.n_v[start_idx][ng] = 1.0;
-                        mna.n_v[start_idx][ns] = -1.0;
+                        if g_raw > 0 { mna.n_v[start_idx][g_raw - 1] = 1.0; }
+                        if s_raw > 0 { mna.n_v[start_idx][s_raw - 1] = -1.0; }
 
                         // N_i: Id flows drain→source
-                        mna.n_i[nd][start_idx] = -1.0; // Current enters drain
-                        mna.n_i[ns][start_idx] = 1.0;  // Current exits source
+                        if d_raw > 0 { mna.n_i[d_raw - 1][start_idx] = -1.0; }
+                        if s_raw > 0 { mna.n_i[s_raw - 1][start_idx] = 1.0; }
                     }
                 }
                 NonlinearDeviceType::Mosfet => {
                     // MOSFET: controlling voltage Vgs, drain current Id
                     // Nodes: [nd, ng, ns, nb]
-                    if node_indices.len() >= 3
-                        && node_indices[0] > 0
-                        && node_indices[1] > 0
-                        && node_indices[2] > 0
-                    {
-                        let nd = node_indices[0] - 1;
-                        let ng = node_indices[1] - 1;
-                        let ns = node_indices[2] - 1;
+                    if node_indices.len() >= 3 {
+                        let d_raw = node_indices[0];
+                        let g_raw = node_indices[1];
+                        let s_raw = node_indices[2];
 
                         // N_v: Vgs = Vg - Vs (controlling voltage)
-                        mna.n_v[start_idx][ng] = 1.0;
-                        mna.n_v[start_idx][ns] = -1.0;
+                        if g_raw > 0 { mna.n_v[start_idx][g_raw - 1] = 1.0; }
+                        if s_raw > 0 { mna.n_v[start_idx][s_raw - 1] = -1.0; }
 
                         // N_i: Id flows drain→source
-                        mna.n_i[nd][start_idx] = -1.0; // Current enters drain
-                        mna.n_i[ns][start_idx] = 1.0;  // Current exits source
+                        if d_raw > 0 { mna.n_i[d_raw - 1][start_idx] = -1.0; }
+                        if s_raw > 0 { mna.n_i[s_raw - 1][start_idx] = 1.0; }
                     }
                 }
             }
@@ -633,7 +643,11 @@ impl MnaBuilder {
             Element::Bjt { nc, nb, ne, .. } => vec![nc, nb, ne],
             Element::Jfet { nd, ng, ns, .. } => vec![nd, ng, ns],
             Element::Mosfet { nd, ng, ns, nb, .. } => vec![nd, ng, ns, nb],
-            Element::SubcktInstance { .. } => vec![], // Skip for now
+            Element::SubcktInstance { name, .. } => {
+                return Err(MnaError::TopologyError(
+                    format!("subcircuit instance '{}' not supported (expand subcircuits before MNA)", name)
+                ));
+            }
         };
 
         for node in nodes {
@@ -787,8 +801,10 @@ impl MnaBuilder {
                     ],
                 });
             }
-            Element::SubcktInstance { .. } => {
-                // Skip for now
+            Element::SubcktInstance { name, .. } => {
+                return Err(MnaError::TopologyError(
+                    format!("subcircuit instance '{}' not supported (expand subcircuits before MNA)", name)
+                ));
             }
         }
 

@@ -121,7 +121,7 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
 - Purely resistive nonlinear circuits oscillate (need capacitor damping)
 - JFET/MOSFET not yet in codegen NR
 - Koren triode equation needs rewrite (Phase 4a of review plan)
-- Gummel-Poon BJT Jacobian delegates to Ebers-Moll (ignores Early effect)
+- Gummel-Poon BJT Jacobian uses full analytical derivatives (Early effect + high injection)
 
 ### Pending Review Plan
 See `.claude/plans/reflective-sprouting-stroustrup.md` for the full 7-phase fix plan.

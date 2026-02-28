@@ -63,13 +63,15 @@ Dim:      1D     -----2D-----    1D
 
 ### build_rhs
 ```rust
-fn build_rhs(input: f64, state: &CircuitState) -> [f64; N] {
-    // A_neg * v_prev  (includes capacitor history via alpha*C!)
+fn build_rhs(input: f64, input_prev: f64, state: &CircuitState) -> [f64; N] {
+    // RHS_CONST (DC sources, if any)
+    // + A_neg * v_prev  (includes capacitor history via alpha*C!)
     // + N_i^T * i_nl_prev
-    // + 2.0 * input / INPUT_RESISTANCE
+    // + (input + input_prev) / INPUT_RESISTANCE  (proper trapezoidal)
 }
 ```
 A_neg already contains alpha*C. Do NOT add separate cap_history.
+The input uses proper trapezoidal integration: `(V_in(n+1) + V_in(n)) * G_in`.
 
 ### solve_nonlinear
 ```rust
@@ -114,7 +116,7 @@ let f_i = i_nl[i] - i_dev_i;
 ### process_sample
 ```rust
 pub fn process_sample(input: f64, state: &mut CircuitState) -> f64 {
-    let rhs = build_rhs(input, state);
+    let rhs = build_rhs(input, state.input_prev, state);
     let v_pred = mat_vec_mul_s(&rhs);
     let p = extract_controlling_voltages(&v_pred);
     let i_nl = solve_nonlinear(&p, state);
@@ -122,6 +124,7 @@ pub fn process_sample(input: f64, state: &mut CircuitState) -> f64 {
 
     state.v_prev = v;
     state.i_nl_prev = i_nl;
+    state.input_prev = input;  // Track for trapezoidal RHS
 
     v[OUTPUT_NODE]
 }

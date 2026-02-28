@@ -1,6 +1,6 @@
 //! JFET (Junction Field-Effect Transistor) models.
 
-use crate::{NonlinearDevice, VT_ROOM};
+use crate::{NonlinearDevice, VT_ROOM, safeguards};
 
 /// JFET channel type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -164,7 +164,7 @@ impl Jfet {
 
         if vgs_eff > 0.0 {
             // Forward biased
-            self.is * ((vgs_eff / VT_ROOM).exp() - 1.0)
+            self.is * (safeguards::safe_exp(vgs_eff / VT_ROOM) - 1.0)
         } else {
             // Reverse biased
             -self.is
