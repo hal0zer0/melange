@@ -216,7 +216,14 @@ fn truncate(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {
         s.to_string()
     } else {
-        format!("{}...", &s[..max_len.saturating_sub(3)])
+        // Find a char boundary at or before the desired cut point
+        let end = max_len.saturating_sub(3);
+        let boundary = s.char_indices()
+            .take_while(|&(i, _)| i <= end)
+            .last()
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        format!("{}...", &s[..boundary])
     }
 }
 

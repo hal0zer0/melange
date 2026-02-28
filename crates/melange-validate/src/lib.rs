@@ -293,7 +293,7 @@ pub fn validate_circuit_with_options(
         .map_err(|e| ValidationError::Spice(e))?;
 
     // Run melange solver
-    let melange_output = run_melange_solver(netlist_path, input_signal, sample_rate)?;
+    let melange_output = run_melange_solver(netlist_path, input_signal, sample_rate, output_node)?;
 
     // Create signal objects for comparison
     let spice_signal = Signal::new(
@@ -382,6 +382,7 @@ fn run_melange_solver(
     netlist_path: &Path,
     input_signal: &[f64],
     sample_rate: f64,
+    output_node_name: &str,
 ) -> Result<Vec<f64>, ValidationError> {
     // 1. Parse netlist
     let netlist_str = std::fs::read_to_string(netlist_path)
@@ -391,16 +392,29 @@ fn run_melange_solver(
         .map_err(|e| ValidationError::Solver(format!("Parse error at line {}: {}", e.line, e.message)))?;
 
     // 2. Build MNA system
-    let mna = melange_solver::mna::MnaSystem::from_netlist(&netlist)
+    let mut mna = melange_solver::mna::MnaSystem::from_netlist(&netlist)
         .map_err(|e| ValidationError::Solver(format!("MNA error: {}", e)))?;
 
-    // 3. Create DK kernel
+    // Get input/output node indices
+    let input_node = mna.node_map.get("in").copied().unwrap_or(1).saturating_sub(1);
+    let output_node = mna.node_map.get(output_node_name)
+        .copied()
+        .ok_or_else(|| ValidationError::Solver(format!(
+            "Output node '{}' not found in circuit. Available: {:?}",
+            output_node_name, mna.node_map.keys().collect::<Vec<_>>()
+        )))?
+        .saturating_sub(1);
+
+    // Stamp input conductance into G matrix BEFORE building DK kernel.
+    // This models the source impedance (1 ohm) and must be baked into S = A^{-1}.
+    let input_conductance = 1.0; // 1/R_in where R_in = 1 ohm
+    if input_node < mna.n {
+        mna.g[input_node][input_node] += input_conductance;
+    }
+
+    // 3. Create DK kernel (uses G with input conductance already stamped)
     let kernel = melange_solver::dk::DkKernel::from_mna(&mna, sample_rate)
         .map_err(|e| ValidationError::Solver(format!("DK kernel error: {}", e)))?;
-
-    // Get input/output node indices (default to "in" and "out")
-    let input_node = mna.node_map.get("in").copied().unwrap_or(1).saturating_sub(1);
-    let output_node = mna.node_map.get("out").copied().unwrap_or(2).saturating_sub(1);
 
     // 4. Build device list from netlist
     let devices = build_devices_from_netlist(&netlist, &mna)?;
@@ -585,29 +599,36 @@ fn find_bjt_polarity(netlist: &melange_solver::parser::Netlist, device_name: &st
     melange_devices::BjtPolarity::Npn
 }
 
-/// Skip a test if ngspice is not available
+/// Check if ngspice is available. Returns `true` if the test should be skipped.
 ///
 /// Useful for tests that require ngspice to be installed.
 ///
 /// # Example
 ///
 /// ```rust,no_run
-/// use melange_validate::skip_if_no_ngspice;
+/// use melange_validate::should_skip_no_ngspice;
 ///
 /// #[test]
 /// fn test_validation() {
-///     skip_if_no_ngspice();
+///     if should_skip_no_ngspice() {
+///         return;
+///     }
 ///     // ... rest of test
 /// }
 /// ```
-pub fn skip_if_no_ngspice() {
+pub fn should_skip_no_ngspice() -> bool {
     if !spice_runner::is_ngspice_available() {
         eprintln!("Skipping test: ngspice not available");
-        // In actual test code, you would use:
-        // return;
-        // or
-        // panic!("ngspice not available");
+        return true;
     }
+    false
+}
+
+/// Deprecated: use `should_skip_no_ngspice()` instead.
+/// This function does NOT actually skip the test — it only prints a message.
+#[deprecated(note = "Use should_skip_no_ngspice() which returns bool")]
+pub fn skip_if_no_ngspice() {
+    let _ = should_skip_no_ngspice();
 }
 
 /// Builder for validation runs

@@ -83,33 +83,58 @@ pub type HalfBand4 = HalfBandFilter<4>;
 
 impl<const N_SECTIONS: usize> HalfBandFilter<N_SECTIONS> {
     /// Create a half-band filter with the given coefficients.
+    ///
+    /// Coefficients are split between even and odd allpass chains using the
+    /// standard polyphase decomposition: even-indexed coefficients go to the
+    /// even path, odd-indexed coefficients go to the odd path. This produces
+    /// a proper half-band filter via allpass complementary pair.
     pub fn new(coeffs: [f64; N_SECTIONS]) -> Self {
         let even = [AllpassSection::new(0.0); N_SECTIONS];
         let odd = [AllpassSection::new(0.0); N_SECTIONS];
         let mut filter = Self { even, odd };
-        
+
+        let mut even_idx = 0;
+        let mut odd_idx = 0;
         for (i, &c) in coeffs.iter().enumerate() {
-            filter.even[i] = AllpassSection::new(c);
-            filter.odd[i] = AllpassSection::new(c);
+            if i % 2 == 0 {
+                filter.even[even_idx] = AllpassSection::new(c);
+                even_idx += 1;
+            } else {
+                filter.odd[odd_idx] = AllpassSection::new(c);
+                odd_idx += 1;
+            }
         }
-        
+
         filter
     }
 
+    /// Number of active sections in the even allpass chain.
+    #[inline(always)]
+    fn even_len(&self) -> usize {
+        (N_SECTIONS + 1) / 2
+    }
+
+    /// Number of active sections in the odd allpass chain.
+    #[inline(always)]
+    fn odd_len(&self) -> usize {
+        N_SECTIONS / 2
+    }
+
     /// Process a sample through the half-band filter.
-    /// 
+    ///
     /// Returns (even_output, odd_output) for polyphase processing.
     #[inline(always)]
     fn process(&mut self, input: f64) -> (f64, f64) {
-        // Even and odd allpass outputs
         let mut even_out = input;
-        let mut odd_out = input;
-        
-        for i in 0..N_SECTIONS {
+        for i in 0..self.even_len() {
             even_out = self.even[i].process(even_out);
+        }
+
+        let mut odd_out = input;
+        for i in 0..self.odd_len() {
             odd_out = self.odd[i].process(odd_out);
         }
-        
+
         (even_out, odd_out)
     }
 

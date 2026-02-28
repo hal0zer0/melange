@@ -29,23 +29,27 @@ impl KorenTriode {
     }
 
     /// 12AX7 (ECC83) - high-mu twin triode, common in guitar amps.
+    /// Koren parameters: mu=100, ex=1.4, Kg1=1060, Kp=600, Kvb=300
     pub fn ecc83() -> Self {
-        Self::new(100.0, 1.5, 1060.0, 600.0, 300.0)
+        Self::new(100.0, 1.4, 1060.0, 600.0, 300.0)
     }
 
     /// 12AU7 (ECC82) - medium-mu twin triode.
+    /// Koren parameters: mu=17, ex=1.4, Kg1=1180, Kp=200, Kvb=100
     pub fn ecc82() -> Self {
-        Self::new(17.0, 1.5, 1180.0, 200.0, 100.0)
+        Self::new(17.0, 1.4, 1180.0, 200.0, 100.0)
     }
 
     /// 12AT7 (ECC81) - medium-mu triode.
+    /// Koren parameters: mu=40, ex=1.4, Kg1=800, Kp=300, Kvb=150
     pub fn ecc81() -> Self {
-        Self::new(40.0, 1.5, 800.0, 300.0, 150.0)
+        Self::new(40.0, 1.4, 800.0, 300.0, 150.0)
     }
 
     /// 6SL7 - high-mu octal triode.
+    /// Koren parameters: mu=70, ex=1.4, Kg1=1200, Kp=400, Kvb=200
     pub fn _6sl7() -> Self {
-        Self::new(70.0, 1.5, 1200.0, 400.0, 200.0)
+        Self::new(70.0, 1.4, 1200.0, 400.0, 200.0)
     }
 
     /// Calculate plate current given Vgk and Vpk.
@@ -168,7 +172,7 @@ impl KorenPentode {
     /// EL84 (6BQ5) - popular output pentode.
     pub fn el84() -> Self {
         Self {
-            triode: KorenTriode::new(20.0, 1.5, 2000.0, 1000.0, 300.0),
+            triode: KorenTriode::new(20.0, 1.4, 2000.0, 1000.0, 300.0),
             mu_sg: 15.0,
             kg2: 4000.0,
             kx: 20.0,
@@ -178,7 +182,7 @@ impl KorenPentode {
     /// EL34 (6CA7) - higher power pentode.
     pub fn el34() -> Self {
         Self {
-            triode: KorenTriode::new(11.0, 1.5, 1500.0, 800.0, 200.0),
+            triode: KorenTriode::new(11.0, 1.4, 1500.0, 800.0, 200.0),
             mu_sg: 8.0,
             kg2: 3000.0,
             kx: 25.0,

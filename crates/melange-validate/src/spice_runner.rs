@@ -201,7 +201,7 @@ pub fn run_transient(
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     
-    if !output.status.success() && stderr.contains("error") {
+    if !output.status.success() && stderr.to_lowercase().contains("error") {
         return Err(SpiceError::SimulationFailed(stderr.to_string()));
     }
 

@@ -394,7 +394,7 @@ fn compile_circuit_source(
             println!("  - Standalone integration in your own projects");
             println!();
             println!("To generate a complete plugin project instead, use:");
-            println!("  melange compile {} --output {} --format plugin", input_node, output.display());
+            println!("  melange compile {} --output {} --format plugin", circuit_source.name(), output.display());
         }
         OutputFormat::Plugin => {
             // Generate complete plugin project

@@ -94,21 +94,27 @@ impl Cache {
         Ok(())
     }
 
-    /// Get cache statistics
+    /// Get cache statistics (recursively traverses subdirectories)
     pub fn stats(&self) -> CacheStats {
         let mut total_files = 0;
         let mut total_bytes = 0;
 
-        if let Ok(entries) = std::fs::read_dir(&self.cache_dir) {
-            for entry in entries.flatten() {
-                if let Ok(metadata) = entry.metadata() {
-                    if metadata.is_file() {
-                        total_files += 1;
-                        total_bytes += metadata.len();
+        fn visit_dir(dir: &std::path::Path, files: &mut usize, bytes: &mut u64) {
+            if let Ok(entries) = std::fs::read_dir(dir) {
+                for entry in entries.flatten() {
+                    if let Ok(metadata) = entry.metadata() {
+                        if metadata.is_file() {
+                            *files += 1;
+                            *bytes += metadata.len();
+                        } else if metadata.is_dir() {
+                            visit_dir(&entry.path(), files, bytes);
+                        }
                     }
                 }
             }
         }
+
+        visit_dir(&self.cache_dir, &mut total_files, &mut total_bytes);
 
         CacheStats { total_files, total_bytes }
     }
@@ -186,27 +192,34 @@ pub fn format_cache_list(cache: &Cache) -> String {
 
     output.push_str("\n\n");
 
-    // Try to list files
-    if let Ok(entries) = std::fs::read_dir(cache.cache_dir()) {
-        let mut files: Vec<_> = entries
-            .flatten()
-            .filter(|e| e.metadata().map(|m| m.is_file()).unwrap_or(false))
-            .collect();
-        
-        files.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
-        
-        for entry in files.iter().take(20) {
-            if let Ok(metadata) = entry.metadata() {
-                let size = metadata.len();
-                let name = entry.file_name();
-                let name_str = name.to_string_lossy();
-                output.push_str(&format!("  {:<30} {:>8} B\n", name_str, size));
+    // Recursively collect cached files
+    fn collect_files(dir: &std::path::Path, base: &std::path::Path, out: &mut Vec<(String, u64)>) {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                if let Ok(metadata) = entry.metadata() {
+                    if metadata.is_file() {
+                        let rel = entry.path().strip_prefix(base)
+                            .map(|p| p.to_string_lossy().to_string())
+                            .unwrap_or_else(|_| entry.file_name().to_string_lossy().to_string());
+                        out.push((rel, metadata.len()));
+                    } else if metadata.is_dir() {
+                        collect_files(&entry.path(), base, out);
+                    }
+                }
             }
         }
-        
-        if files.len() > 20 {
-            output.push_str(&format!("\n  ... and {} more files\n", files.len() - 20));
-        }
+    }
+
+    let mut files = Vec::new();
+    collect_files(cache.cache_dir(), cache.cache_dir(), &mut files);
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+
+    for (name, size) in files.iter().take(20) {
+        output.push_str(&format!("  {:<30} {:>8} B\n", name, size));
+    }
+
+    if files.len() > 20 {
+        output.push_str(&format!("\n  ... and {} more files\n", files.len() - 20));
     }
 
     output
