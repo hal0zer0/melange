@@ -268,6 +268,16 @@ impl CircuitIR {
                         .unwrap_or(2.52e-9);
                     let n = Self::lookup_model_param(netlist, model, "N")
                         .unwrap_or(1.0);
+                    if is <= 0.0 || !is.is_finite() {
+                        return Err(CodegenError::InvalidConfig(
+                            format!("diode model IS must be positive finite, got {}", is)
+                        ));
+                    }
+                    if n <= 0.0 || !n.is_finite() {
+                        return Err(CodegenError::InvalidConfig(
+                            format!("diode model N must be positive finite, got {}", n)
+                        ));
+                    }
                     let params = DiodeParams { is, n_vt: n * vt };
 
                     if first_diode.is_none() {
@@ -291,6 +301,26 @@ impl CircuitIR {
                         .unwrap_or(200.0);
                     let beta_r = Self::lookup_model_param(netlist, model, "BR")
                         .unwrap_or(3.0);
+                    if is <= 0.0 || !is.is_finite() {
+                        return Err(CodegenError::InvalidConfig(
+                            format!("BJT model IS must be positive finite, got {}", is)
+                        ));
+                    }
+                    if vt <= 0.0 || !vt.is_finite() {
+                        return Err(CodegenError::InvalidConfig(
+                            format!("BJT model VT must be positive finite, got {}", vt)
+                        ));
+                    }
+                    if beta_f <= 0.0 || !beta_f.is_finite() {
+                        return Err(CodegenError::InvalidConfig(
+                            format!("BJT model BF must be positive finite, got {}", beta_f)
+                        ));
+                    }
+                    if beta_r <= 0.0 || !beta_r.is_finite() {
+                        return Err(CodegenError::InvalidConfig(
+                            format!("BJT model BR must be positive finite, got {}", beta_r)
+                        ));
+                    }
                     let params = BjtParams { is, vt, beta_f, beta_r };
 
                     if first_bjt.is_none() {

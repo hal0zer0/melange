@@ -317,16 +317,9 @@ impl NonlinearDevice<2> for BjtGummelPoon {
         // Ic_eff = Icc/qb - Is/βr * (exp(Vbc_eff/Vt) - 1)
         // d(Icc/qb)/dV = (dIcc/dV * qb - Icc * dqb/dV) / qb^2  (quotient rule)
         let qb2 = qb * qb;
-        let quotient_dvbe = if qb2 > 1e-30 {
-            (dicc_dvbe * qb - icc * dqb_dvbe) / qb2
-        } else {
-            dicc_dvbe
-        };
-        let quotient_dvbc = if qb2 > 1e-30 {
-            (dicc_dvbc * qb - icc * dqb_dvbc) / qb2
-        } else {
-            dicc_dvbc
-        };
+        let qb2_safe = qb2.max(1e-30);
+        let quotient_dvbe = (dicc_dvbe * qb - icc * dqb_dvbe) / qb2_safe;
+        let quotient_dvbc = (dicc_dvbc * qb - icc * dqb_dvbc) / qb2_safe;
 
         let d_bc_term_dvbc = is * self.base.inv_beta_r / vt * exp_bc;
 

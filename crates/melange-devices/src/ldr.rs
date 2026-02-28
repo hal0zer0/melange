@@ -96,7 +96,7 @@ impl CdsLdr {
 
     /// Get current conductance.
     pub fn conductance(&self) -> f64 {
-        1.0 / self.r_state
+        1.0 / self.r_state.max(1e-12)
     }
 
     /// Reset to dark state.
@@ -110,16 +110,19 @@ impl CdsLdr {
     }
 }
 
+/// Minimum resistance floor to prevent division by zero.
+const MIN_RESISTANCE: f64 = 1e-12;
+
 /// LDR as a two-terminal variable resistor.
 impl NonlinearDevice<1> for CdsLdr {
     /// Current through LDR: I = V / R
     fn current(&self, v: &[f64; 1]) -> f64 {
-        v[0] / self.r_state
+        v[0] / self.r_state.max(MIN_RESISTANCE)
     }
 
     /// Conductance: G = 1/R
     fn jacobian(&self, _v: &[f64; 1]) -> [f64; 1] {
-        [1.0 / self.r_state]
+        [1.0 / self.r_state.max(MIN_RESISTANCE)]
     }
 }
 
@@ -224,5 +227,24 @@ mod tests {
         // Should be within 20% of r_min after long settling
         assert!((r - r_min) / r_min < 0.2,
             "After settling, R = {:.1} ohms, r_min = {:.1} ohms", r, r_min);
+    }
+
+    /// Verify LDR current and jacobian are finite even with very small r_min.
+    #[test]
+    fn test_ldr_finite_at_small_resistance() {
+        // Create LDR with very small r_min to test the guard
+        let mut ldr = CdsLdr::new(1e-15, 1e6, 0.7, 0.005, 0.2, 44100.0);
+
+        // Drive to minimum resistance
+        for _ in 0..200000 {
+            ldr.update(1.0);
+        }
+
+        let i = ldr.current(&[1.0]);
+        let g = ldr.jacobian(&[1.0]);
+        assert!(i.is_finite(), "LDR current must be finite, got {}", i);
+        assert!(g[0].is_finite(), "LDR conductance must be finite, got {}", g[0]);
+        assert!(g[0] > 0.0, "LDR conductance must be positive, got {}", g[0]);
+        assert!(ldr.conductance().is_finite(), "conductance() must be finite");
     }
 }

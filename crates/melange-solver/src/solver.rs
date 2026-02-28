@@ -730,13 +730,16 @@ impl CircuitSolver {
             let solved = gauss_solve_inplace(&mut self.jacobian_mat, &mut self.delta, m);
 
             if !solved {
-                // Singular Jacobian — fall back to damped residual update
-                for i in 0..m {
-                    let update = -self.residual[i] * 0.5;
-                    self.v_nl[i] = (self.v_nl[i] + update)
-                        .clamp(self.v_nl[i] - self.clamp, self.v_nl[i] + self.clamp);
-                }
-                continue;
+                // Singular Jacobian — return best guess (matches codegen behavior)
+                break;
+            }
+
+            // Check step-size convergence (matches 1D/2D solvers)
+            let step_sq: f64 = self.delta[..m].iter()
+                .map(|&d| { let c = d.clamp(-self.clamp, self.clamp); c * c })
+                .sum();
+            if step_sq < self.tol * self.tol {
+                break;
             }
 
             // Update: v_nl -= delta (with clamping)

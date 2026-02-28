@@ -29,7 +29,12 @@ pub struct Jfet {
 
 impl Jfet {
     /// Create a new JFET.
+    ///
+    /// # Panics
+    /// Panics if `vp` is zero (would cause division by zero) or `idss` is not positive.
     pub fn new(channel: JfetChannel, vp: f64, idss: f64) -> Self {
+        assert!(vp.abs() > 1e-15, "JFET Vp must be non-zero, got {}", vp);
+        assert!(idss > 0.0, "JFET IDSS must be positive, got {}", idss);
         Self {
             channel,
             vp,
@@ -307,5 +312,17 @@ mod tests {
             "P-channel gds: analytical={:.6e}, numerical={:.6e}",
             d_id_d_vds, num_d_id_d_vds
         );
+    }
+
+    #[test]
+    #[should_panic(expected = "Vp must be non-zero")]
+    fn test_jfet_vp_zero_rejected() {
+        let _ = Jfet::new(JfetChannel::N, 0.0, 1e-3);
+    }
+
+    #[test]
+    #[should_panic(expected = "IDSS must be positive")]
+    fn test_jfet_negative_idss_rejected() {
+        let _ = Jfet::new(JfetChannel::N, -2.0, -1e-3);
     }
 }

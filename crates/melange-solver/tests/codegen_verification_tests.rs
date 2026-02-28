@@ -1407,3 +1407,63 @@ C1 out 0 1u
         other => panic!("Expected UnsupportedTopology, got: {:?}", other),
     }
 }
+
+// ==========================================================================
+// Test: Model parameter validation catches invalid values
+// ==========================================================================
+
+#[test]
+fn test_diode_zero_is_rejected() {
+    let spice = r#"Clip
+.model BADDIODE D(IS=0)
+D1 in out BADDIODE
+R1 in 0 1k
+C1 out 0 1u
+Vin in 0 0
+.END"#;
+    let (netlist, mna, kernel) = build_pipeline(spice);
+    let config = default_config();
+    let codegen = CodeGenerator::new(config);
+    let result = codegen.generate(&kernel, &mna, &netlist);
+    assert!(result.is_err(), "IS=0 should be rejected");
+    let err = format!("{:?}", result.unwrap_err());
+    assert!(err.contains("IS"), "Error should mention IS, got: {}", err);
+}
+
+#[test]
+fn test_diode_negative_n_rejected() {
+    let spice = r#"Clip
+.model BADDIODE D(IS=1e-15 N=-1)
+D1 in out BADDIODE
+R1 in 0 1k
+C1 out 0 1u
+Vin in 0 0
+.END"#;
+    let (netlist, mna, kernel) = build_pipeline(spice);
+    let config = default_config();
+    let codegen = CodeGenerator::new(config);
+    let result = codegen.generate(&kernel, &mna, &netlist);
+    assert!(result.is_err(), "N=-1 should be rejected");
+    let err = format!("{:?}", result.unwrap_err());
+    assert!(err.contains("N"), "Error should mention N, got: {}", err);
+}
+
+#[test]
+fn test_invalid_input_resistance_rejected() {
+    let (netlist, mna, kernel) = build_pipeline(RC_CIRCUIT_SPICE);
+    let config = CodegenConfig {
+        input_resistance: 0.0,
+        ..default_config()
+    };
+    let codegen = CodeGenerator::new(config);
+    let result = codegen.generate(&kernel, &mna, &netlist);
+    assert!(result.is_err(), "input_resistance=0 should be rejected");
+
+    let config2 = CodegenConfig {
+        input_resistance: -1.0,
+        ..default_config()
+    };
+    let codegen2 = CodeGenerator::new(config2);
+    let result2 = codegen2.generate(&kernel, &mna, &netlist);
+    assert!(result2.is_err(), "input_resistance=-1 should be rejected");
+}

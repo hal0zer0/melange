@@ -26,7 +26,11 @@ pub struct Mosfet {
 
 impl Mosfet {
     /// Create a new MOSFET.
+    ///
+    /// # Panics
+    /// Panics if `kp` is not positive.
     pub fn new(channel: ChannelType, vt: f64, kp: f64, lambda: f64) -> Self {
+        assert!(kp > 0.0, "MOSFET Kp must be positive, got {}", kp);
         Self { channel, vt, kp, lambda }
     }
 
@@ -226,5 +230,11 @@ mod tests {
             "P-channel gds: analytical={:.6e}, numerical={:.6e}",
             d_id_d_vds, num_d_id_d_vds
         );
+    }
+
+    #[test]
+    #[should_panic(expected = "Kp must be positive")]
+    fn test_mosfet_zero_kp_rejected() {
+        let _ = Mosfet::new(ChannelType::N, 2.0, 0.0, 0.01);
     }
 }

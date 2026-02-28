@@ -196,6 +196,17 @@ fn main() -> Result<()> {
             format,
             with_level_params,
         } => {
+            // Validate numeric CLI parameters
+            if sample_rate <= 0.0 || !sample_rate.is_finite() {
+                anyhow::bail!("Sample rate must be positive and finite, got {}", sample_rate);
+            }
+            if tolerance <= 0.0 || !tolerance.is_finite() {
+                anyhow::bail!("Tolerance must be positive and finite, got {}", tolerance);
+            }
+            if max_iter == 0 {
+                anyhow::bail!("max-iter must be at least 1, got 0");
+            }
+
             let circuit_source = circuits::resolve(&input)?;
             println!("Resolved circuit: {}", circuit_source.name());
             compile_circuit_source(
@@ -298,15 +309,18 @@ fn compile_circuit_source(
 
     // Get input node index and add input conductance to G matrix
     // This models the source impedance of the input voltage source
-    let input_node_idx = mna
+    let input_node_raw = mna
         .node_map
         .get(input_node)
         .copied()
         .ok_or_else(|| anyhow::anyhow!(
             "Input node '{}' not found in circuit. Available: {:?}",
             input_node, mna.node_map.keys().collect::<Vec<_>>()
-        ))?
-        .saturating_sub(1);
+        ))?;
+    if input_node_raw == 0 {
+        anyhow::bail!("Input node cannot be ground (0). Please specify a non-ground node.");
+    }
+    let input_node_idx = input_node_raw - 1;
     // Use 1Ω input impedance so the input signal appears directly at the input node.
     // In a DAW plugin context, the input represents the actual voltage, not a source
     // with series impedance. A low R_in ensures V_node ≈ V_input.
@@ -332,15 +346,18 @@ fn compile_circuit_source(
         .unwrap_or("circuit")
         .to_string();
 
-    let output_node_idx = mna
+    let output_node_raw = mna
         .node_map
         .get(output_node)
         .copied()
         .ok_or_else(|| anyhow::anyhow!(
             "Output node '{}' not found in circuit. Available: {:?}",
             output_node, mna.node_map.keys().collect::<Vec<_>>()
-        ))?
-        .saturating_sub(1);
+        ))?;
+    if output_node_raw == 0 {
+        anyhow::bail!("Output node cannot be ground (0). Please specify a non-ground node.");
+    }
+    let output_node_idx = output_node_raw - 1;
 
     let config = CodegenConfig {
         circuit_name,
@@ -401,7 +418,9 @@ fn compile_circuit_source(
             println!("Generated plugin project at: {}", project_dir.display());
             println!();
             println!("To build the plugin (CLAP + VST3):");
-            println!("  cd {}", project_dir.file_name().unwrap().to_str().unwrap());
+            println!("  cd {}", project_dir.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("<project-dir>"));
             println!("  cargo build --release");
             println!();
             println!("The compiled plugin will be at:");

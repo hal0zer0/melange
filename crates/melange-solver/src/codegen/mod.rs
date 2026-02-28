@@ -127,6 +127,24 @@ impl CodeGenerator {
         mna: &MnaSystem,
         netlist: &Netlist,
     ) -> Result<GeneratedCode, CodegenError> {
+        // Validate config
+        if self.config.input_resistance <= 0.0 || !self.config.input_resistance.is_finite() {
+            return Err(CodegenError::InvalidConfig(format!(
+                "input_resistance must be positive finite, got {}",
+                self.config.input_resistance
+            )));
+        }
+        if self.config.input_node >= kernel.n {
+            return Err(CodegenError::InvalidConfig(format!(
+                "input_node {} >= N={}", self.config.input_node, kernel.n
+            )));
+        }
+        if self.config.output_node >= kernel.n {
+            return Err(CodegenError::InvalidConfig(format!(
+                "output_node {} >= N={}", self.config.output_node, kernel.n
+            )));
+        }
+
         // Step 1: Build language-agnostic IR
         let ir = CircuitIR::from_kernel(kernel, mna, netlist, &self.config)?;
 
