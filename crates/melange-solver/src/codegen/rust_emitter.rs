@@ -635,7 +635,9 @@ impl RustEmitter {
                     .device_slots
                     .iter()
                     .find(|s| i >= s.start_idx && i < s.start_idx + s.dimension)
-                    .expect("every M index should belong to a device");
+                    .ok_or_else(|| CodegenError::InvalidConfig(
+                        format!("no device slot found for M-dimension index {}", i)
+                    ))?;
                 let blk_start = slot.start_idx;
                 let blk_dim = slot.dimension;
                 for j in 0..m {

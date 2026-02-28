@@ -218,6 +218,82 @@ Vin in 0 0
     }
 }
 
+// ============================================================================
+// All-grounded device rejection tests (TopologyError)
+// ============================================================================
+
+/// Diode with both terminals grounded should produce TopologyError.
+#[test]
+fn test_diode_both_terminals_grounded() {
+    let spice = "Grounded Diode\nD1 0 0 D1N4148\nR1 in 0 1k\n.model D1N4148 D(IS=1e-15)\n";
+    let netlist = Netlist::parse(spice).unwrap();
+    let result = MnaSystem::from_netlist(&netlist);
+    assert!(
+        result.is_err(),
+        "Diode with both terminals grounded should be rejected"
+    );
+    let err = format!("{:?}", result.unwrap_err());
+    assert!(
+        err.contains("TopologyError") || err.contains("grounded"),
+        "Error should mention topology/grounded, got: {}",
+        err
+    );
+}
+
+/// BJT with all terminals grounded should produce TopologyError.
+#[test]
+fn test_bjt_all_terminals_grounded() {
+    let spice = "Grounded BJT\nQ1 0 0 0 2N2222\nR1 in 0 1k\n.model 2N2222 NPN(IS=1e-15 BF=200)\n";
+    let netlist = Netlist::parse(spice).unwrap();
+    let result = MnaSystem::from_netlist(&netlist);
+    assert!(
+        result.is_err(),
+        "BJT with all terminals grounded should be rejected"
+    );
+    let err = format!("{:?}", result.unwrap_err());
+    assert!(
+        err.contains("TopologyError") || err.contains("grounded"),
+        "Error should mention topology/grounded, got: {}",
+        err
+    );
+}
+
+/// JFET with all terminals grounded should produce TopologyError.
+#[test]
+fn test_jfet_all_terminals_grounded() {
+    let spice = "Grounded JFET\nJ1 0 0 0 JMOD\nR1 in 0 1k\n.model JMOD NJF\n";
+    let netlist = Netlist::parse(spice).unwrap();
+    let result = MnaSystem::from_netlist(&netlist);
+    assert!(
+        result.is_err(),
+        "JFET with all terminals grounded should be rejected"
+    );
+    let err = format!("{:?}", result.unwrap_err());
+    assert!(
+        err.contains("TopologyError") || err.contains("grounded"),
+        "Error should mention topology/grounded, got: {}",
+        err
+    );
+}
+
+/// MOSFET with all terminals grounded should produce TopologyError.
+#[test]
+fn test_mosfet_all_terminals_grounded() {
+    let spice = "Grounded MOSFET\nM1 0 0 0 0 MMOD\nR1 in 0 1k\n.model MMOD NMOS\n";
+    let netlist = Netlist::parse(spice).unwrap();
+    let result = MnaSystem::from_netlist(&netlist);
+    assert!(
+        result.is_err(),
+        "MOSFET with all terminals grounded should be rejected"
+    );
+    let err = format!("{:?}", result.unwrap_err());
+    assert!(
+        err.contains("TopologyError") || err.contains("grounded"),
+        "Error should mention topology/grounded, got: {}",
+        err
+    );
+}
+
 #[test]
 fn test_solver_has_step_clamping() {
     // For 2D nonlinear systems (two diodes), verify step clamping exists

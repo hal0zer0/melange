@@ -289,11 +289,14 @@ impl NonlinearDevice<2> for BjtGummelPoon {
         let dicc_dvbe = is / vt * exp_be;
         let dicc_dvbc = -is / vt * exp_bc;
 
-        // Base charge factor q1
+        // Base charge factor q1 (matches qb() singularity handling)
         let q1_denom = 1.0 - vbe_eff / self.var - vbc_eff / self.vaf;
-        let q1 = if q1_denom.abs() > 1e-15 { 1.0 / q1_denom } else { 1e15_f64.copysign(q1_denom) };
-        let dq1_dvbe = q1 * q1 / self.var;
-        let dq1_dvbc = q1 * q1 / self.vaf;
+        let (q1, dq1_dvbe, dq1_dvbc) = if q1_denom.abs() < 1e-30 {
+            (1.0, 0.0, 0.0) // matches qb() fallback
+        } else {
+            let q1 = 1.0 / q1_denom;
+            (q1, q1 * q1 / self.var, q1 * q1 / self.vaf)
+        };
 
         // High injection q2
         let q2 = icc / self.ikf;
@@ -511,6 +514,83 @@ mod tests {
             assert!(rel_err_bc < 1e-4,
                 "dIc/dVbc at ({}, {}): analytic={:.6e} fd={:.6e} err={:.2e}",
                 vbe, vbc, dic_dvbc, fd_dvbc, rel_err_bc);
+        }
+    }
+
+    /// Verify Gummel-Poon Jacobian matches finite-difference derivatives
+    /// of collector_current near the Q1 singularity point (where 1 - Vbe/VAR - Vbc/VAF ≈ 0).
+    #[test]
+    fn test_gummel_poon_q1_singularity_jacobian_consistency() {
+        let eps = 1e-7;
+
+        // Standard 2N2222A GP at normal operating points
+        let bjt_std = BjtGummelPoon::npn_2n2222a();
+        let std_points = [
+            (0.7, -5.0),   // standard forward active
+            (0.65, -2.0),  // moderate
+            (0.8, -10.0),  // higher Vbe, within safe_exp range
+        ];
+
+        // Custom GP with very small VAR to approach Q1 singularity at small voltages
+        // VAR=1.0: q1_denom = 1 - Vbe/1.0 - Vbc/100 → near-zero at Vbe~0.95
+        let bjt_near_sing = BjtGummelPoon::new(
+            BjtEbersMoll::npn_2n2222a(),
+            100.0,  // VAF (normal)
+            1.0,    // VAR (very small, creates singularity near Vbe=1V)
+            0.3,    // IKF
+            0.006,  // IKR
+        );
+        let near_sing_points = [
+            (0.8, 0.0),    // q1_denom = 1 - 0.8 = 0.2
+            (0.9, 0.0),    // q1_denom = 0.1 (very close to singularity)
+            (0.95, 0.0),   // q1_denom = 0.05 (near singularity)
+        ];
+
+        for (bjt, points, label) in [
+            (&bjt_std, &std_points[..], "standard"),
+            (&bjt_near_sing, &near_sing_points[..], "near-singularity"),
+        ] {
+            for &(vbe, vbc) in points {
+                let jac = bjt.jacobian(&[vbe, vbc]);
+
+                // Finite-difference derivatives
+                let ic_vbe_p = bjt.collector_current(vbe + eps, vbc);
+                let ic_vbe_m = bjt.collector_current(vbe - eps, vbc);
+                let fd_dvbe = (ic_vbe_p - ic_vbe_m) / (2.0 * eps);
+
+                let ic_vbc_p = bjt.collector_current(vbe, vbc + eps);
+                let ic_vbc_m = bjt.collector_current(vbe, vbc - eps);
+                let fd_dvbc = (ic_vbc_p - ic_vbc_m) / (2.0 * eps);
+
+                // Both should be finite
+                assert!(jac[0].is_finite(),
+                    "{}: dIc/dVbe must be finite at ({}, {})", label, vbe, vbc);
+                assert!(jac[1].is_finite(),
+                    "{}: dIc/dVbc must be finite at ({}, {})", label, vbe, vbc);
+
+                // Compare analytic vs finite-difference
+                let rel_err_be = if fd_dvbe.abs() > 1e-10 {
+                    (jac[0] - fd_dvbe).abs() / fd_dvbe.abs()
+                } else {
+                    (jac[0] - fd_dvbe).abs()
+                };
+                let rel_err_bc = if fd_dvbc.abs() > 1e-10 {
+                    (jac[1] - fd_dvbc).abs() / fd_dvbc.abs()
+                } else {
+                    (jac[1] - fd_dvbc).abs()
+                };
+
+                assert!(
+                    rel_err_be < 0.01,
+                    "{}: GP dIc/dVbe at ({}, {}): analytic={:.6e} fd={:.6e} rel_err={:.2e}",
+                    label, vbe, vbc, jac[0], fd_dvbe, rel_err_be
+                );
+                assert!(
+                    rel_err_bc < 0.01,
+                    "{}: GP dIc/dVbc at ({}, {}): analytic={:.6e} fd={:.6e} rel_err={:.2e}",
+                    label, vbe, vbc, jac[1], fd_dvbc, rel_err_bc
+                );
+            }
         }
     }
 

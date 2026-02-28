@@ -170,6 +170,12 @@ impl CircuitIR {
         let n = kernel.n;
         let m = kernel.m;
 
+        if m > 4 {
+            return Err(CodegenError::UnsupportedTopology(format!(
+                "code generation supports at most M=4 nonlinear dimensions, got M={}", m
+            )));
+        }
+
         // --- Topology ---
         let topology = Topology {
             n,

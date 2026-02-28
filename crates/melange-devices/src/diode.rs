@@ -128,7 +128,11 @@ impl DiodeWithRs {
         let v_diode = v - i_approx * self.rs;
         // g_total = g_diode / (1 + g_diode * Rs)
         let g_d = self.diode.conductance_at(v_diode);
-        g_d / (1.0 + g_d * self.rs)
+        let denom = 1.0 + g_d * self.rs;
+        if denom.abs() < 1e-15 {
+            return g_d; // fallback: ignore Rs when denominator vanishes
+        }
+        g_d / denom
     }
 }
 
@@ -261,6 +265,38 @@ mod tests {
         let i_blue = blue.current(&[2.0]);
 
         assert!(i_red > i_blue, "Red LED should conduct more at 2V than blue");
+    }
+
+    /// Verify DiodeWithRs conductance is always finite, even at edge voltages
+    /// where the denominator (1 + g_d * Rs) could vanish.
+    #[test]
+    fn test_diode_with_rs_conductance_finite() {
+        // Use large Rs and various voltages to stress the denominator guard
+        let diode = DiodeShockley::silicon();
+        let drs = DiodeWithRs::new(diode, 100.0);
+
+        // Test a wide range of voltages including extreme values
+        for &v in &[-10.0, -1.0, -0.5, 0.0, 0.3, 0.5, 0.6, 0.7, 0.8, 1.0, 5.0, 10.0] {
+            let g = drs.conductance_at(v);
+            assert!(
+                g.is_finite(),
+                "DiodeWithRs conductance must be finite at v={}, got {}",
+                v, g
+            );
+            // Conductance should be non-negative for a diode
+            assert!(
+                g >= 0.0,
+                "DiodeWithRs conductance must be non-negative at v={}, got {}",
+                v, g
+            );
+        }
+
+        // Also test with very small Rs
+        let drs_small = DiodeWithRs::new(diode, 1e-10);
+        for &v in &[0.0, 0.7, 1.0] {
+            let g = drs_small.conductance_at(v);
+            assert!(g.is_finite(), "Small Rs conductance must be finite at v={}", v);
+        }
     }
 
     /// Verify diode forward voltage at 1mA against expected values.

@@ -807,3 +807,173 @@ fn test_m4_four_diodes_converges() {
         );
     }
 }
+
+// ============================================================================
+// Test: Multi-inductor circuit (pi-filter: L1-C-L2)
+// ============================================================================
+
+/// Verify that a circuit with 2 inductors (pi-filter topology) produces
+/// finite, bounded output over 500+ samples.
+#[test]
+fn test_multi_inductor_pi_filter() {
+    // Pi-filter: L1 from in to mid, C from mid to ground, L2 from mid to out,
+    // plus small parasitic caps for stability
+    let spice = "Pi Filter\nR1 in n1 100\nL1 n1 mid 10m\nC1 mid 0 1u\nL2 mid out 10m\nR2 out 0 1k\nC2 out 0 100p\nC3 n1 0 100p\n";
+    let netlist = Netlist::parse(spice).unwrap();
+    let mna = MnaSystem::from_netlist(&netlist).unwrap();
+    let kernel = DkKernel::from_mna(&mna, SAMPLE_RATE).unwrap();
+
+    // Verify both inductors are tracked
+    assert_eq!(
+        kernel.inductors.len(), 2,
+        "Pi-filter should have 2 inductors, got {}",
+        kernel.inductors.len()
+    );
+
+    let in_idx = *mna.node_map.get("in").unwrap() - 1;
+    let out_idx = *mna.node_map.get("out").unwrap() - 1;
+
+    let mut solver = LinearSolver::new(kernel, in_idx, out_idx);
+    solver.input_conductance = 1.0 / 100.0; // 1/R1
+
+    // Apply 1V DC step for 500 samples
+    for i in 0..500 {
+        let output = solver.process_sample(1.0);
+        assert!(
+            output.is_finite(),
+            "Pi-filter output[{}] = {} is not finite", i, output
+        );
+        assert!(
+            output.abs() < 10.0,
+            "Pi-filter output[{}] = {:.4} exceeds bound", i, output
+        );
+    }
+}
+
+// ============================================================================
+// Test: NR fallback — MaxIterations graceful degradation
+// ============================================================================
+
+/// Verify that when NR hits max iterations (stiff circuit, few iterations),
+/// the solver still produces finite output (graceful degradation).
+#[test]
+fn test_nr_max_iterations_graceful_degradation() {
+    // Extremely stiff diode (IS=1e-15, n=1.0) with large input
+    let spice = "Stiff Diode\nRin in out 1k\nD1 out 0 D1N4148\nC1 out 0 1u\n.model D1N4148 D(IS=1e-15)\n";
+    let netlist = Netlist::parse(spice).unwrap();
+    let mna = MnaSystem::from_netlist(&netlist).unwrap();
+    let kernel = DkKernel::from_mna(&mna, SAMPLE_RATE).unwrap();
+
+    let in_idx = *mna.node_map.get("in").unwrap() - 1;
+    let out_idx = *mna.node_map.get("out").unwrap() - 1;
+
+    let diode = DiodeShockley::new_room_temp(1e-15, 1.0);
+    let devices = vec![DeviceEntry::new_diode(diode, 0)];
+
+    let mut solver = CircuitSolver::new(kernel, devices, in_idx, out_idx);
+    solver.input_conductance = 0.001;
+    // Use very few max iterations to force early termination
+    solver.max_iter = 2;
+
+    // Drive with large input to stress the NR solver
+    for i in 0..100 {
+        let output = solver.process_sample(10.0);
+        assert!(
+            output.is_finite(),
+            "NR max-iter output[{}] must be finite, got {}", i, output
+        );
+    }
+}
+
+// ============================================================================
+// Test: NR NaN/Inf recovery
+// ============================================================================
+
+/// Verify that after receiving NaN inputs, the solver recovers to
+/// finite output once normal inputs resume.
+#[test]
+fn test_nr_nan_recovery() {
+    let spice = "NaN Recovery\nRin in out 1k\nD1 out 0 D1N4148\nC1 out 0 1u\n.model D1N4148 D(IS=1e-15)\n";
+    let netlist = Netlist::parse(spice).unwrap();
+    let mna = MnaSystem::from_netlist(&netlist).unwrap();
+    let kernel = DkKernel::from_mna(&mna, SAMPLE_RATE).unwrap();
+
+    let in_idx = *mna.node_map.get("in").unwrap() - 1;
+    let out_idx = *mna.node_map.get("out").unwrap() - 1;
+
+    let diode = DiodeShockley::new_room_temp(1e-15, 1.0);
+    let devices = vec![DeviceEntry::new_diode(diode, 0)];
+
+    let mut solver = CircuitSolver::new(kernel, devices, in_idx, out_idx);
+    solver.input_conductance = 0.001;
+
+    // Normal operation
+    for _ in 0..20 {
+        let out = solver.process_sample(1.0);
+        assert!(out.is_finite(), "Normal input should produce finite output");
+    }
+
+    // Feed NaN for several samples
+    for _ in 0..5 {
+        let out = solver.process_sample(f64::NAN);
+        assert!(out.is_finite(), "NaN input should still produce finite output (clamped)");
+    }
+
+    // Recovery: feed normal input and verify output is always finite and bounded
+    for i in 0..200 {
+        let out = solver.process_sample(0.0);
+        assert!(
+            out.is_finite(),
+            "Recovery output[{}] must be finite, got {}", i, out
+        );
+        assert!(
+            out.abs() <= 10.0,
+            "Recovery output[{}] must be bounded, got {:.4}", i, out
+        );
+    }
+
+    // After 200 zero-input samples, output should have decayed significantly
+    let final_out = solver.process_sample(0.0);
+    assert!(
+        final_out.is_finite() && final_out.abs() < 1.0,
+        "After 200 zero-input recovery samples, output should be small, got {:.4}",
+        final_out
+    );
+}
+
+// ============================================================================
+// Test: Inductor NaN reset / recovery
+// ============================================================================
+
+/// Verify that an RL circuit recovers to finite output after NaN input.
+#[test]
+fn test_inductor_nan_reset_recovery() {
+    let spice = "RL NaN\nR1 in out 1k\nL1 out 0 10m\nC1 out 0 100p\n";
+    let netlist = Netlist::parse(spice).unwrap();
+    let mna = MnaSystem::from_netlist(&netlist).unwrap();
+    let kernel = DkKernel::from_mna(&mna, SAMPLE_RATE).unwrap();
+
+    let in_idx = *mna.node_map.get("in").unwrap() - 1;
+    let out_idx = *mna.node_map.get("out").unwrap() - 1;
+
+    let mut solver = LinearSolver::new(kernel, in_idx, out_idx);
+    solver.input_conductance = 0.001;
+
+    // Normal operation
+    for _ in 0..50 {
+        let out = solver.process_sample(1.0);
+        assert!(out.is_finite(), "Normal RL output should be finite");
+    }
+
+    // Feed NaN
+    let _nan_out = solver.process_sample(f64::NAN);
+
+    // Recovery: verify output returns to finite values
+    for i in 0..100 {
+        let out = solver.process_sample(0.0);
+        assert!(
+            out.is_finite(),
+            "RL recovery output[{}] must be finite after NaN, got {}", i, out
+        );
+    }
+}

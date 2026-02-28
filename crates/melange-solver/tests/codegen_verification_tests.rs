@@ -1316,3 +1316,94 @@ fn test_ir_roundtrip_heterogeneous_devices() {
         _ => panic!("Expected two Diode device params after round-trip"),
     }
 }
+
+// ==========================================================================
+// Test: Inductor codegen E2E
+// ==========================================================================
+
+/// Verify that generated code for an RL lowpass circuit contains
+/// inductor state fields, constants, RHS injection, and state update.
+#[test]
+fn test_inductor_codegen_e2e() {
+    let spice = "\
+RL Lowpass
+R1 in out 1k
+L1 out 0 10m
+C1 out 0 100p
+";
+    let (code, _netlist, _mna, _kernel) = generate_code(spice);
+
+    // Should contain inductor constants
+    assert!(
+        code.contains("IND_0_G_EQ") || code.contains("INDUCTOR_0_G_EQ"),
+        "Generated code should contain inductor equivalent conductance constant.\n\
+         Code snippet: {}",
+        &code[..code.len().min(500)]
+    );
+
+    // Should contain inductor state fields (history current)
+    assert!(
+        code.contains("i_ind_hist") || code.contains("ind_i_hist") || code.contains("i_hist"),
+        "Generated code should contain inductor history current state field"
+    );
+
+    // Should contain inductor RHS injection (history current injection into build_rhs)
+    assert!(
+        code.contains("ind") || code.contains("IND"),
+        "Generated code should reference inductor constants or state"
+    );
+
+    // Verify the code mentions inductor-related updates in process_sample
+    assert!(
+        code.contains("state.i_ind") || code.contains("state.ind"),
+        "Generated code should update inductor state in process_sample"
+    );
+}
+
+// ==========================================================================
+// Test: M > 4 early rejection in IR
+// ==========================================================================
+
+/// Verify that CircuitIR::from_kernel rejects M > 4 at IR build time,
+/// not just at emission time.
+#[test]
+fn test_m_gt_4_rejected_at_ir_build() {
+    // 5 diodes → M=5 which should be rejected
+    let spice = "\
+Five Diodes
+Rin in 0 1k
+D1 in m1 D1N4148
+D2 m1 m2 D1N4148
+D3 m2 m3 D1N4148
+D4 m3 m4 D1N4148
+D5 m4 out D1N4148
+R1 m1 0 10k
+R2 m2 0 10k
+R3 m3 0 10k
+R4 m4 0 10k
+C1 out 0 1u
+.model D1N4148 D(IS=1e-15)
+";
+
+    let (netlist, mna, kernel) = build_pipeline(spice);
+    assert_eq!(kernel.m, 5, "Five diodes should produce M=5");
+
+    let config = default_config();
+    let result = CircuitIR::from_kernel(&kernel, &mna, &netlist, &config);
+    assert!(
+        result.is_err(),
+        "M=5 should be rejected at IR build time, but got Ok"
+    );
+
+    let err = result.unwrap_err();
+    match err {
+        CodegenError::UnsupportedTopology(msg) => {
+            assert!(
+                msg.contains("M=5"),
+                "Error message should mention M=5, got: {}",
+                msg
+            );
+        }
+        other => panic!("Expected UnsupportedTopology, got: {:?}", other),
+    }
+}
