@@ -239,95 +239,57 @@ impl MnaSystem {
         self.n_i[ne][start_idx + 1] = 1.0;  // Ib exits emitter (KCL conservation)
     }
 
-    /// Get the A matrix for a given sample rate (trapezoidal discretization).
+    /// Build a discretized system matrix from G and C with inductor companion models.
     ///
-    /// A = 2*C/T + G (includes inductor companion model conductances)
+    /// Computes `result[i][j] = g_sign * G[i][j] + alpha * C[i][j]` for each element,
+    /// then stamps inductor companion conductances with the given `g_sign`.
     ///
-    /// # Panics
-    /// Panics if `sample_rate` is not positive and finite.
+    /// - `g_sign = +1`: produces A = G + (2/T)*C  (forward matrix)
+    /// - `g_sign = -1`: produces A_neg = (2/T)*C - G  (history matrix)
     #[allow(clippy::needless_range_loop)]
-    pub fn get_a_matrix(&self, sample_rate: f64) -> Vec<Vec<f64>> {
-        assert!(sample_rate > 0.0 && sample_rate.is_finite(), 
+    fn build_discretized_matrix(&self, sample_rate: f64, g_sign: f64) -> Vec<Vec<f64>> {
+        assert!(sample_rate > 0.0 && sample_rate.is_finite(),
                 "sample_rate must be positive and finite, got {}", sample_rate);
         let t = 1.0 / sample_rate;
         let alpha = 2.0 / t; // 2/T for trapezoidal
 
-        let mut a = vec![vec![0.0; self.n]; self.n];
+        let mut mat = vec![vec![0.0; self.n]; self.n];
         for i in 0..self.n {
             for j in 0..self.n {
-                a[i][j] = self.g[i][j] + alpha * self.c[i][j];
+                mat[i][j] = g_sign * self.g[i][j] + alpha * self.c[i][j];
             }
         }
-        
-        // Add inductor companion model conductances: g_eq = T/(2L)
-        let g_eq_inductor = t / 2.0;
+
+        // Inductor companion model conductances: g_eq = T/(2L).
+        // In A (g_sign=+1) inductors add +g_eq (like a resistor).
+        // In A_neg (g_sign=-1) inductors add -g_eq (opposite sign).
+        let g_eq_factor = t / 2.0;
         for ind in &self.inductors {
-            if ind.node_i > 0 && ind.node_j > 0 {
-                let i = ind.node_i - 1;
-                let j = ind.node_j - 1;
-                let g = g_eq_inductor / ind.value;
-                a[i][i] += g;
-                a[j][j] += g;
-                a[i][j] -= g;
-                a[j][i] -= g;
-            } else if ind.node_i > 0 {
-                let i = ind.node_i - 1;
-                let g = g_eq_inductor / ind.value;
-                a[i][i] += g;
-            } else if ind.node_j > 0 {
-                let j = ind.node_j - 1;
-                let g = g_eq_inductor / ind.value;
-                a[j][j] += g;
-            }
+            let g = g_sign * g_eq_factor / ind.value;
+            stamp_conductance_to_ground(&mut mat, ind.node_i, ind.node_j, g);
         }
-        
-        a
+
+        mat
+    }
+
+    /// Get the A matrix for a given sample rate (trapezoidal discretization).
+    ///
+    /// A = G + (2/T)*C (includes inductor companion model conductances)
+    ///
+    /// # Panics
+    /// Panics if `sample_rate` is not positive and finite.
+    pub fn get_a_matrix(&self, sample_rate: f64) -> Vec<Vec<f64>> {
+        self.build_discretized_matrix(sample_rate, 1.0)
     }
 
     /// Get the A_neg matrix for history term (trapezoidal discretization).
     ///
-    /// A_neg = 2*C/T - G (includes inductor companion model)
+    /// A_neg = (2/T)*C - G (includes inductor companion model)
     ///
     /// # Panics
     /// Panics if `sample_rate` is not positive and finite.
-    #[allow(clippy::needless_range_loop)]
     pub fn get_a_neg_matrix(&self, sample_rate: f64) -> Vec<Vec<f64>> {
-        assert!(sample_rate > 0.0 && sample_rate.is_finite(),
-                "sample_rate must be positive and finite, got {}", sample_rate);
-        let t = 1.0 / sample_rate;
-        let alpha = 2.0 / t;
-
-        let mut a_neg = vec![vec![0.0; self.n]; self.n];
-        for i in 0..self.n {
-            for j in 0..self.n {
-                a_neg[i][j] = alpha * self.c[i][j] - self.g[i][j];
-            }
-        }
-        
-        // Inductor companion model contributes to A_neg with opposite sign to A.
-        // A has +g_eq (like resistor), A_neg has -g_eq (opposite: inductor stores energy)
-        let g_eq_inductor = t / 2.0;
-        for ind in &self.inductors {
-            if ind.node_i > 0 && ind.node_j > 0 {
-                let i = ind.node_i - 1;
-                let j = ind.node_j - 1;
-                let g = g_eq_inductor / ind.value;
-                a_neg[i][i] -= g;
-                a_neg[j][j] -= g;
-                a_neg[i][j] += g;
-                a_neg[j][i] += g;
-            } else if ind.node_i > 0 {
-                let i = ind.node_i - 1;
-                let g = g_eq_inductor / ind.value;
-                a_neg[i][i] -= g;
-            } else if ind.node_j > 0 {
-                let j = ind.node_j - 1;
-                let g = g_eq_inductor / ind.value;
-                a_neg[j][j] -= g;
-            }
-        }
-        
-        a_neg
+        self.build_discretized_matrix(sample_rate, -1.0)
     }
 }
 
@@ -365,6 +327,44 @@ impl std::fmt::Display for MnaError {
 }
 
 impl std::error::Error for MnaError {}
+
+/// Stamp a conductance `g` between two nodes that may be grounded (index 0).
+///
+/// This is the standard MNA conductance stamp with ground-node handling:
+/// - Both nodes non-ground: full 2x2 stamp into the matrix
+/// - One node grounded: single diagonal entry
+/// - Both grounded: no-op
+///
+/// Node indices use the MNA convention where 0 = ground (excluded from matrix),
+/// and non-zero indices are 1-based (matrix row/col = index - 1).
+fn stamp_conductance_to_ground(mat: &mut [Vec<f64>], node_i: usize, node_j: usize, g: f64) {
+    match (node_i > 0, node_j > 0) {
+        (true, true) => {
+            let i = node_i - 1;
+            let j = node_j - 1;
+            mat[i][i] += g;
+            mat[j][j] += g;
+            mat[i][j] -= g;
+            mat[j][i] -= g;
+        }
+        (true, false) => {
+            mat[node_i - 1][node_i - 1] += g;
+        }
+        (false, true) => {
+            mat[node_j - 1][node_j - 1] += g;
+        }
+        (false, false) => {}
+    }
+}
+
+/// Inject a current into the RHS vector at a node, handling ground (index 0).
+///
+/// Positive current is injected at `node` (node_map convention: 0 = ground).
+pub(crate) fn inject_rhs_current(rhs: &mut [f64], node: usize, current: f64) {
+    if node > 0 {
+        rhs[node - 1] += current;
+    }
+}
 
 /// Builder for MNA systems.
 struct MnaBuilder {
@@ -473,74 +473,25 @@ impl MnaBuilder {
         for elem in &self.elements {
             match elem.element_type {
                 ElementType::Resistor => {
-                    if elem.nodes.len() >= 2 {
-                        let node_i = elem.nodes[0];
-                        let node_j = elem.nodes[1];
-                        let r = elem.value;
-                        if r == 0.0 {
-                            continue; // Short circuit - skip to avoid division by zero
-                        }
-
-                        // Handle resistor to ground
-                        if node_i == 0 && node_j > 0 {
-                            let j = node_j - 1;
-                            let g = 1.0 / r;
-                            mna.g[j][j] += g;
-                        } else if node_j == 0 && node_i > 0 {
-                            let i = node_i - 1;
-                            let g = 1.0 / r;
-                            mna.g[i][i] += g;
-                        } else if node_i > 0 && node_j > 0 {
-                            let i = node_i - 1;
-                            let j = node_j - 1;
-                            mna.stamp_resistor(i, j, r);
-                        }
+                    if elem.nodes.len() >= 2 && elem.value != 0.0 {
+                        let g = 1.0 / elem.value;
+                        stamp_conductance_to_ground(&mut mna.g, elem.nodes[0], elem.nodes[1], g);
                     }
                 }
                 ElementType::Capacitor => {
                     if elem.nodes.len() >= 2 {
-                        let node_i = elem.nodes[0];
-                        let node_j = elem.nodes[1];
-                        let c = elem.value;
-
-                        if node_i == 0 && node_j > 0 {
-                            let j = node_j - 1;
-                            mna.c[j][j] += c;
-                        } else if node_j == 0 && node_i > 0 {
-                            let i = node_i - 1;
-                            mna.c[i][i] += c;
-                        } else if node_i > 0 && node_j > 0 {
-                            let i = node_i - 1;
-                            let j = node_j - 1;
-                            mna.stamp_capacitor(i, j, c);
-                        }
+                        stamp_conductance_to_ground(&mut mna.c, elem.nodes[0], elem.nodes[1], elem.value);
                     }
                 }
                 ElementType::Inductor => {
-                    // Inductors are handled in DK kernel with companion model
-                    // We store them but stamping happens at kernel creation
-                    // since we need sample rate
+                    // Inductors are handled in DK kernel with companion model.
+                    // Stamping happens at kernel creation since we need sample rate.
                 }
                 ElementType::VoltageSource => {
-                    // Norton equivalent: stamp large conductance between nodes
-                    // The current contribution is handled in build_rhs_const
+                    // Norton equivalent: stamp large conductance between nodes.
+                    // The current contribution is handled in build_rhs_const.
                     if elem.nodes.len() >= 2 {
-                        let node_i = elem.nodes[0]; // n_plus
-                        let node_j = elem.nodes[1]; // n_minus
-                        if node_i == 0 && node_j > 0 {
-                            let j = node_j - 1;
-                            mna.g[j][j] += VS_CONDUCTANCE;
-                        } else if node_j == 0 && node_i > 0 {
-                            let i = node_i - 1;
-                            mna.g[i][i] += VS_CONDUCTANCE;
-                        } else if node_i > 0 && node_j > 0 {
-                            let i = node_i - 1;
-                            let j = node_j - 1;
-                            mna.g[i][i] += VS_CONDUCTANCE;
-                            mna.g[j][j] += VS_CONDUCTANCE;
-                            mna.g[i][j] -= VS_CONDUCTANCE;
-                            mna.g[j][i] -= VS_CONDUCTANCE;
-                        }
+                        stamp_conductance_to_ground(&mut mna.g, elem.nodes[0], elem.nodes[1], VS_CONDUCTANCE);
                     }
                 }
                 _ => {} // Nonlinear handled separately
@@ -755,9 +706,8 @@ impl MnaBuilder {
                 });
             }
             Element::Diode { name, n_plus, n_minus, .. } => {
-                let ni = self.node_map[n_plus];
-                let nj = self.node_map[n_minus];
-                if ni == 0 && nj == 0 {
+                let node_indices = vec![self.node_map[n_plus], self.node_map[n_minus]];
+                if node_indices.iter().all(|&idx| idx == 0) {
                     return Err(MnaError::TopologyError(
                         format!("diode '{}' has both terminals grounded", name)
                     ));
@@ -770,17 +720,16 @@ impl MnaBuilder {
                     dimension: 1,
                     start_idx,
                     nodes: vec![n_plus.clone(), n_minus.clone()],
-                    node_indices: vec![
-                        self.node_map[n_plus],
-                        self.node_map[n_minus],
-                    ],
+                    node_indices,
                 });
             }
             Element::Bjt { name, nc, nb, ne, .. } => {
-                let nc_idx = self.node_map[nc];
-                let nb_idx = self.node_map[nb];
-                let ne_idx = self.node_map[ne];
-                if nc_idx == 0 && nb_idx == 0 && ne_idx == 0 {
+                let node_indices = vec![
+                    self.node_map[nc],
+                    self.node_map[nb],
+                    self.node_map[ne],
+                ];
+                if node_indices.iter().all(|&idx| idx == 0) {
                     return Err(MnaError::TopologyError(
                         format!("BJT '{}' has all terminals grounded", name)
                     ));
@@ -793,62 +742,53 @@ impl MnaBuilder {
                     dimension: 2,
                     start_idx,
                     nodes: vec![nc.clone(), nb.clone(), ne.clone()],
-                    node_indices: vec![
-                        self.node_map[nc],
-                        self.node_map[nb],
-                        self.node_map[ne],
-                    ],
+                    node_indices,
                 });
             }
             Element::Jfet { name, nd, ng, ns, .. } => {
-                let nd_idx = self.node_map[nd];
-                let ng_idx = self.node_map[ng];
-                let ns_idx = self.node_map[ns];
-                if nd_idx == 0 && ng_idx == 0 && ns_idx == 0 {
+                let node_indices = vec![
+                    self.node_map[nd],
+                    self.node_map[ng],
+                    self.node_map[ns],
+                ];
+                if node_indices.iter().all(|&idx| idx == 0) {
                     return Err(MnaError::TopologyError(
                         format!("JFET '{}' has all terminals grounded", name)
                     ));
                 }
                 let start_idx = self.total_dimension;
                 self.total_dimension += 1; // Simplified: 1D for now
-                let _idx = self.nonlinear_devices.len();
                 self.nonlinear_devices.push(NonlinearDeviceInfo {
                     name: name.clone(),
                     device_type: NonlinearDeviceType::Jfet,
                     dimension: 1,
                     start_idx,
                     nodes: vec![nd.clone(), ng.clone(), ns.clone()],
-                    node_indices: vec![
-                        self.node_map[nd],
-                        self.node_map[ng],
-                        self.node_map[ns],
-                    ],
+                    node_indices,
                 });
             }
             Element::Mosfet { name, nd, ng, ns, nb, .. } => {
-                let nd_idx = self.node_map[nd];
-                let ng_idx = self.node_map[ng];
-                let ns_idx = self.node_map[ns];
-                if nd_idx == 0 && ng_idx == 0 && ns_idx == 0 {
+                let node_indices = vec![
+                    self.node_map[nd],
+                    self.node_map[ng],
+                    self.node_map[ns],
+                    self.node_map[nb],
+                ];
+                // Check drain/gate/source (not bulk) for all-grounded
+                if node_indices[..3].iter().all(|&idx| idx == 0) {
                     return Err(MnaError::TopologyError(
                         format!("MOSFET '{}' has all terminals grounded", name)
                     ));
                 }
                 let start_idx = self.total_dimension;
                 self.total_dimension += 1; // Simplified: 1D for now
-                let _idx = self.nonlinear_devices.len();
                 self.nonlinear_devices.push(NonlinearDeviceInfo {
                     name: name.clone(),
                     device_type: NonlinearDeviceType::Mosfet,
                     dimension: 1,
                     start_idx,
                     nodes: vec![nd.clone(), ng.clone(), ns.clone(), nb.clone()],
-                    node_indices: vec![
-                        self.node_map[nd],
-                        self.node_map[ng],
-                        self.node_map[ns],
-                        self.node_map[nb],
-                    ],
+                    node_indices,
                 });
             }
             Element::SubcktInstance { name, .. } => {

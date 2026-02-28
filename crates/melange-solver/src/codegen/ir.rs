@@ -6,14 +6,10 @@
 use serde::{Deserialize, Serialize};
 
 use crate::dk::{self, DkKernel};
-use crate::mna::{MnaSystem, VS_CONDUCTANCE};
+use crate::mna::{inject_rhs_current, MnaSystem, VS_CONDUCTANCE};
 use crate::parser::{Element, Netlist};
 
 use super::{CodegenConfig, CodegenError};
-
-// ============================================================================
-// Top-level IR
-// ============================================================================
 
 /// Language-agnostic intermediate representation of a compiled circuit.
 ///
@@ -180,9 +176,15 @@ pub enum DeviceType {
     Bjt,
 }
 
-// ============================================================================
-// Builder
-// ============================================================================
+/// Validate that a device model parameter is positive and finite.
+fn validate_positive_finite(value: f64, param_label: &str) -> Result<(), CodegenError> {
+    if value <= 0.0 || !value.is_finite() {
+        return Err(CodegenError::InvalidConfig(format!(
+            "{param_label} must be positive finite, got {value}"
+        )));
+    }
+    Ok(())
+}
 
 impl CircuitIR {
     /// Build a `CircuitIR` from the compiled kernel, MNA system, netlist, and config.
@@ -205,14 +207,12 @@ impl CircuitIR {
             )));
         }
 
-        // --- Topology ---
         let topology = Topology {
             n,
             m,
             num_devices: kernel.num_devices,
         };
 
-        // --- Solver config ---
         let solver_config = SolverConfig {
             sample_rate: config.sample_rate,
             alpha: 2.0 * config.sample_rate,
@@ -223,14 +223,12 @@ impl CircuitIR {
             input_resistance: config.input_resistance,
         };
 
-        // --- Metadata ---
         let metadata = CircuitMetadata {
             circuit_name: config.circuit_name.clone(),
             title: netlist.title.clone(),
             generator_version: env!("CARGO_PKG_VERSION").to_string(),
         };
 
-        // --- Matrices (direct copy from kernel) ---
         let matrices = Matrices {
             s: kernel.s.clone(),
             a_neg: kernel.a_neg.clone(),
@@ -240,19 +238,16 @@ impl CircuitIR {
             rhs_const: kernel.rhs_const.clone(),
         };
 
-        // --- Device slots + resolved params ---
         let (device_slots, devices) = Self::build_device_info(netlist)?;
 
-        // --- Inductors ---
-        let inductors: Vec<InductorIR> = kernel.inductors.iter().map(|ind| InductorIR {
+        let inductors = kernel.inductors.iter().map(|ind| InductorIR {
             name: ind.name.to_string(),
             node_i: ind.node_i,
             node_j: ind.node_j,
             g_eq: ind.g_eq,
         }).collect();
 
-        // --- Potentiometers ---
-        let pots: Vec<PotentiometerIR> = kernel.pots.iter().map(|p| PotentiometerIR {
+        let pots = kernel.pots.iter().map(|p| PotentiometerIR {
             su: p.su.clone(),
             usu: p.usu,
             g_nominal: p.g_nominal,
@@ -265,10 +260,8 @@ impl CircuitIR {
             grounded: p.grounded,
         }).collect();
 
-        // --- DC sources ---
         let has_dc_sources = kernel.rhs_const.iter().any(|&v| v != 0.0);
 
-        // --- DC operating point (includes input conductance) ---
         let dc_op = Self::compute_dc_operating_point(
             mna,
             config.input_node,
@@ -294,40 +287,16 @@ impl CircuitIR {
     /// Build device slot map and resolve per-device parameters from netlist.
     ///
     /// # Errors
-    /// Returns `CodegenError::InvalidConfig` if JFET or MOSFET elements are present.
+    /// Returns `CodegenError::InvalidConfig` if JFET or MOSFET elements are present,
+    /// or if any device model parameter is non-positive or non-finite.
     fn build_device_info(netlist: &Netlist) -> Result<(Vec<DeviceSlot>, Vec<DeviceIR>), CodegenError> {
         let mut slots = Vec::new();
-        let mut devices = Vec::new();
         let mut dim_offset = 0;
-
-        // Track first occurrence of each type for the legacy `devices` vec
-        let mut first_diode: Option<DiodeParams> = None;
-        let mut first_bjt: Option<BjtParams> = None;
 
         for elem in &netlist.elements {
             match elem {
                 Element::Diode { model, .. } => {
-                    let vt = 0.02585;
-                    let is = Self::lookup_model_param(netlist, model, "IS")
-                        .unwrap_or(2.52e-9);
-                    let n = Self::lookup_model_param(netlist, model, "N")
-                        .unwrap_or(1.0);
-                    if is <= 0.0 || !is.is_finite() {
-                        return Err(CodegenError::InvalidConfig(
-                            format!("diode model IS must be positive finite, got {}", is)
-                        ));
-                    }
-                    if n <= 0.0 || !n.is_finite() {
-                        return Err(CodegenError::InvalidConfig(
-                            format!("diode model N must be positive finite, got {}", n)
-                        ));
-                    }
-                    let params = DiodeParams { is, n_vt: n * vt };
-
-                    if first_diode.is_none() {
-                        first_diode = Some(params.clone());
-                    }
-
+                    let params = Self::resolve_diode_params(netlist, model)?;
                     slots.push(DeviceSlot {
                         device_type: DeviceType::Diode,
                         start_idx: dim_offset,
@@ -337,45 +306,7 @@ impl CircuitIR {
                     dim_offset += 1;
                 }
                 Element::Bjt { model, .. } => {
-                    let vt = Self::lookup_model_param(netlist, model, "VT")
-                        .unwrap_or(0.02585);
-                    let is = Self::lookup_model_param(netlist, model, "IS")
-                        .unwrap_or(1.26e-14);
-                    let beta_f = Self::lookup_model_param(netlist, model, "BF")
-                        .unwrap_or(200.0);
-                    let beta_r = Self::lookup_model_param(netlist, model, "BR")
-                        .unwrap_or(3.0);
-                    if is <= 0.0 || !is.is_finite() {
-                        return Err(CodegenError::InvalidConfig(
-                            format!("BJT model IS must be positive finite, got {}", is)
-                        ));
-                    }
-                    if vt <= 0.0 || !vt.is_finite() {
-                        return Err(CodegenError::InvalidConfig(
-                            format!("BJT model VT must be positive finite, got {}", vt)
-                        ));
-                    }
-                    if beta_f <= 0.0 || !beta_f.is_finite() {
-                        return Err(CodegenError::InvalidConfig(
-                            format!("BJT model BF must be positive finite, got {}", beta_f)
-                        ));
-                    }
-                    if beta_r <= 0.0 || !beta_r.is_finite() {
-                        return Err(CodegenError::InvalidConfig(
-                            format!("BJT model BR must be positive finite, got {}", beta_r)
-                        ));
-                    }
-                    // Look up polarity from .model directive (default NPN)
-                    let is_pnp = netlist.models.iter()
-                        .find(|m| m.name.eq_ignore_ascii_case(model))
-                        .map(|m| m.model_type.to_uppercase().starts_with("PNP"))
-                        .unwrap_or(false);
-                    let params = BjtParams { is, vt, beta_f, beta_r, is_pnp };
-
-                    if first_bjt.is_none() {
-                        first_bjt = Some(params.clone());
-                    }
-
+                    let params = Self::resolve_bjt_params(netlist, model)?;
                     slots.push(DeviceSlot {
                         device_type: DeviceType::Bjt,
                         start_idx: dim_offset,
@@ -394,19 +325,72 @@ impl CircuitIR {
                         format!("MOSFET '{}' not supported in code generation", name)
                     ));
                 }
-                _ => {} // Skip non-device elements (R, C, L, sources)
+                _ => {}
             }
         }
 
-        // Legacy devices list (first of each type, for backward compat)
-        if let Some(dp) = first_diode {
-            devices.push(DeviceIR::Diode(dp));
-        }
-        if let Some(bp) = first_bjt {
-            devices.push(DeviceIR::Bjt(bp));
-        }
+        // Legacy devices list: first occurrence of each type (for JSON backward compat)
+        let devices = Self::build_legacy_devices(&slots);
 
         Ok((slots, devices))
+    }
+
+    /// Resolve diode model parameters from the netlist, with validation.
+    fn resolve_diode_params(netlist: &Netlist, model: &str) -> Result<DiodeParams, CodegenError> {
+        let vt = 0.02585;
+        let is = Self::lookup_model_param(netlist, model, "IS").unwrap_or(2.52e-9);
+        let n = Self::lookup_model_param(netlist, model, "N").unwrap_or(1.0);
+
+        validate_positive_finite(is, "diode model IS")?;
+        validate_positive_finite(n, "diode model N")?;
+
+        Ok(DiodeParams { is, n_vt: n * vt })
+    }
+
+    /// Resolve BJT model parameters from the netlist, with validation.
+    fn resolve_bjt_params(netlist: &Netlist, model: &str) -> Result<BjtParams, CodegenError> {
+        let vt = Self::lookup_model_param(netlist, model, "VT").unwrap_or(0.02585);
+        let is = Self::lookup_model_param(netlist, model, "IS").unwrap_or(1.26e-14);
+        let beta_f = Self::lookup_model_param(netlist, model, "BF").unwrap_or(200.0);
+        let beta_r = Self::lookup_model_param(netlist, model, "BR").unwrap_or(3.0);
+
+        validate_positive_finite(is, "BJT model IS")?;
+        validate_positive_finite(vt, "BJT model VT")?;
+        validate_positive_finite(beta_f, "BJT model BF")?;
+        validate_positive_finite(beta_r, "BJT model BR")?;
+
+        let is_pnp = netlist.models.iter()
+            .find(|m| m.name.eq_ignore_ascii_case(model))
+            .map(|m| m.model_type.to_uppercase().starts_with("PNP"))
+            .unwrap_or(false);
+
+        Ok(BjtParams { is, vt, beta_f, beta_r, is_pnp })
+    }
+
+    /// Build the legacy `devices` list (first occurrence of each device type).
+    fn build_legacy_devices(slots: &[DeviceSlot]) -> Vec<DeviceIR> {
+        let mut devices = Vec::new();
+        let mut has_diode = false;
+        let mut has_bjt = false;
+
+        for slot in slots {
+            match &slot.params {
+                DeviceParams::Diode(p) if !has_diode => {
+                    devices.push(DeviceIR::Diode(p.clone()));
+                    has_diode = true;
+                }
+                DeviceParams::Bjt(p) if !has_bjt => {
+                    devices.push(DeviceIR::Bjt(p.clone()));
+                    has_bjt = true;
+                }
+                _ => {}
+            }
+            if has_diode && has_bjt {
+                break;
+            }
+        }
+
+        devices
     }
 
     /// Look up a parameter from a `.model` directive, case-insensitive.
@@ -442,22 +426,14 @@ impl CircuitIR {
         let mut b_dc = vec![0.0; n];
         for vs in &mna.voltage_sources {
             let current = vs.dc_value * VS_CONDUCTANCE;
-            if vs.n_plus_idx > 0 {
-                b_dc[vs.n_plus_idx - 1] += current;
-            }
-            if vs.n_minus_idx > 0 {
-                b_dc[vs.n_minus_idx - 1] -= current;
-            }
+            inject_rhs_current(&mut b_dc, vs.n_plus_idx, current);
+            inject_rhs_current(&mut b_dc, vs.n_minus_idx, -current);
         }
 
         // Current sources: same sign convention as dk.rs build_rhs_const
         for src in &mna.current_sources {
-            if src.n_plus_idx > 0 {
-                b_dc[src.n_plus_idx - 1] += src.dc_value;
-            }
-            if src.n_minus_idx > 0 {
-                b_dc[src.n_minus_idx - 1] -= src.dc_value;
-            }
+            inject_rhs_current(&mut b_dc, src.n_plus_idx, src.dc_value);
+            inject_rhs_current(&mut b_dc, src.n_minus_idx, -src.dc_value);
         }
 
         // If no DC sources, return zeros
@@ -488,34 +464,27 @@ impl CircuitIR {
         v_dc
     }
 
-    // --- Matrix accessors (mirror DkKernel's API for convenience) ---
-
     /// Access S matrix element S[i][j]
-    #[inline(always)]
     pub fn s(&self, i: usize, j: usize) -> f64 {
         self.matrices.s[i * self.topology.n + j]
     }
 
     /// Access K matrix element K[i][j]
-    #[inline(always)]
     pub fn k(&self, i: usize, j: usize) -> f64 {
         self.matrices.k[i * self.topology.m + j]
     }
 
     /// Access N_v matrix element N_v[i][j]
-    #[inline(always)]
     pub fn n_v(&self, i: usize, j: usize) -> f64 {
         self.matrices.n_v[i * self.topology.n + j]
     }
 
     /// Access N_i matrix element N_i[i][j] (N×M storage: node × device)
-    #[inline(always)]
     pub fn n_i(&self, i: usize, j: usize) -> f64 {
         self.matrices.n_i[i * self.topology.m + j]
     }
 
     /// Access A_neg matrix element A_neg[i][j]
-    #[inline(always)]
     pub fn a_neg(&self, i: usize, j: usize) -> f64 {
         self.matrices.a_neg[i * self.topology.n + j]
     }

@@ -23,6 +23,80 @@ struct InductorTemplateData {
     g_eq: String,
 }
 
+// ============================================================================
+// Formatting helpers — reduce repetition in string-building code
+// ============================================================================
+
+/// Format a float with full precision for codegen constants.
+fn fmt_f64(v: f64) -> String {
+    format!("{:.17e}", v)
+}
+
+/// Format a matrix as rows of comma-separated full-precision floats.
+///
+/// `rows` x `cols` elements are read from `get(i, j)`.
+fn format_matrix_rows(
+    rows: usize,
+    cols: usize,
+    get: impl Fn(usize, usize) -> f64,
+) -> Vec<String> {
+    (0..rows)
+        .map(|i| {
+            (0..cols)
+                .map(|j| fmt_f64(get(i, j)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .collect()
+}
+
+/// Build `InductorTemplateData` from IR inductors.
+///
+/// When `with_g_eq` is true, each entry includes the formatted g_eq value
+/// (needed by the constants template). Otherwise g_eq is left empty.
+fn inductor_template_data(ir: &CircuitIR, with_g_eq: bool) -> Vec<InductorTemplateData> {
+    ir.inductors
+        .iter()
+        .map(|ind| InductorTemplateData {
+            name: ind.name.clone(),
+            node_i: ind.node_i,
+            node_j: ind.node_j,
+            g_eq: if with_g_eq {
+                fmt_f64(ind.g_eq)
+            } else {
+                String::new()
+            },
+        })
+        .collect()
+}
+
+/// Emit a section banner comment.
+fn section_banner(title: &str) -> String {
+    format!(
+        "// =============================================================================\n\
+         // {}\n\
+         // =============================================================================\n\n",
+        title
+    )
+}
+
+/// Format a slice of f64 as comma-separated full-precision values.
+fn format_f64_slice(values: &[f64]) -> String {
+    values
+        .iter()
+        .map(|v| fmt_f64(*v))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Emit a single `const DEVICE_{n}_{suffix}: f64 = ...;` line.
+fn emit_device_const(code: &mut String, dev_num: usize, suffix: &str, value: f64) {
+    code.push_str(&format!(
+        "const DEVICE_{}_{}: f64 = {};\n",
+        dev_num, suffix, fmt_f64(value)
+    ));
+}
+
 // Embed templates at compile time — no runtime file loading.
 const TMPL_HEADER: &str = include_str!("../../templates/rust/header.rs.tera");
 const TMPL_CONSTANTS: &str = include_str!("../../templates/rust/constants.rs.tera");
@@ -129,97 +203,36 @@ impl RustEmitter {
         ctx.insert("n", &n);
         ctx.insert("m", &m);
 
-        // Inductor data
         let num_inductors = ir.inductors.len();
         ctx.insert("num_inductors", &num_inductors);
         if num_inductors > 0 {
-            // Build inductor data with g_eq formatted to full precision
-            let inductors_data: Vec<InductorTemplateData> = ir.inductors.iter().map(|ind| {
-                InductorTemplateData {
-                    name: ind.name.clone(),
-                    node_i: ind.node_i,
-                    node_j: ind.node_j,
-                    g_eq: format!("{:.17e}", ind.g_eq),
-                }
-            }).collect();
-            ctx.insert("inductors", &inductors_data);
+            ctx.insert("inductors", &inductor_template_data(ir, true));
         }
         ctx.insert(
             "sample_rate",
             &format!("{:.1}", ir.solver_config.sample_rate),
         );
-        ctx.insert("alpha", &format!("{:.17e}", ir.solver_config.alpha));
+        ctx.insert("alpha", &fmt_f64(ir.solver_config.alpha));
         ctx.insert("input_node", &ir.solver_config.input_node);
         ctx.insert("output_node", &ir.solver_config.output_node);
-        ctx.insert(
-            "input_resistance",
-            &format!("{:.17e}", ir.solver_config.input_resistance),
-        );
+        ctx.insert("input_resistance", &fmt_f64(ir.solver_config.input_resistance));
         ctx.insert("has_dc_sources", &ir.has_dc_sources);
 
-        // S matrix rows
-        let s_rows: Vec<String> = (0..n)
-            .map(|i| {
-                (0..n)
-                    .map(|j| format!("{:.17e}", ir.s(i, j)))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            })
-            .collect();
-        ctx.insert("s_rows", &s_rows);
+        ctx.insert("s_rows", &format_matrix_rows(n, n, |i, j| ir.s(i, j)));
+        ctx.insert("a_neg_rows", &format_matrix_rows(n, n, |i, j| ir.a_neg(i, j)));
 
-        // A_neg matrix rows
-        let a_neg_rows: Vec<String> = (0..n)
-            .map(|i| {
-                (0..n)
-                    .map(|j| format!("{:.17e}", ir.a_neg(i, j)))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            })
-            .collect();
-        ctx.insert("a_neg_rows", &a_neg_rows);
-
-        // RHS_CONST
         if ir.has_dc_sources {
             let rhs_const_values = (0..n)
-                .map(|i| format!("{:.17e}", ir.matrices.rhs_const[i]))
+                .map(|i| fmt_f64(ir.matrices.rhs_const[i]))
                 .collect::<Vec<_>>()
                 .join(", ");
             ctx.insert("rhs_const_values", &rhs_const_values);
         }
 
-        // K matrix rows
-        let k_rows: Vec<String> = (0..m)
-            .map(|i| {
-                (0..m)
-                    .map(|j| format!("{:.17e}", ir.k(i, j)))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            })
-            .collect();
-        ctx.insert("k_rows", &k_rows);
-
-        // N_v matrix rows
-        let n_v_rows: Vec<String> = (0..m)
-            .map(|i| {
-                (0..n)
-                    .map(|j| format!("{:.17e}", ir.n_v(i, j)))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            })
-            .collect();
-        ctx.insert("n_v_rows", &n_v_rows);
-
-        // N_i matrix rows (transposed: N_I[device][node] = n_i[node][device])
-        let n_i_rows: Vec<String> = (0..m)
-            .map(|i| {
-                (0..n)
-                    .map(|j| format!("{:.17e}", ir.n_i(j, i)))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            })
-            .collect();
-        ctx.insert("n_i_rows", &n_i_rows);
+        ctx.insert("k_rows", &format_matrix_rows(m, m, |i, j| ir.k(i, j)));
+        ctx.insert("n_v_rows", &format_matrix_rows(m, n, |i, j| ir.n_v(i, j)));
+        // N_i transposed: N_I[device][node] = n_i[node][device]
+        ctx.insert("n_i_rows", &format_matrix_rows(m, n, |i, j| ir.n_i(j, i)));
 
         self.render("constants", &ctx)
     }
@@ -230,17 +243,14 @@ impl RustEmitter {
         ctx.insert("num_inductors", &ir.inductors.len());
         ctx.insert("num_pots", &ir.pots.len());
 
-        // Pot default resistances (nominal = 1/g_nominal)
-        let pot_defaults: Vec<String> = ir.pots.iter().map(|p| {
-            format!("{:.17e}", 1.0 / p.g_nominal)
-        }).collect();
+        let pot_defaults: Vec<String> = ir.pots.iter().map(|p| fmt_f64(1.0 / p.g_nominal)).collect();
         ctx.insert("pot_defaults", &pot_defaults);
 
         if ir.has_dc_op {
             let dc_op_values = ir
                 .dc_operating_point
                 .iter()
-                .map(|v| format!("{:.17e}", v))
+                .map(|v| fmt_f64(*v))
                 .collect::<Vec<_>>()
                 .join(", ");
             ctx.insert("dc_op_values", &dc_op_values);
@@ -250,12 +260,8 @@ impl RustEmitter {
     }
 
     fn emit_device_models(&self, ir: &CircuitIR) -> Result<String, CodegenError> {
-        let mut code = String::new();
-        code.push_str("// =============================================================================\n");
-        code.push_str("// DEVICE MODELS\n");
-        code.push_str("// =============================================================================\n\n");
+        let mut code = section_banner("DEVICE MODELS");
 
-        // Emit per-device constants
         let mut has_diode = false;
         let mut has_bjt = false;
 
@@ -263,33 +269,16 @@ impl RustEmitter {
             match &slot.params {
                 DeviceParams::Diode(dp) => {
                     has_diode = true;
-                    code.push_str(&format!(
-                        "const DEVICE_{}_IS: f64 = {:.17e};\n",
-                        dev_num, dp.is
-                    ));
-                    code.push_str(&format!(
-                        "const DEVICE_{}_N_VT: f64 = {:.17e};\n\n",
-                        dev_num, dp.n_vt
-                    ));
+                    emit_device_const(&mut code, dev_num, "IS", dp.is);
+                    emit_device_const(&mut code, dev_num, "N_VT", dp.n_vt);
+                    code.push('\n');
                 }
                 DeviceParams::Bjt(bp) => {
                     has_bjt = true;
-                    code.push_str(&format!(
-                        "const DEVICE_{}_IS: f64 = {:.17e};\n",
-                        dev_num, bp.is
-                    ));
-                    code.push_str(&format!(
-                        "const DEVICE_{}_VT: f64 = {:.17e};\n",
-                        dev_num, bp.vt
-                    ));
-                    code.push_str(&format!(
-                        "const DEVICE_{}_BETA_F: f64 = {:.17e};\n",
-                        dev_num, bp.beta_f
-                    ));
-                    code.push_str(&format!(
-                        "const DEVICE_{}_BETA_R: f64 = {:.17e};\n",
-                        dev_num, bp.beta_r
-                    ));
+                    emit_device_const(&mut code, dev_num, "IS", bp.is);
+                    emit_device_const(&mut code, dev_num, "VT", bp.vt);
+                    emit_device_const(&mut code, dev_num, "BETA_F", bp.beta_f);
+                    emit_device_const(&mut code, dev_num, "BETA_R", bp.beta_r);
                     let sign = if bp.is_pnp { -1.0 } else { 1.0 };
                     code.push_str(&format!(
                         "const DEVICE_{}_SIGN: f64 = {:.1};\n\n",
@@ -299,7 +288,6 @@ impl RustEmitter {
             }
         }
 
-        // Emit parameterized device functions (once per type used)
         if has_diode {
             code.push_str(&self.render("device_diode", &Context::new())?);
         }
@@ -314,53 +302,30 @@ impl RustEmitter {
         if ir.pots.is_empty() {
             return String::new();
         }
-        let n = ir.topology.n;
         let m = ir.topology.m;
-        let mut code = String::new();
-        code.push_str("// =============================================================================\n");
-        code.push_str("// POTENTIOMETER CONSTANTS (Sherman-Morrison precomputed vectors)\n");
-        code.push_str("// =============================================================================\n\n");
+        let mut code = section_banner("POTENTIOMETER CONSTANTS (Sherman-Morrison precomputed vectors)");
 
         for (idx, pot) in ir.pots.iter().enumerate() {
-            // SU vector
-            let su_values = pot.su.iter()
-                .map(|v| format!("{:.17e}", v))
-                .collect::<Vec<_>>()
-                .join(", ");
+            let su_values = format_f64_slice(&pot.su);
             code.push_str(&format!(
                 "const POT_{}_SU: [f64; N] = [{}];\n", idx, su_values
             ));
-
-            // USU scalar
             code.push_str(&format!(
-                "const POT_{}_USU: f64 = {:.17e};\n", idx, pot.usu
+                "const POT_{}_USU: f64 = {};\n", idx, fmt_f64(pot.usu)
+            ));
+            code.push_str(&format!(
+                "const POT_{}_G_NOM: f64 = {};\n", idx, fmt_f64(pot.g_nominal)
             ));
 
-            // G_NOM
-            code.push_str(&format!(
-                "const POT_{}_G_NOM: f64 = {:.17e};\n", idx, pot.g_nominal
-            ));
-
-            // NV_SU vector (only if M > 0)
             if m > 0 {
-                let nv_su_values = pot.nv_su.iter()
-                    .map(|v| format!("{:.17e}", v))
-                    .collect::<Vec<_>>()
-                    .join(", ");
                 code.push_str(&format!(
-                    "const POT_{}_NV_SU: [f64; M] = [{}];\n", idx, nv_su_values
+                    "const POT_{}_NV_SU: [f64; M] = [{}];\n", idx, format_f64_slice(&pot.nv_su)
                 ));
-
-                let u_ni_values = pot.u_ni.iter()
-                    .map(|v| format!("{:.17e}", v))
-                    .collect::<Vec<_>>()
-                    .join(", ");
                 code.push_str(&format!(
-                    "const POT_{}_U_NI: [f64; M] = [{}];\n", idx, u_ni_values
+                    "const POT_{}_U_NI: [f64; M] = [{}];\n", idx, format_f64_slice(&pot.u_ni)
                 ));
             }
 
-            // Node indices (0-indexed into v arrays)
             if pot.node_p > 0 {
                 code.push_str(&format!(
                     "const POT_{}_NODE_P: usize = {};\n", idx, pot.node_p - 1
@@ -373,12 +338,11 @@ impl RustEmitter {
             }
 
             code.push_str(&format!(
-                "const POT_{}_MIN_R: f64 = {:.17e};\n", idx, pot.min_resistance
+                "const POT_{}_MIN_R: f64 = {};\n", idx, fmt_f64(pot.min_resistance)
             ));
             code.push_str(&format!(
-                "const POT_{}_MAX_R: f64 = {:.17e};\n", idx, pot.max_resistance
+                "const POT_{}_MAX_R: f64 = {};\n", idx, fmt_f64(pot.max_resistance)
             ));
-            let _ = n; // used for SU array size above
             code.push('\n');
         }
         code
@@ -388,33 +352,22 @@ impl RustEmitter {
         if ir.pots.is_empty() {
             return String::new();
         }
-        let mut code = String::new();
-        code.push_str("// =============================================================================\n");
-        code.push_str("// POTENTIOMETER SM SCALE HELPERS\n");
-        code.push_str("// =============================================================================\n\n");
+        let mut code = section_banner("POTENTIOMETER SM SCALE HELPERS");
 
-        for (idx, pot) in ir.pots.iter().enumerate() {
-            code.push_str(&format!("/// Sherman-Morrison scale factor for pot {}\n", idx));
-            code.push_str("#[inline(always)]\n");
+        for (idx, _pot) in ir.pots.iter().enumerate() {
             code.push_str(&format!(
-                "fn sm_scale_{}(state: &CircuitState) -> (f64, f64) {{\n", idx
+                "/// Sherman-Morrison scale factor for pot {idx}\n\
+                 #[inline(always)]\n\
+                 fn sm_scale_{idx}(state: &CircuitState) -> (f64, f64) {{\n\
+                 \x20   let r = state.pot_{idx}_resistance;\n\
+                 \x20   if !r.is_finite() {{ return (0.0, 0.0); }}\n\
+                 \x20   let r = r.clamp(POT_{idx}_MIN_R, POT_{idx}_MAX_R);\n\
+                 \x20   let delta_g = 1.0 / r - POT_{idx}_G_NOM;\n\
+                 \x20   let denom = 1.0 + delta_g * POT_{idx}_USU;\n\
+                 \x20   let scale = if denom.abs() > 1e-15 {{ delta_g / denom }} else {{ 0.0 }};\n\
+                 \x20   (delta_g, scale)\n\
+                 }}\n\n",
             ));
-            code.push_str(&format!(
-                "    let r = state.pot_{}_resistance;\n    if !r.is_finite() {{ return (0.0, 0.0); }}\n    let r = r.clamp(POT_{}_MIN_R, POT_{}_MAX_R);\n",
-                idx, idx, idx
-            ));
-            code.push_str(&format!(
-                "    let delta_g = 1.0 / r - POT_{}_G_NOM;\n", idx
-            ));
-            code.push_str(&format!(
-                "    let denom = 1.0 + delta_g * POT_{}_USU;\n", idx
-            ));
-            code.push_str(
-                "    let scale = if denom.abs() > 1e-15 { delta_g / denom } else { 0.0 };\n"
-            );
-            code.push_str("    (delta_g, scale)\n");
-            code.push_str("}\n\n");
-            let _ = pot; // used above
         }
         code
     }
@@ -426,19 +379,10 @@ impl RustEmitter {
 
         ctx.insert("has_dc_sources", &ir.has_dc_sources);
 
-        // Inductor data for history current injection
         let num_inductors = ir.inductors.len();
         ctx.insert("num_inductors", &num_inductors);
         if num_inductors > 0 {
-            let inductors_data: Vec<InductorTemplateData> = ir.inductors.iter().map(|ind| {
-                InductorTemplateData {
-                    name: ind.name.clone(),
-                    node_i: ind.node_i,
-                    node_j: ind.node_j,
-                    g_eq: String::new(), // not needed for build_rhs
-                }
-            }).collect();
-            ctx.insert("inductors", &inductors_data);
+            ctx.insert("inductors", &inductor_template_data(ir, false));
         }
 
         // A_neg * v_prev lines
@@ -542,7 +486,7 @@ impl RustEmitter {
                     if (abs_val - 1.0).abs() < 1e-15 {
                         extract_lines.push_str(&format!("v_pred[{}]", j));
                     } else {
-                        extract_lines.push_str(&format!("{:.17e} * v_pred[{}]", abs_val, j));
+                        extract_lines.push_str(&format!("{} * v_pred[{}]", fmt_f64(abs_val), j));
                     }
                     first = false;
                 }
@@ -585,7 +529,7 @@ impl RustEmitter {
                     s_ni_ij += ir.s(i, k) * ir.n_i(k, j);
                 }
                 if s_ni_ij != 0.0 {
-                    voltage_lines.push_str(&format!(" + {:.17e} * di{}", s_ni_ij, j));
+                    voltage_lines.push_str(&format!(" + {} * di{}", fmt_f64(s_ni_ij), j));
                 }
             }
             voltage_lines.push_str(",\n");
@@ -604,23 +548,12 @@ impl RustEmitter {
         let num_inductors = ir.inductors.len();
         ctx.insert("num_inductors", &num_inductors);
         if num_inductors > 0 {
-            let inductors_data: Vec<InductorTemplateData> = ir.inductors.iter().map(|ind| {
-                InductorTemplateData {
-                    name: ind.name.clone(),
-                    node_i: ind.node_i,
-                    node_j: ind.node_j,
-                    g_eq: String::new(),
-                }
-            }).collect();
-            ctx.insert("inductors", &inductors_data);
+            ctx.insert("inductors", &inductor_template_data(ir, false));
         }
 
         let num_pots = ir.pots.len();
         ctx.insert("num_pots", &num_pots);
-        // Pot defaults for sanitization reset
-        let pot_defaults: Vec<String> = ir.pots.iter().map(|p| {
-            format!("{:.17e}", 1.0 / p.g_nominal)
-        }).collect();
+        let pot_defaults: Vec<String> = ir.pots.iter().map(|p| fmt_f64(1.0 / p.g_nominal)).collect();
         ctx.insert("pot_defaults", &pot_defaults);
 
         // Generate pot correction code blocks procedurally
@@ -754,6 +687,44 @@ impl RustEmitter {
 // Procedural NR solver generation (too complex for templates)
 // ============================================================================
 
+/// Emit damped fallback lines for a singular Jacobian: `i_nl[i] -= (fi * 0.5).clamp(...)`.
+fn emit_nr_singular_fallback(code: &mut String, dim: usize, indent: &str) {
+    code.push_str(&format!("{indent}// Singular Jacobian — damped fallback (0.5 * residual)\n"));
+    for i in 0..dim {
+        code.push_str(&format!(
+            "{indent}i_nl[{i}] -= (f{i} * 0.5).clamp(-STEP_CLAMP, STEP_CLAMP);\n"
+        ));
+    }
+}
+
+/// Emit clamp, update, and convergence check for NR delta values.
+///
+/// Assumes `delta0..delta{dim-1}` are already defined. Emits clamping,
+/// `i_nl` update, and early return on convergence.
+fn emit_nr_clamp_and_converge(code: &mut String, dim: usize, indent: &str) {
+    code.push_str(&format!("{indent}// Clamp steps to prevent overshoot\n"));
+    for i in 0..dim {
+        code.push_str(&format!(
+            "{indent}let clamped_delta{i} = delta{i}.clamp(-STEP_CLAMP, STEP_CLAMP);\n"
+        ));
+    }
+    for i in 0..dim {
+        code.push_str(&format!("{indent}i_nl[{i}] -= clamped_delta{i};\n"));
+    }
+    code.push_str(&format!("\n{indent}// Convergence check\n"));
+    code.push_str(&format!("{indent}if "));
+    for i in 0..dim {
+        if i > 0 {
+            code.push_str(" + ");
+        }
+        code.push_str(&format!("clamped_delta{i}.abs()"));
+    }
+    code.push_str(" < TOL {\n");
+    code.push_str(&format!("{indent}    state.last_nr_iterations = iter as u32;\n"));
+    code.push_str(&format!("{indent}    return i_nl;\n"));
+    code.push_str(&format!("{indent}}}\n"));
+}
+
 impl RustEmitter {
     /// Generate solve_nonlinear function using Newton-Raphson.
     ///
@@ -772,9 +743,9 @@ impl RustEmitter {
         code.push_str("/// Solves: i_nl - i_d(p + K*i_nl) = 0\n");
         code.push_str("/// where p = N_v * v_pred is the linear prediction\n");
         code.push_str("#[inline(always)]\n");
-        code.push_str(&format!(
-            "fn solve_nonlinear(p: &[f64; M], state: &mut CircuitState) -> [f64; M] {{\n"
-        ));
+        code.push_str(
+            "fn solve_nonlinear(p: &[f64; M], state: &mut CircuitState) -> [f64; M] {\n"
+        );
         code.push_str(&format!(
             "    const MAX_ITER: usize = {};\n",
             ir.solver_config.max_iterations
@@ -966,69 +937,29 @@ impl RustEmitter {
             // Solve the linear system based on matrix size
             match m {
                 1 => {
-                    code.push_str("        // Solve 1×1 system: J * delta = f\n");
+                    code.push_str("        // Solve 1x1 system: J * delta = f\n");
                     code.push_str("        let det = j00;\n");
                     code.push_str("        if det.abs() < SINGULARITY_THRESHOLD {\n");
-                    code.push_str("            // Singular Jacobian — damped fallback (0.5 * residual)\n");
-                    code.push_str("            i_nl[0] -= (f0 * 0.5).clamp(-STEP_CLAMP, STEP_CLAMP);\n");
+                    emit_nr_singular_fallback(code, 1, "            ");
                     code.push_str("            continue;\n");
                     code.push_str("        }\n");
-                    code.push_str("        let delta0 = f0 / det;\n");
-                    code.push_str("\n");
-                    code.push_str("        // Clamp step to prevent overshoot\n");
-                    code.push_str(
-                        "        let clamped_delta0 = delta0.clamp(-STEP_CLAMP, STEP_CLAMP);\n",
-                    );
-                    code.push_str("        i_nl[0] -= clamped_delta0;\n\n");
-                    code.push_str("        // Convergence check\n");
-                    code.push_str("        if clamped_delta0.abs() < TOL {\n");
-                    code.push_str(
-                        "            state.last_nr_iterations = iter as u32;\n",
-                    );
-                    code.push_str("            return i_nl;\n");
-                    code.push_str("        }\n");
+                    code.push_str("        let delta0 = f0 / det;\n\n");
+                    emit_nr_clamp_and_converge(code, 1, "        ");
                 }
                 2 => {
-                    code.push_str("        // Solve 2×2 system: J * delta = f\n");
-                    code.push_str(
-                        "        let det = j00 * j11 - j01 * j10;\n",
-                    );
+                    code.push_str("        // Solve 2x2 system: J * delta = f (Cramer's rule)\n");
+                    code.push_str("        let det = j00 * j11 - j01 * j10;\n");
                     code.push_str("        if det.abs() < SINGULARITY_THRESHOLD {\n");
-                    code.push_str("            // Singular Jacobian — damped fallback (0.5 * residual)\n");
-                    code.push_str("            i_nl[0] -= (f0 * 0.5).clamp(-STEP_CLAMP, STEP_CLAMP);\n");
-                    code.push_str("            i_nl[1] -= (f1 * 0.5).clamp(-STEP_CLAMP, STEP_CLAMP);\n");
+                    emit_nr_singular_fallback(code, 2, "            ");
                     code.push_str("            continue;\n");
                     code.push_str("        }\n");
                     code.push_str("        let inv_det = 1.0 / det;\n");
-                    code.push_str(
-                        "        let delta0 = inv_det * (j11 * f0 - j01 * f1);\n",
-                    );
-                    code.push_str(
-                        "        let delta1 = inv_det * (-j10 * f0 + j00 * f1);\n",
-                    );
-                    code.push_str("\n");
-                    code.push_str("        // Clamp steps to prevent overshoot\n");
-                    code.push_str(
-                        "        let clamped_delta0 = delta0.clamp(-STEP_CLAMP, STEP_CLAMP);\n",
-                    );
-                    code.push_str(
-                        "        let clamped_delta1 = delta1.clamp(-STEP_CLAMP, STEP_CLAMP);\n",
-                    );
-                    code.push_str("        i_nl[0] -= clamped_delta0;\n");
-                    code.push_str("        i_nl[1] -= clamped_delta1;\n\n");
-                    code.push_str("        // Convergence check\n");
-                    code.push_str("        if clamped_delta0.abs() + clamped_delta1.abs() < TOL {\n");
-                    code.push_str(
-                        "            state.last_nr_iterations = iter as u32;\n",
-                    );
-                    code.push_str("            return i_nl;\n");
-                    code.push_str("        }\n");
+                    code.push_str("        let delta0 = inv_det * (j11 * f0 - j01 * f1);\n");
+                    code.push_str("        let delta1 = inv_det * (-j10 * f0 + j00 * f1);\n\n");
+                    emit_nr_clamp_and_converge(code, 2, "        ");
                 }
-                3 => {
-                    Self::generate_gauss_elim(code, 3);
-                }
-                4 => {
-                    Self::generate_gauss_elim(code, 4);
+                3 | 4 => {
+                    Self::generate_gauss_elim(code, m);
                 }
                 _ => {
                     return Err(CodegenError::UnsupportedTopology(format!(
@@ -1067,116 +998,71 @@ impl RustEmitter {
     /// Generate inline Gaussian elimination for M=3 or M=4.
     fn generate_gauss_elim(code: &mut String, dim: usize) {
         code.push_str(&format!(
-            "        // Solve {}×{} system via inline Gaussian elimination\n",
-            dim, dim
+            "        // Solve {dim}x{dim} system via inline Gaussian elimination\n"
         ));
+
+        // Build augmented matrix [a | b] from Jacobian entries and residuals
         code.push_str("        let mut a = [\n");
         for i in 0..dim {
-            code.push_str("            [");
-            for j in 0..dim {
-                if j > 0 {
-                    code.push_str(", ");
-                }
-                code.push_str(&format!("j{}{}", i, j));
-            }
-            code.push_str("],\n");
+            let row = (0..dim)
+                .map(|j| format!("j{i}{j}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            code.push_str(&format!("            [{row}],\n"));
         }
         code.push_str("        ];\n");
 
-        code.push_str("        let mut b = [");
-        for i in 0..dim {
-            if i > 0 {
-                code.push_str(", ");
-            }
-            code.push_str(&format!("f{}", i));
-        }
-        code.push_str("];\n");
+        let b_init = (0..dim)
+            .map(|i| format!("f{i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        code.push_str(&format!("        let mut b = [{b_init}];\n"));
 
-        code.push_str("        let mut singular = false;\n");
-        code.push_str("        // Forward elimination with partial pivoting\n");
+        // Forward elimination with partial pivoting
         code.push_str(&format!(
-            "        for col in 0..{} {{\n",
-            dim
+            "        let mut singular = false;\n\
+             \x20       // Forward elimination with partial pivoting\n\
+             \x20       for col in 0..{dim} {{\n\
+             \x20           let mut max_row = col;\n\
+             \x20           let mut max_val = a[col][col].abs();\n\
+             \x20           for row in (col+1)..{dim} {{\n\
+             \x20               if a[row][col].abs() > max_val {{\n\
+             \x20                   max_val = a[row][col].abs();\n\
+             \x20                   max_row = row;\n\
+             \x20               }}\n\
+             \x20           }}\n\
+             \x20           if max_val < SINGULARITY_THRESHOLD {{ singular = true; break; }}\n\
+             \x20           if max_row != col {{ a.swap(col, max_row); b.swap(col, max_row); }}\n\
+             \x20           let pivot = a[col][col];\n\
+             \x20           for row in (col+1)..{dim} {{\n\
+             \x20               let factor = a[row][col] / pivot;\n\
+             \x20               for j in (col+1)..{dim} {{ a[row][j] -= factor * a[col][j]; }}\n\
+             \x20               b[row] -= factor * b[col];\n\
+             \x20           }}\n\
+             \x20       }}\n"
         ));
-        code.push_str("            let mut max_row = col;\n");
-        code.push_str("            let mut max_val = a[col][col].abs();\n");
-        code.push_str(&format!(
-            "            for row in (col+1)..{} {{\n",
-            dim
-        ));
-        code.push_str("                if a[row][col].abs() > max_val {\n");
-        code.push_str("                    max_val = a[row][col].abs();\n");
-        code.push_str("                    max_row = row;\n");
-        code.push_str("                }\n");
-        code.push_str("            }\n");
-        code.push_str(
-            "            if max_val < SINGULARITY_THRESHOLD { singular = true; break; }\n",
-        );
-        code.push_str(
-            "            if max_row != col { a.swap(col, max_row); b.swap(col, max_row); }\n",
-        );
-        code.push_str("            let pivot = a[col][col];\n");
-        code.push_str(&format!(
-            "            for row in (col+1)..{} {{\n",
-            dim
-        ));
-        code.push_str("                let factor = a[row][col] / pivot;\n");
-        code.push_str(&format!(
-            "                for j in (col+1)..{} {{ a[row][j] -= factor * a[col][j]; }}\n",
-            dim
-        ));
-        code.push_str("                b[row] -= factor * b[col];\n");
-        code.push_str("            }\n");
-        code.push_str("        }\n");
 
+        // Back substitution
+        code.push_str(&format!(
+            "        if !singular {{\n\
+             \x20           // Back substitution\n\
+             \x20           for i in (0..{dim}).rev() {{\n\
+             \x20               let mut sum = b[i];\n\
+             \x20               for j in (i+1)..{dim} {{ sum -= a[i][j] * b[j]; }}\n\
+             \x20               if a[i][i].abs() < SINGULARITY_THRESHOLD {{ singular = true; break; }}\n\
+             \x20               b[i] = sum / a[i][i];\n\
+             \x20           }}\n\
+             \x20       }}\n"
+        ));
+
+        // Clamp and converge (alias b[i] as delta{i} for the shared helper)
         code.push_str("        if !singular {\n");
-        code.push_str("            // Back substitution\n");
-        code.push_str(&format!(
-            "            for i in (0..{}).rev() {{\n",
-            dim
-        ));
-        code.push_str("                let mut sum = b[i];\n");
-        code.push_str(&format!(
-            "                for j in (i+1)..{} {{ sum -= a[i][j] * b[j]; }}\n",
-            dim
-        ));
-        code.push_str("                if a[i][i].abs() < SINGULARITY_THRESHOLD { singular = true; break; }\n");
-        code.push_str("                b[i] = sum / a[i][i];\n");
-        code.push_str("            }\n");
-        code.push_str("        }\n");
-        code.push_str("        if !singular {\n");
-
         for i in 0..dim {
-            code.push_str(&format!(
-                "            let clamped_delta{} = b[{}].clamp(-STEP_CLAMP, STEP_CLAMP);\n",
-                i, i
-            ));
-            code.push_str(&format!(
-                "            i_nl[{}] -= clamped_delta{};\n",
-                i, i
-            ));
+            code.push_str(&format!("            let delta{i} = b[{i}];\n"));
         }
-
-        code.push_str("            // Convergence check\n");
-        code.push_str("            if ");
-        for i in 0..dim {
-            if i > 0 {
-                code.push_str(" + ");
-            }
-            code.push_str(&format!("clamped_delta{}.abs()", i));
-        }
-        code.push_str(" < TOL {\n");
-        code.push_str("                state.last_nr_iterations = iter as u32;\n");
-        code.push_str("                return i_nl;\n");
-        code.push_str("            }\n");
+        emit_nr_clamp_and_converge(code, dim, "            ");
         code.push_str("        } else {\n");
-        code.push_str("            // Singular Jacobian — damped fallback (0.5 * residual)\n");
-        for i in 0..dim {
-            code.push_str(&format!(
-                "            i_nl[{}] -= (f{} * 0.5).clamp(-STEP_CLAMP, STEP_CLAMP);\n",
-                i, i
-            ));
-        }
+        emit_nr_singular_fallback(code, dim, "            ");
         code.push_str("        }\n");
     }
 }

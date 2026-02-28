@@ -10,6 +10,33 @@ use melange_primitives::nr::{nr_solve_1d, nr_solve_2d};
 use melange_devices::{DiodeShockley, BjtEbersMoll, NonlinearDevice};
 use smallvec::{SmallVec, smallvec};
 
+/// Sanitize an audio input sample: replace NaN/Inf with 0, clamp to [-100, 100].
+fn sanitize_input(input: f64) -> f64 {
+    if input.is_finite() {
+        input.clamp(-100.0, 100.0)
+    } else {
+        0.0
+    }
+}
+
+/// Clamp a raw output voltage to safe audio range [-10, 10], replacing NaN/Inf with 0.
+fn clamp_output(raw: f64) -> f64 {
+    if raw.is_finite() {
+        raw.clamp(-10.0, 10.0)
+    } else {
+        0.0
+    }
+}
+
+/// Reset all inductor companion model state to zero.
+fn reset_inductors(inductors: &mut [crate::dk::InductorInfo]) {
+    for ind in inductors {
+        ind.i_hist = 0.0;
+        ind.i_prev = 0.0;
+        ind.v_prev = 0.0;
+    }
+}
+
 /// Nonlinear device interface for the solver.
 ///
 /// This abstracts over the specific device types from melange-devices.
@@ -183,6 +210,44 @@ impl DeviceEntry {
             DeviceEntry::DiodeWithRs { device, .. } => device.current_at(v),
             DeviceEntry::Led { device, .. } => device.current(&[v]),
             DeviceEntry::Bjt { .. } => panic!("current_1d called on 2D device"),
+        }
+    }
+
+    /// Write device currents from `v_nl` into `i_nl` at this device's start index.
+    ///
+    /// Reads voltages from `v_nl[start_idx..]` and writes currents to `i_nl[start_idx..]`.
+    fn write_currents(&self, v_nl: &[f64], i_nl: &mut [f64]) {
+        let s = self.start_idx();
+        match self.dimension() {
+            1 => {
+                i_nl[s] = self.currents(&[v_nl[s]])[0];
+            }
+            2 => {
+                let currents = self.currents(&[v_nl[s], v_nl[s + 1]]);
+                i_nl[s] = currents[0];
+                i_nl[s + 1] = currents[1];
+            }
+            _ => unreachable!("unsupported device dimension"),
+        }
+    }
+
+    /// Write device Jacobian entries into a flat M*M matrix `g_dev` (row-major).
+    ///
+    /// Only writes the block-diagonal entries for this device.
+    fn write_jacobian(&self, v_nl: &[f64], g_dev: &mut [f64], m: usize) {
+        let s = self.start_idx();
+        match self.dimension() {
+            1 => {
+                g_dev[s * m + s] = self.jacobian(&[v_nl[s]])[0];
+            }
+            2 => {
+                let jac = self.jacobian(&[v_nl[s], v_nl[s + 1]]);
+                g_dev[s * m + s] = jac[0];
+                g_dev[s * m + s + 1] = jac[1];
+                g_dev[(s + 1) * m + s] = jac[2];
+                g_dev[(s + 1) * m + s + 1] = jac[3];
+            }
+            _ => unreachable!("unsupported device dimension"),
         }
     }
 }
@@ -387,41 +452,26 @@ impl CircuitSolver {
     ///
     /// Uses pre-allocated buffers - no heap allocation.
     pub fn process_sample(&mut self, input: f64) -> f64 {
-        // Validate input - handle NaN, inf, and extreme values
-        let input = if input.is_finite() {
-            // Clamp to reasonable audio range (±100V is plenty for any audio circuit)
-            input.clamp(-100.0, 100.0)
-        } else {
-            0.0
-        };
-        
-        // Build RHS from history (into pre-allocated buffer)
-        self.build_rhs(input);
+        let input = sanitize_input(input);
 
-        // Linear prediction (into pre-allocated buffer)
+        self.build_rhs(input);
         self.predict();
 
         // Extract predicted nonlinear voltages: p = N_v * v_pred
         self.kernel.extract_prediction_into(&self.v_pred, &mut self.p);
 
         // Solve for nonlinear voltages/currents
-        if self.kernel.m == 0 {
-            // Linear circuit - nothing to do
-        } else if self.all_devices_1d() && self.devices.len() == 1 {
-            // Single 1D device - use 1D NR
-            self.solve_1d();
-        } else if self.all_devices_1d() && self.devices.len() == 2 {
-            // Two 1D devices - use 2D NR
-            self.solve_2d_two_1d_devices();
-        } else {
-            // General case - use M-dimensional NR
-            self.solve_md();
+        if self.kernel.m > 0 {
+            if self.all_devices_1d() && self.devices.len() == 1 {
+                self.solve_1d();
+            } else if self.all_devices_1d() && self.devices.len() == 2 {
+                self.solve_2d_two_1d_devices();
+            } else {
+                self.solve_md();
+            }
         }
 
-        // Compute final nonlinear currents for all devices
         self.compute_all_currents();
-
-        // Update node voltages: v = v_pred + S * N_i * i_nl
         self.update_voltage();
 
         // Save state for next sample
@@ -430,36 +480,23 @@ impl CircuitSolver {
         std::mem::swap(&mut self.i_nl_prev, &mut self.i_nl);
 
         // Sanitize state BEFORE updating inductors: if any value is NaN/inf,
-        // reset to zero to prevent one bad sample from poisoning inductor
-        // history and all future output
+        // reset to zero to prevent one bad sample from poisoning all future output
         if self.v_prev.iter().any(|v| !v.is_finite()) {
             self.v_prev.fill(0.0);
             self.v_nl_prev.fill(0.0);
             self.i_nl_prev.fill(0.0);
             self.input_prev = 0.0;
-            for ind in &mut self.kernel.inductors {
-                ind.i_hist = 0.0;
-                ind.i_prev = 0.0;
-                ind.v_prev = 0.0;
-            }
+            reset_inductors(&mut self.kernel.inductors);
         }
 
-        // Update inductor companion model state
         self.kernel.update_inductors(&self.v_prev);
 
-        // Return output with safety clamping
         let raw = if self.output_node < self.kernel.n {
             self.v_prev[self.output_node]
         } else {
             0.0
         };
-
-        // Clamp to safe audio range — prevents speaker damage and DAW safety trips
-        if raw.is_finite() {
-            raw.clamp(-10.0, 10.0)
-        } else {
-            0.0
-        }
+        clamp_output(raw)
     }
 
     /// Check if all devices are 1-dimensional.
@@ -544,20 +581,8 @@ impl CircuitSolver {
             self.clamp,
         );
 
-        // Check for divergence - if NR failed, use previous sample for continuity
-        let v_final = match result {
-            melange_primitives::nr::NrResult::Converged { .. } => v_nl,
-            melange_primitives::nr::NrResult::MaxIterations { .. } => {
-                // Use previous sample's solution for continuity (no audible clicks)
-                self.v_nl_prev[0]
-            }
-            melange_primitives::nr::NrResult::Divergence => {
-                // Use previous sample's solution for continuity
-                self.v_nl_prev[0]
-            }
-        };
-
-        self.v_nl[0] = v_final;
+        // On convergence use the NR result; on failure fall back to previous for continuity
+        self.v_nl[0] = if result.converged() { v_nl } else { self.v_nl_prev[0] };
     }
 
     /// Solve two 1D nonlinear devices (2D system).
@@ -619,20 +644,13 @@ impl CircuitSolver {
             self.clamp,
         );
 
-        match result {
-            melange_primitives::nr::NrResult::Converged { .. } => {
-                self.v_nl[0] = v1;
-                self.v_nl[1] = v2;
-            }
-            melange_primitives::nr::NrResult::MaxIterations { .. } => {
-                // Use previous sample's solution for continuity (no audible clicks)
-                self.v_nl[0] = self.v_nl_prev[0];
-                self.v_nl[1] = self.v_nl_prev[1];
-            }
-            melange_primitives::nr::NrResult::Divergence => {
-                self.v_nl[0] = self.v_nl_prev[0];
-                self.v_nl[1] = self.v_nl_prev[1];
-            }
+        // On convergence use the NR result; on failure fall back to previous for continuity
+        if result.converged() {
+            self.v_nl[0] = v1;
+            self.v_nl[1] = v2;
+        } else {
+            self.v_nl[0] = self.v_nl_prev[0];
+            self.v_nl[1] = self.v_nl_prev[1];
         }
     }
 
@@ -645,10 +663,8 @@ impl CircuitSolver {
     fn solve_md(&mut self) {
         let m = self.kernel.m;
 
-        // Initialize with warm start
-        for i in 0..m {
-            self.v_nl[i] = self.v_nl_prev[i];
-        }
+        // Warm start from previous solution
+        self.v_nl[..m].copy_from_slice(&self.v_nl_prev[..m]);
 
         // Newton-Raphson iteration
         for _ in 0..self.max_iter {
@@ -657,21 +673,7 @@ impl CircuitSolver {
             // Compute all device currents into pre-allocated buffer
             self.i_nl_temp.fill(0.0);
             for device in &self.devices {
-                let start_idx = device.start_idx();
-                match device.dimension() {
-                    1 => {
-                        let v = [self.v_nl[start_idx]];
-                        let currents = device.currents(&v);
-                        self.i_nl_temp[start_idx] = currents[0];
-                    }
-                    2 => {
-                        let v = [self.v_nl[start_idx], self.v_nl[start_idx + 1]];
-                        let currents = device.currents(&v);
-                        self.i_nl_temp[start_idx] = currents[0];
-                        self.i_nl_temp[start_idx + 1] = currents[1];
-                    }
-                    _ => unreachable!("unsupported device dimension"),
-                }
+                device.write_currents(&self.v_nl, &mut self.i_nl_temp);
             }
 
             // Compute residual: r[i] = v_nl[i] - p[i] - sum_j(K[i][j] * i_nl[j])
@@ -695,21 +697,7 @@ impl CircuitSolver {
             // Build block-diagonal device Jacobian G[k][j] = di_nl[k]/dv_nl[j]
             self.g_dev.fill(0.0);
             for device in &self.devices {
-                let s = device.start_idx();
-                match device.dimension() {
-                    1 => {
-                        let jac = device.jacobian(&[self.v_nl[s]]);
-                        self.g_dev[s * m + s] = jac[0];
-                    }
-                    2 => {
-                        let jac = device.jacobian(&[self.v_nl[s], self.v_nl[s + 1]]);
-                        self.g_dev[s * m + s] = jac[0];             // dI0/dV0
-                        self.g_dev[s * m + s + 1] = jac[1];         // dI0/dV1
-                        self.g_dev[(s + 1) * m + s] = jac[2];       // dI1/dV0
-                        self.g_dev[(s + 1) * m + s + 1] = jac[3];   // dI1/dV1
-                    }
-                    _ => unreachable!("unsupported device dimension"),
-                }
+                device.write_jacobian(&self.v_nl, &mut self.g_dev, m);
             }
 
             // Build full NR Jacobian: J[i][j] = delta_ij - sum_k K[i][k] * G[k][j]
@@ -760,24 +748,10 @@ impl CircuitSolver {
         }
     }
 
-    /// Compute all device currents.
+    /// Compute all device currents from v_nl into i_nl.
     fn compute_all_currents(&mut self) {
         for device in &self.devices {
-            let start_idx = device.start_idx();
-            match device.dimension() {
-                1 => {
-                    let v = [self.v_nl[start_idx]];
-                    let currents = device.currents(&v);
-                    self.i_nl[start_idx] = currents[0];
-                }
-                2 => {
-                    let v = [self.v_nl[start_idx], self.v_nl[start_idx + 1]];
-                    let currents = device.currents(&v);
-                    self.i_nl[start_idx] = currents[0];
-                    self.i_nl[start_idx + 1] = currents[1];
-                }
-                _ => unreachable!("unsupported device dimension"),
-            }
+            device.write_currents(&self.v_nl, &mut self.i_nl);
         }
     }
 
@@ -794,11 +768,7 @@ impl CircuitSolver {
         self.v_nl_prev.fill(0.0);
         self.i_nl_prev.fill(0.0);
         self.input_prev = 0.0;
-        for ind in &mut self.kernel.inductors {
-            ind.i_hist = 0.0;
-            ind.i_prev = 0.0;
-            ind.v_prev = 0.0;
-        }
+        reset_inductors(&mut self.kernel.inductors);
     }
 
     /// Process a block of samples.
@@ -846,16 +816,10 @@ impl LinearSolver {
     /// Process a single sample.
     #[allow(clippy::needless_range_loop)]
     pub fn process_sample(&mut self, input: f64) -> f64 {
-        // Validate input - handle NaN, inf, and extreme values
-        let input = if input.is_finite() {
-            input.clamp(-100.0, 100.0)
-        } else {
-            0.0
-        };
-
+        let input = sanitize_input(input);
         let n = self.kernel.n;
 
-        // Build RHS: A_neg * v_prev + 2*input
+        // Build RHS: rhs_const + A_neg * v_prev
         for i in 0..n {
             let mut sum = self.kernel.rhs_const[i];
             let a_neg_row_offset = i * n;
@@ -876,8 +840,7 @@ impl LinearSolver {
             }
         }
 
-        // Add input source (Thevenin: V_in through R_in)
-        // Trapezoidal rule: contribution is (V_in(n+1) + V_in(n)) * G_in
+        // Add input source (Thevenin: V_in through R_in, trapezoidal rule)
         if self.input_node < n {
             self.rhs[self.input_node] += (input + self.input_prev) * self.input_conductance;
         }
@@ -893,46 +856,30 @@ impl LinearSolver {
             self.v_pred[i] = sum;
         }
 
-        // Swap v_prev and v_pred
         std::mem::swap(&mut self.v_prev, &mut self.v_pred);
 
         // Sanitize state BEFORE updating inductors to prevent NaN poisoning
         if self.v_prev.iter().any(|v| !v.is_finite()) {
             self.v_prev.fill(0.0);
             self.input_prev = 0.0;
-            for ind in &mut self.kernel.inductors {
-                ind.i_hist = 0.0;
-                ind.i_prev = 0.0;
-                ind.v_prev = 0.0;
-            }
+            reset_inductors(&mut self.kernel.inductors);
         }
 
-        // Update inductor companion model state
         self.kernel.update_inductors(&self.v_prev);
 
-        // Return output with safety clamping
         let raw = if self.output_node < n {
             self.v_prev[self.output_node]
         } else {
             0.0
         };
-
-        if raw.is_finite() {
-            raw.clamp(-10.0, 10.0)
-        } else {
-            0.0
-        }
+        clamp_output(raw)
     }
 
     /// Reset solver state.
     pub fn reset(&mut self) {
         self.v_prev.fill(0.0);
         self.input_prev = 0.0;
-        for ind in &mut self.kernel.inductors {
-            ind.i_hist = 0.0;
-            ind.i_prev = 0.0;
-            ind.v_prev = 0.0;
-        }
+        reset_inductors(&mut self.kernel.inductors);
     }
 }
 

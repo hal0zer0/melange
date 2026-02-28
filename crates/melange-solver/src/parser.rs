@@ -142,16 +142,27 @@ impl Element {
     /// Get the element name.
     pub fn name(&self) -> &str {
         match self {
-            Element::Resistor { name, .. } => name,
-            Element::Capacitor { name, .. } => name,
-            Element::Inductor { name, .. } => name,
-            Element::VoltageSource { name, .. } => name,
-            Element::CurrentSource { name, .. } => name,
-            Element::Diode { name, .. } => name,
-            Element::Bjt { name, .. } => name,
-            Element::Jfet { name, .. } => name,
-            Element::Mosfet { name, .. } => name,
-            Element::SubcktInstance { name, .. } => name,
+            Element::Resistor { name, .. }
+            | Element::Capacitor { name, .. }
+            | Element::Inductor { name, .. }
+            | Element::VoltageSource { name, .. }
+            | Element::CurrentSource { name, .. }
+            | Element::Diode { name, .. }
+            | Element::Bjt { name, .. }
+            | Element::Jfet { name, .. }
+            | Element::Mosfet { name, .. }
+            | Element::SubcktInstance { name, .. } => name,
+        }
+    }
+
+    /// Get the referenced model name, if this is a device that requires a `.model` card.
+    pub fn model_name(&self) -> Option<&str> {
+        match self {
+            Element::Diode { model, .. }
+            | Element::Bjt { model, .. }
+            | Element::Jfet { model, .. }
+            | Element::Mosfet { model, .. } => Some(model),
+            _ => None,
         }
     }
 }
@@ -270,53 +281,27 @@ impl Parser {
             }
         }
 
-        // Post-parse validation: verify all .pot directives reference existing resistors
-        // (deferred so .pot can appear before the resistor in the netlist)
-        for pot in &netlist.pots {
-            let resistor_exists = netlist.elements.iter().any(|e| {
-                matches!(e, Element::Resistor { name, .. } if name.eq_ignore_ascii_case(&pot.resistor_name))
-            });
-            if !resistor_exists {
+        Self::validate_netlist(&netlist)?;
+        Ok(netlist)
+    }
+
+    /// Post-parse validation: duplicate names, model references, pot targets.
+    fn validate_netlist(netlist: &Netlist) -> Result<(), ParseError> {
+        // Check for duplicate component names (case-insensitive)
+        let mut seen_names = std::collections::HashSet::new();
+        for elem in &netlist.elements {
+            if !seen_names.insert(elem.name().to_ascii_lowercase()) {
                 return Err(ParseError {
                     line: 0,
-                    message: format!(
-                        ".pot references resistor '{}' which was not found in the netlist",
-                        pot.resistor_name
-                    ),
+                    message: format!("Duplicate component name: '{}'", elem.name()),
                 });
             }
         }
 
-        // Post-parse validation: check for duplicate component names (case-insensitive)
-        {
-            let mut seen_names = std::collections::HashSet::new();
-            for elem in &netlist.elements {
-                let name_lower = elem.name().to_ascii_lowercase();
-                if !seen_names.insert(name_lower) {
-                    return Err(ParseError {
-                        line: 0,
-                        message: format!(
-                            "Duplicate component name: '{}'",
-                            elem.name()
-                        ),
-                    });
-                }
-            }
-        }
-
-        // Post-parse validation: check that devices referencing models have matching .model definitions
+        // Check that devices referencing models have matching .model definitions
         for elem in &netlist.elements {
-            let model_name = match elem {
-                Element::Diode { model, .. } => Some(model),
-                Element::Bjt { model, .. } => Some(model),
-                Element::Jfet { model, .. } => Some(model),
-                Element::Mosfet { model, .. } => Some(model),
-                _ => None,
-            };
-            if let Some(model_ref) = model_name {
-                let model_exists = netlist.models.iter().any(|m| {
-                    m.name.eq_ignore_ascii_case(model_ref)
-                });
+            if let Some(model_ref) = elem.model_name() {
+                let model_exists = netlist.models.iter().any(|m| m.name.eq_ignore_ascii_case(model_ref));
                 if !model_exists {
                     return Err(ParseError {
                         line: 0,
@@ -329,7 +314,24 @@ impl Parser {
             }
         }
 
-        Ok(netlist)
+        // Verify all .pot directives reference existing resistors
+        // (deferred so .pot can appear before the resistor in the netlist)
+        for pot in &netlist.pots {
+            let exists = netlist.elements.iter().any(|e| {
+                matches!(e, Element::Resistor { name, .. } if name.eq_ignore_ascii_case(&pot.resistor_name))
+            });
+            if !exists {
+                return Err(ParseError {
+                    line: 0,
+                    message: format!(
+                        ".pot references resistor '{}' which was not found in the netlist",
+                        pot.resistor_name
+                    ),
+                });
+            }
+        }
+
+        Ok(())
     }
 
     fn next_line(&mut self) -> Option<String> {
@@ -358,9 +360,7 @@ impl Parser {
 
         match parts[0].to_lowercase().as_str() {
             ".model" => {
-                if parts.len() < 3 {
-                    return Err(self.error(".model requires name and type"));
-                }
+                self.require_parts(&parts, 3, "name and type")?;
                 let model = self.parse_model(&parts)?;
                 netlist.models.push(model);
             }
@@ -369,9 +369,7 @@ impl Parser {
                 netlist.params.push(param);
             }
             ".subckt" => {
-                if parts.len() < 2 {
-                    return Err(self.error(".subckt requires a name"));
-                }
+                self.require_parts(&parts, 2, "a name")?;
                 let subckt_name = parts[1].to_string();
                 let subckt_nodes: Vec<String> = parts[2..].iter().map(|s| s.to_string()).collect();
                 let mut subckt_elements = Vec::new();
@@ -456,32 +454,23 @@ impl Parser {
     }
 
     fn parse_param(&self, parts: &[&str]) -> Result<Parameter, ParseError> {
-        // .param name=value
-        if parts.len() < 2 {
-            return Err(self.error(".param requires name=value"));
-        }
-
+        self.require_parts(parts, 2, "name=value")?;
         let param_str = parts[1];
-        if let Some(eq_pos) = param_str.find('=') {
-            let name = param_str[..eq_pos].to_string();
-            let value_str = &param_str[eq_pos + 1..];
-            let value = parse_value(value_str)
-                .map_err(|_| self.error(format!("Invalid parameter value: {}", value_str)))?;
-            Ok(Parameter { name, value })
-        } else {
-            Err(self.error("Parameter must be name=value format"))
-        }
+        let eq_pos = param_str.find('=')
+            .ok_or_else(|| self.error("Parameter must be name=value format"))?;
+        let name = param_str[..eq_pos].to_string();
+        let value_str = &param_str[eq_pos + 1..];
+        let value = parse_value(value_str)
+            .map_err(|_| self.error(format!("Invalid parameter value: {}", value_str)))?;
+        Ok(Parameter { name, value })
     }
 
     fn parse_pot_directive(&self, parts: &[&str], netlist: &Netlist) -> Result<PotDirective, ParseError> {
         // .pot Rname min max
-        if parts.len() < 4 {
-            return Err(self.error(".pot requires: .pot Rname min_value max_value"));
-        }
+        self.require_parts(parts, 4, ".pot Rname min_value max_value")?;
 
         let resistor_name = parts[1].to_string();
 
-        // Validate that the resistor name starts with 'R' or 'r'
         if !resistor_name.starts_with('R') && !resistor_name.starts_with('r') {
             return Err(self.error(format!(
                 ".pot target must be a resistor (name starting with R), got '{}'",
@@ -489,45 +478,26 @@ impl Parser {
             )));
         }
 
-        let min_value = parse_value(parts[2])
-            .map_err(|_| self.error(format!("Invalid .pot min value: {}", parts[2])))?;
-        let max_value = parse_value(parts[3])
-            .map_err(|_| self.error(format!("Invalid .pot max value: {}", parts[3])))?;
+        let min_value = self.parse_positive_value(parts[2], ".pot min")?;
+        let max_value = self.parse_positive_value(parts[3], ".pot max")?;
 
-        // Validate values
-        if min_value <= 0.0 || !min_value.is_finite() {
-            return Err(self.error(format!(
-                ".pot min value must be positive and finite, got {}",
-                min_value
-            )));
-        }
-        if max_value <= 0.0 || !max_value.is_finite() {
-            return Err(self.error(format!(
-                ".pot max value must be positive and finite, got {}",
-                max_value
-            )));
-        }
         if min_value >= max_value {
             return Err(self.error(format!(
                 ".pot min ({}) must be less than max ({})",
                 min_value, max_value
             )));
         }
-
-        // Validate: no duplicate pot for the same resistor (case-insensitive)
         if netlist.pots.iter().any(|p| p.resistor_name.eq_ignore_ascii_case(&resistor_name)) {
             return Err(self.error(format!(
                 "Duplicate .pot directive for resistor '{}'",
                 resistor_name
             )));
         }
-
-        // Limit: max 2 pots
         if netlist.pots.len() >= 2 {
             return Err(self.error("Maximum of 2 .pot directives supported"));
         }
 
-        // Note: resistor existence is validated after full parse (order-independent)
+        // Resistor existence is validated after full parse (order-independent)
         Ok(PotDirective {
             resistor_name,
             min_value,
@@ -544,6 +514,28 @@ impl Parser {
             )));
         }
         Ok(())
+    }
+
+    /// Validate minimum field count for a component line.
+    fn require_parts(&self, parts: &[&str], min: usize, description: &str) -> Result<(), ParseError> {
+        if parts.len() < min {
+            return Err(self.error(format!("{} requires: {}", parts.first().unwrap_or(&"?"), description)));
+        }
+        Ok(())
+    }
+
+    /// Parse a component value and validate it is positive and finite.
+    ///
+    /// Used by R, C, L parsers which all require strictly positive values.
+    fn parse_positive_value(&self, raw: &str, component_type: &str) -> Result<f64, ParseError> {
+        let value = parse_value(raw)
+            .map_err(|_| self.error(format!("Invalid {} value: {}", component_type, raw)))?;
+        if value <= 0.0 || !value.is_finite() {
+            return Err(self.error(format!(
+                "{} value must be positive and finite, got {}", component_type, value
+            )));
+        }
+        Ok(value)
     }
 
     fn parse_element(&self, line: &str) -> Result<Element, ParseError> {
@@ -571,17 +563,9 @@ impl Parser {
     }
 
     fn parse_resistor(&self, parts: &[&str]) -> Result<Element, ParseError> {
-        if parts.len() < 4 {
-            return Err(self.error("Resistor requires: Rname n+ n- value"));
-        }
+        self.require_parts(parts, 4, "Rname n+ n- value")?;
         self.check_self_connection(parts[1], parts[2], parts[0])?;
-        let value = parse_value(parts[3])
-            .map_err(|_| self.error(format!("Invalid resistor value: {}", parts[3])))?;
-        if value <= 0.0 || !value.is_finite() {
-            return Err(self.error(format!(
-                "Resistor value must be positive and finite, got {}", value
-            )));
-        }
+        let value = self.parse_positive_value(parts[3], "Resistor")?;
         Ok(Element::Resistor {
             name: parts[0].to_string(),
             n_plus: parts[1].to_string(),
@@ -591,27 +575,15 @@ impl Parser {
     }
 
     fn parse_capacitor(&self, parts: &[&str]) -> Result<Element, ParseError> {
-        if parts.len() < 4 {
-            return Err(self.error("Capacitor requires: Cname n+ n- value"));
-        }
+        self.require_parts(parts, 4, "Cname n+ n- value")?;
         self.check_self_connection(parts[1], parts[2], parts[0])?;
+        let value = self.parse_positive_value(parts[3], "Capacitor")?;
 
-        let value = parse_value(parts[3])
-            .map_err(|_| self.error(format!("Invalid capacitor value: {}", parts[3])))?;
-        if value <= 0.0 || !value.is_finite() {
-            return Err(self.error(format!(
-                "Capacitor value must be positive and finite, got {}", value
-            )));
-        }
-
-        let mut ic = None;
-        for part in &parts[4..] {
-            if part.to_uppercase().starts_with("IC=") {
-                let ic_val = &part[3..];
-                ic = Some(parse_value(ic_val)
-                    .map_err(|_| self.error(format!("Invalid IC value: {}", ic_val)))?);
-            }
-        }
+        let ic = parts[4..].iter()
+            .find(|p| p.to_uppercase().starts_with("IC="))
+            .map(|p| parse_value(&p[3..]))
+            .transpose()
+            .map_err(|_| self.error("Invalid IC value"))?;
 
         Ok(Element::Capacitor {
             name: parts[0].to_string(),
@@ -623,17 +595,9 @@ impl Parser {
     }
 
     fn parse_inductor(&self, parts: &[&str]) -> Result<Element, ParseError> {
-        if parts.len() < 4 {
-            return Err(self.error("Inductor requires: Lname n+ n- value"));
-        }
+        self.require_parts(parts, 4, "Lname n+ n- value")?;
         self.check_self_connection(parts[1], parts[2], parts[0])?;
-        let value = parse_value(parts[3])
-            .map_err(|_| self.error(format!("Invalid inductor value: {}", parts[3])))?;
-        if value <= 0.0 || !value.is_finite() {
-            return Err(self.error(format!(
-                "Inductor value must be positive and finite, got {}", value
-            )));
-        }
+        let value = self.parse_positive_value(parts[3], "Inductor")?;
         Ok(Element::Inductor {
             name: parts[0].to_string(),
             n_plus: parts[1].to_string(),
@@ -643,9 +607,7 @@ impl Parser {
     }
 
     fn parse_voltage_source(&self, parts: &[&str]) -> Result<Element, ParseError> {
-        if parts.len() < 3 {
-            return Err(self.error("Voltage source requires: Vname n+ n-"));
-        }
+        self.require_parts(parts, 3, "Vname n+ n-")?;
 
         let mut dc = None;
         let mut ac = None;
@@ -688,21 +650,18 @@ impl Parser {
     }
 
     fn parse_current_source(&self, parts: &[&str]) -> Result<Element, ParseError> {
-        if parts.len() < 3 {
-            return Err(self.error("Current source requires: Iname n+ n-"));
-        }
+        self.require_parts(parts, 3, "Iname n+ n-")?;
 
-        let mut dc = None;
-
-        if parts.len() >= 4 {
-            if parts[3].to_uppercase() == "DC" && parts.len() >= 5 {
-                dc = Some(parse_value(parts[4])
-                    .map_err(|_| self.error(format!("Invalid DC value: {}", parts[4])))?);
-            } else {
-                dc = Some(parse_value(parts[3])
-                    .map_err(|_| self.error(format!("Invalid DC value: {}", parts[3])))?);
+        let dc = match parts.get(3) {
+            Some(p) if p.to_uppercase() == "DC" => {
+                let val_str = parts.get(4).ok_or_else(|| self.error("DC keyword requires a value"))?;
+                Some(parse_value(val_str)
+                    .map_err(|_| self.error(format!("Invalid DC value: {}", val_str)))?)
             }
-        }
+            Some(p) => Some(parse_value(p)
+                .map_err(|_| self.error(format!("Invalid DC value: {}", p)))?),
+            None => None,
+        };
 
         Ok(Element::CurrentSource {
             name: parts[0].to_string(),
@@ -713,9 +672,7 @@ impl Parser {
     }
 
     fn parse_diode(&self, parts: &[&str]) -> Result<Element, ParseError> {
-        if parts.len() < 4 {
-            return Err(self.error("Diode requires: Dname n+ n- modelname"));
-        }
+        self.require_parts(parts, 4, "Dname n+ n- modelname")?;
         self.check_self_connection(parts[1], parts[2], parts[0])?;
         Ok(Element::Diode {
             name: parts[0].to_string(),
@@ -727,31 +684,19 @@ impl Parser {
 
     fn parse_bjt(&self, parts: &[&str]) -> Result<Element, ParseError> {
         // Qname nc nb ne [ns] modelname
-        if parts.len() < 5 {
-            return Err(self.error("BJT requires: Qname nc nb ne modelname"));
-        }
-        
-        let nc = parts[1].to_string();
-        let nb = parts[2].to_string();
-        let ne = parts[3].to_string();
-        
-        // Model is always the last part
-        // If we have 6+ parts, there's a substrate node before the model
-        let model = parts[parts.len() - 1].to_string();
-
+        self.require_parts(parts, 5, "Qname nc nb ne modelname")?;
+        // Model is always the last part (substrate node, if present, is skipped)
         Ok(Element::Bjt {
             name: parts[0].to_string(),
-            nc,
-            nb,
-            ne,
-            model,
+            nc: parts[1].to_string(),
+            nb: parts[2].to_string(),
+            ne: parts[3].to_string(),
+            model: parts[parts.len() - 1].to_string(),
         })
     }
 
     fn parse_jfet(&self, parts: &[&str]) -> Result<Element, ParseError> {
-        if parts.len() < 5 {
-            return Err(self.error("JFET requires: Jname nd ng ns modelname"));
-        }
+        self.require_parts(parts, 5, "Jname nd ng ns modelname")?;
         Ok(Element::Jfet {
             name: parts[0].to_string(),
             nd: parts[1].to_string(),
@@ -762,9 +707,7 @@ impl Parser {
     }
 
     fn parse_mosfet(&self, parts: &[&str]) -> Result<Element, ParseError> {
-        if parts.len() < 6 {
-            return Err(self.error("MOSFET requires: Mname nd ng ns nb modelname"));
-        }
+        self.require_parts(parts, 6, "Mname nd ng ns nb modelname")?;
         Ok(Element::Mosfet {
             name: parts[0].to_string(),
             nd: parts[1].to_string(),
@@ -776,18 +719,11 @@ impl Parser {
     }
 
     fn parse_subckt_instance(&self, parts: &[&str]) -> Result<Element, ParseError> {
-        if parts.len() < 3 {
-            return Err(self.error("Subcircuit instance requires: Xname nodes... subcktname"));
-        }
-        
-        let name = parts[0].to_string();
-        let subckt = parts[parts.len() - 1].to_string();
-        let nodes = parts[1..parts.len() - 1].iter().map(|s| s.to_string()).collect();
-
+        self.require_parts(parts, 3, "Xname nodes... subcktname")?;
         Ok(Element::SubcktInstance {
-            name,
-            nodes,
-            subckt,
+            name: parts[0].to_string(),
+            nodes: parts[1..parts.len() - 1].iter().map(|s| s.to_string()).collect(),
+            subckt: parts[parts.len() - 1].to_string(),
         })
     }
 }

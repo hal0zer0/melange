@@ -11,7 +11,7 @@
 //! - 1 BJT: M = 2 (Vbe, Vbc)
 //! - 2 diodes + 1 BJT: M = 1 + 1 + 2 = 4
 
-use crate::mna::{MnaSystem, VS_CONDUCTANCE};
+use crate::mna::{inject_rhs_current, MnaSystem, VS_CONDUCTANCE};
 use std::sync::Arc;
 
 /// Information about an inductor for companion model.
@@ -221,7 +221,7 @@ impl DkKernel {
         let a_neg = flatten_matrix(&a_neg_2d, n, n);
 
         // Build constant sources from voltage and current sources
-        let rhs_const = build_rhs_const(mna, sample_rate);
+        let rhs_const = build_rhs_const(mna);
 
         // Precompute Sherman-Morrison vectors for pots
         let mut pots = Vec::with_capacity(mna.pots.len());
@@ -487,40 +487,28 @@ impl DkKernel {
 
 /// Build constant RHS vector from DC sources.
 ///
-/// For trapezoidal rule, DC sources contribute 2*V to RHS.
-#[allow(clippy::needless_range_loop)]
-fn build_rhs_const(mna: &MnaSystem, _sample_rate: f64) -> Vec<f64> {
+/// For trapezoidal rule, DC sources contribute 2*I to RHS.
+/// Current sources inject I directly; voltage sources use Norton equivalent (I = V * G_large).
+fn build_rhs_const(mna: &MnaSystem) -> Vec<f64> {
     let mut rhs = vec![0.0; mna.n];
 
-    // Current sources: contribute I to RHS
-    // Convention: current flows from n_plus to n_minus (into n_plus, out of n_minus)
-    // RHS injection: positive at n_plus (current enters), negative at n_minus (current leaves)
+    // Current sources: positive at n_plus (current enters), negative at n_minus (leaves)
     for src in &mna.current_sources {
-        if src.n_plus_idx > 0 {
-            rhs[src.n_plus_idx - 1] += src.dc_value;
-        }
-        if src.n_minus_idx > 0 {
-            rhs[src.n_minus_idx - 1] -= src.dc_value;
-        }
+        inject_rhs_current(&mut rhs, src.n_plus_idx, src.dc_value);
+        inject_rhs_current(&mut rhs, src.n_minus_idx, -src.dc_value);
     }
 
-    // Voltage sources: use Norton equivalent (large conductance + current source)
-    // For DC voltage V between n+ and n-, stamp G_large between nodes and I = V * G_large
-    // The conductance is already stamped into G in the MNA builder below,
-    // so here we just add the current contribution.
+    // Voltage sources: Norton equivalent current I = V * G_large.
+    // The conductance is already stamped into G by the MNA builder.
     for vs in &mna.voltage_sources {
         let current = vs.dc_value * VS_CONDUCTANCE;
-        if vs.n_plus_idx > 0 {
-            rhs[vs.n_plus_idx - 1] += current;
-        }
-        if vs.n_minus_idx > 0 {
-            rhs[vs.n_minus_idx - 1] -= current;
-        }
+        inject_rhs_current(&mut rhs, vs.n_plus_idx, current);
+        inject_rhs_current(&mut rhs, vs.n_minus_idx, -current);
     }
 
     // Multiply by 2 for trapezoidal rule
-    for i in 0..rhs.len() {
-        rhs[i] *= 2.0;
+    for val in &mut rhs {
+        *val *= 2.0;
     }
 
     rhs

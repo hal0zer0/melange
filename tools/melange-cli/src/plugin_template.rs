@@ -1,6 +1,7 @@
 //! Plugin project template generation
 
 use std::path::Path;
+
 use anyhow::Result;
 
 /// Pot info for plugin parameter generation.
@@ -25,26 +26,16 @@ pub fn generate_plugin_project(
     with_level_params: bool,
     pots: &[PotParamInfo],
 ) -> Result<()> {
-    // Create directory structure
     std::fs::create_dir_all(output_dir.join("src"))?;
-
-    // Write Cargo.toml
-    let cargo_toml = generate_cargo_toml(circuit_name);
-    std::fs::write(output_dir.join("Cargo.toml"), cargo_toml)?;
-
-    // Write circuit.rs (the generated code)
+    std::fs::write(output_dir.join("Cargo.toml"), generate_cargo_toml(circuit_name))?;
     std::fs::write(output_dir.join("src/circuit.rs"), circuit_code)?;
-
-    // Write lib.rs (plugin wrapper)
-    let lib_rs = generate_lib_rs(circuit_name, with_level_params, pots);
-    std::fs::write(output_dir.join("src/lib.rs"), lib_rs)?;
-
+    std::fs::write(output_dir.join("src/lib.rs"), generate_lib_rs(circuit_name, with_level_params, pots))?;
     Ok(())
 }
 
 fn generate_cargo_toml(circuit_name: &str) -> String {
     format!(r#"[package]
-name = "{}"
+name = "{circuit_name}"
 version = "0.1.0"
 edition = "2021"
 
@@ -53,10 +44,9 @@ nih_plug = {{ git = "https://github.com/robbert-vdh/nih-plug.git", rev = "28b149
 
 [lib]
 crate-type = ["cdylib"]
-"#, circuit_name)
+"#)
 }
 
-// Visible for testing
 #[cfg(test)]
 pub(crate) fn test_generate_cargo_toml(circuit_name: &str) -> String {
     generate_cargo_toml(circuit_name)
@@ -67,48 +57,40 @@ pub(crate) fn test_generate_lib_rs(circuit_name: &str, with_level_params: bool, 
     generate_lib_rs(circuit_name, with_level_params, pots)
 }
 
-fn generate_lib_rs(circuit_name: &str, with_level_params: bool, pots: &[PotParamInfo]) -> String {
-    // Convert to a display-friendly name (e.g., "mordor-screamer" -> "Mordor Screamer")
-    let display_name = circuit_name
-        .split('-')
-        .map(|s| {
-            let mut chars = s.chars();
-            match chars.next() {
-                None => String::new(),
-                Some(first) => first.to_uppercase().collect::<String>() + &chars.as_str().to_lowercase(),
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ");
+/// Capitalize first character, lowercase the rest (e.g., "hello" -> "Hello", "LOUD" -> "Loud").
+fn capitalize_word(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        None => String::new(),
+        Some(first) => first.to_uppercase().collect::<String>() + &chars.as_str().to_lowercase(),
+    }
+}
 
-    // Create unique CLAP ID based on circuit name
-    let clap_id = format!("com.melange.{}", circuit_name);
-
-    // Compute a stable 16-byte VST3 ID from circuit name using XOR hash
+/// Compute a stable 16-byte VST3 ID string from a circuit name.
+///
+/// Uses XOR folding to produce 16 bytes, then maps each to uppercase ASCII
+/// so the result is valid for a `b"..."` literal.
+fn compute_vst3_id(circuit_name: &str) -> String {
     let mut hash = [0u8; 16];
-    let name_bytes = circuit_name.as_bytes();
-    for (i, &b) in name_bytes.iter().enumerate() {
+    for (i, &b) in circuit_name.as_bytes().iter().enumerate() {
         hash[i % 16] ^= b;
     }
-    // Ensure all bytes are printable ASCII for b"..." literal
     for h in hash.iter_mut() {
         *h = b'A' + (*h % 26);
     }
-    let vst3_id_str = String::from_utf8(hash.to_vec()).unwrap();
+    String::from_utf8(hash.to_vec()).unwrap()
+}
 
-    // Build pot parameter fields and process_sample lines
-    let mut pot_param_fields = String::new();
-    let mut pot_param_defaults = String::new();
-    let mut pot_process_lines = String::new();
-    for pot in pots {
-        // Parameter field
-        pot_param_fields.push_str(&format!(
-            "    #[id = \"pot_{}\"]\n    pub pot_{}: FloatParam,\n",
-            pot.index, pot.index
-        ));
-        // Default initialization
-        pot_param_defaults.push_str(&format!(
-            r#"            pot_{idx}: FloatParam::new(
+fn generate_pot_field(pot: &PotParamInfo) -> String {
+    format!(
+        "    #[id = \"pot_{idx}\"]\n    pub pot_{idx}: FloatParam,\n",
+        idx = pot.index,
+    )
+}
+
+fn generate_pot_default(pot: &PotParamInfo) -> String {
+    format!(
+        r#"            pot_{idx}: FloatParam::new(
                 "{name}",
                 {default:.1},
                 FloatRange::Linear {{
@@ -119,31 +101,116 @@ fn generate_lib_rs(circuit_name: &str, with_level_params: bool, pots: &[PotParam
             .with_smoother(SmoothingStyle::Linear(10.0))
             .with_unit(" \u{{2126}}"),
 "#,
-            idx = pot.index,
-            name = pot.name,
-            default = pot.default_resistance,
-            min = pot.min_resistance,
-            max = pot.max_resistance,
-        ));
-        // Process loop: read param smoothed value (per sample, before inner channel loop)
-        pot_process_lines.push_str(&format!(
-            "            let pot_{}_val = self.params.pot_{}.smoothed.next() as f64;\n",
-            pot.index, pot.index
-        ));
+        idx = pot.index,
+        name = pot.name,
+        default = pot.default_resistance,
+        min = pot.min_resistance,
+        max = pot.max_resistance,
+    )
+}
+
+fn generate_params_struct(with_level_params: bool, pots: &[PotParamInfo]) -> String {
+    let has_any_params = with_level_params || !pots.is_empty();
+    if !has_any_params {
+        return "#[derive(Params, Default)]\npub struct CircuitParams {}".to_string();
     }
 
+    let mut fields = String::new();
+    let mut defaults = String::new();
+
+    if with_level_params {
+        fields.push_str(LEVEL_PARAM_FIELDS);
+        defaults.push_str(LEVEL_PARAM_DEFAULTS);
+    }
+
+    for pot in pots {
+        fields.push_str(&generate_pot_field(pot));
+        defaults.push_str(&generate_pot_default(pot));
+    }
+
+    format!(
+        r#"#[derive(Params)]
+pub struct CircuitParams {{
+{fields}}}
+
+impl Default for CircuitParams {{
+    fn default() -> Self {{
+        Self {{
+{defaults}        }}
+    }}
+}}"#
+    )
+}
+
+fn generate_process_loop(with_level_params: bool, pots: &[PotParamInfo]) -> String {
     let has_any_params = with_level_params || !pots.is_empty();
-    let (params_struct, process_loop) = if has_any_params {
-        // Build params struct fields
-        let mut fields = String::new();
-        let mut defaults = String::new();
-        if with_level_params {
-            fields.push_str(r#"    #[id = "input_level"]
+    if !has_any_params {
+        return r#"        for channel_samples in buffer.iter_samples() {
+            for (ch, sample) in channel_samples.into_iter().enumerate() {
+                let state = &mut self.circuit_states[ch];
+                let out = process_sample(*sample as f64, state) as f32;
+                *sample = if out.is_finite() { out.clamp(-1.0, 1.0) } else { 0.0 };
+            }
+        }"#
+            .to_string();
+    }
+
+    let gain_reads = if with_level_params {
+        "            let input_gain = self.params.input_level.smoothed.next();\n\
+         \x20           let output_gain = self.params.output_level.smoothed.next();\n"
+    } else {
+        ""
+    };
+
+    let pot_reads: String = pots
+        .iter()
+        .map(|p| {
+            format!(
+                "            let pot_{i}_val = self.params.pot_{i}.smoothed.next() as f64;\n",
+                i = p.index,
+            )
+        })
+        .collect();
+
+    let pot_assignments: String = pots
+        .iter()
+        .map(|p| {
+            format!(
+                "                state.pot_{i}_resistance = pot_{i}_val;\n",
+                i = p.index,
+            )
+        })
+        .collect();
+
+    let sample_processing = if with_level_params {
+        "                let input = *sample as f64 * input_gain as f64;\n\
+         \x20               let out = process_sample(input, state) as f32;\n\
+         \x20               let out = out * output_gain;\n"
+    } else {
+        "                let out = process_sample(*sample as f64, state) as f32;\n"
+    };
+
+    format!(
+        "\x20       for channel_samples in buffer.iter_samples() {{\n\
+         {gain_reads}\
+         {pot_reads}\
+         \x20           for (ch, sample) in channel_samples.into_iter().enumerate() {{\n\
+         \x20               let state = &mut self.circuit_states[ch];\n\
+         {pot_assignments}\
+         {sample_processing}\
+         \x20               *sample = if out.is_finite() {{ out.clamp(-1.0, 1.0) }} else {{ 0.0 }};\n\
+         \x20           }}\n\
+         \x20       }}"
+    )
+}
+
+const LEVEL_PARAM_FIELDS: &str = r#"    #[id = "input_level"]
     pub input_level: FloatParam,
     #[id = "output_level"]
     pub output_level: FloatParam,
-"#);
-            defaults.push_str(r#"            input_level: FloatParam::new(
+"#;
+
+const LEVEL_PARAM_DEFAULTS: &str = r#"            input_level: FloatParam::new(
                 "Input Level",
                 util::db_to_gain(0.0),
                 FloatRange::Skewed {
@@ -170,62 +237,14 @@ fn generate_lib_rs(circuit_name: &str, with_level_params: bool, pots: &[PotParam
             .with_unit(" dB")
             .with_value_to_string(formatters::v2s_f32_gain_to_db(1))
             .with_string_to_value(formatters::s2v_f32_gain_to_db()),
-"#);
-        }
-        fields.push_str(&pot_param_fields);
-        defaults.push_str(&pot_param_defaults);
+"#;
 
-        let params = format!(r#"#[derive(Params)]
-pub struct CircuitParams {{
-{fields}}}
-
-impl Default for CircuitParams {{
-    fn default() -> Self {{
-        Self {{
-{defaults}        }}
-    }}
-}}"#);
-
-        // Build process loop
-        let mut loop_code = String::from("        for channel_samples in buffer.iter_samples() {\n");
-        if with_level_params {
-            loop_code.push_str("            let input_gain = self.params.input_level.smoothed.next();\n");
-            loop_code.push_str("            let output_gain = self.params.output_level.smoothed.next();\n");
-        }
-        loop_code.push_str(&pot_process_lines);
-        loop_code.push_str("            for (ch, sample) in channel_samples.into_iter().enumerate() {\n");
-        loop_code.push_str("                let state = &mut self.circuit_states[ch];\n");
-        // Set pot resistances on state
-        for pot in pots {
-            loop_code.push_str(&format!(
-                "                state.pot_{}_resistance = pot_{}_val;\n",
-                pot.index, pot.index
-            ));
-        }
-        if with_level_params {
-            loop_code.push_str("                let input = *sample as f64 * input_gain as f64;\n");
-            loop_code.push_str("                let out = process_sample(input, state) as f32;\n");
-            loop_code.push_str("                let out = out * output_gain;\n");
-        } else {
-            loop_code.push_str("                let out = process_sample(*sample as f64, state) as f32;\n");
-        }
-        loop_code.push_str("                *sample = if out.is_finite() { out.clamp(-1.0, 1.0) } else { 0.0 };\n");
-        loop_code.push_str("            }\n");
-        loop_code.push_str("        }");
-
-        (params, loop_code)
-    } else {
-        (
-            "#[derive(Params, Default)]\npub struct CircuitParams {}".to_string(),
-            r#"        for channel_samples in buffer.iter_samples() {
-            for (ch, sample) in channel_samples.into_iter().enumerate() {
-                let state = &mut self.circuit_states[ch];
-                let out = process_sample(*sample as f64, state) as f32;
-                *sample = if out.is_finite() { out.clamp(-1.0, 1.0) } else { 0.0 };
-            }
-        }"#.to_string(),
-        )
-    };
+fn generate_lib_rs(circuit_name: &str, with_level_params: bool, pots: &[PotParamInfo]) -> String {
+    let display_name: String = circuit_name.split('-').map(capitalize_word).collect::<Vec<_>>().join(" ");
+    let clap_id = format!("com.melange.{circuit_name}");
+    let vst3_id_str = compute_vst3_id(circuit_name);
+    let params_struct = generate_params_struct(with_level_params, pots);
+    let process_loop = generate_process_loop(with_level_params, pots);
 
     format!(
         r#"use nih_plug::prelude::*;

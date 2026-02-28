@@ -79,25 +79,27 @@ pub enum CodegenError {
 
 impl std::fmt::Display for CodegenError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            CodegenError::InvalidKernel(s) => write!(f, "Invalid kernel: {}", s),
-            CodegenError::UnsupportedTopology(s) => write!(f, "Unsupported topology: {}", s),
-            CodegenError::InvalidDevice(s) => write!(f, "Invalid device: {}", s),
-            CodegenError::InvalidConfig(s) => write!(f, "Invalid config: {}", s),
-            CodegenError::TemplateError(s) => write!(f, "Template error: {}", s),
-        }
+        let (label, msg) = match self {
+            CodegenError::InvalidKernel(s) => ("Invalid kernel", s.as_str()),
+            CodegenError::UnsupportedTopology(s) => ("Unsupported topology", s.as_str()),
+            CodegenError::InvalidDevice(s) => ("Invalid device", s.as_str()),
+            CodegenError::InvalidConfig(s) => ("Invalid config", s.as_str()),
+            CodegenError::TemplateError(s) => ("Template error", s.as_str()),
+        };
+        write!(f, "{label}: {msg}")
     }
 }
 
 impl std::error::Error for CodegenError {}
 
-/// Generated circuit solver code
+/// Generated circuit solver code.
 #[derive(Debug, Clone)]
 pub struct GeneratedCode {
     /// The generated Rust source code
     pub code: String,
-    /// Circuit metadata
+    /// Number of circuit nodes (excluding ground)
     pub n: usize,
+    /// Total nonlinear dimension (sum of device dimensions)
     pub m: usize,
 }
 
@@ -145,12 +147,8 @@ impl CodeGenerator {
             )));
         }
 
-        // Step 1: Build language-agnostic IR
         let ir = CircuitIR::from_kernel(kernel, mna, netlist, &self.config)?;
-
-        // Step 2: Emit Rust code from IR
-        let emitter = RustEmitter::new();
-        let code = emitter.emit(&ir)?;
+        let code = RustEmitter::new().emit(&ir)?;
 
         Ok(GeneratedCode {
             code,
