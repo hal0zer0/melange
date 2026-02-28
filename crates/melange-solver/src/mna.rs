@@ -440,7 +440,7 @@ impl MnaBuilder {
         // Resolve pot directives before moving node_map
         for pot_dir in &netlist.pots {
             let resistor = netlist.elements.iter().find(|e| {
-                matches!(e, Element::Resistor { name, .. } if name == &pot_dir.resistor_name)
+                matches!(e, Element::Resistor { name, .. } if name.eq_ignore_ascii_case(&pot_dir.resistor_name))
             });
             if let Some(Element::Resistor { n_plus, n_minus, value, .. }) = resistor {
                 let node_p = self.node_map[n_plus];

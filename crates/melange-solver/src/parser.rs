@@ -270,6 +270,23 @@ impl Parser {
             }
         }
 
+        // Post-parse validation: verify all .pot directives reference existing resistors
+        // (deferred so .pot can appear before the resistor in the netlist)
+        for pot in &netlist.pots {
+            let resistor_exists = netlist.elements.iter().any(|e| {
+                matches!(e, Element::Resistor { name, .. } if name.eq_ignore_ascii_case(&pot.resistor_name))
+            });
+            if !resistor_exists {
+                return Err(ParseError {
+                    line: 0,
+                    message: format!(
+                        ".pot references resistor '{}' which was not found in the netlist",
+                        pot.resistor_name
+                    ),
+                });
+            }
+        }
+
         Ok(netlist)
     }
 
@@ -455,17 +472,8 @@ impl Parser {
             )));
         }
 
-        // Validate: referenced resistor must exist in the netlist
-        let resistor_exists = netlist.elements.iter().any(|e| matches!(e, Element::Resistor { name, .. } if name == &resistor_name));
-        if !resistor_exists {
-            return Err(self.error(format!(
-                ".pot references resistor '{}' which was not found in the netlist",
-                resistor_name
-            )));
-        }
-
-        // Validate: no duplicate pot for the same resistor
-        if netlist.pots.iter().any(|p| p.resistor_name == resistor_name) {
+        // Validate: no duplicate pot for the same resistor (case-insensitive)
+        if netlist.pots.iter().any(|p| p.resistor_name.eq_ignore_ascii_case(&resistor_name)) {
             return Err(self.error(format!(
                 "Duplicate .pot directive for resistor '{}'",
                 resistor_name
@@ -477,6 +485,7 @@ impl Parser {
             return Err(self.error("Maximum of 2 .pot directives supported"));
         }
 
+        // Note: resistor existence is validated after full parse (order-independent)
         Ok(PotDirective {
             resistor_name,
             min_value,
@@ -982,6 +991,32 @@ mod tests {
         let spice = "Test\nR1 1 0 10k\n.pot R1 1k\n";
         let result = Netlist::parse(spice);
         assert!(result.is_err(), "Missing max value should fail");
+    }
+
+    #[test]
+    fn test_parse_pot_case_insensitive() {
+        // SPICE is case-insensitive: .pot r1 should match R1
+        let spice = "Test\nR1 1 0 10k\n.pot r1 1k 100k\n";
+        let netlist = Netlist::parse(spice).unwrap();
+        assert_eq!(netlist.pots.len(), 1);
+        assert_eq!(netlist.pots[0].resistor_name, "r1");
+    }
+
+    #[test]
+    fn test_parse_pot_order_independent() {
+        // .pot can appear before the resistor it references
+        let spice = "Test\n.pot R1 1k 100k\nR1 1 0 10k\n";
+        let netlist = Netlist::parse(spice).unwrap();
+        assert_eq!(netlist.pots.len(), 1);
+        assert_eq!(netlist.pots[0].resistor_name, "R1");
+    }
+
+    #[test]
+    fn test_parse_pot_case_insensitive_duplicate() {
+        // r1 and R1 should be treated as the same resistor for duplicate detection
+        let spice = "Test\nR1 1 0 10k\n.pot R1 1k 100k\n.pot r1 2k 50k\n";
+        let result = Netlist::parse(spice);
+        assert!(result.is_err(), "Case-insensitive duplicate should fail");
     }
 
     #[test]
