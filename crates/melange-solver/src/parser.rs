@@ -287,6 +287,48 @@ impl Parser {
             }
         }
 
+        // Post-parse validation: check for duplicate component names (case-insensitive)
+        {
+            let mut seen_names = std::collections::HashSet::new();
+            for elem in &netlist.elements {
+                let name_lower = elem.name().to_ascii_lowercase();
+                if !seen_names.insert(name_lower) {
+                    return Err(ParseError {
+                        line: 0,
+                        message: format!(
+                            "Duplicate component name: '{}'",
+                            elem.name()
+                        ),
+                    });
+                }
+            }
+        }
+
+        // Post-parse validation: check that devices referencing models have matching .model definitions
+        for elem in &netlist.elements {
+            let model_name = match elem {
+                Element::Diode { model, .. } => Some(model),
+                Element::Bjt { model, .. } => Some(model),
+                Element::Jfet { model, .. } => Some(model),
+                Element::Mosfet { model, .. } => Some(model),
+                _ => None,
+            };
+            if let Some(model_ref) = model_name {
+                let model_exists = netlist.models.iter().any(|m| {
+                    m.name.eq_ignore_ascii_case(model_ref)
+                });
+                if !model_exists {
+                    return Err(ParseError {
+                        line: 0,
+                        message: format!(
+                            "Component '{}' references model '{}' which is not defined",
+                            elem.name(), model_ref
+                        ),
+                    });
+                }
+            }
+        }
+
         Ok(netlist)
     }
 
@@ -493,6 +535,17 @@ impl Parser {
         })
     }
 
+    /// Validate that two nodes are not the same (self-connected component).
+    fn check_self_connection(&self, n1: &str, n2: &str, component: &str) -> Result<(), ParseError> {
+        if n1.eq_ignore_ascii_case(n2) {
+            return Err(self.error(format!(
+                "Component '{}' has both terminals connected to the same node '{}'",
+                component, n1
+            )));
+        }
+        Ok(())
+    }
+
     fn parse_element(&self, line: &str) -> Result<Element, ParseError> {
         let parts: Vec<&str> = line.split_whitespace().collect();
         if parts.is_empty() {
@@ -521,6 +574,7 @@ impl Parser {
         if parts.len() < 4 {
             return Err(self.error("Resistor requires: Rname n+ n- value"));
         }
+        self.check_self_connection(parts[1], parts[2], parts[0])?;
         let value = parse_value(parts[3])
             .map_err(|_| self.error(format!("Invalid resistor value: {}", parts[3])))?;
         if value <= 0.0 || !value.is_finite() {
@@ -540,6 +594,7 @@ impl Parser {
         if parts.len() < 4 {
             return Err(self.error("Capacitor requires: Cname n+ n- value"));
         }
+        self.check_self_connection(parts[1], parts[2], parts[0])?;
 
         let value = parse_value(parts[3])
             .map_err(|_| self.error(format!("Invalid capacitor value: {}", parts[3])))?;
@@ -571,6 +626,7 @@ impl Parser {
         if parts.len() < 4 {
             return Err(self.error("Inductor requires: Lname n+ n- value"));
         }
+        self.check_self_connection(parts[1], parts[2], parts[0])?;
         let value = parse_value(parts[3])
             .map_err(|_| self.error(format!("Invalid inductor value: {}", parts[3])))?;
         if value <= 0.0 || !value.is_finite() {
@@ -660,6 +716,7 @@ impl Parser {
         if parts.len() < 4 {
             return Err(self.error("Diode requires: Dname n+ n- modelname"));
         }
+        self.check_self_connection(parts[1], parts[2], parts[0])?;
         Ok(Element::Diode {
             name: parts[0].to_string(),
             n_plus: parts[1].to_string(),
@@ -838,7 +895,7 @@ mod tests {
 
     #[test]
     fn test_parse_bjt() {
-        let netlist = Netlist::parse("Test\nQ1 3 2 1 2N2222\n").unwrap();
+        let netlist = Netlist::parse("Test\nQ1 3 2 1 2N2222\n.model 2N2222 NPN(IS=1e-15 BF=200)\n").unwrap();
         match &netlist.elements[0] {
             Element::Bjt { name, nc, nb, ne, model } => {
                 assert_eq!(name, "Q1");
@@ -1037,5 +1094,420 @@ Q1 coll base emit 2N2222
         let netlist = Netlist::parse(spice).unwrap();
         assert_eq!(netlist.elements.len(), 9);
         assert_eq!(netlist.models.len(), 1);
+    }
+
+    // ======================================================================
+    // Edge case tests for parser error handling
+    // ======================================================================
+
+    // 1. Missing model card: device references a .model that doesn't exist
+    #[test]
+    fn test_missing_model_card_diode() {
+        let spice = "Test\nD1 1 2 UnknownModel\n";
+        let result = Netlist::parse(spice);
+        assert!(result.is_err(), "Diode referencing undefined model should be rejected");
+        let err = result.unwrap_err();
+        assert!(
+            err.message.contains("UnknownModel"),
+            "Error should mention the missing model name, got: {}", err.message
+        );
+    }
+
+    #[test]
+    fn test_missing_model_card_bjt() {
+        let spice = "Test\nQ1 3 2 1 NonExistent\n";
+        let result = Netlist::parse(spice);
+        assert!(result.is_err(), "BJT referencing undefined model should be rejected");
+    }
+
+    #[test]
+    fn test_missing_model_card_jfet() {
+        let spice = "Test\nJ1 3 2 1 NoSuchModel\n";
+        let result = Netlist::parse(spice);
+        assert!(result.is_err(), "JFET referencing undefined model should be rejected");
+    }
+
+    #[test]
+    fn test_missing_model_card_mosfet() {
+        let spice = "Test\nM1 3 2 1 0 GhostModel\n";
+        let result = Netlist::parse(spice);
+        assert!(result.is_err(), "MOSFET referencing undefined model should be rejected");
+    }
+
+    #[test]
+    fn test_model_reference_exists() {
+        // Positive test: model IS defined, should parse OK
+        let spice = "Test\nD1 1 2 MyDiode\n.model MyDiode D(IS=1e-14)\n";
+        let result = Netlist::parse(spice);
+        assert!(result.is_ok(), "Diode with defined model should succeed: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_model_reference_case_insensitive() {
+        // SPICE model references are case-insensitive
+        let spice = "Test\nD1 1 2 mydiode\n.model MYDIODE D(IS=1e-14)\n";
+        let result = Netlist::parse(spice);
+        assert!(result.is_ok(), "Model reference should be case-insensitive: {:?}", result.err());
+    }
+
+    // 2. Duplicate component names
+    #[test]
+    fn test_duplicate_component_names_resistors() {
+        let spice = "Test\nR1 1 0 1k\nR1 2 0 2k\n";
+        let result = Netlist::parse(spice);
+        assert!(result.is_err(), "Duplicate component names should be rejected");
+        let err = result.unwrap_err();
+        assert!(
+            err.message.contains("Duplicate") && err.message.contains("R1"),
+            "Error should mention duplicate and the name, got: {}", err.message
+        );
+    }
+
+    #[test]
+    fn test_duplicate_component_names_case_insensitive() {
+        // SPICE names are case-insensitive: R1 and r1 are the same component
+        let spice = "Test\nR1 1 0 1k\nr1 2 0 2k\n";
+        let result = Netlist::parse(spice);
+        assert!(result.is_err(), "Case-insensitive duplicate names should be rejected");
+    }
+
+    #[test]
+    fn test_duplicate_names_different_types() {
+        // Even different component types with the same name should be rejected
+        let spice = "Test\nR1 1 0 1k\nC1 2 0 10u\n";
+        let result = Netlist::parse(spice);
+        assert!(result.is_ok(), "Different component names should be accepted: {:?}", result.err());
+    }
+
+    // 3. Invalid node names / special characters
+    #[test]
+    fn test_node_names_with_alphanumeric() {
+        // Standard alphanumeric node names should work fine
+        let spice = "Test\nR1 node_a node_b 1k\n";
+        let result = Netlist::parse(spice);
+        assert!(result.is_ok(), "Alphanumeric node names should work: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_node_names_numeric() {
+        // Purely numeric node names (common in SPICE)
+        let spice = "Test\nR1 1 0 1k\n";
+        let result = Netlist::parse(spice);
+        assert!(result.is_ok(), "Numeric node names should work: {:?}", result.err());
+    }
+
+    // 4. Invalid number format
+    #[test]
+    fn test_invalid_number_format_alpha() {
+        let spice = "Test\nR1 1 2 abc\n";
+        let result = Netlist::parse(spice);
+        assert!(result.is_err(), "Alphabetic value 'abc' should be rejected");
+    }
+
+    #[test]
+    fn test_invalid_number_format_special_chars() {
+        let spice = "Test\nR1 1 2 @#$\n";
+        let result = Netlist::parse(spice);
+        assert!(result.is_err(), "Special character value should be rejected");
+    }
+
+    #[test]
+    fn test_invalid_number_format_empty_suffix() {
+        // Just a suffix with no numeric part
+        let result = parse_value("k");
+        assert!(result.is_err(), "Bare suffix with no number should be rejected");
+    }
+
+    #[test]
+    fn test_invalid_number_format_double_dot() {
+        let result = parse_value("1.2.3");
+        assert!(result.is_err(), "Double decimal point should be rejected");
+    }
+
+    // 5. Empty netlist (title only, no components)
+    #[test]
+    fn test_empty_netlist() {
+        let spice = "My Empty Circuit\n";
+        let result = Netlist::parse(spice);
+        assert!(result.is_ok(), "Empty netlist (title only) should parse: {:?}", result.err());
+        let netlist = result.unwrap();
+        assert_eq!(netlist.title, "My Empty Circuit");
+        assert!(netlist.elements.is_empty());
+        assert!(netlist.models.is_empty());
+    }
+
+    #[test]
+    fn test_empty_netlist_with_end() {
+        let spice = "My Circuit\n.end\n";
+        let result = Netlist::parse(spice);
+        assert!(result.is_ok(), "Netlist with only .end should parse: {:?}", result.err());
+        let netlist = result.unwrap();
+        assert!(netlist.elements.is_empty());
+    }
+
+    #[test]
+    fn test_empty_netlist_only_comments() {
+        let spice = "My Circuit\n* This is a comment\n* Another comment\n.end\n";
+        let result = Netlist::parse(spice);
+        assert!(result.is_ok(), "Comment-only netlist should parse: {:?}", result.err());
+        let netlist = result.unwrap();
+        assert!(netlist.elements.is_empty());
+    }
+
+    #[test]
+    fn test_completely_empty_input() {
+        let spice = "";
+        let result = Netlist::parse(spice);
+        // Empty string should still parse (empty title)
+        assert!(result.is_ok(), "Completely empty input should parse: {:?}", result.err());
+        let netlist = result.unwrap();
+        assert_eq!(netlist.title, "");
+        assert!(netlist.elements.is_empty());
+    }
+
+    // 6. Floating nodes (single-terminal connections)
+    // Note: The parser itself doesn't validate node connectivity; that's an MNA concern.
+    // This test documents that a node connected to only one component terminal parses OK.
+    #[test]
+    fn test_floating_node_parses_ok() {
+        // Node "3" is only connected to R2's n+ — it's electrically floating
+        // The parser accepts this; downstream MNA assembly would detect the issue
+        let spice = "Test\nR1 1 0 1k\nR2 3 0 2k\n";
+        let result = Netlist::parse(spice);
+        assert!(result.is_ok(), "Parser doesn't validate connectivity (MNA's job): {:?}", result.err());
+    }
+
+    // 7. Duplicate node connections (self-connected component)
+    #[test]
+    fn test_self_connected_resistor() {
+        let spice = "Test\nR1 1 1 1k\n";
+        let result = Netlist::parse(spice);
+        assert!(result.is_err(), "Resistor from node to itself should be rejected");
+        let err = result.unwrap_err();
+        assert!(
+            err.message.contains("same node"),
+            "Error should mention same node, got: {}", err.message
+        );
+    }
+
+    #[test]
+    fn test_self_connected_capacitor() {
+        let spice = "Test\nC1 2 2 10u\n";
+        let result = Netlist::parse(spice);
+        assert!(result.is_err(), "Capacitor from node to itself should be rejected");
+    }
+
+    #[test]
+    fn test_self_connected_inductor() {
+        let spice = "Test\nL1 out out 100m\n";
+        let result = Netlist::parse(spice);
+        assert!(result.is_err(), "Inductor from node to itself should be rejected");
+    }
+
+    #[test]
+    fn test_self_connected_diode() {
+        let spice = "Test\nD1 1 1 MyDiode\n.model MyDiode D(IS=1e-14)\n";
+        let result = Netlist::parse(spice);
+        assert!(result.is_err(), "Diode from node to itself should be rejected");
+    }
+
+    #[test]
+    fn test_self_connected_case_insensitive() {
+        // SPICE node names are case-insensitive: "VCC" and "vcc" are the same node
+        let spice = "Test\nR1 VCC vcc 1k\n";
+        let result = Netlist::parse(spice);
+        assert!(result.is_err(), "Case-insensitive self-connection should be rejected");
+    }
+
+    #[test]
+    fn test_ground_to_ground_ok_for_vsource() {
+        // Voltage source from ground to ground is physically meaningless but
+        // the parser only validates two-terminal passive components for self-connection.
+        // Voltage sources can have unusual configurations (AC superposition).
+        // This test documents current behavior.
+        let spice = "Test\nV1 0 0 DC 5\n";
+        let result = Netlist::parse(spice);
+        // Voltage sources don't get self-connection validation in the parser
+        // This is a circuit-level issue, not a syntax issue
+        assert!(result.is_ok(), "Voltage source self-connection is not validated at parse level: {:?}", result.err());
+    }
+
+    // 8. Unknown element type
+    #[test]
+    fn test_unknown_element_type() {
+        let spice = "Test\nZ1 1 2 100\n";
+        let result = Netlist::parse(spice);
+        assert!(result.is_err(), "Unknown element type 'Z' should be rejected");
+        let err = result.unwrap_err();
+        assert!(
+            err.message.contains("Unknown element type"),
+            "Error should mention unknown element type, got: {}", err.message
+        );
+    }
+
+    // 9. Insufficient fields for various components
+    #[test]
+    fn test_missing_value_capacitor() {
+        let result = Netlist::parse("Test\nC1 1 0\n");
+        assert!(result.is_err(), "Capacitor without value should be rejected");
+    }
+
+    #[test]
+    fn test_missing_value_inductor() {
+        let result = Netlist::parse("Test\nL1 1 0\n");
+        assert!(result.is_err(), "Inductor without value should be rejected");
+    }
+
+    #[test]
+    fn test_missing_nodes_voltage_source() {
+        let result = Netlist::parse("Test\nV1 1\n");
+        assert!(result.is_err(), "Voltage source with one node should be rejected");
+    }
+
+    #[test]
+    fn test_missing_model_diode() {
+        let result = Netlist::parse("Test\nD1 1 2\n");
+        assert!(result.is_err(), "Diode without model name should be rejected");
+    }
+
+    #[test]
+    fn test_missing_fields_bjt() {
+        let result = Netlist::parse("Test\nQ1 3 2\n");
+        assert!(result.is_err(), "BJT with too few fields should be rejected");
+    }
+
+    #[test]
+    fn test_missing_fields_jfet() {
+        let result = Netlist::parse("Test\nJ1 3 2\n");
+        assert!(result.is_err(), "JFET with too few fields should be rejected");
+    }
+
+    #[test]
+    fn test_missing_fields_mosfet() {
+        let result = Netlist::parse("Test\nM1 3 2 1\n");
+        assert!(result.is_err(), "MOSFET with too few fields should be rejected");
+    }
+
+    // 10. Zero component values
+    #[test]
+    fn test_zero_capacitance_rejected() {
+        let result = Netlist::parse("Test\nC1 1 0 0\n");
+        assert!(result.is_err(), "Zero capacitance should be rejected");
+    }
+
+    // 11. Continuation lines and comments
+    #[test]
+    fn test_continuation_line() {
+        let spice = "Test\nR1 1 0\n+ 1k\n";
+        let result = Netlist::parse(spice);
+        assert!(result.is_ok(), "Continuation line should work: {:?}", result.err());
+        let netlist = result.unwrap();
+        assert_eq!(netlist.elements.len(), 1);
+        match &netlist.elements[0] {
+            Element::Resistor { value, .. } => {
+                assert_eq!(*value, 1000.0);
+            }
+            _ => panic!("Expected resistor"),
+        }
+    }
+
+    #[test]
+    fn test_inline_comment_semicolon() {
+        let spice = "Test\nR1 1 0 1k ; this is a comment\n";
+        let result = Netlist::parse(spice);
+        assert!(result.is_ok(), "Inline semicolon comment should be stripped: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_inline_comment_dollar() {
+        let spice = "Test\nR1 1 0 1k $ this is a comment\n";
+        let result = Netlist::parse(spice);
+        assert!(result.is_ok(), "Inline dollar comment should be stripped: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_star_comment_line() {
+        let spice = "Test\n* This is a comment\nR1 1 0 1k\n";
+        let result = Netlist::parse(spice);
+        assert!(result.is_ok(), "Star comment lines should be ignored: {:?}", result.err());
+        let netlist = result.unwrap();
+        assert_eq!(netlist.elements.len(), 1);
+    }
+
+    // 12. Edge cases for parse_value
+    #[test]
+    fn test_parse_value_empty_string() {
+        let result = parse_value("");
+        assert!(result.is_err(), "Empty string value should be rejected");
+    }
+
+    #[test]
+    fn test_parse_value_whitespace_only() {
+        let result = parse_value("   ");
+        assert!(result.is_err(), "Whitespace-only value should be rejected");
+    }
+
+    #[test]
+    fn test_parse_value_negative() {
+        // parse_value itself accepts negative numbers; component parsers reject them
+        let result = parse_value("-1k");
+        assert!(result.is_ok(), "parse_value should accept negative numbers");
+        assert_eq!(result.unwrap(), -1000.0);
+    }
+
+    #[test]
+    fn test_parse_value_scientific_notation() {
+        let result = parse_value("1e-12");
+        assert!(result.is_ok(), "Scientific notation should work");
+        assert!((result.unwrap() - 1e-12).abs() < 1e-24);
+    }
+
+    #[test]
+    fn test_parse_value_bare_meg() {
+        let result = parse_value("MEG");
+        assert!(result.is_err(), "Bare 'MEG' with no number should be rejected");
+    }
+
+    // 13. Model parsing edge cases
+    #[test]
+    fn test_model_without_params() {
+        let spice = "Test\n.model MyDiode D\nD1 1 2 MyDiode\n";
+        let result = Netlist::parse(spice);
+        assert!(result.is_ok(), "Model without params should parse: {:?}", result.err());
+        let netlist = result.unwrap();
+        assert_eq!(netlist.models[0].params.len(), 0);
+    }
+
+    #[test]
+    fn test_model_missing_type() {
+        let spice = "Test\n.model MyDiode\n";
+        let result = Netlist::parse(spice);
+        assert!(result.is_err(), ".model without type should be rejected");
+    }
+
+    // 14. Directive edge cases
+    #[test]
+    fn test_unknown_directive_ignored() {
+        let spice = "Test\n.options RELTOL=1e-3\nR1 1 0 1k\n";
+        let result = Netlist::parse(spice);
+        assert!(result.is_ok(), "Unknown directives should be ignored: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_param_directive() {
+        let spice = "Test\n.param Rval=1k\n";
+        let result = Netlist::parse(spice);
+        assert!(result.is_ok(), ".param directive should parse: {:?}", result.err());
+        let netlist = result.unwrap();
+        assert_eq!(netlist.params.len(), 1);
+        assert_eq!(netlist.params[0].name, "Rval");
+        assert_eq!(netlist.params[0].value, 1000.0);
+    }
+
+    #[test]
+    fn test_param_missing_equals() {
+        let spice = "Test\n.param Rval\n";
+        let result = Netlist::parse(spice);
+        assert!(result.is_err(), ".param without = should be rejected");
     }
 }

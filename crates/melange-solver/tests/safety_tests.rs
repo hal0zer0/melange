@@ -222,20 +222,21 @@ Vin in 0 0
 // All-grounded device rejection tests (TopologyError)
 // ============================================================================
 
-/// Diode with both terminals grounded should produce TopologyError.
+/// Diode with both terminals grounded should be rejected.
+/// The parser now catches self-connected components (both terminals on same node)
+/// before MNA assembly is reached.
 #[test]
 fn test_diode_both_terminals_grounded() {
     let spice = "Grounded Diode\nD1 0 0 D1N4148\nR1 in 0 1k\n.model D1N4148 D(IS=1e-15)\n";
-    let netlist = Netlist::parse(spice).unwrap();
-    let result = MnaSystem::from_netlist(&netlist);
+    let result = Netlist::parse(spice);
     assert!(
         result.is_err(),
-        "Diode with both terminals grounded should be rejected"
+        "Diode with both terminals grounded should be rejected at parse time"
     );
-    let err = format!("{:?}", result.unwrap_err());
+    let err = format!("{}", result.unwrap_err());
     assert!(
-        err.contains("TopologyError") || err.contains("grounded"),
-        "Error should mention topology/grounded, got: {}",
+        err.contains("same node"),
+        "Error should mention same node, got: {}",
         err
     );
 }

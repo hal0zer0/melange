@@ -18,6 +18,7 @@ const DIODE_CLIPPER_SPICE: &str = r#"Diode Clipper
 Rin in 0 1k
 D1 in out D1N4148
 C1 out 0 1u
+.model D1N4148 D(IS=2.52e-9 N=1.752)
 "#;
 
 #[test]

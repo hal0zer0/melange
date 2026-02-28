@@ -783,10 +783,8 @@ impl RustEmitter {
             "    const TOL: f64 = {:.17e};\n",
             ir.solver_config.tolerance
         ));
-        // NOTE: STEP_CLAMP=0.01 is tighter than the runtime solver's 0.1.
-        // Generated code runs unsupervised, so tighter clamping ensures stability
-        // across all circuits without manual tuning.
-        code.push_str("    const STEP_CLAMP: f64 = 0.01;  // Tighter than runtime (0.1) for unsupervised stability\n");
+        // STEP_CLAMP=0.01 matches the runtime solver's clamp value.
+        code.push_str("    const STEP_CLAMP: f64 = 0.01;  // Matches runtime solver clamp\n");
         code.push_str("    const SINGULARITY_THRESHOLD: f64 = 1e-15;\n\n");
 
         code.push_str("    // Initial guess from previous sample (warm start)\n");
@@ -971,10 +969,9 @@ impl RustEmitter {
                     code.push_str("        // Solve 1×1 system: J * delta = f\n");
                     code.push_str("        let det = j00;\n");
                     code.push_str("        if det.abs() < SINGULARITY_THRESHOLD {\n");
-                    code.push_str(
-                        "            state.last_nr_iterations = MAX_ITER as u32;\n",
-                    );
-                    code.push_str("            return i_nl;  // Singular Jacobian, return best guess\n");
+                    code.push_str("            // Singular Jacobian — damped fallback (0.5 * residual)\n");
+                    code.push_str("            i_nl[0] -= (f0 * 0.5).clamp(-STEP_CLAMP, STEP_CLAMP);\n");
+                    code.push_str("            continue;\n");
                     code.push_str("        }\n");
                     code.push_str("        let delta0 = f0 / det;\n");
                     code.push_str("\n");
@@ -997,10 +994,10 @@ impl RustEmitter {
                         "        let det = j00 * j11 - j01 * j10;\n",
                     );
                     code.push_str("        if det.abs() < SINGULARITY_THRESHOLD {\n");
-                    code.push_str(
-                        "            state.last_nr_iterations = MAX_ITER as u32;\n",
-                    );
-                    code.push_str("            return i_nl;  // Singular Jacobian, return best guess\n");
+                    code.push_str("            // Singular Jacobian — damped fallback (0.5 * residual)\n");
+                    code.push_str("            i_nl[0] -= (f0 * 0.5).clamp(-STEP_CLAMP, STEP_CLAMP);\n");
+                    code.push_str("            i_nl[1] -= (f1 * 0.5).clamp(-STEP_CLAMP, STEP_CLAMP);\n");
+                    code.push_str("            continue;\n");
                     code.push_str("        }\n");
                     code.push_str("        let inv_det = 1.0 / det;\n");
                     code.push_str(
@@ -1173,9 +1170,13 @@ impl RustEmitter {
         code.push_str("                return i_nl;\n");
         code.push_str("            }\n");
         code.push_str("        } else {\n");
-        code.push_str("            // Singular Jacobian — return best guess\n");
-        code.push_str("            state.last_nr_iterations = MAX_ITER as u32;\n");
-        code.push_str("            return i_nl;\n");
+        code.push_str("            // Singular Jacobian — damped fallback (0.5 * residual)\n");
+        for i in 0..dim {
+            code.push_str(&format!(
+                "            i_nl[{}] -= (f{} * 0.5).clamp(-STEP_CLAMP, STEP_CLAMP);\n",
+                i, i
+            ));
+        }
         code.push_str("        }\n");
     }
 }

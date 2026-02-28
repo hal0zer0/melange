@@ -101,6 +101,16 @@ pub enum DkError {
     InvalidParameter(String),
     /// An inductor has a non-positive inductance value.
     InvalidInductance { name: String, value: f64 },
+    /// A K matrix diagonal entry is non-negative, indicating incorrect feedback polarity.
+    ///
+    /// K diagonals must be negative for stable NR convergence. A non-negative diagonal
+    /// means the circuit topology or N_i/N_v wiring is incorrect.
+    InvalidKDiagonal {
+        /// Index of the offending diagonal entry.
+        index: usize,
+        /// The non-negative value found.
+        value: f64,
+    },
 }
 
 impl std::fmt::Display for DkError {
@@ -110,6 +120,13 @@ impl std::fmt::Display for DkError {
             DkError::InvalidParameter(msg) => write!(f, "DK error: {}", msg),
             DkError::InvalidInductance { name, value } => {
                 write!(f, "DK error: inductor '{}' has non-positive inductance: {}", name, value)
+            }
+            DkError::InvalidKDiagonal { index, value } => {
+                write!(
+                    f,
+                    "DK error: K diagonal [{}][{}] = {} is non-negative (expected < 0 for stable feedback)",
+                    index, index, value
+                )
             }
         }
     }
@@ -152,6 +169,22 @@ impl DkKernel {
         // Invert A to get S
         let s_2d = invert_matrix(&a)
             .map_err(|e| DkError::SingularMatrix(format!("Failed to invert A matrix: {}", e)))?;
+
+        // Condition number estimate: cond(A) ~ ||A||_inf * ||S||_inf
+        // If cond > 1e12, emit a diagnostic warning (not a hard error).
+        {
+            let norm_a = infinity_norm(&a);
+            let norm_s = infinity_norm(&s_2d);
+            let cond = norm_a * norm_s;
+            if cond > 1e12 {
+                eprintln!(
+                    "Warning: A matrix condition number estimate is {:.2e} (threshold 1e12). \
+                     Results may be numerically inaccurate.",
+                    cond
+                );
+            }
+        }
+
         let s = flatten_matrix(&s_2d, n, n);
 
         // Compute K = N_v * S * N_i  (M x M)
@@ -166,6 +199,21 @@ impl DkKernel {
         let s_ni = mat_mul(&s_2d, &mna.n_i);
         // Then: N_v * (S * N_i) (M x M)
         let k_2d = mat_mul(&mna.n_v, &s_ni);
+
+        // Validate K diagonal: all K[i][i] must be negative for stable NR feedback.
+        // A non-negative diagonal indicates incorrect circuit topology or wiring.
+        // Only check when M > 0 (nonlinear devices present); for M=0, K is empty.
+        if m > 0 {
+            for i in 0..m {
+                if k_2d[i][i] >= 0.0 {
+                    return Err(DkError::InvalidKDiagonal {
+                        index: i,
+                        value: k_2d[i][i],
+                    });
+                }
+            }
+        }
+
         let k = flatten_matrix(&k_2d, m, m);
 
         // Get A_neg matrix for history
@@ -589,6 +637,18 @@ pub(crate) fn mat_mul(a: &[Vec<f64>], b: &[Vec<f64>]) -> Vec<Vec<f64>> {
         }
     }
     c
+}
+
+/// Compute the infinity norm of a matrix: max over rows of the sum of absolute values.
+///
+/// This is used for condition number estimation: cond(A) ~ ||A||_inf * ||A^{-1}||_inf.
+fn infinity_norm(a: &[Vec<f64>]) -> f64 {
+    let mut max_row_sum = 0.0_f64;
+    for row in a {
+        let row_sum: f64 = row.iter().map(|x| x.abs()).sum();
+        max_row_sum = max_row_sum.max(row_sum);
+    }
+    max_row_sum
 }
 
 /// Matrix-vector multiplication: y = A * x

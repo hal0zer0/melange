@@ -208,6 +208,7 @@ C1 out 0 1u
 R1 in out 1k
 R2 out 0 10k
 D1 out 0 1N4148
+.model 1N4148 D(IS=2.52e-9 N=1.752)
 "#;
         let netlist = Netlist::parse(spice).unwrap();
         let mna = MnaSystem::from_netlist(&netlist).unwrap();

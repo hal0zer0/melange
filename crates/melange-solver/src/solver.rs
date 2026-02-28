@@ -377,9 +377,9 @@ impl CircuitSolver {
             output_node,
             input_conductance: 1.0, // Default 1/1Ω (near-ideal voltage source) — caller should set from netlist
             input_prev: 0.0,
-            max_iter: 20,
+            max_iter: 100,
             tol: 1e-10,
-            clamp: 0.1,
+            clamp: 0.01,
         }
     }
 
@@ -730,15 +730,19 @@ impl CircuitSolver {
             let solved = gauss_solve_inplace(&mut self.jacobian_mat, &mut self.delta, m);
 
             if !solved {
-                // Singular Jacobian — return best guess (matches codegen behavior)
-                break;
+                // Singular Jacobian — damped fallback (0.5 * residual)
+                for i in 0..m {
+                    let step = (self.residual[i] * 0.5).clamp(-self.clamp, self.clamp);
+                    self.v_nl[i] -= step;
+                }
+                continue;
             }
 
-            // Check step-size convergence (matches 1D/2D solvers)
-            let step_sq: f64 = self.delta[..m].iter()
-                .map(|&d| { let c = d.clamp(-self.clamp, self.clamp); c * c })
-                .sum();
-            if step_sq < self.tol * self.tol {
+            // Check step-size convergence: if max absolute clamped step < tolerance, done
+            let max_step: f64 = self.delta[..m].iter()
+                .map(|&d| d.clamp(-self.clamp, self.clamp).abs())
+                .fold(0.0_f64, f64::max);
+            if max_step < self.tol {
                 break;
             }
 
