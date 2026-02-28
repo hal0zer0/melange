@@ -1,0 +1,7 @@
+/// Multiply vector by S matrix: result = S * rhs
+#[inline(always)]
+fn mat_vec_mul_s(rhs: &[f64; N]) -> [f64; N] {
+    [
+{{ mul_lines }}    ]
+}
+

@@ -1,0 +1,10 @@
+* Antiparallel Diodes - Symmetric clipping (without input voltage source for solver validation)
+* Input is applied via solver's input_conductance at node 'in'
+
+.model D1N4148 D(IS=2.52e-9 RS=0.568 N=1.906)
+
+R1 in out 1k
+D1 out 0 D1N4148
+D2 0 out D1N4148
+
+.end

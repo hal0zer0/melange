@@ -1,0 +1,52 @@
+// =============================================================================
+// MAIN PROCESS FUNCTION
+// =============================================================================
+
+/// Process a single audio sample through the circuit
+///
+/// # Arguments
+/// * `input` - Input voltage at INPUT_NODE
+/// * `state` - Mutable circuit state (preserved across calls)
+///
+/// # Returns
+/// Output voltage at OUTPUT_NODE
+#[inline]
+pub fn process_sample(input: f64, state: &mut CircuitState) -> f64 {
+    // Validate input — handle NaN, inf, and extreme values
+    let input = if input.is_finite() { input.clamp(-100.0, 100.0) } else { 0.0 };
+
+    // Step 1: Build RHS vector from history and input
+    let rhs = build_rhs(input, state.input_prev, state);
+
+    // Step 2: Linear prediction: v_pred = S * rhs
+    let v_pred = mat_vec_mul_s(&rhs);
+
+    // Step 3: Extract controlling voltages for nonlinear devices
+    let p = extract_controlling_voltages(&v_pred);
+
+    // Step 4: Solve M×M nonlinear system via Newton-Raphson
+    let i_nl = solve_nonlinear(&p, state);
+
+    // Step 5: Compute final node voltages
+    let v = compute_final_voltages(&v_pred, &i_nl, state);
+
+    // Step 6: Update history (no-op, handled by A_neg formulation)
+    update_history(&v, state);
+
+    // Step 7: Update state for next iteration
+    state.v_prev = v;
+    state.i_nl_prev = i_nl;
+    state.input_prev = input;
+
+    // Step 8: Sanitize state — if NaN/inf entered, reset to prevent poisoning
+    if !state.v_prev.iter().all(|x| x.is_finite()) {
+        state.v_prev = [0.0; N];
+        state.i_nl_prev = [0.0; M];
+        state.input_prev = 0.0;
+        return 0.0;
+    }
+
+    // Return output voltage, clamped to safe audio range
+    let out = v[OUTPUT_NODE];
+    if out.is_finite() { out.clamp(-10.0, 10.0) } else { 0.0 }
+}

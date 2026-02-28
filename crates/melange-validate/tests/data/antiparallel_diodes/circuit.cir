@@ -3,7 +3,9 @@
 
 .model D1N4148 D(IS=2.52e-9 RS=0.568 N=1.906)
 
-Vin in 0 PWL(0 0 0.5m 3 1m -3 1.5m 0)
+* Input source - PWL will be injected during validation
+VIN in 0 DC 0
+
 R1 in out 1k
 D1 out 0 D1N4148
 D2 0 out D1N4148

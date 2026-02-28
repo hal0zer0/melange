@@ -1,0 +1,58 @@
+// =============================================================================
+// STATE STRUCTURE
+// =============================================================================
+
+{% if has_dc_op %}/// DC operating point: linear steady-state node voltages
+/// Computed from G * v = b_dc (treats nonlinear devices as open)
+pub const DC_OP: [f64; N] = [{{ dc_op_values }}];
+
+{% endif %}/// Circuit state for one processing channel
+#[derive(Clone, Debug)]
+pub struct CircuitState {
+    /// Previous node voltages v[n-1]
+    pub v_prev: [f64; N],
+
+    /// Previous nonlinear currents i_nl[n-1]
+    pub i_nl_prev: [f64; M],
+
+    /// DC operating point (for reset/sleep/wake)
+    pub dc_operating_point: [f64; N],
+
+    /// Previous input sample for trapezoidal integration
+    pub input_prev: f64,
+
+    /// Iteration count from last solve (for diagnostics)
+    pub last_nr_iterations: u32,
+}
+
+impl Default for CircuitState {
+    fn default() -> Self {
+        Self {
+{% if has_dc_op %}            v_prev: DC_OP,
+            i_nl_prev: [0.0; M],
+            dc_operating_point: DC_OP,
+{% else %}            v_prev: [0.0; N],
+            i_nl_prev: [0.0; M],
+            dc_operating_point: [0.0; N],
+{% endif %}            input_prev: 0.0,
+            last_nr_iterations: 0,
+        }
+    }
+}
+
+impl CircuitState {
+    /// Reset to DC operating point
+    pub fn reset(&mut self) {
+        self.v_prev = self.dc_operating_point;
+        self.i_nl_prev = [0.0; M];
+        self.input_prev = 0.0;
+        self.last_nr_iterations = 0;
+    }
+
+    /// Set DC operating point (call after DC analysis)
+    pub fn set_dc_operating_point(&mut self, v_dc: [f64; N]) {
+        self.dc_operating_point = v_dc;
+        self.v_prev = v_dc;
+    }
+}
+

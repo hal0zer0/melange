@@ -340,19 +340,30 @@ impl Parser {
 
     fn parse_model(&self, parts: &[&str]) -> Result<Model, ParseError> {
         let name = parts[1].to_string();
-        let model_type = parts[2].to_string();
         let mut params = Vec::new();
 
-        // Parse parameters like IS=1e-15 BF=200
-        for part in &parts[3..] {
-            // Remove parentheses and trailing characters
-            let part = part.trim_start_matches('(').trim_end_matches(')');
-            if let Some(eq_pos) = part.find('=') {
-                let key = part[..eq_pos].to_string();
-                let value_str = &part[eq_pos + 1..];
-                let value = parse_value(value_str)
-                    .map_err(|_| self.error(format!("Invalid model parameter value: {}", value_str)))?;
-                params.push((key, value));
+        // Reconstruct everything after ".model NAME" to handle TYPE(PARAMS...) correctly
+        // e.g. ".model D1N4148 D(IS=1e-15)" or ".model 2N2222 NPN(IS=1e-15 BF=200)"
+        let rest: String = parts[2..].join(" ");
+
+        // Extract model type: everything before the first '('
+        let model_type = if let Some(paren_pos) = rest.find('(') {
+            rest[..paren_pos].trim().to_string()
+        } else {
+            rest.trim().to_string()
+        };
+
+        // Extract params from between parentheses (if any)
+        if let (Some(open), Some(close)) = (rest.find('('), rest.rfind(')')) {
+            let params_str = &rest[open + 1..close];
+            for token in params_str.split_whitespace() {
+                if let Some(eq_pos) = token.find('=') {
+                    let key = token[..eq_pos].to_string();
+                    let value_str = &token[eq_pos + 1..];
+                    let value = parse_value(value_str)
+                        .map_err(|_| self.error(format!("Invalid model parameter value: {}", value_str)))?;
+                    params.push((key, value));
+                }
             }
         }
 

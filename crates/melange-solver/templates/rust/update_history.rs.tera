@@ -1,0 +1,9 @@
+/// Update capacitor history for companion model.
+///
+/// NOTE: In the DK method, capacitor history is implicitly handled by
+/// the A_neg * v_prev term in build_rhs. This function is a no-op.
+#[inline(always)]
+fn update_history(_v: &[f64; N], _state: &mut CircuitState) {
+    // Capacitor history is handled implicitly by A_neg * v_prev
+}
+

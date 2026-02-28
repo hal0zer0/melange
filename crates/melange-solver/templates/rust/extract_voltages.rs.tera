@@ -1,0 +1,7 @@
+/// Extract controlling voltages: p = N_v * v_pred
+#[inline(always)]
+fn extract_controlling_voltages(v_pred: &[f64; N]) -> [f64; M] {
+    [
+{{ extract_lines }}    ]
+}
+

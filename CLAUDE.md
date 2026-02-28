@@ -106,13 +106,18 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
 - DK kernel build with proper trapezoidal discretization
 - NR solver: 1D, 2D (two 1D devices), and M-dimensional
 - Codegen for diode and BJT circuits (up to M=4)
+- Codegen uses proper trapezoidal RHS with `input_prev` tracking (matches runtime solver)
+- Per-device `.model` params: each device gets its own IS, N, BF, BR, VT (heterogeneous models supported)
+- DC operating point calculation includes input conductance
+- Plugin template generates per-channel state for stereo (no cross-channel corruption)
 - SPICE validation infrastructure with ngspice
-- Input validation: parser rejects negative/zero/NaN/Inf component values
-- Error types are enums (`MnaError`, `DkError`) — no panicking library code
+- Input validation: parser rejects negative/zero/NaN/Inf component values; codegen validates node indices
+- Error types are enums (`MnaError`, `DkError`, `CodegenError` with `InvalidConfig`) — no panicking library code
 - MAX_M=8 bound prevents unbounded allocation in DK kernel
+- CLI reports errors for unresolved node names (no silent defaults)
 
 ### Known Limitations
-- No DC operating point solver (circuits with DC bias start from zero)
+- Linear DC operating point only (no nonlinear DC OP solver; circuits with DC bias start from linear estimate)
 - Purely resistive nonlinear circuits oscillate (need capacitor damping)
 - JFET/MOSFET not yet in codegen NR
 - Koren triode equation needs rewrite (Phase 4a of review plan)

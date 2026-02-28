@@ -1,0 +1,32 @@
+/// Safe exponential (clamp to prevent overflow)
+#[inline(always)]
+fn safe_exp(x: f64) -> f64 { x.clamp(-500.0, 500.0).exp() }
+
+/// BJT Ebers-Moll collector current Ic(Vbe, Vbc)
+#[inline(always)]
+fn bjt_ic(vbe: f64, vbc: f64, is: f64, vt: f64, beta_r: f64) -> f64 {
+    let exp_be = safe_exp(vbe / vt);
+    let exp_bc = safe_exp(vbc / vt);
+    is * (exp_be - exp_bc) - is / beta_r * (exp_bc - 1.0)
+}
+
+/// BJT Ebers-Moll base current Ib(Vbe, Vbc)
+#[inline(always)]
+fn bjt_ib(vbe: f64, vbc: f64, is: f64, vt: f64, beta_f: f64, beta_r: f64) -> f64 {
+    let exp_be = safe_exp(vbe / vt);
+    let exp_bc = safe_exp(vbc / vt);
+    is / beta_f * (exp_be - 1.0) + is / beta_r * (exp_bc - 1.0)
+}
+
+/// BJT Jacobian: [dIc/dVbe, dIc/dVbc, dIb/dVbe, dIb/dVbc]
+#[inline(always)]
+fn bjt_jacobian(vbe: f64, vbc: f64, is: f64, vt: f64, beta_f: f64, beta_r: f64) -> [f64; 4] {
+    let exp_be = safe_exp(vbe / vt);
+    let exp_bc = safe_exp(vbc / vt);
+    let dic_dvbe = is / vt * exp_be;
+    let dic_dvbc = -(is / vt) * exp_bc - (is / (beta_r * vt)) * exp_bc;
+    let dib_dvbe = (is / (beta_f * vt)) * exp_be;
+    let dib_dvbc = (is / (beta_r * vt)) * exp_bc;
+    [dic_dvbe, dic_dvbc, dib_dvbe, dib_dvbc]
+}
+

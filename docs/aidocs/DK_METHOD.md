@@ -54,9 +54,11 @@ Devices occupy M dimensions in netlist order:
 
 ### Step 1: Build RHS
 ```
-rhs = A_neg * v_prev + N_i * i_nl_prev + 2 * V_in * G_in + rhs_const
+rhs = A_neg * v_prev + N_i * i_nl_prev + (V_in + V_in_prev) * G_in + rhs_const
 ```
 Note: A_neg already contains capacitor history via alpha*C. Do NOT add separate cap_history.
+
+**CRITICAL**: Use trapezoidal rule for inputs: `(V_in + V_in_prev) * G_in`, NOT `2 * V_in * G_in`
 
 ### Step 2: Linear Prediction
 ```
@@ -103,6 +105,50 @@ v = v_pred + S * N_i * (i_nl - i_nl_prev)
 2. **Double-counting history** -> DC offset, instability
 3. **Wrong N_i ground-reference sign** -> Wrong K sign for grounded devices
 4. **Missing correction term** -> Wrong output amplitude
+
+## Common Integration Pitfalls
+
+### Input Handling in SPICE Validation
+
+**WRONG** - Setting solver field after MNA built:
+```rust
+let mna = MnaSystem::from_netlist(&netlist)?;
+let kernel = DkKernel::from_mna(&mna, sample_rate)?;  // S computed WITHOUT input
+let mut solver = CircuitSolver::new(kernel, ...);
+solver.input_conductance = 0.0001;  // TOO LATE!
+```
+
+**RIGHT** - Stamp into MNA G matrix before kernel:
+```rust
+let mut mna = MnaSystem::from_netlist(&netlist)?;
+// Stamp input conductance BEFORE building kernel
+mna.g[input_node][input_node] += input_conductance;
+let kernel = DkKernel::from_mna(&mna, sample_rate)?;  // S includes input
+```
+
+**Why**: The DK kernel computes `S = A⁻¹` where `A = 2C/T + G`. If input conductance isn't in G, it's not part of the circuit topology, and the solver's runtime injection creates an inconsistent system.
+
+### Trapezoidal Rule for Time-Varying Inputs
+
+**WRONG**:
+```rust
+rhs[input_node] += 2.0 * input * G_in;
+```
+
+**RIGHT**:
+```rust
+rhs[input_node] += (input + input_prev) * G_in;
+// Track input_prev across samples
+```
+
+**Impact**: In RC lowpass test, wrong approach gave 3.2% RMS error; correct approach gave 0.03%.
+
+### Input Conductance Value for Validation
+
+When validating against SPICE voltage source (ideal, 0Ω output):
+- Use `input_conductance = 1.0` (1Ω, near-ideal)
+- NOT the circuit's input resistor value (e.g., 10kΩ)
+- The voltage source is the reference; we approximate it with low-Z Thevenin
 
 ## References
 - Hack Audio Tutorial (Chapters 5-8): https://hackaudio.com/tutorial-courses/audio-circuit-modeling-tutorial/

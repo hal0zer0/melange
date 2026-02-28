@@ -1,0 +1,55 @@
+// =============================================================================
+// CONSTANTS: Compile-time circuit topology
+// =============================================================================
+
+/// Number of circuit nodes (including ground reference)
+pub const N: usize = {{ n }};
+
+/// Number of nonlinear devices
+pub const M: usize = {{ m }};
+
+/// Sample rate (Hz)
+pub const SAMPLE_RATE: f64 = {{ sample_rate }};
+
+/// Alpha = 2/T for trapezoidal integration
+pub const ALPHA: f64 = {{ alpha }};
+
+/// Input node index
+pub const INPUT_NODE: usize = {{ input_node }};
+
+/// Output node index
+pub const OUTPUT_NODE: usize = {{ output_node }};
+
+/// Input resistance (Thevenin equivalent)
+pub const INPUT_RESISTANCE: f64 = {{ input_resistance }};
+
+/// S matrix: S = A⁻¹ where A = G + alpha*C
+pub const S: [[f64; N]; N] = [
+{% for row in s_rows %}    [{{ row }}],
+{% endfor %}];
+
+/// A_neg matrix: A_neg = alpha*C - G
+/// Used for RHS computation: A_neg * v_prev gives history contribution
+pub const A_NEG: [[f64; N]; N] = [
+{% for row in a_neg_rows %}    [{{ row }}],
+{% endfor %}];
+
+{% if has_dc_sources %}/// RHS_CONST: constant contribution from DC voltage/current sources
+/// Added to RHS every sample (Norton equivalent of voltage sources)
+pub const RHS_CONST: [f64; N] = [{{ rhs_const_values }}];
+
+{% endif %}/// K matrix: Nonlinear kernel K = N_v * S * N_i^T
+pub const K: [[f64; M]; M] = [
+{% for row in k_rows %}    [{{ row }}],
+{% endfor %}];
+
+/// N_v matrix: Extracts controlling voltages from node voltages
+pub const N_V: [[f64; N]; M] = [
+{% for row in n_v_rows %}    [{{ row }}],
+{% endfor %}];
+
+/// N_i matrix (transposed): Maps nonlinear currents to node injections
+pub const N_I: [[f64; N]; M] = [
+{% for row in n_i_rows %}    [{{ row }}],
+{% endfor %}];
+

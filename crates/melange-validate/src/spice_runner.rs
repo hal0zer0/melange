@@ -6,7 +6,11 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 use thiserror::Error;
+
+/// Thread-safe counter for unique temp file names
+static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Errors that can occur when running SPICE simulations
 #[derive(Debug, Error, Clone)]
@@ -118,20 +122,81 @@ impl SpiceData {
 /// ```
 pub fn run_transient(
     netlist_path: &Path,
-    _tstep: f64,
-    _tstop: f64,
+    tstep: f64,
+    tstop: f64,
     nodes_to_capture: &[String],
 ) -> Result<SpiceData, SpiceError> {
+    use std::io::Write;
+    
     // Check if ngspice is available
     if Command::new("ngspice").arg("--version").output().is_err() {
         return Err(SpiceError::NgspiceNotFound);
     }
 
-    // Run ngspice directly on the netlist (which already has .TRAN and .PRINT)
+    // Read original netlist
+    let original_content = std::fs::read_to_string(netlist_path)?;
+    
+    // Create modified netlist with updated .TRAN and .PRINT statements
+    let mut modified_content = String::new();
+    let mut first_line = true;
+
+    for line in original_content.lines() {
+        let trimmed_upper = line.trim().to_uppercase();
+
+        // After copying the title line (first line in SPICE is always the title),
+        // inject .OPTIONS INTERP to force uniform output timestep.
+        // Without this, ngspice prints at all internal adaptive timestep points,
+        // which gives non-uniform time spacing and breaks index-based comparison.
+        if first_line {
+            modified_content.push_str(line);
+            modified_content.push('\n');
+            modified_content.push_str(".OPTIONS INTERP\n");
+            first_line = false;
+            continue;
+        }
+
+        if trimmed_upper.starts_with(".TRAN") {
+            // Replace with uniform timestep for sample-accurate comparison
+            // Use the specified tstep and tstop instead of netlist values
+            modified_content.push_str(&format!(".TRAN {} {}\n",
+                format_scientific(tstep),
+                format_scientific(tstop)
+            ));
+        } else if trimmed_upper.starts_with(".OPTIONS") {
+            // Skip existing .OPTIONS lines to avoid conflicts with our INTERP
+            continue;
+        } else if trimmed_upper.starts_with(".PRINT") {
+            // Update .PRINT to capture at our timestep
+            modified_content.push_str(&format!(
+                ".PRINT TRAN {}\n",
+                nodes_to_capture.iter().map(|n| format!("V({})", n)).collect::<Vec<_>>().join(" ")
+            ));
+        } else if !trimmed_upper.starts_with(".END") {
+            // Copy all lines except .END (we'll add it at the end)
+            modified_content.push_str(line);
+            modified_content.push('\n');
+        }
+    }
+    // Ensure .END is present
+    modified_content.push_str(".END\n");
+    
+    // Write to temp file
+    let temp_dir = std::env::temp_dir();
+    let temp_path = temp_dir.join(format!("melange_tran_{}_{}.cir",
+        std::process::id(), TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)));
+    {
+        let mut file = std::fs::File::create(&temp_path)?;
+        file.write_all(modified_content.as_bytes())?;
+    }
+    
+    // Run ngspice on the modified netlist
     let output = Command::new("ngspice")
         .arg("-b")  // Batch mode
-        .arg(netlist_path)
+        .arg(&temp_path)
         .output()?;
+
+    // Clean up temp file
+    let _ = std::fs::remove_file(&temp_path);
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -169,6 +234,10 @@ pub fn run_transient_with_pwl(
 }
 
 /// Inject a PWL voltage source into a netlist
+///
+/// This function replaces an existing voltage source with a PWL (piecewise linear)
+/// source while preserving the original node connections. It correctly parses
+/// the original source line to extract node names (not hardcoded to "in 0").
 fn inject_pwl_source(
     original_netlist: &Path,
     source_name: &str,
@@ -186,9 +255,6 @@ fn inject_pwl_source(
     // Read original netlist
     let original_content = std::fs::read_to_string(original_netlist)?;
 
-    // Build PWL source line (SPICE format: Vname node+ node- PWL(t1 v1 t2 v2 ...))
-    let pwl_source_line = format!("V{} in 0 PWL({})", source_name.to_uppercase(), pwl_string);
-
     // Case-insensitive search for existing voltage source
     let lines: Vec<&str> = original_content.lines().collect();
     let mut modified_lines = Vec::new();
@@ -203,19 +269,45 @@ fn inject_pwl_source(
         
         // Check if this line is the voltage source definition (case-insensitive)
         if trimmed_upper.starts_with(&source_pattern) {
-            // Replace the entire source line with PWL version
-            // Find comment position to preserve comments
-            let comment_pos = line.find('*').unwrap_or(line.len());
-            let comment = &line[comment_pos..];
-            if comment.starts_with('*') {
-                modified_lines.push(format!("{} {}", pwl_source_line, comment));
+            // Parse the original source line to extract node names
+            // Format: Vname n+ n- [DC value] [AC ...] or Vname n+ n- PWL(...)
+            let parts: Vec<&str> = trimmed.split_whitespace().collect();
+            
+            // We need at least: Vname n+ n-
+            if parts.len() >= 3 {
+                let node_plus = parts[1];
+                let node_minus = parts[2];
+                
+                // Build PWL source line with correct node names
+                let pwl_source_line = format!(
+                    "V{} {} {} PWL({})",
+                    source_name.to_uppercase(),
+                    node_plus,
+                    node_minus,
+                    pwl_string
+                );
+                
+                // Find comment position to preserve comments
+                let comment_pos = line.find('*').unwrap_or(line.len());
+                let comment = &line[comment_pos..];
+                if comment.starts_with('*') {
+                    modified_lines.push(format!("{} {}", pwl_source_line, comment));
+                } else {
+                    modified_lines.push(pwl_source_line);
+                }
+                source_replaced = true;
             } else {
-                modified_lines.push(pwl_source_line.clone());
+                // Malformed source line, keep it as-is
+                modified_lines.push(line.to_string());
             }
-            source_replaced = true;
         } else if trimmed_upper.starts_with("*PWL_SOURCE_") {
-            // Replace placeholder
-            modified_lines.push(pwl_source_line.clone());
+            // Replace placeholder - use default nodes "in" and "0"
+            let pwl_source_line = format!(
+                "V{} in 0 PWL({})",
+                source_name.to_uppercase(),
+                pwl_string
+            );
+            modified_lines.push(pwl_source_line);
             source_replaced = true;
         } else {
             modified_lines.push(line.to_string());
@@ -227,19 +319,28 @@ fn inject_pwl_source(
         // Look for .END and insert before it
         let mut content = modified_lines.join("\n");
         let end_pos = content.to_uppercase().find(".END");
+        
+        // Default nodes for auto-added source
+        let default_pwl_line = format!(
+            "V{} in 0 PWL({})",
+            source_name.to_uppercase(),
+            pwl_string
+        );
+        
         if let Some(pos) = end_pos {
-            content.insert_str(pos, &format!("{}\n", pwl_source_line));
+            content.insert_str(pos, &format!("{}\n", default_pwl_line));
             content
         } else {
             // No .END found, just append
-            format!("{}\n{}\n", content, pwl_source_line)
+            format!("{}\n{}\n", content, default_pwl_line)
         }
     } else {
         modified_lines.join("\n")
     };
 
     let temp_dir = std::env::temp_dir();
-    let modified_path = temp_dir.join(format!("melange_pwl_{}.cir", std::process::id()));
+    let modified_path = temp_dir.join(format!("melange_pwl_{}_{}.cir",
+        std::process::id(), TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)));
 
     let mut file = std::fs::File::create(&modified_path)?;
     file.write_all(modified_content.as_bytes())?;

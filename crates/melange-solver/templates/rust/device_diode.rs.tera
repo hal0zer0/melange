@@ -1,0 +1,14 @@
+/// Diode current: i_d = is * (exp(v_d / n_vt) - 1)
+#[inline(always)]
+fn diode_current(v_d: f64, is: f64, n_vt: f64) -> f64 {
+    let v_clamped = v_d.clamp(-100.0 * n_vt, 100.0 * n_vt);
+    is * ((v_clamped / n_vt).exp() - 1.0)
+}
+
+/// Diode conductance: g_d = di/dv = (is / n_vt) * exp(v_d / n_vt)
+#[inline(always)]
+fn diode_conductance(v_d: f64, is: f64, n_vt: f64) -> f64 {
+    let v_clamped = v_d.clamp(-100.0 * n_vt, 100.0 * n_vt);
+    (is / n_vt) * (v_clamped / n_vt).exp()
+}
+
