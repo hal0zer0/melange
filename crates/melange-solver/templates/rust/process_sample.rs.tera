@@ -14,12 +14,24 @@
 pub fn process_sample(input: f64, state: &mut CircuitState) -> f64 {
     // Validate input — handle NaN, inf, and extreme values
     let input = if input.is_finite() { input.clamp(-100.0, 100.0) } else { 0.0 };
+{% if num_pots > 0 %}
+
+    // Compute Sherman-Morrison scale factors for potentiometers
+{{ sm_scale_lines }}{% endif %}
 
     // Step 1: Build RHS vector from history and input
-    let rhs = build_rhs(input, state.input_prev, state);
+    let {% if num_pots > 0 %}mut {% endif %}rhs = build_rhs(input, state.input_prev, state);
+{% if num_pots > 0 %}
+
+    // Step 1b: A_neg correction for pot conductance change
+{{ a_neg_correction }}{% endif %}
 
     // Step 2: Linear prediction: v_pred = S * rhs
-    let v_pred = mat_vec_mul_s(&rhs);
+    let {% if num_pots > 0 %}mut {% endif %}v_pred = mat_vec_mul_s(&rhs);
+{% if num_pots > 0 %}
+
+    // Step 2b: Sherman-Morrison S correction on v_pred
+{{ s_correction }}{% endif %}
 
     // Step 3: Extract controlling voltages for nonlinear devices
     let p = extract_controlling_voltages(&v_pred);
@@ -28,7 +40,11 @@ pub fn process_sample(input: f64, state: &mut CircuitState) -> f64 {
     let i_nl = solve_nonlinear(&p, state);
 
     // Step 5: Compute final node voltages
-    let v = compute_final_voltages(&v_pred, &i_nl, state);
+    let {% if num_pots > 0 %}mut {% endif %}v = compute_final_voltages(&v_pred, &i_nl, state);
+{% if num_pots > 0 and sni_correction is defined and sni_correction != "" %}
+
+    // Step 5b: Sherman-Morrison S*N_i correction on final voltages
+{{ sni_correction }}{% endif %}
 
     // Step 6: Update history (no-op, handled by A_neg formulation)
     update_history(&v, state);

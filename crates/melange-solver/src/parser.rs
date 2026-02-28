@@ -2,7 +2,7 @@
 //!
 //! Parses a subset of SPICE sufficient for audio circuits:
 //! - Components: R, C, L, V (DC/AC), I, D, Q, J, M, X
-//! - Directives: .model, .subckt, .param, .end
+//! - Directives: .model, .subckt, .param, .pot, .end
 //!
 //! The parser builds an AST (Abstract Syntax Tree) representation
 //! of the circuit that can be processed by the MNA assembler.
@@ -20,6 +20,23 @@ pub struct Netlist {
     pub subcircuits: Vec<Subcircuit>,
     /// Global parameters
     pub params: Vec<Parameter>,
+    /// Potentiometer directives (.pot)
+    pub pots: Vec<PotDirective>,
+}
+
+/// A potentiometer directive (.pot Rname min max).
+///
+/// Marks a resistor as runtime-variable with a min/max range.
+/// The resistor's existing value in the netlist becomes the nominal
+/// value for Sherman-Morrison precomputation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PotDirective {
+    /// Name of the resistor this pot controls (e.g. "R1")
+    pub resistor_name: String,
+    /// Minimum resistance value (ohms)
+    pub min_value: f64,
+    /// Maximum resistance value (ohms)
+    pub max_value: f64,
 }
 
 impl Netlist {
@@ -31,6 +48,7 @@ impl Netlist {
             models: Vec::new(),
             subcircuits: Vec::new(),
             params: Vec::new(),
+            pots: Vec::new(),
         }
     }
 
@@ -327,6 +345,10 @@ impl Parser {
                     elements: subckt_elements,
                 });
             }
+            ".pot" => {
+                let pot = self.parse_pot_directive(&parts, netlist)?;
+                netlist.pots.push(pot);
+            }
             ".end" | ".ends" => {
                 // End of netlist or subcircuit
             }
@@ -390,6 +412,76 @@ impl Parser {
         } else {
             Err(self.error("Parameter must be name=value format"))
         }
+    }
+
+    fn parse_pot_directive(&self, parts: &[&str], netlist: &Netlist) -> Result<PotDirective, ParseError> {
+        // .pot Rname min max
+        if parts.len() < 4 {
+            return Err(self.error(".pot requires: .pot Rname min_value max_value"));
+        }
+
+        let resistor_name = parts[1].to_string();
+
+        // Validate that the resistor name starts with 'R' or 'r'
+        if !resistor_name.starts_with('R') && !resistor_name.starts_with('r') {
+            return Err(self.error(format!(
+                ".pot target must be a resistor (name starting with R), got '{}'",
+                resistor_name
+            )));
+        }
+
+        let min_value = parse_value(parts[2])
+            .map_err(|_| self.error(format!("Invalid .pot min value: {}", parts[2])))?;
+        let max_value = parse_value(parts[3])
+            .map_err(|_| self.error(format!("Invalid .pot max value: {}", parts[3])))?;
+
+        // Validate values
+        if min_value <= 0.0 || !min_value.is_finite() {
+            return Err(self.error(format!(
+                ".pot min value must be positive and finite, got {}",
+                min_value
+            )));
+        }
+        if max_value <= 0.0 || !max_value.is_finite() {
+            return Err(self.error(format!(
+                ".pot max value must be positive and finite, got {}",
+                max_value
+            )));
+        }
+        if min_value >= max_value {
+            return Err(self.error(format!(
+                ".pot min ({}) must be less than max ({})",
+                min_value, max_value
+            )));
+        }
+
+        // Validate: referenced resistor must exist in the netlist
+        let resistor_exists = netlist.elements.iter().any(|e| matches!(e, Element::Resistor { name, .. } if name == &resistor_name));
+        if !resistor_exists {
+            return Err(self.error(format!(
+                ".pot references resistor '{}' which was not found in the netlist",
+                resistor_name
+            )));
+        }
+
+        // Validate: no duplicate pot for the same resistor
+        if netlist.pots.iter().any(|p| p.resistor_name == resistor_name) {
+            return Err(self.error(format!(
+                "Duplicate .pot directive for resistor '{}'",
+                resistor_name
+            )));
+        }
+
+        // Limit: max 2 pots
+        if netlist.pots.len() >= 2 {
+            return Err(self.error("Maximum of 2 .pot directives supported"));
+        }
+
+        Ok(PotDirective {
+            resistor_name,
+            min_value,
+            max_value,
+        })
     }
 
     fn parse_element(&self, line: &str) -> Result<Element, ParseError> {
@@ -822,6 +914,74 @@ mod tests {
     fn test_parse_missing_value() {
         let result = Netlist::parse("Test\nR1 1 0\n");
         assert!(result.is_err(), "Missing value should be rejected");
+    }
+
+    #[test]
+    fn test_parse_pot_directive() {
+        let spice = "Test\nR1 1 0 10k\n.pot R1 1k 100k\n";
+        let netlist = Netlist::parse(spice).unwrap();
+        assert_eq!(netlist.pots.len(), 1);
+        assert_eq!(netlist.pots[0].resistor_name, "R1");
+        assert_eq!(netlist.pots[0].min_value, 1e3);
+        assert_eq!(netlist.pots[0].max_value, 100e3);
+    }
+
+    #[test]
+    fn test_parse_pot_two_pots() {
+        let spice = "Test\nR1 1 0 10k\nR2 2 0 5k\n.pot R1 1k 100k\n.pot R2 500 50k\n";
+        let netlist = Netlist::parse(spice).unwrap();
+        assert_eq!(netlist.pots.len(), 2);
+        assert_eq!(netlist.pots[0].resistor_name, "R1");
+        assert_eq!(netlist.pots[1].resistor_name, "R2");
+    }
+
+    #[test]
+    fn test_parse_pot_missing_resistor() {
+        let spice = "Test\nR1 1 0 10k\n.pot R2 1k 100k\n";
+        let result = Netlist::parse(spice);
+        assert!(result.is_err(), "Pot referencing non-existent resistor should fail");
+    }
+
+    #[test]
+    fn test_parse_pot_not_a_resistor() {
+        let spice = "Test\nC1 1 0 10u\n.pot C1 1u 100u\n";
+        let result = Netlist::parse(spice);
+        assert!(result.is_err(), "Pot targeting non-resistor should fail");
+    }
+
+    #[test]
+    fn test_parse_pot_min_gte_max() {
+        let spice = "Test\nR1 1 0 10k\n.pot R1 100k 1k\n";
+        let result = Netlist::parse(spice);
+        assert!(result.is_err(), "Pot with min >= max should fail");
+    }
+
+    #[test]
+    fn test_parse_pot_duplicate() {
+        let spice = "Test\nR1 1 0 10k\n.pot R1 1k 100k\n.pot R1 2k 50k\n";
+        let result = Netlist::parse(spice);
+        assert!(result.is_err(), "Duplicate pot for same resistor should fail");
+    }
+
+    #[test]
+    fn test_parse_pot_max_exceeded() {
+        let spice = "Test\nR1 1 0 10k\nR2 2 0 5k\nR3 3 0 3k\n.pot R1 1k 100k\n.pot R2 500 50k\n.pot R3 100 10k\n";
+        let result = Netlist::parse(spice);
+        assert!(result.is_err(), "More than 2 pots should fail");
+    }
+
+    #[test]
+    fn test_parse_pot_negative_min() {
+        let spice = "Test\nR1 1 0 10k\n.pot R1 -1k 100k\n";
+        let result = Netlist::parse(spice);
+        assert!(result.is_err(), "Negative min value should fail");
+    }
+
+    #[test]
+    fn test_parse_pot_missing_args() {
+        let spice = "Test\nR1 1 0 10k\n.pot R1 1k\n";
+        let result = Netlist::parse(spice);
+        assert!(result.is_err(), "Missing max value should fail");
     }
 
     #[test]

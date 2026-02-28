@@ -115,6 +115,12 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
 - Error types are enums (`MnaError`, `DkError`, `CodegenError` with `InvalidConfig`) — no panicking library code
 - MAX_M=8 bound prevents unbounded allocation in DK kernel
 - CLI reports errors for unresolved node names (no silent defaults)
+- **Dynamic potentiometers**: `.pot R1 min max` directive marks a resistor as runtime-variable
+  - Sherman-Morrison rank-1 updates: O(N²) correction instead of O(N³) re-inversion
+  - Precomputed SM vectors (SU, USU, NV_SU, U_NI) baked into generated constants
+  - Corrections applied to S, K, A_neg, and S*N_i products in codegen
+  - Plugin template auto-generates `FloatParam` knobs for each pot
+  - Max 2 pots per circuit; pot value stored in `CircuitState`
 
 ### Known Limitations
 - Linear DC operating point only (no nonlinear DC OP solver; circuits with DC bias start from linear estimate)

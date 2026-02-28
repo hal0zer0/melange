@@ -31,6 +31,10 @@ pub struct CircuitState {
     /// Inductor history currents (Norton equivalent)
     pub ind_i_hist: [f64; {{ num_inductors }}],
 {% endif %}
+{% for default in pot_defaults %}
+    /// Potentiometer {{ loop.index0 }} current resistance (ohms)
+    pub pot_{{ loop.index0 }}_resistance: f64,
+{% endfor %}
 }
 
 impl Default for CircuitState {
@@ -49,6 +53,9 @@ impl Default for CircuitState {
             ind_v_prev: [0.0; {{ num_inductors }}],
             ind_i_hist: [0.0; {{ num_inductors }}],
 {% endif %}
+{% for default in pot_defaults %}
+            pot_{{ loop.index0 }}_resistance: {{ default }},
+{% endfor %}
         }
     }
 }
@@ -65,6 +72,9 @@ impl CircuitState {
         self.ind_v_prev = [0.0; {{ num_inductors }}];
         self.ind_i_hist = [0.0; {{ num_inductors }}];
 {% endif %}
+{% for default in pot_defaults %}
+        self.pot_{{ loop.index0 }}_resistance = {{ default }};
+{% endfor %}
     }
 
     /// Set DC operating point (call after DC analysis)

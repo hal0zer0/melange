@@ -31,6 +31,35 @@ pub struct InductorInfo {
     pub v_prev: f64,
 }
 
+/// Precomputed Sherman-Morrison data for a potentiometer.
+///
+/// When a pot changes resistance from R_nom to R_new, the conductance change
+/// `delta_g = 1/R_new - 1/R_nom` produces a rank-1 update to the A matrix.
+/// These precomputed vectors enable O(N^2) correction instead of O(N^3) re-inversion.
+#[derive(Debug, Clone)]
+pub struct SmPotData {
+    /// S * u where u is the pot's node difference vector (N-vector)
+    pub su: Vec<f64>,
+    /// u^T * S * u (scalar for SM denominator)
+    pub usu: f64,
+    /// Nominal conductance 1/R_nom
+    pub g_nominal: f64,
+    /// N_v * su (M-vector, for K correction in NR loop)
+    pub nv_su: Vec<f64>,
+    /// u^T * N_i (M-vector, for correction to S*N_i products)
+    pub u_ni: Vec<f64>,
+    /// Positive terminal node index (0 = ground, 1-indexed)
+    pub node_p: usize,
+    /// Negative terminal node index (0 = ground, 1-indexed)
+    pub node_q: usize,
+    /// Minimum resistance (ohms)
+    pub min_resistance: f64,
+    /// Maximum resistance (ohms)
+    pub max_resistance: f64,
+    /// True if one terminal is grounded
+    pub grounded: bool,
+}
+
 /// DK kernel for a circuit.
 ///
 /// This is the reduced representation used for efficient simulation.
@@ -59,6 +88,8 @@ pub struct DkKernel {
     pub rhs_const: Vec<f64>,
     /// Inductor companion model info
     pub inductors: Vec<InductorInfo>,
+    /// Potentiometer Sherman-Morrison precomputed data
+    pub pots: Vec<SmPotData>,
 }
 
 /// Error type for DK reduction.
@@ -144,6 +175,59 @@ impl DkKernel {
         // Build constant sources from voltage and current sources
         let rhs_const = build_rhs_const(mna, sample_rate);
 
+        // Precompute Sherman-Morrison vectors for pots
+        let mut pots = Vec::with_capacity(mna.pots.len());
+        for pot_info in &mna.pots {
+            // Build the u vector: u[p-1] = 1, u[q-1] = -1 (for non-grounded)
+            // If one terminal is grounded, only the non-ground terminal has +1
+            let mut u = vec![0.0; n];
+            if pot_info.node_p > 0 {
+                u[pot_info.node_p - 1] = 1.0;
+            }
+            if pot_info.node_q > 0 {
+                u[pot_info.node_q - 1] = -1.0;
+            }
+
+            // su = S * u (N-vector)
+            let su = mat_vec_mul(&s_2d, &u);
+
+            // usu = u^T * S * u (scalar)
+            let mut usu = 0.0;
+            for i in 0..n {
+                usu += u[i] * su[i];
+            }
+
+            // nv_su = N_v * su (M-vector)
+            let nv_su = if m > 0 {
+                mat_vec_mul(&mna.n_v, &su)
+            } else {
+                Vec::new()
+            };
+
+            // u_ni[j] = u^T * N_i[:,j] (M-vector)
+            let mut u_ni = vec![0.0; m];
+            for j in 0..m {
+                let mut sum = 0.0;
+                for i in 0..n {
+                    sum += u[i] * mna.n_i[i][j];
+                }
+                u_ni[j] = sum;
+            }
+
+            pots.push(SmPotData {
+                su,
+                usu,
+                g_nominal: pot_info.g_nominal,
+                nv_su,
+                u_ni,
+                node_p: pot_info.node_p,
+                node_q: pot_info.node_q,
+                min_resistance: pot_info.min_resistance,
+                max_resistance: pot_info.max_resistance,
+                grounded: pot_info.grounded,
+            });
+        }
+
         // Flatten N_v and N_i from MNA (which still uses 2D format)
         let n_v = flatten_matrix(&mna.n_v, m, n);
         let n_i = flatten_matrix(&mna.n_i, n, m);
@@ -183,6 +267,7 @@ impl DkKernel {
             a_neg,
             rhs_const,
             inductors,
+            pots,
         })
     }
 

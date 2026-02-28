@@ -54,6 +54,8 @@ pub struct MnaSystem {
     pub current_sources: Vec<CurrentSourceInfo>,
     /// Inductor elements for companion model
     pub inductors: Vec<InductorElement>,
+    /// Potentiometer info (resolved from .pot directives)
+    pub pots: Vec<PotInfo>,
 }
 
 /// Inductor element info for companion model.
@@ -109,6 +111,25 @@ pub struct CurrentSourceInfo {
     pub dc_value: f64,
 }
 
+/// Potentiometer information resolved from .pot directive.
+#[derive(Debug, Clone)]
+pub struct PotInfo {
+    /// Name of the resistor this pot controls
+    pub name: String,
+    /// 0-indexed MNA node index for the positive terminal (0 = grounded)
+    pub node_p: usize,
+    /// 0-indexed MNA node index for the negative terminal (0 = grounded)
+    pub node_q: usize,
+    /// Nominal conductance (1/R_nominal, from the resistor value in the netlist)
+    pub g_nominal: f64,
+    /// Minimum resistance in ohms
+    pub min_resistance: f64,
+    /// Maximum resistance in ohms
+    pub max_resistance: f64,
+    /// True if one terminal is grounded (simplifies SM update)
+    pub grounded: bool,
+}
+
 impl MnaSystem {
     /// Create a new empty MNA system.
     pub fn new(n: usize, m: usize, num_devices: usize, num_vs: usize) -> Self {
@@ -125,6 +146,7 @@ impl MnaSystem {
             voltage_sources: Vec::with_capacity(num_vs),
             current_sources: Vec::new(),
             inductors: Vec::new(),
+            pots: Vec::new(),
         }
     }
 
@@ -414,6 +436,33 @@ impl MnaBuilder {
         let num_devices = self.nonlinear_devices.len();
         let num_vs = self.voltage_sources.len();
         let mut mna = MnaSystem::new(n, m, num_devices, num_vs);
+
+        // Resolve pot directives before moving node_map
+        for pot_dir in &netlist.pots {
+            let resistor = netlist.elements.iter().find(|e| {
+                matches!(e, Element::Resistor { name, .. } if name == &pot_dir.resistor_name)
+            });
+            if let Some(Element::Resistor { n_plus, n_minus, value, .. }) = resistor {
+                let node_p = self.node_map[n_plus];
+                let node_q = self.node_map[n_minus];
+                let grounded = node_p == 0 || node_q == 0;
+                mna.pots.push(PotInfo {
+                    name: pot_dir.resistor_name.clone(),
+                    node_p,
+                    node_q,
+                    g_nominal: 1.0 / *value,
+                    min_resistance: pot_dir.min_value,
+                    max_resistance: pot_dir.max_value,
+                    grounded,
+                });
+            } else {
+                return Err(MnaError::TopologyError(format!(
+                    ".pot references resistor '{}' which was not found",
+                    pot_dir.resistor_name
+                )));
+            }
+        }
+
         mna.node_map = self.node_map;
         mna.nonlinear_devices = self.nonlinear_devices;
         mna.voltage_sources = self.voltage_sources;

@@ -32,6 +32,7 @@ pub struct CircuitIR {
     pub has_dc_sources: bool,
     pub has_dc_op: bool,
     pub inductors: Vec<InductorIR>,
+    pub pots: Vec<PotentiometerIR>,
 }
 
 /// Circuit metadata (name, title, generator version).
@@ -81,6 +82,31 @@ pub struct Matrices {
     pub n_i: Vec<f64>,
     /// Constant RHS contribution from DC sources, length N
     pub rhs_const: Vec<f64>,
+}
+
+/// Potentiometer parameters for code generation (Sherman-Morrison precomputed data).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PotentiometerIR {
+    /// S * u where u is the pot's node difference vector (N-vector)
+    pub su: Vec<f64>,
+    /// u^T * S * u (scalar for SM denominator)
+    pub usu: f64,
+    /// Nominal conductance 1/R_nom
+    pub g_nominal: f64,
+    /// N_v * su (M-vector, for K correction in NR loop)
+    pub nv_su: Vec<f64>,
+    /// u^T * N_i (M-vector, for correction to S*N_i products)
+    pub u_ni: Vec<f64>,
+    /// Positive terminal node index (0 = ground, 1-indexed)
+    pub node_p: usize,
+    /// Negative terminal node index (0 = ground, 1-indexed)
+    pub node_q: usize,
+    /// Minimum resistance (ohms)
+    pub min_resistance: f64,
+    /// Maximum resistance (ohms)
+    pub max_resistance: f64,
+    /// True if one terminal is grounded
+    pub grounded: bool,
 }
 
 /// Inductor parameters for code generation.
@@ -225,6 +251,20 @@ impl CircuitIR {
             g_eq: ind.g_eq,
         }).collect();
 
+        // --- Potentiometers ---
+        let pots: Vec<PotentiometerIR> = kernel.pots.iter().map(|p| PotentiometerIR {
+            su: p.su.clone(),
+            usu: p.usu,
+            g_nominal: p.g_nominal,
+            nv_su: p.nv_su.clone(),
+            u_ni: p.u_ni.clone(),
+            node_p: p.node_p,
+            node_q: p.node_q,
+            min_resistance: p.min_resistance,
+            max_resistance: p.max_resistance,
+            grounded: p.grounded,
+        }).collect();
+
         // --- DC sources ---
         let has_dc_sources = kernel.rhs_const.iter().any(|&v| v != 0.0);
 
@@ -247,6 +287,7 @@ impl CircuitIR {
             has_dc_sources,
             has_dc_op,
             inductors,
+            pots,
         })
     }
 

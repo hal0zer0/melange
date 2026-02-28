@@ -411,7 +411,18 @@ fn compile_circuit_source(
                 .unwrap_or("circuit")
                 .to_string();
 
-            plugin_template::generate_plugin_project(&project_dir, &generated.code, &circuit_name, with_level_params)?;
+            // Build pot parameter info from kernel
+            let pot_params: Vec<plugin_template::PotParamInfo> = kernel.pots.iter().enumerate().map(|(idx, p)| {
+                plugin_template::PotParamInfo {
+                    index: idx,
+                    name: netlist.pots.get(idx).map(|d| d.resistor_name.clone()).unwrap_or_else(|| format!("Pot {}", idx)),
+                    min_resistance: p.min_resistance,
+                    max_resistance: p.max_resistance,
+                    default_resistance: 1.0 / p.g_nominal,
+                }
+            }).collect();
+
+            plugin_template::generate_plugin_project(&project_dir, &generated.code, &circuit_name, with_level_params, &pot_params)?;
 
             println!("  ✓ Done!");
             println!();

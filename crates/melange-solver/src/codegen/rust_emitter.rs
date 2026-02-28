@@ -10,7 +10,7 @@ use serde::Serialize;
 use tera::{Context, Tera};
 
 use super::emitter::Emitter;
-use super::ir::{CircuitIR, DeviceParams, DeviceType};
+use super::ir::{CircuitIR, DeviceParams, DeviceType, PotentiometerIR};
 use super::CodegenError;
 
 /// Inductor data passed to Tera templates.
@@ -94,8 +94,10 @@ impl Emitter for RustEmitter {
 
         code.push_str(&self.emit_header(ir)?);
         code.push_str(&self.emit_constants(ir)?);
+        code.push_str(&self.emit_pot_constants(ir));
         code.push_str(&self.emit_state(ir)?);
         code.push_str(&self.emit_device_models(ir)?);
+        code.push_str(&self.emit_pot_helpers(ir));
         code.push_str(&self.emit_build_rhs(ir)?);
         code.push_str(&self.emit_mat_vec_mul_s(ir)?);
         code.push_str(&self.emit_extract_voltages(ir)?);
@@ -226,6 +228,13 @@ impl RustEmitter {
         let mut ctx = Context::new();
         ctx.insert("has_dc_op", &ir.has_dc_op);
         ctx.insert("num_inductors", &ir.inductors.len());
+        ctx.insert("num_pots", &ir.pots.len());
+
+        // Pot default resistances (nominal = 1/g_nominal)
+        let pot_defaults: Vec<String> = ir.pots.iter().map(|p| {
+            format!("{:.17e}", 1.0 / p.g_nominal)
+        }).collect();
+        ctx.insert("pot_defaults", &pot_defaults);
 
         if ir.has_dc_op {
             let dc_op_values = ir
@@ -299,6 +308,115 @@ impl RustEmitter {
         }
 
         Ok(code)
+    }
+
+    fn emit_pot_constants(&self, ir: &CircuitIR) -> String {
+        if ir.pots.is_empty() {
+            return String::new();
+        }
+        let n = ir.topology.n;
+        let m = ir.topology.m;
+        let mut code = String::new();
+        code.push_str("// =============================================================================\n");
+        code.push_str("// POTENTIOMETER CONSTANTS (Sherman-Morrison precomputed vectors)\n");
+        code.push_str("// =============================================================================\n\n");
+
+        for (idx, pot) in ir.pots.iter().enumerate() {
+            // SU vector
+            let su_values = pot.su.iter()
+                .map(|v| format!("{:.17e}", v))
+                .collect::<Vec<_>>()
+                .join(", ");
+            code.push_str(&format!(
+                "const POT_{}_SU: [f64; N] = [{}];\n", idx, su_values
+            ));
+
+            // USU scalar
+            code.push_str(&format!(
+                "const POT_{}_USU: f64 = {:.17e};\n", idx, pot.usu
+            ));
+
+            // G_NOM
+            code.push_str(&format!(
+                "const POT_{}_G_NOM: f64 = {:.17e};\n", idx, pot.g_nominal
+            ));
+
+            // NV_SU vector (only if M > 0)
+            if m > 0 {
+                let nv_su_values = pot.nv_su.iter()
+                    .map(|v| format!("{:.17e}", v))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                code.push_str(&format!(
+                    "const POT_{}_NV_SU: [f64; M] = [{}];\n", idx, nv_su_values
+                ));
+
+                let u_ni_values = pot.u_ni.iter()
+                    .map(|v| format!("{:.17e}", v))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                code.push_str(&format!(
+                    "const POT_{}_U_NI: [f64; M] = [{}];\n", idx, u_ni_values
+                ));
+            }
+
+            // Node indices (0-indexed into v arrays)
+            if pot.node_p > 0 {
+                code.push_str(&format!(
+                    "const POT_{}_NODE_P: usize = {};\n", idx, pot.node_p - 1
+                ));
+            }
+            if pot.node_q > 0 {
+                code.push_str(&format!(
+                    "const POT_{}_NODE_Q: usize = {};\n", idx, pot.node_q - 1
+                ));
+            }
+
+            code.push_str(&format!(
+                "const POT_{}_MIN_R: f64 = {:.17e};\n", idx, pot.min_resistance
+            ));
+            code.push_str(&format!(
+                "const POT_{}_MAX_R: f64 = {:.17e};\n", idx, pot.max_resistance
+            ));
+            let _ = n; // used for SU array size above
+            code.push('\n');
+        }
+        code
+    }
+
+    fn emit_pot_helpers(&self, ir: &CircuitIR) -> String {
+        if ir.pots.is_empty() {
+            return String::new();
+        }
+        let mut code = String::new();
+        code.push_str("// =============================================================================\n");
+        code.push_str("// POTENTIOMETER SM SCALE HELPERS\n");
+        code.push_str("// =============================================================================\n\n");
+
+        for (idx, pot) in ir.pots.iter().enumerate() {
+            code.push_str(&format!("/// Sherman-Morrison scale factor for pot {}\n", idx));
+            code.push_str("#[inline(always)]\n");
+            code.push_str(&format!(
+                "fn sm_scale_{}(state: &CircuitState) -> (f64, f64) {{\n", idx
+            ));
+            code.push_str(&format!(
+                "    let r = state.pot_{}_resistance.clamp(POT_{}_MIN_R, POT_{}_MAX_R);\n",
+                idx, idx, idx
+            ));
+            code.push_str(&format!(
+                "    let delta_g = 1.0 / r - POT_{}_G_NOM;\n", idx
+            ));
+            code.push_str(&format!(
+                "    let denom = 1.0 + delta_g * POT_{}_USU;\n", idx
+            ));
+            code.push_str(
+                "    let scale = if denom.abs() > 1e-15 { delta_g / denom } else { 0.0 };\n"
+            );
+            code.push_str("    (delta_g, scale)\n");
+            code.push_str("}\n\n");
+            let _ = pot; // used above
+        }
+        code
     }
 
     fn emit_build_rhs(&self, ir: &CircuitIR) -> Result<String, CodegenError> {
@@ -491,12 +609,134 @@ impl RustEmitter {
                     name: ind.name.clone(),
                     node_i: ind.node_i,
                     node_j: ind.node_j,
-                    g_eq: String::new(), // not needed for process_sample (uses IND_N_G_EQ constants)
+                    g_eq: String::new(),
                 }
             }).collect();
             ctx.insert("inductors", &inductors_data);
         }
+
+        let num_pots = ir.pots.len();
+        ctx.insert("num_pots", &num_pots);
+
+        // Generate pot correction code blocks procedurally
+        if num_pots > 0 {
+            let n = ir.topology.n;
+            let m = ir.topology.m;
+
+            // SM scale computation (top of function)
+            let mut sm_scale_lines = String::new();
+            for idx in 0..num_pots {
+                sm_scale_lines.push_str(&format!(
+                    "    let (delta_g_{}, scale_{}) = sm_scale_{}(state);\n",
+                    idx, idx, idx
+                ));
+            }
+            ctx.insert("sm_scale_lines", &sm_scale_lines);
+
+            // A_neg correction: modify rhs for pot conductance change on v_prev
+            let mut a_neg_correction = String::new();
+            for (idx, pot) in ir.pots.iter().enumerate() {
+                Self::emit_a_neg_correction(&mut a_neg_correction, idx, pot);
+            }
+            ctx.insert("a_neg_correction", &a_neg_correction);
+
+            // S correction: apply SM to v_pred after mat_vec_mul_s
+            let mut s_correction = String::new();
+            for (idx, pot) in ir.pots.iter().enumerate() {
+                Self::emit_s_correction(&mut s_correction, idx, pot, n);
+            }
+            ctx.insert("s_correction", &s_correction);
+
+            // S*N_i correction: after compute_final_voltages (only if M > 0)
+            let mut sni_correction = String::new();
+            if m > 0 {
+                for (idx, pot) in ir.pots.iter().enumerate() {
+                    Self::emit_sni_correction(&mut sni_correction, idx, pot, n, m);
+                }
+            }
+            ctx.insert("sni_correction", &sni_correction);
+        }
+
         self.render("process_sample", &ctx)
+    }
+
+    fn emit_a_neg_correction(code: &mut String, idx: usize, pot: &PotentiometerIR) {
+        // A_neg correction: delta_g changes the effective A_neg matrix
+        // The pot conductance change affects the RHS through v_prev:
+        // rhs[p] -= delta_g * (v_prev[p] - v_prev[q])
+        // rhs[q] += delta_g * (v_prev[p] - v_prev[q])  (if not grounded)
+        if pot.node_p > 0 && pot.node_q > 0 {
+            let p = pot.node_p - 1;
+            let q = pot.node_q - 1;
+            code.push_str(&format!(
+                "    let v_diff_{} = state.v_prev[{}] - state.v_prev[{}];\n",
+                idx, p, q
+            ));
+            code.push_str(&format!(
+                "    rhs[{}] -= delta_g_{} * v_diff_{};\n", p, idx, idx
+            ));
+            code.push_str(&format!(
+                "    rhs[{}] += delta_g_{} * v_diff_{};\n", q, idx, idx
+            ));
+        } else if pot.node_p > 0 {
+            let p = pot.node_p - 1;
+            code.push_str(&format!(
+                "    rhs[{}] -= delta_g_{} * state.v_prev[{}];\n", p, idx, p
+            ));
+        } else if pot.node_q > 0 {
+            let q = pot.node_q - 1;
+            code.push_str(&format!(
+                "    rhs[{}] += delta_g_{} * state.v_prev[{}];\n", q, idx, q
+            ));
+        }
+    }
+
+    fn emit_s_correction(code: &mut String, idx: usize, pot: &PotentiometerIR, n: usize) {
+        // S correction: v_pred -= scale * (u^T . rhs) * SU
+        // u^T . rhs = rhs[node_p-1] - rhs[node_q-1] (or just one if grounded)
+        let u_dot_rhs = if pot.node_p > 0 && pot.node_q > 0 {
+            format!("rhs[{}] - rhs[{}]", pot.node_p - 1, pot.node_q - 1)
+        } else if pot.node_p > 0 {
+            format!("rhs[{}]", pot.node_p - 1)
+        } else {
+            format!("-rhs[{}]", pot.node_q - 1)
+        };
+
+        code.push_str(&format!(
+            "    let u_dot_rhs_{} = {};\n", idx, u_dot_rhs
+        ));
+        code.push_str(&format!(
+            "    let factor_{} = scale_{} * u_dot_rhs_{};\n", idx, idx, idx
+        ));
+        for k in 0..n {
+            code.push_str(&format!(
+                "    v_pred[{}] -= factor_{} * POT_{}_SU[{}];\n", k, idx, idx, k
+            ));
+        }
+    }
+
+    fn emit_sni_correction(code: &mut String, idx: usize, _pot: &PotentiometerIR, n: usize, m: usize) {
+        // S*N_i correction: v -= scale * (u^T . N_i . di_nl) * SU
+        // where u^T . N_i is the precomputed POT_idx_U_NI vector
+        // and di_nl = i_nl - i_nl_prev
+        code.push_str(&format!("    let u_ni_dot_di_{} = ", idx));
+        let mut first = true;
+        for j in 0..m {
+            if !first { code.push_str(" + "); }
+            code.push_str(&format!(
+                "POT_{}_U_NI[{}] * (i_nl[{}] - state.i_nl_prev[{}])", idx, j, j, j
+            ));
+            first = false;
+        }
+        code.push_str(";\n");
+        code.push_str(&format!(
+            "    let sni_factor_{} = scale_{} * u_ni_dot_di_{};\n", idx, idx, idx
+        ));
+        for k in 0..n {
+            code.push_str(&format!(
+                "    v[{}] -= sni_factor_{} * POT_{}_SU[{}];\n", k, idx, idx, k
+            ));
+        }
     }
 }
 
@@ -557,8 +797,10 @@ impl RustEmitter {
 
         // Compute v_d = p + K * i_nl
         code.push_str("        // Compute controlling voltages: v_d = p + K * i_nl\n");
+        let has_pots = !ir.pots.is_empty();
+        let vd_let = if has_pots { "let mut" } else { "let" };
         for i in 0..m {
-            code.push_str(&format!("        let v_d{} = ", i));
+            code.push_str(&format!("        {} v_d{} = ", vd_let, i));
             code.push_str(&format!("p[{}]", i));
             for j in 0..m {
                 if ir.k(i, j) != 0.0 {
@@ -566,6 +808,35 @@ impl RustEmitter {
                 }
             }
             code.push_str(";\n");
+        }
+
+        // K correction for pots: v_d[i] -= scale * NV_SU[i] * (u^T * N_i * i_nl)
+        if !ir.pots.is_empty() {
+            code.push_str("\n        // Sherman-Morrison K correction for potentiometers\n");
+            for (idx, pot) in ir.pots.iter().enumerate() {
+                if pot.u_ni.is_empty() {
+                    continue;
+                }
+                code.push_str(&format!(
+                    "        let (_, k_scale_{}) = sm_scale_{}(state);\n", idx, idx
+                ));
+                // Compute u^T * N_i * i_nl
+                code.push_str(&format!("        let u_ni_dot_inl_{} = ", idx));
+                let mut first = true;
+                for j in 0..m {
+                    if !first { code.push_str(" + "); }
+                    code.push_str(&format!("POT_{}_U_NI[{}] * i_nl[{}]", idx, j, j));
+                    first = false;
+                }
+                code.push_str(";\n");
+                // Apply correction to each v_d
+                for i in 0..m {
+                    code.push_str(&format!(
+                        "        v_d{} -= k_scale_{} * POT_{}_NV_SU[{}] * u_ni_dot_inl_{};\n",
+                        i, idx, idx, i, idx
+                    ));
+                }
+            }
         }
         code.push_str("\n");
 

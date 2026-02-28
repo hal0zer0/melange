@@ -3,12 +3,27 @@
 use std::path::Path;
 use anyhow::Result;
 
+/// Pot info for plugin parameter generation.
+pub struct PotParamInfo {
+    /// Index (0-based)
+    pub index: usize,
+    /// Human-readable name (e.g., "R1 (Tone)")
+    pub name: String,
+    /// Minimum resistance (ohms)
+    pub min_resistance: f64,
+    /// Maximum resistance (ohms)
+    pub max_resistance: f64,
+    /// Default/nominal resistance (ohms)
+    pub default_resistance: f64,
+}
+
 /// Generate a complete plugin project
 pub fn generate_plugin_project(
     output_dir: &Path,
     circuit_code: &str,
     circuit_name: &str,
     with_level_params: bool,
+    pots: &[PotParamInfo],
 ) -> Result<()> {
     // Create directory structure
     std::fs::create_dir_all(output_dir.join("src"))?;
@@ -21,7 +36,7 @@ pub fn generate_plugin_project(
     std::fs::write(output_dir.join("src/circuit.rs"), circuit_code)?;
 
     // Write lib.rs (plugin wrapper)
-    let lib_rs = generate_lib_rs(circuit_name, with_level_params);
+    let lib_rs = generate_lib_rs(circuit_name, with_level_params, pots);
     std::fs::write(output_dir.join("src/lib.rs"), lib_rs)?;
 
     Ok(())
@@ -41,7 +56,7 @@ crate-type = ["cdylib"]
 "#, circuit_name)
 }
 
-fn generate_lib_rs(circuit_name: &str, with_level_params: bool) -> String {
+fn generate_lib_rs(circuit_name: &str, with_level_params: bool, pots: &[PotParamInfo]) -> String {
     // Convert to a display-friendly name (e.g., "mordor-screamer" -> "Mordor Screamer")
     let display_name = circuit_name
         .split('-')
@@ -70,20 +85,54 @@ fn generate_lib_rs(circuit_name: &str, with_level_params: bool) -> String {
     }
     let vst3_id_str = String::from_utf8(hash.to_vec()).unwrap();
 
-    let (params_struct, process_loop) = if with_level_params {
-        (
-            r#"#[derive(Params)]
-pub struct CircuitParams {
-    #[id = "input_level"]
+    // Build pot parameter fields and process_sample lines
+    let mut pot_param_fields = String::new();
+    let mut pot_param_defaults = String::new();
+    let mut pot_process_lines = String::new();
+    for pot in pots {
+        // Parameter field
+        pot_param_fields.push_str(&format!(
+            "    #[id = \"pot_{}\"]\n    pub pot_{}: FloatParam,\n",
+            pot.index, pot.index
+        ));
+        // Default initialization
+        pot_param_defaults.push_str(&format!(
+            r#"            pot_{idx}: FloatParam::new(
+                "{name}",
+                {default:.1},
+                FloatRange::Linear {{
+                    min: {min:.1},
+                    max: {max:.1},
+                }},
+            )
+            .with_smoother(SmoothingStyle::Linear(10.0))
+            .with_unit(" \u{{2126}}"),
+"#,
+            idx = pot.index,
+            name = pot.name,
+            default = pot.default_resistance,
+            min = pot.min_resistance,
+            max = pot.max_resistance,
+        ));
+        // Process loop: read param smoothed value (per sample, before inner channel loop)
+        pot_process_lines.push_str(&format!(
+            "            let pot_{}_val = self.params.pot_{}.smoothed.next() as f64;\n",
+            pot.index, pot.index
+        ));
+    }
+
+    let has_any_params = with_level_params || !pots.is_empty();
+    let (params_struct, process_loop) = if has_any_params {
+        // Build params struct fields
+        let mut fields = String::new();
+        let mut defaults = String::new();
+        if with_level_params {
+            fields.push_str(r#"    #[id = "input_level"]
     pub input_level: FloatParam,
     #[id = "output_level"]
     pub output_level: FloatParam,
-}
-
-impl Default for CircuitParams {
-    fn default() -> Self {
-        Self {
-            input_level: FloatParam::new(
+"#);
+            defaults.push_str(r#"            input_level: FloatParam::new(
                 "Input Level",
                 util::db_to_gain(0.0),
                 FloatRange::Skewed {
@@ -110,32 +159,60 @@ impl Default for CircuitParams {
             .with_unit(" dB")
             .with_value_to_string(formatters::v2s_f32_gain_to_db(1))
             .with_string_to_value(formatters::s2v_f32_gain_to_db()),
+"#);
         }
-    }
-}"#,
-            r#"        for channel_samples in buffer.iter_samples() {
-            let input_gain = self.params.input_level.smoothed.next();
-            let output_gain = self.params.output_level.smoothed.next();
-            for (ch, sample) in channel_samples.into_iter().enumerate() {
-                let state = &mut self.circuit_states[ch];
-                let input = *sample as f64 * input_gain as f64;
-                let out = process_sample(input, state) as f32;
-                let out = out * output_gain;
-                *sample = if out.is_finite() { out.clamp(-1.0, 1.0) } else { 0.0 };
-            }
-        }"#,
-        )
+        fields.push_str(&pot_param_fields);
+        defaults.push_str(&pot_param_defaults);
+
+        let params = format!(r#"#[derive(Params)]
+pub struct CircuitParams {{
+{fields}}}
+
+impl Default for CircuitParams {{
+    fn default() -> Self {{
+        Self {{
+{defaults}        }}
+    }}
+}}"#);
+
+        // Build process loop
+        let mut loop_code = String::from("        for channel_samples in buffer.iter_samples() {\n");
+        if with_level_params {
+            loop_code.push_str("            let input_gain = self.params.input_level.smoothed.next();\n");
+            loop_code.push_str("            let output_gain = self.params.output_level.smoothed.next();\n");
+        }
+        loop_code.push_str(&pot_process_lines);
+        loop_code.push_str("            for (ch, sample) in channel_samples.into_iter().enumerate() {\n");
+        loop_code.push_str("                let state = &mut self.circuit_states[ch];\n");
+        // Set pot resistances on state
+        for pot in pots {
+            loop_code.push_str(&format!(
+                "                state.pot_{}_resistance = pot_{}_val;\n",
+                pot.index, pot.index
+            ));
+        }
+        if with_level_params {
+            loop_code.push_str("                let input = *sample as f64 * input_gain as f64;\n");
+            loop_code.push_str("                let out = process_sample(input, state) as f32;\n");
+            loop_code.push_str("                let out = out * output_gain;\n");
+        } else {
+            loop_code.push_str("                let out = process_sample(*sample as f64, state) as f32;\n");
+        }
+        loop_code.push_str("                *sample = if out.is_finite() { out.clamp(-1.0, 1.0) } else { 0.0 };\n");
+        loop_code.push_str("            }\n");
+        loop_code.push_str("        }");
+
+        (params, loop_code)
     } else {
         (
-            r#"#[derive(Params, Default)]
-pub struct CircuitParams {}"#,
+            "#[derive(Params, Default)]\npub struct CircuitParams {}".to_string(),
             r#"        for channel_samples in buffer.iter_samples() {
             for (ch, sample) in channel_samples.into_iter().enumerate() {
                 let state = &mut self.circuit_states[ch];
                 let out = process_sample(*sample as f64, state) as f32;
                 *sample = if out.is_finite() { out.clamp(-1.0, 1.0) } else { 0.0 };
             }
-        }"#,
+        }"#.to_string(),
         )
     };
 
