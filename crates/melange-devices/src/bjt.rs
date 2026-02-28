@@ -244,11 +244,11 @@ impl BjtGummelPoon {
         }
         let q1 = 1.0 / q1_denom;
 
-        // High-level injection
-        let i_cc = self.base.is * ((vbe_eff / self.base.vt).exp() - (vbc_eff / self.base.vt).exp());
+        // High-level injection (use safe_exp to prevent overflow)
+        let i_cc = self.base.is * (safeguards::safe_exp(vbe_eff / self.base.vt) - safeguards::safe_exp(vbc_eff / self.base.vt));
         let q2 = i_cc / self.ikf;
 
-        q1 * (1.0 + (1.0 + 4.0 * q2).sqrt()) / 2.0
+        q1 * (1.0 + (1.0 + 4.0 * q2).max(0.0).sqrt()) / 2.0
     }
 
     /// Collector current with Early effect and high injection.

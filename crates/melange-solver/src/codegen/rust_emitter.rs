@@ -278,8 +278,13 @@ impl RustEmitter {
                         dev_num, bp.beta_f
                     ));
                     code.push_str(&format!(
-                        "const DEVICE_{}_BETA_R: f64 = {:.17e};\n\n",
+                        "const DEVICE_{}_BETA_R: f64 = {:.17e};\n",
                         dev_num, bp.beta_r
+                    ));
+                    let sign = if bp.is_pnp { -1.0 } else { 1.0 };
+                    code.push_str(&format!(
+                        "const DEVICE_{}_SIGN: f64 = {:.1};\n\n",
+                        dev_num, sign
                     ));
                 }
             }
@@ -584,16 +589,16 @@ impl RustEmitter {
                         let s = slot.start_idx;
                         let s1 = s + 1;
                         code.push_str(&format!(
-                            "        let i_dev{} = bjt_ic(v_d{}, v_d{}, DEVICE_{}_IS, DEVICE_{}_VT, DEVICE_{}_BETA_R);\n",
-                            s, s, s1, dev_num, dev_num, dev_num
+                            "        let i_dev{} = bjt_ic(v_d{}, v_d{}, DEVICE_{}_IS, DEVICE_{}_VT, DEVICE_{}_BETA_R, DEVICE_{}_SIGN);\n",
+                            s, s, s1, dev_num, dev_num, dev_num, dev_num
                         ));
                         code.push_str(&format!(
-                            "        let i_dev{} = bjt_ib(v_d{}, v_d{}, DEVICE_{}_IS, DEVICE_{}_VT, DEVICE_{}_BETA_F, DEVICE_{}_BETA_R);\n",
-                            s1, s, s1, dev_num, dev_num, dev_num, dev_num
+                            "        let i_dev{} = bjt_ib(v_d{}, v_d{}, DEVICE_{}_IS, DEVICE_{}_VT, DEVICE_{}_BETA_F, DEVICE_{}_BETA_R, DEVICE_{}_SIGN);\n",
+                            s1, s, s1, dev_num, dev_num, dev_num, dev_num, dev_num
                         ));
                         code.push_str(&format!(
-                            "        let bjt{}_jac = bjt_jacobian(v_d{}, v_d{}, DEVICE_{}_IS, DEVICE_{}_VT, DEVICE_{}_BETA_F, DEVICE_{}_BETA_R);\n",
-                            dev_num, s, s1, dev_num, dev_num, dev_num, dev_num
+                            "        let bjt{}_jac = bjt_jacobian(v_d{}, v_d{}, DEVICE_{}_IS, DEVICE_{}_VT, DEVICE_{}_BETA_F, DEVICE_{}_BETA_R, DEVICE_{}_SIGN);\n",
+                            dev_num, s, s1, dev_num, dev_num, dev_num, dev_num, dev_num
                         ));
                         code.push_str(&format!(
                             "        let jdev_{}_{} = bjt{}_jac[0];\n",
@@ -835,8 +840,11 @@ impl RustEmitter {
             "                for j in (i+1)..{} {{ sum -= a[i][j] * b[j]; }}\n",
             dim
         ));
+        code.push_str("                if a[i][i].abs() < SINGULARITY_THRESHOLD { singular = true; break; }\n");
         code.push_str("                b[i] = sum / a[i][i];\n");
         code.push_str("            }\n");
+        code.push_str("        }\n");
+        code.push_str("        if !singular {\n");
 
         for i in 0..dim {
             code.push_str(&format!(

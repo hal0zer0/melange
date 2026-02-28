@@ -129,6 +129,9 @@ pub struct BjtParams {
     pub beta_f: f64,
     /// Reverse current gain
     pub beta_r: f64,
+    /// True if PNP (false = NPN)
+    #[serde(default)]
+    pub is_pnp: bool,
 }
 
 /// A slot in the nonlinear system: maps a device to its M-dimension range.
@@ -321,7 +324,12 @@ impl CircuitIR {
                             format!("BJT model BR must be positive finite, got {}", beta_r)
                         ));
                     }
-                    let params = BjtParams { is, vt, beta_f, beta_r };
+                    // Look up polarity from .model directive (default NPN)
+                    let is_pnp = netlist.models.iter()
+                        .find(|m| m.name.eq_ignore_ascii_case(model))
+                        .map(|m| m.model_type.to_uppercase().starts_with("PNP"))
+                        .unwrap_or(false);
+                    let params = BjtParams { is, vt, beta_f, beta_r, is_pnp };
 
                     if first_bjt.is_none() {
                         first_bjt = Some(params.clone());

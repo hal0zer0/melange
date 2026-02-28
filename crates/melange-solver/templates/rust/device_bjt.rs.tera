@@ -1,28 +1,37 @@
-/// Safe exponential (clamp to prevent overflow)
+/// Safe exponential (clamp to prevent overflow, matches runtime [-40, 40] range)
 #[inline(always)]
-fn safe_exp(x: f64) -> f64 { x.clamp(-500.0, 500.0).exp() }
+fn safe_exp(x: f64) -> f64 { x.clamp(-40.0, 40.0).exp() }
 
 /// BJT Ebers-Moll collector current Ic(Vbe, Vbc)
+/// sign: +1.0 for NPN, -1.0 for PNP (applied to voltages and output current)
 #[inline(always)]
-fn bjt_ic(vbe: f64, vbc: f64, is: f64, vt: f64, beta_r: f64) -> f64 {
-    let exp_be = safe_exp(vbe / vt);
-    let exp_bc = safe_exp(vbc / vt);
-    is * (exp_be - exp_bc) - is / beta_r * (exp_bc - 1.0)
+fn bjt_ic(vbe: f64, vbc: f64, is: f64, vt: f64, beta_r: f64, sign: f64) -> f64 {
+    let vbe_eff = sign * vbe;
+    let vbc_eff = sign * vbc;
+    let exp_be = safe_exp(vbe_eff / vt);
+    let exp_bc = safe_exp(vbc_eff / vt);
+    sign * (is * (exp_be - exp_bc) - is / beta_r * (exp_bc - 1.0))
 }
 
 /// BJT Ebers-Moll base current Ib(Vbe, Vbc)
+/// sign: +1.0 for NPN, -1.0 for PNP
 #[inline(always)]
-fn bjt_ib(vbe: f64, vbc: f64, is: f64, vt: f64, beta_f: f64, beta_r: f64) -> f64 {
-    let exp_be = safe_exp(vbe / vt);
-    let exp_bc = safe_exp(vbc / vt);
-    is / beta_f * (exp_be - 1.0) + is / beta_r * (exp_bc - 1.0)
+fn bjt_ib(vbe: f64, vbc: f64, is: f64, vt: f64, beta_f: f64, beta_r: f64, sign: f64) -> f64 {
+    let vbe_eff = sign * vbe;
+    let vbc_eff = sign * vbc;
+    let exp_be = safe_exp(vbe_eff / vt);
+    let exp_bc = safe_exp(vbc_eff / vt);
+    sign * (is / beta_f * (exp_be - 1.0) + is / beta_r * (exp_bc - 1.0))
 }
 
 /// BJT Jacobian: [dIc/dVbe, dIc/dVbc, dIb/dVbe, dIb/dVbc]
+/// sign: +1.0 for NPN, -1.0 for PNP (s*s=1, so Jacobian entries are polarity-invariant)
 #[inline(always)]
-fn bjt_jacobian(vbe: f64, vbc: f64, is: f64, vt: f64, beta_f: f64, beta_r: f64) -> [f64; 4] {
-    let exp_be = safe_exp(vbe / vt);
-    let exp_bc = safe_exp(vbc / vt);
+fn bjt_jacobian(vbe: f64, vbc: f64, is: f64, vt: f64, beta_f: f64, beta_r: f64, sign: f64) -> [f64; 4] {
+    let vbe_eff = sign * vbe;
+    let vbc_eff = sign * vbc;
+    let exp_be = safe_exp(vbe_eff / vt);
+    let exp_bc = safe_exp(vbc_eff / vt);
     let dic_dvbe = is / vt * exp_be;
     let dic_dvbc = -(is / vt) * exp_bc - (is / (beta_r * vt)) * exp_bc;
     let dib_dvbe = (is / (beta_f * vt)) * exp_be;

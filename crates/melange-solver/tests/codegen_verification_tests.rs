@@ -635,20 +635,20 @@ fn test_codegen_bjt_nr_solver_generates_device_calls() {
 
     assert_eq!(kernel.m, 2, "Expected m=2 for single BJT circuit");
 
-    // BJT NR solver should call bjt_ic and bjt_ib with per-device params
+    // BJT NR solver should call bjt_ic and bjt_ib with per-device params including sign
     assert!(
-        code.contains("bjt_ic(v_d0, v_d1, DEVICE_0_IS, DEVICE_0_VT, DEVICE_0_BETA_R)"),
-        "NR solver should call bjt_ic with per-device params."
+        code.contains("bjt_ic(v_d0, v_d1, DEVICE_0_IS, DEVICE_0_VT, DEVICE_0_BETA_R, DEVICE_0_SIGN)"),
+        "NR solver should call bjt_ic with per-device params and sign."
     );
     assert!(
-        code.contains("bjt_ib(v_d0, v_d1, DEVICE_0_IS, DEVICE_0_VT, DEVICE_0_BETA_F, DEVICE_0_BETA_R)"),
-        "NR solver should call bjt_ib with per-device params."
+        code.contains("bjt_ib(v_d0, v_d1, DEVICE_0_IS, DEVICE_0_VT, DEVICE_0_BETA_F, DEVICE_0_BETA_R, DEVICE_0_SIGN)"),
+        "NR solver should call bjt_ib with per-device params and sign."
     );
 
-    // Should call bjt_jacobian with per-device params
+    // Should call bjt_jacobian with per-device params including sign
     assert!(
-        code.contains("bjt_jacobian(v_d0, v_d1, DEVICE_0_IS, DEVICE_0_VT, DEVICE_0_BETA_F, DEVICE_0_BETA_R)"),
-        "NR solver should call bjt_jacobian with per-device params."
+        code.contains("bjt_jacobian(v_d0, v_d1, DEVICE_0_IS, DEVICE_0_VT, DEVICE_0_BETA_F, DEVICE_0_BETA_R, DEVICE_0_SIGN)"),
+        "NR solver should call bjt_jacobian with per-device params and sign."
     );
 
     // Should assign all 4 Jacobian entries from the bjt_jacobian result
@@ -746,10 +746,10 @@ fn test_codegen_mixed_diode_bjt_device_map() {
     assert!(code.contains("diode_current(v_d0, DEVICE_0_IS, DEVICE_0_N_VT)"), "Diode current at index 0");
     assert!(code.contains("jdev_0_0 = diode_conductance(v_d0, DEVICE_0_IS, DEVICE_0_N_VT)"), "Diode jdev at index 0");
 
-    // BJT at indices 1,2 (device 1) with per-device params
-    assert!(code.contains("bjt_ic(v_d1, v_d2, DEVICE_1_IS, DEVICE_1_VT, DEVICE_1_BETA_R)"), "BJT Ic at indices 1,2");
-    assert!(code.contains("bjt_ib(v_d1, v_d2, DEVICE_1_IS, DEVICE_1_VT, DEVICE_1_BETA_F, DEVICE_1_BETA_R)"), "BJT Ib at indices 1,2");
-    assert!(code.contains("bjt_jacobian(v_d1, v_d2, DEVICE_1_IS, DEVICE_1_VT, DEVICE_1_BETA_F, DEVICE_1_BETA_R)"), "BJT Jacobian at indices 1,2");
+    // BJT at indices 1,2 (device 1) with per-device params including sign
+    assert!(code.contains("bjt_ic(v_d1, v_d2, DEVICE_1_IS, DEVICE_1_VT, DEVICE_1_BETA_R, DEVICE_1_SIGN)"), "BJT Ic at indices 1,2");
+    assert!(code.contains("bjt_ib(v_d1, v_d2, DEVICE_1_IS, DEVICE_1_VT, DEVICE_1_BETA_F, DEVICE_1_BETA_R, DEVICE_1_SIGN)"), "BJT Ib at indices 1,2");
+    assert!(code.contains("bjt_jacobian(v_d1, v_d2, DEVICE_1_IS, DEVICE_1_VT, DEVICE_1_BETA_F, DEVICE_1_BETA_R, DEVICE_1_SIGN)"), "BJT Jacobian at indices 1,2");
 
     // All 3 residuals
     assert!(code.contains("let f0 = i_nl[0] - i_dev0"), "Residual f0");

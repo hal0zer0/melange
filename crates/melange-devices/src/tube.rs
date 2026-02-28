@@ -2,7 +2,7 @@
 //!
 //! Koren's models for triodes and pentodes.
 
-use crate::{NonlinearDevice, VT_ROOM};
+use crate::{NonlinearDevice, VT_ROOM, safeguards};
 
 /// Koren triode model.
 ///
@@ -38,7 +38,7 @@ impl KorenTriode {
         Self::new(17.0, 1.5, 1180.0, 200.0, 100.0)
     }
 
-    /// 12AY7 - low-mu triode (used in Fender input stages).
+    /// 12AT7 (ECC81) - medium-mu triode.
     pub fn ecc81() -> Self {
         Self::new(40.0, 1.5, 800.0, 300.0, 150.0)
     }
@@ -88,7 +88,7 @@ impl KorenTriode {
         if vgk > 0.0 {
             // Very rough approximation: grid conducts like a diode
             let vt = VT_ROOM;
-            1e-6 * ((vgk / vt).exp() - 1.0)
+            1e-6 * (safeguards::safe_exp(vgk / vt) - 1.0)
         } else {
             0.0
         }
