@@ -46,7 +46,7 @@ pub struct SmPotData {
     pub g_nominal: f64,
     /// N_v * su (M-vector, for K correction in NR loop)
     pub nv_su: Vec<f64>,
-    /// u^T * N_i (M-vector, for correction to S*N_i products)
+    /// su^T * N_i = (S*u)^T * N_i (M-vector, for correction to K and S*N_i products)
     pub u_ni: Vec<f64>,
     /// Positive terminal node index (0 = ground, 1-indexed)
     pub node_p: usize,
@@ -204,12 +204,14 @@ impl DkKernel {
                 Vec::new()
             };
 
-            // u_ni[j] = u^T * N_i[:,j] (M-vector)
+            // u_ni[j] = su^T * N_i[:,j] = (S*u)^T * N_i[:,j] (M-vector)
+            // Sherman-Morrison requires su^T*N_i (not u^T*N_i) because
+            // S' = S - scale * (S*u) * (u^T*S) and S is symmetric, so u^T*S = su^T
             let mut u_ni = vec![0.0; m];
             for j in 0..m {
                 let mut sum = 0.0;
                 for i in 0..n {
-                    sum += u[i] * mna.n_i[i][j];
+                    sum += su[i] * mna.n_i[i][j];
                 }
                 u_ni[j] = sum;
             }

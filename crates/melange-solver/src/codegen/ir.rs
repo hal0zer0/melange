@@ -95,7 +95,7 @@ pub struct PotentiometerIR {
     pub g_nominal: f64,
     /// N_v * su (M-vector, for K correction in NR loop)
     pub nv_su: Vec<f64>,
-    /// u^T * N_i (M-vector, for correction to S*N_i products)
+    /// su^T * N_i = (S*u)^T * N_i (M-vector, for correction to K and S*N_i products)
     pub u_ni: Vec<f64>,
     /// Positive terminal node index (0 = ground, 1-indexed)
     pub node_p: usize,

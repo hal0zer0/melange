@@ -400,7 +400,7 @@ impl RustEmitter {
                 "fn sm_scale_{}(state: &CircuitState) -> (f64, f64) {{\n", idx
             ));
             code.push_str(&format!(
-                "    let r = state.pot_{}_resistance.clamp(POT_{}_MIN_R, POT_{}_MAX_R);\n",
+                "    let r = state.pot_{}_resistance;\n    if !r.is_finite() {{ return (0.0, 0.0); }}\n    let r = r.clamp(POT_{}_MIN_R, POT_{}_MAX_R);\n",
                 idx, idx, idx
             ));
             code.push_str(&format!(
@@ -617,6 +617,11 @@ impl RustEmitter {
 
         let num_pots = ir.pots.len();
         ctx.insert("num_pots", &num_pots);
+        // Pot defaults for sanitization reset
+        let pot_defaults: Vec<String> = ir.pots.iter().map(|p| {
+            format!("{:.17e}", 1.0 / p.g_nominal)
+        }).collect();
+        ctx.insert("pot_defaults", &pot_defaults);
 
         // Generate pot correction code blocks procedurally
         if num_pots > 0 {
@@ -686,27 +691,32 @@ impl RustEmitter {
         } else if pot.node_q > 0 {
             let q = pot.node_q - 1;
             code.push_str(&format!(
-                "    rhs[{}] += delta_g_{} * state.v_prev[{}];\n", q, idx, q
+                "    rhs[{}] -= delta_g_{} * state.v_prev[{}];\n", q, idx, q
             ));
         }
     }
 
     fn emit_s_correction(code: &mut String, idx: usize, pot: &PotentiometerIR, n: usize) {
-        // S correction: v_pred -= scale * (u^T . rhs) * SU
-        // u^T . rhs = rhs[node_p-1] - rhs[node_q-1] (or just one if grounded)
-        let u_dot_rhs = if pot.node_p > 0 && pot.node_q > 0 {
-            format!("rhs[{}] - rhs[{}]", pot.node_p - 1, pot.node_q - 1)
-        } else if pot.node_p > 0 {
-            format!("rhs[{}]", pot.node_p - 1)
-        } else {
-            format!("-rhs[{}]", pot.node_q - 1)
-        };
+        // S correction: v_pred -= scale * (su^T . rhs) * SU
+        // Sherman-Morrison: S' * rhs = S*rhs - scale * su * (su^T * rhs)
+        // where su = S*u, so the inner product must use su (POT_SU), not u.
+        code.push_str(&format!("    let su_dot_rhs_{} = ", idx));
+        let mut first = true;
+        for k in 0..n {
+            if pot.su[k] != 0.0 {
+                if !first { code.push_str(" + "); }
+                code.push_str(&format!("POT_{}_SU[{}] * rhs[{}]", idx, k, k));
+                first = false;
+            }
+        }
+        if first {
+            // All su entries are zero (degenerate pot)
+            code.push_str("0.0");
+        }
+        code.push_str(";\n");
 
         code.push_str(&format!(
-            "    let u_dot_rhs_{} = {};\n", idx, u_dot_rhs
-        ));
-        code.push_str(&format!(
-            "    let factor_{} = scale_{} * u_dot_rhs_{};\n", idx, idx, idx
+            "    let factor_{} = scale_{} * su_dot_rhs_{};\n", idx, idx, idx
         ));
         for k in 0..n {
             code.push_str(&format!(
@@ -902,10 +912,17 @@ impl RustEmitter {
             }
             code.push_str("\n");
 
-            // NR Jacobian
-            code.push_str(
-                "        // Jacobian: J[i][j] = delta_ij - sum_k(jdev_ik * K[k][j])\n",
-            );
+            // NR Jacobian: J[i][j] = delta_ij - sum_k(jdev_ik * K'[k][j])
+            // When pots are present, K' = K - scale * nv_su * su_ni^T
+            if !ir.pots.is_empty() {
+                code.push_str(
+                    "        // Jacobian: J[i][j] = delta_ij - sum_k(jdev_ik * K_eff[k][j])\n",
+                );
+            } else {
+                code.push_str(
+                    "        // Jacobian: J[i][j] = delta_ij - sum_k(jdev_ik * K[k][j])\n",
+                );
+            }
             for i in 0..m {
                 let slot = ir
                     .device_slots
@@ -920,10 +937,25 @@ impl RustEmitter {
                     let diag = if i == j { "1.0" } else { "0.0" };
                     let mut terms = String::new();
                     for k in blk_start..blk_start + blk_dim {
-                        terms.push_str(&format!(
-                            " - jdev_{}_{} * K[{}][{}]",
-                            i, k, k, j
-                        ));
+                        if ir.pots.is_empty() {
+                            terms.push_str(&format!(
+                                " - jdev_{}_{} * K[{}][{}]",
+                                i, k, k, j
+                            ));
+                        } else {
+                            // Use corrected K': K[k][j] - sum_pots(scale_p * nv_su_p[k] * u_ni_p[j])
+                            let mut k_correction = String::new();
+                            for (idx, _pot) in ir.pots.iter().enumerate() {
+                                k_correction.push_str(&format!(
+                                    " - k_scale_{} * POT_{}_NV_SU[{}] * POT_{}_U_NI[{}]",
+                                    idx, idx, k, idx, j
+                                ));
+                            }
+                            terms.push_str(&format!(
+                                " - jdev_{}_{} * (K[{}][{}]{})",
+                                i, k, k, j, k_correction
+                            ));
+                        }
                     }
                     code.push_str(&format!(
                         "        let j{}{} = {}{};\n",

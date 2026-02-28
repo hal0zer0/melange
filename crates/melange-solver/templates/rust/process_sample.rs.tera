@@ -75,7 +75,8 @@ pub fn process_sample(input: f64, state: &mut CircuitState) -> f64 {
 {% if num_inductors > 0 %}        state.ind_i_prev = [0.0; {{ num_inductors }}];
         state.ind_v_prev = [0.0; {{ num_inductors }}];
         state.ind_i_hist = [0.0; {{ num_inductors }}];
-{% endif %}        return 0.0;
+{% endif %}{% for default in pot_defaults %}        state.pot_{{ loop.index0 }}_resistance = {{ default }};
+{% endfor %}        return 0.0;
     }
 
     // Return output voltage, clamped to safe audio range
