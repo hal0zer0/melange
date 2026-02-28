@@ -8,6 +8,8 @@
 //! - Produce output matching a rebuilt circuit at non-nominal resistance
 //! - Don't change codegen output when no pots are present (backward compat)
 
+use std::io::Write;
+
 use melange_solver::codegen::{CodeGenerator, CodegenConfig};
 use melange_solver::codegen::ir::CircuitIR;
 use melange_solver::parser::Netlist;
@@ -44,6 +46,40 @@ fn generate_code(spice: &str) -> String {
     result.code
 }
 
+/// Compile generated code with rustc, panicking with stderr on failure.
+fn assert_compiles(code: &str, label: &str) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+    let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+
+    let tmp_dir = std::env::temp_dir();
+    let src = tmp_dir.join(format!("melange_pot_test_{}.rs", id));
+    let lib = tmp_dir.join(format!("melange_pot_test_{}.rlib", id));
+
+    {
+        let mut f = std::fs::File::create(&src).expect("create temp file");
+        f.write_all(code.as_bytes()).expect("write temp file");
+    }
+
+    let output = std::process::Command::new("rustc")
+        .args(["--edition", "2021", "--crate-type", "lib", "-o"])
+        .arg(&lib)
+        .arg(&src)
+        .output()
+        .expect("failed to run rustc");
+
+    let _ = std::fs::remove_file(&src);
+    let _ = std::fs::remove_file(&lib);
+    let _ = std::fs::remove_file(tmp_dir.join(format!("libmelange_pot_test_{}.rlib", id)));
+
+    assert!(
+        output.status.success(),
+        "Generated code for '{}' failed to compile:\n{}",
+        label,
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Test circuits
 // ---------------------------------------------------------------------------
@@ -76,6 +112,25 @@ Grounded Pot
 R1 in 0 10k
 C1 in out 100n
 R2 out 0 1k
+.pot R1 1k 100k
+";
+
+const TWO_POT_SPICE: &str = "\
+Two Pot Circuit
+R1 in mid 10k
+R2 mid out 5k
+C1 out 0 100n
+.pot R1 1k 100k
+.pot R2 500 50k
+";
+
+const GROUNDED_POT_DIODE_SPICE: &str = "\
+Grounded Pot with Diode
+R1 in 0 10k
+D1 in out Dmod
+C1 out 0 100n
+R2 out 0 1k
+.model Dmod D(IS=2.52e-9 N=1.5)
 .pot R1 1k 100k
 ";
 
@@ -316,7 +371,7 @@ fn test_sm_vectors_match_manual_computation() {
     //
     // We verify our precomputed SM vectors against a fresh A inversion.
 
-    let (_netlist, mna, kernel) = build_pipeline(RC_POT_SPICE);
+    let (_netlist, _mna, kernel) = build_pipeline(RC_POT_SPICE);
     let n = kernel.n;
     assert_eq!(n, 2);
 
@@ -368,9 +423,6 @@ fn test_sm_update_matches_full_rebuild() {
     // Build RC circuit with R=10k, get S via SM
     // Build RC circuit with R=5k directly, get S via full inversion
     // Compare S_updated vs S_rebuilt
-    use melange_solver::dk::DkKernel;
-
-    let sr = 44100.0;
 
     // Circuit 1: R=10k (nominal), with pot
     let spice_10k = "\
@@ -397,12 +449,7 @@ C1 out 0 100n
     let denom = 1.0 + delta_g * pot.usu;
     let scale = delta_g / denom;
 
-    // S_new[i][j] = S_old[i][j] - scale * su[i] * su[j]
-    // (This is the Sherman-Morrison formula for S_new = (A + delta_g * u * u^T)^{-1})
-    // Wait, actually: for a symmetric rank-1 update A' = A + delta_g * u * u^T,
-    // S' = S - (delta_g / (1 + delta_g * u^T S u)) * (S u) * (S u)^T
-    // = S - scale * su * su^T
-
+    // S' = S - scale * su * su^T (symmetric A → symmetric S)
     for i in 0..n {
         for j in 0..n {
             let s_old = kernel_10k.s[i * n + j];
@@ -416,4 +463,374 @@ C1 out 0 100n
             );
         }
     }
+}
+
+// ===========================================================================
+// NEW TESTS: Filling coverage gaps identified by multi-agent review
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// Two-pot circuit through full pipeline
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_two_pot_pipeline() {
+    let (_, mna, kernel) = build_pipeline(TWO_POT_SPICE);
+    assert_eq!(mna.pots.len(), 2);
+    assert_eq!(kernel.pots.len(), 2);
+
+    // Both pots should have distinct SM vectors
+    let pot0 = &kernel.pots[0];
+    let pot1 = &kernel.pots[1];
+    assert_eq!(pot0.su.len(), kernel.n);
+    assert_eq!(pot1.su.len(), kernel.n);
+    assert!(pot0.usu > 0.0);
+    assert!(pot1.usu > 0.0);
+    // Different pots → different USU values
+    assert!((pot0.usu - pot1.usu).abs() > 1e-6, "Two pots should have distinct USU values");
+}
+
+#[test]
+fn test_two_pot_codegen() {
+    let code = generate_code(TWO_POT_SPICE);
+
+    // Both pots should have constants and helpers
+    assert!(code.contains("POT_0_SU"), "Missing POT_0_SU");
+    assert!(code.contains("POT_1_SU"), "Missing POT_1_SU");
+    assert!(code.contains("POT_0_USU"), "Missing POT_0_USU");
+    assert!(code.contains("POT_1_USU"), "Missing POT_1_USU");
+    assert!(code.contains("fn sm_scale_0("), "Missing sm_scale_0");
+    assert!(code.contains("fn sm_scale_1("), "Missing sm_scale_1");
+    assert!(code.contains("pot_0_resistance"), "Missing pot_0_resistance");
+    assert!(code.contains("pot_1_resistance"), "Missing pot_1_resistance");
+    assert!(code.contains("delta_g_0"), "Missing delta_g_0 in process_sample");
+    assert!(code.contains("delta_g_1"), "Missing delta_g_1 in process_sample");
+}
+
+#[test]
+fn test_two_pot_compiles() {
+    let code = generate_code(TWO_POT_SPICE);
+    assert_compiles(&code, "two_pot");
+}
+
+// ---------------------------------------------------------------------------
+// Actual rustc compilation tests (replaces brace-counting)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_rc_pot_compiles_rustc() {
+    let code = generate_code(RC_POT_SPICE);
+    assert_compiles(&code, "rc_pot");
+}
+
+#[test]
+fn test_diode_pot_compiles_rustc() {
+    let code = generate_code(DIODE_POT_SPICE);
+    assert_compiles(&code, "diode_pot");
+}
+
+#[test]
+fn test_grounded_pot_compiles_rustc() {
+    let code = generate_code(GROUNDED_POT_SPICE);
+    assert_compiles(&code, "grounded_pot");
+}
+
+#[test]
+fn test_grounded_pot_diode_compiles_rustc() {
+    let code = generate_code(GROUNDED_POT_DIODE_SPICE);
+    assert_compiles(&code, "grounded_pot_diode");
+}
+
+// ---------------------------------------------------------------------------
+// SM-corrected K matrix matches full rebuild
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_sm_k_update_matches_full_rebuild() {
+    // For a nonlinear circuit, verify K' via SM matches K from fresh build at R=5k
+    let spice_10k = "\
+Diode K test
+R1 in mid 10k
+R2 in 0 100k
+D1 mid out Dmod
+C1 out 0 100n
+.model Dmod D(IS=2.52e-9 N=1.5)
+.pot R1 1k 100k
+";
+    let (_, _, kernel_10k) = build_pipeline(spice_10k);
+    let _n = kernel_10k.n;
+    let m = kernel_10k.m;
+    assert!(m > 0, "Need nonlinear device for K test");
+    let pot = &kernel_10k.pots[0];
+
+    let spice_5k = "\
+Diode K test 5k
+R1 in mid 5k
+R2 in 0 100k
+D1 mid out Dmod
+C1 out 0 100n
+.model Dmod D(IS=2.52e-9 N=1.5)
+";
+    let (_, _, kernel_5k) = build_pipeline(spice_5k);
+
+    // SM scale for R=5k
+    let r_new = 5000.0;
+    let delta_g = 1.0 / r_new - pot.g_nominal;
+    let scale = delta_g / (1.0 + delta_g * pot.usu);
+
+    // K' = K - scale * nv_su * u_ni^T
+    // (where nv_su = N_v*su, u_ni = su^T*N_i after our fix)
+    for i in 0..m {
+        for j in 0..m {
+            let k_old = kernel_10k.k[i * m + j];
+            let k_updated = k_old - scale * pot.nv_su[i] * pot.u_ni[j];
+            let k_rebuilt = kernel_5k.k[i * m + j];
+
+            assert!(
+                (k_updated - k_rebuilt).abs() < 1e-8,
+                "K[{}][{}] mismatch: SM={:.15e}, rebuilt={:.15e}, diff={:.2e}",
+                i, j, k_updated, k_rebuilt, (k_updated - k_rebuilt).abs()
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Manual verification of nv_su and u_ni vectors
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_sm_nonlinear_vectors_match_manual() {
+    let (_, mna, kernel) = build_pipeline(DIODE_POT_SPICE);
+    let n = kernel.n;
+    let m = kernel.m;
+    let pot = &kernel.pots[0];
+
+    // nv_su = N_v * su
+    // N_v is M×N, su is N-vector → nv_su is M-vector
+    for i in 0..m {
+        let mut nv_su_manual = 0.0;
+        for j in 0..n {
+            nv_su_manual += mna.n_v[i][j] * pot.su[j];
+        }
+        assert!(
+            (pot.nv_su[i] - nv_su_manual).abs() < 1e-10,
+            "nv_su[{}] mismatch: precomputed={:.15e}, manual={:.15e}",
+            i, pot.nv_su[i], nv_su_manual
+        );
+    }
+
+    // u_ni = su^T * N_i (after our fix)
+    // su is N-vector, N_i is N×M → u_ni is M-vector
+    for j in 0..m {
+        let mut u_ni_manual = 0.0;
+        for i in 0..n {
+            u_ni_manual += pot.su[i] * mna.n_i[i][j];
+        }
+        assert!(
+            (pot.u_ni[j] - u_ni_manual).abs() < 1e-10,
+            "u_ni[{}] mismatch: precomputed={:.15e}, manual={:.15e}",
+            j, pot.u_ni[j], u_ni_manual
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Pot at extreme resistance values
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_sm_scale_at_extremes() {
+    let (_, _, kernel) = build_pipeline(RC_POT_SPICE);
+    let pot = &kernel.pots[0];
+
+    // Helper: compute (delta_g, scale) for a given resistance
+    let sm_scale = |r: f64| -> (f64, f64) {
+        let r = r.clamp(pot.min_resistance, pot.max_resistance);
+        let delta_g = 1.0 / r - pot.g_nominal;
+        let denom = 1.0 + delta_g * pot.usu;
+        let scale = if denom.abs() > 1e-15 { delta_g / denom } else { 0.0 };
+        (delta_g, scale)
+    };
+
+    // At nominal: delta_g ≈ 0
+    let (dg_nom, scale_nom) = sm_scale(1.0 / pot.g_nominal);
+    assert!(dg_nom.abs() < 1e-15, "delta_g should be ~0 at nominal");
+    assert!(scale_nom.abs() < 1e-15, "scale should be ~0 at nominal");
+
+    // At min_r: delta_g > 0 (conductance increases)
+    let (dg_min, scale_min) = sm_scale(pot.min_resistance);
+    assert!(dg_min > 0.0, "delta_g should be positive at min_r (more conductance)");
+    assert!(scale_min.is_finite(), "scale at min_r should be finite");
+
+    // At max_r: delta_g < 0 (conductance decreases)
+    let (dg_max, scale_max) = sm_scale(pot.max_resistance);
+    assert!(dg_max < 0.0, "delta_g should be negative at max_r (less conductance)");
+    assert!(scale_max.is_finite(), "scale at max_r should be finite");
+
+    // Below min_r should clamp to min_r
+    let (dg_below, _) = sm_scale(100.0); // below min of 1k
+    assert_eq!(dg_below, dg_min, "Below min_r should clamp");
+
+    // Above max_r should clamp to max_r
+    let (dg_above, _) = sm_scale(1e6); // above max of 100k
+    assert_eq!(dg_above, dg_max, "Above max_r should clamp");
+
+    // Verify the corrected S matrix is still positive definite (diagonal > 0)
+    // by checking that the SM-updated diagonal entries remain positive
+    let n = kernel.n;
+    for &r in &[pot.min_resistance, pot.max_resistance] {
+        let (_, scale) = sm_scale(r);
+        for i in 0..n {
+            let s_corrected = kernel.s[i * n + i] - scale * pot.su[i] * pot.su[i];
+            assert!(
+                s_corrected > 0.0,
+                "S_corrected[{}][{}] should be positive at R={}, got {}",
+                i, i, r, s_corrected
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Nominal R equals min or max boundary
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_pot_nominal_at_boundary() {
+    // Nominal R = min_r
+    let spice_at_min = "\
+Nominal at min
+R1 in out 1k
+C1 out 0 100n
+.pot R1 1k 100k
+";
+    let (_, _, kernel) = build_pipeline(spice_at_min);
+    let pot = &kernel.pots[0];
+    assert!((1.0 / pot.g_nominal - 1000.0).abs() < 1e-10);
+    assert!(pot.usu > 0.0);
+
+    // Nominal R = max_r
+    let spice_at_max = "\
+Nominal at max
+R1 in out 100k
+C1 out 0 100n
+.pot R1 1k 100k
+";
+    let (_, _, kernel) = build_pipeline(spice_at_max);
+    let pot = &kernel.pots[0];
+    assert!((1.0 / pot.g_nominal - 100000.0).abs() < 1e-6);
+    assert!(pot.usu > 0.0);
+}
+
+// ---------------------------------------------------------------------------
+// Grounded pot in nonlinear circuit
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_grounded_pot_diode_pipeline() {
+    let (_, mna, kernel) = build_pipeline(GROUNDED_POT_DIODE_SPICE);
+    assert_eq!(mna.pots.len(), 1);
+    assert!(mna.pots[0].grounded);
+    assert!(kernel.m > 0, "Should have nonlinear device");
+
+    let pot = &kernel.pots[0];
+    assert_eq!(pot.nv_su.len(), kernel.m);
+    assert_eq!(pot.u_ni.len(), kernel.m);
+    for v in &pot.nv_su { assert!(v.is_finite()); }
+    for v in &pot.u_ni { assert!(v.is_finite()); }
+}
+
+// ---------------------------------------------------------------------------
+// S*N_i correction in generated code
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_codegen_sni_correction() {
+    let code = generate_code(DIODE_POT_SPICE);
+
+    // S*N_i correction block should exist (M>0 and pots exist)
+    assert!(code.contains("u_ni_dot_di_0"), "Missing u_ni_dot_di in sni correction");
+    assert!(code.contains("sni_factor_0"), "Missing sni_factor in sni correction");
+    assert!(code.contains("let mut v = compute_final_voltages"), "v should be mutable with pot+nonlinear");
+}
+
+#[test]
+fn test_codegen_no_sni_correction_linear() {
+    let code = generate_code(RC_POT_SPICE);
+
+    // Linear circuit (M=0): no S*N_i correction should appear
+    assert!(!code.contains("sni_factor"), "Linear pot circuit should have no sni_factor");
+    assert!(!code.contains("u_ni_dot_di"), "Linear pot circuit should have no u_ni_dot_di");
+}
+
+// ---------------------------------------------------------------------------
+// NaN guard in sm_scale
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_codegen_nan_guard_in_sm_scale() {
+    let code = generate_code(RC_POT_SPICE);
+    assert!(
+        code.contains("if !r.is_finite()"),
+        "sm_scale should have NaN/Inf guard"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// State sanitization resets pot resistance
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_codegen_sanitization_resets_pot() {
+    let code = generate_code(RC_POT_SPICE);
+
+    // The NaN sanitization block should reset pot resistance
+    // Find the sanitization block and check it contains pot reset
+    let sanitize_idx = code.find("if !state.v_prev.iter().all(|x| x.is_finite())")
+        .expect("Missing sanitization block");
+    let after_sanitize = &code[sanitize_idx..];
+    let return_idx = after_sanitize.find("return 0.0;").expect("Missing return in sanitization");
+    let sanitize_block = &after_sanitize[..return_idx];
+    assert!(
+        sanitize_block.contains("pot_0_resistance"),
+        "Sanitization block should reset pot_0_resistance"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Jacobian K correction in generated code
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_codegen_jacobian_uses_corrected_k() {
+    let code = generate_code(DIODE_POT_SPICE);
+
+    // The Jacobian should use corrected K, not bare K[k][j]
+    // Look for the pattern: K[0][0] - k_scale_0 * POT_0_NV_SU
+    assert!(
+        code.contains("K[0][0] - k_scale_0 * POT_0_NV_SU"),
+        "Jacobian should use SM-corrected K"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// S correction uses su^T*rhs (not u^T*rhs)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_codegen_s_correction_uses_su() {
+    let code = generate_code(RC_POT_SPICE);
+
+    // The S correction should compute su^T * rhs = POT_0_SU[k] * rhs[k]
+    assert!(
+        code.contains("POT_0_SU[0] * rhs[0]") || code.contains("POT_0_SU[1] * rhs[1]"),
+        "S correction should use POT_SU dot rhs, not u dot rhs"
+    );
+    // Should NOT use the old pattern "rhs[p] - rhs[q]" for S correction
+    // (that pattern is still valid for A_neg correction which uses u not su)
+    assert!(
+        code.contains("su_dot_rhs"),
+        "S correction variable should be named su_dot_rhs"
+    );
 }
