@@ -156,40 +156,6 @@ impl MnaSystem {
         self.c[j][i] -= capacitance;
     }
 
-    /// Stamp an inductor using companion model (trapezoidal).
-    ///
-    /// For trapezoidal: Geq = T/(2L), Ieq = i_L(t) + (T/2L)*v_L(t)
-    /// This stamps only the conductance part into G.
-    ///
-    /// # Errors
-    /// Returns an error if `sample_rate` is not positive and finite, or if `inductance` is negative.
-    pub fn stamp_inductor(&mut self, i: usize, j: usize, inductance: f64, sample_rate: f64) -> Result<(), MnaError> {
-        if !(sample_rate > 0.0 && sample_rate.is_finite()) {
-            return Err(MnaError::InvalidParameter(
-                "sample_rate must be positive and finite".to_string()
-            ));
-        }
-        if inductance < 0.0 {
-            return Err(MnaError::InvalidComponentValue {
-                component: "inductor".to_string(),
-                value: inductance,
-                reason: "inductance must be non-negative".to_string(),
-            });
-        }
-        if inductance == 0.0 {
-            return Ok(()); // Treat as short
-        }
-        let t = 1.0 / sample_rate;
-        let g_eq = t / (2.0 * inductance);
-
-        // Stamp equivalent conductance like a resistor
-        self.g[i][i] += g_eq;
-        self.g[j][j] += g_eq;
-        self.g[i][j] -= g_eq;
-        self.g[j][i] -= g_eq;
-        Ok(())
-    }
-
     /// Stamp input conductance to ground at a node.
     /// 
     /// This represents the Thevenin equivalent of the input source:
@@ -316,8 +282,8 @@ impl MnaSystem {
             }
         }
         
-        // Inductor companion model contributes to A_neg as well
-        // For inductor: A_neg contribution is g_eq (same form as resistor in A_neg)
+        // Inductor companion model contributes to A_neg with opposite sign to A.
+        // A has +g_eq (like resistor), A_neg has -g_eq (opposite: inductor stores energy)
         let g_eq_inductor = t / 2.0;
         for ind in &self.inductors {
             if ind.node_i > 0 && ind.node_j > 0 {

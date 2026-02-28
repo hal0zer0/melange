@@ -442,9 +442,9 @@ impl Parser {
 
         let value = parse_value(parts[3])
             .map_err(|_| self.error(format!("Invalid capacitor value: {}", parts[3])))?;
-        if value < 0.0 || !value.is_finite() {
+        if value <= 0.0 || !value.is_finite() {
             return Err(self.error(format!(
-                "Capacitor value must be non-negative and finite, got {}", value
+                "Capacitor value must be positive and finite, got {}", value
             )));
         }
 

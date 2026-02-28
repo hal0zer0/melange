@@ -25,7 +25,9 @@ impl OnePoleLpf {
     /// * `fc` - Cutoff frequency in Hz
     /// * `fs` - Sample rate in Hz
     pub fn new(fc: f64, fs: f64) -> Self {
-        let g = 1.0 - (-core::f64::consts::TAU * fc / fs).exp();
+        // Clamp cutoff below Nyquist to prevent unstable coefficients
+        let fc_safe = fc.min(fs * 0.499);
+        let g = 1.0 - (-core::f64::consts::TAU * fc_safe / fs).exp();
         Self {
             state: 0.0,
             g,
@@ -35,7 +37,8 @@ impl OnePoleLpf {
 
     /// Set the cutoff frequency (smoothly update coefficients).
     pub fn set_cutoff(&mut self, fc: f64, fs: f64) {
-        self.g = 1.0 - (-core::f64::consts::TAU * fc / fs).exp();
+        let fc_safe = fc.min(fs * 0.499);
+        self.g = 1.0 - (-core::f64::consts::TAU * fc_safe / fs).exp();
         self.g1 = 1.0 - self.g;
     }
 
@@ -118,13 +121,16 @@ pub struct TptLpf {
 impl TptLpf {
     /// Create a new TPT LPF at the given cutoff frequency.
     pub fn new(fc: f64, fs: f64) -> Self {
-        let g = (core::f64::consts::PI * fc / fs).tan();
+        // Clamp below Nyquist to prevent tan() blowup
+        let fc_safe = fc.min(fs * 0.499);
+        let g = (core::f64::consts::PI * fc_safe / fs).tan();
         Self { s: 0.0, g }
     }
 
     /// Set the cutoff frequency.
     pub fn set_cutoff(&mut self, fc: f64, fs: f64) {
-        self.g = (core::f64::consts::PI * fc / fs).tan();
+        let fc_safe = fc.min(fs * 0.499);
+        self.g = (core::f64::consts::PI * fc_safe / fs).tan();
     }
 
     /// Process a single sample (linear, no saturation).
@@ -249,7 +255,7 @@ impl Biquad {
     pub fn set_type(&mut self, filter_type: BiquadType, fs: f64) {
         match filter_type {
             BiquadType::Lowpass { fc, q } => {
-                let w0 = core::f64::consts::TAU * fc / fs;
+                let w0 = core::f64::consts::TAU * fc.min(fs * 0.499) / fs;
                 let cos_w0 = w0.cos();
                 let sin_w0 = w0.sin();
                 let alpha = sin_w0 / (2.0 * q);
@@ -262,7 +268,7 @@ impl Biquad {
                 self.a2 = (1.0 - alpha) / a0;
             }
             BiquadType::Highpass { fc, q } => {
-                let w0 = core::f64::consts::TAU * fc / fs;
+                let w0 = core::f64::consts::TAU * fc.min(fs * 0.499) / fs;
                 let cos_w0 = w0.cos();
                 let sin_w0 = w0.sin();
                 let alpha = sin_w0 / (2.0 * q);
@@ -275,7 +281,7 @@ impl Biquad {
                 self.a2 = (1.0 - alpha) / a0;
             }
             BiquadType::Bandpass { fc, q } => {
-                let w0 = core::f64::consts::TAU * fc / fs;
+                let w0 = core::f64::consts::TAU * fc.min(fs * 0.499) / fs;
                 let cos_w0 = w0.cos();
                 let sin_w0 = w0.sin();
                 let alpha = sin_w0 / (2.0 * q);
@@ -288,7 +294,7 @@ impl Biquad {
                 self.a2 = (1.0 - alpha) / a0;
             }
             BiquadType::PeakingEq { fc, q, gain_db } => {
-                let w0 = core::f64::consts::TAU * fc / fs;
+                let w0 = core::f64::consts::TAU * fc.min(fs * 0.499) / fs;
                 let cos_w0 = w0.cos();
                 let sin_w0 = w0.sin();
                 let a = 10.0_f64.powf(gain_db / 40.0);
@@ -302,7 +308,7 @@ impl Biquad {
                 self.a2 = (1.0 - alpha / a) / a0;
             }
             BiquadType::LowShelf { fc, gain_db } => {
-                let w0 = core::f64::consts::TAU * fc / fs;
+                let w0 = core::f64::consts::TAU * fc.min(fs * 0.499) / fs;
                 let cos_w0 = w0.cos();
                 let sin_w0 = w0.sin();
                 let a = 10.0_f64.powf(gain_db / 40.0);
@@ -316,7 +322,7 @@ impl Biquad {
                 self.a2 = ((a + 1.0) + (a - 1.0) * cos_w0 - sqrt_a_2 * sin_w0) / a0;
             }
             BiquadType::HighShelf { fc, gain_db } => {
-                let w0 = core::f64::consts::TAU * fc / fs;
+                let w0 = core::f64::consts::TAU * fc.min(fs * 0.499) / fs;
                 let cos_w0 = w0.cos();
                 let sin_w0 = w0.sin();
                 let a = 10.0_f64.powf(gain_db / 40.0);

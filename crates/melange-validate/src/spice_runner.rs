@@ -468,12 +468,7 @@ fn format_scientific(value: f64) -> String {
     if value == 0.0 {
         return "0".to_string();
     }
-
-    let abs_val = value.abs();
-    let exponent = abs_val.log10().floor() as i32;
-    let mantissa = value / 10f64.powi(exponent);
-
-    format!("{:e}", mantissa * 10f64.powi(exponent))
+    format!("{:e}", value)
 }
 
 /// Check if ngspice is installed and available

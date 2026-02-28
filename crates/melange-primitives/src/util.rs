@@ -78,7 +78,11 @@ pub fn freq_to_midi(freq: f64) -> f64 {
 /// assert_eq!(map_range(0.5, 0.0, 1.0, 0.0, 100.0), 50.0);
 /// ```
 pub fn map_range(x: f64, in_min: f64, in_max: f64, out_min: f64, out_max: f64) -> f64 {
-    out_min + (x - in_min) * (out_max - out_min) / (in_max - in_min)
+    let range = in_max - in_min;
+    if range == 0.0 {
+        return (out_min + out_max) * 0.5; // midpoint when input range is degenerate
+    }
+    out_min + (x - in_min) * (out_max - out_min) / range
 }
 
 /// Convert dB to linear gain.
@@ -88,8 +92,13 @@ pub fn db_to_gain(db: f64) -> f64 {
 }
 
 /// Convert linear gain to dB.
+///
+/// Returns -200.0 dB for gain <= 0 (floor to avoid -inf/NaN).
 #[inline(always)]
 pub fn gain_to_db(gain: f64) -> f64 {
+    if gain <= 0.0 {
+        return -200.0; // floor: ~0 in linear domain
+    }
     20.0 * gain.log10()
 }
 

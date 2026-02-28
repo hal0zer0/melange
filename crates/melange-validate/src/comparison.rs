@@ -108,6 +108,10 @@ impl Signal {
     /// Apply a window function (Hann window) for spectral analysis
     pub fn apply_window(&self) -> Signal {
         let n = self.samples.len();
+        if n <= 1 {
+            // Single sample or empty: Hann window is trivially 0 at boundaries
+            return Signal::new(vec![0.0; n], self.sample_rate, format!("{}_windowed", self.name));
+        }
         let windowed: Vec<f64> = self
             .samples
             .iter()
@@ -480,7 +484,7 @@ pub fn compare_signals(
         ));
     }
 
-    if thd_error_db.abs() > config.thd_error_tolerance_db {
+    if !thd_error_db.is_finite() || thd_error_db.abs() > config.thd_error_tolerance_db {
         failures.push(format!(
             "THD error {:.2} dB exceeds tolerance {:.2} dB",
             thd_error_db.abs(),
