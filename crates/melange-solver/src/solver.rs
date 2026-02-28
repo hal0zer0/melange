@@ -429,16 +429,23 @@ impl CircuitSolver {
         std::mem::swap(&mut self.v_nl_prev, &mut self.v_nl);
         std::mem::swap(&mut self.i_nl_prev, &mut self.i_nl);
 
-        // Update inductor companion model state
-        self.kernel.update_inductors(&self.v_prev);
-
-        // Sanitize state: if any value is NaN/inf, reset to zero to prevent
-        // one bad sample from poisoning all future output
+        // Sanitize state BEFORE updating inductors: if any value is NaN/inf,
+        // reset to zero to prevent one bad sample from poisoning inductor
+        // history and all future output
         if self.v_prev.iter().any(|v| !v.is_finite()) {
             self.v_prev.fill(0.0);
             self.v_nl_prev.fill(0.0);
             self.i_nl_prev.fill(0.0);
+            self.input_prev = 0.0;
+            for ind in &mut self.kernel.inductors {
+                ind.i_hist = 0.0;
+                ind.i_prev = 0.0;
+                ind.v_prev = 0.0;
+            }
         }
+
+        // Update inductor companion model state
+        self.kernel.update_inductors(&self.v_prev);
 
         // Return output with safety clamping
         let raw = if self.output_node < self.kernel.n {
@@ -537,16 +544,16 @@ impl CircuitSolver {
             self.clamp,
         );
 
-        // Check for divergence - if NR failed, use a safe fallback
+        // Check for divergence - if NR failed, use previous sample for continuity
         let v_final = match result {
             melange_primitives::nr::NrResult::Converged { .. } => v_nl,
             melange_primitives::nr::NrResult::MaxIterations { .. } => {
-                // Limit to reasonable range if max iterations reached
-                v_nl.clamp(-1.0, 1.0)
+                // Use previous sample's solution for continuity (no audible clicks)
+                self.v_nl_prev[0]
             }
             melange_primitives::nr::NrResult::Divergence => {
-                // Use zero as safe fallback
-                0.0
+                // Use previous sample's solution for continuity
+                self.v_nl_prev[0]
             }
         };
 
@@ -618,8 +625,9 @@ impl CircuitSolver {
                 self.v_nl[1] = v2;
             }
             melange_primitives::nr::NrResult::MaxIterations { .. } => {
-                self.v_nl[0] = v1.clamp(-1.0, 1.0);
-                self.v_nl[1] = v2.clamp(-1.0, 1.0);
+                // Use previous sample's solution for continuity (no audible clicks)
+                self.v_nl[0] = self.v_nl_prev[0];
+                self.v_nl[1] = self.v_nl_prev[1];
             }
             melange_primitives::nr::NrResult::Divergence => {
                 self.v_nl[0] = self.v_nl_prev[0];
@@ -779,6 +787,11 @@ impl CircuitSolver {
         self.v_nl_prev.fill(0.0);
         self.i_nl_prev.fill(0.0);
         self.input_prev = 0.0;
+        for ind in &mut self.kernel.inductors {
+            ind.i_hist = 0.0;
+            ind.i_prev = 0.0;
+            ind.v_prev = 0.0;
+        }
     }
 
     /// Process a block of samples.
@@ -826,6 +839,13 @@ impl LinearSolver {
     /// Process a single sample.
     #[allow(clippy::needless_range_loop)]
     pub fn process_sample(&mut self, input: f64) -> f64 {
+        // Validate input - handle NaN, inf, and extreme values
+        let input = if input.is_finite() {
+            input.clamp(-100.0, 100.0)
+        } else {
+            0.0
+        };
+
         let n = self.kernel.n;
 
         // Build RHS: A_neg * v_prev + 2*input
@@ -869,13 +889,19 @@ impl LinearSolver {
         // Swap v_prev and v_pred
         std::mem::swap(&mut self.v_prev, &mut self.v_pred);
 
-        // Update inductor companion model state
-        self.kernel.update_inductors(&self.v_prev);
-
-        // Sanitize state: if any value is NaN/inf, reset to prevent poisoning
+        // Sanitize state BEFORE updating inductors to prevent NaN poisoning
         if self.v_prev.iter().any(|v| !v.is_finite()) {
             self.v_prev.fill(0.0);
+            self.input_prev = 0.0;
+            for ind in &mut self.kernel.inductors {
+                ind.i_hist = 0.0;
+                ind.i_prev = 0.0;
+                ind.v_prev = 0.0;
+            }
         }
+
+        // Update inductor companion model state
+        self.kernel.update_inductors(&self.v_prev);
 
         // Return output with safety clamping
         let raw = if self.output_node < n {
@@ -895,6 +921,11 @@ impl LinearSolver {
     pub fn reset(&mut self) {
         self.v_prev.fill(0.0);
         self.input_prev = 0.0;
+        for ind in &mut self.kernel.inductors {
+            ind.i_hist = 0.0;
+            ind.i_prev = 0.0;
+            ind.v_prev = 0.0;
+        }
     }
 }
 

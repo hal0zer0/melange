@@ -11,6 +11,10 @@ fn build_rhs(input: f64, input_prev: f64, state: &CircuitState) -> [f64; N] {
 {{ a_neg_lines }}
 {% if has_nl_prev %}    // Add N_i * i_nl_prev contribution
 {{ nl_prev_lines }}
+{% endif %}{% if num_inductors > 0 %}    // Add inductor history current contribution (Norton companion model)
+{% for ind in inductors %}{% if ind.node_i > 0 %}    rhs[{{ ind.node_i - 1 }}] -= state.ind_i_hist[{{ loop.index0 }}];
+{% endif %}{% if ind.node_j > 0 %}    rhs[{{ ind.node_j - 1 }}] += state.ind_i_hist[{{ loop.index0 }}];
+{% endif %}{% endfor %}
 {% endif %}    // Add input contribution (Thevenin: (V_in + V_in_prev) * G_in)
     rhs[INPUT_NODE] += (input + input_prev) / INPUT_RESISTANCE;
 

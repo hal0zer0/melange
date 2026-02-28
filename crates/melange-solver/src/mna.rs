@@ -343,6 +343,12 @@ impl MnaSystem {
     }
 }
 
+/// Norton equivalent conductance for voltage sources [S].
+///
+/// A large conductance value used to model ideal voltage sources as
+/// Norton equivalents (current source + parallel conductance).
+pub const VS_CONDUCTANCE: f64 = 1e6;
+
 /// Error type for MNA assembly.
 #[derive(Debug, Clone)]
 pub enum MnaError {
@@ -503,7 +509,6 @@ impl MnaBuilder {
                 ElementType::VoltageSource => {
                     // Norton equivalent: stamp large conductance between nodes
                     // The current contribution is handled in build_rhs_const
-                    const VS_CONDUCTANCE: f64 = 1e6;
                     if elem.nodes.len() >= 2 {
                         let node_i = elem.nodes[0]; // n_plus
                         let node_j = elem.nodes[1]; // n_minus
@@ -569,10 +574,9 @@ impl MnaBuilder {
                         let b_raw = node_indices[1];
                         let e_raw = node_indices[2];
 
-                        // Reject all-grounded BJT
-                        if c_raw == 0 && b_raw == 0 && e_raw == 0 {
-                            // All terminals grounded — skip (no contribution)
-                        } else if c_raw > 0 && b_raw > 0 && e_raw > 0 {
+                        // All-grounded BJTs are rejected in categorize_element,
+                        // so c/b/e can't all be 0 here.
+                        if c_raw > 0 && b_raw > 0 && e_raw > 0 {
                             // No grounded terminals — use standard stamp
                             mna.stamp_bjt(start_idx, c_raw - 1, b_raw - 1, e_raw - 1);
                         } else {
@@ -736,6 +740,13 @@ impl MnaBuilder {
                 });
             }
             Element::Diode { name, n_plus, n_minus, .. } => {
+                let ni = self.node_map[n_plus];
+                let nj = self.node_map[n_minus];
+                if ni == 0 && nj == 0 {
+                    return Err(MnaError::TopologyError(
+                        format!("diode '{}' has both terminals grounded", name)
+                    ));
+                }
                 let start_idx = self.total_dimension;
                 self.total_dimension += 1; // Diode is 1-dimensional
                 self.nonlinear_devices.push(NonlinearDeviceInfo {
@@ -751,6 +762,14 @@ impl MnaBuilder {
                 });
             }
             Element::Bjt { name, nc, nb, ne, .. } => {
+                let nc_idx = self.node_map[nc];
+                let nb_idx = self.node_map[nb];
+                let ne_idx = self.node_map[ne];
+                if nc_idx == 0 && nb_idx == 0 && ne_idx == 0 {
+                    return Err(MnaError::TopologyError(
+                        format!("BJT '{}' has all terminals grounded", name)
+                    ));
+                }
                 let start_idx = self.total_dimension;
                 self.total_dimension += 2; // BJT is 2-dimensional (Vbe, Vbc)
                 self.nonlinear_devices.push(NonlinearDeviceInfo {
@@ -767,6 +786,14 @@ impl MnaBuilder {
                 });
             }
             Element::Jfet { name, nd, ng, ns, .. } => {
+                let nd_idx = self.node_map[nd];
+                let ng_idx = self.node_map[ng];
+                let ns_idx = self.node_map[ns];
+                if nd_idx == 0 && ng_idx == 0 && ns_idx == 0 {
+                    return Err(MnaError::TopologyError(
+                        format!("JFET '{}' has all terminals grounded", name)
+                    ));
+                }
                 let start_idx = self.total_dimension;
                 self.total_dimension += 1; // Simplified: 1D for now
                 let _idx = self.nonlinear_devices.len();
@@ -784,6 +811,14 @@ impl MnaBuilder {
                 });
             }
             Element::Mosfet { name, nd, ng, ns, nb, .. } => {
+                let nd_idx = self.node_map[nd];
+                let ng_idx = self.node_map[ng];
+                let ns_idx = self.node_map[ns];
+                if nd_idx == 0 && ng_idx == 0 && ns_idx == 0 {
+                    return Err(MnaError::TopologyError(
+                        format!("MOSFET '{}' has all terminals grounded", name)
+                    ));
+                }
                 let start_idx = self.total_dimension;
                 self.total_dimension += 1; // Simplified: 1D for now
                 let _idx = self.nonlinear_devices.len();

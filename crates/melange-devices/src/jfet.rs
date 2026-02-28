@@ -150,8 +150,9 @@ impl Jfet {
             self.idss * (vgst / vp_abs).powi(2) * self.lambda
         };
 
-        // Apply chain rule for polarity
-        (s * d_id_d_vgs, s * d_id_d_vds)
+        // Apply chain rule for polarity: ∂Id/∂vgs = s * ∂(s*f)/∂(s*vgs) = s² * ∂f/∂vgs_eff
+        // For N-channel (s=1): s²=1, no change. For P-channel (s=-1): s²=1, sign preserved.
+        (s * s * d_id_d_vgs, s * s * d_id_d_vds)
     }
 
     /// Gate current (very small, only conducts when forward biased).
@@ -277,5 +278,34 @@ mod tests {
         // Should match within 1%
         assert!((d_id_d_vgs - num_d_id_d_vgs).abs() / d_id_d_vgs.abs() < 0.01);
         assert!((d_id_d_vds - num_d_id_d_vds).abs() / d_id_d_vds.abs() < 0.01);
+    }
+
+    #[test]
+    fn test_jfet_p_channel_jacobian_numerical() {
+        let jfet = Jfet::p_2n5460();
+
+        // P-channel: positive Vgs (below Vp to conduct), negative Vds
+        let vgs = 2.0;
+        let vds = -5.0;
+
+        // Analytical Jacobian
+        let (d_id_d_vgs, d_id_d_vds) = jfet.jacobian_partial(vgs, vds);
+
+        // Numerical verification (central difference)
+        let eps = 1e-6;
+        let num_d_id_d_vgs = (jfet.drain_current(vgs + eps, vds) - jfet.drain_current(vgs - eps, vds)) / (2.0 * eps);
+        let num_d_id_d_vds = (jfet.drain_current(vgs, vds + eps) - jfet.drain_current(vgs, vds - eps)) / (2.0 * eps);
+
+        // Should match within 1%
+        assert!(
+            (d_id_d_vgs - num_d_id_d_vgs).abs() / num_d_id_d_vgs.abs().max(1e-15) < 0.01,
+            "P-channel gm: analytical={:.6e}, numerical={:.6e}",
+            d_id_d_vgs, num_d_id_d_vgs
+        );
+        assert!(
+            (d_id_d_vds - num_d_id_d_vds).abs() / num_d_id_d_vds.abs().max(1e-15) < 0.01,
+            "P-channel gds: analytical={:.6e}, numerical={:.6e}",
+            d_id_d_vds, num_d_id_d_vds
+        );
     }
 }

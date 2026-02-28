@@ -11,7 +11,7 @@
 //! - 1 BJT: M = 2 (Vbe, Vbc)
 //! - 2 diodes + 1 BJT: M = 1 + 1 + 2 = 4
 
-use crate::mna::MnaSystem;
+use crate::mna::{MnaSystem, VS_CONDUCTANCE};
 use std::sync::Arc;
 
 /// Information about an inductor for companion model.
@@ -373,7 +373,6 @@ fn build_rhs_const(mna: &MnaSystem, _sample_rate: f64) -> Vec<f64> {
     // For DC voltage V between n+ and n-, stamp G_large between nodes and I = V * G_large
     // The conductance is already stamped into G in the MNA builder below,
     // so here we just add the current contribution.
-    const VS_CONDUCTANCE: f64 = 1e6; // Large conductance for Norton equivalent
     for vs in &mna.voltage_sources {
         let current = vs.dc_value * VS_CONDUCTANCE;
         if vs.n_plus_idx > 0 {

@@ -128,7 +128,7 @@ impl CodeGenerator {
         netlist: &Netlist,
     ) -> Result<GeneratedCode, CodegenError> {
         // Step 1: Build language-agnostic IR
-        let ir = CircuitIR::from_kernel(kernel, mna, netlist, &self.config);
+        let ir = CircuitIR::from_kernel(kernel, mna, netlist, &self.config)?;
 
         // Step 2: Emit Rust code from IR
         let emitter = RustEmitter::new();

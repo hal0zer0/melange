@@ -23,6 +23,14 @@ pub struct CircuitState {
 
     /// Iteration count from last solve (for diagnostics)
     pub last_nr_iterations: u32,
+{% if num_inductors > 0 %}
+    /// Inductor previous currents
+    pub ind_i_prev: [f64; {{ num_inductors }}],
+    /// Inductor previous voltages
+    pub ind_v_prev: [f64; {{ num_inductors }}],
+    /// Inductor history currents (Norton equivalent)
+    pub ind_i_hist: [f64; {{ num_inductors }}],
+{% endif %}
 }
 
 impl Default for CircuitState {
@@ -36,6 +44,11 @@ impl Default for CircuitState {
             dc_operating_point: [0.0; N],
 {% endif %}            input_prev: 0.0,
             last_nr_iterations: 0,
+{% if num_inductors > 0 %}
+            ind_i_prev: [0.0; {{ num_inductors }}],
+            ind_v_prev: [0.0; {{ num_inductors }}],
+            ind_i_hist: [0.0; {{ num_inductors }}],
+{% endif %}
         }
     }
 }
@@ -47,6 +60,11 @@ impl CircuitState {
         self.i_nl_prev = [0.0; M];
         self.input_prev = 0.0;
         self.last_nr_iterations = 0;
+{% if num_inductors > 0 %}
+        self.ind_i_prev = [0.0; {{ num_inductors }}];
+        self.ind_v_prev = [0.0; {{ num_inductors }}];
+        self.ind_i_hist = [0.0; {{ num_inductors }}];
+{% endif %}
     }
 
     /// Set DC operating point (call after DC analysis)

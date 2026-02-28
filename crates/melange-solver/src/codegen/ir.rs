@@ -6,10 +6,10 @@
 use serde::{Deserialize, Serialize};
 
 use crate::dk::{self, DkKernel};
-use crate::mna::MnaSystem;
+use crate::mna::{MnaSystem, VS_CONDUCTANCE};
 use crate::parser::{Element, Netlist};
 
-use super::CodegenConfig;
+use super::{CodegenConfig, CodegenError};
 
 // ============================================================================
 // Top-level IR
@@ -31,6 +31,7 @@ pub struct CircuitIR {
     pub device_slots: Vec<DeviceSlot>,
     pub has_dc_sources: bool,
     pub has_dc_op: bool,
+    pub inductors: Vec<InductorIR>,
 }
 
 /// Circuit metadata (name, title, generator version).
@@ -80,6 +81,18 @@ pub struct Matrices {
     pub n_i: Vec<f64>,
     /// Constant RHS contribution from DC sources, length N
     pub rhs_const: Vec<f64>,
+}
+
+/// Inductor parameters for code generation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InductorIR {
+    pub name: String,
+    /// Node index (1-indexed, 0=ground)
+    pub node_i: usize,
+    /// Node index (1-indexed, 0=ground)
+    pub node_j: usize,
+    /// Equivalent conductance T/(2L)
+    pub g_eq: f64,
 }
 
 /// Resolved parameters for a single nonlinear device (legacy, kept for JSON compat).
@@ -144,12 +157,16 @@ pub enum DeviceType {
 
 impl CircuitIR {
     /// Build a `CircuitIR` from the compiled kernel, MNA system, netlist, and config.
+    ///
+    /// # Errors
+    /// Returns `CodegenError::InvalidConfig` if the netlist contains JFET or MOSFET
+    /// devices, which are not yet supported in code generation.
     pub fn from_kernel(
         kernel: &DkKernel,
         mna: &MnaSystem,
         netlist: &Netlist,
         config: &CodegenConfig,
-    ) -> Self {
+    ) -> Result<Self, CodegenError> {
         let n = kernel.n;
         let m = kernel.m;
 
@@ -189,7 +206,15 @@ impl CircuitIR {
         };
 
         // --- Device slots + resolved params ---
-        let (device_slots, devices) = Self::build_device_info(netlist);
+        let (device_slots, devices) = Self::build_device_info(netlist)?;
+
+        // --- Inductors ---
+        let inductors: Vec<InductorIR> = kernel.inductors.iter().map(|ind| InductorIR {
+            name: ind.name.to_string(),
+            node_i: ind.node_i,
+            node_j: ind.node_j,
+            g_eq: ind.g_eq,
+        }).collect();
 
         // --- DC sources ---
         let has_dc_sources = kernel.rhs_const.iter().any(|&v| v != 0.0);
@@ -202,7 +227,7 @@ impl CircuitIR {
         );
         let has_dc_op = dc_op.iter().any(|&v| v != 0.0);
 
-        CircuitIR {
+        Ok(CircuitIR {
             metadata,
             topology,
             solver_config,
@@ -212,11 +237,15 @@ impl CircuitIR {
             device_slots,
             has_dc_sources,
             has_dc_op,
-        }
+            inductors,
+        })
     }
 
     /// Build device slot map and resolve per-device parameters from netlist.
-    fn build_device_info(netlist: &Netlist) -> (Vec<DeviceSlot>, Vec<DeviceIR>) {
+    ///
+    /// # Errors
+    /// Returns `CodegenError::InvalidConfig` if JFET or MOSFET elements are present.
+    fn build_device_info(netlist: &Netlist) -> Result<(Vec<DeviceSlot>, Vec<DeviceIR>), CodegenError> {
         let mut slots = Vec::new();
         let mut devices = Vec::new();
         let mut dim_offset = 0;
@@ -270,7 +299,17 @@ impl CircuitIR {
                     });
                     dim_offset += 2;
                 }
-                _ => {}
+                Element::Jfet { name, .. } => {
+                    return Err(CodegenError::InvalidConfig(
+                        format!("JFET '{}' not supported in code generation", name)
+                    ));
+                }
+                Element::Mosfet { name, .. } => {
+                    return Err(CodegenError::InvalidConfig(
+                        format!("MOSFET '{}' not supported in code generation", name)
+                    ));
+                }
+                _ => {} // Skip non-device elements (R, C, L, sources)
             }
         }
 
@@ -282,7 +321,7 @@ impl CircuitIR {
             devices.push(DeviceIR::Bjt(bp));
         }
 
-        (slots, devices)
+        Ok((slots, devices))
     }
 
     /// Look up a parameter from a `.model` directive, case-insensitive.
@@ -316,7 +355,6 @@ impl CircuitIR {
 
         // Build DC source vector (Norton currents, no *2 trapezoidal factor)
         let mut b_dc = vec![0.0; n];
-        const VS_CONDUCTANCE: f64 = 1e6;
         for vs in &mna.voltage_sources {
             let current = vs.dc_value * VS_CONDUCTANCE;
             if vs.n_plus_idx > 0 {

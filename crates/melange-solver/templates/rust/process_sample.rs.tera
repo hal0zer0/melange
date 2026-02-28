@@ -37,13 +37,29 @@ pub fn process_sample(input: f64, state: &mut CircuitState) -> f64 {
     state.v_prev = v;
     state.i_nl_prev = i_nl;
     state.input_prev = input;
+{% if num_inductors > 0 %}
+
+    // Step 7b: Update inductor companion model state
+{% for ind in inductors %}    {
+        let v_i = {% if ind.node_i > 0 %}v[{{ ind.node_i - 1 }}]{% else %}0.0{% endif %};
+        let v_j = {% if ind.node_j > 0 %}v[{{ ind.node_j - 1 }}]{% else %}0.0{% endif %};
+        let v_new = v_i - v_j;
+        let i_new = state.ind_i_prev[{{ loop.index0 }}] + IND_{{ loop.index0 }}_G_EQ * (state.ind_v_prev[{{ loop.index0 }}] + v_new);
+        state.ind_i_hist[{{ loop.index0 }}] = i_new - IND_{{ loop.index0 }}_G_EQ * v_new;
+        state.ind_i_prev[{{ loop.index0 }}] = i_new;
+        state.ind_v_prev[{{ loop.index0 }}] = v_new;
+    }
+{% endfor %}{% endif %}
 
     // Step 8: Sanitize state — if NaN/inf entered, reset to prevent poisoning
     if !state.v_prev.iter().all(|x| x.is_finite()) {
         state.v_prev = [0.0; N];
         state.i_nl_prev = [0.0; M];
         state.input_prev = 0.0;
-        return 0.0;
+{% if num_inductors > 0 %}        state.ind_i_prev = [0.0; {{ num_inductors }}];
+        state.ind_v_prev = [0.0; {{ num_inductors }}];
+        state.ind_i_hist = [0.0; {{ num_inductors }}];
+{% endif %}        return 0.0;
     }
 
     // Return output voltage, clamped to safe audio range

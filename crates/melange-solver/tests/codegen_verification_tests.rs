@@ -1017,7 +1017,7 @@ fn test_singularity_threshold_constant() {
 /// Helper: build CircuitIR from SPICE string
 fn build_ir(spice: &str) -> CircuitIR {
     let (netlist, mna, kernel) = build_pipeline(spice);
-    CircuitIR::from_kernel(&kernel, &mna, &netlist, &default_config())
+    CircuitIR::from_kernel(&kernel, &mna, &netlist, &default_config()).unwrap()
 }
 
 /// Verify IR matrix data round-trips through JSON with near-exact f64 equality.
@@ -1106,7 +1106,7 @@ fn test_ir_roundtrip_mixed_diode_bjt() {
 #[test]
 fn test_ir_fields_match_kernel() {
     let (netlist, mna, kernel) = build_pipeline(DIODE_CLIPPER_SPICE);
-    let ir = CircuitIR::from_kernel(&kernel, &mna, &netlist, &default_config());
+    let ir = CircuitIR::from_kernel(&kernel, &mna, &netlist, &default_config()).unwrap();
 
     // Topology
     assert_eq!(ir.topology.n, kernel.n);
@@ -1250,13 +1250,13 @@ fn test_dc_op_includes_input_conductance() {
         input_resistance: 1.0, // 1 ohm — near-ideal voltage source
         ..default_config()
     };
-    let ir_low_r = CircuitIR::from_kernel(&kernel, &mna, &netlist, &config_low_r);
+    let ir_low_r = CircuitIR::from_kernel(&kernel, &mna, &netlist, &config_low_r).unwrap();
 
     let config_high_r = CodegenConfig {
         input_resistance: 1e6, // 1 Mohm — very high impedance
         ..default_config()
     };
-    let ir_high_r = CircuitIR::from_kernel(&kernel, &mna, &netlist, &config_high_r);
+    let ir_high_r = CircuitIR::from_kernel(&kernel, &mna, &netlist, &config_high_r).unwrap();
 
     // DC operating points should differ when input resistance changes
     // (because input conductance is part of the G matrix used in DC OP calculation)

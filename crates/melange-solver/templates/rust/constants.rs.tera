@@ -52,4 +52,14 @@ pub const N_V: [[f64; N]; M] = [
 pub const N_I: [[f64; N]; M] = [
 {% for row in n_i_rows %}    [{{ row }}],
 {% endfor %}];
+{% if num_inductors > 0 %}
+
+/// Number of inductors
+pub const NUM_INDUCTORS: usize = {{ num_inductors }};
+{% for ind in inductors %}
+const IND_{{ loop.index0 }}_NODE_I: usize = {{ ind.node_i }};
+const IND_{{ loop.index0 }}_NODE_J: usize = {{ ind.node_j }};
+const IND_{{ loop.index0 }}_G_EQ: f64 = {{ ind.g_eq }};
+{% endfor %}
+{% endif %}
 

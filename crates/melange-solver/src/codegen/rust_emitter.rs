@@ -6,11 +6,22 @@
 //! Uses Tera templates for declarative sections and procedural code for the
 //! complex NR solver (deeply conditional M=1/2/3/4 branching).
 
+use serde::Serialize;
 use tera::{Context, Tera};
 
 use super::emitter::Emitter;
 use super::ir::{CircuitIR, DeviceParams, DeviceType};
 use super::CodegenError;
+
+/// Inductor data passed to Tera templates.
+#[derive(Serialize)]
+struct InductorTemplateData {
+    name: String,
+    node_i: usize,
+    node_j: usize,
+    /// Formatted g_eq string for constants template (empty when not needed)
+    g_eq: String,
+}
 
 // Embed templates at compile time — no runtime file loading.
 const TMPL_HEADER: &str = include_str!("../../templates/rust/header.rs.tera");
@@ -91,7 +102,7 @@ impl Emitter for RustEmitter {
         self.generate_solve_nonlinear(&mut code, ir)?;
         code.push_str(&self.emit_final_voltages(ir)?);
         code.push_str(&self.emit_update_history()?);
-        code.push_str(&self.emit_process_sample()?);
+        code.push_str(&self.emit_process_sample(ir)?);
 
         Ok(code)
     }
@@ -115,6 +126,22 @@ impl RustEmitter {
 
         ctx.insert("n", &n);
         ctx.insert("m", &m);
+
+        // Inductor data
+        let num_inductors = ir.inductors.len();
+        ctx.insert("num_inductors", &num_inductors);
+        if num_inductors > 0 {
+            // Build inductor data with g_eq formatted to full precision
+            let inductors_data: Vec<InductorTemplateData> = ir.inductors.iter().map(|ind| {
+                InductorTemplateData {
+                    name: ind.name.clone(),
+                    node_i: ind.node_i,
+                    node_j: ind.node_j,
+                    g_eq: format!("{:.17e}", ind.g_eq),
+                }
+            }).collect();
+            ctx.insert("inductors", &inductors_data);
+        }
         ctx.insert(
             "sample_rate",
             &format!("{:.1}", ir.solver_config.sample_rate),
@@ -198,6 +225,7 @@ impl RustEmitter {
     fn emit_state(&self, ir: &CircuitIR) -> Result<String, CodegenError> {
         let mut ctx = Context::new();
         ctx.insert("has_dc_op", &ir.has_dc_op);
+        ctx.insert("num_inductors", &ir.inductors.len());
 
         if ir.has_dc_op {
             let dc_op_values = ir
@@ -274,6 +302,21 @@ impl RustEmitter {
         let mut ctx = Context::new();
 
         ctx.insert("has_dc_sources", &ir.has_dc_sources);
+
+        // Inductor data for history current injection
+        let num_inductors = ir.inductors.len();
+        ctx.insert("num_inductors", &num_inductors);
+        if num_inductors > 0 {
+            let inductors_data: Vec<InductorTemplateData> = ir.inductors.iter().map(|ind| {
+                InductorTemplateData {
+                    name: ind.name.clone(),
+                    node_i: ind.node_i,
+                    node_j: ind.node_j,
+                    g_eq: String::new(), // not needed for build_rhs
+                }
+            }).collect();
+            ctx.insert("inductors", &inductors_data);
+        }
 
         // A_neg * v_prev lines
         let assign_op = if ir.has_dc_sources { "+=" } else { "=" };
@@ -433,8 +476,22 @@ impl RustEmitter {
         self.render("update_history", &Context::new())
     }
 
-    fn emit_process_sample(&self) -> Result<String, CodegenError> {
-        self.render("process_sample", &Context::new())
+    fn emit_process_sample(&self, ir: &CircuitIR) -> Result<String, CodegenError> {
+        let mut ctx = Context::new();
+        let num_inductors = ir.inductors.len();
+        ctx.insert("num_inductors", &num_inductors);
+        if num_inductors > 0 {
+            let inductors_data: Vec<InductorTemplateData> = ir.inductors.iter().map(|ind| {
+                InductorTemplateData {
+                    name: ind.name.clone(),
+                    node_i: ind.node_i,
+                    node_j: ind.node_j,
+                    g_eq: String::new(), // not needed for process_sample (uses IND_N_G_EQ constants)
+                }
+            }).collect();
+            ctx.insert("inductors", &inductors_data);
+        }
+        self.render("process_sample", &ctx)
     }
 }
 
@@ -471,7 +528,10 @@ impl RustEmitter {
             "    const TOL: f64 = {:.17e};\n",
             ir.solver_config.tolerance
         ));
-        code.push_str("    const STEP_CLAMP: f64 = 0.01;  // Prevent overshoot\n");
+        // NOTE: STEP_CLAMP=0.01 is tighter than the runtime solver's 0.1.
+        // Generated code runs unsupervised, so tighter clamping ensures stability
+        // across all circuits without manual tuning.
+        code.push_str("    const STEP_CLAMP: f64 = 0.01;  // Tighter than runtime (0.1) for unsupervised stability\n");
         code.push_str("    const SINGULARITY_THRESHOLD: f64 = 1e-15;\n\n");
 
         code.push_str("    // Initial guess from previous sample (warm start)\n");

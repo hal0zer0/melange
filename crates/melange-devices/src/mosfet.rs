@@ -106,8 +106,9 @@ impl Mosfet {
             0.5 * self.kp * vov * vov * self.lambda
         };
 
-        // Apply chain rule
-        (s * d_id_d_vgs, s * d_id_d_vds)
+        // Apply chain rule for polarity: ∂Id/∂vgs = s * ∂(s*f)/∂(s*vgs) = s² * ∂f/∂vgs_eff
+        // For N-channel (s=1): s²=1, no change. For P-channel (s=-1): s²=1, sign preserved.
+        (s * s * d_id_d_vgs, s * s * d_id_d_vds)
     }
 }
 
@@ -195,5 +196,35 @@ mod tests {
         // Should match within 1%
         assert!((d_id_d_vgs - num_d_id_d_vgs).abs() / d_id_d_vgs.abs() < 0.01);
         assert!((d_id_d_vds - num_d_id_d_vds).abs() / d_id_d_vds.abs() < 0.01);
+    }
+
+    #[test]
+    fn test_mosfet_p_channel_jacobian_numerical() {
+        // P-channel MOSFET: Vt=-2.0, same Kp
+        let mos = Mosfet::new(ChannelType::P, -2.0, 0.1, 0.01);
+
+        // P-channel: negative Vgs (more negative than Vt to conduct), negative Vds
+        let vgs = -5.0;
+        let vds = -5.0;
+
+        // Analytical Jacobian
+        let (d_id_d_vgs, d_id_d_vds) = mos.jacobian_partial(vgs, vds);
+
+        // Numerical verification (central difference)
+        let eps = 1e-6;
+        let num_d_id_d_vgs = (mos.drain_current(vgs + eps, vds) - mos.drain_current(vgs - eps, vds)) / (2.0 * eps);
+        let num_d_id_d_vds = (mos.drain_current(vgs, vds + eps) - mos.drain_current(vgs, vds - eps)) / (2.0 * eps);
+
+        // Should match within 1%
+        assert!(
+            (d_id_d_vgs - num_d_id_d_vgs).abs() / num_d_id_d_vgs.abs().max(1e-15) < 0.01,
+            "P-channel gm: analytical={:.6e}, numerical={:.6e}",
+            d_id_d_vgs, num_d_id_d_vgs
+        );
+        assert!(
+            (d_id_d_vds - num_d_id_d_vds).abs() / num_d_id_d_vds.abs().max(1e-15) < 0.01,
+            "P-channel gds: analytical={:.6e}, numerical={:.6e}",
+            d_id_d_vds, num_d_id_d_vds
+        );
     }
 }
