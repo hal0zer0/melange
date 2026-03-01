@@ -11,6 +11,7 @@ Quick reference for melange circuit simulation.
 | [COMPANION_MODELS.md](COMPANION_MODELS.md) | Trapezoidal integration | Pillage & Rohrer, Circuit Simulation Project |
 | [NR_SOLVER.md](NR_SOLVER.md) | Newton-Raphson | Hack Audio Ch. 7 |
 | [DEVICE_MODELS.md](DEVICE_MODELS.md) | Diode/BJT equations | Shockley equation, Ebers-Moll |
+| [DC_OP.md](DC_OP.md) | DC operating point solver | SPICE DC analysis, Nagel (1975) |
 | [CODEGEN.md](CODEGEN.md) | Generated code structure | melange implementation |
 | [DEBUGGING.md](DEBUGGING.md) | Bug signatures | melange debugging experience |
 
@@ -69,6 +70,8 @@ Since K is naturally negative, both formulas give J > 0 (convergent).
 | Quiet | INPUT_RESISTANCE too high | Use 1Ω (near-ideal voltage source) |
 | Unstable | No step clamping | Add STEP_CLAMP = 0.01 |
 | Wrong freq | Wrong alpha | Use 2/T not 1/T |
+| BJT no output | No DC OP init | Call `initialize_dc_op()` or use `DC_NL_I` constant |
+| DC OP diverges | Wrong Jacobian sign | Use `G_aug = G_dc - N_i·J_dev·N_v` (subtraction!) |
 
 ## External References
 
@@ -92,8 +95,21 @@ Since K is naturally negative, both formulas give J > 0 (convergent).
    "The Modified Nodal Approach to Network Analysis"
    Original MNA paper
 
+### DC Operating Point
+
+Nonlinear DC OP solver in `dc_op.rs`. Companion formulation:
+```
+G_aug = G_dc - N_i · J_dev · N_v   (subtraction — see DC_OP.md for why)
+rhs   = b_dc + N_i · (i_nl - J_dev · v_nl)
+v_new = G_aug^{-1} · rhs
+```
+
+Convergence chain: Direct NR → Source Stepping → Gmin Stepping → Linear Fallback.
+
 ## Test Circuits (Verified)
 
 1. **Voltage divider** (10k/10k) → Gain = 0.5
 2. **Diode clipper** → Unity + clip at ±0.7V
 3. **RC lowpass** (10k, 0.1uF) → -3dB @ 159Hz
+4. **Single diode + VCC** → V_anode ≈ 0.65V (DC OP verified)
+5. **BJT CE bias** → Vbe ≈ 0.65V, Ic ≈ 1.5mA (DC OP verified)

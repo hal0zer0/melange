@@ -1,7 +1,14 @@
-/// Multiply vector by S matrix: result = S * rhs
+/// Multiply vector by S matrix: result = state.s * rhs
 #[inline(always)]
-fn mat_vec_mul_s(rhs: &[f64; N]) -> [f64; N] {
-    [
-{{ mul_lines }}    ]
+fn mat_vec_mul_s(rhs: &[f64; N], state: &CircuitState) -> [f64; N] {
+    let mut result = [0.0f64; N];
+    for i in 0..N {
+        let mut sum = 0.0;
+        for j in 0..N {
+            sum += state.s[i][j] * rhs[j];
+        }
+        result[i] = sum;
+    }
+    result
 }
 

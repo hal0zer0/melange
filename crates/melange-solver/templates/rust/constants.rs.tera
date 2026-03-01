@@ -8,18 +8,13 @@ pub const N: usize = {{ n }};
 /// Total nonlinear dimension (sum of device dimensions)
 pub const M: usize = {{ m }};
 
-/// Sample rate (Hz)
+/// Default sample rate (Hz) used at code generation time.
 ///
-/// WARNING: This code was generated for a specific sample rate.
-/// Running at a different sample rate will produce incorrect results.
-/// Regenerate the code with the correct sample rate if needed.
+/// Call `state.set_sample_rate(actual_rate)` before processing audio
+/// if the DAW sample rate differs from this value.
 pub const SAMPLE_RATE: f64 = {{ sample_rate }};
 
-/// Alpha = 2/T for trapezoidal integration
-///
-/// WARNING: ALPHA is derived from SAMPLE_RATE at code generation time.
-/// All matrix constants (S, A_NEG, K) are baked in for this sample rate.
-/// Changing SAMPLE_RATE without regenerating the code will NOT update these matrices.
+/// Alpha = 2/T for trapezoidal integration (at SAMPLE_RATE)
 pub const ALPHA: f64 = {{ alpha }};
 
 /// Input node index
@@ -31,14 +26,25 @@ pub const OUTPUT_NODE: usize = {{ output_node }};
 /// Input resistance (Thevenin equivalent)
 pub const INPUT_RESISTANCE: f64 = {{ input_resistance }};
 
-/// S matrix: S = A⁻¹ where A = G + alpha*C
-pub const S: [[f64; N]; N] = [
+/// G matrix: conductance matrix (sample-rate independent)
+/// Includes input conductance and voltage source Norton equivalents.
+const G: [[f64; N]; N] = [
+{% for row in g_rows %}    [{{ row }}],
+{% endfor %}];
+
+/// C matrix: capacitance matrix (sample-rate independent)
+const C: [[f64; N]; N] = [
+{% for row in c_rows %}    [{{ row }}],
+{% endfor %}];
+
+/// Default S matrix: S = A^-1 where A = G + alpha*C (at SAMPLE_RATE)
+pub const S_DEFAULT: [[f64; N]; N] = [
 {% for row in s_rows %}    [{{ row }}],
 {% endfor %}];
 
-/// A_neg matrix: A_neg = alpha*C - G
+/// Default A_neg matrix: A_neg = alpha*C - G (at SAMPLE_RATE)
 /// Used for RHS computation: A_neg * v_prev gives history contribution
-pub const A_NEG: [[f64; N]; N] = [
+pub const A_NEG_DEFAULT: [[f64; N]; N] = [
 {% for row in a_neg_rows %}    [{{ row }}],
 {% endfor %}];
 
@@ -46,8 +52,8 @@ pub const A_NEG: [[f64; N]; N] = [
 /// Added to RHS every sample (Norton equivalent of voltage sources)
 pub const RHS_CONST: [f64; N] = [{{ rhs_const_values }}];
 
-{% endif %}/// K matrix: Nonlinear kernel K = N_v * S * N_i
-pub const K: [[f64; M]; M] = [
+{% endif %}/// Default K matrix: Nonlinear kernel K = N_v * S * N_i (at SAMPLE_RATE)
+pub const K_DEFAULT: [[f64; M]; M] = [
 {% for row in k_rows %}    [{{ row }}],
 {% endfor %}];
 
@@ -60,6 +66,11 @@ pub const N_V: [[f64; N]; M] = [
 pub const N_I: [[f64; N]; M] = [
 {% for row in n_i_rows %}    [{{ row }}],
 {% endfor %}];
+
+/// Default S*N_i product (at SAMPLE_RATE): precomputed for final voltage correction
+pub const S_NI_DEFAULT: [[f64; M]; N] = [
+{% for row in s_ni_rows %}    [{{ row }}],
+{% endfor %}];
 {% if num_inductors > 0 %}
 
 /// Number of inductors
@@ -68,6 +79,7 @@ pub const NUM_INDUCTORS: usize = {{ num_inductors }};
 const IND_{{ loop.index0 }}_NODE_I: usize = {{ ind.node_i }};
 const IND_{{ loop.index0 }}_NODE_J: usize = {{ ind.node_j }};
 const IND_{{ loop.index0 }}_G_EQ: f64 = {{ ind.g_eq }};
+const IND_{{ loop.index0 }}_INDUCTANCE: f64 = {{ ind.inductance }};
 {% endfor %}
 {% endif %}
 

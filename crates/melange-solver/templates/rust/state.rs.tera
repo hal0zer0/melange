@@ -2,11 +2,17 @@
 // STATE STRUCTURE
 // =============================================================================
 
-{% if has_dc_op %}/// DC operating point: linear steady-state node voltages
-/// Computed from G * v = b_dc (treats nonlinear devices as open)
+{% if has_dc_op %}/// DC operating point: steady-state node voltages
 pub const DC_OP: [f64; N] = [{{ dc_op_values }}];
 
-{% endif %}/// Circuit state for one processing channel
+{% endif %}{% if has_dc_nl %}/// DC operating point: nonlinear device currents at bias point
+pub const DC_NL_I: [f64; M] = [{{ dc_nl_i_values }}];
+
+{% endif %}/// Circuit state for one processing channel.
+///
+/// Contains both per-sample state (v_prev, i_nl_prev) and sample-rate-dependent
+/// matrices (s, a_neg, k, s_ni). Call [`set_sample_rate`](CircuitState::set_sample_rate)
+/// before processing if the host sample rate differs from [`SAMPLE_RATE`].
 #[derive(Clone, Debug)]
 pub struct CircuitState {
     /// Previous node voltages v[n-1]
@@ -23,6 +29,18 @@ pub struct CircuitState {
 
     /// Iteration count from last solve (for diagnostics)
     pub last_nr_iterations: u32,
+
+    /// S = A^{-1} matrix, recomputed by set_sample_rate
+    pub s: [[f64; N]; N],
+
+    /// A_neg = alpha*C - G matrix, recomputed by set_sample_rate
+    pub a_neg: [[f64; N]; N],
+
+    /// K = N_v * S * N_i kernel matrix, recomputed by set_sample_rate
+    pub k: [[f64; M]; M],
+
+    /// S * N_i product, recomputed by set_sample_rate
+    pub s_ni: [[f64; M]; N],
 {% if num_inductors > 0 %}
     /// Inductor previous currents
     pub ind_i_prev: [f64; {{ num_inductors }}],
@@ -30,32 +48,61 @@ pub struct CircuitState {
     pub ind_v_prev: [f64; {{ num_inductors }}],
     /// Inductor history currents (Norton equivalent)
     pub ind_i_hist: [f64; {{ num_inductors }}],
+    /// Inductor equivalent conductances (sample-rate dependent)
+    pub ind_g_eq: [f64; {{ num_inductors }}],
 {% endif %}
 {% for default in pot_defaults %}
     /// Potentiometer {{ loop.index0 }} current resistance (ohms)
     pub pot_{{ loop.index0 }}_resistance: f64,
 {% endfor %}
+{% if num_pots > 0 %}
+{% for idx in pot_indices %}
+    /// Sherman-Morrison precomputed SU vector for pot {{ idx }} (recomputed by set_sample_rate)
+    pub pot_{{ idx }}_su: [f64; N],
+    /// Sherman-Morrison USU scalar for pot {{ idx }} (recomputed by set_sample_rate)
+    pub pot_{{ idx }}_usu: f64,
+    /// Sherman-Morrison NV_SU vector for pot {{ idx }} (recomputed by set_sample_rate)
+    pub pot_{{ idx }}_nv_su: [f64; M],
+    /// Sherman-Morrison U_NI vector for pot {{ idx }} (recomputed by set_sample_rate)
+    pub pot_{{ idx }}_u_ni: [f64; M],
+{% endfor %}
+{% endif %}
 }
 
 impl Default for CircuitState {
     fn default() -> Self {
         Self {
 {% if has_dc_op %}            v_prev: DC_OP,
-            i_nl_prev: [0.0; M],
-            dc_operating_point: DC_OP,
+{% if has_dc_nl %}            i_nl_prev: DC_NL_I,
+{% else %}            i_nl_prev: [0.0; M],
+{% endif %}            dc_operating_point: DC_OP,
 {% else %}            v_prev: [0.0; N],
-            i_nl_prev: [0.0; M],
-            dc_operating_point: [0.0; N],
+{% if has_dc_nl %}            i_nl_prev: DC_NL_I,
+{% else %}            i_nl_prev: [0.0; M],
+{% endif %}            dc_operating_point: [0.0; N],
 {% endif %}            input_prev: 0.0,
             last_nr_iterations: 0,
+            s: S_DEFAULT,
+            a_neg: A_NEG_DEFAULT,
+            k: K_DEFAULT,
+            s_ni: S_NI_DEFAULT,
 {% if num_inductors > 0 %}
             ind_i_prev: [0.0; {{ num_inductors }}],
             ind_v_prev: [0.0; {{ num_inductors }}],
             ind_i_hist: [0.0; {{ num_inductors }}],
+            ind_g_eq: [{% for ind in inductors %}IND_{{ loop.index0 }}_G_EQ{% if not loop.last %}, {% endif %}{% endfor %}],
 {% endif %}
 {% for default in pot_defaults %}
             pot_{{ loop.index0 }}_resistance: {{ default }},
 {% endfor %}
+{% if num_pots > 0 %}
+{% for idx in pot_indices %}
+            pot_{{ idx }}_su: POT_{{ idx }}_SU,
+            pot_{{ idx }}_usu: POT_{{ idx }}_USU,
+            pot_{{ idx }}_nv_su: POT_{{ idx }}_NV_SU,
+            pot_{{ idx }}_u_ni: POT_{{ idx }}_U_NI,
+{% endfor %}
+{% endif %}
         }
     }
 }
@@ -64,8 +111,9 @@ impl CircuitState {
     /// Reset to DC operating point
     pub fn reset(&mut self) {
         self.v_prev = self.dc_operating_point;
-        self.i_nl_prev = [0.0; M];
-        self.input_prev = 0.0;
+{% if has_dc_nl %}        self.i_nl_prev = DC_NL_I;
+{% else %}        self.i_nl_prev = [0.0; M];
+{% endif %}        self.input_prev = 0.0;
         self.last_nr_iterations = 0;
 {% if num_inductors > 0 %}
         self.ind_i_prev = [0.0; {{ num_inductors }}];
@@ -82,5 +130,218 @@ impl CircuitState {
         self.dc_operating_point = v_dc;
         self.v_prev = v_dc;
     }
+
+    /// Recompute all sample-rate-dependent matrices for a new sample rate.
+    ///
+    /// Call this once during plugin initialization (NOT on the audio thread).
+    /// This recomputes S, A_neg, K, S*N_i, inductor g_eq, and pot SM vectors
+    /// from the stored G and C matrices.
+    ///
+    /// If `sample_rate` matches [`SAMPLE_RATE`], this is a no-op (the defaults
+    /// are already correct).
+    pub fn set_sample_rate(&mut self, sample_rate: f64) {
+        if !(sample_rate > 0.0 && sample_rate.is_finite()) {
+            return; // Invalid sample rate, keep defaults
+        }
+
+        // If same as codegen sample rate, reset to defaults (avoids numerical drift)
+        if (sample_rate - SAMPLE_RATE).abs() < 0.5 {
+            self.s = S_DEFAULT;
+            self.a_neg = A_NEG_DEFAULT;
+            self.k = K_DEFAULT;
+            self.s_ni = S_NI_DEFAULT;
+{% if num_inductors > 0 %}
+            self.ind_g_eq = [{% for ind in inductors %}IND_{{ loop.index0 }}_G_EQ{% if not loop.last %}, {% endif %}{% endfor %}];
+{% endif %}
+{% if num_pots > 0 %}
+{% for idx in pot_indices %}
+            self.pot_{{ idx }}_su = POT_{{ idx }}_SU;
+            self.pot_{{ idx }}_usu = POT_{{ idx }}_USU;
+            self.pot_{{ idx }}_nv_su = POT_{{ idx }}_NV_SU;
+            self.pot_{{ idx }}_u_ni = POT_{{ idx }}_U_NI;
+{% endfor %}
+{% endif %}
+            return;
+        }
+
+        let alpha = 2.0 * sample_rate;
+{% if num_inductors > 0 %}        let t = 1.0 / sample_rate;
+{% endif %}
+        // Build A = G + alpha*C
+        let mut a = [[0.0f64; N]; N];
+        for i in 0..N {
+            for j in 0..N {
+                a[i][j] = G[i][j] + alpha * C[i][j];
+            }
+        }
+
+        // Build A_neg = alpha*C - G
+        let mut a_neg = [[0.0f64; N]; N];
+        for i in 0..N {
+            for j in 0..N {
+                a_neg[i][j] = alpha * C[i][j] - G[i][j];
+            }
+        }
+{% if num_inductors > 0 %}
+
+        // Add inductor companion model conductances
+{% for ind in inductors %}        {
+            let g_eq = t / (2.0 * IND_{{ loop.index0 }}_INDUCTANCE);
+            self.ind_g_eq[{{ loop.index0 }}] = g_eq;
+            stamp_conductance(&mut a, IND_{{ loop.index0 }}_NODE_I, IND_{{ loop.index0 }}_NODE_J, g_eq);
+            stamp_conductance(&mut a_neg, IND_{{ loop.index0 }}_NODE_I, IND_{{ loop.index0 }}_NODE_J, -g_eq);
+        }
+{% endfor %}{% endif %}
+
+        // Invert A to get S
+        let s = invert_n(a);
+
+        // Compute S * N_i product (N x M)
+        let mut s_ni = [[0.0f64; M]; N];
+        for i in 0..N {
+            for j in 0..M {
+                let mut sum = 0.0;
+                for kk in 0..N {
+                    sum += s[i][kk] * N_I[j][kk]; // N_I is transposed: [M][N]
+                }
+                s_ni[i][j] = sum;
+            }
+        }
+
+        // Compute K = N_v * S_NI (M x M)
+        let mut k = [[0.0f64; M]; M];
+        for i in 0..M {
+            for j in 0..M {
+                let mut sum = 0.0;
+                for n_idx in 0..N {
+                    sum += N_V[i][n_idx] * s_ni[n_idx][j];
+                }
+                k[i][j] = sum;
+            }
+        }
+
+        self.s = s;
+        self.a_neg = a_neg;
+        self.k = k;
+        self.s_ni = s_ni;
+{% if num_pots > 0 %}
+
+        // Recompute Sherman-Morrison vectors for pots
+{% for idx in pot_indices %}        {
+            let mut u = [0.0f64; N];
+            if POT_{{ idx }}_NODE_P > 0 { u[POT_{{ idx }}_NODE_P - 1] = 1.0; }
+            if POT_{{ idx }}_NODE_Q > 0 { u[POT_{{ idx }}_NODE_Q - 1] = -1.0; }
+
+            let mut su = [0.0f64; N];
+            for i in 0..N {
+                let mut sum = 0.0;
+                for j in 0..N { sum += self.s[i][j] * u[j]; }
+                su[i] = sum;
+            }
+
+            let mut usu = 0.0f64;
+            for i in 0..N { usu += u[i] * su[i]; }
+
+            let mut nv_su = [0.0f64; M];
+            for i in 0..M {
+                let mut sum = 0.0;
+                for j in 0..N { sum += N_V[i][j] * su[j]; }
+                nv_su[i] = sum;
+            }
+
+            let mut u_ni = [0.0f64; M];
+            for j in 0..M {
+                let mut sum = 0.0;
+                for i in 0..N { sum += su[i] * N_I[j][i]; }
+                u_ni[j] = sum;
+            }
+
+            self.pot_{{ idx }}_su = su;
+            self.pot_{{ idx }}_usu = usu;
+            self.pot_{{ idx }}_nv_su = nv_su;
+            self.pot_{{ idx }}_u_ni = u_ni;
+        }
+{% endfor %}{% endif %}
+    }
+}
+
+{% if num_inductors > 0 %}/// Stamp a conductance between two nodes into a matrix.
+/// Node indices are 1-indexed; 0 means ground.
+fn stamp_conductance(mat: &mut [[f64; N]; N], node_i: usize, node_j: usize, g: f64) {
+    match (node_i > 0, node_j > 0) {
+        (true, true) => {
+            let i = node_i - 1;
+            let j = node_j - 1;
+            mat[i][i] += g;
+            mat[j][j] += g;
+            mat[i][j] -= g;
+            mat[j][i] -= g;
+        }
+        (true, false) => { mat[node_i - 1][node_i - 1] += g; }
+        (false, true) => { mat[node_j - 1][node_j - 1] += g; }
+        (false, false) => {}
+    }
+}
+
+{% endif %}/// Invert an N x N matrix using Gaussian elimination with partial pivoting.
+///
+/// Returns the identity matrix if the input is singular (graceful degradation).
+fn invert_n(a: [[f64; N]; N]) -> [[f64; N]; N] {
+    let mut aug = [[0.0f64; 2 * N]; N];
+    for i in 0..N {
+        for j in 0..N {
+            aug[i][j] = a[i][j];
+        }
+        aug[i][N + i] = 1.0;
+    }
+
+    for col in 0..N {
+        let mut max_row = col;
+        let mut max_val = aug[col][col].abs();
+        for row in (col + 1)..N {
+            if aug[row][col].abs() > max_val {
+                max_val = aug[row][col].abs();
+                max_row = row;
+            }
+        }
+
+        if max_val < 1e-30 {
+            let mut result = [[0.0f64; N]; N];
+            for i in 0..N { result[i][i] = 1.0; }
+            return result;
+        }
+
+        if max_row != col { aug.swap(col, max_row); }
+
+        let pivot = aug[col][col];
+        for row in (col + 1)..N {
+            let factor = aug[row][col] / pivot;
+            for j in col..(2 * N) {
+                aug[row][j] -= factor * aug[col][j];
+            }
+        }
+    }
+
+    for col in (0..N).rev() {
+        let pivot = aug[col][col];
+        if pivot.abs() < 1e-30 {
+            let mut result = [[0.0f64; N]; N];
+            for i in 0..N { result[i][i] = 1.0; }
+            return result;
+        }
+        for j in 0..(2 * N) { aug[col][j] /= pivot; }
+        for row in 0..col {
+            let factor = aug[row][col];
+            for j in 0..(2 * N) { aug[row][j] -= factor * aug[col][j]; }
+        }
+    }
+
+    let mut result = [[0.0f64; N]; N];
+    for i in 0..N {
+        for j in 0..N {
+            result[i][j] = aug[i][N + j];
+        }
+    }
+    result
 }
 

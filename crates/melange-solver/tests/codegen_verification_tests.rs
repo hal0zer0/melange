@@ -95,16 +95,16 @@ fn test_generated_code_contains_correct_v_d_formula() {
     assert_eq!(kernel.m, 1, "Expected m=1 for single-diode circuit");
 
     assert!(
-        code.contains("p[0] + K[0][0] * i_nl[0]"),
-        "Generated code should contain 'p[0] + K[0][0] * i_nl[0]' (correct sign). \
+        code.contains("p[0] + state.k[0][0] * i_nl[0]"),
+        "Generated code should contain 'p[0] + state.k[0][0] * i_nl[0]' (correct sign). \
          K is naturally negative so the sign is already correct.\n\
          Searched in generated code but did not find the expected pattern."
     );
 
     // Make sure the incorrect negated form is absent
     assert!(
-        !code.contains("p[0] - K[0][0] * i_nl[0]"),
-        "Generated code must NOT contain 'p[0] - K[0][0] * i_nl[0]' (wrong sign)."
+        !code.contains("p[0] - state.k[0][0] * i_nl[0]"),
+        "Generated code must NOT contain 'p[0] - state.k[0][0] * i_nl[0]' (wrong sign)."
     );
 }
 
@@ -122,8 +122,8 @@ fn test_generated_code_contains_correct_jacobian_formula() {
     //   j00 = 1.0 - jdev_0_0 * K[0][0]
     // Since K is negative, this is > 1, which is correct for stable NR.
     assert!(
-        code.contains("1.0 - jdev_0_0 * K[0][0]"),
-        "Generated code should contain '1.0 - jdev_0_0 * K[0][0]' (diagonal Jacobian).\n\
+        code.contains("1.0 - jdev_0_0 * state.k[0][0]"),
+        "Generated code should contain '1.0 - jdev_0_0 * state.k[0][0]' (diagonal Jacobian).\n\
          Searched in generated code but did not find the expected pattern."
     );
 
@@ -295,10 +295,10 @@ fn test_codegen_bjt_2d_matrices_correct_size() {
         "Generated code should declare M = 2 for BJT circuit."
     );
 
-    // K is declared as [[f64; M]; M] = 2x2
+    // K_DEFAULT is declared as [[f64; M]; M] = 2x2
     assert!(
-        code.contains("pub const K: [[f64; M]; M]"),
-        "K should be declared as [[f64; M]; M]."
+        code.contains("pub const K_DEFAULT: [[f64; M]; M]"),
+        "K_DEFAULT should be declared as [[f64; M]; M]."
     );
 
     // N_V is [[f64; N]; M] = 2xN
@@ -397,9 +397,11 @@ fn test_generated_code_contains_all_constants() {
     assert!(code.contains("pub const INPUT_NODE: usize ="), "Missing INPUT_NODE constant");
     assert!(code.contains("pub const OUTPUT_NODE: usize ="), "Missing OUTPUT_NODE constant");
     assert!(code.contains("pub const INPUT_RESISTANCE: f64 ="), "Missing INPUT_RESISTANCE constant");
-    assert!(code.contains("pub const S: [[f64; N]; N]"), "Missing S matrix");
-    assert!(code.contains("pub const A_NEG: [[f64; N]; N]"), "Missing A_NEG matrix");
-    assert!(code.contains("pub const K: [[f64; M]; M]"), "Missing K matrix");
+    assert!(code.contains("pub const S_DEFAULT: [[f64; N]; N]"), "Missing S_DEFAULT matrix");
+    assert!(code.contains("pub const A_NEG_DEFAULT: [[f64; N]; N]"), "Missing A_NEG_DEFAULT matrix");
+    assert!(code.contains("pub const K_DEFAULT: [[f64; M]; M]"), "Missing K_DEFAULT matrix");
+    assert!(code.contains("const G: [[f64; N]; N]"), "Missing G matrix");
+    assert!(code.contains("const C: [[f64; N]; N]"), "Missing C matrix");
     assert!(code.contains("pub const N_V: [[f64; N]; M]"), "Missing N_V matrix");
     assert!(code.contains("pub const N_I: [[f64; N]; M]"), "Missing N_I matrix");
 
@@ -681,8 +683,8 @@ fn test_codegen_bjt_nr_solver_generates_residuals_and_jacobian() {
     // Off-diagonal should start with 0.0
     // Both should reference jdev entries (not g_dev)
     assert!(
-        code.contains("jdev_0_0 * K[0]") || code.contains("jdev_0_1 * K[1]"),
-        "Jacobian should use jdev entries with K matrix multiplication."
+        code.contains("jdev_0_0 * state.k[0]") || code.contains("jdev_0_1 * state.k[1]"),
+        "Jacobian should use jdev entries with state.k matrix multiplication."
     );
 
     // Should use 2x2 Cramer's rule solver
@@ -779,8 +781,8 @@ fn test_codegen_mixed_device_jacobian_block_structure() {
     // Diode (index 0) is a 1x1 block: j0x entries should only reference jdev_0_0
     // (not jdev_0_1 or jdev_0_2 which don't exist for the diode)
     assert!(
-        code.contains("jdev_0_0 * K[0]"),
-        "Row 0 (diode) should use jdev_0_0 with K[0][j]."
+        code.contains("jdev_0_0 * state.k[0]"),
+        "Row 0 (diode) should use jdev_0_0 with state.k[0][j]."
     );
 
     // BJT rows (indices 1,2) should reference their 2x2 block: jdev_1_1, jdev_1_2, jdev_2_1, jdev_2_2
@@ -1361,51 +1363,46 @@ C1 out 0 100p
 }
 
 // ==========================================================================
-// Test: M > 4 early rejection in IR
+// Test: M > 8 rejection at DK kernel build time
 // ==========================================================================
 
-/// Verify that CircuitIR::from_kernel rejects M > 4 at IR build time,
-/// not just at emission time.
+/// Verify that M=9 is rejected at DK kernel build time (MAX_M=8).
 #[test]
-fn test_m_gt_4_rejected_at_ir_build() {
-    // 5 diodes → M=5 which should be rejected
+fn test_m_gt_8_rejected() {
+    // 9 diodes → M=9 which exceeds MAX_M=8
     let spice = "\
-Five Diodes
+Nine Diodes
 Rin in 0 1k
 D1 in m1 D1N4148
 D2 m1 m2 D1N4148
 D3 m2 m3 D1N4148
 D4 m3 m4 D1N4148
-D5 m4 out D1N4148
+D5 m4 m5 D1N4148
+D6 m5 m6 D1N4148
+D7 m6 m7 D1N4148
+D8 m7 m8 D1N4148
+D9 m8 out D1N4148
 R1 m1 0 10k
 R2 m2 0 10k
 R3 m3 0 10k
 R4 m4 0 10k
+R5 m5 0 10k
+R6 m6 0 10k
+R7 m7 0 10k
+R8 m8 0 10k
 C1 out 0 1u
 .model D1N4148 D(IS=1e-15)
 ";
 
-    let (netlist, mna, kernel) = build_pipeline(spice);
-    assert_eq!(kernel.m, 5, "Five diodes should produce M=5");
+    let netlist = Netlist::parse(spice).expect("failed to parse netlist");
+    let mna = MnaSystem::from_netlist(&netlist).expect("failed to build MNA");
 
-    let config = default_config();
-    let result = CircuitIR::from_kernel(&kernel, &mna, &netlist, &config);
+    // M=9 exceeds MAX_M=8, so kernel build should fail
+    let result = DkKernel::from_mna(&mna, 44100.0);
     assert!(
         result.is_err(),
-        "M=5 should be rejected at IR build time, but got Ok"
+        "M=9 should be rejected at DK kernel build time (MAX_M=8)"
     );
-
-    let err = result.unwrap_err();
-    match err {
-        CodegenError::UnsupportedTopology(msg) => {
-            assert!(
-                msg.contains("M=5"),
-                "Error message should mention M=5, got: {}",
-                msg
-            );
-        }
-        other => panic!("Expected UnsupportedTopology, got: {:?}", other),
-    }
 }
 
 // ==========================================================================
@@ -1473,20 +1470,28 @@ fn test_invalid_input_resistance_rejected() {
 // ==========================================================================
 
 #[test]
-fn test_sample_rate_warning_present_in_generated_code() {
+fn test_sample_rate_info_present_in_generated_code() {
     let (code, _netlist, _mna, _kernel) = generate_code(RC_CIRCUIT_SPICE);
 
     assert!(
-        code.contains("WARNING"),
-        "Generated code should contain a WARNING comment about sample rate dependency."
+        code.contains("set_sample_rate"),
+        "Generated code should reference set_sample_rate for runtime sample rate changes."
     );
     assert!(
-        code.contains("generated for a specific sample rate"),
-        "Generated code should warn that it was generated for a specific sample rate."
+        code.contains("Default sample rate"),
+        "Generated code should indicate the default sample rate."
     );
     assert!(
-        code.contains("Regenerate"),
-        "Generated code should advise users to regenerate the code if sample rate changes."
+        code.contains("S_DEFAULT"),
+        "Generated code should contain S_DEFAULT matrix (defaults at codegen sample rate)."
+    );
+    assert!(
+        code.contains("A_NEG_DEFAULT"),
+        "Generated code should contain A_NEG_DEFAULT matrix."
+    );
+    assert!(
+        code.contains("K_DEFAULT"),
+        "Generated code should contain K_DEFAULT matrix."
     );
 }
 
@@ -1836,4 +1841,648 @@ Rbias vcc 0 10k
         "BJT output should not have wild oscillations, last_20 pp={:.4}",
         last_pp
     );
+}
+
+// ==========================================================================
+// Runtime sample rate support tests
+// ==========================================================================
+
+/// Verify that generated code contains the set_sample_rate method.
+#[test]
+fn test_generated_code_contains_set_sample_rate_method() {
+    let (code, _netlist, _mna, _kernel) = generate_code(RC_CIRCUIT_SPICE);
+
+    assert!(
+        code.contains("pub fn set_sample_rate(&mut self, sample_rate: f64)"),
+        "Generated code must contain a set_sample_rate method."
+    );
+    assert!(
+        code.contains("fn invert_n("),
+        "Generated code must contain the invert_n helper for runtime matrix inversion."
+    );
+}
+
+/// Verify that G and C matrices are emitted as constants.
+#[test]
+fn test_generated_code_contains_g_and_c_matrices() {
+    let (code, _netlist, _mna, _kernel) = generate_code(RC_CIRCUIT_SPICE);
+
+    assert!(
+        code.contains("const G: [[f64; N]; N]"),
+        "Generated code must contain the G (conductance) matrix."
+    );
+    assert!(
+        code.contains("const C: [[f64; N]; N]"),
+        "Generated code must contain the C (capacitance) matrix."
+    );
+}
+
+/// Verify that S, A_NEG, K are now stored as state fields.
+#[test]
+fn test_generated_code_state_has_matrix_fields() {
+    let (code, _netlist, _mna, _kernel) = generate_code(RC_CIRCUIT_SPICE);
+
+    assert!(
+        code.contains("pub s: [[f64; N]; N]"),
+        "CircuitState must have s matrix field."
+    );
+    assert!(
+        code.contains("pub a_neg: [[f64; N]; N]"),
+        "CircuitState must have a_neg matrix field."
+    );
+    assert!(
+        code.contains("pub k: [[f64; M]; M]"),
+        "CircuitState must have k matrix field."
+    );
+    assert!(
+        code.contains("pub s_ni: [[f64; M]; N]"),
+        "CircuitState must have s_ni matrix field."
+    );
+}
+
+/// Verify that S_DEFAULT, A_NEG_DEFAULT, K_DEFAULT, S_NI_DEFAULT are emitted.
+#[test]
+fn test_generated_code_has_default_matrix_constants() {
+    let (code, _netlist, _mna, _kernel) = generate_code(DIODE_CLIPPER_SPICE);
+
+    assert!(code.contains("pub const S_DEFAULT:"), "Missing S_DEFAULT");
+    assert!(code.contains("pub const A_NEG_DEFAULT:"), "Missing A_NEG_DEFAULT");
+    assert!(code.contains("pub const K_DEFAULT:"), "Missing K_DEFAULT");
+    assert!(code.contains("pub const S_NI_DEFAULT:"), "Missing S_NI_DEFAULT");
+}
+
+/// Verify that the NR solver uses state.k instead of K constant.
+#[test]
+fn test_nr_solver_uses_state_k_not_constant() {
+    let (code, _netlist, _mna, _kernel) = generate_code(DIODE_CLIPPER_SPICE);
+
+    // The NR solver should reference state.k, not the bare K constant
+    assert!(
+        code.contains("state.k["),
+        "NR solver should use state.k for K matrix access."
+    );
+    // Make sure no bare K constant access in the NR section
+    // (K_DEFAULT is fine as a constant definition, but active code should use state.k)
+    // Check that `+ K[` pattern does NOT appear in the process function body
+    let process_idx = code.find("fn solve_nonlinear").unwrap_or(0);
+    let process_code = &code[process_idx..];
+    assert!(
+        !process_code.contains("+ K["),
+        "NR solver should not use bare K constant for matrix access."
+    );
+}
+
+/// Verify that build_rhs uses state.a_neg instead of A_NEG constant.
+#[test]
+fn test_build_rhs_uses_state_a_neg() {
+    let (code, _netlist, _mna, _kernel) = generate_code(RC_CIRCUIT_SPICE);
+
+    // build_rhs should use state.a_neg
+    assert!(
+        code.contains("state.a_neg["),
+        "build_rhs should use state.a_neg for A_neg matrix access."
+    );
+}
+
+/// Verify that the IR captures G and C matrices.
+#[test]
+fn test_ir_has_g_and_c_matrices() {
+    let (netlist, mna, kernel) = build_pipeline(RC_CIRCUIT_SPICE);
+    let config = default_config();
+    let ir = CircuitIR::from_kernel(&kernel, &mna, &netlist, &config)
+        .expect("IR build failed");
+
+    let n = ir.topology.n;
+
+    // G and C matrices should be non-empty
+    assert_eq!(
+        ir.matrices.g_matrix.len(), n * n,
+        "G matrix should have N*N elements"
+    );
+    assert_eq!(
+        ir.matrices.c_matrix.len(), n * n,
+        "C matrix should have N*N elements"
+    );
+
+    // G matrix should have nonzero entries (at least the resistor)
+    assert!(
+        ir.matrices.g_matrix.iter().any(|&v| v != 0.0),
+        "G matrix should have nonzero entries from resistor"
+    );
+
+    // C matrix should have nonzero entries (at least the capacitor)
+    assert!(
+        ir.matrices.c_matrix.iter().any(|&v| v != 0.0),
+        "C matrix should have nonzero entries from capacitor"
+    );
+}
+
+/// Verify that set_sample_rate with the same rate produces identity behavior.
+///
+/// The generated code should contain a check: if sample_rate == SAMPLE_RATE, reset
+/// to defaults to avoid numerical drift.
+#[test]
+fn test_set_sample_rate_same_rate_resets_defaults() {
+    let (code, _netlist, _mna, _kernel) = generate_code(RC_CIRCUIT_SPICE);
+
+    // Should check if sample rate matches and reset to defaults
+    assert!(
+        code.contains("self.s = S_DEFAULT"),
+        "set_sample_rate should reset to S_DEFAULT when rate matches."
+    );
+    assert!(
+        code.contains("self.a_neg = A_NEG_DEFAULT"),
+        "set_sample_rate should reset to A_NEG_DEFAULT when rate matches."
+    );
+    assert!(
+        code.contains("self.k = K_DEFAULT"),
+        "set_sample_rate should reset to K_DEFAULT when rate matches."
+    );
+}
+
+/// Verify that set_sample_rate builds A = G + alpha*C.
+#[test]
+fn test_set_sample_rate_builds_a_from_g_and_c() {
+    let (code, _netlist, _mna, _kernel) = generate_code(RC_CIRCUIT_SPICE);
+
+    // Should compute A from G + alpha*C
+    assert!(
+        code.contains("G[i][j] + alpha * C[i][j]"),
+        "set_sample_rate should compute A = G + alpha*C."
+    );
+    // Should compute A_neg = alpha*C - G
+    assert!(
+        code.contains("alpha * C[i][j] - G[i][j]"),
+        "set_sample_rate should compute A_neg = alpha*C - G."
+    );
+}
+
+/// Verify that generated code compiles with set_sample_rate at a different rate.
+///
+/// This is an end-to-end test: generate code, compile it, run at two different
+/// sample rates, and verify the output differs.
+#[test]
+fn test_generated_code_compiles_and_set_sample_rate_works() {
+    let (code, _netlist, _mna, _kernel) = generate_code(RC_CIRCUIT_SPICE);
+
+    // Create a test harness that exercises set_sample_rate
+    let test_harness = format!(
+        "{code}\n\
+         fn main() {{\n\
+             // Run at default sample rate\n\
+             let mut state1 = CircuitState::default();\n\
+             let mut out1 = Vec::new();\n\
+             for i in 0..100 {{\n\
+                 let input = if i < 50 {{ 1.0 }} else {{ 0.0 }};\n\
+                 out1.push(process_sample(input, &mut state1));\n\
+             }}\n\
+             \n\
+             // Run at double sample rate\n\
+             let mut state2 = CircuitState::default();\n\
+             state2.set_sample_rate(SAMPLE_RATE * 2.0);\n\
+             let mut out2 = Vec::new();\n\
+             for i in 0..200 {{\n\
+                 let input = if i < 100 {{ 1.0 }} else {{ 0.0 }};\n\
+                 out2.push(process_sample(input, &mut state2));\n\
+             }}\n\
+             \n\
+             // Outputs should differ (different filter response)\n\
+             // At 2x sample rate, the RC filter has a different cutoff\n\
+             assert!(out1[49] != 0.0, \"Default rate should produce output\");\n\
+             assert!(out2[99] != 0.0, \"Double rate should produce output\");\n\
+             \n\
+             // The 2x rate output at sample 99 (same real time as sample 49 at 1x)\n\
+             // should be close but not identical to the 1x rate output at sample 49\n\
+             let diff = (out1[49] - out2[99]).abs();\n\
+             assert!(\n\
+                 diff > 1e-6,\n\
+                 \"Outputs at different sample rates should differ: diff={{:.10}}\",\n\
+                 diff\n\
+             );\n\
+             \n\
+             // Verify reset to default rate works\n\
+             let mut state3 = CircuitState::default();\n\
+             state3.set_sample_rate(SAMPLE_RATE * 2.0);\n\
+             state3.set_sample_rate(SAMPLE_RATE); // Reset back\n\
+             let mut out3 = Vec::new();\n\
+             for i in 0..100 {{\n\
+                 let input = if i < 50 {{ 1.0 }} else {{ 0.0 }};\n\
+                 out3.push(process_sample(input, &mut state3));\n\
+             }}\n\
+             // Should match original\n\
+             for i in 0..100 {{\n\
+                 assert!(\n\
+                     (out1[i] - out3[i]).abs() < 1e-12,\n\
+                     \"Reset to default rate should match original: sample {{}} diff={{:.15}}\",\n\
+                     i, (out1[i] - out3[i]).abs()\n\
+                 );\n\
+             }}\n\
+             \n\
+             eprintln!(\"set_sample_rate test passed!\");\n\
+         }}\n"
+    );
+
+    // Write to temp file and compile
+    let path = std::path::Path::new("/tmp/melange_sample_rate_test.rs");
+    let mut f = std::fs::File::create(path).expect("create temp file");
+    f.write_all(test_harness.as_bytes()).expect("write temp file");
+
+    let output = std::process::Command::new("rustc")
+        .args([
+            path.to_str().unwrap(),
+            "-o",
+            "/tmp/melange_sample_rate_test",
+            "--edition",
+            "2021",
+        ])
+        .output()
+        .expect("run rustc");
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        panic!(
+            "Generated code with set_sample_rate test failed to compile:\n{}",
+            stderr
+        );
+    }
+
+    // Run the compiled binary
+    let run_output = std::process::Command::new("/tmp/melange_sample_rate_test")
+        .output()
+        .expect("run compiled test");
+
+    if !run_output.status.success() {
+        let stderr = String::from_utf8_lossy(&run_output.stderr);
+        let stdout = String::from_utf8_lossy(&run_output.stdout);
+        panic!(
+            "set_sample_rate test binary failed:\nstdout: {}\nstderr: {}",
+            stdout, stderr
+        );
+    }
+}
+
+/// Verify that a diode circuit's generated code compiles with set_sample_rate.
+#[test]
+fn test_nonlinear_circuit_set_sample_rate_compiles() {
+    let (code, _netlist, _mna, _kernel) = generate_code(DIODE_CLIPPER_SPICE);
+
+    let test_harness = format!(
+        "{code}\n\
+         fn main() {{\n\
+             let mut state = CircuitState::default();\n\
+             // Switch to 96kHz\n\
+             state.set_sample_rate(96000.0);\n\
+             \n\
+             // Process some samples\n\
+             let mut outputs = Vec::new();\n\
+             for i in 0..200 {{\n\
+                 let t = i as f64 / 96000.0;\n\
+                 let input = (2.0 * std::f64::consts::PI * 1000.0 * t).sin();\n\
+                 outputs.push(process_sample(input, &mut state));\n\
+             }}\n\
+             \n\
+             // Should produce non-trivial output\n\
+             let max_out = outputs.iter().cloned().fold(0.0f64, f64::max);\n\
+             assert!(max_out > 1e-6, \"Diode clipper at 96kHz should produce output\");\n\
+             \n\
+             // Verify state matrices were updated\n\
+             // At 96kHz, alpha = 2*96000 = 192000, different from default 88200\n\
+             // So the S matrix should differ from S_DEFAULT\n\
+             let mut s_matches_default = true;\n\
+             for i in 0..N {{\n\
+                 for j in 0..N {{\n\
+                     if (state.s[i][j] - S_DEFAULT[i][j]).abs() > 1e-15 {{\n\
+                         s_matches_default = false;\n\
+                     }}\n\
+                 }}\n\
+             }}\n\
+             assert!(!s_matches_default, \"S matrix at 96kHz should differ from S_DEFAULT\");\n\
+             \n\
+             eprintln!(\"Nonlinear set_sample_rate test passed!\");\n\
+         }}\n"
+    );
+
+    let path = std::path::Path::new("/tmp/melange_sr_nonlinear_test.rs");
+    let mut f = std::fs::File::create(path).expect("create temp file");
+    f.write_all(test_harness.as_bytes()).expect("write temp file");
+
+    let output = std::process::Command::new("rustc")
+        .args([
+            path.to_str().unwrap(),
+            "-o",
+            "/tmp/melange_sr_nonlinear_test",
+            "--edition",
+            "2021",
+        ])
+        .output()
+        .expect("run rustc");
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        panic!(
+            "Nonlinear circuit set_sample_rate test failed to compile:\n{}",
+            stderr
+        );
+    }
+
+    let run_output = std::process::Command::new("/tmp/melange_sr_nonlinear_test")
+        .output()
+        .expect("run compiled test");
+
+    if !run_output.status.success() {
+        let stderr = String::from_utf8_lossy(&run_output.stderr);
+        let stdout = String::from_utf8_lossy(&run_output.stdout);
+        panic!(
+            "Nonlinear set_sample_rate test binary failed:\nstdout: {}\nstderr: {}",
+            stdout, stderr
+        );
+    }
+}
+
+/// Verify that the IR stores inductor inductance values.
+#[test]
+fn test_ir_stores_inductor_inductance() {
+    let spice = "\
+Inductor Circuit
+R1 in out 1k
+L1 out 0 10m
+C1 out 0 1u
+";
+    let netlist = Netlist::parse(spice).expect("parse");
+    let mna = MnaSystem::from_netlist(&netlist).expect("mna");
+    let kernel = DkKernel::from_mna(&mna, 44100.0).expect("kernel");
+
+    let config = CodegenConfig {
+        circuit_name: "ind_test".to_string(),
+        sample_rate: 44100.0,
+        input_node: 0,
+        output_node: 1,
+        input_resistance: 1000.0,
+        ..CodegenConfig::default()
+    };
+
+    let ir = CircuitIR::from_kernel(&kernel, &mna, &netlist, &config)
+        .expect("IR build failed");
+
+    assert_eq!(ir.inductors.len(), 1, "Should have 1 inductor");
+    assert!(
+        (ir.inductors[0].inductance - 0.01).abs() < 1e-10,
+        "Inductance should be 10mH = 0.01H, got {}",
+        ir.inductors[0].inductance
+    );
+}
+
+// ==========================================================================
+// Test: M=5 codegen (5 diodes) — Gaussian elimination
+// ==========================================================================
+
+const FIVE_DIODE_SPICE: &str = "\
+Five Diode Chain
+Rin in 0 1k
+D1 in m1 D1N4148
+D2 m1 m2 D1N4148
+D3 m2 m3 D1N4148
+D4 m3 m4 D1N4148
+D5 m4 out D1N4148
+R1 m1 0 10k
+R2 m2 0 10k
+R3 m3 0 10k
+R4 m4 0 10k
+C1 out 0 1u
+.model D1N4148 D(IS=1e-15)
+";
+
+#[test]
+fn test_codegen_m5_generates_gauss_elim() {
+    let (code, _netlist, _mna, kernel) = generate_code(FIVE_DIODE_SPICE);
+    assert_eq!(kernel.m, 5, "Five diodes should produce M=5");
+
+    assert!(
+        code.contains("Solve 5x5"),
+        "M=5 should use Gaussian elimination"
+    );
+
+    // All 5 residuals
+    for i in 0..5 {
+        assert!(
+            code.contains(&format!("let f{} = i_nl[{}] - i_dev{}", i, i, i)),
+            "Missing residual f{}", i
+        );
+    }
+
+    // All 25 Jacobian entries
+    for i in 0..5 {
+        for j in 0..5 {
+            assert!(
+                code.contains(&format!("let j{}{} =", i, j)),
+                "Missing Jacobian entry j{}{}", i, j
+            );
+        }
+    }
+
+    assert!(code.contains("partial pivoting"), "Should use partial pivoting");
+    assert!(code.contains("Back substitution"), "Should have back substitution");
+}
+
+#[test]
+fn test_codegen_m5_compiles() {
+    let (code, _netlist, _mna, kernel) = generate_code(FIVE_DIODE_SPICE);
+    assert_eq!(kernel.m, 5);
+
+    let tmp_dir = std::env::temp_dir();
+    let tmp_path = tmp_dir.join("melange_codegen_test_m5.rs");
+    {
+        let mut f = std::fs::File::create(&tmp_path).unwrap();
+        f.write_all(code.as_bytes()).unwrap();
+    }
+
+    let output = std::process::Command::new("rustc")
+        .args(["--edition", "2024", "--crate-type", "lib", "-o"])
+        .arg(tmp_dir.join("melange_codegen_test_m5.rlib"))
+        .arg(&tmp_path)
+        .output()
+        .expect("failed to run rustc");
+
+    let _ = std::fs::remove_file(&tmp_path);
+    let _ = std::fs::remove_file(tmp_dir.join("melange_codegen_test_m5.rlib"));
+    let _ = std::fs::remove_file(tmp_dir.join("libmelange_codegen_test_m5.rlib"));
+
+    assert!(
+        output.status.success(),
+        "M=5 codegen failed to compile:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+// ==========================================================================
+// Test: M=6 codegen (6 diodes)
+// ==========================================================================
+
+const SIX_DIODE_SPICE: &str = "\
+Six Diode Chain
+Rin in 0 1k
+D1 in m1 D1N4148
+D2 m1 m2 D1N4148
+D3 m2 m3 D1N4148
+D4 m3 m4 D1N4148
+D5 m4 m5 D1N4148
+D6 m5 out D1N4148
+R1 m1 0 10k
+R2 m2 0 10k
+R3 m3 0 10k
+R4 m4 0 10k
+R5 m5 0 10k
+C1 out 0 1u
+.model D1N4148 D(IS=1e-15)
+";
+
+#[test]
+fn test_codegen_m6_six_diodes() {
+    let (code, _netlist, _mna, kernel) = generate_code(SIX_DIODE_SPICE);
+    assert_eq!(kernel.m, 6);
+    assert!(code.contains("Solve 6x6"), "M=6 should use Gaussian elimination");
+
+    for i in 0..6 {
+        assert!(
+            code.contains(&format!("let f{} = i_nl[{}] - i_dev{}", i, i, i)),
+            "Missing residual f{}", i
+        );
+    }
+}
+
+#[test]
+fn test_codegen_m6_compiles() {
+    let (code, _netlist, _mna, kernel) = generate_code(SIX_DIODE_SPICE);
+    assert_eq!(kernel.m, 6);
+
+    let tmp_dir = std::env::temp_dir();
+    let tmp_path = tmp_dir.join("melange_codegen_test_m6.rs");
+    {
+        let mut f = std::fs::File::create(&tmp_path).unwrap();
+        f.write_all(code.as_bytes()).unwrap();
+    }
+
+    let output = std::process::Command::new("rustc")
+        .args(["--edition", "2024", "--crate-type", "lib", "-o"])
+        .arg(tmp_dir.join("melange_codegen_test_m6.rlib"))
+        .arg(&tmp_path)
+        .output()
+        .expect("failed to run rustc");
+
+    let _ = std::fs::remove_file(&tmp_path);
+    let _ = std::fs::remove_file(tmp_dir.join("melange_codegen_test_m6.rlib"));
+    let _ = std::fs::remove_file(tmp_dir.join("libmelange_codegen_test_m6.rlib"));
+
+    assert!(
+        output.status.success(),
+        "M=6 codegen failed to compile:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+// ==========================================================================
+// Test: M=8 codegen (8 diodes) — maximum supported
+// ==========================================================================
+
+const EIGHT_DIODE_SPICE: &str = "\
+Eight Diode Chain
+Rin in 0 1k
+D1 in m1 D1N4148
+D2 m1 m2 D1N4148
+D3 m2 m3 D1N4148
+D4 m3 m4 D1N4148
+D5 m4 m5 D1N4148
+D6 m5 m6 D1N4148
+D7 m6 m7 D1N4148
+D8 m7 out D1N4148
+R1 m1 0 10k
+R2 m2 0 10k
+R3 m3 0 10k
+R4 m4 0 10k
+R5 m5 0 10k
+R6 m6 0 10k
+R7 m7 0 10k
+C1 out 0 1u
+.model D1N4148 D(IS=1e-15)
+";
+
+#[test]
+fn test_codegen_m8_generates_gauss_elim() {
+    let (code, _netlist, _mna, kernel) = generate_code(EIGHT_DIODE_SPICE);
+    assert_eq!(kernel.m, 8);
+    assert!(code.contains("Solve 8x8"), "M=8 should use Gaussian elimination");
+
+    for i in 0..8 {
+        assert!(
+            code.contains(&format!("let f{} = i_nl[{}] - i_dev{}", i, i, i)),
+            "Missing residual f{}", i
+        );
+    }
+
+    for i in 0..8 {
+        for j in 0..8 {
+            assert!(
+                code.contains(&format!("let j{}{} =", i, j)),
+                "Missing Jacobian entry j{}{}", i, j
+            );
+        }
+    }
+}
+
+#[test]
+fn test_codegen_m8_compiles() {
+    let (code, _netlist, _mna, kernel) = generate_code(EIGHT_DIODE_SPICE);
+    assert_eq!(kernel.m, 8);
+
+    let tmp_dir = std::env::temp_dir();
+    let tmp_path = tmp_dir.join("melange_codegen_test_m8.rs");
+    {
+        let mut f = std::fs::File::create(&tmp_path).unwrap();
+        f.write_all(code.as_bytes()).unwrap();
+    }
+
+    let output = std::process::Command::new("rustc")
+        .args(["--edition", "2024", "--crate-type", "lib", "-o"])
+        .arg(tmp_dir.join("melange_codegen_test_m8.rlib"))
+        .arg(&tmp_path)
+        .output()
+        .expect("failed to run rustc");
+
+    let _ = std::fs::remove_file(&tmp_path);
+    let _ = std::fs::remove_file(tmp_dir.join("melange_codegen_test_m8.rlib"));
+    let _ = std::fs::remove_file(tmp_dir.join("libmelange_codegen_test_m8.rlib"));
+
+    assert!(
+        output.status.success(),
+        "M=8 codegen failed to compile:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+// ==========================================================================
+// Test: M=3/4 still work after limit raise
+// ==========================================================================
+
+#[test]
+fn test_codegen_m3_m4_still_work_after_limit_raise() {
+    let (code3, _nl3, _mna3, kernel3) = generate_code(MIXED_DEVICE_SPICE);
+    assert_eq!(kernel3.m, 3, "D1 + Q1 = M=3");
+    assert!(code3.contains("Solve 3x3"), "M=3 should still work");
+
+    let m4_spice = "\
+Four Diode Chain
+Rin in 0 1k
+D1 in m1 D1N4148
+D2 m1 m2 D1N4148
+D3 m2 m3 D1N4148
+D4 m3 out D1N4148
+R1 m1 0 10k
+R2 m2 0 10k
+R3 m3 0 10k
+C1 out 0 1u
+.model D1N4148 D(IS=1e-15)
+";
+    let (code4, _nl4, _mna4, kernel4) = generate_code(m4_spice);
+    assert_eq!(kernel4.m, 4, "Four diodes = M=4");
+    assert!(code4.contains("Solve 4x4"), "M=4 should still work");
 }

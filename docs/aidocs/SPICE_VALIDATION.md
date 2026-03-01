@@ -64,6 +64,24 @@ C1 out 0 10n
 
 ## Melange Solver Setup
 
+### DC Operating Point for Nonlinear Circuits
+
+For circuits with nonlinear devices (diodes, BJTs), call `initialize_dc_op()` after
+constructing the solver to set the correct bias point:
+
+```rust
+// Build device slots from netlist
+let device_slots = build_device_slots(&netlist, &mna);
+
+// Initialize DC OP
+solver.initialize_dc_op(&mna, &device_slots);
+```
+
+Without this, BJT circuits start from v=0 (cutoff) while SPICE starts from
+its own DC OP solution, causing massive output differences.
+
+See [DC_OP.md](DC_OP.md) for the solver algorithm.
+
 ### Input Conductance Stamping
 
 **CRITICAL**: Stamp into MNA before building DK kernel:

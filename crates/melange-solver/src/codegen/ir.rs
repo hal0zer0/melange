@@ -5,8 +5,9 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::dc_op::{self, DcOpConfig};
 use crate::dk::{self, DkKernel};
-use crate::mna::{inject_rhs_current, MnaSystem, VS_CONDUCTANCE};
+use crate::mna::MnaSystem;
 use crate::parser::{Element, Netlist};
 
 use super::{CodegenConfig, CodegenError};
@@ -27,6 +28,12 @@ pub struct CircuitIR {
     pub device_slots: Vec<DeviceSlot>,
     pub has_dc_sources: bool,
     pub has_dc_op: bool,
+    /// M-vector: nonlinear device currents at DC operating point
+    #[serde(default)]
+    pub dc_nl_currents: Vec<f64>,
+    /// Whether the nonlinear DC OP solver converged
+    #[serde(default)]
+    pub dc_op_converged: bool,
     pub inductors: Vec<InductorIR>,
     pub pots: Vec<PotentiometerIR>,
 }
@@ -66,11 +73,11 @@ pub struct SolverConfig {
 /// All matrices needed by the generated solver (flattened row-major).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Matrices {
-    /// S = A^{-1}, N×N row-major
+    /// S = A^{-1}, N×N row-major (default for codegen sample rate)
     pub s: Vec<f64>,
-    /// A_neg = alpha*C - G, N×N row-major
+    /// A_neg = alpha*C - G, N×N row-major (default for codegen sample rate)
     pub a_neg: Vec<f64>,
-    /// Nonlinear kernel K = N_v * S * N_i, M×M row-major
+    /// Nonlinear kernel K = N_v * S * N_i, M×M row-major (default for codegen sample rate)
     pub k: Vec<f64>,
     /// Voltage extraction N_v, M×N row-major
     pub n_v: Vec<f64>,
@@ -78,6 +85,13 @@ pub struct Matrices {
     pub n_i: Vec<f64>,
     /// Constant RHS contribution from DC sources, length N
     pub rhs_const: Vec<f64>,
+    /// Raw conductance matrix G, N×N row-major (sample-rate independent)
+    /// Includes input conductance but NOT inductor companion conductances
+    #[serde(default)]
+    pub g_matrix: Vec<f64>,
+    /// Raw capacitance matrix C, N×N row-major (sample-rate independent)
+    #[serde(default)]
+    pub c_matrix: Vec<f64>,
 }
 
 /// Potentiometer parameters for code generation (Sherman-Morrison precomputed data).
@@ -113,8 +127,11 @@ pub struct InductorIR {
     pub node_i: usize,
     /// Node index (1-indexed, 0=ground)
     pub node_j: usize,
-    /// Equivalent conductance T/(2L)
+    /// Equivalent conductance T/(2L) (at the codegen sample rate)
     pub g_eq: f64,
+    /// Raw inductance value in henries (for sample rate recomputation)
+    #[serde(default)]
+    pub inductance: f64,
 }
 
 /// Resolved parameters for a single nonlinear device (legacy, kept for JSON compat).
@@ -201,9 +218,9 @@ impl CircuitIR {
         let n = kernel.n;
         let m = kernel.m;
 
-        if m > 4 {
+        if m > 8 {
             return Err(CodegenError::UnsupportedTopology(format!(
-                "code generation supports at most M=4 nonlinear dimensions, got M={}", m
+                "code generation supports at most M=8 nonlinear dimensions, got M={}", m
             )));
         }
 
@@ -229,6 +246,11 @@ impl CircuitIR {
             generator_version: env!("CARGO_PKG_VERSION").to_string(),
         };
 
+        // Store the raw G and C matrices for runtime sample rate recomputation.
+        // The MNA G matrix already includes input conductance (stamped before kernel build).
+        let g_matrix = dk::flatten_matrix(&mna.g, n, n);
+        let c_matrix = dk::flatten_matrix(&mna.c, n, n);
+
         let matrices = Matrices {
             s: kernel.s.clone(),
             a_neg: kernel.a_neg.clone(),
@@ -236,6 +258,8 @@ impl CircuitIR {
             n_v: kernel.n_v.clone(),
             n_i: kernel.n_i.clone(),
             rhs_const: kernel.rhs_const.clone(),
+            g_matrix,
+            c_matrix,
         };
 
         let (device_slots, devices) = Self::build_device_info(netlist)?;
@@ -245,6 +269,7 @@ impl CircuitIR {
             node_i: ind.node_i,
             node_j: ind.node_j,
             g_eq: ind.g_eq,
+            inductance: ind.inductance,
         }).collect();
 
         let pots = kernel.pots.iter().map(|p| PotentiometerIR {
@@ -262,23 +287,38 @@ impl CircuitIR {
 
         let has_dc_sources = kernel.rhs_const.iter().any(|&v| v != 0.0);
 
-        let dc_op = Self::compute_dc_operating_point(
-            mna,
-            config.input_node,
-            config.input_resistance,
-        );
-        let has_dc_op = dc_op.iter().any(|&v| v != 0.0);
+        // Use nonlinear DC OP solver (falls back to linear for M=0)
+        let dc_op_config = DcOpConfig {
+            tolerance: config.dc_op_tolerance,
+            max_iterations: config.dc_op_max_iterations,
+            input_node: config.input_node,
+            input_resistance: config.input_resistance,
+            ..DcOpConfig::default()
+        };
+        let dc_result = dc_op::solve_dc_operating_point(mna, &device_slots, &dc_op_config);
+        let has_dc_op = dc_result.v_node.iter().any(|&v| v.abs() > 1e-15);
+        let dc_op_converged = dc_result.converged;
+        let dc_nl_currents = dc_result.i_nl.clone();
+
+        if !dc_result.converged && m > 0 {
+            eprintln!(
+                "Warning: nonlinear DC OP solver did not converge (method: {:?}), using best estimate",
+                dc_result.method
+            );
+        }
 
         Ok(CircuitIR {
             metadata,
             topology,
             solver_config,
             matrices,
-            dc_operating_point: dc_op,
+            dc_operating_point: dc_result.v_node,
             devices,
             device_slots,
             has_dc_sources,
             has_dc_op,
+            dc_nl_currents,
+            dc_op_converged,
             inductors,
             pots,
         })
@@ -407,63 +447,6 @@ impl CircuitIR {
             })
     }
 
-    /// Compute the linear DC operating point: v_dc = G_dc^{-1} * b_dc
-    ///
-    /// Treats all capacitors as open circuits and all nonlinear devices as open.
-    /// Includes the input conductance (1/input_resistance) in the G matrix.
-    /// Returns zeros if G is singular or there are no DC sources.
-    fn compute_dc_operating_point(
-        mna: &MnaSystem,
-        input_node: usize,
-        input_resistance: f64,
-    ) -> Vec<f64> {
-        let n = mna.n;
-        if n == 0 {
-            return Vec::new();
-        }
-
-        // Build DC source vector (Norton currents, no *2 trapezoidal factor)
-        let mut b_dc = vec![0.0; n];
-        for vs in &mna.voltage_sources {
-            let current = vs.dc_value * VS_CONDUCTANCE;
-            inject_rhs_current(&mut b_dc, vs.n_plus_idx, current);
-            inject_rhs_current(&mut b_dc, vs.n_minus_idx, -current);
-        }
-
-        // Current sources: same sign convention as dk.rs build_rhs_const
-        for src in &mna.current_sources {
-            inject_rhs_current(&mut b_dc, src.n_plus_idx, src.dc_value);
-            inject_rhs_current(&mut b_dc, src.n_minus_idx, -src.dc_value);
-        }
-
-        // If no DC sources, return zeros
-        if b_dc.iter().all(|&v| v == 0.0) {
-            return vec![0.0; n];
-        }
-
-        // Clone G and stamp input conductance
-        let mut g_dc = mna.g.clone();
-        if input_node < n && input_resistance > 0.0 {
-            g_dc[input_node][input_node] += 1.0 / input_resistance;
-        }
-
-        // Invert G matrix (now including input conductance)
-        let g_inv = match dk::invert_matrix(&g_dc) {
-            Ok(inv) => inv,
-            Err(_) => return vec![0.0; n],
-        };
-
-        // v_dc = G_inv * b_dc
-        let mut v_dc = vec![0.0; n];
-        for i in 0..n {
-            for j in 0..n {
-                v_dc[i] += g_inv[i][j] * b_dc[j];
-            }
-        }
-
-        v_dc
-    }
-
     /// Access S matrix element S[i][j]
     pub fn s(&self, i: usize, j: usize) -> f64 {
         self.matrices.s[i * self.topology.n + j]
@@ -487,6 +470,16 @@ impl CircuitIR {
     /// Access A_neg matrix element A_neg[i][j]
     pub fn a_neg(&self, i: usize, j: usize) -> f64 {
         self.matrices.a_neg[i * self.topology.n + j]
+    }
+
+    /// Access G matrix element G[i][j]
+    pub fn g(&self, i: usize, j: usize) -> f64 {
+        self.matrices.g_matrix[i * self.topology.n + j]
+    }
+
+    /// Access C matrix element C[i][j]
+    pub fn c(&self, i: usize, j: usize) -> f64 {
+        self.matrices.c_matrix[i * self.topology.n + j]
     }
 
     /// Get the first diode params (if any diodes exist).

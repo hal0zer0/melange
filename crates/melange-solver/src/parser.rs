@@ -1,7 +1,7 @@
 //! SPICE netlist parser.
 //!
 //! Parses a subset of SPICE sufficient for audio circuits:
-//! - Components: R, C, L, V (DC/AC), I, D, Q, J, M, X
+//! - Components: R, C, L, V (DC/AC), I, D, Q, J, M, U (op-amp), X
 //! - Directives: .model, .subckt, .param, .pot, .end
 //!
 //! The parser builds an AST (Abstract Syntax Tree) representation
@@ -130,6 +130,20 @@ pub enum Element {
         nb: String,
         model: String,
     },
+    /// Op-amp: Uname n_plus n_minus n_out modelname
+    ///
+    /// Modeled as a high-gain VCCS -- does NOT add nonlinear dimensions.
+    Opamp {
+        name: String,
+        /// Non-inverting input node
+        n_plus: String,
+        /// Inverting input node
+        n_minus: String,
+        /// Output node
+        n_out: String,
+        /// Model name (references .model with OA type)
+        model: String,
+    },
     /// Subcircuit instance: Xname nodes... subcktname
     SubcktInstance {
         name: String,
@@ -151,6 +165,7 @@ impl Element {
             | Element::Bjt { name, .. }
             | Element::Jfet { name, .. }
             | Element::Mosfet { name, .. }
+            | Element::Opamp { name, .. }
             | Element::SubcktInstance { name, .. } => name,
         }
     }
@@ -161,7 +176,8 @@ impl Element {
             Element::Diode { model, .. }
             | Element::Bjt { model, .. }
             | Element::Jfet { model, .. }
-            | Element::Mosfet { model, .. } => Some(model),
+            | Element::Mosfet { model, .. }
+            | Element::Opamp { model, .. } => Some(model),
             _ => None,
         }
     }
@@ -493,8 +509,8 @@ impl Parser {
                 resistor_name
             )));
         }
-        if netlist.pots.len() >= 2 {
-            return Err(self.error("Maximum of 2 .pot directives supported"));
+        if netlist.pots.len() >= 32 {
+            return Err(self.error("Maximum of 32 .pot directives supported"));
         }
 
         // Resistor existence is validated after full parse (order-independent)
@@ -557,6 +573,7 @@ impl Parser {
             'Q' => self.parse_bjt(&parts),
             'J' => self.parse_jfet(&parts),
             'M' => self.parse_mosfet(&parts),
+            'U' => self.parse_opamp(&parts),
             'X' => self.parse_subckt_instance(&parts),
             _ => Err(self.error(format!("Unknown element type: {}", first_char))),
         }
@@ -715,6 +732,18 @@ impl Parser {
             ns: parts[3].to_string(),
             nb: parts[4].to_string(),
             model: parts[5].to_string(),
+        })
+    }
+
+    fn parse_opamp(&self, parts: &[&str]) -> Result<Element, ParseError> {
+        // Uname n_plus n_minus n_out modelname
+        self.require_parts(parts, 5, "Uname n_plus n_minus n_out modelname")?;
+        Ok(Element::Opamp {
+            name: parts[0].to_string(),
+            n_plus: parts[1].to_string(),
+            n_minus: parts[2].to_string(),
+            n_out: parts[3].to_string(),
+            model: parts[4].to_string(),
         })
     }
 
@@ -967,9 +996,25 @@ mod tests {
 
     #[test]
     fn test_parse_pot_max_exceeded() {
-        let spice = "Test\nR1 1 0 10k\nR2 2 0 5k\nR3 3 0 3k\n.pot R1 1k 100k\n.pot R2 500 50k\n.pot R3 100 10k\n";
+        let mut spice = String::from("Test\n");
+        for i in 1..=33 {
+            spice.push_str(&format!("R{i} {i} 0 10k\n"));
+        }
+        for i in 1..=33 {
+            spice.push_str(&format!(".pot R{i} 1k 100k\n"));
+        }
+        let result = Netlist::parse(&spice);
+        assert!(result.is_err(), "More than 32 pots should fail");
+    }
+
+    #[test]
+    fn test_parse_pot_four_pots_ok() {
+        let spice = "Test\nR1 1 0 10k\nR2 2 0 5k\nR3 3 0 3k\nR4 4 0 2k\n\
+                      .pot R1 1k 100k\n.pot R2 500 50k\n.pot R3 100 10k\n.pot R4 200 20k\n";
         let result = Netlist::parse(spice);
-        assert!(result.is_err(), "More than 2 pots should fail");
+        assert!(result.is_ok(), "4 pots should be allowed: {:?}", result.err());
+        let netlist = result.unwrap();
+        assert_eq!(netlist.pots.len(), 4);
     }
 
     #[test]
@@ -1445,5 +1490,56 @@ Q1 coll base emit 2N2222
         let spice = "Test\n.param Rval\n";
         let result = Netlist::parse(spice);
         assert!(result.is_err(), ".param without = should be rejected");
+    }
+
+    // ===== Op-amp parsing tests =====
+
+    #[test]
+    fn test_parse_opamp_basic() {
+        let spice = "Test\nU1 3 2 6 opamp\n.model opamp OA(AOL=200000)\n";
+        let netlist = Netlist::parse(spice).unwrap();
+        match &netlist.elements[0] {
+            Element::Opamp { name, n_plus, n_minus, n_out, model } => {
+                assert_eq!(name, "U1");
+                assert_eq!(n_plus, "3");
+                assert_eq!(n_minus, "2");
+                assert_eq!(n_out, "6");
+                assert_eq!(model, "opamp");
+            }
+            _ => panic!("Expected Opamp, got {:?}", netlist.elements[0]),
+        }
+    }
+
+    #[test]
+    fn test_parse_opamp_model_params() {
+        let spice = "Test\nU1 3 2 6 myoa\n.model myoa OA(AOL=100000 GBW=1e6 ROUT=75)\n";
+        let netlist = Netlist::parse(spice).unwrap();
+        assert_eq!(netlist.models.len(), 1);
+        let model = &netlist.models[0];
+        assert_eq!(model.model_type, "OA");
+        let aol = model.params.iter().find(|(k, _)| k == "AOL").map(|(_, v)| *v);
+        assert_eq!(aol, Some(100_000.0));
+        let rout = model.params.iter().find(|(k, _)| k == "ROUT").map(|(_, v)| *v);
+        assert_eq!(rout, Some(75.0));
+    }
+
+    #[test]
+    fn test_parse_opamp_no_model() {
+        let spice = "Test\nU1 3 2 6 missing_model\n";
+        let result = Netlist::parse(spice);
+        assert!(result.is_err(), "Op-amp without .model should be rejected");
+    }
+
+    #[test]
+    fn test_parse_opamp_in_circuit() {
+        let spice = r#"Inverting Amplifier
+R1 in inv 10k
+R2 inv out 100k
+U1 0 inv out opamp
+.model opamp OA(AOL=200000)
+"#;
+        let netlist = Netlist::parse(spice).unwrap();
+        assert_eq!(netlist.elements.len(), 3);
+        assert!(matches!(&netlist.elements[2], Element::Opamp { .. }));
     }
 }

@@ -806,11 +806,11 @@ fn test_codegen_sanitization_resets_pot() {
 fn test_codegen_jacobian_uses_corrected_k() {
     let code = generate_code(DIODE_POT_SPICE);
 
-    // The Jacobian should use corrected K, not bare K[k][j]
-    // Look for the pattern: K[0][0] - k_scale_0 * POT_0_NV_SU
+    // The Jacobian should use corrected K via state fields, not bare K[k][j]
+    // Look for the pattern: state.k[0][0] - k_scale_0 * state.pot_0_nv_su
     assert!(
-        code.contains("K[0][0] - k_scale_0 * POT_0_NV_SU"),
-        "Jacobian should use SM-corrected K"
+        code.contains("state.k[0][0] - k_scale_0 * state.pot_0_nv_su"),
+        "Jacobian should use SM-corrected K via state fields"
     );
 }
 
@@ -822,10 +822,10 @@ fn test_codegen_jacobian_uses_corrected_k() {
 fn test_codegen_s_correction_uses_su() {
     let code = generate_code(RC_POT_SPICE);
 
-    // The S correction should compute su^T * rhs = POT_0_SU[k] * rhs[k]
+    // The S correction should compute su^T * rhs using state fields
     assert!(
-        code.contains("POT_0_SU[0] * rhs[0]") || code.contains("POT_0_SU[1] * rhs[1]"),
-        "S correction should use POT_SU dot rhs, not u dot rhs"
+        code.contains("state.pot_0_su[_k] * rhs[_k]"),
+        "S correction should use state.pot_0_su dot rhs via runtime loop"
     );
     // Should NOT use the old pattern "rhs[p] - rhs[q]" for S correction
     // (that pattern is still valid for A_neg correction which uses u not su)

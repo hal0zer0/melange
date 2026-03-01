@@ -21,6 +21,8 @@ struct InductorTemplateData {
     node_j: usize,
     /// Formatted g_eq string for constants template (empty when not needed)
     g_eq: String,
+    /// Formatted inductance string for constants template (empty when not needed)
+    inductance: String,
 }
 
 // ============================================================================
@@ -63,6 +65,11 @@ fn inductor_template_data(ir: &CircuitIR, with_g_eq: bool) -> Vec<InductorTempla
             node_j: ind.node_j,
             g_eq: if with_g_eq {
                 fmt_f64(ind.g_eq)
+            } else {
+                String::new()
+            },
+            inductance: if with_g_eq {
+                fmt_f64(ind.inductance)
             } else {
                 String::new()
             },
@@ -218,6 +225,10 @@ impl RustEmitter {
         ctx.insert("input_resistance", &fmt_f64(ir.solver_config.input_resistance));
         ctx.insert("has_dc_sources", &ir.has_dc_sources);
 
+        // G and C matrices (sample-rate independent)
+        ctx.insert("g_rows", &format_matrix_rows(n, n, |i, j| ir.g(i, j)));
+        ctx.insert("c_rows", &format_matrix_rows(n, n, |i, j| ir.c(i, j)));
+
         ctx.insert("s_rows", &format_matrix_rows(n, n, |i, j| ir.s(i, j)));
         ctx.insert("a_neg_rows", &format_matrix_rows(n, n, |i, j| ir.a_neg(i, j)));
 
@@ -234,17 +245,40 @@ impl RustEmitter {
         // N_i transposed: N_I[device][node] = n_i[node][device]
         ctx.insert("n_i_rows", &format_matrix_rows(m, n, |i, j| ir.n_i(j, i)));
 
+        // S*N_i product: precomputed for final voltage correction
+        // S_NI[node][device] = sum_k S[node][k] * N_i[k][device]
+        let s_ni_rows: Vec<String> = (0..n).map(|i| {
+            (0..m).map(|j| {
+                let mut val = 0.0;
+                for k in 0..n {
+                    val += ir.s(i, k) * ir.n_i(k, j);
+                }
+                fmt_f64(val)
+            }).collect::<Vec<_>>().join(", ")
+        }).collect();
+        ctx.insert("s_ni_rows", &s_ni_rows);
+
         self.render("constants", &ctx)
     }
 
     fn emit_state(&self, ir: &CircuitIR) -> Result<String, CodegenError> {
         let mut ctx = Context::new();
         ctx.insert("has_dc_op", &ir.has_dc_op);
-        ctx.insert("num_inductors", &ir.inductors.len());
-        ctx.insert("num_pots", &ir.pots.len());
+        let num_inductors = ir.inductors.len();
+        ctx.insert("num_inductors", &num_inductors);
+        let num_pots = ir.pots.len();
+        ctx.insert("num_pots", &num_pots);
+
+        if num_inductors > 0 {
+            ctx.insert("inductors", &inductor_template_data(ir, true));
+        }
 
         let pot_defaults: Vec<String> = ir.pots.iter().map(|p| fmt_f64(1.0 / p.g_nominal)).collect();
         ctx.insert("pot_defaults", &pot_defaults);
+
+        // Pot indices for template iteration
+        let pot_indices: Vec<usize> = (0..num_pots).collect();
+        ctx.insert("pot_indices", &pot_indices);
 
         if ir.has_dc_op {
             let dc_op_values = ir
@@ -317,7 +351,6 @@ impl RustEmitter {
         if ir.pots.is_empty() {
             return String::new();
         }
-        let m = ir.topology.m;
         let mut code = section_banner("POTENTIOMETER CONSTANTS (Sherman-Morrison precomputed vectors)");
 
         for (idx, pot) in ir.pots.iter().enumerate() {
@@ -332,25 +365,20 @@ impl RustEmitter {
                 "const POT_{}_G_NOM: f64 = {};\n", idx, fmt_f64(pot.g_nominal)
             ));
 
-            if m > 0 {
-                code.push_str(&format!(
-                    "const POT_{}_NV_SU: [f64; M] = [{}];\n", idx, format_f64_slice(&pot.nv_su)
-                ));
-                code.push_str(&format!(
-                    "const POT_{}_U_NI: [f64; M] = [{}];\n", idx, format_f64_slice(&pot.u_ni)
-                ));
-            }
+            code.push_str(&format!(
+                "const POT_{}_NV_SU: [f64; M] = [{}];\n", idx, format_f64_slice(&pot.nv_su)
+            ));
+            code.push_str(&format!(
+                "const POT_{}_U_NI: [f64; M] = [{}];\n", idx, format_f64_slice(&pot.u_ni)
+            ));
 
-            if pot.node_p > 0 {
-                code.push_str(&format!(
-                    "const POT_{}_NODE_P: usize = {};\n", idx, pot.node_p - 1
-                ));
-            }
-            if pot.node_q > 0 {
-                code.push_str(&format!(
-                    "const POT_{}_NODE_Q: usize = {};\n", idx, pot.node_q - 1
-                ));
-            }
+            // Node indices (1-indexed, 0 = ground) for set_sample_rate recomputation
+            code.push_str(&format!(
+                "const POT_{}_NODE_P: usize = {};\n", idx, pot.node_p
+            ));
+            code.push_str(&format!(
+                "const POT_{}_NODE_Q: usize = {};\n", idx, pot.node_q
+            ));
 
             code.push_str(&format!(
                 "const POT_{}_MIN_R: f64 = {};\n", idx, fmt_f64(pot.min_resistance)
@@ -378,7 +406,7 @@ impl RustEmitter {
                  \x20   if !r.is_finite() {{ return (0.0, 0.0); }}\n\
                  \x20   let r = r.clamp(POT_{idx}_MIN_R, POT_{idx}_MAX_R);\n\
                  \x20   let delta_g = 1.0 / r - POT_{idx}_G_NOM;\n\
-                 \x20   let denom = 1.0 + delta_g * POT_{idx}_USU;\n\
+                 \x20   let denom = 1.0 + delta_g * state.pot_{idx}_usu;\n\
                  \x20   let scale = if denom.abs() > 1e-15 {{ delta_g / denom }} else {{ 0.0 }};\n\
                  \x20   (delta_g, scale)\n\
                  }}\n\n",
@@ -407,7 +435,7 @@ impl RustEmitter {
             let mut terms = Vec::new();
             for j in 0..n {
                 if ir.a_neg(i, j) != 0.0 {
-                    terms.push(format!("A_NEG[{}][{}] * state.v_prev[{}]", i, j, j));
+                    terms.push(format!("state.a_neg[{}][{}] * state.v_prev[{}]", i, j, j));
                 }
             }
             if terms.is_empty() {
@@ -446,31 +474,9 @@ impl RustEmitter {
         self.render("build_rhs", &ctx)
     }
 
-    fn emit_mat_vec_mul_s(&self, ir: &CircuitIR) -> Result<String, CodegenError> {
-        let n = ir.topology.n;
-        let mut ctx = Context::new();
-
-        let mut mul_lines = String::new();
-        for i in 0..n {
-            mul_lines.push_str("        ");
-            let mut first = true;
-            for j in 0..n {
-                if ir.s(i, j) != 0.0 || (!first && j == n - 1) {
-                    if !first {
-                        mul_lines.push_str(" + ");
-                    }
-                    mul_lines.push_str(&format!("S[{}][{}] * rhs[{}]", i, j, j));
-                    first = false;
-                }
-            }
-            if first {
-                mul_lines.push_str("0.0");
-            }
-            mul_lines.push_str(",\n");
-        }
-        ctx.insert("mul_lines", &mul_lines);
-
-        self.render("mat_vec_mul_s", &ctx)
+    fn emit_mat_vec_mul_s(&self, _ir: &CircuitIR) -> Result<String, CodegenError> {
+        // The template now uses a runtime loop over state.s, no context needed
+        self.render("mat_vec_mul_s", &Context::new())
     }
 
     fn emit_extract_voltages(&self, ir: &CircuitIR) -> Result<String, CodegenError> {
@@ -516,36 +522,9 @@ impl RustEmitter {
         self.render("extract_voltages", &ctx)
     }
 
-    fn emit_final_voltages(&self, ir: &CircuitIR) -> Result<String, CodegenError> {
-        let n = ir.topology.n;
-        let m = ir.topology.m;
-        let mut ctx = Context::new();
-        ctx.insert("m", &m);
-
-        // No delta_i lines needed — trapezoidal uses full i_nl (not delta)
-        let di_lines = String::new();
-        ctx.insert("di_lines", &di_lines);
-
-        // voltage computation lines: v = v_pred + S * N_i * i_nl
-        // Using full i_nl implements trapezoidal nonlinear integration:
-        // combined with N_i * i_nl_prev in the RHS, gives S * N_i * (i_nl + i_nl_prev)
-        let mut voltage_lines = String::new();
-        for i in 0..n {
-            voltage_lines.push_str(&format!("        v_pred[{}]", i));
-            for j in 0..m {
-                let mut s_ni_ij = 0.0;
-                for k in 0..n {
-                    s_ni_ij += ir.s(i, k) * ir.n_i(k, j);
-                }
-                if s_ni_ij != 0.0 {
-                    voltage_lines.push_str(&format!(" + {} * i_nl[{}]", fmt_f64(s_ni_ij), j));
-                }
-            }
-            voltage_lines.push_str(",\n");
-        }
-        ctx.insert("voltage_lines", &voltage_lines);
-
-        self.render("final_voltages", &ctx)
+    fn emit_final_voltages(&self, _ir: &CircuitIR) -> Result<String, CodegenError> {
+        // The template now uses a runtime loop over state.s_ni, no context needed
+        self.render("final_voltages", &Context::new())
     }
 
     fn emit_update_history(&self) -> Result<String, CodegenError> {
@@ -638,55 +617,41 @@ impl RustEmitter {
         }
     }
 
-    fn emit_s_correction(code: &mut String, idx: usize, pot: &PotentiometerIR, n: usize) {
+    fn emit_s_correction(code: &mut String, idx: usize, _pot: &PotentiometerIR, n: usize) {
         // S correction: v_pred -= scale * (su^T . rhs) * SU
         // Sherman-Morrison: S' * rhs = S*rhs - scale * su * (su^T * rhs)
-        // where su = S*u, so the inner product must use su (POT_SU), not u.
-        code.push_str(&format!("    let su_dot_rhs_{} = ", idx));
-        let mut first = true;
-        for k in 0..n {
-            if pot.su[k] != 0.0 {
-                if !first { code.push_str(" + "); }
-                code.push_str(&format!("POT_{}_SU[{}] * rhs[{}]", idx, k, k));
-                first = false;
-            }
-        }
-        if first {
-            // All su entries are zero (degenerate pot)
-            code.push_str("0.0");
-        }
-        code.push_str(";\n");
+        // where su = S*u, so the inner product must use su (state.pot_su), not u.
+        // Uses runtime state fields (not constants) for sample-rate independence.
+        code.push_str(&format!("    let mut su_dot_rhs_{} = 0.0;\n", idx));
+        code.push_str(&format!(
+            "    for _k in 0..N {{ su_dot_rhs_{idx} += state.pot_{idx}_su[_k] * rhs[_k]; }}\n"
+        ));
 
         code.push_str(&format!(
             "    let factor_{} = scale_{} * su_dot_rhs_{};\n", idx, idx, idx
         ));
         for k in 0..n {
             code.push_str(&format!(
-                "    v_pred[{}] -= factor_{} * POT_{}_SU[{}];\n", k, idx, idx, k
+                "    v_pred[{}] -= factor_{} * state.pot_{}_su[{}];\n", k, idx, idx, k
             ));
         }
     }
 
-    fn emit_sni_correction(code: &mut String, idx: usize, _pot: &PotentiometerIR, n: usize, m: usize) {
+    fn emit_sni_correction(code: &mut String, idx: usize, _pot: &PotentiometerIR, n: usize, _m: usize) {
         // S*N_i correction: v -= scale * (u^T . N_i . i_nl) * SU
-        // where u^T . N_i is the precomputed POT_idx_U_NI vector
+        // where u^T . N_i is the state.pot_{idx}_u_ni vector
         // Uses full i_nl (not delta) for trapezoidal nonlinear integration
-        code.push_str(&format!("    let u_ni_dot_inl_{} = ", idx));
-        let mut first = true;
-        for j in 0..m {
-            if !first { code.push_str(" + "); }
-            code.push_str(&format!(
-                "POT_{}_U_NI[{}] * i_nl[{}]", idx, j, j
-            ));
-            first = false;
-        }
-        code.push_str(";\n");
+        // Uses runtime state fields (not constants) for sample-rate independence.
+        code.push_str(&format!("    let mut u_ni_dot_inl_{} = 0.0;\n", idx));
+        code.push_str(&format!(
+            "    for _j in 0..M {{ u_ni_dot_inl_{idx} += state.pot_{idx}_u_ni[_j] * i_nl[_j]; }}\n"
+        ));
         code.push_str(&format!(
             "    let sni_factor_{} = scale_{} * u_ni_dot_inl_{};\n", idx, idx, idx
         ));
         for k in 0..n {
             code.push_str(&format!(
-                "    v[{}] -= sni_factor_{} * POT_{}_SU[{}];\n", k, idx, idx, k
+                "    v[{}] -= sni_factor_{} * state.pot_{}_su[{}];\n", k, idx, idx, k
             ));
         }
     }
@@ -792,7 +757,7 @@ impl RustEmitter {
             code.push_str(&format!("p[{}]", i));
             for j in 0..m {
                 if ir.k(i, j) != 0.0 {
-                    code.push_str(&format!(" + K[{}][{}] * i_nl[{}]", i, j, j));
+                    code.push_str(&format!(" + state.k[{}][{}] * i_nl[{}]", i, j, j));
                 }
             }
             code.push_str(";\n");
@@ -813,14 +778,14 @@ impl RustEmitter {
                 let mut first = true;
                 for j in 0..m {
                     if !first { code.push_str(" + "); }
-                    code.push_str(&format!("POT_{}_U_NI[{}] * i_nl[{}]", idx, j, j));
+                    code.push_str(&format!("state.pot_{}_u_ni[{}] * i_nl[{}]", idx, j, j));
                     first = false;
                 }
                 code.push_str(";\n");
                 // Apply correction to each v_d
                 for i in 0..m {
                     code.push_str(&format!(
-                        "        v_d{} -= k_scale_{} * POT_{}_NV_SU[{}] * u_ni_dot_inl_{};\n",
+                        "        v_d{} -= k_scale_{} * state.pot_{}_nv_su[{}] * u_ni_dot_inl_{};\n",
                         i, idx, idx, i, idx
                     ));
                 }
@@ -917,20 +882,20 @@ impl RustEmitter {
                     for k in blk_start..blk_start + blk_dim {
                         if ir.pots.is_empty() {
                             terms.push_str(&format!(
-                                " - jdev_{}_{} * K[{}][{}]",
+                                " - jdev_{}_{} * state.k[{}][{}]",
                                 i, k, k, j
                             ));
                         } else {
-                            // Use corrected K': K[k][j] - sum_pots(scale_p * nv_su_p[k] * u_ni_p[j])
+                            // Use corrected K': state.k[k][j] - sum_pots(scale_p * nv_su_p[k] * u_ni_p[j])
                             let mut k_correction = String::new();
                             for (idx, _pot) in ir.pots.iter().enumerate() {
                                 k_correction.push_str(&format!(
-                                    " - k_scale_{} * POT_{}_NV_SU[{}] * POT_{}_U_NI[{}]",
+                                    " - k_scale_{} * state.pot_{}_nv_su[{}] * state.pot_{}_u_ni[{}]",
                                     idx, idx, k, idx, j
                                 ));
                             }
                             terms.push_str(&format!(
-                                " - jdev_{}_{} * (K[{}][{}]{})",
+                                " - jdev_{}_{} * (state.k[{}][{}]{})",
                                 i, k, k, j, k_correction
                             ));
                         }
@@ -967,12 +932,12 @@ impl RustEmitter {
                     code.push_str("        let delta1 = inv_det * (-j10 * f0 + j00 * f1);\n\n");
                     emit_nr_clamp_and_converge(code, 2, "        ");
                 }
-                3 | 4 => {
+                3..=8 => {
                     Self::generate_gauss_elim(code, m);
                 }
                 _ => {
                     return Err(CodegenError::UnsupportedTopology(format!(
-                        "M={} nonlinear devices not supported (max 4)",
+                        "M={} nonlinear devices not supported (max 8)",
                         m
                     )));
                 }

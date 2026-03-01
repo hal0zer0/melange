@@ -517,7 +517,7 @@ fn build_rhs_const(mna: &MnaSystem) -> Vec<f64> {
 /// Flatten a 2D matrix into a 1D row-major vector.
 ///
 /// Index calculation: index = row * cols + col
-fn flatten_matrix(matrix: &[Vec<f64>], rows: usize, cols: usize) -> Vec<f64> {
+pub(crate) fn flatten_matrix(matrix: &[Vec<f64>], rows: usize, cols: usize) -> Vec<f64> {
     if rows == 0 || cols == 0 {
         return Vec::new();
     }

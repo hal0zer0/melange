@@ -44,6 +44,7 @@ pub mod mna;
 pub mod dk;
 pub mod solver;
 pub mod codegen;
+pub mod dc_op;
 
 #[cfg(test)]
 mod dk_math_verification;

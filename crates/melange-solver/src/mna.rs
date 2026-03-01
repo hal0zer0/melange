@@ -56,6 +56,8 @@ pub struct MnaSystem {
     pub inductors: Vec<InductorElement>,
     /// Potentiometer info (resolved from .pot directives)
     pub pots: Vec<PotInfo>,
+    /// Op-amp info (for VCCS stamping)
+    pub opamps: Vec<OpampInfo>,
 }
 
 /// Inductor element info for companion model.
@@ -111,6 +113,26 @@ pub struct CurrentSourceInfo {
     pub dc_value: f64,
 }
 
+/// Op-amp information for VCCS stamping.
+///
+/// Modeled as a voltage-controlled current source with transconductance
+/// Gm = AOL / Rout, plus output conductance Go = 1 / Rout. This stamps
+/// directly into the G matrix and does NOT add nonlinear dimensions.
+#[derive(Debug, Clone)]
+pub struct OpampInfo {
+    pub name: String,
+    /// Non-inverting input node index (0 = ground)
+    pub n_plus_idx: usize,
+    /// Inverting input node index (0 = ground)
+    pub n_minus_idx: usize,
+    /// Output node index (0 = ground)
+    pub n_out_idx: usize,
+    /// Open-loop gain (default 200,000)
+    pub aol: f64,
+    /// Output resistance in ohms (default 1)
+    pub r_out: f64,
+}
+
 /// Potentiometer information resolved from .pot directive.
 #[derive(Debug, Clone)]
 pub struct PotInfo {
@@ -147,6 +169,7 @@ impl MnaSystem {
             current_sources: Vec::new(),
             inductors: Vec::new(),
             pots: Vec::new(),
+            opamps: Vec::new(),
         }
     }
 
@@ -374,6 +397,7 @@ struct MnaBuilder {
     voltage_sources: Vec<VoltageSourceInfo>,
     current_sources: Vec<CurrentSourceInfo>,
     inductors: Vec<InductorElement>,
+    opamps: Vec<OpampInfo>,
     elements: Vec<ElementInfo>,
     /// Total voltage dimension accumulated so far
     total_dimension: usize,
@@ -400,6 +424,7 @@ enum ElementType {
     Bjt,
     Jfet,
     Mosfet,
+    Opamp,
 }
 
 impl MnaBuilder {
@@ -414,6 +439,7 @@ impl MnaBuilder {
             voltage_sources: Vec::new(),
             current_sources: Vec::new(),
             inductors: Vec::new(),
+            opamps: Vec::new(),
             elements: Vec::new(),
             total_dimension: 0,
         }
@@ -428,6 +454,23 @@ impl MnaBuilder {
         // Second pass: categorize elements and build device info
         for element in &netlist.elements {
             self.categorize_element(element)?;
+        }
+
+        // Resolve op-amp model parameters from netlist .model directives
+        for (oa, elem) in self.opamps.iter_mut().zip(
+            netlist.elements.iter().filter(|e| matches!(e, Element::Opamp { .. }))
+        ) {
+            if let Element::Opamp { model, .. } = elem {
+                if let Some(m) = netlist.models.iter().find(|m| m.name.eq_ignore_ascii_case(model)) {
+                    for (key, val) in &m.params {
+                        match key.to_ascii_uppercase().as_str() {
+                            "AOL" => oa.aol = *val,
+                            "ROUT" => oa.r_out = *val,
+                            _ => {} // Ignore unknown params (GBW, etc.)
+                        }
+                    }
+                }
+            }
         }
 
         // Create MNA system with correct dimensions
@@ -468,6 +511,7 @@ impl MnaBuilder {
         mna.voltage_sources = self.voltage_sources;
         mna.current_sources = self.current_sources;
         mna.inductors = self.inductors;
+        mna.opamps = self.opamps;
 
         // Stamp linear elements
         for elem in &self.elements {
@@ -494,7 +538,24 @@ impl MnaBuilder {
                         stamp_conductance_to_ground(&mut mna.g, elem.nodes[0], elem.nodes[1], VS_CONDUCTANCE);
                     }
                 }
-                _ => {} // Nonlinear handled separately
+                _ => {} // Nonlinear and op-amps handled separately
+            }
+        }
+
+        // Stamp op-amps as VCCS into G matrix
+        for oa in &mna.opamps {
+            let gm = oa.aol / oa.r_out; // Transconductance
+            let go = 1.0 / oa.r_out;    // Output conductance
+
+            let out = oa.n_out_idx;
+            let np = oa.n_plus_idx;
+            let nm = oa.n_minus_idx;
+
+            if out > 0 {
+                let o = out - 1;
+                if np > 0 { mna.g[o][np - 1] += gm; }
+                if nm > 0 { mna.g[o][nm - 1] -= gm; }
+                mna.g[o][o] += go;
             }
         }
 
@@ -613,6 +674,7 @@ impl MnaBuilder {
             Element::Bjt { nc, nb, ne, .. } => vec![nc, nb, ne],
             Element::Jfet { nd, ng, ns, .. } => vec![nd, ng, ns],
             Element::Mosfet { nd, ng, ns, nb, .. } => vec![nd, ng, ns, nb],
+            Element::Opamp { n_plus, n_minus, n_out, .. } => vec![n_plus, n_minus, n_out],
             Element::SubcktInstance { name, .. } => {
                 return Err(MnaError::TopologyError(
                     format!("subcircuit instance '{}' not supported (expand subcircuits before MNA)", name)
@@ -791,6 +853,32 @@ impl MnaBuilder {
                     node_indices,
                 });
             }
+            Element::Opamp { name, n_plus, n_minus, n_out, .. } => {
+                let np_idx = self.node_map[n_plus];
+                let nm_idx = self.node_map[n_minus];
+                let no_idx = self.node_map[n_out];
+
+                if no_idx == 0 {
+                    return Err(MnaError::TopologyError(
+                        format!("op-amp '{}' has output connected to ground", name)
+                    ));
+                }
+                if np_idx == 0 && nm_idx == 0 {
+                    return Err(MnaError::TopologyError(
+                        format!("op-amp '{}' has both inputs grounded", name)
+                    ));
+                }
+
+                // Op-amps are LINEAR — do NOT add to nonlinear dimension M
+                self.opamps.push(OpampInfo {
+                    name: name.clone(),
+                    n_plus_idx: np_idx,
+                    n_minus_idx: nm_idx,
+                    n_out_idx: no_idx,
+                    aol: 200_000.0,
+                    r_out: 1.0,
+                });
+            }
             Element::SubcktInstance { name, .. } => {
                 return Err(MnaError::TopologyError(
                     format!("subcircuit instance '{}' not supported (expand subcircuits before MNA)", name)
@@ -886,5 +974,87 @@ R2 base 0 100k
         assert_eq!(mna.n_v[0][emit_idx], -1.0);
         assert_eq!(mna.n_v[1][base_idx], 1.0);
         assert_eq!(mna.n_v[1][coll_idx], -1.0);
+    }
+
+    // ===== Op-amp MNA tests =====
+
+    #[test]
+    fn test_mna_opamp_basic() {
+        let spice = r#"Opamp Test
+R1 in inv 10k
+R2 inv out 100k
+U1 0 inv out opamp
+.model opamp OA(AOL=200000)
+"#;
+        let netlist = Netlist::parse(spice).unwrap();
+        let mna = MnaSystem::from_netlist(&netlist).unwrap();
+
+        assert_eq!(mna.n, 3); // in, inv, out
+        assert_eq!(mna.m, 0); // Op-amp is linear
+        assert_eq!(mna.num_devices, 0);
+        assert_eq!(mna.opamps.len(), 1);
+        assert_eq!(mna.opamps[0].aol, 200_000.0);
+    }
+
+    #[test]
+    fn test_mna_opamp_vccs_stamping() {
+        let spice = r#"Opamp VCCS Test
+R1 in inv 10k
+R2 inv out 100k
+U1 0 inv out opamp
+.model opamp OA(AOL=200000 ROUT=1)
+"#;
+        let netlist = Netlist::parse(spice).unwrap();
+        let mna = MnaSystem::from_netlist(&netlist).unwrap();
+
+        let inv_idx = *mna.node_map.get("inv").unwrap();
+        let out_idx = *mna.node_map.get("out").unwrap();
+
+        let o = out_idx - 1;
+        let i = inv_idx - 1;
+
+        // G[out, inv] should have -Gm - g_R2
+        let g_r2 = 1.0 / 100_000.0;
+        assert!((mna.g[o][i] - (-200_000.0 - g_r2)).abs() < 1e-6,
+            "G[out,inv] should be -Gm - g_R2, got {}", mna.g[o][i]);
+
+        // G[out, out] should have Go + g_R2
+        let expected_go = 1.0 + g_r2;
+        assert!((mna.g[o][o] - expected_go).abs() < 1e-6,
+            "G[out,out] should include Go={}, got {}", expected_go, mna.g[o][o]);
+    }
+
+    #[test]
+    fn test_mna_opamp_output_grounded_error() {
+        let spice = r#"Opamp Output Grounded
+R1 in inv 10k
+U1 inp inv 0 opamp
+.model opamp OA(AOL=200000)
+"#;
+        let result = Netlist::parse(spice).and_then(|n| {
+            MnaSystem::from_netlist(&n).map_err(|e| crate::parser::ParseError {
+                line: 0,
+                message: format!("{}", e),
+            })
+        });
+        assert!(result.is_err(), "Op-amp with grounded output should error");
+    }
+
+    #[test]
+    fn test_mna_opamp_no_nonlinear_dimensions() {
+        let spice = r#"Opamp With Diode
+R1 in inv 10k
+R2 inv out 100k
+U1 0 inv out opamp
+D1 out 0 D1N4148
+.model opamp OA(AOL=200000)
+.model D1N4148 D(IS=1e-15)
+"#;
+        let netlist = Netlist::parse(spice).unwrap();
+        let mna = MnaSystem::from_netlist(&netlist).unwrap();
+
+        assert_eq!(mna.m, 1); // Only diode
+        assert_eq!(mna.num_devices, 1);
+        assert_eq!(mna.opamps.len(), 1);
     }
 }

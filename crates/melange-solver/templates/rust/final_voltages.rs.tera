@@ -1,16 +1,22 @@
-/// Compute final node voltages: v = v_pred + S * N_i * i_nl
+/// Compute final node voltages: v = v_pred + state.s_ni * i_nl
 ///
 /// Uses full i_nl (not delta) for trapezoidal nonlinear integration.
 /// Combined with N_i * i_nl_prev in the RHS, this gives the proper
 /// trapezoidal average: S * N_i * (i_nl + i_nl_prev).
+///
+/// The S*N_i product is stored in state.s_ni for sample rate independence.
 #[inline(always)]
 fn compute_final_voltages(
     v_pred: &[f64; N],
     i_nl: &[f64; M],
-    _state: &CircuitState,
+    state: &CircuitState,
 ) -> [f64; N] {
-    // Compute final voltages with correction term
-    [
-{{ voltage_lines }}    ]
+    let mut v = *v_pred;
+    for i in 0..N {
+        for j in 0..M {
+            v[i] += state.s_ni[i][j] * i_nl[j];
+        }
+    }
+    v
 }
 

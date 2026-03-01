@@ -27,7 +27,7 @@ pub fn process_sample(input: f64, state: &mut CircuitState) -> f64 {
 {{ a_neg_correction }}{% endif %}
 
     // Step 2: Linear prediction: v_pred = S * rhs
-    let {% if num_pots > 0 %}mut {% endif %}v_pred = mat_vec_mul_s(&rhs);
+    let {% if num_pots > 0 %}mut {% endif %}v_pred = mat_vec_mul_s(&rhs, state);
 {% if num_pots > 0 %}
 
     // Step 2b: Sherman-Morrison S correction on v_pred
@@ -60,8 +60,9 @@ pub fn process_sample(input: f64, state: &mut CircuitState) -> f64 {
         let v_i = {% if ind.node_i > 0 %}v[{{ ind.node_i - 1 }}]{% else %}0.0{% endif %};
         let v_j = {% if ind.node_j > 0 %}v[{{ ind.node_j - 1 }}]{% else %}0.0{% endif %};
         let v_new = v_i - v_j;
-        let i_new = state.ind_i_prev[{{ loop.index0 }}] + IND_{{ loop.index0 }}_G_EQ * (state.ind_v_prev[{{ loop.index0 }}] + v_new);
-        state.ind_i_hist[{{ loop.index0 }}] = i_new - IND_{{ loop.index0 }}_G_EQ * v_new;
+        let g_eq = state.ind_g_eq[{{ loop.index0 }}];
+        let i_new = state.ind_i_prev[{{ loop.index0 }}] + g_eq * (state.ind_v_prev[{{ loop.index0 }}] + v_new);
+        state.ind_i_hist[{{ loop.index0 }}] = i_new - g_eq * v_new;
         state.ind_i_prev[{{ loop.index0 }}] = i_new;
         state.ind_v_prev[{{ loop.index0 }}] = v_new;
     }

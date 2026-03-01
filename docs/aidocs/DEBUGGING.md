@@ -136,6 +136,54 @@ rhs += history + A_neg*v_prev;  // Double!
 rhs = A_neg * v_prev;
 ```
 
+## Problem: BJT Circuit Produces No Output / Wrong Bias
+
+### Check DC Operating Point Initialization
+
+BJT amplifiers require a DC bias point. Without it, all transistors start in cutoff
+(v=0) and produce no output.
+
+**Runtime solver:**
+```rust
+solver.initialize_dc_op(&mna, &device_slots);
+```
+
+**Codegen:** Check that `DC_NL_I` constant is present in generated code:
+```rust
+pub const DC_NL_I: [f64; M] = [...];  // Should be non-zero for BJT circuits
+```
+
+If `DC_NL_I` is all zeros or missing, the DC OP solver may not have converged.
+
+### Check DC OP Convergence
+
+```rust
+let result = dc_op::solve_dc_operating_point(&mna, &slots, &config);
+eprintln!("DC OP: converged={}, method={:?}, iters={}", result.converged, result.method, result.iterations);
+for (name, &idx) in &mna.node_map {
+    if idx > 0 { eprintln!("  V({}) = {:.4}V", name, result.v_node[idx - 1]); }
+}
+```
+
+### Expected DC OP for BJT CE Amplifier
+
+```
+V(base) ≈ voltage divider output (e.g., 2.16V for 12V/100k/22k)
+V(emitter) ≈ V(base) - 0.65V
+V(collector) ≈ VCC - Ic*RC
+```
+
+If V(base) is correct but V(collector) ≈ VCC, the BJT is in cutoff (wrong DC OP).
+
+### DC OP Jacobian Sign
+
+The companion formulation uses **subtraction**:
+```
+G_aug = G_dc - N_i · J_dev · N_v
+```
+
+Using addition causes NR divergence. See `DC_OP.md` for the mathematical derivation.
+
 ## Quick Diagnostics
 
 ```rust
@@ -170,10 +218,14 @@ rhs = A_neg * v_prev;
 |-----------|-------|-------|
 | INPUT_RESISTANCE | 1 ohm | Near-ideal voltage source |
 | STEP_CLAMP | 0.01 | Prevents NR overshoot |
-| MAX_ITER | 20 | NR iteration limit |
+| MAX_ITER | 100 | NR iteration limit (runtime & codegen) |
 | TOLERANCE | 1e-9 | NR convergence |
 | alpha | 2/T | Trapezoidal rule |
 | K | N_v*S*N_i | Naturally negative, no extra negation |
+| DC OP tolerance | 1e-9 | DC OP NR convergence |
+| DC OP max_iter | 200 | DC OP NR iteration limit |
+| DC OP source_steps | 10 | Source stepping stages |
+| DC OP voltage_limit | ±0.5V | Per-node NR step limit |
 
 ## References
 - TU Delft Analog Electronics Webbook: MNA stamps

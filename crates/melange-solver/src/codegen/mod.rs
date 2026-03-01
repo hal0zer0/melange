@@ -45,6 +45,10 @@ pub struct CodegenConfig {
     pub output_node: usize,
     /// Include DC operating point in generated code
     pub include_dc_op: bool,
+    /// Maximum NR iterations for DC operating point solver
+    pub dc_op_max_iterations: usize,
+    /// Convergence tolerance for DC operating point solver
+    pub dc_op_tolerance: f64,
 }
 
 impl Default for CodegenConfig {
@@ -58,6 +62,8 @@ impl Default for CodegenConfig {
             input_node: 0,
             output_node: 0,
             include_dc_op: true,
+            dc_op_max_iterations: 200,
+            dc_op_tolerance: 1e-9,
         }
     }
 }

@@ -90,21 +90,33 @@ enum Commands {
         /// Input SPICE netlist file or circuit reference
         input: String,
 
-        /// Input audio file (WAV)
-        #[arg(short, long)]
+        /// Input audio file (WAV). If omitted, generates a 1kHz sine wave.
+        #[arg(short = 'a', long)]
         input_audio: Option<PathBuf>,
 
         /// Output audio file (WAV)
         #[arg(short, long)]
         output: PathBuf,
 
-        /// Sample rate in Hz
+        /// Sample rate in Hz (used when no input audio provided)
         #[arg(short, long, default_value = "48000")]
         sample_rate: f64,
 
-        /// Duration in seconds
+        /// Input node name
+        #[arg(short = 'I', long, default_value = "in")]
+        input_node: String,
+
+        /// Output node name
+        #[arg(short = 'n', long, default_value = "out")]
+        output_node: String,
+
+        /// Duration in seconds (used when no input audio provided)
         #[arg(short, long, default_value = "1.0")]
         duration: f64,
+
+        /// Input signal amplitude (0.0 to 1.0)
+        #[arg(long, default_value = "0.5")]
+        amplitude: f64,
     },
 
     /// List available nodes in a netlist
@@ -235,11 +247,17 @@ fn main() -> Result<()> {
             input_audio,
             output,
             sample_rate,
+            input_node,
+            output_node,
             duration,
+            amplitude,
         } => {
             let circuit_source = circuits::resolve(&input)?;
             println!("Resolved circuit: {}", circuit_source.name());
-            simulate_circuit_source(&circuit_source, input_audio.as_deref(), &output, sample_rate, duration)
+            simulate_circuit_source(
+                &circuit_source, input_audio.as_deref(), &output,
+                sample_rate, &input_node, &output_node, duration, amplitude,
+            )
         }
         Commands::Nodes { input } => {
             let circuit_source = circuits::resolve(&input)?;
@@ -368,6 +386,7 @@ fn compile_circuit_source(
         tolerance,
         include_dc_op: true,
         input_resistance,   // 1Ω (near-ideal voltage source)
+        ..CodegenConfig::default()
     };
 
     let generator = CodeGenerator::new(config);
@@ -460,14 +479,316 @@ fn validate_circuit_source(
 }
 
 fn simulate_circuit_source(
-    _circuit_source: &circuits::CircuitSource,
-    _input_audio: Option<&std::path::Path>,
-    _output: &PathBuf,
-    _sample_rate: f64,
-    _duration: f64,
+    circuit_source: &circuits::CircuitSource,
+    input_audio: Option<&std::path::Path>,
+    output: &PathBuf,
+    sample_rate: f64,
+    input_node: &str,
+    output_node: &str,
+    duration: f64,
+    amplitude: f64,
 ) -> Result<()> {
-    println!("Simulation not yet implemented.");
-    println!("Use 'melange compile' to generate code, then process audio in your application.");
+    use melange_solver::{
+        dk::DkKernel,
+        mna::MnaSystem,
+        parser::Netlist,
+        solver::{CircuitSolver, DeviceEntry},
+    };
+    use melange_devices::bjt::{BjtEbersMoll, BjtPolarity};
+    use melange_devices::diode::DiodeShockley;
+
+    println!("melange simulate");
+    println!("  Source: {}", circuit_source.name());
+    println!();
+
+    // Get circuit content
+    let netlist_str = match circuit_source {
+        circuits::CircuitSource::Builtin { content, name } => {
+            println!("  Using builtin circuit: {}", name);
+            content.clone()
+        }
+        circuits::CircuitSource::Local { path } => {
+            std::fs::read_to_string(path)
+                .with_context(|| format!("Failed to read local file: {}", path.display()))?
+        }
+        circuits::CircuitSource::Url { url } | circuits::CircuitSource::Friendly { url, .. } => {
+            println!("  Fetching from URL: {}", url);
+            let cache = cache::Cache::new()?;
+            cache.get_sync(url, false)?
+        }
+    };
+
+    // Step 1: Parse netlist
+    println!("Step 1: Parsing SPICE netlist...");
+    let netlist = Netlist::parse(&netlist_str)
+        .with_context(|| "Failed to parse SPICE netlist")?;
+    println!("  Parsed {} elements", netlist.elements.len());
+
+    // Step 2: Build MNA
+    println!("Step 2: Building MNA system...");
+    let mut mna = MnaSystem::from_netlist(&netlist)
+        .with_context(|| "Failed to build MNA system")?;
+
+    let input_node_raw = mna.node_map.get(input_node).copied()
+        .ok_or_else(|| anyhow::anyhow!(
+            "Input node '{}' not found. Available: {:?}",
+            input_node, mna.node_map.keys().collect::<Vec<_>>()
+        ))?;
+    if input_node_raw == 0 {
+        anyhow::bail!("Input node cannot be ground (0)");
+    }
+    let input_node_idx = input_node_raw - 1;
+
+    let output_node_raw = mna.node_map.get(output_node).copied()
+        .ok_or_else(|| anyhow::anyhow!(
+            "Output node '{}' not found. Available: {:?}",
+            output_node, mna.node_map.keys().collect::<Vec<_>>()
+        ))?;
+    if output_node_raw == 0 {
+        anyhow::bail!("Output node cannot be ground (0)");
+    }
+    let output_node_idx = output_node_raw - 1;
+
+    // Stamp input conductance (1Ω series resistance)
+    let input_conductance = 1.0;
+    if input_node_idx < mna.n {
+        mna.g[input_node_idx][input_node_idx] += input_conductance;
+    }
+
+    println!("  {} nodes, {} nonlinear devices", mna.n, mna.nonlinear_devices.len());
+
+    // Step 3: Read input audio or generate test signal
+    let (samples, actual_sample_rate) = if let Some(audio_path) = input_audio {
+        println!("Step 3: Reading input audio: {}", audio_path.display());
+        let reader = hound::WavReader::open(audio_path)
+            .with_context(|| format!("Failed to open WAV file: {}", audio_path.display()))?;
+        let spec = reader.spec();
+        let sr = spec.sample_rate as f64;
+        let input_samples: Vec<f64> = match spec.sample_format {
+            hound::SampleFormat::Int => {
+                let max_val = (1i64 << (spec.bits_per_sample - 1)) as f64;
+                reader.into_samples::<i32>()
+                    .map(|s| s.unwrap() as f64 / max_val)
+                    .collect()
+            }
+            hound::SampleFormat::Float => {
+                reader.into_samples::<f32>()
+                    .map(|s| s.unwrap() as f64)
+                    .collect()
+            }
+        };
+        println!("  {} samples at {} Hz ({:.2}s)",
+            input_samples.len(), sr, input_samples.len() as f64 / sr);
+        (input_samples, sr)
+    } else {
+        println!("Step 3: Generating 1kHz sine wave ({:.1}s at {} Hz)...", duration, sample_rate);
+        let num_samples = (duration * sample_rate) as usize;
+        let samples: Vec<f64> = (0..num_samples)
+            .map(|i| amplitude * (2.0 * std::f64::consts::PI * 1000.0 * i as f64 / sample_rate).sin())
+            .collect();
+        (samples, sample_rate)
+    };
+
+    // Step 4: Build DK kernel
+    println!("Step 4: Building DK kernel at {} Hz...", actual_sample_rate);
+    let kernel = DkKernel::from_mna(&mna, actual_sample_rate)
+        .with_context(|| "Failed to create DK kernel")?;
+    println!("  N={}, M={}", kernel.n, kernel.m);
+
+    // Step 5: Build solver
+    println!("Step 5: Creating solver...");
+
+    // Helper: find model param
+    let find_model_param = |model_name: &str, param: &str| -> Option<f64> {
+        netlist.models.iter()
+            .find(|m| m.name.eq_ignore_ascii_case(model_name))
+            .and_then(|m| m.params.iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(param))
+                .map(|(_, v)| *v))
+    };
+
+    // Build device entries from MNA nonlinear device list
+    let mut devices = Vec::new();
+    for dev_info in &mna.nonlinear_devices {
+        match dev_info.device_type {
+            melange_solver::mna::NonlinearDeviceType::Diode => {
+                // Find model name for this diode
+                let model_name = netlist.elements.iter().find_map(|e| {
+                    if let melange_solver::parser::Element::Diode { name, model, .. } = e {
+                        if name.eq_ignore_ascii_case(&dev_info.name) { Some(model.as_str()) } else { None }
+                    } else { None }
+                }).unwrap_or("");
+                let is = find_model_param(model_name, "IS").unwrap_or(1e-15);
+                let n = find_model_param(model_name, "N").unwrap_or(1.0);
+                let diode = DiodeShockley::new_room_temp(is, n);
+                devices.push(DeviceEntry::new_diode(diode, dev_info.start_idx));
+            }
+            melange_solver::mna::NonlinearDeviceType::Bjt => {
+                let model_name = netlist.elements.iter().find_map(|e| {
+                    if let melange_solver::parser::Element::Bjt { name, model, .. } = e {
+                        if name.eq_ignore_ascii_case(&dev_info.name) { Some(model.as_str()) } else { None }
+                    } else { None }
+                }).unwrap_or("");
+                let is = find_model_param(model_name, "IS").unwrap_or(1e-14);
+                let bf = find_model_param(model_name, "BF").unwrap_or(200.0);
+                let br = find_model_param(model_name, "BR").unwrap_or(3.0);
+                // Check for PNP
+                let is_pnp = netlist.models.iter()
+                    .find(|m| m.name.eq_ignore_ascii_case(model_name))
+                    .map(|m| m.model_type.eq_ignore_ascii_case("PNP"))
+                    .unwrap_or(false);
+                let polarity = if is_pnp { BjtPolarity::Pnp } else { BjtPolarity::Npn };
+                let bjt = BjtEbersMoll::new(is, 0.02585, bf, br, polarity);
+                devices.push(DeviceEntry::new_bjt(bjt, dev_info.start_idx));
+            }
+            _ => {
+                println!("  Warning: unsupported device type for '{}', skipping", dev_info.name);
+            }
+        }
+    }
+
+    let has_nonlinear = !devices.is_empty();
+
+    if kernel.m == 0 {
+        // Linear circuit: use LinearSolver
+        let mut solver = melange_solver::solver::LinearSolver::new(
+            kernel, input_node_idx, output_node_idx,
+        );
+        solver.input_conductance = input_conductance;
+
+        println!("  Linear solver ready");
+        println!();
+
+        // Process
+        println!("Step 6: Processing {} samples...", samples.len());
+        let mut output_samples = Vec::with_capacity(samples.len());
+        for &s in &samples {
+            output_samples.push(solver.process_sample(s));
+        }
+
+        write_wav(output, actual_sample_rate, &output_samples)?;
+    } else {
+        // Nonlinear circuit: use CircuitSolver
+        let mut solver = CircuitSolver::new(
+            kernel, devices, input_node_idx, output_node_idx,
+        );
+        solver.input_conductance = input_conductance;
+
+        // Initialize DC operating point for nonlinear circuits
+        if has_nonlinear {
+            println!("  Initializing DC operating point...");
+            // Build device slots for DC OP (same as codegen IR uses)
+            let device_slots = build_device_slots(&netlist, &mna);
+            solver.initialize_dc_op(&mna, &device_slots);
+            println!("  DC OP initialized");
+        }
+
+        println!("  Nonlinear solver ready (M={})", mna.nonlinear_devices.iter().map(|d| d.dimension).sum::<usize>());
+        println!();
+
+        // Process
+        println!("Step 6: Processing {} samples...", samples.len());
+        let mut output_samples = Vec::with_capacity(samples.len());
+        for &s in &samples {
+            output_samples.push(solver.process_sample(s));
+        }
+
+        write_wav(output, actual_sample_rate, &output_samples)?;
+    }
+
+    Ok(())
+}
+
+fn build_device_slots(
+    netlist: &melange_solver::parser::Netlist,
+    mna: &melange_solver::mna::MnaSystem,
+) -> Vec<melange_solver::codegen::ir::DeviceSlot> {
+    use melange_solver::codegen::ir::{DeviceSlot, DeviceType, DeviceParams, DiodeParams, BjtParams};
+
+    let find_param = |model_name: &str, param: &str| -> Option<f64> {
+        netlist.models.iter()
+            .find(|m| m.name.eq_ignore_ascii_case(model_name))
+            .and_then(|m| m.params.iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(param))
+                .map(|(_, v)| *v))
+    };
+
+    let mut slots = Vec::new();
+    for dev_info in &mna.nonlinear_devices {
+        match dev_info.device_type {
+            melange_solver::mna::NonlinearDeviceType::Diode => {
+                let model_name = netlist.elements.iter().find_map(|e| {
+                    if let melange_solver::parser::Element::Diode { name, model, .. } = e {
+                        if name.eq_ignore_ascii_case(&dev_info.name) { Some(model.clone()) } else { None }
+                    } else { None }
+                }).unwrap_or_default();
+                let is = find_param(&model_name, "IS").unwrap_or(1e-15);
+                let n = find_param(&model_name, "N").unwrap_or(1.0);
+                slots.push(DeviceSlot {
+                    device_type: DeviceType::Diode,
+                    start_idx: dev_info.start_idx,
+                    dimension: 1,
+                    params: DeviceParams::Diode(DiodeParams { is, n_vt: n * 0.02585 }),
+                });
+            }
+            melange_solver::mna::NonlinearDeviceType::Bjt => {
+                let model_name = netlist.elements.iter().find_map(|e| {
+                    if let melange_solver::parser::Element::Bjt { name, model, .. } = e {
+                        if name.eq_ignore_ascii_case(&dev_info.name) { Some(model.clone()) } else { None }
+                    } else { None }
+                }).unwrap_or_default();
+                let is = find_param(&model_name, "IS").unwrap_or(1e-14);
+                let bf = find_param(&model_name, "BF").unwrap_or(200.0);
+                let br = find_param(&model_name, "BR").unwrap_or(3.0);
+                let is_pnp = netlist.models.iter()
+                    .find(|m| m.name.eq_ignore_ascii_case(&model_name))
+                    .map(|m| m.model_type.eq_ignore_ascii_case("PNP"))
+                    .unwrap_or(false);
+                slots.push(DeviceSlot {
+                    device_type: DeviceType::Bjt,
+                    start_idx: dev_info.start_idx,
+                    dimension: 2,
+                    params: DeviceParams::Bjt(BjtParams {
+                        is,
+                        vt: 0.02585,
+                        beta_f: bf,
+                        beta_r: br,
+                        is_pnp,
+                    }),
+                });
+            }
+            _ => {}
+        }
+    }
+    slots
+}
+
+fn write_wav(output: &PathBuf, sample_rate: f64, samples: &[f64]) -> Result<()> {
+    let spec = hound::WavSpec {
+        channels: 1,
+        sample_rate: sample_rate as u32,
+        bits_per_sample: 32,
+        sample_format: hound::SampleFormat::Float,
+    };
+    let mut writer = hound::WavWriter::create(output, spec)
+        .with_context(|| format!("Failed to create WAV file: {}", output.display()))?;
+
+    let mut peak = 0.0f64;
+    for &s in samples {
+        peak = peak.max(s.abs());
+        writer.write_sample(s as f32)
+            .with_context(|| "Failed to write WAV sample")?;
+    }
+    writer.finalize()
+        .with_context(|| "Failed to finalize WAV file")?;
+
+    println!();
+    println!("Output written to: {}", output.display());
+    println!("  Samples: {}", samples.len());
+    println!("  Duration: {:.2}s", samples.len() as f64 / sample_rate);
+    println!("  Peak level: {:.4} ({:.1} dB)",
+        peak, if peak > 0.0 { 20.0 * peak.log10() } else { f64::NEG_INFINITY });
+
     Ok(())
 }
 
