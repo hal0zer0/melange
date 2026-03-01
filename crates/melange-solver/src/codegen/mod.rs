@@ -56,7 +56,7 @@ impl Default for CodegenConfig {
         Self {
             circuit_name: "unnamed_circuit".to_string(),
             sample_rate: 44100.0,
-            max_iterations: 20,
+            max_iterations: 100,
             tolerance: 1e-9,
             input_resistance: 1.0, // 1Ω default (near-ideal voltage source)
             input_node: 0,
@@ -172,7 +172,7 @@ mod tests {
     fn test_codegen_config_default() {
         let config = CodegenConfig::default();
         assert_eq!(config.sample_rate, 44100.0);
-        assert_eq!(config.max_iterations, 20);
+        assert_eq!(config.max_iterations, 100);
         assert!(config.tolerance > 0.0);
     }
 }

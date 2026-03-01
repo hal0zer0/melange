@@ -191,25 +191,25 @@ impl DeviceEntry {
 
     /// Compute the conductance (∂I/∂V) for a 1D device.
     ///
-    /// Panics if called on a 2D device.
+    /// Returns 0.0 if called on a 2D device (safe no-op for audio).
     pub fn conductance_1d(&self, v: f64) -> f64 {
         match self {
             DeviceEntry::Diode { device, .. } => device.conductance_at(v),
             DeviceEntry::DiodeWithRs { device, .. } => device.conductance_at(v),
             DeviceEntry::Led { device, .. } => device.jacobian(&[v])[0],
-            DeviceEntry::Bjt { .. } => panic!("conductance_1d called on 2D device"),
+            DeviceEntry::Bjt { .. } => 0.0,
         }
     }
 
     /// Compute current for a 1D device.
     ///
-    /// Panics if called on a 2D device.
+    /// Returns 0.0 if called on a 2D device (safe no-op for audio).
     pub fn current_1d(&self, v: f64) -> f64 {
         match self {
             DeviceEntry::Diode { device, .. } => device.current_at(v),
             DeviceEntry::DiodeWithRs { device, .. } => device.current_at(v),
             DeviceEntry::Led { device, .. } => device.current(&[v]),
-            DeviceEntry::Bjt { .. } => panic!("current_1d called on 2D device"),
+            DeviceEntry::Bjt { .. } => 0.0,
         }
     }
 

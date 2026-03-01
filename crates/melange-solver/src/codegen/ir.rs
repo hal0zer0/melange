@@ -218,7 +218,7 @@ impl CircuitIR {
         let n = kernel.n;
         let m = kernel.m;
 
-        if m > 8 {
+        if m > crate::dk::MAX_M {
             return Err(CodegenError::UnsupportedTopology(format!(
                 "code generation supports at most M=8 nonlinear dimensions, got M={}", m
             )));

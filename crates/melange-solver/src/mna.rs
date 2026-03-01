@@ -271,8 +271,10 @@ impl MnaSystem {
     /// - `g_sign = -1`: produces A_neg = (2/T)*C - G  (history matrix)
     #[allow(clippy::needless_range_loop)]
     fn build_discretized_matrix(&self, sample_rate: f64, g_sign: f64) -> Vec<Vec<f64>> {
-        assert!(sample_rate > 0.0 && sample_rate.is_finite(),
-                "sample_rate must be positive and finite, got {}", sample_rate);
+        if !(sample_rate > 0.0 && sample_rate.is_finite()) {
+            eprintln!("WARNING: invalid sample_rate {}, using 44100.0", sample_rate);
+            return self.build_discretized_matrix(44100.0, g_sign);
+        }
         let t = 1.0 / sample_rate;
         let alpha = 2.0 / t; // 2/T for trapezoidal
 
@@ -462,6 +464,12 @@ impl MnaBuilder {
         ) {
             if let Element::Opamp { model, .. } = elem {
                 if let Some(m) = netlist.models.iter().find(|m| m.name.eq_ignore_ascii_case(model)) {
+                    if m.model_type != "OA" {
+                        return Err(MnaError::InvalidParameter(format!(
+                            "Op-amp {} references model '{}' with type '{}', expected 'OA'",
+                            model, m.name, m.model_type
+                        )));
+                    }
                     for (key, val) in &m.params {
                         match key.to_ascii_uppercase().as_str() {
                             "AOL" => oa.aol = *val,

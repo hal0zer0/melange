@@ -191,7 +191,12 @@ impl CircuitState {
             stamp_conductance(&mut a, IND_{{ loop.index0 }}_NODE_I, IND_{{ loop.index0 }}_NODE_J, g_eq);
             stamp_conductance(&mut a_neg, IND_{{ loop.index0 }}_NODE_I, IND_{{ loop.index0 }}_NODE_J, -g_eq);
         }
-{% endfor %}{% endif %}
+{% endfor %}
+        // Reset inductor transient state (old g_eq is incompatible with new rate)
+        self.ind_i_prev = [0.0; {{ num_inductors }}];
+        self.ind_v_prev = [0.0; {{ num_inductors }}];
+        self.ind_i_hist = [0.0; {{ num_inductors }}];
+{% endif %}
 
         // Invert A to get S
         let s = invert_n(a);

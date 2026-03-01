@@ -1044,6 +1044,8 @@ fn assert_ir_matrices_close(a: &CircuitIR, b: &CircuitIR) {
     assert_vecs_close(&a.matrices.n_v, &b.matrices.n_v, "N_v");
     assert_vecs_close(&a.matrices.n_i, &b.matrices.n_i, "N_i");
     assert_vecs_close(&a.matrices.rhs_const, &b.matrices.rhs_const, "rhs_const");
+    assert_vecs_close(&a.matrices.g_matrix, &b.matrices.g_matrix, "G");
+    assert_vecs_close(&a.matrices.c_matrix, &b.matrices.c_matrix, "C");
     assert_vecs_close(&a.dc_operating_point, &b.dc_operating_point, "DC OP");
 }
 
@@ -1121,6 +1123,21 @@ fn test_ir_fields_match_kernel() {
     assert_eq!(ir.matrices.n_v, kernel.n_v);
     assert_eq!(ir.matrices.n_i, kernel.n_i);
     assert_eq!(ir.matrices.rhs_const, kernel.rhs_const);
+
+    // G and C matrices match MNA source (flattened row-major)
+    let n = kernel.n;
+    for i in 0..n {
+        for j in 0..n {
+            assert_eq!(
+                ir.g(i, j), mna.g[i][j],
+                "G[{}][{}] mismatch: IR={} vs MNA={}", i, j, ir.g(i, j), mna.g[i][j]
+            );
+            assert_eq!(
+                ir.c(i, j), mna.c[i][j],
+                "C[{}][{}] mismatch: IR={} vs MNA={}", i, j, ir.c(i, j), mna.c[i][j]
+            );
+        }
+    }
 
     // Config
     assert_eq!(ir.solver_config.sample_rate, 44100.0);
@@ -2230,6 +2247,178 @@ C1 out 0 1u
         "Inductance should be 10mH = 0.01H, got {}",
         ir.inductors[0].inductance
     );
+}
+
+/// Verify that set_sample_rate works for a circuit with a potentiometer.
+/// SM vectors (su, usu, nv_su, u_ni) must be recomputed for the new rate.
+#[test]
+fn test_pot_circuit_set_sample_rate_compiles_and_runs() {
+    let pot_spice = "\
+Pot SR Test
+R1 in out 10k
+D1 out 0 D1N4148
+C1 out 0 100n
+.model D1N4148 D(IS=1e-15)
+.pot R1 1k 100k
+";
+    let (netlist, mna, kernel) = build_pipeline(pot_spice);
+    let codegen = CodeGenerator::new(default_config());
+    let result = codegen.generate(&kernel, &mna, &netlist).expect("codegen failed");
+
+    let test_harness = format!(
+        "{}\n\
+         fn main() {{\n\
+             let mut state = CircuitState::default();\n\
+             let mut state2 = CircuitState::default();\n\
+             state2.set_sample_rate(96000.0);\n\
+             \n\
+             // SM vectors should differ from defaults at a different rate\n\
+             let mut su_matches = true;\n\
+             for i in 0..N {{\n\
+                 if (state2.pot_0_su[i] - state.pot_0_su[i]).abs() > 1e-15 {{\n\
+                     su_matches = false;\n\
+                 }}\n\
+             }}\n\
+             assert!(!su_matches, \"pot_0_su at 96kHz should differ from 44.1kHz defaults\");\n\
+             assert!(\n\
+                 (state2.pot_0_usu - state.pot_0_usu).abs() > 1e-15,\n\
+                 \"pot_0_usu at 96kHz should differ from default\"\n\
+             );\n\
+             \n\
+             // Process a 1kHz sine wave at both rates and compare\n\
+             // The RC filter response differs between 44.1kHz and 96kHz\n\
+             let mut sum_sq_diff = 0.0f64;\n\
+             for i in 0..200 {{\n\
+                 let t1 = i as f64 / 44100.0;\n\
+                 let t2 = i as f64 / 96000.0;\n\
+                 let in1 = (2.0 * std::f64::consts::PI * 1000.0 * t1).sin();\n\
+                 let in2 = (2.0 * std::f64::consts::PI * 1000.0 * t2).sin();\n\
+                 let out1 = process_sample(in1, &mut state);\n\
+                 let out2 = process_sample(in2, &mut state2);\n\
+                 assert!(out1.is_finite(), \"Output at 44.1kHz should be finite\");\n\
+                 assert!(out2.is_finite(), \"Output at 96kHz should be finite\");\n\
+                 sum_sq_diff += (out1 - out2).powi(2);\n\
+             }}\n\
+             let rms_diff = (sum_sq_diff / 200.0).sqrt();\n\
+             assert!(\n\
+                 rms_diff > 1e-10,\n\
+                 \"Different sample rates should produce different output (rms_diff={{}})\",\n\
+                 rms_diff\n\
+             );\n\
+             eprintln!(\"pot set_sample_rate test passed! rms_diff={{}}\", rms_diff);\n\
+         }}\n",
+        result.code
+    );
+
+    let path = std::path::Path::new("/tmp/melange_pot_sr_test.rs");
+    let mut f = std::fs::File::create(path).expect("create temp file");
+    f.write_all(test_harness.as_bytes()).expect("write temp file");
+
+    let output = std::process::Command::new("rustc")
+        .args([path.to_str().unwrap(), "-o", "/tmp/melange_pot_sr_test", "--edition", "2021"])
+        .output()
+        .expect("run rustc");
+
+    if !output.status.success() {
+        panic!("Pot set_sample_rate test failed to compile:\n{}", String::from_utf8_lossy(&output.stderr));
+    }
+
+    let run_output = std::process::Command::new("/tmp/melange_pot_sr_test").output().expect("run test");
+    if !run_output.status.success() {
+        panic!("Pot set_sample_rate test failed:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&run_output.stdout), String::from_utf8_lossy(&run_output.stderr));
+    }
+}
+
+/// Verify that set_sample_rate works for a circuit with an inductor.
+/// ind_g_eq must be recomputed for the new rate.
+#[test]
+fn test_inductor_circuit_set_sample_rate_compiles_and_runs() {
+    let ind_spice = "\
+Inductor SR Test
+R1 in out 1k
+L1 out 0 10m
+C1 out 0 1u
+";
+    let (netlist, mna, kernel) = build_pipeline(ind_spice);
+    let config = CodegenConfig {
+        circuit_name: "ind_sr_test".to_string(),
+        sample_rate: 44100.0,
+        input_node: 0,
+        output_node: 1,
+        input_resistance: 1000.0,
+        ..CodegenConfig::default()
+    };
+    let codegen = CodeGenerator::new(config);
+    let result = codegen.generate(&kernel, &mna, &netlist).expect("codegen failed");
+
+    let test_harness = format!(
+        "{}\n\
+         fn main() {{\n\
+             let mut state = CircuitState::default();\n\
+             let default_g_eq = state.ind_g_eq[0];\n\
+             \n\
+             // Switch to 96kHz — g_eq = T/(2L) should change\n\
+             state.set_sample_rate(96000.0);\n\
+             let new_g_eq = state.ind_g_eq[0];\n\
+             \n\
+             // g_eq = T/(2*L) = 1/(2*sr*L), so at 96kHz it should be smaller\n\
+             assert!(\n\
+                 (default_g_eq - new_g_eq).abs() > 1e-10,\n\
+                 \"ind_g_eq should change with sample rate: default={{}} vs 96k={{}}\",\n\
+                 default_g_eq, new_g_eq\n\
+             );\n\
+             assert!(\n\
+                 new_g_eq < default_g_eq,\n\
+                 \"g_eq at 96kHz should be smaller (shorter T): {{}} < {{}}\",\n\
+                 new_g_eq, default_g_eq\n\
+             );\n\
+             \n\
+             // Process samples and verify finite output\n\
+             let mut outputs = Vec::new();\n\
+             for i in 0..200 {{\n\
+                 let t = i as f64 / 96000.0;\n\
+                 let input = (2.0 * std::f64::consts::PI * 1000.0 * t).sin();\n\
+                 outputs.push(process_sample(input, &mut state));\n\
+             }}\n\
+             assert!(outputs.iter().all(|v| v.is_finite()), \"All outputs should be finite\");\n\
+             let max_out = outputs.iter().cloned().fold(0.0f64, f64::max);\n\
+             assert!(max_out > 1e-6, \"Inductor circuit should produce output\");\n\
+             \n\
+             // S matrix should also differ from default\n\
+             let mut s_matches = true;\n\
+             for i in 0..N {{\n\
+                 for j in 0..N {{\n\
+                     if (state.s[i][j] - S_DEFAULT[i][j]).abs() > 1e-15 {{\n\
+                         s_matches = false;\n\
+                     }}\n\
+                 }}\n\
+             }}\n\
+             assert!(!s_matches, \"S at 96kHz should differ from S_DEFAULT\");\n\
+             \n\
+             eprintln!(\"inductor set_sample_rate test passed!\");\n\
+         }}\n",
+        result.code
+    );
+
+    let path = std::path::Path::new("/tmp/melange_ind_sr_test.rs");
+    let mut f = std::fs::File::create(path).expect("create temp file");
+    f.write_all(test_harness.as_bytes()).expect("write temp file");
+
+    let output = std::process::Command::new("rustc")
+        .args([path.to_str().unwrap(), "-o", "/tmp/melange_ind_sr_test", "--edition", "2021"])
+        .output()
+        .expect("run rustc");
+
+    if !output.status.success() {
+        panic!("Inductor set_sample_rate test failed to compile:\n{}", String::from_utf8_lossy(&output.stderr));
+    }
+
+    let run_output = std::process::Command::new("/tmp/melange_ind_sr_test").output().expect("run test");
+    if !run_output.status.success() {
+        panic!("Inductor set_sample_rate test failed:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&run_output.stdout), String::from_utf8_lossy(&run_output.stderr));
+    }
 }
 
 // ==========================================================================

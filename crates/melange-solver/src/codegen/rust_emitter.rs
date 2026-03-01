@@ -4,7 +4,7 @@
 //! All matrices are emitted as compile-time constants and loops are unrolled.
 //!
 //! Uses Tera templates for declarative sections and procedural code for the
-//! complex NR solver (deeply conditional M=1/2/3/4 branching).
+//! complex NR solver (deeply conditional M=1/2/3..8 branching).
 
 use serde::Serialize;
 use tera::{Context, Tera};
@@ -969,7 +969,7 @@ impl RustEmitter {
         Ok(())
     }
 
-    /// Generate inline Gaussian elimination for M=3 or M=4.
+    /// Generate inline Gaussian elimination for M=3..=8.
     fn generate_gauss_elim(code: &mut String, dim: usize) {
         code.push_str(&format!(
             "        // Solve {dim}x{dim} system via inline Gaussian elimination\n"
