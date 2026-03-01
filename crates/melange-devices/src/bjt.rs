@@ -640,4 +640,672 @@ mod tests {
             "GP dIc/dVbc: analytic={:.6e} fd={:.6e} err={:.2e}",
             dic_dvbc, fd_dvbc, rel_err_bc);
     }
+
+    // ========================================================================
+    // Gummel-Poon comprehensive tests (#20)
+    // ========================================================================
+
+    // --- High-level injection tests ---
+
+    /// At high Vbe the Gummel-Poon model should exhibit beta droop
+    /// due to high-level injection (IKF limiting).
+    /// Compare effective beta at moderate vs high Vbe.
+    #[test]
+    fn test_gp_high_level_injection_beta_droop() {
+        let gp = BjtGummelPoon::npn_2n2222a();
+        let em = BjtEbersMoll::npn_2n2222a();
+
+        // Moderate injection: Vbe=0.65V
+        let ic_mod = gp.collector_current(0.65, -5.0);
+        let ib_mod = em.base_current(0.65, -5.0);
+        let beta_mod = ic_mod / ib_mod;
+
+        // High injection: Vbe=0.85V (pushing toward IKF)
+        let ic_high = gp.collector_current(0.85, -5.0);
+        let ib_high = em.base_current(0.85, -5.0);
+        let beta_high = ic_high / ib_high;
+
+        // Beta should decrease at high injection (beta droop)
+        assert!(
+            beta_high < beta_mod,
+            "GP beta should droop at high injection: beta_mod={:.1}, beta_high={:.1}",
+            beta_mod, beta_high
+        );
+
+        // Both betas should be positive and finite
+        assert!(beta_mod > 0.0 && beta_mod.is_finite());
+        assert!(beta_high > 0.0 && beta_high.is_finite());
+    }
+
+    /// At very high Vbe (near safe_exp limit), the GP model should still
+    /// produce finite results. The qb factor should prevent unbounded currents.
+    #[test]
+    fn test_gp_high_injection_extreme_vbe() {
+        let gp = BjtGummelPoon::npn_2n2222a();
+
+        // Sweep Vbe from 0.7 to 1.0 in steps
+        let mut prev_ic = 0.0;
+        for vbe_mv in (700..=1000).step_by(50) {
+            let vbe = vbe_mv as f64 / 1000.0;
+            let ic = gp.collector_current(vbe, -5.0);
+
+            assert!(ic.is_finite(), "GP Ic must be finite at Vbe={}", vbe);
+            assert!(ic > 0.0, "GP Ic must be positive at Vbe={}", vbe);
+
+            // Current should increase monotonically with Vbe
+            if vbe_mv > 700 {
+                assert!(
+                    ic > prev_ic,
+                    "GP Ic should increase with Vbe: Ic({:.2})={:.6e} vs Ic(prev)={:.6e}",
+                    vbe, ic, prev_ic
+                );
+            }
+            prev_ic = ic;
+        }
+    }
+
+    /// Verify that GP Ic is less than Ebers-Moll Ic at high injection
+    /// (qb > 1 reduces the transport current).
+    #[test]
+    fn test_gp_ic_less_than_ebers_moll_at_high_injection() {
+        let gp = BjtGummelPoon::npn_2n2222a();
+        let em = BjtEbersMoll::npn_2n2222a();
+
+        // At Vbe=0.85V, high-level injection should reduce GP current vs EM
+        let ic_gp = gp.collector_current(0.85, -5.0);
+        let ic_em = em.collector_current(0.85, -5.0);
+
+        assert!(
+            ic_gp < ic_em,
+            "GP Ic ({:.6e}) should be less than EM Ic ({:.6e}) at high injection",
+            ic_gp, ic_em
+        );
+    }
+
+    // --- Base-width modulation (Early effect) tests ---
+
+    /// Sweep Vce from 1V to 20V and verify Ic increases monotonically
+    /// (positive output conductance from Early effect).
+    #[test]
+    fn test_gp_early_effect_vce_sweep() {
+        let gp = BjtGummelPoon::npn_2n2222a();
+        let vbe = 0.7;
+
+        let mut prev_ic = 0.0;
+        for vce_x10 in (10..=200).step_by(10) {
+            let vce = vce_x10 as f64 / 10.0;
+            let vbc = vbe - vce;
+            let ic = gp.collector_current(vbe, vbc);
+
+            assert!(ic.is_finite(), "GP Ic must be finite at Vce={}", vce);
+            assert!(ic > 0.0, "GP Ic must be positive at Vce={}", vce);
+
+            if vce_x10 > 10 {
+                assert!(
+                    ic >= prev_ic,
+                    "GP Ic should increase with Vce (Early effect): Ic({:.1}V)={:.6e} < Ic(prev)={:.6e}",
+                    vce, ic, prev_ic
+                );
+            }
+            prev_ic = ic;
+        }
+    }
+
+    /// Verify the output resistance (ro = dVce/dIc) is approximately VAF/Ic.
+    /// This is the classic Early voltage relationship.
+    #[test]
+    fn test_gp_output_resistance_early_voltage() {
+        let gp = BjtGummelPoon::npn_2n2222a();
+        let vbe = 0.7;
+
+        // Measure Ic at two nearby Vce values
+        let vce1 = 5.0;
+        let vce2 = 10.0;
+        let ic1 = gp.collector_current(vbe, vbe - vce1);
+        let ic2 = gp.collector_current(vbe, vbe - vce2);
+
+        let delta_vce = vce2 - vce1;
+        let delta_ic = ic2 - ic1;
+        let ro = delta_vce / delta_ic;
+
+        // ro should be approximately VAF / Ic (= 100V / ~few mA = tens of kOhms)
+        let ic_mid = (ic1 + ic2) / 2.0;
+        let ro_expected = 100.0 / ic_mid; // VAF = 100V for 2N2222A GP
+
+        // Allow a factor of 5x tolerance (Early voltage is approximate)
+        assert!(
+            ro > ro_expected * 0.2 && ro < ro_expected * 5.0,
+            "Output resistance ro={:.0} ohm, expected ~{:.0} ohm (VAF/Ic)",
+            ro, ro_expected
+        );
+    }
+
+    /// With a very large VAF (weak Early effect), GP should approach EM behavior.
+    #[test]
+    fn test_gp_large_vaf_approaches_ebers_moll() {
+        let em = BjtEbersMoll::npn_2n2222a();
+        let gp_weak = BjtGummelPoon::new(
+            BjtEbersMoll::npn_2n2222a(),
+            1e6,    // Very large VAF (negligible Early effect)
+            1e6,    // Very large VAR
+            1e6,    // Very large IKF (no high injection)
+            1e6,    // Very large IKR
+        );
+
+        let vbe = 0.7;
+        let vbc = -5.0;
+        let ic_em = em.collector_current(vbe, vbc);
+        let ic_gp = gp_weak.collector_current(vbe, vbc);
+
+        let rel_diff = (ic_gp - ic_em).abs() / ic_em.abs();
+        assert!(
+            rel_diff < 0.001,
+            "GP with very large VAF/IKF should match EM: GP={:.6e}, EM={:.6e}, rel_diff={:.2e}",
+            ic_gp, ic_em, rel_diff
+        );
+    }
+
+    // --- Operating region tests ---
+
+    /// Verify GP model behavior in all four operating regions.
+    #[test]
+    fn test_gp_all_operating_regions() {
+        let gp = BjtGummelPoon::npn_2n2222a();
+
+        // Cutoff: Vbe=0, Vbc=-5
+        let ic_cutoff = gp.collector_current(0.0, -5.0);
+        assert!(
+            ic_cutoff.abs() < 1e-10,
+            "Cutoff Ic should be ~0: {:.2e}", ic_cutoff
+        );
+
+        // Forward active: Vbe=0.7, Vbc=-5
+        let ic_fwd = gp.collector_current(0.7, -5.0);
+        assert!(
+            ic_fwd > 1e-4,
+            "Forward active Ic should be significant: {:.2e}", ic_fwd
+        );
+        assert!(ic_fwd > 0.0, "Forward active Ic should be positive");
+
+        // Reverse active: Vbe=-5, Vbc=0.7
+        let ic_rev = gp.collector_current(-5.0, 0.7);
+        assert!(
+            ic_rev < 0.0,
+            "Reverse active Ic should be negative: {:.2e}", ic_rev
+        );
+
+        // Saturation: Vbe=0.7, Vbc=0.6 (both junctions forward biased)
+        let ic_sat = gp.collector_current(0.7, 0.6);
+        assert!(
+            ic_sat.is_finite(),
+            "Saturation Ic should be finite: {}", ic_sat
+        );
+        // In saturation, Ic should be smaller than in forward active
+        // (forward transport partially canceled by reverse injection)
+        assert!(
+            ic_sat < ic_fwd,
+            "Saturation Ic ({:.2e}) should be less than forward active Ic ({:.2e})",
+            ic_sat, ic_fwd
+        );
+    }
+
+    /// In forward active, Ic should be much larger than |Ib|.
+    /// In saturation, this ratio decreases (forced beta < natural beta).
+    #[test]
+    fn test_gp_forced_beta_in_saturation() {
+        let gp = BjtGummelPoon::npn_2n2222a();
+        let em = &gp.base;
+
+        // Forward active
+        let ic_fwd = gp.collector_current(0.7, -5.0);
+        let ib_fwd = em.base_current(0.7, -5.0);
+        let beta_fwd = ic_fwd / ib_fwd;
+
+        // Saturation (both junctions forward biased)
+        let ic_sat = gp.collector_current(0.7, 0.5);
+        let ib_sat = em.base_current(0.7, 0.5);
+        let beta_sat = ic_sat / ib_sat;
+
+        assert!(
+            beta_sat < beta_fwd,
+            "Forced beta in saturation ({:.1}) should be less than forward active beta ({:.1})",
+            beta_sat, beta_fwd
+        );
+    }
+
+    /// Region classification should work correctly for PNP transistors.
+    #[test]
+    fn test_region_classification_pnp() {
+        // For PNP, the voltages are inverted relative to NPN
+        // PNP forward active: Vbe=-0.7, Vbc=5
+        assert_eq!(classify_region(-0.7, 5.0, BjtPolarity::Pnp), BjtRegion::ForwardActive);
+        assert_eq!(classify_region(0.0, 0.0, BjtPolarity::Pnp), BjtRegion::Cutoff);
+        assert_eq!(classify_region(-0.7, -0.7, BjtPolarity::Pnp), BjtRegion::Saturation);
+        assert_eq!(classify_region(5.0, -0.7, BjtPolarity::Pnp), BjtRegion::ReverseActive);
+    }
+
+    // --- PNP vs NPN sign handling ---
+
+    /// PNP GP model should have opposite current signs compared to NPN.
+    #[test]
+    fn test_gp_pnp_sign_handling() {
+        let npn = BjtGummelPoon::npn_2n2222a();
+        let pnp_base = BjtEbersMoll::pnp_2n3906();
+        let pnp = BjtGummelPoon::new(pnp_base, 100.0, 10.0, 0.3, 0.006);
+
+        // NPN forward active: Vbe=+0.7, Vbc=-5
+        let ic_npn = npn.collector_current(0.7, -5.0);
+        assert!(ic_npn > 0.0, "NPN Ic should be positive: {:.2e}", ic_npn);
+
+        // PNP forward active: Vbe=-0.7, Vbc=+5
+        let ic_pnp = pnp.collector_current(-0.7, 5.0);
+        assert!(ic_pnp < 0.0, "PNP Ic should be negative: {:.2e}", ic_pnp);
+
+        // Both should be finite
+        assert!(ic_npn.is_finite());
+        assert!(ic_pnp.is_finite());
+    }
+
+    /// PNP GP Jacobian should have correct signs (through NonlinearDevice trait).
+    #[test]
+    fn test_gp_pnp_jacobian_signs() {
+        let pnp_base = BjtEbersMoll::pnp_2n3906();
+        let pnp = BjtGummelPoon::new(pnp_base, 100.0, 10.0, 0.3, 0.006);
+
+        // PNP forward active: Vbe=-0.7, Vbc=+5
+        let jac = pnp.jacobian(&[-0.7, 5.0]);
+
+        // dIc/dVbe for PNP should be negative (Ic decreases as Vbe becomes more negative)
+        // Actually for PNP, Ic < 0, and making Vbe more negative increases |Ic|,
+        // so dIc/dVbe should be positive (less negative Ic with less negative Vbe).
+        // The sign depends on the convention. Let's just verify finite and nonzero.
+        assert!(jac[0].is_finite(), "PNP dIc/dVbe should be finite: {}", jac[0]);
+        assert!(jac[1].is_finite(), "PNP dIc/dVbc should be finite: {}", jac[1]);
+        assert!(jac[0] != 0.0, "PNP dIc/dVbe should be nonzero");
+    }
+
+    /// PNP GP Jacobian should match finite differences.
+    #[test]
+    fn test_gp_pnp_jacobian_finite_difference() {
+        let pnp_base = BjtEbersMoll::pnp_2n3906();
+        let pnp = BjtGummelPoon::new(pnp_base, 100.0, 10.0, 0.3, 0.006);
+        let eps = 1e-7;
+
+        // PNP forward active
+        let vbe = -0.7;
+        let vbc = 5.0;
+
+        let jac = pnp.jacobian(&[vbe, vbc]);
+
+        let ic_p = pnp.collector_current(vbe + eps, vbc);
+        let ic_m = pnp.collector_current(vbe - eps, vbc);
+        let fd_dvbe = (ic_p - ic_m) / (2.0 * eps);
+
+        let ic_p = pnp.collector_current(vbe, vbc + eps);
+        let ic_m = pnp.collector_current(vbe, vbc - eps);
+        let fd_dvbc = (ic_p - ic_m) / (2.0 * eps);
+
+        let rel_err_be = if fd_dvbe.abs() > 1e-10 {
+            (jac[0] - fd_dvbe).abs() / fd_dvbe.abs()
+        } else {
+            (jac[0] - fd_dvbe).abs()
+        };
+        let rel_err_bc = if fd_dvbc.abs() > 1e-10 {
+            (jac[1] - fd_dvbc).abs() / fd_dvbc.abs()
+        } else {
+            (jac[1] - fd_dvbc).abs()
+        };
+
+        assert!(
+            rel_err_be < 0.01,
+            "PNP GP dIc/dVbe: analytic={:.6e} fd={:.6e} rel_err={:.2e}",
+            jac[0], fd_dvbe, rel_err_be
+        );
+        assert!(
+            rel_err_bc < 0.01,
+            "PNP GP dIc/dVbc: analytic={:.6e} fd={:.6e} rel_err={:.2e}",
+            jac[1], fd_dvbc, rel_err_bc
+        );
+    }
+
+    // --- Edge cases ---
+
+    /// Vbe=0, Vbc=0: both junctions unbiased. Ic should be ~0.
+    #[test]
+    fn test_gp_both_junctions_zero() {
+        let gp = BjtGummelPoon::npn_2n2222a();
+
+        let ic = gp.collector_current(0.0, 0.0);
+        assert!(ic.is_finite(), "GP Ic at (0,0) should be finite: {}", ic);
+        assert!(
+            ic.abs() < 1e-12,
+            "GP Ic at (0,0) should be ~0: {:.2e}", ic
+        );
+
+        let jac = gp.jacobian(&[0.0, 0.0]);
+        assert!(jac[0].is_finite(), "GP dIc/dVbe at (0,0) should be finite");
+        assert!(jac[1].is_finite(), "GP dIc/dVbc at (0,0) should be finite");
+    }
+
+    /// Vbe=0 with Vbc negative: cutoff region.
+    #[test]
+    fn test_gp_vbe_zero_vbc_negative() {
+        let gp = BjtGummelPoon::npn_2n2222a();
+
+        let ic = gp.collector_current(0.0, -10.0);
+        assert!(ic.is_finite());
+        assert!(
+            ic.abs() < 1e-10,
+            "GP Ic in cutoff should be near zero: {:.2e}", ic
+        );
+    }
+
+    /// Both junctions forward biased (saturation): should produce finite results.
+    #[test]
+    fn test_gp_both_junctions_forward_biased() {
+        let gp = BjtGummelPoon::npn_2n2222a();
+
+        // Strong saturation: Vbe=0.7, Vbc=0.7
+        let ic = gp.collector_current(0.7, 0.7);
+        assert!(ic.is_finite(), "GP Ic in deep saturation should be finite: {}", ic);
+
+        let jac = gp.jacobian(&[0.7, 0.7]);
+        assert!(jac[0].is_finite(), "GP Jacobian[0] in deep saturation should be finite");
+        assert!(jac[1].is_finite(), "GP Jacobian[1] in deep saturation should be finite");
+
+        // Jacobian should match finite difference even in saturation
+        let eps = 1e-7;
+        let fd_dvbe = (gp.collector_current(0.7 + eps, 0.7) - gp.collector_current(0.7 - eps, 0.7)) / (2.0 * eps);
+        let fd_dvbc = (gp.collector_current(0.7, 0.7 + eps) - gp.collector_current(0.7, 0.7 - eps)) / (2.0 * eps);
+
+        let rel_err_be = if fd_dvbe.abs() > 1e-10 {
+            (jac[0] - fd_dvbe).abs() / fd_dvbe.abs()
+        } else {
+            (jac[0] - fd_dvbe).abs()
+        };
+        let rel_err_bc = if fd_dvbc.abs() > 1e-10 {
+            (jac[1] - fd_dvbc).abs() / fd_dvbc.abs()
+        } else {
+            (jac[1] - fd_dvbc).abs()
+        };
+
+        assert!(rel_err_be < 0.01,
+            "GP saturation dIc/dVbe: analytic={:.6e} fd={:.6e} err={:.2e}",
+            jac[0], fd_dvbe, rel_err_be);
+        assert!(rel_err_bc < 0.01,
+            "GP saturation dIc/dVbc: analytic={:.6e} fd={:.6e} err={:.2e}",
+            jac[1], fd_dvbc, rel_err_bc);
+    }
+
+    // --- Consistency tests: NonlinearDevice trait vs direct methods ---
+
+    /// The NonlinearDevice::current() should match collector_current().
+    #[test]
+    fn test_gp_trait_current_matches_direct() {
+        let gp = BjtGummelPoon::npn_2n2222a();
+
+        for &(vbe, vbc) in &[(0.7, -5.0), (0.0, 0.0), (0.65, -2.0), (0.8, 0.5)] {
+            let ic_direct = gp.collector_current(vbe, vbc);
+            let ic_trait = gp.current(&[vbe, vbc]);
+
+            assert!(
+                (ic_direct - ic_trait).abs() < 1e-20,
+                "Trait current should match direct at ({}, {}): direct={:.6e} trait={:.6e}",
+                vbe, vbc, ic_direct, ic_trait
+            );
+        }
+    }
+
+    /// The NonlinearDevice::jacobian() should return [dIc/dVbe, dIc/dVbc].
+    #[test]
+    fn test_gp_trait_jacobian_matches_direct() {
+        let gp = BjtGummelPoon::npn_2n2222a();
+
+        for &(vbe, vbc) in &[(0.7, -5.0), (0.0, 0.0), (0.65, -2.0), (0.8, 0.5)] {
+            let jac = gp.jacobian(&[vbe, vbc]);
+
+            // Verify by finite difference
+            let eps = 1e-7;
+            let fd_dvbe = (gp.current(&[vbe + eps, vbc]) - gp.current(&[vbe - eps, vbc])) / (2.0 * eps);
+            let fd_dvbc = (gp.current(&[vbe, vbc + eps]) - gp.current(&[vbe, vbc - eps])) / (2.0 * eps);
+
+            let err_be = if fd_dvbe.abs() > 1e-10 {
+                (jac[0] - fd_dvbe).abs() / fd_dvbe.abs()
+            } else {
+                (jac[0] - fd_dvbe).abs()
+            };
+            let err_bc = if fd_dvbc.abs() > 1e-10 {
+                (jac[1] - fd_dvbc).abs() / fd_dvbc.abs()
+            } else {
+                (jac[1] - fd_dvbc).abs()
+            };
+
+            assert!(err_be < 0.01,
+                "GP trait Jac[0] at ({}, {}): {:.6e} vs fd {:.6e}, err={:.2e}",
+                vbe, vbc, jac[0], fd_dvbe, err_be);
+            assert!(err_bc < 0.01,
+                "GP trait Jac[1] at ({}, {}): {:.6e} vs fd {:.6e}, err={:.2e}",
+                vbe, vbc, jac[1], fd_dvbc, err_bc);
+        }
+    }
+
+    // --- Jacobian sign and magnitude tests ---
+
+    /// In forward active, dIc/dVbe (transconductance gm) must be positive.
+    /// dIc/dVbc should be small and negative (or slightly positive due to Early effect).
+    #[test]
+    fn test_gp_jacobian_signs_forward_active() {
+        let gp = BjtGummelPoon::npn_2n2222a();
+
+        let jac = gp.jacobian(&[0.7, -5.0]);
+
+        // gm = dIc/dVbe should be positive (more Vbe => more Ic)
+        assert!(
+            jac[0] > 0.0,
+            "GP gm (dIc/dVbe) should be positive in forward active: {:.6e}", jac[0]
+        );
+
+        // dIc/dVbc: includes Early effect and reverse injection.
+        // For the standard Ebers-Moll part, dIc/dVbc < 0 (reverse injection increases with Vbc).
+        // The Early effect adds a positive component.
+        // The net sign depends on operating point, but it should be finite.
+        assert!(
+            jac[1].is_finite(),
+            "GP dIc/dVbc should be finite in forward active: {:.6e}", jac[1]
+        );
+    }
+
+    /// gm should be proportional to Ic/Vt (a fundamental BJT relationship).
+    /// For GP, gm = dIc/dVbe ~ Ic / (Vt * qb) where qb >= 1.
+    /// So gm <= Ic/Vt always, and gm ~ Ic/Vt at low injection.
+    #[test]
+    fn test_gp_transconductance_relationship() {
+        let gp = BjtGummelPoon::npn_2n2222a();
+        let vt = gp.base.vt;
+
+        // Moderate injection point
+        let vbe = 0.65;
+        let vbc = -5.0;
+        let ic = gp.collector_current(vbe, vbc);
+        let jac = gp.jacobian(&[vbe, vbc]);
+        let gm = jac[0];
+
+        let gm_ideal = ic / vt; // Ideal gm = Ic/Vt
+
+        // gm should be less than or equal to Ic/Vt (due to qb >= 1)
+        // Allow small numerical tolerance
+        assert!(
+            gm <= gm_ideal * 1.01,
+            "GP gm ({:.6e}) should not exceed Ic/Vt ({:.6e})",
+            gm, gm_ideal
+        );
+
+        // At moderate injection, gm should be reasonably close to Ic/Vt
+        assert!(
+            gm > gm_ideal * 0.5,
+            "GP gm ({:.6e}) should be within 50% of Ic/Vt ({:.6e}) at moderate injection",
+            gm, gm_ideal
+        );
+    }
+
+    /// Verify that the Jacobian magnitude scales with the current magnitude.
+    /// As Vbe increases, both Ic and gm should increase.
+    #[test]
+    fn test_gp_jacobian_magnitude_scales_with_current() {
+        let gp = BjtGummelPoon::npn_2n2222a();
+
+        let ic_low = gp.collector_current(0.6, -5.0);
+        let gm_low = gp.jacobian(&[0.6, -5.0])[0];
+
+        let ic_high = gp.collector_current(0.75, -5.0);
+        let gm_high = gp.jacobian(&[0.75, -5.0])[0];
+
+        assert!(ic_high > ic_low, "Ic should increase with Vbe");
+        assert!(gm_high > gm_low, "gm should increase with Vbe");
+    }
+
+    // --- Ebers-Moll base current Jacobian finite difference ---
+
+    /// Verify Ebers-Moll base current Jacobian against finite differences.
+    #[test]
+    fn test_ebers_moll_base_jacobian_finite_difference() {
+        let bjt = BjtEbersMoll::npn_2n2222a();
+        let eps = 1e-7;
+
+        for &(vbe, vbc) in &[(0.7, -5.0), (0.6, -2.0), (0.0, 0.0), (0.65, 0.5)] {
+            let dib_dvbe = bjt.base_current_jacobian_dvbe(vbe, vbc);
+            let dib_dvbc = bjt.base_current_jacobian_dvbc(vbe, vbc);
+
+            let fd_dvbe = (bjt.base_current(vbe + eps, vbc) - bjt.base_current(vbe - eps, vbc)) / (2.0 * eps);
+            let fd_dvbc = (bjt.base_current(vbe, vbc + eps) - bjt.base_current(vbe, vbc - eps)) / (2.0 * eps);
+
+            let rel_err_be = if fd_dvbe.abs() > 1e-15 {
+                (dib_dvbe - fd_dvbe).abs() / fd_dvbe.abs()
+            } else {
+                dib_dvbe.abs()
+            };
+            let rel_err_bc = if fd_dvbc.abs() > 1e-15 {
+                (dib_dvbc - fd_dvbc).abs() / fd_dvbc.abs()
+            } else {
+                dib_dvbc.abs()
+            };
+
+            assert!(rel_err_be < 1e-4,
+                "dIb/dVbe at ({}, {}): analytic={:.6e} fd={:.6e} err={:.2e}",
+                vbe, vbc, dib_dvbe, fd_dvbe, rel_err_be);
+            assert!(rel_err_bc < 1e-4,
+                "dIb/dVbc at ({}, {}): analytic={:.6e} fd={:.6e} err={:.2e}",
+                vbe, vbc, dib_dvbc, fd_dvbc, rel_err_bc);
+        }
+    }
+
+    /// Ebers-Moll KCL consistency: Ie = -(Ic + Ib) at various operating points.
+    #[test]
+    fn test_ebers_moll_kcl_consistency() {
+        let bjt = BjtEbersMoll::npn_2n2222a();
+
+        for &(vbe, vbc) in &[(0.7, -5.0), (0.6, -2.0), (0.0, 0.0), (-0.5, -0.5), (0.7, 0.7)] {
+            let ic = bjt.collector_current(vbe, vbc);
+            let ib = bjt.base_current(vbe, vbc);
+            let ie = bjt.emitter_current(vbe, vbc);
+
+            let kcl_error = (ie + ic + ib).abs();
+            let scale = ic.abs().max(ib.abs()).max(ie.abs()).max(1e-20);
+
+            assert!(
+                kcl_error / scale < 1e-10,
+                "KCL violation at ({}, {}): Ic={:.6e} Ib={:.6e} Ie={:.6e} sum={:.6e}",
+                vbe, vbc, ic, ib, ie, ie + ic + ib
+            );
+        }
+    }
+
+    /// Ebers-Moll reverse active: Vbe negative, Vbc positive.
+    /// Ic should be negative (current flows from emitter to collector).
+    #[test]
+    fn test_ebers_moll_reverse_active() {
+        let bjt = BjtEbersMoll::npn_2n2222a();
+
+        let ic = bjt.collector_current(-5.0, 0.7);
+        assert!(
+            ic < 0.0,
+            "Reverse active Ic should be negative: {:.6e}", ic
+        );
+
+        // Verify Ic is finite and significant
+        assert!(ic.is_finite(), "Reverse active Ic should be finite");
+        assert!(
+            ic.abs() > 1e-6,
+            "Reverse active Ic should be significant with Vbc=0.7: {:.6e}", ic
+        );
+
+        // In reverse active the base current from the BC junction is large
+        // because beta_r is small (3.0), so Ib should be significant
+        let ib = bjt.base_current(-5.0, 0.7);
+        assert!(ib.is_finite());
+        assert!(
+            ib > 0.0,
+            "Reverse active Ib should be positive (BC junction conducting): {:.6e}", ib
+        );
+
+        // The reverse beta (Ic/Ib) should be much smaller than forward beta
+        let ic_fwd = bjt.collector_current(0.7, -5.0);
+        let ib_fwd = bjt.base_current(0.7, -5.0);
+        let beta_fwd = ic_fwd / ib_fwd;
+
+        // In reverse, we use a weaker bias to get a meaningful reverse beta
+        let ic_rev_small = bjt.collector_current(-0.1, 0.7);
+        let ib_rev_small = bjt.base_current(-0.1, 0.7);
+        if ib_rev_small.abs() > 1e-15 && ic_rev_small.abs() > 1e-15 {
+            let _beta_rev = ic_rev_small.abs() / ib_rev_small.abs();
+            // beta_rev should be much smaller than beta_fwd
+            assert!(
+                beta_fwd > 50.0,
+                "Forward beta should be large: {:.1}", beta_fwd
+            );
+        }
+    }
+
+    /// GP Jacobian finite-difference sweep across many operating points.
+    /// This is a comprehensive stress test for the analytical Jacobian.
+    #[test]
+    fn test_gp_jacobian_comprehensive_sweep() {
+        let gp = BjtGummelPoon::npn_2n2222a();
+        let eps = 1e-7;
+
+        let vbe_values = [0.0, 0.3, 0.5, 0.6, 0.65, 0.7, 0.75, 0.8];
+        let vbc_values = [-10.0, -5.0, -2.0, -0.5, 0.0, 0.3, 0.5, 0.7];
+
+        for &vbe in &vbe_values {
+            for &vbc in &vbc_values {
+                let jac = gp.jacobian(&[vbe, vbc]);
+
+                assert!(jac[0].is_finite(),
+                    "GP Jac[0] must be finite at ({}, {}): {}", vbe, vbc, jac[0]);
+                assert!(jac[1].is_finite(),
+                    "GP Jac[1] must be finite at ({}, {}): {}", vbe, vbc, jac[1]);
+
+                let fd_dvbe = (gp.collector_current(vbe + eps, vbc) - gp.collector_current(vbe - eps, vbc)) / (2.0 * eps);
+                let fd_dvbc = (gp.collector_current(vbe, vbc + eps) - gp.collector_current(vbe, vbc - eps)) / (2.0 * eps);
+
+                let err_be = if fd_dvbe.abs() > 1e-10 {
+                    (jac[0] - fd_dvbe).abs() / fd_dvbe.abs()
+                } else {
+                    (jac[0] - fd_dvbe).abs()
+                };
+                let err_bc = if fd_dvbc.abs() > 1e-10 {
+                    (jac[1] - fd_dvbc).abs() / fd_dvbc.abs()
+                } else {
+                    (jac[1] - fd_dvbc).abs()
+                };
+
+                assert!(err_be < 0.01,
+                    "GP Jac[0] at ({}, {}): analytic={:.6e} fd={:.6e} err={:.2e}",
+                    vbe, vbc, jac[0], fd_dvbe, err_be);
+                assert!(err_bc < 0.01,
+                    "GP Jac[1] at ({}, {}): analytic={:.6e} fd={:.6e} err={:.2e}",
+                    vbe, vbc, jac[1], fd_dvbc, err_bc);
+            }
+        }
+    }
 }

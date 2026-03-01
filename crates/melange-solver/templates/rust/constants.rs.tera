@@ -9,9 +9,17 @@ pub const N: usize = {{ n }};
 pub const M: usize = {{ m }};
 
 /// Sample rate (Hz)
+///
+/// WARNING: This code was generated for a specific sample rate.
+/// Running at a different sample rate will produce incorrect results.
+/// Regenerate the code with the correct sample rate if needed.
 pub const SAMPLE_RATE: f64 = {{ sample_rate }};
 
 /// Alpha = 2/T for trapezoidal integration
+///
+/// WARNING: ALPHA is derived from SAMPLE_RATE at code generation time.
+/// All matrix constants (S, A_NEG, K) are baked in for this sample rate.
+/// Changing SAMPLE_RATE without regenerating the code will NOT update these matrices.
 pub const ALPHA: f64 = {{ alpha }};
 
 /// Input node index

@@ -252,6 +252,23 @@ impl DeviceEntry {
     }
 }
 
+/// Describes why the Newton-Raphson solver stopped iterating.
+///
+/// This is set after each call to [`CircuitSolver::process_sample`] and can be
+/// queried via [`CircuitSolver::last_convergence_reason`] to diagnose solver
+/// behavior without inspecting internal state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConvergenceReason {
+    /// Converged: all residuals fell below tolerance.
+    Residual,
+    /// Converged: maximum step size fell below tolerance.
+    StepSize,
+    /// Did not converge within the maximum number of iterations.
+    MaxIterations,
+    /// No nonlinear devices present; the system is trivially linear.
+    Linear,
+}
+
 /// Pivot threshold for detecting singular matrices in Gaussian elimination.
 const SINGULARITY_THRESHOLD: f64 = 1e-15;
 
@@ -374,6 +391,8 @@ pub struct CircuitSolver {
     pub tol: f64,
     /// Step clamp for NR
     pub clamp: f64,
+    /// Reason the NR solver stopped on the most recent sample.
+    last_convergence_reason: ConvergenceReason,
 }
 
 impl CircuitSolver {
@@ -445,7 +464,17 @@ impl CircuitSolver {
             max_iter: 100,
             tol: 1e-10,
             clamp: 0.01,
+            last_convergence_reason: if m == 0 { ConvergenceReason::Linear } else { ConvergenceReason::MaxIterations },
         }
+    }
+
+    /// Returns the convergence reason from the most recent call to
+    /// [`process_sample`](Self::process_sample).
+    ///
+    /// For linear circuits (no nonlinear devices), this always returns
+    /// [`ConvergenceReason::Linear`].
+    pub fn last_convergence_reason(&self) -> ConvergenceReason {
+        self.last_convergence_reason
     }
 
     /// Process a single sample.
@@ -469,6 +498,8 @@ impl CircuitSolver {
             } else {
                 self.solve_md();
             }
+        } else {
+            self.last_convergence_reason = ConvergenceReason::Linear;
         }
 
         self.compute_all_currents();
@@ -582,7 +613,15 @@ impl CircuitSolver {
         );
 
         // On convergence use the NR result; on failure fall back to previous for continuity
-        self.v_nl[0] = if result.converged() { v_nl } else { self.v_nl_prev[0] };
+        if result.converged() {
+            self.v_nl[0] = v_nl;
+            // nr_solve_1d checks residual before step size, so Residual is the
+            // most likely path; we cannot distinguish them from NrResult alone.
+            self.last_convergence_reason = ConvergenceReason::Residual;
+        } else {
+            self.v_nl[0] = self.v_nl_prev[0];
+            self.last_convergence_reason = ConvergenceReason::MaxIterations;
+        }
     }
 
     /// Solve two 1D nonlinear devices (2D system).
@@ -648,9 +687,11 @@ impl CircuitSolver {
         if result.converged() {
             self.v_nl[0] = v1;
             self.v_nl[1] = v2;
+            self.last_convergence_reason = ConvergenceReason::Residual;
         } else {
             self.v_nl[0] = self.v_nl_prev[0];
             self.v_nl[1] = self.v_nl_prev[1];
+            self.last_convergence_reason = ConvergenceReason::MaxIterations;
         }
     }
 
@@ -665,6 +706,9 @@ impl CircuitSolver {
 
         // Warm start from previous solution
         self.v_nl[..m].copy_from_slice(&self.v_nl_prev[..m]);
+
+        // Default: assume we'll exhaust iterations (overwritten on early exit)
+        self.last_convergence_reason = ConvergenceReason::MaxIterations;
 
         // Newton-Raphson iteration
         for _ in 0..self.max_iter {
@@ -691,6 +735,7 @@ impl CircuitSolver {
             }
 
             if converged {
+                self.last_convergence_reason = ConvergenceReason::Residual;
                 break;
             }
 
@@ -731,6 +776,7 @@ impl CircuitSolver {
                 .map(|&d| d.clamp(-self.clamp, self.clamp).abs())
                 .fold(0.0_f64, f64::max);
             if max_step < self.tol {
+                self.last_convergence_reason = ConvergenceReason::StepSize;
                 break;
             }
 
@@ -743,6 +789,7 @@ impl CircuitSolver {
             // NaN/Inf detection: if any v_nl is non-finite, restore from previous and break
             if self.v_nl[..m].iter().any(|v| !v.is_finite()) {
                 self.v_nl[..m].copy_from_slice(&self.v_nl_prev[..m]);
+                // MaxIterations is already set as the default
                 break;
             }
         }
@@ -1438,5 +1485,200 @@ C1 out 0 1u
         let solver = CircuitSolver::new(kernel, vec![], 0, 0);
         assert_eq!(solver.input_conductance, 1.0,
             "Default input_conductance should be 1.0 (1/1Ω, near-ideal voltage source)");
+    }
+
+    // ========================================================================
+    // ConvergenceReason tests
+    // ========================================================================
+
+    /// Linear circuit (no nonlinear devices) should report Linear.
+    #[test]
+    fn test_convergence_reason_linear() {
+        let spice = "RC\nR1 in 0 1k\nC1 in 0 1u\n";
+        let netlist = Netlist::parse(spice).unwrap();
+        let mna = MnaSystem::from_netlist(&netlist).unwrap();
+        let kernel = DkKernel::from_mna(&mna, 44100.0).unwrap();
+
+        // m == 0 → no nonlinear devices
+        assert_eq!(kernel.m, 0);
+
+        let mut solver = CircuitSolver::new(kernel, vec![], 0, 0);
+        solver.input_conductance = 0.001;
+
+        // Before any processing, initial reason should be Linear (m == 0)
+        assert_eq!(solver.last_convergence_reason(), ConvergenceReason::Linear);
+
+        // After processing, it should still report Linear
+        let _ = solver.process_sample(1.0);
+        assert_eq!(solver.last_convergence_reason(), ConvergenceReason::Linear);
+    }
+
+    /// Diode clipper (1D NR via solve_1d) should converge via Residual.
+    #[test]
+    fn test_convergence_reason_1d_residual() {
+        let spice = r#"Diode Clipper
+Rin in 0 1k
+D1 in out D1N4148
+C1 out 0 1u
+.model D1N4148 D(IS=1e-15)
+"#;
+        let netlist = Netlist::parse(spice).unwrap();
+        let mna = MnaSystem::from_netlist(&netlist).unwrap();
+        let kernel = DkKernel::from_mna(&mna, 44100.0).unwrap();
+
+        assert_eq!(kernel.m, 1, "Single diode should give M=1");
+
+        let diode = DiodeShockley::new_room_temp(1e-15, 1.0);
+        let devices = vec![DeviceEntry::new_diode(diode, 0)];
+        let mut solver = CircuitSolver::new(kernel, devices, 0, 1);
+        solver.input_conductance = 0.001;
+
+        // Process a small signal — should converge easily
+        let _ = solver.process_sample(0.1);
+        assert_eq!(solver.last_convergence_reason(), ConvergenceReason::Residual,
+            "1D solve with small signal should converge via residual");
+    }
+
+    /// BJT circuit (2D via solve_md) should converge and report Residual or StepSize.
+    #[test]
+    fn test_convergence_reason_md_bjt() {
+        let spice = r#"Common Emitter
+Q1 coll base emit 2N2222
+Rc coll vcc 10k
+R1 base 0 100k
+Re emit 0 1k
+Rbias vcc 0 10k
+.model 2N2222 NPN(IS=1e-15 BF=200)
+"#;
+        let netlist = Netlist::parse(spice).unwrap();
+        let mna = MnaSystem::from_netlist(&netlist).unwrap();
+        let kernel = DkKernel::from_mna(&mna, 44100.0).unwrap();
+
+        if kernel.m != 2 {
+            eprintln!("Skipping BJT convergence test: kernel.m = {}, expected 2", kernel.m);
+            return;
+        }
+
+        let bjt = BjtEbersMoll::new_room_temp(1e-15, 200.0, 3.0, melange_devices::BjtPolarity::Npn);
+        let devices = vec![DeviceEntry::new_bjt(bjt, 0)];
+        let mut solver = CircuitSolver::new(kernel, devices, 0, 0);
+        solver.input_conductance = 1.0 / 100000.0;
+
+        // Process several samples so NR has a warm start
+        for _ in 0..20 {
+            let _ = solver.process_sample(0.5);
+        }
+
+        let reason = solver.last_convergence_reason();
+        assert!(
+            reason == ConvergenceReason::Residual || reason == ConvergenceReason::StepSize,
+            "BJT solve_md should converge, got {:?}", reason
+        );
+    }
+
+    /// Two diodes (2D via solve_2d_two_1d_devices) should converge.
+    #[test]
+    fn test_convergence_reason_2d_two_diodes() {
+        let spice = r#"Antiparallel Diodes
+Rin in 0 1k
+D1 in out D_FWD
+D2 out in D_REV
+C1 out 0 1u
+.model D_FWD D(IS=1e-15)
+.model D_REV D(IS=1e-15)
+"#;
+        let netlist = Netlist::parse(spice).unwrap();
+        let mna = MnaSystem::from_netlist(&netlist).unwrap();
+        let kernel = DkKernel::from_mna(&mna, 44100.0).unwrap();
+
+        if kernel.m != 2 {
+            eprintln!("Skipping 2-diode test: kernel.m = {}, expected 2", kernel.m);
+            return;
+        }
+
+        let d1 = DiodeShockley::new_room_temp(1e-15, 1.0);
+        let d2 = DiodeShockley::new_room_temp(1e-15, 1.0);
+        let devices = vec![
+            DeviceEntry::new_diode(d1, 0),
+            DeviceEntry::new_diode(d2, 1),
+        ];
+        let mut solver = CircuitSolver::new(kernel, devices, 0, 1);
+        solver.input_conductance = 0.001;
+
+        // Process a few samples
+        for _ in 0..10 {
+            let _ = solver.process_sample(0.05);
+        }
+
+        let reason = solver.last_convergence_reason();
+        assert_eq!(reason, ConvergenceReason::Residual,
+            "Two-diode 2D solve should converge via residual, got {:?}", reason);
+    }
+
+    /// MaxIterations is reported when the solver cannot converge.
+    #[test]
+    fn test_convergence_reason_max_iterations() {
+        let spice = r#"Diode Clipper
+Rin in 0 1k
+D1 in out D1N4148
+C1 out 0 1u
+.model D1N4148 D(IS=1e-15)
+"#;
+        let netlist = Netlist::parse(spice).unwrap();
+        let mna = MnaSystem::from_netlist(&netlist).unwrap();
+        let kernel = DkKernel::from_mna(&mna, 44100.0).unwrap();
+
+        let diode = DiodeShockley::new_room_temp(1e-15, 1.0);
+        let devices = vec![DeviceEntry::new_diode(diode, 0)];
+        let mut solver = CircuitSolver::new(kernel, devices, 0, 1);
+        solver.input_conductance = 0.001;
+
+        // Set absurdly tight tolerance and very few iterations to force non-convergence
+        solver.tol = 1e-300;
+        solver.max_iter = 1;
+
+        let _ = solver.process_sample(5.0);
+        assert_eq!(solver.last_convergence_reason(), ConvergenceReason::MaxIterations,
+            "With tol=1e-300 and max_iter=1, should report MaxIterations");
+    }
+
+    /// Getter returns the reason from the most recent sample, not a stale one.
+    #[test]
+    fn test_convergence_reason_updates_each_sample() {
+        let spice = r#"Diode Clipper
+Rin in 0 1k
+D1 in out D1N4148
+C1 out 0 1u
+.model D1N4148 D(IS=1e-15)
+"#;
+        let netlist = Netlist::parse(spice).unwrap();
+        let mna = MnaSystem::from_netlist(&netlist).unwrap();
+        let kernel = DkKernel::from_mna(&mna, 44100.0).unwrap();
+
+        let diode = DiodeShockley::new_room_temp(1e-15, 1.0);
+        let devices = vec![DeviceEntry::new_diode(diode, 0)];
+        let mut solver = CircuitSolver::new(kernel, devices, 0, 1);
+        solver.input_conductance = 0.001;
+
+        // Normal convergence
+        let _ = solver.process_sample(0.1);
+        let reason1 = solver.last_convergence_reason();
+        assert_eq!(reason1, ConvergenceReason::Residual);
+
+        // Force non-convergence
+        solver.tol = 1e-300;
+        solver.max_iter = 1;
+        let _ = solver.process_sample(5.0);
+        let reason2 = solver.last_convergence_reason();
+        assert_eq!(reason2, ConvergenceReason::MaxIterations,
+            "Reason should update to MaxIterations after forced non-convergence");
+
+        // Restore normal settings — should converge again
+        solver.tol = 1e-10;
+        solver.max_iter = 100;
+        let _ = solver.process_sample(0.1);
+        let reason3 = solver.last_convergence_reason();
+        assert_eq!(reason3, ConvergenceReason::Residual,
+            "Reason should update back to Residual after restoring settings");
     }
 }

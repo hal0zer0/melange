@@ -140,3 +140,4 @@ fn test_diode_clipper_solver() {
     assert!(final_output < 1.5,
         "Diode clipper should limit output below ~1V, got {:.4}V", final_output);
 }
+

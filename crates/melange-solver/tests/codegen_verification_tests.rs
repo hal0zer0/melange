@@ -1467,3 +1467,260 @@ fn test_invalid_input_resistance_rejected() {
     let result2 = codegen2.generate(&kernel, &mna, &netlist);
     assert!(result2.is_err(), "input_resistance=-1 should be rejected");
 }
+
+// ==========================================================================
+// Test: Sample rate mismatch warning is present in generated code (#13)
+// ==========================================================================
+
+#[test]
+fn test_sample_rate_warning_present_in_generated_code() {
+    let (code, _netlist, _mna, _kernel) = generate_code(RC_CIRCUIT_SPICE);
+
+    assert!(
+        code.contains("WARNING"),
+        "Generated code should contain a WARNING comment about sample rate dependency."
+    );
+    assert!(
+        code.contains("generated for a specific sample rate"),
+        "Generated code should warn that it was generated for a specific sample rate."
+    );
+    assert!(
+        code.contains("Regenerate"),
+        "Generated code should advise users to regenerate the code if sample rate changes."
+    );
+}
+
+// ==========================================================================
+// Test: Different sample rates produce different ALPHA values (#18)
+// ==========================================================================
+
+#[test]
+fn test_different_sample_rates_produce_different_alpha() {
+    let spice = RC_CIRCUIT_SPICE;
+    let netlist = Netlist::parse(spice).expect("failed to parse netlist");
+    let mna = MnaSystem::from_netlist(&netlist).expect("failed to build MNA");
+
+    // Generate code at 44100 Hz
+    let kernel_44100 = DkKernel::from_mna(&mna, 44100.0).expect("failed to build DK kernel");
+    let config_44100 = CodegenConfig {
+        sample_rate: 44100.0,
+        ..default_config()
+    };
+    let codegen_44100 = CodeGenerator::new(config_44100);
+    let result_44100 = codegen_44100.generate(&kernel_44100, &mna, &netlist)
+        .expect("code generation at 44100 Hz failed");
+
+    // Generate code at 48000 Hz
+    let kernel_48000 = DkKernel::from_mna(&mna, 48000.0).expect("failed to build DK kernel");
+    let config_48000 = CodegenConfig {
+        sample_rate: 48000.0,
+        ..default_config()
+    };
+    let codegen_48000 = CodeGenerator::new(config_48000);
+    let result_48000 = codegen_48000.generate(&kernel_48000, &mna, &netlist)
+        .expect("code generation at 48000 Hz failed");
+
+    // ALPHA = 2 * sample_rate, so they must be different
+    let alpha_44100 = format!("{:.17e}", 2.0 * 44100.0_f64);
+    let alpha_48000 = format!("{:.17e}", 2.0 * 48000.0_f64);
+    assert_ne!(alpha_44100, alpha_48000, "ALPHA values should differ for different sample rates");
+
+    assert!(
+        result_44100.code.contains(&alpha_44100),
+        "Code generated at 44100 Hz should contain ALPHA = {}",
+        alpha_44100
+    );
+    assert!(
+        result_48000.code.contains(&alpha_48000),
+        "Code generated at 48000 Hz should contain ALPHA = {}",
+        alpha_48000
+    );
+
+    // Sample rate values should also differ
+    assert!(
+        result_44100.code.contains("SAMPLE_RATE: f64 = 44100.0"),
+        "Code generated at 44100 Hz should contain SAMPLE_RATE = 44100.0"
+    );
+    assert!(
+        result_48000.code.contains("SAMPLE_RATE: f64 = 48000.0"),
+        "Code generated at 48000 Hz should contain SAMPLE_RATE = 48000.0"
+    );
+}
+
+#[test]
+fn test_sample_rate_96000_produces_correct_alpha() {
+    let spice = RC_CIRCUIT_SPICE;
+    let netlist = Netlist::parse(spice).expect("failed to parse netlist");
+    let mna = MnaSystem::from_netlist(&netlist).expect("failed to build MNA");
+
+    let kernel = DkKernel::from_mna(&mna, 96000.0).expect("failed to build DK kernel");
+    let config = CodegenConfig {
+        sample_rate: 96000.0,
+        ..default_config()
+    };
+    let codegen = CodeGenerator::new(config);
+    let result = codegen.generate(&kernel, &mna, &netlist)
+        .expect("code generation at 96000 Hz failed");
+
+    let expected_alpha = format!("{:.17e}", 2.0 * 96000.0_f64);
+    assert!(
+        result.code.contains(&expected_alpha),
+        "Code generated at 96000 Hz should contain ALPHA = {} but it was not found.",
+        expected_alpha
+    );
+    assert!(
+        result.code.contains("SAMPLE_RATE: f64 = 96000.0"),
+        "Code generated at 96000 Hz should contain SAMPLE_RATE = 96000.0"
+    );
+}
+
+#[test]
+fn test_sample_rate_affects_s_matrix() {
+    // The S = A^-1 matrix depends on sample rate (A = G + 2/T * C).
+    // Generating at different rates must produce different S matrix entries.
+    let spice = RC_CIRCUIT_SPICE;
+    let netlist = Netlist::parse(spice).expect("failed to parse netlist");
+    let mna = MnaSystem::from_netlist(&netlist).expect("failed to build MNA");
+
+    let kernel_44100 = DkKernel::from_mna(&mna, 44100.0).expect("44100 kernel");
+    let kernel_96000 = DkKernel::from_mna(&mna, 96000.0).expect("96000 kernel");
+
+    // S matrices must differ because A = G + alpha*C depends on sample rate
+    assert_ne!(
+        kernel_44100.s, kernel_96000.s,
+        "S matrices at different sample rates should differ"
+    );
+}
+
+// ==========================================================================
+// Test: Voltage source Norton-equivalent stamping (#19)
+// ==========================================================================
+
+/// Circuit with a DC voltage source for testing voltage source stamping.
+const VS_DIVIDER_SPICE: &str = "\
+Voltage Divider with DC Source
+V1 vcc 0 DC 9
+R1 vcc out 1k
+R2 out 0 1k
+C1 out 0 100p
+";
+
+#[test]
+fn test_vs_conductance_stamps_into_g_matrix() {
+    // A voltage source uses Norton equivalent: G_vs = 1e6 S stamped in G matrix.
+    let netlist = Netlist::parse(VS_DIVIDER_SPICE).expect("failed to parse");
+    let mna = MnaSystem::from_netlist(&netlist).expect("failed to build MNA");
+
+    // VS_CONDUCTANCE should be 1e6
+    assert_eq!(
+        melange_solver::mna::VS_CONDUCTANCE, 1e6,
+        "VS_CONDUCTANCE should be 1e6"
+    );
+
+    // The voltage source is between vcc (node index) and ground (node 0).
+    // In G matrix, G[vcc_idx][vcc_idx] should include VS_CONDUCTANCE.
+    let vcc_idx = mna.node_map["vcc"] - 1; // Convert to 0-indexed matrix row
+    let g_vcc = mna.g[vcc_idx][vcc_idx];
+    assert!(
+        g_vcc >= melange_solver::mna::VS_CONDUCTANCE,
+        "G[vcc][vcc] should include VS_CONDUCTANCE (1e6), got {}",
+        g_vcc
+    );
+}
+
+#[test]
+fn test_vs_divider_dc_accuracy() {
+    // Voltage divider: V1=9V, R1=R2=1k → Vout should be ~4.5V at DC operating point.
+    // The VS_CONDUCTANCE approximation should be accurate enough.
+    let netlist = Netlist::parse(VS_DIVIDER_SPICE).expect("failed to parse");
+    let mna = MnaSystem::from_netlist(&netlist).expect("failed to build MNA");
+
+    // The voltage source info should be recorded
+    assert_eq!(mna.voltage_sources.len(), 1, "Should have 1 voltage source");
+    assert_eq!(
+        mna.voltage_sources[0].dc_value, 9.0,
+        "V1 DC value should be 9V"
+    );
+
+    // Build kernel to get rhs_const
+    let kernel = DkKernel::from_mna(&mna, 44100.0).expect("failed to build DK kernel");
+
+    // rhs_const should be non-zero since we have a DC voltage source
+    let any_nonzero = kernel.rhs_const.iter().any(|&v| v != 0.0);
+    assert!(
+        any_nonzero,
+        "rhs_const should have non-zero entries from DC voltage source"
+    );
+
+    // The Norton equivalent current is V * G_vs = 9 * 1e6 = 9e6 A,
+    // multiplied by 2 for trapezoidal rule: 2 * 9e6 = 1.8e7.
+    // This should be injected at the vcc node.
+    let vcc_idx = mna.node_map["vcc"] - 1;
+    let expected_rhs = 2.0 * 9.0 * melange_solver::mna::VS_CONDUCTANCE;
+    assert!(
+        (kernel.rhs_const[vcc_idx] - expected_rhs).abs() < 1e-3,
+        "rhs_const[vcc] should be 2*V*G_vs = {}, got {}",
+        expected_rhs,
+        kernel.rhs_const[vcc_idx]
+    );
+}
+
+#[test]
+fn test_generated_code_includes_rhs_const_for_dc_source() {
+    // When DC sources are present, generated code must include RHS_CONST array.
+    let spice = VS_DIVIDER_SPICE;
+    let netlist = Netlist::parse(spice).expect("failed to parse");
+    let mna = MnaSystem::from_netlist(&netlist).expect("failed to build MNA");
+    let kernel = DkKernel::from_mna(&mna, 44100.0).expect("failed to build DK kernel");
+
+    let config = CodegenConfig {
+        circuit_name: "vs_test".to_string(),
+        sample_rate: 44100.0,
+        input_node: 0,
+        output_node: 1,
+        input_resistance: 1000.0,
+        ..CodegenConfig::default()
+    };
+    let codegen = CodeGenerator::new(config);
+    let result = codegen.generate(&kernel, &mna, &netlist)
+        .expect("code generation failed");
+
+    assert!(
+        result.code.contains("RHS_CONST"),
+        "Generated code should include RHS_CONST when DC sources are present."
+    );
+    assert!(
+        result.code.contains("pub const RHS_CONST: [f64; N]"),
+        "Generated code should define RHS_CONST as a public constant array."
+    );
+}
+
+#[test]
+fn test_no_rhs_const_without_dc_source() {
+    // When no DC sources are present, generated code should not include RHS_CONST.
+    let (code, _netlist, _mna, _kernel) = generate_code(RC_CIRCUIT_SPICE);
+
+    // RC circuit has no voltage sources, so no RHS_CONST
+    assert!(
+        !code.contains("pub const RHS_CONST"),
+        "Generated code should NOT include RHS_CONST when no DC sources are present."
+    );
+}
+
+#[test]
+fn test_vs_conductance_value_is_large() {
+    // VS_CONDUCTANCE must be large enough to approximate an ideal voltage source.
+    // With G_vs = 1e6, the voltage error is V * R_other / (R_other + 1/G_vs).
+    // For a 1k load, error ~ 1k / (1k + 1e-6) ~ 1e-3, i.e. 0.1% error.
+    let g_vs = melange_solver::mna::VS_CONDUCTANCE;
+    assert!(
+        g_vs >= 1e5,
+        "VS_CONDUCTANCE should be at least 1e5 for accuracy, got {}",
+        g_vs
+    );
+    assert!(
+        g_vs <= 1e12,
+        "VS_CONDUCTANCE should not be so large as to cause numerical issues, got {}",
+        g_vs
+    );
+}

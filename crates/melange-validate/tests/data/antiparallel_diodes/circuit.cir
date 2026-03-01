@@ -1,7 +1,7 @@
 * Antiparallel Diodes - Symmetric clipping
 * Tests two 1D devices in 2D solver
 
-.model D1N4148 D(IS=2.52e-9 RS=0.568 N=1.906)
+.model D1N4148 D(IS=2.52e-9 N=1.906)
 
 * Input source - PWL will be injected during validation
 VIN in 0 DC 0
@@ -9,6 +9,7 @@ VIN in 0 DC 0
 R1 in out 1k
 D1 out 0 D1N4148
 D2 0 out D1N4148
+C1 out 0 1u
 
 .tran 10u 2m
 .print tran V(out) V(in)

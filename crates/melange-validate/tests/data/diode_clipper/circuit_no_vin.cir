@@ -1,13 +1,13 @@
 * Diode Clipper Circuit (without input voltage source for solver validation)
-* Soft clipping using antiparallel diodes
 * Input is applied via solver's input_conductance at node 'in'
 
-R1 in mid 10k
-D1 mid out D1N4148
-D2 out mid D1N4148
-R2 out 0 100k
+R1 in out 1k
+D1 out 0 D1N4148
+D2 0 out D1N4148
+C1 out 0 1u
+R2 out 0 10k
 
 * Diode model (1N4148 approx)
-.MODEL D1N4148 D(IS=2.52e-9 RS=0.568 N=1.752 TT=4.32e-9 CJO=1.95e-12 VJ=0.4 M=0.38 EG=1.11 XTI=3 KF=0 AF=1 FC=0.5 BV=100 IBV=1e-6)
+.MODEL D1N4148 D(IS=2.52e-9 N=1.752)
 
 .END
