@@ -60,6 +60,10 @@ Note: A_neg already contains capacitor history via alpha*C. Do NOT add separate 
 
 **CRITICAL**: Use trapezoidal rule for inputs: `(V_in + V_in_prev) * G_in`, NOT `2 * V_in * G_in`
 
+The `N_i * i_nl_prev` term is part of trapezoidal nonlinear integration. Combined with
+the full `S * N_i * i_nl` in Step 4, the net effect is `N_i * (i_nl[n+1] + i_nl[n])` —
+a proper trapezoidal average of nonlinear currents across timesteps.
+
 ### Step 2: Linear Prediction
 ```
 v_pred = S * rhs          // Linear solution
@@ -79,10 +83,22 @@ where J_dev is the block-diagonal device Jacobian:
 
 K is naturally negative, so J > 0 (always convergent).
 
-### Step 4: Final Voltage
+### Step 4: Final Voltage (Trapezoidal Nonlinear)
 ```
-v = v_pred + S * N_i * (i_nl - i_nl_prev)
+v = v_pred + S * N_i * i_nl
 ```
+
+This uses the full `i_nl` (not the delta `i_nl - i_nl_prev`). Combined with Step 1's
+`N_i * i_nl_prev` in the RHS, the net algebraic contribution is:
+```
+v = S * (... + N_i * i_nl_prev + ...) + S * N_i * i_nl
+  = S * (... + N_i * (i_nl_prev + i_nl) + ...)
+```
+This is trapezoidal integration for nonlinear currents, matching the trapezoidal
+discretization used for linear elements (`A = G + 2C/T`). Using only the delta
+`(i_nl - i_nl_prev)` would give backward Euler for nonlinear currents, which creates
+a mixed integration scheme that is conditionally unstable (period-3 oscillation in
+BJT circuits).
 
 ## Sign Convention Summary
 

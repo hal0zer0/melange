@@ -750,7 +750,7 @@ fn test_codegen_sni_correction() {
     let code = generate_code(DIODE_POT_SPICE);
 
     // S*N_i correction block should exist (M>0 and pots exist)
-    assert!(code.contains("u_ni_dot_di_0"), "Missing u_ni_dot_di in sni correction");
+    assert!(code.contains("u_ni_dot_inl_0"), "Missing u_ni_dot_inl in sni correction");
     assert!(code.contains("sni_factor_0"), "Missing sni_factor in sni correction");
     assert!(code.contains("let mut v = compute_final_voltages"), "v should be mutable with pot+nonlinear");
 }
@@ -761,7 +761,7 @@ fn test_codegen_no_sni_correction_linear() {
 
     // Linear circuit (M=0): no S*N_i correction should appear
     assert!(!code.contains("sni_factor"), "Linear pot circuit should have no sni_factor");
-    assert!(!code.contains("u_ni_dot_di"), "Linear pot circuit should have no u_ni_dot_di");
+    assert!(!code.contains("u_ni_dot_inl"), "Linear pot circuit should have no u_ni_dot_inl");
 }
 
 // ---------------------------------------------------------------------------

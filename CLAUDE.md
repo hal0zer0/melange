@@ -36,6 +36,7 @@ Detailed docs live in `docs/aidocs/`. Always read the relevant doc before modify
 | `docs/aidocs/NR_SOLVER.md` | Changing Newton-Raphson iteration or Jacobian |
 | `docs/aidocs/MNA.md` | Changing MNA stamping (G, C, N_v, N_i) |
 | `docs/aidocs/DEVICE_MODELS.md` | Changing diode/BJT/tube equations |
+| `docs/aidocs/DC_OP.md` | Changing DC operating point solver or bias initialization |
 | `docs/aidocs/CODEGEN.md` | Changing generated solver code |
 | `docs/aidocs/DEBUGGING.md` | Diagnosing solver output issues |
 
@@ -96,9 +97,11 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
 | Sample count mismatch | ngspice adaptive timestep | `.OPTIONS INTERP` (after title line!) |
 | Output all zeros | Voltage source in no_vin netlist | Check circuit_no_vin.cir has no VIN |
 | Output ±10V oscillating | Purely resistive circuit, no caps | Add parasitic capacitance or use backward Euler |
-| BJT output wrong | No DC operating point | Solver starts from zeros; SPICE starts from DC OP |
+| BJT output wrong | No DC operating point | Call `initialize_dc_op()` or use `DC_NL_I` codegen constant |
+| BJT period-3 oscillation | Backward Euler for nonlinear currents | Fixed: use full i_nl in correction (not delta) |
+| DC OP NR diverges | Wrong Jacobian sign | Use `G_aug = G_dc - N_i·J_dev·N_v` (subtraction!) |
 
-## Current Status (2026-02-24)
+## Current Status (2026-03-01)
 
 ### Working
 - Linear circuit simulation (RC lowpass matches ngspice to 0.03% RMS, 8-nines correlation)
@@ -108,6 +111,8 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
 - Codegen for diode and BJT circuits (up to M=4)
 - Codegen uses proper trapezoidal RHS with `input_prev` tracking (matches runtime solver)
 - Per-device `.model` params: each device gets its own IS, N, BF, BR, VT (heterogeneous models supported)
+- Nonlinear DC operating point solver (Newton-Raphson with source stepping and Gmin stepping fallbacks)
+- DC OP integrated into codegen (`DC_NL_I` constant) and runtime (`initialize_dc_op()`)
 - DC operating point calculation includes input conductance
 - Plugin template generates per-channel state for stereo (no cross-channel corruption)
 - SPICE validation infrastructure with ngspice
@@ -115,6 +120,9 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
 - Error types are enums (`MnaError`, `DkError`, `CodegenError` with `InvalidConfig`) — no panicking library code
 - MAX_M=8 bound prevents unbounded allocation in DK kernel
 - CLI reports errors for unresolved node names (no silent defaults)
+- **BJT common-emitter amplifier**: SPICE validation passes (correlation 0.965, 35% RMS)
+  - Trapezoidal nonlinear integration: correction uses full `S*N_i*i_nl` (not delta)
+  - Combined with `N_i*i_nl_prev` in RHS, gives proper trapezoidal average
 - **Dynamic potentiometers**: `.pot R1 min max` directive marks a resistor as runtime-variable
   - Sherman-Morrison rank-1 updates: O(N²) correction instead of O(N³) re-inversion
   - Precomputed SM vectors (SU, USU, NV_SU, U_NI) baked into generated constants
@@ -123,12 +131,10 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
   - Max 2 pots per circuit; pot value stored in `CircuitState`
 
 ### Known Limitations
-- Linear DC operating point only (no nonlinear DC OP solver; circuits with DC bias start from linear estimate)
 - Purely resistive nonlinear circuits oscillate (need capacitor damping)
 - JFET/MOSFET not yet in codegen NR
 - Koren triode equation needs rewrite (Phase 4a of review plan)
 - Gummel-Poon BJT Jacobian uses full analytical derivatives (Early effect + high injection)
 
-### Pending Review Plan
-See `.claude/plans/reflective-sprouting-stroustrup.md` for the full 7-phase fix plan.
-Phases 1-6 mostly complete; Phase 7 (testing quality) in progress.
+### Pending Work
+- **Review plan**: See `.claude/plans/reflective-sprouting-stroustrup.md` for the full 7-phase fix plan. Phases 1-6 mostly complete; Phase 7 (testing quality) in progress.

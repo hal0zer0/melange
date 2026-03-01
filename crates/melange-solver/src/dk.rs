@@ -405,41 +405,41 @@ impl DkKernel {
         }
     }
 
-    /// Apply correction: v = v_pred + S * N_i * (i_nl - i_nl_prev)
+    /// Apply correction: v = v_pred + S * N_i * i_nl
     ///
     /// This computes the final node voltages after solving for i_nl.
-    /// The correction uses the delta current since v_pred already includes
-    /// the effect of i_nl_prev from the RHS.
+    /// Uses full i_nl (not delta) to implement trapezoidal nonlinear integration:
+    /// since v_pred already includes N_i * i_nl_prev from the RHS, the net result is
+    /// v = S * (rhs_base + N_i * i_nl_prev + N_i * i_nl) = S * (... + N_i * (i_nl + i_nl_prev)),
+    /// which is the proper trapezoidal average of nonlinear currents.
     ///
     /// Writes result into the provided output buffer.
-    /// 
+    ///
     /// # Arguments
     /// - `v_pred`: Prediction vector (n elements)
     /// - `i_nl`: New nonlinear currents (m elements)
-    /// - `i_nl_prev`: Previous nonlinear currents (m elements)
+    /// - `i_nl_prev`: Previous nonlinear currents (m elements, unused — kept for API compatibility)
     /// - `v`: Output buffer for result (n elements)
-    /// - `ni_inl`: Temporary buffer for N_i * di_nl (n elements, pre-allocated)
+    /// - `ni_inl`: Temporary buffer for N_i * i_nl (n elements, pre-allocated)
     #[allow(clippy::needless_range_loop)]
-    pub fn apply_correction_into(&self, v_pred: &[f64], i_nl: &[f64], i_nl_prev: &[f64], v: &mut [f64], ni_inl: &mut [f64]) {
+    pub fn apply_correction_into(&self, v_pred: &[f64], i_nl: &[f64], _i_nl_prev: &[f64], v: &mut [f64], ni_inl: &mut [f64]) {
         assert_eq!(v_pred.len(), self.n);
         assert_eq!(i_nl.len(), self.m);
-        assert_eq!(i_nl_prev.len(), self.m);
         assert_eq!(v.len(), self.n);
         assert_eq!(ni_inl.len(), self.n);
 
-        // v = v_pred + S * N_i * (i_nl - i_nl_prev)
-        // First compute N_i * (i_nl - i_nl_prev) (N vector)
+        // v = v_pred + S * N_i * i_nl
+        // First compute N_i * i_nl (N vector)
         for i in 0..self.n {
             let mut sum = 0.0;
             let row_offset = i * self.m;
             for j in 0..self.m {
-                let di_nl = i_nl[j] - i_nl_prev[j];
-                sum += self.n_i[row_offset + j] * di_nl;
+                sum += self.n_i[row_offset + j] * i_nl[j];
             }
             ni_inl[i] = sum;
         }
 
-        // Then S * (N_i * di_nl)
+        // Then S * (N_i * i_nl)
         for i in 0..self.n {
             let mut sum = v_pred[i]; // Start with prediction
             let row_offset = i * self.n;

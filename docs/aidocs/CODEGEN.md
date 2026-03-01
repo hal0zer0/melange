@@ -17,11 +17,20 @@ const N_V: [[f64; N]; M] = [...];
 const N_I: [[f64; N]; M] = [...];
 ```
 
+### DC Operating Point Constants
+```rust
+// For circuits with nonlinear devices where DC OP has non-zero i_nl:
+pub const DC_NL_I: [f64; M] = [1.234e-3, 5.678e-6];  // From dc_op solver
+```
+
+Emitted when `has_dc_nl` is true (M > 0 and any dc_nl_current is nonzero).
+Used to initialize `i_nl_prev` in both `Default` and `reset()`.
+
 ### State (Runtime, Per-Channel)
 ```rust
 struct CircuitState {
     v_prev: [f64; N],        // Previous node voltages
-    i_nl_prev: [f64; M],     // Previous nonlinear currents
+    i_nl_prev: [f64; M],     // Previous nonlinear currents (init from DC_NL_I if present)
     dc_operating_point: [f64; N],
     last_nr_iterations: u32,
 }
@@ -66,12 +75,14 @@ Dim:      1D     -----2D-----    1D
 fn build_rhs(input: f64, input_prev: f64, state: &CircuitState) -> [f64; N] {
     // RHS_CONST (DC sources, if any)
     // + A_neg * v_prev  (includes capacitor history via alpha*C!)
-    // + N_i^T * i_nl_prev
+    // + N_i^T * i_nl_prev  (part of trapezoidal nonlinear integration)
     // + (input + input_prev) / INPUT_RESISTANCE  (proper trapezoidal)
 }
 ```
 A_neg already contains alpha*C. Do NOT add separate cap_history.
 The input uses proper trapezoidal integration: `(V_in(n+1) + V_in(n)) * G_in`.
+The `N_i * i_nl_prev` term, combined with `S * N_i * i_nl` in `compute_final_voltages`,
+gives the trapezoidal average `N_i * (i_nl[n+1] + i_nl[n])`.
 
 ### solve_nonlinear
 ```rust
@@ -182,6 +193,24 @@ rhs += history;
 - [ ] is_finite() checks present
 - [ ] S matrix values reasonable (< 1e6)
 
+## DC Operating Point in Codegen
+
+The codegen pipeline calls `dc_op::solve_dc_operating_point()` to find the DC bias:
+
+```rust
+// In CircuitIR::from_kernel():
+let dc_result = dc_op::solve_dc_operating_point(mna, &device_slots, &dc_op_config);
+ir.dc_operating_point = dc_result.v_node;
+ir.dc_nl_currents = dc_result.i_nl;
+ir.dc_op_converged = dc_result.converged;
+```
+
+The emitter checks `has_dc_nl = M > 0 && dc_nl_currents.iter().any(|&x| x.abs() > 1e-30)`:
+- If true: emits `DC_NL_I` constant, initializes `i_nl_prev` from it
+- If false: initializes `i_nl_prev` to `[0.0; M]`
+
+`CodegenConfig` fields: `dc_op_max_iterations` (default 200), `dc_op_tolerance` (default 1e-9).
+
 ## Differences: Runtime vs Generated
 
 | Aspect | Runtime Solver | Generated Code |
@@ -190,3 +219,4 @@ rhs += history;
 | Device Jacobian | Dense matrix from devices | Block-diagonal jdev entries |
 | Linear solve | Gaussian elimination (any size) | Explicit for M<=4 |
 | Handles | All device types | Diodes (1D) and BJTs (2D) |
+| DC OP init | `initialize_dc_op()` (opt-in) | `DC_NL_I` constant (automatic) |

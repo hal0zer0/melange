@@ -186,7 +186,7 @@ fn test_generated_code_final_voltage_coefficients() {
     // The compute_final_voltages function precomputes coefficients:
     //   coeff[i][j] = sum_k S[i][k] * N_i[k][j]
     // For each output node i and device j.
-    // These appear as float literals multiplying di{j} in the generated code.
+    // These appear as float literals multiplying i_nl[j] in the generated code.
     for i in 0..n {
         for j in 0..m {
             let mut coeff = 0.0;
@@ -200,7 +200,7 @@ fn test_generated_code_final_voltage_coefficients() {
                     code.contains(&coeff_str),
                     "(S*N_i)[{}][{}] = {} not found in generated code.\n\
                      This coefficient should appear in compute_final_voltages as a literal \
-                     multiplying di{}.",
+                     multiplying i_nl[{}].",
                     i, j, coeff_str, j
                 );
             }
@@ -1722,5 +1722,118 @@ fn test_vs_conductance_value_is_large() {
         g_vs <= 1e12,
         "VS_CONDUCTANCE should not be so large as to cause numerical issues, got {}",
         g_vs
+    );
+}
+
+// ==========================================================================
+// Test: BJT codegen-runtime consistency
+//
+// Verifies that the generated BJT code:
+// 1. Uses full i_nl (not delta) in compute_final_voltages (trapezoidal)
+// 2. Has matching K matrix values with the runtime kernel
+// 3. Produces a runtime solver output that amplifies (functional check)
+// ==========================================================================
+
+#[test]
+fn test_codegen_runtime_consistency_bjt() {
+    use melange_solver::solver::{CircuitSolver, DeviceEntry};
+    use melange_devices::bjt::{BjtEbersMoll, BjtPolarity};
+
+    // --- Part 1: Structural verification of generated code ---
+    let (code, _netlist, _mna, kernel) = generate_code(BJT_SPICE);
+
+    assert_eq!(kernel.m, 2, "BJT should have M=2");
+
+    // Verify K matrix values match between codegen and runtime
+    for i in 0..2 {
+        for j in 0..2 {
+            let k_val = kernel.k(i, j);
+            let k_str = format!("{:.17e}", k_val);
+            assert!(
+                code.contains(&k_str),
+                "K[{}][{}] = {} must match between codegen and runtime",
+                i, j, k_val
+            );
+        }
+    }
+
+    // Verify compute_final_voltages uses full i_nl[j], NOT di{j} (delta)
+    assert!(
+        !code.contains("di0") && !code.contains("di1"),
+        "compute_final_voltages must use full i_nl[j], not delta (di0/di1).\n\
+         Found 'di0' or 'di1' in generated code — this is the backward Euler \
+         formulation, not the correct trapezoidal formulation."
+    );
+
+    // Verify the S*N_i coefficients appear multiplied by i_nl[0] and i_nl[1]
+    for j in 0..kernel.m {
+        let pattern = format!("i_nl[{}]", j);
+        assert!(
+            code.contains(&pattern),
+            "compute_final_voltages should reference i_nl[{}] for trapezoidal correction",
+            j
+        );
+    }
+
+    // --- Part 2: Functional verification of runtime solver ---
+    // Use a BJT CE circuit (same topology as existing test_solve_2d_bjt_basic)
+    let biased_bjt = "\
+Common Emitter
+Q1 coll base emit 2N2222
+Rc coll vcc 10k
+R1 base 0 100k
+Re emit 0 1k
+Rbias vcc 0 10k
+.model 2N2222 NPN(IS=1e-15 BF=200)
+";
+    let netlist = Netlist::parse(biased_bjt).unwrap();
+    let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
+
+    let input_node = *mna.node_map.get("base").unwrap() - 1;
+    let output_node = *mna.node_map.get("coll").unwrap() - 1;
+    mna.g[input_node][input_node] += 1.0;
+
+    let kernel_rt = DkKernel::from_mna(&mna, 44100.0).unwrap();
+    assert_eq!(kernel_rt.m, 2, "Runtime BJT kernel should have M=2");
+
+    let bjt = BjtEbersMoll::new_room_temp(1e-15, 200.0, 3.0, BjtPolarity::Npn);
+    let devices = vec![DeviceEntry::new_bjt(bjt, 0)];
+
+    let mut solver = CircuitSolver::new(kernel_rt, devices, input_node, output_node);
+    solver.input_conductance = 1.0;
+
+    // Feed a sine wave and verify output is finite and stable
+    let mut outputs = Vec::new();
+    for i in 0..200 {
+        let input = 0.5 + 0.3 * (2.0 * std::f64::consts::PI * 1000.0 * i as f64 / 44100.0).sin();
+        outputs.push(solver.process_sample(input));
+    }
+
+    // All outputs must be finite
+    assert!(
+        outputs.iter().all(|v| v.is_finite()),
+        "BJT runtime solver outputs must all be finite"
+    );
+
+    // Output should have variation (not stuck at DC)
+    let out_min = outputs[100..].iter().cloned().fold(f64::INFINITY, f64::min);
+    let out_max = outputs[100..].iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let out_pp = out_max - out_min;
+
+    assert!(
+        out_pp > 0.001,
+        "BJT output should vary (not stuck at DC), out_pp={:.6}",
+        out_pp
+    );
+
+    // No period-3 oscillation: check last 20 samples have bounded variation
+    // (before the fix, BJTs would oscillate with pp > 5V)
+    let last_20: Vec<f64> = outputs[180..].to_vec();
+    let last_pp = last_20.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
+        - last_20.iter().cloned().fold(f64::INFINITY, f64::min);
+    assert!(
+        last_pp < 2.0,
+        "BJT output should not have wild oscillations, last_20 pp={:.4}",
+        last_pp
     );
 }

@@ -16,6 +16,12 @@ f(i) = i - i_d           // Residual (should be 0 at solution)
 K = N_v*S*N_i is naturally negative for stable circuits.
 So `v = p + K*i = p - |K|*i` gives correct negative feedback.
 
+**Note on trapezoidal nonlinear integration**: The prediction `p = N_v * v_pred` already
+includes `K * i_nl_prev` from the RHS (via `N_i * i_nl_prev` in `build_rhs`). The NR
+correction then adds `S * N_i * i_nl` (full, not delta). The combined effect is
+`N_i * (i_nl_prev + i_nl)` — proper trapezoidal averaging. The NR equations themselves
+(`f(i) = i - i_dev(p + K*i)` and `J = I - J_dev*K`) are unchanged by this choice.
+
 ## Jacobian Formula
 
 ### General Form (both runtime and codegen)
@@ -102,6 +108,18 @@ if !i_nl.iter().all(|x| x.is_finite()) {
 
 ## Warm Start
 Use `i_nl_prev` from previous time sample as initial guess. Reduces iterations from 10-20 to 3-5.
+
+## DC Operating Point Initialization
+
+For circuits with DC bias (BJT amplifiers), `i_nl_prev` should be initialized from
+the DC operating point, not zeros. See [DC_OP.md](DC_OP.md).
+
+- **Codegen**: `DC_NL_I` constant auto-generated, initializes `i_nl_prev` in `Default`
+- **Runtime**: Call `solver.initialize_dc_op(&mna, &device_slots)` after construction
+
+**Note**: The DC OP solver uses a different NR formulation than the time-stepping solver.
+The DC OP solves for node voltages directly (companion formulation on the N×N system),
+while the time-stepping NR solves for nonlinear currents (M-dimensional system via DK reduction).
 
 ## Common Failures
 1. **Extra K negation** -> Wrong feedback polarity, immediate divergence

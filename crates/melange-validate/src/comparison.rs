@@ -484,7 +484,7 @@ pub fn compare_signals(
         ));
     }
 
-    if !thd_error_db.is_finite() || thd_error_db.abs() > config.thd_error_tolerance_db {
+    if !config.skip_thd && (!thd_error_db.is_finite() || thd_error_db.abs() > config.thd_error_tolerance_db) {
         failures.push(format!(
             "THD error {:.2} dB exceeds tolerance {:.2} dB",
             thd_error_db.abs(),

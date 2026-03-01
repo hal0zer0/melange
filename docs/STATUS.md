@@ -130,31 +130,57 @@ See `docs/limitations.md` for full details.
 - [x] Generate `.rs` files from `DkKernel`
 - [x] Unrolled matrix operations
 - [x] Inlined device models
-- [ ] M=3,4 NR solver generation
-- [ ] Full BJT (2D) device support
+- [x] M=3,4 NR solver generation (Gaussian elimination)
+- [x] Full BJT (2D) device support (codegen + runtime)
+- [x] Per-device model parameters (heterogeneous IS, BF, etc.)
+- [x] PNP BJT support
 
 **Validation:**
-- [ ] SPICE comparison pipeline
-- [ ] Automated tolerance testing
+- [x] SPICE comparison pipeline (ngspice integration)
+- [x] Automated tolerance testing (correlation + RMS)
 - [ ] THD/SNR measurements
+
+**DC Operating Point:**
+- [x] Nonlinear DC OP solver (Newton-Raphson + source stepping + Gmin stepping)
+- [x] Codegen integration (DC_NL_I constant)
+- [x] Runtime integration (initialize_dc_op)
+
+### Fixed: DK Solver BJT Stability (2026-03-01)
+
+**Problem (resolved):** The DK solver exhibited period-3 oscillation on BJT
+common-emitter amplifier circuits due to mixing trapezoidal integration (linear
+elements) with backward Euler (nonlinear currents).
+
+**Fix applied:** Changed the DK correction step from `v = v_pred + S*N_i*(i_nl - i_nl_prev)`
+(backward Euler) to `v = v_pred + S*N_i*i_nl` (trapezoidal). Combined with the
+`N_i*i_nl_prev` already in the RHS, this gives `N_i*(i_nl[n+1] + i_nl[n])` —
+proper trapezoidal averaging for nonlinear currents. NR equations unchanged.
+
+**Results:**
+- [x] BJT CE correlation: 0.965 (was 0.035)
+- [x] Period-3 oscillation eliminated
+- [x] Diode clipper: passes (unaffected for M=0)
+- [x] Antiparallel diodes: passes
+- [x] RC lowpass: passes (unaffected for M=0)
+- [x] All 311 solver tests pass
 
 ### Short Term (v0.3.0)
 
 **Features:**
 - [ ] Controlled source support (E, G)
-- [ ] Potentiometer model
+- [x] Potentiometer model (Sherman-Morrison rank-1 updates)
 - [ ] Switch model
 - [ ] Line continuation fix
 
 **Integration:**
-- [ ] melange-validate implementation
-- [ ] CLI with actual commands
+- [x] melange-validate implementation
+- [x] CLI with actual commands
 - [ ] nih-plug wrapper (melange-plugin)
 
 ### Medium Term (v0.4.0)
 
 **Advanced:**
-- [ ] Sherman-Morrison for time-varying elements
+- [x] Sherman-Morrison for time-varying elements (potentiometers)
 - [ ] Subcircuit expansion
 - [ ] Behavioral sources (B)
 - [ ] Transformers (K)

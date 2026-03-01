@@ -256,6 +256,21 @@ impl RustEmitter {
             ctx.insert("dc_op_values", &dc_op_values);
         }
 
+        // DC nonlinear currents: emit DC_NL_I constant if M > 0 and any i_nl is nonzero
+        let has_dc_nl = ir.topology.m > 0
+            && !ir.dc_nl_currents.is_empty()
+            && ir.dc_nl_currents.iter().any(|&v| v.abs() > 1e-30);
+        ctx.insert("has_dc_nl", &has_dc_nl);
+        if has_dc_nl {
+            let dc_nl_i_values = ir
+                .dc_nl_currents
+                .iter()
+                .map(|v| fmt_f64(*v))
+                .collect::<Vec<_>>()
+                .join(", ");
+            ctx.insert("dc_nl_i_values", &dc_nl_i_values);
+        }
+
         self.render("state", &ctx)
     }
 
@@ -507,19 +522,13 @@ impl RustEmitter {
         let mut ctx = Context::new();
         ctx.insert("m", &m);
 
-        // delta_i lines
-        let mut di_lines = String::new();
-        if m > 0 {
-            for j in 0..m {
-                di_lines.push_str(&format!(
-                    "    let di{} = i_nl[{}] - state.i_nl_prev[{}];\n",
-                    j, j, j
-                ));
-            }
-        }
+        // No delta_i lines needed — trapezoidal uses full i_nl (not delta)
+        let di_lines = String::new();
         ctx.insert("di_lines", &di_lines);
 
-        // voltage computation lines
+        // voltage computation lines: v = v_pred + S * N_i * i_nl
+        // Using full i_nl implements trapezoidal nonlinear integration:
+        // combined with N_i * i_nl_prev in the RHS, gives S * N_i * (i_nl + i_nl_prev)
         let mut voltage_lines = String::new();
         for i in 0..n {
             voltage_lines.push_str(&format!("        v_pred[{}]", i));
@@ -529,7 +538,7 @@ impl RustEmitter {
                     s_ni_ij += ir.s(i, k) * ir.n_i(k, j);
                 }
                 if s_ni_ij != 0.0 {
-                    voltage_lines.push_str(&format!(" + {} * di{}", fmt_f64(s_ni_ij), j));
+                    voltage_lines.push_str(&format!(" + {} * i_nl[{}]", fmt_f64(s_ni_ij), j));
                 }
             }
             voltage_lines.push_str(",\n");
@@ -659,21 +668,21 @@ impl RustEmitter {
     }
 
     fn emit_sni_correction(code: &mut String, idx: usize, _pot: &PotentiometerIR, n: usize, m: usize) {
-        // S*N_i correction: v -= scale * (u^T . N_i . di_nl) * SU
+        // S*N_i correction: v -= scale * (u^T . N_i . i_nl) * SU
         // where u^T . N_i is the precomputed POT_idx_U_NI vector
-        // and di_nl = i_nl - i_nl_prev
-        code.push_str(&format!("    let u_ni_dot_di_{} = ", idx));
+        // Uses full i_nl (not delta) for trapezoidal nonlinear integration
+        code.push_str(&format!("    let u_ni_dot_inl_{} = ", idx));
         let mut first = true;
         for j in 0..m {
             if !first { code.push_str(" + "); }
             code.push_str(&format!(
-                "POT_{}_U_NI[{}] * (i_nl[{}] - state.i_nl_prev[{}])", idx, j, j, j
+                "POT_{}_U_NI[{}] * i_nl[{}]", idx, j, j
             ));
             first = false;
         }
         code.push_str(";\n");
         code.push_str(&format!(
-            "    let sni_factor_{} = scale_{} * u_ni_dot_di_{};\n", idx, idx, idx
+            "    let sni_factor_{} = scale_{} * u_ni_dot_inl_{};\n", idx, idx, idx
         ));
         for k in 0..n {
             code.push_str(&format!(
