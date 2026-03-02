@@ -157,10 +157,24 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
 - Tube Koren model: no plate resistance (rp) or mu variation with operating point
 - BJT Gummel-Poon: no self-heating or charge storage dynamics
 
+### Cross-Compilation (macOS from Linux)
+- Zig 0.13 + cargo-zigbuild + macOS SDK 13.3 + rcodesign (ad-hoc signing)
+- `cargo zigbuild --release --target universal2-apple-darwin` produces universal Mac binaries
+- Tested: rc-lowpass, pultec-eq, wurli-preamp all compile + sign successfully
+- melange-cli does NOT cross-compile (ureq/dirs need CoreFoundation), but generated plugins do
+
+### Validated Circuits
+- `circuits/pultec-eq.cir`: Pultec EQP-1A (N=13, M=2, 3 switches, 5 pots, 12AX7 tube)
+- `circuits/wurli-preamp.cir`: Wurlitzer 200A preamp (N=11, M=5, 2 BJTs + 1 diode, 1 pot)
+  - Flattened from openwurli/spice/subcircuits/preamp.cir
+  - R1-Cin series input coupling via intermediate node (mid_in)
+  - 0.1V in → 9.12V peak out at R_ldr=100K nominal
+
 ### Pending Work
 
-#### Current Priority — Rust Codegen Completeness
-- **Device coverage**: MOSFET codegen (MNA stamping done, codegen returns InvalidConfig)
+#### Current Priority — OpenWurli Integration
+- **Validate wurli-preamp**: SPICE comparison, gain at R_ldr extremes, frequency response
+- **Benchmark M=5 vs M=2**: OpenWurli uses forward-active BJT (Ib≈0, M=2 Cramer's); melange models full Ic+Ib (M=4) + diode (M=5) Gaussian elimination. If perf matters at 64 voices, add 1D forward-active BJT mode.
 - **M>16**: Iterative/sparse NR for very large nonlinear systems
 
 #### Future — Multi-Language Codegen
