@@ -96,19 +96,38 @@ fn jfet_conductance(vgs: f64, idss: f64, vp: f64, sign: f64) -> f64; // 2*IDSS*V
 - Default IDSS=2e-3 A, lambda=0.001 (stored but unused in 1D model)
 - Parameter lookup: `VTO` only (no `VT` alias, to avoid confusion with thermal voltage)
 
+### Tube/Triode (2D per device)
+```rust
+fn tube_ip(vgk: f64, vpk: f64, mu: f64, ex: f64, kg1: f64, kp: f64, kvb: f64) -> f64;  // Koren plate current
+fn tube_ig(vgk: f64, ig_max: f64, vgk_onset: f64) -> f64;                                // Leach grid current
+fn tube_jacobian(vgk: f64, vpk: f64, mu: f64, ex: f64, kg1: f64, kp: f64, kvb: f64,
+                 ig_max: f64, vgk_onset: f64) -> [f64; 4];  // [dIp/dVgk, dIp/dVpk, dIg/dVgk, dIg/dVpk]
+```
+
+2D model: plate current (Ip) at `start_idx`, grid current (Ig) at `start_idx+1`.
+
+- **Plate current**: Koren model — `Ip = (E1^ex / kg1) * atan(vpk / kvb)` where `E1 = vpk/kp * ln(1 + exp(kp * (1/mu + vgk/vpk)))`
+- **Grid current**: Leach power-law — `Ig = ig_max * max(0, (vgk - vgk_onset) / vgk_onset)^2` (zero for vgk < vgk_onset)
+- **Jacobian**: 4-element `[dIp/dVgk, dIp/dVpk, dIg/dVgk, dIg/dVpk]` — dIg/dVpk = 0 (grid current independent of plate voltage)
+- Constants: `DEVICE_{n}_MU`, `DEVICE_{n}_EX`, `DEVICE_{n}_KG1`, `DEVICE_{n}_KP`, `DEVICE_{n}_KVB`, `DEVICE_{n}_IG_MAX`, `DEVICE_{n}_VGK_ONSET`
+- Netlist syntax: `X1 plate grid cathode modelname` with `.model modelname TRIODE(MU=100 EX=1.4 KG1=1060 KP=600 KVB=300)`
+- Default params: MU=100, EX=1.4, KG1=1060, KP=600, KVB=300, IG_MAX=2e-3, VGK_ONSET=0.5
+- Template: `device_tube.rs.tera`
+
 ## Device Map and M-Dimension Assignment
 
 Nonlinear devices occupy M dimensions in order of appearance in the netlist:
 - Diode: 1 dimension (controlling voltage Vd, current Id)
 - BJT: 2 dimensions (Vbe->Ic, Vbc->Ib)
 - JFET: 1 dimension (Vgs->Id)
+- Tube: 2 dimensions (Vgk->Ip, Vpk->Ig)
 - MOSFET: 1 dimension (Vgs->Id) — not yet supported in NR codegen
 
-Example for a circuit with D1, Q1, D2:
+Example for a circuit with D1, Q1, X1 (triode):
 ```
-M index:  0      1       2       3
-Device:   D1     Q1(Ic)  Q1(Ib)  D2
-Dim:      1D     -----2D-----    1D
+M index:  0      1       2       3       4
+Device:   D1     Q1(Ic)  Q1(Ib)  X1(Ip)  X1(Ig)
+Dim:      1D     -----2D-----    ------2D------
 ```
 
 ## Functions
@@ -237,8 +256,8 @@ rhs += history;
 ### Linear Solve by M Size
 - M=1: Direct division
 - M=2: Cramer's rule (explicit 2x2 inverse)
-- M=3..8: Inline Gaussian elimination with partial pivoting
-- M>8: Not supported (MAX_M=8)
+- M=3..16: Inline Gaussian elimination with partial pivoting
+- M>16: Not supported (MAX_M=16)
 
 ## Verification Checklist
 - [ ] INPUT_RESISTANCE matches G matrix stamping (default: 1 ohm)
@@ -330,8 +349,8 @@ Matrix inversion uses inline Gaussian elimination (`invert_n()` helper emitted i
 |--------|---------------|----------------|
 | Jacobian | Full `J = I - J_dev * K` | Block-diagonal `J = I - J_dev * K` |
 | Device Jacobian | Dense matrix from devices | Block-diagonal jdev entries |
-| Linear solve | Gaussian elimination (any size) | Explicit for M<=8 (Gauss elim for M>=3) |
-| Handles | All device types | Diodes (1D), BJTs (2D), JFETs (1D) |
+| Linear solve | Gaussian elimination (any size) | Explicit for M<=16 (Gauss elim for M>=3) |
+| Handles | All device types | Diodes (1D), BJTs (2D), JFETs (1D), Tubes (2D) |
 | DC OP init | `initialize_dc_op()` (opt-in) | `DC_NL_I` constant (automatic) |
 | Oversampling | Not available | 2x/4x polyphase half-band IIR |
 | Sparsity | Dense | Zero entries skipped in emission |

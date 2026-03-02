@@ -58,6 +58,8 @@ RHS input = (V_in(n+1) + V_in(n)) * G_in   (proper trapezoidal, NOT 2*V*G)
 
 - Diodes: 1D per device (single voltage/current)
 - BJTs: 2D per device (Vbe→Ic at start_idx, Vbc→Ib at start_idx+1)
+- JFETs: 1D per device (Vgs→Id)
+- Tubes: 2D per device (Vgk→Ip at start_idx, Vpk→Ig at start_idx+1)
 - Device map built from netlist element order, mirrors MNA builder
 - Codegen uses `jdev_i_k` naming for block-diagonal Jacobian entries
 
@@ -108,7 +110,7 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
 - MNA stamping for R, C, L, voltage sources, diodes, BJTs, JFETs
 - DK kernel build with proper trapezoidal discretization
 - NR solver: 1D, 2D (two 1D devices), and M-dimensional
-- Codegen for diode, BJT, and JFET circuits (up to M=8, Gaussian elimination for M=3..8)
+- Codegen for diode, BJT, JFET, and tube/triode circuits (up to M=16, Gaussian elimination for M=3..16)
 - Codegen uses proper trapezoidal RHS with `input_prev` tracking (matches runtime solver)
 - Per-device `.model` params: each device gets its own IS, N, BF, BR, VT (heterogeneous models supported)
 - Nonlinear DC operating point solver (Newton-Raphson with source stepping and Gmin stepping fallbacks)
@@ -119,11 +121,13 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
 - Input validation: parser rejects negative/zero/NaN/Inf component values; codegen validates node indices
 - Error types are enums (`MnaError`, `DkError`, `CodegenError` with `InvalidConfig`) — no panicking library code
 - Logging via `log` crate (no `eprintln!` in library code)
-- MAX_M=8 bound prevents unbounded allocation in DK kernel
+- MAX_M=16 bound prevents unbounded allocation in DK kernel
 - CLI reports errors for unresolved node names (no silent defaults)
 - **BJT common-emitter amplifier**: SPICE validation passes (correlation 0.965, 35% RMS)
   - Trapezoidal nonlinear integration: correction uses full `S*N_i*i_nl` (not delta)
   - Combined with `N_i*i_nl_prev` in RHS, gives proper trapezoidal average
+  - **Gummel-Poon model**: `BjtParams` includes VAF, VAR, IKF, IKR; `bjt_qb()` base charge modulation
+  - USE_GP flag auto-detected from params; falls back to Ebers-Moll when GP params are infinite
 - **Dynamic potentiometers**: `.pot R1 min max` directive marks a resistor as runtime-variable
   - Sherman-Morrison rank-1 updates: O(N²) correction instead of O(N³) re-inversion
   - Precomputed SM vectors (SU, USU, NV_SU, U_NI) baked into generated constants
@@ -140,22 +144,24 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
 - **JFET codegen**: 1D saturation-only model (Id = IDSS*(1-Vgs/Vp)^2), clamped at IDSS
   - N-channel (NJ) defaults: VTO=-2.0, IDSS=2e-3; P-channel (PJ) defaults: VTO=+2.0
   - Compile-and-run verified for both N-channel and P-channel circuits
+- **Tube/triode codegen**: 2D Koren plate current model with Leach grid current
+  - `tube_ip()` (Koren), `tube_ig()` (Leach power-law), `tube_jacobian()` (4-element)
+  - Constants: `DEVICE_{n}_MU`, `DEVICE_{n}_EX`, `DEVICE_{n}_KG1`, `DEVICE_{n}_KP`, `DEVICE_{n}_KVB`, `DEVICE_{n}_IG_MAX`, `DEVICE_{n}_VGK_ONSET`
+  - Template: `device_tube.rs.tera`; 6 tests (parser, MNA, codegen, compile-and-run, two-triode preamp)
 - **Explicit re-exports**: `lib.rs` uses named re-exports (no glob `pub use module::*`)
 
 ### Known Limitations
 - Purely resistive nonlinear circuits oscillate (need capacitor damping)
 - MOSFET not yet in codegen NR
-- Koren triode equation needs rewrite (no grid current model)
 - JFET codegen uses 1D saturation-only model (ignores Vds, current clamped at IDSS)
-- BJT uses Ebers-Moll (no Early effect); Gummel-Poon upgrade needed for <10% RMS accuracy
-- M=8 ceiling limits full tube amp stacks (4 triodes = M=8 minimum)
+- Tube Koren model: no plate resistance (rp) or mu variation with operating point
+- BJT Gummel-Poon: no self-heating or charge storage dynamics
 
 ### Pending Work
 
 #### Current Priority — Rust Codegen Completeness
-- **Device coverage**: MOSFET codegen, tube/triode codegen (Koren model with grid current)
-- **BJT accuracy**: Upgrade Ebers-Moll → Gummel-Poon with Early effect (addresses 35% RMS gap)
-- **M>8**: Iterative/sparse NR for large nonlinear systems
+- **Device coverage**: MOSFET codegen (MNA stamping done, codegen returns InvalidConfig)
+- **M>16**: Iterative/sparse NR for very large nonlinear systems
 
 #### Future — Multi-Language Codegen
 The `Emitter` trait + `CircuitIR` are language-agnostic by design. Once Rust output is complete, planned targets in priority order: C++ (pro plugin devs), FAUST (compiles to 30+ targets), Python/NumPy (prototyping), MATLAB/Octave (academic).

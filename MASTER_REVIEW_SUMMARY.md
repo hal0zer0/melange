@@ -37,7 +37,7 @@ Found 0 bugs, 12 gaps (4 medium, 7 low, 1 very-low). All fixed in commit 4b4e723
 1. **DK method is the right choice** for small nonlinear audio circuits (N=5-20, M=1-8). The N-to-M reduction concentrates compute into the smallest possible NR solve.
 2. **Pipeline decomposition** (Netlist → MNA → DK → IR → Emitter) is well-motivated by the physics. Stage boundaries are in the right places.
 3. **Real-time safety is genuine** — generated code is allocation-free, NaN-safe, stack-only. Runtime uses enum dispatch (no vtable). No unsafe.
-4. **Testing is excellent** — SPICE validation against ngspice, 585+ tests, codegen compile-and-run verification.
+4. **Testing is excellent** — SPICE validation against ngspice, 613+ tests, codegen compile-and-run verification.
 5. **Sherman-Morrison pots** and **runtime sample rate** are correctly designed and implemented.
 6. **CircuitIR** is at the right abstraction level — serializable, language-agnostic, clean Emitter trait.
 7. **DC OP multi-strategy solver** follows SPICE best practices (NR → source stepping → Gmin → fallback).
@@ -56,10 +56,11 @@ Found 0 bugs, 12 gaps (4 medium, 7 low, 1 very-low). All fixed in commit 4b4e723
 - **Remaining**: Tera templates still have duplicated equations (necessary — generated code must be self-contained)
 - Templates carry canonical-source comments pointing to `melange-devices`
 
-#### W3: Missing Device Coverage (3 reviewers) — JFET DONE
+#### W3: Missing Device Coverage (3 reviewers) — JFET + TUBE DONE
 - ~~No tubes (core use case for guitar amps), JFET, MOSFET in codegen~~
 - **Fixed**: JFET codegen complete — 1D saturation-only model (Id = IDSS*(1-Vgs/Vp)^2)
-- **Remaining**: MOSFET codegen, tube/triode codegen (Koren model needs grid current rewrite)
+- **Fixed**: Tube/triode codegen complete — 2D Koren plate current + Leach grid current, 6 tests
+- **Remaining**: MOSFET codegen
 
 #### W4: melange-solver is a Monolith (2 reviewers) — PARTIALLY FIXED
 - Parser, MNA, DK, solver, DC OP, codegen IR, emitter, templates — all in one crate
@@ -96,7 +97,7 @@ Found 0 bugs, 12 gaps (4 medium, 7 low, 1 very-low). All fixed in commit 4b4e723
 - **Competitors**: RT-WDF (Chowdhury), Faust circuit libs, ACME.jl
 
 #### Scaling Limits
-- MAX_M=8 blocks full tube preamps (4 triodes = M=8 minimum, no room for diodes)
+- MAX_M=16 allows 4-triode preamp stacks (4 triodes × 2D = M=8, with room for diodes)
 - Single-input/single-output limits real-world circuit complexity
 - No subcircuit expansion (parser rejects .subckt X instances)
 
@@ -149,13 +150,12 @@ All 12 gaps fixed in commit 4b4e723:
 2. ~~**W8**: Add sparsity-aware emission~~ — **DONE**
 3. ~~**W1**: Oversampling integration in codegen (2x/4x)~~ — **DONE**
 4. ~~**W3**: JFET codegen (1D saturation-only)~~ — **DONE**
+4b. ~~**W3**: Tube/triode codegen (2D Koren + grid current)~~ — **DONE**
 5. ~~**W2**: Device equation dedup in dc_op.rs~~ — **DONE** (templates remain duplicated by necessity)
 6. ~~**W4**: Glob re-export cleanup~~ — **DONE** (crate split deferred)
 
 ### Remaining — Device & Model
-7. **W3**: Tube/triode codegen (2D, Koren model with grid current — core guitar amp use case)
-8. **W3**: MOSFET codegen (1D, Level 1 — similar to JFET)
-9. BJT upgrade to Gummel-Poon (Early effect, high injection — addresses 35% RMS gap)
+7. **W3**: MOSFET codegen (1D, Level 1 — similar to JFET)
 
 ### Remaining — Multi-Language Codegen
 The `Emitter` trait + `CircuitIR` pipeline supports adding new language backends. Priority:
@@ -172,7 +172,7 @@ Note: FAUST/Python/MATLAB emitters don't need oversampling or pot SM corrections
 15. **W4**: Split monolith (extract melange-parser, melange-codegen — deferred)
 16. **W7**: Multi-input/output support
 17. Subcircuit expansion
-18. Raise MAX_M beyond 8 (iterative solver for large M)
+18. Raise MAX_M beyond 16 (iterative solver for very large M)
 
 ---
 
@@ -216,9 +216,9 @@ Note: FAUST/Python/MATLAB emitters don't need oversampling or pot SM corrections
 
 ### Universally Concerning
 
-1. **BJT model accuracy (35% RMS)** — flagged by all 5 personas. Ebers-Moll lacks Early effect; pro engineer called it "a dealbreaker." Root cause: model-level difference (Ebers-Moll vs. ngspice's Gummel-Poon), not a bug. Fix: upgrade to Gummel-Poon with Early effect.
-2. **Tube model maturity** — Koren equation without grid current models "a polite tube that doesn't exist." Multiple personas noted this is the core guitar amp use case.
-3. **M=8 ceiling** — caps practical circuits at roughly a two-stage preamp. Full amp stacks need M>8.
+1. **BJT model accuracy (35% RMS)** — flagged by all 5 personas. **UPDATE**: Gummel-Poon model now implemented (VAF/VAR/IKF/IKR). Re-validation against ngspice pending.
+2. **Tube model maturity** — **UPDATE**: Koren + Leach grid current now implemented in codegen. 6 tests pass including two-triode preamp.
+3. **M=8 ceiling** — **UPDATE**: MAX_M raised to 16. Supports 4-triode preamp stacks with room for additional diodes.
 
 ### Persona-Specific Insights
 
@@ -247,9 +247,9 @@ Note: FAUST/Python/MATLAB emitters don't need oversampling or pot SM corrections
 
 These findings reinforce and extend the Phase 1-5 roadmap from Round 3:
 
-1. **Upgrade BJT to Gummel-Poon** — the single highest-impact change. Every persona flagged 35% RMS error. Early effect + high-injection modeling would close most of the gap.
-2. **Tube grid current** — without it, the guitar amp use case (Melange's core audience) is incomplete. Dave: "grid current is where tubes get their character."
-3. **Raise M limit** — M=8 blocks full amp modeling. Consider iterative/sparse NR for M>8.
+1. ~~**Upgrade BJT to Gummel-Poon**~~ — **DONE**. BjtParams includes VAF/VAR/IKF/IKR; bjt_qb() base charge modulation in codegen template.
+2. ~~**Tube grid current**~~ — **DONE**. Leach power-law grid current model implemented in tube codegen (tube_ig function).
+3. ~~**Raise M limit**~~ — **DONE**. MAX_M raised to 16 (from 8), supporting 4-triode preamps with room for diodes.
 4. **Onboarding/DX** — Jake's "terminal fumbler" concern is real. A `curl | sh` installer or pre-built binaries + a 5-minute quickstart would dramatically lower the barrier for the pedal-builder audience.
 5. **NR failure behavior docs** — Marcus needs to know: what happens when convergence fails at audio rate? Document the fallback (clamp? hold last sample? mute?) and make it configurable.
 6. **Hardware validation** — Dr. Moreira's point: SPICE-vs-SPICE validation proves implementation correctness, but hardware-vs-Melange validation proves model accuracy. Even a few published comparisons would build credibility.

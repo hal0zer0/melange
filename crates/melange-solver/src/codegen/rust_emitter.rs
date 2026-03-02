@@ -1337,7 +1337,7 @@ impl RustEmitter {
         Ok(())
     }
 
-    /// Generate inline Gaussian elimination for M=3..=8.
+    /// Generate inline Gaussian elimination for M=3..=16.
     fn generate_gauss_elim(code: &mut String, dim: usize) {
         code.push_str(&format!(
             "        // Solve {dim}x{dim} system via inline Gaussian elimination\n"
