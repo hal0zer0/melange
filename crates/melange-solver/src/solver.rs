@@ -227,7 +227,9 @@ impl DeviceEntry {
                 i_nl[s] = currents[0];
                 i_nl[s + 1] = currents[1];
             }
-            _ => unreachable!("unsupported device dimension"),
+            _ => {
+                debug_assert!(false, "unsupported device dimension: {}", self.dimension());
+            }
         }
     }
 
@@ -247,7 +249,9 @@ impl DeviceEntry {
                 g_dev[(s + 1) * m + s] = jac[2];
                 g_dev[(s + 1) * m + s + 1] = jac[3];
             }
-            _ => unreachable!("unsupported device dimension"),
+            _ => {
+                debug_assert!(false, "unsupported device dimension: {}", self.dimension());
+            }
         }
     }
 }

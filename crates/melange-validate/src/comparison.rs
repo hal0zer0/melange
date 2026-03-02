@@ -613,10 +613,10 @@ fn compute_thd(samples: &[f64], fft_size: usize, sample_rate: f64) -> f64 {
 
     // Fallback to global max if no peak found
     if fundamental_mag < 1e-12 {
-        for i in search_start..search_end.min(half_size) {
-            if magnitudes[i] > fundamental_mag {
-                fundamental_mag = magnitudes[i];
-                fundamental_idx = i;
+        for (i, &mag) in magnitudes[search_start..search_end.min(half_size)].iter().enumerate() {
+            if mag > fundamental_mag {
+                fundamental_mag = mag;
+                fundamental_idx = search_start + i;
             }
         }
     }

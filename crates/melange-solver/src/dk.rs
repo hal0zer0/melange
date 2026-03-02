@@ -138,7 +138,10 @@ impl std::error::Error for DkError {}
 ///
 /// Circuits with more than MAX_M nonlinear dimensions are rejected to prevent
 /// unbounded allocation and O(M^3) NR solve cost.
-pub const MAX_M: usize = 8;
+///
+/// M=16 supports: full tube preamp (4 triodes × 2 = 8) + bias diodes,
+/// or complex multi-device circuits.
+pub const MAX_M: usize = 16;
 
 impl DkKernel {
     /// Build DK kernel from MNA system.
@@ -177,8 +180,8 @@ impl DkKernel {
             let norm_s = infinity_norm(&s_2d);
             let cond = norm_a * norm_s;
             if cond > 1e12 {
-                eprintln!(
-                    "Warning: A matrix condition number estimate is {:.2e} (threshold 1e12). \
+                log::warn!(
+                    "A matrix condition number estimate is {:.2e} (threshold 1e12). \
                      Results may be numerically inaccurate.",
                     cond
                 );
@@ -203,14 +206,12 @@ impl DkKernel {
         // Validate K diagonal: all K[i][i] must be negative for stable NR feedback.
         // A non-negative diagonal indicates incorrect circuit topology or wiring.
         // Only check when M > 0 (nonlinear devices present); for M=0, K is empty.
-        if m > 0 {
-            for i in 0..m {
-                if k_2d[i][i] >= 0.0 {
-                    return Err(DkError::InvalidKDiagonal {
-                        index: i,
-                        value: k_2d[i][i],
-                    });
-                }
+        for (i, row) in k_2d.iter().enumerate() {
+            if row[i] >= 0.0 {
+                return Err(DkError::InvalidKDiagonal {
+                    index: i,
+                    value: row[i],
+                });
             }
         }
 
@@ -240,10 +241,7 @@ impl DkKernel {
             let su = mat_vec_mul(&s_2d, &u);
 
             // usu = u^T * S * u (scalar)
-            let mut usu = 0.0;
-            for i in 0..n {
-                usu += u[i] * su[i];
-            }
+            let usu: f64 = u.iter().zip(su.iter()).map(|(a, b)| a * b).sum();
 
             // nv_su = N_v * su (M-vector)
             let nv_su = if m > 0 {
@@ -255,14 +253,9 @@ impl DkKernel {
             // u_ni[j] = su^T * N_i[:,j] = (S*u)^T * N_i[:,j] (M-vector)
             // Sherman-Morrison requires su^T*N_i (not u^T*N_i) because
             // S' = S - scale * (S*u) * (u^T*S) and S is symmetric, so u^T*S = su^T
-            let mut u_ni = vec![0.0; m];
-            for j in 0..m {
-                let mut sum = 0.0;
-                for i in 0..n {
-                    sum += su[i] * mna.n_i[i][j];
-                }
-                u_ni[j] = sum;
-            }
+            let u_ni: Vec<f64> = (0..m)
+                .map(|j| su.iter().enumerate().map(|(i, &s)| s * mna.n_i[i][j]).sum())
+                .collect();
 
             pots.push(SmPotData {
                 su,

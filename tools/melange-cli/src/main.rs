@@ -255,8 +255,16 @@ fn main() -> Result<()> {
             let circuit_source = circuits::resolve(&input)?;
             println!("Resolved circuit: {}", circuit_source.name());
             simulate_circuit_source(
-                &circuit_source, input_audio.as_deref(), &output,
-                sample_rate, &input_node, &output_node, duration, amplitude,
+                &circuit_source,
+                &SimulateOptions {
+                    input_audio: input_audio.as_deref(),
+                    output: &output,
+                    sample_rate,
+                    input_node: &input_node,
+                    output_node: &output_node,
+                    duration,
+                    amplitude,
+                },
             )
         }
         Commands::Nodes { input } => {
@@ -270,6 +278,7 @@ fn main() -> Result<()> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn compile_circuit_source(
     circuit_source: &circuits::CircuitSource,
     output: &PathBuf,
@@ -478,15 +487,19 @@ fn validate_circuit_source(
     Ok(())
 }
 
-fn simulate_circuit_source(
-    circuit_source: &circuits::CircuitSource,
-    input_audio: Option<&std::path::Path>,
-    output: &PathBuf,
+struct SimulateOptions<'a> {
+    input_audio: Option<&'a std::path::Path>,
+    output: &'a PathBuf,
     sample_rate: f64,
-    input_node: &str,
-    output_node: &str,
+    input_node: &'a str,
+    output_node: &'a str,
     duration: f64,
     amplitude: f64,
+}
+
+fn simulate_circuit_source(
+    circuit_source: &circuits::CircuitSource,
+    opts: &SimulateOptions,
 ) -> Result<()> {
     use melange_solver::{
         dk::DkKernel,
@@ -529,20 +542,20 @@ fn simulate_circuit_source(
     let mut mna = MnaSystem::from_netlist(&netlist)
         .with_context(|| "Failed to build MNA system")?;
 
-    let input_node_raw = mna.node_map.get(input_node).copied()
+    let input_node_raw = mna.node_map.get(opts.input_node).copied()
         .ok_or_else(|| anyhow::anyhow!(
             "Input node '{}' not found. Available: {:?}",
-            input_node, mna.node_map.keys().collect::<Vec<_>>()
+            opts.input_node, mna.node_map.keys().collect::<Vec<_>>()
         ))?;
     if input_node_raw == 0 {
         anyhow::bail!("Input node cannot be ground (0)");
     }
     let input_node_idx = input_node_raw - 1;
 
-    let output_node_raw = mna.node_map.get(output_node).copied()
+    let output_node_raw = mna.node_map.get(opts.output_node).copied()
         .ok_or_else(|| anyhow::anyhow!(
             "Output node '{}' not found. Available: {:?}",
-            output_node, mna.node_map.keys().collect::<Vec<_>>()
+            opts.output_node, mna.node_map.keys().collect::<Vec<_>>()
         ))?;
     if output_node_raw == 0 {
         anyhow::bail!("Output node cannot be ground (0)");
@@ -558,7 +571,7 @@ fn simulate_circuit_source(
     println!("  {} nodes, {} nonlinear devices", mna.n, mna.nonlinear_devices.len());
 
     // Step 3: Read input audio or generate test signal
-    let (samples, actual_sample_rate) = if let Some(audio_path) = input_audio {
+    let (samples, actual_sample_rate) = if let Some(audio_path) = opts.input_audio {
         println!("Step 3: Reading input audio: {}", audio_path.display());
         let reader = hound::WavReader::open(audio_path)
             .with_context(|| format!("Failed to open WAV file: {}", audio_path.display()))?;
@@ -581,12 +594,12 @@ fn simulate_circuit_source(
             input_samples.len(), sr, input_samples.len() as f64 / sr);
         (input_samples, sr)
     } else {
-        println!("Step 3: Generating 1kHz sine wave ({:.1}s at {} Hz)...", duration, sample_rate);
-        let num_samples = (duration * sample_rate) as usize;
+        println!("Step 3: Generating 1kHz sine wave ({:.1}s at {} Hz)...", opts.duration, opts.sample_rate);
+        let num_samples = (opts.duration * opts.sample_rate) as usize;
         let samples: Vec<f64> = (0..num_samples)
-            .map(|i| amplitude * (2.0 * std::f64::consts::PI * 1000.0 * i as f64 / sample_rate).sin())
+            .map(|i| opts.amplitude * (2.0 * std::f64::consts::PI * 1000.0 * i as f64 / opts.sample_rate).sin())
             .collect();
-        (samples, sample_rate)
+        (samples, opts.sample_rate)
     };
 
     // Step 4: Build DK kernel
@@ -666,7 +679,7 @@ fn simulate_circuit_source(
             output_samples.push(solver.process_sample(s));
         }
 
-        write_wav(output, actual_sample_rate, &output_samples)?;
+        write_wav(opts.output, actual_sample_rate, &output_samples)?;
     } else {
         // Nonlinear circuit: use CircuitSolver
         let mut solver = CircuitSolver::new(
@@ -693,7 +706,7 @@ fn simulate_circuit_source(
             output_samples.push(solver.process_sample(s));
         }
 
-        write_wav(output, actual_sample_rate, &output_samples)?;
+        write_wav(opts.output, actual_sample_rate, &output_samples)?;
     }
 
     Ok(())
@@ -754,6 +767,10 @@ fn build_device_slots(
                         beta_f: bf,
                         beta_r: br,
                         is_pnp,
+                        vaf: f64::INFINITY,
+                        var: f64::INFINITY,
+                        ikf: f64::INFINITY,
+                        ikr: f64::INFINITY,
                     }),
                 });
             }

@@ -413,15 +413,15 @@ fn parse_printed_output(
                     for (i, col_name) in column_names.iter().enumerate().skip(1) {
                         // col_names[0] is "time", so data starts at index 2
                         let data_idx = i + 1;
-                        if data_idx < parts.len() {
-                            if let Ok(voltage) = parts[data_idx].parse::<f64>() {
-                                let normalized = normalize_node_name(col_name);
-                                spice_data
-                                    .voltages
-                                    .entry(normalized)
-                                    .or_default()
-                                    .push(voltage);
-                            }
+                        if data_idx < parts.len()
+                            && let Ok(voltage) = parts[data_idx].parse::<f64>()
+                        {
+                            let normalized = normalize_node_name(col_name);
+                            spice_data
+                                .voltages
+                                .entry(normalized)
+                                .or_default()
+                                .push(voltage);
                         }
                     }
                 }

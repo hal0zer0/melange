@@ -89,6 +89,7 @@ pub enum NonlinearDeviceType {
     Bjt,
     Jfet,
     Mosfet,
+    Tube,
 }
 
 /// Voltage source information for extended MNA.
@@ -262,6 +263,43 @@ impl MnaSystem {
         self.n_i[ne][start_idx + 1] = 1.0;  // Ib exits emitter (KCL conservation)
     }
 
+    /// Stamp triode nonlinear matrices.
+    ///
+    /// Triode is 2D per device:
+    /// - Dimension 0: Ip (plate current), controlled by Vgk
+    /// - Dimension 1: Ig (grid current), controlled by Vpk (for Jacobian coupling)
+    ///
+    /// N_v extracts controlling voltages:
+    /// - Row start_idx: Vgk = V_grid - V_cathode
+    /// - Row start_idx+1: Vpk = V_plate - V_cathode
+    ///
+    /// N_i injects currents:
+    /// - Column start_idx: Ip flows plate→cathode
+    /// - Column start_idx+1: Ig flows grid→cathode
+    pub fn stamp_triode(
+        &mut self,
+        start_idx: usize,
+        ng: usize,
+        np: usize,
+        nk: usize,
+    ) {
+        // Row start_idx: Vgk = V_grid - V_cathode
+        self.n_v[start_idx][ng] = 1.0;
+        self.n_v[start_idx][nk] = -1.0;
+
+        // Row start_idx+1: Vpk = V_plate - V_cathode
+        self.n_v[start_idx + 1][np] = 1.0;
+        self.n_v[start_idx + 1][nk] = -1.0;
+
+        // Column start_idx: Ip enters plate, exits cathode
+        self.n_i[np][start_idx] = -1.0; // Ip enters plate (current into device)
+        self.n_i[nk][start_idx] = 1.0;  // Ip exits cathode
+
+        // Column start_idx+1: Ig enters grid, exits cathode
+        self.n_i[ng][start_idx + 1] = -1.0; // Ig enters grid
+        self.n_i[nk][start_idx + 1] = 1.0;  // Ig exits cathode
+    }
+
     /// Build a discretized system matrix from G and C with inductor companion models.
     ///
     /// Computes `result[i][j] = g_sign * G[i][j] + alpha * C[i][j]` for each element,
@@ -272,7 +310,7 @@ impl MnaSystem {
     #[allow(clippy::needless_range_loop)]
     fn build_discretized_matrix(&self, sample_rate: f64, g_sign: f64) -> Vec<Vec<f64>> {
         if !(sample_rate > 0.0 && sample_rate.is_finite()) {
-            eprintln!("WARNING: invalid sample_rate {}, using 44100.0", sample_rate);
+            log::warn!("invalid sample_rate {}, using 44100.0", sample_rate);
             return self.build_discretized_matrix(44100.0, g_sign);
         }
         let t = 1.0 / sample_rate;
@@ -462,20 +500,20 @@ impl MnaBuilder {
         for (oa, elem) in self.opamps.iter_mut().zip(
             netlist.elements.iter().filter(|e| matches!(e, Element::Opamp { .. }))
         ) {
-            if let Element::Opamp { model, .. } = elem {
-                if let Some(m) = netlist.models.iter().find(|m| m.name.eq_ignore_ascii_case(model)) {
-                    if m.model_type != "OA" {
-                        return Err(MnaError::InvalidParameter(format!(
-                            "Op-amp {} references model '{}' with type '{}', expected 'OA'",
-                            model, m.name, m.model_type
-                        )));
-                    }
-                    for (key, val) in &m.params {
-                        match key.to_ascii_uppercase().as_str() {
-                            "AOL" => oa.aol = *val,
-                            "ROUT" => oa.r_out = *val,
-                            _ => {} // Ignore unknown params (GBW, etc.)
-                        }
+            if let Element::Opamp { model, .. } = elem
+                && let Some(m) = netlist.models.iter().find(|m| m.name.eq_ignore_ascii_case(model))
+            {
+                if m.model_type != "OA" {
+                    return Err(MnaError::InvalidParameter(format!(
+                        "Op-amp {} references model '{}' with type '{}', expected 'OA'",
+                        model, m.name, m.model_type
+                    )));
+                }
+                for (key, val) in &m.params {
+                    match key.to_ascii_uppercase().as_str() {
+                        "AOL" => oa.aol = *val,
+                        "ROUT" => oa.r_out = *val,
+                        _ => {} // Ignore unknown params (GBW, etc.)
                     }
                 }
             }
@@ -665,6 +703,33 @@ impl MnaBuilder {
                         if s_raw > 0 { mna.n_i[s_raw - 1][start_idx] = 1.0; }
                     }
                 }
+                NonlinearDeviceType::Tube => {
+                    // Triode: 2D — Ip (plate current) + Ig (grid current)
+                    // Nodes: [ng, np, nk] (grid, plate, cathode)
+                    if node_indices.len() >= 3 {
+                        let g_raw = node_indices[0];
+                        let p_raw = node_indices[1];
+                        let k_raw = node_indices[2];
+
+                        if g_raw > 0 && p_raw > 0 && k_raw > 0 {
+                            mna.stamp_triode(start_idx, g_raw - 1, p_raw - 1, k_raw - 1);
+                        } else {
+                            // Per-terminal ground handling
+                            // N_v row 0 (Vgk): +1 at grid, -1 at cathode
+                            if g_raw > 0 { mna.n_v[start_idx][g_raw - 1] = 1.0; }
+                            if k_raw > 0 { mna.n_v[start_idx][k_raw - 1] = -1.0; }
+                            // N_v row 1 (Vpk): +1 at plate, -1 at cathode
+                            if p_raw > 0 { mna.n_v[start_idx + 1][p_raw - 1] = 1.0; }
+                            if k_raw > 0 { mna.n_v[start_idx + 1][k_raw - 1] = -1.0; }
+                            // N_i col 0 (Ip): -1 at plate, +1 at cathode
+                            if p_raw > 0 { mna.n_i[p_raw - 1][start_idx] = -1.0; }
+                            if k_raw > 0 { mna.n_i[k_raw - 1][start_idx] = 1.0; }
+                            // N_i col 1 (Ig): -1 at grid, +1 at cathode
+                            if g_raw > 0 { mna.n_i[g_raw - 1][start_idx + 1] = -1.0; }
+                            if k_raw > 0 { mna.n_i[k_raw - 1][start_idx + 1] = 1.0; }
+                        }
+                    }
+                }
             }
         }
 
@@ -682,6 +747,7 @@ impl MnaBuilder {
             Element::Bjt { nc, nb, ne, .. } => vec![nc, nb, ne],
             Element::Jfet { nd, ng, ns, .. } => vec![nd, ng, ns],
             Element::Mosfet { nd, ng, ns, nb, .. } => vec![nd, ng, ns, nb],
+            Element::Triode { n_grid, n_plate, n_cathode, .. } => vec![n_grid, n_plate, n_cathode],
             Element::Opamp { n_plus, n_minus, n_out, .. } => vec![n_plus, n_minus, n_out],
             Element::SubcktInstance { name, .. } => {
                 return Err(MnaError::TopologyError(
@@ -858,6 +924,23 @@ impl MnaBuilder {
                     dimension: 1,
                     start_idx,
                     nodes: vec![nd.clone(), ng.clone(), ns.clone(), nb.clone()],
+                    node_indices,
+                });
+            }
+            Element::Triode { name, n_grid, n_plate, n_cathode, .. } => {
+                let node_indices = vec![
+                    self.node_map[n_grid],
+                    self.node_map[n_plate],
+                    self.node_map[n_cathode],
+                ];
+                let start_idx = self.total_dimension;
+                self.total_dimension += 2; // 2D: plate current + grid current
+                self.nonlinear_devices.push(NonlinearDeviceInfo {
+                    name: name.clone(),
+                    device_type: NonlinearDeviceType::Tube,
+                    dimension: 2,
+                    start_idx,
+                    nodes: vec![n_grid.clone(), n_plate.clone(), n_cathode.clone()],
                     node_indices,
                 });
             }

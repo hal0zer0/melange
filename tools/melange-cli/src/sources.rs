@@ -175,7 +175,7 @@ pub fn format_sources_list(config: &SourcesConfig) -> String {
     let mut output = String::new();
     
     output.push_str("Configured circuit sources:\n");
-    output.push_str("\n");
+    output.push('\n');
 
     if config.sources.is_empty() {
         output.push_str("  (no sources configured)\n");

@@ -47,18 +47,15 @@ impl Cache {
         let cache_path = self.url_to_cache_path(url);
 
         // Check if we can use cached version
-        if !force_refresh && cache_path.exists() {
-            if let Ok(metadata) = std::fs::metadata(&cache_path) {
-                if let Ok(modified) = metadata.modified() {
-                    if let Ok(age) = std::time::SystemTime::now().duration_since(modified) {
-                        // Cache valid for 24 hours
-                        if age < std::time::Duration::from_secs(24 * 3600) {
-                            return std::fs::read_to_string(&cache_path)
-                                .with_context(|| format!("Failed to read cached file: {}", cache_path.display()));
-                        }
-                    }
-                }
-            }
+        if !force_refresh
+            && cache_path.exists()
+            && let Ok(metadata) = std::fs::metadata(&cache_path)
+            && let Ok(modified) = metadata.modified()
+            && let Ok(age) = std::time::SystemTime::now().duration_since(modified)
+            && age < std::time::Duration::from_secs(24 * 3600)
+        {
+            return std::fs::read_to_string(&cache_path)
+                .with_context(|| format!("Failed to read cached file: {}", cache_path.display()));
         }
 
         // Fetch from URL using blocking client

@@ -290,7 +290,7 @@ pub fn validate_circuit_with_options(
     // Extract the output signal from SPICE results
     let spice_output = spice_data
         .get_node_voltage(output_node)
-        .map_err(|e| ValidationError::Spice(e))?;
+        .map_err(ValidationError::Spice)?;
 
     // Run melange solver
     let melange_output = run_melange_solver(netlist_path, input_signal, sample_rate, output_node)?;
@@ -333,7 +333,7 @@ pub fn validate_circuit_with_options(
         let output_dir = options
             .output_dir
             .clone()
-            .unwrap_or_else(|| std::env::temp_dir());
+            .unwrap_or_else(std::env::temp_dir);
 
         std::fs::create_dir_all(&output_dir)?;
 
@@ -487,10 +487,10 @@ fn build_devices_from_netlist(
 fn find_diode_model(netlist: &melange_solver::parser::Netlist, device_name: &str) -> (Option<f64>, Option<f64>) {
     // First, find the device to get its model name
     let model_name = netlist.elements.iter().find_map(|e| {
-        if let melange_solver::parser::Element::Diode { name, model, .. } = e {
-            if name == device_name {
-                return Some(model.clone());
-            }
+        if let melange_solver::parser::Element::Diode { name, model, .. } = e
+            && name == device_name
+        {
+            return Some(model.clone());
         }
         None
     });
@@ -528,10 +528,10 @@ fn find_bjt_model(
 ) -> (Option<f64>, Option<f64>, Option<f64>) {
     // First, find the device to get its model name
     let model_name = netlist.elements.iter().find_map(|e| {
-        if let melange_solver::parser::Element::Bjt { name, model, .. } = e {
-            if name == device_name {
-                return Some(model.clone());
-            }
+        if let melange_solver::parser::Element::Bjt { name, model, .. } = e
+            && name == device_name
+        {
+            return Some(model.clone());
         }
         None
     });
@@ -570,10 +570,10 @@ fn find_bjt_model(
 fn find_bjt_polarity(netlist: &melange_solver::parser::Netlist, device_name: &str) -> melange_devices::BjtPolarity {
     // First, find the device to get its model name
     let model_name = netlist.elements.iter().find_map(|e| {
-        if let melange_solver::parser::Element::Bjt { name, model, .. } = e {
-            if name == device_name {
-                return Some(model.clone());
-            }
+        if let melange_solver::parser::Element::Bjt { name, model, .. } = e
+            && name == device_name
+        {
+            return Some(model.clone());
         }
         None
     });

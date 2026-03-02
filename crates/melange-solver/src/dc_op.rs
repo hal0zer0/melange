@@ -12,6 +12,9 @@
 use crate::codegen::ir::{DeviceParams, DeviceSlot, DeviceType};
 use crate::dk;
 use crate::mna::{inject_rhs_current, MnaSystem, VS_CONDUCTANCE};
+use melange_devices::bjt::{BjtEbersMoll, BjtGummelPoon, BjtPolarity};
+use melange_devices::diode::DiodeShockley;
+use melange_devices::tube::KorenTriode;
 
 /// Configuration for the DC operating point solver.
 #[derive(Debug, Clone)]
@@ -81,56 +84,6 @@ pub enum DcOpMethod {
     Failed,
 }
 
-/// Clamp and exponentiate, matching codegen/runtime safe_exp convention.
-fn safe_exp(x: f64) -> f64 {
-    x.clamp(-40.0, 40.0).exp()
-}
-
-/// Evaluate diode current: i = IS * (exp(v/N_VT) - 1)
-fn diode_current(v: f64, is: f64, n_vt: f64) -> f64 {
-    let v_clamped = v.clamp(-40.0 * n_vt, 40.0 * n_vt);
-    is * (safe_exp(v_clamped / n_vt) - 1.0)
-}
-
-/// Evaluate diode conductance: g = (IS/N_VT) * exp(v/N_VT)
-fn diode_conductance(v: f64, is: f64, n_vt: f64) -> f64 {
-    let v_clamped = v.clamp(-40.0 * n_vt, 40.0 * n_vt);
-    (is / n_vt) * safe_exp(v_clamped / n_vt)
-}
-
-/// Evaluate BJT collector current (Ebers-Moll transport model).
-///
-/// sign = +1.0 for NPN, -1.0 for PNP.
-fn bjt_ic(vbe: f64, vbc: f64, is: f64, vt: f64, beta_r: f64, sign: f64) -> f64 {
-    let vbe_eff = sign * vbe;
-    let vbc_eff = sign * vbc;
-    sign * is * (safe_exp(vbe_eff / vt) - safe_exp(vbc_eff / vt))
-        - sign * (is / beta_r) * (safe_exp(vbc_eff / vt) - 1.0)
-}
-
-/// Evaluate BJT base current (Ebers-Moll).
-fn bjt_ib(vbe: f64, vbc: f64, is: f64, vt: f64, beta_f: f64, beta_r: f64, sign: f64) -> f64 {
-    let vbe_eff = sign * vbe;
-    let vbc_eff = sign * vbc;
-    sign * (is / beta_f) * (safe_exp(vbe_eff / vt) - 1.0)
-        + sign * (is / beta_r) * (safe_exp(vbc_eff / vt) - 1.0)
-}
-
-/// Evaluate BJT Jacobian [dIc/dVbe, dIc/dVbc, dIb/dVbe, dIb/dVbc].
-fn bjt_jacobian(vbe: f64, vbc: f64, is: f64, vt: f64, beta_f: f64, beta_r: f64, sign: f64) -> [f64; 4] {
-    let vbe_eff = sign * vbe;
-    let vbc_eff = sign * vbc;
-    let exp_be = safe_exp(vbe_eff / vt);
-    let exp_bc = safe_exp(vbc_eff / vt);
-
-    let dic_dvbe = (is / vt) * exp_be;
-    let dic_dvbc = -(is / vt) * exp_bc - (is / (beta_r * vt)) * exp_bc;
-    let dib_dvbe = (is / (beta_f * vt)) * exp_be;
-    let dib_dvbc = (is / (beta_r * vt)) * exp_bc;
-
-    [dic_dvbe, dic_dvbc, dib_dvbe, dib_dvbc]
-}
-
 /// Evaluate all nonlinear device currents and Jacobian entries.
 ///
 /// # Arguments
@@ -153,23 +106,77 @@ fn evaluate_devices(
         let s = slot.start_idx;
         match (&slot.device_type, &slot.params) {
             (DeviceType::Diode, DeviceParams::Diode(dp)) => {
+                // Use canonical DiodeShockley from melange-devices.
+                // DiodeParams stores pre-multiplied n_vt, so use n=1.0, vt=n_vt.
+                let diode = DiodeShockley::new(dp.is, 1.0, dp.n_vt);
                 let v = v_nl[s];
-                i_nl[s] = diode_current(v, dp.is, dp.n_vt);
-                j_dev[s * m + s] = diode_conductance(v, dp.is, dp.n_vt);
+                i_nl[s] = diode.current_at(v);
+                j_dev[s * m + s] = diode.conductance_at(v);
             }
             (DeviceType::Bjt, DeviceParams::Bjt(bp)) => {
+                let polarity = if bp.is_pnp { BjtPolarity::Pnp } else { BjtPolarity::Npn };
+                let em = BjtEbersMoll::new(bp.is, bp.vt, bp.beta_f, bp.beta_r, polarity);
                 let vbe = v_nl[s];
                 let vbc = v_nl[s + 1];
-                let sign = if bp.is_pnp { -1.0 } else { 1.0 };
 
-                i_nl[s] = bjt_ic(vbe, vbc, bp.is, bp.vt, bp.beta_r, sign);
-                i_nl[s + 1] = bjt_ib(vbe, vbc, bp.is, bp.vt, bp.beta_f, bp.beta_r, sign);
+                if bp.is_gummel_poon() {
+                    // Gummel-Poon model (Early effect + high injection)
+                    let gp = BjtGummelPoon::new(em, bp.vaf, bp.var, bp.ikf, bp.ikr);
+                    use melange_devices::NonlinearDevice;
+                    i_nl[s] = gp.collector_current(vbe, vbc);
+                    i_nl[s + 1] = em.base_current(vbe, vbc); // base current unchanged by GP
+                    let jac = gp.jacobian(&[vbe, vbc]);
+                    j_dev[s * m + s] = jac[0];        // dIc/dVbe
+                    j_dev[s * m + (s + 1)] = jac[1];  // dIc/dVbc
+                    j_dev[(s + 1) * m + s] = em.base_current_jacobian_dvbe(vbe, vbc);
+                    j_dev[(s + 1) * m + (s + 1)] = em.base_current_jacobian_dvbc(vbe, vbc);
+                } else {
+                    // Standard Ebers-Moll
+                    i_nl[s] = em.collector_current(vbe, vbc);
+                    i_nl[s + 1] = em.base_current(vbe, vbc);
+                    let (dic_dvbe, dic_dvbc) = em.collector_jacobian(vbe, vbc);
+                    j_dev[s * m + s] = dic_dvbe;
+                    j_dev[s * m + (s + 1)] = dic_dvbc;
+                    j_dev[(s + 1) * m + s] = em.base_current_jacobian_dvbe(vbe, vbc);
+                    j_dev[(s + 1) * m + (s + 1)] = em.base_current_jacobian_dvbc(vbe, vbc);
+                }
+            }
+            (DeviceType::Jfet, DeviceParams::Jfet(jp)) => {
+                // Use canonical Jfet from melange-devices (1D: only Vgs).
+                // At DC operating point, we approximate with saturation-only model.
+                let channel = if jp.is_p_channel {
+                    melange_devices::jfet::JfetChannel::P
+                } else {
+                    melange_devices::jfet::JfetChannel::N
+                };
+                let jfet = melange_devices::jfet::Jfet::new(channel, jp.vp, jp.idss);
+                let vgs = v_nl[s];
+                // 1D simplification: assume Vds = 5V (deep saturation) for DC OP
+                let vds = if jp.is_p_channel { -5.0 } else { 5.0 };
+                i_nl[s] = jfet.drain_current(vgs, vds);
+                let (gm, _gds) = jfet.jacobian_partial(vgs, vds);
+                j_dev[s * m + s] = gm;
+            }
+            (DeviceType::Tube, DeviceParams::Tube(tp)) => {
+                // Use canonical KorenTriode from melange-devices.
+                // 2D: Vgk at start_idx, Vpk at start_idx+1.
+                let tube = KorenTriode::with_grid_params(
+                    tp.mu, tp.ex, tp.kg1, tp.kp, tp.kvb, tp.ig_max, tp.vgk_onset,
+                );
+                let vgk = v_nl[s];
+                let vpk = v_nl[s + 1];
 
-                let jac = bjt_jacobian(vbe, vbc, bp.is, bp.vt, bp.beta_f, bp.beta_r, sign);
-                j_dev[s * m + s] = jac[0];         // dIc/dVbe
-                j_dev[s * m + (s + 1)] = jac[1];   // dIc/dVbc
-                j_dev[(s + 1) * m + s] = jac[2];   // dIb/dVbe
-                j_dev[(s + 1) * m + (s + 1)] = jac[3]; // dIb/dVbc
+                // Plate current (dimension 0) and grid current (dimension 1)
+                i_nl[s] = tube.plate_current(vgk, vpk);
+                i_nl[s + 1] = tube.grid_current(vgk);
+
+                // Jacobian: [[dIp/dVgk, dIp/dVpk], [dIg/dVgk, 0]]
+                use melange_devices::NonlinearDevice;
+                let plate_jac = tube.jacobian(&[vgk, vpk]);
+                j_dev[s * m + s] = plate_jac[0];         // dIp/dVgk
+                j_dev[s * m + (s + 1)] = plate_jac[1];   // dIp/dVpk
+                j_dev[(s + 1) * m + s] = tube.grid_current_jacobian(vgk); // dIg/dVgk
+                j_dev[(s + 1) * m + (s + 1)] = 0.0;      // dIg/dVpk = 0
             }
             _ => {} // Mismatched type/params — skip
         }
@@ -236,14 +243,8 @@ fn build_dc_system(mna: &MnaSystem, config: &DcOpConfig) -> (Vec<Vec<f64>>, Vec<
 
 /// Compute v_nl = N_v · v (extract controlling voltages from node voltages).
 fn extract_nl_voltages(mna: &MnaSystem, v: &[f64], v_nl: &mut [f64]) {
-    let n = mna.n;
-    let m = mna.m;
-    for i in 0..m {
-        let mut sum = 0.0;
-        for j in 0..n {
-            sum += mna.n_v[i][j] * v[j];
-        }
-        v_nl[i] = sum;
+    for (i, v_nl_i) in v_nl.iter_mut().enumerate().take(mna.m) {
+        *v_nl_i = mna.n_v[i].iter().zip(v.iter()).map(|(nv, vi)| nv * vi).sum();
     }
 }
 
@@ -266,6 +267,15 @@ fn solve_linear(g_aug: &[Vec<f64>], rhs: &[f64]) -> Option<Vec<f64>> {
 ///
 /// Solves: F(v) = G_dc · v - b_dc - N_i · i_nl(N_v · v) = 0
 ///
+/// Immutable circuit data for DC NR iterations.
+struct DcCircuit<'a> {
+    g_dc: &'a [Vec<f64>],
+    b_dc: &'a [f64],
+    mna: &'a MnaSystem,
+    device_slots: &'a [DeviceSlot],
+    config: &'a DcOpConfig,
+}
+
 /// Uses companion formulation at each iteration:
 ///   G_aug = G_dc + N_i · J_dev · N_v
 ///   rhs = b_dc + N_i · (i_nl - J_dev · v_nl)
@@ -273,24 +283,26 @@ fn solve_linear(g_aug: &[Vec<f64>], rhs: &[f64]) -> Option<Vec<f64>> {
 ///
 /// Returns (converged, iterations).
 fn nr_dc_solve(
-    g_dc: &[Vec<f64>],
-    b_dc: &[f64],
-    mna: &MnaSystem,
-    device_slots: &[DeviceSlot],
-    config: &DcOpConfig,
-    v: &mut Vec<f64>,
-    v_nl: &mut Vec<f64>,
-    i_nl: &mut Vec<f64>,
+    circuit: &DcCircuit,
+    v: &mut [f64],
+    v_nl: &mut [f64],
+    i_nl: &mut [f64],
     source_scale: f64,
     gmin: f64,
 ) -> (bool, usize) {
-    let n = mna.n;
-    let m = mna.m;
+    let n = circuit.mna.n;
+    let m = circuit.mna.m;
 
     // Pre-allocate working buffers
     let mut j_dev = vec![0.0; m * m];
     let mut g_aug = vec![vec![0.0; n]; n];
     let mut rhs = vec![0.0; n];
+
+    let mna = circuit.mna;
+    let device_slots = circuit.device_slots;
+    let config = circuit.config;
+    let g_dc = circuit.g_dc;
+    let b_dc = circuit.b_dc;
 
     for iter in 0..config.max_iterations {
         // 1. Extract controlling voltages: v_nl = N_v · v
@@ -313,8 +325,7 @@ fn nr_dc_solve(
                     let nl_idx = slot.start_idx + d;
                     // Add gmin to the diagonal entries corresponding to
                     // the nodes that this NL voltage spans
-                    for j in 0..n {
-                        let nv_val = mna.n_v[nl_idx][j];
+                    for (j, &nv_val) in mna.n_v[nl_idx].iter().enumerate() {
                         if nv_val.abs() > 1e-15 {
                             g_aug[j][j] += gmin * nv_val.abs();
                         }
@@ -327,8 +338,8 @@ fn nr_dc_solve(
         // G_aug = G_dc - N_i · J_dev · N_v
         // The negative sign is correct: N_i has -1 at anodes, so
         // -(-1) · g_d = +g_d stamps device conductance positively.
-        for a in 0..n {
-            for b in 0..n {
+        for (a, g_aug_a) in g_aug.iter_mut().enumerate().take(n) {
+            for (b, g_aug_ab) in g_aug_a.iter_mut().enumerate().take(n) {
                 let mut sum = 0.0;
                 for i in 0..m {
                     let ni_ai = mna.n_i[a][i];
@@ -341,7 +352,7 @@ fn nr_dc_solve(
                         sum += ni_ai * jd * nv_jb;
                     }
                 }
-                g_aug[a][b] -= sum;
+                *g_aug_ab -= sum;
             }
         }
 
@@ -361,8 +372,8 @@ fn nr_dc_solve(
             let i_comp = i_nl[i] - jdev_vnl_i;
 
             // Inject into RHS: rhs[a] += N_i[a][i] * i_comp
-            for a in 0..n {
-                rhs[a] += mna.n_i[a][i] * i_comp;
+            for (a, rhs_a) in rhs.iter_mut().enumerate().take(n) {
+                *rhs_a += mna.n_i[a][i] * i_comp;
             }
         }
 
@@ -429,15 +440,15 @@ pub fn solve_dc_operating_point(
         };
     }
 
+    let circuit = DcCircuit { g_dc: &g_dc, b_dc: &b_dc, mna, device_slots, config };
+
     let mut v = v_linear.clone();
     let mut v_nl = vec![0.0; m];
     let mut i_nl = vec![0.0; m];
 
     // Strategy 1: Direct NR from linear initial guess
     let (converged, iters) = nr_dc_solve(
-        &g_dc, &b_dc, mna, device_slots, config,
-        &mut v, &mut v_nl, &mut i_nl,
-        1.0, 0.0,
+        &circuit, &mut v, &mut v_nl, &mut i_nl, 1.0, 0.0,
     );
     if converged {
         return DcOpResult {
@@ -459,9 +470,7 @@ pub fn solve_dc_operating_point(
     for step in 1..=config.source_steps {
         let scale = step as f64 / config.source_steps as f64;
         let (converged, iters) = nr_dc_solve(
-            &g_dc, &b_dc, mna, device_slots, config,
-            &mut v, &mut v_nl, &mut i_nl,
-            scale, 0.0,
+            &circuit, &mut v, &mut v_nl, &mut i_nl, scale, 0.0,
         );
         total_iters += iters;
         if !converged {
@@ -496,9 +505,7 @@ pub fn solve_dc_operating_point(
         let gmin = (log_start + frac * (log_end - log_start)).exp();
 
         let (converged, iters) = nr_dc_solve(
-            &g_dc, &b_dc, mna, device_slots, config,
-            &mut v, &mut v_nl, &mut i_nl,
-            1.0, gmin,
+            &circuit, &mut v, &mut v_nl, &mut i_nl, 1.0, gmin,
         );
         total_iters += iters;
         if !converged {
@@ -510,9 +517,7 @@ pub fn solve_dc_operating_point(
     // Final solve without Gmin
     if gmin_converged {
         let (converged, iters) = nr_dc_solve(
-            &g_dc, &b_dc, mna, device_slots, config,
-            &mut v, &mut v_nl, &mut i_nl,
-            1.0, 0.0,
+            &circuit, &mut v, &mut v_nl, &mut i_nl, 1.0, 0.0,
         );
         total_iters += iters;
         if converged {

@@ -31,7 +31,14 @@ struct InductorTemplateData {
 
 /// Format a float with full precision for codegen constants.
 fn fmt_f64(v: f64) -> String {
-    format!("{:.17e}", v)
+    if v.is_infinite() {
+        if v > 0.0 { "f64::INFINITY".to_string() }
+        else { "f64::NEG_INFINITY".to_string() }
+    } else if v.is_nan() {
+        "f64::NAN".to_string()
+    } else {
+        format!("{:.17e}", v)
+    }
 }
 
 /// Format a matrix as rows of comma-separated full-precision floats.
@@ -104,12 +111,83 @@ fn emit_device_const(code: &mut String, dev_num: usize, suffix: &str, value: f64
     ));
 }
 
+// ============================================================================
+// Oversampling configuration
+// ============================================================================
+
+/// Half-band filter coefficients from melange-primitives/src/oversampling.rs.
+/// 3-section (~80dB rejection, balanced quality/cost).
+const HB_3SECTION: [f64; 3] = [
+    0.036681502163648017,
+    0.2746317593794541,
+    0.7856959333713522,
+];
+
+/// 2-section half-band (minimal CPU, ~60dB rejection) for 4x outer stage.
+const HB_2SECTION: [f64; 2] = [0.07986642623635751, 0.5453536510716122];
+
+/// Oversampling stage configuration.
+struct OversamplingInfo {
+    /// Number of allpass sections per filter (for inner 2x stage)
+    num_sections: usize,
+    /// Coefficients for inner 2x stage
+    coeffs: Vec<f64>,
+    /// State size per filter = num_sections * 2 (x1, y1 per section)
+    state_size: usize,
+    /// For 4x: state size of the outer 2x stage
+    state_size_outer: usize,
+    /// For 4x: coefficients for outer 2x stage
+    coeffs_outer: Vec<f64>,
+    /// For 4x: number of sections in outer stage
+    num_sections_outer: usize,
+}
+
+/// Get oversampling configuration for a given factor.
+fn oversampling_info(factor: usize) -> OversamplingInfo {
+    match factor {
+        2 => {
+            let num_sections = HB_3SECTION.len();
+            OversamplingInfo {
+                num_sections,
+                coeffs: HB_3SECTION.to_vec(),
+                state_size: num_sections * 2,
+                state_size_outer: 0,
+                coeffs_outer: Vec::new(),
+                num_sections_outer: 0,
+            }
+        }
+        4 => {
+            // Inner 2x stage uses 3-section, outer uses 2-section
+            let inner = HB_3SECTION.len();
+            let outer = HB_2SECTION.len();
+            OversamplingInfo {
+                num_sections: inner,
+                coeffs: HB_3SECTION.to_vec(),
+                state_size: inner * 2,
+                state_size_outer: outer * 2,
+                coeffs_outer: HB_2SECTION.to_vec(),
+                num_sections_outer: outer,
+            }
+        }
+        _ => OversamplingInfo {
+            num_sections: 0,
+            coeffs: Vec::new(),
+            state_size: 0,
+            state_size_outer: 0,
+            coeffs_outer: Vec::new(),
+            num_sections_outer: 0,
+        },
+    }
+}
+
 // Embed templates at compile time — no runtime file loading.
 const TMPL_HEADER: &str = include_str!("../../templates/rust/header.rs.tera");
 const TMPL_CONSTANTS: &str = include_str!("../../templates/rust/constants.rs.tera");
 const TMPL_STATE: &str = include_str!("../../templates/rust/state.rs.tera");
 const TMPL_DEVICE_DIODE: &str = include_str!("../../templates/rust/device_diode.rs.tera");
 const TMPL_DEVICE_BJT: &str = include_str!("../../templates/rust/device_bjt.rs.tera");
+const TMPL_DEVICE_JFET: &str = include_str!("../../templates/rust/device_jfet.rs.tera");
+const TMPL_DEVICE_TUBE: &str = include_str!("../../templates/rust/device_tube.rs.tera");
 const TMPL_BUILD_RHS: &str = include_str!("../../templates/rust/build_rhs.rs.tera");
 const TMPL_MAT_VEC_MUL_S: &str = include_str!("../../templates/rust/mat_vec_mul_s.rs.tera");
 const TMPL_EXTRACT_VOLTAGES: &str = include_str!("../../templates/rust/extract_voltages.rs.tera");
@@ -122,6 +200,12 @@ pub struct RustEmitter {
     tera: Tera,
 }
 
+impl Default for RustEmitter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RustEmitter {
     pub fn new() -> Self {
         let mut tera = Tera::default();
@@ -131,6 +215,8 @@ impl RustEmitter {
             ("state", TMPL_STATE),
             ("device_diode", TMPL_DEVICE_DIODE),
             ("device_bjt", TMPL_DEVICE_BJT),
+            ("device_jfet", TMPL_DEVICE_JFET),
+            ("device_tube", TMPL_DEVICE_TUBE),
             ("build_rhs", TMPL_BUILD_RHS),
             ("mat_vec_mul_s", TMPL_MAT_VEC_MUL_S),
             ("extract_voltages", TMPL_EXTRACT_VOLTAGES),
@@ -187,6 +273,10 @@ impl Emitter for RustEmitter {
         code.push_str(&self.emit_update_history()?);
         code.push_str(&self.emit_process_sample(ir)?);
 
+        if ir.solver_config.oversampling_factor > 1 {
+            code.push_str(&Self::emit_oversampler(ir));
+        }
+
         Ok(code)
     }
 }
@@ -219,6 +309,12 @@ impl RustEmitter {
             "sample_rate",
             &format!("{:.1}", ir.solver_config.sample_rate),
         );
+        ctx.insert("oversampling_factor", &ir.solver_config.oversampling_factor);
+        if ir.solver_config.oversampling_factor > 1 {
+            let internal_rate = ir.solver_config.sample_rate
+                * ir.solver_config.oversampling_factor as f64;
+            ctx.insert("internal_sample_rate", &format!("{:.1}", internal_rate));
+        }
         ctx.insert("alpha", &fmt_f64(ir.solver_config.alpha));
         ctx.insert("input_node", &ir.solver_config.input_node);
         ctx.insert("output_node", &ir.solver_config.output_node);
@@ -269,6 +365,19 @@ impl RustEmitter {
         let num_pots = ir.pots.len();
         ctx.insert("num_pots", &num_pots);
 
+        let os_factor = ir.solver_config.oversampling_factor;
+        ctx.insert("oversampling_factor", &os_factor);
+        if os_factor > 1 {
+            let os_info = oversampling_info(os_factor);
+            ctx.insert("os_state_size", &os_info.state_size);
+            ctx.insert("oversampling_4x", &(os_factor == 4));
+            if os_factor == 4 {
+                ctx.insert("os_state_size_outer", &os_info.state_size_outer);
+            }
+        } else {
+            ctx.insert("oversampling_4x", &false);
+        }
+
         if num_inductors > 0 {
             ctx.insert("inductors", &inductor_template_data(ir, true));
         }
@@ -313,6 +422,8 @@ impl RustEmitter {
 
         let mut has_diode = false;
         let mut has_bjt = false;
+        let mut has_jfet = false;
+        let mut has_tube = false;
 
         for (dev_num, slot) in ir.device_slots.iter().enumerate() {
             match &slot.params {
@@ -330,9 +441,39 @@ impl RustEmitter {
                     emit_device_const(&mut code, dev_num, "BETA_R", bp.beta_r);
                     let sign = if bp.is_pnp { -1.0 } else { 1.0 };
                     code.push_str(&format!(
+                        "const DEVICE_{}_SIGN: f64 = {:.1};\n",
+                        dev_num, sign
+                    ));
+                    code.push_str(&format!(
+                        "const DEVICE_{}_USE_GP: bool = {};\n",
+                        dev_num, bp.is_gummel_poon()
+                    ));
+                    emit_device_const(&mut code, dev_num, "VAF", bp.vaf);
+                    emit_device_const(&mut code, dev_num, "VAR", bp.var);
+                    emit_device_const(&mut code, dev_num, "IKF", bp.ikf);
+                    emit_device_const(&mut code, dev_num, "IKR", bp.ikr);
+                    code.push('\n');
+                }
+                DeviceParams::Jfet(jp) => {
+                    has_jfet = true;
+                    emit_device_const(&mut code, dev_num, "IDSS", jp.idss);
+                    emit_device_const(&mut code, dev_num, "VP", jp.vp);
+                    let sign = if jp.is_p_channel { -1.0 } else { 1.0 };
+                    code.push_str(&format!(
                         "const DEVICE_{}_SIGN: f64 = {:.1};\n\n",
                         dev_num, sign
                     ));
+                }
+                DeviceParams::Tube(tp) => {
+                    has_tube = true;
+                    emit_device_const(&mut code, dev_num, "MU", tp.mu);
+                    emit_device_const(&mut code, dev_num, "EX", tp.ex);
+                    emit_device_const(&mut code, dev_num, "KG1", tp.kg1);
+                    emit_device_const(&mut code, dev_num, "KP", tp.kp);
+                    emit_device_const(&mut code, dev_num, "KVB", tp.kvb);
+                    emit_device_const(&mut code, dev_num, "IG_MAX", tp.ig_max);
+                    emit_device_const(&mut code, dev_num, "VGK_ONSET", tp.vgk_onset);
+                    code.push('\n');
                 }
             }
         }
@@ -342,6 +483,12 @@ impl RustEmitter {
         }
         if has_bjt {
             code.push_str(&self.render("device_bjt", &Context::new())?);
+        }
+        if has_jfet {
+            code.push_str(&self.render("device_jfet", &Context::new())?);
+        }
+        if has_tube {
+            code.push_str(&self.render("device_tube", &Context::new())?);
         }
 
         Ok(code)
@@ -428,21 +575,20 @@ impl RustEmitter {
             ctx.insert("inductors", &inductor_template_data(ir, false));
         }
 
-        // A_neg * v_prev lines
+        // A_neg * v_prev lines (using pre-analyzed sparsity)
         let assign_op = if ir.has_dc_sources { "+=" } else { "=" };
         let mut a_neg_lines = String::new();
         for i in 0..n {
-            let mut terms = Vec::new();
-            for j in 0..n {
-                if ir.a_neg(i, j) != 0.0 {
-                    terms.push(format!("state.a_neg[{}][{}] * state.v_prev[{}]", i, j, j));
-                }
-            }
-            if terms.is_empty() {
+            let nz_cols = &ir.sparsity.a_neg.nz_by_row[i];
+            if nz_cols.is_empty() {
                 if !ir.has_dc_sources {
                     a_neg_lines.push_str(&format!("    rhs[{}] = 0.0;\n", i));
                 }
             } else {
+                let terms: Vec<String> = nz_cols
+                    .iter()
+                    .map(|&j| format!("state.a_neg[{}][{}] * state.v_prev[{}]", i, j, j))
+                    .collect();
                 a_neg_lines.push_str(&format!(
                     "    rhs[{}] {} {};\n",
                     i,
@@ -453,19 +599,17 @@ impl RustEmitter {
         }
         ctx.insert("a_neg_lines", &a_neg_lines);
 
-        // N_i * i_nl_prev lines
+        // N_i * i_nl_prev lines (using pre-analyzed sparsity)
         let has_nl_prev = m > 0;
         ctx.insert("has_nl_prev", &has_nl_prev);
         if has_nl_prev {
             let mut nl_prev_lines = String::new();
             for i in 0..n {
-                for j in 0..m {
-                    if ir.n_i(i, j) != 0.0 {
-                        nl_prev_lines.push_str(&format!(
-                            "    rhs[{}] += N_I[{}][{}] * state.i_nl_prev[{}];\n",
-                            i, j, i, j
-                        ));
-                    }
+                for &j in &ir.sparsity.n_i.nz_by_row[i] {
+                    nl_prev_lines.push_str(&format!(
+                        "    rhs[{}] += N_I[{}][{}] * state.i_nl_prev[{}];\n",
+                        i, j, i, j
+                    ));
                 }
             }
             ctx.insert("nl_prev_lines", &nl_prev_lines);
@@ -480,17 +624,20 @@ impl RustEmitter {
     }
 
     fn emit_extract_voltages(&self, ir: &CircuitIR) -> Result<String, CodegenError> {
-        let n = ir.topology.n;
         let m = ir.topology.m;
         let mut ctx = Context::new();
 
+        // N_v extraction lines (using pre-analyzed sparsity)
         let mut extract_lines = String::new();
         for i in 0..m {
             extract_lines.push_str("        ");
-            let mut first = true;
-            for j in 0..n {
-                let coeff = ir.n_v(i, j);
-                if coeff != 0.0 {
+            let nz_cols = &ir.sparsity.n_v.nz_by_row[i];
+            if nz_cols.is_empty() {
+                extract_lines.push_str("0.0");
+            } else {
+                let mut first = true;
+                for &j in nz_cols {
+                    let coeff = ir.n_v(i, j);
                     let abs_val = coeff.abs();
                     let is_negative = coeff < 0.0;
 
@@ -511,9 +658,6 @@ impl RustEmitter {
                     }
                     first = false;
                 }
-            }
-            if first {
-                extract_lines.push_str("0.0");
             }
             extract_lines.push_str(",\n");
         }
@@ -538,6 +682,9 @@ impl RustEmitter {
         if num_inductors > 0 {
             ctx.insert("inductors", &inductor_template_data(ir, false));
         }
+
+        let os_factor = ir.solver_config.oversampling_factor;
+        ctx.insert("oversampling_factor", &os_factor);
 
         let num_pots = ir.pots.len();
         ctx.insert("num_pots", &num_pots);
@@ -584,6 +731,194 @@ impl RustEmitter {
         }
 
         self.render("process_sample", &ctx)
+    }
+
+    /// Emit oversampling wrapper: constants, allpass helper, halfband, and process_sample.
+    fn emit_oversampler(ir: &CircuitIR) -> String {
+        let factor = ir.solver_config.oversampling_factor;
+        let info = oversampling_info(factor);
+        let mut code = section_banner("OVERSAMPLING");
+
+        // Emit coefficients as constants
+        code.push_str("/// Half-band filter coefficients for allpass polyphase oversampler.\n");
+        let coeffs_str = info
+            .coeffs
+            .iter()
+            .map(|c| fmt_f64(*c))
+            .collect::<Vec<_>>()
+            .join(", ");
+        code.push_str(&format!(
+            "const OS_COEFFS: [f64; {}] = [{}];\n\n",
+            info.num_sections, coeffs_str
+        ));
+
+        if factor == 4 {
+            let coeffs_outer_str = info
+                .coeffs_outer
+                .iter()
+                .map(|c| fmt_f64(*c))
+                .collect::<Vec<_>>()
+                .join(", ");
+            code.push_str(&format!(
+                "const OS_COEFFS_OUTER: [f64; {}] = [{}];\n\n",
+                info.num_sections_outer, coeffs_outer_str
+            ));
+        }
+
+        // Emit allpass inline function (takes slice + offset to avoid double &mut borrow)
+        code.push_str(
+            "/// First-order allpass section: y = c*(x - y1) + x1\n\
+             /// State layout: state[base] = x1, state[base+1] = y1\n\
+             #[inline(always)]\n\
+             fn os_allpass(x: f64, c: f64, state: &mut [f64], base: usize) -> f64 {\n\
+             \x20   let y = c * x + state[base] - c * state[base + 1];\n\
+             \x20   state[base] = x;\n\
+             \x20   state[base + 1] = y;\n\
+             \x20   y\n\
+             }\n\n",
+        );
+
+        // Emit halfband_process inline function
+        Self::emit_halfband_fn(&mut code, "os_halfband", &info.coeffs, info.state_size);
+        if factor == 4 {
+            Self::emit_halfband_fn(
+                &mut code,
+                "os_halfband_outer",
+                &info.coeffs_outer,
+                info.state_size_outer,
+            );
+        }
+
+        // Emit the public process_sample wrapper
+        code.push_str("/// Process a single audio sample through the circuit with oversampling.\n");
+        code.push_str("///\n");
+        code.push_str(&format!(
+            "/// Runs the circuit at {}x the host sample rate to reduce aliasing.\n",
+            factor
+        ));
+        code.push_str("#[inline]\n");
+        code.push_str(
+            "pub fn process_sample(input: f64, state: &mut CircuitState) -> f64 {\n",
+        );
+        code.push_str(
+            "    let input = if input.is_finite() { input.clamp(-100.0, 100.0) } else { 0.0 };\n\n",
+        );
+
+        if factor == 2 {
+            Self::emit_2x_wrapper(&mut code);
+        } else if factor == 4 {
+            Self::emit_4x_wrapper(&mut code);
+        }
+
+        code.push_str("}\n\n");
+        code
+    }
+
+    /// Emit a halfband filter function that processes input through even/odd allpass chains.
+    fn emit_halfband_fn(code: &mut String, name: &str, coeffs: &[f64], state_size: usize) {
+        let num_sections = coeffs.len();
+        let even_count = num_sections.div_ceil(2);
+        let odd_count = num_sections / 2;
+
+        code.push_str(&format!(
+            "/// Half-band filter: processes input through even/odd allpass chains.\n\
+             #[inline(always)]\n\
+             fn {name}(input: f64, coeffs: &[f64], state: &mut [f64; {state_size}]) -> (f64, f64) {{\n"
+        ));
+
+        // Even chain: coefficients at indices 0, 2, 4, ...
+        // State layout: even sections first, then odd sections
+        code.push_str("    let mut even = input;\n");
+        for i in 0..even_count {
+            let coeff_idx = i * 2; // even-indexed coefficients
+            let state_base = i * 2; // sequential state storage for even chain
+            code.push_str(&format!(
+                "    even = os_allpass(even, coeffs[{coeff_idx}], state, {state_base});\n",
+            ));
+        }
+
+        // Odd chain: coefficients at indices 1, 3, 5, ...
+        code.push_str("    let mut odd = input;\n");
+        let odd_state_offset = even_count * 2;
+        for i in 0..odd_count {
+            let coeff_idx = i * 2 + 1; // odd-indexed coefficients
+            let state_base = odd_state_offset + i * 2;
+            code.push_str(&format!(
+                "    odd = os_allpass(odd, coeffs[{coeff_idx}], state, {state_base});\n",
+            ));
+        }
+
+        code.push_str("    (even, odd)\n");
+        code.push_str("}\n\n");
+    }
+
+    /// Emit the 2x oversampling wrapper body.
+    fn emit_2x_wrapper(code: &mut String) {
+        // Upsample: halfband → 2 samples
+        code.push_str(
+            "    // Upsample: half-band filter produces 2 samples at internal rate\n\
+             \x20   let (up_even, up_odd) = os_halfband(input, &OS_COEFFS, &mut state.os_up_state);\n\n",
+        );
+
+        // Process both at 2x rate
+        code.push_str(
+            "    // Process both samples at 2x rate\n\
+             \x20   let out_even = process_sample_inner(up_even, state);\n\
+             \x20   let out_odd = process_sample_inner(up_odd, state);\n\n",
+        );
+
+        // Downsample: filter both and combine
+        code.push_str(
+            "    // Downsample: half-band filter combines 2 samples into 1\n\
+             \x20   let (dn1_even, _) = os_halfband(out_even, &OS_COEFFS, &mut state.os_dn_state);\n\
+             \x20   let (_, dn2_odd) = os_halfband(out_odd, &OS_COEFFS, &mut state.os_dn_state);\n\
+             \x20   let out = (dn1_even + dn2_odd) * 0.5;\n\
+             \x20   if out.is_finite() { out.clamp(-10.0, 10.0) } else { 0.0 }\n",
+        );
+    }
+
+    /// Emit the 4x oversampling wrapper body (cascaded 2x stages).
+    fn emit_4x_wrapper(code: &mut String) {
+        // Outer upsample: 1 → 2 at 2x rate
+        code.push_str(
+            "    // Outer upsample: 1 → 2 samples at 2x rate\n\
+             \x20   let (outer_even, outer_odd) = os_halfband_outer(\n\
+             \x20       input, &OS_COEFFS_OUTER, &mut state.os_up_state_outer,\n\
+             \x20   );\n\n",
+        );
+
+        // Inner upsample + process for each outer sample
+        code.push_str(
+            "    // Inner upsample + process: each 2x sample → 2 samples at 4x rate\n\
+             \x20   let (inner_e0, inner_o0) = os_halfband(outer_even, &OS_COEFFS, &mut state.os_up_state);\n\
+             \x20   let proc_e0 = process_sample_inner(inner_e0, state);\n\
+             \x20   let proc_o0 = process_sample_inner(inner_o0, state);\n\
+             \x20   let (dn_e0, _) = os_halfband(proc_e0, &OS_COEFFS, &mut state.os_dn_state);\n\
+             \x20   let (_, dn_o0) = os_halfband(proc_o0, &OS_COEFFS, &mut state.os_dn_state);\n\
+             \x20   let inner_out0 = (dn_e0 + dn_o0) * 0.5;\n\n",
+        );
+
+        code.push_str(
+            "    let (inner_e1, inner_o1) = os_halfband(outer_odd, &OS_COEFFS, &mut state.os_up_state);\n\
+             \x20   let proc_e1 = process_sample_inner(inner_e1, state);\n\
+             \x20   let proc_o1 = process_sample_inner(inner_o1, state);\n\
+             \x20   let (dn_e1, _) = os_halfband(proc_e1, &OS_COEFFS, &mut state.os_dn_state);\n\
+             \x20   let (_, dn_o1) = os_halfband(proc_o1, &OS_COEFFS, &mut state.os_dn_state);\n\
+             \x20   let inner_out1 = (dn_e1 + dn_o1) * 0.5;\n\n",
+        );
+
+        // Outer downsample
+        code.push_str(
+            "    // Outer downsample: 2 → 1 sample at host rate\n\
+             \x20   let (dn_outer_e, _) = os_halfband_outer(\n\
+             \x20       inner_out0, &OS_COEFFS_OUTER, &mut state.os_dn_state_outer,\n\
+             \x20   );\n\
+             \x20   let (_, dn_outer_o) = os_halfband_outer(\n\
+             \x20       inner_out1, &OS_COEFFS_OUTER, &mut state.os_dn_state_outer,\n\
+             \x20   );\n\
+             \x20   let out = (dn_outer_e + dn_outer_o) * 0.5;\n\
+             \x20   if out.is_finite() { out.clamp(-10.0, 10.0) } else { 0.0 }\n",
+        );
     }
 
     fn emit_a_neg_correction(code: &mut String, idx: usize, pot: &PotentiometerIR) {
@@ -748,17 +1083,15 @@ impl RustEmitter {
         code.push_str("    // Newton-Raphson iteration\n");
         code.push_str("    for iter in 0..MAX_ITER {\n\n");
 
-        // Compute v_d = p + K * i_nl
+        // Compute v_d = p + K * i_nl (using pre-analyzed sparsity)
         code.push_str("        // Compute controlling voltages: v_d = p + K * i_nl\n");
         let has_pots = !ir.pots.is_empty();
         let vd_let = if has_pots { "let mut" } else { "let" };
         for i in 0..m {
             code.push_str(&format!("        {} v_d{} = ", vd_let, i));
             code.push_str(&format!("p[{}]", i));
-            for j in 0..m {
-                if ir.k(i, j) != 0.0 {
-                    code.push_str(&format!(" + state.k[{}][{}] * i_nl[{}]", i, j, j));
-                }
+            for &j in &ir.sparsity.k.nz_by_row[i] {
+                code.push_str(&format!(" + state.k[{}][{}] * i_nl[{}]", i, j, j));
             }
             code.push_str(";\n");
         }
@@ -791,7 +1124,7 @@ impl RustEmitter {
                 }
             }
         }
-        code.push_str("\n");
+        code.push('\n');
 
         if has_nonlinear {
             // Device currents and Jacobian entries
@@ -812,17 +1145,15 @@ impl RustEmitter {
                     DeviceType::Bjt => {
                         let s = slot.start_idx;
                         let s1 = s + 1;
+                        let d = dev_num;
                         code.push_str(&format!(
-                            "        let i_dev{} = bjt_ic(v_d{}, v_d{}, DEVICE_{}_IS, DEVICE_{}_VT, DEVICE_{}_BETA_R, DEVICE_{}_SIGN);\n",
-                            s, s, s1, dev_num, dev_num, dev_num, dev_num
+                            "        let i_dev{s} = bjt_ic(v_d{s}, v_d{s1}, DEVICE_{d}_IS, DEVICE_{d}_VT, DEVICE_{d}_BETA_R, DEVICE_{d}_SIGN, DEVICE_{d}_USE_GP, DEVICE_{d}_VAF, DEVICE_{d}_VAR, DEVICE_{d}_IKF);\n"
                         ));
                         code.push_str(&format!(
-                            "        let i_dev{} = bjt_ib(v_d{}, v_d{}, DEVICE_{}_IS, DEVICE_{}_VT, DEVICE_{}_BETA_F, DEVICE_{}_BETA_R, DEVICE_{}_SIGN);\n",
-                            s1, s, s1, dev_num, dev_num, dev_num, dev_num, dev_num
+                            "        let i_dev{s1} = bjt_ib(v_d{s}, v_d{s1}, DEVICE_{d}_IS, DEVICE_{d}_VT, DEVICE_{d}_BETA_F, DEVICE_{d}_BETA_R, DEVICE_{d}_SIGN);\n"
                         ));
                         code.push_str(&format!(
-                            "        let bjt{}_jac = bjt_jacobian(v_d{}, v_d{}, DEVICE_{}_IS, DEVICE_{}_VT, DEVICE_{}_BETA_F, DEVICE_{}_BETA_R, DEVICE_{}_SIGN);\n",
-                            dev_num, s, s1, dev_num, dev_num, dev_num, dev_num, dev_num
+                            "        let bjt{d}_jac = bjt_jacobian(v_d{s}, v_d{s1}, DEVICE_{d}_IS, DEVICE_{d}_VT, DEVICE_{d}_BETA_F, DEVICE_{d}_BETA_R, DEVICE_{d}_SIGN, DEVICE_{d}_USE_GP, DEVICE_{d}_VAF, DEVICE_{d}_VAR, DEVICE_{d}_IKF);\n"
                         ));
                         code.push_str(&format!(
                             "        let jdev_{}_{} = bjt{}_jac[0];\n",
@@ -841,9 +1172,46 @@ impl RustEmitter {
                             s1, s1, dev_num
                         ));
                     }
+                    DeviceType::Jfet => {
+                        let s = slot.start_idx;
+                        code.push_str(&format!(
+                            "        let i_dev{} = jfet_id(v_d{}, DEVICE_{}_IDSS, DEVICE_{}_VP, DEVICE_{}_SIGN);\n",
+                            s, s, dev_num, dev_num, dev_num
+                        ));
+                        code.push_str(&format!(
+                            "        let jdev_{}_{} = jfet_conductance(v_d{}, DEVICE_{}_IDSS, DEVICE_{}_VP, DEVICE_{}_SIGN);\n",
+                            s, s, s, dev_num, dev_num, dev_num
+                        ));
+                    }
+                    DeviceType::Tube => {
+                        let s = slot.start_idx;
+                        let s1 = s + 1;
+                        let d = dev_num;
+                        code.push_str(&format!(
+                            "        let i_dev{s} = tube_ip(v_d{s}, v_d{s1}, DEVICE_{d}_MU, DEVICE_{d}_EX, DEVICE_{d}_KG1, DEVICE_{d}_KP, DEVICE_{d}_KVB);\n"
+                        ));
+                        code.push_str(&format!(
+                            "        let i_dev{s1} = tube_ig(v_d{s}, DEVICE_{d}_IG_MAX, DEVICE_{d}_VGK_ONSET);\n"
+                        ));
+                        code.push_str(&format!(
+                            "        let tube{d}_jac = tube_jacobian(v_d{s}, v_d{s1}, DEVICE_{d}_MU, DEVICE_{d}_EX, DEVICE_{d}_KG1, DEVICE_{d}_KP, DEVICE_{d}_KVB, DEVICE_{d}_IG_MAX, DEVICE_{d}_VGK_ONSET);\n"
+                        ));
+                        code.push_str(&format!(
+                            "        let jdev_{}_{} = tube{}_jac[0];\n", s, s, d
+                        ));
+                        code.push_str(&format!(
+                            "        let jdev_{}_{} = tube{}_jac[1];\n", s, s1, d
+                        ));
+                        code.push_str(&format!(
+                            "        let jdev_{}_{} = tube{}_jac[2];\n", s1, s, d
+                        ));
+                        code.push_str(&format!(
+                            "        let jdev_{}_{} = tube{}_jac[3];\n", s1, s1, d
+                        ));
+                    }
                 }
             }
-            code.push_str("\n");
+            code.push('\n');
 
             // Residuals
             code.push_str("        // Residuals: f(i) = i - i_dev(v(i)) = 0\n");
@@ -853,7 +1221,7 @@ impl RustEmitter {
                     i, i, i
                 ));
             }
-            code.push_str("\n");
+            code.push('\n');
 
             // NR Jacobian: J[i][j] = delta_ij - sum_k(jdev_ik * K'[k][j])
             // When pots are present, K' = K - scale * nv_su * su_ni^T
@@ -906,7 +1274,7 @@ impl RustEmitter {
                     ));
                 }
             }
-            code.push_str("\n");
+            code.push('\n');
 
             // Solve the linear system based on matrix size
             match m {
@@ -932,13 +1300,13 @@ impl RustEmitter {
                     code.push_str("        let delta1 = inv_det * (-j10 * f0 + j00 * f1);\n\n");
                     emit_nr_clamp_and_converge(code, 2, "        ");
                 }
-                3..=8 => {
+                3..=16 => {
                     Self::generate_gauss_elim(code, m);
                 }
                 _ => {
                     return Err(CodegenError::UnsupportedTopology(format!(
-                        "M={} nonlinear devices not supported (max 8)",
-                        m
+                        "M={} nonlinear dimensions not supported (max {})",
+                        m, crate::dk::MAX_M
                     )));
                 }
             }
@@ -962,7 +1330,7 @@ impl RustEmitter {
                 i, i
             ));
         }
-        code.push_str("\n");
+        code.push('\n');
         code.push_str("    i_nl\n");
         code.push_str("}\n\n");
 

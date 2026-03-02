@@ -144,6 +144,20 @@ pub enum Element {
         /// Model name (references .model with OA type)
         model: String,
     },
+    /// Triode: Tname n_grid n_plate n_cathode modelname
+    ///
+    /// M=2 per triode: plate current (Ip) and grid current (Ig).
+    Triode {
+        name: String,
+        /// Grid node
+        n_grid: String,
+        /// Plate (anode) node
+        n_plate: String,
+        /// Cathode node
+        n_cathode: String,
+        /// Model name (references .model with TUBE type)
+        model: String,
+    },
     /// Subcircuit instance: Xname nodes... subcktname
     SubcktInstance {
         name: String,
@@ -166,6 +180,7 @@ impl Element {
             | Element::Jfet { name, .. }
             | Element::Mosfet { name, .. }
             | Element::Opamp { name, .. }
+            | Element::Triode { name, .. }
             | Element::SubcktInstance { name, .. } => name,
         }
     }
@@ -177,7 +192,8 @@ impl Element {
             | Element::Bjt { model, .. }
             | Element::Jfet { model, .. }
             | Element::Mosfet { model, .. }
-            | Element::Opamp { model, .. } => Some(model),
+            | Element::Opamp { model, .. }
+            | Element::Triode { model, .. } => Some(model),
             _ => None,
         }
     }
@@ -241,7 +257,7 @@ impl Parser {
         while i < raw_lines.len() {
             // Strip inline comments (semicolon and $ delimiter)
             let line = raw_lines[i]
-                .split(|c| c == ';' || c == '$')
+                .split([';', '$'])
                 .next()
                 .unwrap_or(raw_lines[i])
                 .trim();
@@ -250,14 +266,14 @@ impl Parser {
             let mut accumulated = line.to_string();
             while i + 1 < raw_lines.len() {
                 let next = raw_lines[i + 1]
-                    .split(|c| c == ';' || c == '$')
+                    .split([';', '$'])
                     .next()
                     .unwrap_or(raw_lines[i + 1])
                     .trim();
-                if next.starts_with('+') {
+                if let Some(stripped) = next.strip_prefix('+') {
                     // Continuation line: strip '+' and append
                     accumulated.push(' ');
-                    accumulated.push_str(next[1..].trim());
+                    accumulated.push_str(stripped.trim());
                     i += 1;
                 } else {
                     break;
@@ -573,6 +589,7 @@ impl Parser {
             'Q' => self.parse_bjt(&parts),
             'J' => self.parse_jfet(&parts),
             'M' => self.parse_mosfet(&parts),
+            'T' => self.parse_triode(&parts),
             'U' => self.parse_opamp(&parts),
             'X' => self.parse_subckt_instance(&parts),
             _ => Err(self.error(format!("Unknown element type: {}", first_char))),
@@ -743,6 +760,18 @@ impl Parser {
             n_plus: parts[1].to_string(),
             n_minus: parts[2].to_string(),
             n_out: parts[3].to_string(),
+            model: parts[4].to_string(),
+        })
+    }
+
+    fn parse_triode(&self, parts: &[&str]) -> Result<Element, ParseError> {
+        // Tname n_grid n_plate n_cathode modelname
+        self.require_parts(parts, 5, "Tname n_grid n_plate n_cathode modelname")?;
+        Ok(Element::Triode {
+            name: parts[0].to_string(),
+            n_grid: parts[1].to_string(),
+            n_plate: parts[2].to_string(),
+            n_cathode: parts[3].to_string(),
             model: parts[4].to_string(),
         })
     }

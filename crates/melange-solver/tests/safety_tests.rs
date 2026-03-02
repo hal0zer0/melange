@@ -156,13 +156,6 @@ R1 in 0 1k
     // Node n2 only has a capacitor — at DC it's floating.
     // S matrix may have very large diagonal (>1e6) for that node.
     let n = kernel.n;
-    let mut has_large = false;
-    for i in 0..n {
-        let s_ii = kernel.s[i * n + i];
-        if s_ii > 1e6 {
-            has_large = true;
-        }
-    }
     // With trapezoidal rule, capacitors do provide some conductance (2C/T),
     // so the matrix won't truly explode. Check for finite at least.
     for i in 0..n {

@@ -87,7 +87,7 @@ pub fn generate_html_report(
 
     let html = format_html_report(
         report,
-        &status_class,
+        status_class,
         status_text,
         &signal_overlay_svg,
         &error_signal_svg,

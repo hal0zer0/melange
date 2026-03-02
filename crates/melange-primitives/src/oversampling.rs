@@ -111,7 +111,7 @@ impl<const N_SECTIONS: usize> HalfBandFilter<N_SECTIONS> {
     /// Number of active sections in the even allpass chain.
     #[inline(always)]
     fn even_len(&self) -> usize {
-        (N_SECTIONS + 1) / 2
+        N_SECTIONS.div_ceil(2)
     }
 
     /// Number of active sections in the odd allpass chain.
