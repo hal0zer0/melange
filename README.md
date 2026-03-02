@@ -9,7 +9,7 @@ An open-source Rust toolkit for translating analog circuit schematics into real-
 
 ## The Problem
 
-There is no open-source tool that takes a circuit netlist and produces optimized real-time DSP code. The closest thing (Cytomic CCS) is proprietary and closed. Every audio developer who wants to model a real circuit (guitar amp, pedal, preamp, compressor) currently:
+There is no open-source tool that takes a circuit netlist and produces optimized real-time DSP code. Every audio developer who wants to model a real circuit (guitar amp, pedal, preamp, compressor) currently:
 
 1. Reads a schematic by hand
 2. Derives MNA matrices by hand
@@ -19,16 +19,148 @@ There is no open-source tool that takes a circuit netlist and produces optimized
 
 **Melange automates steps 2-5.**
 
+## One Command, Done
+
+### SPICE netlist to audio plugin
+
+```bash
+melange compile fuzz-face --format plugin -o my-fuzz
+cd my-fuzz && cargo build --release
+# You now have a VST3/CLAP plugin.
+```
+
+That's it. One command turns a circuit into a buildable nih-plug project with all the DSP, parameters, and real-time-safe code generated for you.
+
+### Simulate a circuit to WAV
+
+```bash
+# Push a guitar recording through a Tube Screamer
+melange simulate tube-screamer --input-audio guitar.wav -o output.wav
+
+# Quick test tone through a Big Muff
+melange simulate big-muff --amplitude 0.1 -o fuzz.wav
+```
+
+No code, no compilation — just circuit + audio in, audio out.
+
+### Fetch circuits from anywhere
+
+```bash
+# Built-in circuits — just use the name
+melange compile tube-screamer --format plugin -o ts9
+
+# Local SPICE netlist
+melange compile my-circuit.cir --format plugin -o my-plugin
+
+# Add a git repo as a circuit source
+melange sources add pedalboards https://github.com/someone/spice-pedals
+melange compile pedalboards:rat-distortion --format plugin -o rat
+```
+
+Sources are cached locally. Share circuit libraries via git, pull them by name.
+
+### Inspect any circuit
+
+```bash
+melange nodes big-muff
+# Nodes in circuit:
+#   (0) GND - Ground reference
+#   (1) in
+#   (2) base1
+#   ...
+# Nonlinear devices:
+#   Q1: Bjt (dimension: 2)
+#   Q2: Bjt (dimension: 2)
+#   D1: Diode (dimension: 1)
+#   D2: Diode (dimension: 1)
+```
+
+### Cross-compile for macOS from Linux
+
+```bash
+cargo zigbuild --release --target universal2-apple-darwin
+rcodesign sign target/universal2-apple-darwin/release/libmy_plugin.dylib
+# Universal Mac binary, ad-hoc signed. Ship it.
+```
+
+## Built-in Circuits
+
+Melange ships with classic circuits ready to compile:
+
+| Circuit | Description |
+|---------|-------------|
+| `tube-screamer` | Classic op-amp clipper (Tube Screamer style) |
+| `fuzz-face` | 2-transistor fuzz (Fuzz Face style) |
+| `big-muff` | 4-transistor fuzz (Big Muff style) |
+| `rc-lowpass` | Simple RC lowpass filter for testing |
+| `mordor-screamer` | High-gain distortion forged in Mount Doom |
+
+Plus real-world validated circuits in `circuits/`:
+
+| Circuit | Description |
+|---------|-------------|
+| `pultec-eq.cir` | Pultec EQP-1A passive tube EQ (3 switches, 5 pots, 12AX7) |
+| `wurli-preamp.cir` | Wurlitzer 200A preamp (2-stage BJT, LDR tremolo pot) |
+
+## What Gets Generated
+
+The generated code is completely standalone — zero runtime dependencies on melange. It includes:
+
+- Pre-inverted DK matrices with sparsity-aware emission (only non-zero entries)
+- Newton-Raphson solver (M=1 direct, M=2 Cramer's, M=3-16 Gaussian elimination)
+- DC operating point initialization for correct bias
+- Sherman-Morrison rank-1 updates for dynamic potentiometers (O(N) not O(N^3))
+- Matrix rebuild for runtime sample rate changes
+- DC blocking filter (5 Hz HPF)
+- Optional 2x/4x oversampling (self-contained polyphase half-band IIR)
+- All buffers pre-allocated — zero heap allocation in the audio path
+
 ## Features
 
-- **SPICE Netlist Parser**: Parse industry-standard SPICE netlists for audio circuits
-- **MNA/DK Solver**: Modified Nodal Analysis with Discrete K-method reduction
-- **Device Models**: Parameterized nonlinear models for BJT, tube, diode, MOSFET, JFET, LDR, op-amp
-- **Real-Time Safe**: Zero heap allocation in the audio thread, no `unsafe` code
-- **Code Generation**: Generate optimized Rust code from circuit descriptions
-- **Validation Pipeline**: Automated comparison against ngspice reference simulations
+- **SPICE Netlist Parser**: Industry-standard SPICE netlists with `.model` and `.subckt` support
+- **MNA/DK Solver**: Modified Nodal Analysis with Discrete K-method (Yeh 2009)
+- **7 Device Models**: Diode, BJT (Ebers-Moll/Gummel-Poon), JFET, MOSFET, vacuum tube (Koren), op-amp
+- **Dynamic Controls**: `.pot` (potentiometers) and `.switch` (ganged component switching) directives
+- **Real-Time Safe**: Zero heap allocation in audio callback, no `unsafe` code, f64 precision
+- **Code Generation**: Optimized Rust with const generics, sparse matrices, unrolled loops
+- **Plugin Generation**: One-step CLAP/VST3 plugin projects via nih-plug
+- **SPICE Validation**: Automated comparison against ngspice reference simulations
+- **Cross-Compilation**: Build macOS plugins from Linux via cargo-zigbuild
 
-## Quick Start
+## Architecture
+
+```
+Layer 5: melange-plugin     — nih-plug integration (voice mgmt, oversampling, params)
+Layer 4: melange-validate   — SPICE-to-Rust validation pipeline
+Layer 3: melange-solver     — MNA/DK-method engine + code generation (THE CORE)
+Layer 2: melange-devices    — Component models (BJT, tube, diode, LDR, opamp)
+Layer 1: melange-primitives — DSP building blocks (filters, oversampling, NR helpers)
+         melange-cli        — CLI tool
+```
+
+Each crate is useful independently. The pipeline:
+
+```
+SPICE Netlist → Parser → MNA System → DK Kernel → CircuitIR → Rust Emitter → Source Code
+```
+
+## Supported Components
+
+| Component | Runtime | Codegen | Notes |
+|-----------|---------|---------|-------|
+| Resistor/Capacitor/Inductor | yes | yes | Trapezoidal companion models |
+| Diode | yes | yes | Shockley equation, series resistance, LED |
+| BJT | yes | yes | Ebers-Moll, Gummel-Poon (VAF, VAR, IKF, IKR) |
+| JFET | yes | yes | Saturation-only (1D) |
+| MOSFET | yes | yes | Saturation-only (1D) |
+| Vacuum Tube | yes | yes | Koren triode + Leach grid current |
+| Op-Amp | yes | yes | VCCS macromodel (linear) |
+| CdS LDR | yes | — | VTL5C3/4, NSL-32 with asymmetric envelope |
+| Voltage Source | yes | yes | DC (Norton equivalent) |
+| Potentiometer | — | yes | Sherman-Morrison rank-1 updates |
+| Switch | — | yes | Ganged R/C/L component switching |
+
+## Quick Start (Library)
 
 ```rust
 use melange_solver::parser::Netlist;
@@ -49,79 +181,42 @@ let mna = MnaSystem::from_netlist(&netlist)?;
 let kernel = DkKernel::from_mna(&mna, 44100.0)?;
 ```
 
-## Architecture
+## CLI Reference
 
 ```
-Layer 5: melange-plugin     — nih-plug integration (voice mgmt, oversampling, params)
-Layer 4: melange-validate   — SPICE-to-Rust validation pipeline
-Layer 3: melange-solver     — MNA/DK-method engine + code generation (THE CORE)
-Layer 2: melange-devices    — Component models (BJT, tube, diode, LDR, opamp)
-Layer 1: melange-primitives — DSP building blocks (filters, oversampling, NR helpers)
-         melange-cli        — CLI tool for circuit compilation and benchmarking
+melange compile <circuit> -o <output>     Compile circuit to Rust code or plugin project
+melange simulate <circuit> -o <output>    Simulate circuit, write WAV output
+melange validate <circuit> -r <ref>       Compare against SPICE reference
+melange nodes <circuit>                   List nodes and devices in a circuit
+melange builtins                          List built-in circuits
+melange sources add <name> <url>          Add a git repo as a circuit source
+melange sources list                      List configured sources
+melange cache list|clear|stats            Manage cached circuits
 ```
 
-Each crate is useful independently. You can use `melange-primitives` without any other crate.
-
-## Supported Components
-
-| Component | Status | Models |
-|-----------|--------|--------|
-| Resistor/Capacitor/Inductor | ✅ Complete | Linear elements with companion models |
-| Diode | ✅ Complete | Shockley equation, series resistance, LED |
-| BJT | ✅ Complete | Ebers-Moll, Gummel-Poon |
-| JFET/MOSFET | ✅ Complete | Shichman-Hodges (Level 1) |
-| Vacuum Tube | ✅ Complete | Koren triode/pentode |
-| Op-Amp | ⚠️ Partial | Boyle macromodel defined, integration pending |
-| CdS LDR | ✅ Complete | VTL5C3/4, NSL-32 with asymmetric envelope |
+Circuits can be referenced as:
+- **Built-in name**: `tube-screamer`, `fuzz-face`, `big-muff`, ...
+- **Local file**: `path/to/circuit.cir`
+- **Source reference**: `sourcename:circuitname`
 
 ## Requirements
 
 - Rust 1.85+ (2024 edition)
-- No external dependencies for core library
-- Optional: ngspice for validation
+- No external dependencies for core library or generated code
+- Optional: ngspice for SPICE validation
+- Optional: zig + cargo-zigbuild for macOS cross-compilation
 
 ## Building
 
 ```bash
-# Build everything
-cargo build --workspace
-
-# Run all tests
-cargo test --workspace
-
-# Run the CLI
-cargo run -p melange-cli
-```
-
-## Safety & Performance
-
-- **Zero `unsafe` code** in the entire codebase
-- **Real-time safe**: No allocation in audio callback
-- **Const generics**: Circuit topology at compile time
-- **f64 everywhere**: Double precision for numerical accuracy
-
-## Documentation
-
-- [Architecture Overview](docs/architecture.md)
-- [DK Method](docs/dk-method.md)
-- [MNA Assembly](docs/mna-assembly.md)
-- [Device Models](docs/device-models.md)
-- [Known Limitations](docs/limitations.md)
-
-## Testing
-
-91 tests across all layers:
-
-```
-melange-primitives: 29 tests (filters, oversampling, NR, companion models)
-melange-devices:    33 tests (BJT, diode, tube, JFET, MOSFET, LDR, opamp)
-melange-solver:     25 tests (parser, MNA, DK kernel, solver)
-doc-tests:           3 tests
+cargo build --workspace       # Build everything
+cargo test --workspace        # Run all tests (~640 tests)
+cargo run -p melange-cli      # Run the CLI
 ```
 
 ## Origin
 
-Melange was extracted from the [OpenWurli](https://github.com/openwurli/openwurli) project, a Wurlitzer 200A virtual instrument. The generic components (DK solver, device models, validation pipeline) are being generalized into this standalone toolkit.
+Melange was extracted from the [OpenWurli](https://github.com/openwurli/openwurli) project, a Wurlitzer 200A virtual instrument. The DK solver, device models, and validation pipeline were generalized into this standalone toolkit.
 
 ## License
 
@@ -132,12 +227,8 @@ Licensed under either of:
 
 at your option.
 
-## Contributing
-
-See [AGENTS.md](AGENTS.md) for development guidelines and coding standards.
-
 ## Acknowledgments
 
 - David Yeh's 2009 thesis on the Discrete K-method
-- SPICE - The original circuit simulator by Larry Nagel
+- SPICE — the original circuit simulator by Larry Nagel
 - The audio DSP community
