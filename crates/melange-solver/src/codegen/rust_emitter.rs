@@ -308,7 +308,15 @@ impl Emitter for RustEmitter {
 impl RustEmitter {
     fn emit_header(&self, ir: &CircuitIR) -> Result<String, CodegenError> {
         let mut ctx = Context::new();
-        ctx.insert("title", &ir.metadata.title);
+        // Sanitize title: replace newlines and control characters with spaces
+        // to prevent template injection through a crafted SPICE netlist title line.
+        let sanitized_title: String = ir
+            .metadata
+            .title
+            .chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .collect();
+        ctx.insert("title", &sanitized_title);
         self.render("header", &ctx)
     }
 
@@ -724,7 +732,8 @@ impl RustEmitter {
         code.push_str(&format!(
             "\n\
              \x20       // Invert A to get S\n\
-             \x20       let s = invert_n(a);\n\n\
+             \x20       let (s, singular) = invert_n(a);\n\
+             \x20       if singular {{ self.diag_singular_matrix_count += 1; }}\n\n\
              \x20       // Compute S * N_i product (N x M)\n\
              \x20       let mut s_ni = [[0.0f64; M]; N];\n\
              \x20       for i in 0..N {{\n\

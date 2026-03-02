@@ -178,7 +178,13 @@ fn evaluate_devices(
                 j_dev[(s + 1) * m + s] = tube.grid_current_jacobian(vgk); // dIg/dVgk
                 j_dev[(s + 1) * m + (s + 1)] = 0.0;      // dIg/dVpk = 0
             }
-            _ => {} // Mismatched type/params — skip
+            _ => {
+                // Mismatched type/params — warn instead of silently skipping
+                log::warn!(
+                    "DC OP: unexpected device type/params combination at device index {}",
+                    slot.start_idx
+                );
+            }
         }
     }
 }

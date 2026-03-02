@@ -322,6 +322,7 @@ use circuit::{{process_sample, CircuitState}};
 pub struct CircuitPlugin {{
     params: Arc<CircuitParams>,
     circuit_states: Vec<CircuitState>,
+    current_sample_rate: f64,
 }}
 
 impl Default for CircuitPlugin {{
@@ -329,6 +330,7 @@ impl Default for CircuitPlugin {{
         Self {{
             params: Arc::new(CircuitParams::default()),
             circuit_states: vec![CircuitState::default(); 2],
+            current_sample_rate: 0.0,
         }}
     }}
 }}
@@ -369,6 +371,7 @@ impl Plugin for CircuitPlugin {{
     ) -> bool {{
         let num_channels = audio_io_layout.main_input_channels
             .map(|c| c.get() as usize).unwrap_or(2);
+        self.current_sample_rate = buffer_config.sample_rate as f64;
         self.circuit_states = (0..num_channels).map(|_| {{
             let mut s = CircuitState::default();
             s.set_sample_rate(buffer_config.sample_rate as f64);
@@ -378,8 +381,12 @@ impl Plugin for CircuitPlugin {{
     }}
 
     fn reset(&mut self) {{
+        let sr = self.current_sample_rate;
         for state in &mut self.circuit_states {{
             *state = CircuitState::default();
+            if sr > 0.0 {{
+                state.set_sample_rate(sr);
+            }}
         }}
     }}
 

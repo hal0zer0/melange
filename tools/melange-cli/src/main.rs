@@ -752,7 +752,7 @@ fn simulate_circuit_source(
 
         eprintln!("  Peak output: {:.2}V", solver.diag_peak_output);
         if solver.diag_clamp_count > 0 {
-            eprintln!("  WARNING: Output clipped {} times -- consider adjusting circuit or input level", solver.diag_clamp_count);
+            eprintln!("  WARNING: Output exceeded ±10V {} times -- try reducing --amplitude or adding gain reduction to the circuit", solver.diag_clamp_count);
         }
 
         write_wav(opts.output, actual_sample_rate, &output_samples)?;
@@ -787,7 +787,7 @@ fn simulate_circuit_source(
 
         eprintln!("  Peak output: {:.2}V", solver.diag_peak_output);
         if solver.diag_clamp_count > 0 {
-            eprintln!("  WARNING: Output clipped {} times -- consider adjusting circuit or input level", solver.diag_clamp_count);
+            eprintln!("  WARNING: Output exceeded ±10V {} times -- try reducing --amplitude or adding gain reduction to the circuit", solver.diag_clamp_count);
         }
         if solver.diag_nr_max_iter_count > 0 {
             eprintln!("  NR max iterations: {} times", solver.diag_nr_max_iter_count);

@@ -37,42 +37,10 @@ fn reset_inductors(inductors: &mut [crate::dk::InductorInfo]) {
     }
 }
 
-/// Nonlinear device interface for the solver.
-///
-/// This abstracts over the specific device types from melange-devices.
-/// Uses const generics to specify device dimension at compile time,
-/// enabling stack-allocated arrays and no heap allocation.
-///
-/// # Type Parameters
-/// - `N`: Device dimension (1 for diode, 2 for BJT, etc.)
-pub trait SolverDevice<const N: usize>: Send + Sync {
-    /// Compute currents given controlling voltages.
-    ///
-    /// Returns [I0, I1, ...] where I_k is the k-th terminal current.
-    /// For diode: [I_anode] (cathode current is -I_anode)
-    /// For BJT: [Ic, Ib] (emitter current is -(Ic + Ib))
-    fn currents(&self, v: &[f64; N]) -> [f64; N];
-
-    /// Compute Jacobian: ∂I/∂V for each current-voltage pair.
-    ///
-    /// Returns flattened N×N matrix: [∂I0/∂V0, ∂I0/∂V1, ..., ∂I1/∂V0, ...]
-    fn jacobian(&self, v: &[f64; N]) -> [[f64; N]; N];
-
-    /// Clone into a Box.
-    fn clone_box(&self) -> Box<dyn SolverDevice<N>>;
-}
-
-impl<const N: usize> Clone for Box<dyn SolverDevice<N>> {
-    fn clone(&self) -> Self {
-        self.clone_box()
-    }
-}
-
 /// Enum-based device entry for zero-cost dispatch in the audio hot path.
 ///
-/// This eliminates vtable overhead by using enum dispatch instead of
-/// `Box<dyn SolverDevice<N>>`. All device types are stored inline
-/// with no heap allocation.
+/// This eliminates vtable overhead by using enum dispatch.
+/// All device types are stored inline with no heap allocation.
 #[derive(Debug, Clone)]
 pub enum DeviceEntry {
     /// Shockley diode model (1D)

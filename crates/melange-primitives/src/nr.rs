@@ -387,7 +387,7 @@ mod tests {
             10.0,
         );
         assert!(result.converged());
-        assert!((x - 1.4142135623730951).abs() < 1e-8);
+        assert!((x - std::f64::consts::SQRT_2).abs() < 1e-8);
     }
 
     #[test]

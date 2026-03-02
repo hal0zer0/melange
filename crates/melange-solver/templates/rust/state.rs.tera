@@ -44,6 +44,8 @@ pub struct CircuitState {
     pub diag_nr_max_iter_count: u64,
     /// Diagnostic: number of times NaN triggered state reset
     pub diag_nan_reset_count: u64,
+    /// Diagnostic: number of times matrix inversion detected a singular matrix
+    pub diag_singular_matrix_count: u64,
 
     /// S = A^{-1} matrix, recomputed by set_sample_rate
     pub s: [[f64; N]; N],
@@ -123,6 +125,7 @@ impl Default for CircuitState {
             diag_clamp_count: 0,
             diag_nr_max_iter_count: 0,
             diag_nan_reset_count: 0,
+            diag_singular_matrix_count: 0,
             s: S_DEFAULT,
             a_neg: A_NEG_DEFAULT,
             k: K_DEFAULT,
@@ -175,6 +178,7 @@ impl CircuitState {
         self.diag_clamp_count = 0;
         self.diag_nr_max_iter_count = 0;
         self.diag_nan_reset_count = 0;
+        self.diag_singular_matrix_count = 0;
 {% if num_inductors > 0 %}
         self.ind_i_prev = [0.0; {{ num_inductors }}];
         self.ind_v_prev = [0.0; {{ num_inductors }}];
@@ -319,7 +323,10 @@ impl CircuitState {
 {% endif %}
 
         // Invert A to get S
-        let s = invert_n(a);
+        let (s, singular) = invert_n(a);
+        if singular {
+            self.diag_singular_matrix_count += 1;
+        }
 
         // Compute S * N_i product (N x M)
         let mut s_ni = [[0.0f64; M]; N];
@@ -432,8 +439,11 @@ fn stamp_conductance(mat: &mut [[f64; N]; N], node_i: usize, node_j: usize, g: f
 
 {% endif %}/// Invert an N x N matrix using Gaussian elimination with partial pivoting.
 ///
-/// Returns the identity matrix if the input is singular (graceful degradation).
-fn invert_n(a: [[f64; N]; N]) -> [[f64; N]; N] {
+/// Returns `(result, singular)` where `singular` is `true` if the matrix was
+/// detected as singular (pivot below threshold). On singularity, the identity
+/// matrix is returned as a safe fallback; the caller should record the event
+/// via `diag_singular_matrix_count`.
+fn invert_n(a: [[f64; N]; N]) -> ([[f64; N]; N], bool) {
     let mut aug = [[0.0f64; 2 * N]; N];
     for i in 0..N {
         for j in 0..N {
@@ -455,7 +465,7 @@ fn invert_n(a: [[f64; N]; N]) -> [[f64; N]; N] {
         if max_val < 1e-30 {
             let mut result = [[0.0f64; N]; N];
             for i in 0..N { result[i][i] = 1.0; }
-            return result;
+            return (result, true);
         }
 
         if max_row != col { aug.swap(col, max_row); }
@@ -474,7 +484,7 @@ fn invert_n(a: [[f64; N]; N]) -> [[f64; N]; N] {
         if pivot.abs() < 1e-30 {
             let mut result = [[0.0f64; N]; N];
             for i in 0..N { result[i][i] = 1.0; }
-            return result;
+            return (result, true);
         }
         for j in 0..(2 * N) { aug[col][j] /= pivot; }
         for row in 0..col {
@@ -489,6 +499,6 @@ fn invert_n(a: [[f64; N]; N]) -> [[f64; N]; N] {
             result[i][j] = aug[i][N + j];
         }
     }
-    result
+    (result, false)
 }
 
