@@ -1,0 +1,64 @@
+// Canonical source: melange-devices/src/tube.rs (KorenTriode)
+// Duplicated here because generated code must be self-contained.
+
+/// Koren triode plate current Ip(Vgk, Vpk).
+///
+/// Uses Koren 1996 equation:
+///   inner = Kp * (1/mu + Vgk / sqrt(Kvb + Vpk^2))
+///   E1 = (Vpk / Kp) * ln(1 + exp(inner))
+///   Ip = E1^ex / Kg1   (if E1 > 0)
+#[inline(always)]
+fn tube_ip(vgk: f64, vpk: f64, mu: f64, ex: f64, kg1: f64, kp: f64, kvb: f64) -> f64 {
+    if vpk <= 0.0 { return 0.0; }
+    let s = (kvb + vpk * vpk).sqrt();
+    let inner = kp * (1.0 / mu + vgk / s);
+    let softplus = if inner > 20.0 { inner }
+                   else if inner < -20.0 { 0.0 }
+                   else { (1.0 + inner.exp()).ln() };
+    let e1 = (vpk / kp) * softplus;
+    if e1 <= 0.0 { return 0.0; }
+    e1.powf(ex) / kg1
+}
+
+/// Grid current using smooth power-law model.
+/// Ig = ig_max * max(0, Vgk / vgk_onset)^1.5
+#[inline(always)]
+fn tube_ig(vgk: f64, ig_max: f64, vgk_onset: f64) -> f64 {
+    if vgk <= 0.0 { return 0.0; }
+    let x = vgk / vgk_onset;
+    ig_max * x * x.sqrt()
+}
+
+/// Triode Jacobian: [dIp/dVgk, dIp/dVpk, dIg/dVgk, dIg/dVpk]
+///
+/// dIg/dVpk = 0 (grid current depends only on Vgk).
+#[inline(always)]
+fn tube_jacobian(vgk: f64, vpk: f64, mu: f64, ex: f64, kg1: f64, kp: f64, kvb: f64,
+                 ig_max: f64, vgk_onset: f64) -> [f64; 4] {
+    // Grid current Jacobian
+    let dig_dvgk = if vgk <= 0.0 { 0.0 }
+                   else { ig_max * 1.5 * (vgk / vgk_onset).sqrt() / vgk_onset };
+
+    // Plate current Jacobian
+    if vpk <= 0.0 { return [0.0, 0.0, dig_dvgk, 0.0]; }
+
+    let s = (kvb + vpk * vpk).sqrt();
+    let inner = kp * (1.0 / mu + vgk / s);
+
+    let (sigmoid, softplus) = if inner > 20.0 { (1.0, inner) }
+                              else if inner < -20.0 { (0.0, 0.0) }
+                              else {
+                                  let exp_inner = inner.exp();
+                                  (exp_inner / (1.0 + exp_inner), (1.0 + exp_inner).ln())
+                              };
+
+    let e1 = (vpk / kp) * softplus;
+    if e1 <= 1e-30 { return [0.0, 0.0, dig_dvgk, 0.0]; }
+
+    let dip_de1 = ex * e1.powf(ex - 1.0) / kg1;
+    let de1_dvgk = vpk * sigmoid / s;
+    let de1_dvpk = softplus / kp - sigmoid * vgk * vpk * vpk / (s * s * s);
+
+    [dip_de1 * de1_dvgk, dip_de1 * de1_dvpk, dig_dvgk, 0.0]
+}
+

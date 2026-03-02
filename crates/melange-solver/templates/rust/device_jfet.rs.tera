@@ -1,0 +1,31 @@
+// Canonical source: melange-devices/src/jfet.rs (Jfet)
+// Duplicated here because generated code must be self-contained.
+// NOTE: 1D simplification — saturation-only model, ignores Vds dependency.
+// Vgst is clamped to [0, |Vp|] so drain current never exceeds IDSS.
+
+/// JFET drain current (1D saturation model): Id = IDSS * (Vgst/|Vp|)^2
+/// sign: +1.0 for N-channel, -1.0 for P-channel
+#[inline(always)]
+fn jfet_id(vgs: f64, idss: f64, vp: f64, sign: f64) -> f64 {
+    let vgs_eff = sign * vgs;
+    let vp_eff = sign * vp; // Always negative after sign application
+    let vgst = vgs_eff - vp_eff;
+    if vgst <= 0.0 { return 0.0; } // Cutoff
+    let vp_abs = vp.abs();
+    let vgst = if vgst < vp_abs { vgst } else { vp_abs }; // Cap at |Vp| → Id ≤ IDSS
+    sign * idss * (vgst / vp_abs) * (vgst / vp_abs)
+}
+
+/// JFET transconductance (1D): gm = dId/dVgs = 2 * IDSS * Vgst / Vp^2
+/// Always non-negative (sign cancels in derivative).
+#[inline(always)]
+fn jfet_conductance(vgs: f64, idss: f64, vp: f64, sign: f64) -> f64 {
+    let vgs_eff = sign * vgs;
+    let vp_eff = sign * vp;
+    let vgst = vgs_eff - vp_eff;
+    if vgst <= 0.0 { return 0.0; } // Cutoff
+    let vp_abs = vp.abs();
+    let vgst = if vgst < vp_abs { vgst } else { vp_abs }; // Match current clamp
+    2.0 * idss * vgst / (vp_abs * vp_abs)
+}
+
