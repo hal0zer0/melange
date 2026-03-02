@@ -14,6 +14,7 @@ Quick reference for melange circuit simulation.
 | [DC_OP.md](DC_OP.md) | DC operating point solver | SPICE DC analysis, Nagel (1975) |
 | [CODEGEN.md](CODEGEN.md) | Generated code structure | melange implementation |
 | [DEBUGGING.md](DEBUGGING.md) | Bug signatures | melange debugging experience |
+| [SIGNAL_LEVELS.md](SIGNAL_LEVELS.md) | Signal level contract, DC blocking, diagnostics | melange implementation |
 
 ## Critical Equations (Verified)
 

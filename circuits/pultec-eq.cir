@@ -1,0 +1,108 @@
+* Pultec EQP-1A Passive Equalizer
+* Copyright (c) 2026 Melange Contributors
+* License: MIT OR Apache-2.0
+*
+* Classic passive program equalizer based on the ABSounds/EQP-WDF-1A
+* LTSpice model. Passive LC/RC EQ sections followed by a 12AX7 tube
+* makeup gain stage.
+*
+* Topology:
+*   in -> R1 (jumper) -> hfb (HF boost LC) -> lfb (LF boost C) ->
+*   hfc (HF cut RC) -> Cin -> grid -> [12AX7] -> plate -> output pad -> out
+*
+* Controls (8 total):
+*   3 switches: HF Boost Freq (7-pos), LF Boost Freq (4-pos), HF Cut Freq (3-pos)
+*   5 pots: HF Boost Amount, HF Boost Q, LF Boost Amount, LF Cut Amount, HF Cut Amount
+*
+* Component values from ABSounds/EQP-WDF-1A LTSpice model.
+* Inductor values corrected: 50n/22n -> 50m/22m (millihenries for audio LC resonance).
+
+.model 12AX7 TRIODE(MU=100 EX=1.4 KG1=1060 KP=600 KVB=300)
+.input_impedance 600
+
+* B+ power supply (250V plate voltage)
+VCC vcc 0 DC 250
+
+* === INPUT SECTION ===
+* R1 is a jumper (near-zero resistance), connects input to EQ network
+R1 in eq_in 1m
+
+* === HF BOOST SECTION (series LC resonant to ground) ===
+* The HF boost pot controls how much of the LC resonant circuit
+* is connected to the signal path. At max, full resonant boost.
+* At min (1 ohm), the LC is effectively disconnected.
+* C_hfb and L_hfb are ganged on one 7-position switch.
+R_hfb eq_in hfb_tap 10k
+C_hfb hfb_tap hfb_l 15n
+L_hfb hfb_l 0 176m
+R_hfb_q hfb_tap 0 2.2k
+
+* === LF BOOST SECTION (capacitor to ground for bass shelf) ===
+* The LF boost pot controls how much bass boost cap is active.
+* At max, full cap to ground creates bass shelf.
+R_lfb eq_in lfb_tap 10k
+C_lfb lfb_tap 0 330n
+
+* === LF CUT SECTION (highpass via series cap) ===
+* Higher pot value = more LF cut (less bass passes)
+R_lfc eq_in lfc_out 100k
+C_lfc lfc_out 0 100n
+
+* === HF CUT SECTION (RC lowpass) ===
+* HF cut pot controls the rolloff amount.
+* C_hfc is on a 3-position switch.
+R_hfc eq_in hfc_tap 1k
+C_hfc hfc_tap 0 47n
+
+* === TUBE MAKEUP GAIN (12AX7) ===
+* Input coupling cap
+Cin eq_in grid 100n
+
+* Grid leak resistor
+Rg grid 0 1Meg
+
+* 12AX7 triode (grid, plate, cathode)
+T1 grid plate cathode 12AX7
+
+* Plate load resistor
+Ra vcc plate 100k
+
+* Cathode bias with bypass cap
+Rk cathode 0 1.5k
+Ck cathode 0 25u
+
+* === OUTPUT PAD ===
+* Models cathode follower + output transformer attenuation
+Rpad plate pad 390k
+Rshunt pad 0 6.8k
+
+* Output coupling
+Cout pad out 1u
+Rload out 0 100k
+
+* === SWITCH DIRECTIVES ===
+* HF Boost frequency: 7 positions (ganged C + L)
+* Positions: 3kHz, 4kHz, 5kHz, 8kHz, 10kHz, 12kHz, 16kHz
+.switch C_hfb,L_hfb 15n/176m 15n/100m 10n/100m 10n/50m 6n8/50m 6n8/22m 3n3/22m
+
+* LF Boost frequency: 4 positions
+* Positions: 20Hz, 30Hz, 60Hz, 100Hz
+.switch C_lfb 330n 220n 100n 68n
+
+* HF Cut frequency: 3 positions
+* Positions: ~3.4kHz, ~3.4kHz, ~1.1kHz
+.switch C_hfc 47n 47n 150n
+
+* === POTENTIOMETER DIRECTIVES ===
+* HF Boost Amount (series R to LC network)
+.pot R_hfb 1 10k
+* HF Boost Q (damping resistor across LC)
+.pot R_hfb_q 1 2.2k
+* LF Boost Amount
+.pot R_lfb 1 10k
+* LF Cut Amount
+.pot R_lfc 1 100k
+* HF Cut Amount
+.pot R_hfc 1 1k
+
+.END

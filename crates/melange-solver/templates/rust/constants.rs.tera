@@ -89,3 +89,32 @@ const IND_{{ loop.index0 }}_INDUCTANCE: f64 = {{ ind.inductance }};
 {% endfor %}
 {% endif %}
 
+{% if num_switches > 0 %}
+// =============================================================================
+// SWITCH CONSTANTS
+// =============================================================================
+{% for sw in switches %}
+/// Number of positions for switch {{ sw.index }}
+pub const SWITCH_{{ sw.index }}_NUM_POSITIONS: usize = {{ sw.num_positions }};
+{% for comp in sw.components %}
+const SWITCH_{{ sw.index }}_COMP_{{ loop.index0 }}_NODE_P: usize = {{ comp.node_p }};
+const SWITCH_{{ sw.index }}_COMP_{{ loop.index0 }}_NODE_Q: usize = {{ comp.node_q }};
+const SWITCH_{{ sw.index }}_COMP_{{ loop.index0 }}_NOMINAL: f64 = {{ comp.nominal }};
+const SWITCH_{{ sw.index }}_COMP_{{ loop.index0 }}_TYPE: char = '{{ comp.comp_type }}';
+{% if comp.inductor_index is defined and comp.inductor_index >= 0 %}const SWITCH_{{ sw.index }}_COMP_{{ loop.index0 }}_IND_IDX: usize = {{ comp.inductor_index }};
+{% endif %}{% endfor %}
+/// Position values for switch {{ sw.index }}: [position][component]
+pub const SWITCH_{{ sw.index }}_VALUES: [[f64; {{ sw.num_components }}]; {{ sw.num_positions }}] = [
+{% for pos in sw.position_rows %}    [{{ pos }}],
+{% endfor %}];
+
+{% endfor %}{% endif %}
+/// DC blocking filter coefficient: R = 1 - 2*pi*fc/sr (5Hz cutoff at internal rate)
+pub const DC_BLOCK_R: f64 = {{ dc_block_r }};
+
+/// Output scale factor (applied after DC blocking, before clamping)
+pub const OUTPUT_SCALE: f64 = {{ output_scale }};
+
+/// Whether the nonlinear DC OP solver converged at codegen time
+pub const DC_OP_CONVERGED: bool = {{ dc_op_converged }};
+

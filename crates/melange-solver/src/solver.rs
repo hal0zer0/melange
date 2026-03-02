@@ -397,6 +397,20 @@ pub struct CircuitSolver {
     pub clamp: f64,
     /// Reason the NR solver stopped on the most recent sample.
     last_convergence_reason: ConvergenceReason,
+    /// DC blocking filter state (previous input)
+    pub dc_block_x_prev: f64,
+    /// DC blocking filter state (previous output)
+    pub dc_block_y_prev: f64,
+    /// DC blocking filter coefficient (1 - 2*pi*5/sr)
+    pub dc_block_r: f64,
+    /// Diagnostics: peak absolute output seen
+    pub diag_peak_output: f64,
+    /// Diagnostics: number of samples that exceeded clamp threshold
+    pub diag_clamp_count: u64,
+    /// Diagnostics: number of times NR hit max iterations
+    pub diag_nr_max_iter_count: u64,
+    /// Diagnostics: number of times state was reset due to NaN
+    pub diag_nan_reset_count: u64,
 }
 
 impl CircuitSolver {
@@ -443,6 +457,8 @@ impl CircuitSolver {
         let jacobian_mat = vec![0.0; m * m];
         let delta = vec![0.0; m];
 
+        let dc_block_r = 1.0 - 2.0 * std::f64::consts::PI * 5.0 / kernel.sample_rate;
+
         Self {
             kernel,
             devices,
@@ -469,6 +485,13 @@ impl CircuitSolver {
             tol: 1e-10,
             clamp: 0.01,
             last_convergence_reason: if m == 0 { ConvergenceReason::Linear } else { ConvergenceReason::MaxIterations },
+            dc_block_x_prev: 0.0,
+            dc_block_y_prev: 0.0,
+            dc_block_r,
+            diag_peak_output: 0.0,
+            diag_clamp_count: 0,
+            diag_nr_max_iter_count: 0,
+            diag_nan_reset_count: 0,
         }
     }
 
@@ -492,8 +515,9 @@ impl CircuitSolver {
     /// This is essential for BJT circuits where the transistor must be biased
     /// into its active region before AC signals can be amplified.
     ///
+    /// Returns `true` if the DC OP converged, `false` otherwise.
     /// Does nothing if the DC OP solver fails to converge (keeps zero state).
-    pub fn initialize_dc_op(&mut self, mna: &crate::mna::MnaSystem, device_slots: &[crate::codegen::ir::DeviceSlot]) {
+    pub fn initialize_dc_op(&mut self, mna: &crate::mna::MnaSystem, device_slots: &[crate::codegen::ir::DeviceSlot]) -> bool {
         let config = crate::dc_op::DcOpConfig {
             input_node: self.input_node,
             input_resistance: if self.input_conductance > 0.0 {
@@ -523,6 +547,10 @@ impl CircuitSolver {
             for _ in 0..50 {
                 self.process_sample(0.0);
             }
+            true
+        } else {
+            log::warn!("DC operating point did not converge after all strategies");
+            false
         }
     }
 
@@ -567,16 +595,26 @@ impl CircuitSolver {
             self.i_nl_prev.fill(0.0);
             self.input_prev = 0.0;
             reset_inductors(&mut self.kernel.inductors);
+            self.diag_nan_reset_count += 1;
         }
 
         self.kernel.update_inductors(&self.v_prev);
 
-        let raw = if self.output_node < self.kernel.n {
-            self.v_prev[self.output_node]
-        } else {
-            0.0
-        };
-        clamp_output(raw)
+        let n = self.kernel.n;
+
+        // DC blocking filter (5Hz HPF)
+        let raw_out = if self.output_node < n { self.v_prev[self.output_node] } else { 0.0 };
+        let raw_out = if raw_out.is_finite() { raw_out } else { 0.0 };
+        let dc_blocked = raw_out - self.dc_block_x_prev + self.dc_block_r * self.dc_block_y_prev;
+        self.dc_block_x_prev = raw_out;
+        self.dc_block_y_prev = dc_blocked;
+
+        // Diagnostics
+        let abs_out = dc_blocked.abs();
+        if abs_out > self.diag_peak_output { self.diag_peak_output = abs_out; }
+        if abs_out > 10.0 { self.diag_clamp_count += 1; }
+
+        clamp_output(dc_blocked)
     }
 
     /// Check if all devices are 1-dimensional.
@@ -672,6 +710,7 @@ impl CircuitSolver {
         } else {
             self.v_nl[0] = self.v_nl_prev[0];
             self.last_convergence_reason = ConvergenceReason::MaxIterations;
+            self.diag_nr_max_iter_count += 1;
         }
     }
 
@@ -743,6 +782,7 @@ impl CircuitSolver {
             self.v_nl[0] = self.v_nl_prev[0];
             self.v_nl[1] = self.v_nl_prev[1];
             self.last_convergence_reason = ConvergenceReason::MaxIterations;
+            self.diag_nr_max_iter_count += 1;
         }
     }
 
@@ -844,6 +884,10 @@ impl CircuitSolver {
                 break;
             }
         }
+
+        if self.last_convergence_reason == ConvergenceReason::MaxIterations {
+            self.diag_nr_max_iter_count += 1;
+        }
     }
 
     /// Compute all device currents from v_nl into i_nl.
@@ -867,6 +911,12 @@ impl CircuitSolver {
         self.i_nl_prev.fill(0.0);
         self.input_prev = 0.0;
         reset_inductors(&mut self.kernel.inductors);
+        self.dc_block_x_prev = 0.0;
+        self.dc_block_y_prev = 0.0;
+        self.diag_peak_output = 0.0;
+        self.diag_clamp_count = 0;
+        self.diag_nr_max_iter_count = 0;
+        self.diag_nan_reset_count = 0;
     }
 
     /// Process a block of samples.
@@ -893,12 +943,25 @@ pub struct LinearSolver {
     pub input_conductance: f64,
     /// Previous input sample for trapezoidal integration
     input_prev: f64,
+    /// DC blocking filter state (previous input)
+    pub dc_block_x_prev: f64,
+    /// DC blocking filter state (previous output)
+    pub dc_block_y_prev: f64,
+    /// DC blocking filter coefficient (1 - 2*pi*5/sr)
+    pub dc_block_r: f64,
+    /// Diagnostics: peak absolute output seen
+    pub diag_peak_output: f64,
+    /// Diagnostics: number of samples that exceeded clamp threshold
+    pub diag_clamp_count: u64,
+    /// Diagnostics: number of times state was reset due to NaN
+    pub diag_nan_reset_count: u64,
 }
 
 impl LinearSolver {
     /// Create a new linear solver.
     pub fn new(kernel: DkKernel, input_node: usize, output_node: usize) -> Self {
         let n = kernel.n;
+        let dc_block_r = 1.0 - 2.0 * std::f64::consts::PI * 5.0 / kernel.sample_rate;
         Self {
             kernel,
             v_prev: vec![0.0; n],
@@ -908,6 +971,12 @@ impl LinearSolver {
             output_node,
             input_conductance: 1.0, // Default 1/1Ω (near-ideal voltage source) — caller should set from netlist
             input_prev: 0.0,
+            dc_block_x_prev: 0.0,
+            dc_block_y_prev: 0.0,
+            dc_block_r,
+            diag_peak_output: 0.0,
+            diag_clamp_count: 0,
+            diag_nan_reset_count: 0,
         }
     }
 
@@ -961,16 +1030,24 @@ impl LinearSolver {
             self.v_prev.fill(0.0);
             self.input_prev = 0.0;
             reset_inductors(&mut self.kernel.inductors);
+            self.diag_nan_reset_count += 1;
         }
 
         self.kernel.update_inductors(&self.v_prev);
 
-        let raw = if self.output_node < n {
-            self.v_prev[self.output_node]
-        } else {
-            0.0
-        };
-        clamp_output(raw)
+        // DC blocking filter (5Hz HPF)
+        let raw_out = if self.output_node < n { self.v_prev[self.output_node] } else { 0.0 };
+        let raw_out = if raw_out.is_finite() { raw_out } else { 0.0 };
+        let dc_blocked = raw_out - self.dc_block_x_prev + self.dc_block_r * self.dc_block_y_prev;
+        self.dc_block_x_prev = raw_out;
+        self.dc_block_y_prev = dc_blocked;
+
+        // Diagnostics
+        let abs_out = dc_blocked.abs();
+        if abs_out > self.diag_peak_output { self.diag_peak_output = abs_out; }
+        if abs_out > 10.0 { self.diag_clamp_count += 1; }
+
+        clamp_output(dc_blocked)
     }
 
     /// Reset solver state.
@@ -978,6 +1055,11 @@ impl LinearSolver {
         self.v_prev.fill(0.0);
         self.input_prev = 0.0;
         reset_inductors(&mut self.kernel.inductors);
+        self.dc_block_x_prev = 0.0;
+        self.dc_block_y_prev = 0.0;
+        self.diag_peak_output = 0.0;
+        self.diag_clamp_count = 0;
+        self.diag_nan_reset_count = 0;
     }
 }
 
@@ -987,12 +1069,12 @@ mod tests {
     use crate::mna::MnaSystem;
     use crate::parser::Netlist;
 
-    /// Test RC lowpass step response converges to correct DC value.
+    /// Test RC lowpass step response with DC blocking filter.
     ///
     /// Uses R1 to ground with C1 in parallel — single-node RC circuit.
     /// The Thevenin input model requires a ground reference at the input node.
     /// R=1k, C=1u, tau=RC=1ms (44.1 samples at 44.1kHz).
-    /// After sufficient settling, output should converge to 1.0V.
+    /// DC blocking filter removes steady-state DC, so we check transient behavior.
     #[test]
     fn test_linear_rc_solver() {
         let spice = r#"RC Circuit
@@ -1015,25 +1097,21 @@ C1 in 0 1u
             output[i] = solver.process_sample(1.0);
         }
 
-        // After ~11 time constants (500 samples), should be very close to 1V
-        let final_output = output[num_samples - 1];
-        assert!((final_output - 1.0).abs() < 0.05,
-            "RC lowpass DC output = {:.4}V, expected ~1.0V", final_output);
-
-        // Output should be monotonically increasing (RC step response)
-        for i in 1..num_samples {
-            assert!(output[i] >= output[i-1] - 1e-10,
-                "Output should be monotonically increasing: output[{}]={:.6} < output[{}]={:.6}",
-                i, output[i], i-1, output[i-1]);
-        }
-
-        // Check time constant: at ~44 samples (1 tau), output ≈ 1-exp(-1) ≈ 0.632
-        let at_tau = output[44];
-        assert!(at_tau > 0.4 && at_tau < 0.85,
-            "At 1 tau, output = {:.4}, expected roughly 0.4-0.85", at_tau);
+        // With DC blocking, the peak output should be > 0.8V (transient from step)
+        let peak_output = output.iter().fold(0.0_f64, |a, &b| a.max(b));
+        assert!(peak_output > 0.8,
+            "RC lowpass peak output = {:.4}V, expected > 0.8V (DC blocking removes steady-state)", peak_output);
 
         // First sample should be positive (step response starts rising)
         assert!(output[0] > 0.0, "First sample should be positive, got {:.6}", output[0]);
+
+        // Output should be monotonically increasing in first ~100 samples
+        // (before DC blocker droop becomes significant)
+        for i in 1..100 {
+            assert!(output[i] >= output[i-1] - 1e-10,
+                "Output should be monotonically increasing in first 100 samples: output[{}]={:.6} < output[{}]={:.6}",
+                i, output[i], i-1, output[i-1]);
+        }
     }
 
     /// Test diode clipper: small signal passes through, large signal gets clipped.
@@ -1519,8 +1597,9 @@ C1 out 0 1u
         assert!(final_out < 1.5,
             "Output should be bounded below input, got {:.6}", final_out);
 
-        // Output should monotonically increase (charging capacitor)
-        for i in 1..outputs.len() {
+        // Output should monotonically increase in first 100 samples (charging capacitor)
+        // DC blocker causes droop after that, so limit the check
+        for i in 1..100 {
             assert!(outputs[i] >= outputs[i-1] - 1e-10,
                 "Output should be monotonic: [{}]={:.6} < [{}]={:.6}",
                 i, outputs[i], i-1, outputs[i-1]);

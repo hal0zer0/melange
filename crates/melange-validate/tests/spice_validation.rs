@@ -120,6 +120,20 @@ fn bjt_config() -> ComparisonConfig {
     }
 }
 
+/// Apply a 5Hz DC blocking HPF to a signal.
+fn dc_block_signal(signal: &mut [f64], sample_rate: f64) {
+    let r = 1.0 - 2.0 * std::f64::consts::PI * 5.0 / sample_rate;
+    let mut x_prev = 0.0f64;
+    let mut y_prev = 0.0f64;
+    for sample in signal.iter_mut() {
+        let x = *sample;
+        let y = x - x_prev + r * y_prev;
+        x_prev = x;
+        y_prev = y;
+        *sample = y;
+    }
+}
+
 /// Run validation for a circuit and return the result
 ///
 /// This helper function:
@@ -162,15 +176,18 @@ fn run_validation(
     )?;
 
     // Extract SPICE output
-    let spice_output = spice_data
+    let mut spice_output = spice_data
         .get_node_voltage(output_node)
         .map_err(|e| ValidationError::Spice(e))?
         .to_vec();
 
     // Run melange solver (uses netlist without VIN source, input via input_conductance)
     let input_signal = resample_pwl_to_signal(&pwl_data, SAMPLE_RATE, spice_output.len());
-    
+
     let melange_output = run_melange_solver(&netlist_path_no_vin, &input_signal, SAMPLE_RATE)?;
+
+    // Apply DC blocking to SPICE output to match melange's internal DC blocker
+    dc_block_signal(&mut spice_output, SAMPLE_RATE);
 
     // Create signals for comparison
     let spice_signal = Signal::new(spice_output, SAMPLE_RATE, "SPICE");

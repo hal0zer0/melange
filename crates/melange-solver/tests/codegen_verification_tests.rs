@@ -451,6 +451,10 @@ fn test_generated_code_contains_all_constants() {
         "M should be {} in generated code.",
         m
     );
+
+    assert!(code.contains("pub const DC_BLOCK_R: f64 ="), "Missing DC_BLOCK_R constant");
+    assert!(code.contains("pub const OUTPUT_SCALE: f64 ="), "Missing OUTPUT_SCALE constant");
+    assert!(code.contains("pub const DC_OP_CONVERGED: bool ="), "Missing DC_OP_CONVERGED constant");
 }
 
 /// Verify that the generated code contains all expected functions.
@@ -1980,6 +1984,13 @@ fn test_generated_code_state_has_matrix_fields() {
         code.contains("pub s_ni: [[f64; M]; N]"),
         "CircuitState must have s_ni matrix field."
     );
+    assert!(code.contains("pub dc_block_x_prev: f64"), "CircuitState must have dc_block_x_prev field.");
+    assert!(code.contains("pub dc_block_y_prev: f64"), "CircuitState must have dc_block_y_prev field.");
+    assert!(code.contains("pub dc_block_r: f64"), "CircuitState must have dc_block_r field.");
+    assert!(code.contains("pub diag_peak_output: f64"), "CircuitState must have diag_peak_output field.");
+    assert!(code.contains("pub diag_clamp_count: u64"), "CircuitState must have diag_clamp_count field.");
+    assert!(code.contains("pub diag_nr_max_iter_count: u64"), "CircuitState must have diag_nr_max_iter_count field.");
+    assert!(code.contains("pub diag_nan_reset_count: u64"), "CircuitState must have diag_nan_reset_count field.");
 }
 
 /// Verify that S_DEFAULT, A_NEG_DEFAULT, K_DEFAULT, S_NI_DEFAULT are emitted.

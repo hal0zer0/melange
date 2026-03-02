@@ -66,9 +66,17 @@ enum Commands {
         #[arg(short = 'f', long, value_enum, default_value = "code")]
         format: OutputFormat,
 
+        /// Output scale factor (default 1.0, use 0.1 to map ±10V to ±1.0 audio)
+        #[arg(long, default_value = "1.0")]
+        output_scale: f64,
+
         /// Add Input Level and Output Level parameters to the plugin
         #[arg(long)]
         with_level_params: bool,
+
+        /// Override input resistance (ohms). Default: 1Ω, or from .input_impedance directive.
+        #[arg(long)]
+        input_resistance: Option<f64>,
     },
 
     /// Validate circuit against SPICE reference
@@ -117,6 +125,10 @@ enum Commands {
         /// Input signal amplitude (0.0 to 1.0)
         #[arg(long, default_value = "0.5")]
         amplitude: f64,
+
+        /// Override input resistance (ohms). Default: 1Ω, or from .input_impedance directive.
+        #[arg(long)]
+        input_resistance: Option<f64>,
     },
 
     /// List available nodes in a netlist
@@ -205,8 +217,10 @@ fn main() -> Result<()> {
             output_node,
             max_iter,
             tolerance,
+            output_scale,
             format,
             with_level_params,
+            input_resistance: input_resistance_flag,
         } => {
             // Validate numeric CLI parameters
             if sample_rate <= 0.0 || !sample_rate.is_finite() {
@@ -229,8 +243,10 @@ fn main() -> Result<()> {
                 &output_node,
                 max_iter,
                 tolerance,
+                output_scale,
                 format,
                 with_level_params,
+                input_resistance_flag,
             )
         }
         Commands::Validate {
@@ -251,6 +267,7 @@ fn main() -> Result<()> {
             output_node,
             duration,
             amplitude,
+            input_resistance: input_resistance_flag,
         } => {
             let circuit_source = circuits::resolve(&input)?;
             println!("Resolved circuit: {}", circuit_source.name());
@@ -264,6 +281,7 @@ fn main() -> Result<()> {
                     output_node: &output_node,
                     duration,
                     amplitude,
+                    input_resistance_flag,
                 },
             )
         }
@@ -287,8 +305,10 @@ fn compile_circuit_source(
     output_node: &str,
     max_iter: usize,
     tolerance: f64,
+    output_scale: f64,
     format: OutputFormat,
     with_level_params: bool,
+    input_resistance_flag: Option<f64>,
 ) -> Result<()> {
     use melange_solver::{
         codegen::{CodegenConfig, CodeGenerator},
@@ -348,13 +368,45 @@ fn compile_circuit_source(
         anyhow::bail!("Input node cannot be ground (0). Please specify a non-ground node.");
     }
     let input_node_idx = input_node_raw - 1;
-    // Use 1Ω input impedance so the input signal appears directly at the input node.
-    // In a DAW plugin context, the input represents the actual voltage, not a source
-    // with series impedance. A low R_in ensures V_node ≈ V_input.
-    let input_resistance = 1.0;  // 1Ω (near-ideal voltage source)
+    // Resolve input resistance: CLI flag > .input_impedance directive > default 1Ω
+    let (input_resistance, ir_source) = if let Some(r) = input_resistance_flag {
+        (r, "from --input-resistance flag")
+    } else if let Some(r) = netlist.input_impedance {
+        (r, "from .input_impedance directive")
+    } else {
+        (1.0, "default")
+    };
+    println!("  Input resistance: {} ohm ({})", input_resistance, ir_source);
     let input_conductance = 1.0 / input_resistance;
     if input_node_idx < mna.n {
         mna.g[input_node_idx][input_node_idx] += input_conductance;
+    }
+
+    // Warn if passive EQ topology detected with low source impedance
+    if input_resistance < 10.0 && !mna.pots.is_empty() {
+        // Check if any pot is connected to the input node
+        let mut connected_pots = Vec::new();
+        for pot in &mna.pots {
+            // Direct connection: pot node matches input node (both 1-indexed)
+            let direct = pot.node_p == input_node_raw || pot.node_q == input_node_raw;
+            // One-hop: connected through another component (check G matrix)
+            let pot_p_0 = if pot.node_p > 0 { pot.node_p - 1 } else { usize::MAX };
+            let pot_q_0 = if pot.node_q > 0 { pot.node_q - 1 } else { usize::MAX };
+            let one_hop = (pot_p_0 < mna.n && mna.g[input_node_idx][pot_p_0] != 0.0)
+                || (pot_q_0 < mna.n && mna.g[input_node_idx][pot_q_0] != 0.0);
+            if direct || one_hop {
+                connected_pots.push(pot.name.clone());
+            }
+        }
+        if !connected_pots.is_empty() {
+            eprintln!();
+            eprintln!("  WARNING: Passive EQ topology detected with {:.0}Ω source impedance.", input_resistance);
+            eprintln!("  Pots connected to input: {}", connected_pots.join(", "));
+            eprintln!("  A low source impedance overwhelms passive EQ networks, making pots inert.");
+            eprintln!("  Consider adding to your netlist:  .input_impedance 600");
+            eprintln!("  Or use the CLI flag:              --input-resistance 600");
+            eprintln!();
+        }
     }
 
     // Step 3: Create DK kernel
@@ -393,6 +445,7 @@ fn compile_circuit_source(
         sample_rate,
         max_iterations: max_iter,
         tolerance,
+        output_scale,
         include_dc_op: true,
         input_resistance,   // 1Ω (near-ideal voltage source)
         ..CodegenConfig::default()
@@ -450,7 +503,16 @@ fn compile_circuit_source(
                 }
             }).collect();
 
-            plugin_template::generate_plugin_project(&project_dir, &generated.code, &circuit_name, with_level_params, &pot_params)?;
+            // Build switch parameter info from netlist
+            let switch_params: Vec<plugin_template::SwitchParamInfo> = netlist.switches.iter().enumerate().map(|(idx, sw)| {
+                plugin_template::SwitchParamInfo {
+                    index: idx,
+                    name: format!("Switch {} ({})", idx, sw.component_names.join("+")),
+                    num_positions: sw.positions.len(),
+                }
+            }).collect();
+
+            plugin_template::generate_plugin_project(&project_dir, &generated.code, &circuit_name, with_level_params, &pot_params, &switch_params)?;
 
             println!("  ✓ Done!");
             println!();
@@ -495,6 +557,7 @@ struct SimulateOptions<'a> {
     output_node: &'a str,
     duration: f64,
     amplitude: f64,
+    input_resistance_flag: Option<f64>,
 }
 
 fn simulate_circuit_source(
@@ -562,8 +625,16 @@ fn simulate_circuit_source(
     }
     let output_node_idx = output_node_raw - 1;
 
-    // Stamp input conductance (1Ω series resistance)
-    let input_conductance = 1.0;
+    // Resolve input resistance: CLI flag > .input_impedance directive > default 1Ω
+    let (input_resistance, ir_source) = if let Some(r) = opts.input_resistance_flag {
+        (r, "from --input-resistance flag")
+    } else if let Some(r) = netlist.input_impedance {
+        (r, "from .input_impedance directive")
+    } else {
+        (1.0, "default")
+    };
+    println!("  Input resistance: {} ohm ({})", input_resistance, ir_source);
+    let input_conductance = 1.0 / input_resistance;
     if input_node_idx < mna.n {
         mna.g[input_node_idx][input_node_idx] += input_conductance;
     }
@@ -679,6 +750,11 @@ fn simulate_circuit_source(
             output_samples.push(solver.process_sample(s));
         }
 
+        eprintln!("  Peak output: {:.2}V", solver.diag_peak_output);
+        if solver.diag_clamp_count > 0 {
+            eprintln!("  WARNING: Output clipped {} times -- consider adjusting circuit or input level", solver.diag_clamp_count);
+        }
+
         write_wav(opts.output, actual_sample_rate, &output_samples)?;
     } else {
         // Nonlinear circuit: use CircuitSolver
@@ -692,7 +768,10 @@ fn simulate_circuit_source(
             println!("  Initializing DC operating point...");
             // Build device slots for DC OP (same as codegen IR uses)
             let device_slots = build_device_slots(&netlist, &mna);
-            solver.initialize_dc_op(&mna, &device_slots);
+            let converged = solver.initialize_dc_op(&mna, &device_slots);
+            if !converged {
+                eprintln!("  Warning: DC operating point did not fully converge");
+            }
             println!("  DC OP initialized");
         }
 
@@ -704,6 +783,17 @@ fn simulate_circuit_source(
         let mut output_samples = Vec::with_capacity(samples.len());
         for &s in &samples {
             output_samples.push(solver.process_sample(s));
+        }
+
+        eprintln!("  Peak output: {:.2}V", solver.diag_peak_output);
+        if solver.diag_clamp_count > 0 {
+            eprintln!("  WARNING: Output clipped {} times -- consider adjusting circuit or input level", solver.diag_clamp_count);
+        }
+        if solver.diag_nr_max_iter_count > 0 {
+            eprintln!("  NR max iterations: {} times", solver.diag_nr_max_iter_count);
+        }
+        if solver.diag_nan_reset_count > 0 {
+            eprintln!("  NaN resets: {}", solver.diag_nan_reset_count);
         }
 
         write_wav(opts.output, actual_sample_rate, &output_samples)?;

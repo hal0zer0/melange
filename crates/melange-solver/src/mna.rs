@@ -56,6 +56,8 @@ pub struct MnaSystem {
     pub inductors: Vec<InductorElement>,
     /// Potentiometer info (resolved from .pot directives)
     pub pots: Vec<PotInfo>,
+    /// Switch info (resolved from .switch directives)
+    pub switches: Vec<SwitchInfo>,
     /// Op-amp info (for VCCS stamping)
     pub opamps: Vec<OpampInfo>,
 }
@@ -134,6 +136,30 @@ pub struct OpampInfo {
     pub r_out: f64,
 }
 
+/// Component within a switch directive, resolved to MNA node indices.
+#[derive(Debug, Clone)]
+pub struct SwitchComponentInfo {
+    /// Component name (e.g. "C_hfb")
+    pub name: String,
+    /// Component type: 'R', 'C', or 'L'
+    pub component_type: char,
+    /// Node index (0 = ground, 1-indexed for MNA)
+    pub node_p: usize,
+    /// Node index (0 = ground, 1-indexed for MNA)
+    pub node_q: usize,
+    /// Nominal value (from netlist element definition)
+    pub nominal_value: f64,
+}
+
+/// Switch information resolved from .switch directive.
+#[derive(Debug, Clone)]
+pub struct SwitchInfo {
+    /// Components controlled by this switch
+    pub components: Vec<SwitchComponentInfo>,
+    /// Position values: positions[pos][comp] = value for that position
+    pub positions: Vec<Vec<f64>>,
+}
+
 /// Potentiometer information resolved from .pot directive.
 #[derive(Debug, Clone)]
 pub struct PotInfo {
@@ -170,6 +196,7 @@ impl MnaSystem {
             current_sources: Vec::new(),
             inductors: Vec::new(),
             pots: Vec::new(),
+            switches: Vec::new(),
             opamps: Vec::new(),
         }
     }
@@ -550,6 +577,68 @@ impl MnaBuilder {
                     pot_dir.resistor_name
                 )));
             }
+        }
+
+        // Resolve switch directives
+        for sw_dir in &netlist.switches {
+            let mut components = Vec::new();
+            for comp_name in &sw_dir.component_names {
+                let first_char = comp_name.chars().next().unwrap_or(' ').to_ascii_uppercase();
+                let (node_p, node_q, nominal_value) = match first_char {
+                    'R' => {
+                        let elem = netlist.elements.iter().find(|e| {
+                            matches!(e, Element::Resistor { name, .. } if name.eq_ignore_ascii_case(comp_name))
+                        });
+                        if let Some(Element::Resistor { n_plus, n_minus, value, .. }) = elem {
+                            (self.node_map[n_plus], self.node_map[n_minus], *value)
+                        } else {
+                            return Err(MnaError::TopologyError(format!(
+                                ".switch references component '{}' which was not found", comp_name
+                            )));
+                        }
+                    }
+                    'C' => {
+                        let elem = netlist.elements.iter().find(|e| {
+                            matches!(e, Element::Capacitor { name, .. } if name.eq_ignore_ascii_case(comp_name))
+                        });
+                        if let Some(Element::Capacitor { n_plus, n_minus, value, .. }) = elem {
+                            (self.node_map[n_plus], self.node_map[n_minus], *value)
+                        } else {
+                            return Err(MnaError::TopologyError(format!(
+                                ".switch references component '{}' which was not found", comp_name
+                            )));
+                        }
+                    }
+                    'L' => {
+                        let elem = netlist.elements.iter().find(|e| {
+                            matches!(e, Element::Inductor { name, .. } if name.eq_ignore_ascii_case(comp_name))
+                        });
+                        if let Some(Element::Inductor { n_plus, n_minus, value, .. }) = elem {
+                            (self.node_map[n_plus], self.node_map[n_minus], *value)
+                        } else {
+                            return Err(MnaError::TopologyError(format!(
+                                ".switch references component '{}' which was not found", comp_name
+                            )));
+                        }
+                    }
+                    _ => {
+                        return Err(MnaError::TopologyError(format!(
+                            ".switch component '{}' must start with R, C, or L", comp_name
+                        )));
+                    }
+                };
+                components.push(SwitchComponentInfo {
+                    name: comp_name.clone(),
+                    component_type: first_char,
+                    node_p,
+                    node_q,
+                    nominal_value,
+                });
+            }
+            mna.switches.push(SwitchInfo {
+                components,
+                positions: sw_dir.positions.clone(),
+            });
         }
 
         mna.node_map = self.node_map;

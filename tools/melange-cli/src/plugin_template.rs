@@ -18,6 +18,16 @@ pub struct PotParamInfo {
     pub default_resistance: f64,
 }
 
+/// Switch info for plugin parameter generation.
+pub struct SwitchParamInfo {
+    /// Index (0-based)
+    pub index: usize,
+    /// Human-readable name (e.g., "SW0 (HF Boost Freq)")
+    pub name: String,
+    /// Number of positions
+    pub num_positions: usize,
+}
+
 /// Generate a complete plugin project
 pub fn generate_plugin_project(
     output_dir: &Path,
@@ -25,11 +35,12 @@ pub fn generate_plugin_project(
     circuit_name: &str,
     with_level_params: bool,
     pots: &[PotParamInfo],
+    switches: &[SwitchParamInfo],
 ) -> Result<()> {
     std::fs::create_dir_all(output_dir.join("src"))?;
     std::fs::write(output_dir.join("Cargo.toml"), generate_cargo_toml(circuit_name))?;
     std::fs::write(output_dir.join("src/circuit.rs"), circuit_code)?;
-    std::fs::write(output_dir.join("src/lib.rs"), generate_lib_rs(circuit_name, with_level_params, pots))?;
+    std::fs::write(output_dir.join("src/lib.rs"), generate_lib_rs(circuit_name, with_level_params, pots, switches))?;
     Ok(())
 }
 
@@ -54,7 +65,7 @@ pub(crate) fn test_generate_cargo_toml(circuit_name: &str) -> String {
 
 #[cfg(test)]
 pub(crate) fn test_generate_lib_rs(circuit_name: &str, with_level_params: bool, pots: &[PotParamInfo]) -> String {
-    generate_lib_rs(circuit_name, with_level_params, pots)
+    generate_lib_rs(circuit_name, with_level_params, pots, &[])
 }
 
 /// Capitalize first character, lowercase the rest (e.g., "hello" -> "Hello", "LOUD" -> "Loud").
@@ -109,8 +120,32 @@ fn generate_pot_default(pot: &PotParamInfo) -> String {
     )
 }
 
-fn generate_params_struct(with_level_params: bool, pots: &[PotParamInfo]) -> String {
-    let has_any_params = with_level_params || !pots.is_empty();
+fn generate_switch_field(sw: &SwitchParamInfo) -> String {
+    format!(
+        "    #[id = \"switch_{idx}\"]\n    pub switch_{idx}: IntParam,\n",
+        idx = sw.index,
+    )
+}
+
+fn generate_switch_default(sw: &SwitchParamInfo) -> String {
+    format!(
+        r#"            switch_{idx}: IntParam::new(
+                "{name}",
+                0,
+                IntRange::Linear {{
+                    min: 0,
+                    max: {max},
+                }},
+            ),
+"#,
+        idx = sw.index,
+        name = sw.name,
+        max = sw.num_positions as i32 - 1,
+    )
+}
+
+fn generate_params_struct(with_level_params: bool, pots: &[PotParamInfo], switches: &[SwitchParamInfo]) -> String {
+    let has_any_params = with_level_params || !pots.is_empty() || !switches.is_empty();
     if !has_any_params {
         return "#[derive(Params, Default)]\npub struct CircuitParams {}".to_string();
     }
@@ -128,6 +163,11 @@ fn generate_params_struct(with_level_params: bool, pots: &[PotParamInfo]) -> Str
         defaults.push_str(&generate_pot_default(pot));
     }
 
+    for sw in switches {
+        fields.push_str(&generate_switch_field(sw));
+        defaults.push_str(&generate_switch_default(sw));
+    }
+
     format!(
         r#"#[derive(Params)]
 pub struct CircuitParams {{
@@ -142,8 +182,8 @@ impl Default for CircuitParams {{
     )
 }
 
-fn generate_process_loop(with_level_params: bool, pots: &[PotParamInfo]) -> String {
-    let has_any_params = with_level_params || !pots.is_empty();
+fn generate_process_loop(with_level_params: bool, pots: &[PotParamInfo], switches: &[SwitchParamInfo]) -> String {
+    let has_any_params = with_level_params || !pots.is_empty() || !switches.is_empty();
     if !has_any_params {
         return r#"        for channel_samples in buffer.iter_samples() {
             for (ch, sample) in channel_samples.into_iter().enumerate() {
@@ -172,12 +212,36 @@ fn generate_process_loop(with_level_params: bool, pots: &[PotParamInfo]) -> Stri
         })
         .collect();
 
+    // Switch reads: read once per buffer (not per sample — no smoother)
+    let switch_reads: String = switches
+        .iter()
+        .map(|s| {
+            format!(
+                "            let sw_{i}_pos = self.params.switch_{i}.value() as usize;\n",
+                i = s.index,
+            )
+        })
+        .collect();
+
     let pot_assignments: String = pots
         .iter()
         .map(|p| {
             format!(
                 "                state.pot_{i}_resistance = pot_{i}_val;\n",
                 i = p.index,
+            )
+        })
+        .collect();
+
+    // Switch assignments: only call set_switch_N when position changed (avoids O(N^3) rebuild)
+    let switch_assignments: String = switches
+        .iter()
+        .map(|s| {
+            format!(
+                "                if state.switch_{i}_position != sw_{i}_pos {{\n\
+                 \x20                   state.set_switch_{i}(sw_{i}_pos);\n\
+                 \x20               }}\n",
+                i = s.index,
             )
         })
         .collect();
@@ -194,9 +258,11 @@ fn generate_process_loop(with_level_params: bool, pots: &[PotParamInfo]) -> Stri
         "\x20       for channel_samples in buffer.iter_samples() {{\n\
          {gain_reads}\
          {pot_reads}\
+         {switch_reads}\
          \x20           for (ch, sample) in channel_samples.into_iter().enumerate() {{\n\
          \x20               let state = &mut self.circuit_states[ch];\n\
          {pot_assignments}\
+         {switch_assignments}\
          {sample_processing}\
          \x20               *sample = if out.is_finite() {{ out.clamp(-1.0, 1.0) }} else {{ 0.0 }};\n\
          \x20           }}\n\
@@ -239,12 +305,12 @@ const LEVEL_PARAM_DEFAULTS: &str = r#"            input_level: FloatParam::new(
             .with_string_to_value(formatters::s2v_f32_gain_to_db()),
 "#;
 
-fn generate_lib_rs(circuit_name: &str, with_level_params: bool, pots: &[PotParamInfo]) -> String {
+fn generate_lib_rs(circuit_name: &str, with_level_params: bool, pots: &[PotParamInfo], switches: &[SwitchParamInfo]) -> String {
     let display_name: String = circuit_name.split('-').map(capitalize_word).collect::<Vec<_>>().join(" ");
     let clap_id = format!("com.melange.{circuit_name}");
     let vst3_id_str = compute_vst3_id(circuit_name);
-    let params_struct = generate_params_struct(with_level_params, pots);
-    let process_loop = generate_process_loop(with_level_params, pots);
+    let params_struct = generate_params_struct(with_level_params, pots, switches);
+    let process_loop = generate_process_loop(with_level_params, pots, switches);
 
     format!(
         r#"use nih_plug::prelude::*;
@@ -298,12 +364,16 @@ impl Plugin for CircuitPlugin {{
     fn initialize(
         &mut self,
         audio_io_layout: &AudioIOLayout,
-        _buffer_config: &BufferConfig,
+        buffer_config: &BufferConfig,
         _context: &mut impl InitContext<Self>,
     ) -> bool {{
         let num_channels = audio_io_layout.main_input_channels
             .map(|c| c.get() as usize).unwrap_or(2);
-        self.circuit_states = (0..num_channels).map(|_| CircuitState::default()).collect();
+        self.circuit_states = (0..num_channels).map(|_| {{
+            let mut s = CircuitState::default();
+            s.set_sample_rate(buffer_config.sample_rate as f64);
+            s
+        }}).collect();
         true
     }}
 
@@ -725,6 +795,7 @@ mod tests {
             "test-circuit",
             false,
             &[],
+            &[],
         );
         assert!(result.is_ok(), "generate_plugin_project should succeed: {:?}", result.err());
         assert!(dir.join("Cargo.toml").exists(), "Should create Cargo.toml");
@@ -740,7 +811,7 @@ mod tests {
         let dir = std::env::temp_dir().join("melange_test_plugin_circuit");
         let _ = std::fs::remove_dir_all(&dir);
         let circuit_code = "// This is the generated circuit code\npub fn process_sample() {}";
-        let result = generate_plugin_project(&dir, circuit_code, "test", false, &[]);
+        let result = generate_plugin_project(&dir, circuit_code, "test", false, &[], &[]);
         assert!(result.is_ok());
         let written = std::fs::read_to_string(dir.join("src/circuit.rs")).unwrap();
         assert_eq!(written, circuit_code);
@@ -751,7 +822,7 @@ mod tests {
     fn generate_plugin_project_cargo_toml_has_correct_name() {
         let dir = std::env::temp_dir().join("melange_test_plugin_name");
         let _ = std::fs::remove_dir_all(&dir);
-        let result = generate_plugin_project(&dir, "// code", "my-cool-plugin", false, &[]);
+        let result = generate_plugin_project(&dir, "// code", "my-cool-plugin", false, &[], &[]);
         assert!(result.is_ok());
         let toml = std::fs::read_to_string(dir.join("Cargo.toml")).unwrap();
         assert!(toml.contains("name = \"my-cool-plugin\""));
@@ -762,7 +833,7 @@ mod tests {
     fn generate_plugin_project_lib_rs_has_plugin_code() {
         let dir = std::env::temp_dir().join("melange_test_plugin_lib");
         let _ = std::fs::remove_dir_all(&dir);
-        let result = generate_plugin_project(&dir, "// code", "my-plugin", false, &[]);
+        let result = generate_plugin_project(&dir, "// code", "my-plugin", false, &[], &[]);
         assert!(result.is_ok());
         let lib_rs = std::fs::read_to_string(dir.join("src/lib.rs")).unwrap();
         assert!(lib_rs.contains("CircuitPlugin"));
@@ -776,8 +847,8 @@ mod tests {
         let dir = std::env::temp_dir().join("melange_test_plugin_idempotent");
         let _ = std::fs::remove_dir_all(&dir);
         // Generate twice, should not fail
-        let _ = generate_plugin_project(&dir, "// v1", "test", false, &[]);
-        let result = generate_plugin_project(&dir, "// v2", "test", false, &[]);
+        let _ = generate_plugin_project(&dir, "// v1", "test", false, &[], &[]);
+        let result = generate_plugin_project(&dir, "// v2", "test", false, &[], &[]);
         assert!(result.is_ok());
         // Second write should overwrite
         let circuit = std::fs::read_to_string(dir.join("src/circuit.rs")).unwrap();

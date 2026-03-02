@@ -30,6 +30,21 @@ pub struct CircuitState {
     /// Iteration count from last solve (for diagnostics)
     pub last_nr_iterations: u32,
 
+    /// DC blocking filter: previous input sample
+    pub dc_block_x_prev: f64,
+    /// DC blocking filter: previous output sample
+    pub dc_block_y_prev: f64,
+    /// DC blocking filter coefficient (recomputed on sample rate change)
+    pub dc_block_r: f64,
+    /// Diagnostic: peak absolute output (pre-clamp)
+    pub diag_peak_output: f64,
+    /// Diagnostic: number of times output exceeded ±10V
+    pub diag_clamp_count: u64,
+    /// Diagnostic: number of times NR hit max iterations
+    pub diag_nr_max_iter_count: u64,
+    /// Diagnostic: number of times NaN triggered state reset
+    pub diag_nan_reset_count: u64,
+
     /// S = A^{-1} matrix, recomputed by set_sample_rate
     pub s: [[f64; N]; N],
 
@@ -66,6 +81,14 @@ pub struct CircuitState {
     /// 4x oversampler outer downsampling filter state
     pub os_dn_state_outer: [f64; {{ os_state_size_outer }}],
 {% endif %}
+{% if num_switches > 0 %}
+{% for idx in switch_indices %}
+    /// Switch {{ idx }} current position (0-indexed)
+    pub switch_{{ idx }}_position: usize,
+{% endfor %}
+    /// Current sample rate (needed for rebuild_matrices)
+    pub current_sample_rate: f64,
+{% endif %}
 {% if num_pots > 0 %}
 {% for idx in pot_indices %}
     /// Sherman-Morrison precomputed SU vector for pot {{ idx }} (recomputed by set_sample_rate)
@@ -93,6 +116,13 @@ impl Default for CircuitState {
 {% endif %}            dc_operating_point: [0.0; N],
 {% endif %}            input_prev: 0.0,
             last_nr_iterations: 0,
+            dc_block_x_prev: 0.0,
+            dc_block_y_prev: 0.0,
+            dc_block_r: DC_BLOCK_R,
+            diag_peak_output: 0.0,
+            diag_clamp_count: 0,
+            diag_nr_max_iter_count: 0,
+            diag_nan_reset_count: 0,
             s: S_DEFAULT,
             a_neg: A_NEG_DEFAULT,
             k: K_DEFAULT,
@@ -112,6 +142,12 @@ impl Default for CircuitState {
 {% endif %}{% if oversampling_4x %}
             os_up_state_outer: [0.0; {{ os_state_size_outer }}],
             os_dn_state_outer: [0.0; {{ os_state_size_outer }}],
+{% endif %}
+{% if num_switches > 0 %}
+{% for idx in switch_indices %}
+            switch_{{ idx }}_position: 0,
+{% endfor %}
+            current_sample_rate: SAMPLE_RATE,
 {% endif %}
 {% if num_pots > 0 %}
 {% for idx in pot_indices %}
@@ -133,6 +169,12 @@ impl CircuitState {
 {% else %}        self.i_nl_prev = [0.0; M];
 {% endif %}        self.input_prev = 0.0;
         self.last_nr_iterations = 0;
+        self.dc_block_x_prev = 0.0;
+        self.dc_block_y_prev = 0.0;
+        self.diag_peak_output = 0.0;
+        self.diag_clamp_count = 0;
+        self.diag_nr_max_iter_count = 0;
+        self.diag_nan_reset_count = 0;
 {% if num_inductors > 0 %}
         self.ind_i_prev = [0.0; {{ num_inductors }}];
         self.ind_v_prev = [0.0; {{ num_inductors }}];
@@ -141,6 +183,11 @@ impl CircuitState {
 {% for default in pot_defaults %}
         self.pot_{{ loop.index0 }}_resistance = {{ default }};
 {% endfor %}
+{% if num_switches > 0 %}
+{% for idx in switch_indices %}
+        self.switch_{{ idx }}_position = 0;
+{% endfor %}
+{% endif %}
 {% if oversampling_factor > 1 %}
         self.os_up_state = [0.0; {{ os_state_size }}];
         self.os_dn_state = [0.0; {{ os_state_size }}];
@@ -168,6 +215,50 @@ impl CircuitState {
         if !(sample_rate > 0.0 && sample_rate.is_finite()) {
             return; // Invalid sample rate, keep defaults
         }
+{% if num_switches > 0 %}
+        self.current_sample_rate = sample_rate;
+
+        // If same as codegen sample rate AND all switches at default position, reset to defaults
+        if (sample_rate - SAMPLE_RATE).abs() < 0.5 {
+            let all_default = true
+{% for idx in switch_indices %}                && self.switch_{{ idx }}_position == 0
+{% endfor %}            ;
+            if all_default {
+                self.s = S_DEFAULT;
+                self.a_neg = A_NEG_DEFAULT;
+                self.k = K_DEFAULT;
+                self.s_ni = S_NI_DEFAULT;
+{% if num_inductors > 0 %}
+                self.ind_g_eq = [{% for ind in inductors %}IND_{{ loop.index0 }}_G_EQ{% if not loop.last %}, {% endif %}{% endfor %}];
+{% endif %}
+{% if num_pots > 0 %}
+{% for idx in pot_indices %}
+                self.pot_{{ idx }}_su = POT_{{ idx }}_SU;
+                self.pot_{{ idx }}_usu = POT_{{ idx }}_USU;
+                self.pot_{{ idx }}_nv_su = POT_{{ idx }}_NV_SU;
+                self.pot_{{ idx }}_u_ni = POT_{{ idx }}_U_NI;
+{% endfor %}
+{% endif %}
+                self.dc_block_r = DC_BLOCK_R;
+                self.dc_block_x_prev = 0.0;
+                self.dc_block_y_prev = 0.0;
+{% if oversampling_factor > 1 %}
+                self.os_up_state = [0.0; {{ os_state_size }}];
+                self.os_dn_state = [0.0; {{ os_state_size }}];
+{% endif %}{% if oversampling_4x %}
+                self.os_up_state_outer = [0.0; {{ os_state_size_outer }}];
+                self.os_dn_state_outer = [0.0; {{ os_state_size_outer }}];
+{% endif %}
+{% if num_inductors > 0 %}
+                self.ind_i_prev = [0.0; {{ num_inductors }}];
+                self.ind_v_prev = [0.0; {{ num_inductors }}];
+                self.ind_i_hist = [0.0; {{ num_inductors }}];
+{% endif %}
+                return;
+            }
+        }
+        self.rebuild_matrices();
+{% else %}
 
         // If same as codegen sample rate, reset to defaults (avoids numerical drift)
         if (sample_rate - SAMPLE_RATE).abs() < 0.5 {
@@ -186,6 +277,9 @@ impl CircuitState {
             self.pot_{{ idx }}_u_ni = POT_{{ idx }}_U_NI;
 {% endfor %}
 {% endif %}
+            self.dc_block_r = DC_BLOCK_R;
+            self.dc_block_x_prev = 0.0;
+            self.dc_block_y_prev = 0.0;
             return;
         }
 
@@ -301,10 +395,24 @@ impl CircuitState {
         self.os_up_state_outer = [0.0; {{ os_state_size_outer }}];
         self.os_dn_state_outer = [0.0; {{ os_state_size_outer }}];
 {% endif %}
+
+        // Recompute DC blocking coefficient for new sample rate
+        {% if oversampling_factor > 1 %}
+        let internal_rate = sample_rate * {{ oversampling_factor }}.0;
+        {% else %}
+        let internal_rate = sample_rate;
+        {% endif %}
+        self.dc_block_r = 1.0 - 2.0 * std::f64::consts::PI * 5.0 / internal_rate;
+        self.dc_block_x_prev = 0.0;
+        self.dc_block_y_prev = 0.0;
+{% endif %}
     }
+{% if num_switches > 0 %}
+{{ switch_methods }}
+{% endif %}
 }
 
-{% if num_inductors > 0 %}/// Stamp a conductance between two nodes into a matrix.
+{% if num_inductors > 0 or num_switches > 0 %}/// Stamp a conductance between two nodes into a matrix.
 /// Node indices are 1-indexed; 0 means ground.
 fn stamp_conductance(mat: &mut [[f64; N]; N], node_i: usize, node_j: usize, g: f64) {
     match (node_i > 0, node_j > 0) {

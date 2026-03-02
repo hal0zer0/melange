@@ -1,7 +1,7 @@
 # Melange Multi-Agent Review — Unified Findings
 
 **Last Updated:** 2026-03-01
-**Reviews Conducted:** 4 rounds (initial code review Feb 23, bug-hunt Feb 28, architecture review Mar 1, user persona reactions Mar 1)
+**Reviews Conducted:** 6 rounds (initial code review Feb 23, bug-hunt Feb 28, architecture review Mar 1, user persona reactions Mar 1, bulletproof pipeline Mar 1, hostile audit Mar 1)
 
 ---
 
@@ -253,3 +253,105 @@ These findings reinforce and extend the Phase 1-5 roadmap from Round 3:
 4. **Onboarding/DX** — Jake's "terminal fumbler" concern is real. A `curl | sh` installer or pre-built binaries + a 5-minute quickstart would dramatically lower the barrier for the pedal-builder audience.
 5. **NR failure behavior docs** — Marcus needs to know: what happens when convergence fails at audio rate? Document the fallback (clamp? hold last sample? mute?) and make it configurable.
 6. **Hardware validation** — Dr. Moreira's point: SPICE-vs-SPICE validation proves implementation correctness, but hardware-vs-Melange validation proves model accuracy. Even a few published comparisons would build credibility.
+
+---
+
+## Round 5 — Bulletproof Pipeline (2026-03-01)
+
+Implemented signal integrity fixes across the full pipeline (netlist → codegen → plugin → DAW):
+
+- **DC Blocking**: 5Hz 1-pole HPF in all solver paths (CircuitSolver, LinearSolver, codegen templates). Formula: `y[n] = x[n] - x[n-1] + R * y[n-1]`, R = 1 - 2π·5/sr.
+- **Output Scaling**: `OUTPUT_SCALE` constant in codegen, `--output-scale` CLI flag. Plugin template maps ±10V → ±1.0 via hardcoded ×0.1.
+- **Diagnostics**: 4 counters in both runtime and codegen: `diag_peak_output`, `diag_clamp_count`, `diag_nr_max_iter_count`, `diag_nan_reset_count`. CLI prints after simulation.
+- **Fail-Loud**: `invert_flat_matrix` returns `Result` (was silent identity fallback). `initialize_dc_op()` returns `bool` + `log::warn!`. `DC_OP_CONVERGED` constant emitted.
+- **SPICE Validation**: `dc_block_signal()` applied to ngspice reference before comparison. All tests pass.
+- **Documentation**: `docs/aidocs/SIGNAL_LEVELS.md` documents signal level contract.
+
+---
+
+## Round 6 — Hostile Audit (2026-03-01)
+
+5 parallel agents reviewed the codebase from adversarial perspectives: silent failures, math/DSP correctness, security/real-time safety, testing gaps, and code smells. Goal: find everything a hostile Reddit reviewer would use to bash the project.
+
+### CRITICAL (4 findings)
+
+| # | Finding | Category |
+|---|---------|----------|
+| **C1** | **`tube-preamp.cir` not tracked in git** — `include_str!` references untracked file. Clean clone fails to compile. Broken build on main. | Code smells |
+| **C2** | **10GB abandoned AI agent worktrees** in `.claude/worktrees/`. Three dead worktrees with full repo copies, not gitignored. | Code smells |
+| **C3** | **Template injection via SPICE netlist title** — title embedded in `// Circuit: "{{ title }}"` comment in `header.rs.tera`. Newline in title breaks out of comment, injects arbitrary Rust code into generated files. | Security |
+| **C4** | **Tube runtime solver has ZERO test coverage** — `DeviceEntry::Tube` implemented (currents, Jacobian) but no test creates a CircuitSolver with a tube device. Could be completely wrong. | Testing |
+
+### HIGH (16 findings)
+
+| # | Finding | Category |
+|---|---------|----------|
+| **H1** | **`--output-scale` warning lies to `simulate` users** — prints "consider --output-scale" but flag only exists on `compile` command. | Silent failures |
+| **H2** | **Plugin doesn't call `set_sample_rate` without switches** — DAW at 96kHz + circuit at 44.1kHz = all matrices wrong, silent incorrect output. | Math/correctness |
+| **H3** | **`set_switch()` called from audio thread does O(N³) work** — plugin template calls it inside `process()`, triggering Gaussian elimination. Audio dropouts. | Real-time safety |
+| **H4** | **Dead `SolverDevice` trait** (20 lines) — replaced by `DeviceEntry` enum but never deleted. Comment even explains the replacement. | Code smells |
+| **H5** | **DC blocking never functionally tested** — string-contains checks only. No test feeds DC and verifies removal. Wrong coefficient formula goes undetected. | Testing |
+| **H6** | **`OUTPUT_SCALE` never tested with non-default value** — user-facing `--output-scale` flag, zero tests set it to anything other than 1.0. | Testing |
+| **H7** | **Plugin template never compiled** — tests check strings, never run `rustc`. nih-plug API changes go undetected. | Testing |
+| **H8** | **Matrix singularity error path never tested** — `invert_flat_matrix` returns `Result` but no test provides a singular matrix. | Testing |
+| **H9** | **`invert_n()` at runtime silently returns identity** on singular matrix. No log, no flag. Generated code produces wrong but finite-looking output. | Silent failures |
+| **H10** | **BJT Jacobian reimplemented inline** in solver.rs instead of using `melange-devices` methods. Will diverge on update. | Code smells |
+| **H11** | **Magic numbers** — `5.0` (DC block Hz) in 3 places, `10.0` (clamp V) in 5 places, `100.0` (input clamp) in 2 places. No named constants. | Code smells |
+| **H12** | **Stale comments** — "backward Euler" in code fixed to trapezoidal. RHS comment says `2*input` when code does `(input + input_prev) * G_in`. | Code smells |
+| **H13** | **Clippy deny-error** — `approx_constant` in `melange-primitives`. `cargo clippy --workspace` fails. | Code smells |
+| **H14** | **SPICE validation DC blocking creates blind spot** — both signals DC-blocked hides DC offset bugs. BJT test inconsistent (doesn't DC-block SPICE reference). | Testing |
+| **H15** | **solver.rs is 1,900 lines** with two ~80%-identical solver implementations (CircuitSolver/LinearSolver). No shared abstraction. | Code smells |
+| **H16** | **`dc_op.rs` silently swallows mismatched device types** — `_ => {}` in `evaluate_devices()` skips devices with wrong params variant. NR gets i_nl=0. | Silent failures |
+
+### MEDIUM (16 findings)
+
+| # | Finding | Category |
+|---|---------|----------|
+| **M1** | `DC_OP_CONVERGED` emitted but never read by generated code. Dead constant. | Silent failures |
+| **M2** | `LinearSolver::reset()` doesn't reset diagnostic counters (CircuitSolver does). | Silent failures |
+| **M3** | DC block coefficient goes negative below 31.4 Hz sample rate. No guard. | Math |
+| **M4** | Double clamping with oversampling — clamp inside inner + after decimation. | Math |
+| **M5** | Runtime vs codegen diagnostic inconsistency — different scaling applied. | Silent failures |
+| **M6** | `vt` means "thermal voltage" in BJTs but "threshold voltage" in MOSFETs. | Code smells |
+| **M7** | `if m > 0 { ... } else { ... }` with identical branches in main.rs. | Code smells |
+| **M8** | 13 instances of `#[allow(clippy::needless_range_loop)]`. | Code smells |
+| **M9** | `SINGULARITY_THRESHOLD` defined independently in dk.rs and solver.rs. | Code smells |
+| **M10** | `test.rs`, `test_output.txt`, failure report HTML untracked in repo. Debug artifacts. | Code smells |
+| **M11** | `process_block` has `assert_eq!` that panics in audio thread on mismatched buffers. | Real-time safety |
+| **M12** | No K diagonal validation at runtime `set_sample_rate()`. K[i][i] >= 0 → NR diverges. | Math |
+| **M13** | DC blocking filter state not reset on NaN event. Minor audio discontinuity. | Math |
+| **M14** | Diagnostic counters never asserted in any test. Could return garbage. | Testing |
+| **M15** | BJT SPICE tolerance is 40% RMS, 2× gain ratio, THD skipped. Hides bugs. | Testing |
+| **M16** | PNP BJT, LED, DiodeWithRs, oversampling signal correctness: zero test coverage. | Testing |
+
+### Fix Status
+
+- **C2**: FIXED — worktrees deleted, `.claude/` added to .gitignore
+- **M10**: FIXED — debug artifacts deleted, added to .gitignore
+- All other findings remain open for future work.
+
+### Recommended Fix Priority
+
+**Immediate (broken build / embarrassment):**
+1. C1: Track `tube-preamp.cir` in git (or remove reference)
+2. H13: Fix clippy `approx_constant` error
+3. H4: Delete dead `SolverDevice` trait
+4. H12: Fix stale comments
+
+**Next (silent failures / correctness):**
+5. C3: Sanitize netlist title (strip newlines before template injection)
+6. H2: Always call `set_sample_rate()` in plugin `initialize()`
+7. H1: Fix warning text for `simulate` command
+8. H3: Move `set_switch()` outside audio callback (or use lock-free message queue)
+9. H9: Add diagnostic flag when `invert_n()` falls back to identity
+10. H16: Log warning on device type mismatch in dc_op.rs
+
+**Testing gaps:**
+11. C4 + M16: Add runtime solver integration tests for tube, PNP BJT, LED, DiodeWithRs
+12. H5-H8: Add functional tests for DC blocking, OUTPUT_SCALE, plugin compilation, singular matrix
+13. M14: Assert diagnostic counter values in existing edge-case tests
+
+**Code quality (low urgency):**
+14. H11: Extract magic numbers to named constants
+15. H15: Extract shared solver logic into common functions
+16. H10: Use `melange-devices` BJT Jacobian methods instead of inline reimplementation

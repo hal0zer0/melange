@@ -46,6 +46,8 @@ pub struct CodegenConfig {
     /// Oversampling factor (1, 2, or 4). Default 1 (no oversampling).
     /// Factor > 1 reduces aliasing from nonlinearities.
     pub oversampling_factor: usize,
+    /// Output scale factor applied after DC blocking (default 1.0)
+    pub output_scale: f64,
     /// Include DC operating point in generated code
     pub include_dc_op: bool,
     /// Maximum NR iterations for DC operating point solver
@@ -65,6 +67,7 @@ impl Default for CodegenConfig {
             input_node: 0,
             output_node: 0,
             oversampling_factor: 1,
+            output_scale: 1.0,
             include_dc_op: true,
             dc_op_max_iterations: 200,
             dc_op_tolerance: 1e-9,

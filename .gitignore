@@ -7,3 +7,6 @@ Cargo.lock
 .venv/
 __pycache__/
 *.pyc
+.claude/
+test.rs
+test_output.txt

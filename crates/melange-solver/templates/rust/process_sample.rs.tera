@@ -41,9 +41,17 @@ pub fn process_sample(input: f64, state: &mut CircuitState) -> f64 {
 
     // Step 3: Extract controlling voltages for nonlinear devices
     let p = extract_controlling_voltages(&v_pred);
+{% if use_k_eff is defined and use_k_eff %}
+
+    // Step 3b: Precompute corrected K matrix for NR solver
+{{ k_eff_setup }}
+    // Step 4: Solve M×M nonlinear system via Newton-Raphson
+    let i_nl = solve_nonlinear(&p, &k_eff, state);
+{% else %}
 
     // Step 4: Solve M×M nonlinear system via Newton-Raphson
     let i_nl = solve_nonlinear(&p, state);
+{% endif %}
 
     // Step 5: Compute final node voltages
     let {% if num_pots > 0 %}mut {% endif %}v = compute_final_voltages(&v_pred, &i_nl, state);
@@ -83,10 +91,27 @@ pub fn process_sample(input: f64, state: &mut CircuitState) -> f64 {
         state.ind_v_prev = [0.0; {{ num_inductors }}];
         state.ind_i_hist = [0.0; {{ num_inductors }}];
 {% endif %}{% for default in pot_defaults %}        state.pot_{{ loop.index0 }}_resistance = {{ default }};
-{% endfor %}        return 0.0;
+{% endfor %}        state.diag_nan_reset_count += 1;
+        return 0.0;
     }
 
-    // Return output voltage, clamped to safe audio range
-    let out = v[OUTPUT_NODE];
-    if out.is_finite() { out.clamp(-10.0, 10.0) } else { 0.0 }
+    {% if m > 0 %}
+    if state.last_nr_iterations >= {{ max_iter }} as u32 {
+        state.diag_nr_max_iter_count += 1;
+    }
+    {% endif %}
+
+    // Step 9: Extract raw output and apply DC blocking filter (5Hz HPF)
+    let raw_out = v[OUTPUT_NODE];
+    let raw_out = if raw_out.is_finite() { raw_out } else { 0.0 };
+    let dc_blocked = raw_out - state.dc_block_x_prev + state.dc_block_r * state.dc_block_y_prev;
+    state.dc_block_x_prev = raw_out;
+    state.dc_block_y_prev = dc_blocked;
+
+    // Step 10: Apply output scale, track diagnostics, clamp to safe range
+    let scaled = dc_blocked * OUTPUT_SCALE;
+    let abs_out = scaled.abs();
+    if abs_out > state.diag_peak_output { state.diag_peak_output = abs_out; }
+    if abs_out > 10.0 { state.diag_clamp_count += 1; }
+    scaled.clamp(-10.0, 10.0)
 }

@@ -2,7 +2,7 @@
 //!
 //! Parses a subset of SPICE sufficient for audio circuits:
 //! - Components: R, C, L, V (DC/AC), I, D, Q, J, M, U (op-amp), X
-//! - Directives: .model, .subckt, .param, .pot, .end
+//! - Directives: .model, .subckt, .param, .pot, .switch, .input_impedance, .end
 //!
 //! The parser builds an AST (Abstract Syntax Tree) representation
 //! of the circuit that can be processed by the MNA assembler.
@@ -22,6 +22,10 @@ pub struct Netlist {
     pub params: Vec<Parameter>,
     /// Potentiometer directives (.pot)
     pub pots: Vec<PotDirective>,
+    /// Switch directives (.switch)
+    pub switches: Vec<SwitchDirective>,
+    /// Input impedance directive (.input_impedance)
+    pub input_impedance: Option<f64>,
 }
 
 /// A potentiometer directive (.pot Rname min max).
@@ -39,6 +43,19 @@ pub struct PotDirective {
     pub max_value: f64,
 }
 
+/// A switch directive (.switch C1,L1 val0a/val0b val1a/val1b ...).
+///
+/// Defines a rotary switch that selects among discrete component values.
+/// Multiple components can be ganged (changed simultaneously) by listing
+/// names separated by commas, with position values separated by slashes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SwitchDirective {
+    /// Component names controlled by this switch (e.g. ["C_hfb", "L_hfb"])
+    pub component_names: Vec<String>,
+    /// Position values: positions[pos][comp] = value for that component at that position
+    pub positions: Vec<Vec<f64>>,
+}
+
 impl Netlist {
     /// Create an empty netlist.
     pub fn new(title: impl Into<String>) -> Self {
@@ -49,6 +66,8 @@ impl Netlist {
             subcircuits: Vec::new(),
             params: Vec::new(),
             pots: Vec::new(),
+            switches: Vec::new(),
+            input_impedance: None,
         }
     }
 
@@ -363,6 +382,28 @@ impl Parser {
             }
         }
 
+        // Verify all .switch directives reference existing components
+        for sw in &netlist.switches {
+            for comp_name in &sw.component_names {
+                let first_char = comp_name.chars().next().unwrap_or(' ').to_ascii_uppercase();
+                let exists = netlist.elements.iter().any(|e| match (first_char, e) {
+                    ('R', Element::Resistor { name, .. }) => name.eq_ignore_ascii_case(comp_name),
+                    ('C', Element::Capacitor { name, .. }) => name.eq_ignore_ascii_case(comp_name),
+                    ('L', Element::Inductor { name, .. }) => name.eq_ignore_ascii_case(comp_name),
+                    _ => false,
+                });
+                if !exists {
+                    return Err(ParseError {
+                        line: 0,
+                        message: format!(
+                            ".switch references component '{}' which was not found in the netlist",
+                            comp_name
+                        ),
+                    });
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -437,6 +478,13 @@ impl Parser {
             ".pot" => {
                 let pot = self.parse_pot_directive(&parts, netlist)?;
                 netlist.pots.push(pot);
+            }
+            ".switch" => {
+                let sw = self.parse_switch_directive(&parts, netlist)?;
+                netlist.switches.push(sw);
+            }
+            ".input_impedance" => {
+                self.parse_input_impedance_directive(&parts, netlist)?;
             }
             ".end" | ".ends" => {
                 // End of netlist or subcircuit
@@ -535,6 +583,101 @@ impl Parser {
             min_value,
             max_value,
         })
+    }
+
+    fn parse_switch_directive(&self, parts: &[&str], netlist: &Netlist) -> Result<SwitchDirective, ParseError> {
+        // .switch C1,L1 val0a/val0b val1a/val1b ...
+        // Minimum: .switch <names> <pos0> <pos1>  (at least 2 positions)
+        self.require_parts(parts, 4, ".switch names pos0 pos1 [pos2 ...]")?;
+
+        // Parse component names (comma-separated)
+        let component_names: Vec<String> = parts[1]
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        if component_names.is_empty() {
+            return Err(self.error(".switch requires at least one component name"));
+        }
+
+        // Validate component name prefixes
+        for name in &component_names {
+            let first = name.chars().next().unwrap_or(' ').to_ascii_uppercase();
+            if !matches!(first, 'R' | 'C' | 'L') {
+                return Err(self.error(format!(
+                    ".switch component '{}' must start with R, C, or L", name
+                )));
+            }
+        }
+
+        let num_comps = component_names.len();
+
+        // Parse position values (parts[2..])
+        let mut positions = Vec::new();
+        for &pos_str in &parts[2..] {
+            let values: Vec<f64> = pos_str
+                .split('/')
+                .map(|v| {
+                    let val = parse_value(v.trim())
+                        .map_err(|_| self.error(format!("Invalid .switch value: '{}'", v)))?;
+                    if val <= 0.0 || !val.is_finite() {
+                        return Err(self.error(format!(
+                            ".switch value must be positive and finite, got {}", val
+                        )));
+                    }
+                    Ok(val)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+
+            if values.len() != num_comps {
+                return Err(self.error(format!(
+                    ".switch position '{}' has {} values but {} components were specified",
+                    pos_str, values.len(), num_comps
+                )));
+            }
+            positions.push(values);
+        }
+
+        if positions.len() < 2 {
+            return Err(self.error(".switch requires at least 2 positions"));
+        }
+        if positions.len() > 32 {
+            return Err(self.error("Maximum of 32 positions per switch"));
+        }
+
+        // Check for duplicate component names across all switches
+        for name in &component_names {
+            if netlist.switches.iter().any(|sw| {
+                sw.component_names.iter().any(|n| n.eq_ignore_ascii_case(name))
+            }) {
+                return Err(self.error(format!(
+                    "Component '{}' is already used in another .switch directive", name
+                )));
+            }
+        }
+
+        if netlist.switches.len() >= 16 {
+            return Err(self.error("Maximum of 16 .switch directives supported"));
+        }
+
+        Ok(SwitchDirective {
+            component_names,
+            positions,
+        })
+    }
+
+    fn parse_input_impedance_directive(&self, parts: &[&str], netlist: &mut Netlist) -> Result<(), ParseError> {
+        // .input_impedance <value>
+        self.require_parts(parts, 2, ".input_impedance <value>")?;
+
+        if netlist.input_impedance.is_some() {
+            return Err(self.error("Duplicate .input_impedance directive"));
+        }
+
+        let value = self.parse_positive_value(parts[1], ".input_impedance")?;
+        netlist.input_impedance = Some(value);
+        Ok(())
     }
 
     /// Validate that two nodes are not the same (self-connected component).
@@ -786,6 +929,57 @@ impl Parser {
     }
 }
 
+/// Try to parse infix notation where a scale character replaces the decimal point.
+///
+/// Examples: "6n8" → 6.8e-9, "3n3" → 3.3e-9, "4k7" → 4.7e3, "1m5" → 1.5e-3
+///
+/// Pattern: `<digits><scale_char><digits>` where scale_char is one of T,G,K,M,U,N,P.
+fn try_parse_infix(s: &str) -> Option<f64> {
+    // Need at least 3 chars: digit, scale, digit
+    if s.len() < 3 {
+        return None;
+    }
+
+    // Find the scale character (must not be first or last, and must be alphabetic)
+    let bytes = s.as_bytes();
+    let mut scale_pos = None;
+    for (i, &b) in bytes.iter().enumerate() {
+        if i == 0 { continue; }
+        let c = (b as char).to_ascii_uppercase();
+        if matches!(c, 'T' | 'G' | 'K' | 'M' | 'U' | 'N' | 'P') {
+            // Check: digits before, digits after
+            let before = &s[..i];
+            let after = &s[i + 1..];
+            if !before.is_empty()
+                && !after.is_empty()
+                && before.chars().all(|c| c.is_ascii_digit())
+                && after.chars().all(|c| c.is_ascii_digit())
+            {
+                scale_pos = Some((i, c));
+                break;
+            }
+        }
+    }
+
+    let (pos, scale_char) = scale_pos?;
+    let before = &s[..pos];
+    let after = &s[pos + 1..];
+    let decimal_str = format!("{}.{}", before, after);
+    let base: f64 = decimal_str.parse().ok()?;
+    let scale = match scale_char {
+        'T' => 1e12,
+        'G' => 1e9,
+        'K' => 1e3,
+        'M' => 1e-3,
+        'U' => 1e-6,
+        'N' => 1e-9,
+        'P' => 1e-12,
+        _ => return None,
+    };
+    let result = base * scale;
+    if result.is_finite() { Some(result) } else { None }
+}
+
 /// Parse a SPICE value with optional scale suffix.
 ///
 /// Examples:
@@ -793,11 +987,18 @@ impl Parser {
 /// - "4.7u" -> 4.7e-6
 /// - "10pF" -> 10e-12
 /// - "1F" -> 1.0 (Farad, not femto)
+/// - "6n8" -> 6.8e-9 (infix notation)
 fn parse_value(s: &str) -> Result<f64, ParseFloatError> {
     let s = s.trim();
     if s.is_empty() {
         return Err(ParseFloatError);
     }
+
+    // Try infix notation first (e.g. "6n8" → 6.8e-9)
+    if let Some(val) = try_parse_infix(s) {
+        return Ok(val);
+    }
+
     let s_upper = s.to_uppercase();
 
     // Check for MEG first (must be before stripping units)
@@ -1084,6 +1285,40 @@ mod tests {
         let spice = "Test\nR1 1 0 10k\n.pot R1 1k 100k\n.pot r1 2k 50k\n";
         let result = Netlist::parse(spice);
         assert!(result.is_err(), "Case-insensitive duplicate should fail");
+    }
+
+    // ======================================================================
+    // .input_impedance directive tests
+    // ======================================================================
+
+    #[test]
+    fn test_parse_input_impedance_basic() {
+        let spice = "Test\nR1 1 0 1k\n.input_impedance 600\n";
+        let netlist = Netlist::parse(spice).unwrap();
+        assert_eq!(netlist.input_impedance, Some(600.0));
+    }
+
+    #[test]
+    fn test_parse_input_impedance_engineering_notation() {
+        let spice = "Test\nR1 1 0 1k\n.input_impedance 10k\n";
+        let netlist = Netlist::parse(spice).unwrap();
+        assert_eq!(netlist.input_impedance, Some(10_000.0));
+    }
+
+    #[test]
+    fn test_parse_input_impedance_default_none() {
+        let spice = "Test\nR1 1 0 1k\n";
+        let netlist = Netlist::parse(spice).unwrap();
+        assert_eq!(netlist.input_impedance, None);
+    }
+
+    #[test]
+    fn test_parse_input_impedance_duplicate_error() {
+        let spice = "Test\nR1 1 0 1k\n.input_impedance 600\n.input_impedance 1k\n";
+        let result = Netlist::parse(spice);
+        assert!(result.is_err(), "Duplicate .input_impedance should fail");
+        let err = result.unwrap_err();
+        assert!(err.message.contains("Duplicate"), "Error: {}", err.message);
     }
 
     #[test]

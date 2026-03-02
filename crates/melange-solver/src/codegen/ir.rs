@@ -36,6 +36,7 @@ pub struct CircuitIR {
     pub dc_op_converged: bool,
     pub inductors: Vec<InductorIR>,
     pub pots: Vec<PotentiometerIR>,
+    pub switches: Vec<SwitchIR>,
     /// Pre-analyzed sparsity patterns for compile-time matrices.
     #[serde(default)]
     pub sparsity: SparseInfo,
@@ -74,10 +75,17 @@ pub struct SolverConfig {
     /// Oversampling factor (1, 2, or 4). Default 1 (no oversampling).
     #[serde(default = "default_oversampling_factor")]
     pub oversampling_factor: usize,
+    /// Output scale factor applied after DC blocking (default 1.0)
+    #[serde(default = "default_output_scale")]
+    pub output_scale: f64,
 }
 
 fn default_oversampling_factor() -> usize {
     1
+}
+
+fn default_output_scale() -> f64 {
+    1.0
 }
 
 /// All matrices needed by the generated solver (flattened row-major).
@@ -127,6 +135,35 @@ pub struct PotentiometerIR {
     pub max_resistance: f64,
     /// True if one terminal is grounded
     pub grounded: bool,
+}
+
+/// Component within a switch directive for code generation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SwitchComponentIR {
+    pub name: String,
+    /// 'R', 'C', or 'L'
+    pub component_type: char,
+    /// Node index (1-indexed, 0 = ground)
+    pub node_p: usize,
+    /// Node index (1-indexed, 0 = ground)
+    pub node_q: usize,
+    /// Nominal value from netlist
+    pub nominal_value: f64,
+    /// For 'L' components: index into the inductors vec (for g_eq recomputation)
+    pub inductor_index: Option<usize>,
+}
+
+/// Switch parameters for code generation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SwitchIR {
+    /// Switch index (0-based)
+    pub index: usize,
+    /// Components controlled by this switch
+    pub components: Vec<SwitchComponentIR>,
+    /// Position values: positions[pos][comp] = value
+    pub positions: Vec<Vec<f64>>,
+    /// Number of positions
+    pub num_positions: usize,
 }
 
 /// Inductor parameters for code generation.
@@ -354,8 +391,8 @@ fn stamp_flat_conductance(mat: &mut [f64], n: usize, node_i: usize, node_j: usiz
 
 /// Invert a flat row-major N×N matrix using Gaussian elimination with partial pivoting.
 ///
-/// Returns the identity matrix if singular (graceful degradation).
-fn invert_flat_matrix(a: &[f64], n: usize) -> Vec<f64> {
+/// Returns `CodegenError::InvalidConfig` if the matrix is singular.
+fn invert_flat_matrix(a: &[f64], n: usize) -> Result<Vec<f64>, CodegenError> {
     // Build augmented [A | I]
     let mut aug = vec![0.0f64; n * 2 * n];
     for i in 0..n {
@@ -378,10 +415,10 @@ fn invert_flat_matrix(a: &[f64], n: usize) -> Vec<f64> {
             }
         }
         if max_val < 1e-30 {
-            // Singular — return identity
-            let mut result = vec![0.0f64; n * n];
-            for i in 0..n { result[i * n + i] = 1.0; }
-            return result;
+            return Err(CodegenError::InvalidConfig(format!(
+                "Matrix is singular (pivot {:.2e} at row {}) — check for floating nodes or missing ground path",
+                max_val, col
+            )));
         }
         if max_row != col {
             for j in 0..w { aug.swap(col * w + j, max_row * w + j); }
@@ -399,9 +436,10 @@ fn invert_flat_matrix(a: &[f64], n: usize) -> Vec<f64> {
     for col in (0..n).rev() {
         let pivot = aug[col * w + col];
         if pivot.abs() < 1e-30 {
-            let mut result = vec![0.0f64; n * n];
-            for i in 0..n { result[i * n + i] = 1.0; }
-            return result;
+            return Err(CodegenError::InvalidConfig(format!(
+                "Matrix is singular (pivot {:.2e} at row {}) — check for floating nodes or missing ground path",
+                pivot.abs(), col
+            )));
         }
         for j in 0..w { aug[col * w + j] /= pivot; }
         for row in 0..col {
@@ -417,7 +455,7 @@ fn invert_flat_matrix(a: &[f64], n: usize) -> Vec<f64> {
             result[i * n + j] = aug[i * w + n + j];
         }
     }
-    result
+    Ok(result)
 }
 
 /// Compute K = N_v * S * N_i from flat row-major matrices.
@@ -499,6 +537,7 @@ impl CircuitIR {
             output_node: config.output_node,
             input_resistance: config.input_resistance,
             oversampling_factor: os_factor,
+            output_scale: config.output_scale,
         };
 
         let metadata = CircuitMetadata {
@@ -537,7 +576,7 @@ impl CircuitIR {
             }
 
             // Invert A to get S
-            let s = invert_flat_matrix(&a_flat, n);
+            let s = invert_flat_matrix(&a_flat, n)?;
 
             // Compute K = N_v * S * N_i
             let k = compute_k_from_s(&s, &kernel.n_v, &kernel.n_i, n, m);
@@ -596,6 +635,34 @@ impl CircuitIR {
             grounded: p.grounded,
         }).collect();
 
+        // Build switches from MNA resolved info
+        let switches: Vec<SwitchIR> = mna.switches.iter().enumerate().map(|(idx, sw)| {
+            let components = sw.components.iter().map(|comp| {
+                // For inductor components, find matching index in the inductors vec
+                let inductor_index = if comp.component_type == 'L' {
+                    kernel.inductors.iter().position(|ind| {
+                        ind.name.eq_ignore_ascii_case(&comp.name)
+                    })
+                } else {
+                    None
+                };
+                SwitchComponentIR {
+                    name: comp.name.clone(),
+                    component_type: comp.component_type,
+                    node_p: comp.node_p,
+                    node_q: comp.node_q,
+                    nominal_value: comp.nominal_value,
+                    inductor_index,
+                }
+            }).collect();
+            SwitchIR {
+                index: idx,
+                components,
+                positions: sw.positions.clone(),
+                num_positions: sw.positions.len(),
+            }
+        }).collect();
+
         let has_dc_sources = kernel.rhs_const.iter().any(|&v| v != 0.0);
 
         // Use nonlinear DC OP solver (falls back to linear for M=0)
@@ -640,6 +707,7 @@ impl CircuitIR {
             dc_op_converged,
             inductors,
             pots,
+            switches,
             sparsity,
         })
     }

@@ -477,7 +477,7 @@ fn test_no_dc_op_without_sources() {
     // Code should NOT have DC_OP constant
     let code = generate_code(RC_DCOP_SPICE, &config);
     assert!(
-        !code.contains("pub const DC_OP"),
+        !code.contains("pub const DC_OP: [f64"),
         "Code without DC sources should not have DC_OP constant"
     );
 

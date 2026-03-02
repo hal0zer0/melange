@@ -274,8 +274,10 @@ fn test_codegen_pot_sm_scale_helper() {
 fn test_codegen_pot_process_sample_corrections() {
     let code = generate_code(RC_POT_SPICE);
 
-    // Process sample should have SM corrections
-    assert!(code.contains("sm_scale_0(state)"), "Missing SM scale call in process_sample");
+    // Process sample should have sequential SM setup with cross-corrections
+    assert!(code.contains("delta_g_0"), "Missing delta_g_0 in sequential SM setup");
+    assert!(code.contains("su_c0"), "Missing corrected su_c0 in sequential SM setup");
+    assert!(code.contains("scale_c0"), "Missing corrected scale_c0 in sequential SM setup");
     assert!(code.contains("let mut rhs"), "RHS should be mutable when pots exist");
     assert!(code.contains("let mut v_pred"), "v_pred should be mutable when pots exist");
 }
@@ -284,10 +286,11 @@ fn test_codegen_pot_process_sample_corrections() {
 fn test_codegen_pot_nr_k_correction() {
     let code = generate_code(DIODE_POT_SPICE);
 
-    // NR solver should have K correction for pot
-    assert!(code.contains("POT_0_NV_SU"), "Missing NV_SU in NR K correction");
-    assert!(code.contains("POT_0_U_NI"), "Missing U_NI in NR K correction");
-    assert!(code.contains("let mut v_d0"), "v_d should be mutable when pots exist");
+    // NR solver should use precomputed k_eff (corrected K matrix)
+    assert!(code.contains("k_eff"), "Missing k_eff in NR solver");
+    // k_eff is computed from nv_su_c and u_ni_c in process_sample
+    assert!(code.contains("nv_su_c0"), "Missing corrected nv_su_c0 for k_eff computation");
+    assert!(code.contains("u_ni_c0"), "Missing corrected u_ni_c0 for k_eff computation");
 }
 
 #[test]
@@ -806,11 +809,10 @@ fn test_codegen_sanitization_resets_pot() {
 fn test_codegen_jacobian_uses_corrected_k() {
     let code = generate_code(DIODE_POT_SPICE);
 
-    // The Jacobian should use corrected K via state fields, not bare K[k][j]
-    // Look for the pattern: state.k[0][0] - k_scale_0 * state.pot_0_nv_su
+    // The Jacobian should use precomputed k_eff (sequential SM corrected K)
     assert!(
-        code.contains("state.k[0][0] - k_scale_0 * state.pot_0_nv_su"),
-        "Jacobian should use SM-corrected K via state fields"
+        code.contains("k_eff[0][0]"),
+        "Jacobian should use k_eff for SM-corrected K matrix"
     );
 }
 
@@ -822,13 +824,11 @@ fn test_codegen_jacobian_uses_corrected_k() {
 fn test_codegen_s_correction_uses_su() {
     let code = generate_code(RC_POT_SPICE);
 
-    // The S correction should compute su^T * rhs using state fields
+    // The S correction should compute su_c0^T * rhs using corrected local vectors
     assert!(
-        code.contains("state.pot_0_su[_k] * rhs[_k]"),
-        "S correction should use state.pot_0_su dot rhs via runtime loop"
+        code.contains("su_c0[_k] * rhs[_k]"),
+        "S correction should use corrected su_c0 dot rhs via runtime loop"
     );
-    // Should NOT use the old pattern "rhs[p] - rhs[q]" for S correction
-    // (that pattern is still valid for A_neg correction which uses u not su)
     assert!(
         code.contains("su_dot_rhs"),
         "S correction variable should be named su_dot_rhs"

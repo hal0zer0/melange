@@ -38,13 +38,19 @@ fn build_linear_solver(spice: &str, sample_rate: f64) -> (LinearSolver, usize, u
     (solver, input_node_0, output_node_0)
 }
 
-/// Helper: measure DC gain by processing a step input and waiting for steady state.
+/// Helper: measure DC gain by processing a step input and returning peak absolute output
+/// (preserving sign). With a DC blocker in the solver, the final sample drools toward zero,
+/// so we track the peak instead.
 fn measure_dc_gain(solver: &mut LinearSolver, input_voltage: f64, num_samples: usize) -> f64 {
-    let mut output = 0.0;
+    let mut peak_pos = 0.0f64;
+    let mut peak_neg = 0.0f64;
     for _ in 0..num_samples {
-        output = solver.process_sample(input_voltage);
+        let out = solver.process_sample(input_voltage);
+        if out > peak_pos { peak_pos = out; }
+        if out < peak_neg { peak_neg = out; }
     }
-    output / input_voltage
+    let peak = if peak_pos.abs() > peak_neg.abs() { peak_pos } else { peak_neg };
+    peak / input_voltage
 }
 
 // =============================================================================

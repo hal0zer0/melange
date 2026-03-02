@@ -25,6 +25,26 @@ struct InductorTemplateData {
     inductance: String,
 }
 
+/// Switch component data passed to Tera templates.
+#[derive(Serialize)]
+struct SwitchCompTemplateData {
+    node_p: usize,
+    node_q: usize,
+    nominal: String,
+    comp_type: char,
+    inductor_index: i64, // -1 if not an inductor
+}
+
+/// Switch data passed to Tera templates.
+#[derive(Serialize)]
+struct SwitchTemplateData {
+    index: usize,
+    num_positions: usize,
+    num_components: usize,
+    components: Vec<SwitchCompTemplateData>,
+    position_rows: Vec<String>,
+}
+
 // ============================================================================
 // Formatting helpers — reduce repetition in string-building code
 // ============================================================================
@@ -354,6 +374,41 @@ impl RustEmitter {
         }).collect();
         ctx.insert("s_ni_rows", &s_ni_rows);
 
+        // Switch constants
+        let num_switches = ir.switches.len();
+        ctx.insert("num_switches", &num_switches);
+        if num_switches > 0 {
+            let switch_data: Vec<SwitchTemplateData> = ir.switches.iter().map(|sw| {
+                let components: Vec<SwitchCompTemplateData> = sw.components.iter().map(|comp| {
+                    SwitchCompTemplateData {
+                        node_p: comp.node_p,
+                        node_q: comp.node_q,
+                        nominal: fmt_f64(comp.nominal_value),
+                        comp_type: comp.component_type,
+                        inductor_index: comp.inductor_index.map(|i| i as i64).unwrap_or(-1),
+                    }
+                }).collect();
+                let position_rows: Vec<String> = sw.positions.iter().map(|pos| {
+                    pos.iter().map(|v| fmt_f64(*v)).collect::<Vec<_>>().join(", ")
+                }).collect();
+                SwitchTemplateData {
+                    index: sw.index,
+                    num_positions: sw.num_positions,
+                    num_components: sw.components.len(),
+                    components,
+                    position_rows,
+                }
+            }).collect();
+            ctx.insert("switches", &switch_data);
+        }
+
+        // DC block coefficient: R = 1 - 2*pi*5/sr
+        let internal_rate = ir.solver_config.sample_rate * ir.solver_config.oversampling_factor as f64;
+        let dc_block_r = 1.0 - 2.0 * std::f64::consts::PI * 5.0 / internal_rate;
+        ctx.insert("dc_block_r", &format!("{:.17e}", dc_block_r));
+        ctx.insert("output_scale", &format!("{:.17e}", ir.solver_config.output_scale));
+        ctx.insert("dc_op_converged", &ir.dc_op_converged);
+
         self.render("constants", &ctx)
     }
 
@@ -412,6 +467,17 @@ impl RustEmitter {
                 .collect::<Vec<_>>()
                 .join(", ");
             ctx.insert("dc_nl_i_values", &dc_nl_i_values);
+        }
+
+        // Switch data
+        let num_switches = ir.switches.len();
+        ctx.insert("num_switches", &num_switches);
+        if num_switches > 0 {
+            let switch_indices: Vec<usize> = (0..num_switches).collect();
+            ctx.insert("switch_indices", &switch_indices);
+            // Generate switch methods procedurally (too complex for Tera conditionals)
+            let switch_methods = self.emit_switch_methods(ir);
+            ctx.insert("switch_methods", &switch_methods);
         }
 
         self.render("state", &ctx)
@@ -494,6 +560,270 @@ impl RustEmitter {
         Ok(code)
     }
 
+    /// Generate switch setter methods and rebuild_matrices() procedurally.
+    fn emit_switch_methods(&self, ir: &CircuitIR) -> String {
+        let m = ir.topology.m;
+        let num_pots = ir.pots.len();
+        let num_inductors = ir.inductors.len();
+        let os_factor = ir.solver_config.oversampling_factor;
+        let mut code = String::new();
+
+        // Emit set_switch_N() for each switch
+        for sw in &ir.switches {
+            code.push_str(&format!(
+                "    /// Set switch {} position (0..{}).\n\
+                 \x20   ///\n\
+                 \x20   /// Triggers a full matrix rebuild. Call from UI thread, NOT audio thread.\n\
+                 \x20   pub fn set_switch_{}(&mut self, position: usize) {{\n\
+                 \x20       if position >= SWITCH_{}_NUM_POSITIONS {{ return; }}\n\
+                 \x20       if self.switch_{}_position == position {{ return; }}\n\
+                 \x20       self.switch_{}_position = position;\n\
+                 \x20       self.rebuild_matrices();\n\
+                 \x20   }}\n\n",
+                sw.index,
+                sw.num_positions - 1,
+                sw.index, sw.index, sw.index, sw.index,
+            ));
+        }
+
+        // Emit rebuild_matrices()
+        code.push_str(
+            "    /// Rebuild all sample-rate-dependent matrices from G/C constants.\n\
+             \x20   ///\n\
+             \x20   /// Applies switch position deltas to G/C, then rebuilds A, S, K, S*N_i.\n\
+             \x20   /// Called by `set_switch_N()` and `set_sample_rate()`.\n\
+             \x20   fn rebuild_matrices(&mut self) {\n\
+             \x20       let internal_rate = self.current_sample_rate * OVERSAMPLING_FACTOR as f64;\n\
+             \x20       let alpha = 2.0 * internal_rate;\n",
+        );
+        if num_inductors > 0 {
+            code.push_str("        let t = 1.0 / internal_rate;\n");
+        }
+
+        // Start from constant G, C
+        let has_r_switch = ir.switches.iter().any(|sw| sw.components.iter().any(|c| c.component_type == 'R'));
+        let has_c_switch = ir.switches.iter().any(|sw| sw.components.iter().any(|c| c.component_type == 'C'));
+        let g_mut = if has_r_switch { "mut " } else { "" };
+        let c_mut = if has_c_switch { "mut " } else { "" };
+        code.push_str(&format!(
+            "\n\
+             \x20       // Start from constant G and C matrices\n\
+             \x20       let {}g_eff = G;\n\
+             \x20       let {}c_eff = C;\n",
+            g_mut, c_mut,
+        ));
+
+        // Apply switch deltas
+        code.push_str(
+            "\n\
+             \x20       // Apply switch position deltas\n",
+        );
+        for sw in &ir.switches {
+            for (ci, comp) in sw.components.iter().enumerate() {
+                let nominal = fmt_f64(comp.nominal_value);
+                code.push_str(&format!(
+                    "        {{\n\
+                     \x20           let new_val = SWITCH_{}_VALUES[self.switch_{}_position][{}];\n",
+                    sw.index, sw.index, ci,
+                ));
+                match comp.component_type {
+                    'R' => {
+                        code.push_str(&format!(
+                            "            let delta_g = 1.0 / new_val - 1.0 / {};\n\
+                             \x20           stamp_conductance(&mut g_eff, SWITCH_{}_COMP_{}_NODE_P, SWITCH_{}_COMP_{}_NODE_Q, delta_g);\n",
+                            nominal, sw.index, ci, sw.index, ci,
+                        ));
+                    }
+                    'C' => {
+                        code.push_str(&format!(
+                            "            let delta_c = new_val - {};\n\
+                             \x20           stamp_conductance(&mut c_eff, SWITCH_{}_COMP_{}_NODE_P, SWITCH_{}_COMP_{}_NODE_Q, delta_c);\n",
+                            nominal, sw.index, ci, sw.index, ci,
+                        ));
+                    }
+                    'L' => {
+                        // Inductors: don't modify G/C here; handled in inductor companion stamp below
+                        code.push_str("            // Inductor: handled in companion model stamp below\n");
+                        code.push_str("            let _ = new_val;\n");
+                    }
+                    _ => {}
+                }
+                code.push_str("        }\n");
+            }
+        }
+
+        // Build A = g_eff + alpha * c_eff
+        code.push_str(
+            "\n\
+             \x20       // Build A = G_eff + alpha * C_eff\n\
+             \x20       let mut a = [[0.0f64; N]; N];\n\
+             \x20       for i in 0..N {\n\
+             \x20           for j in 0..N {\n\
+             \x20               a[i][j] = g_eff[i][j] + alpha * c_eff[i][j];\n\
+             \x20           }\n\
+             \x20       }\n\n\
+             \x20       // Build A_neg = alpha * C_eff - G_eff\n\
+             \x20       let mut a_neg = [[0.0f64; N]; N];\n\
+             \x20       for i in 0..N {\n\
+             \x20           for j in 0..N {\n\
+             \x20               a_neg[i][j] = alpha * c_eff[i][j] - g_eff[i][j];\n\
+             \x20           }\n\
+             \x20       }\n",
+        );
+
+        // Inductor companion stamps (with switch-aware inductance)
+        if num_inductors > 0 {
+            code.push_str("\n        // Add inductor companion model conductances\n");
+            for (li, ind) in ir.inductors.iter().enumerate() {
+                // Check if any switch controls this inductor
+                let mut switched = false;
+                for sw in &ir.switches {
+                    for (ci, comp) in sw.components.iter().enumerate() {
+                        if comp.component_type == 'L' && comp.inductor_index == Some(li) {
+                            code.push_str(&format!(
+                                "        {{\n\
+                                 \x20           let inductance = SWITCH_{}_VALUES[self.switch_{}_position][{}];\n\
+                                 \x20           let g_eq = t / (2.0 * inductance);\n\
+                                 \x20           self.ind_g_eq[{}] = g_eq;\n\
+                                 \x20           stamp_conductance(&mut a, {}, {}, g_eq);\n\
+                                 \x20           stamp_conductance(&mut a_neg, {}, {}, -g_eq);\n\
+                                 \x20       }}\n",
+                                sw.index, sw.index, ci,
+                                li,
+                                ind.node_i, ind.node_j,
+                                ind.node_i, ind.node_j,
+                            ));
+                            switched = true;
+                            break;
+                        }
+                    }
+                    if switched { break; }
+                }
+                if !switched {
+                    // Non-switched inductor: use constant
+                    code.push_str(&format!(
+                        "        {{\n\
+                         \x20           let g_eq = t / (2.0 * IND_{}_INDUCTANCE);\n\
+                         \x20           self.ind_g_eq[{}] = g_eq;\n\
+                         \x20           stamp_conductance(&mut a, IND_{}_NODE_I, IND_{}_NODE_J, g_eq);\n\
+                         \x20           stamp_conductance(&mut a_neg, IND_{}_NODE_I, IND_{}_NODE_J, -g_eq);\n\
+                         \x20       }}\n",
+                        li, li, li, li, li, li,
+                    ));
+                }
+            }
+            code.push_str(&format!(
+                "        self.ind_i_prev = [0.0; {}];\n\
+                 \x20       self.ind_v_prev = [0.0; {}];\n\
+                 \x20       self.ind_i_hist = [0.0; {}];\n",
+                num_inductors, num_inductors, num_inductors,
+            ));
+        }
+
+        // Invert A → S, compute S_NI, K
+        code.push_str(&format!(
+            "\n\
+             \x20       // Invert A to get S\n\
+             \x20       let s = invert_n(a);\n\n\
+             \x20       // Compute S * N_i product (N x M)\n\
+             \x20       let mut s_ni = [[0.0f64; M]; N];\n\
+             \x20       for i in 0..N {{\n\
+             \x20           for j in 0..M {{\n\
+             \x20               let mut sum = 0.0;\n\
+             \x20               for kk in 0..N {{\n\
+             \x20                   sum += s[i][kk] * N_I[j][kk];\n\
+             \x20               }}\n\
+             \x20               s_ni[i][j] = sum;\n\
+             \x20           }}\n\
+             \x20       }}\n\n\
+             \x20       // Compute K = N_v * S_NI (M x M)\n\
+             \x20       let mut k = [[0.0f64; {m}]; {m}];\n\
+             \x20       for i in 0..M {{\n\
+             \x20           for j in 0..M {{\n\
+             \x20               let mut sum = 0.0;\n\
+             \x20               for n_idx in 0..N {{\n\
+             \x20                   sum += N_V[i][n_idx] * s_ni[n_idx][j];\n\
+             \x20               }}\n\
+             \x20               k[i][j] = sum;\n\
+             \x20           }}\n\
+             \x20       }}\n\n\
+             \x20       self.s = s;\n\
+             \x20       self.a_neg = a_neg;\n\
+             \x20       self.k = k;\n\
+             \x20       self.s_ni = s_ni;\n",
+            m = m,
+        ));
+
+        // Pot SM recomputation
+        if num_pots > 0 {
+            code.push_str("\n        // Recompute Sherman-Morrison vectors for pots\n");
+            for idx in 0..num_pots {
+                let pot = &ir.pots[idx];
+                code.push_str(&format!(
+                    "        {{\n\
+                     \x20           let mut u = [0.0f64; N];\n\
+                     \x20           if POT_{idx}_NODE_P > 0 {{ u[POT_{idx}_NODE_P - 1] = 1.0; }}\n\
+                     \x20           if POT_{idx}_NODE_Q > 0 {{ u[POT_{idx}_NODE_Q - 1] = -1.0; }}\n\
+                     \x20           let mut su = [0.0f64; N];\n\
+                     \x20           for i in 0..N {{ let mut sum = 0.0; for j in 0..N {{ sum += self.s[i][j] * u[j]; }} su[i] = sum; }}\n\
+                     \x20           let mut usu = 0.0f64;\n\
+                     \x20           for i in 0..N {{ usu += u[i] * su[i]; }}\n",
+                    idx = idx,
+                ));
+                if m > 0 {
+                    code.push_str(&format!(
+                        "            let mut nv_su = [0.0f64; M];\n\
+                         \x20           for i in 0..M {{ let mut sum = 0.0; for j in 0..N {{ sum += N_V[i][j] * su[j]; }} nv_su[i] = sum; }}\n\
+                         \x20           let mut u_ni = [0.0f64; M];\n\
+                         \x20           for j in 0..M {{ let mut sum = 0.0; for i in 0..N {{ sum += su[i] * N_I[j][i]; }} u_ni[j] = sum; }}\n\
+                         \x20           self.pot_{idx}_nv_su = nv_su;\n\
+                         \x20           self.pot_{idx}_u_ni = u_ni;\n",
+                        idx = idx,
+                    ));
+                } else {
+                    // Still need to declare nv_su/u_ni even if M=0
+                    let _ = pot;
+                }
+                code.push_str(&format!(
+                    "            self.pot_{idx}_su = su;\n\
+                     \x20           self.pot_{idx}_usu = usu;\n\
+                     \x20       }}\n",
+                    idx = idx,
+                ));
+            }
+        }
+
+        // Reset oversampler state
+        if os_factor > 1 {
+            let os_info = oversampling_info(os_factor);
+            code.push_str(&format!(
+                "\n        self.os_up_state = [0.0; {}];\n\
+                 \x20       self.os_dn_state = [0.0; {}];\n",
+                os_info.state_size, os_info.state_size,
+            ));
+            if os_factor == 4 {
+                code.push_str(&format!(
+                    "        self.os_up_state_outer = [0.0; {}];\n\
+                     \x20       self.os_dn_state_outer = [0.0; {}];\n",
+                    os_info.state_size_outer, os_info.state_size_outer,
+                ));
+            }
+        }
+
+        // DC block recomputation
+        code.push_str(&format!(
+            "\n        // Recompute DC blocking coefficient\n\
+             \x20       let internal_rate = self.current_sample_rate * {}.0;\n\
+             \x20       self.dc_block_r = 1.0 - 2.0 * std::f64::consts::PI * 5.0 / internal_rate;\n\
+             \x20       self.dc_block_x_prev = 0.0;\n\
+             \x20       self.dc_block_y_prev = 0.0;\n",
+            os_factor,
+        ));
+
+        code.push_str("    }\n");
+        code
+    }
+
     fn emit_pot_constants(&self, ir: &CircuitIR) -> String {
         if ir.pots.is_empty() {
             return String::new();
@@ -547,6 +877,7 @@ impl RustEmitter {
         for (idx, _pot) in ir.pots.iter().enumerate() {
             code.push_str(&format!(
                 "/// Sherman-Morrison scale factor for pot {idx}\n\
+                 #[allow(dead_code)]\n\
                  #[inline(always)]\n\
                  fn sm_scale_{idx}(state: &CircuitState) -> (f64, f64) {{\n\
                  \x20   let r = state.pot_{idx}_resistance;\n\
@@ -686,6 +1017,9 @@ impl RustEmitter {
         let os_factor = ir.solver_config.oversampling_factor;
         ctx.insert("oversampling_factor", &os_factor);
 
+        ctx.insert("max_iter", &ir.solver_config.max_iterations);
+        ctx.insert("m", &ir.topology.m);
+
         let num_pots = ir.pots.len();
         ctx.insert("num_pots", &num_pots);
         let pot_defaults: Vec<String> = ir.pots.iter().map(|p| fmt_f64(1.0 / p.g_nominal)).collect();
@@ -696,14 +1030,8 @@ impl RustEmitter {
             let n = ir.topology.n;
             let m = ir.topology.m;
 
-            // SM scale computation (top of function)
-            let mut sm_scale_lines = String::new();
-            for idx in 0..num_pots {
-                sm_scale_lines.push_str(&format!(
-                    "    let (delta_g_{}, scale_{}) = sm_scale_{}(state);\n",
-                    idx, idx, idx
-                ));
-            }
+            // Sequential SM setup with cross-corrections for multi-pot stability
+            let sm_scale_lines = Self::emit_sequential_sm_setup(&ir.pots, n, m);
             ctx.insert("sm_scale_lines", &sm_scale_lines);
 
             // A_neg correction: modify rhs for pot conductance change on v_prev
@@ -728,6 +1056,14 @@ impl RustEmitter {
                 }
             }
             ctx.insert("sni_correction", &sni_correction);
+
+            // K_eff: precomputed corrected K matrix for NR solver (M > 0 with pots)
+            let use_k_eff = m > 0;
+            ctx.insert("use_k_eff", &use_k_eff);
+            if use_k_eff {
+                let k_eff_setup = Self::emit_k_eff_setup(&ir.pots, m);
+                ctx.insert("k_eff_setup", &k_eff_setup);
+            }
         }
 
         self.render("process_sample", &ctx)
@@ -953,42 +1289,165 @@ impl RustEmitter {
     }
 
     fn emit_s_correction(code: &mut String, idx: usize, _pot: &PotentiometerIR, n: usize) {
-        // S correction: v_pred -= scale * (su^T . rhs) * SU
-        // Sherman-Morrison: S' * rhs = S*rhs - scale * su * (su^T * rhs)
-        // where su = S*u, so the inner product must use su (state.pot_su), not u.
-        // Uses runtime state fields (not constants) for sample-rate independence.
+        // S correction using sequentially corrected local su_c{idx} and scale_c{idx}.
         code.push_str(&format!("    let mut su_dot_rhs_{} = 0.0;\n", idx));
         code.push_str(&format!(
-            "    for _k in 0..N {{ su_dot_rhs_{idx} += state.pot_{idx}_su[_k] * rhs[_k]; }}\n"
+            "    for _k in 0..N {{ su_dot_rhs_{idx} += su_c{idx}[_k] * rhs[_k]; }}\n"
         ));
 
         code.push_str(&format!(
-            "    let factor_{} = scale_{} * su_dot_rhs_{};\n", idx, idx, idx
+            "    let factor_{} = scale_c{} * su_dot_rhs_{};\n", idx, idx, idx
         ));
         for k in 0..n {
             code.push_str(&format!(
-                "    v_pred[{}] -= factor_{} * state.pot_{}_su[{}];\n", k, idx, idx, k
+                "    v_pred[{}] -= factor_{} * su_c{}[{}];\n", k, idx, idx, k
             ));
         }
     }
 
     fn emit_sni_correction(code: &mut String, idx: usize, _pot: &PotentiometerIR, n: usize, _m: usize) {
-        // S*N_i correction: v -= scale * (u^T . N_i . i_nl) * SU
-        // where u^T . N_i is the state.pot_{idx}_u_ni vector
-        // Uses full i_nl (not delta) for trapezoidal nonlinear integration
-        // Uses runtime state fields (not constants) for sample-rate independence.
+        // S*N_i correction using sequentially corrected local vectors.
         code.push_str(&format!("    let mut u_ni_dot_inl_{} = 0.0;\n", idx));
         code.push_str(&format!(
-            "    for _j in 0..M {{ u_ni_dot_inl_{idx} += state.pot_{idx}_u_ni[_j] * i_nl[_j]; }}\n"
+            "    for _j in 0..M {{ u_ni_dot_inl_{idx} += u_ni_c{idx}[_j] * i_nl[_j]; }}\n"
         ));
         code.push_str(&format!(
-            "    let sni_factor_{} = scale_{} * u_ni_dot_inl_{};\n", idx, idx, idx
+            "    let sni_factor_{} = scale_c{} * u_ni_dot_inl_{};\n", idx, idx, idx
         ));
         for k in 0..n {
             code.push_str(&format!(
-                "    v[{}] -= sni_factor_{} * state.pot_{}_su[{}];\n", k, idx, idx, k
+                "    v[{}] -= sni_factor_{} * su_c{}[{}];\n", k, idx, idx, k
             ));
         }
+    }
+
+    /// Generate sequential SM setup code with cross-corrections between pots.
+    ///
+    /// For multiple pots, independent SM rank-1 updates are incorrect because
+    /// each update changes S, which affects subsequent updates. This method
+    /// generates code that applies corrections sequentially: pot k's SU vector
+    /// is corrected for the cumulative effect of pots 0..k-1.
+    ///
+    /// Math: su_ck = S_corrected * u_k = su_k - Σ_{j<k} scale_cj * su_cj * (su_cj^T * u_k)
+    fn emit_sequential_sm_setup(pots: &[PotentiometerIR], _n: usize, m: usize) -> String {
+        let mut code = String::new();
+        code.push_str("    // Sequential Sherman-Morrison setup with cross-corrections\n");
+
+        for k in 0..pots.len() {
+            let pot_k = &pots[k];
+
+            // Delta G computation (independent per pot)
+            code.push_str(&format!(
+                "    let delta_g_{k} = {{\n\
+                 \x20       let r = state.pot_{k}_resistance.clamp(POT_{k}_MIN_R, POT_{k}_MAX_R);\n\
+                 \x20       1.0 / r - POT_{k}_G_NOM\n\
+                 \x20   }};\n"
+            ));
+
+            if k == 0 {
+                // First pot: no cross-corrections needed
+                code.push_str(&format!("    let su_c{k} = state.pot_{k}_su;\n"));
+            } else {
+                // Compute cross-correction dot products: su_cj^T * u_k
+                for j in 0..k {
+                    let dot_expr = Self::emit_dot_su_u(j, pot_k);
+                    code.push_str(&format!("    let dot_{j}_{k} = {dot_expr};\n"));
+                }
+
+                // Corrected SU vector: su_ck = su_k - Σ_{j<k} scale_cj * su_cj * dot_j_k
+                code.push_str(&format!("    let mut su_c{k} = state.pot_{k}_su;\n"));
+                code.push_str("    for _n in 0..N {\n");
+                for j in 0..k {
+                    code.push_str(&format!(
+                        "        su_c{k}[_n] -= scale_c{j} * su_c{j}[_n] * dot_{j}_{k};\n"
+                    ));
+                }
+                code.push_str("    }\n");
+            }
+
+            // Corrected USU: u_k^T * su_ck (extract from corrected su_ck at pot's node indices)
+            let usu_expr = Self::emit_usu_from_su(k, pot_k);
+            code.push_str(&format!("    let usu_c{k} = {usu_expr};\n"));
+
+            // Scale factor
+            code.push_str(&format!(
+                "    let scale_c{k} = if (1.0 + delta_g_{k} * usu_c{k}).abs() > 1e-15 {{\n\
+                 \x20       delta_g_{k} / (1.0 + delta_g_{k} * usu_c{k})\n\
+                 \x20   }} else {{ 0.0 }};\n"
+            ));
+
+            // If M > 0, compute corrected nv_su and u_ni for K_eff
+            if m > 0 {
+                if k == 0 {
+                    code.push_str(&format!("    let nv_su_c{k} = state.pot_{k}_nv_su;\n"));
+                    code.push_str(&format!("    let u_ni_c{k} = state.pot_{k}_u_ni;\n"));
+                } else {
+                    // Corrected NV_SU: nv_su_ck = nv_su_k - Σ_{j<k} scale_cj * nv_su_cj * dot_j_k
+                    code.push_str(&format!("    let mut nv_su_c{k} = state.pot_{k}_nv_su;\n"));
+                    for j in 0..k {
+                        code.push_str(&format!(
+                            "    for _i in 0..M {{ nv_su_c{k}[_i] -= scale_c{j} * nv_su_c{j}[_i] * dot_{j}_{k}; }}\n"
+                        ));
+                    }
+                    // Corrected U_NI: u_ni_ck = u_ni_k - Σ_{j<k} scale_cj * u_ni_cj * dot_j_k
+                    code.push_str(&format!("    let mut u_ni_c{k} = state.pot_{k}_u_ni;\n"));
+                    for j in 0..k {
+                        code.push_str(&format!(
+                            "    for _i in 0..M {{ u_ni_c{k}[_i] -= scale_c{j} * u_ni_c{j}[_i] * dot_{j}_{k}; }}\n"
+                        ));
+                    }
+                }
+            }
+
+            code.push('\n');
+        }
+
+        code
+    }
+
+    /// Emit dot product expression: su_cj^T * u_k
+    /// u_k has entries +1 at node_p-1 and -1 at node_q-1 (grounded nodes omitted)
+    fn emit_dot_su_u(j: usize, pot_k: &PotentiometerIR) -> String {
+        if pot_k.node_p > 0 && pot_k.node_q > 0 {
+            format!("su_c{}[{}] - su_c{}[{}]", j, pot_k.node_p - 1, j, pot_k.node_q - 1)
+        } else if pot_k.node_p > 0 {
+            format!("su_c{}[{}]", j, pot_k.node_p - 1)
+        } else if pot_k.node_q > 0 {
+            format!("-su_c{}[{}]", j, pot_k.node_q - 1)
+        } else {
+            "0.0".to_string()
+        }
+    }
+
+    /// Emit USU expression from corrected SU: u_k^T * su_ck
+    fn emit_usu_from_su(k: usize, pot_k: &PotentiometerIR) -> String {
+        if pot_k.node_p > 0 && pot_k.node_q > 0 {
+            format!("su_c{}[{}] - su_c{}[{}]", k, pot_k.node_p - 1, k, pot_k.node_q - 1)
+        } else if pot_k.node_p > 0 {
+            format!("su_c{}[{}]", k, pot_k.node_p - 1)
+        } else if pot_k.node_q > 0 {
+            format!("-su_c{}[{}]", k, pot_k.node_q - 1)
+        } else {
+            "0.0".to_string()
+        }
+    }
+
+    /// Emit K_eff setup: precomputed corrected K matrix incorporating all pot SM corrections.
+    /// K_eff = K - Σ_k scale_ck * nv_su_ck ⊗ u_ni_ck
+    fn emit_k_eff_setup(pots: &[PotentiometerIR], m: usize) -> String {
+        let mut code = String::new();
+        code.push_str("    // Precompute corrected K matrix: K_eff = K - Σ_k scale_ck * nv_su_ck ⊗ u_ni_ck\n");
+        code.push_str("    let mut k_eff = state.k;\n");
+        for k in 0..pots.len() {
+            for i in 0..m {
+                for j in 0..m {
+                    code.push_str(&format!(
+                        "    k_eff[{i}][{j}] -= scale_c{k} * nv_su_c{k}[{i}] * u_ni_c{k}[{j}];\n"
+                    ));
+                }
+            }
+        }
+        code
     }
 }
 
@@ -1051,10 +1510,17 @@ impl RustEmitter {
         code.push_str("/// \n");
         code.push_str("/// Solves: i_nl - i_d(p + K*i_nl) = 0\n");
         code.push_str("/// where p = N_v * v_pred is the linear prediction\n");
+        let has_pots = !ir.pots.is_empty();
         code.push_str("#[inline(always)]\n");
-        code.push_str(
-            "fn solve_nonlinear(p: &[f64; M], state: &mut CircuitState) -> [f64; M] {\n"
-        );
+        if has_pots && m > 0 {
+            code.push_str(
+                "fn solve_nonlinear(p: &[f64; M], k_eff: &[[f64; M]; M], state: &mut CircuitState) -> [f64; M] {\n"
+            );
+        } else {
+            code.push_str(
+                "fn solve_nonlinear(p: &[f64; M], state: &mut CircuitState) -> [f64; M] {\n"
+            );
+        }
         code.push_str(&format!(
             "    const MAX_ITER: usize = {};\n",
             ir.solver_config.max_iterations
@@ -1083,45 +1549,26 @@ impl RustEmitter {
         code.push_str("    // Newton-Raphson iteration\n");
         code.push_str("    for iter in 0..MAX_ITER {\n\n");
 
-        // Compute v_d = p + K * i_nl (using pre-analyzed sparsity)
-        code.push_str("        // Compute controlling voltages: v_d = p + K * i_nl\n");
-        let has_pots = !ir.pots.is_empty();
-        let vd_let = if has_pots { "let mut" } else { "let" };
-        for i in 0..m {
-            code.push_str(&format!("        {} v_d{} = ", vd_let, i));
-            code.push_str(&format!("p[{}]", i));
-            for &j in &ir.sparsity.k.nz_by_row[i] {
-                code.push_str(&format!(" + state.k[{}][{}] * i_nl[{}]", i, j, j));
-            }
-            code.push_str(";\n");
-        }
-
-        // K correction for pots: v_d[i] -= scale * NV_SU[i] * (u^T * N_i * i_nl)
-        if !ir.pots.is_empty() {
-            code.push_str("\n        // Sherman-Morrison K correction for potentiometers\n");
-            for (idx, pot) in ir.pots.iter().enumerate() {
-                if pot.u_ni.is_empty() {
-                    continue;
-                }
-                code.push_str(&format!(
-                    "        let (_, k_scale_{}) = sm_scale_{}(state);\n", idx, idx
-                ));
-                // Compute u^T * N_i * i_nl
-                code.push_str(&format!("        let u_ni_dot_inl_{} = ", idx));
-                let mut first = true;
+        // Compute v_d = p + K * i_nl
+        if has_pots && m > 0 {
+            // Use precomputed K_eff (corrected for all pots via sequential SM)
+            code.push_str("        // Compute controlling voltages: v_d = p + K_eff * i_nl\n");
+            for i in 0..m {
+                code.push_str(&format!("        let v_d{} = p[{}]", i, i));
                 for j in 0..m {
-                    if !first { code.push_str(" + "); }
-                    code.push_str(&format!("state.pot_{}_u_ni[{}] * i_nl[{}]", idx, j, j));
-                    first = false;
+                    code.push_str(&format!(" + k_eff[{}][{}] * i_nl[{}]", i, j, j));
                 }
                 code.push_str(";\n");
-                // Apply correction to each v_d
-                for i in 0..m {
-                    code.push_str(&format!(
-                        "        v_d{} -= k_scale_{} * state.pot_{}_nv_su[{}] * u_ni_dot_inl_{};\n",
-                        i, idx, idx, i, idx
-                    ));
+            }
+        } else {
+            // Use base K matrix with sparsity optimization
+            code.push_str("        // Compute controlling voltages: v_d = p + K * i_nl\n");
+            for i in 0..m {
+                code.push_str(&format!("        let v_d{} = p[{}]", i, i));
+                for &j in &ir.sparsity.k.nz_by_row[i] {
+                    code.push_str(&format!(" + state.k[{}][{}] * i_nl[{}]", i, j, j));
                 }
+                code.push_str(";\n");
             }
         }
         code.push('\n');
@@ -1248,23 +1695,16 @@ impl RustEmitter {
                     let diag = if i == j { "1.0" } else { "0.0" };
                     let mut terms = String::new();
                     for k in blk_start..blk_start + blk_dim {
-                        if ir.pots.is_empty() {
+                        if has_pots {
+                            // Use precomputed k_eff (corrected for all pots)
                             terms.push_str(&format!(
-                                " - jdev_{}_{} * state.k[{}][{}]",
+                                " - jdev_{}_{} * k_eff[{}][{}]",
                                 i, k, k, j
                             ));
                         } else {
-                            // Use corrected K': state.k[k][j] - sum_pots(scale_p * nv_su_p[k] * u_ni_p[j])
-                            let mut k_correction = String::new();
-                            for (idx, _pot) in ir.pots.iter().enumerate() {
-                                k_correction.push_str(&format!(
-                                    " - k_scale_{} * state.pot_{}_nv_su[{}] * state.pot_{}_u_ni[{}]",
-                                    idx, idx, k, idx, j
-                                ));
-                            }
                             terms.push_str(&format!(
-                                " - jdev_{}_{} * (state.k[{}][{}]{})",
-                                i, k, k, j, k_correction
+                                " - jdev_{}_{} * state.k[{}][{}]",
+                                i, k, k, j
                             ));
                         }
                     }
