@@ -2,7 +2,12 @@
 // MAIN PROCESS FUNCTION
 // =============================================================================
 
-/// Process a single audio sample through the circuit
+{% if oversampling_factor > 1 %}/// Process a single sample at the internal (oversampled) rate.
+///
+/// Called by `process_sample()` through the oversampling chain.
+#[inline(always)]
+fn process_sample_inner(input: f64, state: &mut CircuitState) -> f64 {
+{% else %}/// Process a single audio sample through the circuit
 ///
 /// # Arguments
 /// * `input` - Input voltage at INPUT_NODE
@@ -12,6 +17,7 @@
 /// Output voltage at OUTPUT_NODE
 #[inline]
 pub fn process_sample(input: f64, state: &mut CircuitState) -> f64 {
+{% endif %}
     // Validate input — handle NaN, inf, and extreme values
     let input = if input.is_finite() { input.clamp(-100.0, 100.0) } else { 0.0 };
 {% if num_pots > 0 %}

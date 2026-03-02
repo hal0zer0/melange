@@ -105,10 +105,10 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
 
 ### Working
 - Linear circuit simulation (RC lowpass matches ngspice to 0.03% RMS, 8-nines correlation)
-- MNA stamping for R, C, L, voltage sources, diodes, BJTs
+- MNA stamping for R, C, L, voltage sources, diodes, BJTs, JFETs
 - DK kernel build with proper trapezoidal discretization
 - NR solver: 1D, 2D (two 1D devices), and M-dimensional
-- Codegen for diode and BJT circuits (up to M=4)
+- Codegen for diode, BJT, and JFET circuits (up to M=8, Gaussian elimination for M=3..8)
 - Codegen uses proper trapezoidal RHS with `input_prev` tracking (matches runtime solver)
 - Per-device `.model` params: each device gets its own IS, N, BF, BR, VT (heterogeneous models supported)
 - Nonlinear DC operating point solver (Newton-Raphson with source stepping and Gmin stepping fallbacks)
@@ -118,6 +118,7 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
 - SPICE validation infrastructure with ngspice
 - Input validation: parser rejects negative/zero/NaN/Inf component values; codegen validates node indices
 - Error types are enums (`MnaError`, `DkError`, `CodegenError` with `InvalidConfig`) — no panicking library code
+- Logging via `log` crate (no `eprintln!` in library code)
 - MAX_M=8 bound prevents unbounded allocation in DK kernel
 - CLI reports errors for unresolved node names (no silent defaults)
 - **BJT common-emitter amplifier**: SPICE validation passes (correlation 0.965, 35% RMS)
@@ -129,12 +130,36 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
   - Corrections applied to S, K, A_neg, and S*N_i products in codegen
   - Plugin template auto-generates `FloatParam` knobs for each pot
   - Max 2 pots per circuit; pot value stored in `CircuitState`
+- **Oversampling in codegen** (2x/4x): self-contained polyphase half-band IIR in generated code
+  - `CodegenConfig.oversampling_factor` = 1, 2, or 4
+  - All matrices recomputed at internal rate (sample_rate * factor) from G+C
+  - No runtime crate dependencies — filter coefficients + allpass structure emitted inline
+  - 4x uses cascaded 2x: outer 2-section (~60dB) + inner 3-section (~80dB)
+- **Sparsity-aware emission**: systematic zero-skipping in A_neg, N_v, K, S*N_i multiplications
+- **Runtime sample rate**: `set_sample_rate()` recomputes all matrices from G+C at runtime
+- **JFET codegen**: 1D saturation-only model (Id = IDSS*(1-Vgs/Vp)^2), clamped at IDSS
+  - N-channel (NJ) defaults: VTO=-2.0, IDSS=2e-3; P-channel (PJ) defaults: VTO=+2.0
+  - Compile-and-run verified for both N-channel and P-channel circuits
+- **Explicit re-exports**: `lib.rs` uses named re-exports (no glob `pub use module::*`)
 
 ### Known Limitations
 - Purely resistive nonlinear circuits oscillate (need capacitor damping)
-- JFET/MOSFET not yet in codegen NR
-- Koren triode equation needs rewrite (Phase 4a of review plan)
-- Gummel-Poon BJT Jacobian uses full analytical derivatives (Early effect + high injection)
+- MOSFET not yet in codegen NR
+- Koren triode equation needs rewrite (no grid current model)
+- JFET codegen uses 1D saturation-only model (ignores Vds, current clamped at IDSS)
+- BJT uses Ebers-Moll (no Early effect); Gummel-Poon upgrade needed for <10% RMS accuracy
+- M=8 ceiling limits full tube amp stacks (4 triodes = M=8 minimum)
 
 ### Pending Work
-- **Review plan**: See `.claude/plans/reflective-sprouting-stroustrup.md` for the full 7-phase fix plan. Phases 1-6 mostly complete; Phase 7 (testing quality) in progress.
+
+#### Current Priority — Rust Codegen Completeness
+- **Device coverage**: MOSFET codegen, tube/triode codegen (Koren model with grid current)
+- **BJT accuracy**: Upgrade Ebers-Moll → Gummel-Poon with Early effect (addresses 35% RMS gap)
+- **M>8**: Iterative/sparse NR for large nonlinear systems
+
+#### Future — Multi-Language Codegen
+The `Emitter` trait + `CircuitIR` are language-agnostic by design. Once Rust output is complete, planned targets in priority order: C++ (pro plugin devs), FAUST (compiles to 30+ targets), Python/NumPy (prototyping), MATLAB/Octave (academic).
+
+#### Deferred
+- **Phase 6a/6b** (type safety): NodeIdx newtype and field visibility
+- **Phase 7** (crate split): Extract melange-parser, melange-codegen

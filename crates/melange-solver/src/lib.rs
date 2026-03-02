@@ -49,8 +49,9 @@ pub mod dc_op;
 #[cfg(test)]
 mod dk_math_verification;
 
-pub use parser::*;
-pub use mna::*;
-pub use dk::*;
-pub use solver::*;
-pub use codegen::*;
+// Explicit re-exports of commonly used types (avoid glob pollution).
+pub use parser::Netlist;
+pub use mna::MnaSystem;
+pub use dk::DkKernel;
+pub use solver::{CircuitSolver, LinearSolver};
+pub use codegen::{CodeGenerator, CodegenConfig, CodegenError, GeneratedCode};

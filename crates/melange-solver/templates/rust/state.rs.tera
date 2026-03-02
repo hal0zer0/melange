@@ -55,6 +55,17 @@ pub struct CircuitState {
     /// Potentiometer {{ loop.index0 }} current resistance (ohms)
     pub pot_{{ loop.index0 }}_resistance: f64,
 {% endfor %}
+{% if oversampling_factor > 1 %}
+    /// Oversampler upsampling half-band filter state
+    pub os_up_state: [f64; {{ os_state_size }}],
+    /// Oversampler downsampling half-band filter state
+    pub os_dn_state: [f64; {{ os_state_size }}],
+{% endif %}{% if oversampling_4x %}
+    /// 4x oversampler outer upsampling filter state
+    pub os_up_state_outer: [f64; {{ os_state_size_outer }}],
+    /// 4x oversampler outer downsampling filter state
+    pub os_dn_state_outer: [f64; {{ os_state_size_outer }}],
+{% endif %}
 {% if num_pots > 0 %}
 {% for idx in pot_indices %}
     /// Sherman-Morrison precomputed SU vector for pot {{ idx }} (recomputed by set_sample_rate)
@@ -95,6 +106,13 @@ impl Default for CircuitState {
 {% for default in pot_defaults %}
             pot_{{ loop.index0 }}_resistance: {{ default }},
 {% endfor %}
+{% if oversampling_factor > 1 %}
+            os_up_state: [0.0; {{ os_state_size }}],
+            os_dn_state: [0.0; {{ os_state_size }}],
+{% endif %}{% if oversampling_4x %}
+            os_up_state_outer: [0.0; {{ os_state_size_outer }}],
+            os_dn_state_outer: [0.0; {{ os_state_size_outer }}],
+{% endif %}
 {% if num_pots > 0 %}
 {% for idx in pot_indices %}
             pot_{{ idx }}_su: POT_{{ idx }}_SU,
@@ -123,6 +141,13 @@ impl CircuitState {
 {% for default in pot_defaults %}
         self.pot_{{ loop.index0 }}_resistance = {{ default }};
 {% endfor %}
+{% if oversampling_factor > 1 %}
+        self.os_up_state = [0.0; {{ os_state_size }}];
+        self.os_dn_state = [0.0; {{ os_state_size }}];
+{% endif %}{% if oversampling_4x %}
+        self.os_up_state_outer = [0.0; {{ os_state_size_outer }}];
+        self.os_dn_state_outer = [0.0; {{ os_state_size_outer }}];
+{% endif %}
     }
 
     /// Set DC operating point (call after DC analysis)
@@ -164,8 +189,9 @@ impl CircuitState {
             return;
         }
 
-        let alpha = 2.0 * sample_rate;
-{% if num_inductors > 0 %}        let t = 1.0 / sample_rate;
+        let internal_rate = sample_rate * OVERSAMPLING_FACTOR as f64;
+        let alpha = 2.0 * internal_rate;
+{% if num_inductors > 0 %}        let t = 1.0 / internal_rate;
 {% endif %}
         // Build A = G + alpha*C
         let mut a = [[0.0f64; N]; N];
@@ -267,6 +293,14 @@ impl CircuitState {
             self.pot_{{ idx }}_u_ni = u_ni;
         }
 {% endfor %}{% endif %}
+{% if oversampling_factor > 1 %}
+        // Reset oversampler filter state (old state is incompatible with new rate)
+        self.os_up_state = [0.0; {{ os_state_size }}];
+        self.os_dn_state = [0.0; {{ os_state_size }}];
+{% endif %}{% if oversampling_4x %}
+        self.os_up_state_outer = [0.0; {{ os_state_size_outer }}];
+        self.os_dn_state_outer = [0.0; {{ os_state_size_outer }}];
+{% endif %}
     }
 }
 

@@ -508,6 +508,8 @@ fn build_device_slots_from_netlist(
                     dimension: 2,
                     params: DeviceParams::Bjt(BjtParams {
                         is, vt, beta_f, beta_r, is_pnp,
+                        vaf: f64::INFINITY, var: f64::INFINITY,
+                        ikf: f64::INFINITY, ikr: f64::INFINITY,
                     }),
                 });
                 dim_offset += 2;

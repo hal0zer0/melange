@@ -2,12 +2,16 @@
 //!
 //! Koren's models for triodes and pentodes.
 
-use crate::{NonlinearDevice, VT_ROOM, safeguards};
+use crate::NonlinearDevice;
 
-/// Koren triode model.
+/// Koren triode model with improved grid current.
 ///
 /// Based on Norman Koren's improved vacuum tube models.
 /// Parameters from SPICE model cards.
+///
+/// Grid current uses a smooth power-law model (Leach-style):
+///   Ig = ig_max * max(0, Vgk/vgk_onset)^1.5
+/// which is physically motivated and has a well-defined analytical Jacobian.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct KorenTriode {
     /// Amplification factor (mu)
@@ -20,12 +24,26 @@ pub struct KorenTriode {
     pub kp: f64,
     /// Kvb coefficient (for knee shaping)
     pub kvb: f64,
+    /// Maximum grid current [A] at Vgk = vgk_onset
+    pub ig_max: f64,
+    /// Grid current onset voltage [V]
+    pub vgk_onset: f64,
 }
 
+/// Default grid current maximum [A].
+const DEFAULT_IG_MAX: f64 = 2e-3;
+/// Default grid current onset voltage [V].
+const DEFAULT_VGK_ONSET: f64 = 0.5;
+
 impl KorenTriode {
-    /// Create a new triode model.
+    /// Create a new triode model with default grid current parameters.
     pub fn new(mu: f64, ex: f64, kg1: f64, kp: f64, kvb: f64) -> Self {
-        Self { mu, ex, kg1, kp, kvb }
+        Self { mu, ex, kg1, kp, kvb, ig_max: DEFAULT_IG_MAX, vgk_onset: DEFAULT_VGK_ONSET }
+    }
+
+    /// Create a new triode model with custom grid current parameters.
+    pub fn with_grid_params(mu: f64, ex: f64, kg1: f64, kp: f64, kvb: f64, ig_max: f64, vgk_onset: f64) -> Self {
+        Self { mu, ex, kg1, kp, kvb, ig_max, vgk_onset }
     }
 
     /// 12AX7 (ECC83) - high-mu twin triode, common in guitar amps.
@@ -87,15 +105,29 @@ impl KorenTriode {
         e1.powf(self.ex) / self.kg1
     }
 
-    /// Grid current (simplified - only conducts when grid is positive).
+    /// Grid current using smooth power-law model (Leach-style).
+    ///
+    /// Ig = ig_max * max(0, Vgk / vgk_onset)^1.5
+    ///
+    /// Physically motivated: grid acts as a diode when positive, with
+    /// a smooth onset and well-defined Jacobian. Returns 0 for Vgk <= 0.
     pub fn grid_current(&self, vgk: f64) -> f64 {
-        if vgk > 0.0 {
-            // Very rough approximation: grid conducts like a diode
-            let vt = VT_ROOM;
-            1e-6 * (safeguards::safe_exp(vgk / vt) - 1.0)
-        } else {
-            0.0
+        if vgk <= 0.0 {
+            return 0.0;
         }
+        let x = vgk / self.vgk_onset;
+        self.ig_max * x * x.sqrt() // x^1.5 = x * sqrt(x)
+    }
+
+    /// Grid current Jacobian: dIg/dVgk.
+    ///
+    /// dIg/dVgk = ig_max * 1.5 * (Vgk/vgk_onset)^0.5 / vgk_onset
+    pub fn grid_current_jacobian(&self, vgk: f64) -> f64 {
+        if vgk <= 0.0 {
+            return 0.0;
+        }
+        let x = vgk / self.vgk_onset;
+        self.ig_max * 1.5 * x.sqrt() / self.vgk_onset
     }
 }
 
@@ -460,5 +492,51 @@ mod tests {
                 "Pentode Jacobian[{}] mismatch: analytic={:.6e} fd={:.6e} err={:.2e}",
                 dim, jac[dim], fd, rel_err);
         }
+    }
+
+    /// Verify improved grid current model.
+    #[test]
+    fn test_grid_current_model() {
+        let tube = KorenTriode::ecc83();
+
+        // Negative Vgk → zero grid current
+        assert_eq!(tube.grid_current(-1.0), 0.0);
+        assert_eq!(tube.grid_current(0.0), 0.0);
+
+        // Positive Vgk → nonzero current
+        let ig = tube.grid_current(0.5);
+        assert!(ig > 0.0, "Grid current should be positive for Vgk > 0");
+        // At Vgk = vgk_onset (0.5V), Ig should be ig_max * (0.5/0.5)^1.5 = ig_max
+        assert!((ig - tube.ig_max).abs() < 1e-10,
+            "Ig at onset should be ig_max: got {}, expected {}", ig, tube.ig_max);
+
+        // Monotonically increasing
+        let ig2 = tube.grid_current(1.0);
+        assert!(ig2 > ig, "Grid current should increase with Vgk");
+    }
+
+    /// Verify grid current Jacobian against finite differences.
+    #[test]
+    fn test_grid_current_jacobian_finite_difference() {
+        let tube = KorenTriode::ecc83();
+        let eps = 1e-7;
+
+        for &vgk in &[0.1, 0.3, 0.5, 1.0, 2.0] {
+            let jac = tube.grid_current_jacobian(vgk);
+            let fd = (tube.grid_current(vgk + eps) - tube.grid_current(vgk - eps)) / (2.0 * eps);
+
+            let rel_err = if fd.abs() > 1e-15 {
+                (jac - fd).abs() / fd.abs()
+            } else {
+                jac.abs()
+            };
+            assert!(rel_err < 1e-4,
+                "dIg/dVgk mismatch at Vgk={}: analytic={:.6e} fd={:.6e} err={:.2e}",
+                vgk, jac, fd, rel_err);
+        }
+
+        // At Vgk <= 0, Jacobian should be zero
+        assert_eq!(tube.grid_current_jacobian(0.0), 0.0);
+        assert_eq!(tube.grid_current_jacobian(-1.0), 0.0);
     }
 }

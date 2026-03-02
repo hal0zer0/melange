@@ -14,7 +14,13 @@ pub const M: usize = {{ m }};
 /// if the DAW sample rate differs from this value.
 pub const SAMPLE_RATE: f64 = {{ sample_rate }};
 
-/// Alpha = 2/T for trapezoidal integration (at SAMPLE_RATE)
+/// Oversampling factor (1 = none, 2 = 2x, 4 = 4x)
+pub const OVERSAMPLING_FACTOR: usize = {{ oversampling_factor }};
+{% if oversampling_factor > 1 %}
+/// Internal sample rate = SAMPLE_RATE * OVERSAMPLING_FACTOR
+pub const INTERNAL_SAMPLE_RATE: f64 = {{ internal_sample_rate }};
+{% endif %}
+/// Alpha = 2/T for trapezoidal integration (at internal sample rate)
 pub const ALPHA: f64 = {{ alpha }};
 
 /// Input node index

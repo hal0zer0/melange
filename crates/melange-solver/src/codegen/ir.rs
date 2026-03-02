@@ -36,6 +36,9 @@ pub struct CircuitIR {
     pub dc_op_converged: bool,
     pub inductors: Vec<InductorIR>,
     pub pots: Vec<PotentiometerIR>,
+    /// Pre-analyzed sparsity patterns for compile-time matrices.
+    #[serde(default)]
+    pub sparsity: SparseInfo,
 }
 
 /// Circuit metadata (name, title, generator version).
@@ -61,13 +64,20 @@ pub struct Topology {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SolverConfig {
     pub sample_rate: f64,
-    /// alpha = 2 * sample_rate (trapezoidal integration constant)
+    /// alpha = 2 * internal_sample_rate (trapezoidal integration constant)
     pub alpha: f64,
     pub tolerance: f64,
     pub max_iterations: usize,
     pub input_node: usize,
     pub output_node: usize,
     pub input_resistance: f64,
+    /// Oversampling factor (1, 2, or 4). Default 1 (no oversampling).
+    #[serde(default = "default_oversampling_factor")]
+    pub oversampling_factor: usize,
+}
+
+fn default_oversampling_factor() -> usize {
+    1
 }
 
 /// All matrices needed by the generated solver (flattened row-major).
@@ -139,6 +149,7 @@ pub struct InductorIR {
 pub enum DeviceIR {
     Diode(DiodeParams),
     Bjt(BjtParams),
+    Tube(TubeParams),
 }
 
 /// Per-device resolved parameters, stored in each `DeviceSlot`.
@@ -146,6 +157,8 @@ pub enum DeviceIR {
 pub enum DeviceParams {
     Diode(DiodeParams),
     Bjt(BjtParams),
+    Jfet(JfetParams),
+    Tube(TubeParams),
 }
 
 /// Diode model parameters (resolved from `.model` directive or defaults).
@@ -157,7 +170,11 @@ pub struct DiodeParams {
     pub n_vt: f64,
 }
 
-/// BJT Ebers-Moll parameters (resolved from `.model` directive or defaults).
+/// BJT parameters (Ebers-Moll or Gummel-Poon, resolved from `.model` directive).
+///
+/// When `vaf`, `var`, `ikf`, `ikr` are all infinite (the default), this reduces
+/// to the basic Ebers-Moll model (backward compatible). Any finite GP parameter
+/// activates the Gummel-Poon extension with Early effect and high-injection.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BjtParams {
     /// Saturation current
@@ -171,6 +188,37 @@ pub struct BjtParams {
     /// True if PNP (false = NPN)
     #[serde(default)]
     pub is_pnp: bool,
+    /// Forward Early voltage [V] (inf = no Early effect)
+    #[serde(default = "default_infinity", deserialize_with = "deserialize_f64_or_infinity")]
+    pub vaf: f64,
+    /// Reverse Early voltage [V] (inf = no Early effect)
+    #[serde(default = "default_infinity", deserialize_with = "deserialize_f64_or_infinity")]
+    pub var: f64,
+    /// Forward knee current [A] (inf = no high injection)
+    #[serde(default = "default_infinity", deserialize_with = "deserialize_f64_or_infinity")]
+    pub ikf: f64,
+    /// Reverse knee current [A] (inf = no high injection)
+    #[serde(default = "default_infinity", deserialize_with = "deserialize_f64_or_infinity")]
+    pub ikr: f64,
+}
+
+fn default_infinity() -> f64 {
+    f64::INFINITY
+}
+
+/// Deserialize an f64 that may be null (JSON cannot represent infinity).
+/// Maps null → f64::INFINITY so old serialized data is handled gracefully.
+fn deserialize_f64_or_infinity<'de, D>(deserializer: D) -> Result<f64, D::Error>
+where D: serde::Deserializer<'de> {
+    let opt: Option<f64> = Option::deserialize(deserializer)?;
+    Ok(opt.unwrap_or(f64::INFINITY))
+}
+
+impl BjtParams {
+    /// Returns true if any Gummel-Poon parameter is finite.
+    pub fn is_gummel_poon(&self) -> bool {
+        self.vaf.is_finite() || self.var.is_finite() || self.ikf.is_finite() || self.ikr.is_finite()
+    }
 }
 
 /// A slot in the nonlinear system: maps a device to its M-dimension range.
@@ -186,11 +234,219 @@ pub struct DeviceSlot {
     pub params: DeviceParams,
 }
 
+/// JFET model parameters (resolved from `.model` directive or defaults).
+///
+/// Codegen uses 1D simplification: only Vgs controls Id (saturation-only, ignores Vds).
+/// This matches the MNA stamping where JFET is 1D (dimension=1, controlling voltage=Vgs).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JfetParams {
+    /// Saturation current IDSS [A]
+    pub idss: f64,
+    /// Pinch-off voltage [V] (negative for N-channel, positive for P-channel)
+    pub vp: f64,
+    /// Channel length modulation [1/V] (not used in 1D codegen, stored for reference)
+    pub lambda: f64,
+    /// True if P-channel (false = N-channel)
+    pub is_p_channel: bool,
+}
+
+/// Tube/triode model parameters (Koren + improved grid current).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TubeParams {
+    /// Amplification factor (mu)
+    pub mu: f64,
+    /// Exponent for Koren's equation
+    pub ex: f64,
+    /// Kg1 coefficient
+    pub kg1: f64,
+    /// Kp coefficient
+    pub kp: f64,
+    /// Kvb coefficient (for knee shaping)
+    pub kvb: f64,
+    /// Maximum grid current [A]
+    pub ig_max: f64,
+    /// Grid current onset voltage [V]
+    pub vgk_onset: f64,
+}
+
 /// Nonlinear device type tag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DeviceType {
     Diode,
     Bjt,
+    Jfet,
+    Tube,
+}
+
+/// Sparsity pattern for a single matrix.
+///
+/// Stores per-row lists of nonzero column indices, enabling emitters to
+/// skip structural zeros without ad-hoc `!= 0.0` checks. Entries with
+/// `|x| < SPARSITY_THRESHOLD` are treated as structural zeros.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct MatrixSparsity {
+    pub rows: usize,
+    pub cols: usize,
+    /// Total number of nonzero entries
+    pub nnz: usize,
+    /// For each row, sorted list of column indices with nonzero entries
+    pub nz_by_row: Vec<Vec<usize>>,
+}
+
+/// Pre-analyzed sparsity information for all compile-time matrices.
+///
+/// Populated by `analyze_sparsity()` at the end of `from_kernel()`.
+/// Emitters use this to generate code that skips structural zeros.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SparseInfo {
+    /// A_neg matrix (N×N) — history matrix
+    pub a_neg: MatrixSparsity,
+    /// N_v matrix (M×N) — voltage extraction
+    pub n_v: MatrixSparsity,
+    /// N_i matrix (N×M) — current injection
+    pub n_i: MatrixSparsity,
+    /// K matrix (M×M) — nonlinear kernel
+    pub k: MatrixSparsity,
+}
+
+/// Threshold below which matrix entries are treated as structural zeros.
+const SPARSITY_THRESHOLD: f64 = 1e-20;
+
+/// Analyze sparsity pattern of a flattened row-major matrix.
+fn analyze_matrix_sparsity(data: &[f64], rows: usize, cols: usize) -> MatrixSparsity {
+    let mut nnz = 0;
+    let mut nz_by_row = Vec::with_capacity(rows);
+    for i in 0..rows {
+        let mut row_nz = Vec::new();
+        for j in 0..cols {
+            if data[i * cols + j].abs() >= SPARSITY_THRESHOLD {
+                row_nz.push(j);
+                nnz += 1;
+            }
+        }
+        nz_by_row.push(row_nz);
+    }
+    MatrixSparsity {
+        rows,
+        cols,
+        nnz,
+        nz_by_row,
+    }
+}
+
+/// Stamp a conductance between two nodes into a flat row-major matrix.
+/// Node indices are 1-indexed; 0 means ground.
+fn stamp_flat_conductance(mat: &mut [f64], n: usize, node_i: usize, node_j: usize, g: f64) {
+    match (node_i > 0, node_j > 0) {
+        (true, true) => {
+            let i = node_i - 1;
+            let j = node_j - 1;
+            mat[i * n + i] += g;
+            mat[j * n + j] += g;
+            mat[i * n + j] -= g;
+            mat[j * n + i] -= g;
+        }
+        (true, false) => { mat[(node_i - 1) * n + (node_i - 1)] += g; }
+        (false, true) => { mat[(node_j - 1) * n + (node_j - 1)] += g; }
+        (false, false) => {}
+    }
+}
+
+/// Invert a flat row-major N×N matrix using Gaussian elimination with partial pivoting.
+///
+/// Returns the identity matrix if singular (graceful degradation).
+fn invert_flat_matrix(a: &[f64], n: usize) -> Vec<f64> {
+    // Build augmented [A | I]
+    let mut aug = vec![0.0f64; n * 2 * n];
+    for i in 0..n {
+        for j in 0..n {
+            aug[i * 2 * n + j] = a[i * n + j];
+        }
+        aug[i * 2 * n + n + i] = 1.0;
+    }
+
+    let w = 2 * n;
+    for col in 0..n {
+        // Partial pivoting
+        let mut max_row = col;
+        let mut max_val = aug[col * w + col].abs();
+        for row in (col + 1)..n {
+            let v = aug[row * w + col].abs();
+            if v > max_val {
+                max_val = v;
+                max_row = row;
+            }
+        }
+        if max_val < 1e-30 {
+            // Singular — return identity
+            let mut result = vec![0.0f64; n * n];
+            for i in 0..n { result[i * n + i] = 1.0; }
+            return result;
+        }
+        if max_row != col {
+            for j in 0..w { aug.swap(col * w + j, max_row * w + j); }
+        }
+        let pivot = aug[col * w + col];
+        for row in (col + 1)..n {
+            let factor = aug[row * w + col] / pivot;
+            for j in col..w {
+                aug[row * w + j] -= factor * aug[col * w + j];
+            }
+        }
+    }
+
+    // Back substitution
+    for col in (0..n).rev() {
+        let pivot = aug[col * w + col];
+        if pivot.abs() < 1e-30 {
+            let mut result = vec![0.0f64; n * n];
+            for i in 0..n { result[i * n + i] = 1.0; }
+            return result;
+        }
+        for j in 0..w { aug[col * w + j] /= pivot; }
+        for row in 0..col {
+            let factor = aug[row * w + col];
+            for j in 0..w { aug[row * w + j] -= factor * aug[col * w + j]; }
+        }
+    }
+
+    // Extract result
+    let mut result = vec![0.0f64; n * n];
+    for i in 0..n {
+        for j in 0..n {
+            result[i * n + j] = aug[i * w + n + j];
+        }
+    }
+    result
+}
+
+/// Compute K = N_v * S * N_i from flat row-major matrices.
+///
+/// N_v is M×N, S is N×N, N_i is N×M (all flat row-major).
+fn compute_k_from_s(s: &[f64], n_v: &[f64], n_i: &[f64], n: usize, m: usize) -> Vec<f64> {
+    // First compute S * N_i → S_NI (N×M)
+    let mut s_ni = vec![0.0f64; n * m];
+    for i in 0..n {
+        for j in 0..m {
+            let mut sum = 0.0;
+            for k in 0..n {
+                sum += s[i * n + k] * n_i[k * m + j];
+            }
+            s_ni[i * m + j] = sum;
+        }
+    }
+    // Then K = N_v * S_NI → K (M×M)
+    let mut k = vec![0.0f64; m * m];
+    for i in 0..m {
+        for j in 0..m {
+            let mut sum = 0.0;
+            for ki in 0..n {
+                sum += n_v[i * n + ki] * s_ni[ki * m + j];
+            }
+            k[i * m + j] = sum;
+        }
+    }
+    k
 }
 
 /// Validate that a device model parameter is positive and finite.
@@ -220,7 +476,8 @@ impl CircuitIR {
 
         if m > crate::dk::MAX_M {
             return Err(CodegenError::UnsupportedTopology(format!(
-                "code generation supports at most M=8 nonlinear dimensions, got M={}", m
+                "code generation supports at most M={} nonlinear dimensions, got M={}",
+                crate::dk::MAX_M, m
             )));
         }
 
@@ -230,14 +487,18 @@ impl CircuitIR {
             num_devices: kernel.num_devices,
         };
 
+        let os_factor = config.oversampling_factor;
+        let internal_rate = config.sample_rate * os_factor as f64;
+
         let solver_config = SolverConfig {
             sample_rate: config.sample_rate,
-            alpha: 2.0 * config.sample_rate,
+            alpha: 2.0 * internal_rate,
             tolerance: config.tolerance,
             max_iterations: config.max_iterations,
             input_node: config.input_node,
             output_node: config.output_node,
             input_resistance: config.input_resistance,
+            oversampling_factor: os_factor,
         };
 
         let metadata = CircuitMetadata {
@@ -251,25 +512,75 @@ impl CircuitIR {
         let g_matrix = dk::flatten_matrix(&mna.g, n, n);
         let c_matrix = dk::flatten_matrix(&mna.c, n, n);
 
-        let matrices = Matrices {
-            s: kernel.s.clone(),
-            a_neg: kernel.a_neg.clone(),
-            k: kernel.k.clone(),
-            n_v: kernel.n_v.clone(),
-            n_i: kernel.n_i.clone(),
-            rhs_const: kernel.rhs_const.clone(),
-            g_matrix,
-            c_matrix,
+        let matrices = if os_factor > 1 {
+            // Recompute matrices at internal (oversampled) rate from G and C.
+            let alpha = 2.0 * internal_rate;
+            let t = 1.0 / internal_rate;
+
+            // Build A = G + alpha*C (add inductor companion g_eq at internal rate)
+            let mut a_flat = vec![0.0f64; n * n];
+            let mut a_neg_flat = vec![0.0f64; n * n];
+            for i in 0..n {
+                for j in 0..n {
+                    let g = g_matrix[i * n + j];
+                    let c = c_matrix[i * n + j];
+                    a_flat[i * n + j] = g + alpha * c;
+                    a_neg_flat[i * n + j] = alpha * c - g;
+                }
+            }
+
+            // Stamp inductor companion conductances at internal rate
+            for ind in &kernel.inductors {
+                let g_eq = t / (2.0 * ind.inductance);
+                stamp_flat_conductance(&mut a_flat, n, ind.node_i, ind.node_j, g_eq);
+                stamp_flat_conductance(&mut a_neg_flat, n, ind.node_i, ind.node_j, -g_eq);
+            }
+
+            // Invert A to get S
+            let s = invert_flat_matrix(&a_flat, n);
+
+            // Compute K = N_v * S * N_i
+            let k = compute_k_from_s(&s, &kernel.n_v, &kernel.n_i, n, m);
+
+            Matrices {
+                s,
+                a_neg: a_neg_flat,
+                k,
+                n_v: kernel.n_v.clone(),
+                n_i: kernel.n_i.clone(),
+                rhs_const: kernel.rhs_const.clone(),
+                g_matrix,
+                c_matrix,
+            }
+        } else {
+            Matrices {
+                s: kernel.s.clone(),
+                a_neg: kernel.a_neg.clone(),
+                k: kernel.k.clone(),
+                n_v: kernel.n_v.clone(),
+                n_i: kernel.n_i.clone(),
+                rhs_const: kernel.rhs_const.clone(),
+                g_matrix,
+                c_matrix,
+            }
         };
 
         let (device_slots, devices) = Self::build_device_info(netlist)?;
 
-        let inductors = kernel.inductors.iter().map(|ind| InductorIR {
-            name: ind.name.to_string(),
-            node_i: ind.node_i,
-            node_j: ind.node_j,
-            g_eq: ind.g_eq,
-            inductance: ind.inductance,
+        let inductors: Vec<InductorIR> = kernel.inductors.iter().map(|ind| {
+            // Recompute g_eq at internal rate when oversampling
+            let g_eq = if os_factor > 1 {
+                1.0 / (2.0 * internal_rate * ind.inductance)
+            } else {
+                ind.g_eq
+            };
+            InductorIR {
+                name: ind.name.to_string(),
+                node_i: ind.node_i,
+                node_j: ind.node_j,
+                g_eq,
+                inductance: ind.inductance,
+            }
         }).collect();
 
         let pots = kernel.pots.iter().map(|p| PotentiometerIR {
@@ -301,11 +612,19 @@ impl CircuitIR {
         let dc_nl_currents = dc_result.i_nl.clone();
 
         if !dc_result.converged && m > 0 {
-            eprintln!(
-                "Warning: nonlinear DC OP solver did not converge (method: {:?}), using best estimate",
+            log::warn!(
+                "nonlinear DC OP solver did not converge (method: {:?}), using best estimate",
                 dc_result.method
             );
         }
+
+        // Analyze sparsity patterns for compile-time matrices
+        let sparsity = SparseInfo {
+            a_neg: analyze_matrix_sparsity(&matrices.a_neg, n, n),
+            n_v: analyze_matrix_sparsity(&matrices.n_v, m, n),
+            n_i: analyze_matrix_sparsity(&matrices.n_i, n, m),
+            k: analyze_matrix_sparsity(&matrices.k, m, m),
+        };
 
         Ok(CircuitIR {
             metadata,
@@ -321,6 +640,7 @@ impl CircuitIR {
             dc_op_converged,
             inductors,
             pots,
+            sparsity,
         })
     }
 
@@ -355,10 +675,25 @@ impl CircuitIR {
                     });
                     dim_offset += 2;
                 }
-                Element::Jfet { name, .. } => {
-                    return Err(CodegenError::InvalidConfig(
-                        format!("JFET '{}' not supported in code generation", name)
-                    ));
+                Element::Jfet { model, .. } => {
+                    let params = Self::resolve_jfet_params(netlist, model)?;
+                    slots.push(DeviceSlot {
+                        device_type: DeviceType::Jfet,
+                        start_idx: dim_offset,
+                        dimension: 1,
+                        params: DeviceParams::Jfet(params),
+                    });
+                    dim_offset += 1;
+                }
+                Element::Triode { model, .. } => {
+                    let params = Self::resolve_tube_params(netlist, model)?;
+                    slots.push(DeviceSlot {
+                        device_type: DeviceType::Tube,
+                        start_idx: dim_offset,
+                        dimension: 2,
+                        params: DeviceParams::Tube(params),
+                    });
+                    dim_offset += 2;
                 }
                 Element::Mosfet { name, .. } => {
                     return Err(CodegenError::InvalidConfig(
@@ -388,6 +723,9 @@ impl CircuitIR {
     }
 
     /// Resolve BJT model parameters from the netlist, with validation.
+    ///
+    /// Gummel-Poon parameters (VAF, VAR, IKF, IKR) default to infinity,
+    /// which collapses qb→1.0, giving exact Ebers-Moll behavior.
     fn resolve_bjt_params(netlist: &Netlist, model: &str) -> Result<BjtParams, CodegenError> {
         let vt = Self::lookup_model_param(netlist, model, "VT").unwrap_or(0.02585);
         let is = Self::lookup_model_param(netlist, model, "IS").unwrap_or(1.26e-14);
@@ -404,7 +742,87 @@ impl CircuitIR {
             .map(|m| m.model_type.to_uppercase().starts_with("PNP"))
             .unwrap_or(false);
 
-        Ok(BjtParams { is, vt, beta_f, beta_r, is_pnp })
+        // Gummel-Poon parameters (default to infinity = pure Ebers-Moll)
+        let vaf = Self::lookup_model_param(netlist, model, "VAF")
+            .or_else(|| Self::lookup_model_param(netlist, model, "VA"))
+            .unwrap_or(f64::INFINITY);
+        let var = Self::lookup_model_param(netlist, model, "VAR")
+            .or_else(|| Self::lookup_model_param(netlist, model, "VB"))
+            .unwrap_or(f64::INFINITY);
+        let ikf = Self::lookup_model_param(netlist, model, "IKF")
+            .or_else(|| Self::lookup_model_param(netlist, model, "JBF"))
+            .unwrap_or(f64::INFINITY);
+        let ikr = Self::lookup_model_param(netlist, model, "IKR")
+            .or_else(|| Self::lookup_model_param(netlist, model, "JBR"))
+            .unwrap_or(f64::INFINITY);
+
+        // Validate: if finite, must be positive
+        if vaf.is_finite() {
+            validate_positive_finite(vaf, "BJT model VAF")?;
+        }
+        if var.is_finite() {
+            validate_positive_finite(var, "BJT model VAR")?;
+        }
+        if ikf.is_finite() {
+            validate_positive_finite(ikf, "BJT model IKF")?;
+        }
+        if ikr.is_finite() {
+            validate_positive_finite(ikr, "BJT model IKR")?;
+        }
+
+        Ok(BjtParams { is, vt, beta_f, beta_r, is_pnp, vaf, var, ikf, ikr })
+    }
+
+    /// Resolve JFET model parameters from the netlist, with validation.
+    ///
+    /// Uses 1D simplification: only IDSS and VP are used in codegen.
+    /// Lambda is stored but not used in the saturation-only model.
+    fn resolve_jfet_params(netlist: &Netlist, model: &str) -> Result<JfetParams, CodegenError> {
+        // Determine channel type first — default VP depends on polarity.
+        let is_p_channel = netlist.models.iter()
+            .find(|m| m.name.eq_ignore_ascii_case(model))
+            .map(|m| m.model_type.to_uppercase().starts_with("PJ"))
+            .unwrap_or(false);
+
+        let idss = Self::lookup_model_param(netlist, model, "IDSS")
+            .or_else(|| Self::lookup_model_param(netlist, model, "BETA"))
+            .unwrap_or(2e-3);
+        let default_vp = if is_p_channel { 2.0 } else { -2.0 };
+        let vp = Self::lookup_model_param(netlist, model, "VTO")
+            .unwrap_or(default_vp);
+        let lambda = Self::lookup_model_param(netlist, model, "LAMBDA").unwrap_or(0.001);
+
+        validate_positive_finite(idss, "JFET model IDSS")?;
+        if !vp.is_finite() || vp.abs() < 1e-15 {
+            return Err(CodegenError::InvalidConfig(
+                format!("JFET model VP must be finite and nonzero, got {vp}")
+            ));
+        }
+
+        Ok(JfetParams { idss, vp, lambda, is_p_channel })
+    }
+
+    /// Resolve tube/triode model parameters from the netlist, with validation.
+    ///
+    /// Defaults are 12AX7 (ECC83) values.
+    fn resolve_tube_params(netlist: &Netlist, model: &str) -> Result<TubeParams, CodegenError> {
+        let mu = Self::lookup_model_param(netlist, model, "MU").unwrap_or(100.0);
+        let ex = Self::lookup_model_param(netlist, model, "EX").unwrap_or(1.4);
+        let kg1 = Self::lookup_model_param(netlist, model, "KG1").unwrap_or(1060.0);
+        let kp = Self::lookup_model_param(netlist, model, "KP").unwrap_or(600.0);
+        let kvb = Self::lookup_model_param(netlist, model, "KVB").unwrap_or(300.0);
+        let ig_max = Self::lookup_model_param(netlist, model, "IG_MAX").unwrap_or(2e-3);
+        let vgk_onset = Self::lookup_model_param(netlist, model, "VGK_ONSET").unwrap_or(0.5);
+
+        validate_positive_finite(mu, "tube model MU")?;
+        validate_positive_finite(ex, "tube model EX")?;
+        validate_positive_finite(kg1, "tube model KG1")?;
+        validate_positive_finite(kp, "tube model KP")?;
+        validate_positive_finite(kvb, "tube model KVB")?;
+        validate_positive_finite(ig_max, "tube model IG_MAX")?;
+        validate_positive_finite(vgk_onset, "tube model VGK_ONSET")?;
+
+        Ok(TubeParams { mu, ex, kg1, kp, kvb, ig_max, vgk_onset })
     }
 
     /// Build the legacy `devices` list (first occurrence of each device type).

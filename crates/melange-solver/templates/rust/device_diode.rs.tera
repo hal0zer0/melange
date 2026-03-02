@@ -1,3 +1,6 @@
+// Canonical source: melange-devices/src/diode.rs (DiodeShockley)
+// Duplicated here because generated code must be self-contained.
+
 /// Diode current: i_d = is * (exp(v_d / n_vt) - 1)
 #[inline(always)]
 fn diode_current(v_d: f64, is: f64, n_vt: f64) -> f64 {

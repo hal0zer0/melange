@@ -8,13 +8,33 @@ const N: usize = 4;           // Number of nodes
 const M: usize = 2;           // Nonlinear device dimensions
 const SAMPLE_RATE: f64 = 48000.0;
 const INPUT_RESISTANCE: f64 = 1.0;  // 1Ω near-ideal voltage source
+const OVERSAMPLING_FACTOR: usize = 2;       // 1, 2, or 4
+const INTERNAL_SAMPLE_RATE: f64 = 96000.0;  // Only when factor > 1
 
-// Precomputed matrices
-const S: [[f64; N]; N] = [...];       // S = A^{-1}
-const A_NEG: [[f64; N]; N] = [...];   // A_neg = alpha*C - G
-const K: [[f64; M]; M] = [...];       // K = N_v*S*N_i (naturally negative)
-const N_V: [[f64; N]; M] = [...];
-const N_I: [[f64; N]; M] = [...];
+// G and C stored for runtime recomputation via set_sample_rate()
+const G: [[f64; N]; N] = [...];        // Conductance matrix
+const C: [[f64; N]; N] = [...];        // Capacitance matrix
+const N_V: [[f64; N]; M] = [...];      // Voltage extraction (constant)
+const N_I: [[f64; N]; M] = [...];      // Current injection (constant)
+
+// Per-device constants
+const DEVICE_0_IS: f64 = 1e-12;
+const DEVICE_0_N_VT: f64 = 0.026;
+const DEVICE_1_IDSS: f64 = 2e-3;      // JFET
+const DEVICE_1_VP: f64 = -2.0;
+const DEVICE_1_SIGN: f64 = 1.0;       // +1.0 N-ch, -1.0 P-ch
+```
+
+### State (Runtime, Mutable Matrices)
+```rust
+struct CircuitState {
+    // Matrices recomputed by set_sample_rate()
+    s: [[f64; N]; N],          // S = A^{-1} (at internal rate)
+    a_neg: [[f64; N]; N],      // A_neg = alpha*C - G
+    k: [[f64; M]; M],          // K = N_v*S*N_i
+    s_ni: [[f64; M]; N],       // S*N_i (for final voltages)
+    // ...
+}
 ```
 
 ### DC Operating Point Constants
@@ -31,8 +51,17 @@ Used to initialize `i_nl_prev` in both `Default` and `reset()`.
 struct CircuitState {
     v_prev: [f64; N],        // Previous node voltages
     i_nl_prev: [f64; M],     // Previous nonlinear currents (init from DC_NL_I if present)
+    input_prev: f64,          // Previous input (for trapezoidal RHS)
     dc_operating_point: [f64; N],
     last_nr_iterations: u32,
+    // Runtime matrices (recomputed by set_sample_rate)
+    s: [[f64; N]; N],
+    a_neg: [[f64; N]; N],
+    k: [[f64; M]; M],
+    s_ni: [[f64; M]; N],
+    // Oversampler state (when factor > 1)
+    os_up_state: [f64; STATE_SIZE],
+    os_dn_state: [f64; STATE_SIZE],
 }
 ```
 
@@ -53,13 +82,27 @@ fn bjt_ib(vbe: f64, vbc: f64) -> f64;              // Ebers-Moll Ib
 fn bjt_jacobian(vbe: f64, vbc: f64) -> [f64; 4];   // [dIc/dVbe, dIc/dVbc, dIb/dVbe, dIb/dVbc]
 ```
 
+### JFET (1D per device)
+```rust
+fn jfet_id(vgs: f64, idss: f64, vp: f64, sign: f64) -> f64;          // Saturation: IDSS*(1-Vgs/Vp)^2
+fn jfet_conductance(vgs: f64, idss: f64, vp: f64, sign: f64) -> f64; // 2*IDSS*Vgst/Vp^2
+```
+
+1D saturation-only model: ignores Vds (no triode/ohmic region). Vgst is clamped to
+`[0, |Vp|]` so drain current never exceeds IDSS (prevents runaway for forward-biased gate).
+
+- N-channel (`.model name NJ(...)`): sign=+1.0, default VTO=-2.0
+- P-channel (`.model name PJ(...)`): sign=-1.0, default VTO=+2.0
+- Default IDSS=2e-3 A, lambda=0.001 (stored but unused in 1D model)
+- Parameter lookup: `VTO` only (no `VT` alias, to avoid confusion with thermal voltage)
+
 ## Device Map and M-Dimension Assignment
 
 Nonlinear devices occupy M dimensions in order of appearance in the netlist:
 - Diode: 1 dimension (controlling voltage Vd, current Id)
 - BJT: 2 dimensions (Vbe->Ic, Vbc->Ib)
-- JFET: 1 dimension (Vgs->Id) -- not yet supported in NR codegen
-- MOSFET: 1 dimension (Vgs->Id) -- not yet supported in NR codegen
+- JFET: 1 dimension (Vgs->Id)
+- MOSFET: 1 dimension (Vgs->Id) — not yet supported in NR codegen
 
 Example for a circuit with D1, Q1, D2:
 ```
@@ -126,9 +169,23 @@ let f_i = i_nl[i] - i_dev_i;
 
 ### process_sample
 ```rust
+// Without oversampling (factor=1):
+pub fn process_sample(input: f64, state: &mut CircuitState) -> f64 { ... }
+
+// With oversampling (factor=2):
+fn process_sample_inner(input: f64, state: &mut CircuitState) -> f64 { ... }
 pub fn process_sample(input: f64, state: &mut CircuitState) -> f64 {
+    // Upsample: [input, halfband_up(input)]
+    // Process both samples through process_sample_inner
+    // Downsample: halfband_dn(out0) → return out1
+}
+```
+
+The inner function contains the standard DK pipeline:
+```rust
+fn process_sample_inner(input: f64, state: &mut CircuitState) -> f64 {
     let rhs = build_rhs(input, state.input_prev, state);
-    let v_pred = mat_vec_mul_s(&rhs);
+    let v_pred = mat_vec_mul_s(&rhs, state);  // Uses state.s (runtime matrix)
     let p = extract_controlling_voltages(&v_pred);
     let i_nl = solve_nonlinear(&p, state);
     let v = compute_final_voltages(&v_pred, &i_nl, state);
@@ -180,8 +237,8 @@ rhs += history;
 ### Linear Solve by M Size
 - M=1: Direct division
 - M=2: Cramer's rule (explicit 2x2 inverse)
-- M=3, M=4: Inline Gaussian elimination with partial pivoting
-- M>4: Not supported
+- M=3..8: Inline Gaussian elimination with partial pivoting
+- M>8: Not supported (MAX_M=8)
 
 ## Verification Checklist
 - [ ] INPUT_RESISTANCE matches G matrix stamping (default: 1 ohm)
@@ -211,12 +268,71 @@ The emitter checks `has_dc_nl = M > 0 && dc_nl_currents.iter().any(|&x| x.abs() 
 
 `CodegenConfig` fields: `dc_op_max_iterations` (default 200), `dc_op_tolerance` (default 1e-9).
 
+## Oversampling
+
+Generated code supports 2x and 4x oversampling via `CodegenConfig.oversampling_factor` (default: 1).
+
+### How It Works
+When factor > 1, the codegen:
+1. Recomputes all matrices (S, A_neg, K, S_NI) at `sample_rate * factor` from stored G+C
+2. Renames `process_sample` → `process_sample_inner` (private)
+3. Emits a public `process_sample` wrapper that upsamples → processes → downsamples
+4. Emits self-contained polyphase allpass half-band filter functions inline (no external dependencies)
+
+### Filter Design
+- **2x**: 3-section polyphase allpass half-band (~80dB stopband rejection)
+- **4x**: Cascaded 2x — outer stage uses 2-section (~60dB), inner stage uses 3-section (~80dB)
+- Coefficients from `melange-primitives/src/oversampling.rs` (HB_3SECTION, HB_2SECTION)
+
+### State Fields
+- `os_up_state`, `os_dn_state`: allpass filter state for upsample/downsample (2x)
+- `os_up_state_outer`, `os_dn_state_outer`: additional state for outer stage (4x only)
+- All reset in `reset()` and reinitialized in `set_sample_rate()`
+
+### `set_sample_rate()` with Oversampling
+When oversampling is active, `set_sample_rate(sr)` computes `internal_rate = sr * OVERSAMPLING_FACTOR`
+and recomputes all matrices at the internal rate.
+
+## Sparsity-Aware Emission
+
+The IR includes `SparseInfo` with per-matrix nonzero entry lists (threshold: `|x| < 1e-20` = structural zero).
+The emitter skips zero entries uniformly in:
+- `build_rhs`: A_neg * v_prev multiplication
+- `extract_controlling_voltages`: N_v * v_pred
+- `solve_nonlinear`: K * i_nl
+- `compute_final_voltages`: S * N_i * i_nl
+
+This reduces generated code size and improves performance for sparse circuits.
+
+## Runtime Sample Rate Support
+
+Generated code stores G and C as constants and recomputes S, A_neg, K, S_NI at runtime:
+
+```rust
+impl CircuitState {
+    pub fn set_sample_rate(&mut self, sample_rate: f64) {
+        let internal_rate = sample_rate * OVERSAMPLING_FACTOR as f64;
+        let alpha = 2.0 * internal_rate;
+        // Recompute A = G + alpha*C, then S = A^{-1}
+        // Recompute A_neg = alpha*C - G
+        // Recompute K = N_v * S * N_i
+        // Recompute S_NI = S * N_i (for final voltage computation)
+        // Recompute inductor g_eq and pot SM vectors if applicable
+    }
+}
+```
+
+Matrix inversion uses inline Gaussian elimination (`invert_n()` helper emitted in generated code).
+
 ## Differences: Runtime vs Generated
 
 | Aspect | Runtime Solver | Generated Code |
 |--------|---------------|----------------|
 | Jacobian | Full `J = I - J_dev * K` | Block-diagonal `J = I - J_dev * K` |
 | Device Jacobian | Dense matrix from devices | Block-diagonal jdev entries |
-| Linear solve | Gaussian elimination (any size) | Explicit for M<=4 |
-| Handles | All device types | Diodes (1D) and BJTs (2D) |
+| Linear solve | Gaussian elimination (any size) | Explicit for M<=8 (Gauss elim for M>=3) |
+| Handles | All device types | Diodes (1D), BJTs (2D), JFETs (1D) |
 | DC OP init | `initialize_dc_op()` (opt-in) | `DC_NL_I` constant (automatic) |
+| Oversampling | Not available | 2x/4x polyphase half-band IIR |
+| Sparsity | Dense | Zero entries skipped in emission |
+| Sample rate | Fixed at construction | `set_sample_rate()` recomputes from G+C |

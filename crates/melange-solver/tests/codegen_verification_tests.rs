@@ -637,20 +637,20 @@ fn test_codegen_bjt_nr_solver_generates_device_calls() {
 
     assert_eq!(kernel.m, 2, "Expected m=2 for single BJT circuit");
 
-    // BJT NR solver should call bjt_ic and bjt_ib with per-device params including sign
+    // BJT NR solver should call bjt_ic and bjt_ib with per-device params including GP params
     assert!(
-        code.contains("bjt_ic(v_d0, v_d1, DEVICE_0_IS, DEVICE_0_VT, DEVICE_0_BETA_R, DEVICE_0_SIGN)"),
-        "NR solver should call bjt_ic with per-device params and sign."
+        code.contains("bjt_ic(v_d0, v_d1, DEVICE_0_IS, DEVICE_0_VT, DEVICE_0_BETA_R, DEVICE_0_SIGN, DEVICE_0_USE_GP, DEVICE_0_VAF, DEVICE_0_VAR, DEVICE_0_IKF)"),
+        "NR solver should call bjt_ic with per-device params and GP params."
     );
     assert!(
         code.contains("bjt_ib(v_d0, v_d1, DEVICE_0_IS, DEVICE_0_VT, DEVICE_0_BETA_F, DEVICE_0_BETA_R, DEVICE_0_SIGN)"),
         "NR solver should call bjt_ib with per-device params and sign."
     );
 
-    // Should call bjt_jacobian with per-device params including sign
+    // Should call bjt_jacobian with per-device params including GP params
     assert!(
-        code.contains("bjt_jacobian(v_d0, v_d1, DEVICE_0_IS, DEVICE_0_VT, DEVICE_0_BETA_F, DEVICE_0_BETA_R, DEVICE_0_SIGN)"),
-        "NR solver should call bjt_jacobian with per-device params and sign."
+        code.contains("bjt_jacobian(v_d0, v_d1, DEVICE_0_IS, DEVICE_0_VT, DEVICE_0_BETA_F, DEVICE_0_BETA_R, DEVICE_0_SIGN, DEVICE_0_USE_GP, DEVICE_0_VAF, DEVICE_0_VAR, DEVICE_0_IKF)"),
+        "NR solver should call bjt_jacobian with per-device params and GP params."
     );
 
     // Should assign all 4 Jacobian entries from the bjt_jacobian result
@@ -748,10 +748,10 @@ fn test_codegen_mixed_diode_bjt_device_map() {
     assert!(code.contains("diode_current(v_d0, DEVICE_0_IS, DEVICE_0_N_VT)"), "Diode current at index 0");
     assert!(code.contains("jdev_0_0 = diode_conductance(v_d0, DEVICE_0_IS, DEVICE_0_N_VT)"), "Diode jdev at index 0");
 
-    // BJT at indices 1,2 (device 1) with per-device params including sign
-    assert!(code.contains("bjt_ic(v_d1, v_d2, DEVICE_1_IS, DEVICE_1_VT, DEVICE_1_BETA_R, DEVICE_1_SIGN)"), "BJT Ic at indices 1,2");
+    // BJT at indices 1,2 (device 1) with per-device params including GP params
+    assert!(code.contains("bjt_ic(v_d1, v_d2, DEVICE_1_IS, DEVICE_1_VT, DEVICE_1_BETA_R, DEVICE_1_SIGN, DEVICE_1_USE_GP, DEVICE_1_VAF, DEVICE_1_VAR, DEVICE_1_IKF)"), "BJT Ic at indices 1,2");
     assert!(code.contains("bjt_ib(v_d1, v_d2, DEVICE_1_IS, DEVICE_1_VT, DEVICE_1_BETA_F, DEVICE_1_BETA_R, DEVICE_1_SIGN)"), "BJT Ib at indices 1,2");
-    assert!(code.contains("bjt_jacobian(v_d1, v_d2, DEVICE_1_IS, DEVICE_1_VT, DEVICE_1_BETA_F, DEVICE_1_BETA_R, DEVICE_1_SIGN)"), "BJT Jacobian at indices 1,2");
+    assert!(code.contains("bjt_jacobian(v_d1, v_d2, DEVICE_1_IS, DEVICE_1_VT, DEVICE_1_BETA_F, DEVICE_1_BETA_R, DEVICE_1_SIGN, DEVICE_1_USE_GP, DEVICE_1_VAF, DEVICE_1_VAR, DEVICE_1_IKF)"), "BJT Jacobian at indices 1,2");
 
     // All 3 residuals
     assert!(code.contains("let f0 = i_nl[0] - i_dev0"), "Residual f0");
@@ -1380,15 +1380,15 @@ C1 out 0 100p
 }
 
 // ==========================================================================
-// Test: M > 8 rejection at DK kernel build time
+// Test: M > MAX_M rejection at DK kernel build time
 // ==========================================================================
 
-/// Verify that M=9 is rejected at DK kernel build time (MAX_M=8).
+/// Verify that M=17 is rejected at DK kernel build time (MAX_M=16).
 #[test]
-fn test_m_gt_8_rejected() {
-    // 9 diodes → M=9 which exceeds MAX_M=8
+fn test_m_gt_max_rejected() {
+    // 17 diodes → M=17 which exceeds MAX_M=16
     let spice = "\
-Nine Diodes
+Seventeen Diodes
 Rin in 0 1k
 D1 in m1 D1N4148
 D2 m1 m2 D1N4148
@@ -1398,7 +1398,15 @@ D5 m4 m5 D1N4148
 D6 m5 m6 D1N4148
 D7 m6 m7 D1N4148
 D8 m7 m8 D1N4148
-D9 m8 out D1N4148
+D9 m8 m9 D1N4148
+D10 m9 m10 D1N4148
+D11 m10 m11 D1N4148
+D12 m11 m12 D1N4148
+D13 m12 m13 D1N4148
+D14 m13 m14 D1N4148
+D15 m14 m15 D1N4148
+D16 m15 m16 D1N4148
+D17 m16 out D1N4148
 R1 m1 0 10k
 R2 m2 0 10k
 R3 m3 0 10k
@@ -1407,6 +1415,14 @@ R5 m5 0 10k
 R6 m6 0 10k
 R7 m7 0 10k
 R8 m8 0 10k
+R9 m9 0 10k
+R10 m10 0 10k
+R11 m11 0 10k
+R12 m12 0 10k
+R13 m13 0 10k
+R14 m14 0 10k
+R15 m15 0 10k
+R16 m16 0 10k
 C1 out 0 1u
 .model D1N4148 D(IS=1e-15)
 ";
@@ -1414,12 +1430,61 @@ C1 out 0 1u
     let netlist = Netlist::parse(spice).expect("failed to parse netlist");
     let mna = MnaSystem::from_netlist(&netlist).expect("failed to build MNA");
 
-    // M=9 exceeds MAX_M=8, so kernel build should fail
+    // M=17 exceeds MAX_M=16, so kernel build should fail
     let result = DkKernel::from_mna(&mna, 44100.0);
     assert!(
         result.is_err(),
-        "M=9 should be rejected at DK kernel build time (MAX_M=8)"
+        "M=17 should be rejected at DK kernel build time (MAX_M=16)"
     );
+}
+
+/// Verify that M=10 (10 diodes) succeeds with MAX_M=16.
+#[test]
+fn test_m10_accepted() {
+    let spice = "\
+Ten Diodes
+Rin in 0 1k
+D1 in m1 D1N4148
+D2 m1 m2 D1N4148
+D3 m2 m3 D1N4148
+D4 m3 m4 D1N4148
+D5 m4 m5 D1N4148
+D6 m5 m6 D1N4148
+D7 m6 m7 D1N4148
+D8 m7 m8 D1N4148
+D9 m8 m9 D1N4148
+D10 m9 out D1N4148
+R1 m1 0 10k
+R2 m2 0 10k
+R3 m3 0 10k
+R4 m4 0 10k
+R5 m5 0 10k
+R6 m6 0 10k
+R7 m7 0 10k
+R8 m8 0 10k
+R9 m9 0 10k
+C1 out 0 1u
+.model D1N4148 D(IS=1e-15)
+";
+
+    let netlist = Netlist::parse(spice).expect("failed to parse netlist");
+    let mna = MnaSystem::from_netlist(&netlist).expect("failed to build MNA");
+    assert_eq!(mna.m, 10, "10 diodes should give M=10");
+
+    // M=10 is within MAX_M=16, should succeed
+    let kernel = DkKernel::from_mna(&mna, 44100.0).expect("M=10 should succeed with MAX_M=16");
+    assert_eq!(kernel.m, 10);
+
+    // Also verify codegen works for M=10
+    let config = CodegenConfig {
+        circuit_name: "ten_diode_test".to_string(),
+        input_node: 0,
+        output_node: kernel.n - 1,
+        ..CodegenConfig::default()
+    };
+    let codegen = CodeGenerator::new(config);
+    let result = codegen.generate(&kernel, &mna, &netlist);
+    assert!(result.is_ok(), "Codegen for M=10 should succeed: {:?}", result.err());
 }
 
 // ==========================================================================
@@ -2674,4 +2739,1157 @@ C1 out 0 1u
     let (code4, _nl4, _mna4, kernel4) = generate_code(m4_spice);
     assert_eq!(kernel4.m, 4, "Four diodes = M=4");
     assert!(code4.contains("Solve 4x4"), "M=4 should still work");
+}
+
+// ==========================================================================
+// JFET codegen tests
+// ==========================================================================
+
+// N-channel JFET common-source amplifier with VDD supply.
+// Nodes: in(0), out(1), src(2), vdd(3) → matches default_config input=0, output=1.
+const JFET_CS_SPICE: &str = "\
+JFET Common Source Amplifier
+Rg in 0 100k
+J1 out in src J2N5457
+Rd vdd out 10k
+Rs src 0 1k
+V1 vdd 0 DC 12
+C1 out 0 100n
+Cs src 0 10u
+.model J2N5457 NJ(VTO=-2.0 IDSS=2e-3 LAMBDA=0.001)
+";
+
+#[test]
+fn test_jfet_codegen_generates_correct_functions() {
+    let (code, _netlist, _mna, kernel) = generate_code(JFET_CS_SPICE);
+
+    // JFET is 1D: M=1
+    assert_eq!(kernel.m, 1, "JFET should be 1D (M=1)");
+
+    // Should contain JFET device functions
+    assert!(code.contains("jfet_id("), "Should contain jfet_id function");
+    assert!(code.contains("jfet_conductance("), "Should contain jfet_conductance function");
+
+    // Should have JFET device constants
+    assert!(code.contains("DEVICE_0_IDSS"), "Should have IDSS constant");
+    assert!(code.contains("DEVICE_0_VP"), "Should have VP constant");
+    assert!(code.contains("DEVICE_0_SIGN"), "Should have SIGN constant");
+
+    // Should call JFET functions in NR loop
+    assert!(
+        code.contains("jfet_id(v_d0, DEVICE_0_IDSS, DEVICE_0_VP, DEVICE_0_SIGN)"),
+        "NR loop should call jfet_id"
+    );
+    assert!(
+        code.contains("jfet_conductance(v_d0, DEVICE_0_IDSS, DEVICE_0_VP, DEVICE_0_SIGN)"),
+        "NR loop should call jfet_conductance"
+    );
+}
+
+#[test]
+fn test_jfet_codegen_compiles() {
+    let (code, _netlist, _mna, kernel) = generate_code(JFET_CS_SPICE);
+    assert_eq!(kernel.m, 1);
+
+    let tmp_dir = std::env::temp_dir();
+    let tmp_path = tmp_dir.join("melange_codegen_test_jfet.rs");
+    {
+        let mut f = std::fs::File::create(&tmp_path).unwrap();
+        f.write_all(code.as_bytes()).unwrap();
+    }
+
+    let output = std::process::Command::new("rustc")
+        .args(["--edition", "2024", "--crate-type", "lib", "-o"])
+        .arg(tmp_dir.join("melange_codegen_test_jfet.rlib"))
+        .arg(&tmp_path)
+        .output()
+        .expect("failed to run rustc");
+
+    let _ = std::fs::remove_file(&tmp_path);
+    let _ = std::fs::remove_file(tmp_dir.join("melange_codegen_test_jfet.rlib"));
+    let _ = std::fs::remove_file(tmp_dir.join("libmelange_codegen_test_jfet.rlib"));
+
+    assert!(
+        output.status.success(),
+        "JFET codegen failed to compile:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_jfet_mixed_with_diode_compiles() {
+    // Nodes: in(0), out(1), mid(2), src(3), vdd(4).
+    // J1 first → device 0 (JFET), D1 second → device 1 (diode).
+    let spice = "\
+JFET with Diode Clipper
+Rin in out 100k
+J1 mid in src J2N5457
+D1 out 0 D1N4148
+Rd vdd mid 10k
+Rs src 0 1k
+V1 vdd 0 DC 12
+Cc mid out 100n
+Cs src 0 10u
+.model J2N5457 NJ(VTO=-2.0 IDSS=2e-3)
+.model D1N4148 D(IS=1e-15)
+";
+    let (code, _netlist, _mna, kernel) = generate_code(spice);
+    assert_eq!(kernel.m, 2, "JFET(1D) + Diode(1D) = M=2");
+
+    // Should contain both device types
+    assert!(code.contains("jfet_id("), "Should have JFET functions");
+    assert!(code.contains("diode_current("), "Should have diode functions");
+    assert!(code.contains("DEVICE_0_IDSS"), "JFET at device 0");
+    assert!(code.contains("DEVICE_1_IS"), "Diode at device 1");
+
+    let tmp_dir = std::env::temp_dir();
+    let tmp_path = tmp_dir.join("melange_codegen_test_jfet_diode.rs");
+    {
+        let mut f = std::fs::File::create(&tmp_path).unwrap();
+        f.write_all(code.as_bytes()).unwrap();
+    }
+
+    let output = std::process::Command::new("rustc")
+        .args(["--edition", "2024", "--crate-type", "lib", "-o"])
+        .arg(tmp_dir.join("melange_codegen_test_jfet_diode.rlib"))
+        .arg(&tmp_path)
+        .output()
+        .expect("failed to run rustc");
+
+    let _ = std::fs::remove_file(&tmp_path);
+    let _ = std::fs::remove_file(tmp_dir.join("melange_codegen_test_jfet_diode.rlib"));
+    let _ = std::fs::remove_file(tmp_dir.join("libmelange_codegen_test_jfet_diode.rlib"));
+
+    assert!(
+        output.status.success(),
+        "JFET+Diode codegen failed to compile:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Compile and run the JFET common-source amplifier: feed a sine wave, verify
+/// output is finite, non-zero, and the signal passes through.
+#[test]
+fn test_jfet_codegen_compiles_and_runs() {
+    let (netlist, mna, kernel) = build_pipeline(JFET_CS_SPICE);
+    let config = CodegenConfig {
+        circuit_name: "jfet_cs_run".to_string(),
+        sample_rate: 44100.0,
+        input_node: 0,
+        output_node: 1,
+        input_resistance: 1.0,
+        ..CodegenConfig::default()
+    };
+    let codegen = CodeGenerator::new(config);
+    let result = codegen.generate(&kernel, &mna, &netlist).expect("codegen failed");
+
+    let test_harness = format!(
+        "{}\n\
+         fn main() {{\n\
+             let mut state = CircuitState::default();\n\
+             \n\
+             // Warm up with 200 silent samples to let DC OP settle\n\
+             for _ in 0..200 {{\n\
+                 let out = process_sample(0.0, &mut state);\n\
+                 assert!(out.is_finite(), \"Warmup output must be finite\");\n\
+             }}\n\
+             \n\
+             // Feed a 1kHz sine wave (100mV amplitude) for 500 samples\n\
+             let mut max_abs_out = 0.0f64;\n\
+             let mut any_nonzero = false;\n\
+             for i in 0..500 {{\n\
+                 let t = i as f64 / 44100.0;\n\
+                 let input = 0.1 * (2.0 * std::f64::consts::PI * 1000.0 * t).sin();\n\
+                 let out = process_sample(input, &mut state);\n\
+                 assert!(out.is_finite(), \"Output at sample {{}} must be finite, got {{}}\", i, out);\n\
+                 if out.abs() > 1e-6 {{ any_nonzero = true; }}\n\
+                 if out.abs() > max_abs_out {{ max_abs_out = out.abs(); }}\n\
+             }}\n\
+             \n\
+             assert!(any_nonzero, \"JFET amp output should not be all zeros\");\n\
+             eprintln!(\"JFET CS amp test passed! max_abs_out={{}}\", max_abs_out);\n\
+         }}\n",
+        result.code
+    );
+
+    let tmp_dir = std::env::temp_dir();
+    let src_path = tmp_dir.join("melange_jfet_run_test.rs");
+    let bin_path = tmp_dir.join("melange_jfet_run_test");
+    {
+        let mut f = std::fs::File::create(&src_path).expect("create temp file");
+        f.write_all(test_harness.as_bytes()).expect("write temp file");
+    }
+
+    let compile = std::process::Command::new("rustc")
+        .args([src_path.to_str().unwrap(), "-o", bin_path.to_str().unwrap(), "--edition", "2021"])
+        .output()
+        .expect("run rustc");
+
+    if !compile.status.success() {
+        let _ = std::fs::remove_file(&src_path);
+        panic!(
+            "JFET compile-and-run test failed to compile:\n{}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+    }
+
+    let run = std::process::Command::new(&bin_path).output().expect("run test binary");
+    let _ = std::fs::remove_file(&src_path);
+    let _ = std::fs::remove_file(&bin_path);
+
+    if !run.status.success() {
+        panic!(
+            "JFET compile-and-run test failed:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&run.stdout),
+            String::from_utf8_lossy(&run.stderr)
+        );
+    }
+}
+
+/// P-channel JFET: verify default VP=+2.0 is used when VTO is not specified,
+/// and the generated code compiles and runs.
+#[test]
+fn test_jfet_p_channel_default_vp_compiles_and_runs() {
+    // P-channel JFET with no explicit VTO — should default to +2.0.
+    // Self-biased: gate tied to source through Rg → Vgs ≈ 0 → fully on.
+    // Nodes: in(0), out(1), src(2), vdd(3).
+    let spice = "\
+P-Channel JFET Test
+Rg in 0 100k
+J1 out in src PJFET1
+Rs vdd src 2.2k
+Rd out 0 4.7k
+V1 vdd 0 DC 9
+C1 out 0 100n
+.model PJFET1 PJ(IDSS=2e-3)
+";
+    let (netlist, mna, kernel) = build_pipeline(spice);
+    assert_eq!(kernel.m, 1, "P-channel JFET should be 1D (M=1)");
+
+    let config = CodegenConfig {
+        circuit_name: "pjfet_test".to_string(),
+        sample_rate: 44100.0,
+        input_node: 0,
+        output_node: 1,
+        input_resistance: 1.0,
+        ..CodegenConfig::default()
+    };
+    let codegen = CodeGenerator::new(config);
+    let result = codegen.generate(&kernel, &mna, &netlist).expect("codegen failed");
+
+    // Verify P-channel sign is emitted
+    assert!(
+        result.code.contains("DEVICE_0_SIGN: f64 = -1.0"),
+        "P-channel JFET should have SIGN = -1.0"
+    );
+
+    // VP should be +2.0 (the P-channel default, NOT -2.0)
+    let vp_str = format!("{:.17e}", 2.0_f64);
+    assert!(
+        result.code.contains(&vp_str),
+        "P-channel VP should default to +2.0, looking for {} in code",
+        vp_str
+    );
+
+    let test_harness = format!(
+        "{}\n\
+         fn main() {{\n\
+             let mut state = CircuitState::default();\n\
+             for _ in 0..200 {{\n\
+                 let out = process_sample(0.0, &mut state);\n\
+                 assert!(out.is_finite(), \"P-ch JFET warmup output must be finite\");\n\
+             }}\n\
+             let mut any_nonzero = false;\n\
+             for i in 0..500 {{\n\
+                 let t = i as f64 / 44100.0;\n\
+                 let input = 0.1 * (2.0 * std::f64::consts::PI * 1000.0 * t).sin();\n\
+                 let out = process_sample(input, &mut state);\n\
+                 assert!(out.is_finite(), \"P-ch JFET output at sample {{}} must be finite\", i);\n\
+                 if out.abs() > 1e-6 {{ any_nonzero = true; }}\n\
+             }}\n\
+             assert!(any_nonzero, \"P-channel JFET output should not be all zeros\");\n\
+             eprintln!(\"P-channel JFET test passed!\");\n\
+         }}\n",
+        result.code
+    );
+
+    let tmp_dir = std::env::temp_dir();
+    let src_path = tmp_dir.join("melange_pjfet_run_test.rs");
+    let bin_path = tmp_dir.join("melange_pjfet_run_test");
+    {
+        let mut f = std::fs::File::create(&src_path).expect("create temp file");
+        f.write_all(test_harness.as_bytes()).expect("write temp file");
+    }
+
+    let compile = std::process::Command::new("rustc")
+        .args([src_path.to_str().unwrap(), "-o", bin_path.to_str().unwrap(), "--edition", "2021"])
+        .output()
+        .expect("run rustc");
+
+    if !compile.status.success() {
+        let _ = std::fs::remove_file(&src_path);
+        panic!(
+            "P-channel JFET test failed to compile:\n{}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+    }
+
+    let run = std::process::Command::new(&bin_path).output().expect("run test binary");
+    let _ = std::fs::remove_file(&src_path);
+    let _ = std::fs::remove_file(&bin_path);
+
+    if !run.status.success() {
+        panic!(
+            "P-channel JFET test failed:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&run.stdout),
+            String::from_utf8_lossy(&run.stderr)
+        );
+    }
+}
+
+// ==========================================================================
+// OVERSAMPLING TESTS
+// ==========================================================================
+
+#[test]
+fn test_oversampling_2x_generates_correct_structure() {
+    let (netlist, mna, kernel) = build_pipeline(DIODE_CLIPPER_SPICE);
+    let config = CodegenConfig {
+        circuit_name: "test_os2x".to_string(),
+        sample_rate: 44100.0,
+        input_node: 0,
+        output_node: 1,
+        input_resistance: 1000.0,
+        oversampling_factor: 2,
+        ..CodegenConfig::default()
+    };
+    let codegen = CodeGenerator::new(config);
+    let result = codegen.generate(&kernel, &mna, &netlist).unwrap();
+    let code = &result.code;
+
+    // Should have OVERSAMPLING_FACTOR constant
+    assert!(
+        code.contains("pub const OVERSAMPLING_FACTOR: usize = 2;"),
+        "Should emit OVERSAMPLING_FACTOR = 2"
+    );
+
+    // Should have INTERNAL_SAMPLE_RATE
+    assert!(
+        code.contains("pub const INTERNAL_SAMPLE_RATE: f64 = 88200.0;"),
+        "Should emit INTERNAL_SAMPLE_RATE = 88200.0"
+    );
+
+    // Should have os_allpass function
+    assert!(
+        code.contains("fn os_allpass("),
+        "Should emit os_allpass helper function"
+    );
+
+    // Should have os_halfband function
+    assert!(
+        code.contains("fn os_halfband("),
+        "Should emit os_halfband function"
+    );
+
+    // Should have process_sample_inner (renamed from process_sample)
+    assert!(
+        code.contains("fn process_sample_inner("),
+        "Should rename process_sample to process_sample_inner when oversampling"
+    );
+
+    // Should have public process_sample wrapper
+    assert!(
+        code.contains("pub fn process_sample(input: f64, state: &mut CircuitState) -> f64"),
+        "Should emit public process_sample wrapper"
+    );
+
+    // Should have oversampler state fields
+    assert!(
+        code.contains("pub os_up_state: [f64;"),
+        "Should have upsampler state in CircuitState"
+    );
+    assert!(
+        code.contains("pub os_dn_state: [f64;"),
+        "Should have downsampler state in CircuitState"
+    );
+
+    // Should have OS_COEFFS
+    assert!(
+        code.contains("const OS_COEFFS:"),
+        "Should emit OS_COEFFS constant"
+    );
+
+    // set_sample_rate should use OVERSAMPLING_FACTOR
+    assert!(
+        code.contains("sample_rate * OVERSAMPLING_FACTOR"),
+        "set_sample_rate should compute internal rate using OVERSAMPLING_FACTOR"
+    );
+}
+
+#[test]
+fn test_oversampling_factor_1_unchanged() {
+    let (code_1x, _, _, _) = generate_code(DIODE_CLIPPER_SPICE);
+
+    // Factor 1 should NOT have oversampling artifacts
+    assert!(
+        code_1x.contains("pub const OVERSAMPLING_FACTOR: usize = 1;"),
+        "Factor 1 should have OVERSAMPLING_FACTOR = 1"
+    );
+    assert!(
+        !code_1x.contains("os_allpass"),
+        "Factor 1 should NOT have os_allpass"
+    );
+    assert!(
+        !code_1x.contains("process_sample_inner"),
+        "Factor 1 should NOT rename process_sample"
+    );
+    assert!(
+        !code_1x.contains("INTERNAL_SAMPLE_RATE"),
+        "Factor 1 should NOT have INTERNAL_SAMPLE_RATE"
+    );
+    assert!(
+        !code_1x.contains("os_up_state"),
+        "Factor 1 should NOT have oversampler state"
+    );
+}
+
+#[test]
+fn test_oversampling_invalid_factor_rejected() {
+    let (netlist, mna, kernel) = build_pipeline(RC_CIRCUIT_SPICE);
+    let config = CodegenConfig {
+        circuit_name: "test_invalid_os".to_string(),
+        sample_rate: 44100.0,
+        input_node: 0,
+        output_node: 0,
+        input_resistance: 1.0,
+        oversampling_factor: 3,
+        ..CodegenConfig::default()
+    };
+    let codegen = CodeGenerator::new(config);
+    let result = codegen.generate(&kernel, &mna, &netlist);
+    assert!(result.is_err(), "Factor 3 should be rejected");
+    let err = result.unwrap_err();
+    match err {
+        CodegenError::InvalidConfig(msg) => {
+            assert!(msg.contains("oversampling_factor"), "Error should mention oversampling_factor: {}", msg);
+        }
+        _ => panic!("Expected InvalidConfig, got {:?}", err),
+    }
+}
+
+#[test]
+fn test_oversampling_2x_diode_clipper_compiles() {
+    let (netlist, mna, kernel) = build_pipeline(DIODE_CLIPPER_SPICE);
+    let config = CodegenConfig {
+        circuit_name: "test_os2x_compile".to_string(),
+        sample_rate: 44100.0,
+        input_node: 0,
+        output_node: 1,
+        input_resistance: 1000.0,
+        oversampling_factor: 2,
+        ..CodegenConfig::default()
+    };
+    let codegen = CodeGenerator::new(config);
+    let result = codegen.generate(&kernel, &mna, &netlist).unwrap();
+
+    let tmp_dir = std::env::temp_dir();
+    let tmp_path = tmp_dir.join("melange_codegen_test_os2x_diode.rs");
+
+    {
+        let mut f = std::fs::File::create(&tmp_path).unwrap();
+        f.write_all(result.code.as_bytes()).unwrap();
+    }
+
+    let output = std::process::Command::new("rustc")
+        .args(["--edition", "2024", "--crate-type", "lib", "-o"])
+        .arg(tmp_dir.join("melange_codegen_test_os2x_diode.rlib"))
+        .arg(&tmp_path)
+        .output()
+        .expect("failed to run rustc");
+
+    let _ = std::fs::remove_file(&tmp_path);
+    let _ = std::fs::remove_file(tmp_dir.join("melange_codegen_test_os2x_diode.rlib"));
+    let _ = std::fs::remove_file(tmp_dir.join("libmelange_codegen_test_os2x_diode.rlib"));
+
+    assert!(
+        output.status.success(),
+        "2x oversampled diode clipper codegen failed to compile:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_oversampling_2x_rc_linear_compiles() {
+    let (netlist, mna, kernel) = build_pipeline(RC_CIRCUIT_SPICE);
+    let config = CodegenConfig {
+        circuit_name: "test_os2x_rc".to_string(),
+        sample_rate: 44100.0,
+        input_node: 0,
+        output_node: 0,
+        input_resistance: 1.0,
+        oversampling_factor: 2,
+        ..CodegenConfig::default()
+    };
+    let codegen = CodeGenerator::new(config);
+    let result = codegen.generate(&kernel, &mna, &netlist).unwrap();
+
+    let tmp_dir = std::env::temp_dir();
+    let tmp_path = tmp_dir.join("melange_codegen_test_os2x_rc.rs");
+
+    {
+        let mut f = std::fs::File::create(&tmp_path).unwrap();
+        f.write_all(result.code.as_bytes()).unwrap();
+    }
+
+    let output = std::process::Command::new("rustc")
+        .args(["--edition", "2024", "--crate-type", "lib", "-o"])
+        .arg(tmp_dir.join("melange_codegen_test_os2x_rc.rlib"))
+        .arg(&tmp_path)
+        .output()
+        .expect("failed to run rustc");
+
+    let _ = std::fs::remove_file(&tmp_path);
+    let _ = std::fs::remove_file(tmp_dir.join("melange_codegen_test_os2x_rc.rlib"));
+    let _ = std::fs::remove_file(tmp_dir.join("libmelange_codegen_test_os2x_rc.rlib"));
+
+    assert!(
+        output.status.success(),
+        "2x oversampled RC circuit codegen failed to compile:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_oversampling_2x_bjt_compiles() {
+    let (netlist, mna, kernel) = build_pipeline(BJT_SPICE);
+    let config = CodegenConfig {
+        circuit_name: "test_os2x_bjt".to_string(),
+        sample_rate: 44100.0,
+        input_node: 0,
+        output_node: 1,
+        input_resistance: 1000.0,
+        oversampling_factor: 2,
+        ..CodegenConfig::default()
+    };
+    let codegen = CodeGenerator::new(config);
+    let result = codegen.generate(&kernel, &mna, &netlist).unwrap();
+
+    let tmp_dir = std::env::temp_dir();
+    let tmp_path = tmp_dir.join("melange_codegen_test_os2x_bjt.rs");
+
+    {
+        let mut f = std::fs::File::create(&tmp_path).unwrap();
+        f.write_all(result.code.as_bytes()).unwrap();
+    }
+
+    let output = std::process::Command::new("rustc")
+        .args(["--edition", "2024", "--crate-type", "lib", "-o"])
+        .arg(tmp_dir.join("melange_codegen_test_os2x_bjt.rlib"))
+        .arg(&tmp_path)
+        .output()
+        .expect("failed to run rustc");
+
+    let _ = std::fs::remove_file(&tmp_path);
+    let _ = std::fs::remove_file(tmp_dir.join("melange_codegen_test_os2x_bjt.rlib"));
+    let _ = std::fs::remove_file(tmp_dir.join("libmelange_codegen_test_os2x_bjt.rlib"));
+
+    assert!(
+        output.status.success(),
+        "2x oversampled BJT circuit codegen failed to compile:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_oversampling_4x_diode_clipper_compiles() {
+    let (netlist, mna, kernel) = build_pipeline(DIODE_CLIPPER_SPICE);
+    let config = CodegenConfig {
+        circuit_name: "test_os4x".to_string(),
+        sample_rate: 44100.0,
+        input_node: 0,
+        output_node: 1,
+        input_resistance: 1000.0,
+        oversampling_factor: 4,
+        ..CodegenConfig::default()
+    };
+    let codegen = CodeGenerator::new(config);
+    let result = codegen.generate(&kernel, &mna, &netlist).unwrap();
+
+    let code = &result.code;
+
+    // Should have 4x specific constants and state
+    assert!(code.contains("pub const OVERSAMPLING_FACTOR: usize = 4;"));
+    assert!(code.contains("os_up_state_outer"));
+    assert!(code.contains("os_dn_state_outer"));
+    assert!(code.contains("OS_COEFFS_OUTER"));
+    assert!(code.contains("fn os_halfband_outer("));
+
+    let tmp_dir = std::env::temp_dir();
+    let tmp_path = tmp_dir.join("melange_codegen_test_os4x_diode.rs");
+
+    {
+        let mut f = std::fs::File::create(&tmp_path).unwrap();
+        f.write_all(result.code.as_bytes()).unwrap();
+    }
+
+    let output = std::process::Command::new("rustc")
+        .args(["--edition", "2024", "--crate-type", "lib", "-o"])
+        .arg(tmp_dir.join("melange_codegen_test_os4x_diode.rlib"))
+        .arg(&tmp_path)
+        .output()
+        .expect("failed to run rustc");
+
+    let _ = std::fs::remove_file(&tmp_path);
+    let _ = std::fs::remove_file(tmp_dir.join("melange_codegen_test_os4x_diode.rlib"));
+    let _ = std::fs::remove_file(tmp_dir.join("libmelange_codegen_test_os4x_diode.rlib"));
+
+    assert!(
+        output.status.success(),
+        "4x oversampled diode clipper codegen failed to compile:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_oversampling_2x_matrices_at_internal_rate() {
+    let (netlist, mna, kernel) = build_pipeline(DIODE_CLIPPER_SPICE);
+
+    // Generate at 1x
+    let config_1x = CodegenConfig {
+        circuit_name: "test_1x".to_string(),
+        sample_rate: 44100.0,
+        input_node: 0,
+        output_node: 1,
+        input_resistance: 1000.0,
+        oversampling_factor: 1,
+        ..CodegenConfig::default()
+    };
+    let ir_1x = CircuitIR::from_kernel(&kernel, &mna, &netlist, &config_1x).unwrap();
+
+    // Generate at 2x (internal rate = 88200)
+    let config_2x = CodegenConfig {
+        circuit_name: "test_2x".to_string(),
+        sample_rate: 44100.0,
+        input_node: 0,
+        output_node: 1,
+        input_resistance: 1000.0,
+        oversampling_factor: 2,
+        ..CodegenConfig::default()
+    };
+    let ir_2x = CircuitIR::from_kernel(&kernel, &mna, &netlist, &config_2x).unwrap();
+
+    // Generate at 1x with sample_rate=88200 (should match 2x internal matrices)
+    let kernel_88k = DkKernel::from_mna(&mna, 88200.0).expect("failed to build 88k kernel");
+    let config_88k = CodegenConfig {
+        circuit_name: "test_88k".to_string(),
+        sample_rate: 88200.0,
+        input_node: 0,
+        output_node: 1,
+        input_resistance: 1000.0,
+        oversampling_factor: 1,
+        ..CodegenConfig::default()
+    };
+    let ir_88k = CircuitIR::from_kernel(&kernel_88k, &mna, &netlist, &config_88k).unwrap();
+
+    // Alpha should be doubled for 2x
+    let alpha_1x = ir_1x.solver_config.alpha;
+    let alpha_2x = ir_2x.solver_config.alpha;
+    assert!(
+        (alpha_2x - 2.0 * alpha_1x).abs() < 1.0,
+        "2x alpha {} should be double 1x alpha {}",
+        alpha_2x, alpha_1x
+    );
+
+    // S matrix should match the 88200 Hz kernel's S matrix (same rate)
+    let n = ir_1x.topology.n;
+    let mut max_s_diff = 0.0f64;
+    for i in 0..n {
+        for j in 0..n {
+            let diff = (ir_2x.s(i, j) - ir_88k.s(i, j)).abs();
+            max_s_diff = max_s_diff.max(diff);
+        }
+    }
+    assert!(
+        max_s_diff < 1e-10,
+        "2x oversampled S matrix should match 88200Hz kernel S, max diff = {}",
+        max_s_diff
+    );
+
+    // K matrix should also match
+    let m = ir_1x.topology.m;
+    let mut max_k_diff = 0.0f64;
+    for i in 0..m {
+        for j in 0..m {
+            let diff = (ir_2x.k(i, j) - ir_88k.k(i, j)).abs();
+            max_k_diff = max_k_diff.max(diff);
+        }
+    }
+    assert!(
+        max_k_diff < 1e-10,
+        "2x oversampled K matrix should match 88200Hz kernel K, max diff = {}",
+        max_k_diff
+    );
+}
+
+// ==========================================================================
+// Tests: Gummel-Poon BJT model
+// ==========================================================================
+
+const BJT_GP_SPICE: &str = "\
+BJT GP Circuit
+Q1 c b e 2N2222
+Rc c 0 1k
+Rb b 0 100k
+Re e 0 1k
+.model 2N2222 NPN(IS=1e-14 BF=200 VAF=100 IKF=0.3)
+";
+
+/// GP BJT codegen compiles successfully.
+#[test]
+fn test_codegen_bjt_gummel_poon_compiles() {
+    let (netlist, mna, kernel) = build_pipeline(BJT_GP_SPICE);
+    let config = CodegenConfig {
+        circuit_name: "test_gp_bjt".to_string(),
+        input_node: 0,
+        output_node: kernel.n - 1,
+        ..CodegenConfig::default()
+    };
+    let codegen = CodeGenerator::new(config);
+    let result = codegen.generate(&kernel, &mna, &netlist).unwrap();
+
+    let tmp_dir = std::env::temp_dir();
+    let tmp_path = tmp_dir.join("melange_codegen_test_gp_bjt.rs");
+
+    {
+        let mut f = std::fs::File::create(&tmp_path).unwrap();
+        f.write_all(result.code.as_bytes()).unwrap();
+    }
+
+    let output = std::process::Command::new("rustc")
+        .args(["--edition", "2024", "--crate-type", "lib", "-o"])
+        .arg(tmp_dir.join("melange_codegen_test_gp_bjt.rlib"))
+        .arg(&tmp_path)
+        .output()
+        .expect("failed to run rustc");
+
+    let _ = std::fs::remove_file(&tmp_path);
+    let _ = std::fs::remove_file(tmp_dir.join("melange_codegen_test_gp_bjt.rlib"));
+    let _ = std::fs::remove_file(tmp_dir.join("libmelange_codegen_test_gp_bjt.rlib"));
+
+    assert!(
+        output.status.success(),
+        "GP BJT codegen failed to compile:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// GP constants appear in generated code.
+#[test]
+fn test_codegen_bjt_gp_constants_emitted() {
+    let (netlist, mna, kernel) = build_pipeline(BJT_GP_SPICE);
+    let config = CodegenConfig {
+        circuit_name: "test_gp_bjt_consts".to_string(),
+        input_node: 0,
+        output_node: kernel.n - 1,
+        ..CodegenConfig::default()
+    };
+    let codegen = CodeGenerator::new(config);
+    let result = codegen.generate(&kernel, &mna, &netlist).unwrap();
+    let code = &result.code;
+
+    assert!(code.contains("DEVICE_0_USE_GP: bool = true"), "GP flag should be true");
+    assert!(code.contains("DEVICE_0_VAF"), "VAF constant should be emitted");
+    assert!(code.contains("DEVICE_0_IKF"), "IKF constant should be emitted");
+    assert!(code.contains("bjt_qb"), "qb function should be in generated code");
+}
+
+/// Non-GP BJT (no VAF/VAR/IKF/IKR) should emit USE_GP=false.
+#[test]
+fn test_codegen_bjt_no_gp_backward_compat() {
+    let (code, _netlist, _mna, _kernel) = generate_code(BJT_SPICE);
+
+    assert!(code.contains("DEVICE_0_USE_GP: bool = false"), "GP flag should be false for EM");
+    // GP constants still emitted but as infinity
+    assert!(code.contains("DEVICE_0_VAF"), "VAF constant should still be emitted");
+}
+
+/// IR BjtParams with GP fields round-trips through serde.
+#[test]
+fn test_ir_bjt_params_gp_serde_roundtrip() {
+    use melange_solver::codegen::ir::BjtParams;
+
+    let bp = BjtParams {
+        is: 1e-14, vt: 0.02585, beta_f: 200.0, beta_r: 3.0,
+        is_pnp: false, vaf: 100.0, var: f64::INFINITY, ikf: 0.3, ikr: f64::INFINITY,
+    };
+
+    let json = serde_json::to_string(&bp).unwrap();
+    let bp2: BjtParams = serde_json::from_str(&json).unwrap();
+
+    assert!((bp2.vaf - 100.0).abs() < 1e-10);
+    assert!(bp2.var.is_infinite());
+    assert!((bp2.ikf - 0.3).abs() < 1e-10);
+    assert!(bp2.ikr.is_infinite());
+    assert!(bp2.is_gummel_poon());
+}
+
+/// Old JSON without GP fields deserializes with infinity defaults.
+#[test]
+fn test_ir_bjt_params_old_json_compat() {
+    use melange_solver::codegen::ir::BjtParams;
+
+    let old_json = r#"{"is":1e-14,"vt":0.02585,"beta_f":200.0,"beta_r":3.0,"is_pnp":false}"#;
+    let bp: BjtParams = serde_json::from_str(old_json).unwrap();
+
+    assert!(bp.vaf.is_infinite(), "vaf should default to infinity");
+    assert!(bp.var.is_infinite(), "var should default to infinity");
+    assert!(bp.ikf.is_infinite(), "ikf should default to infinity");
+    assert!(bp.ikr.is_infinite(), "ikr should default to infinity");
+    assert!(!bp.is_gummel_poon(), "should be plain Ebers-Moll");
+}
+
+// ==========================================================================
+// Tube/Triode codegen tests
+// ==========================================================================
+
+/// 12AX7 common-cathode amplifier SPICE netlist.
+/// Nodes: in(0), out(1), plate(2), vcc(3).
+const TRIODE_CC_SPICE: &str = "\
+12AX7 Common Cathode Amplifier
+Rin in 0 1Meg
+Cin in grid 100n
+Rg grid 0 1Meg
+T1 grid plate cathode 12AX7
+Rk cathode 0 1.5k
+Ck cathode 0 25u
+Rp vcc plate 100k
+Cout plate out 100n
+Rout out 0 1Meg
+V1 vcc 0 DC 250
+.model 12AX7 TUBE(MU=100 EX=1.4 KG1=1060 KP=600 KVB=300)
+";
+
+/// Two-stage triode preamp.
+const TRIODE_TWO_STAGE_SPICE: &str = "\
+Two-Stage 12AX7 Preamp
+Rin in 0 1Meg
+Cin in grid1 100n
+Rg1 grid1 0 1Meg
+T1 grid1 plate1 cathode1 12AX7
+Rk1 cathode1 0 1.5k
+Ck1 cathode1 0 25u
+Rp1 vcc plate1 100k
+Cc plate1 grid2 22n
+Rg2 grid2 0 470k
+T2 grid2 plate2 cathode2 12AX7
+Rk2 cathode2 0 1.5k
+Ck2 cathode2 0 25u
+Rp2 vcc plate2 100k
+Cout plate2 out 100n
+Rout out 0 1Meg
+V1 vcc 0 DC 250
+.model 12AX7 TUBE(MU=100 EX=1.4 KG1=1060 KP=600 KVB=300)
+";
+
+/// Parser: T1 parses correctly.
+#[test]
+fn test_parser_triode() {
+    let spice = "\
+Triode Test
+T1 grid plate cathode 12AX7
+Rp vcc plate 100k
+Rg grid 0 1Meg
+Rk cathode 0 1k
+V1 vcc 0 DC 250
+Cp plate 0 1p
+.model 12AX7 TUBE(MU=100 EX=1.4 KG1=1060 KP=600 KVB=300)
+";
+    let netlist = Netlist::parse(spice).expect("parse failed");
+    let triodes: Vec<_> = netlist.elements.iter().filter(|e| matches!(e, melange_solver::parser::Element::Triode { .. })).collect();
+    assert_eq!(triodes.len(), 1, "Should find one triode");
+    match &triodes[0] {
+        melange_solver::parser::Element::Triode { name, n_grid, n_plate, n_cathode, model } => {
+            assert_eq!(name, "T1");
+            assert_eq!(n_grid, "grid");
+            assert_eq!(n_plate, "plate");
+            assert_eq!(n_cathode, "cathode");
+            assert_eq!(model, "12AX7");
+        }
+        _ => panic!("Expected Triode"),
+    }
+}
+
+/// MNA: Verify N_v/N_i matrices for a single triode.
+#[test]
+fn test_mna_triode_stamping() {
+    let spice = "\
+Triode MNA Test
+T1 grid plate cathode 12AX7
+Rp vcc plate 100k
+Rg grid 0 1Meg
+Rk cathode 0 1k
+V1 vcc 0 DC 250
+Cp plate 0 1p
+.model 12AX7 TUBE(MU=100 EX=1.4 KG1=1060 KP=600 KVB=300)
+";
+    let netlist = Netlist::parse(spice).expect("parse failed");
+    let mna = MnaSystem::from_netlist(&netlist).expect("MNA failed");
+
+    // Triode should add M=2 nonlinear dimensions
+    assert_eq!(mna.m, 2, "Triode should have M=2");
+
+    // N_v should have 2 rows (Vgk at row 0, Vpk at row 1)
+    // N_i should have 2 columns (Ip at col 0, Ig at col 1)
+
+    // Check that N_v and N_i have correct structure:
+    // Row 0 (Vgk): should have +1 at grid node, -1 at cathode node
+    // Row 1 (Vpk): should have +1 at plate node, -1 at cathode node
+    let grid_node = mna.node_map["grid"];
+    let plate_node = mna.node_map["plate"];
+    let cathode_node = mna.node_map["cathode"];
+
+    // N_v row 0 (Vgk): +1 at grid, -1 at cathode
+    if grid_node > 0 {
+        assert!((mna.n_v[0][grid_node - 1] - 1.0).abs() < 1e-15, "N_v[0][grid] should be +1");
+    }
+    if cathode_node > 0 {
+        assert!((mna.n_v[0][cathode_node - 1] - (-1.0)).abs() < 1e-15, "N_v[0][cathode] should be -1");
+    }
+
+    // N_v row 1 (Vpk): +1 at plate, -1 at cathode
+    if plate_node > 0 {
+        assert!((mna.n_v[1][plate_node - 1] - 1.0).abs() < 1e-15, "N_v[1][plate] should be +1");
+    }
+    if cathode_node > 0 {
+        assert!((mna.n_v[1][cathode_node - 1] - (-1.0)).abs() < 1e-15, "N_v[1][cathode] should be -1");
+    }
+
+    // N_i col 0 (Ip): -1 at plate (extracted), +1 at cathode (injected)
+    if plate_node > 0 {
+        assert!((mna.n_i[plate_node - 1][0] - (-1.0)).abs() < 1e-15, "N_i[plate][0] should be -1");
+    }
+    if cathode_node > 0 {
+        assert!((mna.n_i[cathode_node - 1][0] - 1.0).abs() < 1e-15, "N_i[cathode][0] should be +1");
+    }
+
+    // N_i col 1 (Ig): -1 at grid (extracted), +1 at cathode (injected)
+    if grid_node > 0 {
+        assert!((mna.n_i[grid_node - 1][1] - (-1.0)).abs() < 1e-15, "N_i[grid][1] should be -1");
+    }
+    if cathode_node > 0 {
+        assert!((mna.n_i[cathode_node - 1][1] - 1.0).abs() < 1e-15, "N_i[cathode][1] should be +1");
+    }
+}
+
+/// Codegen: 12AX7 common-cathode generates code with tube functions and constants.
+#[test]
+fn test_codegen_triode_constants_and_functions() {
+    let (code, _netlist, _mna, kernel) = generate_code(TRIODE_CC_SPICE);
+    assert_eq!(kernel.m, 2, "Triode should have M=2");
+
+    // Should contain tube device functions
+    assert!(code.contains("tube_ip("), "Should have tube_ip function");
+    assert!(code.contains("tube_ig("), "Should have tube_ig function");
+    assert!(code.contains("tube_jacobian("), "Should have tube_jacobian function");
+
+    // Should contain tube constants
+    assert!(code.contains("DEVICE_0_MU"), "Should have MU constant");
+    assert!(code.contains("DEVICE_0_EX"), "Should have EX constant");
+    assert!(code.contains("DEVICE_0_KG1"), "Should have KG1 constant");
+    assert!(code.contains("DEVICE_0_KP"), "Should have KP constant");
+    assert!(code.contains("DEVICE_0_KVB"), "Should have KVB constant");
+    assert!(code.contains("DEVICE_0_IG_MAX"), "Should have IG_MAX constant");
+    assert!(code.contains("DEVICE_0_VGK_ONSET"), "Should have VGK_ONSET constant");
+}
+
+/// Codegen: 12AX7 common-cathode amplifier compiles.
+#[test]
+fn test_codegen_triode_compiles() {
+    let (code, _netlist, _mna, kernel) = generate_code(TRIODE_CC_SPICE);
+    assert_eq!(kernel.m, 2);
+
+    let tmp_dir = std::env::temp_dir();
+    let tmp_path = tmp_dir.join("melange_codegen_test_triode.rs");
+    {
+        let mut f = std::fs::File::create(&tmp_path).unwrap();
+        f.write_all(code.as_bytes()).unwrap();
+    }
+
+    let output = std::process::Command::new("rustc")
+        .args(["--edition", "2024", "--crate-type", "lib", "-o"])
+        .arg(tmp_dir.join("melange_codegen_test_triode.rlib"))
+        .arg(&tmp_path)
+        .output()
+        .expect("failed to run rustc");
+
+    let _ = std::fs::remove_file(&tmp_path);
+    let _ = std::fs::remove_file(tmp_dir.join("melange_codegen_test_triode.rlib"));
+    let _ = std::fs::remove_file(tmp_dir.join("libmelange_codegen_test_triode.rlib"));
+
+    assert!(
+        output.status.success(),
+        "Triode codegen failed to compile:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Codegen: Compile and run the triode common-cathode amplifier.
+/// Feed a sine wave, verify output is finite and non-zero.
+#[test]
+fn test_codegen_triode_compiles_and_runs() {
+    let (netlist, mna, kernel) = build_pipeline(TRIODE_CC_SPICE);
+    assert_eq!(kernel.m, 2);
+
+    let config = CodegenConfig {
+        circuit_name: "triode_cc_run".to_string(),
+        sample_rate: 44100.0,
+        input_node: 0,
+        output_node: 1,
+        input_resistance: 1.0,
+        ..CodegenConfig::default()
+    };
+    let codegen = CodeGenerator::new(config);
+    let result = codegen.generate(&kernel, &mna, &netlist).expect("codegen failed");
+
+    let test_harness = format!(
+        "{}\n\
+         fn main() {{\n\
+             let mut state = CircuitState::default();\n\
+             \n\
+             // Warm up with 500 samples to let DC OP settle\n\
+             for _ in 0..500 {{\n\
+                 let out = process_sample(0.0, &mut state);\n\
+                 assert!(out.is_finite(), \"Warmup output must be finite\");\n\
+             }}\n\
+             \n\
+             // Feed a 1kHz sine wave (10mV amplitude) for 500 samples\n\
+             let mut max_abs_out = 0.0f64;\n\
+             let mut any_nonzero = false;\n\
+             for i in 0..500 {{\n\
+                 let t = i as f64 / 44100.0;\n\
+                 let input = 0.01 * (2.0 * std::f64::consts::PI * 1000.0 * t).sin();\n\
+                 let out = process_sample(input, &mut state);\n\
+                 assert!(out.is_finite(), \"Output at sample {{}} must be finite, got {{}}\", i, out);\n\
+                 if out.abs() > 1e-6 {{ any_nonzero = true; }}\n\
+                 if out.abs() > max_abs_out {{ max_abs_out = out.abs(); }}\n\
+             }}\n\
+             \n\
+             assert!(any_nonzero, \"Triode amp output should not be all zeros\");\n\
+             eprintln!(\"Triode CC amp test passed! max_abs_out={{}}\", max_abs_out);\n\
+         }}\n",
+        result.code
+    );
+
+    let tmp_dir = std::env::temp_dir();
+    let src_path = tmp_dir.join("melange_triode_run_test.rs");
+    let bin_path = tmp_dir.join("melange_triode_run_test");
+    {
+        let mut f = std::fs::File::create(&src_path).expect("create temp file");
+        f.write_all(test_harness.as_bytes()).expect("write temp file");
+    }
+
+    let compile = std::process::Command::new("rustc")
+        .args([src_path.to_str().unwrap(), "-o", bin_path.to_str().unwrap(), "--edition", "2021"])
+        .output()
+        .expect("run rustc");
+
+    if !compile.status.success() {
+        let _ = std::fs::remove_file(&src_path);
+        panic!(
+            "Triode compile-and-run test failed to compile:\n{}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+    }
+
+    let run = std::process::Command::new(&bin_path).output().expect("run test binary");
+    let _ = std::fs::remove_file(&src_path);
+    let _ = std::fs::remove_file(&bin_path);
+
+    if !run.status.success() {
+        panic!(
+            "Triode compile-and-run test failed:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&run.stdout),
+            String::from_utf8_lossy(&run.stderr)
+        );
+    }
+}
+
+/// Multi-triode: 2-stage preamp (2 triodes = M=4) compiles and runs.
+#[test]
+fn test_codegen_two_triode_preamp_compiles_and_runs() {
+    let (netlist, mna, kernel) = build_pipeline(TRIODE_TWO_STAGE_SPICE);
+    assert_eq!(kernel.m, 4, "Two triodes should have M=4");
+
+    let config = CodegenConfig {
+        circuit_name: "triode_preamp_run".to_string(),
+        sample_rate: 44100.0,
+        input_node: 0,
+        output_node: 1,
+        input_resistance: 1.0,
+        ..CodegenConfig::default()
+    };
+    let codegen = CodeGenerator::new(config);
+    let result = codegen.generate(&kernel, &mna, &netlist).expect("codegen failed");
+
+    let test_harness = format!(
+        "{}\n\
+         fn main() {{\n\
+             let mut state = CircuitState::default();\n\
+             \n\
+             // Warm up with 500 samples\n\
+             for _ in 0..500 {{\n\
+                 let out = process_sample(0.0, &mut state);\n\
+                 assert!(out.is_finite(), \"Warmup output must be finite\");\n\
+             }}\n\
+             \n\
+             // Feed a 1kHz sine wave (5mV amplitude) for 500 samples\n\
+             let mut max_abs_out = 0.0f64;\n\
+             let mut any_nonzero = false;\n\
+             for i in 0..500 {{\n\
+                 let t = i as f64 / 44100.0;\n\
+                 let input = 0.005 * (2.0 * std::f64::consts::PI * 1000.0 * t).sin();\n\
+                 let out = process_sample(input, &mut state);\n\
+                 assert!(out.is_finite(), \"Output at sample {{}} must be finite, got {{}}\", i, out);\n\
+                 if out.abs() > 1e-6 {{ any_nonzero = true; }}\n\
+                 if out.abs() > max_abs_out {{ max_abs_out = out.abs(); }}\n\
+             }}\n\
+             \n\
+             assert!(any_nonzero, \"Two-stage triode preamp output should not be all zeros\");\n\
+             eprintln!(\"Two-stage triode preamp test passed! max_abs_out={{}}\", max_abs_out);\n\
+         }}\n",
+        result.code
+    );
+
+    let tmp_dir = std::env::temp_dir();
+    let src_path = tmp_dir.join("melange_triode_preamp_test.rs");
+    let bin_path = tmp_dir.join("melange_triode_preamp_test");
+    {
+        let mut f = std::fs::File::create(&src_path).expect("create temp file");
+        f.write_all(test_harness.as_bytes()).expect("write temp file");
+    }
+
+    let compile = std::process::Command::new("rustc")
+        .args([src_path.to_str().unwrap(), "-o", bin_path.to_str().unwrap(), "--edition", "2021"])
+        .output()
+        .expect("run rustc");
+
+    if !compile.status.success() {
+        let _ = std::fs::remove_file(&src_path);
+        panic!(
+            "Two-stage triode compile-and-run test failed to compile:\n{}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+    }
+
+    let run = std::process::Command::new(&bin_path).output().expect("run test binary");
+    let _ = std::fs::remove_file(&src_path);
+    let _ = std::fs::remove_file(&bin_path);
+
+    if !run.status.success() {
+        panic!(
+            "Two-stage triode compile-and-run test failed:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&run.stdout),
+            String::from_utf8_lossy(&run.stderr)
+        );
+    }
 }

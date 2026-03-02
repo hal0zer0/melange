@@ -43,6 +43,9 @@ pub struct CodegenConfig {
     pub input_node: usize,
     /// Output node index
     pub output_node: usize,
+    /// Oversampling factor (1, 2, or 4). Default 1 (no oversampling).
+    /// Factor > 1 reduces aliasing from nonlinearities.
+    pub oversampling_factor: usize,
     /// Include DC operating point in generated code
     pub include_dc_op: bool,
     /// Maximum NR iterations for DC operating point solver
@@ -61,6 +64,7 @@ impl Default for CodegenConfig {
             input_resistance: 1.0, // 1Ω default (near-ideal voltage source)
             input_node: 0,
             output_node: 0,
+            oversampling_factor: 1,
             include_dc_op: true,
             dc_op_max_iterations: 200,
             dc_op_tolerance: 1e-9,
@@ -136,6 +140,14 @@ impl CodeGenerator {
         netlist: &Netlist,
     ) -> Result<GeneratedCode, CodegenError> {
         // Validate config
+        match self.config.oversampling_factor {
+            1 | 2 | 4 => {}
+            f => {
+                return Err(CodegenError::InvalidConfig(format!(
+                    "oversampling_factor must be 1, 2, or 4, got {f}"
+                )));
+            }
+        }
         if self.config.input_resistance <= 0.0 || !self.config.input_resistance.is_finite() {
             return Err(CodegenError::InvalidConfig(format!(
                 "input_resistance must be positive finite, got {}",
