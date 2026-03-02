@@ -522,3 +522,50 @@ fn test_nr_converges_with_correct_k_sign() {
         result_correct
     );
 }
+
+// ===========================================================================
+// Singular matrix error path (H8)
+// ===========================================================================
+
+/// Verify that DkKernel::from_mna returns DkError::SingularMatrix when the
+/// A matrix is singular (e.g., a floating node with no conductance or capacitance).
+#[test]
+fn test_singular_matrix_error_path() {
+    use std::collections::HashMap;
+
+    // Manually construct a 2-node MnaSystem where node 2 is floating
+    // (zero row/col in G and C), making A singular.
+    let mna = MnaSystem {
+        n: 2,
+        m: 0,
+        num_devices: 0,
+        g: vec![
+            vec![1.0, 0.0],  // node 0 has conductance to ground
+            vec![0.0, 0.0],  // node 1 is floating — zero row
+        ],
+        c: vec![
+            vec![1e-6, 0.0],
+            vec![0.0, 0.0],  // node 1 has no capacitance either
+        ],
+        n_v: vec![],
+        n_i: vec![],
+        node_map: HashMap::new(),
+        nonlinear_devices: vec![],
+        voltage_sources: vec![],
+        current_sources: vec![],
+        inductors: vec![],
+        pots: vec![],
+        switches: vec![],
+        opamps: vec![],
+    };
+
+    let result = DkKernel::from_mna(&mna, 44100.0);
+    assert!(result.is_err(), "Expected error for singular A matrix, got Ok");
+    let err = result.unwrap_err();
+    match err {
+        melange_solver::dk::DkError::SingularMatrix(_) => {
+            // Expected: floating node makes A singular
+        }
+        other => panic!("Expected DkError::SingularMatrix, got: {}", other),
+    }
+}

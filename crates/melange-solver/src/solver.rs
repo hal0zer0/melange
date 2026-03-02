@@ -1784,4 +1784,317 @@ C1 out 0 1u
         assert_eq!(reason3, ConvergenceReason::Residual,
             "Reason should update back to Residual after restoring settings");
     }
+
+    // ========================================================================
+    // DC Blocking Functional Tests (H5)
+    // ========================================================================
+
+    /// Verify the 5Hz HPF actually removes DC in a linear circuit.
+    /// Feed constant 1V for 1 second — output should decay to near zero.
+    #[test]
+    fn test_dc_blocking_removes_dc_linear() {
+        let spice = r#"RC Circuit
+R1 in 0 1k
+C1 in 0 1u
+"#;
+        let netlist = Netlist::parse(spice).unwrap();
+        let mna = MnaSystem::from_netlist(&netlist).unwrap();
+        let kernel = DkKernel::from_mna(&mna, 44100.0).unwrap();
+
+        let mut solver = LinearSolver::new(kernel, 0, 0);
+        solver.input_conductance = 0.001;
+
+        // Feed 1V DC for 1 second (44100 samples)
+        let mut peak = 0.0_f64;
+        let mut last_out = 0.0_f64;
+        for i in 0..44100 {
+            last_out = solver.process_sample(1.0);
+            if i < 500 {
+                // Track peak during initial transient
+                peak = peak.max(last_out.abs());
+            }
+        }
+
+        // Transient should have been visible
+        assert!(peak > 0.1,
+            "Initial transient should pass through, peak = {}", peak);
+        // After 1 second at 5Hz cutoff, DC should be heavily attenuated
+        assert!(last_out.abs() < 0.01,
+            "DC should be blocked after 1s, got {:.6}V", last_out);
+    }
+
+    /// Verify the 5Hz HPF removes DC in a nonlinear (diode clipper) circuit.
+    #[test]
+    fn test_dc_blocking_removes_dc_nonlinear() {
+        let spice = r#"Diode Clipper DC
+Rin in 0 1k
+D1 in out D1N4148
+R1 out 0 1k
+C1 out 0 100n
+.model D1N4148 D(IS=1e-15)
+"#;
+        let netlist = Netlist::parse(spice).unwrap();
+        let mna = MnaSystem::from_netlist(&netlist).unwrap();
+        let kernel = DkKernel::from_mna(&mna, 44100.0).unwrap();
+
+        let diode = DiodeShockley::new_room_temp(1e-15, 1.0);
+        let devices = vec![DeviceEntry::new_diode(diode, 0)];
+        let mut solver = CircuitSolver::new(kernel, devices, 0, 1);
+        solver.input_conductance = 0.001;
+
+        // Feed 1V DC for 2 seconds
+        let mut peak = 0.0_f64;
+        let mut last_out = 0.0_f64;
+        for i in 0..88200 {
+            last_out = solver.process_sample(1.0);
+            if i < 500 {
+                peak = peak.max(last_out.abs());
+            }
+        }
+
+        assert!(peak > 0.1,
+            "Initial transient should pass through, peak = {}", peak);
+        assert!(last_out.abs() < 0.01,
+            "DC should be blocked after 2s, got {:.6}V", last_out);
+    }
+
+    // ========================================================================
+    // Device Coverage Tests (M16)
+    // ========================================================================
+
+    /// Test LED device variant through the runtime solver.
+    #[test]
+    fn test_led_device_runtime_solver() {
+        let spice = r#"LED Clipper
+Rin in 0 1k
+D1 in out LED_RED
+R1 out 0 1k
+C1 out 0 100n
+.model LED_RED D(IS=1e-20)
+"#;
+        let netlist = Netlist::parse(spice).unwrap();
+        let mna = MnaSystem::from_netlist(&netlist).unwrap();
+        let kernel = DkKernel::from_mna(&mna, 44100.0).unwrap();
+
+        let led = melange_devices::Led::red();
+        let devices = vec![DeviceEntry::new_led(led, 0)];
+        let mut solver = CircuitSolver::new(kernel, devices, 0, 1);
+        solver.input_conductance = 0.001;
+
+        // 200 samples of 1kHz sine
+        for i in 0..200 {
+            let t = i as f64 / 44100.0;
+            let input = (2.0 * std::f64::consts::PI * 1000.0 * t).sin();
+            let out = solver.process_sample(input);
+            assert!(out.is_finite(), "LED solver output NaN/Inf at sample {}", i);
+            assert!(out.abs() <= 10.0, "LED solver output unbounded at sample {}: {}", i, out);
+        }
+    }
+
+    /// Test DiodeWithRs device variant (diode with series resistance).
+    #[test]
+    fn test_diode_with_rs_runtime_solver() {
+        let spice = r#"Diode Rs Clipper
+Rin in 0 1k
+D1 in out D1N4148
+R1 out 0 1k
+C1 out 0 100n
+.model D1N4148 D(IS=1e-15)
+"#;
+        let netlist = Netlist::parse(spice).unwrap();
+        let mna = MnaSystem::from_netlist(&netlist).unwrap();
+        let kernel = DkKernel::from_mna(&mna, 44100.0).unwrap();
+
+        let base_diode = DiodeShockley::new_room_temp(1e-15, 1.0);
+        let diode_rs = melange_devices::DiodeWithRs::new(base_diode, 10.0); // 10Ω series R
+        let devices = vec![DeviceEntry::new_diode_with_rs(diode_rs, 0)];
+        let mut solver = CircuitSolver::new(kernel, devices, 0, 1);
+        solver.input_conductance = 0.001;
+
+        for i in 0..200 {
+            let t = i as f64 / 44100.0;
+            let input = (2.0 * std::f64::consts::PI * 1000.0 * t).sin();
+            let out = solver.process_sample(input);
+            assert!(out.is_finite(), "DiodeWithRs output NaN/Inf at sample {}", i);
+            assert!(out.abs() <= 10.0, "DiodeWithRs output unbounded at sample {}: {}", i, out);
+        }
+    }
+
+    /// Test PNP BJT device variant through the runtime solver.
+    #[test]
+    fn test_pnp_bjt_runtime_solver() {
+        // PNP common-emitter: emitter to VCC, collector to load
+        let spice = r#"PNP Common Emitter
+Q1 coll base emit 2N3906
+Rc coll 0 10k
+R1 base 0 100k
+Re emit vcc 1k
+Rbias vcc 0 10k
+.model 2N3906 PNP(IS=1e-15 BF=200)
+"#;
+        let netlist = Netlist::parse(spice).unwrap();
+        let mna = MnaSystem::from_netlist(&netlist).unwrap();
+        let kernel = DkKernel::from_mna(&mna, 44100.0).unwrap();
+
+        let bjt = BjtEbersMoll::new_room_temp(1e-15, 200.0, 3.0, melange_devices::BjtPolarity::Pnp);
+        let devices = vec![DeviceEntry::new_bjt(bjt, 0)];
+        let mut solver = CircuitSolver::new(kernel, devices, 0, 0);
+        solver.input_conductance = 1.0 / 100000.0;
+
+        // 50 DC warm-up samples
+        for _ in 0..50 {
+            let out = solver.process_sample(0.5);
+            assert!(out.is_finite(), "PNP warm-up output should be finite");
+        }
+
+        // 100 sine samples
+        for i in 0..100 {
+            let t = i as f64 / 44100.0;
+            let input = 0.5 + 0.3 * (2.0 * std::f64::consts::PI * 1000.0 * t).sin();
+            let out = solver.process_sample(input);
+            assert!(out.is_finite(), "PNP sine output NaN/Inf at sample {}", i);
+            assert!(out.abs() <= 10.0, "PNP output unbounded at sample {}: {}", i, out);
+        }
+    }
+
+    // ========================================================================
+    // Diagnostic Counter Tests (M14)
+    // ========================================================================
+
+    /// Verify peak output tracking works and resets properly.
+    #[test]
+    fn test_diag_peak_output_tracking() {
+        let spice = r#"RC Circuit
+R1 in 0 1k
+C1 in 0 1u
+"#;
+        let netlist = Netlist::parse(spice).unwrap();
+        let mna = MnaSystem::from_netlist(&netlist).unwrap();
+        let kernel = DkKernel::from_mna(&mna, 44100.0).unwrap();
+
+        let mut solver = LinearSolver::new(kernel, 0, 0);
+        solver.input_conductance = 0.001;
+
+        // Peak starts at 0
+        assert_eq!(solver.diag_peak_output, 0.0, "Peak should start at 0");
+
+        // Process some signal
+        for _ in 0..100 {
+            solver.process_sample(1.0);
+        }
+        let peak_after_signal = solver.diag_peak_output;
+        assert!(peak_after_signal > 0.0, "Peak should increase after signal");
+
+        // Peak is monotonically non-decreasing: process zero input
+        for _ in 0..100 {
+            solver.process_sample(0.0);
+        }
+        assert!(solver.diag_peak_output >= peak_after_signal,
+            "Peak should be monotonically non-decreasing");
+
+        // Reset zeros the peak
+        solver.reset();
+        assert_eq!(solver.diag_peak_output, 0.0, "Peak should be 0 after reset");
+    }
+
+    /// Verify NR max-iterations counter tracks and resets.
+    #[test]
+    fn test_diag_nr_max_iter_count() {
+        let spice = r#"Diode Clipper
+Rin in 0 1k
+D1 in out D1N4148
+C1 out 0 1u
+.model D1N4148 D(IS=1e-15)
+"#;
+        let netlist = Netlist::parse(spice).unwrap();
+        let mna = MnaSystem::from_netlist(&netlist).unwrap();
+        let kernel = DkKernel::from_mna(&mna, 44100.0).unwrap();
+
+        let diode = DiodeShockley::new_room_temp(1e-15, 1.0);
+        let devices = vec![DeviceEntry::new_diode(diode, 0)];
+        let mut solver = CircuitSolver::new(kernel, devices, 0, 1);
+        solver.input_conductance = 0.001;
+
+        // Normal operation: counter should stay at 0
+        for _ in 0..100 {
+            solver.process_sample(0.1);
+        }
+        assert_eq!(solver.diag_nr_max_iter_count, 0,
+            "NR max iter count should be 0 during normal operation");
+
+        // Force non-convergence: impossibly tight tolerance, 1 iteration
+        solver.tol = 1e-300;
+        solver.max_iter = 1;
+        for _ in 0..10 {
+            solver.process_sample(5.0);
+        }
+        assert!(solver.diag_nr_max_iter_count > 0,
+            "NR max iter count should increment when forced to not converge");
+
+        // Reset zeros the counter
+        solver.reset();
+        assert_eq!(solver.diag_nr_max_iter_count, 0,
+            "NR max iter count should be 0 after reset");
+    }
+
+    /// Verify NaN reset counter tracks and resets.
+    #[test]
+    fn test_diag_nan_reset_count() {
+        let spice = r#"Diode Clipper
+Rin in 0 1k
+D1 in out D1N4148
+C1 out 0 1u
+.model D1N4148 D(IS=1e-15)
+"#;
+        let netlist = Netlist::parse(spice).unwrap();
+        let mna = MnaSystem::from_netlist(&netlist).unwrap();
+        let kernel = DkKernel::from_mna(&mna, 44100.0).unwrap();
+
+        let diode = DiodeShockley::new_room_temp(1e-15, 1.0);
+        let devices = vec![DeviceEntry::new_diode(diode, 0)];
+        let mut solver = CircuitSolver::new(kernel, devices, 0, 1);
+        solver.input_conductance = 0.001;
+
+        // Normal operation
+        for _ in 0..100 {
+            solver.process_sample(0.1);
+        }
+        assert_eq!(solver.diag_nan_reset_count, 0,
+            "NaN reset count should be 0 during normal operation");
+
+        // Corrupt state to trigger NaN detection
+        solver.v_prev[0] = f64::NAN;
+        solver.process_sample(0.1);
+        assert!(solver.diag_nan_reset_count > 0,
+            "NaN reset count should increment after NaN in v_prev");
+
+        // Reset zeros the counter
+        solver.reset();
+        assert_eq!(solver.diag_nan_reset_count, 0,
+            "NaN reset count should be 0 after reset");
+    }
+
+    /// Verify clamp counter stays at 0 for small signals (LinearSolver).
+    #[test]
+    fn test_diag_clamp_count() {
+        let spice = r#"RC Circuit
+R1 in 0 1k
+C1 in 0 1u
+"#;
+        let netlist = Netlist::parse(spice).unwrap();
+        let mna = MnaSystem::from_netlist(&netlist).unwrap();
+        let kernel = DkKernel::from_mna(&mna, 44100.0).unwrap();
+
+        let mut solver = LinearSolver::new(kernel, 0, 0);
+        solver.input_conductance = 0.001;
+
+        // Small signal: clamp count should remain 0
+        for i in 0..500 {
+            let t = i as f64 / 44100.0;
+            let input = 0.5 * (2.0 * std::f64::consts::PI * 1000.0 * t).sin();
+            solver.process_sample(input);
+        }
+        assert_eq!(solver.diag_clamp_count, 0,
+            "Clamp count should be 0 for small signals, got {}", solver.diag_clamp_count);
+    }
 }

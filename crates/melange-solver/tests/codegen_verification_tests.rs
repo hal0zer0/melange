@@ -3904,3 +3904,59 @@ fn test_codegen_two_triode_preamp_compiles_and_runs() {
         );
     }
 }
+
+// ===========================================================================
+// OUTPUT_SCALE non-default tests (H6)
+// ===========================================================================
+
+/// Verify that a non-default output_scale is emitted into the generated code.
+#[test]
+fn test_output_scale_non_default_emitted() {
+    let (netlist, mna, kernel) = build_pipeline(DIODE_CLIPPER_SPICE);
+    let config = CodegenConfig {
+        output_scale: 0.5,
+        ..default_config()
+    };
+    let codegen = CodeGenerator::new(config);
+    let result = codegen.generate(&kernel, &mna, &netlist)
+        .expect("code generation failed");
+
+    // Should contain 0.5 (5.0e-1) as the OUTPUT_SCALE constant
+    assert!(result.code.contains("OUTPUT_SCALE"),
+        "Generated code should contain OUTPUT_SCALE constant");
+    assert!(result.code.contains("5.0") || result.code.contains("5e-1") || result.code.contains("0.5"),
+        "OUTPUT_SCALE should be 0.5, not 1.0. Code snippet: {}",
+        result.code.lines()
+            .find(|l| l.contains("OUTPUT_SCALE"))
+            .unwrap_or("NOT FOUND"));
+    // Should NOT contain the default 1.0e0 value for OUTPUT_SCALE
+    let scale_line = result.code.lines()
+        .find(|l| l.contains("OUTPUT_SCALE"))
+        .expect("OUTPUT_SCALE line should exist");
+    assert!(!scale_line.contains("1.00000000000000000e0"),
+        "OUTPUT_SCALE should not be default 1.0, got: {}", scale_line);
+}
+
+/// Verify that output_scale=2.0 is applied in process_sample via dc_blocked * OUTPUT_SCALE.
+#[test]
+fn test_output_scale_applied_in_process_sample() {
+    let (netlist, mna, kernel) = build_pipeline(DIODE_CLIPPER_SPICE);
+    let config = CodegenConfig {
+        output_scale: 2.0,
+        ..default_config()
+    };
+    let codegen = CodeGenerator::new(config);
+    let result = codegen.generate(&kernel, &mna, &netlist)
+        .expect("code generation failed");
+
+    // The process_sample template applies: dc_blocked * OUTPUT_SCALE
+    assert!(result.code.contains("dc_blocked * OUTPUT_SCALE"),
+        "process_sample should multiply dc_blocked by OUTPUT_SCALE");
+
+    // The constant should be 2.0
+    let scale_line = result.code.lines()
+        .find(|l| l.contains("OUTPUT_SCALE"))
+        .expect("OUTPUT_SCALE line should exist");
+    assert!(scale_line.contains("2.0"),
+        "OUTPUT_SCALE constant should contain 2.0, got: {}", scale_line);
+}

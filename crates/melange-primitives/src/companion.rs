@@ -453,4 +453,98 @@ mod tests {
         // Trapezoidal has 2x the conductance of backward Euler
         assert!((g_trap - 2.0 * g_be).abs() < 1e-10);
     }
+
+    // -----------------------------------------------------------------------
+    // InductorCompanion tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_inductor_companion_conductance() {
+        // g_eq = T/(2L) = 1/(2*L*fs) for 100mH at 44100 Hz
+        let l = 0.1; // 100 mH
+        let fs = 44100.0;
+        let comp = InductorCompanion::new_inductor(l, fs);
+
+        let expected = 1.0 / (2.0 * l * fs); // T/(2L) = 1/(2*L*fs)
+        assert!(
+            (comp.conductance() - expected).abs() < 1e-15,
+            "g_eq = {}, expected {}", comp.conductance(), expected
+        );
+        // Also verify the standalone helper gives the same result
+        let g_helper = inductor_companion_conductance_trapezoidal(l, fs);
+        assert!(
+            (comp.conductance() - g_helper).abs() < 1e-15,
+            "conductance() vs helper: {} vs {}", comp.conductance(), g_helper
+        );
+    }
+
+    #[test]
+    fn test_inductor_companion_initial_state() {
+        let comp = InductorCompanion::new_inductor(0.1, 44100.0);
+        assert_eq!(comp.history_current(), 0.0, "initial history current should be 0");
+        assert_eq!(comp.current(0.0), 0.0, "current(0) should be 0 at startup");
+    }
+
+    #[test]
+    fn test_inductor_companion_dc_steady_state() {
+        // Apply constant 1V across inductor — current should grow over time
+        // (inductors integrate voltage: di/dt = V/L)
+        let l = 0.1;
+        let fs = 44100.0;
+        let mut comp = InductorCompanion::new_inductor(l, fs);
+
+        let v_dc = 1.0;
+        let mut prev_current = 0.0_f64;
+        for step in 0..1000 {
+            let i = comp.current(v_dc);
+            comp.update(v_dc);
+            if step > 0 {
+                assert!(
+                    i > prev_current,
+                    "Current should grow with constant voltage: step {}, i={}, prev={}",
+                    step, i, prev_current
+                );
+            }
+            prev_current = i;
+        }
+        // After 1000 samples at 44.1kHz, t = ~22.7ms
+        // Ideal: i = V*t/L = 1.0 * 0.0227 / 0.1 = 0.227A
+        // Trapezoidal should be close
+        assert!(prev_current > 0.1, "Current should have grown substantially: {}", prev_current);
+    }
+
+    #[test]
+    fn test_inductor_companion_reset() {
+        let mut comp = InductorCompanion::new_inductor(0.1, 44100.0);
+
+        // Run some updates to build up state
+        for _ in 0..100 {
+            comp.update(1.0);
+        }
+        assert!(comp.history_current().abs() > 0.0, "Should have nonzero history after updates");
+
+        // Reset should zero everything
+        comp.reset();
+        assert_eq!(comp.history_current(), 0.0, "history_current should be 0 after reset");
+        assert_eq!(comp.current(0.0), 0.0, "current(0) should be 0 after reset");
+    }
+
+    #[test]
+    fn test_inductor_companion_current_formula() {
+        // Verify i = g_eq * v + j_hist
+        let mut comp = InductorCompanion::new_inductor(0.1, 44100.0);
+
+        // Run a few updates to get nonzero j_hist
+        comp.update(1.0);
+        comp.update(0.5);
+
+        let v_test = 2.0;
+        let expected = comp.g_eq * v_test + comp.j_hist;
+        let actual = comp.current(v_test);
+        assert!(
+            (actual - expected).abs() < 1e-15,
+            "current({}) = {}, expected g_eq*v + j_hist = {}",
+            v_test, actual, expected
+        );
+    }
 }
