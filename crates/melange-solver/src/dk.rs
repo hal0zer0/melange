@@ -31,6 +31,39 @@ pub struct InductorInfo {
     pub v_prev: f64,
 }
 
+/// Information about a coupled inductor pair for companion model.
+#[derive(Debug, Clone)]
+pub struct CoupledInductorState {
+    pub name: String,
+    pub l1_name: String,
+    pub l2_name: String,
+    pub l1_node_i: usize,
+    pub l1_node_j: usize,
+    pub l2_node_i: usize,
+    pub l2_node_j: usize,
+    pub l1_inductance: f64,
+    pub l2_inductance: f64,
+    pub coupling: f64,
+    /// Self-conductance for L1: (T/2) * L2 / det
+    pub g_self_1: f64,
+    /// Self-conductance for L2: (T/2) * L1 / det
+    pub g_self_2: f64,
+    /// Mutual conductance: -(T/2) * M / det
+    pub g_mutual: f64,
+    /// Previous current through L1
+    pub i1_prev: f64,
+    /// Previous current through L2
+    pub i2_prev: f64,
+    /// Previous voltage across L1
+    pub v1_prev: f64,
+    /// Previous voltage across L2
+    pub v2_prev: f64,
+    /// History current for L1 (Norton equivalent)
+    pub i1_hist: f64,
+    /// History current for L2 (Norton equivalent)
+    pub i2_hist: f64,
+}
+
 /// Precomputed Sherman-Morrison data for a potentiometer.
 ///
 /// When a pot changes resistance from R_nom to R_new, the conductance change
@@ -86,8 +119,10 @@ pub struct DkKernel {
     pub a_neg: Vec<f64>,
     /// Constant sources contribution to RHS (N)
     pub rhs_const: Vec<f64>,
-    /// Inductor companion model info
+    /// Inductor companion model info (uncoupled)
     pub inductors: Vec<InductorInfo>,
+    /// Coupled inductor pair companion model info
+    pub coupled_inductors: Vec<CoupledInductorState>,
     /// Potentiometer Sherman-Morrison precomputed data
     pub pots: Vec<SmPotData>,
 }
@@ -298,6 +333,57 @@ impl DkKernel {
             });
         }
 
+        // Initialize coupled inductor companion models
+        let mut coupled_inductors = Vec::with_capacity(mna.coupled_inductors.len());
+        for ci in &mna.coupled_inductors {
+            if ci.l1_value <= 0.0 {
+                return Err(DkError::InvalidInductance {
+                    name: ci.l1_name.clone(),
+                    value: ci.l1_value,
+                });
+            }
+            if ci.l2_value <= 0.0 {
+                return Err(DkError::InvalidInductance {
+                    name: ci.l2_name.clone(),
+                    value: ci.l2_value,
+                });
+            }
+            let m_val = ci.coupling * (ci.l1_value * ci.l2_value).sqrt();
+            let det = ci.l1_value * ci.l2_value - m_val * m_val;
+            if det <= 0.0 {
+                return Err(DkError::InvalidParameter(format!(
+                    "Coupled inductors '{}'-'{}': det = L1*L2 - M² = {:.6e} <= 0 (k={} too close to 1)",
+                    ci.l1_name, ci.l2_name, det, ci.coupling
+                )));
+            }
+            let half_t = t / 2.0;
+            let g_self_1 = half_t * ci.l2_value / det;
+            let g_self_2 = half_t * ci.l1_value / det;
+            let g_mutual = -half_t * m_val / det;
+
+            coupled_inductors.push(CoupledInductorState {
+                name: ci.name.clone(),
+                l1_name: ci.l1_name.clone(),
+                l2_name: ci.l2_name.clone(),
+                l1_node_i: ci.l1_node_i,
+                l1_node_j: ci.l1_node_j,
+                l2_node_i: ci.l2_node_i,
+                l2_node_j: ci.l2_node_j,
+                l1_inductance: ci.l1_value,
+                l2_inductance: ci.l2_value,
+                coupling: ci.coupling,
+                g_self_1,
+                g_self_2,
+                g_mutual,
+                i1_prev: 0.0,
+                i2_prev: 0.0,
+                v1_prev: 0.0,
+                v2_prev: 0.0,
+                i1_hist: 0.0,
+                i2_hist: 0.0,
+            });
+        }
+
         Ok(Self {
             n,
             m,
@@ -310,6 +396,7 @@ impl DkKernel {
             a_neg,
             rhs_const,
             inductors,
+            coupled_inductors,
             pots,
         })
     }
@@ -474,6 +561,40 @@ impl DkKernel {
             // Save state for next iteration
             ind.i_prev = i_new;
             ind.v_prev = v_l_new;
+        }
+    }
+
+    /// Update coupled inductor state after solving.
+    ///
+    /// Uses trapezoidal companion model for coupled inductors:
+    ///   i1_new = i1_prev + g_self_1*(v1_prev + v1_new) + g_mutual*(v2_prev + v2_new)
+    ///   i2_new = i2_prev + g_mutual*(v1_prev + v1_new) + g_self_2*(v2_prev + v2_new)
+    ///   i1_hist = i1_new - g_self_1*v1_new - g_mutual*v2_new
+    ///   i2_hist = i2_new - g_mutual*v1_new - g_self_2*v2_new
+    pub fn update_coupled_inductors(&mut self, v_node: &[f64]) {
+        for ci in &mut self.coupled_inductors {
+            let v1i = if ci.l1_node_i > 0 { v_node[ci.l1_node_i - 1] } else { 0.0 };
+            let v1j = if ci.l1_node_j > 0 { v_node[ci.l1_node_j - 1] } else { 0.0 };
+            let v1_new = v1i - v1j;
+
+            let v2i = if ci.l2_node_i > 0 { v_node[ci.l2_node_i - 1] } else { 0.0 };
+            let v2j = if ci.l2_node_j > 0 { v_node[ci.l2_node_j - 1] } else { 0.0 };
+            let v2_new = v2i - v2j;
+
+            let i1_new = ci.i1_prev
+                + ci.g_self_1 * (ci.v1_prev + v1_new)
+                + ci.g_mutual * (ci.v2_prev + v2_new);
+            let i2_new = ci.i2_prev
+                + ci.g_mutual * (ci.v1_prev + v1_new)
+                + ci.g_self_2 * (ci.v2_prev + v2_new);
+
+            ci.i1_hist = i1_new - ci.g_self_1 * v1_new - ci.g_mutual * v2_new;
+            ci.i2_hist = i2_new - ci.g_mutual * v1_new - ci.g_self_2 * v2_new;
+
+            ci.i1_prev = i1_new;
+            ci.i2_prev = i2_new;
+            ci.v1_prev = v1_new;
+            ci.v2_prev = v2_new;
         }
     }
 }

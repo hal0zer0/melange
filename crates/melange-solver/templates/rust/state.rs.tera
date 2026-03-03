@@ -68,6 +68,24 @@ pub struct CircuitState {
     /// Inductor equivalent conductances (sample-rate dependent)
     pub ind_g_eq: [f64; {{ num_inductors }}],
 {% endif %}
+{% if num_coupled_inductors > 0 %}
+    /// Coupled inductor L1 previous currents
+    pub ci_i1_prev: [f64; {{ num_coupled_inductors }}],
+    /// Coupled inductor L2 previous currents
+    pub ci_i2_prev: [f64; {{ num_coupled_inductors }}],
+    /// Coupled inductor L1 previous voltages
+    pub ci_v1_prev: [f64; {{ num_coupled_inductors }}],
+    /// Coupled inductor L2 previous voltages
+    pub ci_v2_prev: [f64; {{ num_coupled_inductors }}],
+    /// Coupled inductor L1 history currents (Norton equivalent)
+    pub ci_i1_hist: [f64; {{ num_coupled_inductors }}],
+    /// Coupled inductor L2 history currents (Norton equivalent)
+    pub ci_i2_hist: [f64; {{ num_coupled_inductors }}],
+    /// Coupled inductor self-conductances and mutual conductance (sample-rate dependent)
+    pub ci_g_self_1: [f64; {{ num_coupled_inductors }}],
+    pub ci_g_self_2: [f64; {{ num_coupled_inductors }}],
+    pub ci_g_mutual: [f64; {{ num_coupled_inductors }}],
+{% endif %}
 {% for default in pot_defaults %}
     /// Potentiometer {{ loop.index0 }} current resistance (ohms)
     pub pot_{{ loop.index0 }}_resistance: f64,
@@ -136,6 +154,17 @@ impl Default for CircuitState {
             ind_i_hist: [0.0; {{ num_inductors }}],
             ind_g_eq: [{% for ind in inductors %}IND_{{ loop.index0 }}_G_EQ{% if not loop.last %}, {% endif %}{% endfor %}],
 {% endif %}
+{% if num_coupled_inductors > 0 %}
+            ci_i1_prev: [0.0; {{ num_coupled_inductors }}],
+            ci_i2_prev: [0.0; {{ num_coupled_inductors }}],
+            ci_v1_prev: [0.0; {{ num_coupled_inductors }}],
+            ci_v2_prev: [0.0; {{ num_coupled_inductors }}],
+            ci_i1_hist: [0.0; {{ num_coupled_inductors }}],
+            ci_i2_hist: [0.0; {{ num_coupled_inductors }}],
+            ci_g_self_1: [{% for ci in coupled_inductors %}CI_{{ loop.index0 }}_G_SELF_1{% if not loop.last %}, {% endif %}{% endfor %}],
+            ci_g_self_2: [{% for ci in coupled_inductors %}CI_{{ loop.index0 }}_G_SELF_2{% if not loop.last %}, {% endif %}{% endfor %}],
+            ci_g_mutual: [{% for ci in coupled_inductors %}CI_{{ loop.index0 }}_G_MUTUAL{% if not loop.last %}, {% endif %}{% endfor %}],
+{% endif %}
 {% for default in pot_defaults %}
             pot_{{ loop.index0 }}_resistance: {{ default }},
 {% endfor %}
@@ -183,6 +212,14 @@ impl CircuitState {
         self.ind_i_prev = [0.0; {{ num_inductors }}];
         self.ind_v_prev = [0.0; {{ num_inductors }}];
         self.ind_i_hist = [0.0; {{ num_inductors }}];
+{% endif %}
+{% if num_coupled_inductors > 0 %}
+        self.ci_i1_prev = [0.0; {{ num_coupled_inductors }}];
+        self.ci_i2_prev = [0.0; {{ num_coupled_inductors }}];
+        self.ci_v1_prev = [0.0; {{ num_coupled_inductors }}];
+        self.ci_v2_prev = [0.0; {{ num_coupled_inductors }}];
+        self.ci_i1_hist = [0.0; {{ num_coupled_inductors }}];
+        self.ci_i2_hist = [0.0; {{ num_coupled_inductors }}];
 {% endif %}
 {% for default in pot_defaults %}
         self.pot_{{ loop.index0 }}_resistance = {{ default }};
@@ -258,6 +295,17 @@ impl CircuitState {
                 self.ind_v_prev = [0.0; {{ num_inductors }}];
                 self.ind_i_hist = [0.0; {{ num_inductors }}];
 {% endif %}
+{% if num_coupled_inductors > 0 %}
+                self.ci_i1_prev = [0.0; {{ num_coupled_inductors }}];
+                self.ci_i2_prev = [0.0; {{ num_coupled_inductors }}];
+                self.ci_v1_prev = [0.0; {{ num_coupled_inductors }}];
+                self.ci_v2_prev = [0.0; {{ num_coupled_inductors }}];
+                self.ci_i1_hist = [0.0; {{ num_coupled_inductors }}];
+                self.ci_i2_hist = [0.0; {{ num_coupled_inductors }}];
+                self.ci_g_self_1 = [{% for ci in coupled_inductors %}CI_{{ loop.index0 }}_G_SELF_1{% if not loop.last %}, {% endif %}{% endfor %}];
+                self.ci_g_self_2 = [{% for ci in coupled_inductors %}CI_{{ loop.index0 }}_G_SELF_2{% if not loop.last %}, {% endif %}{% endfor %}];
+                self.ci_g_mutual = [{% for ci in coupled_inductors %}CI_{{ loop.index0 }}_G_MUTUAL{% if not loop.last %}, {% endif %}{% endfor %}];
+{% endif %}
                 return;
             }
         }
@@ -272,6 +320,11 @@ impl CircuitState {
             self.s_ni = S_NI_DEFAULT;
 {% if num_inductors > 0 %}
             self.ind_g_eq = [{% for ind in inductors %}IND_{{ loop.index0 }}_G_EQ{% if not loop.last %}, {% endif %}{% endfor %}];
+{% endif %}
+{% if num_coupled_inductors > 0 %}
+            self.ci_g_self_1 = [{% for ci in coupled_inductors %}CI_{{ loop.index0 }}_G_SELF_1{% if not loop.last %}, {% endif %}{% endfor %}];
+            self.ci_g_self_2 = [{% for ci in coupled_inductors %}CI_{{ loop.index0 }}_G_SELF_2{% if not loop.last %}, {% endif %}{% endfor %}];
+            self.ci_g_mutual = [{% for ci in coupled_inductors %}CI_{{ loop.index0 }}_G_MUTUAL{% if not loop.last %}, {% endif %}{% endfor %}];
 {% endif %}
 {% if num_pots > 0 %}
 {% for idx in pot_indices %}
@@ -289,7 +342,7 @@ impl CircuitState {
 
         let internal_rate = sample_rate * OVERSAMPLING_FACTOR as f64;
         let alpha = 2.0 * internal_rate;
-{% if num_inductors > 0 %}        let t = 1.0 / internal_rate;
+{% if num_inductors > 0 or num_coupled_inductors > 0 %}        let t = 1.0 / internal_rate;
 {% endif %}
         // Build A = G + alpha*C
         let mut a = [[0.0f64; N]; N];
@@ -320,6 +373,37 @@ impl CircuitState {
         self.ind_i_prev = [0.0; {{ num_inductors }}];
         self.ind_v_prev = [0.0; {{ num_inductors }}];
         self.ind_i_hist = [0.0; {{ num_inductors }}];
+{% endif %}
+{% if num_coupled_inductors > 0 %}
+
+        // Add coupled inductor companion model conductances
+{% for ci in coupled_inductors %}        {
+            let m_val = CI_{{ loop.index0 }}_COUPLING * (CI_{{ loop.index0 }}_L1_INDUCTANCE * CI_{{ loop.index0 }}_L2_INDUCTANCE).sqrt();
+            let det = CI_{{ loop.index0 }}_L1_INDUCTANCE * CI_{{ loop.index0 }}_L2_INDUCTANCE - m_val * m_val;
+            let half_t = t / 2.0;
+            let gs1 = half_t * CI_{{ loop.index0 }}_L2_INDUCTANCE / det;
+            let gs2 = half_t * CI_{{ loop.index0 }}_L1_INDUCTANCE / det;
+            let gm = -half_t * m_val / det;
+            self.ci_g_self_1[{{ loop.index0 }}] = gs1;
+            self.ci_g_self_2[{{ loop.index0 }}] = gs2;
+            self.ci_g_mutual[{{ loop.index0 }}] = gm;
+            stamp_conductance(&mut a, CI_{{ loop.index0 }}_L1_NODE_I, CI_{{ loop.index0 }}_L1_NODE_J, gs1);
+            stamp_conductance(&mut a_neg, CI_{{ loop.index0 }}_L1_NODE_I, CI_{{ loop.index0 }}_L1_NODE_J, -gs1);
+            stamp_conductance(&mut a, CI_{{ loop.index0 }}_L2_NODE_I, CI_{{ loop.index0 }}_L2_NODE_J, gs2);
+            stamp_conductance(&mut a_neg, CI_{{ loop.index0 }}_L2_NODE_I, CI_{{ loop.index0 }}_L2_NODE_J, -gs2);
+            stamp_mutual(&mut a, CI_{{ loop.index0 }}_L1_NODE_I, CI_{{ loop.index0 }}_L1_NODE_J, CI_{{ loop.index0 }}_L2_NODE_I, CI_{{ loop.index0 }}_L2_NODE_J, gm);
+            stamp_mutual(&mut a, CI_{{ loop.index0 }}_L2_NODE_I, CI_{{ loop.index0 }}_L2_NODE_J, CI_{{ loop.index0 }}_L1_NODE_I, CI_{{ loop.index0 }}_L1_NODE_J, gm);
+            stamp_mutual(&mut a_neg, CI_{{ loop.index0 }}_L1_NODE_I, CI_{{ loop.index0 }}_L1_NODE_J, CI_{{ loop.index0 }}_L2_NODE_I, CI_{{ loop.index0 }}_L2_NODE_J, -gm);
+            stamp_mutual(&mut a_neg, CI_{{ loop.index0 }}_L2_NODE_I, CI_{{ loop.index0 }}_L2_NODE_J, CI_{{ loop.index0 }}_L1_NODE_I, CI_{{ loop.index0 }}_L1_NODE_J, -gm);
+        }
+{% endfor %}
+        // Reset coupled inductor transient state
+        self.ci_i1_prev = [0.0; {{ num_coupled_inductors }}];
+        self.ci_i2_prev = [0.0; {{ num_coupled_inductors }}];
+        self.ci_v1_prev = [0.0; {{ num_coupled_inductors }}];
+        self.ci_v2_prev = [0.0; {{ num_coupled_inductors }}];
+        self.ci_i1_hist = [0.0; {{ num_coupled_inductors }}];
+        self.ci_i2_hist = [0.0; {{ num_coupled_inductors }}];
 {% endif %}
 
         // Invert A to get S
@@ -419,7 +503,7 @@ impl CircuitState {
 {% endif %}
 }
 
-{% if num_inductors > 0 or num_switches > 0 %}/// Stamp a conductance between two nodes into a matrix.
+{% if num_inductors > 0 or num_switches > 0 or num_coupled_inductors > 0 %}/// Stamp a conductance between two nodes into a matrix.
 /// Node indices are 1-indexed; 0 means ground.
 fn stamp_conductance(mat: &mut [[f64; N]; N], node_i: usize, node_j: usize, g: f64) {
     match (node_i > 0, node_j > 0) {
@@ -435,6 +519,14 @@ fn stamp_conductance(mat: &mut [[f64; N]; N], node_i: usize, node_j: usize, g: f
         (false, true) => { mat[node_j - 1][node_j - 1] += g; }
         (false, false) => {}
     }
+}
+
+{% endif %}{% if num_coupled_inductors > 0 %}/// Stamp mutual conductance between two 2-terminal elements.
+fn stamp_mutual(mat: &mut [[f64; N]; N], a: usize, b: usize, c: usize, d: usize, g: f64) {
+    if a > 0 && c > 0 { mat[a - 1][c - 1] += g; }
+    if b > 0 && d > 0 { mat[b - 1][d - 1] += g; }
+    if a > 0 && d > 0 { mat[a - 1][d - 1] -= g; }
+    if b > 0 && c > 0 { mat[b - 1][c - 1] -= g; }
 }
 
 {% endif %}/// Invert an N x N matrix using Gaussian elimination with partial pivoting.

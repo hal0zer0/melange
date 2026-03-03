@@ -88,6 +88,22 @@ const IND_{{ loop.index0 }}_G_EQ: f64 = {{ ind.g_eq }};
 const IND_{{ loop.index0 }}_INDUCTANCE: f64 = {{ ind.inductance }};
 {% endfor %}
 {% endif %}
+{% if num_coupled_inductors > 0 %}
+/// Number of coupled inductor pairs (transformers)
+pub const NUM_COUPLED_INDUCTORS: usize = {{ num_coupled_inductors }};
+{% for ci in coupled_inductors %}
+const CI_{{ loop.index0 }}_L1_NODE_I: usize = {{ ci.l1_node_i }};
+const CI_{{ loop.index0 }}_L1_NODE_J: usize = {{ ci.l1_node_j }};
+const CI_{{ loop.index0 }}_L2_NODE_I: usize = {{ ci.l2_node_i }};
+const CI_{{ loop.index0 }}_L2_NODE_J: usize = {{ ci.l2_node_j }};
+const CI_{{ loop.index0 }}_L1_INDUCTANCE: f64 = {{ ci.l1_inductance }};
+const CI_{{ loop.index0 }}_L2_INDUCTANCE: f64 = {{ ci.l2_inductance }};
+const CI_{{ loop.index0 }}_COUPLING: f64 = {{ ci.coupling }};
+const CI_{{ loop.index0 }}_G_SELF_1: f64 = {{ ci.g_self_1 }};
+const CI_{{ loop.index0 }}_G_SELF_2: f64 = {{ ci.g_self_2 }};
+const CI_{{ loop.index0 }}_G_MUTUAL: f64 = {{ ci.g_mutual }};
+{% endfor %}
+{% endif %}
 
 {% if num_switches > 0 %}
 // =============================================================================

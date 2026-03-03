@@ -24,6 +24,8 @@ pub struct Netlist {
     pub pots: Vec<PotDirective>,
     /// Switch directives (.switch)
     pub switches: Vec<SwitchDirective>,
+    /// Coupling directives (K elements for coupled inductors / transformers)
+    pub couplings: Vec<CouplingDirective>,
     /// Input impedance directive (.input_impedance)
     pub input_impedance: Option<f64>,
 }
@@ -41,6 +43,8 @@ pub struct PotDirective {
     pub min_value: f64,
     /// Maximum resistance value (ohms)
     pub max_value: f64,
+    /// Optional human-readable label (e.g. "Volume")
+    pub label: Option<String>,
 }
 
 /// A switch directive (.switch C1,L1 val0a/val0b val1a/val1b ...).
@@ -54,6 +58,24 @@ pub struct SwitchDirective {
     pub component_names: Vec<String>,
     /// Position values: positions[pos][comp] = value for that component at that position
     pub positions: Vec<Vec<f64>>,
+    /// Optional human-readable label (e.g. "Bright")
+    pub label: Option<String>,
+}
+
+/// A coupling directive (K element) for coupled inductors / transformers.
+///
+/// Standard SPICE syntax: `K1 L1 L2 0.95`
+/// Couples two inductors with mutual inductance M = k * sqrt(L1 * L2).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CouplingDirective {
+    /// Name of the coupling element (e.g. "K1")
+    pub name: String,
+    /// Name of the first inductor (e.g. "L1")
+    pub inductor1_name: String,
+    /// Name of the second inductor (e.g. "L2")
+    pub inductor2_name: String,
+    /// Coupling coefficient k (0 < k < 1)
+    pub coupling: f64,
 }
 
 impl Netlist {
@@ -67,6 +89,7 @@ impl Netlist {
             params: Vec::new(),
             pots: Vec::new(),
             switches: Vec::new(),
+            couplings: Vec::new(),
             input_impedance: None,
         }
     }
@@ -74,6 +97,109 @@ impl Netlist {
     /// Parse a netlist from a string.
     pub fn parse(input: &str) -> Result<Self, ParseError> {
         Parser::new(input).parse()
+    }
+
+    /// Expand all subcircuit instances (`X` elements) into their constituent elements.
+    ///
+    /// Each `SubcktInstance` is replaced by the elements from its subcircuit definition,
+    /// with component names prefixed (`X1.R1`) and internal nodes remapped (`X1.mid`).
+    /// Port nodes are mapped to the caller's actual connection nodes. Ground ("0") is
+    /// always global and never prefixed.
+    ///
+    /// This must be called between `parse()` and `MnaSystem::from_netlist()`.
+    /// Nested subcircuits are handled by iterative expansion (max 32 passes).
+    ///
+    /// # Errors
+    /// - Undefined subcircuit reference
+    /// - Port count mismatch
+    /// - Recursive subcircuit cycle
+    /// - Duplicate subcircuit names
+    pub fn expand_subcircuits(&mut self) -> Result<(), ParseError> {
+        if self.subcircuits.is_empty() {
+            return Ok(());
+        }
+
+        // Build lookup: lowercase name → index into self.subcircuits
+        let mut lookup: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for (i, sc) in self.subcircuits.iter().enumerate() {
+            let key = sc.name.to_ascii_lowercase();
+            if lookup.contains_key(&key) {
+                return Err(ParseError {
+                    line: 0,
+                    message: format!("Duplicate subcircuit definition: '{}'", sc.name),
+                });
+            }
+            lookup.insert(key, i);
+        }
+
+        // Cycle detection
+        detect_subcircuit_cycles(&self.subcircuits, &lookup)?;
+
+        // Iterative expansion (max 32 passes for deeply nested subcircuits)
+        for _pass in 0..32 {
+            let has_instances = self.elements.iter().any(|e| matches!(e, Element::SubcktInstance { .. }));
+            if !has_instances {
+                break;
+            }
+
+            let mut new_elements = Vec::with_capacity(self.elements.len());
+            for elem in &self.elements {
+                if let Element::SubcktInstance { name: inst_name, nodes: inst_nodes, subckt } = elem {
+                    let key = subckt.to_ascii_lowercase();
+                    let sc_idx = lookup.get(&key).ok_or_else(|| ParseError {
+                        line: 0,
+                        message: format!(
+                            "Subcircuit instance '{}' references undefined subcircuit '{}'",
+                            inst_name, subckt
+                        ),
+                    })?;
+                    let sc = &self.subcircuits[*sc_idx];
+
+                    // Validate port count
+                    if inst_nodes.len() != sc.nodes.len() {
+                        return Err(ParseError {
+                            line: 0,
+                            message: format!(
+                                "Subcircuit instance '{}' has {} nodes but '{}' expects {}",
+                                inst_name, inst_nodes.len(), subckt, sc.nodes.len()
+                            ),
+                        });
+                    }
+
+                    // Build node map: subckt port name → caller's actual node
+                    let mut node_map: std::collections::HashMap<String, String> =
+                        std::collections::HashMap::new();
+                    for (port, actual) in sc.nodes.iter().zip(inst_nodes.iter()) {
+                        node_map.insert(port.to_ascii_lowercase(), actual.clone());
+                    }
+
+                    // Expand each element from the subcircuit definition
+                    for sc_elem in &sc.elements {
+                        new_elements.push(sc_elem.remap_for_subcircuit(inst_name, &node_map));
+                    }
+                } else {
+                    new_elements.push(elem.clone());
+                }
+            }
+            self.elements = new_elements;
+        }
+
+        // Verify no unexpanded instances remain
+        for elem in &self.elements {
+            if let Element::SubcktInstance { name, subckt, .. } = elem {
+                return Err(ParseError {
+                    line: 0,
+                    message: format!(
+                        "Subcircuit instance '{}' (of '{}') could not be fully expanded after 32 passes",
+                        name, subckt
+                    ),
+                });
+            }
+        }
+
+        // Clear subcircuit definitions — they've been inlined
+        self.subcircuits.clear();
+        Ok(())
     }
 }
 
@@ -216,6 +342,179 @@ impl Element {
             _ => None,
         }
     }
+
+    /// Clone this element with remapped nodes and prefixed name for subcircuit expansion.
+    ///
+    /// - Component name is prefixed: `{prefix}.{name}`
+    /// - Nodes are remapped: port nodes → caller's nodes, internal → `{prefix}.{node}`, "0" → "0"
+    /// - Model names are NOT remapped (models are global).
+    fn remap_for_subcircuit(
+        &self,
+        prefix: &str,
+        node_map: &std::collections::HashMap<String, String>,
+    ) -> Element {
+        let remap = |node: &str| -> String {
+            if node == "0" {
+                return "0".to_string();
+            }
+            let key = node.to_ascii_lowercase();
+            if let Some(actual) = node_map.get(&key) {
+                actual.clone()
+            } else {
+                format!("{}.{}", prefix, node)
+            }
+        };
+        let prefixed = |name: &str| -> String {
+            format!("{}.{}", prefix, name)
+        };
+
+        match self {
+            Element::Resistor { name, n_plus, n_minus, value } => Element::Resistor {
+                name: prefixed(name),
+                n_plus: remap(n_plus),
+                n_minus: remap(n_minus),
+                value: *value,
+            },
+            Element::Capacitor { name, n_plus, n_minus, value, ic } => Element::Capacitor {
+                name: prefixed(name),
+                n_plus: remap(n_plus),
+                n_minus: remap(n_minus),
+                value: *value,
+                ic: *ic,
+            },
+            Element::Inductor { name, n_plus, n_minus, value } => Element::Inductor {
+                name: prefixed(name),
+                n_plus: remap(n_plus),
+                n_minus: remap(n_minus),
+                value: *value,
+            },
+            Element::VoltageSource { name, n_plus, n_minus, dc, ac } => Element::VoltageSource {
+                name: prefixed(name),
+                n_plus: remap(n_plus),
+                n_minus: remap(n_minus),
+                dc: *dc,
+                ac: *ac,
+            },
+            Element::CurrentSource { name, n_plus, n_minus, dc } => Element::CurrentSource {
+                name: prefixed(name),
+                n_plus: remap(n_plus),
+                n_minus: remap(n_minus),
+                dc: *dc,
+            },
+            Element::Diode { name, n_plus, n_minus, model } => Element::Diode {
+                name: prefixed(name),
+                n_plus: remap(n_plus),
+                n_minus: remap(n_minus),
+                model: model.clone(),
+            },
+            Element::Bjt { name, nc, nb, ne, model } => Element::Bjt {
+                name: prefixed(name),
+                nc: remap(nc),
+                nb: remap(nb),
+                ne: remap(ne),
+                model: model.clone(),
+            },
+            Element::Jfet { name, nd, ng, ns, model } => Element::Jfet {
+                name: prefixed(name),
+                nd: remap(nd),
+                ng: remap(ng),
+                ns: remap(ns),
+                model: model.clone(),
+            },
+            Element::Mosfet { name, nd, ng, ns, nb, model } => Element::Mosfet {
+                name: prefixed(name),
+                nd: remap(nd),
+                ng: remap(ng),
+                ns: remap(ns),
+                nb: remap(nb),
+                model: model.clone(),
+            },
+            Element::Opamp { name, n_plus, n_minus, n_out, model } => Element::Opamp {
+                name: prefixed(name),
+                n_plus: remap(n_plus),
+                n_minus: remap(n_minus),
+                n_out: remap(n_out),
+                model: model.clone(),
+            },
+            Element::Triode { name, n_grid, n_plate, n_cathode, model } => Element::Triode {
+                name: prefixed(name),
+                n_grid: remap(n_grid),
+                n_plate: remap(n_plate),
+                n_cathode: remap(n_cathode),
+                model: model.clone(),
+            },
+            Element::SubcktInstance { name, nodes, subckt } => Element::SubcktInstance {
+                name: prefixed(name),
+                nodes: nodes.iter().map(|n| remap(n)).collect(),
+                subckt: subckt.clone(),
+            },
+        }
+    }
+}
+
+/// Detect cycles in subcircuit definitions (A contains instance of B which contains instance of A).
+fn detect_subcircuit_cycles(
+    subcircuits: &[Subcircuit],
+    lookup: &std::collections::HashMap<String, usize>,
+) -> Result<(), ParseError> {
+    // Build adjacency list: subckt index → list of subckt indices it references
+    let mut adj: Vec<Vec<usize>> = vec![Vec::new(); subcircuits.len()];
+    for (i, sc) in subcircuits.iter().enumerate() {
+        for elem in &sc.elements {
+            if let Element::SubcktInstance { subckt, .. } = elem {
+                let key = subckt.to_ascii_lowercase();
+                if let Some(&j) = lookup.get(&key) {
+                    adj[i].push(j);
+                }
+                // Missing references will be caught during expansion
+            }
+        }
+    }
+
+    // DFS cycle detection
+    let n = subcircuits.len();
+    let mut color = vec![0u8; n]; // 0=white, 1=gray (in stack), 2=black (done)
+    let mut stack = Vec::new();
+
+    for start in 0..n {
+        if color[start] != 0 {
+            continue;
+        }
+        stack.clear();
+        stack.push((start, 0usize)); // (node, next_neighbor_index)
+        color[start] = 1;
+
+        while let Some((node, ni)) = stack.last_mut() {
+            if *ni < adj[*node].len() {
+                let neighbor = adj[*node][*ni];
+                *ni += 1;
+                if color[neighbor] == 1 {
+                    // Found a cycle — build cycle path for error message
+                    let mut cycle_names: Vec<String> = stack
+                        .iter()
+                        .skip_while(|(idx, _)| *idx != neighbor)
+                        .map(|(idx, _)| subcircuits[*idx].name.clone())
+                        .collect();
+                    cycle_names.push(subcircuits[neighbor].name.clone());
+                    return Err(ParseError {
+                        line: 0,
+                        message: format!(
+                            "Recursive subcircuit cycle detected: {}",
+                            cycle_names.join(" -> ")
+                        ),
+                    });
+                } else if color[neighbor] == 0 {
+                    color[neighbor] = 1;
+                    stack.push((neighbor, 0));
+                }
+            } else {
+                color[*node] = 2;
+                stack.pop();
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// A model definition (.model).
@@ -326,6 +625,12 @@ impl Parser {
             // Parse directive or element
             if line.starts_with('.') {
                 self.parse_directive(&line, &mut netlist)?;
+            } else if line.starts_with('K') || line.starts_with('k') {
+                if netlist.couplings.len() >= 16 {
+                    return Err(self.error("Maximum of 16 coupling (K) directives supported"));
+                }
+                let coupling = self.parse_coupling(&line)?;
+                netlist.couplings.push(coupling);
             } else {
                 let element = self.parse_element(&line)?;
                 netlist.elements.push(element);
@@ -367,7 +672,12 @@ impl Parser {
 
         // Verify all .pot directives reference existing resistors
         // (deferred so .pot can appear before the resistor in the netlist)
+        // Names containing '.' are expanded subcircuit refs (e.g. "X1.R1") —
+        // skip validation here; they'll be checked after expand_subcircuits().
         for pot in &netlist.pots {
+            if pot.resistor_name.contains('.') {
+                continue; // Will be validated after subcircuit expansion
+            }
             let exists = netlist.elements.iter().any(|e| {
                 matches!(e, Element::Resistor { name, .. } if name.eq_ignore_ascii_case(&pot.resistor_name))
             });
@@ -383,8 +693,12 @@ impl Parser {
         }
 
         // Verify all .switch directives reference existing components
+        // Names containing '.' are expanded subcircuit refs — skip here.
         for sw in &netlist.switches {
             for comp_name in &sw.component_names {
+                if comp_name.contains('.') {
+                    continue; // Will be validated after subcircuit expansion
+                }
                 let first_char = comp_name.chars().next().unwrap_or(' ').to_ascii_uppercase();
                 let exists = netlist.elements.iter().any(|e| match (first_char, e) {
                     ('R', Element::Resistor { name, .. }) => name.eq_ignore_ascii_case(comp_name),
@@ -400,6 +714,96 @@ impl Parser {
                             comp_name
                         ),
                     });
+                }
+            }
+        }
+
+        // Verify all coupling (K) directives: no duplicate names, reference existing inductors,
+        // and no inductor appears in multiple couplings
+        {
+            let mut seen_coupling_names = std::collections::HashSet::new();
+            let mut coupled_inductors = std::collections::HashSet::new();
+            for coupling in &netlist.couplings {
+                if !seen_coupling_names.insert(coupling.name.to_ascii_lowercase()) {
+                    return Err(ParseError {
+                        line: 0,
+                        message: format!(
+                            "Duplicate coupling name: '{}'",
+                            coupling.name
+                        ),
+                    });
+                }
+                let l1_exists = netlist.elements.iter().any(|e| {
+                    matches!(e, Element::Inductor { name, .. } if name.eq_ignore_ascii_case(&coupling.inductor1_name))
+                });
+                if !l1_exists {
+                    return Err(ParseError {
+                        line: 0,
+                        message: format!(
+                            "Coupling '{}' references inductor '{}' which was not found in the netlist",
+                            coupling.name, coupling.inductor1_name
+                        ),
+                    });
+                }
+                let l2_exists = netlist.elements.iter().any(|e| {
+                    matches!(e, Element::Inductor { name, .. } if name.eq_ignore_ascii_case(&coupling.inductor2_name))
+                });
+                if !l2_exists {
+                    return Err(ParseError {
+                        line: 0,
+                        message: format!(
+                            "Coupling '{}' references inductor '{}' which was not found in the netlist",
+                            coupling.name, coupling.inductor2_name
+                        ),
+                    });
+                }
+                let l1_lower = coupling.inductor1_name.to_ascii_lowercase();
+                let l2_lower = coupling.inductor2_name.to_ascii_lowercase();
+                if !coupled_inductors.insert(l1_lower.clone()) {
+                    return Err(ParseError {
+                        line: 0,
+                        message: format!(
+                            "Inductor '{}' appears in multiple coupling directives",
+                            coupling.inductor1_name
+                        ),
+                    });
+                }
+                if !coupled_inductors.insert(l2_lower) {
+                    return Err(ParseError {
+                        line: 0,
+                        message: format!(
+                            "Inductor '{}' appears in multiple coupling directives",
+                            coupling.inductor2_name
+                        ),
+                    });
+                }
+            }
+        }
+
+        // Verify subcircuit instances reference defined subcircuits with matching port count
+        for elem in &netlist.elements {
+            if let Element::SubcktInstance { name, nodes, subckt } = elem {
+                let sc = netlist.subcircuits.iter().find(|s| s.name.eq_ignore_ascii_case(subckt));
+                match sc {
+                    None => {
+                        return Err(ParseError {
+                            line: 0,
+                            message: format!(
+                                "Subcircuit instance '{}' references undefined subcircuit '{}'",
+                                name, subckt
+                            ),
+                        });
+                    }
+                    Some(s) if nodes.len() != s.nodes.len() => {
+                        return Err(ParseError {
+                            line: 0,
+                            message: format!(
+                                "Subcircuit instance '{}' has {} nodes but '{}' expects {}",
+                                name, nodes.len(), subckt, s.nodes.len()
+                            ),
+                        });
+                    }
+                    _ => {}
                 }
             }
         }
@@ -545,13 +949,67 @@ impl Parser {
         Ok(Parameter { name, value })
     }
 
+    /// Parse a K (coupling) element: `K1 L1 L2 0.95`
+    fn parse_coupling(&self, line: &str) -> Result<CouplingDirective, ParseError> {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 4 {
+            return Err(self.error("Coupling element requires: Kname L1 L2 coupling_coeff"));
+        }
+
+        let name = parts[0].to_string();
+        let inductor1_name = parts[1].to_string();
+        let inductor2_name = parts[2].to_string();
+
+        // Validate inductor names start with L/l
+        if !inductor1_name.starts_with('L') && !inductor1_name.starts_with('l') {
+            return Err(self.error(format!(
+                "Coupling '{}': first reference must be an inductor (L), got '{}'",
+                name, inductor1_name
+            )));
+        }
+        if !inductor2_name.starts_with('L') && !inductor2_name.starts_with('l') {
+            return Err(self.error(format!(
+                "Coupling '{}': second reference must be an inductor (L), got '{}'",
+                name, inductor2_name
+            )));
+        }
+
+        // Reject self-coupling
+        if inductor1_name.eq_ignore_ascii_case(&inductor2_name) {
+            return Err(self.error(format!(
+                "Coupling '{}': cannot couple an inductor to itself ('{}')",
+                name, inductor1_name
+            )));
+        }
+
+        let coupling = parse_value(parts[3])
+            .map_err(|_| self.error(format!("Invalid coupling coefficient: {}", parts[3])))?;
+
+        if coupling <= 0.0 || coupling >= 1.0 {
+            return Err(self.error(format!(
+                "Coupling coefficient must be in (0, 1) exclusive, got {}",
+                coupling
+            )));
+        }
+
+        Ok(CouplingDirective {
+            name,
+            inductor1_name,
+            inductor2_name,
+            coupling,
+        })
+    }
+
     fn parse_pot_directive(&self, parts: &[&str], netlist: &Netlist) -> Result<PotDirective, ParseError> {
         // .pot Rname min max
         self.require_parts(parts, 4, ".pot Rname min_value max_value")?;
 
         let resistor_name = parts[1].to_string();
 
-        if !resistor_name.starts_with('R') && !resistor_name.starts_with('r') {
+        // Check component type prefix: either starts with R, or for expanded subcircuit
+        // names like "X1.R1", the part after the last dot starts with R.
+        let base_name = resistor_name.rsplit('.').next().unwrap_or(&resistor_name);
+        if !base_name.starts_with('R') && !base_name.starts_with('r') {
             return Err(self.error(format!(
                 ".pot target must be a resistor (name starting with R), got '{}'",
                 resistor_name
@@ -577,11 +1035,29 @@ impl Parser {
             return Err(self.error("Maximum of 32 .pot directives supported"));
         }
 
+        // Optional quoted label: .pot Rname min max "Label"
+        let label = if parts.len() > 4 {
+            let rest = parts[4..].join(" ");
+            if rest.starts_with('"') {
+                let trimmed = rest.trim_matches('"');
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         // Resistor existence is validated after full parse (order-independent)
         Ok(PotDirective {
             resistor_name,
             min_value,
             max_value,
+            label,
         })
     }
 
@@ -601,9 +1077,11 @@ impl Parser {
             return Err(self.error(".switch requires at least one component name"));
         }
 
-        // Validate component name prefixes
+        // Validate component name prefixes: for expanded subcircuit names like "X1.C1",
+        // check the part after the last dot.
         for name in &component_names {
-            let first = name.chars().next().unwrap_or(' ').to_ascii_uppercase();
+            let base = name.rsplit('.').next().unwrap_or(name);
+            let first = base.chars().next().unwrap_or(' ').to_ascii_uppercase();
             if !matches!(first, 'R' | 'C' | 'L') {
                 return Err(self.error(format!(
                     ".switch component '{}' must start with R, C, or L", name
@@ -613,9 +1091,21 @@ impl Parser {
 
         let num_comps = component_names.len();
 
-        // Parse position values (parts[2..])
+        // Separate position values from optional trailing quoted label
+        let value_parts = &parts[2..];
+        let label_start = value_parts.iter().position(|p| p.starts_with('"'));
+        let (pos_parts, label) = if let Some(idx) = label_start {
+            let label_text = value_parts[idx..].join(" ");
+            let trimmed = label_text.trim_matches('"');
+            let label = if trimmed.is_empty() { None } else { Some(trimmed.to_string()) };
+            (&value_parts[..idx], label)
+        } else {
+            (value_parts, None)
+        };
+
+        // Parse position values
         let mut positions = Vec::new();
-        for &pos_str in &parts[2..] {
+        for &pos_str in pos_parts {
             let values: Vec<f64> = pos_str
                 .split('/')
                 .map(|v| {
@@ -664,6 +1154,7 @@ impl Parser {
         Ok(SwitchDirective {
             component_names,
             positions,
+            label,
         })
     }
 
@@ -1285,6 +1776,54 @@ mod tests {
         let spice = "Test\nR1 1 0 10k\n.pot R1 1k 100k\n.pot r1 2k 50k\n";
         let result = Netlist::parse(spice);
         assert!(result.is_err(), "Case-insensitive duplicate should fail");
+    }
+
+    // ======================================================================
+    // .pot / .switch label tests
+    // ======================================================================
+
+    #[test]
+    fn test_parse_pot_with_label() {
+        let spice = "Test\nR1 1 0 10k\n.pot R1 1k 100k \"Volume\"\n";
+        let netlist = Netlist::parse(spice).unwrap();
+        assert_eq!(netlist.pots[0].label, Some("Volume".to_string()));
+    }
+
+    #[test]
+    fn test_parse_pot_with_multi_word_label() {
+        let spice = "Test\nR1 1 0 10k\n.pot R1 1k 100k \"HF Boost\"\n";
+        let netlist = Netlist::parse(spice).unwrap();
+        assert_eq!(netlist.pots[0].label, Some("HF Boost".to_string()));
+    }
+
+    #[test]
+    fn test_parse_pot_without_label() {
+        let spice = "Test\nR1 1 0 10k\n.pot R1 1k 100k\n";
+        let netlist = Netlist::parse(spice).unwrap();
+        assert_eq!(netlist.pots[0].label, None);
+    }
+
+    #[test]
+    fn test_parse_switch_with_label() {
+        let spice = "Test\nC1 1 0 100n\n.switch C1 100n 220n 470n \"Bright\"\n";
+        let netlist = Netlist::parse(spice).unwrap();
+        assert_eq!(netlist.switches[0].label, Some("Bright".to_string()));
+        assert_eq!(netlist.switches[0].positions.len(), 3);
+    }
+
+    #[test]
+    fn test_parse_switch_with_multi_word_label() {
+        let spice = "Test\nC1 1 0 100n\nL1 1 0 100m\n.switch C1,L1 100n/100m 220n/176m \"HF Boost Freq\"\n";
+        let netlist = Netlist::parse(spice).unwrap();
+        assert_eq!(netlist.switches[0].label, Some("HF Boost Freq".to_string()));
+        assert_eq!(netlist.switches[0].positions.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_switch_without_label() {
+        let spice = "Test\nC1 1 0 100n\n.switch C1 100n 220n\n";
+        let netlist = Netlist::parse(spice).unwrap();
+        assert_eq!(netlist.switches[0].label, None);
     }
 
     // ======================================================================

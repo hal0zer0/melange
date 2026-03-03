@@ -81,6 +81,28 @@ pub fn process_sample(input: f64, state: &mut CircuitState) -> f64 {
         state.ind_v_prev[{{ loop.index0 }}] = v_new;
     }
 {% endfor %}{% endif %}
+{% if num_coupled_inductors > 0 %}
+    // Step 7c: Update coupled inductor companion model state
+{% for ci in coupled_inductors %}    {
+        let v1_i = {% if ci.l1_node_i > 0 %}v[{{ ci.l1_node_i - 1 }}]{% else %}0.0{% endif %};
+        let v1_j = {% if ci.l1_node_j > 0 %}v[{{ ci.l1_node_j - 1 }}]{% else %}0.0{% endif %};
+        let v1_new = v1_i - v1_j;
+        let v2_i = {% if ci.l2_node_i > 0 %}v[{{ ci.l2_node_i - 1 }}]{% else %}0.0{% endif %};
+        let v2_j = {% if ci.l2_node_j > 0 %}v[{{ ci.l2_node_j - 1 }}]{% else %}0.0{% endif %};
+        let v2_new = v2_i - v2_j;
+        let gs1 = state.ci_g_self_1[{{ loop.index0 }}];
+        let gs2 = state.ci_g_self_2[{{ loop.index0 }}];
+        let gm = state.ci_g_mutual[{{ loop.index0 }}];
+        let i1_new = state.ci_i1_prev[{{ loop.index0 }}] + gs1 * (state.ci_v1_prev[{{ loop.index0 }}] + v1_new) + gm * (state.ci_v2_prev[{{ loop.index0 }}] + v2_new);
+        let i2_new = state.ci_i2_prev[{{ loop.index0 }}] + gm * (state.ci_v1_prev[{{ loop.index0 }}] + v1_new) + gs2 * (state.ci_v2_prev[{{ loop.index0 }}] + v2_new);
+        state.ci_i1_hist[{{ loop.index0 }}] = i1_new - gs1 * v1_new - gm * v2_new;
+        state.ci_i2_hist[{{ loop.index0 }}] = i2_new - gm * v1_new - gs2 * v2_new;
+        state.ci_i1_prev[{{ loop.index0 }}] = i1_new;
+        state.ci_i2_prev[{{ loop.index0 }}] = i2_new;
+        state.ci_v1_prev[{{ loop.index0 }}] = v1_new;
+        state.ci_v2_prev[{{ loop.index0 }}] = v2_new;
+    }
+{% endfor %}{% endif %}
 
     // Step 8: Sanitize state — if NaN/inf entered, reset to prevent poisoning
     if !state.v_prev.iter().all(|x| x.is_finite()) {
@@ -90,6 +112,12 @@ pub fn process_sample(input: f64, state: &mut CircuitState) -> f64 {
 {% if num_inductors > 0 %}        state.ind_i_prev = [0.0; {{ num_inductors }}];
         state.ind_v_prev = [0.0; {{ num_inductors }}];
         state.ind_i_hist = [0.0; {{ num_inductors }}];
+{% endif %}{% if num_coupled_inductors > 0 %}        state.ci_i1_prev = [0.0; {{ num_coupled_inductors }}];
+        state.ci_i2_prev = [0.0; {{ num_coupled_inductors }}];
+        state.ci_v1_prev = [0.0; {{ num_coupled_inductors }}];
+        state.ci_v2_prev = [0.0; {{ num_coupled_inductors }}];
+        state.ci_i1_hist = [0.0; {{ num_coupled_inductors }}];
+        state.ci_i2_hist = [0.0; {{ num_coupled_inductors }}];
 {% endif %}{% for default in pot_defaults %}        state.pot_{{ loop.index0 }}_resistance = {{ default }};
 {% endfor %}        state.diag_nan_reset_count += 1;
         return 0.0;

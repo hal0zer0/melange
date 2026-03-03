@@ -15,6 +15,12 @@ fn build_rhs(input: f64, input_prev: f64, state: &CircuitState) -> [f64; N] {
 {% for ind in inductors %}{% if ind.node_i > 0 %}    rhs[{{ ind.node_i - 1 }}] -= state.ind_i_hist[{{ loop.index0 }}];
 {% endif %}{% if ind.node_j > 0 %}    rhs[{{ ind.node_j - 1 }}] += state.ind_i_hist[{{ loop.index0 }}];
 {% endif %}{% endfor %}
+{% endif %}{% if num_coupled_inductors > 0 %}    // Add coupled inductor history current contribution
+{% for ci in coupled_inductors %}{% if ci.l1_node_i > 0 %}    rhs[{{ ci.l1_node_i - 1 }}] -= state.ci_i1_hist[{{ loop.index0 }}];
+{% endif %}{% if ci.l1_node_j > 0 %}    rhs[{{ ci.l1_node_j - 1 }}] += state.ci_i1_hist[{{ loop.index0 }}];
+{% endif %}{% if ci.l2_node_i > 0 %}    rhs[{{ ci.l2_node_i - 1 }}] -= state.ci_i2_hist[{{ loop.index0 }}];
+{% endif %}{% if ci.l2_node_j > 0 %}    rhs[{{ ci.l2_node_j - 1 }}] += state.ci_i2_hist[{{ loop.index0 }}];
+{% endif %}{% endfor %}
 {% endif %}    // Add input contribution (Thevenin: (V_in + V_in_prev) * G_in)
     rhs[INPUT_NODE] += (input + input_prev) / INPUT_RESISTANCE;
 

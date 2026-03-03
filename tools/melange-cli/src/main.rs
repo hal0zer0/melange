@@ -70,9 +70,13 @@ enum Commands {
         #[arg(long, default_value = "1.0")]
         output_scale: f64,
 
-        /// Add Input Level and Output Level parameters to the plugin
-        #[arg(long)]
+        /// Add Input Level and Output Level parameters to the plugin (default: true)
+        #[arg(long, default_value = "true")]
         with_level_params: bool,
+
+        /// Generate plugin without Input/Output Level parameters
+        #[arg(long)]
+        no_level_params: bool,
 
         /// Override input resistance (ohms). Default: 1Ω, or from .input_impedance directive.
         #[arg(long)]
@@ -220,6 +224,7 @@ fn main() -> Result<()> {
             output_scale,
             format,
             with_level_params,
+            no_level_params,
             input_resistance: input_resistance_flag,
         } => {
             // Validate numeric CLI parameters
@@ -233,6 +238,9 @@ fn main() -> Result<()> {
                 anyhow::bail!("max-iter must be at least 1, got 0");
             }
 
+            // Level params are on by default; --no-level-params disables them
+            let level_params = with_level_params && !no_level_params;
+
             let circuit_source = circuits::resolve(&input)?;
             println!("Resolved circuit: {}", circuit_source.name());
             compile_circuit_source(
@@ -245,7 +253,7 @@ fn main() -> Result<()> {
                 tolerance,
                 output_scale,
                 format,
-                with_level_params,
+                level_params,
                 input_resistance_flag,
             )
         }
@@ -342,8 +350,16 @@ fn compile_circuit_source(
 
     // Step 1: Parse netlist
     println!("Step 1: Parsing SPICE netlist...");
-    let netlist = Netlist::parse(&netlist_str)
+    let mut netlist = Netlist::parse(&netlist_str)
         .with_context(|| "Failed to parse SPICE netlist")?;
+
+    // Expand subcircuit instances (X elements) before MNA
+    if !netlist.subcircuits.is_empty() {
+        let num_subcircuits = netlist.subcircuits.len();
+        netlist.expand_subcircuits()
+            .with_context(|| "Failed to expand subcircuits")?;
+        println!("  ✓ Expanded {} subcircuit definition(s)", num_subcircuits);
+    }
 
     println!("  ✓ Parsed {} elements", netlist.elements.len());
 
@@ -496,7 +512,9 @@ fn compile_circuit_source(
             let pot_params: Vec<plugin_template::PotParamInfo> = kernel.pots.iter().enumerate().map(|(idx, p)| {
                 plugin_template::PotParamInfo {
                     index: idx,
-                    name: netlist.pots.get(idx).map(|d| d.resistor_name.clone()).unwrap_or_else(|| format!("Pot {}", idx)),
+                    name: netlist.pots.get(idx).map(|d| {
+                        d.label.clone().unwrap_or_else(|| d.resistor_name.clone())
+                    }).unwrap_or_else(|| format!("Pot {}", idx)),
                     min_resistance: p.min_resistance,
                     max_resistance: p.max_resistance,
                     default_resistance: 1.0 / p.g_nominal,
@@ -507,7 +525,7 @@ fn compile_circuit_source(
             let switch_params: Vec<plugin_template::SwitchParamInfo> = netlist.switches.iter().enumerate().map(|(idx, sw)| {
                 plugin_template::SwitchParamInfo {
                     index: idx,
-                    name: format!("Switch {} ({})", idx, sw.component_names.join("+")),
+                    name: sw.label.clone().unwrap_or_else(|| format!("Switch {} ({})", idx, sw.component_names.join("+"))),
                     num_positions: sw.positions.len(),
                 }
             }).collect();
@@ -596,8 +614,16 @@ fn simulate_circuit_source(
 
     // Step 1: Parse netlist
     println!("Step 1: Parsing SPICE netlist...");
-    let netlist = Netlist::parse(&netlist_str)
+    let mut netlist = Netlist::parse(&netlist_str)
         .with_context(|| "Failed to parse SPICE netlist")?;
+
+    // Expand subcircuit instances (X elements) before MNA
+    if !netlist.subcircuits.is_empty() {
+        let num_subcircuits = netlist.subcircuits.len();
+        netlist.expand_subcircuits()
+            .with_context(|| "Failed to expand subcircuits")?;
+        println!("  Expanded {} subcircuit definition(s)", num_subcircuits);
+    }
     println!("  Parsed {} elements", netlist.elements.len());
 
     // Step 2: Build MNA
@@ -919,8 +945,14 @@ fn list_nodes_source(circuit_source: &circuits::CircuitSource) -> Result<()> {
         }
     };
 
-    let netlist = Netlist::parse(&netlist_str)
+    let mut netlist = Netlist::parse(&netlist_str)
         .with_context(|| "Failed to parse SPICE netlist")?;
+
+    // Expand subcircuit instances (X elements) before MNA
+    if !netlist.subcircuits.is_empty() {
+        netlist.expand_subcircuits()
+            .with_context(|| "Failed to expand subcircuits")?;
+    }
 
     let mna = MnaSystem::from_netlist(&netlist)
         .with_context(|| "Failed to build MNA system")?;

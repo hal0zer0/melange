@@ -25,6 +25,22 @@ struct InductorTemplateData {
     inductance: String,
 }
 
+/// Coupled inductor data passed to Tera templates.
+#[derive(Serialize)]
+struct CoupledInductorTemplateData {
+    name: String,
+    l1_node_i: usize,
+    l1_node_j: usize,
+    l2_node_i: usize,
+    l2_node_j: usize,
+    l1_inductance: String,
+    l2_inductance: String,
+    coupling: String,
+    g_self_1: String,
+    g_self_2: String,
+    g_mutual: String,
+}
+
 /// Switch component data passed to Tera templates.
 #[derive(Serialize)]
 struct SwitchCompTemplateData {
@@ -100,6 +116,26 @@ fn inductor_template_data(ir: &CircuitIR, with_g_eq: bool) -> Vec<InductorTempla
             } else {
                 String::new()
             },
+        })
+        .collect()
+}
+
+/// Build `CoupledInductorTemplateData` from IR coupled inductors.
+fn coupled_inductor_template_data(ir: &CircuitIR) -> Vec<CoupledInductorTemplateData> {
+    ir.coupled_inductors
+        .iter()
+        .map(|ci| CoupledInductorTemplateData {
+            name: ci.name.clone(),
+            l1_node_i: ci.l1_node_i,
+            l1_node_j: ci.l1_node_j,
+            l2_node_i: ci.l2_node_i,
+            l2_node_j: ci.l2_node_j,
+            l1_inductance: fmt_f64(ci.l1_inductance),
+            l2_inductance: fmt_f64(ci.l2_inductance),
+            coupling: fmt_f64(ci.coupling),
+            g_self_1: fmt_f64(ci.g_self_1),
+            g_self_2: fmt_f64(ci.g_self_2),
+            g_mutual: fmt_f64(ci.g_mutual),
         })
         .collect()
 }
@@ -333,6 +369,11 @@ impl RustEmitter {
         if num_inductors > 0 {
             ctx.insert("inductors", &inductor_template_data(ir, true));
         }
+        let num_coupled_inductors = ir.coupled_inductors.len();
+        ctx.insert("num_coupled_inductors", &num_coupled_inductors);
+        if num_coupled_inductors > 0 {
+            ctx.insert("coupled_inductors", &coupled_inductor_template_data(ir));
+        }
         ctx.insert(
             "sample_rate",
             &format!("{:.1}", ir.solver_config.sample_rate),
@@ -443,6 +484,11 @@ impl RustEmitter {
 
         if num_inductors > 0 {
             ctx.insert("inductors", &inductor_template_data(ir, true));
+        }
+        let num_coupled_inductors = ir.coupled_inductors.len();
+        ctx.insert("num_coupled_inductors", &num_coupled_inductors);
+        if num_coupled_inductors > 0 {
+            ctx.insert("coupled_inductors", &coupled_inductor_template_data(ir));
         }
 
         let pot_defaults: Vec<String> = ir.pots.iter().map(|p| fmt_f64(1.0 / p.g_nominal)).collect();
@@ -728,6 +774,49 @@ impl RustEmitter {
             ));
         }
 
+        // Coupled inductor companion stamps
+        let num_coupled = ir.coupled_inductors.len();
+        if num_coupled > 0 {
+            if num_inductors == 0 {
+                code.push_str("        let t = 1.0 / internal_rate;\n");
+            }
+            code.push_str("\n        // Add coupled inductor companion model conductances\n");
+            for (ci_idx, ci) in ir.coupled_inductors.iter().enumerate() {
+                code.push_str(&format!(
+                    "        {{\n\
+                     \x20           let m_val = CI_{ci}_COUPLING * (CI_{ci}_L1_INDUCTANCE * CI_{ci}_L2_INDUCTANCE).sqrt();\n\
+                     \x20           let det = CI_{ci}_L1_INDUCTANCE * CI_{ci}_L2_INDUCTANCE - m_val * m_val;\n\
+                     \x20           let half_t = t / 2.0;\n\
+                     \x20           let gs1 = half_t * CI_{ci}_L2_INDUCTANCE / det;\n\
+                     \x20           let gs2 = half_t * CI_{ci}_L1_INDUCTANCE / det;\n\
+                     \x20           let gm = -half_t * m_val / det;\n\
+                     \x20           self.ci_g_self_1[{ci}] = gs1;\n\
+                     \x20           self.ci_g_self_2[{ci}] = gs2;\n\
+                     \x20           self.ci_g_mutual[{ci}] = gm;\n\
+                     \x20           stamp_conductance(&mut a, CI_{ci}_L1_NODE_I, CI_{ci}_L1_NODE_J, gs1);\n\
+                     \x20           stamp_conductance(&mut a_neg, CI_{ci}_L1_NODE_I, CI_{ci}_L1_NODE_J, -gs1);\n\
+                     \x20           stamp_conductance(&mut a, CI_{ci}_L2_NODE_I, CI_{ci}_L2_NODE_J, gs2);\n\
+                     \x20           stamp_conductance(&mut a_neg, CI_{ci}_L2_NODE_I, CI_{ci}_L2_NODE_J, -gs2);\n\
+                     \x20           stamp_mutual(&mut a, CI_{ci}_L1_NODE_I, CI_{ci}_L1_NODE_J, CI_{ci}_L2_NODE_I, CI_{ci}_L2_NODE_J, gm);\n\
+                     \x20           stamp_mutual(&mut a, CI_{ci}_L2_NODE_I, CI_{ci}_L2_NODE_J, CI_{ci}_L1_NODE_I, CI_{ci}_L1_NODE_J, gm);\n\
+                     \x20           stamp_mutual(&mut a_neg, CI_{ci}_L1_NODE_I, CI_{ci}_L1_NODE_J, CI_{ci}_L2_NODE_I, CI_{ci}_L2_NODE_J, -gm);\n\
+                     \x20           stamp_mutual(&mut a_neg, CI_{ci}_L2_NODE_I, CI_{ci}_L2_NODE_J, CI_{ci}_L1_NODE_I, CI_{ci}_L1_NODE_J, -gm);\n\
+                     \x20       }}\n",
+                    ci = ci_idx,
+                ));
+                let _ = ci; // suppress unused warning
+            }
+            code.push_str(&format!(
+                "        self.ci_i1_prev = [0.0; {n}];\n\
+                 \x20       self.ci_i2_prev = [0.0; {n}];\n\
+                 \x20       self.ci_v1_prev = [0.0; {n}];\n\
+                 \x20       self.ci_v2_prev = [0.0; {n}];\n\
+                 \x20       self.ci_i1_hist = [0.0; {n}];\n\
+                 \x20       self.ci_i2_hist = [0.0; {n}];\n",
+                n = num_coupled,
+            ));
+        }
+
         // Invert A → S, compute S_NI, K
         code.push_str(&format!(
             "\n\
@@ -914,6 +1003,11 @@ impl RustEmitter {
         if num_inductors > 0 {
             ctx.insert("inductors", &inductor_template_data(ir, false));
         }
+        let num_coupled_inductors = ir.coupled_inductors.len();
+        ctx.insert("num_coupled_inductors", &num_coupled_inductors);
+        if num_coupled_inductors > 0 {
+            ctx.insert("coupled_inductors", &coupled_inductor_template_data(ir));
+        }
 
         // A_neg * v_prev lines (using pre-analyzed sparsity)
         let assign_op = if ir.has_dc_sources { "+=" } else { "=" };
@@ -1021,6 +1115,11 @@ impl RustEmitter {
         ctx.insert("num_inductors", &num_inductors);
         if num_inductors > 0 {
             ctx.insert("inductors", &inductor_template_data(ir, false));
+        }
+        let num_coupled_inductors = ir.coupled_inductors.len();
+        ctx.insert("num_coupled_inductors", &num_coupled_inductors);
+        if num_coupled_inductors > 0 {
+            ctx.insert("coupled_inductors", &coupled_inductor_template_data(ir));
         }
 
         let os_factor = ir.solver_config.oversampling_factor;

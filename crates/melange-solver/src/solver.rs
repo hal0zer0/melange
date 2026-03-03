@@ -37,6 +37,18 @@ fn reset_inductors(inductors: &mut [crate::dk::InductorInfo]) {
     }
 }
 
+/// Reset all coupled inductor companion model state to zero.
+fn reset_coupled_inductors(coupled: &mut [crate::dk::CoupledInductorState]) {
+    for ci in coupled {
+        ci.i1_hist = 0.0;
+        ci.i2_hist = 0.0;
+        ci.i1_prev = 0.0;
+        ci.i2_prev = 0.0;
+        ci.v1_prev = 0.0;
+        ci.v2_prev = 0.0;
+    }
+}
+
 /// Enum-based device entry for zero-cost dispatch in the audio hot path.
 ///
 /// This eliminates vtable overhead by using enum dispatch.
@@ -563,10 +575,12 @@ impl CircuitSolver {
             self.i_nl_prev.fill(0.0);
             self.input_prev = 0.0;
             reset_inductors(&mut self.kernel.inductors);
+            reset_coupled_inductors(&mut self.kernel.coupled_inductors);
             self.diag_nan_reset_count += 1;
         }
 
         self.kernel.update_inductors(&self.v_prev);
+        self.kernel.update_coupled_inductors(&self.v_prev);
 
         let n = self.kernel.n;
 
@@ -626,6 +640,14 @@ impl CircuitSolver {
             if ind.node_j > 0 {
                 self.rhs[ind.node_j - 1] += i_hist;
             }
+        }
+
+        // Add coupled inductor history contribution
+        for ci in &self.kernel.coupled_inductors {
+            if ci.l1_node_i > 0 { self.rhs[ci.l1_node_i - 1] -= ci.i1_hist; }
+            if ci.l1_node_j > 0 { self.rhs[ci.l1_node_j - 1] += ci.i1_hist; }
+            if ci.l2_node_i > 0 { self.rhs[ci.l2_node_i - 1] -= ci.i2_hist; }
+            if ci.l2_node_j > 0 { self.rhs[ci.l2_node_j - 1] += ci.i2_hist; }
         }
 
         // Add input source (Thevenin: V_in through R_in)
@@ -879,6 +901,7 @@ impl CircuitSolver {
         self.i_nl_prev.fill(0.0);
         self.input_prev = 0.0;
         reset_inductors(&mut self.kernel.inductors);
+        reset_coupled_inductors(&mut self.kernel.coupled_inductors);
         self.dc_block_x_prev = 0.0;
         self.dc_block_y_prev = 0.0;
         self.diag_peak_output = 0.0;
@@ -975,6 +998,14 @@ impl LinearSolver {
             }
         }
 
+        // Add coupled inductor history contribution
+        for ci in &self.kernel.coupled_inductors {
+            if ci.l1_node_i > 0 { self.rhs[ci.l1_node_i - 1] -= ci.i1_hist; }
+            if ci.l1_node_j > 0 { self.rhs[ci.l1_node_j - 1] += ci.i1_hist; }
+            if ci.l2_node_i > 0 { self.rhs[ci.l2_node_i - 1] -= ci.i2_hist; }
+            if ci.l2_node_j > 0 { self.rhs[ci.l2_node_j - 1] += ci.i2_hist; }
+        }
+
         // Add input source (Thevenin: V_in through R_in, trapezoidal rule)
         if self.input_node < n {
             self.rhs[self.input_node] += (input + self.input_prev) * self.input_conductance;
@@ -998,10 +1029,12 @@ impl LinearSolver {
             self.v_prev.fill(0.0);
             self.input_prev = 0.0;
             reset_inductors(&mut self.kernel.inductors);
+            reset_coupled_inductors(&mut self.kernel.coupled_inductors);
             self.diag_nan_reset_count += 1;
         }
 
         self.kernel.update_inductors(&self.v_prev);
+        self.kernel.update_coupled_inductors(&self.v_prev);
 
         // DC blocking filter (5Hz HPF)
         let raw_out = if self.output_node < n { self.v_prev[self.output_node] } else { 0.0 };
@@ -1023,6 +1056,7 @@ impl LinearSolver {
         self.v_prev.fill(0.0);
         self.input_prev = 0.0;
         reset_inductors(&mut self.kernel.inductors);
+        reset_coupled_inductors(&mut self.kernel.coupled_inductors);
         self.dc_block_x_prev = 0.0;
         self.dc_block_y_prev = 0.0;
         self.diag_peak_output = 0.0;

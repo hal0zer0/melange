@@ -35,6 +35,7 @@ pub struct CircuitIR {
     #[serde(default)]
     pub dc_op_converged: bool,
     pub inductors: Vec<InductorIR>,
+    pub coupled_inductors: Vec<CoupledInductorIR>,
     pub pots: Vec<PotentiometerIR>,
     pub switches: Vec<SwitchIR>,
     /// Pre-analyzed sparsity patterns for compile-time matrices.
@@ -179,6 +180,27 @@ pub struct InductorIR {
     /// Raw inductance value in henries (for sample rate recomputation)
     #[serde(default)]
     pub inductance: f64,
+}
+
+/// Coupled inductor pair parameters for code generation (transformer).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CoupledInductorIR {
+    pub name: String,
+    pub l1_name: String,
+    pub l2_name: String,
+    pub l1_node_i: usize,
+    pub l1_node_j: usize,
+    pub l2_node_i: usize,
+    pub l2_node_j: usize,
+    pub l1_inductance: f64,
+    pub l2_inductance: f64,
+    pub coupling: f64,
+    /// Self-conductance for L1: (T/2) * L2 / det
+    pub g_self_1: f64,
+    /// Self-conductance for L2: (T/2) * L1 / det
+    pub g_self_2: f64,
+    /// Mutual conductance: -(T/2) * M / det
+    pub g_mutual: f64,
 }
 
 /// Resolved parameters for a single nonlinear device (legacy, kept for JSON compat).
@@ -369,6 +391,15 @@ fn analyze_matrix_sparsity(data: &[f64], rows: usize, cols: usize) -> MatrixSpar
         nnz,
         nz_by_row,
     }
+}
+
+/// Stamp mutual conductance between two 2-terminal elements into a flat row-major matrix.
+/// Node indices are 1-indexed; 0 means ground.
+fn stamp_flat_mutual(mat: &mut [f64], n: usize, a: usize, b: usize, c: usize, d: usize, g: f64) {
+    if a > 0 && c > 0 { mat[(a - 1) * n + (c - 1)] += g; }
+    if b > 0 && d > 0 { mat[(b - 1) * n + (d - 1)] += g; }
+    if a > 0 && d > 0 { mat[(a - 1) * n + (d - 1)] -= g; }
+    if b > 0 && c > 0 { mat[(b - 1) * n + (c - 1)] -= g; }
 }
 
 /// Stamp a conductance between two nodes into a flat row-major matrix.
@@ -575,6 +606,24 @@ impl CircuitIR {
                 stamp_flat_conductance(&mut a_neg_flat, n, ind.node_i, ind.node_j, -g_eq);
             }
 
+            // Stamp coupled inductor companion conductances at internal rate
+            for ci in &kernel.coupled_inductors {
+                let m_val = ci.coupling * (ci.l1_inductance * ci.l2_inductance).sqrt();
+                let det = ci.l1_inductance * ci.l2_inductance - m_val * m_val;
+                let half_t = t / 2.0;
+                let gs1 = half_t * ci.l2_inductance / det;
+                let gs2 = half_t * ci.l1_inductance / det;
+                let gm = -half_t * m_val / det;
+                stamp_flat_conductance(&mut a_flat, n, ci.l1_node_i, ci.l1_node_j, gs1);
+                stamp_flat_conductance(&mut a_neg_flat, n, ci.l1_node_i, ci.l1_node_j, -gs1);
+                stamp_flat_conductance(&mut a_flat, n, ci.l2_node_i, ci.l2_node_j, gs2);
+                stamp_flat_conductance(&mut a_neg_flat, n, ci.l2_node_i, ci.l2_node_j, -gs2);
+                stamp_flat_mutual(&mut a_flat, n, ci.l1_node_i, ci.l1_node_j, ci.l2_node_i, ci.l2_node_j, gm);
+                stamp_flat_mutual(&mut a_flat, n, ci.l2_node_i, ci.l2_node_j, ci.l1_node_i, ci.l1_node_j, gm);
+                stamp_flat_mutual(&mut a_neg_flat, n, ci.l1_node_i, ci.l1_node_j, ci.l2_node_i, ci.l2_node_j, -gm);
+                stamp_flat_mutual(&mut a_neg_flat, n, ci.l2_node_i, ci.l2_node_j, ci.l1_node_i, ci.l1_node_j, -gm);
+            }
+
             // Invert A to get S
             let s = invert_flat_matrix(&a_flat, n)?;
 
@@ -619,6 +668,34 @@ impl CircuitIR {
                 node_j: ind.node_j,
                 g_eq,
                 inductance: ind.inductance,
+            }
+        }).collect();
+
+        let coupled_inductors: Vec<CoupledInductorIR> = kernel.coupled_inductors.iter().map(|ci| {
+            // Recompute conductances at internal rate when oversampling
+            let (g_self_1, g_self_2, g_mutual) = if os_factor > 1 {
+                let t = 1.0 / internal_rate;
+                let m_val = ci.coupling * (ci.l1_inductance * ci.l2_inductance).sqrt();
+                let det = ci.l1_inductance * ci.l2_inductance - m_val * m_val;
+                let half_t = t / 2.0;
+                (half_t * ci.l2_inductance / det, half_t * ci.l1_inductance / det, -half_t * m_val / det)
+            } else {
+                (ci.g_self_1, ci.g_self_2, ci.g_mutual)
+            };
+            CoupledInductorIR {
+                name: ci.name.clone(),
+                l1_name: ci.l1_name.clone(),
+                l2_name: ci.l2_name.clone(),
+                l1_node_i: ci.l1_node_i,
+                l1_node_j: ci.l1_node_j,
+                l2_node_i: ci.l2_node_i,
+                l2_node_j: ci.l2_node_j,
+                l1_inductance: ci.l1_inductance,
+                l2_inductance: ci.l2_inductance,
+                coupling: ci.coupling,
+                g_self_1,
+                g_self_2,
+                g_mutual,
             }
         }).collect();
 
@@ -706,6 +783,7 @@ impl CircuitIR {
             dc_nl_currents,
             dc_op_converged,
             inductors,
+            coupled_inductors,
             pots,
             switches,
             sparsity,

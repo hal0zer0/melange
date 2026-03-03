@@ -52,8 +52,10 @@ pub struct MnaSystem {
     pub voltage_sources: Vec<VoltageSourceInfo>,
     /// Current source contributions to RHS
     pub current_sources: Vec<CurrentSourceInfo>,
-    /// Inductor elements for companion model
+    /// Inductor elements for companion model (uncoupled only)
     pub inductors: Vec<InductorElement>,
+    /// Coupled inductor pairs for transformer companion model
+    pub coupled_inductors: Vec<CoupledInductorInfo>,
     /// Potentiometer info (resolved from .pot directives)
     pub pots: Vec<PotInfo>,
     /// Switch info (resolved from .switch directives)
@@ -69,6 +71,25 @@ pub struct InductorElement {
     pub node_i: usize,
     pub node_j: usize,
     pub value: f64,
+}
+
+/// Coupled inductor pair info for transformer companion model.
+///
+/// Two inductors L1 and L2 with coupling coefficient k have mutual
+/// inductance M = k * sqrt(L1 * L2). The companion model stamps
+/// both self-conductances and cross-coupling conductances.
+#[derive(Debug, Clone)]
+pub struct CoupledInductorInfo {
+    pub name: String,
+    pub l1_name: String,
+    pub l2_name: String,
+    pub l1_node_i: usize,
+    pub l1_node_j: usize,
+    pub l2_node_i: usize,
+    pub l2_node_j: usize,
+    pub l1_value: f64,
+    pub l2_value: f64,
+    pub coupling: f64,
 }
 
 /// Information about a nonlinear device in the MNA system.
@@ -195,6 +216,7 @@ impl MnaSystem {
             voltage_sources: Vec::with_capacity(num_vs),
             current_sources: Vec::new(),
             inductors: Vec::new(),
+            coupled_inductors: Vec::new(),
             pots: Vec::new(),
             switches: Vec::new(),
             opamps: Vec::new(),
@@ -359,6 +381,28 @@ impl MnaSystem {
             stamp_conductance_to_ground(&mut mat, ind.node_i, ind.node_j, g);
         }
 
+        // Coupled inductor companion model: self + mutual conductances.
+        // For two coupled inductors L1, L2 with coupling k:
+        //   M = k * sqrt(L1 * L2)
+        //   det = L1*L2 - M^2
+        //   g_self_1 = (T/2) * L2 / det,  g_self_2 = (T/2) * L1 / det
+        //   g_mutual = -(T/2) * M / det
+        for ci in &self.coupled_inductors {
+            let m = ci.coupling * (ci.l1_value * ci.l2_value).sqrt();
+            let det = ci.l1_value * ci.l2_value - m * m;
+            let gs1 = g_sign * g_eq_factor * ci.l2_value / det;
+            let gs2 = g_sign * g_eq_factor * ci.l1_value / det;
+            let gm = g_sign * (-g_eq_factor) * m / det;
+
+            // Self-conductances (stamped like regular inductors)
+            stamp_conductance_to_ground(&mut mat, ci.l1_node_i, ci.l1_node_j, gs1);
+            stamp_conductance_to_ground(&mut mat, ci.l2_node_i, ci.l2_node_j, gs2);
+
+            // Mutual conductance cross-coupling between L1 and L2 (symmetric)
+            stamp_mutual_conductance(&mut mat, ci.l1_node_i, ci.l1_node_j, ci.l2_node_i, ci.l2_node_j, gm);
+            stamp_mutual_conductance(&mut mat, ci.l2_node_i, ci.l2_node_j, ci.l1_node_i, ci.l1_node_j, gm);
+        }
+
         mat
     }
 
@@ -445,6 +489,24 @@ fn stamp_conductance_to_ground(mat: &mut [Vec<f64>], node_i: usize, node_j: usiz
         }
         (false, false) => {}
     }
+}
+
+/// Stamp mutual conductance between two 2-terminal elements.
+///
+/// For a mutual conductance `g` between element 1 (nodes a, b) and
+/// element 2 (nodes c, d), the stamp adds cross-coupling:
+///   mat[a][c] += g, mat[b][d] += g, mat[a][d] -= g, mat[b][c] -= g
+///
+/// Node indices use MNA convention: 0 = ground (excluded from matrix).
+fn stamp_mutual_conductance(mat: &mut [Vec<f64>], a: usize, b: usize, c: usize, d: usize, g: f64) {
+    // a-c coupling
+    if a > 0 && c > 0 { mat[a - 1][c - 1] += g; }
+    // b-d coupling
+    if b > 0 && d > 0 { mat[b - 1][d - 1] += g; }
+    // a-d coupling (negative)
+    if a > 0 && d > 0 { mat[a - 1][d - 1] -= g; }
+    // b-c coupling (negative)
+    if b > 0 && c > 0 { mat[b - 1][c - 1] -= g; }
 }
 
 /// Inject a current into the RHS vector at a node, handling ground (index 0).
@@ -583,7 +645,9 @@ impl MnaBuilder {
         for sw_dir in &netlist.switches {
             let mut components = Vec::new();
             for comp_name in &sw_dir.component_names {
-                let first_char = comp_name.chars().next().unwrap_or(' ').to_ascii_uppercase();
+                // For expanded subcircuit names like "X1.C1", use base name after last dot
+                let base = comp_name.rsplit('.').next().unwrap_or(comp_name);
+                let first_char = base.chars().next().unwrap_or(' ').to_ascii_uppercase();
                 let (node_p, node_q, nominal_value) = match first_char {
                     'R' => {
                         let elem = netlist.elements.iter().find(|e| {
@@ -640,6 +704,50 @@ impl MnaBuilder {
                 positions: sw_dir.positions.clone(),
             });
         }
+
+        // Resolve coupling (K) directives: pair up inductors, remove from uncoupled list
+        let mut coupled_inductor_names = std::collections::HashSet::new();
+        for coupling in &netlist.couplings {
+            let l1 = netlist.elements.iter().find(|e| {
+                matches!(e, Element::Inductor { name, .. } if name.eq_ignore_ascii_case(&coupling.inductor1_name))
+            });
+            let l2 = netlist.elements.iter().find(|e| {
+                matches!(e, Element::Inductor { name, .. } if name.eq_ignore_ascii_case(&coupling.inductor2_name))
+            });
+            if let (
+                Some(Element::Inductor { name: n1, n_plus: np1, n_minus: nm1, value: v1, .. }),
+                Some(Element::Inductor { name: n2, n_plus: np2, n_minus: nm2, value: v2, .. }),
+            ) = (l1, l2) {
+                // Reject coupled inductors in .switch directives
+                for sw in &netlist.switches {
+                    for comp_name in &sw.component_names {
+                        if comp_name.eq_ignore_ascii_case(n1) || comp_name.eq_ignore_ascii_case(n2) {
+                            return Err(MnaError::TopologyError(format!(
+                                "Coupled inductor '{}' cannot also be in a .switch directive",
+                                comp_name
+                            )));
+                        }
+                    }
+                }
+                mna.coupled_inductors.push(CoupledInductorInfo {
+                    name: coupling.name.clone(),
+                    l1_name: n1.clone(),
+                    l2_name: n2.clone(),
+                    l1_node_i: self.node_map[np1],
+                    l1_node_j: self.node_map[nm1],
+                    l2_node_i: self.node_map[np2],
+                    l2_node_j: self.node_map[nm2],
+                    l1_value: *v1,
+                    l2_value: *v2,
+                    coupling: coupling.coupling,
+                });
+                coupled_inductor_names.insert(n1.to_ascii_lowercase());
+                coupled_inductor_names.insert(n2.to_ascii_lowercase());
+            }
+        }
+
+        // Remove coupled inductors from the uncoupled inductors list
+        self.inductors.retain(|ind| !coupled_inductor_names.contains(&ind.name.to_ascii_lowercase()));
 
         mna.node_map = self.node_map;
         mna.nonlinear_devices = self.nonlinear_devices;
