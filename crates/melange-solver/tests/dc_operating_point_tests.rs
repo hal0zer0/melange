@@ -41,7 +41,7 @@ fn default_config() -> CodegenConfig {
         circuit_name: "test_circuit".to_string(),
         sample_rate: 44100.0,
         input_node: 0,
-        output_node: 1,
+        output_nodes: vec![1],
         input_resistance: 1.0,
         ..CodegenConfig::default()
     }
@@ -146,7 +146,7 @@ fn test_dc_op_voltage_divider() {
         circuit_name: "voltage_divider".to_string(),
         sample_rate: 44100.0,
         input_node: 0, // not used for DC OP, but needed
-        output_node: 1,
+        output_nodes: vec![1],
         input_resistance: 1e6, // very high so it doesn't affect DC OP
         ..CodegenConfig::default()
     };
@@ -193,7 +193,7 @@ fn test_dc_op_rc_capacitor_open() {
         circuit_name: "rc_dcop".to_string(),
         sample_rate: 44100.0,
         input_node: 0,
-        output_node: 1,
+        output_nodes: vec![1],
         input_resistance: 1.0,
         ..CodegenConfig::default()
     };
@@ -230,7 +230,7 @@ C1 out 0 100n
         circuit_name: "rc_vcc".to_string(),
         sample_rate: 44100.0,
         input_node: 0,
-        output_node: 1,
+        output_nodes: vec![1],
         input_resistance: 1e6,
         ..CodegenConfig::default()
     };
@@ -276,7 +276,7 @@ fn test_dc_op_vcc_bias_network() {
         circuit_name: "vcc_bias".to_string(),
         sample_rate: 44100.0,
         input_node: 0,
-        output_node: 1,
+        output_nodes: vec![1],
         input_resistance: 1e6,
         ..CodegenConfig::default()
     };
@@ -316,7 +316,7 @@ fn test_dc_op_dual_supply() {
         circuit_name: "dual_supply".to_string(),
         sample_rate: 44100.0,
         input_node: 0,
-        output_node: 1,
+        output_nodes: vec![1],
         input_resistance: 1e6,
         ..CodegenConfig::default()
     };
@@ -363,7 +363,7 @@ fn test_dc_op_initializes_v_prev_in_codegen() {
         circuit_name: "dcop_init".to_string(),
         sample_rate: 44100.0,
         input_node: 0,
-        output_node: 1,
+        output_nodes: vec![1],
         input_resistance: 1e6,
         ..CodegenConfig::default()
     };
@@ -408,7 +408,7 @@ fn test_dc_op_codegen_compiles_with_vcc() {
         circuit_name: "dcop_compile".to_string(),
         sample_rate: 44100.0,
         input_node: 0,
-        output_node: 1,
+        output_nodes: vec![1],
         input_resistance: 1e6,
         ..CodegenConfig::default()
     };
@@ -427,7 +427,7 @@ fn test_dc_op_values_embedded_correctly() {
         circuit_name: "dcop_values".to_string(),
         sample_rate: 44100.0,
         input_node: 0,
-        output_node: 1,
+        output_nodes: vec![1],
         input_resistance: 1e6,
         ..CodegenConfig::default()
     };
@@ -464,7 +464,7 @@ fn test_no_dc_op_without_sources() {
         circuit_name: "no_sources".to_string(),
         sample_rate: 44100.0,
         input_node: 0,
-        output_node: 1,
+        output_nodes: vec![1],
         input_resistance: 1.0,
         ..CodegenConfig::default()
     };
@@ -513,7 +513,7 @@ C1 out 0 100n
         circuit_name: "dcop_low_r".to_string(),
         sample_rate: 44100.0,
         input_node: out_idx,
-        output_node: out_idx,
+        output_nodes: vec![out_idx],
         input_resistance: 100.0, // 100 ohm => G_in = 0.01 S (huge load vs R1's 0.0001 S)
         ..CodegenConfig::default()
     };
@@ -522,7 +522,7 @@ C1 out 0 100n
         circuit_name: "dcop_high_r".to_string(),
         sample_rate: 44100.0,
         input_node: out_idx,
-        output_node: out_idx,
+        output_nodes: vec![out_idx],
         input_resistance: 1e6, // 1M ohm => G_in = 1e-6 S (negligible)
         ..CodegenConfig::default()
     };
@@ -601,7 +601,7 @@ fn test_dc_op_all_finite() {
         circuit_name: "finite_test".to_string(),
         sample_rate: 44100.0,
         input_node: 0,
-        output_node: 1,
+        output_nodes: vec![1],
         input_resistance: 1e6,
         ..CodegenConfig::default()
     };

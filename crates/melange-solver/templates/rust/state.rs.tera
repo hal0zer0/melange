@@ -30,10 +30,10 @@ pub struct CircuitState {
     /// Iteration count from last solve (for diagnostics)
     pub last_nr_iterations: u32,
 
-    /// DC blocking filter: previous input sample
-    pub dc_block_x_prev: f64,
-    /// DC blocking filter: previous output sample
-    pub dc_block_y_prev: f64,
+    /// DC blocking filter: previous input samples (one per output)
+    pub dc_block_x_prev: [f64; NUM_OUTPUTS],
+    /// DC blocking filter: previous output samples (one per output)
+    pub dc_block_y_prev: [f64; NUM_OUTPUTS],
     /// DC blocking filter coefficient (recomputed on sample rate change)
     pub dc_block_r: f64,
     /// Diagnostic: peak absolute output (pre-clamp)
@@ -91,15 +91,15 @@ pub struct CircuitState {
     pub pot_{{ loop.index0 }}_resistance: f64,
 {% endfor %}
 {% if oversampling_factor > 1 %}
-    /// Oversampler upsampling half-band filter state
+    /// Oversampler upsampling half-band filter state (single input)
     pub os_up_state: [f64; {{ os_state_size }}],
-    /// Oversampler downsampling half-band filter state
-    pub os_dn_state: [f64; {{ os_state_size }}],
+    /// Oversampler downsampling half-band filter state (per output)
+    pub os_dn_state: [[f64; {{ os_state_size }}]; NUM_OUTPUTS],
 {% endif %}{% if oversampling_4x %}
-    /// 4x oversampler outer upsampling filter state
+    /// 4x oversampler outer upsampling filter state (single input)
     pub os_up_state_outer: [f64; {{ os_state_size_outer }}],
-    /// 4x oversampler outer downsampling filter state
-    pub os_dn_state_outer: [f64; {{ os_state_size_outer }}],
+    /// 4x oversampler outer downsampling filter state (per output)
+    pub os_dn_state_outer: [[f64; {{ os_state_size_outer }}]; NUM_OUTPUTS],
 {% endif %}
 {% if num_switches > 0 %}
 {% for idx in switch_indices %}
@@ -136,8 +136,8 @@ impl Default for CircuitState {
 {% endif %}            dc_operating_point: [0.0; N],
 {% endif %}            input_prev: 0.0,
             last_nr_iterations: 0,
-            dc_block_x_prev: 0.0,
-            dc_block_y_prev: 0.0,
+            dc_block_x_prev: [0.0; NUM_OUTPUTS],
+            dc_block_y_prev: [0.0; NUM_OUTPUTS],
             dc_block_r: DC_BLOCK_R,
             diag_peak_output: 0.0,
             diag_clamp_count: 0,
@@ -170,10 +170,10 @@ impl Default for CircuitState {
 {% endfor %}
 {% if oversampling_factor > 1 %}
             os_up_state: [0.0; {{ os_state_size }}],
-            os_dn_state: [0.0; {{ os_state_size }}],
+            os_dn_state: [[0.0; {{ os_state_size }}]; NUM_OUTPUTS],
 {% endif %}{% if oversampling_4x %}
             os_up_state_outer: [0.0; {{ os_state_size_outer }}],
-            os_dn_state_outer: [0.0; {{ os_state_size_outer }}],
+            os_dn_state_outer: [[0.0; {{ os_state_size_outer }}]; NUM_OUTPUTS],
 {% endif %}
 {% if num_switches > 0 %}
 {% for idx in switch_indices %}
@@ -201,8 +201,8 @@ impl CircuitState {
 {% else %}        self.i_nl_prev = [0.0; M];
 {% endif %}        self.input_prev = 0.0;
         self.last_nr_iterations = 0;
-        self.dc_block_x_prev = 0.0;
-        self.dc_block_y_prev = 0.0;
+        self.dc_block_x_prev = [0.0; NUM_OUTPUTS];
+        self.dc_block_y_prev = [0.0; NUM_OUTPUTS];
         self.diag_peak_output = 0.0;
         self.diag_clamp_count = 0;
         self.diag_nr_max_iter_count = 0;
@@ -231,10 +231,10 @@ impl CircuitState {
 {% endif %}
 {% if oversampling_factor > 1 %}
         self.os_up_state = [0.0; {{ os_state_size }}];
-        self.os_dn_state = [0.0; {{ os_state_size }}];
+        self.os_dn_state = [[0.0; {{ os_state_size }}]; NUM_OUTPUTS];
 {% endif %}{% if oversampling_4x %}
         self.os_up_state_outer = [0.0; {{ os_state_size_outer }}];
-        self.os_dn_state_outer = [0.0; {{ os_state_size_outer }}];
+        self.os_dn_state_outer = [[0.0; {{ os_state_size_outer }}]; NUM_OUTPUTS];
 {% endif %}
     }
 
@@ -281,14 +281,14 @@ impl CircuitState {
 {% endfor %}
 {% endif %}
                 self.dc_block_r = DC_BLOCK_R;
-                self.dc_block_x_prev = 0.0;
-                self.dc_block_y_prev = 0.0;
+                self.dc_block_x_prev = [0.0; NUM_OUTPUTS];
+                self.dc_block_y_prev = [0.0; NUM_OUTPUTS];
 {% if oversampling_factor > 1 %}
                 self.os_up_state = [0.0; {{ os_state_size }}];
-                self.os_dn_state = [0.0; {{ os_state_size }}];
+                self.os_dn_state = [[0.0; {{ os_state_size }}]; NUM_OUTPUTS];
 {% endif %}{% if oversampling_4x %}
                 self.os_up_state_outer = [0.0; {{ os_state_size_outer }}];
-                self.os_dn_state_outer = [0.0; {{ os_state_size_outer }}];
+                self.os_dn_state_outer = [[0.0; {{ os_state_size_outer }}]; NUM_OUTPUTS];
 {% endif %}
 {% if num_inductors > 0 %}
                 self.ind_i_prev = [0.0; {{ num_inductors }}];
@@ -335,8 +335,8 @@ impl CircuitState {
 {% endfor %}
 {% endif %}
             self.dc_block_r = DC_BLOCK_R;
-            self.dc_block_x_prev = 0.0;
-            self.dc_block_y_prev = 0.0;
+            self.dc_block_x_prev = [0.0; NUM_OUTPUTS];
+            self.dc_block_y_prev = [0.0; NUM_OUTPUTS];
             return;
         }
 
@@ -481,10 +481,10 @@ impl CircuitState {
 {% if oversampling_factor > 1 %}
         // Reset oversampler filter state (old state is incompatible with new rate)
         self.os_up_state = [0.0; {{ os_state_size }}];
-        self.os_dn_state = [0.0; {{ os_state_size }}];
+        self.os_dn_state = [[0.0; {{ os_state_size }}]; NUM_OUTPUTS];
 {% endif %}{% if oversampling_4x %}
         self.os_up_state_outer = [0.0; {{ os_state_size_outer }}];
-        self.os_dn_state_outer = [0.0; {{ os_state_size_outer }}];
+        self.os_dn_state_outer = [[0.0; {{ os_state_size_outer }}]; NUM_OUTPUTS];
 {% endif %}
 
         // Recompute DC blocking coefficient for new sample rate
@@ -494,8 +494,8 @@ impl CircuitState {
         let internal_rate = sample_rate;
         {% endif %}
         self.dc_block_r = 1.0 - 2.0 * std::f64::consts::PI * 5.0 / internal_rate;
-        self.dc_block_x_prev = 0.0;
-        self.dc_block_y_prev = 0.0;
+        self.dc_block_x_prev = [0.0; NUM_OUTPUTS];
+        self.dc_block_y_prev = [0.0; NUM_OUTPUTS];
 {% endif %}
     }
 {% if num_switches > 0 %}

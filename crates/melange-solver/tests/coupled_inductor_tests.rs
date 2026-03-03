@@ -47,7 +47,7 @@ fn default_config() -> CodegenConfig {
         circuit_name: "test_circuit".to_string(),
         sample_rate: 44100.0,
         input_node: 0,
-        output_node: 1,
+        output_nodes: vec![1],
         input_resistance: 1.0,
         ..CodegenConfig::default()
     }
@@ -789,7 +789,7 @@ fn test_codegen_nan_sanitization() {
 
     let after_sanitize = &code[sanitize_idx.unwrap()..];
     let return_idx = after_sanitize
-        .find("return 0.0;")
+        .find("return [0.0; NUM_OUTPUTS];")
         .expect("Missing return in sanitization");
     let sanitize_block = &after_sanitize[..return_idx];
 

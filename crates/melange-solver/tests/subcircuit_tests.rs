@@ -416,7 +416,7 @@ X1 in out lowpass
     let config = CodegenConfig {
         circuit_name: "rc_lowpass_subckt".to_string(),
         input_node: input_node_idx,
-        output_node: output_node_idx,
+        output_nodes: vec![output_node_idx],
         sample_rate: 48000.0,
         input_resistance: 1.0,
         ..CodegenConfig::default()

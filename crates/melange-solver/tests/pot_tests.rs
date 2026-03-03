@@ -32,7 +32,7 @@ fn default_config() -> CodegenConfig {
         circuit_name: "test_circuit".to_string(),
         sample_rate: 44100.0,
         input_node: 0,
-        output_node: 1,
+        output_nodes: vec![1],
         input_resistance: 1000.0,
         ..CodegenConfig::default()
     }
@@ -793,7 +793,7 @@ fn test_codegen_sanitization_resets_pot() {
     let sanitize_idx = code.find("if !state.v_prev.iter().all(|x| x.is_finite())")
         .expect("Missing sanitization block");
     let after_sanitize = &code[sanitize_idx..];
-    let return_idx = after_sanitize.find("return 0.0;").expect("Missing return in sanitization");
+    let return_idx = after_sanitize.find("return [0.0; NUM_OUTPUTS];").expect("Missing return in sanitization");
     let sanitize_block = &after_sanitize[..return_idx];
     assert!(
         sanitize_block.contains("pot_0_resistance"),

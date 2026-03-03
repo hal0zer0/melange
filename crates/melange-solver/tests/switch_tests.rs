@@ -29,7 +29,7 @@ fn generate(spice: &str) -> String {
         circuit_name: "switch_test".to_string(),
         sample_rate: 44100.0,
         input_node: 0,
-        output_node: if kernel.n > 1 { 1 } else { 0 },
+        output_nodes: vec![if kernel.n > 1 { 1 } else { 0 }],
         input_resistance: 1.0,
         ..CodegenConfig::default()
     };
@@ -328,27 +328,27 @@ C1 out 0 100n
              \n\
              // Process at default position (0)\n\
              for _ in 0..100 {{\n\
-                 let out = process_sample(0.1, &mut state);\n\
+                 let out = process_sample(0.1, &mut state)[0];\n\
                  assert!(out.is_finite(), \"output must be finite\");\n\
              }}\n\
              \n\
              // Switch to position 1\n\
              state.set_switch_0(1);\n\
              for _ in 0..100 {{\n\
-                 let out = process_sample(0.1, &mut state);\n\
+                 let out = process_sample(0.1, &mut state)[0];\n\
                  assert!(out.is_finite(), \"output after switch must be finite\");\n\
              }}\n\
              \n\
              // Switch to position 2\n\
              state.set_switch_0(2);\n\
              for _ in 0..100 {{\n\
-                 let out = process_sample(0.1, &mut state);\n\
+                 let out = process_sample(0.1, &mut state)[0];\n\
                  assert!(out.is_finite(), \"output after switch 2 must be finite\");\n\
              }}\n\
              \n\
              // Invalid position should be no-op\n\
              state.set_switch_0(99);\n\
-             let out = process_sample(0.1, &mut state);\n\
+             let out = process_sample(0.1, &mut state)[0];\n\
              assert!(out.is_finite(), \"output after invalid switch must be finite\");\n\
              \n\
              eprintln!(\"Switched cap test passed!\");\n\
@@ -374,21 +374,21 @@ L1 mid 0 176m
              \n\
              // Process at default position\n\
              for _ in 0..100 {{\n\
-                 let out = process_sample(0.1, &mut state);\n\
+                 let out = process_sample(0.1, &mut state)[0];\n\
                  assert!(out.is_finite(), \"output must be finite\");\n\
              }}\n\
              \n\
              // Switch to position 1\n\
              state.set_switch_0(1);\n\
              for _ in 0..100 {{\n\
-                 let out = process_sample(0.1, &mut state);\n\
+                 let out = process_sample(0.1, &mut state)[0];\n\
                  assert!(out.is_finite(), \"output after switch must be finite\");\n\
              }}\n\
              \n\
              // set_sample_rate should also work\n\
              state.set_sample_rate(48000.0);\n\
              for _ in 0..100 {{\n\
-                 let out = process_sample(0.1, &mut state);\n\
+                 let out = process_sample(0.1, &mut state)[0];\n\
                  assert!(out.is_finite(), \"output after SR change must be finite\");\n\
              }}\n\
              \n\
@@ -415,7 +415,7 @@ C2 out 0 47n
         circuit_name: "switch_pot_test".to_string(),
         sample_rate: 44100.0,
         input_node: 0,
-        output_node: if kernel.n > 1 { 1 } else { 0 },
+        output_nodes: vec![if kernel.n > 1 { 1 } else { 0 }],
         input_resistance: 1.0,
         ..CodegenConfig::default()
     };
@@ -429,21 +429,21 @@ C2 out 0 47n
              \n\
              // Process with default settings\n\
              for _ in 0..100 {{\n\
-                 let out = process_sample(0.1, &mut state);\n\
+                 let out = process_sample(0.1, &mut state)[0];\n\
                  assert!(out.is_finite(), \"output must be finite\");\n\
              }}\n\
              \n\
              // Change pot\n\
              state.pot_0_resistance = 5000.0;\n\
              for _ in 0..100 {{\n\
-                 let out = process_sample(0.1, &mut state);\n\
+                 let out = process_sample(0.1, &mut state)[0];\n\
                  assert!(out.is_finite(), \"output after pot change must be finite\");\n\
              }}\n\
              \n\
              // Change switch\n\
              state.set_switch_0(1);\n\
              for _ in 0..100 {{\n\
-                 let out = process_sample(0.1, &mut state);\n\
+                 let out = process_sample(0.1, &mut state)[0];\n\
                  assert!(out.is_finite(), \"output after switch must be finite\");\n\
              }}\n\
              \n\
@@ -471,7 +471,7 @@ C1 out 0 100n
              for pos in 0..4 {{\n\
                  state.set_switch_0(pos);\n\
                  for _ in 0..100 {{\n\
-                     let out = process_sample(0.1, &mut state);\n\
+                     let out = process_sample(0.1, &mut state)[0];\n\
                      assert!(out.is_finite(), \"output at pos {{}} must be finite\", pos);\n\
                  }}\n\
              }}\n\
@@ -505,7 +505,7 @@ C2 out 0 47n
                  for p1 in 0..3 {{\n\
                      state.set_switch_1(p1);\n\
                      for _ in 0..50 {{\n\
-                         let out = process_sample(0.1, &mut state);\n\
+                         let out = process_sample(0.1, &mut state)[0];\n\
                          assert!(out.is_finite(), \"output at ({{}},{{}}) must be finite\", p0, p1);\n\
                      }}\n\
                  }}\n\

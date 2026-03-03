@@ -306,11 +306,13 @@ impl Emitter for RustEmitter {
                 ir.solver_config.input_node, n
             )));
         }
-        if ir.solver_config.output_node >= n {
-            return Err(CodegenError::InvalidConfig(format!(
-                "output_node {} >= N={}",
-                ir.solver_config.output_node, n
-            )));
+        for (i, &node) in ir.solver_config.output_nodes.iter().enumerate() {
+            if node >= n {
+                return Err(CodegenError::InvalidConfig(format!(
+                    "output_nodes[{}] = {} >= N={}",
+                    i, node, n
+                )));
+            }
         }
 
         let mut code = String::new();
@@ -386,7 +388,18 @@ impl RustEmitter {
         }
         ctx.insert("alpha", &fmt_f64(ir.solver_config.alpha));
         ctx.insert("input_node", &ir.solver_config.input_node);
-        ctx.insert("output_node", &ir.solver_config.output_node);
+        let num_outputs = ir.solver_config.output_nodes.len();
+        ctx.insert("num_outputs", &num_outputs);
+        let output_nodes_values = ir.solver_config.output_nodes.iter()
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        ctx.insert("output_nodes_values", &output_nodes_values);
+        let output_scales_values = ir.solver_config.output_scales.iter()
+            .map(|s| fmt_f64(*s))
+            .collect::<Vec<_>>()
+            .join(", ");
+        ctx.insert("output_scales_values", &output_scales_values);
         ctx.insert("input_resistance", &fmt_f64(ir.solver_config.input_resistance));
         ctx.insert("has_dc_sources", &ir.has_dc_sources);
 
@@ -455,7 +468,6 @@ impl RustEmitter {
         let internal_rate = ir.solver_config.sample_rate * ir.solver_config.oversampling_factor as f64;
         let dc_block_r = 1.0 - 2.0 * std::f64::consts::PI * 5.0 / internal_rate;
         ctx.insert("dc_block_r", &format!("{:.17e}", dc_block_r));
-        ctx.insert("output_scale", &format!("{:.17e}", ir.solver_config.output_scale));
         ctx.insert("dc_op_converged", &ir.dc_op_converged);
 
         self.render("constants", &ctx)
@@ -468,6 +480,8 @@ impl RustEmitter {
         ctx.insert("num_inductors", &num_inductors);
         let num_pots = ir.pots.len();
         ctx.insert("num_pots", &num_pots);
+        let num_outputs = ir.solver_config.output_nodes.len();
+        ctx.insert("num_outputs", &num_outputs);
 
         let os_factor = ir.solver_config.oversampling_factor;
         ctx.insert("oversampling_factor", &os_factor);
@@ -896,13 +910,13 @@ impl RustEmitter {
             let os_info = oversampling_info(os_factor);
             code.push_str(&format!(
                 "\n        self.os_up_state = [0.0; {}];\n\
-                 \x20       self.os_dn_state = [0.0; {}];\n",
+                 \x20       self.os_dn_state = [[0.0; {}]; NUM_OUTPUTS];\n",
                 os_info.state_size, os_info.state_size,
             ));
             if os_factor == 4 {
                 code.push_str(&format!(
                     "        self.os_up_state_outer = [0.0; {}];\n\
-                     \x20       self.os_dn_state_outer = [0.0; {}];\n",
+                     \x20       self.os_dn_state_outer = [[0.0; {}]; NUM_OUTPUTS];\n",
                     os_info.state_size_outer, os_info.state_size_outer,
                 ));
             }
@@ -913,8 +927,8 @@ impl RustEmitter {
             "\n        // Recompute DC blocking coefficient\n\
              \x20       let internal_rate = self.current_sample_rate * {}.0;\n\
              \x20       self.dc_block_r = 1.0 - 2.0 * std::f64::consts::PI * 5.0 / internal_rate;\n\
-             \x20       self.dc_block_x_prev = 0.0;\n\
-             \x20       self.dc_block_y_prev = 0.0;\n",
+             \x20       self.dc_block_x_prev = [0.0; NUM_OUTPUTS];\n\
+             \x20       self.dc_block_y_prev = [0.0; NUM_OUTPUTS];\n",
             os_factor,
         ));
 
@@ -1125,6 +1139,9 @@ impl RustEmitter {
         let os_factor = ir.solver_config.oversampling_factor;
         ctx.insert("oversampling_factor", &os_factor);
 
+        let num_outputs = ir.solver_config.output_nodes.len();
+        ctx.insert("num_outputs", &num_outputs);
+
         ctx.insert("max_iter", &ir.solver_config.max_iterations);
         ctx.insert("m", &ir.topology.m);
 
@@ -1233,6 +1250,8 @@ impl RustEmitter {
             );
         }
 
+        let num_outputs = ir.solver_config.output_nodes.len();
+
         // Emit the public process_sample wrapper
         code.push_str("/// Process a single audio sample through the circuit with oversampling.\n");
         code.push_str("///\n");
@@ -1242,16 +1261,16 @@ impl RustEmitter {
         ));
         code.push_str("#[inline]\n");
         code.push_str(
-            "pub fn process_sample(input: f64, state: &mut CircuitState) -> f64 {\n",
+            "pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS] {\n",
         );
         code.push_str(
             "    let input = if input.is_finite() { input.clamp(-100.0, 100.0) } else { 0.0 };\n\n",
         );
 
         if factor == 2 {
-            Self::emit_2x_wrapper(&mut code);
+            Self::emit_2x_wrapper(&mut code, num_outputs);
         } else if factor == 4 {
-            Self::emit_4x_wrapper(&mut code);
+            Self::emit_4x_wrapper(&mut code, num_outputs);
         }
 
         code.push_str("}\n\n");
@@ -1297,33 +1316,36 @@ impl RustEmitter {
     }
 
     /// Emit the 2x oversampling wrapper body.
-    fn emit_2x_wrapper(code: &mut String) {
-        // Upsample: halfband → 2 samples
+    fn emit_2x_wrapper(code: &mut String, num_outputs: usize) {
+        // Upsample: halfband → 2 samples (single input)
         code.push_str(
             "    // Upsample: half-band filter produces 2 samples at internal rate\n\
              \x20   let (up_even, up_odd) = os_halfband(input, &OS_COEFFS, &mut state.os_up_state);\n\n",
         );
 
-        // Process both at 2x rate
+        // Process both at 2x rate — returns [f64; NUM_OUTPUTS]
         code.push_str(
             "    // Process both samples at 2x rate\n\
              \x20   let out_even = process_sample_inner(up_even, state);\n\
              \x20   let out_odd = process_sample_inner(up_odd, state);\n\n",
         );
 
-        // Downsample: filter both and combine
-        code.push_str(
-            "    // Downsample: half-band filter combines 2 samples into 1\n\
-             \x20   let (dn1_even, _) = os_halfband(out_even, &OS_COEFFS, &mut state.os_dn_state);\n\
-             \x20   let (_, dn2_odd) = os_halfband(out_odd, &OS_COEFFS, &mut state.os_dn_state);\n\
-             \x20   let out = (dn1_even + dn2_odd) * 0.5;\n\
-             \x20   if out.is_finite() { out.clamp(-10.0, 10.0) } else { 0.0 }\n",
-        );
+        // Downsample per-output
+        code.push_str("    // Downsample: per-output half-band filter combines 2 samples into 1\n");
+        code.push_str("    let mut result = [0.0f64; NUM_OUTPUTS];\n");
+        code.push_str("    for out_idx in 0..NUM_OUTPUTS {\n");
+        code.push_str("        let (dn1_even, _) = os_halfband(out_even[out_idx], &OS_COEFFS, &mut state.os_dn_state[out_idx]);\n");
+        code.push_str("        let (_, dn2_odd) = os_halfband(out_odd[out_idx], &OS_COEFFS, &mut state.os_dn_state[out_idx]);\n");
+        code.push_str("        let v = (dn1_even + dn2_odd) * 0.5;\n");
+        code.push_str("        result[out_idx] = if v.is_finite() { v.clamp(-10.0, 10.0) } else { 0.0 };\n");
+        code.push_str("    }\n");
+        code.push_str("    result\n");
+        let _ = num_outputs; // used for signature type
     }
 
     /// Emit the 4x oversampling wrapper body (cascaded 2x stages).
-    fn emit_4x_wrapper(code: &mut String) {
-        // Outer upsample: 1 → 2 at 2x rate
+    fn emit_4x_wrapper(code: &mut String, num_outputs: usize) {
+        // Outer upsample: 1 → 2 at 2x rate (single input)
         code.push_str(
             "    // Outer upsample: 1 → 2 samples at 2x rate\n\
              \x20   let (outer_even, outer_odd) = os_halfband_outer(\n\
@@ -1331,38 +1353,52 @@ impl RustEmitter {
              \x20   );\n\n",
         );
 
-        // Inner upsample + process for each outer sample
+        // Inner upsample + process for each outer sample — returns [f64; NUM_OUTPUTS]
         code.push_str(
             "    // Inner upsample + process: each 2x sample → 2 samples at 4x rate\n\
              \x20   let (inner_e0, inner_o0) = os_halfband(outer_even, &OS_COEFFS, &mut state.os_up_state);\n\
              \x20   let proc_e0 = process_sample_inner(inner_e0, state);\n\
-             \x20   let proc_o0 = process_sample_inner(inner_o0, state);\n\
-             \x20   let (dn_e0, _) = os_halfband(proc_e0, &OS_COEFFS, &mut state.os_dn_state);\n\
-             \x20   let (_, dn_o0) = os_halfband(proc_o0, &OS_COEFFS, &mut state.os_dn_state);\n\
-             \x20   let inner_out0 = (dn_e0 + dn_o0) * 0.5;\n\n",
+             \x20   let proc_o0 = process_sample_inner(inner_o0, state);\n\n",
         );
 
+        // Inner downsample per-output for first 2x pair
+        code.push_str("    let mut inner_out0 = [0.0f64; NUM_OUTPUTS];\n");
+        code.push_str("    for out_idx in 0..NUM_OUTPUTS {\n");
+        code.push_str("        let (dn_e0, _) = os_halfband(proc_e0[out_idx], &OS_COEFFS, &mut state.os_dn_state[out_idx]);\n");
+        code.push_str("        let (_, dn_o0) = os_halfband(proc_o0[out_idx], &OS_COEFFS, &mut state.os_dn_state[out_idx]);\n");
+        code.push_str("        inner_out0[out_idx] = (dn_e0 + dn_o0) * 0.5;\n");
+        code.push_str("    }\n\n");
+
+        // Second inner upsample + process pair
         code.push_str(
             "    let (inner_e1, inner_o1) = os_halfband(outer_odd, &OS_COEFFS, &mut state.os_up_state);\n\
              \x20   let proc_e1 = process_sample_inner(inner_e1, state);\n\
-             \x20   let proc_o1 = process_sample_inner(inner_o1, state);\n\
-             \x20   let (dn_e1, _) = os_halfband(proc_e1, &OS_COEFFS, &mut state.os_dn_state);\n\
-             \x20   let (_, dn_o1) = os_halfband(proc_o1, &OS_COEFFS, &mut state.os_dn_state);\n\
-             \x20   let inner_out1 = (dn_e1 + dn_o1) * 0.5;\n\n",
+             \x20   let proc_o1 = process_sample_inner(inner_o1, state);\n\n",
         );
 
-        // Outer downsample
-        code.push_str(
-            "    // Outer downsample: 2 → 1 sample at host rate\n\
-             \x20   let (dn_outer_e, _) = os_halfband_outer(\n\
-             \x20       inner_out0, &OS_COEFFS_OUTER, &mut state.os_dn_state_outer,\n\
-             \x20   );\n\
-             \x20   let (_, dn_outer_o) = os_halfband_outer(\n\
-             \x20       inner_out1, &OS_COEFFS_OUTER, &mut state.os_dn_state_outer,\n\
-             \x20   );\n\
-             \x20   let out = (dn_outer_e + dn_outer_o) * 0.5;\n\
-             \x20   if out.is_finite() { out.clamp(-10.0, 10.0) } else { 0.0 }\n",
-        );
+        // Inner downsample per-output for second 2x pair
+        code.push_str("    let mut inner_out1 = [0.0f64; NUM_OUTPUTS];\n");
+        code.push_str("    for out_idx in 0..NUM_OUTPUTS {\n");
+        code.push_str("        let (dn_e1, _) = os_halfband(proc_e1[out_idx], &OS_COEFFS, &mut state.os_dn_state[out_idx]);\n");
+        code.push_str("        let (_, dn_o1) = os_halfband(proc_o1[out_idx], &OS_COEFFS, &mut state.os_dn_state[out_idx]);\n");
+        code.push_str("        inner_out1[out_idx] = (dn_e1 + dn_o1) * 0.5;\n");
+        code.push_str("    }\n\n");
+
+        // Outer downsample per-output
+        code.push_str("    // Outer downsample: per-output 2 → 1 sample at host rate\n");
+        code.push_str("    let mut result = [0.0f64; NUM_OUTPUTS];\n");
+        code.push_str("    for out_idx in 0..NUM_OUTPUTS {\n");
+        code.push_str("        let (dn_outer_e, _) = os_halfband_outer(\n");
+        code.push_str("            inner_out0[out_idx], &OS_COEFFS_OUTER, &mut state.os_dn_state_outer[out_idx],\n");
+        code.push_str("        );\n");
+        code.push_str("        let (_, dn_outer_o) = os_halfband_outer(\n");
+        code.push_str("            inner_out1[out_idx], &OS_COEFFS_OUTER, &mut state.os_dn_state_outer[out_idx],\n");
+        code.push_str("        );\n");
+        code.push_str("        let v = (dn_outer_e + dn_outer_o) * 0.5;\n");
+        code.push_str("        result[out_idx] = if v.is_finite() { v.clamp(-10.0, 10.0) } else { 0.0 };\n");
+        code.push_str("    }\n");
+        code.push_str("    result\n");
+        let _ = num_outputs; // used for signature type
     }
 
     fn emit_a_neg_correction(code: &mut String, idx: usize, pot: &PotentiometerIR) {

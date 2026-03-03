@@ -30,7 +30,7 @@ fn default_config() -> CodegenConfig {
         circuit_name: "test_circuit".to_string(),
         sample_rate: 44100.0,
         input_node: 0,
-        output_node: 1,
+        output_nodes: vec![1],
         input_resistance: 1000.0,
         ..CodegenConfig::default()
     }
@@ -395,7 +395,8 @@ fn test_generated_code_contains_all_constants() {
     assert!(code.contains("pub const SAMPLE_RATE: f64 ="), "Missing SAMPLE_RATE constant");
     assert!(code.contains("pub const ALPHA: f64 ="), "Missing ALPHA constant");
     assert!(code.contains("pub const INPUT_NODE: usize ="), "Missing INPUT_NODE constant");
-    assert!(code.contains("pub const OUTPUT_NODE: usize ="), "Missing OUTPUT_NODE constant");
+    assert!(code.contains("pub const NUM_OUTPUTS: usize ="), "Missing NUM_OUTPUTS constant");
+    assert!(code.contains("pub const OUTPUT_NODES: [usize; NUM_OUTPUTS] ="), "Missing OUTPUT_NODES constant");
     assert!(code.contains("pub const INPUT_RESISTANCE: f64 ="), "Missing INPUT_RESISTANCE constant");
     assert!(code.contains("pub const S_DEFAULT: [[f64; N]; N]"), "Missing S_DEFAULT matrix");
     assert!(code.contains("pub const A_NEG_DEFAULT: [[f64; N]; N]"), "Missing A_NEG_DEFAULT matrix");
@@ -417,8 +418,8 @@ fn test_generated_code_contains_all_constants() {
         "Input node should be 0 (from config)"
     );
     assert!(
-        code.contains("pub const OUTPUT_NODE: usize = 1;"),
-        "Output node should be 1 (from config)"
+        code.contains("pub const OUTPUT_NODES: [usize; NUM_OUTPUTS] = [1]"),
+        "Output nodes should contain 1 (from config)"
     );
 
     // Verify alpha = 2 * sample_rate
@@ -453,7 +454,7 @@ fn test_generated_code_contains_all_constants() {
     );
 
     assert!(code.contains("pub const DC_BLOCK_R: f64 ="), "Missing DC_BLOCK_R constant");
-    assert!(code.contains("pub const OUTPUT_SCALE: f64 ="), "Missing OUTPUT_SCALE constant");
+    assert!(code.contains("pub const OUTPUT_SCALES: [f64; NUM_OUTPUTS] ="), "Missing OUTPUT_SCALES constant");
     assert!(code.contains("pub const DC_OP_CONVERGED: bool ="), "Missing DC_OP_CONVERGED constant");
 }
 
@@ -628,7 +629,7 @@ fn test_generated_process_sample_pipeline() {
     assert!(code.contains("let v = compute_final_voltages("), "Step 5: compute_final_voltages");
     assert!(code.contains("state.v_prev = v;"), "Step 7: update v_prev");
     assert!(code.contains("state.i_nl_prev = i_nl;"), "Step 7: update i_nl_prev");
-    assert!(code.contains("v[OUTPUT_NODE]"), "Step 8: read output");
+    assert!(code.contains("v[OUTPUT_NODES[out_idx]]"), "Step 8: read output");
 }
 
 // ==========================================================================
@@ -915,7 +916,7 @@ fn test_invalid_input_node_rejected() {
 
     let config = CodegenConfig {
         input_node: 999, // Way too large
-        output_node: 0,
+        output_nodes: vec![0],
         ..default_config()
     };
 
@@ -936,14 +937,14 @@ fn test_invalid_output_node_rejected() {
 
     let config = CodegenConfig {
         input_node: 0,
-        output_node: 999, // Way too large
+        output_nodes: vec![999], // Way too large
         ..default_config()
     };
 
     let codegen = CodeGenerator::new(config);
     let result = codegen.generate(&kernel, &mna, &netlist);
 
-    assert!(result.is_err(), "Should reject output_node >= N");
+    assert!(result.is_err(), "Should reject output_nodes >= N");
     let err = result.unwrap_err();
     assert!(
         matches!(err, CodegenError::InvalidConfig(_)),
@@ -1146,7 +1147,7 @@ fn test_ir_fields_match_kernel() {
     // Config
     assert_eq!(ir.solver_config.sample_rate, 44100.0);
     assert_eq!(ir.solver_config.input_node, 0);
-    assert_eq!(ir.solver_config.output_node, 1);
+    assert_eq!(ir.solver_config.output_nodes, vec![1]);
 
     // Device slots
     assert_eq!(ir.device_slots.len(), 1); // one diode
@@ -1483,7 +1484,7 @@ C1 out 0 1u
     let config = CodegenConfig {
         circuit_name: "ten_diode_test".to_string(),
         input_node: 0,
-        output_node: kernel.n - 1,
+        output_nodes: vec![kernel.n - 1],
         ..CodegenConfig::default()
     };
     let codegen = CodeGenerator::new(config);
@@ -1768,7 +1769,7 @@ fn test_generated_code_includes_rhs_const_for_dc_source() {
         circuit_name: "vs_test".to_string(),
         sample_rate: 44100.0,
         input_node: 0,
-        output_node: 1,
+        output_nodes: vec![1],
         input_resistance: 1000.0,
         ..CodegenConfig::default()
     };
@@ -1984,8 +1985,8 @@ fn test_generated_code_state_has_matrix_fields() {
         code.contains("pub s_ni: [[f64; M]; N]"),
         "CircuitState must have s_ni matrix field."
     );
-    assert!(code.contains("pub dc_block_x_prev: f64"), "CircuitState must have dc_block_x_prev field.");
-    assert!(code.contains("pub dc_block_y_prev: f64"), "CircuitState must have dc_block_y_prev field.");
+    assert!(code.contains("pub dc_block_x_prev: [f64; NUM_OUTPUTS]"), "CircuitState must have dc_block_x_prev field.");
+    assert!(code.contains("pub dc_block_y_prev: [f64; NUM_OUTPUTS]"), "CircuitState must have dc_block_y_prev field.");
     assert!(code.contains("pub dc_block_r: f64"), "CircuitState must have dc_block_r field.");
     assert!(code.contains("pub diag_peak_output: f64"), "CircuitState must have diag_peak_output field.");
     assert!(code.contains("pub diag_clamp_count: u64"), "CircuitState must have diag_clamp_count field.");
@@ -2127,7 +2128,7 @@ fn test_generated_code_compiles_and_set_sample_rate_works() {
              let mut out1 = Vec::new();\n\
              for i in 0..100 {{\n\
                  let input = if i < 50 {{ 1.0 }} else {{ 0.0 }};\n\
-                 out1.push(process_sample(input, &mut state1));\n\
+                 out1.push(process_sample(input, &mut state1)[0]);\n\
              }}\n\
              \n\
              // Run at double sample rate\n\
@@ -2136,7 +2137,7 @@ fn test_generated_code_compiles_and_set_sample_rate_works() {
              let mut out2 = Vec::new();\n\
              for i in 0..200 {{\n\
                  let input = if i < 100 {{ 1.0 }} else {{ 0.0 }};\n\
-                 out2.push(process_sample(input, &mut state2));\n\
+                 out2.push(process_sample(input, &mut state2)[0]);\n\
              }}\n\
              \n\
              // Outputs should differ (different filter response)\n\
@@ -2160,7 +2161,7 @@ fn test_generated_code_compiles_and_set_sample_rate_works() {
              let mut out3 = Vec::new();\n\
              for i in 0..100 {{\n\
                  let input = if i < 50 {{ 1.0 }} else {{ 0.0 }};\n\
-                 out3.push(process_sample(input, &mut state3));\n\
+                 out3.push(process_sample(input, &mut state3)[0]);\n\
              }}\n\
              // Should match original\n\
              for i in 0..100 {{\n\
@@ -2231,7 +2232,7 @@ fn test_nonlinear_circuit_set_sample_rate_compiles() {
              for i in 0..200 {{\n\
                  let t = i as f64 / 96000.0;\n\
                  let input = (2.0 * std::f64::consts::PI * 1000.0 * t).sin();\n\
-                 outputs.push(process_sample(input, &mut state));\n\
+                 outputs.push(process_sample(input, &mut state)[0]);\n\
              }}\n\
              \n\
              // Should produce non-trivial output\n\
@@ -2309,7 +2310,7 @@ C1 out 0 1u
         circuit_name: "ind_test".to_string(),
         sample_rate: 44100.0,
         input_node: 0,
-        output_node: 1,
+        output_nodes: vec![1],
         input_resistance: 1000.0,
         ..CodegenConfig::default()
     };
@@ -2369,8 +2370,8 @@ C1 out 0 100n
                  let t2 = i as f64 / 96000.0;\n\
                  let in1 = (2.0 * std::f64::consts::PI * 1000.0 * t1).sin();\n\
                  let in2 = (2.0 * std::f64::consts::PI * 1000.0 * t2).sin();\n\
-                 let out1 = process_sample(in1, &mut state);\n\
-                 let out2 = process_sample(in2, &mut state2);\n\
+                 let out1 = process_sample(in1, &mut state)[0];\n\
+                 let out2 = process_sample(in2, &mut state2)[0];\n\
                  assert!(out1.is_finite(), \"Output at 44.1kHz should be finite\");\n\
                  assert!(out2.is_finite(), \"Output at 96kHz should be finite\");\n\
                  sum_sq_diff += (out1 - out2).powi(2);\n\
@@ -2421,7 +2422,7 @@ C1 out 0 1u
         circuit_name: "ind_sr_test".to_string(),
         sample_rate: 44100.0,
         input_node: 0,
-        output_node: 1,
+        output_nodes: vec![1],
         input_resistance: 1000.0,
         ..CodegenConfig::default()
     };
@@ -2455,7 +2456,7 @@ C1 out 0 1u
              for i in 0..200 {{\n\
                  let t = i as f64 / 96000.0;\n\
                  let input = (2.0 * std::f64::consts::PI * 1000.0 * t).sin();\n\
-                 outputs.push(process_sample(input, &mut state));\n\
+                 outputs.push(process_sample(input, &mut state)[0]);\n\
              }}\n\
              assert!(outputs.iter().all(|v| v.is_finite()), \"All outputs should be finite\");\n\
              let max_out = outputs.iter().cloned().fold(0.0f64, f64::max);\n\
@@ -2887,7 +2888,7 @@ fn test_jfet_codegen_compiles_and_runs() {
         circuit_name: "jfet_cs_run".to_string(),
         sample_rate: 44100.0,
         input_node: 0,
-        output_node: 1,
+        output_nodes: vec![1],
         input_resistance: 1.0,
         ..CodegenConfig::default()
     };
@@ -2901,7 +2902,7 @@ fn test_jfet_codegen_compiles_and_runs() {
              \n\
              // Warm up with 200 silent samples to let DC OP settle\n\
              for _ in 0..200 {{\n\
-                 let out = process_sample(0.0, &mut state);\n\
+                 let out = process_sample(0.0, &mut state)[0];\n\
                  assert!(out.is_finite(), \"Warmup output must be finite\");\n\
              }}\n\
              \n\
@@ -2911,7 +2912,7 @@ fn test_jfet_codegen_compiles_and_runs() {
              for i in 0..500 {{\n\
                  let t = i as f64 / 44100.0;\n\
                  let input = 0.1 * (2.0 * std::f64::consts::PI * 1000.0 * t).sin();\n\
-                 let out = process_sample(input, &mut state);\n\
+                 let out = process_sample(input, &mut state)[0];\n\
                  assert!(out.is_finite(), \"Output at sample {{}} must be finite, got {{}}\", i, out);\n\
                  if out.abs() > 1e-6 {{ any_nonzero = true; }}\n\
                  if out.abs() > max_abs_out {{ max_abs_out = out.abs(); }}\n\
@@ -2981,7 +2982,7 @@ C1 out 0 100n
         circuit_name: "pjfet_test".to_string(),
         sample_rate: 44100.0,
         input_node: 0,
-        output_node: 1,
+        output_nodes: vec![1],
         input_resistance: 1.0,
         ..CodegenConfig::default()
     };
@@ -3007,14 +3008,14 @@ C1 out 0 100n
          fn main() {{\n\
              let mut state = CircuitState::default();\n\
              for _ in 0..200 {{\n\
-                 let out = process_sample(0.0, &mut state);\n\
+                 let out = process_sample(0.0, &mut state)[0];\n\
                  assert!(out.is_finite(), \"P-ch JFET warmup output must be finite\");\n\
              }}\n\
              let mut any_nonzero = false;\n\
              for i in 0..500 {{\n\
                  let t = i as f64 / 44100.0;\n\
                  let input = 0.1 * (2.0 * std::f64::consts::PI * 1000.0 * t).sin();\n\
-                 let out = process_sample(input, &mut state);\n\
+                 let out = process_sample(input, &mut state)[0];\n\
                  assert!(out.is_finite(), \"P-ch JFET output at sample {{}} must be finite\", i);\n\
                  if out.abs() > 1e-6 {{ any_nonzero = true; }}\n\
              }}\n\
@@ -3069,7 +3070,7 @@ fn test_oversampling_2x_generates_correct_structure() {
         circuit_name: "test_os2x".to_string(),
         sample_rate: 44100.0,
         input_node: 0,
-        output_node: 1,
+        output_nodes: vec![1],
         input_resistance: 1000.0,
         oversampling_factor: 2,
         ..CodegenConfig::default()
@@ -3110,7 +3111,7 @@ fn test_oversampling_2x_generates_correct_structure() {
 
     // Should have public process_sample wrapper
     assert!(
-        code.contains("pub fn process_sample(input: f64, state: &mut CircuitState) -> f64"),
+        code.contains("pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS]"),
         "Should emit public process_sample wrapper"
     );
 
@@ -3120,7 +3121,7 @@ fn test_oversampling_2x_generates_correct_structure() {
         "Should have upsampler state in CircuitState"
     );
     assert!(
-        code.contains("pub os_dn_state: [f64;"),
+        code.contains("pub os_dn_state: [[f64;"),
         "Should have downsampler state in CircuitState"
     );
 
@@ -3171,7 +3172,7 @@ fn test_oversampling_invalid_factor_rejected() {
         circuit_name: "test_invalid_os".to_string(),
         sample_rate: 44100.0,
         input_node: 0,
-        output_node: 0,
+        output_nodes: vec![0],
         input_resistance: 1.0,
         oversampling_factor: 3,
         ..CodegenConfig::default()
@@ -3195,7 +3196,7 @@ fn test_oversampling_2x_diode_clipper_compiles() {
         circuit_name: "test_os2x_compile".to_string(),
         sample_rate: 44100.0,
         input_node: 0,
-        output_node: 1,
+        output_nodes: vec![1],
         input_resistance: 1000.0,
         oversampling_factor: 2,
         ..CodegenConfig::default()
@@ -3236,7 +3237,7 @@ fn test_oversampling_2x_rc_linear_compiles() {
         circuit_name: "test_os2x_rc".to_string(),
         sample_rate: 44100.0,
         input_node: 0,
-        output_node: 0,
+        output_nodes: vec![0],
         input_resistance: 1.0,
         oversampling_factor: 2,
         ..CodegenConfig::default()
@@ -3277,7 +3278,7 @@ fn test_oversampling_2x_bjt_compiles() {
         circuit_name: "test_os2x_bjt".to_string(),
         sample_rate: 44100.0,
         input_node: 0,
-        output_node: 1,
+        output_nodes: vec![1],
         input_resistance: 1000.0,
         oversampling_factor: 2,
         ..CodegenConfig::default()
@@ -3318,7 +3319,7 @@ fn test_oversampling_4x_diode_clipper_compiles() {
         circuit_name: "test_os4x".to_string(),
         sample_rate: 44100.0,
         input_node: 0,
-        output_node: 1,
+        output_nodes: vec![1],
         input_resistance: 1000.0,
         oversampling_factor: 4,
         ..CodegenConfig::default()
@@ -3370,7 +3371,7 @@ fn test_oversampling_2x_matrices_at_internal_rate() {
         circuit_name: "test_1x".to_string(),
         sample_rate: 44100.0,
         input_node: 0,
-        output_node: 1,
+        output_nodes: vec![1],
         input_resistance: 1000.0,
         oversampling_factor: 1,
         ..CodegenConfig::default()
@@ -3382,7 +3383,7 @@ fn test_oversampling_2x_matrices_at_internal_rate() {
         circuit_name: "test_2x".to_string(),
         sample_rate: 44100.0,
         input_node: 0,
-        output_node: 1,
+        output_nodes: vec![1],
         input_resistance: 1000.0,
         oversampling_factor: 2,
         ..CodegenConfig::default()
@@ -3395,7 +3396,7 @@ fn test_oversampling_2x_matrices_at_internal_rate() {
         circuit_name: "test_88k".to_string(),
         sample_rate: 88200.0,
         input_node: 0,
-        output_node: 1,
+        output_nodes: vec![1],
         input_resistance: 1000.0,
         oversampling_factor: 1,
         ..CodegenConfig::default()
@@ -3462,7 +3463,7 @@ fn test_codegen_bjt_gummel_poon_compiles() {
     let config = CodegenConfig {
         circuit_name: "test_gp_bjt".to_string(),
         input_node: 0,
-        output_node: kernel.n - 1,
+        output_nodes: vec![kernel.n - 1],
         ..CodegenConfig::default()
     };
     let codegen = CodeGenerator::new(config);
@@ -3501,7 +3502,7 @@ fn test_codegen_bjt_gp_constants_emitted() {
     let config = CodegenConfig {
         circuit_name: "test_gp_bjt_consts".to_string(),
         input_node: 0,
-        output_node: kernel.n - 1,
+        output_nodes: vec![kernel.n - 1],
         ..CodegenConfig::default()
     };
     let codegen = CodeGenerator::new(config);
@@ -3755,7 +3756,7 @@ fn test_codegen_triode_compiles_and_runs() {
         circuit_name: "triode_cc_run".to_string(),
         sample_rate: 44100.0,
         input_node: 0,
-        output_node: 1,
+        output_nodes: vec![1],
         input_resistance: 1.0,
         ..CodegenConfig::default()
     };
@@ -3769,7 +3770,7 @@ fn test_codegen_triode_compiles_and_runs() {
              \n\
              // Warm up with 500 samples to let DC OP settle\n\
              for _ in 0..500 {{\n\
-                 let out = process_sample(0.0, &mut state);\n\
+                 let out = process_sample(0.0, &mut state)[0];\n\
                  assert!(out.is_finite(), \"Warmup output must be finite\");\n\
              }}\n\
              \n\
@@ -3779,7 +3780,7 @@ fn test_codegen_triode_compiles_and_runs() {
              for i in 0..500 {{\n\
                  let t = i as f64 / 44100.0;\n\
                  let input = 0.01 * (2.0 * std::f64::consts::PI * 1000.0 * t).sin();\n\
-                 let out = process_sample(input, &mut state);\n\
+                 let out = process_sample(input, &mut state)[0];\n\
                  assert!(out.is_finite(), \"Output at sample {{}} must be finite, got {{}}\", i, out);\n\
                  if out.abs() > 1e-6 {{ any_nonzero = true; }}\n\
                  if out.abs() > max_abs_out {{ max_abs_out = out.abs(); }}\n\
@@ -3835,7 +3836,7 @@ fn test_codegen_two_triode_preamp_compiles_and_runs() {
         circuit_name: "triode_preamp_run".to_string(),
         sample_rate: 44100.0,
         input_node: 0,
-        output_node: 1,
+        output_nodes: vec![1],
         input_resistance: 1.0,
         ..CodegenConfig::default()
     };
@@ -3849,7 +3850,7 @@ fn test_codegen_two_triode_preamp_compiles_and_runs() {
              \n\
              // Warm up with 500 samples\n\
              for _ in 0..500 {{\n\
-                 let out = process_sample(0.0, &mut state);\n\
+                 let out = process_sample(0.0, &mut state)[0];\n\
                  assert!(out.is_finite(), \"Warmup output must be finite\");\n\
              }}\n\
              \n\
@@ -3859,7 +3860,7 @@ fn test_codegen_two_triode_preamp_compiles_and_runs() {
              for i in 0..500 {{\n\
                  let t = i as f64 / 44100.0;\n\
                  let input = 0.005 * (2.0 * std::f64::consts::PI * 1000.0 * t).sin();\n\
-                 let out = process_sample(input, &mut state);\n\
+                 let out = process_sample(input, &mut state)[0];\n\
                  assert!(out.is_finite(), \"Output at sample {{}} must be finite, got {{}}\", i, out);\n\
                  if out.abs() > 1e-6 {{ any_nonzero = true; }}\n\
                  if out.abs() > max_abs_out {{ max_abs_out = out.abs(); }}\n\
@@ -3906,57 +3907,57 @@ fn test_codegen_two_triode_preamp_compiles_and_runs() {
 }
 
 // ===========================================================================
-// OUTPUT_SCALE non-default tests (H6)
+// OUTPUT_SCALES non-default tests (H6)
 // ===========================================================================
 
-/// Verify that a non-default output_scale is emitted into the generated code.
+/// Verify that a non-default output_scales is emitted into the generated code.
 #[test]
 fn test_output_scale_non_default_emitted() {
     let (netlist, mna, kernel) = build_pipeline(DIODE_CLIPPER_SPICE);
     let config = CodegenConfig {
-        output_scale: 0.5,
+        output_scales: vec![0.5],
         ..default_config()
     };
     let codegen = CodeGenerator::new(config);
     let result = codegen.generate(&kernel, &mna, &netlist)
         .expect("code generation failed");
 
-    // Should contain 0.5 (5.0e-1) as the OUTPUT_SCALE constant
-    assert!(result.code.contains("OUTPUT_SCALE"),
-        "Generated code should contain OUTPUT_SCALE constant");
+    // Should contain 0.5 (5.0e-1) as the OUTPUT_SCALES constant
+    assert!(result.code.contains("OUTPUT_SCALES"),
+        "Generated code should contain OUTPUT_SCALES constant");
     assert!(result.code.contains("5.0") || result.code.contains("5e-1") || result.code.contains("0.5"),
-        "OUTPUT_SCALE should be 0.5, not 1.0. Code snippet: {}",
+        "OUTPUT_SCALES should be 0.5, not 1.0. Code snippet: {}",
         result.code.lines()
-            .find(|l| l.contains("OUTPUT_SCALE"))
+            .find(|l| l.contains("OUTPUT_SCALES"))
             .unwrap_or("NOT FOUND"));
-    // Should NOT contain the default 1.0e0 value for OUTPUT_SCALE
+    // Should NOT contain the default 1.0e0 value for OUTPUT_SCALES
     let scale_line = result.code.lines()
-        .find(|l| l.contains("OUTPUT_SCALE"))
-        .expect("OUTPUT_SCALE line should exist");
+        .find(|l| l.contains("OUTPUT_SCALES"))
+        .expect("OUTPUT_SCALES line should exist");
     assert!(!scale_line.contains("1.00000000000000000e0"),
-        "OUTPUT_SCALE should not be default 1.0, got: {}", scale_line);
+        "OUTPUT_SCALES should not be default 1.0, got: {}", scale_line);
 }
 
-/// Verify that output_scale=2.0 is applied in process_sample via dc_blocked * OUTPUT_SCALE.
+/// Verify that output_scales=[2.0] is applied in process_sample via dc_blocked * OUTPUT_SCALES[out_idx].
 #[test]
 fn test_output_scale_applied_in_process_sample() {
     let (netlist, mna, kernel) = build_pipeline(DIODE_CLIPPER_SPICE);
     let config = CodegenConfig {
-        output_scale: 2.0,
+        output_scales: vec![2.0],
         ..default_config()
     };
     let codegen = CodeGenerator::new(config);
     let result = codegen.generate(&kernel, &mna, &netlist)
         .expect("code generation failed");
 
-    // The process_sample template applies: dc_blocked * OUTPUT_SCALE
-    assert!(result.code.contains("dc_blocked * OUTPUT_SCALE"),
-        "process_sample should multiply dc_blocked by OUTPUT_SCALE");
+    // The process_sample template applies: dc_blocked * OUTPUT_SCALES[out_idx]
+    assert!(result.code.contains("dc_blocked * OUTPUT_SCALES[out_idx]"),
+        "process_sample should multiply dc_blocked by OUTPUT_SCALES[out_idx]");
 
     // The constant should be 2.0
     let scale_line = result.code.lines()
-        .find(|l| l.contains("OUTPUT_SCALE"))
-        .expect("OUTPUT_SCALE line should exist");
+        .find(|l| l.contains("OUTPUT_SCALES"))
+        .expect("OUTPUT_SCALES line should exist");
     assert!(scale_line.contains("2.0"),
-        "OUTPUT_SCALE constant should contain 2.0, got: {}", scale_line);
+        "OUTPUT_SCALES constant should contain 2.0, got: {}", scale_line);
 }

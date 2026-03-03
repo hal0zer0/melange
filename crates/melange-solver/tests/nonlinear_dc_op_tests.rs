@@ -27,7 +27,7 @@ fn default_config() -> CodegenConfig {
         circuit_name: "test_circuit".to_string(),
         sample_rate: 44100.0,
         input_node: 0,
-        output_node: 1,
+        output_nodes: vec![1],
         input_resistance: 1.0,
         ..CodegenConfig::default()
     }
@@ -371,7 +371,7 @@ fn test_codegen_with_nonlinear_dc_op() {
     let ir = build_ir(SINGLE_DIODE_VCC, &CodegenConfig {
         circuit_name: "diode_dc_test".to_string(),
         input_node: 0,
-        output_node: 1,
+        output_nodes: vec![1],
         ..default_config()
     });
 
@@ -391,7 +391,7 @@ fn test_codegen_bjt_has_dc_nl_i() {
     let ir = build_ir(BJT_COMMON_EMITTER, &CodegenConfig {
         circuit_name: "bjt_dc_test".to_string(),
         input_node: 0,
-        output_node: 1,
+        output_nodes: vec![1],
         ..default_config()
     });
 
@@ -415,7 +415,7 @@ fn test_codegen_dc_nl_i_in_generated_code() {
     let config = CodegenConfig {
         circuit_name: "bjt_dc_gen".to_string(),
         input_node: 0,
-        output_node: 1,
+        output_nodes: vec![1],
         ..default_config()
     };
 
@@ -442,7 +442,7 @@ fn test_codegen_linear_circuit_no_dc_nl_i() {
     let config = CodegenConfig {
         circuit_name: "rc_linear".to_string(),
         input_node: 0,
-        output_node: 1,
+        output_nodes: vec![1],
         ..default_config()
     };
 

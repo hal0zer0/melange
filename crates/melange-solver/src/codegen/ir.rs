@@ -71,22 +71,28 @@ pub struct SolverConfig {
     pub tolerance: f64,
     pub max_iterations: usize,
     pub input_node: usize,
-    pub output_node: usize,
+    /// Output node indices (one per output channel)
+    #[serde(default = "default_output_nodes")]
+    pub output_nodes: Vec<usize>,
     pub input_resistance: f64,
     /// Oversampling factor (1, 2, or 4). Default 1 (no oversampling).
     #[serde(default = "default_oversampling_factor")]
     pub oversampling_factor: usize,
-    /// Output scale factor applied after DC blocking (default 1.0)
-    #[serde(default = "default_output_scale")]
-    pub output_scale: f64,
+    /// Output scale factors applied after DC blocking (one per output)
+    #[serde(default = "default_output_scales")]
+    pub output_scales: Vec<f64>,
+}
+
+fn default_output_nodes() -> Vec<usize> {
+    vec![0]
 }
 
 fn default_oversampling_factor() -> usize {
     1
 }
 
-fn default_output_scale() -> f64 {
-    1.0
+fn default_output_scales() -> Vec<f64> {
+    vec![1.0]
 }
 
 /// All matrices needed by the generated solver (flattened row-major).
@@ -565,10 +571,10 @@ impl CircuitIR {
             tolerance: config.tolerance,
             max_iterations: config.max_iterations,
             input_node: config.input_node,
-            output_node: config.output_node,
+            output_nodes: config.output_nodes.clone(),
             input_resistance: config.input_resistance,
             oversampling_factor: os_factor,
-            output_scale: config.output_scale,
+            output_scales: config.output_scales.clone(),
         };
 
         let metadata = CircuitMetadata {

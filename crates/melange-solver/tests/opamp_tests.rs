@@ -197,7 +197,7 @@ U1 0 inv out opamp
         circuit_name: "inverting_opamp".to_string(),
         sample_rate: 44100.0,
         input_node: input_node_0,
-        output_node: output_node_0,
+        output_nodes: vec![output_node_0],
         ..CodegenConfig::default()
     };
 
@@ -240,7 +240,7 @@ C2 out 0 100n
         circuit_name: "opamp_then_diode".to_string(),
         sample_rate: 44100.0,
         input_node: input_node_0,
-        output_node: output_node_0,
+        output_nodes: vec![output_node_0],
         ..CodegenConfig::default()
     };
 

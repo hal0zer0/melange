@@ -36,11 +36,12 @@ pub fn generate_plugin_project(
     with_level_params: bool,
     pots: &[PotParamInfo],
     switches: &[SwitchParamInfo],
+    num_outputs: usize,
 ) -> Result<()> {
     std::fs::create_dir_all(output_dir.join("src"))?;
     std::fs::write(output_dir.join("Cargo.toml"), generate_cargo_toml(circuit_name))?;
     std::fs::write(output_dir.join("src/circuit.rs"), circuit_code)?;
-    std::fs::write(output_dir.join("src/lib.rs"), generate_lib_rs(circuit_name, with_level_params, pots, switches))?;
+    std::fs::write(output_dir.join("src/lib.rs"), generate_lib_rs(circuit_name, with_level_params, pots, switches, num_outputs))?;
     Ok(())
 }
 
@@ -65,7 +66,7 @@ pub(crate) fn test_generate_cargo_toml(circuit_name: &str) -> String {
 
 #[cfg(test)]
 pub(crate) fn test_generate_lib_rs(circuit_name: &str, with_level_params: bool, pots: &[PotParamInfo]) -> String {
-    generate_lib_rs(circuit_name, with_level_params, pots, &[])
+    generate_lib_rs(circuit_name, with_level_params, pots, &[], 1)
 }
 
 /// Capitalize first character, lowercase the rest (e.g., "hello" -> "Hello", "LOUD" -> "Loud").
@@ -182,13 +183,24 @@ impl Default for CircuitParams {{
     )
 }
 
-fn generate_process_loop(with_level_params: bool, pots: &[PotParamInfo], switches: &[SwitchParamInfo]) -> String {
+fn generate_process_loop(with_level_params: bool, pots: &[PotParamInfo], switches: &[SwitchParamInfo], num_outputs: usize) -> String {
     let has_any_params = with_level_params || !pots.is_empty() || !switches.is_empty();
-    if !has_any_params {
+    if !has_any_params && num_outputs <= 1 {
         return r#"        for channel_samples in buffer.iter_samples() {
             for (ch, sample) in channel_samples.into_iter().enumerate() {
                 let state = &mut self.circuit_states[ch];
-                let out = process_sample(*sample as f64, state) as f32;
+                let out = process_sample(*sample as f64, state)[0] as f32;
+                *sample = if out.is_finite() { out.clamp(-1.0, 1.0) } else { 0.0 };
+            }
+        }"#
+            .to_string();
+    }
+    if !has_any_params && num_outputs > 1 {
+        return r#"        for channel_samples in buffer.iter_samples() {
+            let input = *channel_samples.into_iter().next().unwrap() as f64;
+            let outs = process_sample(input, &mut self.circuit_state);
+            for (ch, sample) in channel_samples.into_iter().enumerate() {
+                let out = outs[ch.min(NUM_OUTPUTS - 1)] as f32;
                 *sample = if out.is_finite() { out.clamp(-1.0, 1.0) } else { 0.0 };
             }
         }"#
@@ -246,12 +258,22 @@ fn generate_process_loop(with_level_params: bool, pots: &[PotParamInfo], switche
         })
         .collect();
 
-    let sample_processing = if with_level_params {
+    let sample_processing = if num_outputs > 1 {
+        // Multi-output: handled differently (mono input → stereo output)
+        // This path shouldn't be reached because multi-output with params is handled above
+        if with_level_params {
+            "                let input = *sample as f64 * input_gain as f64;\n\
+             \x20               let out = process_sample(input, state)[0] as f32;\n\
+             \x20               let out = out * output_gain;\n"
+        } else {
+            "                let out = process_sample(*sample as f64, state)[0] as f32;\n"
+        }
+    } else if with_level_params {
         "                let input = *sample as f64 * input_gain as f64;\n\
-         \x20               let out = process_sample(input, state) as f32;\n\
+         \x20               let out = process_sample(input, state)[0] as f32;\n\
          \x20               let out = out * output_gain;\n"
     } else {
-        "                let out = process_sample(*sample as f64, state) as f32;\n"
+        "                let out = process_sample(*sample as f64, state)[0] as f32;\n"
     };
 
     format!(
@@ -305,12 +327,112 @@ const LEVEL_PARAM_DEFAULTS: &str = r#"            input_level: FloatParam::new(
             .with_string_to_value(formatters::s2v_f32_gain_to_db()),
 "#;
 
-fn generate_lib_rs(circuit_name: &str, with_level_params: bool, pots: &[PotParamInfo], switches: &[SwitchParamInfo]) -> String {
+fn generate_lib_rs(circuit_name: &str, with_level_params: bool, pots: &[PotParamInfo], switches: &[SwitchParamInfo], num_outputs: usize) -> String {
     let display_name: String = circuit_name.split('-').map(capitalize_word).collect::<Vec<_>>().join(" ");
     let clap_id = format!("com.melange.{circuit_name}");
     let vst3_id_str = compute_vst3_id(circuit_name);
     let params_struct = generate_params_struct(with_level_params, pots, switches);
-    let process_loop = generate_process_loop(with_level_params, pots, switches);
+    let process_loop = generate_process_loop(with_level_params, pots, switches, num_outputs);
+
+    // Conditional sections based on num_outputs
+    let (circuit_import, plugin_struct, plugin_default, init_method, reset_method) = if num_outputs > 1 {
+        // Multi-output: single circuit state, mono input → multi-output
+        (
+            format!("use circuit::{{process_sample, CircuitState, NUM_OUTPUTS}};"),
+            format!(
+                "pub struct CircuitPlugin {{\n\
+                 \x20   params: Arc<CircuitParams>,\n\
+                 \x20   circuit_state: CircuitState,\n\
+                 \x20   current_sample_rate: f64,\n\
+                 }}"
+            ),
+            format!(
+                "impl Default for CircuitPlugin {{\n\
+                 \x20   fn default() -> Self {{\n\
+                 \x20       Self {{\n\
+                 \x20           params: Arc::new(CircuitParams::default()),\n\
+                 \x20           circuit_state: CircuitState::default(),\n\
+                 \x20           current_sample_rate: 0.0,\n\
+                 \x20       }}\n\
+                 \x20   }}\n\
+                 }}"
+            ),
+            format!(
+                "    fn initialize(\n\
+                 \x20       &mut self,\n\
+                 \x20       _audio_io_layout: &AudioIOLayout,\n\
+                 \x20       buffer_config: &BufferConfig,\n\
+                 \x20       _context: &mut impl InitContext<Self>,\n\
+                 \x20   ) -> bool {{\n\
+                 \x20       self.current_sample_rate = buffer_config.sample_rate as f64;\n\
+                 \x20       self.circuit_state = CircuitState::default();\n\
+                 \x20       self.circuit_state.set_sample_rate(buffer_config.sample_rate as f64);\n\
+                 \x20       true\n\
+                 \x20   }}"
+            ),
+            format!(
+                "    fn reset(&mut self) {{\n\
+                 \x20       let sr = self.current_sample_rate;\n\
+                 \x20       self.circuit_state = CircuitState::default();\n\
+                 \x20       if sr > 0.0 {{\n\
+                 \x20           self.circuit_state.set_sample_rate(sr);\n\
+                 \x20       }}\n\
+                 \x20   }}"
+            ),
+        )
+    } else {
+        // Single output: per-channel state duplication (stereo from mono)
+        (
+            format!("use circuit::{{process_sample, CircuitState}};"),
+            format!(
+                "pub struct CircuitPlugin {{\n\
+                 \x20   params: Arc<CircuitParams>,\n\
+                 \x20   circuit_states: Vec<CircuitState>,\n\
+                 \x20   current_sample_rate: f64,\n\
+                 }}"
+            ),
+            format!(
+                "impl Default for CircuitPlugin {{\n\
+                 \x20   fn default() -> Self {{\n\
+                 \x20       Self {{\n\
+                 \x20           params: Arc::new(CircuitParams::default()),\n\
+                 \x20           circuit_states: vec![CircuitState::default(); 2],\n\
+                 \x20           current_sample_rate: 0.0,\n\
+                 \x20       }}\n\
+                 \x20   }}\n\
+                 }}"
+            ),
+            format!(
+                "    fn initialize(\n\
+                 \x20       &mut self,\n\
+                 \x20       audio_io_layout: &AudioIOLayout,\n\
+                 \x20       buffer_config: &BufferConfig,\n\
+                 \x20       _context: &mut impl InitContext<Self>,\n\
+                 \x20   ) -> bool {{\n\
+                 \x20       let num_channels = audio_io_layout.main_input_channels\n\
+                 \x20           .map(|c| c.get() as usize).unwrap_or(2);\n\
+                 \x20       self.current_sample_rate = buffer_config.sample_rate as f64;\n\
+                 \x20       self.circuit_states = (0..num_channels).map(|_| {{\n\
+                 \x20           let mut s = CircuitState::default();\n\
+                 \x20           s.set_sample_rate(buffer_config.sample_rate as f64);\n\
+                 \x20           s\n\
+                 \x20       }}).collect();\n\
+                 \x20       true\n\
+                 \x20   }}"
+            ),
+            format!(
+                "    fn reset(&mut self) {{\n\
+                 \x20       let sr = self.current_sample_rate;\n\
+                 \x20       for state in &mut self.circuit_states {{\n\
+                 \x20           *state = CircuitState::default();\n\
+                 \x20           if sr > 0.0 {{\n\
+                 \x20               state.set_sample_rate(sr);\n\
+                 \x20           }}\n\
+                 \x20       }}\n\
+                 \x20   }}"
+            ),
+        )
+    };
 
     format!(
         r#"// =============================================================================
@@ -336,23 +458,11 @@ use nih_plug::prelude::*;
 use std::sync::Arc;
 
 mod circuit;
-use circuit::{{process_sample, CircuitState}};
+{circuit_import}
 
-pub struct CircuitPlugin {{
-    params: Arc<CircuitParams>,
-    circuit_states: Vec<CircuitState>,
-    current_sample_rate: f64,
-}}
+{plugin_struct}
 
-impl Default for CircuitPlugin {{
-    fn default() -> Self {{
-        Self {{
-            params: Arc::new(CircuitParams::default()),
-            circuit_states: vec![CircuitState::default(); 2],
-            current_sample_rate: 0.0,
-        }}
-    }}
-}}
+{plugin_default}
 
 {params_struct}
 
@@ -382,32 +492,9 @@ impl Plugin for CircuitPlugin {{
         self.params.clone()
     }}
 
-    fn initialize(
-        &mut self,
-        audio_io_layout: &AudioIOLayout,
-        buffer_config: &BufferConfig,
-        _context: &mut impl InitContext<Self>,
-    ) -> bool {{
-        let num_channels = audio_io_layout.main_input_channels
-            .map(|c| c.get() as usize).unwrap_or(2);
-        self.current_sample_rate = buffer_config.sample_rate as f64;
-        self.circuit_states = (0..num_channels).map(|_| {{
-            let mut s = CircuitState::default();
-            s.set_sample_rate(buffer_config.sample_rate as f64);
-            s
-        }}).collect();
-        true
-    }}
+{init_method}
 
-    fn reset(&mut self) {{
-        let sr = self.current_sample_rate;
-        for state in &mut self.circuit_states {{
-            *state = CircuitState::default();
-            if sr > 0.0 {{
-                state.set_sample_rate(sr);
-            }}
-        }}
-    }}
+{reset_method}
 
     fn process(
         &mut self,
@@ -822,6 +909,7 @@ mod tests {
             false,
             &[],
             &[],
+            1,
         );
         assert!(result.is_ok(), "generate_plugin_project should succeed: {:?}", result.err());
         assert!(dir.join("Cargo.toml").exists(), "Should create Cargo.toml");
@@ -837,7 +925,7 @@ mod tests {
         let dir = std::env::temp_dir().join("melange_test_plugin_circuit");
         let _ = std::fs::remove_dir_all(&dir);
         let circuit_code = "// This is the generated circuit code\npub fn process_sample() {}";
-        let result = generate_plugin_project(&dir, circuit_code, "test", false, &[], &[]);
+        let result = generate_plugin_project(&dir, circuit_code, "test", false, &[], &[], 1);
         assert!(result.is_ok());
         let written = std::fs::read_to_string(dir.join("src/circuit.rs")).unwrap();
         assert_eq!(written, circuit_code);
@@ -848,7 +936,7 @@ mod tests {
     fn generate_plugin_project_cargo_toml_has_correct_name() {
         let dir = std::env::temp_dir().join("melange_test_plugin_name");
         let _ = std::fs::remove_dir_all(&dir);
-        let result = generate_plugin_project(&dir, "// code", "my-cool-plugin", false, &[], &[]);
+        let result = generate_plugin_project(&dir, "// code", "my-cool-plugin", false, &[], &[], 1);
         assert!(result.is_ok());
         let toml = std::fs::read_to_string(dir.join("Cargo.toml")).unwrap();
         assert!(toml.contains("name = \"my-cool-plugin\""));
@@ -859,7 +947,7 @@ mod tests {
     fn generate_plugin_project_lib_rs_has_plugin_code() {
         let dir = std::env::temp_dir().join("melange_test_plugin_lib");
         let _ = std::fs::remove_dir_all(&dir);
-        let result = generate_plugin_project(&dir, "// code", "my-plugin", false, &[], &[]);
+        let result = generate_plugin_project(&dir, "// code", "my-plugin", false, &[], &[], 1);
         assert!(result.is_ok());
         let lib_rs = std::fs::read_to_string(dir.join("src/lib.rs")).unwrap();
         assert!(lib_rs.contains("CircuitPlugin"));
@@ -873,8 +961,8 @@ mod tests {
         let dir = std::env::temp_dir().join("melange_test_plugin_idempotent");
         let _ = std::fs::remove_dir_all(&dir);
         // Generate twice, should not fail
-        let _ = generate_plugin_project(&dir, "// v1", "test", false, &[], &[]);
-        let result = generate_plugin_project(&dir, "// v2", "test", false, &[], &[]);
+        let _ = generate_plugin_project(&dir, "// v1", "test", false, &[], &[], 1);
+        let result = generate_plugin_project(&dir, "// v2", "test", false, &[], &[], 1);
         assert!(result.is_ok());
         // Second write should overwrite
         let circuit = std::fs::read_to_string(dir.join("src/circuit.rs")).unwrap();

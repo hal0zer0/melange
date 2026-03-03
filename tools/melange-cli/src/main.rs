@@ -50,7 +50,7 @@ enum Commands {
         #[arg(short, long, default_value = "in")]
         input_node: String,
 
-        /// Output node name
+        /// Output node name(s), comma-separated for multi-output (e.g., "out_l,out_r")
         #[arg(short = 'n', long, default_value = "out")]
         output_node: String,
 
@@ -441,29 +441,37 @@ fn compile_circuit_source(
         .unwrap_or("circuit")
         .to_string();
 
-    let output_node_raw = mna
-        .node_map
-        .get(output_node)
-        .copied()
-        .ok_or_else(|| anyhow::anyhow!(
-            "Output node '{}' not found in circuit. Available: {:?}",
-            output_node, mna.node_map.keys().collect::<Vec<_>>()
-        ))?;
-    if output_node_raw == 0 {
-        anyhow::bail!("Output node cannot be ground (0). Please specify a non-ground node.");
+    // Parse comma-separated output nodes
+    let output_node_names: Vec<&str> = output_node.split(',').map(|s| s.trim()).collect();
+    let mut output_node_indices = Vec::new();
+    for name in &output_node_names {
+        let raw = mna
+            .node_map
+            .get(*name)
+            .copied()
+            .ok_or_else(|| anyhow::anyhow!(
+                "Output node '{}' not found in circuit. Available: {:?}",
+                name, mna.node_map.keys().collect::<Vec<_>>()
+            ))?;
+        if raw == 0 {
+            anyhow::bail!("Output node '{}' cannot be ground (0). Please specify a non-ground node.", name);
+        }
+        output_node_indices.push(raw - 1);
     }
-    let output_node_idx = output_node_raw - 1;
+
+    // Broadcast single output_scale to all outputs
+    let output_scales = vec![output_scale; output_node_indices.len()];
 
     let config = CodegenConfig {
         circuit_name,
         input_node: input_node_idx,
-        output_node: output_node_idx,
+        output_nodes: output_node_indices.clone(),
         sample_rate,
         max_iterations: max_iter,
         tolerance,
-        output_scale,
+        output_scales,
         include_dc_op: true,
-        input_resistance,   // 1Ω (near-ideal voltage source)
+        input_resistance,
         ..CodegenConfig::default()
     };
 
@@ -530,7 +538,7 @@ fn compile_circuit_source(
                 }
             }).collect();
 
-            plugin_template::generate_plugin_project(&project_dir, &generated.code, &circuit_name, with_level_params, &pot_params, &switch_params)?;
+            plugin_template::generate_plugin_project(&project_dir, &generated.code, &circuit_name, with_level_params, &pot_params, &switch_params, output_node_indices.len())?;
 
             println!("  ✓ Done!");
             println!();

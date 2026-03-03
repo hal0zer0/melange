@@ -6,7 +6,7 @@
 ///
 /// Called by `process_sample()` through the oversampling chain.
 #[inline(always)]
-fn process_sample_inner(input: f64, state: &mut CircuitState) -> f64 {
+fn process_sample_inner(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS] {
 {% else %}/// Process a single audio sample through the circuit
 ///
 /// # Arguments
@@ -14,9 +14,9 @@ fn process_sample_inner(input: f64, state: &mut CircuitState) -> f64 {
 /// * `state` - Mutable circuit state (preserved across calls)
 ///
 /// # Returns
-/// Output voltage at OUTPUT_NODE
+/// Output voltages at OUTPUT_NODES (one per output channel)
 #[inline]
-pub fn process_sample(input: f64, state: &mut CircuitState) -> f64 {
+pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS] {
 {% endif %}
     // Validate input — handle NaN, inf, and extreme values
     let input = if input.is_finite() { input.clamp(-100.0, 100.0) } else { 0.0 };
@@ -120,7 +120,7 @@ pub fn process_sample(input: f64, state: &mut CircuitState) -> f64 {
         state.ci_i2_hist = [0.0; {{ num_coupled_inductors }}];
 {% endif %}{% for default in pot_defaults %}        state.pot_{{ loop.index0 }}_resistance = {{ default }};
 {% endfor %}        state.diag_nan_reset_count += 1;
-        return 0.0;
+        return [0.0; NUM_OUTPUTS];
     }
 
     {% if m > 0 %}
@@ -129,17 +129,20 @@ pub fn process_sample(input: f64, state: &mut CircuitState) -> f64 {
     }
     {% endif %}
 
-    // Step 9: Extract raw output and apply DC blocking filter (5Hz HPF)
-    let raw_out = v[OUTPUT_NODE];
-    let raw_out = if raw_out.is_finite() { raw_out } else { 0.0 };
-    let dc_blocked = raw_out - state.dc_block_x_prev + state.dc_block_r * state.dc_block_y_prev;
-    state.dc_block_x_prev = raw_out;
-    state.dc_block_y_prev = dc_blocked;
-
-    // Step 10: Apply output scale, track diagnostics, clamp to safe range
-    let scaled = dc_blocked * OUTPUT_SCALE;
-    let abs_out = scaled.abs();
-    if abs_out > state.diag_peak_output { state.diag_peak_output = abs_out; }
-    if abs_out > 10.0 { state.diag_clamp_count += 1; }
-    scaled.clamp(-10.0, 10.0)
+    // Step 9: Extract outputs, apply per-output DC blocking filter and scale
+    let mut output = [0.0f64; NUM_OUTPUTS];
+    for out_idx in 0..NUM_OUTPUTS {
+        let raw_out = v[OUTPUT_NODES[out_idx]];
+        let raw_out = if raw_out.is_finite() { raw_out } else { 0.0 };
+        let dc_blocked = raw_out - state.dc_block_x_prev[out_idx]
+            + state.dc_block_r * state.dc_block_y_prev[out_idx];
+        state.dc_block_x_prev[out_idx] = raw_out;
+        state.dc_block_y_prev[out_idx] = dc_blocked;
+        let scaled = dc_blocked * OUTPUT_SCALES[out_idx];
+        let abs_out = scaled.abs();
+        if abs_out > state.diag_peak_output { state.diag_peak_output = abs_out; }
+        if abs_out > 10.0 { state.diag_clamp_count += 1; }
+        output[out_idx] = scaled.clamp(-10.0, 10.0);
+    }
+    output
 }
