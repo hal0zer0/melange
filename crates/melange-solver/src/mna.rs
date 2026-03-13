@@ -518,6 +518,29 @@ pub(crate) fn inject_rhs_current(rhs: &mut [f64], node: usize, current: f64) {
     }
 }
 
+/// Stamp a voltage-controlled current source (VCCS) into the G matrix.
+///
+/// Current `I = gm * (V_ctrl_p - V_ctrl_n)` flows into `out_p` and out of `out_n`.
+/// Node indices use MNA convention: 0 = ground (excluded from matrix).
+///
+/// G stamps:
+///   G[out_p, ctrl_p] += gm
+///   G[out_p, ctrl_n] -= gm
+///   G[out_n, ctrl_p] -= gm
+///   G[out_n, ctrl_n] += gm
+fn stamp_vccs(mat: &mut [Vec<f64>], out_p: usize, out_n: usize, ctrl_p: usize, ctrl_n: usize, gm: f64) {
+    if out_p > 0 {
+        let o = out_p - 1;
+        if ctrl_p > 0 { mat[o][ctrl_p - 1] += gm; }
+        if ctrl_n > 0 { mat[o][ctrl_n - 1] -= gm; }
+    }
+    if out_n > 0 {
+        let o = out_n - 1;
+        if ctrl_p > 0 { mat[o][ctrl_p - 1] -= gm; }
+        if ctrl_n > 0 { mat[o][ctrl_n - 1] += gm; }
+    }
+}
+
 /// Builder for MNA systems.
 struct MnaBuilder {
     node_map: HashMap<String, usize>,
@@ -554,6 +577,8 @@ enum ElementType {
     Jfet,
     Mosfet,
     Opamp,
+    Vcvs,
+    Vccs,
 }
 
 impl MnaBuilder {
@@ -781,6 +806,36 @@ impl MnaBuilder {
                         stamp_conductance_to_ground(&mut mna.g, elem.nodes[0], elem.nodes[1], VS_CONDUCTANCE);
                     }
                 }
+                ElementType::Vcvs => {
+                    // Norton equivalent of VCVS: output conductance + controlled VCCS
+                    // G_out = VS_CONDUCTANCE, Gm = gain * G_out
+                    if elem.nodes.len() >= 4 {
+                        let out_p = elem.nodes[0];
+                        let out_n = elem.nodes[1];
+                        let ctrl_p = elem.nodes[2];
+                        let ctrl_n = elem.nodes[3];
+                        let g_out = VS_CONDUCTANCE;
+                        let gm = elem.value * g_out;
+
+                        // Stamp output conductance between out+ and out-
+                        stamp_conductance_to_ground(&mut mna.g, out_p, out_n, g_out);
+
+                        // Stamp VCCS: Gm from control to output
+                        stamp_vccs(&mut mna.g, out_p, out_n, ctrl_p, ctrl_n, gm);
+                    }
+                }
+                ElementType::Vccs => {
+                    // Direct VCCS stamp into G matrix
+                    if elem.nodes.len() >= 4 {
+                        let out_p = elem.nodes[0];
+                        let out_n = elem.nodes[1];
+                        let ctrl_p = elem.nodes[2];
+                        let ctrl_n = elem.nodes[3];
+                        let gm = elem.value;
+
+                        stamp_vccs(&mut mna.g, out_p, out_n, ctrl_p, ctrl_n, gm);
+                    }
+                }
                 _ => {} // Nonlinear and op-amps handled separately
             }
         }
@@ -958,6 +1013,8 @@ impl MnaBuilder {
             Element::Mosfet { nd, ng, ns, nb, .. } => vec![nd, ng, ns, nb],
             Element::Triode { n_grid, n_plate, n_cathode, .. } => vec![n_grid, n_plate, n_cathode],
             Element::Opamp { n_plus, n_minus, n_out, .. } => vec![n_plus, n_minus, n_out],
+            Element::Vcvs { out_p, out_n, ctrl_p, ctrl_n, .. } => vec![out_p, out_n, ctrl_p, ctrl_n],
+            Element::Vccs { out_p, out_n, ctrl_p, ctrl_n, .. } => vec![out_p, out_n, ctrl_p, ctrl_n],
             Element::SubcktInstance { name, .. } => {
                 return Err(MnaError::TopologyError(
                     format!("subcircuit instance '{}' not supported (expand subcircuits before MNA)", name)
@@ -1179,6 +1236,38 @@ impl MnaBuilder {
                     r_out: 1.0,
                 });
             }
+            Element::Vcvs { name, out_p, out_n, ctrl_p, ctrl_n, gain } => {
+                // VCVS is LINEAR — do NOT add to nonlinear dimension M
+                // Stored as ElementInfo for G matrix stamping (Norton equivalent)
+                self.elements.push(ElementInfo {
+                    element_type: ElementType::Vcvs,
+                    nodes: vec![
+                        self.node_map[out_p],
+                        self.node_map[out_n],
+                        self.node_map[ctrl_p],
+                        self.node_map[ctrl_n],
+                    ],
+                    value: *gain,
+                    name: name.clone(),
+                    dc_value: None,
+                });
+            }
+            Element::Vccs { name, out_p, out_n, ctrl_p, ctrl_n, gm } => {
+                // VCCS is LINEAR — do NOT add to nonlinear dimension M
+                // Stored as ElementInfo for G matrix stamping
+                self.elements.push(ElementInfo {
+                    element_type: ElementType::Vccs,
+                    nodes: vec![
+                        self.node_map[out_p],
+                        self.node_map[out_n],
+                        self.node_map[ctrl_p],
+                        self.node_map[ctrl_n],
+                    ],
+                    value: *gm,
+                    name: name.clone(),
+                    dc_value: None,
+                });
+            }
             Element::SubcktInstance { name, .. } => {
                 return Err(MnaError::TopologyError(
                     format!("subcircuit instance '{}' not supported (expand subcircuits before MNA)", name)
@@ -1356,5 +1445,198 @@ D1 out 0 D1N4148
         assert_eq!(mna.m, 1); // Only diode
         assert_eq!(mna.num_devices, 1);
         assert_eq!(mna.opamps.len(), 1);
+    }
+
+    // ===== VCCS (G element) MNA tests =====
+
+    #[test]
+    fn test_mna_vccs_basic() {
+        // G1 out 0 in 0 0.01 — current gm*(V_in - 0) flows into out
+        let spice = r#"VCCS Test
+R1 in 0 1k
+R2 out 0 1k
+G1 out 0 in 0 0.01
+"#;
+        let netlist = Netlist::parse(spice).unwrap();
+        let mna = MnaSystem::from_netlist(&netlist).unwrap();
+
+        assert_eq!(mna.m, 0); // VCCS is linear
+        assert_eq!(mna.num_devices, 0);
+
+        let in_idx = *mna.node_map.get("in").unwrap();
+        let out_idx = *mna.node_map.get("out").unwrap();
+
+        let o = out_idx - 1;
+        let i = in_idx - 1;
+
+        // G[out, in] should have +gm = +0.01
+        assert!((mna.g[o][i] - 0.01).abs() < 1e-15,
+            "G[out,in] should be +gm=0.01, got {}", mna.g[o][i]);
+
+        // G[out, out] should only have resistor conductance (1/1k = 0.001)
+        assert!((mna.g[o][o] - 0.001).abs() < 1e-15,
+            "G[out,out] should be 0.001, got {}", mna.g[o][o]);
+    }
+
+    #[test]
+    fn test_mna_vccs_differential() {
+        // G1 out 0 inp inn 0.01 — ctrl is differential
+        let spice = r#"VCCS Differential
+R1 out 0 1k
+G1 out 0 inp inn 0.01
+"#;
+        let netlist = Netlist::parse(spice).unwrap();
+        let mna = MnaSystem::from_netlist(&netlist).unwrap();
+
+        let out_idx = *mna.node_map.get("out").unwrap();
+        let inp_idx = *mna.node_map.get("inp").unwrap();
+        let inn_idx = *mna.node_map.get("inn").unwrap();
+
+        let o = out_idx - 1;
+
+        // G[out, inp] should have +gm
+        assert!((mna.g[o][inp_idx - 1] - 0.01).abs() < 1e-15,
+            "G[out,inp] should be +gm, got {}", mna.g[o][inp_idx - 1]);
+
+        // G[out, inn] should have -gm
+        assert!((mna.g[o][inn_idx - 1] - (-0.01)).abs() < 1e-15,
+            "G[out,inn] should be -gm, got {}", mna.g[o][inn_idx - 1]);
+    }
+
+    #[test]
+    fn test_mna_vccs_out_n_not_ground() {
+        // G1 out_p out_n ctrl 0 0.01 — output negative node is not ground
+        let spice = r#"VCCS Non-Ground Output
+R1 out_p 0 1k
+R2 out_n 0 1k
+G1 out_p out_n ctrl 0 0.01
+"#;
+        let netlist = Netlist::parse(spice).unwrap();
+        let mna = MnaSystem::from_netlist(&netlist).unwrap();
+
+        let op = *mna.node_map.get("out_p").unwrap() - 1;
+        let on = *mna.node_map.get("out_n").unwrap() - 1;
+        let ctrl = *mna.node_map.get("ctrl").unwrap() - 1;
+
+        // G[out_p, ctrl] += gm
+        assert!((mna.g[op][ctrl] - 0.01).abs() < 1e-15);
+        // G[out_n, ctrl] -= gm
+        assert!((mna.g[on][ctrl] - (-0.01)).abs() < 1e-15);
+    }
+
+    // ===== VCVS (E element) MNA tests =====
+
+    #[test]
+    fn test_mna_vcvs_basic() {
+        // E1 out 0 in 0 10 — voltage gain of 10
+        let spice = r#"VCVS Test
+R1 in 0 1k
+R2 out 0 1k
+E1 out 0 in 0 10
+"#;
+        let netlist = Netlist::parse(spice).unwrap();
+        let mna = MnaSystem::from_netlist(&netlist).unwrap();
+
+        assert_eq!(mna.m, 0); // VCVS is linear
+        assert_eq!(mna.num_devices, 0);
+
+        let in_idx = *mna.node_map.get("in").unwrap();
+        let out_idx = *mna.node_map.get("out").unwrap();
+
+        let o = out_idx - 1;
+        let i = in_idx - 1;
+
+        // VCVS stamps: G_out at output (VS_CONDUCTANCE = 1e6)
+        // G[out, out] should have VS_CONDUCTANCE + 1/R2
+        let g_r2 = 1.0 / 1000.0;
+        let expected = VS_CONDUCTANCE + g_r2;
+        assert!((mna.g[o][o] - expected).abs() / expected < 1e-10,
+            "G[out,out] should include VS_CONDUCTANCE, got {}", mna.g[o][o]);
+
+        // G[out, in] should have gain * VS_CONDUCTANCE = 10 * 1e6 = 1e7
+        let gm = 10.0 * VS_CONDUCTANCE;
+        assert!((mna.g[o][i] - gm).abs() / gm < 1e-10,
+            "G[out,in] should be gain*VS_CONDUCTANCE={}, got {}", gm, mna.g[o][i]);
+    }
+
+    #[test]
+    fn test_mna_vcvs_differential_output() {
+        // E1 out_p out_n in 0 5 — VCVS with non-ground output negative
+        let spice = r#"VCVS Diff Output
+R1 out_p 0 1k
+R2 out_n 0 1k
+E1 out_p out_n in 0 5
+"#;
+        let netlist = Netlist::parse(spice).unwrap();
+        let mna = MnaSystem::from_netlist(&netlist).unwrap();
+
+        let op = *mna.node_map.get("out_p").unwrap() - 1;
+        let on = *mna.node_map.get("out_n").unwrap() - 1;
+        let inp = *mna.node_map.get("in").unwrap() - 1;
+
+        let g_out = VS_CONDUCTANCE;
+        let gm = 5.0 * g_out;
+
+        // Output conductance: stamp_conductance_to_ground stamps between out_p and out_n
+        // G[out_p, out_p] += G_out
+        // G[out_n, out_n] += G_out
+        // G[out_p, out_n] -= G_out
+        // G[out_n, out_p] -= G_out
+        let g_r = 1.0 / 1000.0;
+        assert!((mna.g[op][op] - (g_out + g_r)).abs() / g_out < 1e-10);
+        assert!((mna.g[on][on] - (g_out + g_r)).abs() / g_out < 1e-10);
+        assert!((mna.g[op][on] - (-g_out)).abs() / g_out < 1e-10);
+        assert!((mna.g[on][op] - (-g_out)).abs() / g_out < 1e-10);
+
+        // VCCS stamp: gm from ctrl to output
+        // G[out_p, in] += gm
+        assert!((mna.g[op][inp] - gm).abs() / gm < 1e-10);
+        // G[out_n, in] -= gm
+        assert!((mna.g[on][inp] - (-gm)).abs() / gm < 1e-10);
+    }
+
+    #[test]
+    fn test_mna_vccs_with_opamp() {
+        // VCCS and op-amp coexist in same circuit
+        let spice = r#"VCCS With Opamp
+R1 in inv 10k
+R2 inv out 100k
+U1 0 inv out opamp
+G1 out2 0 out 0 0.001
+R3 out2 0 1k
+.model opamp OA(AOL=200000)
+"#;
+        let netlist = Netlist::parse(spice).unwrap();
+        let mna = MnaSystem::from_netlist(&netlist).unwrap();
+
+        assert_eq!(mna.m, 0); // Both linear
+        assert_eq!(mna.opamps.len(), 1);
+
+        let out_idx = *mna.node_map.get("out").unwrap();
+        let out2_idx = *mna.node_map.get("out2").unwrap();
+
+        let o2 = out2_idx - 1;
+        let o = out_idx - 1;
+
+        // G[out2, out] should have VCCS gm = 0.001
+        assert!((mna.g[o2][o] - 0.001).abs() < 1e-15,
+            "G[out2,out] should be VCCS gm=0.001, got {}", mna.g[o2][o]);
+    }
+
+    #[test]
+    fn test_mna_vcvs_no_nonlinear_dimensions() {
+        // VCVS + diode: only the diode adds nonlinear dimensions
+        let spice = r#"VCVS With Diode
+R1 in 0 1k
+E1 mid 0 in 0 10
+D1 mid out D1N4148
+C1 out 0 1u
+.model D1N4148 D(IS=1e-15)
+"#;
+        let netlist = Netlist::parse(spice).unwrap();
+        let mna = MnaSystem::from_netlist(&netlist).unwrap();
+
+        assert_eq!(mna.m, 1); // Only diode
+        assert_eq!(mna.num_devices, 1);
     }
 }

@@ -1,7 +1,7 @@
 //! SPICE netlist parser.
 //!
 //! Parses a subset of SPICE sufficient for audio circuits:
-//! - Components: R, C, L, V (DC/AC), I, D, Q, J, M, U (op-amp), X
+//! - Components: R, C, L, V (DC/AC), I, D, Q, J, M, U (op-amp), E (VCVS), G (VCCS), X
 //! - Directives: .model, .subckt, .param, .pot, .switch, .input_impedance, .end
 //!
 //! The parser builds an AST (Abstract Syntax Tree) representation
@@ -303,6 +303,39 @@ pub enum Element {
         /// Model name (references .model with TUBE type)
         model: String,
     },
+    /// Voltage-Controlled Voltage Source: Ename out+ out- ctrl+ ctrl- gain
+    ///
+    /// Modeled as Norton equivalent (VCCS + output conductance).
+    /// Does NOT add nonlinear dimensions.
+    Vcvs {
+        name: String,
+        /// Positive output node
+        out_p: String,
+        /// Negative output node
+        out_n: String,
+        /// Positive control node
+        ctrl_p: String,
+        /// Negative control node
+        ctrl_n: String,
+        /// Voltage gain
+        gain: f64,
+    },
+    /// Voltage-Controlled Current Source: Gname out+ out- ctrl+ ctrl- gm
+    ///
+    /// Direct G matrix stamp. Does NOT add nonlinear dimensions.
+    Vccs {
+        name: String,
+        /// Positive output node (current flows into this node)
+        out_p: String,
+        /// Negative output node (current flows out of this node)
+        out_n: String,
+        /// Positive control node
+        ctrl_p: String,
+        /// Negative control node
+        ctrl_n: String,
+        /// Transconductance (A/V)
+        gm: f64,
+    },
     /// Subcircuit instance: Xname nodes... subcktname
     SubcktInstance {
         name: String,
@@ -326,6 +359,8 @@ impl Element {
             | Element::Mosfet { name, .. }
             | Element::Opamp { name, .. }
             | Element::Triode { name, .. }
+            | Element::Vcvs { name, .. }
+            | Element::Vccs { name, .. }
             | Element::SubcktInstance { name, .. } => name,
         }
     }
@@ -442,6 +477,22 @@ impl Element {
                 n_plate: remap(n_plate),
                 n_cathode: remap(n_cathode),
                 model: model.clone(),
+            },
+            Element::Vcvs { name, out_p, out_n, ctrl_p, ctrl_n, gain } => Element::Vcvs {
+                name: prefixed(name),
+                out_p: remap(out_p),
+                out_n: remap(out_n),
+                ctrl_p: remap(ctrl_p),
+                ctrl_n: remap(ctrl_n),
+                gain: *gain,
+            },
+            Element::Vccs { name, out_p, out_n, ctrl_p, ctrl_n, gm } => Element::Vccs {
+                name: prefixed(name),
+                out_p: remap(out_p),
+                out_n: remap(out_n),
+                ctrl_p: remap(ctrl_p),
+                ctrl_n: remap(ctrl_n),
+                gm: *gm,
             },
             Element::SubcktInstance { name, nodes, subckt } => Element::SubcktInstance {
                 name: prefixed(name),
@@ -1225,6 +1276,8 @@ impl Parser {
             'M' => self.parse_mosfet(&parts),
             'T' => self.parse_triode(&parts),
             'U' => self.parse_opamp(&parts),
+            'E' => self.parse_vcvs(&parts),
+            'G' => self.parse_vccs(&parts),
             'X' => self.parse_subckt_instance(&parts),
             _ => Err(self.error(format!("Unknown element type: {}", first_char))),
         }
@@ -1407,6 +1460,46 @@ impl Parser {
             n_plate: parts[2].to_string(),
             n_cathode: parts[3].to_string(),
             model: parts[4].to_string(),
+        })
+    }
+
+    fn parse_vcvs(&self, parts: &[&str]) -> Result<Element, ParseError> {
+        // Ename out+ out- ctrl+ ctrl- gain
+        self.require_parts(parts, 6, "Ename out+ out- ctrl+ ctrl- gain")?;
+        let gain = parse_value(parts[5])
+            .map_err(|_| self.error(format!("Invalid VCVS gain: {}", parts[5])))?;
+        if !gain.is_finite() || gain == 0.0 {
+            return Err(self.error(format!(
+                "VCVS gain must be finite and non-zero, got {}", gain
+            )));
+        }
+        Ok(Element::Vcvs {
+            name: parts[0].to_string(),
+            out_p: parts[1].to_string(),
+            out_n: parts[2].to_string(),
+            ctrl_p: parts[3].to_string(),
+            ctrl_n: parts[4].to_string(),
+            gain,
+        })
+    }
+
+    fn parse_vccs(&self, parts: &[&str]) -> Result<Element, ParseError> {
+        // Gname out+ out- ctrl+ ctrl- gm
+        self.require_parts(parts, 6, "Gname out+ out- ctrl+ ctrl- gm")?;
+        let gm = parse_value(parts[5])
+            .map_err(|_| self.error(format!("Invalid VCCS transconductance: {}", parts[5])))?;
+        if !gm.is_finite() || gm == 0.0 {
+            return Err(self.error(format!(
+                "VCCS transconductance must be finite and non-zero, got {}", gm
+            )));
+        }
+        Ok(Element::Vccs {
+            name: parts[0].to_string(),
+            out_p: parts[1].to_string(),
+            out_n: parts[2].to_string(),
+            ctrl_p: parts[3].to_string(),
+            ctrl_n: parts[4].to_string(),
+            gm,
         })
     }
 
@@ -2344,5 +2437,147 @@ U1 0 inv out opamp
         let netlist = Netlist::parse(spice).unwrap();
         assert_eq!(netlist.elements.len(), 3);
         assert!(matches!(&netlist.elements[2], Element::Opamp { .. }));
+    }
+
+    // ======================================================================
+    // VCVS (E) and VCCS (G) controlled source tests
+    // ======================================================================
+
+    #[test]
+    fn test_parse_vcvs_basic() {
+        let spice = "Test\nE1 out 0 in 0 10\n";
+        let netlist = Netlist::parse(spice).unwrap();
+        assert_eq!(netlist.elements.len(), 1);
+        match &netlist.elements[0] {
+            Element::Vcvs { name, out_p, out_n, ctrl_p, ctrl_n, gain } => {
+                assert_eq!(name, "E1");
+                assert_eq!(out_p, "out");
+                assert_eq!(out_n, "0");
+                assert_eq!(ctrl_p, "in");
+                assert_eq!(ctrl_n, "0");
+                assert_eq!(*gain, 10.0);
+            }
+            _ => panic!("Expected VCVS"),
+        }
+    }
+
+    #[test]
+    fn test_parse_vccs_basic() {
+        let spice = "Test\nG1 out 0 in 0 1m\n";
+        let netlist = Netlist::parse(spice).unwrap();
+        assert_eq!(netlist.elements.len(), 1);
+        match &netlist.elements[0] {
+            Element::Vccs { name, out_p, out_n, ctrl_p, ctrl_n, gm } => {
+                assert_eq!(name, "G1");
+                assert_eq!(out_p, "out");
+                assert_eq!(out_n, "0");
+                assert_eq!(ctrl_p, "in");
+                assert_eq!(ctrl_n, "0");
+                assert!((gm - 1e-3).abs() < 1e-12, "Expected 1m = 1e-3, got {}", gm);
+            }
+            _ => panic!("Expected VCCS"),
+        }
+    }
+
+    #[test]
+    fn test_parse_vcvs_engineering_notation() {
+        let spice = "Test\nE1 out 0 in 0 1k\n";
+        let netlist = Netlist::parse(spice).unwrap();
+        match &netlist.elements[0] {
+            Element::Vcvs { gain, .. } => {
+                assert_eq!(*gain, 1000.0);
+            }
+            _ => panic!("Expected VCVS"),
+        }
+    }
+
+    #[test]
+    fn test_parse_vccs_engineering_notation() {
+        let spice = "Test\nG1 out 0 in 0 100u\n";
+        let netlist = Netlist::parse(spice).unwrap();
+        match &netlist.elements[0] {
+            Element::Vccs { gm, .. } => {
+                assert!((*gm - 100e-6).abs() < 1e-15, "Expected 100u, got {}", gm);
+            }
+            _ => panic!("Expected VCCS"),
+        }
+    }
+
+    #[test]
+    fn test_parse_vcvs_negative_gain() {
+        // Negative gain is valid for VCVS (e.g., inverting amplifier)
+        let spice = "Test\nE1 out 0 in 0 -10\n";
+        let netlist = Netlist::parse(spice).unwrap();
+        match &netlist.elements[0] {
+            Element::Vcvs { gain, .. } => {
+                assert_eq!(*gain, -10.0);
+            }
+            _ => panic!("Expected VCVS"),
+        }
+    }
+
+    #[test]
+    fn test_parse_vccs_negative_gm() {
+        // Negative gm is valid for VCCS
+        let spice = "Test\nG1 out 0 in 0 -0.01\n";
+        let netlist = Netlist::parse(spice).unwrap();
+        match &netlist.elements[0] {
+            Element::Vccs { gm, .. } => {
+                assert_eq!(*gm, -0.01);
+            }
+            _ => panic!("Expected VCCS"),
+        }
+    }
+
+    #[test]
+    fn test_parse_vcvs_zero_gain_rejected() {
+        let spice = "Test\nE1 out 0 in 0 0\n";
+        let result = Netlist::parse(spice);
+        assert!(result.is_err(), "Zero VCVS gain should be rejected");
+    }
+
+    #[test]
+    fn test_parse_vccs_zero_gm_rejected() {
+        let spice = "Test\nG1 out 0 in 0 0\n";
+        let result = Netlist::parse(spice);
+        assert!(result.is_err(), "Zero VCCS gm should be rejected");
+    }
+
+    #[test]
+    fn test_parse_vcvs_missing_nodes() {
+        let spice = "Test\nE1 out 0 in\n";
+        let result = Netlist::parse(spice);
+        assert!(result.is_err(), "VCVS with missing nodes should be rejected");
+    }
+
+    #[test]
+    fn test_parse_vccs_missing_value() {
+        let spice = "Test\nG1 out 0 in 0\n";
+        let result = Netlist::parse(spice);
+        assert!(result.is_err(), "VCCS with missing gm should be rejected");
+    }
+
+    #[test]
+    fn test_parse_vcvs_duplicate_name() {
+        let spice = "Test\nE1 out 0 in 0 10\nE1 out2 0 in2 0 5\n";
+        let result = Netlist::parse(spice);
+        assert!(result.is_err(), "Duplicate E1 should be rejected");
+    }
+
+    #[test]
+    fn test_parse_vcvs_four_nodes() {
+        // All four nodes non-ground
+        let spice = "Test\nE1 out_p out_n ctrl_p ctrl_n 2.5\n";
+        let netlist = Netlist::parse(spice).unwrap();
+        match &netlist.elements[0] {
+            Element::Vcvs { out_p, out_n, ctrl_p, ctrl_n, gain, .. } => {
+                assert_eq!(out_p, "out_p");
+                assert_eq!(out_n, "out_n");
+                assert_eq!(ctrl_p, "ctrl_p");
+                assert_eq!(ctrl_n, "ctrl_n");
+                assert_eq!(*gain, 2.5);
+            }
+            _ => panic!("Expected VCVS"),
+        }
     }
 }
