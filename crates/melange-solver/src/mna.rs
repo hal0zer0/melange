@@ -251,6 +251,33 @@ impl MnaSystem {
         self.c[j][i] -= capacitance;
     }
 
+    /// Stamp a capacitor between two 1-indexed nodes (0 = ground).
+    ///
+    /// Unlike `stamp_capacitor` which takes 0-indexed node numbers (MNA internal),
+    /// this takes netlist-style 1-indexed nodes where 0 means ground. This is
+    /// useful for stamping junction capacitances computed from device node indices.
+    pub fn stamp_capacitor_raw(&mut self, node_a: usize, node_b: usize, cap: f64) {
+        if cap <= 0.0 {
+            return;
+        }
+        match (node_a > 0, node_b > 0) {
+            (true, true) => {
+                let (a, b) = (node_a - 1, node_b - 1);
+                self.c[a][a] += cap;
+                self.c[b][b] += cap;
+                self.c[a][b] -= cap;
+                self.c[b][a] -= cap;
+            }
+            (true, false) => {
+                self.c[node_a - 1][node_a - 1] += cap;
+            }
+            (false, true) => {
+                self.c[node_b - 1][node_b - 1] += cap;
+            }
+            (false, false) => {}
+        }
+    }
+
     /// Stamp input conductance to ground at a node.
     /// 
     /// This represents the Thevenin equivalent of the input source:
@@ -425,6 +452,76 @@ impl MnaSystem {
     pub fn get_a_neg_matrix(&self, sample_rate: f64) -> Vec<Vec<f64>> {
         self.build_discretized_matrix(sample_rate, -1.0)
     }
+
+    /// Add parasitic junction capacitances across nonlinear device terminals.
+    ///
+    /// Stamps a small capacitor across each physical junction of every nonlinear
+    /// device. This models real semiconductor junction capacitance and ensures
+    /// the C matrix is non-trivial for purely resistive nonlinear circuits,
+    /// preventing the trapezoidal-rule A matrix from being singular.
+    ///
+    /// Junction topology per device type:
+    /// - **Diode**: anode-cathode (Cj)
+    /// - **BJT**: base-emitter (Cje) + base-collector (Cjc)
+    /// - **JFET**: gate-source (Cgs) + gate-drain (Cgd)
+    /// - **MOSFET**: gate-source (Cgs) + gate-drain (Cgd)
+    /// - **Tube**: grid-cathode (Cgk) + plate-cathode (Cpk)
+    ///
+    /// Uses [`PARASITIC_CAP`] (10pF) and [`stamp_capacitor_raw`](Self::stamp_capacitor_raw).
+    pub fn add_parasitic_caps(&mut self) {
+        // Collect junction node pairs first to avoid borrowing self immutably
+        // (nonlinear_devices) and mutably (stamp_capacitor_raw) at the same time.
+        let mut junctions: Vec<(String, usize, usize)> = Vec::new();
+
+        for dev in &self.nonlinear_devices {
+            match dev.device_type {
+                NonlinearDeviceType::Diode => {
+                    // node_indices: [anode, cathode]
+                    junctions.push((dev.name.clone(), dev.node_indices[0], dev.node_indices[1]));
+                }
+                NonlinearDeviceType::Bjt => {
+                    // node_indices: [collector, base, emitter]
+                    let (nc, nb, ne) = (dev.node_indices[0], dev.node_indices[1], dev.node_indices[2]);
+                    // B-E junction (Cje)
+                    junctions.push((dev.name.clone(), nb, ne));
+                    // B-C junction (Cjc)
+                    junctions.push((dev.name.clone(), nb, nc));
+                }
+                NonlinearDeviceType::Jfet => {
+                    // node_indices: [drain, gate, source]
+                    let (nd, ng, ns) = (dev.node_indices[0], dev.node_indices[1], dev.node_indices[2]);
+                    // G-S junction (Cgs)
+                    junctions.push((dev.name.clone(), ng, ns));
+                    // G-D junction (Cgd)
+                    junctions.push((dev.name.clone(), ng, nd));
+                }
+                NonlinearDeviceType::Mosfet => {
+                    // node_indices: [drain, gate, source, bulk]
+                    let (nd, ng, ns) = (dev.node_indices[0], dev.node_indices[1], dev.node_indices[2]);
+                    // G-S junction (Cgs)
+                    junctions.push((dev.name.clone(), ng, ns));
+                    // G-D junction (Cgd)
+                    junctions.push((dev.name.clone(), ng, nd));
+                }
+                NonlinearDeviceType::Tube => {
+                    // node_indices: [grid, plate, cathode]
+                    let (ng, np, nk) = (dev.node_indices[0], dev.node_indices[1], dev.node_indices[2]);
+                    // Grid-cathode (Cgk)
+                    junctions.push((dev.name.clone(), ng, nk));
+                    // Plate-cathode (Cpk)
+                    junctions.push((dev.name.clone(), np, nk));
+                }
+            }
+        }
+
+        for (name, node_a, node_b) in &junctions {
+            self.stamp_capacitor_raw(*node_a, *node_b, PARASITIC_CAP);
+            log::debug!(
+                "Parasitic cap {}: node({})-node({}) = {:.0e} F",
+                name, node_a, node_b, PARASITIC_CAP,
+            );
+        }
+    }
 }
 
 /// Norton equivalent conductance for voltage sources [S].
@@ -432,6 +529,18 @@ impl MnaSystem {
 /// A large conductance value used to model ideal voltage sources as
 /// Norton equivalents (current source + parallel conductance).
 pub const VS_CONDUCTANCE: f64 = 1e6;
+
+/// Parasitic junction capacitance for nonlinear device stabilization [F].
+///
+/// 10pF is representative of small-signal semiconductor junction capacitances
+/// (typical Cj = 2-10pF for diodes, Cbc = 2-8pF for BJTs). At audio
+/// frequencies this is negligible (10pF @ 20kHz = ~800kOhm impedance) but
+/// provides enough reactance for the trapezoidal-rule DK discretization to
+/// form a well-conditioned A matrix (2C/T ~ 8.8e-7 at 44.1kHz).
+///
+/// Caps are stamped *across device junctions* (not node-to-ground) to model
+/// physical junction capacitance without introducing artificial ground coupling.
+pub const PARASITIC_CAP: f64 = 10e-12;
 
 /// Error type for MNA assembly.
 #[derive(Debug, Clone)]
@@ -1638,5 +1747,237 @@ C1 out 0 1u
 
         assert_eq!(mna.m, 1); // Only diode
         assert_eq!(mna.num_devices, 1);
+    }
+
+    // ===== Parasitic capacitance tests =====
+
+    #[test]
+    fn test_parasitic_cap_value() {
+        assert!((PARASITIC_CAP - 10e-12).abs() < 1e-25, "PARASITIC_CAP should be 10pF");
+    }
+
+    #[test]
+    fn test_parasitic_cap_diode_across_junction() {
+        // Diode: one cap between anode and cathode (across junction)
+        let spice = r#"Diode Parasitic
+D1 in out D1N4148
+R1 out 0 1k
+.model D1N4148 D(IS=1e-15)
+"#;
+        let netlist = Netlist::parse(spice).unwrap();
+        let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
+
+        // C matrix should be all zeros before parasitic caps
+        for i in 0..mna.n {
+            for j in 0..mna.n {
+                assert_eq!(mna.c[i][j], 0.0, "C[{i}][{j}] should be 0 before parasitic caps");
+            }
+        }
+
+        mna.add_parasitic_caps();
+
+        let anode = *mna.node_map.get("in").unwrap();
+        let cathode = *mna.node_map.get("out").unwrap();
+        let a = anode - 1; // 0-indexed
+        let k = cathode - 1;
+
+        // Diagonal: both nodes get +PARASITIC_CAP
+        assert!((mna.c[a][a] - PARASITIC_CAP).abs() < 1e-25,
+            "C[anode][anode] should be PARASITIC_CAP, got {}", mna.c[a][a]);
+        assert!((mna.c[k][k] - PARASITIC_CAP).abs() < 1e-25,
+            "C[cathode][cathode] should be PARASITIC_CAP, got {}", mna.c[k][k]);
+
+        // Off-diagonal: negative (cap between nodes, not to ground)
+        assert!((mna.c[a][k] + PARASITIC_CAP).abs() < 1e-25,
+            "C[anode][cathode] should be -PARASITIC_CAP, got {}", mna.c[a][k]);
+        assert!((mna.c[k][a] + PARASITIC_CAP).abs() < 1e-25,
+            "C[cathode][anode] should be -PARASITIC_CAP, got {}", mna.c[k][a]);
+    }
+
+    #[test]
+    fn test_parasitic_cap_bjt_two_junctions() {
+        // BJT: two caps — B-E and B-C
+        let spice = r#"BJT Parasitic
+Q1 coll base emit 2N2222
+R1 coll 0 1k
+R2 base 0 100k
+.model 2N2222 NPN(IS=1e-15 BF=200)
+"#;
+        let netlist = Netlist::parse(spice).unwrap();
+        let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
+        mna.add_parasitic_caps();
+
+        let nc = *mna.node_map.get("coll").unwrap() - 1;
+        let nb = *mna.node_map.get("base").unwrap() - 1;
+        let ne = *mna.node_map.get("emit").unwrap() - 1;
+
+        // Base gets caps from both B-E and B-C junctions: 2 * PARASITIC_CAP
+        assert!((mna.c[nb][nb] - 2.0 * PARASITIC_CAP).abs() < 1e-25,
+            "C[base][base] should be 2*PARASITIC_CAP, got {}", mna.c[nb][nb]);
+
+        // Collector gets cap from B-C junction only
+        assert!((mna.c[nc][nc] - PARASITIC_CAP).abs() < 1e-25,
+            "C[coll][coll] should be PARASITIC_CAP, got {}", mna.c[nc][nc]);
+
+        // Emitter gets cap from B-E junction only
+        assert!((mna.c[ne][ne] - PARASITIC_CAP).abs() < 1e-25,
+            "C[emit][emit] should be PARASITIC_CAP, got {}", mna.c[ne][ne]);
+
+        // Off-diagonal: B-E junction
+        assert!((mna.c[nb][ne] + PARASITIC_CAP).abs() < 1e-25,
+            "C[base][emit] should be -PARASITIC_CAP, got {}", mna.c[nb][ne]);
+        assert!((mna.c[ne][nb] + PARASITIC_CAP).abs() < 1e-25,
+            "C[emit][base] should be -PARASITIC_CAP, got {}", mna.c[ne][nb]);
+
+        // Off-diagonal: B-C junction
+        assert!((mna.c[nb][nc] + PARASITIC_CAP).abs() < 1e-25,
+            "C[base][coll] should be -PARASITIC_CAP, got {}", mna.c[nb][nc]);
+        assert!((mna.c[nc][nb] + PARASITIC_CAP).abs() < 1e-25,
+            "C[coll][base] should be -PARASITIC_CAP, got {}", mna.c[nc][nb]);
+
+        // Collector-Emitter: no direct parasitic cap
+        assert!((mna.c[nc][ne]).abs() < 1e-25,
+            "C[coll][emit] should be 0, got {}", mna.c[nc][ne]);
+    }
+
+    #[test]
+    fn test_parasitic_cap_jfet_two_junctions() {
+        // JFET: two caps — G-S and G-D
+        let spice = r#"JFET Parasitic
+J1 drain gate source JN
+R1 drain 0 1k
+R2 gate 0 1M
+.model JN NJ(VTO=-2.0)
+"#;
+        let netlist = Netlist::parse(spice).unwrap();
+        let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
+        mna.add_parasitic_caps();
+
+        let nd = *mna.node_map.get("drain").unwrap() - 1;
+        let ng = *mna.node_map.get("gate").unwrap() - 1;
+        let ns = *mna.node_map.get("source").unwrap() - 1;
+
+        // Gate gets caps from both G-S and G-D junctions: 2 * PARASITIC_CAP
+        assert!((mna.c[ng][ng] - 2.0 * PARASITIC_CAP).abs() < 1e-25,
+            "C[gate][gate] should be 2*PARASITIC_CAP, got {}", mna.c[ng][ng]);
+
+        // Off-diagonal: G-S
+        assert!((mna.c[ng][ns] + PARASITIC_CAP).abs() < 1e-25,
+            "C[gate][source] should be -PARASITIC_CAP, got {}", mna.c[ng][ns]);
+
+        // Off-diagonal: G-D
+        assert!((mna.c[ng][nd] + PARASITIC_CAP).abs() < 1e-25,
+            "C[gate][drain] should be -PARASITIC_CAP, got {}", mna.c[ng][nd]);
+
+        // Drain-Source: no direct parasitic cap
+        assert!((mna.c[nd][ns]).abs() < 1e-25,
+            "C[drain][source] should be 0, got {}", mna.c[nd][ns]);
+    }
+
+    #[test]
+    fn test_parasitic_cap_mosfet_two_junctions() {
+        // MOSFET: two caps — G-S and G-D
+        let spice = r#"MOSFET Parasitic
+M1 drain gate source source NM1
+R1 drain 0 1k
+.model NM1 NM(VTO=2.0 KP=0.1)
+"#;
+        let netlist = Netlist::parse(spice).unwrap();
+        let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
+        mna.add_parasitic_caps();
+
+        let nd = *mna.node_map.get("drain").unwrap() - 1;
+        let ng = *mna.node_map.get("gate").unwrap() - 1;
+        let ns = *mna.node_map.get("source").unwrap() - 1;
+
+        // Gate gets caps from G-S and G-D: 2 * PARASITIC_CAP
+        assert!((mna.c[ng][ng] - 2.0 * PARASITIC_CAP).abs() < 1e-25,
+            "C[gate][gate] should be 2*PARASITIC_CAP, got {}", mna.c[ng][ng]);
+
+        // Off-diagonal: G-S
+        assert!((mna.c[ng][ns] + PARASITIC_CAP).abs() < 1e-25,
+            "C[gate][source] should be -PARASITIC_CAP, got {}", mna.c[ng][ns]);
+
+        // Off-diagonal: G-D
+        assert!((mna.c[ng][nd] + PARASITIC_CAP).abs() < 1e-25,
+            "C[gate][drain] should be -PARASITIC_CAP, got {}", mna.c[ng][nd]);
+    }
+
+    #[test]
+    fn test_parasitic_cap_tube_two_junctions() {
+        // Tube: two caps — grid-cathode (Cgk) and plate-cathode (Cpk)
+        let spice = r#"Tube Parasitic
+T1 grid plate cathode 12AX7
+R1 plate 0 100k
+R2 grid 0 1M
+.model 12AX7 TRIODE(MU=100 EX=1.4 KG1=1060 KP=600 KVB=300)
+"#;
+        let netlist = Netlist::parse(spice).unwrap();
+        let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
+        mna.add_parasitic_caps();
+
+        let ng = *mna.node_map.get("grid").unwrap() - 1;
+        let np = *mna.node_map.get("plate").unwrap() - 1;
+        let nk = *mna.node_map.get("cathode").unwrap() - 1;
+
+        // Cathode gets caps from both Cgk and Cpk: 2 * PARASITIC_CAP
+        assert!((mna.c[nk][nk] - 2.0 * PARASITIC_CAP).abs() < 1e-25,
+            "C[cathode][cathode] should be 2*PARASITIC_CAP, got {}", mna.c[nk][nk]);
+
+        // Grid gets cap from Cgk only
+        assert!((mna.c[ng][ng] - PARASITIC_CAP).abs() < 1e-25,
+            "C[grid][grid] should be PARASITIC_CAP, got {}", mna.c[ng][ng]);
+
+        // Plate gets cap from Cpk only
+        assert!((mna.c[np][np] - PARASITIC_CAP).abs() < 1e-25,
+            "C[plate][plate] should be PARASITIC_CAP, got {}", mna.c[np][np]);
+
+        // Off-diagonal: grid-cathode
+        assert!((mna.c[ng][nk] + PARASITIC_CAP).abs() < 1e-25,
+            "C[grid][cathode] should be -PARASITIC_CAP, got {}", mna.c[ng][nk]);
+        assert!((mna.c[nk][ng] + PARASITIC_CAP).abs() < 1e-25,
+            "C[cathode][grid] should be -PARASITIC_CAP, got {}", mna.c[nk][ng]);
+
+        // Off-diagonal: plate-cathode
+        assert!((mna.c[np][nk] + PARASITIC_CAP).abs() < 1e-25,
+            "C[plate][cathode] should be -PARASITIC_CAP, got {}", mna.c[np][nk]);
+        assert!((mna.c[nk][np] + PARASITIC_CAP).abs() < 1e-25,
+            "C[cathode][plate] should be -PARASITIC_CAP, got {}", mna.c[nk][np]);
+
+        // Grid-Plate: no direct parasitic cap
+        assert!((mna.c[ng][np]).abs() < 1e-25,
+            "C[grid][plate] should be 0, got {}", mna.c[ng][np]);
+    }
+
+    #[test]
+    fn test_parasitic_cap_count_per_device() {
+        // Verify correct number of junction caps: 1 for diode, 2 for BJT
+        // All device terminals are non-ground so every junction produces off-diagonal entries
+        let spice = r#"Mixed Devices
+D1 in mid D1N4148
+Q1 out mid emit 2N2222
+R1 out 0 1k
+R2 emit 0 100
+.model D1N4148 D(IS=1e-15)
+.model 2N2222 NPN(IS=1e-15 BF=200)
+"#;
+        let netlist = Netlist::parse(spice).unwrap();
+        let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
+        mna.add_parasitic_caps();
+
+        // Count total nonzero off-diagonal C entries (each junction adds 2 off-diag entries)
+        let mut off_diag_count = 0;
+        for i in 0..mna.n {
+            for j in 0..mna.n {
+                if i != j && mna.c[i][j].abs() > 1e-25 {
+                    off_diag_count += 1;
+                }
+            }
+        }
+        // Diode: 1 junction (anode-cathode) = 2 off-diagonal entries
+        // BJT: 2 junctions (B-E + B-C, all non-ground) = 4 off-diagonal entries
+        // Total: 6 off-diagonal entries
+        assert_eq!(off_diag_count, 6,
+            "Expected 6 off-diagonal C entries (1 diode junction + 2 BJT junctions), got {off_diag_count}");
     }
 }
