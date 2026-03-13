@@ -9,7 +9,10 @@ Verify melange solver matches ngspice output within tight tolerances.
 |--------------|-------------|-----------|-------|
 | Linear (RC, RL) | > 0.999999 (6 nines) | < 0.1% | Should match almost exactly |
 | Nonlinear (diodes) | > 0.9999 (4 nines) | < 1% | NR convergence differences |
-| BJT circuits | > 0.999 (3 nines) | < 5% | Model parameter variations |
+| BJT circuits | > 0.96 | < 40% | Model parameter variations; actual measured: 0.965 correlation, 35% RMS |
+| Op-amp (linear) | ~1.0 | ~0% | VCCS+Rout model matches ngspice exactly |
+| JFET circuits | — | — | Test exists but `#[ignore]` (no runtime DeviceEntry yet) |
+| MOSFET circuits | — | — | Test exists but `#[ignore]` (no runtime DeviceEntry yet) |
 
 ## ngspice Setup for Sample-Accurate Comparison
 

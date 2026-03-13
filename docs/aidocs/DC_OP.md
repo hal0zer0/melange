@@ -58,14 +58,28 @@ the device conductance with wrong sign, causing divergence.
 
 ### Voltage Limiting
 
-Each NR iteration clamps the voltage update to ±0.5V per node:
+Each NR iteration uses junction-aware logarithmic voltage limiting:
 ```rust
+let vt = 0.026; // thermal voltage
 let delta = v_new[i] - v[i];
-v[i] += delta.clamp(-0.5, 0.5);
+let limited = if delta.abs() < vt {
+    delta  // small steps pass unchanged
+} else {
+    delta.signum() * vt * (delta.abs() / vt + 1.0).ln()
+};
+v[i] += limited;
 ```
 
-This prevents the exponential device models from causing NR to overshoot
-into regions where exp() overflows.
+This compresses large voltage steps (e.g. 300V → ~0.3V) while passing small
+steps (~26mV) nearly unchanged — much more effective than a flat clamp for
+circuits with both low-voltage junctions and high-voltage supply nodes.
+
+### Linear System Solve
+
+The DC OP solver uses LU decomposition with partial pivoting to solve
+`G_aug * v = rhs` each NR iteration, rather than full matrix inversion.
+This is both faster (O(N²) per solve vs O(N³) per inversion) and more
+numerically stable.
 
 ## Convergence Strategies
 

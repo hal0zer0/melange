@@ -225,7 +225,7 @@ Using addition causes NR divergence. See `DC_OP.md` for the mathematical derivat
 | DC OP tolerance | 1e-9 | DC OP NR convergence |
 | DC OP max_iter | 200 | DC OP NR iteration limit |
 | DC OP source_steps | 10 | Source stepping stages |
-| DC OP voltage_limit | ±0.5V | Per-node NR step limit |
+| DC OP voltage_limit | logarithmic (Vt-scaled) | Junction-aware: `sign * Vt * ln(\|delta\|/Vt + 1)` |
 
 ## References
 - TU Delft Analog Electronics Webbook: MNA stamps

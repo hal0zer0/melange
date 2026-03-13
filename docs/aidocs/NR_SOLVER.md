@@ -30,6 +30,11 @@ f(i) = i - i_dev(p + K*i)
 J[i][j] = delta_ij - sum_k J_dev[i][k] * K[k][j]
 ```
 
+**Note**: This formula is in current-space (M×M). The runtime `solve_md` uses the equivalent
+voltage-space form `K * J_dev` to compute `J[i][j] = delta_ij - sum_k K[i][k] * J_dev[k][j]`.
+Both are correct when J_dev is block-diagonal, since K*J_dev and J_dev*K produce the same
+NR Jacobian entries for the relevant device blocks.
+
 where `J_dev[i][k] = di_dev_i / dv_k` is the device Jacobian, which is block-diagonal:
 - Diode at index d: `J_dev[d][d] = g_d` (1x1 block)
 - BJT at indices (s, s+1): `J_dev` is a 2x2 block:

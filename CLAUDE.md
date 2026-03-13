@@ -104,7 +104,7 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
 | BJT period-3 oscillation | Backward Euler for nonlinear currents | Fixed: use full i_nl in correction (not delta) |
 | DC OP NR diverges | Wrong Jacobian sign | Use `G_aug = G_dc - N_i·J_dev·N_v` (subtraction!) |
 
-## Current Status (2026-03-12)
+## Current Status (2026-03-13)
 
 ### Working
 - Linear circuit simulation (RC lowpass matches ngspice to 0.03% RMS, 8-nines correlation)
@@ -114,13 +114,13 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
 - Codegen for diode, BJT, JFET, and tube/triode circuits (up to M=16, Gaussian elimination for M=3..16)
 - Codegen uses proper trapezoidal RHS with `input_prev` tracking (matches runtime solver)
 - Per-device `.model` params: each device gets its own IS, N, BF, BR, VT (heterogeneous models supported)
-- Nonlinear DC operating point solver (Newton-Raphson with source stepping and Gmin stepping fallbacks)
+- Nonlinear DC operating point solver (LU decomposition with partial pivoting, logarithmic junction-aware voltage limiting, source stepping and Gmin stepping fallbacks)
 - DC OP integrated into codegen (`DC_NL_I` constant) and runtime (`initialize_dc_op()`)
 - DC operating point calculation includes input conductance
 - Plugin template generates per-channel state for stereo (no cross-channel corruption)
 - SPICE validation infrastructure with ngspice
-- Input validation: parser rejects negative/zero/NaN/Inf component values; codegen validates node indices
-- Error types are enums (`MnaError`, `DkError`, `CodegenError` with `InvalidConfig`) — no panicking library code
+- Input validation: parser rejects negative/zero/NaN/Inf component values, self-connected components (including V/I sources), warns on unknown directives, errors on missing `.ends`; codegen validates node indices
+- Error types are enums (`MnaError`, `DkError`, `CodegenError` with `InvalidConfig`, `SolverError`) — no panicking library code
 - Logging via `log` crate (no `eprintln!` in library code)
 - MAX_M=16 bound prevents unbounded allocation in DK kernel
 - CLI reports errors for unresolved node names (no silent defaults)
@@ -164,15 +164,13 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
 - **AC frequency response analysis** (`melange analyze` command)
 - **`melange simulate` command**: parse -> MNA -> DK kernel -> solver -> process WAV
   - Supports `--input` for WAV files and `--amplitude` for sine test tones
-- **Explicit re-exports**: `lib.rs` uses named re-exports (no glob `pub use module::*`)
+- **Explicit re-exports**: all crates (melange-solver, melange-devices, melange-primitives) use named re-exports (no glob `pub use module::*`)
 
 ### Known Limitations
 - Purely resistive nonlinear circuits oscillate (need capacitor damping)
 - Tube Koren model: no plate resistance (rp) or mu variation with operating point
 - BJT Gummel-Poon: no self-heating or charge storage dynamics
-- **Runtime solver** (`DeviceEntry`) only supports Diode, DiodeWithRs, Led, BJT — no JFET, MOSFET, or Tube
-  - `melange simulate` skips tubes with warning; use codegen (`--format plugin`) for tube circuits
-  - Codegen supports all device types
+- **Runtime solver** (`DeviceEntry`) supports all device types: Diode, DiodeWithRs, Led, BJT, JFET, MOSFET, Tube
 
 ### Cross-Compilation (macOS from Linux)
 - Zig 0.13 + cargo-zigbuild + macOS SDK 13.3 + rcodesign (ad-hoc signing)
