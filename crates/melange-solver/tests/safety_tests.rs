@@ -290,7 +290,7 @@ fn test_mosfet_all_terminals_grounded() {
 
 #[test]
 fn test_solver_has_step_clamping() {
-    // For 2D nonlinear systems (two diodes), verify step clamping exists
+    // For 2D nonlinear systems (two diodes), verify NR voltage limiting exists
     // This was added to fix the v2 plugin explosion bug
     let spice = r#"Test
 .model D D(IS=1e-15)
@@ -299,25 +299,29 @@ D1 n1 0 D
 D2 0 n1 D
 Vin in 0 0
 .END"#;
-    
+
     let netlist = Netlist::parse(spice).unwrap();
     let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
     mna.g[0][0] += 1.0;
-    
+
     let kernel = DkKernel::from_mna(&mna, 48000.0).unwrap();
-    
+
     println!("M = {}", kernel.m);
-    
+
     let config = CodegenConfig::default();
     let generator = CodeGenerator::new(config);
     let generated = generator.generate(&kernel, &mna, &netlist).unwrap();
-    
-    // For 2D systems (two diodes), verify clamping was added
+
+    // For 2D systems (two diodes), verify SPICE-style voltage limiting is present
     if kernel.m == 2 {
         assert!(
-            generated.code.contains("STEP_CLAMP"),
-            "2D solver MUST have STEP_CLAMP to prevent divergence. \
+            generated.code.contains("pnjlim"),
+            "2D solver MUST have SPICE pnjlim to prevent NR divergence. \
              This catches the v2 plugin explosion bug."
+        );
+        assert!(
+            generated.code.contains("VCRIT"),
+            "Diode devices MUST have precomputed VCRIT for pnjlim"
         );
         assert!(
             generated.code.contains("is_finite"),

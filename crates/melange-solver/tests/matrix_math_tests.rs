@@ -422,10 +422,14 @@ fn test_nr_converges_with_correct_k_sign() {
             let g = diode.conductance_at(v);
             1.0 - k * g
         },
+        |vnew, vold| {
+            let n_vt = 1.0 * melange_primitives::util::VT_ROOM;
+            let vcrit = melange_primitives::nr::pn_vcrit(n_vt, 1e-15);
+            melange_primitives::nr::pnjlim(vnew, vold, n_vt, vcrit)
+        },
         0.0,  // initial guess
         50,
         1e-9,
-        0.1,
     );
 
     assert!(
@@ -493,10 +497,14 @@ fn test_nr_converges_with_correct_k_sign() {
             // causing the Newton step to be in the wrong direction.
             1.0 - bad_k * g
         },
+        |vnew, vold| {
+            let n_vt = 1.0 * melange_primitives::util::VT_ROOM;
+            let vcrit = melange_primitives::nr::pn_vcrit(n_vt, 1e-15);
+            melange_primitives::nr::pnjlim(vnew, vold, n_vt, vcrit)
+        },
         0.0,
         50,
         1e-9,
-        0.1,
     );
 
     // With positive K the NR Jacobian 1 - K*g can flip sign, leading to

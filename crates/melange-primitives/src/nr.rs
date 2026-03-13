@@ -41,24 +41,26 @@ impl NrResult {
 /// # Arguments
 /// * `f` - Function to find root of
 /// * `df` - Derivative of f
+/// * `limit` - Voltage limiting function: `limit(x_proposed, x_old) -> x_limited`.
+///   Use [`pnjlim`] for PN junctions, [`fetlim`] for FETs, or a flat clamp closure.
 /// * `x0` - Initial guess
 /// * `max_iter` - Maximum iterations (typically 20-50)
 /// * `tol` - Tolerance for convergence (typically 1e-7)
-/// * `clamp` - Maximum step size per iteration (e.g., 2*Vt = 0.05 for diodes)
 ///
 /// # Returns
 /// (solution_x, result)
-pub fn nr_solve_1d<F, DF>(
+pub fn nr_solve_1d<F, DF, L>(
     f: F,
     df: DF,
+    limit: L,
     x0: f64,
     max_iter: u32,
     tol: f64,
-    clamp: f64,
 ) -> (f64, NrResult)
 where
     F: Fn(f64) -> f64,
     DF: Fn(f64) -> f64,
+    L: Fn(f64, f64) -> f64,
 {
     let mut x = x0;
 
@@ -77,16 +79,18 @@ where
             return (x, NrResult::Divergence);
         }
 
-        // Newton step with clamping
+        // Newton step with SPICE-style limiting
         let dx = fx / dfx;
-        let dx_clamped = dx.clamp(-clamp, clamp);
-        
+        let x_proposed = x - dx;
+        let x_limited = limit(x_proposed, x);
+        let actual_step = (x_limited - x).abs();
+
         // Check step-size convergence
-        if dx_clamped.abs() < tol {
-            return (x, NrResult::Converged { iterations: iter });
+        if actual_step < tol {
+            return (x_limited, NrResult::Converged { iterations: iter });
         }
-        
-        x -= dx_clamped;
+
+        x = x_limited;
 
         // Check for NaN/inf
         if !x.is_finite() {
@@ -114,23 +118,25 @@ where
 /// * `(x0, y0)` - Initial guess
 /// * `max_iter` - Maximum iterations
 /// * `tol` - Tolerance for convergence
-/// * `clamp` - Maximum step size per iteration (per dimension)
-/// 
+/// * `limit_x` - Voltage limiting for x: `limit(x_proposed, x_old) -> x_limited`
+/// * `limit_y` - Voltage limiting for y: `limit(y_proposed, y_old) -> y_limited`
+///
 /// Note: This function has many parameters because it takes 6 callback functions
 /// plus solver configuration. This is intentional for flexibility.
 #[allow(clippy::too_many_arguments)]
-pub fn nr_solve_2d<F1, F2, DF1X, DF1Y, DF2X, DF2Y>(
+pub fn nr_solve_2d<F1, F2, DF1X, DF1Y, DF2X, DF2Y, LX, LY>(
     f1: F1,
     f2: F2,
     df1_dx: DF1X,
     df1_dy: DF1Y,
     df2_dx: DF2X,
     df2_dy: DF2Y,
+    limit_x: LX,
+    limit_y: LY,
     x0: f64,
     y0: f64,
     max_iter: u32,
     tol: f64,
-    clamp: f64,
 ) -> (f64, f64, NrResult)
 where
     F1: Fn(f64, f64) -> f64,
@@ -139,6 +145,8 @@ where
     DF1Y: Fn(f64, f64) -> f64,
     DF2X: Fn(f64, f64) -> f64,
     DF2Y: Fn(f64, f64) -> f64,
+    LX: Fn(f64, f64) -> f64,
+    LY: Fn(f64, f64) -> f64,
 {
     let mut x = x0;
     let mut y = y0;
@@ -170,15 +178,18 @@ where
         let dx = (f1_val * j22 - j12 * f2_val) / det;
         let dy = (j11 * f2_val - f1_val * j21) / det;
 
+        // SPICE-style voltage limiting (per-dimension)
+        let x_new = limit_x(x - dx, x);
+        let y_new = limit_y(y - dy, y);
+
         // Check step-size convergence
-        let step_sq = dx * dx + dy * dy;
+        let step_sq = (x_new - x).powi(2) + (y_new - y).powi(2);
         if step_sq < tol * tol {
-            return (x, y, NrResult::Converged { iterations: iter });
+            return (x_new, y_new, NrResult::Converged { iterations: iter });
         }
 
-        // Clamped update
-        x -= dx.clamp(-clamp, clamp);
-        y -= dy.clamp(-clamp, clamp);
+        x = x_new;
+        y = y_new;
 
         // Check for NaN/inf
         if !x.is_finite() || !y.is_finite() {
@@ -371,6 +382,109 @@ fn solve_linear_m<const M: usize>(a: &[[f64; M]; M], b: &[f64; M]) -> ([f64; M],
     (x, false)
 }
 
+// ============================================================================
+// SPICE-style voltage limiting (from SPICE2G6/SPICE3f5)
+// ============================================================================
+
+/// Compute the critical voltage for PN junction limiting.
+///
+/// From SPICE3f5 `DEVpnjlim`: `vcrit = vt * ln(vt / (sqrt(2) * is))`.
+/// Above this voltage, the exponential I-V curve is steep enough that
+/// unlimited Newton steps can overshoot catastrophically.
+pub fn pn_vcrit(vt: f64, is: f64) -> f64 {
+    vt * (vt / (std::f64::consts::SQRT_2 * is)).ln()
+}
+
+/// SPICE PN junction voltage limiting (from SPICE3f5 `DEVpnjlim`).
+///
+/// Limits the change in junction voltage to prevent the Newton-Raphson
+/// solver from overshooting on the exponential I-V curve. Large forward
+/// steps are compressed logarithmically; reverse-bias steps are limited
+/// symmetrically.
+///
+/// # Arguments
+/// * `vnew` - Proposed new junction voltage
+/// * `vold` - Previous junction voltage
+/// * `vt` - Thermal voltage (n * kT/q for ideality factor n)
+/// * `vcrit` - Critical voltage from [`pn_vcrit`]
+pub fn pnjlim(vnew: f64, vold: f64, vt: f64, vcrit: f64) -> f64 {
+    // Only limit when vnew is above the critical voltage AND the step is large.
+    // This matches SPICE3f5 DEVpnjlim exactly — no reverse limiting.
+    if vnew > vcrit && (vnew - vold).abs() > vt + vt {
+        if vold >= 0.0 {
+            let arg = 1.0 + (vnew - vold) / vt;
+            if arg > 0.0 {
+                vold + vt * arg.ln()
+            } else {
+                vcrit
+            }
+        } else {
+            vt * (vnew / vt).ln()
+        }
+    } else {
+        vnew
+    }
+}
+
+/// SPICE FET voltage limiting (from SPICE3f5 `DEVfetlim`).
+///
+/// Limits the change in gate-source voltage to prevent the NR solver
+/// from jumping across the threshold boundary in a single step.
+/// The allowed step size adapts to the distance from threshold.
+///
+/// # Arguments
+/// * `vnew` - Proposed new gate-source voltage
+/// * `vold` - Previous gate-source voltage
+/// * `vto` - Threshold (pinch-off) voltage
+pub fn fetlim(vnew: f64, vold: f64, vto: f64) -> f64 {
+    let delv = vnew - vold;
+    let vtox = vto + 3.5;
+    let vtsthi = (2.0 * (vold - vto)).abs() + 2.0;
+    let vtstlo = vtsthi / 2.0 + 2.0;
+
+    if vold >= vto {
+        // Device is "on"
+        if vold >= vtox {
+            if delv <= 0.0 {
+                // Going off
+                if vnew >= vtox {
+                    if -delv > vtstlo {
+                        return vold - vtstlo;
+                    }
+                } else {
+                    return vnew.max(vto + 2.0);
+                }
+            } else {
+                // Staying on
+                if delv >= vtsthi {
+                    return vold + vtsthi;
+                }
+            }
+        } else {
+            // Middle region
+            if delv <= 0.0 {
+                return vnew.max(vto - 0.5);
+            } else {
+                return vnew.min(vto + 4.0);
+            }
+        }
+    } else {
+        // Device is "off"
+        if delv <= 0.0 {
+            if -delv > vtstlo {
+                return vold - vtstlo;
+            }
+        } else if vnew <= vto + 0.5 {
+            if delv > vtstlo {
+                return vold + vtstlo;
+            }
+        } else {
+            return vto + 0.5;
+        }
+    }
+    vnew
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -381,10 +495,10 @@ mod tests {
         let (x, result) = nr_solve_1d(
             |x| x * x - 2.0,
             |x| 2.0 * x,
+            |xnew, _xold| xnew, // no limiting needed for polynomial
             1.0,
             50,
             1e-10,
-            10.0,
         );
         assert!(result.converged());
         assert!((x - std::f64::consts::SQRT_2).abs() < 1e-8);
@@ -397,14 +511,15 @@ mod tests {
         let is = 1e-15;
         let vt = 0.02585;
         let target_i = 0.001;
+        let vcrit = pn_vcrit(vt, is);
 
         let (v, result) = nr_solve_1d(
             |v| is * ((v / vt).exp() - 1.0) - target_i,
             |v| is * (v / vt).exp() / vt,
+            |vnew, vold| pnjlim(vnew, vold, vt, vcrit),
             0.7,  // Typical diode drop
             50,
             1e-12,
-            0.1,  // Clamp to 0.1V (≈ 4*Vt)
         );
         assert!(result.converged());
         // V = Vt * ln(I/Is + 1) ≈ 0.02585 * ln(0.001/1e-15) ≈ 0.73V
@@ -423,10 +538,11 @@ mod tests {
             |_x, _y| 1.0,
             |_x, _y| 1.0,
             |_x, _y| -1.0,
+            |xnew, _xold| xnew, // no limiting for linear system
+            |ynew, _yold| ynew,
             0.0, 0.0,
             10,
             1e-10,
-            10.0,
         );
         assert!(result.converged());
         assert!((x - 2.0).abs() < 1e-8);
@@ -495,14 +611,14 @@ mod tests {
     fn test_nr_step_size_convergence() {
         // Test that solver converges on step size, not just residual
         // Use a function that converges reliably: f(x) = x^2 - 1
-        
+
         let (x, result) = nr_solve_1d(
             |x| x * x - 1.0,
             |x| 2.0 * x,
+            |xnew, _xold| xnew, // no limiting for polynomial
             2.0,  // Start at x=2
             100,
             1e-10,
-            1.0,
         );
         
         // Should converge to x = 1.0

@@ -72,7 +72,7 @@ Since K is naturally negative, both formulas give J > 0 (convergent).
 | No output | Input R not stamped | Add to G[in,in] |
 | DC offset | Double history | Remove cap_history, use A_neg only |
 | Quiet | INPUT_RESISTANCE too high | Use 1Ω (near-ideal voltage source) |
-| Unstable | No step clamping | Add STEP_CLAMP = 0.01 |
+| Unstable | No voltage limiting | Add SPICE pnjlim/fetlim (per-device VCRIT) |
 | Wrong freq | Wrong alpha | Use 2/T not 1/T |
 | BJT no output | No DC OP init | Call `initialize_dc_op()` or use `DC_NL_I` constant |
 | DC OP diverges | Wrong Jacobian sign | Use `G_aug = G_dc - N_i·J_dev·N_v` (subtraction!) |

@@ -336,6 +336,7 @@ const TMPL_EXTRACT_VOLTAGES: &str = include_str!("../../templates/rust/extract_v
 const TMPL_FINAL_VOLTAGES: &str = include_str!("../../templates/rust/final_voltages.rs.tera");
 const TMPL_UPDATE_HISTORY: &str = include_str!("../../templates/rust/update_history.rs.tera");
 const TMPL_PROCESS_SAMPLE: &str = include_str!("../../templates/rust/process_sample.rs.tera");
+const TMPL_SPICE_LIMITING: &str = include_str!("../../templates/rust/spice_limiting.rs.tera");
 
 /// Rust language emitter.
 pub struct RustEmitter {
@@ -360,6 +361,7 @@ impl RustEmitter {
             ("final_voltages", TMPL_FINAL_VOLTAGES),
             ("update_history", TMPL_UPDATE_HISTORY),
             ("process_sample", TMPL_PROCESS_SAMPLE),
+            ("spice_limiting", TMPL_SPICE_LIMITING),
         ])
         .map_err(|e| CodegenError::TemplateError(format!("template init: {}", e)))?;
         Ok(Self { tera })
@@ -655,6 +657,9 @@ impl RustEmitter {
                     has_diode = true;
                     emit_device_const(&mut code, dev_num, "IS", dp.is);
                     emit_device_const(&mut code, dev_num, "N_VT", dp.n_vt);
+                    // Precomputed critical voltage for SPICE pnjlim
+                    let vcrit = dp.n_vt * (dp.n_vt / (std::f64::consts::SQRT_2 * dp.is)).ln();
+                    emit_device_const(&mut code, dev_num, "VCRIT", vcrit);
                     code.push('\n');
                 }
                 DeviceParams::Bjt(bp) => {
@@ -676,6 +681,9 @@ impl RustEmitter {
                     emit_device_const(&mut code, dev_num, "VAR", bp.var);
                     emit_device_const(&mut code, dev_num, "IKF", bp.ikf);
                     emit_device_const(&mut code, dev_num, "IKR", bp.ikr);
+                    // Precomputed critical voltage for SPICE pnjlim (both Vbe and Vbc junctions)
+                    let vcrit = bp.vt * (bp.vt / (std::f64::consts::SQRT_2 * bp.is)).ln();
+                    emit_device_const(&mut code, dev_num, "VCRIT", vcrit);
                     code.push('\n');
                 }
                 DeviceParams::Jfet(jp) => {
@@ -709,9 +717,18 @@ impl RustEmitter {
                     emit_device_const(&mut code, dev_num, "KVB", tp.kvb);
                     emit_device_const(&mut code, dev_num, "IG_MAX", tp.ig_max);
                     emit_device_const(&mut code, dev_num, "VGK_ONSET", tp.vgk_onset);
+                    // Precomputed critical voltage for SPICE pnjlim (grid current onset)
+                    let vt_tube = tp.vgk_onset / 3.0;
+                    let vcrit = vt_tube * (vt_tube / (std::f64::consts::SQRT_2 * 1e-10)).ln();
+                    emit_device_const(&mut code, dev_num, "VCRIT", vcrit);
                     code.push('\n');
                 }
             }
+        }
+
+        // SPICE voltage limiting functions (needed by all nonlinear devices)
+        if has_diode || has_bjt || has_jfet || has_mosfet || has_tube {
+            code.push_str(&self.render("spice_limiting", &Context::new())?);
         }
 
         if has_diode {
@@ -1704,37 +1721,123 @@ impl RustEmitter {
 // Procedural NR solver generation (too complex for templates)
 // ============================================================================
 
-/// Emit damped fallback lines for a singular Jacobian: `i_nl[i] -= (fi * 0.5).clamp(...)`.
+/// Emit damped fallback for singular Jacobian: half-step on residual, clamped.
 fn emit_nr_singular_fallback(code: &mut String, dim: usize, indent: &str) {
     code.push_str(&format!("{indent}// Singular Jacobian — damped fallback (0.5 * residual)\n"));
     for i in 0..dim {
         code.push_str(&format!(
-            "{indent}i_nl[{i}] -= (f{i} * 0.5).clamp(-STEP_CLAMP, STEP_CLAMP);\n"
+            "{indent}i_nl[{i}] -= (f{i} * 0.5).clamp(-0.01, 0.01);\n"
         ));
     }
 }
 
-/// Emit clamp, update, and convergence check for NR delta values.
+/// Emit SPICE-style voltage-space limiting and convergence check for NR.
 ///
-/// Assumes `delta0..delta{dim-1}` are already defined. Emits clamping,
-/// `i_nl` update, and early return on convergence.
-fn emit_nr_clamp_and_converge(code: &mut String, dim: usize, indent: &str) {
-    code.push_str(&format!("{indent}// Clamp steps to prevent overshoot\n"));
+/// After computing Newton deltas (delta0..delta{dim-1}), converts to voltage
+/// space via K matrix, applies per-device pnjlim/fetlim, and uses scalar
+/// damping to maintain current-space NR consistency.
+///
+/// Assumes `delta0..delta{dim-1}` and `v_d0..v_d{dim-1}` are in scope.
+fn emit_nr_limit_and_converge(
+    code: &mut String,
+    ir: &CircuitIR,
+    dim: usize,
+    indent: &str,
+    has_pots: bool,
+) {
+    // Compute implied voltage changes: dv[i] = -sum_j K[i][j] * delta[j]
+    code.push_str(&format!("{indent}// Voltage-space limiting (SPICE pnjlim/fetlim through K matrix)\n"));
     for i in 0..dim {
-        code.push_str(&format!(
-            "{indent}let clamped_delta{i} = delta{i}.clamp(-STEP_CLAMP, STEP_CLAMP);\n"
-        ));
+        code.push_str(&format!("{indent}let dv{i} = -("));
+        let mut first = true;
+        if has_pots {
+            for j in 0..dim {
+                if !first { code.push_str(" + "); }
+                code.push_str(&format!("k_eff[{i}][{j}] * delta{j}"));
+                first = false;
+            }
+        } else {
+            // Use sparsity info when available
+            for j in 0..dim {
+                if !first { code.push_str(" + "); }
+                code.push_str(&format!("state.k[{i}][{j}] * delta{j}"));
+                first = false;
+            }
+        }
+        code.push_str(");\n");
     }
+
+    // Compute scalar damping factor from per-device limiting
+    code.push_str(&format!("{indent}let mut alpha = 1.0_f64;\n"));
+    for (dev_num, slot) in ir.device_slots.iter().enumerate() {
+        for d in 0..slot.dimension {
+            let i = slot.start_idx + d;
+            code.push_str(&format!("{indent}if dv{i}.abs() > 1e-15 {{\n"));
+            // Emit per-device limiter call based on device type and dimension
+            match (&slot.device_type, d) {
+                (DeviceType::Diode, _) => {
+                    code.push_str(&format!(
+                        "{indent}    let v_lim = pnjlim(v_d{i} + dv{i}, v_d{i}, state.device_{dev_num}_n_vt, DEVICE_{dev_num}_VCRIT);\n"
+                    ));
+                }
+                (DeviceType::Bjt, _) => {
+                    // Both Vbe and Vbc are PN junctions
+                    code.push_str(&format!(
+                        "{indent}    let v_lim = pnjlim(v_d{i} + dv{i}, v_d{i}, state.device_{dev_num}_vt, DEVICE_{dev_num}_VCRIT);\n"
+                    ));
+                }
+                (DeviceType::Jfet, 0) => {
+                    code.push_str(&format!(
+                        "{indent}    let v_lim = fetlim(v_d{i} + dv{i}, v_d{i}, state.device_{dev_num}_vp);\n"
+                    ));
+                }
+                (DeviceType::Jfet, _) => {
+                    code.push_str(&format!(
+                        "{indent}    let v_lim = fetlim(v_d{i} + dv{i}, v_d{i}, 0.0);\n"
+                    ));
+                }
+                (DeviceType::Mosfet, 0) => {
+                    code.push_str(&format!(
+                        "{indent}    let v_lim = fetlim(v_d{i} + dv{i}, v_d{i}, state.device_{dev_num}_vt);\n"
+                    ));
+                }
+                (DeviceType::Mosfet, _) => {
+                    code.push_str(&format!(
+                        "{indent}    let v_lim = fetlim(v_d{i} + dv{i}, v_d{i}, 0.0);\n"
+                    ));
+                }
+                (DeviceType::Tube, 0) => {
+                    code.push_str(&format!(
+                        "{indent}    let v_lim = pnjlim(v_d{i} + dv{i}, v_d{i}, state.device_{dev_num}_vgk_onset / 3.0, DEVICE_{dev_num}_VCRIT);\n"
+                    ));
+                }
+                (DeviceType::Tube, _) => {
+                    code.push_str(&format!(
+                        "{indent}    let v_lim = fetlim(v_d{i} + dv{i}, v_d{i}, 0.0);\n"
+                    ));
+                }
+            }
+            code.push_str(&format!(
+                "{indent}    let ratio = ((v_lim - v_d{i}) / dv{i}).max(0.01);\n"
+            ));
+            code.push_str(&format!("{indent}    if ratio < alpha {{ alpha = ratio; }}\n"));
+            code.push_str(&format!("{indent}}}\n"));
+        }
+    }
+
+    // Apply damped step
     for i in 0..dim {
-        code.push_str(&format!("{indent}i_nl[{i}] -= clamped_delta{i};\n"));
+        code.push_str(&format!("{indent}i_nl[{i}] -= alpha * delta{i};\n"));
     }
-    code.push_str(&format!("\n{indent}// Convergence check (max-norm)\n"));
+
+    // Convergence check on actual step taken
+    code.push_str(&format!("\n{indent}// Convergence check (max-norm on actual step)\n"));
     code.push_str(&format!("{indent}if "));
     for i in 0..dim {
         if i > 0 {
             code.push_str(".max(");
         }
-        code.push_str(&format!("clamped_delta{i}.abs()"));
+        code.push_str(&format!("(alpha * delta{i}).abs()"));
         if i > 0 {
             code.push(')');
         }
@@ -1781,8 +1884,6 @@ impl RustEmitter {
             "    const TOL: f64 = {:.17e};\n",
             ir.solver_config.tolerance
         ));
-        // STEP_CLAMP=0.01 matches the runtime solver's clamp value.
-        code.push_str("    const STEP_CLAMP: f64 = 0.01;  // Matches runtime solver clamp\n");
         code.push_str("    const SINGULARITY_THRESHOLD: f64 = 1e-15;\n\n");
 
         code.push_str("    // Initial guess from previous sample (warm start)\n");
@@ -2023,7 +2124,7 @@ impl RustEmitter {
                     code.push_str("            continue;\n");
                     code.push_str("        }\n");
                     code.push_str("        let delta0 = f0 / det;\n\n");
-                    emit_nr_clamp_and_converge(code, 1, "        ");
+                    emit_nr_limit_and_converge(code, ir, 1, "        ", has_pots);
                 }
                 2 => {
                     code.push_str("        // Solve 2x2 system: J * delta = f (Cramer's rule)\n");
@@ -2035,10 +2136,10 @@ impl RustEmitter {
                     code.push_str("        let inv_det = 1.0 / det;\n");
                     code.push_str("        let delta0 = inv_det * (j11 * f0 - j01 * f1);\n");
                     code.push_str("        let delta1 = inv_det * (-j10 * f0 + j00 * f1);\n\n");
-                    emit_nr_clamp_and_converge(code, 2, "        ");
+                    emit_nr_limit_and_converge(code, ir, 2, "        ", has_pots);
                 }
                 3..=16 => {
-                    Self::generate_gauss_elim(code, m);
+                    Self::generate_gauss_elim(code, ir, m, has_pots);
                 }
                 _ => {
                     return Err(CodegenError::UnsupportedTopology(format!(
@@ -2075,7 +2176,7 @@ impl RustEmitter {
     }
 
     /// Generate inline Gaussian elimination for M=3..=16.
-    fn generate_gauss_elim(code: &mut String, dim: usize) {
+    fn generate_gauss_elim(code: &mut String, ir: &CircuitIR, dim: usize, has_pots: bool) {
         code.push_str(&format!(
             "        // Solve {dim}x{dim} system via inline Gaussian elimination\n"
         ));
@@ -2139,7 +2240,7 @@ impl RustEmitter {
         for i in 0..dim {
             code.push_str(&format!("            let delta{i} = b[{i}];\n"));
         }
-        emit_nr_clamp_and_converge(code, dim, "            ");
+        emit_nr_limit_and_converge(code, ir, dim, "            ", has_pots);
         code.push_str("        } else {\n");
         emit_nr_singular_fallback(code, dim, "            ");
         code.push_str("        }\n");

@@ -64,12 +64,22 @@ let jdev_s1_s1 = bjt_jac[3];  // dIb/dVbc
 
 ## Update Step
 ```
-delta = J^{-1} * f        // Newton step
-delta_clamped = clamp(delta, -STEP_CLAMP, STEP_CLAMP)
-i_new = i - delta_clamped  // Apply update
+delta = J^{-1} * f            // Newton step (in current space)
+dv = -K * delta               // Implied voltage change per device
+alpha = min over devices of voltage_limit(dv, v_prev) / |dv|
+i_nl -= alpha * delta          // Damped update
 ```
 
-STEP_CLAMP = 0.01 prevents overshoot on sharp nonlinearities.
+Voltage limiting uses SPICE3f5-style per-device limiters applied in voltage space:
+- **pnjlim** (PN junction): Logarithmic compression for large forward steps above vcrit.
+  Used for diodes (1D), BJTs (both junctions), tubes (grid current dimension).
+  `vcrit = vt * ln(vt / (sqrt(2) * is))` precomputed per device as a constant.
+- **fetlim** (FET): Prevents gate-source voltage from jumping across threshold.
+  Used for JFETs and MOSFETs.
+
+The scalar damping factor `alpha` (0 < alpha <= 1) is the minimum ratio across all
+device dimensions, ensuring no single junction or gate voltage overshoots. When all
+voltage steps are within safe bounds, alpha = 1.0 (full Newton step).
 
 ## Convergence Criteria
 ```
@@ -78,11 +88,16 @@ STEP_CLAMP = 0.01 prevents overshoot on sharp nonlinearities.
 
 ## Safety Measures
 
-### Step Clamping (Essential!)
+### SPICE-Style Voltage Limiting (Essential!)
 ```rust
-const STEP_CLAMP: f64 = 0.01;
-let clamped_delta = delta.clamp(-STEP_CLAMP, STEP_CLAMP);
-i_nl[i] -= clamped_delta;
+// After computing Newton step delta in current space:
+// 1. Compute implied voltage change: dv = -K * delta
+// 2. Apply per-device pnjlim/fetlim to each voltage dimension
+// 3. Compute scalar damping factor alpha = min(limited_dv / dv) across all dimensions
+// 4. Apply damped step: i_nl -= alpha * delta
+//
+// Per-device VCRIT constants precomputed from pn_vcrit(vt, is):
+const DEVICE_0_VCRIT: f64 = 0.6145;  // e.g., for diode with IS=1e-12
 ```
 
 ### Singular Jacobian Check
@@ -128,7 +143,7 @@ while the time-stepping NR solves for nonlinear currents (M-dimensional system v
 
 ## Common Failures
 1. **Extra K negation** -> Wrong feedback polarity, immediate divergence
-2. **No step clamping** -> Oscillation on sharp corners
+2. **No voltage limiting** -> Oscillation on sharp corners
 3. **Cold start (i=0)** -> Slower convergence
 4. **Wrong VT temperature** -> Wrong operating point
 5. **Diagonal-only Jacobian for BJT** -> Ignores cross-coupling, poor convergence

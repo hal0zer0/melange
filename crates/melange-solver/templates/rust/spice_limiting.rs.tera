@@ -1,0 +1,75 @@
+// Canonical source: melange-primitives/src/nr.rs (pnjlim, fetlim)
+// Duplicated here because generated code must be self-contained.
+
+/// SPICE PN junction voltage limiting (from SPICE3f5 DEVpnjlim).
+///
+/// Limits large forward voltage steps on exponential I-V curves using
+/// logarithmic compression. Only activates when vnew > vcrit with large step.
+#[inline(always)]
+fn pnjlim(vnew: f64, vold: f64, vt: f64, vcrit: f64) -> f64 {
+    if vnew > vcrit && (vnew - vold).abs() > vt + vt {
+        if vold >= 0.0 {
+            let arg = 1.0 + (vnew - vold) / vt;
+            if arg > 0.0 { vold + vt * arg.ln() } else { vcrit }
+        } else {
+            vt * (vnew / vt).ln()
+        }
+    } else {
+        vnew
+    }
+}
+
+/// SPICE FET voltage limiting (from SPICE3f5 DEVfetlim).
+///
+/// Prevents gate-source voltage from jumping across threshold boundary.
+/// The allowed step size adapts to the distance from threshold.
+#[inline(always)]
+fn fetlim(vnew: f64, vold: f64, vto: f64) -> f64 {
+    let delv = vnew - vold;
+    let vtox = vto + 3.5;
+    let vtsthi = (2.0 * (vold - vto)).abs() + 2.0;
+    let vtstlo = vtsthi / 2.0 + 2.0;
+
+    if vold >= vto {
+        // Device is "on"
+        if vold >= vtox {
+            if delv <= 0.0 {
+                // Going off
+                if vnew >= vtox {
+                    if -delv > vtstlo {
+                        return vold - vtstlo;
+                    }
+                } else {
+                    return vnew.max(vto + 2.0);
+                }
+            } else {
+                // Staying on
+                if delv >= vtsthi {
+                    return vold + vtsthi;
+                }
+            }
+        } else {
+            // Middle region
+            if delv <= 0.0 {
+                return vnew.max(vto - 0.5);
+            } else {
+                return vnew.min(vto + 4.0);
+            }
+        }
+    } else {
+        // Device is "off"
+        if delv <= 0.0 {
+            if -delv > vtstlo {
+                return vold - vtstlo;
+            }
+        } else if vnew <= vto + 0.5 {
+            if delv > vtstlo {
+                return vold + vtstlo;
+            }
+        } else {
+            return vto + 0.5;
+        }
+    }
+    vnew
+}
+

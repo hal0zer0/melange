@@ -155,7 +155,7 @@ gives the trapezoidal average `N_i * (i_nl[n+1] + i_nl[n])`.
 fn solve_nonlinear(p: &[f64; M], state: &mut CircuitState) -> [f64; M] {
     // Newton-Raphson with:
     // - Warm start from i_nl_prev
-    // - Step clamping (STEP_CLAMP = 0.01)
+    // - SPICE-style voltage limiting (pnjlim/fetlim with per-device VCRIT constants)
     // - Block-diagonal device Jacobian (see below)
     // - Singular check: |det| > 1e-15
     // - NaN/Inf protection
@@ -269,7 +269,7 @@ rhs += history;
 - [ ] No separate cap_history in build_rhs
 - [ ] K has no extra negation (naturally negative from kernel)
 - [ ] Jacobian uses block-diagonal jdev entries (not just diagonal g_dev)
-- [ ] Step clamping present (STEP_CLAMP = 0.01)
+- [ ] SPICE-style voltage limiting present (pnjlim/fetlim with per-device VCRIT)
 - [ ] is_finite() checks present
 - [ ] S matrix values reasonable (< 1e6)
 

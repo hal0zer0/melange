@@ -1,7 +1,7 @@
 # Melange Roadmap
 
 **Last Updated:** 2026-03-13
-**Current:** 780 tests passing, 0 warnings, 0 unsafe blocks
+**Current:** 786 tests passing, 0 warnings, 0 unsafe blocks
 
 ---
 
@@ -32,13 +32,13 @@ Issues where the math is wrong or numerically fragile.
 ### ~~B.1 DC OP solver: LU factorization~~ ✅ Done (2026-03-13)
 ### ~~B.2 DC OP voltage limiting: junction-aware logarithmic limiting~~ ✅ Done (2026-03-13)
 
-### B.3 NR step clamp: device-aware or scaled clamping
-- 0.01V step clamp too conservative for JFETs (Vp=2V) and tubes (Vgk~5V swing)
-- At max_iter=100, max excursion is 1V/sample — can't track fast transients
-- Scale clamp by device characteristic voltage, or use line search
-- **Files:** `crates/melange-solver/src/solver.rs`, codegen templates
-- **Severity:** Major (primary contributor to 35% BJT RMS error)
-- **Status:** Deferred — revisit after B.1/B.2 improve DC OP convergence
+### ~~B.3 NR voltage limiting: SPICE3f5-style pnjlim/fetlim~~ ✅ Done (2026-03-13)
+- SPICE-style voltage-space limiting replaces flat per-dimension current clamping
+- pnjlim (PN junction): logarithmic compression above vcrit, for diodes/BJTs/tubes
+- fetlim (FET): threshold-aware limiting for JFETs/MOSFETs
+- Per-device VCRIT constants precomputed from `pn_vcrit(vt, is) = vt * ln(vt / (sqrt(2) * is))`
+- Scalar damping factor alpha applied to full Newton step: `i_nl -= alpha * delta`
+- Both runtime solver and codegen
 
 ### ~~B.4 Diode linearized continuation beyond clamp~~ ✅ Done (2026-03-13)
 ### ~~B.5 Gummel-Poon qb() IKR term~~ ✅ Done (2026-03-13)
@@ -64,16 +64,18 @@ Issues where the math is wrong or numerically fragile.
 
 ### ~~C.1 Add SPICE validation for JFET, MOSFET, op-amp~~ ✅ Done (2026-03-13)
 - Op-amp inverting: passes (correlation 1.0, RMS ~0%)
-- JFET/MOSFET: test infrastructure created, `#[ignore]` until runtime solver supports DeviceEntry
+- JFET common-source: passes (correlation 0.999, RMS 3.5%)
+- MOSFET common-source: passes (correlation 0.99999997, RMS 0.03%, SNR 71dB)
+- Runtime solver now supports all device types (JFET, MOSFET, Tube added)
 - Tube: not yet added (requires codegen-based validation path)
 
 ### ~~C.2 Codegen vs runtime cross-validation test~~ ✅ Done (2026-03-13)
-- Diode clipper: max diff 3.06e-11 (sample-by-sample)
+- 6 tests: diode (3e-11), BJT CE (8e-10), JFET CS (1e-9), MOSFET CS (6e-6), triode CC (1e-6), SM sanity
+- Compile-and-run: generates code, compiles with rustc, compares sample-by-sample
 
-### C.3 Sherman-Morrison correctness test
-- SM pot data sanity test added (dimensions, finiteness, nominal conductance)
-- Full sweep comparison (SM vs rebuild) still TODO
-- **Severity:** High
+### ~~C.3 Sherman-Morrison correctness test~~ ✅ Done (2026-03-13)
+- Full sweep comparison: SM-corrected S and K matrices vs full matrix rebuild
+- Tests in `crates/melange-solver/tests/pot_tests.rs`
 
 ### C.4 Improve test signals
 - Add step response, multi-frequency (chirp), silence-to-signal transition
@@ -89,9 +91,9 @@ Issues where the math is wrong or numerically fragile.
 ### ~~C.6 Fix signal length truncation in comparison~~ ✅ Done (2026-03-13)
 - Added `log::warn!` when signal lengths differ by >1 sample
 
-### C.7 Oversampling correctness test
-- Compare 1x vs 2x vs 4x output: should match at audio frequencies, differ at Nyquist
-- **Severity:** Medium
+### ~~C.7 Oversampling correctness test~~ ✅ Done (2026-03-13)
+- Matrix recomputation verified at internal rate (1x vs 2x)
+- 2x and 4x compile-and-run tests pass
 
 ---
 
@@ -112,10 +114,10 @@ Issues where the math is wrong or numerically fragile.
 ### D.3 Guard generated code edge cases
 - Switch position R=0 → division by zero in generated code
 - `dc_block_r` goes negative for sample_rate < 31.4 Hz → clamp to [0, 1)
-- `fmt_f64` emits `f64::NAN` for NaN matrix entries → return error instead
-- Circuit name not sanitized for Rust identifiers
+- ~~`fmt_f64` emits `f64::NAN` for NaN matrix entries~~ ✅ Done
+- ~~Circuit name not sanitized for Rust identifiers~~ ✅ Done (control chars replaced)
 - **Files:** codegen/rust_emitter.rs, state.rs.tera
-- **Severity:** Medium
+- **Severity:** Medium (2 of 4 sub-items remain)
 
 ### D.4 Replace `Vec<Vec<f64>>` with flat matrix in MNA
 - Each row is separate heap allocation; DK kernel already uses flat arrays
@@ -129,7 +131,7 @@ Issues where the math is wrong or numerically fragile.
 
 ---
 
-## Priority 1 — High Impact, Moderate Effort (Pre-Audit)
+## Priority 1 — High Impact, Moderate Effort (Pre-Audit) ✅ Complete
 
 ### ~~1.1 AC Frequency Response Analysis~~ ✅ Done
 ### ~~1.2 2D JFET Model~~ ✅ Done (2026-03-12)
@@ -140,10 +142,18 @@ Issues where the math is wrong or numerically fragile.
 
 ---
 
-## Priority 2 — Important, Larger Effort (Pre-Audit)
+## Priority 2 — Important, Larger Effort (Pre-Audit) ✅ Complete
 
-### 2.1 Runtime Device Parameter Control
-### 2.2 Controlled Sources (E, G)
+### ~~2.1 Runtime Device Parameter Control~~ ✅ Done (2026-03-13)
+- IS, BF, MU, IDSS, KP, etc. promoted to CircuitState fields
+- NR solver reads `state.device_N_param` instead of constants
+- 16 tests verify compile-and-run with parameter changes
+
+### ~~2.2 Controlled Sources (E, G)~~ ✅ Done (2026-03-13)
+- VCVS (E): voltage-controlled voltage source, Norton equivalent in MNA
+- VCCS (G): voltage-controlled current source, direct G matrix stamp
+- 22 tests including compile-and-run integration
+
 ### ~~2.3 Line Continuation Fix~~ ✅ Done
 
 ---
@@ -182,11 +192,11 @@ Issues where the math is wrong or numerically fragile.
 |-----|----------|------------|
 | ~~Line continuation (`+`) not joined~~ | ~~Medium~~ | ✅ Fixed |
 | Purely resistive nonlinear circuits oscillate | Low | Always include at least one capacitor |
-| Several integration tests `#[ignore]`d | Low | Tests exist but need tuning |
-| `nr_solve_dk` assumes diagonal device Jacobian | Medium | Only used for 1D circuits; runtime `solve_md` is correct |
-| Runtime solver panics on M>8 | Medium | Use codegen path for M>8 circuits |
-| `DeviceIR` legacy enum missing JFET/MOSFET | Low | Use `DeviceSlotIR` instead |
-| `build_legacy_devices` only emits first diode/BJT | Low | Use `device_slots` field |
+| ~~Several integration tests `#[ignore]`d~~ | ~~Low~~ | ✅ Fixed (runtime solver supports all devices) |
+| ~~`nr_solve_dk` assumes diagonal device Jacobian~~ | ~~Medium~~ | ✅ Fixed (runtime uses Gaussian elimination) |
+| ~~Runtime solver panics on M>8~~ | ~~Medium~~ | ✅ Fixed (`CircuitSolver::new()` returns `Result`) |
+| ~~`DeviceIR` legacy enum missing JFET/MOSFET~~ | ~~Low~~ | ✅ Fixed (legacy `DeviceIR` removed entirely) |
+| ~~`build_legacy_devices` only emits first diode/BJT~~ | ~~Low~~ | ✅ Fixed (removed; `device_slots` is the sole source of truth) |
 
 ---
 

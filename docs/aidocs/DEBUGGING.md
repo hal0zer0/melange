@@ -80,13 +80,16 @@ let j_ij = delta_ij - sum_k(jdev_{ik} * K[k][j]);
 
 Since K is naturally negative, J > 0 (convergent).
 
-### Check Step Clamping
+### Check Voltage Limiting
 ```rust
-// MUST have:
-let clamped = delta.clamp(-STEP_CLAMP, STEP_CLAMP);
-i_nl[0] -= clamped;
+// MUST have SPICE-style voltage limiting:
+// 1. Compute implied voltage change: dv = -K * delta
+// 2. Apply pnjlim (PN junctions) or fetlim (FETs) per device dimension
+// 3. Compute scalar damping factor: alpha = min(limited / raw) across dimensions
+// 4. Apply damped step: i_nl -= alpha * delta
+// Per-device VCRIT constants precomputed from pn_vcrit(vt, is)
 
-// WITHOUT clamping:
+// WITHOUT limiting:
 i_nl[0] -= delta;  // Can explode on sharp nonlinearities
 ```
 
@@ -217,7 +220,7 @@ Using addition causes NR divergence. See `DC_OP.md` for the mathematical derivat
 | Parameter | Value | Notes |
 |-----------|-------|-------|
 | INPUT_RESISTANCE | 1 ohm | Near-ideal voltage source |
-| STEP_CLAMP | 0.01 | Prevents NR overshoot |
+| Voltage limiting | SPICE pnjlim/fetlim | pnjlim for diode/BJT/tube (VCRIT per device), fetlim for JFET/MOSFET |
 | MAX_ITER | 100 | NR iteration limit (runtime & codegen) |
 | TOLERANCE | 1e-9 | NR convergence |
 | alpha | 2/T | Trapezoidal rule |

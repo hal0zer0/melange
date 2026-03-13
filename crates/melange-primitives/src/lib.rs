@@ -23,7 +23,7 @@ pub use oversampling::{
     Oversampler2x, Oversampler2xFast, Oversampler2xStandard, Oversampler2xQuality,
     Oversampler4x, Oversampler,
 };
-pub use nr::{NrResult, nr_solve_1d, nr_solve_2d, nr_solve_dk};
+pub use nr::{NrResult, nr_solve_1d, nr_solve_2d, nr_solve_dk, pn_vcrit, pnjlim, fetlim};
 pub use companion::{
     TrapezoidalCompanion, BilinearCompanion, BackwardEulerCompanion,
     InductorCompanion,

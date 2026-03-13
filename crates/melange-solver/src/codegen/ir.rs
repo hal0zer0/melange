@@ -24,7 +24,6 @@ pub struct CircuitIR {
     pub solver_config: SolverConfig,
     pub matrices: Matrices,
     pub dc_operating_point: Vec<f64>,
-    pub devices: Vec<DeviceIR>,
     pub device_slots: Vec<DeviceSlot>,
     pub has_dc_sources: bool,
     pub has_dc_op: bool,
@@ -209,14 +208,6 @@ pub struct CoupledInductorIR {
     pub g_mutual: f64,
 }
 
-/// Resolved parameters for a single nonlinear device (legacy, kept for JSON compat).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum DeviceIR {
-    Diode(DiodeParams),
-    Bjt(BjtParams),
-    Tube(TubeParams),
-}
-
 /// Per-device resolved parameters, stored in each `DeviceSlot`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DeviceParams {
@@ -351,6 +342,9 @@ pub struct TubeParams {
     pub ig_max: f64,
     /// Grid current onset voltage [V]
     pub vgk_onset: f64,
+}
+
+impl DeviceParams {
 }
 
 /// Nonlinear device type tag.
@@ -678,7 +672,7 @@ impl CircuitIR {
             }
         };
 
-        let (device_slots, devices) = Self::build_device_info(netlist)?;
+        let device_slots = Self::build_device_info(netlist)?;
 
         let inductors: Vec<InductorIR> = kernel.inductors.iter().map(|ind| {
             // Recompute g_eq at internal rate when oversampling
@@ -801,7 +795,6 @@ impl CircuitIR {
             solver_config,
             matrices,
             dc_operating_point: dc_result.v_node,
-            devices,
             device_slots,
             has_dc_sources,
             has_dc_op,
@@ -819,7 +812,7 @@ impl CircuitIR {
     ///
     /// # Errors
     /// Returns `CodegenError::InvalidConfig` if any device model parameter is non-positive or non-finite.
-    fn build_device_info(netlist: &Netlist) -> Result<(Vec<DeviceSlot>, Vec<DeviceIR>), CodegenError> {
+    fn build_device_info(netlist: &Netlist) -> Result<Vec<DeviceSlot>, CodegenError> {
         let mut slots = Vec::new();
         let mut dim_offset = 0;
 
@@ -879,10 +872,7 @@ impl CircuitIR {
             }
         }
 
-        // Legacy devices list: first occurrence of each type (for JSON backward compat)
-        let devices = Self::build_legacy_devices(&slots);
-
-        Ok((slots, devices))
+        Ok(slots)
     }
 
     /// Resolve diode model parameters from the netlist, with validation.
@@ -1039,31 +1029,6 @@ impl CircuitIR {
     }
 
     /// Build the legacy `devices` list (first occurrence of each device type).
-    fn build_legacy_devices(slots: &[DeviceSlot]) -> Vec<DeviceIR> {
-        let mut devices = Vec::new();
-        let mut has_diode = false;
-        let mut has_bjt = false;
-
-        for slot in slots {
-            match &slot.params {
-                DeviceParams::Diode(p) if !has_diode => {
-                    devices.push(DeviceIR::Diode(p.clone()));
-                    has_diode = true;
-                }
-                DeviceParams::Bjt(p) if !has_bjt => {
-                    devices.push(DeviceIR::Bjt(p.clone()));
-                    has_bjt = true;
-                }
-                _ => {}
-            }
-            if has_diode && has_bjt {
-                break;
-            }
-        }
-
-        devices
-    }
-
     /// Look up a parameter from a `.model` directive, case-insensitive.
     fn lookup_model_param(netlist: &Netlist, model_name: &str, param_name: &str) -> Option<f64> {
         netlist
@@ -1113,19 +1078,4 @@ impl CircuitIR {
         self.matrices.c_matrix[i * self.topology.n + j]
     }
 
-    /// Get the first diode params (if any diodes exist).
-    pub fn diode_params(&self) -> Option<&DiodeParams> {
-        self.devices.iter().find_map(|d| match d {
-            DeviceIR::Diode(p) => Some(p),
-            _ => None,
-        })
-    }
-
-    /// Get the first BJT params (if any BJTs exist).
-    pub fn bjt_params(&self) -> Option<&BjtParams> {
-        self.devices.iter().find_map(|d| match d {
-            DeviceIR::Bjt(p) => Some(p),
-            _ => None,
-        })
-    }
 }

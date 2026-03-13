@@ -1166,7 +1166,6 @@ fn test_ir_json_is_valid() {
     // Should contain key fields
     assert!(parsed.get("topology").is_some());
     assert!(parsed.get("matrices").is_some());
-    assert!(parsed.get("devices").is_some());
     assert!(parsed.get("device_slots").is_some());
     assert!(parsed.get("solver_config").is_some());
 }

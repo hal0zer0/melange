@@ -6,7 +6,7 @@
 //! All processing uses pre-allocated buffers - no heap allocation in the audio thread.
 
 use crate::dk::DkKernel;
-use melange_primitives::nr::{nr_solve_1d, nr_solve_2d};
+use melange_primitives::nr::{nr_solve_1d, nr_solve_2d, pn_vcrit, pnjlim, fetlim};
 use melange_devices::{DiodeShockley, BjtEbersMoll, Jfet, Mosfet, KorenTriode, NonlinearDevice};
 use smallvec::{SmallVec, smallvec};
 
@@ -152,6 +152,64 @@ impl DeviceEntry {
             DeviceEntry::Jfet { start_idx, .. } => *start_idx,
             DeviceEntry::Mosfet { start_idx, .. } => *start_idx,
             DeviceEntry::Tube { start_idx, .. } => *start_idx,
+        }
+    }
+
+    /// Apply SPICE-style voltage limiting for one dimension of this device.
+    ///
+    /// Uses `pnjlim` for PN junctions (diodes, BJTs) and `fetlim` for FETs.
+    /// `dim` is the local dimension index within this device (0 or 1).
+    pub fn limit_voltage(&self, dim: usize, vnew: f64, vold: f64) -> f64 {
+        match self {
+            DeviceEntry::Diode { device, .. } => {
+                let n_vt = device.n * device.vt;
+                let vcrit = pn_vcrit(n_vt, device.is);
+                pnjlim(vnew, vold, n_vt, vcrit)
+            }
+            DeviceEntry::DiodeWithRs { device, .. } => {
+                let n_vt = device.diode.n * device.diode.vt;
+                let vcrit = pn_vcrit(n_vt, device.diode.is);
+                pnjlim(vnew, vold, n_vt, vcrit)
+            }
+            DeviceEntry::Led { .. } => {
+                // LED uses Shockley diode internally (n=1.0, IS ~1e-20)
+                let n_vt = melange_devices::VT_ROOM;
+                let vcrit = pn_vcrit(n_vt, 1e-20);
+                pnjlim(vnew, vold, n_vt, vcrit)
+            }
+            DeviceEntry::Bjt { device, .. } => {
+                // Both junctions (Vbe, Vbc) use pnjlim with thermal voltage
+                let vcrit = pn_vcrit(device.vt, device.is);
+                pnjlim(vnew, vold, device.vt, vcrit)
+            }
+            DeviceEntry::Jfet { device, .. } => {
+                if dim == 0 {
+                    // Vgs — limit around pinch-off voltage
+                    fetlim(vnew, vold, device.vp)
+                } else {
+                    // Vds — generous limiting (quadratic model, well-behaved)
+                    fetlim(vnew, vold, 0.0)
+                }
+            }
+            DeviceEntry::Mosfet { device, .. } => {
+                if dim == 0 {
+                    // Vgs — limit around threshold voltage
+                    fetlim(vnew, vold, device.vt)
+                } else {
+                    // Vds — generous limiting
+                    fetlim(vnew, vold, 0.0)
+                }
+            }
+            DeviceEntry::Tube { device, .. } => {
+                if dim == 0 {
+                    // Vgk — grid current has exponential-like onset
+                    let vcrit = pn_vcrit(device.vgk_onset / 3.0, 1e-10);
+                    pnjlim(vnew, vold, device.vgk_onset / 3.0, vcrit)
+                } else {
+                    // Vpk — plate current is well-behaved, use FET-like limiting
+                    fetlim(vnew, vold, 0.0)
+                }
+            }
         }
     }
 
@@ -481,8 +539,6 @@ pub struct CircuitSolver {
     pub max_iter: u32,
     /// NR tolerance
     pub tol: f64,
-    /// Step clamp for NR
-    pub clamp: f64,
     /// Reason the NR solver stopped on the most recent sample.
     last_convergence_reason: ConvergenceReason,
     /// DC blocking filter state (previous input)
@@ -573,7 +629,6 @@ impl CircuitSolver {
             input_prev: 0.0,
             max_iter: 100,
             tol: 1e-10,
-            clamp: 0.01,
             last_convergence_reason: if m == 0 { ConvergenceReason::Linear } else { ConvergenceReason::MaxIterations },
             dc_block_x_prev: 0.0,
             dc_block_y_prev: 0.0,
@@ -805,10 +860,10 @@ impl CircuitSolver {
                 let g = jac[0];
                 1.0 - k * g
             },
+            |vnew, vold| device.limit_voltage(0, vnew, vold),
             self.v_nl_prev[0],
             self.max_iter,
             self.tol,
-            self.clamp,
         );
 
         // On convergence use the NR result; on failure fall back to previous for continuity
@@ -877,10 +932,11 @@ impl CircuitSolver {
             f1, f2,
             df1_dv1, df1_dv2,
             df2_dv1, df2_dv2,
+            |vnew, vold| dev0.limit_voltage(0, vnew, vold),
+            |vnew, vold| dev1.limit_voltage(0, vnew, vold),
             self.v_nl_prev[0], self.v_nl_prev[1],
             self.max_iter,
             self.tol,
-            self.clamp,
         );
 
         // On convergence use the NR result; on failure fall back to previous for continuity
@@ -969,27 +1025,53 @@ impl CircuitSolver {
             let solved = gauss_solve_inplace(&mut self.jacobian_mat, &mut self.delta, m);
 
             if !solved {
-                // Singular Jacobian — damped fallback (0.5 * residual)
+                // Singular Jacobian — damped half-step along residual
                 for i in 0..m {
-                    let step = (self.residual[i] * 0.5).clamp(-self.clamp, self.clamp);
-                    self.i_nl[i] -= step;
+                    self.i_nl[i] -= self.residual[i] * 0.5;
                 }
                 continue;
             }
 
-            // Check step-size convergence: if max absolute clamped step < tolerance, done
+            // Compute voltage-space step: delta_v[i] = -sum_j K[i][j] * delta[j]
+            // Then apply SPICE limiting in voltage space and compute damping factor.
+            let mut alpha = 1.0_f64;
+            for device in &self.devices {
+                let idx = device.start_idx();
+                for d in 0..device.dimension() {
+                    let i = idx + d;
+                    // Implied voltage change from current-space step
+                    let mut dv = 0.0;
+                    for j in 0..m {
+                        dv -= self.kernel.k[i * m + j] * self.delta[j];
+                    }
+                    if dv.abs() > 1e-15 {
+                        let v_old = self.v_nl[i];
+                        let v_proposed = v_old + dv;
+                        let v_limited = device.limit_voltage(d, v_proposed, v_old);
+                        let dv_limited = v_limited - v_old;
+                        let ratio = dv_limited / dv;
+                        // ratio can be negative if limiter reverses direction (rare);
+                        // in that case take a small step rather than going backwards
+                        let ratio = ratio.max(0.01);
+                        if ratio < alpha {
+                            alpha = ratio;
+                        }
+                    }
+                }
+            }
+
+            // Apply damped Newton step
+            for i in 0..m {
+                self.i_nl[i] -= alpha * self.delta[i];
+            }
+
+            // Check step-size convergence
             let max_step: f64 = self.delta[..m].iter()
-                .map(|&d| d.clamp(-self.clamp, self.clamp).abs())
+                .map(|&d| (alpha * d).abs())
                 .fold(0.0_f64, f64::max);
             if max_step < self.tol {
                 self.last_convergence_reason = ConvergenceReason::StepSize;
                 break;
-            }
-
-            // Update: i_nl -= delta (with clamping)
-            for i in 0..m {
-                let step = self.delta[i].clamp(-self.clamp, self.clamp);
-                self.i_nl[i] -= step;
             }
 
             // NaN/Inf detection: if any i_nl is non-finite, restore from previous and break

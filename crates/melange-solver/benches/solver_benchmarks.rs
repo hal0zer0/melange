@@ -13,7 +13,7 @@ use melange_devices::{BjtEbersMoll, DiodeShockley};
 use melange_solver::{
     parser::Netlist, mna::MnaSystem, dk::DkKernel, solver::{CircuitSolver, DeviceEntry, LinearSolver},
 };
-use melange_primitives::nr::{nr_solve_1d, nr_solve_2d};
+use melange_primitives::nr::{nr_solve_1d, nr_solve_2d, pn_vcrit, pnjlim};
 
 // =============================================================================
 // Circuit Netlists
@@ -156,6 +156,8 @@ fn benchmark_nr_1d_convergence(c: &mut Criterion) {
             let mut v_prev = if warm_start { 0.4 } else { 0.0 };
             b.iter(|| {
                 let v0 = if warm_start { v_prev } else { 0.0 };
+                let n_vt = diode.n * diode.vt;
+                let vcrit = pn_vcrit(n_vt, diode.is);
                 let (v, result) = nr_solve_1d(
                     |v| {
                         let i = diode.current_at(v);
@@ -165,10 +167,10 @@ fn benchmark_nr_1d_convergence(c: &mut Criterion) {
                         let g = diode.conductance_at(v);
                         1.0 - k * g
                     },
+                    |vnew, vold| pnjlim(vnew, vold, n_vt, vcrit),
                     v0,
                     20,
                     1e-10,
-                    0.1,
                 );
                 if warm_start {
                     v_prev = v;
@@ -189,6 +191,8 @@ fn benchmark_nr_2d_convergence(c: &mut Criterion) {
     // K matrix for two coupled diodes
     let k = [[500.0, 200.0], [200.0, 500.0]];
     let p = [0.3, -0.3]; // Differential drive
+    let n_vt = diode1.n * diode1.vt;
+    let vcrit = pn_vcrit(n_vt, diode1.is);
 
     let mut group = c.benchmark_group("nr_solver/2d");
     group.measurement_time(std::time::Duration::from_secs(5));
@@ -231,10 +235,11 @@ fn benchmark_nr_2d_convergence(c: &mut Criterion) {
                         let g = diode2.conductance_at(v2);
                         1.0 - k[1][1] * g
                     },
+                    |vnew, vold| pnjlim(vnew, vold, n_vt, vcrit),
+                    |vnew, vold| pnjlim(vnew, vold, n_vt, vcrit),
                     v0[0], v0[1],
                     20,
                     1e-10,
-                    0.1,
                 );
                 if warm_start {
                     v_prev = [v1, v2];
