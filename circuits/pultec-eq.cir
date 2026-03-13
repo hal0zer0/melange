@@ -83,26 +83,26 @@ Rload out 0 100k
 * === SWITCH DIRECTIVES ===
 * HF Boost frequency: 7 positions (ganged C + L)
 * Positions: 3kHz, 4kHz, 5kHz, 8kHz, 10kHz, 12kHz, 16kHz
-.switch C_hfb,L_hfb 15n/176m 15n/100m 10n/100m 10n/50m 6n8/50m 6n8/22m 3n3/22m
+.switch C_hfb,L_hfb 15n/176m 15n/100m 10n/100m 10n/50m 6n8/50m 6n8/22m 3n3/22m "HF Boost Freq"
 
 * LF Boost frequency: 4 positions
 * Positions: 20Hz, 30Hz, 60Hz, 100Hz
-.switch C_lfb 330n 220n 100n 68n
+.switch C_lfb 330n 220n 100n 68n "LF Boost Freq"
 
 * HF Cut frequency: 3 positions
 * Positions: ~3.4kHz, ~3.4kHz, ~1.1kHz
-.switch C_hfc 47n 47n 150n
+.switch C_hfc 47n 47n 150n "HF Cut Freq"
 
 * === POTENTIOMETER DIRECTIVES ===
 * HF Boost Amount (series R to LC network)
-.pot R_hfb 1 10k
+.pot R_hfb 1 10k "HF Boost"
 * HF Boost Q (damping resistor across LC)
-.pot R_hfb_q 1 2.2k
+.pot R_hfb_q 1 2.2k "HF Boost Q"
 * LF Boost Amount
-.pot R_lfb 1 10k
+.pot R_lfb 1 10k "LF Boost"
 * LF Cut Amount
-.pot R_lfc 1 100k
+.pot R_lfc 1 100k "LF Cut"
 * HF Cut Amount
-.pot R_hfc 1 1k
+.pot R_hfc 1 1k "HF Cut"
 
 .END

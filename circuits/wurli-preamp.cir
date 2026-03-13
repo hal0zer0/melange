@@ -49,7 +49,7 @@ R10   out   fb     56K
 
 * --- Tremolo LDR (dynamic pot) ---
 R_ldr fb    0      100k
-.pot R_ldr 1k 1Meg
+.pot R_ldr 1k 1Meg "Tremolo"
 
 * --- Supply ---
 V1    vcc   0      DC 15
