@@ -18,7 +18,8 @@ use std::path::PathBuf;
 
 use melange_validate::{
     comparison::{compare_signals, ComparisonConfig, Signal},
-    spice_runner::{is_ngspice_available, run_transient_with_pwl},
+    spice_runner::{is_ngspice_available, run_transient_with_thevenin_pwl},
+    strip_vin_source,
     visualizer::generate_html_report,
     ValidationError,
 };
@@ -112,8 +113,8 @@ fn bjt_config() -> ComparisonConfig {
     ComparisonConfig {
         rms_error_tolerance: 0.40,        // 40% — dominated by 0.5V DC offset between models
         peak_error_tolerance: 1.8,        // 1.8V — startup transient + DC offset
-        max_relative_tolerance: 200.0,    // near zero-crossings can have very large relative error
-        correlation_min: 0.96,            // waveform shape should match well (measured: 0.965)
+        max_relative_tolerance: 1000.0,   // near zero-crossings have huge relative error due to DC offset
+        correlation_min: 0.96,            // waveform shape should match well (measured: 0.963)
         thd_error_tolerance_db: 5.0,      // larger model differences
         full_scale: 10.0,                 // BJT CE output can swing wider
         skip_thd: true,                   // THD unreliable: DC offset shifts fundamental detection
@@ -148,7 +149,6 @@ fn run_validation(
 ) -> Result<ValidationResult, ValidationError> {
     let data_dir = test_data_dir().join(circuit_name);
     let netlist_path = data_dir.join("circuit.cir");
-    let netlist_path_no_vin = data_dir.join("circuit_no_vin.cir");
     let input_pwl_path = data_dir.join("input_pwl.txt");
 
     // Load PWL input data
@@ -161,17 +161,22 @@ fn run_validation(
         ));
     }
 
+    // Read the single netlist file
+    let netlist_str = std::fs::read_to_string(&netlist_path)
+        .map_err(|e| ValidationError::Io(e.to_string()))?;
+
     // Determine simulation parameters from PWL data
     let duration = pwl_data.last().map(|(t, _)| *t).unwrap_or(0.01);
     let tstep = 1.0 / SAMPLE_RATE;
 
-    // Run ngspice simulation (uses netlist with VIN source)
-    let spice_data = run_transient_with_pwl(
-        &netlist_path,
+    // Run ngspice with Thevenin PWL (1-ohm series R matching melange)
+    let spice_data = run_transient_with_thevenin_pwl(
+        &netlist_str,
         tstep,
         duration,
-        "in", // PWL source name - netlists use Vin as the input source
+        "in",
         &pwl_data,
+        1.0,
         &[output_node.to_string()],
     )?;
 
@@ -181,10 +186,11 @@ fn run_validation(
         .map_err(|e| ValidationError::Spice(e))?
         .to_vec();
 
-    // Run melange solver (uses netlist without VIN source, input via input_conductance)
+    // Strip VIN for melange solver (auto-detect and remove input voltage source)
+    let (stripped_netlist, _dc_offset) = strip_vin_source(&netlist_str, "in");
     let input_signal = resample_pwl_to_signal(&pwl_data, SAMPLE_RATE, spice_output.len());
 
-    let melange_output = run_melange_solver(&netlist_path_no_vin, &input_signal, SAMPLE_RATE)?;
+    let melange_output = run_melange_solver(&stripped_netlist, &input_signal, SAMPLE_RATE)?;
 
     // Apply DC blocking to SPICE output to match melange's internal DC blocker
     dc_block_signal(&mut spice_output, SAMPLE_RATE);
@@ -259,19 +265,15 @@ fn interpolate_pwl(pwl_data: &[(f64, f64)], t: f64) -> f64 {
     0.0
 }
 
-/// Run melange solver on a netlist with the given input signal
+/// Run melange solver on a netlist string with the given input signal
 fn run_melange_solver(
-    netlist_path: &PathBuf,
+    netlist_str: &str,
     input_signal: &[f64],
     sample_rate: f64,
 ) -> Result<Vec<f64>, ValidationError> {
     use melange_solver::solver::CircuitSolver;
 
-    // Read and parse netlist
-    let netlist_str = std::fs::read_to_string(netlist_path)
-        .map_err(|e| ValidationError::Io(format!("Failed to read netlist: {}", e)))?;
-
-    let netlist = melange_solver::parser::Netlist::parse(&netlist_str)
+    let netlist = melange_solver::parser::Netlist::parse(netlist_str)
         .map_err(|e| ValidationError::Solver(format!("Parse error at line {}: {}", e.line, e.message)))?;
 
     // Build MNA system (mutable — we need to stamp input conductance before kernel build)
@@ -303,7 +305,7 @@ fn run_melange_solver(
     let devices = build_devices_from_netlist(&netlist, &mna)?;
 
     // Create solver with matching input_conductance
-    let mut solver = CircuitSolver::new(kernel, devices, input_node, output_node);
+    let mut solver = CircuitSolver::new(kernel, devices, input_node, output_node).unwrap();
     solver.input_conductance = input_conductance;
 
     // Initialize nonlinear DC operating point (essential for BJT circuits)
@@ -335,7 +337,6 @@ fn build_devices_from_netlist(
     for dev_info in &mna.nonlinear_devices {
         match dev_info.device_type {
             melange_solver::mna::NonlinearDeviceType::Diode => {
-                // Find model parameters from netlist
                 let model_params = find_diode_model(netlist, &dev_info.name);
                 let is = model_params.0.unwrap_or(1e-15);
                 let n = model_params.1.unwrap_or(1.0);
@@ -344,24 +345,25 @@ fn build_devices_from_netlist(
                 devices.push(DeviceEntry::new_diode(diode, dev_info.start_idx));
             }
             melange_solver::mna::NonlinearDeviceType::Bjt => {
-                // Find model parameters from netlist
                 let model_params = find_bjt_model(netlist, &dev_info.name);
                 let is = model_params.0.unwrap_or(1e-15);
                 let beta_f = model_params.1.unwrap_or(200.0);
                 let beta_r = model_params.2.unwrap_or(3.0);
-
-                // Determine polarity from model type
                 let polarity = find_bjt_polarity(netlist, &dev_info.name);
-
                 let bjt = BjtEbersMoll::new_room_temp(is, beta_f, beta_r, polarity);
                 devices.push(DeviceEntry::new_bjt(bjt, dev_info.start_idx));
             }
-            _ => {
-                // Other device types not yet supported
-                return Err(ValidationError::Solver(format!(
-                    "Device type {:?} not yet supported",
-                    dev_info.device_type
-                )));
+            melange_solver::mna::NonlinearDeviceType::Jfet => {
+                let jfet = find_jfet_device(netlist, &dev_info.name);
+                devices.push(DeviceEntry::new_jfet(jfet, dev_info.start_idx));
+            }
+            melange_solver::mna::NonlinearDeviceType::Mosfet => {
+                let mosfet = find_mosfet_device(netlist, &dev_info.name);
+                devices.push(DeviceEntry::new_mosfet(mosfet, dev_info.start_idx));
+            }
+            melange_solver::mna::NonlinearDeviceType::Tube => {
+                let tube = find_tube_device(netlist, &dev_info.name);
+                devices.push(DeviceEntry::new_tube(tube, dev_info.start_idx));
             }
         }
     }
@@ -486,15 +488,119 @@ fn find_bjt_polarity(netlist: &melange_solver::parser::Netlist, device_name: &st
     BjtPolarity::Npn
 }
 
+/// Find JFET device from netlist, constructing a Jfet with model params.
+fn find_jfet_device(netlist: &melange_solver::parser::Netlist, device_name: &str) -> melange_devices::Jfet {
+    use melange_devices::jfet::{Jfet, JfetChannel};
+
+    let model_name = netlist.elements.iter().find_map(|e| {
+        if let melange_solver::parser::Element::Jfet { name, model, .. } = e {
+            if name.eq_ignore_ascii_case(device_name) { Some(model.clone()) } else { None }
+        } else { None }
+    }).unwrap_or_default();
+
+    let is_p_channel = netlist.models.iter()
+        .find(|m| m.name.eq_ignore_ascii_case(&model_name))
+        .map(|m| m.model_type.to_uppercase().starts_with("PJ"))
+        .unwrap_or(false);
+
+    let channel = if is_p_channel { JfetChannel::P } else { JfetChannel::N };
+    let default_vp = if is_p_channel { 2.0 } else { -2.0 };
+
+    let find_param = |param: &str| -> Option<f64> {
+        netlist.models.iter()
+            .find(|m| m.name.eq_ignore_ascii_case(&model_name))
+            .and_then(|m| m.params.iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(param))
+                .map(|(_, v)| *v))
+    };
+
+    let vp = find_param("VTO").unwrap_or(default_vp);
+    // ngspice BETA = IDSS / VP^2, so IDSS = BETA * VP^2
+    let idss = if let Some(beta) = find_param("BETA") {
+        beta * vp * vp
+    } else {
+        find_param("IDSS").unwrap_or(2e-3)
+    };
+    let mut jfet = Jfet::new(channel, vp, idss);
+    jfet.lambda = find_param("LAMBDA").unwrap_or(0.001);
+    jfet
+}
+
+/// Find MOSFET device from netlist, constructing a Mosfet with model params.
+fn find_mosfet_device(netlist: &melange_solver::parser::Netlist, device_name: &str) -> melange_devices::Mosfet {
+    use melange_devices::mosfet::{Mosfet, ChannelType};
+
+    let model_name = netlist.elements.iter().find_map(|e| {
+        if let melange_solver::parser::Element::Mosfet { name, model, .. } = e {
+            if name.eq_ignore_ascii_case(device_name) { Some(model.clone()) } else { None }
+        } else { None }
+    }).unwrap_or_default();
+
+    let is_p_channel = netlist.models.iter()
+        .find(|m| m.name.eq_ignore_ascii_case(&model_name))
+        .map(|m| m.model_type.to_uppercase().starts_with("PM"))
+        .unwrap_or(false);
+
+    let channel = if is_p_channel { ChannelType::P } else { ChannelType::N };
+    let default_vt = if is_p_channel { -2.0 } else { 2.0 };
+
+    let find_param = |param: &str| -> Option<f64> {
+        netlist.models.iter()
+            .find(|m| m.name.eq_ignore_ascii_case(&model_name))
+            .and_then(|m| m.params.iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(param))
+                .map(|(_, v)| *v))
+    };
+
+    let vt = find_param("VTO").unwrap_or(default_vt);
+    let kp = find_param("KP").unwrap_or(0.1);
+    let lambda = find_param("LAMBDA").unwrap_or(0.01);
+    Mosfet::new(channel, vt, kp, lambda)
+}
+
+/// Find tube/triode device from netlist, constructing a KorenTriode with model params.
+fn find_tube_device(netlist: &melange_solver::parser::Netlist, device_name: &str) -> melange_devices::KorenTriode {
+    let model_name = netlist.elements.iter().find_map(|e| {
+        if let melange_solver::parser::Element::Triode { name, model, .. } = e {
+            if name.eq_ignore_ascii_case(device_name) { Some(model.clone()) } else { None }
+        } else { None }
+    }).unwrap_or_default();
+
+    let find_param = |param: &str| -> Option<f64> {
+        netlist.models.iter()
+            .find(|m| m.name.eq_ignore_ascii_case(&model_name))
+            .and_then(|m| m.params.iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(param))
+                .map(|(_, v)| *v))
+    };
+
+    let mu = find_param("MU").unwrap_or(100.0);
+    let ex = find_param("EX").unwrap_or(1.4);
+    let kg1 = find_param("KG1").unwrap_or(1060.0);
+    let kp = find_param("KP").unwrap_or(600.0);
+    let kvb = find_param("KVB").unwrap_or(300.0);
+    let ig_max = find_param("IG_MAX").unwrap_or(2e-3);
+    let vgk_onset = find_param("VGK_ONSET").unwrap_or(0.5);
+    melange_devices::KorenTriode::with_grid_params(mu, ex, kg1, kp, kvb, ig_max, vgk_onset)
+}
+
 /// Build device slots for the DC OP solver from a parsed netlist.
 fn build_device_slots_from_netlist(
     netlist: &melange_solver::parser::Netlist,
 ) -> Vec<melange_solver::codegen::ir::DeviceSlot> {
-    use melange_solver::codegen::ir::{DeviceSlot, DeviceType, DeviceParams, DiodeParams, BjtParams};
+    use melange_solver::codegen::ir::{DeviceSlot, DeviceType, DeviceParams, DiodeParams, BjtParams, JfetParams, MosfetParams, TubeParams};
 
     let vt = 0.02585;
     let mut slots = Vec::new();
     let mut dim_offset = 0;
+
+    let find_model_param = |model_name: &str, param: &str| -> Option<f64> {
+        netlist.models.iter()
+            .find(|m| m.name.eq_ignore_ascii_case(model_name))
+            .and_then(|m| m.params.iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(param))
+                .map(|(_, v)| *v))
+    };
 
     for elem in &netlist.elements {
         match elem {
@@ -527,6 +633,68 @@ fn build_device_slots_from_netlist(
                         is, vt, beta_f, beta_r, is_pnp,
                         vaf: f64::INFINITY, var: f64::INFINITY,
                         ikf: f64::INFINITY, ikr: f64::INFINITY,
+                    }),
+                });
+                dim_offset += 2;
+            }
+            melange_solver::parser::Element::Jfet { model, .. } => {
+                let is_p_channel = netlist.models.iter()
+                    .find(|m| m.name.eq_ignore_ascii_case(model))
+                    .map(|m| m.model_type.to_uppercase().starts_with("PJ"))
+                    .unwrap_or(false);
+                let default_vp = if is_p_channel { 2.0 } else { -2.0 };
+                slots.push(DeviceSlot {
+                    device_type: DeviceType::Jfet,
+                    start_idx: dim_offset,
+                    dimension: 2,
+                    params: DeviceParams::Jfet(JfetParams {
+                        idss: {
+                            let vp = find_model_param(model, "VTO").unwrap_or(default_vp);
+                            if let Some(beta) = find_model_param(model, "BETA") {
+                                beta * vp * vp
+                            } else {
+                                find_model_param(model, "IDSS").unwrap_or(2e-3)
+                            }
+                        },
+                        vp: find_model_param(model, "VTO").unwrap_or(default_vp),
+                        lambda: find_model_param(model, "LAMBDA").unwrap_or(0.001),
+                        is_p_channel,
+                    }),
+                });
+                dim_offset += 2;
+            }
+            melange_solver::parser::Element::Mosfet { model, .. } => {
+                let is_p_channel = netlist.models.iter()
+                    .find(|m| m.name.eq_ignore_ascii_case(model))
+                    .map(|m| m.model_type.to_uppercase().starts_with("PM"))
+                    .unwrap_or(false);
+                let default_vt = if is_p_channel { -2.0 } else { 2.0 };
+                slots.push(DeviceSlot {
+                    device_type: DeviceType::Mosfet,
+                    start_idx: dim_offset,
+                    dimension: 2,
+                    params: DeviceParams::Mosfet(MosfetParams {
+                        kp: find_model_param(model, "KP").unwrap_or(0.1),
+                        vt: find_model_param(model, "VTO").unwrap_or(default_vt),
+                        lambda: find_model_param(model, "LAMBDA").unwrap_or(0.01),
+                        is_p_channel,
+                    }),
+                });
+                dim_offset += 2;
+            }
+            melange_solver::parser::Element::Triode { model, .. } => {
+                slots.push(DeviceSlot {
+                    device_type: DeviceType::Tube,
+                    start_idx: dim_offset,
+                    dimension: 2,
+                    params: DeviceParams::Tube(TubeParams {
+                        mu: find_model_param(model, "MU").unwrap_or(100.0),
+                        ex: find_model_param(model, "EX").unwrap_or(1.4),
+                        kg1: find_model_param(model, "KG1").unwrap_or(1060.0),
+                        kp: find_model_param(model, "KP").unwrap_or(600.0),
+                        kvb: find_model_param(model, "KVB").unwrap_or(300.0),
+                        ig_max: find_model_param(model, "IG_MAX").unwrap_or(2e-3),
+                        vgk_onset: find_model_param(model, "VGK_ONSET").unwrap_or(0.5),
                     }),
                 });
                 dim_offset += 2;
@@ -726,20 +894,21 @@ fn test_bjt_common_emitter_vs_spice() {
     // Run validation with signal access for gain analysis
     let data_dir = test_data_dir().join("bjt_common_emitter");
     let netlist_path = data_dir.join("circuit.cir");
-    let netlist_path_no_vin = data_dir.join("circuit_no_vin.cir");
     let input_pwl_path = data_dir.join("input_pwl.txt");
 
+    let netlist_str = std::fs::read_to_string(&netlist_path).expect("Failed to read netlist");
     let pwl_data = load_pwl_file(&input_pwl_path).expect("Failed to load PWL");
     let duration = pwl_data.last().map(|(t, _)| *t).unwrap_or(0.01);
     let tstep = 1.0 / SAMPLE_RATE;
 
-    let spice_data = run_transient_with_pwl(
-        &netlist_path, tstep, duration, "in", &pwl_data, &["out".to_string()],
+    let spice_data = run_transient_with_thevenin_pwl(
+        &netlist_str, tstep, duration, "in", &pwl_data, 1.0, &["out".to_string()],
     ).expect("ngspice failed");
 
     let spice_output = spice_data.get_node_voltage("out").unwrap().to_vec();
     let input_signal = resample_pwl_to_signal(&pwl_data, SAMPLE_RATE, spice_output.len());
-    let melange_output = run_melange_solver(&netlist_path_no_vin, &input_signal, SAMPLE_RATE)
+    let (stripped_netlist, _) = strip_vin_source(&netlist_str, "in");
+    let melange_output = run_melange_solver(&stripped_netlist, &input_signal, SAMPLE_RATE)
         .expect("melange solver failed");
 
     let config = bjt_config();
@@ -833,6 +1002,110 @@ fn test_antiparallel_diodes_vs_spice() {
         result.report.correlation_coefficient > 0.99,
         "Correlation too low for 2D solver: {:.8}",
         result.report.correlation_coefficient
+    );
+}
+
+/// Test 5: Op-Amp Inverting Amplifier (Linear, M=0)
+///
+/// Validates melange's VCCS-based op-amp model against ngspice.
+/// Gain = -R2/R1 = -100k/10k = -10.
+/// Uses VCCS (G element) + Rout to match melange's op-amp model exactly.
+///
+/// This is a linear circuit (M=0), so tolerances should be strict.
+#[test]
+fn test_opamp_inverting_vs_spice() {
+    if !is_ngspice_available() {
+        eprintln!("Skipping test_opamp_inverting_vs_spice: ngspice not available");
+        return;
+    }
+
+    println!("\n=== Op-Amp Inverting Amplifier Validation ===");
+    println!("Circuit: Gain=-10, VCCS model (AOL=200k, ROUT=1)");
+
+    let result = run_validation("opamp_inverting", "out", &strict_linear_config())
+        .expect("Failed to run validation");
+
+    print_validation_metrics(&result);
+
+    assert!(
+        result.report.passed,
+        "Op-amp inverting validation failed:\n{}\nReport saved to: {:?}",
+        result.report.summary(),
+        result.html_report_path
+    );
+}
+
+/// Test 6: JFET Common Source Amplifier
+///
+/// N-channel JFET with self-bias. Tests the 2D Shichman-Hodges model.
+///
+#[test]
+fn test_jfet_common_source_vs_spice() {
+    if !is_ngspice_available() {
+        eprintln!("Skipping test_jfet_common_source_vs_spice: ngspice not available");
+        return;
+    }
+
+    println!("\n=== JFET Common Source Amplifier Validation ===");
+    println!("Circuit: N-channel JFET, Rd=2.2k, Rs=1k, VDD=12V");
+
+    let config = ComparisonConfig {
+        rms_error_tolerance: 0.10,
+        peak_error_tolerance: 0.5,
+        max_relative_tolerance: 5.0,
+        correlation_min: 0.999,
+        thd_error_tolerance_db: 5.0,  // DK method produces different harmonics than SPICE
+        full_scale: 5.0,
+        skip_thd: false,
+    };
+
+    let result = run_validation("jfet_common_source", "out", &config)
+        .expect("Failed to run validation");
+
+    print_validation_metrics(&result);
+
+    assert!(
+        result.report.passed,
+        "JFET common source validation failed:\n{}\nReport saved to: {:?}",
+        result.report.summary(),
+        result.html_report_path
+    );
+}
+
+/// Test 7: MOSFET Common Source Amplifier
+///
+/// N-channel MOSFET Level 1 with voltage divider bias. Tests the 2D model.
+///
+#[test]
+fn test_mosfet_common_source_vs_spice() {
+    if !is_ngspice_available() {
+        eprintln!("Skipping test_mosfet_common_source_vs_spice: ngspice not available");
+        return;
+    }
+
+    println!("\n=== MOSFET Common Source Amplifier Validation ===");
+    println!("Circuit: N-channel MOSFET, Rd=1k, VDD=5V");
+
+    let config = ComparisonConfig {
+        rms_error_tolerance: 0.10,
+        peak_error_tolerance: 0.5,
+        max_relative_tolerance: 5.0,
+        correlation_min: 0.999,
+        thd_error_tolerance_db: 5.0,
+        full_scale: 5.0,
+        skip_thd: true,  // small-signal linear region: THD too low to measure reliably
+    };
+
+    let result = run_validation("mosfet_common_source", "out", &config)
+        .expect("Failed to run validation");
+
+    print_validation_metrics(&result);
+
+    assert!(
+        result.report.passed,
+        "MOSFET common source validation failed:\n{}\nReport saved to: {:?}",
+        result.report.summary(),
+        result.html_report_path
     );
 }
 

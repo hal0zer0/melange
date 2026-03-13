@@ -155,7 +155,10 @@ pub fn run_transient(
             continue;
         }
 
-        if trimmed_upper.starts_with(".TRAN") {
+        if is_melange_directive(line) {
+            // Strip melange-specific directives that ngspice doesn't understand
+            continue;
+        } else if trimmed_upper.starts_with(".TRAN") {
             // Replace with uniform timestep for sample-accurate comparison
             // Use the specified tstep and tstop instead of netlist values
             modified_content.push_str(&format!(".TRAN {} {}\n",
@@ -350,14 +353,134 @@ fn inject_pwl_source(
     })
 }
 
-struct ModifiedNetlist {
-    netlist_path: std::path::PathBuf,
+pub(crate) struct ModifiedNetlist {
+    pub(crate) netlist_path: std::path::PathBuf,
 }
 
 impl Drop for ModifiedNetlist {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.netlist_path);
     }
+}
+
+/// Check if a line is a melange-specific directive that ngspice doesn't understand
+fn is_melange_directive(line: &str) -> bool {
+    let trimmed = line.trim().to_uppercase();
+    trimmed.starts_with(".POT ")
+        || trimmed.starts_with(".SWITCH ")
+        || trimmed.starts_with(".INPUT_IMPEDANCE ")
+}
+
+/// Inject a Thevenin-equivalent PWL source into a netlist string
+///
+/// Creates a modified netlist with a voltage source + series resistance matching
+/// melange's 1-ohm Thevenin input model. If an existing voltage source is found
+/// with n+ matching `input_node`, it is replaced; otherwise the pair is inserted.
+///
+/// The intermediate node `in_mlg_src` avoids collisions with existing node names.
+pub(crate) fn inject_thevenin_pwl(
+    original_content: &str,
+    input_node: &str,
+    pwl_data: &[(f64, f64)],
+    series_resistance: f64,
+) -> Result<ModifiedNetlist, SpiceError> {
+    use std::io::Write;
+
+    let pwl_string: String = pwl_data
+        .iter()
+        .map(|(t, v)| format!("{} {}", format_scientific(*t), format_scientific(*v)))
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    let input_upper = input_node.to_uppercase();
+    let mut modified_lines = Vec::new();
+    let mut source_replaced = false;
+
+    for line in original_content.lines() {
+        let trimmed = line.trim();
+
+        // Skip commented lines
+        if trimmed.starts_with('*') {
+            modified_lines.push(line.to_string());
+            continue;
+        }
+
+        let trimmed_upper = trimmed.to_uppercase();
+
+        // Check if this line is a voltage source with n+ matching input_node
+        if !source_replaced && trimmed_upper.starts_with('V') {
+            let parts: Vec<&str> = trimmed.split_whitespace().collect();
+            if parts.len() >= 3 && parts[1].to_uppercase() == input_upper {
+                // Found voltage source at input node — replace with Thevenin pair
+                // Preserve original source name to avoid breaking I(Vname) references
+                let original_name = parts[0];
+                let n_minus = parts[2];
+                modified_lines.push(format!(
+                    "{} in_mlg_src {} PWL({})",
+                    original_name, n_minus, pwl_string
+                ));
+                modified_lines.push(format!(
+                    "R_mlg_src in_mlg_src {} {}",
+                    input_node, series_resistance
+                ));
+                source_replaced = true;
+                continue;
+            }
+        }
+
+        modified_lines.push(line.to_string());
+    }
+
+    // If no source was found at the input node, insert Thevenin pair before .END
+    // Use V_mlg_in (not VIN) to avoid name collisions with existing sources
+    if !source_replaced {
+        let thevenin_v = format!("V_mlg_in in_mlg_src 0 PWL({})", pwl_string);
+        let thevenin_r = format!("R_mlg_src in_mlg_src {} {}", input_node, series_resistance);
+
+        let mut insert_idx = modified_lines.len();
+        for (i, line) in modified_lines.iter().enumerate() {
+            if line.trim().to_uppercase().starts_with(".END") {
+                insert_idx = i;
+                break;
+            }
+        }
+        modified_lines.insert(insert_idx, thevenin_v);
+        modified_lines.insert(insert_idx + 1, thevenin_r);
+    }
+
+    let content = modified_lines.join("\n");
+
+    let temp_dir = std::env::temp_dir();
+    let modified_path = temp_dir.join(format!(
+        "melange_thev_{}_{}.cir",
+        std::process::id(),
+        TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+
+    let mut file = std::fs::File::create(&modified_path)?;
+    file.write_all(content.as_bytes())?;
+
+    Ok(ModifiedNetlist {
+        netlist_path: modified_path,
+    })
+}
+
+/// Run ngspice with a Thevenin-equivalent PWL input source
+///
+/// This injects a voltage source + series resistor matching melange's 1-ohm
+/// Thevenin input model. Melange-specific directives (.pot, .switch, .input_impedance)
+/// are automatically stripped so ngspice can parse the netlist.
+pub fn run_transient_with_thevenin_pwl(
+    netlist_content: &str,
+    tstep: f64,
+    tstop: f64,
+    input_node: &str,
+    pwl_data: &[(f64, f64)],
+    series_resistance: f64,
+    nodes_to_capture: &[String],
+) -> Result<SpiceData, SpiceError> {
+    let modified = inject_thevenin_pwl(netlist_content, input_node, pwl_data, series_resistance)?;
+    run_transient(modified.netlist_path.as_path(), tstep, tstop, nodes_to_capture)
 }
 
 /// Parse ngspice printed output format (from .PRINT TRAN statements)

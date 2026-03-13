@@ -346,8 +346,17 @@ pub fn compare_signals(
         actual.clone()
     };
 
-    // Use the shorter length
+    // Use the shorter length, warn if mismatch
     let len = reference.len().min(resampled_actual.len());
+    if reference.len() != resampled_actual.len() {
+        let diff = (reference.len() as isize - resampled_actual.len() as isize).unsigned_abs();
+        if diff > 1 {
+            log::warn!(
+                "Signal length mismatch: reference={} vs actual={} (diff={})",
+                reference.len(), resampled_actual.len(), diff
+            );
+        }
+    }
     if len == 0 {
         return ComparisonReport {
             circuit_name: String::new(),

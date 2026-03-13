@@ -121,7 +121,7 @@ fn test_diode_clipper_solver() {
 
     let input_node = 0;
     let output_node = 1;
-    let mut solver = melange_solver::solver::CircuitSolver::new(kernel, devices, input_node, output_node);
+    let mut solver = melange_solver::solver::CircuitSolver::new(kernel, devices, input_node, output_node).unwrap();
     solver.input_conductance = 0.001; // Rin = 1k
 
     // Small signal: output should be proportional to input (not clipped)

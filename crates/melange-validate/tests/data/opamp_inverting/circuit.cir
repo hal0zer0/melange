@@ -1,0 +1,21 @@
+* Op-Amp Inverting Amplifier
+* Gain = -R2/R1 = -100k/10k = -10
+* Uses VCCS model matching melange's op-amp implementation
+
+* Input coupling
+R1 in inv 10k
+R2 inv out 100k
+
+* Op-amp as VCCS + Rout (matches melange model)
+* Gm = AOL/ROUT = 200000 S, Go = 1/ROUT = 1 S
+G1 0 out inv 0 200000
+Rout out 0 1
+
+* Stabilization cap (needed for DK trapezoidal method)
+Cstab out 0 1p
+
+* Control statements
+.TRAN 1u 10m
+.PRINT TRAN V(out) V(in)
+
+.END

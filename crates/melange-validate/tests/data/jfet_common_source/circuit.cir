@@ -1,0 +1,29 @@
+* JFET Common Source Amplifier
+* N-channel 2N5457-like
+* Self-biased with Rs, Rd=2.2k, VDD=12V
+
+VDD vdd 0 DC 12
+
+* Input coupling
+C1 in gate 10u
+
+* Gate bias (self-bias via Rs)
+Rg gate 0 1M
+
+* JFET stage
+J1 drain gate source JMOD
+Rd vdd drain 2.2k
+Rs source 0 1k
+Cs source 0 100u
+
+* Output coupling
+C2 drain out 10u
+Rload out 0 100k
+
+.MODEL JMOD NJF(VTO=-2.0 BETA=1.25e-3 LAMBDA=0.01)
+
+* Control statements
+.TRAN 1u 10m
+.PRINT TRAN V(out) V(in) V(drain) V(gate)
+
+.END

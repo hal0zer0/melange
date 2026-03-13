@@ -1,0 +1,28 @@
+* MOSFET Common Source Amplifier
+* N-channel BS170-like
+* VDD=5V, Rd=1k, bias via voltage divider
+
+VDD vdd 0 DC 5
+
+* Input coupling and bias (Vg = 5 * 100k/(47k+100k) = 3.4V, above VTO=2.0V)
+C1 in gate 10u
+R1 vdd gate 47k
+R2 gate 0 100k
+
+* MOSFET stage
+M1 drain gate source 0 NMOD
+Rd vdd drain 1k
+Rs source 0 100
+Cs source 0 100u
+
+* Output coupling
+C2 drain out 10u
+Rload out 0 100k
+
+.MODEL NMOD NMOS(VTO=2.0 KP=0.1 LAMBDA=0.01)
+
+* Control statements
+.TRAN 1u 10m
+.PRINT TRAN V(out) V(in) V(drain) V(gate)
+
+.END
