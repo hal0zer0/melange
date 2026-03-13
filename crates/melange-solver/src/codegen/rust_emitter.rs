@@ -138,6 +138,7 @@ fn device_param_template_data(ir: &CircuitIR) -> Vec<DeviceParamTemplateData> {
                         DeviceParamEntry { field_suffix: "kvb".into(), const_suffix: "KVB".into() },
                         DeviceParamEntry { field_suffix: "ig_max".into(), const_suffix: "IG_MAX".into() },
                         DeviceParamEntry { field_suffix: "vgk_onset".into(), const_suffix: "VGK_ONSET".into() },
+                        DeviceParamEntry { field_suffix: "lambda".into(), const_suffix: "LAMBDA".into() },
                     ],
                 ),
             };
@@ -717,6 +718,7 @@ impl RustEmitter {
                     emit_device_const(&mut code, dev_num, "KVB", tp.kvb);
                     emit_device_const(&mut code, dev_num, "IG_MAX", tp.ig_max);
                     emit_device_const(&mut code, dev_num, "VGK_ONSET", tp.vgk_onset);
+                    emit_device_const(&mut code, dev_num, "LAMBDA", tp.lambda);
                     // Precomputed critical voltage for SPICE pnjlim (grid current onset)
                     let vt_tube = tp.vgk_onset / 3.0;
                     let vcrit = vt_tube * (vt_tube / (std::f64::consts::SQRT_2 * 1e-10)).ln();
@@ -2033,13 +2035,13 @@ impl RustEmitter {
                         let d = dev_num;
                         // All tube params from state (no polarity constant for tubes)
                         code.push_str(&format!(
-                            "        let i_dev{s} = tube_ip(v_d{s}, v_d{s1}, state.device_{d}_mu, state.device_{d}_ex, state.device_{d}_kg1, state.device_{d}_kp, state.device_{d}_kvb);\n"
+                            "        let i_dev{s} = tube_ip(v_d{s}, v_d{s1}, state.device_{d}_mu, state.device_{d}_ex, state.device_{d}_kg1, state.device_{d}_kp, state.device_{d}_kvb, state.device_{d}_lambda);\n"
                         ));
                         code.push_str(&format!(
                             "        let i_dev{s1} = tube_ig(v_d{s}, state.device_{d}_ig_max, state.device_{d}_vgk_onset);\n"
                         ));
                         code.push_str(&format!(
-                            "        let tube{d}_jac = tube_jacobian(v_d{s}, v_d{s1}, state.device_{d}_mu, state.device_{d}_ex, state.device_{d}_kg1, state.device_{d}_kp, state.device_{d}_kvb, state.device_{d}_ig_max, state.device_{d}_vgk_onset);\n"
+                            "        let tube{d}_jac = tube_jacobian(v_d{s}, v_d{s1}, state.device_{d}_mu, state.device_{d}_ex, state.device_{d}_kg1, state.device_{d}_kp, state.device_{d}_kvb, state.device_{d}_ig_max, state.device_{d}_vgk_onset, state.device_{d}_lambda);\n"
                         ));
                         code.push_str(&format!(
                             "        let jdev_{}_{} = tube{}_jac[0];\n", s, s, d

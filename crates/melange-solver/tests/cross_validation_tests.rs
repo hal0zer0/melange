@@ -186,7 +186,8 @@ fn build_device_entries(
                 let kvb = find_model_param(&model, "KVB").unwrap_or(300.0);
                 let ig_max = find_model_param(&model, "IG_MAX").unwrap_or(2e-3);
                 let vgk_onset = find_model_param(&model, "VGK_ONSET").unwrap_or(0.5);
-                let tube = melange_devices::KorenTriode::with_grid_params(mu, ex, kg1, kp, kvb, ig_max, vgk_onset);
+                let lambda = find_model_param(&model, "LAMBDA").unwrap_or(0.0);
+                let tube = melange_devices::KorenTriode::with_all_params(mu, ex, kg1, kp, kvb, ig_max, vgk_onset, lambda);
                 devices.push(DeviceEntry::new_tube(tube, dev_info.start_idx));
             }
         }

@@ -342,6 +342,9 @@ pub struct TubeParams {
     pub ig_max: f64,
     /// Grid current onset voltage [V]
     pub vgk_onset: f64,
+    /// Channel-length modulation coefficient [1/V]. 0.0 = disabled (default).
+    #[serde(default)]
+    pub lambda: f64,
 }
 
 impl DeviceParams {
@@ -1016,6 +1019,7 @@ impl CircuitIR {
         let kvb = Self::lookup_model_param(netlist, model, "KVB").unwrap_or(300.0);
         let ig_max = Self::lookup_model_param(netlist, model, "IG_MAX").unwrap_or(2e-3);
         let vgk_onset = Self::lookup_model_param(netlist, model, "VGK_ONSET").unwrap_or(0.5);
+        let lambda = Self::lookup_model_param(netlist, model, "LAMBDA").unwrap_or(0.0);
 
         validate_positive_finite(mu, "tube model MU")?;
         validate_positive_finite(ex, "tube model EX")?;
@@ -1025,7 +1029,14 @@ impl CircuitIR {
         validate_positive_finite(ig_max, "tube model IG_MAX")?;
         validate_positive_finite(vgk_onset, "tube model VGK_ONSET")?;
 
-        Ok(TubeParams { mu, ex, kg1, kp, kvb, ig_max, vgk_onset })
+        // Validate optional lambda: must be non-negative and finite
+        if !lambda.is_finite() || lambda < 0.0 {
+            return Err(CodegenError::InvalidConfig(
+                format!("tube model LAMBDA must be non-negative and finite, got {lambda}")
+            ));
+        }
+
+        Ok(TubeParams { mu, ex, kg1, kp, kvb, ig_max, vgk_onset, lambda })
     }
 
     /// Build the legacy `devices` list (first occurrence of each device type).

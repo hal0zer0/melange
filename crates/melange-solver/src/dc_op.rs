@@ -180,8 +180,9 @@ fn evaluate_devices(
             (DeviceType::Tube, DeviceParams::Tube(tp)) => {
                 // Use canonical KorenTriode from melange-devices.
                 // 2D: Vgk at start_idx, Vpk at start_idx+1.
-                let tube = KorenTriode::with_grid_params(
+                let tube = KorenTriode::with_all_params(
                     tp.mu, tp.ex, tp.kg1, tp.kp, tp.kvb, tp.ig_max, tp.vgk_onset,
+                    tp.lambda,
                 );
                 let vgk = v_nl[s];
                 let vpk = v_nl[s + 1];

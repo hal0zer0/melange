@@ -1,14 +1,16 @@
 // Canonical source: melange-devices/src/tube.rs (KorenTriode)
 // Duplicated here because generated code must be self-contained.
 
-/// Koren triode plate current Ip(Vgk, Vpk).
+/// Koren triode plate current Ip(Vgk, Vpk) with optional Early-effect lambda.
 ///
-/// Uses Koren 1996 equation:
+/// Uses Koren 1996 equation with channel-length modulation:
 ///   inner = Kp * (1/mu + Vgk / sqrt(Kvb + Vpk^2))
 ///   E1 = (Vpk / Kp) * ln(1 + exp(inner))
-///   Ip = E1^ex / Kg1   (if E1 > 0)
+///   Ip_koren = E1^ex / Kg1   (if E1 > 0)
+///   Ip = Ip_koren * (1 + lambda * Vpk)
 #[inline(always)]
-fn tube_ip(vgk: f64, vpk: f64, mu: f64, ex: f64, kg1: f64, kp: f64, kvb: f64) -> f64 {
+fn tube_ip(vgk: f64, vpk: f64, mu: f64, ex: f64, kg1: f64, kp: f64, kvb: f64,
+           lambda: f64) -> f64 {
     if vpk <= 0.0 { return 0.0; }
     let s = (kvb + vpk * vpk).sqrt();
     let inner = kp * (1.0 / mu + vgk / s);
@@ -16,8 +18,8 @@ fn tube_ip(vgk: f64, vpk: f64, mu: f64, ex: f64, kg1: f64, kp: f64, kvb: f64) ->
                    else if inner < -20.0 { 0.0 }
                    else { (1.0 + inner.exp()).ln() };
     let e1 = (vpk / kp) * softplus;
-    if e1 <= 0.0 { return 0.0; }
-    e1.powf(ex) / kg1
+    let ip_koren = if e1 <= 0.0 { 0.0 } else { e1.powf(ex) / kg1 };
+    ip_koren * (1.0 + lambda * vpk)
 }
 
 /// Grid current using smooth power-law model.
@@ -32,9 +34,10 @@ fn tube_ig(vgk: f64, ig_max: f64, vgk_onset: f64) -> f64 {
 /// Triode Jacobian: [dIp/dVgk, dIp/dVpk, dIg/dVgk, dIg/dVpk]
 ///
 /// dIg/dVpk = 0 (grid current depends only on Vgk).
+/// Includes Early-effect lambda: Ip = Ip_koren * (1 + lambda * Vpk).
 #[inline(always)]
 fn tube_jacobian(vgk: f64, vpk: f64, mu: f64, ex: f64, kg1: f64, kp: f64, kvb: f64,
-                 ig_max: f64, vgk_onset: f64) -> [f64; 4] {
+                 ig_max: f64, vgk_onset: f64, lambda: f64) -> [f64; 4] {
     // Grid current Jacobian
     let dig_dvgk = if vgk <= 0.0 { 0.0 }
                    else { ig_max * 1.5 * (vgk / vgk_onset).sqrt() / vgk_onset };
@@ -55,10 +58,15 @@ fn tube_jacobian(vgk: f64, vpk: f64, mu: f64, ex: f64, kg1: f64, kp: f64, kvb: f
     let e1 = (vpk / kp) * softplus;
     if e1 <= 1e-30 { return [0.0, 0.0, dig_dvgk, 0.0]; }
 
+    let ip_koren = e1.powf(ex) / kg1;
+    let lambda_factor = 1.0 + lambda * vpk;
+
     let dip_de1 = ex * e1.powf(ex - 1.0) / kg1;
     let de1_dvgk = vpk * sigmoid / s;
     let de1_dvpk = softplus / kp - sigmoid * vgk * vpk * vpk / (s * s * s);
 
-    [dip_de1 * de1_dvgk, dip_de1 * de1_dvpk, dig_dvgk, 0.0]
-}
+    let dip_koren_dvgk = dip_de1 * de1_dvgk;
+    let dip_koren_dvpk = dip_de1 * de1_dvpk;
 
+    [dip_koren_dvgk * lambda_factor, dip_koren_dvpk * lambda_factor + ip_koren * lambda, dig_dvgk, 0.0]
+}
