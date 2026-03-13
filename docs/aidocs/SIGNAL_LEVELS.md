@@ -37,15 +37,24 @@ output = (dc_blocked * OUTPUT_SCALE).clamp(-10.0, 10.0)
 
 Use `--output-scale` in the CLI to adjust for circuits with unusual voltage swing.
 
-## Plugin Output Mapping
+## Plugin Level Controls
 
-The plugin template maps the ±10V circuit range to ±1.0 audio range:
+Generated plugins always include Input Level and Output Level parameters:
+
+| Parameter | Default | Range | Purpose |
+|-----------|---------|-------|---------|
+| Input Level | **-12 dB** | -36 to +12 dB | Attenuates DAW signal to match circuit's expected input level |
+| Output Level | 0 dB | -60 to +12 dB | Final output gain control |
+
+The -12 dB input default maps ±1.0 DAW signal to ±250mV, matching typical guitar pickup levels (50-200mV). This prevents dangerously loud output from amplifying circuits on first load. For line-level circuits (EQs, filters), turn input up toward 0 dB.
+
+To generate a plugin without level controls, pass `--no-level-params`.
+
+The plugin clamps final output to ±1.0:
 
 ```
-audio_out = (process_sample(input) * 0.1).clamp(-1.0, 1.0)
+audio_out = (process_sample(input * input_gain) * output_gain).clamp(-1.0, 1.0)
 ```
-
-When level parameters are enabled (`with_level_params`), the output level knob provides additional gain control.
 
 ## Diagnostics
 

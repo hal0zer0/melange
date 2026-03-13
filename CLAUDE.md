@@ -58,7 +58,7 @@ RHS input = (V_in(n+1) + V_in(n)) * G_in   (proper trapezoidal, NOT 2*V*G)
 
 - Diodes: 1D per device (single voltage/current)
 - BJTs: 2D per device (Vbe→Ic at start_idx, Vbc→Ib at start_idx+1)
-- JFETs: 1D per device (Vgs→Id)
+- JFETs: 2D per device (Vgs→Id at start_idx, Vds→Ig at start_idx+1)
 - Tubes: 2D per device (Vgk→Ip at start_idx, Vpk→Ig at start_idx+1)
 - Device map built from netlist element order, mirrors MNA builder
 - Codegen uses `jdev_i_k` naming for block-diagonal Jacobian entries
@@ -134,6 +134,9 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
   - Corrections applied to S, K, A_neg, and S*N_i products in codegen
   - Plugin template auto-generates `FloatParam` knobs for each pot
   - Max 2 pots per circuit; pot value stored in `CircuitState`
+- **Plugin level params always included**: Input Level (-12 dB default, -36 to +12 dB) and Output Level (0 dB default, -60 to +12 dB)
+  - -12 dB input maps ±1V DAW to ±250mV (safe for guitar-level circuits)
+  - Use `--no-level-params` CLI flag to opt out
 - **Oversampling in codegen** (2x/4x): self-contained polyphase half-band IIR in generated code
   - `CodegenConfig.oversampling_factor` = 1, 2, or 4
   - All matrices recomputed at internal rate (sample_rate * factor) from G+C
@@ -141,7 +144,9 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
   - 4x uses cascaded 2x: outer 2-section (~60dB) + inner 3-section (~80dB)
 - **Sparsity-aware emission**: systematic zero-skipping in A_neg, N_v, K, S*N_i multiplications
 - **Runtime sample rate**: `set_sample_rate()` recomputes all matrices from G+C at runtime
-- **JFET codegen**: 1D saturation-only model (Id = IDSS*(1-Vgs/Vp)^2), clamped at IDSS
+- **JFET codegen**: 2D Shichman-Hodges model (triode + saturation regions, channel-length modulation)
+  - `jfet_id(vgs, vds, idss, vp, lambda, sign)`, `jfet_ig(vgs, sign)`, `jfet_jacobian()` → [f64; 4]
+  - Constants: `DEVICE_{n}_IDSS`, `DEVICE_{n}_VP`, `DEVICE_{n}_LAMBDA`, `DEVICE_{n}_SIGN`
   - N-channel (NJ) defaults: VTO=-2.0, IDSS=2e-3; P-channel (PJ) defaults: VTO=+2.0
   - Compile-and-run verified for both N-channel and P-channel circuits
 - **Tube/triode codegen**: 2D Koren plate current model with Leach grid current
@@ -152,10 +157,13 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
 
 ### Known Limitations
 - Purely resistive nonlinear circuits oscillate (need capacitor damping)
-- MOSFET not yet in codegen NR
-- JFET codegen uses 1D saturation-only model (ignores Vds, current clamped at IDSS)
+- MOSFET codegen: 2D Level 1 SPICE with triode + saturation + channel-length modulation (LAMBDA)
+- JFET codegen: 2D Shichman-Hodges with triode + saturation + channel-length modulation (LAMBDA)
 - Tube Koren model: no plate resistance (rp) or mu variation with operating point
 - BJT Gummel-Poon: no self-heating or charge storage dynamics
+- **Runtime solver** (`DeviceEntry`) only supports Diode, DiodeWithRs, Led, BJT — no JFET, MOSFET, or Tube
+  - `melange simulate` skips tubes with warning; use codegen (`--format plugin`) for tube circuits
+  - Codegen supports all device types
 
 ### Cross-Compilation (macOS from Linux)
 - Zig 0.13 + cargo-zigbuild + macOS SDK 13.3 + rcodesign (ad-hoc signing)
@@ -169,6 +177,11 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
   - Flattened from openwurli/spice/subcircuits/preamp.cir
   - R1-Cin series input coupling via intermediate node (mid_in)
   - 0.1V in → 9.12V peak out at R_ldr=100K nominal
+- `circuits/tweed-preamp.cir`: Fender-style 2-stage 12AX7 guitar amp (N=13, M=4, 1 pot, 1 switch)
+  - Two 12AX7 triode stages, interstage volume pot (shunt, 500Ω-500kΩ), bright switch (3-pos)
+  - Stage 1: fully bypassed cathode (25µF, max gain); Stage 2: partial bypass (0.68µF, ~156Hz)
+  - Output pad (390k/6.8k, -35dB) models output transformer attenuation
+  - 50mV in → 549mV out (11x / 20.8dB gain), zero NR divergence
 
 ### Pending Work
 

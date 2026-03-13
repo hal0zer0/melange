@@ -13,8 +13,8 @@ The following standard SPICE element types are not implemented:
 - **G** (Voltage-Controlled Current Source) - Transconductance amplifiers
 - **H** (Current-Controlled Voltage Source)
 - **B** (Behavioral sources) - Arbitrary expressions
-- **K** (Coupled inductors) - Transformers
-- **S** / **W** (Switches) - Audio circuit switching
+- ~~**K** (Coupled inductors) - Transformers~~ ✅ Implemented (2026-03-02)
+- ~~**S** / **W** (Switches)~~ ✅ Implemented via `.switch` directive (2026-03-02)
 - **T** (Transmission lines)
 
 **Workaround:** Model these using combinations of existing elements where possible.
@@ -51,9 +51,9 @@ This will NOT parse correctly.
 
 **Workaround:** Use single-line statements.
 
-### Subcircuits [DEFERRED]
+### ~~Subcircuits~~ ✅ Implemented (2026-03-02)
 
-`.subckt` and `.ends` are parsed but subcircuit instantiation (`X` elements) cannot expand the subcircuit. The instance is stored but not processed.
+Subcircuit expansion now works: `X` elements are recursively expanded with node remapping, cycle detection (max depth 16), and nested subcircuit support.
 
 ## Numerical Limitations
 
@@ -87,17 +87,17 @@ For M > 2 nonlinear elements, the solver uses a damped fixed-point iteration ins
 
 ## Audio-Specific Missing Features
 
-### Potentiometers [DEFERRED]
+### ~~Potentiometers~~ ✅ Implemented (2026-02-28)
 
-No built-in potentiometer model. Use two resistors with parameterized values.
+`.pot` directive with Sherman-Morrison rank-1 updates for real-time parameter control.
 
-### Switches [DEFERRED]
+### ~~Switches~~ ✅ Implemented (2026-03-02)
 
-No switch model for channel switching, relays, etc.
+`.switch` directive with ganged components, matrix rebuild on position change.
 
-### Transformers [DEFERRED]
+### ~~Transformers~~ ✅ Implemented (2026-03-02)
 
-No coupled inductor support. Transformers cannot be modeled.
+SPICE-standard `K` element for coupled inductors with symmetric mutual conductance stamps.
 
 ### LFO/Modulation [DEFERRED]
 
@@ -166,4 +166,4 @@ These are intentional trade-offs, not bugs:
 
 ---
 
-*Last updated: 2026-02-23*
+*Last updated: 2026-03-02*

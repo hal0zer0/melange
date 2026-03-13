@@ -1,8 +1,8 @@
 # Melange Project Status
 
-**Last Updated:** 2026-02-23  
-**Version:** 0.1.0  
-**Status:** Production Ready (Core Crates)
+**Last Updated:** 2026-03-02
+**Version:** 0.2.0-dev
+**Status:** Production Ready (Core Crates) — 731+ tests passing
 
 ---
 
@@ -13,10 +13,10 @@
 | melange-primitives | ✅ Production | DSP building blocks complete |
 | melange-devices | ✅ Production | All device models implemented |
 | melange-solver | ✅ Production | MNA/DK solver, parser complete |
-| melange-validate | ⚠️ Placeholder | Skeleton only, needs implementation |
-| melange-plugin | ⚠️ Placeholder | Skeleton only, needs implementation |
-| melange-cli | ⚠️ Minimal | Only prints banner, needs commands |
-| Code Generation | 🚧 In Progress | M=0,1,2 support implemented |
+| melange-validate | ✅ Production | 6 SPICE comparisons (RC, diode, BJT, JFET, MOSFET, op-amp) |
+| melange-plugin | ⚠️ Stub | Plugin generation via codegen works; crate itself is placeholder |
+| melange-cli | ✅ Production | compile, simulate, info commands |
+| Code Generation | ✅ Production | M=0..16, all device types, pots, switches, coupled inductors |
 
 ---
 
@@ -105,8 +105,8 @@ See `docs/limitations.md` for full details.
 ### SPICE Compatibility
 - Missing: E, F, G, H (controlled sources)
 - Missing: B (behavioral sources)
-- Missing: K (coupled inductors/transformers)
-- Missing: S, W (switches)
+- ~~Missing: K (coupled inductors/transformers)~~ ✅ Implemented (2026-03-02)
+- ~~Missing: S, W (switches)~~ ✅ Implemented via `.switch` directive (2026-03-02)
 - Line continuation not working
 - Parametric expressions not supported
 
@@ -169,7 +169,7 @@ proper trapezoidal averaging for nonlinear currents. NR equations unchanged.
 **Features:**
 - [ ] Controlled source support (E, G)
 - [x] Potentiometer model (Sherman-Morrison rank-1 updates)
-- [ ] Switch model
+- [x] Switch model (`.switch` directive with ganged components, rebuild_matrices)
 - [ ] Line continuation fix
 
 **Integration:**
@@ -181,9 +181,9 @@ proper trapezoidal averaging for nonlinear currents. NR equations unchanged.
 
 **Advanced:**
 - [x] Sherman-Morrison for time-varying elements (potentiometers)
-- [ ] Subcircuit expansion
+- [x] Subcircuit expansion (recursive X element substitution with node remapping, cycle detection)
 - [ ] Behavioral sources (B)
-- [ ] Transformers (K)
+- [x] Transformers (K) (SPICE-standard coupled inductors, symmetric mutual conductance stamps)
 
 **Performance:**
 - [ ] SIMD matrix operations
