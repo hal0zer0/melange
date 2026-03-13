@@ -785,6 +785,7 @@ fn validate_circuit_source(
         generate_csv: csv_output.is_some(),
         output_dir: csv_output.and_then(|p| p.parent().map(|d| d.to_path_buf())),
         circuit_name: Some(circuit_source.name()),
+        input_node: input_node.to_string(),
         ..Default::default()
     };
 
@@ -864,6 +865,9 @@ fn simulate_circuit_source(
     };
     use melange_devices::bjt::{BjtEbersMoll, BjtPolarity};
     use melange_devices::diode::DiodeShockley;
+    use melange_devices::jfet::{Jfet, JfetChannel};
+    use melange_devices::mosfet::{Mosfet, ChannelType};
+    use melange_devices::tube::KorenTriode;
 
     println!("melange simulate");
     println!("  Source: {}", circuit_source.name());
@@ -1016,17 +1020,70 @@ fn simulate_circuit_source(
                 let is = find_model_param(model_name, "IS").unwrap_or(1e-14);
                 let bf = find_model_param(model_name, "BF").unwrap_or(200.0);
                 let br = find_model_param(model_name, "BR").unwrap_or(3.0);
-                // Check for PNP
                 let is_pnp = netlist.models.iter()
                     .find(|m| m.name.eq_ignore_ascii_case(model_name))
                     .map(|m| m.model_type.eq_ignore_ascii_case("PNP"))
                     .unwrap_or(false);
                 let polarity = if is_pnp { BjtPolarity::Pnp } else { BjtPolarity::Npn };
-                let bjt = BjtEbersMoll::new(is, 0.02585, bf, br, polarity);
+                let bjt = BjtEbersMoll::new(is, melange_primitives::VT_ROOM, bf, br, polarity);
                 devices.push(DeviceEntry::new_bjt(bjt, dev_info.start_idx));
             }
-            _ => {
-                println!("  Warning: unsupported device type for '{}', skipping", dev_info.name);
+            melange_solver::mna::NonlinearDeviceType::Jfet => {
+                let model_name = netlist.elements.iter().find_map(|e| {
+                    if let melange_solver::parser::Element::Jfet { name, model, .. } = e {
+                        if name.eq_ignore_ascii_case(&dev_info.name) { Some(model.as_str()) } else { None }
+                    } else { None }
+                }).unwrap_or("");
+                let is_p_channel = netlist.models.iter()
+                    .find(|m| m.name.eq_ignore_ascii_case(model_name))
+                    .map(|m| m.model_type.to_uppercase().starts_with("PJ"))
+                    .unwrap_or(false);
+                let channel = if is_p_channel { JfetChannel::P } else { JfetChannel::N };
+                let default_vp = if is_p_channel { 2.0 } else { -2.0 };
+                let vp = find_model_param(model_name, "VTO").unwrap_or(default_vp);
+                // ngspice BETA = IDSS / VP^2, so IDSS = BETA * VP^2
+                let idss = if let Some(beta) = find_model_param(model_name, "BETA") {
+                    beta * vp * vp
+                } else {
+                    find_model_param(model_name, "IDSS").unwrap_or(2e-3)
+                };
+                let mut jfet = Jfet::new(channel, vp, idss);
+                jfet.lambda = find_model_param(model_name, "LAMBDA").unwrap_or(0.001);
+                devices.push(DeviceEntry::new_jfet(jfet, dev_info.start_idx));
+            }
+            melange_solver::mna::NonlinearDeviceType::Mosfet => {
+                let model_name = netlist.elements.iter().find_map(|e| {
+                    if let melange_solver::parser::Element::Mosfet { name, model, .. } = e {
+                        if name.eq_ignore_ascii_case(&dev_info.name) { Some(model.as_str()) } else { None }
+                    } else { None }
+                }).unwrap_or("");
+                let is_p_channel = netlist.models.iter()
+                    .find(|m| m.name.eq_ignore_ascii_case(model_name))
+                    .map(|m| m.model_type.to_uppercase().starts_with("PM"))
+                    .unwrap_or(false);
+                let channel = if is_p_channel { ChannelType::P } else { ChannelType::N };
+                let default_vt = if is_p_channel { -2.0 } else { 2.0 };
+                let vt = find_model_param(model_name, "VTO").unwrap_or(default_vt);
+                let kp = find_model_param(model_name, "KP").unwrap_or(0.1);
+                let lambda = find_model_param(model_name, "LAMBDA").unwrap_or(0.01);
+                let mosfet = Mosfet::new(channel, vt, kp, lambda);
+                devices.push(DeviceEntry::new_mosfet(mosfet, dev_info.start_idx));
+            }
+            melange_solver::mna::NonlinearDeviceType::Tube => {
+                let model_name = netlist.elements.iter().find_map(|e| {
+                    if let melange_solver::parser::Element::Triode { name, model, .. } = e {
+                        if name.eq_ignore_ascii_case(&dev_info.name) { Some(model.as_str()) } else { None }
+                    } else { None }
+                }).unwrap_or("");
+                let mu = find_model_param(model_name, "MU").unwrap_or(100.0);
+                let ex = find_model_param(model_name, "EX").unwrap_or(1.4);
+                let kg1 = find_model_param(model_name, "KG1").unwrap_or(1060.0);
+                let kp = find_model_param(model_name, "KP").unwrap_or(600.0);
+                let kvb = find_model_param(model_name, "KVB").unwrap_or(300.0);
+                let ig_max = find_model_param(model_name, "IG_MAX").unwrap_or(2e-3);
+                let vgk_onset = find_model_param(model_name, "VGK_ONSET").unwrap_or(0.5);
+                let tube = KorenTriode::with_grid_params(mu, ex, kg1, kp, kvb, ig_max, vgk_onset);
+                devices.push(DeviceEntry::new_tube(tube, dev_info.start_idx));
             }
         }
     }
@@ -1060,7 +1117,7 @@ fn simulate_circuit_source(
         // Nonlinear circuit: use CircuitSolver
         let mut solver = CircuitSolver::new(
             kernel, devices, input_node_idx, output_node_idx,
-        );
+        ).with_context(|| "Failed to create circuit solver")?;
         solver.input_conductance = input_conductance;
 
         // Initialize DC operating point for nonlinear circuits
@@ -1123,6 +1180,9 @@ fn analyze_freq_response(
     };
     use melange_devices::bjt::{BjtEbersMoll, BjtPolarity};
     use melange_devices::diode::DiodeShockley;
+    use melange_devices::jfet::{Jfet, JfetChannel};
+    use melange_devices::mosfet::{Mosfet, ChannelType};
+    use melange_devices::tube::KorenTriode;
 
     eprintln!("melange analyze (frequency response)");
 
@@ -1234,14 +1294,69 @@ fn analyze_freq_response(
                         .map(|m| m.model_type.eq_ignore_ascii_case("PNP"))
                         .unwrap_or(false);
                     let polarity = if is_pnp { BjtPolarity::Pnp } else { BjtPolarity::Npn };
-                    devices.push(DeviceEntry::new_bjt(BjtEbersMoll::new(is, 0.02585, bf, br, polarity), dev_info.start_idx));
+                    devices.push(DeviceEntry::new_bjt(BjtEbersMoll::new(is, melange_primitives::VT_ROOM, bf, br, polarity), dev_info.start_idx));
                 }
-                _ => {
-                    eprintln!("  Warning: unsupported device type for '{}' in runtime analysis, skipping", dev_info.name);
+                melange_solver::mna::NonlinearDeviceType::Jfet => {
+                    let model_name = netlist.elements.iter().find_map(|e| {
+                        if let melange_solver::parser::Element::Jfet { name, model, .. } = e {
+                            if name.eq_ignore_ascii_case(&dev_info.name) { Some(model.as_str()) } else { None }
+                        } else { None }
+                    }).unwrap_or("");
+                    let is_p_channel = netlist.models.iter()
+                        .find(|m| m.name.eq_ignore_ascii_case(model_name))
+                        .map(|m| m.model_type.to_uppercase().starts_with("PJ"))
+                        .unwrap_or(false);
+                    let channel = if is_p_channel { JfetChannel::P } else { JfetChannel::N };
+                    let default_vp = if is_p_channel { 2.0 } else { -2.0 };
+                    let vp = find_model_param(model_name, "VTO").unwrap_or(default_vp);
+                    // ngspice BETA = IDSS / VP^2, so IDSS = BETA * VP^2
+                    let idss = if let Some(beta) = find_model_param(model_name, "BETA") {
+                        beta * vp * vp
+                    } else {
+                        find_model_param(model_name, "IDSS").unwrap_or(2e-3)
+                    };
+                    let mut jfet = Jfet::new(channel, vp, idss);
+                    jfet.lambda = find_model_param(model_name, "LAMBDA").unwrap_or(0.001);
+                    devices.push(DeviceEntry::new_jfet(jfet, dev_info.start_idx));
+                }
+                melange_solver::mna::NonlinearDeviceType::Mosfet => {
+                    let model_name = netlist.elements.iter().find_map(|e| {
+                        if let melange_solver::parser::Element::Mosfet { name, model, .. } = e {
+                            if name.eq_ignore_ascii_case(&dev_info.name) { Some(model.as_str()) } else { None }
+                        } else { None }
+                    }).unwrap_or("");
+                    let is_p_channel = netlist.models.iter()
+                        .find(|m| m.name.eq_ignore_ascii_case(model_name))
+                        .map(|m| m.model_type.to_uppercase().starts_with("PM"))
+                        .unwrap_or(false);
+                    let channel = if is_p_channel { ChannelType::P } else { ChannelType::N };
+                    let default_vt = if is_p_channel { -2.0 } else { 2.0 };
+                    let vt = find_model_param(model_name, "VTO").unwrap_or(default_vt);
+                    let kp = find_model_param(model_name, "KP").unwrap_or(0.1);
+                    let lambda = find_model_param(model_name, "LAMBDA").unwrap_or(0.01);
+                    let mosfet = Mosfet::new(channel, vt, kp, lambda);
+                    devices.push(DeviceEntry::new_mosfet(mosfet, dev_info.start_idx));
+                }
+                melange_solver::mna::NonlinearDeviceType::Tube => {
+                    let model_name = netlist.elements.iter().find_map(|e| {
+                        if let melange_solver::parser::Element::Triode { name, model, .. } = e {
+                            if name.eq_ignore_ascii_case(&dev_info.name) { Some(model.as_str()) } else { None }
+                        } else { None }
+                    }).unwrap_or("");
+                    let mu = find_model_param(model_name, "MU").unwrap_or(100.0);
+                    let ex = find_model_param(model_name, "EX").unwrap_or(1.4);
+                    let kg1 = find_model_param(model_name, "KG1").unwrap_or(1060.0);
+                    let kp = find_model_param(model_name, "KP").unwrap_or(600.0);
+                    let kvb = find_model_param(model_name, "KVB").unwrap_or(300.0);
+                    let ig_max = find_model_param(model_name, "IG_MAX").unwrap_or(2e-3);
+                    let vgk_onset = find_model_param(model_name, "VGK_ONSET").unwrap_or(0.5);
+                    let tube = KorenTriode::with_grid_params(mu, ex, kg1, kp, kvb, ig_max, vgk_onset);
+                    devices.push(DeviceEntry::new_tube(tube, dev_info.start_idx));
                 }
             }
         }
-        let mut solver = CircuitSolver::new(kernel.clone(), devices, input_node_idx, output_node_idx);
+        let mut solver = CircuitSolver::new(kernel.clone(), devices, input_node_idx, output_node_idx)
+            .with_context(|| "Failed to create circuit solver")?;
         solver.input_conductance = input_conductance;
         let device_slots = build_device_slots(&netlist, &mna);
         solver.initialize_dc_op(&mna, &device_slots);
@@ -1407,7 +1522,7 @@ fn build_device_slots(
                     device_type: DeviceType::Diode,
                     start_idx: dev_info.start_idx,
                     dimension: 1,
-                    params: DeviceParams::Diode(DiodeParams { is, n_vt: n * 0.02585 }),
+                    params: DeviceParams::Diode(DiodeParams { is, n_vt: n * melange_primitives::VT_ROOM }),
                 });
             }
             melange_solver::mna::NonlinearDeviceType::Bjt => {
@@ -1429,7 +1544,7 @@ fn build_device_slots(
                     dimension: 2,
                     params: DeviceParams::Bjt(BjtParams {
                         is,
-                        vt: 0.02585,
+                        vt: melange_primitives::VT_ROOM,
                         beta_f: bf,
                         beta_r: br,
                         is_pnp,
