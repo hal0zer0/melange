@@ -17,11 +17,13 @@ pub mod opamp;
 pub mod mosfet;
 pub mod jfet;
 
-pub use bjt::*;
-pub use diode::*;
-pub use tube::*;
-pub use ldr::*;
-pub use opamp::*;
+pub use bjt::{BjtEbersMoll, BjtGummelPoon, BjtPolarity, BjtRegion, classify_region};
+pub use diode::{DiodeShockley, DiodeWithRs, Led};
+pub use tube::KorenTriode;
+pub use jfet::{Jfet, JfetChannel};
+pub use mosfet::{Mosfet, ChannelType as MosfetChannelType};
+pub use ldr::CdsLdr;
+pub use opamp::{IdealOpamp, SimpleOpamp};
 
 /// A nonlinear circuit element for use in MNA/DK solvers.
 ///

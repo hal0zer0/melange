@@ -106,7 +106,7 @@ fn test_very_small_capacitor_with_diode() {
 
     let diode = DiodeShockley::new_room_temp(1e-15, 1.0);
     let devices = vec![DeviceEntry::new_diode(diode, 0)];
-    let mut solver = CircuitSolver::new(kernel, devices, in_idx, out_idx);
+    let mut solver = CircuitSolver::new(kernel, devices, in_idx, out_idx).unwrap();
     solver.input_conductance = 0.001;
 
     for i in 0..200 {
@@ -235,7 +235,7 @@ fn test_diode_extreme_small_is_in_circuit() {
     let diode = DiodeShockley::new_room_temp(1e-18, 1.0);
     let devices = vec![DeviceEntry::new_diode(diode, 0)];
 
-    let mut solver = CircuitSolver::new(kernel, devices, in_idx, out_idx);
+    let mut solver = CircuitSolver::new(kernel, devices, in_idx, out_idx).unwrap();
     solver.input_conductance = 0.001;
 
     for i in 0..200 {

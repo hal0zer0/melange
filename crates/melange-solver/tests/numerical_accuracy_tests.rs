@@ -172,7 +172,7 @@ fn test_diode_forward_voltage_shunt_clipper() {
     let diode = DiodeShockley::new_room_temp(1e-15, 1.0);
     let devices = vec![DeviceEntry::new_diode(diode, 0)];
 
-    let mut solver = CircuitSolver::new(kernel, devices, in_idx, out_idx);
+    let mut solver = CircuitSolver::new(kernel, devices, in_idx, out_idx).unwrap();
     solver.input_conductance = 0.001; // 1/Rin = 1/1k
 
     // Apply 5V DC step for 1000 samples (allow ample settling time)
@@ -243,7 +243,7 @@ fn test_diode_logarithmic_voltage_scaling() {
         let devices = vec![DeviceEntry::new_diode(diode, 0)];
         let in_idx = *mna.node_map.get("in").unwrap() - 1;
         let out_idx = *mna.node_map.get("out").unwrap() - 1;
-        let mut solver = CircuitSolver::new(kernel, devices, in_idx, out_idx);
+        let mut solver = CircuitSolver::new(kernel, devices, in_idx, out_idx).unwrap();
         solver.input_conductance = 0.001;
         let mut last = 0.0;
         for _ in 0..500 {
@@ -320,7 +320,7 @@ fn test_multi_device_two_diodes_converges() {
         DeviceEntry::new_diode(diode2, 1),
     ];
 
-    let mut solver = CircuitSolver::new(kernel, devices, in_idx, out_idx);
+    let mut solver = CircuitSolver::new(kernel, devices, in_idx, out_idx).unwrap();
     solver.input_conductance = 0.001; // 1/Rin = 1/1k
 
     // Process 200 samples of 1V DC step
@@ -388,7 +388,7 @@ fn test_multi_device_three_devices_converges() {
         DeviceEntry::new_diode(diode3, 2),
     ];
 
-    let mut solver = CircuitSolver::new(kernel, devices, in_idx, out_idx);
+    let mut solver = CircuitSolver::new(kernel, devices, in_idx, out_idx).unwrap();
     solver.input_conductance = 0.001;
 
     // Process 200 samples of 1V DC step
@@ -449,7 +449,7 @@ fn test_bjt_common_emitter_bias_point() {
     let bjt = BjtEbersMoll::new_room_temp(1e-15, 200.0, 3.0, melange_devices::BjtPolarity::Npn);
     let devices = vec![DeviceEntry::new_bjt(bjt, 0)];
 
-    let mut solver = CircuitSolver::new(kernel, devices, b_idx, c_idx);
+    let mut solver = CircuitSolver::new(kernel, devices, b_idx, c_idx).unwrap();
     solver.input_conductance = 1.0 / 100000.0; // Rb = 100k
 
     // Apply 0.7V DC bias for 200 samples to forward-bias the base
@@ -509,7 +509,7 @@ fn test_purely_resistive_circuit_with_cap_stable() {
         let out_idx = *mna.node_map.get("out").unwrap() - 1;
         let diode = DiodeShockley::new_room_temp(1e-15, 1.0);
         let devices = vec![DeviceEntry::new_diode(diode, 0)];
-        let mut solver = CircuitSolver::new(kernel, devices, in_idx, out_idx);
+        let mut solver = CircuitSolver::new(kernel, devices, in_idx, out_idx).unwrap();
         solver.input_conductance = 0.001;
         let mut output = vec![0.0; 100];
         for i in 0..100 {
@@ -581,7 +581,7 @@ fn test_solver_output_never_exceeds_10v_for_any_input() {
     let diode = DiodeShockley::new_room_temp(1e-15, 1.0);
     let devices = vec![DeviceEntry::new_diode(diode, 0)];
 
-    let mut solver = CircuitSolver::new(kernel, devices, in_idx, out_idx);
+    let mut solver = CircuitSolver::new(kernel, devices, in_idx, out_idx).unwrap();
     solver.input_conductance = 0.001;
 
     let extreme_inputs = [0.0, 1.0, -1.0, 5.0, -5.0, 10.0, -10.0, 100.0, -100.0, 0.001, -0.001];
@@ -626,7 +626,7 @@ fn test_zero_input_produces_zero_output() {
     let diode = DiodeShockley::new_room_temp(1e-15, 1.0);
     let devices = vec![DeviceEntry::new_diode(diode, 0)];
 
-    let mut solver = CircuitSolver::new(kernel, devices, in_idx, out_idx);
+    let mut solver = CircuitSolver::new(kernel, devices, in_idx, out_idx).unwrap();
     solver.input_conductance = 0.001;
 
     // Process 100 samples of 0V input
@@ -658,7 +658,7 @@ fn test_solver_handles_nan_input() {
     let diode = DiodeShockley::new_room_temp(1e-15, 1.0);
     let devices = vec![DeviceEntry::new_diode(diode, 0)];
 
-    let mut solver = CircuitSolver::new(kernel, devices, in_idx, out_idx);
+    let mut solver = CircuitSolver::new(kernel, devices, in_idx, out_idx).unwrap();
     solver.input_conductance = 0.001;
 
     // Process normal samples first
@@ -769,7 +769,7 @@ fn test_m3_three_diodes_converges() {
         DeviceEntry::new_diode(DiodeShockley::new_room_temp(1e-15, 1.0), 2),
     ];
 
-    let mut solver = CircuitSolver::new(kernel, devices, in_idx, out_idx);
+    let mut solver = CircuitSolver::new(kernel, devices, in_idx, out_idx).unwrap();
     solver.input_conductance = 0.001;
 
     for i in 0..200 {
@@ -801,7 +801,7 @@ fn test_m4_four_diodes_converges() {
         DeviceEntry::new_diode(DiodeShockley::new_room_temp(1e-15, 1.0), 3),
     ];
 
-    let mut solver = CircuitSolver::new(kernel, devices, in_idx, out_idx);
+    let mut solver = CircuitSolver::new(kernel, devices, in_idx, out_idx).unwrap();
     solver.input_conductance = 0.001;
 
     for i in 0..200 {
@@ -875,7 +875,7 @@ fn test_nr_max_iterations_graceful_degradation() {
     let diode = DiodeShockley::new_room_temp(1e-15, 1.0);
     let devices = vec![DeviceEntry::new_diode(diode, 0)];
 
-    let mut solver = CircuitSolver::new(kernel, devices, in_idx, out_idx);
+    let mut solver = CircuitSolver::new(kernel, devices, in_idx, out_idx).unwrap();
     solver.input_conductance = 0.001;
     // Use very few max iterations to force early termination
     solver.max_iter = 2;
@@ -909,7 +909,7 @@ fn test_nr_nan_recovery() {
     let diode = DiodeShockley::new_room_temp(1e-15, 1.0);
     let devices = vec![DeviceEntry::new_diode(diode, 0)];
 
-    let mut solver = CircuitSolver::new(kernel, devices, in_idx, out_idx);
+    let mut solver = CircuitSolver::new(kernel, devices, in_idx, out_idx).unwrap();
     solver.input_conductance = 0.001;
 
     // Normal operation

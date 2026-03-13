@@ -65,9 +65,28 @@ impl DiodeShockley {
     }
 
     /// Calculate current for a given voltage.
+    ///
+    /// Uses linear extension beyond the exponential clamp boundaries so that
+    /// the derivative of `current_at` matches `conductance_at` everywhere.
     pub fn current_at(&self, v: f64) -> f64 {
-        let v_limited = safeguards::limit_exp_v(v, self.n_vt);
-        self.is * ((v_limited / self.n_vt).exp() - 1.0)
+        let v_over_nvt = v / self.n_vt;
+        if v_over_nvt > safeguards::MAX_EXP_V {
+            // Linear extension: I(v_clamp) + G(v_clamp) * (v - v_clamp)
+            let v_clamp = safeguards::MAX_EXP_V * self.n_vt;
+            let exp_clamp = safeguards::MAX_EXP_V.exp();
+            let i_clamp = self.is * (exp_clamp - 1.0);
+            let g_clamp = (self.is / self.n_vt) * exp_clamp;
+            i_clamp + g_clamp * (v - v_clamp)
+        } else if v_over_nvt < safeguards::MIN_EXP_V {
+            // Linear extension for large reverse bias
+            let v_clamp = safeguards::MIN_EXP_V * self.n_vt;
+            let exp_clamp = safeguards::MIN_EXP_V.exp();
+            let i_clamp = self.is * (exp_clamp - 1.0);
+            let g_clamp = (self.is / self.n_vt) * exp_clamp;
+            i_clamp + g_clamp * (v - v_clamp)
+        } else {
+            self.is * (v_over_nvt.exp() - 1.0)
+        }
     }
 
     /// Calculate conductance (di/dv) for a given voltage.
@@ -363,6 +382,36 @@ mod tests {
             assert!(rel_err < 1e-4,
                 "Conductance at {:.1}V: analytic={:.6e} fd={:.6e} err={:.2e}",
                 v, g, fd, rel_err);
+        }
+    }
+
+    /// Verify current_at derivative matches conductance_at at and beyond clamp boundaries.
+    #[test]
+    fn test_diode_linearized_continuation() {
+        let diode = DiodeShockley::silicon();
+        let n_vt = diode.n * diode.vt;
+        let eps = 1e-8;
+
+        // Test at clamp boundary and well beyond it
+        let v_clamp = safeguards::MAX_EXP_V * n_vt;
+        for &v in &[v_clamp - 0.01, v_clamp, v_clamp + 0.1, v_clamp + 1.0] {
+            let g = diode.conductance_at(v);
+            let fd = (diode.current_at(v + eps) - diode.current_at(v - eps)) / (2.0 * eps);
+            let err = (g - fd).abs();
+            assert!(err < g.abs() * 1e-4 + 1e-10,
+                "Derivative mismatch at v={:.4}: conductance={:.6e} fd={:.6e} err={:.2e}",
+                v, g, fd, err);
+        }
+
+        // Negative clamp boundary
+        let v_neg = safeguards::MIN_EXP_V * n_vt;
+        for &v in &[v_neg + 0.01, v_neg, v_neg - 0.1] {
+            let g = diode.conductance_at(v);
+            let fd = (diode.current_at(v + eps) - diode.current_at(v - eps)) / (2.0 * eps);
+            let err = (g - fd).abs();
+            assert!(err < g.abs() * 1e-4 + 1e-10,
+                "Derivative mismatch at v={:.4}: conductance={:.6e} fd={:.6e} err={:.2e}",
+                v, g, fd, err);
         }
     }
 

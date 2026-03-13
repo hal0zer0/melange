@@ -188,6 +188,9 @@ impl NonlinearDevice<2> for KorenTriode {
 ///
 /// Uses the screen grid voltage (Vsg) in the E1 calculation for screen-limited
 /// behavior, with a plate voltage correction factor (1 - exp(-Vpk/Kx)).
+///
+/// **Experimental**: 3D pentode — not yet supported by solver (max device dim = 2).
+#[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct KorenPentode {
     /// Triode part (provides mu, ex, kg1, kp, kvb)

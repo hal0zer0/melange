@@ -80,7 +80,7 @@ fn benchmark_diode_clipper(c: &mut Criterion) {
     let diode = DiodeShockley::silicon();
     let devices = vec![DeviceEntry::new_diode(diode, 0)];
 
-    let mut solver = CircuitSolver::new(kernel, devices, 0, 1);
+    let mut solver = CircuitSolver::new(kernel, devices, 0, 1).unwrap();
 
     let mut group = c.benchmark_group("process_sample/diode_clipper");
     group.throughput(Throughput::Elements(1));
@@ -115,7 +115,7 @@ fn benchmark_bjt_amp(c: &mut Criterion) {
     let bjt = BjtEbersMoll::npn_2n2222a();
     let devices = vec![DeviceEntry::new_bjt(bjt, 0)];
 
-    let mut solver = CircuitSolver::new(kernel, devices, 0, 0);
+    let mut solver = CircuitSolver::new(kernel, devices, 0, 0).unwrap();
 
     let mut group = c.benchmark_group("process_sample/bjt_amp");
     group.throughput(Throughput::Elements(1));
@@ -333,7 +333,7 @@ fn benchmark_rhs_construction(c: &mut Criterion) {
     let diode = DiodeShockley::silicon();
     let devices = vec![DeviceEntry::new_diode(diode, 0)];
 
-    let mut solver = CircuitSolver::new(kernel, devices, 0, 1);
+    let mut solver = CircuitSolver::new(kernel, devices, 0, 1).unwrap();
 
     // Prime the solver
     for _ in 0..10 {
@@ -469,7 +469,7 @@ fn benchmark_sample_rate_comparison(c: &mut Criterion) {
         let kernel = DkKernel::from_mna(&mna, sample_rate).unwrap();
         let diode = DiodeShockley::silicon();
         let devices = vec![DeviceEntry::new_diode(diode, 0)];
-        let mut solver = CircuitSolver::new(kernel, devices, 0, 1);
+        let mut solver = CircuitSolver::new(kernel, devices, 0, 1).unwrap();
 
         group.bench_with_input(
             BenchmarkId::from_parameter(sample_rate as u64),

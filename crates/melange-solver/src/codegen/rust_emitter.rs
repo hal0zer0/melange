@@ -342,14 +342,8 @@ pub struct RustEmitter {
     tera: Tera,
 }
 
-impl Default for RustEmitter {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl RustEmitter {
-    pub fn new() -> Self {
+    pub fn new() -> Result<Self, CodegenError> {
         let mut tera = Tera::default();
         tera.add_raw_templates(vec![
             ("header", TMPL_HEADER),
@@ -367,8 +361,8 @@ impl RustEmitter {
             ("update_history", TMPL_UPDATE_HISTORY),
             ("process_sample", TMPL_PROCESS_SAMPLE),
         ])
-        .expect("embedded templates should parse");
-        Self { tera }
+        .map_err(|e| CodegenError::TemplateError(format!("template init: {}", e)))?;
+        Ok(Self { tera })
     }
 
     fn render(&self, name: &str, ctx: &Context) -> Result<String, CodegenError> {
@@ -1734,13 +1728,16 @@ fn emit_nr_clamp_and_converge(code: &mut String, dim: usize, indent: &str) {
     for i in 0..dim {
         code.push_str(&format!("{indent}i_nl[{i}] -= clamped_delta{i};\n"));
     }
-    code.push_str(&format!("\n{indent}// Convergence check\n"));
+    code.push_str(&format!("\n{indent}// Convergence check (max-norm)\n"));
     code.push_str(&format!("{indent}if "));
     for i in 0..dim {
         if i > 0 {
-            code.push_str(" + ");
+            code.push_str(".max(");
         }
         code.push_str(&format!("clamped_delta{i}.abs()"));
+        if i > 0 {
+            code.push(')');
+        }
     }
     code.push_str(" < TOL {\n");
     code.push_str(&format!("{indent}    state.last_nr_iterations = iter as u32;\n"));
@@ -1850,13 +1847,13 @@ impl RustEmitter {
                         let d = dev_num;
                         // IS, VT, BETA_R from state; SIGN, USE_GP, VAF, VAR, IKF stay as const
                         code.push_str(&format!(
-                            "        let i_dev{s} = bjt_ic(v_d{s}, v_d{s1}, state.device_{d}_is, state.device_{d}_vt, state.device_{d}_br, DEVICE_{d}_SIGN, DEVICE_{d}_USE_GP, DEVICE_{d}_VAF, DEVICE_{d}_VAR, DEVICE_{d}_IKF);\n"
+                            "        let i_dev{s} = bjt_ic(v_d{s}, v_d{s1}, state.device_{d}_is, state.device_{d}_vt, state.device_{d}_br, DEVICE_{d}_SIGN, DEVICE_{d}_USE_GP, DEVICE_{d}_VAF, DEVICE_{d}_VAR, DEVICE_{d}_IKF, DEVICE_{d}_IKR);\n"
                         ));
                         code.push_str(&format!(
                             "        let i_dev{s1} = bjt_ib(v_d{s}, v_d{s1}, state.device_{d}_is, state.device_{d}_vt, state.device_{d}_bf, state.device_{d}_br, DEVICE_{d}_SIGN);\n"
                         ));
                         code.push_str(&format!(
-                            "        let bjt{d}_jac = bjt_jacobian(v_d{s}, v_d{s1}, state.device_{d}_is, state.device_{d}_vt, state.device_{d}_bf, state.device_{d}_br, DEVICE_{d}_SIGN, DEVICE_{d}_USE_GP, DEVICE_{d}_VAF, DEVICE_{d}_VAR, DEVICE_{d}_IKF);\n"
+                            "        let bjt{d}_jac = bjt_jacobian(v_d{s}, v_d{s1}, state.device_{d}_is, state.device_{d}_vt, state.device_{d}_bf, state.device_{d}_br, DEVICE_{d}_SIGN, DEVICE_{d}_USE_GP, DEVICE_{d}_VAF, DEVICE_{d}_VAR, DEVICE_{d}_IKF, DEVICE_{d}_IKR);\n"
                         ));
                         code.push_str(&format!(
                             "        let jdev_{}_{} = bjt{}_jac[0];\n",

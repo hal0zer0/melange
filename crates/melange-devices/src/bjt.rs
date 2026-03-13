@@ -245,8 +245,9 @@ impl BjtGummelPoon {
         let q1 = 1.0 / q1_denom;
 
         // High-level injection (use safe_exp to prevent overflow)
-        let i_cc = self.base.is * (safeguards::safe_exp(vbe_eff / self.base.vt) - safeguards::safe_exp(vbc_eff / self.base.vt));
-        let q2 = i_cc / self.ikf;
+        let exp_be = safeguards::safe_exp(vbe_eff / self.base.vt);
+        let exp_bc = safeguards::safe_exp(vbc_eff / self.base.vt);
+        let q2 = self.base.is * exp_be / self.ikf + self.base.is * exp_bc / self.ikr;
 
         q1 * (1.0 + (1.0 + 4.0 * q2).max(0.0).sqrt()) / 2.0
     }
@@ -298,10 +299,10 @@ impl NonlinearDevice<2> for BjtGummelPoon {
             (q1, q1 * q1 / self.var, q1 * q1 / self.vaf)
         };
 
-        // High injection q2
-        let q2 = icc / self.ikf;
-        let dq2_dvbe = dicc_dvbe / self.ikf;
-        let dq2_dvbc = dicc_dvbc / self.ikf;
+        // High injection q2 = Is*exp(Vbe/Vt)/IKF + Is*exp(Vbc/Vt)/IKR
+        let q2 = is * exp_be / self.ikf + is * exp_bc / self.ikr;
+        let dq2_dvbe = is / (vt * self.ikf) * exp_be;
+        let dq2_dvbc = is / (vt * self.ikr) * exp_bc;
 
         // Discriminant D = sqrt(1 + 4*q2)
         let disc = (1.0 + 4.0 * q2).max(0.0);

@@ -16,6 +16,9 @@ pub struct IdealOpamp;
 /// - Slew rate limiting
 /// - Output saturation
 /// - Input offset (optional)
+///
+/// **Placeholder**: Does not implement `NonlinearDevice`. Not used by solver or codegen.
+#[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BoyleOpamp {
     /// DC open-loop gain

@@ -10,7 +10,6 @@
 //! call into this module.
 
 use crate::codegen::ir::{DeviceParams, DeviceSlot, DeviceType};
-use crate::dk;
 use crate::mna::{inject_rhs_current, MnaSystem, VS_CONDUCTANCE};
 use melange_devices::bjt::{BjtEbersMoll, BjtGummelPoon, BjtPolarity};
 use melange_devices::diode::DiodeShockley;
@@ -275,19 +274,77 @@ fn extract_nl_voltages(mna: &MnaSystem, v: &[f64], v_nl: &mut [f64]) {
     }
 }
 
-/// Solve a linear system g_aug · v = rhs using matrix inversion.
+/// LU decomposition with partial pivoting.
+///
+/// Returns (LU, pivot) where LU holds L (below diagonal) and U (on+above diagonal).
+/// Returns None if the matrix is singular.
+fn lu_decompose(a: &[Vec<f64>]) -> Option<(Vec<Vec<f64>>, Vec<usize>)> {
+    let n = a.len();
+    let mut lu: Vec<Vec<f64>> = a.to_vec();
+    let mut pivot: Vec<usize> = (0..n).collect();
+
+    for k in 0..n {
+        // Partial pivoting: find row with largest absolute value in column k
+        let mut max_val = lu[k][k].abs();
+        let mut max_row = k;
+        for i in (k + 1)..n {
+            if lu[i][k].abs() > max_val {
+                max_val = lu[i][k].abs();
+                max_row = i;
+            }
+        }
+        if max_val < 1e-30 {
+            return None; // Singular
+        }
+        if max_row != k {
+            lu.swap(k, max_row);
+            pivot.swap(k, max_row);
+        }
+
+        let diag = lu[k][k];
+        for i in (k + 1)..n {
+            lu[i][k] /= diag;
+            let factor = lu[i][k];
+            for j in (k + 1)..n {
+                lu[i][j] -= factor * lu[k][j];
+            }
+        }
+    }
+    Some((lu, pivot))
+}
+
+/// Solve Ax = b given LU decomposition with pivoting.
+fn lu_solve(lu: &[Vec<f64>], pivot: &[usize], b: &[f64]) -> Vec<f64> {
+    let n = lu.len();
+    // Permute b
+    let mut x: Vec<f64> = pivot.iter().map(|&p| b[p]).collect();
+
+    // Forward substitution (L * y = Pb)
+    for i in 1..n {
+        let mut sum = 0.0;
+        for j in 0..i {
+            sum += lu[i][j] * x[j];
+        }
+        x[i] -= sum;
+    }
+
+    // Back substitution (U * x = y)
+    for i in (0..n).rev() {
+        let mut sum = 0.0;
+        for j in (i + 1)..n {
+            sum += lu[i][j] * x[j];
+        }
+        x[i] = (x[i] - sum) / lu[i][i];
+    }
+    x
+}
+
+/// Solve a linear system g_aug · v = rhs using LU decomposition.
 ///
 /// Returns None if the matrix is singular.
 fn solve_linear(g_aug: &[Vec<f64>], rhs: &[f64]) -> Option<Vec<f64>> {
-    let n = g_aug.len();
-    let g_inv = dk::invert_matrix(g_aug).ok()?;
-    let mut v = vec![0.0; n];
-    for i in 0..n {
-        for j in 0..n {
-            v[i] += g_inv[i][j] * rhs[j];
-        }
-    }
-    Some(v)
+    let (lu, pivot) = lu_decompose(g_aug)?;
+    Some(lu_solve(&lu, &pivot, rhs))
 }
 
 /// Run Newton-Raphson DC operating point solve.
@@ -410,13 +467,20 @@ fn nr_dc_solve(
             None => return (false, iter + 1), // Singular matrix
         };
 
-        // 6. Voltage limiting (max 0.5V step per node) and convergence check
+        // 6. Junction-aware logarithmic voltage limiting and convergence check
+        //    Large steps are compressed: sign * vt * ln(|delta|/vt + 1)
+        //    Small steps (~26mV) pass nearly unchanged.
+        let vt = 0.026; // thermal voltage for limiting
         let mut max_delta = 0.0_f64;
         for i in 0..n {
             let delta = v_new[i] - v[i];
-            let clamped_delta = delta.clamp(-0.5, 0.5);
-            v[i] += clamped_delta;
-            max_delta = max_delta.max(clamped_delta.abs());
+            let limited = if delta.abs() < vt {
+                delta // Small steps pass through unchanged
+            } else {
+                delta.signum() * vt * (delta.abs() / vt + 1.0).ln()
+            };
+            v[i] += limited;
+            max_delta = max_delta.max(limited.abs());
         }
 
         if max_delta < config.tolerance {

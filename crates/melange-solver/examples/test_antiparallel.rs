@@ -41,7 +41,7 @@ Vin in 0 0
         DeviceEntry::new_diode(diode2, 1),
     ];
     
-    let mut solver = CircuitSolver::new(kernel, devices, 0, 0);
+    let mut solver = CircuitSolver::new(kernel, devices, 0, 0).unwrap();
     
     println!("\nTesting with CircuitSolver:");
     for amp in [0.01_f64, 0.1, 1.0, 5.0].iter() {

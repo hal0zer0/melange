@@ -53,5 +53,5 @@ mod dk_math_verification;
 pub use parser::Netlist;
 pub use mna::MnaSystem;
 pub use dk::DkKernel;
-pub use solver::{CircuitSolver, LinearSolver};
+pub use solver::{CircuitSolver, LinearSolver, SolverError};
 pub use codegen::{CodeGenerator, CodegenConfig, CodegenError, GeneratedCode};

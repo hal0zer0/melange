@@ -188,7 +188,7 @@ pub fn thermal_voltage(temp_c: f64) -> f64 {
 }
 
 /// Standard thermal voltage at room temperature (27°C).
-pub const VT_ROOM: f64 = 0.02585;  // ≈ 26 mV
+pub const VT_ROOM: f64 = 0.025851991; // kT/q at 300.15K (27°C)
 
 #[cfg(test)]
 mod tests {

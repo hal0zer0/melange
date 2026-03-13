@@ -887,7 +887,7 @@ impl CircuitIR {
 
     /// Resolve diode model parameters from the netlist, with validation.
     fn resolve_diode_params(netlist: &Netlist, model: &str) -> Result<DiodeParams, CodegenError> {
-        let vt = 0.02585;
+        let vt = melange_primitives::VT_ROOM;
         let is = Self::lookup_model_param(netlist, model, "IS").unwrap_or(2.52e-9);
         let n = Self::lookup_model_param(netlist, model, "N").unwrap_or(1.0);
 
@@ -902,7 +902,7 @@ impl CircuitIR {
     /// Gummel-Poon parameters (VAF, VAR, IKF, IKR) default to infinity,
     /// which collapses qb→1.0, giving exact Ebers-Moll behavior.
     fn resolve_bjt_params(netlist: &Netlist, model: &str) -> Result<BjtParams, CodegenError> {
-        let vt = Self::lookup_model_param(netlist, model, "VT").unwrap_or(0.02585);
+        let vt = Self::lookup_model_param(netlist, model, "VT").unwrap_or(melange_primitives::VT_ROOM);
         let is = Self::lookup_model_param(netlist, model, "IS").unwrap_or(1.26e-14);
         let beta_f = Self::lookup_model_param(netlist, model, "BF").unwrap_or(200.0);
         let beta_r = Self::lookup_model_param(netlist, model, "BR").unwrap_or(3.0);
@@ -958,12 +958,17 @@ impl CircuitIR {
             .map(|m| m.model_type.to_uppercase().starts_with("PJ"))
             .unwrap_or(false);
 
-        let idss = Self::lookup_model_param(netlist, model, "IDSS")
-            .or_else(|| Self::lookup_model_param(netlist, model, "BETA"))
-            .unwrap_or(2e-3);
         let default_vp = if is_p_channel { 2.0 } else { -2.0 };
         let vp = Self::lookup_model_param(netlist, model, "VTO")
             .unwrap_or(default_vp);
+        // ngspice BETA = IDSS / VP^2, so IDSS = BETA * VP^2
+        let idss = if let Some(raw_idss) = Self::lookup_model_param(netlist, model, "IDSS") {
+            raw_idss
+        } else if let Some(beta) = Self::lookup_model_param(netlist, model, "BETA") {
+            beta * vp * vp
+        } else {
+            2e-3
+        };
         let lambda = Self::lookup_model_param(netlist, model, "LAMBDA").unwrap_or(0.001);
 
         validate_positive_finite(idss, "JFET model IDSS")?;

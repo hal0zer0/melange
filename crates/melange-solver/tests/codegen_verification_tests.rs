@@ -645,7 +645,7 @@ fn test_codegen_bjt_nr_solver_generates_device_calls() {
     // BJT NR solver should call bjt_ic and bjt_ib with state fields for IS, VT, BETA_R, BETA_F
     // but SIGN, USE_GP, VAF, VAR, IKF remain as const
     assert!(
-        code.contains("bjt_ic(v_d0, v_d1, state.device_0_is, state.device_0_vt, state.device_0_br, DEVICE_0_SIGN, DEVICE_0_USE_GP, DEVICE_0_VAF, DEVICE_0_VAR, DEVICE_0_IKF)"),
+        code.contains("bjt_ic(v_d0, v_d1, state.device_0_is, state.device_0_vt, state.device_0_br, DEVICE_0_SIGN, DEVICE_0_USE_GP, DEVICE_0_VAF, DEVICE_0_VAR, DEVICE_0_IKF, DEVICE_0_IKR)"),
         "NR solver should call bjt_ic with state fields for IS/VT/BR and const for SIGN/GP params."
     );
     assert!(
@@ -655,7 +655,7 @@ fn test_codegen_bjt_nr_solver_generates_device_calls() {
 
     // Should call bjt_jacobian with state fields for IS/VT/BF/BR and const for SIGN/GP params
     assert!(
-        code.contains("bjt_jacobian(v_d0, v_d1, state.device_0_is, state.device_0_vt, state.device_0_bf, state.device_0_br, DEVICE_0_SIGN, DEVICE_0_USE_GP, DEVICE_0_VAF, DEVICE_0_VAR, DEVICE_0_IKF)"),
+        code.contains("bjt_jacobian(v_d0, v_d1, state.device_0_is, state.device_0_vt, state.device_0_bf, state.device_0_br, DEVICE_0_SIGN, DEVICE_0_USE_GP, DEVICE_0_VAF, DEVICE_0_VAR, DEVICE_0_IKF, DEVICE_0_IKR)"),
         "NR solver should call bjt_jacobian with state fields for IS/VT/BF/BR and const for SIGN/GP params."
     );
 
@@ -755,9 +755,9 @@ fn test_codegen_mixed_diode_bjt_device_map() {
     assert!(code.contains("jdev_0_0 = diode_conductance(v_d0, state.device_0_is, state.device_0_n_vt)"), "Diode jdev at index 0");
 
     // BJT at indices 1,2 (device 1) with state fields for IS/VT/BF/BR, const for SIGN/GP
-    assert!(code.contains("bjt_ic(v_d1, v_d2, state.device_1_is, state.device_1_vt, state.device_1_br, DEVICE_1_SIGN, DEVICE_1_USE_GP, DEVICE_1_VAF, DEVICE_1_VAR, DEVICE_1_IKF)"), "BJT Ic at indices 1,2");
+    assert!(code.contains("bjt_ic(v_d1, v_d2, state.device_1_is, state.device_1_vt, state.device_1_br, DEVICE_1_SIGN, DEVICE_1_USE_GP, DEVICE_1_VAF, DEVICE_1_VAR, DEVICE_1_IKF, DEVICE_1_IKR)"), "BJT Ic at indices 1,2");
     assert!(code.contains("bjt_ib(v_d1, v_d2, state.device_1_is, state.device_1_vt, state.device_1_bf, state.device_1_br, DEVICE_1_SIGN)"), "BJT Ib at indices 1,2");
-    assert!(code.contains("bjt_jacobian(v_d1, v_d2, state.device_1_is, state.device_1_vt, state.device_1_bf, state.device_1_br, DEVICE_1_SIGN, DEVICE_1_USE_GP, DEVICE_1_VAF, DEVICE_1_VAR, DEVICE_1_IKF)"), "BJT Jacobian at indices 1,2");
+    assert!(code.contains("bjt_jacobian(v_d1, v_d2, state.device_1_is, state.device_1_vt, state.device_1_bf, state.device_1_br, DEVICE_1_SIGN, DEVICE_1_USE_GP, DEVICE_1_VAF, DEVICE_1_VAR, DEVICE_1_IKF, DEVICE_1_IKR)"), "BJT Jacobian at indices 1,2");
 
     // All 3 residuals
     assert!(code.contains("let f0 = i_nl[0] - i_dev0"), "Residual f0");
@@ -1058,7 +1058,7 @@ fn assert_ir_matrices_close(a: &CircuitIR, b: &CircuitIR) {
 /// IR round-trip: serialize → deserialize → verify data preserved + emits valid code.
 fn assert_ir_roundtrip(spice: &str) {
     let ir = build_ir(spice);
-    let emitter = RustEmitter::new();
+    let emitter = RustEmitter::new().unwrap();
 
     // Direct emission must succeed
     let direct_code = emitter.emit(&ir).expect("direct emit failed");
@@ -1207,15 +1207,16 @@ fn test_heterogeneous_diode_models() {
     // They must be DIFFERENT
     assert_ne!(fast_is, slow_is, "Devices should have different IS values");
 
-    // Device 0 N_VT = 1.0 * 0.02585 = 0.02585
-    let fast_n_vt = format!("{:.17e}", 1.0 * 0.02585_f64);
+    // Device 0 N_VT = 1.0 * VT_ROOM
+    let vt = melange_primitives::VT_ROOM;
+    let fast_n_vt = format!("{:.17e}", 1.0 * vt);
     assert!(
         code.contains(&format!("DEVICE_0_N_VT: f64 = {}", fast_n_vt)),
         "Device 0 (DFAST) should have N_VT for N=1.0."
     );
 
-    // Device 1 N_VT = 1.5 * 0.02585 = 0.038775
-    let slow_n_vt = format!("{:.17e}", 1.5 * 0.02585_f64);
+    // Device 1 N_VT = 1.5 * VT_ROOM
+    let slow_n_vt = format!("{:.17e}", 1.5 * vt);
     assert!(
         code.contains(&format!("DEVICE_1_N_VT: f64 = {}", slow_n_vt)),
         "Device 1 (DSLOW) should have N_VT for N=1.5."
@@ -1892,7 +1893,7 @@ Rbias vcc 0 10k
     let bjt = BjtEbersMoll::new_room_temp(1e-15, 200.0, 3.0, BjtPolarity::Npn);
     let devices = vec![DeviceEntry::new_bjt(bjt, 0)];
 
-    let mut solver = CircuitSolver::new(kernel_rt, devices, input_node, output_node);
+    let mut solver = CircuitSolver::new(kernel_rt, devices, input_node, output_node).unwrap();
     solver.input_conductance = 1.0;
 
     // Feed a sine wave and verify output is finite and stable

@@ -473,7 +473,7 @@ fn test_runtime_solver_dc_op_init() {
     let input_node = mna.node_map.get("in").copied().unwrap_or(1).saturating_sub(1);
     let output_node = mna.node_map.get("out").copied().unwrap_or(2).saturating_sub(1);
 
-    let mut solver = CircuitSolver::new(kernel, devices, input_node, output_node);
+    let mut solver = CircuitSolver::new(kernel, devices, input_node, output_node).unwrap();
     solver.input_conductance = 1.0;
 
     // Before DC OP init: everything should be zero

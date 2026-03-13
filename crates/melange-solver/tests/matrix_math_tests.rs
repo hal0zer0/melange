@@ -462,7 +462,7 @@ fn test_nr_converges_with_correct_k_sign() {
         vec![diode_entry],
         in_idx - 1,  // 0-based node index
         out_idx - 1,
-    );
+    ).unwrap();
 
     let mut all_finite = true;
     let mut any_nonzero = false;

@@ -182,7 +182,7 @@ impl CodeGenerator {
         }
 
         let ir = CircuitIR::from_kernel(kernel, mna, netlist, &self.config)?;
-        let code = RustEmitter::new().emit(&ir)?;
+        let code = RustEmitter::new()?.emit(&ir)?;
 
         Ok(GeneratedCode {
             code,

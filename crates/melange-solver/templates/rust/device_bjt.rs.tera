@@ -11,7 +11,7 @@ fn safe_exp(x: f64) -> f64 { x.clamp(-40.0, 40.0).exp() }
 /// When use_gp=false or all GP params are infinite, returns 1.0 (Ebers-Moll).
 #[inline(always)]
 fn bjt_qb(vbe: f64, vbc: f64, is: f64, vt: f64, sign: f64,
-           use_gp: bool, vaf: f64, var: f64, ikf: f64) -> f64 {
+           use_gp: bool, vaf: f64, var: f64, ikf: f64, ikr: f64) -> f64 {
     if !use_gp { return 1.0; }
     let vbe_eff = sign * vbe;
     let vbc_eff = sign * vbc;
@@ -21,9 +21,10 @@ fn bjt_qb(vbe: f64, vbc: f64, is: f64, vt: f64, sign: f64,
     if q1_denom.abs() < 1e-30 { return 1.0; }
     let q1 = 1.0 / q1_denom;
 
-    // High-level injection: q2 = Icc / IKF
-    let i_cc = is * (safe_exp(vbe_eff / vt) - safe_exp(vbc_eff / vt));
-    let q2 = i_cc / ikf;
+    // High-level injection: q2 = Is*exp(Vbe/Vt)/IKF + Is*exp(Vbc/Vt)/IKR
+    let exp_be = safe_exp(vbe_eff / vt);
+    let exp_bc = safe_exp(vbc_eff / vt);
+    let q2 = is * exp_be / ikf + is * exp_bc / ikr;
 
     q1 * (1.0 + (1.0 + 4.0 * q2).max(0.0).sqrt()) / 2.0
 }
@@ -33,13 +34,13 @@ fn bjt_qb(vbe: f64, vbc: f64, is: f64, vt: f64, sign: f64,
 /// When use_gp=true, divides transport current by qb (Gummel-Poon).
 #[inline(always)]
 fn bjt_ic(vbe: f64, vbc: f64, is: f64, vt: f64, beta_r: f64, sign: f64,
-          use_gp: bool, vaf: f64, var: f64, ikf: f64) -> f64 {
+          use_gp: bool, vaf: f64, var: f64, ikf: f64, ikr: f64) -> f64 {
     let vbe_eff = sign * vbe;
     let vbc_eff = sign * vbc;
     let exp_be = safe_exp(vbe_eff / vt);
     let exp_bc = safe_exp(vbc_eff / vt);
     let i_cc = is * (exp_be - exp_bc);
-    let qb = bjt_qb(vbe, vbc, is, vt, sign, use_gp, vaf, var, ikf);
+    let qb = bjt_qb(vbe, vbc, is, vt, sign, use_gp, vaf, var, ikf, ikr);
     sign * (i_cc / qb - is / beta_r * (exp_bc - 1.0))
 }
 
@@ -60,7 +61,7 @@ fn bjt_ib(vbe: f64, vbc: f64, is: f64, vt: f64, beta_f: f64, beta_r: f64, sign: 
 /// When use_gp=true, uses quotient rule for d(Icc/qb)/dV (Gummel-Poon).
 #[inline(always)]
 fn bjt_jacobian(vbe: f64, vbc: f64, is: f64, vt: f64, beta_f: f64, beta_r: f64, sign: f64,
-                use_gp: bool, vaf: f64, var: f64, ikf: f64) -> [f64; 4] {
+                use_gp: bool, vaf: f64, var: f64, ikf: f64, ikr: f64) -> [f64; 4] {
     let vbe_eff = sign * vbe;
     let vbc_eff = sign * vbc;
     let exp_be = safe_exp(vbe_eff / vt);
@@ -91,10 +92,10 @@ fn bjt_jacobian(vbe: f64, vbc: f64, is: f64, vt: f64, beta_f: f64, beta_r: f64, 
         (q1, q1 * q1 / var, q1 * q1 / vaf)
     };
 
-    // q2 and derivatives
-    let q2 = icc / ikf;
-    let dq2_dvbe = dicc_dvbe / ikf;
-    let dq2_dvbc = dicc_dvbc / ikf;
+    // q2 and derivatives: q2 = Is*exp(Vbe/Vt)/IKF + Is*exp(Vbc/Vt)/IKR
+    let q2 = is * exp_be / ikf + is * exp_bc / ikr;
+    let dq2_dvbe = is / (vt * ikf) * exp_be;
+    let dq2_dvbc = is / (vt * ikr) * exp_bc;
 
     // Discriminant D = sqrt(1 + 4*q2)
     let disc = (1.0 + 4.0 * q2).max(0.0);

@@ -35,7 +35,7 @@ Vin in 0 0
         DeviceEntry::new_diode(d2, 1),
     ];
     
-    let mut solver = CircuitSolver::new(kernel, devices, 0, 5);
+    let mut solver = CircuitSolver::new(kernel, devices, 0, 5).unwrap();
     
     println!("Testing with 50mV sine:");
     for i in 0..100 {

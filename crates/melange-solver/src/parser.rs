@@ -903,12 +903,14 @@ impl Parser {
                 let mut subckt_elements = Vec::new();
 
                 // Collect elements until .ends
+                let mut found_ends = false;
                 while let Some(sub_line) = self.next_line() {
                     let sub_line = sub_line.trim().to_string();
                     if sub_line.is_empty() || sub_line.starts_with('*') {
                         continue;
                     }
                     if sub_line.to_lowercase().starts_with(".ends") {
+                        found_ends = true;
                         break;
                     }
                     if sub_line.starts_with('.') {
@@ -922,6 +924,12 @@ impl Parser {
                     }
                     let elem = self.parse_element(&sub_line)?;
                     subckt_elements.push(elem);
+                }
+
+                if !found_ends {
+                    return Err(self.error(format!(
+                        "Subcircuit '{}' missing .ends directive", subckt_name
+                    )));
                 }
 
                 netlist.subcircuits.push(Subcircuit {
@@ -944,8 +952,8 @@ impl Parser {
             ".end" | ".ends" => {
                 // End of netlist or subcircuit
             }
-            _ => {
-                // Unknown directive, ignore
+            other => {
+                log::warn!("Unknown directive: {}", other);
             }
         }
 
@@ -1329,6 +1337,7 @@ impl Parser {
 
     fn parse_voltage_source(&self, parts: &[&str]) -> Result<Element, ParseError> {
         self.require_parts(parts, 3, "Vname n+ n-")?;
+        self.check_self_connection(parts[1], parts[2], parts[0])?;
 
         let mut dc = None;
         let mut ac = None;
@@ -1372,6 +1381,7 @@ impl Parser {
 
     fn parse_current_source(&self, parts: &[&str]) -> Result<Element, ParseError> {
         self.require_parts(parts, 3, "Iname n+ n-")?;
+        self.check_self_connection(parts[1], parts[2], parts[0])?;
 
         let dc = match parts.get(3) {
             Some(p) if p.to_uppercase() == "DC" => {
@@ -2197,16 +2207,19 @@ Q1 coll base emit 2N2222
     }
 
     #[test]
-    fn test_ground_to_ground_ok_for_vsource() {
-        // Voltage source from ground to ground is physically meaningless but
-        // the parser only validates two-terminal passive components for self-connection.
-        // Voltage sources can have unusual configurations (AC superposition).
-        // This test documents current behavior.
+    fn test_self_connected_voltage_source() {
+        // Voltage source from node to itself is physically meaningless and should be rejected
         let spice = "Test\nV1 0 0 DC 5\n";
         let result = Netlist::parse(spice);
-        // Voltage sources don't get self-connection validation in the parser
-        // This is a circuit-level issue, not a syntax issue
-        assert!(result.is_ok(), "Voltage source self-connection is not validated at parse level: {:?}", result.err());
+        assert!(result.is_err(), "Voltage source self-connection should be rejected");
+    }
+
+    #[test]
+    fn test_self_connected_current_source() {
+        // Current source from node to itself is physically meaningless and should be rejected
+        let spice = "Test\nI1 1 1 DC 1m\n";
+        let result = Netlist::parse(spice);
+        assert!(result.is_err(), "Current source self-connection should be rejected");
     }
 
     // 8. Unknown element type

@@ -32,7 +32,7 @@ Vin in 0 0
         DeviceEntry::new_diode(d, 1),
     ];
     
-    let mut solver = CircuitSolver::new(kernel, devices, 0, 5);
+    let mut solver = CircuitSolver::new(kernel, devices, 0, 5).unwrap();
     
     println!("CircuitSolver with 10mV DC:");
     for i in 0..20 {
