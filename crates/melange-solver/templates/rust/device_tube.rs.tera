@@ -56,7 +56,7 @@ fn tube_jacobian(vgk: f64, vpk: f64, mu: f64, ex: f64, kg1: f64, kp: f64, kvb: f
                               };
 
     let e1 = (vpk / kp) * softplus;
-    if e1 <= 1e-30 { return [0.0, 0.0, dig_dvgk, 0.0]; }
+    if e1 <= 1e-10 { return [0.0, 0.0, dig_dvgk, 0.0]; }
 
     let ip_koren = e1.powf(ex) / kg1;
     let lambda_factor = 1.0 + lambda * vpk;

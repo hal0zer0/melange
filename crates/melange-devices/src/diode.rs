@@ -127,31 +127,57 @@ impl DiodeWithRs {
 
     /// Current-voltage relationship.
     ///
-    /// Requires solving: I = Is * (exp((V - I*Rs) / (n*Vt)) - 1)
-    /// We use an approximate solution: I ≈ diode_current(V) for small Rs
-    /// or iterative solution for accuracy.
+    /// Solves V_j + Id(V_j)*Rs = V for the junction voltage V_j using
+    /// Newton-Raphson with SPICE-style voltage limiting (steps clamped to
+    /// 4*n*Vt per iteration). Then I = Id(V_j).
+    ///
+    /// The previous single fixed-point iteration had O((g_d*Rs)^2) error —
+    /// unusable for forward-biased diodes with Rs > 10 ohm.
     pub fn current_at(&self, v: f64) -> f64 {
-        // Simple approximation: just use the diode current
-        // For more accuracy, could use NR iteration here
-        let i_approx = self.diode.current_at(v);
-        
-        // Better approximation: account for voltage drop across Rs
-        let v_diode = v - i_approx * self.rs;
-        self.diode.current_at(v_diode)
+        if self.rs <= 0.0 {
+            return self.diode.current_at(v);
+        }
+        let v_j = self.solve_junction_voltage(v);
+        self.diode.current_at(v_j)
     }
 
     /// Conductance with series resistance.
+    ///
+    /// g_total = g_d / (1 + g_d * Rs) where g_d is evaluated at the
+    /// NR-solved junction voltage.
     pub fn conductance_at(&self, v: f64) -> f64 {
-        // Evaluate at the corrected junction voltage (consistent with current_at)
-        let i_approx = self.diode.current_at(v);
-        let v_diode = v - i_approx * self.rs;
-        // g_total = g_diode / (1 + g_diode * Rs)
-        let g_d = self.diode.conductance_at(v_diode);
-        let denom = 1.0 + g_d * self.rs;
-        if denom.abs() < 1e-15 {
-            return g_d; // fallback: ignore Rs when denominator vanishes
+        if self.rs <= 0.0 {
+            return self.diode.conductance_at(v);
         }
-        g_d / denom
+        let v_j = self.solve_junction_voltage(v);
+        let g_d = self.diode.conductance_at(v_j);
+        g_d / (1.0 + g_d * self.rs)
+    }
+
+    /// Solve for junction voltage: V_j + Id(V_j)*Rs = V.
+    ///
+    /// NR with step limiting (4*n*Vt per iteration) for robust convergence
+    /// even with stiff exponentials and large Rs.
+    fn solve_junction_voltage(&self, v: f64) -> f64 {
+        let n_vt = self.diode.n * self.diode.vt;
+        let max_step = 4.0 * n_vt;
+        // Initial guess: clamp to a reasonable forward voltage
+        let mut v_j = if v > 0.0 { v.min(0.7) } else { v };
+        for _ in 0..15 {
+            let id = self.diode.current_at(v_j);
+            let gd = self.diode.conductance_at(v_j);
+            // f(V_j) = V_j + Id(V_j)*Rs - V
+            let f = v_j + id * self.rs - v;
+            let fp = 1.0 + gd * self.rs;
+            let mut delta = f / fp;
+            // Clamp step to prevent overshoot in stiff exponential region
+            delta = delta.clamp(-max_step, max_step);
+            v_j -= delta;
+            if delta.abs() < 1e-10 {
+                break;
+            }
+        }
+        v_j
     }
 }
 
@@ -412,6 +438,51 @@ mod tests {
             assert!(err < g.abs() * 1e-4 + 1e-10,
                 "Derivative mismatch at v={:.4}: conductance={:.6e} fd={:.6e} err={:.2e}",
                 v, g, fd, err);
+        }
+    }
+
+    /// Verify DiodeWithRs NR solution: I = Is*(exp((V-I*Rs)/(n*Vt))-1).
+    /// Check that the solved current satisfies the implicit equation.
+    #[test]
+    fn test_diode_with_rs_nr_accuracy() {
+        let diode = DiodeShockley::silicon();
+
+        // Test with large Rs where single fixed-point fails
+        for &rs in &[10.0, 100.0, 1000.0] {
+            let drs = DiodeWithRs::new(diode, rs);
+            for &v in &[0.7, 1.0, 2.0, 5.0] {
+                let i = drs.current_at(v);
+                // Verify implicit equation: I should equal Id(V - I*Rs)
+                let v_j = v - i * rs;
+                let id = diode.current_at(v_j);
+                let residual = (i - id).abs();
+                assert!(residual < 1e-10,
+                    "NR residual at v={}, Rs={}: I={:.6e}, Id(Vj)={:.6e}, |I-Id|={:.2e}",
+                    v, rs, i, id, residual);
+            }
+        }
+    }
+
+    /// Verify DiodeWithRs conductance matches finite difference of current.
+    #[test]
+    fn test_diode_with_rs_conductance_fd() {
+        let diode = DiodeShockley::silicon();
+        let eps = 1e-7;
+
+        for &rs in &[10.0, 100.0] {
+            let drs = DiodeWithRs::new(diode, rs);
+            for &v in &[0.7, 1.0, 2.0] {
+                let g = drs.conductance_at(v);
+                let fd = (drs.current_at(v + eps) - drs.current_at(v - eps)) / (2.0 * eps);
+                let rel_err = if fd.abs() > 1e-15 {
+                    (g - fd).abs() / fd.abs()
+                } else {
+                    g.abs()
+                };
+                assert!(rel_err < 1e-3,
+                    "DiodeWithRs g mismatch at v={}, Rs={}: g={:.6e} fd={:.6e} err={:.2e}",
+                    v, rs, g, fd, rel_err);
+            }
         }
     }
 

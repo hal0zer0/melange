@@ -25,7 +25,7 @@ All false claims removed or corrected (2026-03-13).
 
 ---
 
-## Phase B — Numerical Correctness
+## Phase B — Numerical Correctness ✅ Complete
 
 Issues where the math is wrong or numerically fragile.
 
@@ -45,18 +45,14 @@ Issues where the math is wrong or numerically fragile.
 ### ~~B.6 NR convergence max-norm~~ ✅ Done (2026-03-13)
 ### ~~B.7 Thermal voltage full precision~~ ✅ Done (VT_ROOM = 0.025851991)
 
-### B.8 Tube Jacobian guard threshold too small for fractional exponents
-- `e1.powf(ex-1.0)` with guard at `1e-30` — produces huge values when `ex < 1.0`
-- Raise guard to `1e-10` or use safe formulation
-- **Files:** `templates/rust/device_tube.rs.tera`
-- **Severity:** Low-Moderate
+### ~~B.8 Tube Jacobian guard threshold too small for fractional exponents~~ ✅ Done (2026-03-13)
+- Guard raised from `1e-30` to `1e-10` in tube.rs (runtime) and device_tube.rs.tera (codegen)
+- Prevents huge values from `e1.powf(ex-1.0)` when `ex < 1.0`
 
-### B.9 `DiodeWithRs` uses non-convergent single-step approximation
-- Single fixed-point iteration for `I = Is*(exp((V-I*Rs)/(n*Vt))-1)`
-- Error is O((g_d*Rs)^2) — useless for forward-biased diode with Rs > 10 ohm
-- Add NR inner loop (3-5 iterations) or companion linearization
-- **Files:** `crates/melange-devices/src/diode.rs`
-- **Severity:** Low (only affects runtime solver with DiodeWithRs)
+### ~~B.9 `DiodeWithRs` uses non-convergent single-step approximation~~ ✅ Done (2026-03-13)
+- Replaced single fixed-point iteration with NR on junction voltage V_j (up to 15 iterations)
+- SPICE-style step limiting (4*n_vt per iteration) prevents overshoot
+- Conductance uses chain rule: `g_d / (1 + g_d * Rs)`
 
 ---
 

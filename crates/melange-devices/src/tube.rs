@@ -191,7 +191,7 @@ impl NonlinearDevice<2> for KorenTriode {
 
         let e1 = (vpk / self.kp) * softplus;
 
-        if e1 <= 1e-30 {
+        if e1 <= 1e-10 {
             return [0.0, 0.0];
         }
 
@@ -536,6 +536,28 @@ mod tests {
         }
         assert_eq!(tube.grid_current_jacobian(0.0), 0.0);
         assert_eq!(tube.grid_current_jacobian(-1.0), 0.0);
+    }
+
+    /// Verify Jacobian is bounded for fractional exponents (ex < 1.0).
+    /// Previously e1.powf(ex-1.0) produced huge values near the guard threshold.
+    #[test]
+    fn test_fractional_exponent_jacobian_bounded() {
+        // ex=0.5 means e1^(ex-1) = e1^(-0.5) which diverges for small e1
+        let tube = KorenTriode::new(100.0, 0.5, 1060.0, 600.0, 300.0);
+
+        // Test at low Vpk where e1 is very small
+        for &vpk in &[0.1, 1.0, 5.0, 10.0] {
+            let jac = tube.jacobian(&[-3.0, vpk]);
+            assert!(jac[0].is_finite(), "dIp/dVgk must be finite at vpk={}", vpk);
+            assert!(jac[1].is_finite(), "dIp/dVpk must be finite at vpk={}", vpk);
+            assert!(jac[0].abs() < 1e6, "dIp/dVgk must be bounded at vpk={}, got {:.2e}", vpk, jac[0]);
+            assert!(jac[1].abs() < 1e6, "dIp/dVpk must be bounded at vpk={}, got {:.2e}", vpk, jac[1]);
+        }
+
+        // Normal operating point should still work
+        let jac = tube.jacobian(&[0.0, 250.0]);
+        assert!(jac[0] > 0.0, "Transconductance should be positive");
+        assert!(jac[1] > 0.0, "Output conductance should be positive");
     }
 
     /// Verify lambda multiplier increases plate current proportional to Vpk.
