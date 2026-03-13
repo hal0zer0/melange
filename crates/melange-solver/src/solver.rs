@@ -7,8 +7,30 @@
 
 use crate::dk::DkKernel;
 use melange_primitives::nr::{nr_solve_1d, nr_solve_2d};
-use melange_devices::{DiodeShockley, BjtEbersMoll, NonlinearDevice};
+use melange_devices::{DiodeShockley, BjtEbersMoll, Jfet, Mosfet, KorenTriode, NonlinearDevice};
 use smallvec::{SmallVec, smallvec};
+
+/// Error type for solver construction and validation.
+#[derive(Debug, Clone)]
+pub enum SolverError {
+    /// Device dimensions don't match the kernel's nonlinear dimension M.
+    DimensionMismatch { expected: usize, got: usize },
+    /// A 2D device has an out-of-bounds start index.
+    DeviceIndexOutOfBounds { start_idx: usize, m: usize },
+}
+
+impl std::fmt::Display for SolverError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SolverError::DimensionMismatch { expected, got } =>
+                write!(f, "Total device dimensions ({}) don't match kernel M ({})", got, expected),
+            SolverError::DeviceIndexOutOfBounds { start_idx, m } =>
+                write!(f, "2D device start_idx {} out of bounds for M={}", start_idx, m),
+        }
+    }
+}
+
+impl std::error::Error for SolverError {}
 
 /// Sanitize an audio input sample: replace NaN/Inf with 0, clamp to [-100, 100].
 fn sanitize_input(input: f64) -> f64 {
@@ -63,6 +85,12 @@ pub enum DeviceEntry {
     Led { device: melange_devices::Led, start_idx: usize },
     /// BJT Ebers-Moll model (2D)
     Bjt { device: BjtEbersMoll, start_idx: usize },
+    /// JFET Shichman-Hodges model (2D)
+    Jfet { device: Jfet, start_idx: usize },
+    /// MOSFET Level 1 model (2D)
+    Mosfet { device: Mosfet, start_idx: usize },
+    /// Koren triode model (2D: plate current + grid current)
+    Tube { device: KorenTriode, start_idx: usize },
 }
 
 impl DeviceEntry {
@@ -86,6 +114,21 @@ impl DeviceEntry {
         Self::Bjt { device, start_idx }
     }
 
+    /// Create a new JFET device entry.
+    pub fn new_jfet(device: Jfet, start_idx: usize) -> Self {
+        Self::Jfet { device, start_idx }
+    }
+
+    /// Create a new MOSFET device entry.
+    pub fn new_mosfet(device: Mosfet, start_idx: usize) -> Self {
+        Self::Mosfet { device, start_idx }
+    }
+
+    /// Create a new triode tube device entry.
+    pub fn new_tube(device: KorenTriode, start_idx: usize) -> Self {
+        Self::Tube { device, start_idx }
+    }
+
     /// Get the device dimension (1, 2, etc.)
     pub fn dimension(&self) -> usize {
         match self {
@@ -93,6 +136,9 @@ impl DeviceEntry {
             DeviceEntry::DiodeWithRs { .. } => 1,
             DeviceEntry::Led { .. } => 1,
             DeviceEntry::Bjt { .. } => 2,
+            DeviceEntry::Jfet { .. } => 2,
+            DeviceEntry::Mosfet { .. } => 2,
+            DeviceEntry::Tube { .. } => 2,
         }
     }
 
@@ -103,6 +149,9 @@ impl DeviceEntry {
             DeviceEntry::DiodeWithRs { start_idx, .. } => *start_idx,
             DeviceEntry::Led { start_idx, .. } => *start_idx,
             DeviceEntry::Bjt { start_idx, .. } => *start_idx,
+            DeviceEntry::Jfet { start_idx, .. } => *start_idx,
+            DeviceEntry::Mosfet { start_idx, .. } => *start_idx,
+            DeviceEntry::Tube { start_idx, .. } => *start_idx,
         }
     }
 
@@ -129,6 +178,21 @@ impl DeviceEntry {
                 let ic = device.collector_current(v[0], v[1]);
                 let ib = device.base_current(v[0], v[1]);
                 smallvec![ic, ib]
+            }
+            DeviceEntry::Jfet { device, .. } => {
+                let id = device.drain_current(v[0], v[1]);
+                let ig = device.gate_current(v[0]);
+                smallvec![id, ig]
+            }
+            DeviceEntry::Mosfet { device, .. } => {
+                let id = device.drain_current(v[0], v[1]);
+                // MOSFET gate current is zero (insulated gate)
+                smallvec![id, 0.0]
+            }
+            DeviceEntry::Tube { device, .. } => {
+                let ip = device.plate_current(v[0], v[1]);
+                let ig = device.grid_current(v[0]);
+                smallvec![ip, ig]
             }
         }
     }
@@ -166,6 +230,44 @@ impl DeviceEntry {
                 let dib_dvbc = s * s * (device.is * device.beta_r.recip() / device.vt) * exp_bc;
                 smallvec![dic_dvbe, dic_dvbc, dib_dvbe, dib_dvbc]
             }
+            DeviceEntry::Jfet { device, .. } => {
+                let (did_dvgs, did_dvds) = device.jacobian_partial(v[0], v[1]);
+                // Gate current Jacobian: only depends on Vgs
+                let dig_dvgs = if v[0] > 0.0 {
+                    // Forward-biased gate-source junction
+                    let vgs_eff = match device.channel {
+                        melange_devices::jfet::JfetChannel::N => v[0],
+                        melange_devices::jfet::JfetChannel::P => -v[0],
+                    };
+                    if vgs_eff > 0.0 {
+                        let sign = match device.channel {
+                            melange_devices::jfet::JfetChannel::N => 1.0,
+                            melange_devices::jfet::JfetChannel::P => -1.0,
+                        };
+                        sign * device.is / melange_devices::VT_ROOM
+                            * melange_devices::safeguards::safe_exp(vgs_eff / melange_devices::VT_ROOM)
+                    } else {
+                        0.0
+                    }
+                } else {
+                    0.0
+                };
+                smallvec![did_dvgs, did_dvds, dig_dvgs, 0.0]
+            }
+            DeviceEntry::Mosfet { device, .. } => {
+                let (did_dvgs, did_dvds) = device.jacobian_partial(v[0], v[1]);
+                // MOSFET gate current is zero → Jacobian row is zero
+                smallvec![did_dvgs, did_dvds, 0.0, 0.0]
+            }
+            DeviceEntry::Tube { device, .. } => {
+                // Plate current Jacobian from NonlinearDevice<2>
+                let ip_jac = NonlinearDevice::<2>::jacobian(device, &[v[0], v[1]]);
+                let dip_dvgk = ip_jac[0];
+                let dip_dvpk = ip_jac[1];
+                // Grid current Jacobian: only depends on Vgk
+                let dig_dvgk = device.grid_current_jacobian(v[0]);
+                smallvec![dip_dvgk, dip_dvpk, dig_dvgk, 0.0]
+            }
         }
     }
 
@@ -178,6 +280,9 @@ impl DeviceEntry {
             DeviceEntry::DiodeWithRs { device, .. } => device.conductance_at(v),
             DeviceEntry::Led { device, .. } => device.jacobian(&[v])[0],
             DeviceEntry::Bjt { .. } => 0.0,
+            DeviceEntry::Jfet { .. } => 0.0,
+            DeviceEntry::Mosfet { .. } => 0.0,
+            DeviceEntry::Tube { .. } => 0.0,
         }
     }
 
@@ -190,6 +295,9 @@ impl DeviceEntry {
             DeviceEntry::DiodeWithRs { device, .. } => device.current_at(v),
             DeviceEntry::Led { device, .. } => device.current(&[v]),
             DeviceEntry::Bjt { .. } => 0.0,
+            DeviceEntry::Jfet { .. } => 0.0,
+            DeviceEntry::Mosfet { .. } => 0.0,
+            DeviceEntry::Tube { .. } => 0.0,
         }
     }
 
@@ -207,8 +315,8 @@ impl DeviceEntry {
                 i_nl[s] = currents[0];
                 i_nl[s + 1] = currents[1];
             }
-            _ => {
-                debug_assert!(false, "unsupported device dimension: {}", self.dimension());
+            d => {
+                log::warn!("write_currents: unsupported device dimension {}, skipping", d);
             }
         }
     }
@@ -229,8 +337,8 @@ impl DeviceEntry {
                 g_dev[(s + 1) * m + s] = jac[2];
                 g_dev[(s + 1) * m + s + 1] = jac[3];
             }
-            _ => {
-                debug_assert!(false, "unsupported device dimension: {}", self.dimension());
+            d => {
+                log::warn!("write_jacobian: unsupported device dimension {}, skipping", d);
             }
         }
     }
@@ -396,27 +504,29 @@ pub struct CircuitSolver {
 impl CircuitSolver {
     /// Create a new circuit solver.
     ///
-    /// # Panics
-    /// Panics if device dimensions don't match kernel dimensions.
+    /// Returns an error if device dimensions don't match kernel dimensions.
     pub fn new(
         kernel: DkKernel,
         devices: Vec<DeviceEntry>,
         input_node: usize,
         output_node: usize,
-    ) -> Self {
+    ) -> Result<Self, SolverError> {
         let n = kernel.n;
         let m = kernel.m;
 
         // Verify device dimensions match kernel
         let total_device_dim: usize = devices.iter().map(|d| d.dimension()).sum();
-        assert_eq!(total_device_dim, m, "Total device dimensions must match kernel dimension");
-        
+        if total_device_dim != m {
+            return Err(SolverError::DimensionMismatch { expected: m, got: total_device_dim });
+        }
+
         // Verify 2D devices have valid indices (check once at construction)
         for device in &devices {
-            if device.dimension() == 2 {
-                assert!(device.start_idx() + 1 < m,
-                    "Device 2D index out of bounds: start_idx={}, m={}",
-                    device.start_idx(), m);
+            if device.dimension() == 2 && device.start_idx() + 1 >= m {
+                return Err(SolverError::DeviceIndexOutOfBounds {
+                    start_idx: device.start_idx(),
+                    m,
+                });
             }
         }
 
@@ -439,7 +549,7 @@ impl CircuitSolver {
 
         let dc_block_r = 1.0 - 2.0 * std::f64::consts::PI * 5.0 / kernel.sample_rate;
 
-        Self {
+        Ok(Self {
             kernel,
             devices,
             v_prev,
@@ -472,7 +582,7 @@ impl CircuitSolver {
             diag_clamp_count: 0,
             diag_nr_max_iter_count: 0,
             diag_nan_reset_count: 0,
-        }
+        })
     }
 
     /// Returns the convergence reason from the most recent call to
@@ -529,7 +639,17 @@ impl CircuitSolver {
             }
             true
         } else {
-            log::warn!("DC operating point did not converge after all strategies");
+            log::warn!("DC operating point did not converge after all strategies; using linear fallback");
+            // Even when nonlinear DC OP fails, use the linear fallback node voltages.
+            // This matches codegen, which always initializes v_prev from DC_OP
+            // (the linear solution). Without this, the runtime starts from all-zeros
+            // while codegen starts from the linear DC solution, causing divergence.
+            let n = self.v_prev.len();
+            for i in 0..n.min(result.v_node.len()) {
+                self.v_prev[i] = result.v_node[i];
+            }
+            // i_nl_prev stays at zero (nonlinear currents unknown)
+            // No warm-up: codegen doesn't run warm-up when DC OP fails
             false
         }
     }
@@ -785,31 +905,35 @@ impl CircuitSolver {
     fn solve_md(&mut self) {
         let m = self.kernel.m;
 
-        // Warm start from previous solution
-        self.v_nl[..m].copy_from_slice(&self.v_nl_prev[..m]);
+        // Warm start from previous currents (current-based NR, matches codegen)
+        self.i_nl[..m].copy_from_slice(&self.i_nl_prev[..m]);
 
         // Default: assume we'll exhaust iterations (overwritten on early exit)
         self.last_convergence_reason = ConvergenceReason::MaxIterations;
 
-        // Newton-Raphson iteration
+        // Newton-Raphson iteration (current-based formulation)
+        // Solves: i_nl = f(p + K * i_nl) where f() is device current evaluation
         for _ in 0..self.max_iter {
-            let mut converged = true;
+            // Compute controlling voltages: v_d[i] = p[i] + sum_j K[i][j] * i_nl[j]
+            for i in 0..m {
+                let mut v_d = self.p[i];
+                let k_row_offset = i * m;
+                for j in 0..m {
+                    v_d += self.kernel.k[k_row_offset + j] * self.i_nl[j];
+                }
+                self.v_nl[i] = v_d;
+            }
 
-            // Compute all device currents into pre-allocated buffer
+            // Compute device currents at controlling voltages
             self.i_nl_temp.fill(0.0);
             for device in &self.devices {
                 device.write_currents(&self.v_nl, &mut self.i_nl_temp);
             }
 
-            // Compute residual: r[i] = v_nl[i] - p[i] - sum_j(K[i][j] * i_nl[j])
+            // Compute residual: r[i] = i_nl[i] - i_dev[i]
+            let mut converged = true;
             for i in 0..m {
-                let mut k_i = 0.0;
-                let k_row_offset = i * m;
-                for j in 0..m {
-                    k_i += self.kernel.k[k_row_offset + j] * self.i_nl_temp[j];
-                }
-                self.residual[i] = self.v_nl[i] - self.p[i] - k_i;
-
+                self.residual[i] = self.i_nl[i] - self.i_nl_temp[i];
                 if self.residual[i].abs() > self.tol {
                     converged = false;
                 }
@@ -820,20 +944,21 @@ impl CircuitSolver {
                 break;
             }
 
-            // Build block-diagonal device Jacobian G[k][j] = di_nl[k]/dv_nl[j]
+            // Build block-diagonal device Jacobian G[k][j] = di_dev[k]/dv_d[j]
             self.g_dev.fill(0.0);
             for device in &self.devices {
                 device.write_jacobian(&self.v_nl, &mut self.g_dev, m);
             }
 
-            // Build full NR Jacobian: J[i][j] = delta_ij - sum_k K[i][k] * G[k][j]
+            // Build full NR Jacobian: J[i][j] = delta_ij - sum_k jdev[i][k] * K[k][j]
+            // This matches the codegen formulation (Jf * K, not K * Jf)
             for i in 0..m {
                 for j in 0..m {
-                    let mut kg = 0.0;
+                    let mut jk = 0.0;
                     for k in 0..m {
-                        kg += self.kernel.k[i * m + k] * self.g_dev[k * m + j];
+                        jk += self.g_dev[i * m + k] * self.kernel.k[k * m + j];
                     }
-                    self.jacobian_mat[i * m + j] = if i == j { 1.0 } else { 0.0 } - kg;
+                    self.jacobian_mat[i * m + j] = if i == j { 1.0 } else { 0.0 } - jk;
                 }
             }
 
@@ -847,7 +972,7 @@ impl CircuitSolver {
                 // Singular Jacobian — damped fallback (0.5 * residual)
                 for i in 0..m {
                     let step = (self.residual[i] * 0.5).clamp(-self.clamp, self.clamp);
-                    self.v_nl[i] -= step;
+                    self.i_nl[i] -= step;
                 }
                 continue;
             }
@@ -861,18 +986,30 @@ impl CircuitSolver {
                 break;
             }
 
-            // Update: v_nl -= delta (with clamping)
+            // Update: i_nl -= delta (with clamping)
             for i in 0..m {
                 let step = self.delta[i].clamp(-self.clamp, self.clamp);
-                self.v_nl[i] -= step;
+                self.i_nl[i] -= step;
             }
 
-            // NaN/Inf detection: if any v_nl is non-finite, restore from previous and break
-            if self.v_nl[..m].iter().any(|v| !v.is_finite()) {
-                self.v_nl[..m].copy_from_slice(&self.v_nl_prev[..m]);
-                // MaxIterations is already set as the default
+            // NaN/Inf detection: if any i_nl is non-finite, restore from previous and break
+            if self.i_nl[..m].iter().any(|v| !v.is_finite()) {
+                self.i_nl[..m].copy_from_slice(&self.i_nl_prev[..m]);
                 break;
             }
+        }
+
+        // Recompute v_nl from final i_nl to ensure consistency.
+        // The NR loop may exit with v_nl from the previous iteration's step 1
+        // while i_nl was updated in step 5. This ensures compute_all_currents()
+        // (called after solve_md) sees voltages consistent with the final currents.
+        for i in 0..m {
+            let mut v_d = self.p[i];
+            let k_row_offset = i * m;
+            for j in 0..m {
+                v_d += self.kernel.k[k_row_offset + j] * self.i_nl[j];
+            }
+            self.v_nl[i] = v_d;
         }
 
         if self.last_convergence_reason == ConvergenceReason::MaxIterations {
@@ -912,9 +1049,9 @@ impl CircuitSolver {
 
     /// Process a block of samples.
     pub fn process_block(&mut self, input: &[f64], output: &mut [f64]) {
-        assert_eq!(input.len(), output.len());
-        for (i, &x) in input.iter().enumerate() {
-            output[i] = self.process_sample(x);
+        let len = input.len().min(output.len());
+        for i in 0..len {
+            output[i] = self.process_sample(input[i]);
         }
     }
 }
@@ -1133,7 +1270,7 @@ C1 out 0 100n
         let diode = DiodeShockley::new_room_temp(1e-15, 1.0);
         let devices = vec![DeviceEntry::new_diode(diode, 0)];
 
-        let mut solver = CircuitSolver::new(kernel, devices, 0, 1);
+        let mut solver = CircuitSolver::new(kernel, devices, 0, 1).unwrap();
         solver.input_conductance = 0.001; // Rin = 1k
 
         // Small signal should pass through with some attenuation
@@ -1284,7 +1421,7 @@ Rbias vcc 0 10k
         let bjt = BjtEbersMoll::new_room_temp(1e-15, 200.0, 3.0, melange_devices::BjtPolarity::Npn);
         let devices = vec![DeviceEntry::new_bjt(bjt, 0)];
 
-        let mut solver = CircuitSolver::new(kernel, devices, 0, 0);
+        let mut solver = CircuitSolver::new(kernel, devices, 0, 0).unwrap();
         solver.input_conductance = 1.0 / 100000.0; // R1 = 100k base bias
 
         // Test various input levels - just verify convergence (no panic)
@@ -1322,9 +1459,9 @@ R1 out 0 1k
         let diode = DiodeShockley::new_room_temp(1e-15, 1.0);
         let devices = vec![DeviceEntry::new_diode(diode, 0)];
 
-        let mut solver = CircuitSolver::new(kernel, devices, 0, 1);
+        let mut solver = CircuitSolver::new(kernel, devices, 0, 1).unwrap();
         solver.input_conductance = 0.001; // Rin = 1k
-        
+
         // Process samples and verify all outputs are finite
         let mut outputs = Vec::new();
         for i in 0..100 {
@@ -1377,9 +1514,9 @@ R1 out 0 10k
         let diode = DiodeShockley::new_room_temp(1e-15, 1.0);
         let devices = vec![DeviceEntry::new_diode(diode, 0)];
 
-        let mut solver = CircuitSolver::new(kernel, devices, 0, 1);
+        let mut solver = CircuitSolver::new(kernel, devices, 0, 1).unwrap();
         solver.input_conductance = 0.001; // Rin = 1k
-        
+
         // Test very small inputs
         let tiny_inputs = [1e-10, 1e-6, 1e-3, 0.0];
         for &input in &tiny_inputs {
@@ -1437,7 +1574,7 @@ C1 out 0 1u
 
         let diode = DiodeShockley::new_room_temp(1e-15, 1.0);
         let devices = vec![DeviceEntry::new_diode(diode, 0)];
-        let mut solver = CircuitSolver::new(kernel, devices, 0, 1);
+        let mut solver = CircuitSolver::new(kernel, devices, 0, 1).unwrap();
         solver.input_conductance = 0.001; // Rin = 1k
 
         // Test small signal passes through with some attenuation
@@ -1470,7 +1607,7 @@ Re e 0 1k
         if kernel2.m == 2 {
             let bjt = BjtEbersMoll::new_room_temp(1e-15, 200.0, 3.0, melange_devices::BjtPolarity::Npn);
             let devices2 = vec![DeviceEntry::new_bjt(bjt, 0)];
-            let mut solver2 = CircuitSolver::new(kernel2, devices2, 0, 0);
+            let mut solver2 = CircuitSolver::new(kernel2, devices2, 0, 0).unwrap();
             solver2.input_conductance = 1.0 / 100000.0; // Rb = 100k
             
             // Verify 2D device converges
@@ -1526,7 +1663,7 @@ R1 out 0 1k
         let kernel = DkKernel::from_mna(&mna, 44100.0).unwrap();
         let diode = DiodeShockley::new_room_temp(1e-15, 1.0);
         let devices = vec![DeviceEntry::new_diode(diode, 0)];
-        let mut solver = CircuitSolver::new(kernel, devices, 0, 1);
+        let mut solver = CircuitSolver::new(kernel, devices, 0, 1).unwrap();
         solver.input_conductance = 0.001;
 
         // Feed 1000 samples of normal audio then check all are safe
@@ -1579,7 +1716,7 @@ C1 out 0 1u
 
         let diode = DiodeShockley::new_room_temp(1e-15, 1.0);
         let devices = vec![DeviceEntry::new_diode(diode, 0)];
-        let mut solver = CircuitSolver::new(kernel, devices, 0, 1);
+        let mut solver = CircuitSolver::new(kernel, devices, 0, 1).unwrap();
         solver.input_conductance = 0.001; // Rin = 1k
 
         // Step response: 500 samples at 1V DC
@@ -1619,7 +1756,7 @@ C1 out 0 1u
         let netlist = Netlist::parse(spice).unwrap();
         let mna = MnaSystem::from_netlist(&netlist).unwrap();
         let kernel = DkKernel::from_mna(&mna, 44100.0).unwrap();
-        let solver = CircuitSolver::new(kernel, vec![], 0, 0);
+        let solver = CircuitSolver::new(kernel, vec![], 0, 0).unwrap();
         assert_eq!(solver.input_conductance, 1.0,
             "Default input_conductance should be 1.0 (1/1Ω, near-ideal voltage source)");
     }
@@ -1639,7 +1776,7 @@ C1 out 0 1u
         // m == 0 → no nonlinear devices
         assert_eq!(kernel.m, 0);
 
-        let mut solver = CircuitSolver::new(kernel, vec![], 0, 0);
+        let mut solver = CircuitSolver::new(kernel, vec![], 0, 0).unwrap();
         solver.input_conductance = 0.001;
 
         // Before any processing, initial reason should be Linear (m == 0)
@@ -1667,7 +1804,7 @@ C1 out 0 1u
 
         let diode = DiodeShockley::new_room_temp(1e-15, 1.0);
         let devices = vec![DeviceEntry::new_diode(diode, 0)];
-        let mut solver = CircuitSolver::new(kernel, devices, 0, 1);
+        let mut solver = CircuitSolver::new(kernel, devices, 0, 1).unwrap();
         solver.input_conductance = 0.001;
 
         // Process a small signal — should converge easily
@@ -1698,7 +1835,7 @@ Rbias vcc 0 10k
 
         let bjt = BjtEbersMoll::new_room_temp(1e-15, 200.0, 3.0, melange_devices::BjtPolarity::Npn);
         let devices = vec![DeviceEntry::new_bjt(bjt, 0)];
-        let mut solver = CircuitSolver::new(kernel, devices, 0, 0);
+        let mut solver = CircuitSolver::new(kernel, devices, 0, 0).unwrap();
         solver.input_conductance = 1.0 / 100000.0;
 
         // Process several samples so NR has a warm start
@@ -1739,7 +1876,7 @@ C1 out 0 1u
             DeviceEntry::new_diode(d1, 0),
             DeviceEntry::new_diode(d2, 1),
         ];
-        let mut solver = CircuitSolver::new(kernel, devices, 0, 1);
+        let mut solver = CircuitSolver::new(kernel, devices, 0, 1).unwrap();
         solver.input_conductance = 0.001;
 
         // Process a few samples
@@ -1767,7 +1904,7 @@ C1 out 0 1u
 
         let diode = DiodeShockley::new_room_temp(1e-15, 1.0);
         let devices = vec![DeviceEntry::new_diode(diode, 0)];
-        let mut solver = CircuitSolver::new(kernel, devices, 0, 1);
+        let mut solver = CircuitSolver::new(kernel, devices, 0, 1).unwrap();
         solver.input_conductance = 0.001;
 
         // Set absurdly tight tolerance and very few iterations to force non-convergence
@@ -1794,7 +1931,7 @@ C1 out 0 1u
 
         let diode = DiodeShockley::new_room_temp(1e-15, 1.0);
         let devices = vec![DeviceEntry::new_diode(diode, 0)];
-        let mut solver = CircuitSolver::new(kernel, devices, 0, 1);
+        let mut solver = CircuitSolver::new(kernel, devices, 0, 1).unwrap();
         solver.input_conductance = 0.001;
 
         // Normal convergence
@@ -1873,7 +2010,7 @@ C1 out 0 100n
 
         let diode = DiodeShockley::new_room_temp(1e-15, 1.0);
         let devices = vec![DeviceEntry::new_diode(diode, 0)];
-        let mut solver = CircuitSolver::new(kernel, devices, 0, 1);
+        let mut solver = CircuitSolver::new(kernel, devices, 0, 1).unwrap();
         solver.input_conductance = 0.001;
 
         // Feed 1V DC for 2 seconds
@@ -1912,7 +2049,7 @@ C1 out 0 100n
 
         let led = melange_devices::Led::red();
         let devices = vec![DeviceEntry::new_led(led, 0)];
-        let mut solver = CircuitSolver::new(kernel, devices, 0, 1);
+        let mut solver = CircuitSolver::new(kernel, devices, 0, 1).unwrap();
         solver.input_conductance = 0.001;
 
         // 200 samples of 1kHz sine
@@ -1942,7 +2079,7 @@ C1 out 0 100n
         let base_diode = DiodeShockley::new_room_temp(1e-15, 1.0);
         let diode_rs = melange_devices::DiodeWithRs::new(base_diode, 10.0); // 10Ω series R
         let devices = vec![DeviceEntry::new_diode_with_rs(diode_rs, 0)];
-        let mut solver = CircuitSolver::new(kernel, devices, 0, 1);
+        let mut solver = CircuitSolver::new(kernel, devices, 0, 1).unwrap();
         solver.input_conductance = 0.001;
 
         for i in 0..200 {
@@ -1972,7 +2109,7 @@ Rbias vcc 0 10k
 
         let bjt = BjtEbersMoll::new_room_temp(1e-15, 200.0, 3.0, melange_devices::BjtPolarity::Pnp);
         let devices = vec![DeviceEntry::new_bjt(bjt, 0)];
-        let mut solver = CircuitSolver::new(kernel, devices, 0, 0);
+        let mut solver = CircuitSolver::new(kernel, devices, 0, 0).unwrap();
         solver.input_conductance = 1.0 / 100000.0;
 
         // 50 DC warm-up samples
@@ -2046,7 +2183,7 @@ C1 out 0 1u
 
         let diode = DiodeShockley::new_room_temp(1e-15, 1.0);
         let devices = vec![DeviceEntry::new_diode(diode, 0)];
-        let mut solver = CircuitSolver::new(kernel, devices, 0, 1);
+        let mut solver = CircuitSolver::new(kernel, devices, 0, 1).unwrap();
         solver.input_conductance = 0.001;
 
         // Normal operation: counter should stay at 0
@@ -2086,7 +2223,7 @@ C1 out 0 1u
 
         let diode = DiodeShockley::new_room_temp(1e-15, 1.0);
         let devices = vec![DeviceEntry::new_diode(diode, 0)];
-        let mut solver = CircuitSolver::new(kernel, devices, 0, 1);
+        let mut solver = CircuitSolver::new(kernel, devices, 0, 1).unwrap();
         solver.input_conductance = 0.001;
 
         // Normal operation
