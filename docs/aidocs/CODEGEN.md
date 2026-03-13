@@ -82,6 +82,36 @@ fn bjt_ib(vbe: f64, vbc: f64) -> f64;              // Ebers-Moll Ib
 fn bjt_jacobian(vbe: f64, vbc: f64) -> [f64; 4];   // [dIc/dVbe, dIc/dVbc, dIb/dVbe, dIb/dVbc]
 ```
 
+### BJT Thermal Constants (Electrothermal Model)
+When self-heating is enabled (RTH is finite), additional per-device constants are emitted:
+```rust
+const DEVICE_0_RTH: f64 = 50.0;       // Thermal resistance [K/W]
+const DEVICE_0_CTH: f64 = 1e-6;       // Thermal capacitance [J/K]
+const DEVICE_0_XTI: f64 = 3.0;        // IS temperature exponent
+const DEVICE_0_EG: f64 = 1.11;        // Bandgap energy [eV]
+```
+
+A `BjtThermalState` is added to `CircuitState` for each thermal-enabled BJT, tracking `Tj`,
+`IS(T)`, and `VT(T)`. The thermal update runs once per sample (quasi-static), outside the
+NR loop. Forward Euler when stable (`dt < 2 * Rth * Cth`), implicit Euler otherwise.
+Zero overhead when RTH is infinite (default).
+
+### BJT Charge Storage Constants
+When junction capacitance parameters are specified, additional per-device constants are emitted:
+```rust
+const DEVICE_0_TF: f64 = 1e-10;       // Forward transit time [s]
+const DEVICE_0_CJE: f64 = 5e-12;      // B-E zero-bias junction cap [F]
+const DEVICE_0_VJE: f64 = 0.75;       // B-E built-in potential [V]
+const DEVICE_0_MJE: f64 = 0.33;       // B-E grading coefficient
+const DEVICE_0_CJC: f64 = 2e-12;      // B-C zero-bias junction cap [F]
+const DEVICE_0_VJC: f64 = 0.75;       // B-C built-in potential [V]
+const DEVICE_0_MJC: f64 = 0.33;       // B-C grading coefficient
+```
+
+These caps are linearized at the DC operating point and stamped into the MNA C matrix.
+The DK framework requires linear C, so caps are fixed at DC OP values. Zero overhead
+when all charge params are 0 (default).
+
 ### JFET (2D per device)
 ```rust
 fn jfet_id(vgs: f64, vds: f64, idss: f64, vp: f64, lambda: f64, sign: f64) -> f64;  // Shichman-Hodges Id
@@ -102,20 +132,22 @@ fn jfet_jacobian(vgs: f64, vds: f64, idss: f64, vp: f64, lambda: f64, sign: f64)
 
 ### Tube/Triode (2D per device)
 ```rust
-fn tube_ip(vgk: f64, vpk: f64, mu: f64, ex: f64, kg1: f64, kp: f64, kvb: f64) -> f64;  // Koren plate current
+fn tube_ip(vgk: f64, vpk: f64, mu: f64, ex: f64, kg1: f64, kp: f64, kvb: f64,
+           lambda: f64) -> f64;                                                            // Koren plate current with Early effect
 fn tube_ig(vgk: f64, ig_max: f64, vgk_onset: f64) -> f64;                                // Leach grid current
 fn tube_jacobian(vgk: f64, vpk: f64, mu: f64, ex: f64, kg1: f64, kp: f64, kvb: f64,
-                 ig_max: f64, vgk_onset: f64) -> [f64; 4];  // [dIp/dVgk, dIp/dVpk, dIg/dVgk, dIg/dVpk]
+                 ig_max: f64, vgk_onset: f64, lambda: f64) -> [f64; 4];  // [dIp/dVgk, dIp/dVpk, dIg/dVgk, dIg/dVpk]
 ```
 
 2D model: plate current (Ip) at `start_idx`, grid current (Ig) at `start_idx+1`.
 
-- **Plate current**: Koren model — `Ip = E1^ex / kg1` where `E1 = (vpk/kp) * ln(1 + exp(kp * (1/mu + vgk/sqrt(kvb + vpk^2))))`
+- **Plate current**: Koren model with Early-effect lambda — `Ip = Ip_koren * (1 + lambda * Vpk)` where `Ip_koren = E1^ex / kg1` and `E1 = (vpk/kp) * ln(1 + exp(kp * (1/mu + vgk/sqrt(kvb + vpk^2))))`
 - **Grid current**: Leach power-law — `Ig = ig_max * (vgk / vgk_onset)^1.5` for vgk > 0 (zero for vgk <= 0)
-- **Jacobian**: 4-element `[dIp/dVgk, dIp/dVpk, dIg/dVgk, dIg/dVpk]` — dIg/dVpk = 0 (grid current independent of plate voltage)
-- Constants: `DEVICE_{n}_MU`, `DEVICE_{n}_EX`, `DEVICE_{n}_KG1`, `DEVICE_{n}_KP`, `DEVICE_{n}_KVB`, `DEVICE_{n}_IG_MAX`, `DEVICE_{n}_VGK_ONSET`
+- **Jacobian**: 4-element `[dIp/dVgk, dIp/dVpk, dIg/dVgk, dIg/dVpk]` — dIg/dVpk = 0. With lambda: `dIp/dVgk = dIp_koren/dVgk * (1+lambda*Vpk)`, `dIp/dVpk = dIp_koren/dVpk * (1+lambda*Vpk) + Ip_koren * lambda`
+- Constants: `DEVICE_{n}_MU`, `DEVICE_{n}_EX`, `DEVICE_{n}_KG1`, `DEVICE_{n}_KP`, `DEVICE_{n}_KVB`, `DEVICE_{n}_IG_MAX`, `DEVICE_{n}_VGK_ONSET`, `DEVICE_{n}_LAMBDA`
 - Netlist syntax: `X1 plate grid cathode modelname` with `.model modelname TRIODE(MU=100 EX=1.4 KG1=1060 KP=600 KVB=300)`
-- Default params: MU=100, EX=1.4, KG1=1060, KP=600, KVB=300, IG_MAX=2e-3, VGK_ONSET=0.5
+- Default params: MU=100, EX=1.4, KG1=1060, KP=600, KVB=300, IG_MAX=2e-3, VGK_ONSET=0.5, LAMBDA=0.0
+- `LAMBDA` controls Early-effect multiplier: `Ip = Ip_koren * (1 + lambda * Vpk)`. Default 0.0 = no correction (backward compatible). Plate resistance rp ~ 1/(lambda*Ip).
 - Template: `device_tube.rs.tera`
 
 ## Device Map and M-Dimension Assignment
@@ -347,6 +379,14 @@ impl CircuitState {
 
 Matrix inversion uses inline Gaussian elimination (`invert_n()` helper emitted in generated code).
 
+## Parasitic Cap Handling
+
+Purely resistive nonlinear circuits (no capacitors in netlist) are ill-conditioned for
+the trapezoidal-based DK method because `A = G + (2/T)*C` degenerates to just `G` when
+`C = 0`. The caller should invoke `MnaSystem::add_parasitic_caps()` before building the
+DK kernel to auto-insert 10pF across each device junction. See
+[DEVICE_MODELS.md](DEVICE_MODELS.md#parasitic-cap-auto-insertion) for junction topology.
+
 ## Differences: Runtime vs Generated
 
 | Aspect | Runtime Solver | Generated Code |
@@ -360,3 +400,4 @@ Matrix inversion uses inline Gaussian elimination (`invert_n()` helper emitted i
 | Sparsity | Dense | Zero entries skipped in emission |
 | Sample rate | Fixed at construction | `set_sample_rate()` recomputes from G+C |
 | Multi-output | Single output | Stereo/multi-output supported (multiple output nodes) |
+| Potentiometers | `set_pot(index, resistance)` via Sherman-Morrison | SM rank-1 updates in `process_sample` |

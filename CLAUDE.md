@@ -8,7 +8,7 @@ Melange — Rust toolkit for circuit simulation to real-time audio DSP.
 cargo build --workspace
 cargo test --workspace
 cargo test -p melange-solver          # core solver tests
-cargo test -p melange-validate --test spice_validation  # SPICE comparison (needs ngspice)
+cargo test -p melange-validate --test spice_validation -- --include-ignored  # SPICE comparison (needs ngspice)
 cargo run -p melange-cli
 ```
 
@@ -99,7 +99,7 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
 | ~3% error linear circuit | Using `2*V*G` instead of `(V+V_prev)*G` | Track `input_prev`, use proper trapezoidal |
 | Sample count mismatch | ngspice adaptive timestep | `.OPTIONS INTERP` (after title line!) |
 | Output all zeros | Voltage source in no_vin netlist | Check circuit_no_vin.cir has no VIN |
-| Output ±10V oscillating | Purely resistive circuit, no caps | Add parasitic capacitance or use backward Euler |
+| Output ±10V oscillating | Purely resistive circuit, no caps | Auto-inserted 10pF parasitic caps (or add explicit caps) |
 | BJT output wrong | No DC operating point | Call `initialize_dc_op()` or use `DC_NL_I` codegen constant |
 | BJT period-3 oscillation | Backward Euler for nonlinear currents | Fixed: use full i_nl in correction (not delta) |
 | DC OP NR diverges | Wrong Jacobian sign | Use `G_aug = G_dc - N_i·J_dev·N_v` (subtraction!) |
@@ -129,10 +129,13 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
   - Combined with `N_i*i_nl_prev` in RHS, gives proper trapezoidal average
   - **Gummel-Poon model**: `BjtParams` includes VAF, VAR, IKF, IKR; `bjt_qb()` base charge modulation
   - USE_GP flag auto-detected from params; falls back to Ebers-Moll when GP params are infinite
+  - **Self-heating**: Thermal RC model (Rth, Cth, XTI, EG); forward/implicit Euler; SPICE3f5 IS(T); quasi-static (outside NR); default disabled (Rth=infinity)
+  - **Charge storage**: Junction caps (CJE, CJC with VJE/VJC/MJE/MJC) + diffusion cap (TF); SPICE3f5 depletion formula with FC=0.5; linearized at DC OP; default disabled
 - **Dynamic potentiometers**: `.pot R1 min max` directive marks a resistor as runtime-variable
   - Sherman-Morrison rank-1 updates: O(N²) correction instead of O(N³) re-inversion
   - Precomputed SM vectors (SU, USU, NV_SU, U_NI) baked into generated constants
   - Corrections applied to S, K, A_neg, and S*N_i products in codegen
+  - **Runtime solver**: `CircuitSolver.set_pot(index, resistance)` with pre-allocated SM buffers (real-time safe)
   - Plugin template auto-generates `FloatParam` knobs for each pot
   - Max 32 pots per circuit; pot value stored in `CircuitState`
 - **Plugin level params always included**: Input Level (-12 dB default, -36 to +12 dB) and Output Level (0 dB default, -60 to +12 dB)
@@ -152,7 +155,8 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
   - Compile-and-run verified for both N-channel and P-channel circuits
 - **Tube/triode codegen**: 2D Koren plate current model with Leach grid current
   - `tube_ip()` (Koren), `tube_ig()` (Leach power-law), `tube_jacobian()` (4-element)
-  - Constants: `DEVICE_{n}_MU`, `DEVICE_{n}_EX`, `DEVICE_{n}_KG1`, `DEVICE_{n}_KP`, `DEVICE_{n}_KVB`, `DEVICE_{n}_IG_MAX`, `DEVICE_{n}_VGK_ONSET`
+  - Early-effect lambda: `Ip = Ip_koren * (1 + lambda * Vpk)` for finite plate resistance (default lambda=0.0)
+  - Constants: `DEVICE_{n}_MU`, `DEVICE_{n}_EX`, `DEVICE_{n}_KG1`, `DEVICE_{n}_KP`, `DEVICE_{n}_KVB`, `DEVICE_{n}_LAMBDA`, `DEVICE_{n}_IG_MAX`, `DEVICE_{n}_VGK_ONSET`
   - Template: `device_tube.rs.tera`; 6 tests (parser, MNA, codegen, compile-and-run, two-triode preamp)
 - **MOSFET codegen**: 2D Level 1 SPICE with triode + saturation + channel-length modulation (LAMBDA)
   - `mosfet_id(vgs, vds, kp, vt, lambda, sign)`, `mosfet_ig(vgs, sign)`, `mosfet_jacobian()` -> [f64; 4]
@@ -165,11 +169,12 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
 - **`melange simulate` command**: parse -> MNA -> DK kernel -> solver -> process WAV
   - Supports `--input` for WAV files and `--amplitude` for sine test tones
 - **Explicit re-exports**: all crates (melange-solver, melange-devices, melange-primitives) use named re-exports (no glob `pub use module::*`)
+- **Parasitic cap auto-insertion**: 10pF across device junctions (not to ground) when nonlinear circuit has no caps; stabilizes trapezoidal rule in `from_mna()`
 
 ### Known Limitations
-- Purely resistive nonlinear circuits oscillate (need capacitor damping)
-- Tube Koren model: no plate resistance (rp) or mu variation with operating point
-- BJT Gummel-Poon: no self-heating or charge storage dynamics
+- Parasitic caps (10pF) auto-inserted across junctions for purely resistive nonlinear circuits
+- Tube Koren model: lambda parameter models finite plate resistance; no space-charge or transit-time effects
+- BJT Gummel-Poon: self-heating (Rth/Cth) and charge storage (CJE/CJC/TF) available; no substrate current or avalanche breakdown
 - **Runtime solver** (`DeviceEntry`) supports all device types: Diode, DiodeWithRs, Led, BJT, JFET, MOSFET, Tube
 
 ### Cross-Compilation (macOS from Linux)

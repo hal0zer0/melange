@@ -184,14 +184,14 @@ SPICE Netlist → Parser → MNA System → DK Kernel → CircuitIR → Rust Emi
 |-----------|---------|---------|-------|
 | Resistor/Capacitor/Inductor | yes | yes | Trapezoidal companion models |
 | Diode | yes | yes | Shockley equation, series resistance, LED |
-| BJT | yes | yes | Ebers-Moll, Gummel-Poon (VAF, VAR, IKF, IKR) |
-| JFET | — | yes | Shichman-Hodges 2D (triode + saturation) |
-| MOSFET | — | yes | Level 1 SPICE 2D (triode + saturation) |
-| Vacuum Tube | — | yes | Koren triode + Leach grid current |
+| BJT | yes | yes | Ebers-Moll, Gummel-Poon, self-heating, charge storage |
+| JFET | yes | yes | Shichman-Hodges 2D (triode + saturation) |
+| MOSFET | yes | yes | Level 1 SPICE 2D (triode + saturation) |
+| Vacuum Tube | yes | yes | Koren triode + Leach grid current + lambda |
 | Op-Amp | yes | yes | VCCS macromodel (linear) |
 | CdS LDR | yes | — | VTL5C3/4, NSL-32 with asymmetric envelope |
 | Voltage Source | yes | yes | DC (Norton equivalent) |
-| Potentiometer | — | yes | Sherman-Morrison rank-1 updates |
+| Potentiometer | yes | yes | Sherman-Morrison rank-1 updates |
 | Switch | — | yes | Ganged R/C/L component switching |
 
 ## Quick Start (Library)

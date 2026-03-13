@@ -57,15 +57,80 @@ beta_F = 200
 beta_R = 3
 ```
 
+### Self-Heating (Electrothermal Model)
+
+Optional quasi-static thermal model that updates junction temperature once per sample,
+outside the NR loop.
+
+```
+dTj/dt = (P_diss - (Tj - T_amb) / Rth) / Cth
+```
+
+- `P_diss = Vce * Ic + Vbe * Ib` (instantaneous power dissipation)
+- Forward Euler when stable (`dt < 2 * Rth * Cth`), implicit Euler otherwise
+- Temperature-dependent saturation current (SPICE3f5 exact):
+  `IS(T) = IS_nom * (Tj/Tnom)^XTI * exp(EG/VT_nom * (Tj/Tnom - 1))`
+- `VT(T) = k * Tj / q` (thermal voltage tracks junction temperature)
+- Zero overhead when disabled (RTH = infinity, the default)
+
+#### Parameters
+```
+RTH   Thermal resistance [K/W]  (default: inf = disabled)
+CTH   Thermal capacitance [J/K] (default: 0)
+XTI   IS temperature exponent   (default: 3.0)
+EG    Bandgap energy [eV]       (default: 1.11)
+```
+
+### Charge Storage Dynamics
+
+BJT junction capacitances linearized at the DC operating point and stamped into the
+MNA C matrix. The DK framework requires linear C, so caps are fixed at DC OP values.
+Zero overhead when all charge params are 0 (default).
+
+#### Depletion Capacitance (SPICE3f5)
+```
+Cj = CJ0 / (1 - Vj/VJ)^MJ     for Vj < FC * VJ
+Cj = CJ0 / (1-FC)^(1+MJ) * (1 - FC*(1+MJ) + MJ*Vj/VJ)   for Vj >= FC * VJ
+```
+Where FC = 0.5 (forward-bias coefficient for linear extension).
+
+#### Diffusion Capacitance
+```
+Cd = TF * |Ic| / VT
+```
+
+#### Parameters
+```
+TF    Forward transit time [s]       (default: 0)
+CJE   B-E zero-bias junction cap [F] (default: 0)
+VJE   B-E built-in potential [V]     (default: 0.75)
+MJE   B-E grading coefficient        (default: 0.33)
+CJC   B-C zero-bias junction cap [F] (default: 0)
+VJC   B-C built-in potential [V]     (default: 0.75)
+MJC   B-C grading coefficient        (default: 0.33)
+```
+
 ## Triode (Koren Model)
 
 M-dimension: 2 per triode (Vgk -> Ip, Vpk -> Ig)
 
-### Plate Current
+### Plate Current (with Early-effect lambda)
 ```
 inner = Kp * (1/mu + Vgk / sqrt(Kvb + Vpk^2))
 E1 = (Vpk / Kp) * ln(1 + exp(inner))
-Ip = E1^ex / Kg1   (if E1 > 0, else 0)
+Ip_koren = E1^ex / Kg1   (if E1 > 0, else 0)
+Ip = Ip_koren * (1 + lambda * Vpk)
+```
+
+The `lambda` parameter models channel-length modulation (Early effect) for triodes,
+analogous to MOSFET/JFET lambda. When `lambda = 0.0` (default), the model reduces
+to the standard Koren equation (backward compatible). The plate resistance at the
+operating point is approximately `rp = 1 / (lambda * Ip)`.
+
+### Jacobian with lambda
+```
+dIp/dVgk = dIp_koren/dVgk * (1 + lambda * Vpk)
+dIp/dVpk = dIp_koren/dVpk * (1 + lambda * Vpk) + Ip_koren * lambda
 ```
 
 ### Grid Current (Leach)
@@ -77,7 +142,7 @@ Ig = 0                                 for vgk <= 0
 ### 12AX7 Parameters
 ```
 mu = 100, Kp = 600, Kvb = 300, Kg1 = 1060, ex = 1.4
-ig_max = 2e-3, vgk_onset = 0.5
+ig_max = 2e-3, vgk_onset = 0.5, lambda = 0.0
 ```
 
 ## JFET (Shichman-Hodges)
@@ -175,6 +240,25 @@ ROUT = 1 ohm  (output resistance)
 VT = k*T/q  (thermal voltage)
 IS ~ T^3 * exp(-EG/(kT))
 ```
+
+## Parasitic Cap Auto-Insertion
+
+When a nonlinear circuit has zero capacitors in the netlist, `MnaSystem::add_parasitic_caps()`
+inserts 10pF (`PARASITIC_CAP = 10e-12`) across each physical device junction:
+
+| Device | Junctions |
+|--------|-----------|
+| Diode | anode-cathode (Cak) |
+| BJT | base-emitter (Cje) + base-collector (Cjc) |
+| JFET | gate-source (Cgs) + gate-drain (Cgd) |
+| MOSFET | gate-source (Cgs) + gate-drain (Cgd) |
+| Tube | grid-cathode (Cgk) + plate-cathode (Cpk) |
+
+Caps are stamped *across junctions* (not node-to-ground) to model physical junction
+capacitance. This ensures the C matrix is non-trivial, preventing the trapezoidal-rule
+A matrix from becoming singular for purely resistive nonlinear circuits.
+
+A `log::warn!` is emitted when auto-insertion occurs.
 
 ## Jacobian Contributions to NR System
 

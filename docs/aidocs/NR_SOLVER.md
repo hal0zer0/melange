@@ -129,6 +129,21 @@ if !i_nl.iter().all(|x| x.is_finite()) {
 ## Warm Start
 Use `i_nl_prev` from previous time sample as initial guess. Reduces iterations from 10-20 to 3-5.
 
+## BJT Self-Heating (Quasi-Static Thermal Update)
+
+When self-heating is enabled (finite RTH), the junction temperature is updated
+**once per sample, outside the NR loop** (quasi-static approximation). This means:
+
+1. NR solves for currents at the current `Tj` (using temperature-adjusted IS and VT)
+2. After NR converges, compute power dissipation: `P = Vce*Ic + Vbe*Ib`
+3. Update `Tj` via thermal RC: `dTj/dt = (P - (Tj-Tamb)/Rth) / Cth`
+4. Recompute `IS(Tj)` and `VT(Tj)` for the next sample
+
+This avoids coupling thermal dynamics into the NR iteration (which would require
+a larger Jacobian and slower convergence). The quasi-static approximation is valid
+because thermal time constants (ms to s) are much slower than electrical time
+constants (us to ms at audio rates).
+
 ## DC Operating Point Initialization
 
 For circuits with DC bias (BJT amplifiers), `i_nl_prev` should be initialized from

@@ -8,9 +8,9 @@ This document lists known limitations of melange-solver. Items marked [DEFERRED]
 
 The following standard SPICE element types are not implemented:
 
-- **E** (Voltage-Controlled Voltage Source) - Needed for ideal op-amps
+- ~~**E** (Voltage-Controlled Voltage Source)~~ ✅ Implemented (2026-03-13)
 - **F** (Current-Controlled Current Source) - Current mirrors
-- **G** (Voltage-Controlled Current Source) - Transconductance amplifiers
+- ~~**G** (Voltage-Controlled Current Source)~~ ✅ Implemented (2026-03-13)
 - **H** (Current-Controlled Voltage Source)
 - **B** (Behavioral sources) - Arbitrary expressions
 - ~~**K** (Coupled inductors) - Transformers~~ ✅ Implemented (2026-03-02)
@@ -31,9 +31,9 @@ The following standard SPICE element types are not implemented:
 
 Expressions like `{R1*2}` in component values are not supported. Only numeric values are parsed.
 
-### Temperature Dependencies [DEFERRED]
+### Temperature Dependencies [PARTIAL]
 
-Temperature coefficients (TC1, TC2) on resistors are ignored. All simulations run at nominal temperature.
+Temperature coefficients (TC1, TC2) on resistors are ignored. BJT self-heating (Rth, Cth, XTI, EG) is available via thermal RC model with SPICE3f5 IS(T) scaling (default disabled, Rth=infinity). All other simulations run at nominal temperature.
 
 ## Parser Issues
 
@@ -79,17 +79,17 @@ For M > 2 nonlinear elements, the solver uses full Newton-Raphson with block-dia
 
 ### Device Models
 
-- **BJT**: Full 2D (Ic + Ib) Ebers-Moll and Gummel-Poon models in both runtime and codegen
+- **BJT**: Full 2D (Ic + Ib) Ebers-Moll and Gummel-Poon models in both runtime and codegen. Self-heating (Rth/Cth, SPICE3f5 IS(T)) and charge storage (CJE/CJC/TF junction + diffusion caps) available, default disabled.
 - **Op-amps**: Work via VCCS MNA stamping (linear, no NR dimensions). AOL and ROUT configurable.
-- **JFET**: Full 2D Shichman-Hodges (triode + saturation + channel-length modulation) in codegen. Not in runtime solver.
-- **MOSFET**: Full 2D Level 1 SPICE (triode + saturation + channel-length modulation) in codegen. Not in runtime solver.
-- **Vacuum Tube**: Koren triode + Leach grid current in codegen. Not in runtime solver.
+- **JFET**: Full 2D Shichman-Hodges (triode + saturation + channel-length modulation) in both runtime and codegen
+- **MOSFET**: Full 2D Level 1 SPICE (triode + saturation + channel-length modulation) in both runtime and codegen
+- **Vacuum Tube**: Koren triode + Leach grid current + lambda (finite plate resistance) in both runtime and codegen
 
 ## Audio-Specific Missing Features
 
-### ~~Potentiometers~~ ✅ Implemented (2026-02-28)
+### ~~Potentiometers~~ ✅ Implemented (codegen 2026-02-28, runtime 2026-03-13)
 
-`.pot` directive with Sherman-Morrison rank-1 updates for real-time parameter control.
+`.pot` directive with Sherman-Morrison rank-1 updates for real-time parameter control. Both codegen and runtime solver support via `CircuitSolver.set_pot(index, resistance)` with pre-allocated SM buffers (real-time safe).
 
 ### ~~Switches~~ ✅ Implemented (2026-03-02)
 
@@ -166,4 +166,4 @@ These are intentional trade-offs, not bugs:
 
 ---
 
-*Last updated: 2026-03-02*
+*Last updated: 2026-03-13*

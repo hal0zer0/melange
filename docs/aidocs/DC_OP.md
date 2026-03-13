@@ -121,6 +121,28 @@ At DC steady state:
 - **Voltage sources**: Norton equivalent (`VS_CONDUCTANCE` + current injection)
 - **Input**: `1/input_resistance` added to `g_dc[input_node][input_node]`
 
+### BJT Junction Cap Linearization
+
+When BJT charge storage parameters are specified (CJE, CJC, TF), the junction
+capacitances are evaluated at the DC operating point and stamped into the MNA C matrix:
+
+- **Depletion cap**: `Cj = CJ0 / (1 - Vj/VJ)^MJ` (with FC=0.5 linear extension for forward bias)
+- **Diffusion cap**: `Cd = TF * |Ic| / VT`
+- Total B-E cap: `CJE_linearized + Cd` stamped across base-emitter nodes
+- Total B-C cap: `CJC_linearized` stamped across base-collector nodes
+
+The DK framework requires linear C, so these caps are fixed at DC OP values.
+This happens during `CircuitIR::from_kernel()` after the DC OP solve.
+
+### Parasitic Caps
+
+If the circuit has nonlinear devices but zero capacitors, `MnaSystem::add_parasitic_caps()`
+should be called before building the DK kernel. This inserts 10pF across each device
+junction (see [DEVICE_MODELS.md](DEVICE_MODELS.md#parasitic-cap-auto-insertion)),
+ensuring the C matrix is non-trivial for stable trapezoidal integration. Parasitic caps
+are inserted before the DC OP solve so that the linearized junction caps (if any) add
+to the parasitic base.
+
 ## Device Evaluation
 
 Uses `DeviceSlot` params from `codegen::ir`:
@@ -135,8 +157,8 @@ Uses `DeviceSlot` params from `codegen::ir`:
 - **MOSFET**: 2D Level 1 SPICE with triode + saturation regions, channel-length modulation (lambda)
   - `Id = sign * KP * f(Vgs, Vds, Vt) * (1 + lambda*|Vds|)`, `Ig = 0`
   - N-channel (sign=+1) / P-channel (sign=-1)
-- **Tube**: 2D Koren plate current + Leach grid current
-  - `Ip = E1^ex / Kg1`, `Ig = ig_max * (vgk/vgk_onset)^1.5` for vgk > 0
+- **Tube**: 2D Koren plate current (with Early-effect lambda) + Leach grid current
+  - `Ip = Ip_koren * (1 + lambda*Vpk)` where `Ip_koren = E1^ex / Kg1`; `Ig = ig_max * (vgk/vgk_onset)^1.5` for vgk > 0
 - **Clamping**: `safe_exp(x) = x.clamp(-40, 40).exp()` matching codegen/runtime
 
 ## API

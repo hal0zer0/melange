@@ -1,6 +1,6 @@
 # Melange Project Status
 
-**Last Updated:** 2026-03-02
+**Last Updated:** 2026-03-13
 **Version:** 0.2.0-dev
 **Status:** Production Ready (Core Crates) — 731+ tests passing
 
@@ -50,10 +50,10 @@
 
 **Device Models:**
 - [x] Diode (Shockley, LED)
-- [x] BJT (Ebers-Moll, Gummel-Poon)
+- [x] BJT (Ebers-Moll, Gummel-Poon, self-heating Rth/Cth, charge storage CJE/CJC/TF)
 - [x] JFET (Shichman-Hodges)
 - [x] MOSFET (Level 1)
-- [x] Vacuum Tube (Koren triode/pentode)
+- [x] Vacuum Tube (Koren triode/pentode, lambda for finite plate resistance)
 - [x] CdS LDR (VTL5C3/4, NSL-32)
 - [x] Op-Amp (VCCS MNA stamping — linear, working in both runtime and codegen)
 
@@ -117,7 +117,8 @@ See `docs/limitations.md` for full details.
 
 ### Solver
 - Voltage sources: implemented as Norton equivalents (DC supply + input source both work)
-- ~~Sherman-Morrison rank-1 updates: spec only~~ ✅ Implemented (pots use SM rank-1 updates in codegen)
+- ~~Sherman-Morrison rank-1 updates: spec only~~ ✅ Implemented (pots use SM rank-1 updates in both codegen and runtime solver)
+- Parasitic cap auto-insertion: 10pF across device junctions when nonlinear circuit has no caps
 - Shadow subtraction: not implemented
 
 ### Device Integration

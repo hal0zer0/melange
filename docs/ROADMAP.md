@@ -60,7 +60,7 @@ Issues where the math is wrong or numerically fragile.
 
 ---
 
-## Phase C — Validation & Testing
+## Phase C — Validation & Testing ✅ Complete
 
 ### ~~C.1 Add SPICE validation for JFET, MOSFET, op-amp~~ ✅ Done (2026-03-13)
 - Op-amp inverting: passes (correlation 1.0, RMS ~0%)
@@ -77,16 +77,16 @@ Issues where the math is wrong or numerically fragile.
 - Full sweep comparison: SM-corrected S and K matrices vs full matrix rebuild
 - Tests in `crates/melange-solver/tests/pot_tests.rs`
 
-### C.4 Improve test signals
-- Add step response, multi-frequency (chirp), silence-to-signal transition
-- Extend simulation length to 100ms+ (error accumulation)
-- Increase PWL density for diode test (25 points is a triangle wave)
-- **Severity:** Medium
+### ~~C.4 Improve test signals~~ ✅ Done (2026-03-13)
+- Square wave (500Hz, 100ms) tests transient response + error accumulation
+- Chirp (100Hz→10kHz, 100ms) tests wideband frequency accuracy
+- Silence-to-signal (5ms silence + 15ms sine) tests NR startup
+- Diode clipper PWL density increased from 10 to 100 points per cycle
 
-### C.5 Fail-loud when ngspice unavailable
-- Replace `if !is_ngspice_available() { return; }` with `#[ignore]` or CI gating
-- Current pattern silently passes all SPICE tests without running them
-- **Severity:** Medium
+### ~~C.5 Fail-loud when ngspice unavailable~~ ✅ Done (2026-03-13)
+- All 11 ngspice tests now `#[ignore]` — show as "ignored" (not "ok") in `cargo test`
+- Run with: `cargo test -p melange-validate --test spice_validation -- --include-ignored`
+- Missing ngspice → `assert!` failure (not silent return)
 
 ### ~~C.6 Fix signal length truncation in comparison~~ ✅ Done (2026-03-13)
 - Added `log::warn!` when signal lengths differ by >1 sample
@@ -191,7 +191,7 @@ Issues where the math is wrong or numerically fragile.
 | Bug | Severity | Workaround |
 |-----|----------|------------|
 | ~~Line continuation (`+`) not joined~~ | ~~Medium~~ | ✅ Fixed |
-| Purely resistive nonlinear circuits oscillate | Low | Always include at least one capacitor |
+| ~~Purely resistive nonlinear circuits oscillate~~ | ~~Low~~ | ✅ Fixed (10pF parasitic caps auto-inserted across junctions) |
 | ~~Several integration tests `#[ignore]`d~~ | ~~Low~~ | ✅ Fixed (runtime solver supports all devices) |
 | ~~`nr_solve_dk` assumes diagonal device Jacobian~~ | ~~Medium~~ | ✅ Fixed (runtime uses Gaussian elimination) |
 | ~~Runtime solver panics on M>8~~ | ~~Medium~~ | ✅ Fixed (`CircuitSolver::new()` returns `Result`) |

@@ -117,6 +117,31 @@ BJT circuits).
 - S[i][i] > 0 (positive diagonal)
 - |S[i][j]| < 1e6 (reasonable magnitude for audio)
 
+## Parasitic Cap Auto-Insertion
+
+The DK method uses the trapezoidal rule: `A = G + (2/T)*C`. When the circuit has
+nonlinear devices but no capacitors (`C = 0`), the system matrix degenerates to
+`A = G`, and `A_neg = -G`. This means `A_neg * v_prev = -G * v_prev` has no
+frequency-dependent history, and the solver can oscillate (period-2 instability for
+purely resistive nonlinear circuits).
+
+**Solution**: Call `MnaSystem::add_parasitic_caps()` before building the DK kernel.
+This stamps 10pF (`PARASITIC_CAP = 10e-12`) across each physical device junction:
+
+- Diode: anode-cathode
+- BJT: base-emitter + base-collector
+- JFET: gate-source + gate-drain
+- MOSFET: gate-source + gate-drain
+- Tube: grid-cathode + plate-cathode
+
+These are physically realistic values for small-signal semiconductor packages. Caps
+are stamped across junctions (not node-to-ground) to avoid introducing artificial
+ground coupling. A `log::warn!` is emitted when auto-insertion occurs.
+
+With parasitic caps present, the C matrix is non-trivial, `A` has proper frequency
+dependence via `(2/T)*C`, and `A_neg = (2/T)*C - G` provides the correct capacitor
+history for stable trapezoidal integration.
+
 ## Common Bugs
 1. **Extra negation of K** -> NR diverges (positive feedback)
 2. **Double-counting history** -> DC offset, instability
