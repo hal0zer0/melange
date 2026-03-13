@@ -2,7 +2,7 @@
 //!
 //! Usage:
 //!   melange compile input.cir --output circuit.rs
-//!   melange validate input.cir --reference reference.raw
+//!   melange validate input.cir --output-node out
 //!   melange simulate input.cir --input input.wav --output output.wav
 //!   melange sources list
 //!   melange builtins
@@ -83,18 +83,42 @@ enum Commands {
         input_resistance: Option<f64>,
     },
 
-    /// Validate circuit against SPICE reference
+    /// Validate circuit against ngspice reference simulation
+    ///
+    /// Runs the melange solver and ngspice on the same circuit with a test input
+    /// signal, then compares the outputs. Requires ngspice to be installed.
     Validate {
         /// Input SPICE netlist file or circuit reference
+        /// (builtin:circuit, source:circuit, URL, or local path)
         input: String,
 
-        /// Reference SPICE output file
-        #[arg(short, long)]
-        reference: PathBuf,
+        /// Output node name to compare
+        #[arg(short = 'n', long, default_value = "out")]
+        output_node: String,
 
         /// Sample rate in Hz
         #[arg(short, long, default_value = "48000")]
         sample_rate: f64,
+
+        /// Test signal duration in seconds
+        #[arg(long, default_value = "1.0")]
+        duration: f64,
+
+        /// Test signal amplitude (volts)
+        #[arg(long, default_value = "0.1")]
+        amplitude: f64,
+
+        /// Input node name (for informational display)
+        #[arg(short = 'I', long, default_value = "in")]
+        input_node: String,
+
+        /// Write comparison data to CSV file
+        #[arg(long)]
+        csv: Option<PathBuf>,
+
+        /// Use relaxed tolerances (1% RMS, 0.999 correlation)
+        #[arg(long)]
+        relaxed: bool,
     },
 
     /// Simulate circuit with input signal
@@ -301,12 +325,37 @@ fn main() -> Result<()> {
         }
         Commands::Validate {
             input,
-            reference,
+            output_node,
             sample_rate,
+            duration,
+            amplitude,
+            input_node,
+            csv,
+            relaxed,
         } => {
+            // Validate numeric CLI parameters
+            if sample_rate <= 0.0 || !sample_rate.is_finite() {
+                anyhow::bail!("sample-rate must be positive and finite");
+            }
+            if duration <= 0.0 || !duration.is_finite() {
+                anyhow::bail!("duration must be positive and finite");
+            }
+            if amplitude <= 0.0 || !amplitude.is_finite() {
+                anyhow::bail!("amplitude must be positive and finite");
+            }
+
             let circuit_source = circuits::resolve(&input)?;
             println!("Resolved circuit: {}", circuit_source.name());
-            validate_circuit_source(&circuit_source, &reference, sample_rate)
+            validate_circuit_source(
+                &circuit_source,
+                &output_node,
+                sample_rate,
+                duration,
+                amplitude,
+                &input_node,
+                csv.as_ref(),
+                relaxed,
+            )
         }
         Commands::Simulate {
             input,
@@ -644,14 +693,152 @@ fn compile_circuit_source(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn validate_circuit_source(
-    _circuit_source: &circuits::CircuitSource,
-    _reference: &PathBuf,
-    _sample_rate: f64,
+    circuit_source: &circuits::CircuitSource,
+    output_node: &str,
+    sample_rate: f64,
+    duration: f64,
+    amplitude: f64,
+    input_node: &str,
+    csv_output: Option<&PathBuf>,
+    relaxed: bool,
 ) -> Result<()> {
-    println!("Validation not yet implemented.");
-    println!("Use 'melange compile' to generate code, then compare against SPICE manually.");
-    Ok(())
+    use melange_validate::{
+        comparison::ComparisonConfig,
+        spice_runner::is_ngspice_available,
+        validate_circuit_with_options,
+        ValidationOptions,
+    };
+
+    println!("melange validate");
+    println!("  Source: {}", circuit_source.name());
+    println!("  Output node: {}", output_node);
+    println!("  Input node: {}", input_node);
+    println!("  Sample rate: {} Hz", sample_rate);
+    println!("  Duration: {}s", duration);
+    println!("  Amplitude: {}V", amplitude);
+    println!("  Tolerances: {}", if relaxed { "relaxed" } else { "strict" });
+    println!();
+
+    // Step 1: Check ngspice availability
+    println!("Step 1: Checking ngspice...");
+    if !is_ngspice_available() {
+        anyhow::bail!(
+            "ngspice is not installed or not found in PATH.\n\
+             Install it with: sudo apt install ngspice (Debian/Ubuntu)\n\
+             or: brew install ngspice (macOS)"
+        );
+    }
+    println!("  ngspice found");
+
+    // Step 2: Get circuit netlist as a file path
+    // validate_circuit needs a file path. For local files, use directly.
+    // For builtins/URLs, write to a temp file.
+    println!("Step 2: Loading circuit...");
+    let (netlist_path, _temp_file) = match circuit_source {
+        circuits::CircuitSource::Local { path } => {
+            // Verify the file exists
+            if !path.exists() {
+                anyhow::bail!("Circuit file not found: {}", path.display());
+            }
+            (path.clone(), None)
+        }
+        circuits::CircuitSource::Builtin { content, name } => {
+            println!("  Using builtin circuit: {}", name);
+            let temp_dir = std::env::temp_dir();
+            let temp_path = temp_dir.join(format!("melange_validate_{}.cir", std::process::id()));
+            std::fs::write(&temp_path, content)
+                .with_context(|| format!("Failed to write temp netlist to {}", temp_path.display()))?;
+            (temp_path.clone(), Some(temp_path))
+        }
+        circuits::CircuitSource::Url { url } | circuits::CircuitSource::Friendly { url, .. } => {
+            println!("  Fetching from URL: {}", url);
+            let cache = cache::Cache::new()?;
+            let content = cache.get_sync(url, false)?;
+            let temp_dir = std::env::temp_dir();
+            let temp_path = temp_dir.join(format!("melange_validate_{}.cir", std::process::id()));
+            std::fs::write(&temp_path, &content)
+                .with_context(|| format!("Failed to write temp netlist to {}", temp_path.display()))?;
+            (temp_path.clone(), Some(temp_path))
+        }
+    };
+
+    // Step 3: Generate test input signal (1kHz sine)
+    println!("Step 3: Generating test signal ({:.1}s, {:.3}V amplitude, 1kHz sine)...", duration, amplitude);
+    let num_samples = (duration * sample_rate) as usize;
+    let input_signal: Vec<f64> = (0..num_samples)
+        .map(|i| amplitude * (2.0 * std::f64::consts::PI * 1000.0 * i as f64 / sample_rate).sin())
+        .collect();
+    println!("  {} samples", input_signal.len());
+
+    // Step 4: Configure comparison
+    let config = if relaxed {
+        ComparisonConfig::relaxed()
+    } else {
+        ComparisonConfig::strict()
+    };
+
+    let options = ValidationOptions {
+        generate_html_on_failure: false,
+        generate_html_on_success: false,
+        generate_csv: csv_output.is_some(),
+        output_dir: csv_output.and_then(|p| p.parent().map(|d| d.to_path_buf())),
+        circuit_name: Some(circuit_source.name()),
+        ..Default::default()
+    };
+
+    // Step 5: Run validation
+    println!("Step 4: Running validation (ngspice + melange solver)...");
+    let result = validate_circuit_with_options(
+        &netlist_path,
+        &input_signal,
+        sample_rate,
+        output_node,
+        &config,
+        &options,
+    );
+
+    // Clean up temp file if we created one
+    if let Some(ref temp) = _temp_file {
+        let _ = std::fs::remove_file(temp);
+    }
+
+    let result = result.with_context(|| "Validation failed")?;
+
+    // Step 6: Print report
+    println!();
+    println!("{}", result.report.summary());
+
+    // Step 7: Write CSV if requested
+    if let Some(csv_path) = csv_output {
+        // The validate library may have already written CSV if output_dir matched,
+        // but if the user specified a specific path, write it explicitly
+        if result.csv_path.as_ref() != Some(&csv_path.to_path_buf()) {
+            // We need to reconstruct signals from the report info to write CSV.
+            // Re-run would be expensive, so only rely on the library's CSV if it wrote one.
+            if let Some(lib_csv) = &result.csv_path {
+                // Copy the library-generated CSV to the user-specified path
+                std::fs::copy(lib_csv, csv_path)
+                    .with_context(|| format!("Failed to copy CSV to {}", csv_path.display()))?;
+                println!("CSV written to: {}", csv_path.display());
+            }
+        } else if result.csv_path.is_some() {
+            println!("CSV written to: {}", csv_path.display());
+        }
+    }
+
+    // Exit with error if validation failed
+    if result.report.passed {
+        println!("Validation PASSED");
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "Validation FAILED: {} tolerance check(s) exceeded.\n\
+             Use --relaxed for less strict tolerances, or investigate the differences.",
+            result.report.failures.len()
+        );
+    }
 }
 
 struct SimulateOptions<'a> {
