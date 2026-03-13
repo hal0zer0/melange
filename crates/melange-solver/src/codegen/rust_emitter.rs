@@ -243,6 +243,7 @@ const TMPL_STATE: &str = include_str!("../../templates/rust/state.rs.tera");
 const TMPL_DEVICE_DIODE: &str = include_str!("../../templates/rust/device_diode.rs.tera");
 const TMPL_DEVICE_BJT: &str = include_str!("../../templates/rust/device_bjt.rs.tera");
 const TMPL_DEVICE_JFET: &str = include_str!("../../templates/rust/device_jfet.rs.tera");
+const TMPL_DEVICE_MOSFET: &str = include_str!("../../templates/rust/device_mosfet.rs.tera");
 const TMPL_DEVICE_TUBE: &str = include_str!("../../templates/rust/device_tube.rs.tera");
 const TMPL_BUILD_RHS: &str = include_str!("../../templates/rust/build_rhs.rs.tera");
 const TMPL_MAT_VEC_MUL_S: &str = include_str!("../../templates/rust/mat_vec_mul_s.rs.tera");
@@ -272,6 +273,7 @@ impl RustEmitter {
             ("device_diode", TMPL_DEVICE_DIODE),
             ("device_bjt", TMPL_DEVICE_BJT),
             ("device_jfet", TMPL_DEVICE_JFET),
+            ("device_mosfet", TMPL_DEVICE_MOSFET),
             ("device_tube", TMPL_DEVICE_TUBE),
             ("build_rhs", TMPL_BUILD_RHS),
             ("mat_vec_mul_s", TMPL_MAT_VEC_MUL_S),
@@ -557,6 +559,7 @@ impl RustEmitter {
         let mut has_diode = false;
         let mut has_bjt = false;
         let mut has_jfet = false;
+        let mut has_mosfet = false;
         let mut has_tube = false;
 
         for (dev_num, slot) in ir.device_slots.iter().enumerate() {
@@ -592,7 +595,19 @@ impl RustEmitter {
                     has_jfet = true;
                     emit_device_const(&mut code, dev_num, "IDSS", jp.idss);
                     emit_device_const(&mut code, dev_num, "VP", jp.vp);
+                    emit_device_const(&mut code, dev_num, "LAMBDA", jp.lambda);
                     let sign = if jp.is_p_channel { -1.0 } else { 1.0 };
+                    code.push_str(&format!(
+                        "const DEVICE_{}_SIGN: f64 = {:.1};\n\n",
+                        dev_num, sign
+                    ));
+                }
+                DeviceParams::Mosfet(mp) => {
+                    has_mosfet = true;
+                    emit_device_const(&mut code, dev_num, "KP", mp.kp);
+                    emit_device_const(&mut code, dev_num, "VT", mp.vt);
+                    emit_device_const(&mut code, dev_num, "LAMBDA", mp.lambda);
+                    let sign = if mp.is_p_channel { -1.0 } else { 1.0 };
                     code.push_str(&format!(
                         "const DEVICE_{}_SIGN: f64 = {:.1};\n\n",
                         dev_num, sign
@@ -620,6 +635,9 @@ impl RustEmitter {
         }
         if has_jfet {
             code.push_str(&self.render("device_jfet", &Context::new())?);
+        }
+        if has_mosfet {
+            code.push_str(&self.render("device_mosfet", &Context::new())?);
         }
         if has_tube {
             code.push_str(&self.render("device_tube", &Context::new())?);
@@ -1765,13 +1783,54 @@ impl RustEmitter {
                     }
                     DeviceType::Jfet => {
                         let s = slot.start_idx;
+                        let s1 = s + 1;
+                        let d = dev_num;
                         code.push_str(&format!(
-                            "        let i_dev{} = jfet_id(v_d{}, DEVICE_{}_IDSS, DEVICE_{}_VP, DEVICE_{}_SIGN);\n",
-                            s, s, dev_num, dev_num, dev_num
+                            "        let i_dev{s} = jfet_id(v_d{s}, v_d{s1}, DEVICE_{d}_IDSS, DEVICE_{d}_VP, DEVICE_{d}_LAMBDA, DEVICE_{d}_SIGN);\n"
                         ));
                         code.push_str(&format!(
-                            "        let jdev_{}_{} = jfet_conductance(v_d{}, DEVICE_{}_IDSS, DEVICE_{}_VP, DEVICE_{}_SIGN);\n",
-                            s, s, s, dev_num, dev_num, dev_num
+                            "        let i_dev{s1} = jfet_ig(v_d{s}, DEVICE_{d}_SIGN);\n"
+                        ));
+                        code.push_str(&format!(
+                            "        let jfet{d}_jac = jfet_jacobian(v_d{s}, v_d{s1}, DEVICE_{d}_IDSS, DEVICE_{d}_VP, DEVICE_{d}_LAMBDA, DEVICE_{d}_SIGN);\n"
+                        ));
+                        code.push_str(&format!(
+                            "        let jdev_{}_{} = jfet{}_jac[0];\n", s, s, d
+                        ));
+                        code.push_str(&format!(
+                            "        let jdev_{}_{} = jfet{}_jac[1];\n", s, s1, d
+                        ));
+                        code.push_str(&format!(
+                            "        let jdev_{}_{} = jfet{}_jac[2];\n", s1, s, d
+                        ));
+                        code.push_str(&format!(
+                            "        let jdev_{}_{} = jfet{}_jac[3];\n", s1, s1, d
+                        ));
+                    }
+                    DeviceType::Mosfet => {
+                        let s = slot.start_idx;
+                        let s1 = s + 1;
+                        let d = dev_num;
+                        code.push_str(&format!(
+                            "        let i_dev{s} = mosfet_id(v_d{s}, v_d{s1}, DEVICE_{d}_KP, DEVICE_{d}_VT, DEVICE_{d}_LAMBDA, DEVICE_{d}_SIGN);\n"
+                        ));
+                        code.push_str(&format!(
+                            "        let i_dev{s1} = mosfet_ig(v_d{s}, DEVICE_{d}_SIGN);\n"
+                        ));
+                        code.push_str(&format!(
+                            "        let mos{d}_jac = mosfet_jacobian(v_d{s}, v_d{s1}, DEVICE_{d}_KP, DEVICE_{d}_VT, DEVICE_{d}_LAMBDA, DEVICE_{d}_SIGN);\n"
+                        ));
+                        code.push_str(&format!(
+                            "        let jdev_{}_{} = mos{}_jac[0];\n", s, s, d
+                        ));
+                        code.push_str(&format!(
+                            "        let jdev_{}_{} = mos{}_jac[1];\n", s, s1, d
+                        ));
+                        code.push_str(&format!(
+                            "        let jdev_{}_{} = mos{}_jac[2];\n", s1, s, d
+                        ));
+                        code.push_str(&format!(
+                            "        let jdev_{}_{} = mos{}_jac[3];\n", s1, s1, d
                         ));
                     }
                     DeviceType::Tube => {

@@ -58,15 +58,16 @@ impl Mosfet {
         let vgs_eff = s * vgs;
         let vds_eff = s * vds;
 
-        if vgs_eff <= self.vt {
+        let vt_abs = self.vt.abs();
+        if vgs_eff <= vt_abs {
             return 0.0;  // Cutoff
         }
 
-        let vov = vgs_eff - self.vt;  // Overdrive voltage
+        let vov = vgs_eff - vt_abs;  // Overdrive voltage
 
         if vds_eff < vov {
             // Linear (triode) region
-            let id = self.kp * ((vgs_eff - self.vt) * vds_eff - 0.5 * vds_eff * vds_eff);
+            let id = self.kp * (vov * vds_eff - 0.5 * vds_eff * vds_eff);
             s * id * (1.0 + self.lambda * vds_eff)
         } else {
             // Saturation region
@@ -83,11 +84,12 @@ impl Mosfet {
         let vgs_eff = s * vgs;
         let vds_eff = s * vds;
 
-        if vgs_eff <= self.vt {
+        let vt_abs = self.vt.abs();
+        if vgs_eff <= vt_abs {
             return (0.0, 0.0);
         }
 
-        let vov = vgs_eff - self.vt;
+        let vov = vgs_eff - vt_abs;
 
         // ∂Id/∂Vgs
         let d_id_d_vgs = if vds_eff < vov {

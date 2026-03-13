@@ -1,31 +1,65 @@
 // Canonical source: melange-devices/src/jfet.rs (Jfet)
 // Duplicated here because generated code must be self-contained.
-// NOTE: 1D simplification — saturation-only model, ignores Vds dependency.
-// Vgst is clamped to [0, |Vp|] so drain current never exceeds IDSS.
+// 2D Shichman-Hodges model: triode + saturation regions, with channel-length modulation.
+// Dimension 0: Id (drain current), Dimension 1: Ig (gate leakage current ≈ 0).
 
-/// JFET drain current (1D saturation model): Id = IDSS * (Vgst/|Vp|)^2
+/// JFET drain current (Shichman-Hodges 2D model).
 /// sign: +1.0 for N-channel, -1.0 for P-channel
 #[inline(always)]
-fn jfet_id(vgs: f64, idss: f64, vp: f64, sign: f64) -> f64 {
+fn jfet_id(vgs: f64, vds: f64, idss: f64, vp: f64, lambda: f64, sign: f64) -> f64 {
     let vgs_eff = sign * vgs;
+    let vds_eff = sign * vds;
     let vp_eff = sign * vp; // Always negative after sign application
     let vgst = vgs_eff - vp_eff;
     if vgst <= 0.0 { return 0.0; } // Cutoff
     let vp_abs = vp.abs();
-    let vgst = if vgst < vp_abs { vgst } else { vp_abs }; // Cap at |Vp| → Id ≤ IDSS
-    sign * idss * (vgst / vp_abs) * (vgst / vp_abs)
+    let vds_sat = vgst;
+    if vds_eff < vds_sat {
+        // Triode region: Id = IDSS/Vp^2 * (2*Vgst*Vds - Vds^2) * (1 + lambda*Vds)
+        let id = idss / (vp_abs * vp_abs) * (2.0 * vgst * vds_eff - vds_eff * vds_eff);
+        sign * id * (1.0 + lambda * vds_eff)
+    } else {
+        // Saturation region: Id = IDSS * (Vgst/|Vp|)^2 * (1 + lambda*Vds)
+        let ratio = vgst / vp_abs;
+        sign * idss * ratio * ratio * (1.0 + lambda * vds_eff)
+    }
 }
 
-/// JFET transconductance (1D): gm = dId/dVgs = 2 * IDSS * Vgst / Vp^2
-/// Always non-negative (sign cancels in derivative).
+/// JFET gate leakage current (effectively zero for reverse-biased gate).
 #[inline(always)]
-fn jfet_conductance(vgs: f64, idss: f64, vp: f64, sign: f64) -> f64 {
+fn jfet_ig(_vgs: f64, _sign: f64) -> f64 {
+    0.0
+}
+
+/// JFET 2x2 Jacobian: [dId/dVgs, dId/dVds, dIg/dVgs, dIg/dVds]
+#[inline(always)]
+fn jfet_jacobian(vgs: f64, vds: f64, idss: f64, vp: f64, lambda: f64, sign: f64) -> [f64; 4] {
     let vgs_eff = sign * vgs;
+    let vds_eff = sign * vds;
     let vp_eff = sign * vp;
     let vgst = vgs_eff - vp_eff;
-    if vgst <= 0.0 { return 0.0; } // Cutoff
+    if vgst <= 0.0 { return [0.0; 4]; } // Cutoff — all derivatives zero
     let vp_abs = vp.abs();
-    let vgst = if vgst < vp_abs { vgst } else { vp_abs }; // Match current clamp
-    2.0 * idss * vgst / (vp_abs * vp_abs)
+    let vp2 = vp_abs * vp_abs;
+    let vds_sat = vgst;
+
+    let (d_id_d_vgs, d_id_d_vds) = if vds_eff < vds_sat {
+        // Triode region
+        let clm = 1.0 + lambda * vds_eff;
+        let gm = idss * 2.0 * vds_eff / vp2 * clm;
+        let gds_base = idss / vp2 * (2.0 * vgst - 2.0 * vds_eff);
+        let gds_lambda = idss / vp2 * (2.0 * vgst * vds_eff - vds_eff * vds_eff) * lambda;
+        (gm, gds_base * clm + gds_lambda)
+    } else {
+        // Saturation region
+        let ratio = vgst / vp_abs;
+        let clm = 1.0 + lambda * vds_eff;
+        let gm = idss * 2.0 * vgst / vp2 * clm;
+        let gds = idss * ratio * ratio * lambda;
+        (gm, gds)
+    };
+
+    // Gate current derivatives are zero (no gate leakage in this model)
+    [d_id_d_vgs, d_id_d_vds, 0.0, 0.0]
 }
 

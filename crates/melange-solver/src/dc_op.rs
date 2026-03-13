@@ -142,20 +142,41 @@ fn evaluate_devices(
                 }
             }
             (DeviceType::Jfet, DeviceParams::Jfet(jp)) => {
-                // Use canonical Jfet from melange-devices (1D: only Vgs).
-                // At DC operating point, we approximate with saturation-only model.
+                // 2D JFET: Vgs at start_idx, Vds at start_idx+1
                 let channel = if jp.is_p_channel {
                     melange_devices::jfet::JfetChannel::P
                 } else {
                     melange_devices::jfet::JfetChannel::N
                 };
-                let jfet = melange_devices::jfet::Jfet::new(channel, jp.vp, jp.idss);
+                let mut jfet = melange_devices::jfet::Jfet::new(channel, jp.vp, jp.idss);
+                jfet.lambda = jp.lambda;
                 let vgs = v_nl[s];
-                // 1D simplification: assume Vds = 5V (deep saturation) for DC OP
-                let vds = if jp.is_p_channel { -5.0 } else { 5.0 };
+                let vds = v_nl[s + 1];
                 i_nl[s] = jfet.drain_current(vgs, vds);
-                let (gm, _gds) = jfet.jacobian_partial(vgs, vds);
-                j_dev[s * m + s] = gm;
+                i_nl[s + 1] = jfet.gate_current(vgs);
+                let (gm, gds) = jfet.jacobian_partial(vgs, vds);
+                j_dev[s * m + s] = gm;           // dId/dVgs
+                j_dev[s * m + (s + 1)] = gds;     // dId/dVds
+                j_dev[(s + 1) * m + s] = 0.0;     // dIg/dVgs ≈ 0
+                j_dev[(s + 1) * m + (s + 1)] = 0.0; // dIg/dVds = 0
+            }
+            (DeviceType::Mosfet, DeviceParams::Mosfet(mp)) => {
+                // 2D MOSFET: Vgs at start_idx, Vds at start_idx+1
+                let channel = if mp.is_p_channel {
+                    melange_devices::mosfet::ChannelType::P
+                } else {
+                    melange_devices::mosfet::ChannelType::N
+                };
+                let mos = melange_devices::mosfet::Mosfet::new(channel, mp.vt, mp.kp, mp.lambda);
+                let vgs = v_nl[s];
+                let vds = v_nl[s + 1];
+                i_nl[s] = mos.drain_current(vgs, vds);
+                i_nl[s + 1] = 0.0; // Insulated gate — no gate current
+                let (gm, gds) = mos.jacobian_partial(vgs, vds);
+                j_dev[s * m + s] = gm;           // dId/dVgs
+                j_dev[s * m + (s + 1)] = gds;     // dId/dVds
+                j_dev[(s + 1) * m + s] = 0.0;     // dIg/dVgs = 0
+                j_dev[(s + 1) * m + (s + 1)] = 0.0; // dIg/dVds = 0
             }
             (DeviceType::Tube, DeviceParams::Tube(tp)) => {
                 // Use canonical KorenTriode from melange-devices.

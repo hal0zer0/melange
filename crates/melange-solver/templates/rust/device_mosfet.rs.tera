@@ -1,0 +1,63 @@
+// Canonical source: melange-devices/src/mosfet.rs (Mosfet)
+// Duplicated here because generated code must be self-contained.
+// 2D Level 1 SPICE model: triode + saturation regions, with channel-length modulation.
+// Dimension 0: Id (drain current), Dimension 1: Ig (gate current = 0, insulated gate).
+
+/// MOSFET drain current (Level 1 SPICE, 2D model).
+/// sign: +1.0 for N-channel, -1.0 for P-channel
+/// vt here is the threshold voltage (not thermal voltage).
+#[inline(always)]
+fn mosfet_id(vgs: f64, vds: f64, kp: f64, vt: f64, lambda: f64, sign: f64) -> f64 {
+    let vgs_eff = sign * vgs;
+    let vds_eff = sign * vds;
+    let vt_abs = vt.abs();
+    if vgs_eff <= vt_abs {
+        return 0.0; // Cutoff
+    }
+    let vov = vgs_eff - vt_abs; // Overdrive voltage
+    if vds_eff < vov {
+        // Triode region: Id = kp * ((Vgs-Vt)*Vds - 0.5*Vds^2) * (1 + lambda*Vds)
+        let id = kp * (vov * vds_eff - 0.5 * vds_eff * vds_eff);
+        sign * id * (1.0 + lambda * vds_eff)
+    } else {
+        // Saturation region: Id = 0.5 * kp * Vov^2 * (1 + lambda*Vds)
+        sign * 0.5 * kp * vov * vov * (1.0 + lambda * vds_eff)
+    }
+}
+
+/// MOSFET gate current (always zero — insulated gate).
+#[inline(always)]
+fn mosfet_ig(_vgs: f64, _sign: f64) -> f64 {
+    0.0
+}
+
+/// MOSFET 2x2 Jacobian: [dId/dVgs, dId/dVds, dIg/dVgs, dIg/dVds]
+#[inline(always)]
+fn mosfet_jacobian(vgs: f64, vds: f64, kp: f64, vt: f64, lambda: f64, sign: f64) -> [f64; 4] {
+    let vgs_eff = sign * vgs;
+    let vds_eff = sign * vds;
+    let vt_abs = vt.abs();
+    if vgs_eff <= vt_abs {
+        return [0.0; 4]; // Cutoff — all derivatives zero
+    }
+    let vov = vgs_eff - vt_abs;
+
+    let (d_id_d_vgs, d_id_d_vds) = if vds_eff < vov {
+        // Triode region
+        let clm = 1.0 + lambda * vds_eff;
+        let gm = kp * vds_eff * clm;
+        let gds_base = kp * (vov - vds_eff);
+        let id_full = kp * (vov * vds_eff - 0.5 * vds_eff * vds_eff);
+        (gm, gds_base * clm + id_full * lambda)
+    } else {
+        // Saturation region
+        let clm = 1.0 + lambda * vds_eff;
+        let gm = kp * vov * clm;
+        let gds = 0.5 * kp * vov * vov * lambda;
+        (gm, gds)
+    };
+
+    // Gate current derivatives are zero (insulated gate)
+    [d_id_d_vgs, d_id_d_vds, 0.0, 0.0]
+}
+

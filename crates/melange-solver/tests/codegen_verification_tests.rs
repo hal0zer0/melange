@@ -2775,33 +2775,35 @@ Cs src 0 10u
 fn test_jfet_codegen_generates_correct_functions() {
     let (code, _netlist, _mna, kernel) = generate_code(JFET_CS_SPICE);
 
-    // JFET is 1D: M=1
-    assert_eq!(kernel.m, 1, "JFET should be 1D (M=1)");
+    // JFET is 2D: M=2 (Id + Ig)
+    assert_eq!(kernel.m, 2, "JFET should be 2D (M=2)");
 
     // Should contain JFET device functions
     assert!(code.contains("jfet_id("), "Should contain jfet_id function");
-    assert!(code.contains("jfet_conductance("), "Should contain jfet_conductance function");
+    assert!(code.contains("jfet_ig("), "Should contain jfet_ig function");
+    assert!(code.contains("jfet_jacobian("), "Should contain jfet_jacobian function");
 
     // Should have JFET device constants
     assert!(code.contains("DEVICE_0_IDSS"), "Should have IDSS constant");
     assert!(code.contains("DEVICE_0_VP"), "Should have VP constant");
+    assert!(code.contains("DEVICE_0_LAMBDA"), "Should have LAMBDA constant");
     assert!(code.contains("DEVICE_0_SIGN"), "Should have SIGN constant");
 
     // Should call JFET functions in NR loop
     assert!(
-        code.contains("jfet_id(v_d0, DEVICE_0_IDSS, DEVICE_0_VP, DEVICE_0_SIGN)"),
-        "NR loop should call jfet_id"
+        code.contains("jfet_id(v_d0, v_d1, DEVICE_0_IDSS, DEVICE_0_VP, DEVICE_0_LAMBDA, DEVICE_0_SIGN)"),
+        "NR loop should call jfet_id with 2D args"
     );
     assert!(
-        code.contains("jfet_conductance(v_d0, DEVICE_0_IDSS, DEVICE_0_VP, DEVICE_0_SIGN)"),
-        "NR loop should call jfet_conductance"
+        code.contains("jfet_ig(v_d0, DEVICE_0_SIGN)"),
+        "NR loop should call jfet_ig"
     );
 }
 
 #[test]
 fn test_jfet_codegen_compiles() {
     let (code, _netlist, _mna, kernel) = generate_code(JFET_CS_SPICE);
-    assert_eq!(kernel.m, 1);
+    assert_eq!(kernel.m, 2);
 
     let tmp_dir = std::env::temp_dir();
     let tmp_path = tmp_dir.join("melange_codegen_test_jfet.rs");
@@ -2846,7 +2848,7 @@ Cs src 0 10u
 .model D1N4148 D(IS=1e-15)
 ";
     let (code, _netlist, _mna, kernel) = generate_code(spice);
-    assert_eq!(kernel.m, 2, "JFET(1D) + Diode(1D) = M=2");
+    assert_eq!(kernel.m, 3, "JFET(2D) + Diode(1D) = M=3");
 
     // Should contain both device types
     assert!(code.contains("jfet_id("), "Should have JFET functions");
@@ -2976,7 +2978,7 @@ C1 out 0 100n
 .model PJFET1 PJ(IDSS=2e-3)
 ";
     let (netlist, mna, kernel) = build_pipeline(spice);
-    assert_eq!(kernel.m, 1, "P-channel JFET should be 1D (M=1)");
+    assert_eq!(kernel.m, 2, "P-channel JFET should be 2D (M=2)");
 
     let config = CodegenConfig {
         circuit_name: "pjfet_test".to_string(),
@@ -3960,4 +3962,392 @@ fn test_output_scale_applied_in_process_sample() {
         .expect("OUTPUT_SCALES line should exist");
     assert!(scale_line.contains("2.0"),
         "OUTPUT_SCALES constant should contain 2.0, got: {}", scale_line);
+}
+
+// ==========================================================================
+// MOSFET codegen tests
+// ==========================================================================
+
+const MOSFET_CS_SPICE: &str = "\
+MOSFET Common Source
+M1 out gate in 0 NMOD
+.model NMOD NM(VTO=2.0 KP=0.1 LAMBDA=0.01)
+R1 vcc out 1k
+R2 in 0 100
+C1 gate 0 100n
+VCC vcc 0 DC 12
+";
+
+#[test]
+fn test_mosfet_codegen_generates_correct_functions() {
+    let (netlist, mna, kernel) = build_pipeline(MOSFET_CS_SPICE);
+
+    let input_node_idx = mna.node_map["in"] - 1;
+    let output_node_idx = mna.node_map["out"] - 1;
+
+    let config = CodegenConfig {
+        circuit_name: "mosfet_cs".to_string(),
+        sample_rate: 44100.0,
+        input_node: input_node_idx,
+        output_nodes: vec![output_node_idx],
+        output_scales: vec![1.0],
+        input_resistance: 1.0,
+        ..CodegenConfig::default()
+    };
+    let codegen = CodeGenerator::new(config);
+    let result = codegen.generate(&kernel, &mna, &netlist).expect("codegen failed");
+    let code = result.code;
+
+    // MOSFET is 2D: M=2 (Id + Ig)
+    assert_eq!(kernel.m, 2, "MOSFET should be 2D (M=2)");
+
+    // Should contain MOSFET device functions
+    assert!(code.contains("mosfet_id("), "Should contain mosfet_id function");
+    assert!(code.contains("mosfet_ig("), "Should contain mosfet_ig function");
+    assert!(code.contains("mosfet_jacobian("), "Should contain mosfet_jacobian function");
+
+    // Should have MOSFET device constants
+    assert!(code.contains("DEVICE_0_KP"), "Should have KP constant");
+    assert!(code.contains("DEVICE_0_VT"), "Should have VT constant");
+    assert!(code.contains("DEVICE_0_LAMBDA"), "Should have LAMBDA constant");
+    assert!(code.contains("DEVICE_0_SIGN"), "Should have SIGN constant");
+}
+
+/// Compile and run the MOSFET common-source amplifier (N-channel): feed a sine wave,
+/// verify output is finite, non-zero, and the signal passes through.
+#[test]
+fn test_mosfet_codegen_compiles_and_runs() {
+    let (netlist, mna, kernel) = build_pipeline(MOSFET_CS_SPICE);
+    assert_eq!(kernel.m, 2, "MOSFET should be 2D (M=2)");
+
+    let input_node_idx = mna.node_map["in"] - 1;
+    let output_node_idx = mna.node_map["out"] - 1;
+
+    let config = CodegenConfig {
+        circuit_name: "mosfet_cs_run".to_string(),
+        sample_rate: 44100.0,
+        input_node: input_node_idx,
+        output_nodes: vec![output_node_idx],
+        output_scales: vec![1.0],
+        input_resistance: 1.0,
+        ..CodegenConfig::default()
+    };
+    let codegen = CodeGenerator::new(config);
+    let result = codegen.generate(&kernel, &mna, &netlist).expect("codegen failed");
+
+    let test_harness = format!(
+        "{}\n\
+         fn main() {{\n\
+             let mut state = CircuitState::default();\n\
+             \n\
+             // Warm up with 200 silent samples to let DC OP settle\n\
+             for _ in 0..200 {{\n\
+                 let out = process_sample(0.0, &mut state)[0];\n\
+                 assert!(out.is_finite(), \"Warmup output must be finite\");\n\
+             }}\n\
+             \n\
+             // Feed a 1kHz sine wave (100mV amplitude) for 500 samples\n\
+             let mut max_abs_out = 0.0f64;\n\
+             let mut any_nonzero = false;\n\
+             for i in 0..500 {{\n\
+                 let t = i as f64 / 44100.0;\n\
+                 let input = 0.1 * (2.0 * std::f64::consts::PI * 1000.0 * t).sin();\n\
+                 let out = process_sample(input, &mut state)[0];\n\
+                 assert!(out.is_finite(), \"Output at sample {{}} must be finite, got {{}}\", i, out);\n\
+                 if out.abs() > 1e-6 {{ any_nonzero = true; }}\n\
+                 if out.abs() > max_abs_out {{ max_abs_out = out.abs(); }}\n\
+             }}\n\
+             \n\
+             assert!(any_nonzero, \"MOSFET amp output should not be all zeros\");\n\
+             // Verify gain: output amplitude should exceed input amplitude for an amplifier\n\
+             assert!(max_abs_out > 0.1, \"MOSFET amp should have gain (max_abs_out={{}})\", max_abs_out);\n\
+             eprintln!(\"MOSFET CS amp test passed! max_abs_out={{}}\", max_abs_out);\n\
+         }}\n",
+        result.code
+    );
+
+    let tmp_dir = std::env::temp_dir();
+    let src_path = tmp_dir.join("melange_mosfet_run_test.rs");
+    let bin_path = tmp_dir.join("melange_mosfet_run_test");
+    {
+        let mut f = std::fs::File::create(&src_path).expect("create temp file");
+        f.write_all(test_harness.as_bytes()).expect("write temp file");
+    }
+
+    let compile = std::process::Command::new("rustc")
+        .args([src_path.to_str().unwrap(), "-o", bin_path.to_str().unwrap(), "--edition", "2021"])
+        .output()
+        .expect("run rustc");
+
+    if !compile.status.success() {
+        let _ = std::fs::remove_file(&src_path);
+        panic!(
+            "MOSFET compile-and-run test failed to compile:\n{}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+    }
+
+    let run = std::process::Command::new(&bin_path).output().expect("run test binary");
+    let _ = std::fs::remove_file(&src_path);
+    let _ = std::fs::remove_file(&bin_path);
+
+    if !run.status.success() {
+        panic!(
+            "MOSFET compile-and-run test failed:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&run.stdout),
+            String::from_utf8_lossy(&run.stderr)
+        );
+    }
+}
+
+/// P-channel MOSFET: verify codegen compiles and runs.
+#[test]
+fn test_pmos_codegen_compiles_and_runs() {
+    let spice = "\
+PMOS Test
+M1 out gate vcc vcc PMOD
+.model PMOD PM(VTO=-2.0 KP=0.1 LAMBDA=0.01)
+R1 out 0 1k
+R2 in 0 100
+C1 gate 0 100n
+VCC vcc 0 DC 12
+";
+    let (netlist, mna, kernel) = build_pipeline(spice);
+    assert_eq!(kernel.m, 2, "P-channel MOSFET should be 2D (M=2)");
+
+    let input_node_idx = mna.node_map["in"] - 1;
+    let output_node_idx = mna.node_map["out"] - 1;
+
+    let config = CodegenConfig {
+        circuit_name: "pmos_test".to_string(),
+        sample_rate: 44100.0,
+        input_node: input_node_idx,
+        output_nodes: vec![output_node_idx],
+        output_scales: vec![1.0],
+        input_resistance: 1.0,
+        ..CodegenConfig::default()
+    };
+    let codegen = CodeGenerator::new(config);
+    let result = codegen.generate(&kernel, &mna, &netlist).expect("codegen failed");
+
+    // Verify P-channel sign is emitted
+    assert!(
+        result.code.contains("DEVICE_0_SIGN: f64 = -1.0"),
+        "P-channel MOSFET should have SIGN = -1.0"
+    );
+
+    let test_harness = format!(
+        "{}\n\
+         fn main() {{\n\
+             let mut state = CircuitState::default();\n\
+             for _ in 0..200 {{\n\
+                 let out = process_sample(0.0, &mut state)[0];\n\
+                 assert!(out.is_finite(), \"P-ch MOSFET warmup output must be finite\");\n\
+             }}\n\
+             let mut any_nonzero = false;\n\
+             for i in 0..500 {{\n\
+                 let t = i as f64 / 44100.0;\n\
+                 let input = 0.1 * (2.0 * std::f64::consts::PI * 1000.0 * t).sin();\n\
+                 let out = process_sample(input, &mut state)[0];\n\
+                 assert!(out.is_finite(), \"P-ch MOSFET output at sample {{}} must be finite\", i);\n\
+                 if out.abs() > 1e-6 {{ any_nonzero = true; }}\n\
+             }}\n\
+             assert!(any_nonzero, \"P-channel MOSFET output should not be all zeros\");\n\
+             eprintln!(\"P-channel MOSFET test passed!\");\n\
+         }}\n",
+        result.code
+    );
+
+    let tmp_dir = std::env::temp_dir();
+    let src_path = tmp_dir.join("melange_pmos_run_test.rs");
+    let bin_path = tmp_dir.join("melange_pmos_run_test");
+    {
+        let mut f = std::fs::File::create(&src_path).expect("create temp file");
+        f.write_all(test_harness.as_bytes()).expect("write temp file");
+    }
+
+    let compile = std::process::Command::new("rustc")
+        .args([src_path.to_str().unwrap(), "-o", bin_path.to_str().unwrap(), "--edition", "2021"])
+        .output()
+        .expect("run rustc");
+
+    if !compile.status.success() {
+        let _ = std::fs::remove_file(&src_path);
+        panic!(
+            "P-channel MOSFET test failed to compile:\n{}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+    }
+
+    let run = std::process::Command::new(&bin_path).output().expect("run test binary");
+    let _ = std::fs::remove_file(&src_path);
+    let _ = std::fs::remove_file(&bin_path);
+
+    if !run.status.success() {
+        panic!(
+            "P-channel MOSFET test failed:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&run.stdout),
+            String::from_utf8_lossy(&run.stderr)
+        );
+    }
+}
+
+// ==========================================================================
+// Multi-output codegen tests
+// ==========================================================================
+
+/// Multi-output (2 outputs) codegen compiles: RC circuit with two tap points.
+#[test]
+fn test_multi_output_codegen_compiles() {
+    let spice = "\
+Multi Output Test
+R1 in mid 1k
+R2 mid out 1k
+C1 mid 0 100n
+C2 out 0 100n
+";
+    let (netlist, mna, kernel) = build_pipeline(spice);
+
+    let in_idx = mna.node_map["in"] - 1;
+    let mid_idx = mna.node_map["mid"] - 1;
+    let out_idx = mna.node_map["out"] - 1;
+
+    let config = CodegenConfig {
+        circuit_name: "multi_output_test".to_string(),
+        sample_rate: 44100.0,
+        input_node: in_idx,
+        output_nodes: vec![mid_idx, out_idx],
+        output_scales: vec![1.0, 1.0],
+        input_resistance: 1.0,
+        ..CodegenConfig::default()
+    };
+    let codegen = CodeGenerator::new(config);
+    let result = codegen.generate(&kernel, &mna, &netlist).expect("codegen failed");
+    let code = &result.code;
+
+    // Verify multi-output constants
+    assert!(
+        code.contains("pub const NUM_OUTPUTS: usize = 2"),
+        "Should have NUM_OUTPUTS = 2"
+    );
+    assert!(
+        code.contains("OUTPUT_NODES: [usize; NUM_OUTPUTS]"),
+        "Should have OUTPUT_NODES array"
+    );
+    assert!(
+        code.contains("OUTPUT_SCALES: [f64; NUM_OUTPUTS]"),
+        "Should have OUTPUT_SCALES array"
+    );
+
+    // Compile and run: verify both outputs are finite
+    let test_harness = format!(
+        "{}\n\
+         fn main() {{\n\
+             let mut state = CircuitState::default();\n\
+             \n\
+             // Warm up\n\
+             for _ in 0..200 {{\n\
+                 let out = process_sample(0.0, &mut state);\n\
+                 assert!(out[0].is_finite(), \"Warmup output[0] must be finite\");\n\
+                 assert!(out[1].is_finite(), \"Warmup output[1] must be finite\");\n\
+             }}\n\
+             \n\
+             // Feed a 1kHz sine wave\n\
+             let mut any_nonzero_0 = false;\n\
+             let mut any_nonzero_1 = false;\n\
+             for i in 0..500 {{\n\
+                 let t = i as f64 / 44100.0;\n\
+                 let input = 0.1 * (2.0 * std::f64::consts::PI * 1000.0 * t).sin();\n\
+                 let out = process_sample(input, &mut state);\n\
+                 assert!(out[0].is_finite(), \"output[0] at sample {{}} must be finite\", i);\n\
+                 assert!(out[1].is_finite(), \"output[1] at sample {{}} must be finite\", i);\n\
+                 if out[0].abs() > 1e-6 {{ any_nonzero_0 = true; }}\n\
+                 if out[1].abs() > 1e-6 {{ any_nonzero_1 = true; }}\n\
+             }}\n\
+             \n\
+             assert!(any_nonzero_0, \"Multi-output: output[0] (mid) should not be all zeros\");\n\
+             assert!(any_nonzero_1, \"Multi-output: output[1] (out) should not be all zeros\");\n\
+             eprintln!(\"Multi-output test passed!\");\n\
+         }}\n",
+        code
+    );
+
+    let tmp_dir = std::env::temp_dir();
+    let src_path = tmp_dir.join("melange_multi_output_test.rs");
+    let bin_path = tmp_dir.join("melange_multi_output_test");
+    {
+        let mut f = std::fs::File::create(&src_path).expect("create temp file");
+        f.write_all(test_harness.as_bytes()).expect("write temp file");
+    }
+
+    let compile = std::process::Command::new("rustc")
+        .args([src_path.to_str().unwrap(), "-o", bin_path.to_str().unwrap(), "--edition", "2021"])
+        .output()
+        .expect("run rustc");
+
+    if !compile.status.success() {
+        let _ = std::fs::remove_file(&src_path);
+        panic!(
+            "Multi-output test failed to compile:\n{}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+    }
+
+    let run = std::process::Command::new(&bin_path).output().expect("run test binary");
+    let _ = std::fs::remove_file(&src_path);
+    let _ = std::fs::remove_file(&bin_path);
+
+    if !run.status.success() {
+        panic!(
+            "Multi-output test failed:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&run.stdout),
+            String::from_utf8_lossy(&run.stderr)
+        );
+    }
+}
+
+/// Multi-output validation: empty output_nodes is rejected.
+#[test]
+fn test_empty_output_nodes_rejected() {
+    let (netlist, mna, kernel) = build_pipeline(RC_CIRCUIT_SPICE);
+
+    let config = CodegenConfig {
+        input_node: 0,
+        output_nodes: vec![],
+        output_scales: vec![],
+        ..default_config()
+    };
+
+    let codegen = CodeGenerator::new(config);
+    let result = codegen.generate(&kernel, &mna, &netlist);
+
+    assert!(result.is_err(), "Should reject empty output_nodes");
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err, CodegenError::InvalidConfig(_)),
+        "Error should be InvalidConfig, got: {:?}", err
+    );
+}
+
+/// Multi-output validation: mismatched output_scales length is rejected.
+#[test]
+fn test_mismatched_output_scales_rejected() {
+    let (netlist, mna, kernel) = build_pipeline(RC_CIRCUIT_SPICE);
+
+    let config = CodegenConfig {
+        input_node: 0,
+        output_nodes: vec![1],
+        output_scales: vec![1.0, 2.0],
+        ..default_config()
+    };
+
+    let codegen = CodeGenerator::new(config);
+    let result = codegen.generate(&kernel, &mna, &netlist);
+
+    assert!(result.is_err(), "Should reject mismatched output_scales length");
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err, CodegenError::InvalidConfig(_)),
+        "Error should be InvalidConfig, got: {:?}", err
+    );
 }

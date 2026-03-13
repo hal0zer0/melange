@@ -867,37 +867,49 @@ impl MnaBuilder {
                     }
                 }
                 NonlinearDeviceType::Jfet => {
-                    // JFET: controlling voltage Vgs, drain current Id
+                    // JFET: 2D — Id (drain current) + Ig (gate current)
                     // Nodes: [nd, ng, ns]
                     if node_indices.len() >= 3 {
                         let d_raw = node_indices[0];
                         let g_raw = node_indices[1];
                         let s_raw = node_indices[2];
 
-                        // N_v: Vgs = Vg - Vs (controlling voltage)
+                        // N_v row 0 (Vgs): +1 at G, -1 at S
                         if g_raw > 0 { mna.n_v[start_idx][g_raw - 1] = 1.0; }
                         if s_raw > 0 { mna.n_v[start_idx][s_raw - 1] = -1.0; }
+                        // N_v row 1 (Vds): +1 at D, -1 at S
+                        if d_raw > 0 { mna.n_v[start_idx + 1][d_raw - 1] = 1.0; }
+                        if s_raw > 0 { mna.n_v[start_idx + 1][s_raw - 1] = -1.0; }
 
-                        // N_i: Id flows drain→source
+                        // N_i col 0 (Id): -1 at D (extracted), +1 at S (injected)
                         if d_raw > 0 { mna.n_i[d_raw - 1][start_idx] = -1.0; }
                         if s_raw > 0 { mna.n_i[s_raw - 1][start_idx] = 1.0; }
+                        // N_i col 1 (Ig): -1 at G (extracted), +1 at S (injected)
+                        if g_raw > 0 { mna.n_i[g_raw - 1][start_idx + 1] = -1.0; }
+                        if s_raw > 0 { mna.n_i[s_raw - 1][start_idx + 1] = 1.0; }
                     }
                 }
                 NonlinearDeviceType::Mosfet => {
-                    // MOSFET: controlling voltage Vgs, drain current Id
+                    // MOSFET: 2D — Id (drain current) + Ig (gate current = 0, insulated gate)
                     // Nodes: [nd, ng, ns, nb]
                     if node_indices.len() >= 3 {
                         let d_raw = node_indices[0];
                         let g_raw = node_indices[1];
                         let s_raw = node_indices[2];
 
-                        // N_v: Vgs = Vg - Vs (controlling voltage)
+                        // N_v row 0 (Vgs): +1 at G, -1 at S
                         if g_raw > 0 { mna.n_v[start_idx][g_raw - 1] = 1.0; }
                         if s_raw > 0 { mna.n_v[start_idx][s_raw - 1] = -1.0; }
+                        // N_v row 1 (Vds): +1 at D, -1 at S
+                        if d_raw > 0 { mna.n_v[start_idx + 1][d_raw - 1] = 1.0; }
+                        if s_raw > 0 { mna.n_v[start_idx + 1][s_raw - 1] = -1.0; }
 
-                        // N_i: Id flows drain→source
+                        // N_i col 0 (Id): -1 at D (extracted), +1 at S (injected)
                         if d_raw > 0 { mna.n_i[d_raw - 1][start_idx] = -1.0; }
                         if s_raw > 0 { mna.n_i[s_raw - 1][start_idx] = 1.0; }
+                        // N_i col 1 (Ig): effectively zero (insulated gate), but stamp for framework
+                        if g_raw > 0 { mna.n_i[g_raw - 1][start_idx + 1] = -1.0; }
+                        if s_raw > 0 { mna.n_i[s_raw - 1][start_idx + 1] = 1.0; }
                     }
                 }
                 NonlinearDeviceType::Tube => {
@@ -1090,11 +1102,11 @@ impl MnaBuilder {
                     ));
                 }
                 let start_idx = self.total_dimension;
-                self.total_dimension += 1; // Simplified: 1D for now
+                self.total_dimension += 2; // 2D: Id(Vgs,Vds) + Ig(Vgs)
                 self.nonlinear_devices.push(NonlinearDeviceInfo {
                     name: name.clone(),
                     device_type: NonlinearDeviceType::Jfet,
-                    dimension: 1,
+                    dimension: 2,
                     start_idx,
                     nodes: vec![nd.clone(), ng.clone(), ns.clone()],
                     node_indices,
@@ -1114,11 +1126,11 @@ impl MnaBuilder {
                     ));
                 }
                 let start_idx = self.total_dimension;
-                self.total_dimension += 1; // Simplified: 1D for now
+                self.total_dimension += 2; // 2D: Id(Vgs,Vds) + Ig(=0, insulated gate)
                 self.nonlinear_devices.push(NonlinearDeviceInfo {
                     name: name.clone(),
                     device_type: NonlinearDeviceType::Mosfet,
-                    dimension: 1,
+                    dimension: 2,
                     start_idx,
                     nodes: vec![nd.clone(), ng.clone(), ns.clone(), nb.clone()],
                     node_indices,

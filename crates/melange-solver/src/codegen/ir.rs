@@ -223,6 +223,7 @@ pub enum DeviceParams {
     Diode(DiodeParams),
     Bjt(BjtParams),
     Jfet(JfetParams),
+    Mosfet(MosfetParams),
     Tube(TubeParams),
 }
 
@@ -301,15 +302,33 @@ pub struct DeviceSlot {
 
 /// JFET model parameters (resolved from `.model` directive or defaults).
 ///
-/// Codegen uses 1D simplification: only Vgs controls Id (saturation-only, ignores Vds).
-/// This matches the MNA stamping where JFET is 1D (dimension=1, controlling voltage=Vgs).
+/// Codegen uses 2D Shichman-Hodges: Vgs and Vds control Id (triode + saturation regions).
+/// Gate current Ig (dimension 2) is effectively zero for reverse-biased gate.
+/// This matches the MNA stamping where JFET is 2D (dimension=2, controlling voltages=Vgs, Vds).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JfetParams {
     /// Saturation current IDSS [A]
     pub idss: f64,
     /// Pinch-off voltage [V] (negative for N-channel, positive for P-channel)
     pub vp: f64,
-    /// Channel length modulation [1/V] (not used in 1D codegen, stored for reference)
+    /// Channel length modulation [1/V]
+    pub lambda: f64,
+    /// True if P-channel (false = N-channel)
+    pub is_p_channel: bool,
+}
+
+/// MOSFET model parameters (Level 1 SPICE, triode + saturation).
+///
+/// Codegen uses 2D: Vgs and Vds control Id (triode + saturation regions).
+/// Gate current Ig (dimension 2) is zero (insulated gate).
+/// MNA stamping: 2D (dimension=2, controlling voltages=Vgs, Vds).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MosfetParams {
+    /// Transconductance parameter KP [A/V²]
+    pub kp: f64,
+    /// Threshold voltage VT [V] (positive for N-channel, negative for P-channel)
+    pub vt: f64,
+    /// Channel length modulation [1/V]
     pub lambda: f64,
     /// True if P-channel (false = N-channel)
     pub is_p_channel: bool,
@@ -340,6 +359,7 @@ pub enum DeviceType {
     Diode,
     Bjt,
     Jfet,
+    Mosfet,
     Tube,
 }
 
@@ -538,8 +558,7 @@ impl CircuitIR {
     /// Build a `CircuitIR` from the compiled kernel, MNA system, netlist, and config.
     ///
     /// # Errors
-    /// Returns `CodegenError::InvalidConfig` if the netlist contains JFET or MOSFET
-    /// devices, which are not yet supported in code generation.
+    /// Returns `CodegenError::InvalidConfig` if any device model parameter is invalid.
     pub fn from_kernel(
         kernel: &DkKernel,
         mna: &MnaSystem,
@@ -799,8 +818,7 @@ impl CircuitIR {
     /// Build device slot map and resolve per-device parameters from netlist.
     ///
     /// # Errors
-    /// Returns `CodegenError::InvalidConfig` if JFET or MOSFET elements are present,
-    /// or if any device model parameter is non-positive or non-finite.
+    /// Returns `CodegenError::InvalidConfig` if any device model parameter is non-positive or non-finite.
     fn build_device_info(netlist: &Netlist) -> Result<(Vec<DeviceSlot>, Vec<DeviceIR>), CodegenError> {
         let mut slots = Vec::new();
         let mut dim_offset = 0;
@@ -832,10 +850,10 @@ impl CircuitIR {
                     slots.push(DeviceSlot {
                         device_type: DeviceType::Jfet,
                         start_idx: dim_offset,
-                        dimension: 1,
+                        dimension: 2,
                         params: DeviceParams::Jfet(params),
                     });
-                    dim_offset += 1;
+                    dim_offset += 2;
                 }
                 Element::Triode { model, .. } => {
                     let params = Self::resolve_tube_params(netlist, model)?;
@@ -847,10 +865,15 @@ impl CircuitIR {
                     });
                     dim_offset += 2;
                 }
-                Element::Mosfet { name, .. } => {
-                    return Err(CodegenError::InvalidConfig(
-                        format!("MOSFET '{}' not supported in code generation", name)
-                    ));
+                Element::Mosfet { model, .. } => {
+                    let params = Self::resolve_mosfet_params(netlist, model)?;
+                    slots.push(DeviceSlot {
+                        device_type: DeviceType::Mosfet,
+                        start_idx: dim_offset,
+                        dimension: 2,
+                        params: DeviceParams::Mosfet(params),
+                    });
+                    dim_offset += 2;
                 }
                 _ => {}
             }
@@ -927,8 +950,7 @@ impl CircuitIR {
 
     /// Resolve JFET model parameters from the netlist, with validation.
     ///
-    /// Uses 1D simplification: only IDSS and VP are used in codegen.
-    /// Lambda is stored but not used in the saturation-only model.
+    /// 2D Shichman-Hodges: IDSS, VP, and LAMBDA control triode + saturation regions.
     fn resolve_jfet_params(netlist: &Netlist, model: &str) -> Result<JfetParams, CodegenError> {
         // Determine channel type first — default VP depends on polarity.
         let is_p_channel = netlist.models.iter()
@@ -950,8 +972,42 @@ impl CircuitIR {
                 format!("JFET model VP must be finite and nonzero, got {vp}")
             ));
         }
+        if !lambda.is_finite() || lambda < 0.0 {
+            return Err(CodegenError::InvalidConfig(
+                format!("JFET model LAMBDA must be non-negative and finite, got {lambda}")
+            ));
+        }
 
         Ok(JfetParams { idss, vp, lambda, is_p_channel })
+    }
+
+    /// Resolve MOSFET model parameters from the netlist, with validation.
+    fn resolve_mosfet_params(netlist: &Netlist, model: &str) -> Result<MosfetParams, CodegenError> {
+        let is_p_channel = netlist.models.iter()
+            .find(|m| m.name.eq_ignore_ascii_case(model))
+            .map(|m| m.model_type.to_uppercase().starts_with("PM"))
+            .unwrap_or(false);
+
+        let kp = Self::lookup_model_param(netlist, model, "KP").unwrap_or(0.1);
+        let default_vt = if is_p_channel { -2.0 } else { 2.0 };
+        let vt = Self::lookup_model_param(netlist, model, "VTO")
+            .or_else(|| Self::lookup_model_param(netlist, model, "VT"))
+            .unwrap_or(default_vt);
+        let lambda = Self::lookup_model_param(netlist, model, "LAMBDA").unwrap_or(0.01);
+
+        validate_positive_finite(kp, "MOSFET model KP")?;
+        if !vt.is_finite() {
+            return Err(CodegenError::InvalidConfig(
+                format!("MOSFET model VT must be finite, got {vt}")
+            ));
+        }
+        if !lambda.is_finite() || lambda < 0.0 {
+            return Err(CodegenError::InvalidConfig(
+                format!("MOSFET model LAMBDA must be non-negative and finite, got {lambda}")
+            ));
+        }
+
+        Ok(MosfetParams { kp, vt, lambda, is_p_channel })
     }
 
     /// Resolve tube/triode model parameters from the netlist, with validation.
