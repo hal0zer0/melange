@@ -64,7 +64,7 @@ pub fn generate_html_report(
     melange: &Signal,
     output_path: &Path,
 ) -> Result<(), VisualizerError> {
-    let len = report.sample_count;
+    let len = report.sample_count.min(spice.len()).min(melange.len());
     if len == 0 {
         return Err(VisualizerError::InvalidData(
             "No samples to visualize".to_string(),

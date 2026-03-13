@@ -3,7 +3,12 @@
 //! These tests verify that melange produces results matching ngspice
 //! within tight tolerances. They require ngspice to be installed.
 //!
-//! Run with: cargo test -p melange-validate --test spice_validation -- --nocapture
+//! All ngspice-dependent tests are marked `#[ignore]` so that `cargo test` clearly
+//! shows them as "ignored" rather than silently passing. To run them:
+//!
+//! ```sh
+//! cargo test -p melange-validate --test spice_validation -- --include-ignored --nocapture
+//! ```
 //!
 //! # Test Coverage
 //!
@@ -13,6 +18,9 @@
 //! | `test_diode_clipper_vs_spice` | Diode clipper | 2 diodes | Default |
 //! | `test_bjt_common_emitter_vs_spice` | BJT amplifier | 1 BJT | Default |
 //! | `test_antiparallel_diodes_vs_spice` | Symmetric clipper | 2 diodes | Default |
+//! | `test_rc_lowpass_step_response` | Linear RC | 0 | Strict |
+//! | `test_rc_lowpass_chirp` | Linear RC | 0 | Strict |
+//! | `test_diode_clipper_silence_to_signal` | Diode clipper | 2 diodes | Default |
 
 use std::path::PathBuf;
 
@@ -20,6 +28,7 @@ use melange_validate::{
     comparison::{compare_signals, ComparisonConfig, Signal},
     spice_runner::{is_ngspice_available, run_transient_with_thevenin_pwl},
     strip_vin_source,
+    validate_circuit,
     visualizer::generate_html_report,
     ValidationError,
 };
@@ -581,7 +590,8 @@ fn find_tube_device(netlist: &melange_solver::parser::Netlist, device_name: &str
     let kvb = find_param("KVB").unwrap_or(300.0);
     let ig_max = find_param("IG_MAX").unwrap_or(2e-3);
     let vgk_onset = find_param("VGK_ONSET").unwrap_or(0.5);
-    melange_devices::KorenTriode::with_grid_params(mu, ex, kg1, kp, kvb, ig_max, vgk_onset)
+    let lambda = find_param("LAMBDA").unwrap_or(0.0);
+    melange_devices::KorenTriode::with_all_params(mu, ex, kg1, kp, kvb, ig_max, vgk_onset, lambda)
 }
 
 /// Build device slots for the DC OP solver from a parsed netlist.
@@ -695,6 +705,7 @@ fn build_device_slots_from_netlist(
                         kvb: find_model_param(model, "KVB").unwrap_or(300.0),
                         ig_max: find_model_param(model, "IG_MAX").unwrap_or(2e-3),
                         vgk_onset: find_model_param(model, "VGK_ONSET").unwrap_or(0.5),
+                        lambda: find_model_param(model, "LAMBDA").unwrap_or(0.0),
                     }),
                 });
                 dim_offset += 2;
@@ -776,12 +787,10 @@ fn print_validation_metrics(result: &ValidationResult) {
 /// Input: 1 kHz sine wave
 /// Expected: -3.9 dB attenuation, -58° phase shift
 #[test]
+#[ignore] // requires ngspice
 fn test_rc_lowpass_vs_spice() {
-    // Skip if ngspice not available
-    if !is_ngspice_available() {
-        eprintln!("Skipping test_rc_lowpass_vs_spice: ngspice not available");
-        return;
-    }
+    assert!(is_ngspice_available(), "ngspice not found");
+
 
     println!("\n=== RC Lowpass Filter Validation ===");
     println!("Circuit: 10kΩ + 10nF, fc ≈ 1.59 kHz");
@@ -826,11 +835,10 @@ fn test_rc_lowpass_vs_spice() {
 /// which is acceptable for method validation. The 1uF cap provides numerical
 /// stability for the trapezoidal discretization.
 #[test]
+#[ignore] // requires ngspice
 fn test_diode_clipper_vs_spice() {
-    if !is_ngspice_available() {
-        eprintln!("Skipping test_diode_clipper_vs_spice: ngspice not available");
-        return;
-    }
+    assert!(is_ngspice_available(), "ngspice not found");
+
 
     println!("\n=== Diode Clipper Validation ===");
     println!("Circuit: Antiparallel 1N4148 diodes, soft clipping");
@@ -882,11 +890,10 @@ fn test_diode_clipper_vs_spice() {
 /// Un-ignoring this test requires implementing a nonlinear DC operating point
 /// solver that iterates to find the quiescent bias point.
 #[test]
+#[ignore] // requires ngspice
 fn test_bjt_common_emitter_vs_spice() {
-    if !is_ngspice_available() {
-        eprintln!("Skipping test_bjt_common_emitter_vs_spice: ngspice not available");
-        return;
-    }
+    assert!(is_ngspice_available(), "ngspice not found");
+
 
     println!("\n=== BJT Common Emitter Validation ===");
     println!("Circuit: BC547 NPN amplifier, gain ≈ 10x");
@@ -976,11 +983,10 @@ fn test_bjt_common_emitter_vs_spice() {
 /// - Symmetric device handling
 /// - Multiple nonlinearity interaction
 #[test]
+#[ignore] // requires ngspice
 fn test_antiparallel_diodes_vs_spice() {
-    if !is_ngspice_available() {
-        eprintln!("Skipping test_antiparallel_diodes_vs_spice: ngspice not available");
-        return;
-    }
+    assert!(is_ngspice_available(), "ngspice not found");
+
 
     println!("\n=== Antiparallel Diodes Validation ===");
     println!("Circuit: Two antiparallel diodes, 2D nonlinear system");
@@ -1013,11 +1019,10 @@ fn test_antiparallel_diodes_vs_spice() {
 ///
 /// This is a linear circuit (M=0), so tolerances should be strict.
 #[test]
+#[ignore] // requires ngspice
 fn test_opamp_inverting_vs_spice() {
-    if !is_ngspice_available() {
-        eprintln!("Skipping test_opamp_inverting_vs_spice: ngspice not available");
-        return;
-    }
+    assert!(is_ngspice_available(), "ngspice not found");
+
 
     println!("\n=== Op-Amp Inverting Amplifier Validation ===");
     println!("Circuit: Gain=-10, VCCS model (AOL=200k, ROUT=1)");
@@ -1040,11 +1045,10 @@ fn test_opamp_inverting_vs_spice() {
 /// N-channel JFET with self-bias. Tests the 2D Shichman-Hodges model.
 ///
 #[test]
+#[ignore] // requires ngspice
 fn test_jfet_common_source_vs_spice() {
-    if !is_ngspice_available() {
-        eprintln!("Skipping test_jfet_common_source_vs_spice: ngspice not available");
-        return;
-    }
+    assert!(is_ngspice_available(), "ngspice not found");
+
 
     println!("\n=== JFET Common Source Amplifier Validation ===");
     println!("Circuit: N-channel JFET, Rd=2.2k, Rs=1k, VDD=12V");
@@ -1077,11 +1081,10 @@ fn test_jfet_common_source_vs_spice() {
 /// N-channel MOSFET Level 1 with voltage divider bias. Tests the 2D model.
 ///
 #[test]
+#[ignore] // requires ngspice
 fn test_mosfet_common_source_vs_spice() {
-    if !is_ngspice_available() {
-        eprintln!("Skipping test_mosfet_common_source_vs_spice: ngspice not available");
-        return;
-    }
+    assert!(is_ngspice_available(), "ngspice not found");
+
 
     println!("\n=== MOSFET Common Source Amplifier Validation ===");
     println!("Circuit: N-channel MOSFET, Rd=1k, VDD=5V");
@@ -1119,11 +1122,10 @@ fn test_mosfet_common_source_vs_spice() {
 /// antiparallel_diodes (nonlinear tolerances). BJT is excluded pending
 /// nonlinear DC operating point solver.
 #[test]
+#[ignore] // requires ngspice
 fn test_all_circuits_batch() {
-    if !is_ngspice_available() {
-        eprintln!("Skipping test_all_circuits_batch: ngspice not available");
-        return;
-    }
+    assert!(is_ngspice_available(), "ngspice not found");
+
 
     println!("\n=== Batch Validation of All Circuits ===");
 
@@ -1227,6 +1229,149 @@ fn test_pwl_interpolation() {
     // Test extrapolation (should clamp)
     assert!((interpolate_pwl(&pwl_data, -1.0) - 0.0).abs() < 1e-10);
     assert!((interpolate_pwl(&pwl_data, 3.0) - 0.0).abs() < 1e-10);
+}
+
+// =============================================================================
+// Enhanced Signal Tests (C.4)
+// =============================================================================
+
+/// Test: RC Lowpass Square Wave (Transient Response)
+///
+/// 500 Hz square wave at 1V tests transient step response repeatedly.
+/// The RC lowpass with R=10kΩ, C=10nF has τ=100µs, so each half-cycle (1ms)
+/// gives 10 time constants of settling. The square wave has zero DC on average,
+/// avoiding DC blocker artifacts. 100ms tests error accumulation.
+#[test]
+#[ignore] // requires ngspice
+fn test_rc_lowpass_step_response() {
+    assert!(is_ngspice_available(), "ngspice not found");
+
+    println!("\n=== RC Lowpass Square Wave (500 Hz, 100 ms) ===");
+
+    let num_samples = (SAMPLE_RATE * 0.1) as usize; // 100ms
+    let period_samples = (SAMPLE_RATE / 500.0) as usize; // 96 samples per cycle
+    let input: Vec<f64> = (0..num_samples)
+        .map(|i| if (i % period_samples) < period_samples / 2 { 1.0 } else { -1.0 })
+        .collect();
+
+    let netlist_path = test_data_dir().join("rc_lowpass").join("circuit.cir");
+    // Square wave tolerances: the bilinear transform can't track instantaneous
+    // steps, so peak error is large (~1V) at transitions. RMS and correlation
+    // still validate overall accuracy over 100ms of error accumulation.
+    let config = ComparisonConfig {
+        rms_error_tolerance: 0.05,        // 5% — step transitions dominate error
+        peak_error_tolerance: 1.0,        // 1V — bilinear can't track instantaneous jump
+        max_relative_tolerance: 1e4,      // near zero-crossings
+        correlation_min: 0.999,           // shape should match well despite peak errors
+        thd_error_tolerance_db: 5.0,
+        full_scale: 1.0,
+        skip_thd: true,                   // square wave THD is not meaningful
+    };
+
+    let result = validate_circuit(&netlist_path, &input, SAMPLE_RATE, "out", &config)
+        .expect("Square wave validation failed");
+
+    println!("  Samples: {}", result.report.sample_count);
+    println!("  RMS Error: {:.6e}", result.report.rms_error);
+    println!("  Correlation: {:.8}", result.report.correlation_coefficient);
+
+    assert!(
+        result.report.passed,
+        "RC lowpass square wave failed:\n{}",
+        result.report.summary()
+    );
+}
+
+/// Test: RC Lowpass Chirp (Multi-Frequency)
+///
+/// Linear chirp from 100 Hz to 10 kHz over 100ms tests wideband accuracy
+/// and error accumulation across 4800 samples. The chirp exercises the filter
+/// from well below cutoff (1.59 kHz) to well above it.
+#[test]
+#[ignore] // requires ngspice
+fn test_rc_lowpass_chirp() {
+    assert!(is_ngspice_available(), "ngspice not found");
+
+    println!("\n=== RC Lowpass Chirp (100 Hz → 10 kHz, 100 ms) ===");
+
+    let duration = 0.1; // 100ms
+    let num_samples = (SAMPLE_RATE * duration) as usize;
+    let f_start = 100.0;
+    let f_end = 10_000.0;
+
+    // Linear chirp: phase = 2π * (f0*t + (f1-f0)*t²/(2*T))
+    let input: Vec<f64> = (0..num_samples)
+        .map(|i| {
+            let t = i as f64 / SAMPLE_RATE;
+            let phase = 2.0 * std::f64::consts::PI
+                * (f_start * t + (f_end - f_start) * t * t / (2.0 * duration));
+            phase.sin()
+        })
+        .collect();
+
+    let netlist_path = test_data_dir().join("rc_lowpass").join("circuit.cir");
+
+    // Relaxed vs pure-sine: chirp exercises high frequencies where trapezoidal
+    // bilinear warping causes phase/amplitude differences vs SPICE's Gear method
+    let config = ComparisonConfig {
+        rms_error_tolerance: 0.02,        // 2% — trapezoidal warping at high freq
+        peak_error_tolerance: 0.2,        // 200mV — instantaneous phase error near Nyquist
+        max_relative_tolerance: 1e4,      // near zero-crossings, relative error is huge
+        correlation_min: 0.9999,          // waveform shape should still match well
+        thd_error_tolerance_db: 5.0,
+        full_scale: 1.0,
+        skip_thd: true,                   // chirp has no meaningful THD
+    };
+
+    let result = validate_circuit(&netlist_path, &input, SAMPLE_RATE, "out", &config)
+        .expect("Chirp validation failed");
+
+    println!("  Samples: {} ({:.0} ms)", result.report.sample_count, 1000.0 * num_samples as f64 / SAMPLE_RATE);
+    println!("  RMS Error: {:.6e}", result.report.rms_error);
+    println!("  Correlation: {:.8}", result.report.correlation_coefficient);
+
+    assert!(
+        result.report.passed,
+        "RC lowpass chirp validation failed:\n{}",
+        result.report.summary()
+    );
+}
+
+/// Test: Diode Clipper Silence-to-Signal Transition
+///
+/// 5ms of silence followed by 15ms of 500Hz/5V sine onset. Tests NR solver
+/// startup behavior when nonlinear devices transition from quiescent to active.
+#[test]
+#[ignore] // requires ngspice
+fn test_diode_clipper_silence_to_signal() {
+    assert!(is_ngspice_available(), "ngspice not found");
+
+    println!("\n=== Diode Clipper Silence-to-Signal ===");
+
+    let silence_samples = (SAMPLE_RATE * 0.005) as usize; // 5ms
+    let signal_samples = (SAMPLE_RATE * 0.015) as usize;  // 15ms
+    let mut input = vec![0.0; silence_samples];
+    for i in 0..signal_samples {
+        let t = i as f64 / SAMPLE_RATE;
+        input.push(5.0 * (2.0 * std::f64::consts::PI * 500.0 * t).sin());
+    }
+
+    let netlist_path = test_data_dir().join("diode_clipper").join("circuit.cir");
+    let result = validate_circuit(&netlist_path, &input, SAMPLE_RATE, "out", &nonlinear_config())
+        .expect("Silence-to-signal validation failed");
+
+    println!("  Samples: {} ({}ms silence + {}ms signal)",
+        result.report.sample_count,
+        silence_samples * 1000 / SAMPLE_RATE as usize,
+        signal_samples * 1000 / SAMPLE_RATE as usize);
+    println!("  RMS Error: {:.6e}", result.report.rms_error);
+    println!("  Correlation: {:.8}", result.report.correlation_coefficient);
+
+    assert!(
+        result.report.passed,
+        "Diode clipper silence-to-signal failed:\n{}",
+        result.report.summary()
+    );
 }
 
 /// Test comparison configs
