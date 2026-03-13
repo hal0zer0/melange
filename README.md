@@ -2,7 +2,7 @@
 
 *The spice must flow.*
 
-[![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](LICENSE-MIT)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-2024%20edition-orange.svg)](https://www.rust-lang.org)
 
 An open-source Rust toolkit for translating analog circuit schematics into real-time audio DSP code. Melange bridges the gap between SPICE simulation and production audio plugins — automating the pipeline that every circuit modeler currently does by hand.
@@ -101,6 +101,7 @@ Plus real-world validated circuits in `circuits/`:
 |---------|-------------|
 | `pultec-eq.cir` | Pultec EQP-1A passive tube EQ (3 switches, 5 pots, 12AX7) |
 | `wurli-preamp.cir` | Wurlitzer 200A preamp (2-stage BJT, LDR tremolo pot) |
+| `tweed-preamp.cir` | Fender-style 2-stage 12AX7 guitar amp (volume pot, bright switch) |
 
 ## What Gets Generated
 
@@ -112,8 +113,41 @@ The generated code is completely standalone — zero runtime dependencies on mel
 - Sherman-Morrison rank-1 updates for dynamic potentiometers (O(N) not O(N^3))
 - Matrix rebuild for runtime sample rate changes
 - DC blocking filter (5 Hz HPF)
+- Input/Output Level parameters (input defaults to -12 dB for safe levels)
 - Optional 2x/4x oversampling (self-contained polyphase half-band IIR)
 - All buffers pre-allocated — zero heap allocation in the audio path
+
+## Customizing Generated Plugins
+
+Generated plugins use a two-file architecture:
+
+- **`src/circuit.rs`** — Generated DSP code (matrices, NR solver, state). Don't edit by hand.
+- **`src/lib.rs`** — Plugin wrapper (params, GUI, presets). Customize freely.
+
+To iterate on component values without losing your `lib.rs` customizations, regenerate just the circuit:
+
+```bash
+melange compile my-circuit.cir --format code -o my-plugin/src/circuit.rs
+```
+
+### Parameter Labels
+
+Add human-readable labels to `.pot` and `.switch` directives in your netlist:
+
+```spice
+.pot R_vol 500 500k "Volume"
+.switch C_bright 1p 120p 470p "Bright"
+```
+
+Without labels, params use the component name (e.g. "R_vol", "Switch 0 (C_bright)").
+
+### What's Safe to Customize in lib.rs
+
+- Parameter names, ranges, units, and smoothing
+- Plugin metadata (name, vendor, description)
+- GUI (nih-plug supports [VIZIA](https://github.com/vizia/vizia) and [iced](https://github.com/iced-rs/iced))
+- Pre/post processing (wet/dry mix, oversampling control)
+- Presets and state persistence
 
 ## Features
 
@@ -194,6 +228,14 @@ melange sources list                      List configured sources
 melange cache list|clear|stats            Manage cached circuits
 ```
 
+Key `compile` options:
+```
+--format plugin          Generate a complete nih-plug project (default: code)
+--no-level-params        Omit Input/Output Level parameters from plugin
+--output-scale <f64>     Scale factor for circuit output (default: 1.0)
+-s, --sample-rate <Hz>   Target sample rate (default: 48000)
+```
+
 Circuits can be referenced as:
 - **Built-in name**: `tube-screamer`, `fuzz-face`, `big-muff`, ...
 - **Local file**: `path/to/circuit.cir`
@@ -220,12 +262,9 @@ Melange was extracted from the [OpenWurli](https://github.com/openwurli/openwurl
 
 ## License
 
-Licensed under either of:
+This project is licensed under the [GNU General Public License v3.0 or later](LICENSE) (GPL-3.0-or-later).
 
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
-- MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
-
-at your option.
+Melange includes code derived from the [OpenWurli](https://github.com/openwurli/openwurli) project, which is licensed under GPL-3.0.
 
 ## Acknowledgments
 
