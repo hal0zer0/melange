@@ -159,9 +159,9 @@ If `DC_NL_I` is all zeros or missing, the DC OP solver may not have converged.
 
 ```rust
 let result = dc_op::solve_dc_operating_point(&mna, &slots, &config);
-eprintln!("DC OP: converged={}, method={:?}, iters={}", result.converged, result.method, result.iterations);
+log::debug!("DC OP: converged={}, method={:?}, iters={}", result.converged, result.method, result.iterations);
 for (name, &idx) in &mna.node_map {
-    if idx > 0 { eprintln!("  V({}) = {:.4}V", name, result.v_node[idx - 1]); }
+    if idx > 0 { log::debug!("  V({}) = {:.4}V", name, result.v_node[idx - 1]); }
 }
 ```
 

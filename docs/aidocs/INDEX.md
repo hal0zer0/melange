@@ -10,7 +10,7 @@ Quick reference for melange circuit simulation.
 | [DK_METHOD.md](DK_METHOD.md) | Discrete Kirchhoff reduction | Hack Audio Tutorial, Yeh & Smith |
 | [COMPANION_MODELS.md](COMPANION_MODELS.md) | Trapezoidal integration | Pillage & Rohrer, Circuit Simulation Project |
 | [NR_SOLVER.md](NR_SOLVER.md) | Newton-Raphson | Hack Audio Ch. 7 |
-| [DEVICE_MODELS.md](DEVICE_MODELS.md) | Diode/BJT equations | Shockley equation, Ebers-Moll |
+| [DEVICE_MODELS.md](DEVICE_MODELS.md) | Diode/BJT/JFET/MOSFET/Tube equations | Shockley, Ebers-Moll, Shichman-Hodges, Koren |
 | [DC_OP.md](DC_OP.md) | DC operating point solver | SPICE DC analysis, Nagel (1975) |
 | [CODEGEN.md](CODEGEN.md) | Generated code structure | melange implementation |
 | [DEBUGGING.md](DEBUGGING.md) | Bug signatures | melange debugging experience |
@@ -50,6 +50,9 @@ where k ranges over the device block that owns row i.
 
 For diodes (1D): single term `jdev_{d}_{d} = diode_conductance(v_d)`.
 For BJTs (2D): 2x2 block from `bjt_jacobian(Vbe, Vbc)`.
+For JFETs (2D): 2x2 block from `jfet_jacobian(Vgs, Vds, ...)`.
+For MOSFETs (2D): 2x2 block from `mosfet_jacobian(Vgs, Vds, ...)`.
+For Tubes (2D): 2x2 block from `tube_jacobian(Vgk, Vpk, ...)`.
 
 Since K is naturally negative, both formulas give J > 0 (convergent).
 

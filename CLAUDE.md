@@ -59,6 +59,7 @@ RHS input = (V_in(n+1) + V_in(n)) * G_in   (proper trapezoidal, NOT 2*V*G)
 - Diodes: 1D per device (single voltage/current)
 - BJTs: 2D per device (Vbe→Ic at start_idx, Vbc→Ib at start_idx+1)
 - JFETs: 2D per device (Vgs→Id at start_idx, Vds→Ig at start_idx+1)
+- MOSFETs: 2D per device (Vgs→Id at start_idx, Vds→Ig at start_idx+1)
 - Tubes: 2D per device (Vgk→Ip at start_idx, Vpk→Ig at start_idx+1)
 - Device map built from netlist element order, mirrors MNA builder
 - Codegen uses `jdev_i_k` naming for block-diagonal Jacobian entries
@@ -103,11 +104,11 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
 | BJT period-3 oscillation | Backward Euler for nonlinear currents | Fixed: use full i_nl in correction (not delta) |
 | DC OP NR diverges | Wrong Jacobian sign | Use `G_aug = G_dc - N_i·J_dev·N_v` (subtraction!) |
 
-## Current Status (2026-03-01)
+## Current Status (2026-03-12)
 
 ### Working
 - Linear circuit simulation (RC lowpass matches ngspice to 0.03% RMS, 8-nines correlation)
-- MNA stamping for R, C, L, voltage sources, diodes, BJTs, JFETs
+- MNA stamping for R, C, L, voltage sources, current sources, diodes, BJTs, JFETs, MOSFETs, tubes, op-amps
 - DK kernel build with proper trapezoidal discretization
 - NR solver: 1D, 2D (two 1D devices), and M-dimensional
 - Codegen for diode, BJT, JFET, and tube/triode circuits (up to M=16, Gaussian elimination for M=3..16)
@@ -133,7 +134,7 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
   - Precomputed SM vectors (SU, USU, NV_SU, U_NI) baked into generated constants
   - Corrections applied to S, K, A_neg, and S*N_i products in codegen
   - Plugin template auto-generates `FloatParam` knobs for each pot
-  - Max 2 pots per circuit; pot value stored in `CircuitState`
+  - Max 32 pots per circuit; pot value stored in `CircuitState`
 - **Plugin level params always included**: Input Level (-12 dB default, -36 to +12 dB) and Output Level (0 dB default, -60 to +12 dB)
   - -12 dB input maps ±1V DAW to ±250mV (safe for guitar-level circuits)
   - Use `--no-level-params` CLI flag to opt out
@@ -153,12 +154,20 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
   - `tube_ip()` (Koren), `tube_ig()` (Leach power-law), `tube_jacobian()` (4-element)
   - Constants: `DEVICE_{n}_MU`, `DEVICE_{n}_EX`, `DEVICE_{n}_KG1`, `DEVICE_{n}_KP`, `DEVICE_{n}_KVB`, `DEVICE_{n}_IG_MAX`, `DEVICE_{n}_VGK_ONSET`
   - Template: `device_tube.rs.tera`; 6 tests (parser, MNA, codegen, compile-and-run, two-triode preamp)
+- **MOSFET codegen**: 2D Level 1 SPICE with triode + saturation + channel-length modulation (LAMBDA)
+  - `mosfet_id(vgs, vds, kp, vt, lambda, sign)`, `mosfet_ig(vgs, sign)`, `mosfet_jacobian()` -> [f64; 4]
+  - Constants: `DEVICE_{n}_KP`, `DEVICE_{n}_VT`, `DEVICE_{n}_LAMBDA`, `DEVICE_{n}_SIGN`
+  - N-channel (NM) defaults: VTO=2.0, KP=0.1; P-channel (PM) defaults: VTO=-2.0
+- **Multi-output (stereo) support in codegen pipeline**
+  - `output_nodes` and `output_scales` in `CodegenConfig` for multi-channel output
+- **Subcircuit expansion** (`.subckt` / `X` elements)
+- **AC frequency response analysis** (`melange analyze` command)
+- **`melange simulate` command**: parse -> MNA -> DK kernel -> solver -> process WAV
+  - Supports `--input` for WAV files and `--amplitude` for sine test tones
 - **Explicit re-exports**: `lib.rs` uses named re-exports (no glob `pub use module::*`)
 
 ### Known Limitations
 - Purely resistive nonlinear circuits oscillate (need capacitor damping)
-- MOSFET codegen: 2D Level 1 SPICE with triode + saturation + channel-length modulation (LAMBDA)
-- JFET codegen: 2D Shichman-Hodges with triode + saturation + channel-length modulation (LAMBDA)
 - Tube Koren model: no plate resistance (rp) or mu variation with operating point
 - BJT Gummel-Poon: no self-heating or charge storage dynamics
 - **Runtime solver** (`DeviceEntry`) only supports Diode, DiodeWithRs, Led, BJT — no JFET, MOSFET, or Tube

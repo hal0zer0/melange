@@ -15,7 +15,7 @@
 | melange-solver | ✅ Production | MNA/DK solver, parser complete |
 | melange-validate | ✅ Production | 6 SPICE comparisons (RC, diode, BJT, JFET, MOSFET, op-amp) |
 | melange-plugin | ⚠️ Stub | Plugin generation via codegen works; crate itself is placeholder |
-| melange-cli | ✅ Production | compile, simulate, info commands |
+| melange-cli | ✅ Production | compile, simulate, analyze, nodes commands |
 | Code Generation | ✅ Production | M=0..16, all device types, pots, switches, coupled inductors |
 
 ---
@@ -55,7 +55,7 @@
 - [x] MOSFET (Level 1)
 - [x] Vacuum Tube (Koren triode/pentode)
 - [x] CdS LDR (VTL5C3/4, NSL-32)
-- [x] Op-Amp (Boyle macromodel - defined, not integrated)
+- [x] Op-Amp (VCCS MNA stamping — linear, working in both runtime and codegen)
 
 **Traits:**
 - [x] `NonlinearDevice<const N>` with const generics
@@ -67,8 +67,13 @@
 **Parser:**
 - [x] R, C, L, V, I elements
 - [x] D, Q, J, M devices
+- [x] U (op-amp), T (triode), K (coupled inductors)
 - [x] .model, .param directives
-- [x] Value parsing (1k, 10uF, etc.)
+- [x] .subckt / X (subcircuit definition and expansion)
+- [x] .pot (dynamic potentiometers)
+- [x] .switch (ganged component switching)
+- [x] .input_impedance directive
+- [x] Value parsing (1k, 10uF, infix 6n8, etc.)
 
 **MNA Assembly:**
 - [x] G matrix stamping
@@ -80,7 +85,7 @@
 **DK Kernel:**
 - [x] Matrix inversion (Gaussian elimination)
 - [x] S = A⁻¹ computation
-- [x] K = -N_v·S·N_i computation
+- [x] K = N_v·S·N_i computation (no negation — K is naturally negative)
 - [x] History term (A_neg)
 
 **Solver:**
@@ -107,17 +112,17 @@ See `docs/limitations.md` for full details.
 - Missing: B (behavioral sources)
 - ~~Missing: K (coupled inductors/transformers)~~ ✅ Implemented (2026-03-02)
 - ~~Missing: S, W (switches)~~ ✅ Implemented via `.switch` directive (2026-03-02)
-- Line continuation not working
+- ~~Line continuation not working~~ ✅ Fixed (continuation lines joined before parsing)
 - Parametric expressions not supported
 
 ### Solver
-- Extended MNA for voltage sources: partial
-- Sherman-Morrison rank-1 updates: spec only
+- Voltage sources: implemented as Norton equivalents (DC supply + input source both work)
+- ~~Sherman-Morrison rank-1 updates: spec only~~ ✅ Implemented (pots use SM rank-1 updates in codegen)
 - Shadow subtraction: not implemented
 
 ### Device Integration
-- Op-amp Boyle model: defined but not wired to solver
-- Full BJT with base current: 2D kernel ready, needs device adapter
+- ~~Op-amp Boyle model: defined but not wired to solver~~ ✅ Op-amps work via VCCS MNA stamping (linear, no NR dimensions)
+- ~~Full BJT with base current: 2D kernel ready, needs device adapter~~ ✅ Implemented (2D Ic+Ib in both runtime and codegen)
 
 ---
 
@@ -170,7 +175,7 @@ proper trapezoidal averaging for nonlinear currents. NR equations unchanged.
 - [ ] Controlled source support (E, G)
 - [x] Potentiometer model (Sherman-Morrison rank-1 updates)
 - [x] Switch model (`.switch` directive with ganged components, rebuild_matrices)
-- [ ] Line continuation fix
+- [x] Line continuation fix
 
 **Integration:**
 - [x] melange-validate implementation
@@ -204,10 +209,10 @@ proper trapezoidal averaging for nonlinear currents. NR equations unchanged.
 
 These features were explicitly deferred per user request:
 
-1. **Code Generation Module** - Spec complete, implementation started in v0.2.0
+1. ~~**Code Generation Module**~~ ✅ Implemented (M=0..16, all device types, pots, switches, coupled inductors)
 2. **Proc-Macros** - Planned for v1.0.0
-3. **Full BJT Integration** - Architecture ready, needs solver adapter
-4. **Extended MNA** - Voltage sources partially implemented
+3. ~~**Full BJT Integration**~~ ✅ Implemented (2D Ic+Ib in runtime and codegen)
+4. **Extended MNA** - Voltage sources work as Norton equivalents; controlled sources (E, F, G, H) not yet implemented
 
 ---
 

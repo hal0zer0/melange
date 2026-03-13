@@ -7,12 +7,10 @@
 
 ## Priority 1 — High Impact, Moderate Effort
 
-### 1.1 AC Frequency Response Analysis
-- **Status:** Not started
-- **Scope:** Add `melange analyze circuit.cir --freq-response 20 20000` CLI command
-- Sweep sine at each frequency through solver, measure gain/phase
-- Output CSV (frequency, gain_dB, phase_deg)
-- Infrastructure exists in melange-validate
+### ~~1.1 AC Frequency Response Analysis~~ ✅ Done
+- `melange analyze circuit.cir` CLI command with `--start-freq`, `--end-freq`, `--points-per-decade`
+- Sweeps sine at each frequency through solver, measures gain/phase
+- Outputs CSV (frequency, gain_dB, phase_deg) to stdout or file (`-o`)
 - **Files:** `tools/melange-cli/src/main.rs`
 
 ### ~~1.2 2D JFET Model (Triode + Saturation Regions)~~ ✅ Done (2026-03-12)
@@ -42,9 +40,8 @@
 - Needed for current mirrors, active filters, dependent sources
 - **Files:** `parser.rs`, `mna.rs`
 
-### 2.3 Line Continuation Fix
-- SPICE `+` continuation lines not properly joined (KNOWN BUG)
-- **Files:** `parser.rs`
+### ~~2.3 Line Continuation Fix~~ ✅ Done
+- SPICE `+` continuation lines are now properly joined before parsing
 
 ---
 
@@ -80,7 +77,7 @@
 
 | Bug | Severity | Workaround |
 |-----|----------|------------|
-| Line continuation (`+`) not joined | Medium | Use single-line `.model` statements |
+| ~~Line continuation (`+`) not joined~~ | ~~Medium~~ | ✅ Fixed — continuation lines are now joined |
 | Purely resistive nonlinear circuits oscillate | Low | Always include at least one capacitor |
 | Several integration tests `#[ignore]`d | Low | Tests exist but need tuning |
 

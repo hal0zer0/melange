@@ -110,7 +110,7 @@ The generated code is completely standalone — zero runtime dependencies on mel
 - Pre-inverted DK matrices with sparsity-aware emission (only non-zero entries)
 - Newton-Raphson solver (M=1 direct, M=2 Cramer's, M=3-16 Gaussian elimination)
 - DC operating point initialization for correct bias
-- Sherman-Morrison rank-1 updates for dynamic potentiometers (O(N) not O(N^3))
+- Sherman-Morrison rank-1 updates for dynamic potentiometers (O(N^2) not O(N^3))
 - Matrix rebuild for runtime sample rate changes
 - DC blocking filter (5 Hz HPF)
 - Input/Output Level parameters (input defaults to -12 dB for safe levels)
@@ -156,7 +156,7 @@ Without labels, params use the component name (e.g. "R_vol", "Switch 0 (C_bright
 - **7 Device Models**: Diode, BJT (Ebers-Moll/Gummel-Poon), JFET, MOSFET, vacuum tube (Koren), op-amp
 - **Dynamic Controls**: `.pot` (potentiometers) and `.switch` (ganged component switching) directives
 - **Real-Time Safe**: Zero heap allocation in audio callback, no `unsafe` code, f64 precision
-- **Code Generation**: Optimized Rust with const generics, sparse matrices, unrolled loops
+- **Code Generation**: Optimized Rust with compile-time constants, sparse matrices, unrolled loops
 - **Plugin Generation**: One-step CLAP/VST3 plugin projects via nih-plug
 - **SPICE Validation**: Automated comparison against ngspice reference simulations
 - **Cross-Compilation**: Build macOS plugins from Linux via cargo-zigbuild
@@ -185,9 +185,9 @@ SPICE Netlist → Parser → MNA System → DK Kernel → CircuitIR → Rust Emi
 | Resistor/Capacitor/Inductor | yes | yes | Trapezoidal companion models |
 | Diode | yes | yes | Shockley equation, series resistance, LED |
 | BJT | yes | yes | Ebers-Moll, Gummel-Poon (VAF, VAR, IKF, IKR) |
-| JFET | yes | yes | Saturation-only (1D) |
-| MOSFET | yes | yes | Saturation-only (1D) |
-| Vacuum Tube | yes | yes | Koren triode + Leach grid current |
+| JFET | — | yes | Shichman-Hodges 2D (triode + saturation) |
+| MOSFET | — | yes | Level 1 SPICE 2D (triode + saturation) |
+| Vacuum Tube | — | yes | Koren triode + Leach grid current |
 | Op-Amp | yes | yes | VCCS macromodel (linear) |
 | CdS LDR | yes | — | VTL5C3/4, NSL-32 with asymmetric envelope |
 | Voltage Source | yes | yes | DC (Norton equivalent) |
@@ -220,6 +220,7 @@ let kernel = DkKernel::from_mna(&mna, 44100.0)?;
 ```
 melange compile <circuit> -o <output>     Compile circuit to Rust code or plugin project
 melange simulate <circuit> -o <output>    Simulate circuit, write WAV output
+melange analyze <circuit>                 Analyze circuit frequency response
 melange validate <circuit> -r <ref>       Compare against SPICE reference
 melange nodes <circuit>                   List nodes and devices in a circuit
 melange builtins                          List built-in circuits
@@ -234,6 +235,17 @@ Key `compile` options:
 --no-level-params        Omit Input/Output Level parameters from plugin
 --output-scale <f64>     Scale factor for circuit output (default: 1.0)
 -s, --sample-rate <Hz>   Target sample rate (default: 48000)
+```
+
+Key `analyze` options:
+```
+--start-freq <Hz>        Start frequency (default: 20)
+--end-freq <Hz>          End frequency (default: 20000)
+--points-per-decade <N>  Frequency resolution (default: 10)
+--amplitude <V>          Input amplitude in volts (default: 0.1)
+-I, --input-node <name>  Input node name (default: "in")
+-n, --output-node <name> Output node name (default: "out")
+-o, --output <file>      Write CSV to file instead of stdout
 ```
 
 Circuits can be referenced as:
@@ -252,7 +264,7 @@ Circuits can be referenced as:
 
 ```bash
 cargo build --workspace       # Build everything
-cargo test --workspace        # Run all tests (~640 tests)
+cargo test --workspace        # Run all tests (~730 tests)
 cargo run -p melange-cli      # Run the CLI
 ```
 

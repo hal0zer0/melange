@@ -82,18 +82,22 @@ fn bjt_ib(vbe: f64, vbc: f64) -> f64;              // Ebers-Moll Ib
 fn bjt_jacobian(vbe: f64, vbc: f64) -> [f64; 4];   // [dIc/dVbe, dIc/dVbc, dIb/dVbe, dIb/dVbc]
 ```
 
-### JFET (1D per device)
+### JFET (2D per device)
 ```rust
-fn jfet_id(vgs: f64, idss: f64, vp: f64, sign: f64) -> f64;          // Saturation: IDSS*(1-Vgs/Vp)^2
-fn jfet_conductance(vgs: f64, idss: f64, vp: f64, sign: f64) -> f64; // 2*IDSS*Vgst/Vp^2
+fn jfet_id(vgs: f64, vds: f64, idss: f64, vp: f64, lambda: f64, sign: f64) -> f64;  // Shichman-Hodges Id
+fn jfet_ig(vgs: f64, sign: f64) -> f64;                                                // Gate current (≈0)
+fn jfet_jacobian(vgs: f64, vds: f64, idss: f64, vp: f64, lambda: f64, sign: f64) -> [f64; 4];  // [dId/dVgs, dId/dVds, dIg/dVgs, dIg/dVds]
 ```
 
-1D saturation-only model: ignores Vds (no triode/ohmic region). Vgst is clamped to
-`[0, |Vp|]` so drain current never exceeds IDSS (prevents runaway for forward-biased gate).
+2D Shichman-Hodges model: drain current (Id) at `start_idx`, gate current (Ig) at `start_idx+1`.
 
+- **Drain current**: Triode region (|Vds| < |Vgst|): `Id = IDSS * (2*Vgst*Vds - Vds^2) / Vp^2 * (1 + lambda*|Vds|)`; Saturation region: `Id = IDSS * (1 - Vgs/Vp)^2 * (1 + lambda*|Vds|)`
+- **Gate current**: Approximately zero (insulated gate approximation)
+- **Jacobian**: 4-element `[dId/dVgs, dId/dVds, dIg/dVgs, dIg/dVds]` — dIg/dVgs and dIg/dVds are effectively zero
 - N-channel (`.model name NJ(...)`): sign=+1.0, default VTO=-2.0
 - P-channel (`.model name PJ(...)`): sign=-1.0, default VTO=+2.0
-- Default IDSS=2e-3 A, lambda=0.001 (stored but unused in 1D model)
+- Default IDSS=2e-3 A, lambda=0.001
+- Constants: `DEVICE_{n}_IDSS`, `DEVICE_{n}_VP`, `DEVICE_{n}_LAMBDA`, `DEVICE_{n}_SIGN`
 - Parameter lookup: `VTO` only (no `VT` alias, to avoid confusion with thermal voltage)
 
 ### Tube/Triode (2D per device)
@@ -106,8 +110,8 @@ fn tube_jacobian(vgk: f64, vpk: f64, mu: f64, ex: f64, kg1: f64, kp: f64, kvb: f
 
 2D model: plate current (Ip) at `start_idx`, grid current (Ig) at `start_idx+1`.
 
-- **Plate current**: Koren model — `Ip = (E1^ex / kg1) * atan(vpk / kvb)` where `E1 = vpk/kp * ln(1 + exp(kp * (1/mu + vgk/vpk)))`
-- **Grid current**: Leach power-law — `Ig = ig_max * max(0, (vgk - vgk_onset) / vgk_onset)^2` (zero for vgk < vgk_onset)
+- **Plate current**: Koren model — `Ip = E1^ex / kg1` where `E1 = (vpk/kp) * ln(1 + exp(kp * (1/mu + vgk/sqrt(kvb + vpk^2))))`
+- **Grid current**: Leach power-law — `Ig = ig_max * (vgk / vgk_onset)^1.5` for vgk > 0 (zero for vgk <= 0)
 - **Jacobian**: 4-element `[dIp/dVgk, dIp/dVpk, dIg/dVgk, dIg/dVpk]` — dIg/dVpk = 0 (grid current independent of plate voltage)
 - Constants: `DEVICE_{n}_MU`, `DEVICE_{n}_EX`, `DEVICE_{n}_KG1`, `DEVICE_{n}_KP`, `DEVICE_{n}_KVB`, `DEVICE_{n}_IG_MAX`, `DEVICE_{n}_VGK_ONSET`
 - Netlist syntax: `X1 plate grid cathode modelname` with `.model modelname TRIODE(MU=100 EX=1.4 KG1=1060 KP=600 KVB=300)`
@@ -119,9 +123,9 @@ fn tube_jacobian(vgk: f64, vpk: f64, mu: f64, ex: f64, kg1: f64, kp: f64, kvb: f
 Nonlinear devices occupy M dimensions in order of appearance in the netlist:
 - Diode: 1 dimension (controlling voltage Vd, current Id)
 - BJT: 2 dimensions (Vbe->Ic, Vbc->Ib)
-- JFET: 1 dimension (Vgs->Id)
+- JFET: 2 dimensions (Vgs,Vds->Id, Vgs->Ig)
 - Tube: 2 dimensions (Vgk->Ip, Vpk->Ig)
-- MOSFET: 1 dimension (Vgs->Id) — not yet supported in NR codegen
+- MOSFET: 2 dimensions (Vgs,Vds->Id, Ig=0)
 
 Example for a circuit with D1, Q1, X1 (triode):
 ```
@@ -350,8 +354,9 @@ Matrix inversion uses inline Gaussian elimination (`invert_n()` helper emitted i
 | Jacobian | Full `J = I - J_dev * K` | Block-diagonal `J = I - J_dev * K` |
 | Device Jacobian | Dense matrix from devices | Block-diagonal jdev entries |
 | Linear solve | Gaussian elimination (any size) | Explicit for M<=16 (Gauss elim for M>=3) |
-| Handles | All device types | Diodes (1D), BJTs (2D), JFETs (1D), Tubes (2D) |
+| Handles | All device types | Diodes (1D), BJTs (2D), JFETs (2D), Tubes (2D), MOSFETs (2D) |
 | DC OP init | `initialize_dc_op()` (opt-in) | `DC_NL_I` constant (automatic) |
 | Oversampling | Not available | 2x/4x polyphase half-band IIR |
 | Sparsity | Dense | Zero entries skipped in emission |
 | Sample rate | Fixed at construction | `set_sample_rate()` recomputes from G+C |
+| Multi-output | Single output | Stereo/multi-output supported (multiple output nodes) |

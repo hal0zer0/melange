@@ -37,9 +37,9 @@ Temperature coefficients (TC1, TC2) on resistors are ignored. All simulations ru
 
 ## Parser Issues
 
-### Line Continuation [KNOWN BUG]
+### ~~Line Continuation~~ ✅ Fixed
 
-Multi-line statements with `+` continuation characters are not properly concatenated. The `+` is stripped but lines are not joined.
+Multi-line statements with `+` continuation characters are now properly concatenated. The parser joins continuation lines before processing.
 
 **Example:**
 ```spice
@@ -47,9 +47,7 @@ Multi-line statements with `+` continuation characters are not properly concaten
 + IS=1e-15 BF=200
 + )
 ```
-This will NOT parse correctly.
-
-**Workaround:** Use single-line statements.
+This parses correctly.
 
 ### ~~Subcircuits~~ ✅ Implemented (2026-03-02)
 
@@ -59,7 +57,7 @@ Subcircuit expansion now works: `X` elements are recursively expanded with node 
 
 ### Matrix Storage [PERFORMANCE]
 
-Matrices use `Vec<Vec<f64>>` (jagged arrays) instead of flat storage. This has poor cache locality but is acceptable for small circuits (N ≤ 8).
+Matrices use `Vec<Vec<f64>>` (jagged arrays) instead of flat storage. This has poor cache locality but is acceptable for typical circuits (validated up to N=13, e.g. Pultec EQP-1A).
 
 ### Denormal Handling [PERFORMANCE]
 
@@ -67,23 +65,25 @@ Very small values (< 1e-308) are not flushed to zero. On x86, this can cause per
 
 ### Condition Number [NUMERICAL]
 
-No condition number estimation is performed. Very ill-conditioned circuits may produce inaccurate results without warning.
+Condition number estimation is performed during DK kernel build. A `log::warn!` is emitted if cond(A) > 1e12. Very ill-conditioned circuits will still produce results but may have reduced accuracy.
 
 ## Solver Limitations
 
-### Voltage Sources [PARTIAL]
+### Voltage Sources
 
-Independent voltage sources (V elements) are parsed but not fully integrated into the MNA system. Only the input source (for `process_sample`) is handled correctly.
+Independent voltage sources (V elements) are implemented as Norton equivalents (high-conductance stamp in G matrix + current in RHS). DC supply voltages (e.g. VCC) and the input source both work correctly.
 
-### Multi-Dimensional NR [SIMPLIFIED]
+### ~~Multi-Dimensional NR~~ ✅ Full Implementation
 
-For M > 2 nonlinear elements, the solver uses a damped fixed-point iteration instead of full Newton-Raphson with Jacobian. This converges slower but is more stable.
+For M > 2 nonlinear elements, the solver uses full Newton-Raphson with block-diagonal Jacobian and Gaussian elimination (M=3..16). Both runtime and codegen support up to M=16.
 
-### Device Models [PARTIAL]
+### Device Models
 
-- **BJT**: Ebers-Moll model in devices crate, but only collector current is used in solver (simplified)
-- **Op-amps**: Boyle macro model defined but not integrated into solver
-- **JFET/MOSFET**: Simplified 1D models only
+- **BJT**: Full 2D (Ic + Ib) Ebers-Moll and Gummel-Poon models in both runtime and codegen
+- **Op-amps**: Work via VCCS MNA stamping (linear, no NR dimensions). AOL and ROUT configurable.
+- **JFET**: Full 2D Shichman-Hodges (triode + saturation + channel-length modulation) in codegen. Not in runtime solver.
+- **MOSFET**: Full 2D Level 1 SPICE (triode + saturation + channel-length modulation) in codegen. Not in runtime solver.
+- **Vacuum Tube**: Koren triode + Leach grid current in codegen. Not in runtime solver.
 
 ## Audio-Specific Missing Features
 
@@ -119,7 +119,7 @@ Matrix inversion is O(n³) and occurs at:
 - Construction time (sample rate change)
 - Never during audio callback
 
-For n ≤ 8 nodes, this is negligible.
+For typical circuits (up to N=13 validated), this is negligible.
 
 ## Documentation Gaps
 
@@ -138,7 +138,7 @@ Many public structs lack detailed field documentation.
 
 ### Component Values
 
-- Negative resistors/capacitors/inductors are rejected (panic)
+- Negative resistors/capacitors/inductors are rejected (returns error, does not panic)
 - Zero values may cause numerical issues
 - No warnings for extreme values (1e-300, 1e300)
 

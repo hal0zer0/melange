@@ -68,7 +68,7 @@ STEP_CLAMP = 0.01 prevents overshoot on sharp nonlinearities.
 
 ## Convergence Criteria
 ```
-|delta| < tolerance (1e-9)  or  max_iter (20) reached
+|delta| < tolerance (1e-9)  or  max_iter (100) reached
 ```
 
 ## Safety Measures
@@ -103,8 +103,8 @@ if !i_nl.iter().all(|x| x.is_finite()) {
   delta0 = (j11*f0 - j01*f1) / det
   delta1 = (-j10*f0 + j00*f1) / det
   ```
-- M=3, M=4: Inline Gaussian elimination with partial pivoting
-- M>4: Not supported in codegen
+- M=3..16: Inline Gaussian elimination with partial pivoting
+- M>16: Not supported (MAX_M=16)
 
 ## Warm Start
 Use `i_nl_prev` from previous time sample as initial guess. Reduces iterations from 10-20 to 3-5.

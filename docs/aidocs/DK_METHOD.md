@@ -47,8 +47,9 @@ No negation needed. N_i uses the "current injection" convention:
 Devices occupy M dimensions in netlist order:
 - Diode: 1 dimension (Vd -> Id)
 - BJT: 2 dimensions (Vbe -> Ic, Vbc -> Ib)
-- JFET: 1 dimension (Vgs -> Id)
-- MOSFET: 1 dimension (Vgs -> Id)
+- JFET: 2 dimensions (Vgs,Vds -> Id, Vgs -> Ig)
+- MOSFET: 2 dimensions (Vgs,Vds -> Id, Ig=0)
+- Tube: 2 dimensions (Vgk -> Ip, Vpk -> Ig)
 
 ## Algorithm
 

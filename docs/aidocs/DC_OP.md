@@ -115,6 +115,14 @@ Uses `DeviceSlot` params from `codegen::ir`:
 - **BJT**: Ebers-Moll transport model with polarity sign (+1 NPN, -1 PNP)
   - `Ic = sign * IS * (exp(Vbe_eff/VT) - exp(Vbc_eff/VT)) - sign * (IS/BR) * (exp(Vbc_eff/VT) - 1)`
   - `Ib = sign * (IS/BF) * (exp(Vbe_eff/VT) - 1) + sign * (IS/BR) * (exp(Vbc_eff/VT) - 1)`
+- **JFET**: 2D Shichman-Hodges with triode + saturation regions, channel-length modulation (lambda)
+  - `Id = sign * IDSS * f(Vgs, Vds, Vp) * (1 + lambda*|Vds|)`, `Ig ≈ 0`
+  - N-channel (sign=+1) / P-channel (sign=-1)
+- **MOSFET**: 2D Level 1 SPICE with triode + saturation regions, channel-length modulation (lambda)
+  - `Id = sign * KP * f(Vgs, Vds, Vt) * (1 + lambda*|Vds|)`, `Ig = 0`
+  - N-channel (sign=+1) / P-channel (sign=-1)
+- **Tube**: 2D Koren plate current + Leach grid current
+  - `Ip = E1^ex / Kg1`, `Ig = ig_max * (vgk/vgk_onset)^1.5` for vgk > 0
 - **Clamping**: `safe_exp(x) = x.clamp(-40, 40).exp()` matching codegen/runtime
 
 ## API
@@ -197,23 +205,15 @@ pub fn initialize_dc_op(&mut self, mna: &MnaSystem, device_slots: &[DeviceSlot])
 }
 ```
 
-## Known Issue: DK Backward Euler Steady State
+## DK Trapezoidal Steady State
 
-The DK solver uses **backward Euler** for nonlinear currents (only `i_nl[n+1]`,
-not trapezoidal average). This means the DK solver's steady state differs from the
-true DC operating point.
+The DK solver uses **trapezoidal** integration for both linear and nonlinear currents.
+The net nonlinear contribution is `N_i * (i_nl[n+1] + i_nl[n])`, which is a proper
+trapezoidal average matching the linear discretization.
 
-At DC steady state in the DK framework:
-```
-v = S · (b_dc + N_i · i_nl)   // NOT G^{-1} · (b_dc + N_i · i_nl)
-```
-
-where `S = A^{-1} = (G + 2C/T)^{-1}`, so the capacitor terms shift the effective
-conductance matrix. For circuits with capacitors, initializing with true DC OP values
-causes a startup transient as the DK solver adjusts to its own steady state.
-
-**Mitigation**: `initialize_dc_op()` runs 500 warm-up samples with zero input after
-setting the initial state, allowing the DK solver to settle.
+**Warm-up**: `initialize_dc_op()` runs 50 warm-up samples with zero input after
+setting the initial state, allowing the DK solver to settle from any residual
+mismatch between the DC OP solution and the DK steady state.
 
 ## Expected DC OP Values (Verification)
 
@@ -241,4 +241,4 @@ V(coll) ≈ 1.73V  (12 - 1.51e-3 * 6800)
 | Converges to wrong point | Linear initial guess too far | Source stepping will fix automatically |
 | PNP BJT wrong polarity | Missing sign parameter | Check `is_pnp` flag in DeviceParams |
 | V_node all zeros | Input conductance not stamped | Check `config.input_resistance > 0` |
-| BJT oscillation in transient | DK backward Euler instability | Pre-existing DK issue, not DC OP |
+| BJT oscillation in transient | Mixed integration mismatch | Fixed: DK now uses trapezoidal for nonlinear currents |
