@@ -135,6 +135,48 @@ enum Commands {
         input_resistance: Option<f64>,
     },
 
+    /// Analyze circuit frequency response
+    Analyze {
+        /// Input SPICE netlist file or circuit reference
+        input: String,
+
+        /// Input node name
+        #[arg(short = 'I', long, default_value = "in")]
+        input_node: String,
+
+        /// Output node name
+        #[arg(short = 'n', long, default_value = "out")]
+        output_node: String,
+
+        /// Start frequency in Hz
+        #[arg(long, default_value = "20.0")]
+        start_freq: f64,
+
+        /// End frequency in Hz
+        #[arg(long, default_value = "20000.0")]
+        end_freq: f64,
+
+        /// Frequency points per decade
+        #[arg(long, default_value = "10")]
+        points_per_decade: usize,
+
+        /// Input amplitude in volts
+        #[arg(long, default_value = "0.1")]
+        amplitude: f64,
+
+        /// Sample rate in Hz
+        #[arg(short, long, default_value = "96000")]
+        sample_rate: f64,
+
+        /// Override input resistance (ohms)
+        #[arg(long)]
+        input_resistance: Option<f64>,
+
+        /// Write CSV output to file instead of stdout
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
+
     /// List available nodes in a netlist
     Nodes {
         /// Input SPICE netlist file or circuit reference
@@ -291,6 +333,43 @@ fn main() -> Result<()> {
                     amplitude,
                     input_resistance_flag,
                 },
+            )
+        }
+        Commands::Analyze {
+            input,
+            input_node,
+            output_node,
+            start_freq,
+            end_freq,
+            points_per_decade,
+            amplitude,
+            sample_rate,
+            input_resistance,
+            output,
+        } => {
+            // Validate numeric CLI parameters
+            if start_freq <= 0.0 || !start_freq.is_finite() {
+                anyhow::bail!("start-freq must be positive and finite");
+            }
+            if end_freq <= start_freq || !end_freq.is_finite() {
+                anyhow::bail!("end-freq must be greater than start-freq and finite");
+            }
+            if amplitude <= 0.0 || !amplitude.is_finite() {
+                anyhow::bail!("amplitude must be positive and finite");
+            }
+            if sample_rate <= 0.0 || !sample_rate.is_finite() {
+                anyhow::bail!("sample-rate must be positive and finite");
+            }
+            if points_per_decade == 0 {
+                anyhow::bail!("points-per-decade must be at least 1");
+            }
+
+            let circuit_source = circuits::resolve(&input)?;
+            analyze_freq_response(
+                &circuit_source, &input_node, &output_node,
+                start_freq, end_freq, points_per_decade,
+                amplitude, sample_rate, input_resistance,
+                output.as_ref(),
             )
         }
         Commands::Nodes { input } => {
@@ -834,6 +913,282 @@ fn simulate_circuit_source(
     }
 
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn analyze_freq_response(
+    circuit_source: &circuits::CircuitSource,
+    input_node_name: &str,
+    output_node_name: &str,
+    start_freq: f64,
+    end_freq: f64,
+    points_per_decade: usize,
+    amplitude: f64,
+    sample_rate: f64,
+    input_resistance_flag: Option<f64>,
+    output_file: Option<&PathBuf>,
+) -> Result<()> {
+    use melange_solver::{
+        dk::DkKernel,
+        mna::MnaSystem,
+        parser::Netlist,
+        solver::{CircuitSolver, DeviceEntry, LinearSolver},
+    };
+    use melange_devices::bjt::{BjtEbersMoll, BjtPolarity};
+    use melange_devices::diode::DiodeShockley;
+
+    eprintln!("melange analyze (frequency response)");
+
+    let netlist_str = match circuit_source {
+        circuits::CircuitSource::Builtin { content, name } => {
+            eprintln!("  Using builtin circuit: {}", name);
+            content.clone()
+        }
+        circuits::CircuitSource::Local { path } => {
+            std::fs::read_to_string(path)
+                .with_context(|| format!("Failed to read: {}", path.display()))?
+        }
+        circuits::CircuitSource::Url { url } | circuits::CircuitSource::Friendly { url, .. } => {
+            let cache = cache::Cache::new()?;
+            cache.get_sync(url, false)?
+        }
+    };
+
+    let mut netlist = Netlist::parse(&netlist_str)
+        .with_context(|| "Failed to parse SPICE netlist")?;
+    if !netlist.subcircuits.is_empty() {
+        netlist.expand_subcircuits()
+            .with_context(|| "Failed to expand subcircuits")?;
+    }
+
+    let mut mna = MnaSystem::from_netlist(&netlist)
+        .with_context(|| "Failed to build MNA system")?;
+
+    let input_node_raw = mna.node_map.get(input_node_name).copied()
+        .ok_or_else(|| anyhow::anyhow!(
+            "Input node '{}' not found. Available: {:?}",
+            input_node_name, mna.node_map.keys().collect::<Vec<_>>()
+        ))?;
+    if input_node_raw == 0 { anyhow::bail!("Input node cannot be ground (0)"); }
+    let input_node_idx = input_node_raw - 1;
+
+    let output_node_raw = mna.node_map.get(output_node_name).copied()
+        .ok_or_else(|| anyhow::anyhow!(
+            "Output node '{}' not found. Available: {:?}",
+            output_node_name, mna.node_map.keys().collect::<Vec<_>>()
+        ))?;
+    if output_node_raw == 0 { anyhow::bail!("Output node cannot be ground (0)"); }
+    let output_node_idx = output_node_raw - 1;
+
+    let (input_resistance, ir_source) = if let Some(r) = input_resistance_flag {
+        (r, "flag")
+    } else if let Some(r) = netlist.input_impedance {
+        (r, "directive")
+    } else {
+        (1.0, "default")
+    };
+    let input_conductance = 1.0 / input_resistance;
+    if input_node_idx < mna.n {
+        mna.g[input_node_idx][input_node_idx] += input_conductance;
+    }
+    eprintln!("  N={}, M={}, R_in={} ({})", mna.n,
+        mna.nonlinear_devices.iter().map(|d| d.dimension).sum::<usize>(),
+        input_resistance, ir_source);
+
+    // Generate log-spaced frequencies
+    let freqs = generate_log_frequencies(start_freq, end_freq, points_per_decade);
+    eprintln!("  Sweeping {} frequencies from {:.0} Hz to {:.0} Hz", freqs.len(), start_freq, end_freq);
+
+    let nyquist = sample_rate / 2.0;
+    if end_freq > nyquist {
+        eprintln!("  Warning: end frequency {:.0} Hz exceeds Nyquist ({:.0} Hz), results above Nyquist will alias", end_freq, nyquist);
+    }
+
+    // Build kernel
+    let kernel = DkKernel::from_mna(&mna, sample_rate)
+        .with_context(|| "Failed to create DK kernel")?;
+
+    let is_linear = kernel.m == 0;
+
+    // For nonlinear circuits, compute DC OP once and clone for each frequency
+    let base_solver = if !is_linear {
+        let find_model_param = |model_name: &str, param: &str| -> Option<f64> {
+            netlist.models.iter()
+                .find(|m| m.name.eq_ignore_ascii_case(model_name))
+                .and_then(|m| m.params.iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case(param))
+                    .map(|(_, v)| *v))
+        };
+
+        let mut devices = Vec::new();
+        for dev_info in &mna.nonlinear_devices {
+            match dev_info.device_type {
+                melange_solver::mna::NonlinearDeviceType::Diode => {
+                    let model_name = netlist.elements.iter().find_map(|e| {
+                        if let melange_solver::parser::Element::Diode { name, model, .. } = e {
+                            if name.eq_ignore_ascii_case(&dev_info.name) { Some(model.as_str()) } else { None }
+                        } else { None }
+                    }).unwrap_or("");
+                    let is = find_model_param(model_name, "IS").unwrap_or(1e-15);
+                    let n = find_model_param(model_name, "N").unwrap_or(1.0);
+                    devices.push(DeviceEntry::new_diode(DiodeShockley::new_room_temp(is, n), dev_info.start_idx));
+                }
+                melange_solver::mna::NonlinearDeviceType::Bjt => {
+                    let model_name = netlist.elements.iter().find_map(|e| {
+                        if let melange_solver::parser::Element::Bjt { name, model, .. } = e {
+                            if name.eq_ignore_ascii_case(&dev_info.name) { Some(model.as_str()) } else { None }
+                        } else { None }
+                    }).unwrap_or("");
+                    let is = find_model_param(model_name, "IS").unwrap_or(1e-14);
+                    let bf = find_model_param(model_name, "BF").unwrap_or(200.0);
+                    let br = find_model_param(model_name, "BR").unwrap_or(3.0);
+                    let is_pnp = netlist.models.iter()
+                        .find(|m| m.name.eq_ignore_ascii_case(&model_name))
+                        .map(|m| m.model_type.eq_ignore_ascii_case("PNP"))
+                        .unwrap_or(false);
+                    let polarity = if is_pnp { BjtPolarity::Pnp } else { BjtPolarity::Npn };
+                    devices.push(DeviceEntry::new_bjt(BjtEbersMoll::new(is, 0.02585, bf, br, polarity), dev_info.start_idx));
+                }
+                _ => {
+                    eprintln!("  Warning: unsupported device type for '{}' in runtime analysis, skipping", dev_info.name);
+                }
+            }
+        }
+        let mut solver = CircuitSolver::new(kernel.clone(), devices, input_node_idx, output_node_idx);
+        solver.input_conductance = input_conductance;
+        let device_slots = build_device_slots(&netlist, &mna);
+        solver.initialize_dc_op(&mna, &device_slots);
+        Some(solver)
+    } else {
+        None
+    };
+
+    // Measure at each frequency
+    let mut results: Vec<(f64, f64, f64)> = Vec::with_capacity(freqs.len());
+
+    for &freq in &freqs {
+        let (gain_db, phase_deg) = if is_linear {
+            let mut solver = LinearSolver::new(kernel.clone(), input_node_idx, output_node_idx);
+            solver.input_conductance = input_conductance;
+            measure_at_frequency(&mut SolverWrapper::Linear(&mut solver), freq, amplitude, sample_rate)
+        } else {
+            // Clone from the DC OP-initialized base solver to avoid recomputing DC OP
+            let mut solver = base_solver.as_ref().unwrap().clone();
+            measure_at_frequency(&mut SolverWrapper::Nonlinear(&mut solver), freq, amplitude, sample_rate)
+        };
+        results.push((freq, gain_db, phase_deg));
+        eprintln!("  {:.1} Hz: {:.2} dB, {:.1}°", freq, gain_db, phase_deg);
+    }
+
+    // Format CSV output
+    let csv = format_freq_response_csv(&results);
+    if let Some(path) = output_file {
+        std::fs::write(path, &csv)
+            .with_context(|| format!("Failed to write output: {}", path.display()))?;
+        eprintln!("  Wrote {} frequency points to {}", results.len(), path.display());
+    } else {
+        print!("{}", csv);
+    }
+
+    Ok(())
+}
+
+fn generate_log_frequencies(start: f64, end: f64, points_per_decade: usize) -> Vec<f64> {
+    let log_start = start.log10();
+    let log_end = end.log10();
+    let decades = log_end - log_start;
+    let total_points = (decades * points_per_decade as f64).ceil() as usize + 1;
+    (0..total_points)
+        .map(|i| {
+            let log_f = log_start + i as f64 * decades / (total_points - 1).max(1) as f64;
+            10.0_f64.powf(log_f)
+        })
+        .collect()
+}
+
+/// Wrapper to abstract over linear/nonlinear solvers for freq measurement.
+enum SolverWrapper<'a> {
+    Linear(&'a mut melange_solver::solver::LinearSolver),
+    Nonlinear(&'a mut melange_solver::solver::CircuitSolver),
+}
+
+impl SolverWrapper<'_> {
+    fn process_sample(&mut self, input: f64) -> f64 {
+        match self {
+            SolverWrapper::Linear(s) => s.process_sample(input),
+            SolverWrapper::Nonlinear(s) => s.process_sample(input),
+        }
+    }
+}
+
+/// Measure gain (dB) and phase (degrees) at a single frequency using single-bin DFT.
+fn measure_at_frequency(
+    solver: &mut SolverWrapper,
+    freq: f64,
+    amplitude: f64,
+    sample_rate: f64,
+) -> (f64, f64) {
+    use std::f64::consts::PI;
+    let period_samples = (sample_rate / freq).round() as usize;
+    let settle_cycles = 10;
+    let measure_cycles = 5;
+    let settle_samples = settle_cycles * period_samples;
+    let measure_samples = (measure_cycles as f64 * sample_rate / freq).round() as usize;
+
+    // Settle phase
+    for i in 0..settle_samples {
+        let t = i as f64 / sample_rate;
+        let input = amplitude * (2.0 * PI * freq * t).sin();
+        solver.process_sample(input);
+    }
+
+    // Measure phase using single-bin DFT (correlate with sin/cos at test frequency)
+    let mut sin_acc = 0.0;
+    let mut cos_acc = 0.0;
+    let mut in_sin_acc = 0.0;
+    let mut in_cos_acc = 0.0;
+
+    for i in 0..measure_samples {
+        let t = (settle_samples + i) as f64 / sample_rate;
+        let phase = 2.0 * PI * freq * t;
+        let input = amplitude * phase.sin();
+        let output = solver.process_sample(input);
+
+        let sin_ref = phase.sin();
+        let cos_ref = phase.cos();
+        sin_acc += output * sin_ref;
+        cos_acc += output * cos_ref;
+        in_sin_acc += input * sin_ref;
+        in_cos_acc += input * cos_ref;
+    }
+
+    // Output amplitude and phase from DFT coefficients
+    let out_amp = 2.0 * (sin_acc * sin_acc + cos_acc * cos_acc).sqrt() / measure_samples as f64;
+    let in_amp = 2.0 * (in_sin_acc * in_sin_acc + in_cos_acc * in_cos_acc).sqrt() / measure_samples as f64;
+
+    let gain_db = if in_amp > 1e-30 && out_amp > 1e-30 {
+        20.0 * (out_amp / in_amp).log10()
+    } else {
+        -120.0
+    };
+
+    let out_phase = cos_acc.atan2(sin_acc);
+    let in_phase = in_cos_acc.atan2(in_sin_acc);
+    let phase_diff = (out_phase - in_phase).to_degrees();
+    // Normalize to [-180, 180]
+    let phase_deg = if phase_diff > 180.0 { phase_diff - 360.0 }
+        else if phase_diff < -180.0 { phase_diff + 360.0 }
+        else { phase_diff };
+
+    (gain_db, phase_deg)
+}
+
+fn format_freq_response_csv(results: &[(f64, f64, f64)]) -> String {
+    let mut csv = String::from("frequency_hz,gain_db,phase_deg\n");
+    for &(freq, gain, phase) in results {
+        csv.push_str(&format!("{:.2},{:.4},{:.2}\n", freq, gain, phase));
+    }
+    csv
 }
 
 fn build_device_slots(
