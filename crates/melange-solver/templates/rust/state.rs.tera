@@ -121,6 +121,15 @@ pub struct CircuitState {
     pub pot_{{ idx }}_u_ni: [f64; M],
 {% endfor %}
 {% endif %}
+{% if num_device_params > 0 %}
+    // --- Runtime-adjustable device parameters ---
+    // These fields are initialized from the corresponding DEVICE_N_* constants.
+    // Modify them at runtime to change device behavior (e.g. tube aging, transistor matching).
+{% for dev in device_params %}{% for p in dev.params %}
+    /// Device {{ dev.dev_num }} {{ p.const_suffix }} ({{ dev.device_type }}) — runtime adjustable
+    pub device_{{ dev.dev_num }}_{{ p.field_suffix }}: f64,
+{% endfor %}{% endfor %}
+{% endif %}
 }
 
 impl Default for CircuitState {
@@ -189,6 +198,11 @@ impl Default for CircuitState {
             pot_{{ idx }}_u_ni: POT_{{ idx }}_U_NI,
 {% endfor %}
 {% endif %}
+{% if num_device_params > 0 %}
+{% for dev in device_params %}{% for p in dev.params %}
+            device_{{ dev.dev_num }}_{{ p.field_suffix }}: DEVICE_{{ dev.dev_num }}_{{ p.const_suffix }},
+{% endfor %}{% endfor %}
+{% endif %}
         }
     }
 }
@@ -235,6 +249,11 @@ impl CircuitState {
 {% endif %}{% if oversampling_4x %}
         self.os_up_state_outer = [0.0; {{ os_state_size_outer }}];
         self.os_dn_state_outer = [[0.0; {{ os_state_size_outer }}]; NUM_OUTPUTS];
+{% endif %}
+{% if num_device_params > 0 %}
+{% for dev in device_params %}{% for p in dev.params %}
+        self.device_{{ dev.dev_num }}_{{ p.field_suffix }} = DEVICE_{{ dev.dev_num }}_{{ p.const_suffix }};
+{% endfor %}{% endfor %}
 {% endif %}
     }
 

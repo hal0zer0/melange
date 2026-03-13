@@ -642,20 +642,21 @@ fn test_codegen_bjt_nr_solver_generates_device_calls() {
 
     assert_eq!(kernel.m, 2, "Expected m=2 for single BJT circuit");
 
-    // BJT NR solver should call bjt_ic and bjt_ib with per-device params including GP params
+    // BJT NR solver should call bjt_ic and bjt_ib with state fields for IS, VT, BETA_R, BETA_F
+    // but SIGN, USE_GP, VAF, VAR, IKF remain as const
     assert!(
-        code.contains("bjt_ic(v_d0, v_d1, DEVICE_0_IS, DEVICE_0_VT, DEVICE_0_BETA_R, DEVICE_0_SIGN, DEVICE_0_USE_GP, DEVICE_0_VAF, DEVICE_0_VAR, DEVICE_0_IKF)"),
-        "NR solver should call bjt_ic with per-device params and GP params."
+        code.contains("bjt_ic(v_d0, v_d1, state.device_0_is, state.device_0_vt, state.device_0_br, DEVICE_0_SIGN, DEVICE_0_USE_GP, DEVICE_0_VAF, DEVICE_0_VAR, DEVICE_0_IKF)"),
+        "NR solver should call bjt_ic with state fields for IS/VT/BR and const for SIGN/GP params."
     );
     assert!(
-        code.contains("bjt_ib(v_d0, v_d1, DEVICE_0_IS, DEVICE_0_VT, DEVICE_0_BETA_F, DEVICE_0_BETA_R, DEVICE_0_SIGN)"),
-        "NR solver should call bjt_ib with per-device params and sign."
+        code.contains("bjt_ib(v_d0, v_d1, state.device_0_is, state.device_0_vt, state.device_0_bf, state.device_0_br, DEVICE_0_SIGN)"),
+        "NR solver should call bjt_ib with state fields for IS/VT/BF/BR and const for SIGN."
     );
 
-    // Should call bjt_jacobian with per-device params including GP params
+    // Should call bjt_jacobian with state fields for IS/VT/BF/BR and const for SIGN/GP params
     assert!(
-        code.contains("bjt_jacobian(v_d0, v_d1, DEVICE_0_IS, DEVICE_0_VT, DEVICE_0_BETA_F, DEVICE_0_BETA_R, DEVICE_0_SIGN, DEVICE_0_USE_GP, DEVICE_0_VAF, DEVICE_0_VAR, DEVICE_0_IKF)"),
-        "NR solver should call bjt_jacobian with per-device params and GP params."
+        code.contains("bjt_jacobian(v_d0, v_d1, state.device_0_is, state.device_0_vt, state.device_0_bf, state.device_0_br, DEVICE_0_SIGN, DEVICE_0_USE_GP, DEVICE_0_VAF, DEVICE_0_VAR, DEVICE_0_IKF)"),
+        "NR solver should call bjt_jacobian with state fields for IS/VT/BF/BR and const for SIGN/GP params."
     );
 
     // Should assign all 4 Jacobian entries from the bjt_jacobian result
@@ -749,14 +750,14 @@ fn test_codegen_mixed_diode_bjt_device_map() {
     // D1 is 1D (index 0), Q1 is 2D (indices 1,2) → M=3
     assert_eq!(kernel.m, 3, "Expected m=3 for diode + BJT circuit");
 
-    // Diode at index 0 (device 0) with per-device params
-    assert!(code.contains("diode_current(v_d0, DEVICE_0_IS, DEVICE_0_N_VT)"), "Diode current at index 0");
-    assert!(code.contains("jdev_0_0 = diode_conductance(v_d0, DEVICE_0_IS, DEVICE_0_N_VT)"), "Diode jdev at index 0");
+    // Diode at index 0 (device 0) with state fields for IS, N_VT
+    assert!(code.contains("diode_current(v_d0, state.device_0_is, state.device_0_n_vt)"), "Diode current at index 0");
+    assert!(code.contains("jdev_0_0 = diode_conductance(v_d0, state.device_0_is, state.device_0_n_vt)"), "Diode jdev at index 0");
 
-    // BJT at indices 1,2 (device 1) with per-device params including GP params
-    assert!(code.contains("bjt_ic(v_d1, v_d2, DEVICE_1_IS, DEVICE_1_VT, DEVICE_1_BETA_R, DEVICE_1_SIGN, DEVICE_1_USE_GP, DEVICE_1_VAF, DEVICE_1_VAR, DEVICE_1_IKF)"), "BJT Ic at indices 1,2");
-    assert!(code.contains("bjt_ib(v_d1, v_d2, DEVICE_1_IS, DEVICE_1_VT, DEVICE_1_BETA_F, DEVICE_1_BETA_R, DEVICE_1_SIGN)"), "BJT Ib at indices 1,2");
-    assert!(code.contains("bjt_jacobian(v_d1, v_d2, DEVICE_1_IS, DEVICE_1_VT, DEVICE_1_BETA_F, DEVICE_1_BETA_R, DEVICE_1_SIGN, DEVICE_1_USE_GP, DEVICE_1_VAF, DEVICE_1_VAR, DEVICE_1_IKF)"), "BJT Jacobian at indices 1,2");
+    // BJT at indices 1,2 (device 1) with state fields for IS/VT/BF/BR, const for SIGN/GP
+    assert!(code.contains("bjt_ic(v_d1, v_d2, state.device_1_is, state.device_1_vt, state.device_1_br, DEVICE_1_SIGN, DEVICE_1_USE_GP, DEVICE_1_VAF, DEVICE_1_VAR, DEVICE_1_IKF)"), "BJT Ic at indices 1,2");
+    assert!(code.contains("bjt_ib(v_d1, v_d2, state.device_1_is, state.device_1_vt, state.device_1_bf, state.device_1_br, DEVICE_1_SIGN)"), "BJT Ib at indices 1,2");
+    assert!(code.contains("bjt_jacobian(v_d1, v_d2, state.device_1_is, state.device_1_vt, state.device_1_bf, state.device_1_br, DEVICE_1_SIGN, DEVICE_1_USE_GP, DEVICE_1_VAF, DEVICE_1_VAR, DEVICE_1_IKF)"), "BJT Jacobian at indices 1,2");
 
     // All 3 residuals
     assert!(code.contains("let f0 = i_nl[0] - i_dev0"), "Residual f0");
@@ -1220,14 +1221,14 @@ fn test_heterogeneous_diode_models() {
         "Device 1 (DSLOW) should have N_VT for N=1.5."
     );
 
-    // Both devices should call parameterized functions with their own constants
+    // Both devices should call parameterized functions with state fields
     assert!(
-        code.contains("diode_current(v_d0, DEVICE_0_IS, DEVICE_0_N_VT)"),
-        "Device 0 should call diode_current with DEVICE_0 params."
+        code.contains("diode_current(v_d0, state.device_0_is, state.device_0_n_vt)"),
+        "Device 0 should call diode_current with state.device_0 params."
     );
     assert!(
-        code.contains("diode_current(v_d1, DEVICE_1_IS, DEVICE_1_N_VT)"),
-        "Device 1 should call diode_current with DEVICE_1 params."
+        code.contains("diode_current(v_d1, state.device_1_is, state.device_1_n_vt)"),
+        "Device 1 should call diode_current with state.device_1 params."
     );
 }
 
@@ -2789,10 +2790,10 @@ fn test_jfet_codegen_generates_correct_functions() {
     assert!(code.contains("DEVICE_0_LAMBDA"), "Should have LAMBDA constant");
     assert!(code.contains("DEVICE_0_SIGN"), "Should have SIGN constant");
 
-    // Should call JFET functions in NR loop
+    // Should call JFET functions in NR loop with state fields for IDSS/VP/LAMBDA, const for SIGN
     assert!(
-        code.contains("jfet_id(v_d0, v_d1, DEVICE_0_IDSS, DEVICE_0_VP, DEVICE_0_LAMBDA, DEVICE_0_SIGN)"),
-        "NR loop should call jfet_id with 2D args"
+        code.contains("jfet_id(v_d0, v_d1, state.device_0_idss, state.device_0_vp, state.device_0_lambda, DEVICE_0_SIGN)"),
+        "NR loop should call jfet_id with state fields for IDSS/VP/LAMBDA"
     );
     assert!(
         code.contains("jfet_ig(v_d0, DEVICE_0_SIGN)"),
@@ -4350,4 +4351,729 @@ fn test_mismatched_output_scales_rejected() {
         matches!(err, CodegenError::InvalidConfig(_)),
         "Error should be InvalidConfig, got: {:?}", err
     );
+}
+
+// ==========================================================================
+// VCCS (G) and VCVS (E) controlled source codegen tests
+// ==========================================================================
+
+const VCCS_CIRCUIT_SPICE: &str = "\
+VCCS Circuit
+R1 in 0 1k
+G1 out 0 in 0 0.01
+R2 out 0 1k
+C1 out 0 100n
+";
+
+const VCVS_CIRCUIT_SPICE: &str = "\
+VCVS Circuit
+R1 in 0 1k
+E1 out 0 in 0 10
+R2 out 0 1k
+C1 out 0 100n
+";
+
+const VCCS_WITH_DIODE_SPICE: &str = "\
+VCCS With Diode
+R1 in 0 1k
+G1 mid 0 in 0 0.01
+R2 mid 0 1k
+D1 mid out D1N4148
+C1 out 0 100n
+.model D1N4148 D(IS=2.52e-9 N=1.752)
+";
+
+/// VCCS circuit: verify codegen produces valid code (linear, M=0).
+#[test]
+fn test_vccs_codegen_compiles_and_runs() {
+    let (netlist, mna, kernel) = build_pipeline(VCCS_CIRCUIT_SPICE);
+    assert_eq!(kernel.m, 0, "VCCS is linear, M should be 0");
+
+    let config = CodegenConfig {
+        circuit_name: "vccs_test".to_string(),
+        sample_rate: 44100.0,
+        input_node: 0,
+        output_nodes: vec![1],
+        input_resistance: 1.0,
+        ..CodegenConfig::default()
+    };
+    let codegen = CodeGenerator::new(config);
+    let result = codegen.generate(&kernel, &mna, &netlist).expect("codegen failed");
+
+    let test_harness = format!(
+        "{}\n\
+         fn main() {{\n\
+             let mut state = CircuitState::default();\n\
+             \n\
+             // Feed a 1kHz sine wave for 500 samples\n\
+             let mut max_abs_out = 0.0f64;\n\
+             let mut any_nonzero = false;\n\
+             for i in 0..500 {{\n\
+                 let t = i as f64 / 44100.0;\n\
+                 let input = 0.1 * (2.0 * std::f64::consts::PI * 1000.0 * t).sin();\n\
+                 let out = process_sample(input, &mut state)[0];\n\
+                 assert!(out.is_finite(), \"Output at sample {{}} must be finite, got {{}}\", i, out);\n\
+                 if out.abs() > 1e-10 {{ any_nonzero = true; }}\n\
+                 if out.abs() > max_abs_out {{ max_abs_out = out.abs(); }}\n\
+             }}\n\
+             \n\
+             assert!(any_nonzero, \"VCCS circuit output should not be all zeros\");\n\
+             eprintln!(\"VCCS codegen test passed! max_abs_out={{}}\", max_abs_out);\n\
+         }}\n",
+        result.code
+    );
+
+    let tmp_dir = std::env::temp_dir();
+    let src_path = tmp_dir.join("melange_vccs_run_test.rs");
+    let bin_path = tmp_dir.join("melange_vccs_run_test");
+    {
+        let mut f = std::fs::File::create(&src_path).expect("create temp file");
+        f.write_all(test_harness.as_bytes()).expect("write temp file");
+    }
+
+    let compile = std::process::Command::new("rustc")
+        .args([src_path.to_str().unwrap(), "-o", bin_path.to_str().unwrap(), "--edition", "2021"])
+        .output()
+        .expect("run rustc");
+
+    if !compile.status.success() {
+        let _ = std::fs::remove_file(&src_path);
+        panic!(
+            "VCCS compile-and-run test failed to compile:\n{}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+    }
+
+    let run = std::process::Command::new(&bin_path).output().expect("run test binary");
+    let _ = std::fs::remove_file(&src_path);
+    let _ = std::fs::remove_file(&bin_path);
+
+    if !run.status.success() {
+        panic!(
+            "VCCS compile-and-run test failed:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&run.stdout),
+            String::from_utf8_lossy(&run.stderr)
+        );
+    }
+}
+
+/// VCVS circuit: verify codegen produces valid code (linear, M=0).
+#[test]
+fn test_vcvs_codegen_compiles_and_runs() {
+    let (netlist, mna, kernel) = build_pipeline(VCVS_CIRCUIT_SPICE);
+    assert_eq!(kernel.m, 0, "VCVS is linear, M should be 0");
+
+    let config = CodegenConfig {
+        circuit_name: "vcvs_test".to_string(),
+        sample_rate: 44100.0,
+        input_node: 0,
+        output_nodes: vec![1],
+        input_resistance: 1.0,
+        ..CodegenConfig::default()
+    };
+    let codegen = CodeGenerator::new(config);
+    let result = codegen.generate(&kernel, &mna, &netlist).expect("codegen failed");
+
+    let test_harness = format!(
+        "{}\n\
+         fn main() {{\n\
+             let mut state = CircuitState::default();\n\
+             \n\
+             // Feed a 1kHz sine wave for 500 samples\n\
+             let mut max_abs_out = 0.0f64;\n\
+             let mut any_nonzero = false;\n\
+             for i in 0..500 {{\n\
+                 let t = i as f64 / 44100.0;\n\
+                 let input = 0.1 * (2.0 * std::f64::consts::PI * 1000.0 * t).sin();\n\
+                 let out = process_sample(input, &mut state)[0];\n\
+                 assert!(out.is_finite(), \"Output at sample {{}} must be finite, got {{}}\", i, out);\n\
+                 if out.abs() > 1e-10 {{ any_nonzero = true; }}\n\
+                 if out.abs() > max_abs_out {{ max_abs_out = out.abs(); }}\n\
+             }}\n\
+             \n\
+             assert!(any_nonzero, \"VCVS circuit output should not be all zeros\");\n\
+             eprintln!(\"VCVS codegen test passed! max_abs_out={{}}\", max_abs_out);\n\
+         }}\n",
+        result.code
+    );
+
+    let tmp_dir = std::env::temp_dir();
+    let src_path = tmp_dir.join("melange_vcvs_run_test.rs");
+    let bin_path = tmp_dir.join("melange_vcvs_run_test");
+    {
+        let mut f = std::fs::File::create(&src_path).expect("create temp file");
+        f.write_all(test_harness.as_bytes()).expect("write temp file");
+    }
+
+    let compile = std::process::Command::new("rustc")
+        .args([src_path.to_str().unwrap(), "-o", bin_path.to_str().unwrap(), "--edition", "2021"])
+        .output()
+        .expect("run rustc");
+
+    if !compile.status.success() {
+        let _ = std::fs::remove_file(&src_path);
+        panic!(
+            "VCVS compile-and-run test failed to compile:\n{}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+    }
+
+    let run = std::process::Command::new(&bin_path).output().expect("run test binary");
+    let _ = std::fs::remove_file(&src_path);
+    let _ = std::fs::remove_file(&bin_path);
+
+    if !run.status.success() {
+        panic!(
+            "VCVS compile-and-run test failed:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&run.stdout),
+            String::from_utf8_lossy(&run.stderr)
+        );
+    }
+}
+
+/// VCCS + nonlinear device (diode): verify codegen handles mixed circuit.
+#[test]
+fn test_vccs_with_diode_codegen_compiles_and_runs() {
+    let (netlist, mna, kernel) = build_pipeline(VCCS_WITH_DIODE_SPICE);
+    assert_eq!(kernel.m, 1, "One diode -> M=1");
+
+    let config = CodegenConfig {
+        circuit_name: "vccs_diode_test".to_string(),
+        sample_rate: 44100.0,
+        input_node: 0,
+        output_nodes: vec![2], // output node index for 'out'
+        input_resistance: 1.0,
+        ..CodegenConfig::default()
+    };
+    let codegen = CodeGenerator::new(config);
+    let result = codegen.generate(&kernel, &mna, &netlist).expect("codegen failed");
+
+    let test_harness = format!(
+        "{}\n\
+         fn main() {{\n\
+             let mut state = CircuitState::default();\n\
+             \n\
+             // Warm up to let DC settle\n\
+             for _ in 0..200 {{\n\
+                 let out = process_sample(0.0, &mut state)[0];\n\
+                 assert!(out.is_finite(), \"Warmup output must be finite\");\n\
+             }}\n\
+             \n\
+             // Feed a 1kHz sine wave for 500 samples\n\
+             let mut max_abs_out = 0.0f64;\n\
+             let mut any_nonzero = false;\n\
+             for i in 0..500 {{\n\
+                 let t = i as f64 / 44100.0;\n\
+                 let input = 0.1 * (2.0 * std::f64::consts::PI * 1000.0 * t).sin();\n\
+                 let out = process_sample(input, &mut state)[0];\n\
+                 assert!(out.is_finite(), \"Output at sample {{}} must be finite, got {{}}\", i, out);\n\
+                 if out.abs() > 1e-10 {{ any_nonzero = true; }}\n\
+                 if out.abs() > max_abs_out {{ max_abs_out = out.abs(); }}\n\
+             }}\n\
+             \n\
+             assert!(any_nonzero, \"VCCS+diode circuit output should not be all zeros\");\n\
+             eprintln!(\"VCCS+diode codegen test passed! max_abs_out={{}}\", max_abs_out);\n\
+         }}\n",
+        result.code
+    );
+
+    let tmp_dir = std::env::temp_dir();
+    let src_path = tmp_dir.join("melange_vccs_diode_run_test.rs");
+    let bin_path = tmp_dir.join("melange_vccs_diode_run_test");
+    {
+        let mut f = std::fs::File::create(&src_path).expect("create temp file");
+        f.write_all(test_harness.as_bytes()).expect("write temp file");
+    }
+
+    let compile = std::process::Command::new("rustc")
+        .args([src_path.to_str().unwrap(), "-o", bin_path.to_str().unwrap(), "--edition", "2021"])
+        .output()
+        .expect("run rustc");
+
+    if !compile.status.success() {
+        let _ = std::fs::remove_file(&src_path);
+        panic!(
+            "VCCS+diode compile-and-run test failed to compile:\n{}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+    }
+
+    let run = std::process::Command::new(&bin_path).output().expect("run test binary");
+    let _ = std::fs::remove_file(&src_path);
+    let _ = std::fs::remove_file(&bin_path);
+
+    if !run.status.success() {
+        panic!(
+            "VCCS+diode compile-and-run test failed:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&run.stdout),
+            String::from_utf8_lossy(&run.stderr)
+        );
+    }
+}
+
+// ==========================================================================
+// Runtime device parameter tests
+// ==========================================================================
+
+/// Diode circuit: state struct contains device_0_is and device_0_n_vt fields.
+#[test]
+fn test_runtime_device_params_diode_state_fields() {
+    let (code, _netlist, _mna, _kernel) = generate_code(DIODE_CLIPPER_SPICE);
+
+    // State struct should have device param fields
+    assert!(
+        code.contains("pub device_0_is: f64"),
+        "CircuitState should contain device_0_is field"
+    );
+    assert!(
+        code.contains("pub device_0_n_vt: f64"),
+        "CircuitState should contain device_0_n_vt field"
+    );
+}
+
+/// Diode circuit: Default impl initializes device params from consts.
+#[test]
+fn test_runtime_device_params_diode_default_init() {
+    let (code, _netlist, _mna, _kernel) = generate_code(DIODE_CLIPPER_SPICE);
+
+    // Default impl should reference the const for each device param
+    assert!(
+        code.contains("device_0_is: DEVICE_0_IS"),
+        "Default impl should initialize device_0_is from DEVICE_0_IS"
+    );
+    assert!(
+        code.contains("device_0_n_vt: DEVICE_0_N_VT"),
+        "Default impl should initialize device_0_n_vt from DEVICE_0_N_VT"
+    );
+}
+
+/// Diode circuit: NR loop uses state fields instead of const for IS and N_VT.
+#[test]
+fn test_runtime_device_params_diode_nr_uses_state() {
+    let (code, _netlist, _mna, _kernel) = generate_code(DIODE_CLIPPER_SPICE);
+
+    // NR loop should use state.device_0_is and state.device_0_n_vt
+    assert!(
+        code.contains("state.device_0_is"),
+        "NR loop should reference state.device_0_is"
+    );
+    assert!(
+        code.contains("state.device_0_n_vt"),
+        "NR loop should reference state.device_0_n_vt"
+    );
+    assert!(
+        code.contains("diode_current(v_d0, state.device_0_is, state.device_0_n_vt)"),
+        "diode_current should use state fields"
+    );
+    assert!(
+        code.contains("diode_conductance(v_d0, state.device_0_is, state.device_0_n_vt)"),
+        "diode_conductance should use state fields"
+    );
+}
+
+/// Diode circuit: DEVICE_0_IS const declaration still exists (for defaults and DC OP).
+#[test]
+fn test_runtime_device_params_diode_consts_still_exist() {
+    let (code, _netlist, _mna, _kernel) = generate_code(DIODE_CLIPPER_SPICE);
+
+    assert!(
+        code.contains("const DEVICE_0_IS: f64"),
+        "DEVICE_0_IS const should still be declared"
+    );
+    assert!(
+        code.contains("const DEVICE_0_N_VT: f64"),
+        "DEVICE_0_N_VT const should still be declared"
+    );
+}
+
+/// BJT circuit: state struct contains device param fields for IS, VT, BF, BR.
+#[test]
+fn test_runtime_device_params_bjt_state_fields() {
+    let (code, _netlist, _mna, _kernel) = generate_code(BJT_SPICE);
+
+    assert!(code.contains("pub device_0_is: f64"), "BJT state should have device_0_is");
+    assert!(code.contains("pub device_0_vt: f64"), "BJT state should have device_0_vt");
+    assert!(code.contains("pub device_0_bf: f64"), "BJT state should have device_0_bf");
+    assert!(code.contains("pub device_0_br: f64"), "BJT state should have device_0_br");
+}
+
+/// BJT circuit: Default impl initializes from consts.
+#[test]
+fn test_runtime_device_params_bjt_default_init() {
+    let (code, _netlist, _mna, _kernel) = generate_code(BJT_SPICE);
+
+    assert!(code.contains("device_0_is: DEVICE_0_IS"), "Default should init device_0_is");
+    assert!(code.contains("device_0_vt: DEVICE_0_VT"), "Default should init device_0_vt");
+    assert!(code.contains("device_0_bf: DEVICE_0_BETA_F"), "Default should init device_0_bf");
+    assert!(code.contains("device_0_br: DEVICE_0_BETA_R"), "Default should init device_0_br");
+}
+
+/// BJT circuit: SIGN remains as const in NR loop (not state field).
+#[test]
+fn test_runtime_device_params_bjt_sign_stays_const() {
+    let (code, _netlist, _mna, _kernel) = generate_code(BJT_SPICE);
+
+    // SIGN should still be referenced as DEVICE_0_SIGN, not state.device_0_sign
+    assert!(
+        code.contains("DEVICE_0_SIGN"),
+        "DEVICE_0_SIGN const should still be used in NR loop"
+    );
+    assert!(
+        !code.contains("state.device_0_sign"),
+        "state.device_0_sign should NOT exist (SIGN stays const)"
+    );
+    assert!(
+        !code.contains("pub device_0_sign: f64"),
+        "CircuitState should NOT have device_0_sign field"
+    );
+}
+
+/// Tube circuit: state struct contains all 7 tube params.
+#[test]
+fn test_runtime_device_params_tube_state_fields() {
+    let (netlist, mna, kernel) = build_pipeline(TRIODE_CC_SPICE);
+    let input_node_idx = mna.node_map["in"] - 1;
+    let output_node_idx = mna.node_map["out"] - 1;
+    let config = CodegenConfig {
+        circuit_name: "tube_params".to_string(),
+        sample_rate: 44100.0,
+        input_node: input_node_idx,
+        output_nodes: vec![output_node_idx],
+        input_resistance: 1.0,
+        ..CodegenConfig::default()
+    };
+    let codegen = CodeGenerator::new(config);
+    let result = codegen.generate(&kernel, &mna, &netlist).expect("codegen failed");
+    let code = result.code;
+
+    assert!(code.contains("pub device_0_mu: f64"), "Tube state should have device_0_mu");
+    assert!(code.contains("pub device_0_ex: f64"), "Tube state should have device_0_ex");
+    assert!(code.contains("pub device_0_kg1: f64"), "Tube state should have device_0_kg1");
+    assert!(code.contains("pub device_0_kp: f64"), "Tube state should have device_0_kp");
+    assert!(code.contains("pub device_0_kvb: f64"), "Tube state should have device_0_kvb");
+    assert!(code.contains("pub device_0_ig_max: f64"), "Tube state should have device_0_ig_max");
+    assert!(code.contains("pub device_0_vgk_onset: f64"), "Tube state should have device_0_vgk_onset");
+}
+
+/// Tube circuit: NR loop uses state fields for all tube params.
+#[test]
+fn test_runtime_device_params_tube_nr_uses_state() {
+    let (netlist, mna, kernel) = build_pipeline(TRIODE_CC_SPICE);
+    let input_node_idx = mna.node_map["in"] - 1;
+    let output_node_idx = mna.node_map["out"] - 1;
+    let config = CodegenConfig {
+        circuit_name: "tube_nr".to_string(),
+        sample_rate: 44100.0,
+        input_node: input_node_idx,
+        output_nodes: vec![output_node_idx],
+        input_resistance: 1.0,
+        ..CodegenConfig::default()
+    };
+    let codegen = CodeGenerator::new(config);
+    let result = codegen.generate(&kernel, &mna, &netlist).expect("codegen failed");
+    let code = result.code;
+
+    // tube_ip should use state fields
+    assert!(
+        code.contains("state.device_0_mu"),
+        "tube_ip should reference state.device_0_mu"
+    );
+    assert!(
+        code.contains("state.device_0_kg1"),
+        "tube_ip should reference state.device_0_kg1"
+    );
+    // tube_ig should use state fields
+    assert!(
+        code.contains("state.device_0_ig_max"),
+        "tube_ig should reference state.device_0_ig_max"
+    );
+    assert!(
+        code.contains("state.device_0_vgk_onset"),
+        "tube_ig should reference state.device_0_vgk_onset"
+    );
+}
+
+/// Tube circuit: Default impl initializes tube params from consts.
+#[test]
+fn test_runtime_device_params_tube_default_init() {
+    let (netlist, mna, kernel) = build_pipeline(TRIODE_CC_SPICE);
+    let input_node_idx = mna.node_map["in"] - 1;
+    let output_node_idx = mna.node_map["out"] - 1;
+    let config = CodegenConfig {
+        circuit_name: "tube_default".to_string(),
+        sample_rate: 44100.0,
+        input_node: input_node_idx,
+        output_nodes: vec![output_node_idx],
+        input_resistance: 1.0,
+        ..CodegenConfig::default()
+    };
+    let codegen = CodeGenerator::new(config);
+    let result = codegen.generate(&kernel, &mna, &netlist).expect("codegen failed");
+    let code = result.code;
+
+    assert!(code.contains("device_0_mu: DEVICE_0_MU"), "Default should init device_0_mu");
+    assert!(code.contains("device_0_kg1: DEVICE_0_KG1"), "Default should init device_0_kg1");
+    assert!(code.contains("device_0_ig_max: DEVICE_0_IG_MAX"), "Default should init device_0_ig_max");
+}
+
+/// JFET circuit: state struct and NR loop use state fields for IDSS/VP/LAMBDA.
+#[test]
+fn test_runtime_device_params_jfet_state_fields() {
+    let (code, _netlist, _mna, _kernel) = generate_code(JFET_CS_SPICE);
+
+    assert!(code.contains("pub device_0_idss: f64"), "JFET state should have device_0_idss");
+    assert!(code.contains("pub device_0_vp: f64"), "JFET state should have device_0_vp");
+    assert!(code.contains("pub device_0_lambda: f64"), "JFET state should have device_0_lambda");
+
+    // NR loop uses state fields
+    assert!(code.contains("state.device_0_idss"), "NR loop should use state.device_0_idss");
+    assert!(code.contains("state.device_0_vp"), "NR loop should use state.device_0_vp");
+    assert!(code.contains("state.device_0_lambda"), "NR loop should use state.device_0_lambda");
+
+    // SIGN stays const
+    assert!(!code.contains("state.device_0_sign"), "SIGN should NOT be a state field for JFET");
+}
+
+/// MOSFET circuit: state struct contains KP/VT/LAMBDA, SIGN stays const.
+#[test]
+fn test_runtime_device_params_mosfet_state_fields() {
+    let (netlist, mna, kernel) = build_pipeline(MOSFET_CS_SPICE);
+    let input_node_idx = mna.node_map["in"] - 1;
+    let output_node_idx = mna.node_map["out"] - 1;
+    let config = CodegenConfig {
+        circuit_name: "mosfet_params".to_string(),
+        sample_rate: 44100.0,
+        input_node: input_node_idx,
+        output_nodes: vec![output_node_idx],
+        output_scales: vec![1.0],
+        input_resistance: 1.0,
+        ..CodegenConfig::default()
+    };
+    let codegen = CodeGenerator::new(config);
+    let result = codegen.generate(&kernel, &mna, &netlist).expect("codegen failed");
+    let code = result.code;
+
+    assert!(code.contains("pub device_0_kp: f64"), "MOSFET state should have device_0_kp");
+    assert!(code.contains("pub device_0_vt: f64"), "MOSFET state should have device_0_vt");
+    assert!(code.contains("pub device_0_lambda: f64"), "MOSFET state should have device_0_lambda");
+
+    // NR loop uses state fields
+    assert!(code.contains("state.device_0_kp"), "NR loop should use state.device_0_kp");
+    assert!(code.contains("state.device_0_vt"), "NR loop should use state.device_0_vt");
+
+    // SIGN stays const
+    assert!(!code.contains("state.device_0_sign"), "SIGN should NOT be a state field for MOSFET");
+}
+
+/// Reset method restores device params to const defaults.
+#[test]
+fn test_runtime_device_params_reset_restores_defaults() {
+    let (code, _netlist, _mna, _kernel) = generate_code(DIODE_CLIPPER_SPICE);
+
+    // The reset() method should restore device params
+    assert!(
+        code.contains("self.device_0_is = DEVICE_0_IS"),
+        "reset() should restore device_0_is"
+    );
+    assert!(
+        code.contains("self.device_0_n_vt = DEVICE_0_N_VT"),
+        "reset() should restore device_0_n_vt"
+    );
+}
+
+/// No device params emitted for linear circuits (M=0).
+#[test]
+fn test_runtime_device_params_linear_circuit_no_fields() {
+    let (code, _netlist, _mna, _kernel) = generate_code(RC_CIRCUIT_SPICE);
+
+    // Linear circuits have no devices, so no device param fields
+    assert!(
+        !code.contains("pub device_0_is"),
+        "Linear circuit should not have device_0_is field"
+    );
+    assert!(
+        !code.contains("state.device_0"),
+        "Linear circuit should not reference state.device_0"
+    );
+}
+
+/// Compile-and-run test: diode circuit with modified device params produces different output.
+#[test]
+fn test_runtime_device_params_compile_and_run_diode() {
+    let (netlist, mna, kernel) = build_pipeline(DIODE_CLIPPER_SPICE);
+    let config = CodegenConfig {
+        circuit_name: "diode_runtime_params".to_string(),
+        sample_rate: 44100.0,
+        input_node: 0,
+        output_nodes: vec![1],
+        input_resistance: 1.0,
+        ..CodegenConfig::default()
+    };
+    let codegen = CodeGenerator::new(config);
+    let result = codegen.generate(&kernel, &mna, &netlist).expect("codegen failed");
+
+    let test_harness = format!(
+        "{}\n\
+         fn main() {{\n\
+             // Run with default params\n\
+             let mut state1 = CircuitState::default();\n\
+             for _ in 0..100 {{\n\
+                 process_sample(0.0, &mut state1);\n\
+             }}\n\
+             let mut sum1 = 0.0f64;\n\
+             for i in 0..200 {{\n\
+                 let t = i as f64 / 44100.0;\n\
+                 let input = 0.5 * (2.0 * std::f64::consts::PI * 1000.0 * t).sin();\n\
+                 let out = process_sample(input, &mut state1)[0];\n\
+                 assert!(out.is_finite(), \"Default output must be finite at sample {{}}\", i);\n\
+                 sum1 += out.abs();\n\
+             }}\n\
+             \n\
+             // Run with modified IS (10x larger = more conductive diode)\n\
+             let mut state2 = CircuitState::default();\n\
+             state2.device_0_is = DEVICE_0_IS * 10.0;\n\
+             for _ in 0..100 {{\n\
+                 process_sample(0.0, &mut state2);\n\
+             }}\n\
+             let mut sum2 = 0.0f64;\n\
+             for i in 0..200 {{\n\
+                 let t = i as f64 / 44100.0;\n\
+                 let input = 0.5 * (2.0 * std::f64::consts::PI * 1000.0 * t).sin();\n\
+                 let out = process_sample(input, &mut state2)[0];\n\
+                 assert!(out.is_finite(), \"Modified output must be finite at sample {{}}\", i);\n\
+                 sum2 += out.abs();\n\
+             }}\n\
+             \n\
+             // The outputs should differ (more conductive diode clips harder)\n\
+             let diff = (sum1 - sum2).abs();\n\
+             assert!(diff > 1e-6, \n\
+                 \"Changing IS should produce different output. sum1={{}} sum2={{}} diff={{}}\",\n\
+                 sum1, sum2, diff);\n\
+             eprintln!(\"Runtime device params test passed! sum1={{}} sum2={{}} diff={{}}\", sum1, sum2, diff);\n\
+         }}\n",
+        result.code
+    );
+
+    let tmp_dir = std::env::temp_dir();
+    let src_path = tmp_dir.join("melange_runtime_params_diode_test.rs");
+    let bin_path = tmp_dir.join("melange_runtime_params_diode_test");
+    {
+        let mut f = std::fs::File::create(&src_path).expect("create temp file");
+        f.write_all(test_harness.as_bytes()).expect("write temp file");
+    }
+
+    let compile = std::process::Command::new("rustc")
+        .args([src_path.to_str().unwrap(), "-o", bin_path.to_str().unwrap(), "--edition", "2021"])
+        .output()
+        .expect("run rustc");
+
+    if !compile.status.success() {
+        let _ = std::fs::remove_file(&src_path);
+        panic!(
+            "Runtime params compile-and-run test failed to compile:\n{}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+    }
+
+    let run = std::process::Command::new(&bin_path).output().expect("run test binary");
+    let _ = std::fs::remove_file(&src_path);
+    let _ = std::fs::remove_file(&bin_path);
+
+    if !run.status.success() {
+        panic!(
+            "Runtime params compile-and-run test failed:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&run.stdout),
+            String::from_utf8_lossy(&run.stderr)
+        );
+    }
+}
+
+/// Compile-and-run test: BJT circuit with modified BF produces different output.
+#[test]
+fn test_runtime_device_params_compile_and_run_bjt() {
+    let (netlist, mna, kernel) = build_pipeline(BJT_SPICE);
+    let config = CodegenConfig {
+        circuit_name: "bjt_runtime_params".to_string(),
+        sample_rate: 44100.0,
+        input_node: 0,
+        output_nodes: vec![1],
+        input_resistance: 1.0,
+        ..CodegenConfig::default()
+    };
+    let codegen = CodeGenerator::new(config);
+    let result = codegen.generate(&kernel, &mna, &netlist).expect("codegen failed");
+
+    let test_harness = format!(
+        "{}\n\
+         fn main() {{\n\
+             // Run with default BF=200\n\
+             let mut state1 = CircuitState::default();\n\
+             for _ in 0..200 {{\n\
+                 process_sample(0.0, &mut state1);\n\
+             }}\n\
+             let mut sum1 = 0.0f64;\n\
+             for i in 0..200 {{\n\
+                 let t = i as f64 / 44100.0;\n\
+                 let input = 0.01 * (2.0 * std::f64::consts::PI * 1000.0 * t).sin();\n\
+                 let out = process_sample(input, &mut state1)[0];\n\
+                 assert!(out.is_finite(), \"Default BJT output must be finite\");\n\
+                 sum1 += out.abs();\n\
+             }}\n\
+             \n\
+             // Run with BF=50 (lower gain transistor)\n\
+             let mut state2 = CircuitState::default();\n\
+             state2.device_0_bf = 50.0;\n\
+             for _ in 0..200 {{\n\
+                 process_sample(0.0, &mut state2);\n\
+             }}\n\
+             let mut sum2 = 0.0f64;\n\
+             for i in 0..200 {{\n\
+                 let t = i as f64 / 44100.0;\n\
+                 let input = 0.01 * (2.0 * std::f64::consts::PI * 1000.0 * t).sin();\n\
+                 let out = process_sample(input, &mut state2)[0];\n\
+                 assert!(out.is_finite(), \"Modified BJT output must be finite\");\n\
+                 sum2 += out.abs();\n\
+             }}\n\
+             \n\
+             let diff = (sum1 - sum2).abs();\n\
+             assert!(diff > 1e-12,\n\
+                 \"Changing BF should produce different output. sum1={{}} sum2={{}} diff={{}}\",\n\
+                 sum1, sum2, diff);\n\
+             eprintln!(\"BJT runtime params test passed! sum1={{}} sum2={{}} diff={{}}\", sum1, sum2, diff);\n\
+         }}\n",
+        result.code
+    );
+
+    let tmp_dir = std::env::temp_dir();
+    let src_path = tmp_dir.join("melange_runtime_params_bjt_test.rs");
+    let bin_path = tmp_dir.join("melange_runtime_params_bjt_test");
+    {
+        let mut f = std::fs::File::create(&src_path).expect("create temp file");
+        f.write_all(test_harness.as_bytes()).expect("write temp file");
+    }
+
+    let compile = std::process::Command::new("rustc")
+        .args([src_path.to_str().unwrap(), "-o", bin_path.to_str().unwrap(), "--edition", "2021"])
+        .output()
+        .expect("run rustc");
+
+    if !compile.status.success() {
+        let _ = std::fs::remove_file(&src_path);
+        panic!(
+            "BJT runtime params compile-and-run test failed to compile:\n{}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+    }
+
+    let run = std::process::Command::new(&bin_path).output().expect("run test binary");
+    let _ = std::fs::remove_file(&src_path);
+    let _ = std::fs::remove_file(&bin_path);
+
+    if !run.status.success() {
+        panic!(
+            "BJT runtime params compile-and-run test failed:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&run.stdout),
+            String::from_utf8_lossy(&run.stderr)
+        );
+    }
 }

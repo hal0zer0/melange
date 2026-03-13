@@ -61,6 +61,91 @@ struct SwitchTemplateData {
     position_rows: Vec<String>,
 }
 
+/// Device parameter data passed to Tera templates for runtime-adjustable state fields.
+///
+/// Each device slot produces one entry. The `params` vec contains (field_suffix, const_name)
+/// pairs for parameters that should become CircuitState fields.
+/// SIGN, USE_GP, and Gummel-Poon params (VAF/VAR/IKF/IKR) remain as const-only.
+#[derive(Serialize)]
+struct DeviceParamTemplateData {
+    /// Device index (0-based)
+    dev_num: usize,
+    /// Device type tag for conditional template logic
+    device_type: String,
+    /// Runtime-adjustable parameter entries: (lowercase_field_suffix, CONST_SUFFIX)
+    params: Vec<DeviceParamEntry>,
+}
+
+/// A single runtime-adjustable device parameter.
+#[derive(Serialize)]
+struct DeviceParamEntry {
+    /// Lowercase field name suffix, e.g. "is", "n_vt", "bf"
+    field_suffix: String,
+    /// Uppercase const name suffix, e.g. "IS", "N_VT", "BETA_F"
+    const_suffix: String,
+}
+
+/// Build `DeviceParamTemplateData` for each device slot in the IR.
+///
+/// Only parameters that should be runtime-adjustable are included.
+/// SIGN constants and Gummel-Poon parameters (VAF, VAR, IKF, IKR, USE_GP)
+/// are intentionally excluded — they remain as compile-time constants.
+fn device_param_template_data(ir: &CircuitIR) -> Vec<DeviceParamTemplateData> {
+    ir.device_slots
+        .iter()
+        .enumerate()
+        .map(|(dev_num, slot)| {
+            let (device_type, params) = match &slot.params {
+                DeviceParams::Diode(_) => (
+                    "Diode".to_string(),
+                    vec![
+                        DeviceParamEntry { field_suffix: "is".into(), const_suffix: "IS".into() },
+                        DeviceParamEntry { field_suffix: "n_vt".into(), const_suffix: "N_VT".into() },
+                    ],
+                ),
+                DeviceParams::Bjt(_) => (
+                    "Bjt".to_string(),
+                    vec![
+                        DeviceParamEntry { field_suffix: "is".into(), const_suffix: "IS".into() },
+                        DeviceParamEntry { field_suffix: "vt".into(), const_suffix: "VT".into() },
+                        DeviceParamEntry { field_suffix: "bf".into(), const_suffix: "BETA_F".into() },
+                        DeviceParamEntry { field_suffix: "br".into(), const_suffix: "BETA_R".into() },
+                    ],
+                ),
+                DeviceParams::Jfet(_) => (
+                    "Jfet".to_string(),
+                    vec![
+                        DeviceParamEntry { field_suffix: "idss".into(), const_suffix: "IDSS".into() },
+                        DeviceParamEntry { field_suffix: "vp".into(), const_suffix: "VP".into() },
+                        DeviceParamEntry { field_suffix: "lambda".into(), const_suffix: "LAMBDA".into() },
+                    ],
+                ),
+                DeviceParams::Mosfet(_) => (
+                    "Mosfet".to_string(),
+                    vec![
+                        DeviceParamEntry { field_suffix: "kp".into(), const_suffix: "KP".into() },
+                        DeviceParamEntry { field_suffix: "vt".into(), const_suffix: "VT".into() },
+                        DeviceParamEntry { field_suffix: "lambda".into(), const_suffix: "LAMBDA".into() },
+                    ],
+                ),
+                DeviceParams::Tube(_) => (
+                    "Tube".to_string(),
+                    vec![
+                        DeviceParamEntry { field_suffix: "mu".into(), const_suffix: "MU".into() },
+                        DeviceParamEntry { field_suffix: "ex".into(), const_suffix: "EX".into() },
+                        DeviceParamEntry { field_suffix: "kg1".into(), const_suffix: "KG1".into() },
+                        DeviceParamEntry { field_suffix: "kp".into(), const_suffix: "KP".into() },
+                        DeviceParamEntry { field_suffix: "kvb".into(), const_suffix: "KVB".into() },
+                        DeviceParamEntry { field_suffix: "ig_max".into(), const_suffix: "IG_MAX".into() },
+                        DeviceParamEntry { field_suffix: "vgk_onset".into(), const_suffix: "VGK_ONSET".into() },
+                    ],
+                ),
+            };
+            DeviceParamTemplateData { dev_num, device_type, params }
+        })
+        .collect()
+}
+
 // ============================================================================
 // Formatting helpers — reduce repetition in string-building code
 // ============================================================================
@@ -548,6 +633,14 @@ impl RustEmitter {
             // Generate switch methods procedurally (too complex for Tera conditionals)
             let switch_methods = self.emit_switch_methods(ir);
             ctx.insert("switch_methods", &switch_methods);
+        }
+
+        // Device parameter state fields (runtime-adjustable)
+        let device_params = device_param_template_data(ir);
+        let num_device_params = device_params.len();
+        ctx.insert("num_device_params", &num_device_params);
+        if num_device_params > 0 {
+            ctx.insert("device_params", &device_params);
         }
 
         self.render("state", &ctx)
@@ -1743,11 +1836,11 @@ impl RustEmitter {
                     DeviceType::Diode => {
                         let s = slot.start_idx;
                         code.push_str(&format!(
-                            "        let i_dev{} = diode_current(v_d{}, DEVICE_{}_IS, DEVICE_{}_N_VT);\n",
+                            "        let i_dev{} = diode_current(v_d{}, state.device_{}_is, state.device_{}_n_vt);\n",
                             s, s, dev_num, dev_num
                         ));
                         code.push_str(&format!(
-                            "        let jdev_{}_{} = diode_conductance(v_d{}, DEVICE_{}_IS, DEVICE_{}_N_VT);\n",
+                            "        let jdev_{}_{} = diode_conductance(v_d{}, state.device_{}_is, state.device_{}_n_vt);\n",
                             s, s, s, dev_num, dev_num
                         ));
                     }
@@ -1755,14 +1848,15 @@ impl RustEmitter {
                         let s = slot.start_idx;
                         let s1 = s + 1;
                         let d = dev_num;
+                        // IS, VT, BETA_R from state; SIGN, USE_GP, VAF, VAR, IKF stay as const
                         code.push_str(&format!(
-                            "        let i_dev{s} = bjt_ic(v_d{s}, v_d{s1}, DEVICE_{d}_IS, DEVICE_{d}_VT, DEVICE_{d}_BETA_R, DEVICE_{d}_SIGN, DEVICE_{d}_USE_GP, DEVICE_{d}_VAF, DEVICE_{d}_VAR, DEVICE_{d}_IKF);\n"
+                            "        let i_dev{s} = bjt_ic(v_d{s}, v_d{s1}, state.device_{d}_is, state.device_{d}_vt, state.device_{d}_br, DEVICE_{d}_SIGN, DEVICE_{d}_USE_GP, DEVICE_{d}_VAF, DEVICE_{d}_VAR, DEVICE_{d}_IKF);\n"
                         ));
                         code.push_str(&format!(
-                            "        let i_dev{s1} = bjt_ib(v_d{s}, v_d{s1}, DEVICE_{d}_IS, DEVICE_{d}_VT, DEVICE_{d}_BETA_F, DEVICE_{d}_BETA_R, DEVICE_{d}_SIGN);\n"
+                            "        let i_dev{s1} = bjt_ib(v_d{s}, v_d{s1}, state.device_{d}_is, state.device_{d}_vt, state.device_{d}_bf, state.device_{d}_br, DEVICE_{d}_SIGN);\n"
                         ));
                         code.push_str(&format!(
-                            "        let bjt{d}_jac = bjt_jacobian(v_d{s}, v_d{s1}, DEVICE_{d}_IS, DEVICE_{d}_VT, DEVICE_{d}_BETA_F, DEVICE_{d}_BETA_R, DEVICE_{d}_SIGN, DEVICE_{d}_USE_GP, DEVICE_{d}_VAF, DEVICE_{d}_VAR, DEVICE_{d}_IKF);\n"
+                            "        let bjt{d}_jac = bjt_jacobian(v_d{s}, v_d{s1}, state.device_{d}_is, state.device_{d}_vt, state.device_{d}_bf, state.device_{d}_br, DEVICE_{d}_SIGN, DEVICE_{d}_USE_GP, DEVICE_{d}_VAF, DEVICE_{d}_VAR, DEVICE_{d}_IKF);\n"
                         ));
                         code.push_str(&format!(
                             "        let jdev_{}_{} = bjt{}_jac[0];\n",
@@ -1785,14 +1879,15 @@ impl RustEmitter {
                         let s = slot.start_idx;
                         let s1 = s + 1;
                         let d = dev_num;
+                        // IDSS, VP, LAMBDA from state; SIGN stays as const
                         code.push_str(&format!(
-                            "        let i_dev{s} = jfet_id(v_d{s}, v_d{s1}, DEVICE_{d}_IDSS, DEVICE_{d}_VP, DEVICE_{d}_LAMBDA, DEVICE_{d}_SIGN);\n"
+                            "        let i_dev{s} = jfet_id(v_d{s}, v_d{s1}, state.device_{d}_idss, state.device_{d}_vp, state.device_{d}_lambda, DEVICE_{d}_SIGN);\n"
                         ));
                         code.push_str(&format!(
                             "        let i_dev{s1} = jfet_ig(v_d{s}, DEVICE_{d}_SIGN);\n"
                         ));
                         code.push_str(&format!(
-                            "        let jfet{d}_jac = jfet_jacobian(v_d{s}, v_d{s1}, DEVICE_{d}_IDSS, DEVICE_{d}_VP, DEVICE_{d}_LAMBDA, DEVICE_{d}_SIGN);\n"
+                            "        let jfet{d}_jac = jfet_jacobian(v_d{s}, v_d{s1}, state.device_{d}_idss, state.device_{d}_vp, state.device_{d}_lambda, DEVICE_{d}_SIGN);\n"
                         ));
                         code.push_str(&format!(
                             "        let jdev_{}_{} = jfet{}_jac[0];\n", s, s, d
@@ -1811,14 +1906,15 @@ impl RustEmitter {
                         let s = slot.start_idx;
                         let s1 = s + 1;
                         let d = dev_num;
+                        // KP, VT, LAMBDA from state; SIGN stays as const
                         code.push_str(&format!(
-                            "        let i_dev{s} = mosfet_id(v_d{s}, v_d{s1}, DEVICE_{d}_KP, DEVICE_{d}_VT, DEVICE_{d}_LAMBDA, DEVICE_{d}_SIGN);\n"
+                            "        let i_dev{s} = mosfet_id(v_d{s}, v_d{s1}, state.device_{d}_kp, state.device_{d}_vt, state.device_{d}_lambda, DEVICE_{d}_SIGN);\n"
                         ));
                         code.push_str(&format!(
                             "        let i_dev{s1} = mosfet_ig(v_d{s}, DEVICE_{d}_SIGN);\n"
                         ));
                         code.push_str(&format!(
-                            "        let mos{d}_jac = mosfet_jacobian(v_d{s}, v_d{s1}, DEVICE_{d}_KP, DEVICE_{d}_VT, DEVICE_{d}_LAMBDA, DEVICE_{d}_SIGN);\n"
+                            "        let mos{d}_jac = mosfet_jacobian(v_d{s}, v_d{s1}, state.device_{d}_kp, state.device_{d}_vt, state.device_{d}_lambda, DEVICE_{d}_SIGN);\n"
                         ));
                         code.push_str(&format!(
                             "        let jdev_{}_{} = mos{}_jac[0];\n", s, s, d
@@ -1837,14 +1933,15 @@ impl RustEmitter {
                         let s = slot.start_idx;
                         let s1 = s + 1;
                         let d = dev_num;
+                        // All tube params from state (no polarity constant for tubes)
                         code.push_str(&format!(
-                            "        let i_dev{s} = tube_ip(v_d{s}, v_d{s1}, DEVICE_{d}_MU, DEVICE_{d}_EX, DEVICE_{d}_KG1, DEVICE_{d}_KP, DEVICE_{d}_KVB);\n"
+                            "        let i_dev{s} = tube_ip(v_d{s}, v_d{s1}, state.device_{d}_mu, state.device_{d}_ex, state.device_{d}_kg1, state.device_{d}_kp, state.device_{d}_kvb);\n"
                         ));
                         code.push_str(&format!(
-                            "        let i_dev{s1} = tube_ig(v_d{s}, DEVICE_{d}_IG_MAX, DEVICE_{d}_VGK_ONSET);\n"
+                            "        let i_dev{s1} = tube_ig(v_d{s}, state.device_{d}_ig_max, state.device_{d}_vgk_onset);\n"
                         ));
                         code.push_str(&format!(
-                            "        let tube{d}_jac = tube_jacobian(v_d{s}, v_d{s1}, DEVICE_{d}_MU, DEVICE_{d}_EX, DEVICE_{d}_KG1, DEVICE_{d}_KP, DEVICE_{d}_KVB, DEVICE_{d}_IG_MAX, DEVICE_{d}_VGK_ONSET);\n"
+                            "        let tube{d}_jac = tube_jacobian(v_d{s}, v_d{s1}, state.device_{d}_mu, state.device_{d}_ex, state.device_{d}_kg1, state.device_{d}_kp, state.device_{d}_kvb, state.device_{d}_ig_max, state.device_{d}_vgk_onset);\n"
                         ));
                         code.push_str(&format!(
                             "        let jdev_{}_{} = tube{}_jac[0];\n", s, s, d
