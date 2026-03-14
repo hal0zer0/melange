@@ -49,8 +49,20 @@
 .model 12AU7 TRIODE(MU=20.21 EX=1.23 KG1=1108.7 KP=84.96 KVB=551.3)
 .input_impedance 600
 
-* B+ power supply (250V plate voltage)
-VCC vcc 0 DC 250
+* B+ power supply
+* Real Pultec: 6X4 rectifier → 320V → two 1kΩ dropping resistors → 293V.
+* Output transformer CT sees ~261V (measured). 12AX7 plate supply ~293V
+* through Ra (100k), giving ~136V at plate (~1.5mA).
+* We model the B+ at the output transformer CT (261V measured, 290V schematic).
+* The 1kΩ dropping resistors and filter caps decouple the 12AX7 B+ supply.
+* Voltage data: GroupDIY EQP-1A voltage measurements thread.
+VCC vcc 0 DC 290
+
+* B+ decoupling for 12AX7 (two 1kΩ/1W resistors + filter caps)
+R_drop1 vcc vcc_filt 1k
+C_filt1 vcc_filt 0 20u
+R_drop2 vcc_filt vcc_ax7 1k
+C_filt2 vcc_ax7 0 20u
 
 * === HF BOOST SECTION (bridge-T) ===
 * 3-terminal 10k linear pot split into upper arm (in→b) and lower arm (b→eq).
@@ -89,8 +101,8 @@ Rg grid 0 1Meg
 * 12AX7 triode
 T1 grid plate cathode 12AX7
 
-* Plate load resistor
-Ra vcc plate 100k
+* Plate load resistor (connected to filtered B+ rail)
+Ra vcc_ax7 plate 100k
 
 * Cathode bias with bypass cap
 * Rk and Ck connect to feedback node (fb), not ground.
@@ -118,8 +130,11 @@ L_int_b int_ct grid2b 130
 K_inta L_int_pri L_int_a 0.99
 K_intb L_int_pri L_int_b 0.99
 
-* Center tap to ground (DC reference for 12AU7 grids)
-R_int_ct int_ct 0 10k
+* Center tap bias: connected to B+ through ~2M bias resistor.
+* Grid leaks (470k each, parallel 235k) provide ground return.
+* Sets V_ct ≈ 290 × 235k/(2M+235k) ≈ 31V (measured on real unit).
+* This biases 12AU7 grids to +31V, giving Vgk ≈ -9V with 40V cathode.
+R_bias vcc int_ct 2Meg
 
 * Grid leak resistors for push-pull 12AU7
 Rg2a grid2a 0 470k
@@ -131,8 +146,8 @@ Rg2b grid2b 0 470k
 T2a grid2a plate2a cath2 12AU7
 T2b grid2b plate2b cath2 12AU7
 
-* Shared cathode bias
-Rk2 cath2 0 330
+* Shared cathode bias (40V measured → ~4k at ~10mA push-pull current)
+Rk2 cath2 0 4k
 Ck2 cath2 0 100u
 
 * === OUTPUT TRANSFORMER: PEERLESS S-217-D ===
@@ -163,13 +178,16 @@ L_opt_sec out 0 1.903
 * Tertiary (overall negative feedback to 12AX7 cathode)
 L_opt_fb 0 fb 0.077
 
-* Coupling between all windings on the S-217-D core
-K_opta L_opt_a L_opt_sec 0.999
-K_optb L_opt_b L_opt_sec 0.999
-K_optab L_opt_a L_opt_b 0.999
-K_fba L_opt_a L_opt_fb 0.999
-K_fbb L_opt_b L_opt_fb 0.999
-K_fbsec L_opt_sec L_opt_fb 0.999
+* Coupling between all windings on the S-217-D core.
+* Measured k ≈ 0.9998 (from L_leak=19mH, L_pri=38.1H) but k>0.95
+* causes convergence failure in both ngspice and trapezoidal companion
+* models for 3+ winding transformers. Using k=0.95, validated in ngspice.
+K_opta L_opt_a L_opt_sec 0.95
+K_optb L_opt_b L_opt_sec 0.95
+K_optab L_opt_a L_opt_b 0.95
+K_fba L_opt_a L_opt_fb 0.95
+K_fbb L_opt_b L_opt_fb 0.95
+K_fbsec L_opt_sec L_opt_fb 0.95
 
 * Output load (high-impedance bridging, typical of modern equipment)
 Rload out 0 100k

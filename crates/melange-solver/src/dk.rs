@@ -82,6 +82,8 @@ pub struct TransformerGroupState {
     pub v_prev: Vec<f64>,
     /// History current for each winding (Norton equivalent)
     pub i_hist: Vec<f64>,
+    /// Pre-allocated scratch buffer for current voltages (real-time safe)
+    pub v_new: Vec<f64>,
 }
 
 /// Precomputed Sherman-Morrison data for a potentiometer.
@@ -447,6 +449,7 @@ impl DkKernel {
                 i_prev: vec![0.0; w],
                 v_prev: vec![0.0; w],
                 i_hist: vec![0.0; w],
+                v_new: vec![0.0; w],
             });
         }
 
@@ -673,12 +676,11 @@ impl DkKernel {
     pub fn update_transformer_groups(&mut self, v_node: &[f64]) {
         for group in &mut self.transformer_groups {
             let w = group.num_windings;
-            // Extract current voltages across each winding
-            let mut v_new = vec![0.0f64; w];
+            // Extract current voltages across each winding (pre-allocated buffer)
             for k in 0..w {
                 let vi = if group.winding_node_i[k] > 0 { v_node[group.winding_node_i[k] - 1] } else { 0.0 };
                 let vj = if group.winding_node_j[k] > 0 { v_node[group.winding_node_j[k] - 1] } else { 0.0 };
-                v_new[k] = vi - vj;
+                group.v_new[k] = vi - vj;
             }
             // Compute new currents and history
             for k in 0..w {
@@ -686,15 +688,15 @@ impl DkKernel {
                 let mut y_v_new = 0.0f64;
                 for j in 0..w {
                     let y_kj = group.y_matrix[k * w + j];
-                    i_new += y_kj * (group.v_prev[j] + v_new[j]);
-                    y_v_new += y_kj * v_new[j];
+                    i_new += y_kj * (group.v_prev[j] + group.v_new[j]);
+                    y_v_new += y_kj * group.v_new[j];
                 }
                 group.i_hist[k] = i_new - y_v_new;
                 group.i_prev[k] = i_new;
             }
             // Update previous voltages
             for k in 0..w {
-                group.v_prev[k] = v_new[k];
+                group.v_prev[k] = group.v_new[k];
             }
         }
     }

@@ -230,7 +230,7 @@ fn build_dc_system(mna: &MnaSystem, config: &DcOpConfig) -> (Vec<Vec<f64>>, Vec<
         g_dc[config.input_node][config.input_node] += 1.0 / config.input_resistance;
     }
 
-    // Stamp inductors as short circuits at DC
+    // Stamp inductors as short circuits at DC (uncoupled)
     for ind in &mna.inductors {
         let ni = ind.node_i;
         let nj = ind.node_j;
@@ -245,6 +245,45 @@ fn build_dc_system(mna: &MnaSystem, config: &DcOpConfig) -> (Vec<Vec<f64>>, Vec<
             g_dc[nj - 1][nj - 1] += VS_CONDUCTANCE;
             if ni > 0 {
                 g_dc[nj - 1][ni - 1] -= VS_CONDUCTANCE;
+            }
+        }
+    }
+
+    // Stamp coupled inductors as short circuits at DC
+    // Each winding in a coupled pair is an inductor that is a short at DC.
+    for ci in &mna.coupled_inductors {
+        for (ni, nj) in [(ci.l1_node_i, ci.l1_node_j), (ci.l2_node_i, ci.l2_node_j)] {
+            if ni > 0 {
+                g_dc[ni - 1][ni - 1] += VS_CONDUCTANCE;
+                if nj > 0 {
+                    g_dc[ni - 1][nj - 1] -= VS_CONDUCTANCE;
+                }
+            }
+            if nj > 0 {
+                g_dc[nj - 1][nj - 1] += VS_CONDUCTANCE;
+                if ni > 0 {
+                    g_dc[nj - 1][ni - 1] -= VS_CONDUCTANCE;
+                }
+            }
+        }
+    }
+
+    // Stamp transformer group inductors as short circuits at DC
+    for group in &mna.transformer_groups {
+        for k in 0..group.num_windings {
+            let ni = group.winding_node_i[k];
+            let nj = group.winding_node_j[k];
+            if ni > 0 {
+                g_dc[ni - 1][ni - 1] += VS_CONDUCTANCE;
+                if nj > 0 {
+                    g_dc[ni - 1][nj - 1] -= VS_CONDUCTANCE;
+                }
+            }
+            if nj > 0 {
+                g_dc[nj - 1][nj - 1] += VS_CONDUCTANCE;
+                if ni > 0 {
+                    g_dc[nj - 1][ni - 1] -= VS_CONDUCTANCE;
+                }
             }
         }
     }

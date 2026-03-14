@@ -635,7 +635,7 @@ impl std::error::Error for MnaError {}
 
 /// Invert a small NxN matrix using Gaussian elimination with partial pivoting.
 /// Used for multi-winding transformer inductance matrix inversion.
-/// Panics if the matrix is singular (determinant ≈ 0).
+/// Returns identity matrix as fallback if singular (with log warning).
 pub(crate) fn invert_small_matrix(a: &[Vec<f64>]) -> Vec<Vec<f64>> {
     let n = a.len();
     // Build augmented matrix [A | I]
@@ -1034,7 +1034,6 @@ impl MnaBuilder {
         }
 
         // Process each group
-        let mut xfmr_idx = 0usize;
         for (_root, mut members) in groups {
             // Sort members for deterministic ordering (by original element order)
             members.sort_by_key(|m| {

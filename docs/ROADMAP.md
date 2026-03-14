@@ -166,6 +166,33 @@ Issues where the math is wrong or numerically fragile.
 
 ---
 
+## Pultec EQP-1A (2026-03-13)
+
+Full rewrite with hardware-accurate topology and multi-winding transformer support.
+
+### Done
+- Passive EQ: bridge-T HF boost, parallel-path HF cut, ganged LF switch, output tap
+- Full output stage: 12AX7 → HS-29 interstage → push-pull 12AU7 → S-217-D with NFB
+- Multi-winding transformer support: parser allows inductors in multiple K directives
+- Per-pair SPICE approach for multi-winding (numerically stable at high k)
+- Component values from CineMag CM-S217D, Sowter 1475, Sylvania 12AU7 Koren fit
+- ~0.9 dB gain at flat (real hardware targets unity)
+
+### Review Findings (pending fixes)
+
+| Issue | Severity | Status |
+|-------|----------|--------|
+| B+ split rail: real Pultec uses ~290V for 12AU7, ~140V for 12AX7 via dropping resistor; we use single 250V | High | TODO |
+| Dead code: TransformerGroupInfo NxN path fully plumbed but never instantiated | Low | TODO (remove or gate behind feature) |
+| Unused `xfmr_idx` variable in mna.rs (2 compiler warnings) | Low | TODO |
+| `vec!` allocation in `update_transformer_groups()` hot path (dead code) | Low | TODO (pre-allocate if activated) |
+| Doc comment says "panics" but function returns identity fallback | Low | TODO |
+| No test coverage for NxN transformer group codegen path | Low | TODO |
+| Missing input transformer (`.input_impedance 600` approximates) | Medium | Deferred |
+| Pot values use Pultec manual specs, not ABSounds measured values | Info | By design |
+
+---
+
 ## OpenWurli Integration
 
 - Validate wurli-preamp via SPICE comparison
