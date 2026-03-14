@@ -52,7 +52,7 @@
 * B+ power supply
 * Real Pultec: 6X4 rectifier → 320V → two 1kΩ dropping resistors → 293V.
 * Output transformer CT sees ~261V (measured). 12AX7 plate supply ~293V
-* through Ra (100k), giving ~136V at plate (~1.5mA).
+* through Ra (100k), giving ~140V at plate (~1.48mA, Vk≈1.21V).
 * We model the B+ at the output transformer CT (261V measured, 290V schematic).
 * The 1kΩ dropping resistors and filter caps decouple the 12AX7 B+ supply.
 * Voltage data: GroupDIY EQP-1A voltage measurements thread.
@@ -92,8 +92,9 @@ R_lfb mid 0 10k
 C_lfb mid 0 2.2u
 
 * === FIRST STAGE: 12AX7 VOLTAGE AMPLIFIER ===
-* Coupling cap from EQ output tap to tube grid
-Cin out_tap grid 100n
+* Coupling cap from EQ output tap to tube grid.
+* 270pF per Sowter schematic (.00027); deliberate mid/HF coupling (f_c≈590Hz with 1M grid leak).
+Cin out_tap grid 270p
 
 * Grid leak resistor
 Rg grid 0 1Meg
@@ -104,19 +105,20 @@ T1 grid plate cathode 12AX7
 * Plate load resistor (connected to filtered B+ rail)
 Ra vcc_ax7 plate 100k
 
-* Cathode bias with bypass cap
+* Cathode bias with partial bypass (HF-only, Ck=250nF, f_c≈770Hz with Rk=820Ω).
 * Rk and Ck connect to feedback node (fb), not ground.
 * The S-217-D tertiary winding provides DC return path to ground
 * while injecting overall negative feedback at AC.
-Rk cathode fb 1.5k
-Ck cathode fb 25u
+Rk cathode fb 820
+Ck cathode fb 250n
 
 * === INTERSTAGE: TRIAD HS-29 TRANSFORMER ===
 * Phase splitter: single-ended 12AX7 plate → push-pull drive for 12AU7 pair.
 * 1:1+1 center-tapped secondary (each half = primary turns).
 * Confirmed specs: L_pri=130H, impedance 5k:20k, freq 20Hz-20kHz.
 * Coupling cap blocks DC from first stage plate.
-Cint plate pri_int 1u
+* 20nF (20000pF) confirmed from Sowter schematic — NOT 250nF.
+Cint plate pri_int 20n
 
 * Primary: pri_int to ground (DC return through winding)
 L_int_pri pri_int 0 130
@@ -146,8 +148,8 @@ Rg2b grid2b 0 470k
 T2a grid2a plate2a cath2 12AU7
 T2b grid2b plate2b cath2 12AU7
 
-* Shared cathode bias (40V measured → ~4k at ~10mA push-pull current)
-Rk2 cath2 0 4k
+* Shared cathode bias (40V measured, 4.7kΩ matched pair per schematic "RESISTORS SELECTED ALIKE")
+Rk2 cath2 0 4.7k
 Ck2 cath2 0 100u
 
 * === OUTPUT TRANSFORMER: PEERLESS S-217-D ===
