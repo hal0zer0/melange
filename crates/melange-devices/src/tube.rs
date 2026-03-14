@@ -66,27 +66,27 @@ impl KorenTriode {
     }
 
     /// 12AX7 (ECC83) - high-mu twin triode, common in guitar amps.
-    /// Koren parameters: mu=100, ex=1.4, Kg1=1060, Kp=600, Kvb=300
     pub fn ecc83() -> Self {
-        Self::new(100.0, 1.4, 1060.0, 600.0, 300.0)
+        let c = crate::catalog::tubes::lookup("12AX7").unwrap();
+        Self::with_all_params(c.mu, c.ex, c.kg1, c.kp, c.kvb, c.ig_max, c.vgk_onset, c.lambda)
     }
 
     /// 12AU7 (ECC82) - medium-mu twin triode.
-    /// Koren parameters: mu=17, ex=1.4, Kg1=1180, Kp=200, Kvb=100
     pub fn ecc82() -> Self {
-        Self::new(17.0, 1.4, 1180.0, 200.0, 100.0)
+        let c = crate::catalog::tubes::lookup("12AU7").unwrap();
+        Self::with_all_params(c.mu, c.ex, c.kg1, c.kp, c.kvb, c.ig_max, c.vgk_onset, c.lambda)
     }
 
     /// 12AT7 (ECC81) - medium-mu triode.
-    /// Koren parameters: mu=40, ex=1.4, Kg1=800, Kp=300, Kvb=150
     pub fn ecc81() -> Self {
-        Self::new(40.0, 1.4, 800.0, 300.0, 150.0)
+        let c = crate::catalog::tubes::lookup("12AT7").unwrap();
+        Self::with_all_params(c.mu, c.ex, c.kg1, c.kp, c.kvb, c.ig_max, c.vgk_onset, c.lambda)
     }
 
     /// 6SL7 - high-mu octal triode.
-    /// Koren parameters: mu=70, ex=1.4, Kg1=1200, Kp=400, Kvb=200
     pub fn _6sl7() -> Self {
-        Self::new(70.0, 1.4, 1200.0, 400.0, 200.0)
+        let c = crate::catalog::tubes::lookup("6SL7").unwrap();
+        Self::with_all_params(c.mu, c.ex, c.kg1, c.kp, c.kvb, c.ig_max, c.vgk_onset, c.lambda)
     }
 
     /// Calculate plate current given Vgk and Vpk.

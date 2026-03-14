@@ -36,12 +36,14 @@ impl Mosfet {
 
     /// 2N7000 N-channel MOSFET (common small-signal).
     pub fn n_2n7000() -> Self {
-        Self::new(ChannelType::N, 2.0, 0.1, 0.01)
+        let c = crate::catalog::mosfets::lookup("2N7000").unwrap();
+        Self::new(ChannelType::N, c.vt, c.kp, c.lambda)
     }
 
     /// BS170 N-channel MOSFET.
     pub fn n_bs170() -> Self {
-        Self::new(ChannelType::N, 0.8, 0.05, 0.01)
+        let c = crate::catalog::mosfets::lookup("BS170").unwrap();
+        Self::new(ChannelType::N, c.vt, c.kp, c.lambda)
     }
 
     /// Get sign multiplier based on channel type.

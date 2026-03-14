@@ -3518,10 +3518,19 @@ fn test_codegen_bjt_gp_constants_emitted() {
     assert!(code.contains("bjt_qb"), "qb function should be in generated code");
 }
 
-/// Non-GP BJT (no VAF/VAR/IKF/IKR) should emit USE_GP=false.
+/// Non-GP BJT (no VAF/VAR/IKF/IKR, unknown model name) should emit USE_GP=false.
 #[test]
 fn test_codegen_bjt_no_gp_backward_compat() {
-    let (code, _netlist, _mna, _kernel) = generate_code(BJT_SPICE);
+    // Use a model name NOT in the catalog so GP params default to infinity
+    let spice = "\
+BJT Circuit
+Q1 c b e MYBJTMODEL
+Rc c 0 1k
+Rb b 0 100k
+Re e 0 1k
+.model MYBJTMODEL NPN(IS=1e-15 BF=200)
+";
+    let (code, _netlist, _mna, _kernel) = generate_code(spice);
 
     assert!(code.contains("DEVICE_0_USE_GP: bool = false"), "GP flag should be false for EM");
     // GP constants still emitted but as infinity

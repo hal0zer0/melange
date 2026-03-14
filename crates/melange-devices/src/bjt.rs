@@ -59,23 +59,26 @@ impl BjtEbersMoll {
 
     /// 2N2222A NPN transistor (common general-purpose).
     pub fn npn_2n2222a() -> Self {
-        Self::new_room_temp(1.26e-14, 200.0, 3.0, BjtPolarity::Npn)
+        let c = crate::catalog::bjts::lookup("2N2222A").unwrap();
+        Self::new_room_temp(c.is, c.beta_f, c.beta_r, BjtPolarity::Npn)
     }
 
     /// 2N3904 NPN transistor.
     pub fn npn_2n3904() -> Self {
-        Self::new_room_temp(6.73e-15, 416.0, 0.737, BjtPolarity::Npn)
+        let c = crate::catalog::bjts::lookup("2N3904").unwrap();
+        Self::new_room_temp(c.is, c.beta_f, c.beta_r, BjtPolarity::Npn)
     }
 
     /// 2N3906 PNP transistor.
     pub fn pnp_2n3906() -> Self {
-        Self::new_room_temp(1.27e-14, 207.0, 1.68, BjtPolarity::Pnp)
+        let c = crate::catalog::bjts::lookup("2N3906").unwrap();
+        Self::new_room_temp(c.is, c.beta_f, c.beta_r, BjtPolarity::Pnp)
     }
 
     /// AC128 Germanium PNP (vintage fuzz tones).
     pub fn pnp_ac128() -> Self {
-        // Germanium has much higher Is
-        Self::new_room_temp(1e-6, 70.0, 3.0, BjtPolarity::Pnp)
+        let c = crate::catalog::bjts::lookup("AC128").unwrap();
+        Self::new_room_temp(c.is, c.beta_f, c.beta_r, BjtPolarity::Pnp)
     }
 
     /// Get the sign multiplier for polarity.

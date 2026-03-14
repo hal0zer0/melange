@@ -46,24 +46,34 @@ impl Jfet {
 
     /// 2N5457 N-channel JFET.
     pub fn n_2n5457() -> Self {
-        // Vp ≈ -2.5V, IDSS ≈ 1-5mA
-        Self::new(JfetChannel::N, -2.5, 3e-3)
+        let c = crate::catalog::jfets::lookup("2N5457").unwrap();
+        let mut j = Self::new(JfetChannel::N, c.vp, c.idss);
+        j.lambda = c.lambda;
+        j
     }
 
     /// J201 N-channel JFET (common in audio).
     pub fn n_j201() -> Self {
-        // Vp ≈ -0.6V to -1.5V, IDSS ≈ 0.2-1.0mA
-        Self::new(JfetChannel::N, -0.8, 6e-4)
+        let c = crate::catalog::jfets::lookup("J201").unwrap();
+        let mut j = Self::new(JfetChannel::N, c.vp, c.idss);
+        j.lambda = c.lambda;
+        j
     }
 
     /// 2N3819 N-channel JFET.
     pub fn n_2n3819() -> Self {
-        Self::new(JfetChannel::N, -3.0, 2e-3)
+        let c = crate::catalog::jfets::lookup("2N3819").unwrap();
+        let mut j = Self::new(JfetChannel::N, c.vp, c.idss);
+        j.lambda = c.lambda;
+        j
     }
 
     /// 2N5460 P-channel JFET.
     pub fn p_2n5460() -> Self {
-        Self::new(JfetChannel::P, 2.5, 3e-3)
+        let c = crate::catalog::jfets::lookup("2N5460").unwrap();
+        let mut j = Self::new(JfetChannel::P, c.vp, c.idss);
+        j.lambda = c.lambda;
+        j
     }
 
     fn sign(&self) -> f64 {

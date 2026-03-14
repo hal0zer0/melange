@@ -938,10 +938,17 @@ impl CircuitIR {
     }
 
     /// Resolve diode model parameters from the netlist, with validation.
+    ///
+    /// Resolution order: explicit `.model` param → catalog → generic default.
     fn resolve_diode_params(netlist: &Netlist, model: &str) -> Result<DiodeParams, CodegenError> {
         let vt = melange_primitives::VT_ROOM;
-        let is = Self::lookup_model_param(netlist, model, "IS").unwrap_or(2.52e-9);
-        let n = Self::lookup_model_param(netlist, model, "N").unwrap_or(1.0);
+        let cat = melange_devices::catalog::diodes::lookup(model);
+        let is = Self::lookup_model_param(netlist, model, "IS")
+            .or_else(|| cat.map(|c| c.is))
+            .unwrap_or(2.52e-9);
+        let n = Self::lookup_model_param(netlist, model, "N")
+            .or_else(|| cat.map(|c| c.n))
+            .unwrap_or(1.0);
 
         validate_positive_finite(is, "diode model IS")?;
         validate_positive_finite(n, "diode model N")?;
@@ -954,10 +961,19 @@ impl CircuitIR {
     /// Gummel-Poon parameters (VAF, VAR, IKF, IKR) default to infinity,
     /// which collapses qb→1.0, giving exact Ebers-Moll behavior.
     fn resolve_bjt_params(netlist: &Netlist, model: &str) -> Result<BjtParams, CodegenError> {
-        let vt = Self::lookup_model_param(netlist, model, "VT").unwrap_or(melange_primitives::VT_ROOM);
-        let is = Self::lookup_model_param(netlist, model, "IS").unwrap_or(1.26e-14);
-        let beta_f = Self::lookup_model_param(netlist, model, "BF").unwrap_or(200.0);
-        let beta_r = Self::lookup_model_param(netlist, model, "BR").unwrap_or(3.0);
+        let cat = melange_devices::catalog::bjts::lookup(model);
+        let vt = Self::lookup_model_param(netlist, model, "VT")
+            .or_else(|| cat.map(|c| c.vt))
+            .unwrap_or(melange_primitives::VT_ROOM);
+        let is = Self::lookup_model_param(netlist, model, "IS")
+            .or_else(|| cat.map(|c| c.is))
+            .unwrap_or(1.26e-14);
+        let beta_f = Self::lookup_model_param(netlist, model, "BF")
+            .or_else(|| cat.map(|c| c.beta_f))
+            .unwrap_or(200.0);
+        let beta_r = Self::lookup_model_param(netlist, model, "BR")
+            .or_else(|| cat.map(|c| c.beta_r))
+            .unwrap_or(3.0);
 
         validate_positive_finite(is, "BJT model IS")?;
         validate_positive_finite(vt, "BJT model VT")?;
@@ -967,20 +983,24 @@ impl CircuitIR {
         let is_pnp = netlist.models.iter()
             .find(|m| m.name.eq_ignore_ascii_case(model))
             .map(|m| m.model_type.to_uppercase().starts_with("PNP"))
-            .unwrap_or(false);
+            .unwrap_or(cat.map(|c| c.is_pnp).unwrap_or(false));
 
         // Gummel-Poon parameters (default to infinity = pure Ebers-Moll)
         let vaf = Self::lookup_model_param(netlist, model, "VAF")
             .or_else(|| Self::lookup_model_param(netlist, model, "VA"))
+            .or_else(|| cat.map(|c| c.vaf))
             .unwrap_or(f64::INFINITY);
         let var = Self::lookup_model_param(netlist, model, "VAR")
             .or_else(|| Self::lookup_model_param(netlist, model, "VB"))
+            .or_else(|| cat.map(|c| c.var))
             .unwrap_or(f64::INFINITY);
         let ikf = Self::lookup_model_param(netlist, model, "IKF")
             .or_else(|| Self::lookup_model_param(netlist, model, "JBF"))
+            .or_else(|| cat.map(|c| c.ikf))
             .unwrap_or(f64::INFINITY);
         let ikr = Self::lookup_model_param(netlist, model, "IKR")
             .or_else(|| Self::lookup_model_param(netlist, model, "JBR"))
+            .or_else(|| cat.map(|c| c.ikr))
             .unwrap_or(f64::INFINITY);
 
         // Validate: if finite, must be positive
@@ -1004,13 +1024,15 @@ impl CircuitIR {
     ///
     /// 2D Shichman-Hodges: IDSS, VP, and LAMBDA control triode + saturation regions.
     fn resolve_jfet_params(netlist: &Netlist, model: &str) -> Result<JfetParams, CodegenError> {
+        let cat = melange_devices::catalog::jfets::lookup(model);
+
         // Determine channel type first — default VP depends on polarity.
         let is_p_channel = netlist.models.iter()
             .find(|m| m.name.eq_ignore_ascii_case(model))
             .map(|m| m.model_type.to_uppercase().starts_with("PJ"))
-            .unwrap_or(false);
+            .unwrap_or(cat.map(|c| c.is_p_channel).unwrap_or(false));
 
-        let default_vp = if is_p_channel { 2.0 } else { -2.0 };
+        let default_vp = cat.map(|c| c.vp).unwrap_or(if is_p_channel { 2.0 } else { -2.0 });
         let vp = Self::lookup_model_param(netlist, model, "VTO")
             .unwrap_or(default_vp);
         // ngspice BETA = IDSS / VP^2, so IDSS = BETA * VP^2
@@ -1019,9 +1041,11 @@ impl CircuitIR {
         } else if let Some(beta) = Self::lookup_model_param(netlist, model, "BETA") {
             beta * vp * vp
         } else {
-            2e-3
+            cat.map(|c| c.idss).unwrap_or(2e-3)
         };
-        let lambda = Self::lookup_model_param(netlist, model, "LAMBDA").unwrap_or(0.001);
+        let lambda = Self::lookup_model_param(netlist, model, "LAMBDA")
+            .or_else(|| cat.map(|c| c.lambda))
+            .unwrap_or(0.001);
 
         validate_positive_finite(idss, "JFET model IDSS")?;
         if !vp.is_finite() || vp.abs() < 1e-15 {
@@ -1040,17 +1064,23 @@ impl CircuitIR {
 
     /// Resolve MOSFET model parameters from the netlist, with validation.
     fn resolve_mosfet_params(netlist: &Netlist, model: &str) -> Result<MosfetParams, CodegenError> {
+        let cat = melange_devices::catalog::mosfets::lookup(model);
+
         let is_p_channel = netlist.models.iter()
             .find(|m| m.name.eq_ignore_ascii_case(model))
             .map(|m| m.model_type.to_uppercase().starts_with("PM"))
-            .unwrap_or(false);
+            .unwrap_or(cat.map(|c| c.is_p_channel).unwrap_or(false));
 
-        let kp = Self::lookup_model_param(netlist, model, "KP").unwrap_or(0.1);
-        let default_vt = if is_p_channel { -2.0 } else { 2.0 };
+        let kp = Self::lookup_model_param(netlist, model, "KP")
+            .or_else(|| cat.map(|c| c.kp))
+            .unwrap_or(0.1);
+        let default_vt = cat.map(|c| c.vt).unwrap_or(if is_p_channel { -2.0 } else { 2.0 });
         let vt = Self::lookup_model_param(netlist, model, "VTO")
             .or_else(|| Self::lookup_model_param(netlist, model, "VT"))
             .unwrap_or(default_vt);
-        let lambda = Self::lookup_model_param(netlist, model, "LAMBDA").unwrap_or(0.01);
+        let lambda = Self::lookup_model_param(netlist, model, "LAMBDA")
+            .or_else(|| cat.map(|c| c.lambda))
+            .unwrap_or(0.01);
 
         validate_positive_finite(kp, "MOSFET model KP")?;
         if !vt.is_finite() {
@@ -1069,16 +1099,33 @@ impl CircuitIR {
 
     /// Resolve tube/triode model parameters from the netlist, with validation.
     ///
-    /// Defaults are 12AX7 (ECC83) values.
+    /// Resolution order: explicit `.model` param → catalog → generic default (12AX7).
     fn resolve_tube_params(netlist: &Netlist, model: &str) -> Result<TubeParams, CodegenError> {
-        let mu = Self::lookup_model_param(netlist, model, "MU").unwrap_or(100.0);
-        let ex = Self::lookup_model_param(netlist, model, "EX").unwrap_or(1.4);
-        let kg1 = Self::lookup_model_param(netlist, model, "KG1").unwrap_or(1060.0);
-        let kp = Self::lookup_model_param(netlist, model, "KP").unwrap_or(600.0);
-        let kvb = Self::lookup_model_param(netlist, model, "KVB").unwrap_or(300.0);
-        let ig_max = Self::lookup_model_param(netlist, model, "IG_MAX").unwrap_or(2e-3);
-        let vgk_onset = Self::lookup_model_param(netlist, model, "VGK_ONSET").unwrap_or(0.5);
-        let lambda = Self::lookup_model_param(netlist, model, "LAMBDA").unwrap_or(0.0);
+        let cat = melange_devices::catalog::tubes::lookup(model);
+        let mu = Self::lookup_model_param(netlist, model, "MU")
+            .or_else(|| cat.map(|c| c.mu))
+            .unwrap_or(100.0);
+        let ex = Self::lookup_model_param(netlist, model, "EX")
+            .or_else(|| cat.map(|c| c.ex))
+            .unwrap_or(1.4);
+        let kg1 = Self::lookup_model_param(netlist, model, "KG1")
+            .or_else(|| cat.map(|c| c.kg1))
+            .unwrap_or(1060.0);
+        let kp = Self::lookup_model_param(netlist, model, "KP")
+            .or_else(|| cat.map(|c| c.kp))
+            .unwrap_or(600.0);
+        let kvb = Self::lookup_model_param(netlist, model, "KVB")
+            .or_else(|| cat.map(|c| c.kvb))
+            .unwrap_or(300.0);
+        let ig_max = Self::lookup_model_param(netlist, model, "IG_MAX")
+            .or_else(|| cat.map(|c| c.ig_max))
+            .unwrap_or(2e-3);
+        let vgk_onset = Self::lookup_model_param(netlist, model, "VGK_ONSET")
+            .or_else(|| cat.map(|c| c.vgk_onset))
+            .unwrap_or(0.5);
+        let lambda = Self::lookup_model_param(netlist, model, "LAMBDA")
+            .or_else(|| cat.map(|c| c.lambda))
+            .unwrap_or(0.0);
 
         validate_positive_finite(mu, "tube model MU")?;
         validate_positive_finite(ex, "tube model EX")?;

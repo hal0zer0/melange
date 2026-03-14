@@ -10,6 +10,7 @@
 // - CdS LDR photocell (asymmetric attack/release, power-law resistance)
 
 pub mod bjt;
+pub mod catalog;
 pub mod diode;
 pub mod tube;
 pub mod ldr;

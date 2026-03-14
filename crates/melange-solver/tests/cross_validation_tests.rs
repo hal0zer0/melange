@@ -30,14 +30,14 @@ BJT Common Emitter
 Cin in base 10u
 R1 vcc base 100k
 R2 base 0 22k
-Q1 coll base emit 2N2222
+Q1 coll base emit MYBJTCE
 Rc vcc coll 4.7k
 Re emit 0 1k
 Ce emit 0 100u
 Cout coll out 10u
 Rload out 0 100k
 Vcc vcc 0 DC 12
-.model 2N2222 NPN(IS=1e-14 BF=200 BR=3)
+.model MYBJTCE NPN(IS=1e-14 BF=200 BR=3)
 ";
 
 const JFET_CS: &str = "\

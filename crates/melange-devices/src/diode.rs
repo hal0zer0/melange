@@ -46,7 +46,8 @@ impl DiodeShockley {
 
     /// Create a 1N4148 signal diode (well-characterized).
     pub fn silicon_1n4148() -> Self {
-        Self::new_room_temp(2.52e-9, 1.752)
+        let c = crate::catalog::diodes::lookup("1N4148").unwrap();
+        Self::new_room_temp(c.is, c.n)
     }
 
     /// Create an ideal silicon diode (theoretical).
@@ -56,12 +57,14 @@ impl DiodeShockley {
 
     /// Create a germanium diode (1N34A-like).
     pub fn germanium() -> Self {
-        Self::new_room_temp(2e-7, 1.05)
+        let c = crate::catalog::diodes::lookup("1N34A").unwrap();
+        Self::new_room_temp(c.is, c.n)
     }
 
     /// Create a Schottky diode (1N5819-like).
     pub fn schottky() -> Self {
-        Self::new_room_temp(1e-8, 1.04)
+        let c = crate::catalog::diodes::lookup("1N5819").unwrap();
+        Self::new_room_temp(c.is, c.n)
     }
 
     /// Calculate current for a given voltage.
