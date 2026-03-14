@@ -1074,32 +1074,48 @@ impl MnaBuilder {
                     coupling: k_val,
                 });
             } else {
-                // Multi-winding (3+): use per-pair CoupledInductorInfo.
-                // Standard SPICE approach: each K directive is an independent 2-winding
-                // coupled pair. An inductor appearing in multiple K directives gets its
-                // self-conductance stamped multiple times — the accumulation provides
-                // natural numerical damping. This avoids the ill-conditioned NxN
-                // inductance matrix that arises with high coupling values (k→1).
+                // Multi-winding (3+): build NxN inductance matrix and invert.
+                // The per-pair approach incorrectly stamps self-conductance once per K
+                // directive an inductor appears in, giving wrong effective inductances.
+                // The NxN approach computes the correct admittance matrix Y = inv(L).
+                let w = members.len();
+                let mut coupling_matrix = vec![vec![0.0f64; w]; w];
+                for i in 0..w {
+                    coupling_matrix[i][i] = 1.0; // Self-coupling = 1.0
+                }
+                // Fill in coupling coefficients from K directives
                 for coupling in &netlist.couplings {
                     let a = coupling.inductor1_name.to_ascii_lowercase();
                     let b = coupling.inductor2_name.to_ascii_lowercase();
-                    if members.contains(&a) && members.contains(&b) {
-                        let ra = &inductor_refs[&a];
-                        let rb = &inductor_refs[&b];
-                        mna.coupled_inductors.push(CoupledInductorInfo {
-                            name: coupling.name.clone(),
-                            l1_name: ra.name.clone(),
-                            l2_name: rb.name.clone(),
-                            l1_node_i: ra.node_i,
-                            l1_node_j: ra.node_j,
-                            l2_node_i: rb.node_i,
-                            l2_node_j: rb.node_j,
-                            l1_value: ra.value,
-                            l2_value: rb.value,
-                            coupling: coupling.coupling,
-                        });
+                    if let (Some(ia), Some(ib)) = (
+                        members.iter().position(|m| *m == a),
+                        members.iter().position(|m| *m == b),
+                    ) {
+                        coupling_matrix[ia][ib] = coupling.coupling;
+                        coupling_matrix[ib][ia] = coupling.coupling;
                     }
                 }
+                let mut winding_node_i = Vec::with_capacity(w);
+                let mut winding_node_j = Vec::with_capacity(w);
+                let mut inductances = Vec::with_capacity(w);
+                let mut winding_names = Vec::with_capacity(w);
+                for m in &members {
+                    let r = &inductor_refs[m];
+                    winding_node_i.push(r.node_i);
+                    winding_node_j.push(r.node_j);
+                    inductances.push(r.value);
+                    winding_names.push(r.name.clone());
+                }
+                let group_idx = mna.transformer_groups.len();
+                mna.transformer_groups.push(TransformerGroupInfo {
+                    name: format!("xfmr_{}", group_idx),
+                    num_windings: w,
+                    winding_names,
+                    winding_node_i,
+                    winding_node_j,
+                    inductances,
+                    coupling_matrix,
+                });
             }
         }
 

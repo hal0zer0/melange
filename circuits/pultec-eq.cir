@@ -128,9 +128,11 @@ L_int_pri pri_int 0 130
 L_int_a grid2a int_ct 130
 L_int_b int_ct grid2b 130
 
-* Coupling between primary and each secondary half
+* Coupling between primary and each secondary half, plus inter-secondary.
+* All windings on same core — k_ab must be specified for NxN matrix to be positive definite.
 K_inta L_int_pri L_int_a 0.99
 K_intb L_int_pri L_int_b 0.99
+K_intab L_int_a L_int_b 0.98
 
 * Center tap bias: connected to B+ through ~2M bias resistor.
 * Grid leaks (470k each, parallel 235k) provide ground return.
