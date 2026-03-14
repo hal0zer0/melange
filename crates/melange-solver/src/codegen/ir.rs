@@ -35,6 +35,7 @@ pub struct CircuitIR {
     pub dc_op_converged: bool,
     pub inductors: Vec<InductorIR>,
     pub coupled_inductors: Vec<CoupledInductorIR>,
+    pub transformer_groups: Vec<TransformerGroupIR>,
     pub pots: Vec<PotentiometerIR>,
     pub switches: Vec<SwitchIR>,
     /// Pre-analyzed sparsity patterns for compile-time matrices.
@@ -206,6 +207,21 @@ pub struct CoupledInductorIR {
     pub g_self_2: f64,
     /// Mutual conductance: -(T/2) * M / det
     pub g_mutual: f64,
+}
+
+/// Multi-winding transformer group for codegen.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransformerGroupIR {
+    pub name: String,
+    pub num_windings: usize,
+    pub winding_names: Vec<String>,
+    pub winding_node_i: Vec<usize>,
+    pub winding_node_j: Vec<usize>,
+    pub inductances: Vec<f64>,
+    /// NxN coupling matrix, flat row-major
+    pub coupling_flat: Vec<f64>,
+    /// NxN admittance matrix Y = (T/2) * inv(L), flat row-major (at codegen sample rate)
+    pub y_matrix: Vec<f64>,
 }
 
 /// Per-device resolved parameters, stored in each `DeviceSlot`.
@@ -721,6 +737,48 @@ impl CircuitIR {
             }
         }).collect();
 
+        let transformer_groups: Vec<TransformerGroupIR> = kernel.transformer_groups.iter().map(|g| {
+            let w = g.num_windings;
+            // Recompute Y matrix at internal rate when oversampling
+            let y_matrix = if os_factor > 1 {
+                let t = 1.0 / internal_rate;
+                let half_t = t / 2.0;
+                let mut l_mat = vec![vec![0.0f64; w]; w];
+                for i in 0..w {
+                    for j in 0..w {
+                        l_mat[i][j] = g.coupling_matrix[i][j]
+                            * (g.inductances[i] * g.inductances[j]).sqrt();
+                    }
+                }
+                let y_raw = crate::mna::invert_small_matrix(&l_mat);
+                let mut y_flat = vec![0.0f64; w * w];
+                for i in 0..w {
+                    for j in 0..w {
+                        y_flat[i * w + j] = half_t * y_raw[i][j];
+                    }
+                }
+                y_flat
+            } else {
+                g.y_matrix.clone()
+            };
+            let mut coupling_flat = vec![0.0f64; w * w];
+            for i in 0..w {
+                for j in 0..w {
+                    coupling_flat[i * w + j] = g.coupling_matrix[i][j];
+                }
+            }
+            TransformerGroupIR {
+                name: g.name.clone(),
+                num_windings: w,
+                winding_names: g.winding_names.clone(),
+                winding_node_i: g.winding_node_i.clone(),
+                winding_node_j: g.winding_node_j.clone(),
+                inductances: g.inductances.clone(),
+                coupling_flat,
+                y_matrix,
+            }
+        }).collect();
+
         let pots = kernel.pots.iter().map(|p| PotentiometerIR {
             su: p.su.clone(),
             usu: p.usu,
@@ -805,6 +863,7 @@ impl CircuitIR {
             dc_op_converged,
             inductors,
             coupled_inductors,
+            transformer_groups,
             pots,
             switches,
             sparsity,

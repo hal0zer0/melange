@@ -21,7 +21,8 @@ fn build_rhs(input: f64, input_prev: f64, state: &CircuitState) -> [f64; N] {
 {% endif %}{% if ci.l2_node_i > 0 %}    rhs[{{ ci.l2_node_i - 1 }}] -= state.ci_i2_hist[{{ loop.index0 }}];
 {% endif %}{% if ci.l2_node_j > 0 %}    rhs[{{ ci.l2_node_j - 1 }}] += state.ci_i2_hist[{{ loop.index0 }}];
 {% endif %}{% endfor %}
-{% endif %}    // Add input contribution (Thevenin: (V_in + V_in_prev) * G_in)
+{% endif %}{% if num_transformer_groups > 0 %}    // Add transformer group history current contribution
+{{ xfmr_rhs_lines }}{% endif %}    // Add input contribution (Thevenin: (V_in + V_in_prev) * G_in)
     rhs[INPUT_NODE] += (input + input_prev) / INPUT_RESISTANCE;
 
     rhs

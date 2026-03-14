@@ -563,6 +563,7 @@ fn test_singular_matrix_error_path() {
         current_sources: vec![],
         inductors: vec![],
         coupled_inductors: vec![],
+        transformer_groups: vec![],
         pots: vec![],
         switches: vec![],
         opamps: vec![],

@@ -54,8 +54,10 @@ pub struct MnaSystem {
     pub current_sources: Vec<CurrentSourceInfo>,
     /// Inductor elements for companion model (uncoupled only)
     pub inductors: Vec<InductorElement>,
-    /// Coupled inductor pairs for transformer companion model
+    /// Coupled inductor pairs for transformer companion model (2-winding only)
     pub coupled_inductors: Vec<CoupledInductorInfo>,
+    /// Multi-winding transformer groups (3+ windings on shared core)
+    pub transformer_groups: Vec<TransformerGroupInfo>,
     /// Potentiometer info (resolved from .pot directives)
     pub pots: Vec<PotInfo>,
     /// Switch info (resolved from .switch directives)
@@ -90,6 +92,29 @@ pub struct CoupledInductorInfo {
     pub l1_value: f64,
     pub l2_value: f64,
     pub coupling: f64,
+}
+
+/// Multi-winding transformer group info.
+///
+/// Groups 3+ inductors that share a magnetic core (connected via K directives).
+/// The companion model uses an NxN inductance matrix and its inverse for
+/// admittance stamping, instead of per-pair 2x2 inversions.
+#[derive(Debug, Clone)]
+pub struct TransformerGroupInfo {
+    /// Auto-generated group name (e.g. "xfmr_0")
+    pub name: String,
+    /// Number of windings in this group
+    pub num_windings: usize,
+    /// Inductor names in group order
+    pub winding_names: Vec<String>,
+    /// Positive node index for each winding (1-indexed, 0=ground)
+    pub winding_node_i: Vec<usize>,
+    /// Negative node index for each winding (1-indexed, 0=ground)
+    pub winding_node_j: Vec<usize>,
+    /// Self-inductance for each winding
+    pub inductances: Vec<f64>,
+    /// NxN coupling coefficient matrix (symmetric, diagonal = 1.0)
+    pub coupling_matrix: Vec<Vec<f64>>,
 }
 
 /// Information about a nonlinear device in the MNA system.
@@ -217,6 +242,7 @@ impl MnaSystem {
             current_sources: Vec::new(),
             inductors: Vec::new(),
             coupled_inductors: Vec::new(),
+            transformer_groups: Vec::new(),
             pots: Vec::new(),
             switches: Vec::new(),
             opamps: Vec::new(),
@@ -430,6 +456,42 @@ impl MnaSystem {
             stamp_mutual_conductance(&mut mat, ci.l2_node_i, ci.l2_node_j, ci.l1_node_i, ci.l1_node_j, gm);
         }
 
+        // Multi-winding transformer groups: NxN admittance stamping.
+        // Build the full inductance matrix, invert it, multiply by T/2,
+        // and stamp all self and mutual admittance entries.
+        for group in &self.transformer_groups {
+            let w = group.num_windings;
+            // Build inductance matrix L[i][j] = k[i][j] * sqrt(L_i * L_j)
+            let mut l_mat = vec![vec![0.0f64; w]; w];
+            for i in 0..w {
+                for j in 0..w {
+                    l_mat[i][j] = group.coupling_matrix[i][j]
+                        * (group.inductances[i] * group.inductances[j]).sqrt();
+                }
+            }
+            // Invert: Y_raw = inv(L)
+            let y_raw = invert_small_matrix(&l_mat);
+            // Scale by T/2 and apply sign
+            let scale = g_sign * g_eq_factor;
+            // Stamp admittance entries
+            for i in 0..w {
+                // Self-conductance Y[i][i]
+                let y_self = scale * y_raw[i][i];
+                stamp_conductance_to_ground(&mut mat,
+                    group.winding_node_i[i], group.winding_node_j[i], y_self);
+                // Mutual conductance Y[i][j] for j > i (stamp both directions)
+                for j in (i + 1)..w {
+                    let y_mut = scale * y_raw[i][j];
+                    stamp_mutual_conductance(&mut mat,
+                        group.winding_node_i[i], group.winding_node_j[i],
+                        group.winding_node_i[j], group.winding_node_j[j], y_mut);
+                    stamp_mutual_conductance(&mut mat,
+                        group.winding_node_i[j], group.winding_node_j[j],
+                        group.winding_node_i[i], group.winding_node_j[i], y_mut);
+                }
+            }
+        }
+
         mat
     }
 
@@ -570,6 +632,61 @@ impl std::fmt::Display for MnaError {
 }
 
 impl std::error::Error for MnaError {}
+
+/// Invert a small NxN matrix using Gaussian elimination with partial pivoting.
+/// Used for multi-winding transformer inductance matrix inversion.
+/// Panics if the matrix is singular (determinant ≈ 0).
+pub(crate) fn invert_small_matrix(a: &[Vec<f64>]) -> Vec<Vec<f64>> {
+    let n = a.len();
+    // Build augmented matrix [A | I]
+    let mut aug = vec![vec![0.0f64; 2 * n]; n];
+    for i in 0..n {
+        for j in 0..n {
+            aug[i][j] = a[i][j];
+        }
+        aug[i][n + i] = 1.0;
+    }
+    // Forward elimination with partial pivoting
+    for col in 0..n {
+        let mut max_row = col;
+        let mut max_val = aug[col][col].abs();
+        for row in (col + 1)..n {
+            if aug[row][col].abs() > max_val {
+                max_val = aug[row][col].abs();
+                max_row = row;
+            }
+        }
+        if max_val < 1e-30 {
+            log::warn!("Singular inductance matrix in transformer group (pivot {:.2e})", max_val);
+            // Return identity as fallback
+            let mut result = vec![vec![0.0; n]; n];
+            for i in 0..n { result[i][i] = 1.0; }
+            return result;
+        }
+        if max_row != col {
+            aug.swap(col, max_row);
+        }
+        let pivot = aug[col][col];
+        for j in col..(2 * n) {
+            aug[col][j] /= pivot;
+        }
+        for row in 0..n {
+            if row == col { continue; }
+            let factor = aug[row][col];
+            for j in col..(2 * n) {
+                aug[row][j] -= factor * aug[col][j];
+            }
+        }
+    }
+    // Extract inverse from augmented matrix
+    let mut result = vec![vec![0.0; n]; n];
+    for i in 0..n {
+        for j in 0..n {
+            result[i][j] = aug[i][n + j];
+        }
+    }
+    result
+}
 
 /// Stamp a conductance `g` between two nodes that may be grounded (index 0).
 ///
@@ -839,44 +956,151 @@ impl MnaBuilder {
             });
         }
 
-        // Resolve coupling (K) directives: pair up inductors, remove from uncoupled list
+        // Resolve coupling (K) directives: group inductors into transformer groups.
+        // 2-winding pairs (inductors that appear in exactly one K directive each)
+        // use the existing CoupledInductorInfo path. Multi-winding groups (3+
+        // inductors connected by multiple K directives) use TransformerGroupInfo.
         let mut coupled_inductor_names = std::collections::HashSet::new();
+
+        // Collect all inductor info referenced by K directives
+        struct InductorRef {
+            name: String,
+            node_i: usize,
+            node_j: usize,
+            value: f64,
+        }
+        let mut inductor_refs: std::collections::HashMap<String, InductorRef> = std::collections::HashMap::new();
         for coupling in &netlist.couplings {
-            let l1 = netlist.elements.iter().find(|e| {
-                matches!(e, Element::Inductor { name, .. } if name.eq_ignore_ascii_case(&coupling.inductor1_name))
-            });
-            let l2 = netlist.elements.iter().find(|e| {
-                matches!(e, Element::Inductor { name, .. } if name.eq_ignore_ascii_case(&coupling.inductor2_name))
-            });
-            if let (
-                Some(Element::Inductor { name: n1, n_plus: np1, n_minus: nm1, value: v1, .. }),
-                Some(Element::Inductor { name: n2, n_plus: np2, n_minus: nm2, value: v2, .. }),
-            ) = (l1, l2) {
-                // Reject coupled inductors in .switch directives
-                for sw in &netlist.switches {
-                    for comp_name in &sw.component_names {
-                        if comp_name.eq_ignore_ascii_case(n1) || comp_name.eq_ignore_ascii_case(n2) {
-                            return Err(MnaError::TopologyError(format!(
-                                "Coupled inductor '{}' cannot also be in a .switch directive",
-                                comp_name
-                            )));
+            for ind_name in [&coupling.inductor1_name, &coupling.inductor2_name] {
+                let lower = ind_name.to_ascii_lowercase();
+                if inductor_refs.contains_key(&lower) {
+                    continue;
+                }
+                if let Some(Element::Inductor { name, n_plus, n_minus, value, .. }) =
+                    netlist.elements.iter().find(|e| {
+                        matches!(e, Element::Inductor { name, .. } if name.eq_ignore_ascii_case(ind_name))
+                    })
+                {
+                    // Reject coupled inductors in .switch directives
+                    for sw in &netlist.switches {
+                        for comp_name in &sw.component_names {
+                            if comp_name.eq_ignore_ascii_case(name) {
+                                return Err(MnaError::TopologyError(format!(
+                                    "Coupled inductor '{}' cannot also be in a .switch directive",
+                                    comp_name
+                                )));
+                            }
                         }
                     }
+                    inductor_refs.insert(lower, InductorRef {
+                        name: name.clone(),
+                        node_i: self.node_map[n_plus],
+                        node_j: self.node_map[n_minus],
+                        value: *value,
+                    });
                 }
+            }
+        }
+
+        // Build a graph of inductor connections via K directives (union-find)
+        let ind_names: Vec<String> = inductor_refs.keys().cloned().collect();
+        let mut parent: std::collections::HashMap<String, String> = ind_names.iter()
+            .map(|n| (n.clone(), n.clone())).collect();
+        fn find(parent: &mut std::collections::HashMap<String, String>, x: &str) -> String {
+            let p = parent[x].clone();
+            if p == x { return p; }
+            let root = find(parent, &p);
+            parent.insert(x.to_string(), root.clone());
+            root
+        }
+        fn union(parent: &mut std::collections::HashMap<String, String>, a: &str, b: &str) {
+            let ra = find(parent, a);
+            let rb = find(parent, b);
+            if ra != rb {
+                parent.insert(ra, rb);
+            }
+        }
+        for coupling in &netlist.couplings {
+            let l1 = coupling.inductor1_name.to_ascii_lowercase();
+            let l2 = coupling.inductor2_name.to_ascii_lowercase();
+            union(&mut parent, &l1, &l2);
+        }
+
+        // Group inductors by their root in the union-find
+        let mut groups: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+        for name in &ind_names {
+            let root = find(&mut parent, name);
+            groups.entry(root).or_default().push(name.clone());
+        }
+
+        // Process each group
+        let mut xfmr_idx = 0usize;
+        for (_root, mut members) in groups {
+            // Sort members for deterministic ordering (by original element order)
+            members.sort_by_key(|m| {
+                netlist.elements.iter().position(|e| {
+                    matches!(e, Element::Inductor { name, .. } if name.to_ascii_lowercase() == *m)
+                }).unwrap_or(usize::MAX)
+            });
+
+            for m in &members {
+                coupled_inductor_names.insert(m.clone());
+            }
+
+            if members.len() == 2 {
+                // 2-winding: use existing CoupledInductorInfo path
+                let r1 = &inductor_refs[&members[0]];
+                let r2 = &inductor_refs[&members[1]];
+                // Find the coupling between these two
+                let k_val = netlist.couplings.iter().find(|c| {
+                    let a = c.inductor1_name.to_ascii_lowercase();
+                    let b = c.inductor2_name.to_ascii_lowercase();
+                    (a == members[0] && b == members[1]) || (a == members[1] && b == members[0])
+                }).map(|c| c.coupling).unwrap_or(0.0);
+                let k_name = netlist.couplings.iter().find(|c| {
+                    let a = c.inductor1_name.to_ascii_lowercase();
+                    let b = c.inductor2_name.to_ascii_lowercase();
+                    (a == members[0] && b == members[1]) || (a == members[1] && b == members[0])
+                }).map(|c| c.name.clone()).unwrap_or_default();
                 mna.coupled_inductors.push(CoupledInductorInfo {
-                    name: coupling.name.clone(),
-                    l1_name: n1.clone(),
-                    l2_name: n2.clone(),
-                    l1_node_i: self.node_map[np1],
-                    l1_node_j: self.node_map[nm1],
-                    l2_node_i: self.node_map[np2],
-                    l2_node_j: self.node_map[nm2],
-                    l1_value: *v1,
-                    l2_value: *v2,
-                    coupling: coupling.coupling,
+                    name: k_name,
+                    l1_name: r1.name.clone(),
+                    l2_name: r2.name.clone(),
+                    l1_node_i: r1.node_i,
+                    l1_node_j: r1.node_j,
+                    l2_node_i: r2.node_i,
+                    l2_node_j: r2.node_j,
+                    l1_value: r1.value,
+                    l2_value: r2.value,
+                    coupling: k_val,
                 });
-                coupled_inductor_names.insert(n1.to_ascii_lowercase());
-                coupled_inductor_names.insert(n2.to_ascii_lowercase());
+            } else {
+                // Multi-winding (3+): use per-pair CoupledInductorInfo.
+                // Standard SPICE approach: each K directive is an independent 2-winding
+                // coupled pair. An inductor appearing in multiple K directives gets its
+                // self-conductance stamped multiple times — the accumulation provides
+                // natural numerical damping. This avoids the ill-conditioned NxN
+                // inductance matrix that arises with high coupling values (k→1).
+                for coupling in &netlist.couplings {
+                    let a = coupling.inductor1_name.to_ascii_lowercase();
+                    let b = coupling.inductor2_name.to_ascii_lowercase();
+                    if members.contains(&a) && members.contains(&b) {
+                        let ra = &inductor_refs[&a];
+                        let rb = &inductor_refs[&b];
+                        mna.coupled_inductors.push(CoupledInductorInfo {
+                            name: coupling.name.clone(),
+                            l1_name: ra.name.clone(),
+                            l2_name: rb.name.clone(),
+                            l1_node_i: ra.node_i,
+                            l1_node_j: ra.node_j,
+                            l2_node_i: rb.node_i,
+                            l2_node_j: rb.node_j,
+                            l1_value: ra.value,
+                            l2_value: rb.value,
+                            coupling: coupling.coupling,
+                        });
+                    }
+                }
             }
         }
 

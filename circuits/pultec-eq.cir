@@ -2,107 +2,206 @@
 * Copyright (c) 2026 Melange Contributors
 * License: MIT OR Apache-2.0
 *
-* Classic passive program equalizer based on the ABSounds/EQP-WDF-1A
-* LTSpice model. Passive LC/RC EQ sections followed by a 12AX7 tube
-* makeup gain stage.
+* Passive bridge-T EQ network followed by full tube amplifier stage:
+*   12AX7 voltage amplifier → Triad HS-29 interstage transformer →
+*   12AU7 push-pull output → Peerless S-217-D output transformer
+*   with overall negative feedback via tertiary winding.
 *
-* Topology:
-*   in -> R1 (jumper) -> hfb (HF boost LC) -> lfb (LF boost C) ->
-*   hfc (HF cut RC) -> Cin -> grid -> [12AX7] -> plate -> output pad -> out
+* Topology derived from ABSounds/EQP-WDF-1A analysis of actual hardware.
+* Pot values from original Pultec EQP-1A service manual.
+* Transformer specs from CineMag CM-S217D datasheet and Sowter 1475 data.
+* 12AU7 Koren parameters from Sylvania Technical Manual fit.
 *
-* Controls (8 total):
-*   3 switches: HF Boost Freq (7-pos), LF Boost Freq (4-pos), HF Cut Freq (3-pos)
-*   5 pots: HF Boost Amount, HF Boost Q, LF Boost Amount, LF Cut Amount, HF Cut Amount
+* Signal flow (passive EQ is a 2-port network, NOT a series chain):
 *
-* Component values from ABSounds/EQP-WDF-1A LTSpice model.
-* Inductor values corrected: 50n/22n -> 50m/22m (millihenries for audio LC resonance).
+*   in ──┬── R_hfb_u ── b ──┬── R_hfb_l ──┬── eq ──┬── R_hfc_u ── f ──┬── R_hfc_l ── mid ──┬── R_lfb ── gnd
+*        │                   │              │        │                   │                    │
+*        │                   ├── C+L+Q ─────┘        │                   ├── C_hfc ───────────┘├── C_lfb ── gnd
+*        │(600Ω src)         │(bridge-T boost)       │                   │(HF cut shunt)
+*        │                                           ├── C_lfa ── h ──── R2 ── out_tap ── R3 ── mid
+*        │                                           ├── R_lfc ── h     (tube Cin couples from out_tap)
+*
+* Output stage:
+*   out_tap → Cin → 12AX7 grid → plate → Cint → HS-29 interstage xfmr →
+*   push-pull 12AU7 grids → plates → S-217-D output xfmr → out
+*   S-217-D tertiary → feedback to 12AX7 cathode (overall NFB)
+*
+* Controls (8 total — but 7 pots due to 3-terminal pot modeling):
+*   3 switches: HF Boost Freq (7-pos), LF Freq (4-pos), HF Cut Freq (3-pos)
+*   7 pots: HF Boost upper/lower (linked), Bandwidth, LF Boost, LF Atten,
+*           HF Cut upper/lower (linked)
+*
+* 3-terminal pot note: HF Boost and HF Cut use voltage-divider pots where
+* R_upper + R_lower = R_total. The plugin must link these inversely:
+*   R_upper = R_total * (1 - param), R_lower = R_total * param
+*
+* Component values:
+*   Pots: original Pultec manual (10k/2.5k/10k/100k/1k)
+*   Fixed Rs: ABSounds analysis (R2=1k, R3=10k, R_q_off=390)
+*   Switch caps/inductors: computed from ABSounds RATIO_L1_C1=12e6
+*   LF caps: ABSounds (LoFreqC2 values, LoFreqC1 = LoFreqC2/30)
+*   HF cut caps: ABSounds (270n/135n/68n for 5k/10k/20kHz)
+*   HS-29: Sowter 1475 replacement data (130H primary, 1:1+1 CT)
+*   S-217-D: CineMag CM-S217D datasheet (38.1H@1kHz, 4.474:1, tertiary 22.2:1)
+*   12AU7: Koren fit to Sylvania Technical Manual curves
 
 .model 12AX7 TRIODE(MU=100 EX=1.4 KG1=1060 KP=600 KVB=300)
+.model 12AU7 TRIODE(MU=20.21 EX=1.23 KG1=1108.7 KP=84.96 KVB=551.3)
 .input_impedance 600
 
 * B+ power supply (250V plate voltage)
 VCC vcc 0 DC 250
 
-* === INPUT SECTION ===
-* R1 is a jumper (near-zero resistance), connects input to EQ network
-R1 in eq_in 1m
+* === HF BOOST SECTION (bridge-T) ===
+* 3-terminal 10k linear pot split into upper arm (in→b) and lower arm (b→eq).
+* Series LC resonant circuit + Q damping bridges from b to eq.
+R_hfb_u in b 10k
+R_hfb_l b eq 10k
+C_hfb b c_hfb 15.3n
+L_hfb c_hfb d_hfb 183.8m
+R_hfb_q d_hfb eq 2.5k
+R_q_off d_hfb eq 390
 
-* === HF BOOST SECTION (series LC resonant to ground) ===
-* The HF boost pot controls how much of the LC resonant circuit
-* is connected to the signal path. At max, full resonant boost.
-* At min (1 ohm), the LC is effectively disconnected.
-* C_hfb and L_hfb are ganged on one 7-position switch.
-R_hfb eq_in hfb_tap 10k
-C_hfb hfb_tap hfb_l 15n
-L_hfb hfb_l 0 176m
-R_hfb_q hfb_tap 0 2.2k
+* === HF CUT + LF SECTIONS (parallel paths from eq to mid) ===
 
-* === LF BOOST SECTION (capacitor to ground for bass shelf) ===
-* The LF boost pot controls how much bass boost cap is active.
-* At max, full cap to ground creates bass shelf.
-R_lfb eq_in lfb_tap 10k
-C_lfb lfb_tap 0 330n
+* --- HF Cut path (eq → mid, bypasses the output tap) ---
+R_hfc_u eq f 1k
+R_hfc_l f mid 1k
+C_hfc f mid 270n
 
-* === LF CUT SECTION (highpass via series cap) ===
-* Higher pot value = more LF cut (less bass passes)
-R_lfc eq_in lfc_out 100k
-C_lfc lfc_out 0 100n
+* --- LF path (eq → out_tap → mid, includes the output tap) ---
+C_lfa eq h 73.3n
+R_lfc eq h 100k
+R2 h out_tap 1k
+R3 out_tap mid 10k
 
-* === HF CUT SECTION (RC lowpass) ===
-* HF cut pot controls the rolloff amount.
-* C_hfc is on a 3-position switch.
-R_hfc eq_in hfc_tap 1k
-C_hfc hfc_tap 0 47n
+* === LF BOOST SHUNT (mid → ground) ===
+R_lfb mid 0 10k
+C_lfb mid 0 2.2u
 
-* === TUBE MAKEUP GAIN (12AX7) ===
-* Input coupling cap
-Cin eq_in grid 100n
+* === FIRST STAGE: 12AX7 VOLTAGE AMPLIFIER ===
+* Coupling cap from EQ output tap to tube grid
+Cin out_tap grid 100n
 
 * Grid leak resistor
 Rg grid 0 1Meg
 
-* 12AX7 triode (grid, plate, cathode)
+* 12AX7 triode
 T1 grid plate cathode 12AX7
 
 * Plate load resistor
 Ra vcc plate 100k
 
 * Cathode bias with bypass cap
-Rk cathode 0 1.5k
-Ck cathode 0 25u
+* Rk and Ck connect to feedback node (fb), not ground.
+* The S-217-D tertiary winding provides DC return path to ground
+* while injecting overall negative feedback at AC.
+Rk cathode fb 1.5k
+Ck cathode fb 25u
 
-* === OUTPUT PAD ===
-* Models cathode follower + output transformer attenuation
-Rpad plate pad 390k
-Rshunt pad 0 6.8k
+* === INTERSTAGE: TRIAD HS-29 TRANSFORMER ===
+* Phase splitter: single-ended 12AX7 plate → push-pull drive for 12AU7 pair.
+* 1:1+1 center-tapped secondary (each half = primary turns).
+* Confirmed specs: L_pri=130H, impedance 5k:20k, freq 20Hz-20kHz.
+* Coupling cap blocks DC from first stage plate.
+Cint plate pri_int 1u
 
-* Output coupling
-Cout pad out 1u
+* Primary: pri_int to ground (DC return through winding)
+L_int_pri pri_int 0 130
+
+* Secondary halves: center-tapped for anti-phase push-pull drive.
+* Node order sets polarity: grid2a in phase with primary, grid2b anti-phase.
+L_int_a grid2a int_ct 130
+L_int_b int_ct grid2b 130
+
+* Coupling between primary and each secondary half
+K_inta L_int_pri L_int_a 0.99
+K_intb L_int_pri L_int_b 0.99
+
+* Center tap to ground (DC reference for 12AU7 grids)
+R_int_ct int_ct 0 10k
+
+* Grid leak resistors for push-pull 12AU7
+Rg2a grid2a 0 470k
+Rg2b grid2b 0 470k
+
+* === PUSH-PULL OUTPUT STAGE: 12AU7 (ECC82) ===
+* Two triode sections driven in anti-phase by HS-29 secondary.
+* Shared cathode resistor cancels even harmonics in push-pull.
+T2a grid2a plate2a cath2 12AU7
+T2b grid2b plate2b cath2 12AU7
+
+* Shared cathode bias
+Rk2 cath2 0 330
+Ck2 cath2 0 100u
+
+* === OUTPUT TRANSFORMER: PEERLESS S-217-D ===
+* Push-pull center-tapped primary, balanced secondary, tertiary feedback.
+* Confirmed specs (CineMag CM-S217D reproduction):
+*   Turns: 1575 (pri) : 352 (sec) : 71 (tert) per coil
+*   Turns ratio: 4.474:1 (primary:secondary)
+*   Impedance: 12,000:600 ohm
+*   L_pri = 38.1H at 1kHz (CineMag measurement)
+*   L_leak = 19mH → k = 0.9995
+*
+* Push-pull primary halves: L_each = L_total/4 = 9.525H
+* Secondary: L = L_pri_half / N_half² = 9.525 / 2.237² = 1.903H
+* Tertiary: L = L_pri_half / (N_pri_half/N_tert)² = 9.525 / 11.1² = 0.077H
+*
+* B+ connects to center tap of primary (serves as plate load for 12AU7s).
+
+* Center tap to B+ (low-R connection, transformer primary IS the plate load)
+R_opt_ct vcc opt_ct 1m
+
+* Push-pull primary halves
+L_opt_a plate2a opt_ct 9.525
+L_opt_b opt_ct plate2b 9.525
+
+* Secondary (output)
+L_opt_sec out 0 1.903
+
+* Tertiary (overall negative feedback to 12AX7 cathode)
+L_opt_fb 0 fb 0.077
+
+* Coupling between all windings on the S-217-D core
+K_opta L_opt_a L_opt_sec 0.999
+K_optb L_opt_b L_opt_sec 0.999
+K_optab L_opt_a L_opt_b 0.999
+K_fba L_opt_a L_opt_fb 0.999
+K_fbb L_opt_b L_opt_fb 0.999
+K_fbsec L_opt_sec L_opt_fb 0.999
+
+* Output load (high-impedance bridging, typical of modern equipment)
 Rload out 0 100k
 
 * === SWITCH DIRECTIVES ===
 * HF Boost frequency: 7 positions (ganged C + L)
+* Values computed from f_c, RATIO_L1_C1=12e6:
+*   C1 = sqrt(1 / (RATIO * (2*pi*fc)^2)), L1 = RATIO * C1
 * Positions: 3kHz, 4kHz, 5kHz, 8kHz, 10kHz, 12kHz, 16kHz
-.switch C_hfb,L_hfb 15n/176m 15n/100m 10n/100m 10n/50m 6n8/50m 6n8/22m 3n3/22m "HF Boost Freq"
+.switch C_hfb,L_hfb 15.3n/183.8m 11.5n/137.8m 9.19n/110.3m 5.74n/68.9m 4.59n/55.1m 3.83n/45.9m 2.87n/34.5m "HF Boost Freq"
 
-* LF Boost frequency: 4 positions
+* LF frequency: 4 positions (ganged boost cap C_lfb + atten cap C_lfa)
+* C_lfa = C_lfb / 30 (LF atten cap tracks boost cap)
 * Positions: 20Hz, 30Hz, 60Hz, 100Hz
-.switch C_lfb 330n 220n 100n 68n "LF Boost Freq"
+.switch C_lfb,C_lfa 2.2u/73.3n 1.1u/36.7n 560n/18.7n 330n/11n "LF Freq"
 
 * HF Cut frequency: 3 positions
-* Positions: ~3.4kHz, ~3.4kHz, ~1.1kHz
-.switch C_hfc 47n 47n 150n "HF Cut Freq"
+* Positions: 5kHz, 10kHz, 20kHz
+.switch C_hfc 270n 135n 68n "HF Cut Freq"
 
 * === POTENTIOMETER DIRECTIVES ===
-* HF Boost Amount (series R to LC network)
-.pot R_hfb 1 10k "HF Boost"
-* HF Boost Q (damping resistor across LC)
-.pot R_hfb_q 1 2.2k "HF Boost Q"
-* LF Boost Amount
+* HF Boost: 3-terminal 10k linear pot (upper + lower arms, link inversely)
+.pot R_hfb_u 1 10k "HF Boost (upper)"
+.pot R_hfb_l 1 10k "HF Boost (lower)"
+* Bandwidth/Q: 2.5k linear pot (series with 390Ω offset resistor R_q_off)
+.pot R_hfb_q 1 2.5k "Bandwidth"
+* LF Boost: 10k audio pot (shunt from mid to ground)
 .pot R_lfb 1 10k "LF Boost"
-* LF Cut Amount
-.pot R_lfc 1 100k "LF Cut"
-* HF Cut Amount
-.pot R_hfc 1 1k "HF Cut"
+* LF Atten: 100k audio pot (parallel with LF atten cap)
+.pot R_lfc 1 100k "LF Atten"
+* HF Cut: 3-terminal 1k linear pot (upper + lower arms, link inversely)
+.pot R_hfc_u 1 1k "HF Cut (upper)"
+.pot R_hfc_l 1 1k "HF Cut (lower)"
 
 .END

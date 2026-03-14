@@ -108,6 +108,18 @@ const CI_{{ loop.index0 }}_G_SELF_2: f64 = {{ ci.g_self_2 }};
 const CI_{{ loop.index0 }}_G_MUTUAL: f64 = {{ ci.g_mutual }};
 {% endfor %}
 {% endif %}
+{% if num_transformer_groups > 0 %}
+/// Number of transformer groups (3+ winding)
+pub const NUM_TRANSFORMER_GROUPS: usize = {{ num_transformer_groups }};
+{% for g in transformer_groups %}
+const XFMR_{{ g.index }}_NUM_WINDINGS: usize = {{ g.num_windings }};
+const XFMR_{{ g.index }}_NODE_I: [usize; {{ g.num_windings }}] = [{% for n in g.winding_node_i %}{{ n }}{% if not loop.last %}, {% endif %}{% endfor %}];
+const XFMR_{{ g.index }}_NODE_J: [usize; {{ g.num_windings }}] = [{% for n in g.winding_node_j %}{{ n }}{% if not loop.last %}, {% endif %}{% endfor %}];
+const XFMR_{{ g.index }}_INDUCTANCES: [f64; {{ g.num_windings }}] = [{% for v in g.inductances %}{{ v }}{% if not loop.last %}, {% endif %}{% endfor %}];
+const XFMR_{{ g.index }}_COUPLING: [f64; {{ g.num_windings * g.num_windings }}] = [{% for v in g.coupling_flat %}{{ v }}{% if not loop.last %}, {% endif %}{% endfor %}];
+const XFMR_{{ g.index }}_Y_DEFAULT: [f64; {{ g.num_windings * g.num_windings }}] = [{% for v in g.y_matrix %}{{ v }}{% if not loop.last %}, {% endif %}{% endfor %}];
+{% endfor %}
+{% endif %}
 
 {% if num_switches > 0 %}
 // =============================================================================

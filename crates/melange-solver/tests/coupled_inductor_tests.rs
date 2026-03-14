@@ -348,7 +348,8 @@ C1 a 0 1n
 }
 
 #[test]
-fn test_reject_inductor_in_multiple_couplings() {
+fn test_allow_inductor_in_multiple_couplings() {
+    // Multi-winding transformers: an inductor may appear in multiple K directives
     let spice = "\
 Test Circuit
 L1 a 0 10m
@@ -356,6 +357,7 @@ L2 b 0 100m
 L3 c 0 50m
 K1 L1 L2 0.95
 K2 L1 L3 0.8
+K3 L2 L3 0.9
 R1 a 0 1k
 C1 a 0 1n
 C2 b 0 1n
@@ -363,15 +365,31 @@ C3 c 0 1n
 ";
     let result = Netlist::parse(spice);
     assert!(
-        result.is_err(),
-        "Should reject inductor appearing in multiple couplings"
+        result.is_ok(),
+        "Multi-winding transformers should be allowed: {:?}",
+        result.err()
     );
+    let netlist = result.unwrap();
+    assert_eq!(netlist.couplings.len(), 3);
+}
+
+#[test]
+fn test_reject_duplicate_coupling_pair() {
+    // Same pair of inductors coupled twice should be rejected
+    let spice = "\
+Test Circuit
+L1 a 0 10m
+L2 b 0 100m
+K1 L1 L2 0.95
+K2 L2 L1 0.8
+R1 a 0 1k
+C1 a 0 1n
+C2 b 0 1n
+";
+    let result = Netlist::parse(spice);
+    assert!(result.is_err(), "Should reject duplicate coupling pair");
     let err = result.unwrap_err().to_string();
-    assert!(
-        err.contains("multiple"),
-        "Error should mention multiple couplings: {}",
-        err
-    );
+    assert!(err.contains("multiple K directives"), "Error: {}", err);
 }
 
 #[test]

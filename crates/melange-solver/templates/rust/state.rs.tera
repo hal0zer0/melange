@@ -86,6 +86,18 @@ pub struct CircuitState {
     pub ci_g_self_2: [f64; {{ num_coupled_inductors }}],
     pub ci_g_mutual: [f64; {{ num_coupled_inductors }}],
 {% endif %}
+{% if num_transformer_groups > 0 %}
+{% for g in transformer_groups %}
+    /// Transformer group {{ g.index }} admittance matrix Y (flat {{ g.num_windings }}x{{ g.num_windings }}, sample-rate dependent)
+    pub xfmr_{{ g.index }}_y: [f64; {{ g.num_windings * g.num_windings }}],
+    /// Transformer group {{ g.index }} previous winding currents
+    pub xfmr_{{ g.index }}_i_prev: [f64; {{ g.num_windings }}],
+    /// Transformer group {{ g.index }} previous winding voltages
+    pub xfmr_{{ g.index }}_v_prev: [f64; {{ g.num_windings }}],
+    /// Transformer group {{ g.index }} history currents (Norton equivalent)
+    pub xfmr_{{ g.index }}_i_hist: [f64; {{ g.num_windings }}],
+{% endfor %}
+{% endif %}
 {% for default in pot_defaults %}
     /// Potentiometer {{ loop.index0 }} current resistance (ohms)
     pub pot_{{ loop.index0 }}_resistance: f64,
@@ -174,6 +186,14 @@ impl Default for CircuitState {
             ci_g_self_2: [{% for ci in coupled_inductors %}CI_{{ loop.index0 }}_G_SELF_2{% if not loop.last %}, {% endif %}{% endfor %}],
             ci_g_mutual: [{% for ci in coupled_inductors %}CI_{{ loop.index0 }}_G_MUTUAL{% if not loop.last %}, {% endif %}{% endfor %}],
 {% endif %}
+{% if num_transformer_groups > 0 %}
+{% for g in transformer_groups %}
+            xfmr_{{ g.index }}_y: XFMR_{{ g.index }}_Y_DEFAULT,
+            xfmr_{{ g.index }}_i_prev: [0.0; {{ g.num_windings }}],
+            xfmr_{{ g.index }}_v_prev: [0.0; {{ g.num_windings }}],
+            xfmr_{{ g.index }}_i_hist: [0.0; {{ g.num_windings }}],
+{% endfor %}
+{% endif %}
 {% for default in pot_defaults %}
             pot_{{ loop.index0 }}_resistance: {{ default }},
 {% endfor %}
@@ -234,6 +254,13 @@ impl CircuitState {
         self.ci_v2_prev = [0.0; {{ num_coupled_inductors }}];
         self.ci_i1_hist = [0.0; {{ num_coupled_inductors }}];
         self.ci_i2_hist = [0.0; {{ num_coupled_inductors }}];
+{% endif %}
+{% if num_transformer_groups > 0 %}
+{% for g in transformer_groups %}
+        self.xfmr_{{ g.index }}_i_prev = [0.0; {{ g.num_windings }}];
+        self.xfmr_{{ g.index }}_v_prev = [0.0; {{ g.num_windings }}];
+        self.xfmr_{{ g.index }}_i_hist = [0.0; {{ g.num_windings }}];
+{% endfor %}
 {% endif %}
 {% for default in pot_defaults %}
         self.pot_{{ loop.index0 }}_resistance = {{ default }};
@@ -325,6 +352,14 @@ impl CircuitState {
                 self.ci_g_self_2 = [{% for ci in coupled_inductors %}CI_{{ loop.index0 }}_G_SELF_2{% if not loop.last %}, {% endif %}{% endfor %}];
                 self.ci_g_mutual = [{% for ci in coupled_inductors %}CI_{{ loop.index0 }}_G_MUTUAL{% if not loop.last %}, {% endif %}{% endfor %}];
 {% endif %}
+{% if num_transformer_groups > 0 %}
+{% for g in transformer_groups %}
+                self.xfmr_{{ g.index }}_y = XFMR_{{ g.index }}_Y_DEFAULT;
+                self.xfmr_{{ g.index }}_i_prev = [0.0; {{ g.num_windings }}];
+                self.xfmr_{{ g.index }}_v_prev = [0.0; {{ g.num_windings }}];
+                self.xfmr_{{ g.index }}_i_hist = [0.0; {{ g.num_windings }}];
+{% endfor %}
+{% endif %}
                 return;
             }
         }
@@ -345,6 +380,14 @@ impl CircuitState {
             self.ci_g_self_2 = [{% for ci in coupled_inductors %}CI_{{ loop.index0 }}_G_SELF_2{% if not loop.last %}, {% endif %}{% endfor %}];
             self.ci_g_mutual = [{% for ci in coupled_inductors %}CI_{{ loop.index0 }}_G_MUTUAL{% if not loop.last %}, {% endif %}{% endfor %}];
 {% endif %}
+{% if num_transformer_groups > 0 %}
+{% for g in transformer_groups %}
+            self.xfmr_{{ g.index }}_y = XFMR_{{ g.index }}_Y_DEFAULT;
+            self.xfmr_{{ g.index }}_i_prev = [0.0; {{ g.num_windings }}];
+            self.xfmr_{{ g.index }}_v_prev = [0.0; {{ g.num_windings }}];
+            self.xfmr_{{ g.index }}_i_hist = [0.0; {{ g.num_windings }}];
+{% endfor %}
+{% endif %}
 {% if num_pots > 0 %}
 {% for idx in pot_indices %}
             self.pot_{{ idx }}_su = POT_{{ idx }}_SU;
@@ -361,7 +404,7 @@ impl CircuitState {
 
         let internal_rate = sample_rate * OVERSAMPLING_FACTOR as f64;
         let alpha = 2.0 * internal_rate;
-{% if num_inductors > 0 or num_coupled_inductors > 0 %}        let t = 1.0 / internal_rate;
+{% if num_inductors > 0 or num_coupled_inductors > 0 or num_transformer_groups > 0 %}        let t = 1.0 / internal_rate;
 {% endif %}
         // Build A = G + alpha*C
         let mut a = [[0.0f64; N]; N];
@@ -424,6 +467,10 @@ impl CircuitState {
         self.ci_i1_hist = [0.0; {{ num_coupled_inductors }}];
         self.ci_i2_hist = [0.0; {{ num_coupled_inductors }}];
 {% endif %}
+{% if num_transformer_groups > 0 %}
+
+        // Add transformer group companion model conductances
+{{ xfmr_set_sample_rate_lines }}{% endif %}
 
         // Invert A to get S
         let (s, singular) = invert_n(a);
@@ -522,7 +569,7 @@ impl CircuitState {
 {% endif %}
 }
 
-{% if num_inductors > 0 or num_switches > 0 or num_coupled_inductors > 0 %}/// Stamp a conductance between two nodes into a matrix.
+{% if num_inductors > 0 or num_switches > 0 or num_coupled_inductors > 0 or num_transformer_groups > 0 %}/// Stamp a conductance between two nodes into a matrix.
 /// Node indices are 1-indexed; 0 means ground.
 fn stamp_conductance(mat: &mut [[f64; N]; N], node_i: usize, node_j: usize, g: f64) {
     match (node_i > 0, node_j > 0) {
@@ -540,7 +587,7 @@ fn stamp_conductance(mat: &mut [[f64; N]; N], node_i: usize, node_j: usize, g: f
     }
 }
 
-{% endif %}{% if num_coupled_inductors > 0 %}/// Stamp mutual conductance between two 2-terminal elements.
+{% endif %}{% if num_coupled_inductors > 0 or num_transformer_groups > 0 %}/// Stamp mutual conductance between two 2-terminal elements.
 fn stamp_mutual(mat: &mut [[f64; N]; N], a: usize, b: usize, c: usize, d: usize, g: f64) {
     if a > 0 && c > 0 { mat[a - 1][c - 1] += g; }
     if b > 0 && d > 0 { mat[b - 1][d - 1] += g; }

@@ -11,7 +11,7 @@
 //! - 1 BJT: M = 2 (Vbe, Vbc)
 //! - 2 diodes + 1 BJT: M = 1 + 1 + 2 = 4
 
-use crate::mna::{inject_rhs_current, MnaSystem, VS_CONDUCTANCE};
+use crate::mna::{inject_rhs_current, invert_small_matrix, MnaSystem, VS_CONDUCTANCE};
 use std::sync::Arc;
 
 /// Information about an inductor for companion model.
@@ -62,6 +62,26 @@ pub struct CoupledInductorState {
     pub i1_hist: f64,
     /// History current for L2 (Norton equivalent)
     pub i2_hist: f64,
+}
+
+/// Multi-winding transformer group state for NxN companion model.
+#[derive(Debug, Clone)]
+pub struct TransformerGroupState {
+    pub name: String,
+    pub num_windings: usize,
+    pub winding_names: Vec<String>,
+    pub winding_node_i: Vec<usize>,
+    pub winding_node_j: Vec<usize>,
+    pub inductances: Vec<f64>,
+    pub coupling_matrix: Vec<Vec<f64>>,
+    /// NxN admittance matrix Y = (T/2) * inv(L), stored flat row-major
+    pub y_matrix: Vec<f64>,
+    /// Previous current through each winding
+    pub i_prev: Vec<f64>,
+    /// Previous voltage across each winding
+    pub v_prev: Vec<f64>,
+    /// History current for each winding (Norton equivalent)
+    pub i_hist: Vec<f64>,
 }
 
 /// Precomputed Sherman-Morrison data for a potentiometer.
@@ -121,8 +141,10 @@ pub struct DkKernel {
     pub rhs_const: Vec<f64>,
     /// Inductor companion model info (uncoupled)
     pub inductors: Vec<InductorInfo>,
-    /// Coupled inductor pair companion model info
+    /// Coupled inductor pair companion model info (2-winding)
     pub coupled_inductors: Vec<CoupledInductorState>,
+    /// Multi-winding transformer group companion model info (3+ windings)
+    pub transformer_groups: Vec<TransformerGroupState>,
     /// Potentiometer Sherman-Morrison precomputed data
     pub pots: Vec<SmPotData>,
 }
@@ -384,6 +406,50 @@ impl DkKernel {
             });
         }
 
+        // Initialize multi-winding transformer groups
+        let mut transformer_groups = Vec::with_capacity(mna.transformer_groups.len());
+        for group in &mna.transformer_groups {
+            let w = group.num_windings;
+            for (idx, l) in group.inductances.iter().enumerate() {
+                if *l <= 0.0 {
+                    return Err(DkError::InvalidInductance {
+                        name: group.winding_names[idx].clone(),
+                        value: *l,
+                    });
+                }
+            }
+            // Build NxN inductance matrix
+            let mut l_mat = vec![vec![0.0f64; w]; w];
+            for i in 0..w {
+                for j in 0..w {
+                    l_mat[i][j] = group.coupling_matrix[i][j]
+                        * (group.inductances[i] * group.inductances[j]).sqrt();
+                }
+            }
+            // Compute Y = (T/2) * inv(L)
+            let y_raw = invert_small_matrix(&l_mat);
+            let half_t = t / 2.0;
+            let mut y_flat = vec![0.0f64; w * w];
+            for i in 0..w {
+                for j in 0..w {
+                    y_flat[i * w + j] = half_t * y_raw[i][j];
+                }
+            }
+            transformer_groups.push(TransformerGroupState {
+                name: group.name.clone(),
+                num_windings: w,
+                winding_names: group.winding_names.clone(),
+                winding_node_i: group.winding_node_i.clone(),
+                winding_node_j: group.winding_node_j.clone(),
+                inductances: group.inductances.clone(),
+                coupling_matrix: group.coupling_matrix.clone(),
+                y_matrix: y_flat,
+                i_prev: vec![0.0; w],
+                v_prev: vec![0.0; w],
+                i_hist: vec![0.0; w],
+            });
+        }
+
         Ok(Self {
             n,
             m,
@@ -397,6 +463,7 @@ impl DkKernel {
             rhs_const,
             inductors,
             coupled_inductors,
+            transformer_groups,
             pots,
         })
     }
@@ -595,6 +662,40 @@ impl DkKernel {
             ci.i2_prev = i2_new;
             ci.v1_prev = v1_new;
             ci.v2_prev = v2_new;
+        }
+    }
+
+    /// Update multi-winding transformer group companion model state.
+    ///
+    /// For each group with W windings, uses the NxN admittance matrix Y:
+    ///   i_k_new = i_k_prev + sum_j Y[k][j] * (v_j_prev + v_j_new)
+    ///   i_k_hist = i_k_new - sum_j Y[k][j] * v_j_new
+    pub fn update_transformer_groups(&mut self, v_node: &[f64]) {
+        for group in &mut self.transformer_groups {
+            let w = group.num_windings;
+            // Extract current voltages across each winding
+            let mut v_new = vec![0.0f64; w];
+            for k in 0..w {
+                let vi = if group.winding_node_i[k] > 0 { v_node[group.winding_node_i[k] - 1] } else { 0.0 };
+                let vj = if group.winding_node_j[k] > 0 { v_node[group.winding_node_j[k] - 1] } else { 0.0 };
+                v_new[k] = vi - vj;
+            }
+            // Compute new currents and history
+            for k in 0..w {
+                let mut i_new = group.i_prev[k];
+                let mut y_v_new = 0.0f64;
+                for j in 0..w {
+                    let y_kj = group.y_matrix[k * w + j];
+                    i_new += y_kj * (group.v_prev[j] + v_new[j]);
+                    y_v_new += y_kj * v_new[j];
+                }
+                group.i_hist[k] = i_new - y_v_new;
+                group.i_prev[k] = i_new;
+            }
+            // Update previous voltages
+            for k in 0..w {
+                group.v_prev[k] = v_new[k];
+            }
         }
     }
 }

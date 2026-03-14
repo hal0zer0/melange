@@ -769,11 +769,11 @@ impl Parser {
             }
         }
 
-        // Verify all coupling (K) directives: no duplicate names, reference existing inductors,
-        // and no inductor appears in multiple couplings
+        // Verify all coupling (K) directives: no duplicate names, reference existing inductors.
+        // An inductor MAY appear in multiple K directives (multi-winding transformers).
         {
             let mut seen_coupling_names = std::collections::HashSet::new();
-            let mut coupled_inductors = std::collections::HashSet::new();
+            let mut seen_pairs = std::collections::HashSet::new();
             for coupling in &netlist.couplings {
                 if !seen_coupling_names.insert(coupling.name.to_ascii_lowercase()) {
                     return Err(ParseError {
@@ -808,23 +808,20 @@ impl Parser {
                         ),
                     });
                 }
+                // Reject duplicate pairs (same two inductors coupled twice)
                 let l1_lower = coupling.inductor1_name.to_ascii_lowercase();
                 let l2_lower = coupling.inductor2_name.to_ascii_lowercase();
-                if !coupled_inductors.insert(l1_lower.clone()) {
+                let pair = if l1_lower < l2_lower {
+                    (l1_lower, l2_lower)
+                } else {
+                    (l2_lower, l1_lower)
+                };
+                if !seen_pairs.insert(pair) {
                     return Err(ParseError {
                         line: 0,
                         message: format!(
-                            "Inductor '{}' appears in multiple coupling directives",
-                            coupling.inductor1_name
-                        ),
-                    });
-                }
-                if !coupled_inductors.insert(l2_lower) {
-                    return Err(ParseError {
-                        line: 0,
-                        message: format!(
-                            "Inductor '{}' appears in multiple coupling directives",
-                            coupling.inductor2_name
+                            "Inductors '{}' and '{}' are coupled by multiple K directives",
+                            coupling.inductor1_name, coupling.inductor2_name
                         ),
                     });
                 }
