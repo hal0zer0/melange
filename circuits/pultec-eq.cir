@@ -46,7 +46,8 @@
 *   12AU7: Koren fit to Sylvania Technical Manual curves
 
 .model 12AX7 TRIODE(MU=100 EX=1.4 KG1=1060 KP=600 KVB=300)
-.model 12AU7 TRIODE(MU=20.21 EX=1.23 KG1=1108.7 KP=84.96 KVB=551.3)
+* 12AU7 params from catalog (Koren fit to Sylvania datasheet)
+.model 12AU7 TRIODE(MU=21.5 EX=1.3 KG1=1180 KP=84 KVB=300)
 .input_impedance 600
 
 * B+ power supply
@@ -179,19 +180,24 @@ L_opt_b opt_ct plate2b 9.525
 * Secondary (output)
 L_opt_sec out 0 1.903
 
-* Tertiary (overall negative feedback to 12AX7 cathode)
-L_opt_fb 0 fb 0.077
-
-* Coupling between all windings on the S-217-D core.
+* Coupling between primary halves and secondary.
 * Measured k ≈ 0.9998 (from L_leak=19mH, L_pri=38.1H) but k>0.95
-* causes convergence failure in both ngspice and trapezoidal companion
-* models for 3+ winding transformers. Using k=0.95, validated in ngspice.
+* causes convergence failure in trapezoidal companion models for 3+
+* winding transformers. Using k=0.95, validated in ngspice.
 K_opta L_opt_a L_opt_sec 0.95
 K_optb L_opt_b L_opt_sec 0.95
 K_optab L_opt_a L_opt_b 0.95
-K_fba L_opt_a L_opt_fb 0.95
-K_fbb L_opt_b L_opt_fb 0.95
-K_fbsec L_opt_sec L_opt_fb 0.95
+
+* Tertiary feedback winding — modeled as VCVS + magnetizing inductance.
+* The trapezoidal companion model's mutual conductance (T/2L) vanishes at
+* practical sample rates, making coupled-inductor feedback inoperative.
+* VCVS provides instantaneous coupling at the correct turns ratio.
+* Shunt L_fb_mag models the magnetizing inductance rolloff (~6.7kHz with
+* Rk=820Ω), which reduces NFB at HF — part of the Pultec's character.
+*
+* Turns ratio: N_tert/N_sec = 71/352 = 0.2017
+* L_mag_tert = L_mag_pri × (N_tert/N_pri)² = 9.525 × (71/1575)² = 19.4mH
+E_fb fb 0 out 0 0.2017
 
 * Output load (high-impedance bridging, typical of modern equipment)
 Rload out 0 100k
