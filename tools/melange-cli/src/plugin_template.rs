@@ -300,7 +300,7 @@ const LEVEL_PARAM_FIELDS: &str = r#"    #[id = "input_level"]
 
 const LEVEL_PARAM_DEFAULTS: &str = r#"            input_level: FloatParam::new(
                 "Input Level",
-                util::db_to_gain(-12.0),
+                util::db_to_gain(0.0),
                 FloatRange::Skewed {
                     min: util::db_to_gain(-36.0),
                     max: util::db_to_gain(12.0),

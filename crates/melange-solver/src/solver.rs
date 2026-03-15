@@ -193,20 +193,20 @@ impl DeviceEntry {
             }
             DeviceEntry::Jfet { device, .. } => {
                 if dim == 0 {
-                    // Vgs — limit around pinch-off voltage
-                    fetlim(vnew, vold, device.vp)
-                } else {
-                    // Vds — generous limiting (quadratic model, well-behaved)
+                    // dim 0 = Vds — generous limiting (quadratic model, well-behaved)
                     fetlim(vnew, vold, 0.0)
+                } else {
+                    // dim 1 = Vgs — limit around pinch-off voltage
+                    fetlim(vnew, vold, device.vp)
                 }
             }
             DeviceEntry::Mosfet { device, .. } => {
                 if dim == 0 {
-                    // Vgs — limit around threshold voltage
-                    fetlim(vnew, vold, device.vt)
-                } else {
-                    // Vds — generous limiting
+                    // dim 0 = Vds — generous limiting
                     fetlim(vnew, vold, 0.0)
+                } else {
+                    // dim 1 = Vgs — limit around threshold voltage
+                    fetlim(vnew, vold, device.vt)
                 }
             }
             DeviceEntry::Tube { device, .. } => {
@@ -247,12 +247,14 @@ impl DeviceEntry {
                 smallvec![ic, ib]
             }
             DeviceEntry::Jfet { device, .. } => {
-                let id = device.drain_current(v[0], v[1]);
-                let ig = device.gate_current(v[0]);
+                // dim 0 = Vds (v[0]), dim 1 = Vgs (v[1])
+                let id = device.drain_current(v[1], v[0]);
+                let ig = device.gate_current(v[1]);
                 smallvec![id, ig]
             }
             DeviceEntry::Mosfet { device, .. } => {
-                let id = device.drain_current(v[0], v[1]);
+                // dim 0 = Vds (v[0]), dim 1 = Vgs (v[1])
+                let id = device.drain_current(v[1], v[0]);
                 // MOSFET gate current is zero (insulated gate)
                 smallvec![id, 0.0]
             }
@@ -298,13 +300,14 @@ impl DeviceEntry {
                 smallvec![dic_dvbe, dic_dvbc, dib_dvbe, dib_dvbc]
             }
             DeviceEntry::Jfet { device, .. } => {
-                let (did_dvgs, did_dvds) = device.jacobian_partial(v[0], v[1]);
-                // Gate current Jacobian: only depends on Vgs
-                let dig_dvgs = if v[0] > 0.0 {
+                // dim 0 = Vds (v[0]), dim 1 = Vgs (v[1])
+                let (did_dvgs, did_dvds) = device.jacobian_partial(v[1], v[0]);
+                // Gate current Jacobian: only depends on Vgs (= v[1])
+                let dig_dvgs = if v[1] > 0.0 {
                     // Forward-biased gate-source junction
                     let vgs_eff = match device.channel {
-                        melange_devices::jfet::JfetChannel::N => v[0],
-                        melange_devices::jfet::JfetChannel::P => -v[0],
+                        melange_devices::jfet::JfetChannel::N => v[1],
+                        melange_devices::jfet::JfetChannel::P => -v[1],
                     };
                     if vgs_eff > 0.0 {
                         let sign = match device.channel {
@@ -319,12 +322,15 @@ impl DeviceEntry {
                 } else {
                     0.0
                 };
-                smallvec![did_dvgs, did_dvds, dig_dvgs, 0.0]
+                // Return in dim-space order: [dId/dVds, dId/dVgs, dIg/dVds, dIg/dVgs]
+                smallvec![did_dvds, did_dvgs, 0.0, dig_dvgs]
             }
             DeviceEntry::Mosfet { device, .. } => {
-                let (did_dvgs, did_dvds) = device.jacobian_partial(v[0], v[1]);
-                // MOSFET gate current is zero → Jacobian row is zero
-                smallvec![did_dvgs, did_dvds, 0.0, 0.0]
+                // dim 0 = Vds (v[0]), dim 1 = Vgs (v[1])
+                let (did_dvgs, did_dvds) = device.jacobian_partial(v[1], v[0]);
+                // MOSFET gate current is zero → Jacobian row is zero.
+                // Return in dim-space order: [dId/dVds, dId/dVgs, 0, 0]
+                smallvec![did_dvds, did_dvgs, 0.0, 0.0]
             }
             DeviceEntry::Tube { device, .. } => {
                 // Plate current Jacobian from NonlinearDevice<2>
@@ -2382,5 +2388,322 @@ C1 in 0 1u
         }
         assert_eq!(solver.diag_clamp_count, 0,
             "Clamp count should be 0 for small signals, got {}", solver.diag_clamp_count);
+    }
+}
+
+// ==========================================================================
+// NodalSolver: Full-nodal Newton-Raphson transient solver
+//
+// Instead of reducing to the M×M nonlinear kernel (DK method), this solver
+// iterates on the full N-dimensional voltage vector each sample. The Jacobian
+// is A - N_i * J_dev * N_v (N×N), which is well-conditioned because A provides
+// the dominant diagonal structure. The rank-M nonlinear update modifies at most
+// M eigenvalues.
+//
+// This handles circuits with large transformers and global feedback that make
+// the DK method's K matrix ill-conditioned. Cost: O(N^3) per NR iteration
+// for LU factorization (vs O(M^2) for DK), but for N~33, M~8 this is ~12K
+// FLOPs per iteration — well within real-time budget at 48kHz.
+// ==========================================================================
+
+use crate::codegen::ir::DeviceSlot;
+use crate::dc_op;
+use crate::mna::MnaSystem;
+
+/// Full-nodal Newton-Raphson solver for nonlinear transient simulation.
+///
+/// Works in the full voltage space rather than the reduced nonlinear current space.
+/// Handles circuits where the DK method's K matrix is ill-conditioned (large
+/// transformers, global feedback through transformers).
+#[derive(Clone)]
+pub struct NodalSolver {
+    /// DK kernel (used for A_neg, rhs_const, inductors, and N_v/N_i matrices)
+    pub kernel: DkKernel,
+    /// A matrix = G + 2C/T (N_aug × N_aug, stored as 2D for LU compatibility)
+    a_matrix: Vec<Vec<f64>>,
+    /// Device slots for device evaluation (same format as dc_op)
+    device_slots: Vec<DeviceSlot>,
+    /// Previous node voltages (N_aug)
+    pub v_prev: Vec<f64>,
+    /// Previous nonlinear currents (M) for trapezoidal integration
+    pub i_nl_prev: Vec<f64>,
+    /// Pre-allocated working buffers
+    rhs: Vec<f64>,
+    v_nl: Vec<f64>,
+    i_nl: Vec<f64>,
+    j_dev: Vec<f64>,
+    g_aug: Vec<Vec<f64>>,
+    rhs_work: Vec<f64>,
+    /// Input/output
+    pub input_node: usize,
+    pub output_node: usize,
+    pub input_conductance: f64,
+    input_prev: f64,
+    /// NR config
+    pub max_iter: u32,
+    pub tol: f64,
+    /// DC blocking filter
+    pub dc_block_x_prev: f64,
+    pub dc_block_y_prev: f64,
+    pub dc_block_r: f64,
+    /// Diagnostics
+    pub diag_peak_output: f64,
+    pub diag_clamp_count: u64,
+    pub diag_nr_max_iter_count: u64,
+    pub diag_nan_reset_count: u64,
+}
+
+impl NodalSolver {
+    /// Create a new full-nodal solver.
+    pub fn new(
+        kernel: DkKernel,
+        mna: &MnaSystem,
+        device_slots: Vec<DeviceSlot>,
+        input_node: usize,
+        output_node: usize,
+    ) -> Self {
+        let n = kernel.n;
+        let m = kernel.m;
+        let a_matrix = mna.get_a_matrix(kernel.sample_rate);
+        let dc_block_r = 1.0 - 2.0 * std::f64::consts::PI * 5.0 / kernel.sample_rate;
+        Self {
+            kernel,
+            a_matrix,
+            device_slots,
+            v_prev: vec![0.0; n],
+            i_nl_prev: vec![0.0; m],
+            rhs: vec![0.0; n],
+            v_nl: vec![0.0; m],
+            i_nl: vec![0.0; m],
+            j_dev: vec![0.0; m * m],
+            g_aug: vec![vec![0.0; n]; n],
+            rhs_work: vec![0.0; n],
+            input_node,
+            output_node,
+            input_conductance: 1.0,
+            input_prev: 0.0,
+            max_iter: 50,
+            tol: 1e-6,
+            dc_block_x_prev: 0.0,
+            dc_block_y_prev: 0.0,
+            dc_block_r,
+            diag_peak_output: 0.0,
+            diag_clamp_count: 0,
+            diag_nr_max_iter_count: 0,
+            diag_nan_reset_count: 0,
+        }
+    }
+
+    /// Initialize from DC operating point.
+    pub fn initialize_dc_op(&mut self, mna: &MnaSystem, device_slots: &[DeviceSlot]) {
+        let config = dc_op::DcOpConfig {
+            input_node: self.input_node,
+            input_resistance: 1.0 / self.input_conductance,
+            ..Default::default()
+        };
+        let result = dc_op::solve_dc_operating_point(mna, device_slots, &config);
+        if result.converged {
+            // Initialize v_prev from DC operating point
+            let n = self.kernel.n;
+            for i in 0..n.min(result.v_node.len()) {
+                self.v_prev[i] = result.v_node[i];
+            }
+            // Initialize i_nl_prev from DC nonlinear currents
+            let m = self.kernel.m;
+            for i in 0..m.min(result.i_nl.len()) {
+                self.i_nl_prev[i] = result.i_nl[i];
+            }
+            log::info!("Nodal solver DC OP initialized (method: {:?})", result.method);
+        } else {
+            log::warn!("Nodal solver DC OP failed to converge, using zero initial state");
+        }
+
+        // Warm-up: process 50 samples of silence to settle transients
+        for _ in 0..50 {
+            self.process_sample(0.0);
+        }
+    }
+
+    /// Process a single sample using full-nodal Newton-Raphson.
+    #[allow(clippy::needless_range_loop)]
+    pub fn process_sample(&mut self, input: f64) -> f64 {
+        let input = sanitize_input(input);
+        let n = self.kernel.n;
+        let n_nodes = self.kernel.n_nodes;
+        let m = self.kernel.m;
+
+        // Step 1: Build base RHS = rhs_const + A_neg * v_prev + N_i * i_nl_prev + input + inductor history
+        for i in 0..n {
+            let mut sum = self.kernel.rhs_const[i];
+            let a_neg_offset = i * n;
+            for j in 0..n {
+                sum += self.kernel.a_neg[a_neg_offset + j] * self.v_prev[j];
+            }
+            // N_i * i_nl_prev (trapezoidal nonlinear integration)
+            let ni_offset = i * m;
+            for j in 0..m {
+                sum += self.kernel.n_i[ni_offset + j] * self.i_nl_prev[j];
+            }
+            self.rhs[i] = sum;
+        }
+
+        // Inductor history contributions
+        for ind in &self.kernel.inductors {
+            if ind.node_i > 0 { self.rhs[ind.node_i - 1] -= ind.i_hist; }
+            if ind.node_j > 0 { self.rhs[ind.node_j - 1] += ind.i_hist; }
+        }
+        for ci in &self.kernel.coupled_inductors {
+            if ci.l1_node_i > 0 { self.rhs[ci.l1_node_i - 1] -= ci.i1_hist; }
+            if ci.l1_node_j > 0 { self.rhs[ci.l1_node_j - 1] += ci.i1_hist; }
+            if ci.l2_node_i > 0 { self.rhs[ci.l2_node_i - 1] -= ci.i2_hist; }
+            if ci.l2_node_j > 0 { self.rhs[ci.l2_node_j - 1] += ci.i2_hist; }
+        }
+        for group in &self.kernel.transformer_groups {
+            for k in 0..group.num_windings {
+                if group.winding_node_i[k] > 0 { self.rhs[group.winding_node_i[k] - 1] -= group.i_hist[k]; }
+                if group.winding_node_j[k] > 0 { self.rhs[group.winding_node_j[k] - 1] += group.i_hist[k]; }
+            }
+        }
+
+        // Input source (Thevenin, trapezoidal)
+        if self.input_node < n {
+            self.rhs[self.input_node] += (input + self.input_prev) * self.input_conductance;
+        }
+        self.input_prev = input;
+
+        // Step 2: Newton-Raphson in full voltage space
+        // Start from previous solution (warm start)
+        // v is updated in-place during NR
+        let mut v = self.v_prev.clone();
+        let mut converged = false;
+
+        // Access MNA n_v and n_i from kernel (stored as flat arrays)
+        // We need 2D access: n_v[i][j] = kernel.n_v[i * n + j], n_i[a][i] = kernel.n_i[a * m + i]
+
+        for _iter in 0..self.max_iter {
+            // 2a. Extract nonlinear voltages: v_nl = N_v * v
+            for i in 0..m {
+                let mut sum = 0.0;
+                let nv_offset = i * n;
+                for j in 0..n {
+                    sum += self.kernel.n_v[nv_offset + j] * v[j];
+                }
+                self.v_nl[i] = sum;
+            }
+
+            // 2b. Evaluate device currents and Jacobian
+            dc_op::evaluate_devices(&self.v_nl, &self.device_slots, &mut self.i_nl, &mut self.j_dev, m);
+
+            // 2c. Build Jacobian: G_aug = A - N_i * J_dev * N_v
+            for i in 0..n {
+                for j in 0..n {
+                    self.g_aug[i][j] = self.a_matrix[i][j];
+                }
+            }
+            // Stamp -N_i * J_dev * N_v (same as DC OP but using A instead of G_dc)
+            for a in 0..n {
+                for b in 0..n {
+                    let mut sum = 0.0;
+                    for i in 0..m {
+                        let ni_ai = self.kernel.n_i[a * m + i];
+                        if ni_ai.abs() < 1e-30 { continue; }
+                        for j in 0..m {
+                            let jd = self.j_dev[i * m + j];
+                            if jd.abs() < 1e-30 { continue; }
+                            let nv_jb = self.kernel.n_v[j * n + b];
+                            if nv_jb.abs() < 1e-30 { continue; }
+                            sum += ni_ai * jd * nv_jb;
+                        }
+                    }
+                    self.g_aug[a][b] -= sum;
+                }
+            }
+
+            // 2d. Build companion RHS: rhs_base + N_i * (i_nl - J_dev * v_nl)
+            self.rhs_work.copy_from_slice(&self.rhs);
+            for i in 0..m {
+                let mut jdev_vnl = 0.0;
+                for j in 0..m {
+                    jdev_vnl += self.j_dev[i * m + j] * self.v_nl[j];
+                }
+                let i_comp = self.i_nl[i] - jdev_vnl;
+                for a in 0..n {
+                    self.rhs_work[a] += self.kernel.n_i[a * m + i] * i_comp;
+                }
+            }
+
+            // 2e. Solve: v_new = G_aug^{-1} * rhs_work
+            let v_new = match dc_op::solve_linear(&self.g_aug, &self.rhs_work) {
+                Some(v) => v,
+                None => {
+                    self.diag_nr_max_iter_count += 1;
+                    break;
+                }
+            };
+
+            // 2f. Junction-aware voltage limiting + convergence check
+            let vt = 0.026;
+            let mut max_delta = 0.0_f64;
+            for i in 0..n {
+                let delta = v_new[i] - v[i];
+                let limited = if i < n_nodes {
+                    if delta.abs() < vt { delta }
+                    else { delta.signum() * vt * (delta.abs() / vt + 1.0).ln() }
+                } else {
+                    delta // Augmented variables don't need junction limiting
+                };
+                v[i] += limited;
+                max_delta = max_delta.max(limited.abs());
+            }
+
+            if max_delta < self.tol {
+                converged = true;
+                // Final device evaluation at converged point
+                for i in 0..m {
+                    let mut sum = 0.0;
+                    let nv_offset = i * n;
+                    for j in 0..n {
+                        sum += self.kernel.n_v[nv_offset + j] * v[j];
+                    }
+                    self.v_nl[i] = sum;
+                }
+                dc_op::evaluate_devices(&self.v_nl, &self.device_slots, &mut self.i_nl, &mut self.j_dev, m);
+                break;
+            }
+        }
+
+        if !converged {
+            self.diag_nr_max_iter_count += 1;
+        }
+
+        // Step 3: Update state
+        self.v_prev.copy_from_slice(&v);
+        self.i_nl_prev.copy_from_slice(&self.i_nl);
+
+        // NaN check
+        if !self.v_prev.iter().all(|x| x.is_finite()) {
+            self.v_prev.fill(0.0);
+            self.i_nl_prev.fill(0.0);
+            self.input_prev = 0.0;
+            self.diag_nan_reset_count += 1;
+        }
+
+        // Step 4: Update inductor companion models
+        self.kernel.update_inductors(&self.v_prev);
+        self.kernel.update_coupled_inductors(&self.v_prev);
+        self.kernel.update_transformer_groups(&self.v_prev);
+
+        // Step 5: DC blocking + output
+        let raw_out = if self.output_node < n { self.v_prev[self.output_node] } else { 0.0 };
+        let raw_out = if raw_out.is_finite() { raw_out } else { 0.0 };
+        let dc_blocked = raw_out - self.dc_block_x_prev + self.dc_block_r * self.dc_block_y_prev;
+        self.dc_block_x_prev = raw_out;
+        self.dc_block_y_prev = dc_blocked;
+
+        let abs_out = dc_blocked.abs();
+        if abs_out > self.diag_peak_output { self.diag_peak_output = abs_out; }
+        if abs_out > 10.0 { self.diag_clamp_count += 1; }
+
+        clamp_output(dc_blocked)
     }
 }

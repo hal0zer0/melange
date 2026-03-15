@@ -10,7 +10,7 @@
 //! call into this module.
 
 use crate::codegen::ir::{DeviceParams, DeviceSlot, DeviceType};
-use crate::mna::{inject_rhs_current, MnaSystem, VS_CONDUCTANCE};
+use crate::mna::{inject_rhs_current, MnaSystem, DC_SHORT_CONDUCTANCE};
 use melange_devices::bjt::{BjtEbersMoll, BjtGummelPoon, BjtPolarity};
 use melange_devices::diode::DiodeShockley;
 use melange_devices::tube::KorenTriode;
@@ -90,7 +90,7 @@ pub enum DcOpMethod {
 /// * `device_slots` - Device slot descriptors
 /// * `i_nl` - Output M-vector of device currents
 /// * `j_dev` - Output M×M block-diagonal Jacobian (row-major)
-fn evaluate_devices(
+pub fn evaluate_devices(
     v_nl: &[f64],
     device_slots: &[DeviceSlot],
     i_nl: &mut [f64],
@@ -141,7 +141,7 @@ fn evaluate_devices(
                 }
             }
             (DeviceType::Jfet, DeviceParams::Jfet(jp)) => {
-                // 2D JFET: Vgs at start_idx, Vds at start_idx+1
+                // 2D JFET: dim 0 = Vds (at start_idx), dim 1 = Vgs (at start_idx+1)
                 let channel = if jp.is_p_channel {
                     melange_devices::jfet::JfetChannel::P
                 } else {
@@ -149,33 +149,33 @@ fn evaluate_devices(
                 };
                 let mut jfet = melange_devices::jfet::Jfet::new(channel, jp.vp, jp.idss);
                 jfet.lambda = jp.lambda;
-                let vgs = v_nl[s];
-                let vds = v_nl[s + 1];
-                i_nl[s] = jfet.drain_current(vgs, vds);
-                i_nl[s + 1] = jfet.gate_current(vgs);
+                let vds = v_nl[s];       // dim 0 = Vds
+                let vgs = v_nl[s + 1];   // dim 1 = Vgs
+                i_nl[s] = jfet.drain_current(vgs, vds);     // Id (dim 0 current)
+                i_nl[s + 1] = jfet.gate_current(vgs);        // Ig (dim 1 current)
                 let (gm, gds) = jfet.jacobian_partial(vgs, vds);
-                j_dev[s * m + s] = gm;           // dId/dVgs
-                j_dev[s * m + (s + 1)] = gds;     // dId/dVds
-                j_dev[(s + 1) * m + s] = 0.0;     // dIg/dVgs ≈ 0
-                j_dev[(s + 1) * m + (s + 1)] = 0.0; // dIg/dVds = 0
+                j_dev[s * m + s] = gds;           // dId/dVds (dim0 curr, dim0 volt)
+                j_dev[s * m + (s + 1)] = gm;       // dId/dVgs (dim0 curr, dim1 volt)
+                j_dev[(s + 1) * m + s] = 0.0;      // dIg/dVds ≈ 0
+                j_dev[(s + 1) * m + (s + 1)] = 0.0; // dIg/dVgs ≈ 0 (reverse-biased)
             }
             (DeviceType::Mosfet, DeviceParams::Mosfet(mp)) => {
-                // 2D MOSFET: Vgs at start_idx, Vds at start_idx+1
+                // 2D MOSFET: dim 0 = Vds (at start_idx), dim 1 = Vgs (at start_idx+1)
                 let channel = if mp.is_p_channel {
                     melange_devices::mosfet::ChannelType::P
                 } else {
                     melange_devices::mosfet::ChannelType::N
                 };
                 let mos = melange_devices::mosfet::Mosfet::new(channel, mp.vt, mp.kp, mp.lambda);
-                let vgs = v_nl[s];
-                let vds = v_nl[s + 1];
-                i_nl[s] = mos.drain_current(vgs, vds);
-                i_nl[s + 1] = 0.0; // Insulated gate — no gate current
+                let vds = v_nl[s];       // dim 0 = Vds
+                let vgs = v_nl[s + 1];   // dim 1 = Vgs
+                i_nl[s] = mos.drain_current(vgs, vds);  // Id (dim 0 current)
+                i_nl[s + 1] = 0.0; // Insulated gate — no gate current (dim 1 current)
                 let (gm, gds) = mos.jacobian_partial(vgs, vds);
-                j_dev[s * m + s] = gm;           // dId/dVgs
-                j_dev[s * m + (s + 1)] = gds;     // dId/dVds
-                j_dev[(s + 1) * m + s] = 0.0;     // dIg/dVgs = 0
-                j_dev[(s + 1) * m + (s + 1)] = 0.0; // dIg/dVds = 0
+                j_dev[s * m + s] = gds;           // dId/dVds (dim0 curr, dim0 volt)
+                j_dev[s * m + (s + 1)] = gm;       // dId/dVgs (dim0 curr, dim1 volt)
+                j_dev[(s + 1) * m + s] = 0.0;      // dIg/dVds = 0
+                j_dev[(s + 1) * m + (s + 1)] = 0.0; // dIg/dVgs = 0
             }
             (DeviceType::Tube, DeviceParams::Tube(tp)) => {
                 // Use canonical KorenTriode from melange-devices.
@@ -213,102 +213,87 @@ fn evaluate_devices(
 /// Build the DC conductance matrix and source vector from MNA.
 ///
 /// At DC:
-/// - Capacitors are open circuits (not stamped)
-/// - Inductors are short circuits (stamped as VS_CONDUCTANCE)
-/// - Voltage sources are Norton equivalents (VS_CONDUCTANCE)
-/// - Input conductance is included
+/// - Capacitors are open circuits (not stamped, so C rows in G are absent)
+/// - Inductors are short circuits (DC_SHORT_CONDUCTANCE in the n×n node block)
+/// - Voltage sources use augmented MNA (already in mna.g n_aug × n_aug)
+/// - Input conductance is included in the n×n node block
 ///
-/// Returns (g_dc, b_dc) as N-sized structures.
-fn build_dc_system(mna: &MnaSystem, config: &DcOpConfig) -> (Vec<Vec<f64>>, Vec<f64>) {
+/// Returns (g_dc, b_dc) as n_aug-sized structures.
+fn build_dc_system(mna: &MnaSystem, config: &DcOpConfig) -> (Vec<Vec<f64>>, Vec<f64>, usize) {
     let n = mna.n;
+    let n_aug = mna.n_aug;
 
-    // Start from conductance matrix (already has resistor stamps)
-    let mut g_dc = mna.g.clone();
+    // Collect all inductor node pairs for augmented DC short-circuit constraints.
+    // At DC, each inductor is V_plus - V_minus = 0 (exact short circuit).
+    // We model this with augmented MNA (same as voltage sources with V_dc=0),
+    // not with a large conductance hack.
+    let mut inductor_pairs: Vec<(usize, usize)> = Vec::new();
+    for ind in &mna.inductors {
+        inductor_pairs.push((ind.node_i, ind.node_j));
+    }
+    for ci in &mna.coupled_inductors {
+        inductor_pairs.push((ci.l1_node_i, ci.l1_node_j));
+        inductor_pairs.push((ci.l2_node_i, ci.l2_node_j));
+    }
+    for group in &mna.transformer_groups {
+        for k in 0..group.num_windings {
+            inductor_pairs.push((group.winding_node_i[k], group.winding_node_j[k]));
+        }
+    }
+    // Ideal transformer couplings: the coupled windings are already replaced by
+    // leakage + magnetizing inductors (in mna.inductors), so they're covered above.
+
+    let num_ind = inductor_pairs.len();
+    let n_dc = n_aug + num_ind; // DC system dimension
+
+    // Start from the augmented conductance matrix, expanded for inductor constraints.
+    let mut g_dc = vec![vec![0.0; n_dc]; n_dc];
+    // Copy the n_aug × n_aug G matrix
+    for i in 0..n_aug {
+        for j in 0..n_aug {
+            g_dc[i][j] = mna.g[i][j];
+        }
+    }
 
     // Stamp input conductance
     if config.input_node < n && config.input_resistance > 0.0 {
         g_dc[config.input_node][config.input_node] += 1.0 / config.input_resistance;
     }
 
-    // Stamp inductors as short circuits at DC (uncoupled)
-    for ind in &mna.inductors {
-        let ni = ind.node_i;
-        let nj = ind.node_j;
-        // Stamp VS_CONDUCTANCE between inductor terminals (same as voltage source)
-        if ni > 0 {
-            g_dc[ni - 1][ni - 1] += VS_CONDUCTANCE;
-            if nj > 0 {
-                g_dc[ni - 1][nj - 1] -= VS_CONDUCTANCE;
-            }
-        }
-        if nj > 0 {
-            g_dc[nj - 1][nj - 1] += VS_CONDUCTANCE;
-            if ni > 0 {
-                g_dc[nj - 1][ni - 1] -= VS_CONDUCTANCE;
-            }
-        }
+    // Stamp inductor short-circuit constraints as augmented rows/cols.
+    // For inductor between nodes ni, nj: V(ni) - V(nj) = 0 with current j_ind.
+    // Same stamp as a voltage source with V_dc = 0.
+    for (idx, &(ni, nj)) in inductor_pairs.iter().enumerate() {
+        let k = n_aug + idx; // augmented row/col for this inductor
+        // KVL row: V(ni) - V(nj) = 0
+        if ni > 0 { g_dc[k][ni - 1] += 1.0; }
+        if nj > 0 { g_dc[k][nj - 1] -= 1.0; }
+        // Current injection column: j_ind enters ni, exits nj
+        if ni > 0 { g_dc[ni - 1][k] += 1.0; }
+        if nj > 0 { g_dc[nj - 1][k] -= 1.0; }
     }
 
-    // Stamp coupled inductors as short circuits at DC
-    // Each winding in a coupled pair is an inductor that is a short at DC.
-    for ci in &mna.coupled_inductors {
-        for (ni, nj) in [(ci.l1_node_i, ci.l1_node_j), (ci.l2_node_i, ci.l2_node_j)] {
-            if ni > 0 {
-                g_dc[ni - 1][ni - 1] += VS_CONDUCTANCE;
-                if nj > 0 {
-                    g_dc[ni - 1][nj - 1] -= VS_CONDUCTANCE;
-                }
-            }
-            if nj > 0 {
-                g_dc[nj - 1][nj - 1] += VS_CONDUCTANCE;
-                if ni > 0 {
-                    g_dc[nj - 1][ni - 1] -= VS_CONDUCTANCE;
-                }
-            }
-        }
-    }
+    // Build DC source vector (n_dc sized).
+    let mut b_dc = vec![0.0; n_dc];
 
-    // Stamp transformer group inductors as short circuits at DC
-    for group in &mna.transformer_groups {
-        for k in 0..group.num_windings {
-            let ni = group.winding_node_i[k];
-            let nj = group.winding_node_j[k];
-            if ni > 0 {
-                g_dc[ni - 1][ni - 1] += VS_CONDUCTANCE;
-                if nj > 0 {
-                    g_dc[ni - 1][nj - 1] -= VS_CONDUCTANCE;
-                }
-            }
-            if nj > 0 {
-                g_dc[nj - 1][nj - 1] += VS_CONDUCTANCE;
-                if ni > 0 {
-                    g_dc[nj - 1][ni - 1] -= VS_CONDUCTANCE;
-                }
-            }
-        }
-    }
-
-    // Build DC source vector
-    let mut b_dc = vec![0.0; n];
-
-    // Voltage sources (Norton equivalent)
+    // Voltage sources: augmented row = V_dc.
     for vs in &mna.voltage_sources {
-        let current = vs.dc_value * VS_CONDUCTANCE;
-        inject_rhs_current(&mut b_dc, vs.n_plus_idx, current);
-        inject_rhs_current(&mut b_dc, vs.n_minus_idx, -current);
+        b_dc[n + vs.ext_idx] = vs.dc_value;
     }
 
-    // Current sources
+    // Inductor constraints: b_dc[n_aug + idx] = 0 (short circuit, already zero).
+
+    // Current sources inject into node rows (0..n-1)
     for src in &mna.current_sources {
         inject_rhs_current(&mut b_dc, src.n_plus_idx, src.dc_value);
         inject_rhs_current(&mut b_dc, src.n_minus_idx, -src.dc_value);
     }
 
-    (g_dc, b_dc)
+    (g_dc, b_dc, n_dc)
 }
 
 /// Compute v_nl = N_v · v (extract controlling voltages from node voltages).
-fn extract_nl_voltages(mna: &MnaSystem, v: &[f64], v_nl: &mut [f64]) {
+pub fn extract_nl_voltages(mna: &MnaSystem, v: &[f64], v_nl: &mut [f64]) {
     for (i, v_nl_i) in v_nl.iter_mut().enumerate().take(mna.m) {
         *v_nl_i = mna.n_v[i].iter().zip(v.iter()).map(|(nv, vi)| nv * vi).sum();
     }
@@ -318,7 +303,7 @@ fn extract_nl_voltages(mna: &MnaSystem, v: &[f64], v_nl: &mut [f64]) {
 ///
 /// Returns (LU, pivot) where LU holds L (below diagonal) and U (on+above diagonal).
 /// Returns None if the matrix is singular.
-fn lu_decompose(a: &[Vec<f64>]) -> Option<(Vec<Vec<f64>>, Vec<usize>)> {
+pub fn lu_decompose(a: &[Vec<f64>]) -> Option<(Vec<Vec<f64>>, Vec<usize>)> {
     let n = a.len();
     let mut lu: Vec<Vec<f64>> = a.to_vec();
     let mut pivot: Vec<usize> = (0..n).collect();
@@ -354,7 +339,7 @@ fn lu_decompose(a: &[Vec<f64>]) -> Option<(Vec<Vec<f64>>, Vec<usize>)> {
 }
 
 /// Solve Ax = b given LU decomposition with pivoting.
-fn lu_solve(lu: &[Vec<f64>], pivot: &[usize], b: &[f64]) -> Vec<f64> {
+pub fn lu_solve(lu: &[Vec<f64>], pivot: &[usize], b: &[f64]) -> Vec<f64> {
     let n = lu.len();
     // Permute b
     let mut x: Vec<f64> = pivot.iter().map(|&p| b[p]).collect();
@@ -382,7 +367,7 @@ fn lu_solve(lu: &[Vec<f64>], pivot: &[usize], b: &[f64]) -> Vec<f64> {
 /// Solve a linear system g_aug · v = rhs using LU decomposition.
 ///
 /// Returns None if the matrix is singular.
-fn solve_linear(g_aug: &[Vec<f64>], rhs: &[f64]) -> Option<Vec<f64>> {
+pub fn solve_linear(g_aug: &[Vec<f64>], rhs: &[f64]) -> Option<Vec<f64>> {
     let (lu, pivot) = lu_decompose(g_aug)?;
     Some(lu_solve(&lu, &pivot, rhs))
 }
@@ -414,13 +399,13 @@ fn nr_dc_solve(
     source_scale: f64,
     gmin: f64,
 ) -> (bool, usize) {
-    let n = circuit.mna.n;
+    let n_dc = circuit.g_dc.len(); // DC system dimension (may be > n_aug due to inductor constraints)
     let m = circuit.mna.m;
 
-    // Pre-allocate working buffers
+    // Pre-allocate working buffers (all n_dc-sized)
     let mut j_dev = vec![0.0; m * m];
-    let mut g_aug = vec![vec![0.0; n]; n];
-    let mut rhs = vec![0.0; n];
+    let mut g_aug = vec![vec![0.0; n_dc]; n_dc];
+    let mut rhs = vec![0.0; n_dc];
 
     let mna = circuit.mna;
     let device_slots = circuit.device_slots;
@@ -429,26 +414,39 @@ fn nr_dc_solve(
     let b_dc = circuit.b_dc;
 
     for iter in 0..config.max_iterations {
-        // 1. Extract controlling voltages: v_nl = N_v · v
+        // 1. Extract controlling voltages: v_nl = N_v · v  (N_v is M × n_aug)
         extract_nl_voltages(mna, v, v_nl);
 
         // 2. Evaluate device currents and Jacobian
         evaluate_devices(v_nl, device_slots, i_nl, &mut j_dev, m);
 
-        // 3. Build augmented conductance: G_aug = G_dc + N_i · J_dev · N_v + gmin_diag
-        for i in 0..n {
-            for j in 0..n {
+        // 3. Build augmented conductance: G_aug = G_dc (n_dc × n_dc copy)
+        for i in 0..n_dc {
+            for j in 0..n_dc {
                 g_aug[i][j] = g_dc[i][j];
             }
         }
 
-        // Add Gmin conductance across each nonlinear device's controlling nodes
+        // Regularize: add tiny conductance to any node with zero self-conductance.
+        // Nodes connected only through capacitors (open at DC) or only through
+        // augmented constraints (inductors) have zero G diagonal. Without this,
+        // the Jacobian is singular even with device conductance stamps.
+        {
+            let gmin_floor = 1e-12;
+            for i in 0..mna.n {
+                if g_aug[i][i].abs() < gmin_floor {
+                    g_aug[i][i] += gmin_floor;
+                }
+            }
+        }
+
+        // Add Gmin conductance across each nonlinear device's controlling nodes.
+        // n_v[nl_idx] has n_aug entries; only the first n_nodes are nonzero,
+        // but we iterate over all to be safe.
         if gmin > 0.0 {
             for slot in device_slots {
                 for d in 0..slot.dimension {
                     let nl_idx = slot.start_idx + d;
-                    // Add gmin to the diagonal entries corresponding to
-                    // the nodes that this NL voltage spans
                     for (j, &nv_val) in mna.n_v[nl_idx].iter().enumerate() {
                         if nv_val.abs() > 1e-15 {
                             g_aug[j][j] += gmin * nv_val.abs();
@@ -458,12 +456,13 @@ fn nr_dc_solve(
             }
         }
 
-        // Stamp -N_i · J_dev · N_v into G_aug (companion linearization)
+        // Stamp -N_i · J_dev · N_v into G_aug (companion linearization).
         // G_aug = G_dc - N_i · J_dev · N_v
-        // The negative sign is correct: N_i has -1 at anodes, so
-        // -(-1) · g_d = +g_d stamps device conductance positively.
-        for (a, g_aug_a) in g_aug.iter_mut().enumerate().take(n) {
-            for (b, g_aug_ab) in g_aug_a.iter_mut().enumerate().take(n) {
+        // N_i is n_aug × M, N_v is M × n_aug. The nonlinear device entries
+        // are only in rows/cols < n_nodes, so inductor constraint rows are unaffected.
+        let n_mna = mna.n_aug; // MNA system dimension (excludes DC inductor constraints)
+        for (a, g_aug_a) in g_aug.iter_mut().enumerate().take(n_mna) {
+            for (b, g_aug_ab) in g_aug_a.iter_mut().enumerate().take(n_mna) {
                 let mut sum = 0.0;
                 for i in 0..m {
                     let ni_ai = mna.n_i[a][i];
@@ -481,13 +480,21 @@ fn nr_dc_solve(
         }
 
         // 4. Build companion RHS: rhs = b_dc_scaled + N_i · (i_nl - J_dev · v_nl)
-        //    with source scaling for source stepping
+        //    For augmented rows (VS/VCVS constraints), source_scale applies only to
+        //    the node-row current sources. VS constraint rows (b_dc[k] = V_dc) must
+        //    be fully enforced regardless of scale (they are not "sources" being ramped).
+        //    We apply source_scale only to node rows (0..n) but keep constraint rows exact.
+        let n = mna.n;
         for i in 0..n {
             rhs[i] = b_dc[i] * source_scale;
         }
+        // VS/VCVS/inductor constraint rows are always fully applied (not scaled)
+        for i in n..n_dc {
+            rhs[i] = b_dc[i];
+        }
 
         // Compute companion current: i_companion = i_nl - J_dev · v_nl
-        // Then inject: rhs += N_i · i_companion
+        // Then inject: rhs += N_i · i_companion (only into node rows; augmented rows unaffected)
         for i in 0..m {
             let mut jdev_vnl_i = 0.0;
             for j in 0..m {
@@ -496,7 +503,7 @@ fn nr_dc_solve(
             let i_comp = i_nl[i] - jdev_vnl_i;
 
             // Inject into RHS: rhs[a] += N_i[a][i] * i_comp
-            for (a, rhs_a) in rhs.iter_mut().enumerate().take(n) {
+            for (a, rhs_a) in rhs.iter_mut().enumerate().take(n_mna) {
                 *rhs_a += mna.n_i[a][i] * i_comp;
             }
         }
@@ -507,17 +514,23 @@ fn nr_dc_solve(
             None => return (false, iter + 1), // Singular matrix
         };
 
-        // 6. Junction-aware logarithmic voltage limiting and convergence check
-        //    Large steps are compressed: sign * vt * ln(|delta|/vt + 1)
-        //    Small steps (~26mV) pass nearly unchanged.
+        // 6. Junction-aware logarithmic voltage limiting and convergence check.
+        //    Apply only to node rows (0..n); augmented VS/VCVS variables are
+        //    algebraic and don't need junction limiting.
         let vt = 0.026; // thermal voltage for limiting
         let mut max_delta = 0.0_f64;
-        for i in 0..n {
+        for i in 0..n_dc {
             let delta = v_new[i] - v[i];
-            let limited = if delta.abs() < vt {
-                delta // Small steps pass through unchanged
+            let limited = if i < n {
+                // Apply junction-aware logarithmic limiting to circuit nodes
+                if delta.abs() < vt {
+                    delta
+                } else {
+                    delta.signum() * vt * (delta.abs() / vt + 1.0).ln()
+                }
             } else {
-                delta.signum() * vt * (delta.abs() / vt + 1.0).ln()
+                // Augmented variables (VS currents): apply directly without limiting
+                delta
             };
             v[i] += limited;
             max_delta = max_delta.max(limited.abs());
@@ -550,14 +563,23 @@ pub fn solve_dc_operating_point(
     device_slots: &[DeviceSlot],
     config: &DcOpConfig,
 ) -> DcOpResult {
-    let n = mna.n;
     let m = mna.m;
 
-    // Build DC system
-    let (g_dc, b_dc) = build_dc_system(mna, config);
+    // Build DC system. Dimension n_dc = n_aug + num_inductors (inductor short-circuit constraints).
+    let (g_dc, b_dc, n_dc) = build_dc_system(mna, config);
 
-    // Compute linear initial guess
-    let v_linear = solve_linear(&g_dc, &b_dc).unwrap_or_else(|| vec![0.0; n]);
+    // Compute linear initial guess (n_dc vector).
+    // Some circuit nodes may have no DC conductance path to ground (e.g. tube grids
+    // connected only through capacitors). Add a small Gmin to each node diagonal
+    // for the linear guess to prevent singularity. This is removed for NR iteration.
+    let v_linear = {
+        let gmin_init = 1e-9; // Small enough to not distort voltages, large enough to regularize
+        let mut g_reg = g_dc.clone();
+        for i in 0..mna.n {
+            g_reg[i][i] += gmin_init;
+        }
+        solve_linear(&g_reg, &b_dc).unwrap_or_else(|| vec![0.0; n_dc])
+    };
 
     // If no nonlinear devices, return linear result
     if m == 0 || device_slots.is_empty() {
@@ -594,7 +616,7 @@ pub fn solve_dc_operating_point(
 
     // Strategy 2: Source stepping
     // Ramp DC sources from 0 to full value, NR at each stage
-    let mut v = vec![0.0; n]; // Start from zero for source stepping
+    let mut v = vec![0.0; n_dc]; // Start from zero for source stepping
     let mut total_iters = 0;
     let mut source_stepping_converged = true;
 

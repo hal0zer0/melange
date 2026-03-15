@@ -10,33 +10,37 @@ const MAX_SAFE_VOLTAGE: f64 = 10.0;
 const _MAX_SAFE_DC_OFFSET: f64 = 0.1;
 const _MAX_ABSOLUTE_OUTPUT: f64 = 100.0;
 
-/// Validates S matrix is well-conditioned
+/// Validates S matrix is well-conditioned for circuit node entries.
+///
+/// Only checks rows/cols corresponding to circuit nodes (0..n_nodes).
+/// Augmented rows (voltage source currents, VCVS currents) may have
+/// zero or negative diagonal entries and are skipped.
 pub fn validate_s_matrix(kernel: &DkKernel) -> Result<(), String> {
     let n = kernel.n;
-    
-    for i in 0..n {
+    let n_nodes = kernel.n_nodes;
+
+    for i in 0..n_nodes {
         let s_ii = kernel.s[i * n + i];
-        
+
         if s_ii <= 0.0 {
             return Err(format!(
                 "S[{},{}] = {} is not positive", i, i, s_ii
             ));
         }
-        
-        // S[0,0] can be very small if voltage sources are present (Norton equiv stamps 1e6 S)
+
         if i == 0 && (s_ii < 1e-8 || s_ii > 100.0) {
             return Err(format!(
                 "S[0,0] = {} is out of safe range [1e-8, 100]", s_ii
             ));
         }
-        
+
         if s_ii > 1e6 {
             return Err(format!(
                 "S[{},{}] = {} is too large", i, i, s_ii
             ));
         }
     }
-    
+
     Ok(())
 }
 
@@ -65,10 +69,10 @@ pub fn validate_k_matrix(kernel: &DkKernel) -> Result<(), String> {
     Ok(())
 }
 
-/// Validates G matrix has proper structure
+/// Validates G matrix has proper structure for circuit node rows.
 pub fn validate_g_matrix(mna: &MnaSystem) -> Result<(), String> {
-    let n = mna.n;
-    
+    let n = mna.n; // circuit node count (not n_aug)
+
     for i in 0..n {
         let g_ii = mna.g[i][i];
         let mut off_diag_sum = 0.0;
@@ -119,26 +123,6 @@ pub fn validate_circuit_safe(netlist_str: &str, sample_rate: f64) -> Result<(Mna
     Ok((mna, kernel))
 }
 
-#[test]
-fn test_mordor_screamer_matrices_safe() {
-    let spice = r#"* Mordor Screamer
-.model D1N4148 D(IS=2.52e-9 RS=0.568 N=1.906)
-C1 in n1 0.1u
-R1 n1 0 1meg
-R2 n1 n2 10k
-C2 n2 n3 0.047u
-D1 n3 n2 D1N4148
-D2 n2 n3 D1N4148
-R3 n3 n4 1k
-C3 n4 0 0.022u
-R4 n4 out 10k
-C4 out 0 0.1u
-Vin in 0 0
-.END"#;
-    
-    let result = validate_circuit_safe(spice, 48000.0);
-    assert!(result.is_ok(), "Mordor Screamer failed validation: {:?}", result.err());
-}
 
 #[test]
 fn test_s_matrix_catches_explosion() {

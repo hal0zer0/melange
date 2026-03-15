@@ -168,9 +168,12 @@ impl CodeGenerator {
             ));
         }
         for (i, &node) in self.config.output_nodes.iter().enumerate() {
-            if node >= kernel.n {
+            // Validate against n_nodes (original circuit nodes), not n_aug
+            let n_nodes = kernel.n_nodes;
+            if node >= n_nodes {
                 return Err(CodegenError::InvalidConfig(format!(
-                    "output_nodes[{}] = {} >= N={}", i, node, kernel.n
+                    "output_nodes[{}] = {} >= n_nodes={} (original circuit node count)",
+                    i, node, n_nodes
                 )));
             }
         }

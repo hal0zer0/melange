@@ -54,8 +54,13 @@ pub struct CircuitMetadata {
 /// Circuit topology dimensions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Topology {
-    /// Number of circuit nodes (excluding ground)
+    /// System dimension = n_aug (n + num_vs + num_vcvs).
+    /// This is the size of all N-indexed matrices and vectors in the solver.
     pub n: usize,
+    /// Original circuit node count (excluding ground and augmented VS/VCVS variables).
+    /// Output node indices must be < n_nodes.
+    #[serde(default)]
+    pub n_nodes: usize,
     /// Total nonlinear dimension (sum of device dimensions)
     pub m: usize,
     /// Number of physical nonlinear devices
@@ -578,7 +583,8 @@ impl CircuitIR {
         netlist: &Netlist,
         config: &CodegenConfig,
     ) -> Result<Self, CodegenError> {
-        let n = kernel.n;
+        let n = kernel.n;         // = n_aug (system dimension)
+        let n_nodes = kernel.n_nodes; // original circuit node count
         let m = kernel.m;
 
         if m > crate::dk::MAX_M {
@@ -590,6 +596,7 @@ impl CircuitIR {
 
         let topology = Topology {
             n,
+            n_nodes,
             m,
             num_devices: kernel.num_devices,
         };

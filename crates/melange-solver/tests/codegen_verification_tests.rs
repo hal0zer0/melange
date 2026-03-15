@@ -1699,32 +1699,45 @@ C1 out 0 100p
 ";
 
 #[test]
-fn test_vs_conductance_stamps_into_g_matrix() {
-    // A voltage source uses Norton equivalent: G_vs = 1e6 S stamped in G matrix.
+fn test_vs_augmented_mna_stamps_into_g_matrix() {
+    // A voltage source uses augmented MNA: extra row/col for current variable.
+    // V1 vcc 0 DC 9: vcc is n+, ground is n-, so the VS adds row k = n + 0.
     let netlist = Netlist::parse(VS_DIVIDER_SPICE).expect("failed to parse");
     let mna = MnaSystem::from_netlist(&netlist).expect("failed to build MNA");
 
-    // VS_CONDUCTANCE should be 1e6
-    assert_eq!(
-        melange_solver::mna::VS_CONDUCTANCE, 1e6,
-        "VS_CONDUCTANCE should be 1e6"
-    );
+    // n_aug = n + 1 (one voltage source)
+    let n = mna.n;
+    assert_eq!(mna.n_aug, n + 1, "n_aug should be n+1 for one voltage source");
+    assert_eq!(mna.g.len(), n + 1, "G should be n_aug × n_aug");
 
-    // The voltage source is between vcc (node index) and ground (node 0).
-    // In G matrix, G[vcc_idx][vcc_idx] should include VS_CONDUCTANCE.
-    let vcc_idx = mna.node_map["vcc"] - 1; // Convert to 0-indexed matrix row
-    let g_vcc = mna.g[vcc_idx][vcc_idx];
+    let vcc_idx = mna.node_map["vcc"] - 1; // 0-indexed matrix row
+    let k = n; // augmented row for V1 (ext_idx=0, so k = n + 0)
+
+    // G[vcc][k] = +1 (current j_vs enters vcc)
     assert!(
-        g_vcc >= melange_solver::mna::VS_CONDUCTANCE,
-        "G[vcc][vcc] should include VS_CONDUCTANCE (1e6), got {}",
-        g_vcc
+        (mna.g[vcc_idx][k] - 1.0).abs() < 1e-15,
+        "G[vcc][k] should be +1 for VS current injection, got {}",
+        mna.g[vcc_idx][k]
+    );
+    // G[k][vcc] = +1 (KVL: V_vcc contributes positively)
+    assert!(
+        (mna.g[k][vcc_idx] - 1.0).abs() < 1e-15,
+        "G[k][vcc] should be +1 for VS KVL constraint, got {}",
+        mna.g[k][vcc_idx]
+    );
+    // G[vcc][vcc] should NOT include large VS conductance anymore (augmented MNA)
+    let g_r1 = 1.0 / 1000.0; // only R1 connects to vcc
+    assert!(
+        mna.g[vcc_idx][vcc_idx] < 10.0 * g_r1,
+        "G[vcc][vcc] should not have large VS conductance in augmented MNA, got {}",
+        mna.g[vcc_idx][vcc_idx]
     );
 }
 
 #[test]
 fn test_vs_divider_dc_accuracy() {
     // Voltage divider: V1=9V, R1=R2=1k → Vout should be ~4.5V at DC operating point.
-    // The VS_CONDUCTANCE approximation should be accurate enough.
+    // With augmented MNA, the VS constraint enforces V_vcc = 9V exactly.
     let netlist = Netlist::parse(VS_DIVIDER_SPICE).expect("failed to parse");
     let mna = MnaSystem::from_netlist(&netlist).expect("failed to build MNA");
 
@@ -1745,16 +1758,14 @@ fn test_vs_divider_dc_accuracy() {
         "rhs_const should have non-zero entries from DC voltage source"
     );
 
-    // The Norton equivalent current is V * G_vs = 9 * 1e6 = 9e6 A,
-    // multiplied by 2 for trapezoidal rule: 2 * 9e6 = 1.8e7.
-    // This should be injected at the vcc node.
-    let vcc_idx = mna.node_map["vcc"] - 1;
-    let expected_rhs = 2.0 * 9.0 * melange_solver::mna::VS_CONDUCTANCE;
+    // With augmented MNA, the VS augmented row has rhs_const[k] = V_dc = 9.0.
+    // This is NOT multiplied by 2 (algebraic constraint, no trapezoidal history).
+    let n = mna.n;
+    let k = n + mna.voltage_sources[0].ext_idx; // augmented row index
     assert!(
-        (kernel.rhs_const[vcc_idx] - expected_rhs).abs() < 1e-3,
-        "rhs_const[vcc] should be 2*V*G_vs = {}, got {}",
-        expected_rhs,
-        kernel.rhs_const[vcc_idx]
+        (kernel.rhs_const[k] - 9.0).abs() < 1e-10,
+        "rhs_const[k] should be V_dc=9.0 for augmented VS row, got {}",
+        kernel.rhs_const[k]
     );
 }
 
@@ -1801,20 +1812,19 @@ fn test_no_rhs_const_without_dc_source() {
 }
 
 #[test]
-fn test_vs_conductance_value_is_large() {
-    // VS_CONDUCTANCE must be large enough to approximate an ideal voltage source.
-    // With G_vs = 1e6, the voltage error is V * R_other / (R_other + 1/G_vs).
-    // For a 1k load, error ~ 1k / (1k + 1e-6) ~ 1e-3, i.e. 0.1% error.
-    let g_vs = melange_solver::mna::VS_CONDUCTANCE;
+fn test_dc_short_conductance_exists() {
+    // DC_SHORT_CONDUCTANCE is used only for inductor short circuits in the DC OP solver.
+    // It is no longer used for voltage sources (augmented MNA enforces VS exactly).
+    let g_short = melange_solver::mna::DC_SHORT_CONDUCTANCE;
     assert!(
-        g_vs >= 1e5,
-        "VS_CONDUCTANCE should be at least 1e5 for accuracy, got {}",
-        g_vs
+        g_short >= 1e2,
+        "DC_SHORT_CONDUCTANCE should be at least 1e2, got {}",
+        g_short
     );
     assert!(
-        g_vs <= 1e12,
-        "VS_CONDUCTANCE should not be so large as to cause numerical issues, got {}",
-        g_vs
+        g_short <= 1e9,
+        "DC_SHORT_CONDUCTANCE should not be unreasonably large, got {}",
+        g_short
     );
 }
 
@@ -2790,14 +2800,16 @@ fn test_jfet_codegen_generates_correct_functions() {
     assert!(code.contains("DEVICE_0_LAMBDA"), "Should have LAMBDA constant");
     assert!(code.contains("DEVICE_0_SIGN"), "Should have SIGN constant");
 
-    // Should call JFET functions in NR loop with state fields for IDSS/VP/LAMBDA, const for SIGN
+    // Should call JFET functions in NR loop with state fields for IDSS/VP/LAMBDA, const for SIGN.
+    // N_v ordering: dim 0 = Vds (v_d0), dim 1 = Vgs (v_d1).
+    // Functions expect (vgs, vds), so the call is jfet_id(v_d1, v_d0, ...).
     assert!(
-        code.contains("jfet_id(v_d0, v_d1, state.device_0_idss, state.device_0_vp, state.device_0_lambda, DEVICE_0_SIGN)"),
-        "NR loop should call jfet_id with state fields for IDSS/VP/LAMBDA"
+        code.contains("jfet_id(v_d1, v_d0, state.device_0_idss, state.device_0_vp, state.device_0_lambda, DEVICE_0_SIGN)"),
+        "NR loop should call jfet_id(v_d1, v_d0, ...) — dim0=Vds, dim1=Vgs"
     );
     assert!(
-        code.contains("jfet_ig(v_d0, DEVICE_0_SIGN)"),
-        "NR loop should call jfet_ig"
+        code.contains("jfet_ig(v_d1, DEVICE_0_SIGN)"),
+        "NR loop should call jfet_ig(v_d1, ...) — dim1=Vgs"
     );
 }
 

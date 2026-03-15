@@ -138,8 +138,7 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
   - **Runtime solver**: `CircuitSolver.set_pot(index, resistance)` with pre-allocated SM buffers (real-time safe)
   - Plugin template auto-generates `FloatParam` knobs for each pot
   - Max 32 pots per circuit; pot value stored in `CircuitState`
-- **Plugin level params always included**: Input Level (-12 dB default, -36 to +12 dB) and Output Level (0 dB default, -60 to +12 dB)
-  - -12 dB input maps ±1V DAW to ±250mV (safe for guitar-level circuits)
+- **Plugin level params always included**: Input Level (0 dB default, -36 to +12 dB) and Output Level (0 dB default, -60 to +12 dB)
   - Use `--no-level-params` CLI flag to opt out
 - **Oversampling in codegen** (2x/4x): self-contained polyphase half-band IIR in generated code
   - `CodegenConfig.oversampling_factor` = 1, 2, or 4

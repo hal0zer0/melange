@@ -421,6 +421,15 @@ impl CircuitState {
                 a_neg[i][j] = alpha * C[i][j] - G[i][j];
             }
         }
+{% if has_augmented %}
+        // Zero augmented rows (voltage source / VCVS algebraic constraints).
+        // These have no capacitance and no history — rhs_const provides V_dc directly.
+        for i in {{ n_nodes }}..N {
+            for j in 0..N {
+                a_neg[i][j] = 0.0;
+            }
+        }
+{% endif %}
 {% if num_inductors > 0 %}
 
         // Add inductor companion model conductances

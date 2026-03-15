@@ -26,30 +26,40 @@ use std::collections::HashMap;
 ///
 /// After discretization with timestep T:
 ///   A = 2*C/T + G  (trapezoidal rule)
+///
+/// When voltage sources or VCVS elements are present, the system is augmented
+/// with extra unknowns for the source currents. The augmented dimension is
+///   n_aug = n + num_vs + num_vcvs
+/// All matrices (G, C, N_v, N_i) are expanded to n_aug × n_aug.
 #[derive(Debug, Clone)]
 pub struct MnaSystem {
-    /// Number of nodes (excluding ground)
+    /// Number of circuit nodes (excluding ground)
     pub n: usize,
+    /// Augmented system dimension: n + num_vs + num_vcvs.
+    /// Equal to n when no voltage sources or VCVS elements are present.
+    pub n_aug: usize,
     /// Total voltage dimension (sum of device dimensions)
     pub m: usize,
     /// Number of physical nonlinear devices
     pub num_devices: usize,
-    /// Conductance matrix (symmetric, n×n)
+    /// Conductance matrix (n_aug × n_aug — includes augmented VS/VCVS rows)
     pub g: Vec<Vec<f64>>,
-    /// Capacitance matrix (symmetric, n×n)
+    /// Capacitance matrix (n_aug × n_aug — augmented rows are all zeros)
     pub c: Vec<Vec<f64>>,
-    /// Nonlinear voltage extraction matrix (m×n)
+    /// Nonlinear voltage extraction matrix (m × n_aug)
     /// Row i maps node voltages to controlling voltage i
     pub n_v: Vec<Vec<f64>>,
-    /// Nonlinear current injection matrix (n×m)
+    /// Nonlinear current injection matrix (n_aug × m)
     /// Column j maps nonlinear current j to node currents
     pub n_i: Vec<Vec<f64>>,
     /// Node name to index mapping (0 = ground, not stored)
     pub node_map: HashMap<String, usize>,
     /// Nonlinear device info
     pub nonlinear_devices: Vec<NonlinearDeviceInfo>,
-    /// Voltage source info (for extended MNA)
+    /// Voltage source info (for augmented MNA)
     pub voltage_sources: Vec<VoltageSourceInfo>,
+    /// VCVS augmented row info (one entry per VCVS element, in element order)
+    pub vcvs_sources: Vec<VcvsAugInfo>,
     /// Current source contributions to RHS
     pub current_sources: Vec<CurrentSourceInfo>,
     /// Inductor elements for companion model (uncoupled only)
@@ -58,6 +68,9 @@ pub struct MnaSystem {
     pub coupled_inductors: Vec<CoupledInductorInfo>,
     /// Multi-winding transformer groups (3+ windings on shared core)
     pub transformer_groups: Vec<TransformerGroupInfo>,
+    /// Ideal transformer couplings (decomposed from large tightly-coupled groups).
+    /// Each coupling enforces V_sec = n * V_pri algebraically via augmented MNA.
+    pub ideal_transformers: Vec<IdealTransformerCoupling>,
     /// Potentiometer info (resolved from .pot directives)
     pub pots: Vec<PotInfo>,
     /// Switch info (resolved from .switch directives)
@@ -65,6 +78,49 @@ pub struct MnaSystem {
     /// Op-amp info (for VCCS stamping)
     pub opamps: Vec<OpampInfo>,
 }
+
+/// Augmented-MNA extra row/column info for a VCVS element.
+///
+/// Each VCVS adds one extra unknown j_vs (the source current) and one
+/// algebraic constraint row: V_out+ - V_out- = gain*(V_ctrl+ - V_ctrl-).
+#[derive(Debug, Clone)]
+pub struct VcvsAugInfo {
+    /// 0-based index within VCVS sources (extra row k = n + num_vs + vcvs_idx)
+    pub aug_idx: usize,
+}
+
+/// Ideal transformer coupling from decomposition of large tightly-coupled inductors.
+///
+/// Enforces V(sec_p) - V(sec_n) = turns_ratio * (V(pri_p) - V(pri_n)) as an
+/// algebraic constraint via augmented MNA. Also injects reflected current at the
+/// primary: I_pri = turns_ratio * I_sec (power conservation).
+///
+/// Created when a transformer group has max(L) > 1H and max(k) > 0.8.
+/// The original coupled inductors are replaced by:
+/// - One magnetizing inductance (L_ref, added to uncoupled inductors)
+/// - One IdealTransformerCoupling per non-reference winding
+#[derive(Debug, Clone)]
+pub struct IdealTransformerCoupling {
+    pub name: String,
+    /// Reference (primary) winding positive node (1-indexed, 0=ground)
+    pub pri_node_p: usize,
+    /// Reference (primary) winding negative node
+    pub pri_node_n: usize,
+    /// Secondary winding positive node
+    pub sec_node_p: usize,
+    /// Secondary winding negative node
+    pub sec_node_n: usize,
+    /// Turns ratio: V_sec = turns_ratio * V_pri
+    pub turns_ratio: f64,
+}
+
+/// Threshold: transformer groups with max(L) above this use ideal decomposition.
+/// Currently disabled (1e30) — ideal transformer decomposition creates algebraic loops
+/// in circuits with global feedback through transformers (e.g. Pultec NFB).
+/// The DK method requires at least one sample of reactive delay in every feedback loop.
+const IDEAL_XFMR_L_THRESHOLD: f64 = 1e30;
+/// Threshold: transformer groups with max(k) above this use ideal decomposition.
+const IDEAL_XFMR_K_THRESHOLD: f64 = 0.8;
 
 /// Inductor element info for companion model.
 #[derive(Debug, Clone)]
@@ -227,9 +283,13 @@ pub struct PotInfo {
 
 impl MnaSystem {
     /// Create a new empty MNA system.
+    ///
+    /// Matrices are sized at `n × n`; the builder expands them to `n_aug × n_aug`
+    /// after counting voltage sources and VCVS elements.
     pub fn new(n: usize, m: usize, num_devices: usize, num_vs: usize) -> Self {
         Self {
             n,
+            n_aug: n, // Will be expanded by the builder
             m,
             num_devices,
             g: vec![vec![0.0; n]; n],
@@ -239,10 +299,12 @@ impl MnaSystem {
             node_map: HashMap::new(),
             nonlinear_devices: Vec::new(),
             voltage_sources: Vec::with_capacity(num_vs),
+            vcvs_sources: Vec::new(),
             current_sources: Vec::new(),
             inductors: Vec::new(),
             coupled_inductors: Vec::new(),
             transformer_groups: Vec::new(),
+            ideal_transformers: Vec::new(),
             pots: Vec::new(),
             switches: Vec::new(),
             opamps: Vec::new(),
@@ -409,6 +471,10 @@ impl MnaSystem {
     ///
     /// - `g_sign = +1`: produces A = G + (2/T)*C  (forward matrix)
     /// - `g_sign = -1`: produces A_neg = (2/T)*C - G  (history matrix)
+    ///
+    /// For augmented MNA (voltage sources/VCVS present), rows n..n_aug-1 are algebraic
+    /// constraints with no capacitance. In A_neg (g_sign < 0), those rows must be ALL
+    /// ZEROS because there is no trapezoidal history for algebraic constraints.
     #[allow(clippy::needless_range_loop)]
     fn build_discretized_matrix(&self, sample_rate: f64, g_sign: f64) -> Vec<Vec<f64>> {
         if !(sample_rate > 0.0 && sample_rate.is_finite()) {
@@ -417,11 +483,24 @@ impl MnaSystem {
         }
         let t = 1.0 / sample_rate;
         let alpha = 2.0 / t; // 2/T for trapezoidal
+        let n_aug = self.n_aug;
 
-        let mut mat = vec![vec![0.0; self.n]; self.n];
-        for i in 0..self.n {
-            for j in 0..self.n {
+        let mut mat = vec![vec![0.0; n_aug]; n_aug];
+        for i in 0..n_aug {
+            for j in 0..n_aug {
                 mat[i][j] = g_sign * self.g[i][j] + alpha * self.c[i][j];
+            }
+        }
+
+        // Augmented rows (n..n_aug-1) are algebraic constraints with C=0.
+        // In A_neg (history matrix), these rows must be ALL ZEROS — there is no
+        // trapezoidal history for algebraic constraints (VS/VCVS equations).
+        // In A (g_sign > 0), the G entries are correct as-is.
+        if g_sign < 0.0 && n_aug > self.n {
+            for i in self.n..n_aug {
+                for j in 0..n_aug {
+                    mat[i][j] = 0.0;
+                }
             }
         }
 
@@ -586,11 +665,12 @@ impl MnaSystem {
     }
 }
 
-/// Norton equivalent conductance for voltage sources [S].
+/// Large conductance for modeling short circuits at DC [S].
 ///
-/// A large conductance value used to model ideal voltage sources as
-/// Norton equivalents (current source + parallel conductance).
-pub const VS_CONDUCTANCE: f64 = 1e6;
+/// Used only in the DC operating-point solver to stamp inductors as short circuits.
+/// NOT used for voltage sources or VCVS — those use augmented MNA (extra variables
+/// for source currents, enforcing V_plus - V_minus = V_dc exactly).
+pub const DC_SHORT_CONDUCTANCE: f64 = 1e3;
 
 /// Parasitic junction capacitance for nonlinear device stabilization [F].
 ///
@@ -1033,6 +1113,10 @@ impl MnaBuilder {
             groups.entry(root).or_default().push(name.clone());
         }
 
+        // Track internal nodes added by ideal transformer decomposition.
+        // Internal nodes are 1-indexed, starting after the last circuit node.
+        let mut next_internal_node = n + 1;
+
         // Process each group
         for (_root, mut members) in groups {
             // Sort members for deterministic ordering (by original element order)
@@ -1044,6 +1128,134 @@ impl MnaBuilder {
 
             for m in &members {
                 coupled_inductor_names.insert(m.clone());
+            }
+
+            // Check if this group qualifies for ideal transformer decomposition:
+            // large inductances + tight coupling → companion model creates ill-conditioning.
+            let max_l = members.iter()
+                .map(|m| inductor_refs[m].value)
+                .fold(0.0_f64, f64::max);
+            let max_k = netlist.couplings.iter()
+                .filter(|c| {
+                    let a = c.inductor1_name.to_ascii_lowercase();
+                    let b = c.inductor2_name.to_ascii_lowercase();
+                    members.contains(&a) && members.contains(&b)
+                })
+                .map(|c| c.coupling)
+                .fold(0.0_f64, f64::max);
+
+            if max_l > IDEAL_XFMR_L_THRESHOLD && max_k > IDEAL_XFMR_K_THRESHOLD {
+                // Decompose into: leakage inductors + ideal transformer couplings + magnetizing inductance.
+                //
+                // Standard T-model equivalent circuit per winding:
+                //   original_node_p ── L_leak ── internal_node ── (ideal xfmr) ── ref internal nodes
+                //   original_node_n ─────────────────────────────/
+                //
+                // The leakage inductor provides the reactive delay needed for the DK
+                // method's trapezoidal integration — without it, the ideal transformer
+                // creates an algebraic loop that produces positive K diagonals.
+                //
+                // For each winding i:
+                //   - Leakage: L_leak_i = (1 - k_avg_i²) × L_i
+                //   - k_avg_i = average coupling of winding i to all other windings
+                //
+                // The leakage inductor connects from the original positive node to a new
+                // internal node. The original negative node is shared. The ideal transformer
+                // connects between the internal nodes.
+
+                // Pick reference winding (largest inductance).
+                let ref_idx = members.iter()
+                    .enumerate()
+                    .max_by(|(_, a), (_, b)| {
+                        inductor_refs[*a].value.partial_cmp(&inductor_refs[*b].value).unwrap()
+                    })
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
+                let ref_ind = &inductor_refs[&members[ref_idx]];
+                let l_ref = ref_ind.value;
+
+                // Compute average coupling per winding
+                let w = members.len();
+                let mut k_avg = vec![0.0f64; w];
+                let mut k_count = vec![0usize; w];
+                for coupling in &netlist.couplings {
+                    let a = coupling.inductor1_name.to_ascii_lowercase();
+                    let b = coupling.inductor2_name.to_ascii_lowercase();
+                    if let (Some(ia), Some(ib)) = (
+                        members.iter().position(|m| *m == a),
+                        members.iter().position(|m| *m == b),
+                    ) {
+                        k_avg[ia] += coupling.coupling;
+                        k_count[ia] += 1;
+                        k_avg[ib] += coupling.coupling;
+                        k_count[ib] += 1;
+                    }
+                }
+                for i in 0..w {
+                    if k_count[i] > 0 {
+                        k_avg[i] /= k_count[i] as f64;
+                    }
+                }
+
+                // Create internal nodes for each winding.
+                // Track the next available node index across all groups.
+                let mut internal_nodes_p = Vec::with_capacity(w);
+                for (i, m) in members.iter().enumerate() {
+                    let ind = &inductor_refs[m];
+                    let k_i = k_avg[i];
+                    let l_leak = (1.0 - k_i * k_i) * ind.value;
+                    // Minimum leakage: ensure non-zero reactive element for numerical stability
+                    let l_leak = l_leak.max(ind.value * 1e-4);
+
+                    // Allocate internal node (1-indexed). Use next_internal_node counter
+                    // that starts at n+1 and increments across all groups.
+                    let internal_p = next_internal_node;
+                    next_internal_node += 1;
+                    internal_nodes_p.push(internal_p);
+
+                    // Add leakage inductor: original_node_p → internal_node_p
+                    self.inductors.push(InductorElement {
+                        name: format!("{}_leak", ind.name),
+                        node_i: ind.node_i,
+                        node_j: internal_p,
+                        value: l_leak,
+                    });
+                }
+
+                // Add magnetizing inductance between reference winding's internal nodes.
+                let ref_internal_p = internal_nodes_p[ref_idx];
+                let ref_neg = inductor_refs[&members[ref_idx]].node_j;
+                self.inductors.push(InductorElement {
+                    name: format!("{}_mag", ref_ind.name),
+                    node_i: ref_internal_p,
+                    node_j: ref_neg,
+                    value: l_ref,
+                });
+
+                // For each non-reference winding: add ideal transformer coupling
+                // between internal nodes (after leakage inductors).
+                for (i, m) in members.iter().enumerate() {
+                    if i == ref_idx { continue; }
+                    let ind = &inductor_refs[m];
+                    let n_turns = (ind.value / l_ref).sqrt();
+
+                    mna.ideal_transformers.push(IdealTransformerCoupling {
+                        name: format!("ideal_{}_{}", ref_ind.name, ind.name),
+                        pri_node_p: ref_internal_p,
+                        pri_node_n: ref_neg,
+                        sec_node_p: internal_nodes_p[i],
+                        sec_node_n: ind.node_j,
+                        turns_ratio: n_turns,
+                    });
+                }
+
+                log::info!(
+                    "Ideal transformer decomposition: {} windings, L_ref={:.3}H, {} couplings, {} internal nodes",
+                    members.len(), l_ref, members.len() - 1, w
+                );
+
+                // Don't add to coupled_inductors or transformer_groups — replaced by ideal model.
+                continue;
             }
 
             if members.len() == 2 {
@@ -1122,6 +1334,23 @@ impl MnaBuilder {
         // Remove coupled inductors from the uncoupled inductors list
         self.inductors.retain(|ind| !coupled_inductor_names.contains(&ind.name.to_ascii_lowercase()));
 
+        // Expand MNA matrices if ideal transformer decomposition added internal nodes
+        let num_internal = next_internal_node - (n + 1);
+        if num_internal > 0 {
+            let new_n = n + num_internal;
+            for row in &mut mna.g { row.resize(new_n, 0.0); }
+            for row in &mut mna.c { row.resize(new_n, 0.0); }
+            for _ in 0..num_internal {
+                mna.g.push(vec![0.0; new_n]);
+                mna.c.push(vec![0.0; new_n]);
+            }
+            for row in &mut mna.n_v { row.resize(new_n, 0.0); }
+            for _ in 0..num_internal {
+                mna.n_i.push(vec![0.0; mna.m]);
+            }
+            mna.n = new_n;
+        }
+
         mna.node_map = self.node_map;
         mna.nonlinear_devices = self.nonlinear_devices;
         mna.voltage_sources = self.voltage_sources;
@@ -1129,7 +1358,123 @@ impl MnaBuilder {
         mna.inductors = self.inductors;
         mna.opamps = self.opamps;
 
-        // Stamp linear elements
+        // -----------------------------------------------------------------
+        // Expand matrices for augmented MNA (voltage sources + VCVS).
+        //
+        // Count VCVS elements in element order.
+        // Use mna.n (which may have grown due to internal nodes from ideal transformers).
+        let n_base = mna.n;
+        let num_vs = mna.voltage_sources.len();
+        let num_vcvs = self.elements.iter()
+            .filter(|e| matches!(e.element_type, ElementType::Vcvs))
+            .count();
+        let num_ideal_xfmr = mna.ideal_transformers.len();
+        let n_aug = n_base + num_vs + num_vcvs + num_ideal_xfmr;
+        mna.n_aug = n_aug;
+
+        // Expand G, C, N_v, N_i to n_aug dimensions (extra rows/cols are zero).
+        if n_aug > n_base {
+            // Expand each existing row by appending zeros
+            for row in &mut mna.g {
+                row.resize(n_aug, 0.0);
+            }
+            for row in &mut mna.c {
+                row.resize(n_aug, 0.0);
+            }
+            for row in &mut mna.n_v {
+                row.resize(n_aug, 0.0);
+            }
+            // Add new zero rows for the augmented variables
+            for _ in n_base..n_aug {
+                mna.g.push(vec![0.0; n_aug]);
+                mna.c.push(vec![0.0; n_aug]);
+            }
+            // Expand N_i rows by appending zeros (column count stays m)
+            for row in &mut mna.n_i {
+                // N_i is n×m; we add n_aug-n more zero rows
+                let _ = row; // row width is m, not n — no resize needed
+            }
+            // Add zero rows for augmented variables in N_i
+            for _ in n_base..n_aug {
+                mna.n_i.push(vec![0.0; mna.m]);
+            }
+        }
+
+        // Stamp voltage sources with augmented MNA.
+        // For VS between n+ and n- with current j_vs (extra unknown at row/col k):
+        //   KVL constraint row k: G[k][n+] = +1, G[k][n-] = -1
+        //   Current injection col k: G[n+][k] = +1, G[n-][k] = -1
+        for vs in &mna.voltage_sources {
+            let k = n_base + vs.ext_idx; // augmented row/col index
+            let np = vs.n_plus_idx;
+            let nm = vs.n_minus_idx;
+            // Current injection column: j_vs enters n+, exits n-
+            if np > 0 { mna.g[np - 1][k] += 1.0; mna.g[k][np - 1] += 1.0; }
+            if nm > 0 { mna.g[nm - 1][k] -= 1.0; mna.g[k][nm - 1] -= 1.0; }
+        }
+
+        // Stamp VCVS elements with augmented MNA.
+        // For VCVS: V_out+ - V_out- = gain*(V_ctrl+ - V_ctrl-)
+        //   Extra unknown j_vcvs at row/col k = n + num_vs + vcvs_idx
+        //   Current injection column k: enters out+, exits out-
+        //   KVL constraint row k: G[k][out+]=+1, G[k][out-]=-1,
+        //                          G[k][ctrl+]=-gain, G[k][ctrl-]=+gain
+        let mut vcvs_idx = 0;
+        for elem in &self.elements {
+            if let ElementType::Vcvs = elem.element_type {
+                if elem.nodes.len() >= 4 {
+                    let k = n_base + num_vs + vcvs_idx;
+                    let out_p = elem.nodes[0];
+                    let out_n = elem.nodes[1];
+                    let ctrl_p = elem.nodes[2];
+                    let ctrl_n = elem.nodes[3];
+                    let gain = elem.value;
+
+                    // Current injection column: j_vcvs enters out+, exits out-
+                    if out_p > 0 { mna.g[out_p - 1][k] += 1.0; }
+                    if out_n > 0 { mna.g[out_n - 1][k] -= 1.0; }
+                    // KVL constraint row: V_out+ - V_out- - gain*(V_ctrl+ - V_ctrl-) = 0
+                    if out_p > 0 { mna.g[k][out_p - 1] += 1.0; }
+                    if out_n > 0 { mna.g[k][out_n - 1] -= 1.0; }
+                    if ctrl_p > 0 { mna.g[k][ctrl_p - 1] -= gain; }
+                    if ctrl_n > 0 { mna.g[k][ctrl_n - 1] += gain; }
+
+                    mna.vcvs_sources.push(VcvsAugInfo { aug_idx: vcvs_idx });
+                    vcvs_idx += 1;
+                }
+            }
+        }
+
+        // Stamp ideal transformer couplings with augmented MNA.
+        // For ideal transformer with turns ratio n:
+        //   V_sec = n * V_pri  (voltage coupling)
+        //   I_pri = n * I_sec  (current coupling, power conservation)
+        //
+        // Extra unknown j (secondary current) at row/col k = n + num_vs + num_vcvs + xfmr_idx.
+        // KVL row k: G[k][sec+]=+1, G[k][sec-]=-1, G[k][pri+]=-n, G[k][pri-]=+n
+        // Current col k: G[sec+][k]=+1, G[sec-][k]=-1, G[pri+][k]=+n, G[pri-][k]=-n
+        for (xi, xfmr) in mna.ideal_transformers.iter().enumerate() {
+            let k = n_base + num_vs + num_vcvs + xi;
+            let sp = xfmr.sec_node_p;
+            let sn = xfmr.sec_node_n;
+            let pp = xfmr.pri_node_p;
+            let pn = xfmr.pri_node_n;
+            let nr = xfmr.turns_ratio;
+
+            // KVL constraint row: V(sec+) - V(sec-) - n*(V(pri+) - V(pri-)) = 0
+            if sp > 0 { mna.g[k][sp - 1] += 1.0; }
+            if sn > 0 { mna.g[k][sn - 1] -= 1.0; }
+            if pp > 0 { mna.g[k][pp - 1] -= nr; }
+            if pn > 0 { mna.g[k][pn - 1] += nr; }
+
+            // Current injection column: j enters sec+, exits sec-; n*j enters pri+, exits pri-
+            if sp > 0 { mna.g[sp - 1][k] += 1.0; }
+            if sn > 0 { mna.g[sn - 1][k] -= 1.0; }
+            if pp > 0 { mna.g[pp - 1][k] += nr; }
+            if pn > 0 { mna.g[pn - 1][k] -= nr; }
+        }
+
+        // Stamp linear elements (resistors, capacitors, VCCS; skip VS/VCVS now handled above)
         for elem in &self.elements {
             match elem.element_type {
                 ElementType::Resistor => {
@@ -1148,29 +1493,10 @@ impl MnaBuilder {
                     // Stamping happens at kernel creation since we need sample rate.
                 }
                 ElementType::VoltageSource => {
-                    // Norton equivalent: stamp large conductance between nodes.
-                    // The current contribution is handled in build_rhs_const.
-                    if elem.nodes.len() >= 2 {
-                        stamp_conductance_to_ground(&mut mna.g, elem.nodes[0], elem.nodes[1], VS_CONDUCTANCE);
-                    }
+                    // Handled above with augmented MNA stamping (not Norton equivalent).
                 }
                 ElementType::Vcvs => {
-                    // Norton equivalent of VCVS: output conductance + controlled VCCS
-                    // G_out = VS_CONDUCTANCE, Gm = gain * G_out
-                    if elem.nodes.len() >= 4 {
-                        let out_p = elem.nodes[0];
-                        let out_n = elem.nodes[1];
-                        let ctrl_p = elem.nodes[2];
-                        let ctrl_n = elem.nodes[3];
-                        let g_out = VS_CONDUCTANCE;
-                        let gm = elem.value * g_out;
-
-                        // Stamp output conductance between out+ and out-
-                        stamp_conductance_to_ground(&mut mna.g, out_p, out_n, g_out);
-
-                        // Stamp VCCS: Gm from control to output
-                        stamp_vccs(&mut mna.g, out_p, out_n, ctrl_p, ctrl_n, gm);
-                    }
+                    // Handled above with augmented MNA stamping (not Norton equivalent).
                 }
                 ElementType::Vccs => {
                     // Direct VCCS stamp into G matrix
@@ -1270,18 +1596,27 @@ impl MnaBuilder {
                     }
                 }
                 NonlinearDeviceType::Jfet => {
-                    // JFET: 2D — Id (drain current) + Ig (gate current)
+                    // JFET: 2D — dim 0: (Vds, Id), dim 1: (Vgs, Ig)
+                    //
+                    // Dimension pairing for stable K diagonal (K[i][i] < 0):
+                    //   dim 0: N_v row extracts Vds, N_i col injects Id (drain current drives
+                    //          drain-source voltage → K[0][0] = dVds/dId < 0 always)
+                    //   dim 1: N_v row extracts Vgs, N_i col injects Ig (gate current drives
+                    //          gate-source voltage → K[1][1] = dVgs/dIg < 0 always)
+                    //
+                    // This ordering ensures K[i][i] < 0 even when source is VS-pinned,
+                    // because drain always has a finite load (never VS-pinned in typical circuits).
                     // Nodes: [nd, ng, ns]
                     if node_indices.len() >= 3 {
                         let d_raw = node_indices[0];
                         let g_raw = node_indices[1];
                         let s_raw = node_indices[2];
 
-                        // N_v row 0 (Vgs): +1 at G, -1 at S
-                        if g_raw > 0 { mna.n_v[start_idx][g_raw - 1] = 1.0; }
+                        // N_v row 0 (Vds): +1 at D, -1 at S
+                        if d_raw > 0 { mna.n_v[start_idx][d_raw - 1] = 1.0; }
                         if s_raw > 0 { mna.n_v[start_idx][s_raw - 1] = -1.0; }
-                        // N_v row 1 (Vds): +1 at D, -1 at S
-                        if d_raw > 0 { mna.n_v[start_idx + 1][d_raw - 1] = 1.0; }
+                        // N_v row 1 (Vgs): +1 at G, -1 at S
+                        if g_raw > 0 { mna.n_v[start_idx + 1][g_raw - 1] = 1.0; }
                         if s_raw > 0 { mna.n_v[start_idx + 1][s_raw - 1] = -1.0; }
 
                         // N_i col 0 (Id): -1 at D (extracted), +1 at S (injected)
@@ -1293,18 +1628,26 @@ impl MnaBuilder {
                     }
                 }
                 NonlinearDeviceType::Mosfet => {
-                    // MOSFET: 2D — Id (drain current) + Ig (gate current = 0, insulated gate)
+                    // MOSFET: 2D — dim 0: (Vds, Id), dim 1: (Vgs, Ig=0)
+                    //
+                    // Dimension pairing for stable K diagonal (K[i][i] < 0):
+                    //   dim 0: N_v row extracts Vds, N_i col injects Id (drain current drives
+                    //          drain-source voltage → K[0][0] = dVds/dId < 0 always, even when
+                    //          source is VS-pinned, because drain always has a finite load resistor)
+                    //   dim 1: N_v row extracts Vgs, N_i col injects Ig (gate current drives
+                    //          gate-source voltage → K[1][1] = dVgs/dIg < 0 always because
+                    //          gate always has at least a parasitic capacitor)
                     // Nodes: [nd, ng, ns, nb]
                     if node_indices.len() >= 3 {
                         let d_raw = node_indices[0];
                         let g_raw = node_indices[1];
                         let s_raw = node_indices[2];
 
-                        // N_v row 0 (Vgs): +1 at G, -1 at S
-                        if g_raw > 0 { mna.n_v[start_idx][g_raw - 1] = 1.0; }
+                        // N_v row 0 (Vds): +1 at D, -1 at S
+                        if d_raw > 0 { mna.n_v[start_idx][d_raw - 1] = 1.0; }
                         if s_raw > 0 { mna.n_v[start_idx][s_raw - 1] = -1.0; }
-                        // N_v row 1 (Vds): +1 at D, -1 at S
-                        if d_raw > 0 { mna.n_v[start_idx + 1][d_raw - 1] = 1.0; }
+                        // N_v row 1 (Vgs): +1 at G, -1 at S
+                        if g_raw > 0 { mna.n_v[start_idx + 1][g_raw - 1] = 1.0; }
                         if s_raw > 0 { mna.n_v[start_idx + 1][s_raw - 1] = -1.0; }
 
                         // N_i col 0 (Id): -1 at D (extracted), +1 at S (injected)
@@ -1425,7 +1768,8 @@ impl MnaBuilder {
                 });
             }
             Element::VoltageSource { name, n_plus, n_minus, dc, .. } => {
-                // Add as an element so it gets stamped (Norton equivalent conductance)
+                // Record element for augmented MNA stamping (done after matrix expansion).
+                // Do NOT add Norton equivalent conductance here.
                 self.elements.push(ElementInfo {
                     element_type: ElementType::VoltageSource,
                     nodes: vec![
@@ -1436,7 +1780,8 @@ impl MnaBuilder {
                     name: name.clone(),
                     dc_value: *dc,
                 });
-                let start_idx = self.next_node_idx - 1 + self.voltage_sources.len();
+                // ext_idx = 0-based index within voltage sources (used as offset in augmented rows)
+                let ext_idx = self.voltage_sources.len();
                 self.voltage_sources.push(VoltageSourceInfo {
                     name: name.clone(),
                     n_plus: n_plus.clone(),
@@ -1444,7 +1789,7 @@ impl MnaBuilder {
                     n_plus_idx: self.node_map[n_plus],
                     n_minus_idx: self.node_map[n_minus],
                     dc_value: dc.unwrap_or(0.0),
-                    ext_idx: start_idx,
+                    ext_idx,
                 });
             }
             Element::CurrentSource { name, n_plus, n_minus, dc } => {
@@ -1877,6 +2222,7 @@ G1 out_p out_n ctrl 0 0.01
     #[test]
     fn test_mna_vcvs_basic() {
         // E1 out 0 in 0 10 — voltage gain of 10
+        // With augmented MNA, VCVS adds an extra row/col at index n + num_vs + 0.
         let spice = r#"VCVS Test
 R1 in 0 1k
 R2 out 0 1k
@@ -1888,28 +2234,39 @@ E1 out 0 in 0 10
         assert_eq!(mna.m, 0); // VCVS is linear
         assert_eq!(mna.num_devices, 0);
 
+        let n = mna.n;
+        // n_aug = n + 0 VS + 1 VCVS = n + 1
+        assert_eq!(mna.n_aug, n + 1);
+        assert_eq!(mna.g.len(), n + 1, "G should be n_aug × n_aug");
+
         let in_idx = *mna.node_map.get("in").unwrap();
         let out_idx = *mna.node_map.get("out").unwrap();
-
         let o = out_idx - 1;
         let i = in_idx - 1;
+        let k = n; // augmented row for VCVS (no voltage sources, so k = n + 0 + 0)
 
-        // VCVS stamps: G_out at output (VS_CONDUCTANCE = 1e6)
-        // G[out, out] should have VS_CONDUCTANCE + 1/R2
+        // G[out][k] should be +1 (current injection column: j_vcvs enters out+)
+        assert!((mna.g[o][k] - 1.0).abs() < 1e-15,
+            "G[out][k] should be +1 for VCVS current injection, got {}", mna.g[o][k]);
+
+        // G[k][out] should be +1 (KVL row: V_out+)
+        assert!((mna.g[k][o] - 1.0).abs() < 1e-15,
+            "G[k][out] should be +1 for KVL constraint, got {}", mna.g[k][o]);
+
+        // G[k][in] should be -gain = -10 (KVL row: -gain * V_ctrl+)
+        assert!((mna.g[k][i] - (-10.0)).abs() < 1e-15,
+            "G[k][in] should be -gain=-10 for KVL constraint, got {}", mna.g[k][i]);
+
+        // G[out][out] should only have 1/R2 (no VS_CONDUCTANCE in augmented MNA)
         let g_r2 = 1.0 / 1000.0;
-        let expected = VS_CONDUCTANCE + g_r2;
-        assert!((mna.g[o][o] - expected).abs() / expected < 1e-10,
-            "G[out,out] should include VS_CONDUCTANCE, got {}", mna.g[o][o]);
-
-        // G[out, in] should have gain * VS_CONDUCTANCE = 10 * 1e6 = 1e7
-        let gm = 10.0 * VS_CONDUCTANCE;
-        assert!((mna.g[o][i] - gm).abs() / gm < 1e-10,
-            "G[out,in] should be gain*VS_CONDUCTANCE={}, got {}", gm, mna.g[o][i]);
+        assert!((mna.g[o][o] - g_r2).abs() < 1e-10,
+            "G[out][out] should only have 1/R2={}, got {} (augmented MNA: no Norton equiv)", g_r2, mna.g[o][o]);
     }
 
     #[test]
     fn test_mna_vcvs_differential_output() {
         // E1 out_p out_n in 0 5 — VCVS with non-ground output negative
+        // With augmented MNA, VCVS adds an extra row/col (no VS in this circuit).
         let spice = r#"VCVS Diff Output
 R1 out_p 0 1k
 R2 out_n 0 1k
@@ -1918,29 +2275,35 @@ E1 out_p out_n in 0 5
         let netlist = Netlist::parse(spice).unwrap();
         let mna = MnaSystem::from_netlist(&netlist).unwrap();
 
+        let n = mna.n;
+        assert_eq!(mna.n_aug, n + 1, "One VCVS adds 1 augmented dimension");
+
         let op = *mna.node_map.get("out_p").unwrap() - 1;
         let on = *mna.node_map.get("out_n").unwrap() - 1;
         let inp = *mna.node_map.get("in").unwrap() - 1;
+        let k = n; // augmented row for the VCVS
 
-        let g_out = VS_CONDUCTANCE;
-        let gm = 5.0 * g_out;
-
-        // Output conductance: stamp_conductance_to_ground stamps between out_p and out_n
-        // G[out_p, out_p] += G_out
-        // G[out_n, out_n] += G_out
-        // G[out_p, out_n] -= G_out
-        // G[out_n, out_p] -= G_out
+        // Current injection column: j_vcvs enters out+ (G[out_p][k] = +1), exits out- (G[out_n][k] = -1)
         let g_r = 1.0 / 1000.0;
-        assert!((mna.g[op][op] - (g_out + g_r)).abs() / g_out < 1e-10);
-        assert!((mna.g[on][on] - (g_out + g_r)).abs() / g_out < 1e-10);
-        assert!((mna.g[op][on] - (-g_out)).abs() / g_out < 1e-10);
-        assert!((mna.g[on][op] - (-g_out)).abs() / g_out < 1e-10);
+        // G[out_p][out_p] should only have 1/R1 (no Norton equivalent conductance)
+        assert!((mna.g[op][op] - g_r).abs() < 1e-10,
+            "G[op][op] should only be 1/R1 in augmented MNA, got {}", mna.g[op][op]);
+        assert!((mna.g[on][on] - g_r).abs() < 1e-10,
+            "G[on][on] should only be 1/R2 in augmented MNA, got {}", mna.g[on][on]);
 
-        // VCCS stamp: gm from ctrl to output
-        // G[out_p, in] += gm
-        assert!((mna.g[op][inp] - gm).abs() / gm < 1e-10);
-        // G[out_n, in] -= gm
-        assert!((mna.g[on][inp] - (-gm)).abs() / gm < 1e-10);
+        // Current injection: j_vcvs enters out+, exits out-
+        assert!((mna.g[op][k] - 1.0).abs() < 1e-15,
+            "G[out_p][k] should be +1 (current injection), got {}", mna.g[op][k]);
+        assert!((mna.g[on][k] - (-1.0)).abs() < 1e-15,
+            "G[out_n][k] should be -1 (current injection), got {}", mna.g[on][k]);
+
+        // KVL constraint row: G[k][out_p] = +1, G[k][out_n] = -1, G[k][in] = -gain = -5
+        assert!((mna.g[k][op] - 1.0).abs() < 1e-15,
+            "G[k][out_p] should be +1 (KVL), got {}", mna.g[k][op]);
+        assert!((mna.g[k][on] - (-1.0)).abs() < 1e-15,
+            "G[k][out_n] should be -1 (KVL), got {}", mna.g[k][on]);
+        assert!((mna.g[k][inp] - (-5.0)).abs() < 1e-15,
+            "G[k][in] should be -gain=-5 (KVL), got {}", mna.g[k][inp]);
     }
 
     #[test]

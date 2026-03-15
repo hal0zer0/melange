@@ -3,11 +3,10 @@
 * License: MIT OR Apache-2.0
 *
 * Passive bridge-T EQ network followed by full tube amplifier stage:
-*   12AX7 voltage amplifier → Triad HS-29 interstage transformer →
-*   12AU7 push-pull output → Peerless S-217-D output transformer
-*   with overall negative feedback via tertiary winding.
+*   HS-29 input coupling/phase splitter → 12AX7 (both sections, anti-phase) →
+*   .25µF direct coupling → 12AU7 push-pull output → S-217-D output transformer
 *
-* Topology derived from ABSounds/EQP-WDF-1A analysis of actual hardware.
+* Topology from Sowter schematic DWG E-72,658-2 (direct readings).
 * Pot values from original Pultec EQP-1A service manual.
 * Transformer specs from CineMag CM-S217D datasheet and Sowter 1475 data.
 * 12AU7 Koren parameters from Sylvania Technical Manual fit.
@@ -19,12 +18,19 @@
 *        │                   ├── C+L+Q ─────┘        │                   ├── C_hfc ───────────┘├── C_lfb ── gnd
 *        │(600Ω src)         │(bridge-T boost)       │                   │(HF cut shunt)
 *        │                                           ├── C_lfa ── h ──── R2 ── out_tap ── R3 ── mid
-*        │                                           ├── R_lfc ── h     (tube Cin couples from out_tap)
+*        │                                           ├── R_lfc ── h     (HS-29 primary couples from out_tap)
 *
-* Output stage:
-*   out_tap → Cin → 12AX7 grid → plate → Cint → HS-29 interstage xfmr →
-*   push-pull 12AU7 grids → plates → S-217-D output xfmr → out
-*   S-217-D tertiary → feedback to 12AX7 cathode (overall NFB)
+* Amplifier stage:
+*   out_tap → HS-29 primary (input coupling/phase splitter) →
+*   HS-29 CT secondary pin 5 → .00027 → grid1, 43K cross-coupling → grid2
+*   HS-29 pin 8 = feedback node (bottom of 820Ω cathode resistor)
+*   plate1/plate2 → .25µF → 12AU7 push-pull grids → plates →
+*   360Ω stoppers → S-217-D output xfmr → out
+*
+* Feedback: S-217-D tertiary (pins 3-5, 1000Ω shunt) →
+*   pin 3 → 360Ω → cathode (top of 820Ω)
+*   pin 5 → 360Ω → fb_node (bottom of 820Ω = HS-29 pin 8)
+*   Series-voltage NFB across cathode resistor → 0dB overall gain
 *
 * Controls (8 total — but 7 pots due to 3-terminal pot modeling):
 *   3 switches: HF Boost Freq (7-pos), LF Freq (4-pos), HF Cut Freq (3-pos)
@@ -42,7 +48,7 @@
 *   LF caps: ABSounds (LoFreqC2 values, LoFreqC1 = LoFreqC2/30)
 *   HF cut caps: ABSounds (270n/135n/68n for 5k/10k/20kHz)
 *   HS-29: Sowter 1475 replacement data (130H primary, 1:1+1 CT)
-*   S-217-D: CineMag CM-S217D datasheet (38.1H@1kHz, 4.474:1, tertiary 22.2:1)
+*   S-217-D: CineMag CM-S217D datasheet (38.1H@1kHz, 4.474:1)
 *   12AU7: Koren fit to Sylvania Technical Manual curves
 
 .model 12AX7 TRIODE(MU=100 EX=1.4 KG1=1060 KP=600 KVB=300)
@@ -54,13 +60,13 @@
 * Real Pultec: 6X4 rectifier → +345V raw → 1000Ω/1W → +325V → filter caps.
 * We model from +290V (measured at main filtered B+ node on schematic).
 * Supply chain: +290V → 2200Ω/1W → Node G → 47kΩ → +250V (bias-only rail).
-* Node G feeds 12AX7 plate (through Ra) and PCC-55 passive EQ board.
-* +250V rail only supplies 12AU7 grid bias network (low current).
+* Node G feeds PCC-55 passive EQ board.
+* +250V rail supplies 12AX7 plate loads and 12AU7 grid bias network.
 * Voltage annotations (11MΩ meter, no signal): +290V, +250V, +140V plate,
 * +40V 12AU7 cathode, +31V grid bias, +1.3V 12AX7 cathode.
 VCC vcc 0 DC 290
 
-* B+ filter: +290V → 2200Ω → Node G (12AX7 supply) → 47kΩ → +250V (bias)
+* B+ filter: +290V → 2200Ω → Node G (EQ board supply) → 47kΩ → +250V (bias)
 R_drop vcc node_g 2200
 C_filt node_g 0 40u
 R_bias_filt node_g v250 47k
@@ -92,77 +98,73 @@ R3 out_tap mid 10k
 R_lfb mid 0 10k
 C_lfb mid 0 2.2u
 
-* === FIRST STAGE: 12AX7 VOLTAGE AMPLIFIER ===
-* Coupling cap from EQ output tap to tube grid.
-* 270pF per Sowter schematic (.00027); deliberate mid/HF coupling (f_c≈590Hz with 1M grid leak).
-Cin out_tap grid 270p
-
-* Grid leak resistor
-Rg grid 0 1Meg
-
-* 12AX7 triode
-T1 grid plate cathode 12AX7
-
-* Plate load resistor (connected to Node G, filtered B+ for 12AX7)
-* TODO: Ra value not confirmed from schematic (100k not visible, 200k nearby
-* but those are 12AU7 bias resistors). 100k gives correct voltages with
-* Node G ≈ 287V: Ip=1.47mA, Vp=140V, Vk=1.21V ≈ schematic +1.3V.
-Ra node_g plate 100k
-
-* Cathode bias with partial bypass (HF-only, Ck=250nF, f_c≈770Hz with Rk=820Ω).
-* Rk and Ck connect to feedback node (fb), not ground.
-* The S-217-D tertiary winding provides DC return path to ground
-* while injecting overall negative feedback at AC.
-Rk cathode fb 820
-Ck cathode fb 250n
-
-* === INTERSTAGE: TRIAD HS-29 TRANSFORMER ===
-* Phase splitter: single-ended 12AX7 plate → push-pull drive for 12AU7 pair.
+* === INPUT COUPLING: TRIAD HS-29 TRANSFORMER ===
+* Phase splitter: passive EQ output → center-tapped secondary drives
+* both 12AX7 grids in anti-phase for push-pull drive.
 * 1:1+1 center-tapped secondary (each half = primary turns).
 * Confirmed specs: L_pri=130H, impedance 5k:20k, freq 20Hz-20kHz.
-* Coupling cap blocks DC from first stage plate.
-* 20nF (20000pF) confirmed from Sowter schematic — NOT 250nF.
-Cint plate pri_int 20n
+*
+* Primary: EQ output drives transformer, winding to ground for DC return.
+L_int_pri out_tap 0 130
 
-* Primary: pri_int to ground (DC return through winding)
-L_int_pri pri_int 0 130
-
-* Secondary halves: center-tapped for anti-phase push-pull drive.
-* Node order sets polarity: sec2a in phase with primary, sec2b anti-phase.
-* Secondary outputs go through 200kΩ + .25µF coupling to 12AU7 grids.
-L_int_a sec2a int_ct 130
-L_int_b int_ct sec2b 130
+* Secondary halves: center-tapped.
+* Pin 5 (L_int_a) → .00027 → grid1 (forward signal path).
+* Pin 8 (L_int_b) → fb_node (feedback injection point = bottom of 820Ω).
+* Grid2 gets signal only through 43K cross-coupling from grid1.
+L_int_a grid1 hs29_ct 130
+L_int_b hs29_ct fb_node 130
 
 * Coupling between primary and each secondary half, plus inter-secondary.
-* All windings on same core — k_ab must be specified for NxN matrix to be positive definite.
+* All windings on same core — k_ab specified for NxN matrix positive definite.
 K_inta L_int_pri L_int_a 0.99
 K_intb L_int_pri L_int_b 0.99
 K_intab L_int_a L_int_b 0.98
 
-* 12AU7 grid bias network — from Sowter schematic.
-* +250V → 470kΩ → +31V bias node (= HS-29 center tap) → 62kΩ → ground.
-* Voltage divider: 250 × 62k/(470k+62k) = 29.1V ≈ +31V measured.
-R_bias_hi v250 int_ct 470k
-R_bias_lo int_ct 0 62k
+* Center tap grounded for DC return (provides grid bias reference)
+R_ct hs29_ct 0 100
 
-* AC coupling: HS-29 secondary → 200kΩ/1W (DC feed from +250V) → .25µF → grid.
-* The 200kΩ provides DC from +250V to the HS-29 secondary terminals.
-* The .25µF caps AC-couple the signal to the 12AU7 grids.
-* f_c = 1/(2π × 200k × 0.25µ) = 3.2 Hz — passes all audio.
-R_dc2a v250 sec2a 200k
-R_dc2b v250 sec2b 200k
-C_coup2a sec2a grid2a 250n
-C_coup2b sec2b grid2b 250n
+* === 12AX7 DUAL TRIODE (both sections, anti-phase) ===
+* HS-29 CT secondary drives grids. 43K + .00027 cross-coupling network
+* between grids (from schematic: HS-29 pin 5 → .00027 → 43K → pin 9).
+C_gg grid1 mid_gg 270p
+R_gg mid_gg grid2 43k
+
+* 12AX7 section 1 (pins 1,2,3)
+T1a grid1 plate1 cathode 12AX7
+* 12AX7 section 2 (pins 6,7,8)
+T1b grid2 plate2 cathode 12AX7
+
+* Plate load resistors (200K/1W from +250V, confirmed from schematic).
+* Both plates at ~+140V with Ip ≈ 0.55mA per section.
+Ra1 v250 plate1 200k
+Ra2 v250 plate2 200k
+
+* Shared cathode bias (820Ω, unbypassed).
+* Both cathodes tied together. 820Ω connects cathode to fb_node
+* (NOT ground). DC path: cathode → 820Ω → fb_node → HS-29 winding → CT → 100Ω → GND.
+* S-217-D feedback winding drives voltage across 820Ω for series NFB.
+* No cathode bypass cap on schematic — NFB requires full signal across 820Ω.
+Rk cathode fb_node 820
+
+* === INTERSTAGE COUPLING: 12AX7 plates → 12AU7 grids ===
+* .25µF caps provide direct AC coupling from 12AX7 plates to 12AU7 grids.
+* f_c = 1/(2π × 1MΩ × 0.25µF) = 0.64 Hz — passes all audio.
+C_coup2a plate1 grid2a 250n
+C_coup2b plate2 grid2b 250n
+
+* 12AU7 grid bias network — from Sowter schematic.
+* +250V → 470kΩ → +31V bias node → 62kΩ → ground.
+* Voltage divider: 250 × 62k/(470k+62k) = 29.1V ≈ +31V measured.
+R_bias_hi v250 bias_31v 470k
+R_bias_lo bias_31v 0 62k
 
 * Grid return resistors (1MΩ each to +31V bias node).
 * Sets grid DC at +31V; with cathode at +40V → Vgk ≈ -9V.
-* TODO: verify 1MΩ goes to int_ct (+31V) vs ground — if to ground,
-* Vgk = -40V (too much cutoff), so +31V is the only option that works.
-Rg2a grid2a int_ct 1Meg
-Rg2b grid2b int_ct 1Meg
+Rg2a grid2a bias_31v 1Meg
+Rg2b grid2b bias_31v 1Meg
 
 * === PUSH-PULL OUTPUT STAGE: 12AU7 (ECC82) ===
-* Two triode sections driven in anti-phase by HS-29 secondary.
+* Two triode sections driven in anti-phase by 12AX7 plates.
 * Shared cathode resistor cancels even harmonics in push-pull.
 T2a grid2a plate2a cath2 12AU7
 T2b grid2b plate2b cath2 12AU7
@@ -178,9 +180,9 @@ R_stop2a plate2a opt_a 360
 R_stop2b plate2b opt_b 360
 
 * === OUTPUT TRANSFORMER: PEERLESS S-217-D ===
-* Push-pull center-tapped primary, balanced secondary, tertiary feedback.
+* Push-pull center-tapped primary, balanced secondary.
 * Confirmed specs (CineMag CM-S217D reproduction):
-*   Turns: 1575 (pri) : 352 (sec) : 71 (tert) per coil
+*   Turns: 1575 (pri) : 352 (sec) per coil
 *   Turns ratio: 4.474:1 (primary:secondary)
 *   Impedance: 12,000:600 ohm
 *   L_pri = 38.1H at 1kHz (CineMag measurement)
@@ -188,7 +190,6 @@ R_stop2b plate2b opt_b 360
 *
 * Push-pull primary halves: L_each = L_total/4 = 9.525H
 * Secondary: L = L_pri_half / N_half² = 9.525 / 2.237² = 1.903H
-* Tertiary: L = L_pri_half / (N_pri_half/N_tert)² = 9.525 / 11.1² = 0.077H
 *
 * B+ connects to center tap of primary (serves as plate load for 12AU7s).
 
@@ -210,16 +211,23 @@ K_opta L_opt_a L_opt_sec 0.95
 K_optb L_opt_b L_opt_sec 0.95
 K_optab L_opt_a L_opt_b 0.95
 
-* Tertiary feedback winding — modeled as VCVS + magnetizing inductance.
-* The trapezoidal companion model's mutual conductance (T/2L) vanishes at
-* practical sample rates, making coupled-inductor feedback inoperative.
-* VCVS provides instantaneous coupling at the correct turns ratio.
-* Shunt L_fb_mag models the magnetizing inductance rolloff (~6.7kHz with
-* Rk=820Ω), which reduces NFB at HF — part of the Pultec's character.
+* === FEEDBACK WINDING: S-217-D TERTIARY (pins 3-5) ===
+* Series-voltage negative feedback from output back to 12AX7 cathode.
+* Tertiary winding coupled to primary, with 1000Ω shunt damping.
+* Pin 3 → 360Ω → cathode (top of 820Ω).
+* Pin 5 → 360Ω → fb_node (bottom of 820Ω = HS-29 pin 8).
+* Feedback voltage appears across 820Ω, reducing gain to ~0dB overall.
+* +1.1V measured at pin 5 (close to cathode +1.3V, confirming DC connection).
 *
-* Turns ratio: N_tert/N_sec = 71/352 = 0.2017
-* L_mag_tert = L_mag_pri × (N_tert/N_pri)² = 9.525 × (71/1575)² = 19.4mH
-E_fb fb 0 out 0 0.2017
+* Tertiary inductance: estimated from turns ratio. If tertiary is ~1/4 of primary
+* turns (feedback tap), L_tert ≈ L_pri/16 ≈ 2.4H. Using conservative estimate.
+L_fb_a fb_s5 fb_s3 2.4
+R_fb_shunt fb_s3 fb_s5 1000
+R_fb_a fb_s3 cathode 360
+R_fb_b fb_s5 fb_node 360
+* Coupling: tertiary to each primary half
+K_fba L_opt_a L_fb_a 0.95
+K_fbb L_opt_b L_fb_a 0.95
 
 * Output load (high-impedance bridging, typical of modern equipment)
 Rload out 0 100k

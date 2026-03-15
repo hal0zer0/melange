@@ -413,19 +413,21 @@ impl Emitter for RustEmitter {
 
     fn emit(&self, ir: &CircuitIR) -> Result<String, CodegenError> {
         let n = ir.topology.n;
+        // n_nodes: original circuit node count. Fallback to n for backward compat (n_nodes=0 in old data).
+        let n_nodes = if ir.topology.n_nodes > 0 { ir.topology.n_nodes } else { n };
 
-        // Validate node indices
-        if ir.solver_config.input_node >= n {
+        // Validate node indices against original circuit nodes (not augmented dimension)
+        if ir.solver_config.input_node >= n_nodes {
             return Err(CodegenError::InvalidConfig(format!(
-                "input_node {} >= N={}",
-                ir.solver_config.input_node, n
+                "input_node {} >= n_nodes={}",
+                ir.solver_config.input_node, n_nodes
             )));
         }
         for (i, &node) in ir.solver_config.output_nodes.iter().enumerate() {
-            if node >= n {
+            if node >= n_nodes {
                 return Err(CodegenError::InvalidConfig(format!(
-                    "output_nodes[{}] = {} >= N={}",
-                    i, node, n
+                    "output_nodes[{}] = {} >= n_nodes={}",
+                    i, node, n_nodes
                 )));
             }
         }
@@ -481,6 +483,12 @@ impl RustEmitter {
 
         ctx.insert("n", &n);
         ctx.insert("m", &m);
+        // n_nodes: original circuit node count (before augmented VS/VCVS variables).
+        // Used to zero out augmented rows in A_neg during rebuild_matrices.
+        let n_nodes = if ir.topology.n_nodes > 0 { ir.topology.n_nodes } else { n };
+        ctx.insert("n_nodes", &n_nodes);
+        let has_augmented = n_nodes < n;
+        ctx.insert("has_augmented", &has_augmented);
 
         let num_inductors = ir.inductors.len();
         ctx.insert("num_inductors", &num_inductors);
@@ -864,7 +872,9 @@ impl RustEmitter {
 
     /// Generate switch setter methods and rebuild_matrices() procedurally.
     fn emit_switch_methods(&self, ir: &CircuitIR) -> String {
+        let n = ir.topology.n;
         let m = ir.topology.m;
+        let n_nodes = if ir.topology.n_nodes > 0 { ir.topology.n_nodes } else { n };
         let num_pots = ir.pots.len();
         let num_inductors = ir.inductors.len();
         let os_factor = ir.solver_config.oversampling_factor;
@@ -972,6 +982,18 @@ impl RustEmitter {
              \x20           }\n\
              \x20       }\n",
         );
+
+        // Zero augmented rows in A_neg (algebraic constraints for VS/VCVS)
+        if n_nodes < n {
+            code.push_str(&format!(
+                "        // Zero augmented rows (VS/VCVS algebraic constraints)\n\
+                 \x20       for i in {n_nodes}..N {{\n\
+                 \x20           for j in 0..N {{\n\
+                 \x20               a_neg[i][j] = 0.0;\n\
+                 \x20           }}\n\
+                 \x20       }}\n"
+            ));
+        }
 
         // Inductor companion stamps (with switch-aware inductance)
         if num_inductors > 0 {
@@ -2159,23 +2181,27 @@ fn emit_nr_limit_and_converge(
                     ));
                 }
                 (DeviceType::Jfet, 0) => {
+                    // dim 0 = Vds — generous limiting
+                    code.push_str(&format!(
+                        "{indent}    let v_lim = fetlim(v_d{i} + dv{i}, v_d{i}, 0.0);\n"
+                    ));
+                }
+                (DeviceType::Jfet, _) => {
+                    // dim 1 = Vgs — limit around pinch-off voltage
                     code.push_str(&format!(
                         "{indent}    let v_lim = fetlim(v_d{i} + dv{i}, v_d{i}, state.device_{dev_num}_vp);\n"
                     ));
                 }
-                (DeviceType::Jfet, _) => {
+                (DeviceType::Mosfet, 0) => {
+                    // dim 0 = Vds — generous limiting
                     code.push_str(&format!(
                         "{indent}    let v_lim = fetlim(v_d{i} + dv{i}, v_d{i}, 0.0);\n"
-                    ));
-                }
-                (DeviceType::Mosfet, 0) => {
-                    code.push_str(&format!(
-                        "{indent}    let v_lim = fetlim(v_d{i} + dv{i}, v_d{i}, state.device_{dev_num}_vt);\n"
                     ));
                 }
                 (DeviceType::Mosfet, _) => {
+                    // dim 1 = Vgs — limit around threshold voltage
                     code.push_str(&format!(
-                        "{indent}    let v_lim = fetlim(v_d{i} + dv{i}, v_d{i}, 0.0);\n"
+                        "{indent}    let v_lim = fetlim(v_d{i} + dv{i}, v_d{i}, state.device_{dev_num}_vt);\n"
                     ));
                 }
                 (DeviceType::Tube, 0) => {
@@ -2349,54 +2375,70 @@ impl RustEmitter {
                         let s = slot.start_idx;
                         let s1 = s + 1;
                         let d = dev_num;
-                        // IDSS, VP, LAMBDA from state; SIGN stays as const
+                        // IDSS, VP, LAMBDA from state; SIGN stays as const.
+                        // N_v ordering: dim s = Vds, dim s+1 = Vgs.
+                        // Functions expect (vgs, vds), so pass (v_d{s1}, v_d{s}).
+                        // Jacobian jfet_jacobian(vgs,vds) returns [dId/dVgs, dId/dVds, dIg/dVgs, dIg/dVds].
+                        // In dim-space (dim0=Vds, dim1=Vgs):
+                        //   jdev_s_s   = dId/dVds = jac[1]
+                        //   jdev_s_s1  = dId/dVgs = jac[0]
+                        //   jdev_s1_s  = dIg/dVds = jac[3]
+                        //   jdev_s1_s1 = dIg/dVgs = jac[2]
                         code.push_str(&format!(
-                            "        let i_dev{s} = jfet_id(v_d{s}, v_d{s1}, state.device_{d}_idss, state.device_{d}_vp, state.device_{d}_lambda, DEVICE_{d}_SIGN);\n"
+                            "        let i_dev{s} = jfet_id(v_d{s1}, v_d{s}, state.device_{d}_idss, state.device_{d}_vp, state.device_{d}_lambda, DEVICE_{d}_SIGN);\n"
                         ));
                         code.push_str(&format!(
-                            "        let i_dev{s1} = jfet_ig(v_d{s}, DEVICE_{d}_SIGN);\n"
+                            "        let i_dev{s1} = jfet_ig(v_d{s1}, DEVICE_{d}_SIGN);\n"
                         ));
                         code.push_str(&format!(
-                            "        let jfet{d}_jac = jfet_jacobian(v_d{s}, v_d{s1}, state.device_{d}_idss, state.device_{d}_vp, state.device_{d}_lambda, DEVICE_{d}_SIGN);\n"
+                            "        let jfet{d}_jac = jfet_jacobian(v_d{s1}, v_d{s}, state.device_{d}_idss, state.device_{d}_vp, state.device_{d}_lambda, DEVICE_{d}_SIGN);\n"
                         ));
                         code.push_str(&format!(
-                            "        let jdev_{}_{} = jfet{}_jac[0];\n", s, s, d
+                            "        let jdev_{}_{} = jfet{}_jac[1];\n", s, s, d   // dId/dVds
                         ));
                         code.push_str(&format!(
-                            "        let jdev_{}_{} = jfet{}_jac[1];\n", s, s1, d
+                            "        let jdev_{}_{} = jfet{}_jac[0];\n", s, s1, d  // dId/dVgs
                         ));
                         code.push_str(&format!(
-                            "        let jdev_{}_{} = jfet{}_jac[2];\n", s1, s, d
+                            "        let jdev_{}_{} = jfet{}_jac[3];\n", s1, s, d  // dIg/dVds
                         ));
                         code.push_str(&format!(
-                            "        let jdev_{}_{} = jfet{}_jac[3];\n", s1, s1, d
+                            "        let jdev_{}_{} = jfet{}_jac[2];\n", s1, s1, d // dIg/dVgs
                         ));
                     }
                     DeviceType::Mosfet => {
                         let s = slot.start_idx;
                         let s1 = s + 1;
                         let d = dev_num;
-                        // KP, VT, LAMBDA from state; SIGN stays as const
+                        // KP, VT, LAMBDA from state; SIGN stays as const.
+                        // N_v ordering: dim s = Vds, dim s+1 = Vgs.
+                        // Functions expect (vgs, vds), so pass (v_d{s1}, v_d{s}).
+                        // Jacobian mosfet_jacobian(vgs,vds) returns [dId/dVgs, dId/dVds, 0, 0].
+                        // In dim-space (dim0=Vds, dim1=Vgs):
+                        //   jdev_s_s   = dId/dVds = jac[1]
+                        //   jdev_s_s1  = dId/dVgs = jac[0]
+                        //   jdev_s1_s  = dIg/dVds = jac[3] = 0
+                        //   jdev_s1_s1 = dIg/dVgs = jac[2] = 0
                         code.push_str(&format!(
-                            "        let i_dev{s} = mosfet_id(v_d{s}, v_d{s1}, state.device_{d}_kp, state.device_{d}_vt, state.device_{d}_lambda, DEVICE_{d}_SIGN);\n"
+                            "        let i_dev{s} = mosfet_id(v_d{s1}, v_d{s}, state.device_{d}_kp, state.device_{d}_vt, state.device_{d}_lambda, DEVICE_{d}_SIGN);\n"
                         ));
                         code.push_str(&format!(
-                            "        let i_dev{s1} = mosfet_ig(v_d{s}, DEVICE_{d}_SIGN);\n"
+                            "        let i_dev{s1} = mosfet_ig(v_d{s1}, DEVICE_{d}_SIGN);\n"
                         ));
                         code.push_str(&format!(
-                            "        let mos{d}_jac = mosfet_jacobian(v_d{s}, v_d{s1}, state.device_{d}_kp, state.device_{d}_vt, state.device_{d}_lambda, DEVICE_{d}_SIGN);\n"
+                            "        let mos{d}_jac = mosfet_jacobian(v_d{s1}, v_d{s}, state.device_{d}_kp, state.device_{d}_vt, state.device_{d}_lambda, DEVICE_{d}_SIGN);\n"
                         ));
                         code.push_str(&format!(
-                            "        let jdev_{}_{} = mos{}_jac[0];\n", s, s, d
+                            "        let jdev_{}_{} = mos{}_jac[1];\n", s, s, d    // dId/dVds
                         ));
                         code.push_str(&format!(
-                            "        let jdev_{}_{} = mos{}_jac[1];\n", s, s1, d
+                            "        let jdev_{}_{} = mos{}_jac[0];\n", s, s1, d   // dId/dVgs
                         ));
                         code.push_str(&format!(
-                            "        let jdev_{}_{} = mos{}_jac[2];\n", s1, s, d
+                            "        let jdev_{}_{} = mos{}_jac[3];\n", s1, s, d   // dIg/dVds = 0
                         ));
                         code.push_str(&format!(
-                            "        let jdev_{}_{} = mos{}_jac[3];\n", s1, s1, d
+                            "        let jdev_{}_{} = mos{}_jac[2];\n", s1, s1, d  // dIg/dVgs = 0
                         ));
                     }
                     DeviceType::Tube => {

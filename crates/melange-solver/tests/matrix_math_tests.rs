@@ -545,6 +545,7 @@ fn test_singular_matrix_error_path() {
     // (zero row/col in G and C), making A singular.
     let mna = MnaSystem {
         n: 2,
+        n_aug: 2, // no voltage sources or VCVS
         m: 0,
         num_devices: 0,
         g: vec![
@@ -560,10 +561,12 @@ fn test_singular_matrix_error_path() {
         node_map: HashMap::new(),
         nonlinear_devices: vec![],
         voltage_sources: vec![],
+        vcvs_sources: vec![],
         current_sources: vec![],
         inductors: vec![],
         coupled_inductors: vec![],
         transformer_groups: vec![],
+        ideal_transformers: vec![],
         pots: vec![],
         switches: vec![],
         opamps: vec![],

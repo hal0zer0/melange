@@ -11,7 +11,7 @@
 //! - 1 BJT: M = 2 (Vbe, Vbc)
 //! - 2 diodes + 1 BJT: M = 1 + 1 + 2 = 4
 
-use crate::mna::{inject_rhs_current, invert_small_matrix, MnaSystem, VS_CONDUCTANCE};
+use crate::mna::{inject_rhs_current, invert_small_matrix, MnaSystem};
 use std::sync::Arc;
 
 /// Information about an inductor for companion model.
@@ -121,8 +121,12 @@ pub struct SmPotData {
 /// All matrices are stored in flattened row-major format for better cache locality.
 #[derive(Debug, Clone)]
 pub struct DkKernel {
-    /// Number of nodes (original system dimension)
+    /// System dimension = n_aug (n + num_vs + num_vcvs).
+    /// This is the size of all N-indexed vectors and N×N matrices.
     pub n: usize,
+    /// Original circuit node count (excluding ground and augmented VS/VCVS variables).
+    /// Output extraction uses indices < n_nodes.
+    pub n_nodes: usize,
     /// Total voltage dimension (sum of device dimensions)
     pub m: usize,
     /// Number of physical nonlinear devices
@@ -216,7 +220,8 @@ impl DkKernel {
             ));
         }
 
-        let n = mna.n;
+        let n_nodes = mna.n;
+        let n = mna.n_aug; // augmented system dimension
         let m = mna.m;
 
         if m > MAX_M {
@@ -225,7 +230,7 @@ impl DkKernel {
             ));
         }
 
-        // Get A matrix
+        // Get A matrix (n_aug × n_aug)
         let a = mna.get_a_matrix(sample_rate);
 
         // Invert A to get S
@@ -257,7 +262,10 @@ impl DkKernel {
         // This means K is naturally negative for stable circuits,
         // providing the correct negative feedback for NR convergence.
         //
-        // First: S * N_i (N x M)
+        // N_v is M × n_aug and N_i is n_aug × M; augmented entries are zero,
+        // so K = N_v * S * N_i reduces to the same result as before.
+        //
+        // First: S * N_i (n_aug x M)
         let s_ni = mat_mul(&s_2d, &mna.n_i);
         // Then: N_v * (S * N_i) (M x M)
         let k_2d = mat_mul(&mna.n_v, &s_ni);
@@ -276,14 +284,15 @@ impl DkKernel {
 
         let k = flatten_matrix(&k_2d, m, m);
 
-        // Get A_neg matrix for history
+        // Get A_neg matrix for history (augmented rows are all zeros — algebraic constraints)
         let a_neg_2d = mna.get_a_neg_matrix(sample_rate);
         let a_neg = flatten_matrix(&a_neg_2d, n, n);
 
         // Build constant sources from voltage and current sources
         let rhs_const = build_rhs_const(mna);
 
-        // Precompute Sherman-Morrison vectors for pots
+        // Precompute Sherman-Morrison vectors for pots.
+        // u is n_aug-sized; pot node indices are < n_nodes < n, so they fit.
         let mut pots = Vec::with_capacity(mna.pots.len());
         for pot_info in &mna.pots {
             // Build the u vector: u[p-1] = 1, u[q-1] = -1 (for non-grounded)
@@ -330,7 +339,7 @@ impl DkKernel {
             });
         }
 
-        // Flatten N_v and N_i from MNA (which still uses 2D format)
+        // Flatten N_v (M × n_aug) and N_i (n_aug × M) from MNA
         let n_v = flatten_matrix(&mna.n_v, m, n);
         let n_i = flatten_matrix(&mna.n_i, n, m);
 
@@ -454,7 +463,8 @@ impl DkKernel {
         }
 
         Ok(Self {
-            n,
+            n,       // = n_aug (system dimension including VS/VCVS variables)
+            n_nodes, // = mna.n (original circuit node count)
             m,
             num_devices: mna.num_devices,
             sample_rate,
@@ -702,31 +712,39 @@ impl DkKernel {
     }
 }
 
-/// Build constant RHS vector from DC sources.
+/// Build constant RHS vector from DC sources for augmented MNA.
 ///
-/// For trapezoidal rule, DC sources contribute 2*I to RHS.
-/// Current sources inject I directly; voltage sources use Norton equivalent (I = V * G_large).
+/// For trapezoidal rule:
+/// - Current source rows (indices 0..n-1): multiply by 2 (proper trapezoidal average).
+/// - Voltage source augmented rows (indices n..n+num_vs-1): set to V_dc (NOT multiplied
+///   by 2, because these are algebraic constraints, not differential equations).
+/// - VCVS augmented rows: 0 (homogeneous constraint).
 fn build_rhs_const(mna: &MnaSystem) -> Vec<f64> {
-    let mut rhs = vec![0.0; mna.n];
+    let n = mna.n;
+    let n_aug = mna.n_aug;
+    let mut rhs = vec![0.0; n_aug];
 
-    // Current sources: positive at n_plus (current enters), negative at n_minus (leaves)
+    // Current sources: inject into node rows (0..n-1)
     for src in &mna.current_sources {
         inject_rhs_current(&mut rhs, src.n_plus_idx, src.dc_value);
         inject_rhs_current(&mut rhs, src.n_minus_idx, -src.dc_value);
     }
 
-    // Voltage sources: Norton equivalent current I = V * G_large.
-    // The conductance is already stamped into G by the MNA builder.
-    for vs in &mna.voltage_sources {
-        let current = vs.dc_value * VS_CONDUCTANCE;
-        inject_rhs_current(&mut rhs, vs.n_plus_idx, current);
-        inject_rhs_current(&mut rhs, vs.n_minus_idx, -current);
-    }
-
-    // Multiply by 2 for trapezoidal rule
-    for val in &mut rhs {
+    // Multiply the node rows by 2 for trapezoidal rule.
+    // Augmented rows (n..n_aug-1) are NOT multiplied — algebraic constraints have no history.
+    for val in rhs[..n].iter_mut() {
         *val *= 2.0;
     }
+
+    // Voltage sources: set augmented row to V_dc (KVL constraint: V+ - V- = V_dc).
+    // This is NOT multiplied by 2 — it's an algebraic constraint, not a trapezoidal term.
+    for vs in &mna.voltage_sources {
+        let k = n + vs.ext_idx;
+        rhs[k] = vs.dc_value;
+    }
+
+    // VCVS augmented rows are 0 (homogeneous KVL: V_out+ - V_out- - gain*(V_ctrl+ - V_ctrl-) = 0).
+    // Already zero from initialization.
 
     rhs
 }
@@ -750,9 +768,17 @@ pub(crate) fn flatten_matrix(matrix: &[Vec<f64>], rows: usize, cols: usize) -> V
 /// Pivot threshold for detecting singular matrices in Gaussian elimination.
 const SINGULARITY_THRESHOLD: f64 = 1e-15;
 
-/// Matrix inversion using Gaussian elimination.
+/// Matrix inversion using equilibrated LU decomposition with iterative refinement.
 ///
-/// For small matrices (N ≤ 8), this is acceptable.
+/// Steps:
+/// 1. Equilibrate: D * A * D where D = diag(1/sqrt(|A[i][i]|)) to normalize entries.
+/// 2. LU factorize with partial pivoting.
+/// 3. Solve each column of A^{-1} via forward/backward substitution.
+/// 4. One round of iterative refinement per column for extra accuracy.
+/// 5. Undo equilibration: S = D * S_eq * D.
+///
+/// This gives ~6 additional correct digits vs naive Gauss-Jordan for ill-conditioned
+/// matrices (cond > 1e9), which is critical for circuits with large inductors.
 #[allow(clippy::needless_range_loop)]
 pub(crate) fn invert_matrix(a: &[Vec<f64>]) -> Result<Vec<Vec<f64>>, String> {
     let n = a.len();
@@ -760,58 +786,139 @@ pub(crate) fn invert_matrix(a: &[Vec<f64>]) -> Result<Vec<Vec<f64>>, String> {
         return Ok(Vec::new());
     }
 
-    // Create augmented matrix [A | I]
-    let mut aug = vec![vec![0.0; 2 * n]; n];
+    // Step 1: Compute symmetric equilibration D = diag(1/sqrt(|A[i][i]|))
+    let mut d = vec![1.0; n];
     for i in 0..n {
-        for j in 0..n {
-            aug[i][j] = a[i][j];
+        let diag = a[i][i].abs();
+        if diag > SINGULARITY_THRESHOLD {
+            d[i] = 1.0 / diag.sqrt();
         }
-        aug[i][n + i] = 1.0;
     }
 
-    // Gaussian elimination with partial pivoting
+    // Build equilibrated matrix A_eq = D * A * D
+    let mut a_eq = vec![vec![0.0; n]; n];
+    for i in 0..n {
+        for j in 0..n {
+            a_eq[i][j] = d[i] * a[i][j] * d[j];
+        }
+    }
+
+    // Step 2: LU factorize with partial pivoting (in-place)
+    // perm[k] = row that was pivoted into position k
+    let mut perm = vec![0usize; n];
+    for i in 0..n {
+        perm[i] = i;
+    }
+
     for col in 0..n {
         // Find pivot
         let mut max_row = col;
-        let mut max_val = aug[col][col].abs();
+        let mut max_val = a_eq[col][col].abs();
         for row in (col + 1)..n {
-            if aug[row][col].abs() > max_val {
-                max_val = aug[row][col].abs();
+            if a_eq[row][col].abs() > max_val {
+                max_val = a_eq[row][col].abs();
                 max_row = row;
             }
         }
 
         if max_val < SINGULARITY_THRESHOLD {
-            return Err("Matrix is singular or nearly singular".to_string());
+            return Err(format!(
+                "Matrix is singular or nearly singular (pivot {:.2e} at col {})",
+                max_val, col
+            ));
         }
 
-        // Swap rows
         if max_row != col {
-            aug.swap(col, max_row);
+            a_eq.swap(col, max_row);
+            perm.swap(col, max_row);
         }
 
-        // Scale pivot row
-        let pivot = aug[col][col];
-        for j in col..(2 * n) {
-            aug[col][j] /= pivot;
-        }
-
-        // Eliminate column
-        for row in 0..n {
-            if row != col {
-                let factor = aug[row][col];
-                for j in col..(2 * n) {
-                    aug[row][j] -= factor * aug[col][j];
-                }
+        // Compute multipliers and eliminate below
+        let pivot = a_eq[col][col];
+        for row in (col + 1)..n {
+            let factor = a_eq[row][col] / pivot;
+            a_eq[row][col] = factor; // Store L factor in lower triangle
+            for j in (col + 1)..n {
+                a_eq[row][j] -= factor * a_eq[col][j];
             }
         }
     }
 
-    // Extract inverse
+    // Step 3: Solve each column via forward/backward substitution
+    let mut s_eq = vec![vec![0.0; n]; n];
+
+    for col in 0..n {
+        // Build permuted RHS (identity column)
+        let mut b = vec![0.0; n];
+        for i in 0..n {
+            b[i] = if perm[i] == col { 1.0 } else { 0.0 };
+        }
+
+        // Forward substitution (L * y = Pb)
+        for i in 1..n {
+            let mut sum = 0.0;
+            for j in 0..i {
+                sum += a_eq[i][j] * b[j];
+            }
+            b[i] -= sum;
+        }
+
+        // Backward substitution (U * x = y)
+        for i in (0..n).rev() {
+            let mut sum = 0.0;
+            for j in (i + 1)..n {
+                sum += a_eq[i][j] * b[j];
+            }
+            b[i] = (b[i] - sum) / a_eq[i][i];
+        }
+
+        // Step 4: One round of iterative refinement
+        // Compute residual r = P*e_col - (P*A_eq)*x in the permuted system.
+        // A_eq was overwritten by LU, so recompute (P*A_eq)*x from original `a`:
+        //   (P*A_eq)[i][j] = A_eq[perm[i]][j] = d[perm[i]] * a[perm[i]][j] * d[j]
+        let mut r = vec![0.0; n];
+        for i in 0..n {
+            let pi = perm[i];
+            let mut ax_i = 0.0;
+            for j in 0..n {
+                ax_i += d[pi] * a[pi][j] * d[j] * b[j];
+            }
+            r[i] = (if pi == col { 1.0 } else { 0.0 }) - ax_i;
+        }
+
+        // Solve LU * dx = r (same factored system)
+        // Forward substitution
+        for i in 1..n {
+            let mut sum = 0.0;
+            for j in 0..i {
+                sum += a_eq[i][j] * r[j];
+            }
+            r[i] -= sum;
+        }
+        // Backward substitution
+        for i in (0..n).rev() {
+            let mut sum = 0.0;
+            for j in (i + 1)..n {
+                sum += a_eq[i][j] * r[j];
+            }
+            r[i] = (r[i] - sum) / a_eq[i][i];
+        }
+
+        // Apply correction
+        for i in 0..n {
+            b[i] += r[i];
+        }
+
+        for i in 0..n {
+            s_eq[i][col] = b[i];
+        }
+    }
+
+    // Step 5: Undo equilibration: S = D * S_eq * D
     let mut inv = vec![vec![0.0; n]; n];
     for i in 0..n {
         for j in 0..n {
-            inv[i][j] = aug[i][n + j];
+            inv[i][j] = d[i] * s_eq[i][j] * d[j];
         }
     }
 
