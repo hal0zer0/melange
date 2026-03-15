@@ -26,19 +26,29 @@ tools/
 docs/aidocs/            # Detailed math reference docs (READ THESE before changing core math)
 ```
 
-## Core Math — Read Before Touching Solver Code
+## Agent Research Library — `docs/aidocs/`
 
-Detailed docs live in `docs/aidocs/`. Always read the relevant doc before modifying equations.
+**MANDATORY**: Before modifying any solver math, matrix operations, device models, or codegen,
+read the relevant doc(s) from `docs/aidocs/`. These are optimized for AI agent consumption —
+dense equations, code patterns, and cross-references. The full index is at `docs/aidocs/INDEX.md`.
 
 | Doc | When to read |
 |-----|-------------|
+| `docs/aidocs/MNA.md` | Changing MNA stamping (G, C, N_v, N_i), any component stamping rules |
 | `docs/aidocs/DK_METHOD.md` | Changing S, K, A matrices or kernel build |
 | `docs/aidocs/NR_SOLVER.md` | Changing Newton-Raphson iteration or Jacobian |
-| `docs/aidocs/MNA.md` | Changing MNA stamping (G, C, N_v, N_i) |
-| `docs/aidocs/DEVICE_MODELS.md` | Changing diode/BJT/tube equations |
+| `docs/aidocs/VOLTAGE_LIMITING.md` | Changing NR voltage limiting (pnjlim/fetlim), convergence, damping |
 | `docs/aidocs/DC_OP.md` | Changing DC operating point solver or bias initialization |
-| `docs/aidocs/CODEGEN.md` | Changing generated solver code |
-| `docs/aidocs/DEBUGGING.md` | Diagnosing solver output issues |
+| `docs/aidocs/DEVICE_MODELS.md` | Changing diode/BJT/JFET/MOSFET/tube/opamp equations |
+| `docs/aidocs/GUMMEL_POON.md` | Changing Gummel-Poon BJT model, qb() function, GP Jacobian |
+| `docs/aidocs/LINEAR_ALGEBRA.md` | Changing matrix inversion, LU decomposition, Gaussian elimination |
+| `docs/aidocs/SHERMAN_MORRISON.md` | Changing dynamic potentiometers, rank-1 updates, SM vectors |
+| `docs/aidocs/OVERSAMPLING.md` | Changing oversampling, anti-alias filters, polyphase half-band IIR |
+| `docs/aidocs/CODEGEN.md` | Changing generated solver code structure or templates |
+| `docs/aidocs/COMPANION_MODELS.md` | Changing trapezoidal integration or companion circuits |
+| `docs/aidocs/SIGNAL_LEVELS.md` | Changing signal levels, DC blocking, output scaling |
+| `docs/aidocs/DEBUGGING.md` | Diagnosing solver output issues, known failure signatures |
+| `docs/aidocs/SPICE_VALIDATION.md` | Running or modifying SPICE validation tests |
 
 ### Critical Sign Conventions
 

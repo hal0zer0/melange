@@ -2641,16 +2641,17 @@ impl NodalSolver {
                 }
             };
 
-            // 2f. Junction-aware voltage limiting + convergence check
-            let vt = 0.026;
+            // 2f. Voltage limiting + convergence check
+            // Per-sample transient: voltage changes are small (millivolts for audio).
+            // Larger limit than PN junction vt but smaller than DC OP's 50V.
+            let v_max_step = 5.0;
             let mut max_delta = 0.0_f64;
             for i in 0..n {
                 let delta = v_new[i] - v[i];
                 let limited = if i < n_nodes {
-                    if delta.abs() < vt { delta }
-                    else { delta.signum() * vt * (delta.abs() / vt + 1.0).ln() }
+                    delta.clamp(-v_max_step, v_max_step)
                 } else {
-                    delta // Augmented variables don't need junction limiting
+                    delta // Augmented variables don't need limiting
                 };
                 v[i] += limited;
                 max_delta = max_delta.max(limited.abs());

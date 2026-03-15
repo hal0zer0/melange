@@ -10,7 +10,7 @@
 //! call into this module.
 
 use crate::codegen::ir::{DeviceParams, DeviceSlot, DeviceType};
-use crate::mna::{inject_rhs_current, MnaSystem, DC_SHORT_CONDUCTANCE};
+use crate::mna::{inject_rhs_current, MnaSystem};
 use melange_devices::bjt::{BjtEbersMoll, BjtGummelPoon, BjtPolarity};
 use melange_devices::diode::DiodeShockley;
 use melange_devices::tube::KorenTriode;
@@ -289,6 +289,16 @@ fn build_dc_system(mna: &MnaSystem, config: &DcOpConfig) -> (Vec<Vec<f64>>, Vec<
         inject_rhs_current(&mut b_dc, src.n_minus_idx, -src.dc_value);
     }
 
+    // Regularize: add a small conductance from every circuit node to ground.
+    // This prevents singular matrices from floating node clusters (nodes connected
+    // only through capacitors or to each other without any path to ground).
+    // Standard SPICE practice: Gmin is applied to every node diagonal.
+    // 1e-12 S = 1 TΩ to ground — negligible current but ensures solvability.
+    let gmin_floor = 1e-12;
+    for i in 0..n {
+        g_dc[i][i] += gmin_floor;
+    }
+
     (g_dc, b_dc, n_dc)
 }
 
@@ -420,23 +430,21 @@ fn nr_dc_solve(
         // 2. Evaluate device currents and Jacobian
         evaluate_devices(v_nl, device_slots, i_nl, &mut j_dev, m);
 
+        // Check for NaN/Inf in device evaluation
+        if i_nl.iter().any(|x| !x.is_finite()) || j_dev.iter().any(|x| !x.is_finite()) {
+            log::warn!("DC NR iter {}: NaN/Inf in device evaluation", iter);
+            return (false, iter + 1);
+        }
+
+        if iter < 3 && m >= 4 {
+            log::info!("DC NR iter {} (scale={:.2}, gmin={:.1e}): v_nl[0..4]=[{:.3}, {:.3}, {:.3}, {:.3}]",
+                iter, source_scale, gmin, v_nl[0], v_nl[1], v_nl[2], v_nl[3]);
+        }
+
         // 3. Build augmented conductance: G_aug = G_dc (n_dc × n_dc copy)
         for i in 0..n_dc {
             for j in 0..n_dc {
                 g_aug[i][j] = g_dc[i][j];
-            }
-        }
-
-        // Regularize: add tiny conductance to any node with zero self-conductance.
-        // Nodes connected only through capacitors (open at DC) or only through
-        // augmented constraints (inductors) have zero G diagonal. Without this,
-        // the Jacobian is singular even with device conductance stamps.
-        {
-            let gmin_floor = 1e-12;
-            for i in 0..mna.n {
-                if g_aug[i][i].abs() < gmin_floor {
-                    g_aug[i][i] += gmin_floor;
-                }
             }
         }
 
@@ -511,23 +519,23 @@ fn nr_dc_solve(
         // 5. Solve: v_new = G_aug^{-1} · rhs
         let v_new = match solve_linear(&g_aug, &rhs) {
             Some(v) => v,
-            None => return (false, iter + 1), // Singular matrix
+            None => {
+                log::warn!("DC NR iter {}: Jacobian singular (scale={}, gmin={:.2e})", iter, source_scale, gmin);
+                return (false, iter + 1);
+            }
         };
 
-        // 6. Junction-aware logarithmic voltage limiting and convergence check.
-        //    Apply only to node rows (0..n); augmented VS/VCVS variables are
-        //    algebraic and don't need junction limiting.
-        let vt = 0.026; // thermal voltage for limiting
+        // 6. Voltage limiting and convergence check.
+        //    Use a flat clamp with a generous limit. The logarithmic limiter is
+        //    too aggressive for tube circuits where controlling voltages are in
+        //    the tens-of-volts range (not millivolts like PN junctions).
+        //    50V per step allows fast convergence while preventing wild oscillation.
+        let v_max_step = 50.0;
         let mut max_delta = 0.0_f64;
         for i in 0..n_dc {
             let delta = v_new[i] - v[i];
             let limited = if i < n {
-                // Apply junction-aware logarithmic limiting to circuit nodes
-                if delta.abs() < vt {
-                    delta
-                } else {
-                    delta.signum() * vt * (delta.abs() / vt + 1.0).ln()
-                }
+                delta.clamp(-v_max_step, v_max_step)
             } else {
                 // Augmented variables (VS currents): apply directly without limiting
                 delta
@@ -568,18 +576,9 @@ pub fn solve_dc_operating_point(
     // Build DC system. Dimension n_dc = n_aug + num_inductors (inductor short-circuit constraints).
     let (g_dc, b_dc, n_dc) = build_dc_system(mna, config);
 
-    // Compute linear initial guess (n_dc vector).
-    // Some circuit nodes may have no DC conductance path to ground (e.g. tube grids
-    // connected only through capacitors). Add a small Gmin to each node diagonal
-    // for the linear guess to prevent singularity. This is removed for NR iteration.
-    let v_linear = {
-        let gmin_init = 1e-9; // Small enough to not distort voltages, large enough to regularize
-        let mut g_reg = g_dc.clone();
-        for i in 0..mna.n {
-            g_reg[i][i] += gmin_init;
-        }
-        solve_linear(&g_reg, &b_dc).unwrap_or_else(|| vec![0.0; n_dc])
-    };
+    // Compute linear initial guess. The g_dc matrix already has Gmin floor
+    // regularization for floating nodes, so this should not be singular.
+    let v_linear = solve_linear(&g_dc, &b_dc).unwrap_or_else(|| vec![0.0; n_dc]);
 
     // If no nonlinear devices, return linear result
     if m == 0 || device_slots.is_empty() {
