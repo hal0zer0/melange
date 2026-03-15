@@ -21,8 +21,18 @@ fn main() {
     let sample_rate = 48000.0;
     let kernel = DkKernel::from_mna(&mna, sample_rate).unwrap();
 
-    println!("N={}, N_nodes={}, M={}", kernel.n, kernel.n_nodes, kernel.m);
-    println!("cond(A) ~ {:.2e}", {
+    // Print companion model condition number (old approach)
+    let n_aug = kernel.n;
+    println!("N_aug={}, N_nodes={}, M={}", n_aug, kernel.n_nodes, kernel.m);
+    println!("Inductors: {} uncoupled, {} coupled pairs, {} transformer groups",
+        mna.inductors.len(), mna.coupled_inductors.len(), mna.transformer_groups.len());
+
+    let n_inductor_vars: usize = mna.inductors.len()
+        + mna.coupled_inductors.len() * 2
+        + mna.transformer_groups.iter().map(|g| g.num_windings).sum::<usize>();
+    println!("N_nodal={} (N_aug + {} inductor variables)", n_aug + n_inductor_vars, n_inductor_vars);
+
+    println!("\ncond(A_companion) ~ {:.2e} (old companion model)", {
         let a = mna.get_a_matrix(sample_rate);
         let norm_a: f64 = a.iter().map(|row| row.iter().map(|x| x.abs()).sum::<f64>()).fold(0.0_f64, f64::max);
         let n = kernel.n;
@@ -45,7 +55,7 @@ fn main() {
     };
     let ir = CircuitIR::from_kernel(&kernel, &mna, &netlist, &config).unwrap();
 
-    // Create NodalSolver
+    // Create NodalSolver (uses augmented MNA for inductors)
     let mut solver = NodalSolver::new(
         kernel, &mna, ir.device_slots.clone(),
         in_node - 1, out_node - 1,
@@ -66,9 +76,9 @@ fn main() {
         }
     }
 
-    // Process samples
-    println!("\nProcessing 4800 samples (0.1s at 48kHz)...");
-    let num_samples = 4800;
+    // Process samples (reduced from 4800 for faster diagnostic)
+    println!("\nProcessing 480 samples (10ms at 48kHz)...");
+    let num_samples = 480;
     let mut peak_out = 0.0_f64;
     for i in 0..num_samples {
         let t = i as f64 / sample_rate;
@@ -78,7 +88,7 @@ fn main() {
     }
 
     println!("Peak output: {:.4}V", peak_out);
-    println!("NR max iterations: {} times", solver.diag_nr_max_iter_count);
+    println!("NR max iterations: {} / {} samples", solver.diag_nr_max_iter_count, num_samples);
     println!("NaN resets: {}", solver.diag_nan_reset_count);
     println!("Clamp count: {}", solver.diag_clamp_count);
 }

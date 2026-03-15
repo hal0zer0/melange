@@ -2415,15 +2415,30 @@ use crate::mna::MnaSystem;
 /// Works in the full voltage space rather than the reduced nonlinear current space.
 /// Handles circuits where the DK method's K matrix is ill-conditioned (large
 /// transformers, global feedback through transformers).
+///
+/// Uses augmented MNA for inductors: each inductor winding adds an extra variable
+/// (branch current j_L) with inductance L in the C matrix. This avoids the tiny
+/// companion conductances (T/(2L)) that make the standard companion model
+/// ill-conditioned for large inductors at audio sample rates.
 #[derive(Clone)]
 pub struct NodalSolver {
-    /// DK kernel (used for A_neg, rhs_const, inductors, and N_v/N_i matrices)
+    /// DK kernel (retained for kernel.n_nodes, kernel.m, kernel.sample_rate)
     pub kernel: DkKernel,
-    /// A matrix = G + 2C/T (N_aug × N_aug, stored as 2D for LU compatibility)
+    /// Total system dimension: n_aug + inductor branch variables
+    n_nodal: usize,
+    /// A matrix = G_nodal + (2/T)*C_nodal (n_nodal × n_nodal, augmented inductors)
     a_matrix: Vec<Vec<f64>>,
+    /// A_neg = (2/T)*C_nodal - G_nodal, flat row-major (n_nodal × n_nodal)
+    a_neg: Vec<f64>,
+    /// Constant RHS vector (n_nodal), padded with zeros for inductor rows
+    rhs_const: Vec<f64>,
+    /// N_v matrix expanded to m × n_nodal (extra cols zero), flat row-major
+    n_v: Vec<f64>,
+    /// N_i matrix expanded to n_nodal × m (extra rows zero), flat row-major
+    n_i: Vec<f64>,
     /// Device slots for device evaluation (same format as dc_op)
     device_slots: Vec<DeviceSlot>,
-    /// Previous node voltages (N_aug)
+    /// Previous state vector (n_nodal: node voltages + VS currents + inductor currents)
     pub v_prev: Vec<f64>,
     /// Previous nonlinear currents (M) for trapezoidal integration
     pub i_nl_prev: Vec<f64>,
@@ -2454,7 +2469,11 @@ pub struct NodalSolver {
 }
 
 impl NodalSolver {
-    /// Create a new full-nodal solver.
+    /// Create a new full-nodal solver with augmented MNA for inductors.
+    ///
+    /// Each inductor winding gets an extra variable (branch current) in the system.
+    /// The inductance L appears in the C matrix instead of as a tiny companion
+    /// conductance T/(2L), giving a well-conditioned A matrix for large inductors.
     pub fn new(
         kernel: DkKernel,
         mna: &MnaSystem,
@@ -2462,22 +2481,181 @@ impl NodalSolver {
         input_node: usize,
         output_node: usize,
     ) -> Self {
-        let n = kernel.n;
+        let n_aug = kernel.n;
+        let n_nodes = kernel.n_nodes;
         let m = kernel.m;
-        let a_matrix = mna.get_a_matrix(kernel.sample_rate);
+
+        // Count total inductor winding variables
+        let n_uncoupled = mna.inductors.len();
+        let n_coupled_windings: usize = mna.coupled_inductors.len() * 2;
+        let n_xfmr_windings: usize = mna.transformer_groups.iter()
+            .map(|g| g.num_windings).sum();
+        let n_inductor_vars = n_uncoupled + n_coupled_windings + n_xfmr_windings;
+        let n_nodal = n_aug + n_inductor_vars;
+
+        let t = 1.0 / kernel.sample_rate;
+        let alpha = 2.0 / t; // 2/T
+
+        // Build G_nodal and C_nodal (n_nodal × n_nodal)
+        // Start from MNA's raw G and C (no inductor companion conductances)
+        let mut g_nod = vec![vec![0.0; n_nodal]; n_nodal];
+        let mut c_nod = vec![vec![0.0; n_nodal]; n_nodal];
+        for i in 0..n_aug {
+            for j in 0..n_aug {
+                g_nod[i][j] = mna.g[i][j];
+                c_nod[i][j] = mna.c[i][j];
+            }
+        }
+
+        // Stamp inductor augmented variables
+        let mut var_idx = n_aug;
+
+        // Uncoupled inductors: 1 variable each
+        for ind in &mna.inductors {
+            let k = var_idx;
+            let ni = ind.node_i; // 1-indexed, 0 = ground
+            let nj = ind.node_j;
+
+            // KCL: j_L enters node_i, exits node_j
+            if ni > 0 { g_nod[ni - 1][k] += 1.0; }
+            if nj > 0 { g_nod[nj - 1][k] -= 1.0; }
+            // KVL row: -V_i + V_j (= -L·dj_L/dt, with L in C)
+            if ni > 0 { g_nod[k][ni - 1] -= 1.0; }
+            if nj > 0 { g_nod[k][nj - 1] += 1.0; }
+            // Self-inductance in C matrix
+            c_nod[k][k] = ind.value;
+
+            var_idx += 1;
+        }
+
+        // Coupled inductor pairs: 2 variables each
+        for ci in &mna.coupled_inductors {
+            let k1 = var_idx;
+            let k2 = var_idx + 1;
+
+            // Winding 1 KCL/KVL
+            if ci.l1_node_i > 0 { g_nod[ci.l1_node_i - 1][k1] += 1.0; }
+            if ci.l1_node_j > 0 { g_nod[ci.l1_node_j - 1][k1] -= 1.0; }
+            if ci.l1_node_i > 0 { g_nod[k1][ci.l1_node_i - 1] -= 1.0; }
+            if ci.l1_node_j > 0 { g_nod[k1][ci.l1_node_j - 1] += 1.0; }
+
+            // Winding 2 KCL/KVL
+            if ci.l2_node_i > 0 { g_nod[ci.l2_node_i - 1][k2] += 1.0; }
+            if ci.l2_node_j > 0 { g_nod[ci.l2_node_j - 1][k2] -= 1.0; }
+            if ci.l2_node_i > 0 { g_nod[k2][ci.l2_node_i - 1] -= 1.0; }
+            if ci.l2_node_j > 0 { g_nod[k2][ci.l2_node_j - 1] += 1.0; }
+
+            // Self-inductances
+            c_nod[k1][k1] = ci.l1_value;
+            c_nod[k2][k2] = ci.l2_value;
+            // Mutual inductance M = k·√(L1·L2)
+            let m_val = ci.coupling * (ci.l1_value * ci.l2_value).sqrt();
+            c_nod[k1][k2] = m_val;
+            c_nod[k2][k1] = m_val;
+
+            var_idx += 2;
+        }
+
+        // Transformer groups: N variables each
+        for group in &mna.transformer_groups {
+            let w = group.num_windings;
+            let base_k = var_idx;
+
+            for widx in 0..w {
+                let k = base_k + widx;
+                let ni = group.winding_node_i[widx];
+                let nj = group.winding_node_j[widx];
+
+                // KCL/KVL stamps for winding
+                if ni > 0 { g_nod[ni - 1][k] += 1.0; }
+                if nj > 0 { g_nod[nj - 1][k] -= 1.0; }
+                if ni > 0 { g_nod[k][ni - 1] -= 1.0; }
+                if nj > 0 { g_nod[k][nj - 1] += 1.0; }
+
+                // Inductance sub-matrix: L[i][j] = k_ij·√(Li·Lj)
+                for widx2 in 0..w {
+                    let k2 = base_k + widx2;
+                    c_nod[k][k2] = group.coupling_matrix[widx][widx2]
+                        * (group.inductances[widx] * group.inductances[widx2]).sqrt();
+                }
+            }
+
+            var_idx += w;
+        }
+
+        // Build A = G + (2/T)*C
+        let mut a_matrix = vec![vec![0.0; n_nodal]; n_nodal];
+        for i in 0..n_nodal {
+            for j in 0..n_nodal {
+                a_matrix[i][j] = g_nod[i][j] + alpha * c_nod[i][j];
+            }
+        }
+
+        // Build A_neg = (2/T)*C - G (flat row-major)
+        let mut a_neg = vec![0.0; n_nodal * n_nodal];
+        for i in 0..n_nodal {
+            for j in 0..n_nodal {
+                a_neg[i * n_nodal + j] = alpha * c_nod[i][j] - g_nod[i][j];
+            }
+        }
+        // Zero VS/VCVS/ideal_xfmr rows in A_neg (algebraic constraints, no history).
+        // These are rows n_nodes..n_aug. Do NOT zero inductor rows (n_aug..n_nodal).
+        if n_aug > n_nodes {
+            for i in n_nodes..n_aug {
+                for j in 0..n_nodal {
+                    a_neg[i * n_nodal + j] = 0.0;
+                }
+            }
+        }
+
+        // Expand rhs_const from kernel (n_aug) to n_nodal (inductor rows = 0)
+        let mut rhs_const = vec![0.0; n_nodal];
+        for i in 0..n_aug {
+            rhs_const[i] = kernel.rhs_const[i];
+        }
+
+        // Expand N_v from m × n_aug to m × n_nodal (extra cols = 0)
+        let mut n_v = vec![0.0; m * n_nodal];
+        for i in 0..m {
+            for j in 0..n_aug {
+                n_v[i * n_nodal + j] = kernel.n_v[i * n_aug + j];
+            }
+        }
+
+        // Expand N_i from n_aug × m to n_nodal × m (extra rows = 0)
+        let mut n_i = vec![0.0; n_nodal * m];
+        for i in 0..n_aug {
+            for j in 0..m {
+                n_i[i * m + j] = kernel.n_i[i * m + j];
+            }
+        }
+
         let dc_block_r = 1.0 - 2.0 * std::f64::consts::PI * 5.0 / kernel.sample_rate;
+
+        if n_inductor_vars > 0 {
+            log::info!(
+                "NodalSolver: augmented MNA with {} inductor variables (n_aug={}, n_nodal={})",
+                n_inductor_vars, n_aug, n_nodal
+            );
+        }
+
         Self {
             kernel,
+            n_nodal,
             a_matrix,
+            a_neg,
+            rhs_const,
+            n_v,
+            n_i,
             device_slots,
-            v_prev: vec![0.0; n],
+            v_prev: vec![0.0; n_nodal],
             i_nl_prev: vec![0.0; m],
-            rhs: vec![0.0; n],
+            rhs: vec![0.0; n_nodal],
             v_nl: vec![0.0; m],
             i_nl: vec![0.0; m],
             j_dev: vec![0.0; m * m],
-            g_aug: vec![vec![0.0; n]; n],
-            rhs_work: vec![0.0; n],
+            g_aug: vec![vec![0.0; n_nodal]; n_nodal],
+            rhs_work: vec![0.0; n_nodal],
             input_node,
             output_node,
             input_conductance: 1.0,
@@ -2495,6 +2673,10 @@ impl NodalSolver {
     }
 
     /// Initialize from DC operating point.
+    ///
+    /// The DC OP solver operates on the original n_aug system. Node voltages and VS
+    /// currents are copied to v_prev[0..n_aug]. Inductor branch currents
+    /// (v_prev[n_aug..n_nodal]) start at zero and settle during warm-up.
     pub fn initialize_dc_op(&mut self, mna: &MnaSystem, device_slots: &[DeviceSlot]) {
         let config = dc_op::DcOpConfig {
             input_node: self.input_node,
@@ -2503,9 +2685,10 @@ impl NodalSolver {
         };
         let result = dc_op::solve_dc_operating_point(mna, device_slots, &config);
         if result.converged {
-            // Initialize v_prev from DC operating point
-            let n = self.kernel.n;
-            for i in 0..n.min(result.v_node.len()) {
+            // Initialize v_prev from DC operating point.
+            // The DC OP solver uses the same augmented inductor convention (n_dc = n_aug + inductors),
+            // so v_node includes node voltages, VS currents, AND inductor DC branch currents.
+            for i in 0..self.n_nodal.min(result.v_node.len()) {
                 self.v_prev[i] = result.v_node[i];
             }
             // Initialize i_nl_prev from DC nonlinear currents
@@ -2525,44 +2708,32 @@ impl NodalSolver {
     }
 
     /// Process a single sample using full-nodal Newton-Raphson.
+    ///
+    /// The state vector includes node voltages, VS currents, and inductor branch
+    /// currents. A_neg handles all trapezoidal history (including inductors) — no
+    /// separate inductor companion model updates are needed.
     #[allow(clippy::needless_range_loop)]
     pub fn process_sample(&mut self, input: f64) -> f64 {
         let input = sanitize_input(input);
-        let n = self.kernel.n;
+        let n = self.n_nodal;
         let n_nodes = self.kernel.n_nodes;
         let m = self.kernel.m;
 
-        // Step 1: Build base RHS = rhs_const + A_neg * v_prev + N_i * i_nl_prev + input + inductor history
+        // Step 1: Build base RHS = rhs_const + A_neg * v_prev + N_i * i_nl_prev + input
+        // A_neg automatically handles inductor history (2L/T diagonal + ±1 coupling).
         for i in 0..n {
-            let mut sum = self.kernel.rhs_const[i];
+            let mut sum = self.rhs_const[i];
             let a_neg_offset = i * n;
             for j in 0..n {
-                sum += self.kernel.a_neg[a_neg_offset + j] * self.v_prev[j];
+                sum += self.a_neg[a_neg_offset + j] * self.v_prev[j];
             }
             // N_i * i_nl_prev (trapezoidal nonlinear integration)
+            // Only the first n_aug rows of N_i are nonzero (inductor rows are zero)
             let ni_offset = i * m;
             for j in 0..m {
-                sum += self.kernel.n_i[ni_offset + j] * self.i_nl_prev[j];
+                sum += self.n_i[ni_offset + j] * self.i_nl_prev[j];
             }
             self.rhs[i] = sum;
-        }
-
-        // Inductor history contributions
-        for ind in &self.kernel.inductors {
-            if ind.node_i > 0 { self.rhs[ind.node_i - 1] -= ind.i_hist; }
-            if ind.node_j > 0 { self.rhs[ind.node_j - 1] += ind.i_hist; }
-        }
-        for ci in &self.kernel.coupled_inductors {
-            if ci.l1_node_i > 0 { self.rhs[ci.l1_node_i - 1] -= ci.i1_hist; }
-            if ci.l1_node_j > 0 { self.rhs[ci.l1_node_j - 1] += ci.i1_hist; }
-            if ci.l2_node_i > 0 { self.rhs[ci.l2_node_i - 1] -= ci.i2_hist; }
-            if ci.l2_node_j > 0 { self.rhs[ci.l2_node_j - 1] += ci.i2_hist; }
-        }
-        for group in &self.kernel.transformer_groups {
-            for k in 0..group.num_windings {
-                if group.winding_node_i[k] > 0 { self.rhs[group.winding_node_i[k] - 1] -= group.i_hist[k]; }
-                if group.winding_node_j[k] > 0 { self.rhs[group.winding_node_j[k] - 1] += group.i_hist[k]; }
-            }
         }
 
         // Input source (Thevenin, trapezoidal)
@@ -2571,22 +2742,18 @@ impl NodalSolver {
         }
         self.input_prev = input;
 
-        // Step 2: Newton-Raphson in full voltage space
-        // Start from previous solution (warm start)
-        // v is updated in-place during NR
+        // Step 2: Newton-Raphson in full augmented voltage space
         let mut v = self.v_prev.clone();
         let mut converged = false;
 
-        // Access MNA n_v and n_i from kernel (stored as flat arrays)
-        // We need 2D access: n_v[i][j] = kernel.n_v[i * n + j], n_i[a][i] = kernel.n_i[a * m + i]
-
         for _iter in 0..self.max_iter {
             // 2a. Extract nonlinear voltages: v_nl = N_v * v
+            // N_v is m × n_nodal (extra inductor cols are zero, but included for correctness)
             for i in 0..m {
                 let mut sum = 0.0;
                 let nv_offset = i * n;
                 for j in 0..n {
-                    sum += self.kernel.n_v[nv_offset + j] * v[j];
+                    sum += self.n_v[nv_offset + j] * v[j];
                 }
                 self.v_nl[i] = sum;
             }
@@ -2595,22 +2762,23 @@ impl NodalSolver {
             dc_op::evaluate_devices(&self.v_nl, &self.device_slots, &mut self.i_nl, &mut self.j_dev, m);
 
             // 2c. Build Jacobian: G_aug = A - N_i * J_dev * N_v
+            // Start from A matrix (inductor rows are linear, unaffected by J_dev)
             for i in 0..n {
                 for j in 0..n {
                     self.g_aug[i][j] = self.a_matrix[i][j];
                 }
             }
-            // Stamp -N_i * J_dev * N_v (same as DC OP but using A instead of G_dc)
+            // Stamp -N_i * J_dev * N_v (only affects rows/cols where N_i/N_v are nonzero)
             for a in 0..n {
                 for b in 0..n {
                     let mut sum = 0.0;
                     for i in 0..m {
-                        let ni_ai = self.kernel.n_i[a * m + i];
+                        let ni_ai = self.n_i[a * m + i];
                         if ni_ai.abs() < 1e-30 { continue; }
                         for j in 0..m {
                             let jd = self.j_dev[i * m + j];
                             if jd.abs() < 1e-30 { continue; }
-                            let nv_jb = self.kernel.n_v[j * n + b];
+                            let nv_jb = self.n_v[j * n + b];
                             if nv_jb.abs() < 1e-30 { continue; }
                             sum += ni_ai * jd * nv_jb;
                         }
@@ -2628,13 +2796,11 @@ impl NodalSolver {
                 }
                 let i_comp = self.i_nl[i] - jdev_vnl;
                 for a in 0..n {
-                    self.rhs_work[a] += self.kernel.n_i[a * m + i] * i_comp;
+                    self.rhs_work[a] += self.n_i[a * m + i] * i_comp;
                 }
             }
 
             // 2e. Solve: v_new = G_aug^{-1} * rhs_work
-            // Use equilibrated LU (not basic LU) because the transient A matrix is
-            // ill-conditioned (cond ~1e9 from large inductor companion conductances).
             let v_new = match crate::dk::solve_equilibrated(&self.g_aug, &self.rhs_work) {
                 Some(v) => v,
                 None => {
@@ -2644,8 +2810,6 @@ impl NodalSolver {
             };
 
             // 2f. Voltage limiting + convergence check
-            // Per-sample transient: voltage changes are small (millivolts for audio).
-            // Larger limit than PN junction vt but smaller than DC OP's 50V.
             let v_max_step = 5.0;
             let mut max_delta = 0.0_f64;
             for i in 0..n {
@@ -2653,7 +2817,7 @@ impl NodalSolver {
                 let limited = if i < n_nodes {
                     delta.clamp(-v_max_step, v_max_step)
                 } else {
-                    delta // Augmented variables don't need limiting
+                    delta // Augmented variables (VS currents, inductor currents) don't need limiting
                 };
                 v[i] += limited;
                 max_delta = max_delta.max(limited.abs());
@@ -2666,7 +2830,7 @@ impl NodalSolver {
                     let mut sum = 0.0;
                     let nv_offset = i * n;
                     for j in 0..n {
-                        sum += self.kernel.n_v[nv_offset + j] * v[j];
+                        sum += self.n_v[nv_offset + j] * v[j];
                     }
                     self.v_nl[i] = sum;
                 }
@@ -2679,7 +2843,7 @@ impl NodalSolver {
             self.diag_nr_max_iter_count += 1;
         }
 
-        // Step 3: Update state
+        // Step 3: Update state (includes inductor branch currents implicitly)
         self.v_prev.copy_from_slice(&v);
         self.i_nl_prev.copy_from_slice(&self.i_nl);
 
@@ -2691,13 +2855,13 @@ impl NodalSolver {
             self.diag_nan_reset_count += 1;
         }
 
-        // Step 4: Update inductor companion models
-        self.kernel.update_inductors(&self.v_prev);
-        self.kernel.update_coupled_inductors(&self.v_prev);
-        self.kernel.update_transformer_groups(&self.v_prev);
-
-        // Step 5: DC blocking + output
-        let raw_out = if self.output_node < n { self.v_prev[self.output_node] } else { 0.0 };
+        // Step 4: DC blocking + output
+        // output_node is an original node index (< n_nodes), still valid in the augmented vector
+        let raw_out = if self.output_node < self.n_nodal {
+            self.v_prev[self.output_node]
+        } else {
+            0.0
+        };
         let raw_out = if raw_out.is_finite() { raw_out } else { 0.0 };
         let dc_blocked = raw_out - self.dc_block_x_prev + self.dc_block_r * self.dc_block_y_prev;
         self.dc_block_x_prev = raw_out;

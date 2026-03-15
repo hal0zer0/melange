@@ -954,9 +954,9 @@ fn test_dc_op_pultec_nonlinear_nodal() {
         peak, solver.diag_nr_max_iter_count, solver.diag_nan_reset_count);
 
     assert_eq!(solver.diag_nan_reset_count, 0, "No NaN resets expected");
-    // TODO: transient NR doesn't converge yet for Pultec (companion model stiffness).
-    // The DC OP converges correctly. Transient fix requires addressing the 130H inductor
-    // companion conductance (8e-8 S at 48kHz) which creates ~5e5 transfer impedances.
+    // Augmented MNA for inductors eliminated companion model stiffness (cond 4e9 → well-conditioned).
+    // NR still hits max iterations on most samples due to Koren triode nonlinearity at high
+    // plate voltages — needs per-device SPICE-style voltage limiting in the full-nodal solver.
     // For now, just verify DC OP produced reasonable voltages and no NaN resets.
     // assert!(peak < 1.0, "DC output should be near zero with no input, got peak {:.4}V", peak);
 }
