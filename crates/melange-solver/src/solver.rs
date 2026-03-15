@@ -2406,9 +2406,52 @@ C1 in 0 1u
 // FLOPs per iteration — well within real-time budget at 48kHz.
 // ==========================================================================
 
-use crate::codegen::ir::DeviceSlot;
 use crate::dc_op;
+use crate::codegen::ir::{DeviceParams, DeviceSlot};
 use crate::mna::MnaSystem;
+
+/// Apply SPICE-style voltage limiting for a DeviceSlot dimension.
+///
+/// Dispatches pnjlim (PN junctions: diodes, BJTs, tubes) or fetlim (JFETs, MOSFETs)
+/// based on device type and dimension. Same limiting as DeviceEntry::limit_voltage
+/// but works with DeviceSlot parameters directly.
+fn limit_slot_voltage(slot: &DeviceSlot, dim: usize, vnew: f64, vold: f64) -> f64 {
+    match &slot.params {
+        DeviceParams::Diode(dp) => {
+            let vcrit = pn_vcrit(dp.n_vt, dp.is);
+            pnjlim(vnew, vold, dp.n_vt, vcrit)
+        }
+        DeviceParams::Bjt(bp) => {
+            let vcrit = pn_vcrit(bp.vt, bp.is);
+            pnjlim(vnew, vold, bp.vt, vcrit)
+        }
+        DeviceParams::Jfet(jp) => {
+            if dim == 0 {
+                fetlim(vnew, vold, 0.0) // Vds
+            } else {
+                fetlim(vnew, vold, jp.vp) // Vgs
+            }
+        }
+        DeviceParams::Mosfet(mp) => {
+            if dim == 0 {
+                fetlim(vnew, vold, 0.0) // Vds
+            } else {
+                fetlim(vnew, vold, mp.vt) // Vgs
+            }
+        }
+        DeviceParams::Tube(tp) => {
+            if dim == 0 {
+                // Vgk — grid current has exponential-like onset
+                let n_vt = tp.vgk_onset / 3.0;
+                let vcrit = pn_vcrit(n_vt, 1e-10);
+                pnjlim(vnew, vold, n_vt, vcrit)
+            } else {
+                // Vpk — plate current is well-behaved
+                fetlim(vnew, vold, 0.0)
+            }
+        }
+    }
+}
 
 /// Full-nodal Newton-Raphson solver for nonlinear transient simulation.
 ///
@@ -2716,7 +2759,6 @@ impl NodalSolver {
     pub fn process_sample(&mut self, input: f64) -> f64 {
         let input = sanitize_input(input);
         let n = self.n_nodal;
-        let n_nodes = self.kernel.n_nodes;
         let m = self.kernel.m;
 
         // Step 1: Build base RHS = rhs_const + A_neg * v_prev + N_i * i_nl_prev + input
@@ -2809,18 +2851,41 @@ impl NodalSolver {
                 }
             };
 
-            // 2f. Voltage limiting + convergence check
-            let v_max_step = 5.0;
+            // 2f. SPICE-style voltage limiting + convergence check
+            // Compute proposed device voltages from v_new, apply pnjlim/fetlim,
+            // and compute a scalar damping factor alpha for the full step.
+            let mut alpha = 1.0_f64;
+            if m > 0 {
+                for slot in &self.device_slots {
+                    let s = slot.start_idx;
+                    for d in 0..slot.dimension {
+                        let i = s + d;
+                        // Proposed nonlinear voltage from solved v_new
+                        let mut v_nl_proposed = 0.0;
+                        let nv_offset = i * n;
+                        for j in 0..n {
+                            v_nl_proposed += self.n_v[nv_offset + j] * v_new[j];
+                        }
+                        let v_nl_current = self.v_nl[i]; // from step 2a
+                        let dv = v_nl_proposed - v_nl_current;
+                        if dv.abs() > 1e-15 {
+                            let v_limited = limit_slot_voltage(slot, d, v_nl_proposed, v_nl_current);
+                            let dv_limited = v_limited - v_nl_current;
+                            let ratio = (dv_limited / dv).clamp(0.01, 1.0);
+                            if ratio < alpha {
+                                alpha = ratio;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Apply damped Newton step to all variables
             let mut max_delta = 0.0_f64;
             for i in 0..n {
-                let delta = v_new[i] - v[i];
-                let limited = if i < n_nodes {
-                    delta.clamp(-v_max_step, v_max_step)
-                } else {
-                    delta // Augmented variables (VS currents, inductor currents) don't need limiting
-                };
-                v[i] += limited;
-                max_delta = max_delta.max(limited.abs());
+                let delta = alpha * (v_new[i] - v[i]);
+                v[i] += delta;
+                max_delta = max_delta.max(delta.abs());
             }
 
             if max_delta < self.tol {
