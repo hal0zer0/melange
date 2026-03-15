@@ -481,6 +481,256 @@ impl DkKernel {
         })
     }
 
+    /// Build DK kernel from MNA using augmented MNA for inductors.
+    ///
+    /// Each inductor winding adds an extra variable (branch current j_L) with
+    /// inductance L in the C matrix. This gives A[k][k] = 2L/T (well-conditioned)
+    /// instead of the companion model's T/(2L) (ill-conditioned for large L).
+    ///
+    /// The resulting kernel has `n = n_nodal = n_aug + total_inductor_windings`.
+    /// S, A_neg, N_v, N_i are all at the expanded dimension. K stays M×M.
+    /// The companion model vectors (inductors, coupled_inductors, transformer_groups)
+    /// are left empty — A_neg handles all trapezoidal inductor history automatically.
+    ///
+    /// Use this for circuits with large inductors (transformers) and nonlinear devices.
+    pub fn from_mna_augmented(mna: &MnaSystem, sample_rate: f64) -> Result<Self, DkError> {
+        if !(sample_rate > 0.0 && sample_rate.is_finite()) {
+            return Err(DkError::InvalidParameter(
+                format!("sample_rate must be positive and finite, got {}", sample_rate)
+            ));
+        }
+
+        let n_nodes = mna.n;
+        let n_aug = mna.n_aug;
+        let m = mna.m;
+
+        if m > MAX_M {
+            return Err(DkError::InvalidParameter(
+                format!("nonlinear dimension m={} exceeds MAX_M={}", m, MAX_M)
+            ));
+        }
+
+        // Count inductor winding variables
+        let n_uncoupled = mna.inductors.len();
+        let n_coupled_windings: usize = mna.coupled_inductors.len() * 2;
+        let n_xfmr_windings: usize = mna.transformer_groups.iter()
+            .map(|g| g.num_windings).sum();
+        let n_inductor_vars = n_uncoupled + n_coupled_windings + n_xfmr_windings;
+        let n = n_aug + n_inductor_vars; // n_nodal
+
+        let t = 1.0 / sample_rate;
+        let alpha = 2.0 / t;
+
+        // Validate inductor values
+        for ind in &mna.inductors {
+            if ind.value <= 0.0 {
+                return Err(DkError::InvalidInductance { name: ind.name.clone(), value: ind.value });
+            }
+        }
+        for ci in &mna.coupled_inductors {
+            if ci.l1_value <= 0.0 {
+                return Err(DkError::InvalidInductance { name: ci.l1_name.clone(), value: ci.l1_value });
+            }
+            if ci.l2_value <= 0.0 {
+                return Err(DkError::InvalidInductance { name: ci.l2_name.clone(), value: ci.l2_value });
+            }
+        }
+        for group in &mna.transformer_groups {
+            for (idx, &l) in group.inductances.iter().enumerate() {
+                if l <= 0.0 {
+                    return Err(DkError::InvalidInductance {
+                        name: group.winding_names[idx].clone(), value: l,
+                    });
+                }
+            }
+        }
+
+        // Build G_nodal and C_nodal from raw MNA matrices (no companion conductances)
+        let mut g_nod = vec![vec![0.0; n]; n];
+        let mut c_nod = vec![vec![0.0; n]; n];
+        for i in 0..n_aug {
+            for j in 0..n_aug {
+                g_nod[i][j] = mna.g[i][j];
+                c_nod[i][j] = mna.c[i][j];
+            }
+        }
+
+        // Stamp inductor augmented variables (same logic as NodalSolver::new)
+        let mut var_idx = n_aug;
+
+        for ind in &mna.inductors {
+            let k = var_idx;
+            let ni = ind.node_i;
+            let nj = ind.node_j;
+            if ni > 0 { g_nod[ni - 1][k] += 1.0; }
+            if nj > 0 { g_nod[nj - 1][k] -= 1.0; }
+            if ni > 0 { g_nod[k][ni - 1] -= 1.0; }
+            if nj > 0 { g_nod[k][nj - 1] += 1.0; }
+            c_nod[k][k] = ind.value;
+            var_idx += 1;
+        }
+
+        for ci in &mna.coupled_inductors {
+            let k1 = var_idx;
+            let k2 = var_idx + 1;
+            if ci.l1_node_i > 0 { g_nod[ci.l1_node_i - 1][k1] += 1.0; }
+            if ci.l1_node_j > 0 { g_nod[ci.l1_node_j - 1][k1] -= 1.0; }
+            if ci.l1_node_i > 0 { g_nod[k1][ci.l1_node_i - 1] -= 1.0; }
+            if ci.l1_node_j > 0 { g_nod[k1][ci.l1_node_j - 1] += 1.0; }
+            if ci.l2_node_i > 0 { g_nod[ci.l2_node_i - 1][k2] += 1.0; }
+            if ci.l2_node_j > 0 { g_nod[ci.l2_node_j - 1][k2] -= 1.0; }
+            if ci.l2_node_i > 0 { g_nod[k2][ci.l2_node_i - 1] -= 1.0; }
+            if ci.l2_node_j > 0 { g_nod[k2][ci.l2_node_j - 1] += 1.0; }
+            c_nod[k1][k1] = ci.l1_value;
+            c_nod[k2][k2] = ci.l2_value;
+            let m_val = ci.coupling * (ci.l1_value * ci.l2_value).sqrt();
+            c_nod[k1][k2] = m_val;
+            c_nod[k2][k1] = m_val;
+            var_idx += 2;
+        }
+
+        for group in &mna.transformer_groups {
+            let w = group.num_windings;
+            let base_k = var_idx;
+            for widx in 0..w {
+                let k = base_k + widx;
+                let ni = group.winding_node_i[widx];
+                let nj = group.winding_node_j[widx];
+                if ni > 0 { g_nod[ni - 1][k] += 1.0; }
+                if nj > 0 { g_nod[nj - 1][k] -= 1.0; }
+                if ni > 0 { g_nod[k][ni - 1] -= 1.0; }
+                if nj > 0 { g_nod[k][nj - 1] += 1.0; }
+                for widx2 in 0..w {
+                    let k2 = base_k + widx2;
+                    c_nod[k][k2] = group.coupling_matrix[widx][widx2]
+                        * (group.inductances[widx] * group.inductances[widx2]).sqrt();
+                }
+            }
+            var_idx += w;
+        }
+
+        // Build A = G + (2/T)*C
+        let mut a = vec![vec![0.0; n]; n];
+        for i in 0..n {
+            for j in 0..n {
+                a[i][j] = g_nod[i][j] + alpha * c_nod[i][j];
+            }
+        }
+
+        // Invert A to get S
+        let s_2d = invert_matrix(&a)
+            .map_err(|e| DkError::SingularMatrix(format!("Failed to invert augmented A: {}", e)))?;
+
+        {
+            let norm_a = infinity_norm(&a);
+            let norm_s = infinity_norm(&s_2d);
+            let cond = norm_a * norm_s;
+            if cond > 1e12 {
+                log::warn!(
+                    "Augmented A matrix condition number estimate is {:.2e} (threshold 1e12).",
+                    cond
+                );
+            }
+        }
+
+        let s = flatten_matrix(&s_2d, n, n);
+
+        // Expand N_v (m × n_aug → m × n_nodal) and N_i (n_aug × m → n_nodal × m)
+        let mut n_v_2d = vec![vec![0.0; n]; m];
+        for i in 0..m {
+            for j in 0..n_aug {
+                n_v_2d[i][j] = mna.n_v[i][j];
+            }
+        }
+        let mut n_i_2d = vec![vec![0.0; m]; n];
+        for i in 0..n_aug {
+            for j in 0..m {
+                n_i_2d[i][j] = mna.n_i[i][j];
+            }
+        }
+
+        // Compute K = N_v * S * N_i (M × M)
+        let s_ni = mat_mul(&s_2d, &n_i_2d);
+        let k_2d = mat_mul(&n_v_2d, &s_ni);
+
+        for (i, row) in k_2d.iter().enumerate() {
+            if row[i] >= 0.0 {
+                return Err(DkError::InvalidKDiagonal { index: i, value: row[i] });
+            }
+        }
+
+        let k = flatten_matrix(&k_2d, m, m);
+        let n_v = flatten_matrix(&n_v_2d, m, n);
+        let n_i = flatten_matrix(&n_i_2d, n, m);
+
+        // Build A_neg = (2/T)*C - G, zeroing VS/VCVS rows only (not inductor rows)
+        let mut a_neg_2d = vec![vec![0.0; n]; n];
+        for i in 0..n {
+            for j in 0..n {
+                a_neg_2d[i][j] = alpha * c_nod[i][j] - g_nod[i][j];
+            }
+        }
+        if n_aug > n_nodes {
+            for i in n_nodes..n_aug {
+                for j in 0..n {
+                    a_neg_2d[i][j] = 0.0;
+                }
+            }
+        }
+        let a_neg = flatten_matrix(&a_neg_2d, n, n);
+
+        // Build rhs_const: reuse existing build_rhs_const (n_aug-sized), pad with zeros
+        let rhs_const_base = build_rhs_const(mna);
+        let mut rhs_const = vec![0.0; n];
+        for i in 0..n_aug {
+            rhs_const[i] = rhs_const_base[i];
+        }
+
+        // Precompute Sherman-Morrison pot vectors at the expanded dimension
+        let mut pots = Vec::with_capacity(mna.pots.len());
+        for pot_info in &mna.pots {
+            let mut u = vec![0.0; n];
+            if pot_info.node_p > 0 { u[pot_info.node_p - 1] = 1.0; }
+            if pot_info.node_q > 0 { u[pot_info.node_q - 1] = -1.0; }
+            let su = mat_vec_mul(&s_2d, &u);
+            let usu: f64 = u.iter().zip(su.iter()).map(|(a, b)| a * b).sum();
+            let nv_su = if m > 0 { mat_vec_mul(&n_v_2d, &su) } else { Vec::new() };
+            let u_ni: Vec<f64> = (0..m)
+                .map(|j| su.iter().enumerate().map(|(i, &s)| s * n_i_2d[i][j]).sum())
+                .collect();
+            pots.push(SmPotData {
+                su, usu,
+                g_nominal: pot_info.g_nominal,
+                nv_su, u_ni,
+                node_p: pot_info.node_p,
+                node_q: pot_info.node_q,
+                min_resistance: pot_info.min_resistance,
+                max_resistance: pot_info.max_resistance,
+                grounded: pot_info.grounded,
+            });
+        }
+
+        if n_inductor_vars > 0 {
+            log::info!(
+                "DK kernel (augmented): n_nodal={} (n_aug={} + {} inductor vars), M={}",
+                n, n_aug, n_inductor_vars, m
+            );
+        }
+
+        Ok(Self {
+            n,
+            n_nodes,
+            m,
+            num_devices: mna.num_devices,
+            sample_rate,
+            s, k, n_v, n_i, a_neg, rhs_const,
+            inductors: Vec::new(),          // empty — augmented MNA handles history
+            coupled_inductors: Vec::new(),  // empty
+            transformer_groups: Vec::new(), // empty
+            pots,
+        })
+    }
+
     /// Access S matrix element S[i][j]
     #[inline(always)]
     pub fn s(&self, i: usize, j: usize) -> f64 {

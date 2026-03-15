@@ -986,9 +986,24 @@ fn simulate_circuit_source(
     };
 
     // Step 4: Build DK kernel
+    let has_inductors = !mna.inductors.is_empty()
+        || !mna.coupled_inductors.is_empty()
+        || !mna.transformer_groups.is_empty();
+
     println!("Step 4: Building DK kernel at {} Hz...", actual_sample_rate);
-    let kernel = DkKernel::from_mna(&mna, actual_sample_rate)
-        .with_context(|| "Failed to create DK kernel")?;
+    let kernel = if has_inductors && opts.solver != "dk" {
+        // Use augmented MNA for inductors (well-conditioned for large L)
+        println!("  Using augmented MNA for {} inductor variables", {
+            mna.inductors.len()
+                + mna.coupled_inductors.len() * 2
+                + mna.transformer_groups.iter().map(|g| g.num_windings).sum::<usize>()
+        });
+        DkKernel::from_mna_augmented(&mna, actual_sample_rate)
+            .with_context(|| "Failed to create augmented DK kernel")?
+    } else {
+        DkKernel::from_mna(&mna, actual_sample_rate)
+            .with_context(|| "Failed to create DK kernel")?
+    };
     println!("  N={}, M={}", kernel.n, kernel.m);
 
     // Step 5: Build solver
@@ -1098,16 +1113,9 @@ fn simulate_circuit_source(
     }
 
     let has_nonlinear = !devices.is_empty();
-    let has_inductors = !mna.inductors.is_empty()
-        || !mna.coupled_inductors.is_empty()
-        || !mna.transformer_groups.is_empty();
 
-    // Determine solver type: auto picks nodal for nonlinear circuits with inductors
-    let use_nodal = match opts.solver {
-        "nodal" => true,
-        "dk" => false,
-        _ => has_nonlinear && has_inductors, // "auto"
-    };
+    // Determine solver type: nodal only used when explicitly requested
+    let use_nodal = opts.solver == "nodal";
 
     if kernel.m == 0 && !use_nodal {
         // Linear circuit: use LinearSolver
