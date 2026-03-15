@@ -113,8 +113,10 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
 | BJT output wrong | No DC operating point | Call `initialize_dc_op()` or use `DC_NL_I` codegen constant |
 | BJT period-3 oscillation | Backward Euler for nonlinear currents | Fixed: use full i_nl in correction (not delta) |
 | DC OP NR diverges | Wrong Jacobian sign | Use `G_aug = G_dc - N_i·J_dev·N_v` (subtraction!) |
+| NodalSolver NaN after DC OP | Inductor currents not initialized | Copy full v_node (incl. inductor branch currents) from DC OP |
+| NodalSolver wrong A_neg | Inductor rows zeroed | Only zero VS/VCVS rows (n_nodes..n_aug), NOT inductor rows (n_aug..n_nodal) |
 
-## Current Status (2026-03-13)
+## Current Status (2026-03-15)
 
 ### Working
 - Linear circuit simulation (RC lowpass matches ngspice to 0.03% RMS, 8-nines correlation)
@@ -179,12 +181,15 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
   - Supports `--input` for WAV files and `--amplitude` for sine test tones
 - **Explicit re-exports**: all crates (melange-solver, melange-devices, melange-primitives) use named re-exports (no glob `pub use module::*`)
 - **Parasitic cap auto-insertion**: 10pF across device junctions (not to ground) when nonlinear circuit has no caps; stabilizes trapezoidal rule in `from_mna()`
+- **NodalSolver augmented MNA for inductors**: Each inductor winding adds a branch current variable with L in C matrix (2L/T diagonal, well-conditioned). Replaces companion model (T/(2L) ≈ 8e-8 S for 130H). Supports uncoupled, coupled pairs, and multi-winding transformer groups. DC OP initializes inductor currents. DK/CircuitSolver/codegen untouched.
 
 ### Known Limitations
 - Parasitic caps (10pF) auto-inserted across junctions for purely resistive nonlinear circuits
 - Tube Koren model: lambda parameter models finite plate resistance; no space-charge or transit-time effects
 - BJT Gummel-Poon: self-heating (Rth/Cth) and charge storage (CJE/CJC/TF) available; no substrate current or avalanche breakdown
 - **Runtime solver** (`DeviceEntry`) supports all device types: Diode, DiodeWithRs, Led, BJT, JFET, MOSFET, Tube
+- **NodalSolver transient NR**: Linear circuits converge perfectly. Nonlinear circuits (Pultec tubes) hit max iterations on most samples — needs per-device SPICE-style voltage limiting in the full-nodal NR loop (currently only has flat ±5V step clamp)
+- **`melange simulate`** does not yet use NodalSolver — uses CircuitSolver (DK method) which can't handle large inductors
 
 ### Cross-Compilation (macOS from Linux)
 - Zig 0.13 + cargo-zigbuild + macOS SDK 13.3 + rcodesign (ad-hoc signing)
@@ -206,7 +211,11 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
 
 ### Pending Work
 
-#### Current Priority — OpenWurli Integration
+#### Current Priority — NodalSolver Simulation
+- **Wire NodalSolver into `melange simulate`**: Detect large-inductor circuits, route through NodalSolver instead of CircuitSolver
+- **NodalSolver NR convergence for nonlinear circuits**: Add per-device SPICE voltage limiting to full-nodal NR loop (currently only ±5V flat clamp)
+
+#### Next — OpenWurli Integration
 - **Validate wurli-preamp**: SPICE comparison, gain at R_ldr extremes, frequency response
 - **Benchmark M=5 vs M=2**: OpenWurli uses forward-active BJT (Ib≈0, M=2 Cramer's); melange models full Ic+Ib (M=4) + diode (M=5) Gaussian elimination. If perf matters at 64 voices, add 1D forward-active BJT mode.
 - **M>16**: Iterative/sparse NR for very large nonlinear systems

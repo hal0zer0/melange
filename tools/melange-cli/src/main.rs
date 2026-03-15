@@ -157,6 +157,11 @@ enum Commands {
         /// Override input resistance (ohms). Default: 1Ω, or from .input_impedance directive.
         #[arg(long)]
         input_resistance: Option<f64>,
+
+        /// Solver type: auto (default), dk (DK method), nodal (full-nodal NR).
+        /// Auto selects nodal for nonlinear circuits with inductors, dk otherwise.
+        #[arg(long, default_value = "auto")]
+        solver: String,
     },
 
     /// Analyze circuit frequency response
@@ -367,6 +372,7 @@ fn main() -> Result<()> {
             duration,
             amplitude,
             input_resistance: input_resistance_flag,
+            solver,
         } => {
             let circuit_source = circuits::resolve(&input)?;
             println!("Resolved circuit: {}", circuit_source.name());
@@ -381,6 +387,7 @@ fn main() -> Result<()> {
                     duration,
                     amplitude,
                     input_resistance_flag,
+                    solver: &solver,
                 },
             )
         }
@@ -851,6 +858,7 @@ struct SimulateOptions<'a> {
     duration: f64,
     amplitude: f64,
     input_resistance_flag: Option<f64>,
+    solver: &'a str,
 }
 
 fn simulate_circuit_source(
@@ -861,7 +869,7 @@ fn simulate_circuit_source(
         dk::DkKernel,
         mna::MnaSystem,
         parser::Netlist,
-        solver::{CircuitSolver, DeviceEntry},
+        solver::{CircuitSolver, DeviceEntry, NodalSolver},
     };
     use melange_devices::bjt::{BjtEbersMoll, BjtPolarity};
     use melange_devices::diode::DiodeShockley;
@@ -1090,8 +1098,18 @@ fn simulate_circuit_source(
     }
 
     let has_nonlinear = !devices.is_empty();
+    let has_inductors = !mna.inductors.is_empty()
+        || !mna.coupled_inductors.is_empty()
+        || !mna.transformer_groups.is_empty();
 
-    if kernel.m == 0 {
+    // Determine solver type: auto picks nodal for nonlinear circuits with inductors
+    let use_nodal = match opts.solver {
+        "nodal" => true,
+        "dk" => false,
+        _ => has_nonlinear && has_inductors, // "auto"
+    };
+
+    if kernel.m == 0 && !use_nodal {
         // Linear circuit: use LinearSolver
         let mut solver = melange_solver::solver::LinearSolver::new(
             kernel, input_node_idx, output_node_idx,
@@ -1114,8 +1132,50 @@ fn simulate_circuit_source(
         }
 
         write_wav(opts.output, actual_sample_rate, &output_samples)?;
+    } else if use_nodal {
+        // Full-nodal NR solver (augmented MNA for inductors)
+        let device_slots = build_device_slots(&netlist, &mna);
+        let mut solver = NodalSolver::new(
+            kernel, &mna, device_slots.clone(), input_node_idx, output_node_idx,
+        );
+        solver.input_conductance = input_conductance;
+
+        if has_nonlinear {
+            println!("  Initializing DC operating point (nodal)...");
+            solver.initialize_dc_op(&mna, &device_slots);
+            println!("  DC OP initialized");
+        }
+
+        let n_inductor_vars = mna.inductors.len()
+            + mna.coupled_inductors.len() * 2
+            + mna.transformer_groups.iter().map(|g| g.num_windings).sum::<usize>();
+        println!("  Nodal solver ready (M={}, {} inductor variables, n_nodal={})",
+            mna.nonlinear_devices.iter().map(|d| d.dimension).sum::<usize>(),
+            n_inductor_vars,
+            solver.v_prev.len());
+        println!();
+
+        // Process
+        println!("Step 6: Processing {} samples...", samples.len());
+        let mut output_samples = Vec::with_capacity(samples.len());
+        for &s in &samples {
+            output_samples.push(solver.process_sample(s));
+        }
+
+        eprintln!("  Peak output: {:.2}V", solver.diag_peak_output);
+        if solver.diag_clamp_count > 0 {
+            eprintln!("  WARNING: Output exceeded ±10V {} times -- try reducing --amplitude or adding gain reduction to the circuit", solver.diag_clamp_count);
+        }
+        if solver.diag_nr_max_iter_count > 0 {
+            eprintln!("  NR max iterations: {} times", solver.diag_nr_max_iter_count);
+        }
+        if solver.diag_nan_reset_count > 0 {
+            eprintln!("  NaN resets: {}", solver.diag_nan_reset_count);
+        }
+
+        write_wav(opts.output, actual_sample_rate, &output_samples)?;
     } else {
-        // Nonlinear circuit: use CircuitSolver
+        // Nonlinear circuit: use CircuitSolver (DK method)
         let mut solver = CircuitSolver::new(
             kernel, devices, input_node_idx, output_node_idx,
         ).with_context(|| "Failed to create circuit solver")?;
@@ -1124,7 +1184,6 @@ fn simulate_circuit_source(
         // Initialize DC operating point for nonlinear circuits
         if has_nonlinear {
             println!("  Initializing DC operating point...");
-            // Build device slots for DC OP (same as codegen IR uses)
             let device_slots = build_device_slots(&netlist, &mna);
             let converged = solver.initialize_dc_op(&mna, &device_slots);
             if !converged {
