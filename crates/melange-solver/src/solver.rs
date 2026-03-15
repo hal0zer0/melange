@@ -542,6 +542,9 @@ pub struct CircuitSolver {
     jacobian_mat: Vec<f64>,
     /// Pre-allocated M solution vector for Gaussian elimination
     delta: Vec<f64>,
+    /// Precomputed S*N_i for node rows (n_nodes × M, row-major).
+    /// Maps current-space NR steps to node voltage changes for damping.
+    s_ni_nodes: Vec<f64>,
     /// Input node index
     pub input_node: usize,
     /// Output node index
@@ -618,6 +621,20 @@ impl CircuitSolver {
         let jacobian_mat = vec![0.0; m * m];
         let delta = vec![0.0; m];
 
+        // Precompute S*N_i for node rows (n_nodes × M) for NR node voltage damping.
+        // s_ni_nodes[i][j] = sum_k S[i][k] * N_i[k][j], for i in 0..n_nodes
+        let n_nodes = kernel.n_nodes;
+        let mut s_ni_nodes = vec![0.0; n_nodes * m];
+        for i in 0..n_nodes {
+            for j in 0..m {
+                let mut sum = 0.0;
+                for k in 0..n {
+                    sum += kernel.s[i * n + k] * kernel.n_i[k * m + j];
+                }
+                s_ni_nodes[i * m + j] = sum;
+            }
+        }
+
         let dc_block_r = 1.0 - 2.0 * std::f64::consts::PI * 5.0 / kernel.sample_rate;
 
         Ok(Self {
@@ -638,6 +655,7 @@ impl CircuitSolver {
             g_dev,
             jacobian_mat,
             delta,
+            s_ni_nodes,
             input_node,
             output_node,
             input_conductance: 1.0, // Default 1/1Ω (near-ideal voltage source) — caller should set from netlist
@@ -752,7 +770,49 @@ impl CircuitSolver {
         self.compute_all_currents();
         self.update_voltage();
 
-        // Save state for next sample
+        // Save state for next sample.
+        // v_pred now holds the new node voltages (after correction).
+        // v_prev holds the old node voltages (from previous sample).
+        //
+        // Global node voltage damping (a la ngspice CKTnodeDamping):
+        // If any node voltage changed by more than NODE_DAMP_THRESHOLD per sample,
+        // scale the entire step so the maximum change equals the threshold.
+        // This prevents transformer coupling from amplifying NR errors exponentially
+        // across samples. When damping triggers, re-evaluate device currents at the
+        // damped state to keep i_nl_prev consistent with v_prev (otherwise the
+        // N_i * i_nl_prev term in the next sample's RHS feeds back the divergent currents).
+        const NODE_DAMP_THRESHOLD: f64 = 10.0;
+        {
+            let n_nodes = self.kernel.n_nodes;
+            let m = self.kernel.m;
+            let mut max_node_delta = 0.0_f64;
+            for i in 0..n_nodes {
+                let delta = (self.v_pred[i] - self.v_prev[i]).abs();
+                if delta > max_node_delta { max_node_delta = delta; }
+            }
+            if max_node_delta > NODE_DAMP_THRESHOLD {
+                let damp = (NODE_DAMP_THRESHOLD / max_node_delta).max(0.1);
+                let n = self.kernel.n;
+                for i in 0..n {
+                    self.v_pred[i] = self.v_prev[i] + damp * (self.v_pred[i] - self.v_prev[i]);
+                }
+                // Re-evaluate device currents at the damped operating point.
+                // Extract device voltages from damped v_pred: v_nl = N_v * v_pred
+                for i in 0..m {
+                    let mut sum = 0.0;
+                    let nv_offset = i * n;
+                    for j in 0..n {
+                        sum += self.kernel.n_v[nv_offset + j] * self.v_pred[j];
+                    }
+                    self.v_nl[i] = sum;
+                }
+                // Evaluate device currents at damped voltages
+                for device in &self.devices {
+                    device.write_currents(&self.v_nl, &mut self.i_nl);
+                }
+            }
+        }
+
         std::mem::swap(&mut self.v_prev, &mut self.v_pred);
         std::mem::swap(&mut self.v_nl_prev, &mut self.v_nl);
         std::mem::swap(&mut self.i_nl_prev, &mut self.i_nl);
@@ -1083,6 +1143,25 @@ impl CircuitSolver {
                             alpha = ratio;
                         }
                     }
+                }
+            }
+
+            // Node voltage damping (ngspice CKTnodeDamping):
+            // Check if the implied node voltage change from this NR step exceeds 10V.
+            // Uses precomputed S*N_i to map current-space delta to node voltage space.
+            {
+                let n_nodes = self.kernel.n_nodes;
+                let mut max_node_dv = 0.0_f64;
+                for i in 0..n_nodes {
+                    let mut dv = 0.0;
+                    let row_offset = i * m;
+                    for j in 0..m {
+                        dv += self.s_ni_nodes[row_offset + j] * self.delta[j];
+                    }
+                    max_node_dv = max_node_dv.max((alpha * dv).abs());
+                }
+                if max_node_dv > 10.0 {
+                    alpha *= (10.0 / max_node_dv).max(0.01);
                 }
             }
 
@@ -2524,7 +2603,7 @@ impl NodalSolver {
         input_node: usize,
         output_node: usize,
     ) -> Self {
-        let n_aug = kernel.n;
+        let n_aug = mna.n_aug;    // original system dimension (not kernel.n which may be augmented)
         let n_nodes = kernel.n_nodes;
         let m = kernel.m;
 
@@ -2651,17 +2730,20 @@ impl NodalSolver {
             }
         }
 
-        // Expand rhs_const from kernel (n_aug) to n_nodal (inductor rows = 0)
+        // Build rhs_const, N_v, N_i from MNA (always n_aug-sized), expand to n_nodal.
+        // Use MNA directly — kernel.rhs_const/n_v/n_i might already be at n_nodal
+        // if from_mna_augmented was used, and we don't want to double-expand.
+        let rhs_const_base = crate::dk::build_rhs_const(mna);
         let mut rhs_const = vec![0.0; n_nodal];
         for i in 0..n_aug {
-            rhs_const[i] = kernel.rhs_const[i];
+            rhs_const[i] = rhs_const_base[i];
         }
 
         // Expand N_v from m × n_aug to m × n_nodal (extra cols = 0)
         let mut n_v = vec![0.0; m * n_nodal];
         for i in 0..m {
             for j in 0..n_aug {
-                n_v[i * n_nodal + j] = kernel.n_v[i * n_aug + j];
+                n_v[i * n_nodal + j] = mna.n_v[i][j];
             }
         }
 
@@ -2669,7 +2751,7 @@ impl NodalSolver {
         let mut n_i = vec![0.0; n_nodal * m];
         for i in 0..n_aug {
             for j in 0..m {
-                n_i[i * m + j] = kernel.n_i[i * m + j];
+                n_i[i * m + j] = mna.n_i[i][j];
             }
         }
 
@@ -2851,32 +2933,49 @@ impl NodalSolver {
                 }
             };
 
-            // 2f. SPICE-style voltage limiting + convergence check
-            // Compute proposed device voltages from v_new, apply pnjlim/fetlim,
-            // and compute a scalar damping factor alpha for the full step.
+            // 2f. SPICE-style voltage limiting + ngspice global node damping.
+            //
+            // Two layers of damping, applied multiplicatively to a single alpha:
+            // 1) Device voltage limiting (pnjlim/fetlim): prevents NR overshoot on
+            //    steep nonlinear I-V curves (PN junctions, FET thresholds).
+            // 2) Global node voltage damping (ngspice CKTnodeDamping): limits max
+            //    node voltage change to 10V per NR iteration, preventing transformer
+            //    coupling from amplifying device voltage steps to 1e8V node swings.
             let mut alpha = 1.0_f64;
+
+            // Layer 1: SPICE device voltage limiting
             if m > 0 {
                 for slot in &self.device_slots {
                     let s = slot.start_idx;
                     for d in 0..slot.dimension {
                         let i = s + d;
-                        // Proposed nonlinear voltage from solved v_new
                         let mut v_nl_proposed = 0.0;
                         let nv_offset = i * n;
                         for j in 0..n {
                             v_nl_proposed += self.n_v[nv_offset + j] * v_new[j];
                         }
-                        let v_nl_current = self.v_nl[i]; // from step 2a
+                        let v_nl_current = self.v_nl[i];
                         let dv = v_nl_proposed - v_nl_current;
                         if dv.abs() > 1e-15 {
                             let v_limited = limit_slot_voltage(slot, d, v_nl_proposed, v_nl_current);
                             let dv_limited = v_limited - v_nl_current;
                             let ratio = (dv_limited / dv).clamp(0.01, 1.0);
-                            if ratio < alpha {
-                                alpha = ratio;
-                            }
+                            if ratio < alpha { alpha = ratio; }
                         }
                     }
+                }
+            }
+
+            // Layer 2: Global node voltage damping (10V threshold)
+            {
+                let n_nodes = self.kernel.n_nodes;
+                let mut max_node_dv = 0.0_f64;
+                for i in 0..n_nodes {
+                    let dv = alpha * (v_new[i] - v[i]);
+                    max_node_dv = max_node_dv.max(dv.abs());
+                }
+                if max_node_dv > 10.0 {
+                    alpha *= (10.0 / max_node_dv).max(0.01);
                 }
             }
 

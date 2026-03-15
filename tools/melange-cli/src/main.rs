@@ -1114,8 +1114,12 @@ fn simulate_circuit_source(
 
     let has_nonlinear = !devices.is_empty();
 
-    // Determine solver type: nodal only used when explicitly requested
-    let use_nodal = opts.solver == "nodal";
+    // Determine solver type: auto picks nodal for nonlinear circuits with inductors
+    let use_nodal = match opts.solver {
+        "nodal" => true,
+        "dk" => false,
+        _ => has_nonlinear && has_inductors, // "auto"
+    };
 
     if kernel.m == 0 && !use_nodal {
         // Linear circuit: use LinearSolver

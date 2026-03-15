@@ -969,7 +969,7 @@ impl DkKernel {
 /// - Voltage source augmented rows (indices n..n+num_vs-1): set to V_dc (NOT multiplied
 ///   by 2, because these are algebraic constraints, not differential equations).
 /// - VCVS augmented rows: 0 (homogeneous constraint).
-fn build_rhs_const(mna: &MnaSystem) -> Vec<f64> {
+pub(crate) fn build_rhs_const(mna: &MnaSystem) -> Vec<f64> {
     let n = mna.n;
     let n_aug = mna.n_aug;
     let mut rhs = vec![0.0; n_aug];
