@@ -749,6 +749,115 @@ fn build_rhs_const(mna: &MnaSystem) -> Vec<f64> {
     rhs
 }
 
+/// Solve A * x = b using equilibrated LU decomposition with iterative refinement.
+///
+/// Same numerical approach as `invert_matrix` but solves a single system instead
+/// of computing the full inverse. Used by the NodalSolver for per-iteration Jacobian
+/// solves where cond(A) can be ~1e9 (too ill-conditioned for basic LU).
+#[allow(clippy::needless_range_loop)]
+pub fn solve_equilibrated(a: &[Vec<f64>], b: &[f64]) -> Option<Vec<f64>> {
+    let n = a.len();
+    if n == 0 { return Some(Vec::new()); }
+
+    // Step 1: Equilibrate
+    let mut d = vec![1.0; n];
+    for i in 0..n {
+        let diag = a[i][i].abs();
+        if diag > SINGULARITY_THRESHOLD {
+            d[i] = 1.0 / diag.sqrt();
+        }
+    }
+
+    let mut a_eq = vec![vec![0.0; n]; n];
+    for i in 0..n {
+        for j in 0..n {
+            a_eq[i][j] = d[i] * a[i][j] * d[j];
+        }
+    }
+
+    // Step 2: LU factorize with partial pivoting
+    let mut perm = vec![0usize; n];
+    for i in 0..n { perm[i] = i; }
+
+    for col in 0..n {
+        let mut max_row = col;
+        let mut max_val = a_eq[col][col].abs();
+        for row in (col + 1)..n {
+            if a_eq[row][col].abs() > max_val {
+                max_val = a_eq[row][col].abs();
+                max_row = row;
+            }
+        }
+        if max_val < SINGULARITY_THRESHOLD {
+            return None; // Singular
+        }
+        if max_row != col {
+            a_eq.swap(col, max_row);
+            perm.swap(col, max_row);
+        }
+        let pivot = a_eq[col][col];
+        for row in (col + 1)..n {
+            let factor = a_eq[row][col] / pivot;
+            a_eq[row][col] = factor;
+            for j in (col + 1)..n {
+                a_eq[row][j] -= factor * a_eq[col][j];
+            }
+        }
+    }
+
+    // Step 3: Solve LU * x_eq = D * P * b
+    // Build permuted, scaled RHS
+    let mut x = vec![0.0; n];
+    for i in 0..n {
+        x[i] = d[perm[i]] * b[perm[i]];
+    }
+
+    // Forward substitution (L * y = rhs)
+    for i in 1..n {
+        let mut sum = 0.0;
+        for j in 0..i { sum += a_eq[i][j] * x[j]; }
+        x[i] -= sum;
+    }
+
+    // Backward substitution (U * x_eq = y)
+    for i in (0..n).rev() {
+        let mut sum = 0.0;
+        for j in (i + 1)..n { sum += a_eq[i][j] * x[j]; }
+        x[i] = (x[i] - sum) / a_eq[i][i];
+    }
+
+    // Step 4: Iterative refinement
+    // Compute residual in permuted equilibrated space: r = D*P*b - (P*A_eq)*x
+    let mut r = vec![0.0; n];
+    for i in 0..n {
+        let pi = perm[i];
+        let mut ax_i = 0.0;
+        for j in 0..n {
+            ax_i += d[pi] * a[pi][j] * d[j] * x[j];
+        }
+        r[i] = d[pi] * b[pi] - ax_i;
+    }
+
+    // Solve LU * dx = r
+    for i in 1..n {
+        let mut sum = 0.0;
+        for j in 0..i { sum += a_eq[i][j] * r[j]; }
+        r[i] -= sum;
+    }
+    for i in (0..n).rev() {
+        let mut sum = 0.0;
+        for j in (i + 1)..n { sum += a_eq[i][j] * r[j]; }
+        r[i] = (r[i] - sum) / a_eq[i][i];
+    }
+
+    // Apply correction and undo equilibration: x_final = D * (x_eq + dx)
+    for i in 0..n {
+        x[i] = d[i] * (x[i] + r[i]);
+    }
+
+    Some(x)
+}
+
 /// Flatten a 2D matrix into a 1D row-major vector.
 ///
 /// Index calculation: index = row * cols + col

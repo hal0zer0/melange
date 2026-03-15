@@ -2633,7 +2633,9 @@ impl NodalSolver {
             }
 
             // 2e. Solve: v_new = G_aug^{-1} * rhs_work
-            let v_new = match dc_op::solve_linear(&self.g_aug, &self.rhs_work) {
+            // Use equilibrated LU (not basic LU) because the transient A matrix is
+            // ill-conditioned (cond ~1e9 from large inductor companion conductances).
+            let v_new = match crate::dk::solve_equilibrated(&self.g_aug, &self.rhs_work) {
                 Some(v) => v,
                 None => {
                     self.diag_nr_max_iter_count += 1;
