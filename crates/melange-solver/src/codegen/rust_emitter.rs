@@ -489,18 +489,23 @@ impl RustEmitter {
         ctx.insert("n_nodes", &n_nodes);
         let has_augmented = n_nodes < n;
         ctx.insert("has_augmented", &has_augmented);
+        ctx.insert("augmented_inductors", &ir.topology.augmented_inductors);
+        ctx.insert("n_aug", &ir.topology.n_aug);
 
-        let num_inductors = ir.inductors.len();
+        // When augmented_inductors is true, companion model constants (IND_*_G_EQ,
+        // CI_*_G_SELF/MUTUAL, XFMR_*_Y) are not needed. The G/C matrices already
+        // contain inductor stamps and A_neg handles history.
+        let num_inductors = if ir.topology.augmented_inductors { 0 } else { ir.inductors.len() };
         ctx.insert("num_inductors", &num_inductors);
         if num_inductors > 0 {
             ctx.insert("inductors", &inductor_template_data(ir, true));
         }
-        let num_coupled_inductors = ir.coupled_inductors.len();
+        let num_coupled_inductors = if ir.topology.augmented_inductors { 0 } else { ir.coupled_inductors.len() };
         ctx.insert("num_coupled_inductors", &num_coupled_inductors);
         if num_coupled_inductors > 0 {
             ctx.insert("coupled_inductors", &coupled_inductor_template_data(ir));
         }
-        let num_transformer_groups = ir.transformer_groups.len();
+        let num_transformer_groups = if ir.topology.augmented_inductors { 0 } else { ir.transformer_groups.len() };
         ctx.insert("num_transformer_groups", &num_transformer_groups);
         if num_transformer_groups > 0 {
             ctx.insert("transformer_groups", &transformer_group_template_data(ir));
@@ -605,7 +610,12 @@ impl RustEmitter {
     fn emit_state(&self, ir: &CircuitIR) -> Result<String, CodegenError> {
         let mut ctx = Context::new();
         ctx.insert("has_dc_op", &ir.has_dc_op);
-        let num_inductors = ir.inductors.len();
+        ctx.insert("augmented_inductors", &ir.topology.augmented_inductors);
+        ctx.insert("n_aug", &ir.topology.n_aug);
+        ctx.insert("n_nodes", &ir.topology.n_nodes);
+        // When augmented_inductors is true, companion model state (ind_i_prev, ci_i_hist,
+        // xfmr_y, etc.) is not needed. A_neg handles history through augmented G/C.
+        let num_inductors = if ir.topology.augmented_inductors { 0 } else { ir.inductors.len() };
         ctx.insert("num_inductors", &num_inductors);
         let num_pots = ir.pots.len();
         ctx.insert("num_pots", &num_pots);
@@ -628,12 +638,12 @@ impl RustEmitter {
         if num_inductors > 0 {
             ctx.insert("inductors", &inductor_template_data(ir, true));
         }
-        let num_coupled_inductors = ir.coupled_inductors.len();
+        let num_coupled_inductors = if ir.topology.augmented_inductors { 0 } else { ir.coupled_inductors.len() };
         ctx.insert("num_coupled_inductors", &num_coupled_inductors);
         if num_coupled_inductors > 0 {
             ctx.insert("coupled_inductors", &coupled_inductor_template_data(ir));
         }
-        let num_transformer_groups = ir.transformer_groups.len();
+        let num_transformer_groups = if ir.topology.augmented_inductors { 0 } else { ir.transformer_groups.len() };
         ctx.insert("num_transformer_groups", &num_transformer_groups);
         if num_transformer_groups > 0 {
             ctx.insert("transformer_groups", &transformer_group_template_data(ir));
@@ -876,7 +886,7 @@ impl RustEmitter {
         let m = ir.topology.m;
         let n_nodes = if ir.topology.n_nodes > 0 { ir.topology.n_nodes } else { n };
         let num_pots = ir.pots.len();
-        let num_inductors = ir.inductors.len();
+        let num_inductors = if ir.topology.augmented_inductors { 0 } else { ir.inductors.len() };
         let os_factor = ir.solver_config.oversampling_factor;
         let mut code = String::new();
 
@@ -984,10 +994,13 @@ impl RustEmitter {
         );
 
         // Zero augmented rows in A_neg (algebraic constraints for VS/VCVS)
-        if n_nodes < n {
+        // When augmented_inductors, only zero n_nodes..n_aug (not inductor rows)
+        let n_aug = ir.topology.n_aug;
+        let a_neg_zero_end = if ir.topology.augmented_inductors { n_aug } else { n };
+        if n_nodes < a_neg_zero_end {
             code.push_str(&format!(
-                "        // Zero augmented rows (VS/VCVS algebraic constraints)\n\
-                 \x20       for i in {n_nodes}..N {{\n\
+                "        // Zero VS/VCVS algebraic rows in A_neg (NOT inductor rows)\n\
+                 \x20       for i in {n_nodes}..{a_neg_zero_end} {{\n\
                  \x20           for j in 0..N {{\n\
                  \x20               a_neg[i][j] = 0.0;\n\
                  \x20           }}\n\
@@ -1045,7 +1058,7 @@ impl RustEmitter {
         }
 
         // Coupled inductor companion stamps
-        let num_coupled = ir.coupled_inductors.len();
+        let num_coupled = if ir.topology.augmented_inductors { 0 } else { ir.coupled_inductors.len() };
         if num_coupled > 0 {
             if num_inductors == 0 {
                 code.push_str("        let t = 1.0 / internal_rate;\n");
@@ -1088,7 +1101,7 @@ impl RustEmitter {
         }
 
         // Transformer group companion stamps
-        let num_xfmr_groups = ir.transformer_groups.len();
+        let num_xfmr_groups = if ir.topology.augmented_inductors { 0 } else { ir.transformer_groups.len() };
         if num_xfmr_groups > 0 {
             if num_inductors == 0 && num_coupled == 0 {
                 code.push_str("        let t = 1.0 / internal_rate;\n");
@@ -1432,18 +1445,22 @@ impl RustEmitter {
         let mut ctx = Context::new();
 
         ctx.insert("has_dc_sources", &ir.has_dc_sources);
+        ctx.insert("augmented_inductors", &ir.topology.augmented_inductors);
 
-        let num_inductors = ir.inductors.len();
+        // When augmented_inductors is true, companion model history is handled by A_neg,
+        // so num_inductors/num_coupled_inductors/num_transformer_groups should be 0
+        // for the build_rhs template (no history current injection).
+        let num_inductors = if ir.topology.augmented_inductors { 0 } else { ir.inductors.len() };
         ctx.insert("num_inductors", &num_inductors);
         if num_inductors > 0 {
             ctx.insert("inductors", &inductor_template_data(ir, false));
         }
-        let num_coupled_inductors = ir.coupled_inductors.len();
+        let num_coupled_inductors = if ir.topology.augmented_inductors { 0 } else { ir.coupled_inductors.len() };
         ctx.insert("num_coupled_inductors", &num_coupled_inductors);
         if num_coupled_inductors > 0 {
             ctx.insert("coupled_inductors", &coupled_inductor_template_data(ir));
         }
-        let num_transformer_groups = ir.transformer_groups.len();
+        let num_transformer_groups = if ir.topology.augmented_inductors { 0 } else { ir.transformer_groups.len() };
         ctx.insert("num_transformer_groups", &num_transformer_groups);
         if num_transformer_groups > 0 {
             let mut xfmr_rhs_lines = String::new();
@@ -1568,17 +1585,20 @@ impl RustEmitter {
 
     fn emit_process_sample(&self, ir: &CircuitIR) -> Result<String, CodegenError> {
         let mut ctx = Context::new();
-        let num_inductors = ir.inductors.len();
+        ctx.insert("augmented_inductors", &ir.topology.augmented_inductors);
+        // When augmented_inductors is true, companion model state update is not needed —
+        // A_neg handles all inductor history through the augmented G/C matrices.
+        let num_inductors = if ir.topology.augmented_inductors { 0 } else { ir.inductors.len() };
         ctx.insert("num_inductors", &num_inductors);
         if num_inductors > 0 {
             ctx.insert("inductors", &inductor_template_data(ir, false));
         }
-        let num_coupled_inductors = ir.coupled_inductors.len();
+        let num_coupled_inductors = if ir.topology.augmented_inductors { 0 } else { ir.coupled_inductors.len() };
         ctx.insert("num_coupled_inductors", &num_coupled_inductors);
         if num_coupled_inductors > 0 {
             ctx.insert("coupled_inductors", &coupled_inductor_template_data(ir));
         }
-        let num_transformer_groups = ir.transformer_groups.len();
+        let num_transformer_groups = if ir.topology.augmented_inductors { 0 } else { ir.transformer_groups.len() };
         ctx.insert("num_transformer_groups", &num_transformer_groups);
         if num_transformer_groups > 0 {
             // Generate transformer group state update code procedurally

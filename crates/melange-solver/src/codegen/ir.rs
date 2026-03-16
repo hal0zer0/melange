@@ -54,7 +54,7 @@ pub struct CircuitMetadata {
 /// Circuit topology dimensions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Topology {
-    /// System dimension = n_aug (n + num_vs + num_vcvs).
+    /// System dimension = n_aug (n + num_vs + num_vcvs), or n_nodal when augmented inductors are used.
     /// This is the size of all N-indexed matrices and vectors in the solver.
     pub n: usize,
     /// Original circuit node count (excluding ground and augmented VS/VCVS variables).
@@ -65,6 +65,16 @@ pub struct Topology {
     pub m: usize,
     /// Number of physical nonlinear devices
     pub num_devices: usize,
+    /// Boundary between VS/VCVS rows and inductor branch variables.
+    /// Equal to mna.n_aug (= n_nodes + num_vs + num_vcvs).
+    /// When augmented_inductors is true, A_neg rows n_nodes..n_aug should be zeroed,
+    /// but inductor rows n_aug..n should NOT be zeroed.
+    #[serde(default)]
+    pub n_aug: usize,
+    /// True when inductors use augmented MNA (branch current variables in G/C)
+    /// instead of companion model (history currents in state).
+    #[serde(default)]
+    pub augmented_inductors: bool,
 }
 
 /// Solver configuration baked into the generated code.
@@ -594,11 +604,18 @@ impl CircuitIR {
             )));
         }
 
+        // Detect augmented inductors: kernel.inductors is empty when from_mna_augmented
+        // was used (companion vectors cleared), and kernel.n > mna.n_aug means extra
+        // inductor branch variables were added.
+        let augmented_inductors = kernel.inductors.is_empty() && (kernel.n > mna.n_aug);
+
         let topology = Topology {
             n,
             n_nodes,
             m,
             num_devices: kernel.num_devices,
+            n_aug: mna.n_aug,
+            augmented_inductors,
         };
 
         let os_factor = config.oversampling_factor;
@@ -624,15 +641,21 @@ impl CircuitIR {
 
         // Store the raw G and C matrices for runtime sample rate recomputation.
         // The MNA G matrix already includes input conductance (stamped before kernel build).
-        let g_matrix = dk::flatten_matrix(&mna.g, n, n);
-        let c_matrix = dk::flatten_matrix(&mna.c, n, n);
+        // When augmented inductors are used, kernel.n > mna.n_aug, so we need the
+        // augmented G/C (with inductor KCL/KVL/L stamps) at the full n_nodal dimension.
+        let (g_matrix, c_matrix) = if augmented_inductors {
+            let aug = mna.build_augmented_matrices();
+            (dk::flatten_matrix(&aug.g, n, n), dk::flatten_matrix(&aug.c, n, n))
+        } else {
+            (dk::flatten_matrix(&mna.g, n, n), dk::flatten_matrix(&mna.c, n, n))
+        };
 
         let matrices = if os_factor > 1 {
             // Recompute matrices at internal (oversampled) rate from G and C.
             let alpha = 2.0 * internal_rate;
             let t = 1.0 / internal_rate;
 
-            // Build A = G + alpha*C (add inductor companion g_eq at internal rate)
+            // Build A = G + alpha*C
             let mut a_flat = vec![0.0f64; n * n];
             let mut a_neg_flat = vec![0.0f64; n * n];
             for i in 0..n {
@@ -644,29 +667,42 @@ impl CircuitIR {
                 }
             }
 
-            // Stamp inductor companion conductances at internal rate
-            for ind in &kernel.inductors {
-                let g_eq = t / (2.0 * ind.inductance);
-                stamp_flat_conductance(&mut a_flat, n, ind.node_i, ind.node_j, g_eq);
-                stamp_flat_conductance(&mut a_neg_flat, n, ind.node_i, ind.node_j, -g_eq);
+            if !augmented_inductors {
+                // Companion model path: stamp inductor conductances at internal rate
+                for ind in &kernel.inductors {
+                    let g_eq = t / (2.0 * ind.inductance);
+                    stamp_flat_conductance(&mut a_flat, n, ind.node_i, ind.node_j, g_eq);
+                    stamp_flat_conductance(&mut a_neg_flat, n, ind.node_i, ind.node_j, -g_eq);
+                }
+
+                // Stamp coupled inductor companion conductances at internal rate
+                for ci in &kernel.coupled_inductors {
+                    let m_val = ci.coupling * (ci.l1_inductance * ci.l2_inductance).sqrt();
+                    let det = ci.l1_inductance * ci.l2_inductance - m_val * m_val;
+                    let half_t = t / 2.0;
+                    let gs1 = half_t * ci.l2_inductance / det;
+                    let gs2 = half_t * ci.l1_inductance / det;
+                    let gm = -half_t * m_val / det;
+                    stamp_flat_conductance(&mut a_flat, n, ci.l1_node_i, ci.l1_node_j, gs1);
+                    stamp_flat_conductance(&mut a_neg_flat, n, ci.l1_node_i, ci.l1_node_j, -gs1);
+                    stamp_flat_conductance(&mut a_flat, n, ci.l2_node_i, ci.l2_node_j, gs2);
+                    stamp_flat_conductance(&mut a_neg_flat, n, ci.l2_node_i, ci.l2_node_j, -gs2);
+                    stamp_flat_mutual(&mut a_flat, n, ci.l1_node_i, ci.l1_node_j, ci.l2_node_i, ci.l2_node_j, gm);
+                    stamp_flat_mutual(&mut a_flat, n, ci.l2_node_i, ci.l2_node_j, ci.l1_node_i, ci.l1_node_j, gm);
+                    stamp_flat_mutual(&mut a_neg_flat, n, ci.l1_node_i, ci.l1_node_j, ci.l2_node_i, ci.l2_node_j, -gm);
+                    stamp_flat_mutual(&mut a_neg_flat, n, ci.l2_node_i, ci.l2_node_j, ci.l1_node_i, ci.l1_node_j, -gm);
+                }
             }
 
-            // Stamp coupled inductor companion conductances at internal rate
-            for ci in &kernel.coupled_inductors {
-                let m_val = ci.coupling * (ci.l1_inductance * ci.l2_inductance).sqrt();
-                let det = ci.l1_inductance * ci.l2_inductance - m_val * m_val;
-                let half_t = t / 2.0;
-                let gs1 = half_t * ci.l2_inductance / det;
-                let gs2 = half_t * ci.l1_inductance / det;
-                let gm = -half_t * m_val / det;
-                stamp_flat_conductance(&mut a_flat, n, ci.l1_node_i, ci.l1_node_j, gs1);
-                stamp_flat_conductance(&mut a_neg_flat, n, ci.l1_node_i, ci.l1_node_j, -gs1);
-                stamp_flat_conductance(&mut a_flat, n, ci.l2_node_i, ci.l2_node_j, gs2);
-                stamp_flat_conductance(&mut a_neg_flat, n, ci.l2_node_i, ci.l2_node_j, -gs2);
-                stamp_flat_mutual(&mut a_flat, n, ci.l1_node_i, ci.l1_node_j, ci.l2_node_i, ci.l2_node_j, gm);
-                stamp_flat_mutual(&mut a_flat, n, ci.l2_node_i, ci.l2_node_j, ci.l1_node_i, ci.l1_node_j, gm);
-                stamp_flat_mutual(&mut a_neg_flat, n, ci.l1_node_i, ci.l1_node_j, ci.l2_node_i, ci.l2_node_j, -gm);
-                stamp_flat_mutual(&mut a_neg_flat, n, ci.l2_node_i, ci.l2_node_j, ci.l1_node_i, ci.l1_node_j, -gm);
+            // Zero VS/VCVS algebraic rows in A_neg (NOT inductor rows).
+            // These have no capacitance and no history — rhs_const provides V_dc directly.
+            let a_neg_zero_end = if augmented_inductors { mna.n_aug } else { n };
+            if n_nodes < a_neg_zero_end {
+                for i in n_nodes..a_neg_zero_end {
+                    for j in 0..n {
+                        a_neg_flat[i * n + j] = 0.0;
+                    }
+                }
             }
 
             // Invert A to get S
@@ -865,11 +901,17 @@ impl CircuitIR {
             topology,
             solver_config,
             matrices,
-            // Truncate DC OP to n_aug (the codegen kernel dimension).
-            // The DC OP solver returns n_dc = n_aug + n_inductors, but
-            // inductor branch currents are only meaningful in the augmented
-            // MNA system (NodalSolver), not in the companion-model codegen.
-            dc_operating_point: dc_result.v_node[..kernel.n].to_vec(),
+            // For augmented inductors, the DC OP solver returns n_aug-sized vectors
+            // but the kernel dimension is n_nodal = n_aug + n_inductor_vars.
+            // Pad with zeros for inductor branch currents (DC OP doesn't solve them).
+            // For companion model, truncate to kernel.n (= n_aug).
+            dc_operating_point: if augmented_inductors {
+                let mut dc = dc_result.v_node.clone();
+                dc.resize(kernel.n, 0.0); // pad with zeros for inductor branch currents
+                dc
+            } else {
+                dc_result.v_node[..kernel.n].to_vec()
+            },
             device_slots,
             has_dc_sources,
             has_dc_op,

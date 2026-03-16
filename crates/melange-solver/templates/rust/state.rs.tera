@@ -422,9 +422,13 @@ impl CircuitState {
             }
         }
 {% if has_augmented %}
-        // Zero augmented rows (voltage source / VCVS algebraic constraints).
+        // Zero VS/VCVS algebraic rows in A_neg (NOT inductor rows).
         // These have no capacitance and no history — rhs_const provides V_dc directly.
+{% if augmented_inductors %}
+        for i in {{ n_nodes }}..{{ n_aug }} {
+{% else %}
         for i in {{ n_nodes }}..N {
+{% endif %}
             for j in 0..N {
                 a_neg[i][j] = 0.0;
             }

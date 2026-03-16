@@ -561,9 +561,19 @@ fn compile_circuit_source(
     }
 
     // Step 3: Create DK kernel
+    // Use augmented MNA for inductor circuits (well-conditioned for large L)
+    let has_inductors_compile = !mna.inductors.is_empty()
+        || !mna.coupled_inductors.is_empty()
+        || !mna.transformer_groups.is_empty();
     println!("Step 3: Creating DK kernel...");
-    let kernel = DkKernel::from_mna(&mna, sample_rate)
-        .with_context(|| "Failed to create DK kernel")?;
+    let kernel = if has_inductors_compile {
+        println!("  Using augmented MNA for inductors");
+        DkKernel::from_mna_augmented(&mna, sample_rate)
+            .with_context(|| "Failed to create augmented DK kernel")?
+    } else {
+        DkKernel::from_mna(&mna, sample_rate)
+            .with_context(|| "Failed to create DK kernel")?
+    };
 
     println!("  ✓ Matrix dimensions: N={}, M={}", kernel.n, kernel.m);
 

@@ -545,69 +545,10 @@ impl DkKernel {
             }
         }
 
-        // Build G_nodal and C_nodal from raw MNA matrices (no companion conductances)
-        let mut g_nod = vec![vec![0.0; n]; n];
-        let mut c_nod = vec![vec![0.0; n]; n];
-        for i in 0..n_aug {
-            for j in 0..n_aug {
-                g_nod[i][j] = mna.g[i][j];
-                c_nod[i][j] = mna.c[i][j];
-            }
-        }
-
-        // Stamp inductor augmented variables (same logic as NodalSolver::new)
-        let mut var_idx = n_aug;
-
-        for ind in &mna.inductors {
-            let k = var_idx;
-            let ni = ind.node_i;
-            let nj = ind.node_j;
-            if ni > 0 { g_nod[ni - 1][k] += 1.0; }
-            if nj > 0 { g_nod[nj - 1][k] -= 1.0; }
-            if ni > 0 { g_nod[k][ni - 1] -= 1.0; }
-            if nj > 0 { g_nod[k][nj - 1] += 1.0; }
-            c_nod[k][k] = ind.value;
-            var_idx += 1;
-        }
-
-        for ci in &mna.coupled_inductors {
-            let k1 = var_idx;
-            let k2 = var_idx + 1;
-            if ci.l1_node_i > 0 { g_nod[ci.l1_node_i - 1][k1] += 1.0; }
-            if ci.l1_node_j > 0 { g_nod[ci.l1_node_j - 1][k1] -= 1.0; }
-            if ci.l1_node_i > 0 { g_nod[k1][ci.l1_node_i - 1] -= 1.0; }
-            if ci.l1_node_j > 0 { g_nod[k1][ci.l1_node_j - 1] += 1.0; }
-            if ci.l2_node_i > 0 { g_nod[ci.l2_node_i - 1][k2] += 1.0; }
-            if ci.l2_node_j > 0 { g_nod[ci.l2_node_j - 1][k2] -= 1.0; }
-            if ci.l2_node_i > 0 { g_nod[k2][ci.l2_node_i - 1] -= 1.0; }
-            if ci.l2_node_j > 0 { g_nod[k2][ci.l2_node_j - 1] += 1.0; }
-            c_nod[k1][k1] = ci.l1_value;
-            c_nod[k2][k2] = ci.l2_value;
-            let m_val = ci.coupling * (ci.l1_value * ci.l2_value).sqrt();
-            c_nod[k1][k2] = m_val;
-            c_nod[k2][k1] = m_val;
-            var_idx += 2;
-        }
-
-        for group in &mna.transformer_groups {
-            let w = group.num_windings;
-            let base_k = var_idx;
-            for widx in 0..w {
-                let k = base_k + widx;
-                let ni = group.winding_node_i[widx];
-                let nj = group.winding_node_j[widx];
-                if ni > 0 { g_nod[ni - 1][k] += 1.0; }
-                if nj > 0 { g_nod[nj - 1][k] -= 1.0; }
-                if ni > 0 { g_nod[k][ni - 1] -= 1.0; }
-                if nj > 0 { g_nod[k][nj - 1] += 1.0; }
-                for widx2 in 0..w {
-                    let k2 = base_k + widx2;
-                    c_nod[k][k2] = group.coupling_matrix[widx][widx2]
-                        * (group.inductances[widx] * group.inductances[widx2]).sqrt();
-                }
-            }
-            var_idx += w;
-        }
+        // Build augmented G/C matrices using shared method
+        let aug = mna.build_augmented_matrices();
+        let g_nod = aug.g;
+        let c_nod = aug.c;
 
         // Build A = G + (2/T)*C
         let mut a = vec![vec![0.0; n]; n];

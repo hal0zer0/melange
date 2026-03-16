@@ -2621,27 +2621,15 @@ impl NodalSolver {
         let n_nodes = kernel.n_nodes;
         let m = kernel.m;
 
-        // Count total inductor winding variables
-        let n_uncoupled = mna.inductors.len();
-        let n_coupled_windings: usize = mna.coupled_inductors.len() * 2;
-        let n_xfmr_windings: usize = mna.transformer_groups.iter()
-            .map(|g| g.num_windings).sum();
-        let n_inductor_vars = n_uncoupled + n_coupled_windings + n_xfmr_windings;
-        let n_nodal = n_aug + n_inductor_vars;
+        // Build augmented G/C matrices using shared method
+        let aug = mna.build_augmented_matrices();
+        let n_inductor_vars = aug.n_inductor_vars;
+        let n_nodal = aug.n_nodal;
+        let mut g_nod = aug.g;
+        let c_nod = aug.c;
 
         let t = 1.0 / kernel.sample_rate;
         let alpha = 2.0 / t; // 2/T
-
-        // Build G_nodal and C_nodal (n_nodal × n_nodal)
-        // Start from MNA's raw G and C (no inductor companion conductances)
-        let mut g_nod = vec![vec![0.0; n_nodal]; n_nodal];
-        let mut c_nod = vec![vec![0.0; n_nodal]; n_nodal];
-        for i in 0..n_aug {
-            for j in 0..n_aug {
-                g_nod[i][j] = mna.g[i][j];
-                c_nod[i][j] = mna.c[i][j];
-            }
-        }
 
         // Gmin regularization: tiny conductance from every circuit node to ground.
         // Standard SPICE practice (ngspice default Gmin = 1e-12 S). Prevents
@@ -2649,82 +2637,6 @@ impl NodalSolver {
         let gmin = 1e-12;
         for i in 0..n_nodes {
             g_nod[i][i] += gmin;
-        }
-
-        // Stamp inductor augmented variables
-        let mut var_idx = n_aug;
-
-        // Uncoupled inductors: 1 variable each
-        for ind in &mna.inductors {
-            let k = var_idx;
-            let ni = ind.node_i; // 1-indexed, 0 = ground
-            let nj = ind.node_j;
-
-            // KCL: j_L enters node_i, exits node_j
-            if ni > 0 { g_nod[ni - 1][k] += 1.0; }
-            if nj > 0 { g_nod[nj - 1][k] -= 1.0; }
-            // KVL row: -V_i + V_j (= -L·dj_L/dt, with L in C)
-            if ni > 0 { g_nod[k][ni - 1] -= 1.0; }
-            if nj > 0 { g_nod[k][nj - 1] += 1.0; }
-            // Self-inductance in C matrix
-            c_nod[k][k] = ind.value;
-
-            var_idx += 1;
-        }
-
-        // Coupled inductor pairs: 2 variables each
-        for ci in &mna.coupled_inductors {
-            let k1 = var_idx;
-            let k2 = var_idx + 1;
-
-            // Winding 1 KCL/KVL
-            if ci.l1_node_i > 0 { g_nod[ci.l1_node_i - 1][k1] += 1.0; }
-            if ci.l1_node_j > 0 { g_nod[ci.l1_node_j - 1][k1] -= 1.0; }
-            if ci.l1_node_i > 0 { g_nod[k1][ci.l1_node_i - 1] -= 1.0; }
-            if ci.l1_node_j > 0 { g_nod[k1][ci.l1_node_j - 1] += 1.0; }
-
-            // Winding 2 KCL/KVL
-            if ci.l2_node_i > 0 { g_nod[ci.l2_node_i - 1][k2] += 1.0; }
-            if ci.l2_node_j > 0 { g_nod[ci.l2_node_j - 1][k2] -= 1.0; }
-            if ci.l2_node_i > 0 { g_nod[k2][ci.l2_node_i - 1] -= 1.0; }
-            if ci.l2_node_j > 0 { g_nod[k2][ci.l2_node_j - 1] += 1.0; }
-
-            // Self-inductances
-            c_nod[k1][k1] = ci.l1_value;
-            c_nod[k2][k2] = ci.l2_value;
-            // Mutual inductance M = k·√(L1·L2)
-            let m_val = ci.coupling * (ci.l1_value * ci.l2_value).sqrt();
-            c_nod[k1][k2] = m_val;
-            c_nod[k2][k1] = m_val;
-
-            var_idx += 2;
-        }
-
-        // Transformer groups: N variables each
-        for group in &mna.transformer_groups {
-            let w = group.num_windings;
-            let base_k = var_idx;
-
-            for widx in 0..w {
-                let k = base_k + widx;
-                let ni = group.winding_node_i[widx];
-                let nj = group.winding_node_j[widx];
-
-                // KCL/KVL stamps for winding
-                if ni > 0 { g_nod[ni - 1][k] += 1.0; }
-                if nj > 0 { g_nod[nj - 1][k] -= 1.0; }
-                if ni > 0 { g_nod[k][ni - 1] -= 1.0; }
-                if nj > 0 { g_nod[k][nj - 1] += 1.0; }
-
-                // Inductance sub-matrix: L[i][j] = k_ij·√(Li·Lj)
-                for widx2 in 0..w {
-                    let k2 = base_k + widx2;
-                    c_nod[k][k2] = group.coupling_matrix[widx][widx2]
-                        * (group.inductances[widx] * group.inductances[widx2]).sqrt();
-                }
-            }
-
-            var_idx += w;
         }
 
         // Resolve .delay_feedback node names to indices
