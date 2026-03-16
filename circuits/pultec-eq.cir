@@ -223,6 +223,8 @@ K_optab L_opt_a L_opt_b 0.95
 * turns (feedback tap), L_tert ≈ L_pri/16 ≈ 2.4H. Using conservative estimate.
 L_fb_a fb_s5 fb_s3 2.4
 R_fb_shunt fb_s3 fb_s5 1000
+* DC ground reference for tertiary (winding DC resistance)
+R_fb_dcref fb_s5 0 1Meg
 R_fb_a fb_s3 cathode 360
 R_fb_b fb_s5 fb_node 360
 * Coupling: tertiary to each primary half

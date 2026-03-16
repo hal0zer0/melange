@@ -1,0 +1,65 @@
+* Two transformers + two tubes + global NFB
+* Tests whether two transformer groups with tubes in between converges
+*
+* Input xfmr: HS-29 style (3-winding, 130H)
+* Two tube stages (12AX7)
+* Output xfmr: S-217-D style (3-winding, 9.5H) with NFB from tertiary
+*
+.model 12AX7 TRIODE(MU=100 EX=1.4 KG1=1060 KP=600 KVB=300)
+
+* Power supply
+Vcc vcc 0 DC 290
+
+* === INPUT TRANSFORMER (simple coupled pair) ===
+L_in_pri in in_ct 10
+L_in_sec grid_tap grid_ct 10
+K_in L_in_pri L_in_sec 0.95
+Rct1 in_ct 0 100
+Rg_ct grid_ct 0 100
+
+* Grid coupling from input transformer
+Rg1 grid_tap grid1 100k
+Rg1_leak grid1 0 1Meg
+
+* === STAGE 1 ===
+T1 grid1 plate1 cathode1 12AX7
+Ra1 vcc plate1 100k
+Rk1 cathode1 fb_node 820
+
+* === STAGE 2 ===
+Cc plate1 grid2 10n
+Rg2 grid2 0 470k
+T2 grid2 plate2 cathode2 12AX7
+Ra2 vcc plate2 100k
+Rk2 cathode2 0 4.7k
+
+* === OUTPUT TRANSFORMER (S-217-D style) ===
+L_out_pri plate2 xfmr2_ct 9.525
+Rct2 xfmr2_ct 0 100
+* Secondary
+L_out_sec out 0 1.903
+* Tertiary (feedback winding) with DC ground reference
+L_out_tert fb_s1 fb_s2 2.4
+Rfb_gnd_ref fb_s2 0 1Meg
+* Couplings
+K_out1 L_out_pri L_out_sec 0.95
+K_out2 L_out_pri L_out_tert 0.95
+K_out3 L_out_sec L_out_tert 0.95
+
+* === FEEDBACK ===
+* Tertiary -> shunt resistor -> feedback resistors to cathode/fb_node
+Rfb_shunt fb_s1 fb_s2 1000
+Rfb_a fb_s1 cathode1 360
+Rfb_b fb_s2 fb_node 360
+
+* fb_node connects cathode1 through Rk1 and receives feedback from tertiary
+* This creates series-voltage NFB across the 820-ohm cathode resistor
+
+* Output load
+Rload out 0 100k
+
+* Stability caps
+C1 grid1 0 1n
+C2 plate1 0 100p
+C3 plate2 0 100p
+C4 out 0 100p
