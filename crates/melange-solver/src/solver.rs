@@ -2897,7 +2897,9 @@ impl NodalSolver {
         }
 
         // Warm-up: process silence samples to settle transients.
-        for _ in 0..200 {
+        // Use 50 warm-up samples (enough for circuits without huge inductors).
+        // Circuits with very large inductors settle during initial audio processing.
+        for _ in 0..50 {
             self.process_sample(0.0);
         }
     }

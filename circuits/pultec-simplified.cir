@@ -5,8 +5,11 @@
 .model 12AX7 TRIODE(MU=100 EX=1.4 KG1=1060 KP=600 KVB=300)
 .model 12AU7 TRIODE(MU=21.5 EX=1.3 KG1=1180 KP=84 KVB=300)
 
-* Power supply
+* Power supply with B+ filtering (matches real Pultec)
 Vcc vcc 0 DC 290
+R_drop vcc node_g 2200
+C_filt node_g 0 40u
+R_bias_filt node_g v250 47k
 
 * === PASSIVE EQ NETWORK (simplified: HF boost + LF path) ===
 * HF boost: in → R_hfb_u → b → R_hfb_l → eq, with LC series from b
@@ -45,8 +48,8 @@ R_gg mid_gg grid2 43k
 
 T1a grid1 plate1 cathode 12AX7
 T1b grid2 plate2 cathode 12AX7
-Ra1a vcc plate1 100k
-Ra1b vcc plate2 100k
+Ra1a v250 plate1 200k
+Ra1b v250 plate2 200k
 Rk cathode fb_node 820
 
 * === 12AU7 PUSH-PULL OUTPUT ===
@@ -64,6 +67,7 @@ T2a grid2a plate2a cath2 12AU7
 T2b grid2b plate2b cath2 12AU7
 Ra2a vcc plate2a 100k
 Ra2b vcc plate2b 100k
+Ck2 cath2 0 100u
 Rk2 cath2 0 4.7k
 
 * Plate stoppers
