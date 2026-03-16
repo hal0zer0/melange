@@ -806,6 +806,11 @@ fn build_device_slots_from_netlist(
                         rb: 0.0,
                         rc: 0.0,
                         re: 0.0,
+                        rth: f64::INFINITY,
+                        cth: 1e-3,
+                        xti: 3.0,
+                        eg: 1.11,
+                        tamb: 300.15,
                     }),
                 });
                 dim_offset += 2;

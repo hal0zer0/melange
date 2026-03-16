@@ -1693,6 +1693,11 @@ fn build_device_slots(
                         rb: find_param(&model_name, "RB").unwrap_or(0.0),
                         rc: find_param(&model_name, "RC").unwrap_or(0.0),
                         re: find_param(&model_name, "RE").unwrap_or(0.0),
+                        rth: f64::INFINITY,
+                        cth: 1e-3,
+                        xti: 3.0,
+                        eg: 1.11,
+                        tamb: 300.15,
                     }),
                 });
             }

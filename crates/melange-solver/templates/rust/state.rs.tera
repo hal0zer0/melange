@@ -142,6 +142,13 @@ pub struct CircuitState {
     pub device_{{ dev.dev_num }}_{{ p.field_suffix }}: f64,
 {% endfor %}{% endfor %}
 {% endif %}
+{% if num_thermal_devices > 0 %}
+    // --- BJT self-heating thermal state ---
+{% for td in thermal_devices %}
+    /// BJT {{ td.dev_num }} junction temperature [K]
+    pub device_{{ td.dev_num }}_tj: f64,
+{% endfor %}
+{% endif %}
 }
 
 impl Default for CircuitState {
@@ -223,6 +230,11 @@ impl Default for CircuitState {
             device_{{ dev.dev_num }}_{{ p.field_suffix }}: DEVICE_{{ dev.dev_num }}_{{ p.const_suffix }},
 {% endfor %}{% endfor %}
 {% endif %}
+{% if num_thermal_devices > 0 %}
+{% for td in thermal_devices %}
+            device_{{ td.dev_num }}_tj: DEVICE_{{ td.dev_num }}_TAMB,
+{% endfor %}
+{% endif %}
         }
     }
 }
@@ -281,6 +293,11 @@ impl CircuitState {
 {% for dev in device_params %}{% for p in dev.params %}
         self.device_{{ dev.dev_num }}_{{ p.field_suffix }} = DEVICE_{{ dev.dev_num }}_{{ p.const_suffix }};
 {% endfor %}{% endfor %}
+{% endif %}
+{% if num_thermal_devices > 0 %}
+{% for td in thermal_devices %}
+        self.device_{{ td.dev_num }}_tj = DEVICE_{{ td.dev_num }}_TAMB;
+{% endfor %}
 {% endif %}
     }
 

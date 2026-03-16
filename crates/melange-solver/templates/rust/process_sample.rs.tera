@@ -111,6 +111,10 @@ pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS
     // Step 7d: Update transformer group companion model state
 {{ xfmr_update_lines }}{% endif %}
 
+{% if thermal_update is defined and thermal_update != "" %}
+    // Step 7e: BJT self-heating thermal update (quasi-static, outside NR)
+{{ thermal_update }}{% endif %}
+
     // Step 8: Sanitize state — if NaN/inf entered, reset to prevent poisoning
     if !state.v_prev.iter().all(|x| x.is_finite()) {
         state.v_prev = [0.0; N];
@@ -126,7 +130,10 @@ pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS
         state.ci_i1_hist = [0.0; {{ num_coupled_inductors }}];
         state.ci_i2_hist = [0.0; {{ num_coupled_inductors }}];
 {% endif %}{% if num_transformer_groups > 0 %}{{ xfmr_nan_reset_lines }}{% endif %}{% for default in pot_defaults %}        state.pot_{{ loop.index0 }}_resistance = {{ default }};
-{% endfor %}        state.diag_nan_reset_count += 1;
+{% endfor %}{% if num_thermal_devices > 0 %}{% for td in thermal_devices %}        state.device_{{ td.dev_num }}_tj = DEVICE_{{ td.dev_num }}_TAMB;
+        state.device_{{ td.dev_num }}_is = DEVICE_{{ td.dev_num }}_IS;
+        state.device_{{ td.dev_num }}_vt = DEVICE_{{ td.dev_num }}_VT;
+{% endfor %}{% endif %}        state.diag_nan_reset_count += 1;
         return [0.0; NUM_OUTPUTS];
     }
 

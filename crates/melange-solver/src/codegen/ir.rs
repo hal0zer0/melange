@@ -358,6 +358,21 @@ pub struct BjtParams {
     /// Emitter series resistance [Ohms] (0.0 = disabled)
     #[serde(default)]
     pub re: f64,
+    /// Thermal resistance [K/W] (inf = disabled, default)
+    #[serde(default = "default_infinity", deserialize_with = "deserialize_f64_or_infinity")]
+    pub rth: f64,
+    /// Thermal capacitance [J/K] (default 1e-3, typical TO-92)
+    #[serde(default = "default_cth")]
+    pub cth: f64,
+    /// IS temperature exponent (default 3.0)
+    #[serde(default = "default_xti")]
+    pub xti: f64,
+    /// Bandgap energy [eV] (default 1.11, silicon)
+    #[serde(default = "default_eg")]
+    pub eg: f64,
+    /// Ambient temperature [K] (default 300.15 = 27C)
+    #[serde(default = "default_tamb")]
+    pub tamb: f64,
 }
 
 fn default_infinity() -> f64 {
@@ -374,6 +389,22 @@ fn default_one() -> f64 {
 
 fn default_ne() -> f64 {
     1.5
+}
+
+fn default_cth() -> f64 {
+    1e-3
+}
+
+fn default_xti() -> f64 {
+    3.0
+}
+
+fn default_eg() -> f64 {
+    1.11
+}
+
+fn default_tamb() -> f64 {
+    300.15
 }
 
 /// Deserialize an f64 that may be null (JSON cannot represent infinity).
@@ -395,6 +426,8 @@ impl BjtParams {
     pub fn has_ise(&self) -> bool { self.ise > 0.0 }
     /// Returns true if any parasitic resistance (RB/RC/RE) is enabled.
     pub fn has_parasitics(&self) -> bool { self.rb > 0.0 || self.rc > 0.0 || self.re > 0.0 }
+    /// Returns true if self-heating is enabled (RTH is finite).
+    pub fn has_self_heating(&self) -> bool { self.rth.is_finite() }
 }
 
 /// A slot in the nonlinear system: maps a device to its M-dimension range.
@@ -1541,7 +1574,48 @@ impl CircuitIR {
             ));
         }
 
-        Ok(BjtParams { is, vt, beta_f, beta_r, is_pnp, vaf, var, ikf, ikr, cje, cjc, nf, ise, ne, rb, rc, re })
+        // Self-heating parameters (optional)
+        let rth = Self::lookup_model_param(netlist, model, "RTH")
+            .unwrap_or(f64::INFINITY);
+        if rth.is_finite() && rth <= 0.0 {
+            return Err(CodegenError::InvalidConfig(
+                format!("BJT model RTH must be positive (or infinite to disable), got {rth}")
+            ));
+        }
+
+        let cth = Self::lookup_model_param(netlist, model, "CTH")
+            .unwrap_or(1e-3);
+        if cth <= 0.0 || !cth.is_finite() {
+            return Err(CodegenError::InvalidConfig(
+                format!("BJT model CTH must be positive and finite, got {cth}")
+            ));
+        }
+
+        let xti = Self::lookup_model_param(netlist, model, "XTI")
+            .unwrap_or(3.0);
+        if !xti.is_finite() {
+            return Err(CodegenError::InvalidConfig(
+                format!("BJT model XTI must be finite, got {xti}")
+            ));
+        }
+
+        let eg = Self::lookup_model_param(netlist, model, "EG")
+            .unwrap_or(1.11);
+        if eg <= 0.0 || !eg.is_finite() {
+            return Err(CodegenError::InvalidConfig(
+                format!("BJT model EG must be positive and finite, got {eg}")
+            ));
+        }
+
+        let tamb = Self::lookup_model_param(netlist, model, "TAMB")
+            .unwrap_or(300.15);
+        if tamb <= 0.0 || !tamb.is_finite() {
+            return Err(CodegenError::InvalidConfig(
+                format!("BJT model TAMB must be positive and finite, got {tamb}")
+            ));
+        }
+
+        Ok(BjtParams { is, vt, beta_f, beta_r, is_pnp, vaf, var, ikf, ikr, cje, cjc, nf, ise, ne, rb, rc, re, rth, cth, xti, eg, tamb })
     }
 
     /// Resolve JFET model parameters from the netlist, with validation.

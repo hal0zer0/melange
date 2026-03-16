@@ -98,6 +98,34 @@ struct DeviceParamEntry {
     const_suffix: String,
 }
 
+/// Data for a BJT with self-heating enabled (passed to Tera templates).
+#[derive(Serialize)]
+struct SelfHeatingDeviceData {
+    /// Device index (0-based)
+    dev_num: usize,
+    /// Start index in M-dimensional NR space (Vbe/Ic slot)
+    start_idx: usize,
+}
+
+/// Collect BJT devices that have self-heating enabled.
+fn self_heating_device_data(ir: &CircuitIR) -> Vec<SelfHeatingDeviceData> {
+    ir.device_slots
+        .iter()
+        .enumerate()
+        .filter_map(|(dev_num, slot)| {
+            if let DeviceParams::Bjt(bp) = &slot.params {
+                if bp.has_self_heating() {
+                    return Some(SelfHeatingDeviceData {
+                        dev_num,
+                        start_idx: slot.start_idx,
+                    });
+                }
+            }
+            None
+        })
+        .collect()
+}
+
 /// Build `DeviceParamTemplateData` for each device slot in the IR.
 ///
 /// Only parameters that should be runtime-adjustable are included.
@@ -780,6 +808,14 @@ impl RustEmitter {
             ctx.insert("device_params", &device_params);
         }
 
+        // BJT self-heating thermal state
+        let thermal_devices = self_heating_device_data(ir);
+        let num_thermal_devices = thermal_devices.len();
+        ctx.insert("num_thermal_devices", &num_thermal_devices);
+        if num_thermal_devices > 0 {
+            ctx.insert("thermal_devices", &thermal_devices);
+        }
+
         self.render("state", &ctx)
     }
 
@@ -791,6 +827,7 @@ impl RustEmitter {
         let mut has_jfet = false;
         let mut has_mosfet = false;
         let mut has_tube = false;
+        let mut has_bjt_self_heating = false;
 
         for (dev_num, slot) in ir.device_slots.iter().enumerate() {
             match &slot.params {
@@ -812,6 +849,7 @@ impl RustEmitter {
                 }
                 DeviceParams::Bjt(bp) => {
                     has_bjt = true;
+                    if bp.has_self_heating() { has_bjt_self_heating = true; }
                     emit_device_const(&mut code, dev_num, "IS", bp.is);
                     emit_device_const(&mut code, dev_num, "VT", bp.vt);
                     emit_device_const(&mut code, dev_num, "BETA_F", bp.beta_f);
@@ -839,6 +877,14 @@ impl RustEmitter {
                         emit_device_const(&mut code, dev_num, "RB", bp.rb);
                         emit_device_const(&mut code, dev_num, "RC", bp.rc);
                         emit_device_const(&mut code, dev_num, "RE", bp.re);
+                    }
+                    if bp.has_self_heating() {
+                        emit_device_const(&mut code, dev_num, "RTH", bp.rth);
+                        emit_device_const(&mut code, dev_num, "CTH", bp.cth);
+                        emit_device_const(&mut code, dev_num, "XTI", bp.xti);
+                        emit_device_const(&mut code, dev_num, "EG", bp.eg);
+                        emit_device_const(&mut code, dev_num, "TAMB", bp.tamb);
+                        emit_device_const(&mut code, dev_num, "IS_NOM", bp.is);
                     }
                     code.push('\n');
                 }
@@ -904,6 +950,12 @@ impl RustEmitter {
                     code.push('\n');
                 }
             }
+        }
+
+        // Boltzmann constant / elementary charge (k/q in eV/K)
+        if has_bjt_self_heating {
+            code.push_str("/// Boltzmann constant / elementary charge [eV/K]\n");
+            code.push_str("const BOLTZMANN_Q: f64 = 8.617333262e-5;\n\n");
         }
 
         // SPICE voltage limiting functions (needed by all nonlinear devices)
@@ -1807,6 +1859,47 @@ impl RustEmitter {
         }
         if !body_effect_update.is_empty() {
             ctx.insert("body_effect_update", &body_effect_update);
+        }
+
+        // BJT self-heating thermal update (after NR, before state save)
+        let mut thermal_update = String::new();
+        for (dev_num, slot) in ir.device_slots.iter().enumerate() {
+            if let DeviceParams::Bjt(bp) = &slot.params {
+                if bp.has_self_heating() {
+                    let s = slot.start_idx;
+                    let s1 = s + 1;
+                    // Extract Ic, Ib from converged i_nl; compute Vbe, Vbc from final v
+                    thermal_update.push_str(&format!(
+                        "    {{ // BJT {dev_num} self-heating thermal update\n\
+                         \x20       let ic = i_nl[{s}];\n\
+                         \x20       let ib = i_nl[{s1}];\n\
+                         \x20       let v_nl_th = extract_controlling_voltages(&v);\n\
+                         \x20       let vbe = v_nl_th[{s}];\n\
+                         \x20       let vbc = v_nl_th[{s1}];\n\
+                         \x20       let vce = vbe - vbc;\n\
+                         \x20       let p = vce * ic + vbe * ib;\n\
+                         \x20       let dt = 1.0 / SAMPLE_RATE;\n\
+                         \x20       let d_tj = (p - (state.device_{dev_num}_tj - DEVICE_{dev_num}_TAMB) / DEVICE_{dev_num}_RTH) / DEVICE_{dev_num}_CTH * dt;\n\
+                         \x20       state.device_{dev_num}_tj += d_tj;\n\
+                         \x20       state.device_{dev_num}_tj = state.device_{dev_num}_tj.clamp(200.0, 500.0);\n\
+                         \x20       state.device_{dev_num}_vt = BOLTZMANN_Q * state.device_{dev_num}_tj;\n\
+                         \x20       let t_ratio = state.device_{dev_num}_tj / DEVICE_{dev_num}_TAMB;\n\
+                         \x20       let vt_nom = BOLTZMANN_Q * DEVICE_{dev_num}_TAMB;\n\
+                         \x20       state.device_{dev_num}_is = DEVICE_{dev_num}_IS_NOM\n\
+                         \x20           * t_ratio.powf(DEVICE_{dev_num}_XTI)\n\
+                         \x20           * ((DEVICE_{dev_num}_EG / vt_nom) * (1.0 - DEVICE_{dev_num}_TAMB / state.device_{dev_num}_tj)).exp();\n\
+                         \x20   }}\n"
+                    ));
+                }
+            }
+        }
+        if !thermal_update.is_empty() {
+            ctx.insert("thermal_update", &thermal_update);
+            let thermal_devices = self_heating_device_data(ir);
+            ctx.insert("num_thermal_devices", &thermal_devices.len());
+            ctx.insert("thermal_devices", &thermal_devices);
+        } else {
+            ctx.insert("num_thermal_devices", &0usize);
         }
 
         self.render("process_sample", &ctx)
@@ -3110,6 +3203,19 @@ impl RustEmitter {
             }
         }
 
+        // BJT self-heating thermal state
+        let thermal_devices = self_heating_device_data(ir);
+        if !thermal_devices.is_empty() {
+            code.push_str("\n    // --- BJT self-heating thermal state ---\n");
+            for td in &thermal_devices {
+                code.push_str(&format!(
+                    "    /// BJT {} junction temperature [K]\n\
+                     \x20   pub device_{}_tj: f64,\n",
+                    td.dev_num, td.dev_num
+                ));
+            }
+        }
+
         // Oversampling state
         let os_factor = ir.solver_config.oversampling_factor;
         if os_factor > 1 {
@@ -3177,6 +3283,13 @@ impl RustEmitter {
             }
         }
 
+        for td in &thermal_devices {
+            code.push_str(&format!(
+                "            device_{}_tj: DEVICE_{}_TAMB,\n",
+                td.dev_num, td.dev_num
+            ));
+        }
+
         if os_factor > 1 {
             let os_info = oversampling_info(os_factor);
             code.push_str(&format!(
@@ -3225,6 +3338,12 @@ impl RustEmitter {
                     dev.dev_num, p.field_suffix, dev.dev_num, p.const_suffix
                 ));
             }
+        }
+        for td in &thermal_devices {
+            code.push_str(&format!(
+                "        self.device_{}_tj = DEVICE_{}_TAMB;\n",
+                td.dev_num, td.dev_num
+            ));
         }
         if os_factor > 1 {
             let os_info = oversampling_info(os_factor);
@@ -3777,12 +3896,57 @@ impl RustEmitter {
         }
         code.push('\n');
 
+        // Step 3b: BJT self-heating thermal update (quasi-static, outside NR)
+        for (dev_num, slot) in ir.device_slots.iter().enumerate() {
+            if let DeviceParams::Bjt(bp) = &slot.params {
+                if bp.has_self_heating() {
+                    let s = slot.start_idx;
+                    let s1 = s + 1;
+                    code.push_str(&format!(
+                        "    {{ // BJT {dev_num} self-heating thermal update\n\
+                         \x20       let ic = i_nl[{s}];\n\
+                         \x20       let ib = i_nl[{s1}];\n\
+                         \x20       // Extract controlling voltages from final node voltages\n\
+                         \x20       let mut vbe_sum = 0.0f64;\n\
+                         \x20       let mut vbc_sum = 0.0f64;\n\
+                         \x20       for j in 0..N {{ vbe_sum += N_V[{s}][j] * v[j]; }}\n\
+                         \x20       for j in 0..N {{ vbc_sum += N_V[{s1}][j] * v[j]; }}\n\
+                         \x20       let vce = vbe_sum - vbc_sum;\n\
+                         \x20       let p = vce * ic + vbe_sum * ib;\n\
+                         \x20       let dt = 1.0 / SAMPLE_RATE;\n\
+                         \x20       let d_tj = (p - (state.device_{dev_num}_tj - DEVICE_{dev_num}_TAMB) / DEVICE_{dev_num}_RTH) / DEVICE_{dev_num}_CTH * dt;\n\
+                         \x20       state.device_{dev_num}_tj += d_tj;\n\
+                         \x20       state.device_{dev_num}_tj = state.device_{dev_num}_tj.clamp(200.0, 500.0);\n\
+                         \x20       state.device_{dev_num}_vt = BOLTZMANN_Q * state.device_{dev_num}_tj;\n\
+                         \x20       let t_ratio = state.device_{dev_num}_tj / DEVICE_{dev_num}_TAMB;\n\
+                         \x20       let vt_nom = BOLTZMANN_Q * DEVICE_{dev_num}_TAMB;\n\
+                         \x20       state.device_{dev_num}_is = DEVICE_{dev_num}_IS_NOM\n\
+                         \x20           * t_ratio.powf(DEVICE_{dev_num}_XTI)\n\
+                         \x20           * ((DEVICE_{dev_num}_EG / vt_nom) * (1.0 - DEVICE_{dev_num}_TAMB / state.device_{dev_num}_tj)).exp();\n\
+                         \x20   }}\n"
+                    ));
+                }
+            }
+        }
+
         // NaN check
         code.push_str("    // Sanitize state: if NaN/inf entered, reset to prevent poisoning\n");
         code.push_str("    if !state.v_prev.iter().all(|x| x.is_finite()) {\n");
         code.push_str("        state.v_prev = [0.0; N];\n");
         code.push_str("        state.i_nl_prev = [0.0; M];\n");
         code.push_str("        state.input_prev = 0.0;\n");
+        // Reset thermal state on NaN
+        for (dev_num, slot) in ir.device_slots.iter().enumerate() {
+            if let DeviceParams::Bjt(bp) = &slot.params {
+                if bp.has_self_heating() {
+                    code.push_str(&format!(
+                        "        state.device_{dev_num}_tj = DEVICE_{dev_num}_TAMB;\n\
+                         \x20       state.device_{dev_num}_is = DEVICE_{dev_num}_IS;\n\
+                         \x20       state.device_{dev_num}_vt = DEVICE_{dev_num}_VT;\n"
+                    ));
+                }
+            }
+        }
         code.push_str("        state.diag_nan_reset_count += 1;\n");
         code.push_str("        return [0.0; NUM_OUTPUTS];\n");
         code.push_str("    }\n\n");

@@ -545,6 +545,7 @@ fn build_device_slots(netlist: &Netlist, _mna: &MnaSystem) -> Vec<DeviceSlot> {
                         cje: 0.0, cjc: 0.0,
                         nf: 1.0, ise: 0.0, ne: 1.5,
                         rb: 0.0, rc: 0.0, re: 0.0,
+                        rth: f64::INFINITY, cth: 1e-3, xti: 3.0, eg: 1.11, tamb: 300.15,
                     }),
                 });
                 dim_offset += 2;
