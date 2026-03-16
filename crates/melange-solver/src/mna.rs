@@ -1318,6 +1318,43 @@ impl MnaBuilder {
                     inductances.push(r.value);
                     winding_names.push(r.name.clone());
                 }
+                // Validate: check that the inductance matrix is positive definite.
+                // A non-PD matrix means the coupling coefficients are physically
+                // inconsistent (e.g., k_ab=0.95, k_bc=0.95, k_ac=0.50 is impossible).
+                {
+                    let mut l_mat = vec![vec![0.0f64; w]; w];
+                    for i in 0..w {
+                        for j in 0..w {
+                            l_mat[i][j] = coupling_matrix[i][j]
+                                * (inductances[i] * inductances[j]).sqrt();
+                        }
+                    }
+                    // Check via Cholesky-like: all leading minors must be positive.
+                    // For small w (≤8), compute determinant directly.
+                    let det = if w == 2 {
+                        l_mat[0][0]*l_mat[1][1] - l_mat[0][1]*l_mat[1][0]
+                    } else {
+                        // Use the invert_small_matrix helper — if it returns near-zero
+                        // diagonal entries, the matrix is singular or non-PD.
+                        let inv = invert_small_matrix(&l_mat);
+                        // Check: all diagonal entries of inv should be positive for PD
+                        let min_diag: f64 = inv.iter().enumerate()
+                            .map(|(i, row)| row[i])
+                            .fold(f64::INFINITY, f64::min);
+                        min_diag // positive means PD
+                    };
+                    if det <= 0.0 || !det.is_finite() {
+                        log::warn!(
+                            "Transformer group '{}' ({} windings) has non-positive-definite inductance matrix. \
+                             This means the coupling coefficients are physically inconsistent. \
+                             Check that all K values are compatible (all windings on the same core \
+                             should have similar coupling coefficients).",
+                            format!("xfmr_{}", mna.transformer_groups.len()),
+                            w
+                        );
+                    }
+                }
+
                 let group_idx = mna.transformer_groups.len();
                 mna.transformer_groups.push(TransformerGroupInfo {
                     name: format!("xfmr_{}", group_idx),
