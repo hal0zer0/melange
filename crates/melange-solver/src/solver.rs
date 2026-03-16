@@ -3054,8 +3054,7 @@ impl NodalSolver {
 
         if !converged {
             self.diag_nr_max_iter_count += 1;
-            // Ensure i_nl is consistent with the final v (the last NR step
-            // updated v but i_nl was evaluated at the PREVIOUS v).
+            // Accept last iterate but ensure i_nl is consistent with v
             if m > 0 {
                 for i in 0..m {
                     let mut sum = 0.0;
