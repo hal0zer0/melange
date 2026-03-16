@@ -3559,6 +3559,7 @@ fn test_ir_bjt_params_gp_serde_roundtrip() {
         is_pnp: false, vaf: 100.0, var: f64::INFINITY, ikf: 0.3, ikr: f64::INFINITY,
         cje: 0.0, cjc: 0.0,
         nf: 1.0, ise: 0.0, ne: 1.5,
+        rb: 0.0, rc: 0.0, re: 0.0,
     };
 
     let json = serde_json::to_string(&bp).unwrap();

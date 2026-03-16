@@ -41,6 +41,10 @@ pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS
 
     // Step 3: Extract controlling voltages for nonlinear devices
     let p = extract_controlling_voltages(&v_pred);
+{% if body_effect_update is defined and body_effect_update != "" %}
+
+    // Step 3c: MOSFET body effect — update VT from predicted node voltages
+{{ body_effect_update }}{% endif %}
 {% if use_k_eff is defined and use_k_eff %}
 
     // Step 3b: Precompute corrected K matrix for NR solver

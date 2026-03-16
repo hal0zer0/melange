@@ -1690,6 +1690,9 @@ fn build_device_slots(
                         nf: find_param(&model_name, "NF").unwrap_or(1.0),
                         ise: find_param(&model_name, "ISE").unwrap_or(0.0),
                         ne: find_param(&model_name, "NE").unwrap_or(1.5),
+                        rb: find_param(&model_name, "RB").unwrap_or(0.0),
+                        rc: find_param(&model_name, "RC").unwrap_or(0.0),
+                        re: find_param(&model_name, "RE").unwrap_or(0.0),
                     }),
                 });
             }
@@ -1754,6 +1757,10 @@ fn build_device_slots(
                         cgd: find_param(&model_name, "CGD").unwrap_or(0.0),
                         rd: find_param(&model_name, "RD").unwrap_or(0.0),
                         rs_param: find_param(&model_name, "RS").unwrap_or(0.0),
+                        gamma: find_param(&model_name, "GAMMA").unwrap_or(0.0),
+                        phi: find_param(&model_name, "PHI").unwrap_or(0.6),
+                        source_node: 0,
+                        bulk_node: 0,
                     }),
                 });
             }

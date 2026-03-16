@@ -349,6 +349,15 @@ pub struct BjtParams {
     /// B-E leakage emission coefficient (default 1.5)
     #[serde(default = "default_ne")]
     pub ne: f64,
+    /// Base series resistance [Ohms] (0.0 = disabled)
+    #[serde(default)]
+    pub rb: f64,
+    /// Collector series resistance [Ohms] (0.0 = disabled)
+    #[serde(default)]
+    pub rc: f64,
+    /// Emitter series resistance [Ohms] (0.0 = disabled)
+    #[serde(default)]
+    pub re: f64,
 }
 
 fn default_infinity() -> f64 {
@@ -384,6 +393,8 @@ impl BjtParams {
     pub fn has_nf(&self) -> bool { (self.nf - 1.0).abs() > 1e-15 }
     /// Returns true if B-E leakage current (ISE) is enabled.
     pub fn has_ise(&self) -> bool { self.ise > 0.0 }
+    /// Returns true if any parasitic resistance (RB/RC/RE) is enabled.
+    pub fn has_parasitics(&self) -> bool { self.rb > 0.0 || self.rc > 0.0 || self.re > 0.0 }
 }
 
 /// A slot in the nonlinear system: maps a device to its M-dimension range.
@@ -460,11 +471,27 @@ pub struct MosfetParams {
     /// Source ohmic resistance [Ohms] (0.0 = disabled)
     #[serde(default)]
     pub rs_param: f64,
+    /// Body effect coefficient GAMMA [V^0.5] (0.0 = disabled)
+    #[serde(default)]
+    pub gamma: f64,
+    /// Surface potential PHI [V] (default 0.6)
+    #[serde(default = "default_phi")]
+    pub phi: f64,
+    /// Source node index in N-dimensional system (needed for body effect Vsb computation)
+    #[serde(default)]
+    pub source_node: usize,
+    /// Bulk node index in N-dimensional system (needed for body effect Vsb computation)
+    #[serde(default)]
+    pub bulk_node: usize,
 }
+
+fn default_phi() -> f64 { 0.6 }
 
 impl MosfetParams {
     /// Returns true if either drain or source resistance is enabled.
     pub fn has_rd_rs(&self) -> bool { self.rd > 0.0 || self.rs_param > 0.0 }
+    /// Returns true if body effect is enabled.
+    pub fn has_body_effect(&self) -> bool { self.gamma > 0.0 }
 }
 
 /// Tube/triode model parameters (Koren + improved grid current).
@@ -877,7 +904,8 @@ impl CircuitIR {
             }
         };
 
-        let device_slots = Self::build_device_info(netlist)?;
+        let mut device_slots = Self::build_device_info(netlist)?;
+        Self::resolve_mosfet_nodes(&mut device_slots, mna);
 
         let inductors: Vec<InductorIR> = kernel.inductors.iter().map(|ind| {
             // Recompute g_eq at internal rate when oversampling
@@ -1222,7 +1250,8 @@ impl CircuitIR {
         let mut dc_operating_point = dc_result.v_node.clone();
         dc_operating_point.resize(n, 0.0);
 
-        let device_slots = Self::build_device_info(netlist)?;
+        let mut device_slots = Self::build_device_info(netlist)?;
+        Self::resolve_mosfet_nodes(&mut device_slots, mna);
 
         // Sparsity analysis
         let sparsity = SparseInfo {
@@ -1318,6 +1347,35 @@ impl CircuitIR {
         }
 
         Ok(slots)
+    }
+
+    /// Resolve MOSFET source/bulk node indices from MNA nonlinear device info.
+    ///
+    /// Called after `build_device_info` to populate `source_node` and `bulk_node`
+    /// fields in MosfetParams, which are needed for body effect (GAMMA/PHI).
+    fn resolve_mosfet_nodes(slots: &mut [DeviceSlot], mna: &MnaSystem) {
+        let mut mosfet_idx = 0;
+        for slot in slots.iter_mut() {
+            if let DeviceParams::Mosfet(ref mut mp) = slot.params {
+                if mp.has_body_effect() {
+                    // Find the matching MOSFET in MNA nonlinear_devices
+                    for dev in &mna.nonlinear_devices {
+                        if dev.device_type == crate::mna::NonlinearDeviceType::Mosfet
+                            && dev.start_idx == slot.start_idx
+                        {
+                            // node_indices: [drain, gate, source, bulk]
+                            // node_indices are 1-based (0 = ground)
+                            // For the N-dimensional system, node index i maps to v[i-1]
+                            mp.source_node = dev.node_indices[2];
+                            mp.bulk_node = dev.node_indices[3];
+                            break;
+                        }
+                    }
+                }
+                mosfet_idx += 1;
+            }
+        }
+        let _ = mosfet_idx; // suppress unused warning
     }
 
     /// Resolve diode model parameters from the netlist, with validation.
@@ -1460,7 +1518,30 @@ impl CircuitIR {
             ));
         }
 
-        Ok(BjtParams { is, vt, beta_f, beta_r, is_pnp, vaf, var, ikf, ikr, cje, cjc, nf, ise, ne })
+        // Parasitic series resistances (optional, default 0.0)
+        let rb = Self::lookup_model_param(netlist, model, "RB")
+            .unwrap_or(0.0);
+        let rc = Self::lookup_model_param(netlist, model, "RC")
+            .unwrap_or(0.0);
+        let re = Self::lookup_model_param(netlist, model, "RE")
+            .unwrap_or(0.0);
+        if rb < 0.0 || !rb.is_finite() {
+            return Err(CodegenError::InvalidConfig(
+                format!("BJT model RB must be non-negative and finite, got {rb}")
+            ));
+        }
+        if rc < 0.0 || !rc.is_finite() {
+            return Err(CodegenError::InvalidConfig(
+                format!("BJT model RC must be non-negative and finite, got {rc}")
+            ));
+        }
+        if re < 0.0 || !re.is_finite() {
+            return Err(CodegenError::InvalidConfig(
+                format!("BJT model RE must be non-negative and finite, got {re}")
+            ));
+        }
+
+        Ok(BjtParams { is, vt, beta_f, beta_r, is_pnp, vaf, var, ikf, ikr, cje, cjc, nf, ise, ne, rb, rc, re })
     }
 
     /// Resolve JFET model parameters from the netlist, with validation.
@@ -1561,7 +1642,24 @@ impl CircuitIR {
         let rs_param = Self::lookup_model_param(netlist, model, "RS")
             .unwrap_or(0.0);
 
-        Ok(MosfetParams { kp, vt, lambda, is_p_channel, cgs, cgd, rd, rs_param })
+        // Body effect parameters (optional, default 0.0 = disabled)
+        let gamma = Self::lookup_model_param(netlist, model, "GAMMA")
+            .unwrap_or(0.0);
+        let phi = Self::lookup_model_param(netlist, model, "PHI")
+            .unwrap_or(0.6);
+        if gamma < 0.0 || !gamma.is_finite() {
+            return Err(CodegenError::InvalidConfig(
+                format!("MOSFET model GAMMA must be non-negative and finite, got {gamma}")
+            ));
+        }
+        if phi <= 0.0 || !phi.is_finite() {
+            return Err(CodegenError::InvalidConfig(
+                format!("MOSFET model PHI must be positive and finite, got {phi}")
+            ));
+        }
+
+        // source_node and bulk_node will be resolved later from the MNA system
+        Ok(MosfetParams { kp, vt, lambda, is_p_channel, cgs, cgd, rd, rs_param, gamma, phi, source_node: 0, bulk_node: 0 })
     }
 
     /// Resolve tube/triode model parameters from the netlist, with validation.

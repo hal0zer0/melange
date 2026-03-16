@@ -645,6 +645,7 @@ fn build_device_slots_from_netlist(
                         ikf: f64::INFINITY, ikr: f64::INFINITY,
                         cje: 0.0, cjc: 0.0,
                         nf: 1.0, ise: 0.0, ne: 1.5,
+                        rb: 0.0, rc: 0.0, re: 0.0,
                     }),
                 });
                 dim_offset += 2;
@@ -698,6 +699,10 @@ fn build_device_slots_from_netlist(
                         cgd: 0.0,
                         rd: 0.0,
                         rs_param: 0.0,
+                        gamma: 0.0,
+                        phi: 0.6,
+                        source_node: 0,
+                        bulk_node: 0,
                     }),
                 });
                 dim_offset += 2;

@@ -803,6 +803,9 @@ fn build_device_slots_from_netlist(
                         nf: 1.0,
                         ise: 0.0,
                         ne: 1.5,
+                        rb: 0.0,
+                        rc: 0.0,
+                        re: 0.0,
                     }),
                 });
                 dim_offset += 2;

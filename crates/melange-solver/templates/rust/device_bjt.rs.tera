@@ -144,3 +144,109 @@ fn bjt_jacobian(vbe: f64, vbc: f64, is: f64, vt: f64, nf: f64,
     [quotient_dvbe, quotient_dvbc - d_bc_term_dvbc, dib_dvbe, dib_dvbc]
 }
 
+/// BJT with parasitic resistances (RB, RC, RE).
+///
+/// Given external junction voltages (Vbe_ext, Vbc_ext), solves for internal
+/// junction voltages via inner 2D Newton-Raphson, then returns:
+///   (Ic, Ib, [dIc/dVbe_ext, dIc/dVbc_ext, dIb/dVbe_ext, dIb/dVbc_ext])
+///
+/// The inner NR solves: find (Vbe_int, Vbc_int) such that
+///   F1 = Vbe_int - Vbe_ext + Ib*RB + (Ic+Ib)*RE = 0
+///   F2 = Vbc_int - Vbc_ext + Ib*RB - Ic*RC = 0
+/// (note: RE term uses Ie = -(Ic+Ib), so V_E_int = V_E_ext - Ie*RE = V_E_ext + (Ic+Ib)*RE)
+///
+/// When RB=RC=RE=0, this reduces to direct evaluation (no inner loop).
+#[inline(always)]
+fn bjt_with_parasitics(
+    vbe_ext: f64, vbc_ext: f64,
+    is: f64, vt: f64, nf: f64,
+    beta_f: f64, beta_r: f64, sign: f64,
+    use_gp: bool, vaf: f64, var: f64, ikf: f64, ikr: f64,
+    ise: f64, ne: f64,
+    rb: f64, rc: f64, re: f64,
+) -> (f64, f64, [f64; 4]) {
+    const INNER_MAX_ITER: usize = 15;
+    const INNER_TOL: f64 = 1e-10;
+
+    // Initial guess: internal = external
+    let mut vbe_int = vbe_ext;
+    let mut vbc_int = vbc_ext;
+
+    for _iter in 0..INNER_MAX_ITER {
+        let ic = bjt_ic(vbe_int, vbc_int, is, vt, nf, beta_r, sign, use_gp, vaf, var, ikf, ikr);
+        let ib = bjt_ib(vbe_int, vbc_int, is, vt, nf, beta_f, beta_r, sign, ise, ne);
+        let jac_int = bjt_jacobian(vbe_int, vbc_int, is, vt, nf, beta_f, beta_r, sign, use_gp, vaf, var, ikf, ikr, ise, ne);
+        let dic_dvbe = jac_int[0];
+        let dic_dvbc = jac_int[1];
+        let dib_dvbe = jac_int[2];
+        let dib_dvbc = jac_int[3];
+
+        // Residuals
+        let f1 = vbe_int - vbe_ext + ib * rb + (ic + ib) * re;
+        let f2 = vbc_int - vbc_ext + ib * rb - ic * rc;
+
+        if f1.abs() < INNER_TOL && f2.abs() < INNER_TOL {
+            break;
+        }
+
+        // Jacobian of F w.r.t. (Vbe_int, Vbc_int)
+        let j11 = 1.0 + dib_dvbe * rb + (dic_dvbe + dib_dvbe) * re;
+        let j12 = dib_dvbc * rb + (dic_dvbc + dib_dvbc) * re;
+        let j21 = dib_dvbe * rb - dic_dvbe * rc;
+        let j22 = 1.0 + dib_dvbc * rb - dic_dvbc * rc;
+
+        // Solve 2x2 via Cramer's rule
+        let det = j11 * j22 - j12 * j21;
+        if det.abs() < 1e-30 { break; }
+        let inv_det = 1.0 / det;
+        let dvbe = (j22 * f1 - j12 * f2) * inv_det;
+        let dvbc = (j11 * f2 - j21 * f1) * inv_det;
+
+        // Step limiting: max ±4*VT per iteration
+        let max_step = 4.0 * vt;
+        let dvbe = dvbe.clamp(-max_step, max_step);
+        let dvbc = dvbc.clamp(-max_step, max_step);
+
+        vbe_int -= dvbe;
+        vbc_int -= dvbc;
+    }
+
+    // Final evaluation at converged internal voltages
+    let ic = bjt_ic(vbe_int, vbc_int, is, vt, nf, beta_r, sign, use_gp, vaf, var, ikf, ikr);
+    let ib = bjt_ib(vbe_int, vbc_int, is, vt, nf, beta_f, beta_r, sign, ise, ne);
+    let jac_int = bjt_jacobian(vbe_int, vbc_int, is, vt, nf, beta_f, beta_r, sign, use_gp, vaf, var, ikf, ikr, ise, ne);
+
+    // External Jacobian: J_ext = J_device * J_F^{-1}
+    // J_F = [[j11, j12], [j21, j22]] (recompute at converged point)
+    let dic_dvbe = jac_int[0];
+    let dic_dvbc = jac_int[1];
+    let dib_dvbe = jac_int[2];
+    let dib_dvbc = jac_int[3];
+
+    let j11 = 1.0 + dib_dvbe * rb + (dic_dvbe + dib_dvbe) * re;
+    let j12 = dib_dvbc * rb + (dic_dvbc + dib_dvbc) * re;
+    let j21 = dib_dvbe * rb - dic_dvbe * rc;
+    let j22 = 1.0 + dib_dvbc * rb - dic_dvbc * rc;
+
+    let det = j11 * j22 - j12 * j21;
+    if det.abs() < 1e-30 {
+        // Fallback: return intrinsic Jacobian
+        return (ic, ib, jac_int);
+    }
+    let inv_det = 1.0 / det;
+
+    // J_F^{-1} = [[j22, -j12], [-j21, j11]] / det
+    let fi11 = j22 * inv_det;
+    let fi12 = -j12 * inv_det;
+    let fi21 = -j21 * inv_det;
+    let fi22 = j11 * inv_det;
+
+    // J_ext = J_device * J_F^{-1}
+    let dic_dvbe_ext = dic_dvbe * fi11 + dic_dvbc * fi21;
+    let dic_dvbc_ext = dic_dvbe * fi12 + dic_dvbc * fi22;
+    let dib_dvbe_ext = dib_dvbe * fi11 + dib_dvbc * fi21;
+    let dib_dvbc_ext = dib_dvbe * fi12 + dib_dvbc * fi22;
+
+    (ic, ib, [dic_dvbe_ext, dic_dvbc_ext, dib_dvbe_ext, dib_dvbc_ext])
+}
+
