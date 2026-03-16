@@ -1181,6 +1181,9 @@ fn simulate_circuit_source(
         if solver.diag_nr_max_iter_count > 0 {
             eprintln!("  NR max iterations: {} times", solver.diag_nr_max_iter_count);
         }
+        if solver.diag_be_fallback_count > 0 {
+            eprintln!("  BE fallback: {} samples", solver.diag_be_fallback_count);
+        }
         if solver.diag_nan_reset_count > 0 {
             eprintln!("  NaN resets: {}", solver.diag_nan_reset_count);
         }

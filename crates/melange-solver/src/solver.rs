@@ -2548,12 +2548,20 @@ pub struct NodalSolver {
     pub kernel: DkKernel,
     /// Total system dimension: n_aug + inductor branch variables
     n_nodal: usize,
-    /// A matrix = G_nodal + (2/T)*C_nodal (n_nodal × n_nodal, augmented inductors)
+    /// G_nodal (conductance) matrix, stored for BE fallback rebuild
+    g_nodal: Vec<Vec<f64>>,
+    /// C_nodal (capacitance/inductance) matrix, stored for BE fallback rebuild
+    c_nodal: Vec<Vec<f64>>,
+    /// A matrix = G_nodal + alpha*C_nodal (trapezoidal: alpha=2/T)
     a_matrix: Vec<Vec<f64>>,
-    /// A_neg = (2/T)*C_nodal - G_nodal, flat row-major (n_nodal × n_nodal)
+    /// A_neg = alpha*C_nodal - G_nodal (trapezoidal), flat row-major
     a_neg: Vec<f64>,
-    /// Constant RHS vector (n_nodal), padded with zeros for inductor rows
+    /// Constant RHS vector (trapezoidal: node rows ×2, VS rows ×1)
     rhs_const: Vec<f64>,
+    /// Backward Euler fallback matrices (precomputed, alpha_be=1/T)
+    a_matrix_be: Vec<Vec<f64>>,
+    a_neg_be: Vec<f64>,
+    rhs_const_be: Vec<f64>,
     /// N_v matrix expanded to m × n_nodal (extra cols zero), flat row-major
     n_v: Vec<f64>,
     /// N_i matrix expanded to n_nodal × m (extra rows zero), flat row-major
@@ -2588,6 +2596,8 @@ pub struct NodalSolver {
     pub diag_clamp_count: u64,
     pub diag_nr_max_iter_count: u64,
     pub diag_nan_reset_count: u64,
+    /// Diagnostics: number of samples where BE fallback was used
+    pub diag_be_fallback_count: u64,
     /// Node indices frozen during NR (from .delay_feedback directives).
     /// These nodes use v_prev values during NR iteration, breaking feedback loops.
     delayed_node_indices: Vec<usize>,
@@ -2730,28 +2740,56 @@ impl NodalSolver {
             log::info!("NodalSolver: {} delayed feedback nodes", delayed_node_indices.len());
         }
 
-        // Build A = G + (2/T)*C
+        // Build trapezoidal matrices: A = G + (2/T)*C, A_neg = (2/T)*C - G
         let mut a_matrix = vec![vec![0.0; n_nodal]; n_nodal];
-        for i in 0..n_nodal {
-            for j in 0..n_nodal {
-                a_matrix[i][j] = g_nod[i][j] + alpha * c_nod[i][j];
-            }
-        }
-
-        // Build A_neg = (2/T)*C - G (flat row-major)
         let mut a_neg = vec![0.0; n_nodal * n_nodal];
         for i in 0..n_nodal {
             for j in 0..n_nodal {
+                a_matrix[i][j] = g_nod[i][j] + alpha * c_nod[i][j];
                 a_neg[i * n_nodal + j] = alpha * c_nod[i][j] - g_nod[i][j];
             }
         }
-        // Zero VS/VCVS/ideal_xfmr rows in A_neg (algebraic constraints, no history).
-        // These are rows n_nodes..n_aug. Do NOT zero inductor rows (n_aug..n_nodal).
+        // Zero VS/VCVS algebraic rows in A_neg (no history for constraints).
         if n_aug > n_nodes {
             for i in n_nodes..n_aug {
                 for j in 0..n_nodal {
                     a_neg[i * n_nodal + j] = 0.0;
                 }
+            }
+        }
+
+        // Build backward Euler fallback matrices: A_be = G + (1/T)*C, A_neg_be = (1/T)*C
+        // BE is L-stable (unconditionally damps oscillatory modes). Used as fallback
+        // when trapezoidal NR fails to converge on a specific sample.
+        let alpha_be = 1.0 / t; // 1/T for backward Euler (vs 2/T for trapezoidal)
+        let mut a_matrix_be = vec![vec![0.0; n_nodal]; n_nodal];
+        let mut a_neg_be = vec![0.0; n_nodal * n_nodal];
+        for i in 0..n_nodal {
+            for j in 0..n_nodal {
+                a_matrix_be[i][j] = g_nod[i][j] + alpha_be * c_nod[i][j];
+                a_neg_be[i * n_nodal + j] = alpha_be * c_nod[i][j];
+            }
+        }
+        // Zero VS/VCVS algebraic rows in A_neg_be
+        if n_aug > n_nodes {
+            for i in n_nodes..n_aug {
+                for j in 0..n_nodal {
+                    a_neg_be[i * n_nodal + j] = 0.0;
+                }
+            }
+        }
+
+        // BE rhs_const: current source rows are NOT multiplied by 2 (BE uses i[n], not average)
+        // VS rows are unchanged (algebraic constraint)
+        let mut rhs_const_be = vec![0.0; n_nodal];
+        for src in &mna.current_sources {
+            crate::mna::inject_rhs_current(&mut rhs_const_be, src.n_plus_idx, src.dc_value);
+            crate::mna::inject_rhs_current(&mut rhs_const_be, src.n_minus_idx, -src.dc_value);
+        }
+        for vs in &mna.voltage_sources {
+            let k = mna.n + vs.ext_idx;
+            if k < n_nodal {
+                rhs_const_be[k] = vs.dc_value;
             }
         }
 
@@ -2792,9 +2830,14 @@ impl NodalSolver {
         Self {
             kernel,
             n_nodal,
+            g_nodal: g_nod,
+            c_nodal: c_nod,
             a_matrix,
             a_neg,
             rhs_const,
+            a_matrix_be,
+            a_neg_be,
+            rhs_const_be,
             n_v,
             n_i,
             device_slots,
@@ -2819,6 +2862,7 @@ impl NodalSolver {
             diag_clamp_count: 0,
             diag_nr_max_iter_count: 0,
             diag_nan_reset_count: 0,
+            diag_be_fallback_count: 0,
             delayed_node_indices,
         }
     }
@@ -3052,16 +3096,148 @@ impl NodalSolver {
             }
         }
 
+        // Backward Euler fallback: if trapezoidal NR didn't converge, retry with
+        // BE which is L-stable (unconditionally damps oscillatory modes). This catches
+        // the ~5% of samples where trapezoidal ringing prevents convergence.
         if !converged {
             self.diag_nr_max_iter_count += 1;
-            // Accept last iterate but ensure i_nl is consistent with v
+
+            // Rebuild RHS with BE matrices
+            v.copy_from_slice(&self.v_prev); // restart from v_prev
+            for i in 0..n {
+                let mut sum = self.rhs_const_be[i];
+                let a_neg_offset = i * n;
+                for j in 0..n {
+                    sum += self.a_neg_be[a_neg_offset + j] * self.v_prev[j];
+                }
+                // BE nonlinear history: N_i * i_nl_prev (same as trapezoidal)
+                let ni_offset = i * m;
+                for j in 0..m {
+                    sum += self.n_i[ni_offset + j] * self.i_nl_prev[j];
+                }
+                self.rhs[i] = sum;
+            }
+            if self.input_node < n {
+                // BE input: just input[n+1] * G_in (no trapezoidal average)
+                self.rhs[self.input_node] += input * self.input_conductance;
+            }
+
+            // BE NR loop (same structure, using a_matrix_be)
+            for _iter in 0..self.max_iter {
+                for i in 0..m {
+                    let mut sum = 0.0;
+                    let nv_offset = i * n;
+                    for j in 0..n { sum += self.n_v[nv_offset + j] * v[j]; }
+                    self.v_nl[i] = sum;
+                }
+                dc_op::evaluate_devices(&self.v_nl, &self.device_slots, &mut self.i_nl, &mut self.j_dev, m);
+
+                for i in 0..n {
+                    for j in 0..n {
+                        self.g_aug[i][j] = self.a_matrix_be[i][j];
+                    }
+                }
+                for a in 0..n {
+                    for b in 0..n {
+                        let mut sum = 0.0;
+                        for i in 0..m {
+                            let ni_ai = self.n_i[a * m + i];
+                            if ni_ai.abs() < 1e-30 { continue; }
+                            for j in 0..m {
+                                let jd = self.j_dev[i * m + j];
+                                if jd.abs() < 1e-30 { continue; }
+                                let nv_jb = self.n_v[j * n + b];
+                                if nv_jb.abs() < 1e-30 { continue; }
+                                sum += ni_ai * jd * nv_jb;
+                            }
+                        }
+                        self.g_aug[a][b] -= sum;
+                    }
+                }
+
+                self.rhs_work.copy_from_slice(&self.rhs);
+                for i in 0..m {
+                    let mut jdev_vnl = 0.0;
+                    for j in 0..m { jdev_vnl += self.j_dev[i * m + j] * self.v_nl[j]; }
+                    let i_comp = self.i_nl[i] - jdev_vnl;
+                    for a in 0..n { self.rhs_work[a] += self.n_i[a * m + i] * i_comp; }
+                }
+
+                // Delayed node identity constraints
+                for &idx in &self.delayed_node_indices {
+                    for j in 0..n { self.g_aug[idx][j] = 0.0; }
+                    self.g_aug[idx][idx] = 1.0;
+                    self.rhs_work[idx] = self.v_prev[idx];
+                }
+
+                let v_new = match crate::dk::solve_equilibrated(&self.g_aug, &self.rhs_work) {
+                    Some(v) => v,
+                    None => break,
+                };
+
+                let mut alpha = 1.0_f64;
+                if m > 0 {
+                    for slot in &self.device_slots {
+                        let s = slot.start_idx;
+                        for d in 0..slot.dimension {
+                            let i = s + d;
+                            let mut v_nl_proposed = 0.0;
+                            let nv_offset = i * n;
+                            for j in 0..n { v_nl_proposed += self.n_v[nv_offset + j] * v_new[j]; }
+                            let v_nl_current = self.v_nl[i];
+                            let dv = v_nl_proposed - v_nl_current;
+                            if dv.abs() > 1e-15 {
+                                let v_limited = limit_slot_voltage(slot, d, v_nl_proposed, v_nl_current);
+                                let dv_limited = v_limited - v_nl_current;
+                                let ratio = (dv_limited / dv).clamp(0.01, 1.0);
+                                if ratio < alpha { alpha = ratio; }
+                            }
+                        }
+                    }
+                }
+                {
+                    let n_nodes = self.kernel.n_nodes;
+                    let mut max_node_dv = 0.0_f64;
+                    for i in 0..n_nodes {
+                        if self.delayed_node_indices.contains(&i) { continue; }
+                        let dv = alpha * (v_new[i] - v[i]);
+                        max_node_dv = max_node_dv.max(dv.abs());
+                    }
+                    if max_node_dv > 10.0 { alpha *= (10.0 / max_node_dv).max(0.01); }
+                }
+
+                for i in 0..n { v[i] += alpha * (v_new[i] - v[i]); }
+                for &idx in &self.delayed_node_indices { v[idx] = self.v_prev[idx]; }
+
+                let be_converged = (0..n).all(|i| {
+                    if self.delayed_node_indices.contains(&i) { return true; }
+                    let abs_delta = (alpha * (v_new[i] - v[i])).abs();
+                    let threshold = 1e-3 * v[i].abs().max(v_new[i].abs()) + self.tol;
+                    abs_delta < threshold
+                });
+
+                if be_converged {
+                    converged = true;
+                    self.diag_be_fallback_count += 1;
+                    for i in 0..m {
+                        let mut sum = 0.0;
+                        let nv_offset = i * n;
+                        for j in 0..n { sum += self.n_v[nv_offset + j] * v[j]; }
+                        self.v_nl[i] = sum;
+                    }
+                    dc_op::evaluate_devices(&self.v_nl, &self.device_slots, &mut self.i_nl, &mut self.j_dev, m);
+                    break;
+                }
+            }
+        }
+
+        // If still not converged after BE fallback, ensure i_nl is consistent with v
+        if !converged {
             if m > 0 {
                 for i in 0..m {
                     let mut sum = 0.0;
                     let nv_offset = i * n;
-                    for j in 0..n {
-                        sum += self.n_v[nv_offset + j] * v[j];
-                    }
+                    for j in 0..n { sum += self.n_v[nv_offset + j] * v[j]; }
                     self.v_nl[i] = sum;
                 }
                 dc_op::evaluate_devices(&self.v_nl, &self.device_slots, &mut self.i_nl, &mut self.j_dev, m);
