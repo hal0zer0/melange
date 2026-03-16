@@ -141,8 +141,12 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
   - Combined with `N_i*i_nl_prev` in RHS, gives proper trapezoidal average
   - **Gummel-Poon model**: `BjtParams` includes VAF, VAR, IKF, IKR; `bjt_qb()` base charge modulation
   - USE_GP flag auto-detected from params; falls back to Ebers-Moll when GP params are infinite
-  - **Self-heating**: NOT IMPLEMENTED (documented but no code exists; planned future feature)
-  - **Charge storage**: NOT IMPLEMENTED (documented but no code exists; planned as part of junction capacitance feature)
+  - **Junction capacitances**: CJE/CJC (BJT), CGS/CGD (JFET/MOSFET), CJO (diode), CCG/CGP/CCP (tube). Parsed from .model, stamped into MNA C matrix.
+  - **Parasitic resistances**: RS (diode, inner NR), RB/RC/RE (BJT, 2D inner NR), RD/RS (JFET/MOSFET, closed-form), RGI (tube, 1D inner NR)
+  - **BJT NF/ISE/NE**: Forward emission coefficient and base-emitter leakage current
+  - **Diode BV/IBV**: Reverse breakdown (Zener) support
+  - **MOSFET GAMMA/PHI**: Body effect (threshold voltage shift with source-bulk voltage)
+  - **Self-heating**: NOT IMPLEMENTED (planned future feature)
 - **Dynamic potentiometers**: `.pot R1 min max` directive marks a resistor as runtime-variable
   - Sherman-Morrison rank-1 updates: O(N²) correction instead of O(N³) re-inversion
   - Precomputed SM vectors (SU, USU, NV_SU, U_NI) baked into generated constants
@@ -186,7 +190,7 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
 ### Known Limitations
 - Parasitic caps (10pF) auto-inserted across junctions for purely resistive nonlinear circuits
 - Tube Koren model: lambda parameter models finite plate resistance; no space-charge or transit-time effects
-- BJT Gummel-Poon: no self-heating, no charge storage (junction capacitances), no substrate current, no avalanche breakdown
+- BJT Gummel-Poon: no self-heating, no substrate current, no avalanche breakdown
 - **Runtime solver** (`DeviceEntry`) supports all device types: Diode, DiodeWithRs, Led, BJT, JFET, MOSFET, Tube
 - **NodalSolver transient NR**: Converges for all physically valid circuits including Pultec EQP-1A (4 tubes, 2 transformers, 130H, k=0.99, global NFB). Requires positive-definite inductance matrices (validated at MNA build time).
 - **`melange simulate`**: auto-selects NodalSolver for nonlinear circuits with inductors, CircuitSolver (DK) otherwise. `--solver nodal|dk` override available.
