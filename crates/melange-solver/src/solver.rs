@@ -2493,17 +2493,20 @@ use crate::mna::MnaSystem;
 ///
 /// One-sample delayed mutual coupling between two inductor windings.
 ///
-/// The mutual inductance M is removed from the simultaneous C matrix and
-/// injected as a delayed history term: `rhs[k_a] += 2*alpha*M * v_prev[k_b]`.
-/// This breaks feedback loops through tightly coupled transformers, allowing
-/// the NR to converge without fighting transformer gain amplification.
+/// The mutual inductance M is kept in C_nodal (so A_neg has the history term
+/// `alpha*M*j[n]`) but removed from the A matrix (so the NR Jacobian doesn't
+/// include the coupling). The removed A contribution `alpha*M*j[n+1]` is
+/// replaced by `alpha*M*j[n]` (delayed one sample) in the RHS injection.
+/// Total RHS mutual contribution: `alpha*M*j[n]` (A_neg) + `alpha*M*j[n]`
+/// (injection) = `2*alpha*M*j[n]`, matching the original simultaneous system
+/// at equilibrium.
 #[derive(Debug, Clone)]
 struct DelayedCoupling {
     /// Augmented variable index for winding A
     var_a: usize,
     /// Augmented variable index for winding B
     var_b: usize,
-    /// 2 * (2/T) * M = 4 * sample_rate * mutual_inductance
+    /// alpha * M = (2/T) * mutual_inductance
     coeff: f64,
 }
 
@@ -2882,9 +2885,14 @@ impl NodalSolver {
             log::warn!("Nodal solver DC OP failed to converge, using zero initial state");
         }
 
-        // Warm-up: process 50 samples of silence to settle transients
-        for _ in 0..50 {
-            self.process_sample(0.0);
+        // Warm-up: process silence samples to settle transients.
+        // Skip when delayed feedback is active — the DC OP state is the correct
+        // equilibrium, and the delayed feedback system's different dynamics would
+        // destabilize the warm-up.
+        if self.delayed_couplings.is_empty() {
+            for _ in 0..50 {
+                self.process_sample(0.0);
+            }
         }
     }
 
@@ -2917,8 +2925,9 @@ impl NodalSolver {
         }
 
         // Delayed mutual coupling injection (one-sample feedback delay).
-        // For each delayed pair (a, b): inject 2*alpha*M * j_prev from the other winding.
-        // This replaces the mutual terms that were zeroed in C_nodal.
+        // For each delayed pair (a, b): inject alpha*M * j_prev from the other winding.
+        // Combined with A_neg's alpha*M*j_prev (from C_nodal), this gives the full
+        // 2*alpha*M*j_prev that replaces the simultaneous alpha*M*j[n+1] + alpha*M*j[n].
         for dc in &self.delayed_couplings {
             self.rhs[dc.var_a] += dc.coeff * self.v_prev[dc.var_b];
             self.rhs[dc.var_b] += dc.coeff * self.v_prev[dc.var_a];
