@@ -2633,6 +2633,14 @@ impl NodalSolver {
             }
         }
 
+        // Gmin regularization: tiny conductance from every circuit node to ground.
+        // Standard SPICE practice (ngspice default Gmin = 1e-12 S). Prevents
+        // floating nodes and improves Jacobian conditioning for transformer circuits.
+        let gmin = 1e-12;
+        for i in 0..n_nodes {
+            g_nod[i][i] += gmin;
+        }
+
         // Stamp inductor augmented variables
         let mut var_idx = n_aug;
 
@@ -2844,8 +2852,11 @@ impl NodalSolver {
             log::warn!("Nodal solver DC OP failed to converge, using zero initial state");
         }
 
-        // Warm-up: process silence samples to settle transients
-        for _ in 0..50 {
+        // Warm-up: process silence samples to settle transients.
+        // Large inductors (130H) need L/R ≈ 1.3s to settle, so we need many samples.
+        // Use 200 samples as a compromise (covers ~4ms, enough for most circuits;
+        // circuits with very large inductors will settle during initial audio processing).
+        for _ in 0..200 {
             self.process_sample(0.0);
         }
     }

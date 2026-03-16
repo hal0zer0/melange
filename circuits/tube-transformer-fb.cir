@@ -1,0 +1,46 @@
+* Minimal tube + transformer with NFB
+* Single 12AX7 triode, 3-winding transformer (pri/sec/tert), NFB from tertiary
+* Tests whether simultaneous NR can converge with transformer-coupled feedback
+*
+* Signal: in -> Cin -> grid, plate -> transformer primary -> secondary -> out
+* Feedback: tertiary -> Rfb -> cathode
+*
+.model 12AX7 TRIODE(MU=100 EX=1.4 KG1=1060 KP=600 KVB=300)
+
+* Power supply
+Vcc vcc 0 DC 250
+
+* Input coupling
+Cin in grid 100n
+Rg grid 0 1Meg
+
+* Triode
+T1 grid plate cathode 12AX7
+
+* Plate load
+Ra vcc plate 100k
+
+* Cathode bias (unbypassed for NFB)
+Rk cathode 0 1.5k
+
+* Output transformer (Pultec-scale: 130H, k=0.99)
+L_pri plate xfmr_ct 130
+L_sec out 0 26
+L_tert fb_n fb_p 13
+K1 L_pri L_sec 0.99
+K2 L_pri L_tert 0.99
+K3 L_sec L_tert 0.99
+
+* Transformer center tap to ground
+Rct xfmr_ct 0 10
+
+* Feedback from tertiary to cathode
+Rfb fb_p cathode 1k
+Rfb_gnd fb_n 0 100
+
+* Output load
+Rload out 0 10k
+
+* Stability caps
+C1 plate 0 100p
+C2 out 0 100p

@@ -228,8 +228,8 @@ R_fb_b fb_s5 fb_node 360
 * Coupling: tertiary to each primary half
 K_fba L_opt_a L_fb_a 0.95
 K_fbb L_opt_b L_fb_a 0.95
-* Delay feedback at tertiary terminals to break NFB loop in NR
-.delay_feedback fb_s3 fb_s5
+* Secondary-tertiary coupling (all windings on same core must couple)
+K_sec_fb L_opt_sec L_fb_a 0.50
 
 * Output load (high-impedance bridging, typical of modern equipment)
 Rload out 0 100k

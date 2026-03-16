@@ -167,8 +167,9 @@ C1 out 0 100n
         max_diff = max_diff.max((nodal.process_sample(input) - linear.process_sample(input)).abs());
     }
 
-    // No inductors → identical matrix formulation → exact match
-    assert!(max_diff < 1e-10, "No inductors: exact match, diff = {:.2e}", max_diff);
+    // No inductors → nearly identical (Gmin regularization adds 1e-12 S per node,
+    // causing ~1e-9 difference in node voltages)
+    assert!(max_diff < 1e-8, "No inductors: near-exact match, diff = {:.2e}", max_diff);
 }
 
 // ---------------------------------------------------------------------------
