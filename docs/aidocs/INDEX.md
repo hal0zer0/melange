@@ -93,6 +93,10 @@ K' = K - scale * (N_v * su) * (su^T * N_i)
 | Pot no effect | SM vectors stale | Check set_sample_rate recomputes |
 | NaN in NodalSolver | Inductor currents not initialized | Copy v_node[n_aug..] from DC OP |
 | NodalSolver wrong output | Zeroed inductor A_neg rows | Only zero VS/VCVS rows (n_nodes..n_aug) |
+| Xfmr primary diverges exponentially | 50× amplification from k≈0.95 coupling | ngspice node damping (10V/iter), NOT delayed feedback |
+| Node damping disabled globally | `is_empty()` check on delayed nodes | Skip only delayed nodes in damping loop |
+| Absolute tol on HV circuit | 1μV on 290V = 3.4 ppb | RELTOL: 1e-3*max(\|v\|)+1e-6 |
+| Delayed feedback freezes nodes | Circular v_prev in process_sample | Dead end for tight coupling — don't use |
 
 ## Document Inventory
 

@@ -230,6 +230,18 @@ Using addition causes NR divergence. See `DC_OP.md` for the mathematical derivat
 | DC OP source_steps | 10 | Source stepping stages |
 | DC OP voltage_limit | logarithmic (Vt-scaled) | Junction-aware: `sign * Vt * ln(\|delta\|/Vt + 1)` |
 
+## Transformer-Coupled Circuit Failure Signatures
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| NR diverges, opt_a grows exponentially | Transformer coupling amplification (1/(1-k²)≈50× for k=0.95) | Add ngspice node damping (10V threshold) |
+| Node damping disabled for entire circuit | `delayed_node_indices.is_empty()` check skips ALL damping | Skip only delayed nodes, not all damping |
+| i_nl/v_prev inconsistent after max_iter | v updated one step ahead of i_nl on non-convergence | Re-evaluate devices at final v when NR fails |
+| 1e-6 absolute tol on 290V circuit | Demands 3.4 ppb — unreasonable for LU precision | Use SPICE RELTOL: 1e-3 * max(\|v\|) + 1e-6 |
+| Delayed feedback nodes permanently frozen | Circular v_prev assignment in process_sample | Dead end — don't use node-level delay for transformer coupling |
+| Coupling-level delay unstable (eigenvalue>1) | M/L ≈ 1 for tight coupling, delay pole outside unit circle | Don't delay raw transformer mutual inductance |
+| Incomplete transformer coupling matrix | Missing K directive between windings on same core | Add K for ALL winding pairs (check for k[i][j]=0 in groups) |
+
 ## References
 - TU Delft Analog Electronics Webbook: MNA stamps
 - Hack Audio Tutorial: DK method and NR solver
