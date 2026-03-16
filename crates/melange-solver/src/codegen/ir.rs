@@ -1477,4 +1477,18 @@ impl CircuitIR {
         self.matrices.c_matrix[i * self.topology.n + j]
     }
 
+    /// Access A matrix element A[i][j] (trapezoidal, nodal mode only)
+    pub fn a_matrix(&self, i: usize, j: usize) -> f64 {
+        self.matrices.a_matrix[i * self.topology.n + j]
+    }
+
+    /// Access A_be matrix element A_be[i][j] (backward Euler, nodal mode only)
+    pub fn a_matrix_be(&self, i: usize, j: usize) -> f64 {
+        self.matrices.a_matrix_be[i * self.topology.n + j]
+    }
+
+    /// Access A_neg_be matrix element A_neg_be[i][j] (backward Euler history, nodal mode only)
+    pub fn a_neg_be(&self, i: usize, j: usize) -> f64 {
+        self.matrices.a_neg_be[i * self.topology.n + j]
+    }
 }

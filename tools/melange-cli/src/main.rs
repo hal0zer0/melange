@@ -621,9 +621,16 @@ fn compile_circuit_source(
     };
 
     let generator = CodeGenerator::new(config);
-    let generated = generator
-        .generate(&kernel, &mna, &netlist)
-        .with_context(|| "Code generation failed")?;
+    let generated = if has_inductors_compile {
+        println!("  Using nodal solver codegen for inductor circuit");
+        generator
+            .generate_nodal(&mna, &netlist)
+            .with_context(|| "Nodal code generation failed")?
+    } else {
+        generator
+            .generate(&kernel, &mna, &netlist)
+            .with_context(|| "Code generation failed")?
+    };
 
     println!("  ✓ Generated {} lines of Rust code", generated.code.lines().count());
 
@@ -661,27 +668,31 @@ fn compile_circuit_source(
                 .unwrap_or("circuit")
                 .to_string();
 
-            // Build pot parameter info from kernel
-            let pot_params: Vec<plugin_template::PotParamInfo> = kernel.pots.iter().enumerate().map(|(idx, p)| {
-                plugin_template::PotParamInfo {
-                    index: idx,
-                    name: netlist.pots.get(idx).map(|d| {
-                        d.label.clone().unwrap_or_else(|| d.resistor_name.clone())
-                    }).unwrap_or_else(|| format!("Pot {}", idx)),
-                    min_resistance: p.min_resistance,
-                    max_resistance: p.max_resistance,
-                    default_resistance: 1.0 / p.g_nominal,
-                }
-            }).collect();
-
-            // Build switch parameter info from netlist
-            let switch_params: Vec<plugin_template::SwitchParamInfo> = netlist.switches.iter().enumerate().map(|(idx, sw)| {
-                plugin_template::SwitchParamInfo {
-                    index: idx,
-                    name: sw.label.clone().unwrap_or_else(|| format!("Switch {} ({})", idx, sw.component_names.join("+"))),
-                    num_positions: sw.positions.len(),
-                }
-            }).collect();
+            // Build pot/switch parameter info.
+            // Nodal codegen doesn't support pots/switches yet (Phase 3), so pass empty.
+            let (pot_params, switch_params) = if has_inductors_compile {
+                (Vec::new(), Vec::new())
+            } else {
+                let pots: Vec<plugin_template::PotParamInfo> = kernel.pots.iter().enumerate().map(|(idx, p)| {
+                    plugin_template::PotParamInfo {
+                        index: idx,
+                        name: netlist.pots.get(idx).map(|d| {
+                            d.label.clone().unwrap_or_else(|| d.resistor_name.clone())
+                        }).unwrap_or_else(|| format!("Pot {}", idx)),
+                        min_resistance: p.min_resistance,
+                        max_resistance: p.max_resistance,
+                        default_resistance: 1.0 / p.g_nominal,
+                    }
+                }).collect();
+                let switches: Vec<plugin_template::SwitchParamInfo> = netlist.switches.iter().enumerate().map(|(idx, sw)| {
+                    plugin_template::SwitchParamInfo {
+                        index: idx,
+                        name: sw.label.clone().unwrap_or_else(|| format!("Switch {} ({})", idx, sw.component_names.join("+"))),
+                        num_positions: sw.positions.len(),
+                    }
+                }).collect();
+                (pots, switches)
+            };
 
             plugin_template::generate_plugin_project(&project_dir, &generated.code, &circuit_name, with_level_params, &pot_params, &switch_params, output_node_indices.len())?;
 

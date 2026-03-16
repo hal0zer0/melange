@@ -412,6 +412,8 @@ impl Emitter for RustEmitter {
     }
 
     fn emit(&self, ir: &CircuitIR) -> Result<String, CodegenError> {
+        use super::ir::SolverMode;
+
         let n = ir.topology.n;
         // n_nodes: original circuit node count. Fallback to n for backward compat (n_nodes=0 in old data).
         let n_nodes = if ir.topology.n_nodes > 0 { ir.topology.n_nodes } else { n };
@@ -432,6 +434,16 @@ impl Emitter for RustEmitter {
             }
         }
 
+        match ir.solver_mode {
+            SolverMode::Dk => self.emit_dk(ir),
+            SolverMode::Nodal => self.emit_nodal(ir),
+        }
+    }
+}
+
+impl RustEmitter {
+    /// Emit DK-method generated code (original path).
+    fn emit_dk(&self, ir: &CircuitIR) -> Result<String, CodegenError> {
         let mut code = String::new();
 
         code.push_str(&self.emit_header(ir)?);
@@ -2678,5 +2690,1263 @@ impl RustEmitter {
         code.push_str("        } else {\n");
         emit_nr_singular_fallback(code, dim, "            ");
         code.push_str("        }\n");
+    }
+}
+
+// ============================================================================
+// Nodal solver emission (full N×N NR per sample, LU solve per iteration)
+// ============================================================================
+
+impl RustEmitter {
+    /// Emit complete generated code for the nodal solver path.
+    ///
+    /// The nodal path differs from DK in that it does full N-dimensional
+    /// Newton-Raphson with LU factorization per iteration, instead of
+    /// precomputing S=A^{-1} and doing M-dimensional NR.
+    ///
+    /// Shared with DK: header, device models, SPICE limiting, safe_exp.
+    /// Nodal-specific: constants, state, process_sample, LU solve, set_sample_rate.
+    fn emit_nodal(&self, ir: &CircuitIR) -> Result<String, CodegenError> {
+        let mut code = String::new();
+
+        // Shared: header
+        code.push_str(&self.emit_header(ir)?);
+
+        // Nodal-specific: constants
+        code.push_str(&self.emit_nodal_constants(ir));
+
+        // Shared: device model constants + functions
+        code.push_str(&self.emit_device_models(ir)?);
+
+        // Nodal-specific: state struct, Default, set_sample_rate, reset
+        code.push_str(&self.emit_nodal_state(ir));
+
+        // Nodal-specific: LU solve function
+        code.push_str(&Self::emit_nodal_lu_solve(ir));
+
+        // Nodal-specific: process_sample with full NR loop
+        code.push_str(&Self::emit_nodal_process_sample(ir));
+
+        if ir.solver_config.oversampling_factor > 1 {
+            code.push_str(&Self::emit_oversampler(ir));
+        }
+
+        Ok(code)
+    }
+
+    /// Emit constants section for nodal solver.
+    ///
+    /// Includes A, A_neg, A_be, A_neg_be, N_v, N_i, G, C, RHS_CONST, RHS_CONST_BE,
+    /// DC_OP, DC_NL_I, and topology dimensions. No S, K, or S_NI.
+    fn emit_nodal_constants(&self, ir: &CircuitIR) -> String {
+        let n = ir.topology.n;
+        let m = ir.topology.m;
+        let n_nodes = if ir.topology.n_nodes > 0 { ir.topology.n_nodes } else { n };
+        let n_aug = ir.topology.n_aug;
+        let num_outputs = ir.solver_config.output_nodes.len();
+
+        let mut code = section_banner("CONSTANTS: Compile-time circuit topology (Nodal solver)");
+
+        // Dimension constants
+        code.push_str(&format!("/// Number of augmented system nodes (including VS/VCVS/inductor branch variables)\n"));
+        code.push_str(&format!("pub const N: usize = {};\n\n", n));
+        code.push_str(&format!("/// Number of original circuit nodes (excluding ground)\n"));
+        code.push_str(&format!("pub const N_NODES: usize = {};\n\n", n_nodes));
+        code.push_str(&format!("/// Boundary between VS/VCVS rows and inductor branch variables\n"));
+        code.push_str(&format!("pub const N_AUG: usize = {};\n\n", n_aug));
+        code.push_str(&format!("/// Total nonlinear dimension (sum of device dimensions)\n"));
+        code.push_str(&format!("pub const M: usize = {};\n\n", m));
+        code.push_str(&format!("/// Maximum NR iterations per sample\n"));
+        code.push_str(&format!("pub const MAX_ITER: usize = {};\n\n", ir.solver_config.max_iterations));
+        code.push_str(&format!("/// NR convergence tolerance (VNTOL)\n"));
+        code.push_str(&format!("pub const TOL: f64 = {};\n\n", fmt_f64(ir.solver_config.tolerance)));
+
+        // Sample rate
+        code.push_str(&format!(
+            "/// Default sample rate (Hz) used at code generation time.\npub const SAMPLE_RATE: f64 = {:.1};\n\n",
+            ir.solver_config.sample_rate
+        ));
+        code.push_str(&format!(
+            "/// Oversampling factor (1 = none, 2 = 2x, 4 = 4x)\npub const OVERSAMPLING_FACTOR: usize = {};\n",
+            ir.solver_config.oversampling_factor
+        ));
+        if ir.solver_config.oversampling_factor > 1 {
+            let internal_rate = ir.solver_config.sample_rate * ir.solver_config.oversampling_factor as f64;
+            code.push_str(&format!(
+                "/// Internal sample rate = SAMPLE_RATE * OVERSAMPLING_FACTOR\npub const INTERNAL_SAMPLE_RATE: f64 = {:.1};\n",
+                internal_rate
+            ));
+        }
+        code.push('\n');
+
+        // I/O configuration
+        code.push_str(&format!("/// Input node index\npub const INPUT_NODE: usize = {};\n\n", ir.solver_config.input_node));
+        code.push_str(&format!("/// Number of output channels\npub const NUM_OUTPUTS: usize = {};\n\n", num_outputs));
+        let output_nodes_values = ir.solver_config.output_nodes.iter()
+            .map(|n| n.to_string()).collect::<Vec<_>>().join(", ");
+        code.push_str(&format!(
+            "/// Output node indices (one per output channel)\npub const OUTPUT_NODES: [usize; NUM_OUTPUTS] = [{}];\n\n",
+            output_nodes_values
+        ));
+        let output_scales_values = ir.solver_config.output_scales.iter()
+            .map(|s| fmt_f64(*s)).collect::<Vec<_>>().join(", ");
+        code.push_str(&format!(
+            "/// Output scale factors (applied after DC blocking)\npub const OUTPUT_SCALES: [f64; NUM_OUTPUTS] = [{}];\n\n",
+            output_scales_values
+        ));
+        code.push_str(&format!(
+            "/// Input resistance (Thevenin equivalent)\npub const INPUT_RESISTANCE: f64 = {};\n\n",
+            fmt_f64(ir.solver_config.input_resistance)
+        ));
+
+        // G and C matrices (sample-rate independent)
+        code.push_str("/// G matrix: conductance matrix (sample-rate independent)\nconst G: [[f64; N]; N] = [\n");
+        for row in format_matrix_rows(n, n, |i, j| ir.g(i, j)) {
+            code.push_str(&format!("    [{}],\n", row));
+        }
+        code.push_str("];\n\n");
+
+        code.push_str("/// C matrix: capacitance matrix (sample-rate independent)\nconst C: [[f64; N]; N] = [\n");
+        for row in format_matrix_rows(n, n, |i, j| ir.c(i, j)) {
+            code.push_str(&format!("    [{}],\n", row));
+        }
+        code.push_str("];\n\n");
+
+        // A = G + alpha*C (trapezoidal forward matrix)
+        code.push_str("/// Default A matrix: A = G + (2/T)*C (trapezoidal, at SAMPLE_RATE)\nconst A_DEFAULT: [[f64; N]; N] = [\n");
+        for row in format_matrix_rows(n, n, |i, j| ir.a_matrix(i, j)) {
+            code.push_str(&format!("    [{}],\n", row));
+        }
+        code.push_str("];\n\n");
+
+        // A_neg = alpha*C - G (trapezoidal history matrix)
+        code.push_str("/// Default A_neg matrix: A_neg = (2/T)*C - G (trapezoidal history, at SAMPLE_RATE)\nconst A_NEG_DEFAULT: [[f64; N]; N] = [\n");
+        for row in format_matrix_rows(n, n, |i, j| ir.a_neg(i, j)) {
+            code.push_str(&format!("    [{}],\n", row));
+        }
+        code.push_str("];\n\n");
+
+        // A_be = G + (1/T)*C (backward Euler forward matrix)
+        code.push_str("/// Default A_be matrix: A_be = G + (1/T)*C (backward Euler, at SAMPLE_RATE)\nconst A_BE_DEFAULT: [[f64; N]; N] = [\n");
+        for row in format_matrix_rows(n, n, |i, j| ir.a_matrix_be(i, j)) {
+            code.push_str(&format!("    [{}],\n", row));
+        }
+        code.push_str("];\n\n");
+
+        // A_neg_be = (1/T)*C (backward Euler history matrix)
+        code.push_str("/// Default A_neg_be matrix: (1/T)*C (backward Euler history, at SAMPLE_RATE)\nconst A_NEG_BE_DEFAULT: [[f64; N]; N] = [\n");
+        for row in format_matrix_rows(n, n, |i, j| ir.a_neg_be(i, j)) {
+            code.push_str(&format!("    [{}],\n", row));
+        }
+        code.push_str("];\n\n");
+
+        // N_v: voltage extraction matrix (M × N)
+        code.push_str("/// N_v matrix: extracts controlling voltages from node voltages (M x N)\npub const N_V: [[f64; N]; M] = [\n");
+        for row in format_matrix_rows(m, n, |i, j| ir.n_v(i, j)) {
+            code.push_str(&format!("    [{}],\n", row));
+        }
+        code.push_str("];\n\n");
+
+        // N_i: current injection matrix (N × M, stored as [M][N] transposed for codegen convention)
+        code.push_str("/// N_i matrix (transposed): maps nonlinear currents to node injections (M x N)\npub const N_I: [[f64; N]; M] = [\n");
+        for row in format_matrix_rows(m, n, |i, j| ir.n_i(j, i)) {
+            code.push_str(&format!("    [{}],\n", row));
+        }
+        code.push_str("];\n\n");
+
+        // RHS_CONST (trapezoidal)
+        if ir.has_dc_sources {
+            let rhs_const_values = (0..n).map(|i| fmt_f64(ir.matrices.rhs_const[i])).collect::<Vec<_>>().join(", ");
+            code.push_str(&format!(
+                "/// RHS constant contribution from DC sources (trapezoidal: node rows x2, VS rows x1)\npub const RHS_CONST: [f64; N] = [{}];\n\n",
+                rhs_const_values
+            ));
+        }
+
+        // RHS_CONST_BE (backward Euler)
+        if ir.has_dc_sources && !ir.matrices.rhs_const_be.is_empty() {
+            let rhs_const_be_values = (0..n).map(|i| {
+                if i < ir.matrices.rhs_const_be.len() { fmt_f64(ir.matrices.rhs_const_be[i]) } else { fmt_f64(0.0) }
+            }).collect::<Vec<_>>().join(", ");
+            code.push_str(&format!(
+                "/// RHS constant contribution from DC sources (backward Euler: all rows x1)\npub const RHS_CONST_BE: [f64; N] = [{}];\n\n",
+                rhs_const_be_values
+            ));
+        }
+
+        // DC blocking coefficient
+        let internal_rate = ir.solver_config.sample_rate * ir.solver_config.oversampling_factor as f64;
+        let dc_block_r = 1.0 - 2.0 * std::f64::consts::PI * 5.0 / internal_rate;
+        code.push_str(&format!(
+            "/// DC blocking filter coefficient: R = 1 - 2*pi*fc/sr (5Hz cutoff at internal rate)\npub const DC_BLOCK_R: f64 = {:.17e};\n\n",
+            dc_block_r
+        ));
+
+        // DC OP convergence flag
+        code.push_str(&format!(
+            "/// Whether the nonlinear DC OP solver converged at codegen time\npub const DC_OP_CONVERGED: bool = {};\n\n",
+            ir.dc_op_converged
+        ));
+
+        code
+    }
+
+    /// Emit state struct, Default impl, set_sample_rate, and reset for nodal solver.
+    fn emit_nodal_state(&self, ir: &CircuitIR) -> String {
+        let n = ir.topology.n;
+        let m = ir.topology.m;
+        let n_nodes = if ir.topology.n_nodes > 0 { ir.topology.n_nodes } else { n };
+        let n_aug = ir.topology.n_aug;
+        let num_outputs = ir.solver_config.output_nodes.len();
+
+        let mut code = section_banner("STATE STRUCTURE (Nodal solver)");
+
+        // DC OP constant
+        let has_dc_op = ir.has_dc_op;
+        if has_dc_op {
+            let dc_op_values = ir.dc_operating_point.iter().map(|v| fmt_f64(*v)).collect::<Vec<_>>().join(", ");
+            code.push_str(&format!(
+                "/// DC operating point: steady-state node voltages\npub const DC_OP: [f64; N] = [{}];\n\n",
+                dc_op_values
+            ));
+        }
+
+        // DC NL currents
+        let has_dc_nl = m > 0
+            && !ir.dc_nl_currents.is_empty()
+            && ir.dc_nl_currents.iter().any(|&v| v.abs() > 1e-30);
+        if has_dc_nl {
+            let dc_nl_i_values = ir.dc_nl_currents.iter().map(|v| fmt_f64(*v)).collect::<Vec<_>>().join(", ");
+            code.push_str(&format!(
+                "/// DC operating point: nonlinear device currents at bias point\npub const DC_NL_I: [f64; M] = [{}];\n\n",
+                dc_nl_i_values
+            ));
+        }
+
+        // State struct
+        code.push_str("/// Circuit state for one processing channel (nodal solver).\n");
+        code.push_str("///\n");
+        code.push_str("/// Contains per-sample state and sample-rate-dependent matrices.\n");
+        code.push_str("/// Call [`set_sample_rate`](CircuitState::set_sample_rate) before processing\n");
+        code.push_str("/// if the host sample rate differs from [`SAMPLE_RATE`].\n");
+        code.push_str("#[derive(Clone, Debug)]\n");
+        code.push_str("pub struct CircuitState {\n");
+        code.push_str("    /// Previous node voltages v[n-1]\n");
+        code.push_str("    pub v_prev: [f64; N],\n\n");
+        code.push_str("    /// Previous nonlinear currents i_nl[n-1]\n");
+        code.push_str("    pub i_nl_prev: [f64; M],\n\n");
+        code.push_str("    /// DC operating point (for reset/sleep/wake)\n");
+        code.push_str("    pub dc_operating_point: [f64; N],\n\n");
+        code.push_str("    /// Previous input sample for trapezoidal integration\n");
+        code.push_str("    pub input_prev: f64,\n\n");
+        code.push_str("    /// Iteration count from last solve (for diagnostics)\n");
+        code.push_str("    pub last_nr_iterations: u32,\n\n");
+        code.push_str("    /// DC blocking filter: previous input samples (one per output)\n");
+        code.push_str("    pub dc_block_x_prev: [f64; NUM_OUTPUTS],\n");
+        code.push_str("    /// DC blocking filter: previous output samples (one per output)\n");
+        code.push_str("    pub dc_block_y_prev: [f64; NUM_OUTPUTS],\n");
+        code.push_str("    /// DC blocking filter coefficient (recomputed on sample rate change)\n");
+        code.push_str("    pub dc_block_r: f64,\n\n");
+        code.push_str("    /// Diagnostic: peak absolute output (pre-clamp)\n");
+        code.push_str("    pub diag_peak_output: f64,\n");
+        code.push_str("    /// Diagnostic: number of times output exceeded +/-10V\n");
+        code.push_str("    pub diag_clamp_count: u64,\n");
+        code.push_str("    /// Diagnostic: number of times NR hit max iterations\n");
+        code.push_str("    pub diag_nr_max_iter_count: u64,\n");
+        code.push_str("    /// Diagnostic: number of backward Euler fallback activations\n");
+        code.push_str("    pub diag_be_fallback_count: u64,\n");
+        code.push_str("    /// Diagnostic: number of times NaN triggered state reset\n");
+        code.push_str("    pub diag_nan_reset_count: u64,\n\n");
+        code.push_str("    /// A matrix: G + alpha*C (trapezoidal), recomputed by set_sample_rate\n");
+        code.push_str("    pub a: [[f64; N]; N],\n");
+        code.push_str("    /// A_neg matrix: alpha*C - G (trapezoidal history), recomputed by set_sample_rate\n");
+        code.push_str("    pub a_neg: [[f64; N]; N],\n");
+        code.push_str("    /// A_be matrix: G + (1/T)*C (backward Euler), recomputed by set_sample_rate\n");
+        code.push_str("    pub a_be: [[f64; N]; N],\n");
+        code.push_str("    /// A_neg_be matrix: (1/T)*C (backward Euler history), recomputed by set_sample_rate\n");
+        code.push_str("    pub a_neg_be: [[f64; N]; N],\n");
+
+        // Device parameter state fields (runtime-adjustable)
+        let device_params = device_param_template_data(ir);
+        if !device_params.is_empty() {
+            code.push_str("\n    // --- Runtime-adjustable device parameters ---\n");
+            for dev in &device_params {
+                for p in &dev.params {
+                    code.push_str(&format!(
+                        "    /// Device {} {} ({}) — runtime adjustable\n",
+                        dev.dev_num, p.const_suffix, dev.device_type
+                    ));
+                    code.push_str(&format!(
+                        "    pub device_{}_{}: f64,\n",
+                        dev.dev_num, p.field_suffix
+                    ));
+                }
+            }
+        }
+
+        // Oversampling state
+        let os_factor = ir.solver_config.oversampling_factor;
+        if os_factor > 1 {
+            let os_info = oversampling_info(os_factor);
+            code.push_str(&format!(
+                "\n    /// Oversampler upsampling half-band filter state (single input)\n\
+                     \x20   pub os_up_state: [f64; {}],\n\
+                     \x20   /// Oversampler downsampling half-band filter state (per output)\n\
+                     \x20   pub os_dn_state: [[f64; {}]; NUM_OUTPUTS],\n",
+                os_info.state_size, os_info.state_size
+            ));
+            if os_factor == 4 {
+                code.push_str(&format!(
+                    "    /// 4x oversampler outer upsampling filter state\n\
+                         \x20   pub os_up_state_outer: [f64; {}],\n\
+                         \x20   /// 4x oversampler outer downsampling filter state\n\
+                         \x20   pub os_dn_state_outer: [[f64; {}]; NUM_OUTPUTS],\n",
+                    os_info.state_size_outer, os_info.state_size_outer
+                ));
+            }
+        }
+
+        code.push_str("}\n\n");
+
+        // Default impl
+        code.push_str("impl Default for CircuitState {\n");
+        code.push_str("    fn default() -> Self {\n");
+        code.push_str("        Self {\n");
+        if has_dc_op {
+            code.push_str("            v_prev: DC_OP,\n");
+        } else {
+            code.push_str("            v_prev: [0.0; N],\n");
+        }
+        if has_dc_nl {
+            code.push_str("            i_nl_prev: DC_NL_I,\n");
+        } else {
+            code.push_str("            i_nl_prev: [0.0; M],\n");
+        }
+        if has_dc_op {
+            code.push_str("            dc_operating_point: DC_OP,\n");
+        } else {
+            code.push_str("            dc_operating_point: [0.0; N],\n");
+        }
+        code.push_str("            input_prev: 0.0,\n");
+        code.push_str("            last_nr_iterations: 0,\n");
+        code.push_str("            dc_block_x_prev: [0.0; NUM_OUTPUTS],\n");
+        code.push_str("            dc_block_y_prev: [0.0; NUM_OUTPUTS],\n");
+        code.push_str("            dc_block_r: DC_BLOCK_R,\n");
+        code.push_str("            diag_peak_output: 0.0,\n");
+        code.push_str("            diag_clamp_count: 0,\n");
+        code.push_str("            diag_nr_max_iter_count: 0,\n");
+        code.push_str("            diag_be_fallback_count: 0,\n");
+        code.push_str("            diag_nan_reset_count: 0,\n");
+        code.push_str("            a: A_DEFAULT,\n");
+        code.push_str("            a_neg: A_NEG_DEFAULT,\n");
+        code.push_str("            a_be: A_BE_DEFAULT,\n");
+        code.push_str("            a_neg_be: A_NEG_BE_DEFAULT,\n");
+
+        for dev in &device_params {
+            for p in &dev.params {
+                code.push_str(&format!(
+                    "            device_{}_{}: DEVICE_{}_{},\n",
+                    dev.dev_num, p.field_suffix, dev.dev_num, p.const_suffix
+                ));
+            }
+        }
+
+        if os_factor > 1 {
+            let os_info = oversampling_info(os_factor);
+            code.push_str(&format!(
+                "            os_up_state: [0.0; {}],\n\
+                 \x20           os_dn_state: [[0.0; {}]; NUM_OUTPUTS],\n",
+                os_info.state_size, os_info.state_size
+            ));
+            if os_factor == 4 {
+                code.push_str(&format!(
+                    "            os_up_state_outer: [0.0; {}],\n\
+                     \x20           os_dn_state_outer: [[0.0; {}]; NUM_OUTPUTS],\n",
+                    os_info.state_size_outer, os_info.state_size_outer
+                ));
+            }
+        }
+
+        code.push_str("        }\n");
+        code.push_str("    }\n");
+        code.push_str("}\n\n");
+
+        // impl CircuitState
+        code.push_str("impl CircuitState {\n");
+
+        // reset()
+        code.push_str("    /// Reset to DC operating point\n");
+        code.push_str("    pub fn reset(&mut self) {\n");
+        code.push_str("        self.v_prev = self.dc_operating_point;\n");
+        if has_dc_nl {
+            code.push_str("        self.i_nl_prev = DC_NL_I;\n");
+        } else {
+            code.push_str("        self.i_nl_prev = [0.0; M];\n");
+        }
+        code.push_str("        self.input_prev = 0.0;\n");
+        code.push_str("        self.last_nr_iterations = 0;\n");
+        code.push_str("        self.dc_block_x_prev = [0.0; NUM_OUTPUTS];\n");
+        code.push_str("        self.dc_block_y_prev = [0.0; NUM_OUTPUTS];\n");
+        code.push_str("        self.diag_peak_output = 0.0;\n");
+        code.push_str("        self.diag_clamp_count = 0;\n");
+        code.push_str("        self.diag_nr_max_iter_count = 0;\n");
+        code.push_str("        self.diag_be_fallback_count = 0;\n");
+        code.push_str("        self.diag_nan_reset_count = 0;\n");
+        for dev in &device_params {
+            for p in &dev.params {
+                code.push_str(&format!(
+                    "        self.device_{}_{} = DEVICE_{}_{};\n",
+                    dev.dev_num, p.field_suffix, dev.dev_num, p.const_suffix
+                ));
+            }
+        }
+        if os_factor > 1 {
+            let os_info = oversampling_info(os_factor);
+            code.push_str(&format!(
+                "        self.os_up_state = [0.0; {}];\n\
+                 \x20       self.os_dn_state = [[0.0; {}]; NUM_OUTPUTS];\n",
+                os_info.state_size, os_info.state_size
+            ));
+            if os_factor == 4 {
+                code.push_str(&format!(
+                    "        self.os_up_state_outer = [0.0; {}];\n\
+                     \x20       self.os_dn_state_outer = [[0.0; {}]; NUM_OUTPUTS];\n",
+                    os_info.state_size_outer, os_info.state_size_outer
+                ));
+            }
+        }
+        code.push_str("    }\n\n");
+
+        // set_dc_operating_point()
+        code.push_str("    /// Set DC operating point (call after DC analysis)\n");
+        code.push_str("    pub fn set_dc_operating_point(&mut self, v_dc: [f64; N]) {\n");
+        code.push_str("        self.dc_operating_point = v_dc;\n");
+        code.push_str("        self.v_prev = v_dc;\n");
+        code.push_str("    }\n\n");
+
+        // set_sample_rate()
+        code.push_str("    /// Recompute all sample-rate-dependent matrices for a new sample rate.\n");
+        code.push_str("    ///\n");
+        code.push_str("    /// Call this once during plugin initialization (NOT on the audio thread).\n");
+        code.push_str("    /// Rebuilds A, A_neg, A_be, A_neg_be from stored G and C matrices.\n");
+        code.push_str("    pub fn set_sample_rate(&mut self, sample_rate: f64) {\n");
+        code.push_str("        if !(sample_rate > 0.0 && sample_rate.is_finite()) {\n");
+        code.push_str("            return;\n");
+        code.push_str("        }\n\n");
+        code.push_str("        // If same as codegen sample rate, reset to defaults\n");
+        code.push_str("        if (sample_rate - SAMPLE_RATE).abs() < 0.5 {\n");
+        code.push_str("            self.a = A_DEFAULT;\n");
+        code.push_str("            self.a_neg = A_NEG_DEFAULT;\n");
+        code.push_str("            self.a_be = A_BE_DEFAULT;\n");
+        code.push_str("            self.a_neg_be = A_NEG_BE_DEFAULT;\n");
+        code.push_str("            self.dc_block_r = DC_BLOCK_R;\n");
+        code.push_str("            self.dc_block_x_prev = [0.0; NUM_OUTPUTS];\n");
+        code.push_str("            self.dc_block_y_prev = [0.0; NUM_OUTPUTS];\n");
+        if os_factor > 1 {
+            let os_info = oversampling_info(os_factor);
+            code.push_str(&format!(
+                "            self.os_up_state = [0.0; {}];\n\
+                 \x20           self.os_dn_state = [[0.0; {}]; NUM_OUTPUTS];\n",
+                os_info.state_size, os_info.state_size
+            ));
+            if os_factor == 4 {
+                code.push_str(&format!(
+                    "            self.os_up_state_outer = [0.0; {}];\n\
+                     \x20           self.os_dn_state_outer = [[0.0; {}]; NUM_OUTPUTS];\n",
+                    os_info.state_size_outer, os_info.state_size_outer
+                ));
+            }
+        }
+        code.push_str("            return;\n");
+        code.push_str("        }\n\n");
+
+        code.push_str(&format!(
+            "        let internal_rate = sample_rate * {}.0;\n",
+            ir.solver_config.oversampling_factor
+        ));
+        code.push_str("        let alpha = 2.0 * internal_rate;\n");
+        code.push_str("        let alpha_be = internal_rate;\n\n");
+
+        // Build A = G + alpha*C
+        code.push_str("        // Build A = G + alpha*C (trapezoidal)\n");
+        code.push_str("        for i in 0..N {\n");
+        code.push_str("            for j in 0..N {\n");
+        code.push_str("                self.a[i][j] = G[i][j] + alpha * C[i][j];\n");
+        code.push_str("            }\n");
+        code.push_str("        }\n\n");
+
+        // Build A_neg = alpha*C - G
+        code.push_str("        // Build A_neg = alpha*C - G (trapezoidal history)\n");
+        code.push_str("        for i in 0..N {\n");
+        code.push_str("            for j in 0..N {\n");
+        code.push_str("                self.a_neg[i][j] = alpha * C[i][j] - G[i][j];\n");
+        code.push_str("            }\n");
+        code.push_str("        }\n");
+
+        // Zero VS/VCVS algebraic rows in A_neg
+        if n_nodes < n_aug {
+            code.push_str(&format!(
+                "        // Zero VS/VCVS algebraic rows in A_neg (NOT inductor rows)\n\
+                 \x20       for i in {}..{} {{\n\
+                 \x20           for j in 0..N {{\n\
+                 \x20               self.a_neg[i][j] = 0.0;\n\
+                 \x20           }}\n\
+                 \x20       }}\n",
+                n_nodes, n_aug
+            ));
+        }
+        code.push('\n');
+
+        // Build A_be = G + alpha_be*C
+        code.push_str("        // Build A_be = G + (1/T)*C (backward Euler)\n");
+        code.push_str("        for i in 0..N {\n");
+        code.push_str("            for j in 0..N {\n");
+        code.push_str("                self.a_be[i][j] = G[i][j] + alpha_be * C[i][j];\n");
+        code.push_str("            }\n");
+        code.push_str("        }\n\n");
+
+        // Build A_neg_be = alpha_be*C
+        code.push_str("        // Build A_neg_be = (1/T)*C (backward Euler history)\n");
+        code.push_str("        for i in 0..N {\n");
+        code.push_str("            for j in 0..N {\n");
+        code.push_str("                self.a_neg_be[i][j] = alpha_be * C[i][j];\n");
+        code.push_str("            }\n");
+        code.push_str("        }\n");
+
+        // Zero VS/VCVS rows in A_neg_be
+        if n_nodes < n_aug {
+            code.push_str(&format!(
+                "        for i in {}..{} {{\n\
+                 \x20           for j in 0..N {{\n\
+                 \x20               self.a_neg_be[i][j] = 0.0;\n\
+                 \x20           }}\n\
+                 \x20       }}\n",
+                n_nodes, n_aug
+            ));
+        }
+        code.push('\n');
+
+        // DC block recomputation
+        code.push_str(&format!(
+            "        // Recompute DC blocking coefficient\n\
+             \x20       self.dc_block_r = 1.0 - 2.0 * std::f64::consts::PI * 5.0 / internal_rate;\n\
+             \x20       self.dc_block_x_prev = [0.0; NUM_OUTPUTS];\n\
+             \x20       self.dc_block_y_prev = [0.0; NUM_OUTPUTS];\n"
+        ));
+
+        if os_factor > 1 {
+            let os_info = oversampling_info(os_factor);
+            code.push_str(&format!(
+                "        self.os_up_state = [0.0; {}];\n\
+                 \x20       self.os_dn_state = [[0.0; {}]; NUM_OUTPUTS];\n",
+                os_info.state_size, os_info.state_size
+            ));
+            if os_factor == 4 {
+                code.push_str(&format!(
+                    "        self.os_up_state_outer = [0.0; {}];\n\
+                     \x20       self.os_dn_state_outer = [[0.0; {}]; NUM_OUTPUTS];\n",
+                    os_info.state_size_outer, os_info.state_size_outer
+                ));
+            }
+        }
+
+        code.push_str("    }\n");
+        code.push_str("}\n\n");
+
+        let _ = (n, m, n_nodes, n_aug, num_outputs);
+
+        code
+    }
+
+    /// Emit LU solve function for the nodal solver (N x N with partial pivoting).
+    fn emit_nodal_lu_solve(_ir: &CircuitIR) -> String {
+        let mut code = section_banner("LU SOLVE (Gaussian elimination with partial pivoting)");
+
+        code.push_str("/// Solve A*x = b using Gaussian elimination with partial pivoting.\n");
+        code.push_str("///\n");
+        code.push_str("/// Modifies `a` and `b` in place. On success, `b` contains the solution.\n");
+        code.push_str("/// Returns `true` if the solve succeeded, `false` if the matrix was singular.\n");
+        code.push_str("#[inline(always)]\n");
+        code.push_str("fn lu_solve(a: &mut [[f64; N]; N], b: &mut [f64; N]) -> bool {\n");
+        code.push_str("    let mut perm = [0usize; N];\n");
+        code.push_str("    for i in 0..N { perm[i] = i; }\n\n");
+
+        // Forward elimination with partial pivoting
+        code.push_str("    // Forward elimination with partial pivoting\n");
+        code.push_str("    for col in 0..N {\n");
+        code.push_str("        // Find max pivot in column\n");
+        code.push_str("        let mut max_row = col;\n");
+        code.push_str("        let mut max_val = a[col][col].abs();\n");
+        code.push_str("        for row in (col + 1)..N {\n");
+        code.push_str("            if a[row][col].abs() > max_val {\n");
+        code.push_str("                max_val = a[row][col].abs();\n");
+        code.push_str("                max_row = row;\n");
+        code.push_str("            }\n");
+        code.push_str("        }\n\n");
+        code.push_str("        if max_val < 1e-30 {\n");
+        code.push_str("            return false; // Singular\n");
+        code.push_str("        }\n\n");
+        code.push_str("        // Swap rows\n");
+        code.push_str("        if max_row != col {\n");
+        code.push_str("            a.swap(col, max_row);\n");
+        code.push_str("            b.swap(col, max_row);\n");
+        code.push_str("            perm.swap(col, max_row);\n");
+        code.push_str("        }\n\n");
+        code.push_str("        // Eliminate below pivot\n");
+        code.push_str("        let pivot = a[col][col];\n");
+        code.push_str("        for row in (col + 1)..N {\n");
+        code.push_str("            let factor = a[row][col] / pivot;\n");
+        code.push_str("            for j in (col + 1)..N {\n");
+        code.push_str("                a[row][j] -= factor * a[col][j];\n");
+        code.push_str("            }\n");
+        code.push_str("            a[row][col] = 0.0;\n");
+        code.push_str("            b[row] -= factor * b[col];\n");
+        code.push_str("        }\n");
+        code.push_str("    }\n\n");
+
+        // Back substitution
+        code.push_str("    // Back substitution\n");
+        code.push_str("    for i in (0..N).rev() {\n");
+        code.push_str("        let mut sum = b[i];\n");
+        code.push_str("        for j in (i + 1)..N {\n");
+        code.push_str("            sum -= a[i][j] * b[j];\n");
+        code.push_str("        }\n");
+        code.push_str("        if a[i][i].abs() < 1e-30 {\n");
+        code.push_str("            return false; // Singular\n");
+        code.push_str("        }\n");
+        code.push_str("        b[i] = sum / a[i][i];\n");
+        code.push_str("    }\n\n");
+        code.push_str("    true\n");
+        code.push_str("}\n\n");
+
+        code
+    }
+
+    /// Emit the complete process_sample function for the nodal solver.
+    ///
+    /// This is the core NR loop: build RHS, iterate (Jacobian stamp, LU solve,
+    /// SPICE limiting, damping, convergence), BE fallback, state update.
+    fn emit_nodal_process_sample(ir: &CircuitIR) -> String {
+        let n = ir.topology.n;
+        let m = ir.topology.m;
+        let n_nodes = if ir.topology.n_nodes > 0 { ir.topology.n_nodes } else { n };
+        let num_outputs = ir.solver_config.output_nodes.len();
+        let os_factor = ir.solver_config.oversampling_factor;
+
+        let mut code = section_banner("PROCESS SAMPLE (Full-nodal NR with LU solve)");
+
+        // Function signature
+        if os_factor > 1 {
+            code.push_str("/// Process a single sample at the internal (oversampled) rate.\n");
+            code.push_str("///\n");
+            code.push_str("/// Called by `process_sample()` through the oversampling chain.\n");
+            code.push_str("#[inline(always)]\n");
+            code.push_str("fn process_sample_inner(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS] {\n");
+        } else {
+            code.push_str("/// Process a single audio sample through the circuit.\n");
+            code.push_str("///\n");
+            code.push_str("/// Uses full-nodal Newton-Raphson with LU factorization per iteration.\n");
+            code.push_str("/// Includes backward Euler fallback for unconditional stability.\n");
+            code.push_str("#[inline]\n");
+            code.push_str("pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS] {\n");
+        }
+
+        // Input sanitization
+        code.push_str("    let input = if input.is_finite() { input.clamp(-100.0, 100.0) } else { 0.0 };\n\n");
+
+        // Step 1: Build RHS = rhs_const + A_neg * v_prev + N_i * i_nl_prev + input
+        code.push_str("    // Step 1: Build RHS = rhs_const + A_neg * v_prev + N_i * i_nl_prev + input\n");
+        code.push_str("    let mut rhs = [0.0f64; N];\n");
+        code.push_str("    for i in 0..N {\n");
+        if ir.has_dc_sources {
+            code.push_str("        let mut sum = RHS_CONST[i];\n");
+        } else {
+            code.push_str("        let mut sum = 0.0;\n");
+        }
+        code.push_str("        for j in 0..N {\n");
+        code.push_str("            sum += state.a_neg[i][j] * state.v_prev[j];\n");
+        code.push_str("        }\n");
+        if m > 0 {
+            code.push_str("        // N_i * i_nl_prev (trapezoidal nonlinear integration)\n");
+            code.push_str("        for j in 0..M {\n");
+            code.push_str("            sum += N_I[j][i] * state.i_nl_prev[j];\n");
+            code.push_str("        }\n");
+        }
+        code.push_str("        rhs[i] = sum;\n");
+        code.push_str("    }\n\n");
+
+        // Input source (Thevenin, trapezoidal)
+        code.push_str("    // Input source (Thevenin, trapezoidal)\n");
+        code.push_str("    let input_conductance = 1.0 / INPUT_RESISTANCE;\n");
+        code.push_str("    rhs[INPUT_NODE] += (input + state.input_prev) * input_conductance;\n");
+        code.push_str("    state.input_prev = input;\n\n");
+
+        // Handle linear circuits (M=0): direct LU solve, no NR iteration
+        if m == 0 {
+            code.push_str("    // Linear circuit: direct LU solve (no NR needed)\n");
+            code.push_str("    let mut g_aug = state.a;\n");
+            code.push_str("    let mut v = rhs;\n");
+            code.push_str("    if !lu_solve(&mut g_aug, &mut v) {\n");
+            code.push_str("        v = state.v_prev;\n");
+            code.push_str("    }\n\n");
+        } else {
+            // Step 2: Newton-Raphson in full augmented voltage space
+            code.push_str("    // Step 2: Newton-Raphson in full augmented voltage space\n");
+            code.push_str("    let mut v = state.v_prev;\n");
+            code.push_str("    let mut converged = false;\n");
+            code.push_str("    let mut i_nl = [0.0f64; M];\n\n");
+
+            // Trapezoidal NR loop
+            code.push_str("    for iter in 0..MAX_ITER {\n");
+
+            // 2a. Extract nonlinear voltages: v_nl = N_v * v
+            code.push_str("        // 2a. Extract nonlinear voltages: v_nl = N_v * v\n");
+            code.push_str("        let mut v_nl = [0.0f64; M];\n");
+            code.push_str("        for i in 0..M {\n");
+            code.push_str("            let mut sum = 0.0;\n");
+            code.push_str("            for j in 0..N {\n");
+            code.push_str("                sum += N_V[i][j] * v[j];\n");
+            code.push_str("            }\n");
+            code.push_str("            v_nl[i] = sum;\n");
+            code.push_str("        }\n\n");
+
+            // 2b. Evaluate device currents and Jacobian
+            code.push_str("        // 2b. Evaluate device currents and Jacobian (block-diagonal)\n");
+            Self::emit_nodal_device_evaluation(&mut code, ir);
+            code.push('\n');
+
+            // 2c. Build Jacobian: G_aug = A - N_i * J_dev * N_v
+            code.push_str("        // 2c. Build Jacobian: G_aug = A - N_i * J_dev * N_v\n");
+            code.push_str("        let mut g_aug = state.a;\n");
+            code.push_str("        for a_idx in 0..N {\n");
+            code.push_str("            for b_idx in 0..N {\n");
+            code.push_str("                let mut sum = 0.0;\n");
+            code.push_str("                for i in 0..M {\n");
+            code.push_str("                    let ni_ai = N_I[i][a_idx];\n");
+            code.push_str("                    if ni_ai.abs() < 1e-30 { continue; }\n");
+            code.push_str("                    for j in 0..M {\n");
+            code.push_str("                        let jd = j_dev[i * M + j];\n");
+            code.push_str("                        if jd.abs() < 1e-30 { continue; }\n");
+            code.push_str("                        let nv_jb = N_V[j][b_idx];\n");
+            code.push_str("                        if nv_jb.abs() < 1e-30 { continue; }\n");
+            code.push_str("                        sum += ni_ai * jd * nv_jb;\n");
+            code.push_str("                    }\n");
+            code.push_str("                }\n");
+            code.push_str("                g_aug[a_idx][b_idx] -= sum;\n");
+            code.push_str("            }\n");
+            code.push_str("        }\n\n");
+
+            // 2d. Build companion RHS: rhs_base + N_i * (i_nl - J_dev * v_nl)
+            code.push_str("        // 2d. Build companion RHS: rhs + N_i * (i_nl - J_dev * v_nl)\n");
+            code.push_str("        let mut rhs_work = rhs;\n");
+            code.push_str("        for i in 0..M {\n");
+            code.push_str("            let mut jdev_vnl = 0.0;\n");
+            code.push_str("            for j in 0..M {\n");
+            code.push_str("                jdev_vnl += j_dev[i * M + j] * v_nl[j];\n");
+            code.push_str("            }\n");
+            code.push_str("            let i_comp = i_nl[i] - jdev_vnl;\n");
+            code.push_str("            for a_idx in 0..N {\n");
+            code.push_str("                rhs_work[a_idx] += N_I[i][a_idx] * i_comp;\n");
+            code.push_str("            }\n");
+            code.push_str("        }\n\n");
+
+            // 2e. LU solve: v_new = G_aug^{-1} * rhs_work
+            code.push_str("        // 2e. LU solve: v_new = G_aug^{-1} * rhs_work\n");
+            code.push_str("        let mut v_new = rhs_work;\n");
+            code.push_str("        if !lu_solve(&mut g_aug, &mut v_new) {\n");
+            code.push_str("            state.diag_nr_max_iter_count += 1;\n");
+            code.push_str("            break;\n");
+            code.push_str("        }\n\n");
+
+            // 2f. SPICE-style voltage limiting + global node damping
+            code.push_str("        // 2f. SPICE voltage limiting + node damping\n");
+            code.push_str("        let mut alpha = 1.0_f64;\n\n");
+
+            // Layer 1: Device voltage limiting
+            code.push_str("        // Layer 1: SPICE device voltage limiting\n");
+            Self::emit_nodal_voltage_limiting(&mut code, ir);
+            code.push('\n');
+
+            // Layer 2: Global node voltage damping (10V threshold)
+            code.push_str("        // Layer 2: Global node voltage damping (10V threshold)\n");
+            code.push_str("        {\n");
+            code.push_str("            let mut max_node_dv = 0.0_f64;\n");
+            code.push_str(&format!(
+                "            for i in 0..{} {{\n\
+                 \x20               let dv = alpha * (v_new[i] - v[i]);\n\
+                 \x20               max_node_dv = max_node_dv.max(dv.abs());\n\
+                 \x20           }}\n",
+                n_nodes
+            ));
+            code.push_str("            if max_node_dv > 10.0 {\n");
+            code.push_str("                alpha *= (10.0 / max_node_dv).max(0.01);\n");
+            code.push_str("            }\n");
+            code.push_str("        }\n\n");
+
+            // Apply damped Newton step
+            code.push_str("        // Apply damped Newton step\n");
+            code.push_str("        for i in 0..N {\n");
+            code.push_str("            v[i] += alpha * (v_new[i] - v[i]);\n");
+            code.push_str("        }\n\n");
+
+            // RELTOL convergence check
+            code.push_str("        // SPICE-style convergence: RELTOL * max(|v_new|, |v_old|) + VNTOL\n");
+            code.push_str("        let converged_check = (0..N).all(|i| {\n");
+            code.push_str("            let abs_delta = (alpha * (v_new[i] - v[i])).abs();\n");
+            code.push_str("            let threshold = 1e-3 * v[i].abs().max(v_new[i].abs()) + TOL;\n");
+            code.push_str("            abs_delta < threshold\n");
+            code.push_str("        });\n\n");
+
+            code.push_str("        if converged_check {\n");
+            code.push_str("            converged = true;\n");
+            code.push_str("            state.last_nr_iterations = iter as u32;\n");
+
+            // Final device evaluation at converged point
+            code.push_str("            // Final device evaluation at converged point\n");
+            code.push_str("            let mut v_nl_final = [0.0f64; M];\n");
+            code.push_str("            for i in 0..M {\n");
+            code.push_str("                let mut sum = 0.0;\n");
+            code.push_str("                for j in 0..N { sum += N_V[i][j] * v[j]; }\n");
+            code.push_str("                v_nl_final[i] = sum;\n");
+            code.push_str("            }\n");
+            Self::emit_nodal_device_evaluation_final(&mut code, ir, "            ");
+            code.push_str("            break;\n");
+            code.push_str("        }\n");
+            code.push_str("    }\n\n"); // end trapezoidal NR loop
+
+            // Backward Euler fallback
+            code.push_str("    // Backward Euler fallback: if trapezoidal NR didn't converge, retry with BE\n");
+            code.push_str("    if !converged {\n");
+            code.push_str("        state.diag_nr_max_iter_count += 1;\n\n");
+
+            // Rebuild RHS with BE matrices
+            code.push_str("        // Rebuild RHS with backward Euler matrices\n");
+            code.push_str("        v = state.v_prev;\n");
+            code.push_str("        let mut rhs_be = [0.0f64; N];\n");
+            code.push_str("        for i in 0..N {\n");
+            if ir.has_dc_sources && !ir.matrices.rhs_const_be.is_empty() {
+                code.push_str("            let mut sum = RHS_CONST_BE[i];\n");
+            } else {
+                code.push_str("            let mut sum = 0.0;\n");
+            }
+            code.push_str("            for j in 0..N {\n");
+            code.push_str("                sum += state.a_neg_be[i][j] * state.v_prev[j];\n");
+            code.push_str("            }\n");
+            if m > 0 {
+                code.push_str("            for j in 0..M {\n");
+                code.push_str("                sum += N_I[j][i] * state.i_nl_prev[j];\n");
+                code.push_str("            }\n");
+            }
+            code.push_str("            rhs_be[i] = sum;\n");
+            code.push_str("        }\n");
+            code.push_str("        // BE input: just input[n+1] * G_in (no trapezoidal average)\n");
+            code.push_str("        rhs_be[INPUT_NODE] += input * input_conductance;\n\n");
+
+            // BE NR loop
+            code.push_str("        for _iter in 0..MAX_ITER {\n");
+
+            // Extract v_nl
+            code.push_str("            let mut v_nl = [0.0f64; M];\n");
+            code.push_str("            for i in 0..M {\n");
+            code.push_str("                let mut sum = 0.0;\n");
+            code.push_str("                for j in 0..N { sum += N_V[i][j] * v[j]; }\n");
+            code.push_str("                v_nl[i] = sum;\n");
+            code.push_str("            }\n\n");
+
+            // Evaluate devices
+            code.push_str("            // Evaluate devices\n");
+            Self::emit_nodal_device_evaluation_indented(&mut code, ir, "            ");
+            code.push('\n');
+
+            // Build Jacobian for BE
+            code.push_str("            let mut g_aug = state.a_be;\n");
+            code.push_str("            for a_idx in 0..N {\n");
+            code.push_str("                for b_idx in 0..N {\n");
+            code.push_str("                    let mut sum = 0.0;\n");
+            code.push_str("                    for i in 0..M {\n");
+            code.push_str("                        let ni_ai = N_I[i][a_idx];\n");
+            code.push_str("                        if ni_ai.abs() < 1e-30 { continue; }\n");
+            code.push_str("                        for j in 0..M {\n");
+            code.push_str("                            let jd = j_dev[i * M + j];\n");
+            code.push_str("                            if jd.abs() < 1e-30 { continue; }\n");
+            code.push_str("                            let nv_jb = N_V[j][b_idx];\n");
+            code.push_str("                            if nv_jb.abs() < 1e-30 { continue; }\n");
+            code.push_str("                            sum += ni_ai * jd * nv_jb;\n");
+            code.push_str("                        }\n");
+            code.push_str("                    }\n");
+            code.push_str("                    g_aug[a_idx][b_idx] -= sum;\n");
+            code.push_str("                }\n");
+            code.push_str("            }\n\n");
+
+            // Companion RHS for BE
+            code.push_str("            let mut rhs_work = rhs_be;\n");
+            code.push_str("            for i in 0..M {\n");
+            code.push_str("                let mut jdev_vnl = 0.0;\n");
+            code.push_str("                for j in 0..M { jdev_vnl += j_dev[i * M + j] * v_nl[j]; }\n");
+            code.push_str("                let i_comp = i_nl[i] - jdev_vnl;\n");
+            code.push_str("                for a_idx in 0..N { rhs_work[a_idx] += N_I[i][a_idx] * i_comp; }\n");
+            code.push_str("            }\n\n");
+
+            // LU solve for BE
+            code.push_str("            let mut v_new = rhs_work;\n");
+            code.push_str("            if !lu_solve(&mut g_aug, &mut v_new) { break; }\n\n");
+
+            // Limiting and damping for BE (same structure)
+            code.push_str("            let mut alpha = 1.0_f64;\n");
+            Self::emit_nodal_voltage_limiting_indented(&mut code, ir, "            ");
+            code.push_str("            {\n");
+            code.push_str("                let mut max_node_dv = 0.0_f64;\n");
+            code.push_str(&format!(
+                "                for i in 0..{} {{\n\
+                 \x20                   let dv = alpha * (v_new[i] - v[i]);\n\
+                 \x20                   max_node_dv = max_node_dv.max(dv.abs());\n\
+                 \x20               }}\n",
+                n_nodes
+            ));
+            code.push_str("                if max_node_dv > 10.0 { alpha *= (10.0 / max_node_dv).max(0.01); }\n");
+            code.push_str("            }\n\n");
+
+            code.push_str("            for i in 0..N { v[i] += alpha * (v_new[i] - v[i]); }\n\n");
+
+            // BE convergence
+            code.push_str("            let be_converged = (0..N).all(|i| {\n");
+            code.push_str("                let abs_delta = (alpha * (v_new[i] - v[i])).abs();\n");
+            code.push_str("                let threshold = 1e-3 * v[i].abs().max(v_new[i].abs()) + TOL;\n");
+            code.push_str("                abs_delta < threshold\n");
+            code.push_str("            });\n\n");
+
+            code.push_str("            if be_converged {\n");
+            code.push_str("                converged = true;\n");
+            code.push_str("                state.diag_be_fallback_count += 1;\n");
+            code.push_str("                let mut v_nl_final = [0.0f64; M];\n");
+            code.push_str("                for i in 0..M {\n");
+            code.push_str("                    let mut sum = 0.0;\n");
+            code.push_str("                    for j in 0..N { sum += N_V[i][j] * v[j]; }\n");
+            code.push_str("                    v_nl_final[i] = sum;\n");
+            code.push_str("                }\n");
+            Self::emit_nodal_device_evaluation_final(&mut code, ir, "                ");
+            code.push_str("                break;\n");
+            code.push_str("            }\n");
+            code.push_str("        }\n\n"); // end BE NR loop
+
+            // If still not converged, ensure i_nl is consistent
+            code.push_str("        // If still not converged, ensure i_nl is consistent with v\n");
+            code.push_str("        if !converged {\n");
+            code.push_str("            let mut v_nl_final = [0.0f64; M];\n");
+            code.push_str("            for i in 0..M {\n");
+            code.push_str("                let mut sum = 0.0;\n");
+            code.push_str("                for j in 0..N { sum += N_V[i][j] * v[j]; }\n");
+            code.push_str("                v_nl_final[i] = sum;\n");
+            code.push_str("            }\n");
+            Self::emit_nodal_device_evaluation_final(&mut code, ir, "            ");
+            code.push_str("        }\n");
+            code.push_str("    }\n\n"); // end BE fallback block
+        }
+
+        // Step 3: Update state
+        code.push_str("    // Step 3: Update state\n");
+        code.push_str("    state.v_prev = v;\n");
+        if m > 0 {
+            code.push_str("    state.i_nl_prev = i_nl;\n");
+        }
+        code.push('\n');
+
+        // NaN check
+        code.push_str("    // Sanitize state: if NaN/inf entered, reset to prevent poisoning\n");
+        code.push_str("    if !state.v_prev.iter().all(|x| x.is_finite()) {\n");
+        code.push_str("        state.v_prev = [0.0; N];\n");
+        code.push_str("        state.i_nl_prev = [0.0; M];\n");
+        code.push_str("        state.input_prev = 0.0;\n");
+        code.push_str("        state.diag_nan_reset_count += 1;\n");
+        code.push_str("        return [0.0; NUM_OUTPUTS];\n");
+        code.push_str("    }\n\n");
+
+        if m > 0 {
+            code.push_str("    if state.last_nr_iterations >= MAX_ITER as u32 {\n");
+            code.push_str("        state.diag_nr_max_iter_count += 1;\n");
+            code.push_str("    }\n\n");
+        }
+
+        // Step 4: Extract outputs, apply DC blocking and scaling
+        code.push_str("    // Step 4: Extract outputs, DC blocking, and scaling\n");
+        code.push_str("    let mut output = [0.0f64; NUM_OUTPUTS];\n");
+        code.push_str("    for out_idx in 0..NUM_OUTPUTS {\n");
+        code.push_str("        let raw_out = v[OUTPUT_NODES[out_idx]];\n");
+        code.push_str("        let raw_out = if raw_out.is_finite() { raw_out } else { 0.0 };\n");
+        code.push_str("        let dc_blocked = raw_out - state.dc_block_x_prev[out_idx]\n");
+        code.push_str("            + state.dc_block_r * state.dc_block_y_prev[out_idx];\n");
+        code.push_str("        state.dc_block_x_prev[out_idx] = raw_out;\n");
+        code.push_str("        state.dc_block_y_prev[out_idx] = dc_blocked;\n");
+        code.push_str("        let scaled = dc_blocked * OUTPUT_SCALES[out_idx];\n");
+        code.push_str("        let abs_out = scaled.abs();\n");
+        code.push_str("        if abs_out > state.diag_peak_output { state.diag_peak_output = abs_out; }\n");
+        code.push_str("        if abs_out > 10.0 { state.diag_clamp_count += 1; }\n");
+        code.push_str("        output[out_idx] = scaled.clamp(-10.0, 10.0);\n");
+        code.push_str("    }\n");
+        code.push_str("    output\n");
+        code.push_str("}\n\n");
+
+        let _ = (num_outputs, n_nodes);
+
+        code
+    }
+
+    /// Emit device evaluation code for the NR loop body (trapezoidal, no indent prefix).
+    fn emit_nodal_device_evaluation(code: &mut String, ir: &CircuitIR) {
+        Self::emit_nodal_device_evaluation_indented(code, ir, "        ");
+    }
+
+    /// Emit device evaluation code at a given indentation level.
+    ///
+    /// Produces `i_nl[M]` and `j_dev[M*M]` arrays from `v_nl[M]`.
+    fn emit_nodal_device_evaluation_indented(code: &mut String, ir: &CircuitIR, indent: &str) {
+        let m = ir.topology.m;
+
+        code.push_str(&format!("{indent}let mut i_nl = [0.0f64; M];\n"));
+        code.push_str(&format!("{indent}let mut j_dev = [0.0f64; M * M];\n"));
+
+        for (dev_num, slot) in ir.device_slots.iter().enumerate() {
+            let s = slot.start_idx;
+            match (&slot.device_type, &slot.params) {
+                (DeviceType::Diode, DeviceParams::Diode(_dp)) => {
+                    code.push_str(&format!(
+                        "{indent}{{ // Diode {dev_num}\n\
+                         {indent}    let v = v_nl[{s}];\n\
+                         {indent}    let v_clamped = v.clamp(-40.0 * state.device_{dev_num}_n_vt, 40.0 * state.device_{dev_num}_n_vt);\n\
+                         {indent}    let e = (v_clamped / state.device_{dev_num}_n_vt).exp();\n\
+                         {indent}    i_nl[{s}] = state.device_{dev_num}_is * (e - 1.0);\n\
+                         {indent}    let g = state.device_{dev_num}_is * e / state.device_{dev_num}_n_vt;\n\
+                         {indent}    j_dev[{s} * M + {s}] = if v > 40.0 * state.device_{dev_num}_n_vt {{ g + state.device_{dev_num}_is / state.device_{dev_num}_n_vt }} else {{ g }};\n\
+                         {indent}}}\n"
+                    ));
+                }
+                (DeviceType::Bjt, DeviceParams::Bjt(bp)) => {
+                    let s1 = s + 1;
+                    if bp.is_gummel_poon() {
+                        code.push_str(&format!(
+                            "{indent}{{ // BJT {dev_num} (Gummel-Poon)\n\
+                             {indent}    let vbe = v_nl[{s}] * DEVICE_{dev_num}_SIGN;\n\
+                             {indent}    let vbc = v_nl[{s1}] * DEVICE_{dev_num}_SIGN;\n\
+                             {indent}    let (ic, ib, jac) = bjt_gummel_poon_{dev_num}(vbe, vbc, state);\n\
+                             {indent}    i_nl[{s}] = ic * DEVICE_{dev_num}_SIGN;\n\
+                             {indent}    i_nl[{s1}] = ib * DEVICE_{dev_num}_SIGN;\n\
+                             {indent}    j_dev[{s} * M + {s}] = jac[0];\n\
+                             {indent}    j_dev[{s} * M + {s1}] = jac[1];\n\
+                             {indent}    j_dev[{s1} * M + {s}] = jac[2];\n\
+                             {indent}    j_dev[{s1} * M + {s1}] = jac[3];\n\
+                             {indent}}}\n"
+                        ));
+                    } else {
+                        code.push_str(&format!(
+                            "{indent}{{ // BJT {dev_num} (Ebers-Moll)\n\
+                             {indent}    let vbe = v_nl[{s}] * DEVICE_{dev_num}_SIGN;\n\
+                             {indent}    let vbc = v_nl[{s1}] * DEVICE_{dev_num}_SIGN;\n\
+                             {indent}    let (ic, ib, jac) = bjt_ebers_moll(vbe, vbc, state.device_{dev_num}_is, state.device_{dev_num}_vt, state.device_{dev_num}_bf, state.device_{dev_num}_br);\n\
+                             {indent}    i_nl[{s}] = ic * DEVICE_{dev_num}_SIGN;\n\
+                             {indent}    i_nl[{s1}] = ib * DEVICE_{dev_num}_SIGN;\n\
+                             {indent}    j_dev[{s} * M + {s}] = jac[0];\n\
+                             {indent}    j_dev[{s} * M + {s1}] = jac[1];\n\
+                             {indent}    j_dev[{s1} * M + {s}] = jac[2];\n\
+                             {indent}    j_dev[{s1} * M + {s1}] = jac[3];\n\
+                             {indent}}}\n"
+                        ));
+                    }
+                }
+                (DeviceType::Jfet, DeviceParams::Jfet(_jp)) => {
+                    let s1 = s + 1;
+                    code.push_str(&format!(
+                        "{indent}{{ // JFET {dev_num}\n\
+                         {indent}    let vds = v_nl[{s}];\n\
+                         {indent}    let vgs = v_nl[{s1}];\n\
+                         {indent}    let sign = DEVICE_{dev_num}_SIGN;\n\
+                         {indent}    i_nl[{s}] = jfet_id(vgs, vds, state.device_{dev_num}_idss, state.device_{dev_num}_vp, state.device_{dev_num}_lambda, sign);\n\
+                         {indent}    i_nl[{s1}] = jfet_ig(vgs, sign);\n\
+                         {indent}    let jac = jfet_jacobian(vgs, vds, state.device_{dev_num}_idss, state.device_{dev_num}_vp, state.device_{dev_num}_lambda, sign);\n\
+                         {indent}    j_dev[{s} * M + {s}] = jac[0];\n\
+                         {indent}    j_dev[{s} * M + {s1}] = jac[1];\n\
+                         {indent}    j_dev[{s1} * M + {s}] = jac[2];\n\
+                         {indent}    j_dev[{s1} * M + {s1}] = jac[3];\n\
+                         {indent}}}\n"
+                    ));
+                }
+                (DeviceType::Mosfet, DeviceParams::Mosfet(_mp)) => {
+                    let s1 = s + 1;
+                    code.push_str(&format!(
+                        "{indent}{{ // MOSFET {dev_num}\n\
+                         {indent}    let vds = v_nl[{s}];\n\
+                         {indent}    let vgs = v_nl[{s1}];\n\
+                         {indent}    let sign = DEVICE_{dev_num}_SIGN;\n\
+                         {indent}    i_nl[{s}] = mosfet_id(vgs, vds, state.device_{dev_num}_kp, state.device_{dev_num}_vt, state.device_{dev_num}_lambda, sign);\n\
+                         {indent}    i_nl[{s1}] = 0.0; // Insulated gate\n\
+                         {indent}    let jac = mosfet_jacobian(vgs, vds, state.device_{dev_num}_kp, state.device_{dev_num}_vt, state.device_{dev_num}_lambda, sign);\n\
+                         {indent}    j_dev[{s} * M + {s}] = jac[0];\n\
+                         {indent}    j_dev[{s} * M + {s1}] = jac[1];\n\
+                         {indent}    j_dev[{s1} * M + {s}] = jac[2];\n\
+                         {indent}    j_dev[{s1} * M + {s1}] = jac[3];\n\
+                         {indent}}}\n"
+                    ));
+                }
+                (DeviceType::Tube, DeviceParams::Tube(_tp)) => {
+                    let s1 = s + 1;
+                    code.push_str(&format!(
+                        "{indent}{{ // Tube {dev_num}\n\
+                         {indent}    let vgk = v_nl[{s}];\n\
+                         {indent}    let vpk = v_nl[{s1}];\n\
+                         {indent}    i_nl[{s}] = tube_ip(vgk, vpk, state.device_{dev_num}_mu, state.device_{dev_num}_ex, state.device_{dev_num}_kg1, state.device_{dev_num}_kp, state.device_{dev_num}_kvb, state.device_{dev_num}_lambda);\n\
+                         {indent}    i_nl[{s1}] = tube_ig(vgk, state.device_{dev_num}_ig_max, state.device_{dev_num}_vgk_onset);\n\
+                         {indent}    let jac = tube_jacobian(vgk, vpk, state.device_{dev_num}_mu, state.device_{dev_num}_ex, state.device_{dev_num}_kg1, state.device_{dev_num}_kp, state.device_{dev_num}_kvb, state.device_{dev_num}_ig_max, state.device_{dev_num}_vgk_onset, state.device_{dev_num}_lambda);\n\
+                         {indent}    j_dev[{s} * M + {s}] = jac[0];\n\
+                         {indent}    j_dev[{s} * M + {s1}] = jac[1];\n\
+                         {indent}    j_dev[{s1} * M + {s}] = jac[2];\n\
+                         {indent}    j_dev[{s1} * M + {s1}] = jac[3];\n\
+                         {indent}}}\n"
+                    ));
+                }
+                _ => {} // Mismatched type/params — skip
+            }
+        }
+
+        let _ = m;
+    }
+
+    /// Emit final device evaluation at converged point (writes into existing `i_nl`).
+    fn emit_nodal_device_evaluation_final(code: &mut String, ir: &CircuitIR, indent: &str) {
+        for (dev_num, slot) in ir.device_slots.iter().enumerate() {
+            let s = slot.start_idx;
+            match (&slot.device_type, &slot.params) {
+                (DeviceType::Diode, DeviceParams::Diode(_dp)) => {
+                    code.push_str(&format!(
+                        "{indent}{{ let v = v_nl_final[{s}];\n\
+                         {indent}  let v_clamped = v.clamp(-40.0 * state.device_{dev_num}_n_vt, 40.0 * state.device_{dev_num}_n_vt);\n\
+                         {indent}  i_nl[{s}] = state.device_{dev_num}_is * ((v_clamped / state.device_{dev_num}_n_vt).exp() - 1.0);\n\
+                         {indent}}}\n"
+                    ));
+                }
+                (DeviceType::Bjt, DeviceParams::Bjt(bp)) => {
+                    let s1 = s + 1;
+                    if bp.is_gummel_poon() {
+                        code.push_str(&format!(
+                            "{indent}{{ let vbe = v_nl_final[{s}] * DEVICE_{dev_num}_SIGN;\n\
+                             {indent}  let vbc = v_nl_final[{s1}] * DEVICE_{dev_num}_SIGN;\n\
+                             {indent}  let (ic, ib, _) = bjt_gummel_poon_{dev_num}(vbe, vbc, state);\n\
+                             {indent}  i_nl[{s}] = ic * DEVICE_{dev_num}_SIGN;\n\
+                             {indent}  i_nl[{s1}] = ib * DEVICE_{dev_num}_SIGN;\n\
+                             {indent}}}\n"
+                        ));
+                    } else {
+                        code.push_str(&format!(
+                            "{indent}{{ let vbe = v_nl_final[{s}] * DEVICE_{dev_num}_SIGN;\n\
+                             {indent}  let vbc = v_nl_final[{s1}] * DEVICE_{dev_num}_SIGN;\n\
+                             {indent}  let (ic, ib, _) = bjt_ebers_moll(vbe, vbc, state.device_{dev_num}_is, state.device_{dev_num}_vt, state.device_{dev_num}_bf, state.device_{dev_num}_br);\n\
+                             {indent}  i_nl[{s}] = ic * DEVICE_{dev_num}_SIGN;\n\
+                             {indent}  i_nl[{s1}] = ib * DEVICE_{dev_num}_SIGN;\n\
+                             {indent}}}\n"
+                        ));
+                    }
+                }
+                (DeviceType::Jfet, DeviceParams::Jfet(_jp)) => {
+                    let s1 = s + 1;
+                    code.push_str(&format!(
+                        "{indent}i_nl[{s}] = jfet_id(v_nl_final[{s1}], v_nl_final[{s}], state.device_{dev_num}_idss, state.device_{dev_num}_vp, state.device_{dev_num}_lambda, DEVICE_{dev_num}_SIGN);\n\
+                         {indent}i_nl[{s1}] = jfet_ig(v_nl_final[{s1}], DEVICE_{dev_num}_SIGN);\n"
+                    ));
+                }
+                (DeviceType::Mosfet, DeviceParams::Mosfet(_mp)) => {
+                    let s1 = s + 1;
+                    code.push_str(&format!(
+                        "{indent}i_nl[{s}] = mosfet_id(v_nl_final[{s1}], v_nl_final[{s}], state.device_{dev_num}_kp, state.device_{dev_num}_vt, state.device_{dev_num}_lambda, DEVICE_{dev_num}_SIGN);\n\
+                         {indent}i_nl[{s1}] = 0.0;\n"
+                    ));
+                }
+                (DeviceType::Tube, DeviceParams::Tube(_tp)) => {
+                    let s1 = s + 1;
+                    code.push_str(&format!(
+                        "{indent}i_nl[{s}] = tube_ip(v_nl_final[{s}], v_nl_final[{s1}], state.device_{dev_num}_mu, state.device_{dev_num}_ex, state.device_{dev_num}_kg1, state.device_{dev_num}_kp, state.device_{dev_num}_kvb, state.device_{dev_num}_lambda);\n\
+                         {indent}i_nl[{s1}] = tube_ig(v_nl_final[{s}], state.device_{dev_num}_ig_max, state.device_{dev_num}_vgk_onset);\n"
+                    ));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Emit SPICE voltage limiting for nodal solver (trapezoidal NR, at default indent).
+    fn emit_nodal_voltage_limiting(code: &mut String, ir: &CircuitIR) {
+        Self::emit_nodal_voltage_limiting_indented(code, ir, "        ");
+    }
+
+    /// Emit SPICE voltage limiting for nodal solver at a given indent level.
+    ///
+    /// For each nonlinear device dimension, computes the proposed device voltage
+    /// from v_new via N_v, applies pnjlim/fetlim, and reduces alpha if needed.
+    fn emit_nodal_voltage_limiting_indented(code: &mut String, ir: &CircuitIR, indent: &str) {
+        let n = ir.topology.n;
+
+        for (dev_num, slot) in ir.device_slots.iter().enumerate() {
+            for d in 0..slot.dimension {
+                let i = slot.start_idx + d;
+
+                // Compute proposed device voltage from v_new via N_v
+                code.push_str(&format!("{indent}{{ // Device {dev_num} dim {d}\n"));
+                code.push_str(&format!("{indent}    let mut v_nl_proposed = 0.0;\n"));
+                code.push_str(&format!("{indent}    for j in 0..N {{ v_nl_proposed += N_V[{i}][j] * v_new[j]; }}\n"));
+                code.push_str(&format!("{indent}    let v_nl_current = v_nl[{i}];\n"));
+                code.push_str(&format!("{indent}    let dv = v_nl_proposed - v_nl_current;\n"));
+                code.push_str(&format!("{indent}    if dv.abs() > 1e-15 {{\n"));
+
+                // Apply per-device limiter
+                match (&slot.device_type, d) {
+                    (DeviceType::Diode, _) => {
+                        code.push_str(&format!(
+                            "{indent}        let v_lim = pnjlim(v_nl_proposed, v_nl_current, state.device_{dev_num}_n_vt, DEVICE_{dev_num}_VCRIT);\n"
+                        ));
+                    }
+                    (DeviceType::Bjt, _) => {
+                        code.push_str(&format!(
+                            "{indent}        let v_lim = pnjlim(v_nl_proposed, v_nl_current, state.device_{dev_num}_vt, DEVICE_{dev_num}_VCRIT);\n"
+                        ));
+                    }
+                    (DeviceType::Jfet, 0) => {
+                        code.push_str(&format!(
+                            "{indent}        let v_lim = fetlim(v_nl_proposed, v_nl_current, 0.0);\n"
+                        ));
+                    }
+                    (DeviceType::Jfet, _) => {
+                        code.push_str(&format!(
+                            "{indent}        let v_lim = fetlim(v_nl_proposed, v_nl_current, state.device_{dev_num}_vp);\n"
+                        ));
+                    }
+                    (DeviceType::Mosfet, 0) => {
+                        code.push_str(&format!(
+                            "{indent}        let v_lim = fetlim(v_nl_proposed, v_nl_current, 0.0);\n"
+                        ));
+                    }
+                    (DeviceType::Mosfet, _) => {
+                        code.push_str(&format!(
+                            "{indent}        let v_lim = fetlim(v_nl_proposed, v_nl_current, state.device_{dev_num}_vt);\n"
+                        ));
+                    }
+                    (DeviceType::Tube, 0) => {
+                        code.push_str(&format!(
+                            "{indent}        let v_lim = pnjlim(v_nl_proposed, v_nl_current, state.device_{dev_num}_vgk_onset / 3.0, DEVICE_{dev_num}_VCRIT);\n"
+                        ));
+                    }
+                    (DeviceType::Tube, _) => {
+                        code.push_str(&format!(
+                            "{indent}        let v_lim = fetlim(v_nl_proposed, v_nl_current, 0.0);\n"
+                        ));
+                    }
+                }
+
+                code.push_str(&format!(
+                    "{indent}        let ratio = ((v_lim - v_nl_current) / dv).clamp(0.01, 1.0);\n\
+                     {indent}        if ratio < alpha {{ alpha = ratio; }}\n\
+                     {indent}    }}\n\
+                     {indent}}}\n"
+                ));
+            }
+        }
+
+        let _ = n;
     }
 }
