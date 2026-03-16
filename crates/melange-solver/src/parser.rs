@@ -26,6 +26,8 @@ pub struct Netlist {
     pub switches: Vec<SwitchDirective>,
     /// Coupling directives (K elements for coupled inductors / transformers)
     pub couplings: Vec<CouplingDirective>,
+    /// Delay feedback directives (.delay_feedback K1 K2 ...)
+    pub delay_feedback_couplings: Vec<String>,
     /// Input impedance directive (.input_impedance)
     pub input_impedance: Option<f64>,
 }
@@ -90,6 +92,7 @@ impl Netlist {
             pots: Vec::new(),
             switches: Vec::new(),
             couplings: Vec::new(),
+            delay_feedback_couplings: Vec::new(),
             input_impedance: None,
         }
     }
@@ -942,6 +945,15 @@ impl Parser {
             ".switch" => {
                 let sw = self.parse_switch_directive(&parts, netlist)?;
                 netlist.switches.push(sw);
+            }
+            ".delay_feedback" => {
+                // .delay_feedback K1 K2 ... — names of K coupling elements to delay
+                if parts.len() < 2 {
+                    return Err(self.error(".delay_feedback requires at least one K element name"));
+                }
+                for name in &parts[1..] {
+                    netlist.delay_feedback_couplings.push(name.to_string());
+                }
             }
             ".input_impedance" => {
                 self.parse_input_impedance_directive(&parts, netlist)?;

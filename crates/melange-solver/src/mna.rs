@@ -171,6 +171,11 @@ pub struct TransformerGroupInfo {
     pub inductances: Vec<f64>,
     /// NxN coupling coefficient matrix (symmetric, diagonal = 1.0)
     pub coupling_matrix: Vec<Vec<f64>>,
+    /// Pairs of winding indices whose mutual coupling is delayed by one sample.
+    /// Set from `.delay_feedback` directives. The mutual inductance for these pairs
+    /// is excluded from the simultaneous C matrix and injected as a one-sample-delayed
+    /// history term in the NodalSolver RHS.
+    pub delayed_pairs: Vec<(usize, usize)>,
 }
 
 /// Information about a nonlinear device in the MNA system.
@@ -1318,6 +1323,23 @@ impl MnaBuilder {
                     inductances.push(r.value);
                     winding_names.push(r.name.clone());
                 }
+                // Identify delayed coupling pairs from .delay_feedback directives
+                let mut delayed_pairs = Vec::new();
+                for coupling in &netlist.couplings {
+                    if netlist.delay_feedback_couplings.iter().any(
+                        |name| name.eq_ignore_ascii_case(&coupling.name)
+                    ) {
+                        let a = coupling.inductor1_name.to_ascii_lowercase();
+                        let b = coupling.inductor2_name.to_ascii_lowercase();
+                        if let (Some(ia), Some(ib)) = (
+                            members.iter().position(|m| *m == a),
+                            members.iter().position(|m| *m == b),
+                        ) {
+                            delayed_pairs.push((ia, ib));
+                        }
+                    }
+                }
+
                 let group_idx = mna.transformer_groups.len();
                 mna.transformer_groups.push(TransformerGroupInfo {
                     name: format!("xfmr_{}", group_idx),
@@ -1327,6 +1349,7 @@ impl MnaBuilder {
                     winding_node_j,
                     inductances,
                     coupling_matrix,
+                    delayed_pairs,
                 });
             }
         }
