@@ -1,0 +1,86 @@
+* Four tubes + two transformers + global NFB (Pultec-like topology)
+* Stage 1: 12AX7 differential pair (anti-phase from HS-29 secondaries)
+* Stage 2: 12AU7 push-pull output into S-217-D primary halves
+* NFB: S-217-D tertiary -> stage 1 cathode
+*
+.model 12AX7 TRIODE(MU=100 EX=1.4 KG1=1060 KP=600 KVB=300)
+.model 12AU7 TRIODE(MU=21.5 EX=1.3 KG1=1180 KP=84 KVB=300)
+
+* Power supply
+Vcc vcc 0 DC 290
+
+* === INPUT TRANSFORMER (HS-29: 3-winding, 130H, k=0.99) ===
+L_in_pri in in_ct 130
+L_in_sec_a grid_tap_a in_ct2 130
+L_in_sec_b in_ct2 fb_inject 130
+K_in1 L_in_pri L_in_sec_a 0.99
+K_in2 L_in_pri L_in_sec_b 0.99
+K_in3 L_in_sec_a L_in_sec_b 0.98
+Rct1 in_ct 0 100
+Rct1b in_ct2 0 100
+Rfb_inject fb_inject fb_node 1
+
+* === STAGE 1: 12AX7 differential pair ===
+Rg1a grid_tap_a grid1a 100k
+Rg1a_leak grid1a 0 1Meg
+T1a grid1a plate1a cathode 12AX7
+Ra1a vcc plate1a 100k
+
+Rg1b fb_inject grid1b 100k
+Rg1b_leak grid1b 0 1Meg
+T1b grid1b plate1b cathode 12AX7
+Ra1b vcc plate1b 100k
+
+* Shared cathode (unbypassed for NFB)
+Rk cathode fb_node 820
+
+* === STAGE 2: 12AU7 push-pull ===
+* Grid bias
+Vbias bias_node 0 DC 31
+Rbias1 bias_node grid2a 470k
+Rbias2 bias_node grid2b 470k
+
+* Coupling caps
+Cc_a plate1a grid2a 10n
+Cc_b plate1b grid2b 10n
+
+T2a grid2a plate2a cathode2 12AU7
+T2b grid2b plate2b cathode2 12AU7
+Ra2a vcc plate2a 100k
+Ra2b vcc plate2b 100k
+Rk2 cathode2 0 4.7k
+
+* === OUTPUT TRANSFORMER (S-217-D: 4-winding, 9.5H) ===
+L_opt_a plate2a opt_ct 9.525
+L_opt_b opt_ct plate2b 9.525
+L_opt_sec out 0 1.903
+L_fb_a fb_s5 fb_s3 2.4
+K_opta L_opt_a L_opt_sec 0.95
+K_optb L_opt_b L_opt_sec 0.95
+K_optab L_opt_a L_opt_b 0.95
+K_fba L_opt_a L_fb_a 0.95
+K_fbb L_opt_b L_fb_a 0.95
+K_sec_fb L_opt_sec L_fb_a 0.95
+
+* Center tap
+Rct2 opt_ct 0 100
+
+* Tertiary DC ground reference
+R_fb_dcref fb_s5 0 1Meg
+
+* === FEEDBACK ===
+R_fb_shunt fb_s3 fb_s5 1000
+R_fb_a fb_s3 cathode 360
+R_fb_b fb_s5 fb_node 360
+
+* Output load
+Rload out 0 100k
+
+* Stability caps
+C1a grid1a 0 1n
+C1b grid1b 0 1n
+C2a plate1a 0 100p
+C2b plate1b 0 100p
+C3a plate2a 0 100p
+C3b plate2b 0 100p
+C4 out 0 100p

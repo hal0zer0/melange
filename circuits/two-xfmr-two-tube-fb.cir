@@ -10,16 +10,21 @@
 * Power supply
 Vcc vcc 0 DC 290
 
-* === INPUT TRANSFORMER (simple coupled pair) ===
-L_in_pri in in_ct 10
-L_in_sec grid_tap grid_ct 10
-K_in L_in_pri L_in_sec 0.95
+* === INPUT TRANSFORMER (HS-29 3-winding: pri, sec_a, sec_b at 130H, k=0.99) ===
+L_in_pri in in_ct 130
+L_in_sec_a grid_tap in_ct2 130
+L_in_sec_b in_ct2 fb_inject 130
+K_in1 L_in_pri L_in_sec_a 0.99
+K_in2 L_in_pri L_in_sec_b 0.99
+K_in3 L_in_sec_a L_in_sec_b 0.98
 Rct1 in_ct 0 100
-Rg_ct grid_ct 0 100
+Rct1b in_ct2 0 100
 
 * Grid coupling from input transformer
 Rg1 grid_tap grid1 100k
 Rg1_leak grid1 0 1Meg
+* HS-29 sec_b connects to fb_node (like the real Pultec)
+Rfb_inject fb_inject fb_node 1
 
 * === STAGE 1 ===
 T1 grid1 plate1 cathode1 12AX7
