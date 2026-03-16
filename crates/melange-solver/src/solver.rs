@@ -2853,9 +2853,6 @@ impl NodalSolver {
         }
 
         // Warm-up: process silence samples to settle transients.
-        // Large inductors (130H) need L/R ≈ 1.3s to settle, so we need many samples.
-        // Use 200 samples as a compromise (covers ~4ms, enough for most circuits;
-        // circuits with very large inductors will settle during initial audio processing).
         for _ in 0..200 {
             self.process_sample(0.0);
         }
