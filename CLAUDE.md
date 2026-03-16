@@ -188,8 +188,8 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
 - Tube Koren model: lambda parameter models finite plate resistance; no space-charge or transit-time effects
 - BJT Gummel-Poon: self-heating (Rth/Cth) and charge storage (CJE/CJC/TF) available; no substrate current or avalanche breakdown
 - **Runtime solver** (`DeviceEntry`) supports all device types: Diode, DiodeWithRs, Led, BJT, JFET, MOSFET, Tube
-- **NodalSolver transient NR**: Linear circuits converge perfectly. Nonlinear circuits (Pultec tubes) hit max iterations on most samples — needs per-device SPICE-style voltage limiting in the full-nodal NR loop (currently only has flat ±5V step clamp)
-- **`melange simulate`** does not yet use NodalSolver — uses CircuitSolver (DK method) which can't handle large inductors
+- **NodalSolver transient NR**: Converges for all physically valid circuits including Pultec EQP-1A (4 tubes, 2 transformers, 130H, k=0.99, global NFB). Requires positive-definite inductance matrices (validated at MNA build time).
+- **`melange simulate`**: auto-selects NodalSolver for nonlinear circuits with inductors, CircuitSolver (DK) otherwise. `--solver nodal|dk` override available.
 
 ### Cross-Compilation (macOS from Linux)
 - Zig 0.13 + cargo-zigbuild + macOS SDK 13.3 + rcodesign (ad-hoc signing)
@@ -211,9 +211,9 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
 
 ### Pending Work
 
-#### Current Priority — NodalSolver Simulation
-- **Wire NodalSolver into `melange simulate`**: Detect large-inductor circuits, route through NodalSolver instead of CircuitSolver
-- **NodalSolver NR convergence for nonlinear circuits**: Add per-device SPICE voltage limiting to full-nodal NR loop (currently only ±5V flat clamp)
+#### Current Priority — SPICE Validation for NodalSolver
+- **Validate tube+transformer circuits against ngspice**: Compare NodalSolver output for tube-transformer-fb.cir and Pultec-simplified against ngspice transient analysis
+- **NodalSolver simulation DONE**: CLI auto-routes inductor+nonlinear circuits to NodalSolver with augmented MNA. Pultec converges on all samples.
 
 #### Next — OpenWurli Integration
 - **Validate wurli-preamp**: SPICE comparison, gain at R_ldr extremes, frequency response
