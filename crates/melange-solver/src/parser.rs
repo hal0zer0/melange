@@ -26,8 +26,10 @@ pub struct Netlist {
     pub switches: Vec<SwitchDirective>,
     /// Coupling directives (K elements for coupled inductors / transformers)
     pub couplings: Vec<CouplingDirective>,
-    /// Delay feedback directives (.delay_feedback K1 K2 ...)
-    pub delay_feedback_couplings: Vec<String>,
+    /// Delay feedback node names (.delay_feedback node1 node2 ...)
+    /// These nodes are frozen at their previous-sample values during NR iteration,
+    /// breaking feedback loops through transformers.
+    pub delay_feedback_nodes: Vec<String>,
     /// Input impedance directive (.input_impedance)
     pub input_impedance: Option<f64>,
 }
@@ -92,7 +94,7 @@ impl Netlist {
             pots: Vec::new(),
             switches: Vec::new(),
             couplings: Vec::new(),
-            delay_feedback_couplings: Vec::new(),
+            delay_feedback_nodes: Vec::new(),
             input_impedance: None,
         }
     }
@@ -947,12 +949,12 @@ impl Parser {
                 netlist.switches.push(sw);
             }
             ".delay_feedback" => {
-                // .delay_feedback K1 K2 ... — names of K coupling elements to delay
+                // .delay_feedback node1 node2 ... — node names to freeze during NR
                 if parts.len() < 2 {
-                    return Err(self.error(".delay_feedback requires at least one K element name"));
+                    return Err(self.error(".delay_feedback requires at least one node name"));
                 }
                 for name in &parts[1..] {
-                    netlist.delay_feedback_couplings.push(name.to_string());
+                    netlist.delay_feedback_nodes.push(name.to_string());
                 }
             }
             ".input_impedance" => {

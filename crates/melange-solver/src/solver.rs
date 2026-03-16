@@ -2491,25 +2491,6 @@ use crate::mna::MnaSystem;
 
 /// Apply SPICE-style voltage limiting for a DeviceSlot dimension.
 ///
-/// One-sample delayed mutual coupling between two inductor windings.
-///
-/// The mutual inductance M is kept in C_nodal (so A_neg has the history term
-/// `alpha*M*j[n]`) but removed from the A matrix (so the NR Jacobian doesn't
-/// include the coupling). The removed A contribution `alpha*M*j[n+1]` is
-/// replaced by `alpha*M*j[n]` (delayed one sample) in the RHS injection.
-/// Total RHS mutual contribution: `alpha*M*j[n]` (A_neg) + `alpha*M*j[n]`
-/// (injection) = `2*alpha*M*j[n]`, matching the original simultaneous system
-/// at equilibrium.
-#[derive(Debug, Clone)]
-struct DelayedCoupling {
-    /// Augmented variable index for winding A
-    var_a: usize,
-    /// Augmented variable index for winding B
-    var_b: usize,
-    /// alpha * M = (2/T) * mutual_inductance
-    coeff: f64,
-}
-
 /// Dispatches pnjlim (PN junctions: diodes, BJTs, tubes) or fetlim (JFETs, MOSFETs)
 /// based on device type and dimension. Same limiting as DeviceEntry::limit_voltage
 /// but works with DeviceSlot parameters directly.
@@ -2607,8 +2588,9 @@ pub struct NodalSolver {
     pub diag_clamp_count: u64,
     pub diag_nr_max_iter_count: u64,
     pub diag_nan_reset_count: u64,
-    /// Delayed mutual couplings (from .delay_feedback directives)
-    delayed_couplings: Vec<DelayedCoupling>,
+    /// Node indices frozen during NR (from .delay_feedback directives).
+    /// These nodes use v_prev values during NR iteration, breaking feedback loops.
+    delayed_node_indices: Vec<usize>,
 }
 
 impl NodalSolver {
@@ -2620,6 +2602,7 @@ impl NodalSolver {
     pub fn new(
         kernel: DkKernel,
         mna: &MnaSystem,
+        netlist: &crate::parser::Netlist,
         device_slots: Vec<DeviceSlot>,
         input_node: usize,
         output_node: usize,
@@ -2700,7 +2683,6 @@ impl NodalSolver {
         }
 
         // Transformer groups: N variables each
-        let mut delayed_couplings = Vec::new();
         for group in &mna.transformer_groups {
             let w = group.num_windings;
             let base_k = var_idx;
@@ -2717,44 +2699,27 @@ impl NodalSolver {
                 if nj > 0 { g_nod[k][nj - 1] += 1.0; }
 
                 // Inductance sub-matrix: L[i][j] = k_ij·√(Li·Lj)
-                // Skip delayed pairs — their mutual inductance is injected as history.
                 for widx2 in 0..w {
-                    let is_delayed = group.delayed_pairs.iter().any(|&(a, b)|
-                        (a == widx && b == widx2) || (a == widx2 && b == widx)
-                    );
-                    if is_delayed && widx != widx2 {
-                        // Store delayed coupling info for RHS injection.
-                        // We keep the mutual M in C_nodal (so A_neg has the history term),
-                        // but remove it from A (so NR doesn't fight the coupling).
-                        // The removed A contribution (alpha*M*j[n+1]) is replaced by
-                        // alpha*M*j[n] (delayed one sample) in the RHS.
-                        let m_val = group.coupling_matrix[widx][widx2]
-                            * (group.inductances[widx] * group.inductances[widx2]).sqrt();
-                        if widx < widx2 {
-                            delayed_couplings.push(DelayedCoupling {
-                                var_a: base_k + widx,
-                                var_b: base_k + widx2,
-                                coeff: alpha * m_val, // (2/T) * M — just the A contribution
-                            });
-                        }
-                        // DO stamp into C_nodal (A_neg keeps the history term)
-                        let k2 = base_k + widx2;
-                        c_nod[k][k2] = group.coupling_matrix[widx][widx2]
-                            * (group.inductances[widx] * group.inductances[widx2]).sqrt();
-                    } else {
-                        let k2 = base_k + widx2;
-                        c_nod[k][k2] = group.coupling_matrix[widx][widx2]
-                            * (group.inductances[widx] * group.inductances[widx2]).sqrt();
-                    }
+                    let k2 = base_k + widx2;
+                    c_nod[k][k2] = group.coupling_matrix[widx][widx2]
+                        * (group.inductances[widx] * group.inductances[widx2]).sqrt();
                 }
             }
 
             var_idx += w;
         }
 
-        if !delayed_couplings.is_empty() {
-            log::info!("NodalSolver: {} delayed mutual couplings (one-sample feedback delay)",
-                delayed_couplings.len());
+        // Resolve .delay_feedback node names to indices
+        let delayed_node_indices: Vec<usize> = netlist.delay_feedback_nodes.iter()
+            .filter_map(|name| {
+                mna.node_map.get(name).map(|&idx| {
+                    if idx > 0 { idx - 1 } else { usize::MAX } // 0 = ground, skip
+                })
+            })
+            .filter(|&idx| idx < n_nodes)
+            .collect();
+        if !delayed_node_indices.is_empty() {
+            log::info!("NodalSolver: {} delayed feedback nodes", delayed_node_indices.len());
         }
 
         // Build A = G + (2/T)*C
@@ -2763,12 +2728,6 @@ impl NodalSolver {
             for j in 0..n_nodal {
                 a_matrix[i][j] = g_nod[i][j] + alpha * c_nod[i][j];
             }
-        }
-        // Remove delayed mutual terms from A (they stay in A_neg for history).
-        // The A contribution alpha*M*j[n+1] is replaced by alpha*M*j[n] in the RHS.
-        for dc in &delayed_couplings {
-            a_matrix[dc.var_a][dc.var_b] -= dc.coeff;
-            a_matrix[dc.var_b][dc.var_a] -= dc.coeff;
         }
 
         // Build A_neg = (2/T)*C - G (flat row-major)
@@ -2852,7 +2811,7 @@ impl NodalSolver {
             diag_clamp_count: 0,
             diag_nr_max_iter_count: 0,
             diag_nan_reset_count: 0,
-            delayed_couplings,
+            delayed_node_indices,
         }
     }
 
@@ -2885,14 +2844,9 @@ impl NodalSolver {
             log::warn!("Nodal solver DC OP failed to converge, using zero initial state");
         }
 
-        // Warm-up: process silence samples to settle transients.
-        // Skip when delayed feedback is active — the DC OP state is the correct
-        // equilibrium, and the delayed feedback system's different dynamics would
-        // destabilize the warm-up.
-        if self.delayed_couplings.is_empty() {
-            for _ in 0..50 {
-                self.process_sample(0.0);
-            }
+        // Warm-up: process silence samples to settle transients
+        for _ in 0..50 {
+            self.process_sample(0.0);
         }
     }
 
@@ -2922,15 +2876,6 @@ impl NodalSolver {
                 sum += self.n_i[ni_offset + j] * self.i_nl_prev[j];
             }
             self.rhs[i] = sum;
-        }
-
-        // Delayed mutual coupling injection (one-sample feedback delay).
-        // For each delayed pair (a, b): inject alpha*M * j_prev from the other winding.
-        // Combined with A_neg's alpha*M*j_prev (from C_nodal), this gives the full
-        // 2*alpha*M*j_prev that replaces the simultaneous alpha*M*j[n+1] + alpha*M*j[n].
-        for dc in &self.delayed_couplings {
-            self.rhs[dc.var_a] += dc.coeff * self.v_prev[dc.var_b];
-            self.rhs[dc.var_b] += dc.coeff * self.v_prev[dc.var_a];
         }
 
         // Input source (Thevenin, trapezoidal)
@@ -2997,6 +2942,17 @@ impl NodalSolver {
                 }
             }
 
+            // Fix delayed feedback nodes in the Jacobian: set their ROW to identity.
+            // This treats delayed nodes as known voltage sources (v = v_prev).
+            // Columns are left intact so other nodes correctly see the coupling.
+            for &idx in &self.delayed_node_indices {
+                for j in 0..n {
+                    self.g_aug[idx][j] = 0.0;
+                }
+                self.g_aug[idx][idx] = 1.0;
+                self.rhs_work[idx] = self.v_prev[idx];
+            }
+
             // 2e. Solve: v_new = G_aug^{-1} * rhs_work
             let v_new = match crate::dk::solve_equilibrated(&self.g_aug, &self.rhs_work) {
                 Some(v) => v,
@@ -3039,11 +2995,8 @@ impl NodalSolver {
                 }
             }
 
-            // Layer 2: Global node voltage damping (10V threshold)
-            // Only needed when transformer coupling is in the Jacobian (no delayed feedback).
-            // With delayed feedback, the coupling is in the RHS (a fixed source), not the
-            // Jacobian, so the NR doesn't fight it and damping is unnecessary.
-            if self.delayed_couplings.is_empty() {
+            // Layer 2: Global node voltage damping (10V threshold, ngspice CKTnodeDamping)
+            if self.delayed_node_indices.is_empty() {
                 let n_nodes = self.kernel.n_nodes;
                 let mut max_node_dv = 0.0_f64;
                 for i in 0..n_nodes {
@@ -3055,12 +3008,19 @@ impl NodalSolver {
                 }
             }
 
-            // Apply damped Newton step to all variables
+            // Apply damped Newton step, then freeze delayed nodes.
+            // Delayed nodes are excluded from convergence check (they're fixed at v_prev).
             let mut max_delta = 0.0_f64;
             for i in 0..n {
                 let delta = alpha * (v_new[i] - v[i]);
                 v[i] += delta;
-                max_delta = max_delta.max(delta.abs());
+                if !self.delayed_node_indices.contains(&i) {
+                    max_delta = max_delta.max(delta.abs());
+                }
+            }
+            // Force delayed nodes back to v_prev (one-sample delay)
+            for &idx in &self.delayed_node_indices {
+                v[idx] = self.v_prev[idx];
             }
 
             if max_delta < self.tol {

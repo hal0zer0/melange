@@ -51,7 +51,7 @@ fn build_linear_nodal(spice: &str, in_name: &str, out_name: &str, r_in: f64, sr:
         ..CodegenConfig::default()
     };
     let ir = CircuitIR::from_kernel(&kernel, &mna, &netlist, &config).unwrap();
-    let mut solver = NodalSolver::new(kernel, &mna, ir.device_slots.clone(), in_idx, out_idx);
+    let mut solver = NodalSolver::new(kernel, &mna, &netlist, ir.device_slots.clone(), in_idx, out_idx);
     solver.input_conductance = 1.0 / r_in;
     (solver, mna)
 }

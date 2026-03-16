@@ -57,7 +57,7 @@ fn main() {
 
     // Create NodalSolver (uses augmented MNA for inductors)
     let mut solver = NodalSolver::new(
-        kernel, &mna, ir.device_slots.clone(),
+        kernel, &mna, &netlist, ir.device_slots.clone(),
         in_node - 1, out_node - 1,
     );
     solver.input_conductance = g_in;

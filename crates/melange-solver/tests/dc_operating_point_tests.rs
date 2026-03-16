@@ -924,7 +924,7 @@ fn test_dc_op_pultec_nonlinear_nodal() {
     };
     let ir = CircuitIR::from_kernel(&kernel, &mna, &netlist, &config).unwrap();
 
-    let mut solver = NodalSolver::new(kernel, &mna, ir.device_slots.clone(), in_node - 1, out_node - 1);
+    let mut solver = NodalSolver::new(kernel, &mna, &netlist, ir.device_slots.clone(), in_node - 1, out_node - 1);
     solver.input_conductance = 1.0 / 600.0;
     solver.initialize_dc_op(&mna, &ir.device_slots);
 

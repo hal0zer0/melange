@@ -1148,7 +1148,7 @@ fn simulate_circuit_source(
         // Full-nodal NR solver (augmented MNA for inductors)
         let device_slots = build_device_slots(&netlist, &mna);
         let mut solver = NodalSolver::new(
-            kernel, &mna, device_slots.clone(), input_node_idx, output_node_idx,
+            kernel, &mna, &netlist, device_slots.clone(), input_node_idx, output_node_idx,
         );
         solver.input_conductance = input_conductance;
 
