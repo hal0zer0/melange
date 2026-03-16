@@ -838,7 +838,10 @@ impl CircuitIR {
             ..DcOpConfig::default()
         };
         let dc_result = dc_op::solve_dc_operating_point(mna, &device_slots, &dc_op_config);
-        let has_dc_op = dc_result.v_node.iter().any(|&v| v.abs() > 1e-15);
+        // Check DC OP significance on the truncated vector (n_aug), not the full
+        // n_dc vector which includes inductor branch currents.
+        let dc_op_truncated = &dc_result.v_node[..kernel.n];
+        let has_dc_op = dc_op_truncated.iter().any(|&v| v.abs() > 1e-15);
         let dc_op_converged = dc_result.converged;
         let dc_nl_currents = dc_result.i_nl.clone();
 
