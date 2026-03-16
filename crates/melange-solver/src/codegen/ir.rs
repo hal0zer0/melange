@@ -290,6 +290,9 @@ pub struct DiodeParams {
     pub is: f64,
     /// Ideality factor * thermal voltage
     pub n_vt: f64,
+    /// Zero-bias junction capacitance [F] (0.0 = disabled)
+    #[serde(default)]
+    pub cjo: f64,
 }
 
 /// BJT parameters (Ebers-Moll or Gummel-Poon, resolved from `.model` directive).
@@ -322,6 +325,12 @@ pub struct BjtParams {
     /// Reverse knee current [A] (inf = no high injection)
     #[serde(default = "default_infinity", deserialize_with = "deserialize_f64_or_infinity")]
     pub ikr: f64,
+    /// Base-emitter junction capacitance [F] (0.0 = disabled)
+    #[serde(default)]
+    pub cje: f64,
+    /// Base-collector junction capacitance [F] (0.0 = disabled)
+    #[serde(default)]
+    pub cjc: f64,
 }
 
 fn default_infinity() -> f64 {
@@ -371,6 +380,12 @@ pub struct JfetParams {
     pub lambda: f64,
     /// True if P-channel (false = N-channel)
     pub is_p_channel: bool,
+    /// Gate-source junction capacitance [F] (0.0 = disabled)
+    #[serde(default)]
+    pub cgs: f64,
+    /// Gate-drain junction capacitance [F] (0.0 = disabled)
+    #[serde(default)]
+    pub cgd: f64,
 }
 
 /// MOSFET model parameters (Level 1 SPICE, triode + saturation).
@@ -388,6 +403,12 @@ pub struct MosfetParams {
     pub lambda: f64,
     /// True if P-channel (false = N-channel)
     pub is_p_channel: bool,
+    /// Gate-source capacitance [F] (0.0 = disabled)
+    #[serde(default)]
+    pub cgs: f64,
+    /// Gate-drain capacitance [F] (0.0 = disabled)
+    #[serde(default)]
+    pub cgd: f64,
 }
 
 /// Tube/triode model parameters (Koren + improved grid current).
@@ -410,6 +431,15 @@ pub struct TubeParams {
     /// Channel-length modulation coefficient [1/V]. 0.0 = disabled (default).
     #[serde(default)]
     pub lambda: f64,
+    /// Cathode-grid capacitance [F] (0.0 = disabled)
+    #[serde(default)]
+    pub ccg: f64,
+    /// Grid-plate capacitance [F] (0.0 = disabled)
+    #[serde(default)]
+    pub cgp: f64,
+    /// Cathode-plate capacitance [F] (0.0 = disabled)
+    #[serde(default)]
+    pub ccp: f64,
 }
 
 impl DeviceParams {
@@ -1156,7 +1186,7 @@ impl CircuitIR {
     ///
     /// # Errors
     /// Returns `CodegenError::InvalidConfig` if any device model parameter is non-positive or non-finite.
-    fn build_device_info(netlist: &Netlist) -> Result<Vec<DeviceSlot>, CodegenError> {
+    pub fn build_device_info(netlist: &Netlist) -> Result<Vec<DeviceSlot>, CodegenError> {
         let mut slots = Vec::new();
         let mut dim_offset = 0;
 
@@ -1235,7 +1265,11 @@ impl CircuitIR {
         validate_positive_finite(is, "diode model IS")?;
         validate_positive_finite(n, "diode model N")?;
 
-        Ok(DiodeParams { is, n_vt: n * vt })
+        // Junction capacitance (optional, default 0.0)
+        let cjo = Self::lookup_model_param(netlist, model, "CJO")
+            .unwrap_or(0.0);
+
+        Ok(DiodeParams { is, n_vt: n * vt, cjo })
     }
 
     /// Resolve BJT model parameters from the netlist, with validation.
@@ -1299,7 +1333,13 @@ impl CircuitIR {
             validate_positive_finite(ikr, "BJT model IKR")?;
         }
 
-        Ok(BjtParams { is, vt, beta_f, beta_r, is_pnp, vaf, var, ikf, ikr })
+        // Junction capacitances (optional, default 0.0)
+        let cje = Self::lookup_model_param(netlist, model, "CJE")
+            .unwrap_or(0.0);
+        let cjc = Self::lookup_model_param(netlist, model, "CJC")
+            .unwrap_or(0.0);
+
+        Ok(BjtParams { is, vt, beta_f, beta_r, is_pnp, vaf, var, ikf, ikr, cje, cjc })
     }
 
     /// Resolve JFET model parameters from the netlist, with validation.
@@ -1341,7 +1381,13 @@ impl CircuitIR {
             ));
         }
 
-        Ok(JfetParams { idss, vp, lambda, is_p_channel })
+        // Junction capacitances (optional, default 0.0)
+        let cgs = Self::lookup_model_param(netlist, model, "CGS")
+            .unwrap_or(0.0);
+        let cgd = Self::lookup_model_param(netlist, model, "CGD")
+            .unwrap_or(0.0);
+
+        Ok(JfetParams { idss, vp, lambda, is_p_channel, cgs, cgd })
     }
 
     /// Resolve MOSFET model parameters from the netlist, with validation.
@@ -1376,7 +1422,13 @@ impl CircuitIR {
             ));
         }
 
-        Ok(MosfetParams { kp, vt, lambda, is_p_channel })
+        // Junction capacitances (optional, default 0.0)
+        let cgs = Self::lookup_model_param(netlist, model, "CGS")
+            .unwrap_or(0.0);
+        let cgd = Self::lookup_model_param(netlist, model, "CGD")
+            .unwrap_or(0.0);
+
+        Ok(MosfetParams { kp, vt, lambda, is_p_channel, cgs, cgd })
     }
 
     /// Resolve tube/triode model parameters from the netlist, with validation.
@@ -1424,7 +1476,15 @@ impl CircuitIR {
             ));
         }
 
-        Ok(TubeParams { mu, ex, kg1, kp, kvb, ig_max, vgk_onset, lambda })
+        // Inter-electrode capacitances (optional, default 0.0)
+        let ccg = Self::lookup_model_param(netlist, model, "CCG")
+            .unwrap_or(0.0);
+        let cgp = Self::lookup_model_param(netlist, model, "CGP")
+            .unwrap_or(0.0);
+        let ccp = Self::lookup_model_param(netlist, model, "CCP")
+            .unwrap_or(0.0);
+
+        Ok(TubeParams { mu, ex, kg1, kp, kvb, ig_max, vgk_onset, lambda, ccg, cgp, ccp })
     }
 
     /// Build the legacy `devices` list (first occurrence of each device type).

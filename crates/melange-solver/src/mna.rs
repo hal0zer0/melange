@@ -383,6 +383,65 @@ impl MnaSystem {
         }
     }
 
+    /// Stamp junction capacitances from device model parameters into the C matrix.
+    ///
+    /// Reads cap fields from each `DeviceSlot`'s params and stamps them across
+    /// the appropriate device junctions. Only stamps non-zero values.
+    ///
+    /// Must be called BEFORE building the DK kernel (so caps are included in A = G + 2C/T).
+    ///
+    /// Device slots must be in the same order as `self.nonlinear_devices`.
+    pub fn stamp_device_junction_caps(&mut self, device_slots: &[crate::codegen::ir::DeviceSlot]) {
+        use crate::codegen::ir::DeviceParams;
+
+        // Collect (node_a, node_b, cap) tuples first to avoid borrow conflict
+        // (self.nonlinear_devices borrowed immutably, self.stamp_capacitor_raw borrows mutably).
+        let mut caps: Vec<(usize, usize, f64)> = Vec::new();
+
+        for (dev_info, slot) in self.nonlinear_devices.iter().zip(device_slots.iter()) {
+            match &slot.params {
+                DeviceParams::Tube(p) => {
+                    // node_indices: [grid, plate, cathode]
+                    let (ng, np, nk) = (dev_info.node_indices[0], dev_info.node_indices[1], dev_info.node_indices[2]);
+                    if p.ccg > 0.0 { caps.push((nk, ng, p.ccg)); }
+                    if p.cgp > 0.0 { caps.push((ng, np, p.cgp)); }
+                    if p.ccp > 0.0 { caps.push((nk, np, p.ccp)); }
+                }
+                DeviceParams::Bjt(p) => {
+                    // node_indices: [collector, base, emitter]
+                    let (nc, nb, ne) = (dev_info.node_indices[0], dev_info.node_indices[1], dev_info.node_indices[2]);
+                    if p.cje > 0.0 { caps.push((nb, ne, p.cje)); }
+                    if p.cjc > 0.0 { caps.push((nb, nc, p.cjc)); }
+                }
+                DeviceParams::Jfet(p) => {
+                    // node_indices: [drain, gate, source]
+                    let (nd, ng, ns) = (dev_info.node_indices[0], dev_info.node_indices[1], dev_info.node_indices[2]);
+                    if p.cgs > 0.0 { caps.push((ng, ns, p.cgs)); }
+                    if p.cgd > 0.0 { caps.push((ng, nd, p.cgd)); }
+                }
+                DeviceParams::Mosfet(p) => {
+                    // node_indices: [drain, gate, source, bulk]
+                    let (nd, ng, ns) = (dev_info.node_indices[0], dev_info.node_indices[1], dev_info.node_indices[2]);
+                    if p.cgs > 0.0 { caps.push((ng, ns, p.cgs)); }
+                    if p.cgd > 0.0 { caps.push((ng, nd, p.cgd)); }
+                }
+                DeviceParams::Diode(p) => {
+                    // node_indices: [anode, cathode]
+                    let (na, nc) = (dev_info.node_indices[0], dev_info.node_indices[1]);
+                    if p.cjo > 0.0 { caps.push((na, nc, p.cjo)); }
+                }
+            }
+        }
+
+        for (node_a, node_b, cap) in &caps {
+            self.stamp_capacitor_raw(*node_a, *node_b, *cap);
+            log::debug!(
+                "Junction cap: node({})-node({}) = {:.2e} F",
+                node_a, node_b, cap,
+            );
+        }
+    }
+
     /// Stamp input conductance to ground at a node.
     /// 
     /// This represents the Thevenin equivalent of the input source:

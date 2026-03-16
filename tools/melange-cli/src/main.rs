@@ -560,6 +560,16 @@ fn compile_circuit_source(
         }
     }
 
+    // Stamp junction capacitances from device model parameters into MNA C matrix.
+    // Must happen BEFORE kernel build so caps are included in A = G + 2C/T.
+    {
+        let device_slots = melange_solver::codegen::ir::CircuitIR::build_device_info(&netlist)
+            .unwrap_or_default();
+        if !device_slots.is_empty() {
+            mna.stamp_device_junction_caps(&device_slots);
+        }
+    }
+
     // Step 3: Create DK kernel
     // Use augmented MNA for inductor circuits (well-conditioned for large L)
     let has_inductors_compile = !mna.inductors.is_empty()
@@ -974,6 +984,16 @@ fn simulate_circuit_source(
 
     println!("  {} nodes, {} nonlinear devices", mna.n, mna.nonlinear_devices.len());
 
+    // Stamp junction capacitances from device model parameters into MNA C matrix.
+    // Must happen BEFORE kernel build so caps are included in A = G + 2C/T.
+    {
+        let device_slots = melange_solver::codegen::ir::CircuitIR::build_device_info(&netlist)
+            .unwrap_or_default();
+        if !device_slots.is_empty() {
+            mna.stamp_device_junction_caps(&device_slots);
+        }
+    }
+
     // Step 3: Read input audio or generate test signal
     let (samples, actual_sample_rate) = if let Some(audio_path) = opts.input_audio {
         println!("Step 3: Reading input audio: {}", audio_path.display());
@@ -1347,6 +1367,15 @@ fn analyze_freq_response(
         eprintln!("  Warning: end frequency {:.0} Hz exceeds Nyquist ({:.0} Hz), results above Nyquist will alias", end_freq, nyquist);
     }
 
+    // Stamp junction capacitances from device model parameters into MNA C matrix.
+    {
+        let device_slots = melange_solver::codegen::ir::CircuitIR::build_device_info(&netlist)
+            .unwrap_or_default();
+        if !device_slots.is_empty() {
+            mna.stamp_device_junction_caps(&device_slots);
+        }
+    }
+
     // Build kernel
     let kernel = DkKernel::from_mna(&mna, sample_rate)
         .with_context(|| "Failed to create DK kernel")?;
@@ -1619,7 +1648,11 @@ fn build_device_slots(
                     device_type: DeviceType::Diode,
                     start_idx: dev_info.start_idx,
                     dimension: 1,
-                    params: DeviceParams::Diode(DiodeParams { is, n_vt: n * melange_primitives::VT_ROOM }),
+                    params: DeviceParams::Diode(DiodeParams {
+                        is,
+                        n_vt: n * melange_primitives::VT_ROOM,
+                        cjo: find_param(&model_name, "CJO").unwrap_or(0.0),
+                    }),
                 });
             }
             melange_solver::mna::NonlinearDeviceType::Bjt => {
@@ -1649,6 +1682,8 @@ fn build_device_slots(
                         var: f64::INFINITY,
                         ikf: f64::INFINITY,
                         ikr: f64::INFINITY,
+                        cje: find_param(&model_name, "CJE").unwrap_or(0.0),
+                        cjc: find_param(&model_name, "CJC").unwrap_or(0.0),
                     }),
                 });
             }
@@ -1679,6 +1714,8 @@ fn build_device_slots(
                         vp,
                         lambda,
                         is_p_channel,
+                        cgs: find_param(&model_name, "CGS").unwrap_or(0.0),
+                        cgd: find_param(&model_name, "CGD").unwrap_or(0.0),
                     }),
                 });
             }
@@ -1705,6 +1742,8 @@ fn build_device_slots(
                         vt,
                         lambda,
                         is_p_channel,
+                        cgs: find_param(&model_name, "CGS").unwrap_or(0.0),
+                        cgd: find_param(&model_name, "CGD").unwrap_or(0.0),
                     }),
                 });
             }
@@ -1735,6 +1774,9 @@ fn build_device_slots(
                         ig_max,
                         vgk_onset,
                         lambda,
+                        ccg: find_param(&model_name, "CCG").unwrap_or(0.0),
+                        cgp: find_param(&model_name, "CGP").unwrap_or(0.0),
+                        ccp: find_param(&model_name, "CCP").unwrap_or(0.0),
                     }),
                 });
             }

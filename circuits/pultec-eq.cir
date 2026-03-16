@@ -51,9 +51,9 @@
 *   S-217-D: CineMag CM-S217D datasheet (38.1H@1kHz, 4.474:1)
 *   12AU7: Koren fit to Sylvania Technical Manual curves
 
-.model 12AX7 TRIODE(MU=100 EX=1.4 KG1=1060 KP=600 KVB=300)
+.model 12AX7 TRIODE(MU=100 EX=1.4 KG1=1060 KP=600 KVB=300 CCG=1.6p CGP=1.7p CCP=0.46p)
 * 12AU7 params from catalog (Koren fit to Sylvania datasheet)
-.model 12AU7 TRIODE(MU=21.5 EX=1.3 KG1=1180 KP=84 KVB=300)
+.model 12AU7 TRIODE(MU=21.5 EX=1.3 KG1=1180 KP=84 KVB=300 CCG=2.3p CGP=2.2p CCP=0.5p)
 .input_impedance 600
 
 * B+ power supply — from Sowter schematic DWG E-72,658-2

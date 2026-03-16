@@ -622,7 +622,7 @@ fn build_device_slots_from_netlist(
                     device_type: DeviceType::Diode,
                     start_idx: dim_offset,
                     dimension: 1,
-                    params: DeviceParams::Diode(DiodeParams { is, n_vt: n * vt }),
+                    params: DeviceParams::Diode(DiodeParams { is, n_vt: n * vt, cjo: 0.0 }),
                 });
                 dim_offset += 1;
             }
@@ -643,6 +643,7 @@ fn build_device_slots_from_netlist(
                         is, vt, beta_f, beta_r, is_pnp,
                         vaf: f64::INFINITY, var: f64::INFINITY,
                         ikf: f64::INFINITY, ikr: f64::INFINITY,
+                        cje: 0.0, cjc: 0.0,
                     }),
                 });
                 dim_offset += 2;
@@ -669,6 +670,8 @@ fn build_device_slots_from_netlist(
                         vp: find_model_param(model, "VTO").unwrap_or(default_vp),
                         lambda: find_model_param(model, "LAMBDA").unwrap_or(0.001),
                         is_p_channel,
+                        cgs: 0.0,
+                        cgd: 0.0,
                     }),
                 });
                 dim_offset += 2;
@@ -688,6 +691,8 @@ fn build_device_slots_from_netlist(
                         vt: find_model_param(model, "VTO").unwrap_or(default_vt),
                         lambda: find_model_param(model, "LAMBDA").unwrap_or(0.01),
                         is_p_channel,
+                        cgs: 0.0,
+                        cgd: 0.0,
                     }),
                 });
                 dim_offset += 2;
@@ -706,6 +711,9 @@ fn build_device_slots_from_netlist(
                         ig_max: find_model_param(model, "IG_MAX").unwrap_or(2e-3),
                         vgk_onset: find_model_param(model, "VGK_ONSET").unwrap_or(0.5),
                         lambda: find_model_param(model, "LAMBDA").unwrap_or(0.0),
+                        ccg: 0.0,
+                        cgp: 0.0,
+                        ccp: 0.0,
                     }),
                 });
                 dim_offset += 2;

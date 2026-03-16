@@ -16,7 +16,7 @@
 * M=4 nonlinear (2 triodes x 2D each), N=13 nodes
 * Controls: Volume (pot), Bright (3-pos switch)
 
-.model 12AX7 TRIODE(MU=100 EX=1.4 KG1=1060 KP=600 KVB=300)
+.model 12AX7 TRIODE(MU=100 EX=1.4 KG1=1060 KP=600 KVB=300 CCG=1.6p CGP=1.7p CCP=0.46p)
 
 * B+ supply (standard 12AX7 plate voltage)
 VCC vcc 0 DC 250

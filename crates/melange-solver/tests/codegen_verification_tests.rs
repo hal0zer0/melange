@@ -3557,6 +3557,7 @@ fn test_ir_bjt_params_gp_serde_roundtrip() {
     let bp = BjtParams {
         is: 1e-14, vt: 0.02585, beta_f: 200.0, beta_r: 3.0,
         is_pnp: false, vaf: 100.0, var: f64::INFINITY, ikf: 0.3, ikr: f64::INFINITY,
+        cje: 0.0, cjc: 0.0,
     };
 
     let json = serde_json::to_string(&bp).unwrap();

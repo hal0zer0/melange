@@ -521,7 +521,7 @@ fn build_device_slots(netlist: &Netlist, _mna: &MnaSystem) -> Vec<DeviceSlot> {
                     device_type: DeviceType::Diode,
                     start_idx: dim_offset,
                     dimension: 1,
-                    params: DeviceParams::Diode(DiodeParams { is, n_vt: n * vt }),
+                    params: DeviceParams::Diode(DiodeParams { is, n_vt: n * vt, cjo: 0.0 }),
                 });
                 dim_offset += 1;
             }
@@ -542,6 +542,7 @@ fn build_device_slots(netlist: &Netlist, _mna: &MnaSystem) -> Vec<DeviceSlot> {
                         is, vt: vt_val, beta_f, beta_r, is_pnp,
                         vaf: f64::INFINITY, var: f64::INFINITY,
                         ikf: f64::INFINITY, ikr: f64::INFINITY,
+                        cje: 0.0, cjc: 0.0,
                     }),
                 });
                 dim_offset += 2;
