@@ -37,8 +37,8 @@ K1 L_pri L_sec 0.99
 K2 L_pri L_tert 0.99
 K3 L_sec L_tert 0.99
 
-* Transformer center tap to ground
-Rct xfmr_ct 0 100
+* Transformer center tap to VCC (DC plate supply through winding)
+Rct vcc xfmr_ct 100
 
 * Feedback from tertiary to stage 1 cathode (series-voltage NFB)
 Rfb fb_p cathode1 1k

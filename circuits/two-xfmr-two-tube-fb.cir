@@ -40,7 +40,7 @@ Rk2 cathode2 0 4.7k
 
 * === OUTPUT TRANSFORMER (S-217-D style) ===
 L_out_pri plate2 xfmr2_ct 9.525
-Rct2 xfmr2_ct 0 100
+Rct2 vcc xfmr2_ct 100
 * Secondary
 L_out_sec out 0 1.903
 * Tertiary (feedback winding) with DC ground reference

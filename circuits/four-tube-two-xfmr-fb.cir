@@ -63,7 +63,7 @@ K_fbb L_opt_b L_fb_a 0.95
 K_sec_fb L_opt_sec L_fb_a 0.95
 
 * Center tap
-Rct2 opt_ct 0 100
+Rct2 vcc opt_ct 100
 
 * Tertiary DC ground reference
 R_fb_dcref fb_s5 0 1Meg
