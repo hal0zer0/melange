@@ -76,18 +76,68 @@ fn main() {
         }
     }
 
-    // Process samples (reduced from 4800 for faster diagnostic)
+    // Print delayed node indices
+    println!("\nDelayed feedback nodes:");
+    for name in &netlist.delay_feedback_nodes {
+        if let Some(&idx) = node_map.get(name.as_str()) {
+            println!("  {} -> node index {} (0-based: {})", name, idx, idx.wrapping_sub(1));
+        }
+    }
+
+    // Print transformer group info
+    println!("\nTransformer groups:");
+    for (gi, g) in mna.transformer_groups.iter().enumerate() {
+        println!("  Group {}: {} windings: {:?}", gi, g.num_windings, g.winding_names);
+        println!("    Inductances: {:?}", g.inductances);
+        println!("    Coupling matrix:");
+        for i in 0..g.num_windings {
+            print!("      [");
+            for j in 0..g.num_windings {
+                print!("{:.3} ", g.coupling_matrix[i][j]);
+            }
+            println!("]");
+        }
+    }
+
+    // Print output node info
+    println!("\nOutput node 'out': index {} (0-based: {})", out_node, out_node - 1);
+    println!("Input node 'in': index {} (0-based: {})", in_node, in_node - 1);
+
+    // Process samples with detailed monitoring
     println!("\nProcessing 480 samples (10ms at 48kHz)...");
     let num_samples = 480;
     let mut peak_out = 0.0_f64;
+    let mut peak_raw = 0.0_f64;
     for i in 0..num_samples {
         let t = i as f64 / sample_rate;
         let input = 0.05 * (2.0 * std::f64::consts::PI * 1000.0 * t).sin();
         let out = solver.process_sample(input);
         peak_out = peak_out.max(out.abs());
+
+        // Check raw output node voltage (before DC blocking)
+        let raw = if out_node > 0 && (out_node - 1) < solver.v_prev.len() {
+            solver.v_prev[out_node - 1]
+        } else { 0.0 };
+        peak_raw = peak_raw.max(raw.abs());
+
+        if i < 10 || (i % 48 == 0) {
+            println!("  sample {}: input={:.4}V, raw_out={:.4}V, dc_blocked={:.6}V",
+                i, input, raw, out);
+            // Print key node voltages
+            let mut key_info = String::new();
+            for name in &["out_tap", "grid1", "plate1", "grid2a", "plate2a", "opt_a", "fb_s3", "fb_s5"] {
+                if let Some(&idx) = node_map.get(*name) {
+                    if idx > 0 && (idx - 1) < solver.v_prev.len() {
+                        key_info.push_str(&format!(" {}={:.2}", name, solver.v_prev[idx - 1]));
+                    }
+                }
+            }
+            println!("    nodes:{}", key_info);
+        }
     }
 
-    println!("Peak output: {:.4}V", peak_out);
+    println!("\nPeak raw output: {:.4}V", peak_raw);
+    println!("Peak DC-blocked output: {:.4}V", peak_out);
     println!("NR max iterations: {} / {} samples", solver.diag_nr_max_iter_count, num_samples);
     println!("NaN resets: {}", solver.diag_nan_reset_count);
     println!("Clamp count: {}", solver.diag_clamp_count);

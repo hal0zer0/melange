@@ -2996,10 +2996,12 @@ impl NodalSolver {
             }
 
             // Layer 2: Global node voltage damping (10V threshold, ngspice CKTnodeDamping)
-            if self.delayed_node_indices.is_empty() {
+            // Skip delayed nodes (they're frozen at v_prev) but damp everything else.
+            {
                 let n_nodes = self.kernel.n_nodes;
                 let mut max_node_dv = 0.0_f64;
                 for i in 0..n_nodes {
+                    if self.delayed_node_indices.contains(&i) { continue; }
                     let dv = alpha * (v_new[i] - v[i]);
                     max_node_dv = max_node_dv.max(dv.abs());
                 }
@@ -3009,21 +3011,24 @@ impl NodalSolver {
             }
 
             // Apply damped Newton step, then freeze delayed nodes.
-            // Delayed nodes are excluded from convergence check (they're fixed at v_prev).
-            let mut max_delta = 0.0_f64;
             for i in 0..n {
-                let delta = alpha * (v_new[i] - v[i]);
-                v[i] += delta;
-                if !self.delayed_node_indices.contains(&i) {
-                    max_delta = max_delta.max(delta.abs());
-                }
+                v[i] += alpha * (v_new[i] - v[i]);
             }
             // Force delayed nodes back to v_prev (one-sample delay)
             for &idx in &self.delayed_node_indices {
                 v[idx] = self.v_prev[idx];
             }
 
-            if max_delta < self.tol {
+            // SPICE-style convergence: RELTOL * max(|v_new|, |v_old|) + VNTOL
+            // For a 290V node: threshold = 0.001*290 + 1e-6 = 0.29V (vs fixed 1e-6)
+            let converged_check = (0..n).all(|i| {
+                if self.delayed_node_indices.contains(&i) { return true; }
+                let abs_delta = (alpha * (v_new[i] - v[i])).abs(); // actual step taken
+                let threshold = 1e-3 * v[i].abs().max(v_new[i].abs()) + self.tol;
+                abs_delta < threshold
+            });
+
+            if converged_check {
                 converged = true;
                 // Final device evaluation at converged point
                 for i in 0..m {
@@ -3041,9 +3046,47 @@ impl NodalSolver {
 
         if !converged {
             self.diag_nr_max_iter_count += 1;
+            // Ensure i_nl is consistent with the final v (the last NR step
+            // updated v but i_nl was evaluated at the PREVIOUS v).
+            if m > 0 {
+                for i in 0..m {
+                    let mut sum = 0.0;
+                    let nv_offset = i * n;
+                    for j in 0..n {
+                        sum += self.n_v[nv_offset + j] * v[j];
+                    }
+                    self.v_nl[i] = sum;
+                }
+                dc_op::evaluate_devices(&self.v_nl, &self.device_slots, &mut self.i_nl, &mut self.j_dev, m);
+            }
         }
 
         // Step 3: Update state (includes inductor branch currents implicitly)
+        //
+        // For delayed feedback nodes: recompute their voltages from the converged
+        // system state so v_prev carries the correct one-sample-delayed values next
+        // time.  During NR iteration the delayed rows were identity-constrained
+        // (v = v_prev), but the TRUE voltage at these nodes is determined by KCL.
+        // Solve: v[idx] = (rhs[idx] - sum_{j!=idx} A[idx][j]*v[j]) / A[idx][idx]
+        if !self.delayed_node_indices.is_empty() {
+            for &idx in &self.delayed_node_indices {
+                let diag = self.a_matrix[idx][idx];
+                if diag.abs() > 1e-30 {
+                    let mut sum = self.rhs[idx];
+                    // Add nonlinear current contribution: N_i * i_nl
+                    let ni_offset = idx * m;
+                    for j in 0..m {
+                        sum += self.n_i[ni_offset + j] * self.i_nl[j];
+                    }
+                    for j in 0..n {
+                        if j != idx {
+                            sum -= self.a_matrix[idx][j] * v[j];
+                        }
+                    }
+                    v[idx] = sum / diag;
+                }
+            }
+        }
         self.v_prev.copy_from_slice(&v);
         self.i_nl_prev.copy_from_slice(&self.i_nl);
 

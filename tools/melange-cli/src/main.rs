@@ -1570,7 +1570,7 @@ fn build_device_slots(
     netlist: &melange_solver::parser::Netlist,
     mna: &melange_solver::mna::MnaSystem,
 ) -> Vec<melange_solver::codegen::ir::DeviceSlot> {
-    use melange_solver::codegen::ir::{DeviceSlot, DeviceType, DeviceParams, DiodeParams, BjtParams};
+    use melange_solver::codegen::ir::{DeviceSlot, DeviceType, DeviceParams, DiodeParams, BjtParams, JfetParams, MosfetParams, TubeParams};
 
     let find_param = |model_name: &str, param: &str| -> Option<f64> {
         netlist.models.iter()
@@ -1628,7 +1628,92 @@ fn build_device_slots(
                     }),
                 });
             }
-            _ => {}
+            melange_solver::mna::NonlinearDeviceType::Jfet => {
+                let model_name = netlist.elements.iter().find_map(|e| {
+                    if let melange_solver::parser::Element::Jfet { name, model, .. } = e {
+                        if name.eq_ignore_ascii_case(&dev_info.name) { Some(model.clone()) } else { None }
+                    } else { None }
+                }).unwrap_or_default();
+                let is_p_channel = netlist.models.iter()
+                    .find(|m| m.name.eq_ignore_ascii_case(&model_name))
+                    .map(|m| m.model_type.to_uppercase().starts_with("PJ"))
+                    .unwrap_or(false);
+                let default_vp = if is_p_channel { 2.0 } else { -2.0 };
+                let vp = find_param(&model_name, "VTO").unwrap_or(default_vp);
+                let idss = if let Some(beta) = find_param(&model_name, "BETA") {
+                    beta * vp * vp
+                } else {
+                    find_param(&model_name, "IDSS").unwrap_or(2e-3)
+                };
+                let lambda = find_param(&model_name, "LAMBDA").unwrap_or(0.001);
+                slots.push(DeviceSlot {
+                    device_type: DeviceType::Jfet,
+                    start_idx: dev_info.start_idx,
+                    dimension: 2,
+                    params: DeviceParams::Jfet(JfetParams {
+                        idss,
+                        vp,
+                        lambda,
+                        is_p_channel,
+                    }),
+                });
+            }
+            melange_solver::mna::NonlinearDeviceType::Mosfet => {
+                let model_name = netlist.elements.iter().find_map(|e| {
+                    if let melange_solver::parser::Element::Mosfet { name, model, .. } = e {
+                        if name.eq_ignore_ascii_case(&dev_info.name) { Some(model.clone()) } else { None }
+                    } else { None }
+                }).unwrap_or_default();
+                let is_p_channel = netlist.models.iter()
+                    .find(|m| m.name.eq_ignore_ascii_case(&model_name))
+                    .map(|m| m.model_type.to_uppercase().starts_with("PM"))
+                    .unwrap_or(false);
+                let default_vt = if is_p_channel { -2.0 } else { 2.0 };
+                let vt = find_param(&model_name, "VTO").unwrap_or(default_vt);
+                let kp = find_param(&model_name, "KP").unwrap_or(0.1);
+                let lambda = find_param(&model_name, "LAMBDA").unwrap_or(0.01);
+                slots.push(DeviceSlot {
+                    device_type: DeviceType::Mosfet,
+                    start_idx: dev_info.start_idx,
+                    dimension: 2,
+                    params: DeviceParams::Mosfet(MosfetParams {
+                        kp,
+                        vt,
+                        lambda,
+                        is_p_channel,
+                    }),
+                });
+            }
+            melange_solver::mna::NonlinearDeviceType::Tube => {
+                let model_name = netlist.elements.iter().find_map(|e| {
+                    if let melange_solver::parser::Element::Triode { name, model, .. } = e {
+                        if name.eq_ignore_ascii_case(&dev_info.name) { Some(model.clone()) } else { None }
+                    } else { None }
+                }).unwrap_or_default();
+                let mu = find_param(&model_name, "MU").unwrap_or(100.0);
+                let ex = find_param(&model_name, "EX").unwrap_or(1.4);
+                let kg1 = find_param(&model_name, "KG1").unwrap_or(1060.0);
+                let kp = find_param(&model_name, "KP").unwrap_or(600.0);
+                let kvb = find_param(&model_name, "KVB").unwrap_or(300.0);
+                let ig_max = find_param(&model_name, "IG_MAX").unwrap_or(2e-3);
+                let vgk_onset = find_param(&model_name, "VGK_ONSET").unwrap_or(0.5);
+                let lambda = find_param(&model_name, "LAMBDA").unwrap_or(0.0);
+                slots.push(DeviceSlot {
+                    device_type: DeviceType::Tube,
+                    start_idx: dev_info.start_idx,
+                    dimension: 2,
+                    params: DeviceParams::Tube(TubeParams {
+                        mu,
+                        ex,
+                        kg1,
+                        kp,
+                        kvb,
+                        ig_max,
+                        vgk_onset,
+                        lambda,
+                    }),
+                });
+            }
         }
     }
     slots
