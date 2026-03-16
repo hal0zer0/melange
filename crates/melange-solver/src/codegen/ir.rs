@@ -862,7 +862,11 @@ impl CircuitIR {
             topology,
             solver_config,
             matrices,
-            dc_operating_point: dc_result.v_node,
+            // Truncate DC OP to n_aug (the codegen kernel dimension).
+            // The DC OP solver returns n_dc = n_aug + n_inductors, but
+            // inductor branch currents are only meaningful in the augmented
+            // MNA system (NodalSolver), not in the companion-model codegen.
+            dc_operating_point: dc_result.v_node[..kernel.n].to_vec(),
             device_slots,
             has_dc_sources,
             has_dc_op,
