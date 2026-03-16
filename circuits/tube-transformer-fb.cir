@@ -17,22 +17,20 @@ Rg grid 0 1Meg
 * Triode
 T1 grid plate cathode 12AX7
 
-* Plate load
-Ra vcc plate 100k
+* Plate supply through transformer center tap
+* (DC path: VCC → Rct → xfmr_ct → L_pri → plate)
+Rct vcc xfmr_ct 100
 
 * Cathode bias (unbypassed for NFB)
 Rk cathode 0 1.5k
 
 * Output transformer (Pultec-scale: 130H, k=0.99)
-L_pri plate xfmr_ct 130
+L_pri xfmr_ct plate 130
 L_sec out 0 26
 L_tert fb_n fb_p 13
 K1 L_pri L_sec 0.99
 K2 L_pri L_tert 0.99
 K3 L_sec L_tert 0.99
-
-* Transformer center tap to ground
-Rct xfmr_ct 0 10
 
 * Feedback from tertiary to cathode
 Rfb fb_p cathode 1k
