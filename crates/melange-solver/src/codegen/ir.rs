@@ -12,6 +12,22 @@ use crate::parser::{Element, Netlist};
 
 use super::{CodegenConfig, CodegenError};
 
+/// Solver method for code generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SolverMode {
+    /// DK method: precompute S=A⁻¹, NR in M-dimensional current space.
+    /// Fast (O(N²+M³) per sample) but requires well-conditioned A and K[i][i]<0.
+    Dk,
+    /// Full-nodal NR: LU solve in N-dimensional voltage space per NR iteration.
+    /// Handles any circuit topology including transformer-coupled NFB.
+    /// Slower (O(N³) per sample) but universally convergent.
+    Nodal,
+}
+
+impl Default for SolverMode {
+    fn default() -> Self { SolverMode::Dk }
+}
+
 /// Language-agnostic intermediate representation of a compiled circuit.
 ///
 /// Built from `DkKernel` + `MnaSystem` + `Netlist` + `CodegenConfig`, this
@@ -21,6 +37,9 @@ use super::{CodegenConfig, CodegenError};
 pub struct CircuitIR {
     pub metadata: CircuitMetadata,
     pub topology: Topology,
+    /// DK or Nodal solver mode
+    #[serde(default)]
+    pub solver_mode: SolverMode,
     pub solver_config: SolverConfig,
     pub matrices: Matrices,
     pub dc_operating_point: Vec<f64>,
@@ -132,6 +151,21 @@ pub struct Matrices {
     /// Raw capacitance matrix C, N×N row-major (sample-rate independent)
     #[serde(default)]
     pub c_matrix: Vec<f64>,
+
+    // --- Nodal solver matrices (only populated when solver_mode == Nodal) ---
+
+    /// A = G + (2/T)*C, N×N row-major (trapezoidal forward matrix)
+    #[serde(default)]
+    pub a_matrix: Vec<f64>,
+    /// A_be = G + (1/T)*C, N×N row-major (backward Euler fallback)
+    #[serde(default)]
+    pub a_matrix_be: Vec<f64>,
+    /// A_neg_be = (1/T)*C, N×N row-major (backward Euler history)
+    #[serde(default)]
+    pub a_neg_be: Vec<f64>,
+    /// RHS constant for backward Euler (DC sources × 1, not × 2)
+    #[serde(default)]
+    pub rhs_const_be: Vec<f64>,
 }
 
 /// Potentiometer parameters for code generation (Sherman-Morrison precomputed data).
@@ -720,6 +754,10 @@ impl CircuitIR {
                 rhs_const: kernel.rhs_const.clone(),
                 g_matrix,
                 c_matrix,
+                a_matrix: Vec::new(),
+                a_matrix_be: Vec::new(),
+                a_neg_be: Vec::new(),
+                rhs_const_be: Vec::new(),
             }
         } else {
             Matrices {
@@ -731,6 +769,10 @@ impl CircuitIR {
                 rhs_const: kernel.rhs_const.clone(),
                 g_matrix,
                 c_matrix,
+                a_matrix: Vec::new(),
+                a_matrix_be: Vec::new(),
+                a_neg_be: Vec::new(),
+                rhs_const_be: Vec::new(),
             }
         };
 
@@ -899,6 +941,7 @@ impl CircuitIR {
         Ok(CircuitIR {
             metadata,
             topology,
+            solver_mode: SolverMode::Dk,
             solver_config,
             matrices,
             // For augmented inductors, the DC OP solver returns n_aug-sized vectors
@@ -922,6 +965,189 @@ impl CircuitIR {
             transformer_groups,
             pots,
             switches,
+            sparsity,
+        })
+    }
+
+    /// Build CircuitIR for the nodal solver path (no DkKernel needed).
+    ///
+    /// Uses augmented MNA: inductors are branch current variables in G/C.
+    /// The generated code does full N×N NR per sample instead of DK's M×M.
+    pub fn from_mna(
+        mna: &MnaSystem,
+        netlist: &Netlist,
+        config: &CodegenConfig,
+    ) -> Result<Self, CodegenError> {
+        let n_nodes = mna.n;
+        let n_aug = mna.n_aug;
+        let m = mna.m;
+
+        // Build augmented G/C matrices (includes inductor branch variables)
+        let aug = mna.build_augmented_matrices();
+        let n = aug.n_nodal;
+
+        let sample_rate = config.sample_rate;
+        let t = 1.0 / sample_rate;
+        let alpha = 2.0 / t;
+        let alpha_be = 1.0 / t;
+
+        let topology = Topology {
+            n,
+            n_nodes,
+            m,
+            num_devices: mna.num_devices,
+            n_aug,
+            augmented_inductors: true,
+        };
+
+        let solver_config = SolverConfig {
+            sample_rate,
+            alpha,
+            tolerance: config.tolerance,
+            max_iterations: config.max_iterations,
+            input_node: config.input_node,
+            output_nodes: config.output_nodes.clone(),
+            input_resistance: config.input_resistance,
+            oversampling_factor: config.oversampling_factor,
+            output_scales: config.output_scales.clone(),
+        };
+
+        let metadata = CircuitMetadata {
+            circuit_name: config.circuit_name.clone(),
+            title: netlist.title.clone(),
+            generator_version: env!("CARGO_PKG_VERSION").to_string(),
+        };
+
+        // Flatten G and C at n_nodal dimension
+        let g_matrix = dk::flatten_matrix(&aug.g, n, n);
+        let c_matrix = dk::flatten_matrix(&aug.c, n, n);
+
+        // Build trapezoidal A = G + alpha*C, A_neg = alpha*C - G
+        let mut a_flat = vec![0.0f64; n * n];
+        let mut a_neg_flat = vec![0.0f64; n * n];
+        for i in 0..n {
+            for j in 0..n {
+                let g = aug.g[i][j];
+                let c = aug.c[i][j];
+                a_flat[i * n + j] = g + alpha * c;
+                a_neg_flat[i * n + j] = alpha * c - g;
+            }
+        }
+        // Zero VS/VCVS algebraic rows in A_neg (NOT inductor rows)
+        for i in n_nodes..n_aug {
+            for j in 0..n {
+                a_neg_flat[i * n + j] = 0.0;
+            }
+        }
+
+        // Build backward Euler: A_be = G + (1/T)*C, A_neg_be = (1/T)*C
+        let mut a_be_flat = vec![0.0f64; n * n];
+        let mut a_neg_be_flat = vec![0.0f64; n * n];
+        for i in 0..n {
+            for j in 0..n {
+                let g = aug.g[i][j];
+                let c = aug.c[i][j];
+                a_be_flat[i * n + j] = g + alpha_be * c;
+                a_neg_be_flat[i * n + j] = alpha_be * c;
+            }
+        }
+        for i in n_nodes..n_aug {
+            for j in 0..n {
+                a_neg_be_flat[i * n + j] = 0.0;
+            }
+        }
+
+        // Expand N_v (m × n_aug → m × n_nodal) and N_i (n_aug × m → n_nodal × m)
+        let mut n_v_flat = vec![0.0f64; m * n];
+        for i in 0..m {
+            for j in 0..n_aug {
+                n_v_flat[i * n + j] = mna.n_v[i][j];
+            }
+        }
+        let mut n_i_flat = vec![0.0f64; n * m];
+        for i in 0..n_aug {
+            for j in 0..m {
+                n_i_flat[i * m + j] = mna.n_i[i][j];
+            }
+        }
+
+        // Build trapezoidal rhs_const (node rows ×2, VS rows ×1)
+        let rhs_const_base = dk::build_rhs_const(mna);
+        let mut rhs_const = vec![0.0f64; n];
+        for i in 0..n_aug {
+            rhs_const[i] = rhs_const_base[i];
+        }
+
+        // Build BE rhs_const (node rows ×1, VS rows ×1)
+        let mut rhs_const_be = vec![0.0f64; n];
+        for src in &mna.current_sources {
+            crate::mna::inject_rhs_current(&mut rhs_const_be, src.n_plus_idx, src.dc_value);
+            crate::mna::inject_rhs_current(&mut rhs_const_be, src.n_minus_idx, -src.dc_value);
+        }
+        for vs in &mna.voltage_sources {
+            let k = mna.n + vs.ext_idx;
+            if k < n { rhs_const_be[k] = vs.dc_value; }
+        }
+
+        let matrices = Matrices {
+            s: Vec::new(),     // not used in nodal mode
+            k: Vec::new(),     // not used in nodal mode
+            a_neg: a_neg_flat,
+            n_v: n_v_flat,
+            n_i: n_i_flat,
+            rhs_const,
+            g_matrix,
+            c_matrix,
+            a_matrix: a_flat,
+            a_matrix_be: a_be_flat,
+            a_neg_be: a_neg_be_flat,
+            rhs_const_be,
+        };
+
+        // Run DC OP
+        let dc_op_config = DcOpConfig {
+            input_node: config.input_node,
+            input_resistance: config.input_resistance,
+            ..DcOpConfig::default()
+        };
+        let dc_result = dc_op::solve_dc_operating_point(mna, &Self::build_device_info(netlist)?, &dc_op_config);
+        let dc_op_truncated = &dc_result.v_node[..n_aug.min(dc_result.v_node.len())];
+        let has_dc_op = dc_op_truncated.iter().any(|&v| v.abs() > 1e-15);
+        let dc_op_converged = dc_result.converged;
+        let dc_nl_currents = dc_result.i_nl.clone();
+        let has_dc_sources = !mna.voltage_sources.is_empty() || !mna.current_sources.is_empty();
+
+        // Pad DC OP to n_nodal (inductor branch currents = 0)
+        let mut dc_operating_point = dc_result.v_node.clone();
+        dc_operating_point.resize(n, 0.0);
+
+        let device_slots = Self::build_device_info(netlist)?;
+
+        // Sparsity analysis
+        let sparsity = SparseInfo {
+            a_neg: analyze_matrix_sparsity(&matrices.a_neg, n, n),
+            n_v: analyze_matrix_sparsity(&matrices.n_v, m, n),
+            n_i: analyze_matrix_sparsity(&matrices.n_i, n, m),
+            k: analyze_matrix_sparsity(&[], 0, 0), // no K in nodal mode
+        };
+
+        Ok(CircuitIR {
+            metadata,
+            topology,
+            solver_mode: SolverMode::Nodal,
+            solver_config,
+            matrices,
+            dc_operating_point,
+            device_slots,
+            has_dc_sources,
+            has_dc_op,
+            dc_nl_currents,
+            dc_op_converged,
+            inductors: Vec::new(),          // no companion model
+            coupled_inductors: Vec::new(),
+            transformer_groups: Vec::new(),
+            pots: Vec::new(),               // TODO: pot support for nodal (Phase 3)
+            switches: Vec::new(),           // TODO: switch support for nodal (Phase 3)
             sparsity,
         })
     }

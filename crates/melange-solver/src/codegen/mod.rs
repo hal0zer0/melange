@@ -193,6 +193,69 @@ impl CodeGenerator {
             m: ir.topology.m,
         })
     }
+
+    /// Generate code using the NodalSolver path (full N×N NR per sample).
+    ///
+    /// This bypasses the DkKernel entirely — no S=A⁻¹ precomputation, no K matrix.
+    /// The generated code does LU factorization per NR iteration, which handles
+    /// any circuit topology including transformer-coupled NFB with large inductors.
+    ///
+    /// # Errors
+    /// Returns `CodegenError` if input/output node validation fails or if code
+    /// generation encounters an error.
+    pub fn generate_nodal(
+        &self,
+        mna: &MnaSystem,
+        netlist: &Netlist,
+    ) -> Result<GeneratedCode, CodegenError> {
+        // Validate config (same checks as generate, but against MNA dimensions)
+        match self.config.oversampling_factor {
+            1 | 2 | 4 => {}
+            f => {
+                return Err(CodegenError::InvalidConfig(format!(
+                    "oversampling_factor must be 1, 2, or 4, got {f}"
+                )));
+            }
+        }
+        if self.config.input_resistance <= 0.0 || !self.config.input_resistance.is_finite() {
+            return Err(CodegenError::InvalidConfig(format!(
+                "input_resistance must be positive finite, got {}",
+                self.config.input_resistance
+            )));
+        }
+        if self.config.input_node >= mna.n {
+            return Err(CodegenError::InvalidConfig(format!(
+                "input_node {} >= n_nodes={}", self.config.input_node, mna.n
+            )));
+        }
+        if self.config.output_nodes.is_empty() {
+            return Err(CodegenError::InvalidConfig(
+                "output_nodes must not be empty".to_string()
+            ));
+        }
+        for (i, &node) in self.config.output_nodes.iter().enumerate() {
+            if node >= mna.n {
+                return Err(CodegenError::InvalidConfig(format!(
+                    "output_nodes[{}] = {} >= n_nodes={}", i, node, mna.n
+                )));
+            }
+        }
+        if self.config.output_scales.len() != self.config.output_nodes.len() {
+            return Err(CodegenError::InvalidConfig(format!(
+                "output_scales length ({}) must match output_nodes length ({})",
+                self.config.output_scales.len(), self.config.output_nodes.len()
+            )));
+        }
+
+        let ir = CircuitIR::from_mna(mna, netlist, &self.config)?;
+        let code = RustEmitter::new()?.emit(&ir)?;
+
+        Ok(GeneratedCode {
+            code,
+            n: ir.topology.n,
+            m: ir.topology.m,
+        })
+    }
 }
 
 #[cfg(test)]
