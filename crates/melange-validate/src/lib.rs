@@ -769,7 +769,7 @@ fn build_device_slots_from_netlist(
                     device_type: DeviceType::Diode,
                     start_idx: dim_offset,
                     dimension: 1,
-                    params: DeviceParams::Diode(DiodeParams { is, n_vt: n * vt, cjo: 0.0 }),
+                    params: DeviceParams::Diode(DiodeParams { is, n_vt: n * vt, cjo: 0.0, rs: 0.0, bv: f64::INFINITY, ibv: 1e-10 }),
                 });
                 dim_offset += 1;
             }
@@ -800,6 +800,9 @@ fn build_device_slots_from_netlist(
                         ikr: f64::INFINITY,
                         cje: 0.0,
                         cjc: 0.0,
+                        nf: 1.0,
+                        ise: 0.0,
+                        ne: 1.5,
                     }),
                 });
                 dim_offset += 2;

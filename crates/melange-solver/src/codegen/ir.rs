@@ -293,6 +293,15 @@ pub struct DiodeParams {
     /// Zero-bias junction capacitance [F] (0.0 = disabled)
     #[serde(default)]
     pub cjo: f64,
+    /// Series resistance [Ohms] (0.0 = disabled)
+    #[serde(default)]
+    pub rs: f64,
+    /// Reverse breakdown voltage [V] (infinity = disabled)
+    #[serde(default = "default_infinity", deserialize_with = "deserialize_f64_or_infinity")]
+    pub bv: f64,
+    /// Reverse breakdown current [A] (default 1e-10)
+    #[serde(default = "default_ibv")]
+    pub ibv: f64,
 }
 
 /// BJT parameters (Ebers-Moll or Gummel-Poon, resolved from `.model` directive).
@@ -331,10 +340,31 @@ pub struct BjtParams {
     /// Base-collector junction capacitance [F] (0.0 = disabled)
     #[serde(default)]
     pub cjc: f64,
+    /// Forward emission coefficient (1.0 = ideal, default)
+    #[serde(default = "default_one")]
+    pub nf: f64,
+    /// B-E leakage saturation current [A] (0.0 = disabled, default)
+    #[serde(default)]
+    pub ise: f64,
+    /// B-E leakage emission coefficient (default 1.5)
+    #[serde(default = "default_ne")]
+    pub ne: f64,
 }
 
 fn default_infinity() -> f64 {
     f64::INFINITY
+}
+
+fn default_ibv() -> f64 {
+    1e-10
+}
+
+fn default_one() -> f64 {
+    1.0
+}
+
+fn default_ne() -> f64 {
+    1.5
 }
 
 /// Deserialize an f64 that may be null (JSON cannot represent infinity).
@@ -350,6 +380,10 @@ impl BjtParams {
     pub fn is_gummel_poon(&self) -> bool {
         self.vaf.is_finite() || self.var.is_finite() || self.ikf.is_finite() || self.ikr.is_finite()
     }
+    /// Returns true if non-ideal emission coefficient (NF != 1.0) is active.
+    pub fn has_nf(&self) -> bool { (self.nf - 1.0).abs() > 1e-15 }
+    /// Returns true if B-E leakage current (ISE) is enabled.
+    pub fn has_ise(&self) -> bool { self.ise > 0.0 }
 }
 
 /// A slot in the nonlinear system: maps a device to its M-dimension range.
@@ -386,6 +420,17 @@ pub struct JfetParams {
     /// Gate-drain junction capacitance [F] (0.0 = disabled)
     #[serde(default)]
     pub cgd: f64,
+    /// Drain ohmic resistance [Ohms] (0.0 = disabled)
+    #[serde(default)]
+    pub rd: f64,
+    /// Source ohmic resistance [Ohms] (0.0 = disabled)
+    #[serde(default)]
+    pub rs_param: f64,
+}
+
+impl JfetParams {
+    /// Returns true if either drain or source resistance is enabled.
+    pub fn has_rd_rs(&self) -> bool { self.rd > 0.0 || self.rs_param > 0.0 }
 }
 
 /// MOSFET model parameters (Level 1 SPICE, triode + saturation).
@@ -409,6 +454,17 @@ pub struct MosfetParams {
     /// Gate-drain capacitance [F] (0.0 = disabled)
     #[serde(default)]
     pub cgd: f64,
+    /// Drain ohmic resistance [Ohms] (0.0 = disabled)
+    #[serde(default)]
+    pub rd: f64,
+    /// Source ohmic resistance [Ohms] (0.0 = disabled)
+    #[serde(default)]
+    pub rs_param: f64,
+}
+
+impl MosfetParams {
+    /// Returns true if either drain or source resistance is enabled.
+    pub fn has_rd_rs(&self) -> bool { self.rd > 0.0 || self.rs_param > 0.0 }
 }
 
 /// Tube/triode model parameters (Koren + improved grid current).
@@ -440,6 +496,21 @@ pub struct TubeParams {
     /// Cathode-plate capacitance [F] (0.0 = disabled)
     #[serde(default)]
     pub ccp: f64,
+    /// Grid internal resistance [Ohms] (0.0 = disabled)
+    #[serde(default)]
+    pub rgi: f64,
+}
+
+impl TubeParams {
+    /// Returns true if grid internal resistance is enabled.
+    pub fn has_rgi(&self) -> bool { self.rgi > 0.0 }
+}
+
+impl DiodeParams {
+    /// Returns true if series resistance is enabled.
+    pub fn has_rs(&self) -> bool { self.rs > 0.0 }
+    /// Returns true if reverse breakdown is enabled.
+    pub fn has_bv(&self) -> bool { self.bv.is_finite() }
 }
 
 impl DeviceParams {
@@ -1269,7 +1340,30 @@ impl CircuitIR {
         let cjo = Self::lookup_model_param(netlist, model, "CJO")
             .unwrap_or(0.0);
 
-        Ok(DiodeParams { is, n_vt: n * vt, cjo })
+        // Series resistance (optional, default 0.0)
+        let rs = Self::lookup_model_param(netlist, model, "RS")
+            .unwrap_or(0.0);
+        if rs < 0.0 || !rs.is_finite() {
+            return Err(CodegenError::InvalidConfig(
+                format!("diode model RS must be non-negative and finite, got {rs}")
+            ));
+        }
+
+        // Reverse breakdown voltage (optional, default infinity = disabled)
+        let bv = Self::lookup_model_param(netlist, model, "BV")
+            .unwrap_or(f64::INFINITY);
+        if bv.is_finite() {
+            validate_positive_finite(bv, "diode model BV")?;
+        }
+
+        // Reverse breakdown current (optional, default 1e-10)
+        let ibv = Self::lookup_model_param(netlist, model, "IBV")
+            .unwrap_or(1e-10);
+        if ibv.is_finite() {
+            validate_positive_finite(ibv, "diode model IBV")?;
+        }
+
+        Ok(DiodeParams { is, n_vt: n * vt, cjo, rs, bv, ibv })
     }
 
     /// Resolve BJT model parameters from the netlist, with validation.
@@ -1339,7 +1433,34 @@ impl CircuitIR {
         let cjc = Self::lookup_model_param(netlist, model, "CJC")
             .unwrap_or(0.0);
 
-        Ok(BjtParams { is, vt, beta_f, beta_r, is_pnp, vaf, var, ikf, ikr, cje, cjc })
+        // Forward emission coefficient (default 1.0 = ideal)
+        let nf = Self::lookup_model_param(netlist, model, "NF")
+            .unwrap_or(1.0);
+        if nf <= 0.0 || !nf.is_finite() {
+            return Err(CodegenError::InvalidConfig(
+                format!("BJT model NF must be positive and finite, got {nf}")
+            ));
+        }
+
+        // B-E leakage saturation current (default 0.0 = disabled)
+        let ise = Self::lookup_model_param(netlist, model, "ISE")
+            .unwrap_or(0.0);
+        if ise < 0.0 || !ise.is_finite() {
+            return Err(CodegenError::InvalidConfig(
+                format!("BJT model ISE must be non-negative and finite, got {ise}")
+            ));
+        }
+
+        // B-E leakage emission coefficient (default 1.5)
+        let ne = Self::lookup_model_param(netlist, model, "NE")
+            .unwrap_or(1.5);
+        if ne <= 0.0 || !ne.is_finite() {
+            return Err(CodegenError::InvalidConfig(
+                format!("BJT model NE must be positive and finite, got {ne}")
+            ));
+        }
+
+        Ok(BjtParams { is, vt, beta_f, beta_r, is_pnp, vaf, var, ikf, ikr, cje, cjc, nf, ise, ne })
     }
 
     /// Resolve JFET model parameters from the netlist, with validation.
@@ -1387,7 +1508,13 @@ impl CircuitIR {
         let cgd = Self::lookup_model_param(netlist, model, "CGD")
             .unwrap_or(0.0);
 
-        Ok(JfetParams { idss, vp, lambda, is_p_channel, cgs, cgd })
+        // Ohmic drain/source resistances (optional, default 0.0)
+        let rd = Self::lookup_model_param(netlist, model, "RD")
+            .unwrap_or(0.0);
+        let rs_param = Self::lookup_model_param(netlist, model, "RS")
+            .unwrap_or(0.0);
+
+        Ok(JfetParams { idss, vp, lambda, is_p_channel, cgs, cgd, rd, rs_param })
     }
 
     /// Resolve MOSFET model parameters from the netlist, with validation.
@@ -1428,7 +1555,13 @@ impl CircuitIR {
         let cgd = Self::lookup_model_param(netlist, model, "CGD")
             .unwrap_or(0.0);
 
-        Ok(MosfetParams { kp, vt, lambda, is_p_channel, cgs, cgd })
+        // Ohmic drain/source resistances (optional, default 0.0)
+        let rd = Self::lookup_model_param(netlist, model, "RD")
+            .unwrap_or(0.0);
+        let rs_param = Self::lookup_model_param(netlist, model, "RS")
+            .unwrap_or(0.0);
+
+        Ok(MosfetParams { kp, vt, lambda, is_p_channel, cgs, cgd, rd, rs_param })
     }
 
     /// Resolve tube/triode model parameters from the netlist, with validation.
@@ -1484,7 +1617,16 @@ impl CircuitIR {
         let ccp = Self::lookup_model_param(netlist, model, "CCP")
             .unwrap_or(0.0);
 
-        Ok(TubeParams { mu, ex, kg1, kp, kvb, ig_max, vgk_onset, lambda, ccg, cgp, ccp })
+        // Grid internal resistance (optional, default 0.0 = disabled)
+        let rgi = Self::lookup_model_param(netlist, model, "RGI")
+            .unwrap_or(0.0);
+        if rgi < 0.0 || (rgi.is_finite() && rgi < 0.0) {
+            return Err(CodegenError::InvalidConfig(
+                format!("tube model RGI must be non-negative, got {rgi}")
+            ));
+        }
+
+        Ok(TubeParams { mu, ex, kg1, kp, kvb, ig_max, vgk_onset, lambda, ccg, cgp, ccp, rgi })
     }
 
     /// Build the legacy `devices` list (first occurrence of each device type).

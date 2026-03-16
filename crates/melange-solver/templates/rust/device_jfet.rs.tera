@@ -63,3 +63,18 @@ fn jfet_jacobian(vgs: f64, vds: f64, idss: f64, vp: f64, lambda: f64, sign: f64)
     [d_id_d_vgs, d_id_d_vds, 0.0, 0.0]
 }
 
+/// JFET Jacobian corrected for ohmic drain/source resistance.
+/// Uses closed-form correction:
+///   dId/dVgs_ext = gm / (1 + gm*RS + gds*(RD+RS))
+///   dId/dVds_ext = gds / (1 + gm*RS + gds*(RD+RS))
+#[inline(always)]
+fn jfet_jacobian_with_rd_rs(vgs: f64, vds: f64, idss: f64, vp: f64, lambda: f64, sign: f64,
+                            rd: f64, rs: f64) -> [f64; 4] {
+    let jac = jfet_jacobian(vgs, vds, idss, vp, lambda, sign);
+    let gm = jac[0];  // dId/dVgs_int
+    let gds = jac[1]; // dId/dVds_int
+    let denom = 1.0 + gm * rs + gds * (rd + rs);
+    if denom.abs() < 1e-30 { return jac; }
+    [gm / denom, gds / denom, 0.0, 0.0]
+}
+

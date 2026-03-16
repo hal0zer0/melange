@@ -801,6 +801,13 @@ impl RustEmitter {
                     // Precomputed critical voltage for SPICE pnjlim
                     let vcrit = dp.n_vt * (dp.n_vt / (std::f64::consts::SQRT_2 * dp.is)).ln();
                     emit_device_const(&mut code, dev_num, "VCRIT", vcrit);
+                    if dp.has_rs() {
+                        emit_device_const(&mut code, dev_num, "RS", dp.rs);
+                    }
+                    if dp.has_bv() {
+                        emit_device_const(&mut code, dev_num, "BV", dp.bv);
+                        emit_device_const(&mut code, dev_num, "IBV", dp.ibv);
+                    }
                     code.push('\n');
                 }
                 DeviceParams::Bjt(bp) => {
@@ -809,6 +816,9 @@ impl RustEmitter {
                     emit_device_const(&mut code, dev_num, "VT", bp.vt);
                     emit_device_const(&mut code, dev_num, "BETA_F", bp.beta_f);
                     emit_device_const(&mut code, dev_num, "BETA_R", bp.beta_r);
+                    emit_device_const(&mut code, dev_num, "NF", bp.nf);
+                    emit_device_const(&mut code, dev_num, "ISE", bp.ise);
+                    emit_device_const(&mut code, dev_num, "NE", bp.ne);
                     let sign = if bp.is_pnp { -1.0 } else { 1.0 };
                     code.push_str(&format!(
                         "const DEVICE_{}_SIGN: f64 = {:.1};\n",
@@ -832,6 +842,10 @@ impl RustEmitter {
                     emit_device_const(&mut code, dev_num, "IDSS", jp.idss);
                     emit_device_const(&mut code, dev_num, "VP", jp.vp);
                     emit_device_const(&mut code, dev_num, "LAMBDA", jp.lambda);
+                    if jp.has_rd_rs() {
+                        emit_device_const(&mut code, dev_num, "RD", jp.rd);
+                        emit_device_const(&mut code, dev_num, "RS_PARAM", jp.rs_param);
+                    }
                     let sign = if jp.is_p_channel { -1.0 } else { 1.0 };
                     code.push_str(&format!(
                         "const DEVICE_{}_SIGN: f64 = {:.1};\n\n",
@@ -843,6 +857,10 @@ impl RustEmitter {
                     emit_device_const(&mut code, dev_num, "KP", mp.kp);
                     emit_device_const(&mut code, dev_num, "VT", mp.vt);
                     emit_device_const(&mut code, dev_num, "LAMBDA", mp.lambda);
+                    if mp.has_rd_rs() {
+                        emit_device_const(&mut code, dev_num, "RD", mp.rd);
+                        emit_device_const(&mut code, dev_num, "RS_PARAM", mp.rs_param);
+                    }
                     let sign = if mp.is_p_channel { -1.0 } else { 1.0 };
                     code.push_str(&format!(
                         "const DEVICE_{}_SIGN: f64 = {:.1};\n\n",
@@ -859,6 +877,9 @@ impl RustEmitter {
                     emit_device_const(&mut code, dev_num, "IG_MAX", tp.ig_max);
                     emit_device_const(&mut code, dev_num, "VGK_ONSET", tp.vgk_onset);
                     emit_device_const(&mut code, dev_num, "LAMBDA", tp.lambda);
+                    if tp.has_rgi() {
+                        emit_device_const(&mut code, dev_num, "RGI", tp.rgi);
+                    }
                     // Precomputed critical voltage for SPICE pnjlim (grid current onset)
                     let vt_tube = tp.vgk_onset / 3.0;
                     let vcrit = vt_tube * (vt_tube / (std::f64::consts::SQRT_2 * 1e-10)).ln();
@@ -2363,28 +2384,55 @@ impl RustEmitter {
                 match slot.device_type {
                     DeviceType::Diode => {
                         let s = slot.start_idx;
-                        code.push_str(&format!(
-                            "        let i_dev{} = diode_current(v_d{}, state.device_{}_is, state.device_{}_n_vt);\n",
-                            s, s, dev_num, dev_num
-                        ));
-                        code.push_str(&format!(
-                            "        let jdev_{}_{} = diode_conductance(v_d{}, state.device_{}_is, state.device_{}_n_vt);\n",
-                            s, s, s, dev_num, dev_num
-                        ));
+                        let d = dev_num;
+                        let dp = match &slot.params { DeviceParams::Diode(dp) => dp, _ => unreachable!() };
+                        if dp.has_rs() && dp.has_bv() {
+                            // RS + BV: solve inner NR for junction voltage, then add breakdown
+                            code.push_str(&format!(
+                                "        let i_dev{s} = diode_current_with_rs(v_d{s}, state.device_{d}_is, state.device_{d}_n_vt, DEVICE_{d}_RS) + diode_breakdown_current(v_d{s}, state.device_{d}_n_vt, DEVICE_{d}_BV, DEVICE_{d}_IBV);\n"
+                            ));
+                            code.push_str(&format!(
+                                "        let jdev_{s}_{s} = diode_conductance_with_rs(v_d{s}, state.device_{d}_is, state.device_{d}_n_vt, DEVICE_{d}_RS) + diode_breakdown_conductance(v_d{s}, state.device_{d}_n_vt, DEVICE_{d}_BV, DEVICE_{d}_IBV);\n"
+                            ));
+                        } else if dp.has_rs() {
+                            // RS only: solve inner NR for junction voltage
+                            code.push_str(&format!(
+                                "        let i_dev{s} = diode_current_with_rs(v_d{s}, state.device_{d}_is, state.device_{d}_n_vt, DEVICE_{d}_RS);\n"
+                            ));
+                            code.push_str(&format!(
+                                "        let jdev_{s}_{s} = diode_conductance_with_rs(v_d{s}, state.device_{d}_is, state.device_{d}_n_vt, DEVICE_{d}_RS);\n"
+                            ));
+                        } else if dp.has_bv() {
+                            // BV only: add breakdown to standard diode
+                            code.push_str(&format!(
+                                "        let i_dev{s} = diode_current(v_d{s}, state.device_{d}_is, state.device_{d}_n_vt) + diode_breakdown_current(v_d{s}, state.device_{d}_n_vt, DEVICE_{d}_BV, DEVICE_{d}_IBV);\n"
+                            ));
+                            code.push_str(&format!(
+                                "        let jdev_{s}_{s} = diode_conductance(v_d{s}, state.device_{d}_is, state.device_{d}_n_vt) + diode_breakdown_conductance(v_d{s}, state.device_{d}_n_vt, DEVICE_{d}_BV, DEVICE_{d}_IBV);\n"
+                            ));
+                        } else {
+                            // Standard diode (no RS, no BV)
+                            code.push_str(&format!(
+                                "        let i_dev{s} = diode_current(v_d{s}, state.device_{d}_is, state.device_{d}_n_vt);\n"
+                            ));
+                            code.push_str(&format!(
+                                "        let jdev_{s}_{s} = diode_conductance(v_d{s}, state.device_{d}_is, state.device_{d}_n_vt);\n"
+                            ));
+                        }
                     }
                     DeviceType::Bjt => {
                         let s = slot.start_idx;
                         let s1 = s + 1;
                         let d = dev_num;
-                        // IS, VT, BETA_R from state; SIGN, USE_GP, VAF, VAR, IKF stay as const
+                        // IS, VT, BETA_R, NF from state; SIGN, USE_GP, VAF, VAR, IKF, ISE, NE stay as const
                         code.push_str(&format!(
-                            "        let i_dev{s} = bjt_ic(v_d{s}, v_d{s1}, state.device_{d}_is, state.device_{d}_vt, state.device_{d}_br, DEVICE_{d}_SIGN, DEVICE_{d}_USE_GP, DEVICE_{d}_VAF, DEVICE_{d}_VAR, DEVICE_{d}_IKF, DEVICE_{d}_IKR);\n"
+                            "        let i_dev{s} = bjt_ic(v_d{s}, v_d{s1}, state.device_{d}_is, state.device_{d}_vt, DEVICE_{d}_NF, state.device_{d}_br, DEVICE_{d}_SIGN, DEVICE_{d}_USE_GP, DEVICE_{d}_VAF, DEVICE_{d}_VAR, DEVICE_{d}_IKF, DEVICE_{d}_IKR);\n"
                         ));
                         code.push_str(&format!(
-                            "        let i_dev{s1} = bjt_ib(v_d{s}, v_d{s1}, state.device_{d}_is, state.device_{d}_vt, state.device_{d}_bf, state.device_{d}_br, DEVICE_{d}_SIGN);\n"
+                            "        let i_dev{s1} = bjt_ib(v_d{s}, v_d{s1}, state.device_{d}_is, state.device_{d}_vt, DEVICE_{d}_NF, state.device_{d}_bf, state.device_{d}_br, DEVICE_{d}_SIGN, DEVICE_{d}_ISE, DEVICE_{d}_NE);\n"
                         ));
                         code.push_str(&format!(
-                            "        let bjt{d}_jac = bjt_jacobian(v_d{s}, v_d{s1}, state.device_{d}_is, state.device_{d}_vt, state.device_{d}_bf, state.device_{d}_br, DEVICE_{d}_SIGN, DEVICE_{d}_USE_GP, DEVICE_{d}_VAF, DEVICE_{d}_VAR, DEVICE_{d}_IKF, DEVICE_{d}_IKR);\n"
+                            "        let bjt{d}_jac = bjt_jacobian(v_d{s}, v_d{s1}, state.device_{d}_is, state.device_{d}_vt, DEVICE_{d}_NF, state.device_{d}_bf, state.device_{d}_br, DEVICE_{d}_SIGN, DEVICE_{d}_USE_GP, DEVICE_{d}_VAF, DEVICE_{d}_VAR, DEVICE_{d}_IKF, DEVICE_{d}_IKR, DEVICE_{d}_ISE, DEVICE_{d}_NE);\n"
                         ));
                         code.push_str(&format!(
                             "        let jdev_{}_{} = bjt{}_jac[0];\n",
@@ -2407,24 +2455,30 @@ impl RustEmitter {
                         let s = slot.start_idx;
                         let s1 = s + 1;
                         let d = dev_num;
+                        let jp = match &slot.params { DeviceParams::Jfet(jp) => jp, _ => unreachable!() };
                         // IDSS, VP, LAMBDA from state; SIGN stays as const.
                         // N_v ordering: dim s = Vds, dim s+1 = Vgs.
                         // Functions expect (vgs, vds), so pass (v_d{s1}, v_d{s}).
-                        // Jacobian jfet_jacobian(vgs,vds) returns [dId/dVgs, dId/dVds, dIg/dVgs, dIg/dVds].
-                        // In dim-space (dim0=Vds, dim1=Vgs):
-                        //   jdev_s_s   = dId/dVds = jac[1]
-                        //   jdev_s_s1  = dId/dVgs = jac[0]
-                        //   jdev_s1_s  = dIg/dVds = jac[3]
-                        //   jdev_s1_s1 = dIg/dVgs = jac[2]
                         code.push_str(&format!(
                             "        let i_dev{s} = jfet_id(v_d{s1}, v_d{s}, state.device_{d}_idss, state.device_{d}_vp, state.device_{d}_lambda, DEVICE_{d}_SIGN);\n"
                         ));
                         code.push_str(&format!(
                             "        let i_dev{s1} = jfet_ig(v_d{s1}, DEVICE_{d}_SIGN);\n"
                         ));
-                        code.push_str(&format!(
-                            "        let jfet{d}_jac = jfet_jacobian(v_d{s1}, v_d{s}, state.device_{d}_idss, state.device_{d}_vp, state.device_{d}_lambda, DEVICE_{d}_SIGN);\n"
-                        ));
+                        if jp.has_rd_rs() {
+                            code.push_str(&format!(
+                                "        let jfet{d}_jac = jfet_jacobian_with_rd_rs(v_d{s1}, v_d{s}, state.device_{d}_idss, state.device_{d}_vp, state.device_{d}_lambda, DEVICE_{d}_SIGN, DEVICE_{d}_RD, DEVICE_{d}_RS_PARAM);\n"
+                            ));
+                        } else {
+                            code.push_str(&format!(
+                                "        let jfet{d}_jac = jfet_jacobian(v_d{s1}, v_d{s}, state.device_{d}_idss, state.device_{d}_vp, state.device_{d}_lambda, DEVICE_{d}_SIGN);\n"
+                            ));
+                        }
+                        // In dim-space (dim0=Vds, dim1=Vgs):
+                        //   jdev_s_s   = dId/dVds = jac[1]
+                        //   jdev_s_s1  = dId/dVgs = jac[0]
+                        //   jdev_s1_s  = dIg/dVds = jac[3]
+                        //   jdev_s1_s1 = dIg/dVgs = jac[2]
                         code.push_str(&format!(
                             "        let jdev_{}_{} = jfet{}_jac[1];\n", s, s, d   // dId/dVds
                         ));
@@ -2442,24 +2496,25 @@ impl RustEmitter {
                         let s = slot.start_idx;
                         let s1 = s + 1;
                         let d = dev_num;
+                        let mp = match &slot.params { DeviceParams::Mosfet(mp) => mp, _ => unreachable!() };
                         // KP, VT, LAMBDA from state; SIGN stays as const.
                         // N_v ordering: dim s = Vds, dim s+1 = Vgs.
                         // Functions expect (vgs, vds), so pass (v_d{s1}, v_d{s}).
-                        // Jacobian mosfet_jacobian(vgs,vds) returns [dId/dVgs, dId/dVds, 0, 0].
-                        // In dim-space (dim0=Vds, dim1=Vgs):
-                        //   jdev_s_s   = dId/dVds = jac[1]
-                        //   jdev_s_s1  = dId/dVgs = jac[0]
-                        //   jdev_s1_s  = dIg/dVds = jac[3] = 0
-                        //   jdev_s1_s1 = dIg/dVgs = jac[2] = 0
                         code.push_str(&format!(
                             "        let i_dev{s} = mosfet_id(v_d{s1}, v_d{s}, state.device_{d}_kp, state.device_{d}_vt, state.device_{d}_lambda, DEVICE_{d}_SIGN);\n"
                         ));
                         code.push_str(&format!(
                             "        let i_dev{s1} = mosfet_ig(v_d{s1}, DEVICE_{d}_SIGN);\n"
                         ));
-                        code.push_str(&format!(
-                            "        let mos{d}_jac = mosfet_jacobian(v_d{s1}, v_d{s}, state.device_{d}_kp, state.device_{d}_vt, state.device_{d}_lambda, DEVICE_{d}_SIGN);\n"
-                        ));
+                        if mp.has_rd_rs() {
+                            code.push_str(&format!(
+                                "        let mos{d}_jac = mosfet_jacobian_with_rd_rs(v_d{s1}, v_d{s}, state.device_{d}_kp, state.device_{d}_vt, state.device_{d}_lambda, DEVICE_{d}_SIGN, DEVICE_{d}_RD, DEVICE_{d}_RS_PARAM);\n"
+                            ));
+                        } else {
+                            code.push_str(&format!(
+                                "        let mos{d}_jac = mosfet_jacobian(v_d{s1}, v_d{s}, state.device_{d}_kp, state.device_{d}_vt, state.device_{d}_lambda, DEVICE_{d}_SIGN);\n"
+                            ));
+                        }
                         code.push_str(&format!(
                             "        let jdev_{}_{} = mos{}_jac[1];\n", s, s, d    // dId/dVds
                         ));
@@ -2477,16 +2532,30 @@ impl RustEmitter {
                         let s = slot.start_idx;
                         let s1 = s + 1;
                         let d = dev_num;
-                        // All tube params from state (no polarity constant for tubes)
-                        code.push_str(&format!(
-                            "        let i_dev{s} = tube_ip(v_d{s}, v_d{s1}, state.device_{d}_mu, state.device_{d}_ex, state.device_{d}_kg1, state.device_{d}_kp, state.device_{d}_kvb, state.device_{d}_lambda);\n"
-                        ));
-                        code.push_str(&format!(
-                            "        let i_dev{s1} = tube_ig(v_d{s}, state.device_{d}_ig_max, state.device_{d}_vgk_onset);\n"
-                        ));
-                        code.push_str(&format!(
-                            "        let tube{d}_jac = tube_jacobian(v_d{s}, v_d{s1}, state.device_{d}_mu, state.device_{d}_ex, state.device_{d}_kg1, state.device_{d}_kp, state.device_{d}_kvb, state.device_{d}_ig_max, state.device_{d}_vgk_onset, state.device_{d}_lambda);\n"
-                        ));
+                        let tp = match &slot.params { DeviceParams::Tube(tp) => tp, _ => unreachable!() };
+                        if tp.has_rgi() {
+                            // RGI: solve for internal Vgk, evaluate at internal voltage
+                            code.push_str(&format!(
+                                "        let i_dev{s} = tube_ip_with_rgi(v_d{s}, v_d{s1}, state.device_{d}_mu, state.device_{d}_ex, state.device_{d}_kg1, state.device_{d}_kp, state.device_{d}_kvb, state.device_{d}_lambda, state.device_{d}_ig_max, state.device_{d}_vgk_onset, DEVICE_{d}_RGI);\n"
+                            ));
+                            code.push_str(&format!(
+                                "        let i_dev{s1} = tube_ig_with_rgi(v_d{s}, state.device_{d}_ig_max, state.device_{d}_vgk_onset, DEVICE_{d}_RGI);\n"
+                            ));
+                            code.push_str(&format!(
+                                "        let tube{d}_jac = tube_jacobian_with_rgi(v_d{s}, v_d{s1}, state.device_{d}_mu, state.device_{d}_ex, state.device_{d}_kg1, state.device_{d}_kp, state.device_{d}_kvb, state.device_{d}_ig_max, state.device_{d}_vgk_onset, state.device_{d}_lambda, DEVICE_{d}_RGI);\n"
+                            ));
+                        } else {
+                            // Standard tube (no RGI)
+                            code.push_str(&format!(
+                                "        let i_dev{s} = tube_ip(v_d{s}, v_d{s1}, state.device_{d}_mu, state.device_{d}_ex, state.device_{d}_kg1, state.device_{d}_kp, state.device_{d}_kvb, state.device_{d}_lambda);\n"
+                            ));
+                            code.push_str(&format!(
+                                "        let i_dev{s1} = tube_ig(v_d{s}, state.device_{d}_ig_max, state.device_{d}_vgk_onset);\n"
+                            ));
+                            code.push_str(&format!(
+                                "        let tube{d}_jac = tube_jacobian(v_d{s}, v_d{s1}, state.device_{d}_mu, state.device_{d}_ex, state.device_{d}_kg1, state.device_{d}_kp, state.device_{d}_kvb, state.device_{d}_ig_max, state.device_{d}_vgk_onset, state.device_{d}_lambda);\n"
+                            ));
+                        }
                         code.push_str(&format!(
                             "        let jdev_{}_{} = tube{}_jac[0];\n", s, s, d
                         ));
@@ -3708,28 +3777,117 @@ impl RustEmitter {
         for (dev_num, slot) in ir.device_slots.iter().enumerate() {
             let s = slot.start_idx;
             match (&slot.device_type, &slot.params) {
-                (DeviceType::Diode, DeviceParams::Diode(_dp)) => {
+                (DeviceType::Diode, DeviceParams::Diode(dp)) => {
+                    if dp.has_rs() {
+                        // Series resistance: use helper functions
+                        let bv_i = if dp.has_bv() { format!(" + diode_breakdown_current(v_nl[{s}], state.device_{dev_num}_n_vt, DEVICE_{dev_num}_BV, DEVICE_{dev_num}_IBV)") } else { String::new() };
+                        let bv_g = if dp.has_bv() { format!(" + diode_breakdown_conductance(v_nl[{s}], state.device_{dev_num}_n_vt, DEVICE_{dev_num}_BV, DEVICE_{dev_num}_IBV)") } else { String::new() };
+                        code.push_str(&format!(
+                            "{indent}{{ // Diode {dev_num} (RS={has_rs}, BV={has_bv})\n\
+                             {indent}    i_nl[{s}] = diode_current_with_rs(v_nl[{s}], state.device_{dev_num}_is, state.device_{dev_num}_n_vt, DEVICE_{dev_num}_RS){bv_i};\n\
+                             {indent}    j_dev[{s} * M + {s}] = diode_conductance_with_rs(v_nl[{s}], state.device_{dev_num}_is, state.device_{dev_num}_n_vt, DEVICE_{dev_num}_RS){bv_g};\n\
+                             {indent}}}\n",
+                            has_rs = dp.has_rs(), has_bv = dp.has_bv(),
+                        ));
+                    } else if dp.has_bv() {
+                        // Breakdown only (no RS): inline standard + breakdown
+                        code.push_str(&format!(
+                            "{indent}{{ // Diode {dev_num} (BV)\n\
+                             {indent}    let v = v_nl[{s}];\n\
+                             {indent}    let v_clamped = v.clamp(-40.0 * state.device_{dev_num}_n_vt, 40.0 * state.device_{dev_num}_n_vt);\n\
+                             {indent}    let e = (v_clamped / state.device_{dev_num}_n_vt).exp();\n\
+                             {indent}    i_nl[{s}] = state.device_{dev_num}_is * (e - 1.0) + diode_breakdown_current(v, state.device_{dev_num}_n_vt, DEVICE_{dev_num}_BV, DEVICE_{dev_num}_IBV);\n\
+                             {indent}    let g = state.device_{dev_num}_is * e / state.device_{dev_num}_n_vt;\n\
+                             {indent}    let g_base = if v > 40.0 * state.device_{dev_num}_n_vt {{ g + state.device_{dev_num}_is / state.device_{dev_num}_n_vt }} else {{ g }};\n\
+                             {indent}    j_dev[{s} * M + {s}] = g_base + diode_breakdown_conductance(v, state.device_{dev_num}_n_vt, DEVICE_{dev_num}_BV, DEVICE_{dev_num}_IBV);\n\
+                             {indent}}}\n"
+                        ));
+                    } else {
+                        // Standard diode (no RS, no BV)
+                        code.push_str(&format!(
+                            "{indent}{{ // Diode {dev_num}\n\
+                             {indent}    let v = v_nl[{s}];\n\
+                             {indent}    let v_clamped = v.clamp(-40.0 * state.device_{dev_num}_n_vt, 40.0 * state.device_{dev_num}_n_vt);\n\
+                             {indent}    let e = (v_clamped / state.device_{dev_num}_n_vt).exp();\n\
+                             {indent}    i_nl[{s}] = state.device_{dev_num}_is * (e - 1.0);\n\
+                             {indent}    let g = state.device_{dev_num}_is * e / state.device_{dev_num}_n_vt;\n\
+                             {indent}    j_dev[{s} * M + {s}] = if v > 40.0 * state.device_{dev_num}_n_vt {{ g + state.device_{dev_num}_is / state.device_{dev_num}_n_vt }} else {{ g }};\n\
+                             {indent}}}\n"
+                        ));
+                    }
+                }
+                (DeviceType::Bjt, DeviceParams::Bjt(_bp)) => {
+                    let s1 = s + 1;
                     code.push_str(&format!(
-                        "{indent}{{ // Diode {dev_num}\n\
-                         {indent}    let v = v_nl[{s}];\n\
-                         {indent}    let v_clamped = v.clamp(-40.0 * state.device_{dev_num}_n_vt, 40.0 * state.device_{dev_num}_n_vt);\n\
-                         {indent}    let e = (v_clamped / state.device_{dev_num}_n_vt).exp();\n\
-                         {indent}    i_nl[{s}] = state.device_{dev_num}_is * (e - 1.0);\n\
-                         {indent}    let g = state.device_{dev_num}_is * e / state.device_{dev_num}_n_vt;\n\
-                         {indent}    j_dev[{s} * M + {s}] = if v > 40.0 * state.device_{dev_num}_n_vt {{ g + state.device_{dev_num}_is / state.device_{dev_num}_n_vt }} else {{ g }};\n\
+                        "{indent}{{ // BJT {dev_num}\n\
+                         {indent}    let vbe = v_nl[{s}] * DEVICE_{dev_num}_SIGN;\n\
+                         {indent}    let vbc = v_nl[{s1}] * DEVICE_{dev_num}_SIGN;\n\
+                         {indent}    let ic = bjt_ic(vbe, vbc, state.device_{dev_num}_is, state.device_{dev_num}_vt, DEVICE_{dev_num}_NF, state.device_{dev_num}_br, DEVICE_{dev_num}_SIGN, DEVICE_{dev_num}_USE_GP, DEVICE_{dev_num}_VAF, DEVICE_{dev_num}_VAR, DEVICE_{dev_num}_IKF, DEVICE_{dev_num}_IKR);\n\
+                         {indent}    let ib = bjt_ib(vbe, vbc, state.device_{dev_num}_is, state.device_{dev_num}_vt, DEVICE_{dev_num}_NF, state.device_{dev_num}_bf, state.device_{dev_num}_br, DEVICE_{dev_num}_SIGN, DEVICE_{dev_num}_ISE, DEVICE_{dev_num}_NE);\n\
+                         {indent}    let jac = bjt_jacobian(vbe, vbc, state.device_{dev_num}_is, state.device_{dev_num}_vt, DEVICE_{dev_num}_NF, state.device_{dev_num}_bf, state.device_{dev_num}_br, DEVICE_{dev_num}_SIGN, DEVICE_{dev_num}_USE_GP, DEVICE_{dev_num}_VAF, DEVICE_{dev_num}_VAR, DEVICE_{dev_num}_IKF, DEVICE_{dev_num}_IKR, DEVICE_{dev_num}_ISE, DEVICE_{dev_num}_NE);\n\
+                         {indent}    i_nl[{s}] = ic * DEVICE_{dev_num}_SIGN;\n\
+                         {indent}    i_nl[{s1}] = ib * DEVICE_{dev_num}_SIGN;\n\
+                         {indent}    j_dev[{s} * M + {s}] = jac[0];\n\
+                         {indent}    j_dev[{s} * M + {s1}] = jac[1];\n\
+                         {indent}    j_dev[{s1} * M + {s}] = jac[2];\n\
+                         {indent}    j_dev[{s1} * M + {s1}] = jac[3];\n\
                          {indent}}}\n"
                     ));
                 }
-                (DeviceType::Bjt, DeviceParams::Bjt(bp)) => {
+                (DeviceType::Jfet, DeviceParams::Jfet(jp)) => {
                     let s1 = s + 1;
-                    if bp.is_gummel_poon() {
+                    let jac_fn = if jp.has_rd_rs() {
+                        format!("jfet_jacobian_with_rd_rs(vgs, vds, state.device_{dev_num}_idss, state.device_{dev_num}_vp, state.device_{dev_num}_lambda, sign, DEVICE_{dev_num}_RD, DEVICE_{dev_num}_RS_PARAM)")
+                    } else {
+                        format!("jfet_jacobian(vgs, vds, state.device_{dev_num}_idss, state.device_{dev_num}_vp, state.device_{dev_num}_lambda, sign)")
+                    };
+                    code.push_str(&format!(
+                        "{indent}{{ // JFET {dev_num}\n\
+                         {indent}    let vds = v_nl[{s}];\n\
+                         {indent}    let vgs = v_nl[{s1}];\n\
+                         {indent}    let sign = DEVICE_{dev_num}_SIGN;\n\
+                         {indent}    i_nl[{s}] = jfet_id(vgs, vds, state.device_{dev_num}_idss, state.device_{dev_num}_vp, state.device_{dev_num}_lambda, sign);\n\
+                         {indent}    i_nl[{s1}] = jfet_ig(vgs, sign);\n\
+                         {indent}    let jac = {jac_fn};\n\
+                         {indent}    j_dev[{s} * M + {s}] = jac[0];\n\
+                         {indent}    j_dev[{s} * M + {s1}] = jac[1];\n\
+                         {indent}    j_dev[{s1} * M + {s}] = jac[2];\n\
+                         {indent}    j_dev[{s1} * M + {s1}] = jac[3];\n\
+                         {indent}}}\n"
+                    ));
+                }
+                (DeviceType::Mosfet, DeviceParams::Mosfet(mp)) => {
+                    let s1 = s + 1;
+                    let jac_fn = if mp.has_rd_rs() {
+                        format!("mosfet_jacobian_with_rd_rs(vgs, vds, state.device_{dev_num}_kp, state.device_{dev_num}_vt, state.device_{dev_num}_lambda, sign, DEVICE_{dev_num}_RD, DEVICE_{dev_num}_RS_PARAM)")
+                    } else {
+                        format!("mosfet_jacobian(vgs, vds, state.device_{dev_num}_kp, state.device_{dev_num}_vt, state.device_{dev_num}_lambda, sign)")
+                    };
+                    code.push_str(&format!(
+                        "{indent}{{ // MOSFET {dev_num}\n\
+                         {indent}    let vds = v_nl[{s}];\n\
+                         {indent}    let vgs = v_nl[{s1}];\n\
+                         {indent}    let sign = DEVICE_{dev_num}_SIGN;\n\
+                         {indent}    i_nl[{s}] = mosfet_id(vgs, vds, state.device_{dev_num}_kp, state.device_{dev_num}_vt, state.device_{dev_num}_lambda, sign);\n\
+                         {indent}    i_nl[{s1}] = 0.0; // Insulated gate\n\
+                         {indent}    let jac = {jac_fn};\n\
+                         {indent}    j_dev[{s} * M + {s}] = jac[0];\n\
+                         {indent}    j_dev[{s} * M + {s1}] = jac[1];\n\
+                         {indent}    j_dev[{s1} * M + {s}] = jac[2];\n\
+                         {indent}    j_dev[{s1} * M + {s1}] = jac[3];\n\
+                         {indent}}}\n"
+                    ));
+                }
+                (DeviceType::Tube, DeviceParams::Tube(tp)) => {
+                    let s1 = s + 1;
+                    if tp.has_rgi() {
                         code.push_str(&format!(
-                            "{indent}{{ // BJT {dev_num} (Gummel-Poon)\n\
-                             {indent}    let vbe = v_nl[{s}] * DEVICE_{dev_num}_SIGN;\n\
-                             {indent}    let vbc = v_nl[{s1}] * DEVICE_{dev_num}_SIGN;\n\
-                             {indent}    let (ic, ib, jac) = bjt_gummel_poon_{dev_num}(vbe, vbc, state);\n\
-                             {indent}    i_nl[{s}] = ic * DEVICE_{dev_num}_SIGN;\n\
-                             {indent}    i_nl[{s1}] = ib * DEVICE_{dev_num}_SIGN;\n\
+                            "{indent}{{ // Tube {dev_num} (RGI)\n\
+                             {indent}    let vgk = v_nl[{s}];\n\
+                             {indent}    let vpk = v_nl[{s1}];\n\
+                             {indent}    i_nl[{s}] = tube_ip_with_rgi(vgk, vpk, state.device_{dev_num}_mu, state.device_{dev_num}_ex, state.device_{dev_num}_kg1, state.device_{dev_num}_kp, state.device_{dev_num}_kvb, state.device_{dev_num}_lambda, state.device_{dev_num}_ig_max, state.device_{dev_num}_vgk_onset, DEVICE_{dev_num}_RGI);\n\
+                             {indent}    i_nl[{s1}] = tube_ig_with_rgi(vgk, state.device_{dev_num}_ig_max, state.device_{dev_num}_vgk_onset, DEVICE_{dev_num}_RGI);\n\
+                             {indent}    let jac = tube_jacobian_with_rgi(vgk, vpk, state.device_{dev_num}_mu, state.device_{dev_num}_ex, state.device_{dev_num}_kg1, state.device_{dev_num}_kp, state.device_{dev_num}_kvb, state.device_{dev_num}_ig_max, state.device_{dev_num}_vgk_onset, state.device_{dev_num}_lambda, DEVICE_{dev_num}_RGI);\n\
                              {indent}    j_dev[{s} * M + {s}] = jac[0];\n\
                              {indent}    j_dev[{s} * M + {s1}] = jac[1];\n\
                              {indent}    j_dev[{s1} * M + {s}] = jac[2];\n\
@@ -3738,12 +3896,12 @@ impl RustEmitter {
                         ));
                     } else {
                         code.push_str(&format!(
-                            "{indent}{{ // BJT {dev_num} (Ebers-Moll)\n\
-                             {indent}    let vbe = v_nl[{s}] * DEVICE_{dev_num}_SIGN;\n\
-                             {indent}    let vbc = v_nl[{s1}] * DEVICE_{dev_num}_SIGN;\n\
-                             {indent}    let (ic, ib, jac) = bjt_ebers_moll(vbe, vbc, state.device_{dev_num}_is, state.device_{dev_num}_vt, state.device_{dev_num}_bf, state.device_{dev_num}_br);\n\
-                             {indent}    i_nl[{s}] = ic * DEVICE_{dev_num}_SIGN;\n\
-                             {indent}    i_nl[{s1}] = ib * DEVICE_{dev_num}_SIGN;\n\
+                            "{indent}{{ // Tube {dev_num}\n\
+                             {indent}    let vgk = v_nl[{s}];\n\
+                             {indent}    let vpk = v_nl[{s1}];\n\
+                             {indent}    i_nl[{s}] = tube_ip(vgk, vpk, state.device_{dev_num}_mu, state.device_{dev_num}_ex, state.device_{dev_num}_kg1, state.device_{dev_num}_kp, state.device_{dev_num}_kvb, state.device_{dev_num}_lambda);\n\
+                             {indent}    i_nl[{s1}] = tube_ig(vgk, state.device_{dev_num}_ig_max, state.device_{dev_num}_vgk_onset);\n\
+                             {indent}    let jac = tube_jacobian(vgk, vpk, state.device_{dev_num}_mu, state.device_{dev_num}_ex, state.device_{dev_num}_kg1, state.device_{dev_num}_kp, state.device_{dev_num}_kvb, state.device_{dev_num}_ig_max, state.device_{dev_num}_vgk_onset, state.device_{dev_num}_lambda);\n\
                              {indent}    j_dev[{s} * M + {s}] = jac[0];\n\
                              {indent}    j_dev[{s} * M + {s1}] = jac[1];\n\
                              {indent}    j_dev[{s1} * M + {s}] = jac[2];\n\
@@ -3751,56 +3909,6 @@ impl RustEmitter {
                              {indent}}}\n"
                         ));
                     }
-                }
-                (DeviceType::Jfet, DeviceParams::Jfet(_jp)) => {
-                    let s1 = s + 1;
-                    code.push_str(&format!(
-                        "{indent}{{ // JFET {dev_num}\n\
-                         {indent}    let vds = v_nl[{s}];\n\
-                         {indent}    let vgs = v_nl[{s1}];\n\
-                         {indent}    let sign = DEVICE_{dev_num}_SIGN;\n\
-                         {indent}    i_nl[{s}] = jfet_id(vgs, vds, state.device_{dev_num}_idss, state.device_{dev_num}_vp, state.device_{dev_num}_lambda, sign);\n\
-                         {indent}    i_nl[{s1}] = jfet_ig(vgs, sign);\n\
-                         {indent}    let jac = jfet_jacobian(vgs, vds, state.device_{dev_num}_idss, state.device_{dev_num}_vp, state.device_{dev_num}_lambda, sign);\n\
-                         {indent}    j_dev[{s} * M + {s}] = jac[0];\n\
-                         {indent}    j_dev[{s} * M + {s1}] = jac[1];\n\
-                         {indent}    j_dev[{s1} * M + {s}] = jac[2];\n\
-                         {indent}    j_dev[{s1} * M + {s1}] = jac[3];\n\
-                         {indent}}}\n"
-                    ));
-                }
-                (DeviceType::Mosfet, DeviceParams::Mosfet(_mp)) => {
-                    let s1 = s + 1;
-                    code.push_str(&format!(
-                        "{indent}{{ // MOSFET {dev_num}\n\
-                         {indent}    let vds = v_nl[{s}];\n\
-                         {indent}    let vgs = v_nl[{s1}];\n\
-                         {indent}    let sign = DEVICE_{dev_num}_SIGN;\n\
-                         {indent}    i_nl[{s}] = mosfet_id(vgs, vds, state.device_{dev_num}_kp, state.device_{dev_num}_vt, state.device_{dev_num}_lambda, sign);\n\
-                         {indent}    i_nl[{s1}] = 0.0; // Insulated gate\n\
-                         {indent}    let jac = mosfet_jacobian(vgs, vds, state.device_{dev_num}_kp, state.device_{dev_num}_vt, state.device_{dev_num}_lambda, sign);\n\
-                         {indent}    j_dev[{s} * M + {s}] = jac[0];\n\
-                         {indent}    j_dev[{s} * M + {s1}] = jac[1];\n\
-                         {indent}    j_dev[{s1} * M + {s}] = jac[2];\n\
-                         {indent}    j_dev[{s1} * M + {s1}] = jac[3];\n\
-                         {indent}}}\n"
-                    ));
-                }
-                (DeviceType::Tube, DeviceParams::Tube(_tp)) => {
-                    let s1 = s + 1;
-                    code.push_str(&format!(
-                        "{indent}{{ // Tube {dev_num}\n\
-                         {indent}    let vgk = v_nl[{s}];\n\
-                         {indent}    let vpk = v_nl[{s1}];\n\
-                         {indent}    i_nl[{s}] = tube_ip(vgk, vpk, state.device_{dev_num}_mu, state.device_{dev_num}_ex, state.device_{dev_num}_kg1, state.device_{dev_num}_kp, state.device_{dev_num}_kvb, state.device_{dev_num}_lambda);\n\
-                         {indent}    i_nl[{s1}] = tube_ig(vgk, state.device_{dev_num}_ig_max, state.device_{dev_num}_vgk_onset);\n\
-                         {indent}    let jac = tube_jacobian(vgk, vpk, state.device_{dev_num}_mu, state.device_{dev_num}_ex, state.device_{dev_num}_kg1, state.device_{dev_num}_kp, state.device_{dev_num}_kvb, state.device_{dev_num}_ig_max, state.device_{dev_num}_vgk_onset, state.device_{dev_num}_lambda);\n\
-                         {indent}    j_dev[{s} * M + {s}] = jac[0];\n\
-                         {indent}    j_dev[{s} * M + {s1}] = jac[1];\n\
-                         {indent}    j_dev[{s1} * M + {s}] = jac[2];\n\
-                         {indent}    j_dev[{s1} * M + {s1}] = jac[3];\n\
-                         {indent}}}\n"
-                    ));
                 }
                 _ => {} // Mismatched type/params — skip
             }
@@ -3814,35 +3922,37 @@ impl RustEmitter {
         for (dev_num, slot) in ir.device_slots.iter().enumerate() {
             let s = slot.start_idx;
             match (&slot.device_type, &slot.params) {
-                (DeviceType::Diode, DeviceParams::Diode(_dp)) => {
-                    code.push_str(&format!(
-                        "{indent}{{ let v = v_nl_final[{s}];\n\
-                         {indent}  let v_clamped = v.clamp(-40.0 * state.device_{dev_num}_n_vt, 40.0 * state.device_{dev_num}_n_vt);\n\
-                         {indent}  i_nl[{s}] = state.device_{dev_num}_is * ((v_clamped / state.device_{dev_num}_n_vt).exp() - 1.0);\n\
-                         {indent}}}\n"
-                    ));
-                }
-                (DeviceType::Bjt, DeviceParams::Bjt(bp)) => {
-                    let s1 = s + 1;
-                    if bp.is_gummel_poon() {
+                (DeviceType::Diode, DeviceParams::Diode(dp)) => {
+                    if dp.has_rs() {
+                        let bv_i = if dp.has_bv() { format!(" + diode_breakdown_current(v_nl_final[{s}], state.device_{dev_num}_n_vt, DEVICE_{dev_num}_BV, DEVICE_{dev_num}_IBV)") } else { String::new() };
                         code.push_str(&format!(
-                            "{indent}{{ let vbe = v_nl_final[{s}] * DEVICE_{dev_num}_SIGN;\n\
-                             {indent}  let vbc = v_nl_final[{s1}] * DEVICE_{dev_num}_SIGN;\n\
-                             {indent}  let (ic, ib, _) = bjt_gummel_poon_{dev_num}(vbe, vbc, state);\n\
-                             {indent}  i_nl[{s}] = ic * DEVICE_{dev_num}_SIGN;\n\
-                             {indent}  i_nl[{s1}] = ib * DEVICE_{dev_num}_SIGN;\n\
+                            "{indent}i_nl[{s}] = diode_current_with_rs(v_nl_final[{s}], state.device_{dev_num}_is, state.device_{dev_num}_n_vt, DEVICE_{dev_num}_RS){bv_i};\n"
+                        ));
+                    } else if dp.has_bv() {
+                        code.push_str(&format!(
+                            "{indent}{{ let v = v_nl_final[{s}];\n\
+                             {indent}  let v_clamped = v.clamp(-40.0 * state.device_{dev_num}_n_vt, 40.0 * state.device_{dev_num}_n_vt);\n\
+                             {indent}  i_nl[{s}] = state.device_{dev_num}_is * ((v_clamped / state.device_{dev_num}_n_vt).exp() - 1.0) + diode_breakdown_current(v, state.device_{dev_num}_n_vt, DEVICE_{dev_num}_BV, DEVICE_{dev_num}_IBV);\n\
                              {indent}}}\n"
                         ));
                     } else {
                         code.push_str(&format!(
-                            "{indent}{{ let vbe = v_nl_final[{s}] * DEVICE_{dev_num}_SIGN;\n\
-                             {indent}  let vbc = v_nl_final[{s1}] * DEVICE_{dev_num}_SIGN;\n\
-                             {indent}  let (ic, ib, _) = bjt_ebers_moll(vbe, vbc, state.device_{dev_num}_is, state.device_{dev_num}_vt, state.device_{dev_num}_bf, state.device_{dev_num}_br);\n\
-                             {indent}  i_nl[{s}] = ic * DEVICE_{dev_num}_SIGN;\n\
-                             {indent}  i_nl[{s1}] = ib * DEVICE_{dev_num}_SIGN;\n\
+                            "{indent}{{ let v = v_nl_final[{s}];\n\
+                             {indent}  let v_clamped = v.clamp(-40.0 * state.device_{dev_num}_n_vt, 40.0 * state.device_{dev_num}_n_vt);\n\
+                             {indent}  i_nl[{s}] = state.device_{dev_num}_is * ((v_clamped / state.device_{dev_num}_n_vt).exp() - 1.0);\n\
                              {indent}}}\n"
                         ));
                     }
+                }
+                (DeviceType::Bjt, DeviceParams::Bjt(_bp)) => {
+                    let s1 = s + 1;
+                    code.push_str(&format!(
+                        "{indent}{{ let vbe = v_nl_final[{s}] * DEVICE_{dev_num}_SIGN;\n\
+                         {indent}  let vbc = v_nl_final[{s1}] * DEVICE_{dev_num}_SIGN;\n\
+                         {indent}  i_nl[{s}] = bjt_ic(vbe, vbc, state.device_{dev_num}_is, state.device_{dev_num}_vt, DEVICE_{dev_num}_NF, state.device_{dev_num}_br, DEVICE_{dev_num}_SIGN, DEVICE_{dev_num}_USE_GP, DEVICE_{dev_num}_VAF, DEVICE_{dev_num}_VAR, DEVICE_{dev_num}_IKF, DEVICE_{dev_num}_IKR);\n\
+                         {indent}  i_nl[{s1}] = bjt_ib(vbe, vbc, state.device_{dev_num}_is, state.device_{dev_num}_vt, DEVICE_{dev_num}_NF, state.device_{dev_num}_bf, state.device_{dev_num}_br, DEVICE_{dev_num}_SIGN, DEVICE_{dev_num}_ISE, DEVICE_{dev_num}_NE);\n\
+                         {indent}}}\n"
+                    ));
                 }
                 (DeviceType::Jfet, DeviceParams::Jfet(_jp)) => {
                     let s1 = s + 1;
@@ -3858,12 +3968,19 @@ impl RustEmitter {
                          {indent}i_nl[{s1}] = 0.0;\n"
                     ));
                 }
-                (DeviceType::Tube, DeviceParams::Tube(_tp)) => {
+                (DeviceType::Tube, DeviceParams::Tube(tp)) => {
                     let s1 = s + 1;
-                    code.push_str(&format!(
-                        "{indent}i_nl[{s}] = tube_ip(v_nl_final[{s}], v_nl_final[{s1}], state.device_{dev_num}_mu, state.device_{dev_num}_ex, state.device_{dev_num}_kg1, state.device_{dev_num}_kp, state.device_{dev_num}_kvb, state.device_{dev_num}_lambda);\n\
-                         {indent}i_nl[{s1}] = tube_ig(v_nl_final[{s}], state.device_{dev_num}_ig_max, state.device_{dev_num}_vgk_onset);\n"
-                    ));
+                    if tp.has_rgi() {
+                        code.push_str(&format!(
+                            "{indent}i_nl[{s}] = tube_ip_with_rgi(v_nl_final[{s}], v_nl_final[{s1}], state.device_{dev_num}_mu, state.device_{dev_num}_ex, state.device_{dev_num}_kg1, state.device_{dev_num}_kp, state.device_{dev_num}_kvb, state.device_{dev_num}_lambda, state.device_{dev_num}_ig_max, state.device_{dev_num}_vgk_onset, DEVICE_{dev_num}_RGI);\n\
+                             {indent}i_nl[{s1}] = tube_ig_with_rgi(v_nl_final[{s}], state.device_{dev_num}_ig_max, state.device_{dev_num}_vgk_onset, DEVICE_{dev_num}_RGI);\n"
+                        ));
+                    } else {
+                        code.push_str(&format!(
+                            "{indent}i_nl[{s}] = tube_ip(v_nl_final[{s}], v_nl_final[{s1}], state.device_{dev_num}_mu, state.device_{dev_num}_ex, state.device_{dev_num}_kg1, state.device_{dev_num}_kp, state.device_{dev_num}_kvb, state.device_{dev_num}_lambda);\n\
+                             {indent}i_nl[{s1}] = tube_ig(v_nl_final[{s}], state.device_{dev_num}_ig_max, state.device_{dev_num}_vgk_onset);\n"
+                        ));
+                    }
                 }
                 _ => {}
             }

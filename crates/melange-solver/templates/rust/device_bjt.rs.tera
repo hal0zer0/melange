@@ -9,8 +9,9 @@ fn safe_exp(x: f64) -> f64 { x.clamp(-40.0, 40.0).exp() }
 ///
 /// Accounts for Early effect (VAF/VAR) and high-level injection (IKF).
 /// When use_gp=false or all GP params are infinite, returns 1.0 (Ebers-Moll).
+/// nf: forward emission coefficient (uses NF*VT for forward exponential).
 #[inline(always)]
-fn bjt_qb(vbe: f64, vbc: f64, is: f64, vt: f64, sign: f64,
+fn bjt_qb(vbe: f64, vbc: f64, is: f64, vt: f64, nf: f64, sign: f64,
            use_gp: bool, vaf: f64, var: f64, ikf: f64, ikr: f64) -> f64 {
     if !use_gp { return 1.0; }
     let vbe_eff = sign * vbe;
@@ -21,8 +22,9 @@ fn bjt_qb(vbe: f64, vbc: f64, is: f64, vt: f64, sign: f64,
     if q1_denom.abs() < 1e-30 { return 1.0; }
     let q1 = 1.0 / q1_denom;
 
-    // High-level injection: q2 = Is*exp(Vbe/Vt)/IKF + Is*exp(Vbc/Vt)/IKR
-    let exp_be = safe_exp(vbe_eff / vt);
+    // High-level injection: q2 = Is*exp(Vbe/(NF*Vt))/IKF + Is*exp(Vbc/Vt)/IKR
+    let nf_vt = nf * vt;
+    let exp_be = safe_exp(vbe_eff / nf_vt);
     let exp_bc = safe_exp(vbc_eff / vt);
     let q2 = is * exp_be / ikf + is * exp_bc / ikr;
 
@@ -31,56 +33,80 @@ fn bjt_qb(vbe: f64, vbc: f64, is: f64, vt: f64, sign: f64,
 
 /// BJT collector current Ic(Vbe, Vbc)
 /// sign: +1.0 for NPN, -1.0 for PNP (applied to voltages and output current)
+/// nf: forward emission coefficient. Transport current uses exp(Vbe/(NF*VT)).
 /// When use_gp=true, divides transport current by qb (Gummel-Poon).
 #[inline(always)]
-fn bjt_ic(vbe: f64, vbc: f64, is: f64, vt: f64, beta_r: f64, sign: f64,
+fn bjt_ic(vbe: f64, vbc: f64, is: f64, vt: f64, nf: f64, beta_r: f64, sign: f64,
           use_gp: bool, vaf: f64, var: f64, ikf: f64, ikr: f64) -> f64 {
     let vbe_eff = sign * vbe;
     let vbc_eff = sign * vbc;
-    let exp_be = safe_exp(vbe_eff / vt);
+    let nf_vt = nf * vt;
+    let exp_be = safe_exp(vbe_eff / nf_vt);
     let exp_bc = safe_exp(vbc_eff / vt);
     let i_cc = is * (exp_be - exp_bc);
-    let qb = bjt_qb(vbe, vbc, is, vt, sign, use_gp, vaf, var, ikf, ikr);
+    let qb = bjt_qb(vbe, vbc, is, vt, nf, sign, use_gp, vaf, var, ikf, ikr);
     sign * (i_cc / qb - is / beta_r * (exp_bc - 1.0))
 }
 
 /// BJT base current Ib(Vbe, Vbc)
 /// sign: +1.0 for NPN, -1.0 for PNP
+/// nf: forward emission coefficient for ideal base current.
+/// ise, ne: B-E leakage saturation current and emission coefficient.
 /// Base current is NOT modified by Gummel-Poon in standard formulation.
 #[inline(always)]
-fn bjt_ib(vbe: f64, vbc: f64, is: f64, vt: f64, beta_f: f64, beta_r: f64, sign: f64) -> f64 {
+fn bjt_ib(vbe: f64, vbc: f64, is: f64, vt: f64, nf: f64,
+          beta_f: f64, beta_r: f64, sign: f64,
+          ise: f64, ne: f64) -> f64 {
     let vbe_eff = sign * vbe;
     let vbc_eff = sign * vbc;
-    let exp_be = safe_exp(vbe_eff / vt);
+    let nf_vt = nf * vt;
+    let exp_be = safe_exp(vbe_eff / nf_vt);
     let exp_bc = safe_exp(vbc_eff / vt);
-    sign * (is / beta_f * (exp_be - 1.0) + is / beta_r * (exp_bc - 1.0))
+    let mut ib = is / beta_f * (exp_be - 1.0) + is / beta_r * (exp_bc - 1.0);
+    // B-E leakage current: ISE * (exp(Vbe/(NE*VT)) - 1)
+    if ise > 0.0 {
+        let ne_vt = ne * vt;
+        let exp_be_leak = safe_exp(vbe_eff / ne_vt);
+        ib += ise * (exp_be_leak - 1.0);
+    }
+    sign * ib
 }
 
 /// BJT Jacobian: [dIc/dVbe, dIc/dVbc, dIb/dVbe, dIb/dVbc]
 /// sign: +1.0 for NPN, -1.0 for PNP (s*s=1, so Jacobian entries are polarity-invariant)
+/// nf: forward emission coefficient. ise, ne: leakage current params.
 /// When use_gp=true, uses quotient rule for d(Icc/qb)/dV (Gummel-Poon).
 #[inline(always)]
-fn bjt_jacobian(vbe: f64, vbc: f64, is: f64, vt: f64, beta_f: f64, beta_r: f64, sign: f64,
-                use_gp: bool, vaf: f64, var: f64, ikf: f64, ikr: f64) -> [f64; 4] {
+fn bjt_jacobian(vbe: f64, vbc: f64, is: f64, vt: f64, nf: f64,
+                beta_f: f64, beta_r: f64, sign: f64,
+                use_gp: bool, vaf: f64, var: f64, ikf: f64, ikr: f64,
+                ise: f64, ne: f64) -> [f64; 4] {
     let vbe_eff = sign * vbe;
     let vbc_eff = sign * vbc;
-    let exp_be = safe_exp(vbe_eff / vt);
+    let nf_vt = nf * vt;
+    let exp_be = safe_exp(vbe_eff / nf_vt);
     let exp_bc = safe_exp(vbc_eff / vt);
 
     // Base current Jacobian (unchanged by GP)
-    let dib_dvbe = (is / (beta_f * vt)) * exp_be;
+    let mut dib_dvbe = (is / (beta_f * nf_vt)) * exp_be;
     let dib_dvbc = (is / (beta_r * vt)) * exp_bc;
+    // ISE leakage contribution to dIb/dVbe
+    if ise > 0.0 {
+        let ne_vt = ne * vt;
+        let exp_be_leak = safe_exp(vbe_eff / ne_vt);
+        dib_dvbe += (ise / ne_vt) * exp_be_leak;
+    }
 
     if !use_gp {
         // Ebers-Moll: simple derivatives
-        let dic_dvbe = is / vt * exp_be;
+        let dic_dvbe = is / nf_vt * exp_be;
         let dic_dvbc = -(is / vt) * exp_bc - (is / (beta_r * vt)) * exp_bc;
         return [dic_dvbe, dic_dvbc, dib_dvbe, dib_dvbc];
     }
 
     // Gummel-Poon: quotient rule for d(Icc/qb)/dV
     let icc = is * (exp_be - exp_bc);
-    let dicc_dvbe = is / vt * exp_be;
+    let dicc_dvbe = is / nf_vt * exp_be;
     let dicc_dvbc = -is / vt * exp_bc;
 
     // q1 and derivatives
@@ -92,9 +118,9 @@ fn bjt_jacobian(vbe: f64, vbc: f64, is: f64, vt: f64, beta_f: f64, beta_r: f64, 
         (q1, q1 * q1 / var, q1 * q1 / vaf)
     };
 
-    // q2 and derivatives: q2 = Is*exp(Vbe/Vt)/IKF + Is*exp(Vbc/Vt)/IKR
+    // q2 and derivatives: q2 = Is*exp(Vbe/(NF*Vt))/IKF + Is*exp(Vbc/Vt)/IKR
     let q2 = is * exp_be / ikf + is * exp_bc / ikr;
-    let dq2_dvbe = is / (vt * ikf) * exp_be;
+    let dq2_dvbe = is / (nf_vt * ikf) * exp_be;
     let dq2_dvbc = is / (vt * ikr) * exp_bc;
 
     // Discriminant D = sqrt(1 + 4*q2)

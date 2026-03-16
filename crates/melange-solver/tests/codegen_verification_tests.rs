@@ -643,20 +643,20 @@ fn test_codegen_bjt_nr_solver_generates_device_calls() {
     assert_eq!(kernel.m, 2, "Expected m=2 for single BJT circuit");
 
     // BJT NR solver should call bjt_ic and bjt_ib with state fields for IS, VT, BETA_R, BETA_F
-    // but SIGN, USE_GP, VAF, VAR, IKF remain as const
+    // but SIGN, USE_GP, NF, VAF, VAR, IKF, ISE, NE remain as const
     assert!(
-        code.contains("bjt_ic(v_d0, v_d1, state.device_0_is, state.device_0_vt, state.device_0_br, DEVICE_0_SIGN, DEVICE_0_USE_GP, DEVICE_0_VAF, DEVICE_0_VAR, DEVICE_0_IKF, DEVICE_0_IKR)"),
-        "NR solver should call bjt_ic with state fields for IS/VT/BR and const for SIGN/GP params."
+        code.contains("bjt_ic(v_d0, v_d1, state.device_0_is, state.device_0_vt, DEVICE_0_NF, state.device_0_br, DEVICE_0_SIGN, DEVICE_0_USE_GP, DEVICE_0_VAF, DEVICE_0_VAR, DEVICE_0_IKF, DEVICE_0_IKR)"),
+        "NR solver should call bjt_ic with state fields for IS/VT/BR and const for SIGN/NF/GP params."
     );
     assert!(
-        code.contains("bjt_ib(v_d0, v_d1, state.device_0_is, state.device_0_vt, state.device_0_bf, state.device_0_br, DEVICE_0_SIGN)"),
-        "NR solver should call bjt_ib with state fields for IS/VT/BF/BR and const for SIGN."
+        code.contains("bjt_ib(v_d0, v_d1, state.device_0_is, state.device_0_vt, DEVICE_0_NF, state.device_0_bf, state.device_0_br, DEVICE_0_SIGN, DEVICE_0_ISE, DEVICE_0_NE)"),
+        "NR solver should call bjt_ib with state fields for IS/VT/BF/BR and const for SIGN/NF/ISE/NE."
     );
 
-    // Should call bjt_jacobian with state fields for IS/VT/BF/BR and const for SIGN/GP params
+    // Should call bjt_jacobian with state fields for IS/VT/BF/BR and const for SIGN/NF/GP/ISE/NE params
     assert!(
-        code.contains("bjt_jacobian(v_d0, v_d1, state.device_0_is, state.device_0_vt, state.device_0_bf, state.device_0_br, DEVICE_0_SIGN, DEVICE_0_USE_GP, DEVICE_0_VAF, DEVICE_0_VAR, DEVICE_0_IKF, DEVICE_0_IKR)"),
-        "NR solver should call bjt_jacobian with state fields for IS/VT/BF/BR and const for SIGN/GP params."
+        code.contains("bjt_jacobian(v_d0, v_d1, state.device_0_is, state.device_0_vt, DEVICE_0_NF, state.device_0_bf, state.device_0_br, DEVICE_0_SIGN, DEVICE_0_USE_GP, DEVICE_0_VAF, DEVICE_0_VAR, DEVICE_0_IKF, DEVICE_0_IKR, DEVICE_0_ISE, DEVICE_0_NE)"),
+        "NR solver should call bjt_jacobian with state fields for IS/VT/BF/BR and const for SIGN/NF/GP/ISE/NE params."
     );
 
     // Should assign all 4 Jacobian entries from the bjt_jacobian result
@@ -754,10 +754,10 @@ fn test_codegen_mixed_diode_bjt_device_map() {
     assert!(code.contains("diode_current(v_d0, state.device_0_is, state.device_0_n_vt)"), "Diode current at index 0");
     assert!(code.contains("jdev_0_0 = diode_conductance(v_d0, state.device_0_is, state.device_0_n_vt)"), "Diode jdev at index 0");
 
-    // BJT at indices 1,2 (device 1) with state fields for IS/VT/BF/BR, const for SIGN/GP
-    assert!(code.contains("bjt_ic(v_d1, v_d2, state.device_1_is, state.device_1_vt, state.device_1_br, DEVICE_1_SIGN, DEVICE_1_USE_GP, DEVICE_1_VAF, DEVICE_1_VAR, DEVICE_1_IKF, DEVICE_1_IKR)"), "BJT Ic at indices 1,2");
-    assert!(code.contains("bjt_ib(v_d1, v_d2, state.device_1_is, state.device_1_vt, state.device_1_bf, state.device_1_br, DEVICE_1_SIGN)"), "BJT Ib at indices 1,2");
-    assert!(code.contains("bjt_jacobian(v_d1, v_d2, state.device_1_is, state.device_1_vt, state.device_1_bf, state.device_1_br, DEVICE_1_SIGN, DEVICE_1_USE_GP, DEVICE_1_VAF, DEVICE_1_VAR, DEVICE_1_IKF, DEVICE_1_IKR)"), "BJT Jacobian at indices 1,2");
+    // BJT at indices 1,2 (device 1) with state fields for IS/VT/BF/BR, const for SIGN/NF/GP/ISE/NE
+    assert!(code.contains("bjt_ic(v_d1, v_d2, state.device_1_is, state.device_1_vt, DEVICE_1_NF, state.device_1_br, DEVICE_1_SIGN, DEVICE_1_USE_GP, DEVICE_1_VAF, DEVICE_1_VAR, DEVICE_1_IKF, DEVICE_1_IKR)"), "BJT Ic at indices 1,2");
+    assert!(code.contains("bjt_ib(v_d1, v_d2, state.device_1_is, state.device_1_vt, DEVICE_1_NF, state.device_1_bf, state.device_1_br, DEVICE_1_SIGN, DEVICE_1_ISE, DEVICE_1_NE)"), "BJT Ib at indices 1,2");
+    assert!(code.contains("bjt_jacobian(v_d1, v_d2, state.device_1_is, state.device_1_vt, DEVICE_1_NF, state.device_1_bf, state.device_1_br, DEVICE_1_SIGN, DEVICE_1_USE_GP, DEVICE_1_VAF, DEVICE_1_VAR, DEVICE_1_IKF, DEVICE_1_IKR, DEVICE_1_ISE, DEVICE_1_NE)"), "BJT Jacobian at indices 1,2");
 
     // All 3 residuals
     assert!(code.contains("let f0 = i_nl[0] - i_dev0"), "Residual f0");
@@ -3558,6 +3558,7 @@ fn test_ir_bjt_params_gp_serde_roundtrip() {
         is: 1e-14, vt: 0.02585, beta_f: 200.0, beta_r: 3.0,
         is_pnp: false, vaf: 100.0, var: f64::INFINITY, ikf: 0.3, ikr: f64::INFINITY,
         cje: 0.0, cjc: 0.0,
+        nf: 1.0, ise: 0.0, ne: 1.5,
     };
 
     let json = serde_json::to_string(&bp).unwrap();

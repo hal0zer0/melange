@@ -15,3 +15,59 @@ fn diode_conductance(v_d: f64, is: f64, n_vt: f64) -> f64 {
     (is / n_vt) * (v_clamped / n_vt).exp()
 }
 
+/// Diode with series resistance: solve V_j + I(V_j)*RS = V_d for V_j,
+/// then return I(V_j). Uses NR with step limiting.
+#[inline(always)]
+fn diode_current_with_rs(v_d: f64, is: f64, n_vt: f64, rs: f64) -> f64 {
+    let max_step = 4.0 * n_vt;
+    let mut v_j = if v_d > 0.0 { v_d.min(0.7) } else { v_d };
+    for _ in 0..15 {
+        let id = diode_current(v_j, is, n_vt);
+        let gd = diode_conductance(v_j, is, n_vt);
+        let f = v_j + id * rs - v_d;
+        let fp = 1.0 + gd * rs;
+        let mut delta = f / fp;
+        delta = delta.clamp(-max_step, max_step);
+        v_j -= delta;
+        if delta.abs() < 1e-10 { break; }
+    }
+    diode_current(v_j, is, n_vt)
+}
+
+/// Diode conductance with series resistance: g_total = g_j / (1 + g_j * rs)
+/// where g_j is evaluated at the NR-solved junction voltage.
+#[inline(always)]
+fn diode_conductance_with_rs(v_d: f64, is: f64, n_vt: f64, rs: f64) -> f64 {
+    let max_step = 4.0 * n_vt;
+    let mut v_j = if v_d > 0.0 { v_d.min(0.7) } else { v_d };
+    for _ in 0..15 {
+        let id = diode_current(v_j, is, n_vt);
+        let gd = diode_conductance(v_j, is, n_vt);
+        let f = v_j + id * rs - v_d;
+        let fp = 1.0 + gd * rs;
+        let mut delta = f / fp;
+        delta = delta.clamp(-max_step, max_step);
+        v_j -= delta;
+        if delta.abs() < 1e-10 { break; }
+    }
+    let g_j = diode_conductance(v_j, is, n_vt);
+    g_j / (1.0 + g_j * rs)
+}
+
+/// Reverse breakdown current: I_bv = -IBV * exp(-(v_d + BV) / n_vt)
+/// Added to diode current when v_d < -BV.
+#[inline(always)]
+fn diode_breakdown_current(v_d: f64, n_vt: f64, bv: f64, ibv: f64) -> f64 {
+    if v_d >= -bv { return 0.0; }
+    let x = (-(v_d + bv) / n_vt).clamp(-40.0, 40.0);
+    -ibv * x.exp()
+}
+
+/// Reverse breakdown conductance: dI_bv/dv = IBV/n_vt * exp(-(v_d + BV) / n_vt)
+#[inline(always)]
+fn diode_breakdown_conductance(v_d: f64, n_vt: f64, bv: f64, ibv: f64) -> f64 {
+    if v_d >= -bv { return 0.0; }
+    let x = (-(v_d + bv) / n_vt).clamp(-40.0, 40.0);
+    ibv / n_vt * x.exp()
+}
+

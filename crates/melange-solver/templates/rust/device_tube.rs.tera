@@ -31,6 +31,13 @@ fn tube_ig(vgk: f64, ig_max: f64, vgk_onset: f64) -> f64 {
     ig_max * x * x.sqrt()
 }
 
+/// Grid current derivative dIg/dVgk.
+#[inline(always)]
+fn tube_ig_deriv(vgk: f64, ig_max: f64, vgk_onset: f64) -> f64 {
+    if vgk <= 0.0 { 0.0 }
+    else { ig_max * 1.5 * (vgk / vgk_onset).sqrt() / vgk_onset }
+}
+
 /// Triode Jacobian: [dIp/dVgk, dIp/dVpk, dIg/dVgk, dIg/dVpk]
 ///
 /// dIg/dVpk = 0 (grid current depends only on Vgk).
@@ -39,8 +46,7 @@ fn tube_ig(vgk: f64, ig_max: f64, vgk_onset: f64) -> f64 {
 fn tube_jacobian(vgk: f64, vpk: f64, mu: f64, ex: f64, kg1: f64, kp: f64, kvb: f64,
                  ig_max: f64, vgk_onset: f64, lambda: f64) -> [f64; 4] {
     // Grid current Jacobian
-    let dig_dvgk = if vgk <= 0.0 { 0.0 }
-                   else { ig_max * 1.5 * (vgk / vgk_onset).sqrt() / vgk_onset };
+    let dig_dvgk = tube_ig_deriv(vgk, ig_max, vgk_onset);
 
     // Plate current Jacobian
     if vpk <= 0.0 { return [0.0, 0.0, dig_dvgk, 0.0]; }
@@ -69,4 +75,55 @@ fn tube_jacobian(vgk: f64, vpk: f64, mu: f64, ex: f64, kg1: f64, kp: f64, kvb: f
     let dip_koren_dvpk = dip_de1 * de1_dvpk;
 
     [dip_koren_dvgk * lambda_factor, dip_koren_dvpk * lambda_factor + ip_koren * lambda, dig_dvgk, 0.0]
+}
+
+/// Solve for internal Vgk when RGI > 0: Vgk_int = Vgk_ext - Ig(Vgk_int) * RGI.
+/// Uses 1D Newton-Raphson with step limiting.
+#[inline(always)]
+fn tube_solve_vgk_int(vgk_ext: f64, ig_max: f64, vgk_onset: f64, rgi: f64) -> f64 {
+    let mut vgk_int = vgk_ext;
+    for _ in 0..15 {
+        let ig = tube_ig(vgk_int, ig_max, vgk_onset);
+        let dig = tube_ig_deriv(vgk_int, ig_max, vgk_onset);
+        // f(vgk_int) = vgk_int + ig * rgi - vgk_ext
+        let f = vgk_int + ig * rgi - vgk_ext;
+        let fp = 1.0 + dig * rgi;
+        let mut delta = f / fp;
+        delta = delta.clamp(-1.0, 1.0);
+        vgk_int -= delta;
+        if delta.abs() < 1e-10 { break; }
+    }
+    vgk_int
+}
+
+/// Plate current with RGI: evaluate at internal Vgk.
+#[inline(always)]
+fn tube_ip_with_rgi(vgk: f64, vpk: f64, mu: f64, ex: f64, kg1: f64, kp: f64, kvb: f64,
+                    lambda: f64, ig_max: f64, vgk_onset: f64, rgi: f64) -> f64 {
+    let vgk_int = tube_solve_vgk_int(vgk, ig_max, vgk_onset, rgi);
+    tube_ip(vgk_int, vpk, mu, ex, kg1, kp, kvb, lambda)
+}
+
+/// Grid current with RGI: evaluate at internal Vgk.
+#[inline(always)]
+fn tube_ig_with_rgi(vgk: f64, ig_max: f64, vgk_onset: f64, rgi: f64) -> f64 {
+    let vgk_int = tube_solve_vgk_int(vgk, ig_max, vgk_onset, rgi);
+    tube_ig(vgk_int, ig_max, vgk_onset)
+}
+
+/// Jacobian with RGI: correct for the chain rule through the inner NR.
+/// dVgk_int/dVgk_ext = 1 / (1 + dIg/dVgk_int * RGI)
+#[inline(always)]
+fn tube_jacobian_with_rgi(vgk: f64, vpk: f64, mu: f64, ex: f64, kg1: f64, kp: f64, kvb: f64,
+                          ig_max: f64, vgk_onset: f64, lambda: f64, rgi: f64) -> [f64; 4] {
+    let vgk_int = tube_solve_vgk_int(vgk, ig_max, vgk_onset, rgi);
+    let jac = tube_jacobian(vgk_int, vpk, mu, ex, kg1, kp, kvb, ig_max, vgk_onset, lambda);
+    // Chain rule correction: dVgk_int/dVgk_ext = 1/(1 + dIg/dVgk_int * RGI)
+    let dig_dvgk_int = tube_ig_deriv(vgk_int, ig_max, vgk_onset);
+    let dvgk_int_dvgk_ext = 1.0 / (1.0 + dig_dvgk_int * rgi);
+    // dIp/dVgk_ext = dIp/dVgk_int * dvgk_int/dvgk_ext
+    // dIp/dVpk unchanged (Vpk not affected by RGI)
+    // dIg/dVgk_ext = dIg/dVgk_int * dvgk_int/dvgk_ext
+    // dIg/dVpk = 0 unchanged
+    [jac[0] * dvgk_int_dvgk_ext, jac[1], jac[2] * dvgk_int_dvgk_ext, jac[3]]
 }

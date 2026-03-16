@@ -1652,6 +1652,9 @@ fn build_device_slots(
                         is,
                         n_vt: n * melange_primitives::VT_ROOM,
                         cjo: find_param(&model_name, "CJO").unwrap_or(0.0),
+                        rs: find_param(&model_name, "RS").unwrap_or(0.0),
+                        bv: find_param(&model_name, "BV").unwrap_or(f64::INFINITY),
+                        ibv: find_param(&model_name, "IBV").unwrap_or(1e-10),
                     }),
                 });
             }
@@ -1684,6 +1687,9 @@ fn build_device_slots(
                         ikr: f64::INFINITY,
                         cje: find_param(&model_name, "CJE").unwrap_or(0.0),
                         cjc: find_param(&model_name, "CJC").unwrap_or(0.0),
+                        nf: find_param(&model_name, "NF").unwrap_or(1.0),
+                        ise: find_param(&model_name, "ISE").unwrap_or(0.0),
+                        ne: find_param(&model_name, "NE").unwrap_or(1.5),
                     }),
                 });
             }
@@ -1716,6 +1722,8 @@ fn build_device_slots(
                         is_p_channel,
                         cgs: find_param(&model_name, "CGS").unwrap_or(0.0),
                         cgd: find_param(&model_name, "CGD").unwrap_or(0.0),
+                        rd: find_param(&model_name, "RD").unwrap_or(0.0),
+                        rs_param: find_param(&model_name, "RS").unwrap_or(0.0),
                     }),
                 });
             }
@@ -1744,6 +1752,8 @@ fn build_device_slots(
                         is_p_channel,
                         cgs: find_param(&model_name, "CGS").unwrap_or(0.0),
                         cgd: find_param(&model_name, "CGD").unwrap_or(0.0),
+                        rd: find_param(&model_name, "RD").unwrap_or(0.0),
+                        rs_param: find_param(&model_name, "RS").unwrap_or(0.0),
                     }),
                 });
             }
@@ -1777,6 +1787,7 @@ fn build_device_slots(
                         ccg: find_param(&model_name, "CCG").unwrap_or(0.0),
                         cgp: find_param(&model_name, "CGP").unwrap_or(0.0),
                         ccp: find_param(&model_name, "CCP").unwrap_or(0.0),
+                        rgi: find_param(&model_name, "RGI").unwrap_or(0.0),
                     }),
                 });
             }
