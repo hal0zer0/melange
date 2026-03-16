@@ -141,8 +141,8 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
   - Combined with `N_i*i_nl_prev` in RHS, gives proper trapezoidal average
   - **Gummel-Poon model**: `BjtParams` includes VAF, VAR, IKF, IKR; `bjt_qb()` base charge modulation
   - USE_GP flag auto-detected from params; falls back to Ebers-Moll when GP params are infinite
-  - **Self-heating**: Thermal RC model (Rth, Cth, XTI, EG); forward/implicit Euler; SPICE3f5 IS(T); quasi-static (outside NR); default disabled (Rth=infinity)
-  - **Charge storage**: Junction caps (CJE, CJC with VJE/VJC/MJE/MJC) + diffusion cap (TF); SPICE3f5 depletion formula with FC=0.5; linearized at DC OP; default disabled
+  - **Self-heating**: NOT IMPLEMENTED (documented but no code exists; planned future feature)
+  - **Charge storage**: NOT IMPLEMENTED (documented but no code exists; planned as part of junction capacitance feature)
 - **Dynamic potentiometers**: `.pot R1 min max` directive marks a resistor as runtime-variable
   - Sherman-Morrison rank-1 updates: O(N²) correction instead of O(N³) re-inversion
   - Precomputed SM vectors (SU, USU, NV_SU, U_NI) baked into generated constants
@@ -186,7 +186,7 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
 ### Known Limitations
 - Parasitic caps (10pF) auto-inserted across junctions for purely resistive nonlinear circuits
 - Tube Koren model: lambda parameter models finite plate resistance; no space-charge or transit-time effects
-- BJT Gummel-Poon: self-heating (Rth/Cth) and charge storage (CJE/CJC/TF) available; no substrate current or avalanche breakdown
+- BJT Gummel-Poon: no self-heating, no charge storage (junction capacitances), no substrate current, no avalanche breakdown
 - **Runtime solver** (`DeviceEntry`) supports all device types: Diode, DiodeWithRs, Led, BJT, JFET, MOSFET, Tube
 - **NodalSolver transient NR**: Converges for all physically valid circuits including Pultec EQP-1A (4 tubes, 2 transformers, 130H, k=0.99, global NFB). Requires positive-definite inductance matrices (validated at MNA build time).
 - **`melange simulate`**: auto-selects NodalSolver for nonlinear circuits with inductors, CircuitSolver (DK) otherwise. `--solver nodal|dk` override available.
