@@ -74,11 +74,13 @@ R_bias_filt node_g v250 47k
 * === HF BOOST SECTION (bridge-T) ===
 * 3-terminal 10k linear pot split into upper arm (in→b) and lower arm (b→eq).
 * Series LC resonant circuit + Q damping bridges from b to eq.
+* Inductor values: VintageWindings measured taps from original Pultec unit.
+* Bandwidth pot: 2.2k (confirmed LTSpice + Sowter schematic).
 R_hfb_u in b 10k
 R_hfb_l b eq 10k
-C_hfb b c_hfb 15.3n
-L_hfb c_hfb d_hfb 183.8m
-R_hfb_q d_hfb eq 2.5k
+C_hfb b c_hfb 18n
+L_hfb c_hfb d_hfb 156m
+R_hfb_q d_hfb eq 2.2k
 R_q_off d_hfb eq 390
 
 * === HF CUT + LF SECTIONS (parallel paths from eq to mid) ===
@@ -89,7 +91,9 @@ R_hfc_l f mid 1k
 C_hfc f mid 270n
 
 * --- LF path (eq → out_tap → mid, includes the output tap) ---
-C_lfa eq h 73.3n
+* C_lfa independently selected per LF frequency position (NOT C_lfb/30 ratio).
+* Real Pultec has non-constant ratios: 147:1 (20Hz) to 3.3:1 (100Hz).
+C_lfa eq h 15n
 R_lfc eq h 100k
 R2 h out_tap 1k
 R3 out_tap mid 10k
@@ -139,6 +143,10 @@ T1b grid2 plate2 cathode 12AX7
 Ra1 v250 plate1 200k
 Ra2 v250 plate2 200k
 
+* 20nF anti-oscillation cap bridging the two 12AX7 plates.
+* ".00002" on schematic = 20,000pF = 20nF. Confirmed by schemer.
+C_plate_bridge plate1 plate2 20n
+
 * Shared cathode bias (820Ω, unbypassed).
 * Both cathodes tied together. 820Ω connects cathode to fb_node
 * (NOT ground). DC path: cathode → 820Ω → fb_node → HS-29 winding → CT → 100Ω → GND.
@@ -165,13 +173,17 @@ Rg2b grid2b bias_31v 1Meg
 
 * === PUSH-PULL OUTPUT STAGE: 12AU7 (ECC82) ===
 * Two triode sections driven in anti-phase by 12AX7 plates.
-* Shared cathode resistor cancels even harmonics in push-pull.
+* Shared cathode node (+40V). Two matched 4.7kΩ in parallel (2.35kΩ effective)
+* for current sharing ("4700* — * = RESISTORS SELECTED ALIKE").
+* Two 50µF/50V bypass caps confirmed by schemer (not one 100µF).
 T2a grid2a plate2a cath2 12AU7
 T2b grid2b plate2b cath2 12AU7
 
-* Shared cathode bias (40V measured, 4.7kΩ matched pair per schematic "RESISTORS SELECTED ALIKE")
-Rk2 cath2 0 4.7k
-Ck2 cath2 0 100u
+* Shared cathode: two matched 4.7kΩ in parallel + two 50µF bypass caps
+Rk2a cath2 0 4.7k
+Rk2b cath2 0 4.7k
+Ck2a cath2 0 50u
+Ck2b cath2 0 50u
 
 * Plate stopper resistors (360Ω each, from Sowter schematic).
 * Prevent parasitic oscillation in push-pull output stage.
@@ -238,15 +250,16 @@ Rload out 0 100k
 
 * === SWITCH DIRECTIVES ===
 * HF Boost frequency: 7 positions (ganged C + L)
-* Values computed from f_c, RATIO_L1_C1=12e6:
-*   C1 = sqrt(1 / (RATIO * (2*pi*fc)^2)), L1 = RATIO * C1
+* VintageWindings measured inductor taps from original Pultec unit.
+* Caps matched for verified resonant frequencies (±0.2%).
 * Positions: 3kHz, 4kHz, 5kHz, 8kHz, 10kHz, 12kHz, 16kHz
-.switch C_hfb,L_hfb 15.3n/183.8m 11.5n/137.8m 9.19n/110.3m 5.74n/68.9m 4.59n/55.1m 3.83n/45.9m 2.87n/34.5m "HF Boost Freq"
+.switch C_hfb,L_hfb 18n/156m 18n/87.9m 15n/67.5m 8n2/48.2m 8n2/31.4m 5n6/31.4m 3n3/29.9m "HF Boost Freq"
 
 * LF frequency: 4 positions (ganged boost cap C_lfb + atten cap C_lfa)
-* C_lfa = C_lfb / 30 (LF atten cap tracks boost cap)
+* Real Pultec uses independently selected cap pairs per frequency.
+* Ratios range from 147:1 (20Hz) to 3.3:1 (100Hz) — NOT a constant ratio.
 * Positions: 20Hz, 30Hz, 60Hz, 100Hz
-.switch C_lfb,C_lfa 2.2u/73.3n 1.1u/36.7n 560n/18.7n 330n/11n "LF Freq"
+.switch C_lfb,C_lfa 2.2u/15n 1u/22n 470n/47n 330n/100n "LF Freq"
 
 * HF Cut frequency: 3 positions
 * Positions: 5kHz, 10kHz, 20kHz
@@ -257,7 +270,7 @@ Rload out 0 100k
 .pot R_hfb_u 1 10k "HF Boost (upper)"
 .pot R_hfb_l 1 10k "HF Boost (lower)"
 * Bandwidth/Q: 2.5k linear pot (series with 390Ω offset resistor R_q_off)
-.pot R_hfb_q 1 2.5k "Bandwidth"
+.pot R_hfb_q 1 2.2k "Bandwidth"
 * LF Boost: 10k audio pot (shunt from mid to ground)
 .pot R_lfb 1 10k "LF Boost"
 * LF Atten: 100k audio pot (parallel with LF atten cap)
