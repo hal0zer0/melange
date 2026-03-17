@@ -186,11 +186,13 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
 - **Explicit re-exports**: all crates (melange-solver, melange-devices, melange-primitives) use named re-exports (no glob `pub use module::*`)
 - **Parasitic cap auto-insertion**: 10pF across device junctions (not to ground) when nonlinear circuit has no caps; stabilizes trapezoidal rule in `from_mna()`
 - **NodalSolver augmented MNA for inductors**: Each inductor winding adds a branch current variable with L in C matrix (2L/T diagonal, well-conditioned). Replaces companion model (T/(2L) ≈ 8e-8 S for 130H). Supports uncoupled, coupled pairs, and multi-winding transformer groups. DC OP initializes inductor currents. DK/CircuitSolver/codegen untouched.
+- **NodalSolver codegen** (Phases 1-2 complete): Full N-dim NR per sample emitted as generated Rust code. LU solve with partial pivoting, SPICE pnjlim/fetlim, ngspice node damping, RELTOL convergence, BE fallback. Auto-selected for inductor+nonlinear circuits. `--solver dk|nodal|auto` CLI flag.
+- **Device model features**: Junction capacitances (CCG/CGP/CCP, CJE/CJC, CGS/CGD, CJO), parasitic resistances (RS, RB/RC/RE, RD/RS, RGI), diode breakdown (BV/IBV), MOSFET body effect (GAMMA/PHI), BJT NF/ISE/NE emission params
 
 ### Known Limitations
 - Parasitic caps (10pF) auto-inserted across junctions for purely resistive nonlinear circuits
 - Tube Koren model: lambda parameter models finite plate resistance; no space-charge or transit-time effects
-- BJT Gummel-Poon: no self-heating, no substrate current, no avalanche breakdown
+- BJT Gummel-Poon: self-heating (Rth/Cth) and charge storage (CJE/CJC/TF) available; no substrate current or avalanche breakdown
 - **Runtime solver** (`DeviceEntry`) supports all device types: Diode, DiodeWithRs, Led, BJT, JFET, MOSFET, Tube
 - **NodalSolver transient NR**: Converges for all physically valid circuits including Pultec EQP-1A (4 tubes, 2 transformers, 130H, k=0.99, global NFB). Requires positive-definite inductance matrices (validated at MNA build time).
 - **`melange simulate`**: auto-selects NodalSolver for nonlinear circuits with inductors, CircuitSolver (DK) otherwise. `--solver nodal|dk` override available.
@@ -202,7 +204,9 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
 - melange-cli does NOT cross-compile (ureq/dirs need CoreFoundation), but generated plugins do
 
 ### Validated Circuits
-- `circuits/pultec-eq.cir`: Pultec EQP-1A (N=13, M=2, 3 switches, 5 pots, 12AX7 tube)
+- `circuits/pultec-eq.cir`: Pultec EQP-1A (4 tubes: 2×12AX7 + 2×12AU7, 2 transformers, 3 switches, 7 pots, global NFB)
+  - Verified against Sowter DWG E-72,658-2 schematic (2026-03-16)
+  - Uses NodalSolver codegen path (augmented MNA for 130H transformers)
 - `circuits/wurli-preamp.cir`: Wurlitzer 200A preamp (N=11, M=5, 2 BJTs + 1 diode, 1 pot)
   - Flattened from openwurli/spice/subcircuits/preamp.cir
   - R1-Cin series input coupling via intermediate node (mid_in)
@@ -215,13 +219,15 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
 
 ### Pending Work
 
-#### Current Priority — SPICE Validation for NodalSolver
-- **Validate tube+transformer circuits against ngspice**: Compare NodalSolver output for tube-transformer-fb.cir and Pultec-simplified against ngspice transient analysis
-- **NodalSolver simulation DONE**: CLI auto-routes inductor+nonlinear circuits to NodalSolver with augmented MNA. Pultec converges on all samples.
+#### Current Priority — Nodal Codegen Phase 3
+- **Pot/switch support for nodal codegen**: Direct G re-stamp (pots), rebuild_matrices (switches)
+- **Oversampling for nodal path**: Same polyphase half-band IIR, scaled matrices
+- **set_sample_rate for nodal path**: Recompute A/A_neg from G+C at new rate
+- Nodal codegen Phases 1-2 complete. Plan: `docs/NODAL_CODEGEN_PLAN.md`
 
-#### Next — OpenWurli Integration
+#### Next — SPICE Validation + OpenWurli
+- **SPICE validation**: tube+transformer circuits (full nonlinear) against ngspice
 - **Validate wurli-preamp**: SPICE comparison, gain at R_ldr extremes, frequency response
-- **Benchmark M=5 vs M=2**: OpenWurli uses forward-active BJT (Ib≈0, M=2 Cramer's); melange models full Ic+Ib (M=4) + diode (M=5) Gaussian elimination. If perf matters at 64 voices, add 1D forward-active BJT mode.
 - **M>16**: Iterative/sparse NR for very large nonlinear systems
 
 #### Future — Multi-Language Codegen

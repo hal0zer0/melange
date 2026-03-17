@@ -3066,9 +3066,9 @@ impl RustEmitter {
         }
         code.push_str("];\n\n");
 
-        // N_i: current injection matrix (N × M, stored as [M][N] transposed for codegen convention)
-        code.push_str("/// N_i matrix (transposed): maps nonlinear currents to node injections (M x N)\npub const N_I: [[f64; N]; M] = [\n");
-        for row in format_matrix_rows(m, n, |i, j| ir.n_i(j, i)) {
+        // N_i: current injection matrix (N × M), matching runtime layout
+        code.push_str("/// N_i matrix: maps nonlinear currents to node injections (N x M)\npub const N_I: [[f64; M]; N] = [\n");
+        for row in format_matrix_rows(n, m, |i, j| ir.n_i(i, j)) {
             code.push_str(&format!("    [{}],\n", row));
         }
         code.push_str("];\n\n");
@@ -3107,6 +3107,44 @@ impl RustEmitter {
             ir.dc_op_converged
         ));
 
+        // Potentiometer constants
+        for (idx, pot) in ir.pots.iter().enumerate() {
+            code.push_str(&format!(
+                "pub const POT_{}_NODE_P: usize = {};\n\
+                 pub const POT_{}_NODE_Q: usize = {};\n\
+                 pub const POT_{}_G_NOM: f64 = {:.17e};\n\
+                 pub const POT_{}_MIN_R: f64 = {:.17e};\n\
+                 pub const POT_{}_MAX_R: f64 = {:.17e};\n\n",
+                idx, pot.node_p, idx, pot.node_q,
+                idx, pot.g_nominal,
+                idx, pot.min_resistance, idx, pot.max_resistance
+            ));
+        }
+
+        // Switch constants (position values)
+        for (idx, sw) in ir.switches.iter().enumerate() {
+            code.push_str(&format!(
+                "pub const SWITCH_{}_NUM_POSITIONS: usize = {};\n",
+                idx, sw.num_positions
+            ));
+            for (ci, comp) in sw.components.iter().enumerate() {
+                let values: Vec<String> = sw.positions.iter().map(|pos| fmt_f64(pos[ci])).collect();
+                code.push_str(&format!(
+                    "pub const SWITCH_{}_COMP_{}_VALUES: [f64; {}] = [{}];\n\
+                     pub const SWITCH_{}_COMP_{}_TYPE: char = '{}';\n\
+                     pub const SWITCH_{}_COMP_{}_NODE_P: usize = {};\n\
+                     pub const SWITCH_{}_COMP_{}_NODE_Q: usize = {};\n\
+                     pub const SWITCH_{}_COMP_{}_NOM: f64 = {:.17e};\n",
+                    idx, ci, sw.num_positions, values.join(", "),
+                    idx, ci, comp.component_type,
+                    idx, ci, comp.node_p,
+                    idx, ci, comp.node_q,
+                    idx, ci, comp.nominal_value,
+                ));
+            }
+            code.push('\n');
+        }
+
         code
     }
 
@@ -3117,6 +3155,8 @@ impl RustEmitter {
         let n_nodes = if ir.topology.n_nodes > 0 { ir.topology.n_nodes } else { n };
         let n_aug = ir.topology.n_aug;
         let num_outputs = ir.solver_config.output_nodes.len();
+        let has_pots = !ir.pots.is_empty();
+        let has_switches = !ir.switches.is_empty();
 
         let mut code = section_banner("STATE STRUCTURE (Nodal solver)");
 
@@ -3184,6 +3224,40 @@ impl RustEmitter {
         code.push_str("    pub a_be: [[f64; N]; N],\n");
         code.push_str("    /// A_neg_be matrix: (1/T)*C (backward Euler history), recomputed by set_sample_rate\n");
         code.push_str("    pub a_neg_be: [[f64; N]; N],\n");
+
+        // Mutable G and C for pot/switch re-stamping
+        if has_pots || has_switches {
+            code.push_str("    /// Working G matrix (modified by pots/switches)\n");
+            code.push_str("    pub g_work: [[f64; N]; N],\n");
+            code.push_str("    /// Working C matrix (modified by switches)\n");
+            code.push_str("    pub c_work: [[f64; N]; N],\n");
+            code.push_str("    /// Current sample rate (for rebuild_matrices)\n");
+            code.push_str("    pub current_sample_rate: f64,\n\n");
+        }
+
+        // Pot state fields
+        for (idx, _pot) in ir.pots.iter().enumerate() {
+            code.push_str(&format!(
+                "    /// Potentiometer {}: current resistance (ohms)\n\
+                 \x20   pub pot_{}_resistance: f64,\n",
+                idx, idx
+            ));
+        }
+        if has_pots {
+            code.push('\n');
+        }
+
+        // Switch state fields
+        for (idx, _sw) in ir.switches.iter().enumerate() {
+            code.push_str(&format!(
+                "    /// Switch {}: current position (0-indexed)\n\
+                 \x20   pub switch_{}_position: usize,\n",
+                idx, idx
+            ));
+        }
+        if has_switches {
+            code.push('\n');
+        }
 
         // Device parameter state fields (runtime-adjustable)
         let device_params = device_param_template_data(ir);
@@ -3261,8 +3335,19 @@ impl RustEmitter {
         }
         code.push_str("            input_prev: 0.0,\n");
         code.push_str("            last_nr_iterations: 0,\n");
-        code.push_str("            dc_block_x_prev: [0.0; NUM_OUTPUTS],\n");
-        code.push_str("            dc_block_y_prev: [0.0; NUM_OUTPUTS],\n");
+        // Initialize DC blocking filter from DC OP so first sample sees zero delta
+        {
+            let output_nodes = &ir.solver_config.output_nodes;
+            let dc_x: Vec<String> = output_nodes.iter().map(|&node| {
+                if has_dc_op && node < ir.dc_operating_point.len() {
+                    fmt_f64(ir.dc_operating_point[node])
+                } else {
+                    "0.0".to_string()
+                }
+            }).collect();
+            code.push_str(&format!("            dc_block_x_prev: [{}],\n", dc_x.join(", ")));
+            code.push_str(&format!("            dc_block_y_prev: [{}],\n", vec!["0.0"; output_nodes.len()].join(", ")));
+        }
         code.push_str("            dc_block_r: DC_BLOCK_R,\n");
         code.push_str("            diag_peak_output: 0.0,\n");
         code.push_str("            diag_clamp_count: 0,\n");
@@ -3273,6 +3358,27 @@ impl RustEmitter {
         code.push_str("            a_neg: A_NEG_DEFAULT,\n");
         code.push_str("            a_be: A_BE_DEFAULT,\n");
         code.push_str("            a_neg_be: A_NEG_BE_DEFAULT,\n");
+
+        if has_pots || has_switches {
+            code.push_str("            g_work: G,\n");
+            code.push_str("            c_work: C,\n");
+            code.push_str(&format!("            current_sample_rate: {:.17e},\n",
+                ir.solver_config.sample_rate * ir.solver_config.oversampling_factor as f64));
+        }
+
+        for (idx, pot) in ir.pots.iter().enumerate() {
+            code.push_str(&format!(
+                "            pot_{}_resistance: {:.17e},\n",
+                idx, 1.0 / pot.g_nominal
+            ));
+        }
+
+        for (idx, _sw) in ir.switches.iter().enumerate() {
+            code.push_str(&format!(
+                "            switch_{}_position: 0,\n",
+                idx
+            ));
+        }
 
         for dev in &device_params {
             for p in &dev.params {
@@ -3324,13 +3430,42 @@ impl RustEmitter {
         }
         code.push_str("        self.input_prev = 0.0;\n");
         code.push_str("        self.last_nr_iterations = 0;\n");
-        code.push_str("        self.dc_block_x_prev = [0.0; NUM_OUTPUTS];\n");
+        // Re-init DC blocker from DC OP (prevents transient on reset)
+        {
+            let output_nodes = &ir.solver_config.output_nodes;
+            for (oi, &node) in output_nodes.iter().enumerate() {
+                if has_dc_op && node < ir.dc_operating_point.len() {
+                    code.push_str(&format!(
+                        "        self.dc_block_x_prev[{}] = self.dc_operating_point[{}];\n", oi, node
+                    ));
+                } else {
+                    code.push_str(&format!(
+                        "        self.dc_block_x_prev[{}] = 0.0;\n", oi
+                    ));
+                }
+            }
+        }
         code.push_str("        self.dc_block_y_prev = [0.0; NUM_OUTPUTS];\n");
         code.push_str("        self.diag_peak_output = 0.0;\n");
         code.push_str("        self.diag_clamp_count = 0;\n");
         code.push_str("        self.diag_nr_max_iter_count = 0;\n");
         code.push_str("        self.diag_be_fallback_count = 0;\n");
         code.push_str("        self.diag_nan_reset_count = 0;\n");
+        if has_pots || has_switches {
+            code.push_str("        self.g_work = G;\n");
+            code.push_str("        self.c_work = C;\n");
+        }
+        for (idx, pot) in ir.pots.iter().enumerate() {
+            code.push_str(&format!(
+                "        self.pot_{}_resistance = {:.17e};\n",
+                idx, 1.0 / pot.g_nominal
+            ));
+        }
+        for (idx, _sw) in ir.switches.iter().enumerate() {
+            code.push_str(&format!(
+                "        self.switch_{}_position = 0;\n", idx
+            ));
+        }
         for dev in &device_params {
             for p in &dev.params {
                 code.push_str(&format!(
@@ -3412,64 +3547,10 @@ impl RustEmitter {
         code.push_str("        let alpha = 2.0 * internal_rate;\n");
         code.push_str("        let alpha_be = internal_rate;\n\n");
 
-        // Build A = G + alpha*C
-        code.push_str("        // Build A = G + alpha*C (trapezoidal)\n");
-        code.push_str("        for i in 0..N {\n");
-        code.push_str("            for j in 0..N {\n");
-        code.push_str("                self.a[i][j] = G[i][j] + alpha * C[i][j];\n");
-        code.push_str("            }\n");
-        code.push_str("        }\n\n");
-
-        // Build A_neg = alpha*C - G
-        code.push_str("        // Build A_neg = alpha*C - G (trapezoidal history)\n");
-        code.push_str("        for i in 0..N {\n");
-        code.push_str("            for j in 0..N {\n");
-        code.push_str("                self.a_neg[i][j] = alpha * C[i][j] - G[i][j];\n");
-        code.push_str("            }\n");
-        code.push_str("        }\n");
-
-        // Zero VS/VCVS algebraic rows in A_neg
-        if n_nodes < n_aug {
-            code.push_str(&format!(
-                "        // Zero VS/VCVS algebraic rows in A_neg (NOT inductor rows)\n\
-                 \x20       for i in {}..{} {{\n\
-                 \x20           for j in 0..N {{\n\
-                 \x20               self.a_neg[i][j] = 0.0;\n\
-                 \x20           }}\n\
-                 \x20       }}\n",
-                n_nodes, n_aug
-            ));
+        if has_pots || has_switches {
+            code.push_str("        self.current_sample_rate = internal_rate;\n");
         }
-        code.push('\n');
-
-        // Build A_be = G + alpha_be*C
-        code.push_str("        // Build A_be = G + (1/T)*C (backward Euler)\n");
-        code.push_str("        for i in 0..N {\n");
-        code.push_str("            for j in 0..N {\n");
-        code.push_str("                self.a_be[i][j] = G[i][j] + alpha_be * C[i][j];\n");
-        code.push_str("            }\n");
-        code.push_str("        }\n\n");
-
-        // Build A_neg_be = alpha_be*C
-        code.push_str("        // Build A_neg_be = (1/T)*C (backward Euler history)\n");
-        code.push_str("        for i in 0..N {\n");
-        code.push_str("            for j in 0..N {\n");
-        code.push_str("                self.a_neg_be[i][j] = alpha_be * C[i][j];\n");
-        code.push_str("            }\n");
-        code.push_str("        }\n");
-
-        // Zero VS/VCVS rows in A_neg_be
-        if n_nodes < n_aug {
-            code.push_str(&format!(
-                "        for i in {}..{} {{\n\
-                 \x20           for j in 0..N {{\n\
-                 \x20               self.a_neg_be[i][j] = 0.0;\n\
-                 \x20           }}\n\
-                 \x20       }}\n",
-                n_nodes, n_aug
-            ));
-        }
-        code.push('\n');
+        code.push_str("        self.rebuild_matrices(internal_rate);\n\n");
 
         // DC block recomputation
         code.push_str(&format!(
@@ -3495,7 +3576,195 @@ impl RustEmitter {
             }
         }
 
-        code.push_str("    }\n");
+        code.push_str("    }\n\n");
+
+        // rebuild_matrices: recompute A/A_neg/A_be/A_neg_be from G+C
+        let g_src = if has_pots || has_switches { "self.g_work" } else { "G" };
+        let c_src = if has_pots || has_switches { "self.c_work" } else { "C" };
+
+        code.push_str("    /// Recompute A, A_neg, A_be, A_neg_be from G and C matrices.\n");
+        code.push_str("    ///\n");
+        code.push_str("    /// Called by set_sample_rate, set_pot, and set_switch.\n");
+        code.push_str("    pub fn rebuild_matrices(&mut self, internal_rate: f64) {\n");
+        code.push_str("        let alpha = 2.0 * internal_rate;\n");
+        code.push_str("        let alpha_be = internal_rate;\n\n");
+
+        code.push_str(&format!(
+            "        for i in 0..N {{\n\
+             \x20           for j in 0..N {{\n\
+             \x20               self.a[i][j] = {}[i][j] + alpha * {}[i][j];\n\
+             \x20               self.a_neg[i][j] = alpha * {}[i][j] - {}[i][j];\n\
+             \x20               self.a_be[i][j] = {}[i][j] + alpha_be * {}[i][j];\n\
+             \x20               self.a_neg_be[i][j] = alpha_be * {}[i][j];\n\
+             \x20           }}\n\
+             \x20       }}\n",
+            g_src, c_src, c_src, g_src, g_src, c_src, c_src
+        ));
+
+        // Zero VS/VCVS algebraic rows in A_neg and A_neg_be (NOT inductor rows)
+        if n_nodes < n_aug {
+            code.push_str(&format!(
+                "        for i in {}..{} {{\n\
+                 \x20           for j in 0..N {{\n\
+                 \x20               self.a_neg[i][j] = 0.0;\n\
+                 \x20               self.a_neg_be[i][j] = 0.0;\n\
+                 \x20           }}\n\
+                 \x20       }}\n",
+                n_nodes, n_aug
+            ));
+        }
+        code.push_str("    }\n\n");
+
+        // set_pot_N() methods — O(1) delta stamping into A/A_neg/A_be matrices
+        // Since A = G + alpha*C, changing G by delta_g means A changes by delta_g at the same entries.
+        // A_neg = alpha*C - G, so A_neg changes by -delta_g. A_neg_be has no G term (unchanged).
+        for (idx, pot) in ir.pots.iter().enumerate() {
+            let np = pot.node_p;
+            let nq = pot.node_q;
+            code.push_str(&format!(
+                "    /// Set potentiometer {} resistance (clamped to [{:.1}..{:.1}] ohms).\n\
+                 \x20   ///\n\
+                 \x20   /// O(1) cost: stamps delta conductance directly into A matrices.\n\
+                 \x20   /// Safe to call per-sample.\n",
+                idx, pot.min_resistance, pot.max_resistance
+            ));
+            code.push_str(&format!(
+                "    pub fn set_pot_{}(&mut self, resistance: f64) {{\n", idx
+            ));
+            code.push_str(&format!(
+                "        let r = resistance.clamp(POT_{}_MIN_R, POT_{}_MAX_R);\n\
+                 \x20       if (r - self.pot_{}_resistance).abs() < 1e-12 {{ return; }}\n\n\
+                 \x20       // Delta conductance: stamp into A, A_neg, A_be (NOT A_neg_be: no G term)\n\
+                 \x20       let delta_g = 1.0 / r - 1.0 / self.pot_{}_resistance;\n",
+                idx, idx, idx, idx
+            ));
+
+            // Helper: emit delta stamp for one matrix with sign multiplier
+            // A and A_be get +delta_g, A_neg gets -delta_g
+            let emit_delta_stamp = |code: &mut String, matrix: &str, sign: &str| {
+                if np > 0 {
+                    code.push_str(&format!(
+                        "        self.{matrix}[{}][{}] {sign}= delta_g;\n", np - 1, np - 1
+                    ));
+                }
+                if nq > 0 {
+                    code.push_str(&format!(
+                        "        self.{matrix}[{}][{}] {sign}= delta_g;\n", nq - 1, nq - 1
+                    ));
+                }
+                if np > 0 && nq > 0 {
+                    let neg_sign = if sign == "+" { "-" } else { "+" };
+                    code.push_str(&format!(
+                        "        self.{matrix}[{}][{}] {neg_sign}= delta_g;\n\
+                         \x20       self.{matrix}[{}][{}] {neg_sign}= delta_g;\n",
+                        np - 1, nq - 1, nq - 1, np - 1
+                    ));
+                }
+            };
+
+            emit_delta_stamp(&mut code, "a", "+");
+            emit_delta_stamp(&mut code, "a_neg", "-");
+            emit_delta_stamp(&mut code, "a_be", "+");
+            // A_neg_be = alpha_be * C — no G term, unchanged by pot
+
+            // Also update g_work for consistency (needed by rebuild_matrices on sample rate change)
+            if has_pots || has_switches {
+                code.push_str("\n        // Update working G for sample rate rebuild consistency\n");
+                if np > 0 {
+                    code.push_str(&format!(
+                        "        self.g_work[{}][{}] += delta_g;\n", np - 1, np - 1
+                    ));
+                }
+                if nq > 0 {
+                    code.push_str(&format!(
+                        "        self.g_work[{}][{}] += delta_g;\n", nq - 1, nq - 1
+                    ));
+                }
+                if np > 0 && nq > 0 {
+                    code.push_str(&format!(
+                        "        self.g_work[{}][{}] -= delta_g;\n\
+                         \x20       self.g_work[{}][{}] -= delta_g;\n",
+                        np - 1, nq - 1, nq - 1, np - 1
+                    ));
+                }
+            }
+
+            code.push_str(&format!(
+                "\n        self.pot_{}_resistance = r;\n", idx
+            ));
+            code.push_str("    }\n\n");
+        }
+
+        // set_switch_N() methods
+        for (idx, sw) in ir.switches.iter().enumerate() {
+            code.push_str(&format!(
+                "    /// Set switch {} position (0-indexed, {} positions).\n",
+                idx, sw.num_positions
+            ));
+            code.push_str(&format!(
+                "    pub fn set_switch_{}(&mut self, position: usize) {{\n\
+                 \x20       if position >= SWITCH_{}_NUM_POSITIONS {{ return; }}\n\
+                 \x20       if position == self.switch_{}_position {{ return; }}\n\n",
+                idx, idx, idx
+            ));
+
+            for (ci, comp) in sw.components.iter().enumerate() {
+                let np = comp.node_p;
+                let nq = comp.node_q;
+                let matrix = if comp.component_type == 'R' { "g_work" } else { "c_work" };
+
+                code.push_str(&format!(
+                    "        // Switch {} component {} ({}, type {})\n",
+                    idx, ci, comp.name, comp.component_type
+                ));
+                code.push_str(&format!(
+                    "        let old_val_{} = SWITCH_{}_COMP_{}_VALUES[self.switch_{}_position];\n\
+                     \x20       let new_val_{} = SWITCH_{}_COMP_{}_VALUES[position];\n",
+                    ci, idx, ci, idx, ci, idx, ci
+                ));
+
+                if comp.component_type == 'R' {
+                    // Resistor: unstamp old conductance, stamp new
+                    code.push_str(&format!(
+                        "        let g_old_{ci} = 1.0 / old_val_{ci};\n\
+                         \x20       let g_new_{ci} = 1.0 / new_val_{ci};\n\
+                         \x20       let delta_{ci} = g_new_{ci} - g_old_{ci};\n"
+                    ));
+                } else {
+                    // Capacitor or Inductor in C matrix: delta is new - old directly
+                    code.push_str(&format!(
+                        "        let delta_{ci} = new_val_{ci} - old_val_{ci};\n"
+                    ));
+                }
+
+                // Stamp delta
+                if np > 0 {
+                    code.push_str(&format!(
+                        "        self.{matrix}[{}][{}] += delta_{ci};\n", np - 1, np - 1
+                    ));
+                }
+                if nq > 0 {
+                    code.push_str(&format!(
+                        "        self.{matrix}[{}][{}] += delta_{ci};\n", nq - 1, nq - 1
+                    ));
+                }
+                if np > 0 && nq > 0 {
+                    code.push_str(&format!(
+                        "        self.{matrix}[{}][{}] -= delta_{ci};\n\
+                         \x20       self.{matrix}[{}][{}] -= delta_{ci};\n",
+                        np - 1, nq - 1, nq - 1, np - 1
+                    ));
+                }
+                code.push('\n');
+            }
+
+            code.push_str(&format!(
+                "        self.switch_{}_position = position;\n", idx
+            ));
+            code.push_str("        self.rebuild_matrices(self.current_sample_rate);\n");
+            code.push_str("    }\n\n");
+        }
+
         code.push_str("}\n\n");
 
         let _ = (n, m, n_nodes, n_aug, num_outputs);
@@ -3505,21 +3774,40 @@ impl RustEmitter {
 
     /// Emit LU solve function for the nodal solver (N x N with partial pivoting).
     fn emit_nodal_lu_solve(_ir: &CircuitIR) -> String {
-        let mut code = section_banner("LU SOLVE (Gaussian elimination with partial pivoting)");
+        let mut code = section_banner("LU SOLVE (Equilibrated Gaussian elimination with iterative refinement)");
 
-        code.push_str("/// Solve A*x = b using Gaussian elimination with partial pivoting.\n");
+        code.push_str("/// Solve A*x = b using equilibrated LU with partial pivoting + iterative refinement.\n");
         code.push_str("///\n");
-        code.push_str("/// Modifies `a` and `b` in place. On success, `b` contains the solution.\n");
-        code.push_str("/// Returns `true` if the solve succeeded, `false` if the matrix was singular.\n");
+        code.push_str("/// Diagonal equilibration scales rows/cols by 1/sqrt(|A[i][i]|) to reduce\n");
+        code.push_str("/// condition number. One round of iterative refinement corrects residual error.\n");
+        code.push_str("/// Matches the runtime solver's `solve_equilibrated()` for numerical parity.\n");
+        code.push_str("/// Modifies `a` in place (LU factors). On success, `b` contains the solution.\n");
         code.push_str("#[inline(always)]\n");
         code.push_str("fn lu_solve(a: &mut [[f64; N]; N], b: &mut [f64; N]) -> bool {\n");
+        code.push_str("    // Save original A and b for iterative refinement\n");
+        code.push_str("    let a_orig = *a;\n");
+        code.push_str("    let b_orig = *b;\n\n");
+
+        // Step 1: Equilibrate
+        code.push_str("    // Step 1: Diagonal equilibration — d[i] = 1/sqrt(|A[i][i]|)\n");
+        code.push_str("    let mut d = [1.0f64; N];\n");
+        code.push_str("    for i in 0..N {\n");
+        code.push_str("        let diag = a[i][i].abs();\n");
+        code.push_str("        if diag > 1e-30 { d[i] = 1.0 / diag.sqrt(); }\n");
+        code.push_str("    }\n");
+        code.push_str("    for i in 0..N {\n");
+        code.push_str("        for j in 0..N {\n");
+        code.push_str("            a[i][j] *= d[i] * d[j];\n");
+        code.push_str("        }\n");
+        code.push_str("        b[i] *= d[i];\n");
+        code.push_str("    }\n\n");
+
+        // Step 2: LU factorize with partial pivoting (stores L below diagonal, U on/above)
+        code.push_str("    // Step 2: LU factorize with partial pivoting\n");
         code.push_str("    let mut perm = [0usize; N];\n");
         code.push_str("    for i in 0..N { perm[i] = i; }\n\n");
 
-        // Forward elimination with partial pivoting
-        code.push_str("    // Forward elimination with partial pivoting\n");
         code.push_str("    for col in 0..N {\n");
-        code.push_str("        // Find max pivot in column\n");
         code.push_str("        let mut max_row = col;\n");
         code.push_str("        let mut max_val = a[col][col].abs();\n");
         code.push_str("        for row in (col + 1)..N {\n");
@@ -3527,40 +3815,70 @@ impl RustEmitter {
         code.push_str("                max_val = a[row][col].abs();\n");
         code.push_str("                max_row = row;\n");
         code.push_str("            }\n");
-        code.push_str("        }\n\n");
-        code.push_str("        if max_val < 1e-30 {\n");
-        code.push_str("            return false; // Singular\n");
-        code.push_str("        }\n\n");
-        code.push_str("        // Swap rows\n");
+        code.push_str("        }\n");
+        code.push_str("        if max_val < 1e-30 { return false; }\n");
         code.push_str("        if max_row != col {\n");
         code.push_str("            a.swap(col, max_row);\n");
-        code.push_str("            b.swap(col, max_row);\n");
         code.push_str("            perm.swap(col, max_row);\n");
-        code.push_str("        }\n\n");
-        code.push_str("        // Eliminate below pivot\n");
+        code.push_str("        }\n");
         code.push_str("        let pivot = a[col][col];\n");
         code.push_str("        for row in (col + 1)..N {\n");
         code.push_str("            let factor = a[row][col] / pivot;\n");
+        code.push_str("            a[row][col] = factor; // Store L factor\n");
         code.push_str("            for j in (col + 1)..N {\n");
         code.push_str("                a[row][j] -= factor * a[col][j];\n");
         code.push_str("            }\n");
-        code.push_str("            a[row][col] = 0.0;\n");
-        code.push_str("            b[row] -= factor * b[col];\n");
         code.push_str("        }\n");
         code.push_str("    }\n\n");
 
-        // Back substitution
-        code.push_str("    // Back substitution\n");
+        // Step 3: Forward/backward substitution — solve LU * x_eq = D * P * b
+        code.push_str("    // Step 3: Solve LU * x_eq = D * P * b\n");
+        code.push_str("    let mut x = [0.0f64; N];\n");
+        code.push_str("    for i in 0..N { x[i] = d[perm[i]] * b_orig[perm[i]]; }\n\n");
+
+        code.push_str("    // Forward substitution (L)\n");
+        code.push_str("    for i in 1..N {\n");
+        code.push_str("        let mut sum = 0.0;\n");
+        code.push_str("        for j in 0..i { sum += a[i][j] * x[j]; }\n");
+        code.push_str("        x[i] -= sum;\n");
+        code.push_str("    }\n");
+        code.push_str("    // Backward substitution (U)\n");
         code.push_str("    for i in (0..N).rev() {\n");
-        code.push_str("        let mut sum = b[i];\n");
-        code.push_str("        for j in (i + 1)..N {\n");
-        code.push_str("            sum -= a[i][j] * b[j];\n");
-        code.push_str("        }\n");
-        code.push_str("        if a[i][i].abs() < 1e-30 {\n");
-        code.push_str("            return false; // Singular\n");
-        code.push_str("        }\n");
-        code.push_str("        b[i] = sum / a[i][i];\n");
+        code.push_str("        let mut sum = 0.0;\n");
+        code.push_str("        for j in (i + 1)..N { sum += a[i][j] * x[j]; }\n");
+        code.push_str("        if a[i][i].abs() < 1e-30 { return false; }\n");
+        code.push_str("        x[i] = (x[i] - sum) / a[i][i];\n");
         code.push_str("    }\n\n");
+
+        // Step 4: Iterative refinement — compute residual in equilibrated space, correct
+        code.push_str("    // Step 4: Iterative refinement\n");
+        code.push_str("    let mut r = [0.0f64; N];\n");
+        code.push_str("    for i in 0..N {\n");
+        code.push_str("        let pi = perm[i];\n");
+        code.push_str("        let mut ax_i = 0.0;\n");
+        code.push_str("        for j in 0..N {\n");
+        code.push_str("            ax_i += d[pi] * a_orig[pi][j] * d[j] * x[j];\n");
+        code.push_str("        }\n");
+        code.push_str("        r[i] = d[pi] * b_orig[pi] - ax_i;\n");
+        code.push_str("    }\n");
+        code.push_str("    // Solve LU * dx = r\n");
+        code.push_str("    for i in 1..N {\n");
+        code.push_str("        let mut sum = 0.0;\n");
+        code.push_str("        for j in 0..i { sum += a[i][j] * r[j]; }\n");
+        code.push_str("        r[i] -= sum;\n");
+        code.push_str("    }\n");
+        code.push_str("    for i in (0..N).rev() {\n");
+        code.push_str("        let mut sum = 0.0;\n");
+        code.push_str("        for j in (i + 1)..N { sum += a[i][j] * r[j]; }\n");
+        code.push_str("        r[i] = (r[i] - sum) / a[i][i];\n");
+        code.push_str("    }\n\n");
+
+        // Step 5: Apply correction and undo equilibration
+        code.push_str("    // Step 5: Apply correction and undo equilibration\n");
+        code.push_str("    for i in 0..N {\n");
+        code.push_str("        b[i] = d[i] * (x[i] + r[i]);\n");
+        code.push_str("    }\n\n");
+
         code.push_str("    true\n");
         code.push_str("}\n\n");
 
@@ -3599,26 +3917,36 @@ impl RustEmitter {
         // Input sanitization
         code.push_str("    let input = if input.is_finite() { input.clamp(-100.0, 100.0) } else { 0.0 };\n\n");
 
-        // Step 1: Build RHS = rhs_const + A_neg * v_prev + N_i * i_nl_prev + input
-        code.push_str("    // Step 1: Build RHS = rhs_const + A_neg * v_prev + N_i * i_nl_prev + input\n");
-        code.push_str("    let mut rhs = [0.0f64; N];\n");
-        code.push_str("    for i in 0..N {\n");
+        // Step 1: Build RHS = rhs_const + A_neg * v_prev + N_i * i_nl_prev + input (sparse)
+        code.push_str("    // Step 1: Build RHS (sparse A_neg * v_prev + sparse N_i * i_nl_prev)\n");
         if ir.has_dc_sources {
-            code.push_str("        let mut sum = RHS_CONST[i];\n");
+            code.push_str("    let mut rhs = RHS_CONST;\n");
         } else {
-            code.push_str("        let mut sum = 0.0;\n");
+            code.push_str("    let mut rhs = [0.0f64; N];\n");
         }
-        code.push_str("        for j in 0..N {\n");
-        code.push_str("            sum += state.a_neg[i][j] * state.v_prev[j];\n");
-        code.push_str("        }\n");
+        // Sparse A_neg * v_prev
+        for i in 0..n {
+            let nz_cols = &ir.sparsity.a_neg.nz_by_row[i];
+            if nz_cols.is_empty() { continue; }
+            for &j in nz_cols {
+                code.push_str(&format!(
+                    "    rhs[{}] += state.a_neg[{}][{}] * state.v_prev[{}];\n",
+                    i, i, j, j
+                ));
+            }
+        }
+        // Sparse N_i * i_nl_prev (N_I is N×M, direct row access)
         if m > 0 {
-            code.push_str("        // N_i * i_nl_prev (trapezoidal nonlinear integration)\n");
-            code.push_str("        for j in 0..M {\n");
-            code.push_str("            sum += N_I[j][i] * state.i_nl_prev[j];\n");
-            code.push_str("        }\n");
+            for i in 0..n {
+                for &j in &ir.sparsity.n_i.nz_by_row[i] {
+                    code.push_str(&format!(
+                        "    rhs[{}] += N_I[{}][{}] * state.i_nl_prev[{}];\n",
+                        i, i, j, j
+                    ));
+                }
+            }
         }
-        code.push_str("        rhs[i] = sum;\n");
-        code.push_str("    }\n\n");
+        code.push('\n');
 
         // Input source (Thevenin, trapezoidal)
         code.push_str("    // Input source (Thevenin, trapezoidal)\n");
@@ -3644,56 +3972,103 @@ impl RustEmitter {
             // Trapezoidal NR loop
             code.push_str("    for iter in 0..MAX_ITER {\n");
 
-            // 2a. Extract nonlinear voltages: v_nl = N_v * v
-            code.push_str("        // 2a. Extract nonlinear voltages: v_nl = N_v * v\n");
+            // 2a. Extract nonlinear voltages: v_nl = N_v * v (sparse)
+            code.push_str("        // 2a. Extract nonlinear voltages: v_nl = N_v * v (sparse)\n");
             code.push_str("        let mut v_nl = [0.0f64; M];\n");
-            code.push_str("        for i in 0..M {\n");
-            code.push_str("            let mut sum = 0.0;\n");
-            code.push_str("            for j in 0..N {\n");
-            code.push_str("                sum += N_V[i][j] * v[j];\n");
-            code.push_str("            }\n");
-            code.push_str("            v_nl[i] = sum;\n");
-            code.push_str("        }\n\n");
+            for i in 0..m {
+                let nz_cols = &ir.sparsity.n_v.nz_by_row[i];
+                if nz_cols.is_empty() { continue; }
+                let terms: Vec<String> = nz_cols.iter().map(|&j| {
+                    format!("N_V[{}][{}] * v[{}]", i, j, j)
+                }).collect();
+                code.push_str(&format!("        v_nl[{}] = {};\n", i, terms.join(" + ")));
+            }
+            code.push('\n');
 
             // 2b. Evaluate device currents and Jacobian
             code.push_str("        // 2b. Evaluate device currents and Jacobian (block-diagonal)\n");
-            Self::emit_nodal_device_evaluation(&mut code, ir);
+            // i_nl is declared in outer scope (line above NR loop), j_dev is per-iteration
+            code.push_str("        let mut j_dev = [0.0f64; M * M];\n");
+            Self::emit_nodal_device_evaluation_body(&mut code, ir, "        ");
             code.push('\n');
 
-            // 2c. Build Jacobian: G_aug = A - N_i * J_dev * N_v
-            code.push_str("        // 2c. Build Jacobian: G_aug = A - N_i * J_dev * N_v\n");
+            // 2c. Build Jacobian: G_aug = A - N_i * J_dev * N_v (sparse)
+            // J_dev is block-diagonal; N_i and N_v have ~2 nonzero entries per device dim.
+            // Compile-time unrolled: ~64 stamps for 4 tubes vs 107K dense iterations.
+            code.push_str("        // 2c. Build Jacobian: G_aug = A - N_i * J_dev * N_v (sparse)\n");
             code.push_str("        let mut g_aug = state.a;\n");
-            code.push_str("        for a_idx in 0..N {\n");
-            code.push_str("            for b_idx in 0..N {\n");
-            code.push_str("                let mut sum = 0.0;\n");
-            code.push_str("                for i in 0..M {\n");
-            code.push_str("                    let ni_ai = N_I[i][a_idx];\n");
-            code.push_str("                    if ni_ai.abs() < 1e-30 { continue; }\n");
-            code.push_str("                    for j in 0..M {\n");
-            code.push_str("                        let jd = j_dev[i * M + j];\n");
-            code.push_str("                        if jd.abs() < 1e-30 { continue; }\n");
-            code.push_str("                        let nv_jb = N_V[j][b_idx];\n");
-            code.push_str("                        if nv_jb.abs() < 1e-30 { continue; }\n");
-            code.push_str("                        sum += ni_ai * jd * nv_jb;\n");
-            code.push_str("                    }\n");
-            code.push_str("                }\n");
-            code.push_str("                g_aug[a_idx][b_idx] -= sum;\n");
-            code.push_str("            }\n");
-            code.push_str("        }\n\n");
+            {
+                // Build transpose of N_i sparsity: for each device dim i, which nodes a are nonzero
+                let mut ni_nz_by_dev = vec![Vec::new(); m];
+                for (a, cols) in ir.sparsity.n_i.nz_by_row.iter().enumerate() {
+                    for &i in cols {
+                        ni_nz_by_dev[i].push(a);
+                    }
+                }
 
-            // 2d. Build companion RHS: rhs_base + N_i * (i_nl - J_dev * v_nl)
-            code.push_str("        // 2d. Build companion RHS: rhs + N_i * (i_nl - J_dev * v_nl)\n");
+                // For each device, stamp N_i[:,i] * j_dev[i,j] * N_v[j,:] for all nonzero entries
+                for slot in &ir.device_slots {
+                    let s = slot.start_idx;
+                    let dim = slot.dimension;
+                    for di in 0..dim {
+                        let i = s + di;
+                        let ni_nodes = &ni_nz_by_dev[i];
+                        for dj in 0..dim {
+                            let j = s + dj;
+                            let nv_nodes = &ir.sparsity.n_v.nz_by_row[j];
+                            if ni_nodes.is_empty() || nv_nodes.is_empty() { continue; }
+                            for &a in ni_nodes {
+                                for &b in nv_nodes {
+                                    code.push_str(&format!(
+                                        "        g_aug[{}][{}] -= N_I[{}][{}] * j_dev[{} * M + {}] * N_V[{}][{}];\n",
+                                        a, b, a, i, i, j, j, b
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            code.push('\n');
+
+            // 2d. Build companion RHS: rhs_base + N_i * (i_nl - J_dev * v_nl) (sparse)
+            code.push_str("        // 2d. Build companion RHS: rhs + N_i * (i_nl - J_dev * v_nl) (sparse)\n");
             code.push_str("        let mut rhs_work = rhs;\n");
-            code.push_str("        for i in 0..M {\n");
-            code.push_str("            let mut jdev_vnl = 0.0;\n");
-            code.push_str("            for j in 0..M {\n");
-            code.push_str("                jdev_vnl += j_dev[i * M + j] * v_nl[j];\n");
-            code.push_str("            }\n");
-            code.push_str("            let i_comp = i_nl[i] - jdev_vnl;\n");
-            code.push_str("            for a_idx in 0..N {\n");
-            code.push_str("                rhs_work[a_idx] += N_I[i][a_idx] * i_comp;\n");
-            code.push_str("            }\n");
-            code.push_str("        }\n\n");
+            {
+                // Build transpose of N_i sparsity
+                let mut ni_nz_by_dev = vec![Vec::new(); m];
+                for (a, cols) in ir.sparsity.n_i.nz_by_row.iter().enumerate() {
+                    for &i in cols {
+                        ni_nz_by_dev[i].push(a);
+                    }
+                }
+
+                for slot in &ir.device_slots {
+                    let s = slot.start_idx;
+                    let dim = slot.dimension;
+                    for di in 0..dim {
+                        let i = s + di;
+                        // Compute jdev_vnl = sum_j j_dev[i*M+j] * v_nl[j] (only within block)
+                        let jdv_terms: Vec<String> = (0..dim).map(|dj| {
+                            let j = s + dj;
+                            format!("j_dev[{} * M + {}] * v_nl[{}]", i, j, j)
+                        }).collect();
+                        code.push_str(&format!(
+                            "        {{ let i_comp = i_nl[{}] - ({});\n",
+                            i, jdv_terms.join(" + ")
+                        ));
+                        // Stamp N_i * i_comp at nonzero nodes (N_I is N×M)
+                        for &a in &ni_nz_by_dev[i] {
+                            code.push_str(&format!(
+                                "          rhs_work[{}] += N_I[{}][{}] * i_comp;\n",
+                                a, a, i
+                            ));
+                        }
+                        code.push_str("        }\n");
+                    }
+                }
+            }
+            code.push('\n');
 
             // 2e. LU solve: v_new = G_aug^{-1} * rhs_work
             code.push_str("        // 2e. LU solve: v_new = G_aug^{-1} * rhs_work\n");
@@ -3728,19 +4103,18 @@ impl RustEmitter {
             code.push_str("            }\n");
             code.push_str("        }\n\n");
 
-            // Apply damped Newton step
-            code.push_str("        // Apply damped Newton step\n");
+            // Apply damped Newton step and check convergence
+            // Compute step BEFORE updating v, so convergence check sees the actual delta
+            // Skip convergence check on iter 0 — need at least one full NR update
+            code.push_str("        // Compute damped step, check convergence, then apply\n");
+            code.push_str("        let mut max_step_exceeded = false;\n");
             code.push_str("        for i in 0..N {\n");
-            code.push_str("            v[i] += alpha * (v_new[i] - v[i]);\n");
-            code.push_str("        }\n\n");
-
-            // RELTOL convergence check
-            code.push_str("        // SPICE-style convergence: RELTOL * max(|v_new|, |v_old|) + VNTOL\n");
-            code.push_str("        let converged_check = (0..N).all(|i| {\n");
-            code.push_str("            let abs_delta = (alpha * (v_new[i] - v[i])).abs();\n");
-            code.push_str("            let threshold = 1e-3 * v[i].abs().max(v_new[i].abs()) + TOL;\n");
-            code.push_str("            abs_delta < threshold\n");
-            code.push_str("        });\n\n");
+            code.push_str("            let step = alpha * (v_new[i] - v[i]);\n");
+            code.push_str("            let threshold = 1e-6 * v[i].abs().max((v[i] + step).abs()) + TOL;\n");
+            code.push_str("            if step.abs() >= threshold { max_step_exceeded = true; }\n");
+            code.push_str("            v[i] += step;\n");
+            code.push_str("        }\n");
+            code.push_str("        let converged_check = !max_step_exceeded;\n\n");
 
             code.push_str("        if converged_check {\n");
             code.push_str("            converged = true;\n");
@@ -3779,7 +4153,7 @@ impl RustEmitter {
             code.push_str("            }\n");
             if m > 0 {
                 code.push_str("            for j in 0..M {\n");
-                code.push_str("                sum += N_I[j][i] * state.i_nl_prev[j];\n");
+                code.push_str("                sum += N_I[i][j] * state.i_nl_prev[j];\n");
                 code.push_str("            }\n");
             }
             code.push_str("            rhs_be[i] = sum;\n");
@@ -3798,39 +4172,70 @@ impl RustEmitter {
             code.push_str("                v_nl[i] = sum;\n");
             code.push_str("            }\n\n");
 
-            // Evaluate devices
+            // Evaluate devices (write to outer i_nl, declare local j_dev)
             code.push_str("            // Evaluate devices\n");
-            Self::emit_nodal_device_evaluation_indented(&mut code, ir, "            ");
+            code.push_str("            let mut j_dev = [0.0f64; M * M];\n");
+            Self::emit_nodal_device_evaluation_body(&mut code, ir, "            ");
             code.push('\n');
 
-            // Build Jacobian for BE
+            // Build Jacobian for BE (sparse, same structure as trapezoidal)
             code.push_str("            let mut g_aug = state.a_be;\n");
-            code.push_str("            for a_idx in 0..N {\n");
-            code.push_str("                for b_idx in 0..N {\n");
-            code.push_str("                    let mut sum = 0.0;\n");
-            code.push_str("                    for i in 0..M {\n");
-            code.push_str("                        let ni_ai = N_I[i][a_idx];\n");
-            code.push_str("                        if ni_ai.abs() < 1e-30 { continue; }\n");
-            code.push_str("                        for j in 0..M {\n");
-            code.push_str("                            let jd = j_dev[i * M + j];\n");
-            code.push_str("                            if jd.abs() < 1e-30 { continue; }\n");
-            code.push_str("                            let nv_jb = N_V[j][b_idx];\n");
-            code.push_str("                            if nv_jb.abs() < 1e-30 { continue; }\n");
-            code.push_str("                            sum += ni_ai * jd * nv_jb;\n");
-            code.push_str("                        }\n");
-            code.push_str("                    }\n");
-            code.push_str("                    g_aug[a_idx][b_idx] -= sum;\n");
-            code.push_str("                }\n");
-            code.push_str("            }\n\n");
+            {
+                let mut ni_nz_by_dev = vec![Vec::new(); m];
+                for (a, cols) in ir.sparsity.n_i.nz_by_row.iter().enumerate() {
+                    for &i in cols { ni_nz_by_dev[i].push(a); }
+                }
+                for slot in &ir.device_slots {
+                    let s = slot.start_idx;
+                    let dim = slot.dimension;
+                    for di in 0..dim {
+                        let i = s + di;
+                        for dj in 0..dim {
+                            let j = s + dj;
+                            let nv_nodes = &ir.sparsity.n_v.nz_by_row[j];
+                            for &a in &ni_nz_by_dev[i] {
+                                for &b in nv_nodes {
+                                    code.push_str(&format!(
+                                        "            g_aug[{}][{}] -= N_I[{}][{}] * j_dev[{} * M + {}] * N_V[{}][{}];\n",
+                                        a, b, a, i, i, j, j, b
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            code.push('\n');
 
-            // Companion RHS for BE
+            // Companion RHS for BE (sparse)
             code.push_str("            let mut rhs_work = rhs_be;\n");
-            code.push_str("            for i in 0..M {\n");
-            code.push_str("                let mut jdev_vnl = 0.0;\n");
-            code.push_str("                for j in 0..M { jdev_vnl += j_dev[i * M + j] * v_nl[j]; }\n");
-            code.push_str("                let i_comp = i_nl[i] - jdev_vnl;\n");
-            code.push_str("                for a_idx in 0..N { rhs_work[a_idx] += N_I[i][a_idx] * i_comp; }\n");
-            code.push_str("            }\n\n");
+            {
+                let mut ni_nz_by_dev = vec![Vec::new(); m];
+                for (a, cols) in ir.sparsity.n_i.nz_by_row.iter().enumerate() {
+                    for &i in cols { ni_nz_by_dev[i].push(a); }
+                }
+                for slot in &ir.device_slots {
+                    let s = slot.start_idx;
+                    let dim = slot.dimension;
+                    for di in 0..dim {
+                        let i = s + di;
+                        let jdv_terms: Vec<String> = (0..dim).map(|dj| {
+                            let j = s + dj;
+                            format!("j_dev[{} * M + {}] * v_nl[{}]", i, j, j)
+                        }).collect();
+                        code.push_str(&format!(
+                            "            {{ let i_comp = i_nl[{}] - ({});\n", i, jdv_terms.join(" + ")
+                        ));
+                        for &a in &ni_nz_by_dev[i] {
+                            code.push_str(&format!(
+                                "              rhs_work[{}] += N_I[{}][{}] * i_comp;\n", a, a, i
+                            ));
+                        }
+                        code.push_str("            }\n");
+                    }
+                }
+            }
+            code.push('\n');
 
             // LU solve for BE
             code.push_str("            let mut v_new = rhs_work;\n");
@@ -3851,14 +4256,15 @@ impl RustEmitter {
             code.push_str("                if max_node_dv > 10.0 { alpha *= (10.0 / max_node_dv).max(0.01); }\n");
             code.push_str("            }\n\n");
 
-            code.push_str("            for i in 0..N { v[i] += alpha * (v_new[i] - v[i]); }\n\n");
-
-            // BE convergence
-            code.push_str("            let be_converged = (0..N).all(|i| {\n");
-            code.push_str("                let abs_delta = (alpha * (v_new[i] - v[i])).abs();\n");
-            code.push_str("                let threshold = 1e-3 * v[i].abs().max(v_new[i].abs()) + TOL;\n");
-            code.push_str("                abs_delta < threshold\n");
-            code.push_str("            });\n\n");
+            // Apply damped step and check convergence (compute delta before updating)
+            code.push_str("            let mut be_step_exceeded = false;\n");
+            code.push_str("            for i in 0..N {\n");
+            code.push_str("                let step = alpha * (v_new[i] - v[i]);\n");
+            code.push_str("                let threshold = 1e-6 * v[i].abs().max((v[i] + step).abs()) + TOL;\n");
+            code.push_str("                if step.abs() >= threshold { be_step_exceeded = true; }\n");
+            code.push_str("                v[i] += step;\n");
+            code.push_str("            }\n");
+            code.push_str("            let be_converged = !be_step_exceeded;\n\n");
 
             code.push_str("            if be_converged {\n");
             code.push_str("                converged = true;\n");
@@ -3986,14 +4392,16 @@ impl RustEmitter {
         Self::emit_nodal_device_evaluation_indented(code, ir, "        ");
     }
 
-    /// Emit device evaluation code at a given indentation level.
-    ///
-    /// Produces `i_nl[M]` and `j_dev[M*M]` arrays from `v_nl[M]`.
+    /// Emit device evaluation code with declarations (i_nl + j_dev).
     fn emit_nodal_device_evaluation_indented(code: &mut String, ir: &CircuitIR, indent: &str) {
-        let m = ir.topology.m;
-
         code.push_str(&format!("{indent}let mut i_nl = [0.0f64; M];\n"));
         code.push_str(&format!("{indent}let mut j_dev = [0.0f64; M * M];\n"));
+        Self::emit_nodal_device_evaluation_body(code, ir, indent);
+    }
+
+    /// Emit device evaluation code WITHOUT declarations (writes to existing i_nl, j_dev).
+    fn emit_nodal_device_evaluation_body(code: &mut String, ir: &CircuitIR, indent: &str) {
+        let _m = ir.topology.m;
 
         for (dev_num, slot) in ir.device_slots.iter().enumerate() {
             let s = slot.start_idx;
@@ -4176,7 +4584,7 @@ impl RustEmitter {
             }
         }
 
-        let _ = m;
+        let _ = _m;
     }
 
     /// Emit final device evaluation at converged point (writes into existing `i_nl`).

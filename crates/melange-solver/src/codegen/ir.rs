@@ -1145,13 +1145,19 @@ impl CircuitIR {
         let m = mna.m;
 
         // Build augmented G/C matrices (includes inductor branch variables)
-        let aug = mna.build_augmented_matrices();
+        let mut aug = mna.build_augmented_matrices();
         let n = aug.n_nodal;
 
+        // Gmin regularization: prevent singular Jacobians on floating nodes.
+        // Matches runtime NodalSolver (solver.rs Gmin stamping).
+        for i in 0..n_nodes {
+            aug.g[i][i] += 1e-12;
+        }
+
         let sample_rate = config.sample_rate;
-        let t = 1.0 / sample_rate;
-        let alpha = 2.0 / t;
-        let alpha_be = 1.0 / t;
+        let internal_rate = sample_rate * config.oversampling_factor as f64;
+        let alpha = 2.0 * internal_rate;
+        let alpha_be = internal_rate;
 
         let topology = Topology {
             n,
@@ -1309,8 +1315,35 @@ impl CircuitIR {
             inductors: Vec::new(),          // no companion model
             coupled_inductors: Vec::new(),
             transformer_groups: Vec::new(),
-            pots: Vec::new(),               // TODO: pot support for nodal (Phase 3)
-            switches: Vec::new(),           // TODO: switch support for nodal (Phase 3)
+            pots: mna.pots.iter().map(|p| PotentiometerIR {
+                su: Vec::new(),         // not used in nodal (no Sherman-Morrison)
+                usu: 0.0,
+                g_nominal: p.g_nominal,
+                nv_su: Vec::new(),
+                u_ni: Vec::new(),
+                node_p: p.node_p,
+                node_q: p.node_q,
+                min_resistance: p.min_resistance,
+                max_resistance: p.max_resistance,
+                grounded: p.grounded,
+            }).collect(),
+            switches: mna.switches.iter().enumerate().map(|(idx, sw)| {
+                SwitchIR {
+                    index: idx,
+                    components: sw.components.iter().map(|comp| {
+                        SwitchComponentIR {
+                            name: comp.name.clone(),
+                            component_type: comp.component_type,
+                            node_p: comp.node_p,
+                            node_q: comp.node_q,
+                            nominal_value: comp.nominal_value,
+                            inductor_index: None, // augmented MNA handles inductors differently
+                        }
+                    }).collect(),
+                    positions: sw.positions.clone(),
+                    num_positions: sw.positions.len(),
+                }
+            }).collect(),
             sparsity,
         })
     }

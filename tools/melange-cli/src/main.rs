@@ -55,7 +55,7 @@ enum Commands {
         output_node: String,
 
         /// Maximum NR iterations
-        #[arg(long, default_value = "20")]
+        #[arg(long, default_value = "50")]
         max_iter: usize,
 
         /// Convergence tolerance
@@ -81,6 +81,10 @@ enum Commands {
         /// Override input resistance (ohms). Default: 1Ω, or from .input_impedance directive.
         #[arg(long)]
         input_resistance: Option<f64>,
+
+        /// Oversampling factor (1=none, 2=2x, 4=4x). Higher reduces aliasing and improves NR stability.
+        #[arg(long, default_value = "1")]
+        oversampling: usize,
     },
 
     /// Validate circuit against ngspice reference simulation
@@ -297,6 +301,7 @@ fn main() -> Result<()> {
             with_level_params,
             no_level_params,
             input_resistance: input_resistance_flag,
+            oversampling,
         } => {
             // Validate numeric CLI parameters
             if sample_rate <= 0.0 || !sample_rate.is_finite() {
@@ -307,6 +312,9 @@ fn main() -> Result<()> {
             }
             if max_iter == 0 {
                 anyhow::bail!("max-iter must be at least 1, got 0");
+            }
+            if oversampling != 1 && oversampling != 2 && oversampling != 4 {
+                anyhow::bail!("oversampling must be 1, 2, or 4, got {}", oversampling);
             }
 
             // Level params are on by default; --no-level-params disables them
@@ -326,6 +334,7 @@ fn main() -> Result<()> {
                 format,
                 level_params,
                 input_resistance_flag,
+                oversampling,
             )
         }
         Commands::Validate {
@@ -452,6 +461,7 @@ fn compile_circuit_source(
     format: OutputFormat,
     with_level_params: bool,
     input_resistance_flag: Option<f64>,
+    oversampling: usize,
 ) -> Result<()> {
     use melange_solver::{
         codegen::{CodegenConfig, CodeGenerator},
@@ -627,6 +637,7 @@ fn compile_circuit_source(
         output_scales,
         include_dc_op: true,
         input_resistance,
+        oversampling_factor: oversampling,
         ..CodegenConfig::default()
     };
 
@@ -678,33 +689,27 @@ fn compile_circuit_source(
                 .unwrap_or("circuit")
                 .to_string();
 
-            // Build pot/switch parameter info.
-            // Nodal codegen doesn't support pots/switches yet (Phase 3), so pass empty.
-            let (pot_params, switch_params) = if has_inductors_compile {
-                (Vec::new(), Vec::new())
-            } else {
-                let pots: Vec<plugin_template::PotParamInfo> = kernel.pots.iter().enumerate().map(|(idx, p)| {
-                    plugin_template::PotParamInfo {
-                        index: idx,
-                        name: netlist.pots.get(idx).map(|d| {
-                            d.label.clone().unwrap_or_else(|| d.resistor_name.clone())
-                        }).unwrap_or_else(|| format!("Pot {}", idx)),
-                        min_resistance: p.min_resistance,
-                        max_resistance: p.max_resistance,
-                        default_resistance: 1.0 / p.g_nominal,
-                    }
-                }).collect();
-                let switches: Vec<plugin_template::SwitchParamInfo> = netlist.switches.iter().enumerate().map(|(idx, sw)| {
-                    plugin_template::SwitchParamInfo {
-                        index: idx,
-                        name: sw.label.clone().unwrap_or_else(|| format!("Switch {} ({})", idx, sw.component_names.join("+"))),
-                        num_positions: sw.positions.len(),
-                    }
-                }).collect();
-                (pots, switches)
-            };
+            // Build pot/switch parameter info from MNA data (works for both DK and nodal paths).
+            let pot_params: Vec<plugin_template::PotParamInfo> = mna.pots.iter().enumerate().map(|(idx, p)| {
+                plugin_template::PotParamInfo {
+                    index: idx,
+                    name: netlist.pots.get(idx).map(|d| {
+                        d.label.clone().unwrap_or_else(|| d.resistor_name.clone())
+                    }).unwrap_or_else(|| format!("Pot {}", idx)),
+                    min_resistance: p.min_resistance,
+                    max_resistance: p.max_resistance,
+                    default_resistance: 1.0 / p.g_nominal,
+                }
+            }).collect();
+            let switch_params: Vec<plugin_template::SwitchParamInfo> = netlist.switches.iter().enumerate().map(|(idx, sw)| {
+                plugin_template::SwitchParamInfo {
+                    index: idx,
+                    name: sw.label.clone().unwrap_or_else(|| format!("Switch {} ({})", idx, sw.component_names.join("+"))),
+                    num_positions: sw.positions.len(),
+                }
+            }).collect();
 
-            plugin_template::generate_plugin_project(&project_dir, &generated.code, &circuit_name, with_level_params, &pot_params, &switch_params, output_node_indices.len())?;
+            plugin_template::generate_plugin_project(&project_dir, &generated.code, &circuit_name, with_level_params, &pot_params, &switch_params, output_node_indices.len(), has_inductors_compile)?;
 
             println!("  ✓ Done!");
             println!();

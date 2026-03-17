@@ -37,11 +37,12 @@ pub fn generate_plugin_project(
     pots: &[PotParamInfo],
     switches: &[SwitchParamInfo],
     num_outputs: usize,
+    nodal_mode: bool,
 ) -> Result<()> {
     std::fs::create_dir_all(output_dir.join("src"))?;
     std::fs::write(output_dir.join("Cargo.toml"), generate_cargo_toml(circuit_name))?;
     std::fs::write(output_dir.join("src/circuit.rs"), circuit_code)?;
-    std::fs::write(output_dir.join("src/lib.rs"), generate_lib_rs(circuit_name, with_level_params, pots, switches, num_outputs))?;
+    std::fs::write(output_dir.join("src/lib.rs"), generate_lib_rs(circuit_name, with_level_params, pots, switches, num_outputs, nodal_mode))?;
     Ok(())
 }
 
@@ -66,7 +67,7 @@ pub(crate) fn test_generate_cargo_toml(circuit_name: &str) -> String {
 
 #[cfg(test)]
 pub(crate) fn test_generate_lib_rs(circuit_name: &str, with_level_params: bool, pots: &[PotParamInfo]) -> String {
-    generate_lib_rs(circuit_name, with_level_params, pots, &[], 1)
+    generate_lib_rs(circuit_name, with_level_params, pots, &[], 1, false)
 }
 
 /// Capitalize first character, lowercase the rest (e.g., "hello" -> "Hello", "LOUD" -> "Loud").
@@ -183,7 +184,7 @@ impl Default for CircuitParams {{
     )
 }
 
-fn generate_process_loop(with_level_params: bool, pots: &[PotParamInfo], switches: &[SwitchParamInfo], num_outputs: usize) -> String {
+fn generate_process_loop(with_level_params: bool, pots: &[PotParamInfo], switches: &[SwitchParamInfo], num_outputs: usize, nodal_mode: bool) -> String {
     let has_any_params = with_level_params || !pots.is_empty() || !switches.is_empty();
     if !has_any_params && num_outputs <= 1 {
         return r#"        for channel_samples in buffer.iter_samples() {
@@ -238,10 +239,19 @@ fn generate_process_loop(with_level_params: bool, pots: &[PotParamInfo], switche
     let pot_assignments: String = pots
         .iter()
         .map(|p| {
-            format!(
-                "                state.pot_{i}_resistance = pot_{i}_val;\n",
-                i = p.index,
-            )
+            if nodal_mode {
+                // Nodal path: call set_pot_N() to re-stamp G and rebuild matrices (only on change)
+                format!(
+                    "                state.set_pot_{i}(pot_{i}_val);\n",
+                    i = p.index,
+                )
+            } else {
+                // DK path: set resistance directly (SM correction applied per-sample in process_sample)
+                format!(
+                    "                state.pot_{i}_resistance = pot_{i}_val;\n",
+                    i = p.index,
+                )
+            }
         })
         .collect();
 
@@ -327,12 +337,12 @@ const LEVEL_PARAM_DEFAULTS: &str = r#"            input_level: FloatParam::new(
             .with_string_to_value(formatters::s2v_f32_gain_to_db()),
 "#;
 
-fn generate_lib_rs(circuit_name: &str, with_level_params: bool, pots: &[PotParamInfo], switches: &[SwitchParamInfo], num_outputs: usize) -> String {
+fn generate_lib_rs(circuit_name: &str, with_level_params: bool, pots: &[PotParamInfo], switches: &[SwitchParamInfo], num_outputs: usize, nodal_mode: bool) -> String {
     let display_name: String = circuit_name.split('-').map(capitalize_word).collect::<Vec<_>>().join(" ");
     let clap_id = format!("com.melange.{circuit_name}");
     let vst3_id_str = compute_vst3_id(circuit_name);
     let params_struct = generate_params_struct(with_level_params, pots, switches);
-    let process_loop = generate_process_loop(with_level_params, pots, switches, num_outputs);
+    let process_loop = generate_process_loop(with_level_params, pots, switches, num_outputs, nodal_mode);
 
     // Conditional sections based on num_outputs
     let (circuit_import, plugin_struct, plugin_default, init_method, reset_method) = if num_outputs > 1 {
@@ -910,6 +920,7 @@ mod tests {
             &[],
             &[],
             1,
+            false,
         );
         assert!(result.is_ok(), "generate_plugin_project should succeed: {:?}", result.err());
         assert!(dir.join("Cargo.toml").exists(), "Should create Cargo.toml");
@@ -925,7 +936,7 @@ mod tests {
         let dir = std::env::temp_dir().join("melange_test_plugin_circuit");
         let _ = std::fs::remove_dir_all(&dir);
         let circuit_code = "// This is the generated circuit code\npub fn process_sample() {}";
-        let result = generate_plugin_project(&dir, circuit_code, "test", false, &[], &[], 1);
+        let result = generate_plugin_project(&dir, circuit_code, "test", false, &[], &[], 1, false);
         assert!(result.is_ok());
         let written = std::fs::read_to_string(dir.join("src/circuit.rs")).unwrap();
         assert_eq!(written, circuit_code);
@@ -936,7 +947,7 @@ mod tests {
     fn generate_plugin_project_cargo_toml_has_correct_name() {
         let dir = std::env::temp_dir().join("melange_test_plugin_name");
         let _ = std::fs::remove_dir_all(&dir);
-        let result = generate_plugin_project(&dir, "// code", "my-cool-plugin", false, &[], &[], 1);
+        let result = generate_plugin_project(&dir, "// code", "my-cool-plugin", false, &[], &[], 1, false);
         assert!(result.is_ok());
         let toml = std::fs::read_to_string(dir.join("Cargo.toml")).unwrap();
         assert!(toml.contains("name = \"my-cool-plugin\""));
@@ -947,7 +958,7 @@ mod tests {
     fn generate_plugin_project_lib_rs_has_plugin_code() {
         let dir = std::env::temp_dir().join("melange_test_plugin_lib");
         let _ = std::fs::remove_dir_all(&dir);
-        let result = generate_plugin_project(&dir, "// code", "my-plugin", false, &[], &[], 1);
+        let result = generate_plugin_project(&dir, "// code", "my-plugin", false, &[], &[], 1, false);
         assert!(result.is_ok());
         let lib_rs = std::fs::read_to_string(dir.join("src/lib.rs")).unwrap();
         assert!(lib_rs.contains("CircuitPlugin"));
@@ -961,8 +972,8 @@ mod tests {
         let dir = std::env::temp_dir().join("melange_test_plugin_idempotent");
         let _ = std::fs::remove_dir_all(&dir);
         // Generate twice, should not fail
-        let _ = generate_plugin_project(&dir, "// v1", "test", false, &[], &[], 1);
-        let result = generate_plugin_project(&dir, "// v2", "test", false, &[], &[], 1);
+        let _ = generate_plugin_project(&dir, "// v1", "test", false, &[], &[], 1, false);
+        let result = generate_plugin_project(&dir, "// v2", "test", false, &[], &[], 1, false);
         assert!(result.is_ok());
         // Second write should overwrite
         let circuit = std::fs::read_to_string(dir.join("src/circuit.rs")).unwrap();
