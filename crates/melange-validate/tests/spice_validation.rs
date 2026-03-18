@@ -21,6 +21,7 @@
 //! | `test_rc_lowpass_step_response` | Linear RC | 0 | Strict |
 //! | `test_rc_lowpass_chirp` | Linear RC | 0 | Strict |
 //! | `test_diode_clipper_silence_to_signal` | Diode clipper | 2 diodes | Default |
+//! | `test_wurli_preamp_vs_spice` | Wurli 200A preamp | 2 BJTs + 1 diode | BJT |
 
 use std::path::PathBuf;
 
@@ -324,6 +325,52 @@ fn run_melange_solver(
     }
 
     // Run simulation
+    let mut output = Vec::with_capacity(input_signal.len());
+    for &sample in input_signal.iter() {
+        output.push(solver.process_sample(sample));
+    }
+
+    Ok(output)
+}
+
+#[allow(dead_code)]
+/// Run melange solver on a netlist string using NodalSolver (full NR per sample).
+///
+/// This is more robust than `run_melange_solver` (DK/CircuitSolver) for multi-stage
+/// BJT circuits where the DK method's reduced-dimension NR can diverge.
+fn run_melange_solver_nodal(
+    netlist_str: &str,
+    input_signal: &[f64],
+    sample_rate: f64,
+) -> Result<Vec<f64>, ValidationError> {
+    use melange_solver::solver::NodalSolver;
+
+    let netlist = melange_solver::parser::Netlist::parse(netlist_str)
+        .map_err(|e| ValidationError::Solver(format!("Parse error at line {}: {}", e.line, e.message)))?;
+
+    let mut mna = melange_solver::mna::MnaSystem::from_netlist(&netlist)
+        .map_err(|e| ValidationError::Solver(format!("MNA error: {}", e)))?;
+
+    let input_node = mna.node_map.get("in").copied().unwrap_or(1).saturating_sub(1);
+    let output_node = mna.node_map.get("out").copied().unwrap_or(2).saturating_sub(1);
+    let input_conductance = 1.0;
+
+    if input_node < mna.n {
+        mna.g[input_node][input_node] += input_conductance;
+    }
+
+    let kernel = melange_solver::dk::DkKernel::from_mna(&mna, sample_rate)
+        .map_err(|e| ValidationError::Solver(format!("DK kernel error: {:?}", e)))?;
+
+    let device_slots = build_device_slots_from_netlist(&netlist);
+
+    let mut solver = NodalSolver::new(kernel, &mna, &netlist, device_slots.clone(), input_node, output_node);
+    solver.input_conductance = input_conductance;
+
+    if mna.m > 0 {
+        solver.initialize_dc_op(&mna, &device_slots);
+    }
+
     let mut output = Vec::with_capacity(input_signal.len());
     for &sample in input_signal.iter() {
         output.push(solver.process_sample(sample));
@@ -1130,6 +1177,105 @@ fn test_mosfet_common_source_vs_spice() {
         "MOSFET common source validation failed:\n{}\nReport saved to: {:?}",
         result.report.summary(),
         result.html_report_path
+    );
+}
+
+/// Test 8: Wurlitzer 200A Preamp (Multi-Stage BJT + Diode, M=5)
+///
+/// Two-stage direct-coupled NPN CE amplifier (2N5089) with series-series
+/// emitter NFB and a diode protection. 2 BJTs (4D) + 1 diode (1D) = M=5.
+///
+/// Circuit: R1(22k) → Cin(22nF) → Q1(150k Rc, 33k Re) → Q2(1.8k Rc) → R9(6.8k) → out
+///          R10(56k) feedback from output to Q1 emitter, LDR(100k) shunt to ground
+///          D1(1N4148) reverse-biased clamp at Q1 base
+/// Input: 100mV sine at 1kHz
+/// Expected: Output ≈ 9.1V DC bias, ~2.5x AC gain (7-8 dB)
+///
+/// **Note**: This circuit's runtime DK solver (CircuitSolver) currently fails to
+/// converge because the nonlinear DC OP solver cannot find the correct bias point
+/// for a two-stage direct-coupled BJT amplifier (M=5). The codegen path works
+/// correctly. This test serves as a regression target for runtime solver improvements.
+#[test]
+#[ignore] // requires ngspice
+fn test_wurli_preamp_vs_spice() {
+    assert!(is_ngspice_available(), "ngspice not found");
+
+    println!("\n=== Wurlitzer 200A Preamp Validation ===");
+    println!("Circuit: 2-stage NPN (2N5089), M=5, LDR=100k fixed");
+
+    let data_dir = test_data_dir().join("wurli_preamp");
+    let netlist_path = data_dir.join("circuit.cir");
+    let input_pwl_path = data_dir.join("input_pwl.txt");
+
+    let netlist_str = std::fs::read_to_string(&netlist_path).expect("Failed to read netlist");
+    let pwl_data = load_pwl_file(&input_pwl_path).expect("Failed to load PWL");
+    let duration = pwl_data.last().map(|(t, _)| *t).unwrap_or(0.01);
+    let tstep = 1.0 / SAMPLE_RATE;
+
+    // --- Run ngspice ---
+    let spice_data = run_transient_with_thevenin_pwl(
+        &netlist_str, tstep, duration, "in", &pwl_data, 1.0, &["out".to_string()],
+    ).expect("ngspice failed");
+
+    let mut spice_output = spice_data.get_node_voltage("out").unwrap().to_vec();
+    // DC-block SPICE output to match melange's internal DC blocking filter.
+    // The wurli-preamp output has ~9.1V DC bias (no output coupling cap).
+    dc_block_signal(&mut spice_output, SAMPLE_RATE);
+    let input_signal = resample_pwl_to_signal(&pwl_data, SAMPLE_RATE, spice_output.len());
+
+    // --- Run melange (DK/CircuitSolver) ---
+    let (stripped_netlist, _) = strip_vin_source(&netlist_str, "in");
+    let melange_output = run_melange_solver(&stripped_netlist, &input_signal, SAMPLE_RATE)
+        .expect("melange solver failed");
+
+    // --- Compare ---
+    let config = bjt_config();
+    let spice_signal = Signal::new(spice_output.clone(), SAMPLE_RATE, "SPICE");
+    let melange_signal = Signal::new(melange_output.clone(), SAMPLE_RATE, "Melange");
+    let mut report = compare_signals(&spice_signal, &melange_signal, &config);
+    report.circuit_name = "wurli_preamp".to_string();
+    report.node_name = "out".to_string();
+
+    let result = ValidationResult {
+        report,
+        html_report_path: None,
+    };
+
+    print_validation_metrics(&result);
+
+    // --- Gain verification ---
+    let input_pp = input_signal.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
+        - input_signal.iter().cloned().fold(f64::INFINITY, f64::min);
+    let melange_pp = melange_output.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
+        - melange_output.iter().cloned().fold(f64::INFINITY, f64::min);
+    let spice_pp = spice_output.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
+        - spice_output.iter().cloned().fold(f64::INFINITY, f64::min);
+
+    let spice_gain = spice_pp / input_pp;
+    let melange_gain = melange_pp / input_pp;
+
+    println!("    Input PP: {:.4} V", input_pp);
+    println!("    SPICE output PP: {:.4} V (gain: {:.1}x)", spice_pp, spice_gain);
+    println!("    Melange output PP: {:.4} V (gain: {:.1}x)", melange_pp, melange_gain);
+
+    assert!(
+        result.report.passed,
+        "Wurli preamp validation failed:\n{}\nReport saved to: {:?}",
+        result.report.summary(),
+        result.html_report_path
+    );
+
+    // Melange must actually amplify the signal (gain > 1x for a multi-stage preamp)
+    assert!(
+        melange_gain > 1.0,
+        "Wurli preamp should amplify signal, got {:.2}x gain", melange_gain
+    );
+    // Melange gain should be within 4x of SPICE gain (allow for model differences)
+    let gain_ratio = melange_gain / spice_gain;
+    assert!(
+        gain_ratio > 0.25 && gain_ratio < 4.0,
+        "Melange gain ({:.1}x) should be within 4x of SPICE gain ({:.1}x), ratio={:.2}",
+        melange_gain, spice_gain, gain_ratio
     );
 }
 

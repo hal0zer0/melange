@@ -391,6 +391,104 @@ pub fn solve_linear(g_aug: &[Vec<f64>], rhs: &[f64]) -> Option<Vec<f64>> {
     Some(lu_solve(&lu, &pivot, rhs))
 }
 
+/// Clamp junction voltages in the linear initial guess to prevent NR divergence.
+///
+/// For BJT circuits, the linear solution (no nonlinear currents) often produces
+/// junction voltages of several volts (e.g., Vbe = 2.8V for a direct-coupled stage)
+/// because the BJT is not conducting in the linear model. These extreme voltages
+/// cause exp(V/Vt) to saturate at exp(40), producing enormous currents and
+/// Jacobians that make NR oscillate.
+///
+/// This function detects junctions with |V_nl| > V_CLAMP and adjusts the
+/// appropriate node voltages to bring controlling voltages within range.
+/// Only PN junction devices (diodes, BJTs) are clamped; FETs and tubes are left alone.
+fn clamp_junction_voltages(
+    mna: &MnaSystem,
+    device_slots: &[DeviceSlot],
+    v_linear: &[f64],
+) -> Vec<f64> {
+    let mut v = v_linear.to_vec();
+    let m = mna.m;
+    let n_aug = mna.n_aug.min(v.len());
+
+    let mut v_nl = vec![0.0; m];
+    extract_nl_voltages(mna, &v, &mut v_nl);
+
+    // For each BJT, set the emitter node so that Vbe ≈ 0.65V, and set the
+    // collector node for reasonable Vce. This adjusts the "dependent" nodes
+    // (emitter, collector) rather than the base, preserving resistor-divider bias.
+    // For diodes, adjust the cathode node to bring the junction to ±0.6V.
+    for slot in device_slots {
+        match slot.device_type {
+            DeviceType::Diode => {
+                let nl_idx = slot.start_idx;
+                if nl_idx >= m { continue; }
+                let v_diode = v_nl[nl_idx];
+                if v_diode.abs() <= 0.8 { continue; }
+
+                // Find anode (+N_v) and cathode (-N_v) nodes
+                let nv_row = &mna.n_v[nl_idx];
+                let mut anode = None;
+                let mut cathode = None;
+                for j in 0..n_aug {
+                    if nv_row[j] > 0.5 { anode = Some(j); }
+                    if nv_row[j] < -0.5 { cathode = Some(j); }
+                }
+                // Set cathode voltage so V_junction = sign * 0.6V
+                if let (Some(a), Some(c)) = (anode, cathode) {
+                    let target = 0.6 * v_diode.signum();
+                    v[c] = v[a] - target;
+                }
+            }
+            DeviceType::Bjt | DeviceType::BjtForwardActive => {
+                let vbe_idx = slot.start_idx;
+                let vbc_idx = slot.start_idx + 1;
+                if vbe_idx >= m || (slot.dimension > 1 && vbc_idx >= m) { continue; }
+
+                // Find base and emitter nodes from Vbe N_v row
+                let nv_vbe = &mna.n_v[vbe_idx];
+                let mut base_node = None;
+                let mut emitter_node = None;
+                for j in 0..n_aug {
+                    if nv_vbe[j] > 0.5 { base_node = Some(j); }
+                    if nv_vbe[j] < -0.5 { emitter_node = Some(j); }
+                }
+
+                // Set emitter so Vbe = 0.65V
+                if let (Some(b), Some(e)) = (base_node, emitter_node) {
+                    let new_ve = v[b] - 0.65;
+                    if (v[e] - new_ve).abs() > 0.1 {
+                        v[e] = new_ve;
+                    }
+                }
+
+                // Find collector node from Vbc N_v row
+                if slot.dimension > 1 {
+                    let nv_vbc = &mna.n_v[vbc_idx];
+                    let mut collector_node = None;
+                    for j in 0..n_aug {
+                        if nv_vbc[j] < -0.5 { collector_node = Some(j); }
+                    }
+
+                    // Set collector for forward-active mode: Vbc < 0 (reverse biased).
+                    // Place collector at base + 30% of (V_supply - V_base).
+                    if let (Some(b), Some(c)) = (base_node, collector_node) {
+                        let vbc = v[b] - v[c];
+                        if vbc > -0.5 {
+                            let v_supply = v.iter().take(mna.n).cloned()
+                                .fold(0.0_f64, f64::max);
+                            v[c] = v[b] + (v_supply - v[b]) * 0.3;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    v
+}
+
 /// Run Newton-Raphson DC operating point solve.
 ///
 /// Solves: F(v) = G_dc · v - b_dc - N_i · i_nl(N_v · v) = 0
@@ -603,11 +701,17 @@ pub fn solve_dc_operating_point(
 
     let circuit = DcCircuit { g_dc: &g_dc, b_dc: &b_dc, mna, device_slots, config };
 
-    let mut v = v_linear.clone();
+    // Clamp junction voltages in the linear initial guess to prevent
+    // extreme forward bias (which causes exp() saturation and NR divergence).
+    // For multi-stage direct-coupled BJT circuits, the linear guess often has
+    // junction voltages of several volts because the BJT is not conducting.
+    let v_clamped = clamp_junction_voltages(mna, device_slots, &v_linear);
+
+    let mut v = v_clamped;
     let mut v_nl = vec![0.0; m];
     let mut i_nl = vec![0.0; m];
 
-    // Strategy 1: Direct NR from linear initial guess
+    // Strategy 1: Direct NR from junction-clamped linear guess
     let (converged, iters) = nr_dc_solve(
         &circuit, &mut v, &mut v_nl, &mut i_nl, 1.0, 0.0,
     );
