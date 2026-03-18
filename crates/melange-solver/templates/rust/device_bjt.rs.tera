@@ -1,9 +1,9 @@
 // Canonical source: melange-devices/src/bjt.rs (BjtEbersMoll, BjtGummelPoon)
 // Duplicated here because generated code must be self-contained.
 
-/// Safe exponential (clamp to prevent overflow, matches runtime [-40, 40] range)
+/// Safe exponential using fast_exp (clamp to prevent overflow, matches runtime [-40, 40] range)
 #[inline(always)]
-fn safe_exp(x: f64) -> f64 { x.clamp(-40.0, 40.0).exp() }
+fn safe_exp(x: f64) -> f64 { fast_exp(x) }
 
 /// Gummel-Poon base charge factor qb.
 ///

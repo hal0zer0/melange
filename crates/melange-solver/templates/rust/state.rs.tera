@@ -21,6 +21,9 @@ pub struct CircuitState {
     /// Previous nonlinear currents i_nl[n-1]
     pub i_nl_prev: [f64; M],
 
+    /// Nonlinear currents from two samples ago i_nl[n-2] (for NR predictor)
+    pub i_nl_prev_prev: [f64; M],
+
     /// DC operating point (for reset/sleep/wake)
     pub dc_operating_point: [f64; N],
 
@@ -156,11 +159,15 @@ impl Default for CircuitState {
         Self {
 {% if has_dc_op %}            v_prev: DC_OP,
 {% if has_dc_nl %}            i_nl_prev: DC_NL_I,
+            i_nl_prev_prev: DC_NL_I,
 {% else %}            i_nl_prev: [0.0; M],
+            i_nl_prev_prev: [0.0; M],
 {% endif %}            dc_operating_point: DC_OP,
 {% else %}            v_prev: [0.0; N],
 {% if has_dc_nl %}            i_nl_prev: DC_NL_I,
+            i_nl_prev_prev: DC_NL_I,
 {% else %}            i_nl_prev: [0.0; M],
+            i_nl_prev_prev: [0.0; M],
 {% endif %}            dc_operating_point: [0.0; N],
 {% endif %}            input_prev: 0.0,
             last_nr_iterations: 0,
@@ -244,7 +251,9 @@ impl CircuitState {
     pub fn reset(&mut self) {
         self.v_prev = self.dc_operating_point;
 {% if has_dc_nl %}        self.i_nl_prev = DC_NL_I;
+        self.i_nl_prev_prev = DC_NL_I;
 {% else %}        self.i_nl_prev = [0.0; M];
+        self.i_nl_prev_prev = [0.0; M];
 {% endif %}        self.input_prev = 0.0;
         self.last_nr_iterations = 0;
         self.dc_block_x_prev = [0.0; NUM_OUTPUTS];

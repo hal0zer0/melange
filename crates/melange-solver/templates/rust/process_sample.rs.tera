@@ -69,6 +69,7 @@ pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS
 
     // Step 7: Update state for next iteration
     state.v_prev = v;
+    state.i_nl_prev_prev = state.i_nl_prev;
     state.i_nl_prev = i_nl;
     state.input_prev = input;
 {% if num_inductors > 0 %}
@@ -119,6 +120,7 @@ pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS
     if !state.v_prev.iter().all(|x| x.is_finite()) {
         state.v_prev = [0.0; N];
         state.i_nl_prev = [0.0; M];
+        state.i_nl_prev_prev = [0.0; M];
         state.input_prev = 0.0;
 {% if num_inductors > 0 %}        state.ind_i_prev = [0.0; {{ num_inductors }}];
         state.ind_v_prev = [0.0; {{ num_inductors }}];

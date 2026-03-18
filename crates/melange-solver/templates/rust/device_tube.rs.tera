@@ -16,7 +16,7 @@ fn tube_ip(vgk: f64, vpk: f64, mu: f64, ex: f64, kg1: f64, kp: f64, kvb: f64,
     let inner = kp * (1.0 / mu + vgk / s);
     let softplus = if inner > 20.0 { inner }
                    else if inner < -20.0 { 0.0 }
-                   else { (1.0 + inner.exp()).ln() };
+                   else { (1.0 + fast_exp(inner)).ln() };
     let e1 = (vpk / kp) * softplus;
     let ip_koren = if e1 <= 0.0 { 0.0 } else { e1.powf(ex) / kg1 };
     ip_koren * (1.0 + lambda * vpk)
@@ -57,7 +57,7 @@ fn tube_jacobian(vgk: f64, vpk: f64, mu: f64, ex: f64, kg1: f64, kp: f64, kvb: f
     let (sigmoid, softplus) = if inner > 20.0 { (1.0, inner) }
                               else if inner < -20.0 { (0.0, 0.0) }
                               else {
-                                  let exp_inner = inner.exp();
+                                  let exp_inner = fast_exp(inner);
                                   (exp_inner / (1.0 + exp_inner), (1.0 + exp_inner).ln())
                               };
 

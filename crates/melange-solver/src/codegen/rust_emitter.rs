@@ -958,6 +958,11 @@ impl RustEmitter {
             code.push_str("const BOLTZMANN_Q: f64 = 8.617333262e-5;\n\n");
         }
 
+        // Fast exp() approximation (needed by diode, BJT, tube device models)
+        if has_diode || has_bjt || has_tube {
+            code.push_str(&Self::emit_fast_exp());
+        }
+
         // SPICE voltage limiting functions (needed by all nonlinear devices)
         if has_diode || has_bjt || has_jfet || has_mosfet || has_tube {
             code.push_str(&self.render("spice_limiting", &Context::new())?);
@@ -980,6 +985,50 @@ impl RustEmitter {
         }
 
         Ok(code)
+    }
+
+    /// Emit fast exp() approximation function.
+    ///
+    /// Provides two implementations selectable at compile time via `MELANGE_FAST_EXP`:
+    /// 1. Default: `x.clamp().exp()` -- uses hardware/libm exp, optimal on x86-64 with glibc
+    /// 2. Polynomial: range reduction + 5th-order minimax -- no libm dependency, optimal on
+    ///    ARM, WASM, or platforms without fast hardware exp
+    ///
+    /// Accuracy of polynomial path: <0.0004% max relative error over [-40, 40].
+    /// Both paths produce identical results to within 0.0004%.
+    fn emit_fast_exp() -> String {
+        let mut code = String::new();
+        code.push_str(
+            "/// Fast exp() for audio circuit simulation.\n\
+             /// Input clamped to [-40, 40] (matches melange safe_exp convention).\n\
+             ///\n\
+             /// To use the polynomial approximation (faster on ARM/WASM, no libm dependency),\n\
+             /// compile with: `--cfg melange_fast_exp`\n\
+             #[inline(always)]\n\
+             fn fast_exp(x: f64) -> f64 {\n\
+             \x20   #[cfg(not(melange_fast_exp))]\n\
+             \x20   { x.clamp(-40.0, 40.0).exp() }\n\
+             \x20   #[cfg(melange_fast_exp)]\n\
+             \x20   {\n\
+             \x20       // Range reduction + 5th-order minimax polynomial. <0.0004% max relative error.\n\
+             \x20       // No lookup tables, no libm dependency, branchless hot path.\n\
+             \x20       let x = x.clamp(-40.0, 40.0);\n\
+             \x20       const LN2_INV: f64 = 1.4426950408889634;\n\
+             \x20       const LN2_HI: f64 = 0.6931471803691238;\n\
+             \x20       const LN2_LO: f64 = 1.9082149292705877e-10;\n\
+             \x20       const SHIFT: f64 = 6755399441055744.0; // 2^52 + 2^51\n\
+             \x20       let z = x * LN2_INV + SHIFT;\n\
+             \x20       let n_i64 = z.to_bits() as i64 - SHIFT.to_bits() as i64;\n\
+             \x20       let n = n_i64 as f64;\n\
+             \x20       let f = (x - n * LN2_HI) - n * LN2_LO;\n\
+             \x20       let p = 1.0 + f * (1.0 + f * (0.5 + f * (0.16666666666666607\n\
+             \x20           + f * (0.04166666666665876 + f * 0.008333333333492337))));\n\
+             \x20       let pow2n = f64::from_bits(((1023 + n_i64) as u64) << 52);\n\
+             \x20       p * pow2n\n\
+             \x20   }\n\
+             }\n\n",
+        );
+        code
     }
 
     /// Generate switch setter methods and rebuild_matrices() procedurally.
@@ -1887,7 +1936,7 @@ impl RustEmitter {
                          \x20       let vt_nom = BOLTZMANN_Q * DEVICE_{dev_num}_TAMB;\n\
                          \x20       state.device_{dev_num}_is = DEVICE_{dev_num}_IS_NOM\n\
                          \x20           * t_ratio.powf(DEVICE_{dev_num}_XTI)\n\
-                         \x20           * ((DEVICE_{dev_num}_EG / vt_nom) * (1.0 - DEVICE_{dev_num}_TAMB / state.device_{dev_num}_tj)).exp();\n\
+                         \x20           * fast_exp((DEVICE_{dev_num}_EG / vt_nom) * (1.0 - DEVICE_{dev_num}_TAMB / state.device_{dev_num}_tj));\n\
                          \x20   }}\n"
                     ));
                 }
@@ -2479,8 +2528,13 @@ impl RustEmitter {
         ));
         code.push_str("    const SINGULARITY_THRESHOLD: f64 = 1e-15;\n\n");
 
-        code.push_str("    // Initial guess from previous sample (warm start)\n");
-        code.push_str("    let mut i_nl = state.i_nl_prev;\n\n");
+        code.push_str("    // First-order predictor for NR warm start: i_guess = 2*i_nl[n-1] - i_nl[n-2]\n");
+        code.push_str("    // Extrapolates the trend from the last two samples. On smooth signals this\n");
+        code.push_str("    // puts the initial guess much closer to the solution, reducing NR iterations.\n");
+        code.push_str("    let mut i_nl = [0.0; M];\n");
+        code.push_str("    for i in 0..M {\n");
+        code.push_str("        i_nl[i] = 2.0 * state.i_nl_prev[i] - state.i_nl_prev_prev[i];\n");
+        code.push_str("    }\n\n");
 
         if m == 0 {
             code.push_str("    // No nonlinear devices\n");
@@ -3194,6 +3248,8 @@ impl RustEmitter {
         code.push_str("    pub v_prev: [f64; N],\n\n");
         code.push_str("    /// Previous nonlinear currents i_nl[n-1]\n");
         code.push_str("    pub i_nl_prev: [f64; M],\n\n");
+        code.push_str("    /// Nonlinear currents from two samples ago i_nl[n-2] (for NR predictor)\n");
+        code.push_str("    pub i_nl_prev_prev: [f64; M],\n\n");
         code.push_str("    /// DC operating point (for reset/sleep/wake)\n");
         code.push_str("    pub dc_operating_point: [f64; N],\n\n");
         code.push_str("    /// Previous input sample for trapezoidal integration\n");
@@ -3325,8 +3381,10 @@ impl RustEmitter {
         }
         if has_dc_nl {
             code.push_str("            i_nl_prev: DC_NL_I,\n");
+            code.push_str("            i_nl_prev_prev: DC_NL_I,\n");
         } else {
             code.push_str("            i_nl_prev: [0.0; M],\n");
+            code.push_str("            i_nl_prev_prev: [0.0; M],\n");
         }
         if has_dc_op {
             code.push_str("            dc_operating_point: DC_OP,\n");
@@ -3425,8 +3483,10 @@ impl RustEmitter {
         code.push_str("        self.v_prev = self.dc_operating_point;\n");
         if has_dc_nl {
             code.push_str("        self.i_nl_prev = DC_NL_I;\n");
+            code.push_str("        self.i_nl_prev_prev = DC_NL_I;\n");
         } else {
             code.push_str("        self.i_nl_prev = [0.0; M];\n");
+            code.push_str("        self.i_nl_prev_prev = [0.0; M];\n");
         }
         code.push_str("        self.input_prev = 0.0;\n");
         code.push_str("        self.last_nr_iterations = 0;\n");
@@ -4298,6 +4358,7 @@ impl RustEmitter {
         code.push_str("    // Step 3: Update state\n");
         code.push_str("    state.v_prev = v;\n");
         if m > 0 {
+            code.push_str("    state.i_nl_prev_prev = state.i_nl_prev;\n");
             code.push_str("    state.i_nl_prev = i_nl;\n");
         }
         code.push('\n');
@@ -4328,7 +4389,7 @@ impl RustEmitter {
                          \x20       let vt_nom = BOLTZMANN_Q * DEVICE_{dev_num}_TAMB;\n\
                          \x20       state.device_{dev_num}_is = DEVICE_{dev_num}_IS_NOM\n\
                          \x20           * t_ratio.powf(DEVICE_{dev_num}_XTI)\n\
-                         \x20           * ((DEVICE_{dev_num}_EG / vt_nom) * (1.0 - DEVICE_{dev_num}_TAMB / state.device_{dev_num}_tj)).exp();\n\
+                         \x20           * fast_exp((DEVICE_{dev_num}_EG / vt_nom) * (1.0 - DEVICE_{dev_num}_TAMB / state.device_{dev_num}_tj));\n\
                          \x20   }}\n"
                     ));
                 }
@@ -4340,6 +4401,7 @@ impl RustEmitter {
         code.push_str("    if !state.v_prev.iter().all(|x| x.is_finite()) {\n");
         code.push_str("        state.v_prev = [0.0; N];\n");
         code.push_str("        state.i_nl_prev = [0.0; M];\n");
+        code.push_str("        state.i_nl_prev_prev = [0.0; M];\n");
         code.push_str("        state.input_prev = 0.0;\n");
         // Reset thermal state on NaN
         for (dev_num, slot) in ir.device_slots.iter().enumerate() {
@@ -4424,7 +4486,7 @@ impl RustEmitter {
                             "{indent}{{ // Diode {dev_num} (BV)\n\
                              {indent}    let v = v_nl[{s}];\n\
                              {indent}    let v_clamped = v.clamp(-40.0 * state.device_{dev_num}_n_vt, 40.0 * state.device_{dev_num}_n_vt);\n\
-                             {indent}    let e = (v_clamped / state.device_{dev_num}_n_vt).exp();\n\
+                             {indent}    let e = fast_exp(v_clamped / state.device_{dev_num}_n_vt);\n\
                              {indent}    i_nl[{s}] = state.device_{dev_num}_is * (e - 1.0) + diode_breakdown_current(v, state.device_{dev_num}_n_vt, DEVICE_{dev_num}_BV, DEVICE_{dev_num}_IBV);\n\
                              {indent}    let g = state.device_{dev_num}_is * e / state.device_{dev_num}_n_vt;\n\
                              {indent}    let g_base = if v > 40.0 * state.device_{dev_num}_n_vt {{ g + state.device_{dev_num}_is / state.device_{dev_num}_n_vt }} else {{ g }};\n\
@@ -4437,7 +4499,7 @@ impl RustEmitter {
                             "{indent}{{ // Diode {dev_num}\n\
                              {indent}    let v = v_nl[{s}];\n\
                              {indent}    let v_clamped = v.clamp(-40.0 * state.device_{dev_num}_n_vt, 40.0 * state.device_{dev_num}_n_vt);\n\
-                             {indent}    let e = (v_clamped / state.device_{dev_num}_n_vt).exp();\n\
+                             {indent}    let e = fast_exp(v_clamped / state.device_{dev_num}_n_vt);\n\
                              {indent}    i_nl[{s}] = state.device_{dev_num}_is * (e - 1.0);\n\
                              {indent}    let g = state.device_{dev_num}_is * e / state.device_{dev_num}_n_vt;\n\
                              {indent}    j_dev[{s} * M + {s}] = if v > 40.0 * state.device_{dev_num}_n_vt {{ g + state.device_{dev_num}_is / state.device_{dev_num}_n_vt }} else {{ g }};\n\
@@ -4602,14 +4664,14 @@ impl RustEmitter {
                         code.push_str(&format!(
                             "{indent}{{ let v = v_nl_final[{s}];\n\
                              {indent}  let v_clamped = v.clamp(-40.0 * state.device_{dev_num}_n_vt, 40.0 * state.device_{dev_num}_n_vt);\n\
-                             {indent}  i_nl[{s}] = state.device_{dev_num}_is * ((v_clamped / state.device_{dev_num}_n_vt).exp() - 1.0) + diode_breakdown_current(v, state.device_{dev_num}_n_vt, DEVICE_{dev_num}_BV, DEVICE_{dev_num}_IBV);\n\
+                             {indent}  i_nl[{s}] = state.device_{dev_num}_is * (fast_exp(v_clamped / state.device_{dev_num}_n_vt) - 1.0) + diode_breakdown_current(v, state.device_{dev_num}_n_vt, DEVICE_{dev_num}_BV, DEVICE_{dev_num}_IBV);\n\
                              {indent}}}\n"
                         ));
                     } else {
                         code.push_str(&format!(
                             "{indent}{{ let v = v_nl_final[{s}];\n\
                              {indent}  let v_clamped = v.clamp(-40.0 * state.device_{dev_num}_n_vt, 40.0 * state.device_{dev_num}_n_vt);\n\
-                             {indent}  i_nl[{s}] = state.device_{dev_num}_is * ((v_clamped / state.device_{dev_num}_n_vt).exp() - 1.0);\n\
+                             {indent}  i_nl[{s}] = state.device_{dev_num}_is * (fast_exp(v_clamped / state.device_{dev_num}_n_vt) - 1.0);\n\
                              {indent}}}\n"
                         ));
                     }

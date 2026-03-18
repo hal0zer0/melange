@@ -5,14 +5,14 @@
 #[inline(always)]
 fn diode_current(v_d: f64, is: f64, n_vt: f64) -> f64 {
     let v_clamped = v_d.clamp(-40.0 * n_vt, 40.0 * n_vt);
-    is * ((v_clamped / n_vt).exp() - 1.0)
+    is * (fast_exp(v_clamped / n_vt) - 1.0)
 }
 
 /// Diode conductance: g_d = di/dv = (is / n_vt) * exp(v_d / n_vt)
 #[inline(always)]
 fn diode_conductance(v_d: f64, is: f64, n_vt: f64) -> f64 {
     let v_clamped = v_d.clamp(-40.0 * n_vt, 40.0 * n_vt);
-    (is / n_vt) * (v_clamped / n_vt).exp()
+    (is / n_vt) * fast_exp(v_clamped / n_vt)
 }
 
 /// Diode with series resistance: solve V_j + I(V_j)*RS = V_d for V_j,
@@ -60,7 +60,7 @@ fn diode_conductance_with_rs(v_d: f64, is: f64, n_vt: f64, rs: f64) -> f64 {
 fn diode_breakdown_current(v_d: f64, n_vt: f64, bv: f64, ibv: f64) -> f64 {
     if v_d >= -bv { return 0.0; }
     let x = (-(v_d + bv) / n_vt).clamp(-40.0, 40.0);
-    -ibv * x.exp()
+    -ibv * fast_exp(x)
 }
 
 /// Reverse breakdown conductance: dI_bv/dv = IBV/n_vt * exp(-(v_d + BV) / n_vt)
@@ -68,6 +68,6 @@ fn diode_breakdown_current(v_d: f64, n_vt: f64, bv: f64, ibv: f64) -> f64 {
 fn diode_breakdown_conductance(v_d: f64, n_vt: f64, bv: f64, ibv: f64) -> f64 {
     if v_d >= -bv { return 0.0; }
     let x = (-(v_d + bv) / n_vt).clamp(-40.0, 40.0);
-    ibv / n_vt * x.exp()
+    ibv / n_vt * fast_exp(x)
 }
 
