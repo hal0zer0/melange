@@ -185,8 +185,10 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
   - Supports `--input` for WAV files and `--amplitude` for sine test tones
 - **Explicit re-exports**: all crates (melange-solver, melange-devices, melange-primitives) use named re-exports (no glob `pub use module::*`)
 - **Parasitic cap auto-insertion**: 10pF across device junctions (not to ground) when nonlinear circuit has no caps; stabilizes trapezoidal rule in `from_mna()`
-- **NodalSolver augmented MNA for inductors**: Each inductor winding adds a branch current variable with L in C matrix (2L/T diagonal, well-conditioned). Replaces companion model (T/(2L) ≈ 8e-8 S for 130H). Supports uncoupled, coupled pairs, and multi-winding transformer groups. DC OP initializes inductor currents. DK/CircuitSolver/codegen untouched.
-- **NodalSolver codegen** (Phases 1-2 complete): Full N-dim NR per sample emitted as generated Rust code. LU solve with partial pivoting, SPICE pnjlim/fetlim, ngspice node damping, RELTOL convergence, BE fallback. Auto-selected for inductor+nonlinear circuits. `--solver dk|nodal|auto` CLI flag.
+- **Augmented MNA for inductors**: Each inductor winding adds a branch current variable with L in C matrix (2L/T diagonal, well-conditioned). Replaces companion model (T/(2L) ≈ 8e-8 S for 130H). Supports uncoupled, coupled pairs, and multi-winding transformer groups.
+- **DK codegen with augmented MNA**: Single-transformer inductor circuits use the fast DK path (M×M NR). Simple inductor+diode: 581× realtime. Auto-selected when ≤1 transformer group.
+- **NodalSolver codegen** (fallback for multi-transformer): Full N-dim NR per sample. LU solve with partial pivoting, SPICE pnjlim/fetlim, ngspice node damping, RELTOL convergence, BE fallback. Auto-selected for circuits with 2+ transformer groups (DK K matrix unstable for inter-transformer coupling).
+- **`melange analyze` with --pot/--switch**: Set pot values and switch positions for frequency sweeps. Auto-applies .pot defaults. NodalSolver support for inductor circuits. 5-second minimum settle time for transformer circuits.
 - **Device model features**: Junction capacitances (CCG/CGP/CCP, CJE/CJC, CGS/CGD, CJO), parasitic resistances (RS, RB/RC/RE, RD/RS, RGI), diode breakdown (BV/IBV), MOSFET body effect (GAMMA/PHI), BJT NF/ISE/NE emission params
 
 ### Known Limitations
@@ -194,8 +196,9 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
 - Tube Koren model: lambda parameter models finite plate resistance; no space-charge or transit-time effects
 - BJT Gummel-Poon: self-heating (Rth/Cth) and charge storage (CJE/CJC/TF) available; no substrate current or avalanche breakdown
 - **Runtime solver** (`DeviceEntry`) supports all device types: Diode, DiodeWithRs, Led, BJT, JFET, MOSFET, Tube
-- **NodalSolver transient NR**: Converges for all physically valid circuits including Pultec EQP-1A (4 tubes, 2 transformers, 130H, k=0.99, global NFB). Requires positive-definite inductance matrices (validated at MNA build time).
+- **NodalSolver transient NR**: Converges for all physically valid circuits including Pultec EQP-1A (4 tubes, 2 transformers, global NFB). Requires positive-definite inductance matrices (validated at MNA build time).
 - **`melange simulate`**: auto-selects NodalSolver for nonlinear circuits with inductors, CircuitSolver (DK) otherwise. `--solver nodal|dk` override available.
+- **Performance**: DK codegen circuits run 100-600× realtime. Nodal codegen (multi-transformer): ~0.6× realtime for Pultec (41-node, 8 NL). Schur complement reduction planned for multi-transformer realtime.
 
 ### Cross-Compilation (macOS from Linux)
 - Zig 0.13 + cargo-zigbuild + macOS SDK 13.3 + rcodesign (ad-hoc signing)
@@ -205,8 +208,12 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
 
 ### Validated Circuits
 - `circuits/pultec-eq.cir`: Pultec EQP-1A (4 tubes: 2×12AX7 + 2×12AU7, 2 transformers, 3 switches, 7 pots, global NFB)
-  - Verified against Sowter DWG E-72,658-2 schematic (2026-03-16)
-  - Uses NodalSolver codegen path (augmented MNA for 130H transformers)
+  - Verified against Sowter DWG E-72,658-2 schematic + Peerless/Triad winding data (2026-03-18)
+  - HS-29: 1:2 step-up, 37H, true push-pull grid drive (both grids from CT secondary)
+  - S-217-D: 220H primary (30Hz), 71-turn tertiary feedback, 220pF 12AU7 grid stabilization
+  - Uses NodalSolver codegen path (2 transformer groups → DK K matrix unstable)
+  - Gain: +21-27 dB (amp) - 23 dB (EQ) = -2 to +4 dB net (target: 0 dB)
+  - Not realtime (0.6×) — needs Schur complement optimization
 - `circuits/wurli-preamp.cir`: Wurlitzer 200A preamp (N=11, M=5, 2 BJTs + 1 diode, 1 pot)
   - Flattened from openwurli/spice/subcircuits/preamp.cir
   - R1-Cin series input coupling via intermediate node (mid_in)
@@ -219,16 +226,17 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
 
 ### Pending Work
 
-#### Current Priority — Nodal Codegen Phase 3
-- **Pot/switch support for nodal codegen**: Direct G re-stamp (pots), rebuild_matrices (switches)
-- **Oversampling for nodal path**: Same polyphase half-band IIR, scaled matrices
-- **set_sample_rate for nodal path**: Recompute A/A_neg from G+C at new rate
-- Nodal codegen Phases 1-2 complete. Plan: `docs/NODAL_CODEGEN_PLAN.md`
-
-#### Next — SPICE Validation + OpenWurli
-- **SPICE validation**: tube+transformer circuits (full nonlinear) against ngspice
+#### Current Priority — Release Prep
+- **Target circuits**: Guitar pedals (diode clippers, tube screamers), simple tube amps, OpenWurli
+- **SPICE validation**: tube+transformer circuits against ngspice
 - **Validate wurli-preamp**: SPICE comparison, gain at R_ldr extremes, frequency response
-- **M>16**: Iterative/sparse NR for very large nonlinear systems
+- **Documentation**: User-facing docs, example circuits, getting-started guide
+
+#### Performance — Schur Complement for Multi-Transformer
+- Reduce N×N NR to M×M for nodal path (same as DK but handling multi-transformer coupling)
+- Would bring Pultec from 0.6× to ~8× realtime
+- Jacobian reuse (chord method): additional 2-3× on top
+- Fast exp() approximation: 15-25% free speedup
 
 #### Future — Multi-Language Codegen
 The `Emitter` trait + `CircuitIR` are language-agnostic by design. Once Rust output is complete, planned targets in priority order: C++ (pro plugin devs), FAUST (compiles to 30+ targets), Python/NumPy (prototyping), MATLAB/Octave (academic).
@@ -236,3 +244,4 @@ The `Emitter` trait + `CircuitIR` are language-agnostic by design. Once Rust out
 #### Deferred
 - **Phase 6a/6b** (type safety): NodeIdx newtype and field visibility
 - **Phase 7** (crate split): Extract melange-parser, melange-codegen
+- **M>16**: Iterative/sparse NR for very large nonlinear systems
