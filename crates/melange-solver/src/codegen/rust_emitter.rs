@@ -642,6 +642,7 @@ impl RustEmitter {
         let internal_rate = ir.solver_config.sample_rate * ir.solver_config.oversampling_factor as f64;
         let dc_block_r = 1.0 - 2.0 * std::f64::consts::PI * 5.0 / internal_rate;
         ctx.insert("dc_block_r", &format!("{:.17e}", dc_block_r));
+        ctx.insert("dc_block", &ir.dc_block);
         ctx.insert("dc_op_converged", &ir.dc_op_converged);
 
         self.render("constants", &ctx)
@@ -815,6 +816,8 @@ impl RustEmitter {
         if num_thermal_devices > 0 {
             ctx.insert("thermal_devices", &thermal_devices);
         }
+
+        ctx.insert("dc_block", &ir.dc_block);
 
         self.render("state", &ctx)
     }
@@ -1423,14 +1426,16 @@ impl RustEmitter {
         }
 
         // DC block recomputation
-        code.push_str(&format!(
-            "\n        // Recompute DC blocking coefficient\n\
-             \x20       let internal_rate = self.current_sample_rate * {}.0;\n\
-             \x20       self.dc_block_r = 1.0 - 2.0 * std::f64::consts::PI * 5.0 / internal_rate;\n\
-             \x20       self.dc_block_x_prev = [0.0; NUM_OUTPUTS];\n\
-             \x20       self.dc_block_y_prev = [0.0; NUM_OUTPUTS];\n",
-            os_factor,
-        ));
+        if ir.dc_block {
+            code.push_str(&format!(
+                "\n        // Recompute DC blocking coefficient\n\
+                 \x20       let internal_rate = self.current_sample_rate * {}.0;\n\
+                 \x20       self.dc_block_r = 1.0 - 2.0 * std::f64::consts::PI * 5.0 / internal_rate;\n\
+                 \x20       self.dc_block_x_prev = [0.0; NUM_OUTPUTS];\n\
+                 \x20       self.dc_block_y_prev = [0.0; NUM_OUTPUTS];\n",
+                os_factor,
+            ));
+        }
 
         code.push_str("    }\n");
         code
@@ -1950,6 +1955,8 @@ impl RustEmitter {
         } else {
             ctx.insert("num_thermal_devices", &0usize);
         }
+
+        ctx.insert("dc_block", &ir.dc_block);
 
         self.render("process_sample", &ctx)
     }
@@ -3168,12 +3175,14 @@ impl RustEmitter {
         }
 
         // DC blocking coefficient
-        let internal_rate = ir.solver_config.sample_rate * ir.solver_config.oversampling_factor as f64;
-        let dc_block_r = 1.0 - 2.0 * std::f64::consts::PI * 5.0 / internal_rate;
-        code.push_str(&format!(
-            "/// DC blocking filter coefficient: R = 1 - 2*pi*fc/sr (5Hz cutoff at internal rate)\npub const DC_BLOCK_R: f64 = {:.17e};\n\n",
-            dc_block_r
-        ));
+        if ir.dc_block {
+            let internal_rate = ir.solver_config.sample_rate * ir.solver_config.oversampling_factor as f64;
+            let dc_block_r = 1.0 - 2.0 * std::f64::consts::PI * 5.0 / internal_rate;
+            code.push_str(&format!(
+                "/// DC blocking filter coefficient: R = 1 - 2*pi*fc/sr (5Hz cutoff at internal rate)\npub const DC_BLOCK_R: f64 = {:.17e};\n\n",
+                dc_block_r
+            ));
+        }
 
         // DC OP convergence flag
         code.push_str(&format!(
@@ -3276,12 +3285,14 @@ impl RustEmitter {
         code.push_str("    pub input_prev: f64,\n\n");
         code.push_str("    /// Iteration count from last solve (for diagnostics)\n");
         code.push_str("    pub last_nr_iterations: u32,\n\n");
-        code.push_str("    /// DC blocking filter: previous input samples (one per output)\n");
-        code.push_str("    pub dc_block_x_prev: [f64; NUM_OUTPUTS],\n");
-        code.push_str("    /// DC blocking filter: previous output samples (one per output)\n");
-        code.push_str("    pub dc_block_y_prev: [f64; NUM_OUTPUTS],\n");
-        code.push_str("    /// DC blocking filter coefficient (recomputed on sample rate change)\n");
-        code.push_str("    pub dc_block_r: f64,\n\n");
+        if ir.dc_block {
+            code.push_str("    /// DC blocking filter: previous input samples (one per output)\n");
+            code.push_str("    pub dc_block_x_prev: [f64; NUM_OUTPUTS],\n");
+            code.push_str("    /// DC blocking filter: previous output samples (one per output)\n");
+            code.push_str("    pub dc_block_y_prev: [f64; NUM_OUTPUTS],\n");
+            code.push_str("    /// DC blocking filter coefficient (recomputed on sample rate change)\n");
+            code.push_str("    pub dc_block_r: f64,\n\n");
+        }
         code.push_str("    /// Diagnostic: peak absolute output (pre-clamp)\n");
         code.push_str("    pub diag_peak_output: f64,\n");
         code.push_str("    /// Diagnostic: number of times output exceeded +/-10V\n");
@@ -3414,7 +3425,7 @@ impl RustEmitter {
         code.push_str("            input_prev: 0.0,\n");
         code.push_str("            last_nr_iterations: 0,\n");
         // Initialize DC blocking filter from DC OP so first sample sees zero delta
-        {
+        if ir.dc_block {
             let output_nodes = &ir.solver_config.output_nodes;
             let dc_x: Vec<String> = output_nodes.iter().map(|&node| {
                 if has_dc_op && node < ir.dc_operating_point.len() {
@@ -3425,8 +3436,8 @@ impl RustEmitter {
             }).collect();
             code.push_str(&format!("            dc_block_x_prev: [{}],\n", dc_x.join(", ")));
             code.push_str(&format!("            dc_block_y_prev: [{}],\n", vec!["0.0"; output_nodes.len()].join(", ")));
+            code.push_str("            dc_block_r: DC_BLOCK_R,\n");
         }
-        code.push_str("            dc_block_r: DC_BLOCK_R,\n");
         code.push_str("            diag_peak_output: 0.0,\n");
         code.push_str("            diag_clamp_count: 0,\n");
         code.push_str("            diag_nr_max_iter_count: 0,\n");
@@ -3511,7 +3522,7 @@ impl RustEmitter {
         code.push_str("        self.input_prev = 0.0;\n");
         code.push_str("        self.last_nr_iterations = 0;\n");
         // Re-init DC blocker from DC OP (prevents transient on reset)
-        {
+        if ir.dc_block {
             let output_nodes = &ir.solver_config.output_nodes;
             for (oi, &node) in output_nodes.iter().enumerate() {
                 if has_dc_op && node < ir.dc_operating_point.len() {
@@ -3524,8 +3535,8 @@ impl RustEmitter {
                     ));
                 }
             }
+            code.push_str("        self.dc_block_y_prev = [0.0; NUM_OUTPUTS];\n");
         }
-        code.push_str("        self.dc_block_y_prev = [0.0; NUM_OUTPUTS];\n");
         code.push_str("        self.diag_peak_output = 0.0;\n");
         code.push_str("        self.diag_clamp_count = 0;\n");
         code.push_str("        self.diag_nr_max_iter_count = 0;\n");
@@ -3599,9 +3610,11 @@ impl RustEmitter {
         code.push_str("            self.a_neg = A_NEG_DEFAULT;\n");
         code.push_str("            self.a_be = A_BE_DEFAULT;\n");
         code.push_str("            self.a_neg_be = A_NEG_BE_DEFAULT;\n");
-        code.push_str("            self.dc_block_r = DC_BLOCK_R;\n");
-        code.push_str("            self.dc_block_x_prev = [0.0; NUM_OUTPUTS];\n");
-        code.push_str("            self.dc_block_y_prev = [0.0; NUM_OUTPUTS];\n");
+        if ir.dc_block {
+            code.push_str("            self.dc_block_r = DC_BLOCK_R;\n");
+            code.push_str("            self.dc_block_x_prev = [0.0; NUM_OUTPUTS];\n");
+            code.push_str("            self.dc_block_y_prev = [0.0; NUM_OUTPUTS];\n");
+        }
         if os_factor > 1 {
             let os_info = oversampling_info(os_factor);
             code.push_str(&format!(
@@ -3633,12 +3646,14 @@ impl RustEmitter {
         code.push_str("        self.rebuild_matrices(internal_rate);\n\n");
 
         // DC block recomputation
-        code.push_str(&format!(
-            "        // Recompute DC blocking coefficient\n\
-             \x20       self.dc_block_r = 1.0 - 2.0 * std::f64::consts::PI * 5.0 / internal_rate;\n\
-             \x20       self.dc_block_x_prev = [0.0; NUM_OUTPUTS];\n\
-             \x20       self.dc_block_y_prev = [0.0; NUM_OUTPUTS];\n"
-        ));
+        if ir.dc_block {
+            code.push_str(&format!(
+                "        // Recompute DC blocking coefficient\n\
+                 \x20       self.dc_block_r = 1.0 - 2.0 * std::f64::consts::PI * 5.0 / internal_rate;\n\
+                 \x20       self.dc_block_x_prev = [0.0; NUM_OUTPUTS];\n\
+                 \x20       self.dc_block_y_prev = [0.0; NUM_OUTPUTS];\n"
+            ));
+        }
 
         if os_factor > 1 {
             let os_info = oversampling_info(os_factor);
@@ -4417,9 +4432,9 @@ impl RustEmitter {
         }
 
         // NaN check
-        code.push_str("    // Sanitize state: if NaN/inf entered, reset to prevent poisoning\n");
+        code.push_str("    // Sanitize state: if NaN/inf entered, reset to DC operating point\n");
         code.push_str("    if !state.v_prev.iter().all(|x| x.is_finite()) {\n");
-        code.push_str("        state.v_prev = [0.0; N];\n");
+        code.push_str("        state.v_prev = state.dc_operating_point;\n");
         code.push_str("        state.i_nl_prev = [0.0; M];\n");
         code.push_str("        state.i_nl_prev_prev = [0.0; M];\n");
         code.push_str("        state.input_prev = 0.0;\n");
@@ -4451,11 +4466,15 @@ impl RustEmitter {
         code.push_str("    for out_idx in 0..NUM_OUTPUTS {\n");
         code.push_str("        let raw_out = v[OUTPUT_NODES[out_idx]];\n");
         code.push_str("        let raw_out = if raw_out.is_finite() { raw_out } else { 0.0 };\n");
-        code.push_str("        let dc_blocked = raw_out - state.dc_block_x_prev[out_idx]\n");
-        code.push_str("            + state.dc_block_r * state.dc_block_y_prev[out_idx];\n");
-        code.push_str("        state.dc_block_x_prev[out_idx] = raw_out;\n");
-        code.push_str("        state.dc_block_y_prev[out_idx] = dc_blocked;\n");
-        code.push_str("        let scaled = dc_blocked * OUTPUT_SCALES[out_idx];\n");
+        if ir.dc_block {
+            code.push_str("        let dc_blocked = raw_out - state.dc_block_x_prev[out_idx]\n");
+            code.push_str("            + state.dc_block_r * state.dc_block_y_prev[out_idx];\n");
+            code.push_str("        state.dc_block_x_prev[out_idx] = raw_out;\n");
+            code.push_str("        state.dc_block_y_prev[out_idx] = dc_blocked;\n");
+            code.push_str("        let scaled = dc_blocked * OUTPUT_SCALES[out_idx];\n");
+        } else {
+            code.push_str("        let scaled = raw_out * OUTPUT_SCALES[out_idx];\n");
+        }
         code.push_str("        let abs_out = scaled.abs();\n");
         code.push_str("        if abs_out > state.diag_peak_output { state.diag_peak_output = abs_out; }\n");
         code.push_str("        if abs_out > 10.0 { state.diag_clamp_count += 1; }\n");

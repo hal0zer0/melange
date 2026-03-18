@@ -78,6 +78,11 @@ enum Commands {
         #[arg(long)]
         no_level_params: bool,
 
+        /// Disable DC blocking filter on outputs. Use for circuits with output coupling
+        /// caps or when downstream handles DC offset. Removes the 5Hz HPF settling time.
+        #[arg(long)]
+        no_dc_block: bool,
+
         /// Override input resistance (ohms). Default: 1Ω, or from .input_impedance directive.
         #[arg(long)]
         input_resistance: Option<f64>,
@@ -308,6 +313,7 @@ fn main() -> Result<()> {
             format,
             with_level_params,
             no_level_params,
+            no_dc_block,
             input_resistance: input_resistance_flag,
             oversampling,
         } => {
@@ -343,6 +349,7 @@ fn main() -> Result<()> {
                 level_params,
                 input_resistance_flag,
                 oversampling,
+                no_dc_block,
             )
         }
         Commands::Validate {
@@ -473,6 +480,7 @@ fn compile_circuit_source(
     with_level_params: bool,
     input_resistance_flag: Option<f64>,
     oversampling: usize,
+    no_dc_block: bool,
 ) -> Result<()> {
     use melange_solver::{
         codegen::{CodegenConfig, CodeGenerator},
@@ -675,6 +683,7 @@ fn compile_circuit_source(
         include_dc_op: true,
         input_resistance,
         oversampling_factor: oversampling,
+        dc_block: !no_dc_block,
         ..CodegenConfig::default()
     };
 

@@ -141,8 +141,8 @@ pub const SWITCH_{{ sw.index }}_VALUES: [[f64; {{ sw.num_components }}]; {{ sw.n
 {% endfor %}];
 
 {% endfor %}{% endif %}
-/// DC blocking filter coefficient: R = 1 - 2*pi*fc/sr (5Hz cutoff at internal rate)
-pub const DC_BLOCK_R: f64 = {{ dc_block_r }};
+{% if dc_block %}/// DC blocking filter coefficient: R = 1 - 2*pi*fc/sr (5Hz cutoff at internal rate)
+pub const DC_BLOCK_R: f64 = {{ dc_block_r }};{% endif %}
 
 /// Output scale factors (applied after DC blocking, before clamping; one per output)
 pub const OUTPUT_SCALES: [f64; NUM_OUTPUTS] = [{{ output_scales_values }}];

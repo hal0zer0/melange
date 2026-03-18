@@ -116,9 +116,9 @@ pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS
     // Step 7e: BJT self-heating thermal update (quasi-static, outside NR)
 {{ thermal_update }}{% endif %}
 
-    // Step 8: Sanitize state — if NaN/inf entered, reset to prevent poisoning
+    // Step 8: Sanitize state — if NaN/inf entered, reset to DC operating point
     if !state.v_prev.iter().all(|x| x.is_finite()) {
-        state.v_prev = [0.0; N];
+        state.v_prev = state.dc_operating_point;
         state.i_nl_prev = [0.0; M];
         state.i_nl_prev_prev = [0.0; M];
         state.input_prev = 0.0;
@@ -145,17 +145,18 @@ pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS
     }
     {% endif %}
 
-    // Step 9: Extract outputs, apply per-output DC blocking filter and scale
+    // Step 9: Extract outputs{% if dc_block %}, apply per-output DC blocking filter{% endif %} and scale
     let mut output = [0.0f64; NUM_OUTPUTS];
     for out_idx in 0..NUM_OUTPUTS {
         let raw_out = v[OUTPUT_NODES[out_idx]];
         let raw_out = if raw_out.is_finite() { raw_out } else { 0.0 };
-        let dc_blocked = raw_out - state.dc_block_x_prev[out_idx]
+{% if dc_block %}        let dc_blocked = raw_out - state.dc_block_x_prev[out_idx]
             + state.dc_block_r * state.dc_block_y_prev[out_idx];
         state.dc_block_x_prev[out_idx] = raw_out;
         state.dc_block_y_prev[out_idx] = dc_blocked;
         let scaled = dc_blocked * OUTPUT_SCALES[out_idx];
-        let abs_out = scaled.abs();
+{% else %}        let scaled = raw_out * OUTPUT_SCALES[out_idx];
+{% endif %}        let abs_out = scaled.abs();
         if abs_out > state.diag_peak_output { state.diag_peak_output = abs_out; }
         if abs_out > 10.0 { state.diag_clamp_count += 1; }
         output[out_idx] = scaled.clamp(-10.0, 10.0);

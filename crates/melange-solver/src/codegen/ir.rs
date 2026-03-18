@@ -52,6 +52,8 @@ pub struct CircuitIR {
     /// Whether the nonlinear DC OP solver converged
     #[serde(default)]
     pub dc_op_converged: bool,
+    /// Whether to include DC blocking filter on outputs.
+    pub dc_block: bool,
     pub inductors: Vec<InductorIR>,
     pub coupled_inductors: Vec<CoupledInductorIR>,
     pub transformer_groups: Vec<TransformerGroupIR>,
@@ -1129,6 +1131,7 @@ impl CircuitIR {
             has_dc_op,
             dc_nl_currents,
             dc_op_converged,
+            dc_block: config.dc_block,
             inductors,
             coupled_inductors,
             transformer_groups,
@@ -1319,6 +1322,7 @@ impl CircuitIR {
             has_dc_op,
             dc_nl_currents,
             dc_op_converged,
+            dc_block: config.dc_block,
             inductors: Vec::new(),          // no companion model
             coupled_inductors: Vec::new(),
             transformer_groups: Vec::new(),
