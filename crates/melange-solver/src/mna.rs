@@ -191,6 +191,9 @@ pub struct NonlinearDeviceInfo {
 pub enum NonlinearDeviceType {
     Diode,
     Bjt,
+    /// Forward-active BJT (1D): Vbc is always reverse-biased, so only Vbe→Ic is tracked.
+    /// Ib = Ic/BF is folded into N_i stamping. Reduces M by 1 per BJT.
+    BjtForwardActive,
     Jfet,
     Mosfet,
     Tube,
@@ -334,9 +337,30 @@ impl MnaSystem {
         builder.build(netlist)
     }
 
+    /// Build MNA system with specified BJTs using forward-active (1D) model.
+    ///
+    /// BJTs whose names are in `forward_active` are modeled as 1D (Vbe→Ic only),
+    /// reducing M by 1 per forward-active BJT. Used after DC OP analysis confirms
+    /// Vbc is deeply reverse-biased.
+    pub fn from_netlist_forward_active(
+        netlist: &Netlist,
+        forward_active: &std::collections::HashSet<String>,
+    ) -> Result<Self, MnaError> {
+        let mut builder = MnaBuilder::new();
+        builder.forward_active_bjts = forward_active.clone();
+        builder.build(netlist)
+    }
+
     /// Stamp a resistor between two nodes.
     ///
     /// G[i,i] += g, G[j,j] += g, G[i,j] -= g, G[j,i] -= g
+    /// Check if this MNA system has any inductors (uncoupled, coupled pairs, or transformer groups).
+    pub fn has_inductors(&self) -> bool {
+        !self.inductors.is_empty()
+            || !self.coupled_inductors.is_empty()
+            || !self.transformer_groups.is_empty()
+    }
+
     pub fn stamp_resistor(&mut self, i: usize, j: usize, resistance: f64) {
         if resistance == 0.0 {
             return; // Short circuit - handled differently
@@ -501,6 +525,31 @@ impl MnaSystem {
         // Column start_idx+1: Ib enters base, exits emitter
         self.n_i[nb][start_idx + 1] = -1.0; // Ib enters base
         self.n_i[ne][start_idx + 1] = 1.0;  // Ib exits emitter (KCL conservation)
+    }
+
+    /// Stamp forward-active BJT nonlinear matrices (1D).
+    ///
+    /// Only tracks Vbe→Ic. Base current Ib = Ic/BF is folded into N_i,
+    /// so KCL at all three terminals is satisfied with a single NR dimension.
+    ///
+    /// N_v: single row extracting Vbe = Vb - Ve
+    /// N_i: single column with Ic at collector, Ic/BF at base, (Ic + Ic/BF) at emitter
+    pub fn stamp_bjt_forward_active(
+        &mut self,
+        start_idx: usize,
+        nc: usize,
+        nb: usize,
+        ne: usize,
+        beta_f: f64,
+    ) {
+        // N_v: extract Vbe = Vb - Ve
+        self.n_v[start_idx][nb] = 1.0;
+        self.n_v[start_idx][ne] = -1.0;
+
+        // N_i: single column with Ic + Ib = Ic * (1 + 1/BF) for KCL
+        self.n_i[nc][start_idx] = -1.0;                // Ic extracted from collector
+        self.n_i[nb][start_idx] = -1.0 / beta_f;       // Ib = Ic/BF extracted from base
+        self.n_i[ne][start_idx] = 1.0 + 1.0 / beta_f;  // Ic + Ib injected into emitter
     }
 
     /// Stamp triode nonlinear matrices.
@@ -696,12 +745,12 @@ impl MnaSystem {
                     // node_indices: [anode, cathode]
                     junctions.push((dev.name.clone(), dev.node_indices[0], dev.node_indices[1]));
                 }
-                NonlinearDeviceType::Bjt => {
+                NonlinearDeviceType::Bjt | NonlinearDeviceType::BjtForwardActive => {
                     // node_indices: [collector, base, emitter]
                     let (nc, nb, ne) = (dev.node_indices[0], dev.node_indices[1], dev.node_indices[2]);
                     // B-E junction (Cje)
                     junctions.push((dev.name.clone(), nb, ne));
-                    // B-C junction (Cjc)
+                    // B-C junction (Cjc) — still present even for forward-active (linear cap)
                     junctions.push((dev.name.clone(), nb, nc));
                 }
                 NonlinearDeviceType::Jfet => {
@@ -1051,6 +1100,8 @@ struct MnaBuilder {
     elements: Vec<ElementInfo>,
     /// Total voltage dimension accumulated so far
     total_dimension: usize,
+    /// BJT names to model as forward-active (1D instead of 2D)
+    forward_active_bjts: std::collections::HashSet<String>,
 }
 
 #[allow(dead_code)]
@@ -1094,6 +1145,7 @@ impl MnaBuilder {
             opamps: Vec::new(),
             elements: Vec::new(),
             total_dimension: 0,
+            forward_active_bjts: std::collections::HashSet::new(),
         }
     }
 
@@ -1762,10 +1814,10 @@ impl MnaBuilder {
 
         // Stamp nonlinear devices (collect indices first to avoid borrow issues)
         let device_info: Vec<_> = mna.nonlinear_devices.iter()
-            .map(|d| (d.device_type, d.dimension, d.start_idx, d.node_indices.clone()))
+            .map(|d| (d.device_type, d.dimension, d.start_idx, d.node_indices.clone(), d.name.clone()))
             .collect();
-            
-        for (dev_type, _dim, start_idx, node_indices) in device_info {
+
+        for (dev_type, _dim, start_idx, node_indices, dev_name) in device_info {
             match dev_type {
                 NonlinearDeviceType::Diode => {
                     if node_indices.len() >= 2 {
@@ -1821,6 +1873,39 @@ impl MnaBuilder {
                             // N_i col 1 (Ib): -1 at B, +1 at E
                             if b_raw > 0 { mna.n_i[b_raw - 1][start_idx + 1] = -1.0; }
                             if e_raw > 0 { mna.n_i[e_raw - 1][start_idx + 1] = 1.0; }
+                        }
+                    }
+                }
+                NonlinearDeviceType::BjtForwardActive => {
+                    if node_indices.len() >= 3 {
+                        let c_raw = node_indices[0];
+                        let b_raw = node_indices[1];
+                        let e_raw = node_indices[2];
+
+                        // Look up BF from the netlist model for BF-scaled N_i
+                        let beta_f = netlist.elements.iter().find_map(|e| {
+                            if let crate::parser::Element::Bjt { name: n, model, .. } = e {
+                                if n.eq_ignore_ascii_case(&dev_name) {
+                                    netlist.models.iter()
+                                        .find(|m| m.name.eq_ignore_ascii_case(model))
+                                        .and_then(|m| m.params.iter()
+                                            .find(|(k, _)| k.eq_ignore_ascii_case("BF"))
+                                            .map(|(_, v)| *v))
+                                } else { None }
+                            } else { None }
+                        }).unwrap_or(200.0);
+
+                        if c_raw > 0 && b_raw > 0 && e_raw > 0 {
+                            mna.stamp_bjt_forward_active(
+                                start_idx, c_raw - 1, b_raw - 1, e_raw - 1, beta_f
+                            );
+                        } else {
+                            // Per-terminal ground handling for 1D forward-active
+                            if b_raw > 0 { mna.n_v[start_idx][b_raw - 1] = 1.0; }
+                            if e_raw > 0 { mna.n_v[start_idx][e_raw - 1] = -1.0; }
+                            if c_raw > 0 { mna.n_i[c_raw - 1][start_idx] = -1.0; }
+                            if b_raw > 0 { mna.n_i[b_raw - 1][start_idx] = -1.0 / beta_f; }
+                            if e_raw > 0 { mna.n_i[e_raw - 1][start_idx] = 1.0 + 1.0 / beta_f; }
                         }
                     }
                 }
@@ -2058,12 +2143,18 @@ impl MnaBuilder {
                         format!("BJT '{}' has all terminals grounded", name)
                     ));
                 }
+                let is_forward_active = self.forward_active_bjts.contains(&name.to_ascii_uppercase());
+                let (device_type, dimension) = if is_forward_active {
+                    (NonlinearDeviceType::BjtForwardActive, 1)
+                } else {
+                    (NonlinearDeviceType::Bjt, 2)
+                };
                 let start_idx = self.total_dimension;
-                self.total_dimension += 2; // BJT is 2-dimensional (Vbe, Vbc)
+                self.total_dimension += dimension;
                 self.nonlinear_devices.push(NonlinearDeviceInfo {
                     name: name.clone(),
-                    device_type: NonlinearDeviceType::Bjt,
-                    dimension: 2,
+                    device_type,
+                    dimension,
                     start_idx,
                     nodes: vec![nc.clone(), nb.clone(), ne.clone()],
                     node_indices,

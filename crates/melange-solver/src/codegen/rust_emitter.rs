@@ -2418,8 +2418,8 @@ fn emit_nr_limit_and_converge(
                         "{indent}    let v_lim = pnjlim(v_d{i} + dv{i}, v_d{i}, state.device_{dev_num}_n_vt, DEVICE_{dev_num}_VCRIT);\n"
                     ));
                 }
-                (DeviceType::Bjt, _) => {
-                    // Both Vbe and Vbc are PN junctions
+                (DeviceType::Bjt, _) | (DeviceType::BjtForwardActive, _) => {
+                    // PN junction limiting (Vbe for forward-active, both Vbe/Vbc for full)
                     code.push_str(&format!(
                         "{indent}    let v_lim = pnjlim(v_d{i} + dv{i}, v_d{i}, state.device_{dev_num}_vt, DEVICE_{dev_num}_VCRIT);\n"
                     ));
@@ -2653,6 +2653,26 @@ impl RustEmitter {
                         code.push_str(&format!(
                             "        let jdev_{}_{} = bjt{}_jac[3];\n",
                             s1, s1, dev_num
+                        ));
+                    }
+                    DeviceType::BjtForwardActive => {
+                        // 1D forward-active BJT: only Vbe→Ic, Ib=Ic/BF folded into N_i
+                        let s = slot.start_idx;
+                        let d = dev_num;
+                        code.push_str(&format!(
+                            "        // BJT {d} forward-active (1D: Vbe→Ic only)\n"
+                        ));
+                        code.push_str(&format!(
+                            "        let vbe_{d} = v_d{s} * DEVICE_{d}_SIGN;\n"
+                        ));
+                        code.push_str(&format!(
+                            "        let exp_be_{d} = fast_exp(vbe_{d} / (DEVICE_{d}_NF * state.device_{d}_vt));\n"
+                        ));
+                        code.push_str(&format!(
+                            "        let i_dev{s} = state.device_{d}_is * (exp_be_{d} - 1.0) * DEVICE_{d}_SIGN;\n"
+                        ));
+                        code.push_str(&format!(
+                            "        let jdev_{s}_{s} = state.device_{d}_is / (DEVICE_{d}_NF * state.device_{d}_vt) * exp_be_{d};\n"
                         ));
                     }
                     DeviceType::Jfet => {
@@ -4541,6 +4561,17 @@ impl RustEmitter {
                         ));
                     }
                 }
+                (DeviceType::BjtForwardActive, DeviceParams::Bjt(_bp)) => {
+                    // 1D forward-active BJT: only Vbe→Ic, single jdev entry
+                    code.push_str(&format!(
+                        "{indent}{{ // BJT {dev_num} forward-active (1D)\n\
+                         {indent}    let vbe = v_nl[{s}] * DEVICE_{dev_num}_SIGN;\n\
+                         {indent}    let exp_be = fast_exp(vbe / (DEVICE_{dev_num}_NF * state.device_{dev_num}_vt));\n\
+                         {indent}    i_nl[{s}] = state.device_{dev_num}_is * (exp_be - 1.0) * DEVICE_{dev_num}_SIGN;\n\
+                         {indent}    j_dev[{s} * M + {s}] = state.device_{dev_num}_is / (DEVICE_{dev_num}_NF * state.device_{dev_num}_vt) * exp_be;\n\
+                         {indent}}}\n"
+                    ));
+                }
                 (DeviceType::Jfet, DeviceParams::Jfet(jp)) => {
                     let s1 = s + 1;
                     let jac_fn = if jp.has_rd_rs() {
@@ -4697,6 +4728,15 @@ impl RustEmitter {
                         ));
                     }
                 }
+                (DeviceType::BjtForwardActive, DeviceParams::Bjt(_bp)) => {
+                    // 1D forward-active BJT: only Vbe→Ic
+                    code.push_str(&format!(
+                        "{indent}{{ let vbe = v_nl_final[{s}] * DEVICE_{dev_num}_SIGN;\n\
+                         {indent}  let exp_be = fast_exp(vbe / (DEVICE_{dev_num}_NF * state.device_{dev_num}_vt));\n\
+                         {indent}  i_nl[{s}] = state.device_{dev_num}_is * (exp_be - 1.0) * DEVICE_{dev_num}_SIGN;\n\
+                         {indent}}}\n"
+                    ));
+                }
                 (DeviceType::Jfet, DeviceParams::Jfet(_jp)) => {
                     let s1 = s + 1;
                     code.push_str(&format!(
@@ -4761,7 +4801,7 @@ impl RustEmitter {
                             "{indent}        let v_lim = pnjlim(v_nl_proposed, v_nl_current, state.device_{dev_num}_n_vt, DEVICE_{dev_num}_VCRIT);\n"
                         ));
                     }
-                    (DeviceType::Bjt, _) => {
+                    (DeviceType::Bjt, _) | (DeviceType::BjtForwardActive, _) => {
                         code.push_str(&format!(
                             "{indent}        let v_lim = pnjlim(v_nl_proposed, v_nl_current, state.device_{dev_num}_vt, DEVICE_{dev_num}_VCRIT);\n"
                         ));

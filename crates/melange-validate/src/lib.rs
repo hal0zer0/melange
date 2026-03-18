@@ -559,7 +559,8 @@ fn build_devices_from_netlist(
                 let diode = melange_devices::DiodeShockley::new_room_temp(is, n);
                 devices.push(melange_solver::solver::DeviceEntry::new_diode(diode, dev_info.start_idx));
             }
-            melange_solver::mna::NonlinearDeviceType::Bjt => {
+            melange_solver::mna::NonlinearDeviceType::Bjt
+            | melange_solver::mna::NonlinearDeviceType::BjtForwardActive => {
                 let model_params = find_bjt_model(netlist, &dev_info.name);
                 let is = model_params.0.unwrap_or(1e-15);
                 let beta_f = model_params.1.unwrap_or(200.0);

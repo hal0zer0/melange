@@ -591,6 +591,32 @@ fn compile_circuit_source(
         }
     }
 
+    // Detect forward-active BJTs (runs DC OP with 2D model, checks Vbc < -1V)
+    let fa_config = melange_solver::codegen::CodegenConfig {
+        input_node: input_node_idx,
+        input_resistance,
+        ..melange_solver::codegen::CodegenConfig::default()
+    };
+    let forward_active = melange_solver::codegen::ir::CircuitIR::detect_forward_active_bjts(&mna, &netlist, &fa_config);
+    if !forward_active.is_empty() {
+        println!("  Forward-active BJTs: {:?} (M reduces by {})", forward_active, forward_active.len());
+        // Rebuild MNA with reduced dimensions
+        mna = MnaSystem::from_netlist_forward_active(&netlist, &forward_active)
+            .with_context(|| "Failed to rebuild MNA for forward-active BJTs")?;
+        // Re-stamp input conductance
+        if input_node_idx < mna.n {
+            mna.g[input_node_idx][input_node_idx] += input_conductance;
+        }
+        // Re-stamp junction capacitances
+        {
+            let device_slots = melange_solver::codegen::ir::CircuitIR::build_device_info_with_mna(&netlist, Some(&mna))
+                .unwrap_or_default();
+            if !device_slots.is_empty() {
+                mna.stamp_device_junction_caps(&device_slots);
+            }
+        }
+    }
+
     // Step 3: Create DK kernel
     // Use augmented MNA for inductor circuits (well-conditioned for large L)
     let has_inductors_compile = !mna.inductors.is_empty()
@@ -1178,6 +1204,24 @@ fn simulate_circuit_source(
                 let lambda = find_model_param(model_name, "LAMBDA").unwrap_or(0.0);
                 let tube = KorenTriode::with_all_params(mu, ex, kg1, kp, kvb, ig_max, vgk_onset, lambda);
                 devices.push(DeviceEntry::new_tube(tube, dev_info.start_idx));
+            }
+            melange_solver::mna::NonlinearDeviceType::BjtForwardActive => {
+                // BjtForwardActive uses the same runtime 2D model as Bjt
+                let model_name = netlist.elements.iter().find_map(|e| {
+                    if let melange_solver::parser::Element::Bjt { name, model, .. } = e {
+                        if name.eq_ignore_ascii_case(&dev_info.name) { Some(model.as_str()) } else { None }
+                    } else { None }
+                }).unwrap_or("");
+                let is = find_model_param(model_name, "IS").unwrap_or(1e-14);
+                let bf = find_model_param(model_name, "BF").unwrap_or(200.0);
+                let br = find_model_param(model_name, "BR").unwrap_or(3.0);
+                let is_pnp = netlist.models.iter()
+                    .find(|m| m.name.eq_ignore_ascii_case(model_name))
+                    .map(|m| m.model_type.eq_ignore_ascii_case("PNP"))
+                    .unwrap_or(false);
+                let polarity = if is_pnp { BjtPolarity::Pnp } else { BjtPolarity::Npn };
+                let bjt = BjtEbersMoll::new(is, melange_primitives::VT_ROOM, bf, br, polarity);
+                devices.push(DeviceEntry::new_bjt(bjt, dev_info.start_idx));
             }
         }
     }
@@ -1827,6 +1871,23 @@ fn build_device_entries(
                 let tube = KorenTriode::with_all_params(mu, ex, kg1, kp, kvb, ig_max, vgk_onset, lambda);
                 devices.push(DeviceEntry::new_tube(tube, dev_info.start_idx));
             }
+            melange_solver::mna::NonlinearDeviceType::BjtForwardActive => {
+                // BjtForwardActive uses the same runtime 2D model as Bjt
+                let model_name = netlist.elements.iter().find_map(|e| {
+                    if let melange_solver::parser::Element::Bjt { name, model, .. } = e {
+                        if name.eq_ignore_ascii_case(&dev_info.name) { Some(model.as_str()) } else { None }
+                    } else { None }
+                }).unwrap_or("");
+                let is = find_model_param(model_name, "IS").unwrap_or(1e-14);
+                let bf = find_model_param(model_name, "BF").unwrap_or(200.0);
+                let br = find_model_param(model_name, "BR").unwrap_or(3.0);
+                let is_pnp = netlist.models.iter()
+                    .find(|m| m.name.eq_ignore_ascii_case(&model_name))
+                    .map(|m| m.model_type.eq_ignore_ascii_case("PNP"))
+                    .unwrap_or(false);
+                let polarity = if is_pnp { BjtPolarity::Pnp } else { BjtPolarity::Npn };
+                devices.push(DeviceEntry::new_bjt(BjtEbersMoll::new(is, melange_primitives::VT_ROOM, bf, br, polarity), dev_info.start_idx));
+            }
         }
     }
     devices
@@ -2013,6 +2074,49 @@ fn build_device_slots(
                         cgp: find_param(&model_name, "CGP").unwrap_or(0.0),
                         ccp: find_param(&model_name, "CCP").unwrap_or(0.0),
                         rgi: find_param(&model_name, "RGI").unwrap_or(0.0),
+                    }),
+                });
+            }
+            melange_solver::mna::NonlinearDeviceType::BjtForwardActive => {
+                let model_name = netlist.elements.iter().find_map(|e| {
+                    if let melange_solver::parser::Element::Bjt { name, model, .. } = e {
+                        if name.eq_ignore_ascii_case(&dev_info.name) { Some(model.clone()) } else { None }
+                    } else { None }
+                }).unwrap_or_default();
+                let is = find_param(&model_name, "IS").unwrap_or(1e-14);
+                let bf = find_param(&model_name, "BF").unwrap_or(200.0);
+                let br = find_param(&model_name, "BR").unwrap_or(3.0);
+                let is_pnp = netlist.models.iter()
+                    .find(|m| m.name.eq_ignore_ascii_case(&model_name))
+                    .map(|m| m.model_type.eq_ignore_ascii_case("PNP"))
+                    .unwrap_or(false);
+                slots.push(DeviceSlot {
+                    device_type: DeviceType::BjtForwardActive,
+                    start_idx: dev_info.start_idx,
+                    dimension: 1,
+                    params: DeviceParams::Bjt(BjtParams {
+                        is,
+                        vt: melange_primitives::VT_ROOM,
+                        beta_f: bf,
+                        beta_r: br,
+                        is_pnp,
+                        vaf: f64::INFINITY,
+                        var: f64::INFINITY,
+                        ikf: f64::INFINITY,
+                        ikr: f64::INFINITY,
+                        cje: find_param(&model_name, "CJE").unwrap_or(0.0),
+                        cjc: find_param(&model_name, "CJC").unwrap_or(0.0),
+                        nf: find_param(&model_name, "NF").unwrap_or(1.0),
+                        ise: find_param(&model_name, "ISE").unwrap_or(0.0),
+                        ne: find_param(&model_name, "NE").unwrap_or(1.5),
+                        rb: find_param(&model_name, "RB").unwrap_or(0.0),
+                        rc: find_param(&model_name, "RC").unwrap_or(0.0),
+                        re: find_param(&model_name, "RE").unwrap_or(0.0),
+                        rth: f64::INFINITY,
+                        cth: 1e-3,
+                        xti: 3.0,
+                        eg: 1.11,
+                        tamb: 300.15,
                     }),
                 });
             }

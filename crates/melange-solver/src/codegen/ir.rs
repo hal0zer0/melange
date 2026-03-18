@@ -581,6 +581,9 @@ impl DeviceParams {
 pub enum DeviceType {
     Diode,
     Bjt,
+    /// Forward-active BJT: 1D model (Vbe→Ic only). Vbc is always reverse-biased.
+    /// Ib = Ic/BF is folded into N_i stamping. Reduces M by 1.
+    BjtForwardActive,
     Jfet,
     Mosfet,
     Tube,
@@ -937,7 +940,7 @@ impl CircuitIR {
             }
         };
 
-        let mut device_slots = Self::build_device_info(netlist)?;
+        let mut device_slots = Self::build_device_info_with_mna(netlist, Some(mna))?;
         Self::resolve_mosfet_nodes(&mut device_slots, mna);
 
         let inductors: Vec<InductorIR> = kernel.inductors.iter().map(|ind| {
@@ -1091,6 +1094,10 @@ impl CircuitIR {
                 dc_result.method
             );
         }
+
+        // Forward-active BJT detection happens BEFORE from_kernel is called.
+        // The caller (detect_forward_active_bjts + CLI) handles MNA/kernel rebuild.
+        // By the time we get here, kernel/mna already have the correct M dimension.
 
         // Analyze sparsity patterns for compile-time matrices
         let sparsity = SparseInfo {
@@ -1289,7 +1296,7 @@ impl CircuitIR {
         let mut dc_operating_point = dc_result.v_node.clone();
         dc_operating_point.resize(n, 0.0);
 
-        let mut device_slots = Self::build_device_info(netlist)?;
+        let mut device_slots = Self::build_device_info_with_mna(netlist, Some(mna))?;
         Self::resolve_mosfet_nodes(&mut device_slots, mna);
 
         // Sparsity analysis
@@ -1352,9 +1359,66 @@ impl CircuitIR {
     ///
     /// # Errors
     /// Returns `CodegenError::InvalidConfig` if any device model parameter is non-positive or non-finite.
+    /// Detect BJTs that are forward-active at the DC operating point.
+    ///
+    /// Returns the names (uppercased) of BJTs with Vbc < -1.0V that can be
+    /// modeled as 1D (Vbe→Ic only), reducing M by 1 each.
+    ///
+    /// Call this BEFORE building the final MNA/kernel. If non-empty, rebuild
+    /// MNA with `from_netlist_forward_active()` and kernel before calling `from_kernel()`.
+    pub fn detect_forward_active_bjts(
+        mna: &crate::mna::MnaSystem,
+        netlist: &Netlist,
+        config: &CodegenConfig,
+    ) -> std::collections::HashSet<String> {
+        use crate::dc_op::{self, DcOpConfig};
+
+        let device_slots = Self::build_device_info(netlist).unwrap_or_default();
+        if device_slots.is_empty() { return std::collections::HashSet::new(); }
+
+        let dc_op_config = DcOpConfig {
+            tolerance: config.dc_op_tolerance,
+            max_iterations: config.dc_op_max_iterations,
+            input_node: config.input_node,
+            input_resistance: config.input_resistance,
+            ..DcOpConfig::default()
+        };
+        let dc_result = dc_op::solve_dc_operating_point(mna, &device_slots, &dc_op_config);
+
+        let mut forward_active = std::collections::HashSet::new();
+        for (slot_idx, slot) in device_slots.iter().enumerate() {
+            if slot.device_type == DeviceType::Bjt {
+                if let DeviceParams::Bjt(bp) = &slot.params {
+                    if slot_idx < mna.nonlinear_devices.len() {
+                        let dev = &mna.nonlinear_devices[slot_idx];
+                        let nc = dev.node_indices[0];
+                        let nb = dev.node_indices[1];
+                        let v_c = if nc > 0 && nc - 1 < dc_result.v_node.len() { dc_result.v_node[nc - 1] } else { 0.0 };
+                        let v_b = if nb > 0 && nb - 1 < dc_result.v_node.len() { dc_result.v_node[nb - 1] } else { 0.0 };
+                        let vbc = v_b - v_c;
+                        let sign = if bp.is_pnp { -1.0 } else { 1.0 };
+                        let vbc_eff = sign * vbc;
+                        if vbc_eff < -1.0 && !bp.has_parasitics() && !bp.is_gummel_poon() {
+                            let name = dev.name.to_ascii_uppercase();
+                            log::info!("BJT '{}' forward-active (Vbc={:.3}V). Using 1D model.", name, vbc_eff);
+                            forward_active.insert(name);
+                        }
+                    }
+                }
+            }
+        }
+        forward_active
+    }
+
     pub fn build_device_info(netlist: &Netlist) -> Result<Vec<DeviceSlot>, CodegenError> {
+        Self::build_device_info_with_mna(netlist, None)
+    }
+
+    /// Build device info, optionally using MNA device dimensions (for forward-active BJTs).
+    pub fn build_device_info_with_mna(netlist: &Netlist, mna: Option<&crate::mna::MnaSystem>) -> Result<Vec<DeviceSlot>, CodegenError> {
         let mut slots = Vec::new();
         let mut dim_offset = 0;
+        let mut nl_dev_idx = 0; // tracks position in mna.nonlinear_devices
 
         for elem in &netlist.elements {
             match elem {
@@ -1367,16 +1431,28 @@ impl CircuitIR {
                         params: DeviceParams::Diode(params),
                     });
                     dim_offset += 1;
+                    nl_dev_idx += 1;
                 }
                 Element::Bjt { model, .. } => {
                     let params = Self::resolve_bjt_params(netlist, model)?;
+                    // Check if MNA has this BJT as forward-active (1D)
+                    let is_fa = mna.map_or(false, |m| {
+                        nl_dev_idx < m.nonlinear_devices.len()
+                            && m.nonlinear_devices[nl_dev_idx].device_type == crate::mna::NonlinearDeviceType::BjtForwardActive
+                    });
+                    let (dev_type, dim) = if is_fa {
+                        (DeviceType::BjtForwardActive, 1)
+                    } else {
+                        (DeviceType::Bjt, 2)
+                    };
                     slots.push(DeviceSlot {
-                        device_type: DeviceType::Bjt,
+                        device_type: dev_type,
                         start_idx: dim_offset,
-                        dimension: 2,
+                        dimension: dim,
                         params: DeviceParams::Bjt(params),
                     });
-                    dim_offset += 2;
+                    dim_offset += dim;
+                    nl_dev_idx += 1;
                 }
                 Element::Jfet { model, .. } => {
                     let params = Self::resolve_jfet_params(netlist, model)?;
@@ -1387,6 +1463,7 @@ impl CircuitIR {
                         params: DeviceParams::Jfet(params),
                     });
                     dim_offset += 2;
+                    nl_dev_idx += 1;
                 }
                 Element::Triode { model, .. } => {
                     let params = Self::resolve_tube_params(netlist, model)?;
@@ -1397,6 +1474,7 @@ impl CircuitIR {
                         params: DeviceParams::Tube(params),
                     });
                     dim_offset += 2;
+                    nl_dev_idx += 1;
                 }
                 Element::Mosfet { model, .. } => {
                     let params = Self::resolve_mosfet_params(netlist, model)?;
@@ -1407,6 +1485,7 @@ impl CircuitIR {
                         params: DeviceParams::Mosfet(params),
                     });
                     dim_offset += 2;
+                    nl_dev_idx += 1;
                 }
                 _ => {}
             }

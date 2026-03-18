@@ -112,6 +112,15 @@ pub fn evaluate_devices(
                 i_nl[s] = diode.current_at(v);
                 j_dev[s * m + s] = diode.conductance_at(v);
             }
+            (DeviceType::BjtForwardActive, DeviceParams::Bjt(bp)) => {
+                // 1D forward-active BJT: only Vbe→Ic, Ib=Ic/BF folded into N_i
+                let sign = if bp.is_pnp { -1.0 } else { 1.0 };
+                let vbe = v_nl[s];
+                let vbe_eff = sign * vbe;
+                let exp_be = (vbe_eff / (bp.nf * bp.vt)).clamp(-40.0, 40.0).exp();
+                i_nl[s] = sign * bp.is * (exp_be - 1.0);
+                j_dev[s * m + s] = bp.is / (bp.nf * bp.vt) * exp_be;
+            }
             (DeviceType::Bjt, DeviceParams::Bjt(bp)) => {
                 let polarity = if bp.is_pnp { BjtPolarity::Pnp } else { BjtPolarity::Npn };
                 let em = BjtEbersMoll::new(bp.is, bp.vt, bp.beta_f, bp.beta_r, polarity);

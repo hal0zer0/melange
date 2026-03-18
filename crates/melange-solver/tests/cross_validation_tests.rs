@@ -136,7 +136,7 @@ fn build_device_entries(
                 let diode = melange_devices::DiodeShockley::new_room_temp(is, n);
                 devices.push(DeviceEntry::new_diode(diode, dev_info.start_idx));
             }
-            melange_solver::mna::NonlinearDeviceType::Bjt => {
+            melange_solver::mna::NonlinearDeviceType::Bjt | melange_solver::mna::NonlinearDeviceType::BjtForwardActive => {
                 let is = find_model_param(&model, "IS").unwrap_or(1e-14);
                 let bf = find_model_param(&model, "BF").unwrap_or(200.0);
                 let br = find_model_param(&model, "BR").unwrap_or(3.0);
