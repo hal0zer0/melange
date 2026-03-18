@@ -184,6 +184,11 @@ R_bias_lo bias_31v 0 62k
 * Sets grid DC at +31V; with cathode at +40V → Vgk ≈ -9V.
 Rg2a grid2a bias_31v 1Meg
 Rg2b grid2b bias_31v 1Meg
+* 220pF grid-to-ground stabilization caps (standard fix for VHF oscillation
+* in DIY Pultec builds — inter-winding capacitance in S-217-D creates 305kHz
+* parasitic resonance. Sowter 9530 bifilar tertiary helps but caps still needed).
+C_stab_a grid2a 0 220p
+C_stab_b grid2b 0 220p
 
 * === PUSH-PULL OUTPUT STAGE: 12AU7 (ECC82) ===
 * Two triode sections driven in anti-phase by 12AX7 plates.
@@ -206,16 +211,18 @@ R_stop2a plate2a opt_a 360
 R_stop2b plate2b opt_b 360
 
 * === OUTPUT TRANSFORMER: PEERLESS S-217-D ===
-* Push-pull center-tapped primary, balanced secondary.
+* Push-pull center-tapped primary, balanced secondary, feedback tertiary.
 * Confirmed specs (CineMag CM-S217D reproduction):
-*   Turns: 1575 (pri) : 352 (sec) per coil
-*   Turns ratio: 4.474:1 (primary:secondary)
+*   Turns: 1575 (pri) : 71 (tert) : 352 (sec) per coil
+*   Turns ratio: pri:sec = 4.474:1, pri:tert = 22.18:1, sec:tert = 4.96:1
 *   Impedance: 12,000:600 ohm
-*   L_pri = 38.1H at 1kHz (CineMag measurement)
+*   L_pri = 38.1H at 1kHz (CineMag), ~220H at 30Hz (frequency-dependent permeability)
 *   L_leak = 19mH → k = 0.9995
 *
-* Push-pull primary halves: L_each = L_total/4 = 9.525H
-* Secondary: L = L_pri_half / N_half² = 9.525 / 2.237² = 1.903H
+* Using 220H at 30Hz for LF accuracy (phase margin for NFB loop below 50Hz).
+* Push-pull primary halves: L_each = 220/4 = 55H
+* Secondary: L = L_pri_half × (N_sec/N_pri)² = 55 × (352/1575)² = 2.75H
+* Tertiary: L = L_pri_half × (142/1575)² = 55 × 0.00813 = 0.447H
 *
 * B+ connects to center tap of primary (serves as plate load for 12AU7s).
 
@@ -223,11 +230,11 @@ R_stop2b plate2b opt_b 360
 R_opt_ct vcc opt_ct 1m
 
 * Push-pull primary halves
-L_opt_a opt_a opt_ct 9.525
-L_opt_b opt_ct opt_b 9.525
+L_opt_a opt_a opt_ct 55
+L_opt_b opt_ct opt_b 55
 
 * Secondary (output)
-L_opt_sec out 0 1.903
+L_opt_sec out 0 11
 
 * Coupling between primary halves and secondary.
 * Measured k ≈ 0.9998 (from L_leak=19mH, L_pri=38.1H) but k>0.95
@@ -237,21 +244,25 @@ K_opta L_opt_a L_opt_sec 0.95
 K_optb L_opt_b L_opt_sec 0.95
 K_optab L_opt_a L_opt_b 0.95
 
-* === NEGATIVE FEEDBACK: S-217-D TERTIARY equivalent ===
-* Modeled as AC-coupled resistive feedback from output to cathode.
-* The real S-217-D has a 71-turn/coil tertiary (142 total) with 1000Ω shunt,
-* coupled to 1575-turn/coil primary. Turns ratio sec:tert = 704:142 = 4.96:1.
-* Feedback fraction: V_tert/V_out = 1/4.96 = 0.202, cathode fraction = 820/1540 = 0.532.
-* Net β = 0.202 × 0.532 = 0.107 → equivalent R_fb = Rk × (1/β - 1) ≈ 6.8kΩ.
+* === FEEDBACK: S-217-D TERTIARY WINDING (pins 3-5) ===
+* Peerless winding data: 71 turns/coil × 2 coils = 142 turns total.
+* L_tert = L_pri_half × (142/1575)² = 55 × 0.00813 = 0.447H (scaled with 220H primary).
+* 1000Ω 1W shunt across pins 3-5 (confirmed on schematic).
 *
-* AC coupling emulates transformer DC blocking. 470nF × 6.8kΩ → f_c ≈ 50 Hz,
-* matching the S-217-D's low-frequency rolloff. Provides ~10% negative feedback
-* at midrange, reducing gain by ~1-3 dB (consistent with "20% NFB" spec).
-*
-* This replaces the coupled inductor model which suffers from multi-winding K
-* phase ambiguity and ill-conditioning in the augmented MNA 4-winding group.
-C_fb out fb_ac 470n
-R_fb fb_ac cathode 6.8k
+* Feedback network (4 components, schematic-verified):
+*   fb_s3 → 360Ω → cathode (series-voltage NFB)
+*   fb_s5 → 360Ω → ground (return path)
+*   Current loop: tertiary → 360Ω → cathode → 820Ω → GND → 360Ω → tertiary
+*   53% of tertiary voltage (820/1540) appears at cathode.
+L_fb_a fb_s5 fb_s3 447m
+R_fb_shunt fb_s3 fb_s5 1000
+R_fb_dcref fb_s5 0 1Meg
+R_fb_a fb_s3 cathode 360
+R_fb_b fb_s5 0 360
+* Coupling: tertiary to both primary halves and secondary (all on same core).
+K_fba L_opt_a L_fb_a 0.95
+K_fbb L_opt_b L_fb_a 0.95
+K_sec_fb L_opt_sec L_fb_a 0.95
 
 * Output load (high-impedance bridging, typical of modern equipment)
 Rload out 0 100k
