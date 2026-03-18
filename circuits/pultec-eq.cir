@@ -157,9 +157,10 @@ T1b grid2 plate2 cathode 12AX7
 Ra1 node_g plate1 200k
 Ra2 node_g plate2 200k
 
-* 20nF anti-oscillation cap bridging the two 12AX7 plates.
-* ".00002" on schematic = 20,000pF = 20nF. Confirmed by schemer.
-C_plate_bridge plate1 plate2 20n
+* 20pF anti-oscillation cap bridging the two 12AX7 plates.
+* ".00002" on schematic = 0.00002µF = 20pF (same convention as ".00027" = 270pF).
+* Previous 20nF was a 1000x error — 20nF with 200K plates gives f_c=80Hz, killing treble.
+C_plate_bridge plate1 plate2 20p
 
 * Shared cathode bias (820Ω to ground, unbypassed).
 * Both cathodes (pins 3, 8) tied together. 820Ω to ground provides self-bias.
@@ -236,27 +237,21 @@ K_opta L_opt_a L_opt_sec 0.95
 K_optb L_opt_b L_opt_sec 0.95
 K_optab L_opt_a L_opt_b 0.95
 
-* === FEEDBACK WINDING: S-217-D TERTIARY (pins 3-5) ===
-* Series-voltage negative feedback from output back to 12AX7 cathode.
-* Tertiary winding coupled to primary, with 1000Ω shunt damping.
-* Both ends of tertiary connect through 360Ω to cathode node:
-*   S-217-D pin 3 → 360Ω → cathode (12AX7 pin 3 = cathode1)
-*   S-217-D pin 5 → 360Ω → cathode (12AX7 pin 8 = cathode2)
-* Both cathodes tied together. Feedback current flows through 720Ω loop.
+* === NEGATIVE FEEDBACK: S-217-D TERTIARY equivalent ===
+* Modeled as AC-coupled resistive feedback from output to cathode.
+* The real S-217-D has a 71-turn/coil tertiary (142 total) with 1000Ω shunt,
+* coupled to 1575-turn/coil primary. Turns ratio sec:tert = 704:142 = 4.96:1.
+* Feedback fraction: V_tert/V_out = 1/4.96 = 0.202, cathode fraction = 820/1540 = 0.532.
+* Net β = 0.202 × 0.532 = 0.107 → equivalent R_fb = Rk × (1/β - 1) ≈ 6.8kΩ.
 *
-* Tertiary inductance from Peerless winding data: 71 turns/coil, 2 coils series = 142 turns.
-* Primary = 1575 turns/coil. L_tert = L_pri_half × (142/1575)² = 9.525 × 0.00813 = 0.0774H.
-L_fb_a fb_s5 fb_s3 77.4m
-R_fb_shunt fb_s3 fb_s5 1000
-* DC ground reference for tertiary (winding DC resistance)
-R_fb_dcref fb_s5 0 1Meg
-R_fb_a fb_s3 cathode 360
-R_fb_b fb_s5 cathode 360
-* Coupling: tertiary to each primary half
-K_fba L_opt_a L_fb_a 0.95
-K_fbb L_opt_b L_fb_a 0.95
-* Secondary-tertiary coupling (all windings on same core must couple)
-K_sec_fb L_opt_sec L_fb_a 0.95
+* AC coupling emulates transformer DC blocking. 470nF × 6.8kΩ → f_c ≈ 50 Hz,
+* matching the S-217-D's low-frequency rolloff. Provides ~10% negative feedback
+* at midrange, reducing gain by ~1-3 dB (consistent with "20% NFB" spec).
+*
+* This replaces the coupled inductor model which suffers from multi-winding K
+* phase ambiguity and ill-conditioning in the augmented MNA 4-winding group.
+C_fb out fb_ac 470n
+R_fb fb_ac cathode 6.8k
 
 * Output load (high-impedance bridging, typical of modern equipment)
 Rload out 0 100k
