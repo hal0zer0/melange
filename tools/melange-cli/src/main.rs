@@ -653,12 +653,23 @@ fn compile_circuit_source(
     };
 
     let generator = CodeGenerator::new(config);
-    let generated = if has_inductors_compile {
-        println!("  Using nodal solver codegen for inductor circuit");
+    // DK codegen handles standard and augmented (single-transformer) circuits.
+    // For circuits with multiple transformer groups (e.g., Pultec with HS-29 + S-217-D),
+    // the DK K matrix can have stability issues from inter-transformer coupling.
+    // Fall back to nodal codegen for those circuits.
+    let n_xfmr_groups = mna.transformer_groups.len()
+        + if mna.coupled_inductors.len() > 0 { 1 } else { 0 };
+    let use_nodal_codegen = has_inductors_compile && n_xfmr_groups > 1;
+
+    let generated = if use_nodal_codegen {
+        println!("  Using nodal solver codegen ({} transformer groups — DK K matrix unstable)", n_xfmr_groups);
         generator
             .generate_nodal(&mna, &netlist)
             .with_context(|| "Nodal code generation failed")?
     } else {
+        if has_inductors_compile {
+            println!("  Using DK codegen with augmented MNA for inductors");
+        }
         generator
             .generate(&kernel, &mna, &netlist)
             .with_context(|| "Code generation failed")?
