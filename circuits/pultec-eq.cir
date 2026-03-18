@@ -13,24 +13,24 @@
 *
 * Signal flow (passive EQ is a 2-port network, NOT a series chain):
 *
-*   in ──┬── R_hfb_u ── b ──┬── R_hfb_l ──┬── eq ──┬── R_hfc_u ── f ──┬── R_hfc_l ── mid ──┬── R_lfb ── gnd
-*        │                   │              │        │                   │                    │
-*        │                   ├── C+L+Q ─────┘        │                   ├── C_hfc ───────────┘├── C_lfb ── gnd
-*        │(600Ω src)         │(bridge-T boost)       │                   │(HF cut shunt)
-*        │                                           ├── C_lfa ── h ──── R2 ── out_tap ── R3 ── mid
-*        │                                           ├── R_lfc ── h     (HS-29 primary couples from out_tap)
+*   in ── R_in(620Ω) ── eq_in ──┬── R_hfb_u ── b ──┬── R_hfb_l ──┬── eq ──┬── R_hfc_u ── f ──┬── R_hfc_l ── mid ──┬── R_lfb ── gnd
+*                               │                   │              │        │                   │                    │
+*                               │                   ├── C+L+Q ─────┘        │                   ├── R_75 ── C_hfc ──┘├── C_lfb ── gnd
+*                               │(600Ω src)         │(bridge-T boost)       │                   │(HF cut shunt)
+*                               │                                           ├── C_lfa ── h ──── R2 ── out_tap ── R3 ── mid
+*                               │                                           ├── R_lfc ── h     (HS-29 primary couples from out_tap)
 *
 * Amplifier stage:
-*   out_tap → HS-29 primary (input coupling/phase splitter) →
-*   HS-29 CT secondary pin 5 → .00027 → grid1, 43K cross-coupling → grid2
-*   HS-29 pin 8 = feedback node (bottom of 820Ω cathode resistor)
+*   out_tap → HS-29 primary (input coupling transformer) →
+*   HS-29 CT secondary: pin 5 → grid1, pin 8 → grid2 (true push-pull anti-phase)
+*   HS-29 CT (pins 6,7) → 43K DC return + 270pF HF bypass to ground
 *   plate1/plate2 → .25µF → 12AU7 push-pull grids → plates →
 *   360Ω stoppers → S-217-D output xfmr → out
 *
 * Feedback: S-217-D tertiary (pins 3-5, 1000Ω shunt) →
-*   pin 3 → 360Ω → cathode (top of 820Ω)
-*   pin 5 → 360Ω → fb_node (bottom of 820Ω = HS-29 pin 8)
-*   Series-voltage NFB across cathode resistor → 0dB overall gain
+*   pin 3 → 360Ω → cathode (12AX7 pin 3)
+*   pin 5 → 360Ω → cathode (12AX7 pin 8)
+*   Both cathodes tied together. Series-voltage NFB → 0dB overall gain
 *
 * Controls (8 total — but 7 pots due to 3-terminal pot modeling):
 *   3 switches: HF Boost Freq (7-pos), LF Freq (4-pos), HF Cut Freq (3-pos)
@@ -71,24 +71,30 @@ R_drop vcc node_g 2200
 C_filt node_g 0 40u
 R_bias_filt node_g v250 47k
 
+* === INPUT SERIES RESISTOR ===
+* 620Ω between input transformer and passive EQ bridge (confirmed SIMetrix model).
+R_in_series in eq_in 620
+*
 * === HF BOOST SECTION (bridge-T) ===
-* 3-terminal 10k linear pot split into upper arm (in→b) and lower arm (b→eq).
+* 3-terminal 10k linear pot split into upper arm (eq_in→b) and lower arm (b→eq).
 * Series LC resonant circuit + Q damping bridges from b to eq.
 * Inductor values: VintageWindings measured taps from original Pultec unit.
-* Bandwidth pot: 2.2k (confirmed LTSpice + Sowter schematic).
-R_hfb_u in b 10k
+* Bandwidth pot: 2.5k linear (confirmed SIMetrix model).
+R_hfb_u eq_in b 10k
 R_hfb_l b eq 10k
 C_hfb b c_hfb 18n
 L_hfb c_hfb d_hfb 156m
-R_hfb_q d_hfb eq 2.2k
+R_hfb_q d_hfb eq 2.5k
 R_q_off d_hfb eq 390
 
 * === HF CUT + LF SECTIONS (parallel paths from eq to mid) ===
 
 * --- HF Cut path (eq → mid, bypasses the output tap) ---
+* 75Ω series R between pot wiper and switched caps (confirmed SIMetrix model).
 R_hfc_u eq f 1k
 R_hfc_l f mid 1k
-C_hfc f mid 270n
+R_hfc_ser f hfc_cap 75
+C_hfc hfc_cap mid 270n
 
 * --- LF path (eq → out_tap → mid, includes the output tap) ---
 * C_lfa independently selected per LF frequency position (NOT C_lfb/30 ratio).
@@ -103,20 +109,25 @@ R_lfb mid 0 10k
 C_lfb mid 0 2.2u
 
 * === INPUT COUPLING: TRIAD HS-29 TRANSFORMER ===
-* Phase splitter: passive EQ output → center-tapped secondary drives
-* both 12AX7 grids in anti-phase for push-pull drive.
-* 1:1+1 center-tapped secondary (each half = primary turns).
-* Confirmed specs: L_pri=130H, impedance 5k:20k, freq 20Hz-20kHz.
+* 1:2 step-up phase splitter with center-tapped secondary.
+* Construction: sec-pri-pri-sec (3600-1800-1800-3600 turns of #44 wire).
+* Primary halves in series (pins 2-3 strapped): total 3600 turns.
+* Each secondary half: 3600 turns (1:1 with full primary = 1:2 step-up).
+* L_pri ≈ 37H (Sowter 9330 spec). BW: 5Hz-100kHz (-3dB).
 *
-* Primary: EQ output drives transformer, winding to ground for DC return.
-L_int_pri out_tap 0 130
+* Pultec wiring (confirmed abbey road d enfer / GroupDIY + schemer):
+*   Pin 4 = hot input (EQ output), Pin 1 = ground (reverse winding for HF)
+*   Pin 5 → grid1, Pin 8 → grid2 (true push-pull anti-phase drive)
+*   Pins 6,7 = center tap → 43K bias return + 270pF HF bypass
+*   Pin 9 = electrostatic shield (ground)
+*
+* Primary (series, 3600 turns total): L = 37H
+L_int_pri out_tap 0 37
 
-* Secondary halves: center-tapped.
-* Pin 5 (L_int_a) → .00027 → grid1 (forward signal path).
-* Pin 8 (L_int_b) → fb_node (feedback injection point = bottom of 820Ω).
-* Grid2 gets signal only through 43K cross-coupling from grid1.
-L_int_a grid1 hs29_ct 130
-L_int_b hs29_ct fb_node 130
+* Secondary halves (each 3600 turns = full primary): L = 37H each.
+* Differential grid drive = 2 × V_pri = +6dB voltage gain before tubes.
+L_int_a grid1 hs29_ct 37
+L_int_b hs29_ct grid2 37
 
 * Coupling between primary and each secondary half, plus inter-secondary.
 * All windings on same core — k_ab specified for NxN matrix positive definite.
@@ -124,35 +135,37 @@ K_inta L_int_pri L_int_a 0.99
 K_intb L_int_pri L_int_b 0.99
 K_intab L_int_a L_int_b 0.98
 
-* Center tap grounded for DC return (provides grid bias reference)
-R_ct hs29_ct 0 100
+* Center tap: 43K DC return + 270pF HF bypass (from schematic).
+* 43K provides grid bias reference (grid current ≈ 0, so V_grid ≈ 0V).
+* 270pF bypasses HF to ground for stability.
+R_ct_bias hs29_ct 0 43k
+C_ct_bypass hs29_ct 0 270p
 
 * === 12AX7 DUAL TRIODE (both sections, anti-phase) ===
-* HS-29 CT secondary drives grids. 43K + .00027 cross-coupling network
-* between grids (from schematic: HS-29 pin 5 → .00027 → 43K → pin 9).
-C_gg grid1 mid_gg 270p
-R_gg mid_gg grid2 43k
+* HS-29 CT secondary drives both grids directly in anti-phase.
+* True push-pull: grid1 and grid2 receive equal and opposite signals.
 
 * 12AX7 section 1 (pins 1,2,3)
 T1a grid1 plate1 cathode 12AX7
 * 12AX7 section 2 (pins 6,7,8)
 T1b grid2 plate2 cathode 12AX7
 
-* Plate load resistors (200K/1W from +250V, confirmed from schematic).
-* Both plates at ~+140V with Ip ≈ 0.55mA per section.
-Ra1 v250 plate1 200k
-Ra2 v250 plate2 200k
+* Plate load resistors (200K/1W from Node G, per schematic supply chain).
+* "Node G feeds: 12AX7 plates (through 200K Ra)" — NOT from +250V rail.
+* +250V rail supplies only bias divider and grid returns.
+* Expected: plate ≈ node_g - 200K × 0.55mA ≈ 287 - 110 = +177V (schematic: +140V).
+Ra1 node_g plate1 200k
+Ra2 node_g plate2 200k
 
 * 20nF anti-oscillation cap bridging the two 12AX7 plates.
 * ".00002" on schematic = 20,000pF = 20nF. Confirmed by schemer.
 C_plate_bridge plate1 plate2 20n
 
-* Shared cathode bias (820Ω, unbypassed).
-* Both cathodes tied together. 820Ω connects cathode to fb_node
-* (NOT ground). DC path: cathode → 820Ω → fb_node → HS-29 winding → CT → 100Ω → GND.
-* S-217-D feedback winding drives voltage across 820Ω for series NFB.
-* No cathode bypass cap on schematic — NFB requires full signal across 820Ω.
-Rk cathode fb_node 820
+* Shared cathode bias (820Ω to ground, unbypassed).
+* Both cathodes (pins 3, 8) tied together. 820Ω to ground provides self-bias.
+* S-217-D feedback tertiary connects to cathode through both 360Ω resistors.
+* No cathode bypass cap — confirmed by schemer on both EQP-1A and EQP-1R.
+Rk cathode 0 820
 
 * === INTERSTAGE COUPLING: 12AX7 plates → 12AU7 grids ===
 * .25µF caps provide direct AC coupling from 12AX7 plates to 12AU7 grids.
@@ -226,19 +239,19 @@ K_optab L_opt_a L_opt_b 0.95
 * === FEEDBACK WINDING: S-217-D TERTIARY (pins 3-5) ===
 * Series-voltage negative feedback from output back to 12AX7 cathode.
 * Tertiary winding coupled to primary, with 1000Ω shunt damping.
-* Pin 3 → 360Ω → cathode (top of 820Ω).
-* Pin 5 → 360Ω → fb_node (bottom of 820Ω = HS-29 pin 8).
-* Feedback voltage appears across 820Ω, reducing gain to ~0dB overall.
-* +1.1V measured at pin 5 (close to cathode +1.3V, confirming DC connection).
+* Both ends of tertiary connect through 360Ω to cathode node:
+*   S-217-D pin 3 → 360Ω → cathode (12AX7 pin 3 = cathode1)
+*   S-217-D pin 5 → 360Ω → cathode (12AX7 pin 8 = cathode2)
+* Both cathodes tied together. Feedback current flows through 720Ω loop.
 *
-* Tertiary inductance: estimated from turns ratio. If tertiary is ~1/4 of primary
-* turns (feedback tap), L_tert ≈ L_pri/16 ≈ 2.4H. Using conservative estimate.
-L_fb_a fb_s5 fb_s3 2.4
+* Tertiary inductance from Peerless winding data: 71 turns/coil, 2 coils series = 142 turns.
+* Primary = 1575 turns/coil. L_tert = L_pri_half × (142/1575)² = 9.525 × 0.00813 = 0.0774H.
+L_fb_a fb_s5 fb_s3 77.4m
 R_fb_shunt fb_s3 fb_s5 1000
 * DC ground reference for tertiary (winding DC resistance)
 R_fb_dcref fb_s5 0 1Meg
 R_fb_a fb_s3 cathode 360
-R_fb_b fb_s5 fb_node 360
+R_fb_b fb_s5 cathode 360
 * Coupling: tertiary to each primary half
 K_fba L_opt_a L_fb_a 0.95
 K_fbb L_opt_b L_fb_a 0.95
@@ -267,16 +280,20 @@ Rload out 0 100k
 
 * === POTENTIOMETER DIRECTIVES ===
 * HF Boost: 3-terminal 10k linear pot (upper + lower arms, link inversely)
-.pot R_hfb_u 1 10k "HF Boost (upper)"
-.pot R_hfb_l 1 10k "HF Boost (lower)"
+* Pot minimums: 100Ω models physical wiper contact resistance.
+* Pot defaults set to "flat" (all knobs at zero) position.
+* Netlist nominals stay at max R for stable A_DEFAULT matrices.
+* Plugin delta-stamps from nominal to default on first sample.
+.pot R_hfb_u 100 10k 10k "HF Boost (upper)"
+.pot R_hfb_l 100 10k 100 "HF Boost (lower)"
 * Bandwidth/Q: 2.5k linear pot (series with 390Ω offset resistor R_q_off)
-.pot R_hfb_q 1 2.2k "Bandwidth"
+.pot R_hfb_q 100 2.5k 2.5k "Bandwidth"
 * LF Boost: 10k audio pot (shunt from mid to ground)
-.pot R_lfb 1 10k "LF Boost"
+.pot R_lfb 100 10k 100 "LF Boost"
 * LF Atten: 100k audio pot (parallel with LF atten cap)
-.pot R_lfc 1 100k "LF Atten"
+.pot R_lfc 100 100k 100 "LF Atten"
 * HF Cut: 3-terminal 1k linear pot (upper + lower arms, link inversely)
-.pot R_hfc_u 1 1k "HF Cut (upper)"
-.pot R_hfc_l 1 1k "HF Cut (lower)"
+.pot R_hfc_u 100 1k 1k "HF Cut (upper)"
+.pot R_hfc_l 100 1k 100 "HF Cut (lower)"
 
 .END

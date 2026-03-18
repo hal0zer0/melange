@@ -47,6 +47,8 @@ pub struct PotDirective {
     pub min_value: f64,
     /// Maximum resistance value (ohms)
     pub max_value: f64,
+    /// Default resistance for plugin parameter (ohms). If None, uses netlist nominal.
+    pub default_value: Option<f64>,
     /// Optional human-readable label (e.g. "Volume")
     pub label: Option<String>,
 }
@@ -1105,9 +1107,27 @@ impl Parser {
             return Err(self.error("Maximum of 32 .pot directives supported"));
         }
 
-        // Optional quoted label: .pot Rname min max "Label"
-        let label = if parts.len() > 4 {
-            let rest = parts[4..].join(" ");
+        // Optional default value and/or quoted label:
+        //   .pot Rname min max "Label"           — default = netlist nominal
+        //   .pot Rname min max default "Label"   — explicit default
+        let mut default_value = None;
+        let mut label_start = 4;
+
+        if parts.len() > 4 && !parts[4].starts_with('"') {
+            // 5th token is not a quoted label — must be the default value
+            default_value = Some(self.parse_positive_value(parts[4], ".pot default")?);
+            let dv = default_value.unwrap();
+            if dv < min_value || dv > max_value {
+                return Err(self.error(format!(
+                    ".pot default ({}) must be between min ({}) and max ({})",
+                    dv, min_value, max_value
+                )));
+            }
+            label_start = 5;
+        }
+
+        let label = if parts.len() > label_start {
+            let rest = parts[label_start..].join(" ");
             if rest.starts_with('"') {
                 let trimmed = rest.trim_matches('"');
                 if trimmed.is_empty() {
@@ -1127,6 +1147,7 @@ impl Parser {
             resistor_name,
             min_value,
             max_value,
+            default_value,
             label,
         })
     }
@@ -1593,7 +1614,8 @@ fn try_parse_infix(s: &str) -> Option<f64> {
 /// - "10pF" -> 10e-12
 /// - "1F" -> 1.0 (Farad, not femto)
 /// - "6n8" -> 6.8e-9 (infix notation)
-fn parse_value(s: &str) -> Result<f64, ParseFloatError> {
+/// Parse a component value string with engineering notation (e.g. "10k", "4n7", "1Meg").
+pub fn parse_value(s: &str) -> Result<f64, ParseFloatError> {
     let s = s.trim();
     if s.is_empty() {
         return Err(ParseFloatError);
@@ -1660,7 +1682,7 @@ fn parse_value(s: &str) -> Result<f64, ParseFloatError> {
 
 /// Error type for float parsing failures.
 #[derive(Debug, Clone, Copy)]
-struct ParseFloatError;
+pub struct ParseFloatError;
 
 #[cfg(test)]
 mod tests {
