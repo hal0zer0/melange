@@ -48,12 +48,12 @@ R9    coll2 out    6.8K
 R10   out   fb     56K
 
 * --- Tremolo LDR (dynamic pot) ---
-R_ldr fb    0      100k
+R_ldr fb    0      31623
 .pot R_ldr 1k 1Meg "Tremolo"
 
 * --- Supply ---
 V1    vcc   0      DC 15
 
 * --- Device models ---
-.model Q2N5089 NPN(IS=3.03e-14 BF=500 VAF=1e6)
+.model Q2N5089 NPN(IS=3.03e-14 BF=500)
 .model D1N4148 D(IS=2.52e-9 N=1.752)

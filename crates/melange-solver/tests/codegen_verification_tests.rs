@@ -2360,18 +2360,16 @@ C1 out 0 100n
              let mut state2 = CircuitState::default();\n\
              state2.set_sample_rate(96000.0);\n\
              \n\
-             // SM vectors should differ from defaults at a different rate\n\
-             let mut su_matches = true;\n\
+             // S matrix should differ from defaults at a different rate\n\
+             let mut s_matches = true;\n\
              for i in 0..N {{\n\
-                 if (state2.pot_0_su[i] - state.pot_0_su[i]).abs() > 1e-15 {{\n\
-                     su_matches = false;\n\
+                 for j in 0..N {{\n\
+                     if (state2.s[i][j] - state.s[i][j]).abs() > 1e-15 {{\n\
+                         s_matches = false;\n\
+                     }}\n\
                  }}\n\
              }}\n\
-             assert!(!su_matches, \"pot_0_su at 96kHz should differ from 44.1kHz defaults\");\n\
-             assert!(\n\
-                 (state2.pot_0_usu - state.pot_0_usu).abs() > 1e-15,\n\
-                 \"pot_0_usu at 96kHz should differ from default\"\n\
-             );\n\
+             assert!(!s_matches, \"S matrix at 96kHz should differ from 48kHz defaults\");\n\
              \n\
              // Process a 1kHz sine wave at both rates and compare\n\
              // The RC filter response differs between 44.1kHz and 96kHz\n\
