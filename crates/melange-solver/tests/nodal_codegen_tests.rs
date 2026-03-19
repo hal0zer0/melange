@@ -9,10 +9,10 @@
 //! - Generated code contains correct constants and structures
 //! - Various circuit topologies (RL, diode+L, tube+transformer)
 
-use melange_solver::codegen::{CodeGenerator, CodegenConfig};
 use melange_solver::codegen::ir::{CircuitIR, SolverMode};
-use melange_solver::parser::Netlist;
+use melange_solver::codegen::{CodeGenerator, CodegenConfig};
 use melange_solver::mna::MnaSystem;
+use melange_solver::parser::Netlist;
 use std::io::Write;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -24,7 +24,9 @@ fn build_mna_with_input(spice: &str, in_name: &str, r_in: f64) -> (Netlist, MnaS
     let netlist = Netlist::parse(spice).expect("parse");
     let mut mna = MnaSystem::from_netlist(&netlist).expect("mna");
     let in_idx = *mna.node_map.get(in_name).unwrap();
-    if in_idx > 0 { mna.g[in_idx - 1][in_idx - 1] += 1.0 / r_in; }
+    if in_idx > 0 {
+        mna.g[in_idx - 1][in_idx - 1] += 1.0 / r_in;
+    }
     (netlist, mna)
 }
 
@@ -45,7 +47,10 @@ fn generate_nodal(spice: &str, in_name: &str, out_name: &str) -> String {
     let (netlist, mna) = build_mna_with_input(spice, in_name, 1.0);
     let config = nodal_config(in_name, out_name, &mna);
     let generator = CodeGenerator::new(config);
-    generator.generate_nodal(&mna, &netlist).expect("nodal codegen").code
+    generator
+        .generate_nodal(&mna, &netlist)
+        .expect("nodal codegen")
+        .code
 }
 
 fn assert_compiles(code: &str, label: &str) {
@@ -245,19 +250,28 @@ fn test_nodal_codegen_structure() {
     assert!(code.contains("N_I:"), "missing N_I matrix");
 
     // State struct with NR working buffers
-    assert!(code.contains("pub struct CircuitState"), "missing state struct");
+    assert!(
+        code.contains("pub struct CircuitState"),
+        "missing state struct"
+    );
     assert!(code.contains("v_prev"), "missing v_prev");
     assert!(code.contains("i_nl_prev"), "missing i_nl_prev");
 
     // Process sample with NR loop
     assert!(code.contains("process_sample"), "missing process_sample");
-    assert!(code.contains("perm"), "missing LU solve (pivot permutation)");
+    assert!(
+        code.contains("perm"),
+        "missing LU solve (pivot permutation)"
+    );
 
     // Device functions
     assert!(code.contains("diode_current"), "missing diode_current");
 
     // SPICE limiting
-    assert!(code.contains("pnjlim") || code.contains("VCRIT"), "missing SPICE limiting");
+    assert!(
+        code.contains("pnjlim") || code.contains("VCRIT"),
+        "missing SPICE limiting"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -280,7 +294,10 @@ fn test_nodal_codegen_sample_rate() {
     let code = generate_nodal(RL_LOWPASS, "in", "out");
     assert!(code.contains("set_sample_rate"), "missing set_sample_rate");
     // Should rebuild A from G + alpha*C, not use S
-    assert!(code.contains("G[") || code.contains("g_val"), "set_sample_rate should use G");
+    assert!(
+        code.contains("G[") || code.contains("g_val"),
+        "set_sample_rate should use G"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -291,8 +308,14 @@ fn test_nodal_codegen_sample_rate() {
 fn test_nodal_codegen_be_fallback() {
     let code = generate_nodal(DIODE_WITH_INDUCTOR, "in", "out");
     // BE fallback should be emitted for nonlinear circuits
-    assert!(code.contains("A_BE_DEFAULT") || code.contains("a_be"), "missing BE fallback matrices");
-    assert!(code.contains("backward") || code.contains("Backward") || code.contains("BE"), "missing BE fallback logic");
+    assert!(
+        code.contains("A_BE_DEFAULT") || code.contains("a_be"),
+        "missing BE fallback matrices"
+    );
+    assert!(
+        code.contains("backward") || code.contains("Backward") || code.contains("BE"),
+        "missing BE fallback logic"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -306,7 +329,9 @@ fn test_nodal_codegen_pultec_simplified() {
     let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
     // Stamp input conductance
     let in_idx = *mna.node_map.get("in").unwrap();
-    if in_idx > 0 { mna.g[in_idx - 1][in_idx - 1] += 1.0; }
+    if in_idx > 0 {
+        mna.g[in_idx - 1][in_idx - 1] += 1.0;
+    }
     let out_idx = *mna.node_map.get("out").unwrap();
 
     let config = CodegenConfig {
@@ -322,7 +347,11 @@ fn test_nodal_codegen_pultec_simplified() {
     let result = generator.generate_nodal(&mna, &netlist).unwrap();
 
     // Should be a large circuit
-    assert!(result.n >= 30, "Pultec n_nodal should be >= 30, got {}", result.n);
+    assert!(
+        result.n >= 30,
+        "Pultec n_nodal should be >= 30, got {}",
+        result.n
+    );
     assert_eq!(result.m, 8, "Pultec M should be 8 (4 tubes × 2)");
 
     // Should compile

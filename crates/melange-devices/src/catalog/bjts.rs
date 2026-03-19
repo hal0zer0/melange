@@ -137,9 +137,9 @@ pub const CATALOG: &[BjtCatalogEntry] = &[
 
 /// Look up a BJT by part number (case-insensitive).
 pub fn lookup(name: &str) -> Option<&'static BjtCatalogEntry> {
-    CATALOG.iter().find(|entry| {
-        entry.names.iter().any(|n| n.eq_ignore_ascii_case(name))
-    })
+    CATALOG
+        .iter()
+        .find(|entry| entry.names.iter().any(|n| n.eq_ignore_ascii_case(name)))
 }
 
 #[cfg(test)]
@@ -181,14 +181,38 @@ mod tests {
     #[test]
     fn test_all_params_valid() {
         for entry in CATALOG {
-            assert!(entry.is > 0.0 && entry.is.is_finite(), "{}: IS", entry.names[0]);
-            assert!(entry.vt > 0.0 && entry.vt.is_finite(), "{}: VT", entry.names[0]);
-            assert!(entry.beta_f > 0.0 && entry.beta_f.is_finite(), "{}: BF", entry.names[0]);
-            assert!(entry.beta_r > 0.0 && entry.beta_r.is_finite(), "{}: BR", entry.names[0]);
-            if entry.vaf.is_finite() { assert!(entry.vaf > 0.0, "{}: VAF", entry.names[0]); }
-            if entry.var.is_finite() { assert!(entry.var > 0.0, "{}: VAR", entry.names[0]); }
-            if entry.ikf.is_finite() { assert!(entry.ikf > 0.0, "{}: IKF", entry.names[0]); }
-            if entry.ikr.is_finite() { assert!(entry.ikr > 0.0, "{}: IKR", entry.names[0]); }
+            assert!(
+                entry.is > 0.0 && entry.is.is_finite(),
+                "{}: IS",
+                entry.names[0]
+            );
+            assert!(
+                entry.vt > 0.0 && entry.vt.is_finite(),
+                "{}: VT",
+                entry.names[0]
+            );
+            assert!(
+                entry.beta_f > 0.0 && entry.beta_f.is_finite(),
+                "{}: BF",
+                entry.names[0]
+            );
+            assert!(
+                entry.beta_r > 0.0 && entry.beta_r.is_finite(),
+                "{}: BR",
+                entry.names[0]
+            );
+            if entry.vaf.is_finite() {
+                assert!(entry.vaf > 0.0, "{}: VAF", entry.names[0]);
+            }
+            if entry.var.is_finite() {
+                assert!(entry.var > 0.0, "{}: VAR", entry.names[0]);
+            }
+            if entry.ikf.is_finite() {
+                assert!(entry.ikf > 0.0, "{}: IKF", entry.names[0]);
+            }
+            if entry.ikr.is_finite() {
+                assert!(entry.ikr > 0.0, "{}: IKR", entry.names[0]);
+            }
         }
     }
 
@@ -233,7 +257,11 @@ mod tests {
     // --- Tier 2: Datasheet operating point verification ---
 
     fn make_bjt(entry: &BjtCatalogEntry) -> BjtEbersMoll {
-        let polarity = if entry.is_pnp { BjtPolarity::Pnp } else { BjtPolarity::Npn };
+        let polarity = if entry.is_pnp {
+            BjtPolarity::Pnp
+        } else {
+            BjtPolarity::Npn
+        };
         BjtEbersMoll::new(entry.is, entry.vt, entry.beta_f, entry.beta_r, polarity)
     }
 
@@ -243,14 +271,20 @@ mod tests {
         // ON Semi: forward active, Ic=1mA → Vbe ≈ 0.6V
         // At Vbe=0.6V, Vbc=0.6-10=-9.4V (forward active)
         let ic = b.collector_current(0.6, -9.4);
-        assert!(ic > 0.1e-3 && ic < 10e-3,
-            "2N2222A Ic at Vbe=0.6V: {:.3}mA", ic * 1e3);
+        assert!(
+            ic > 0.1e-3 && ic < 10e-3,
+            "2N2222A Ic at Vbe=0.6V: {:.3}mA",
+            ic * 1e3
+        );
         // Forward beta check
         let ib = b.base_current(0.6, -9.4);
         if ib > 1e-12 {
             let measured_beta = ic / ib;
-            assert!(measured_beta > 50.0 && measured_beta < 500.0,
-                "2N2222A beta={:.0} (expected ~200)", measured_beta);
+            assert!(
+                measured_beta > 50.0 && measured_beta < 500.0,
+                "2N2222A beta={:.0} (expected ~200)",
+                measured_beta
+            );
         }
     }
 
@@ -258,13 +292,19 @@ mod tests {
     fn test_2n3904_operating_points() {
         let b = make_bjt(lookup("2N3904").unwrap());
         let ic = b.collector_current(0.6, -9.4);
-        assert!(ic > 0.01e-3 && ic < 10e-3,
-            "2N3904 Ic at Vbe=0.6V: {:.3}mA", ic * 1e3);
+        assert!(
+            ic > 0.01e-3 && ic < 10e-3,
+            "2N3904 Ic at Vbe=0.6V: {:.3}mA",
+            ic * 1e3
+        );
         let ib = b.base_current(0.6, -9.4);
         if ib > 1e-12 {
             let measured_beta = ic / ib;
-            assert!(measured_beta > 100.0 && measured_beta < 800.0,
-                "2N3904 beta={:.0} (expected ~416)", measured_beta);
+            assert!(
+                measured_beta > 100.0 && measured_beta < 800.0,
+                "2N3904 beta={:.0} (expected ~416)",
+                measured_beta
+            );
         }
     }
 
@@ -273,8 +313,11 @@ mod tests {
         let b = make_bjt(lookup("2N3906").unwrap());
         // PNP: Vbe=-0.6V, Vbc=-0.6-(-10)=9.4V → forward active
         let ic = b.collector_current(-0.6, 9.4);
-        assert!(ic < -0.01e-3 && ic > -10e-3,
-            "2N3906 Ic at Vbe=-0.6V: {:.3}mA", ic * 1e3);
+        assert!(
+            ic < -0.01e-3 && ic > -10e-3,
+            "2N3906 Ic at Vbe=-0.6V: {:.3}mA",
+            ic * 1e3
+        );
     }
 
     #[test]
@@ -283,7 +326,11 @@ mod tests {
         // Germanium: lower Vbe (≈0.2V), higher Is
         // At Vbe=-0.2V (PNP), should have measurable current
         let ic = b.collector_current(-0.2, 9.0);
-        assert!(ic < 0.0, "AC128 PNP should have negative Ic, got {:.6}mA", ic * 1e3);
+        assert!(
+            ic < 0.0,
+            "AC128 PNP should have negative Ic, got {:.6}mA",
+            ic * 1e3
+        );
     }
 
     #[test]
@@ -294,7 +341,11 @@ mod tests {
         let ib = b.base_current(0.6, -9.4);
         if ib > 1e-12 {
             let measured_beta = ic / ib;
-            assert!(measured_beta > 200.0, "2N5088 beta={:.0} (expected ~600)", measured_beta);
+            assert!(
+                measured_beta > 200.0,
+                "2N5088 beta={:.0} (expected ~600)",
+                measured_beta
+            );
         }
     }
 
@@ -322,31 +373,59 @@ mod tests {
             let vbe = sign * vbe_mag;
             let vbc = sign * (vbe_mag - 10.0); // forward active
             let jac = b.jacobian(&[vbe, vbc]);
-            let fd0 = (b.collector_current(vbe + eps, vbc) - b.collector_current(vbe - eps, vbc)) / (2.0 * eps);
-            let fd1 = (b.collector_current(vbe, vbc + eps) - b.collector_current(vbe, vbc - eps)) / (2.0 * eps);
+            let fd0 = (b.collector_current(vbe + eps, vbc) - b.collector_current(vbe - eps, vbc))
+                / (2.0 * eps);
+            let fd1 = (b.collector_current(vbe, vbc + eps) - b.collector_current(vbe, vbc - eps))
+                / (2.0 * eps);
             if fd0.abs() > 1e-12 {
                 let rel = (jac[0] - fd0).abs() / fd0.abs();
-                assert!(rel < 1e-3, "{} dIc/dVbe: a={:.6e} fd={:.6e}", entry.names[0], jac[0], fd0);
+                assert!(
+                    rel < 1e-3,
+                    "{} dIc/dVbe: a={:.6e} fd={:.6e}",
+                    entry.names[0],
+                    jac[0],
+                    fd0
+                );
             }
             if fd1.abs() > 1e-12 {
                 let rel = (jac[1] - fd1).abs() / fd1.abs();
-                assert!(rel < 1e-3, "{} dIc/dVbc: a={:.6e} fd={:.6e}", entry.names[0], jac[1], fd1);
+                assert!(
+                    rel < 1e-3,
+                    "{} dIc/dVbc: a={:.6e} fd={:.6e}",
+                    entry.names[0],
+                    jac[1],
+                    fd1
+                );
             }
         }
     }
 
     #[test]
-    fn test_2n2222a_jacobian() { check_bjt_jacobian(lookup("2N2222A").unwrap()); }
+    fn test_2n2222a_jacobian() {
+        check_bjt_jacobian(lookup("2N2222A").unwrap());
+    }
     #[test]
-    fn test_2n3904_jacobian() { check_bjt_jacobian(lookup("2N3904").unwrap()); }
+    fn test_2n3904_jacobian() {
+        check_bjt_jacobian(lookup("2N3904").unwrap());
+    }
     #[test]
-    fn test_2n3906_jacobian() { check_bjt_jacobian(lookup("2N3906").unwrap()); }
+    fn test_2n3906_jacobian() {
+        check_bjt_jacobian(lookup("2N3906").unwrap());
+    }
     #[test]
-    fn test_ac128_jacobian() { check_bjt_jacobian(lookup("AC128").unwrap()); }
+    fn test_ac128_jacobian() {
+        check_bjt_jacobian(lookup("AC128").unwrap());
+    }
     #[test]
-    fn test_2n5088_jacobian() { check_bjt_jacobian(lookup("2N5088").unwrap()); }
+    fn test_2n5088_jacobian() {
+        check_bjt_jacobian(lookup("2N5088").unwrap());
+    }
     #[test]
-    fn test_bc547b_jacobian() { check_bjt_jacobian(lookup("BC547B").unwrap()); }
+    fn test_bc547b_jacobian() {
+        check_bjt_jacobian(lookup("BC547B").unwrap());
+    }
     #[test]
-    fn test_bc557b_jacobian() { check_bjt_jacobian(lookup("BC557B").unwrap()); }
+    fn test_bc557b_jacobian() {
+        check_bjt_jacobian(lookup("BC557B").unwrap());
+    }
 }

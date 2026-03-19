@@ -84,11 +84,7 @@ impl SpiceData {
             return 0.0;
         }
         let dt = self.time[1] - self.time[0];
-        if dt > 0.0 {
-            1.0 / dt
-        } else {
-            self.sample_rate
-        }
+        if dt > 0.0 { 1.0 / dt } else { self.sample_rate }
     }
 }
 
@@ -127,7 +123,7 @@ pub fn run_transient(
     nodes_to_capture: &[String],
 ) -> Result<SpiceData, SpiceError> {
     use std::io::Write;
-    
+
     // Check if ngspice is available
     if Command::new("ngspice").arg("--version").output().is_err() {
         return Err(SpiceError::NgspiceNotFound);
@@ -135,7 +131,7 @@ pub fn run_transient(
 
     // Read original netlist
     let original_content = std::fs::read_to_string(netlist_path)?;
-    
+
     // Create modified netlist with updated .TRAN and .PRINT statements
     let mut modified_content = String::new();
     let mut first_line = true;
@@ -161,7 +157,8 @@ pub fn run_transient(
         } else if trimmed_upper.starts_with(".TRAN") {
             // Replace with uniform timestep for sample-accurate comparison
             // Use the specified tstep and tstop instead of netlist values
-            modified_content.push_str(&format!(".TRAN {} {}\n",
+            modified_content.push_str(&format!(
+                ".TRAN {} {}\n",
                 format_scientific(tstep),
                 format_scientific(tstop)
             ));
@@ -172,7 +169,11 @@ pub fn run_transient(
             // Update .PRINT to capture at our timestep
             modified_content.push_str(&format!(
                 ".PRINT TRAN {}\n",
-                nodes_to_capture.iter().map(|n| format!("V({})", n)).collect::<Vec<_>>().join(" ")
+                nodes_to_capture
+                    .iter()
+                    .map(|n| format!("V({})", n))
+                    .collect::<Vec<_>>()
+                    .join(" ")
             ));
         } else if !trimmed_upper.starts_with(".END") {
             // Copy all lines except .END (we'll add it at the end)
@@ -182,19 +183,22 @@ pub fn run_transient(
     }
     // Ensure .END is present
     modified_content.push_str(".END\n");
-    
+
     // Write to temp file
     let temp_dir = std::env::temp_dir();
-    let temp_path = temp_dir.join(format!("melange_tran_{}_{}.cir",
-        std::process::id(), TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)));
+    let temp_path = temp_dir.join(format!(
+        "melange_tran_{}_{}.cir",
+        std::process::id(),
+        TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
     {
         let mut file = std::fs::File::create(&temp_path)?;
         file.write_all(modified_content.as_bytes())?;
     }
-    
+
     // Run ngspice on the modified netlist
     let output = Command::new("ngspice")
-        .arg("-b")  // Batch mode
+        .arg("-b") // Batch mode
         .arg(&temp_path)
         .output()?;
 
@@ -203,7 +207,7 @@ pub fn run_transient(
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    
+
     if !output.status.success() && stderr.to_lowercase().contains("error") {
         return Err(SpiceError::SimulationFailed(stderr.to_string()));
     }
@@ -262,25 +266,25 @@ fn inject_pwl_source(
     let lines: Vec<&str> = original_content.lines().collect();
     let mut modified_lines = Vec::new();
     let mut source_replaced = false;
-    
+
     // Pattern to match: V<name> where name matches source_name case-insensitively
     let source_pattern = format!("V{}", source_name.to_uppercase());
-    
+
     for line in lines {
         let trimmed = line.trim();
         let trimmed_upper = trimmed.to_uppercase();
-        
+
         // Check if this line is the voltage source definition (case-insensitive)
         if trimmed_upper.starts_with(&source_pattern) {
             // Parse the original source line to extract node names
             // Format: Vname n+ n- [DC value] [AC ...] or Vname n+ n- PWL(...)
             let parts: Vec<&str> = trimmed.split_whitespace().collect();
-            
+
             // We need at least: Vname n+ n-
             if parts.len() >= 3 {
                 let node_plus = parts[1];
                 let node_minus = parts[2];
-                
+
                 // Build PWL source line with correct node names
                 let pwl_source_line = format!(
                     "V{} {} {} PWL({})",
@@ -289,7 +293,7 @@ fn inject_pwl_source(
                     node_minus,
                     pwl_string
                 );
-                
+
                 // Find comment position to preserve comments
                 let comment_pos = line.find('*').unwrap_or(line.len());
                 let comment = &line[comment_pos..];
@@ -305,11 +309,8 @@ fn inject_pwl_source(
             }
         } else if trimmed_upper.starts_with("*PWL_SOURCE_") {
             // Replace placeholder - use default nodes "in" and "0"
-            let pwl_source_line = format!(
-                "V{} in 0 PWL({})",
-                source_name.to_uppercase(),
-                pwl_string
-            );
+            let pwl_source_line =
+                format!("V{} in 0 PWL({})", source_name.to_uppercase(), pwl_string);
             modified_lines.push(pwl_source_line);
             source_replaced = true;
         } else {
@@ -322,14 +323,10 @@ fn inject_pwl_source(
         // Look for .END and insert before it
         let mut content = modified_lines.join("\n");
         let end_pos = content.to_uppercase().find(".END");
-        
+
         // Default nodes for auto-added source
-        let default_pwl_line = format!(
-            "V{} in 0 PWL({})",
-            source_name.to_uppercase(),
-            pwl_string
-        );
-        
+        let default_pwl_line = format!("V{} in 0 PWL({})", source_name.to_uppercase(), pwl_string);
+
         if let Some(pos) = end_pos {
             content.insert_str(pos, &format!("{}\n", default_pwl_line));
             content
@@ -342,8 +339,11 @@ fn inject_pwl_source(
     };
 
     let temp_dir = std::env::temp_dir();
-    let modified_path = temp_dir.join(format!("melange_pwl_{}_{}.cir",
-        std::process::id(), TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)));
+    let modified_path = temp_dir.join(format!(
+        "melange_pwl_{}_{}.cir",
+        std::process::id(),
+        TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
 
     let mut file = std::fs::File::create(&modified_path)?;
     file.write_all(modified_content.as_bytes())?;
@@ -480,29 +480,31 @@ pub fn run_transient_with_thevenin_pwl(
     nodes_to_capture: &[String],
 ) -> Result<SpiceData, SpiceError> {
     let modified = inject_thevenin_pwl(netlist_content, input_node, pwl_data, series_resistance)?;
-    run_transient(modified.netlist_path.as_path(), tstep, tstop, nodes_to_capture)
+    run_transient(
+        modified.netlist_path.as_path(),
+        tstep,
+        tstop,
+        nodes_to_capture,
+    )
 }
 
 /// Parse ngspice printed output format (from .PRINT TRAN statements)
 ///
 /// This handles the ASCII table output format that ngspice produces when
 /// running with .PRINT statements in the netlist.
-fn parse_printed_output(
-    output: &str,
-    expected_nodes: &[String],
-) -> Result<SpiceData, SpiceError> {
+fn parse_printed_output(output: &str, expected_nodes: &[String]) -> Result<SpiceData, SpiceError> {
     let mut spice_data = SpiceData::default();
     let mut column_names: Vec<String> = Vec::new();
     let mut in_data_section = false;
-    
+
     for line in output.lines() {
         let trimmed = line.trim();
-        
+
         // Skip empty lines and comments
         if trimmed.is_empty() || trimmed.starts_with('*') {
             continue;
         }
-        
+
         // Look for header line: "Index   time            v(out)          v(in)"
         if trimmed.starts_with("Index") && trimmed.contains("time") {
             // Parse header to get column names
@@ -517,21 +519,27 @@ fn parse_printed_output(
             in_data_section = true;
             continue;
         }
-        
+
         // Skip separator lines (dashes)
         if trimmed.starts_with("---") || trimmed.starts_with("==") {
             continue;
         }
-        
+
         // Parse data lines
-        if in_data_section && trimmed.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+        if in_data_section
+            && trimmed
+                .chars()
+                .next()
+                .map(|c| c.is_ascii_digit())
+                .unwrap_or(false)
+        {
             let parts: Vec<&str> = trimmed.split_whitespace().collect();
-            
+
             if parts.len() >= 2 {
                 // First column is index, second is time
                 if let Ok(time) = parts[1].parse::<f64>() {
                     spice_data.time.push(time);
-                    
+
                     // Remaining columns are voltages
                     for (i, col_name) in column_names.iter().enumerate().skip(1) {
                         // col_names[0] is "time", so data starts at index 2
@@ -551,14 +559,14 @@ fn parse_printed_output(
             }
         }
     }
-    
+
     // Validate that we got data
     if spice_data.time.is_empty() {
         return Err(SpiceError::ParseError(
-            "No simulation data found in ngspice output".to_string()
+            "No simulation data found in ngspice output".to_string(),
         ));
     }
-    
+
     // Verify expected nodes were found
     for node in expected_nodes {
         let normalized = normalize_node_name(node);
@@ -566,13 +574,13 @@ fn parse_printed_output(
             return Err(SpiceError::NodeNotFound(node.clone()));
         }
     }
-    
+
     // Calculate sample rate
     if spice_data.time.len() >= 2 {
         spice_data.actual_tstep = spice_data.time[1] - spice_data.time[0];
         spice_data.sample_rate = 1.0 / spice_data.actual_tstep;
     }
-    
+
     Ok(spice_data)
 }
 

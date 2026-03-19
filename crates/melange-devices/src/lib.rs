@@ -12,19 +12,19 @@
 pub mod bjt;
 pub mod catalog;
 pub mod diode;
-pub mod tube;
-pub mod ldr;
-pub mod opamp;
-pub mod mosfet;
 pub mod jfet;
+pub mod ldr;
+pub mod mosfet;
+pub mod opamp;
+pub mod tube;
 
 pub use bjt::{BjtEbersMoll, BjtGummelPoon, BjtPolarity, BjtRegion, classify_region};
 pub use diode::{DiodeShockley, DiodeWithRs, Led};
-pub use tube::KorenTriode;
 pub use jfet::{Jfet, JfetChannel};
-pub use mosfet::{Mosfet, ChannelType as MosfetChannelType};
 pub use ldr::CdsLdr;
+pub use mosfet::{ChannelType as MosfetChannelType, Mosfet};
 pub use opamp::{IdealOpamp, SimpleOpamp};
+pub use tube::KorenTriode;
 
 /// A nonlinear circuit element for use in MNA/DK solvers.
 ///
@@ -80,9 +80,9 @@ pub use melange_primitives::VT_ROOM;
 
 /// Compute thermal voltage at a given temperature.
 pub fn thermal_voltage(temp_c: f64) -> f64 {
-    const K_BOLTZMANN: f64 = 1.380649e-23;   // J/K
+    const K_BOLTZMANN: f64 = 1.380649e-23; // J/K
     const Q_ELECTRON: f64 = 1.602176634e-19; // C
-    const T_ABS_ZERO: f64 = 273.15;          // K
+    const T_ABS_ZERO: f64 = 273.15; // K
 
     let temp_k = temp_c + T_ABS_ZERO;
     K_BOLTZMANN * temp_k / Q_ELECTRON
@@ -92,11 +92,11 @@ pub fn thermal_voltage(temp_c: f64) -> f64 {
 pub mod safeguards {
     /// Minimum voltage for exponential calculations.
     /// Prevents exp() overflow for large negative voltages.
-    pub const MIN_EXP_V: f64 = -40.0;  // exp(-40) ≈ 4e-18
+    pub const MIN_EXP_V: f64 = -40.0; // exp(-40) ≈ 4e-18
 
     /// Maximum voltage for exponential calculations.
     /// Prevents exp() overflow for large positive voltages.
-    pub const MAX_EXP_V: f64 = 40.0;   // exp(40) ≈ 2e17
+    pub const MAX_EXP_V: f64 = 40.0; // exp(40) ≈ 2e17
 
     /// Minimum conductance to prevent divide-by-zero.
     pub const MIN_CONDUCTANCE: f64 = 1e-15;
@@ -135,7 +135,12 @@ mod tests {
     fn test_thermal_voltage() {
         let vt = thermal_voltage(27.0);
         // Allow for floating point precision in constants
-        assert!((vt - VT_ROOM).abs() < 1e-4, "VT = {}, expected ~{}", vt, VT_ROOM);
+        assert!(
+            (vt - VT_ROOM).abs() < 1e-4,
+            "VT = {}, expected ~{}",
+            vt,
+            VT_ROOM
+        );
     }
 
     #[test]

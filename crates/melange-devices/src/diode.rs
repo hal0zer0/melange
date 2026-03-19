@@ -247,47 +247,47 @@ mod tests {
     #[test]
     fn test_diode_forward_bias() {
         let diode = DiodeShockley::silicon();
-        
+
         // At 0.7V, should have significant current
         let i_700mv = diode.current_at(0.7);
         assert!(i_700mv > 0.0);
-        
+
         // At 0V, current should be approximately 0
         let i_0v = diode.current_at(0.0);
         assert!(i_0v.abs() < 1e-10);
-        
+
         // Reverse bias: small negative current (approximately -Is)
         let i_rev = diode.current_at(-1.0);
         assert!(i_rev < 0.0);
-        assert!(i_rev > -1e-11);  // Should be small (≈ -Is)
+        assert!(i_rev > -1e-11); // Should be small (≈ -Is)
     }
 
     #[test]
     fn test_diode_iv_curve() {
         let diode = DiodeShockley::silicon();
-        
+
         // Current should increase with voltage
         let i1 = diode.current_at(0.6);
         let i2 = diode.current_at(0.7);
         let i3 = diode.current_at(0.8);
-        
+
         assert!(i2 > i1);
         assert!(i3 > i2);
-        
+
         // Should be exponential (roughly)
         let ratio1 = i2 / i1;
         let ratio2 = i3 / i2;
-        assert!((ratio1 - ratio2).abs() / ratio1 < 0.5);  // Within 50%
+        assert!((ratio1 - ratio2).abs() / ratio1 < 0.5); // Within 50%
     }
 
     #[test]
     fn test_diode_conductance() {
         let diode = DiodeShockley::silicon();
-        
+
         // Conductance should be positive and increase with voltage
         let g1 = diode.conductance_at(0.6);
         let g2 = diode.conductance_at(0.7);
-        
+
         assert!(g1 > 0.0);
         assert!(g2 > g1);
     }
@@ -295,10 +295,10 @@ mod tests {
     #[test]
     fn test_diode_trait() {
         let diode = DiodeShockley::silicon();
-        
+
         let i = diode.current(&[0.7]);
         let g = diode.jacobian(&[0.7]);
-        
+
         assert!(i > 0.0);
         assert!(g[0] > 0.0);
     }
@@ -312,7 +312,10 @@ mod tests {
         let i_red = red.current(&[2.0]);
         let i_blue = blue.current(&[2.0]);
 
-        assert!(i_red > i_blue, "Red LED should conduct more at 2V than blue");
+        assert!(
+            i_red > i_blue,
+            "Red LED should conduct more at 2V than blue"
+        );
     }
 
     /// Verify DiodeWithRs conductance is always finite, even at edge voltages
@@ -324,18 +327,22 @@ mod tests {
         let drs = DiodeWithRs::new(diode, 100.0);
 
         // Test a wide range of voltages including extreme values
-        for &v in &[-10.0, -1.0, -0.5, 0.0, 0.3, 0.5, 0.6, 0.7, 0.8, 1.0, 5.0, 10.0] {
+        for &v in &[
+            -10.0, -1.0, -0.5, 0.0, 0.3, 0.5, 0.6, 0.7, 0.8, 1.0, 5.0, 10.0,
+        ] {
             let g = drs.conductance_at(v);
             assert!(
                 g.is_finite(),
                 "DiodeWithRs conductance must be finite at v={}, got {}",
-                v, g
+                v,
+                g
             );
             // Conductance should be non-negative for a diode
             assert!(
                 g >= 0.0,
                 "DiodeWithRs conductance must be non-negative at v={}, got {}",
-                v, g
+                v,
+                g
             );
         }
 
@@ -343,7 +350,11 @@ mod tests {
         let drs_small = DiodeWithRs::new(diode, 1e-10);
         for &v in &[0.0, 0.7, 1.0] {
             let g = drs_small.conductance_at(v);
-            assert!(g.is_finite(), "Small Rs conductance must be finite at v={}", v);
+            assert!(
+                g.is_finite(),
+                "Small Rs conductance must be finite at v={}",
+                v
+            );
         }
     }
 
@@ -370,8 +381,11 @@ mod tests {
         let vf = (v_lo + v_hi) / 2.0;
 
         // Silicon() with Is=1e-12, n=1.5 should be ~0.80V at 1mA
-        assert!(vf > 0.6 && vf < 1.0,
-            "Forward voltage at 1mA = {:.3}V, expected 0.6-1.0V", vf);
+        assert!(
+            vf > 0.6 && vf < 1.0,
+            "Forward voltage at 1mA = {:.3}V, expected 0.6-1.0V",
+            vf
+        );
     }
 
     /// Verify 1N4148 forward voltage at typical current.
@@ -394,8 +408,11 @@ mod tests {
         let vf = (v_lo + v_hi) / 2.0;
 
         // 1N4148 typical Vf at 1mA ≈ 0.55-0.65V
-        assert!(vf > 0.45 && vf < 0.75,
-            "1N4148 Vf at 1mA = {:.3}V, expected 0.45-0.75V", vf);
+        assert!(
+            vf > 0.45 && vf < 0.75,
+            "1N4148 Vf at 1mA = {:.3}V, expected 0.45-0.75V",
+            vf
+        );
     }
 
     /// Verify diode conductance matches finite difference of current.
@@ -408,9 +425,14 @@ mod tests {
             let g = diode.conductance_at(v);
             let fd = (diode.current_at(v + eps) - diode.current_at(v - eps)) / (2.0 * eps);
             let rel_err = (g - fd).abs() / fd.abs();
-            assert!(rel_err < 1e-4,
+            assert!(
+                rel_err < 1e-4,
                 "Conductance at {:.1}V: analytic={:.6e} fd={:.6e} err={:.2e}",
-                v, g, fd, rel_err);
+                v,
+                g,
+                fd,
+                rel_err
+            );
         }
     }
 
@@ -427,9 +449,14 @@ mod tests {
             let g = diode.conductance_at(v);
             let fd = (diode.current_at(v + eps) - diode.current_at(v - eps)) / (2.0 * eps);
             let err = (g - fd).abs();
-            assert!(err < g.abs() * 1e-4 + 1e-10,
+            assert!(
+                err < g.abs() * 1e-4 + 1e-10,
                 "Derivative mismatch at v={:.4}: conductance={:.6e} fd={:.6e} err={:.2e}",
-                v, g, fd, err);
+                v,
+                g,
+                fd,
+                err
+            );
         }
 
         // Negative clamp boundary
@@ -438,9 +465,14 @@ mod tests {
             let g = diode.conductance_at(v);
             let fd = (diode.current_at(v + eps) - diode.current_at(v - eps)) / (2.0 * eps);
             let err = (g - fd).abs();
-            assert!(err < g.abs() * 1e-4 + 1e-10,
+            assert!(
+                err < g.abs() * 1e-4 + 1e-10,
                 "Derivative mismatch at v={:.4}: conductance={:.6e} fd={:.6e} err={:.2e}",
-                v, g, fd, err);
+                v,
+                g,
+                fd,
+                err
+            );
         }
     }
 
@@ -459,9 +491,15 @@ mod tests {
                 let v_j = v - i * rs;
                 let id = diode.current_at(v_j);
                 let residual = (i - id).abs();
-                assert!(residual < 1e-10,
+                assert!(
+                    residual < 1e-10,
                     "NR residual at v={}, Rs={}: I={:.6e}, Id(Vj)={:.6e}, |I-Id|={:.2e}",
-                    v, rs, i, id, residual);
+                    v,
+                    rs,
+                    i,
+                    id,
+                    residual
+                );
             }
         }
     }
@@ -482,9 +520,15 @@ mod tests {
                 } else {
                     g.abs()
                 };
-                assert!(rel_err < 1e-3,
+                assert!(
+                    rel_err < 1e-3,
                     "DiodeWithRs g mismatch at v={}, Rs={}: g={:.6e} fd={:.6e} err={:.2e}",
-                    v, rs, g, fd, rel_err);
+                    v,
+                    rs,
+                    g,
+                    fd,
+                    rel_err
+                );
             }
         }
     }
@@ -503,9 +547,14 @@ mod tests {
             let i2 = diode.current_at(v + dv);
             let actual_ratio = i2 / i1;
             let rel_err = (actual_ratio - expected_ratio).abs() / expected_ratio;
-            assert!(rel_err < 0.02,
+            assert!(
+                rel_err < 0.02,
                 "Ratio at {:.1}V: actual={:.3} expected={:.3} err={:.4}",
-                v, actual_ratio, expected_ratio, rel_err);
+                v,
+                actual_ratio,
+                expected_ratio,
+                rel_err
+            );
         }
     }
 }

@@ -7,8 +7,8 @@
 /// the exact same algorithm that `emit_nodal_process_sample` would generate.
 
 fn main() {
-    use melange_solver::codegen::ir::CircuitIR;
     use melange_solver::codegen::CodegenConfig;
+    use melange_solver::codegen::ir::CircuitIR;
     use melange_solver::dk::DkKernel;
     use melange_solver::mna::MnaSystem;
     use melange_solver::parser::Netlist;
@@ -38,8 +38,8 @@ fn main() {
     mna.stamp_device_junction_caps(&device_slots);
 
     // ── Step 2: Build runtime NodalSolver ──────────────────────────────
-    let kernel = DkKernel::from_mna_augmented(&mna, sample_rate)
-        .expect("failed to build DK kernel");
+    let kernel =
+        DkKernel::from_mna_augmented(&mna, sample_rate).expect("failed to build DK kernel");
     let mut runtime = NodalSolver::new(
         kernel.clone(),
         &mna,
@@ -68,8 +68,7 @@ fn main() {
         dc_block: true,
         pot_settle_samples: 64,
     };
-    let ir = CircuitIR::from_mna(&mna, &netlist, &config)
-        .expect("failed to build CircuitIR");
+    let ir = CircuitIR::from_mna(&mna, &netlist, &config).expect("failed to build CircuitIR");
 
     let n = ir.topology.n;
     let m = ir.topology.m;
@@ -79,7 +78,10 @@ fn main() {
     println!("Circuit: N={n}, M={m}, n_nodes={n_nodes}, n_aug={n_aug}");
     println!("Devices: {}", ir.device_slots.len());
     for (i, slot) in ir.device_slots.iter().enumerate() {
-        println!("  Device {i}: {:?} start={} dim={}", slot.device_type, slot.start_idx, slot.dimension);
+        println!(
+            "  Device {i}: {:?} start={} dim={}",
+            slot.device_type, slot.start_idx, slot.dimension
+        );
     }
 
     // ── Step 4: Initialize codegen state from RUNTIME's post-warmup state ─
@@ -119,7 +121,9 @@ fn main() {
         }
         // Zero VS/VCVS rows
         for i in n_nodes..n_aug {
-            for j in 0..nn { runtime_a_neg[i * nn + j] = 0.0; }
+            for j in 0..nn {
+                runtime_a_neg[i * nn + j] = 0.0;
+            }
         }
 
         let mut max_a_neg_diff = 0.0f64;
@@ -133,13 +137,18 @@ fn main() {
                 }
             }
         }
-        println!("  max|A_neg diff| = {:.6e} at ({},{})", max_a_neg_diff, max_a_neg_idx.0, max_a_neg_idx.1);
+        println!(
+            "  max|A_neg diff| = {:.6e} at ({},{})",
+            max_a_neg_diff, max_a_neg_idx.0, max_a_neg_idx.1
+        );
 
         let mut max_a_diff = 0.0f64;
         for i in 0..nn {
             for j in 0..nn {
                 let diff = (runtime_a_mat[i * nn + j] - ir.matrices.a_matrix[i * nn + j]).abs();
-                if diff > max_a_diff { max_a_diff = diff; }
+                if diff > max_a_diff {
+                    max_a_diff = diff;
+                }
             }
         }
         println!("  max|A diff|     = {:.6e}", max_a_diff);
@@ -148,31 +157,44 @@ fn main() {
         let mut max_nv_diff = 0.0f64;
         let mut n_v_rebuilt = vec![0.0f64; m * nn];
         for i in 0..m {
-            for j in 0..n_aug { n_v_rebuilt[i * nn + j] = mna.n_v[i][j]; }
+            for j in 0..n_aug {
+                n_v_rebuilt[i * nn + j] = mna.n_v[i][j];
+            }
         }
         for i in 0..m * nn {
             let diff = (n_v_rebuilt[i] - ir.matrices.n_v[i]).abs();
-            if diff > max_nv_diff { max_nv_diff = diff; }
+            if diff > max_nv_diff {
+                max_nv_diff = diff;
+            }
         }
         println!("  max|N_v diff|   = {:.6e}", max_nv_diff);
 
         let mut max_ni_diff = 0.0f64;
         let mut n_i_rebuilt = vec![0.0f64; nn * m];
         for i in 0..n_aug {
-            for j in 0..m { n_i_rebuilt[i * m + j] = mna.n_i[i][j]; }
+            for j in 0..m {
+                n_i_rebuilt[i * m + j] = mna.n_i[i][j];
+            }
         }
         for i in 0..nn * m {
             let diff = (n_i_rebuilt[i] - ir.matrices.n_i[i]).abs();
-            if diff > max_ni_diff { max_ni_diff = diff; }
+            if diff > max_ni_diff {
+                max_ni_diff = diff;
+            }
         }
         println!("  max|N_i diff|   = {:.6e}", max_ni_diff);
 
         // rhs_const: can't rebuild (build_rhs_const is pub(crate)), but IR value is used directly
-        println!("  rhs_const: using IR value directly (can't access build_rhs_const from example)");
+        println!(
+            "  rhs_const: using IR value directly (can't access build_rhs_const from example)"
+        );
     }
 
     // ── Step 6: Lockstep comparison ────────────────────────────────────
-    println!("\n=== Lockstep comparison: {} samples of silence ===", num_samples);
+    println!(
+        "\n=== Lockstep comparison: {} samples of silence ===",
+        num_samples
+    );
 
     let mut first_diverge_sample = None;
     let mut max_ever_v_diff = 0.0f64;
@@ -190,7 +212,10 @@ fn main() {
             &mut cg_v_prev,
             &mut cg_i_nl_prev,
             &mut cg_input_prev,
-            n, m, n_nodes, n_aug,
+            n,
+            m,
+            n_nodes,
+            n_aug,
             input_conductance,
         );
 
@@ -227,17 +252,33 @@ fn main() {
         if first_diverge_sample.is_none() && sample_max_v_diff > 1e-10 {
             first_diverge_sample = Some(sample);
             println!("\n*** FIRST DIVERGENCE at sample {} ***", sample);
-            println!("  max|v_diff| = {:.6e} at node {}", sample_max_v_diff, sample_max_v_idx);
-            println!("  max|i_diff| = {:.6e} at dim {}", sample_max_i_diff, sample_max_i_idx);
+            println!(
+                "  max|v_diff| = {:.6e} at node {}",
+                sample_max_v_diff, sample_max_v_idx
+            );
+            println!(
+                "  max|i_diff| = {:.6e} at dim {}",
+                sample_max_i_diff, sample_max_i_idx
+            );
 
             // Detailed node-by-node comparison
             println!("\n  Top 10 divergent nodes:");
             let mut diffs: Vec<(usize, f64, f64, f64)> = (0..n)
-                .map(|i| (i, (runtime.v_prev[i] - cg_v_prev[i]).abs(), runtime.v_prev[i], cg_v_prev[i]))
+                .map(|i| {
+                    (
+                        i,
+                        (runtime.v_prev[i] - cg_v_prev[i]).abs(),
+                        runtime.v_prev[i],
+                        cg_v_prev[i],
+                    )
+                })
                 .collect();
             diffs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
             for &(idx, diff, rt, cg) in diffs.iter().take(10) {
-                println!("    node {:3}: diff={:+.6e}  runtime={:+.10e}  codegen={:+.10e}", idx, diff, rt, cg);
+                println!(
+                    "    node {:3}: diff={:+.6e}  runtime={:+.10e}  codegen={:+.10e}",
+                    idx, diff, rt, cg
+                );
             }
 
             if m > 0 {
@@ -245,8 +286,10 @@ fn main() {
                 for i in 0..m {
                     let diff = (runtime.i_nl_prev[i] - cg_i_nl_prev[i]).abs();
                     if diff > 1e-15 {
-                        println!("    i_nl[{:2}]: diff={:+.6e}  runtime={:+.10e}  codegen={:+.10e}",
-                                 i, diff, runtime.i_nl_prev[i], cg_i_nl_prev[i]);
+                        println!(
+                            "    i_nl[{:2}]: diff={:+.6e}  runtime={:+.10e}  codegen={:+.10e}",
+                            i, diff, runtime.i_nl_prev[i], cg_i_nl_prev[i]
+                        );
                     }
                 }
             }
@@ -303,7 +346,11 @@ fn codegen_process_sample(
     _n_aug: usize,
     input_conductance: f64,
 ) -> f64 {
-    let input = if input.is_finite() { input.clamp(-100.0, 100.0) } else { 0.0 };
+    let input = if input.is_finite() {
+        input.clamp(-100.0, 100.0)
+    } else {
+        0.0
+    };
 
     let a_flat = &ir.matrices.a_matrix;
     let a_neg_flat = &ir.matrices.a_neg;
@@ -372,13 +419,19 @@ fn codegen_process_sample(
                 for dj in 0..dim {
                     let jj = s + dj;
                     let jd = j_dev[ii * m + jj];
-                    if jd.abs() < 1e-30 { continue; }
+                    if jd.abs() < 1e-30 {
+                        continue;
+                    }
                     for a in 0..n {
                         let ni_ai = n_i_flat[a * m + ii];
-                        if ni_ai.abs() < 1e-30 { continue; }
+                        if ni_ai.abs() < 1e-30 {
+                            continue;
+                        }
                         for b in 0..n {
                             let nv_jb = n_v_flat[jj * n + b];
-                            if nv_jb.abs() < 1e-30 { continue; }
+                            if nv_jb.abs() < 1e-30 {
+                                continue;
+                            }
                             g_aug[a][b] -= ni_ai * jd * nv_jb;
                         }
                     }
@@ -426,10 +479,13 @@ fn codegen_process_sample(
                 let v_nl_current = v_nl[i];
                 let dv: f64 = v_nl_proposed - v_nl_current;
                 if dv.abs() > 1e-15 {
-                    let v_limited = limit_slot_voltage_codegen(slot, d, v_nl_proposed, v_nl_current);
+                    let v_limited =
+                        limit_slot_voltage_codegen(slot, d, v_nl_proposed, v_nl_current);
                     let dv_limited = v_limited - v_nl_current;
                     let ratio = (dv_limited / dv).clamp(0.01, 1.0);
-                    if ratio < alpha { alpha = ratio; }
+                    if ratio < alpha {
+                        alpha = ratio;
+                    }
                 }
             }
         }
@@ -470,7 +526,9 @@ fn codegen_process_sample(
             let mut v_nl_final = vec![0.0f64; m];
             for i in 0..m {
                 let mut sum = 0.0;
-                for j in 0..n { sum += n_v_flat[i * n + j] * v[j]; }
+                for j in 0..n {
+                    sum += n_v_flat[i * n + j] * v[j];
+                }
                 v_nl_final[i] = sum;
             }
             evaluate_devices_codegen_final(&v_nl_final, &ir.device_slots, &mut i_nl, m);
@@ -485,7 +543,11 @@ fn codegen_process_sample(
         // Rebuild RHS with BE matrices
         let mut rhs_be = vec![0.0f64; n];
         for i in 0..n {
-            let mut sum = if !rhs_const_be.is_empty() { rhs_const_be[i] } else { 0.0 };
+            let mut sum = if !rhs_const_be.is_empty() {
+                rhs_const_be[i]
+            } else {
+                0.0
+            };
             for j in 0..n {
                 sum += a_neg_be_flat[i * n + j] * v_prev[j];
             }
@@ -500,7 +562,9 @@ fn codegen_process_sample(
             let mut v_nl = vec![0.0f64; m];
             for i in 0..m {
                 let mut sum = 0.0;
-                for j in 0..n { sum += n_v_flat[i * n + j] * v[j]; }
+                for j in 0..n {
+                    sum += n_v_flat[i * n + j] * v[j];
+                }
                 v_nl[i] = sum;
             }
 
@@ -520,13 +584,19 @@ fn codegen_process_sample(
                     for dj in 0..dim {
                         let jj = s + dj;
                         let jd = j_dev[ii * m + jj];
-                        if jd.abs() < 1e-30 { continue; }
+                        if jd.abs() < 1e-30 {
+                            continue;
+                        }
                         for a in 0..n {
                             let ni_ai = n_i_flat[a * m + ii];
-                            if ni_ai.abs() < 1e-30 { continue; }
+                            if ni_ai.abs() < 1e-30 {
+                                continue;
+                            }
                             for b in 0..n {
                                 let nv_jb = n_v_flat[jj * n + b];
-                                if nv_jb.abs() < 1e-30 { continue; }
+                                if nv_jb.abs() < 1e-30 {
+                                    continue;
+                                }
                                 g_aug[a][b] -= ni_ai * jd * nv_jb;
                             }
                         }
@@ -563,14 +633,19 @@ fn codegen_process_sample(
                 for d in 0..slot.dimension {
                     let i = s + d;
                     let mut v_nl_proposed = 0.0;
-                    for j in 0..n { v_nl_proposed += n_v_flat[i * n + j] * v_new[j]; }
+                    for j in 0..n {
+                        v_nl_proposed += n_v_flat[i * n + j] * v_new[j];
+                    }
                     let v_nl_current = v_nl[i];
                     let dv: f64 = v_nl_proposed - v_nl_current;
                     if dv.abs() > 1e-15 {
-                        let v_limited = limit_slot_voltage_codegen(slot, d, v_nl_proposed, v_nl_current);
+                        let v_limited =
+                            limit_slot_voltage_codegen(slot, d, v_nl_proposed, v_nl_current);
                         let dv_limited = v_limited - v_nl_current;
                         let ratio = (dv_limited / dv).clamp(0.01, 1.0);
-                        if ratio < alpha { alpha = ratio; }
+                        if ratio < alpha {
+                            alpha = ratio;
+                        }
                     }
                 }
             }
@@ -580,14 +655,18 @@ fn codegen_process_sample(
                     let dv = alpha * (v_new[i] - v[i]);
                     max_node_dv = max_node_dv.max(dv.abs());
                 }
-                if max_node_dv > 10.0 { alpha *= (10.0 / max_node_dv).max(0.01); }
+                if max_node_dv > 10.0 {
+                    alpha *= (10.0 / max_node_dv).max(0.01);
+                }
             }
 
             let mut be_step_exceeded = false;
             for i in 0..n {
                 let step = alpha * (v_new[i] - v[i]);
                 let threshold = 1e-6 * v[i].abs().max((v[i] + step).abs()) + tol;
-                if step.abs() >= threshold { be_step_exceeded = true; }
+                if step.abs() >= threshold {
+                    be_step_exceeded = true;
+                }
                 v[i] += step;
             }
             let be_converged = !be_step_exceeded;
@@ -597,7 +676,9 @@ fn codegen_process_sample(
                 let mut v_nl_final = vec![0.0f64; m];
                 for i in 0..m {
                     let mut sum = 0.0;
-                    for j in 0..n { sum += n_v_flat[i * n + j] * v[j]; }
+                    for j in 0..n {
+                        sum += n_v_flat[i * n + j] * v[j];
+                    }
                     v_nl_final[i] = sum;
                 }
                 evaluate_devices_codegen_final(&v_nl_final, &ir.device_slots, &mut i_nl, m);
@@ -610,7 +691,9 @@ fn codegen_process_sample(
             let mut v_nl_final = vec![0.0f64; m];
             for i in 0..m {
                 let mut sum = 0.0;
-                for j in 0..n { sum += n_v_flat[i * n + j] * v[j]; }
+                for j in 0..n {
+                    sum += n_v_flat[i * n + j] * v[j];
+                }
                 v_nl_final[i] = sum;
             }
             evaluate_devices_codegen_final(&v_nl_final, &ir.device_slots, &mut i_nl, m);
@@ -643,8 +726,12 @@ fn evaluate_devices_codegen(
     j_dev: &mut [f64],
     m: usize,
 ) {
-    for x in i_nl.iter_mut() { *x = 0.0; }
-    for x in j_dev.iter_mut() { *x = 0.0; }
+    for x in i_nl.iter_mut() {
+        *x = 0.0;
+    }
+    for x in j_dev.iter_mut() {
+        *x = 0.0;
+    }
 
     // Call through to the same evaluate_devices used by the runtime
     melange_solver::dc_op::evaluate_devices(v_nl, device_slots, i_nl, j_dev, m);

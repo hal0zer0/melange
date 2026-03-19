@@ -3,7 +3,7 @@
 //! This module provides comprehensive signal comparison with multiple error metrics
 //! including time-domain errors, correlation, and spectral analysis (THD).
 
-use rustfft::{num_complex::Complex, FftPlanner};
+use rustfft::{FftPlanner, num_complex::Complex};
 use std::f64::consts::PI;
 
 /// A signal with associated sample rate for comparison
@@ -53,10 +53,7 @@ impl Signal {
 
     /// Find the peak (maximum absolute) value
     pub fn peak(&self) -> f64 {
-        self.samples
-            .iter()
-            .map(|&s| s.abs())
-            .fold(0.0, f64::max)
+        self.samples.iter().map(|&s| s.abs()).fold(0.0, f64::max)
     }
 
     /// Compute the mean value
@@ -110,7 +107,11 @@ impl Signal {
         let n = self.samples.len();
         if n <= 1 {
             // Single sample or empty: Hann window is trivially 0 at boundaries
-            return Signal::new(vec![0.0; n], self.sample_rate, format!("{}_windowed", self.name));
+            return Signal::new(
+                vec![0.0; n],
+                self.sample_rate,
+                format!("{}_windowed", self.name),
+            );
         }
         let windowed: Vec<f64> = self
             .samples
@@ -122,7 +123,11 @@ impl Signal {
             })
             .collect();
 
-        Signal::new(windowed, self.sample_rate, format!("{}_windowed", self.name))
+        Signal::new(
+            windowed,
+            self.sample_rate,
+            format!("{}_windowed", self.name),
+        )
     }
 }
 
@@ -148,12 +153,12 @@ pub struct ComparisonConfig {
 impl Default for ComparisonConfig {
     fn default() -> Self {
         Self {
-            rms_error_tolerance: 0.001,    // 0.1%
-            peak_error_tolerance: 0.01,    // 10mV
-            max_relative_tolerance: 0.01,  // 1%
+            rms_error_tolerance: 0.001,   // 0.1%
+            peak_error_tolerance: 0.01,   // 10mV
+            max_relative_tolerance: 0.01, // 1%
             correlation_min: 0.9999,
-            thd_error_tolerance_db: 1.0,   // 1 dB
-            full_scale: 1.0,               // Assume 1V full scale by default
+            thd_error_tolerance_db: 1.0, // 1 dB
+            full_scale: 1.0,             // Assume 1V full scale by default
             skip_thd: false,
         }
     }
@@ -167,7 +172,7 @@ impl ComparisonConfig {
             peak_error_tolerance: 0.001,   // 1mV
             max_relative_tolerance: 0.001, // 0.1%
             correlation_min: 0.99999,
-            thd_error_tolerance_db: 0.1,   // 0.1 dB
+            thd_error_tolerance_db: 0.1, // 0.1 dB
             full_scale: 1.0,
             skip_thd: false,
         }
@@ -176,11 +181,11 @@ impl ComparisonConfig {
     /// Create a relaxed configuration for approximate validation
     pub fn relaxed() -> Self {
         Self {
-            rms_error_tolerance: 0.01,     // 1%
-            peak_error_tolerance: 0.1,     // 100mV
-            max_relative_tolerance: 0.05,  // 5%
+            rms_error_tolerance: 0.01,    // 1%
+            peak_error_tolerance: 0.1,    // 100mV
+            max_relative_tolerance: 0.05, // 5%
             correlation_min: 0.999,
-            thd_error_tolerance_db: 3.0,   // 3 dB
+            thd_error_tolerance_db: 3.0, // 3 dB
             full_scale: 1.0,
             skip_thd: false,
         }
@@ -245,20 +250,42 @@ impl ComparisonReport {
             "Validation Report for {} (node: {})\n",
             self.circuit_name, self.node_name
         );
-        summary.push_str(&format!("Samples: {} at {:.0} Hz\n", self.sample_count, self.sample_rate));
-        summary.push_str(&format!("Status: {}\n\n", if self.passed { "PASSED ✓" } else { "FAILED ✗" }));
+        summary.push_str(&format!(
+            "Samples: {} at {:.0} Hz\n",
+            self.sample_count, self.sample_rate
+        ));
+        summary.push_str(&format!(
+            "Status: {}\n\n",
+            if self.passed {
+                "PASSED ✓"
+            } else {
+                "FAILED ✗"
+            }
+        ));
 
         summary.push_str("Time-Domain Metrics:\n");
-        summary.push_str(&format!("  RMS Error:        {:.6e} ({:.4}%)\n", 
-            self.rms_error, self.normalized_rms_error * 100.0));
+        summary.push_str(&format!(
+            "  RMS Error:        {:.6e} ({:.4}%)\n",
+            self.rms_error,
+            self.normalized_rms_error * 100.0
+        ));
         summary.push_str(&format!("  Peak Error:       {:.6e}\n", self.peak_error));
-        summary.push_str(&format!("  Mean Abs Error:   {:.6e}\n", self.mean_absolute_error));
-        summary.push_str(&format!("  Max Rel Error:    {:.6e} ({:.4}%)\n", 
-            self.max_relative_error, self.max_relative_error * 100.0));
+        summary.push_str(&format!(
+            "  Mean Abs Error:   {:.6e}\n",
+            self.mean_absolute_error
+        ));
+        summary.push_str(&format!(
+            "  Max Rel Error:    {:.6e} ({:.4}%)\n",
+            self.max_relative_error,
+            self.max_relative_error * 100.0
+        ));
 
         summary.push('\n');
         summary.push_str("Correlation:\n");
-        summary.push_str(&format!("  Correlation:      {:.8}\n", self.correlation_coefficient));
+        summary.push_str(&format!(
+            "  Correlation:      {:.8}\n",
+            self.correlation_coefficient
+        ));
         summary.push_str(&format!("  SNR:              {:.2} dB\n", self.snr_db));
 
         if self.thd_spice.is_finite() && self.thd_melange.is_finite() {
@@ -266,7 +293,10 @@ impl ComparisonReport {
             summary.push_str("Spectral Metrics:\n");
             summary.push_str(&format!("  THD (SPICE):      {:.2} dB\n", self.thd_spice));
             summary.push_str(&format!("  THD (melange):    {:.2} dB\n", self.thd_melange));
-            summary.push_str(&format!("  THD Error:        {:.2} dB\n", self.thd_error_db));
+            summary.push_str(&format!(
+                "  THD Error:        {:.2} dB\n",
+                self.thd_error_db
+            ));
         }
 
         if !self.failures.is_empty() {
@@ -293,9 +323,18 @@ impl ComparisonReport {
         let metrics = [
             ("RMS Error", self.rms_error / config.rms_error_tolerance),
             ("Peak Error", self.peak_error / config.peak_error_tolerance),
-            ("Max Rel Error", self.max_relative_error / config.max_relative_tolerance),
-            ("Correlation", (1.0 - self.correlation_coefficient) / (1.0 - config.correlation_min)),
-            ("THD Error", self.thd_error_db.abs() / config.thd_error_tolerance_db),
+            (
+                "Max Rel Error",
+                self.max_relative_error / config.max_relative_tolerance,
+            ),
+            (
+                "Correlation",
+                (1.0 - self.correlation_coefficient) / (1.0 - config.correlation_min),
+            ),
+            (
+                "THD Error",
+                self.thd_error_db.abs() / config.thd_error_tolerance_db,
+            ),
         ];
 
         for (name, ratio) in metrics {
@@ -353,7 +392,9 @@ pub fn compare_signals(
         if diff > 1 {
             log::warn!(
                 "Signal length mismatch: reference={} vs actual={} (diff={})",
-                reference.len(), resampled_actual.len(), diff
+                reference.len(),
+                resampled_actual.len(),
+                diff
             );
         }
     }
@@ -445,7 +486,11 @@ pub fn compare_signals(
 
     // 7. SNR in dB (remove DC offset before computing power for proper AC SNR)
     let ref_dc = ref_slice.iter().sum::<f64>() / len as f64;
-    let signal_power = ref_slice.iter().map(|&r| (r - ref_dc) * (r - ref_dc)).sum::<f64>() / len as f64;
+    let signal_power = ref_slice
+        .iter()
+        .map(|&r| (r - ref_dc) * (r - ref_dc))
+        .sum::<f64>()
+        / len as f64;
     let noise_power = errors.iter().map(|&e| e * e).sum::<f64>() / len as f64;
     let snr_db = if noise_power > 0.0 && signal_power > 0.0 {
         10.0 * (signal_power / noise_power).log10()
@@ -493,7 +538,9 @@ pub fn compare_signals(
         ));
     }
 
-    if !config.skip_thd && (!thd_error_db.is_finite() || thd_error_db.abs() > config.thd_error_tolerance_db) {
+    if !config.skip_thd
+        && (!thd_error_db.is_finite() || thd_error_db.abs() > config.thd_error_tolerance_db)
+    {
         failures.push(format!(
             "THD error {:.2} dB exceeds tolerance {:.2} dB",
             thd_error_db.abs(),
@@ -526,7 +573,7 @@ pub fn compare_signals(
                 .iter()
                 .zip(errors.iter())
                 .map(|(r, e)| if r.abs() > 1e-12 { (e / r).abs() } else { 0.0 })
-                .collect()
+                .collect(),
         ),
     }
 }
@@ -535,20 +582,20 @@ pub fn compare_signals(
 fn compute_thd_metrics(reference: &Signal, actual: &Signal, len: usize) -> (f64, f64, f64) {
     // Use a reasonable FFT size (next power of 2)
     let fft_size = len.next_power_of_two();
-    
+
     // Compute THD for reference
     let thd_ref = compute_thd(&reference.samples[..len], fft_size, reference.sample_rate);
-    
+
     // Compute THD for actual
     let thd_act = compute_thd(&actual.samples[..len], fft_size, actual.sample_rate);
-    
+
     // THD error in dB
     let thd_error = if thd_ref.is_finite() && thd_act.is_finite() {
         (thd_act - thd_ref).abs()
     } else {
         f64::NAN
     };
-    
+
     (thd_ref, thd_act, thd_error)
 }
 
@@ -586,10 +633,7 @@ fn compute_thd(samples: &[f64], fft_size: usize, sample_rate: f64) -> f64 {
 
     // Compute magnitude spectrum (first half only, since it's symmetric)
     let half_size = fft_size / 2;
-    let magnitudes: Vec<f64> = input[..half_size]
-        .iter()
-        .map(|c| c.norm())
-        .collect();
+    let magnitudes: Vec<f64> = input[..half_size].iter().map(|c| c.norm()).collect();
 
     // Find fundamental frequency: first significant peak (low→high), not global max.
     // This prevents strong harmonics from being misidentified as the fundamental.
@@ -611,7 +655,11 @@ fn compute_thd(samples: &[f64], fft_size: usize, sample_rate: f64) -> f64 {
         if magnitudes[i] > threshold {
             // Check if this is a local peak (higher than neighbors)
             let prev = if i > 0 { magnitudes[i - 1] } else { 0.0 };
-            let next = if i + 1 < half_size { magnitudes[i + 1] } else { 0.0 };
+            let next = if i + 1 < half_size {
+                magnitudes[i + 1]
+            } else {
+                0.0
+            };
             if magnitudes[i] >= prev && magnitudes[i] >= next {
                 fundamental_idx = i;
                 fundamental_mag = magnitudes[i];
@@ -622,7 +670,10 @@ fn compute_thd(samples: &[f64], fft_size: usize, sample_rate: f64) -> f64 {
 
     // Fallback to global max if no peak found
     if fundamental_mag < 1e-12 {
-        for (i, &mag) in magnitudes[search_start..search_end.min(half_size)].iter().enumerate() {
+        for (i, &mag) in magnitudes[search_start..search_end.min(half_size)]
+            .iter()
+            .enumerate()
+        {
             if mag > fundamental_mag {
                 fundamental_mag = mag;
                 fundamental_idx = search_start + i;
@@ -643,7 +694,7 @@ fn compute_thd(samples: &[f64], fft_size: usize, sample_rate: f64) -> f64 {
     for harmonic in 2..=10 {
         let harmonic_freq = fundamental_freq * harmonic as f64;
         let harmonic_idx = (harmonic_freq / freq_resolution) as usize;
-        
+
         if harmonic_idx < half_size {
             // Average around the bin to capture spread
             let start = harmonic_idx.saturating_sub(1);
@@ -706,7 +757,7 @@ mod tests {
         let samples: Vec<f64> = (0..1000)
             .map(|i| (2.0 * PI * 1000.0 * i as f64 / 44100.0).sin())
             .collect();
-        
+
         let reference = Signal::new(samples.clone(), 44100.0, "reference");
         let actual = Signal::new(samples, 44100.0, "actual");
 
@@ -715,7 +766,10 @@ mod tests {
 
         assert!(report.passed, "Identical signals should pass");
         assert!(report.rms_error < 1e-10, "RMS error should be near zero");
-        assert!((report.correlation_coefficient - 1.0).abs() < 1e-10, "Correlation should be 1.0");
+        assert!(
+            (report.correlation_coefficient - 1.0).abs() < 1e-10,
+            "Correlation should be 1.0"
+        );
     }
 
     #[test]
@@ -726,7 +780,7 @@ mod tests {
         let act_samples: Vec<f64> = (0..1000)
             .map(|i| 0.5 * (2.0 * PI * 1000.0 * i as f64 / 44100.0).sin()) // Half amplitude
             .collect();
-        
+
         let reference = Signal::new(ref_samples, 44100.0, "reference");
         let actual = Signal::new(act_samples, 44100.0, "actual");
 
@@ -743,9 +797,9 @@ mod tests {
             .map(|i| (2.0 * PI * i as f64 / 100.0).sin())
             .collect();
         let signal = Signal::new(samples, 1000.0, "test");
-        
+
         let resampled = signal.resample(500.0);
-        
+
         // Duration should be preserved
         assert!((resampled.duration() - signal.duration()).abs() < 0.001);
         // Length should be roughly halved

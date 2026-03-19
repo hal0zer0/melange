@@ -3,9 +3,9 @@
 //! Tests for the `.switch` directive: parser, MNA resolution, codegen, and compile-and-run.
 
 use melange_solver::codegen::{CodeGenerator, CodegenConfig};
-use melange_solver::parser::Netlist;
-use melange_solver::mna::MnaSystem;
 use melange_solver::dk::DkKernel;
+use melange_solver::mna::MnaSystem;
+use melange_solver::parser::Netlist;
 use std::io::Write;
 
 // ---------------------------------------------------------------------------
@@ -34,7 +34,9 @@ fn generate(spice: &str) -> String {
         ..CodegenConfig::default()
     };
     let codegen = CodeGenerator::new(config);
-    let result = codegen.generate(&kernel, &mna, &netlist).expect("codegen failed");
+    let result = codegen
+        .generate(&kernel, &mna, &netlist)
+        .expect("codegen failed");
     result.code
 }
 
@@ -48,7 +50,13 @@ fn compile_and_run(code: &str, test_name: &str) {
     }
 
     let compile = std::process::Command::new("rustc")
-        .args([src_path.to_str().unwrap(), "-o", bin_path.to_str().unwrap(), "--edition", "2021"])
+        .args([
+            src_path.to_str().unwrap(),
+            "-o",
+            bin_path.to_str().unwrap(),
+            "--edition",
+            "2021",
+        ])
         .output()
         .expect("run rustc");
 
@@ -61,7 +69,9 @@ fn compile_and_run(code: &str, test_name: &str) {
         );
     }
 
-    let run = std::process::Command::new(&bin_path).output().expect("run test binary");
+    let run = std::process::Command::new(&bin_path)
+        .output()
+        .expect("run test binary");
     let _ = std::fs::remove_file(&src_path);
     let _ = std::fs::remove_file(&bin_path);
 
@@ -128,7 +138,11 @@ C1 out 0 6n8
     // Check R1 value: 4k7 = 4.7k = 4700
     let r1 = netlist.elements.iter().find(|e| e.name() == "R1").unwrap();
     if let melange_solver::parser::Element::Resistor { value, .. } = r1 {
-        assert!((value - 4700.0).abs() < 0.01, "4k7 should be 4700, got {}", value);
+        assert!(
+            (value - 4700.0).abs() < 0.01,
+            "4k7 should be 4700, got {}",
+            value
+        );
     } else {
         panic!("R1 should be a resistor");
     }
@@ -136,7 +150,11 @@ C1 out 0 6n8
     // Check C1 value: 6n8 = 6.8nF
     let c1 = netlist.elements.iter().find(|e| e.name() == "C1").unwrap();
     if let melange_solver::parser::Element::Capacitor { value, .. } = c1 {
-        assert!((value - 6.8e-9).abs() < 1e-15, "6n8 should be 6.8e-9, got {}", value);
+        assert!(
+            (value - 6.8e-9).abs() < 1e-15,
+            "6n8 should be 6.8e-9, got {}",
+            value
+        );
     } else {
         panic!("C1 should be a capacitor");
     }
@@ -156,7 +174,10 @@ C1 out 0 100n
 .switch C1 100n
 ";
     let result = Netlist::parse(spice);
-    assert!(result.is_err(), "Should reject switch with fewer than 2 positions");
+    assert!(
+        result.is_err(),
+        "Should reject switch with fewer than 2 positions"
+    );
 }
 
 #[test]
@@ -169,9 +190,16 @@ L1 mid 0 176m
 .switch C1,L1 15n/176m 10n
 ";
     let result = Netlist::parse(spice);
-    assert!(result.is_err(), "Should reject mismatched value count in ganged switch");
+    assert!(
+        result.is_err(),
+        "Should reject mismatched value count in ganged switch"
+    );
     let err = result.unwrap_err();
-    assert!(err.message.contains("values") || err.message.contains("components"), "Error: {}", err.message);
+    assert!(
+        err.message.contains("values") || err.message.contains("components"),
+        "Error: {}",
+        err.message
+    );
 }
 
 #[test]
@@ -184,7 +212,10 @@ C1 out 0 100n
 .switch C1 470n 680n
 ";
     let result = Netlist::parse(spice);
-    assert!(result.is_err(), "Should reject duplicate component across switches");
+    assert!(
+        result.is_err(),
+        "Should reject duplicate component across switches"
+    );
     let err = result.unwrap_err();
     assert!(err.message.contains("already"), "Error: {}", err.message);
 }
@@ -198,7 +229,10 @@ C1 out 0 100n
 .switch C99 100n 220n
 ";
     let result = Netlist::parse(spice);
-    assert!(result.is_err(), "Should reject nonexistent component reference");
+    assert!(
+        result.is_err(),
+        "Should reject nonexistent component reference"
+    );
 }
 
 #[test]
@@ -212,7 +246,10 @@ D1 out 0 DMOD
 .switch D1 1e-14 1e-13
 ";
     let result = Netlist::parse(spice);
-    assert!(result.is_err(), "Should reject non-R/C/L component in switch");
+    assert!(
+        result.is_err(),
+        "Should reject non-R/C/L component in switch"
+    );
 }
 
 // ===========================================================================
@@ -259,54 +296,95 @@ L1 mid 0 176m
 
 #[test]
 fn test_codegen_switch_constants_emitted() {
-    let code = generate("\
+    let code = generate(
+        "\
 Switch Codegen Test
 R1 in out 1k
 C1 out 0 100n
 .switch C1 100n 220n 470n
-");
-    assert!(code.contains("SWITCH_0_NUM_POSITIONS"), "Should emit SWITCH_0_NUM_POSITIONS");
-    assert!(code.contains("SWITCH_0_VALUES"), "Should emit SWITCH_0_VALUES");
-    assert!(code.contains("SWITCH_0_COMP_0_NODE_P"), "Should emit component node constants");
-    assert!(code.contains("SWITCH_0_COMP_0_NOMINAL"), "Should emit nominal value constant");
+",
+    );
+    assert!(
+        code.contains("SWITCH_0_NUM_POSITIONS"),
+        "Should emit SWITCH_0_NUM_POSITIONS"
+    );
+    assert!(
+        code.contains("SWITCH_0_VALUES"),
+        "Should emit SWITCH_0_VALUES"
+    );
+    assert!(
+        code.contains("SWITCH_0_COMP_0_NODE_P"),
+        "Should emit component node constants"
+    );
+    assert!(
+        code.contains("SWITCH_0_COMP_0_NOMINAL"),
+        "Should emit nominal value constant"
+    );
 }
 
 #[test]
 fn test_codegen_switch_state_fields() {
-    let code = generate("\
+    let code = generate(
+        "\
 Switch State Test
 R1 in out 1k
 C1 out 0 100n
 .switch C1 100n 220n 470n
-");
-    assert!(code.contains("switch_0_position"), "Should have switch_0_position field");
-    assert!(code.contains("current_sample_rate"), "Should have current_sample_rate field");
+",
+    );
+    assert!(
+        code.contains("switch_0_position"),
+        "Should have switch_0_position field"
+    );
+    assert!(
+        code.contains("current_sample_rate"),
+        "Should have current_sample_rate field"
+    );
 }
 
 #[test]
 fn test_codegen_set_switch_method() {
-    let code = generate("\
+    let code = generate(
+        "\
 Switch Method Test
 R1 in out 1k
 C1 out 0 100n
 .switch C1 100n 220n 470n
-");
-    assert!(code.contains("fn set_switch_0"), "Should emit set_switch_0 method");
-    assert!(code.contains("fn rebuild_matrices"), "Should emit rebuild_matrices method");
+",
+    );
+    assert!(
+        code.contains("fn set_switch_0"),
+        "Should emit set_switch_0 method"
+    );
+    assert!(
+        code.contains("fn rebuild_matrices"),
+        "Should emit rebuild_matrices method"
+    );
 }
 
 #[test]
 fn test_codegen_no_switch_backward_compat() {
     // Circuit with no .switch directives should NOT emit switch code
-    let code = generate("\
+    let code = generate(
+        "\
 No Switch Test
 R1 in out 1k
 C1 out 0 100n
-");
-    assert!(!code.contains("SWITCH_"), "Should NOT emit SWITCH_ constants");
+",
+    );
+    assert!(
+        !code.contains("SWITCH_"),
+        "Should NOT emit SWITCH_ constants"
+    );
     assert!(!code.contains("switch_0"), "Should NOT emit switch fields");
-    assert!(!code.contains("rebuild_matrices"), "Should NOT emit rebuild_matrices");
-    assert!(!code.contains("current_sample_rate"), "Should NOT emit current_sample_rate");
+    assert!(
+        !code.contains("rebuild_matrices"),
+        "Should NOT emit rebuild_matrices"
+    );
+    assert!(
+        !code.contains("current_sample_rate"),
+        "Should NOT emit current_sample_rate"
+    );
 }
 
 // ===========================================================================
@@ -315,12 +393,14 @@ C1 out 0 100n
 
 #[test]
 fn test_compile_switched_cap() {
-    let code = generate("\
+    let code = generate(
+        "\
 Switched Cap Test
 R1 in out 1k
 C1 out 0 100n
 .switch C1 100n 220n 470n
-");
+",
+    );
     let test_harness = format!(
         "{}\n\
          fn main() {{\n\
@@ -360,13 +440,15 @@ C1 out 0 100n
 
 #[test]
 fn test_compile_ganged_cap_inductor() {
-    let code = generate("\
+    let code = generate(
+        "\
 Ganged C+L Test
 R1 in out 1k
 C1 out mid 15n
 L1 mid 0 176m
 .switch C1,L1 15n/176m 10n/100m
-");
+",
+    );
     let test_harness = format!(
         "{}\n\
          fn main() {{\n\
@@ -420,7 +502,9 @@ C2 out 0 47n
         ..CodegenConfig::default()
     };
     let codegen = CodeGenerator::new(config);
-    let result = codegen.generate(&kernel, &mna, &netlist).expect("codegen failed");
+    let result = codegen
+        .generate(&kernel, &mna, &netlist)
+        .expect("codegen failed");
 
     let test_harness = format!(
         "{}\n\
@@ -456,12 +540,14 @@ C2 out 0 47n
 
 #[test]
 fn test_compile_switched_resistor() {
-    let code = generate("\
+    let code = generate(
+        "\
 Switched Resistor Test
 R1 in out 1k
 C1 out 0 100n
 .switch R1 1k 2.2k 4.7k 10k
-");
+",
+    );
     let test_harness = format!(
         "{}\n\
          fn main() {{\n\
@@ -485,7 +571,8 @@ C1 out 0 100n
 
 #[test]
 fn test_compile_multiple_switches() {
-    let code = generate("\
+    let code = generate(
+        "\
 Multi Switch Test
 R1 in mid 1k
 C1 mid 0 100n
@@ -493,7 +580,8 @@ R2 mid out 2.2k
 C2 out 0 47n
 .switch C1 100n 220n 470n
 .switch C2 47n 100n 220n
-");
+",
+    );
     let test_harness = format!(
         "{}\n\
          fn main() {{\n\

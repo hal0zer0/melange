@@ -6,14 +6,15 @@
 //! - Matrix operations (S * rhs, K * i_nl)
 //! - Device evaluation (diode/BJT current and jacobian)
 
-use criterion::{
-    black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput,
-};
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use melange_devices::{BjtEbersMoll, DiodeShockley};
-use melange_solver::{
-    parser::Netlist, mna::MnaSystem, dk::DkKernel, solver::{CircuitSolver, DeviceEntry, LinearSolver},
-};
 use melange_primitives::nr::{nr_solve_1d, nr_solve_2d, pn_vcrit, pnjlim};
+use melange_solver::{
+    dk::DkKernel,
+    mna::MnaSystem,
+    parser::Netlist,
+    solver::{CircuitSolver, DeviceEntry, LinearSolver},
+};
 
 // =============================================================================
 // Circuit Netlists
@@ -108,7 +109,10 @@ fn benchmark_bjt_amp(c: &mut Criterion) {
 
     // Skip if kernel dimensions don't match BJT (2D)
     if kernel.m != 2 {
-        println!("Skipping BJT benchmark: kernel.m = {}, expected 2", kernel.m);
+        println!(
+            "Skipping BJT benchmark: kernel.m = {}, expected 2",
+            kernel.m
+        );
         return;
     }
 
@@ -143,15 +147,19 @@ fn benchmark_bjt_amp(c: &mut Criterion) {
 fn benchmark_nr_1d_convergence(c: &mut Criterion) {
     let diode = DiodeShockley::silicon();
     let k = 1000.0; // Typical K value for diode clipper
-    let p = 0.5;    // Typical prediction voltage
+    let p = 0.5; // Typical prediction voltage
 
     let mut group = c.benchmark_group("nr_solver/1d");
     group.measurement_time(std::time::Duration::from_secs(5));
 
     // Benchmark with different initial guesses (warm start effect)
     for &warm_start in &[false, true] {
-        let name = if warm_start { "with_warm_start" } else { "cold_start" };
-        
+        let name = if warm_start {
+            "with_warm_start"
+        } else {
+            "cold_start"
+        };
+
         group.bench_function(name, |b| {
             let mut v_prev = if warm_start { 0.4 } else { 0.0 };
             b.iter(|| {
@@ -187,7 +195,7 @@ fn benchmark_nr_2d_convergence(c: &mut Criterion) {
     // Two diode system (like a full-wave rectifier or back-to-back clipper)
     let diode1 = DiodeShockley::silicon();
     let diode2 = DiodeShockley::silicon();
-    
+
     // K matrix for two coupled diodes
     let k = [[500.0, 200.0], [200.0, 500.0]];
     let p = [0.3, -0.3]; // Differential drive
@@ -198,14 +206,18 @@ fn benchmark_nr_2d_convergence(c: &mut Criterion) {
     group.measurement_time(std::time::Duration::from_secs(5));
 
     for &warm_start in &[false, true] {
-        let name = if warm_start { "with_warm_start" } else { "cold_start" };
-        
+        let name = if warm_start {
+            "with_warm_start"
+        } else {
+            "cold_start"
+        };
+
         group.bench_function(name, |b| {
             let mut v_prev = [0.0_f64; 2];
             if warm_start {
                 v_prev = [0.2, -0.2];
             }
-            
+
             b.iter(|| {
                 let v0 = if warm_start { v_prev } else { [0.0, 0.0] };
                 let (v1, v2, result) = nr_solve_2d(
@@ -237,7 +249,8 @@ fn benchmark_nr_2d_convergence(c: &mut Criterion) {
                     },
                     |vnew, vold| pnjlim(vnew, vold, n_vt, vcrit),
                     |vnew, vold| pnjlim(vnew, vold, n_vt, vcrit),
-                    v0[0], v0[1],
+                    v0[0],
+                    v0[1],
                     20,
                     1e-10,
                 );
@@ -284,7 +297,7 @@ fn benchmark_matrix_correction(c: &mut Criterion) {
 
     let n = kernel.n;
     let m = kernel.m;
-    
+
     let v_pred: Vec<f64> = (0..n).map(|i| i as f64 * 0.01).collect();
     let i_nl: Vec<f64> = (0..m).map(|i| i as f64 * 1e-6).collect();
     let i_nl_prev: Vec<f64> = vec![0.0; m];
@@ -443,9 +456,9 @@ fn benchmark_bjt_evaluation(c: &mut Criterion) {
 
 fn benchmark_device_array_vs_vec(c: &mut Criterion) {
     let diode = DiodeShockley::silicon();
-    
+
     let mut group = c.benchmark_group("device/array_vs_vec");
-    
+
     // Array-based (stack allocated)
     group.bench_function("array_stack", |b| {
         b.iter(|| {
@@ -479,9 +492,7 @@ fn benchmark_sample_rate_comparison(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::from_parameter(sample_rate as u64),
             &sample_rate,
-            |b, _| {
-                b.iter(|| solver.process_sample(black_box(0.5)))
-            },
+            |b, _| b.iter(|| solver.process_sample(black_box(0.5))),
         );
     }
 

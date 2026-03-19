@@ -319,7 +319,10 @@ fn main() -> Result<()> {
         } => {
             // Validate numeric CLI parameters
             if sample_rate <= 0.0 || !sample_rate.is_finite() {
-                anyhow::bail!("Sample rate must be positive and finite, got {}", sample_rate);
+                anyhow::bail!(
+                    "Sample rate must be positive and finite, got {}",
+                    sample_rate
+                );
             }
             if tolerance <= 0.0 || !tolerance.is_finite() {
                 anyhow::bail!("Tolerance must be positive and finite, got {}", tolerance);
@@ -448,11 +451,18 @@ fn main() -> Result<()> {
 
             let circuit_source = circuits::resolve(&input)?;
             analyze_freq_response(
-                &circuit_source, &input_node, &output_node,
-                start_freq, end_freq, points_per_decade,
-                amplitude, sample_rate, input_resistance,
+                &circuit_source,
+                &input_node,
+                &output_node,
+                start_freq,
+                end_freq,
+                points_per_decade,
+                amplitude,
+                sample_rate,
+                input_resistance,
                 output.as_ref(),
-                &pot_overrides, &switch_overrides,
+                &pot_overrides,
+                &switch_overrides,
             )
         }
         Commands::Nodes { input } => {
@@ -483,7 +493,7 @@ fn compile_circuit_source(
     no_dc_block: bool,
 ) -> Result<()> {
     use melange_solver::{
-        codegen::{CodegenConfig, CodeGenerator},
+        codegen::{CodeGenerator, CodegenConfig},
         dk::DkKernel,
         mna::MnaSystem,
         parser::Netlist,
@@ -501,10 +511,8 @@ fn compile_circuit_source(
             println!("  Using builtin circuit: {}", name);
             content.clone()
         }
-        circuits::CircuitSource::Local { path } => {
-            std::fs::read_to_string(path)
-                .with_context(|| format!("Failed to read local file: {}", path.display()))?
-        }
+        circuits::CircuitSource::Local { path } => std::fs::read_to_string(path)
+            .with_context(|| format!("Failed to read local file: {}", path.display()))?,
         circuits::CircuitSource::Url { url } | circuits::CircuitSource::Friendly { url, .. } => {
             println!("  Fetching from URL: {}", url);
             let cache = cache::Cache::new()?;
@@ -514,13 +522,14 @@ fn compile_circuit_source(
 
     // Step 1: Parse netlist
     println!("Step 1: Parsing SPICE netlist...");
-    let mut netlist = Netlist::parse(&netlist_str)
-        .with_context(|| "Failed to parse SPICE netlist")?;
+    let mut netlist =
+        Netlist::parse(&netlist_str).with_context(|| "Failed to parse SPICE netlist")?;
 
     // Expand subcircuit instances (X elements) before MNA
     if !netlist.subcircuits.is_empty() {
         let num_subcircuits = netlist.subcircuits.len();
-        netlist.expand_subcircuits()
+        netlist
+            .expand_subcircuits()
             .with_context(|| "Failed to expand subcircuits")?;
         println!("  ✓ Expanded {} subcircuit definition(s)", num_subcircuits);
     }
@@ -529,21 +538,24 @@ fn compile_circuit_source(
 
     // Step 2: Build MNA system
     println!("Step 2: Building MNA system...");
-    let mut mna = MnaSystem::from_netlist(&netlist)
-        .with_context(|| "Failed to build MNA system")?;
+    let mut mna =
+        MnaSystem::from_netlist(&netlist).with_context(|| "Failed to build MNA system")?;
 
-    println!("  ✓ {} nodes, {} nonlinear devices", mna.n, mna.nonlinear_devices.len());
+    println!(
+        "  ✓ {} nodes, {} nonlinear devices",
+        mna.n,
+        mna.nonlinear_devices.len()
+    );
 
     // Get input node index and add input conductance to G matrix
     // This models the source impedance of the input voltage source
-    let input_node_raw = mna
-        .node_map
-        .get(input_node)
-        .copied()
-        .ok_or_else(|| anyhow::anyhow!(
+    let input_node_raw = mna.node_map.get(input_node).copied().ok_or_else(|| {
+        anyhow::anyhow!(
             "Input node '{}' not found in circuit. Available: {:?}",
-            input_node, mna.node_map.keys().collect::<Vec<_>>()
-        ))?;
+            input_node,
+            mna.node_map.keys().collect::<Vec<_>>()
+        )
+    })?;
     if input_node_raw == 0 {
         anyhow::bail!("Input node cannot be ground (0). Please specify a non-ground node.");
     }
@@ -556,7 +568,10 @@ fn compile_circuit_source(
     } else {
         (1.0, "default")
     };
-    println!("  Input resistance: {} ohm ({})", input_resistance, ir_source);
+    println!(
+        "  Input resistance: {} ohm ({})",
+        input_resistance, ir_source
+    );
     let input_conductance = 1.0 / input_resistance;
     if input_node_idx < mna.n {
         mna.g[input_node_idx][input_node_idx] += input_conductance;
@@ -570,8 +585,16 @@ fn compile_circuit_source(
             // Direct connection: pot node matches input node (both 1-indexed)
             let direct = pot.node_p == input_node_raw || pot.node_q == input_node_raw;
             // One-hop: connected through another component (check G matrix)
-            let pot_p_0 = if pot.node_p > 0 { pot.node_p - 1 } else { usize::MAX };
-            let pot_q_0 = if pot.node_q > 0 { pot.node_q - 1 } else { usize::MAX };
+            let pot_p_0 = if pot.node_p > 0 {
+                pot.node_p - 1
+            } else {
+                usize::MAX
+            };
+            let pot_q_0 = if pot.node_q > 0 {
+                pot.node_q - 1
+            } else {
+                usize::MAX
+            };
             let one_hop = (pot_p_0 < mna.n && mna.g[input_node_idx][pot_p_0] != 0.0)
                 || (pot_q_0 < mna.n && mna.g[input_node_idx][pot_q_0] != 0.0);
             if direct || one_hop {
@@ -580,9 +603,14 @@ fn compile_circuit_source(
         }
         if !connected_pots.is_empty() {
             eprintln!();
-            eprintln!("  WARNING: Passive EQ topology detected with {:.0}Ω source impedance.", input_resistance);
+            eprintln!(
+                "  WARNING: Passive EQ topology detected with {:.0}Ω source impedance.",
+                input_resistance
+            );
             eprintln!("  Pots connected to input: {}", connected_pots.join(", "));
-            eprintln!("  A low source impedance overwhelms passive EQ networks, making pots inert.");
+            eprintln!(
+                "  A low source impedance overwhelms passive EQ networks, making pots inert."
+            );
             eprintln!("  Consider adding to your netlist:  .input_impedance 600");
             eprintln!("  Or use the CLI flag:              --input-resistance 600");
             eprintln!();
@@ -592,8 +620,8 @@ fn compile_circuit_source(
     // Stamp junction capacitances from device model parameters into MNA C matrix.
     // Must happen BEFORE kernel build so caps are included in A = G + 2C/T.
     {
-        let device_slots = melange_solver::codegen::ir::CircuitIR::build_device_info(&netlist)
-            .unwrap_or_default();
+        let device_slots =
+            melange_solver::codegen::ir::CircuitIR::build_device_info(&netlist).unwrap_or_default();
         if !device_slots.is_empty() {
             mna.stamp_device_junction_caps(&device_slots);
         }
@@ -605,9 +633,15 @@ fn compile_circuit_source(
         input_resistance,
         ..melange_solver::codegen::CodegenConfig::default()
     };
-    let forward_active = melange_solver::codegen::ir::CircuitIR::detect_forward_active_bjts(&mna, &netlist, &fa_config);
+    let forward_active = melange_solver::codegen::ir::CircuitIR::detect_forward_active_bjts(
+        &mna, &netlist, &fa_config,
+    );
     if !forward_active.is_empty() {
-        println!("  Forward-active BJTs: {:?} (M reduces by {})", forward_active, forward_active.len());
+        println!(
+            "  Forward-active BJTs: {:?} (M reduces by {})",
+            forward_active,
+            forward_active.len()
+        );
         // Rebuild MNA with reduced dimensions
         mna = MnaSystem::from_netlist_forward_active(&netlist, &forward_active)
             .with_context(|| "Failed to rebuild MNA for forward-active BJTs")?;
@@ -617,8 +651,11 @@ fn compile_circuit_source(
         }
         // Re-stamp junction capacitances
         {
-            let device_slots = melange_solver::codegen::ir::CircuitIR::build_device_info_with_mna(&netlist, Some(&mna))
-                .unwrap_or_default();
+            let device_slots = melange_solver::codegen::ir::CircuitIR::build_device_info_with_mna(
+                &netlist,
+                Some(&mna),
+            )
+            .unwrap_or_default();
             if !device_slots.is_empty() {
                 mna.stamp_device_junction_caps(&device_slots);
             }
@@ -636,8 +673,7 @@ fn compile_circuit_source(
         DkKernel::from_mna_augmented(&mna, sample_rate)
             .with_context(|| "Failed to create augmented DK kernel")?
     } else {
-        DkKernel::from_mna(&mna, sample_rate)
-            .with_context(|| "Failed to create DK kernel")?
+        DkKernel::from_mna(&mna, sample_rate).with_context(|| "Failed to create DK kernel")?
     };
 
     println!("  ✓ Matrix dimensions: N={}, M={}", kernel.n, kernel.m);
@@ -655,16 +691,18 @@ fn compile_circuit_source(
     let output_node_names: Vec<&str> = output_node.split(',').map(|s| s.trim()).collect();
     let mut output_node_indices = Vec::new();
     for name in &output_node_names {
-        let raw = mna
-            .node_map
-            .get(*name)
-            .copied()
-            .ok_or_else(|| anyhow::anyhow!(
+        let raw = mna.node_map.get(*name).copied().ok_or_else(|| {
+            anyhow::anyhow!(
                 "Output node '{}' not found in circuit. Available: {:?}",
-                name, mna.node_map.keys().collect::<Vec<_>>()
-            ))?;
+                name,
+                mna.node_map.keys().collect::<Vec<_>>()
+            )
+        })?;
         if raw == 0 {
-            anyhow::bail!("Output node '{}' cannot be ground (0). Please specify a non-ground node.", name);
+            anyhow::bail!(
+                "Output node '{}' cannot be ground (0). Please specify a non-ground node.",
+                name
+            );
         }
         output_node_indices.push(raw - 1);
     }
@@ -693,11 +731,18 @@ fn compile_circuit_source(
     // the DK K matrix can have stability issues from inter-transformer coupling.
     // Fall back to nodal codegen for those circuits.
     let n_xfmr_groups = mna.transformer_groups.len()
-        + if mna.coupled_inductors.len() > 0 { 1 } else { 0 };
+        + if !mna.coupled_inductors.is_empty() {
+            1
+        } else {
+            0
+        };
     let use_nodal_codegen = has_inductors_compile && n_xfmr_groups > 1;
 
     let generated = if use_nodal_codegen {
-        println!("  Using nodal solver codegen ({} transformer groups — DK K matrix unstable)", n_xfmr_groups);
+        println!(
+            "  Using nodal solver codegen ({} transformer groups — DK K matrix unstable)",
+            n_xfmr_groups
+        );
         generator
             .generate_nodal(&mna, &netlist)
             .with_context(|| "Nodal code generation failed")?
@@ -710,7 +755,10 @@ fn compile_circuit_source(
             .with_context(|| "Code generation failed")?
     };
 
-    println!("  ✓ Generated {} lines of Rust code", generated.code.lines().count());
+    println!(
+        "  ✓ Generated {} lines of Rust code",
+        generated.code.lines().count()
+    );
 
     // Step 5: Write output
     println!("Step 5: Writing output...");
@@ -729,7 +777,11 @@ fn compile_circuit_source(
             println!("  - Standalone integration in your own projects");
             println!();
             println!("To generate a complete plugin project instead, use:");
-            println!("  melange compile {} --output {} --format plugin", circuit_source.name(), output.display());
+            println!(
+                "  melange compile {} --output {} --format plugin",
+                circuit_source.name(),
+                output.display()
+            );
         }
         OutputFormat::Plugin => {
             // Generate complete plugin project
@@ -747,37 +799,62 @@ fn compile_circuit_source(
                 .to_string();
 
             // Build pot/switch parameter info from MNA data (works for both DK and nodal paths).
-            let pot_params: Vec<plugin_template::PotParamInfo> = mna.pots.iter().enumerate().map(|(idx, p)| {
-                plugin_template::PotParamInfo {
+            let pot_params: Vec<plugin_template::PotParamInfo> = mna
+                .pots
+                .iter()
+                .enumerate()
+                .map(|(idx, p)| plugin_template::PotParamInfo {
                     index: idx,
-                    name: netlist.pots.get(idx).map(|d| {
-                        d.label.clone().unwrap_or_else(|| d.resistor_name.clone())
-                    }).unwrap_or_else(|| format!("Pot {}", idx)),
+                    name: netlist
+                        .pots
+                        .get(idx)
+                        .map(|d| d.label.clone().unwrap_or_else(|| d.resistor_name.clone()))
+                        .unwrap_or_else(|| format!("Pot {}", idx)),
                     min_resistance: p.min_resistance,
                     max_resistance: p.max_resistance,
-                    default_resistance: netlist.pots.get(idx)
+                    default_resistance: netlist
+                        .pots
+                        .get(idx)
                         .and_then(|d| d.default_value)
                         .unwrap_or(1.0 / p.g_nominal),
-                }
-            }).collect();
-            let switch_params: Vec<plugin_template::SwitchParamInfo> = netlist.switches.iter().enumerate().map(|(idx, sw)| {
-                plugin_template::SwitchParamInfo {
+                })
+                .collect();
+            let switch_params: Vec<plugin_template::SwitchParamInfo> = netlist
+                .switches
+                .iter()
+                .enumerate()
+                .map(|(idx, sw)| plugin_template::SwitchParamInfo {
                     index: idx,
-                    name: sw.label.clone().unwrap_or_else(|| format!("Switch {} ({})", idx, sw.component_names.join("+"))),
+                    name: sw.label.clone().unwrap_or_else(|| {
+                        format!("Switch {} ({})", idx, sw.component_names.join("+"))
+                    }),
                     num_positions: sw.positions.len(),
-                }
-            }).collect();
+                })
+                .collect();
 
-            plugin_template::generate_plugin_project(&project_dir, &generated.code, &circuit_name, with_level_params, &pot_params, &switch_params, output_node_indices.len(), has_inductors_compile)?;
+            plugin_template::generate_plugin_project(
+                &project_dir,
+                &generated.code,
+                &circuit_name,
+                with_level_params,
+                &pot_params,
+                &switch_params,
+                output_node_indices.len(),
+                has_inductors_compile,
+            )?;
 
             println!("  ✓ Done!");
             println!();
             println!("Generated plugin project at: {}", project_dir.display());
             println!();
             println!("To build the plugin (CLAP + VST3):");
-            println!("  cd {}", project_dir.file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("<project-dir>"));
+            println!(
+                "  cd {}",
+                project_dir
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("<project-dir>")
+            );
             println!("  cargo build --release");
             println!();
             println!("The compiled plugin will be at:");
@@ -785,8 +862,11 @@ fn compile_circuit_source(
             println!();
             println!("To install the CLAP plugin:");
             println!("  mkdir -p ~/.clap");
-            println!("  cp target/release/lib{}.so ~/.clap/{}.clap", 
-                     circuit_name.replace("-", "_"), circuit_name);
+            println!(
+                "  cp target/release/lib{}.so ~/.clap/{}.clap",
+                circuit_name.replace("-", "_"),
+                circuit_name
+            );
             println!();
             println!("The VST3 plugin is included in the same binary.");
         }
@@ -807,10 +887,8 @@ fn validate_circuit_source(
     relaxed: bool,
 ) -> Result<()> {
     use melange_validate::{
-        comparison::ComparisonConfig,
-        spice_runner::is_ngspice_available,
+        ValidationOptions, comparison::ComparisonConfig, spice_runner::is_ngspice_available,
         validate_circuit_with_options,
-        ValidationOptions,
     };
 
     println!("melange validate");
@@ -820,7 +898,10 @@ fn validate_circuit_source(
     println!("  Sample rate: {} Hz", sample_rate);
     println!("  Duration: {}s", duration);
     println!("  Amplitude: {}V", amplitude);
-    println!("  Tolerances: {}", if relaxed { "relaxed" } else { "strict" });
+    println!(
+        "  Tolerances: {}",
+        if relaxed { "relaxed" } else { "strict" }
+    );
     println!();
 
     // Step 1: Check ngspice availability
@@ -850,8 +931,9 @@ fn validate_circuit_source(
             println!("  Using builtin circuit: {}", name);
             let temp_dir = std::env::temp_dir();
             let temp_path = temp_dir.join(format!("melange_validate_{}.cir", std::process::id()));
-            std::fs::write(&temp_path, content)
-                .with_context(|| format!("Failed to write temp netlist to {}", temp_path.display()))?;
+            std::fs::write(&temp_path, content).with_context(|| {
+                format!("Failed to write temp netlist to {}", temp_path.display())
+            })?;
             (temp_path.clone(), Some(temp_path))
         }
         circuits::CircuitSource::Url { url } | circuits::CircuitSource::Friendly { url, .. } => {
@@ -860,14 +942,18 @@ fn validate_circuit_source(
             let content = cache.get_sync(url, false)?;
             let temp_dir = std::env::temp_dir();
             let temp_path = temp_dir.join(format!("melange_validate_{}.cir", std::process::id()));
-            std::fs::write(&temp_path, &content)
-                .with_context(|| format!("Failed to write temp netlist to {}", temp_path.display()))?;
+            std::fs::write(&temp_path, &content).with_context(|| {
+                format!("Failed to write temp netlist to {}", temp_path.display())
+            })?;
             (temp_path.clone(), Some(temp_path))
         }
     };
 
     // Step 3: Generate test input signal (1kHz sine)
-    println!("Step 3: Generating test signal ({:.1}s, {:.3}V amplitude, 1kHz sine)...", duration, amplitude);
+    println!(
+        "Step 3: Generating test signal ({:.1}s, {:.3}V amplitude, 1kHz sine)...",
+        duration, amplitude
+    );
     let num_samples = (duration * sample_rate) as usize;
     let input_signal: Vec<f64> = (0..num_samples)
         .map(|i| amplitude * (2.0 * std::f64::consts::PI * 1000.0 * i as f64 / sample_rate).sin())
@@ -960,17 +1046,17 @@ fn simulate_circuit_source(
     circuit_source: &circuits::CircuitSource,
     opts: &SimulateOptions,
 ) -> Result<()> {
+    use melange_devices::bjt::{BjtEbersMoll, BjtPolarity};
+    use melange_devices::diode::DiodeShockley;
+    use melange_devices::jfet::{Jfet, JfetChannel};
+    use melange_devices::mosfet::{ChannelType, Mosfet};
+    use melange_devices::tube::KorenTriode;
     use melange_solver::{
         dk::DkKernel,
         mna::MnaSystem,
         parser::Netlist,
         solver::{CircuitSolver, DeviceEntry, NodalSolver},
     };
-    use melange_devices::bjt::{BjtEbersMoll, BjtPolarity};
-    use melange_devices::diode::DiodeShockley;
-    use melange_devices::jfet::{Jfet, JfetChannel};
-    use melange_devices::mosfet::{Mosfet, ChannelType};
-    use melange_devices::tube::KorenTriode;
 
     println!("melange simulate");
     println!("  Source: {}", circuit_source.name());
@@ -982,10 +1068,8 @@ fn simulate_circuit_source(
             println!("  Using builtin circuit: {}", name);
             content.clone()
         }
-        circuits::CircuitSource::Local { path } => {
-            std::fs::read_to_string(path)
-                .with_context(|| format!("Failed to read local file: {}", path.display()))?
-        }
+        circuits::CircuitSource::Local { path } => std::fs::read_to_string(path)
+            .with_context(|| format!("Failed to read local file: {}", path.display()))?,
         circuits::CircuitSource::Url { url } | circuits::CircuitSource::Friendly { url, .. } => {
             println!("  Fetching from URL: {}", url);
             let cache = cache::Cache::new()?;
@@ -995,13 +1079,14 @@ fn simulate_circuit_source(
 
     // Step 1: Parse netlist
     println!("Step 1: Parsing SPICE netlist...");
-    let mut netlist = Netlist::parse(&netlist_str)
-        .with_context(|| "Failed to parse SPICE netlist")?;
+    let mut netlist =
+        Netlist::parse(&netlist_str).with_context(|| "Failed to parse SPICE netlist")?;
 
     // Expand subcircuit instances (X elements) before MNA
     if !netlist.subcircuits.is_empty() {
         let num_subcircuits = netlist.subcircuits.len();
-        netlist.expand_subcircuits()
+        netlist
+            .expand_subcircuits()
             .with_context(|| "Failed to expand subcircuits")?;
         println!("  Expanded {} subcircuit definition(s)", num_subcircuits);
     }
@@ -1009,24 +1094,28 @@ fn simulate_circuit_source(
 
     // Step 2: Build MNA
     println!("Step 2: Building MNA system...");
-    let mut mna = MnaSystem::from_netlist(&netlist)
-        .with_context(|| "Failed to build MNA system")?;
+    let mut mna =
+        MnaSystem::from_netlist(&netlist).with_context(|| "Failed to build MNA system")?;
 
-    let input_node_raw = mna.node_map.get(opts.input_node).copied()
-        .ok_or_else(|| anyhow::anyhow!(
+    let input_node_raw = mna.node_map.get(opts.input_node).copied().ok_or_else(|| {
+        anyhow::anyhow!(
             "Input node '{}' not found. Available: {:?}",
-            opts.input_node, mna.node_map.keys().collect::<Vec<_>>()
-        ))?;
+            opts.input_node,
+            mna.node_map.keys().collect::<Vec<_>>()
+        )
+    })?;
     if input_node_raw == 0 {
         anyhow::bail!("Input node cannot be ground (0)");
     }
     let input_node_idx = input_node_raw - 1;
 
-    let output_node_raw = mna.node_map.get(opts.output_node).copied()
-        .ok_or_else(|| anyhow::anyhow!(
+    let output_node_raw = mna.node_map.get(opts.output_node).copied().ok_or_else(|| {
+        anyhow::anyhow!(
             "Output node '{}' not found. Available: {:?}",
-            opts.output_node, mna.node_map.keys().collect::<Vec<_>>()
-        ))?;
+            opts.output_node,
+            mna.node_map.keys().collect::<Vec<_>>()
+        )
+    })?;
     if output_node_raw == 0 {
         anyhow::bail!("Output node cannot be ground (0)");
     }
@@ -1040,19 +1129,26 @@ fn simulate_circuit_source(
     } else {
         (1.0, "default")
     };
-    println!("  Input resistance: {} ohm ({})", input_resistance, ir_source);
+    println!(
+        "  Input resistance: {} ohm ({})",
+        input_resistance, ir_source
+    );
     let input_conductance = 1.0 / input_resistance;
     if input_node_idx < mna.n {
         mna.g[input_node_idx][input_node_idx] += input_conductance;
     }
 
-    println!("  {} nodes, {} nonlinear devices", mna.n, mna.nonlinear_devices.len());
+    println!(
+        "  {} nodes, {} nonlinear devices",
+        mna.n,
+        mna.nonlinear_devices.len()
+    );
 
     // Stamp junction capacitances from device model parameters into MNA C matrix.
     // Must happen BEFORE kernel build so caps are included in A = G + 2C/T.
     {
-        let device_slots = melange_solver::codegen::ir::CircuitIR::build_device_info(&netlist)
-            .unwrap_or_default();
+        let device_slots =
+            melange_solver::codegen::ir::CircuitIR::build_device_info(&netlist).unwrap_or_default();
         if !device_slots.is_empty() {
             mna.stamp_device_junction_caps(&device_slots);
         }
@@ -1068,24 +1164,34 @@ fn simulate_circuit_source(
         let input_samples: Vec<f64> = match spec.sample_format {
             hound::SampleFormat::Int => {
                 let max_val = (1i64 << (spec.bits_per_sample - 1)) as f64;
-                reader.into_samples::<i32>()
+                reader
+                    .into_samples::<i32>()
                     .map(|s| s.unwrap() as f64 / max_val)
                     .collect()
             }
-            hound::SampleFormat::Float => {
-                reader.into_samples::<f32>()
-                    .map(|s| s.unwrap() as f64)
-                    .collect()
-            }
+            hound::SampleFormat::Float => reader
+                .into_samples::<f32>()
+                .map(|s| s.unwrap() as f64)
+                .collect(),
         };
-        println!("  {} samples at {} Hz ({:.2}s)",
-            input_samples.len(), sr, input_samples.len() as f64 / sr);
+        println!(
+            "  {} samples at {} Hz ({:.2}s)",
+            input_samples.len(),
+            sr,
+            input_samples.len() as f64 / sr
+        );
         (input_samples, sr)
     } else {
-        println!("Step 3: Generating 1kHz sine wave ({:.1}s at {} Hz)...", opts.duration, opts.sample_rate);
+        println!(
+            "Step 3: Generating 1kHz sine wave ({:.1}s at {} Hz)...",
+            opts.duration, opts.sample_rate
+        );
         let num_samples = (opts.duration * opts.sample_rate) as usize;
         let samples: Vec<f64> = (0..num_samples)
-            .map(|i| opts.amplitude * (2.0 * std::f64::consts::PI * 1000.0 * i as f64 / opts.sample_rate).sin())
+            .map(|i| {
+                opts.amplitude
+                    * (2.0 * std::f64::consts::PI * 1000.0 * i as f64 / opts.sample_rate).sin()
+            })
             .collect();
         (samples, opts.sample_rate)
     };
@@ -1101,7 +1207,11 @@ fn simulate_circuit_source(
         println!("  Using augmented MNA for {} inductor variables", {
             mna.inductors.len()
                 + mna.coupled_inductors.len() * 2
-                + mna.transformer_groups.iter().map(|g| g.num_windings).sum::<usize>()
+                + mna
+                    .transformer_groups
+                    .iter()
+                    .map(|g| g.num_windings)
+                    .sum::<usize>()
         });
         DkKernel::from_mna_augmented(&mna, actual_sample_rate)
             .with_context(|| "Failed to create augmented DK kernel")?
@@ -1116,11 +1226,16 @@ fn simulate_circuit_source(
 
     // Helper: find model param
     let find_model_param = |model_name: &str, param: &str| -> Option<f64> {
-        netlist.models.iter()
+        netlist
+            .models
+            .iter()
             .find(|m| m.name.eq_ignore_ascii_case(model_name))
-            .and_then(|m| m.params.iter()
-                .find(|(k, _)| k.eq_ignore_ascii_case(param))
-                .map(|(_, v)| *v))
+            .and_then(|m| {
+                m.params
+                    .iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case(param))
+                    .map(|(_, v)| *v)
+            })
     };
 
     // Build device entries from MNA nonlinear device list
@@ -1129,44 +1244,86 @@ fn simulate_circuit_source(
         match dev_info.device_type {
             melange_solver::mna::NonlinearDeviceType::Diode => {
                 // Find model name for this diode
-                let model_name = netlist.elements.iter().find_map(|e| {
-                    if let melange_solver::parser::Element::Diode { name, model, .. } = e {
-                        if name.eq_ignore_ascii_case(&dev_info.name) { Some(model.as_str()) } else { None }
-                    } else { None }
-                }).unwrap_or("");
+                let model_name = netlist
+                    .elements
+                    .iter()
+                    .find_map(|e| {
+                        if let melange_solver::parser::Element::Diode { name, model, .. } = e {
+                            if name.eq_ignore_ascii_case(&dev_info.name) {
+                                Some(model.as_str())
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or("");
                 let is = find_model_param(model_name, "IS").unwrap_or(1e-15);
                 let n = find_model_param(model_name, "N").unwrap_or(1.0);
                 let diode = DiodeShockley::new_room_temp(is, n);
                 devices.push(DeviceEntry::new_diode(diode, dev_info.start_idx));
             }
             melange_solver::mna::NonlinearDeviceType::Bjt => {
-                let model_name = netlist.elements.iter().find_map(|e| {
-                    if let melange_solver::parser::Element::Bjt { name, model, .. } = e {
-                        if name.eq_ignore_ascii_case(&dev_info.name) { Some(model.as_str()) } else { None }
-                    } else { None }
-                }).unwrap_or("");
+                let model_name = netlist
+                    .elements
+                    .iter()
+                    .find_map(|e| {
+                        if let melange_solver::parser::Element::Bjt { name, model, .. } = e {
+                            if name.eq_ignore_ascii_case(&dev_info.name) {
+                                Some(model.as_str())
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or("");
                 let is = find_model_param(model_name, "IS").unwrap_or(1e-14);
                 let bf = find_model_param(model_name, "BF").unwrap_or(200.0);
                 let br = find_model_param(model_name, "BR").unwrap_or(3.0);
-                let is_pnp = netlist.models.iter()
+                let is_pnp = netlist
+                    .models
+                    .iter()
                     .find(|m| m.name.eq_ignore_ascii_case(model_name))
                     .map(|m| m.model_type.eq_ignore_ascii_case("PNP"))
                     .unwrap_or(false);
-                let polarity = if is_pnp { BjtPolarity::Pnp } else { BjtPolarity::Npn };
+                let polarity = if is_pnp {
+                    BjtPolarity::Pnp
+                } else {
+                    BjtPolarity::Npn
+                };
                 let bjt = BjtEbersMoll::new(is, melange_primitives::VT_ROOM, bf, br, polarity);
                 devices.push(DeviceEntry::new_bjt(bjt, dev_info.start_idx));
             }
             melange_solver::mna::NonlinearDeviceType::Jfet => {
-                let model_name = netlist.elements.iter().find_map(|e| {
-                    if let melange_solver::parser::Element::Jfet { name, model, .. } = e {
-                        if name.eq_ignore_ascii_case(&dev_info.name) { Some(model.as_str()) } else { None }
-                    } else { None }
-                }).unwrap_or("");
-                let is_p_channel = netlist.models.iter()
+                let model_name = netlist
+                    .elements
+                    .iter()
+                    .find_map(|e| {
+                        if let melange_solver::parser::Element::Jfet { name, model, .. } = e {
+                            if name.eq_ignore_ascii_case(&dev_info.name) {
+                                Some(model.as_str())
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or("");
+                let is_p_channel = netlist
+                    .models
+                    .iter()
                     .find(|m| m.name.eq_ignore_ascii_case(model_name))
                     .map(|m| m.model_type.to_uppercase().starts_with("PJ"))
                     .unwrap_or(false);
-                let channel = if is_p_channel { JfetChannel::P } else { JfetChannel::N };
+                let channel = if is_p_channel {
+                    JfetChannel::P
+                } else {
+                    JfetChannel::N
+                };
                 let default_vp = if is_p_channel { 2.0 } else { -2.0 };
                 let vp = find_model_param(model_name, "VTO").unwrap_or(default_vp);
                 // ngspice BETA = IDSS / VP^2, so IDSS = BETA * VP^2
@@ -1180,16 +1337,32 @@ fn simulate_circuit_source(
                 devices.push(DeviceEntry::new_jfet(jfet, dev_info.start_idx));
             }
             melange_solver::mna::NonlinearDeviceType::Mosfet => {
-                let model_name = netlist.elements.iter().find_map(|e| {
-                    if let melange_solver::parser::Element::Mosfet { name, model, .. } = e {
-                        if name.eq_ignore_ascii_case(&dev_info.name) { Some(model.as_str()) } else { None }
-                    } else { None }
-                }).unwrap_or("");
-                let is_p_channel = netlist.models.iter()
+                let model_name = netlist
+                    .elements
+                    .iter()
+                    .find_map(|e| {
+                        if let melange_solver::parser::Element::Mosfet { name, model, .. } = e {
+                            if name.eq_ignore_ascii_case(&dev_info.name) {
+                                Some(model.as_str())
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or("");
+                let is_p_channel = netlist
+                    .models
+                    .iter()
                     .find(|m| m.name.eq_ignore_ascii_case(model_name))
                     .map(|m| m.model_type.to_uppercase().starts_with("PM"))
                     .unwrap_or(false);
-                let channel = if is_p_channel { ChannelType::P } else { ChannelType::N };
+                let channel = if is_p_channel {
+                    ChannelType::P
+                } else {
+                    ChannelType::N
+                };
                 let default_vt = if is_p_channel { -2.0 } else { 2.0 };
                 let vt = find_model_param(model_name, "VTO").unwrap_or(default_vt);
                 let kp = find_model_param(model_name, "KP").unwrap_or(0.1);
@@ -1198,11 +1371,21 @@ fn simulate_circuit_source(
                 devices.push(DeviceEntry::new_mosfet(mosfet, dev_info.start_idx));
             }
             melange_solver::mna::NonlinearDeviceType::Tube => {
-                let model_name = netlist.elements.iter().find_map(|e| {
-                    if let melange_solver::parser::Element::Triode { name, model, .. } = e {
-                        if name.eq_ignore_ascii_case(&dev_info.name) { Some(model.as_str()) } else { None }
-                    } else { None }
-                }).unwrap_or("");
+                let model_name = netlist
+                    .elements
+                    .iter()
+                    .find_map(|e| {
+                        if let melange_solver::parser::Element::Triode { name, model, .. } = e {
+                            if name.eq_ignore_ascii_case(&dev_info.name) {
+                                Some(model.as_str())
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or("");
                 let mu = find_model_param(model_name, "MU").unwrap_or(100.0);
                 let ex = find_model_param(model_name, "EX").unwrap_or(1.4);
                 let kg1 = find_model_param(model_name, "KG1").unwrap_or(1060.0);
@@ -1211,24 +1394,41 @@ fn simulate_circuit_source(
                 let ig_max = find_model_param(model_name, "IG_MAX").unwrap_or(2e-3);
                 let vgk_onset = find_model_param(model_name, "VGK_ONSET").unwrap_or(0.5);
                 let lambda = find_model_param(model_name, "LAMBDA").unwrap_or(0.0);
-                let tube = KorenTriode::with_all_params(mu, ex, kg1, kp, kvb, ig_max, vgk_onset, lambda);
+                let tube =
+                    KorenTriode::with_all_params(mu, ex, kg1, kp, kvb, ig_max, vgk_onset, lambda);
                 devices.push(DeviceEntry::new_tube(tube, dev_info.start_idx));
             }
             melange_solver::mna::NonlinearDeviceType::BjtForwardActive => {
                 // BjtForwardActive uses the same runtime 2D model as Bjt
-                let model_name = netlist.elements.iter().find_map(|e| {
-                    if let melange_solver::parser::Element::Bjt { name, model, .. } = e {
-                        if name.eq_ignore_ascii_case(&dev_info.name) { Some(model.as_str()) } else { None }
-                    } else { None }
-                }).unwrap_or("");
+                let model_name = netlist
+                    .elements
+                    .iter()
+                    .find_map(|e| {
+                        if let melange_solver::parser::Element::Bjt { name, model, .. } = e {
+                            if name.eq_ignore_ascii_case(&dev_info.name) {
+                                Some(model.as_str())
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or("");
                 let is = find_model_param(model_name, "IS").unwrap_or(1e-14);
                 let bf = find_model_param(model_name, "BF").unwrap_or(200.0);
                 let br = find_model_param(model_name, "BR").unwrap_or(3.0);
-                let is_pnp = netlist.models.iter()
+                let is_pnp = netlist
+                    .models
+                    .iter()
                     .find(|m| m.name.eq_ignore_ascii_case(model_name))
                     .map(|m| m.model_type.eq_ignore_ascii_case("PNP"))
                     .unwrap_or(false);
-                let polarity = if is_pnp { BjtPolarity::Pnp } else { BjtPolarity::Npn };
+                let polarity = if is_pnp {
+                    BjtPolarity::Pnp
+                } else {
+                    BjtPolarity::Npn
+                };
                 let bjt = BjtEbersMoll::new(is, melange_primitives::VT_ROOM, bf, br, polarity);
                 devices.push(DeviceEntry::new_bjt(bjt, dev_info.start_idx));
             }
@@ -1246,9 +1446,8 @@ fn simulate_circuit_source(
 
     if kernel.m == 0 && !use_nodal {
         // Linear circuit: use LinearSolver
-        let mut solver = melange_solver::solver::LinearSolver::new(
-            kernel, input_node_idx, output_node_idx,
-        );
+        let mut solver =
+            melange_solver::solver::LinearSolver::new(kernel, input_node_idx, output_node_idx);
         solver.input_conductance = input_conductance;
 
         println!("  Linear solver ready");
@@ -1263,7 +1462,10 @@ fn simulate_circuit_source(
 
         eprintln!("  Peak output: {:.2}V", solver.diag_peak_output);
         if solver.diag_clamp_count > 0 {
-            eprintln!("  WARNING: Output exceeded ±10V {} times -- try reducing --amplitude or adding gain reduction to the circuit", solver.diag_clamp_count);
+            eprintln!(
+                "  WARNING: Output exceeded ±10V {} times -- try reducing --amplitude or adding gain reduction to the circuit",
+                solver.diag_clamp_count
+            );
         }
 
         write_wav(opts.output, actual_sample_rate, &output_samples)?;
@@ -1271,7 +1473,12 @@ fn simulate_circuit_source(
         // Full-nodal NR solver (augmented MNA for inductors)
         let device_slots = build_device_slots(&netlist, &mna);
         let mut solver = NodalSolver::new(
-            kernel, &mna, &netlist, device_slots.clone(), input_node_idx, output_node_idx,
+            kernel,
+            &mna,
+            &netlist,
+            device_slots.clone(),
+            input_node_idx,
+            output_node_idx,
         );
         solver.input_conductance = input_conductance;
 
@@ -1283,11 +1490,20 @@ fn simulate_circuit_source(
 
         let n_inductor_vars = mna.inductors.len()
             + mna.coupled_inductors.len() * 2
-            + mna.transformer_groups.iter().map(|g| g.num_windings).sum::<usize>();
-        println!("  Nodal solver ready (M={}, {} inductor variables, n_nodal={})",
-            mna.nonlinear_devices.iter().map(|d| d.dimension).sum::<usize>(),
+            + mna
+                .transformer_groups
+                .iter()
+                .map(|g| g.num_windings)
+                .sum::<usize>();
+        println!(
+            "  Nodal solver ready (M={}, {} inductor variables, n_nodal={})",
+            mna.nonlinear_devices
+                .iter()
+                .map(|d| d.dimension)
+                .sum::<usize>(),
             n_inductor_vars,
-            solver.v_prev.len());
+            solver.v_prev.len()
+        );
         println!();
 
         // Process
@@ -1299,10 +1515,16 @@ fn simulate_circuit_source(
 
         eprintln!("  Peak output: {:.2}V", solver.diag_peak_output);
         if solver.diag_clamp_count > 0 {
-            eprintln!("  WARNING: Output exceeded ±10V {} times -- try reducing --amplitude or adding gain reduction to the circuit", solver.diag_clamp_count);
+            eprintln!(
+                "  WARNING: Output exceeded ±10V {} times -- try reducing --amplitude or adding gain reduction to the circuit",
+                solver.diag_clamp_count
+            );
         }
         if solver.diag_nr_max_iter_count > 0 {
-            eprintln!("  NR max iterations: {} times", solver.diag_nr_max_iter_count);
+            eprintln!(
+                "  NR max iterations: {} times",
+                solver.diag_nr_max_iter_count
+            );
         }
         if solver.diag_be_fallback_count > 0 {
             eprintln!("  BE fallback: {} samples", solver.diag_be_fallback_count);
@@ -1314,9 +1536,8 @@ fn simulate_circuit_source(
         write_wav(opts.output, actual_sample_rate, &output_samples)?;
     } else {
         // Nonlinear circuit: use CircuitSolver (DK method)
-        let mut solver = CircuitSolver::new(
-            kernel, devices, input_node_idx, output_node_idx,
-        ).with_context(|| "Failed to create circuit solver")?;
+        let mut solver = CircuitSolver::new(kernel, devices, input_node_idx, output_node_idx)
+            .with_context(|| "Failed to create circuit solver")?;
         solver.input_conductance = input_conductance;
 
         // Initialize DC operating point for nonlinear circuits
@@ -1330,7 +1551,13 @@ fn simulate_circuit_source(
             println!("  DC OP initialized");
         }
 
-        println!("  Nonlinear solver ready (M={})", mna.nonlinear_devices.iter().map(|d| d.dimension).sum::<usize>());
+        println!(
+            "  Nonlinear solver ready (M={})",
+            mna.nonlinear_devices
+                .iter()
+                .map(|d| d.dimension)
+                .sum::<usize>()
+        );
         println!();
 
         // Process
@@ -1342,10 +1569,16 @@ fn simulate_circuit_source(
 
         eprintln!("  Peak output: {:.2}V", solver.diag_peak_output);
         if solver.diag_clamp_count > 0 {
-            eprintln!("  WARNING: Output exceeded ±10V {} times -- try reducing --amplitude or adding gain reduction to the circuit", solver.diag_clamp_count);
+            eprintln!(
+                "  WARNING: Output exceeded ±10V {} times -- try reducing --amplitude or adding gain reduction to the circuit",
+                solver.diag_clamp_count
+            );
         }
         if solver.diag_nr_max_iter_count > 0 {
-            eprintln!("  NR max iterations: {} times", solver.diag_nr_max_iter_count);
+            eprintln!(
+                "  NR max iterations: {} times",
+                solver.diag_nr_max_iter_count
+            );
         }
         if solver.diag_nan_reset_count > 0 {
             eprintln!("  NaN resets: {}", solver.diag_nan_reset_count);
@@ -1386,62 +1619,88 @@ fn analyze_freq_response(
             eprintln!("  Using builtin circuit: {}", name);
             content.clone()
         }
-        circuits::CircuitSource::Local { path } => {
-            std::fs::read_to_string(path)
-                .with_context(|| format!("Failed to read: {}", path.display()))?
-        }
+        circuits::CircuitSource::Local { path } => std::fs::read_to_string(path)
+            .with_context(|| format!("Failed to read: {}", path.display()))?,
         circuits::CircuitSource::Url { url } | circuits::CircuitSource::Friendly { url, .. } => {
             let cache = cache::Cache::new()?;
             cache.get_sync(url, false)?
         }
     };
 
-    let mut netlist = Netlist::parse(&netlist_str)
-        .with_context(|| "Failed to parse SPICE netlist")?;
+    let mut netlist =
+        Netlist::parse(&netlist_str).with_context(|| "Failed to parse SPICE netlist")?;
     if !netlist.subcircuits.is_empty() {
-        netlist.expand_subcircuits()
+        netlist
+            .expand_subcircuits()
             .with_context(|| "Failed to expand subcircuits")?;
     }
 
     // Apply pot overrides: modify element values in netlist before building MNA.
     // Also apply .pot defaults for any pot NOT overridden (so analyze uses "flat" defaults).
     {
-        let mut overridden_resistors: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut overridden_resistors: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
 
         // First, apply explicit --pot overrides
         for spec in pot_overrides {
-            let (name, val_str) = spec.split_once('=')
-                .ok_or_else(|| anyhow::anyhow!("Invalid --pot format '{}', expected NAME=VALUE", spec))?;
-            let value = melange_solver::parser::parse_value(val_str)
-                .map_err(|_| anyhow::anyhow!("Invalid resistance value '{}' in --pot {}", val_str, spec))?;
+            let (name, val_str) = spec.split_once('=').ok_or_else(|| {
+                anyhow::anyhow!("Invalid --pot format '{}', expected NAME=VALUE", spec)
+            })?;
+            let value = melange_solver::parser::parse_value(val_str).map_err(|_| {
+                anyhow::anyhow!("Invalid resistance value '{}' in --pot {}", val_str, spec)
+            })?;
             if value <= 0.0 || !value.is_finite() {
                 anyhow::bail!("Pot value must be positive and finite: {}", spec);
             }
 
             // Match by pot label or resistor name
-            let resistor_name = netlist.pots.iter()
+            let resistor_name = netlist
+                .pots
+                .iter()
                 .find(|p| {
-                    p.label.as_deref().map(|l| l.eq_ignore_ascii_case(name)).unwrap_or(false)
-                    || p.resistor_name.eq_ignore_ascii_case(name)
+                    p.label
+                        .as_deref()
+                        .map(|l| l.eq_ignore_ascii_case(name))
+                        .unwrap_or(false)
+                        || p.resistor_name.eq_ignore_ascii_case(name)
                 })
                 .map(|p| p.resistor_name.clone())
                 .ok_or_else(|| {
-                    let available: Vec<String> = netlist.pots.iter()
-                        .map(|p| format!("{} ({})", p.resistor_name,
-                            p.label.as_deref().unwrap_or("no label")))
+                    let available: Vec<String> = netlist
+                        .pots
+                        .iter()
+                        .map(|p| {
+                            format!(
+                                "{} ({})",
+                                p.resistor_name,
+                                p.label.as_deref().unwrap_or("no label")
+                            )
+                        })
                         .collect();
-                    anyhow::anyhow!("Pot '{}' not found. Available: {}", name, available.join(", "))
+                    anyhow::anyhow!(
+                        "Pot '{}' not found. Available: {}",
+                        name,
+                        available.join(", ")
+                    )
                 })?;
 
             // Update element value
             let found = netlist.elements.iter_mut().any(|e| {
-                if let melange_solver::parser::Element::Resistor { name: n, value: v, .. } = e {
-                    if n.eq_ignore_ascii_case(&resistor_name) { *v = value; return true; }
+                if let melange_solver::parser::Element::Resistor {
+                    name: n, value: v, ..
+                } = e
+                    && n.eq_ignore_ascii_case(&resistor_name)
+                {
+                    *v = value;
+                    return true;
                 }
                 false
             });
             if !found {
-                anyhow::bail!("Resistor '{}' referenced by pot not found in netlist", resistor_name);
+                anyhow::bail!(
+                    "Resistor '{}' referenced by pot not found in netlist",
+                    resistor_name
+                );
             }
             overridden_resistors.insert(resistor_name.to_ascii_uppercase());
             eprintln!("  Pot override: {} = {:.1}", resistor_name, value);
@@ -1454,11 +1713,13 @@ fn analyze_freq_response(
             }
             if let Some(default) = pot.default_value {
                 for e in netlist.elements.iter_mut() {
-                    if let melange_solver::parser::Element::Resistor { name: n, value: v, .. } = e {
-                        if n.eq_ignore_ascii_case(&pot.resistor_name) {
-                            *v = default;
-                            break;
-                        }
+                    if let melange_solver::parser::Element::Resistor {
+                        name: n, value: v, ..
+                    } = e
+                        && n.eq_ignore_ascii_case(&pot.resistor_name)
+                    {
+                        *v = default;
+                        break;
                     }
                 }
             }
@@ -1468,63 +1729,102 @@ fn analyze_freq_response(
     // Apply switch overrides: modify element values in netlist before building MNA.
     // Also apply switch position 0 as default for unoverridden switches.
     {
-        let mut overridden_switches: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        let mut overridden_switches: std::collections::HashSet<usize> =
+            std::collections::HashSet::new();
 
         for spec in switch_overrides {
-            let (name, pos_str) = spec.split_once('=')
-                .ok_or_else(|| anyhow::anyhow!("Invalid --switch format '{}', expected NAME=POS", spec))?;
-            let position: usize = pos_str.parse()
-                .map_err(|_| anyhow::anyhow!("Invalid switch position '{}' in --switch {}", pos_str, spec))?;
+            let (name, pos_str) = spec.split_once('=').ok_or_else(|| {
+                anyhow::anyhow!("Invalid --switch format '{}', expected NAME=POS", spec)
+            })?;
+            let position: usize = pos_str.parse().map_err(|_| {
+                anyhow::anyhow!("Invalid switch position '{}' in --switch {}", pos_str, spec)
+            })?;
 
             // Match by label or index
             let switch_idx = if let Ok(idx) = name.parse::<usize>() {
                 if idx >= netlist.switches.len() {
-                    anyhow::bail!("Switch index {} out of range (0..{})", idx, netlist.switches.len());
+                    anyhow::bail!(
+                        "Switch index {} out of range (0..{})",
+                        idx,
+                        netlist.switches.len()
+                    );
                 }
                 idx
             } else {
-                netlist.switches.iter().position(|s| {
-                    s.label.as_deref().map(|l| l.eq_ignore_ascii_case(name)).unwrap_or(false)
-                }).ok_or_else(|| {
-                    let available: Vec<String> = netlist.switches.iter().enumerate()
-                        .map(|(i, s)| format!("{}: {}", i, s.label.as_deref().unwrap_or("no label")))
-                        .collect();
-                    anyhow::anyhow!("Switch '{}' not found. Available: {}", name, available.join(", "))
-                })?
+                netlist
+                    .switches
+                    .iter()
+                    .position(|s| {
+                        s.label
+                            .as_deref()
+                            .map(|l| l.eq_ignore_ascii_case(name))
+                            .unwrap_or(false)
+                    })
+                    .ok_or_else(|| {
+                        let available: Vec<String> = netlist
+                            .switches
+                            .iter()
+                            .enumerate()
+                            .map(|(i, s)| {
+                                format!("{}: {}", i, s.label.as_deref().unwrap_or("no label"))
+                            })
+                            .collect();
+                        anyhow::anyhow!(
+                            "Switch '{}' not found. Available: {}",
+                            name,
+                            available.join(", ")
+                        )
+                    })?
             };
 
             let sw = &netlist.switches[switch_idx];
             if position >= sw.positions.len() {
-                anyhow::bail!("Switch '{}' position {} out of range (0..{})",
-                    name, position, sw.positions.len());
+                anyhow::bail!(
+                    "Switch '{}' position {} out of range (0..{})",
+                    name,
+                    position,
+                    sw.positions.len()
+                );
             }
 
             apply_switch_position(&mut netlist.elements, sw, position);
             overridden_switches.insert(switch_idx);
-            eprintln!("  Switch override: {} = position {}", sw.label.as_deref().unwrap_or(name), position);
+            eprintln!(
+                "  Switch override: {} = position {}",
+                sw.label.as_deref().unwrap_or(name),
+                position
+            );
         }
 
         // Default: switches stay at position 0 (netlist nominal values are position 0)
         // No action needed — netlist already has position 0 values.
     }
 
-    let mut mna = MnaSystem::from_netlist(&netlist)
-        .with_context(|| "Failed to build MNA system")?;
+    let mut mna =
+        MnaSystem::from_netlist(&netlist).with_context(|| "Failed to build MNA system")?;
 
-    let input_node_raw = mna.node_map.get(input_node_name).copied()
-        .ok_or_else(|| anyhow::anyhow!(
+    let input_node_raw = mna.node_map.get(input_node_name).copied().ok_or_else(|| {
+        anyhow::anyhow!(
             "Input node '{}' not found. Available: {:?}",
-            input_node_name, mna.node_map.keys().collect::<Vec<_>>()
-        ))?;
-    if input_node_raw == 0 { anyhow::bail!("Input node cannot be ground (0)"); }
+            input_node_name,
+            mna.node_map.keys().collect::<Vec<_>>()
+        )
+    })?;
+    if input_node_raw == 0 {
+        anyhow::bail!("Input node cannot be ground (0)");
+    }
     let input_node_idx = input_node_raw - 1;
 
-    let output_node_raw = mna.node_map.get(output_node_name).copied()
-        .ok_or_else(|| anyhow::anyhow!(
+    let output_node_raw = mna.node_map.get(output_node_name).copied().ok_or_else(|| {
+        anyhow::anyhow!(
             "Output node '{}' not found. Available: {:?}",
-            output_node_name, mna.node_map.keys().collect::<Vec<_>>()
-        ))?;
-    if output_node_raw == 0 { anyhow::bail!("Output node cannot be ground (0)"); }
+            output_node_name,
+            mna.node_map.keys().collect::<Vec<_>>()
+        )
+    })?;
+    if output_node_raw == 0 {
+        anyhow::bail!("Output node cannot be ground (0)");
+    }
     let output_node_idx = output_node_raw - 1;
 
     let (input_resistance, ir_source) = if let Some(r) = input_resistance_flag {
@@ -1538,23 +1838,38 @@ fn analyze_freq_response(
     if input_node_idx < mna.n {
         mna.g[input_node_idx][input_node_idx] += input_conductance;
     }
-    eprintln!("  N={}, M={}, R_in={} ({})", mna.n,
-        mna.nonlinear_devices.iter().map(|d| d.dimension).sum::<usize>(),
-        input_resistance, ir_source);
+    eprintln!(
+        "  N={}, M={}, R_in={} ({})",
+        mna.n,
+        mna.nonlinear_devices
+            .iter()
+            .map(|d| d.dimension)
+            .sum::<usize>(),
+        input_resistance,
+        ir_source
+    );
 
     // Generate log-spaced frequencies
     let freqs = generate_log_frequencies(start_freq, end_freq, points_per_decade);
-    eprintln!("  Sweeping {} frequencies from {:.0} Hz to {:.0} Hz", freqs.len(), start_freq, end_freq);
+    eprintln!(
+        "  Sweeping {} frequencies from {:.0} Hz to {:.0} Hz",
+        freqs.len(),
+        start_freq,
+        end_freq
+    );
 
     let nyquist = sample_rate / 2.0;
     if end_freq > nyquist {
-        eprintln!("  Warning: end frequency {:.0} Hz exceeds Nyquist ({:.0} Hz), results above Nyquist will alias", end_freq, nyquist);
+        eprintln!(
+            "  Warning: end frequency {:.0} Hz exceeds Nyquist ({:.0} Hz), results above Nyquist will alias",
+            end_freq, nyquist
+        );
     }
 
     // Stamp junction capacitances from device model parameters into MNA C matrix.
     {
-        let device_slots = melange_solver::codegen::ir::CircuitIR::build_device_info(&netlist)
-            .unwrap_or_default();
+        let device_slots =
+            melange_solver::codegen::ir::CircuitIR::build_device_info(&netlist).unwrap_or_default();
         if !device_slots.is_empty() {
             mna.stamp_device_junction_caps(&device_slots);
         }
@@ -1572,8 +1887,7 @@ fn analyze_freq_response(
         DkKernel::from_mna_augmented(&mna, sample_rate)
             .with_context(|| "Failed to create augmented DK kernel")?
     } else {
-        DkKernel::from_mna(&mna, sample_rate)
-            .with_context(|| "Failed to create DK kernel")?
+        DkKernel::from_mna(&mna, sample_rate).with_context(|| "Failed to create DK kernel")?
     };
 
     if use_nodal {
@@ -1591,15 +1905,21 @@ fn analyze_freq_response(
 
     let base_solver: Option<BaseSolver> = if use_nodal {
         let mut solver = melange_solver::solver::NodalSolver::new(
-            kernel.clone(), &mna, &netlist, device_slots.clone(), input_node_idx, output_node_idx,
+            kernel.clone(),
+            &mna,
+            &netlist,
+            device_slots.clone(),
+            input_node_idx,
+            output_node_idx,
         );
         solver.input_conductance = input_conductance;
         solver.initialize_dc_op(&mna, &device_slots);
         Some(BaseSolver::Nodal(solver))
     } else if has_nonlinear {
         let devices = build_device_entries(&netlist, &mna);
-        let mut solver = CircuitSolver::new(kernel.clone(), devices, input_node_idx, output_node_idx)
-            .with_context(|| "Failed to create circuit solver")?;
+        let mut solver =
+            CircuitSolver::new(kernel.clone(), devices, input_node_idx, output_node_idx)
+                .with_context(|| "Failed to create circuit solver")?;
         solver.input_conductance = input_conductance;
         solver.initialize_dc_op(&mna, &device_slots);
         Some(BaseSolver::Dk(solver))
@@ -1615,15 +1935,30 @@ fn analyze_freq_response(
             None => {
                 let mut solver = LinearSolver::new(kernel.clone(), input_node_idx, output_node_idx);
                 solver.input_conductance = input_conductance;
-                measure_at_frequency(&mut SolverWrapper::Linear(&mut solver), freq, amplitude, sample_rate)
+                measure_at_frequency(
+                    &mut SolverWrapper::Linear(&mut solver),
+                    freq,
+                    amplitude,
+                    sample_rate,
+                )
             }
             Some(BaseSolver::Dk(base)) => {
                 let mut solver = base.clone();
-                measure_at_frequency(&mut SolverWrapper::Nonlinear(&mut solver), freq, amplitude, sample_rate)
+                measure_at_frequency(
+                    &mut SolverWrapper::Nonlinear(&mut solver),
+                    freq,
+                    amplitude,
+                    sample_rate,
+                )
             }
             Some(BaseSolver::Nodal(base)) => {
                 let mut solver = base.clone();
-                measure_at_frequency(&mut SolverWrapper::Nodal(&mut solver), freq, amplitude, sample_rate)
+                measure_at_frequency(
+                    &mut SolverWrapper::Nodal(&mut solver),
+                    freq,
+                    amplitude,
+                    sample_rate,
+                )
             }
         };
         results.push((freq, gain_db, phase_deg));
@@ -1635,7 +1970,11 @@ fn analyze_freq_response(
     if let Some(path) = output_file {
         std::fs::write(path, &csv)
             .with_context(|| format!("Failed to write output: {}", path.display()))?;
-        eprintln!("  Wrote {} frequency points to {}", results.len(), path.display());
+        eprintln!(
+            "  Wrote {} frequency points to {}",
+            results.len(),
+            path.display()
+        );
     } else {
         print!("{}", csv);
     }
@@ -1653,9 +1992,15 @@ fn apply_switch_position(
         let value = switch.positions[position][comp_idx];
         for e in elements.iter_mut() {
             let (name, val) = match e {
-                melange_solver::parser::Element::Resistor { name, value, .. } => (name as &str, value),
-                melange_solver::parser::Element::Capacitor { name, value, .. } => (name as &str, value),
-                melange_solver::parser::Element::Inductor { name, value, .. } => (name as &str, value),
+                melange_solver::parser::Element::Resistor { name, value, .. } => {
+                    (name as &str, value)
+                }
+                melange_solver::parser::Element::Capacitor { name, value, .. } => {
+                    (name as &str, value)
+                }
+                melange_solver::parser::Element::Inductor { name, value, .. } => {
+                    (name as &str, value)
+                }
                 _ => continue,
             };
             if name.eq_ignore_ascii_case(comp_name) {
@@ -1747,7 +2092,8 @@ fn measure_at_frequency(
 
     // Output amplitude and phase from DFT coefficients
     let out_amp = 2.0 * (sin_acc * sin_acc + cos_acc * cos_acc).sqrt() / measure_samples as f64;
-    let in_amp = 2.0 * (in_sin_acc * in_sin_acc + in_cos_acc * in_cos_acc).sqrt() / measure_samples as f64;
+    let in_amp =
+        2.0 * (in_sin_acc * in_sin_acc + in_cos_acc * in_cos_acc).sqrt() / measure_samples as f64;
 
     let gain_db = if in_amp > 1e-30 && out_amp > 1e-30 {
         20.0 * (out_amp / in_amp).log10()
@@ -1759,9 +2105,13 @@ fn measure_at_frequency(
     let in_phase = in_cos_acc.atan2(in_sin_acc);
     let phase_diff = (out_phase - in_phase).to_degrees();
     // Normalize to [-180, 180]
-    let phase_deg = if phase_diff > 180.0 { phase_diff - 360.0 }
-        else if phase_diff < -180.0 { phase_diff + 360.0 }
-        else { phase_diff };
+    let phase_deg = if phase_diff > 180.0 {
+        phase_diff - 360.0
+    } else if phase_diff < -180.0 {
+        phase_diff + 360.0
+    } else {
+        phase_diff
+    };
 
     (gain_db, phase_deg)
 }
@@ -1782,58 +2132,111 @@ fn build_device_entries(
     use melange_devices::bjt::{BjtEbersMoll, BjtPolarity};
     use melange_devices::diode::DiodeShockley;
     use melange_devices::jfet::{Jfet, JfetChannel};
-    use melange_devices::mosfet::{Mosfet, ChannelType};
+    use melange_devices::mosfet::{ChannelType, Mosfet};
     use melange_devices::tube::KorenTriode;
     use melange_solver::solver::DeviceEntry;
 
     let find_model_param = |model_name: &str, param: &str| -> Option<f64> {
-        netlist.models.iter()
+        netlist
+            .models
+            .iter()
             .find(|m| m.name.eq_ignore_ascii_case(model_name))
-            .and_then(|m| m.params.iter()
-                .find(|(k, _)| k.eq_ignore_ascii_case(param))
-                .map(|(_, v)| *v))
+            .and_then(|m| {
+                m.params
+                    .iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case(param))
+                    .map(|(_, v)| *v)
+            })
     };
 
     let mut devices = Vec::new();
     for dev_info in &mna.nonlinear_devices {
         match dev_info.device_type {
             melange_solver::mna::NonlinearDeviceType::Diode => {
-                let model_name = netlist.elements.iter().find_map(|e| {
-                    if let melange_solver::parser::Element::Diode { name, model, .. } = e {
-                        if name.eq_ignore_ascii_case(&dev_info.name) { Some(model.as_str()) } else { None }
-                    } else { None }
-                }).unwrap_or("");
+                let model_name = netlist
+                    .elements
+                    .iter()
+                    .find_map(|e| {
+                        if let melange_solver::parser::Element::Diode { name, model, .. } = e {
+                            if name.eq_ignore_ascii_case(&dev_info.name) {
+                                Some(model.as_str())
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or("");
                 let is = find_model_param(model_name, "IS").unwrap_or(1e-15);
                 let n = find_model_param(model_name, "N").unwrap_or(1.0);
-                devices.push(DeviceEntry::new_diode(DiodeShockley::new_room_temp(is, n), dev_info.start_idx));
+                devices.push(DeviceEntry::new_diode(
+                    DiodeShockley::new_room_temp(is, n),
+                    dev_info.start_idx,
+                ));
             }
             melange_solver::mna::NonlinearDeviceType::Bjt => {
-                let model_name = netlist.elements.iter().find_map(|e| {
-                    if let melange_solver::parser::Element::Bjt { name, model, .. } = e {
-                        if name.eq_ignore_ascii_case(&dev_info.name) { Some(model.as_str()) } else { None }
-                    } else { None }
-                }).unwrap_or("");
+                let model_name = netlist
+                    .elements
+                    .iter()
+                    .find_map(|e| {
+                        if let melange_solver::parser::Element::Bjt { name, model, .. } = e {
+                            if name.eq_ignore_ascii_case(&dev_info.name) {
+                                Some(model.as_str())
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or("");
                 let is = find_model_param(model_name, "IS").unwrap_or(1e-14);
                 let bf = find_model_param(model_name, "BF").unwrap_or(200.0);
                 let br = find_model_param(model_name, "BR").unwrap_or(3.0);
-                let is_pnp = netlist.models.iter()
-                    .find(|m| m.name.eq_ignore_ascii_case(&model_name))
+                let is_pnp = netlist
+                    .models
+                    .iter()
+                    .find(|m| m.name.eq_ignore_ascii_case(model_name))
                     .map(|m| m.model_type.eq_ignore_ascii_case("PNP"))
                     .unwrap_or(false);
-                let polarity = if is_pnp { BjtPolarity::Pnp } else { BjtPolarity::Npn };
-                devices.push(DeviceEntry::new_bjt(BjtEbersMoll::new(is, melange_primitives::VT_ROOM, bf, br, polarity), dev_info.start_idx));
+                let polarity = if is_pnp {
+                    BjtPolarity::Pnp
+                } else {
+                    BjtPolarity::Npn
+                };
+                devices.push(DeviceEntry::new_bjt(
+                    BjtEbersMoll::new(is, melange_primitives::VT_ROOM, bf, br, polarity),
+                    dev_info.start_idx,
+                ));
             }
             melange_solver::mna::NonlinearDeviceType::Jfet => {
-                let model_name = netlist.elements.iter().find_map(|e| {
-                    if let melange_solver::parser::Element::Jfet { name, model, .. } = e {
-                        if name.eq_ignore_ascii_case(&dev_info.name) { Some(model.as_str()) } else { None }
-                    } else { None }
-                }).unwrap_or("");
-                let is_p_channel = netlist.models.iter()
+                let model_name = netlist
+                    .elements
+                    .iter()
+                    .find_map(|e| {
+                        if let melange_solver::parser::Element::Jfet { name, model, .. } = e {
+                            if name.eq_ignore_ascii_case(&dev_info.name) {
+                                Some(model.as_str())
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or("");
+                let is_p_channel = netlist
+                    .models
+                    .iter()
                     .find(|m| m.name.eq_ignore_ascii_case(model_name))
                     .map(|m| m.model_type.to_uppercase().starts_with("PJ"))
                     .unwrap_or(false);
-                let channel = if is_p_channel { JfetChannel::P } else { JfetChannel::N };
+                let channel = if is_p_channel {
+                    JfetChannel::P
+                } else {
+                    JfetChannel::N
+                };
                 let default_vp = if is_p_channel { 2.0 } else { -2.0 };
                 let vp = find_model_param(model_name, "VTO").unwrap_or(default_vp);
                 let idss = if let Some(beta) = find_model_param(model_name, "BETA") {
@@ -1846,16 +2249,32 @@ fn build_device_entries(
                 devices.push(DeviceEntry::new_jfet(jfet, dev_info.start_idx));
             }
             melange_solver::mna::NonlinearDeviceType::Mosfet => {
-                let model_name = netlist.elements.iter().find_map(|e| {
-                    if let melange_solver::parser::Element::Mosfet { name, model, .. } = e {
-                        if name.eq_ignore_ascii_case(&dev_info.name) { Some(model.as_str()) } else { None }
-                    } else { None }
-                }).unwrap_or("");
-                let is_p_channel = netlist.models.iter()
+                let model_name = netlist
+                    .elements
+                    .iter()
+                    .find_map(|e| {
+                        if let melange_solver::parser::Element::Mosfet { name, model, .. } = e {
+                            if name.eq_ignore_ascii_case(&dev_info.name) {
+                                Some(model.as_str())
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or("");
+                let is_p_channel = netlist
+                    .models
+                    .iter()
                     .find(|m| m.name.eq_ignore_ascii_case(model_name))
                     .map(|m| m.model_type.to_uppercase().starts_with("PM"))
                     .unwrap_or(false);
-                let channel = if is_p_channel { ChannelType::P } else { ChannelType::N };
+                let channel = if is_p_channel {
+                    ChannelType::P
+                } else {
+                    ChannelType::N
+                };
                 let default_vt = if is_p_channel { -2.0 } else { 2.0 };
                 let vt = find_model_param(model_name, "VTO").unwrap_or(default_vt);
                 let kp = find_model_param(model_name, "KP").unwrap_or(0.1);
@@ -1864,11 +2283,21 @@ fn build_device_entries(
                 devices.push(DeviceEntry::new_mosfet(mosfet, dev_info.start_idx));
             }
             melange_solver::mna::NonlinearDeviceType::Tube => {
-                let model_name = netlist.elements.iter().find_map(|e| {
-                    if let melange_solver::parser::Element::Triode { name, model, .. } = e {
-                        if name.eq_ignore_ascii_case(&dev_info.name) { Some(model.as_str()) } else { None }
-                    } else { None }
-                }).unwrap_or("");
+                let model_name = netlist
+                    .elements
+                    .iter()
+                    .find_map(|e| {
+                        if let melange_solver::parser::Element::Triode { name, model, .. } = e {
+                            if name.eq_ignore_ascii_case(&dev_info.name) {
+                                Some(model.as_str())
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or("");
                 let mu = find_model_param(model_name, "MU").unwrap_or(100.0);
                 let ex = find_model_param(model_name, "EX").unwrap_or(1.4);
                 let kg1 = find_model_param(model_name, "KG1").unwrap_or(1060.0);
@@ -1877,25 +2306,45 @@ fn build_device_entries(
                 let ig_max = find_model_param(model_name, "IG_MAX").unwrap_or(2e-3);
                 let vgk_onset = find_model_param(model_name, "VGK_ONSET").unwrap_or(0.5);
                 let lambda = find_model_param(model_name, "LAMBDA").unwrap_or(0.0);
-                let tube = KorenTriode::with_all_params(mu, ex, kg1, kp, kvb, ig_max, vgk_onset, lambda);
+                let tube =
+                    KorenTriode::with_all_params(mu, ex, kg1, kp, kvb, ig_max, vgk_onset, lambda);
                 devices.push(DeviceEntry::new_tube(tube, dev_info.start_idx));
             }
             melange_solver::mna::NonlinearDeviceType::BjtForwardActive => {
                 // BjtForwardActive uses the same runtime 2D model as Bjt
-                let model_name = netlist.elements.iter().find_map(|e| {
-                    if let melange_solver::parser::Element::Bjt { name, model, .. } = e {
-                        if name.eq_ignore_ascii_case(&dev_info.name) { Some(model.as_str()) } else { None }
-                    } else { None }
-                }).unwrap_or("");
+                let model_name = netlist
+                    .elements
+                    .iter()
+                    .find_map(|e| {
+                        if let melange_solver::parser::Element::Bjt { name, model, .. } = e {
+                            if name.eq_ignore_ascii_case(&dev_info.name) {
+                                Some(model.as_str())
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or("");
                 let is = find_model_param(model_name, "IS").unwrap_or(1e-14);
                 let bf = find_model_param(model_name, "BF").unwrap_or(200.0);
                 let br = find_model_param(model_name, "BR").unwrap_or(3.0);
-                let is_pnp = netlist.models.iter()
-                    .find(|m| m.name.eq_ignore_ascii_case(&model_name))
+                let is_pnp = netlist
+                    .models
+                    .iter()
+                    .find(|m| m.name.eq_ignore_ascii_case(model_name))
                     .map(|m| m.model_type.eq_ignore_ascii_case("PNP"))
                     .unwrap_or(false);
-                let polarity = if is_pnp { BjtPolarity::Pnp } else { BjtPolarity::Npn };
-                devices.push(DeviceEntry::new_bjt(BjtEbersMoll::new(is, melange_primitives::VT_ROOM, bf, br, polarity), dev_info.start_idx));
+                let polarity = if is_pnp {
+                    BjtPolarity::Pnp
+                } else {
+                    BjtPolarity::Npn
+                };
+                devices.push(DeviceEntry::new_bjt(
+                    BjtEbersMoll::new(is, melange_primitives::VT_ROOM, bf, br, polarity),
+                    dev_info.start_idx,
+                ));
             }
         }
     }
@@ -1906,25 +2355,43 @@ fn build_device_slots(
     netlist: &melange_solver::parser::Netlist,
     mna: &melange_solver::mna::MnaSystem,
 ) -> Vec<melange_solver::codegen::ir::DeviceSlot> {
-    use melange_solver::codegen::ir::{DeviceSlot, DeviceType, DeviceParams, DiodeParams, BjtParams, JfetParams, MosfetParams, TubeParams};
+    use melange_solver::codegen::ir::{
+        BjtParams, DeviceParams, DeviceSlot, DeviceType, DiodeParams, JfetParams, MosfetParams,
+        TubeParams,
+    };
 
     let find_param = |model_name: &str, param: &str| -> Option<f64> {
-        netlist.models.iter()
+        netlist
+            .models
+            .iter()
             .find(|m| m.name.eq_ignore_ascii_case(model_name))
-            .and_then(|m| m.params.iter()
-                .find(|(k, _)| k.eq_ignore_ascii_case(param))
-                .map(|(_, v)| *v))
+            .and_then(|m| {
+                m.params
+                    .iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case(param))
+                    .map(|(_, v)| *v)
+            })
     };
 
     let mut slots = Vec::new();
     for dev_info in &mna.nonlinear_devices {
         match dev_info.device_type {
             melange_solver::mna::NonlinearDeviceType::Diode => {
-                let model_name = netlist.elements.iter().find_map(|e| {
-                    if let melange_solver::parser::Element::Diode { name, model, .. } = e {
-                        if name.eq_ignore_ascii_case(&dev_info.name) { Some(model.clone()) } else { None }
-                    } else { None }
-                }).unwrap_or_default();
+                let model_name = netlist
+                    .elements
+                    .iter()
+                    .find_map(|e| {
+                        if let melange_solver::parser::Element::Diode { name, model, .. } = e {
+                            if name.eq_ignore_ascii_case(&dev_info.name) {
+                                Some(model.clone())
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_default();
                 let is = find_param(&model_name, "IS").unwrap_or(1e-15);
                 let n = find_param(&model_name, "N").unwrap_or(1.0);
                 slots.push(DeviceSlot {
@@ -1942,15 +2409,27 @@ fn build_device_slots(
                 });
             }
             melange_solver::mna::NonlinearDeviceType::Bjt => {
-                let model_name = netlist.elements.iter().find_map(|e| {
-                    if let melange_solver::parser::Element::Bjt { name, model, .. } = e {
-                        if name.eq_ignore_ascii_case(&dev_info.name) { Some(model.clone()) } else { None }
-                    } else { None }
-                }).unwrap_or_default();
+                let model_name = netlist
+                    .elements
+                    .iter()
+                    .find_map(|e| {
+                        if let melange_solver::parser::Element::Bjt { name, model, .. } = e {
+                            if name.eq_ignore_ascii_case(&dev_info.name) {
+                                Some(model.clone())
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_default();
                 let is = find_param(&model_name, "IS").unwrap_or(1e-14);
                 let bf = find_param(&model_name, "BF").unwrap_or(200.0);
                 let br = find_param(&model_name, "BR").unwrap_or(3.0);
-                let is_pnp = netlist.models.iter()
+                let is_pnp = netlist
+                    .models
+                    .iter()
                     .find(|m| m.name.eq_ignore_ascii_case(&model_name))
                     .map(|m| m.model_type.eq_ignore_ascii_case("PNP"))
                     .unwrap_or(false);
@@ -1985,12 +2464,24 @@ fn build_device_slots(
                 });
             }
             melange_solver::mna::NonlinearDeviceType::Jfet => {
-                let model_name = netlist.elements.iter().find_map(|e| {
-                    if let melange_solver::parser::Element::Jfet { name, model, .. } = e {
-                        if name.eq_ignore_ascii_case(&dev_info.name) { Some(model.clone()) } else { None }
-                    } else { None }
-                }).unwrap_or_default();
-                let is_p_channel = netlist.models.iter()
+                let model_name = netlist
+                    .elements
+                    .iter()
+                    .find_map(|e| {
+                        if let melange_solver::parser::Element::Jfet { name, model, .. } = e {
+                            if name.eq_ignore_ascii_case(&dev_info.name) {
+                                Some(model.clone())
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_default();
+                let is_p_channel = netlist
+                    .models
+                    .iter()
                     .find(|m| m.name.eq_ignore_ascii_case(&model_name))
                     .map(|m| m.model_type.to_uppercase().starts_with("PJ"))
                     .unwrap_or(false);
@@ -2019,12 +2510,24 @@ fn build_device_slots(
                 });
             }
             melange_solver::mna::NonlinearDeviceType::Mosfet => {
-                let model_name = netlist.elements.iter().find_map(|e| {
-                    if let melange_solver::parser::Element::Mosfet { name, model, .. } = e {
-                        if name.eq_ignore_ascii_case(&dev_info.name) { Some(model.clone()) } else { None }
-                    } else { None }
-                }).unwrap_or_default();
-                let is_p_channel = netlist.models.iter()
+                let model_name = netlist
+                    .elements
+                    .iter()
+                    .find_map(|e| {
+                        if let melange_solver::parser::Element::Mosfet { name, model, .. } = e {
+                            if name.eq_ignore_ascii_case(&dev_info.name) {
+                                Some(model.clone())
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_default();
+                let is_p_channel = netlist
+                    .models
+                    .iter()
                     .find(|m| m.name.eq_ignore_ascii_case(&model_name))
                     .map(|m| m.model_type.to_uppercase().starts_with("PM"))
                     .unwrap_or(false);
@@ -2053,11 +2556,21 @@ fn build_device_slots(
                 });
             }
             melange_solver::mna::NonlinearDeviceType::Tube => {
-                let model_name = netlist.elements.iter().find_map(|e| {
-                    if let melange_solver::parser::Element::Triode { name, model, .. } = e {
-                        if name.eq_ignore_ascii_case(&dev_info.name) { Some(model.clone()) } else { None }
-                    } else { None }
-                }).unwrap_or_default();
+                let model_name = netlist
+                    .elements
+                    .iter()
+                    .find_map(|e| {
+                        if let melange_solver::parser::Element::Triode { name, model, .. } = e {
+                            if name.eq_ignore_ascii_case(&dev_info.name) {
+                                Some(model.clone())
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_default();
                 let mu = find_param(&model_name, "MU").unwrap_or(100.0);
                 let ex = find_param(&model_name, "EX").unwrap_or(1.4);
                 let kg1 = find_param(&model_name, "KG1").unwrap_or(1060.0);
@@ -2087,15 +2600,27 @@ fn build_device_slots(
                 });
             }
             melange_solver::mna::NonlinearDeviceType::BjtForwardActive => {
-                let model_name = netlist.elements.iter().find_map(|e| {
-                    if let melange_solver::parser::Element::Bjt { name, model, .. } = e {
-                        if name.eq_ignore_ascii_case(&dev_info.name) { Some(model.clone()) } else { None }
-                    } else { None }
-                }).unwrap_or_default();
+                let model_name = netlist
+                    .elements
+                    .iter()
+                    .find_map(|e| {
+                        if let melange_solver::parser::Element::Bjt { name, model, .. } = e {
+                            if name.eq_ignore_ascii_case(&dev_info.name) {
+                                Some(model.clone())
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_default();
                 let is = find_param(&model_name, "IS").unwrap_or(1e-14);
                 let bf = find_param(&model_name, "BF").unwrap_or(200.0);
                 let br = find_param(&model_name, "BR").unwrap_or(3.0);
-                let is_pnp = netlist.models.iter()
+                let is_pnp = netlist
+                    .models
+                    .iter()
                     .find(|m| m.name.eq_ignore_ascii_case(&model_name))
                     .map(|m| m.model_type.eq_ignore_ascii_case("PNP"))
                     .unwrap_or(false);
@@ -2147,18 +2672,27 @@ fn write_wav(output: &PathBuf, sample_rate: f64, samples: &[f64]) -> Result<()> 
     let mut peak = 0.0f64;
     for &s in samples {
         peak = peak.max(s.abs());
-        writer.write_sample(s as f32)
+        writer
+            .write_sample(s as f32)
             .with_context(|| "Failed to write WAV sample")?;
     }
-    writer.finalize()
+    writer
+        .finalize()
         .with_context(|| "Failed to finalize WAV file")?;
 
     println!();
     println!("Output written to: {}", output.display());
     println!("  Samples: {}", samples.len());
     println!("  Duration: {:.2}s", samples.len() as f64 / sample_rate);
-    println!("  Peak level: {:.4} ({:.1} dB)",
-        peak, if peak > 0.0 { 20.0 * peak.log10() } else { f64::NEG_INFINITY });
+    println!(
+        "  Peak level: {:.4} ({:.1} dB)",
+        peak,
+        if peak > 0.0 {
+            20.0 * peak.log10()
+        } else {
+            f64::NEG_INFINITY
+        }
+    );
 
     Ok(())
 }
@@ -2173,27 +2707,25 @@ fn list_nodes_source(circuit_source: &circuits::CircuitSource) -> Result<()> {
     // Get circuit content
     let netlist_str = match circuit_source {
         circuits::CircuitSource::Builtin { content, .. } => content.clone(),
-        circuits::CircuitSource::Local { path } => {
-            std::fs::read_to_string(path)
-                .with_context(|| format!("Failed to read local file: {}", path.display()))?
-        }
+        circuits::CircuitSource::Local { path } => std::fs::read_to_string(path)
+            .with_context(|| format!("Failed to read local file: {}", path.display()))?,
         circuits::CircuitSource::Url { url } | circuits::CircuitSource::Friendly { url, .. } => {
             let cache = cache::Cache::new()?;
             cache.get_sync(url, false)?
         }
     };
 
-    let mut netlist = Netlist::parse(&netlist_str)
-        .with_context(|| "Failed to parse SPICE netlist")?;
+    let mut netlist =
+        Netlist::parse(&netlist_str).with_context(|| "Failed to parse SPICE netlist")?;
 
     // Expand subcircuit instances (X elements) before MNA
     if !netlist.subcircuits.is_empty() {
-        netlist.expand_subcircuits()
+        netlist
+            .expand_subcircuits()
             .with_context(|| "Failed to expand subcircuits")?;
     }
 
-    let mna = MnaSystem::from_netlist(&netlist)
-        .with_context(|| "Failed to build MNA system")?;
+    let mna = MnaSystem::from_netlist(&netlist).with_context(|| "Failed to build MNA system")?;
 
     println!("Nodes in circuit:");
     println!("  (0) GND - Ground reference");
@@ -2230,16 +2762,21 @@ fn handle_sources(action: SourceAction) -> Result<()> {
             println!("{}", format_sources_list(&config));
             Ok(())
         }
-        SourceAction::Add { name, url, license, attribution } => {
+        SourceAction::Add {
+            name,
+            url,
+            license,
+            attribution,
+        } => {
             let mut config = SourcesConfig::load()?;
-            
+
             if config.has_source(&name) {
                 println!("Warning: Source '{}' already exists. Overwriting.", name);
             }
-            
+
             config.add_source(&name, &url, license.as_deref(), attribution.as_deref());
             config.save()?;
-            
+
             println!("Added source '{}': {}", name, url);
             if let Some(lic) = license {
                 println!("  License: {}", lic);
@@ -2247,24 +2784,24 @@ fn handle_sources(action: SourceAction) -> Result<()> {
             if let Some(attr) = attribution {
                 println!("  Attribution: {}", attr);
             }
-            
+
             Ok(())
         }
         SourceAction::Remove { name } => {
             let mut config = SourcesConfig::load()?;
-            
+
             if config.remove_source(&name) {
                 config.save()?;
                 println!("Removed source '{}'", name);
             } else {
                 anyhow::bail!("Source '{}' not found", name);
             }
-            
+
             Ok(())
         }
         SourceAction::Show { name } => {
             let config = SourcesConfig::load()?;
-            
+
             if let Some(source) = config.get_source(&name) {
                 println!("Source: {}", name);
                 println!("  URL: {}", source.url);
@@ -2280,7 +2817,7 @@ fn handle_sources(action: SourceAction) -> Result<()> {
             } else {
                 anyhow::bail!("Source '{}' not found", name);
             }
-            
+
             Ok(())
         }
     }
@@ -2291,7 +2828,7 @@ fn list_builtins() -> Result<()> {
     println!();
 
     let builtins = circuits::list_builtins();
-    
+
     for (name, description) in builtins {
         println!("  {:<15} - {}", name, description);
     }
@@ -2341,7 +2878,7 @@ mod tests {
         // Test that CLI parsing works
         let cli = Cli::parse_from(["melange", "builtins"]);
         match cli.command {
-            Commands::Builtins => {},
+            Commands::Builtins => {}
             _ => panic!("Expected Builtins command"),
         }
     }

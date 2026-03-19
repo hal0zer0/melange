@@ -148,9 +148,9 @@ pub const CATALOG: &[TubeCatalogEntry] = &[
 
 /// Look up a tube by part number (case-insensitive).
 pub fn lookup(name: &str) -> Option<&'static TubeCatalogEntry> {
-    CATALOG.iter().find(|entry| {
-        entry.names.iter().any(|n| n.eq_ignore_ascii_case(name))
-    })
+    CATALOG
+        .iter()
+        .find(|entry| entry.names.iter().any(|n| n.eq_ignore_ascii_case(name)))
 }
 
 #[cfg(test)]
@@ -163,11 +163,7 @@ mod tests {
         // Every name in the catalog should resolve
         for entry in CATALOG {
             for name in entry.names {
-                assert!(
-                    lookup(name).is_some(),
-                    "Alias '{}' should resolve",
-                    name
-                );
+                assert!(lookup(name).is_some(), "Alias '{}' should resolve", name);
             }
         }
     }
@@ -200,14 +196,46 @@ mod tests {
     #[test]
     fn test_all_params_valid() {
         for entry in CATALOG {
-            assert!(entry.mu > 0.0 && entry.mu.is_finite(), "{}: mu", entry.names[0]);
-            assert!(entry.ex > 0.0 && entry.ex.is_finite(), "{}: ex", entry.names[0]);
-            assert!(entry.kg1 > 0.0 && entry.kg1.is_finite(), "{}: kg1", entry.names[0]);
-            assert!(entry.kp > 0.0 && entry.kp.is_finite(), "{}: kp", entry.names[0]);
-            assert!(entry.kvb > 0.0 && entry.kvb.is_finite(), "{}: kvb", entry.names[0]);
-            assert!(entry.ig_max > 0.0 && entry.ig_max.is_finite(), "{}: ig_max", entry.names[0]);
-            assert!(entry.vgk_onset > 0.0 && entry.vgk_onset.is_finite(), "{}: vgk_onset", entry.names[0]);
-            assert!(entry.lambda >= 0.0 && entry.lambda.is_finite(), "{}: lambda", entry.names[0]);
+            assert!(
+                entry.mu > 0.0 && entry.mu.is_finite(),
+                "{}: mu",
+                entry.names[0]
+            );
+            assert!(
+                entry.ex > 0.0 && entry.ex.is_finite(),
+                "{}: ex",
+                entry.names[0]
+            );
+            assert!(
+                entry.kg1 > 0.0 && entry.kg1.is_finite(),
+                "{}: kg1",
+                entry.names[0]
+            );
+            assert!(
+                entry.kp > 0.0 && entry.kp.is_finite(),
+                "{}: kp",
+                entry.names[0]
+            );
+            assert!(
+                entry.kvb > 0.0 && entry.kvb.is_finite(),
+                "{}: kvb",
+                entry.names[0]
+            );
+            assert!(
+                entry.ig_max > 0.0 && entry.ig_max.is_finite(),
+                "{}: ig_max",
+                entry.names[0]
+            );
+            assert!(
+                entry.vgk_onset > 0.0 && entry.vgk_onset.is_finite(),
+                "{}: vgk_onset",
+                entry.names[0]
+            );
+            assert!(
+                entry.lambda >= 0.0 && entry.lambda.is_finite(),
+                "{}: lambda",
+                entry.names[0]
+            );
         }
     }
 
@@ -266,8 +294,14 @@ mod tests {
 
     fn make_tube(entry: &TubeCatalogEntry) -> KorenTriode {
         KorenTriode::with_all_params(
-            entry.mu, entry.ex, entry.kg1, entry.kp, entry.kvb,
-            entry.ig_max, entry.vgk_onset, entry.lambda,
+            entry.mu,
+            entry.ex,
+            entry.kg1,
+            entry.kp,
+            entry.kvb,
+            entry.ig_max,
+            entry.vgk_onset,
+            entry.lambda,
         )
     }
 
@@ -288,14 +322,28 @@ mod tests {
         // Koren model at Vgk=0V, Vpk=250V → Ip ≈ 3.4mA
         // (RCA tube manual says ~1.2mA; Koren overestimates at zero grid bias)
         let ip0 = t.plate_current(0.0, 250.0);
-        assert!(ip0 > 0.5e-3 && ip0 < 10e-3, "12AX7 Vgk=0: Ip={:.3}mA", ip0 * 1e3);
+        assert!(
+            ip0 > 0.5e-3 && ip0 < 10e-3,
+            "12AX7 Vgk=0: Ip={:.3}mA",
+            ip0 * 1e3
+        );
         // Vgk=-1V, Vpk=250V: Koren gives ~1.7mA (datasheet: ~0.5mA)
         let ip_m1 = t.plate_current(-1.0, 250.0);
-        assert!(ip_m1 > 0.1e-3 && ip_m1 < 5e-3, "12AX7 Vgk=-1: Ip={:.3}mA", ip_m1 * 1e3);
+        assert!(
+            ip_m1 > 0.1e-3 && ip_m1 < 5e-3,
+            "12AX7 Vgk=-1: Ip={:.3}mA",
+            ip_m1 * 1e3
+        );
         // Monotonicity: more negative grid → less current
-        assert!(ip_m1 < ip0, "12AX7: Ip should decrease with more negative Vgk");
+        assert!(
+            ip_m1 < ip0,
+            "12AX7: Ip should decrease with more negative Vgk"
+        );
         // Cutoff: Vgk=-4V → Ip ≈ 0
-        assert!(t.plate_current(-4.0, 250.0) < 0.01e-3, "12AX7 should be near cutoff at Vgk=-4");
+        assert!(
+            t.plate_current(-4.0, 250.0) < 0.01e-3,
+            "12AX7 should be near cutoff at Vgk=-4"
+        );
     }
 
     #[test]
@@ -304,11 +352,22 @@ mod tests {
         // Koren model at Vgk=0V, Vpk=250V → Ip ≈ 20mA
         // (Sylvania datasheet: ~11.5mA; Koren single-mu overestimates at zero grid bias)
         let ip0 = t.plate_current(0.0, 250.0);
-        assert!(ip0 > 5e-3 && ip0 < 40e-3, "12AU7 Vgk=0: Ip={:.1}mA", ip0 * 1e3);
+        assert!(
+            ip0 > 5e-3 && ip0 < 40e-3,
+            "12AU7 Vgk=0: Ip={:.1}mA",
+            ip0 * 1e3
+        );
         // Vgk=-8.5V, Vpk=250V: Koren gives ~5.2mA (datasheet: ~2.3mA)
         let ip_neg = t.plate_current(-8.5, 250.0);
-        assert!(ip_neg > 0.5e-3 && ip_neg < 15e-3, "12AU7 Vgk=-8.5: Ip={:.1}mA", ip_neg * 1e3);
-        assert!(ip_neg < ip0, "12AU7: current should decrease with negative grid");
+        assert!(
+            ip_neg > 0.5e-3 && ip_neg < 15e-3,
+            "12AU7 Vgk=-8.5: Ip={:.1}mA",
+            ip_neg * 1e3
+        );
+        assert!(
+            ip_neg < ip0,
+            "12AU7: current should decrease with negative grid"
+        );
         // Deep cutoff: Vgk=-30V → Ip ≈ 0 (12AU7 has low mu, needs deeper cutoff)
         assert!(t.plate_current(-30.0, 250.0) < 0.01e-3, "12AU7 cutoff");
     }
@@ -355,7 +414,11 @@ mod tests {
         let t = make_tube(lookup("EL34").unwrap());
         // EL34 triode-connected: Vgk=0V, Vpk=250V → Ip in tens of mA
         let ip = t.plate_current(0.0, 250.0);
-        assert!(ip > 10e-3 && ip < 200e-3, "EL34 Vgk=0: Ip={:.1}mA", ip * 1e3);
+        assert!(
+            ip > 10e-3 && ip < 200e-3,
+            "EL34 Vgk=0: Ip={:.1}mA",
+            ip * 1e3
+        );
     }
 
     #[test]
@@ -374,20 +437,36 @@ mod tests {
         for &vgk in &[-5.0, -2.0, -1.0, 0.0] {
             for &vpk in &[50.0, 150.0, 250.0] {
                 let jac = t.jacobian(&[vgk, vpk]);
-                let dip_dvgk = (t.plate_current(vgk + eps, vpk) - t.plate_current(vgk - eps, vpk)) / (2.0 * eps);
-                let dip_dvpk = (t.plate_current(vgk, vpk + eps) - t.plate_current(vgk, vpk - eps)) / (2.0 * eps);
+                let dip_dvgk = (t.plate_current(vgk + eps, vpk) - t.plate_current(vgk - eps, vpk))
+                    / (2.0 * eps);
+                let dip_dvpk = (t.plate_current(vgk, vpk + eps) - t.plate_current(vgk, vpk - eps))
+                    / (2.0 * eps);
 
                 if dip_dvgk.abs() > 1e-12 {
                     let rel = (jac[0] - dip_dvgk).abs() / dip_dvgk.abs();
-                    assert!(rel < 1e-3,
+                    assert!(
+                        rel < 1e-3,
                         "{} dIp/dVgk at ({},{}): analytic={:.6e} fd={:.6e} rel={:.2e}",
-                        entry.names[0], vgk, vpk, jac[0], dip_dvgk, rel);
+                        entry.names[0],
+                        vgk,
+                        vpk,
+                        jac[0],
+                        dip_dvgk,
+                        rel
+                    );
                 }
                 if dip_dvpk.abs() > 1e-12 {
                     let rel = (jac[1] - dip_dvpk).abs() / dip_dvpk.abs();
-                    assert!(rel < 1e-3,
+                    assert!(
+                        rel < 1e-3,
                         "{} dIp/dVpk at ({},{}): analytic={:.6e} fd={:.6e} rel={:.2e}",
-                        entry.names[0], vgk, vpk, jac[1], dip_dvpk, rel);
+                        entry.names[0],
+                        vgk,
+                        vpk,
+                        jac[1],
+                        dip_dvpk,
+                        rel
+                    );
                 }
             }
         }
@@ -397,21 +476,37 @@ mod tests {
     use crate::NonlinearDevice;
 
     #[test]
-    fn test_12ax7_jacobian() { check_jacobian(lookup("12AX7").unwrap()); }
+    fn test_12ax7_jacobian() {
+        check_jacobian(lookup("12AX7").unwrap());
+    }
     #[test]
-    fn test_12au7_jacobian() { check_jacobian(lookup("12AU7").unwrap()); }
+    fn test_12au7_jacobian() {
+        check_jacobian(lookup("12AU7").unwrap());
+    }
     #[test]
-    fn test_12at7_jacobian() { check_jacobian(lookup("12AT7").unwrap()); }
+    fn test_12at7_jacobian() {
+        check_jacobian(lookup("12AT7").unwrap());
+    }
     #[test]
-    fn test_6sl7_jacobian() { check_jacobian(lookup("6SL7").unwrap()); }
+    fn test_6sl7_jacobian() {
+        check_jacobian(lookup("6SL7").unwrap());
+    }
     #[test]
-    fn test_6v6_jacobian() { check_jacobian(lookup("6V6").unwrap()); }
+    fn test_6v6_jacobian() {
+        check_jacobian(lookup("6V6").unwrap());
+    }
     #[test]
-    fn test_el84_jacobian() { check_jacobian(lookup("EL84").unwrap()); }
+    fn test_el84_jacobian() {
+        check_jacobian(lookup("EL84").unwrap());
+    }
     #[test]
-    fn test_el34_jacobian() { check_jacobian(lookup("EL34").unwrap()); }
+    fn test_el34_jacobian() {
+        check_jacobian(lookup("EL34").unwrap());
+    }
     #[test]
-    fn test_6l6_jacobian() { check_jacobian(lookup("6L6").unwrap()); }
+    fn test_6l6_jacobian() {
+        check_jacobian(lookup("6L6").unwrap());
+    }
 
     // --- Tier 5: Known discrepancies ---
 

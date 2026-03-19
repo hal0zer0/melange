@@ -10,11 +10,11 @@
 //! - Codegen: compilation, constants, state fields, RHS injection, backward compat
 //! - Behavioral: step-up/step-down transformer voltage ratios, weak coupling, 1:1
 
-use melange_solver::codegen::{CodeGenerator, CodegenConfig};
 use melange_solver::codegen::ir::CircuitIR;
-use melange_solver::parser::Netlist;
-use melange_solver::mna::MnaSystem;
+use melange_solver::codegen::{CodeGenerator, CodegenConfig};
 use melange_solver::dk::DkKernel;
+use melange_solver::mna::MnaSystem;
+use melange_solver::parser::Netlist;
 use melange_solver::solver::LinearSolver;
 use std::io::Write;
 
@@ -319,7 +319,10 @@ R1 a 0 1k
 C1 a 0 1n
 ";
     let result = Netlist::parse(spice);
-    assert!(result.is_err(), "Should reject reference to missing inductor");
+    assert!(
+        result.is_err(),
+        "Should reject reference to missing inductor"
+    );
     let err = result.unwrap_err().to_string();
     assert!(
         err.contains("L2") && err.contains("not found"),
@@ -402,7 +405,10 @@ K1 L1 R1 0.95
 C1 a 0 1n
 ";
     let result = Netlist::parse(spice);
-    assert!(result.is_err(), "Should reject non-inductor references in K element");
+    assert!(
+        result.is_err(),
+        "Should reject non-inductor references in K element"
+    );
     let err = result.unwrap_err().to_string();
     assert!(
         err.contains("must start with") || err.contains("inductor"),
@@ -686,7 +692,10 @@ fn test_ir_coupled_inductors() {
     assert!((ir.coupled_inductors[0].coupling - 0.95).abs() < 1e-10);
     assert!(ir.coupled_inductors[0].g_self_1 > 0.0);
     assert!(ir.coupled_inductors[0].g_self_2 > 0.0);
-    assert!(ir.coupled_inductors[0].g_mutual < 0.0, "g_mutual should be negative");
+    assert!(
+        ir.coupled_inductors[0].g_mutual < 0.0,
+        "g_mutual should be negative"
+    );
 }
 
 #[test]
@@ -733,31 +742,88 @@ fn test_mixed_inductors_codegen_compiles() {
 fn test_codegen_constants_present() {
     let code = generate_code(SIMPLE_COUPLED);
 
-    assert!(code.contains("CI_0_G_SELF_1"), "Missing CI_0_G_SELF_1 constant");
-    assert!(code.contains("CI_0_G_SELF_2"), "Missing CI_0_G_SELF_2 constant");
-    assert!(code.contains("CI_0_G_MUTUAL"), "Missing CI_0_G_MUTUAL constant");
-    assert!(code.contains("CI_0_L1_NODE_I"), "Missing CI_0_L1_NODE_I constant");
-    assert!(code.contains("CI_0_L1_NODE_J"), "Missing CI_0_L1_NODE_J constant");
-    assert!(code.contains("CI_0_L2_NODE_I"), "Missing CI_0_L2_NODE_I constant");
-    assert!(code.contains("CI_0_L2_NODE_J"), "Missing CI_0_L2_NODE_J constant");
-    assert!(code.contains("CI_0_L1_INDUCTANCE"), "Missing CI_0_L1_INDUCTANCE constant");
-    assert!(code.contains("CI_0_L2_INDUCTANCE"), "Missing CI_0_L2_INDUCTANCE constant");
-    assert!(code.contains("CI_0_COUPLING"), "Missing CI_0_COUPLING constant");
+    assert!(
+        code.contains("CI_0_G_SELF_1"),
+        "Missing CI_0_G_SELF_1 constant"
+    );
+    assert!(
+        code.contains("CI_0_G_SELF_2"),
+        "Missing CI_0_G_SELF_2 constant"
+    );
+    assert!(
+        code.contains("CI_0_G_MUTUAL"),
+        "Missing CI_0_G_MUTUAL constant"
+    );
+    assert!(
+        code.contains("CI_0_L1_NODE_I"),
+        "Missing CI_0_L1_NODE_I constant"
+    );
+    assert!(
+        code.contains("CI_0_L1_NODE_J"),
+        "Missing CI_0_L1_NODE_J constant"
+    );
+    assert!(
+        code.contains("CI_0_L2_NODE_I"),
+        "Missing CI_0_L2_NODE_I constant"
+    );
+    assert!(
+        code.contains("CI_0_L2_NODE_J"),
+        "Missing CI_0_L2_NODE_J constant"
+    );
+    assert!(
+        code.contains("CI_0_L1_INDUCTANCE"),
+        "Missing CI_0_L1_INDUCTANCE constant"
+    );
+    assert!(
+        code.contains("CI_0_L2_INDUCTANCE"),
+        "Missing CI_0_L2_INDUCTANCE constant"
+    );
+    assert!(
+        code.contains("CI_0_COUPLING"),
+        "Missing CI_0_COUPLING constant"
+    );
 }
 
 #[test]
 fn test_codegen_state_fields_present() {
     let code = generate_code(SIMPLE_COUPLED);
 
-    assert!(code.contains("ci_i1_prev"), "Missing ci_i1_prev state field");
-    assert!(code.contains("ci_i2_prev"), "Missing ci_i2_prev state field");
-    assert!(code.contains("ci_v1_prev"), "Missing ci_v1_prev state field");
-    assert!(code.contains("ci_v2_prev"), "Missing ci_v2_prev state field");
-    assert!(code.contains("ci_i1_hist"), "Missing ci_i1_hist state field");
-    assert!(code.contains("ci_i2_hist"), "Missing ci_i2_hist state field");
-    assert!(code.contains("ci_g_self_1"), "Missing ci_g_self_1 state field");
-    assert!(code.contains("ci_g_self_2"), "Missing ci_g_self_2 state field");
-    assert!(code.contains("ci_g_mutual"), "Missing ci_g_mutual state field");
+    assert!(
+        code.contains("ci_i1_prev"),
+        "Missing ci_i1_prev state field"
+    );
+    assert!(
+        code.contains("ci_i2_prev"),
+        "Missing ci_i2_prev state field"
+    );
+    assert!(
+        code.contains("ci_v1_prev"),
+        "Missing ci_v1_prev state field"
+    );
+    assert!(
+        code.contains("ci_v2_prev"),
+        "Missing ci_v2_prev state field"
+    );
+    assert!(
+        code.contains("ci_i1_hist"),
+        "Missing ci_i1_hist state field"
+    );
+    assert!(
+        code.contains("ci_i2_hist"),
+        "Missing ci_i2_hist state field"
+    );
+    assert!(
+        code.contains("ci_g_self_1"),
+        "Missing ci_g_self_1 state field"
+    );
+    assert!(
+        code.contains("ci_g_self_2"),
+        "Missing ci_g_self_2 state field"
+    );
+    assert!(
+        code.contains("ci_g_mutual"),
+        "Missing ci_g_mutual state field"
+    );
 }
 
 #[test]
@@ -860,7 +926,10 @@ C1 out 0 100p
 ";
     let code = generate_code(spice);
 
-    assert!(code.contains("IND_0"), "Should have IND_0 for uncoupled inductor");
+    assert!(
+        code.contains("IND_0"),
+        "Should have IND_0 for uncoupled inductor"
+    );
     assert!(!code.contains("CI_0"), "No CI_0 when no coupled inductors");
     assert!(
         !code.contains("ci_i1_prev"),
@@ -878,8 +947,7 @@ fn test_step_up_transformer_voltage_ratio() {
     // Ideal transformer: V2/V1 = sqrt(L2/L1) = sqrt(10) ~ 3.16
     // With k=0.95 and loading, actual ratio will be less than ideal.
     let input_resistance = 1.0;
-    let (_, mna, kernel) =
-        build_pipeline_with_input(STEP_UP_TRANSFORMER, "in", input_resistance);
+    let (_, mna, kernel) = build_pipeline_with_input(STEP_UP_TRANSFORMER, "in", input_resistance);
     let in_idx = *mna.node_map.get("in").unwrap() - 1;
     let out_idx = *mna.node_map.get("out").unwrap() - 1;
 
@@ -919,8 +987,7 @@ fn test_step_down_transformer_voltage_ratio() {
     // L1=100mH (primary), L2=10mH (secondary), k=0.95
     // Ideal: V2/V1 = sqrt(L2/L1) = sqrt(0.1) ~ 0.316
     let input_resistance = 1.0;
-    let (_, mna, kernel) =
-        build_pipeline_with_input(STEP_DOWN_TRANSFORMER, "in", input_resistance);
+    let (_, mna, kernel) = build_pipeline_with_input(STEP_DOWN_TRANSFORMER, "in", input_resistance);
     let in_idx = *mna.node_map.get("in").unwrap() - 1;
     let out_idx = *mna.node_map.get("out").unwrap() - 1;
 
@@ -959,8 +1026,7 @@ fn test_step_down_transformer_voltage_ratio() {
 fn test_weak_coupling_minimal_transfer() {
     // k=0.1: very weak coupling, minimal energy transfer
     let input_resistance = 1.0;
-    let (_, mna, kernel) =
-        build_pipeline_with_input(WEAK_COUPLING, "in", input_resistance);
+    let (_, mna, kernel) = build_pipeline_with_input(WEAK_COUPLING, "in", input_resistance);
     let in_idx = *mna.node_map.get("in").unwrap() - 1;
     let out_idx = *mna.node_map.get("out").unwrap() - 1;
 
@@ -976,8 +1042,7 @@ fn test_weak_coupling_minimal_transfer() {
     }
 
     // Now compare with strong coupling (k=0.95, same inductances)
-    let (_, mna2, kernel2) =
-        build_pipeline_with_input(UNITY_TRANSFORMER, "in", input_resistance);
+    let (_, mna2, kernel2) = build_pipeline_with_input(UNITY_TRANSFORMER, "in", input_resistance);
     let in_idx2 = *mna2.node_map.get("in").unwrap() - 1;
     let out_idx2 = *mna2.node_map.get("out").unwrap() - 1;
 
@@ -992,14 +1057,12 @@ fn test_weak_coupling_minimal_transfer() {
 
     // Measure RMS of settled region for both
     let settled_weak = &output_weak[2940..4410];
-    let rms_weak: f64 = (settled_weak.iter().map(|v| v * v).sum::<f64>()
-        / settled_weak.len() as f64)
-        .sqrt();
+    let rms_weak: f64 =
+        (settled_weak.iter().map(|v| v * v).sum::<f64>() / settled_weak.len() as f64).sqrt();
 
     let settled_strong = &output_strong[2940..4410];
-    let rms_strong: f64 = (settled_strong.iter().map(|v| v * v).sum::<f64>()
-        / settled_strong.len() as f64)
-        .sqrt();
+    let rms_strong: f64 =
+        (settled_strong.iter().map(|v| v * v).sum::<f64>() / settled_strong.len() as f64).sqrt();
 
     // Weak coupling should transfer significantly less energy
     assert!(
@@ -1015,8 +1078,7 @@ fn test_weak_coupling_minimal_transfer() {
 fn test_unity_transformer_voltage_ratio() {
     // L1=L2=10mH, k=0.95: near-unity voltage ratio
     let input_resistance = 1.0;
-    let (_, mna, kernel) =
-        build_pipeline_with_input(UNITY_TRANSFORMER, "in", input_resistance);
+    let (_, mna, kernel) = build_pipeline_with_input(UNITY_TRANSFORMER, "in", input_resistance);
     let in_idx = *mna.node_map.get("in").unwrap() - 1;
     let out_idx = *mna.node_map.get("out").unwrap() - 1;
 
@@ -1088,8 +1150,7 @@ fn test_transformer_all_finite() {
 fn test_runtime_solver_step_response() {
     // Step response through transformer — output should be transient (not DC)
     let input_resistance = 1.0;
-    let (_, mna, kernel) =
-        build_pipeline_with_input(UNITY_TRANSFORMER, "in", input_resistance);
+    let (_, mna, kernel) = build_pipeline_with_input(UNITY_TRANSFORMER, "in", input_resistance);
     let in_idx = *mna.node_map.get("in").unwrap() - 1;
     let out_idx = *mna.node_map.get("out").unwrap() - 1;
 
@@ -1115,8 +1176,7 @@ fn test_runtime_solver_step_response() {
 fn test_runtime_solver_ac_passes() {
     // AC signal should pass through the transformer
     let input_resistance = 1.0;
-    let (_, mna, kernel) =
-        build_pipeline_with_input(UNITY_TRANSFORMER, "in", input_resistance);
+    let (_, mna, kernel) = build_pipeline_with_input(UNITY_TRANSFORMER, "in", input_resistance);
     let in_idx = *mna.node_map.get("in").unwrap() - 1;
     let out_idx = *mna.node_map.get("out").unwrap() - 1;
 
@@ -1243,7 +1303,12 @@ C4 d 0 1p
             assert!(
                 diff / max_val < 1e-10,
                 "A matrix should be symmetric: A[{}][{}] = {:.6e}, A[{}][{}] = {:.6e}",
-                i, j, a[i][j], j, i, a[j][i]
+                i,
+                j,
+                a[i][j],
+                j,
+                i,
+                a[j][i]
             );
         }
     }
@@ -1252,8 +1317,7 @@ C4 d 0 1p
 #[test]
 fn test_floating_transformer_behavioral() {
     let input_resistance = 1.0;
-    let (_, mna, kernel) =
-        build_pipeline_with_input(FLOATING_TRANSFORMER, "in", input_resistance);
+    let (_, mna, kernel) = build_pipeline_with_input(FLOATING_TRANSFORMER, "in", input_resistance);
     let in_idx = *mna.node_map.get("in").unwrap() - 1;
     let out_idx = *mna.node_map.get("out").unwrap() - 1;
 
@@ -1385,7 +1449,8 @@ C3 out 0 100p
     assert!(
         ci.g_self_1 > uncoupled_g * 100.0,
         "Near-degenerate coupling should produce much larger g_self than uncoupled: g_self_1={:.6}, uncoupled={:.6}",
-        ci.g_self_1, uncoupled_g
+        ci.g_self_1,
+        uncoupled_g
     );
 
     // Should still compile and produce finite output
@@ -1431,7 +1496,11 @@ C4 d 0 1n
 ";
     let (_, mna, kernel) = build_pipeline(spice);
 
-    assert_eq!(mna.coupled_inductors.len(), 2, "Should have 2 coupled pairs");
+    assert_eq!(
+        mna.coupled_inductors.len(),
+        2,
+        "Should have 2 coupled pairs"
+    );
     assert_eq!(mna.inductors.len(), 0, "All inductors should be coupled");
     assert_eq!(kernel.coupled_inductors.len(), 2);
 
@@ -1501,7 +1570,8 @@ C2 b 0 1p
     assert!(
         diff < 1e-15,
         "A matrix should be symmetric: A[a][b] = {:.6e}, A[b][a] = {:.6e}",
-        a[a_idx][b_idx], a[b_idx][a_idx]
+        a[a_idx][b_idx],
+        a[b_idx][a_idx]
     );
 
     // Both should be nonzero (mutual coupling present)

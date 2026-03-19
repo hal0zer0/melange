@@ -83,19 +83,31 @@ fn test_full_solver_rc_lowpass() {
     // Peak output should exceed 0.8V (DC blocker causes eventual droop,
     // so we check peak rather than final value)
     let peak = output.iter().cloned().fold(0.0f64, f64::max);
-    assert!(peak > 0.8,
-        "RC lowpass peak should exceed 0.8V, got {:.4}V", peak);
+    assert!(
+        peak > 0.8,
+        "RC lowpass peak should exceed 0.8V, got {:.4}V",
+        peak
+    );
 
     // Output should be monotonically increasing during first 100 samples
     // (before DC blocker starts pulling it down)
     for i in 1..100.min(num_samples) {
-        assert!(output[i] >= output[i-1] - 1e-10,
+        assert!(
+            output[i] >= output[i - 1] - 1e-10,
             "Output should be monotonic in first 100 samples: output[{}]={:.6} < output[{}]={:.6}",
-            i, output[i], i-1, output[i-1]);
+            i,
+            output[i],
+            i - 1,
+            output[i - 1]
+        );
     }
 
     // First sample should be positive (step response starts rising)
-    assert!(output[0] > 0.0, "First sample should be positive, got {:.6}", output[0]);
+    assert!(
+        output[0] > 0.0,
+        "First sample should be positive, got {:.6}",
+        output[0]
+    );
 }
 
 #[test]
@@ -103,7 +115,7 @@ fn test_diode_clipper_has_nonlinearity() {
     let netlist = melange_solver::parser::Netlist::parse(DIODE_CLIPPER_SPICE).unwrap();
     let mna = melange_solver::mna::MnaSystem::from_netlist(&netlist).unwrap();
     let kernel = melange_solver::dk::DkKernel::from_mna(&mna, 48000.0).unwrap();
-    
+
     // Should have 1 nonlinear port (the diode)
     assert_eq!(kernel.m, 1, "Diode clipper should have 1 nonlinear port");
 }
@@ -121,12 +133,18 @@ fn test_diode_clipper_solver() {
 
     let input_node = 0;
     let output_node = 1;
-    let mut solver = melange_solver::solver::CircuitSolver::new(kernel, devices, input_node, output_node).unwrap();
+    let mut solver =
+        melange_solver::solver::CircuitSolver::new(kernel, devices, input_node, output_node)
+            .unwrap();
     solver.input_conductance = 0.001; // Rin = 1k
 
     // Small signal: output should be proportional to input (not clipped)
     let small_out = solver.process_sample(0.01);
-    assert!(small_out.abs() < 0.1, "Small signal output should be small, got {}", small_out);
+    assert!(
+        small_out.abs() < 0.1,
+        "Small signal output should be small, got {}",
+        small_out
+    );
 
     // Large signal: output should be bounded by diode forward voltage
     solver.reset();
@@ -138,8 +156,13 @@ fn test_diode_clipper_solver() {
     }
 
     let final_output = *outputs.last().unwrap();
-    assert!(final_output > 0.0, "Output should be positive for positive input");
-    assert!(final_output < 1.5,
-        "Diode clipper should limit output below ~1V, got {:.4}V", final_output);
+    assert!(
+        final_output > 0.0,
+        "Output should be positive for positive input"
+    );
+    assert!(
+        final_output < 1.5,
+        "Diode clipper should limit output below ~1V, got {:.4}V",
+        final_output
+    );
 }
-

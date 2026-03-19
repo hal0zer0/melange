@@ -1,3 +1,13 @@
+// Matrix math code uses index loops for clarity; iterator patterns obscure the math.
+#![allow(clippy::needless_range_loop)]
+// String building for code generation uses format! and to_string extensively.
+#![allow(clippy::format_in_format_args)]
+#![allow(clippy::unnecessary_to_owned)]
+// Circuit solver functions have many parameters by nature.
+#![allow(clippy::too_many_arguments)]
+// Manual slice copying is clearer for small fixed-size operations.
+#![allow(clippy::manual_memcpy)]
+
 //! MNA/DK-method circuit solver engine for real-time audio.
 //!
 //! Layer 3 of the melange stack. This crate implements:
@@ -39,19 +49,19 @@
 //!
 //! See [`docs/limitations.md`](../../docs/limitations.md) for known limitations.
 
-pub mod parser;
-pub mod mna;
-pub mod dk;
-pub mod solver;
 pub mod codegen;
 pub mod dc_op;
+pub mod dk;
+pub mod mna;
+pub mod parser;
+pub mod solver;
 
 #[cfg(test)]
 mod dk_math_verification;
 
 // Explicit re-exports of commonly used types (avoid glob pollution).
-pub use parser::Netlist;
-pub use mna::MnaSystem;
-pub use dk::DkKernel;
-pub use solver::{CircuitSolver, LinearSolver, SolverError};
 pub use codegen::{CodeGenerator, CodegenConfig, CodegenError, GeneratedCode};
+pub use dk::DkKernel;
+pub use mna::MnaSystem;
+pub use parser::Netlist;
+pub use solver::{CircuitSolver, LinearSolver, SolverError};

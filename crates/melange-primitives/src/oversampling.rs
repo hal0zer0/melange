@@ -12,14 +12,18 @@ use crate::filters::OnePoleLpf;
 /// where c is the allpass coefficient.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct AllpassSection {
-    c: f64,      // coefficient
-    x1: f64,     // input delay
-    y1: f64,     // output delay
+    c: f64,  // coefficient
+    x1: f64, // input delay
+    y1: f64, // output delay
 }
 
 impl AllpassSection {
     fn new(c: f64) -> Self {
-        Self { c, x1: 0.0, y1: 0.0 }
+        Self {
+            c,
+            x1: 0.0,
+            y1: 0.0,
+        }
     }
 
     #[inline(always)]
@@ -43,7 +47,8 @@ pub mod coefficients {
     pub const HB_2SECTION: [f64; 2] = [0.07986642623635751, 0.5453536510716122];
 
     /// 3-section half-band (balanced, ~80dB rejection).
-    pub const HB_3SECTION: [f64; 3] = [0.036681502163648017, 0.2746317593794541, 0.7856959333713522];
+    pub const HB_3SECTION: [f64; 3] =
+        [0.036681502163648017, 0.2746317593794541, 0.7856959333713522];
 
     /// 4-section half-band (high quality, ~100dB rejection).
     pub const HB_4SECTION: [f64; 4] = [
@@ -202,11 +207,11 @@ impl<const N_SECTIONS: usize> Oversampler2x<N_SECTIONS> {
     {
         // Upsampling by 2 with zero insertion and filtering
         // Input sample produces two output samples
-        
+
         // First upsampled sample (at time 2n): uses even allpass output
         // Second upsampled sample (at time 2n+1): uses odd allpass output
         let (up_even, up_odd) = self.up_filter.process(input);
-        
+
         // Apply pre-emphasis if enabled
         let up_even = if self.use_emphasis {
             self.pre_emphasis.process(up_even)
@@ -218,11 +223,11 @@ impl<const N_SECTIONS: usize> Oversampler2x<N_SECTIONS> {
         } else {
             up_odd
         };
-        
+
         // Process both samples through the nonlinear function
         let proc_even = process_func(up_even);
         let proc_odd = process_func(up_odd);
-        
+
         // Apply de-emphasis if enabled
         let proc_even = if self.use_emphasis {
             self.de_emphasis.process(proc_even)
@@ -234,12 +239,12 @@ impl<const N_SECTIONS: usize> Oversampler2x<N_SECTIONS> {
         } else {
             proc_odd
         };
-        
+
         // Downsampling: filter both samples and combine
         // The half-band filter naturally reconstructs the proper output
         let (out_even, _) = self.down_filter.process(proc_even);
         let (_, out_odd) = self.down_filter.process(proc_odd);
-        
+
         // Return the averaged output (compensate for gain)
         (out_even + out_odd) * 0.5
     }
@@ -248,8 +253,8 @@ impl<const N_SECTIONS: usize> Oversampler2x<N_SECTIONS> {
 /// 4x oversampler (cascades two 2x stages).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Oversampler4x {
-    stage1: Oversampler2x<2>,  // 2-section for first stage
-    stage2: Oversampler2x<4>,  // 4-section for final stage
+    stage1: Oversampler2x<2>, // 2-section for first stage
+    stage2: Oversampler2x<4>, // 4-section for final stage
 }
 
 impl Oversampler4x {
@@ -273,12 +278,13 @@ impl Oversampler4x {
     where
         F: FnMut(f64) -> f64,
     {
-        self.stage1.process(input, |x| self.stage2.process(x, &mut process_func))
+        self.stage1
+            .process(input, |x| self.stage2.process(x, &mut process_func))
     }
 }
 
 /// Generic oversampler supporting 1x, 2x, and 4x.
-/// 
+///
 /// Note: This enum is intentionally `Copy` and stores filter states inline.
 /// The size difference between variants is accepted for performance.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -297,9 +303,16 @@ impl Oversampler {
     pub fn new(factor: usize, fs: f64) -> Result<Self, String> {
         match factor {
             1 => Ok(Self::Bypass),
-            2 => Ok(Self::Double(Oversampler2x::new(coefficients::HB_3SECTION, false, fs))),
+            2 => Ok(Self::Double(Oversampler2x::new(
+                coefficients::HB_3SECTION,
+                false,
+                fs,
+            ))),
             4 => Ok(Self::Quad(Oversampler4x::new(fs))),
-            _ => Err(format!("Unsupported oversampling factor: {} (use 1, 2, or 4)", factor)),
+            _ => Err(format!(
+                "Unsupported oversampling factor: {} (use 1, 2, or 4)",
+                factor
+            )),
         }
     }
 
@@ -348,10 +361,10 @@ mod tests {
     #[test]
     fn test_oversampler_2x_basic() {
         let mut os = Oversampler2x::new(coefficients::HB_3SECTION, false, 44100.0);
-        
+
         // Process a DC input - identity processing
         let y = os.process(1.0, |x| x);
-        
+
         // Output should be finite and reasonably close to input after settling
         assert!(y.is_finite());
         assert!(y > 0.0, "Output should be positive for positive input");
@@ -360,27 +373,31 @@ mod tests {
     #[test]
     fn test_oversampler_2x_many_samples() {
         let mut os = Oversampler2x::new(coefficients::HB_3SECTION, false, 44100.0);
-        
+
         // Process many DC samples to allow filter to settle
         let mut y = 0.0;
         for _ in 0..100 {
             y = os.process(1.0, |x| x);
         }
-        
+
         // After settling, output should be close to input
-        assert!((y - 1.0).abs() < 0.1, "Output {} should be close to 1.0 after settling", y);
+        assert!(
+            (y - 1.0).abs() < 0.1,
+            "Output {} should be close to 1.0 after settling",
+            y
+        );
     }
 
     #[test]
     fn test_oversampler_nonlinear() {
         let mut os = Oversampler2x::new(coefficients::HB_3SECTION, false, 44100.0);
-        
+
         // Process many samples to settle
         let mut y = 0.0;
         for _ in 0..100 {
             y = os.process(2.0, |x| x.clamp(-1.0, 1.0));
         }
-        
+
         // Should be clamped near 1.0
         assert!(y > 0.8, "Clipped output should be near 1.0, got {}", y);
         assert!(y <= 1.1, "Output should not exceed clamp limit much");
@@ -389,12 +406,12 @@ mod tests {
     #[test]
     fn test_oversampler_4x() {
         let mut os = Oversampler4x::new(44100.0);
-        
+
         let mut y = 0.0;
         for _ in 0..200 {
             y = os.process(0.5, |x| x * x);
         }
-        
+
         assert!(y.is_finite());
         assert!(y > 0.0);
     }

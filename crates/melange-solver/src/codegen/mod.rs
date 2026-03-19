@@ -14,16 +14,16 @@
 //! - [`emitter::Emitter`] — trait that language backends implement
 //! - [`rust_emitter::RustEmitter`] — Rust language backend
 
-pub mod ir;
 pub mod emitter;
+pub mod ir;
 pub mod rust_emitter;
 
 use crate::dk::DkKernel;
 use crate::mna::MnaSystem;
 use crate::parser::Netlist;
 
-use ir::CircuitIR;
 use emitter::Emitter;
+use ir::CircuitIR;
 use rust_emitter::RustEmitter;
 
 /// Configuration for code generation
@@ -169,12 +169,13 @@ impl CodeGenerator {
         }
         if self.config.input_node >= kernel.n {
             return Err(CodegenError::InvalidConfig(format!(
-                "input_node {} >= N={}", self.config.input_node, kernel.n
+                "input_node {} >= N={}",
+                self.config.input_node, kernel.n
             )));
         }
         if self.config.output_nodes.is_empty() {
             return Err(CodegenError::InvalidConfig(
-                "output_nodes must not be empty".to_string()
+                "output_nodes must not be empty".to_string(),
             ));
         }
         for (i, &node) in self.config.output_nodes.iter().enumerate() {
@@ -190,7 +191,8 @@ impl CodeGenerator {
         if self.config.output_scales.len() != self.config.output_nodes.len() {
             return Err(CodegenError::InvalidConfig(format!(
                 "output_scales length ({}) must match output_nodes length ({})",
-                self.config.output_scales.len(), self.config.output_nodes.len()
+                self.config.output_scales.len(),
+                self.config.output_nodes.len()
             )));
         }
 
@@ -235,25 +237,28 @@ impl CodeGenerator {
         }
         if self.config.input_node >= mna.n {
             return Err(CodegenError::InvalidConfig(format!(
-                "input_node {} >= n_nodes={}", self.config.input_node, mna.n
+                "input_node {} >= n_nodes={}",
+                self.config.input_node, mna.n
             )));
         }
         if self.config.output_nodes.is_empty() {
             return Err(CodegenError::InvalidConfig(
-                "output_nodes must not be empty".to_string()
+                "output_nodes must not be empty".to_string(),
             ));
         }
         for (i, &node) in self.config.output_nodes.iter().enumerate() {
             if node >= mna.n {
                 return Err(CodegenError::InvalidConfig(format!(
-                    "output_nodes[{}] = {} >= n_nodes={}", i, node, mna.n
+                    "output_nodes[{}] = {} >= n_nodes={}",
+                    i, node, mna.n
                 )));
             }
         }
         if self.config.output_scales.len() != self.config.output_nodes.len() {
             return Err(CodegenError::InvalidConfig(format!(
                 "output_scales length ({}) must match output_nodes length ({})",
-                self.config.output_scales.len(), self.config.output_nodes.len()
+                self.config.output_scales.len(),
+                self.config.output_nodes.len()
             )));
         }
 

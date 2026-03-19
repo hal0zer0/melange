@@ -12,11 +12,11 @@
 //! - RLC circuit basic resonance behavior
 //! - Codegen contains correct inductor constants and state fields
 
-use melange_solver::codegen::{CodeGenerator, CodegenConfig};
 use melange_solver::codegen::ir::CircuitIR;
-use melange_solver::parser::Netlist;
-use melange_solver::mna::MnaSystem;
+use melange_solver::codegen::{CodeGenerator, CodegenConfig};
 use melange_solver::dk::DkKernel;
+use melange_solver::mna::MnaSystem;
+use melange_solver::parser::Netlist;
 use melange_solver::solver::LinearSolver;
 use std::io::Write;
 
@@ -33,7 +33,11 @@ fn build_pipeline(spice: &str) -> (Netlist, MnaSystem, DkKernel) {
 
 /// Build pipeline with input conductance stamped into G matrix before kernel build.
 /// This models the input as a Thevenin voltage source with series resistance R_in.
-fn build_pipeline_with_input(spice: &str, input_node_name: &str, input_resistance: f64) -> (Netlist, MnaSystem, DkKernel) {
+fn build_pipeline_with_input(
+    spice: &str,
+    input_node_name: &str,
+    input_resistance: f64,
+) -> (Netlist, MnaSystem, DkKernel) {
     let netlist = Netlist::parse(spice).expect("failed to parse netlist");
     let mut mna = MnaSystem::from_netlist(&netlist).expect("failed to build MNA");
     // Stamp input conductance into G matrix BEFORE building DK kernel
@@ -57,7 +61,8 @@ fn default_config() -> CodegenConfig {
 fn generate_code(spice: &str) -> String {
     let (netlist, mna, kernel) = build_pipeline(spice);
     let codegen = CodeGenerator::new(default_config());
-    let result = codegen.generate(&kernel, &mna, &netlist)
+    let result = codegen
+        .generate(&kernel, &mna, &netlist)
         .expect("code generation failed");
     result.code
 }
@@ -204,7 +209,8 @@ fn test_rl_step_response() {
     assert!(
         avg_first_10 > avg_last_10,
         "Output should decay over time for RL lowpass: avg_first_10 = {:.4}, avg_last_10 = {:.4}",
-        avg_first_10, avg_last_10
+        avg_first_10,
+        avg_last_10
     );
 }
 
@@ -257,7 +263,8 @@ fn test_inductor_current_continuity() {
     assert!(
         late_energy < early_energy || early_energy < 1e-15,
         "Output energy should decay after step-down: early={:.6e}, late={:.6e}",
-        early_energy, late_energy
+        early_energy,
+        late_energy
     );
 
     // All outputs should be finite
@@ -435,7 +442,8 @@ fn test_inductor_ir() {
     assert!(
         (ir.inductors[0].g_eq - expected_g_eq).abs() < 1e-15,
         "IR g_eq should match: expected {:.17e}, got {:.17e}",
-        expected_g_eq, ir.inductors[0].g_eq
+        expected_g_eq,
+        ir.inductors[0].g_eq
     );
 
     // Node indices should be non-zero (connected between named nodes)
@@ -493,12 +501,19 @@ fn test_rlc_circuit_behavior() {
     );
 
     // The oscillation should decay over time (damped by R)
-    let max_first_half = output[10..1000].iter().map(|&x| x.abs()).fold(0.0f64, f64::max);
-    let max_second_half = output[1000..2000].iter().map(|&x| x.abs()).fold(0.0f64, f64::max);
+    let max_first_half = output[10..1000]
+        .iter()
+        .map(|&x| x.abs())
+        .fold(0.0f64, f64::max);
+    let max_second_half = output[1000..2000]
+        .iter()
+        .map(|&x| x.abs())
+        .fold(0.0f64, f64::max);
     assert!(
         max_second_half < max_first_half || max_first_half < 1e-10,
         "RLC oscillation should decay: max first half = {:.6}, max second half = {:.6}",
-        max_first_half, max_second_half
+        max_first_half,
+        max_second_half
     );
 }
 
@@ -513,7 +528,10 @@ fn test_inductor_mna_stamping() {
     // Verify inductor was found by the parser
     assert_eq!(mna.inductors.len(), 1, "Should have 1 inductor");
     assert_eq!(mna.inductors[0].name, "L1");
-    assert!((mna.inductors[0].value - 0.1).abs() < 1e-10, "L1 should be 100mH = 0.1H");
+    assert!(
+        (mna.inductors[0].value - 0.1).abs() < 1e-10,
+        "L1 should be 100mH = 0.1H"
+    );
 
     // The A matrix should include inductor companion model conductance g_eq = T/(2L)
     let a = mna.get_a_matrix(44100.0);
@@ -531,7 +549,8 @@ fn test_inductor_mna_stamping() {
     assert!(
         (a[out_idx][out_idx] - expected_diag).abs() / expected_diag < 0.01,
         "A[out][out] should include R1 + C1 + L1 contributions: expected {:.6e}, got {:.6e}",
-        expected_diag, a[out_idx][out_idx]
+        expected_diag,
+        a[out_idx][out_idx]
     );
 }
 
@@ -547,13 +566,17 @@ fn test_inductor_dk_kernel() {
     let ind = &kernel.inductors[0];
 
     assert_eq!(&*ind.name, "L1");
-    assert!((ind.inductance - 0.1).abs() < 1e-10, "Inductance should be 0.1H");
+    assert!(
+        (ind.inductance - 0.1).abs() < 1e-10,
+        "Inductance should be 0.1H"
+    );
 
     let expected_g_eq = (1.0 / 44100.0) / (2.0 * 0.1);
     assert!(
         (ind.g_eq - expected_g_eq).abs() < 1e-15,
         "g_eq should be T/(2L) = {:.17e}, got {:.17e}",
-        expected_g_eq, ind.g_eq
+        expected_g_eq,
+        ind.g_eq
     );
 
     // Initial state should be zero
@@ -575,7 +598,9 @@ fn test_inductor_codegen_sanitization() {
     assert!(sanitize_idx.is_some(), "Should have NaN sanitization block");
 
     let after_sanitize = &code[sanitize_idx.unwrap()..];
-    let return_idx = after_sanitize.find("return [0.0; NUM_OUTPUTS];").expect("Missing return in sanitization");
+    let return_idx = after_sanitize
+        .find("return [0.0; NUM_OUTPUTS];")
+        .expect("Missing return in sanitization");
     let sanitize_block = &after_sanitize[..return_idx];
 
     assert!(
@@ -644,7 +669,8 @@ fn test_inductor_reset() {
     let reset_body = &after_reset[..end_fn];
 
     assert!(
-        reset_body.contains("ind_i_prev") || after_reset[..after_reset.len().min(300)].contains("ind_i_prev"),
+        reset_body.contains("ind_i_prev")
+            || after_reset[..after_reset.len().min(300)].contains("ind_i_prev"),
         "reset() should clear inductor state (ind_i_prev)"
     );
 }
@@ -698,19 +724,24 @@ C1 out 0 1p
         assert!(
             v.is_finite(),
             "Output at sample {} should be finite, got {}",
-            i, v
+            i,
+            v
         );
     }
 
     // After many time constants, output should be settled (stable)
     let settled_range = &output[400..500];
     let settled_mean: f64 = settled_range.iter().sum::<f64>() / settled_range.len() as f64;
-    let settled_var: f64 = settled_range.iter().map(|&v| (v - settled_mean).powi(2)).sum::<f64>()
+    let settled_var: f64 = settled_range
+        .iter()
+        .map(|&v| (v - settled_mean).powi(2))
+        .sum::<f64>()
         / settled_range.len() as f64;
     assert!(
         settled_var.sqrt() < 0.01,
         "Output should be stable after many tau: mean={:.6}, std={:.6}",
-        settled_mean, settled_var.sqrt()
+        settled_mean,
+        settled_var.sqrt()
     );
 
     // Early output should differ from late output (transient behavior)
@@ -718,6 +749,7 @@ C1 out 0 1p
         (v_early - v_late).abs() > 1e-6,
         "Early output ({:.6}) should differ from late output ({:.6}): \
          RL circuit should have transient behavior",
-        v_early, v_late
+        v_early,
+        v_late
     );
 }

@@ -426,33 +426,69 @@ impl MnaSystem {
             match &slot.params {
                 DeviceParams::Tube(p) => {
                     // node_indices: [grid, plate, cathode]
-                    let (ng, np, nk) = (dev_info.node_indices[0], dev_info.node_indices[1], dev_info.node_indices[2]);
-                    if p.ccg > 0.0 { caps.push((nk, ng, p.ccg)); }
-                    if p.cgp > 0.0 { caps.push((ng, np, p.cgp)); }
-                    if p.ccp > 0.0 { caps.push((nk, np, p.ccp)); }
+                    let (ng, np, nk) = (
+                        dev_info.node_indices[0],
+                        dev_info.node_indices[1],
+                        dev_info.node_indices[2],
+                    );
+                    if p.ccg > 0.0 {
+                        caps.push((nk, ng, p.ccg));
+                    }
+                    if p.cgp > 0.0 {
+                        caps.push((ng, np, p.cgp));
+                    }
+                    if p.ccp > 0.0 {
+                        caps.push((nk, np, p.ccp));
+                    }
                 }
                 DeviceParams::Bjt(p) => {
                     // node_indices: [collector, base, emitter]
-                    let (nc, nb, ne) = (dev_info.node_indices[0], dev_info.node_indices[1], dev_info.node_indices[2]);
-                    if p.cje > 0.0 { caps.push((nb, ne, p.cje)); }
-                    if p.cjc > 0.0 { caps.push((nb, nc, p.cjc)); }
+                    let (nc, nb, ne) = (
+                        dev_info.node_indices[0],
+                        dev_info.node_indices[1],
+                        dev_info.node_indices[2],
+                    );
+                    if p.cje > 0.0 {
+                        caps.push((nb, ne, p.cje));
+                    }
+                    if p.cjc > 0.0 {
+                        caps.push((nb, nc, p.cjc));
+                    }
                 }
                 DeviceParams::Jfet(p) => {
                     // node_indices: [drain, gate, source]
-                    let (nd, ng, ns) = (dev_info.node_indices[0], dev_info.node_indices[1], dev_info.node_indices[2]);
-                    if p.cgs > 0.0 { caps.push((ng, ns, p.cgs)); }
-                    if p.cgd > 0.0 { caps.push((ng, nd, p.cgd)); }
+                    let (nd, ng, ns) = (
+                        dev_info.node_indices[0],
+                        dev_info.node_indices[1],
+                        dev_info.node_indices[2],
+                    );
+                    if p.cgs > 0.0 {
+                        caps.push((ng, ns, p.cgs));
+                    }
+                    if p.cgd > 0.0 {
+                        caps.push((ng, nd, p.cgd));
+                    }
                 }
                 DeviceParams::Mosfet(p) => {
                     // node_indices: [drain, gate, source, bulk]
-                    let (nd, ng, ns) = (dev_info.node_indices[0], dev_info.node_indices[1], dev_info.node_indices[2]);
-                    if p.cgs > 0.0 { caps.push((ng, ns, p.cgs)); }
-                    if p.cgd > 0.0 { caps.push((ng, nd, p.cgd)); }
+                    let (nd, ng, ns) = (
+                        dev_info.node_indices[0],
+                        dev_info.node_indices[1],
+                        dev_info.node_indices[2],
+                    );
+                    if p.cgs > 0.0 {
+                        caps.push((ng, ns, p.cgs));
+                    }
+                    if p.cgd > 0.0 {
+                        caps.push((ng, nd, p.cgd));
+                    }
                 }
                 DeviceParams::Diode(p) => {
                     // node_indices: [anode, cathode]
                     let (na, nc) = (dev_info.node_indices[0], dev_info.node_indices[1]);
-                    if p.cjo > 0.0 { caps.push((na, nc, p.cjo)); }
+                    if p.cjo > 0.0 {
+                        caps.push((na, nc, p.cjo));
+                    }
                 }
             }
         }
@@ -461,13 +497,15 @@ impl MnaSystem {
             self.stamp_capacitor_raw(*node_a, *node_b, *cap);
             log::debug!(
                 "Junction cap: node({})-node({}) = {:.2e} F",
-                node_a, node_b, cap,
+                node_a,
+                node_b,
+                cap,
             );
         }
     }
 
     /// Stamp input conductance to ground at a node.
-    /// 
+    ///
     /// This represents the Thevenin equivalent of the input source:
     /// a voltage source in series with a resistance.
     /// The conductance g = 1/R is stamped from the node to ground.
@@ -481,12 +519,7 @@ impl MnaSystem {
     ///
     /// The device current flows from anode (i) to cathode (j).
     /// Controlling voltage is V_i - V_j.
-    pub fn stamp_nonlinear_2terminal(
-        &mut self,
-        device_idx: usize,
-        i: usize,
-        j: usize,
-    ) {
+    pub fn stamp_nonlinear_2terminal(&mut self, device_idx: usize, i: usize, j: usize) {
         // N_v extracts controlling voltage: v_nl = v_i - v_j
         self.n_v[device_idx][i] = 1.0;
         self.n_v[device_idx][j] = -1.0;
@@ -502,13 +535,7 @@ impl MnaSystem {
     /// Currents: Ic (collector current), Ib (base current)
     ///
     /// start_idx: starting row/column in N_v/N_i for this device
-    pub fn stamp_bjt(
-        &mut self,
-        start_idx: usize,
-        nc: usize,
-        nb: usize,
-        ne: usize,
-    ) {
+    pub fn stamp_bjt(&mut self, start_idx: usize, nc: usize, nb: usize, ne: usize) {
         // Row start_idx: Vbe = Vb - Ve
         self.n_v[start_idx][nb] = 1.0;
         self.n_v[start_idx][ne] = -1.0;
@@ -520,11 +547,11 @@ impl MnaSystem {
         // Column start_idx: Ic enters collector, exits emitter
         // N_i convention: positive = current entering node from device
         self.n_i[nc][start_idx] = -1.0; // Ic enters collector (current into device = negative)
-        self.n_i[ne][start_idx] = 1.0;  // Ic exits emitter (current out of device = positive by KCL)
+        self.n_i[ne][start_idx] = 1.0; // Ic exits emitter (current out of device = positive by KCL)
 
         // Column start_idx+1: Ib enters base, exits emitter
         self.n_i[nb][start_idx + 1] = -1.0; // Ib enters base
-        self.n_i[ne][start_idx + 1] = 1.0;  // Ib exits emitter (KCL conservation)
+        self.n_i[ne][start_idx + 1] = 1.0; // Ib exits emitter (KCL conservation)
     }
 
     /// Stamp forward-active BJT nonlinear matrices (1D).
@@ -547,9 +574,9 @@ impl MnaSystem {
         self.n_v[start_idx][ne] = -1.0;
 
         // N_i: single column with Ic + Ib = Ic * (1 + 1/BF) for KCL
-        self.n_i[nc][start_idx] = -1.0;                // Ic extracted from collector
-        self.n_i[nb][start_idx] = -1.0 / beta_f;       // Ib = Ic/BF extracted from base
-        self.n_i[ne][start_idx] = 1.0 + 1.0 / beta_f;  // Ic + Ib injected into emitter
+        self.n_i[nc][start_idx] = -1.0; // Ic extracted from collector
+        self.n_i[nb][start_idx] = -1.0 / beta_f; // Ib = Ic/BF extracted from base
+        self.n_i[ne][start_idx] = 1.0 + 1.0 / beta_f; // Ic + Ib injected into emitter
     }
 
     /// Stamp triode nonlinear matrices.
@@ -565,13 +592,7 @@ impl MnaSystem {
     /// N_i injects currents:
     /// - Column start_idx: Ip flows plate→cathode
     /// - Column start_idx+1: Ig flows grid→cathode
-    pub fn stamp_triode(
-        &mut self,
-        start_idx: usize,
-        ng: usize,
-        np: usize,
-        nk: usize,
-    ) {
+    pub fn stamp_triode(&mut self, start_idx: usize, ng: usize, np: usize, nk: usize) {
         // Row start_idx: Vgk = V_grid - V_cathode
         self.n_v[start_idx][ng] = 1.0;
         self.n_v[start_idx][nk] = -1.0;
@@ -582,11 +603,11 @@ impl MnaSystem {
 
         // Column start_idx: Ip enters plate, exits cathode
         self.n_i[np][start_idx] = -1.0; // Ip enters plate (current into device)
-        self.n_i[nk][start_idx] = 1.0;  // Ip exits cathode
+        self.n_i[nk][start_idx] = 1.0; // Ip exits cathode
 
         // Column start_idx+1: Ig enters grid, exits cathode
         self.n_i[ng][start_idx + 1] = -1.0; // Ig enters grid
-        self.n_i[nk][start_idx + 1] = 1.0;  // Ig exits cathode
+        self.n_i[nk][start_idx + 1] = 1.0; // Ig exits cathode
     }
 
     /// Build a discretized system matrix from G and C with inductor companion models.
@@ -656,8 +677,22 @@ impl MnaSystem {
             stamp_conductance_to_ground(&mut mat, ci.l2_node_i, ci.l2_node_j, gs2);
 
             // Mutual conductance cross-coupling between L1 and L2 (symmetric)
-            stamp_mutual_conductance(&mut mat, ci.l1_node_i, ci.l1_node_j, ci.l2_node_i, ci.l2_node_j, gm);
-            stamp_mutual_conductance(&mut mat, ci.l2_node_i, ci.l2_node_j, ci.l1_node_i, ci.l1_node_j, gm);
+            stamp_mutual_conductance(
+                &mut mat,
+                ci.l1_node_i,
+                ci.l1_node_j,
+                ci.l2_node_i,
+                ci.l2_node_j,
+                gm,
+            );
+            stamp_mutual_conductance(
+                &mut mat,
+                ci.l2_node_i,
+                ci.l2_node_j,
+                ci.l1_node_i,
+                ci.l1_node_j,
+                gm,
+            );
         }
 
         // Multi-winding transformer groups: NxN admittance stamping.
@@ -681,17 +716,31 @@ impl MnaSystem {
             for i in 0..w {
                 // Self-conductance Y[i][i]
                 let y_self = scale * y_raw[i][i];
-                stamp_conductance_to_ground(&mut mat,
-                    group.winding_node_i[i], group.winding_node_j[i], y_self);
+                stamp_conductance_to_ground(
+                    &mut mat,
+                    group.winding_node_i[i],
+                    group.winding_node_j[i],
+                    y_self,
+                );
                 // Mutual conductance Y[i][j] for j > i (stamp both directions)
                 for j in (i + 1)..w {
                     let y_mut = scale * y_raw[i][j];
-                    stamp_mutual_conductance(&mut mat,
-                        group.winding_node_i[i], group.winding_node_j[i],
-                        group.winding_node_i[j], group.winding_node_j[j], y_mut);
-                    stamp_mutual_conductance(&mut mat,
-                        group.winding_node_i[j], group.winding_node_j[j],
-                        group.winding_node_i[i], group.winding_node_j[i], y_mut);
+                    stamp_mutual_conductance(
+                        &mut mat,
+                        group.winding_node_i[i],
+                        group.winding_node_j[i],
+                        group.winding_node_i[j],
+                        group.winding_node_j[j],
+                        y_mut,
+                    );
+                    stamp_mutual_conductance(
+                        &mut mat,
+                        group.winding_node_i[j],
+                        group.winding_node_j[j],
+                        group.winding_node_i[i],
+                        group.winding_node_j[i],
+                        y_mut,
+                    );
                 }
             }
         }
@@ -747,7 +796,11 @@ impl MnaSystem {
                 }
                 NonlinearDeviceType::Bjt | NonlinearDeviceType::BjtForwardActive => {
                     // node_indices: [collector, base, emitter]
-                    let (nc, nb, ne) = (dev.node_indices[0], dev.node_indices[1], dev.node_indices[2]);
+                    let (nc, nb, ne) = (
+                        dev.node_indices[0],
+                        dev.node_indices[1],
+                        dev.node_indices[2],
+                    );
                     // B-E junction (Cje)
                     junctions.push((dev.name.clone(), nb, ne));
                     // B-C junction (Cjc) — still present even for forward-active (linear cap)
@@ -755,7 +808,11 @@ impl MnaSystem {
                 }
                 NonlinearDeviceType::Jfet => {
                     // node_indices: [drain, gate, source]
-                    let (nd, ng, ns) = (dev.node_indices[0], dev.node_indices[1], dev.node_indices[2]);
+                    let (nd, ng, ns) = (
+                        dev.node_indices[0],
+                        dev.node_indices[1],
+                        dev.node_indices[2],
+                    );
                     // G-S junction (Cgs)
                     junctions.push((dev.name.clone(), ng, ns));
                     // G-D junction (Cgd)
@@ -763,7 +820,11 @@ impl MnaSystem {
                 }
                 NonlinearDeviceType::Mosfet => {
                     // node_indices: [drain, gate, source, bulk]
-                    let (nd, ng, ns) = (dev.node_indices[0], dev.node_indices[1], dev.node_indices[2]);
+                    let (nd, ng, ns) = (
+                        dev.node_indices[0],
+                        dev.node_indices[1],
+                        dev.node_indices[2],
+                    );
                     // G-S junction (Cgs)
                     junctions.push((dev.name.clone(), ng, ns));
                     // G-D junction (Cgd)
@@ -771,7 +832,11 @@ impl MnaSystem {
                 }
                 NonlinearDeviceType::Tube => {
                     // node_indices: [grid, plate, cathode]
-                    let (ng, np, nk) = (dev.node_indices[0], dev.node_indices[1], dev.node_indices[2]);
+                    let (ng, np, nk) = (
+                        dev.node_indices[0],
+                        dev.node_indices[1],
+                        dev.node_indices[2],
+                    );
                     // Grid-cathode (Cgk)
                     junctions.push((dev.name.clone(), ng, nk));
                     // Plate-cathode (Cpk)
@@ -784,7 +849,10 @@ impl MnaSystem {
             self.stamp_capacitor_raw(*node_a, *node_b, PARASITIC_CAP);
             log::debug!(
                 "Parasitic cap {}: node({})-node({}) = {:.0e} F",
-                name, node_a, node_b, PARASITIC_CAP,
+                name,
+                node_a,
+                node_b,
+                PARASITIC_CAP,
             );
         }
     }
@@ -806,8 +874,7 @@ impl MnaSystem {
         // Count inductor winding variables
         let n_uncoupled = self.inductors.len();
         let n_coupled_windings: usize = self.coupled_inductors.len() * 2;
-        let n_xfmr_windings: usize = self.transformer_groups.iter()
-            .map(|g| g.num_windings).sum();
+        let n_xfmr_windings: usize = self.transformer_groups.iter().map(|g| g.num_windings).sum();
         let n_inductor_vars = n_uncoupled + n_coupled_windings + n_xfmr_windings;
         let n_nodal = n_aug + n_inductor_vars;
 
@@ -831,11 +898,19 @@ impl MnaSystem {
             let nj = ind.node_j;
 
             // KCL: j_L enters node_i, exits node_j
-            if ni > 0 { g_nod[ni - 1][k] += 1.0; }
-            if nj > 0 { g_nod[nj - 1][k] -= 1.0; }
+            if ni > 0 {
+                g_nod[ni - 1][k] += 1.0;
+            }
+            if nj > 0 {
+                g_nod[nj - 1][k] -= 1.0;
+            }
             // KVL row: -V_i + V_j (= -L * dj_L/dt, with L in C)
-            if ni > 0 { g_nod[k][ni - 1] -= 1.0; }
-            if nj > 0 { g_nod[k][nj - 1] += 1.0; }
+            if ni > 0 {
+                g_nod[k][ni - 1] -= 1.0;
+            }
+            if nj > 0 {
+                g_nod[k][nj - 1] += 1.0;
+            }
             // Self-inductance in C matrix
             c_nod[k][k] = ind.value;
 
@@ -848,16 +923,32 @@ impl MnaSystem {
             let k2 = var_idx + 1;
 
             // Winding 1 KCL/KVL
-            if ci.l1_node_i > 0 { g_nod[ci.l1_node_i - 1][k1] += 1.0; }
-            if ci.l1_node_j > 0 { g_nod[ci.l1_node_j - 1][k1] -= 1.0; }
-            if ci.l1_node_i > 0 { g_nod[k1][ci.l1_node_i - 1] -= 1.0; }
-            if ci.l1_node_j > 0 { g_nod[k1][ci.l1_node_j - 1] += 1.0; }
+            if ci.l1_node_i > 0 {
+                g_nod[ci.l1_node_i - 1][k1] += 1.0;
+            }
+            if ci.l1_node_j > 0 {
+                g_nod[ci.l1_node_j - 1][k1] -= 1.0;
+            }
+            if ci.l1_node_i > 0 {
+                g_nod[k1][ci.l1_node_i - 1] -= 1.0;
+            }
+            if ci.l1_node_j > 0 {
+                g_nod[k1][ci.l1_node_j - 1] += 1.0;
+            }
 
             // Winding 2 KCL/KVL
-            if ci.l2_node_i > 0 { g_nod[ci.l2_node_i - 1][k2] += 1.0; }
-            if ci.l2_node_j > 0 { g_nod[ci.l2_node_j - 1][k2] -= 1.0; }
-            if ci.l2_node_i > 0 { g_nod[k2][ci.l2_node_i - 1] -= 1.0; }
-            if ci.l2_node_j > 0 { g_nod[k2][ci.l2_node_j - 1] += 1.0; }
+            if ci.l2_node_i > 0 {
+                g_nod[ci.l2_node_i - 1][k2] += 1.0;
+            }
+            if ci.l2_node_j > 0 {
+                g_nod[ci.l2_node_j - 1][k2] -= 1.0;
+            }
+            if ci.l2_node_i > 0 {
+                g_nod[k2][ci.l2_node_i - 1] -= 1.0;
+            }
+            if ci.l2_node_j > 0 {
+                g_nod[k2][ci.l2_node_j - 1] += 1.0;
+            }
 
             // Self-inductances
             c_nod[k1][k1] = ci.l1_value;
@@ -881,10 +972,18 @@ impl MnaSystem {
                 let nj = group.winding_node_j[widx];
 
                 // KCL/KVL stamps for winding
-                if ni > 0 { g_nod[ni - 1][k] += 1.0; }
-                if nj > 0 { g_nod[nj - 1][k] -= 1.0; }
-                if ni > 0 { g_nod[k][ni - 1] -= 1.0; }
-                if nj > 0 { g_nod[k][nj - 1] += 1.0; }
+                if ni > 0 {
+                    g_nod[ni - 1][k] += 1.0;
+                }
+                if nj > 0 {
+                    g_nod[nj - 1][k] -= 1.0;
+                }
+                if ni > 0 {
+                    g_nod[k][ni - 1] -= 1.0;
+                }
+                if nj > 0 {
+                    g_nod[k][nj - 1] += 1.0;
+                }
 
                 // Inductance sub-matrix: L[i][j] = k_ij * sqrt(Li * Lj)
                 for widx2 in 0..w {
@@ -943,8 +1042,16 @@ pub enum MnaError {
 impl std::fmt::Display for MnaError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            MnaError::InvalidComponentValue { component, value, reason } => {
-                write!(f, "MNA error: invalid value for '{}': {} ({})", component, value, reason)
+            MnaError::InvalidComponentValue {
+                component,
+                value,
+                reason,
+            } => {
+                write!(
+                    f,
+                    "MNA error: invalid value for '{}': {} ({})",
+                    component, value, reason
+                )
             }
             MnaError::InvalidParameter(msg) => write!(f, "MNA error: {}", msg),
             MnaError::TopologyError(msg) => write!(f, "MNA error: {}", msg),
@@ -978,10 +1085,15 @@ pub(crate) fn invert_small_matrix(a: &[Vec<f64>]) -> Vec<Vec<f64>> {
             }
         }
         if max_val < 1e-30 {
-            log::warn!("Singular inductance matrix in transformer group (pivot {:.2e})", max_val);
+            log::warn!(
+                "Singular inductance matrix in transformer group (pivot {:.2e})",
+                max_val
+            );
             // Return identity as fallback
             let mut result = vec![vec![0.0; n]; n];
-            for i in 0..n { result[i][i] = 1.0; }
+            for i in 0..n {
+                result[i][i] = 1.0;
+            }
             return result;
         }
         if max_row != col {
@@ -992,7 +1104,9 @@ pub(crate) fn invert_small_matrix(a: &[Vec<f64>]) -> Vec<Vec<f64>> {
             aug[col][j] /= pivot;
         }
         for row in 0..n {
-            if row == col { continue; }
+            if row == col {
+                continue;
+            }
             let factor = aug[row][col];
             for j in col..(2 * n) {
                 aug[row][j] -= factor * aug[col][j];
@@ -1047,13 +1161,21 @@ fn stamp_conductance_to_ground(mat: &mut [Vec<f64>], node_i: usize, node_j: usiz
 /// Node indices use MNA convention: 0 = ground (excluded from matrix).
 fn stamp_mutual_conductance(mat: &mut [Vec<f64>], a: usize, b: usize, c: usize, d: usize, g: f64) {
     // a-c coupling
-    if a > 0 && c > 0 { mat[a - 1][c - 1] += g; }
+    if a > 0 && c > 0 {
+        mat[a - 1][c - 1] += g;
+    }
     // b-d coupling
-    if b > 0 && d > 0 { mat[b - 1][d - 1] += g; }
+    if b > 0 && d > 0 {
+        mat[b - 1][d - 1] += g;
+    }
     // a-d coupling (negative)
-    if a > 0 && d > 0 { mat[a - 1][d - 1] -= g; }
+    if a > 0 && d > 0 {
+        mat[a - 1][d - 1] -= g;
+    }
     // b-c coupling (negative)
-    if b > 0 && c > 0 { mat[b - 1][c - 1] -= g; }
+    if b > 0 && c > 0 {
+        mat[b - 1][c - 1] -= g;
+    }
 }
 
 /// Inject a current into the RHS vector at a node, handling ground (index 0).
@@ -1075,16 +1197,31 @@ pub(crate) fn inject_rhs_current(rhs: &mut [f64], node: usize, current: f64) {
 ///   G[out_p, ctrl_n] -= gm
 ///   G[out_n, ctrl_p] -= gm
 ///   G[out_n, ctrl_n] += gm
-fn stamp_vccs(mat: &mut [Vec<f64>], out_p: usize, out_n: usize, ctrl_p: usize, ctrl_n: usize, gm: f64) {
+fn stamp_vccs(
+    mat: &mut [Vec<f64>],
+    out_p: usize,
+    out_n: usize,
+    ctrl_p: usize,
+    ctrl_n: usize,
+    gm: f64,
+) {
     if out_p > 0 {
         let o = out_p - 1;
-        if ctrl_p > 0 { mat[o][ctrl_p - 1] += gm; }
-        if ctrl_n > 0 { mat[o][ctrl_n - 1] -= gm; }
+        if ctrl_p > 0 {
+            mat[o][ctrl_p - 1] += gm;
+        }
+        if ctrl_n > 0 {
+            mat[o][ctrl_n - 1] -= gm;
+        }
     }
     if out_n > 0 {
         let o = out_n - 1;
-        if ctrl_p > 0 { mat[o][ctrl_p - 1] -= gm; }
-        if ctrl_n > 0 { mat[o][ctrl_n - 1] += gm; }
+        if ctrl_p > 0 {
+            mat[o][ctrl_p - 1] -= gm;
+        }
+        if ctrl_n > 0 {
+            mat[o][ctrl_n - 1] += gm;
+        }
     }
 }
 
@@ -1162,10 +1299,16 @@ impl MnaBuilder {
 
         // Resolve op-amp model parameters from netlist .model directives
         for (oa, elem) in self.opamps.iter_mut().zip(
-            netlist.elements.iter().filter(|e| matches!(e, Element::Opamp { .. }))
+            netlist
+                .elements
+                .iter()
+                .filter(|e| matches!(e, Element::Opamp { .. })),
         ) {
             if let Element::Opamp { model, .. } = elem
-                && let Some(m) = netlist.models.iter().find(|m| m.name.eq_ignore_ascii_case(model))
+                && let Some(m) = netlist
+                    .models
+                    .iter()
+                    .find(|m| m.name.eq_ignore_ascii_case(model))
             {
                 if m.model_type != "OA" {
                     return Err(MnaError::InvalidParameter(format!(
@@ -1195,7 +1338,13 @@ impl MnaBuilder {
             let resistor = netlist.elements.iter().find(|e| {
                 matches!(e, Element::Resistor { name, .. } if name.eq_ignore_ascii_case(&pot_dir.resistor_name))
             });
-            if let Some(Element::Resistor { n_plus, n_minus, value, .. }) = resistor {
+            if let Some(Element::Resistor {
+                n_plus,
+                n_minus,
+                value,
+                ..
+            }) = resistor
+            {
                 let node_p = self.node_map[n_plus];
                 let node_q = self.node_map[n_minus];
                 let grounded = node_p == 0 || node_q == 0;
@@ -1228,11 +1377,18 @@ impl MnaBuilder {
                         let elem = netlist.elements.iter().find(|e| {
                             matches!(e, Element::Resistor { name, .. } if name.eq_ignore_ascii_case(comp_name))
                         });
-                        if let Some(Element::Resistor { n_plus, n_minus, value, .. }) = elem {
+                        if let Some(Element::Resistor {
+                            n_plus,
+                            n_minus,
+                            value,
+                            ..
+                        }) = elem
+                        {
                             (self.node_map[n_plus], self.node_map[n_minus], *value)
                         } else {
                             return Err(MnaError::TopologyError(format!(
-                                ".switch references component '{}' which was not found", comp_name
+                                ".switch references component '{}' which was not found",
+                                comp_name
                             )));
                         }
                     }
@@ -1240,11 +1396,18 @@ impl MnaBuilder {
                         let elem = netlist.elements.iter().find(|e| {
                             matches!(e, Element::Capacitor { name, .. } if name.eq_ignore_ascii_case(comp_name))
                         });
-                        if let Some(Element::Capacitor { n_plus, n_minus, value, .. }) = elem {
+                        if let Some(Element::Capacitor {
+                            n_plus,
+                            n_minus,
+                            value,
+                            ..
+                        }) = elem
+                        {
                             (self.node_map[n_plus], self.node_map[n_minus], *value)
                         } else {
                             return Err(MnaError::TopologyError(format!(
-                                ".switch references component '{}' which was not found", comp_name
+                                ".switch references component '{}' which was not found",
+                                comp_name
                             )));
                         }
                     }
@@ -1252,17 +1415,25 @@ impl MnaBuilder {
                         let elem = netlist.elements.iter().find(|e| {
                             matches!(e, Element::Inductor { name, .. } if name.eq_ignore_ascii_case(comp_name))
                         });
-                        if let Some(Element::Inductor { n_plus, n_minus, value, .. }) = elem {
+                        if let Some(Element::Inductor {
+                            n_plus,
+                            n_minus,
+                            value,
+                            ..
+                        }) = elem
+                        {
                             (self.node_map[n_plus], self.node_map[n_minus], *value)
                         } else {
                             return Err(MnaError::TopologyError(format!(
-                                ".switch references component '{}' which was not found", comp_name
+                                ".switch references component '{}' which was not found",
+                                comp_name
                             )));
                         }
                     }
                     _ => {
                         return Err(MnaError::TopologyError(format!(
-                            ".switch component '{}' must start with R, C, or L", comp_name
+                            ".switch component '{}' must start with R, C, or L",
+                            comp_name
                         )));
                     }
                 };
@@ -1293,7 +1464,8 @@ impl MnaBuilder {
             node_j: usize,
             value: f64,
         }
-        let mut inductor_refs: std::collections::HashMap<String, InductorRef> = std::collections::HashMap::new();
+        let mut inductor_refs: std::collections::HashMap<String, InductorRef> =
+            std::collections::HashMap::new();
         for coupling in &netlist.couplings {
             for ind_name in [&coupling.inductor1_name, &coupling.inductor2_name] {
                 let lower = ind_name.to_ascii_lowercase();
@@ -1328,11 +1500,13 @@ impl MnaBuilder {
 
         // Build a graph of inductor connections via K directives (union-find)
         let ind_names: Vec<String> = inductor_refs.keys().cloned().collect();
-        let mut parent: std::collections::HashMap<String, String> = ind_names.iter()
-            .map(|n| (n.clone(), n.clone())).collect();
+        let mut parent: std::collections::HashMap<String, String> =
+            ind_names.iter().map(|n| (n.clone(), n.clone())).collect();
         fn find(parent: &mut std::collections::HashMap<String, String>, x: &str) -> String {
             let p = parent[x].clone();
-            if p == x { return p; }
+            if p == x {
+                return p;
+            }
             let root = find(parent, &p);
             parent.insert(x.to_string(), root.clone());
             root
@@ -1351,7 +1525,8 @@ impl MnaBuilder {
         }
 
         // Group inductors by their root in the union-find
-        let mut groups: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+        let mut groups: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
         for name in &ind_names {
             let root = find(&mut parent, name);
             groups.entry(root).or_default().push(name.clone());
@@ -1376,10 +1551,13 @@ impl MnaBuilder {
 
             // Check if this group qualifies for ideal transformer decomposition:
             // large inductances + tight coupling → companion model creates ill-conditioning.
-            let max_l = members.iter()
+            let max_l = members
+                .iter()
                 .map(|m| inductor_refs[m].value)
                 .fold(0.0_f64, f64::max);
-            let max_k = netlist.couplings.iter()
+            let max_k = netlist
+                .couplings
+                .iter()
                 .filter(|c| {
                     let a = c.inductor1_name.to_ascii_lowercase();
                     let b = c.inductor2_name.to_ascii_lowercase();
@@ -1408,10 +1586,14 @@ impl MnaBuilder {
                 // connects between the internal nodes.
 
                 // Pick reference winding (largest inductance).
-                let ref_idx = members.iter()
+                let ref_idx = members
+                    .iter()
                     .enumerate()
                     .max_by(|(_, a), (_, b)| {
-                        inductor_refs[*a].value.partial_cmp(&inductor_refs[*b].value).unwrap()
+                        inductor_refs[*a]
+                            .value
+                            .partial_cmp(&inductor_refs[*b].value)
+                            .unwrap()
                     })
                     .map(|(i, _)| i)
                     .unwrap_or(0);
@@ -1479,7 +1661,9 @@ impl MnaBuilder {
                 // For each non-reference winding: add ideal transformer coupling
                 // between internal nodes (after leakage inductors).
                 for (i, m) in members.iter().enumerate() {
-                    if i == ref_idx { continue; }
+                    if i == ref_idx {
+                        continue;
+                    }
                     let ind = &inductor_refs[m];
                     let n_turns = (ind.value / l_ref).sqrt();
 
@@ -1495,7 +1679,10 @@ impl MnaBuilder {
 
                 log::info!(
                     "Ideal transformer decomposition: {} windings, L_ref={:.3}H, {} couplings, {} internal nodes",
-                    members.len(), l_ref, members.len() - 1, w
+                    members.len(),
+                    l_ref,
+                    members.len() - 1,
+                    w
                 );
 
                 // Don't add to coupled_inductors or transformer_groups — replaced by ideal model.
@@ -1507,16 +1694,26 @@ impl MnaBuilder {
                 let r1 = &inductor_refs[&members[0]];
                 let r2 = &inductor_refs[&members[1]];
                 // Find the coupling between these two
-                let k_val = netlist.couplings.iter().find(|c| {
-                    let a = c.inductor1_name.to_ascii_lowercase();
-                    let b = c.inductor2_name.to_ascii_lowercase();
-                    (a == members[0] && b == members[1]) || (a == members[1] && b == members[0])
-                }).map(|c| c.coupling).unwrap_or(0.0);
-                let k_name = netlist.couplings.iter().find(|c| {
-                    let a = c.inductor1_name.to_ascii_lowercase();
-                    let b = c.inductor2_name.to_ascii_lowercase();
-                    (a == members[0] && b == members[1]) || (a == members[1] && b == members[0])
-                }).map(|c| c.name.clone()).unwrap_or_default();
+                let k_val = netlist
+                    .couplings
+                    .iter()
+                    .find(|c| {
+                        let a = c.inductor1_name.to_ascii_lowercase();
+                        let b = c.inductor2_name.to_ascii_lowercase();
+                        (a == members[0] && b == members[1]) || (a == members[1] && b == members[0])
+                    })
+                    .map(|c| c.coupling)
+                    .unwrap_or(0.0);
+                let k_name = netlist
+                    .couplings
+                    .iter()
+                    .find(|c| {
+                        let a = c.inductor1_name.to_ascii_lowercase();
+                        let b = c.inductor2_name.to_ascii_lowercase();
+                        (a == members[0] && b == members[1]) || (a == members[1] && b == members[0])
+                    })
+                    .map(|c| c.name.clone())
+                    .unwrap_or_default();
                 mna.coupled_inductors.push(CoupledInductorInfo {
                     name: k_name,
                     l1_name: r1.name.clone(),
@@ -1569,20 +1766,22 @@ impl MnaBuilder {
                     let mut l_mat = vec![vec![0.0f64; w]; w];
                     for i in 0..w {
                         for j in 0..w {
-                            l_mat[i][j] = coupling_matrix[i][j]
-                                * (inductances[i] * inductances[j]).sqrt();
+                            l_mat[i][j] =
+                                coupling_matrix[i][j] * (inductances[i] * inductances[j]).sqrt();
                         }
                     }
                     // Check via Cholesky-like: all leading minors must be positive.
                     // For small w (≤8), compute determinant directly.
                     let det = if w == 2 {
-                        l_mat[0][0]*l_mat[1][1] - l_mat[0][1]*l_mat[1][0]
+                        l_mat[0][0] * l_mat[1][1] - l_mat[0][1] * l_mat[1][0]
                     } else {
                         // Use the invert_small_matrix helper — if it returns near-zero
                         // diagonal entries, the matrix is singular or non-PD.
                         let inv = invert_small_matrix(&l_mat);
                         // Check: all diagonal entries of inv should be positive for PD
-                        let min_diag: f64 = inv.iter().enumerate()
+                        let min_diag: f64 = inv
+                            .iter()
+                            .enumerate()
                             .map(|(i, row)| row[i])
                             .fold(f64::INFINITY, f64::min);
                         min_diag // positive means PD
@@ -1613,19 +1812,26 @@ impl MnaBuilder {
         }
 
         // Remove coupled inductors from the uncoupled inductors list
-        self.inductors.retain(|ind| !coupled_inductor_names.contains(&ind.name.to_ascii_lowercase()));
+        self.inductors
+            .retain(|ind| !coupled_inductor_names.contains(&ind.name.to_ascii_lowercase()));
 
         // Expand MNA matrices if ideal transformer decomposition added internal nodes
         let num_internal = next_internal_node - (n + 1);
         if num_internal > 0 {
             let new_n = n + num_internal;
-            for row in &mut mna.g { row.resize(new_n, 0.0); }
-            for row in &mut mna.c { row.resize(new_n, 0.0); }
+            for row in &mut mna.g {
+                row.resize(new_n, 0.0);
+            }
+            for row in &mut mna.c {
+                row.resize(new_n, 0.0);
+            }
             for _ in 0..num_internal {
                 mna.g.push(vec![0.0; new_n]);
                 mna.c.push(vec![0.0; new_n]);
             }
-            for row in &mut mna.n_v { row.resize(new_n, 0.0); }
+            for row in &mut mna.n_v {
+                row.resize(new_n, 0.0);
+            }
             for _ in 0..num_internal {
                 mna.n_i.push(vec![0.0; mna.m]);
             }
@@ -1646,7 +1852,9 @@ impl MnaBuilder {
         // Use mna.n (which may have grown due to internal nodes from ideal transformers).
         let n_base = mna.n;
         let num_vs = mna.voltage_sources.len();
-        let num_vcvs = self.elements.iter()
+        let num_vcvs = self
+            .elements
+            .iter()
             .filter(|e| matches!(e.element_type, ElementType::Vcvs))
             .count();
         let num_ideal_xfmr = mna.ideal_transformers.len();
@@ -1690,8 +1898,14 @@ impl MnaBuilder {
             let np = vs.n_plus_idx;
             let nm = vs.n_minus_idx;
             // Current injection column: j_vs enters n+, exits n-
-            if np > 0 { mna.g[np - 1][k] += 1.0; mna.g[k][np - 1] += 1.0; }
-            if nm > 0 { mna.g[nm - 1][k] -= 1.0; mna.g[k][nm - 1] -= 1.0; }
+            if np > 0 {
+                mna.g[np - 1][k] += 1.0;
+                mna.g[k][np - 1] += 1.0;
+            }
+            if nm > 0 {
+                mna.g[nm - 1][k] -= 1.0;
+                mna.g[k][nm - 1] -= 1.0;
+            }
         }
 
         // Stamp VCVS elements with augmented MNA.
@@ -1702,27 +1916,39 @@ impl MnaBuilder {
         //                          G[k][ctrl+]=-gain, G[k][ctrl-]=+gain
         let mut vcvs_idx = 0;
         for elem in &self.elements {
-            if let ElementType::Vcvs = elem.element_type {
-                if elem.nodes.len() >= 4 {
-                    let k = n_base + num_vs + vcvs_idx;
-                    let out_p = elem.nodes[0];
-                    let out_n = elem.nodes[1];
-                    let ctrl_p = elem.nodes[2];
-                    let ctrl_n = elem.nodes[3];
-                    let gain = elem.value;
+            if let ElementType::Vcvs = elem.element_type
+                && elem.nodes.len() >= 4
+            {
+                let k = n_base + num_vs + vcvs_idx;
+                let out_p = elem.nodes[0];
+                let out_n = elem.nodes[1];
+                let ctrl_p = elem.nodes[2];
+                let ctrl_n = elem.nodes[3];
+                let gain = elem.value;
 
-                    // Current injection column: j_vcvs enters out+, exits out-
-                    if out_p > 0 { mna.g[out_p - 1][k] += 1.0; }
-                    if out_n > 0 { mna.g[out_n - 1][k] -= 1.0; }
-                    // KVL constraint row: V_out+ - V_out- - gain*(V_ctrl+ - V_ctrl-) = 0
-                    if out_p > 0 { mna.g[k][out_p - 1] += 1.0; }
-                    if out_n > 0 { mna.g[k][out_n - 1] -= 1.0; }
-                    if ctrl_p > 0 { mna.g[k][ctrl_p - 1] -= gain; }
-                    if ctrl_n > 0 { mna.g[k][ctrl_n - 1] += gain; }
-
-                    mna.vcvs_sources.push(VcvsAugInfo { aug_idx: vcvs_idx });
-                    vcvs_idx += 1;
+                // Current injection column: j_vcvs enters out+, exits out-
+                if out_p > 0 {
+                    mna.g[out_p - 1][k] += 1.0;
                 }
+                if out_n > 0 {
+                    mna.g[out_n - 1][k] -= 1.0;
+                }
+                // KVL constraint row: V_out+ - V_out- - gain*(V_ctrl+ - V_ctrl-) = 0
+                if out_p > 0 {
+                    mna.g[k][out_p - 1] += 1.0;
+                }
+                if out_n > 0 {
+                    mna.g[k][out_n - 1] -= 1.0;
+                }
+                if ctrl_p > 0 {
+                    mna.g[k][ctrl_p - 1] -= gain;
+                }
+                if ctrl_n > 0 {
+                    mna.g[k][ctrl_n - 1] += gain;
+                }
+
+                mna.vcvs_sources.push(VcvsAugInfo { aug_idx: vcvs_idx });
+                vcvs_idx += 1;
             }
         }
 
@@ -1743,16 +1969,32 @@ impl MnaBuilder {
             let nr = xfmr.turns_ratio;
 
             // KVL constraint row: V(sec+) - V(sec-) - n*(V(pri+) - V(pri-)) = 0
-            if sp > 0 { mna.g[k][sp - 1] += 1.0; }
-            if sn > 0 { mna.g[k][sn - 1] -= 1.0; }
-            if pp > 0 { mna.g[k][pp - 1] -= nr; }
-            if pn > 0 { mna.g[k][pn - 1] += nr; }
+            if sp > 0 {
+                mna.g[k][sp - 1] += 1.0;
+            }
+            if sn > 0 {
+                mna.g[k][sn - 1] -= 1.0;
+            }
+            if pp > 0 {
+                mna.g[k][pp - 1] -= nr;
+            }
+            if pn > 0 {
+                mna.g[k][pn - 1] += nr;
+            }
 
             // Current injection column: j enters sec+, exits sec-; n*j enters pri+, exits pri-
-            if sp > 0 { mna.g[sp - 1][k] += 1.0; }
-            if sn > 0 { mna.g[sn - 1][k] -= 1.0; }
-            if pp > 0 { mna.g[pp - 1][k] += nr; }
-            if pn > 0 { mna.g[pn - 1][k] -= nr; }
+            if sp > 0 {
+                mna.g[sp - 1][k] += 1.0;
+            }
+            if sn > 0 {
+                mna.g[sn - 1][k] -= 1.0;
+            }
+            if pp > 0 {
+                mna.g[pp - 1][k] += nr;
+            }
+            if pn > 0 {
+                mna.g[pn - 1][k] -= nr;
+            }
         }
 
         // Stamp linear elements (resistors, capacitors, VCCS; skip VS/VCVS now handled above)
@@ -1766,7 +2008,12 @@ impl MnaBuilder {
                 }
                 ElementType::Capacitor => {
                     if elem.nodes.len() >= 2 {
-                        stamp_conductance_to_ground(&mut mna.c, elem.nodes[0], elem.nodes[1], elem.value);
+                        stamp_conductance_to_ground(
+                            &mut mna.c,
+                            elem.nodes[0],
+                            elem.nodes[1],
+                            elem.value,
+                        );
                     }
                 }
                 ElementType::Inductor => {
@@ -1798,7 +2045,7 @@ impl MnaBuilder {
         // Stamp op-amps as VCCS into G matrix
         for oa in &mna.opamps {
             let gm = oa.aol / oa.r_out; // Transconductance
-            let go = 1.0 / oa.r_out;    // Output conductance
+            let go = 1.0 / oa.r_out; // Output conductance
 
             let out = oa.n_out_idx;
             let np = oa.n_plus_idx;
@@ -1806,15 +2053,29 @@ impl MnaBuilder {
 
             if out > 0 {
                 let o = out - 1;
-                if np > 0 { mna.g[o][np - 1] += gm; }
-                if nm > 0 { mna.g[o][nm - 1] -= gm; }
+                if np > 0 {
+                    mna.g[o][np - 1] += gm;
+                }
+                if nm > 0 {
+                    mna.g[o][nm - 1] -= gm;
+                }
                 mna.g[o][o] += go;
             }
         }
 
         // Stamp nonlinear devices (collect indices first to avoid borrow issues)
-        let device_info: Vec<_> = mna.nonlinear_devices.iter()
-            .map(|d| (d.device_type, d.dimension, d.start_idx, d.node_indices.clone(), d.name.clone()))
+        let device_info: Vec<_> = mna
+            .nonlinear_devices
+            .iter()
+            .map(|d| {
+                (
+                    d.device_type,
+                    d.dimension,
+                    d.start_idx,
+                    d.node_indices.clone(),
+                    d.name.clone(),
+                )
+            })
             .collect();
 
         for (dev_type, _dim, start_idx, node_indices, dev_name) in device_info {
@@ -1835,12 +2096,12 @@ impl MnaBuilder {
                         // - Injected into cathode: N_i[cathode] = +1
                         if node_i == 0 && node_j > 0 {
                             let j = node_j - 1;
-                            mna.n_v[start_idx][j] = -1.0;  // v_d = 0 - v_j = -v_j
-                            mna.n_i[j][start_idx] = 1.0;   // Current injected into cathode
+                            mna.n_v[start_idx][j] = -1.0; // v_d = 0 - v_j = -v_j
+                            mna.n_i[j][start_idx] = 1.0; // Current injected into cathode
                         } else if node_j == 0 && node_i > 0 {
                             let i = node_i - 1;
-                            mna.n_v[start_idx][i] = 1.0;   // v_d = v_i - 0 = v_i
-                            mna.n_i[i][start_idx] = -1.0;  // Current extracted from anode
+                            mna.n_v[start_idx][i] = 1.0; // v_d = v_i - 0 = v_i
+                            mna.n_i[i][start_idx] = -1.0; // Current extracted from anode
                         } else if node_i > 0 && node_j > 0 {
                             let i = node_i - 1;
                             let j = node_j - 1;
@@ -1862,17 +2123,33 @@ impl MnaBuilder {
                         } else {
                             // Per-terminal ground handling
                             // N_v row 0 (Vbe): +1 at B, -1 at E
-                            if b_raw > 0 { mna.n_v[start_idx][b_raw - 1] = 1.0; }
-                            if e_raw > 0 { mna.n_v[start_idx][e_raw - 1] = -1.0; }
+                            if b_raw > 0 {
+                                mna.n_v[start_idx][b_raw - 1] = 1.0;
+                            }
+                            if e_raw > 0 {
+                                mna.n_v[start_idx][e_raw - 1] = -1.0;
+                            }
                             // N_v row 1 (Vbc): +1 at B, -1 at C
-                            if b_raw > 0 { mna.n_v[start_idx + 1][b_raw - 1] = 1.0; }
-                            if c_raw > 0 { mna.n_v[start_idx + 1][c_raw - 1] = -1.0; }
+                            if b_raw > 0 {
+                                mna.n_v[start_idx + 1][b_raw - 1] = 1.0;
+                            }
+                            if c_raw > 0 {
+                                mna.n_v[start_idx + 1][c_raw - 1] = -1.0;
+                            }
                             // N_i col 0 (Ic): -1 at C, +1 at E
-                            if c_raw > 0 { mna.n_i[c_raw - 1][start_idx] = -1.0; }
-                            if e_raw > 0 { mna.n_i[e_raw - 1][start_idx] = 1.0; }
+                            if c_raw > 0 {
+                                mna.n_i[c_raw - 1][start_idx] = -1.0;
+                            }
+                            if e_raw > 0 {
+                                mna.n_i[e_raw - 1][start_idx] = 1.0;
+                            }
                             // N_i col 1 (Ib): -1 at B, +1 at E
-                            if b_raw > 0 { mna.n_i[b_raw - 1][start_idx + 1] = -1.0; }
-                            if e_raw > 0 { mna.n_i[e_raw - 1][start_idx + 1] = 1.0; }
+                            if b_raw > 0 {
+                                mna.n_i[b_raw - 1][start_idx + 1] = -1.0;
+                            }
+                            if e_raw > 0 {
+                                mna.n_i[e_raw - 1][start_idx + 1] = 1.0;
+                            }
                         }
                     }
                 }
@@ -1883,29 +2160,56 @@ impl MnaBuilder {
                         let e_raw = node_indices[2];
 
                         // Look up BF from the netlist model for BF-scaled N_i
-                        let beta_f = netlist.elements.iter().find_map(|e| {
-                            if let crate::parser::Element::Bjt { name: n, model, .. } = e {
-                                if n.eq_ignore_ascii_case(&dev_name) {
-                                    netlist.models.iter()
-                                        .find(|m| m.name.eq_ignore_ascii_case(model))
-                                        .and_then(|m| m.params.iter()
-                                            .find(|(k, _)| k.eq_ignore_ascii_case("BF"))
-                                            .map(|(_, v)| *v))
-                                } else { None }
-                            } else { None }
-                        }).unwrap_or(200.0);
+                        let beta_f = netlist
+                            .elements
+                            .iter()
+                            .find_map(|e| {
+                                if let crate::parser::Element::Bjt { name: n, model, .. } = e {
+                                    if n.eq_ignore_ascii_case(&dev_name) {
+                                        netlist
+                                            .models
+                                            .iter()
+                                            .find(|m| m.name.eq_ignore_ascii_case(model))
+                                            .and_then(|m| {
+                                                m.params
+                                                    .iter()
+                                                    .find(|(k, _)| k.eq_ignore_ascii_case("BF"))
+                                                    .map(|(_, v)| *v)
+                                            })
+                                    } else {
+                                        None
+                                    }
+                                } else {
+                                    None
+                                }
+                            })
+                            .unwrap_or(200.0);
 
                         if c_raw > 0 && b_raw > 0 && e_raw > 0 {
                             mna.stamp_bjt_forward_active(
-                                start_idx, c_raw - 1, b_raw - 1, e_raw - 1, beta_f
+                                start_idx,
+                                c_raw - 1,
+                                b_raw - 1,
+                                e_raw - 1,
+                                beta_f,
                             );
                         } else {
                             // Per-terminal ground handling for 1D forward-active
-                            if b_raw > 0 { mna.n_v[start_idx][b_raw - 1] = 1.0; }
-                            if e_raw > 0 { mna.n_v[start_idx][e_raw - 1] = -1.0; }
-                            if c_raw > 0 { mna.n_i[c_raw - 1][start_idx] = -1.0; }
-                            if b_raw > 0 { mna.n_i[b_raw - 1][start_idx] = -1.0 / beta_f; }
-                            if e_raw > 0 { mna.n_i[e_raw - 1][start_idx] = 1.0 + 1.0 / beta_f; }
+                            if b_raw > 0 {
+                                mna.n_v[start_idx][b_raw - 1] = 1.0;
+                            }
+                            if e_raw > 0 {
+                                mna.n_v[start_idx][e_raw - 1] = -1.0;
+                            }
+                            if c_raw > 0 {
+                                mna.n_i[c_raw - 1][start_idx] = -1.0;
+                            }
+                            if b_raw > 0 {
+                                mna.n_i[b_raw - 1][start_idx] = -1.0 / beta_f;
+                            }
+                            if e_raw > 0 {
+                                mna.n_i[e_raw - 1][start_idx] = 1.0 + 1.0 / beta_f;
+                            }
                         }
                     }
                 }
@@ -1927,18 +2231,34 @@ impl MnaBuilder {
                         let s_raw = node_indices[2];
 
                         // N_v row 0 (Vds): +1 at D, -1 at S
-                        if d_raw > 0 { mna.n_v[start_idx][d_raw - 1] = 1.0; }
-                        if s_raw > 0 { mna.n_v[start_idx][s_raw - 1] = -1.0; }
+                        if d_raw > 0 {
+                            mna.n_v[start_idx][d_raw - 1] = 1.0;
+                        }
+                        if s_raw > 0 {
+                            mna.n_v[start_idx][s_raw - 1] = -1.0;
+                        }
                         // N_v row 1 (Vgs): +1 at G, -1 at S
-                        if g_raw > 0 { mna.n_v[start_idx + 1][g_raw - 1] = 1.0; }
-                        if s_raw > 0 { mna.n_v[start_idx + 1][s_raw - 1] = -1.0; }
+                        if g_raw > 0 {
+                            mna.n_v[start_idx + 1][g_raw - 1] = 1.0;
+                        }
+                        if s_raw > 0 {
+                            mna.n_v[start_idx + 1][s_raw - 1] = -1.0;
+                        }
 
                         // N_i col 0 (Id): -1 at D (extracted), +1 at S (injected)
-                        if d_raw > 0 { mna.n_i[d_raw - 1][start_idx] = -1.0; }
-                        if s_raw > 0 { mna.n_i[s_raw - 1][start_idx] = 1.0; }
+                        if d_raw > 0 {
+                            mna.n_i[d_raw - 1][start_idx] = -1.0;
+                        }
+                        if s_raw > 0 {
+                            mna.n_i[s_raw - 1][start_idx] = 1.0;
+                        }
                         // N_i col 1 (Ig): -1 at G (extracted), +1 at S (injected)
-                        if g_raw > 0 { mna.n_i[g_raw - 1][start_idx + 1] = -1.0; }
-                        if s_raw > 0 { mna.n_i[s_raw - 1][start_idx + 1] = 1.0; }
+                        if g_raw > 0 {
+                            mna.n_i[g_raw - 1][start_idx + 1] = -1.0;
+                        }
+                        if s_raw > 0 {
+                            mna.n_i[s_raw - 1][start_idx + 1] = 1.0;
+                        }
                     }
                 }
                 NonlinearDeviceType::Mosfet => {
@@ -1958,18 +2278,34 @@ impl MnaBuilder {
                         let s_raw = node_indices[2];
 
                         // N_v row 0 (Vds): +1 at D, -1 at S
-                        if d_raw > 0 { mna.n_v[start_idx][d_raw - 1] = 1.0; }
-                        if s_raw > 0 { mna.n_v[start_idx][s_raw - 1] = -1.0; }
+                        if d_raw > 0 {
+                            mna.n_v[start_idx][d_raw - 1] = 1.0;
+                        }
+                        if s_raw > 0 {
+                            mna.n_v[start_idx][s_raw - 1] = -1.0;
+                        }
                         // N_v row 1 (Vgs): +1 at G, -1 at S
-                        if g_raw > 0 { mna.n_v[start_idx + 1][g_raw - 1] = 1.0; }
-                        if s_raw > 0 { mna.n_v[start_idx + 1][s_raw - 1] = -1.0; }
+                        if g_raw > 0 {
+                            mna.n_v[start_idx + 1][g_raw - 1] = 1.0;
+                        }
+                        if s_raw > 0 {
+                            mna.n_v[start_idx + 1][s_raw - 1] = -1.0;
+                        }
 
                         // N_i col 0 (Id): -1 at D (extracted), +1 at S (injected)
-                        if d_raw > 0 { mna.n_i[d_raw - 1][start_idx] = -1.0; }
-                        if s_raw > 0 { mna.n_i[s_raw - 1][start_idx] = 1.0; }
+                        if d_raw > 0 {
+                            mna.n_i[d_raw - 1][start_idx] = -1.0;
+                        }
+                        if s_raw > 0 {
+                            mna.n_i[s_raw - 1][start_idx] = 1.0;
+                        }
                         // N_i col 1 (Ig): effectively zero (insulated gate), but stamp for framework
-                        if g_raw > 0 { mna.n_i[g_raw - 1][start_idx + 1] = -1.0; }
-                        if s_raw > 0 { mna.n_i[s_raw - 1][start_idx + 1] = 1.0; }
+                        if g_raw > 0 {
+                            mna.n_i[g_raw - 1][start_idx + 1] = -1.0;
+                        }
+                        if s_raw > 0 {
+                            mna.n_i[s_raw - 1][start_idx + 1] = 1.0;
+                        }
                     }
                 }
                 NonlinearDeviceType::Tube => {
@@ -1985,17 +2321,33 @@ impl MnaBuilder {
                         } else {
                             // Per-terminal ground handling
                             // N_v row 0 (Vgk): +1 at grid, -1 at cathode
-                            if g_raw > 0 { mna.n_v[start_idx][g_raw - 1] = 1.0; }
-                            if k_raw > 0 { mna.n_v[start_idx][k_raw - 1] = -1.0; }
+                            if g_raw > 0 {
+                                mna.n_v[start_idx][g_raw - 1] = 1.0;
+                            }
+                            if k_raw > 0 {
+                                mna.n_v[start_idx][k_raw - 1] = -1.0;
+                            }
                             // N_v row 1 (Vpk): +1 at plate, -1 at cathode
-                            if p_raw > 0 { mna.n_v[start_idx + 1][p_raw - 1] = 1.0; }
-                            if k_raw > 0 { mna.n_v[start_idx + 1][k_raw - 1] = -1.0; }
+                            if p_raw > 0 {
+                                mna.n_v[start_idx + 1][p_raw - 1] = 1.0;
+                            }
+                            if k_raw > 0 {
+                                mna.n_v[start_idx + 1][k_raw - 1] = -1.0;
+                            }
                             // N_i col 0 (Ip): -1 at plate, +1 at cathode
-                            if p_raw > 0 { mna.n_i[p_raw - 1][start_idx] = -1.0; }
-                            if k_raw > 0 { mna.n_i[k_raw - 1][start_idx] = 1.0; }
+                            if p_raw > 0 {
+                                mna.n_i[p_raw - 1][start_idx] = -1.0;
+                            }
+                            if k_raw > 0 {
+                                mna.n_i[k_raw - 1][start_idx] = 1.0;
+                            }
                             // N_i col 1 (Ig): -1 at grid, +1 at cathode
-                            if g_raw > 0 { mna.n_i[g_raw - 1][start_idx + 1] = -1.0; }
-                            if k_raw > 0 { mna.n_i[k_raw - 1][start_idx + 1] = 1.0; }
+                            if g_raw > 0 {
+                                mna.n_i[g_raw - 1][start_idx + 1] = -1.0;
+                            }
+                            if k_raw > 0 {
+                                mna.n_i[k_raw - 1][start_idx + 1] = 1.0;
+                            }
                         }
                     }
                 }
@@ -2007,23 +2359,58 @@ impl MnaBuilder {
 
     fn collect_nodes(&mut self, element: &Element) -> Result<(), MnaError> {
         let nodes = match element {
-            Element::Resistor { n_plus, n_minus, .. } => vec![n_plus, n_minus],
-            Element::Capacitor { n_plus, n_minus, .. } => vec![n_plus, n_minus],
-            Element::Inductor { n_plus, n_minus, .. } => vec![n_plus, n_minus],
-            Element::VoltageSource { n_plus, n_minus, .. } => vec![n_plus, n_minus],
-            Element::CurrentSource { n_plus, n_minus, .. } => vec![n_plus, n_minus],
-            Element::Diode { n_plus, n_minus, .. } => vec![n_plus, n_minus],
+            Element::Resistor {
+                n_plus, n_minus, ..
+            } => vec![n_plus, n_minus],
+            Element::Capacitor {
+                n_plus, n_minus, ..
+            } => vec![n_plus, n_minus],
+            Element::Inductor {
+                n_plus, n_minus, ..
+            } => vec![n_plus, n_minus],
+            Element::VoltageSource {
+                n_plus, n_minus, ..
+            } => vec![n_plus, n_minus],
+            Element::CurrentSource {
+                n_plus, n_minus, ..
+            } => vec![n_plus, n_minus],
+            Element::Diode {
+                n_plus, n_minus, ..
+            } => vec![n_plus, n_minus],
             Element::Bjt { nc, nb, ne, .. } => vec![nc, nb, ne],
             Element::Jfet { nd, ng, ns, .. } => vec![nd, ng, ns],
             Element::Mosfet { nd, ng, ns, nb, .. } => vec![nd, ng, ns, nb],
-            Element::Triode { n_grid, n_plate, n_cathode, .. } => vec![n_grid, n_plate, n_cathode],
-            Element::Opamp { n_plus, n_minus, n_out, .. } => vec![n_plus, n_minus, n_out],
-            Element::Vcvs { out_p, out_n, ctrl_p, ctrl_n, .. } => vec![out_p, out_n, ctrl_p, ctrl_n],
-            Element::Vccs { out_p, out_n, ctrl_p, ctrl_n, .. } => vec![out_p, out_n, ctrl_p, ctrl_n],
+            Element::Triode {
+                n_grid,
+                n_plate,
+                n_cathode,
+                ..
+            } => vec![n_grid, n_plate, n_cathode],
+            Element::Opamp {
+                n_plus,
+                n_minus,
+                n_out,
+                ..
+            } => vec![n_plus, n_minus, n_out],
+            Element::Vcvs {
+                out_p,
+                out_n,
+                ctrl_p,
+                ctrl_n,
+                ..
+            } => vec![out_p, out_n, ctrl_p, ctrl_n],
+            Element::Vccs {
+                out_p,
+                out_n,
+                ctrl_p,
+                ctrl_n,
+                ..
+            } => vec![out_p, out_n, ctrl_p, ctrl_n],
             Element::SubcktInstance { name, .. } => {
-                return Err(MnaError::TopologyError(
-                    format!("subcircuit instance '{}' not supported (expand subcircuits before MNA)", name)
-                ));
+                return Err(MnaError::TopologyError(format!(
+                    "subcircuit instance '{}' not supported (expand subcircuits before MNA)",
+                    name
+                )));
             }
         };
 
@@ -2039,31 +2426,41 @@ impl MnaBuilder {
 
     fn categorize_element(&mut self, element: &Element) -> Result<(), MnaError> {
         match element {
-            Element::Resistor { name, n_plus, n_minus, value } => {
+            Element::Resistor {
+                name,
+                n_plus,
+                n_minus,
+                value,
+            } => {
                 self.elements.push(ElementInfo {
                     element_type: ElementType::Resistor,
-                    nodes: vec![
-                        self.node_map[n_plus],
-                        self.node_map[n_minus],
-                    ],
+                    nodes: vec![self.node_map[n_plus], self.node_map[n_minus]],
                     value: *value,
                     name: name.clone(),
                     dc_value: None,
                 });
             }
-            Element::Capacitor { name, n_plus, n_minus, value, .. } => {
+            Element::Capacitor {
+                name,
+                n_plus,
+                n_minus,
+                value,
+                ..
+            } => {
                 self.elements.push(ElementInfo {
                     element_type: ElementType::Capacitor,
-                    nodes: vec![
-                        self.node_map[n_plus],
-                        self.node_map[n_minus],
-                    ],
+                    nodes: vec![self.node_map[n_plus], self.node_map[n_minus]],
                     value: *value,
                     name: name.clone(),
                     dc_value: None,
                 });
             }
-            Element::Inductor { name, n_plus, n_minus, value } => {
+            Element::Inductor {
+                name,
+                n_plus,
+                n_minus,
+                value,
+            } => {
                 let node_i = self.node_map[n_plus];
                 let node_j = self.node_map[n_minus];
                 self.elements.push(ElementInfo {
@@ -2081,15 +2478,18 @@ impl MnaBuilder {
                     value: *value,
                 });
             }
-            Element::VoltageSource { name, n_plus, n_minus, dc, .. } => {
+            Element::VoltageSource {
+                name,
+                n_plus,
+                n_minus,
+                dc,
+                ..
+            } => {
                 // Record element for augmented MNA stamping (done after matrix expansion).
                 // Do NOT add Norton equivalent conductance here.
                 self.elements.push(ElementInfo {
                     element_type: ElementType::VoltageSource,
-                    nodes: vec![
-                        self.node_map[n_plus],
-                        self.node_map[n_minus],
-                    ],
+                    nodes: vec![self.node_map[n_plus], self.node_map[n_minus]],
                     value: dc.unwrap_or(0.0),
                     name: name.clone(),
                     dc_value: *dc,
@@ -2106,7 +2506,12 @@ impl MnaBuilder {
                     ext_idx,
                 });
             }
-            Element::CurrentSource { name, n_plus, n_minus, dc } => {
+            Element::CurrentSource {
+                name,
+                n_plus,
+                n_minus,
+                dc,
+            } => {
                 self.current_sources.push(CurrentSourceInfo {
                     name: name.clone(),
                     n_plus_idx: self.node_map[n_plus],
@@ -2114,12 +2519,18 @@ impl MnaBuilder {
                     dc_value: dc.unwrap_or(0.0),
                 });
             }
-            Element::Diode { name, n_plus, n_minus, .. } => {
+            Element::Diode {
+                name,
+                n_plus,
+                n_minus,
+                ..
+            } => {
                 let node_indices = vec![self.node_map[n_plus], self.node_map[n_minus]];
                 if node_indices.iter().all(|&idx| idx == 0) {
-                    return Err(MnaError::TopologyError(
-                        format!("diode '{}' has both terminals grounded", name)
-                    ));
+                    return Err(MnaError::TopologyError(format!(
+                        "diode '{}' has both terminals grounded",
+                        name
+                    )));
                 }
                 let start_idx = self.total_dimension;
                 self.total_dimension += 1; // Diode is 1-dimensional
@@ -2132,18 +2543,19 @@ impl MnaBuilder {
                     node_indices,
                 });
             }
-            Element::Bjt { name, nc, nb, ne, .. } => {
-                let node_indices = vec![
-                    self.node_map[nc],
-                    self.node_map[nb],
-                    self.node_map[ne],
-                ];
+            Element::Bjt {
+                name, nc, nb, ne, ..
+            } => {
+                let node_indices = vec![self.node_map[nc], self.node_map[nb], self.node_map[ne]];
                 if node_indices.iter().all(|&idx| idx == 0) {
-                    return Err(MnaError::TopologyError(
-                        format!("BJT '{}' has all terminals grounded", name)
-                    ));
+                    return Err(MnaError::TopologyError(format!(
+                        "BJT '{}' has all terminals grounded",
+                        name
+                    )));
                 }
-                let is_forward_active = self.forward_active_bjts.contains(&name.to_ascii_uppercase());
+                let is_forward_active = self
+                    .forward_active_bjts
+                    .contains(&name.to_ascii_uppercase());
                 let (device_type, dimension) = if is_forward_active {
                     (NonlinearDeviceType::BjtForwardActive, 1)
                 } else {
@@ -2160,16 +2572,15 @@ impl MnaBuilder {
                     node_indices,
                 });
             }
-            Element::Jfet { name, nd, ng, ns, .. } => {
-                let node_indices = vec![
-                    self.node_map[nd],
-                    self.node_map[ng],
-                    self.node_map[ns],
-                ];
+            Element::Jfet {
+                name, nd, ng, ns, ..
+            } => {
+                let node_indices = vec![self.node_map[nd], self.node_map[ng], self.node_map[ns]];
                 if node_indices.iter().all(|&idx| idx == 0) {
-                    return Err(MnaError::TopologyError(
-                        format!("JFET '{}' has all terminals grounded", name)
-                    ));
+                    return Err(MnaError::TopologyError(format!(
+                        "JFET '{}' has all terminals grounded",
+                        name
+                    )));
                 }
                 let start_idx = self.total_dimension;
                 self.total_dimension += 2; // 2D: Id(Vgs,Vds) + Ig(Vgs)
@@ -2182,7 +2593,14 @@ impl MnaBuilder {
                     node_indices,
                 });
             }
-            Element::Mosfet { name, nd, ng, ns, nb, .. } => {
+            Element::Mosfet {
+                name,
+                nd,
+                ng,
+                ns,
+                nb,
+                ..
+            } => {
                 let node_indices = vec![
                     self.node_map[nd],
                     self.node_map[ng],
@@ -2191,9 +2609,10 @@ impl MnaBuilder {
                 ];
                 // Check drain/gate/source (not bulk) for all-grounded
                 if node_indices[..3].iter().all(|&idx| idx == 0) {
-                    return Err(MnaError::TopologyError(
-                        format!("MOSFET '{}' has all terminals grounded", name)
-                    ));
+                    return Err(MnaError::TopologyError(format!(
+                        "MOSFET '{}' has all terminals grounded",
+                        name
+                    )));
                 }
                 let start_idx = self.total_dimension;
                 self.total_dimension += 2; // 2D: Id(Vgs,Vds) + Ig(=0, insulated gate)
@@ -2206,7 +2625,13 @@ impl MnaBuilder {
                     node_indices,
                 });
             }
-            Element::Triode { name, n_grid, n_plate, n_cathode, .. } => {
+            Element::Triode {
+                name,
+                n_grid,
+                n_plate,
+                n_cathode,
+                ..
+            } => {
                 let node_indices = vec![
                     self.node_map[n_grid],
                     self.node_map[n_plate],
@@ -2223,20 +2648,28 @@ impl MnaBuilder {
                     node_indices,
                 });
             }
-            Element::Opamp { name, n_plus, n_minus, n_out, .. } => {
+            Element::Opamp {
+                name,
+                n_plus,
+                n_minus,
+                n_out,
+                ..
+            } => {
                 let np_idx = self.node_map[n_plus];
                 let nm_idx = self.node_map[n_minus];
                 let no_idx = self.node_map[n_out];
 
                 if no_idx == 0 {
-                    return Err(MnaError::TopologyError(
-                        format!("op-amp '{}' has output connected to ground", name)
-                    ));
+                    return Err(MnaError::TopologyError(format!(
+                        "op-amp '{}' has output connected to ground",
+                        name
+                    )));
                 }
                 if np_idx == 0 && nm_idx == 0 {
-                    return Err(MnaError::TopologyError(
-                        format!("op-amp '{}' has both inputs grounded", name)
-                    ));
+                    return Err(MnaError::TopologyError(format!(
+                        "op-amp '{}' has both inputs grounded",
+                        name
+                    )));
                 }
 
                 // Op-amps are LINEAR — do NOT add to nonlinear dimension M
@@ -2249,7 +2682,14 @@ impl MnaBuilder {
                     r_out: 1.0,
                 });
             }
-            Element::Vcvs { name, out_p, out_n, ctrl_p, ctrl_n, gain } => {
+            Element::Vcvs {
+                name,
+                out_p,
+                out_n,
+                ctrl_p,
+                ctrl_n,
+                gain,
+            } => {
                 // VCVS is LINEAR — do NOT add to nonlinear dimension M
                 // Stored as ElementInfo for G matrix stamping (Norton equivalent)
                 self.elements.push(ElementInfo {
@@ -2265,7 +2705,14 @@ impl MnaBuilder {
                     dc_value: None,
                 });
             }
-            Element::Vccs { name, out_p, out_n, ctrl_p, ctrl_n, gm } => {
+            Element::Vccs {
+                name,
+                out_p,
+                out_n,
+                ctrl_p,
+                ctrl_n,
+                gm,
+            } => {
                 // VCCS is LINEAR — do NOT add to nonlinear dimension M
                 // Stored as ElementInfo for G matrix stamping
                 self.elements.push(ElementInfo {
@@ -2282,9 +2729,10 @@ impl MnaBuilder {
                 });
             }
             Element::SubcktInstance { name, .. } => {
-                return Err(MnaError::TopologyError(
-                    format!("subcircuit instance '{}' not supported (expand subcircuits before MNA)", name)
-                ));
+                return Err(MnaError::TopologyError(format!(
+                    "subcircuit instance '{}' not supported (expand subcircuits before MNA)",
+                    name
+                )));
             }
         }
 
@@ -2417,13 +2865,20 @@ U1 0 inv out opamp
 
         // G[out, inv] should have -Gm - g_R2
         let g_r2 = 1.0 / 100_000.0;
-        assert!((mna.g[o][i] - (-200_000.0 - g_r2)).abs() < 1e-6,
-            "G[out,inv] should be -Gm - g_R2, got {}", mna.g[o][i]);
+        assert!(
+            (mna.g[o][i] - (-200_000.0 - g_r2)).abs() < 1e-6,
+            "G[out,inv] should be -Gm - g_R2, got {}",
+            mna.g[o][i]
+        );
 
         // G[out, out] should have Go + g_R2
         let expected_go = 1.0 + g_r2;
-        assert!((mna.g[o][o] - expected_go).abs() < 1e-6,
-            "G[out,out] should include Go={}, got {}", expected_go, mna.g[o][o]);
+        assert!(
+            (mna.g[o][o] - expected_go).abs() < 1e-6,
+            "G[out,out] should include Go={}, got {}",
+            expected_go,
+            mna.g[o][o]
+        );
     }
 
     #[test]
@@ -2483,12 +2938,18 @@ G1 out 0 in 0 0.01
         let i = in_idx - 1;
 
         // G[out, in] should have +gm = +0.01
-        assert!((mna.g[o][i] - 0.01).abs() < 1e-15,
-            "G[out,in] should be +gm=0.01, got {}", mna.g[o][i]);
+        assert!(
+            (mna.g[o][i] - 0.01).abs() < 1e-15,
+            "G[out,in] should be +gm=0.01, got {}",
+            mna.g[o][i]
+        );
 
         // G[out, out] should only have resistor conductance (1/1k = 0.001)
-        assert!((mna.g[o][o] - 0.001).abs() < 1e-15,
-            "G[out,out] should be 0.001, got {}", mna.g[o][o]);
+        assert!(
+            (mna.g[o][o] - 0.001).abs() < 1e-15,
+            "G[out,out] should be 0.001, got {}",
+            mna.g[o][o]
+        );
     }
 
     #[test]
@@ -2508,12 +2969,18 @@ G1 out 0 inp inn 0.01
         let o = out_idx - 1;
 
         // G[out, inp] should have +gm
-        assert!((mna.g[o][inp_idx - 1] - 0.01).abs() < 1e-15,
-            "G[out,inp] should be +gm, got {}", mna.g[o][inp_idx - 1]);
+        assert!(
+            (mna.g[o][inp_idx - 1] - 0.01).abs() < 1e-15,
+            "G[out,inp] should be +gm, got {}",
+            mna.g[o][inp_idx - 1]
+        );
 
         // G[out, inn] should have -gm
-        assert!((mna.g[o][inn_idx - 1] - (-0.01)).abs() < 1e-15,
-            "G[out,inn] should be -gm, got {}", mna.g[o][inn_idx - 1]);
+        assert!(
+            (mna.g[o][inn_idx - 1] - (-0.01)).abs() < 1e-15,
+            "G[out,inn] should be -gm, got {}",
+            mna.g[o][inn_idx - 1]
+        );
     }
 
     #[test]
@@ -2566,21 +3033,34 @@ E1 out 0 in 0 10
         let k = n; // augmented row for VCVS (no voltage sources, so k = n + 0 + 0)
 
         // G[out][k] should be +1 (current injection column: j_vcvs enters out+)
-        assert!((mna.g[o][k] - 1.0).abs() < 1e-15,
-            "G[out][k] should be +1 for VCVS current injection, got {}", mna.g[o][k]);
+        assert!(
+            (mna.g[o][k] - 1.0).abs() < 1e-15,
+            "G[out][k] should be +1 for VCVS current injection, got {}",
+            mna.g[o][k]
+        );
 
         // G[k][out] should be +1 (KVL row: V_out+)
-        assert!((mna.g[k][o] - 1.0).abs() < 1e-15,
-            "G[k][out] should be +1 for KVL constraint, got {}", mna.g[k][o]);
+        assert!(
+            (mna.g[k][o] - 1.0).abs() < 1e-15,
+            "G[k][out] should be +1 for KVL constraint, got {}",
+            mna.g[k][o]
+        );
 
         // G[k][in] should be -gain = -10 (KVL row: -gain * V_ctrl+)
-        assert!((mna.g[k][i] - (-10.0)).abs() < 1e-15,
-            "G[k][in] should be -gain=-10 for KVL constraint, got {}", mna.g[k][i]);
+        assert!(
+            (mna.g[k][i] - (-10.0)).abs() < 1e-15,
+            "G[k][in] should be -gain=-10 for KVL constraint, got {}",
+            mna.g[k][i]
+        );
 
         // G[out][out] should only have 1/R2 (no VS_CONDUCTANCE in augmented MNA)
         let g_r2 = 1.0 / 1000.0;
-        assert!((mna.g[o][o] - g_r2).abs() < 1e-10,
-            "G[out][out] should only have 1/R2={}, got {} (augmented MNA: no Norton equiv)", g_r2, mna.g[o][o]);
+        assert!(
+            (mna.g[o][o] - g_r2).abs() < 1e-10,
+            "G[out][out] should only have 1/R2={}, got {} (augmented MNA: no Norton equiv)",
+            g_r2,
+            mna.g[o][o]
+        );
     }
 
     #[test]
@@ -2606,24 +3086,45 @@ E1 out_p out_n in 0 5
         // Current injection column: j_vcvs enters out+ (G[out_p][k] = +1), exits out- (G[out_n][k] = -1)
         let g_r = 1.0 / 1000.0;
         // G[out_p][out_p] should only have 1/R1 (no Norton equivalent conductance)
-        assert!((mna.g[op][op] - g_r).abs() < 1e-10,
-            "G[op][op] should only be 1/R1 in augmented MNA, got {}", mna.g[op][op]);
-        assert!((mna.g[on][on] - g_r).abs() < 1e-10,
-            "G[on][on] should only be 1/R2 in augmented MNA, got {}", mna.g[on][on]);
+        assert!(
+            (mna.g[op][op] - g_r).abs() < 1e-10,
+            "G[op][op] should only be 1/R1 in augmented MNA, got {}",
+            mna.g[op][op]
+        );
+        assert!(
+            (mna.g[on][on] - g_r).abs() < 1e-10,
+            "G[on][on] should only be 1/R2 in augmented MNA, got {}",
+            mna.g[on][on]
+        );
 
         // Current injection: j_vcvs enters out+, exits out-
-        assert!((mna.g[op][k] - 1.0).abs() < 1e-15,
-            "G[out_p][k] should be +1 (current injection), got {}", mna.g[op][k]);
-        assert!((mna.g[on][k] - (-1.0)).abs() < 1e-15,
-            "G[out_n][k] should be -1 (current injection), got {}", mna.g[on][k]);
+        assert!(
+            (mna.g[op][k] - 1.0).abs() < 1e-15,
+            "G[out_p][k] should be +1 (current injection), got {}",
+            mna.g[op][k]
+        );
+        assert!(
+            (mna.g[on][k] - (-1.0)).abs() < 1e-15,
+            "G[out_n][k] should be -1 (current injection), got {}",
+            mna.g[on][k]
+        );
 
         // KVL constraint row: G[k][out_p] = +1, G[k][out_n] = -1, G[k][in] = -gain = -5
-        assert!((mna.g[k][op] - 1.0).abs() < 1e-15,
-            "G[k][out_p] should be +1 (KVL), got {}", mna.g[k][op]);
-        assert!((mna.g[k][on] - (-1.0)).abs() < 1e-15,
-            "G[k][out_n] should be -1 (KVL), got {}", mna.g[k][on]);
-        assert!((mna.g[k][inp] - (-5.0)).abs() < 1e-15,
-            "G[k][in] should be -gain=-5 (KVL), got {}", mna.g[k][inp]);
+        assert!(
+            (mna.g[k][op] - 1.0).abs() < 1e-15,
+            "G[k][out_p] should be +1 (KVL), got {}",
+            mna.g[k][op]
+        );
+        assert!(
+            (mna.g[k][on] - (-1.0)).abs() < 1e-15,
+            "G[k][out_n] should be -1 (KVL), got {}",
+            mna.g[k][on]
+        );
+        assert!(
+            (mna.g[k][inp] - (-5.0)).abs() < 1e-15,
+            "G[k][in] should be -gain=-5 (KVL), got {}",
+            mna.g[k][inp]
+        );
     }
 
     #[test]
@@ -2650,8 +3151,11 @@ R3 out2 0 1k
         let o = out_idx - 1;
 
         // G[out2, out] should have VCCS gm = 0.001
-        assert!((mna.g[o2][o] - 0.001).abs() < 1e-15,
-            "G[out2,out] should be VCCS gm=0.001, got {}", mna.g[o2][o]);
+        assert!(
+            (mna.g[o2][o] - 0.001).abs() < 1e-15,
+            "G[out2,out] should be VCCS gm=0.001, got {}",
+            mna.g[o2][o]
+        );
     }
 
     #[test]
@@ -2675,7 +3179,10 @@ C1 out 0 1u
 
     #[test]
     fn test_parasitic_cap_value() {
-        assert!((PARASITIC_CAP - 10e-12).abs() < 1e-25, "PARASITIC_CAP should be 10pF");
+        assert!(
+            (PARASITIC_CAP - 10e-12).abs() < 1e-25,
+            "PARASITIC_CAP should be 10pF"
+        );
     }
 
     #[test]
@@ -2692,7 +3199,10 @@ R1 out 0 1k
         // C matrix should be all zeros before parasitic caps
         for i in 0..mna.n {
             for j in 0..mna.n {
-                assert_eq!(mna.c[i][j], 0.0, "C[{i}][{j}] should be 0 before parasitic caps");
+                assert_eq!(
+                    mna.c[i][j], 0.0,
+                    "C[{i}][{j}] should be 0 before parasitic caps"
+                );
             }
         }
 
@@ -2704,16 +3214,28 @@ R1 out 0 1k
         let k = cathode - 1;
 
         // Diagonal: both nodes get +PARASITIC_CAP
-        assert!((mna.c[a][a] - PARASITIC_CAP).abs() < 1e-25,
-            "C[anode][anode] should be PARASITIC_CAP, got {}", mna.c[a][a]);
-        assert!((mna.c[k][k] - PARASITIC_CAP).abs() < 1e-25,
-            "C[cathode][cathode] should be PARASITIC_CAP, got {}", mna.c[k][k]);
+        assert!(
+            (mna.c[a][a] - PARASITIC_CAP).abs() < 1e-25,
+            "C[anode][anode] should be PARASITIC_CAP, got {}",
+            mna.c[a][a]
+        );
+        assert!(
+            (mna.c[k][k] - PARASITIC_CAP).abs() < 1e-25,
+            "C[cathode][cathode] should be PARASITIC_CAP, got {}",
+            mna.c[k][k]
+        );
 
         // Off-diagonal: negative (cap between nodes, not to ground)
-        assert!((mna.c[a][k] + PARASITIC_CAP).abs() < 1e-25,
-            "C[anode][cathode] should be -PARASITIC_CAP, got {}", mna.c[a][k]);
-        assert!((mna.c[k][a] + PARASITIC_CAP).abs() < 1e-25,
-            "C[cathode][anode] should be -PARASITIC_CAP, got {}", mna.c[k][a]);
+        assert!(
+            (mna.c[a][k] + PARASITIC_CAP).abs() < 1e-25,
+            "C[anode][cathode] should be -PARASITIC_CAP, got {}",
+            mna.c[a][k]
+        );
+        assert!(
+            (mna.c[k][a] + PARASITIC_CAP).abs() < 1e-25,
+            "C[cathode][anode] should be -PARASITIC_CAP, got {}",
+            mna.c[k][a]
+        );
     }
 
     #[test]
@@ -2734,32 +3256,56 @@ R2 base 0 100k
         let ne = *mna.node_map.get("emit").unwrap() - 1;
 
         // Base gets caps from both B-E and B-C junctions: 2 * PARASITIC_CAP
-        assert!((mna.c[nb][nb] - 2.0 * PARASITIC_CAP).abs() < 1e-25,
-            "C[base][base] should be 2*PARASITIC_CAP, got {}", mna.c[nb][nb]);
+        assert!(
+            (mna.c[nb][nb] - 2.0 * PARASITIC_CAP).abs() < 1e-25,
+            "C[base][base] should be 2*PARASITIC_CAP, got {}",
+            mna.c[nb][nb]
+        );
 
         // Collector gets cap from B-C junction only
-        assert!((mna.c[nc][nc] - PARASITIC_CAP).abs() < 1e-25,
-            "C[coll][coll] should be PARASITIC_CAP, got {}", mna.c[nc][nc]);
+        assert!(
+            (mna.c[nc][nc] - PARASITIC_CAP).abs() < 1e-25,
+            "C[coll][coll] should be PARASITIC_CAP, got {}",
+            mna.c[nc][nc]
+        );
 
         // Emitter gets cap from B-E junction only
-        assert!((mna.c[ne][ne] - PARASITIC_CAP).abs() < 1e-25,
-            "C[emit][emit] should be PARASITIC_CAP, got {}", mna.c[ne][ne]);
+        assert!(
+            (mna.c[ne][ne] - PARASITIC_CAP).abs() < 1e-25,
+            "C[emit][emit] should be PARASITIC_CAP, got {}",
+            mna.c[ne][ne]
+        );
 
         // Off-diagonal: B-E junction
-        assert!((mna.c[nb][ne] + PARASITIC_CAP).abs() < 1e-25,
-            "C[base][emit] should be -PARASITIC_CAP, got {}", mna.c[nb][ne]);
-        assert!((mna.c[ne][nb] + PARASITIC_CAP).abs() < 1e-25,
-            "C[emit][base] should be -PARASITIC_CAP, got {}", mna.c[ne][nb]);
+        assert!(
+            (mna.c[nb][ne] + PARASITIC_CAP).abs() < 1e-25,
+            "C[base][emit] should be -PARASITIC_CAP, got {}",
+            mna.c[nb][ne]
+        );
+        assert!(
+            (mna.c[ne][nb] + PARASITIC_CAP).abs() < 1e-25,
+            "C[emit][base] should be -PARASITIC_CAP, got {}",
+            mna.c[ne][nb]
+        );
 
         // Off-diagonal: B-C junction
-        assert!((mna.c[nb][nc] + PARASITIC_CAP).abs() < 1e-25,
-            "C[base][coll] should be -PARASITIC_CAP, got {}", mna.c[nb][nc]);
-        assert!((mna.c[nc][nb] + PARASITIC_CAP).abs() < 1e-25,
-            "C[coll][base] should be -PARASITIC_CAP, got {}", mna.c[nc][nb]);
+        assert!(
+            (mna.c[nb][nc] + PARASITIC_CAP).abs() < 1e-25,
+            "C[base][coll] should be -PARASITIC_CAP, got {}",
+            mna.c[nb][nc]
+        );
+        assert!(
+            (mna.c[nc][nb] + PARASITIC_CAP).abs() < 1e-25,
+            "C[coll][base] should be -PARASITIC_CAP, got {}",
+            mna.c[nc][nb]
+        );
 
         // Collector-Emitter: no direct parasitic cap
-        assert!((mna.c[nc][ne]).abs() < 1e-25,
-            "C[coll][emit] should be 0, got {}", mna.c[nc][ne]);
+        assert!(
+            (mna.c[nc][ne]).abs() < 1e-25,
+            "C[coll][emit] should be 0, got {}",
+            mna.c[nc][ne]
+        );
     }
 
     #[test]
@@ -2780,20 +3326,32 @@ R2 gate 0 1M
         let ns = *mna.node_map.get("source").unwrap() - 1;
 
         // Gate gets caps from both G-S and G-D junctions: 2 * PARASITIC_CAP
-        assert!((mna.c[ng][ng] - 2.0 * PARASITIC_CAP).abs() < 1e-25,
-            "C[gate][gate] should be 2*PARASITIC_CAP, got {}", mna.c[ng][ng]);
+        assert!(
+            (mna.c[ng][ng] - 2.0 * PARASITIC_CAP).abs() < 1e-25,
+            "C[gate][gate] should be 2*PARASITIC_CAP, got {}",
+            mna.c[ng][ng]
+        );
 
         // Off-diagonal: G-S
-        assert!((mna.c[ng][ns] + PARASITIC_CAP).abs() < 1e-25,
-            "C[gate][source] should be -PARASITIC_CAP, got {}", mna.c[ng][ns]);
+        assert!(
+            (mna.c[ng][ns] + PARASITIC_CAP).abs() < 1e-25,
+            "C[gate][source] should be -PARASITIC_CAP, got {}",
+            mna.c[ng][ns]
+        );
 
         // Off-diagonal: G-D
-        assert!((mna.c[ng][nd] + PARASITIC_CAP).abs() < 1e-25,
-            "C[gate][drain] should be -PARASITIC_CAP, got {}", mna.c[ng][nd]);
+        assert!(
+            (mna.c[ng][nd] + PARASITIC_CAP).abs() < 1e-25,
+            "C[gate][drain] should be -PARASITIC_CAP, got {}",
+            mna.c[ng][nd]
+        );
 
         // Drain-Source: no direct parasitic cap
-        assert!((mna.c[nd][ns]).abs() < 1e-25,
-            "C[drain][source] should be 0, got {}", mna.c[nd][ns]);
+        assert!(
+            (mna.c[nd][ns]).abs() < 1e-25,
+            "C[drain][source] should be 0, got {}",
+            mna.c[nd][ns]
+        );
     }
 
     #[test]
@@ -2813,16 +3371,25 @@ R1 drain 0 1k
         let ns = *mna.node_map.get("source").unwrap() - 1;
 
         // Gate gets caps from G-S and G-D: 2 * PARASITIC_CAP
-        assert!((mna.c[ng][ng] - 2.0 * PARASITIC_CAP).abs() < 1e-25,
-            "C[gate][gate] should be 2*PARASITIC_CAP, got {}", mna.c[ng][ng]);
+        assert!(
+            (mna.c[ng][ng] - 2.0 * PARASITIC_CAP).abs() < 1e-25,
+            "C[gate][gate] should be 2*PARASITIC_CAP, got {}",
+            mna.c[ng][ng]
+        );
 
         // Off-diagonal: G-S
-        assert!((mna.c[ng][ns] + PARASITIC_CAP).abs() < 1e-25,
-            "C[gate][source] should be -PARASITIC_CAP, got {}", mna.c[ng][ns]);
+        assert!(
+            (mna.c[ng][ns] + PARASITIC_CAP).abs() < 1e-25,
+            "C[gate][source] should be -PARASITIC_CAP, got {}",
+            mna.c[ng][ns]
+        );
 
         // Off-diagonal: G-D
-        assert!((mna.c[ng][nd] + PARASITIC_CAP).abs() < 1e-25,
-            "C[gate][drain] should be -PARASITIC_CAP, got {}", mna.c[ng][nd]);
+        assert!(
+            (mna.c[ng][nd] + PARASITIC_CAP).abs() < 1e-25,
+            "C[gate][drain] should be -PARASITIC_CAP, got {}",
+            mna.c[ng][nd]
+        );
     }
 
     #[test]
@@ -2843,32 +3410,56 @@ R2 grid 0 1M
         let nk = *mna.node_map.get("cathode").unwrap() - 1;
 
         // Cathode gets caps from both Cgk and Cpk: 2 * PARASITIC_CAP
-        assert!((mna.c[nk][nk] - 2.0 * PARASITIC_CAP).abs() < 1e-25,
-            "C[cathode][cathode] should be 2*PARASITIC_CAP, got {}", mna.c[nk][nk]);
+        assert!(
+            (mna.c[nk][nk] - 2.0 * PARASITIC_CAP).abs() < 1e-25,
+            "C[cathode][cathode] should be 2*PARASITIC_CAP, got {}",
+            mna.c[nk][nk]
+        );
 
         // Grid gets cap from Cgk only
-        assert!((mna.c[ng][ng] - PARASITIC_CAP).abs() < 1e-25,
-            "C[grid][grid] should be PARASITIC_CAP, got {}", mna.c[ng][ng]);
+        assert!(
+            (mna.c[ng][ng] - PARASITIC_CAP).abs() < 1e-25,
+            "C[grid][grid] should be PARASITIC_CAP, got {}",
+            mna.c[ng][ng]
+        );
 
         // Plate gets cap from Cpk only
-        assert!((mna.c[np][np] - PARASITIC_CAP).abs() < 1e-25,
-            "C[plate][plate] should be PARASITIC_CAP, got {}", mna.c[np][np]);
+        assert!(
+            (mna.c[np][np] - PARASITIC_CAP).abs() < 1e-25,
+            "C[plate][plate] should be PARASITIC_CAP, got {}",
+            mna.c[np][np]
+        );
 
         // Off-diagonal: grid-cathode
-        assert!((mna.c[ng][nk] + PARASITIC_CAP).abs() < 1e-25,
-            "C[grid][cathode] should be -PARASITIC_CAP, got {}", mna.c[ng][nk]);
-        assert!((mna.c[nk][ng] + PARASITIC_CAP).abs() < 1e-25,
-            "C[cathode][grid] should be -PARASITIC_CAP, got {}", mna.c[nk][ng]);
+        assert!(
+            (mna.c[ng][nk] + PARASITIC_CAP).abs() < 1e-25,
+            "C[grid][cathode] should be -PARASITIC_CAP, got {}",
+            mna.c[ng][nk]
+        );
+        assert!(
+            (mna.c[nk][ng] + PARASITIC_CAP).abs() < 1e-25,
+            "C[cathode][grid] should be -PARASITIC_CAP, got {}",
+            mna.c[nk][ng]
+        );
 
         // Off-diagonal: plate-cathode
-        assert!((mna.c[np][nk] + PARASITIC_CAP).abs() < 1e-25,
-            "C[plate][cathode] should be -PARASITIC_CAP, got {}", mna.c[np][nk]);
-        assert!((mna.c[nk][np] + PARASITIC_CAP).abs() < 1e-25,
-            "C[cathode][plate] should be -PARASITIC_CAP, got {}", mna.c[nk][np]);
+        assert!(
+            (mna.c[np][nk] + PARASITIC_CAP).abs() < 1e-25,
+            "C[plate][cathode] should be -PARASITIC_CAP, got {}",
+            mna.c[np][nk]
+        );
+        assert!(
+            (mna.c[nk][np] + PARASITIC_CAP).abs() < 1e-25,
+            "C[cathode][plate] should be -PARASITIC_CAP, got {}",
+            mna.c[nk][np]
+        );
 
         // Grid-Plate: no direct parasitic cap
-        assert!((mna.c[ng][np]).abs() < 1e-25,
-            "C[grid][plate] should be 0, got {}", mna.c[ng][np]);
+        assert!(
+            (mna.c[ng][np]).abs() < 1e-25,
+            "C[grid][plate] should be 0, got {}",
+            mna.c[ng][np]
+        );
     }
 
     #[test]
@@ -2899,7 +3490,9 @@ R2 emit 0 100
         // Diode: 1 junction (anode-cathode) = 2 off-diagonal entries
         // BJT: 2 junctions (B-E + B-C, all non-ground) = 4 off-diagonal entries
         // Total: 6 off-diagonal entries
-        assert_eq!(off_diag_count, 6,
-            "Expected 6 off-diagonal C entries (1 diode junction + 2 BJT junctions), got {off_diag_count}");
+        assert_eq!(
+            off_diag_count, 6,
+            "Expected 6 off-diagonal C entries (1 diode junction + 2 BJT junctions), got {off_diag_count}"
+        );
     }
 }

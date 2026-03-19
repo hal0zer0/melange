@@ -40,14 +40,28 @@ pub fn generate_plugin_project(
     nodal_mode: bool,
 ) -> Result<()> {
     std::fs::create_dir_all(output_dir.join("src"))?;
-    std::fs::write(output_dir.join("Cargo.toml"), generate_cargo_toml(circuit_name))?;
+    std::fs::write(
+        output_dir.join("Cargo.toml"),
+        generate_cargo_toml(circuit_name),
+    )?;
     std::fs::write(output_dir.join("src/circuit.rs"), circuit_code)?;
-    std::fs::write(output_dir.join("src/lib.rs"), generate_lib_rs(circuit_name, with_level_params, pots, switches, num_outputs, nodal_mode))?;
+    std::fs::write(
+        output_dir.join("src/lib.rs"),
+        generate_lib_rs(
+            circuit_name,
+            with_level_params,
+            pots,
+            switches,
+            num_outputs,
+            nodal_mode,
+        ),
+    )?;
     Ok(())
 }
 
 fn generate_cargo_toml(circuit_name: &str) -> String {
-    format!(r#"[package]
+    format!(
+        r#"[package]
 name = "{circuit_name}"
 version = "0.1.0"
 edition = "2021"
@@ -57,7 +71,8 @@ nih_plug = {{ git = "https://github.com/robbert-vdh/nih-plug.git", rev = "28b149
 
 [lib]
 crate-type = ["cdylib"]
-"#)
+"#
+    )
 }
 
 #[cfg(test)]
@@ -66,7 +81,11 @@ pub(crate) fn test_generate_cargo_toml(circuit_name: &str) -> String {
 }
 
 #[cfg(test)]
-pub(crate) fn test_generate_lib_rs(circuit_name: &str, with_level_params: bool, pots: &[PotParamInfo]) -> String {
+pub(crate) fn test_generate_lib_rs(
+    circuit_name: &str,
+    with_level_params: bool,
+    pots: &[PotParamInfo],
+) -> String {
     generate_lib_rs(circuit_name, with_level_params, pots, &[], 1, false)
 }
 
@@ -146,7 +165,11 @@ fn generate_switch_default(sw: &SwitchParamInfo) -> String {
     )
 }
 
-fn generate_params_struct(with_level_params: bool, pots: &[PotParamInfo], switches: &[SwitchParamInfo]) -> String {
+fn generate_params_struct(
+    with_level_params: bool,
+    pots: &[PotParamInfo],
+    switches: &[SwitchParamInfo],
+) -> String {
     let has_any_params = with_level_params || !pots.is_empty() || !switches.is_empty();
     if !has_any_params {
         return "#[derive(Params, Default)]\npub struct CircuitParams {}".to_string();
@@ -184,7 +207,13 @@ impl Default for CircuitParams {{
     )
 }
 
-fn generate_process_loop(with_level_params: bool, pots: &[PotParamInfo], switches: &[SwitchParamInfo], num_outputs: usize, nodal_mode: bool) -> String {
+fn generate_process_loop(
+    with_level_params: bool,
+    pots: &[PotParamInfo],
+    switches: &[SwitchParamInfo],
+    num_outputs: usize,
+    nodal_mode: bool,
+) -> String {
     let has_any_params = with_level_params || !pots.is_empty() || !switches.is_empty();
     if !has_any_params && num_outputs <= 1 {
         return r#"        for channel_samples in buffer.iter_samples() {
@@ -194,7 +223,7 @@ fn generate_process_loop(with_level_params: bool, pots: &[PotParamInfo], switche
                 *sample = if out.is_finite() { out.clamp(-1.0, 1.0) } else { 0.0 };
             }
         }"#
-            .to_string();
+        .to_string();
     }
     if !has_any_params && num_outputs > 1 {
         return r#"        for channel_samples in buffer.iter_samples() {
@@ -205,7 +234,7 @@ fn generate_process_loop(with_level_params: bool, pots: &[PotParamInfo], switche
                 *sample = if out.is_finite() { out.clamp(-1.0, 1.0) } else { 0.0 };
             }
         }"#
-            .to_string();
+        .to_string();
     }
 
     let gain_reads = if with_level_params {
@@ -337,112 +366,117 @@ const LEVEL_PARAM_DEFAULTS: &str = r#"            input_level: FloatParam::new(
             .with_string_to_value(formatters::s2v_f32_gain_to_db()),
 "#;
 
-fn generate_lib_rs(circuit_name: &str, with_level_params: bool, pots: &[PotParamInfo], switches: &[SwitchParamInfo], num_outputs: usize, nodal_mode: bool) -> String {
-    let display_name: String = circuit_name.split('-').map(capitalize_word).collect::<Vec<_>>().join(" ");
+fn generate_lib_rs(
+    circuit_name: &str,
+    with_level_params: bool,
+    pots: &[PotParamInfo],
+    switches: &[SwitchParamInfo],
+    num_outputs: usize,
+    nodal_mode: bool,
+) -> String {
+    let display_name: String = circuit_name
+        .split('-')
+        .map(capitalize_word)
+        .collect::<Vec<_>>()
+        .join(" ");
     let clap_id = format!("com.melange.{circuit_name}");
     let vst3_id_str = compute_vst3_id(circuit_name);
     let params_struct = generate_params_struct(with_level_params, pots, switches);
-    let process_loop = generate_process_loop(with_level_params, pots, switches, num_outputs, nodal_mode);
+    let process_loop =
+        generate_process_loop(with_level_params, pots, switches, num_outputs, nodal_mode);
 
     // Conditional sections based on num_outputs
-    let (circuit_import, plugin_struct, plugin_default, init_method, reset_method) = if num_outputs > 1 {
-        // Multi-output: single circuit state, mono input → multi-output
-        (
-            format!("use circuit::{{process_sample, CircuitState, NUM_OUTPUTS}};"),
-            format!(
-                "pub struct CircuitPlugin {{\n\
+    let (circuit_import, plugin_struct, plugin_default, init_method, reset_method) =
+        if num_outputs > 1 {
+            // Multi-output: single circuit state, mono input → multi-output
+            (
+                "use circuit::{process_sample, CircuitState, NUM_OUTPUTS};".to_string(),
+                "pub struct CircuitPlugin {\n\
                  \x20   params: Arc<CircuitParams>,\n\
                  \x20   circuit_state: CircuitState,\n\
                  \x20   current_sample_rate: f64,\n\
-                 }}"
-            ),
-            format!(
-                "impl Default for CircuitPlugin {{\n\
-                 \x20   fn default() -> Self {{\n\
-                 \x20       Self {{\n\
+                 }"
+                .to_string(),
+                "impl Default for CircuitPlugin {\n\
+                 \x20   fn default() -> Self {\n\
+                 \x20       Self {\n\
                  \x20           params: Arc::new(CircuitParams::default()),\n\
                  \x20           circuit_state: CircuitState::default(),\n\
                  \x20           current_sample_rate: 0.0,\n\
-                 \x20       }}\n\
-                 \x20   }}\n\
-                 }}"
-            ),
-            format!(
+                 \x20       }\n\
+                 \x20   }\n\
+                 }"
+                .to_string(),
                 "    fn initialize(\n\
                  \x20       &mut self,\n\
                  \x20       _audio_io_layout: &AudioIOLayout,\n\
                  \x20       buffer_config: &BufferConfig,\n\
                  \x20       _context: &mut impl InitContext<Self>,\n\
-                 \x20   ) -> bool {{\n\
+                 \x20   ) -> bool {\n\
                  \x20       self.current_sample_rate = buffer_config.sample_rate as f64;\n\
                  \x20       self.circuit_state = CircuitState::default();\n\
                  \x20       self.circuit_state.set_sample_rate(buffer_config.sample_rate as f64);\n\
                  \x20       true\n\
-                 \x20   }}"
-            ),
-            format!(
-                "    fn reset(&mut self) {{\n\
+                 \x20   }"
+                    .to_string(),
+                "    fn reset(&mut self) {\n\
                  \x20       let sr = self.current_sample_rate;\n\
                  \x20       self.circuit_state = CircuitState::default();\n\
-                 \x20       if sr > 0.0 {{\n\
+                 \x20       if sr > 0.0 {\n\
                  \x20           self.circuit_state.set_sample_rate(sr);\n\
-                 \x20       }}\n\
-                 \x20   }}"
-            ),
-        )
-    } else {
-        // Single output: per-channel state duplication (stereo from mono)
-        (
-            format!("use circuit::{{process_sample, CircuitState}};"),
-            format!(
-                "pub struct CircuitPlugin {{\n\
+                 \x20       }\n\
+                 \x20   }"
+                    .to_string(),
+            )
+        } else {
+            // Single output: per-channel state duplication (stereo from mono)
+            (
+                "use circuit::{process_sample, CircuitState};".to_string(),
+                "pub struct CircuitPlugin {\n\
                  \x20   params: Arc<CircuitParams>,\n\
                  \x20   circuit_states: Vec<CircuitState>,\n\
                  \x20   current_sample_rate: f64,\n\
-                 }}"
-            ),
-            format!(
-                "impl Default for CircuitPlugin {{\n\
-                 \x20   fn default() -> Self {{\n\
-                 \x20       Self {{\n\
+                 }"
+                .to_string(),
+                "impl Default for CircuitPlugin {\n\
+                 \x20   fn default() -> Self {\n\
+                 \x20       Self {\n\
                  \x20           params: Arc::new(CircuitParams::default()),\n\
                  \x20           circuit_states: vec![CircuitState::default(); 2],\n\
                  \x20           current_sample_rate: 0.0,\n\
-                 \x20       }}\n\
-                 \x20   }}\n\
-                 }}"
-            ),
-            format!(
+                 \x20       }\n\
+                 \x20   }\n\
+                 }"
+                .to_string(),
                 "    fn initialize(\n\
                  \x20       &mut self,\n\
                  \x20       audio_io_layout: &AudioIOLayout,\n\
                  \x20       buffer_config: &BufferConfig,\n\
                  \x20       _context: &mut impl InitContext<Self>,\n\
-                 \x20   ) -> bool {{\n\
+                 \x20   ) -> bool {\n\
                  \x20       let num_channels = audio_io_layout.main_input_channels\n\
                  \x20           .map(|c| c.get() as usize).unwrap_or(2);\n\
                  \x20       self.current_sample_rate = buffer_config.sample_rate as f64;\n\
-                 \x20       self.circuit_states = (0..num_channels).map(|_| {{\n\
+                 \x20       self.circuit_states = (0..num_channels).map(|_| {\n\
                  \x20           let mut s = CircuitState::default();\n\
                  \x20           s.set_sample_rate(buffer_config.sample_rate as f64);\n\
                  \x20           s\n\
-                 \x20       }}).collect();\n\
+                 \x20       }).collect();\n\
                  \x20       true\n\
-                 \x20   }}"
-            ),
-            format!(
-                "    fn reset(&mut self) {{\n\
+                 \x20   }"
+                    .to_string(),
+                "    fn reset(&mut self) {\n\
                  \x20       let sr = self.current_sample_rate;\n\
-                 \x20       for state in &mut self.circuit_states {{\n\
+                 \x20       for state in &mut self.circuit_states {\n\
                  \x20           *state = CircuitState::default();\n\
-                 \x20           if sr > 0.0 {{\n\
+                 \x20           if sr > 0.0 {\n\
                  \x20               state.set_sample_rate(sr);\n\
-                 \x20           }}\n\
-                 \x20       }}\n\
-                 \x20   }}"
-            ),
-        )
-    };
+                 \x20           }\n\
+                 \x20       }\n\
+                 \x20   }"
+                    .to_string(),
+            )
+        };
 
     format!(
         r#"// =============================================================================
@@ -616,27 +650,41 @@ mod tests {
         let lib = test_generate_lib_rs("test-circuit", false, &[]);
         // The VST3 ID is embedded as b"..." which should be 16 chars
         // Find the VST3_CLASS_ID line
-        let vst3_line = lib.lines()
+        let vst3_line = lib
+            .lines()
             .find(|l| l.contains("VST3_CLASS_ID"))
             .expect("Should have VST3_CLASS_ID line");
         // Extract the b"..." content
         let start = vst3_line.find("*b\"").expect("Should have b\"") + 3;
-        let end = vst3_line[start..].find('"').expect("Should have closing quote") + start;
+        let end = vst3_line[start..]
+            .find('"')
+            .expect("Should have closing quote")
+            + start;
         let id_str = &vst3_line[start..end];
-        assert_eq!(id_str.len(), 16, "VST3 ID should be exactly 16 bytes, got {}", id_str.len());
+        assert_eq!(
+            id_str.len(),
+            16,
+            "VST3 ID should be exactly 16 bytes, got {}",
+            id_str.len()
+        );
     }
 
     #[test]
     fn vst3_id_printable_ascii() {
         let lib = test_generate_lib_rs("test-circuit", false, &[]);
-        let vst3_line = lib.lines()
+        let vst3_line = lib
+            .lines()
             .find(|l| l.contains("VST3_CLASS_ID"))
             .expect("Should have VST3_CLASS_ID line");
         let start = vst3_line.find("*b\"").unwrap() + 3;
         let end = vst3_line[start..].find('"').unwrap() + start;
         let id_str = &vst3_line[start..end];
         for ch in id_str.chars() {
-            assert!(ch.is_ascii_uppercase(), "VST3 ID char '{}' should be uppercase ASCII letter", ch);
+            assert!(
+                ch.is_ascii_uppercase(),
+                "VST3 ID char '{}' should be uppercase ASCII letter",
+                ch
+            );
         }
     }
 
@@ -842,7 +890,10 @@ mod tests {
         let lib = test_generate_lib_rs("test", false, &pots);
         // The template embeds the ohm symbol escape as a literal string in the generated code
         // (it will be interpreted by the Rust compiler when the generated code is compiled)
-        assert!(lib.contains(r"\u{2126}"), "Should contain ohm symbol escape in generated code");
+        assert!(
+            lib.contains(r"\u{2126}"),
+            "Should contain ohm symbol escape in generated code"
+        );
     }
 
     #[test]
@@ -922,10 +973,17 @@ mod tests {
             1,
             false,
         );
-        assert!(result.is_ok(), "generate_plugin_project should succeed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "generate_plugin_project should succeed: {:?}",
+            result.err()
+        );
         assert!(dir.join("Cargo.toml").exists(), "Should create Cargo.toml");
         assert!(dir.join("src").is_dir(), "Should create src/");
-        assert!(dir.join("src/circuit.rs").exists(), "Should create src/circuit.rs");
+        assert!(
+            dir.join("src/circuit.rs").exists(),
+            "Should create src/circuit.rs"
+        );
         assert!(dir.join("src/lib.rs").exists(), "Should create src/lib.rs");
         // Clean up
         let _ = std::fs::remove_dir_all(&dir);
@@ -947,7 +1005,8 @@ mod tests {
     fn generate_plugin_project_cargo_toml_has_correct_name() {
         let dir = std::env::temp_dir().join("melange_test_plugin_name");
         let _ = std::fs::remove_dir_all(&dir);
-        let result = generate_plugin_project(&dir, "// code", "my-cool-plugin", false, &[], &[], 1, false);
+        let result =
+            generate_plugin_project(&dir, "// code", "my-cool-plugin", false, &[], &[], 1, false);
         assert!(result.is_ok());
         let toml = std::fs::read_to_string(dir.join("Cargo.toml")).unwrap();
         assert!(toml.contains("name = \"my-cool-plugin\""));
@@ -958,7 +1017,8 @@ mod tests {
     fn generate_plugin_project_lib_rs_has_plugin_code() {
         let dir = std::env::temp_dir().join("melange_test_plugin_lib");
         let _ = std::fs::remove_dir_all(&dir);
-        let result = generate_plugin_project(&dir, "// code", "my-plugin", false, &[], &[], 1, false);
+        let result =
+            generate_plugin_project(&dir, "// code", "my-plugin", false, &[], &[], 1, false);
         assert!(result.is_ok());
         let lib_rs = std::fs::read_to_string(dir.join("src/lib.rs")).unwrap();
         assert!(lib_rs.contains("CircuitPlugin"));
@@ -1000,10 +1060,12 @@ mod tests {
     #[test]
     fn long_circuit_name_vst3_id_still_16_bytes() {
         // A name longer than 16 bytes should still produce a 16-byte VST3 ID
-        let lib = test_generate_lib_rs("this-is-a-very-long-circuit-name-that-exceeds-sixteen-bytes", false, &[]);
-        let vst3_line = lib.lines()
-            .find(|l| l.contains("VST3_CLASS_ID"))
-            .unwrap();
+        let lib = test_generate_lib_rs(
+            "this-is-a-very-long-circuit-name-that-exceeds-sixteen-bytes",
+            false,
+            &[],
+        );
+        let vst3_line = lib.lines().find(|l| l.contains("VST3_CLASS_ID")).unwrap();
         let start = vst3_line.find("*b\"").unwrap() + 3;
         let end = vst3_line[start..].find('"').unwrap() + start;
         assert_eq!(end - start, 16);

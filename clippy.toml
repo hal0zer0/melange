@@ -1,0 +1,3 @@
+# Matrix math code intentionally uses index loops for clarity.
+# The needless_range_loop and similar lints don't improve matrix code.
+too-many-arguments-threshold = 12

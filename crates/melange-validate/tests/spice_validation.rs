@@ -25,15 +25,14 @@
 
 use std::path::PathBuf;
 
-use melange_validate::{
-    comparison::{compare_signals, ComparisonConfig, Signal},
-    spice_runner::{is_ngspice_available, run_transient_with_thevenin_pwl},
-    strip_vin_source,
-    validate_circuit,
-    visualizer::generate_html_report,
-    ValidationError,
-};
 use melange_devices::bjt::BjtPolarity;
+use melange_validate::{
+    ValidationError,
+    comparison::{ComparisonConfig, Signal, compare_signals},
+    spice_runner::{is_ngspice_available, run_transient_with_thevenin_pwl},
+    strip_vin_source, validate_circuit,
+    visualizer::generate_html_report,
+};
 
 /// Sample rate used for all validation tests (48 kHz audio standard)
 const SAMPLE_RATE: f64 = 48_000.0;
@@ -83,11 +82,11 @@ fn load_pwl_file(path: &PathBuf) -> Result<Vec<(f64, f64)>, std::io::Error> {
 /// no Newton-Raphson iteration or device nonlinearity.
 fn strict_linear_config() -> ComparisonConfig {
     ComparisonConfig {
-        rms_error_tolerance: 5e-4,        // 0.05% — accounts for trapezoidal frequency warping
-        peak_error_tolerance: 5e-3,       // 5 mV for 1V signal
-        max_relative_tolerance: 0.5,       // 50% — relative error is large near zero-crossings
-        correlation_min: 0.99999,         // Five 9s
-        thd_error_tolerance_db: 0.1,      // 0.1 dB
+        rms_error_tolerance: 5e-4, // 0.05% — accounts for trapezoidal frequency warping
+        peak_error_tolerance: 5e-3, // 5 mV for 1V signal
+        max_relative_tolerance: 0.5, // 50% — relative error is large near zero-crossings
+        correlation_min: 0.99999,  // Five 9s
+        thd_error_tolerance_db: 0.1, // 0.1 dB
         full_scale: 1.0,
         skip_thd: false,
     }
@@ -101,12 +100,12 @@ fn strict_linear_config() -> ComparisonConfig {
 /// - Numerical precision in exponential functions
 fn nonlinear_config() -> ComparisonConfig {
     ComparisonConfig {
-        rms_error_tolerance: 0.20,        // 20% — DK vs SPICE method differences
-        peak_error_tolerance: 0.5,        // 500mV
-        max_relative_tolerance: 5.0,      // 500% — near zero-crossings, large relative error expected
-        correlation_min: 0.99,            // Two 9s — waveform shape should match
-        thd_error_tolerance_db: 3.0,      // 3 dB — DK method produces different harmonics than SPICE
-        full_scale: 5.0,                  // Diode clippers can hit 5V
+        rms_error_tolerance: 0.20,   // 20% — DK vs SPICE method differences
+        peak_error_tolerance: 0.5,   // 500mV
+        max_relative_tolerance: 5.0, // 500% — near zero-crossings, large relative error expected
+        correlation_min: 0.99,       // Two 9s — waveform shape should match
+        thd_error_tolerance_db: 3.0, // 3 dB — DK method produces different harmonics than SPICE
+        full_scale: 5.0,             // Diode clippers can hit 5V
         skip_thd: false,
     }
 }
@@ -121,13 +120,13 @@ fn nonlinear_config() -> ComparisonConfig {
 /// Measured values (2026-03-01): RMS 35%, peak 1.56V, correlation 0.965
 fn bjt_config() -> ComparisonConfig {
     ComparisonConfig {
-        rms_error_tolerance: 0.40,        // 40% — dominated by 0.5V DC offset between models
-        peak_error_tolerance: 1.8,        // 1.8V — startup transient + DC offset
-        max_relative_tolerance: 1000.0,   // near zero-crossings have huge relative error due to DC offset
-        correlation_min: 0.96,            // waveform shape should match well (measured: 0.963)
-        thd_error_tolerance_db: 5.0,      // larger model differences
-        full_scale: 10.0,                 // BJT CE output can swing wider
-        skip_thd: true,                   // THD unreliable: DC offset shifts fundamental detection
+        rms_error_tolerance: 0.40, // 40% — dominated by 0.5V DC offset between models
+        peak_error_tolerance: 1.8, // 1.8V — startup transient + DC offset
+        max_relative_tolerance: 1000.0, // near zero-crossings have huge relative error due to DC offset
+        correlation_min: 0.96,          // waveform shape should match well (measured: 0.963)
+        thd_error_tolerance_db: 5.0,    // larger model differences
+        full_scale: 10.0,               // BJT CE output can swing wider
+        skip_thd: true,                 // THD unreliable: DC offset shifts fundamental detection
     }
 }
 
@@ -172,8 +171,8 @@ fn run_validation(
     }
 
     // Read the single netlist file
-    let netlist_str = std::fs::read_to_string(&netlist_path)
-        .map_err(|e| ValidationError::Io(e.to_string()))?;
+    let netlist_str =
+        std::fs::read_to_string(&netlist_path).map_err(|e| ValidationError::Io(e.to_string()))?;
 
     // Determine simulation parameters from PWL data
     let duration = pwl_data.last().map(|(t, _)| *t).unwrap_or(0.01);
@@ -231,7 +230,11 @@ fn run_validation(
 }
 
 /// Resample PWL data to a uniform sample rate
-fn resample_pwl_to_signal(pwl_data: &[(f64, f64)], sample_rate: f64, num_samples: usize) -> Vec<f64> {
+fn resample_pwl_to_signal(
+    pwl_data: &[(f64, f64)],
+    sample_rate: f64,
+    num_samples: usize,
+) -> Vec<f64> {
     let mut signal = Vec::with_capacity(num_samples);
 
     for i in 0..num_samples {
@@ -283,16 +286,27 @@ fn run_melange_solver(
 ) -> Result<Vec<f64>, ValidationError> {
     use melange_solver::solver::CircuitSolver;
 
-    let netlist = melange_solver::parser::Netlist::parse(netlist_str)
-        .map_err(|e| ValidationError::Solver(format!("Parse error at line {}: {}", e.line, e.message)))?;
+    let netlist = melange_solver::parser::Netlist::parse(netlist_str).map_err(|e| {
+        ValidationError::Solver(format!("Parse error at line {}: {}", e.line, e.message))
+    })?;
 
     // Build MNA system (mutable — we need to stamp input conductance before kernel build)
     let mut mna = melange_solver::mna::MnaSystem::from_netlist(&netlist)
         .map_err(|e| ValidationError::Solver(format!("MNA error: {}", e)))?;
 
     // Determine input/output node indices BEFORE building kernel
-    let input_node = mna.node_map.get("in").copied().unwrap_or(1).saturating_sub(1);
-    let output_node = mna.node_map.get("out").copied().unwrap_or(2).saturating_sub(1);
+    let input_node = mna
+        .node_map
+        .get("in")
+        .copied()
+        .unwrap_or(1)
+        .saturating_sub(1);
+    let output_node = mna
+        .node_map
+        .get("out")
+        .copied()
+        .unwrap_or(2)
+        .saturating_sub(1);
     // Use near-ideal voltage source (1Ω) to match SPICE's ideal VIN.
     // The SPICE netlist uses an ideal voltage source; melange models it as a
     // Thevenin source with R_in. Using 1Ω gives G_in = 1.0 S, making the
@@ -345,14 +359,25 @@ fn run_melange_solver_nodal(
 ) -> Result<Vec<f64>, ValidationError> {
     use melange_solver::solver::NodalSolver;
 
-    let netlist = melange_solver::parser::Netlist::parse(netlist_str)
-        .map_err(|e| ValidationError::Solver(format!("Parse error at line {}: {}", e.line, e.message)))?;
+    let netlist = melange_solver::parser::Netlist::parse(netlist_str).map_err(|e| {
+        ValidationError::Solver(format!("Parse error at line {}: {}", e.line, e.message))
+    })?;
 
     let mut mna = melange_solver::mna::MnaSystem::from_netlist(&netlist)
         .map_err(|e| ValidationError::Solver(format!("MNA error: {}", e)))?;
 
-    let input_node = mna.node_map.get("in").copied().unwrap_or(1).saturating_sub(1);
-    let output_node = mna.node_map.get("out").copied().unwrap_or(2).saturating_sub(1);
+    let input_node = mna
+        .node_map
+        .get("in")
+        .copied()
+        .unwrap_or(1)
+        .saturating_sub(1);
+    let output_node = mna
+        .node_map
+        .get("out")
+        .copied()
+        .unwrap_or(2)
+        .saturating_sub(1);
     let input_conductance = 1.0;
 
     if input_node < mna.n {
@@ -364,7 +389,14 @@ fn run_melange_solver_nodal(
 
     let device_slots = build_device_slots_from_netlist(&netlist);
 
-    let mut solver = NodalSolver::new(kernel, &mna, &netlist, device_slots.clone(), input_node, output_node);
+    let mut solver = NodalSolver::new(
+        kernel,
+        &mna,
+        &netlist,
+        device_slots.clone(),
+        input_node,
+        output_node,
+    );
     solver.input_conductance = input_conductance;
 
     if mna.m > 0 {
@@ -384,9 +416,9 @@ fn build_devices_from_netlist(
     netlist: &melange_solver::parser::Netlist,
     mna: &melange_solver::mna::MnaSystem,
 ) -> Result<Vec<melange_solver::solver::DeviceEntry>, ValidationError> {
-    use melange_solver::solver::DeviceEntry;
-    use melange_devices::diode::DiodeShockley;
     use melange_devices::bjt::BjtEbersMoll;
+    use melange_devices::diode::DiodeShockley;
+    use melange_solver::solver::DeviceEntry;
 
     let mut devices = Vec::new();
 
@@ -430,7 +462,10 @@ fn build_devices_from_netlist(
 
 /// Find diode model parameters from netlist
 /// Returns (IS, N) if found
-fn find_diode_model(netlist: &melange_solver::parser::Netlist, device_name: &str) -> (Option<f64>, Option<f64>) {
+fn find_diode_model(
+    netlist: &melange_solver::parser::Netlist,
+    device_name: &str,
+) -> (Option<f64>, Option<f64>) {
     // First, find the device to get its model name
     let model_name = netlist.elements.iter().find_map(|e| {
         if let melange_solver::parser::Element::Diode { name, model, .. } = e {
@@ -546,29 +581,53 @@ fn find_bjt_polarity(netlist: &melange_solver::parser::Netlist, device_name: &st
 }
 
 /// Find JFET device from netlist, constructing a Jfet with model params.
-fn find_jfet_device(netlist: &melange_solver::parser::Netlist, device_name: &str) -> melange_devices::Jfet {
+fn find_jfet_device(
+    netlist: &melange_solver::parser::Netlist,
+    device_name: &str,
+) -> melange_devices::Jfet {
     use melange_devices::jfet::{Jfet, JfetChannel};
 
-    let model_name = netlist.elements.iter().find_map(|e| {
-        if let melange_solver::parser::Element::Jfet { name, model, .. } = e {
-            if name.eq_ignore_ascii_case(device_name) { Some(model.clone()) } else { None }
-        } else { None }
-    }).unwrap_or_default();
+    let model_name = netlist
+        .elements
+        .iter()
+        .find_map(|e| {
+            if let melange_solver::parser::Element::Jfet { name, model, .. } = e {
+                if name.eq_ignore_ascii_case(device_name) {
+                    Some(model.clone())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        })
+        .unwrap_or_default();
 
-    let is_p_channel = netlist.models.iter()
+    let is_p_channel = netlist
+        .models
+        .iter()
         .find(|m| m.name.eq_ignore_ascii_case(&model_name))
         .map(|m| m.model_type.to_uppercase().starts_with("PJ"))
         .unwrap_or(false);
 
-    let channel = if is_p_channel { JfetChannel::P } else { JfetChannel::N };
+    let channel = if is_p_channel {
+        JfetChannel::P
+    } else {
+        JfetChannel::N
+    };
     let default_vp = if is_p_channel { 2.0 } else { -2.0 };
 
     let find_param = |param: &str| -> Option<f64> {
-        netlist.models.iter()
+        netlist
+            .models
+            .iter()
             .find(|m| m.name.eq_ignore_ascii_case(&model_name))
-            .and_then(|m| m.params.iter()
-                .find(|(k, _)| k.eq_ignore_ascii_case(param))
-                .map(|(_, v)| *v))
+            .and_then(|m| {
+                m.params
+                    .iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case(param))
+                    .map(|(_, v)| *v)
+            })
     };
 
     let vp = find_param("VTO").unwrap_or(default_vp);
@@ -584,29 +643,53 @@ fn find_jfet_device(netlist: &melange_solver::parser::Netlist, device_name: &str
 }
 
 /// Find MOSFET device from netlist, constructing a Mosfet with model params.
-fn find_mosfet_device(netlist: &melange_solver::parser::Netlist, device_name: &str) -> melange_devices::Mosfet {
-    use melange_devices::mosfet::{Mosfet, ChannelType};
+fn find_mosfet_device(
+    netlist: &melange_solver::parser::Netlist,
+    device_name: &str,
+) -> melange_devices::Mosfet {
+    use melange_devices::mosfet::{ChannelType, Mosfet};
 
-    let model_name = netlist.elements.iter().find_map(|e| {
-        if let melange_solver::parser::Element::Mosfet { name, model, .. } = e {
-            if name.eq_ignore_ascii_case(device_name) { Some(model.clone()) } else { None }
-        } else { None }
-    }).unwrap_or_default();
+    let model_name = netlist
+        .elements
+        .iter()
+        .find_map(|e| {
+            if let melange_solver::parser::Element::Mosfet { name, model, .. } = e {
+                if name.eq_ignore_ascii_case(device_name) {
+                    Some(model.clone())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        })
+        .unwrap_or_default();
 
-    let is_p_channel = netlist.models.iter()
+    let is_p_channel = netlist
+        .models
+        .iter()
         .find(|m| m.name.eq_ignore_ascii_case(&model_name))
         .map(|m| m.model_type.to_uppercase().starts_with("PM"))
         .unwrap_or(false);
 
-    let channel = if is_p_channel { ChannelType::P } else { ChannelType::N };
+    let channel = if is_p_channel {
+        ChannelType::P
+    } else {
+        ChannelType::N
+    };
     let default_vt = if is_p_channel { -2.0 } else { 2.0 };
 
     let find_param = |param: &str| -> Option<f64> {
-        netlist.models.iter()
+        netlist
+            .models
+            .iter()
             .find(|m| m.name.eq_ignore_ascii_case(&model_name))
-            .and_then(|m| m.params.iter()
-                .find(|(k, _)| k.eq_ignore_ascii_case(param))
-                .map(|(_, v)| *v))
+            .and_then(|m| {
+                m.params
+                    .iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case(param))
+                    .map(|(_, v)| *v)
+            })
     };
 
     let vt = find_param("VTO").unwrap_or(default_vt);
@@ -616,19 +699,37 @@ fn find_mosfet_device(netlist: &melange_solver::parser::Netlist, device_name: &s
 }
 
 /// Find tube/triode device from netlist, constructing a KorenTriode with model params.
-fn find_tube_device(netlist: &melange_solver::parser::Netlist, device_name: &str) -> melange_devices::KorenTriode {
-    let model_name = netlist.elements.iter().find_map(|e| {
-        if let melange_solver::parser::Element::Triode { name, model, .. } = e {
-            if name.eq_ignore_ascii_case(device_name) { Some(model.clone()) } else { None }
-        } else { None }
-    }).unwrap_or_default();
+fn find_tube_device(
+    netlist: &melange_solver::parser::Netlist,
+    device_name: &str,
+) -> melange_devices::KorenTriode {
+    let model_name = netlist
+        .elements
+        .iter()
+        .find_map(|e| {
+            if let melange_solver::parser::Element::Triode { name, model, .. } = e {
+                if name.eq_ignore_ascii_case(device_name) {
+                    Some(model.clone())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        })
+        .unwrap_or_default();
 
     let find_param = |param: &str| -> Option<f64> {
-        netlist.models.iter()
+        netlist
+            .models
+            .iter()
             .find(|m| m.name.eq_ignore_ascii_case(&model_name))
-            .and_then(|m| m.params.iter()
-                .find(|(k, _)| k.eq_ignore_ascii_case(param))
-                .map(|(_, v)| *v))
+            .and_then(|m| {
+                m.params
+                    .iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case(param))
+                    .map(|(_, v)| *v)
+            })
     };
 
     let mu = find_param("MU").unwrap_or(100.0);
@@ -646,18 +747,26 @@ fn find_tube_device(netlist: &melange_solver::parser::Netlist, device_name: &str
 fn build_device_slots_from_netlist(
     netlist: &melange_solver::parser::Netlist,
 ) -> Vec<melange_solver::codegen::ir::DeviceSlot> {
-    use melange_solver::codegen::ir::{DeviceSlot, DeviceType, DeviceParams, DiodeParams, BjtParams, JfetParams, MosfetParams, TubeParams};
+    use melange_solver::codegen::ir::{
+        BjtParams, DeviceParams, DeviceSlot, DeviceType, DiodeParams, JfetParams, MosfetParams,
+        TubeParams,
+    };
 
     let vt = 0.02585;
     let mut slots = Vec::new();
     let mut dim_offset = 0;
 
     let find_model_param = |model_name: &str, param: &str| -> Option<f64> {
-        netlist.models.iter()
+        netlist
+            .models
+            .iter()
             .find(|m| m.name.eq_ignore_ascii_case(model_name))
-            .and_then(|m| m.params.iter()
-                .find(|(k, _)| k.eq_ignore_ascii_case(param))
-                .map(|(_, v)| *v))
+            .and_then(|m| {
+                m.params
+                    .iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case(param))
+                    .map(|(_, v)| *v)
+            })
     };
 
     for elem in &netlist.elements {
@@ -670,7 +779,14 @@ fn build_device_slots_from_netlist(
                     device_type: DeviceType::Diode,
                     start_idx: dim_offset,
                     dimension: 1,
-                    params: DeviceParams::Diode(DiodeParams { is, n_vt: n * vt, cjo: 0.0, rs: 0.0, bv: f64::INFINITY, ibv: 1e-10 }),
+                    params: DeviceParams::Diode(DiodeParams {
+                        is,
+                        n_vt: n * vt,
+                        cjo: 0.0,
+                        rs: 0.0,
+                        bv: f64::INFINITY,
+                        ibv: 1e-10,
+                    }),
                 });
                 dim_offset += 1;
             }
@@ -679,7 +795,9 @@ fn build_device_slots_from_netlist(
                 let is = bjt_params.0.unwrap_or(1e-14);
                 let beta_f = bjt_params.1.unwrap_or(200.0);
                 let beta_r = bjt_params.2.unwrap_or(3.0);
-                let is_pnp = netlist.models.iter()
+                let is_pnp = netlist
+                    .models
+                    .iter()
                     .find(|m| m.name.eq_ignore_ascii_case(model))
                     .map(|m| m.model_type.to_uppercase().starts_with("PNP"))
                     .unwrap_or(false);
@@ -688,19 +806,36 @@ fn build_device_slots_from_netlist(
                     start_idx: dim_offset,
                     dimension: 2,
                     params: DeviceParams::Bjt(BjtParams {
-                        is, vt, beta_f, beta_r, is_pnp,
-                        vaf: f64::INFINITY, var: f64::INFINITY,
-                        ikf: f64::INFINITY, ikr: f64::INFINITY,
-                        cje: 0.0, cjc: 0.0,
-                        nf: 1.0, ise: 0.0, ne: 1.5,
-                        rb: 0.0, rc: 0.0, re: 0.0,
-                        rth: f64::INFINITY, cth: 1e-3, xti: 3.0, eg: 1.11, tamb: 300.15,
+                        is,
+                        vt,
+                        beta_f,
+                        beta_r,
+                        is_pnp,
+                        vaf: f64::INFINITY,
+                        var: f64::INFINITY,
+                        ikf: f64::INFINITY,
+                        ikr: f64::INFINITY,
+                        cje: 0.0,
+                        cjc: 0.0,
+                        nf: 1.0,
+                        ise: 0.0,
+                        ne: 1.5,
+                        rb: 0.0,
+                        rc: 0.0,
+                        re: 0.0,
+                        rth: f64::INFINITY,
+                        cth: 1e-3,
+                        xti: 3.0,
+                        eg: 1.11,
+                        tamb: 300.15,
                     }),
                 });
                 dim_offset += 2;
             }
             melange_solver::parser::Element::Jfet { model, .. } => {
-                let is_p_channel = netlist.models.iter()
+                let is_p_channel = netlist
+                    .models
+                    .iter()
                     .find(|m| m.name.eq_ignore_ascii_case(model))
                     .map(|m| m.model_type.to_uppercase().starts_with("PJ"))
                     .unwrap_or(false);
@@ -730,7 +865,9 @@ fn build_device_slots_from_netlist(
                 dim_offset += 2;
             }
             melange_solver::parser::Element::Mosfet { model, .. } => {
-                let is_p_channel = netlist.models.iter()
+                let is_p_channel = netlist
+                    .models
+                    .iter()
                     .find(|m| m.name.eq_ignore_ascii_case(model))
                     .map(|m| m.model_type.to_uppercase().starts_with("PM"))
                     .unwrap_or(false);
@@ -825,9 +962,13 @@ fn print_validation_metrics(result: &ValidationResult) {
     } else {
         println!("  ✗ Validation FAILED for {}", report.circuit_name);
     }
-    println!("    Samples: {} at {:.0} Hz", report.sample_count, report.sample_rate);
+    println!(
+        "    Samples: {} at {:.0} Hz",
+        report.sample_count, report.sample_rate
+    );
     println!("    RMS Error: {:.6e}", report.rms_error);
-    println!("    Normalized RMS: {:.6} ({:.4}%)",
+    println!(
+        "    Normalized RMS: {:.6} ({:.4}%)",
         report.normalized_rms_error,
         report.normalized_rms_error * 100.0
     );
@@ -858,7 +999,6 @@ fn print_validation_metrics(result: &ValidationResult) {
 #[ignore] // requires ngspice
 fn test_rc_lowpass_vs_spice() {
     assert!(is_ngspice_available(), "ngspice not found");
-
 
     println!("\n=== RC Lowpass Filter Validation ===");
     println!("Circuit: 10kΩ + 10nF, fc ≈ 1.59 kHz");
@@ -906,7 +1046,6 @@ fn test_rc_lowpass_vs_spice() {
 #[ignore] // requires ngspice
 fn test_diode_clipper_vs_spice() {
     assert!(is_ngspice_available(), "ngspice not found");
-
 
     println!("\n=== Diode Clipper Validation ===");
     println!("Circuit: Antiparallel 1N4148 diodes, soft clipping");
@@ -962,7 +1101,6 @@ fn test_diode_clipper_vs_spice() {
 fn test_bjt_common_emitter_vs_spice() {
     assert!(is_ngspice_available(), "ngspice not found");
 
-
     println!("\n=== BJT Common Emitter Validation ===");
     println!("Circuit: BC547 NPN amplifier, gain ≈ 10x");
 
@@ -977,8 +1115,15 @@ fn test_bjt_common_emitter_vs_spice() {
     let tstep = 1.0 / SAMPLE_RATE;
 
     let spice_data = run_transient_with_thevenin_pwl(
-        &netlist_str, tstep, duration, "in", &pwl_data, 1.0, &["out".to_string()],
-    ).expect("ngspice failed");
+        &netlist_str,
+        tstep,
+        duration,
+        "in",
+        &pwl_data,
+        1.0,
+        &["out".to_string()],
+    )
+    .expect("ngspice failed");
 
     let spice_output = spice_data.get_node_voltage("out").unwrap().to_vec();
     let input_signal = resample_pwl_to_signal(&pwl_data, SAMPLE_RATE, spice_output.len());
@@ -1010,31 +1155,49 @@ fn test_bjt_common_emitter_vs_spice() {
     // --- Gain verification ---
     // Input: 10mV sine (20mV peak-to-peak)
     // Expected: CE amplifier with gain ~100-200x
-    let input_pp = input_signal.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
+    let input_pp = input_signal
+        .iter()
+        .cloned()
+        .fold(f64::NEG_INFINITY, f64::max)
         - input_signal.iter().cloned().fold(f64::INFINITY, f64::min);
-    let melange_pp = melange_output.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
+    let melange_pp = melange_output
+        .iter()
+        .cloned()
+        .fold(f64::NEG_INFINITY, f64::max)
         - melange_output.iter().cloned().fold(f64::INFINITY, f64::min);
-    let spice_pp = spice_output.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
+    let spice_pp = spice_output
+        .iter()
+        .cloned()
+        .fold(f64::NEG_INFINITY, f64::max)
         - spice_output.iter().cloned().fold(f64::INFINITY, f64::min);
 
     let melange_gain = melange_pp / input_pp;
     let spice_gain = spice_pp / input_pp;
 
     println!("    Input PP: {:.4} V", input_pp);
-    println!("    SPICE output PP: {:.4} V (gain: {:.1}x)", spice_pp, spice_gain);
-    println!("    Melange output PP: {:.4} V (gain: {:.1}x)", melange_pp, melange_gain);
+    println!(
+        "    SPICE output PP: {:.4} V (gain: {:.1}x)",
+        spice_pp, spice_gain
+    );
+    println!(
+        "    Melange output PP: {:.4} V (gain: {:.1}x)",
+        melange_pp, melange_gain
+    );
 
     // Melange must actually amplify the signal (gain > 50x for a CE stage)
     assert!(
         melange_gain > 50.0,
-        "BJT CE amplifier should have significant gain, got {:.1}x", melange_gain
+        "BJT CE amplifier should have significant gain, got {:.1}x",
+        melange_gain
     );
     // Melange gain should be within 2x of SPICE gain (allow for model differences)
     let gain_ratio = melange_gain / spice_gain;
     assert!(
         gain_ratio > 0.5 && gain_ratio < 2.0,
         "Melange gain ({:.1}x) should be within 2x of SPICE gain ({:.1}x), ratio={:.2}",
-        melange_gain, spice_gain, gain_ratio
+        melange_gain,
+        spice_gain,
+        gain_ratio
     );
 }
 
@@ -1054,7 +1217,6 @@ fn test_bjt_common_emitter_vs_spice() {
 #[ignore] // requires ngspice
 fn test_antiparallel_diodes_vs_spice() {
     assert!(is_ngspice_available(), "ngspice not found");
-
 
     println!("\n=== Antiparallel Diodes Validation ===");
     println!("Circuit: Two antiparallel diodes, 2D nonlinear system");
@@ -1091,7 +1253,6 @@ fn test_antiparallel_diodes_vs_spice() {
 fn test_opamp_inverting_vs_spice() {
     assert!(is_ngspice_available(), "ngspice not found");
 
-
     println!("\n=== Op-Amp Inverting Amplifier Validation ===");
     println!("Circuit: Gain=-10, VCCS model (AOL=200k, ROUT=1)");
 
@@ -1117,7 +1278,6 @@ fn test_opamp_inverting_vs_spice() {
 fn test_jfet_common_source_vs_spice() {
     assert!(is_ngspice_available(), "ngspice not found");
 
-
     println!("\n=== JFET Common Source Amplifier Validation ===");
     println!("Circuit: N-channel JFET, Rd=2.2k, Rs=1k, VDD=12V");
 
@@ -1126,13 +1286,13 @@ fn test_jfet_common_source_vs_spice() {
         peak_error_tolerance: 0.5,
         max_relative_tolerance: 5.0,
         correlation_min: 0.999,
-        thd_error_tolerance_db: 5.0,  // DK method produces different harmonics than SPICE
+        thd_error_tolerance_db: 5.0, // DK method produces different harmonics than SPICE
         full_scale: 5.0,
         skip_thd: false,
     };
 
-    let result = run_validation("jfet_common_source", "out", &config)
-        .expect("Failed to run validation");
+    let result =
+        run_validation("jfet_common_source", "out", &config).expect("Failed to run validation");
 
     print_validation_metrics(&result);
 
@@ -1153,7 +1313,6 @@ fn test_jfet_common_source_vs_spice() {
 fn test_mosfet_common_source_vs_spice() {
     assert!(is_ngspice_available(), "ngspice not found");
 
-
     println!("\n=== MOSFET Common Source Amplifier Validation ===");
     println!("Circuit: N-channel MOSFET, Rd=1k, VDD=5V");
 
@@ -1164,11 +1323,11 @@ fn test_mosfet_common_source_vs_spice() {
         correlation_min: 0.999,
         thd_error_tolerance_db: 5.0,
         full_scale: 5.0,
-        skip_thd: true,  // small-signal linear region: THD too low to measure reliably
+        skip_thd: true, // small-signal linear region: THD too low to measure reliably
     };
 
-    let result = run_validation("mosfet_common_source", "out", &config)
-        .expect("Failed to run validation");
+    let result =
+        run_validation("mosfet_common_source", "out", &config).expect("Failed to run validation");
 
     print_validation_metrics(&result);
 
@@ -1214,8 +1373,15 @@ fn test_wurli_preamp_vs_spice() {
 
     // --- Run ngspice ---
     let spice_data = run_transient_with_thevenin_pwl(
-        &netlist_str, tstep, duration, "in", &pwl_data, 1.0, &["out".to_string()],
-    ).expect("ngspice failed");
+        &netlist_str,
+        tstep,
+        duration,
+        "in",
+        &pwl_data,
+        1.0,
+        &["out".to_string()],
+    )
+    .expect("ngspice failed");
 
     let mut spice_output = spice_data.get_node_voltage("out").unwrap().to_vec();
     // DC-block SPICE output to match melange's internal DC blocking filter.
@@ -1244,19 +1410,34 @@ fn test_wurli_preamp_vs_spice() {
     print_validation_metrics(&result);
 
     // --- Gain verification ---
-    let input_pp = input_signal.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
+    let input_pp = input_signal
+        .iter()
+        .cloned()
+        .fold(f64::NEG_INFINITY, f64::max)
         - input_signal.iter().cloned().fold(f64::INFINITY, f64::min);
-    let melange_pp = melange_output.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
+    let melange_pp = melange_output
+        .iter()
+        .cloned()
+        .fold(f64::NEG_INFINITY, f64::max)
         - melange_output.iter().cloned().fold(f64::INFINITY, f64::min);
-    let spice_pp = spice_output.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
+    let spice_pp = spice_output
+        .iter()
+        .cloned()
+        .fold(f64::NEG_INFINITY, f64::max)
         - spice_output.iter().cloned().fold(f64::INFINITY, f64::min);
 
     let spice_gain = spice_pp / input_pp;
     let melange_gain = melange_pp / input_pp;
 
     println!("    Input PP: {:.4} V", input_pp);
-    println!("    SPICE output PP: {:.4} V (gain: {:.1}x)", spice_pp, spice_gain);
-    println!("    Melange output PP: {:.4} V (gain: {:.1}x)", melange_pp, melange_gain);
+    println!(
+        "    SPICE output PP: {:.4} V (gain: {:.1}x)",
+        spice_pp, spice_gain
+    );
+    println!(
+        "    Melange output PP: {:.4} V (gain: {:.1}x)",
+        melange_pp, melange_gain
+    );
 
     assert!(
         result.report.passed,
@@ -1268,14 +1449,17 @@ fn test_wurli_preamp_vs_spice() {
     // Melange must actually amplify the signal (gain > 1x for a multi-stage preamp)
     assert!(
         melange_gain > 1.0,
-        "Wurli preamp should amplify signal, got {:.2}x gain", melange_gain
+        "Wurli preamp should amplify signal, got {:.2}x gain",
+        melange_gain
     );
     // Melange gain should be within 4x of SPICE gain (allow for model differences)
     let gain_ratio = melange_gain / spice_gain;
     assert!(
         gain_ratio > 0.25 && gain_ratio < 4.0,
         "Melange gain ({:.1}x) should be within 4x of SPICE gain ({:.1}x), ratio={:.2}",
-        melange_gain, spice_gain, gain_ratio
+        melange_gain,
+        spice_gain,
+        gain_ratio
     );
 }
 
@@ -1293,13 +1477,22 @@ fn test_wurli_preamp_vs_spice() {
 fn test_all_circuits_batch() {
     assert!(is_ngspice_available(), "ngspice not found");
 
-
     println!("\n=== Batch Validation of All Circuits ===");
 
     let circuits = vec![
         ("rc_lowpass", "out", strict_linear_config(), "Linear RC"),
-        ("diode_clipper", "out", nonlinear_config(), "Diode clipper (2 diodes)"),
-        ("antiparallel_diodes", "out", nonlinear_config(), "Antiparallel diodes (2D)"),
+        (
+            "diode_clipper",
+            "out",
+            nonlinear_config(),
+            "Diode clipper (2 diodes)",
+        ),
+        (
+            "antiparallel_diodes",
+            "out",
+            nonlinear_config(),
+            "Antiparallel diodes (2D)",
+        ),
     ];
 
     let mut passed = 0;
@@ -1378,11 +1571,7 @@ fn test_pwl_file_loading() {
 /// Test signal interpolation
 #[test]
 fn test_pwl_interpolation() {
-    let pwl_data = vec![
-        (0.0, 0.0),
-        (1.0, 1.0),
-        (2.0, 0.0),
-    ];
+    let pwl_data = vec![(0.0, 0.0), (1.0, 1.0), (2.0, 0.0)];
 
     // Test exact points
     assert!((interpolate_pwl(&pwl_data, 0.0) - 0.0).abs() < 1e-10);
@@ -1418,7 +1607,13 @@ fn test_rc_lowpass_step_response() {
     let num_samples = (SAMPLE_RATE * 0.1) as usize; // 100ms
     let period_samples = (SAMPLE_RATE / 500.0) as usize; // 96 samples per cycle
     let input: Vec<f64> = (0..num_samples)
-        .map(|i| if (i % period_samples) < period_samples / 2 { 1.0 } else { -1.0 })
+        .map(|i| {
+            if (i % period_samples) < period_samples / 2 {
+                1.0
+            } else {
+                -1.0
+            }
+        })
         .collect();
 
     let netlist_path = test_data_dir().join("rc_lowpass").join("circuit.cir");
@@ -1426,13 +1621,13 @@ fn test_rc_lowpass_step_response() {
     // steps, so peak error is large (~1V) at transitions. RMS and correlation
     // still validate overall accuracy over 100ms of error accumulation.
     let config = ComparisonConfig {
-        rms_error_tolerance: 0.05,        // 5% — step transitions dominate error
-        peak_error_tolerance: 1.0,        // 1V — bilinear can't track instantaneous jump
-        max_relative_tolerance: 1e4,      // near zero-crossings
-        correlation_min: 0.999,           // shape should match well despite peak errors
+        rms_error_tolerance: 0.05,   // 5% — step transitions dominate error
+        peak_error_tolerance: 1.0,   // 1V — bilinear can't track instantaneous jump
+        max_relative_tolerance: 1e4, // near zero-crossings
+        correlation_min: 0.999,      // shape should match well despite peak errors
         thd_error_tolerance_db: 5.0,
         full_scale: 1.0,
-        skip_thd: true,                   // square wave THD is not meaningful
+        skip_thd: true, // square wave THD is not meaningful
     };
 
     let result = validate_circuit(&netlist_path, &input, SAMPLE_RATE, "out", &config)
@@ -1440,7 +1635,10 @@ fn test_rc_lowpass_step_response() {
 
     println!("  Samples: {}", result.report.sample_count);
     println!("  RMS Error: {:.6e}", result.report.rms_error);
-    println!("  Correlation: {:.8}", result.report.correlation_coefficient);
+    println!(
+        "  Correlation: {:.8}",
+        result.report.correlation_coefficient
+    );
 
     assert!(
         result.report.passed,
@@ -1470,7 +1668,8 @@ fn test_rc_lowpass_chirp() {
     let input: Vec<f64> = (0..num_samples)
         .map(|i| {
             let t = i as f64 / SAMPLE_RATE;
-            let phase = 2.0 * std::f64::consts::PI
+            let phase = 2.0
+                * std::f64::consts::PI
                 * (f_start * t + (f_end - f_start) * t * t / (2.0 * duration));
             phase.sin()
         })
@@ -1481,21 +1680,28 @@ fn test_rc_lowpass_chirp() {
     // Relaxed vs pure-sine: chirp exercises high frequencies where trapezoidal
     // bilinear warping causes phase/amplitude differences vs SPICE's Gear method
     let config = ComparisonConfig {
-        rms_error_tolerance: 0.02,        // 2% — trapezoidal warping at high freq
-        peak_error_tolerance: 0.2,        // 200mV — instantaneous phase error near Nyquist
-        max_relative_tolerance: 1e4,      // near zero-crossings, relative error is huge
-        correlation_min: 0.9999,          // waveform shape should still match well
+        rms_error_tolerance: 0.02,   // 2% — trapezoidal warping at high freq
+        peak_error_tolerance: 0.2,   // 200mV — instantaneous phase error near Nyquist
+        max_relative_tolerance: 1e4, // near zero-crossings, relative error is huge
+        correlation_min: 0.9999,     // waveform shape should still match well
         thd_error_tolerance_db: 5.0,
         full_scale: 1.0,
-        skip_thd: true,                   // chirp has no meaningful THD
+        skip_thd: true, // chirp has no meaningful THD
     };
 
     let result = validate_circuit(&netlist_path, &input, SAMPLE_RATE, "out", &config)
         .expect("Chirp validation failed");
 
-    println!("  Samples: {} ({:.0} ms)", result.report.sample_count, 1000.0 * num_samples as f64 / SAMPLE_RATE);
+    println!(
+        "  Samples: {} ({:.0} ms)",
+        result.report.sample_count,
+        1000.0 * num_samples as f64 / SAMPLE_RATE
+    );
     println!("  RMS Error: {:.6e}", result.report.rms_error);
-    println!("  Correlation: {:.8}", result.report.correlation_coefficient);
+    println!(
+        "  Correlation: {:.8}",
+        result.report.correlation_coefficient
+    );
 
     assert!(
         result.report.passed,
@@ -1516,7 +1722,7 @@ fn test_diode_clipper_silence_to_signal() {
     println!("\n=== Diode Clipper Silence-to-Signal ===");
 
     let silence_samples = (SAMPLE_RATE * 0.005) as usize; // 5ms
-    let signal_samples = (SAMPLE_RATE * 0.015) as usize;  // 15ms
+    let signal_samples = (SAMPLE_RATE * 0.015) as usize; // 15ms
     let mut input = vec![0.0; silence_samples];
     for i in 0..signal_samples {
         let t = i as f64 / SAMPLE_RATE;
@@ -1524,15 +1730,26 @@ fn test_diode_clipper_silence_to_signal() {
     }
 
     let netlist_path = test_data_dir().join("diode_clipper").join("circuit.cir");
-    let result = validate_circuit(&netlist_path, &input, SAMPLE_RATE, "out", &nonlinear_config())
-        .expect("Silence-to-signal validation failed");
+    let result = validate_circuit(
+        &netlist_path,
+        &input,
+        SAMPLE_RATE,
+        "out",
+        &nonlinear_config(),
+    )
+    .expect("Silence-to-signal validation failed");
 
-    println!("  Samples: {} ({}ms silence + {}ms signal)",
+    println!(
+        "  Samples: {} ({}ms silence + {}ms signal)",
         result.report.sample_count,
         silence_samples * 1000 / SAMPLE_RATE as usize,
-        signal_samples * 1000 / SAMPLE_RATE as usize);
+        signal_samples * 1000 / SAMPLE_RATE as usize
+    );
     println!("  RMS Error: {:.6e}", result.report.rms_error);
-    println!("  Correlation: {:.8}", result.report.correlation_coefficient);
+    println!(
+        "  Correlation: {:.8}",
+        result.report.correlation_coefficient
+    );
 
     assert!(
         result.report.passed,
@@ -1568,10 +1785,14 @@ fn test_comparison_config_levels() {
         "Nonlinear correlation can be lower than strict"
     );
 
-    println!("Strict config: RMS < {:.2e}, corr > {:.6}",
-        strict.rms_error_tolerance, strict.correlation_min);
-    println!("Nonlinear config: RMS < {:.2e}, corr > {:.6}",
-        nonlinear.rms_error_tolerance, nonlinear.correlation_min);
+    println!(
+        "Strict config: RMS < {:.2e}, corr > {:.6}",
+        strict.rms_error_tolerance, strict.correlation_min
+    );
+    println!(
+        "Nonlinear config: RMS < {:.2e}, corr > {:.6}",
+        nonlinear.rms_error_tolerance, nonlinear.correlation_min
+    );
 }
 
 // =============================================================================
@@ -1617,7 +1838,11 @@ fn apply_pot_to_kernel(
     // The caller resets S to S_nominal before each call, so we apply the
     // correction: S -= scale * su * su^T, where scale = delta_g / (1 + delta_g * usu).
     let denom = 1.0 + delta_g_for_s * pot.usu;
-    let scale = if denom.abs() > 1e-15 { delta_g_for_s / denom } else { 0.0 };
+    let scale = if denom.abs() > 1e-15 {
+        delta_g_for_s / denom
+    } else {
+        0.0
+    };
 
     for i in 0..n {
         for j in 0..n {
@@ -1632,7 +1857,9 @@ fn apply_pot_to_kernel(
                 let mut sum = 0.0;
                 for ki in 0..n {
                     let nv_ik = kernel.n_v[i * n + ki];
-                    if nv_ik == 0.0 { continue; }
+                    if nv_ik == 0.0 {
+                        continue;
+                    }
                     for kj in 0..n {
                         sum += nv_ik * kernel.s[ki * n + kj] * kernel.n_i[kj * m + j];
                     }
@@ -1679,7 +1906,7 @@ fn run_melange_with_pot_modulation(
     netlist_str: &str,
     input_signal: &[f64],
     sample_rate: f64,
-    pot_values: &[f64],  // one R value per sample
+    pot_values: &[f64], // one R value per sample
     use_correct_backward_term: bool,
 ) -> Result<Vec<f64>, ValidationError> {
     use melange_solver::solver::CircuitSolver;
@@ -1690,8 +1917,18 @@ fn run_melange_with_pot_modulation(
     let mut mna = melange_solver::mna::MnaSystem::from_netlist(&netlist)
         .map_err(|e| ValidationError::Solver(format!("MNA error: {}", e)))?;
 
-    let input_node = mna.node_map.get("in").copied().unwrap_or(1).saturating_sub(1);
-    let output_node = mna.node_map.get("out").copied().unwrap_or(2).saturating_sub(1);
+    let input_node = mna
+        .node_map
+        .get("in")
+        .copied()
+        .unwrap_or(1)
+        .saturating_sub(1);
+    let output_node = mna
+        .node_map
+        .get("out")
+        .copied()
+        .unwrap_or(2)
+        .saturating_sub(1);
     let input_conductance = 1.0;
 
     if input_node < mna.n {
@@ -1728,7 +1965,7 @@ fn run_melange_with_pot_modulation(
     let mut s_ni_nodes = vec![0.0; n_nodes * m];
 
     let mut output = Vec::with_capacity(input_signal.len());
-    let mut r_prev = 1.0 / g_nominal;  // Start at nominal resistance
+    let mut r_prev = 1.0 / g_nominal; // Start at nominal resistance
 
     for (sample_idx, &input) in input_signal.iter().enumerate() {
         let r_curr = pot_values[sample_idx];
@@ -1742,7 +1979,7 @@ fn run_melange_with_pot_modulation(
         let delta_g_a_neg = if use_correct_backward_term {
             1.0 / r_prev - g_nominal
         } else {
-            1.0 / r_curr - g_nominal  // BUG: uses current instead of previous
+            1.0 / r_curr - g_nominal // BUG: uses current instead of previous
         };
 
         // Reset S and a_neg to nominal, then apply corrections
@@ -1828,9 +2065,15 @@ Rload out 0 100k
         .collect();
 
     let spice_data = run_transient_with_thevenin_pwl(
-        ngspice_netlist, tstep, duration, "in", &pwl_data, 1.0,
+        ngspice_netlist,
+        tstep,
+        duration,
+        "in",
+        &pwl_data,
+        1.0,
         &["out".to_string()],
-    ).expect("ngspice failed");
+    )
+    .expect("ngspice failed");
 
     let mut spice_output = spice_data.get_node_voltage("out").unwrap().to_vec();
     dc_block_signal(&mut spice_output, SAMPLE_RATE);
@@ -1838,8 +2081,13 @@ Rload out 0 100k
     // Run melange with fixed pot at 10k (nominal value)
     let pot_values: Vec<f64> = vec![10_000.0; num_samples];
     let melange_output = run_melange_with_pot_modulation(
-        melange_netlist, &input_signal, SAMPLE_RATE, &pot_values, true,
-    ).expect("melange solver failed");
+        melange_netlist,
+        &input_signal,
+        SAMPLE_RATE,
+        &pot_values,
+        true,
+    )
+    .expect("melange solver failed");
 
     // Trim to common length
     let len = spice_output.len().min(melange_output.len());
@@ -1851,7 +2099,10 @@ Rload out 0 100k
 
     println!("  Samples: {}", report.sample_count);
     println!("  RMS Error: {:.6e}", report.rms_error);
-    println!("  Normalized RMS: {:.4}%", report.normalized_rms_error * 100.0);
+    println!(
+        "  Normalized RMS: {:.4}%",
+        report.normalized_rms_error * 100.0
+    );
     println!("  Correlation: {:.8}", report.correlation_coefficient);
 
     assert!(
@@ -1888,12 +2139,12 @@ fn test_pot_modulation_vs_spice() {
 
     println!("\n=== Pot Modulation vs SPICE (5kHz LFO, 100ms) ===");
 
-    let f_mod = 5000.0;      // Fast modulation (5kHz) — ~9.6 samples/cycle at 48kHz
-    let r_center = 5_500.0;  // Center resistance (5.5k)
-    let r_depth = 4_500.0;   // Modulation depth (+/- 4.5k), sweeps 1k to 10k
-    let f_signal = 1000.0;   // Audio signal frequency (1kHz)
-    let amplitude = 0.5;     // Input amplitude (500mV) — enough to push diode into nonlinear
-    let duration = 0.1;      // 100ms — 500 modulation cycles
+    let f_mod = 5000.0; // Fast modulation (5kHz) — ~9.6 samples/cycle at 48kHz
+    let r_center = 5_500.0; // Center resistance (5.5k)
+    let r_depth = 4_500.0; // Modulation depth (+/- 4.5k), sweeps 1k to 10k
+    let f_signal = 1000.0; // Audio signal frequency (1kHz)
+    let amplitude = 0.5; // Input amplitude (500mV) — enough to push diode into nonlinear
+    let duration = 0.1; // 100ms — 500 modulation cycles
 
     let num_samples = (SAMPLE_RATE * duration) as usize;
     let tstep = 1.0 / SAMPLE_RATE;
@@ -1939,9 +2190,15 @@ fn test_pot_modulation_vs_spice() {
         .collect();
 
     let spice_data = run_transient_with_thevenin_pwl(
-        &ngspice_netlist, tstep, duration, "in", &pwl_data, 1.0,
+        &ngspice_netlist,
+        tstep,
+        duration,
+        "in",
+        &pwl_data,
+        1.0,
         &["out".to_string()],
-    ).expect("ngspice failed for modulated pot");
+    )
+    .expect("ngspice failed for modulated pot");
 
     let mut spice_output = spice_data.get_node_voltage("out").unwrap().to_vec();
     dc_block_signal(&mut spice_output, SAMPLE_RATE);
@@ -1966,21 +2223,36 @@ Rload out 0 100k
     let pot_trimmed = &pot_values[..len];
 
     let melange_correct = run_melange_with_pot_modulation(
-        melange_netlist, input_trimmed, SAMPLE_RATE, pot_trimmed, true,
-    ).expect("melange solver failed (correct backward term)");
+        melange_netlist,
+        input_trimmed,
+        SAMPLE_RATE,
+        pot_trimmed,
+        true,
+    )
+    .expect("melange solver failed (correct backward term)");
 
     // --- 3. Run melange with BUGGY backward term ---
     let melange_buggy = run_melange_with_pot_modulation(
-        melange_netlist, input_trimmed, SAMPLE_RATE, pot_trimmed, false,
-    ).expect("melange solver failed (buggy backward term)");
+        melange_netlist,
+        input_trimmed,
+        SAMPLE_RATE,
+        pot_trimmed,
+        false,
+    )
+    .expect("melange solver failed (buggy backward term)");
 
     // --- Compare all three ---
-    let len = spice_output.len()
+    let len = spice_output
+        .len()
         .min(melange_correct.len())
         .min(melange_buggy.len());
 
     let spice_signal = Signal::new(spice_output[..len].to_vec(), SAMPLE_RATE, "SPICE");
-    let correct_signal = Signal::new(melange_correct[..len].to_vec(), SAMPLE_RATE, "Melange_correct");
+    let correct_signal = Signal::new(
+        melange_correct[..len].to_vec(),
+        SAMPLE_RATE,
+        "Melange_correct",
+    );
     let buggy_signal = Signal::new(melange_buggy[..len].to_vec(), SAMPLE_RATE, "Melange_buggy");
 
     // Compare correct version vs SPICE
@@ -2003,27 +2275,52 @@ Rload out 0 100k
 
     println!("\n  CORRECT backward term vs SPICE:");
     println!("    RMS Error: {:.6e}", report_correct.rms_error);
-    println!("    Normalized RMS: {:.4}%", report_correct.normalized_rms_error * 100.0);
-    println!("    Correlation: {:.8}", report_correct.correlation_coefficient);
+    println!(
+        "    Normalized RMS: {:.4}%",
+        report_correct.normalized_rms_error * 100.0
+    );
+    println!(
+        "    Correlation: {:.8}",
+        report_correct.correlation_coefficient
+    );
 
     println!("\n  BUGGY backward term vs SPICE:");
     println!("    RMS Error: {:.6e}", report_buggy.rms_error);
-    println!("    Normalized RMS: {:.4}%", report_buggy.normalized_rms_error * 100.0);
-    println!("    Correlation: {:.8}", report_buggy.correlation_coefficient);
+    println!(
+        "    Normalized RMS: {:.4}%",
+        report_buggy.normalized_rms_error * 100.0
+    );
+    println!(
+        "    Correlation: {:.8}",
+        report_buggy.correlation_coefficient
+    );
 
     println!("\n  CORRECT vs BUGGY (difference due to bug):");
     println!("    RMS Error: {:.6e}", report_diff.rms_error);
-    println!("    Normalized RMS: {:.4}%", report_diff.normalized_rms_error * 100.0);
-    println!("    Correlation: {:.8}", report_diff.correlation_coefficient);
+    println!(
+        "    Normalized RMS: {:.4}%",
+        report_diff.normalized_rms_error * 100.0
+    );
+    println!(
+        "    Correlation: {:.8}",
+        report_diff.correlation_coefficient
+    );
 
     // The correct version should have better correlation than the buggy one
     // For a 5.63Hz tremolo with 20k depth, the error accumulates over each cycle.
     // Compute the improvement metric
-    let corr_improvement = report_correct.correlation_coefficient - report_buggy.correlation_coefficient;
+    let corr_improvement =
+        report_correct.correlation_coefficient - report_buggy.correlation_coefficient;
     let rms_improvement = report_buggy.normalized_rms_error - report_correct.normalized_rms_error;
 
-    println!("\n  Correlation improvement (correct - buggy): {:.6}", corr_improvement);
-    println!("  RMS improvement (buggy - correct): {:.6}", rms_improvement);
+    println!(
+        "\n  Correlation improvement (correct - buggy): {:.6}",
+        corr_improvement
+    );
+    println!(
+        "  RMS improvement (buggy - correct): {:.6}",
+        rms_improvement
+    );
 
     // --- Assertions ---
 
@@ -2042,8 +2339,10 @@ Rload out 0 100k
         "Correct backward term must outperform buggy version!\n\
          Correct: corr={:.8}, RMS={:.6e}\n\
          Buggy:   corr={:.8}, RMS={:.6e}",
-        report_correct.correlation_coefficient, report_correct.normalized_rms_error,
-        report_buggy.correlation_coefficient, report_buggy.normalized_rms_error,
+        report_correct.correlation_coefficient,
+        report_correct.normalized_rms_error,
+        report_buggy.correlation_coefficient,
+        report_buggy.normalized_rms_error,
     );
 
     // 3. The correct and buggy versions should be measurably different.
@@ -2051,17 +2350,20 @@ Rload out 0 100k
     //    noise floor (established by static baseline at ~0.05% RMS).
     //    A 2x noise floor margin (0.1%) ensures the difference is real.
     let rms_diff_between_versions = report_diff.normalized_rms_error;
-    let noise_floor = 0.001;  // 0.1% = 2x the static baseline noise
+    let noise_floor = 0.001; // 0.1% = 2x the static baseline noise
     assert!(
         rms_diff_between_versions > noise_floor,
         "Correct and buggy versions are indistinguishable.\n\
          RMS difference: {:.4}% (need > {:.4}% = 2x noise floor)\n\
          The test is not sensitive enough to detect the backward-term bug.",
-        rms_diff_between_versions * 100.0, noise_floor * 100.0
+        rms_diff_between_versions * 100.0,
+        noise_floor * 100.0
     );
 
-    println!("\n  Test sensitivity: RMS diff {:.4}% is {:.1}x above noise floor {:.4}%",
+    println!(
+        "\n  Test sensitivity: RMS diff {:.4}% is {:.1}x above noise floor {:.4}%",
         rms_diff_between_versions * 100.0,
         rms_diff_between_versions / noise_floor,
-        noise_floor * 100.0);
+        noise_floor * 100.0
+    );
 }

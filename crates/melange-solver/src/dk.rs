@@ -11,7 +11,7 @@
 //! - 1 BJT: M = 2 (Vbe, Vbc)
 //! - 2 diodes + 1 BJT: M = 1 + 1 + 2 = 4
 
-use crate::mna::{inject_rhs_current, invert_small_matrix, MnaSystem};
+use crate::mna::{MnaSystem, inject_rhs_current, invert_small_matrix};
 use std::sync::Arc;
 
 /// Information about an inductor for companion model.
@@ -182,7 +182,11 @@ impl std::fmt::Display for DkError {
             DkError::SingularMatrix(msg) => write!(f, "DK error: {}", msg),
             DkError::InvalidParameter(msg) => write!(f, "DK error: {}", msg),
             DkError::InvalidInductance { name, value } => {
-                write!(f, "DK error: inductor '{}' has non-positive inductance: {}", name, value)
+                write!(
+                    f,
+                    "DK error: inductor '{}' has non-positive inductance: {}",
+                    name, value
+                )
             }
             DkError::InvalidKDiagonal { index, value } => {
                 write!(
@@ -215,9 +219,10 @@ impl DkKernel {
     /// or if the total nonlinear dimension exceeds [`MAX_M`].
     pub fn from_mna(mna: &MnaSystem, sample_rate: f64) -> Result<Self, DkError> {
         if !(sample_rate > 0.0 && sample_rate.is_finite()) {
-            return Err(DkError::InvalidParameter(
-                format!("sample_rate must be positive and finite, got {}", sample_rate)
-            ));
+            return Err(DkError::InvalidParameter(format!(
+                "sample_rate must be positive and finite, got {}",
+                sample_rate
+            )));
         }
 
         let n_nodes = mna.n;
@@ -225,9 +230,10 @@ impl DkKernel {
         let m = mna.m;
 
         if m > MAX_M {
-            return Err(DkError::InvalidParameter(
-                format!("nonlinear dimension m={} exceeds MAX_M={}", m, MAX_M)
-            ));
+            return Err(DkError::InvalidParameter(format!(
+                "nonlinear dimension m={} exceeds MAX_M={}",
+                m, MAX_M
+            )));
         }
 
         // Get A matrix (n_aug × n_aug)
@@ -353,7 +359,7 @@ impl DkKernel {
                     value: ind.value,
                 });
             }
-            let g_eq = t / (2.0 * ind.value);  // T/(2L)
+            let g_eq = t / (2.0 * ind.value); // T/(2L)
             inductors.push(InductorInfo {
                 name: Arc::from(ind.name.clone().into_boxed_str()),
                 node_i: ind.node_i,
@@ -495,9 +501,10 @@ impl DkKernel {
     /// Use this for circuits with large inductors (transformers) and nonlinear devices.
     pub fn from_mna_augmented(mna: &MnaSystem, sample_rate: f64) -> Result<Self, DkError> {
         if !(sample_rate > 0.0 && sample_rate.is_finite()) {
-            return Err(DkError::InvalidParameter(
-                format!("sample_rate must be positive and finite, got {}", sample_rate)
-            ));
+            return Err(DkError::InvalidParameter(format!(
+                "sample_rate must be positive and finite, got {}",
+                sample_rate
+            )));
         }
 
         let n_nodes = mna.n;
@@ -505,16 +512,16 @@ impl DkKernel {
         let m = mna.m;
 
         if m > MAX_M {
-            return Err(DkError::InvalidParameter(
-                format!("nonlinear dimension m={} exceeds MAX_M={}", m, MAX_M)
-            ));
+            return Err(DkError::InvalidParameter(format!(
+                "nonlinear dimension m={} exceeds MAX_M={}",
+                m, MAX_M
+            )));
         }
 
         // Count inductor winding variables
         let n_uncoupled = mna.inductors.len();
         let n_coupled_windings: usize = mna.coupled_inductors.len() * 2;
-        let n_xfmr_windings: usize = mna.transformer_groups.iter()
-            .map(|g| g.num_windings).sum();
+        let n_xfmr_windings: usize = mna.transformer_groups.iter().map(|g| g.num_windings).sum();
         let n_inductor_vars = n_uncoupled + n_coupled_windings + n_xfmr_windings;
         let n = n_aug + n_inductor_vars; // n_nodal
 
@@ -524,22 +531,32 @@ impl DkKernel {
         // Validate inductor values
         for ind in &mna.inductors {
             if ind.value <= 0.0 {
-                return Err(DkError::InvalidInductance { name: ind.name.clone(), value: ind.value });
+                return Err(DkError::InvalidInductance {
+                    name: ind.name.clone(),
+                    value: ind.value,
+                });
             }
         }
         for ci in &mna.coupled_inductors {
             if ci.l1_value <= 0.0 {
-                return Err(DkError::InvalidInductance { name: ci.l1_name.clone(), value: ci.l1_value });
+                return Err(DkError::InvalidInductance {
+                    name: ci.l1_name.clone(),
+                    value: ci.l1_value,
+                });
             }
             if ci.l2_value <= 0.0 {
-                return Err(DkError::InvalidInductance { name: ci.l2_name.clone(), value: ci.l2_value });
+                return Err(DkError::InvalidInductance {
+                    name: ci.l2_name.clone(),
+                    value: ci.l2_value,
+                });
             }
         }
         for group in &mna.transformer_groups {
             for (idx, &l) in group.inductances.iter().enumerate() {
                 if l <= 0.0 {
                     return Err(DkError::InvalidInductance {
-                        name: group.winding_names[idx].clone(), value: l,
+                        name: group.winding_names[idx].clone(),
+                        value: l,
                     });
                 }
             }
@@ -605,7 +622,9 @@ impl DkKernel {
                     "K diagonal [{}][{}] = {} is non-negative. \
                      This is expected for circuits with transformer-coupled NFB. \
                      The nodal solver handles this correctly via full NR.",
-                    i, i, row[i]
+                    i,
+                    i,
+                    row[i]
                 );
             }
         }
@@ -641,18 +660,28 @@ impl DkKernel {
         let mut pots = Vec::with_capacity(mna.pots.len());
         for pot_info in &mna.pots {
             let mut u = vec![0.0; n];
-            if pot_info.node_p > 0 { u[pot_info.node_p - 1] = 1.0; }
-            if pot_info.node_q > 0 { u[pot_info.node_q - 1] = -1.0; }
+            if pot_info.node_p > 0 {
+                u[pot_info.node_p - 1] = 1.0;
+            }
+            if pot_info.node_q > 0 {
+                u[pot_info.node_q - 1] = -1.0;
+            }
             let su = mat_vec_mul(&s_2d, &u);
             let usu: f64 = u.iter().zip(su.iter()).map(|(a, b)| a * b).sum();
-            let nv_su = if m > 0 { mat_vec_mul(&n_v_2d, &su) } else { Vec::new() };
+            let nv_su = if m > 0 {
+                mat_vec_mul(&n_v_2d, &su)
+            } else {
+                Vec::new()
+            };
             let u_ni: Vec<f64> = (0..m)
                 .map(|j| su.iter().enumerate().map(|(i, &s)| s * n_i_2d[i][j]).sum())
                 .collect();
             pots.push(SmPotData {
-                su, usu,
+                su,
+                usu,
                 g_nominal: pot_info.g_nominal,
-                nv_su, u_ni,
+                nv_su,
+                u_ni,
                 node_p: pot_info.node_p,
                 node_q: pot_info.node_q,
                 min_resistance: pot_info.min_resistance,
@@ -664,7 +693,10 @@ impl DkKernel {
         if n_inductor_vars > 0 {
             log::info!(
                 "DK kernel (augmented): n_nodal={} (n_aug={} + {} inductor vars), M={}",
-                n, n_aug, n_inductor_vars, m
+                n,
+                n_aug,
+                n_inductor_vars,
+                m
             );
         }
 
@@ -674,9 +706,14 @@ impl DkKernel {
             m,
             num_devices: mna.num_devices,
             sample_rate,
-            s, k, n_v, n_i, a_neg, rhs_const,
-            inductors: Vec::new(),          // empty — augmented MNA handles history
-            coupled_inductors: Vec::new(),  // empty
+            s,
+            k,
+            n_v,
+            n_i,
+            a_neg,
+            rhs_const,
+            inductors: Vec::new(), // empty — augmented MNA handles history
+            coupled_inductors: Vec::new(), // empty
             transformer_groups: Vec::new(), // empty
             pots,
         })
@@ -783,7 +820,14 @@ impl DkKernel {
     /// - `v`: Output buffer for result (n elements)
     /// - `ni_inl`: Temporary buffer for N_i * i_nl (n elements, pre-allocated)
     #[allow(clippy::needless_range_loop)]
-    pub fn apply_correction_into(&self, v_pred: &[f64], i_nl: &[f64], _i_nl_prev: &[f64], v: &mut [f64], ni_inl: &mut [f64]) {
+    pub fn apply_correction_into(
+        &self,
+        v_pred: &[f64],
+        i_nl: &[f64],
+        _i_nl_prev: &[f64],
+        v: &mut [f64],
+        ni_inl: &mut [f64],
+    ) {
         assert_eq!(v_pred.len(), self.n);
         assert_eq!(i_nl.len(), self.m);
         assert_eq!(v.len(), self.n);
@@ -824,21 +868,29 @@ impl DkKernel {
     pub fn update_inductors(&mut self, v_node: &[f64]) {
         for ind in &mut self.inductors {
             // Get voltage across inductor at current timestep
-            let v_i = if ind.node_i > 0 { v_node[ind.node_i - 1] } else { 0.0 };
-            let v_j = if ind.node_j > 0 { v_node[ind.node_j - 1] } else { 0.0 };
+            let v_i = if ind.node_i > 0 {
+                v_node[ind.node_i - 1]
+            } else {
+                0.0
+            };
+            let v_j = if ind.node_j > 0 {
+                v_node[ind.node_j - 1]
+            } else {
+                0.0
+            };
             let v_l_new = v_i - v_j;
-            
-            let g_eq = ind.g_eq;  // T/(2L)
-            
+
+            let g_eq = ind.g_eq; // T/(2L)
+
             // Update inductor current using trapezoidal rule:
             // i_new = i_prev + g_eq * (v_prev + v_new)
             let i_new = ind.i_prev + g_eq * (ind.v_prev + v_l_new);
-            
+
             // Compute history current for NEXT timestep's companion model:
             // J = i_new - g_eq * v_new = i_prev + g_eq * v_prev
             // This is the Norton equivalent current source.
             ind.i_hist = i_new - g_eq * v_l_new;
-            
+
             // Save state for next iteration
             ind.i_prev = i_new;
             ind.v_prev = v_l_new;
@@ -854,12 +906,28 @@ impl DkKernel {
     ///   i2_hist = i2_new - g_mutual*v1_new - g_self_2*v2_new
     pub fn update_coupled_inductors(&mut self, v_node: &[f64]) {
         for ci in &mut self.coupled_inductors {
-            let v1i = if ci.l1_node_i > 0 { v_node[ci.l1_node_i - 1] } else { 0.0 };
-            let v1j = if ci.l1_node_j > 0 { v_node[ci.l1_node_j - 1] } else { 0.0 };
+            let v1i = if ci.l1_node_i > 0 {
+                v_node[ci.l1_node_i - 1]
+            } else {
+                0.0
+            };
+            let v1j = if ci.l1_node_j > 0 {
+                v_node[ci.l1_node_j - 1]
+            } else {
+                0.0
+            };
             let v1_new = v1i - v1j;
 
-            let v2i = if ci.l2_node_i > 0 { v_node[ci.l2_node_i - 1] } else { 0.0 };
-            let v2j = if ci.l2_node_j > 0 { v_node[ci.l2_node_j - 1] } else { 0.0 };
+            let v2i = if ci.l2_node_i > 0 {
+                v_node[ci.l2_node_i - 1]
+            } else {
+                0.0
+            };
+            let v2j = if ci.l2_node_j > 0 {
+                v_node[ci.l2_node_j - 1]
+            } else {
+                0.0
+            };
             let v2_new = v2i - v2j;
 
             let i1_new = ci.i1_prev
@@ -889,8 +957,16 @@ impl DkKernel {
             let w = group.num_windings;
             // Extract current voltages across each winding (pre-allocated buffer)
             for k in 0..w {
-                let vi = if group.winding_node_i[k] > 0 { v_node[group.winding_node_i[k] - 1] } else { 0.0 };
-                let vj = if group.winding_node_j[k] > 0 { v_node[group.winding_node_j[k] - 1] } else { 0.0 };
+                let vi = if group.winding_node_i[k] > 0 {
+                    v_node[group.winding_node_i[k] - 1]
+                } else {
+                    0.0
+                };
+                let vj = if group.winding_node_j[k] > 0 {
+                    v_node[group.winding_node_j[k] - 1]
+                } else {
+                    0.0
+                };
                 group.v_new[k] = vi - vj;
             }
             // Compute new currents and history
@@ -958,7 +1034,9 @@ pub(crate) fn build_rhs_const(mna: &MnaSystem) -> Vec<f64> {
 #[allow(clippy::needless_range_loop)]
 pub fn solve_equilibrated(a: &[Vec<f64>], b: &[f64]) -> Option<Vec<f64>> {
     let n = a.len();
-    if n == 0 { return Some(Vec::new()); }
+    if n == 0 {
+        return Some(Vec::new());
+    }
 
     // Step 1: Equilibrate
     let mut d = vec![1.0; n];
@@ -978,7 +1056,9 @@ pub fn solve_equilibrated(a: &[Vec<f64>], b: &[f64]) -> Option<Vec<f64>> {
 
     // Step 2: LU factorize with partial pivoting
     let mut perm = vec![0usize; n];
-    for i in 0..n { perm[i] = i; }
+    for i in 0..n {
+        perm[i] = i;
+    }
 
     for col in 0..n {
         let mut max_row = col;
@@ -1016,14 +1096,18 @@ pub fn solve_equilibrated(a: &[Vec<f64>], b: &[f64]) -> Option<Vec<f64>> {
     // Forward substitution (L * y = rhs)
     for i in 1..n {
         let mut sum = 0.0;
-        for j in 0..i { sum += a_eq[i][j] * x[j]; }
+        for j in 0..i {
+            sum += a_eq[i][j] * x[j];
+        }
         x[i] -= sum;
     }
 
     // Backward substitution (U * x_eq = y)
     for i in (0..n).rev() {
         let mut sum = 0.0;
-        for j in (i + 1)..n { sum += a_eq[i][j] * x[j]; }
+        for j in (i + 1)..n {
+            sum += a_eq[i][j] * x[j];
+        }
         x[i] = (x[i] - sum) / a_eq[i][i];
     }
 
@@ -1042,12 +1126,16 @@ pub fn solve_equilibrated(a: &[Vec<f64>], b: &[f64]) -> Option<Vec<f64>> {
     // Solve LU * dx = r
     for i in 1..n {
         let mut sum = 0.0;
-        for j in 0..i { sum += a_eq[i][j] * r[j]; }
+        for j in 0..i {
+            sum += a_eq[i][j] * r[j];
+        }
         r[i] -= sum;
     }
     for i in (0..n).rev() {
         let mut sum = 0.0;
-        for j in (i + 1)..n { sum += a_eq[i][j] * r[j]; }
+        for j in (i + 1)..n {
+            sum += a_eq[i][j] * r[j];
+        }
         r[i] = (r[i] - sum) / a_eq[i][i];
     }
 
@@ -1236,7 +1324,7 @@ pub(crate) fn invert_matrix(a: &[Vec<f64>]) -> Result<Vec<Vec<f64>>, String> {
 }
 
 /// Matrix multiplication: C = A * B
-/// 
+///
 /// # Panics
 /// Panics if either matrix is empty or if dimensions are incompatible.
 #[allow(clippy::needless_range_loop)]
@@ -1297,10 +1385,7 @@ mod tests {
 
     #[test]
     fn test_matrix_invert() {
-        let a = vec![
-            vec![4.0, 7.0],
-            vec![2.0, 6.0],
-        ];
+        let a = vec![vec![4.0, 7.0], vec![2.0, 6.0]];
         let inv = invert_matrix(&a).unwrap();
 
         // A * A^-1 = I
@@ -1313,10 +1398,7 @@ mod tests {
 
     #[test]
     fn test_flatten_matrix() {
-        let matrix = vec![
-            vec![1.0, 2.0, 3.0],
-            vec![4.0, 5.0, 6.0],
-        ];
+        let matrix = vec![vec![1.0, 2.0, 3.0], vec![4.0, 5.0, 6.0]];
         let flat = flatten_matrix(&matrix, 2, 3);
         assert_eq!(flat, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
     }
@@ -1336,11 +1418,11 @@ R1 out 0 1k
         // Test that accessor methods work correctly
         // K should be 1x1 for single diode
         assert_eq!(kernel.k.len(), 1);
-        
+
         // Test accessor (only element is at [0][0])
         let k00 = kernel.k(0, 0);
         assert!(k00.is_finite());
-        
+
         // Verify accessor matches direct index
         assert_eq!(kernel.k(0, 0), kernel.k[0]);
     }
@@ -1358,7 +1440,7 @@ C1 out 0 1u
         assert_eq!(kernel.n, 2);
         assert_eq!(kernel.m, 0); // No nonlinear devices
         assert_eq!(kernel.num_devices, 0);
-        
+
         // For linear circuits, matrices should have correct dimensions
         assert_eq!(kernel.s.len(), 4); // n * n = 2 * 2
         assert_eq!(kernel.a_neg.len(), 4); // n * n = 2 * 2
@@ -1382,10 +1464,10 @@ R1 out 0 1k
 
         // K should be 1x1 for single diode
         assert_eq!(kernel.k.len(), 1);
-        
+
         // N_v should be 1x2 (M x N)
         assert_eq!(kernel.n_v.len(), 2); // m * n = 1 * 2
-        
+
         // N_i should be 2x1 (N x M)
         assert_eq!(kernel.n_i.len(), 2); // n * m = 2 * 1
     }
@@ -1409,10 +1491,10 @@ Rbias vcc 0 10k
 
         // K should be 2x2
         assert_eq!(kernel.k.len(), 4); // m * m = 2 * 2
-        
+
         // N_v should be 2xN (M x N)
         assert_eq!(kernel.n_v.len(), 2 * kernel.n); // m * n
-        
+
         // N_i should be Nx2 (N x M)
         assert_eq!(kernel.n_i.len(), 2 * kernel.n); // n * m
     }

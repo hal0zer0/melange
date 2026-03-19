@@ -13,19 +13,16 @@ use crate::parser::{Element, Netlist};
 use super::{CodegenConfig, CodegenError};
 
 /// Solver method for code generation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum SolverMode {
     /// DK method: precompute S=A⁻¹, NR in M-dimensional current space.
     /// Fast (O(N²+M³) per sample) but requires well-conditioned A and K[i][i]<0.
+    #[default]
     Dk,
     /// Full-nodal NR: LU solve in N-dimensional voltage space per NR iteration.
     /// Handles any circuit topology including transformer-coupled NFB.
     /// Slower (O(N³) per sample) but universally convergent.
     Nodal,
-}
-
-impl Default for SolverMode {
-    fn default() -> Self { SolverMode::Dk }
 }
 
 /// Language-agnostic intermediate representation of a compiled circuit.
@@ -122,7 +119,9 @@ pub struct SolverConfig {
     pub pot_settle_samples: usize,
 }
 
-fn default_pot_settle_samples() -> usize { 64 }
+fn default_pot_settle_samples() -> usize {
+    64
+}
 
 fn default_output_nodes() -> Vec<usize> {
     vec![0]
@@ -160,7 +159,6 @@ pub struct Matrices {
     pub c_matrix: Vec<f64>,
 
     // --- Nodal solver matrices (only populated when solver_mode == Nodal) ---
-
     /// A = G + (2/T)*C, N×N row-major (trapezoidal forward matrix)
     #[serde(default)]
     pub a_matrix: Vec<f64>,
@@ -304,7 +302,10 @@ pub struct DiodeParams {
     #[serde(default)]
     pub rs: f64,
     /// Reverse breakdown voltage [V] (infinity = disabled)
-    #[serde(default = "default_infinity", deserialize_with = "deserialize_f64_or_infinity")]
+    #[serde(
+        default = "default_infinity",
+        deserialize_with = "deserialize_f64_or_infinity"
+    )]
     pub bv: f64,
     /// Reverse breakdown current [A] (default 1e-10)
     #[serde(default = "default_ibv")]
@@ -330,16 +331,28 @@ pub struct BjtParams {
     #[serde(default)]
     pub is_pnp: bool,
     /// Forward Early voltage [V] (inf = no Early effect)
-    #[serde(default = "default_infinity", deserialize_with = "deserialize_f64_or_infinity")]
+    #[serde(
+        default = "default_infinity",
+        deserialize_with = "deserialize_f64_or_infinity"
+    )]
     pub vaf: f64,
     /// Reverse Early voltage [V] (inf = no Early effect)
-    #[serde(default = "default_infinity", deserialize_with = "deserialize_f64_or_infinity")]
+    #[serde(
+        default = "default_infinity",
+        deserialize_with = "deserialize_f64_or_infinity"
+    )]
     pub var: f64,
     /// Forward knee current [A] (inf = no high injection)
-    #[serde(default = "default_infinity", deserialize_with = "deserialize_f64_or_infinity")]
+    #[serde(
+        default = "default_infinity",
+        deserialize_with = "deserialize_f64_or_infinity"
+    )]
     pub ikf: f64,
     /// Reverse knee current [A] (inf = no high injection)
-    #[serde(default = "default_infinity", deserialize_with = "deserialize_f64_or_infinity")]
+    #[serde(
+        default = "default_infinity",
+        deserialize_with = "deserialize_f64_or_infinity"
+    )]
     pub ikr: f64,
     /// Base-emitter junction capacitance [F] (0.0 = disabled)
     #[serde(default)]
@@ -366,7 +379,10 @@ pub struct BjtParams {
     #[serde(default)]
     pub re: f64,
     /// Thermal resistance [K/W] (inf = disabled, default)
-    #[serde(default = "default_infinity", deserialize_with = "deserialize_f64_or_infinity")]
+    #[serde(
+        default = "default_infinity",
+        deserialize_with = "deserialize_f64_or_infinity"
+    )]
     pub rth: f64,
     /// Thermal capacitance [J/K] (default 1e-3, typical TO-92)
     #[serde(default = "default_cth")]
@@ -417,7 +433,9 @@ fn default_tamb() -> f64 {
 /// Deserialize an f64 that may be null (JSON cannot represent infinity).
 /// Maps null → f64::INFINITY so old serialized data is handled gracefully.
 fn deserialize_f64_or_infinity<'de, D>(deserializer: D) -> Result<f64, D::Error>
-where D: serde::Deserializer<'de> {
+where
+    D: serde::Deserializer<'de>,
+{
     let opt: Option<f64> = Option::deserialize(deserializer)?;
     Ok(opt.unwrap_or(f64::INFINITY))
 }
@@ -428,13 +446,21 @@ impl BjtParams {
         self.vaf.is_finite() || self.var.is_finite() || self.ikf.is_finite() || self.ikr.is_finite()
     }
     /// Returns true if non-ideal emission coefficient (NF != 1.0) is active.
-    pub fn has_nf(&self) -> bool { (self.nf - 1.0).abs() > 1e-15 }
+    pub fn has_nf(&self) -> bool {
+        (self.nf - 1.0).abs() > 1e-15
+    }
     /// Returns true if B-E leakage current (ISE) is enabled.
-    pub fn has_ise(&self) -> bool { self.ise > 0.0 }
+    pub fn has_ise(&self) -> bool {
+        self.ise > 0.0
+    }
     /// Returns true if any parasitic resistance (RB/RC/RE) is enabled.
-    pub fn has_parasitics(&self) -> bool { self.rb > 0.0 || self.rc > 0.0 || self.re > 0.0 }
+    pub fn has_parasitics(&self) -> bool {
+        self.rb > 0.0 || self.rc > 0.0 || self.re > 0.0
+    }
     /// Returns true if self-heating is enabled (RTH is finite).
-    pub fn has_self_heating(&self) -> bool { self.rth.is_finite() }
+    pub fn has_self_heating(&self) -> bool {
+        self.rth.is_finite()
+    }
 }
 
 /// A slot in the nonlinear system: maps a device to its M-dimension range.
@@ -481,7 +507,9 @@ pub struct JfetParams {
 
 impl JfetParams {
     /// Returns true if either drain or source resistance is enabled.
-    pub fn has_rd_rs(&self) -> bool { self.rd > 0.0 || self.rs_param > 0.0 }
+    pub fn has_rd_rs(&self) -> bool {
+        self.rd > 0.0 || self.rs_param > 0.0
+    }
 }
 
 /// MOSFET model parameters (Level 1 SPICE, triode + saturation).
@@ -525,13 +553,19 @@ pub struct MosfetParams {
     pub bulk_node: usize,
 }
 
-fn default_phi() -> f64 { 0.6 }
+fn default_phi() -> f64 {
+    0.6
+}
 
 impl MosfetParams {
     /// Returns true if either drain or source resistance is enabled.
-    pub fn has_rd_rs(&self) -> bool { self.rd > 0.0 || self.rs_param > 0.0 }
+    pub fn has_rd_rs(&self) -> bool {
+        self.rd > 0.0 || self.rs_param > 0.0
+    }
     /// Returns true if body effect is enabled.
-    pub fn has_body_effect(&self) -> bool { self.gamma > 0.0 }
+    pub fn has_body_effect(&self) -> bool {
+        self.gamma > 0.0
+    }
 }
 
 /// Tube/triode model parameters (Koren + improved grid current).
@@ -570,18 +604,23 @@ pub struct TubeParams {
 
 impl TubeParams {
     /// Returns true if grid internal resistance is enabled.
-    pub fn has_rgi(&self) -> bool { self.rgi > 0.0 }
+    pub fn has_rgi(&self) -> bool {
+        self.rgi > 0.0
+    }
 }
 
 impl DiodeParams {
     /// Returns true if series resistance is enabled.
-    pub fn has_rs(&self) -> bool { self.rs > 0.0 }
+    pub fn has_rs(&self) -> bool {
+        self.rs > 0.0
+    }
     /// Returns true if reverse breakdown is enabled.
-    pub fn has_bv(&self) -> bool { self.bv.is_finite() }
+    pub fn has_bv(&self) -> bool {
+        self.bv.is_finite()
+    }
 }
 
-impl DeviceParams {
-}
+impl DeviceParams {}
 
 /// Nonlinear device type tag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -655,10 +694,18 @@ fn analyze_matrix_sparsity(data: &[f64], rows: usize, cols: usize) -> MatrixSpar
 /// Stamp mutual conductance between two 2-terminal elements into a flat row-major matrix.
 /// Node indices are 1-indexed; 0 means ground.
 fn stamp_flat_mutual(mat: &mut [f64], n: usize, a: usize, b: usize, c: usize, d: usize, g: f64) {
-    if a > 0 && c > 0 { mat[(a - 1) * n + (c - 1)] += g; }
-    if b > 0 && d > 0 { mat[(b - 1) * n + (d - 1)] += g; }
-    if a > 0 && d > 0 { mat[(a - 1) * n + (d - 1)] -= g; }
-    if b > 0 && c > 0 { mat[(b - 1) * n + (c - 1)] -= g; }
+    if a > 0 && c > 0 {
+        mat[(a - 1) * n + (c - 1)] += g;
+    }
+    if b > 0 && d > 0 {
+        mat[(b - 1) * n + (d - 1)] += g;
+    }
+    if a > 0 && d > 0 {
+        mat[(a - 1) * n + (d - 1)] -= g;
+    }
+    if b > 0 && c > 0 {
+        mat[(b - 1) * n + (c - 1)] -= g;
+    }
 }
 
 /// Stamp a conductance between two nodes into a flat row-major matrix.
@@ -673,8 +720,12 @@ fn stamp_flat_conductance(mat: &mut [f64], n: usize, node_i: usize, node_j: usiz
             mat[i * n + j] -= g;
             mat[j * n + i] -= g;
         }
-        (true, false) => { mat[(node_i - 1) * n + (node_i - 1)] += g; }
-        (false, true) => { mat[(node_j - 1) * n + (node_j - 1)] += g; }
+        (true, false) => {
+            mat[(node_i - 1) * n + (node_i - 1)] += g;
+        }
+        (false, true) => {
+            mat[(node_j - 1) * n + (node_j - 1)] += g;
+        }
         (false, false) => {}
     }
 }
@@ -711,7 +762,9 @@ fn invert_flat_matrix(a: &[f64], n: usize) -> Result<Vec<f64>, CodegenError> {
             )));
         }
         if max_row != col {
-            for j in 0..w { aug.swap(col * w + j, max_row * w + j); }
+            for j in 0..w {
+                aug.swap(col * w + j, max_row * w + j);
+            }
         }
         let pivot = aug[col * w + col];
         for row in (col + 1)..n {
@@ -728,13 +781,18 @@ fn invert_flat_matrix(a: &[f64], n: usize) -> Result<Vec<f64>, CodegenError> {
         if pivot.abs() < 1e-30 {
             return Err(CodegenError::InvalidConfig(format!(
                 "Matrix is singular (pivot {:.2e} at row {}) — check for floating nodes or missing ground path",
-                pivot.abs(), col
+                pivot.abs(),
+                col
             )));
         }
-        for j in 0..w { aug[col * w + j] /= pivot; }
+        for j in 0..w {
+            aug[col * w + j] /= pivot;
+        }
         for row in 0..col {
             let factor = aug[row * w + col];
-            for j in 0..w { aug[row * w + j] -= factor * aug[col * w + j]; }
+            for j in 0..w {
+                aug[row * w + j] -= factor * aug[col * w + j];
+            }
         }
     }
 
@@ -798,14 +856,15 @@ impl CircuitIR {
         netlist: &Netlist,
         config: &CodegenConfig,
     ) -> Result<Self, CodegenError> {
-        let n = kernel.n;         // = n_aug (system dimension)
+        let n = kernel.n; // = n_aug (system dimension)
         let n_nodes = kernel.n_nodes; // original circuit node count
         let m = kernel.m;
 
         if m > crate::dk::MAX_M {
             return Err(CodegenError::UnsupportedTopology(format!(
                 "code generation supports at most M={} nonlinear dimensions, got M={}",
-                crate::dk::MAX_M, m
+                crate::dk::MAX_M,
+                m
             )));
         }
 
@@ -851,9 +910,15 @@ impl CircuitIR {
         // augmented G/C (with inductor KCL/KVL/L stamps) at the full n_nodal dimension.
         let (g_matrix, c_matrix) = if augmented_inductors {
             let aug = mna.build_augmented_matrices();
-            (dk::flatten_matrix(&aug.g, n, n), dk::flatten_matrix(&aug.c, n, n))
+            (
+                dk::flatten_matrix(&aug.g, n, n),
+                dk::flatten_matrix(&aug.c, n, n),
+            )
         } else {
-            (dk::flatten_matrix(&mna.g, n, n), dk::flatten_matrix(&mna.c, n, n))
+            (
+                dk::flatten_matrix(&mna.g, n, n),
+                dk::flatten_matrix(&mna.c, n, n),
+            )
         };
 
         let matrices = if os_factor > 1 {
@@ -893,10 +958,42 @@ impl CircuitIR {
                     stamp_flat_conductance(&mut a_neg_flat, n, ci.l1_node_i, ci.l1_node_j, -gs1);
                     stamp_flat_conductance(&mut a_flat, n, ci.l2_node_i, ci.l2_node_j, gs2);
                     stamp_flat_conductance(&mut a_neg_flat, n, ci.l2_node_i, ci.l2_node_j, -gs2);
-                    stamp_flat_mutual(&mut a_flat, n, ci.l1_node_i, ci.l1_node_j, ci.l2_node_i, ci.l2_node_j, gm);
-                    stamp_flat_mutual(&mut a_flat, n, ci.l2_node_i, ci.l2_node_j, ci.l1_node_i, ci.l1_node_j, gm);
-                    stamp_flat_mutual(&mut a_neg_flat, n, ci.l1_node_i, ci.l1_node_j, ci.l2_node_i, ci.l2_node_j, -gm);
-                    stamp_flat_mutual(&mut a_neg_flat, n, ci.l2_node_i, ci.l2_node_j, ci.l1_node_i, ci.l1_node_j, -gm);
+                    stamp_flat_mutual(
+                        &mut a_flat,
+                        n,
+                        ci.l1_node_i,
+                        ci.l1_node_j,
+                        ci.l2_node_i,
+                        ci.l2_node_j,
+                        gm,
+                    );
+                    stamp_flat_mutual(
+                        &mut a_flat,
+                        n,
+                        ci.l2_node_i,
+                        ci.l2_node_j,
+                        ci.l1_node_i,
+                        ci.l1_node_j,
+                        gm,
+                    );
+                    stamp_flat_mutual(
+                        &mut a_neg_flat,
+                        n,
+                        ci.l1_node_i,
+                        ci.l1_node_j,
+                        ci.l2_node_i,
+                        ci.l2_node_j,
+                        -gm,
+                    );
+                    stamp_flat_mutual(
+                        &mut a_neg_flat,
+                        n,
+                        ci.l2_node_i,
+                        ci.l2_node_j,
+                        ci.l1_node_i,
+                        ci.l1_node_j,
+                        -gm,
+                    );
                 }
             }
 
@@ -951,132 +1048,162 @@ impl CircuitIR {
         let mut device_slots = Self::build_device_info_with_mna(netlist, Some(mna))?;
         Self::resolve_mosfet_nodes(&mut device_slots, mna);
 
-        let inductors: Vec<InductorIR> = kernel.inductors.iter().map(|ind| {
-            // Recompute g_eq at internal rate when oversampling
-            let g_eq = if os_factor > 1 {
-                1.0 / (2.0 * internal_rate * ind.inductance)
-            } else {
-                ind.g_eq
-            };
-            InductorIR {
-                name: ind.name.to_string(),
-                node_i: ind.node_i,
-                node_j: ind.node_j,
-                g_eq,
-                inductance: ind.inductance,
-            }
-        }).collect();
+        let inductors: Vec<InductorIR> = kernel
+            .inductors
+            .iter()
+            .map(|ind| {
+                // Recompute g_eq at internal rate when oversampling
+                let g_eq = if os_factor > 1 {
+                    1.0 / (2.0 * internal_rate * ind.inductance)
+                } else {
+                    ind.g_eq
+                };
+                InductorIR {
+                    name: ind.name.to_string(),
+                    node_i: ind.node_i,
+                    node_j: ind.node_j,
+                    g_eq,
+                    inductance: ind.inductance,
+                }
+            })
+            .collect();
 
-        let coupled_inductors: Vec<CoupledInductorIR> = kernel.coupled_inductors.iter().map(|ci| {
-            // Recompute conductances at internal rate when oversampling
-            let (g_self_1, g_self_2, g_mutual) = if os_factor > 1 {
-                let t = 1.0 / internal_rate;
-                let m_val = ci.coupling * (ci.l1_inductance * ci.l2_inductance).sqrt();
-                let det = ci.l1_inductance * ci.l2_inductance - m_val * m_val;
-                let half_t = t / 2.0;
-                (half_t * ci.l2_inductance / det, half_t * ci.l1_inductance / det, -half_t * m_val / det)
-            } else {
-                (ci.g_self_1, ci.g_self_2, ci.g_mutual)
-            };
-            CoupledInductorIR {
-                name: ci.name.clone(),
-                l1_name: ci.l1_name.clone(),
-                l2_name: ci.l2_name.clone(),
-                l1_node_i: ci.l1_node_i,
-                l1_node_j: ci.l1_node_j,
-                l2_node_i: ci.l2_node_i,
-                l2_node_j: ci.l2_node_j,
-                l1_inductance: ci.l1_inductance,
-                l2_inductance: ci.l2_inductance,
-                coupling: ci.coupling,
-                g_self_1,
-                g_self_2,
-                g_mutual,
-            }
-        }).collect();
+        let coupled_inductors: Vec<CoupledInductorIR> = kernel
+            .coupled_inductors
+            .iter()
+            .map(|ci| {
+                // Recompute conductances at internal rate when oversampling
+                let (g_self_1, g_self_2, g_mutual) = if os_factor > 1 {
+                    let t = 1.0 / internal_rate;
+                    let m_val = ci.coupling * (ci.l1_inductance * ci.l2_inductance).sqrt();
+                    let det = ci.l1_inductance * ci.l2_inductance - m_val * m_val;
+                    let half_t = t / 2.0;
+                    (
+                        half_t * ci.l2_inductance / det,
+                        half_t * ci.l1_inductance / det,
+                        -half_t * m_val / det,
+                    )
+                } else {
+                    (ci.g_self_1, ci.g_self_2, ci.g_mutual)
+                };
+                CoupledInductorIR {
+                    name: ci.name.clone(),
+                    l1_name: ci.l1_name.clone(),
+                    l2_name: ci.l2_name.clone(),
+                    l1_node_i: ci.l1_node_i,
+                    l1_node_j: ci.l1_node_j,
+                    l2_node_i: ci.l2_node_i,
+                    l2_node_j: ci.l2_node_j,
+                    l1_inductance: ci.l1_inductance,
+                    l2_inductance: ci.l2_inductance,
+                    coupling: ci.coupling,
+                    g_self_1,
+                    g_self_2,
+                    g_mutual,
+                }
+            })
+            .collect();
 
-        let transformer_groups: Vec<TransformerGroupIR> = kernel.transformer_groups.iter().map(|g| {
-            let w = g.num_windings;
-            // Recompute Y matrix at internal rate when oversampling
-            let y_matrix = if os_factor > 1 {
-                let t = 1.0 / internal_rate;
-                let half_t = t / 2.0;
-                let mut l_mat = vec![vec![0.0f64; w]; w];
+        let transformer_groups: Vec<TransformerGroupIR> = kernel
+            .transformer_groups
+            .iter()
+            .map(|g| {
+                let w = g.num_windings;
+                // Recompute Y matrix at internal rate when oversampling
+                let y_matrix = if os_factor > 1 {
+                    let t = 1.0 / internal_rate;
+                    let half_t = t / 2.0;
+                    let mut l_mat = vec![vec![0.0f64; w]; w];
+                    for i in 0..w {
+                        for j in 0..w {
+                            l_mat[i][j] = g.coupling_matrix[i][j]
+                                * (g.inductances[i] * g.inductances[j]).sqrt();
+                        }
+                    }
+                    let y_raw = crate::mna::invert_small_matrix(&l_mat);
+                    let mut y_flat = vec![0.0f64; w * w];
+                    for i in 0..w {
+                        for j in 0..w {
+                            y_flat[i * w + j] = half_t * y_raw[i][j];
+                        }
+                    }
+                    y_flat
+                } else {
+                    g.y_matrix.clone()
+                };
+                let mut coupling_flat = vec![0.0f64; w * w];
                 for i in 0..w {
                     for j in 0..w {
-                        l_mat[i][j] = g.coupling_matrix[i][j]
-                            * (g.inductances[i] * g.inductances[j]).sqrt();
+                        coupling_flat[i * w + j] = g.coupling_matrix[i][j];
                     }
                 }
-                let y_raw = crate::mna::invert_small_matrix(&l_mat);
-                let mut y_flat = vec![0.0f64; w * w];
-                for i in 0..w {
-                    for j in 0..w {
-                        y_flat[i * w + j] = half_t * y_raw[i][j];
-                    }
+                TransformerGroupIR {
+                    name: g.name.clone(),
+                    num_windings: w,
+                    winding_names: g.winding_names.clone(),
+                    winding_node_i: g.winding_node_i.clone(),
+                    winding_node_j: g.winding_node_j.clone(),
+                    inductances: g.inductances.clone(),
+                    coupling_flat,
+                    y_matrix,
                 }
-                y_flat
-            } else {
-                g.y_matrix.clone()
-            };
-            let mut coupling_flat = vec![0.0f64; w * w];
-            for i in 0..w {
-                for j in 0..w {
-                    coupling_flat[i * w + j] = g.coupling_matrix[i][j];
-                }
-            }
-            TransformerGroupIR {
-                name: g.name.clone(),
-                num_windings: w,
-                winding_names: g.winding_names.clone(),
-                winding_node_i: g.winding_node_i.clone(),
-                winding_node_j: g.winding_node_j.clone(),
-                inductances: g.inductances.clone(),
-                coupling_flat,
-                y_matrix,
-            }
-        }).collect();
+            })
+            .collect();
 
-        let pots = kernel.pots.iter().map(|p| PotentiometerIR {
-            su: p.su.clone(),
-            usu: p.usu,
-            g_nominal: p.g_nominal,
-            nv_su: p.nv_su.clone(),
-            u_ni: p.u_ni.clone(),
-            node_p: p.node_p,
-            node_q: p.node_q,
-            min_resistance: p.min_resistance,
-            max_resistance: p.max_resistance,
-            grounded: p.grounded,
-        }).collect();
+        let pots = kernel
+            .pots
+            .iter()
+            .map(|p| PotentiometerIR {
+                su: p.su.clone(),
+                usu: p.usu,
+                g_nominal: p.g_nominal,
+                nv_su: p.nv_su.clone(),
+                u_ni: p.u_ni.clone(),
+                node_p: p.node_p,
+                node_q: p.node_q,
+                min_resistance: p.min_resistance,
+                max_resistance: p.max_resistance,
+                grounded: p.grounded,
+            })
+            .collect();
 
         // Build switches from MNA resolved info
-        let switches: Vec<SwitchIR> = mna.switches.iter().enumerate().map(|(idx, sw)| {
-            let components = sw.components.iter().map(|comp| {
-                // For inductor components, find matching index in the inductors vec
-                let inductor_index = if comp.component_type == 'L' {
-                    kernel.inductors.iter().position(|ind| {
-                        ind.name.eq_ignore_ascii_case(&comp.name)
+        let switches: Vec<SwitchIR> = mna
+            .switches
+            .iter()
+            .enumerate()
+            .map(|(idx, sw)| {
+                let components = sw
+                    .components
+                    .iter()
+                    .map(|comp| {
+                        // For inductor components, find matching index in the inductors vec
+                        let inductor_index = if comp.component_type == 'L' {
+                            kernel
+                                .inductors
+                                .iter()
+                                .position(|ind| ind.name.eq_ignore_ascii_case(&comp.name))
+                        } else {
+                            None
+                        };
+                        SwitchComponentIR {
+                            name: comp.name.clone(),
+                            component_type: comp.component_type,
+                            node_p: comp.node_p,
+                            node_q: comp.node_q,
+                            nominal_value: comp.nominal_value,
+                            inductor_index,
+                        }
                     })
-                } else {
-                    None
-                };
-                SwitchComponentIR {
-                    name: comp.name.clone(),
-                    component_type: comp.component_type,
-                    node_p: comp.node_p,
-                    node_q: comp.node_q,
-                    nominal_value: comp.nominal_value,
-                    inductor_index,
+                    .collect();
+                SwitchIR {
+                    index: idx,
+                    components,
+                    positions: sw.positions.clone(),
+                    num_positions: sw.positions.len(),
                 }
-            }).collect();
-            SwitchIR {
-                index: idx,
-                components,
-                positions: sw.positions.clone(),
-                num_positions: sw.positions.len(),
-            }
-        }).collect();
+            })
+            .collect();
 
         let has_dc_sources = kernel.rhs_const.iter().any(|&v| v != 0.0);
 
@@ -1271,12 +1398,14 @@ impl CircuitIR {
         }
         for vs in &mna.voltage_sources {
             let k = mna.n + vs.ext_idx;
-            if k < n { rhs_const_be[k] = vs.dc_value; }
+            if k < n {
+                rhs_const_be[k] = vs.dc_value;
+            }
         }
 
         let matrices = Matrices {
-            s: Vec::new(),     // not used in nodal mode
-            k: Vec::new(),     // not used in nodal mode
+            s: Vec::new(), // not used in nodal mode
+            k: Vec::new(), // not used in nodal mode
             a_neg: a_neg_flat,
             n_v: n_v_flat,
             n_i: n_i_flat,
@@ -1295,7 +1424,8 @@ impl CircuitIR {
             input_resistance: config.input_resistance,
             ..DcOpConfig::default()
         };
-        let dc_result = dc_op::solve_dc_operating_point(mna, &Self::build_device_info(netlist)?, &dc_op_config);
+        let dc_result =
+            dc_op::solve_dc_operating_point(mna, &Self::build_device_info(netlist)?, &dc_op_config);
         let dc_op_truncated = &dc_result.v_node[..n_aug.min(dc_result.v_node.len())];
         let has_dc_op = dc_op_truncated.iter().any(|&v| v.abs() > 1e-15);
         let dc_op_converged = dc_result.converged;
@@ -1330,38 +1460,51 @@ impl CircuitIR {
             dc_nl_currents,
             dc_op_converged,
             dc_block: config.dc_block,
-            inductors: Vec::new(),          // no companion model
+            inductors: Vec::new(), // no companion model
             coupled_inductors: Vec::new(),
             transformer_groups: Vec::new(),
-            pots: mna.pots.iter().map(|p| PotentiometerIR {
-                su: Vec::new(),         // not used in nodal (no Sherman-Morrison)
-                usu: 0.0,
-                g_nominal: p.g_nominal,
-                nv_su: Vec::new(),
-                u_ni: Vec::new(),
-                node_p: p.node_p,
-                node_q: p.node_q,
-                min_resistance: p.min_resistance,
-                max_resistance: p.max_resistance,
-                grounded: p.grounded,
-            }).collect(),
-            switches: mna.switches.iter().enumerate().map(|(idx, sw)| {
-                SwitchIR {
-                    index: idx,
-                    components: sw.components.iter().map(|comp| {
-                        SwitchComponentIR {
-                            name: comp.name.clone(),
-                            component_type: comp.component_type,
-                            node_p: comp.node_p,
-                            node_q: comp.node_q,
-                            nominal_value: comp.nominal_value,
-                            inductor_index: None, // augmented MNA handles inductors differently
-                        }
-                    }).collect(),
-                    positions: sw.positions.clone(),
-                    num_positions: sw.positions.len(),
-                }
-            }).collect(),
+            pots: mna
+                .pots
+                .iter()
+                .map(|p| PotentiometerIR {
+                    su: Vec::new(), // not used in nodal (no Sherman-Morrison)
+                    usu: 0.0,
+                    g_nominal: p.g_nominal,
+                    nv_su: Vec::new(),
+                    u_ni: Vec::new(),
+                    node_p: p.node_p,
+                    node_q: p.node_q,
+                    min_resistance: p.min_resistance,
+                    max_resistance: p.max_resistance,
+                    grounded: p.grounded,
+                })
+                .collect(),
+            switches: mna
+                .switches
+                .iter()
+                .enumerate()
+                .map(|(idx, sw)| {
+                    SwitchIR {
+                        index: idx,
+                        components: sw
+                            .components
+                            .iter()
+                            .map(|comp| {
+                                SwitchComponentIR {
+                                    name: comp.name.clone(),
+                                    component_type: comp.component_type,
+                                    node_p: comp.node_p,
+                                    node_q: comp.node_q,
+                                    nominal_value: comp.nominal_value,
+                                    inductor_index: None, // augmented MNA handles inductors differently
+                                }
+                            })
+                            .collect(),
+                        positions: sw.positions.clone(),
+                        num_positions: sw.positions.len(),
+                    }
+                })
+                .collect(),
             sparsity,
         })
     }
@@ -1385,7 +1528,9 @@ impl CircuitIR {
         use crate::dc_op::{self, DcOpConfig};
 
         let device_slots = Self::build_device_info(netlist).unwrap_or_default();
-        if device_slots.is_empty() { return std::collections::HashSet::new(); }
+        if device_slots.is_empty() {
+            return std::collections::HashSet::new();
+        }
 
         let dc_op_config = DcOpConfig {
             tolerance: config.dc_op_tolerance,
@@ -1398,23 +1543,34 @@ impl CircuitIR {
 
         let mut forward_active = std::collections::HashSet::new();
         for (slot_idx, slot) in device_slots.iter().enumerate() {
-            if slot.device_type == DeviceType::Bjt {
-                if let DeviceParams::Bjt(bp) = &slot.params {
-                    if slot_idx < mna.nonlinear_devices.len() {
-                        let dev = &mna.nonlinear_devices[slot_idx];
-                        let nc = dev.node_indices[0];
-                        let nb = dev.node_indices[1];
-                        let v_c = if nc > 0 && nc - 1 < dc_result.v_node.len() { dc_result.v_node[nc - 1] } else { 0.0 };
-                        let v_b = if nb > 0 && nb - 1 < dc_result.v_node.len() { dc_result.v_node[nb - 1] } else { 0.0 };
-                        let vbc = v_b - v_c;
-                        let sign = if bp.is_pnp { -1.0 } else { 1.0 };
-                        let vbc_eff = sign * vbc;
-                        if vbc_eff < -1.0 && !bp.has_parasitics() && !bp.is_gummel_poon() {
-                            let name = dev.name.to_ascii_uppercase();
-                            log::info!("BJT '{}' forward-active (Vbc={:.3}V). Using 1D model.", name, vbc_eff);
-                            forward_active.insert(name);
-                        }
-                    }
+            if slot.device_type == DeviceType::Bjt
+                && let DeviceParams::Bjt(bp) = &slot.params
+                && slot_idx < mna.nonlinear_devices.len()
+            {
+                let dev = &mna.nonlinear_devices[slot_idx];
+                let nc = dev.node_indices[0];
+                let nb = dev.node_indices[1];
+                let v_c = if nc > 0 && nc - 1 < dc_result.v_node.len() {
+                    dc_result.v_node[nc - 1]
+                } else {
+                    0.0
+                };
+                let v_b = if nb > 0 && nb - 1 < dc_result.v_node.len() {
+                    dc_result.v_node[nb - 1]
+                } else {
+                    0.0
+                };
+                let vbc = v_b - v_c;
+                let sign = if bp.is_pnp { -1.0 } else { 1.0 };
+                let vbc_eff = sign * vbc;
+                if vbc_eff < -1.0 && !bp.has_parasitics() && !bp.is_gummel_poon() {
+                    let name = dev.name.to_ascii_uppercase();
+                    log::info!(
+                        "BJT '{}' forward-active (Vbc={:.3}V). Using 1D model.",
+                        name,
+                        vbc_eff
+                    );
+                    forward_active.insert(name);
                 }
             }
         }
@@ -1426,7 +1582,10 @@ impl CircuitIR {
     }
 
     /// Build device info, optionally using MNA device dimensions (for forward-active BJTs).
-    pub fn build_device_info_with_mna(netlist: &Netlist, mna: Option<&crate::mna::MnaSystem>) -> Result<Vec<DeviceSlot>, CodegenError> {
+    pub fn build_device_info_with_mna(
+        netlist: &Netlist,
+        mna: Option<&crate::mna::MnaSystem>,
+    ) -> Result<Vec<DeviceSlot>, CodegenError> {
         let mut slots = Vec::new();
         let mut dim_offset = 0;
         let mut nl_dev_idx = 0; // tracks position in mna.nonlinear_devices
@@ -1447,9 +1606,10 @@ impl CircuitIR {
                 Element::Bjt { model, .. } => {
                     let params = Self::resolve_bjt_params(netlist, model)?;
                     // Check if MNA has this BJT as forward-active (1D)
-                    let is_fa = mna.map_or(false, |m| {
+                    let is_fa = mna.is_some_and(|m| {
                         nl_dev_idx < m.nonlinear_devices.len()
-                            && m.nonlinear_devices[nl_dev_idx].device_type == crate::mna::NonlinearDeviceType::BjtForwardActive
+                            && m.nonlinear_devices[nl_dev_idx].device_type
+                                == crate::mna::NonlinearDeviceType::BjtForwardActive
                     });
                     let (dev_type, dim) = if is_fa {
                         (DeviceType::BjtForwardActive, 1)
@@ -1551,33 +1711,36 @@ impl CircuitIR {
         validate_positive_finite(n, "diode model N")?;
 
         // Junction capacitance (optional, default 0.0)
-        let cjo = Self::lookup_model_param(netlist, model, "CJO")
-            .unwrap_or(0.0);
+        let cjo = Self::lookup_model_param(netlist, model, "CJO").unwrap_or(0.0);
 
         // Series resistance (optional, default 0.0)
-        let rs = Self::lookup_model_param(netlist, model, "RS")
-            .unwrap_or(0.0);
+        let rs = Self::lookup_model_param(netlist, model, "RS").unwrap_or(0.0);
         if rs < 0.0 || !rs.is_finite() {
-            return Err(CodegenError::InvalidConfig(
-                format!("diode model RS must be non-negative and finite, got {rs}")
-            ));
+            return Err(CodegenError::InvalidConfig(format!(
+                "diode model RS must be non-negative and finite, got {rs}"
+            )));
         }
 
         // Reverse breakdown voltage (optional, default infinity = disabled)
-        let bv = Self::lookup_model_param(netlist, model, "BV")
-            .unwrap_or(f64::INFINITY);
+        let bv = Self::lookup_model_param(netlist, model, "BV").unwrap_or(f64::INFINITY);
         if bv.is_finite() {
             validate_positive_finite(bv, "diode model BV")?;
         }
 
         // Reverse breakdown current (optional, default 1e-10)
-        let ibv = Self::lookup_model_param(netlist, model, "IBV")
-            .unwrap_or(1e-10);
+        let ibv = Self::lookup_model_param(netlist, model, "IBV").unwrap_or(1e-10);
         if ibv.is_finite() {
             validate_positive_finite(ibv, "diode model IBV")?;
         }
 
-        Ok(DiodeParams { is, n_vt: n * vt, cjo, rs, bv, ibv })
+        Ok(DiodeParams {
+            is,
+            n_vt: n * vt,
+            cjo,
+            rs,
+            bv,
+            ibv,
+        })
     }
 
     /// Resolve BJT model parameters from the netlist, with validation.
@@ -1604,7 +1767,9 @@ impl CircuitIR {
         validate_positive_finite(beta_f, "BJT model BF")?;
         validate_positive_finite(beta_r, "BJT model BR")?;
 
-        let is_pnp = netlist.models.iter()
+        let is_pnp = netlist
+            .models
+            .iter()
             .find(|m| m.name.eq_ignore_ascii_case(model))
             .map(|m| m.model_type.to_uppercase().starts_with("PNP"))
             .unwrap_or(cat.map(|c| c.is_pnp).unwrap_or(false));
@@ -1642,103 +1807,113 @@ impl CircuitIR {
         }
 
         // Junction capacitances (optional, default 0.0)
-        let cje = Self::lookup_model_param(netlist, model, "CJE")
-            .unwrap_or(0.0);
-        let cjc = Self::lookup_model_param(netlist, model, "CJC")
-            .unwrap_or(0.0);
+        let cje = Self::lookup_model_param(netlist, model, "CJE").unwrap_or(0.0);
+        let cjc = Self::lookup_model_param(netlist, model, "CJC").unwrap_or(0.0);
 
         // Forward emission coefficient (default 1.0 = ideal)
-        let nf = Self::lookup_model_param(netlist, model, "NF")
-            .unwrap_or(1.0);
+        let nf = Self::lookup_model_param(netlist, model, "NF").unwrap_or(1.0);
         if nf <= 0.0 || !nf.is_finite() {
-            return Err(CodegenError::InvalidConfig(
-                format!("BJT model NF must be positive and finite, got {nf}")
-            ));
+            return Err(CodegenError::InvalidConfig(format!(
+                "BJT model NF must be positive and finite, got {nf}"
+            )));
         }
 
         // B-E leakage saturation current (default 0.0 = disabled)
-        let ise = Self::lookup_model_param(netlist, model, "ISE")
-            .unwrap_or(0.0);
+        let ise = Self::lookup_model_param(netlist, model, "ISE").unwrap_or(0.0);
         if ise < 0.0 || !ise.is_finite() {
-            return Err(CodegenError::InvalidConfig(
-                format!("BJT model ISE must be non-negative and finite, got {ise}")
-            ));
+            return Err(CodegenError::InvalidConfig(format!(
+                "BJT model ISE must be non-negative and finite, got {ise}"
+            )));
         }
 
         // B-E leakage emission coefficient (default 1.5)
-        let ne = Self::lookup_model_param(netlist, model, "NE")
-            .unwrap_or(1.5);
+        let ne = Self::lookup_model_param(netlist, model, "NE").unwrap_or(1.5);
         if ne <= 0.0 || !ne.is_finite() {
-            return Err(CodegenError::InvalidConfig(
-                format!("BJT model NE must be positive and finite, got {ne}")
-            ));
+            return Err(CodegenError::InvalidConfig(format!(
+                "BJT model NE must be positive and finite, got {ne}"
+            )));
         }
 
         // Parasitic series resistances (optional, default 0.0)
-        let rb = Self::lookup_model_param(netlist, model, "RB")
-            .unwrap_or(0.0);
-        let rc = Self::lookup_model_param(netlist, model, "RC")
-            .unwrap_or(0.0);
-        let re = Self::lookup_model_param(netlist, model, "RE")
-            .unwrap_or(0.0);
+        let rb = Self::lookup_model_param(netlist, model, "RB").unwrap_or(0.0);
+        let rc = Self::lookup_model_param(netlist, model, "RC").unwrap_or(0.0);
+        let re = Self::lookup_model_param(netlist, model, "RE").unwrap_or(0.0);
         if rb < 0.0 || !rb.is_finite() {
-            return Err(CodegenError::InvalidConfig(
-                format!("BJT model RB must be non-negative and finite, got {rb}")
-            ));
+            return Err(CodegenError::InvalidConfig(format!(
+                "BJT model RB must be non-negative and finite, got {rb}"
+            )));
         }
         if rc < 0.0 || !rc.is_finite() {
-            return Err(CodegenError::InvalidConfig(
-                format!("BJT model RC must be non-negative and finite, got {rc}")
-            ));
+            return Err(CodegenError::InvalidConfig(format!(
+                "BJT model RC must be non-negative and finite, got {rc}"
+            )));
         }
         if re < 0.0 || !re.is_finite() {
-            return Err(CodegenError::InvalidConfig(
-                format!("BJT model RE must be non-negative and finite, got {re}")
-            ));
+            return Err(CodegenError::InvalidConfig(format!(
+                "BJT model RE must be non-negative and finite, got {re}"
+            )));
         }
 
         // Self-heating parameters (optional)
-        let rth = Self::lookup_model_param(netlist, model, "RTH")
-            .unwrap_or(f64::INFINITY);
+        let rth = Self::lookup_model_param(netlist, model, "RTH").unwrap_or(f64::INFINITY);
         if rth.is_finite() && rth <= 0.0 {
-            return Err(CodegenError::InvalidConfig(
-                format!("BJT model RTH must be positive (or infinite to disable), got {rth}")
-            ));
+            return Err(CodegenError::InvalidConfig(format!(
+                "BJT model RTH must be positive (or infinite to disable), got {rth}"
+            )));
         }
 
-        let cth = Self::lookup_model_param(netlist, model, "CTH")
-            .unwrap_or(1e-3);
+        let cth = Self::lookup_model_param(netlist, model, "CTH").unwrap_or(1e-3);
         if cth <= 0.0 || !cth.is_finite() {
-            return Err(CodegenError::InvalidConfig(
-                format!("BJT model CTH must be positive and finite, got {cth}")
-            ));
+            return Err(CodegenError::InvalidConfig(format!(
+                "BJT model CTH must be positive and finite, got {cth}"
+            )));
         }
 
-        let xti = Self::lookup_model_param(netlist, model, "XTI")
-            .unwrap_or(3.0);
+        let xti = Self::lookup_model_param(netlist, model, "XTI").unwrap_or(3.0);
         if !xti.is_finite() {
-            return Err(CodegenError::InvalidConfig(
-                format!("BJT model XTI must be finite, got {xti}")
-            ));
+            return Err(CodegenError::InvalidConfig(format!(
+                "BJT model XTI must be finite, got {xti}"
+            )));
         }
 
-        let eg = Self::lookup_model_param(netlist, model, "EG")
-            .unwrap_or(1.11);
+        let eg = Self::lookup_model_param(netlist, model, "EG").unwrap_or(1.11);
         if eg <= 0.0 || !eg.is_finite() {
-            return Err(CodegenError::InvalidConfig(
-                format!("BJT model EG must be positive and finite, got {eg}")
-            ));
+            return Err(CodegenError::InvalidConfig(format!(
+                "BJT model EG must be positive and finite, got {eg}"
+            )));
         }
 
-        let tamb = Self::lookup_model_param(netlist, model, "TAMB")
-            .unwrap_or(300.15);
+        let tamb = Self::lookup_model_param(netlist, model, "TAMB").unwrap_or(300.15);
         if tamb <= 0.0 || !tamb.is_finite() {
-            return Err(CodegenError::InvalidConfig(
-                format!("BJT model TAMB must be positive and finite, got {tamb}")
-            ));
+            return Err(CodegenError::InvalidConfig(format!(
+                "BJT model TAMB must be positive and finite, got {tamb}"
+            )));
         }
 
-        Ok(BjtParams { is, vt, beta_f, beta_r, is_pnp, vaf, var, ikf, ikr, cje, cjc, nf, ise, ne, rb, rc, re, rth, cth, xti, eg, tamb })
+        Ok(BjtParams {
+            is,
+            vt,
+            beta_f,
+            beta_r,
+            is_pnp,
+            vaf,
+            var,
+            ikf,
+            ikr,
+            cje,
+            cjc,
+            nf,
+            ise,
+            ne,
+            rb,
+            rc,
+            re,
+            rth,
+            cth,
+            xti,
+            eg,
+            tamb,
+        })
     }
 
     /// Resolve JFET model parameters from the netlist, with validation.
@@ -1748,14 +1923,17 @@ impl CircuitIR {
         let cat = melange_devices::catalog::jfets::lookup(model);
 
         // Determine channel type first — default VP depends on polarity.
-        let is_p_channel = netlist.models.iter()
+        let is_p_channel = netlist
+            .models
+            .iter()
             .find(|m| m.name.eq_ignore_ascii_case(model))
             .map(|m| m.model_type.to_uppercase().starts_with("PJ"))
             .unwrap_or(cat.map(|c| c.is_p_channel).unwrap_or(false));
 
-        let default_vp = cat.map(|c| c.vp).unwrap_or(if is_p_channel { 2.0 } else { -2.0 });
-        let vp = Self::lookup_model_param(netlist, model, "VTO")
-            .unwrap_or(default_vp);
+        let default_vp = cat
+            .map(|c| c.vp)
+            .unwrap_or(if is_p_channel { 2.0 } else { -2.0 });
+        let vp = Self::lookup_model_param(netlist, model, "VTO").unwrap_or(default_vp);
         // ngspice BETA = IDSS / VP^2, so IDSS = BETA * VP^2
         let idss = if let Some(raw_idss) = Self::lookup_model_param(netlist, model, "IDSS") {
             raw_idss
@@ -1770,36 +1948,43 @@ impl CircuitIR {
 
         validate_positive_finite(idss, "JFET model IDSS")?;
         if !vp.is_finite() || vp.abs() < 1e-15 {
-            return Err(CodegenError::InvalidConfig(
-                format!("JFET model VP must be finite and nonzero, got {vp}")
-            ));
+            return Err(CodegenError::InvalidConfig(format!(
+                "JFET model VP must be finite and nonzero, got {vp}"
+            )));
         }
         if !lambda.is_finite() || lambda < 0.0 {
-            return Err(CodegenError::InvalidConfig(
-                format!("JFET model LAMBDA must be non-negative and finite, got {lambda}")
-            ));
+            return Err(CodegenError::InvalidConfig(format!(
+                "JFET model LAMBDA must be non-negative and finite, got {lambda}"
+            )));
         }
 
         // Junction capacitances (optional, default 0.0)
-        let cgs = Self::lookup_model_param(netlist, model, "CGS")
-            .unwrap_or(0.0);
-        let cgd = Self::lookup_model_param(netlist, model, "CGD")
-            .unwrap_or(0.0);
+        let cgs = Self::lookup_model_param(netlist, model, "CGS").unwrap_or(0.0);
+        let cgd = Self::lookup_model_param(netlist, model, "CGD").unwrap_or(0.0);
 
         // Ohmic drain/source resistances (optional, default 0.0)
-        let rd = Self::lookup_model_param(netlist, model, "RD")
-            .unwrap_or(0.0);
-        let rs_param = Self::lookup_model_param(netlist, model, "RS")
-            .unwrap_or(0.0);
+        let rd = Self::lookup_model_param(netlist, model, "RD").unwrap_or(0.0);
+        let rs_param = Self::lookup_model_param(netlist, model, "RS").unwrap_or(0.0);
 
-        Ok(JfetParams { idss, vp, lambda, is_p_channel, cgs, cgd, rd, rs_param })
+        Ok(JfetParams {
+            idss,
+            vp,
+            lambda,
+            is_p_channel,
+            cgs,
+            cgd,
+            rd,
+            rs_param,
+        })
     }
 
     /// Resolve MOSFET model parameters from the netlist, with validation.
     fn resolve_mosfet_params(netlist: &Netlist, model: &str) -> Result<MosfetParams, CodegenError> {
         let cat = melange_devices::catalog::mosfets::lookup(model);
 
-        let is_p_channel = netlist.models.iter()
+        let is_p_channel = netlist
+            .models
+            .iter()
             .find(|m| m.name.eq_ignore_ascii_case(model))
             .map(|m| m.model_type.to_uppercase().starts_with("PM"))
             .unwrap_or(cat.map(|c| c.is_p_channel).unwrap_or(false));
@@ -1807,7 +1992,9 @@ impl CircuitIR {
         let kp = Self::lookup_model_param(netlist, model, "KP")
             .or_else(|| cat.map(|c| c.kp))
             .unwrap_or(0.1);
-        let default_vt = cat.map(|c| c.vt).unwrap_or(if is_p_channel { -2.0 } else { 2.0 });
+        let default_vt = cat
+            .map(|c| c.vt)
+            .unwrap_or(if is_p_channel { -2.0 } else { 2.0 });
         let vt = Self::lookup_model_param(netlist, model, "VTO")
             .or_else(|| Self::lookup_model_param(netlist, model, "VT"))
             .unwrap_or(default_vt);
@@ -1817,46 +2004,53 @@ impl CircuitIR {
 
         validate_positive_finite(kp, "MOSFET model KP")?;
         if !vt.is_finite() {
-            return Err(CodegenError::InvalidConfig(
-                format!("MOSFET model VT must be finite, got {vt}")
-            ));
+            return Err(CodegenError::InvalidConfig(format!(
+                "MOSFET model VT must be finite, got {vt}"
+            )));
         }
         if !lambda.is_finite() || lambda < 0.0 {
-            return Err(CodegenError::InvalidConfig(
-                format!("MOSFET model LAMBDA must be non-negative and finite, got {lambda}")
-            ));
+            return Err(CodegenError::InvalidConfig(format!(
+                "MOSFET model LAMBDA must be non-negative and finite, got {lambda}"
+            )));
         }
 
         // Junction capacitances (optional, default 0.0)
-        let cgs = Self::lookup_model_param(netlist, model, "CGS")
-            .unwrap_or(0.0);
-        let cgd = Self::lookup_model_param(netlist, model, "CGD")
-            .unwrap_or(0.0);
+        let cgs = Self::lookup_model_param(netlist, model, "CGS").unwrap_or(0.0);
+        let cgd = Self::lookup_model_param(netlist, model, "CGD").unwrap_or(0.0);
 
         // Ohmic drain/source resistances (optional, default 0.0)
-        let rd = Self::lookup_model_param(netlist, model, "RD")
-            .unwrap_or(0.0);
-        let rs_param = Self::lookup_model_param(netlist, model, "RS")
-            .unwrap_or(0.0);
+        let rd = Self::lookup_model_param(netlist, model, "RD").unwrap_or(0.0);
+        let rs_param = Self::lookup_model_param(netlist, model, "RS").unwrap_or(0.0);
 
         // Body effect parameters (optional, default 0.0 = disabled)
-        let gamma = Self::lookup_model_param(netlist, model, "GAMMA")
-            .unwrap_or(0.0);
-        let phi = Self::lookup_model_param(netlist, model, "PHI")
-            .unwrap_or(0.6);
+        let gamma = Self::lookup_model_param(netlist, model, "GAMMA").unwrap_or(0.0);
+        let phi = Self::lookup_model_param(netlist, model, "PHI").unwrap_or(0.6);
         if gamma < 0.0 || !gamma.is_finite() {
-            return Err(CodegenError::InvalidConfig(
-                format!("MOSFET model GAMMA must be non-negative and finite, got {gamma}")
-            ));
+            return Err(CodegenError::InvalidConfig(format!(
+                "MOSFET model GAMMA must be non-negative and finite, got {gamma}"
+            )));
         }
         if phi <= 0.0 || !phi.is_finite() {
-            return Err(CodegenError::InvalidConfig(
-                format!("MOSFET model PHI must be positive and finite, got {phi}")
-            ));
+            return Err(CodegenError::InvalidConfig(format!(
+                "MOSFET model PHI must be positive and finite, got {phi}"
+            )));
         }
 
         // source_node and bulk_node will be resolved later from the MNA system
-        Ok(MosfetParams { kp, vt, lambda, is_p_channel, cgs, cgd, rd, rs_param, gamma, phi, source_node: 0, bulk_node: 0 })
+        Ok(MosfetParams {
+            kp,
+            vt,
+            lambda,
+            is_p_channel,
+            cgs,
+            cgd,
+            rd,
+            rs_param,
+            gamma,
+            phi,
+            source_node: 0,
+            bulk_node: 0,
+        })
     }
 
     /// Resolve tube/triode model parameters from the netlist, with validation.
@@ -1899,29 +2093,38 @@ impl CircuitIR {
 
         // Validate optional lambda: must be non-negative and finite
         if !lambda.is_finite() || lambda < 0.0 {
-            return Err(CodegenError::InvalidConfig(
-                format!("tube model LAMBDA must be non-negative and finite, got {lambda}")
-            ));
+            return Err(CodegenError::InvalidConfig(format!(
+                "tube model LAMBDA must be non-negative and finite, got {lambda}"
+            )));
         }
 
         // Inter-electrode capacitances (optional, default 0.0)
-        let ccg = Self::lookup_model_param(netlist, model, "CCG")
-            .unwrap_or(0.0);
-        let cgp = Self::lookup_model_param(netlist, model, "CGP")
-            .unwrap_or(0.0);
-        let ccp = Self::lookup_model_param(netlist, model, "CCP")
-            .unwrap_or(0.0);
+        let ccg = Self::lookup_model_param(netlist, model, "CCG").unwrap_or(0.0);
+        let cgp = Self::lookup_model_param(netlist, model, "CGP").unwrap_or(0.0);
+        let ccp = Self::lookup_model_param(netlist, model, "CCP").unwrap_or(0.0);
 
         // Grid internal resistance (optional, default 0.0 = disabled)
-        let rgi = Self::lookup_model_param(netlist, model, "RGI")
-            .unwrap_or(0.0);
-        if rgi < 0.0 || (rgi.is_finite() && rgi < 0.0) {
-            return Err(CodegenError::InvalidConfig(
-                format!("tube model RGI must be non-negative, got {rgi}")
-            ));
+        let rgi = Self::lookup_model_param(netlist, model, "RGI").unwrap_or(0.0);
+        if rgi < 0.0 {
+            return Err(CodegenError::InvalidConfig(format!(
+                "tube model RGI must be non-negative, got {rgi}"
+            )));
         }
 
-        Ok(TubeParams { mu, ex, kg1, kp, kvb, ig_max, vgk_onset, lambda, ccg, cgp, ccp, rgi })
+        Ok(TubeParams {
+            mu,
+            ex,
+            kg1,
+            kp,
+            kvb,
+            ig_max,
+            vgk_onset,
+            lambda,
+            ccg,
+            cgp,
+            ccp,
+            rgi,
+        })
     }
 
     /// Build the legacy `devices` list (first occurrence of each device type).

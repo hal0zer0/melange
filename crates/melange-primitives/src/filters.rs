@@ -14,8 +14,8 @@
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct OnePoleLpf {
     state: f64,
-    g: f64,      // feedforward coefficient
-    g1: f64,     // feedback coefficient (1 - g)
+    g: f64,  // feedforward coefficient
+    g1: f64, // feedback coefficient (1 - g)
 }
 
 impl OnePoleLpf {
@@ -114,8 +114,8 @@ impl Default for OnePoleHpf {
 /// This is essentially a ZDF (Zero Delay Feedback) integrator wrapped as a one-pole.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TptLpf {
-    s: f64,      // integrator state
-    g: f64,      // tan(ω/2) coefficient
+    s: f64, // integrator state
+    g: f64, // tan(ω/2) coefficient
 }
 
 impl TptLpf {
@@ -224,8 +224,11 @@ pub struct Biquad {
     s1: f64,
     s2: f64,
     // Coefficients
-    b0: f64, b1: f64, b2: f64,
-    a1: f64, a2: f64,
+    b0: f64,
+    b1: f64,
+    b2: f64,
+    a1: f64,
+    a2: f64,
 }
 
 /// Biquad filter types.
@@ -243,9 +246,13 @@ impl Biquad {
     /// Create a biquad filter from type specification.
     pub fn new(filter_type: BiquadType, fs: f64) -> Self {
         let mut b = Self {
-            s1: 0.0, s2: 0.0,
-            b0: 0.0, b1: 0.0, b2: 0.0,
-            a1: 0.0, a2: 0.0,
+            s1: 0.0,
+            s2: 0.0,
+            b0: 0.0,
+            b1: 0.0,
+            b2: 0.0,
+            a1: 0.0,
+            a2: 0.0,
         };
         b.set_type(filter_type, fs);
         b
@@ -357,7 +364,13 @@ impl Biquad {
 
 impl Default for Biquad {
     fn default() -> Self {
-        Self::new(BiquadType::Lowpass { fc: 1000.0, q: 0.707 }, 44100.0)
+        Self::new(
+            BiquadType::Lowpass {
+                fc: 1000.0,
+                q: 0.707,
+            },
+            44100.0,
+        )
     }
 }
 
@@ -381,12 +394,22 @@ mod tests {
         }
         // Output should approach 0
         let output = dc.process(1.0);
-        assert!(output.abs() < 0.05, "DC blocker failed to attenuate DC: {}", output);
+        assert!(
+            output.abs() < 0.05,
+            "DC blocker failed to attenuate DC: {}",
+            output
+        );
     }
 
     #[test]
     fn test_biquad_lowpass() {
-        let mut bq = Biquad::new(BiquadType::Lowpass { fc: 1000.0, q: 0.707 }, 44100.0);
+        let mut bq = Biquad::new(
+            BiquadType::Lowpass {
+                fc: 1000.0,
+                q: 0.707,
+            },
+            44100.0,
+        );
         let output = bq.process(1.0);
         assert!(output > 0.0 && output <= 1.0);
     }

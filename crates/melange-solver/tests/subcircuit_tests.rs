@@ -1,7 +1,7 @@
 //! Tests for subcircuit expansion (.subckt / X instance support).
 
-use melange_solver::parser::{Element, Netlist};
 use melange_solver::mna::MnaSystem;
+use melange_solver::parser::{Element, Netlist};
 
 // ──────────────────────────────────────────────────────────────
 // Expansion tests
@@ -17,12 +17,20 @@ X1 a b buf
 "#;
     let mut netlist = Netlist::parse(spice).unwrap();
     assert_eq!(netlist.elements.len(), 1);
-    assert!(matches!(&netlist.elements[0], Element::SubcktInstance { .. }));
+    assert!(matches!(
+        &netlist.elements[0],
+        Element::SubcktInstance { .. }
+    ));
 
     netlist.expand_subcircuits().unwrap();
     assert_eq!(netlist.elements.len(), 1);
     match &netlist.elements[0] {
-        Element::Resistor { name, n_plus, n_minus, value } => {
+        Element::Resistor {
+            name,
+            n_plus,
+            n_minus,
+            value,
+        } => {
             assert_eq!(name, "X1.R1");
             assert_eq!(n_plus, "a");
             assert_eq!(n_minus, "b");
@@ -64,7 +72,9 @@ X1 sig grounded
     let mut netlist = Netlist::parse(spice).unwrap();
     netlist.expand_subcircuits().unwrap();
     match &netlist.elements[0] {
-        Element::Resistor { n_plus, n_minus, .. } => {
+        Element::Resistor {
+            n_plus, n_minus, ..
+        } => {
             assert_eq!(n_plus, "sig");
             assert_eq!(n_minus, "0"); // Ground stays "0", NOT "X1.0"
         }
@@ -116,8 +126,10 @@ X1 sig_in sig_out vcc_rail stage
 
     // Internal node "mid" should be prefixed
     match &netlist.elements[0] {
-        Element::Resistor { n_plus, n_minus, .. } => {
-            assert_eq!(n_plus, "sig_in");  // port → caller's node
+        Element::Resistor {
+            n_plus, n_minus, ..
+        } => {
+            assert_eq!(n_plus, "sig_in"); // port → caller's node
             assert_eq!(n_minus, "X1.mid"); // internal → prefixed
         }
         other => panic!("Expected Resistor, got {:?}", other),
@@ -167,16 +179,20 @@ X1 a b outer
 
     // Check node remapping through nesting
     match &netlist.elements[0] {
-        Element::Resistor { n_plus, n_minus, .. } => {
-            assert_eq!(n_plus, "a");         // outer port "in" → "a"
-            assert_eq!(n_minus, "X1.mid");   // outer internal "mid"
+        Element::Resistor {
+            n_plus, n_minus, ..
+        } => {
+            assert_eq!(n_plus, "a"); // outer port "in" → "a"
+            assert_eq!(n_minus, "X1.mid"); // outer internal "mid"
         }
         other => panic!("Expected Resistor, got {:?}", other),
     }
     match &netlist.elements[1] {
-        Element::Resistor { n_plus, n_minus, .. } => {
-            assert_eq!(n_plus, "X1.mid");    // outer internal "mid"
-            assert_eq!(n_minus, "b");         // outer port "out" → "b"
+        Element::Resistor {
+            n_plus, n_minus, ..
+        } => {
+            assert_eq!(n_plus, "X1.mid"); // outer internal "mid"
+            assert_eq!(n_minus, "b"); // outer port "out" → "b"
         }
         other => panic!("Expected Resistor, got {:?}", other),
     }
@@ -258,9 +274,15 @@ X1 a b rail powered
     netlist.expand_subcircuits().unwrap();
     assert_eq!(netlist.elements.len(), 2);
     match &netlist.elements[0] {
-        Element::VoltageSource { name, n_plus, n_minus, dc, .. } => {
+        Element::VoltageSource {
+            name,
+            n_plus,
+            n_minus,
+            dc,
+            ..
+        } => {
             assert_eq!(name, "X1.V1");
-            assert_eq!(n_plus, "rail");  // Port "vcc" → caller's "rail"
+            assert_eq!(n_plus, "rail"); // Port "vcc" → caller's "rail"
             assert_eq!(n_minus, "0");
             assert_eq!(*dc, Some(9.0));
         }
@@ -300,7 +322,13 @@ X1 base collector supply amp
     netlist.expand_subcircuits().unwrap();
     assert_eq!(netlist.elements.len(), 2);
     match &netlist.elements[0] {
-        Element::Bjt { name, nc, nb, ne, model } => {
+        Element::Bjt {
+            name,
+            nc,
+            nb,
+            ne,
+            model,
+        } => {
             assert_eq!(name, "X1.Q1");
             assert_eq!(nc, "collector");
             assert_eq!(nb, "base");
@@ -393,7 +421,7 @@ X1 a b buf
 
 #[test]
 fn test_rc_lowpass_subcircuit_codegen() {
-    use melange_solver::codegen::{CodegenConfig, CodeGenerator};
+    use melange_solver::codegen::{CodeGenerator, CodegenConfig};
     use melange_solver::dk::DkKernel;
 
     let spice = r#"RC Lowpass as Subcircuit
@@ -426,7 +454,10 @@ X1 in out lowpass
     let result = generator.generate(&kernel, &mna, &netlist);
     assert!(result.is_ok(), "Codegen failed: {:?}", result.err());
     let code = result.unwrap().code;
-    assert!(code.contains("process_sample"), "Generated code missing process_sample");
+    assert!(
+        code.contains("process_sample"),
+        "Generated code missing process_sample"
+    );
 }
 
 #[test]
@@ -446,9 +477,10 @@ X1 sig_in sig_out tone
     assert_eq!(netlist.pots[0].resistor_name, "X1.R1");
 
     // Verify it matches the expanded resistor
-    let has_r = netlist.elements.iter().any(|e| {
-        matches!(e, Element::Resistor { name, .. } if name == "X1.R1")
-    });
+    let has_r = netlist
+        .elements
+        .iter()
+        .any(|e| matches!(e, Element::Resistor { name, .. } if name == "X1.R1"));
     assert!(has_r, "Expanded resistor X1.R1 not found");
 
     // Should build MNA successfully
@@ -471,12 +503,16 @@ X1 sig_in sig_out filter
     assert_eq!(netlist.switches[0].component_names[0], "X1.C1");
 
     // Verify the expanded capacitor exists
-    let has_c = netlist.elements.iter().any(|e| {
-        matches!(e, Element::Capacitor { name, .. } if name == "X1.C1")
-    });
+    let has_c = netlist
+        .elements
+        .iter()
+        .any(|e| matches!(e, Element::Capacitor { name, .. } if name == "X1.C1"));
     assert!(has_c, "Expanded capacitor X1.C1 not found");
 
     // Should build MNA successfully
     let mna = MnaSystem::from_netlist(&netlist).unwrap();
-    assert!(!mna.switches.is_empty(), "Switch should be recognized in MNA");
+    assert!(
+        !mna.switches.is_empty(),
+        "Switch should be recognized in MNA"
+    );
 }

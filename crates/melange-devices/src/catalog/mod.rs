@@ -20,11 +20,11 @@
 //! }
 //! ```
 
-pub mod tubes;
 pub mod bjts;
 pub mod diodes;
 pub mod jfets;
 pub mod mosfets;
+pub mod tubes;
 
 /// Result of a cross-family catalog lookup.
 #[derive(Debug, Clone, Copy)]
@@ -40,11 +40,21 @@ pub enum CatalogResult {
 ///
 /// Returns the first match found. Search order: tubes, BJTs, diodes, JFETs, MOSFETs.
 pub fn lookup(name: &str) -> Option<CatalogResult> {
-    if let Some(e) = tubes::lookup(name) { return Some(CatalogResult::Tube(e)); }
-    if let Some(e) = bjts::lookup(name) { return Some(CatalogResult::Bjt(e)); }
-    if let Some(e) = diodes::lookup(name) { return Some(CatalogResult::Diode(e)); }
-    if let Some(e) = jfets::lookup(name) { return Some(CatalogResult::Jfet(e)); }
-    if let Some(e) = mosfets::lookup(name) { return Some(CatalogResult::Mosfet(e)); }
+    if let Some(e) = tubes::lookup(name) {
+        return Some(CatalogResult::Tube(e));
+    }
+    if let Some(e) = bjts::lookup(name) {
+        return Some(CatalogResult::Bjt(e));
+    }
+    if let Some(e) = diodes::lookup(name) {
+        return Some(CatalogResult::Diode(e));
+    }
+    if let Some(e) = jfets::lookup(name) {
+        return Some(CatalogResult::Jfet(e));
+    }
+    if let Some(e) = mosfets::lookup(name) {
+        return Some(CatalogResult::Mosfet(e));
+    }
     None
 }
 

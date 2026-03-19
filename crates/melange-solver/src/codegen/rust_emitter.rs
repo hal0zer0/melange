@@ -9,9 +9,9 @@
 use serde::Serialize;
 use tera::{Context, Tera};
 
+use super::CodegenError;
 use super::emitter::Emitter;
 use super::ir::{CircuitIR, DeviceParams, DeviceType, PotentiometerIR};
-use super::CodegenError;
 
 /// Inductor data passed to Tera templates.
 #[derive(Serialize)]
@@ -113,13 +113,13 @@ fn self_heating_device_data(ir: &CircuitIR) -> Vec<SelfHeatingDeviceData> {
         .iter()
         .enumerate()
         .filter_map(|(dev_num, slot)| {
-            if let DeviceParams::Bjt(bp) = &slot.params {
-                if bp.has_self_heating() {
-                    return Some(SelfHeatingDeviceData {
-                        dev_num,
-                        start_idx: slot.start_idx,
-                    });
-                }
+            if let DeviceParams::Bjt(bp) = &slot.params
+                && bp.has_self_heating()
+            {
+                return Some(SelfHeatingDeviceData {
+                    dev_num,
+                    start_idx: slot.start_idx,
+                });
             }
             None
         })
@@ -140,50 +140,114 @@ fn device_param_template_data(ir: &CircuitIR) -> Vec<DeviceParamTemplateData> {
                 DeviceParams::Diode(_) => (
                     "Diode".to_string(),
                     vec![
-                        DeviceParamEntry { field_suffix: "is".into(), const_suffix: "IS".into() },
-                        DeviceParamEntry { field_suffix: "n_vt".into(), const_suffix: "N_VT".into() },
+                        DeviceParamEntry {
+                            field_suffix: "is".into(),
+                            const_suffix: "IS".into(),
+                        },
+                        DeviceParamEntry {
+                            field_suffix: "n_vt".into(),
+                            const_suffix: "N_VT".into(),
+                        },
                     ],
                 ),
                 DeviceParams::Bjt(_) => (
                     "Bjt".to_string(),
                     vec![
-                        DeviceParamEntry { field_suffix: "is".into(), const_suffix: "IS".into() },
-                        DeviceParamEntry { field_suffix: "vt".into(), const_suffix: "VT".into() },
-                        DeviceParamEntry { field_suffix: "bf".into(), const_suffix: "BETA_F".into() },
-                        DeviceParamEntry { field_suffix: "br".into(), const_suffix: "BETA_R".into() },
+                        DeviceParamEntry {
+                            field_suffix: "is".into(),
+                            const_suffix: "IS".into(),
+                        },
+                        DeviceParamEntry {
+                            field_suffix: "vt".into(),
+                            const_suffix: "VT".into(),
+                        },
+                        DeviceParamEntry {
+                            field_suffix: "bf".into(),
+                            const_suffix: "BETA_F".into(),
+                        },
+                        DeviceParamEntry {
+                            field_suffix: "br".into(),
+                            const_suffix: "BETA_R".into(),
+                        },
                     ],
                 ),
                 DeviceParams::Jfet(_) => (
                     "Jfet".to_string(),
                     vec![
-                        DeviceParamEntry { field_suffix: "idss".into(), const_suffix: "IDSS".into() },
-                        DeviceParamEntry { field_suffix: "vp".into(), const_suffix: "VP".into() },
-                        DeviceParamEntry { field_suffix: "lambda".into(), const_suffix: "LAMBDA".into() },
+                        DeviceParamEntry {
+                            field_suffix: "idss".into(),
+                            const_suffix: "IDSS".into(),
+                        },
+                        DeviceParamEntry {
+                            field_suffix: "vp".into(),
+                            const_suffix: "VP".into(),
+                        },
+                        DeviceParamEntry {
+                            field_suffix: "lambda".into(),
+                            const_suffix: "LAMBDA".into(),
+                        },
                     ],
                 ),
                 DeviceParams::Mosfet(_) => (
                     "Mosfet".to_string(),
                     vec![
-                        DeviceParamEntry { field_suffix: "kp".into(), const_suffix: "KP".into() },
-                        DeviceParamEntry { field_suffix: "vt".into(), const_suffix: "VT".into() },
-                        DeviceParamEntry { field_suffix: "lambda".into(), const_suffix: "LAMBDA".into() },
+                        DeviceParamEntry {
+                            field_suffix: "kp".into(),
+                            const_suffix: "KP".into(),
+                        },
+                        DeviceParamEntry {
+                            field_suffix: "vt".into(),
+                            const_suffix: "VT".into(),
+                        },
+                        DeviceParamEntry {
+                            field_suffix: "lambda".into(),
+                            const_suffix: "LAMBDA".into(),
+                        },
                     ],
                 ),
                 DeviceParams::Tube(_) => (
                     "Tube".to_string(),
                     vec![
-                        DeviceParamEntry { field_suffix: "mu".into(), const_suffix: "MU".into() },
-                        DeviceParamEntry { field_suffix: "ex".into(), const_suffix: "EX".into() },
-                        DeviceParamEntry { field_suffix: "kg1".into(), const_suffix: "KG1".into() },
-                        DeviceParamEntry { field_suffix: "kp".into(), const_suffix: "KP".into() },
-                        DeviceParamEntry { field_suffix: "kvb".into(), const_suffix: "KVB".into() },
-                        DeviceParamEntry { field_suffix: "ig_max".into(), const_suffix: "IG_MAX".into() },
-                        DeviceParamEntry { field_suffix: "vgk_onset".into(), const_suffix: "VGK_ONSET".into() },
-                        DeviceParamEntry { field_suffix: "lambda".into(), const_suffix: "LAMBDA".into() },
+                        DeviceParamEntry {
+                            field_suffix: "mu".into(),
+                            const_suffix: "MU".into(),
+                        },
+                        DeviceParamEntry {
+                            field_suffix: "ex".into(),
+                            const_suffix: "EX".into(),
+                        },
+                        DeviceParamEntry {
+                            field_suffix: "kg1".into(),
+                            const_suffix: "KG1".into(),
+                        },
+                        DeviceParamEntry {
+                            field_suffix: "kp".into(),
+                            const_suffix: "KP".into(),
+                        },
+                        DeviceParamEntry {
+                            field_suffix: "kvb".into(),
+                            const_suffix: "KVB".into(),
+                        },
+                        DeviceParamEntry {
+                            field_suffix: "ig_max".into(),
+                            const_suffix: "IG_MAX".into(),
+                        },
+                        DeviceParamEntry {
+                            field_suffix: "vgk_onset".into(),
+                            const_suffix: "VGK_ONSET".into(),
+                        },
+                        DeviceParamEntry {
+                            field_suffix: "lambda".into(),
+                            const_suffix: "LAMBDA".into(),
+                        },
                     ],
                 ),
             };
-            DeviceParamTemplateData { dev_num, device_type, params }
+            DeviceParamTemplateData {
+                dev_num,
+                device_type,
+                params,
+            }
         })
         .collect()
 }
@@ -195,8 +259,11 @@ fn device_param_template_data(ir: &CircuitIR) -> Vec<DeviceParamTemplateData> {
 /// Format a float with full precision for codegen constants.
 fn fmt_f64(v: f64) -> String {
     if v.is_infinite() {
-        if v > 0.0 { "f64::INFINITY".to_string() }
-        else { "f64::NEG_INFINITY".to_string() }
+        if v > 0.0 {
+            "f64::INFINITY".to_string()
+        } else {
+            "f64::NEG_INFINITY".to_string()
+        }
     } else if v.is_nan() {
         "f64::NAN".to_string()
     } else {
@@ -207,11 +274,7 @@ fn fmt_f64(v: f64) -> String {
 /// Format a matrix as rows of comma-separated full-precision floats.
 ///
 /// `rows` x `cols` elements are read from `get(i, j)`.
-fn format_matrix_rows(
-    rows: usize,
-    cols: usize,
-    get: impl Fn(usize, usize) -> f64,
-) -> Vec<String> {
+fn format_matrix_rows(rows: usize, cols: usize, get: impl Fn(usize, usize) -> f64) -> Vec<String> {
     (0..rows)
         .map(|i| {
             (0..cols)
@@ -308,7 +371,9 @@ fn format_f64_slice(values: &[f64]) -> String {
 fn emit_device_const(code: &mut String, dev_num: usize, suffix: &str, value: f64) {
     code.push_str(&format!(
         "const DEVICE_{}_{}: f64 = {};\n",
-        dev_num, suffix, fmt_f64(value)
+        dev_num,
+        suffix,
+        fmt_f64(value)
     ));
 }
 
@@ -318,11 +383,7 @@ fn emit_device_const(code: &mut String, dev_num: usize, suffix: &str, value: f64
 
 /// Half-band filter coefficients from melange-primitives/src/oversampling.rs.
 /// 3-section (~80dB rejection, balanced quality/cost).
-const HB_3SECTION: [f64; 3] = [
-    0.036681502163648017,
-    0.2746317593794541,
-    0.7856959333713522,
-];
+const HB_3SECTION: [f64; 3] = [0.036681502163648017, 0.2746317593794541, 0.7856959333713522];
 
 /// 2-section half-band (minimal CPU, ~60dB rejection) for 4x outer stage.
 const HB_2SECTION: [f64; 2] = [0.07986642623635751, 0.5453536510716122];
@@ -444,7 +505,11 @@ impl Emitter for RustEmitter {
 
         let n = ir.topology.n;
         // n_nodes: original circuit node count. Fallback to n for backward compat (n_nodes=0 in old data).
-        let n_nodes = if ir.topology.n_nodes > 0 { ir.topology.n_nodes } else { n };
+        let n_nodes = if ir.topology.n_nodes > 0 {
+            ir.topology.n_nodes
+        } else {
+            n
+        };
 
         // Validate node indices against original circuit nodes (not augmented dimension)
         if ir.solver_config.input_node >= n_nodes {
@@ -525,7 +590,11 @@ impl RustEmitter {
         ctx.insert("m", &m);
         // n_nodes: original circuit node count (before augmented VS/VCVS variables).
         // Used to zero out augmented rows in A_neg during rebuild_matrices.
-        let n_nodes = if ir.topology.n_nodes > 0 { ir.topology.n_nodes } else { n };
+        let n_nodes = if ir.topology.n_nodes > 0 {
+            ir.topology.n_nodes
+        } else {
+            n
+        };
         ctx.insert("n_nodes", &n_nodes);
         let has_augmented = n_nodes < n;
         ctx.insert("has_augmented", &has_augmented);
@@ -535,17 +604,29 @@ impl RustEmitter {
         // When augmented_inductors is true, companion model constants (IND_*_G_EQ,
         // CI_*_G_SELF/MUTUAL, XFMR_*_Y) are not needed. The G/C matrices already
         // contain inductor stamps and A_neg handles history.
-        let num_inductors = if ir.topology.augmented_inductors { 0 } else { ir.inductors.len() };
+        let num_inductors = if ir.topology.augmented_inductors {
+            0
+        } else {
+            ir.inductors.len()
+        };
         ctx.insert("num_inductors", &num_inductors);
         if num_inductors > 0 {
             ctx.insert("inductors", &inductor_template_data(ir, true));
         }
-        let num_coupled_inductors = if ir.topology.augmented_inductors { 0 } else { ir.coupled_inductors.len() };
+        let num_coupled_inductors = if ir.topology.augmented_inductors {
+            0
+        } else {
+            ir.coupled_inductors.len()
+        };
         ctx.insert("num_coupled_inductors", &num_coupled_inductors);
         if num_coupled_inductors > 0 {
             ctx.insert("coupled_inductors", &coupled_inductor_template_data(ir));
         }
-        let num_transformer_groups = if ir.topology.augmented_inductors { 0 } else { ir.transformer_groups.len() };
+        let num_transformer_groups = if ir.topology.augmented_inductors {
+            0
+        } else {
+            ir.transformer_groups.len()
+        };
         ctx.insert("num_transformer_groups", &num_transformer_groups);
         if num_transformer_groups > 0 {
             ctx.insert("transformer_groups", &transformer_group_template_data(ir));
@@ -556,25 +637,34 @@ impl RustEmitter {
         );
         ctx.insert("oversampling_factor", &ir.solver_config.oversampling_factor);
         if ir.solver_config.oversampling_factor > 1 {
-            let internal_rate = ir.solver_config.sample_rate
-                * ir.solver_config.oversampling_factor as f64;
+            let internal_rate =
+                ir.solver_config.sample_rate * ir.solver_config.oversampling_factor as f64;
             ctx.insert("internal_sample_rate", &format!("{:.1}", internal_rate));
         }
         ctx.insert("alpha", &fmt_f64(ir.solver_config.alpha));
         ctx.insert("input_node", &ir.solver_config.input_node);
         let num_outputs = ir.solver_config.output_nodes.len();
         ctx.insert("num_outputs", &num_outputs);
-        let output_nodes_values = ir.solver_config.output_nodes.iter()
+        let output_nodes_values = ir
+            .solver_config
+            .output_nodes
+            .iter()
             .map(|n| n.to_string())
             .collect::<Vec<_>>()
             .join(", ");
         ctx.insert("output_nodes_values", &output_nodes_values);
-        let output_scales_values = ir.solver_config.output_scales.iter()
+        let output_scales_values = ir
+            .solver_config
+            .output_scales
+            .iter()
             .map(|s| fmt_f64(*s))
             .collect::<Vec<_>>()
             .join(", ");
         ctx.insert("output_scales_values", &output_scales_values);
-        ctx.insert("input_resistance", &fmt_f64(ir.solver_config.input_resistance));
+        ctx.insert(
+            "input_resistance",
+            &fmt_f64(ir.solver_config.input_resistance),
+        );
         ctx.insert("has_dc_sources", &ir.has_dc_sources);
 
         // G and C matrices (sample-rate independent)
@@ -582,7 +672,10 @@ impl RustEmitter {
         ctx.insert("c_rows", &format_matrix_rows(n, n, |i, j| ir.c(i, j)));
 
         ctx.insert("s_rows", &format_matrix_rows(n, n, |i, j| ir.s(i, j)));
-        ctx.insert("a_neg_rows", &format_matrix_rows(n, n, |i, j| ir.a_neg(i, j)));
+        ctx.insert(
+            "a_neg_rows",
+            &format_matrix_rows(n, n, |i, j| ir.a_neg(i, j)),
+        );
 
         if ir.has_dc_sources {
             let rhs_const_values = (0..n)
@@ -599,47 +692,66 @@ impl RustEmitter {
 
         // S*N_i product: precomputed for final voltage correction
         // S_NI[node][device] = sum_k S[node][k] * N_i[k][device]
-        let s_ni_rows: Vec<String> = (0..n).map(|i| {
-            (0..m).map(|j| {
-                let mut val = 0.0;
-                for k in 0..n {
-                    val += ir.s(i, k) * ir.n_i(k, j);
-                }
-                fmt_f64(val)
-            }).collect::<Vec<_>>().join(", ")
-        }).collect();
+        let s_ni_rows: Vec<String> = (0..n)
+            .map(|i| {
+                (0..m)
+                    .map(|j| {
+                        let mut val = 0.0;
+                        for k in 0..n {
+                            val += ir.s(i, k) * ir.n_i(k, j);
+                        }
+                        fmt_f64(val)
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .collect();
         ctx.insert("s_ni_rows", &s_ni_rows);
 
         // Switch constants
         let num_switches = ir.switches.len();
         ctx.insert("num_switches", &num_switches);
         if num_switches > 0 {
-            let switch_data: Vec<SwitchTemplateData> = ir.switches.iter().map(|sw| {
-                let components: Vec<SwitchCompTemplateData> = sw.components.iter().map(|comp| {
-                    SwitchCompTemplateData {
-                        node_p: comp.node_p,
-                        node_q: comp.node_q,
-                        nominal: fmt_f64(comp.nominal_value),
-                        comp_type: comp.component_type,
-                        inductor_index: comp.inductor_index.map(|i| i as i64).unwrap_or(-1),
+            let switch_data: Vec<SwitchTemplateData> = ir
+                .switches
+                .iter()
+                .map(|sw| {
+                    let components: Vec<SwitchCompTemplateData> = sw
+                        .components
+                        .iter()
+                        .map(|comp| SwitchCompTemplateData {
+                            node_p: comp.node_p,
+                            node_q: comp.node_q,
+                            nominal: fmt_f64(comp.nominal_value),
+                            comp_type: comp.component_type,
+                            inductor_index: comp.inductor_index.map(|i| i as i64).unwrap_or(-1),
+                        })
+                        .collect();
+                    let position_rows: Vec<String> = sw
+                        .positions
+                        .iter()
+                        .map(|pos| {
+                            pos.iter()
+                                .map(|v| fmt_f64(*v))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        })
+                        .collect();
+                    SwitchTemplateData {
+                        index: sw.index,
+                        num_positions: sw.num_positions,
+                        num_components: sw.components.len(),
+                        components,
+                        position_rows,
                     }
-                }).collect();
-                let position_rows: Vec<String> = sw.positions.iter().map(|pos| {
-                    pos.iter().map(|v| fmt_f64(*v)).collect::<Vec<_>>().join(", ")
-                }).collect();
-                SwitchTemplateData {
-                    index: sw.index,
-                    num_positions: sw.num_positions,
-                    num_components: sw.components.len(),
-                    components,
-                    position_rows,
-                }
-            }).collect();
+                })
+                .collect();
             ctx.insert("switches", &switch_data);
         }
 
         // DC block coefficient: R = 1 - 2*pi*5/sr
-        let internal_rate = ir.solver_config.sample_rate * ir.solver_config.oversampling_factor as f64;
+        let internal_rate =
+            ir.solver_config.sample_rate * ir.solver_config.oversampling_factor as f64;
         let dc_block_r = 1.0 - 2.0 * std::f64::consts::PI * 5.0 / internal_rate;
         ctx.insert("dc_block_r", &format!("{:.17e}", dc_block_r));
         ctx.insert("dc_block", &ir.dc_block);
@@ -656,7 +768,11 @@ impl RustEmitter {
         ctx.insert("n_nodes", &ir.topology.n_nodes);
         // When augmented_inductors is true, companion model state (ind_i_prev, ci_i_hist,
         // xfmr_y, etc.) is not needed. A_neg handles history through augmented G/C.
-        let num_inductors = if ir.topology.augmented_inductors { 0 } else { ir.inductors.len() };
+        let num_inductors = if ir.topology.augmented_inductors {
+            0
+        } else {
+            ir.inductors.len()
+        };
         ctx.insert("num_inductors", &num_inductors);
         let num_pots = ir.pots.len();
         ctx.insert("num_pots", &num_pots);
@@ -679,12 +795,20 @@ impl RustEmitter {
         if num_inductors > 0 {
             ctx.insert("inductors", &inductor_template_data(ir, true));
         }
-        let num_coupled_inductors = if ir.topology.augmented_inductors { 0 } else { ir.coupled_inductors.len() };
+        let num_coupled_inductors = if ir.topology.augmented_inductors {
+            0
+        } else {
+            ir.coupled_inductors.len()
+        };
         ctx.insert("num_coupled_inductors", &num_coupled_inductors);
         if num_coupled_inductors > 0 {
             ctx.insert("coupled_inductors", &coupled_inductor_template_data(ir));
         }
-        let num_transformer_groups = if ir.topology.augmented_inductors { 0 } else { ir.transformer_groups.len() };
+        let num_transformer_groups = if ir.topology.augmented_inductors {
+            0
+        } else {
+            ir.transformer_groups.len()
+        };
         ctx.insert("num_transformer_groups", &num_transformer_groups);
         if num_transformer_groups > 0 {
             ctx.insert("transformer_groups", &transformer_group_template_data(ir));
@@ -693,8 +817,10 @@ impl RustEmitter {
             let mut xfmr_ssr_lines = String::new();
             for (gi, g) in ir.transformer_groups.iter().enumerate() {
                 let w = g.num_windings;
-                xfmr_ssr_lines.push_str(&format!("        {{\n\
-                     \x20           let half_t = t / 2.0;\n"));
+                xfmr_ssr_lines.push_str(
+                    "        {\n\
+                     \x20           let half_t = t / 2.0;\n",
+                );
                 // Build L matrix
                 for i in 0..w {
                     for j in 0..w {
@@ -707,10 +833,14 @@ impl RustEmitter {
                 // Call inversion helper
                 xfmr_ssr_lines.push_str(&format!("            let y = invert_xfmr_{gi}(["));
                 for i in 0..w {
-                    if i > 0 { xfmr_ssr_lines.push_str(", "); }
+                    if i > 0 {
+                        xfmr_ssr_lines.push_str(", ");
+                    }
                     xfmr_ssr_lines.push('[');
                     for j in 0..w {
-                        if j > 0 { xfmr_ssr_lines.push_str(", "); }
+                        if j > 0 {
+                            xfmr_ssr_lines.push_str(", ");
+                        }
                         xfmr_ssr_lines.push_str(&format!("l_{i}_{j}"));
                     }
                     xfmr_ssr_lines.push(']');
@@ -736,7 +866,9 @@ impl RustEmitter {
                 // Stamp mutual conductances
                 for i in 0..w {
                     for j in 0..w {
-                        if i == j { continue; }
+                        if i == j {
+                            continue;
+                        }
                         let flat = i * w + j;
                         xfmr_ssr_lines.push_str(&format!(
                             "            stamp_mutual(&mut a, XFMR_{gi}_NODE_I[{i}], XFMR_{gi}_NODE_J[{i}], XFMR_{gi}_NODE_I[{j}], XFMR_{gi}_NODE_J[{j}], self.xfmr_{gi}_y[{flat}]);\n\
@@ -758,7 +890,8 @@ impl RustEmitter {
             ctx.insert("xfmr_set_sample_rate_lines", &xfmr_ssr_lines);
         }
 
-        let pot_defaults: Vec<String> = ir.pots.iter().map(|p| fmt_f64(1.0 / p.g_nominal)).collect();
+        let pot_defaults: Vec<String> =
+            ir.pots.iter().map(|p| fmt_f64(1.0 / p.g_nominal)).collect();
         ctx.insert("pot_defaults", &pot_defaults);
 
         // Pot indices for template iteration
@@ -852,7 +985,9 @@ impl RustEmitter {
                 }
                 DeviceParams::Bjt(bp) => {
                     has_bjt = true;
-                    if bp.has_self_heating() { has_bjt_self_heating = true; }
+                    if bp.has_self_heating() {
+                        has_bjt_self_heating = true;
+                    }
                     emit_device_const(&mut code, dev_num, "IS", bp.is);
                     emit_device_const(&mut code, dev_num, "VT", bp.vt);
                     emit_device_const(&mut code, dev_num, "BETA_F", bp.beta_f);
@@ -867,7 +1002,8 @@ impl RustEmitter {
                     ));
                     code.push_str(&format!(
                         "const DEVICE_{}_USE_GP: bool = {};\n",
-                        dev_num, bp.is_gummel_poon()
+                        dev_num,
+                        bp.is_gummel_poon()
                     ));
                     emit_device_const(&mut code, dev_num, "VAF", bp.vaf);
                     emit_device_const(&mut code, dev_num, "VAR", bp.var);
@@ -1038,9 +1174,17 @@ impl RustEmitter {
     fn emit_switch_methods(&self, ir: &CircuitIR) -> String {
         let n = ir.topology.n;
         let m = ir.topology.m;
-        let n_nodes = if ir.topology.n_nodes > 0 { ir.topology.n_nodes } else { n };
+        let n_nodes = if ir.topology.n_nodes > 0 {
+            ir.topology.n_nodes
+        } else {
+            n
+        };
         let num_pots = ir.pots.len();
-        let num_inductors = if ir.topology.augmented_inductors { 0 } else { ir.inductors.len() };
+        let num_inductors = if ir.topology.augmented_inductors {
+            0
+        } else {
+            ir.inductors.len()
+        };
         let os_factor = ir.solver_config.oversampling_factor;
         let mut code = String::new();
 
@@ -1077,8 +1221,14 @@ impl RustEmitter {
         }
 
         // Start from constant G, C
-        let has_r_switch = ir.switches.iter().any(|sw| sw.components.iter().any(|c| c.component_type == 'R'));
-        let has_c_switch = ir.switches.iter().any(|sw| sw.components.iter().any(|c| c.component_type == 'C'));
+        let has_r_switch = ir
+            .switches
+            .iter()
+            .any(|sw| sw.components.iter().any(|c| c.component_type == 'R'));
+        let has_c_switch = ir
+            .switches
+            .iter()
+            .any(|sw| sw.components.iter().any(|c| c.component_type == 'C'));
         let g_mut = if has_r_switch { "mut " } else { "" };
         let c_mut = if has_c_switch { "mut " } else { "" };
         code.push_str(&format!(
@@ -1119,7 +1269,9 @@ impl RustEmitter {
                     }
                     'L' => {
                         // Inductors: don't modify G/C here; handled in inductor companion stamp below
-                        code.push_str("            // Inductor: handled in companion model stamp below\n");
+                        code.push_str(
+                            "            // Inductor: handled in companion model stamp below\n",
+                        );
                         code.push_str("            let _ = new_val;\n");
                     }
                     _ => {}
@@ -1150,7 +1302,11 @@ impl RustEmitter {
         // Zero augmented rows in A_neg (algebraic constraints for VS/VCVS)
         // When augmented_inductors, only zero n_nodes..n_aug (not inductor rows)
         let n_aug = ir.topology.n_aug;
-        let a_neg_zero_end = if ir.topology.augmented_inductors { n_aug } else { n };
+        let a_neg_zero_end = if ir.topology.augmented_inductors {
+            n_aug
+        } else {
+            n
+        };
         if n_nodes < a_neg_zero_end {
             code.push_str(&format!(
                 "        // Zero VS/VCVS algebraic rows in A_neg (NOT inductor rows)\n\
@@ -1188,7 +1344,9 @@ impl RustEmitter {
                             break;
                         }
                     }
-                    if switched { break; }
+                    if switched {
+                        break;
+                    }
                 }
                 if !switched {
                     // Non-switched inductor: use constant
@@ -1212,7 +1370,11 @@ impl RustEmitter {
         }
 
         // Coupled inductor companion stamps
-        let num_coupled = if ir.topology.augmented_inductors { 0 } else { ir.coupled_inductors.len() };
+        let num_coupled = if ir.topology.augmented_inductors {
+            0
+        } else {
+            ir.coupled_inductors.len()
+        };
         if num_coupled > 0 {
             if num_inductors == 0 {
                 code.push_str("        let t = 1.0 / internal_rate;\n");
@@ -1255,7 +1417,11 @@ impl RustEmitter {
         }
 
         // Transformer group companion stamps
-        let num_xfmr_groups = if ir.topology.augmented_inductors { 0 } else { ir.transformer_groups.len() };
+        let num_xfmr_groups = if ir.topology.augmented_inductors {
+            0
+        } else {
+            ir.transformer_groups.len()
+        };
         if num_xfmr_groups > 0 {
             if num_inductors == 0 && num_coupled == 0 {
                 code.push_str("        let t = 1.0 / internal_rate;\n");
@@ -1264,11 +1430,11 @@ impl RustEmitter {
             for (gi, g) in ir.transformer_groups.iter().enumerate() {
                 let w = g.num_windings;
                 // Build L matrix from inductances and couplings, invert, multiply by T/2
-                code.push_str(&format!(
-                    "        {{\n\
+                code.push_str(
+                    "        {\n\
                      \x20           let half_t = t / 2.0;\n\
-                     \x20           // Build inductance matrix L[i][j] = k[i][j] * sqrt(Li*Lj)\n"
-                ));
+                     \x20           // Build inductance matrix L[i][j] = k[i][j] * sqrt(Li*Lj)\n",
+                );
                 // Emit L matrix construction
                 for i in 0..w {
                     for j in 0..w {
@@ -1279,13 +1445,16 @@ impl RustEmitter {
                     }
                 }
                 // Inline Gauss elimination to invert W x W matrix
-                code.push_str(&format!(
-                    "            let y = invert_xfmr_{gi}(["));
+                code.push_str(&format!("            let y = invert_xfmr_{gi}(["));
                 for i in 0..w {
-                    if i > 0 { code.push_str(", "); }
+                    if i > 0 {
+                        code.push_str(", ");
+                    }
                     code.push('[');
                     for j in 0..w {
-                        if j > 0 { code.push_str(", "); }
+                        if j > 0 {
+                            code.push_str(", ");
+                        }
                         code.push_str(&format!("l_{i}_{j}"));
                     }
                     code.push(']');
@@ -1311,7 +1480,9 @@ impl RustEmitter {
                 // Stamp mutual conductances (off-diagonal)
                 for i in 0..w {
                     for j in 0..w {
-                        if i == j { continue; }
+                        if i == j {
+                            continue;
+                        }
                         let flat = i * w + j;
                         code.push_str(&format!(
                             "            stamp_mutual(&mut a, XFMR_{gi}_NODE_I[{i}], XFMR_{gi}_NODE_J[{i}], XFMR_{gi}_NODE_I[{j}], XFMR_{gi}_NODE_J[{j}], self.xfmr_{gi}_y[{flat}]);\n",
@@ -1445,40 +1616,56 @@ impl RustEmitter {
         if ir.pots.is_empty() {
             return String::new();
         }
-        let mut code = section_banner("POTENTIOMETER CONSTANTS (Sherman-Morrison precomputed vectors)");
+        let mut code =
+            section_banner("POTENTIOMETER CONSTANTS (Sherman-Morrison precomputed vectors)");
 
         for (idx, pot) in ir.pots.iter().enumerate() {
             let su_values = format_f64_slice(&pot.su);
             code.push_str(&format!(
-                "const POT_{}_SU: [f64; N] = [{}];\n", idx, su_values
+                "const POT_{}_SU: [f64; N] = [{}];\n",
+                idx, su_values
             ));
             code.push_str(&format!(
-                "const POT_{}_USU: f64 = {};\n", idx, fmt_f64(pot.usu)
+                "const POT_{}_USU: f64 = {};\n",
+                idx,
+                fmt_f64(pot.usu)
             ));
             code.push_str(&format!(
-                "const POT_{}_G_NOM: f64 = {};\n", idx, fmt_f64(pot.g_nominal)
+                "const POT_{}_G_NOM: f64 = {};\n",
+                idx,
+                fmt_f64(pot.g_nominal)
             ));
 
             code.push_str(&format!(
-                "const POT_{}_NV_SU: [f64; M] = [{}];\n", idx, format_f64_slice(&pot.nv_su)
+                "const POT_{}_NV_SU: [f64; M] = [{}];\n",
+                idx,
+                format_f64_slice(&pot.nv_su)
             ));
             code.push_str(&format!(
-                "const POT_{}_U_NI: [f64; M] = [{}];\n", idx, format_f64_slice(&pot.u_ni)
+                "const POT_{}_U_NI: [f64; M] = [{}];\n",
+                idx,
+                format_f64_slice(&pot.u_ni)
             ));
 
             // Node indices (1-indexed, 0 = ground) for set_sample_rate recomputation
             code.push_str(&format!(
-                "const POT_{}_NODE_P: usize = {};\n", idx, pot.node_p
+                "const POT_{}_NODE_P: usize = {};\n",
+                idx, pot.node_p
             ));
             code.push_str(&format!(
-                "const POT_{}_NODE_Q: usize = {};\n", idx, pot.node_q
+                "const POT_{}_NODE_Q: usize = {};\n",
+                idx, pot.node_q
             ));
 
             code.push_str(&format!(
-                "const POT_{}_MIN_R: f64 = {};\n", idx, fmt_f64(pot.min_resistance)
+                "const POT_{}_MIN_R: f64 = {};\n",
+                idx,
+                fmt_f64(pot.min_resistance)
             ));
             code.push_str(&format!(
-                "const POT_{}_MAX_R: f64 = {};\n", idx, fmt_f64(pot.max_resistance)
+                "const POT_{}_MAX_R: f64 = {};\n",
+                idx,
+                fmt_f64(pot.max_resistance)
             ));
             code.push('\n');
         }
@@ -1606,17 +1793,29 @@ impl RustEmitter {
         // When augmented_inductors is true, companion model history is handled by A_neg,
         // so num_inductors/num_coupled_inductors/num_transformer_groups should be 0
         // for the build_rhs template (no history current injection).
-        let num_inductors = if ir.topology.augmented_inductors { 0 } else { ir.inductors.len() };
+        let num_inductors = if ir.topology.augmented_inductors {
+            0
+        } else {
+            ir.inductors.len()
+        };
         ctx.insert("num_inductors", &num_inductors);
         if num_inductors > 0 {
             ctx.insert("inductors", &inductor_template_data(ir, false));
         }
-        let num_coupled_inductors = if ir.topology.augmented_inductors { 0 } else { ir.coupled_inductors.len() };
+        let num_coupled_inductors = if ir.topology.augmented_inductors {
+            0
+        } else {
+            ir.coupled_inductors.len()
+        };
         ctx.insert("num_coupled_inductors", &num_coupled_inductors);
         if num_coupled_inductors > 0 {
             ctx.insert("coupled_inductors", &coupled_inductor_template_data(ir));
         }
-        let num_transformer_groups = if ir.topology.augmented_inductors { 0 } else { ir.transformer_groups.len() };
+        let num_transformer_groups = if ir.topology.augmented_inductors {
+            0
+        } else {
+            ir.transformer_groups.len()
+        };
         ctx.insert("num_transformer_groups", &num_transformer_groups);
         if num_transformer_groups > 0 {
             let mut xfmr_rhs_lines = String::new();
@@ -1625,13 +1824,17 @@ impl RustEmitter {
                     if g.winding_node_i[k] > 0 {
                         xfmr_rhs_lines.push_str(&format!(
                             "    rhs[{}] -= state.xfmr_{}_i_hist[{}];\n",
-                            g.winding_node_i[k] - 1, gi, k
+                            g.winding_node_i[k] - 1,
+                            gi,
+                            k
                         ));
                     }
                     if g.winding_node_j[k] > 0 {
                         xfmr_rhs_lines.push_str(&format!(
                             "    rhs[{}] += state.xfmr_{}_i_hist[{}];\n",
-                            g.winding_node_j[k] - 1, gi, k
+                            g.winding_node_j[k] - 1,
+                            gi,
+                            k
                         ));
                     }
                 }
@@ -1744,17 +1947,29 @@ impl RustEmitter {
         ctx.insert("augmented_inductors", &ir.topology.augmented_inductors);
         // When augmented_inductors is true, companion model state update is not needed —
         // A_neg handles all inductor history through the augmented G/C matrices.
-        let num_inductors = if ir.topology.augmented_inductors { 0 } else { ir.inductors.len() };
+        let num_inductors = if ir.topology.augmented_inductors {
+            0
+        } else {
+            ir.inductors.len()
+        };
         ctx.insert("num_inductors", &num_inductors);
         if num_inductors > 0 {
             ctx.insert("inductors", &inductor_template_data(ir, false));
         }
-        let num_coupled_inductors = if ir.topology.augmented_inductors { 0 } else { ir.coupled_inductors.len() };
+        let num_coupled_inductors = if ir.topology.augmented_inductors {
+            0
+        } else {
+            ir.coupled_inductors.len()
+        };
         ctx.insert("num_coupled_inductors", &num_coupled_inductors);
         if num_coupled_inductors > 0 {
             ctx.insert("coupled_inductors", &coupled_inductor_template_data(ir));
         }
-        let num_transformer_groups = if ir.topology.augmented_inductors { 0 } else { ir.transformer_groups.len() };
+        let num_transformer_groups = if ir.topology.augmented_inductors {
+            0
+        } else {
+            ir.transformer_groups.len()
+        };
         ctx.insert("num_transformer_groups", &num_transformer_groups);
         if num_transformer_groups > 0 {
             // Generate transformer group state update code procedurally
@@ -1774,9 +1989,8 @@ impl RustEmitter {
                     } else {
                         "0.0".to_string()
                     };
-                    xfmr_update_lines.push_str(&format!(
-                        "        let v_new_{k} = {v_i} - {v_j};\n"
-                    ));
+                    xfmr_update_lines
+                        .push_str(&format!("        let v_new_{k} = {v_i} - {v_j};\n"));
                 }
                 // Compute new currents: i_new[k] = i_prev[k] + sum_j Y[k][j] * (v_prev[j] + v_new[j])
                 for k in 0..w {
@@ -1793,14 +2007,11 @@ impl RustEmitter {
                 }
                 // Compute history currents: i_hist[k] = i_new[k] - sum_j Y[k][j] * v_new[j]
                 for k in 0..w {
-                    xfmr_update_lines.push_str(&format!(
-                        "        state.xfmr_{gi}_i_hist[{k}] = i_new_{k}"
-                    ));
+                    xfmr_update_lines
+                        .push_str(&format!("        state.xfmr_{gi}_i_hist[{k}] = i_new_{k}"));
                     for j in 0..w {
-                        xfmr_update_lines.push_str(&format!(
-                            " - state.xfmr_{gi}_y[{}] * v_new_{j}",
-                            k * w + j,
-                        ));
+                        xfmr_update_lines
+                            .push_str(&format!(" - state.xfmr_{gi}_y[{}] * v_new_{j}", k * w + j,));
                     }
                     xfmr_update_lines.push_str(";\n");
                 }
@@ -1839,7 +2050,8 @@ impl RustEmitter {
 
         let num_pots = ir.pots.len();
         ctx.insert("num_pots", &num_pots);
-        let pot_defaults: Vec<String> = ir.pots.iter().map(|p| fmt_f64(1.0 / p.g_nominal)).collect();
+        let pot_defaults: Vec<String> =
+            ir.pots.iter().map(|p| fmt_f64(1.0 / p.g_nominal)).collect();
         ctx.insert("pot_defaults", &pot_defaults);
 
         // Generate pot correction code blocks procedurally
@@ -1887,27 +2099,27 @@ impl RustEmitter {
         let mut body_effect_update = String::new();
         if ir.solver_mode == super::ir::SolverMode::Dk {
             for (dev_num, slot) in ir.device_slots.iter().enumerate() {
-                if let DeviceParams::Mosfet(mp) = &slot.params {
-                    if mp.has_body_effect() {
-                        // Extract Vsb from v_pred (node indices are 1-based; 0 = ground)
-                        let vs_expr = if mp.source_node > 0 {
-                            format!("v_pred[{}]", mp.source_node - 1)
-                        } else {
-                            "0.0".to_string()
-                        };
-                        let vb_expr = if mp.bulk_node > 0 {
-                            format!("v_pred[{}]", mp.bulk_node - 1)
-                        } else {
-                            "0.0".to_string()
-                        };
-                        let sign = if mp.is_p_channel { -1.0 } else { 1.0 };
-                        body_effect_update.push_str(&format!(
+                if let DeviceParams::Mosfet(mp) = &slot.params
+                    && mp.has_body_effect()
+                {
+                    // Extract Vsb from v_pred (node indices are 1-based; 0 = ground)
+                    let vs_expr = if mp.source_node > 0 {
+                        format!("v_pred[{}]", mp.source_node - 1)
+                    } else {
+                        "0.0".to_string()
+                    };
+                    let vb_expr = if mp.bulk_node > 0 {
+                        format!("v_pred[{}]", mp.bulk_node - 1)
+                    } else {
+                        "0.0".to_string()
+                    };
+                    let sign = if mp.is_p_channel { -1.0 } else { 1.0 };
+                    body_effect_update.push_str(&format!(
                             "    {{ // MOSFET {dev_num} body effect\n\
                              \x20       let vsb = ({sign:.1}) * ({vs_expr} - {vb_expr});\n\
                              \x20       state.device_{dev_num}_vt = DEVICE_{dev_num}_VT + DEVICE_{dev_num}_GAMMA * ((DEVICE_{dev_num}_PHI + vsb.max(0.0)).sqrt() - DEVICE_{dev_num}_PHI.sqrt());\n\
                              \x20   }}\n"
                         ));
-                    }
                 }
             }
         }
@@ -1918,12 +2130,13 @@ impl RustEmitter {
         // BJT self-heating thermal update (after NR, before state save)
         let mut thermal_update = String::new();
         for (dev_num, slot) in ir.device_slots.iter().enumerate() {
-            if let DeviceParams::Bjt(bp) = &slot.params {
-                if bp.has_self_heating() {
-                    let s = slot.start_idx;
-                    let s1 = s + 1;
-                    // Extract Ic, Ib from converged i_nl; compute Vbe, Vbc from final v
-                    thermal_update.push_str(&format!(
+            if let DeviceParams::Bjt(bp) = &slot.params
+                && bp.has_self_heating()
+            {
+                let s = slot.start_idx;
+                let s1 = s + 1;
+                // Extract Ic, Ib from converged i_nl; compute Vbe, Vbc from final v
+                thermal_update.push_str(&format!(
                         "    {{ // BJT {dev_num} self-heating thermal update\n\
                          \x20       let ic = i_nl[{s}];\n\
                          \x20       let ib = i_nl[{s1}];\n\
@@ -1944,7 +2157,6 @@ impl RustEmitter {
                          \x20           * fast_exp((DEVICE_{dev_num}_EG / vt_nom) * (1.0 - DEVICE_{dev_num}_TAMB / state.device_{dev_num}_tj));\n\
                          \x20   }}\n"
                     ));
-                }
             }
         }
         if !thermal_update.is_empty() {
@@ -2104,7 +2316,9 @@ impl RustEmitter {
         code.push_str("        let (dn1_even, _) = os_halfband(out_even[out_idx], &OS_COEFFS, &mut state.os_dn_state[out_idx]);\n");
         code.push_str("        let (_, dn2_odd) = os_halfband(out_odd[out_idx], &OS_COEFFS, &mut state.os_dn_state[out_idx]);\n");
         code.push_str("        let v = (dn1_even + dn2_odd) * 0.5;\n");
-        code.push_str("        result[out_idx] = if v.is_finite() { v.clamp(-10.0, 10.0) } else { 0.0 };\n");
+        code.push_str(
+            "        result[out_idx] = if v.is_finite() { v.clamp(-10.0, 10.0) } else { 0.0 };\n",
+        );
         code.push_str("    }\n");
         code.push_str("    result\n");
         let _ = num_outputs; // used for signature type
@@ -2162,7 +2376,9 @@ impl RustEmitter {
         code.push_str("            inner_out1[out_idx], &OS_COEFFS_OUTER, &mut state.os_dn_state_outer[out_idx],\n");
         code.push_str("        );\n");
         code.push_str("        let v = (dn_outer_e + dn_outer_o) * 0.5;\n");
-        code.push_str("        result[out_idx] = if v.is_finite() { v.clamp(-10.0, 10.0) } else { 0.0 };\n");
+        code.push_str(
+            "        result[out_idx] = if v.is_finite() { v.clamp(-10.0, 10.0) } else { 0.0 };\n",
+        );
         code.push_str("    }\n");
         code.push_str("    result\n");
         let _ = num_outputs; // used for signature type
@@ -2189,20 +2405,24 @@ impl RustEmitter {
                 idx, p, q
             ));
             code.push_str(&format!(
-                "    rhs[{}] -= delta_g_{}_prev * v_diff_{};\n", p, idx, idx
+                "    rhs[{}] -= delta_g_{}_prev * v_diff_{};\n",
+                p, idx, idx
             ));
             code.push_str(&format!(
-                "    rhs[{}] += delta_g_{}_prev * v_diff_{};\n", q, idx, idx
+                "    rhs[{}] += delta_g_{}_prev * v_diff_{};\n",
+                q, idx, idx
             ));
         } else if pot.node_p > 0 {
             let p = pot.node_p - 1;
             code.push_str(&format!(
-                "    rhs[{}] -= delta_g_{}_prev * state.v_prev[{}];\n", p, idx, p
+                "    rhs[{}] -= delta_g_{}_prev * state.v_prev[{}];\n",
+                p, idx, p
             ));
         } else if pot.node_q > 0 {
             let q = pot.node_q - 1;
             code.push_str(&format!(
-                "    rhs[{}] -= delta_g_{}_prev * state.v_prev[{}];\n", q, idx, q
+                "    rhs[{}] -= delta_g_{}_prev * state.v_prev[{}];\n",
+                q, idx, q
             ));
         }
     }
@@ -2215,27 +2435,37 @@ impl RustEmitter {
         ));
 
         code.push_str(&format!(
-            "    let factor_{} = scale_c{} * su_dot_rhs_{};\n", idx, idx, idx
+            "    let factor_{} = scale_c{} * su_dot_rhs_{};\n",
+            idx, idx, idx
         ));
         for k in 0..n {
             code.push_str(&format!(
-                "    v_pred[{}] -= factor_{} * su_c{}[{}];\n", k, idx, idx, k
+                "    v_pred[{}] -= factor_{} * su_c{}[{}];\n",
+                k, idx, idx, k
             ));
         }
     }
 
-    fn emit_sni_correction(code: &mut String, idx: usize, _pot: &PotentiometerIR, n: usize, _m: usize) {
+    fn emit_sni_correction(
+        code: &mut String,
+        idx: usize,
+        _pot: &PotentiometerIR,
+        n: usize,
+        _m: usize,
+    ) {
         // S*N_i correction using sequentially corrected local vectors.
         code.push_str(&format!("    let mut u_ni_dot_inl_{} = 0.0;\n", idx));
         code.push_str(&format!(
             "    for _j in 0..M {{ u_ni_dot_inl_{idx} += u_ni_c{idx}[_j] * i_nl[_j]; }}\n"
         ));
         code.push_str(&format!(
-            "    let sni_factor_{} = scale_c{} * u_ni_dot_inl_{};\n", idx, idx, idx
+            "    let sni_factor_{} = scale_c{} * u_ni_dot_inl_{};\n",
+            idx, idx, idx
         ));
         for k in 0..n {
             code.push_str(&format!(
-                "    v[{}] -= sni_factor_{} * su_c{}[{}];\n", k, idx, idx, k
+                "    v[{}] -= sni_factor_{} * su_c{}[{}];\n",
+                k, idx, idx, k
             ));
         }
     }
@@ -2328,7 +2558,13 @@ impl RustEmitter {
     /// u_k has entries +1 at node_p-1 and -1 at node_q-1 (grounded nodes omitted)
     fn emit_dot_su_u(j: usize, pot_k: &PotentiometerIR) -> String {
         if pot_k.node_p > 0 && pot_k.node_q > 0 {
-            format!("su_c{}[{}] - su_c{}[{}]", j, pot_k.node_p - 1, j, pot_k.node_q - 1)
+            format!(
+                "su_c{}[{}] - su_c{}[{}]",
+                j,
+                pot_k.node_p - 1,
+                j,
+                pot_k.node_q - 1
+            )
         } else if pot_k.node_p > 0 {
             format!("su_c{}[{}]", j, pot_k.node_p - 1)
         } else if pot_k.node_q > 0 {
@@ -2341,7 +2577,13 @@ impl RustEmitter {
     /// Emit USU expression from corrected SU: u_k^T * su_ck
     fn emit_usu_from_su(k: usize, pot_k: &PotentiometerIR) -> String {
         if pot_k.node_p > 0 && pot_k.node_q > 0 {
-            format!("su_c{}[{}] - su_c{}[{}]", k, pot_k.node_p - 1, k, pot_k.node_q - 1)
+            format!(
+                "su_c{}[{}] - su_c{}[{}]",
+                k,
+                pot_k.node_p - 1,
+                k,
+                pot_k.node_q - 1
+            )
         } else if pot_k.node_p > 0 {
             format!("su_c{}[{}]", k, pot_k.node_p - 1)
         } else if pot_k.node_q > 0 {
@@ -2355,7 +2597,9 @@ impl RustEmitter {
     /// K_eff = K - Σ_k scale_ck * nv_su_ck ⊗ u_ni_ck
     fn emit_k_eff_setup(pots: &[PotentiometerIR], m: usize) -> String {
         let mut code = String::new();
-        code.push_str("    // Precompute corrected K matrix: K_eff = K - Σ_k scale_ck * nv_su_ck ⊗ u_ni_ck\n");
+        code.push_str(
+            "    // Precompute corrected K matrix: K_eff = K - Σ_k scale_ck * nv_su_ck ⊗ u_ni_ck\n",
+        );
         code.push_str("    let mut k_eff = state.k;\n");
         for k in 0..pots.len() {
             for i in 0..m {
@@ -2376,7 +2620,9 @@ impl RustEmitter {
 
 /// Emit damped fallback for singular Jacobian: half-step on residual, clamped.
 fn emit_nr_singular_fallback(code: &mut String, dim: usize, indent: &str) {
-    code.push_str(&format!("{indent}// Singular Jacobian — damped fallback (0.5 * residual)\n"));
+    code.push_str(&format!(
+        "{indent}// Singular Jacobian — damped fallback (0.5 * residual)\n"
+    ));
     for i in 0..dim {
         code.push_str(&format!(
             "{indent}i_nl[{i}] -= (f{i} * 0.5).clamp(-0.01, 0.01);\n"
@@ -2399,20 +2645,26 @@ fn emit_nr_limit_and_converge(
     has_pots: bool,
 ) {
     // Compute implied voltage changes: dv[i] = -sum_j K[i][j] * delta[j]
-    code.push_str(&format!("{indent}// Voltage-space limiting (SPICE pnjlim/fetlim through K matrix)\n"));
+    code.push_str(&format!(
+        "{indent}// Voltage-space limiting (SPICE pnjlim/fetlim through K matrix)\n"
+    ));
     for i in 0..dim {
         code.push_str(&format!("{indent}let dv{i} = -("));
         let mut first = true;
         if has_pots {
             for j in 0..dim {
-                if !first { code.push_str(" + "); }
+                if !first {
+                    code.push_str(" + ");
+                }
                 code.push_str(&format!("k_eff[{i}][{j}] * delta{j}"));
                 first = false;
             }
         } else {
             // Use sparsity info when available
             for j in 0..dim {
-                if !first { code.push_str(" + "); }
+                if !first {
+                    code.push_str(" + ");
+                }
                 code.push_str(&format!("state.k[{i}][{j}] * delta{j}"));
                 first = false;
             }
@@ -2477,7 +2729,9 @@ fn emit_nr_limit_and_converge(
             code.push_str(&format!(
                 "{indent}    let ratio = ((v_lim - v_d{i}) / dv{i}).max(0.01);\n"
             ));
-            code.push_str(&format!("{indent}    if ratio < alpha {{ alpha = ratio; }}\n"));
+            code.push_str(&format!(
+                "{indent}    if ratio < alpha {{ alpha = ratio; }}\n"
+            ));
             code.push_str(&format!("{indent}}}\n"));
         }
     }
@@ -2488,7 +2742,9 @@ fn emit_nr_limit_and_converge(
     }
 
     // Convergence check on actual step taken
-    code.push_str(&format!("\n{indent}// Convergence check (max-norm on actual step)\n"));
+    code.push_str(&format!(
+        "\n{indent}// Convergence check (max-norm on actual step)\n"
+    ));
     code.push_str(&format!("{indent}if "));
     for i in 0..dim {
         if i > 0 {
@@ -2500,7 +2756,9 @@ fn emit_nr_limit_and_converge(
         }
     }
     code.push_str(" < TOL {\n");
-    code.push_str(&format!("{indent}    state.last_nr_iterations = iter as u32;\n"));
+    code.push_str(&format!(
+        "{indent}    state.last_nr_iterations = iter as u32;\n"
+    ));
     code.push_str(&format!("{indent}    return i_nl;\n"));
     code.push_str(&format!("{indent}}}\n"));
 }
@@ -2530,7 +2788,7 @@ impl RustEmitter {
             );
         } else {
             code.push_str(
-                "fn solve_nonlinear(p: &[f64; M], state: &mut CircuitState) -> [f64; M] {\n"
+                "fn solve_nonlinear(p: &[f64; M], state: &mut CircuitState) -> [f64; M] {\n",
             );
         }
         code.push_str(&format!(
@@ -2543,9 +2801,15 @@ impl RustEmitter {
         ));
         code.push_str("    const SINGULARITY_THRESHOLD: f64 = 1e-15;\n\n");
 
-        code.push_str("    // First-order predictor for NR warm start: i_guess = 2*i_nl[n-1] - i_nl[n-2]\n");
-        code.push_str("    // Extrapolates the trend from the last two samples. On smooth signals this\n");
-        code.push_str("    // puts the initial guess much closer to the solution, reducing NR iterations.\n");
+        code.push_str(
+            "    // First-order predictor for NR warm start: i_guess = 2*i_nl[n-1] - i_nl[n-2]\n",
+        );
+        code.push_str(
+            "    // Extrapolates the trend from the last two samples. On smooth signals this\n",
+        );
+        code.push_str(
+            "    // puts the initial guess much closer to the solution, reducing NR iterations.\n",
+        );
         code.push_str("    let mut i_nl = [0.0; M];\n");
         code.push_str("    for i in 0..M {\n");
         code.push_str("        i_nl[i] = 2.0 * state.i_nl_prev[i] - state.i_nl_prev_prev[i];\n");
@@ -2596,7 +2860,10 @@ impl RustEmitter {
                     DeviceType::Diode => {
                         let s = slot.start_idx;
                         let d = dev_num;
-                        let dp = match &slot.params { DeviceParams::Diode(dp) => dp, _ => unreachable!() };
+                        let dp = match &slot.params {
+                            DeviceParams::Diode(dp) => dp,
+                            _ => unreachable!(),
+                        };
                         if dp.has_rs() && dp.has_bv() {
                             // RS + BV: solve inner NR for junction voltage, then add breakdown
                             code.push_str(&format!(
@@ -2635,7 +2902,10 @@ impl RustEmitter {
                         let s = slot.start_idx;
                         let s1 = s + 1;
                         let d = dev_num;
-                        let bp = match &slot.params { DeviceParams::Bjt(bp) => bp, _ => unreachable!() };
+                        let bp = match &slot.params {
+                            DeviceParams::Bjt(bp) => bp,
+                            _ => unreachable!(),
+                        };
                         if bp.has_parasitics() {
                             // Use inner 2D NR for parasitic resistances
                             code.push_str(&format!(
@@ -2694,7 +2964,10 @@ impl RustEmitter {
                         let s = slot.start_idx;
                         let s1 = s + 1;
                         let d = dev_num;
-                        let jp = match &slot.params { DeviceParams::Jfet(jp) => jp, _ => unreachable!() };
+                        let jp = match &slot.params {
+                            DeviceParams::Jfet(jp) => jp,
+                            _ => unreachable!(),
+                        };
                         // IDSS, VP, LAMBDA from state; SIGN stays as const.
                         // N_v ordering: dim s = Vds, dim s+1 = Vgs.
                         // Functions expect (vgs, vds), so pass (v_d{s1}, v_d{s}).
@@ -2719,23 +2992,38 @@ impl RustEmitter {
                         //   jdev_s1_s  = dIg/dVds = jac[3]
                         //   jdev_s1_s1 = dIg/dVgs = jac[2]
                         code.push_str(&format!(
-                            "        let jdev_{}_{} = jfet{}_jac[1];\n", s, s, d   // dId/dVds
+                            "        let jdev_{}_{} = jfet{}_jac[1];\n",
+                            s,
+                            s,
+                            d // dId/dVds
                         ));
                         code.push_str(&format!(
-                            "        let jdev_{}_{} = jfet{}_jac[0];\n", s, s1, d  // dId/dVgs
+                            "        let jdev_{}_{} = jfet{}_jac[0];\n",
+                            s,
+                            s1,
+                            d // dId/dVgs
                         ));
                         code.push_str(&format!(
-                            "        let jdev_{}_{} = jfet{}_jac[3];\n", s1, s, d  // dIg/dVds
+                            "        let jdev_{}_{} = jfet{}_jac[3];\n",
+                            s1,
+                            s,
+                            d // dIg/dVds
                         ));
                         code.push_str(&format!(
-                            "        let jdev_{}_{} = jfet{}_jac[2];\n", s1, s1, d // dIg/dVgs
+                            "        let jdev_{}_{} = jfet{}_jac[2];\n",
+                            s1,
+                            s1,
+                            d // dIg/dVgs
                         ));
                     }
                     DeviceType::Mosfet => {
                         let s = slot.start_idx;
                         let s1 = s + 1;
                         let d = dev_num;
-                        let mp = match &slot.params { DeviceParams::Mosfet(mp) => mp, _ => unreachable!() };
+                        let mp = match &slot.params {
+                            DeviceParams::Mosfet(mp) => mp,
+                            _ => unreachable!(),
+                        };
                         // KP, VT, LAMBDA from state; SIGN stays as const.
                         // N_v ordering: dim s = Vds, dim s+1 = Vgs.
                         // Functions expect (vgs, vds), so pass (v_d{s1}, v_d{s}).
@@ -2755,23 +3043,38 @@ impl RustEmitter {
                             ));
                         }
                         code.push_str(&format!(
-                            "        let jdev_{}_{} = mos{}_jac[1];\n", s, s, d    // dId/dVds
+                            "        let jdev_{}_{} = mos{}_jac[1];\n",
+                            s,
+                            s,
+                            d // dId/dVds
                         ));
                         code.push_str(&format!(
-                            "        let jdev_{}_{} = mos{}_jac[0];\n", s, s1, d   // dId/dVgs
+                            "        let jdev_{}_{} = mos{}_jac[0];\n",
+                            s,
+                            s1,
+                            d // dId/dVgs
                         ));
                         code.push_str(&format!(
-                            "        let jdev_{}_{} = mos{}_jac[3];\n", s1, s, d   // dIg/dVds = 0
+                            "        let jdev_{}_{} = mos{}_jac[3];\n",
+                            s1,
+                            s,
+                            d // dIg/dVds = 0
                         ));
                         code.push_str(&format!(
-                            "        let jdev_{}_{} = mos{}_jac[2];\n", s1, s1, d  // dIg/dVgs = 0
+                            "        let jdev_{}_{} = mos{}_jac[2];\n",
+                            s1,
+                            s1,
+                            d // dIg/dVgs = 0
                         ));
                     }
                     DeviceType::Tube => {
                         let s = slot.start_idx;
                         let s1 = s + 1;
                         let d = dev_num;
-                        let tp = match &slot.params { DeviceParams::Tube(tp) => tp, _ => unreachable!() };
+                        let tp = match &slot.params {
+                            DeviceParams::Tube(tp) => tp,
+                            _ => unreachable!(),
+                        };
                         if tp.has_rgi() {
                             // RGI: solve for internal Vgk, evaluate at internal voltage
                             code.push_str(&format!(
@@ -2796,16 +3099,20 @@ impl RustEmitter {
                             ));
                         }
                         code.push_str(&format!(
-                            "        let jdev_{}_{} = tube{}_jac[0];\n", s, s, d
+                            "        let jdev_{}_{} = tube{}_jac[0];\n",
+                            s, s, d
                         ));
                         code.push_str(&format!(
-                            "        let jdev_{}_{} = tube{}_jac[1];\n", s, s1, d
+                            "        let jdev_{}_{} = tube{}_jac[1];\n",
+                            s, s1, d
                         ));
                         code.push_str(&format!(
-                            "        let jdev_{}_{} = tube{}_jac[2];\n", s1, s, d
+                            "        let jdev_{}_{} = tube{}_jac[2];\n",
+                            s1, s, d
                         ));
                         code.push_str(&format!(
-                            "        let jdev_{}_{} = tube{}_jac[3];\n", s1, s1, d
+                            "        let jdev_{}_{} = tube{}_jac[3];\n",
+                            s1, s1, d
                         ));
                     }
                 }
@@ -2815,10 +3122,7 @@ impl RustEmitter {
             // Residuals
             code.push_str("        // Residuals: f(i) = i - i_dev(v(i)) = 0\n");
             for i in 0..m {
-                code.push_str(&format!(
-                    "        let f{} = i_nl[{}] - i_dev{};\n",
-                    i, i, i
-                ));
+                code.push_str(&format!("        let f{} = i_nl[{}] - i_dev{};\n", i, i, i));
             }
             code.push('\n');
 
@@ -2838,9 +3142,12 @@ impl RustEmitter {
                     .device_slots
                     .iter()
                     .find(|s| i >= s.start_idx && i < s.start_idx + s.dimension)
-                    .ok_or_else(|| CodegenError::InvalidConfig(
-                        format!("no device slot found for M-dimension index {}", i)
-                    ))?;
+                    .ok_or_else(|| {
+                        CodegenError::InvalidConfig(format!(
+                            "no device slot found for M-dimension index {}",
+                            i
+                        ))
+                    })?;
                 let blk_start = slot.start_idx;
                 let blk_dim = slot.dimension;
                 for j in 0..m {
@@ -2849,21 +3156,12 @@ impl RustEmitter {
                     for k in blk_start..blk_start + blk_dim {
                         if has_pots {
                             // Use precomputed k_eff (corrected for all pots)
-                            terms.push_str(&format!(
-                                " - jdev_{}_{} * k_eff[{}][{}]",
-                                i, k, k, j
-                            ));
+                            terms.push_str(&format!(" - jdev_{}_{} * k_eff[{}][{}]", i, k, k, j));
                         } else {
-                            terms.push_str(&format!(
-                                " - jdev_{}_{} * state.k[{}][{}]",
-                                i, k, k, j
-                            ));
+                            terms.push_str(&format!(" - jdev_{}_{} * state.k[{}][{}]", i, k, k, j));
                         }
                     }
-                    code.push_str(&format!(
-                        "        let j{}{} = {}{};\n",
-                        i, j, diag, terms
-                    ));
+                    code.push_str(&format!("        let j{}{} = {}{};\n", i, j, diag, terms));
                 }
             }
             code.push('\n');
@@ -2898,7 +3196,8 @@ impl RustEmitter {
                 _ => {
                     return Err(CodegenError::UnsupportedTopology(format!(
                         "M={} nonlinear dimensions not supported (max {})",
-                        m, crate::dk::MAX_M
+                        m,
+                        crate::dk::MAX_M
                     )));
                 }
             }
@@ -3049,25 +3348,39 @@ impl RustEmitter {
     fn emit_nodal_constants(&self, ir: &CircuitIR) -> String {
         let n = ir.topology.n;
         let m = ir.topology.m;
-        let n_nodes = if ir.topology.n_nodes > 0 { ir.topology.n_nodes } else { n };
+        let n_nodes = if ir.topology.n_nodes > 0 {
+            ir.topology.n_nodes
+        } else {
+            n
+        };
         let n_aug = ir.topology.n_aug;
         let num_outputs = ir.solver_config.output_nodes.len();
 
         let mut code = section_banner("CONSTANTS: Compile-time circuit topology (Nodal solver)");
 
         // Dimension constants
-        code.push_str(&format!("/// Number of augmented system nodes (including VS/VCVS/inductor branch variables)\n"));
+        code.push_str(
+            "/// Number of augmented system nodes (including VS/VCVS/inductor branch variables)\n",
+        );
         code.push_str(&format!("pub const N: usize = {};\n\n", n));
-        code.push_str(&format!("/// Number of original circuit nodes (excluding ground)\n"));
+        code.push_str("/// Number of original circuit nodes (excluding ground)\n");
         code.push_str(&format!("pub const N_NODES: usize = {};\n\n", n_nodes));
-        code.push_str(&format!("/// Boundary between VS/VCVS rows and inductor branch variables\n"));
+        code.push_str(
+            "/// Boundary between VS/VCVS rows and inductor branch variables\n",
+        );
         code.push_str(&format!("pub const N_AUG: usize = {};\n\n", n_aug));
-        code.push_str(&format!("/// Total nonlinear dimension (sum of device dimensions)\n"));
+        code.push_str("/// Total nonlinear dimension (sum of device dimensions)\n");
         code.push_str(&format!("pub const M: usize = {};\n\n", m));
-        code.push_str(&format!("/// Maximum NR iterations per sample\n"));
-        code.push_str(&format!("pub const MAX_ITER: usize = {};\n\n", ir.solver_config.max_iterations));
-        code.push_str(&format!("/// NR convergence tolerance (VNTOL)\n"));
-        code.push_str(&format!("pub const TOL: f64 = {};\n\n", fmt_f64(ir.solver_config.tolerance)));
+        code.push_str("/// Maximum NR iterations per sample\n");
+        code.push_str(&format!(
+            "pub const MAX_ITER: usize = {};\n\n",
+            ir.solver_config.max_iterations
+        ));
+        code.push_str("/// NR convergence tolerance (VNTOL)\n");
+        code.push_str(&format!(
+            "pub const TOL: f64 = {};\n\n",
+            fmt_f64(ir.solver_config.tolerance)
+        ));
 
         // Sample rate
         code.push_str(&format!(
@@ -3079,7 +3392,8 @@ impl RustEmitter {
             ir.solver_config.oversampling_factor
         ));
         if ir.solver_config.oversampling_factor > 1 {
-            let internal_rate = ir.solver_config.sample_rate * ir.solver_config.oversampling_factor as f64;
+            let internal_rate =
+                ir.solver_config.sample_rate * ir.solver_config.oversampling_factor as f64;
             code.push_str(&format!(
                 "/// Internal sample rate = SAMPLE_RATE * OVERSAMPLING_FACTOR\npub const INTERNAL_SAMPLE_RATE: f64 = {:.1};\n",
                 internal_rate
@@ -3088,16 +3402,32 @@ impl RustEmitter {
         code.push('\n');
 
         // I/O configuration
-        code.push_str(&format!("/// Input node index\npub const INPUT_NODE: usize = {};\n\n", ir.solver_config.input_node));
-        code.push_str(&format!("/// Number of output channels\npub const NUM_OUTPUTS: usize = {};\n\n", num_outputs));
-        let output_nodes_values = ir.solver_config.output_nodes.iter()
-            .map(|n| n.to_string()).collect::<Vec<_>>().join(", ");
+        code.push_str(&format!(
+            "/// Input node index\npub const INPUT_NODE: usize = {};\n\n",
+            ir.solver_config.input_node
+        ));
+        code.push_str(&format!(
+            "/// Number of output channels\npub const NUM_OUTPUTS: usize = {};\n\n",
+            num_outputs
+        ));
+        let output_nodes_values = ir
+            .solver_config
+            .output_nodes
+            .iter()
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
         code.push_str(&format!(
             "/// Output node indices (one per output channel)\npub const OUTPUT_NODES: [usize; NUM_OUTPUTS] = [{}];\n\n",
             output_nodes_values
         ));
-        let output_scales_values = ir.solver_config.output_scales.iter()
-            .map(|s| fmt_f64(*s)).collect::<Vec<_>>().join(", ");
+        let output_scales_values = ir
+            .solver_config
+            .output_scales
+            .iter()
+            .map(|s| fmt_f64(*s))
+            .collect::<Vec<_>>()
+            .join(", ");
         code.push_str(&format!(
             "/// Output scale factors (applied after DC blocking)\npub const OUTPUT_SCALES: [f64; NUM_OUTPUTS] = [{}];\n\n",
             output_scales_values
@@ -3164,7 +3494,10 @@ impl RustEmitter {
 
         // RHS_CONST (trapezoidal)
         if ir.has_dc_sources {
-            let rhs_const_values = (0..n).map(|i| fmt_f64(ir.matrices.rhs_const[i])).collect::<Vec<_>>().join(", ");
+            let rhs_const_values = (0..n)
+                .map(|i| fmt_f64(ir.matrices.rhs_const[i]))
+                .collect::<Vec<_>>()
+                .join(", ");
             code.push_str(&format!(
                 "/// RHS constant contribution from DC sources (trapezoidal: node rows x2, VS rows x1)\npub const RHS_CONST: [f64; N] = [{}];\n\n",
                 rhs_const_values
@@ -3173,9 +3506,16 @@ impl RustEmitter {
 
         // RHS_CONST_BE (backward Euler)
         if ir.has_dc_sources && !ir.matrices.rhs_const_be.is_empty() {
-            let rhs_const_be_values = (0..n).map(|i| {
-                if i < ir.matrices.rhs_const_be.len() { fmt_f64(ir.matrices.rhs_const_be[i]) } else { fmt_f64(0.0) }
-            }).collect::<Vec<_>>().join(", ");
+            let rhs_const_be_values = (0..n)
+                .map(|i| {
+                    if i < ir.matrices.rhs_const_be.len() {
+                        fmt_f64(ir.matrices.rhs_const_be[i])
+                    } else {
+                        fmt_f64(0.0)
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
             code.push_str(&format!(
                 "/// RHS constant contribution from DC sources (backward Euler: all rows x1)\npub const RHS_CONST_BE: [f64; N] = [{}];\n\n",
                 rhs_const_be_values
@@ -3184,7 +3524,8 @@ impl RustEmitter {
 
         // DC blocking coefficient
         if ir.dc_block {
-            let internal_rate = ir.solver_config.sample_rate * ir.solver_config.oversampling_factor as f64;
+            let internal_rate =
+                ir.solver_config.sample_rate * ir.solver_config.oversampling_factor as f64;
             let dc_block_r = 1.0 - 2.0 * std::f64::consts::PI * 5.0 / internal_rate;
             code.push_str(&format!(
                 "/// DC blocking filter coefficient: R = 1 - 2*pi*fc/sr (5Hz cutoff at internal rate)\npub const DC_BLOCK_R: f64 = {:.17e};\n\n",
@@ -3206,9 +3547,16 @@ impl RustEmitter {
                  pub const POT_{}_G_NOM: f64 = {:.17e};\n\
                  pub const POT_{}_MIN_R: f64 = {:.17e};\n\
                  pub const POT_{}_MAX_R: f64 = {:.17e};\n\n",
-                idx, pot.node_p, idx, pot.node_q,
-                idx, pot.g_nominal,
-                idx, pot.min_resistance, idx, pot.max_resistance
+                idx,
+                pot.node_p,
+                idx,
+                pot.node_q,
+                idx,
+                pot.g_nominal,
+                idx,
+                pot.min_resistance,
+                idx,
+                pot.max_resistance
             ));
         }
 
@@ -3226,11 +3574,22 @@ impl RustEmitter {
                      pub const SWITCH_{}_COMP_{}_NODE_P: usize = {};\n\
                      pub const SWITCH_{}_COMP_{}_NODE_Q: usize = {};\n\
                      pub const SWITCH_{}_COMP_{}_NOM: f64 = {:.17e};\n",
-                    idx, ci, sw.num_positions, values.join(", "),
-                    idx, ci, comp.component_type,
-                    idx, ci, comp.node_p,
-                    idx, ci, comp.node_q,
-                    idx, ci, comp.nominal_value,
+                    idx,
+                    ci,
+                    sw.num_positions,
+                    values.join(", "),
+                    idx,
+                    ci,
+                    comp.component_type,
+                    idx,
+                    ci,
+                    comp.node_p,
+                    idx,
+                    ci,
+                    comp.node_q,
+                    idx,
+                    ci,
+                    comp.nominal_value,
                 ));
             }
             code.push('\n');
@@ -3243,7 +3602,11 @@ impl RustEmitter {
     fn emit_nodal_state(&self, ir: &CircuitIR) -> String {
         let n = ir.topology.n;
         let m = ir.topology.m;
-        let n_nodes = if ir.topology.n_nodes > 0 { ir.topology.n_nodes } else { n };
+        let n_nodes = if ir.topology.n_nodes > 0 {
+            ir.topology.n_nodes
+        } else {
+            n
+        };
         let n_aug = ir.topology.n_aug;
         let num_outputs = ir.solver_config.output_nodes.len();
         let has_pots = !ir.pots.is_empty();
@@ -3254,7 +3617,12 @@ impl RustEmitter {
         // DC OP constant
         let has_dc_op = ir.has_dc_op;
         if has_dc_op {
-            let dc_op_values = ir.dc_operating_point.iter().map(|v| fmt_f64(*v)).collect::<Vec<_>>().join(", ");
+            let dc_op_values = ir
+                .dc_operating_point
+                .iter()
+                .map(|v| fmt_f64(*v))
+                .collect::<Vec<_>>()
+                .join(", ");
             code.push_str(&format!(
                 "/// DC operating point: steady-state node voltages\npub const DC_OP: [f64; N] = [{}];\n\n",
                 dc_op_values
@@ -3266,7 +3634,12 @@ impl RustEmitter {
             && !ir.dc_nl_currents.is_empty()
             && ir.dc_nl_currents.iter().any(|&v| v.abs() > 1e-30);
         if has_dc_nl {
-            let dc_nl_i_values = ir.dc_nl_currents.iter().map(|v| fmt_f64(*v)).collect::<Vec<_>>().join(", ");
+            let dc_nl_i_values = ir
+                .dc_nl_currents
+                .iter()
+                .map(|v| fmt_f64(*v))
+                .collect::<Vec<_>>()
+                .join(", ");
             code.push_str(&format!(
                 "/// DC operating point: nonlinear device currents at bias point\npub const DC_NL_I: [f64; M] = [{}];\n\n",
                 dc_nl_i_values
@@ -3277,7 +3650,9 @@ impl RustEmitter {
         code.push_str("/// Circuit state for one processing channel (nodal solver).\n");
         code.push_str("///\n");
         code.push_str("/// Contains per-sample state and sample-rate-dependent matrices.\n");
-        code.push_str("/// Call [`set_sample_rate`](CircuitState::set_sample_rate) before processing\n");
+        code.push_str(
+            "/// Call [`set_sample_rate`](CircuitState::set_sample_rate) before processing\n",
+        );
         code.push_str("/// if the host sample rate differs from [`SAMPLE_RATE`].\n");
         code.push_str("#[derive(Clone, Debug)]\n");
         code.push_str("pub struct CircuitState {\n");
@@ -3285,7 +3660,9 @@ impl RustEmitter {
         code.push_str("    pub v_prev: [f64; N],\n\n");
         code.push_str("    /// Previous nonlinear currents i_nl[n-1]\n");
         code.push_str("    pub i_nl_prev: [f64; M],\n\n");
-        code.push_str("    /// Nonlinear currents from two samples ago i_nl[n-2] (for NR predictor)\n");
+        code.push_str(
+            "    /// Nonlinear currents from two samples ago i_nl[n-2] (for NR predictor)\n",
+        );
         code.push_str("    pub i_nl_prev_prev: [f64; M],\n\n");
         code.push_str("    /// DC operating point (for reset/sleep/wake)\n");
         code.push_str("    pub dc_operating_point: [f64; N],\n\n");
@@ -3298,7 +3675,9 @@ impl RustEmitter {
             code.push_str("    pub dc_block_x_prev: [f64; NUM_OUTPUTS],\n");
             code.push_str("    /// DC blocking filter: previous output samples (one per output)\n");
             code.push_str("    pub dc_block_y_prev: [f64; NUM_OUTPUTS],\n");
-            code.push_str("    /// DC blocking filter coefficient (recomputed on sample rate change)\n");
+            code.push_str(
+                "    /// DC blocking filter coefficient (recomputed on sample rate change)\n",
+            );
             code.push_str("    pub dc_block_r: f64,\n\n");
         }
         code.push_str("    /// Diagnostic: peak absolute output (pre-clamp)\n");
@@ -3311,11 +3690,15 @@ impl RustEmitter {
         code.push_str("    pub diag_be_fallback_count: u64,\n");
         code.push_str("    /// Diagnostic: number of times NaN triggered state reset\n");
         code.push_str("    pub diag_nan_reset_count: u64,\n\n");
-        code.push_str("    /// A matrix: G + alpha*C (trapezoidal), recomputed by set_sample_rate\n");
+        code.push_str(
+            "    /// A matrix: G + alpha*C (trapezoidal), recomputed by set_sample_rate\n",
+        );
         code.push_str("    pub a: [[f64; N]; N],\n");
         code.push_str("    /// A_neg matrix: alpha*C - G (trapezoidal history), recomputed by set_sample_rate\n");
         code.push_str("    pub a_neg: [[f64; N]; N],\n");
-        code.push_str("    /// A_be matrix: G + (1/T)*C (backward Euler), recomputed by set_sample_rate\n");
+        code.push_str(
+            "    /// A_be matrix: G + (1/T)*C (backward Euler), recomputed by set_sample_rate\n",
+        );
         code.push_str("    pub a_be: [[f64; N]; N],\n");
         code.push_str("    /// A_neg_be matrix: (1/T)*C (backward Euler history), recomputed by set_sample_rate\n");
         code.push_str("    pub a_neg_be: [[f64; N]; N],\n");
@@ -3437,15 +3820,24 @@ impl RustEmitter {
         // Initialize DC blocking filter from DC OP so first sample sees zero delta
         if ir.dc_block {
             let output_nodes = &ir.solver_config.output_nodes;
-            let dc_x: Vec<String> = output_nodes.iter().map(|&node| {
-                if has_dc_op && node < ir.dc_operating_point.len() {
-                    fmt_f64(ir.dc_operating_point[node])
-                } else {
-                    "0.0".to_string()
-                }
-            }).collect();
-            code.push_str(&format!("            dc_block_x_prev: [{}],\n", dc_x.join(", ")));
-            code.push_str(&format!("            dc_block_y_prev: [{}],\n", vec!["0.0"; output_nodes.len()].join(", ")));
+            let dc_x: Vec<String> = output_nodes
+                .iter()
+                .map(|&node| {
+                    if has_dc_op && node < ir.dc_operating_point.len() {
+                        fmt_f64(ir.dc_operating_point[node])
+                    } else {
+                        "0.0".to_string()
+                    }
+                })
+                .collect();
+            code.push_str(&format!(
+                "            dc_block_x_prev: [{}],\n",
+                dc_x.join(", ")
+            ));
+            code.push_str(&format!(
+                "            dc_block_y_prev: [{}],\n",
+                vec!["0.0"; output_nodes.len()].join(", ")
+            ));
             code.push_str("            dc_block_r: DC_BLOCK_R,\n");
         }
         code.push_str("            diag_peak_output: 0.0,\n");
@@ -3461,8 +3853,10 @@ impl RustEmitter {
         if has_pots || has_switches {
             code.push_str("            g_work: G,\n");
             code.push_str("            c_work: C,\n");
-            code.push_str(&format!("            current_sample_rate: {:.17e},\n",
-                ir.solver_config.sample_rate * ir.solver_config.oversampling_factor as f64));
+            code.push_str(&format!(
+                "            current_sample_rate: {:.17e},\n",
+                ir.solver_config.sample_rate * ir.solver_config.oversampling_factor as f64
+            ));
         }
 
         for (idx, pot) in ir.pots.iter().enumerate() {
@@ -3475,10 +3869,7 @@ impl RustEmitter {
         }
 
         for (idx, _sw) in ir.switches.iter().enumerate() {
-            code.push_str(&format!(
-                "            switch_{}_position: 0,\n",
-                idx
-            ));
+            code.push_str(&format!("            switch_{}_position: 0,\n", idx));
         }
 
         for dev in &device_params {
@@ -3539,12 +3930,11 @@ impl RustEmitter {
             for (oi, &node) in output_nodes.iter().enumerate() {
                 if has_dc_op && node < ir.dc_operating_point.len() {
                     code.push_str(&format!(
-                        "        self.dc_block_x_prev[{}] = self.dc_operating_point[{}];\n", oi, node
+                        "        self.dc_block_x_prev[{}] = self.dc_operating_point[{}];\n",
+                        oi, node
                     ));
                 } else {
-                    code.push_str(&format!(
-                        "        self.dc_block_x_prev[{}] = 0.0;\n", oi
-                    ));
+                    code.push_str(&format!("        self.dc_block_x_prev[{}] = 0.0;\n", oi));
                 }
             }
             code.push_str("        self.dc_block_y_prev = [0.0; NUM_OUTPUTS];\n");
@@ -3567,9 +3957,7 @@ impl RustEmitter {
             ));
         }
         for (idx, _sw) in ir.switches.iter().enumerate() {
-            code.push_str(&format!(
-                "        self.switch_{}_position = 0;\n", idx
-            ));
+            code.push_str(&format!("        self.switch_{}_position = 0;\n", idx));
         }
         for dev in &device_params {
             for p in &dev.params {
@@ -3610,9 +3998,13 @@ impl RustEmitter {
         code.push_str("    }\n\n");
 
         // set_sample_rate()
-        code.push_str("    /// Recompute all sample-rate-dependent matrices for a new sample rate.\n");
+        code.push_str(
+            "    /// Recompute all sample-rate-dependent matrices for a new sample rate.\n",
+        );
         code.push_str("    ///\n");
-        code.push_str("    /// Call this once during plugin initialization (NOT on the audio thread).\n");
+        code.push_str(
+            "    /// Call this once during plugin initialization (NOT on the audio thread).\n",
+        );
         code.push_str("    /// Rebuilds A, A_neg, A_be, A_neg_be from stored G and C matrices.\n");
         code.push_str("    pub fn set_sample_rate(&mut self, sample_rate: f64) {\n");
         code.push_str("        if !(sample_rate > 0.0 && sample_rate.is_finite()) {\n");
@@ -3661,12 +4053,10 @@ impl RustEmitter {
 
         // DC block recomputation
         if ir.dc_block {
-            code.push_str(&format!(
-                "        // Recompute DC blocking coefficient\n\
+            code.push_str("        // Recompute DC blocking coefficient\n\
                  \x20       self.dc_block_r = 1.0 - 2.0 * std::f64::consts::PI * 5.0 / internal_rate;\n\
                  \x20       self.dc_block_x_prev = [0.0; NUM_OUTPUTS];\n\
-                 \x20       self.dc_block_y_prev = [0.0; NUM_OUTPUTS];\n"
-            ));
+                 \x20       self.dc_block_y_prev = [0.0; NUM_OUTPUTS];\n");
         }
 
         if os_factor > 1 {
@@ -3688,8 +4078,16 @@ impl RustEmitter {
         code.push_str("    }\n\n");
 
         // rebuild_matrices: recompute A/A_neg/A_be/A_neg_be from G+C
-        let g_src = if has_pots || has_switches { "self.g_work" } else { "G" };
-        let c_src = if has_pots || has_switches { "self.c_work" } else { "C" };
+        let g_src = if has_pots || has_switches {
+            "self.g_work"
+        } else {
+            "G"
+        };
+        let c_src = if has_pots || has_switches {
+            "self.c_work"
+        } else {
+            "C"
+        };
 
         code.push_str("    /// Recompute A, A_neg, A_be, A_neg_be from G and C matrices.\n");
         code.push_str("    ///\n");
@@ -3738,7 +4136,8 @@ impl RustEmitter {
                 idx, pot.min_resistance, pot.max_resistance
             ));
             code.push_str(&format!(
-                "    pub fn set_pot_{}(&mut self, resistance: f64) {{\n", idx
+                "    pub fn set_pot_{}(&mut self, resistance: f64) {{\n",
+                idx
             ));
             code.push_str(&format!(
                 "        let r = resistance.clamp(POT_{}_MIN_R, POT_{}_MAX_R);\n\
@@ -3753,12 +4152,16 @@ impl RustEmitter {
             let emit_delta_stamp = |code: &mut String, matrix: &str, sign: &str| {
                 if np > 0 {
                     code.push_str(&format!(
-                        "        self.{matrix}[{}][{}] {sign}= delta_g;\n", np - 1, np - 1
+                        "        self.{matrix}[{}][{}] {sign}= delta_g;\n",
+                        np - 1,
+                        np - 1
                     ));
                 }
                 if nq > 0 {
                     code.push_str(&format!(
-                        "        self.{matrix}[{}][{}] {sign}= delta_g;\n", nq - 1, nq - 1
+                        "        self.{matrix}[{}][{}] {sign}= delta_g;\n",
+                        nq - 1,
+                        nq - 1
                     ));
                 }
                 if np > 0 && nq > 0 {
@@ -3766,7 +4169,10 @@ impl RustEmitter {
                     code.push_str(&format!(
                         "        self.{matrix}[{}][{}] {neg_sign}= delta_g;\n\
                          \x20       self.{matrix}[{}][{}] {neg_sign}= delta_g;\n",
-                        np - 1, nq - 1, nq - 1, np - 1
+                        np - 1,
+                        nq - 1,
+                        nq - 1,
+                        np - 1
                     ));
                 }
             };
@@ -3778,29 +4184,36 @@ impl RustEmitter {
 
             // Also update g_work for consistency (needed by rebuild_matrices on sample rate change)
             if has_pots || has_switches {
-                code.push_str("\n        // Update working G for sample rate rebuild consistency\n");
+                code.push_str(
+                    "\n        // Update working G for sample rate rebuild consistency\n",
+                );
                 if np > 0 {
                     code.push_str(&format!(
-                        "        self.g_work[{}][{}] += delta_g;\n", np - 1, np - 1
+                        "        self.g_work[{}][{}] += delta_g;\n",
+                        np - 1,
+                        np - 1
                     ));
                 }
                 if nq > 0 {
                     code.push_str(&format!(
-                        "        self.g_work[{}][{}] += delta_g;\n", nq - 1, nq - 1
+                        "        self.g_work[{}][{}] += delta_g;\n",
+                        nq - 1,
+                        nq - 1
                     ));
                 }
                 if np > 0 && nq > 0 {
                     code.push_str(&format!(
                         "        self.g_work[{}][{}] -= delta_g;\n\
                          \x20       self.g_work[{}][{}] -= delta_g;\n",
-                        np - 1, nq - 1, nq - 1, np - 1
+                        np - 1,
+                        nq - 1,
+                        nq - 1,
+                        np - 1
                     ));
                 }
             }
 
-            code.push_str(&format!(
-                "\n        self.pot_{}_resistance = r;\n", idx
-            ));
+            code.push_str(&format!("\n        self.pot_{}_resistance = r;\n", idx));
             code.push_str("    }\n\n");
         }
 
@@ -3820,7 +4233,11 @@ impl RustEmitter {
             for (ci, comp) in sw.components.iter().enumerate() {
                 let np = comp.node_p;
                 let nq = comp.node_q;
-                let matrix = if comp.component_type == 'R' { "g_work" } else { "c_work" };
+                let matrix = if comp.component_type == 'R' {
+                    "g_work"
+                } else {
+                    "c_work"
+                };
 
                 code.push_str(&format!(
                     "        // Switch {} component {} ({}, type {})\n",
@@ -3849,26 +4266,34 @@ impl RustEmitter {
                 // Stamp delta
                 if np > 0 {
                     code.push_str(&format!(
-                        "        self.{matrix}[{}][{}] += delta_{ci};\n", np - 1, np - 1
+                        "        self.{matrix}[{}][{}] += delta_{ci};\n",
+                        np - 1,
+                        np - 1
                     ));
                 }
                 if nq > 0 {
                     code.push_str(&format!(
-                        "        self.{matrix}[{}][{}] += delta_{ci};\n", nq - 1, nq - 1
+                        "        self.{matrix}[{}][{}] += delta_{ci};\n",
+                        nq - 1,
+                        nq - 1
                     ));
                 }
                 if np > 0 && nq > 0 {
                     code.push_str(&format!(
                         "        self.{matrix}[{}][{}] -= delta_{ci};\n\
                          \x20       self.{matrix}[{}][{}] -= delta_{ci};\n",
-                        np - 1, nq - 1, nq - 1, np - 1
+                        np - 1,
+                        nq - 1,
+                        nq - 1,
+                        np - 1
                     ));
                 }
                 code.push('\n');
             }
 
             code.push_str(&format!(
-                "        self.switch_{}_position = position;\n", idx
+                "        self.switch_{}_position = position;\n",
+                idx
             ));
             code.push_str("        self.rebuild_matrices(self.current_sample_rate);\n");
             code.push_str("    }\n\n");
@@ -3883,14 +4308,24 @@ impl RustEmitter {
 
     /// Emit LU solve function for the nodal solver (N x N with partial pivoting).
     fn emit_nodal_lu_solve(_ir: &CircuitIR) -> String {
-        let mut code = section_banner("LU SOLVE (Equilibrated Gaussian elimination with iterative refinement)");
+        let mut code = section_banner(
+            "LU SOLVE (Equilibrated Gaussian elimination with iterative refinement)",
+        );
 
         code.push_str("/// Solve A*x = b using equilibrated LU with partial pivoting + iterative refinement.\n");
         code.push_str("///\n");
-        code.push_str("/// Diagonal equilibration scales rows/cols by 1/sqrt(|A[i][i]|) to reduce\n");
-        code.push_str("/// condition number. One round of iterative refinement corrects residual error.\n");
-        code.push_str("/// Matches the runtime solver's `solve_equilibrated()` for numerical parity.\n");
-        code.push_str("/// Modifies `a` in place (LU factors). On success, `b` contains the solution.\n");
+        code.push_str(
+            "/// Diagonal equilibration scales rows/cols by 1/sqrt(|A[i][i]|) to reduce\n",
+        );
+        code.push_str(
+            "/// condition number. One round of iterative refinement corrects residual error.\n",
+        );
+        code.push_str(
+            "/// Matches the runtime solver's `solve_equilibrated()` for numerical parity.\n",
+        );
+        code.push_str(
+            "/// Modifies `a` in place (LU factors). On success, `b` contains the solution.\n",
+        );
         code.push_str("#[inline(always)]\n");
         code.push_str("fn lu_solve(a: &mut [[f64; N]; N], b: &mut [f64; N]) -> bool {\n");
         code.push_str("    // Save original A and b for iterative refinement\n");
@@ -4001,7 +4436,11 @@ impl RustEmitter {
     fn emit_nodal_process_sample(ir: &CircuitIR) -> String {
         let n = ir.topology.n;
         let m = ir.topology.m;
-        let n_nodes = if ir.topology.n_nodes > 0 { ir.topology.n_nodes } else { n };
+        let n_nodes = if ir.topology.n_nodes > 0 {
+            ir.topology.n_nodes
+        } else {
+            n
+        };
         let num_outputs = ir.solver_config.output_nodes.len();
         let os_factor = ir.solver_config.oversampling_factor;
 
@@ -4017,17 +4456,23 @@ impl RustEmitter {
         } else {
             code.push_str("/// Process a single audio sample through the circuit.\n");
             code.push_str("///\n");
-            code.push_str("/// Uses full-nodal Newton-Raphson with LU factorization per iteration.\n");
+            code.push_str(
+                "/// Uses full-nodal Newton-Raphson with LU factorization per iteration.\n",
+            );
             code.push_str("/// Includes backward Euler fallback for unconditional stability.\n");
             code.push_str("#[inline]\n");
             code.push_str("pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS] {\n");
         }
 
         // Input sanitization
-        code.push_str("    let input = if input.is_finite() { input.clamp(-100.0, 100.0) } else { 0.0 };\n\n");
+        code.push_str(
+            "    let input = if input.is_finite() { input.clamp(-100.0, 100.0) } else { 0.0 };\n\n",
+        );
 
         // Step 1: Build RHS = rhs_const + A_neg * v_prev + N_i * i_nl_prev + input (sparse)
-        code.push_str("    // Step 1: Build RHS (sparse A_neg * v_prev + sparse N_i * i_nl_prev)\n");
+        code.push_str(
+            "    // Step 1: Build RHS (sparse A_neg * v_prev + sparse N_i * i_nl_prev)\n",
+        );
         if ir.has_dc_sources {
             code.push_str("    let mut rhs = RHS_CONST;\n");
         } else {
@@ -4036,7 +4481,9 @@ impl RustEmitter {
         // Sparse A_neg * v_prev
         for i in 0..n {
             let nz_cols = &ir.sparsity.a_neg.nz_by_row[i];
-            if nz_cols.is_empty() { continue; }
+            if nz_cols.is_empty() {
+                continue;
+            }
             for &j in nz_cols {
                 code.push_str(&format!(
                     "    rhs[{}] += state.a_neg[{}][{}] * state.v_prev[{}];\n",
@@ -4086,16 +4533,21 @@ impl RustEmitter {
             code.push_str("        let mut v_nl = [0.0f64; M];\n");
             for i in 0..m {
                 let nz_cols = &ir.sparsity.n_v.nz_by_row[i];
-                if nz_cols.is_empty() { continue; }
-                let terms: Vec<String> = nz_cols.iter().map(|&j| {
-                    format!("N_V[{}][{}] * v[{}]", i, j, j)
-                }).collect();
+                if nz_cols.is_empty() {
+                    continue;
+                }
+                let terms: Vec<String> = nz_cols
+                    .iter()
+                    .map(|&j| format!("N_V[{}][{}] * v[{}]", i, j, j))
+                    .collect();
                 code.push_str(&format!("        v_nl[{}] = {};\n", i, terms.join(" + ")));
             }
             code.push('\n');
 
             // 2b. Evaluate device currents and Jacobian
-            code.push_str("        // 2b. Evaluate device currents and Jacobian (block-diagonal)\n");
+            code.push_str(
+                "        // 2b. Evaluate device currents and Jacobian (block-diagonal)\n",
+            );
             // i_nl is declared in outer scope (line above NR loop), j_dev is per-iteration
             code.push_str("        let mut j_dev = [0.0f64; M * M];\n");
             Self::emit_nodal_device_evaluation_body(&mut code, ir, "        ");
@@ -4104,7 +4556,9 @@ impl RustEmitter {
             // 2c. Build Jacobian: G_aug = A - N_i * J_dev * N_v (sparse)
             // J_dev is block-diagonal; N_i and N_v have ~2 nonzero entries per device dim.
             // Compile-time unrolled: ~64 stamps for 4 tubes vs 107K dense iterations.
-            code.push_str("        // 2c. Build Jacobian: G_aug = A - N_i * J_dev * N_v (sparse)\n");
+            code.push_str(
+                "        // 2c. Build Jacobian: G_aug = A - N_i * J_dev * N_v (sparse)\n",
+            );
             code.push_str("        let mut g_aug = state.a;\n");
             {
                 // Build transpose of N_i sparsity: for each device dim i, which nodes a are nonzero
@@ -4125,7 +4579,9 @@ impl RustEmitter {
                         for dj in 0..dim {
                             let j = s + dj;
                             let nv_nodes = &ir.sparsity.n_v.nz_by_row[j];
-                            if ni_nodes.is_empty() || nv_nodes.is_empty() { continue; }
+                            if ni_nodes.is_empty() || nv_nodes.is_empty() {
+                                continue;
+                            }
                             for &a in ni_nodes {
                                 for &b in nv_nodes {
                                     code.push_str(&format!(
@@ -4141,7 +4597,9 @@ impl RustEmitter {
             code.push('\n');
 
             // 2d. Build companion RHS: rhs_base + N_i * (i_nl - J_dev * v_nl) (sparse)
-            code.push_str("        // 2d. Build companion RHS: rhs + N_i * (i_nl - J_dev * v_nl) (sparse)\n");
+            code.push_str(
+                "        // 2d. Build companion RHS: rhs + N_i * (i_nl - J_dev * v_nl) (sparse)\n",
+            );
             code.push_str("        let mut rhs_work = rhs;\n");
             {
                 // Build transpose of N_i sparsity
@@ -4158,13 +4616,16 @@ impl RustEmitter {
                     for di in 0..dim {
                         let i = s + di;
                         // Compute jdev_vnl = sum_j j_dev[i*M+j] * v_nl[j] (only within block)
-                        let jdv_terms: Vec<String> = (0..dim).map(|dj| {
-                            let j = s + dj;
-                            format!("j_dev[{} * M + {}] * v_nl[{}]", i, j, j)
-                        }).collect();
+                        let jdv_terms: Vec<String> = (0..dim)
+                            .map(|dj| {
+                                let j = s + dj;
+                                format!("j_dev[{} * M + {}] * v_nl[{}]", i, j, j)
+                            })
+                            .collect();
                         code.push_str(&format!(
                             "        {{ let i_comp = i_nl[{}] - ({});\n",
-                            i, jdv_terms.join(" + ")
+                            i,
+                            jdv_terms.join(" + ")
                         ));
                         // Stamp N_i * i_comp at nonzero nodes (N_I is N×M)
                         for &a in &ni_nz_by_dev[i] {
@@ -4219,7 +4680,9 @@ impl RustEmitter {
             code.push_str("        let mut max_step_exceeded = false;\n");
             code.push_str("        for i in 0..N {\n");
             code.push_str("            let step = alpha * (v_new[i] - v[i]);\n");
-            code.push_str("            let threshold = 1e-6 * v[i].abs().max((v[i] + step).abs()) + TOL;\n");
+            code.push_str(
+                "            let threshold = 1e-6 * v[i].abs().max((v[i] + step).abs()) + TOL;\n",
+            );
             code.push_str("            if step.abs() >= threshold { max_step_exceeded = true; }\n");
             code.push_str("            v[i] += step;\n");
             code.push_str("        }\n");
@@ -4292,7 +4755,9 @@ impl RustEmitter {
             {
                 let mut ni_nz_by_dev = vec![Vec::new(); m];
                 for (a, cols) in ir.sparsity.n_i.nz_by_row.iter().enumerate() {
-                    for &i in cols { ni_nz_by_dev[i].push(a); }
+                    for &i in cols {
+                        ni_nz_by_dev[i].push(a);
+                    }
                 }
                 for slot in &ir.device_slots {
                     let s = slot.start_idx;
@@ -4321,23 +4786,30 @@ impl RustEmitter {
             {
                 let mut ni_nz_by_dev = vec![Vec::new(); m];
                 for (a, cols) in ir.sparsity.n_i.nz_by_row.iter().enumerate() {
-                    for &i in cols { ni_nz_by_dev[i].push(a); }
+                    for &i in cols {
+                        ni_nz_by_dev[i].push(a);
+                    }
                 }
                 for slot in &ir.device_slots {
                     let s = slot.start_idx;
                     let dim = slot.dimension;
                     for di in 0..dim {
                         let i = s + di;
-                        let jdv_terms: Vec<String> = (0..dim).map(|dj| {
-                            let j = s + dj;
-                            format!("j_dev[{} * M + {}] * v_nl[{}]", i, j, j)
-                        }).collect();
+                        let jdv_terms: Vec<String> = (0..dim)
+                            .map(|dj| {
+                                let j = s + dj;
+                                format!("j_dev[{} * M + {}] * v_nl[{}]", i, j, j)
+                            })
+                            .collect();
                         code.push_str(&format!(
-                            "            {{ let i_comp = i_nl[{}] - ({});\n", i, jdv_terms.join(" + ")
+                            "            {{ let i_comp = i_nl[{}] - ({});\n",
+                            i,
+                            jdv_terms.join(" + ")
                         ));
                         for &a in &ni_nz_by_dev[i] {
                             code.push_str(&format!(
-                                "              rhs_work[{}] += N_I[{}][{}] * i_comp;\n", a, a, i
+                                "              rhs_work[{}] += N_I[{}][{}] * i_comp;\n",
+                                a, a, i
                             ));
                         }
                         code.push_str("            }\n");
@@ -4370,7 +4842,9 @@ impl RustEmitter {
             code.push_str("            for i in 0..N {\n");
             code.push_str("                let step = alpha * (v_new[i] - v[i]);\n");
             code.push_str("                let threshold = 1e-6 * v[i].abs().max((v[i] + step).abs()) + TOL;\n");
-            code.push_str("                if step.abs() >= threshold { be_step_exceeded = true; }\n");
+            code.push_str(
+                "                if step.abs() >= threshold { be_step_exceeded = true; }\n",
+            );
             code.push_str("                v[i] += step;\n");
             code.push_str("            }\n");
             code.push_str("            let be_converged = !be_step_exceeded;\n\n");
@@ -4412,18 +4886,20 @@ impl RustEmitter {
         }
         for (idx, _pot) in ir.pots.iter().enumerate() {
             code.push_str(&format!(
-                "    state.pot_{}_resistance_prev = state.pot_{}_resistance;\n", idx, idx
+                "    state.pot_{}_resistance_prev = state.pot_{}_resistance;\n",
+                idx, idx
             ));
         }
         code.push('\n');
 
         // Step 3b: BJT self-heating thermal update (quasi-static, outside NR)
         for (dev_num, slot) in ir.device_slots.iter().enumerate() {
-            if let DeviceParams::Bjt(bp) = &slot.params {
-                if bp.has_self_heating() {
-                    let s = slot.start_idx;
-                    let s1 = s + 1;
-                    code.push_str(&format!(
+            if let DeviceParams::Bjt(bp) = &slot.params
+                && bp.has_self_heating()
+            {
+                let s = slot.start_idx;
+                let s1 = s + 1;
+                code.push_str(&format!(
                         "    {{ // BJT {dev_num} self-heating thermal update\n\
                          \x20       let ic = i_nl[{s}];\n\
                          \x20       let ib = i_nl[{s1}];\n\
@@ -4446,7 +4922,6 @@ impl RustEmitter {
                          \x20           * fast_exp((DEVICE_{dev_num}_EG / vt_nom) * (1.0 - DEVICE_{dev_num}_TAMB / state.device_{dev_num}_tj));\n\
                          \x20   }}\n"
                     ));
-                }
             }
         }
 
@@ -4459,14 +4934,14 @@ impl RustEmitter {
         code.push_str("        state.input_prev = 0.0;\n");
         // Reset thermal state on NaN
         for (dev_num, slot) in ir.device_slots.iter().enumerate() {
-            if let DeviceParams::Bjt(bp) = &slot.params {
-                if bp.has_self_heating() {
-                    code.push_str(&format!(
-                        "        state.device_{dev_num}_tj = DEVICE_{dev_num}_TAMB;\n\
+            if let DeviceParams::Bjt(bp) = &slot.params
+                && bp.has_self_heating()
+            {
+                code.push_str(&format!(
+                    "        state.device_{dev_num}_tj = DEVICE_{dev_num}_TAMB;\n\
                          \x20       state.device_{dev_num}_is = DEVICE_{dev_num}_IS;\n\
                          \x20       state.device_{dev_num}_vt = DEVICE_{dev_num}_VT;\n"
-                    ));
-                }
+                ));
             }
         }
         code.push_str("        state.diag_nan_reset_count += 1;\n");
@@ -4495,12 +4970,16 @@ impl RustEmitter {
             code.push_str("        let scaled = raw_out * OUTPUT_SCALES[out_idx];\n");
         }
         code.push_str("        let abs_out = scaled.abs();\n");
-        code.push_str("        if abs_out > state.diag_peak_output { state.diag_peak_output = abs_out; }\n");
+        code.push_str(
+            "        if abs_out > state.diag_peak_output { state.diag_peak_output = abs_out; }\n",
+        );
         if ir.dc_block {
             code.push_str("        if abs_out > 10.0 { state.diag_clamp_count += 1; }\n");
             code.push_str("        output[out_idx] = scaled.clamp(-10.0, 10.0);\n");
         } else {
-            code.push_str("        output[out_idx] = if scaled.is_finite() { scaled } else { 0.0 };\n");
+            code.push_str(
+                "        output[out_idx] = if scaled.is_finite() { scaled } else { 0.0 };\n",
+            );
         }
         code.push_str("    }\n");
         code.push_str("    output\n");
@@ -4512,11 +4991,13 @@ impl RustEmitter {
     }
 
     /// Emit device evaluation code for the NR loop body (trapezoidal, no indent prefix).
+    #[allow(dead_code)]
     fn emit_nodal_device_evaluation(code: &mut String, ir: &CircuitIR) {
         Self::emit_nodal_device_evaluation_indented(code, ir, "        ");
     }
 
     /// Emit device evaluation code with declarations (i_nl + j_dev).
+    #[allow(dead_code)]
     fn emit_nodal_device_evaluation_indented(code: &mut String, ir: &CircuitIR, indent: &str) {
         code.push_str(&format!("{indent}let mut i_nl = [0.0f64; M];\n"));
         code.push_str(&format!("{indent}let mut j_dev = [0.0f64; M * M];\n"));
@@ -4533,8 +5014,20 @@ impl RustEmitter {
                 (DeviceType::Diode, DeviceParams::Diode(dp)) => {
                     if dp.has_rs() {
                         // Series resistance: use helper functions
-                        let bv_i = if dp.has_bv() { format!(" + diode_breakdown_current(v_nl[{s}], state.device_{dev_num}_n_vt, DEVICE_{dev_num}_BV, DEVICE_{dev_num}_IBV)") } else { String::new() };
-                        let bv_g = if dp.has_bv() { format!(" + diode_breakdown_conductance(v_nl[{s}], state.device_{dev_num}_n_vt, DEVICE_{dev_num}_BV, DEVICE_{dev_num}_IBV)") } else { String::new() };
+                        let bv_i = if dp.has_bv() {
+                            format!(
+                                " + diode_breakdown_current(v_nl[{s}], state.device_{dev_num}_n_vt, DEVICE_{dev_num}_BV, DEVICE_{dev_num}_IBV)"
+                            )
+                        } else {
+                            String::new()
+                        };
+                        let bv_g = if dp.has_bv() {
+                            format!(
+                                " + diode_breakdown_conductance(v_nl[{s}], state.device_{dev_num}_n_vt, DEVICE_{dev_num}_BV, DEVICE_{dev_num}_IBV)"
+                            )
+                        } else {
+                            String::new()
+                        };
                         code.push_str(&format!(
                             "{indent}{{ // Diode {dev_num} (RS={has_rs}, BV={has_bv})\n\
                              {indent}    i_nl[{s}] = diode_current_with_rs(v_nl[{s}], state.device_{dev_num}_is, state.device_{dev_num}_n_vt, DEVICE_{dev_num}_RS){bv_i};\n\
@@ -4617,9 +5110,13 @@ impl RustEmitter {
                 (DeviceType::Jfet, DeviceParams::Jfet(jp)) => {
                     let s1 = s + 1;
                     let jac_fn = if jp.has_rd_rs() {
-                        format!("jfet_jacobian_with_rd_rs(vgs, vds, state.device_{dev_num}_idss, state.device_{dev_num}_vp, state.device_{dev_num}_lambda, sign, DEVICE_{dev_num}_RD, DEVICE_{dev_num}_RS_PARAM)")
+                        format!(
+                            "jfet_jacobian_with_rd_rs(vgs, vds, state.device_{dev_num}_idss, state.device_{dev_num}_vp, state.device_{dev_num}_lambda, sign, DEVICE_{dev_num}_RD, DEVICE_{dev_num}_RS_PARAM)"
+                        )
                     } else {
-                        format!("jfet_jacobian(vgs, vds, state.device_{dev_num}_idss, state.device_{dev_num}_vp, state.device_{dev_num}_lambda, sign)")
+                        format!(
+                            "jfet_jacobian(vgs, vds, state.device_{dev_num}_idss, state.device_{dev_num}_vp, state.device_{dev_num}_lambda, sign)"
+                        )
                     };
                     code.push_str(&format!(
                         "{indent}{{ // JFET {dev_num}\n\
@@ -4657,17 +5154,19 @@ impl RustEmitter {
                              {indent}    let vt_eff = DEVICE_{dev_num}_VT + DEVICE_{dev_num}_GAMMA * ((DEVICE_{dev_num}_PHI + vsb.max(0.0)).sqrt() - DEVICE_{dev_num}_PHI.sqrt());\n\
                              {indent}    state.device_{dev_num}_vt = vt_eff;\n"
                         ));
-                        format!("vt_eff")
+                        "vt_eff".to_string()
                     } else {
-                        code.push_str(&format!(
-                            "{indent}{{ // MOSFET {dev_num}\n"
-                        ));
+                        code.push_str(&format!("{indent}{{ // MOSFET {dev_num}\n"));
                         format!("state.device_{dev_num}_vt")
                     };
                     let jac_fn = if mp.has_rd_rs() {
-                        format!("mosfet_jacobian_with_rd_rs(vgs, vds, state.device_{dev_num}_kp, {vt_expr}, state.device_{dev_num}_lambda, sign, DEVICE_{dev_num}_RD, DEVICE_{dev_num}_RS_PARAM)")
+                        format!(
+                            "mosfet_jacobian_with_rd_rs(vgs, vds, state.device_{dev_num}_kp, {vt_expr}, state.device_{dev_num}_lambda, sign, DEVICE_{dev_num}_RD, DEVICE_{dev_num}_RS_PARAM)"
+                        )
                     } else {
-                        format!("mosfet_jacobian(vgs, vds, state.device_{dev_num}_kp, {vt_expr}, state.device_{dev_num}_lambda, sign)")
+                        format!(
+                            "mosfet_jacobian(vgs, vds, state.device_{dev_num}_kp, {vt_expr}, state.device_{dev_num}_lambda, sign)"
+                        )
                     };
                     code.push_str(&format!(
                         "{indent}    let vds = v_nl[{s}];\n\
@@ -4729,7 +5228,13 @@ impl RustEmitter {
             match (&slot.device_type, &slot.params) {
                 (DeviceType::Diode, DeviceParams::Diode(dp)) => {
                     if dp.has_rs() {
-                        let bv_i = if dp.has_bv() { format!(" + diode_breakdown_current(v_nl_final[{s}], state.device_{dev_num}_n_vt, DEVICE_{dev_num}_BV, DEVICE_{dev_num}_IBV)") } else { String::new() };
+                        let bv_i = if dp.has_bv() {
+                            format!(
+                                " + diode_breakdown_current(v_nl_final[{s}], state.device_{dev_num}_n_vt, DEVICE_{dev_num}_BV, DEVICE_{dev_num}_IBV)"
+                            )
+                        } else {
+                            String::new()
+                        };
                         code.push_str(&format!(
                             "{indent}i_nl[{s}] = diode_current_with_rs(v_nl_final[{s}], state.device_{dev_num}_is, state.device_{dev_num}_n_vt, DEVICE_{dev_num}_RS){bv_i};\n"
                         ));
@@ -4831,9 +5336,13 @@ impl RustEmitter {
                 // Compute proposed device voltage from v_new via N_v
                 code.push_str(&format!("{indent}{{ // Device {dev_num} dim {d}\n"));
                 code.push_str(&format!("{indent}    let mut v_nl_proposed = 0.0;\n"));
-                code.push_str(&format!("{indent}    for j in 0..N {{ v_nl_proposed += N_V[{i}][j] * v_new[j]; }}\n"));
+                code.push_str(&format!(
+                    "{indent}    for j in 0..N {{ v_nl_proposed += N_V[{i}][j] * v_new[j]; }}\n"
+                ));
                 code.push_str(&format!("{indent}    let v_nl_current = v_nl[{i}];\n"));
-                code.push_str(&format!("{indent}    let dv = v_nl_proposed - v_nl_current;\n"));
+                code.push_str(&format!(
+                    "{indent}    let dv = v_nl_proposed - v_nl_current;\n"
+                ));
                 code.push_str(&format!("{indent}    if dv.abs() > 1e-15 {{\n"));
 
                 // Apply per-device limiter

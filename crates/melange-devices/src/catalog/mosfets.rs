@@ -62,9 +62,9 @@ pub const CATALOG: &[MosfetCatalogEntry] = &[
 
 /// Look up a MOSFET by part number (case-insensitive).
 pub fn lookup(name: &str) -> Option<&'static MosfetCatalogEntry> {
-    CATALOG.iter().find(|entry| {
-        entry.names.iter().any(|n| n.eq_ignore_ascii_case(name))
-    })
+    CATALOG
+        .iter()
+        .find(|entry| entry.names.iter().any(|n| n.eq_ignore_ascii_case(name)))
 }
 
 #[cfg(test)]
@@ -107,13 +107,29 @@ mod tests {
     #[test]
     fn test_all_params_valid() {
         for entry in CATALOG {
-            assert!(entry.kp > 0.0 && entry.kp.is_finite(), "{}: KP", entry.names[0]);
+            assert!(
+                entry.kp > 0.0 && entry.kp.is_finite(),
+                "{}: KP",
+                entry.names[0]
+            );
             assert!(entry.vt.is_finite(), "{}: VT", entry.names[0]);
-            assert!(entry.lambda >= 0.0 && entry.lambda.is_finite(), "{}: LAMBDA", entry.names[0]);
+            assert!(
+                entry.lambda >= 0.0 && entry.lambda.is_finite(),
+                "{}: LAMBDA",
+                entry.names[0]
+            );
             if entry.is_p_channel {
-                assert!(entry.vt < 0.0, "{}: P-ch VT should be negative", entry.names[0]);
+                assert!(
+                    entry.vt < 0.0,
+                    "{}: P-ch VT should be negative",
+                    entry.names[0]
+                );
             } else {
-                assert!(entry.vt > 0.0, "{}: N-ch VT should be positive", entry.names[0]);
+                assert!(
+                    entry.vt > 0.0,
+                    "{}: N-ch VT should be positive",
+                    entry.names[0]
+                );
             }
         }
     }
@@ -139,7 +155,11 @@ mod tests {
     // --- Tier 2: Datasheet operating point verification ---
 
     fn make_mosfet(entry: &MosfetCatalogEntry) -> Mosfet {
-        let channel = if entry.is_p_channel { MosfetChannelType::P } else { MosfetChannelType::N };
+        let channel = if entry.is_p_channel {
+            MosfetChannelType::P
+        } else {
+            MosfetChannelType::N
+        };
         Mosfet::new(channel, entry.vt, entry.kp, entry.lambda)
     }
 
@@ -148,17 +168,31 @@ mod tests {
         let m = make_mosfet(lookup("BS170").unwrap());
         // Above threshold: should conduct
         let id = m.drain_current(5.0, 10.0);
-        assert!(id > 0.1e-3, "BS170 should conduct at Vgs=5V, got {:.3}mA", id * 1e3);
+        assert!(
+            id > 0.1e-3,
+            "BS170 should conduct at Vgs=5V, got {:.3}mA",
+            id * 1e3
+        );
         // Below threshold: no conduction
-        assert!(m.drain_current(0.5, 10.0) < 1e-6, "BS170 should be off at Vgs=0.5V");
+        assert!(
+            m.drain_current(0.5, 10.0) < 1e-6,
+            "BS170 should be off at Vgs=0.5V"
+        );
     }
 
     #[test]
     fn test_2n7000_operating_points() {
         let m = make_mosfet(lookup("2N7000").unwrap());
         let id = m.drain_current(5.0, 10.0);
-        assert!(id > 0.1e-3, "2N7000 should conduct at Vgs=5V, got {:.3}mA", id * 1e3);
-        assert!(m.drain_current(1.0, 10.0) < 1e-6, "2N7000 should be off at Vgs=1V");
+        assert!(
+            id > 0.1e-3,
+            "2N7000 should conduct at Vgs=5V, got {:.3}mA",
+            id * 1e3
+        );
+        assert!(
+            m.drain_current(1.0, 10.0) < 1e-6,
+            "2N7000 should be off at Vgs=1V"
+        );
     }
 
     #[test]
@@ -178,32 +212,64 @@ mod tests {
         let eps = 1e-6;
         let vt_abs = entry.vt.abs();
         for &vgs_above in &[1.0, 3.0, 5.0] {
-            let vgs = if entry.is_p_channel { -(vt_abs + vgs_above) } else { vt_abs + vgs_above };
+            let vgs = if entry.is_p_channel {
+                -(vt_abs + vgs_above)
+            } else {
+                vt_abs + vgs_above
+            };
             for &vds_mag in &[0.5, 2.0, 10.0] {
-                let vds = if entry.is_p_channel { -vds_mag } else { vds_mag };
+                let vds = if entry.is_p_channel {
+                    -vds_mag
+                } else {
+                    vds_mag
+                };
                 let jac = m.jacobian(&[vgs, vds]);
-                let fd0 = (m.drain_current(vgs + eps, vds) - m.drain_current(vgs - eps, vds)) / (2.0 * eps);
-                let fd1 = (m.drain_current(vgs, vds + eps) - m.drain_current(vgs, vds - eps)) / (2.0 * eps);
+                let fd0 = (m.drain_current(vgs + eps, vds) - m.drain_current(vgs - eps, vds))
+                    / (2.0 * eps);
+                let fd1 = (m.drain_current(vgs, vds + eps) - m.drain_current(vgs, vds - eps))
+                    / (2.0 * eps);
                 if fd0.abs() > 1e-10 {
                     let rel = (jac[0] - fd0).abs() / fd0.abs();
-                    assert!(rel < 1e-2,
-                        "{} gm at ({},{}): a={:.6e} fd={:.6e}", entry.names[0], vgs, vds, jac[0], fd0);
+                    assert!(
+                        rel < 1e-2,
+                        "{} gm at ({},{}): a={:.6e} fd={:.6e}",
+                        entry.names[0],
+                        vgs,
+                        vds,
+                        jac[0],
+                        fd0
+                    );
                 }
                 if fd1.abs() > 1e-10 {
                     let rel = (jac[1] - fd1).abs() / fd1.abs();
-                    assert!(rel < 1e-2,
-                        "{} gds at ({},{}): a={:.6e} fd={:.6e}", entry.names[0], vgs, vds, jac[1], fd1);
+                    assert!(
+                        rel < 1e-2,
+                        "{} gds at ({},{}): a={:.6e} fd={:.6e}",
+                        entry.names[0],
+                        vgs,
+                        vds,
+                        jac[1],
+                        fd1
+                    );
                 }
             }
         }
     }
 
     #[test]
-    fn test_bs170_jacobian() { check_mosfet_jacobian(lookup("BS170").unwrap()); }
+    fn test_bs170_jacobian() {
+        check_mosfet_jacobian(lookup("BS170").unwrap());
+    }
     #[test]
-    fn test_2n7000_jacobian() { check_mosfet_jacobian(lookup("2N7000").unwrap()); }
+    fn test_2n7000_jacobian() {
+        check_mosfet_jacobian(lookup("2N7000").unwrap());
+    }
     #[test]
-    fn test_irf510_jacobian() { check_mosfet_jacobian(lookup("IRF510").unwrap()); }
+    fn test_irf510_jacobian() {
+        check_mosfet_jacobian(lookup("IRF510").unwrap());
+    }
     #[test]
-    fn test_irf520_jacobian() { check_mosfet_jacobian(lookup("IRF520").unwrap()); }
+    fn test_irf520_jacobian() {
+        check_mosfet_jacobian(lookup("IRF520").unwrap());
+    }
 }

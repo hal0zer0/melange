@@ -6,8 +6,8 @@
 //! All processing uses pre-allocated buffers - no heap allocation in the audio thread.
 
 use crate::dk::DkKernel;
-use melange_primitives::nr::{nr_solve_1d, nr_solve_2d, pn_vcrit, pnjlim, fetlim};
-use melange_devices::{DiodeShockley, BjtEbersMoll, Jfet, Mosfet, KorenTriode, NonlinearDevice};
+use melange_devices::{BjtEbersMoll, DiodeShockley, Jfet, KorenTriode, Mosfet, NonlinearDevice};
+use melange_primitives::nr::{fetlim, nr_solve_1d, nr_solve_2d, pn_vcrit, pnjlim};
 use smallvec::{SmallVec, smallvec};
 
 /// Error type for solver construction and validation.
@@ -22,10 +22,16 @@ pub enum SolverError {
 impl std::fmt::Display for SolverError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SolverError::DimensionMismatch { expected, got } =>
-                write!(f, "Total device dimensions ({}) don't match kernel M ({})", got, expected),
-            SolverError::DeviceIndexOutOfBounds { start_idx, m } =>
-                write!(f, "2D device start_idx {} out of bounds for M={}", start_idx, m),
+            SolverError::DimensionMismatch { expected, got } => write!(
+                f,
+                "Total device dimensions ({}) don't match kernel M ({})",
+                got, expected
+            ),
+            SolverError::DeviceIndexOutOfBounds { start_idx, m } => write!(
+                f,
+                "2D device start_idx {} out of bounds for M={}",
+                start_idx, m
+            ),
         }
     }
 }
@@ -74,9 +80,15 @@ fn reset_coupled_inductors(coupled: &mut [crate::dk::CoupledInductorState]) {
 /// Reset all transformer group companion model state to zero.
 fn reset_transformer_groups(groups: &mut [crate::dk::TransformerGroupState]) {
     for g in groups {
-        for v in &mut g.i_hist { *v = 0.0; }
-        for v in &mut g.i_prev { *v = 0.0; }
-        for v in &mut g.v_prev { *v = 0.0; }
+        for v in &mut g.i_hist {
+            *v = 0.0;
+        }
+        for v in &mut g.i_prev {
+            *v = 0.0;
+        }
+        for v in &mut g.v_prev {
+            *v = 0.0;
+        }
     }
 }
 
@@ -87,19 +99,34 @@ fn reset_transformer_groups(groups: &mut [crate::dk::TransformerGroupState]) {
 #[derive(Debug, Clone)]
 pub enum DeviceEntry {
     /// Shockley diode model (1D)
-    Diode { device: DiodeShockley, start_idx: usize },
+    Diode {
+        device: DiodeShockley,
+        start_idx: usize,
+    },
     /// Diode with series resistance (1D)
-    DiodeWithRs { device: melange_devices::DiodeWithRs, start_idx: usize },
+    DiodeWithRs {
+        device: melange_devices::DiodeWithRs,
+        start_idx: usize,
+    },
     /// LED model (1D)
-    Led { device: melange_devices::Led, start_idx: usize },
+    Led {
+        device: melange_devices::Led,
+        start_idx: usize,
+    },
     /// BJT Ebers-Moll model (2D)
-    Bjt { device: BjtEbersMoll, start_idx: usize },
+    Bjt {
+        device: BjtEbersMoll,
+        start_idx: usize,
+    },
     /// JFET Shichman-Hodges model (2D)
     Jfet { device: Jfet, start_idx: usize },
     /// MOSFET Level 1 model (2D)
     Mosfet { device: Mosfet, start_idx: usize },
     /// Koren triode model (2D: plate current + grid current)
-    Tube { device: KorenTriode, start_idx: usize },
+    Tube {
+        device: KorenTriode,
+        start_idx: usize,
+    },
 }
 
 impl DeviceEntry {
@@ -315,7 +342,9 @@ impl DeviceEntry {
                             melange_devices::jfet::JfetChannel::P => -1.0,
                         };
                         sign * device.is / melange_devices::VT_ROOM
-                            * melange_devices::safeguards::safe_exp(vgs_eff / melange_devices::VT_ROOM)
+                            * melange_devices::safeguards::safe_exp(
+                                vgs_eff / melange_devices::VT_ROOM,
+                            )
                     } else {
                         0.0
                     }
@@ -389,7 +418,10 @@ impl DeviceEntry {
                 i_nl[s + 1] = currents[1];
             }
             d => {
-                log::warn!("write_currents: unsupported device dimension {}, skipping", d);
+                log::warn!(
+                    "write_currents: unsupported device dimension {}, skipping",
+                    d
+                );
             }
         }
     }
@@ -411,7 +443,10 @@ impl DeviceEntry {
                 g_dev[(s + 1) * m + s + 1] = jac[3];
             }
             d => {
-                log::warn!("write_jacobian: unsupported device dimension {}, skipping", d);
+                log::warn!(
+                    "write_jacobian: unsupported device dimension {}, skipping",
+                    d
+                );
             }
         }
     }
@@ -591,7 +626,10 @@ impl CircuitSolver {
         // Verify device dimensions match kernel
         let total_device_dim: usize = devices.iter().map(|d| d.dimension()).sum();
         if total_device_dim != m {
-            return Err(SolverError::DimensionMismatch { expected: m, got: total_device_dim });
+            return Err(SolverError::DimensionMismatch {
+                expected: m,
+                got: total_device_dim,
+            });
         }
 
         // Verify 2D devices have valid indices (check once at construction)
@@ -662,7 +700,11 @@ impl CircuitSolver {
             input_prev: 0.0,
             max_iter: 100,
             tol: 1e-10,
-            last_convergence_reason: if m == 0 { ConvergenceReason::Linear } else { ConvergenceReason::MaxIterations },
+            last_convergence_reason: if m == 0 {
+                ConvergenceReason::Linear
+            } else {
+                ConvergenceReason::MaxIterations
+            },
             dc_block_x_prev: 0.0,
             dc_block_y_prev: 0.0,
             dc_block_r,
@@ -695,7 +737,11 @@ impl CircuitSolver {
     ///
     /// Returns `true` if the DC OP converged, `false` otherwise.
     /// Does nothing if the DC OP solver fails to converge (keeps zero state).
-    pub fn initialize_dc_op(&mut self, mna: &crate::mna::MnaSystem, device_slots: &[crate::codegen::ir::DeviceSlot]) -> bool {
+    pub fn initialize_dc_op(
+        &mut self,
+        mna: &crate::mna::MnaSystem,
+        device_slots: &[crate::codegen::ir::DeviceSlot],
+    ) -> bool {
         let config = crate::dc_op::DcOpConfig {
             input_node: self.input_node,
             input_resistance: if self.input_conductance > 0.0 {
@@ -727,7 +773,9 @@ impl CircuitSolver {
             }
             true
         } else {
-            log::warn!("DC operating point did not converge after all strategies; using linear fallback");
+            log::warn!(
+                "DC operating point did not converge after all strategies; using linear fallback"
+            );
             // Even when nonlinear DC OP fails, use the linear fallback node voltages.
             // This matches codegen, which always initializes v_prev from DC_OP
             // (the linear solution). Without this, the runtime starts from all-zeros
@@ -752,7 +800,8 @@ impl CircuitSolver {
         self.predict();
 
         // Extract predicted nonlinear voltages: p = N_v * v_pred
-        self.kernel.extract_prediction_into(&self.v_pred, &mut self.p);
+        self.kernel
+            .extract_prediction_into(&self.v_pred, &mut self.p);
 
         // Solve for nonlinear voltages/currents
         if self.kernel.m > 0 {
@@ -788,7 +837,9 @@ impl CircuitSolver {
             let mut max_node_delta = 0.0_f64;
             for i in 0..n_nodes {
                 let delta = (self.v_pred[i] - self.v_prev[i]).abs();
-                if delta > max_node_delta { max_node_delta = delta; }
+                if delta > max_node_delta {
+                    max_node_delta = delta;
+                }
             }
             if max_node_delta > NODE_DAMP_THRESHOLD {
                 let damp = (NODE_DAMP_THRESHOLD / max_node_delta).max(0.1);
@@ -837,7 +888,11 @@ impl CircuitSolver {
         let n = self.kernel.n;
 
         // DC blocking filter (5Hz HPF)
-        let raw_out = if self.output_node < n { self.v_prev[self.output_node] } else { 0.0 };
+        let raw_out = if self.output_node < n {
+            self.v_prev[self.output_node]
+        } else {
+            0.0
+        };
         let raw_out = if raw_out.is_finite() { raw_out } else { 0.0 };
         let dc_blocked = raw_out - self.dc_block_x_prev + self.dc_block_r * self.dc_block_y_prev;
         self.dc_block_x_prev = raw_out;
@@ -845,8 +900,12 @@ impl CircuitSolver {
 
         // Diagnostics
         let abs_out = dc_blocked.abs();
-        if abs_out > self.diag_peak_output { self.diag_peak_output = abs_out; }
-        if abs_out > 10.0 { self.diag_clamp_count += 1; }
+        if abs_out > self.diag_peak_output {
+            self.diag_peak_output = abs_out;
+        }
+        if abs_out > 10.0 {
+            self.diag_clamp_count += 1;
+        }
 
         clamp_output(dc_blocked)
     }
@@ -896,18 +955,30 @@ impl CircuitSolver {
 
         // Add coupled inductor history contribution
         for ci in &self.kernel.coupled_inductors {
-            if ci.l1_node_i > 0 { self.rhs[ci.l1_node_i - 1] -= ci.i1_hist; }
-            if ci.l1_node_j > 0 { self.rhs[ci.l1_node_j - 1] += ci.i1_hist; }
-            if ci.l2_node_i > 0 { self.rhs[ci.l2_node_i - 1] -= ci.i2_hist; }
-            if ci.l2_node_j > 0 { self.rhs[ci.l2_node_j - 1] += ci.i2_hist; }
+            if ci.l1_node_i > 0 {
+                self.rhs[ci.l1_node_i - 1] -= ci.i1_hist;
+            }
+            if ci.l1_node_j > 0 {
+                self.rhs[ci.l1_node_j - 1] += ci.i1_hist;
+            }
+            if ci.l2_node_i > 0 {
+                self.rhs[ci.l2_node_i - 1] -= ci.i2_hist;
+            }
+            if ci.l2_node_j > 0 {
+                self.rhs[ci.l2_node_j - 1] += ci.i2_hist;
+            }
         }
 
         // Add transformer group history contribution
         for group in &self.kernel.transformer_groups {
             for k in 0..group.num_windings {
                 let i_hist = group.i_hist[k];
-                if group.winding_node_i[k] > 0 { self.rhs[group.winding_node_i[k] - 1] -= i_hist; }
-                if group.winding_node_j[k] > 0 { self.rhs[group.winding_node_j[k] - 1] += i_hist; }
+                if group.winding_node_i[k] > 0 {
+                    self.rhs[group.winding_node_i[k] - 1] -= i_hist;
+                }
+                if group.winding_node_j[k] > 0 {
+                    self.rhs[group.winding_node_j[k] - 1] += i_hist;
+                }
             }
         }
 
@@ -927,7 +998,7 @@ impl CircuitSolver {
     }
 
     /// Solve single 1D nonlinear device.
-    /// 
+    ///
     /// # Panics
     /// Panics if the device is not a 1D device (should not happen if called correctly).
     fn solve_1d(&mut self) {
@@ -1015,12 +1086,16 @@ impl CircuitSolver {
         };
 
         let (v1, v2, result) = nr_solve_2d(
-            f1, f2,
-            df1_dv1, df1_dv2,
-            df2_dv1, df2_dv2,
+            f1,
+            f2,
+            df1_dv1,
+            df1_dv2,
+            df2_dv1,
+            df2_dv2,
             |vnew, vold| dev0.limit_voltage(0, vnew, vold),
             |vnew, vold| dev1.limit_voltage(0, vnew, vold),
-            self.v_nl_prev[0], self.v_nl_prev[1],
+            self.v_nl_prev[0],
+            self.v_nl_prev[1],
             self.max_iter,
             self.tol,
         );
@@ -1171,7 +1246,8 @@ impl CircuitSolver {
             }
 
             // Check step-size convergence
-            let max_step: f64 = self.delta[..m].iter()
+            let max_step: f64 = self.delta[..m]
+                .iter()
                 .map(|&d| (alpha * d).abs())
                 .fold(0.0_f64, f64::max);
             if max_step < self.tol {
@@ -1215,7 +1291,13 @@ impl CircuitSolver {
     fn update_voltage(&mut self) {
         // Copy v_pred to correction buffer to avoid borrow issue
         self.correction.copy_from_slice(&self.v_pred);
-        self.kernel.apply_correction_into(&self.correction, &self.i_nl, &self.i_nl_prev, &mut self.v_pred, &mut self.ni_inl);
+        self.kernel.apply_correction_into(
+            &self.correction,
+            &self.i_nl,
+            &self.i_nl_prev,
+            &mut self.v_pred,
+            &mut self.ni_inl,
+        );
     }
 
     /// Reset solver state.
@@ -1325,18 +1407,30 @@ impl LinearSolver {
 
         // Add coupled inductor history contribution
         for ci in &self.kernel.coupled_inductors {
-            if ci.l1_node_i > 0 { self.rhs[ci.l1_node_i - 1] -= ci.i1_hist; }
-            if ci.l1_node_j > 0 { self.rhs[ci.l1_node_j - 1] += ci.i1_hist; }
-            if ci.l2_node_i > 0 { self.rhs[ci.l2_node_i - 1] -= ci.i2_hist; }
-            if ci.l2_node_j > 0 { self.rhs[ci.l2_node_j - 1] += ci.i2_hist; }
+            if ci.l1_node_i > 0 {
+                self.rhs[ci.l1_node_i - 1] -= ci.i1_hist;
+            }
+            if ci.l1_node_j > 0 {
+                self.rhs[ci.l1_node_j - 1] += ci.i1_hist;
+            }
+            if ci.l2_node_i > 0 {
+                self.rhs[ci.l2_node_i - 1] -= ci.i2_hist;
+            }
+            if ci.l2_node_j > 0 {
+                self.rhs[ci.l2_node_j - 1] += ci.i2_hist;
+            }
         }
 
         // Add transformer group history contribution
         for group in &self.kernel.transformer_groups {
             for k in 0..group.num_windings {
                 let i_hist = group.i_hist[k];
-                if group.winding_node_i[k] > 0 { self.rhs[group.winding_node_i[k] - 1] -= i_hist; }
-                if group.winding_node_j[k] > 0 { self.rhs[group.winding_node_j[k] - 1] += i_hist; }
+                if group.winding_node_i[k] > 0 {
+                    self.rhs[group.winding_node_i[k] - 1] -= i_hist;
+                }
+                if group.winding_node_j[k] > 0 {
+                    self.rhs[group.winding_node_j[k] - 1] += i_hist;
+                }
             }
         }
 
@@ -1373,7 +1467,11 @@ impl LinearSolver {
         self.kernel.update_transformer_groups(&self.v_prev);
 
         // DC blocking filter (5Hz HPF)
-        let raw_out = if self.output_node < n { self.v_prev[self.output_node] } else { 0.0 };
+        let raw_out = if self.output_node < n {
+            self.v_prev[self.output_node]
+        } else {
+            0.0
+        };
         let raw_out = if raw_out.is_finite() { raw_out } else { 0.0 };
         let dc_blocked = raw_out - self.dc_block_x_prev + self.dc_block_r * self.dc_block_y_prev;
         self.dc_block_x_prev = raw_out;
@@ -1381,8 +1479,12 @@ impl LinearSolver {
 
         // Diagnostics
         let abs_out = dc_blocked.abs();
-        if abs_out > self.diag_peak_output { self.diag_peak_output = abs_out; }
-        if abs_out > 10.0 { self.diag_clamp_count += 1; }
+        if abs_out > self.diag_peak_output {
+            self.diag_peak_output = abs_out;
+        }
+        if abs_out > 10.0 {
+            self.diag_clamp_count += 1;
+        }
 
         clamp_output(dc_blocked)
     }
@@ -1438,18 +1540,30 @@ C1 in 0 1u
 
         // With DC blocking, the peak output should be > 0.8V (transient from step)
         let peak_output = output.iter().fold(0.0_f64, |a, &b| a.max(b));
-        assert!(peak_output > 0.8,
-            "RC lowpass peak output = {:.4}V, expected > 0.8V (DC blocking removes steady-state)", peak_output);
+        assert!(
+            peak_output > 0.8,
+            "RC lowpass peak output = {:.4}V, expected > 0.8V (DC blocking removes steady-state)",
+            peak_output
+        );
 
         // First sample should be positive (step response starts rising)
-        assert!(output[0] > 0.0, "First sample should be positive, got {:.6}", output[0]);
+        assert!(
+            output[0] > 0.0,
+            "First sample should be positive, got {:.6}",
+            output[0]
+        );
 
         // Output should be monotonically increasing in first ~100 samples
         // (before DC blocker droop becomes significant)
         for i in 1..100 {
-            assert!(output[i] >= output[i-1] - 1e-10,
+            assert!(
+                output[i] >= output[i - 1] - 1e-10,
                 "Output should be monotonically increasing in first 100 samples: output[{}]={:.6} < output[{}]={:.6}",
-                i, output[i], i-1, output[i-1]);
+                i,
+                output[i],
+                i - 1,
+                output[i - 1]
+            );
         }
     }
 
@@ -1475,7 +1589,11 @@ C1 out 0 100n
 
         // Small signal should pass through with some attenuation
         let output1 = solver.process_sample(0.01);
-        assert!(output1.abs() < 0.1, "Output for small input should be small, got {}", output1);
+        assert!(
+            output1.abs() < 0.1,
+            "Output for small input should be small, got {}",
+            output1
+        );
 
         // Large signal should be clipped near diode forward voltage
         solver.reset();
@@ -1488,10 +1606,16 @@ C1 out 0 100n
         // Diode clipper: the 1N4148 (IS=1e-15, n=1.0) clamps the signal.
         // With 5V input through 1k Thevenin + 1k shunt + diode + 1k load,
         // the output settles to ~2.13V — well below the 5V input.
-        assert!(final_out < 3.0,
-            "Diode clipper should limit output well below input, got {:.4}V", final_out);
-        assert!(final_out > 0.5,
-            "Diode clipper output should be positive (diode conducting), got {:.4}V", final_out);
+        assert!(
+            final_out < 3.0,
+            "Diode clipper should limit output well below input, got {:.4}V",
+            final_out
+        );
+        assert!(
+            final_out > 0.5,
+            "Diode clipper output should be positive (diode conducting), got {:.4}V",
+            final_out
+        );
     }
 
     /// Test that solver runs without error (basic sanity check)
@@ -1515,9 +1639,12 @@ C1 in 0 1u
         for _ in 0..10 {
             last = solver.process_sample(input);
         }
-        assert!(last.is_finite() && last > 0.0, "Output should be finite and positive");
+        assert!(
+            last.is_finite() && last > 0.0,
+            "Output should be finite and positive"
+        );
     }
-    
+
     /// Direct test of the correction formula math
     #[test]
     fn test_correction_formula_math() {
@@ -1531,13 +1658,13 @@ R1 out 0 10k
         let netlist = Netlist::parse(spice).unwrap();
         let mna = MnaSystem::from_netlist(&netlist).unwrap();
         let kernel = DkKernel::from_mna(&mna, 44100.0).unwrap();
-        
+
         assert!(kernel.m > 0, "Need M > 0 for this test");
-        
+
         let v_prev = vec![0.0; kernel.n];
-        let i_nl_prev = vec![1e-6];  // 1uA previous current
-        let i_nl = vec![1.1e-6];      // 1.1uA new current
-        
+        let i_nl_prev = vec![1e-6]; // 1uA previous current
+        let i_nl = vec![1.1e-6]; // 1.1uA new current
+
         // Build RHS with i_nl_prev
         let mut rhs = vec![0.0; kernel.n];
         for i in 0..kernel.n {
@@ -1547,10 +1674,10 @@ R1 out 0 10k
                 sum += kernel.a_neg[a_neg_row_offset + j] * v_prev[j];
             }
             // Input contribution (Thevenin: V_in * G_in * 2)
-            sum += 2.0 * 0.1 * (1.0 / 10000.0);  // 0.1V through 10k
+            sum += 2.0 * 0.1 * (1.0 / 10000.0); // 0.1V through 10k
             rhs[i] = sum;
         }
-        
+
         // Add N_i * i_nl_prev to RHS
         for i in 0..kernel.n {
             let n_i_row_offset = i * kernel.m;
@@ -1569,16 +1696,17 @@ R1 out 0 10k
             let s_row_offset = i * kernel.n;
             for j in 0..kernel.m {
                 for k in 0..kernel.n {
-                    v_correct[i] += kernel.s[s_row_offset + k] * kernel.n_i[k * kernel.m + j] * i_nl[j];
+                    v_correct[i] +=
+                        kernel.s[s_row_offset + k] * kernel.n_i[k * kernel.m + j] * i_nl[j];
                 }
             }
         }
-        
+
         // Runtime formula: v = v_pred + S * N_i * i_nl
         let mut ni_inl = vec![0.0; kernel.n];
         let mut v_runtime = v_pred.clone();
         kernel.apply_correction_into(&v_pred, &i_nl, &i_nl_prev, &mut v_runtime, &mut ni_inl);
-        
+
         let difference = (v_correct[0] - v_runtime[0]).abs();
         println!("v_correct (full i_nl): {:?}", v_correct);
         println!("v_runtime (full i_nl): {:?}", v_runtime);
@@ -1586,8 +1714,11 @@ R1 out 0 10k
 
         // After trapezoidal fix, both formulas should match exactly.
         // The runtime solver uses full i_nl (not delta) in the correction step.
-        assert!(difference < 1e-15,
-                "Runtime solver should use full i_nl correction, difference = {}", difference);
+        assert!(
+            difference < 1e-15,
+            "Runtime solver should use full i_nl correction, difference = {}",
+            difference
+        );
     }
 
     // ========================================================================
@@ -1629,9 +1760,13 @@ Rbias vcc 0 10k
         for &input in &inputs {
             solver.reset();
             let output = solver.process_sample(input);
-            assert!(output.is_finite(), "Output should be finite for input {}", input);
+            assert!(
+                output.is_finite(),
+                "Output should be finite for input {}",
+                input
+            );
         }
-        
+
         // Test sine wave processing
         solver.reset();
         for i in 0..50 {
@@ -1668,34 +1803,48 @@ R1 out 0 1k
             let t = i as f64 / 44100.0;
             let input = (2.0 * std::f64::consts::PI * 1000.0 * t).sin();
             let output = solver.process_sample(input);
-            assert!(output.is_finite(), "Sample {} produced non-finite output", i);
+            assert!(
+                output.is_finite(),
+                "Sample {} produced non-finite output",
+                i
+            );
             outputs.push(output);
         }
-        
+
         // Verify outputs are bounded — with proper input scaling (G_in = 0.001),
         // 1V input through 1k into a diode clipper should produce bounded output
         let max_output = outputs.iter().fold(0.0_f64, |a, &b| a.max(b.abs()));
-        assert!(max_output < 1000.0, "Output should be bounded, max was {}", max_output);
-        
+        assert!(
+            max_output < 1000.0,
+            "Output should be bounded, max was {}",
+            max_output
+        );
+
         // Test reset clears state
         solver.reset();
         let after_reset = solver.process_sample(0.5);
-        assert!(after_reset.is_finite(), "Output after reset should be finite");
-        
+        assert!(
+            after_reset.is_finite(),
+            "Output after reset should be finite"
+        );
+
         // Test determinism
         solver.reset();
         for _ in 0..50 {
             let _ = solver.process_sample(0.5);
         }
         let out1 = solver.process_sample(0.5);
-        
+
         solver.reset();
         for _ in 0..50 {
             let _ = solver.process_sample(0.5);
         }
         let out2 = solver.process_sample(0.5);
-        
-        assert!((out1 - out2).abs() < 1e-10, "Solver should be deterministic");
+
+        assert!(
+            (out1 - out2).abs() < 1e-10,
+            "Solver should be deterministic"
+        );
     }
 
     /// Test numerical robustness with extreme inputs
@@ -1724,7 +1873,7 @@ R1 out 0 10k
             let output = solver.process_sample(input);
             assert!(output.is_finite(), "Tiny input {} should be finite", input);
         }
-        
+
         // Test large inputs (solver clamps internally to [-100, 100])
         let large_inputs = [10.0, 50.0, 100.0, -10.0, -50.0, -100.0];
         for &input in &large_inputs {
@@ -1732,14 +1881,17 @@ R1 out 0 10k
             let output = solver.process_sample(input);
             assert!(output.is_finite(), "Large input {} should be finite", input);
         }
-        
+
         // Test special float values
         for &input in &[f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
             solver.reset();
             let output = solver.process_sample(input);
-            assert!(output.is_finite(), "Special value should produce finite output");
+            assert!(
+                output.is_finite(),
+                "Special value should produce finite output"
+            );
         }
-        
+
         // Test rapid transitions
         solver.reset();
         for &input in &[10.0, -10.0, 10.0, -10.0] {
@@ -1748,7 +1900,7 @@ R1 out 0 10k
                 assert!(output.is_finite(), "Rapid transition should be finite");
             }
         }
-        
+
         // Verify internal state remains valid
         assert!(solver.v_prev.iter().all(|&v| v.is_finite()));
         assert!(solver.v_nl_prev.iter().all(|&v| v.is_finite()));
@@ -1779,7 +1931,10 @@ C1 out 0 1u
 
         // Test small signal passes through with some attenuation
         let small_out = solver.process_sample(0.01);
-        assert!(small_out.is_finite(), "Small signal should produce finite output");
+        assert!(
+            small_out.is_finite(),
+            "Small signal should produce finite output"
+        );
 
         // Test large signal — diode limits V_in-V_out to ~0.7V
         // but output voltage itself depends on circuit topology
@@ -1788,10 +1943,21 @@ C1 out 0 1u
             let _ = solver.process_sample(5.0);
         }
         let output = solver.process_sample(5.0);
-        assert!(output.is_finite(), "Large signal should produce finite output");
-        assert!(output > 0.0, "Output should be positive for positive input, got {}", output);
-        assert!(output < 6.0, "Output should be bounded by input, got {}", output);
-        
+        assert!(
+            output.is_finite(),
+            "Large signal should produce finite output"
+        );
+        assert!(
+            output > 0.0,
+            "Output should be positive for positive input, got {}",
+            output
+        );
+        assert!(
+            output < 6.0,
+            "Output should be bounded by input, got {}",
+            output
+        );
+
         // Now test BJT which exercises the M-dimensional solver (2D case)
         let spice_bjt = r#"BJT Circuit
 Q1 c b e 2N2222
@@ -1803,13 +1969,14 @@ Re e 0 1k
         let netlist2 = Netlist::parse(spice_bjt).unwrap();
         let mna2 = MnaSystem::from_netlist(&netlist2).unwrap();
         let kernel2 = DkKernel::from_mna(&mna2, 44100.0).unwrap();
-        
+
         if kernel2.m == 2 {
-            let bjt = BjtEbersMoll::new_room_temp(1e-15, 200.0, 3.0, melange_devices::BjtPolarity::Npn);
+            let bjt =
+                BjtEbersMoll::new_room_temp(1e-15, 200.0, 3.0, melange_devices::BjtPolarity::Npn);
             let devices2 = vec![DeviceEntry::new_bjt(bjt, 0)];
             let mut solver2 = CircuitSolver::new(kernel2, devices2, 0, 0).unwrap();
             solver2.input_conductance = 1.0 / 100000.0; // Rb = 100k
-            
+
             // Verify 2D device converges
             for i in 0..20 {
                 let output = solver2.process_sample(0.5);
@@ -1838,18 +2005,27 @@ C1 in 0 1u
 
         // NaN input: must produce finite, clamped output
         let out = solver.process_sample(f64::NAN);
-        assert!(out.is_finite() && out.abs() <= 10.0,
-            "NaN input produced {}", out);
+        assert!(
+            out.is_finite() && out.abs() <= 10.0,
+            "NaN input produced {}",
+            out
+        );
 
         // Inf input: must produce finite, clamped output
         let out = solver.process_sample(f64::INFINITY);
-        assert!(out.is_finite() && out.abs() <= 10.0,
-            "Inf input produced {}", out);
+        assert!(
+            out.is_finite() && out.abs() <= 10.0,
+            "Inf input produced {}",
+            out
+        );
 
         // After bad input, solver must recover for normal input
         let out = solver.process_sample(1.0);
-        assert!(out.is_finite() && out.abs() <= 10.0,
-            "Recovery after bad input produced {}", out);
+        assert!(
+            out.is_finite() && out.abs() <= 10.0,
+            "Recovery after bad input produced {}",
+            out
+        );
 
         // Nonlinear solver
         let spice = r#"Diode
@@ -1871,22 +2047,33 @@ R1 out 0 1k
             let t = i as f64 / 44100.0;
             let input = 5.0 * (2.0 * std::f64::consts::PI * 1000.0 * t).sin();
             let out = solver.process_sample(input);
-            assert!(out.is_finite() && out.abs() <= 10.0,
-                "Sample {} output {} exceeds safe range", i, out);
+            assert!(
+                out.is_finite() && out.abs() <= 10.0,
+                "Sample {} output {} exceeds safe range",
+                i,
+                out
+            );
         }
 
         // Hit it with NaN, inf, and extreme values — must survive
         for &bad_input in &[f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 1e300, -1e300] {
             let out = solver.process_sample(bad_input);
-            assert!(out.is_finite() && out.abs() <= 10.0,
-                "Bad input {:?} produced {}", bad_input, out);
+            assert!(
+                out.is_finite() && out.abs() <= 10.0,
+                "Bad input {:?} produced {}",
+                bad_input,
+                out
+            );
         }
 
         // Must recover and produce sane output afterwards
         for _ in 0..100 {
             let out = solver.process_sample(0.5);
-            assert!(out.is_finite() && out.abs() <= 10.0,
-                "Post-recovery output {} exceeds safe range", out);
+            assert!(
+                out.is_finite() && out.abs() <= 10.0,
+                "Post-recovery output {} exceeds safe range",
+                out
+            );
         }
     }
 
@@ -1911,8 +2098,11 @@ C1 out 0 1u
 
         // Verify K is negative (correct feedback sign)
         let k00 = kernel.k(0, 0);
-        assert!(k00 < 0.0,
-            "K[0][0] should be negative for stable NR, got {:.4}", k00);
+        assert!(
+            k00 < 0.0,
+            "K[0][0] should be negative for stable NR, got {:.4}",
+            k00
+        );
 
         let diode = DiodeShockley::new_room_temp(1e-15, 1.0);
         let devices = vec![DeviceEntry::new_diode(diode, 0)];
@@ -1929,24 +2119,38 @@ C1 out 0 1u
 
         // Output should be positive (positive input → positive output)
         let final_out = *outputs.last().unwrap();
-        assert!(final_out > 0.0,
-            "Final output should be positive, got {:.6}", final_out);
+        assert!(
+            final_out > 0.0,
+            "Final output should be positive, got {:.6}",
+            final_out
+        );
 
         // Output must be less than input (diode + RC divider)
-        assert!(final_out < 1.5,
-            "Output should be bounded below input, got {:.6}", final_out);
+        assert!(
+            final_out < 1.5,
+            "Output should be bounded below input, got {:.6}",
+            final_out
+        );
 
         // Output should monotonically increase in first 100 samples (charging capacitor)
         // DC blocker causes droop after that, so limit the check
         for i in 1..100 {
-            assert!(outputs[i] >= outputs[i-1] - 1e-10,
+            assert!(
+                outputs[i] >= outputs[i - 1] - 1e-10,
                 "Output should be monotonic: [{}]={:.6} < [{}]={:.6}",
-                i, outputs[i], i-1, outputs[i-1]);
+                i,
+                outputs[i],
+                i - 1,
+                outputs[i - 1]
+            );
         }
 
         // No NR divergence fallback (output should not be clamped to 0)
-        assert!(outputs[0] > 0.0,
-            "First sample should be nonzero, got {:.6}", outputs[0]);
+        assert!(
+            outputs[0] > 0.0,
+            "First sample should be nonzero, got {:.6}",
+            outputs[0]
+        );
     }
 
     #[test]
@@ -1957,8 +2161,10 @@ C1 out 0 1u
         let mna = MnaSystem::from_netlist(&netlist).unwrap();
         let kernel = DkKernel::from_mna(&mna, 44100.0).unwrap();
         let solver = CircuitSolver::new(kernel, vec![], 0, 0).unwrap();
-        assert_eq!(solver.input_conductance, 1.0,
-            "Default input_conductance should be 1.0 (1/1Ω, near-ideal voltage source)");
+        assert_eq!(
+            solver.input_conductance, 1.0,
+            "Default input_conductance should be 1.0 (1/1Ω, near-ideal voltage source)"
+        );
     }
 
     // ========================================================================
@@ -2009,8 +2215,11 @@ C1 out 0 1u
 
         // Process a small signal — should converge easily
         let _ = solver.process_sample(0.1);
-        assert_eq!(solver.last_convergence_reason(), ConvergenceReason::Residual,
-            "1D solve with small signal should converge via residual");
+        assert_eq!(
+            solver.last_convergence_reason(),
+            ConvergenceReason::Residual,
+            "1D solve with small signal should converge via residual"
+        );
     }
 
     /// BJT circuit (2D via solve_md) should converge and report Residual or StepSize.
@@ -2029,7 +2238,10 @@ Rbias vcc 0 10k
         let kernel = DkKernel::from_mna(&mna, 44100.0).unwrap();
 
         if kernel.m != 2 {
-            eprintln!("Skipping BJT convergence test: kernel.m = {}, expected 2", kernel.m);
+            eprintln!(
+                "Skipping BJT convergence test: kernel.m = {}, expected 2",
+                kernel.m
+            );
             return;
         }
 
@@ -2046,7 +2258,8 @@ Rbias vcc 0 10k
         let reason = solver.last_convergence_reason();
         assert!(
             reason == ConvergenceReason::Residual || reason == ConvergenceReason::StepSize,
-            "BJT solve_md should converge, got {:?}", reason
+            "BJT solve_md should converge, got {:?}",
+            reason
         );
     }
 
@@ -2072,10 +2285,7 @@ C1 out 0 1u
 
         let d1 = DiodeShockley::new_room_temp(1e-15, 1.0);
         let d2 = DiodeShockley::new_room_temp(1e-15, 1.0);
-        let devices = vec![
-            DeviceEntry::new_diode(d1, 0),
-            DeviceEntry::new_diode(d2, 1),
-        ];
+        let devices = vec![DeviceEntry::new_diode(d1, 0), DeviceEntry::new_diode(d2, 1)];
         let mut solver = CircuitSolver::new(kernel, devices, 0, 1).unwrap();
         solver.input_conductance = 0.001;
 
@@ -2085,8 +2295,12 @@ C1 out 0 1u
         }
 
         let reason = solver.last_convergence_reason();
-        assert_eq!(reason, ConvergenceReason::Residual,
-            "Two-diode 2D solve should converge via residual, got {:?}", reason);
+        assert_eq!(
+            reason,
+            ConvergenceReason::Residual,
+            "Two-diode 2D solve should converge via residual, got {:?}",
+            reason
+        );
     }
 
     /// MaxIterations is reported when the solver cannot converge.
@@ -2112,8 +2326,11 @@ C1 out 0 1u
         solver.max_iter = 1;
 
         let _ = solver.process_sample(5.0);
-        assert_eq!(solver.last_convergence_reason(), ConvergenceReason::MaxIterations,
-            "With tol=1e-300 and max_iter=1, should report MaxIterations");
+        assert_eq!(
+            solver.last_convergence_reason(),
+            ConvergenceReason::MaxIterations,
+            "With tol=1e-300 and max_iter=1, should report MaxIterations"
+        );
     }
 
     /// Getter returns the reason from the most recent sample, not a stale one.
@@ -2144,16 +2361,22 @@ C1 out 0 1u
         solver.max_iter = 1;
         let _ = solver.process_sample(5.0);
         let reason2 = solver.last_convergence_reason();
-        assert_eq!(reason2, ConvergenceReason::MaxIterations,
-            "Reason should update to MaxIterations after forced non-convergence");
+        assert_eq!(
+            reason2,
+            ConvergenceReason::MaxIterations,
+            "Reason should update to MaxIterations after forced non-convergence"
+        );
 
         // Restore normal settings — should converge again
         solver.tol = 1e-10;
         solver.max_iter = 100;
         let _ = solver.process_sample(0.1);
         let reason3 = solver.last_convergence_reason();
-        assert_eq!(reason3, ConvergenceReason::Residual,
-            "Reason should update back to Residual after restoring settings");
+        assert_eq!(
+            reason3,
+            ConvergenceReason::Residual,
+            "Reason should update back to Residual after restoring settings"
+        );
     }
 
     // ========================================================================
@@ -2187,11 +2410,17 @@ C1 in 0 1u
         }
 
         // Transient should have been visible
-        assert!(peak > 0.1,
-            "Initial transient should pass through, peak = {}", peak);
+        assert!(
+            peak > 0.1,
+            "Initial transient should pass through, peak = {}",
+            peak
+        );
         // After 1 second at 5Hz cutoff, DC should be heavily attenuated
-        assert!(last_out.abs() < 0.01,
-            "DC should be blocked after 1s, got {:.6}V", last_out);
+        assert!(
+            last_out.abs() < 0.01,
+            "DC should be blocked after 1s, got {:.6}V",
+            last_out
+        );
     }
 
     /// Verify the 5Hz HPF removes DC in a nonlinear (diode clipper) circuit.
@@ -2223,10 +2452,16 @@ C1 out 0 100n
             }
         }
 
-        assert!(peak > 0.1,
-            "Initial transient should pass through, peak = {}", peak);
-        assert!(last_out.abs() < 0.01,
-            "DC should be blocked after 2s, got {:.6}V", last_out);
+        assert!(
+            peak > 0.1,
+            "Initial transient should pass through, peak = {}",
+            peak
+        );
+        assert!(
+            last_out.abs() < 0.01,
+            "DC should be blocked after 2s, got {:.6}V",
+            last_out
+        );
     }
 
     // ========================================================================
@@ -2258,7 +2493,12 @@ C1 out 0 100n
             let input = (2.0 * std::f64::consts::PI * 1000.0 * t).sin();
             let out = solver.process_sample(input);
             assert!(out.is_finite(), "LED solver output NaN/Inf at sample {}", i);
-            assert!(out.abs() <= 10.0, "LED solver output unbounded at sample {}: {}", i, out);
+            assert!(
+                out.abs() <= 10.0,
+                "LED solver output unbounded at sample {}: {}",
+                i,
+                out
+            );
         }
     }
 
@@ -2286,8 +2526,17 @@ C1 out 0 100n
             let t = i as f64 / 44100.0;
             let input = (2.0 * std::f64::consts::PI * 1000.0 * t).sin();
             let out = solver.process_sample(input);
-            assert!(out.is_finite(), "DiodeWithRs output NaN/Inf at sample {}", i);
-            assert!(out.abs() <= 10.0, "DiodeWithRs output unbounded at sample {}: {}", i, out);
+            assert!(
+                out.is_finite(),
+                "DiodeWithRs output NaN/Inf at sample {}",
+                i
+            );
+            assert!(
+                out.abs() <= 10.0,
+                "DiodeWithRs output unbounded at sample {}: {}",
+                i,
+                out
+            );
         }
     }
 
@@ -2324,7 +2573,12 @@ Rbias vcc 0 10k
             let input = 0.5 + 0.3 * (2.0 * std::f64::consts::PI * 1000.0 * t).sin();
             let out = solver.process_sample(input);
             assert!(out.is_finite(), "PNP sine output NaN/Inf at sample {}", i);
-            assert!(out.abs() <= 10.0, "PNP output unbounded at sample {}: {}", i, out);
+            assert!(
+                out.abs() <= 10.0,
+                "PNP output unbounded at sample {}: {}",
+                i,
+                out
+            );
         }
     }
 
@@ -2360,8 +2614,10 @@ C1 in 0 1u
         for _ in 0..100 {
             solver.process_sample(0.0);
         }
-        assert!(solver.diag_peak_output >= peak_after_signal,
-            "Peak should be monotonically non-decreasing");
+        assert!(
+            solver.diag_peak_output >= peak_after_signal,
+            "Peak should be monotonically non-decreasing"
+        );
 
         // Reset zeros the peak
         solver.reset();
@@ -2390,8 +2646,10 @@ C1 out 0 1u
         for _ in 0..100 {
             solver.process_sample(0.1);
         }
-        assert_eq!(solver.diag_nr_max_iter_count, 0,
-            "NR max iter count should be 0 during normal operation");
+        assert_eq!(
+            solver.diag_nr_max_iter_count, 0,
+            "NR max iter count should be 0 during normal operation"
+        );
 
         // Force non-convergence: impossibly tight tolerance, 1 iteration
         solver.tol = 1e-300;
@@ -2399,13 +2657,17 @@ C1 out 0 1u
         for _ in 0..10 {
             solver.process_sample(5.0);
         }
-        assert!(solver.diag_nr_max_iter_count > 0,
-            "NR max iter count should increment when forced to not converge");
+        assert!(
+            solver.diag_nr_max_iter_count > 0,
+            "NR max iter count should increment when forced to not converge"
+        );
 
         // Reset zeros the counter
         solver.reset();
-        assert_eq!(solver.diag_nr_max_iter_count, 0,
-            "NR max iter count should be 0 after reset");
+        assert_eq!(
+            solver.diag_nr_max_iter_count, 0,
+            "NR max iter count should be 0 after reset"
+        );
     }
 
     /// Verify NaN reset counter tracks and resets.
@@ -2430,19 +2692,25 @@ C1 out 0 1u
         for _ in 0..100 {
             solver.process_sample(0.1);
         }
-        assert_eq!(solver.diag_nan_reset_count, 0,
-            "NaN reset count should be 0 during normal operation");
+        assert_eq!(
+            solver.diag_nan_reset_count, 0,
+            "NaN reset count should be 0 during normal operation"
+        );
 
         // Corrupt state to trigger NaN detection
         solver.v_prev[0] = f64::NAN;
         solver.process_sample(0.1);
-        assert!(solver.diag_nan_reset_count > 0,
-            "NaN reset count should increment after NaN in v_prev");
+        assert!(
+            solver.diag_nan_reset_count > 0,
+            "NaN reset count should increment after NaN in v_prev"
+        );
 
         // Reset zeros the counter
         solver.reset();
-        assert_eq!(solver.diag_nan_reset_count, 0,
-            "NaN reset count should be 0 after reset");
+        assert_eq!(
+            solver.diag_nan_reset_count, 0,
+            "NaN reset count should be 0 after reset"
+        );
     }
 
     /// Verify clamp counter stays at 0 for small signals (LinearSolver).
@@ -2465,8 +2733,11 @@ C1 in 0 1u
             let input = 0.5 * (2.0 * std::f64::consts::PI * 1000.0 * t).sin();
             solver.process_sample(input);
         }
-        assert_eq!(solver.diag_clamp_count, 0,
-            "Clamp count should be 0 for small signals, got {}", solver.diag_clamp_count);
+        assert_eq!(
+            solver.diag_clamp_count, 0,
+            "Clamp count should be 0 for small signals, got {}",
+            solver.diag_clamp_count
+        );
     }
 }
 
@@ -2485,8 +2756,8 @@ C1 in 0 1u
 // FLOPs per iteration — well within real-time budget at 48kHz.
 // ==========================================================================
 
-use crate::dc_op;
 use crate::codegen::ir::{DeviceParams, DeviceSlot};
+use crate::dc_op;
 use crate::mna::MnaSystem;
 
 /// Apply SPICE-style voltage limiting for a DeviceSlot dimension.
@@ -2549,9 +2820,9 @@ pub struct NodalSolver {
     /// Total system dimension: n_aug + inductor branch variables
     n_nodal: usize,
     /// G_nodal (conductance) matrix, stored for BE fallback rebuild
-    g_nodal: Vec<Vec<f64>>,
+    _g_nodal: Vec<Vec<f64>>,
     /// C_nodal (capacitance/inductance) matrix, stored for BE fallback rebuild
-    c_nodal: Vec<Vec<f64>>,
+    _c_nodal: Vec<Vec<f64>>,
     /// A matrix = G_nodal + alpha*C_nodal (trapezoidal: alpha=2/T)
     a_matrix: Vec<Vec<f64>>,
     /// A_neg = alpha*C_nodal - G_nodal (trapezoidal), flat row-major
@@ -2617,7 +2888,7 @@ impl NodalSolver {
         input_node: usize,
         output_node: usize,
     ) -> Self {
-        let n_aug = mna.n_aug;    // original system dimension (not kernel.n which may be augmented)
+        let n_aug = mna.n_aug; // original system dimension (not kernel.n which may be augmented)
         let n_nodes = kernel.n_nodes;
         let m = kernel.m;
 
@@ -2640,7 +2911,9 @@ impl NodalSolver {
         }
 
         // Resolve .delay_feedback node names to indices
-        let delayed_node_indices: Vec<usize> = netlist.delay_feedback_nodes.iter()
+        let delayed_node_indices: Vec<usize> = netlist
+            .delay_feedback_nodes
+            .iter()
             .filter_map(|name| {
                 mna.node_map.get(name).map(|&idx| {
                     if idx > 0 { idx - 1 } else { usize::MAX } // 0 = ground, skip
@@ -2649,7 +2922,10 @@ impl NodalSolver {
             .filter(|&idx| idx < n_nodes)
             .collect();
         if !delayed_node_indices.is_empty() {
-            log::info!("NodalSolver: {} delayed feedback nodes", delayed_node_indices.len());
+            log::info!(
+                "NodalSolver: {} delayed feedback nodes",
+                delayed_node_indices.len()
+            );
         }
 
         // Build trapezoidal matrices: A = G + (2/T)*C, A_neg = (2/T)*C - G
@@ -2735,15 +3011,17 @@ impl NodalSolver {
         if n_inductor_vars > 0 {
             log::info!(
                 "NodalSolver: augmented MNA with {} inductor variables (n_aug={}, n_nodal={})",
-                n_inductor_vars, n_aug, n_nodal
+                n_inductor_vars,
+                n_aug,
+                n_nodal
             );
         }
 
         Self {
             kernel,
             n_nodal,
-            g_nodal: g_nod,
-            c_nodal: c_nod,
+            _g_nodal: g_nod,
+            _c_nodal: c_nod,
             a_matrix,
             a_neg,
             rhs_const,
@@ -2803,7 +3081,10 @@ impl NodalSolver {
             for i in 0..m.min(result.i_nl.len()) {
                 self.i_nl_prev[i] = result.i_nl[i];
             }
-            log::info!("Nodal solver DC OP initialized (method: {:?})", result.method);
+            log::info!(
+                "Nodal solver DC OP initialized (method: {:?})",
+                result.method
+            );
         } else {
             log::warn!("Nodal solver DC OP failed to converge, using zero initial state");
         }
@@ -2867,7 +3148,13 @@ impl NodalSolver {
             }
 
             // 2b. Evaluate device currents and Jacobian
-            dc_op::evaluate_devices(&self.v_nl, &self.device_slots, &mut self.i_nl, &mut self.j_dev, m);
+            dc_op::evaluate_devices(
+                &self.v_nl,
+                &self.device_slots,
+                &mut self.i_nl,
+                &mut self.j_dev,
+                m,
+            );
 
             // 2c. Build Jacobian: G_aug = A - N_i * J_dev * N_v
             // Start from A matrix (inductor rows are linear, unaffected by J_dev)
@@ -2882,12 +3169,18 @@ impl NodalSolver {
                     let mut sum = 0.0;
                     for i in 0..m {
                         let ni_ai = self.n_i[a * m + i];
-                        if ni_ai.abs() < 1e-30 { continue; }
+                        if ni_ai.abs() < 1e-30 {
+                            continue;
+                        }
                         for j in 0..m {
                             let jd = self.j_dev[i * m + j];
-                            if jd.abs() < 1e-30 { continue; }
+                            if jd.abs() < 1e-30 {
+                                continue;
+                            }
                             let nv_jb = self.n_v[j * n + b];
-                            if nv_jb.abs() < 1e-30 { continue; }
+                            if nv_jb.abs() < 1e-30 {
+                                continue;
+                            }
                             sum += ni_ai * jd * nv_jb;
                         }
                     }
@@ -2952,10 +3245,13 @@ impl NodalSolver {
                         let v_nl_current = self.v_nl[i];
                         let dv = v_nl_proposed - v_nl_current;
                         if dv.abs() > 1e-15 {
-                            let v_limited = limit_slot_voltage(slot, d, v_nl_proposed, v_nl_current);
+                            let v_limited =
+                                limit_slot_voltage(slot, d, v_nl_proposed, v_nl_current);
                             let dv_limited = v_limited - v_nl_current;
                             let ratio = (dv_limited / dv).clamp(0.01, 1.0);
-                            if ratio < alpha { alpha = ratio; }
+                            if ratio < alpha {
+                                alpha = ratio;
+                            }
                         }
                     }
                 }
@@ -2967,7 +3263,9 @@ impl NodalSolver {
                 let n_nodes = self.kernel.n_nodes;
                 let mut max_node_dv = 0.0_f64;
                 for i in 0..n_nodes {
-                    if self.delayed_node_indices.contains(&i) { continue; }
+                    if self.delayed_node_indices.contains(&i) {
+                        continue;
+                    }
                     let dv = alpha * (v_new[i] - v[i]);
                     max_node_dv = max_node_dv.max(dv.abs());
                 }
@@ -2988,7 +3286,9 @@ impl NodalSolver {
             // SPICE-style convergence: RELTOL * max(|v_new|, |v_old|) + VNTOL
             // For a 290V node: threshold = 0.001*290 + 1e-6 = 0.29V (vs fixed 1e-6)
             let converged_check = (0..n).all(|i| {
-                if self.delayed_node_indices.contains(&i) { return true; }
+                if self.delayed_node_indices.contains(&i) {
+                    return true;
+                }
                 let abs_delta = (alpha * (v_new[i] - v[i])).abs(); // actual step taken
                 let threshold = 1e-3 * v[i].abs().max(v_new[i].abs()) + self.tol;
                 abs_delta < threshold
@@ -3005,7 +3305,13 @@ impl NodalSolver {
                     }
                     self.v_nl[i] = sum;
                 }
-                dc_op::evaluate_devices(&self.v_nl, &self.device_slots, &mut self.i_nl, &mut self.j_dev, m);
+                dc_op::evaluate_devices(
+                    &self.v_nl,
+                    &self.device_slots,
+                    &mut self.i_nl,
+                    &mut self.j_dev,
+                    m,
+                );
                 break;
             }
         }
@@ -3041,10 +3347,18 @@ impl NodalSolver {
                 for i in 0..m {
                     let mut sum = 0.0;
                     let nv_offset = i * n;
-                    for j in 0..n { sum += self.n_v[nv_offset + j] * v[j]; }
+                    for j in 0..n {
+                        sum += self.n_v[nv_offset + j] * v[j];
+                    }
                     self.v_nl[i] = sum;
                 }
-                dc_op::evaluate_devices(&self.v_nl, &self.device_slots, &mut self.i_nl, &mut self.j_dev, m);
+                dc_op::evaluate_devices(
+                    &self.v_nl,
+                    &self.device_slots,
+                    &mut self.i_nl,
+                    &mut self.j_dev,
+                    m,
+                );
 
                 for i in 0..n {
                     for j in 0..n {
@@ -3056,12 +3370,18 @@ impl NodalSolver {
                         let mut sum = 0.0;
                         for i in 0..m {
                             let ni_ai = self.n_i[a * m + i];
-                            if ni_ai.abs() < 1e-30 { continue; }
+                            if ni_ai.abs() < 1e-30 {
+                                continue;
+                            }
                             for j in 0..m {
                                 let jd = self.j_dev[i * m + j];
-                                if jd.abs() < 1e-30 { continue; }
+                                if jd.abs() < 1e-30 {
+                                    continue;
+                                }
                                 let nv_jb = self.n_v[j * n + b];
-                                if nv_jb.abs() < 1e-30 { continue; }
+                                if nv_jb.abs() < 1e-30 {
+                                    continue;
+                                }
                                 sum += ni_ai * jd * nv_jb;
                             }
                         }
@@ -3072,14 +3392,20 @@ impl NodalSolver {
                 self.rhs_work.copy_from_slice(&self.rhs);
                 for i in 0..m {
                     let mut jdev_vnl = 0.0;
-                    for j in 0..m { jdev_vnl += self.j_dev[i * m + j] * self.v_nl[j]; }
+                    for j in 0..m {
+                        jdev_vnl += self.j_dev[i * m + j] * self.v_nl[j];
+                    }
                     let i_comp = self.i_nl[i] - jdev_vnl;
-                    for a in 0..n { self.rhs_work[a] += self.n_i[a * m + i] * i_comp; }
+                    for a in 0..n {
+                        self.rhs_work[a] += self.n_i[a * m + i] * i_comp;
+                    }
                 }
 
                 // Delayed node identity constraints
                 for &idx in &self.delayed_node_indices {
-                    for j in 0..n { self.g_aug[idx][j] = 0.0; }
+                    for j in 0..n {
+                        self.g_aug[idx][j] = 0.0;
+                    }
                     self.g_aug[idx][idx] = 1.0;
                     self.rhs_work[idx] = self.v_prev[idx];
                 }
@@ -3097,14 +3423,19 @@ impl NodalSolver {
                             let i = s + d;
                             let mut v_nl_proposed = 0.0;
                             let nv_offset = i * n;
-                            for j in 0..n { v_nl_proposed += self.n_v[nv_offset + j] * v_new[j]; }
+                            for j in 0..n {
+                                v_nl_proposed += self.n_v[nv_offset + j] * v_new[j];
+                            }
                             let v_nl_current = self.v_nl[i];
                             let dv = v_nl_proposed - v_nl_current;
                             if dv.abs() > 1e-15 {
-                                let v_limited = limit_slot_voltage(slot, d, v_nl_proposed, v_nl_current);
+                                let v_limited =
+                                    limit_slot_voltage(slot, d, v_nl_proposed, v_nl_current);
                                 let dv_limited = v_limited - v_nl_current;
                                 let ratio = (dv_limited / dv).clamp(0.01, 1.0);
-                                if ratio < alpha { alpha = ratio; }
+                                if ratio < alpha {
+                                    alpha = ratio;
+                                }
                             }
                         }
                     }
@@ -3113,18 +3444,28 @@ impl NodalSolver {
                     let n_nodes = self.kernel.n_nodes;
                     let mut max_node_dv = 0.0_f64;
                     for i in 0..n_nodes {
-                        if self.delayed_node_indices.contains(&i) { continue; }
+                        if self.delayed_node_indices.contains(&i) {
+                            continue;
+                        }
                         let dv = alpha * (v_new[i] - v[i]);
                         max_node_dv = max_node_dv.max(dv.abs());
                     }
-                    if max_node_dv > 10.0 { alpha *= (10.0 / max_node_dv).max(0.01); }
+                    if max_node_dv > 10.0 {
+                        alpha *= (10.0 / max_node_dv).max(0.01);
+                    }
                 }
 
-                for i in 0..n { v[i] += alpha * (v_new[i] - v[i]); }
-                for &idx in &self.delayed_node_indices { v[idx] = self.v_prev[idx]; }
+                for i in 0..n {
+                    v[i] += alpha * (v_new[i] - v[i]);
+                }
+                for &idx in &self.delayed_node_indices {
+                    v[idx] = self.v_prev[idx];
+                }
 
                 let be_converged = (0..n).all(|i| {
-                    if self.delayed_node_indices.contains(&i) { return true; }
+                    if self.delayed_node_indices.contains(&i) {
+                        return true;
+                    }
                     let abs_delta = (alpha * (v_new[i] - v[i])).abs();
                     let threshold = 1e-3 * v[i].abs().max(v_new[i].abs()) + self.tol;
                     abs_delta < threshold
@@ -3136,26 +3477,40 @@ impl NodalSolver {
                     for i in 0..m {
                         let mut sum = 0.0;
                         let nv_offset = i * n;
-                        for j in 0..n { sum += self.n_v[nv_offset + j] * v[j]; }
+                        for j in 0..n {
+                            sum += self.n_v[nv_offset + j] * v[j];
+                        }
                         self.v_nl[i] = sum;
                     }
-                    dc_op::evaluate_devices(&self.v_nl, &self.device_slots, &mut self.i_nl, &mut self.j_dev, m);
+                    dc_op::evaluate_devices(
+                        &self.v_nl,
+                        &self.device_slots,
+                        &mut self.i_nl,
+                        &mut self.j_dev,
+                        m,
+                    );
                     break;
                 }
             }
         }
 
         // If still not converged after BE fallback, ensure i_nl is consistent with v
-        if !converged {
-            if m > 0 {
-                for i in 0..m {
-                    let mut sum = 0.0;
-                    let nv_offset = i * n;
-                    for j in 0..n { sum += self.n_v[nv_offset + j] * v[j]; }
-                    self.v_nl[i] = sum;
+        if !converged && m > 0 {
+            for i in 0..m {
+                let mut sum = 0.0;
+                let nv_offset = i * n;
+                for j in 0..n {
+                    sum += self.n_v[nv_offset + j] * v[j];
                 }
-                dc_op::evaluate_devices(&self.v_nl, &self.device_slots, &mut self.i_nl, &mut self.j_dev, m);
+                self.v_nl[i] = sum;
             }
+            dc_op::evaluate_devices(
+                &self.v_nl,
+                &self.device_slots,
+                &mut self.i_nl,
+                &mut self.j_dev,
+                m,
+            );
         }
 
         // Step 3: Update state (includes inductor branch currents implicitly)
@@ -3208,8 +3563,12 @@ impl NodalSolver {
         self.dc_block_y_prev = dc_blocked;
 
         let abs_out = dc_blocked.abs();
-        if abs_out > self.diag_peak_output { self.diag_peak_output = abs_out; }
-        if abs_out > 10.0 { self.diag_clamp_count += 1; }
+        if abs_out > self.diag_peak_output {
+            self.diag_peak_output = abs_out;
+        }
+        if abs_out > 10.0 {
+            self.diag_clamp_count += 1;
+        }
 
         clamp_output(dc_blocked)
     }

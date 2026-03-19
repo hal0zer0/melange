@@ -1,9 +1,9 @@
 //! Speaker Safety and Matrix Validation Tests
 
-use melange_solver::parser::Netlist;
-use melange_solver::mna::MnaSystem;
-use melange_solver::dk::DkKernel;
 use melange_solver::codegen::{CodeGenerator, CodegenConfig};
+use melange_solver::dk::DkKernel;
+use melange_solver::mna::MnaSystem;
+use melange_solver::parser::Netlist;
 
 /// Maximum safe output levels for audio
 const MAX_SAFE_VOLTAGE: f64 = 10.0;
@@ -23,21 +23,18 @@ pub fn validate_s_matrix(kernel: &DkKernel) -> Result<(), String> {
         let s_ii = kernel.s[i * n + i];
 
         if s_ii <= 0.0 {
-            return Err(format!(
-                "S[{},{}] = {} is not positive", i, i, s_ii
-            ));
+            return Err(format!("S[{},{}] = {} is not positive", i, i, s_ii));
         }
 
         if i == 0 && (s_ii < 1e-8 || s_ii > 100.0) {
             return Err(format!(
-                "S[0,0] = {} is out of safe range [1e-8, 100]", s_ii
+                "S[0,0] = {} is out of safe range [1e-8, 100]",
+                s_ii
             ));
         }
 
         if s_ii > 1e6 {
-            return Err(format!(
-                "S[{},{}] = {} is too large", i, i, s_ii
-            ));
+            return Err(format!("S[{},{}] = {} is too large", i, i, s_ii));
         }
     }
 
@@ -50,7 +47,7 @@ pub fn validate_k_matrix(kernel: &DkKernel) -> Result<(), String> {
     if m == 0 {
         return Ok(());
     }
-    
+
     let mut sum_sq = 0.0;
     for i in 0..m {
         for j in 0..m {
@@ -59,13 +56,11 @@ pub fn validate_k_matrix(kernel: &DkKernel) -> Result<(), String> {
         }
     }
     let frob_norm = sum_sq.sqrt();
-    
+
     if frob_norm > 1e6 {
-        return Err(format!(
-            "||K||_F = {} is too large", frob_norm
-        ));
+        return Err(format!("||K||_F = {} is too large", frob_norm));
     }
-    
+
     Ok(())
 }
 
@@ -81,48 +76,46 @@ pub fn validate_g_matrix(mna: &MnaSystem) -> Result<(), String> {
                 off_diag_sum += mna.g[i][j].abs();
             }
         }
-        
+
         if g_ii < off_diag_sum {
             return Err(format!(
-                "G[{},{}] = {} < sum(|off-diag|) = {}", 
+                "G[{},{}] = {} < sum(|off-diag|) = {}",
                 i, i, g_ii, off_diag_sum
             ));
         }
-        
+
         if g_ii < 0.0 {
-            return Err(format!(
-                "G[{},{}] = {} is negative", i, i, g_ii
-            ));
+            return Err(format!("G[{},{}] = {} is negative", i, i, g_ii));
         }
     }
-    
+
     Ok(())
 }
 
 /// Full validation of a circuit before code generation
-pub fn validate_circuit_safe(netlist_str: &str, sample_rate: f64) -> Result<(MnaSystem, DkKernel), String> {
-    let netlist = Netlist::parse(netlist_str)
-        .map_err(|e| format!("Parse error: {:?}", e))?;
-    
-    let mna = MnaSystem::from_netlist(&netlist)
-        .map_err(|e| format!("MNA error: {:?}", e))?;
-    
+pub fn validate_circuit_safe(
+    netlist_str: &str,
+    sample_rate: f64,
+) -> Result<(MnaSystem, DkKernel), String> {
+    let netlist = Netlist::parse(netlist_str).map_err(|e| format!("Parse error: {:?}", e))?;
+
+    let mna = MnaSystem::from_netlist(&netlist).map_err(|e| format!("MNA error: {:?}", e))?;
+
     validate_g_matrix(&mna)?;
-    
+
     let mut mna = mna;
     if mna.g[0][0] < 0.5 {
         mna.g[0][0] += 1.0;
     }
-    
-    let kernel = DkKernel::from_mna(&mna, sample_rate)
-        .map_err(|e| format!("DK kernel error: {}", e))?;
-    
+
+    let kernel =
+        DkKernel::from_mna(&mna, sample_rate).map_err(|e| format!("DK kernel error: {}", e))?;
+
     validate_s_matrix(&kernel)?;
     validate_k_matrix(&kernel)?;
-    
+
     Ok((mna, kernel))
 }
-
 
 #[test]
 fn test_s_matrix_catches_explosion() {
@@ -155,20 +148,23 @@ R1 in out 10k
 C1 out 0 1u
 Vin in 0 0
 .END"#;
-    
+
     let netlist = Netlist::parse(spice).unwrap();
     let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
     mna.g[0][0] += 1.0;
-    
+
     let kernel = DkKernel::from_mna(&mna, 48000.0).unwrap();
-    
+
     let n = kernel.n;
     let output_node = n - 1;
     let input_to_output_gain = kernel.s[output_node * n + 0].abs();
-    
-    assert!(input_to_output_gain < MAX_SAFE_VOLTAGE,
-            "Gain {}x would produce {}V with 1V input",
-            input_to_output_gain, input_to_output_gain);
+
+    assert!(
+        input_to_output_gain < MAX_SAFE_VOLTAGE,
+        "Gain {}x would produce {}V with 1V input",
+        input_to_output_gain,
+        input_to_output_gain
+    );
 }
 
 #[test]
@@ -178,13 +174,13 @@ R1 in out 10k
 C1 out 0 1u
 Vin in 0 0
 .END"#;
-    
+
     let netlist = Netlist::parse(spice).unwrap();
     let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
     mna.g[0][0] += 1.0;
-    
+
     let kernel = DkKernel::from_mna(&mna, 48000.0).unwrap();
-    
+
     let n = kernel.n;
     for i in 0..n {
         for j in 0..n {

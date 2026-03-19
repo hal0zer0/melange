@@ -6,8 +6,8 @@
 //! - Direct URLs: Full HTTP(S) URLs
 //! - Local files: Path resolution
 
-use std::path::PathBuf;
 use anyhow::{Context, Result};
+use std::path::PathBuf;
 
 /// Resolved circuit source information
 #[derive(Debug, Clone)]
@@ -15,7 +15,11 @@ pub enum CircuitSource {
     /// Built-in circuit embedded at compile time
     Builtin { name: String, content: String },
     /// Friendly source reference resolved to URL
-    Friendly { source: String, circuit: String, url: String },
+    Friendly {
+        source: String,
+        circuit: String,
+        url: String,
+    },
     /// Direct HTTP(S) URL
     Url { url: String },
     /// Local file path
@@ -27,24 +31,26 @@ impl CircuitSource {
     pub fn name(&self) -> String {
         match self {
             CircuitSource::Builtin { name, .. } => format!("builtin:{}", name),
-            CircuitSource::Friendly { source, circuit, .. } => format!("{}:{}", source, circuit),
+            CircuitSource::Friendly {
+                source, circuit, ..
+            } => format!("{}:{}", source, circuit),
             CircuitSource::Url { url } => url.clone(),
             CircuitSource::Local { path } => path.display().to_string(),
         }
     }
 
     /// Get the circuit content as a string
-    /// 
+    ///
     /// For remote sources (Url, Friendly), this requires fetching from network.
     pub fn content_sync(&self) -> Result<String> {
         match self {
             CircuitSource::Builtin { content, .. } => Ok(content.clone()),
-            CircuitSource::Local { path } => {
-                std::fs::read_to_string(path)
-                    .with_context(|| format!("Failed to read local circuit file: {}", path.display()))
-            }
+            CircuitSource::Local { path } => std::fs::read_to_string(path)
+                .with_context(|| format!("Failed to read local circuit file: {}", path.display())),
             CircuitSource::Url { .. } | CircuitSource::Friendly { .. } => {
-                anyhow::bail!("Remote circuit sources require async content fetching. Use content_async() or the cache module.")
+                anyhow::bail!(
+                    "Remote circuit sources require async content fetching. Use content_async() or the cache module."
+                )
             }
         }
     }
@@ -54,16 +60,10 @@ impl CircuitSource {
     pub async fn content_async(&self, cache: &crate::cache::Cache) -> Result<String> {
         match self {
             CircuitSource::Builtin { content, .. } => Ok(content.clone()),
-            CircuitSource::Local { path } => {
-                std::fs::read_to_string(path)
-                    .with_context(|| format!("Failed to read local circuit file: {}", path.display()))
-            }
-            CircuitSource::Url { url } => {
-                cache.get(url, false).await
-            }
-            CircuitSource::Friendly { url, .. } => {
-                cache.get(url, false).await
-            }
+            CircuitSource::Local { path } => std::fs::read_to_string(path)
+                .with_context(|| format!("Failed to read local circuit file: {}", path.display())),
+            CircuitSource::Url { url } => cache.get(url, false).await,
+            CircuitSource::Friendly { url, .. } => cache.get(url, false).await,
         }
     }
 }
@@ -96,15 +96,16 @@ impl CircuitSource {
 pub fn resolve(circuit_ref: &str) -> Result<CircuitSource> {
     // Try local file first (if it exists and has an extension or path separator)
     let path = PathBuf::from(circuit_ref);
-    if path.exists() && (path.is_file() || circuit_ref.contains('/') || circuit_ref.contains('\\')) {
+    if path.exists() && (path.is_file() || circuit_ref.contains('/') || circuit_ref.contains('\\'))
+    {
         return Ok(CircuitSource::Local { path });
     }
 
     // Try builtin
     if let Some(content) = get_builtin(circuit_ref) {
-        return Ok(CircuitSource::Builtin { 
-            name: circuit_ref.to_string(), 
-            content 
+        return Ok(CircuitSource::Builtin {
+            name: circuit_ref.to_string(),
+            content,
         });
     }
 
@@ -112,12 +113,18 @@ pub fn resolve(circuit_ref: &str) -> Result<CircuitSource> {
     if let Some((source, circuit)) = parse_friendly_ref(circuit_ref) {
         let config = crate::sources::SourcesConfig::load()?;
         let url = config.resolve_circuit(&source, &circuit)?;
-        return Ok(CircuitSource::Friendly { source, circuit, url });
+        return Ok(CircuitSource::Friendly {
+            source,
+            circuit,
+            url,
+        });
     }
 
     // Try direct URL
     if circuit_ref.starts_with("http://") || circuit_ref.starts_with("https://") {
-        return Ok(CircuitSource::Url { url: circuit_ref.to_string() });
+        return Ok(CircuitSource::Url {
+            url: circuit_ref.to_string(),
+        });
     }
 
     anyhow::bail!(
@@ -167,30 +174,37 @@ fn parse_friendly_ref(circuit_ref: &str) -> Option<(String, String)> {
 /// List all available builtin circuits
 pub fn list_builtins() -> Vec<(&'static str, &'static str)> {
     vec![
-        ("tube-screamer", "Classic op-amp clipper (Tube Screamer style)"),
+        (
+            "tube-screamer",
+            "Classic op-amp clipper (Tube Screamer style)",
+        ),
         ("fuzz-face", "2-transistor fuzz (Fuzz Face style)"),
         ("big-muff", "4-transistor fuzz (Big Muff style)"),
         ("rc-lowpass", "Simple RC lowpass filter for testing"),
-        ("mordor-screamer", "High-gain distortion forged in Mount Doom"),
+        (
+            "mordor-screamer",
+            "High-gain distortion forged in Mount Doom",
+        ),
     ]
 }
 
 /// Fetch circuit content synchronously using blocking HTTP client
-/// 
+///
 /// This is a convenience function for simple use cases.
 /// For production use with caching, use the cache module.
 pub fn fetch_url_sync(url: &str) -> Result<String> {
     use std::io::Read;
-    
+
     let response = ureq::get(url)
         .call()
         .with_context(|| format!("Failed to fetch URL: {}", url))?;
-    
+
     let mut content = String::new();
-    response.into_reader()
+    response
+        .into_reader()
         .read_to_string(&mut content)
         .with_context(|| "Failed to read response body")?;
-    
+
     Ok(content)
 }
 
@@ -201,13 +215,19 @@ mod tests {
     #[test]
     fn test_parse_friendly_ref_colon() {
         let result = parse_friendly_ref("guitarix:bigmuff");
-        assert_eq!(result, Some(("guitarix".to_string(), "bigmuff".to_string())));
+        assert_eq!(
+            result,
+            Some(("guitarix".to_string(), "bigmuff".to_string()))
+        );
     }
 
     #[test]
     fn test_parse_friendly_ref_at() {
         let result = parse_friendly_ref("bigmuff@guitarix");
-        assert_eq!(result, Some(("guitarix".to_string(), "bigmuff".to_string())));
+        assert_eq!(
+            result,
+            Some(("guitarix".to_string(), "bigmuff".to_string()))
+        );
     }
 
     #[test]

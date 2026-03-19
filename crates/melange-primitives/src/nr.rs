@@ -241,13 +241,13 @@ pub fn nr_solve_dk<const M: usize, I, G>(
 ) -> ([f64; M], u32, bool)
 where
     I: Fn(&[f64; M]) -> [f64; M],
-    G: Fn(&[f64; M]) -> [f64; M],  // Returns diagonal of Jacobian (conductances)
+    G: Fn(&[f64; M]) -> [f64; M], // Returns diagonal of Jacobian (conductances)
 {
     let mut v = *v0;
 
     for iter in 1..=max_iter {
         let i = i_nl(&v);
-        let g = g_nl(&v);  // Conductances (diagonal of ∂i/∂v)
+        let g = g_nl(&v); // Conductances (diagonal of ∂i/∂v)
 
         // Residual: f(v) = v - p - K*i(v)
         let mut residual = [0.0; M];
@@ -321,7 +321,7 @@ fn solve_linear_m<const M: usize>(a: &[[f64; M]; M], b: &[f64; M]) -> ([f64; M],
     // Maximum supported dimension is 8 (more than enough for audio circuits)
     const MAX_M: usize = 8;
     assert!(M <= MAX_M, "solve_linear_m only supports M up to {}", MAX_M);
-    
+
     // Create augmented matrix [A | b] on stack with fixed max size
     let mut aug = [[0.0; MAX_M + 1]; MAX_M];
     for i in 0..M {
@@ -517,7 +517,7 @@ mod tests {
             |v| is * ((v / vt).exp() - 1.0) - target_i,
             |v| is * (v / vt).exp() / vt,
             |vnew, vold| pnjlim(vnew, vold, vt, vcrit),
-            0.7,  // Typical diode drop
+            0.7, // Typical diode drop
             50,
             1e-12,
         );
@@ -540,7 +540,8 @@ mod tests {
             |_x, _y| -1.0,
             |xnew, _xold| xnew, // no limiting for linear system
             |ynew, _yold| ynew,
-            0.0, 0.0,
+            0.0,
+            0.0,
             10,
             1e-10,
         );
@@ -564,9 +565,9 @@ mod tests {
         let (v, iters, converged) = nr_solve_dk::<1, _, _>(
             &p,
             &k,
-            |v| [v[0] * v[0]],  // i(v) = v^2
+            |v| [v[0] * v[0]], // i(v) = v^2
             |v| [2.0 * v[0]],  // di/dv = 2v
-            &[0.5],  // Initial guess
+            &[0.5],            // Initial guess
             50,
             1e-10,
             0.1,
@@ -574,7 +575,12 @@ mod tests {
 
         assert!(converged, "Failed to converge after {} iterations", iters);
         // Verify: v should be 1.0 (within reasonable tolerance)
-        assert!((v[0] - 1.0).abs() < 1e-4, "Expected v≈1.0, got {} (error: {})", v[0], (v[0] - 1.0).abs());
+        assert!(
+            (v[0] - 1.0).abs() < 1e-4,
+            "Expected v≈1.0, got {} (error: {})",
+            v[0],
+            (v[0] - 1.0).abs()
+        );
     }
 
     #[test]
@@ -606,7 +612,7 @@ mod tests {
             assert!((sum - b[i]).abs() < 1e-9, "Row {}: {} != {}", i, sum, b[i]);
         }
     }
-    
+
     #[test]
     fn test_nr_step_size_convergence() {
         // Test that solver converges on step size, not just residual
@@ -616,11 +622,11 @@ mod tests {
             |x| x * x - 1.0,
             |x| 2.0 * x,
             |xnew, _xold| xnew, // no limiting for polynomial
-            2.0,  // Start at x=2
+            2.0,                // Start at x=2
             100,
             1e-10,
         );
-        
+
         // Should converge to x = 1.0
         assert!(result.converged());
         assert!((x - 1.0).abs() < 1e-8);

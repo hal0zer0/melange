@@ -3,9 +3,9 @@
 //! Manages external circuit repositories that can be referenced
 //! using the friendly `source:circuit` syntax.
 
-use std::collections::HashMap;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// Configuration for a single external circuit source
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -35,10 +35,11 @@ impl SourcesConfig {
     /// If no config exists, creates default configuration and saves it.
     pub fn load() -> Result<Self> {
         let config_path = Self::config_path()?;
-        
+
         if config_path.exists() {
-            let content = std::fs::read_to_string(&config_path)
-                .with_context(|| format!("Failed to read config file: {}", config_path.display()))?;
+            let content = std::fs::read_to_string(&config_path).with_context(|| {
+                format!("Failed to read config file: {}", config_path.display())
+            })?;
             let config: SourcesConfig = toml::from_str(&content)
                 .with_context(|| "Failed to parse config file (invalid TOML)")?;
             Ok(config)
@@ -53,19 +54,20 @@ impl SourcesConfig {
     /// Save configuration to the config directory
     pub fn save(&self) -> Result<()> {
         let config_path = Self::config_path()?;
-        
+
         // Ensure parent directory exists
         if let Some(parent) = config_path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("Failed to create config directory: {}", parent.display()))?;
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!("Failed to create config directory: {}", parent.display())
+            })?;
         }
-        
-        let content = toml::to_string_pretty(self)
-            .with_context(|| "Failed to serialize config to TOML")?;
-        
+
+        let content =
+            toml::to_string_pretty(self).with_context(|| "Failed to serialize config to TOML")?;
+
         std::fs::write(&config_path, content)
             .with_context(|| format!("Failed to write config file: {}", config_path.display()))?;
-        
+
         Ok(())
     }
 
@@ -81,43 +83,61 @@ impl SourcesConfig {
         let mut sources = HashMap::new();
 
         // Guitarix - popular guitar effects collection
-        sources.insert("guitarix".to_string(), SourceConfig {
-            url: "https://raw.githubusercontent.com/brummer10/guitarix/master".to_string(),
-            license: Some("GPL-3.0".to_string()),
-            attribution: Some("Guitarix Project (brummer10)".to_string()),
-            subdirectory: Some("trunk/tools/ampsim".to_string()),
-        });
+        sources.insert(
+            "guitarix".to_string(),
+            SourceConfig {
+                url: "https://raw.githubusercontent.com/brummer10/guitarix/master".to_string(),
+                license: Some("GPL-3.0".to_string()),
+                attribution: Some("Guitarix Project (brummer10)".to_string()),
+                subdirectory: Some("trunk/tools/ampsim".to_string()),
+            },
+        );
 
         // Tonestack - tone stack circuits
-        sources.insert("tonestack".to_string(), SourceConfig {
-            url: "https://raw.githubusercontent.com/tonestack/tonestack/main".to_string(),
-            license: Some("MIT".to_string()),
-            attribution: Some("Tonestack Project".to_string()),
-            subdirectory: None,
-        });
+        sources.insert(
+            "tonestack".to_string(),
+            SourceConfig {
+                url: "https://raw.githubusercontent.com/tonestack/tonestack/main".to_string(),
+                license: Some("MIT".to_string()),
+                attribution: Some("Tonestack Project".to_string()),
+                subdirectory: None,
+            },
+        );
 
         // Melange community circuits
-        sources.insert("melange".to_string(), SourceConfig {
-            url: "https://raw.githubusercontent.com/melange-audio/circuits/main".to_string(),
-            license: Some("MIT OR Apache-2.0".to_string()),
-            attribution: Some("Melange Community".to_string()),
-            subdirectory: None,
-        });
+        sources.insert(
+            "melange".to_string(),
+            SourceConfig {
+                url: "https://raw.githubusercontent.com/melange-audio/circuits/main".to_string(),
+                license: Some("MIT OR Apache-2.0".to_string()),
+                attribution: Some("Melange Community".to_string()),
+                subdirectory: None,
+            },
+        );
 
-        Self { 
+        Self {
             sources,
             default_source: Some("melange".to_string()),
         }
     }
 
     /// Add a new source
-    pub fn add_source(&mut self, name: &str, url: &str, license: Option<&str>, attribution: Option<&str>) {
-        self.sources.insert(name.to_string(), SourceConfig {
-            url: url.to_string(),
-            license: license.map(|s| s.to_string()),
-            attribution: attribution.map(|s| s.to_string()),
-            subdirectory: None,
-        });
+    pub fn add_source(
+        &mut self,
+        name: &str,
+        url: &str,
+        license: Option<&str>,
+        attribution: Option<&str>,
+    ) {
+        self.sources.insert(
+            name.to_string(),
+            SourceConfig {
+                url: url.to_string(),
+                license: license.map(|s| s.to_string()),
+                attribution: attribution.map(|s| s.to_string()),
+                subdirectory: None,
+            },
+        );
     }
 
     /// Remove a source
@@ -129,12 +149,13 @@ impl SourcesConfig {
     ///
     /// Automatically appends `.cir` extension if not present.
     pub fn resolve_circuit(&self, source: &str, circuit: &str) -> Result<String> {
-        let source_config = self.sources.get(source)
-            .ok_or_else(|| anyhow::anyhow!(
+        let source_config = self.sources.get(source).ok_or_else(|| {
+            anyhow::anyhow!(
                 "Unknown source: '{}'\n\
                  Use 'melange sources list' to see available sources.",
                 source
-            ))?;
+            )
+        })?;
 
         // Construct circuit filename
         let circuit_name = if circuit.ends_with(".cir") {
@@ -173,7 +194,7 @@ impl SourcesConfig {
 /// Display sources in a formatted table
 pub fn format_sources_list(config: &SourcesConfig) -> String {
     let mut output = String::new();
-    
+
     output.push_str("Configured circuit sources:\n");
     output.push('\n');
 
@@ -183,13 +204,29 @@ pub fn format_sources_list(config: &SourcesConfig) -> String {
     }
 
     // Find column widths
-    let name_width = config.sources.keys().map(|k| k.len()).max().unwrap_or(10).max(10);
-    
+    let name_width = config
+        .sources
+        .keys()
+        .map(|k| k.len())
+        .max()
+        .unwrap_or(10)
+        .max(10);
+
     // Header
-    output.push_str(&format!("  {:<width$}  {:<40}  {:<15}\n", 
-        "NAME", "URL", "LICENSE", width = name_width));
-    output.push_str(&format!("  {:-<width$}  {:-<40}  {:-<15}\n", 
-        "", "", "", width = name_width));
+    output.push_str(&format!(
+        "  {:<width$}  {:<40}  {:<15}\n",
+        "NAME",
+        "URL",
+        "LICENSE",
+        width = name_width
+    ));
+    output.push_str(&format!(
+        "  {:-<width$}  {:-<40}  {:-<15}\n",
+        "",
+        "",
+        "",
+        width = name_width
+    ));
 
     // Rows
     let mut sources: Vec<_> = config.sources.iter().collect();
@@ -197,8 +234,9 @@ pub fn format_sources_list(config: &SourcesConfig) -> String {
 
     for (name, source) in sources {
         let license = source.license.as_deref().unwrap_or("unknown");
-        output.push_str(&format!("  {:<width$}  {:<40}  {:<15}\n", 
-            name, 
+        output.push_str(&format!(
+            "  {:<width$}  {:<40}  {:<15}\n",
+            name,
             truncate(&source.url, 38),
             license,
             width = name_width
@@ -218,7 +256,8 @@ fn truncate(s: &str, max_len: usize) -> String {
     } else {
         // Find a char boundary at or before the desired cut point
         let end = max_len.saturating_sub(3);
-        let boundary = s.char_indices()
+        let boundary = s
+            .char_indices()
             .take_while(|&(i, _)| i <= end)
             .last()
             .map(|(i, _)| i)
@@ -242,16 +281,18 @@ mod tests {
     #[test]
     fn test_resolve_circuit() {
         let config = SourcesConfig::default_config();
-        
+
         // With subdirectory
         let url = config.resolve_circuit("guitarix", "bigmuff").unwrap();
         assert!(url.contains("githubusercontent.com"));
         assert!(url.ends_with("bigmuff.cir"));
-        
+
         // Without extension
-        let url = config.resolve_circuit("tonestack", "fender-bassman").unwrap();
+        let url = config
+            .resolve_circuit("tonestack", "fender-bassman")
+            .unwrap();
         assert!(url.ends_with("fender-bassman.cir"));
-        
+
         // With extension
         let url = config.resolve_circuit("tonestack", "test.cir").unwrap();
         assert!(url.ends_with("test.cir"));
@@ -269,14 +310,14 @@ mod tests {
     #[test]
     fn test_add_remove_source() {
         let mut config = SourcesConfig::default();
-        
+
         config.add_source("test", "https://example.com", Some("MIT"), None);
         assert!(config.has_source("test"));
-        
+
         let removed = config.remove_source("test");
         assert!(removed);
         assert!(!config.has_source("test"));
-        
+
         let removed = config.remove_source("nonexistent");
         assert!(!removed);
     }

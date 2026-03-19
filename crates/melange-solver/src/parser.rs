@@ -144,14 +144,22 @@ impl Netlist {
 
         // Iterative expansion (max 32 passes for deeply nested subcircuits)
         for _pass in 0..32 {
-            let has_instances = self.elements.iter().any(|e| matches!(e, Element::SubcktInstance { .. }));
+            let has_instances = self
+                .elements
+                .iter()
+                .any(|e| matches!(e, Element::SubcktInstance { .. }));
             if !has_instances {
                 break;
             }
 
             let mut new_elements = Vec::with_capacity(self.elements.len());
             for elem in &self.elements {
-                if let Element::SubcktInstance { name: inst_name, nodes: inst_nodes, subckt } = elem {
+                if let Element::SubcktInstance {
+                    name: inst_name,
+                    nodes: inst_nodes,
+                    subckt,
+                } = elem
+                {
                     let key = subckt.to_ascii_lowercase();
                     let sc_idx = lookup.get(&key).ok_or_else(|| ParseError {
                         line: 0,
@@ -168,7 +176,10 @@ impl Netlist {
                             line: 0,
                             message: format!(
                                 "Subcircuit instance '{}' has {} nodes but '{}' expects {}",
-                                inst_name, inst_nodes.len(), subckt, sc.nodes.len()
+                                inst_name,
+                                inst_nodes.len(),
+                                subckt,
+                                sc.nodes.len()
                             ),
                         });
                     }
@@ -406,64 +417,113 @@ impl Element {
                 format!("{}.{}", prefix, node)
             }
         };
-        let prefixed = |name: &str| -> String {
-            format!("{}.{}", prefix, name)
-        };
+        let prefixed = |name: &str| -> String { format!("{}.{}", prefix, name) };
 
         match self {
-            Element::Resistor { name, n_plus, n_minus, value } => Element::Resistor {
+            Element::Resistor {
+                name,
+                n_plus,
+                n_minus,
+                value,
+            } => Element::Resistor {
                 name: prefixed(name),
                 n_plus: remap(n_plus),
                 n_minus: remap(n_minus),
                 value: *value,
             },
-            Element::Capacitor { name, n_plus, n_minus, value, ic } => Element::Capacitor {
+            Element::Capacitor {
+                name,
+                n_plus,
+                n_minus,
+                value,
+                ic,
+            } => Element::Capacitor {
                 name: prefixed(name),
                 n_plus: remap(n_plus),
                 n_minus: remap(n_minus),
                 value: *value,
                 ic: *ic,
             },
-            Element::Inductor { name, n_plus, n_minus, value } => Element::Inductor {
+            Element::Inductor {
+                name,
+                n_plus,
+                n_minus,
+                value,
+            } => Element::Inductor {
                 name: prefixed(name),
                 n_plus: remap(n_plus),
                 n_minus: remap(n_minus),
                 value: *value,
             },
-            Element::VoltageSource { name, n_plus, n_minus, dc, ac } => Element::VoltageSource {
+            Element::VoltageSource {
+                name,
+                n_plus,
+                n_minus,
+                dc,
+                ac,
+            } => Element::VoltageSource {
                 name: prefixed(name),
                 n_plus: remap(n_plus),
                 n_minus: remap(n_minus),
                 dc: *dc,
                 ac: *ac,
             },
-            Element::CurrentSource { name, n_plus, n_minus, dc } => Element::CurrentSource {
+            Element::CurrentSource {
+                name,
+                n_plus,
+                n_minus,
+                dc,
+            } => Element::CurrentSource {
                 name: prefixed(name),
                 n_plus: remap(n_plus),
                 n_minus: remap(n_minus),
                 dc: *dc,
             },
-            Element::Diode { name, n_plus, n_minus, model } => Element::Diode {
+            Element::Diode {
+                name,
+                n_plus,
+                n_minus,
+                model,
+            } => Element::Diode {
                 name: prefixed(name),
                 n_plus: remap(n_plus),
                 n_minus: remap(n_minus),
                 model: model.clone(),
             },
-            Element::Bjt { name, nc, nb, ne, model } => Element::Bjt {
+            Element::Bjt {
+                name,
+                nc,
+                nb,
+                ne,
+                model,
+            } => Element::Bjt {
                 name: prefixed(name),
                 nc: remap(nc),
                 nb: remap(nb),
                 ne: remap(ne),
                 model: model.clone(),
             },
-            Element::Jfet { name, nd, ng, ns, model } => Element::Jfet {
+            Element::Jfet {
+                name,
+                nd,
+                ng,
+                ns,
+                model,
+            } => Element::Jfet {
                 name: prefixed(name),
                 nd: remap(nd),
                 ng: remap(ng),
                 ns: remap(ns),
                 model: model.clone(),
             },
-            Element::Mosfet { name, nd, ng, ns, nb, model } => Element::Mosfet {
+            Element::Mosfet {
+                name,
+                nd,
+                ng,
+                ns,
+                nb,
+                model,
+            } => Element::Mosfet {
                 name: prefixed(name),
                 nd: remap(nd),
                 ng: remap(ng),
@@ -471,21 +531,40 @@ impl Element {
                 nb: remap(nb),
                 model: model.clone(),
             },
-            Element::Opamp { name, n_plus, n_minus, n_out, model } => Element::Opamp {
+            Element::Opamp {
+                name,
+                n_plus,
+                n_minus,
+                n_out,
+                model,
+            } => Element::Opamp {
                 name: prefixed(name),
                 n_plus: remap(n_plus),
                 n_minus: remap(n_minus),
                 n_out: remap(n_out),
                 model: model.clone(),
             },
-            Element::Triode { name, n_grid, n_plate, n_cathode, model } => Element::Triode {
+            Element::Triode {
+                name,
+                n_grid,
+                n_plate,
+                n_cathode,
+                model,
+            } => Element::Triode {
                 name: prefixed(name),
                 n_grid: remap(n_grid),
                 n_plate: remap(n_plate),
                 n_cathode: remap(n_cathode),
                 model: model.clone(),
             },
-            Element::Vcvs { name, out_p, out_n, ctrl_p, ctrl_n, gain } => Element::Vcvs {
+            Element::Vcvs {
+                name,
+                out_p,
+                out_n,
+                ctrl_p,
+                ctrl_n,
+                gain,
+            } => Element::Vcvs {
                 name: prefixed(name),
                 out_p: remap(out_p),
                 out_n: remap(out_n),
@@ -493,7 +572,14 @@ impl Element {
                 ctrl_n: remap(ctrl_n),
                 gain: *gain,
             },
-            Element::Vccs { name, out_p, out_n, ctrl_p, ctrl_n, gm } => Element::Vccs {
+            Element::Vccs {
+                name,
+                out_p,
+                out_n,
+                ctrl_p,
+                ctrl_n,
+                gm,
+            } => Element::Vccs {
                 name: prefixed(name),
                 out_p: remap(out_p),
                 out_n: remap(out_n),
@@ -501,7 +587,11 @@ impl Element {
                 ctrl_n: remap(ctrl_n),
                 gm: *gm,
             },
-            Element::SubcktInstance { name, nodes, subckt } => Element::SubcktInstance {
+            Element::SubcktInstance {
+                name,
+                nodes,
+                subckt,
+            } => Element::SubcktInstance {
                 name: prefixed(name),
                 nodes: nodes.iter().map(|n| remap(n)).collect(),
                 subckt: subckt.clone(),
@@ -715,13 +805,17 @@ impl Parser {
         // Check that devices referencing models have matching .model definitions
         for elem in &netlist.elements {
             if let Some(model_ref) = elem.model_name() {
-                let model_exists = netlist.models.iter().any(|m| m.name.eq_ignore_ascii_case(model_ref));
+                let model_exists = netlist
+                    .models
+                    .iter()
+                    .any(|m| m.name.eq_ignore_ascii_case(model_ref));
                 if !model_exists {
                     return Err(ParseError {
                         line: 0,
                         message: format!(
                             "Component '{}' references model '{}' which is not defined",
-                            elem.name(), model_ref
+                            elem.name(),
+                            model_ref
                         ),
                     });
                 }
@@ -785,10 +879,7 @@ impl Parser {
                 if !seen_coupling_names.insert(coupling.name.to_ascii_lowercase()) {
                     return Err(ParseError {
                         line: 0,
-                        message: format!(
-                            "Duplicate coupling name: '{}'",
-                            coupling.name
-                        ),
+                        message: format!("Duplicate coupling name: '{}'", coupling.name),
                     });
                 }
                 let l1_exists = netlist.elements.iter().any(|e| {
@@ -837,8 +928,16 @@ impl Parser {
 
         // Verify subcircuit instances reference defined subcircuits with matching port count
         for elem in &netlist.elements {
-            if let Element::SubcktInstance { name, nodes, subckt } = elem {
-                let sc = netlist.subcircuits.iter().find(|s| s.name.eq_ignore_ascii_case(subckt));
+            if let Element::SubcktInstance {
+                name,
+                nodes,
+                subckt,
+            } = elem
+            {
+                let sc = netlist
+                    .subcircuits
+                    .iter()
+                    .find(|s| s.name.eq_ignore_ascii_case(subckt));
                 match sc {
                     None => {
                         return Err(ParseError {
@@ -854,7 +953,10 @@ impl Parser {
                             line: 0,
                             message: format!(
                                 "Subcircuit instance '{}' has {} nodes but '{}' expects {}",
-                                name, nodes.len(), subckt, s.nodes.len()
+                                name,
+                                nodes.len(),
+                                subckt,
+                                s.nodes.len()
                             ),
                         });
                     }
@@ -932,7 +1034,8 @@ impl Parser {
 
                 if !found_ends {
                     return Err(self.error(format!(
-                        "Subcircuit '{}' missing .ends directive", subckt_name
+                        "Subcircuit '{}' missing .ends directive",
+                        subckt_name
                     )));
                 }
 
@@ -997,12 +1100,15 @@ impl Parser {
             let params_str = &rest[open + 1..close];
             for token in params_str.split(|c: char| c.is_ascii_whitespace() || c == ',') {
                 let token = token.trim();
-                if token.is_empty() { continue; }
+                if token.is_empty() {
+                    continue;
+                }
                 if let Some(eq_pos) = token.find('=') {
                     let key = token[..eq_pos].to_ascii_uppercase();
                     let value_str = &token[eq_pos + 1..];
-                    let value = parse_value(value_str)
-                        .map_err(|_| self.error(format!("Invalid model parameter value: {}", value_str)))?;
+                    let value = parse_value(value_str).map_err(|_| {
+                        self.error(format!("Invalid model parameter value: {}", value_str))
+                    })?;
                     params.push((key, value));
                 }
             }
@@ -1018,7 +1124,8 @@ impl Parser {
     fn parse_param(&self, parts: &[&str]) -> Result<Parameter, ParseError> {
         self.require_parts(parts, 2, "name=value")?;
         let param_str = parts[1];
-        let eq_pos = param_str.find('=')
+        let eq_pos = param_str
+            .find('=')
             .ok_or_else(|| self.error("Parameter must be name=value format"))?;
         let name = param_str[..eq_pos].to_string();
         let value_str = &param_str[eq_pos + 1..];
@@ -1078,7 +1185,11 @@ impl Parser {
         })
     }
 
-    fn parse_pot_directive(&self, parts: &[&str], netlist: &Netlist) -> Result<PotDirective, ParseError> {
+    fn parse_pot_directive(
+        &self,
+        parts: &[&str],
+        netlist: &Netlist,
+    ) -> Result<PotDirective, ParseError> {
         // .pot Rname min max
         self.require_parts(parts, 4, ".pot Rname min_value max_value")?;
 
@@ -1103,7 +1214,11 @@ impl Parser {
                 min_value, max_value
             )));
         }
-        if netlist.pots.iter().any(|p| p.resistor_name.eq_ignore_ascii_case(&resistor_name)) {
+        if netlist
+            .pots
+            .iter()
+            .any(|p| p.resistor_name.eq_ignore_ascii_case(&resistor_name))
+        {
             return Err(self.error(format!(
                 "Duplicate .pot directive for resistor '{}'",
                 resistor_name
@@ -1158,7 +1273,11 @@ impl Parser {
         })
     }
 
-    fn parse_switch_directive(&self, parts: &[&str], netlist: &Netlist) -> Result<SwitchDirective, ParseError> {
+    fn parse_switch_directive(
+        &self,
+        parts: &[&str],
+        netlist: &Netlist,
+    ) -> Result<SwitchDirective, ParseError> {
         // .switch C1,L1 val0a/val0b val1a/val1b ...
         // Minimum: .switch <names> <pos0> <pos1>  (at least 2 positions)
         self.require_parts(parts, 4, ".switch names pos0 pos1 [pos2 ...]")?;
@@ -1181,7 +1300,8 @@ impl Parser {
             let first = base.chars().next().unwrap_or(' ').to_ascii_uppercase();
             if !matches!(first, 'R' | 'C' | 'L') {
                 return Err(self.error(format!(
-                    ".switch component '{}' must start with R, C, or L", name
+                    ".switch component '{}' must start with R, C, or L",
+                    name
                 )));
             }
         }
@@ -1194,7 +1314,11 @@ impl Parser {
         let (pos_parts, label) = if let Some(idx) = label_start {
             let label_text = value_parts[idx..].join(" ");
             let trimmed = label_text.trim_matches('"');
-            let label = if trimmed.is_empty() { None } else { Some(trimmed.to_string()) };
+            let label = if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            };
             (&value_parts[..idx], label)
         } else {
             (value_parts, None)
@@ -1210,7 +1334,8 @@ impl Parser {
                         .map_err(|_| self.error(format!("Invalid .switch value: '{}'", v)))?;
                     if val <= 0.0 || !val.is_finite() {
                         return Err(self.error(format!(
-                            ".switch value must be positive and finite, got {}", val
+                            ".switch value must be positive and finite, got {}",
+                            val
                         )));
                     }
                     Ok(val)
@@ -1220,7 +1345,9 @@ impl Parser {
             if values.len() != num_comps {
                 return Err(self.error(format!(
                     ".switch position '{}' has {} values but {} components were specified",
-                    pos_str, values.len(), num_comps
+                    pos_str,
+                    values.len(),
+                    num_comps
                 )));
             }
             positions.push(values);
@@ -1236,10 +1363,13 @@ impl Parser {
         // Check for duplicate component names across all switches
         for name in &component_names {
             if netlist.switches.iter().any(|sw| {
-                sw.component_names.iter().any(|n| n.eq_ignore_ascii_case(name))
+                sw.component_names
+                    .iter()
+                    .any(|n| n.eq_ignore_ascii_case(name))
             }) {
                 return Err(self.error(format!(
-                    "Component '{}' is already used in another .switch directive", name
+                    "Component '{}' is already used in another .switch directive",
+                    name
                 )));
             }
         }
@@ -1255,7 +1385,11 @@ impl Parser {
         })
     }
 
-    fn parse_input_impedance_directive(&self, parts: &[&str], netlist: &mut Netlist) -> Result<(), ParseError> {
+    fn parse_input_impedance_directive(
+        &self,
+        parts: &[&str],
+        netlist: &mut Netlist,
+    ) -> Result<(), ParseError> {
         // .input_impedance <value>
         self.require_parts(parts, 2, ".input_impedance <value>")?;
 
@@ -1280,9 +1414,18 @@ impl Parser {
     }
 
     /// Validate minimum field count for a component line.
-    fn require_parts(&self, parts: &[&str], min: usize, description: &str) -> Result<(), ParseError> {
+    fn require_parts(
+        &self,
+        parts: &[&str],
+        min: usize,
+        description: &str,
+    ) -> Result<(), ParseError> {
         if parts.len() < min {
-            return Err(self.error(format!("{} requires: {}", parts.first().unwrap_or(&"?"), description)));
+            return Err(self.error(format!(
+                "{} requires: {}",
+                parts.first().unwrap_or(&"?"),
+                description
+            )));
         }
         Ok(())
     }
@@ -1295,7 +1438,8 @@ impl Parser {
             .map_err(|_| self.error(format!("Invalid {} value: {}", component_type, raw)))?;
         if value <= 0.0 || !value.is_finite() {
             return Err(self.error(format!(
-                "{} value must be positive and finite, got {}", component_type, value
+                "{} value must be positive and finite, got {}",
+                component_type, value
             )));
         }
         Ok(value)
@@ -1346,7 +1490,8 @@ impl Parser {
         self.check_self_connection(parts[1], parts[2], parts[0])?;
         let value = self.parse_positive_value(parts[3], "Capacitor")?;
 
-        let ic = parts[4..].iter()
+        let ic = parts[4..]
+            .iter()
             .find(|p| p.to_uppercase().starts_with("IC="))
             .map(|p| parse_value(&p[3..]))
             .transpose()
@@ -1385,8 +1530,10 @@ impl Parser {
         while i < parts.len() {
             let part_upper = parts[i].to_uppercase();
             if part_upper == "DC" && i + 1 < parts.len() {
-                dc = Some(parse_value(parts[i + 1])
-                    .map_err(|_| self.error(format!("Invalid DC value: {}", parts[i + 1])))?);
+                dc = Some(
+                    parse_value(parts[i + 1])
+                        .map_err(|_| self.error(format!("Invalid DC value: {}", parts[i + 1])))?,
+                );
                 i += 2;
             } else if part_upper == "AC" && i + 1 < parts.len() {
                 let mag = parse_value(parts[i + 1])
@@ -1400,8 +1547,10 @@ impl Parser {
                 i += 3;
             } else if dc.is_none() {
                 // Bare value is DC
-                dc = Some(parse_value(parts[i])
-                    .map_err(|_| self.error(format!("Invalid DC value: {}", parts[i])))?);
+                dc = Some(
+                    parse_value(parts[i])
+                        .map_err(|_| self.error(format!("Invalid DC value: {}", parts[i])))?,
+                );
                 i += 1;
             } else {
                 i += 1;
@@ -1423,12 +1572,17 @@ impl Parser {
 
         let dc = match parts.get(3) {
             Some(p) if p.to_uppercase() == "DC" => {
-                let val_str = parts.get(4).ok_or_else(|| self.error("DC keyword requires a value"))?;
-                Some(parse_value(val_str)
-                    .map_err(|_| self.error(format!("Invalid DC value: {}", val_str)))?)
+                let val_str = parts
+                    .get(4)
+                    .ok_or_else(|| self.error("DC keyword requires a value"))?;
+                Some(
+                    parse_value(val_str)
+                        .map_err(|_| self.error(format!("Invalid DC value: {}", val_str)))?,
+                )
             }
-            Some(p) => Some(parse_value(p)
-                .map_err(|_| self.error(format!("Invalid DC value: {}", p)))?),
+            Some(p) => {
+                Some(parse_value(p).map_err(|_| self.error(format!("Invalid DC value: {}", p)))?)
+            }
             None => None,
         };
 
@@ -1518,7 +1672,8 @@ impl Parser {
             .map_err(|_| self.error(format!("Invalid VCVS gain: {}", parts[5])))?;
         if !gain.is_finite() || gain == 0.0 {
             return Err(self.error(format!(
-                "VCVS gain must be finite and non-zero, got {}", gain
+                "VCVS gain must be finite and non-zero, got {}",
+                gain
             )));
         }
         Ok(Element::Vcvs {
@@ -1538,7 +1693,8 @@ impl Parser {
             .map_err(|_| self.error(format!("Invalid VCCS transconductance: {}", parts[5])))?;
         if !gm.is_finite() || gm == 0.0 {
             return Err(self.error(format!(
-                "VCCS transconductance must be finite and non-zero, got {}", gm
+                "VCCS transconductance must be finite and non-zero, got {}",
+                gm
             )));
         }
         Ok(Element::Vccs {
@@ -1555,7 +1711,10 @@ impl Parser {
         self.require_parts(parts, 3, "Xname nodes... subcktname")?;
         Ok(Element::SubcktInstance {
             name: parts[0].to_string(),
-            nodes: parts[1..parts.len() - 1].iter().map(|s| s.to_string()).collect(),
+            nodes: parts[1..parts.len() - 1]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
             subckt: parts[parts.len() - 1].to_string(),
         })
     }
@@ -1576,7 +1735,9 @@ fn try_parse_infix(s: &str) -> Option<f64> {
     let bytes = s.as_bytes();
     let mut scale_pos = None;
     for (i, &b) in bytes.iter().enumerate() {
-        if i == 0 { continue; }
+        if i == 0 {
+            continue;
+        }
         let c = (b as char).to_ascii_uppercase();
         if matches!(c, 'T' | 'G' | 'K' | 'M' | 'U' | 'N' | 'P') {
             // Check: digits before, digits after
@@ -1609,7 +1770,11 @@ fn try_parse_infix(s: &str) -> Option<f64> {
         _ => return None,
     };
     let result = base * scale;
-    if result.is_finite() { Some(result) } else { None }
+    if result.is_finite() {
+        Some(result)
+    } else {
+        None
+    }
 }
 
 /// Parse a SPICE value with optional scale suffix.
@@ -1620,7 +1785,8 @@ fn try_parse_infix(s: &str) -> Option<f64> {
 /// - "10pF" -> 10e-12
 /// - "1F" -> 1.0 (Farad, not femto)
 /// - "6n8" -> 6.8e-9 (infix notation)
-/// Parse a component value string with engineering notation (e.g. "10k", "4n7", "1Meg").
+///
+/// Parses a component value string with engineering notation (e.g. "10k", "4n7", "1Meg").
 pub fn parse_value(s: &str) -> Result<f64, ParseFloatError> {
     let s = s.trim();
     if s.is_empty() {
@@ -1636,7 +1802,7 @@ pub fn parse_value(s: &str) -> Result<f64, ParseFloatError> {
 
     // Check for MEG first (must be before stripping units)
     if s_upper.ends_with("MEG") {
-        let num_part = &s[..s.len()-3];
+        let num_part = &s[..s.len() - 3];
         if num_part.is_empty() {
             return Err(ParseFloatError);
         }
@@ -1658,16 +1824,18 @@ pub fn parse_value(s: &str) -> Result<f64, ParseFloatError> {
     // Now parse scale suffix from what's left
     if let Some(c) = stripped_upper.chars().last() {
         let (new_num, new_scale) = match c {
-            'T' if num_part.len() > 1 => (&num_part[..num_part.len()-1], 1e12),
-            'G' if num_part.len() > 1 => (&num_part[..num_part.len()-1], 1e9),
-            'K' if num_part.len() > 1 => (&num_part[..num_part.len()-1], 1e3),
-            'M' if num_part.len() > 1 => (&num_part[..num_part.len()-1], 1e-3),  // M = milli
-            'U' | 'µ' if num_part.len() > 1 => (&num_part[..num_part.len()-1], 1e-6),
-            'N' if num_part.len() > 1 => (&num_part[..num_part.len()-1], 1e-9),
-            'P' if num_part.len() > 1 => (&num_part[..num_part.len()-1], 1e-12),
+            'T' if num_part.len() > 1 => (&num_part[..num_part.len() - 1], 1e12),
+            'G' if num_part.len() > 1 => (&num_part[..num_part.len() - 1], 1e9),
+            'K' if num_part.len() > 1 => (&num_part[..num_part.len() - 1], 1e3),
+            'M' if num_part.len() > 1 => (&num_part[..num_part.len() - 1], 1e-3), // M = milli
+            'U' | 'µ' if num_part.len() > 1 => (&num_part[..num_part.len() - 1], 1e-6),
+            'N' if num_part.len() > 1 => (&num_part[..num_part.len() - 1], 1e-9),
+            'P' if num_part.len() > 1 => (&num_part[..num_part.len() - 1], 1e-12),
             // Note: 'F' as femto is only recognized if no unit was stripped
             // This avoids ambiguity with Farad
-            'F' if chars_stripped == 0 && num_part.len() > 1 => (&num_part[..num_part.len()-1], 1e-15),
+            'F' if chars_stripped == 0 && num_part.len() > 1 => {
+                (&num_part[..num_part.len() - 1], 1e-15)
+            }
             _ => (num_part, 1.0),
         };
         num_part = new_num;
@@ -1699,7 +1867,12 @@ mod tests {
         let netlist = Netlist::parse("Test Circuit\nR1 1 0 1k\n").unwrap();
         assert_eq!(netlist.elements.len(), 1);
         match &netlist.elements[0] {
-            Element::Resistor { name, n_plus, n_minus, value } => {
+            Element::Resistor {
+                name,
+                n_plus,
+                n_minus,
+                value,
+            } => {
                 assert_eq!(name, "R1");
                 assert_eq!(n_plus, "1");
                 assert_eq!(n_minus, "0");
@@ -1715,7 +1888,11 @@ mod tests {
         match &netlist.elements[0] {
             Element::Capacitor { name, value, .. } => {
                 assert_eq!(name, "C1");
-                assert!((value - 10e-6).abs() < 1e-15, "Expected ~10uF, got {}", value);
+                assert!(
+                    (value - 10e-6).abs() < 1e-15,
+                    "Expected ~10uF, got {}",
+                    value
+                );
             }
             _ => panic!("Expected capacitor"),
         }
@@ -1723,9 +1900,16 @@ mod tests {
 
     #[test]
     fn test_parse_bjt() {
-        let netlist = Netlist::parse("Test\nQ1 3 2 1 2N2222\n.model 2N2222 NPN(IS=1e-15 BF=200)\n").unwrap();
+        let netlist =
+            Netlist::parse("Test\nQ1 3 2 1 2N2222\n.model 2N2222 NPN(IS=1e-15 BF=200)\n").unwrap();
         match &netlist.elements[0] {
-            Element::Bjt { name, nc, nb, ne, model } => {
+            Element::Bjt {
+                name,
+                nc,
+                nb,
+                ne,
+                model,
+            } => {
                 assert_eq!(name, "Q1");
                 assert_eq!(nc, "3");
                 assert_eq!(nb, "2");
@@ -1742,7 +1926,11 @@ mod tests {
         assert_eq!(netlist.models.len(), 1);
         let model = &netlist.models[0];
         assert_eq!(model.name, "2N2222");
-        assert!(model.model_type.starts_with("NPN"), "Model type should be NPN, got {}", model.model_type);
+        assert!(
+            model.model_type.starts_with("NPN"),
+            "Model type should be NPN, got {}",
+            model.model_type
+        );
     }
 
     #[test]
@@ -1833,7 +2021,10 @@ mod tests {
     fn test_parse_pot_missing_resistor() {
         let spice = "Test\nR1 1 0 10k\n.pot R2 1k 100k\n";
         let result = Netlist::parse(spice);
-        assert!(result.is_err(), "Pot referencing non-existent resistor should fail");
+        assert!(
+            result.is_err(),
+            "Pot referencing non-existent resistor should fail"
+        );
     }
 
     #[test]
@@ -1854,7 +2045,10 @@ mod tests {
     fn test_parse_pot_duplicate() {
         let spice = "Test\nR1 1 0 10k\n.pot R1 1k 100k\n.pot R1 2k 50k\n";
         let result = Netlist::parse(spice);
-        assert!(result.is_err(), "Duplicate pot for same resistor should fail");
+        assert!(
+            result.is_err(),
+            "Duplicate pot for same resistor should fail"
+        );
     }
 
     #[test]
@@ -1875,7 +2069,11 @@ mod tests {
         let spice = "Test\nR1 1 0 10k\nR2 2 0 5k\nR3 3 0 3k\nR4 4 0 2k\n\
                       .pot R1 1k 100k\n.pot R2 500 50k\n.pot R3 100 10k\n.pot R4 200 20k\n";
         let result = Netlist::parse(spice);
-        assert!(result.is_ok(), "4 pots should be allowed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "4 pots should be allowed: {:?}",
+            result.err()
+        );
         let netlist = result.unwrap();
         assert_eq!(netlist.pots.len(), 4);
     }
@@ -1955,7 +2153,8 @@ mod tests {
 
     #[test]
     fn test_parse_switch_with_multi_word_label() {
-        let spice = "Test\nC1 1 0 100n\nL1 1 0 100m\n.switch C1,L1 100n/100m 220n/176m \"HF Boost Freq\"\n";
+        let spice =
+            "Test\nC1 1 0 100n\nL1 1 0 100m\n.switch C1,L1 100n/100m 220n/176m \"HF Boost Freq\"\n";
         let netlist = Netlist::parse(spice).unwrap();
         assert_eq!(netlist.switches[0].label, Some("HF Boost Freq".to_string()));
         assert_eq!(netlist.switches[0].positions.len(), 2);
@@ -2031,11 +2230,15 @@ Q1 coll base emit 2N2222
     fn test_missing_model_card_diode() {
         let spice = "Test\nD1 1 2 UnknownModel\n";
         let result = Netlist::parse(spice);
-        assert!(result.is_err(), "Diode referencing undefined model should be rejected");
+        assert!(
+            result.is_err(),
+            "Diode referencing undefined model should be rejected"
+        );
         let err = result.unwrap_err();
         assert!(
             err.message.contains("UnknownModel"),
-            "Error should mention the missing model name, got: {}", err.message
+            "Error should mention the missing model name, got: {}",
+            err.message
         );
     }
 
@@ -2043,21 +2246,30 @@ Q1 coll base emit 2N2222
     fn test_missing_model_card_bjt() {
         let spice = "Test\nQ1 3 2 1 NonExistent\n";
         let result = Netlist::parse(spice);
-        assert!(result.is_err(), "BJT referencing undefined model should be rejected");
+        assert!(
+            result.is_err(),
+            "BJT referencing undefined model should be rejected"
+        );
     }
 
     #[test]
     fn test_missing_model_card_jfet() {
         let spice = "Test\nJ1 3 2 1 NoSuchModel\n";
         let result = Netlist::parse(spice);
-        assert!(result.is_err(), "JFET referencing undefined model should be rejected");
+        assert!(
+            result.is_err(),
+            "JFET referencing undefined model should be rejected"
+        );
     }
 
     #[test]
     fn test_missing_model_card_mosfet() {
         let spice = "Test\nM1 3 2 1 0 GhostModel\n";
         let result = Netlist::parse(spice);
-        assert!(result.is_err(), "MOSFET referencing undefined model should be rejected");
+        assert!(
+            result.is_err(),
+            "MOSFET referencing undefined model should be rejected"
+        );
     }
 
     #[test]
@@ -2065,7 +2277,11 @@ Q1 coll base emit 2N2222
         // Positive test: model IS defined, should parse OK
         let spice = "Test\nD1 1 2 MyDiode\n.model MyDiode D(IS=1e-14)\n";
         let result = Netlist::parse(spice);
-        assert!(result.is_ok(), "Diode with defined model should succeed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Diode with defined model should succeed: {:?}",
+            result.err()
+        );
     }
 
     #[test]
@@ -2073,7 +2289,11 @@ Q1 coll base emit 2N2222
         // SPICE model references are case-insensitive
         let spice = "Test\nD1 1 2 mydiode\n.model MYDIODE D(IS=1e-14)\n";
         let result = Netlist::parse(spice);
-        assert!(result.is_ok(), "Model reference should be case-insensitive: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Model reference should be case-insensitive: {:?}",
+            result.err()
+        );
     }
 
     // 2. Duplicate component names
@@ -2081,11 +2301,15 @@ Q1 coll base emit 2N2222
     fn test_duplicate_component_names_resistors() {
         let spice = "Test\nR1 1 0 1k\nR1 2 0 2k\n";
         let result = Netlist::parse(spice);
-        assert!(result.is_err(), "Duplicate component names should be rejected");
+        assert!(
+            result.is_err(),
+            "Duplicate component names should be rejected"
+        );
         let err = result.unwrap_err();
         assert!(
             err.message.contains("Duplicate") && err.message.contains("R1"),
-            "Error should mention duplicate and the name, got: {}", err.message
+            "Error should mention duplicate and the name, got: {}",
+            err.message
         );
     }
 
@@ -2094,7 +2318,10 @@ Q1 coll base emit 2N2222
         // SPICE names are case-insensitive: R1 and r1 are the same component
         let spice = "Test\nR1 1 0 1k\nr1 2 0 2k\n";
         let result = Netlist::parse(spice);
-        assert!(result.is_err(), "Case-insensitive duplicate names should be rejected");
+        assert!(
+            result.is_err(),
+            "Case-insensitive duplicate names should be rejected"
+        );
     }
 
     #[test]
@@ -2102,7 +2329,11 @@ Q1 coll base emit 2N2222
         // Even different component types with the same name should be rejected
         let spice = "Test\nR1 1 0 1k\nC1 2 0 10u\n";
         let result = Netlist::parse(spice);
-        assert!(result.is_ok(), "Different component names should be accepted: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Different component names should be accepted: {:?}",
+            result.err()
+        );
     }
 
     // 3. Invalid node names / special characters
@@ -2111,7 +2342,11 @@ Q1 coll base emit 2N2222
         // Standard alphanumeric node names should work fine
         let spice = "Test\nR1 node_a node_b 1k\n";
         let result = Netlist::parse(spice);
-        assert!(result.is_ok(), "Alphanumeric node names should work: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Alphanumeric node names should work: {:?}",
+            result.err()
+        );
     }
 
     #[test]
@@ -2119,7 +2354,11 @@ Q1 coll base emit 2N2222
         // Purely numeric node names (common in SPICE)
         let spice = "Test\nR1 1 0 1k\n";
         let result = Netlist::parse(spice);
-        assert!(result.is_ok(), "Numeric node names should work: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Numeric node names should work: {:?}",
+            result.err()
+        );
     }
 
     // 4. Invalid number format
@@ -2134,14 +2373,20 @@ Q1 coll base emit 2N2222
     fn test_invalid_number_format_special_chars() {
         let spice = "Test\nR1 1 2 @#$\n";
         let result = Netlist::parse(spice);
-        assert!(result.is_err(), "Special character value should be rejected");
+        assert!(
+            result.is_err(),
+            "Special character value should be rejected"
+        );
     }
 
     #[test]
     fn test_invalid_number_format_empty_suffix() {
         // Just a suffix with no numeric part
         let result = parse_value("k");
-        assert!(result.is_err(), "Bare suffix with no number should be rejected");
+        assert!(
+            result.is_err(),
+            "Bare suffix with no number should be rejected"
+        );
     }
 
     #[test]
@@ -2155,7 +2400,11 @@ Q1 coll base emit 2N2222
     fn test_empty_netlist() {
         let spice = "My Empty Circuit\n";
         let result = Netlist::parse(spice);
-        assert!(result.is_ok(), "Empty netlist (title only) should parse: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Empty netlist (title only) should parse: {:?}",
+            result.err()
+        );
         let netlist = result.unwrap();
         assert_eq!(netlist.title, "My Empty Circuit");
         assert!(netlist.elements.is_empty());
@@ -2166,7 +2415,11 @@ Q1 coll base emit 2N2222
     fn test_empty_netlist_with_end() {
         let spice = "My Circuit\n.end\n";
         let result = Netlist::parse(spice);
-        assert!(result.is_ok(), "Netlist with only .end should parse: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Netlist with only .end should parse: {:?}",
+            result.err()
+        );
         let netlist = result.unwrap();
         assert!(netlist.elements.is_empty());
     }
@@ -2175,7 +2428,11 @@ Q1 coll base emit 2N2222
     fn test_empty_netlist_only_comments() {
         let spice = "My Circuit\n* This is a comment\n* Another comment\n.end\n";
         let result = Netlist::parse(spice);
-        assert!(result.is_ok(), "Comment-only netlist should parse: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Comment-only netlist should parse: {:?}",
+            result.err()
+        );
         let netlist = result.unwrap();
         assert!(netlist.elements.is_empty());
     }
@@ -2185,7 +2442,11 @@ Q1 coll base emit 2N2222
         let spice = "";
         let result = Netlist::parse(spice);
         // Empty string should still parse (empty title)
-        assert!(result.is_ok(), "Completely empty input should parse: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Completely empty input should parse: {:?}",
+            result.err()
+        );
         let netlist = result.unwrap();
         assert_eq!(netlist.title, "");
         assert!(netlist.elements.is_empty());
@@ -2200,7 +2461,11 @@ Q1 coll base emit 2N2222
         // The parser accepts this; downstream MNA assembly would detect the issue
         let spice = "Test\nR1 1 0 1k\nR2 3 0 2k\n";
         let result = Netlist::parse(spice);
-        assert!(result.is_ok(), "Parser doesn't validate connectivity (MNA's job): {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Parser doesn't validate connectivity (MNA's job): {:?}",
+            result.err()
+        );
     }
 
     // 7. Duplicate node connections (self-connected component)
@@ -2208,11 +2473,15 @@ Q1 coll base emit 2N2222
     fn test_self_connected_resistor() {
         let spice = "Test\nR1 1 1 1k\n";
         let result = Netlist::parse(spice);
-        assert!(result.is_err(), "Resistor from node to itself should be rejected");
+        assert!(
+            result.is_err(),
+            "Resistor from node to itself should be rejected"
+        );
         let err = result.unwrap_err();
         assert!(
             err.message.contains("same node"),
-            "Error should mention same node, got: {}", err.message
+            "Error should mention same node, got: {}",
+            err.message
         );
     }
 
@@ -2220,21 +2489,30 @@ Q1 coll base emit 2N2222
     fn test_self_connected_capacitor() {
         let spice = "Test\nC1 2 2 10u\n";
         let result = Netlist::parse(spice);
-        assert!(result.is_err(), "Capacitor from node to itself should be rejected");
+        assert!(
+            result.is_err(),
+            "Capacitor from node to itself should be rejected"
+        );
     }
 
     #[test]
     fn test_self_connected_inductor() {
         let spice = "Test\nL1 out out 100m\n";
         let result = Netlist::parse(spice);
-        assert!(result.is_err(), "Inductor from node to itself should be rejected");
+        assert!(
+            result.is_err(),
+            "Inductor from node to itself should be rejected"
+        );
     }
 
     #[test]
     fn test_self_connected_diode() {
         let spice = "Test\nD1 1 1 MyDiode\n.model MyDiode D(IS=1e-14)\n";
         let result = Netlist::parse(spice);
-        assert!(result.is_err(), "Diode from node to itself should be rejected");
+        assert!(
+            result.is_err(),
+            "Diode from node to itself should be rejected"
+        );
     }
 
     #[test]
@@ -2242,7 +2520,10 @@ Q1 coll base emit 2N2222
         // SPICE node names are case-insensitive: "VCC" and "vcc" are the same node
         let spice = "Test\nR1 VCC vcc 1k\n";
         let result = Netlist::parse(spice);
-        assert!(result.is_err(), "Case-insensitive self-connection should be rejected");
+        assert!(
+            result.is_err(),
+            "Case-insensitive self-connection should be rejected"
+        );
     }
 
     #[test]
@@ -2250,7 +2531,10 @@ Q1 coll base emit 2N2222
         // Voltage source from node to itself is physically meaningless and should be rejected
         let spice = "Test\nV1 0 0 DC 5\n";
         let result = Netlist::parse(spice);
-        assert!(result.is_err(), "Voltage source self-connection should be rejected");
+        assert!(
+            result.is_err(),
+            "Voltage source self-connection should be rejected"
+        );
     }
 
     #[test]
@@ -2258,7 +2542,10 @@ Q1 coll base emit 2N2222
         // Current source from node to itself is physically meaningless and should be rejected
         let spice = "Test\nI1 1 1 DC 1m\n";
         let result = Netlist::parse(spice);
-        assert!(result.is_err(), "Current source self-connection should be rejected");
+        assert!(
+            result.is_err(),
+            "Current source self-connection should be rejected"
+        );
     }
 
     // 8. Unknown element type
@@ -2266,11 +2553,15 @@ Q1 coll base emit 2N2222
     fn test_unknown_element_type() {
         let spice = "Test\nZ1 1 2 100\n";
         let result = Netlist::parse(spice);
-        assert!(result.is_err(), "Unknown element type 'Z' should be rejected");
+        assert!(
+            result.is_err(),
+            "Unknown element type 'Z' should be rejected"
+        );
         let err = result.unwrap_err();
         assert!(
             err.message.contains("Unknown element type"),
-            "Error should mention unknown element type, got: {}", err.message
+            "Error should mention unknown element type, got: {}",
+            err.message
         );
     }
 
@@ -2278,7 +2569,10 @@ Q1 coll base emit 2N2222
     #[test]
     fn test_missing_value_capacitor() {
         let result = Netlist::parse("Test\nC1 1 0\n");
-        assert!(result.is_err(), "Capacitor without value should be rejected");
+        assert!(
+            result.is_err(),
+            "Capacitor without value should be rejected"
+        );
     }
 
     #[test]
@@ -2290,31 +2584,46 @@ Q1 coll base emit 2N2222
     #[test]
     fn test_missing_nodes_voltage_source() {
         let result = Netlist::parse("Test\nV1 1\n");
-        assert!(result.is_err(), "Voltage source with one node should be rejected");
+        assert!(
+            result.is_err(),
+            "Voltage source with one node should be rejected"
+        );
     }
 
     #[test]
     fn test_missing_model_diode() {
         let result = Netlist::parse("Test\nD1 1 2\n");
-        assert!(result.is_err(), "Diode without model name should be rejected");
+        assert!(
+            result.is_err(),
+            "Diode without model name should be rejected"
+        );
     }
 
     #[test]
     fn test_missing_fields_bjt() {
         let result = Netlist::parse("Test\nQ1 3 2\n");
-        assert!(result.is_err(), "BJT with too few fields should be rejected");
+        assert!(
+            result.is_err(),
+            "BJT with too few fields should be rejected"
+        );
     }
 
     #[test]
     fn test_missing_fields_jfet() {
         let result = Netlist::parse("Test\nJ1 3 2\n");
-        assert!(result.is_err(), "JFET with too few fields should be rejected");
+        assert!(
+            result.is_err(),
+            "JFET with too few fields should be rejected"
+        );
     }
 
     #[test]
     fn test_missing_fields_mosfet() {
         let result = Netlist::parse("Test\nM1 3 2 1\n");
-        assert!(result.is_err(), "MOSFET with too few fields should be rejected");
+        assert!(
+            result.is_err(),
+            "MOSFET with too few fields should be rejected"
+        );
     }
 
     // 10. Zero component values
@@ -2329,7 +2638,11 @@ Q1 coll base emit 2N2222
     fn test_continuation_line() {
         let spice = "Test\nR1 1 0\n+ 1k\n";
         let result = Netlist::parse(spice);
-        assert!(result.is_ok(), "Continuation line should work: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Continuation line should work: {:?}",
+            result.err()
+        );
         let netlist = result.unwrap();
         assert_eq!(netlist.elements.len(), 1);
         match &netlist.elements[0] {
@@ -2344,21 +2657,33 @@ Q1 coll base emit 2N2222
     fn test_inline_comment_semicolon() {
         let spice = "Test\nR1 1 0 1k ; this is a comment\n";
         let result = Netlist::parse(spice);
-        assert!(result.is_ok(), "Inline semicolon comment should be stripped: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Inline semicolon comment should be stripped: {:?}",
+            result.err()
+        );
     }
 
     #[test]
     fn test_inline_comment_dollar() {
         let spice = "Test\nR1 1 0 1k $ this is a comment\n";
         let result = Netlist::parse(spice);
-        assert!(result.is_ok(), "Inline dollar comment should be stripped: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Inline dollar comment should be stripped: {:?}",
+            result.err()
+        );
     }
 
     #[test]
     fn test_star_comment_line() {
         let spice = "Test\n* This is a comment\nR1 1 0 1k\n";
         let result = Netlist::parse(spice);
-        assert!(result.is_ok(), "Star comment lines should be ignored: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Star comment lines should be ignored: {:?}",
+            result.err()
+        );
         let netlist = result.unwrap();
         assert_eq!(netlist.elements.len(), 1);
     }
@@ -2394,7 +2719,10 @@ Q1 coll base emit 2N2222
     #[test]
     fn test_parse_value_bare_meg() {
         let result = parse_value("MEG");
-        assert!(result.is_err(), "Bare 'MEG' with no number should be rejected");
+        assert!(
+            result.is_err(),
+            "Bare 'MEG' with no number should be rejected"
+        );
     }
 
     // 13. Model parsing edge cases
@@ -2402,7 +2730,11 @@ Q1 coll base emit 2N2222
     fn test_model_without_params() {
         let spice = "Test\n.model MyDiode D\nD1 1 2 MyDiode\n";
         let result = Netlist::parse(spice);
-        assert!(result.is_ok(), "Model without params should parse: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Model without params should parse: {:?}",
+            result.err()
+        );
         let netlist = result.unwrap();
         assert_eq!(netlist.models[0].params.len(), 0);
     }
@@ -2419,14 +2751,22 @@ Q1 coll base emit 2N2222
     fn test_unknown_directive_ignored() {
         let spice = "Test\n.options RELTOL=1e-3\nR1 1 0 1k\n";
         let result = Netlist::parse(spice);
-        assert!(result.is_ok(), "Unknown directives should be ignored: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Unknown directives should be ignored: {:?}",
+            result.err()
+        );
     }
 
     #[test]
     fn test_param_directive() {
         let spice = "Test\n.param Rval=1k\n";
         let result = Netlist::parse(spice);
-        assert!(result.is_ok(), ".param directive should parse: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            ".param directive should parse: {:?}",
+            result.err()
+        );
         let netlist = result.unwrap();
         assert_eq!(netlist.params.len(), 1);
         assert_eq!(netlist.params[0].name, "Rval");
@@ -2447,7 +2787,13 @@ Q1 coll base emit 2N2222
         let spice = "Test\nU1 3 2 6 opamp\n.model opamp OA(AOL=200000)\n";
         let netlist = Netlist::parse(spice).unwrap();
         match &netlist.elements[0] {
-            Element::Opamp { name, n_plus, n_minus, n_out, model } => {
+            Element::Opamp {
+                name,
+                n_plus,
+                n_minus,
+                n_out,
+                model,
+            } => {
                 assert_eq!(name, "U1");
                 assert_eq!(n_plus, "3");
                 assert_eq!(n_minus, "2");
@@ -2465,9 +2811,17 @@ Q1 coll base emit 2N2222
         assert_eq!(netlist.models.len(), 1);
         let model = &netlist.models[0];
         assert_eq!(model.model_type, "OA");
-        let aol = model.params.iter().find(|(k, _)| k == "AOL").map(|(_, v)| *v);
+        let aol = model
+            .params
+            .iter()
+            .find(|(k, _)| k == "AOL")
+            .map(|(_, v)| *v);
         assert_eq!(aol, Some(100_000.0));
-        let rout = model.params.iter().find(|(k, _)| k == "ROUT").map(|(_, v)| *v);
+        let rout = model
+            .params
+            .iter()
+            .find(|(k, _)| k == "ROUT")
+            .map(|(_, v)| *v);
         assert_eq!(rout, Some(75.0));
     }
 
@@ -2501,7 +2855,14 @@ U1 0 inv out opamp
         let netlist = Netlist::parse(spice).unwrap();
         assert_eq!(netlist.elements.len(), 1);
         match &netlist.elements[0] {
-            Element::Vcvs { name, out_p, out_n, ctrl_p, ctrl_n, gain } => {
+            Element::Vcvs {
+                name,
+                out_p,
+                out_n,
+                ctrl_p,
+                ctrl_n,
+                gain,
+            } => {
                 assert_eq!(name, "E1");
                 assert_eq!(out_p, "out");
                 assert_eq!(out_n, "0");
@@ -2519,7 +2880,14 @@ U1 0 inv out opamp
         let netlist = Netlist::parse(spice).unwrap();
         assert_eq!(netlist.elements.len(), 1);
         match &netlist.elements[0] {
-            Element::Vccs { name, out_p, out_n, ctrl_p, ctrl_n, gm } => {
+            Element::Vccs {
+                name,
+                out_p,
+                out_n,
+                ctrl_p,
+                ctrl_n,
+                gm,
+            } => {
                 assert_eq!(name, "G1");
                 assert_eq!(out_p, "out");
                 assert_eq!(out_n, "0");
@@ -2599,7 +2967,10 @@ U1 0 inv out opamp
     fn test_parse_vcvs_missing_nodes() {
         let spice = "Test\nE1 out 0 in\n";
         let result = Netlist::parse(spice);
-        assert!(result.is_err(), "VCVS with missing nodes should be rejected");
+        assert!(
+            result.is_err(),
+            "VCVS with missing nodes should be rejected"
+        );
     }
 
     #[test]
@@ -2622,7 +2993,14 @@ U1 0 inv out opamp
         let spice = "Test\nE1 out_p out_n ctrl_p ctrl_n 2.5\n";
         let netlist = Netlist::parse(spice).unwrap();
         match &netlist.elements[0] {
-            Element::Vcvs { out_p, out_n, ctrl_p, ctrl_n, gain, .. } => {
+            Element::Vcvs {
+                out_p,
+                out_n,
+                ctrl_p,
+                ctrl_n,
+                gain,
+                ..
+            } => {
                 assert_eq!(out_p, "out_p");
                 assert_eq!(out_n, "out_n");
                 assert_eq!(ctrl_p, "ctrl_p");

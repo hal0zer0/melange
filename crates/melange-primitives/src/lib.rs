@@ -11,27 +11,25 @@
 // For now, we use std for floating-point math methods
 // #![no_std]
 
-pub mod filters;
-pub mod oversampling;
-pub mod nr;
 pub mod companion;
+pub mod filters;
+pub mod nr;
+pub mod oversampling;
 pub mod util;
 
-pub use filters::{OnePoleLpf, OnePoleHpf, TptLpf, DcBlocker, Biquad, BiquadType};
-pub use oversampling::{
-    coefficients, HalfBandFilter, HalfBand2, HalfBand3, HalfBand4,
-    Oversampler2x, Oversampler2xFast, Oversampler2xStandard, Oversampler2xQuality,
-    Oversampler4x, Oversampler,
-};
-pub use nr::{NrResult, nr_solve_1d, nr_solve_2d, nr_solve_dk, pn_vcrit, pnjlim, fetlim};
 pub use companion::{
-    TrapezoidalCompanion, BilinearCompanion, BackwardEulerCompanion,
-    InductorCompanion,
-    companion_conductance_trapezoidal, companion_conductance_backward_euler,
-    inductor_companion_conductance_trapezoidal, history_current_trapezoidal,
+    BackwardEulerCompanion, BilinearCompanion, InductorCompanion, TrapezoidalCompanion,
+    companion_conductance_backward_euler, companion_conductance_trapezoidal,
+    history_current_trapezoidal, inductor_companion_conductance_trapezoidal,
+};
+pub use filters::{Biquad, BiquadType, DcBlocker, OnePoleHpf, OnePoleLpf, TptLpf};
+pub use nr::{NrResult, fetlim, nr_solve_1d, nr_solve_2d, nr_solve_dk, pn_vcrit, pnjlim};
+pub use oversampling::{
+    HalfBand2, HalfBand3, HalfBand4, HalfBandFilter, Oversampler, Oversampler2x, Oversampler2xFast,
+    Oversampler2xQuality, Oversampler2xStandard, Oversampler4x, coefficients,
 };
 pub use util::{
-    variation_hash, variation_range, midi_to_freq, freq_to_midi, map_range,
-    db_to_gain, gain_to_db, lerp, saturate, soft_clip, soft_clip_variable,
-    sin_approx, triangle_from_phase, is_valid_audio, thermal_voltage, VT_ROOM,
+    VT_ROOM, db_to_gain, freq_to_midi, gain_to_db, is_valid_audio, lerp, map_range, midi_to_freq,
+    saturate, sin_approx, soft_clip, soft_clip_variable, thermal_voltage, triangle_from_phase,
+    variation_hash, variation_range,
 };

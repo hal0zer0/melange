@@ -4,13 +4,13 @@
 //! (Tera templates emitting inline device functions) produce identical output
 //! for the same circuit + input. Any divergence means one path has a bug.
 
-use std::io::Write;
-use melange_solver::codegen::{CodeGenerator, CodegenConfig};
 use melange_solver::codegen::ir::{CircuitIR, DeviceSlot};
-use melange_solver::parser::Netlist;
-use melange_solver::mna::MnaSystem;
+use melange_solver::codegen::{CodeGenerator, CodegenConfig};
 use melange_solver::dk::DkKernel;
+use melange_solver::mna::MnaSystem;
+use melange_solver::parser::Netlist;
 use melange_solver::solver::{CircuitSolver, DeviceEntry};
+use std::io::Write;
 
 // ============================================================================
 // Test circuits
@@ -92,38 +92,58 @@ Vcc vcc 0 DC 250
 fn build_pipeline(spice: &str, sample_rate: f64) -> (Netlist, MnaSystem, DkKernel, usize, usize) {
     let netlist = Netlist::parse(spice).expect("parse");
     let mut mna = MnaSystem::from_netlist(&netlist).expect("mna");
-    let input_node = mna.node_map.get("in").copied().unwrap_or(1).saturating_sub(1);
-    let output_node = mna.node_map.get("out").copied().unwrap_or(2).saturating_sub(1);
+    let input_node = mna
+        .node_map
+        .get("in")
+        .copied()
+        .unwrap_or(1)
+        .saturating_sub(1);
+    let output_node = mna
+        .node_map
+        .get("out")
+        .copied()
+        .unwrap_or(2)
+        .saturating_sub(1);
     mna.g[input_node][input_node] += 1.0; // G_in stamp before kernel
     let kernel = DkKernel::from_mna(&mna, sample_rate).expect("kernel");
     (netlist, mna, kernel, input_node, output_node)
 }
 
 /// Build DeviceEntry list from MNA nonlinear device list + parsed netlist.
-fn build_device_entries(
-    netlist: &Netlist,
-    mna: &MnaSystem,
-) -> Vec<DeviceEntry> {
+fn build_device_entries(netlist: &Netlist, mna: &MnaSystem) -> Vec<DeviceEntry> {
     let find_model_param = |model_name: &str, param: &str| -> Option<f64> {
-        netlist.models.iter()
+        netlist
+            .models
+            .iter()
             .find(|m| m.name.eq_ignore_ascii_case(model_name))
-            .and_then(|m| m.params.iter()
-                .find(|(k, _)| k.eq_ignore_ascii_case(param))
-                .map(|(_, v)| *v))
+            .and_then(|m| {
+                m.params
+                    .iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case(param))
+                    .map(|(_, v)| *v)
+            })
     };
 
     let find_model_name = |dev_name: &str| -> String {
-        netlist.elements.iter().find_map(|e| {
-            let (name, model) = match e {
-                melange_solver::parser::Element::Diode { name, model, .. } => (name, model),
-                melange_solver::parser::Element::Bjt { name, model, .. } => (name, model),
-                melange_solver::parser::Element::Jfet { name, model, .. } => (name, model),
-                melange_solver::parser::Element::Mosfet { name, model, .. } => (name, model),
-                melange_solver::parser::Element::Triode { name, model, .. } => (name, model),
-                _ => return None,
-            };
-            if name.eq_ignore_ascii_case(dev_name) { Some(model.clone()) } else { None }
-        }).unwrap_or_default()
+        netlist
+            .elements
+            .iter()
+            .find_map(|e| {
+                let (name, model) = match e {
+                    melange_solver::parser::Element::Diode { name, model, .. } => (name, model),
+                    melange_solver::parser::Element::Bjt { name, model, .. } => (name, model),
+                    melange_solver::parser::Element::Jfet { name, model, .. } => (name, model),
+                    melange_solver::parser::Element::Mosfet { name, model, .. } => (name, model),
+                    melange_solver::parser::Element::Triode { name, model, .. } => (name, model),
+                    _ => return None,
+                };
+                if name.eq_ignore_ascii_case(dev_name) {
+                    Some(model.clone())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_default()
     };
 
     let mut devices = Vec::new();
@@ -136,24 +156,43 @@ fn build_device_entries(
                 let diode = melange_devices::DiodeShockley::new_room_temp(is, n);
                 devices.push(DeviceEntry::new_diode(diode, dev_info.start_idx));
             }
-            melange_solver::mna::NonlinearDeviceType::Bjt | melange_solver::mna::NonlinearDeviceType::BjtForwardActive => {
+            melange_solver::mna::NonlinearDeviceType::Bjt
+            | melange_solver::mna::NonlinearDeviceType::BjtForwardActive => {
                 let is = find_model_param(&model, "IS").unwrap_or(1e-14);
                 let bf = find_model_param(&model, "BF").unwrap_or(200.0);
                 let br = find_model_param(&model, "BR").unwrap_or(3.0);
-                let is_pnp = netlist.models.iter()
+                let is_pnp = netlist
+                    .models
+                    .iter()
                     .find(|m| m.name.eq_ignore_ascii_case(&model))
                     .map(|m| m.model_type.to_uppercase().starts_with("PNP"))
                     .unwrap_or(false);
-                let polarity = if is_pnp { melange_devices::BjtPolarity::Pnp } else { melange_devices::BjtPolarity::Npn };
-                let bjt = melange_devices::BjtEbersMoll::new(is, melange_primitives::VT_ROOM, bf, br, polarity);
+                let polarity = if is_pnp {
+                    melange_devices::BjtPolarity::Pnp
+                } else {
+                    melange_devices::BjtPolarity::Npn
+                };
+                let bjt = melange_devices::BjtEbersMoll::new(
+                    is,
+                    melange_primitives::VT_ROOM,
+                    bf,
+                    br,
+                    polarity,
+                );
                 devices.push(DeviceEntry::new_bjt(bjt, dev_info.start_idx));
             }
             melange_solver::mna::NonlinearDeviceType::Jfet => {
-                let is_p = netlist.models.iter()
+                let is_p = netlist
+                    .models
+                    .iter()
                     .find(|m| m.name.eq_ignore_ascii_case(&model))
                     .map(|m| m.model_type.to_uppercase().starts_with("PJ"))
                     .unwrap_or(false);
-                let channel = if is_p { melange_devices::JfetChannel::P } else { melange_devices::JfetChannel::N };
+                let channel = if is_p {
+                    melange_devices::JfetChannel::P
+                } else {
+                    melange_devices::JfetChannel::N
+                };
                 let default_vp = if is_p { 2.0 } else { -2.0 };
                 let vp = find_model_param(&model, "VTO").unwrap_or(default_vp);
                 let idss = if let Some(beta) = find_model_param(&model, "BETA") {
@@ -166,11 +205,17 @@ fn build_device_entries(
                 devices.push(DeviceEntry::new_jfet(jfet, dev_info.start_idx));
             }
             melange_solver::mna::NonlinearDeviceType::Mosfet => {
-                let is_p = netlist.models.iter()
+                let is_p = netlist
+                    .models
+                    .iter()
                     .find(|m| m.name.eq_ignore_ascii_case(&model))
                     .map(|m| m.model_type.to_uppercase().starts_with("PM"))
                     .unwrap_or(false);
-                let channel = if is_p { melange_devices::MosfetChannelType::P } else { melange_devices::MosfetChannelType::N };
+                let channel = if is_p {
+                    melange_devices::MosfetChannelType::P
+                } else {
+                    melange_devices::MosfetChannelType::N
+                };
                 let default_vt = if is_p { -2.0 } else { 2.0 };
                 let vt = find_model_param(&model, "VTO").unwrap_or(default_vt);
                 let kp = find_model_param(&model, "KP").unwrap_or(0.1);
@@ -187,7 +232,9 @@ fn build_device_entries(
                 let ig_max = find_model_param(&model, "IG_MAX").unwrap_or(2e-3);
                 let vgk_onset = find_model_param(&model, "VGK_ONSET").unwrap_or(0.5);
                 let lambda = find_model_param(&model, "LAMBDA").unwrap_or(0.0);
-                let tube = melange_devices::KorenTriode::with_all_params(mu, ex, kg1, kp, kvb, ig_max, vgk_onset, lambda);
+                let tube = melange_devices::KorenTriode::with_all_params(
+                    mu, ex, kg1, kp, kvb, ig_max, vgk_onset, lambda,
+                );
                 devices.push(DeviceEntry::new_tube(tube, dev_info.start_idx));
             }
         }
@@ -219,7 +266,11 @@ fn build_device_slots_from_ir(
 
 /// Compile and run generated code with configurable amplitude, return output samples.
 fn compile_and_run_codegen_with_amplitude(
-    code: &str, num_samples: usize, sample_rate: f64, amplitude: f64, tag: &str,
+    code: &str,
+    num_samples: usize,
+    sample_rate: f64,
+    amplitude: f64,
+    tag: &str,
 ) -> Vec<f64> {
     let tmp_dir = std::env::temp_dir();
     let id = std::process::id();
@@ -255,15 +306,20 @@ fn compile_and_run_codegen_with_amplitude(
 
     if !compile.status.success() {
         let _ = std::fs::remove_file(&bin_path);
-        panic!("Codegen compilation failed for {tag}:\n{}", String::from_utf8_lossy(&compile.stderr));
+        panic!(
+            "Codegen compilation failed for {tag}:\n{}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
     }
 
     let run = std::process::Command::new(&bin_path).output().expect("run");
     let _ = std::fs::remove_file(&bin_path);
     if !run.status.success() {
-        panic!("Codegen binary failed for {tag}:\nstdout: {}\nstderr: {}",
+        panic!(
+            "Codegen binary failed for {tag}:\nstdout: {}\nstderr: {}",
             String::from_utf8_lossy(&run.stdout),
-            String::from_utf8_lossy(&run.stderr));
+            String::from_utf8_lossy(&run.stderr)
+        );
     }
 
     String::from_utf8_lossy(&run.stdout)
@@ -276,7 +332,11 @@ fn compile_and_run_codegen_with_amplitude(
 ///
 /// Returns (max_diff, max_runtime_abs) for diagnostics.
 fn run_crossval(
-    spice: &str, amplitude: f64, num_samples: usize, skip_samples: usize, tag: &str,
+    spice: &str,
+    amplitude: f64,
+    num_samples: usize,
+    skip_samples: usize,
+    tag: &str,
 ) -> (f64, f64) {
     let sample_rate = 48000.0;
     let (netlist, mna, kernel, input_node, output_node) = build_pipeline(spice, sample_rate);
@@ -311,11 +371,20 @@ fn run_crossval(
     let codegen = CodeGenerator::new(config);
     let result = codegen.generate(&kernel, &mna, &netlist).expect("codegen");
     let codegen_output = compile_and_run_codegen_with_amplitude(
-        &result.code, num_samples, sample_rate, amplitude, tag,
+        &result.code,
+        num_samples,
+        sample_rate,
+        amplitude,
+        tag,
     );
 
-    assert_eq!(codegen_output.len(), runtime_output.len(),
-        "{tag}: sample count mismatch: codegen={} runtime={}", codegen_output.len(), runtime_output.len());
+    assert_eq!(
+        codegen_output.len(),
+        runtime_output.len(),
+        "{tag}: sample count mismatch: codegen={} runtime={}",
+        codegen_output.len(),
+        runtime_output.len()
+    );
 
     // Compare sample-by-sample
     let mut max_diff = 0.0f64;
@@ -326,7 +395,10 @@ fn run_crossval(
         max_runtime_abs = max_runtime_abs.max(runtime_output[i].abs());
     }
 
-    println!("{tag}: codegen vs runtime max_diff={:.2e}, max_output={:.4}", max_diff, max_runtime_abs);
+    println!(
+        "{tag}: codegen vs runtime max_diff={:.2e}, max_output={:.4}",
+        max_diff, max_runtime_abs
+    );
     (max_diff, max_runtime_abs)
 }
 
@@ -338,8 +410,11 @@ fn run_crossval(
 #[test]
 fn test_codegen_vs_runtime_diode_clipper() {
     let (max_diff, _) = run_crossval(DIODE_CLIPPER, 2.0, 480, 10, "diode");
-    assert!(max_diff < 1e-6,
-        "Diode clipper: codegen vs runtime max diff = {:.2e} (expected < 1e-6)", max_diff);
+    assert!(
+        max_diff < 1e-6,
+        "Diode clipper: codegen vs runtime max diff = {:.2e} (expected < 1e-6)",
+        max_diff
+    );
 }
 
 /// BJT common-emitter: codegen vs runtime should match to < 1e-4.
@@ -347,36 +422,64 @@ fn test_codegen_vs_runtime_diode_clipper() {
 #[test]
 fn test_codegen_vs_runtime_bjt_ce() {
     let (max_diff, max_out) = run_crossval(BJT_CE, 0.01, 4800, 2400, "bjt");
-    assert!(max_out > 1e-4, "BJT CE: output should be non-zero, got {:.2e}", max_out);
-    assert!(max_diff < 1e-4,
-        "BJT CE: codegen vs runtime max diff = {:.2e} (expected < 1e-4)", max_diff);
+    assert!(
+        max_out > 1e-4,
+        "BJT CE: output should be non-zero, got {:.2e}",
+        max_out
+    );
+    assert!(
+        max_diff < 1e-4,
+        "BJT CE: codegen vs runtime max diff = {:.2e} (expected < 1e-4)",
+        max_diff
+    );
 }
 
 /// JFET common-source: codegen vs runtime should match to < 1e-4.
 #[test]
 fn test_codegen_vs_runtime_jfet_cs() {
     let (max_diff, max_out) = run_crossval(JFET_CS, 0.1, 960, 100, "jfet");
-    assert!(max_out > 1e-4, "JFET CS: output should be non-zero, got {:.2e}", max_out);
-    assert!(max_diff < 1e-4,
-        "JFET CS: codegen vs runtime max diff = {:.2e} (expected < 1e-4)", max_diff);
+    assert!(
+        max_out > 1e-4,
+        "JFET CS: output should be non-zero, got {:.2e}",
+        max_out
+    );
+    assert!(
+        max_diff < 1e-4,
+        "JFET CS: codegen vs runtime max diff = {:.2e} (expected < 1e-4)",
+        max_diff
+    );
 }
 
 /// MOSFET common-source: codegen vs runtime should match to < 1e-4.
 #[test]
 fn test_codegen_vs_runtime_mosfet_cs() {
     let (max_diff, max_out) = run_crossval(MOSFET_CS, 0.1, 960, 100, "mosfet");
-    assert!(max_out > 1e-4, "MOSFET CS: output should be non-zero, got {:.2e}", max_out);
-    assert!(max_diff < 1e-4,
-        "MOSFET CS: codegen vs runtime max diff = {:.2e} (expected < 1e-4)", max_diff);
+    assert!(
+        max_out > 1e-4,
+        "MOSFET CS: output should be non-zero, got {:.2e}",
+        max_out
+    );
+    assert!(
+        max_diff < 1e-4,
+        "MOSFET CS: codegen vs runtime max diff = {:.2e} (expected < 1e-4)",
+        max_diff
+    );
 }
 
 /// Triode common-cathode: codegen vs runtime should match to < 1e-4.
 #[test]
 fn test_codegen_vs_runtime_triode_cc() {
     let (max_diff, max_out) = run_crossval(TRIODE_CC, 0.01, 4800, 2400, "triode");
-    assert!(max_out > 1e-4, "Triode CC: output should be non-zero, got {:.2e}", max_out);
-    assert!(max_diff < 1e-4,
-        "Triode CC: codegen vs runtime max diff = {:.2e} (expected < 1e-4)", max_diff);
+    assert!(
+        max_out > 1e-4,
+        "Triode CC: output should be non-zero, got {:.2e}",
+        max_out
+    );
+    assert!(
+        max_diff < 1e-4,
+        "Triode CC: codegen vs runtime max diff = {:.2e} (expected < 1e-4)",
+        max_diff
+    );
 }
 
 /// Test: Sherman-Morrison pot data is consistent in kernel.
@@ -387,7 +490,12 @@ fn test_sherman_morrison_pot_data_sanity() {
     let spice = "SM test\nR1 in mid 1k\n.pot R1 100 10k\nR2 mid out 1k\nC1 out 0 10n\n.end";
     let netlist = Netlist::parse(spice).expect("parse");
     let mut mna = MnaSystem::from_netlist(&netlist).expect("mna");
-    let input_node = mna.node_map.get("in").copied().unwrap_or(1).saturating_sub(1);
+    let input_node = mna
+        .node_map
+        .get("in")
+        .copied()
+        .unwrap_or(1)
+        .saturating_sub(1);
     mna.g[input_node][input_node] += 1.0;
 
     let kernel = DkKernel::from_mna(&mna, 48000.0).expect("kernel");
@@ -405,21 +513,37 @@ fn test_sherman_morrison_pot_data_sanity() {
     assert!(pot.usu.abs() > 1e-30, "USU should be non-zero");
 
     // Resistance range should be valid
-    assert!(pot.min_resistance > 0.0, "min_resistance should be positive");
-    assert!(pot.max_resistance > pot.min_resistance, "max > min resistance");
+    assert!(
+        pot.min_resistance > 0.0,
+        "min_resistance should be positive"
+    );
+    assert!(
+        pot.max_resistance > pot.min_resistance,
+        "max > min resistance"
+    );
 
     // S matrix should be finite
     for i in 0..n {
         for j in 0..n {
-            assert!(kernel.s[i * n + j].is_finite(),
-                "S[{}][{}] = {} is not finite", i, j, kernel.s[i * n + j]);
+            assert!(
+                kernel.s[i * n + j].is_finite(),
+                "S[{}][{}] = {} is not finite",
+                i,
+                j,
+                kernel.s[i * n + j]
+            );
         }
     }
 
     // Nominal conductance should be 1/R_default = 1/1000 = 0.001
-    assert!((pot.g_nominal - 0.001).abs() < 1e-6,
-        "Nominal conductance should be ~0.001, got {}", pot.g_nominal);
+    assert!(
+        (pot.g_nominal - 0.001).abs() < 1e-6,
+        "Nominal conductance should be ~0.001, got {}",
+        pot.g_nominal
+    );
 
-    println!("SM sanity: N={}, M={}, pot min_R={:.0}, max_R={:.0}, g_nom={:.6e}",
-        n, kernel.m, pot.min_resistance, pot.max_resistance, pot.g_nominal);
+    println!(
+        "SM sanity: N={}, M={}, pot min_R={:.0}, max_R={:.0}, g_nom={:.6e}",
+        n, kernel.m, pot.min_resistance, pot.max_resistance, pot.g_nominal
+    );
 }

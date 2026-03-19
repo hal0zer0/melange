@@ -51,11 +51,9 @@ pub mod comparison;
 pub mod spice_runner;
 pub mod visualizer;
 
-pub use comparison::{
-    batch_compare, compare_signals, ComparisonConfig, ComparisonReport, Signal,
-};
+pub use comparison::{ComparisonConfig, ComparisonReport, Signal, batch_compare, compare_signals};
 pub use spice_runner::{
-    run_transient, run_transient_with_pwl, run_transient_with_thevenin_pwl, SpiceData, SpiceError,
+    SpiceData, SpiceError, run_transient, run_transient_with_pwl, run_transient_with_thevenin_pwl,
 };
 pub use visualizer::{generate_csv, generate_html_report, generate_json_report};
 
@@ -276,13 +274,13 @@ pub fn validate_circuit_with_options(
 
     // Strip VIN for melange (auto-detect and remove input voltage source)
     let (stripped_netlist, dc_offset) = strip_vin_source(&netlist_str, input_node);
-    if let Some(dc) = dc_offset {
-        if dc.abs() > 1e-12 {
-            log::warn!(
-                "VIN has DC offset of {:.3}V — melange will not reproduce this offset",
-                dc
-            );
-        }
+    if let Some(dc) = dc_offset
+        && dc.abs() > 1e-12
+    {
+        log::warn!(
+            "VIN has DC offset of {:.3}V — melange will not reproduce this offset",
+            dc
+        );
     }
 
     // Calculate timing parameters
@@ -342,16 +340,13 @@ pub fn validate_circuit_with_options(
 
     // Compare signals
     let mut report = compare_signals(&spice_signal, &melange_signal, config);
-    report.circuit_name = options
-        .circuit_name
-        .clone()
-        .unwrap_or_else(|| {
-            netlist_path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("unknown")
-                .to_string()
-        });
+    report.circuit_name = options.circuit_name.clone().unwrap_or_else(|| {
+        netlist_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("unknown")
+            .to_string()
+    });
     report.node_name = output_node.to_string();
 
     // Generate output files if requested
@@ -451,7 +446,8 @@ pub fn strip_vin_source(netlist: &str, input_node: &str) -> (String, Option<f64>
                     // Multiple voltage sources at input node — warn and keep extras
                     log::warn!(
                         "Multiple voltage sources at input node '{}'; keeping '{}'",
-                        input_node, parts[0]
+                        input_node,
+                        parts[0]
                     );
                 } else {
                     // Extract DC value if present (e.g., "VIN in 0 DC 5.0")
@@ -485,25 +481,36 @@ fn run_melange_solver_from_str(
     output_node_name: &str,
     input_node_name: &str,
 ) -> Result<Vec<f64>, ValidationError> {
-    let netlist = melange_solver::parser::Netlist::parse(netlist_str)
-        .map_err(|e| ValidationError::Solver(format!("Parse error at line {}: {}", e.line, e.message)))?;
+    let netlist = melange_solver::parser::Netlist::parse(netlist_str).map_err(|e| {
+        ValidationError::Solver(format!("Parse error at line {}: {}", e.line, e.message))
+    })?;
 
     let mut mna = melange_solver::mna::MnaSystem::from_netlist(&netlist)
         .map_err(|e| ValidationError::Solver(format!("MNA error: {}", e)))?;
 
-    let input_node = mna.node_map.get(input_node_name)
+    let input_node = mna
+        .node_map
+        .get(input_node_name)
         .copied()
-        .ok_or_else(|| ValidationError::Solver(format!(
-            "Input node '{}' not found in circuit. Available: {:?}",
-            input_node_name, mna.node_map.keys().collect::<Vec<_>>()
-        )))?
+        .ok_or_else(|| {
+            ValidationError::Solver(format!(
+                "Input node '{}' not found in circuit. Available: {:?}",
+                input_node_name,
+                mna.node_map.keys().collect::<Vec<_>>()
+            ))
+        })?
         .saturating_sub(1);
-    let output_node = mna.node_map.get(output_node_name)
+    let output_node = mna
+        .node_map
+        .get(output_node_name)
         .copied()
-        .ok_or_else(|| ValidationError::Solver(format!(
-            "Output node '{}' not found in circuit. Available: {:?}",
-            output_node_name, mna.node_map.keys().collect::<Vec<_>>()
-        )))?
+        .ok_or_else(|| {
+            ValidationError::Solver(format!(
+                "Output node '{}' not found in circuit. Available: {:?}",
+                output_node_name,
+                mna.node_map.keys().collect::<Vec<_>>()
+            ))
+        })?
         .saturating_sub(1);
 
     // Stamp input conductance into G matrix BEFORE building DK kernel
@@ -517,8 +524,9 @@ fn run_melange_solver_from_str(
 
     let devices = build_devices_from_netlist(&netlist, &mna)?;
 
-    let mut solver = melange_solver::solver::CircuitSolver::new(kernel, devices, input_node, output_node)
-        .map_err(|e| ValidationError::Solver(format!("Solver error: {}", e)))?;
+    let mut solver =
+        melange_solver::solver::CircuitSolver::new(kernel, devices, input_node, output_node)
+            .map_err(|e| ValidationError::Solver(format!("Solver error: {}", e)))?;
     solver.input_conductance = input_conductance;
 
     // Initialize nonlinear DC operating point (essential for BJT circuits)
@@ -543,11 +551,16 @@ fn build_devices_from_netlist(
     let mut devices = Vec::new();
 
     let find_model_param = |model_name: &str, param: &str| -> Option<f64> {
-        netlist.models.iter()
+        netlist
+            .models
+            .iter()
             .find(|m| m.name.eq_ignore_ascii_case(model_name))
-            .and_then(|m| m.params.iter()
-                .find(|(k, _)| k.eq_ignore_ascii_case(param))
-                .map(|(_, v)| *v))
+            .and_then(|m| {
+                m.params
+                    .iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case(param))
+                    .map(|(_, v)| *v)
+            })
     };
 
     for dev_info in &mna.nonlinear_devices {
@@ -557,7 +570,10 @@ fn build_devices_from_netlist(
                 let is = model_params.0.unwrap_or(1e-15);
                 let n = model_params.1.unwrap_or(1.0);
                 let diode = melange_devices::DiodeShockley::new_room_temp(is, n);
-                devices.push(melange_solver::solver::DeviceEntry::new_diode(diode, dev_info.start_idx));
+                devices.push(melange_solver::solver::DeviceEntry::new_diode(
+                    diode,
+                    dev_info.start_idx,
+                ));
             }
             melange_solver::mna::NonlinearDeviceType::Bjt
             | melange_solver::mna::NonlinearDeviceType::BjtForwardActive => {
@@ -566,16 +582,26 @@ fn build_devices_from_netlist(
                 let beta_f = model_params.1.unwrap_or(200.0);
                 let beta_r = model_params.2.unwrap_or(3.0);
                 let polarity = find_bjt_polarity(netlist, &dev_info.name);
-                let bjt = melange_devices::BjtEbersMoll::new_room_temp(is, beta_f, beta_r, polarity);
-                devices.push(melange_solver::solver::DeviceEntry::new_bjt(bjt, dev_info.start_idx));
+                let bjt =
+                    melange_devices::BjtEbersMoll::new_room_temp(is, beta_f, beta_r, polarity);
+                devices.push(melange_solver::solver::DeviceEntry::new_bjt(
+                    bjt,
+                    dev_info.start_idx,
+                ));
             }
             melange_solver::mna::NonlinearDeviceType::Jfet => {
                 let model_name = find_device_model_name::<b'J'>(netlist, &dev_info.name);
-                let is_p_channel = netlist.models.iter()
+                let is_p_channel = netlist
+                    .models
+                    .iter()
                     .find(|m| m.name.eq_ignore_ascii_case(&model_name))
                     .map(|m| m.model_type.to_uppercase().starts_with("PJ"))
                     .unwrap_or(false);
-                let channel = if is_p_channel { melange_devices::JfetChannel::P } else { melange_devices::JfetChannel::N };
+                let channel = if is_p_channel {
+                    melange_devices::JfetChannel::P
+                } else {
+                    melange_devices::JfetChannel::N
+                };
                 let default_vp = if is_p_channel { 2.0 } else { -2.0 };
                 let vp = find_model_param(&model_name, "VTO").unwrap_or(default_vp);
                 // ngspice BETA = IDSS / VP^2, so IDSS = BETA * VP^2
@@ -586,21 +612,33 @@ fn build_devices_from_netlist(
                 };
                 let mut jfet = melange_devices::Jfet::new(channel, vp, idss);
                 jfet.lambda = find_model_param(&model_name, "LAMBDA").unwrap_or(0.001);
-                devices.push(melange_solver::solver::DeviceEntry::new_jfet(jfet, dev_info.start_idx));
+                devices.push(melange_solver::solver::DeviceEntry::new_jfet(
+                    jfet,
+                    dev_info.start_idx,
+                ));
             }
             melange_solver::mna::NonlinearDeviceType::Mosfet => {
                 let model_name = find_device_model_name::<b'M'>(netlist, &dev_info.name);
-                let is_p_channel = netlist.models.iter()
+                let is_p_channel = netlist
+                    .models
+                    .iter()
                     .find(|m| m.name.eq_ignore_ascii_case(&model_name))
                     .map(|m| m.model_type.to_uppercase().starts_with("PM"))
                     .unwrap_or(false);
-                let channel = if is_p_channel { melange_devices::MosfetChannelType::P } else { melange_devices::MosfetChannelType::N };
+                let channel = if is_p_channel {
+                    melange_devices::MosfetChannelType::P
+                } else {
+                    melange_devices::MosfetChannelType::N
+                };
                 let default_vt = if is_p_channel { -2.0 } else { 2.0 };
                 let vt = find_model_param(&model_name, "VTO").unwrap_or(default_vt);
                 let kp = find_model_param(&model_name, "KP").unwrap_or(0.1);
                 let lambda = find_model_param(&model_name, "LAMBDA").unwrap_or(0.01);
                 let mosfet = melange_devices::Mosfet::new(channel, vt, kp, lambda);
-                devices.push(melange_solver::solver::DeviceEntry::new_mosfet(mosfet, dev_info.start_idx));
+                devices.push(melange_solver::solver::DeviceEntry::new_mosfet(
+                    mosfet,
+                    dev_info.start_idx,
+                ));
             }
             melange_solver::mna::NonlinearDeviceType::Tube => {
                 let model_name = find_device_model_name::<b'T'>(netlist, &dev_info.name);
@@ -612,8 +650,13 @@ fn build_devices_from_netlist(
                 let ig_max = find_model_param(&model_name, "IG_MAX").unwrap_or(2e-3);
                 let vgk_onset = find_model_param(&model_name, "VGK_ONSET").unwrap_or(0.5);
                 let lambda = find_model_param(&model_name, "LAMBDA").unwrap_or(0.0);
-                let tube = melange_devices::KorenTriode::with_all_params(mu, ex, kg1, kp, kvb, ig_max, vgk_onset, lambda);
-                devices.push(melange_solver::solver::DeviceEntry::new_tube(tube, dev_info.start_idx));
+                let tube = melange_devices::KorenTriode::with_all_params(
+                    mu, ex, kg1, kp, kvb, ig_max, vgk_onset, lambda,
+                );
+                devices.push(melange_solver::solver::DeviceEntry::new_tube(
+                    tube,
+                    dev_info.start_idx,
+                ));
             }
         }
     }
@@ -622,20 +665,40 @@ fn build_devices_from_netlist(
 }
 
 /// Find device model name by device name, using element prefix to match element type.
-fn find_device_model_name<const PREFIX: u8>(netlist: &melange_solver::parser::Netlist, device_name: &str) -> String {
-    netlist.elements.iter().find_map(|e| {
-        match (PREFIX, e) {
-            (b'J', melange_solver::parser::Element::Jfet { name, model, .. }) if name.eq_ignore_ascii_case(device_name) => Some(model.clone()),
-            (b'M', melange_solver::parser::Element::Mosfet { name, model, .. }) if name.eq_ignore_ascii_case(device_name) => Some(model.clone()),
-            (b'T', melange_solver::parser::Element::Triode { name, model, .. }) if name.eq_ignore_ascii_case(device_name) => Some(model.clone()),
+fn find_device_model_name<const PREFIX: u8>(
+    netlist: &melange_solver::parser::Netlist,
+    device_name: &str,
+) -> String {
+    netlist
+        .elements
+        .iter()
+        .find_map(|e| match (PREFIX, e) {
+            (b'J', melange_solver::parser::Element::Jfet { name, model, .. })
+                if name.eq_ignore_ascii_case(device_name) =>
+            {
+                Some(model.clone())
+            }
+            (b'M', melange_solver::parser::Element::Mosfet { name, model, .. })
+                if name.eq_ignore_ascii_case(device_name) =>
+            {
+                Some(model.clone())
+            }
+            (b'T', melange_solver::parser::Element::Triode { name, model, .. })
+                if name.eq_ignore_ascii_case(device_name) =>
+            {
+                Some(model.clone())
+            }
             _ => None,
-        }
-    }).unwrap_or_default()
+        })
+        .unwrap_or_default()
 }
 
 /// Find diode model parameters from netlist
 /// Returns (IS, N) if found
-fn find_diode_model(netlist: &melange_solver::parser::Netlist, device_name: &str) -> (Option<f64>, Option<f64>) {
+fn find_diode_model(
+    netlist: &melange_solver::parser::Netlist,
+    device_name: &str,
+) -> (Option<f64>, Option<f64>) {
     // First, find the device to get its model name
     let model_name = netlist.elements.iter().find_map(|e| {
         if let melange_solver::parser::Element::Diode { name, model, .. } = e
@@ -718,7 +781,10 @@ fn find_bjt_model(
 }
 
 /// Find BJT polarity from netlist model definition
-fn find_bjt_polarity(netlist: &melange_solver::parser::Netlist, device_name: &str) -> melange_devices::BjtPolarity {
+fn find_bjt_polarity(
+    netlist: &melange_solver::parser::Netlist,
+    device_name: &str,
+) -> melange_devices::BjtPolarity {
     // First, find the device to get its model name
     let model_name = netlist.elements.iter().find_map(|e| {
         if let melange_solver::parser::Element::Bjt { name, model, .. } = e
@@ -754,7 +820,9 @@ fn find_bjt_polarity(netlist: &melange_solver::parser::Netlist, device_name: &st
 fn build_device_slots_from_netlist(
     netlist: &melange_solver::parser::Netlist,
 ) -> Vec<melange_solver::codegen::ir::DeviceSlot> {
-    use melange_solver::codegen::ir::{BjtParams, DeviceParams, DeviceSlot, DeviceType, DiodeParams};
+    use melange_solver::codegen::ir::{
+        BjtParams, DeviceParams, DeviceSlot, DeviceType, DiodeParams,
+    };
 
     let vt = melange_primitives::VT_ROOM;
     let mut slots = Vec::new();
@@ -770,7 +838,14 @@ fn build_device_slots_from_netlist(
                     device_type: DeviceType::Diode,
                     start_idx: dim_offset,
                     dimension: 1,
-                    params: DeviceParams::Diode(DiodeParams { is, n_vt: n * vt, cjo: 0.0, rs: 0.0, bv: f64::INFINITY, ibv: 1e-10 }),
+                    params: DeviceParams::Diode(DiodeParams {
+                        is,
+                        n_vt: n * vt,
+                        cjo: 0.0,
+                        rs: 0.0,
+                        bv: f64::INFINITY,
+                        ibv: 1e-10,
+                    }),
                 });
                 dim_offset += 1;
             }
@@ -1028,7 +1103,10 @@ mod tests {
         assert_eq!(builder.config.rms_error_tolerance, 0.0001);
         assert!(builder.options.generate_html_on_failure);
         assert!(builder.options.generate_csv);
-        assert_eq!(builder.options.circuit_name, Some("test_circuit".to_string()));
+        assert_eq!(
+            builder.options.circuit_name,
+            Some("test_circuit".to_string())
+        );
     }
 
     #[test]

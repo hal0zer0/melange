@@ -14,31 +14,40 @@
 //! - NR converges for linear circuits (no max-iter or NaN)
 //! - No-inductor circuits are unaffected (exact match with LinearSolver)
 
-use melange_solver::parser::Netlist;
-use melange_solver::mna::MnaSystem;
-use melange_solver::dk::DkKernel;
-use melange_solver::solver::{LinearSolver, NodalSolver};
-use melange_solver::codegen::ir::CircuitIR;
 use melange_solver::codegen::CodegenConfig;
+use melange_solver::codegen::ir::CircuitIR;
+use melange_solver::dk::DkKernel;
+use melange_solver::mna::MnaSystem;
+use melange_solver::parser::Netlist;
+use melange_solver::solver::{LinearSolver, NodalSolver};
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn build_with_input(spice: &str, in_name: &str, r_in: f64, sr: f64)
-    -> (Netlist, MnaSystem, DkKernel)
-{
+fn build_with_input(
+    spice: &str,
+    in_name: &str,
+    r_in: f64,
+    sr: f64,
+) -> (Netlist, MnaSystem, DkKernel) {
     let netlist = Netlist::parse(spice).expect("parse");
     let mut mna = MnaSystem::from_netlist(&netlist).expect("mna");
     let in_idx = *mna.node_map.get(in_name).unwrap();
-    if in_idx > 0 { mna.g[in_idx - 1][in_idx - 1] += 1.0 / r_in; }
+    if in_idx > 0 {
+        mna.g[in_idx - 1][in_idx - 1] += 1.0 / r_in;
+    }
     let kernel = DkKernel::from_mna(&mna, sr).expect("dk");
     (netlist, mna, kernel)
 }
 
-fn build_linear_nodal(spice: &str, in_name: &str, out_name: &str, r_in: f64, sr: f64)
-    -> (NodalSolver, MnaSystem)
-{
+fn build_linear_nodal(
+    spice: &str,
+    in_name: &str,
+    out_name: &str,
+    r_in: f64,
+    sr: f64,
+) -> (NodalSolver, MnaSystem) {
     let (netlist, mna, kernel) = build_with_input(spice, in_name, r_in, sr);
     let in_idx = *mna.node_map.get(in_name).unwrap() - 1;
     let out_idx = *mna.node_map.get(out_name).unwrap() - 1;
@@ -51,7 +60,14 @@ fn build_linear_nodal(spice: &str, in_name: &str, out_name: &str, r_in: f64, sr:
         ..CodegenConfig::default()
     };
     let ir = CircuitIR::from_kernel(&kernel, &mna, &netlist, &config).unwrap();
-    let mut solver = NodalSolver::new(kernel, &mna, &netlist, ir.device_slots.clone(), in_idx, out_idx);
+    let mut solver = NodalSolver::new(
+        kernel,
+        &mna,
+        &netlist,
+        ir.device_slots.clone(),
+        in_idx,
+        out_idx,
+    );
     solver.input_conductance = 1.0 / r_in;
     (solver, mna)
 }
@@ -123,17 +139,32 @@ fn test_augmented_rl_step_response() {
     assert!(output.iter().all(|v| v.is_finite()), "All outputs finite");
 
     // Starts nonzero, decays toward 0 (L shorts to ground at DC)
-    assert!(output[0].abs() > 0.01, "Initial output nonzero: {:.6}", output[0]);
-    assert!(output[num_samples - 1].abs() < 0.1,
-        "Steady state near 0: {:.6}", output[num_samples - 1]);
+    assert!(
+        output[0].abs() > 0.01,
+        "Initial output nonzero: {:.6}",
+        output[0]
+    );
+    assert!(
+        output[num_samples - 1].abs() < 0.1,
+        "Steady state near 0: {:.6}",
+        output[num_samples - 1]
+    );
 
     // Monotonic decay on average
     let avg_early: f64 = output[0..20].iter().map(|v| v.abs()).sum::<f64>() / 20.0;
     let avg_late: f64 = output[480..500].iter().map(|v| v.abs()).sum::<f64>() / 20.0;
-    assert!(avg_early > avg_late, "Decaying: early {:.6} > late {:.6}", avg_early, avg_late);
+    assert!(
+        avg_early > avg_late,
+        "Decaying: early {:.6} > late {:.6}",
+        avg_early,
+        avg_late
+    );
 
     // Linear circuit: NR must converge every sample
-    assert_eq!(solver.diag_nr_max_iter_count, 0, "NR converged on every sample");
+    assert_eq!(
+        solver.diag_nr_max_iter_count, 0,
+        "NR converged on every sample"
+    );
     assert_eq!(solver.diag_nan_reset_count, 0, "No NaN resets");
 }
 
@@ -152,7 +183,11 @@ C1 out 0 100n
     let r_in = 1.0;
 
     let (mut nodal, mna) = build_linear_nodal(spice, "in", "out", r_in, sr);
-    assert_eq!(nodal.v_prev.len(), mna.n_aug, "No inductors: n_nodal == n_aug");
+    assert_eq!(
+        nodal.v_prev.len(),
+        mna.n_aug,
+        "No inductors: n_nodal == n_aug"
+    );
 
     let (_, mna_lin, kernel_lin) = build_with_input(spice, "in", r_in, sr);
     let in_idx = *mna_lin.node_map.get("in").unwrap() - 1;
@@ -169,7 +204,11 @@ C1 out 0 100n
 
     // No inductors → nearly identical (Gmin regularization adds 1e-12 S per node,
     // causing ~1e-9 difference in node voltages)
-    assert!(max_diff < 1e-8, "No inductors: near-exact match, diff = {:.2e}", max_diff);
+    assert!(
+        max_diff < 1e-8,
+        "No inductors: near-exact match, diff = {:.2e}",
+        max_diff
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -187,7 +226,10 @@ fn test_large_inductor_stability() {
     }
 
     assert_eq!(solver.diag_nan_reset_count, 0, "No NaN resets");
-    assert_eq!(solver.diag_nr_max_iter_count, 0, "NR converged on every sample");
+    assert_eq!(
+        solver.diag_nr_max_iter_count, 0,
+        "NR converged on every sample"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -211,12 +253,20 @@ fn test_large_inductor_steady_state() {
     // At DC: L is short, V_out = 0 (all voltage across R_in + R)
     // Inductor current = V_in / (R_in + R) = 1.0 / 10001 ≈ 1.0e-4 A
     let v_out = solver.v_prev[*mna.node_map.get("out").unwrap() - 1];
-    assert!(v_out.abs() < 0.01, "V_out at DC should be ~0, got {:.6}", v_out);
+    assert!(
+        v_out.abs() < 0.01,
+        "V_out at DC should be ~0, got {:.6}",
+        v_out
+    );
 
     let j_l = solver.v_prev[n_aug]; // inductor branch current
     let expected_i = 1.0 / (r_in + r);
-    assert!((j_l - expected_i).abs() < 0.01 * expected_i,
-        "Inductor DC current: expected {:.6e}, got {:.6e}", expected_i, j_l);
+    assert!(
+        (j_l - expected_i).abs() < 0.01 * expected_i,
+        "Inductor DC current: expected {:.6e}, got {:.6e}",
+        expected_i,
+        j_l
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -231,22 +281,31 @@ fn test_augmented_dimensions() {
     // 1 uncoupled inductor → +1
     {
         let (solver, mna) = build_linear_nodal(RL_LOWPASS, "in", "out", r_in, sr);
-        assert_eq!(solver.v_prev.len(), mna.n_aug + 1,
-            "RL: 1 inductor → n_nodal = n_aug + 1");
+        assert_eq!(
+            solver.v_prev.len(),
+            mna.n_aug + 1,
+            "RL: 1 inductor → n_nodal = n_aug + 1"
+        );
     }
 
     // 2-winding coupled pair → +2
     {
         let (solver, mna) = build_linear_nodal(STEP_UP_XFMR, "in", "out", r_in, sr);
-        assert_eq!(solver.v_prev.len(), mna.n_aug + 2,
-            "Transformer: 2 windings → n_nodal = n_aug + 2");
+        assert_eq!(
+            solver.v_prev.len(),
+            mna.n_aug + 2,
+            "Transformer: 2 windings → n_nodal = n_aug + 2"
+        );
     }
 
     // 3-winding group → +3
     {
         let (solver, mna) = build_linear_nodal(THREE_WINDING, "in", "out", r_in, sr);
-        assert_eq!(solver.v_prev.len(), mna.n_aug + 3,
-            "3-winding xfmr → n_nodal = n_aug + 3");
+        assert_eq!(
+            solver.v_prev.len(),
+            mna.n_aug + 3,
+            "3-winding xfmr → n_nodal = n_aug + 3"
+        );
     }
 }
 
@@ -271,8 +330,12 @@ fn test_inductor_branch_currents() {
 
     // At DC: I_L = V_in / (R_in + R1) = 1.0 / 1001 ≈ 9.99e-4 A
     let expected_i = 1.0 / (r_in + 1000.0);
-    assert!((j_l - expected_i).abs() < 0.01 * expected_i,
-        "Inductor DC current: expected {:.6e}, got {:.6e}", expected_i, j_l);
+    assert!(
+        (j_l - expected_i).abs() < 0.01 * expected_i,
+        "Inductor DC current: expected {:.6e}, got {:.6e}",
+        expected_i,
+        j_l
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -292,7 +355,11 @@ fn test_coupled_inductor_energy_transfer() {
         peak_out = peak_out.max(solver.process_sample(input).abs());
     }
 
-    assert!(peak_out > 0.001, "Transformer transfers energy: peak = {:.6}", peak_out);
+    assert!(
+        peak_out > 0.001,
+        "Transformer transfers energy: peak = {:.6}",
+        peak_out
+    );
     assert_eq!(solver.diag_nan_reset_count, 0, "No NaN resets");
     assert_eq!(solver.diag_nr_max_iter_count, 0, "NR converged");
 }
@@ -314,7 +381,11 @@ fn test_three_winding_transformer() {
         peak_out = peak_out.max(solver.process_sample(input).abs());
     }
 
-    assert!(peak_out > 0.001, "3-winding xfmr transfers energy: peak = {:.6}", peak_out);
+    assert!(
+        peak_out > 0.001,
+        "3-winding xfmr transfers energy: peak = {:.6}",
+        peak_out
+    );
     assert_eq!(solver.diag_nan_reset_count, 0, "No NaN resets");
     assert_eq!(solver.diag_nr_max_iter_count, 0, "NR converged");
 }
@@ -350,12 +421,19 @@ fn test_same_steady_state() {
     let out_linear = linear.process_sample(1.0);
 
     // Steady state should match closely (both at ~0 for DC-blocked RL lowpass)
-    assert!((out_nodal - out_linear).abs() < 0.01,
-        "Steady state match: nodal={:.6e} linear={:.6e}", out_nodal, out_linear);
+    assert!(
+        (out_nodal - out_linear).abs() < 0.01,
+        "Steady state match: nodal={:.6e} linear={:.6e}",
+        out_nodal,
+        out_linear
+    );
 
     // Raw V_out should be near 0 (inductor shorts to ground)
-    assert!(v_nodal.abs() < 0.001,
-        "V_out at steady state near 0: {:.6e}", v_nodal);
+    assert!(
+        v_nodal.abs() < 0.001,
+        "V_out at steady state near 0: {:.6e}",
+        v_nodal
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -372,8 +450,19 @@ fn test_augmented_diagonal_well_scaled() {
     let augmented_diag = 2.0 * l / t;
     let companion_g_eq = t / (2.0 * l);
 
-    assert!(augmented_diag > 1e6, "2L/T = {:.2e} (large, well-conditioned)", augmented_diag);
-    assert!(companion_g_eq < 1e-6, "T/(2L) = {:.2e} (tiny, ill-conditioned)", companion_g_eq);
-    assert!(augmented_diag / companion_g_eq > 1e12,
-        "Ratio = {:.2e} (augmented is 12 orders of magnitude better)", augmented_diag / companion_g_eq);
+    assert!(
+        augmented_diag > 1e6,
+        "2L/T = {:.2e} (large, well-conditioned)",
+        augmented_diag
+    );
+    assert!(
+        companion_g_eq < 1e-6,
+        "T/(2L) = {:.2e} (tiny, ill-conditioned)",
+        companion_g_eq
+    );
+    assert!(
+        augmented_diag / companion_g_eq > 1e12,
+        "Ratio = {:.2e} (augmented is 12 orders of magnitude better)",
+        augmented_diag / companion_g_eq
+    );
 }

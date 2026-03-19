@@ -72,9 +72,7 @@ pub fn generate_html_report(
     }
 
     // Generate SVG plots
-    let time_data: Vec<f64> = (0..len)
-        .map(|i| i as f64 / report.sample_rate)
-        .collect();
+    let time_data: Vec<f64> = (0..len).map(|i| i as f64 / report.sample_rate).collect();
 
     let signal_overlay_svg = generate_signal_overlay_svg(&time_data, spice, melange, len)?;
     let error_signal_svg = generate_error_signal_svg(&time_data, spice, melange, len)?;
@@ -111,7 +109,7 @@ fn format_html_report(
     scatter_svg: &str,
 ) -> String {
     let colors = SvgColors::default();
-    
+
     format!(
         r#"<!DOCTYPE html>
 <html lang="en">
@@ -328,7 +326,10 @@ pub fn generate_csv(
     let mut file = File::create(output_path)?;
 
     // Write header
-    writeln!(file, "time,spice_voltage,melange_voltage,absolute_error,relative_error")?;
+    writeln!(
+        file,
+        "time,spice_voltage,melange_voltage,absolute_error,relative_error"
+    )?;
 
     // Write data rows
     for i in 0..len {
@@ -450,9 +451,8 @@ fn generate_signal_overlay_svg(
     let val_max = val_max + val_margin;
 
     // Scale functions
-    let scale_x = |t: f64| -> i32 {
-        padding + ((t - time_min) / time_range * plot_width as f64) as i32
-    };
+    let scale_x =
+        |t: f64| -> i32 { padding + ((t - time_min) / time_range * plot_width as f64) as i32 };
     let scale_y = |v: f64| -> i32 {
         height - padding - ((v - val_min) / (val_max - val_min) * plot_height as f64) as i32
     };
@@ -485,7 +485,7 @@ fn generate_signal_overlay_svg(
     }
 
     let c = SvgColors::default();
-    
+
     // Build SVG using string concatenation
     let mut svg = String::new();
     svg.push_str(&format!(
@@ -497,7 +497,10 @@ fn generate_signal_overlay_svg(
     ));
 
     // Grid lines
-    svg.push_str(&format!(r#"<g stroke="{grid}" stroke-width="1">"#, grid = c.grid));
+    svg.push_str(&format!(
+        r#"<g stroke="{grid}" stroke-width="1">"#,
+        grid = c.grid
+    ));
     for i in 1..=3 {
         let y = scale_y(val_min + i as f64 * 0.25 * (val_max - val_min));
         svg.push_str(&format!(
@@ -541,9 +544,7 @@ fn generate_signal_overlay_svg(
 
     // Legend
     let legend_x = width - 200;
-    svg.push_str(&format!(
-        r#"<g transform="translate({legend_x}, 20)">"#
-    ));
+    svg.push_str(&format!(r#"<g transform="translate({legend_x}, 20)">"#));
     svg.push_str(&format!(
         r#"<line x1="0" y1="0" x2="20" y2="0" stroke="{spice}" stroke-width="2"/>"#,
         spice = c.spice
@@ -593,9 +594,8 @@ fn generate_error_signal_svg(
     let err_min = -err_max;
 
     // Scale functions
-    let scale_x = |t: f64| -> i32 {
-        padding + ((t - time_min) / time_range * plot_width as f64) as i32
-    };
+    let scale_x =
+        |t: f64| -> i32 { padding + ((t - time_min) / time_range * plot_width as f64) as i32 };
     let scale_y = |v: f64| -> i32 {
         height - padding - ((v - err_min) / (err_max - err_min) * plot_height as f64) as i32
     };
@@ -646,14 +646,18 @@ fn generate_error_signal_svg(
     Ok(svg)
 }
 
-fn generate_histogram_svg(report: &ComparisonReport, _len: usize) -> Result<String, VisualizerError> {
+fn generate_histogram_svg(
+    report: &ComparisonReport,
+    _len: usize,
+) -> Result<String, VisualizerError> {
     let width = 400;
     let height = 200;
     let padding = 40;
 
-    let abs_errors = report.absolute_errors.as_ref().ok_or_else(|| {
-        VisualizerError::InvalidData("No absolute errors in report".to_string())
-    })?;
+    let abs_errors = report
+        .absolute_errors
+        .as_ref()
+        .ok_or_else(|| VisualizerError::InvalidData("No absolute errors in report".to_string()))?;
 
     if abs_errors.is_empty() {
         return Ok("<p>No error data available</p>".to_string());
@@ -816,10 +820,7 @@ mod tests {
         let ref_samples: Vec<f64> = (0..100)
             .map(|i| (2.0 * std::f64::consts::PI * i as f64 / 100.0).sin())
             .collect();
-        let act_samples: Vec<f64> = ref_samples
-            .iter()
-            .map(|&v| v + 0.001)
-            .collect();
+        let act_samples: Vec<f64> = ref_samples.iter().map(|&v| v + 0.001).collect();
 
         let spice = Signal::new(ref_samples, 1000.0, "spice");
         let melange = Signal::new(act_samples, 1000.0, "melange");

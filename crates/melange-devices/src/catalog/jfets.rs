@@ -63,9 +63,9 @@ pub const CATALOG: &[JfetCatalogEntry] = &[
 
 /// Look up a JFET by part number (case-insensitive).
 pub fn lookup(name: &str) -> Option<&'static JfetCatalogEntry> {
-    CATALOG.iter().find(|entry| {
-        entry.names.iter().any(|n| n.eq_ignore_ascii_case(name))
-    })
+    CATALOG
+        .iter()
+        .find(|entry| entry.names.iter().any(|n| n.eq_ignore_ascii_case(name)))
 }
 
 #[cfg(test)]
@@ -107,14 +107,34 @@ mod tests {
     #[test]
     fn test_all_params_valid() {
         for entry in CATALOG {
-            assert!(entry.idss > 0.0 && entry.idss.is_finite(), "{}: IDSS", entry.names[0]);
-            assert!(entry.vp.abs() > 1e-15 && entry.vp.is_finite(), "{}: VP", entry.names[0]);
-            assert!(entry.lambda >= 0.0 && entry.lambda.is_finite(), "{}: LAMBDA", entry.names[0]);
+            assert!(
+                entry.idss > 0.0 && entry.idss.is_finite(),
+                "{}: IDSS",
+                entry.names[0]
+            );
+            assert!(
+                entry.vp.abs() > 1e-15 && entry.vp.is_finite(),
+                "{}: VP",
+                entry.names[0]
+            );
+            assert!(
+                entry.lambda >= 0.0 && entry.lambda.is_finite(),
+                "{}: LAMBDA",
+                entry.names[0]
+            );
             // N-channel should have negative Vp, P-channel positive
             if entry.is_p_channel {
-                assert!(entry.vp > 0.0, "{}: P-ch VP should be positive", entry.names[0]);
+                assert!(
+                    entry.vp > 0.0,
+                    "{}: P-ch VP should be positive",
+                    entry.names[0]
+                );
             } else {
-                assert!(entry.vp < 0.0, "{}: N-ch VP should be negative", entry.names[0]);
+                assert!(
+                    entry.vp < 0.0,
+                    "{}: N-ch VP should be negative",
+                    entry.names[0]
+                );
             }
         }
     }
@@ -156,7 +176,11 @@ mod tests {
     // --- Tier 2: Datasheet operating point verification ---
 
     fn make_jfet(entry: &JfetCatalogEntry) -> Jfet {
-        let channel = if entry.is_p_channel { JfetChannel::P } else { JfetChannel::N };
+        let channel = if entry.is_p_channel {
+            JfetChannel::P
+        } else {
+            JfetChannel::N
+        };
         let mut j = Jfet::new(channel, entry.vp, entry.idss);
         j.lambda = entry.lambda;
         j
@@ -167,19 +191,29 @@ mod tests {
         let j = make_jfet(lookup("J201").unwrap());
         // Vgs=0, Vds=10V → Id ≈ IDSS (0.6mA, range 0.2-1.0mA)
         let id = j.drain_current(0.0, 10.0);
-        assert!(id > 0.2e-3 && id < 1.5e-3,
-            "J201 IDSS: {:.3}mA (expected 0.2-1.0mA)", id * 1e3);
+        assert!(
+            id > 0.2e-3 && id < 1.5e-3,
+            "J201 IDSS: {:.3}mA (expected 0.2-1.0mA)",
+            id * 1e3
+        );
         // At Vgs=Vp, Id ≈ 0
         let id_cutoff = j.drain_current(j.vp, 10.0);
-        assert!(id_cutoff.abs() < 1e-6, "J201 cutoff: {:.6}mA", id_cutoff * 1e3);
+        assert!(
+            id_cutoff.abs() < 1e-6,
+            "J201 cutoff: {:.6}mA",
+            id_cutoff * 1e3
+        );
     }
 
     #[test]
     fn test_2n5457_operating_points() {
         let j = make_jfet(lookup("2N5457").unwrap());
         let id = j.drain_current(0.0, 10.0);
-        assert!(id > 1e-3 && id < 10e-3,
-            "2N5457 IDSS: {:.3}mA (expected ~3mA)", id * 1e3);
+        assert!(
+            id > 1e-3 && id < 10e-3,
+            "2N5457 IDSS: {:.3}mA (expected ~3mA)",
+            id * 1e3
+        );
         let id_cutoff = j.drain_current(j.vp, 10.0);
         assert!(id_cutoff.abs() < 1e-6, "2N5457 cutoff");
     }
@@ -188,8 +222,7 @@ mod tests {
     fn test_2n3819_operating_points() {
         let j = make_jfet(lookup("2N3819").unwrap());
         let id = j.drain_current(0.0, 10.0);
-        assert!(id > 1e-3 && id < 25e-3,
-            "2N3819 IDSS: {:.3}mA", id * 1e3);
+        assert!(id > 1e-3 && id < 25e-3, "2N3819 IDSS: {:.3}mA", id * 1e3);
     }
 
     #[test]
@@ -197,8 +230,11 @@ mod tests {
         let j = make_jfet(lookup("2N5460").unwrap());
         // P-channel: Vgs=0, Vds=-10V
         let id = j.drain_current(0.0, -10.0);
-        assert!(id < -0.5e-3 && id > -10e-3,
-            "2N5460 IDSS: {:.3}mA", id * 1e3);
+        assert!(
+            id < -0.5e-3 && id > -10e-3,
+            "2N5460 IDSS: {:.3}mA",
+            id * 1e3
+        );
     }
 
     // --- Tier 3: Jacobian consistency ---
@@ -215,28 +251,52 @@ mod tests {
             for &vds_mag in &[1.0, 5.0, 10.0] {
                 let vds = vds_sign * vds_mag;
                 let jac = j.jacobian(&[vgs, vds]);
-                let fd0 = (j.drain_current(vgs + eps, vds) - j.drain_current(vgs - eps, vds)) / (2.0 * eps);
-                let fd1 = (j.drain_current(vgs, vds + eps) - j.drain_current(vgs, vds - eps)) / (2.0 * eps);
+                let fd0 = (j.drain_current(vgs + eps, vds) - j.drain_current(vgs - eps, vds))
+                    / (2.0 * eps);
+                let fd1 = (j.drain_current(vgs, vds + eps) - j.drain_current(vgs, vds - eps))
+                    / (2.0 * eps);
                 if fd0.abs() > 1e-10 {
                     let rel = (jac[0] - fd0).abs() / fd0.abs();
-                    assert!(rel < 1e-2,
-                        "{} gm at ({},{}): a={:.6e} fd={:.6e}", entry.names[0], vgs, vds, jac[0], fd0);
+                    assert!(
+                        rel < 1e-2,
+                        "{} gm at ({},{}): a={:.6e} fd={:.6e}",
+                        entry.names[0],
+                        vgs,
+                        vds,
+                        jac[0],
+                        fd0
+                    );
                 }
                 if fd1.abs() > 1e-10 {
                     let rel = (jac[1] - fd1).abs() / fd1.abs();
-                    assert!(rel < 1e-2,
-                        "{} gds at ({},{}): a={:.6e} fd={:.6e}", entry.names[0], vgs, vds, jac[1], fd1);
+                    assert!(
+                        rel < 1e-2,
+                        "{} gds at ({},{}): a={:.6e} fd={:.6e}",
+                        entry.names[0],
+                        vgs,
+                        vds,
+                        jac[1],
+                        fd1
+                    );
                 }
             }
         }
     }
 
     #[test]
-    fn test_2n5457_jacobian() { check_jfet_jacobian(lookup("2N5457").unwrap()); }
+    fn test_2n5457_jacobian() {
+        check_jfet_jacobian(lookup("2N5457").unwrap());
+    }
     #[test]
-    fn test_j201_jacobian() { check_jfet_jacobian(lookup("J201").unwrap()); }
+    fn test_j201_jacobian() {
+        check_jfet_jacobian(lookup("J201").unwrap());
+    }
     #[test]
-    fn test_2n3819_jacobian() { check_jfet_jacobian(lookup("2N3819").unwrap()); }
+    fn test_2n3819_jacobian() {
+        check_jfet_jacobian(lookup("2N3819").unwrap());
+    }
     #[test]
-    fn test_2n5460_jacobian() { check_jfet_jacobian(lookup("2N5460").unwrap()); }
+    fn test_2n5460_jacobian() {
+        check_jfet_jacobian(lookup("2N5460").unwrap());
+    }
 }

@@ -1,6 +1,6 @@
-use melange_solver::parser::Netlist;
-use melange_solver::mna::MnaSystem;
 use melange_solver::dk::DkKernel;
+use melange_solver::mna::MnaSystem;
+use melange_solver::parser::Netlist;
 
 fn main() {
     let spice = r#"* Mordor Screamer
@@ -20,13 +20,13 @@ Vin in 0 0
 
     let netlist = Netlist::parse(spice).unwrap();
     let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
-    
+
     // Add input conductance
     mna.g[0][0] += 1.0;
-    
+
     let sample_rate = 48000.0;
     let kernel = DkKernel::from_mna(&mna, sample_rate).unwrap();
-    
+
     println!("K matrix:");
     for i in 0..kernel.m {
         print!("  ");
@@ -35,7 +35,7 @@ Vin in 0 0
         }
         println!();
     }
-    
+
     // Test with a simple RC circuit (no diodes) for comparison
     println!("\n=== Comparison: Simple RC ===");
     let spice2 = r#"RC Circuit
@@ -47,6 +47,11 @@ Vin in 0 0
     let mut mna2 = MnaSystem::from_netlist(&netlist2).unwrap();
     mna2.g[0][0] += 1.0;
     let kernel2 = DkKernel::from_mna(&mna2, sample_rate).unwrap();
-    
-    println!("S diagonal: {:?}", (0..kernel2.n).map(|i| kernel2.s[i * kernel2.n + i]).collect::<Vec<_>>());
+
+    println!(
+        "S diagonal: {:?}",
+        (0..kernel2.n)
+            .map(|i| kernel2.s[i * kernel2.n + i])
+            .collect::<Vec<_>>()
+    );
 }

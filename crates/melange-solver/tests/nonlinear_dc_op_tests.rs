@@ -3,8 +3,10 @@
 //! Validates that the DC OP solver correctly finds bias points for
 //! circuits with diodes and BJTs.
 
-use melange_solver::codegen::ir::{CircuitIR, DeviceSlot, DeviceType, DeviceParams, DiodeParams, BjtParams};
-use melange_solver::codegen::{CodegenConfig, CodeGenerator};
+use melange_solver::codegen::ir::{
+    BjtParams, CircuitIR, DeviceParams, DeviceSlot, DeviceType, DiodeParams,
+};
+use melange_solver::codegen::{CodeGenerator, CodegenConfig};
 use melange_solver::dc_op::{DcOpConfig, DcOpMethod, solve_dc_operating_point};
 use melange_solver::dk::DkKernel;
 use melange_solver::mna::MnaSystem;
@@ -14,7 +16,12 @@ fn build_pipeline(spice: &str) -> (Netlist, MnaSystem, DkKernel) {
     let netlist = Netlist::parse(spice).expect("parse failed");
     let mut mna = MnaSystem::from_netlist(&netlist).expect("MNA failed");
     // Stamp input conductance (1Ω)
-    let input_node = mna.node_map.get("in").copied().unwrap_or(1).saturating_sub(1);
+    let input_node = mna
+        .node_map
+        .get("in")
+        .copied()
+        .unwrap_or(1)
+        .saturating_sub(1);
     if input_node < mna.n {
         mna.g[input_node][input_node] += 1.0;
     }
@@ -131,7 +138,12 @@ fn test_vcc_bias_linear() {
     // VCC bias network — no nonlinear devices, should match linear solver
     let (_netlist, mna, _) = build_pipeline(VCC_BIAS);
     let config = DcOpConfig {
-        input_node: mna.node_map.get("in").copied().unwrap_or(1).saturating_sub(1),
+        input_node: mna
+            .node_map
+            .get("in")
+            .copied()
+            .unwrap_or(1)
+            .saturating_sub(1),
         input_resistance: 1.0,
         ..DcOpConfig::default()
     };
@@ -143,7 +155,12 @@ fn test_vcc_bias_linear() {
     assert_eq!(result.method, DcOpMethod::Linear);
 
     // VCC=12V, R1=R2=1k, so V_out should be about 6V
-    let out_idx = mna.node_map.get("out").copied().unwrap_or(0).saturating_sub(1);
+    let out_idx = mna
+        .node_map
+        .get("out")
+        .copied()
+        .unwrap_or(0)
+        .saturating_sub(1);
     if out_idx < result.v_node.len() {
         let v_out = result.v_node[out_idx];
         assert!(
@@ -164,7 +181,12 @@ fn test_single_diode_vcc() {
     // Expected: V_anode ≈ 0.6-0.7V (diode forward voltage)
     let (netlist, mna, _) = build_pipeline(SINGLE_DIODE_VCC);
     let config = DcOpConfig {
-        input_node: mna.node_map.get("in").copied().unwrap_or(1).saturating_sub(1),
+        input_node: mna
+            .node_map
+            .get("in")
+            .copied()
+            .unwrap_or(1)
+            .saturating_sub(1),
         input_resistance: 1.0,
         ..DcOpConfig::default()
     };
@@ -174,11 +196,19 @@ fn test_single_diode_vcc() {
 
     let result = solve_dc_operating_point(&mna, &slots, &config);
 
-    assert!(result.converged, "DC OP solver did not converge for single diode circuit");
+    assert!(
+        result.converged,
+        "DC OP solver did not converge for single diode circuit"
+    );
     assert_ne!(result.method, DcOpMethod::Failed);
 
     // Check diode forward voltage
-    let out_idx = mna.node_map.get("out").copied().unwrap_or(0).saturating_sub(1);
+    let out_idx = mna
+        .node_map
+        .get("out")
+        .copied()
+        .unwrap_or(0)
+        .saturating_sub(1);
     if out_idx < result.v_node.len() {
         let v_out = result.v_node[out_idx];
         assert!(
@@ -200,7 +230,12 @@ fn test_single_diode_vcc() {
 fn test_antiparallel_diodes_dc_op() {
     let (netlist, mna, _) = build_pipeline(ANTIPARALLEL_DIODES_VCC);
     let config = DcOpConfig {
-        input_node: mna.node_map.get("in").copied().unwrap_or(1).saturating_sub(1),
+        input_node: mna
+            .node_map
+            .get("in")
+            .copied()
+            .unwrap_or(1)
+            .saturating_sub(1),
         input_resistance: 1.0,
         ..DcOpConfig::default()
     };
@@ -208,7 +243,10 @@ fn test_antiparallel_diodes_dc_op() {
     let slots = build_device_slots(&netlist, &mna);
     let result = solve_dc_operating_point(&mna, &slots, &config);
 
-    assert!(result.converged, "DC OP solver did not converge for antiparallel diodes");
+    assert!(
+        result.converged,
+        "DC OP solver did not converge for antiparallel diodes"
+    );
 }
 
 // =============================================================================
@@ -224,7 +262,12 @@ fn test_bjt_common_emitter_bias() {
     // V_coll ≈ VCC - IC*RC ≈ 12 - 1.5*6.8 ≈ 1.8V
     let (netlist, mna, _) = build_pipeline(BJT_COMMON_EMITTER);
     let config = DcOpConfig {
-        input_node: mna.node_map.get("in").copied().unwrap_or(1).saturating_sub(1),
+        input_node: mna
+            .node_map
+            .get("in")
+            .copied()
+            .unwrap_or(1)
+            .saturating_sub(1),
         input_resistance: 1.0,
         ..DcOpConfig::default()
     };
@@ -239,10 +282,30 @@ fn test_bjt_common_emitter_bias() {
     );
 
     // Check node voltages
-    let base_idx = mna.node_map.get("base").copied().unwrap_or(0).saturating_sub(1);
-    let emit_idx = mna.node_map.get("emit").copied().unwrap_or(0).saturating_sub(1);
-    let coll_idx = mna.node_map.get("coll").copied().unwrap_or(0).saturating_sub(1);
-    let vcc_idx = mna.node_map.get("vcc").copied().unwrap_or(0).saturating_sub(1);
+    let base_idx = mna
+        .node_map
+        .get("base")
+        .copied()
+        .unwrap_or(0)
+        .saturating_sub(1);
+    let emit_idx = mna
+        .node_map
+        .get("emit")
+        .copied()
+        .unwrap_or(0)
+        .saturating_sub(1);
+    let coll_idx = mna
+        .node_map
+        .get("coll")
+        .copied()
+        .unwrap_or(0)
+        .saturating_sub(1);
+    let vcc_idx = mna
+        .node_map
+        .get("vcc")
+        .copied()
+        .unwrap_or(0)
+        .saturating_sub(1);
 
     if vcc_idx < result.v_node.len() {
         let v_vcc = result.v_node[vcc_idx];
@@ -293,7 +356,12 @@ fn test_bjt_common_emitter_bias() {
 fn test_pnp_bjt_dc_op() {
     let (netlist, mna, _) = build_pipeline(PNP_CIRCUIT);
     let config = DcOpConfig {
-        input_node: mna.node_map.get("in").copied().unwrap_or(1).saturating_sub(1),
+        input_node: mna
+            .node_map
+            .get("in")
+            .copied()
+            .unwrap_or(1)
+            .saturating_sub(1),
         input_resistance: 1.0,
         ..DcOpConfig::default()
     };
@@ -308,7 +376,12 @@ fn test_pnp_bjt_dc_op() {
     );
 
     // PNP should have collector voltage > 0 (current flows from VCC through RE to collector)
-    let coll_idx = mna.node_map.get("coll").copied().unwrap_or(0).saturating_sub(1);
+    let coll_idx = mna
+        .node_map
+        .get("coll")
+        .copied()
+        .unwrap_or(0)
+        .saturating_sub(1);
     if coll_idx < result.v_node.len() {
         let v_coll = result.v_node[coll_idx];
         assert!(
@@ -331,7 +404,12 @@ fn test_source_stepping_and_direct_nr_agree() {
     let slots = build_device_slots(&netlist, &mna);
 
     let config_direct = DcOpConfig {
-        input_node: mna.node_map.get("in").copied().unwrap_or(1).saturating_sub(1),
+        input_node: mna
+            .node_map
+            .get("in")
+            .copied()
+            .unwrap_or(1)
+            .saturating_sub(1),
         input_resistance: 1.0,
         max_iterations: 200,
         source_steps: 1, // Force single step = direct NR
@@ -339,7 +417,12 @@ fn test_source_stepping_and_direct_nr_agree() {
     };
 
     let config_stepping = DcOpConfig {
-        input_node: mna.node_map.get("in").copied().unwrap_or(1).saturating_sub(1),
+        input_node: mna
+            .node_map
+            .get("in")
+            .copied()
+            .unwrap_or(1)
+            .saturating_sub(1),
         input_resistance: 1.0,
         max_iterations: 200,
         source_steps: 20, // Fine-grained stepping
@@ -349,15 +432,26 @@ fn test_source_stepping_and_direct_nr_agree() {
     let result_direct = solve_dc_operating_point(&mna, &slots, &config_direct);
     let result_stepping = solve_dc_operating_point(&mna, &slots, &config_stepping);
 
-    assert!(result_direct.converged, "Direct NR should converge for simple diode");
-    assert!(result_stepping.converged, "Source stepping should converge for simple diode");
+    assert!(
+        result_direct.converged,
+        "Direct NR should converge for simple diode"
+    );
+    assert!(
+        result_stepping.converged,
+        "Source stepping should converge for simple diode"
+    );
 
     // Results should agree within tolerance
-    for (a, b) in result_direct.v_node.iter().zip(result_stepping.v_node.iter()) {
+    for (a, b) in result_direct
+        .v_node
+        .iter()
+        .zip(result_stepping.v_node.iter())
+    {
         assert!(
             (a - b).abs() < 1e-3,
             "Direct NR and source stepping disagree: {:.6} vs {:.6}",
-            a, b
+            a,
+            b
         );
     }
 }
@@ -368,15 +462,21 @@ fn test_source_stepping_and_direct_nr_agree() {
 
 #[test]
 fn test_codegen_with_nonlinear_dc_op() {
-    let ir = build_ir(SINGLE_DIODE_VCC, &CodegenConfig {
-        circuit_name: "diode_dc_test".to_string(),
-        input_node: 0,
-        output_nodes: vec![1],
-        ..default_config()
-    });
+    let ir = build_ir(
+        SINGLE_DIODE_VCC,
+        &CodegenConfig {
+            circuit_name: "diode_dc_test".to_string(),
+            input_node: 0,
+            output_nodes: vec![1],
+            ..default_config()
+        },
+    );
 
     assert!(ir.has_dc_op, "Should have DC OP for circuit with VCC");
-    assert!(ir.dc_op_converged, "Nonlinear DC OP should converge for diode circuit");
+    assert!(
+        ir.dc_op_converged,
+        "Nonlinear DC OP should converge for diode circuit"
+    );
 
     // Check that dc_nl_currents has a nonzero entry (diode is conducting)
     assert!(
@@ -388,17 +488,24 @@ fn test_codegen_with_nonlinear_dc_op() {
 
 #[test]
 fn test_codegen_bjt_has_dc_nl_i() {
-    let ir = build_ir(BJT_COMMON_EMITTER, &CodegenConfig {
-        circuit_name: "bjt_dc_test".to_string(),
-        input_node: 0,
-        output_nodes: vec![1],
-        ..default_config()
-    });
+    let ir = build_ir(
+        BJT_COMMON_EMITTER,
+        &CodegenConfig {
+            circuit_name: "bjt_dc_test".to_string(),
+            input_node: 0,
+            output_nodes: vec![1],
+            ..default_config()
+        },
+    );
 
     assert!(ir.has_dc_op, "Should have DC OP for BJT circuit");
 
     // BJT has M=2, dc_nl_currents should have 2 entries
-    assert_eq!(ir.dc_nl_currents.len(), 2, "BJT should have 2 DC NL currents");
+    assert_eq!(
+        ir.dc_nl_currents.len(),
+        2,
+        "BJT should have 2 DC NL currents"
+    );
 
     // At least Ic should be nonzero at bias point
     assert!(
@@ -420,7 +527,9 @@ fn test_codegen_dc_nl_i_in_generated_code() {
     };
 
     let generator = CodeGenerator::new(config);
-    let result = generator.generate(&kernel, &mna, &netlist).expect("codegen failed");
+    let result = generator
+        .generate(&kernel, &mna, &netlist)
+        .expect("codegen failed");
 
     // Check that generated code contains DC_NL_I
     assert!(
@@ -447,7 +556,9 @@ fn test_codegen_linear_circuit_no_dc_nl_i() {
     };
 
     let generator = CodeGenerator::new(config);
-    let result = generator.generate(&kernel, &mna, &netlist).expect("codegen failed");
+    let result = generator
+        .generate(&kernel, &mna, &netlist)
+        .expect("codegen failed");
 
     // Linear circuit should not have DC_NL_I
     assert!(
@@ -470,8 +581,18 @@ fn test_runtime_solver_dc_op_init() {
     let devices = build_device_entries(&netlist, &mna);
     let slots = build_device_slots(&netlist, &mna);
 
-    let input_node = mna.node_map.get("in").copied().unwrap_or(1).saturating_sub(1);
-    let output_node = mna.node_map.get("out").copied().unwrap_or(2).saturating_sub(1);
+    let input_node = mna
+        .node_map
+        .get("in")
+        .copied()
+        .unwrap_or(1)
+        .saturating_sub(1);
+    let output_node = mna
+        .node_map
+        .get("out")
+        .copied()
+        .unwrap_or(2)
+        .saturating_sub(1);
 
     let mut solver = CircuitSolver::new(kernel, devices, input_node, output_node).unwrap();
     solver.input_conductance = 1.0;
@@ -521,7 +642,14 @@ fn build_device_slots(netlist: &Netlist, _mna: &MnaSystem) -> Vec<DeviceSlot> {
                     device_type: DeviceType::Diode,
                     start_idx: dim_offset,
                     dimension: 1,
-                    params: DeviceParams::Diode(DiodeParams { is, n_vt: n * vt, cjo: 0.0, rs: 0.0, bv: f64::INFINITY, ibv: 1e-10 }),
+                    params: DeviceParams::Diode(DiodeParams {
+                        is,
+                        n_vt: n * vt,
+                        cjo: 0.0,
+                        rs: 0.0,
+                        bv: f64::INFINITY,
+                        ibv: 1e-10,
+                    }),
                 });
                 dim_offset += 1;
             }
@@ -530,7 +658,9 @@ fn build_device_slots(netlist: &Netlist, _mna: &MnaSystem) -> Vec<DeviceSlot> {
                 let vt_val = lookup_model_param(netlist, model, "VT").unwrap_or(vt);
                 let beta_f = lookup_model_param(netlist, model, "BF").unwrap_or(200.0);
                 let beta_r = lookup_model_param(netlist, model, "BR").unwrap_or(3.0);
-                let is_pnp = netlist.models.iter()
+                let is_pnp = netlist
+                    .models
+                    .iter()
                     .find(|m| m.name.eq_ignore_ascii_case(model))
                     .map(|m| m.model_type.to_uppercase().starts_with("PNP"))
                     .unwrap_or(false);
@@ -539,13 +669,28 @@ fn build_device_slots(netlist: &Netlist, _mna: &MnaSystem) -> Vec<DeviceSlot> {
                     start_idx: dim_offset,
                     dimension: 2,
                     params: DeviceParams::Bjt(BjtParams {
-                        is, vt: vt_val, beta_f, beta_r, is_pnp,
-                        vaf: f64::INFINITY, var: f64::INFINITY,
-                        ikf: f64::INFINITY, ikr: f64::INFINITY,
-                        cje: 0.0, cjc: 0.0,
-                        nf: 1.0, ise: 0.0, ne: 1.5,
-                        rb: 0.0, rc: 0.0, re: 0.0,
-                        rth: f64::INFINITY, cth: 1e-3, xti: 3.0, eg: 1.11, tamb: 300.15,
+                        is,
+                        vt: vt_val,
+                        beta_f,
+                        beta_r,
+                        is_pnp,
+                        vaf: f64::INFINITY,
+                        var: f64::INFINITY,
+                        ikf: f64::INFINITY,
+                        ikr: f64::INFINITY,
+                        cje: 0.0,
+                        cjc: 0.0,
+                        nf: 1.0,
+                        ise: 0.0,
+                        ne: 1.5,
+                        rb: 0.0,
+                        rc: 0.0,
+                        re: 0.0,
+                        rth: f64::INFINITY,
+                        cth: 1e-3,
+                        xti: 3.0,
+                        eg: 1.11,
+                        tamb: 300.15,
                     }),
                 });
                 dim_offset += 2;
@@ -576,12 +721,17 @@ fn build_device_entries(
                 let diode = DiodeShockley::new_room_temp(is, n);
                 devices.push(DeviceEntry::new_diode(diode, dev_info.start_idx));
             }
-            melange_solver::mna::NonlinearDeviceType::Bjt | melange_solver::mna::NonlinearDeviceType::BjtForwardActive => {
+            melange_solver::mna::NonlinearDeviceType::Bjt
+            | melange_solver::mna::NonlinearDeviceType::BjtForwardActive => {
                 let is = find_bjt_param(netlist, &dev_info.name, "IS").unwrap_or(1e-14);
                 let bf = find_bjt_param(netlist, &dev_info.name, "BF").unwrap_or(200.0);
                 let br = find_bjt_param(netlist, &dev_info.name, "BR").unwrap_or(3.0);
                 let is_pnp = is_bjt_pnp(netlist, &dev_info.name);
-                let polarity = if is_pnp { BjtPolarity::Pnp } else { BjtPolarity::Npn };
+                let polarity = if is_pnp {
+                    BjtPolarity::Pnp
+                } else {
+                    BjtPolarity::Npn
+                };
                 let bjt = BjtEbersMoll::new(is, 0.02585, bf, br, polarity);
                 devices.push(DeviceEntry::new_bjt(bjt, dev_info.start_idx));
             }
@@ -593,28 +743,45 @@ fn build_device_entries(
 }
 
 fn lookup_model_param(netlist: &Netlist, model_name: &str, param_name: &str) -> Option<f64> {
-    netlist.models.iter()
+    netlist
+        .models
+        .iter()
         .find(|m| m.name.eq_ignore_ascii_case(model_name))
-        .and_then(|m| m.params.iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case(param_name))
-            .map(|(_, v)| *v))
+        .and_then(|m| {
+            m.params
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(param_name))
+                .map(|(_, v)| *v)
+        })
 }
 
 fn find_diode_is(netlist: &Netlist, name: &str) -> f64 {
     use melange_solver::parser::Element;
-    let model = netlist.elements.iter().find_map(|e| match e {
-        Element::Diode { name: n, model, .. } if n.eq_ignore_ascii_case(name) => Some(model.as_str()),
-        _ => None,
-    }).unwrap_or("");
+    let model = netlist
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            Element::Diode { name: n, model, .. } if n.eq_ignore_ascii_case(name) => {
+                Some(model.as_str())
+            }
+            _ => None,
+        })
+        .unwrap_or("");
     lookup_model_param(netlist, model, "IS").unwrap_or(1e-15)
 }
 
 fn find_diode_n(netlist: &Netlist, name: &str) -> f64 {
     use melange_solver::parser::Element;
-    let model = netlist.elements.iter().find_map(|e| match e {
-        Element::Diode { name: n, model, .. } if n.eq_ignore_ascii_case(name) => Some(model.as_str()),
-        _ => None,
-    }).unwrap_or("");
+    let model = netlist
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            Element::Diode { name: n, model, .. } if n.eq_ignore_ascii_case(name) => {
+                Some(model.as_str())
+            }
+            _ => None,
+        })
+        .unwrap_or("");
     lookup_model_param(netlist, model, "N").unwrap_or(1.0)
 }
 
@@ -629,11 +796,19 @@ fn find_bjt_param(netlist: &Netlist, name: &str, param: &str) -> Option<f64> {
 
 fn is_bjt_pnp(netlist: &Netlist, name: &str) -> bool {
     use melange_solver::parser::Element;
-    let model = netlist.elements.iter().find_map(|e| match e {
-        Element::Bjt { name: n, model, .. } if n.eq_ignore_ascii_case(name) => Some(model.as_str()),
-        _ => None,
-    }).unwrap_or("");
-    netlist.models.iter()
+    let model = netlist
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            Element::Bjt { name: n, model, .. } if n.eq_ignore_ascii_case(name) => {
+                Some(model.as_str())
+            }
+            _ => None,
+        })
+        .unwrap_or("");
+    netlist
+        .models
+        .iter()
         .find(|m| m.name.eq_ignore_ascii_case(model))
         .map(|m| m.model_type.to_uppercase().starts_with("PNP"))
         .unwrap_or(false)

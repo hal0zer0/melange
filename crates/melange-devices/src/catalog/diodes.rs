@@ -28,7 +28,9 @@ pub const CATALOG: &[DiodeCatalogEntry] = &[
     // 1N4001..1N4007 — general purpose rectifier (silicon)
     // ON Semi: IS=14.11e-9, N=1.984
     DiodeCatalogEntry {
-        names: &["1N4001", "1N4002", "1N4003", "1N4004", "1N4005", "1N4006", "1N4007"],
+        names: &[
+            "1N4001", "1N4002", "1N4003", "1N4004", "1N4005", "1N4006", "1N4007",
+        ],
         is: 14.11e-9,
         n: 1.984,
         source: "ON Semiconductor SPICE model",
@@ -66,9 +68,9 @@ pub const CATALOG: &[DiodeCatalogEntry] = &[
 
 /// Look up a diode by part number (case-insensitive).
 pub fn lookup(name: &str) -> Option<&'static DiodeCatalogEntry> {
-    CATALOG.iter().find(|entry| {
-        entry.names.iter().any(|n| n.eq_ignore_ascii_case(name))
-    })
+    CATALOG
+        .iter()
+        .find(|entry| entry.names.iter().any(|n| n.eq_ignore_ascii_case(name)))
 }
 
 #[cfg(test)]
@@ -110,8 +112,16 @@ mod tests {
     #[test]
     fn test_all_params_valid() {
         for entry in CATALOG {
-            assert!(entry.is > 0.0 && entry.is.is_finite(), "{}: IS", entry.names[0]);
-            assert!(entry.n > 0.0 && entry.n.is_finite(), "{}: N", entry.names[0]);
+            assert!(
+                entry.is > 0.0 && entry.is.is_finite(),
+                "{}: IS",
+                entry.names[0]
+            );
+            assert!(
+                entry.n > 0.0 && entry.n.is_finite(),
+                "{}: N",
+                entry.names[0]
+            );
         }
     }
 
@@ -168,14 +178,20 @@ mod tests {
         let d = make_diode(lookup("1N4148").unwrap());
         // ON Semi datasheet: Vf ≈ 0.72V @ 5mA
         let vf_5ma = solve_vf(&d, 5e-3);
-        assert!((vf_5ma - 0.72).abs() < 0.15,
-            "1N4148 Vf@5mA = {:.3}V (expected ~0.72V)", vf_5ma);
+        assert!(
+            (vf_5ma - 0.72).abs() < 0.15,
+            "1N4148 Vf@5mA = {:.3}V (expected ~0.72V)",
+            vf_5ma
+        );
         // At 100mA, the ideal Shockley model (no Rs) underestimates Vf because
         // real 1N4148 has ~0.6 ohm series resistance. Our model gives ~0.79V
         // vs datasheet ~1.0V. This is a known limitation of the Rs-free model.
         let vf_100ma = solve_vf(&d, 100e-3);
-        assert!(vf_100ma > 0.6 && vf_100ma < 1.2,
-            "1N4148 Vf@100mA = {:.3}V (Shockley: ~0.8V, datasheet w/Rs: ~1.0V)", vf_100ma);
+        assert!(
+            vf_100ma > 0.6 && vf_100ma < 1.2,
+            "1N4148 Vf@100mA = {:.3}V (Shockley: ~0.8V, datasheet w/Rs: ~1.0V)",
+            vf_100ma
+        );
     }
 
     #[test]
@@ -184,8 +200,11 @@ mod tests {
         // ON Semi: Vf ≈ 1.1V @ 1A (our model won't be exact at high current)
         // At 10mA: Vf ≈ 0.7-0.9V
         let vf_10ma = solve_vf(&d, 10e-3);
-        assert!(vf_10ma > 0.5 && vf_10ma < 1.2,
-            "1N4001 Vf@10mA = {:.3}V", vf_10ma);
+        assert!(
+            vf_10ma > 0.5 && vf_10ma < 1.2,
+            "1N4001 Vf@10mA = {:.3}V",
+            vf_10ma
+        );
     }
 
     #[test]
@@ -193,8 +212,11 @@ mod tests {
         let d = make_diode(lookup("1N34A").unwrap());
         // Germanium: Vf ≈ 0.3V @ 1mA
         let vf_1ma = solve_vf(&d, 1e-3);
-        assert!((vf_1ma - 0.3).abs() < 0.15,
-            "1N34A Vf@1mA = {:.3}V (expected ~0.3V)", vf_1ma);
+        assert!(
+            (vf_1ma - 0.3).abs() < 0.15,
+            "1N34A Vf@1mA = {:.3}V (expected ~0.3V)",
+            vf_1ma
+        );
     }
 
     #[test]
@@ -202,8 +224,11 @@ mod tests {
         let d = make_diode(lookup("BAT41").unwrap());
         // Schottky: Vf ≈ 0.35V @ 1mA
         let vf_1ma = solve_vf(&d, 1e-3);
-        assert!(vf_1ma > 0.15 && vf_1ma < 0.55,
-            "BAT41 Vf@1mA = {:.3}V (expected ~0.35V)", vf_1ma);
+        assert!(
+            vf_1ma > 0.15 && vf_1ma < 0.55,
+            "BAT41 Vf@1mA = {:.3}V (expected ~0.35V)",
+            vf_1ma
+        );
     }
 
     #[test]
@@ -211,8 +236,11 @@ mod tests {
         let d = make_diode(lookup("OA91").unwrap());
         // Vintage germanium: Vf ≈ 0.3-0.4V @ 1mA
         let vf_1ma = solve_vf(&d, 1e-3);
-        assert!(vf_1ma > 0.15 && vf_1ma < 0.5,
-            "OA91 Vf@1mA = {:.3}V", vf_1ma);
+        assert!(
+            vf_1ma > 0.15 && vf_1ma < 0.5,
+            "OA91 Vf@1mA = {:.3}V",
+            vf_1ma
+        );
     }
 
     // --- Tier 3: Conductance consistency ---
@@ -224,19 +252,35 @@ mod tests {
             let g = d.conductance_at(v);
             let fd = (d.current_at(v + eps) - d.current_at(v - eps)) / (2.0 * eps);
             let rel = (g - fd).abs() / (fd.abs() + 1e-15);
-            assert!(rel < 1e-3,
-                "{} conductance at {:.1}V: g={:.6e} fd={:.6e}", entry.names[0], v, g, fd);
+            assert!(
+                rel < 1e-3,
+                "{} conductance at {:.1}V: g={:.6e} fd={:.6e}",
+                entry.names[0],
+                v,
+                g,
+                fd
+            );
         }
     }
 
     #[test]
-    fn test_1n4148_conductance() { check_diode_conductance(lookup("1N4148").unwrap()); }
+    fn test_1n4148_conductance() {
+        check_diode_conductance(lookup("1N4148").unwrap());
+    }
     #[test]
-    fn test_1n4001_conductance() { check_diode_conductance(lookup("1N4001").unwrap()); }
+    fn test_1n4001_conductance() {
+        check_diode_conductance(lookup("1N4001").unwrap());
+    }
     #[test]
-    fn test_1n34a_conductance() { check_diode_conductance(lookup("1N34A").unwrap()); }
+    fn test_1n34a_conductance() {
+        check_diode_conductance(lookup("1N34A").unwrap());
+    }
     #[test]
-    fn test_bat41_conductance() { check_diode_conductance(lookup("BAT41").unwrap()); }
+    fn test_bat41_conductance() {
+        check_diode_conductance(lookup("BAT41").unwrap());
+    }
     #[test]
-    fn test_oa91_conductance() { check_diode_conductance(lookup("OA91").unwrap()); }
+    fn test_oa91_conductance() {
+        check_diode_conductance(lookup("OA91").unwrap());
+    }
 }

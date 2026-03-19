@@ -179,9 +179,9 @@ pub fn is_valid_audio(x: f64) -> bool {
 /// # Arguments
 /// * `temp_c` - Temperature in Celsius
 pub fn thermal_voltage(temp_c: f64) -> f64 {
-    const K_BOLTZMANN: f64 = 1.380649e-23;  // J/K
+    const K_BOLTZMANN: f64 = 1.380649e-23; // J/K
     const Q_ELECTRON: f64 = 1.602176634e-19; // C
-    const T_ABS_ZERO: f64 = 273.15;          // K
+    const T_ABS_ZERO: f64 = 273.15; // K
 
     let temp_k = temp_c + T_ABS_ZERO;
     K_BOLTZMANN * temp_k / Q_ELECTRON
@@ -216,8 +216,8 @@ mod tests {
     #[test]
     fn test_midi_to_freq() {
         assert!((midi_to_freq(69) - 440.0).abs() < 0.01);
-        assert!((midi_to_freq(60) - 261.63).abs() < 0.5);  // Middle C
-        assert!((midi_to_freq(57) - 220.0).abs() < 0.01);  // A3
+        assert!((midi_to_freq(60) - 261.63).abs() < 0.5); // Middle C
+        assert!((midi_to_freq(57) - 220.0).abs() < 0.01); // A3
     }
 
     #[test]
@@ -253,6 +253,6 @@ mod tests {
         assert!(soft_clip(0.0).abs() < 1e-10);
         assert!((soft_clip(1.0) - 0.7615).abs() < 0.01);
         assert!((soft_clip(10.0) - 1.0).abs() < 0.01);
-        assert!(soft_clip(-1.0) < 0.0);  // Symmetric
+        assert!(soft_clip(-1.0) < 0.0); // Symmetric
     }
 }

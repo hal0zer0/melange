@@ -31,7 +31,12 @@ impl Mosfet {
     /// Panics if `kp` is not positive.
     pub fn new(channel: ChannelType, vt: f64, kp: f64, lambda: f64) -> Self {
         assert!(kp > 0.0, "MOSFET Kp must be positive, got {}", kp);
-        Self { channel, vt, kp, lambda }
+        Self {
+            channel,
+            vt,
+            kp,
+            lambda,
+        }
     }
 
     /// 2N7000 N-channel MOSFET (common small-signal).
@@ -62,10 +67,10 @@ impl Mosfet {
 
         let vt_abs = self.vt.abs();
         if vgs_eff <= vt_abs {
-            return 0.0;  // Cutoff
+            return 0.0; // Cutoff
         }
 
-        let vov = vgs_eff - vt_abs;  // Overdrive voltage
+        let vov = vgs_eff - vt_abs; // Overdrive voltage
 
         if vds_eff < vov {
             // Linear (triode) region
@@ -139,7 +144,7 @@ mod tests {
     #[test]
     fn test_mosfet_cutoff() {
         let mos = Mosfet::n_2n7000();
-        
+
         // Vgs < Vt: cutoff
         let id = mos.drain_current(0.0, 5.0);
         assert!(id.abs() < 1e-10);
@@ -148,7 +153,7 @@ mod tests {
     #[test]
     fn test_mosfet_saturation() {
         let mos = Mosfet::n_2n7000();
-        
+
         // Vgs > Vt, Vds > Vgs - Vt: saturation
         let id = mos.drain_current(5.0, 10.0);
         assert!(id > 0.0);
@@ -157,11 +162,11 @@ mod tests {
     #[test]
     fn test_mosfet_linear() {
         let mos = Mosfet::n_2n7000();
-        
+
         // Vgs > Vt, Vds < Vgs - Vt: linear region
         let id_lin = mos.drain_current(5.0, 1.0);
         let id_sat = mos.drain_current(5.0, 10.0);
-        
+
         // Linear current should be less than saturation current
         assert!(id_lin < id_sat);
     }
@@ -169,15 +174,15 @@ mod tests {
     #[test]
     fn test_mosfet_jacobian() {
         let mos = Mosfet::n_2n7000();
-        
+
         let vgs = 5.0;
         let vds = 5.0;
-        
+
         let (d_id_d_vgs, d_id_d_vds) = mos.jacobian_partial(vgs, vds);
-        
+
         // Transconductance should be positive
         assert!(d_id_d_vgs > 0.0);
-        
+
         // Output conductance should be positive
         assert!(d_id_d_vds >= 0.0);
     }
@@ -185,22 +190,22 @@ mod tests {
     #[test]
     fn test_mosfet_jacobian_numerical() {
         let mos = Mosfet::n_2n7000();
-        
+
         let vgs = 5.0;
         let vds = 5.0;
-        
+
         // Analytical Jacobian
         let (d_id_d_vgs, d_id_d_vds) = mos.jacobian_partial(vgs, vds);
-        
+
         // Numerical verification
         let dv = 1e-6;
         let id = mos.drain_current(vgs, vds);
         let id_vgs = mos.drain_current(vgs + dv, vds);
         let id_vds = mos.drain_current(vgs, vds + dv);
-        
+
         let num_d_id_d_vgs = (id_vgs - id) / dv;
         let num_d_id_d_vds = (id_vds - id) / dv;
-        
+
         // Should match within 1%
         assert!((d_id_d_vgs - num_d_id_d_vgs).abs() / d_id_d_vgs.abs() < 0.01);
         assert!((d_id_d_vds - num_d_id_d_vds).abs() / d_id_d_vds.abs() < 0.01);
@@ -220,19 +225,23 @@ mod tests {
 
         // Numerical verification (central difference)
         let eps = 1e-6;
-        let num_d_id_d_vgs = (mos.drain_current(vgs + eps, vds) - mos.drain_current(vgs - eps, vds)) / (2.0 * eps);
-        let num_d_id_d_vds = (mos.drain_current(vgs, vds + eps) - mos.drain_current(vgs, vds - eps)) / (2.0 * eps);
+        let num_d_id_d_vgs =
+            (mos.drain_current(vgs + eps, vds) - mos.drain_current(vgs - eps, vds)) / (2.0 * eps);
+        let num_d_id_d_vds =
+            (mos.drain_current(vgs, vds + eps) - mos.drain_current(vgs, vds - eps)) / (2.0 * eps);
 
         // Should match within 1%
         assert!(
             (d_id_d_vgs - num_d_id_d_vgs).abs() / num_d_id_d_vgs.abs().max(1e-15) < 0.01,
             "P-channel gm: analytical={:.6e}, numerical={:.6e}",
-            d_id_d_vgs, num_d_id_d_vgs
+            d_id_d_vgs,
+            num_d_id_d_vgs
         );
         assert!(
             (d_id_d_vds - num_d_id_d_vds).abs() / num_d_id_d_vds.abs().max(1e-15) < 0.01,
             "P-channel gds: analytical={:.6e}, numerical={:.6e}",
-            d_id_d_vds, num_d_id_d_vds
+            d_id_d_vds,
+            num_d_id_d_vds
         );
     }
 

@@ -34,10 +34,17 @@ pub struct CdsLdr {
 
 impl CdsLdr {
     /// Create a new CdS LDR model.
-    pub fn new(r_min: f64, r_max: f64, gamma: f64, attack_tau: f64, release_tau: f64, sample_rate: f64) -> Self {
+    pub fn new(
+        r_min: f64,
+        r_max: f64,
+        gamma: f64,
+        attack_tau: f64,
+        release_tau: f64,
+        sample_rate: f64,
+    ) -> Self {
         let attack_coef = (-1.0 / (attack_tau * sample_rate)).exp();
         let release_coef = (-1.0 / (release_tau * sample_rate)).exp();
-        
+
         Self {
             r_min,
             r_max,
@@ -75,10 +82,10 @@ impl CdsLdr {
     pub fn update(&mut self, control_voltage: f64) {
         // Clamp control voltage
         let cv = control_voltage.clamp(0.0, 1.0);
-        
+
         // Target resistance (power law)
         let target_r = self.r_min + (self.r_max - self.r_min) * (1.0 - cv).powf(self.gamma);
-        
+
         // Asymmetric envelope following
         if target_r < self.r_state {
             // Attack (getting brighter, resistance decreasing)
@@ -131,35 +138,40 @@ mod tests {
     use super::*;
 
     #[test]
-        fn test_ldr_range() {
+    fn test_ldr_range() {
         let mut ldr = CdsLdr::vtl5c3(44100.0);
-        
+
         // Initial state should be dark
         assert!(ldr.resistance() > 1e6);
-        
+
         // Full brightness - needs many iterations to settle
         for _ in 0..50000 {
             ldr.update(1.0);
         }
-        
+
         // Should approach r_min (with tolerance for attack time)
-        assert!(ldr.resistance() < 500.0, "R = {} ohms, expected near {}", ldr.resistance(), ldr.r_min);
+        assert!(
+            ldr.resistance() < 500.0,
+            "R = {} ohms, expected near {}",
+            ldr.resistance(),
+            ldr.r_min
+        );
     }
 
     #[test]
     fn test_ldr_asymmetry() {
         let mut ldr = CdsLdr::vtl5c3(44100.0);
-        
+
         // Dark to bright (attack)
         ldr.reset();
         ldr.update(1.0);
         let r_after_attack = ldr.resistance();
-        
+
         // Reset and go bright to dark (release)
         ldr.reset();
         ldr.update(0.0);
         let r_after_release = ldr.resistance();
-        
+
         // Attack should be faster than release
         // (r_max - r_after_attack) should be larger change than (r_after_release - r_max)
         // Actually, since we only do one sample:
@@ -195,20 +207,29 @@ mod tests {
     fn test_ldr_datasheet_ranges() {
         // VTL5C3
         let ldr = CdsLdr::vtl5c3(44100.0);
-        assert!(ldr.resistance() > 1e6,
-            "VTL5C3 dark resistance = {:.0} ohms, expected > 1M", ldr.resistance());
+        assert!(
+            ldr.resistance() > 1e6,
+            "VTL5C3 dark resistance = {:.0} ohms, expected > 1M",
+            ldr.resistance()
+        );
         assert_eq!(ldr.r_min, 75.0, "VTL5C3 r_min should be 75 ohms");
 
         // VTL5C4
         let ldr = CdsLdr::vtl5c4(44100.0);
-        assert!(ldr.resistance() > 1e6,
-            "VTL5C4 dark resistance = {:.0} ohms, expected > 1M", ldr.resistance());
+        assert!(
+            ldr.resistance() > 1e6,
+            "VTL5C4 dark resistance = {:.0} ohms, expected > 1M",
+            ldr.resistance()
+        );
         assert_eq!(ldr.r_min, 40.0, "VTL5C4 r_min should be 40 ohms");
 
         // NSL-32
         let ldr = CdsLdr::nsl32(44100.0);
-        assert!(ldr.resistance() >= 1e6,
-            "NSL32 dark resistance = {:.0} ohms, expected >= 1M", ldr.resistance());
+        assert!(
+            ldr.resistance() >= 1e6,
+            "NSL32 dark resistance = {:.0} ohms, expected >= 1M",
+            ldr.resistance()
+        );
         assert_eq!(ldr.r_min, 75.0, "NSL32 r_min should be 75 ohms");
     }
 
@@ -225,8 +246,12 @@ mod tests {
         let r = ldr.resistance();
         let r_min = ldr.r_min;
         // Should be within 20% of r_min after long settling
-        assert!((r - r_min) / r_min < 0.2,
-            "After settling, R = {:.1} ohms, r_min = {:.1} ohms", r, r_min);
+        assert!(
+            (r - r_min) / r_min < 0.2,
+            "After settling, R = {:.1} ohms, r_min = {:.1} ohms",
+            r,
+            r_min
+        );
     }
 
     /// Verify LDR current and jacobian are finite even with very small r_min.
@@ -243,8 +268,15 @@ mod tests {
         let i = ldr.current(&[1.0]);
         let g = ldr.jacobian(&[1.0]);
         assert!(i.is_finite(), "LDR current must be finite, got {}", i);
-        assert!(g[0].is_finite(), "LDR conductance must be finite, got {}", g[0]);
+        assert!(
+            g[0].is_finite(),
+            "LDR conductance must be finite, got {}",
+            g[0]
+        );
         assert!(g[0] > 0.0, "LDR conductance must be positive, got {}", g[0]);
-        assert!(ldr.conductance().is_finite(), "conductance() must be finite");
+        assert!(
+            ldr.conductance().is_finite(),
+            "conductance() must be finite"
+        );
     }
 }

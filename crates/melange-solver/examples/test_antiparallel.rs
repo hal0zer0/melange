@@ -1,8 +1,8 @@
-use melange_solver::parser::Netlist;
-use melange_solver::mna::MnaSystem;
-use melange_solver::dk::DkKernel;
-use melange_solver::solver::{CircuitSolver, DeviceEntry};
 use melange_devices::diode::DiodeShockley;
+use melange_solver::dk::DkKernel;
+use melange_solver::mna::MnaSystem;
+use melange_solver::parser::Netlist;
+use melange_solver::solver::{CircuitSolver, DeviceEntry};
 
 fn main() {
     let spice = r#"* Antiparallel Diode Test
@@ -15,15 +15,15 @@ Vin in 0 0
 
     let netlist = Netlist::parse(spice).unwrap();
     let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
-    
+
     // Add input conductance
     mna.g[0][0] += 1.0;
-    
+
     let sample_rate = 48000.0;
     let kernel = DkKernel::from_mna(&mna, sample_rate).unwrap();
-    
+
     println!("Antiparallel diodes: N={}, M={}", kernel.n, kernel.m);
-    
+
     println!("K matrix:");
     for i in 0..kernel.m {
         print!("  ");
@@ -32,7 +32,7 @@ Vin in 0 0
         }
         println!();
     }
-    
+
     // Test with CircuitSolver
     let diode1 = DiodeShockley::new_room_temp(2.52e-9, 1.0);
     let diode2 = DiodeShockley::new_room_temp(2.52e-9, 1.0);
@@ -40,9 +40,9 @@ Vin in 0 0
         DeviceEntry::new_diode(diode1, 0),
         DeviceEntry::new_diode(diode2, 1),
     ];
-    
+
     let mut solver = CircuitSolver::new(kernel, devices, 0, 0).unwrap();
-    
+
     println!("\nTesting with CircuitSolver:");
     for amp in [0.01_f64, 0.1, 1.0, 5.0].iter() {
         solver.reset();
@@ -54,6 +54,11 @@ Vin in 0 0
                 println!("  amp={}V, sample {}: out={:.6e}", amp, i, output);
             }
         }
-        println!("  amp={}V, max_out={:.3}V (finite: {})", amp, max_out, max_out.is_finite());
+        println!(
+            "  amp={}V, max_out={:.3}V (finite: {})",
+            amp,
+            max_out,
+            max_out.is_finite()
+        );
     }
 }

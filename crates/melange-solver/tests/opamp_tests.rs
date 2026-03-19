@@ -10,9 +10,9 @@
 //!
 //! This is purely linear -- no nonlinear dimensions (M stays 0 for pure op-amp circuits).
 
-use melange_solver::parser::Netlist;
-use melange_solver::mna::MnaSystem;
 use melange_solver::dk::DkKernel;
+use melange_solver::mna::MnaSystem;
+use melange_solver::parser::Netlist;
 use melange_solver::solver::LinearSolver;
 
 /// Helper: build a LinearSolver from a SPICE netlist string and return the output node index.
@@ -46,10 +46,18 @@ fn measure_dc_gain(solver: &mut LinearSolver, input_voltage: f64, num_samples: u
     let mut peak_neg = 0.0f64;
     for _ in 0..num_samples {
         let out = solver.process_sample(input_voltage);
-        if out > peak_pos { peak_pos = out; }
-        if out < peak_neg { peak_neg = out; }
+        if out > peak_pos {
+            peak_pos = out;
+        }
+        if out < peak_neg {
+            peak_neg = out;
+        }
     }
-    let peak = if peak_pos.abs() > peak_neg.abs() { peak_pos } else { peak_neg };
+    let peak = if peak_pos.abs() > peak_neg.abs() {
+        peak_pos
+    } else {
+        peak_neg
+    };
     peak / input_voltage
 }
 
@@ -295,7 +303,8 @@ U1 0 inv out opamp
     assert!(
         (output_amplitude - expected_amplitude).abs() / expected_amplitude < 0.15,
         "Output amplitude should be ~{:.3}V, got {:.3}V",
-        expected_amplitude, output_amplitude
+        expected_amplitude,
+        output_amplitude
     );
 }
 
@@ -340,13 +349,16 @@ U1 0 inv out myoa
 #[test]
 fn test_opamp_gain_improves_with_higher_aol() {
     let make_spice = |aol: f64| -> String {
-        format!(r#"Inverting
+        format!(
+            r#"Inverting
 R1 in inv 10k
 R2 inv out 100k
 C1 out 0 100n
 U1 0 inv out oa
 .model oa OA(AOL={})
-"#, aol)
+"#,
+            aol
+        )
     };
 
     let (mut solver_low, _, _) = build_linear_solver(&make_spice(1000.0), 44100.0);
@@ -361,6 +373,7 @@ U1 0 inv out oa
     assert!(
         error_high < error_low,
         "Higher AOL should give more accurate gain: error_low={:.4}, error_high={:.4}",
-        error_low, error_high
+        error_low,
+        error_high
     );
 }

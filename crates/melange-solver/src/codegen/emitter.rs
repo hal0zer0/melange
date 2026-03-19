@@ -1,7 +1,7 @@
 //! Emitter trait for language-specific code generation backends.
 
-use super::ir::CircuitIR;
 use super::CodegenError;
+use super::ir::CircuitIR;
 
 /// A language backend that converts a [`CircuitIR`] into source code.
 pub trait Emitter {

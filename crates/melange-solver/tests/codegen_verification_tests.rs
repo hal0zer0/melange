@@ -5,13 +5,13 @@
 //! These tests check that the generated source strings contain correct formulas,
 //! matrix constants, and coefficient values matching the DK kernel.
 
-use melange_solver::codegen::{CodeGenerator, CodegenConfig, CodegenError};
-use melange_solver::codegen::ir::CircuitIR;
 use melange_solver::codegen::emitter::Emitter;
+use melange_solver::codegen::ir::CircuitIR;
 use melange_solver::codegen::rust_emitter::RustEmitter;
-use melange_solver::parser::Netlist;
-use melange_solver::mna::MnaSystem;
+use melange_solver::codegen::{CodeGenerator, CodegenConfig, CodegenError};
 use melange_solver::dk::DkKernel;
+use melange_solver::mna::MnaSystem;
+use melange_solver::parser::Netlist;
 use std::io::Write;
 
 // ---------------------------------------------------------------------------
@@ -39,7 +39,8 @@ fn default_config() -> CodegenConfig {
 fn generate_code(spice: &str) -> (String, Netlist, MnaSystem, DkKernel) {
     let (netlist, mna, kernel) = build_pipeline(spice);
     let codegen = CodeGenerator::new(default_config());
-    let result = codegen.generate(&kernel, &mna, &netlist)
+    let result = codegen
+        .generate(&kernel, &mna, &netlist)
         .expect("code generation failed");
     (result.code, netlist, mna, kernel)
 }
@@ -160,7 +161,10 @@ fn test_generated_ni_matrix_matches_kernel() {
             code.contains(&expected_str),
             "N_I[0][{}] value {} not found in generated code.\n\
              Expected kernel.n_i({}, 0) = {} to appear in the N_I constant.",
-            j, expected_str, j, expected_val
+            j,
+            expected_str,
+            j,
+            expected_val
         );
     }
 
@@ -201,7 +205,10 @@ fn test_generated_code_final_voltage_coefficients() {
                     "(S*N_i)[{}][{}] = {} not found in generated code.\n\
                      This coefficient should appear in compute_final_voltages as a literal \
                      multiplying i_nl[{}].",
-                    i, j, coeff_str, j
+                    i,
+                    j,
+                    coeff_str,
+                    j
                 );
             }
         }
@@ -217,7 +224,10 @@ fn test_codegen_runtime_consistency_rc_circuit() {
     let (code, _netlist, _mna, kernel) = generate_code(RC_CIRCUIT_SPICE);
 
     let n = kernel.n;
-    assert_eq!(kernel.m, 0, "RC circuit should have m=0 (no nonlinear devices)");
+    assert_eq!(
+        kernel.m, 0,
+        "RC circuit should have m=0 (no nonlinear devices)"
+    );
     assert_eq!(n, 2, "RC circuit should have n=2 nodes");
 
     // Verify S matrix values in generated code match kernel
@@ -227,7 +237,9 @@ fn test_codegen_runtime_consistency_rc_circuit() {
             assert!(
                 code.contains(&expected),
                 "S[{}][{}] = {} not found in generated code.",
-                i, j, expected
+                i,
+                j,
+                expected
             );
         }
     }
@@ -239,7 +251,9 @@ fn test_codegen_runtime_consistency_rc_circuit() {
             assert!(
                 code.contains(&expected),
                 "A_NEG[{}][{}] = {} not found in generated code.",
-                i, j, expected
+                i,
+                j,
+                expected
             );
         }
     }
@@ -320,7 +334,9 @@ fn test_codegen_bjt_2d_matrices_correct_size() {
             assert!(
                 code.contains(&expected),
                 "K[{}][{}] = {} not found in generated code.",
-                i, j, expected
+                i,
+                j,
+                expected
             );
         }
     }
@@ -362,7 +378,11 @@ fn test_codegen_n_i_indexing_multi_device() {
             assert!(
                 code.contains(&expected_str),
                 "N_I[{}][{}] (kernel.n_i({}, {})) = {} not found in generated code.",
-                device_i, node_j, node_j, device_i, expected_str
+                device_i,
+                node_j,
+                node_j,
+                device_i,
+                expected_str
             );
         }
     }
@@ -374,7 +394,9 @@ fn test_codegen_n_i_indexing_multi_device() {
             assert!(
                 code.contains(&expected),
                 "K[{}][{}] = {} not found in generated code.",
-                i, j, expected
+                i,
+                j,
+                expected
             );
         }
     }
@@ -392,19 +414,52 @@ fn test_generated_code_contains_all_constants() {
     // All required constants should be present
     assert!(code.contains("pub const N: usize ="), "Missing N constant");
     assert!(code.contains("pub const M: usize ="), "Missing M constant");
-    assert!(code.contains("pub const SAMPLE_RATE: f64 ="), "Missing SAMPLE_RATE constant");
-    assert!(code.contains("pub const ALPHA: f64 ="), "Missing ALPHA constant");
-    assert!(code.contains("pub const INPUT_NODE: usize ="), "Missing INPUT_NODE constant");
-    assert!(code.contains("pub const NUM_OUTPUTS: usize ="), "Missing NUM_OUTPUTS constant");
-    assert!(code.contains("pub const OUTPUT_NODES: [usize; NUM_OUTPUTS] ="), "Missing OUTPUT_NODES constant");
-    assert!(code.contains("pub const INPUT_RESISTANCE: f64 ="), "Missing INPUT_RESISTANCE constant");
-    assert!(code.contains("pub const S_DEFAULT: [[f64; N]; N]"), "Missing S_DEFAULT matrix");
-    assert!(code.contains("pub const A_NEG_DEFAULT: [[f64; N]; N]"), "Missing A_NEG_DEFAULT matrix");
-    assert!(code.contains("pub const K_DEFAULT: [[f64; M]; M]"), "Missing K_DEFAULT matrix");
+    assert!(
+        code.contains("pub const SAMPLE_RATE: f64 ="),
+        "Missing SAMPLE_RATE constant"
+    );
+    assert!(
+        code.contains("pub const ALPHA: f64 ="),
+        "Missing ALPHA constant"
+    );
+    assert!(
+        code.contains("pub const INPUT_NODE: usize ="),
+        "Missing INPUT_NODE constant"
+    );
+    assert!(
+        code.contains("pub const NUM_OUTPUTS: usize ="),
+        "Missing NUM_OUTPUTS constant"
+    );
+    assert!(
+        code.contains("pub const OUTPUT_NODES: [usize; NUM_OUTPUTS] ="),
+        "Missing OUTPUT_NODES constant"
+    );
+    assert!(
+        code.contains("pub const INPUT_RESISTANCE: f64 ="),
+        "Missing INPUT_RESISTANCE constant"
+    );
+    assert!(
+        code.contains("pub const S_DEFAULT: [[f64; N]; N]"),
+        "Missing S_DEFAULT matrix"
+    );
+    assert!(
+        code.contains("pub const A_NEG_DEFAULT: [[f64; N]; N]"),
+        "Missing A_NEG_DEFAULT matrix"
+    );
+    assert!(
+        code.contains("pub const K_DEFAULT: [[f64; M]; M]"),
+        "Missing K_DEFAULT matrix"
+    );
     assert!(code.contains("const G: [[f64; N]; N]"), "Missing G matrix");
     assert!(code.contains("const C: [[f64; N]; N]"), "Missing C matrix");
-    assert!(code.contains("pub const N_V: [[f64; N]; M]"), "Missing N_V matrix");
-    assert!(code.contains("pub const N_I: [[f64; N]; M]"), "Missing N_I matrix");
+    assert!(
+        code.contains("pub const N_V: [[f64; N]; M]"),
+        "Missing N_V matrix"
+    );
+    assert!(
+        code.contains("pub const N_I: [[f64; N]; M]"),
+        "Missing N_I matrix"
+    );
 
     // Verify the sample rate is correctly emitted
     assert!(
@@ -453,9 +508,18 @@ fn test_generated_code_contains_all_constants() {
         m
     );
 
-    assert!(code.contains("pub const DC_BLOCK_R: f64 ="), "Missing DC_BLOCK_R constant");
-    assert!(code.contains("pub const OUTPUT_SCALES: [f64; NUM_OUTPUTS] ="), "Missing OUTPUT_SCALES constant");
-    assert!(code.contains("pub const DC_OP_CONVERGED: bool ="), "Missing DC_OP_CONVERGED constant");
+    assert!(
+        code.contains("pub const DC_BLOCK_R: f64 ="),
+        "Missing DC_BLOCK_R constant"
+    );
+    assert!(
+        code.contains("pub const OUTPUT_SCALES: [f64; NUM_OUTPUTS] ="),
+        "Missing OUTPUT_SCALES constant"
+    );
+    assert!(
+        code.contains("pub const DC_OP_CONVERGED: bool ="),
+        "Missing DC_OP_CONVERGED constant"
+    );
 }
 
 /// Verify that the generated code contains all expected functions.
@@ -464,11 +528,26 @@ fn test_generated_code_contains_all_functions() {
     let (code, _netlist, _mna, _kernel) = generate_code(DIODE_CLIPPER_SPICE);
 
     assert!(code.contains("fn build_rhs("), "Missing build_rhs function");
-    assert!(code.contains("fn mat_vec_mul_s("), "Missing mat_vec_mul_s function");
-    assert!(code.contains("fn extract_controlling_voltages("), "Missing extract_controlling_voltages function");
-    assert!(code.contains("fn solve_nonlinear("), "Missing solve_nonlinear function");
-    assert!(code.contains("fn compute_final_voltages("), "Missing compute_final_voltages function");
-    assert!(code.contains("pub fn process_sample("), "Missing process_sample function");
+    assert!(
+        code.contains("fn mat_vec_mul_s("),
+        "Missing mat_vec_mul_s function"
+    );
+    assert!(
+        code.contains("fn extract_controlling_voltages("),
+        "Missing extract_controlling_voltages function"
+    );
+    assert!(
+        code.contains("fn solve_nonlinear("),
+        "Missing solve_nonlinear function"
+    );
+    assert!(
+        code.contains("fn compute_final_voltages("),
+        "Missing compute_final_voltages function"
+    );
+    assert!(
+        code.contains("pub fn process_sample("),
+        "Missing process_sample function"
+    );
 }
 
 /// Verify S matrix symmetry property is preserved in generated code for RC circuit.
@@ -483,13 +562,21 @@ fn test_generated_s_matrix_values_rc() {
     for i in 0..n {
         for j in 0..n {
             let val = kernel.s(i, j);
-            assert!(val.is_finite(), "S[{}][{}] should be finite, got {}", i, j, val);
+            assert!(
+                val.is_finite(),
+                "S[{}][{}] should be finite, got {}",
+                i,
+                j,
+                val
+            );
 
             let val_str = format!("{:.17e}", val);
             assert!(
                 code.contains(&val_str),
                 "S[{}][{}] = {} not found in generated code.",
-                i, j, val_str
+                i,
+                j,
+                val_str
             );
         }
     }
@@ -610,7 +697,9 @@ fn test_generated_nv_matrix_matches_kernel() {
             assert!(
                 code.contains(&val_str),
                 "N_V[{}][{}] = {} not found in generated code.",
-                i, j, val_str
+                i,
+                j,
+                val_str
             );
         }
     }
@@ -623,13 +712,31 @@ fn test_generated_process_sample_pipeline() {
 
     // The process_sample function should call all pipeline functions in order
     assert!(code.contains("let rhs = build_rhs("), "Step 1: build_rhs");
-    assert!(code.contains("let v_pred = mat_vec_mul_s("), "Step 2: mat_vec_mul_s");
-    assert!(code.contains("let p = extract_controlling_voltages("), "Step 3: extract_controlling_voltages");
-    assert!(code.contains("let i_nl = solve_nonlinear("), "Step 4: solve_nonlinear");
-    assert!(code.contains("let v = compute_final_voltages("), "Step 5: compute_final_voltages");
+    assert!(
+        code.contains("let v_pred = mat_vec_mul_s("),
+        "Step 2: mat_vec_mul_s"
+    );
+    assert!(
+        code.contains("let p = extract_controlling_voltages("),
+        "Step 3: extract_controlling_voltages"
+    );
+    assert!(
+        code.contains("let i_nl = solve_nonlinear("),
+        "Step 4: solve_nonlinear"
+    );
+    assert!(
+        code.contains("let v = compute_final_voltages("),
+        "Step 5: compute_final_voltages"
+    );
     assert!(code.contains("state.v_prev = v;"), "Step 7: update v_prev");
-    assert!(code.contains("state.i_nl_prev = i_nl;"), "Step 7: update i_nl_prev");
-    assert!(code.contains("v[OUTPUT_NODES[out_idx]]"), "Step 8: read output");
+    assert!(
+        code.contains("state.i_nl_prev = i_nl;"),
+        "Step 7: update i_nl_prev"
+    );
+    assert!(
+        code.contains("v[OUTPUT_NODES[out_idx]]"),
+        "Step 8: read output"
+    );
 }
 
 // ==========================================================================
@@ -673,8 +780,14 @@ fn test_codegen_bjt_nr_solver_generates_residuals_and_jacobian() {
     assert_eq!(kernel.m, 2);
 
     // Should generate residuals f0 and f1
-    assert!(code.contains("let f0 = i_nl[0] - i_dev0"), "Missing residual f0");
-    assert!(code.contains("let f1 = i_nl[1] - i_dev1"), "Missing residual f1");
+    assert!(
+        code.contains("let f0 = i_nl[0] - i_dev0"),
+        "Missing residual f0"
+    );
+    assert!(
+        code.contains("let f1 = i_nl[1] - i_dev1"),
+        "Missing residual f1"
+    );
 
     // NR Jacobian should use the 2D chain rule:
     // j00 = 1.0 - jdev_0_0 * K[0][0] - jdev_0_1 * K[1][0]
@@ -751,8 +864,14 @@ fn test_codegen_mixed_diode_bjt_device_map() {
     assert_eq!(kernel.m, 3, "Expected m=3 for diode + BJT circuit");
 
     // Diode at index 0 (device 0) with state fields for IS, N_VT
-    assert!(code.contains("diode_current(v_d0, state.device_0_is, state.device_0_n_vt)"), "Diode current at index 0");
-    assert!(code.contains("jdev_0_0 = diode_conductance(v_d0, state.device_0_is, state.device_0_n_vt)"), "Diode jdev at index 0");
+    assert!(
+        code.contains("diode_current(v_d0, state.device_0_is, state.device_0_n_vt)"),
+        "Diode current at index 0"
+    );
+    assert!(
+        code.contains("jdev_0_0 = diode_conductance(v_d0, state.device_0_is, state.device_0_n_vt)"),
+        "Diode jdev at index 0"
+    );
 
     // BJT at indices 1,2 (device 1) with state fields for IS/VT/BF/BR, const for SIGN/NF/GP/ISE/NE
     assert!(code.contains("bjt_ic(v_d1, v_d2, state.device_1_is, state.device_1_vt, DEVICE_1_NF, state.device_1_br, DEVICE_1_SIGN, DEVICE_1_USE_GP, DEVICE_1_VAF, DEVICE_1_VAR, DEVICE_1_IKF, DEVICE_1_IKR)"), "BJT Ic at indices 1,2");
@@ -836,8 +955,7 @@ fn test_generated_code_compiles() {
         let tmp_path = tmp_dir.join(format!("melange_codegen_test_{}.rs", name));
 
         {
-            let mut f = std::fs::File::create(&tmp_path)
-                .expect("failed to create temp file");
+            let mut f = std::fs::File::create(&tmp_path).expect("failed to create temp file");
             f.write_all(code.as_bytes())
                 .expect("failed to write temp file");
         }
@@ -853,7 +971,8 @@ fn test_generated_code_compiles() {
         // Clean up temp files regardless of result
         let _ = std::fs::remove_file(&tmp_path);
         let _ = std::fs::remove_file(tmp_dir.join(format!("melange_codegen_test_{}.rlib", name)));
-        let _ = std::fs::remove_file(tmp_dir.join(format!("libmelange_codegen_test_{}.rlib", name)));
+        let _ =
+            std::fs::remove_file(tmp_dir.join(format!("libmelange_codegen_test_{}.rlib", name)));
 
         assert!(
             output.status.success(),
@@ -928,7 +1047,8 @@ fn test_invalid_input_node_rejected() {
     let err = result.unwrap_err();
     assert!(
         matches!(err, CodegenError::InvalidConfig(_)),
-        "Error should be InvalidConfig, got: {:?}", err
+        "Error should be InvalidConfig, got: {:?}",
+        err
     );
 }
 
@@ -949,7 +1069,8 @@ fn test_invalid_output_node_rejected() {
     let err = result.unwrap_err();
     assert!(
         matches!(err, CodegenError::InvalidConfig(_)),
-        "Error should be InvalidConfig, got: {:?}", err
+        "Error should be InvalidConfig, got: {:?}",
+        err
     );
 }
 
@@ -1038,7 +1159,11 @@ fn assert_vecs_close(a: &[f64], b: &[f64], label: &str) {
         assert!(
             diff <= tol || diff < 1e-30,
             "{} element {}: {} vs {} (diff={})",
-            label, i, x, y, diff
+            label,
+            i,
+            x,
+            y,
+            diff
         );
     }
 }
@@ -1081,16 +1206,27 @@ fn assert_ir_roundtrip(spice: &str) {
     let roundtrip_code = emitter.emit(&ir2).expect("roundtrip emit failed");
 
     // Both should contain all required functions
-    for func in &["process_sample", "build_rhs", "mat_vec_mul_s", "solve_nonlinear"] {
+    for func in &[
+        "process_sample",
+        "build_rhs",
+        "mat_vec_mul_s",
+        "solve_nonlinear",
+    ] {
         assert!(direct_code.contains(func), "direct code missing {}", func);
-        assert!(roundtrip_code.contains(func), "roundtrip code missing {}", func);
+        assert!(
+            roundtrip_code.contains(func),
+            "roundtrip code missing {}",
+            func
+        );
     }
 
     // Both should have the same structure (same number of lines)
     let direct_lines = direct_code.lines().count();
     let roundtrip_lines = roundtrip_code.lines().count();
-    assert_eq!(direct_lines, roundtrip_lines,
-        "Round-trip code should have same line count");
+    assert_eq!(
+        direct_lines, roundtrip_lines,
+        "Round-trip code should have same line count"
+    );
 }
 
 #[test]
@@ -1135,12 +1271,22 @@ fn test_ir_fields_match_kernel() {
     for i in 0..n {
         for j in 0..n {
             assert_eq!(
-                ir.g(i, j), mna.g[i][j],
-                "G[{}][{}] mismatch: IR={} vs MNA={}", i, j, ir.g(i, j), mna.g[i][j]
+                ir.g(i, j),
+                mna.g[i][j],
+                "G[{}][{}] mismatch: IR={} vs MNA={}",
+                i,
+                j,
+                ir.g(i, j),
+                mna.g[i][j]
             );
             assert_eq!(
-                ir.c(i, j), mna.c[i][j],
-                "C[{}][{}] mismatch: IR={} vs MNA={}", i, j, ir.c(i, j), mna.c[i][j]
+                ir.c(i, j),
+                mna.c[i][j],
+                "C[{}][{}] mismatch: IR={} vs MNA={}",
+                i,
+                j,
+                ir.c(i, j),
+                mna.c[i][j]
             );
         }
     }
@@ -1241,7 +1387,8 @@ fn test_heterogeneous_diode_models_compile() {
 
     {
         let mut f = std::fs::File::create(&tmp_path).expect("failed to create temp file");
-        f.write_all(code.as_bytes()).expect("failed to write temp file");
+        f.write_all(code.as_bytes())
+            .expect("failed to write temp file");
     }
 
     let output = std::process::Command::new("rustc")
@@ -1336,7 +1483,10 @@ fn test_ir_roundtrip_heterogeneous_devices() {
             melange_solver::codegen::ir::DeviceParams::Diode(d0),
             melange_solver::codegen::ir::DeviceParams::Diode(d1),
         ) => {
-            assert_ne!(d0.is, d1.is, "Round-trip should preserve distinct IS values");
+            assert_ne!(
+                d0.is, d1.is,
+                "Round-trip should preserve distinct IS values"
+            );
         }
         _ => panic!("Expected two Diode device params after round-trip"),
     }
@@ -1490,7 +1640,11 @@ C1 out 0 1u
     };
     let codegen = CodeGenerator::new(config);
     let result = codegen.generate(&kernel, &mna, &netlist);
-    assert!(result.is_ok(), "Codegen for M=10 should succeed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Codegen for M=10 should succeed: {:?}",
+        result.err()
+    );
 }
 
 // ==========================================================================
@@ -1600,7 +1754,8 @@ fn test_different_sample_rates_produce_different_alpha() {
         ..default_config()
     };
     let codegen_44100 = CodeGenerator::new(config_44100);
-    let result_44100 = codegen_44100.generate(&kernel_44100, &mna, &netlist)
+    let result_44100 = codegen_44100
+        .generate(&kernel_44100, &mna, &netlist)
         .expect("code generation at 44100 Hz failed");
 
     // Generate code at 48000 Hz
@@ -1610,13 +1765,17 @@ fn test_different_sample_rates_produce_different_alpha() {
         ..default_config()
     };
     let codegen_48000 = CodeGenerator::new(config_48000);
-    let result_48000 = codegen_48000.generate(&kernel_48000, &mna, &netlist)
+    let result_48000 = codegen_48000
+        .generate(&kernel_48000, &mna, &netlist)
         .expect("code generation at 48000 Hz failed");
 
     // ALPHA = 2 * sample_rate, so they must be different
     let alpha_44100 = format!("{:.17e}", 2.0 * 44100.0_f64);
     let alpha_48000 = format!("{:.17e}", 2.0 * 48000.0_f64);
-    assert_ne!(alpha_44100, alpha_48000, "ALPHA values should differ for different sample rates");
+    assert_ne!(
+        alpha_44100, alpha_48000,
+        "ALPHA values should differ for different sample rates"
+    );
 
     assert!(
         result_44100.code.contains(&alpha_44100),
@@ -1652,7 +1811,8 @@ fn test_sample_rate_96000_produces_correct_alpha() {
         ..default_config()
     };
     let codegen = CodeGenerator::new(config);
-    let result = codegen.generate(&kernel, &mna, &netlist)
+    let result = codegen
+        .generate(&kernel, &mna, &netlist)
         .expect("code generation at 96000 Hz failed");
 
     let expected_alpha = format!("{:.17e}", 2.0 * 96000.0_f64);
@@ -1707,7 +1867,11 @@ fn test_vs_augmented_mna_stamps_into_g_matrix() {
 
     // n_aug = n + 1 (one voltage source)
     let n = mna.n;
-    assert_eq!(mna.n_aug, n + 1, "n_aug should be n+1 for one voltage source");
+    assert_eq!(
+        mna.n_aug,
+        n + 1,
+        "n_aug should be n+1 for one voltage source"
+    );
     assert_eq!(mna.g.len(), n + 1, "G should be n_aug × n_aug");
 
     let vcc_idx = mna.node_map["vcc"] - 1; // 0-indexed matrix row
@@ -1786,7 +1950,8 @@ fn test_generated_code_includes_rhs_const_for_dc_source() {
         ..CodegenConfig::default()
     };
     let codegen = CodeGenerator::new(config);
-    let result = codegen.generate(&kernel, &mna, &netlist)
+    let result = codegen
+        .generate(&kernel, &mna, &netlist)
         .expect("code generation failed");
 
     assert!(
@@ -1839,8 +2004,8 @@ fn test_dc_short_conductance_exists() {
 
 #[test]
 fn test_codegen_runtime_consistency_bjt() {
-    use melange_solver::solver::{CircuitSolver, DeviceEntry};
     use melange_devices::bjt::{BjtEbersMoll, BjtPolarity};
+    use melange_solver::solver::{CircuitSolver, DeviceEntry};
 
     // --- Part 1: Structural verification of generated code ---
     let (code, _netlist, _mna, kernel) = generate_code(BJT_SPICE);
@@ -1855,7 +2020,9 @@ fn test_codegen_runtime_consistency_bjt() {
             assert!(
                 code.contains(&k_str),
                 "K[{}][{}] = {} must match between codegen and runtime",
-                i, j, k_val
+                i,
+                j,
+                k_val
             );
         }
     }
@@ -1920,7 +2087,10 @@ Rbias vcc 0 10k
 
     // Output should have variation (not stuck at DC)
     let out_min = outputs[100..].iter().cloned().fold(f64::INFINITY, f64::min);
-    let out_max = outputs[100..].iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let out_max = outputs[100..]
+        .iter()
+        .cloned()
+        .fold(f64::NEG_INFINITY, f64::max);
     let out_pp = out_max - out_min;
 
     assert!(
@@ -1996,13 +2166,34 @@ fn test_generated_code_state_has_matrix_fields() {
         code.contains("pub s_ni: [[f64; M]; N]"),
         "CircuitState must have s_ni matrix field."
     );
-    assert!(code.contains("pub dc_block_x_prev: [f64; NUM_OUTPUTS]"), "CircuitState must have dc_block_x_prev field.");
-    assert!(code.contains("pub dc_block_y_prev: [f64; NUM_OUTPUTS]"), "CircuitState must have dc_block_y_prev field.");
-    assert!(code.contains("pub dc_block_r: f64"), "CircuitState must have dc_block_r field.");
-    assert!(code.contains("pub diag_peak_output: f64"), "CircuitState must have diag_peak_output field.");
-    assert!(code.contains("pub diag_clamp_count: u64"), "CircuitState must have diag_clamp_count field.");
-    assert!(code.contains("pub diag_nr_max_iter_count: u64"), "CircuitState must have diag_nr_max_iter_count field.");
-    assert!(code.contains("pub diag_nan_reset_count: u64"), "CircuitState must have diag_nan_reset_count field.");
+    assert!(
+        code.contains("pub dc_block_x_prev: [f64; NUM_OUTPUTS]"),
+        "CircuitState must have dc_block_x_prev field."
+    );
+    assert!(
+        code.contains("pub dc_block_y_prev: [f64; NUM_OUTPUTS]"),
+        "CircuitState must have dc_block_y_prev field."
+    );
+    assert!(
+        code.contains("pub dc_block_r: f64"),
+        "CircuitState must have dc_block_r field."
+    );
+    assert!(
+        code.contains("pub diag_peak_output: f64"),
+        "CircuitState must have diag_peak_output field."
+    );
+    assert!(
+        code.contains("pub diag_clamp_count: u64"),
+        "CircuitState must have diag_clamp_count field."
+    );
+    assert!(
+        code.contains("pub diag_nr_max_iter_count: u64"),
+        "CircuitState must have diag_nr_max_iter_count field."
+    );
+    assert!(
+        code.contains("pub diag_nan_reset_count: u64"),
+        "CircuitState must have diag_nan_reset_count field."
+    );
 }
 
 /// Verify that S_DEFAULT, A_NEG_DEFAULT, K_DEFAULT, S_NI_DEFAULT are emitted.
@@ -2011,9 +2202,15 @@ fn test_generated_code_has_default_matrix_constants() {
     let (code, _netlist, _mna, _kernel) = generate_code(DIODE_CLIPPER_SPICE);
 
     assert!(code.contains("pub const S_DEFAULT:"), "Missing S_DEFAULT");
-    assert!(code.contains("pub const A_NEG_DEFAULT:"), "Missing A_NEG_DEFAULT");
+    assert!(
+        code.contains("pub const A_NEG_DEFAULT:"),
+        "Missing A_NEG_DEFAULT"
+    );
     assert!(code.contains("pub const K_DEFAULT:"), "Missing K_DEFAULT");
-    assert!(code.contains("pub const S_NI_DEFAULT:"), "Missing S_NI_DEFAULT");
+    assert!(
+        code.contains("pub const S_NI_DEFAULT:"),
+        "Missing S_NI_DEFAULT"
+    );
 }
 
 /// Verify that the NR solver uses state.k instead of K constant.
@@ -2054,18 +2251,19 @@ fn test_build_rhs_uses_state_a_neg() {
 fn test_ir_has_g_and_c_matrices() {
     let (netlist, mna, kernel) = build_pipeline(RC_CIRCUIT_SPICE);
     let config = default_config();
-    let ir = CircuitIR::from_kernel(&kernel, &mna, &netlist, &config)
-        .expect("IR build failed");
+    let ir = CircuitIR::from_kernel(&kernel, &mna, &netlist, &config).expect("IR build failed");
 
     let n = ir.topology.n;
 
     // G and C matrices should be non-empty
     assert_eq!(
-        ir.matrices.g_matrix.len(), n * n,
+        ir.matrices.g_matrix.len(),
+        n * n,
         "G matrix should have N*N elements"
     );
     assert_eq!(
-        ir.matrices.c_matrix.len(), n * n,
+        ir.matrices.c_matrix.len(),
+        n * n,
         "C matrix should have N*N elements"
     );
 
@@ -2190,7 +2388,8 @@ fn test_generated_code_compiles_and_set_sample_rate_works() {
     // Write to temp file and compile
     let path = std::path::Path::new("/tmp/melange_sample_rate_test.rs");
     let mut f = std::fs::File::create(path).expect("create temp file");
-    f.write_all(test_harness.as_bytes()).expect("write temp file");
+    f.write_all(test_harness.as_bytes())
+        .expect("write temp file");
 
     let output = std::process::Command::new("rustc")
         .args([
@@ -2269,7 +2468,8 @@ fn test_nonlinear_circuit_set_sample_rate_compiles() {
 
     let path = std::path::Path::new("/tmp/melange_sr_nonlinear_test.rs");
     let mut f = std::fs::File::create(path).expect("create temp file");
-    f.write_all(test_harness.as_bytes()).expect("write temp file");
+    f.write_all(test_harness.as_bytes())
+        .expect("write temp file");
 
     let output = std::process::Command::new("rustc")
         .args([
@@ -2326,8 +2526,7 @@ C1 out 0 1u
         ..CodegenConfig::default()
     };
 
-    let ir = CircuitIR::from_kernel(&kernel, &mna, &netlist, &config)
-        .expect("IR build failed");
+    let ir = CircuitIR::from_kernel(&kernel, &mna, &netlist, &config).expect("IR build failed");
 
     assert_eq!(ir.inductors.len(), 1, "Should have 1 inductor");
     assert!(
@@ -2351,7 +2550,9 @@ C1 out 0 100n
 ";
     let (netlist, mna, kernel) = build_pipeline(pot_spice);
     let codegen = CodeGenerator::new(default_config());
-    let result = codegen.generate(&kernel, &mna, &netlist).expect("codegen failed");
+    let result = codegen
+        .generate(&kernel, &mna, &netlist)
+        .expect("codegen failed");
 
     let test_harness = format!(
         "{}\n\
@@ -2400,21 +2601,36 @@ C1 out 0 100n
 
     let path = std::path::Path::new("/tmp/melange_pot_sr_test.rs");
     let mut f = std::fs::File::create(path).expect("create temp file");
-    f.write_all(test_harness.as_bytes()).expect("write temp file");
+    f.write_all(test_harness.as_bytes())
+        .expect("write temp file");
 
     let output = std::process::Command::new("rustc")
-        .args([path.to_str().unwrap(), "-o", "/tmp/melange_pot_sr_test", "--edition", "2021"])
+        .args([
+            path.to_str().unwrap(),
+            "-o",
+            "/tmp/melange_pot_sr_test",
+            "--edition",
+            "2021",
+        ])
         .output()
         .expect("run rustc");
 
     if !output.status.success() {
-        panic!("Pot set_sample_rate test failed to compile:\n{}", String::from_utf8_lossy(&output.stderr));
+        panic!(
+            "Pot set_sample_rate test failed to compile:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
-    let run_output = std::process::Command::new("/tmp/melange_pot_sr_test").output().expect("run test");
+    let run_output = std::process::Command::new("/tmp/melange_pot_sr_test")
+        .output()
+        .expect("run test");
     if !run_output.status.success() {
-        panic!("Pot set_sample_rate test failed:\nstdout: {}\nstderr: {}",
-            String::from_utf8_lossy(&run_output.stdout), String::from_utf8_lossy(&run_output.stderr));
+        panic!(
+            "Pot set_sample_rate test failed:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&run_output.stdout),
+            String::from_utf8_lossy(&run_output.stderr)
+        );
     }
 }
 
@@ -2438,7 +2654,9 @@ C1 out 0 1u
         ..CodegenConfig::default()
     };
     let codegen = CodeGenerator::new(config);
-    let result = codegen.generate(&kernel, &mna, &netlist).expect("codegen failed");
+    let result = codegen
+        .generate(&kernel, &mna, &netlist)
+        .expect("codegen failed");
 
     let test_harness = format!(
         "{}\n\
@@ -2491,21 +2709,36 @@ C1 out 0 1u
 
     let path = std::path::Path::new("/tmp/melange_ind_sr_test.rs");
     let mut f = std::fs::File::create(path).expect("create temp file");
-    f.write_all(test_harness.as_bytes()).expect("write temp file");
+    f.write_all(test_harness.as_bytes())
+        .expect("write temp file");
 
     let output = std::process::Command::new("rustc")
-        .args([path.to_str().unwrap(), "-o", "/tmp/melange_ind_sr_test", "--edition", "2021"])
+        .args([
+            path.to_str().unwrap(),
+            "-o",
+            "/tmp/melange_ind_sr_test",
+            "--edition",
+            "2021",
+        ])
         .output()
         .expect("run rustc");
 
     if !output.status.success() {
-        panic!("Inductor set_sample_rate test failed to compile:\n{}", String::from_utf8_lossy(&output.stderr));
+        panic!(
+            "Inductor set_sample_rate test failed to compile:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
-    let run_output = std::process::Command::new("/tmp/melange_ind_sr_test").output().expect("run test");
+    let run_output = std::process::Command::new("/tmp/melange_ind_sr_test")
+        .output()
+        .expect("run test");
     if !run_output.status.success() {
-        panic!("Inductor set_sample_rate test failed:\nstdout: {}\nstderr: {}",
-            String::from_utf8_lossy(&run_output.stdout), String::from_utf8_lossy(&run_output.stderr));
+        panic!(
+            "Inductor set_sample_rate test failed:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&run_output.stdout),
+            String::from_utf8_lossy(&run_output.stderr)
+        );
     }
 }
 
@@ -2543,7 +2776,8 @@ fn test_codegen_m5_generates_gauss_elim() {
     for i in 0..5 {
         assert!(
             code.contains(&format!("let f{} = i_nl[{}] - i_dev{}", i, i, i)),
-            "Missing residual f{}", i
+            "Missing residual f{}",
+            i
         );
     }
 
@@ -2552,13 +2786,21 @@ fn test_codegen_m5_generates_gauss_elim() {
         for j in 0..5 {
             assert!(
                 code.contains(&format!("let j{}{} =", i, j)),
-                "Missing Jacobian entry j{}{}", i, j
+                "Missing Jacobian entry j{}{}",
+                i,
+                j
             );
         }
     }
 
-    assert!(code.contains("partial pivoting"), "Should use partial pivoting");
-    assert!(code.contains("Back substitution"), "Should have back substitution");
+    assert!(
+        code.contains("partial pivoting"),
+        "Should use partial pivoting"
+    );
+    assert!(
+        code.contains("Back substitution"),
+        "Should have back substitution"
+    );
 }
 
 #[test]
@@ -2617,12 +2859,16 @@ C1 out 0 1u
 fn test_codegen_m6_six_diodes() {
     let (code, _netlist, _mna, kernel) = generate_code(SIX_DIODE_SPICE);
     assert_eq!(kernel.m, 6);
-    assert!(code.contains("Solve 6x6"), "M=6 should use Gaussian elimination");
+    assert!(
+        code.contains("Solve 6x6"),
+        "M=6 should use Gaussian elimination"
+    );
 
     for i in 0..6 {
         assert!(
             code.contains(&format!("let f{} = i_nl[{}] - i_dev{}", i, i, i)),
-            "Missing residual f{}", i
+            "Missing residual f{}",
+            i
         );
     }
 }
@@ -2687,12 +2933,16 @@ C1 out 0 1u
 fn test_codegen_m8_generates_gauss_elim() {
     let (code, _netlist, _mna, kernel) = generate_code(EIGHT_DIODE_SPICE);
     assert_eq!(kernel.m, 8);
-    assert!(code.contains("Solve 8x8"), "M=8 should use Gaussian elimination");
+    assert!(
+        code.contains("Solve 8x8"),
+        "M=8 should use Gaussian elimination"
+    );
 
     for i in 0..8 {
         assert!(
             code.contains(&format!("let f{} = i_nl[{}] - i_dev{}", i, i, i)),
-            "Missing residual f{}", i
+            "Missing residual f{}",
+            i
         );
     }
 
@@ -2700,7 +2950,9 @@ fn test_codegen_m8_generates_gauss_elim() {
         for j in 0..8 {
             assert!(
                 code.contains(&format!("let j{}{} =", i, j)),
-                "Missing Jacobian entry j{}{}", i, j
+                "Missing Jacobian entry j{}{}",
+                i,
+                j
             );
         }
     }
@@ -2792,12 +3044,18 @@ fn test_jfet_codegen_generates_correct_functions() {
     // Should contain JFET device functions
     assert!(code.contains("jfet_id("), "Should contain jfet_id function");
     assert!(code.contains("jfet_ig("), "Should contain jfet_ig function");
-    assert!(code.contains("jfet_jacobian("), "Should contain jfet_jacobian function");
+    assert!(
+        code.contains("jfet_jacobian("),
+        "Should contain jfet_jacobian function"
+    );
 
     // Should have JFET device constants
     assert!(code.contains("DEVICE_0_IDSS"), "Should have IDSS constant");
     assert!(code.contains("DEVICE_0_VP"), "Should have VP constant");
-    assert!(code.contains("DEVICE_0_LAMBDA"), "Should have LAMBDA constant");
+    assert!(
+        code.contains("DEVICE_0_LAMBDA"),
+        "Should have LAMBDA constant"
+    );
     assert!(code.contains("DEVICE_0_SIGN"), "Should have SIGN constant");
 
     // Should call JFET functions in NR loop with state fields for IDSS/VP/LAMBDA, const for SIGN.
@@ -2865,7 +3123,10 @@ Cs src 0 10u
 
     // Should contain both device types
     assert!(code.contains("jfet_id("), "Should have JFET functions");
-    assert!(code.contains("diode_current("), "Should have diode functions");
+    assert!(
+        code.contains("diode_current("),
+        "Should have diode functions"
+    );
     assert!(code.contains("DEVICE_0_IDSS"), "JFET at device 0");
     assert!(code.contains("DEVICE_1_IS"), "Diode at device 1");
 
@@ -2908,7 +3169,9 @@ fn test_jfet_codegen_compiles_and_runs() {
         ..CodegenConfig::default()
     };
     let codegen = CodeGenerator::new(config);
-    let result = codegen.generate(&kernel, &mna, &netlist).expect("codegen failed");
+    let result = codegen
+        .generate(&kernel, &mna, &netlist)
+        .expect("codegen failed");
 
     let test_harness = format!(
         "{}\n\
@@ -2944,11 +3207,18 @@ fn test_jfet_codegen_compiles_and_runs() {
     let bin_path = tmp_dir.join("melange_jfet_run_test");
     {
         let mut f = std::fs::File::create(&src_path).expect("create temp file");
-        f.write_all(test_harness.as_bytes()).expect("write temp file");
+        f.write_all(test_harness.as_bytes())
+            .expect("write temp file");
     }
 
     let compile = std::process::Command::new("rustc")
-        .args([src_path.to_str().unwrap(), "-o", bin_path.to_str().unwrap(), "--edition", "2021"])
+        .args([
+            src_path.to_str().unwrap(),
+            "-o",
+            bin_path.to_str().unwrap(),
+            "--edition",
+            "2021",
+        ])
         .output()
         .expect("run rustc");
 
@@ -2960,7 +3230,9 @@ fn test_jfet_codegen_compiles_and_runs() {
         );
     }
 
-    let run = std::process::Command::new(&bin_path).output().expect("run test binary");
+    let run = std::process::Command::new(&bin_path)
+        .output()
+        .expect("run test binary");
     let _ = std::fs::remove_file(&src_path);
     let _ = std::fs::remove_file(&bin_path);
 
@@ -3002,7 +3274,9 @@ C1 out 0 100n
         ..CodegenConfig::default()
     };
     let codegen = CodeGenerator::new(config);
-    let result = codegen.generate(&kernel, &mna, &netlist).expect("codegen failed");
+    let result = codegen
+        .generate(&kernel, &mna, &netlist)
+        .expect("codegen failed");
 
     // Verify P-channel sign is emitted
     assert!(
@@ -3045,11 +3319,18 @@ C1 out 0 100n
     let bin_path = tmp_dir.join("melange_pjfet_run_test");
     {
         let mut f = std::fs::File::create(&src_path).expect("create temp file");
-        f.write_all(test_harness.as_bytes()).expect("write temp file");
+        f.write_all(test_harness.as_bytes())
+            .expect("write temp file");
     }
 
     let compile = std::process::Command::new("rustc")
-        .args([src_path.to_str().unwrap(), "-o", bin_path.to_str().unwrap(), "--edition", "2021"])
+        .args([
+            src_path.to_str().unwrap(),
+            "-o",
+            bin_path.to_str().unwrap(),
+            "--edition",
+            "2021",
+        ])
         .output()
         .expect("run rustc");
 
@@ -3061,7 +3342,9 @@ C1 out 0 100n
         );
     }
 
-    let run = std::process::Command::new(&bin_path).output().expect("run test binary");
+    let run = std::process::Command::new(&bin_path)
+        .output()
+        .expect("run test binary");
     let _ = std::fs::remove_file(&src_path);
     let _ = std::fs::remove_file(&bin_path);
 
@@ -3126,7 +3409,9 @@ fn test_oversampling_2x_generates_correct_structure() {
 
     // Should have public process_sample wrapper
     assert!(
-        code.contains("pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS]"),
+        code.contains(
+            "pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS]"
+        ),
         "Should emit public process_sample wrapper"
     );
 
@@ -3198,7 +3483,11 @@ fn test_oversampling_invalid_factor_rejected() {
     let err = result.unwrap_err();
     match err {
         CodegenError::InvalidConfig(msg) => {
-            assert!(msg.contains("oversampling_factor"), "Error should mention oversampling_factor: {}", msg);
+            assert!(
+                msg.contains("oversampling_factor"),
+                "Error should mention oversampling_factor: {}",
+                msg
+            );
         }
         _ => panic!("Expected InvalidConfig, got {:?}", err),
     }
@@ -3424,7 +3713,8 @@ fn test_oversampling_2x_matrices_at_internal_rate() {
     assert!(
         (alpha_2x - 2.0 * alpha_1x).abs() < 1.0,
         "2x alpha {} should be double 1x alpha {}",
-        alpha_2x, alpha_1x
+        alpha_2x,
+        alpha_1x
     );
 
     // S matrix should match the 88200 Hz kernel's S matrix (same rate)
@@ -3524,10 +3814,22 @@ fn test_codegen_bjt_gp_constants_emitted() {
     let result = codegen.generate(&kernel, &mna, &netlist).unwrap();
     let code = &result.code;
 
-    assert!(code.contains("DEVICE_0_USE_GP: bool = true"), "GP flag should be true");
-    assert!(code.contains("DEVICE_0_VAF"), "VAF constant should be emitted");
-    assert!(code.contains("DEVICE_0_IKF"), "IKF constant should be emitted");
-    assert!(code.contains("bjt_qb"), "qb function should be in generated code");
+    assert!(
+        code.contains("DEVICE_0_USE_GP: bool = true"),
+        "GP flag should be true"
+    );
+    assert!(
+        code.contains("DEVICE_0_VAF"),
+        "VAF constant should be emitted"
+    );
+    assert!(
+        code.contains("DEVICE_0_IKF"),
+        "IKF constant should be emitted"
+    );
+    assert!(
+        code.contains("bjt_qb"),
+        "qb function should be in generated code"
+    );
 }
 
 /// Non-GP BJT (no VAF/VAR/IKF/IKR, unknown model name) should emit USE_GP=false.
@@ -3544,9 +3846,15 @@ Re e 0 1k
 ";
     let (code, _netlist, _mna, _kernel) = generate_code(spice);
 
-    assert!(code.contains("DEVICE_0_USE_GP: bool = false"), "GP flag should be false for EM");
+    assert!(
+        code.contains("DEVICE_0_USE_GP: bool = false"),
+        "GP flag should be false for EM"
+    );
     // GP constants still emitted but as infinity
-    assert!(code.contains("DEVICE_0_VAF"), "VAF constant should still be emitted");
+    assert!(
+        code.contains("DEVICE_0_VAF"),
+        "VAF constant should still be emitted"
+    );
 }
 
 /// IR BjtParams with GP fields round-trips through serde.
@@ -3555,12 +3863,28 @@ fn test_ir_bjt_params_gp_serde_roundtrip() {
     use melange_solver::codegen::ir::BjtParams;
 
     let bp = BjtParams {
-        is: 1e-14, vt: 0.02585, beta_f: 200.0, beta_r: 3.0,
-        is_pnp: false, vaf: 100.0, var: f64::INFINITY, ikf: 0.3, ikr: f64::INFINITY,
-        cje: 0.0, cjc: 0.0,
-        nf: 1.0, ise: 0.0, ne: 1.5,
-        rb: 0.0, rc: 0.0, re: 0.0,
-        rth: f64::INFINITY, cth: 1e-3, xti: 3.0, eg: 1.11, tamb: 300.15,
+        is: 1e-14,
+        vt: 0.02585,
+        beta_f: 200.0,
+        beta_r: 3.0,
+        is_pnp: false,
+        vaf: 100.0,
+        var: f64::INFINITY,
+        ikf: 0.3,
+        ikr: f64::INFINITY,
+        cje: 0.0,
+        cjc: 0.0,
+        nf: 1.0,
+        ise: 0.0,
+        ne: 1.5,
+        rb: 0.0,
+        rc: 0.0,
+        re: 0.0,
+        rth: f64::INFINITY,
+        cth: 1e-3,
+        xti: 3.0,
+        eg: 1.11,
+        tamb: 300.15,
     };
 
     let json = serde_json::to_string(&bp).unwrap();
@@ -3645,10 +3969,20 @@ Cp plate 0 1p
 .model 12AX7 TUBE(MU=100 EX=1.4 KG1=1060 KP=600 KVB=300)
 ";
     let netlist = Netlist::parse(spice).expect("parse failed");
-    let triodes: Vec<_> = netlist.elements.iter().filter(|e| matches!(e, melange_solver::parser::Element::Triode { .. })).collect();
+    let triodes: Vec<_> = netlist
+        .elements
+        .iter()
+        .filter(|e| matches!(e, melange_solver::parser::Element::Triode { .. }))
+        .collect();
     assert_eq!(triodes.len(), 1, "Should find one triode");
     match &triodes[0] {
-        melange_solver::parser::Element::Triode { name, n_grid, n_plate, n_cathode, model } => {
+        melange_solver::parser::Element::Triode {
+            name,
+            n_grid,
+            n_plate,
+            n_cathode,
+            model,
+        } => {
             assert_eq!(name, "T1");
             assert_eq!(n_grid, "grid");
             assert_eq!(n_plate, "plate");
@@ -3690,34 +4024,58 @@ Cp plate 0 1p
 
     // N_v row 0 (Vgk): +1 at grid, -1 at cathode
     if grid_node > 0 {
-        assert!((mna.n_v[0][grid_node - 1] - 1.0).abs() < 1e-15, "N_v[0][grid] should be +1");
+        assert!(
+            (mna.n_v[0][grid_node - 1] - 1.0).abs() < 1e-15,
+            "N_v[0][grid] should be +1"
+        );
     }
     if cathode_node > 0 {
-        assert!((mna.n_v[0][cathode_node - 1] - (-1.0)).abs() < 1e-15, "N_v[0][cathode] should be -1");
+        assert!(
+            (mna.n_v[0][cathode_node - 1] - (-1.0)).abs() < 1e-15,
+            "N_v[0][cathode] should be -1"
+        );
     }
 
     // N_v row 1 (Vpk): +1 at plate, -1 at cathode
     if plate_node > 0 {
-        assert!((mna.n_v[1][plate_node - 1] - 1.0).abs() < 1e-15, "N_v[1][plate] should be +1");
+        assert!(
+            (mna.n_v[1][plate_node - 1] - 1.0).abs() < 1e-15,
+            "N_v[1][plate] should be +1"
+        );
     }
     if cathode_node > 0 {
-        assert!((mna.n_v[1][cathode_node - 1] - (-1.0)).abs() < 1e-15, "N_v[1][cathode] should be -1");
+        assert!(
+            (mna.n_v[1][cathode_node - 1] - (-1.0)).abs() < 1e-15,
+            "N_v[1][cathode] should be -1"
+        );
     }
 
     // N_i col 0 (Ip): -1 at plate (extracted), +1 at cathode (injected)
     if plate_node > 0 {
-        assert!((mna.n_i[plate_node - 1][0] - (-1.0)).abs() < 1e-15, "N_i[plate][0] should be -1");
+        assert!(
+            (mna.n_i[plate_node - 1][0] - (-1.0)).abs() < 1e-15,
+            "N_i[plate][0] should be -1"
+        );
     }
     if cathode_node > 0 {
-        assert!((mna.n_i[cathode_node - 1][0] - 1.0).abs() < 1e-15, "N_i[cathode][0] should be +1");
+        assert!(
+            (mna.n_i[cathode_node - 1][0] - 1.0).abs() < 1e-15,
+            "N_i[cathode][0] should be +1"
+        );
     }
 
     // N_i col 1 (Ig): -1 at grid (extracted), +1 at cathode (injected)
     if grid_node > 0 {
-        assert!((mna.n_i[grid_node - 1][1] - (-1.0)).abs() < 1e-15, "N_i[grid][1] should be -1");
+        assert!(
+            (mna.n_i[grid_node - 1][1] - (-1.0)).abs() < 1e-15,
+            "N_i[grid][1] should be -1"
+        );
     }
     if cathode_node > 0 {
-        assert!((mna.n_i[cathode_node - 1][1] - 1.0).abs() < 1e-15, "N_i[cathode][1] should be +1");
+        assert!(
+            (mna.n_i[cathode_node - 1][1] - 1.0).abs() < 1e-15,
+            "N_i[cathode][1] should be +1"
+        );
     }
 }
 
@@ -3730,7 +4088,10 @@ fn test_codegen_triode_constants_and_functions() {
     // Should contain tube device functions
     assert!(code.contains("tube_ip("), "Should have tube_ip function");
     assert!(code.contains("tube_ig("), "Should have tube_ig function");
-    assert!(code.contains("tube_jacobian("), "Should have tube_jacobian function");
+    assert!(
+        code.contains("tube_jacobian("),
+        "Should have tube_jacobian function"
+    );
 
     // Should contain tube constants
     assert!(code.contains("DEVICE_0_MU"), "Should have MU constant");
@@ -3738,8 +4099,14 @@ fn test_codegen_triode_constants_and_functions() {
     assert!(code.contains("DEVICE_0_KG1"), "Should have KG1 constant");
     assert!(code.contains("DEVICE_0_KP"), "Should have KP constant");
     assert!(code.contains("DEVICE_0_KVB"), "Should have KVB constant");
-    assert!(code.contains("DEVICE_0_IG_MAX"), "Should have IG_MAX constant");
-    assert!(code.contains("DEVICE_0_VGK_ONSET"), "Should have VGK_ONSET constant");
+    assert!(
+        code.contains("DEVICE_0_IG_MAX"),
+        "Should have IG_MAX constant"
+    );
+    assert!(
+        code.contains("DEVICE_0_VGK_ONSET"),
+        "Should have VGK_ONSET constant"
+    );
 }
 
 /// Codegen: 12AX7 common-cathode amplifier compiles.
@@ -3789,7 +4156,9 @@ fn test_codegen_triode_compiles_and_runs() {
         ..CodegenConfig::default()
     };
     let codegen = CodeGenerator::new(config);
-    let result = codegen.generate(&kernel, &mna, &netlist).expect("codegen failed");
+    let result = codegen
+        .generate(&kernel, &mna, &netlist)
+        .expect("codegen failed");
 
     let test_harness = format!(
         "{}\n\
@@ -3825,11 +4194,18 @@ fn test_codegen_triode_compiles_and_runs() {
     let bin_path = tmp_dir.join("melange_triode_run_test");
     {
         let mut f = std::fs::File::create(&src_path).expect("create temp file");
-        f.write_all(test_harness.as_bytes()).expect("write temp file");
+        f.write_all(test_harness.as_bytes())
+            .expect("write temp file");
     }
 
     let compile = std::process::Command::new("rustc")
-        .args([src_path.to_str().unwrap(), "-o", bin_path.to_str().unwrap(), "--edition", "2021"])
+        .args([
+            src_path.to_str().unwrap(),
+            "-o",
+            bin_path.to_str().unwrap(),
+            "--edition",
+            "2021",
+        ])
         .output()
         .expect("run rustc");
 
@@ -3841,7 +4217,9 @@ fn test_codegen_triode_compiles_and_runs() {
         );
     }
 
-    let run = std::process::Command::new(&bin_path).output().expect("run test binary");
+    let run = std::process::Command::new(&bin_path)
+        .output()
+        .expect("run test binary");
     let _ = std::fs::remove_file(&src_path);
     let _ = std::fs::remove_file(&bin_path);
 
@@ -3869,7 +4247,9 @@ fn test_codegen_two_triode_preamp_compiles_and_runs() {
         ..CodegenConfig::default()
     };
     let codegen = CodeGenerator::new(config);
-    let result = codegen.generate(&kernel, &mna, &netlist).expect("codegen failed");
+    let result = codegen
+        .generate(&kernel, &mna, &netlist)
+        .expect("codegen failed");
 
     let test_harness = format!(
         "{}\n\
@@ -3905,11 +4285,18 @@ fn test_codegen_two_triode_preamp_compiles_and_runs() {
     let bin_path = tmp_dir.join("melange_triode_preamp_test");
     {
         let mut f = std::fs::File::create(&src_path).expect("create temp file");
-        f.write_all(test_harness.as_bytes()).expect("write temp file");
+        f.write_all(test_harness.as_bytes())
+            .expect("write temp file");
     }
 
     let compile = std::process::Command::new("rustc")
-        .args([src_path.to_str().unwrap(), "-o", bin_path.to_str().unwrap(), "--edition", "2021"])
+        .args([
+            src_path.to_str().unwrap(),
+            "-o",
+            bin_path.to_str().unwrap(),
+            "--edition",
+            "2021",
+        ])
         .output()
         .expect("run rustc");
 
@@ -3921,7 +4308,9 @@ fn test_codegen_two_triode_preamp_compiles_and_runs() {
         );
     }
 
-    let run = std::process::Command::new(&bin_path).output().expect("run test binary");
+    let run = std::process::Command::new(&bin_path)
+        .output()
+        .expect("run test binary");
     let _ = std::fs::remove_file(&src_path);
     let _ = std::fs::remove_file(&bin_path);
 
@@ -3947,23 +4336,35 @@ fn test_output_scale_non_default_emitted() {
         ..default_config()
     };
     let codegen = CodeGenerator::new(config);
-    let result = codegen.generate(&kernel, &mna, &netlist)
+    let result = codegen
+        .generate(&kernel, &mna, &netlist)
         .expect("code generation failed");
 
     // Should contain 0.5 (5.0e-1) as the OUTPUT_SCALES constant
-    assert!(result.code.contains("OUTPUT_SCALES"),
-        "Generated code should contain OUTPUT_SCALES constant");
-    assert!(result.code.contains("5.0") || result.code.contains("5e-1") || result.code.contains("0.5"),
+    assert!(
+        result.code.contains("OUTPUT_SCALES"),
+        "Generated code should contain OUTPUT_SCALES constant"
+    );
+    assert!(
+        result.code.contains("5.0") || result.code.contains("5e-1") || result.code.contains("0.5"),
         "OUTPUT_SCALES should be 0.5, not 1.0. Code snippet: {}",
-        result.code.lines()
+        result
+            .code
+            .lines()
             .find(|l| l.contains("OUTPUT_SCALES"))
-            .unwrap_or("NOT FOUND"));
+            .unwrap_or("NOT FOUND")
+    );
     // Should NOT contain the default 1.0e0 value for OUTPUT_SCALES
-    let scale_line = result.code.lines()
+    let scale_line = result
+        .code
+        .lines()
         .find(|l| l.contains("OUTPUT_SCALES"))
         .expect("OUTPUT_SCALES line should exist");
-    assert!(!scale_line.contains("1.00000000000000000e0"),
-        "OUTPUT_SCALES should not be default 1.0, got: {}", scale_line);
+    assert!(
+        !scale_line.contains("1.00000000000000000e0"),
+        "OUTPUT_SCALES should not be default 1.0, got: {}",
+        scale_line
+    );
 }
 
 /// Verify that output_scales=[2.0] is applied in process_sample via dc_blocked * OUTPUT_SCALES[out_idx].
@@ -3975,19 +4376,27 @@ fn test_output_scale_applied_in_process_sample() {
         ..default_config()
     };
     let codegen = CodeGenerator::new(config);
-    let result = codegen.generate(&kernel, &mna, &netlist)
+    let result = codegen
+        .generate(&kernel, &mna, &netlist)
         .expect("code generation failed");
 
     // The process_sample template applies: dc_blocked * OUTPUT_SCALES[out_idx]
-    assert!(result.code.contains("dc_blocked * OUTPUT_SCALES[out_idx]"),
-        "process_sample should multiply dc_blocked by OUTPUT_SCALES[out_idx]");
+    assert!(
+        result.code.contains("dc_blocked * OUTPUT_SCALES[out_idx]"),
+        "process_sample should multiply dc_blocked by OUTPUT_SCALES[out_idx]"
+    );
 
     // The constant should be 2.0
-    let scale_line = result.code.lines()
+    let scale_line = result
+        .code
+        .lines()
         .find(|l| l.contains("OUTPUT_SCALES"))
         .expect("OUTPUT_SCALES line should exist");
-    assert!(scale_line.contains("2.0"),
-        "OUTPUT_SCALES constant should contain 2.0, got: {}", scale_line);
+    assert!(
+        scale_line.contains("2.0"),
+        "OUTPUT_SCALES constant should contain 2.0, got: {}",
+        scale_line
+    );
 }
 
 // ==========================================================================
@@ -4021,21 +4430,35 @@ fn test_mosfet_codegen_generates_correct_functions() {
         ..CodegenConfig::default()
     };
     let codegen = CodeGenerator::new(config);
-    let result = codegen.generate(&kernel, &mna, &netlist).expect("codegen failed");
+    let result = codegen
+        .generate(&kernel, &mna, &netlist)
+        .expect("codegen failed");
     let code = result.code;
 
     // MOSFET is 2D: M=2 (Id + Ig)
     assert_eq!(kernel.m, 2, "MOSFET should be 2D (M=2)");
 
     // Should contain MOSFET device functions
-    assert!(code.contains("mosfet_id("), "Should contain mosfet_id function");
-    assert!(code.contains("mosfet_ig("), "Should contain mosfet_ig function");
-    assert!(code.contains("mosfet_jacobian("), "Should contain mosfet_jacobian function");
+    assert!(
+        code.contains("mosfet_id("),
+        "Should contain mosfet_id function"
+    );
+    assert!(
+        code.contains("mosfet_ig("),
+        "Should contain mosfet_ig function"
+    );
+    assert!(
+        code.contains("mosfet_jacobian("),
+        "Should contain mosfet_jacobian function"
+    );
 
     // Should have MOSFET device constants
     assert!(code.contains("DEVICE_0_KP"), "Should have KP constant");
     assert!(code.contains("DEVICE_0_VT"), "Should have VT constant");
-    assert!(code.contains("DEVICE_0_LAMBDA"), "Should have LAMBDA constant");
+    assert!(
+        code.contains("DEVICE_0_LAMBDA"),
+        "Should have LAMBDA constant"
+    );
     assert!(code.contains("DEVICE_0_SIGN"), "Should have SIGN constant");
 }
 
@@ -4059,7 +4482,9 @@ fn test_mosfet_codegen_compiles_and_runs() {
         ..CodegenConfig::default()
     };
     let codegen = CodeGenerator::new(config);
-    let result = codegen.generate(&kernel, &mna, &netlist).expect("codegen failed");
+    let result = codegen
+        .generate(&kernel, &mna, &netlist)
+        .expect("codegen failed");
 
     let test_harness = format!(
         "{}\n\
@@ -4097,11 +4522,18 @@ fn test_mosfet_codegen_compiles_and_runs() {
     let bin_path = tmp_dir.join("melange_mosfet_run_test");
     {
         let mut f = std::fs::File::create(&src_path).expect("create temp file");
-        f.write_all(test_harness.as_bytes()).expect("write temp file");
+        f.write_all(test_harness.as_bytes())
+            .expect("write temp file");
     }
 
     let compile = std::process::Command::new("rustc")
-        .args([src_path.to_str().unwrap(), "-o", bin_path.to_str().unwrap(), "--edition", "2021"])
+        .args([
+            src_path.to_str().unwrap(),
+            "-o",
+            bin_path.to_str().unwrap(),
+            "--edition",
+            "2021",
+        ])
         .output()
         .expect("run rustc");
 
@@ -4113,7 +4545,9 @@ fn test_mosfet_codegen_compiles_and_runs() {
         );
     }
 
-    let run = std::process::Command::new(&bin_path).output().expect("run test binary");
+    let run = std::process::Command::new(&bin_path)
+        .output()
+        .expect("run test binary");
     let _ = std::fs::remove_file(&src_path);
     let _ = std::fs::remove_file(&bin_path);
 
@@ -4154,7 +4588,9 @@ VCC vcc 0 DC 12
         ..CodegenConfig::default()
     };
     let codegen = CodeGenerator::new(config);
-    let result = codegen.generate(&kernel, &mna, &netlist).expect("codegen failed");
+    let result = codegen
+        .generate(&kernel, &mna, &netlist)
+        .expect("codegen failed");
 
     // Verify P-channel sign is emitted
     assert!(
@@ -4189,11 +4625,18 @@ VCC vcc 0 DC 12
     let bin_path = tmp_dir.join("melange_pmos_run_test");
     {
         let mut f = std::fs::File::create(&src_path).expect("create temp file");
-        f.write_all(test_harness.as_bytes()).expect("write temp file");
+        f.write_all(test_harness.as_bytes())
+            .expect("write temp file");
     }
 
     let compile = std::process::Command::new("rustc")
-        .args([src_path.to_str().unwrap(), "-o", bin_path.to_str().unwrap(), "--edition", "2021"])
+        .args([
+            src_path.to_str().unwrap(),
+            "-o",
+            bin_path.to_str().unwrap(),
+            "--edition",
+            "2021",
+        ])
         .output()
         .expect("run rustc");
 
@@ -4205,7 +4648,9 @@ VCC vcc 0 DC 12
         );
     }
 
-    let run = std::process::Command::new(&bin_path).output().expect("run test binary");
+    let run = std::process::Command::new(&bin_path)
+        .output()
+        .expect("run test binary");
     let _ = std::fs::remove_file(&src_path);
     let _ = std::fs::remove_file(&bin_path);
 
@@ -4248,7 +4693,9 @@ C2 out 0 100n
         ..CodegenConfig::default()
     };
     let codegen = CodeGenerator::new(config);
-    let result = codegen.generate(&kernel, &mna, &netlist).expect("codegen failed");
+    let result = codegen
+        .generate(&kernel, &mna, &netlist)
+        .expect("codegen failed");
     let code = &result.code;
 
     // Verify multi-output constants
@@ -4303,11 +4750,18 @@ C2 out 0 100n
     let bin_path = tmp_dir.join("melange_multi_output_test");
     {
         let mut f = std::fs::File::create(&src_path).expect("create temp file");
-        f.write_all(test_harness.as_bytes()).expect("write temp file");
+        f.write_all(test_harness.as_bytes())
+            .expect("write temp file");
     }
 
     let compile = std::process::Command::new("rustc")
-        .args([src_path.to_str().unwrap(), "-o", bin_path.to_str().unwrap(), "--edition", "2021"])
+        .args([
+            src_path.to_str().unwrap(),
+            "-o",
+            bin_path.to_str().unwrap(),
+            "--edition",
+            "2021",
+        ])
         .output()
         .expect("run rustc");
 
@@ -4319,7 +4773,9 @@ C2 out 0 100n
         );
     }
 
-    let run = std::process::Command::new(&bin_path).output().expect("run test binary");
+    let run = std::process::Command::new(&bin_path)
+        .output()
+        .expect("run test binary");
     let _ = std::fs::remove_file(&src_path);
     let _ = std::fs::remove_file(&bin_path);
 
@@ -4351,7 +4807,8 @@ fn test_empty_output_nodes_rejected() {
     let err = result.unwrap_err();
     assert!(
         matches!(err, CodegenError::InvalidConfig(_)),
-        "Error should be InvalidConfig, got: {:?}", err
+        "Error should be InvalidConfig, got: {:?}",
+        err
     );
 }
 
@@ -4370,11 +4827,15 @@ fn test_mismatched_output_scales_rejected() {
     let codegen = CodeGenerator::new(config);
     let result = codegen.generate(&kernel, &mna, &netlist);
 
-    assert!(result.is_err(), "Should reject mismatched output_scales length");
+    assert!(
+        result.is_err(),
+        "Should reject mismatched output_scales length"
+    );
     let err = result.unwrap_err();
     assert!(
         matches!(err, CodegenError::InvalidConfig(_)),
-        "Error should be InvalidConfig, got: {:?}", err
+        "Error should be InvalidConfig, got: {:?}",
+        err
     );
 }
 
@@ -4423,7 +4884,9 @@ fn test_vccs_codegen_compiles_and_runs() {
         ..CodegenConfig::default()
     };
     let codegen = CodeGenerator::new(config);
-    let result = codegen.generate(&kernel, &mna, &netlist).expect("codegen failed");
+    let result = codegen
+        .generate(&kernel, &mna, &netlist)
+        .expect("codegen failed");
 
     let test_harness = format!(
         "{}\n\
@@ -4453,11 +4916,18 @@ fn test_vccs_codegen_compiles_and_runs() {
     let bin_path = tmp_dir.join("melange_vccs_run_test");
     {
         let mut f = std::fs::File::create(&src_path).expect("create temp file");
-        f.write_all(test_harness.as_bytes()).expect("write temp file");
+        f.write_all(test_harness.as_bytes())
+            .expect("write temp file");
     }
 
     let compile = std::process::Command::new("rustc")
-        .args([src_path.to_str().unwrap(), "-o", bin_path.to_str().unwrap(), "--edition", "2021"])
+        .args([
+            src_path.to_str().unwrap(),
+            "-o",
+            bin_path.to_str().unwrap(),
+            "--edition",
+            "2021",
+        ])
         .output()
         .expect("run rustc");
 
@@ -4469,7 +4939,9 @@ fn test_vccs_codegen_compiles_and_runs() {
         );
     }
 
-    let run = std::process::Command::new(&bin_path).output().expect("run test binary");
+    let run = std::process::Command::new(&bin_path)
+        .output()
+        .expect("run test binary");
     let _ = std::fs::remove_file(&src_path);
     let _ = std::fs::remove_file(&bin_path);
 
@@ -4497,7 +4969,9 @@ fn test_vcvs_codegen_compiles_and_runs() {
         ..CodegenConfig::default()
     };
     let codegen = CodeGenerator::new(config);
-    let result = codegen.generate(&kernel, &mna, &netlist).expect("codegen failed");
+    let result = codegen
+        .generate(&kernel, &mna, &netlist)
+        .expect("codegen failed");
 
     let test_harness = format!(
         "{}\n\
@@ -4527,11 +5001,18 @@ fn test_vcvs_codegen_compiles_and_runs() {
     let bin_path = tmp_dir.join("melange_vcvs_run_test");
     {
         let mut f = std::fs::File::create(&src_path).expect("create temp file");
-        f.write_all(test_harness.as_bytes()).expect("write temp file");
+        f.write_all(test_harness.as_bytes())
+            .expect("write temp file");
     }
 
     let compile = std::process::Command::new("rustc")
-        .args([src_path.to_str().unwrap(), "-o", bin_path.to_str().unwrap(), "--edition", "2021"])
+        .args([
+            src_path.to_str().unwrap(),
+            "-o",
+            bin_path.to_str().unwrap(),
+            "--edition",
+            "2021",
+        ])
         .output()
         .expect("run rustc");
 
@@ -4543,7 +5024,9 @@ fn test_vcvs_codegen_compiles_and_runs() {
         );
     }
 
-    let run = std::process::Command::new(&bin_path).output().expect("run test binary");
+    let run = std::process::Command::new(&bin_path)
+        .output()
+        .expect("run test binary");
     let _ = std::fs::remove_file(&src_path);
     let _ = std::fs::remove_file(&bin_path);
 
@@ -4571,7 +5054,9 @@ fn test_vccs_with_diode_codegen_compiles_and_runs() {
         ..CodegenConfig::default()
     };
     let codegen = CodeGenerator::new(config);
-    let result = codegen.generate(&kernel, &mna, &netlist).expect("codegen failed");
+    let result = codegen
+        .generate(&kernel, &mna, &netlist)
+        .expect("codegen failed");
 
     let test_harness = format!(
         "{}\n\
@@ -4607,11 +5092,18 @@ fn test_vccs_with_diode_codegen_compiles_and_runs() {
     let bin_path = tmp_dir.join("melange_vccs_diode_run_test");
     {
         let mut f = std::fs::File::create(&src_path).expect("create temp file");
-        f.write_all(test_harness.as_bytes()).expect("write temp file");
+        f.write_all(test_harness.as_bytes())
+            .expect("write temp file");
     }
 
     let compile = std::process::Command::new("rustc")
-        .args([src_path.to_str().unwrap(), "-o", bin_path.to_str().unwrap(), "--edition", "2021"])
+        .args([
+            src_path.to_str().unwrap(),
+            "-o",
+            bin_path.to_str().unwrap(),
+            "--edition",
+            "2021",
+        ])
         .output()
         .expect("run rustc");
 
@@ -4623,7 +5115,9 @@ fn test_vccs_with_diode_codegen_compiles_and_runs() {
         );
     }
 
-    let run = std::process::Command::new(&bin_path).output().expect("run test binary");
+    let run = std::process::Command::new(&bin_path)
+        .output()
+        .expect("run test binary");
     let _ = std::fs::remove_file(&src_path);
     let _ = std::fs::remove_file(&bin_path);
 
@@ -4716,10 +5210,22 @@ fn test_runtime_device_params_diode_consts_still_exist() {
 fn test_runtime_device_params_bjt_state_fields() {
     let (code, _netlist, _mna, _kernel) = generate_code(BJT_SPICE);
 
-    assert!(code.contains("pub device_0_is: f64"), "BJT state should have device_0_is");
-    assert!(code.contains("pub device_0_vt: f64"), "BJT state should have device_0_vt");
-    assert!(code.contains("pub device_0_bf: f64"), "BJT state should have device_0_bf");
-    assert!(code.contains("pub device_0_br: f64"), "BJT state should have device_0_br");
+    assert!(
+        code.contains("pub device_0_is: f64"),
+        "BJT state should have device_0_is"
+    );
+    assert!(
+        code.contains("pub device_0_vt: f64"),
+        "BJT state should have device_0_vt"
+    );
+    assert!(
+        code.contains("pub device_0_bf: f64"),
+        "BJT state should have device_0_bf"
+    );
+    assert!(
+        code.contains("pub device_0_br: f64"),
+        "BJT state should have device_0_br"
+    );
 }
 
 /// BJT circuit: Default impl initializes from consts.
@@ -4727,10 +5233,22 @@ fn test_runtime_device_params_bjt_state_fields() {
 fn test_runtime_device_params_bjt_default_init() {
     let (code, _netlist, _mna, _kernel) = generate_code(BJT_SPICE);
 
-    assert!(code.contains("device_0_is: DEVICE_0_IS"), "Default should init device_0_is");
-    assert!(code.contains("device_0_vt: DEVICE_0_VT"), "Default should init device_0_vt");
-    assert!(code.contains("device_0_bf: DEVICE_0_BETA_F"), "Default should init device_0_bf");
-    assert!(code.contains("device_0_br: DEVICE_0_BETA_R"), "Default should init device_0_br");
+    assert!(
+        code.contains("device_0_is: DEVICE_0_IS"),
+        "Default should init device_0_is"
+    );
+    assert!(
+        code.contains("device_0_vt: DEVICE_0_VT"),
+        "Default should init device_0_vt"
+    );
+    assert!(
+        code.contains("device_0_bf: DEVICE_0_BETA_F"),
+        "Default should init device_0_bf"
+    );
+    assert!(
+        code.contains("device_0_br: DEVICE_0_BETA_R"),
+        "Default should init device_0_br"
+    );
 }
 
 /// BJT circuit: SIGN remains as const in NR loop (not state field).
@@ -4768,16 +5286,39 @@ fn test_runtime_device_params_tube_state_fields() {
         ..CodegenConfig::default()
     };
     let codegen = CodeGenerator::new(config);
-    let result = codegen.generate(&kernel, &mna, &netlist).expect("codegen failed");
+    let result = codegen
+        .generate(&kernel, &mna, &netlist)
+        .expect("codegen failed");
     let code = result.code;
 
-    assert!(code.contains("pub device_0_mu: f64"), "Tube state should have device_0_mu");
-    assert!(code.contains("pub device_0_ex: f64"), "Tube state should have device_0_ex");
-    assert!(code.contains("pub device_0_kg1: f64"), "Tube state should have device_0_kg1");
-    assert!(code.contains("pub device_0_kp: f64"), "Tube state should have device_0_kp");
-    assert!(code.contains("pub device_0_kvb: f64"), "Tube state should have device_0_kvb");
-    assert!(code.contains("pub device_0_ig_max: f64"), "Tube state should have device_0_ig_max");
-    assert!(code.contains("pub device_0_vgk_onset: f64"), "Tube state should have device_0_vgk_onset");
+    assert!(
+        code.contains("pub device_0_mu: f64"),
+        "Tube state should have device_0_mu"
+    );
+    assert!(
+        code.contains("pub device_0_ex: f64"),
+        "Tube state should have device_0_ex"
+    );
+    assert!(
+        code.contains("pub device_0_kg1: f64"),
+        "Tube state should have device_0_kg1"
+    );
+    assert!(
+        code.contains("pub device_0_kp: f64"),
+        "Tube state should have device_0_kp"
+    );
+    assert!(
+        code.contains("pub device_0_kvb: f64"),
+        "Tube state should have device_0_kvb"
+    );
+    assert!(
+        code.contains("pub device_0_ig_max: f64"),
+        "Tube state should have device_0_ig_max"
+    );
+    assert!(
+        code.contains("pub device_0_vgk_onset: f64"),
+        "Tube state should have device_0_vgk_onset"
+    );
 }
 
 /// Tube circuit: NR loop uses state fields for all tube params.
@@ -4795,7 +5336,9 @@ fn test_runtime_device_params_tube_nr_uses_state() {
         ..CodegenConfig::default()
     };
     let codegen = CodeGenerator::new(config);
-    let result = codegen.generate(&kernel, &mna, &netlist).expect("codegen failed");
+    let result = codegen
+        .generate(&kernel, &mna, &netlist)
+        .expect("codegen failed");
     let code = result.code;
 
     // tube_ip should use state fields
@@ -4833,12 +5376,23 @@ fn test_runtime_device_params_tube_default_init() {
         ..CodegenConfig::default()
     };
     let codegen = CodeGenerator::new(config);
-    let result = codegen.generate(&kernel, &mna, &netlist).expect("codegen failed");
+    let result = codegen
+        .generate(&kernel, &mna, &netlist)
+        .expect("codegen failed");
     let code = result.code;
 
-    assert!(code.contains("device_0_mu: DEVICE_0_MU"), "Default should init device_0_mu");
-    assert!(code.contains("device_0_kg1: DEVICE_0_KG1"), "Default should init device_0_kg1");
-    assert!(code.contains("device_0_ig_max: DEVICE_0_IG_MAX"), "Default should init device_0_ig_max");
+    assert!(
+        code.contains("device_0_mu: DEVICE_0_MU"),
+        "Default should init device_0_mu"
+    );
+    assert!(
+        code.contains("device_0_kg1: DEVICE_0_KG1"),
+        "Default should init device_0_kg1"
+    );
+    assert!(
+        code.contains("device_0_ig_max: DEVICE_0_IG_MAX"),
+        "Default should init device_0_ig_max"
+    );
 }
 
 /// JFET circuit: state struct and NR loop use state fields for IDSS/VP/LAMBDA.
@@ -4846,17 +5400,38 @@ fn test_runtime_device_params_tube_default_init() {
 fn test_runtime_device_params_jfet_state_fields() {
     let (code, _netlist, _mna, _kernel) = generate_code(JFET_CS_SPICE);
 
-    assert!(code.contains("pub device_0_idss: f64"), "JFET state should have device_0_idss");
-    assert!(code.contains("pub device_0_vp: f64"), "JFET state should have device_0_vp");
-    assert!(code.contains("pub device_0_lambda: f64"), "JFET state should have device_0_lambda");
+    assert!(
+        code.contains("pub device_0_idss: f64"),
+        "JFET state should have device_0_idss"
+    );
+    assert!(
+        code.contains("pub device_0_vp: f64"),
+        "JFET state should have device_0_vp"
+    );
+    assert!(
+        code.contains("pub device_0_lambda: f64"),
+        "JFET state should have device_0_lambda"
+    );
 
     // NR loop uses state fields
-    assert!(code.contains("state.device_0_idss"), "NR loop should use state.device_0_idss");
-    assert!(code.contains("state.device_0_vp"), "NR loop should use state.device_0_vp");
-    assert!(code.contains("state.device_0_lambda"), "NR loop should use state.device_0_lambda");
+    assert!(
+        code.contains("state.device_0_idss"),
+        "NR loop should use state.device_0_idss"
+    );
+    assert!(
+        code.contains("state.device_0_vp"),
+        "NR loop should use state.device_0_vp"
+    );
+    assert!(
+        code.contains("state.device_0_lambda"),
+        "NR loop should use state.device_0_lambda"
+    );
 
     // SIGN stays const
-    assert!(!code.contains("state.device_0_sign"), "SIGN should NOT be a state field for JFET");
+    assert!(
+        !code.contains("state.device_0_sign"),
+        "SIGN should NOT be a state field for JFET"
+    );
 }
 
 /// MOSFET circuit: state struct contains KP/VT/LAMBDA, SIGN stays const.
@@ -4875,19 +5450,39 @@ fn test_runtime_device_params_mosfet_state_fields() {
         ..CodegenConfig::default()
     };
     let codegen = CodeGenerator::new(config);
-    let result = codegen.generate(&kernel, &mna, &netlist).expect("codegen failed");
+    let result = codegen
+        .generate(&kernel, &mna, &netlist)
+        .expect("codegen failed");
     let code = result.code;
 
-    assert!(code.contains("pub device_0_kp: f64"), "MOSFET state should have device_0_kp");
-    assert!(code.contains("pub device_0_vt: f64"), "MOSFET state should have device_0_vt");
-    assert!(code.contains("pub device_0_lambda: f64"), "MOSFET state should have device_0_lambda");
+    assert!(
+        code.contains("pub device_0_kp: f64"),
+        "MOSFET state should have device_0_kp"
+    );
+    assert!(
+        code.contains("pub device_0_vt: f64"),
+        "MOSFET state should have device_0_vt"
+    );
+    assert!(
+        code.contains("pub device_0_lambda: f64"),
+        "MOSFET state should have device_0_lambda"
+    );
 
     // NR loop uses state fields
-    assert!(code.contains("state.device_0_kp"), "NR loop should use state.device_0_kp");
-    assert!(code.contains("state.device_0_vt"), "NR loop should use state.device_0_vt");
+    assert!(
+        code.contains("state.device_0_kp"),
+        "NR loop should use state.device_0_kp"
+    );
+    assert!(
+        code.contains("state.device_0_vt"),
+        "NR loop should use state.device_0_vt"
+    );
 
     // SIGN stays const
-    assert!(!code.contains("state.device_0_sign"), "SIGN should NOT be a state field for MOSFET");
+    assert!(
+        !code.contains("state.device_0_sign"),
+        "SIGN should NOT be a state field for MOSFET"
+    );
 }
 
 /// Reset method restores device params to const defaults.
@@ -4935,7 +5530,9 @@ fn test_runtime_device_params_compile_and_run_diode() {
         ..CodegenConfig::default()
     };
     let codegen = CodeGenerator::new(config);
-    let result = codegen.generate(&kernel, &mna, &netlist).expect("codegen failed");
+    let result = codegen
+        .generate(&kernel, &mna, &netlist)
+        .expect("codegen failed");
 
     let test_harness = format!(
         "{}\n\
@@ -4984,11 +5581,18 @@ fn test_runtime_device_params_compile_and_run_diode() {
     let bin_path = tmp_dir.join("melange_runtime_params_diode_test");
     {
         let mut f = std::fs::File::create(&src_path).expect("create temp file");
-        f.write_all(test_harness.as_bytes()).expect("write temp file");
+        f.write_all(test_harness.as_bytes())
+            .expect("write temp file");
     }
 
     let compile = std::process::Command::new("rustc")
-        .args([src_path.to_str().unwrap(), "-o", bin_path.to_str().unwrap(), "--edition", "2021"])
+        .args([
+            src_path.to_str().unwrap(),
+            "-o",
+            bin_path.to_str().unwrap(),
+            "--edition",
+            "2021",
+        ])
         .output()
         .expect("run rustc");
 
@@ -5000,7 +5604,9 @@ fn test_runtime_device_params_compile_and_run_diode() {
         );
     }
 
-    let run = std::process::Command::new(&bin_path).output().expect("run test binary");
+    let run = std::process::Command::new(&bin_path)
+        .output()
+        .expect("run test binary");
     let _ = std::fs::remove_file(&src_path);
     let _ = std::fs::remove_file(&bin_path);
 
@@ -5026,7 +5632,9 @@ fn test_runtime_device_params_compile_and_run_bjt() {
         ..CodegenConfig::default()
     };
     let codegen = CodeGenerator::new(config);
-    let result = codegen.generate(&kernel, &mna, &netlist).expect("codegen failed");
+    let result = codegen
+        .generate(&kernel, &mna, &netlist)
+        .expect("codegen failed");
 
     let test_harness = format!(
         "{}\n\
@@ -5074,11 +5682,18 @@ fn test_runtime_device_params_compile_and_run_bjt() {
     let bin_path = tmp_dir.join("melange_runtime_params_bjt_test");
     {
         let mut f = std::fs::File::create(&src_path).expect("create temp file");
-        f.write_all(test_harness.as_bytes()).expect("write temp file");
+        f.write_all(test_harness.as_bytes())
+            .expect("write temp file");
     }
 
     let compile = std::process::Command::new("rustc")
-        .args([src_path.to_str().unwrap(), "-o", bin_path.to_str().unwrap(), "--edition", "2021"])
+        .args([
+            src_path.to_str().unwrap(),
+            "-o",
+            bin_path.to_str().unwrap(),
+            "--edition",
+            "2021",
+        ])
         .output()
         .expect("run rustc");
 
@@ -5090,7 +5705,9 @@ fn test_runtime_device_params_compile_and_run_bjt() {
         );
     }
 
-    let run = std::process::Command::new(&bin_path).output().expect("run test binary");
+    let run = std::process::Command::new(&bin_path)
+        .output()
+        .expect("run test binary");
     let _ = std::fs::remove_file(&src_path);
     let _ = std::fs::remove_file(&bin_path);
 

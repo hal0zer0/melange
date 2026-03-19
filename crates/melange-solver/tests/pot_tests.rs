@@ -10,11 +10,11 @@
 
 use std::io::Write;
 
-use melange_solver::codegen::{CodeGenerator, CodegenConfig};
 use melange_solver::codegen::ir::CircuitIR;
-use melange_solver::parser::Netlist;
-use melange_solver::mna::MnaSystem;
+use melange_solver::codegen::{CodeGenerator, CodegenConfig};
 use melange_solver::dk::DkKernel;
+use melange_solver::mna::MnaSystem;
+use melange_solver::parser::Netlist;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -41,7 +41,8 @@ fn default_config() -> CodegenConfig {
 fn generate_code(spice: &str) -> String {
     let (netlist, mna, kernel) = build_pipeline(spice);
     let codegen = CodeGenerator::new(default_config());
-    let result = codegen.generate(&kernel, &mna, &netlist)
+    let result = codegen
+        .generate(&kernel, &mna, &netlist)
         .expect("code generation failed");
     result.code
 }
@@ -146,7 +147,10 @@ fn test_mna_pot_resolution() {
 
     let pot = &mna.pots[0];
     assert_eq!(pot.name, "R1");
-    assert!((pot.g_nominal - 1.0 / 10000.0).abs() < 1e-15, "g_nominal should be 1/10k");
+    assert!(
+        (pot.g_nominal - 1.0 / 10000.0).abs() < 1e-15,
+        "g_nominal should be 1/10k"
+    );
     assert_eq!(pot.min_resistance, 1000.0);
     assert_eq!(pot.max_resistance, 100000.0);
     // Neither node is grounded in this circuit (both "in" and "out" are non-zero)
@@ -158,7 +162,10 @@ fn test_mna_grounded_pot_resolution() {
     let (_netlist, mna, _kernel) = build_pipeline(GROUNDED_POT_SPICE);
     assert_eq!(mna.pots.len(), 1);
     let pot = &mna.pots[0];
-    assert!(pot.grounded, "R1 connects to ground, so pot should be grounded");
+    assert!(
+        pot.grounded,
+        "R1 connects to ground, so pot should be grounded"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -178,7 +185,11 @@ fn test_dk_kernel_sm_vectors() {
     // USU should be finite and positive (conductance change on a resistor
     // between two non-ground nodes should give positive u^T S u)
     assert!(pot.usu.is_finite(), "USU should be finite");
-    assert!(pot.usu > 0.0, "USU should be positive for non-grounded resistor, got {}", pot.usu);
+    assert!(
+        pot.usu > 0.0,
+        "USU should be positive for non-grounded resistor, got {}",
+        pot.usu
+    );
 
     // G_nominal should be 1/10k
     assert!((pot.g_nominal - 1e-4).abs() < 1e-15);
@@ -201,9 +212,15 @@ fn test_dk_kernel_sm_vectors_nonlinear() {
     assert_eq!(pot.u_ni.len(), kernel.m);
 
     // All vectors should be finite
-    for v in &pot.su { assert!(v.is_finite()); }
-    for v in &pot.nv_su { assert!(v.is_finite()); }
-    for v in &pot.u_ni { assert!(v.is_finite()); }
+    for v in &pot.su {
+        assert!(v.is_finite());
+    }
+    for v in &pot.nv_su {
+        assert!(v.is_finite());
+    }
+    for v in &pot.u_ni {
+        assert!(v.is_finite());
+    }
 }
 
 #[test]
@@ -258,7 +275,10 @@ fn test_codegen_pot_state_field() {
     let code = generate_code(RC_POT_SPICE);
 
     // State should have pot resistance field
-    assert!(code.contains("pot_0_resistance"), "Missing pot_0_resistance state field");
+    assert!(
+        code.contains("pot_0_resistance"),
+        "Missing pot_0_resistance state field"
+    );
 }
 
 #[test]
@@ -266,7 +286,10 @@ fn test_codegen_pot_sm_scale_helper() {
     let code = generate_code(RC_POT_SPICE);
 
     // SM scale helper should exist
-    assert!(code.contains("fn sm_scale_0("), "Missing sm_scale_0 helper function");
+    assert!(
+        code.contains("fn sm_scale_0("),
+        "Missing sm_scale_0 helper function"
+    );
     assert!(code.contains("delta_g"), "SM helper should compute delta_g");
 }
 
@@ -275,11 +298,26 @@ fn test_codegen_pot_process_sample_corrections() {
     let code = generate_code(RC_POT_SPICE);
 
     // Process sample should have sequential SM setup with cross-corrections
-    assert!(code.contains("delta_g_0"), "Missing delta_g_0 in sequential SM setup");
-    assert!(code.contains("su_c0"), "Missing corrected su_c0 in sequential SM setup");
-    assert!(code.contains("scale_c0"), "Missing corrected scale_c0 in sequential SM setup");
-    assert!(code.contains("let mut rhs"), "RHS should be mutable when pots exist");
-    assert!(code.contains("let mut v_pred"), "v_pred should be mutable when pots exist");
+    assert!(
+        code.contains("delta_g_0"),
+        "Missing delta_g_0 in sequential SM setup"
+    );
+    assert!(
+        code.contains("su_c0"),
+        "Missing corrected su_c0 in sequential SM setup"
+    );
+    assert!(
+        code.contains("scale_c0"),
+        "Missing corrected scale_c0 in sequential SM setup"
+    );
+    assert!(
+        code.contains("let mut rhs"),
+        "RHS should be mutable when pots exist"
+    );
+    assert!(
+        code.contains("let mut v_pred"),
+        "v_pred should be mutable when pots exist"
+    );
 }
 
 #[test]
@@ -289,8 +327,14 @@ fn test_codegen_pot_nr_k_correction() {
     // NR solver should use precomputed k_eff (corrected K matrix)
     assert!(code.contains("k_eff"), "Missing k_eff in NR solver");
     // k_eff is computed from nv_su_c and u_ni_c in process_sample
-    assert!(code.contains("nv_su_c0"), "Missing corrected nv_su_c0 for k_eff computation");
-    assert!(code.contains("u_ni_c0"), "Missing corrected u_ni_c0 for k_eff computation");
+    assert!(
+        code.contains("nv_su_c0"),
+        "Missing corrected nv_su_c0 for k_eff computation"
+    );
+    assert!(
+        code.contains("u_ni_c0"),
+        "Missing corrected u_ni_c0 for k_eff computation"
+    );
 }
 
 #[test]
@@ -301,10 +345,16 @@ fn test_codegen_pot_compiles() {
     // (We can't actually compile Rust in a test, but we can check for balanced braces, etc.)
     let open_braces = code.chars().filter(|&c| c == '{').count();
     let close_braces = code.chars().filter(|&c| c == '}').count();
-    assert_eq!(open_braces, close_braces, "Unbalanced braces in generated code");
+    assert_eq!(
+        open_braces, close_braces,
+        "Unbalanced braces in generated code"
+    );
 
     // Check that all key functions are present
-    assert!(code.contains("fn process_sample("), "Missing process_sample");
+    assert!(
+        code.contains("fn process_sample("),
+        "Missing process_sample"
+    );
     assert!(code.contains("fn build_rhs("), "Missing build_rhs");
     assert!(code.contains("fn mat_vec_mul_s("), "Missing mat_vec_mul_s");
     assert!(code.contains("struct CircuitState"), "Missing CircuitState");
@@ -316,9 +366,15 @@ fn test_codegen_nonlinear_pot_compiles() {
 
     let open_braces = code.chars().filter(|&c| c == '{').count();
     let close_braces = code.chars().filter(|&c| c == '}').count();
-    assert_eq!(open_braces, close_braces, "Unbalanced braces in generated code with diode+pot");
+    assert_eq!(
+        open_braces, close_braces,
+        "Unbalanced braces in generated code with diode+pot"
+    );
 
-    assert!(code.contains("fn solve_nonlinear("), "Missing solve_nonlinear");
+    assert!(
+        code.contains("fn solve_nonlinear("),
+        "Missing solve_nonlinear"
+    );
     assert!(code.contains("fn sm_scale_0("), "Missing sm_scale_0");
 }
 
@@ -332,11 +388,23 @@ fn test_no_pot_backward_compat() {
 
     // No pot-related code should appear
     assert!(!code.contains("POT_0"), "No POT constants without .pot");
-    assert!(!code.contains("sm_scale"), "No SM scale function without .pot");
-    assert!(!code.contains("pot_0_resistance"), "No pot state field without .pot");
+    assert!(
+        !code.contains("sm_scale"),
+        "No SM scale function without .pot"
+    );
+    assert!(
+        !code.contains("pot_0_resistance"),
+        "No pot state field without .pot"
+    );
     // In process_sample, rhs/v_pred should not be mut (build_rhs uses mut internally, that's ok)
-    assert!(code.contains("let rhs = build_rhs("), "RHS should be immutable in process_sample without pots");
-    assert!(code.contains("let v_pred = mat_vec_mul_s("), "v_pred should be immutable without pots");
+    assert!(
+        code.contains("let rhs = build_rhs("),
+        "RHS should be immutable in process_sample without pots"
+    );
+    assert!(
+        code.contains("let v_pred = mat_vec_mul_s("),
+        "v_pred should be immutable without pots"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -347,14 +415,23 @@ fn test_no_pot_backward_compat() {
 fn test_grounded_pot_codegen() {
     let code = generate_code(GROUNDED_POT_SPICE);
 
-    assert!(code.contains("POT_0_SU"), "Missing POT_0_SU for grounded pot");
-    assert!(code.contains("fn sm_scale_0("), "Missing sm_scale_0 for grounded pot");
+    assert!(
+        code.contains("POT_0_SU"),
+        "Missing POT_0_SU for grounded pot"
+    );
+    assert!(
+        code.contains("fn sm_scale_0("),
+        "Missing sm_scale_0 for grounded pot"
+    );
 
     // Grounded pot should only reference one node in A_neg correction
     // (not both NODE_P and NODE_Q)
     let open_braces = code.chars().filter(|&c| c == '{').count();
     let close_braces = code.chars().filter(|&c| c == '}').count();
-    assert_eq!(open_braces, close_braces, "Unbalanced braces with grounded pot");
+    assert_eq!(
+        open_braces, close_braces,
+        "Unbalanced braces with grounded pot"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -382,8 +459,12 @@ fn test_sm_vectors_match_manual_computation() {
 
     // Build u vector manually
     let mut u = vec![0.0; n];
-    if pot.node_p > 0 { u[pot.node_p - 1] = 1.0; }
-    if pot.node_q > 0 { u[pot.node_q - 1] = -1.0; }
+    if pot.node_p > 0 {
+        u[pot.node_p - 1] = 1.0;
+    }
+    if pot.node_q > 0 {
+        u[pot.node_q - 1] = -1.0;
+    }
 
     // Get S matrix from kernel
     let s = |i: usize, j: usize| -> f64 { kernel.s[i * n + j] };
@@ -401,7 +482,9 @@ fn test_sm_vectors_match_manual_computation() {
         assert!(
             (pot.su[i] - su_manual[i]).abs() < 1e-12,
             "SU[{}] mismatch: precomputed={}, manual={}",
-            i, pot.su[i], su_manual[i]
+            i,
+            pot.su[i],
+            su_manual[i]
         );
     }
 
@@ -413,7 +496,8 @@ fn test_sm_vectors_match_manual_computation() {
     assert!(
         (pot.usu - usu_manual).abs() < 1e-12,
         "USU mismatch: precomputed={}, manual={}",
-        pot.usu, usu_manual
+        pot.usu,
+        usu_manual
     );
 }
 
@@ -462,7 +546,11 @@ C1 out 0 100n
             assert!(
                 (s_updated - s_rebuilt).abs() < 1e-10,
                 "S[{}][{}] mismatch: SM update={:.15e}, full rebuild={:.15e}, diff={:.2e}",
-                i, j, s_updated, s_rebuilt, (s_updated - s_rebuilt).abs()
+                i,
+                j,
+                s_updated,
+                s_rebuilt,
+                (s_updated - s_rebuilt).abs()
             );
         }
     }
@@ -490,7 +578,10 @@ fn test_two_pot_pipeline() {
     assert!(pot0.usu > 0.0);
     assert!(pot1.usu > 0.0);
     // Different pots → different USU values
-    assert!((pot0.usu - pot1.usu).abs() > 1e-6, "Two pots should have distinct USU values");
+    assert!(
+        (pot0.usu - pot1.usu).abs() > 1e-6,
+        "Two pots should have distinct USU values"
+    );
 }
 
 #[test]
@@ -504,10 +595,22 @@ fn test_two_pot_codegen() {
     assert!(code.contains("POT_1_USU"), "Missing POT_1_USU");
     assert!(code.contains("fn sm_scale_0("), "Missing sm_scale_0");
     assert!(code.contains("fn sm_scale_1("), "Missing sm_scale_1");
-    assert!(code.contains("pot_0_resistance"), "Missing pot_0_resistance");
-    assert!(code.contains("pot_1_resistance"), "Missing pot_1_resistance");
-    assert!(code.contains("delta_g_0"), "Missing delta_g_0 in process_sample");
-    assert!(code.contains("delta_g_1"), "Missing delta_g_1 in process_sample");
+    assert!(
+        code.contains("pot_0_resistance"),
+        "Missing pot_0_resistance"
+    );
+    assert!(
+        code.contains("pot_1_resistance"),
+        "Missing pot_1_resistance"
+    );
+    assert!(
+        code.contains("delta_g_0"),
+        "Missing delta_g_0 in process_sample"
+    );
+    assert!(
+        code.contains("delta_g_1"),
+        "Missing delta_g_1 in process_sample"
+    );
 }
 
 #[test]
@@ -592,7 +695,11 @@ C1 out 0 100n
             assert!(
                 (k_updated - k_rebuilt).abs() < 1e-8,
                 "K[{}][{}] mismatch: SM={:.15e}, rebuilt={:.15e}, diff={:.2e}",
-                i, j, k_updated, k_rebuilt, (k_updated - k_rebuilt).abs()
+                i,
+                j,
+                k_updated,
+                k_rebuilt,
+                (k_updated - k_rebuilt).abs()
             );
         }
     }
@@ -619,7 +726,9 @@ fn test_sm_nonlinear_vectors_match_manual() {
         assert!(
             (pot.nv_su[i] - nv_su_manual).abs() < 1e-10,
             "nv_su[{}] mismatch: precomputed={:.15e}, manual={:.15e}",
-            i, pot.nv_su[i], nv_su_manual
+            i,
+            pot.nv_su[i],
+            nv_su_manual
         );
     }
 
@@ -633,7 +742,9 @@ fn test_sm_nonlinear_vectors_match_manual() {
         assert!(
             (pot.u_ni[j] - u_ni_manual).abs() < 1e-10,
             "u_ni[{}] mismatch: precomputed={:.15e}, manual={:.15e}",
-            j, pot.u_ni[j], u_ni_manual
+            j,
+            pot.u_ni[j],
+            u_ni_manual
         );
     }
 }
@@ -652,7 +763,11 @@ fn test_sm_scale_at_extremes() {
         let r = r.clamp(pot.min_resistance, pot.max_resistance);
         let delta_g = 1.0 / r - pot.g_nominal;
         let denom = 1.0 + delta_g * pot.usu;
-        let scale = if denom.abs() > 1e-15 { delta_g / denom } else { 0.0 };
+        let scale = if denom.abs() > 1e-15 {
+            delta_g / denom
+        } else {
+            0.0
+        };
         (delta_g, scale)
     };
 
@@ -663,12 +778,18 @@ fn test_sm_scale_at_extremes() {
 
     // At min_r: delta_g > 0 (conductance increases)
     let (dg_min, scale_min) = sm_scale(pot.min_resistance);
-    assert!(dg_min > 0.0, "delta_g should be positive at min_r (more conductance)");
+    assert!(
+        dg_min > 0.0,
+        "delta_g should be positive at min_r (more conductance)"
+    );
     assert!(scale_min.is_finite(), "scale at min_r should be finite");
 
     // At max_r: delta_g < 0 (conductance decreases)
     let (dg_max, scale_max) = sm_scale(pot.max_resistance);
-    assert!(dg_max < 0.0, "delta_g should be negative at max_r (less conductance)");
+    assert!(
+        dg_max < 0.0,
+        "delta_g should be negative at max_r (less conductance)"
+    );
     assert!(scale_max.is_finite(), "scale at max_r should be finite");
 
     // Below min_r should clamp to min_r
@@ -689,7 +810,10 @@ fn test_sm_scale_at_extremes() {
             assert!(
                 s_corrected > 0.0,
                 "S_corrected[{}][{}] should be positive at R={}, got {}",
-                i, i, r, s_corrected
+                i,
+                i,
+                r,
+                s_corrected
             );
         }
     }
@@ -740,8 +864,12 @@ fn test_grounded_pot_diode_pipeline() {
     let pot = &kernel.pots[0];
     assert_eq!(pot.nv_su.len(), kernel.m);
     assert_eq!(pot.u_ni.len(), kernel.m);
-    for v in &pot.nv_su { assert!(v.is_finite()); }
-    for v in &pot.u_ni { assert!(v.is_finite()); }
+    for v in &pot.nv_su {
+        assert!(v.is_finite());
+    }
+    for v in &pot.u_ni {
+        assert!(v.is_finite());
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -753,9 +881,18 @@ fn test_codegen_sni_correction() {
     let code = generate_code(DIODE_POT_SPICE);
 
     // S*N_i correction block should exist (M>0 and pots exist)
-    assert!(code.contains("u_ni_dot_inl_0"), "Missing u_ni_dot_inl in sni correction");
-    assert!(code.contains("sni_factor_0"), "Missing sni_factor in sni correction");
-    assert!(code.contains("let mut v = compute_final_voltages"), "v should be mutable with pot+nonlinear");
+    assert!(
+        code.contains("u_ni_dot_inl_0"),
+        "Missing u_ni_dot_inl in sni correction"
+    );
+    assert!(
+        code.contains("sni_factor_0"),
+        "Missing sni_factor in sni correction"
+    );
+    assert!(
+        code.contains("let mut v = compute_final_voltages"),
+        "v should be mutable with pot+nonlinear"
+    );
 }
 
 #[test]
@@ -763,8 +900,14 @@ fn test_codegen_no_sni_correction_linear() {
     let code = generate_code(RC_POT_SPICE);
 
     // Linear circuit (M=0): no S*N_i correction should appear
-    assert!(!code.contains("sni_factor"), "Linear pot circuit should have no sni_factor");
-    assert!(!code.contains("u_ni_dot_inl"), "Linear pot circuit should have no u_ni_dot_inl");
+    assert!(
+        !code.contains("sni_factor"),
+        "Linear pot circuit should have no sni_factor"
+    );
+    assert!(
+        !code.contains("u_ni_dot_inl"),
+        "Linear pot circuit should have no u_ni_dot_inl"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -790,10 +933,13 @@ fn test_codegen_sanitization_resets_pot() {
 
     // The NaN sanitization block should reset pot resistance
     // Find the sanitization block and check it contains pot reset
-    let sanitize_idx = code.find("if !state.v_prev.iter().all(|x| x.is_finite())")
+    let sanitize_idx = code
+        .find("if !state.v_prev.iter().all(|x| x.is_finite())")
         .expect("Missing sanitization block");
     let after_sanitize = &code[sanitize_idx..];
-    let return_idx = after_sanitize.find("return [0.0; NUM_OUTPUTS];").expect("Missing return in sanitization");
+    let return_idx = after_sanitize
+        .find("return [0.0; NUM_OUTPUTS];")
+        .expect("Missing return in sanitization");
     let sanitize_block = &after_sanitize[..return_idx];
     assert!(
         sanitize_block.contains("pot_0_resistance"),

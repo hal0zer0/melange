@@ -10,11 +10,11 @@
 //! 3. Codegen output: generated code compiles, M reduced, 1D device eval
 //! 4. Cross-validation: M=5 vs M=4 for wurli-preamp (1D approx error)
 
+use melange_solver::codegen::ir::{CircuitIR, DeviceParams, DeviceType};
 use melange_solver::codegen::{CodeGenerator, CodegenConfig};
-use melange_solver::codegen::ir::{CircuitIR, DeviceType, DeviceParams};
-use melange_solver::parser::Netlist;
-use melange_solver::mna::MnaSystem;
 use melange_solver::dk::DkKernel;
+use melange_solver::mna::MnaSystem;
+use melange_solver::parser::Netlist;
 use std::collections::HashSet;
 use std::io::Write;
 
@@ -121,12 +121,16 @@ fn make_config(input_node: usize, output_node: usize) -> CodegenConfig {
 
 /// Resolve input/output node indices from an MNA system.
 fn resolve_nodes(mna: &MnaSystem) -> (usize, usize) {
-    let input_node = mna.node_map.get("in")
+    let input_node = mna
+        .node_map
+        .get("in")
         .copied()
         .unwrap_or(1)
         .saturating_sub(1);
     // Try common output node names
-    let output_node = mna.node_map.get("out")
+    let output_node = mna
+        .node_map
+        .get("out")
         .or_else(|| mna.node_map.get("collector"))
         .or_else(|| mna.node_map.get("coll2"))
         .copied()
@@ -169,7 +173,13 @@ fn assert_compiles(code: &str, label: &str) {
 }
 
 /// Compile and run generated code, returning output samples.
-fn compile_and_run(code: &str, num_samples: usize, sample_rate: f64, amplitude: f64, tag: &str) -> Vec<f64> {
+fn compile_and_run(
+    code: &str,
+    num_samples: usize,
+    sample_rate: f64,
+    amplitude: f64,
+    tag: &str,
+) -> Vec<f64> {
     let tmp_dir = std::env::temp_dir();
     let pid = std::process::id();
     let src_path = tmp_dir.join(format!("melange_fa_run_{tag}_{pid}.rs"));
@@ -204,15 +214,20 @@ fn compile_and_run(code: &str, num_samples: usize, sample_rate: f64, amplitude: 
 
     if !compile.status.success() {
         let _ = std::fs::remove_file(&bin_path);
-        panic!("Codegen compilation failed for {tag}:\n{}", String::from_utf8_lossy(&compile.stderr));
+        panic!(
+            "Codegen compilation failed for {tag}:\n{}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
     }
 
     let run = std::process::Command::new(&bin_path).output().expect("run");
     let _ = std::fs::remove_file(&bin_path);
     if !run.status.success() {
-        panic!("Binary failed for {tag}:\nstdout: {}\nstderr: {}",
+        panic!(
+            "Binary failed for {tag}:\nstdout: {}\nstderr: {}",
             String::from_utf8_lossy(&run.stdout),
-            String::from_utf8_lossy(&run.stderr));
+            String::from_utf8_lossy(&run.stderr)
+        );
     }
 
     String::from_utf8_lossy(&run.stdout)
@@ -245,9 +260,11 @@ fn generate_with_forward_active(spice: &str) -> (String, usize, HashSet<String>)
 
     // Rebuild MNA if any forward-active BJTs detected
     if !forward_active.is_empty() {
-        mna = MnaSystem::from_netlist_forward_active(&netlist, &forward_active).expect("MNA rebuild");
+        mna =
+            MnaSystem::from_netlist_forward_active(&netlist, &forward_active).expect("MNA rebuild");
         // Re-stamp junction caps with the new MNA
-        let device_slots = CircuitIR::build_device_info_with_mna(&netlist, Some(&mna)).unwrap_or_default();
+        let device_slots =
+            CircuitIR::build_device_info_with_mna(&netlist, Some(&mna)).unwrap_or_default();
         if !device_slots.is_empty() {
             mna.stamp_device_junction_caps(&device_slots);
         }
@@ -312,7 +329,8 @@ fn test_detect_forward_active_ce_npn() {
 
     assert!(
         fa.contains("Q1"),
-        "Q1 should be detected as forward-active. Got: {:?}", fa
+        "Q1 should be detected as forward-active. Got: {:?}",
+        fa
     );
     assert_eq!(fa.len(), 1, "Only Q1 should be detected");
 }
@@ -333,7 +351,8 @@ fn test_detect_not_forward_active_saturated() {
 
     assert!(
         fa.is_empty(),
-        "Saturated BJT should NOT be detected as forward-active. Got: {:?}", fa
+        "Saturated BJT should NOT be detected as forward-active. Got: {:?}",
+        fa
     );
 }
 
@@ -353,7 +372,8 @@ fn test_detect_forward_active_pnp() {
 
     assert!(
         fa.contains("Q1"),
-        "PNP Q1 should be detected as forward-active. Got: {:?}", fa
+        "PNP Q1 should be detected as forward-active. Got: {:?}",
+        fa
     );
 }
 
@@ -374,7 +394,8 @@ fn test_detect_not_forward_active_with_parasitics() {
 
     assert!(
         fa.is_empty(),
-        "BJT with parasitics should NOT be detected as forward-active. Got: {:?}", fa
+        "BJT with parasitics should NOT be detected as forward-active. Got: {:?}",
+        fa
     );
 }
 
@@ -394,7 +415,8 @@ fn test_detect_not_forward_active_with_gummel_poon() {
 
     assert!(
         fa.is_empty(),
-        "BJT with GP params should NOT be detected as forward-active. Got: {:?}", fa
+        "BJT with GP params should NOT be detected as forward-active. Got: {:?}",
+        fa
     );
 }
 
@@ -405,7 +427,10 @@ fn test_detect_forward_active_no_bjts() {
     let (netlist, mna) = build_mna_with_gin(spice);
     let config = make_config(0, 0);
     let fa = CircuitIR::detect_forward_active_bjts(&mna, &netlist, &config);
-    assert!(fa.is_empty(), "Linear circuit should have no forward-active BJTs");
+    assert!(
+        fa.is_empty(),
+        "Linear circuit should have no forward-active BJTs"
+    );
 }
 
 /// Diode-only circuit should return empty set (no BJTs).
@@ -425,7 +450,10 @@ C1 out 0 1u
     }
     let config = make_config(0, 0);
     let fa = CircuitIR::detect_forward_active_bjts(&mna, &netlist, &config);
-    assert!(fa.is_empty(), "Diode circuit should have no forward-active BJTs");
+    assert!(
+        fa.is_empty(),
+        "Diode circuit should have no forward-active BJTs"
+    );
 }
 
 // ============================================================================
@@ -440,7 +468,9 @@ fn test_stamp_forward_active_n_v() {
     let mna = MnaSystem::from_netlist_forward_active(&netlist, &fa_set).expect("MNA");
 
     // Find Q1 device
-    let q1_dev = mna.nonlinear_devices.iter()
+    let q1_dev = mna
+        .nonlinear_devices
+        .iter()
         .find(|d| d.name.eq_ignore_ascii_case("Q1"))
         .expect("Q1 not found in nonlinear devices");
 
@@ -449,7 +479,10 @@ fn test_stamp_forward_active_n_v() {
         melange_solver::mna::NonlinearDeviceType::BjtForwardActive,
         "Q1 should be BjtForwardActive type"
     );
-    assert_eq!(q1_dev.dimension, 1, "Forward-active BJT should have dimension 1");
+    assert_eq!(
+        q1_dev.dimension, 1,
+        "Forward-active BJT should have dimension 1"
+    );
 
     let s = q1_dev.start_idx;
     let nb = q1_dev.node_indices[1]; // base (1-indexed, 0=ground)
@@ -457,20 +490,32 @@ fn test_stamp_forward_active_n_v() {
 
     // N_v[s] should extract Vbe: +1 at base, -1 at emitter, 0 elsewhere
     if nb > 0 {
-        assert_eq!(mna.n_v[s][nb - 1], 1.0,
-            "N_v[{s}][base] should be +1.0 for Vbe extraction");
+        assert_eq!(
+            mna.n_v[s][nb - 1],
+            1.0,
+            "N_v[{s}][base] should be +1.0 for Vbe extraction"
+        );
     }
     if ne > 0 {
-        assert_eq!(mna.n_v[s][ne - 1], -1.0,
-            "N_v[{s}][emitter] should be -1.0 for Vbe extraction");
+        assert_eq!(
+            mna.n_v[s][ne - 1],
+            -1.0,
+            "N_v[{s}][emitter] should be -1.0 for Vbe extraction"
+        );
     }
 
     // All other entries in row s of N_v should be 0
     for j in 0..mna.n {
-        if nb > 0 && j == nb - 1 { continue; }
-        if ne > 0 && j == ne - 1 { continue; }
-        assert_eq!(mna.n_v[s][j], 0.0,
-            "N_v[{s}][{j}] should be 0.0 (not base or emitter)");
+        if nb > 0 && j == nb - 1 {
+            continue;
+        }
+        if ne > 0 && j == ne - 1 {
+            continue;
+        }
+        assert_eq!(
+            mna.n_v[s][j], 0.0,
+            "N_v[{s}][{j}] should be 0.0 (not base or emitter)"
+        );
     }
 }
 
@@ -482,7 +527,9 @@ fn test_stamp_forward_active_n_i() {
     let netlist = Netlist::parse(CE_FORWARD_ACTIVE).expect("parse");
     let mna = MnaSystem::from_netlist_forward_active(&netlist, &fa_set).expect("MNA");
 
-    let q1_dev = mna.nonlinear_devices.iter()
+    let q1_dev = mna
+        .nonlinear_devices
+        .iter()
         .find(|d| d.name.eq_ignore_ascii_case("Q1"))
         .expect("Q1 not found");
 
@@ -497,7 +544,8 @@ fn test_stamp_forward_active_n_i() {
     if nc > 0 {
         assert!(
             (mna.n_i[nc - 1][s] - (-1.0)).abs() < 1e-12,
-            "N_i[collector][{s}] should be -1.0, got {}", mna.n_i[nc - 1][s]
+            "N_i[collector][{s}] should be -1.0, got {}",
+            mna.n_i[nc - 1][s]
         );
     }
 
@@ -506,7 +554,8 @@ fn test_stamp_forward_active_n_i() {
         let expected_base = -1.0 / beta_f;
         assert!(
             (mna.n_i[nb - 1][s] - expected_base).abs() < 1e-12,
-            "N_i[base][{s}] should be {expected_base}, got {}", mna.n_i[nb - 1][s]
+            "N_i[base][{s}] should be {expected_base}, got {}",
+            mna.n_i[nb - 1][s]
         );
     }
 
@@ -515,7 +564,8 @@ fn test_stamp_forward_active_n_i() {
         let expected_emitter = 1.0 + 1.0 / beta_f;
         assert!(
             (mna.n_i[ne - 1][s] - expected_emitter).abs() < 1e-12,
-            "N_i[emitter][{s}] should be {expected_emitter}, got {}", mna.n_i[ne - 1][s]
+            "N_i[emitter][{s}] should be {expected_emitter}, got {}",
+            mna.n_i[ne - 1][s]
         );
     }
 }
@@ -527,7 +577,9 @@ fn test_stamp_forward_active_kcl_conservation() {
     let netlist = Netlist::parse(CE_FORWARD_ACTIVE).expect("parse");
     let mna = MnaSystem::from_netlist_forward_active(&netlist, &fa_set).expect("MNA");
 
-    let q1_dev = mna.nonlinear_devices.iter()
+    let q1_dev = mna
+        .nonlinear_devices
+        .iter()
         .find(|d| d.name.eq_ignore_ascii_case("Q1"))
         .expect("Q1 not found");
     let s = q1_dev.start_idx;
@@ -552,7 +604,9 @@ fn test_stamp_forward_active_bf200_values() {
     let netlist = Netlist::parse(CE_FORWARD_ACTIVE).expect("parse");
     let mna = MnaSystem::from_netlist_forward_active(&netlist, &fa_set).expect("MNA");
 
-    let q1_dev = mna.nonlinear_devices.iter()
+    let q1_dev = mna
+        .nonlinear_devices
+        .iter()
         .find(|d| d.name.eq_ignore_ascii_case("Q1"))
         .expect("Q1 not found");
     let s = q1_dev.start_idx;
@@ -562,14 +616,16 @@ fn test_stamp_forward_active_bf200_values() {
     if nb > 0 {
         assert!(
             (mna.n_i[nb - 1][s] - (-0.005)).abs() < 1e-12,
-            "N_i[base] for BF=200 should be -0.005, got {}", mna.n_i[nb - 1][s]
+            "N_i[base] for BF=200 should be -0.005, got {}",
+            mna.n_i[nb - 1][s]
         );
     }
 
     if ne > 0 {
         assert!(
             (mna.n_i[ne - 1][s] - 1.005).abs() < 1e-12,
-            "N_i[emitter] for BF=200 should be 1.005, got {}", mna.n_i[ne - 1][s]
+            "N_i[emitter] for BF=200 should be 1.005, got {}",
+            mna.n_i[ne - 1][s]
         );
     }
 }
@@ -603,11 +659,22 @@ fn test_stamp_forward_active_single_dimension() {
 
     // Total M should be 1
     let total_m: usize = mna.nonlinear_devices.iter().map(|d| d.dimension).sum();
-    assert_eq!(total_m, 1, "Total M should be 1 for single forward-active BJT");
+    assert_eq!(
+        total_m, 1,
+        "Total M should be 1 for single forward-active BJT"
+    );
 
     // N_v and N_i should be sized for M=1
-    assert_eq!(mna.n_v.len(), total_m, "N_v should have exactly M={total_m} rows");
-    assert_eq!(mna.n_i[0].len(), total_m, "N_i columns should be M={total_m}");
+    assert_eq!(
+        mna.n_v.len(),
+        total_m,
+        "N_v should have exactly M={total_m} rows"
+    );
+    assert_eq!(
+        mna.n_i[0].len(),
+        total_m,
+        "N_i columns should be M={total_m}"
+    );
 }
 
 // ============================================================================
@@ -708,7 +775,11 @@ fn test_codegen_forward_active_produces_output() {
     let samples = compile_and_run(&code, 4410, 44100.0, 0.01, "fa_output");
 
     // Should produce non-zero output after transient settles
-    let peak = samples.iter().skip(2000).map(|s| s.abs()).fold(0.0f64, f64::max);
+    let peak = samples
+        .iter()
+        .skip(2000)
+        .map(|s| s.abs())
+        .fold(0.0f64, f64::max);
     assert!(
         peak > 1e-6,
         "Forward-active CE amp should produce non-zero output, got peak={peak:.2e}"
@@ -716,10 +787,7 @@ fn test_codegen_forward_active_produces_output() {
 
     // Should be stable (no NaN or Inf)
     for (i, &s) in samples.iter().enumerate() {
-        assert!(
-            s.is_finite(),
-            "Sample {i} is not finite: {s}"
-        );
+        assert!(s.is_finite(), "Sample {i} is not finite: {s}");
     }
 }
 
@@ -756,10 +824,17 @@ fn test_wurli_preamp_forward_active_cross_validation() {
 
     // --- Standard path (no FA optimization) ---
     let (code_std, m_std) = generate_without_forward_active(&spice);
-    assert_eq!(m_std, 5, "Wurli-preamp should have M=5 without FA optimization (2 BJTs + 1 diode)");
+    assert_eq!(
+        m_std, 5,
+        "Wurli-preamp should have M=5 without FA optimization (2 BJTs + 1 diode)"
+    );
 
     let out_std = compile_and_run(&code_std, num_samples, sample_rate, amplitude, "wurli_std");
-    assert_eq!(out_std.len(), num_samples, "Standard output length mismatch");
+    assert_eq!(
+        out_std.len(),
+        num_samples,
+        "Standard output length mismatch"
+    );
 
     // --- Forward-active path ---
     let (code_fa, m_fa, fa_bjts) = generate_with_forward_active(&spice);
@@ -777,15 +852,26 @@ fn test_wurli_preamp_forward_active_cross_validation() {
 
     // --- Stability checks ---
     for (i, &s) in out_std.iter().enumerate() {
-        assert!(s.is_finite(), "Standard output sample {i} is not finite: {s}");
+        assert!(
+            s.is_finite(),
+            "Standard output sample {i} is not finite: {s}"
+        );
     }
     for (i, &s) in out_fa.iter().enumerate() {
         assert!(s.is_finite(), "FA output sample {i} is not finite: {s}");
     }
 
     // --- Peak comparison ---
-    let peak_std = out_std.iter().skip(skip).map(|s| s.abs()).fold(0.0f64, f64::max);
-    let peak_fa = out_fa.iter().skip(skip).map(|s| s.abs()).fold(0.0f64, f64::max);
+    let peak_std = out_std
+        .iter()
+        .skip(skip)
+        .map(|s| s.abs())
+        .fold(0.0f64, f64::max);
+    let peak_fa = out_fa
+        .iter()
+        .skip(skip)
+        .map(|s| s.abs())
+        .fold(0.0f64, f64::max);
 
     println!("Wurli-preamp cross-validation:");
     println!("  M standard = {m_std}, M forward-active = {m_fa}");
@@ -806,7 +892,11 @@ fn test_wurli_preamp_forward_active_cross_validation() {
     // The 1D forward-active approximation changes the feedback loop slightly
     // because the reverse junction is removed from the NR system, which
     // affects the K matrix and thus the gain. 2-4 dB differences are typical.
-    let ratio = if peak_std > peak_fa { peak_std / peak_fa } else { peak_fa / peak_std };
+    let ratio = if peak_std > peak_fa {
+        peak_std / peak_fa
+    } else {
+        peak_fa / peak_std
+    };
     let db_diff = 20.0 * ratio.log10();
     println!("  Peak ratio = {ratio:.4}, dB difference = {db_diff:.2}dB");
 
@@ -852,13 +942,15 @@ C_dummy coll2 0 1n
     // Q1 should be forward-active (Vbc well below -1V)
     assert!(
         fa.contains("Q1"),
-        "Q1 (forward-active CE) should be detected. Got: {:?}", fa
+        "Q1 (forward-active CE) should be detected. Got: {:?}",
+        fa
     );
 
     // Q2 should NOT be forward-active (saturated)
     assert!(
         !fa.contains("Q2"),
-        "Q2 (saturated) should NOT be detected. Got: {:?}", fa
+        "Q2 (saturated) should NOT be detected. Got: {:?}",
+        fa
     );
 }
 
@@ -869,13 +961,21 @@ fn test_mna_device_type_after_forward_active_rebuild() {
     let netlist = Netlist::parse(CE_FORWARD_ACTIVE).expect("parse");
     let mna = MnaSystem::from_netlist_forward_active(&netlist, &fa_set).expect("MNA");
 
-    let q1 = mna.nonlinear_devices.iter()
+    let q1 = mna
+        .nonlinear_devices
+        .iter()
         .find(|d| d.name.eq_ignore_ascii_case("Q1"))
         .expect("Q1 not found");
 
-    assert_eq!(q1.device_type, melange_solver::mna::NonlinearDeviceType::BjtForwardActive);
+    assert_eq!(
+        q1.device_type,
+        melange_solver::mna::NonlinearDeviceType::BjtForwardActive
+    );
     assert_eq!(q1.dimension, 1);
-    assert_eq!(q1.start_idx, 0, "Q1 is the only device, should start at index 0");
+    assert_eq!(
+        q1.start_idx, 0,
+        "Q1 is the only device, should start at index 0"
+    );
 }
 
 /// DK kernel built from forward-active MNA should have reduced M.
@@ -897,7 +997,10 @@ fn test_kernel_m_reduced_with_forward_active() {
 
     // K matrix should be 1x1 for forward-active
     let k00 = kernel_fa.k(0, 0);
-    assert!(k00 < 0.0, "K[0][0] should be negative for stable circuit, got {k00}");
+    assert!(
+        k00 < 0.0,
+        "K[0][0] should be negative for stable circuit, got {k00}"
+    );
     assert!(k00.is_finite(), "K[0][0] should be finite");
 }
 
@@ -908,15 +1011,18 @@ fn test_device_slots_forward_active_type() {
     let fa_set: HashSet<String> = ["Q1".to_string()].into_iter().collect();
     let mna = MnaSystem::from_netlist_forward_active(&netlist, &fa_set).expect("MNA");
 
-    let slots = CircuitIR::build_device_info_with_mna(&netlist, Some(&mna))
-        .expect("device slots");
+    let slots = CircuitIR::build_device_info_with_mna(&netlist, Some(&mna)).expect("device slots");
 
     // Find Q1 slot
-    let q1_slot = slots.iter()
+    let q1_slot = slots
+        .iter()
         .find(|s| s.device_type == DeviceType::BjtForwardActive)
         .expect("Should have a BjtForwardActive slot");
 
-    assert_eq!(q1_slot.dimension, 1, "Forward-active slot dimension should be 1");
+    assert_eq!(
+        q1_slot.dimension, 1,
+        "Forward-active slot dimension should be 1"
+    );
     assert_eq!(q1_slot.start_idx, 0, "Q1 should be at start_idx 0");
 
     // Params should still be BJT params

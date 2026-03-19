@@ -47,46 +47,122 @@ const DEFAULT_VGK_ONSET: f64 = 0.5;
 impl KorenTriode {
     /// Create a new triode model with default grid current parameters.
     pub fn new(mu: f64, ex: f64, kg1: f64, kp: f64, kvb: f64) -> Self {
-        Self { mu, ex, kg1, kp, kvb, ig_max: DEFAULT_IG_MAX, vgk_onset: DEFAULT_VGK_ONSET,
-               lambda: 0.0 }
+        Self {
+            mu,
+            ex,
+            kg1,
+            kp,
+            kvb,
+            ig_max: DEFAULT_IG_MAX,
+            vgk_onset: DEFAULT_VGK_ONSET,
+            lambda: 0.0,
+        }
     }
 
     /// Create a new triode model with custom grid current parameters.
-    pub fn with_grid_params(mu: f64, ex: f64, kg1: f64, kp: f64, kvb: f64, ig_max: f64, vgk_onset: f64) -> Self {
-        Self { mu, ex, kg1, kp, kvb, ig_max, vgk_onset, lambda: 0.0 }
+    pub fn with_grid_params(
+        mu: f64,
+        ex: f64,
+        kg1: f64,
+        kp: f64,
+        kvb: f64,
+        ig_max: f64,
+        vgk_onset: f64,
+    ) -> Self {
+        Self {
+            mu,
+            ex,
+            kg1,
+            kp,
+            kvb,
+            ig_max,
+            vgk_onset,
+            lambda: 0.0,
+        }
     }
 
     /// Create a new triode model with all parameters including lambda (Early effect).
+    #[allow(clippy::too_many_arguments)]
     pub fn with_all_params(
-        mu: f64, ex: f64, kg1: f64, kp: f64, kvb: f64,
-        ig_max: f64, vgk_onset: f64,
+        mu: f64,
+        ex: f64,
+        kg1: f64,
+        kp: f64,
+        kvb: f64,
+        ig_max: f64,
+        vgk_onset: f64,
         lambda: f64,
     ) -> Self {
-        Self { mu, ex, kg1, kp, kvb, ig_max, vgk_onset, lambda }
+        Self {
+            mu,
+            ex,
+            kg1,
+            kp,
+            kvb,
+            ig_max,
+            vgk_onset,
+            lambda,
+        }
     }
 
     /// 12AX7 (ECC83) - high-mu twin triode, common in guitar amps.
     pub fn ecc83() -> Self {
         let c = crate::catalog::tubes::lookup("12AX7").unwrap();
-        Self::with_all_params(c.mu, c.ex, c.kg1, c.kp, c.kvb, c.ig_max, c.vgk_onset, c.lambda)
+        Self::with_all_params(
+            c.mu,
+            c.ex,
+            c.kg1,
+            c.kp,
+            c.kvb,
+            c.ig_max,
+            c.vgk_onset,
+            c.lambda,
+        )
     }
 
     /// 12AU7 (ECC82) - medium-mu twin triode.
     pub fn ecc82() -> Self {
         let c = crate::catalog::tubes::lookup("12AU7").unwrap();
-        Self::with_all_params(c.mu, c.ex, c.kg1, c.kp, c.kvb, c.ig_max, c.vgk_onset, c.lambda)
+        Self::with_all_params(
+            c.mu,
+            c.ex,
+            c.kg1,
+            c.kp,
+            c.kvb,
+            c.ig_max,
+            c.vgk_onset,
+            c.lambda,
+        )
     }
 
     /// 12AT7 (ECC81) - medium-mu triode.
     pub fn ecc81() -> Self {
         let c = crate::catalog::tubes::lookup("12AT7").unwrap();
-        Self::with_all_params(c.mu, c.ex, c.kg1, c.kp, c.kvb, c.ig_max, c.vgk_onset, c.lambda)
+        Self::with_all_params(
+            c.mu,
+            c.ex,
+            c.kg1,
+            c.kp,
+            c.kvb,
+            c.ig_max,
+            c.vgk_onset,
+            c.lambda,
+        )
     }
 
     /// 6SL7 - high-mu octal triode.
     pub fn _6sl7() -> Self {
         let c = crate::catalog::tubes::lookup("6SL7").unwrap();
-        Self::with_all_params(c.mu, c.ex, c.kg1, c.kp, c.kvb, c.ig_max, c.vgk_onset, c.lambda)
+        Self::with_all_params(
+            c.mu,
+            c.ex,
+            c.kg1,
+            c.kp,
+            c.kvb,
+            c.ig_max,
+            c.vgk_onset,
+            c.lambda,
+        )
     }
 
     /// Calculate plate current given Vgk and Vpk.
@@ -335,7 +411,13 @@ impl NonlinearDevice<3> for KorenPentode {
             let exp_inner = inner.exp();
             exp_inner / (1.0 + exp_inner)
         };
-        let softplus = if inner > 20.0 { inner } else if inner < -20.0 { 0.0 } else { (1.0 + inner.exp()).ln() };
+        let softplus = if inner > 20.0 {
+            inner
+        } else if inner < -20.0 {
+            0.0
+        } else {
+            (1.0 + inner.exp()).ln()
+        };
 
         let de1_dvgk = vsg * sigmoid / s;
         let de1_dvsg = softplus / self.triode.kp - sigmoid * vgk * vsg * vsg / (s * s * s);
@@ -354,16 +436,19 @@ mod tests {
     #[test]
     fn test_triode_cutoff() {
         let tube = KorenTriode::ecc83();
-        
+
         // Negative grid voltage should reduce current
         // The Koren model doesn't have a hard cutoff, just reduced current
         let ip_off = tube.plate_current(-2.0, 250.0);
         let ip_on = tube.plate_current(0.0, 250.0);
         let ip_very_off = tube.plate_current(-5.0, 250.0);
-        
+
         // More negative grid should give less current
         assert!(ip_off < ip_on, "More negative grid should reduce current");
-        assert!(ip_very_off < ip_off, "Even more negative should reduce further");
+        assert!(
+            ip_very_off < ip_off,
+            "Even more negative should reduce further"
+        );
     }
 
     #[test]
@@ -389,7 +474,11 @@ mod tests {
         assert!(ip_vgk_minus2 < ip_vgk_minus1);
 
         let ratio = ip_vgk_0 / ip_vgk_minus2;
-        assert!(ratio > 2.0, "Mu effect should be noticeable, ratio = {}", ratio);
+        assert!(
+            ratio > 2.0,
+            "Mu effect should be noticeable, ratio = {}",
+            ratio
+        );
     }
 
     #[test]
@@ -400,8 +489,8 @@ mod tests {
         let jac = tube.jacobian(&[0.0, 250.0]);
 
         assert!(ip > 0.0);
-        assert!(jac[0] > 0.0);  // dIp/dVgk > 0 (transconductance)
-        assert!(jac[1] > 0.0);  // dIp/dVpk > 0 (output conductance)
+        assert!(jac[0] > 0.0); // dIp/dVgk > 0 (transconductance)
+        assert!(jac[1] > 0.0); // dIp/dVpk > 0 (output conductance)
     }
 
     #[test]
@@ -409,22 +498,34 @@ mod tests {
         let tube = KorenTriode::ecc83();
 
         let ip_0 = tube.plate_current(0.0, 250.0);
-        assert!(ip_0 > 0.5e-3 && ip_0 < 5.0e-3,
-            "Ip(Vgk=0, Vpk=250) = {:.3}mA, expected 0.5-5.0mA", ip_0 * 1000.0);
+        assert!(
+            ip_0 > 0.5e-3 && ip_0 < 5.0e-3,
+            "Ip(Vgk=0, Vpk=250) = {:.3}mA, expected 0.5-5.0mA",
+            ip_0 * 1000.0
+        );
 
         let ip_m1 = tube.plate_current(-1.0, 250.0);
-        assert!(ip_m1 > 0.1e-3 && ip_m1 < 3.0e-3,
-            "Ip(Vgk=-1, Vpk=250) = {:.3}mA, expected 0.1-3.0mA", ip_m1 * 1000.0);
+        assert!(
+            ip_m1 > 0.1e-3 && ip_m1 < 3.0e-3,
+            "Ip(Vgk=-1, Vpk=250) = {:.3}mA, expected 0.1-3.0mA",
+            ip_m1 * 1000.0
+        );
 
         let ip_m2 = tube.plate_current(-2.0, 250.0);
-        assert!(ip_m2 > 0.01e-3 && ip_m2 < 1.5e-3,
-            "Ip(Vgk=-2, Vpk=250) = {:.3}mA, expected 0.01-1.5mA", ip_m2 * 1000.0);
+        assert!(
+            ip_m2 > 0.01e-3 && ip_m2 < 1.5e-3,
+            "Ip(Vgk=-2, Vpk=250) = {:.3}mA, expected 0.01-1.5mA",
+            ip_m2 * 1000.0
+        );
 
         assert!(ip_0 > ip_m1 && ip_m1 > ip_m2);
 
         let ip_m4 = tube.plate_current(-4.0, 250.0);
-        assert!(ip_m4 < 0.01e-3,
-            "Ip(Vgk=-4, Vpk=250) = {:.4}mA, expected near cutoff", ip_m4 * 1000.0);
+        assert!(
+            ip_m4 < 0.01e-3,
+            "Ip(Vgk=-4, Vpk=250) = {:.4}mA, expected near cutoff",
+            ip_m4 * 1000.0
+        );
     }
 
     /// Verify triode Jacobian against finite differences.
@@ -455,12 +556,24 @@ mod tests {
                 jac[1].abs()
             };
 
-            assert!(rel_err_gk < 1e-4,
+            assert!(
+                rel_err_gk < 1e-4,
                 "dIp/dVgk mismatch at ({}, {}): analytic={:.6e} fd={:.6e} err={:.2e}",
-                vgk, vpk, jac[0], fd_dvgk, rel_err_gk);
-            assert!(rel_err_pk < 1e-4,
+                vgk,
+                vpk,
+                jac[0],
+                fd_dvgk,
+                rel_err_gk
+            );
+            assert!(
+                rel_err_pk < 1e-4,
                 "dIp/dVpk mismatch at ({}, {}): analytic={:.6e} fd={:.6e} err={:.2e}",
-                vgk, vpk, jac[1], fd_dvpk, rel_err_pk);
+                vgk,
+                vpk,
+                jac[1],
+                fd_dvpk,
+                rel_err_pk
+            );
         }
     }
 
@@ -468,7 +581,11 @@ mod tests {
     fn test_pentode_plate_current() {
         let pent = KorenPentode::el84();
         let ip = pent.current(&[0.0, 250.0, 250.0]);
-        assert!(ip > 1e-3, "EL84 Ip should be in mA range, got {:.3}mA", ip * 1000.0);
+        assert!(
+            ip > 1e-3,
+            "EL84 Ip should be in mA range, got {:.3}mA",
+            ip * 1000.0
+        );
 
         let ip_100 = pent.current(&[0.0, 100.0, 250.0]);
         let ip_250 = pent.current(&[0.0, 250.0, 250.0]);
@@ -497,9 +614,14 @@ mod tests {
             } else {
                 jac[dim].abs()
             };
-            assert!(rel_err < 1e-3,
+            assert!(
+                rel_err < 1e-3,
                 "Pentode Jacobian[{}] mismatch: analytic={:.6e} fd={:.6e} err={:.2e}",
-                dim, jac[dim], fd, rel_err);
+                dim,
+                jac[dim],
+                fd,
+                rel_err
+            );
         }
     }
 
@@ -530,9 +652,14 @@ mod tests {
             } else {
                 jac.abs()
             };
-            assert!(rel_err < 1e-4,
+            assert!(
+                rel_err < 1e-4,
                 "dIg/dVgk mismatch at Vgk={}: analytic={:.6e} fd={:.6e} err={:.2e}",
-                vgk, jac, fd, rel_err);
+                vgk,
+                jac,
+                fd,
+                rel_err
+            );
         }
         assert_eq!(tube.grid_current_jacobian(0.0), 0.0);
         assert_eq!(tube.grid_current_jacobian(-1.0), 0.0);
@@ -550,8 +677,18 @@ mod tests {
             let jac = tube.jacobian(&[-3.0, vpk]);
             assert!(jac[0].is_finite(), "dIp/dVgk must be finite at vpk={}", vpk);
             assert!(jac[1].is_finite(), "dIp/dVpk must be finite at vpk={}", vpk);
-            assert!(jac[0].abs() < 1e6, "dIp/dVgk must be bounded at vpk={}, got {:.2e}", vpk, jac[0]);
-            assert!(jac[1].abs() < 1e6, "dIp/dVpk must be bounded at vpk={}, got {:.2e}", vpk, jac[1]);
+            assert!(
+                jac[0].abs() < 1e6,
+                "dIp/dVgk must be bounded at vpk={}, got {:.2e}",
+                vpk,
+                jac[0]
+            );
+            assert!(
+                jac[1].abs() < 1e6,
+                "dIp/dVpk must be bounded at vpk={}, got {:.2e}",
+                vpk,
+                jac[1]
+            );
         }
 
         // Normal operating point should still work
@@ -564,10 +701,8 @@ mod tests {
     #[test]
     fn test_lambda_early_effect() {
         let tube_no_lambda = KorenTriode::ecc83();
-        let tube_with_lambda = KorenTriode::with_all_params(
-            100.0, 1.4, 1060.0, 600.0, 300.0, 2e-3, 0.5,
-            0.001,
-        );
+        let tube_with_lambda =
+            KorenTriode::with_all_params(100.0, 1.4, 1060.0, 600.0, 300.0, 2e-3, 0.5, 0.001);
 
         let vgk = -1.0;
         let vpk = 250.0;
@@ -576,35 +711,36 @@ mod tests {
 
         let expected_ratio = 1.0 + 0.001 * vpk;
         let actual_ratio = ip_with / ip_without;
-        assert!((actual_ratio - expected_ratio).abs() < 1e-10,
+        assert!(
+            (actual_ratio - expected_ratio).abs() < 1e-10,
             "Lambda should multiply by (1+lambda*Vpk): ratio={:.6e}, expected={:.6e}",
-            actual_ratio, expected_ratio);
+            actual_ratio,
+            expected_ratio
+        );
     }
 
     /// Verify lambda=0.0 is backward compatible.
     #[test]
     fn test_lambda_zero_backward_compat() {
         let tube_old = KorenTriode::new(100.0, 1.4, 1060.0, 600.0, 300.0);
-        let tube_new = KorenTriode::with_all_params(
-            100.0, 1.4, 1060.0, 600.0, 300.0, 2e-3, 0.5,
-            0.0,
-        );
+        let tube_new =
+            KorenTriode::with_all_params(100.0, 1.4, 1060.0, 600.0, 300.0, 2e-3, 0.5, 0.0);
 
         for &(vgk, vpk) in &[(0.0, 250.0), (-1.0, 200.0), (-2.0, 100.0)] {
             let ip_old = tube_old.plate_current(vgk, vpk);
             let ip_new = tube_new.plate_current(vgk, vpk);
-            assert_eq!(ip_old, ip_new,
-                "lambda=0.0 should be backward compatible at ({}, {})", vgk, vpk);
+            assert_eq!(
+                ip_old, ip_new,
+                "lambda=0.0 should be backward compatible at ({}, {})",
+                vgk, vpk
+            );
         }
     }
 
     /// Verify Jacobian with lambda against finite differences.
     #[test]
     fn test_jacobian_with_lambda_finite_difference() {
-        let tube = KorenTriode::with_all_params(
-            100.0, 1.4, 1060.0, 600.0, 300.0, 2e-3, 0.5,
-            0.001,
-        );
+        let tube = KorenTriode::with_all_params(100.0, 1.4, 1060.0, 600.0, 300.0, 2e-3, 0.5, 0.001);
         let eps = 1e-6;
 
         for &(vgk, vpk) in &[(0.0, 250.0), (-1.0, 200.0), (-2.0, 100.0), (-0.5, 300.0)] {
@@ -629,12 +765,24 @@ mod tests {
                 jac[1].abs()
             };
 
-            assert!(rel_err_gk < 1e-4,
+            assert!(
+                rel_err_gk < 1e-4,
                 "dIp/dVgk mismatch at ({}, {}): analytic={:.6e} fd={:.6e} err={:.2e}",
-                vgk, vpk, jac[0], fd_dvgk, rel_err_gk);
-            assert!(rel_err_pk < 1e-4,
+                vgk,
+                vpk,
+                jac[0],
+                fd_dvgk,
+                rel_err_gk
+            );
+            assert!(
+                rel_err_pk < 1e-4,
                 "dIp/dVpk mismatch at ({}, {}): analytic={:.6e} fd={:.6e} err={:.2e}",
-                vgk, vpk, jac[1], fd_dvpk, rel_err_pk);
+                vgk,
+                vpk,
+                jac[1],
+                fd_dvpk,
+                rel_err_pk
+            );
         }
     }
 }

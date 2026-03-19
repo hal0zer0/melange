@@ -77,7 +77,7 @@ impl TrapezoidalCompanion {
     /// Update the history term after solving for v[n].
     ///
     /// Must be called exactly once per timestep after v[n] is known.
-    /// 
+    ///
     /// Trapezoidal companion model update:
     /// i[n] = g_eq * v[n] + j[n]
     /// j[n+1] = -g_eq * v[n] - i[n]
@@ -106,7 +106,7 @@ impl TrapezoidalCompanion {
     /// Reset to a specific DC voltage.
     pub fn reset_to_dc(&mut self, v_dc: f64) {
         self.v_prev = v_dc;
-        self.i_prev = 0.0;  // No current at DC for capacitor
+        self.i_prev = 0.0; // No current at DC for capacitor
         self.i_hist = -self.g_eq * v_dc;
     }
 
@@ -212,7 +212,7 @@ pub struct BackwardEulerCompanion {
 impl BackwardEulerCompanion {
     /// Create backward Euler companion for capacitor.
     pub fn new_capacitor(capacitance: f64, sample_rate: f64) -> Self {
-        let g_eq = capacitance * sample_rate;  // C/T
+        let g_eq = capacitance * sample_rate; // C/T
         Self {
             g_eq,
             i_hist: 0.0,
@@ -369,7 +369,7 @@ mod tests {
 
     #[test]
     fn test_trapezoidal_conductance() {
-        let c = 1e-6;  // 1 µF
+        let c = 1e-6; // 1 µF
         let fs = 44100.0;
         let g = companion_conductance_trapezoidal(c, fs);
         // g = 2*C*fs = 2 * 1e-6 * 44100 = 0.0882
@@ -386,33 +386,41 @@ mod tests {
 
         // After reset_to_dc, current should be 0
         let i_final = comp.current(v_dc);
-        assert!(i_final.abs() < 1e-10, "Capacitor current at DC after reset_to_dc: {} (expected 0)", i_final);
-        
+        assert!(
+            i_final.abs() < 1e-10,
+            "Capacitor current at DC after reset_to_dc: {} (expected 0)",
+            i_final
+        );
+
         // And history should be -g_eq * v_dc
         let expected_hist = -comp.g_eq * v_dc;
-        assert!((comp.i_hist - expected_hist).abs() < 1e-10, 
-            "History mismatch: expected {}, got {}", expected_hist, comp.i_hist);
+        assert!(
+            (comp.i_hist - expected_hist).abs() < 1e-10,
+            "History mismatch: expected {}, got {}",
+            expected_hist,
+            comp.i_hist
+        );
     }
-    
+
     #[test]
     fn test_trapezoidal_oscillation_behavior() {
         // Trapezoidal rule oscillates for step inputs - this is expected behavior
         let mut comp = TrapezoidalCompanion::new_capacitor(1e-6, 44100.0);
 
         let v_dc = 5.0;
-        
+
         // First few iterations show oscillation
         let i0 = comp.current(v_dc);
         comp.update(v_dc);
         let i1 = comp.current(v_dc);
         comp.update(v_dc);
         let i2 = comp.current(v_dc);
-        
+
         // Should oscillate between positive and negative
         assert!(i0 > 0.0);
         assert!(i1 < 0.0);
         assert!(i2 > 0.0);
-        
+
         // Magnitude should be consistent
         assert!((i0.abs() - i1.abs()).abs() < 1e-10);
     }
@@ -468,20 +476,28 @@ mod tests {
         let expected = 1.0 / (2.0 * l * fs); // T/(2L) = 1/(2*L*fs)
         assert!(
             (comp.conductance() - expected).abs() < 1e-15,
-            "g_eq = {}, expected {}", comp.conductance(), expected
+            "g_eq = {}, expected {}",
+            comp.conductance(),
+            expected
         );
         // Also verify the standalone helper gives the same result
         let g_helper = inductor_companion_conductance_trapezoidal(l, fs);
         assert!(
             (comp.conductance() - g_helper).abs() < 1e-15,
-            "conductance() vs helper: {} vs {}", comp.conductance(), g_helper
+            "conductance() vs helper: {} vs {}",
+            comp.conductance(),
+            g_helper
         );
     }
 
     #[test]
     fn test_inductor_companion_initial_state() {
         let comp = InductorCompanion::new_inductor(0.1, 44100.0);
-        assert_eq!(comp.history_current(), 0.0, "initial history current should be 0");
+        assert_eq!(
+            comp.history_current(),
+            0.0,
+            "initial history current should be 0"
+        );
         assert_eq!(comp.current(0.0), 0.0, "current(0) should be 0 at startup");
     }
 
@@ -502,7 +518,9 @@ mod tests {
                 assert!(
                     i > prev_current,
                     "Current should grow with constant voltage: step {}, i={}, prev={}",
-                    step, i, prev_current
+                    step,
+                    i,
+                    prev_current
                 );
             }
             prev_current = i;
@@ -510,7 +528,11 @@ mod tests {
         // After 1000 samples at 44.1kHz, t = ~22.7ms
         // Ideal: i = V*t/L = 1.0 * 0.0227 / 0.1 = 0.227A
         // Trapezoidal should be close
-        assert!(prev_current > 0.1, "Current should have grown substantially: {}", prev_current);
+        assert!(
+            prev_current > 0.1,
+            "Current should have grown substantially: {}",
+            prev_current
+        );
     }
 
     #[test]
@@ -521,11 +543,18 @@ mod tests {
         for _ in 0..100 {
             comp.update(1.0);
         }
-        assert!(comp.history_current().abs() > 0.0, "Should have nonzero history after updates");
+        assert!(
+            comp.history_current().abs() > 0.0,
+            "Should have nonzero history after updates"
+        );
 
         // Reset should zero everything
         comp.reset();
-        assert_eq!(comp.history_current(), 0.0, "history_current should be 0 after reset");
+        assert_eq!(
+            comp.history_current(),
+            0.0,
+            "history_current should be 0 after reset"
+        );
         assert_eq!(comp.current(0.0), 0.0, "current(0) should be 0 after reset");
     }
 
@@ -544,7 +573,9 @@ mod tests {
         assert!(
             (actual - expected).abs() < 1e-15,
             "current({}) = {}, expected g_eq*v + j_hist = {}",
-            v_test, actual, expected
+            v_test,
+            actual,
+            expected
         );
     }
 }

@@ -1,8 +1,8 @@
-use melange_solver::parser::Netlist;
-use melange_solver::mna::MnaSystem;
-use melange_solver::dk::DkKernel;
-use melange_solver::solver::{CircuitSolver, DeviceEntry};
 use melange_devices::diode::DiodeShockley;
+use melange_solver::dk::DkKernel;
+use melange_solver::mna::MnaSystem;
+use melange_solver::parser::Netlist;
+use melange_solver::solver::{CircuitSolver, DeviceEntry};
 
 fn main() {
     let spice = r#"* Mordor Screamer
@@ -23,17 +23,17 @@ Vin in 0 0
     let netlist = Netlist::parse(spice).unwrap();
     let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
     mna.g[0][0] += 1.0;
-    
+
     let kernel = DkKernel::from_mna(&mna, 48000.0).unwrap();
-    
+
     let d = DiodeShockley::new(2.52e-9, 1.906, 2.585e-2);
     let devices = vec![
         DeviceEntry::new_diode(d.clone(), 0),
         DeviceEntry::new_diode(d, 1),
     ];
-    
+
     let mut solver = CircuitSolver::new(kernel, devices, 0, 5).unwrap();
-    
+
     println!("CircuitSolver with 10mV DC:");
     for i in 0..20 {
         let out = solver.process_sample(0.01);

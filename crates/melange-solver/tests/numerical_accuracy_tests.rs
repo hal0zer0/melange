@@ -4,11 +4,11 @@
 //! for known circuits, matches analytical solutions where possible, and
 //! remains stable under extreme inputs.
 
-use melange_solver::parser::Netlist;
-use melange_solver::mna::MnaSystem;
+use melange_devices::{BjtEbersMoll, DiodeShockley};
 use melange_solver::dk::DkKernel;
-use melange_solver::solver::{CircuitSolver, LinearSolver, DeviceEntry};
-use melange_devices::{DiodeShockley, BjtEbersMoll};
+use melange_solver::mna::MnaSystem;
+use melange_solver::parser::Netlist;
+use melange_solver::solver::{CircuitSolver, DeviceEntry, LinearSolver};
 
 const SAMPLE_RATE: f64 = 44100.0;
 
@@ -55,7 +55,8 @@ fn test_rc_lowpass_exact_time_constant() {
     assert!(
         (output[44] - analytical_1tau).abs() < 0.05,
         "At 1 tau: output[44] = {:.4}, expected ~{:.4} (tolerance 0.05)",
-        output[44], analytical_1tau
+        output[44],
+        analytical_1tau
     );
 
     // Peak output should exceed 0.8V (DC blocker causes eventual droop,
@@ -73,7 +74,10 @@ fn test_rc_lowpass_exact_time_constant() {
         assert!(
             output[i] >= output[i - 1] - 1e-10,
             "Output should increase in first 100 samples: output[{}]={:.6} < output[{}]={:.6}",
-            i, output[i], i - 1, output[i - 1]
+            i,
+            output[i],
+            i - 1,
+            output[i - 1]
         );
     }
 }
@@ -128,7 +132,8 @@ fn test_rc_highpass_impulse_response() {
         assert!(
             (ratio - expected).abs() < 0.15,
             "Decay ratio output[45]/output[1] = {:.4}, expected ~{:.4} (tolerance 0.15)",
-            ratio, expected
+            ratio,
+            expected
         );
     }
 
@@ -144,7 +149,10 @@ fn test_rc_highpass_impulse_response() {
         assert!(
             output[i] >= output[i + 1] - 1e-10,
             "Output should decay monotonically: output[{}]={:.6} < output[{}]={:.6}",
-            i, output[i], i + 1, output[i + 1]
+            i,
+            output[i],
+            i + 1,
+            output[i + 1]
         );
     }
 }
@@ -159,7 +167,8 @@ fn test_rc_highpass_impulse_response() {
 /// Circuit: Rin=1k from in to out, D1 from out to ground, C1=1u from out to ground.
 #[test]
 fn test_diode_forward_voltage_shunt_clipper() {
-    let spice = "Shunt Clipper\nRin in out 1k\nD1 out 0 D1N4148\nC1 out 0 1u\n.model D1N4148 D(IS=1e-15)\n";
+    let spice =
+        "Shunt Clipper\nRin in out 1k\nD1 out 0 D1N4148\nC1 out 0 1u\n.model D1N4148 D(IS=1e-15)\n";
     let netlist = Netlist::parse(spice).unwrap();
     let mna = MnaSystem::from_netlist(&netlist).unwrap();
 
@@ -207,7 +216,8 @@ fn test_diode_forward_voltage_shunt_clipper() {
     assert!(
         output[50] > output[5],
         "Output should generally increase during transient: output[50]={:.6}, output[5]={:.6}",
-        output[50], output[5]
+        output[50],
+        output[5]
     );
 
     // The last 50 samples should have approximately settled (DC blocker droop
@@ -218,7 +228,9 @@ fn test_diode_forward_voltage_shunt_clipper() {
     assert!(
         (max_last - min_last) < 0.15,
         "Last 50 samples should be approximately settled: min={:.4}, max={:.4}, range={:.4}",
-        min_last, max_last, max_last - min_last
+        min_last,
+        max_last,
+        max_last - min_last
     );
 }
 
@@ -233,7 +245,8 @@ fn test_diode_forward_voltage_shunt_clipper() {
 /// n*Vt*ln(2) ~ 18mV to the diode voltage.
 #[test]
 fn test_diode_logarithmic_voltage_scaling() {
-    let spice = "Shunt Clipper\nRin in out 1k\nD1 out 0 D1N4148\nC1 out 0 1u\n.model D1N4148 D(IS=1e-15)\n";
+    let spice =
+        "Shunt Clipper\nRin in out 1k\nD1 out 0 D1N4148\nC1 out 0 1u\n.model D1N4148 D(IS=1e-15)\n";
 
     let run_to_steady_state = |input_v: f64| -> f64 {
         let netlist = Netlist::parse(spice).unwrap();
@@ -284,7 +297,8 @@ fn test_diode_logarithmic_voltage_scaling() {
     assert!(
         increment_1_to_2 < v_out_2v * 0.5,
         "Increment from 1V to 2V ({:.4}V) should be much less than v_out_2v ({:.4}V)",
-        increment_1_to_2, v_out_2v
+        increment_1_to_2,
+        v_out_2v
     );
 }
 
@@ -332,11 +346,7 @@ fn test_multi_device_two_diodes_converges() {
 
     // All outputs must be finite
     for (i, &v) in output.iter().enumerate() {
-        assert!(
-            v.is_finite(),
-            "Output[{}] = {} is not finite",
-            i, v
-        );
+        assert!(v.is_finite(), "Output[{}] = {} is not finite", i, v);
     }
 
     // Final output should be positive (positive input driving through diodes)
@@ -400,11 +410,7 @@ fn test_multi_device_three_devices_converges() {
 
     // All outputs must be finite
     for (i, &v) in output.iter().enumerate() {
-        assert!(
-            v.is_finite(),
-            "Output[{}] = {} is not finite",
-            i, v
-        );
+        assert!(v.is_finite(), "Output[{}] = {} is not finite", i, v);
     }
 
     // Output should be bounded: positive and less than input
@@ -461,11 +467,7 @@ fn test_bjt_common_emitter_bias_point() {
 
     // All outputs must be finite
     for (i, &v) in output.iter().enumerate() {
-        assert!(
-            v.is_finite(),
-            "Output[{}] = {} is not finite",
-            i, v
-        );
+        assert!(v.is_finite(), "Output[{}] = {} is not finite", i, v);
     }
 
     // Collector voltage should be positive (resistor to ground,
@@ -497,7 +499,8 @@ fn test_bjt_common_emitter_bias_point() {
 /// a brief transient but should still settle to < 1mV ripple.
 #[test]
 fn test_purely_resistive_circuit_with_cap_stable() {
-    let spice_no_cap = "No Cap\nRin in 0 1k\nD1 in out D1N4148\nR1 out 0 1k\n.model D1N4148 D(IS=1e-15)\n";
+    let spice_no_cap =
+        "No Cap\nRin in 0 1k\nD1 in out D1N4148\nR1 out 0 1k\n.model D1N4148 D(IS=1e-15)\n";
     let spice_with_cap = "With Cap\nRin in 0 1k\nD1 in out D1N4148\nR1 out 0 1k\nC1 out 0 100p\n.model D1N4148 D(IS=1e-15)\n";
 
     // Run without cap
@@ -551,12 +554,19 @@ fn test_purely_resistive_circuit_with_cap_stable() {
     assert!(
         (ss_no_cap - ss_with_cap).abs() < 0.01,
         "Steady states should agree: no_cap={:.6}, with_cap={:.6}",
-        ss_no_cap, ss_with_cap
+        ss_no_cap,
+        ss_with_cap
     );
 
     // Both should produce finite output
-    assert!(output_no_cap.iter().all(|v| v.is_finite()), "No-cap outputs should all be finite");
-    assert!(output_with_cap.iter().all(|v| v.is_finite()), "With-cap outputs should all be finite");
+    assert!(
+        output_no_cap.iter().all(|v| v.is_finite()),
+        "No-cap outputs should all be finite"
+    );
+    assert!(
+        output_with_cap.iter().all(|v| v.is_finite()),
+        "With-cap outputs should all be finite"
+    );
 }
 
 // ============================================================================
@@ -570,7 +580,8 @@ fn test_purely_resistive_circuit_with_cap_stable() {
 /// so this test verifies that the safety mechanism works correctly.
 #[test]
 fn test_solver_output_never_exceeds_10v_for_any_input() {
-    let spice = "Diode Clipper\nRin in out 1k\nD1 out 0 D1N4148\nC1 out 0 1u\n.model D1N4148 D(IS=1e-15)\n";
+    let spice =
+        "Diode Clipper\nRin in out 1k\nD1 out 0 D1N4148\nC1 out 0 1u\n.model D1N4148 D(IS=1e-15)\n";
     let netlist = Netlist::parse(spice).unwrap();
     let mna = MnaSystem::from_netlist(&netlist).unwrap();
     let kernel = DkKernel::from_mna(&mna, SAMPLE_RATE).unwrap();
@@ -584,7 +595,9 @@ fn test_solver_output_never_exceeds_10v_for_any_input() {
     let mut solver = CircuitSolver::new(kernel, devices, in_idx, out_idx).unwrap();
     solver.input_conductance = 0.001;
 
-    let extreme_inputs = [0.0, 1.0, -1.0, 5.0, -5.0, 10.0, -10.0, 100.0, -100.0, 0.001, -0.001];
+    let extreme_inputs = [
+        0.0, 1.0, -1.0, 5.0, -5.0, 10.0, -10.0, 100.0, -100.0, 0.001, -0.001,
+    ];
 
     for &input_v in &extreme_inputs {
         // Process 50 samples at each input level
@@ -593,12 +606,16 @@ fn test_solver_output_never_exceeds_10v_for_any_input() {
             assert!(
                 output.is_finite(),
                 "Output must be finite for input={}, sample={}, got {}",
-                input_v, sample_idx, output
+                input_v,
+                sample_idx,
+                output
             );
             assert!(
                 output.abs() <= 10.0,
                 "Output must be within [-10, 10]V for input={}, sample={}, got {:.4}",
-                input_v, sample_idx, output
+                input_v,
+                sample_idx,
+                output
             );
         }
     }
@@ -615,7 +632,8 @@ fn test_solver_output_never_exceeds_10v_for_any_input() {
 /// and the output should remain at zero.
 #[test]
 fn test_zero_input_produces_zero_output() {
-    let spice = "Zero Test\nRin in 0 1k\nD1 in out D1N4148\nC1 out 0 1u\n.model D1N4148 D(IS=1e-15)\n";
+    let spice =
+        "Zero Test\nRin in 0 1k\nD1 in out D1N4148\nC1 out 0 1u\n.model D1N4148 D(IS=1e-15)\n";
     let netlist = Netlist::parse(spice).unwrap();
     let mna = MnaSystem::from_netlist(&netlist).unwrap();
     let kernel = DkKernel::from_mna(&mna, SAMPLE_RATE).unwrap();
@@ -635,7 +653,8 @@ fn test_zero_input_produces_zero_output() {
         assert!(
             output.abs() < 1e-10,
             "Zero input should produce zero output, but sample {} = {:.2e}",
-            i, output
+            i,
+            output
         );
     }
 }
@@ -647,7 +666,8 @@ fn test_zero_input_produces_zero_output() {
 /// Verify that feeding NaN input produces finite output (solver should clamp/sanitize).
 #[test]
 fn test_solver_handles_nan_input() {
-    let spice = "NaN Test\nRin in out 1k\nD1 out 0 D1N4148\nC1 out 0 1u\n.model D1N4148 D(IS=1e-15)\n";
+    let spice =
+        "NaN Test\nRin in out 1k\nD1 out 0 D1N4148\nC1 out 0 1u\n.model D1N4148 D(IS=1e-15)\n";
     let netlist = Netlist::parse(spice).unwrap();
     let mna = MnaSystem::from_netlist(&netlist).unwrap();
     let kernel = DkKernel::from_mna(&mna, SAMPLE_RATE).unwrap();
@@ -669,16 +689,28 @@ fn test_solver_handles_nan_input() {
 
     // Feed NaN - solver should produce finite output (clamped)
     let out_nan = solver.process_sample(f64::NAN);
-    assert!(out_nan.is_finite(), "NaN input should produce finite output, got {}", out_nan);
+    assert!(
+        out_nan.is_finite(),
+        "NaN input should produce finite output, got {}",
+        out_nan
+    );
 
     // Feed Inf - solver should produce finite output (clamped)
     let out_inf = solver.process_sample(f64::INFINITY);
-    assert!(out_inf.is_finite(), "Inf input should produce finite output, got {}", out_inf);
+    assert!(
+        out_inf.is_finite(),
+        "Inf input should produce finite output, got {}",
+        out_inf
+    );
 
     // Should recover after bad inputs
     for _ in 0..50 {
         let out = solver.process_sample(0.0);
-        assert!(out.is_finite(), "Should recover after bad input, got {}", out);
+        assert!(
+            out.is_finite(),
+            "Should recover after bad input, got {}",
+            out
+        );
     }
 }
 
@@ -734,10 +766,7 @@ fn test_inductor_rl_circuit_finite_output() {
     let num_samples = 500;
     for _ in 0..num_samples {
         let output = solver.process_sample(1.0);
-        assert!(
-            output.is_finite(),
-            "RL circuit output must be finite"
-        );
+        assert!(output.is_finite(), "RL circuit output must be finite");
         assert!(
             output.abs() < 10.0,
             "RL circuit output must be bounded, got {:.4}",
@@ -776,7 +805,9 @@ fn test_m3_three_diodes_converges() {
         let output = solver.process_sample(1.0);
         assert!(
             output.is_finite(),
-            "M=3 output[{}] = {} is not finite", i, output
+            "M=3 output[{}] = {} is not finite",
+            i,
+            output
         );
     }
 }
@@ -808,7 +839,9 @@ fn test_m4_four_diodes_converges() {
         let output = solver.process_sample(1.0);
         assert!(
             output.is_finite(),
-            "M=4 output[{}] = {} is not finite", i, output
+            "M=4 output[{}] = {} is not finite",
+            i,
+            output
         );
     }
 }
@@ -830,7 +863,8 @@ fn test_multi_inductor_pi_filter() {
 
     // Verify both inductors are tracked
     assert_eq!(
-        kernel.inductors.len(), 2,
+        kernel.inductors.len(),
+        2,
         "Pi-filter should have 2 inductors, got {}",
         kernel.inductors.len()
     );
@@ -846,11 +880,15 @@ fn test_multi_inductor_pi_filter() {
         let output = solver.process_sample(1.0);
         assert!(
             output.is_finite(),
-            "Pi-filter output[{}] = {} is not finite", i, output
+            "Pi-filter output[{}] = {} is not finite",
+            i,
+            output
         );
         assert!(
             output.abs() < 10.0,
-            "Pi-filter output[{}] = {:.4} exceeds bound", i, output
+            "Pi-filter output[{}] = {:.4} exceeds bound",
+            i,
+            output
         );
     }
 }
@@ -864,7 +902,8 @@ fn test_multi_inductor_pi_filter() {
 #[test]
 fn test_nr_max_iterations_graceful_degradation() {
     // Extremely stiff diode (IS=1e-15, n=1.0) with large input
-    let spice = "Stiff Diode\nRin in out 1k\nD1 out 0 D1N4148\nC1 out 0 1u\n.model D1N4148 D(IS=1e-15)\n";
+    let spice =
+        "Stiff Diode\nRin in out 1k\nD1 out 0 D1N4148\nC1 out 0 1u\n.model D1N4148 D(IS=1e-15)\n";
     let netlist = Netlist::parse(spice).unwrap();
     let mna = MnaSystem::from_netlist(&netlist).unwrap();
     let kernel = DkKernel::from_mna(&mna, SAMPLE_RATE).unwrap();
@@ -885,7 +924,9 @@ fn test_nr_max_iterations_graceful_degradation() {
         let output = solver.process_sample(10.0);
         assert!(
             output.is_finite(),
-            "NR max-iter output[{}] must be finite, got {}", i, output
+            "NR max-iter output[{}] must be finite, got {}",
+            i,
+            output
         );
     }
 }
@@ -898,7 +939,8 @@ fn test_nr_max_iterations_graceful_degradation() {
 /// finite output once normal inputs resume.
 #[test]
 fn test_nr_nan_recovery() {
-    let spice = "NaN Recovery\nRin in out 1k\nD1 out 0 D1N4148\nC1 out 0 1u\n.model D1N4148 D(IS=1e-15)\n";
+    let spice =
+        "NaN Recovery\nRin in out 1k\nD1 out 0 D1N4148\nC1 out 0 1u\n.model D1N4148 D(IS=1e-15)\n";
     let netlist = Netlist::parse(spice).unwrap();
     let mna = MnaSystem::from_netlist(&netlist).unwrap();
     let kernel = DkKernel::from_mna(&mna, SAMPLE_RATE).unwrap();
@@ -921,7 +963,10 @@ fn test_nr_nan_recovery() {
     // Feed NaN for several samples
     for _ in 0..5 {
         let out = solver.process_sample(f64::NAN);
-        assert!(out.is_finite(), "NaN input should still produce finite output (clamped)");
+        assert!(
+            out.is_finite(),
+            "NaN input should still produce finite output (clamped)"
+        );
     }
 
     // Recovery: feed normal input and verify output is always finite and bounded
@@ -929,11 +974,15 @@ fn test_nr_nan_recovery() {
         let out = solver.process_sample(0.0);
         assert!(
             out.is_finite(),
-            "Recovery output[{}] must be finite, got {}", i, out
+            "Recovery output[{}] must be finite, got {}",
+            i,
+            out
         );
         assert!(
             out.abs() <= 10.0,
-            "Recovery output[{}] must be bounded, got {:.4}", i, out
+            "Recovery output[{}] must be bounded, got {:.4}",
+            i,
+            out
         );
     }
 
@@ -978,7 +1027,9 @@ fn test_inductor_nan_reset_recovery() {
         let out = solver.process_sample(0.0);
         assert!(
             out.is_finite(),
-            "RL recovery output[{}] must be finite after NaN, got {}", i, out
+            "RL recovery output[{}] must be finite after NaN, got {}",
+            i,
+            out
         );
     }
 }

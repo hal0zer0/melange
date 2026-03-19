@@ -6,11 +6,11 @@
 //! - S matrix properties (positive diagonal, S = A^{-1})
 //! - NR convergence with correct vs. negated K sign
 
-use melange_solver::parser::Netlist;
-use melange_solver::mna::MnaSystem;
-use melange_solver::dk::DkKernel;
 use melange_devices::DiodeShockley;
-use melange_primitives::nr::{nr_solve_1d, NrResult};
+use melange_primitives::nr::{NrResult, nr_solve_1d};
+use melange_solver::dk::DkKernel;
+use melange_solver::mna::MnaSystem;
+use melange_solver::parser::Netlist;
 
 // ---------------------------------------------------------------------------
 // Helper: parse -> MNA -> DK kernel at 44100 Hz
@@ -83,16 +83,8 @@ fn test_k_sign_negative_bjt() {
     let k10 = kernel.k(1, 0);
     let k11 = kernel.k(1, 1);
 
-    assert!(
-        k00 < 0.0,
-        "K[0,0] must be negative; got {:.6e}",
-        k00
-    );
-    assert!(
-        k11 < 0.0,
-        "K[1,1] must be negative; got {:.6e}",
-        k11
-    );
+    assert!(k00 < 0.0, "K[0,0] must be negative; got {:.6e}", k00);
+    assert!(k11 < 0.0, "K[1,1] must be negative; got {:.6e}", k11);
 
     let trace = k00 + k11;
     assert!(
@@ -134,16 +126,8 @@ fn test_k_sign_negative_two_diodes() {
     let k10 = kernel.k(1, 0);
     let k11 = kernel.k(1, 1);
 
-    assert!(
-        k00 < 0.0,
-        "K[0,0] must be negative; got {:.6e}",
-        k00
-    );
-    assert!(
-        k11 < 0.0,
-        "K[1,1] must be negative; got {:.6e}",
-        k11
-    );
+    assert!(k00 < 0.0, "K[0,0] must be negative; got {:.6e}", k00);
+    assert!(k11 < 0.0, "K[1,1] must be negative; got {:.6e}", k11);
 
     let trace = k00 + k11;
     assert!(
@@ -357,7 +341,10 @@ fn test_s_matrix_positive_diagonal() {
             assert!(
                 s_ii > 0.0,
                 "[{}] S[{},{}] should be positive; got {:.6e}",
-                label, i, i, s_ii
+                label,
+                i,
+                i,
+                s_ii
             );
         }
 
@@ -377,7 +364,11 @@ fn test_s_matrix_positive_diagonal() {
                 assert!(
                     (sa_ij - expected).abs() < tol,
                     "[{}] (S*A)[{},{}] = {:.6e}, expected {:.1}",
-                    label, i, j, sa_ij, expected
+                    label,
+                    i,
+                    j,
+                    sa_ij,
+                    expected
                 );
             }
         }
@@ -427,7 +418,7 @@ fn test_nr_converges_with_correct_k_sign() {
             let vcrit = melange_primitives::nr::pn_vcrit(n_vt, 1e-15);
             melange_primitives::nr::pnjlim(vnew, vold, n_vt, vcrit)
         },
-        0.0,  // initial guess
+        0.0, // initial guess
         50,
         1e-9,
     );
@@ -456,17 +447,15 @@ fn test_nr_converges_with_correct_k_sign() {
     let in_idx = *mna_fresh.node_map.get("in").expect("'in' node not found");
     let out_idx = *mna_fresh.node_map.get("out").expect("'out' node not found");
 
-    let diode_entry = DeviceEntry::new_diode(
-        DiodeShockley::new_room_temp(1e-15, 1.0),
-        0,
-    );
+    let diode_entry = DeviceEntry::new_diode(DiodeShockley::new_room_temp(1e-15, 1.0), 0);
 
     let mut solver = CircuitSolver::new(
         kernel_fresh,
         vec![diode_entry],
-        in_idx - 1,  // 0-based node index
+        in_idx - 1, // 0-based node index
         out_idx - 1,
-    ).unwrap();
+    )
+    .unwrap();
 
     let mut all_finite = true;
     let mut any_nonzero = false;
@@ -480,7 +469,10 @@ fn test_nr_converges_with_correct_k_sign() {
         }
     }
     assert!(all_finite, "All 10 solver outputs must be finite");
-    assert!(any_nonzero, "At least one output must be non-zero for a 1V step");
+    assert!(
+        any_nonzero,
+        "At least one output must be non-zero for a 1V step"
+    );
 
     // --- Part C: Negated K should cause divergence or failure ---
     let bad_k = -k; // Flip sign: positive
@@ -549,12 +541,12 @@ fn test_singular_matrix_error_path() {
         m: 0,
         num_devices: 0,
         g: vec![
-            vec![1.0, 0.0],  // node 0 has conductance to ground
-            vec![0.0, 0.0],  // node 1 is floating — zero row
+            vec![1.0, 0.0], // node 0 has conductance to ground
+            vec![0.0, 0.0], // node 1 is floating — zero row
         ],
         c: vec![
             vec![1e-6, 0.0],
-            vec![0.0, 0.0],  // node 1 has no capacitance either
+            vec![0.0, 0.0], // node 1 has no capacitance either
         ],
         n_v: vec![],
         n_i: vec![],
@@ -573,7 +565,10 @@ fn test_singular_matrix_error_path() {
     };
 
     let result = DkKernel::from_mna(&mna, 44100.0);
-    assert!(result.is_err(), "Expected error for singular A matrix, got Ok");
+    assert!(
+        result.is_err(),
+        "Expected error for singular A matrix, got Ok"
+    );
     let err = result.unwrap_err();
     match err {
         melange_solver::dk::DkError::SingularMatrix(_) => {

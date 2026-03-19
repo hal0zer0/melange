@@ -43,7 +43,7 @@ impl BoyleOpamp {
         Self {
             gain,
             dominant_pole,
-            second_pole: dominant_pole * 10.0,  // Typical ratio
+            second_pole: dominant_pole * 10.0, // Typical ratio
             vout_max,
             vout_min: -vout_max,
             slew_rate,
@@ -73,7 +73,7 @@ impl BoyleOpamp {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SimpleOpamp {
     pub gain: f64,
-    pub bandwidth: f64,  // Hz
+    pub bandwidth: f64, // Hz
     pub vout_max: f64,
     pub vout_min: f64,
 }
@@ -121,11 +121,11 @@ mod tests {
     #[test]
     fn test_simple_opamp() {
         let opa = SimpleOpamp::new(100e3, 10e6, 12.0);
-        
+
         // Small signal: linear region
-        let i = opa.current(&[0.1e-3]);  // 0.1mV input
+        let i = opa.current(&[0.1e-3]); // 0.1mV input
         assert!(i > 0.0);
-        
+
         // Large signal: saturation
         let i_sat = opa.current(&[1.0]);
         assert!(i_sat <= opa.vout_max);

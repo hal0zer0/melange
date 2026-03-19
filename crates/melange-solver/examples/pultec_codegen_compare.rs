@@ -1,8 +1,8 @@
 /// Run runtime NodalSolver for 48000 samples, check for oscillation
 fn main() {
-    use melange_solver::parser::Netlist;
-    use melange_solver::mna::MnaSystem;
     use melange_solver::codegen::ir::CircuitIR;
+    use melange_solver::mna::MnaSystem;
+    use melange_solver::parser::Netlist;
 
     let source = std::fs::read_to_string("circuits/pultec-eq.cir").unwrap();
     let netlist = Netlist::parse(&source).unwrap();
@@ -20,7 +20,12 @@ fn main() {
 
     let kernel = melange_solver::dk::DkKernel::from_mna_augmented(&mna, 48000.0).unwrap();
     let mut solver = melange_solver::solver::NodalSolver::new(
-        kernel, &mna, &netlist, device_slots.clone(), input_node - 1, output_node - 1,
+        kernel,
+        &mna,
+        &netlist,
+        device_slots.clone(),
+        input_node - 1,
+        output_node - 1,
     );
     solver.input_conductance = input_conductance;
     solver.initialize_dc_op(&mna, &device_slots);
@@ -33,9 +38,13 @@ fn main() {
             batch_peak = batch_peak.max(out.abs());
         }
         peak = peak.max(batch_peak);
-        println!("{:.1}s: peak={:.6e}  nr={}  be={}",
-            (batch + 1) as f64 * 0.1, batch_peak,
-            solver.diag_nr_max_iter_count, solver.diag_be_fallback_count);
+        println!(
+            "{:.1}s: peak={:.6e}  nr={}  be={}",
+            (batch + 1) as f64 * 0.1,
+            batch_peak,
+            solver.diag_nr_max_iter_count,
+            solver.diag_be_fallback_count
+        );
     }
     println!("\nOverall peak: {:.6e}", peak);
 }

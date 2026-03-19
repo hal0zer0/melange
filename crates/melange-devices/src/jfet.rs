@@ -86,7 +86,7 @@ impl Jfet {
     /// Drain current given Vgs and Vds.
     pub fn drain_current(&self, vgs: f64, vds: f64) -> f64 {
         let s = self.sign();
-        
+
         // Convert to N-channel equivalent voltages
         // After sign flip, both N and P channel use N-channel equations
         let vgs_eff = s * vgs;
@@ -98,13 +98,13 @@ impl Jfet {
         // - vgst = vgs_eff - vp_eff = -Vgs - (-Vp) = Vp - Vgs
         // - For conduction: vgst > 0 means Vp > Vgs (correct for P-channel!)
         let vp_eff = match self.channel {
-            JfetChannel::N => self.vp,   // Already negative
-            JfetChannel::P => -self.vp,  // Flip to negative
+            JfetChannel::N => self.vp,  // Already negative
+            JfetChannel::P => -self.vp, // Flip to negative
         };
         let vgst = vgs_eff - vp_eff;
 
         if vgst <= 0.0 {
-            return 0.0;  // Cutoff
+            return 0.0; // Cutoff
         }
 
         // Saturation voltage (Vds at which device enters saturation)
@@ -158,7 +158,9 @@ impl Jfet {
         let d_id_d_vds = if vds_eff < vds_sat {
             // Linear: derivative of (2*Vgst*Vds - Vds^2)
             let id_base = self.idss / (vp_abs * vp_abs) * (2.0 * vgst - 2.0 * vds_eff);
-            let id_lambda = self.idss / (vp_abs * vp_abs) * (2.0 * vgst * vds_eff - vds_eff * vds_eff) * self.lambda;
+            let id_lambda = self.idss / (vp_abs * vp_abs)
+                * (2.0 * vgst * vds_eff - vds_eff * vds_eff)
+                * self.lambda;
             id_base * (1.0 + self.lambda * vds_eff) + id_lambda
         } else {
             // Saturation: IDSS * (Vgst/Vp)^2 * lambda
@@ -174,8 +176,8 @@ impl Jfet {
     pub fn gate_current(&self, vgs: f64) -> f64 {
         // Gate-source diode
         let vgs_eff = match self.channel {
-            JfetChannel::N => vgs,   // Forward bias when Vgs > 0
-            JfetChannel::P => -vgs,  // Forward bias when Vgs < 0
+            JfetChannel::N => vgs,  // Forward bias when Vgs > 0
+            JfetChannel::P => -vgs, // Forward bias when Vgs < 0
         };
 
         if vgs_eff > 0.0 {
@@ -207,7 +209,7 @@ mod tests {
     #[test]
     fn test_jfet_cutoff() {
         let jfet = Jfet::n_j201();
-        
+
         // Vgs more negative than Vp: cutoff
         // Vp = -0.8, so Vgs = -2.0 < -0.8 should cutoff
         let id = jfet.drain_current(-2.0, 5.0);
@@ -217,79 +219,95 @@ mod tests {
     #[test]
     fn test_jfet_saturation() {
         let jfet = Jfet::n_j201();
-        
+
         // Vgs = 0, Vds > Vgs - Vp: saturation at IDSS
         // Vgst = 0 - (-0.8) = 0.8
         let id = jfet.drain_current(0.0, 5.0);
-        
+
         // Should be close to IDSS (with channel length modulation)
         assert!(id > 0.0);
-        assert!(id > jfet.idss * 0.5);  // At least half of IDSS
+        assert!(id > jfet.idss * 0.5); // At least half of IDSS
     }
 
     #[test]
     fn test_jfet_idss() {
         let jfet = Jfet::n_j201();
-        
+
         // At Vgs = 0, Id should be approximately IDSS
         let id = jfet.drain_current(0.0, 9.0);
-        
+
         // Allow for channel length modulation
-        assert!(id > jfet.idss);  // lambda > 0 increases current at high Vds
+        assert!(id > jfet.idss); // lambda > 0 increases current at high Vds
     }
 
     #[test]
     fn test_jfet_polarity() {
         let n_jfet = Jfet::n_j201();
         let p_jfet = Jfet::p_2n5460();
-        
+
         // N-channel: positive Vds, small negative Vgs (above Vp to conduct)
         // Vp = -0.8, Vgs = -0.3 > -0.8, so conducts
         let id_n = n_jfet.drain_current(-0.3, 5.0);
-        
+
         // P-channel: negative Vds, small positive Vgs (below Vp to conduct)
         // Vp = 2.5, Vgs = 2.0 < 2.5, so conducts
         let id_p = p_jfet.drain_current(2.0, -5.0);
-        
-        assert!(id_n > 0.0, "N-channel current should be positive, got {}", id_n);
-        assert!(id_p < 0.0, "P-channel current should be negative, got {}", id_p);
+
+        assert!(
+            id_n > 0.0,
+            "N-channel current should be positive, got {}",
+            id_n
+        );
+        assert!(
+            id_p < 0.0,
+            "P-channel current should be negative, got {}",
+            id_p
+        );
     }
 
     #[test]
     fn test_jfet_jacobian() {
         let jfet = Jfet::n_j201();
-        
+
         let vgs = -0.3;
         let vds = 5.0;
-        
+
         let (d_id_d_vgs, d_id_d_vds) = jfet.jacobian_partial(vgs, vds);
-        
+
         // Transconductance should be positive
-        assert!(d_id_d_vgs > 0.0, "gm should be positive, got {}", d_id_d_vgs);
-        
+        assert!(
+            d_id_d_vgs > 0.0,
+            "gm should be positive, got {}",
+            d_id_d_vgs
+        );
+
         // Output conductance should be positive
-        assert!(d_id_d_vds > 0.0, "gds should be positive, got {}", d_id_d_vds);
+        assert!(
+            d_id_d_vds > 0.0,
+            "gds should be positive, got {}",
+            d_id_d_vds
+        );
     }
 
     #[test]
     fn test_jfet_jacobian_numerical() {
         let jfet = Jfet::n_j201();
-        
+
         let vgs = -0.3;
         let vds = 5.0;
-        
+
         // Analytical Jacobian
         let (d_id_d_vgs, d_id_d_vds) = jfet.jacobian_partial(vgs, vds);
-        
+
         // Numerical verification
         let dv = 1e-6;
         let id = jfet.drain_current(vgs, vds);
         let id_vgs = jfet.drain_current(vgs + dv, vds);
         let id_vds = jfet.drain_current(vgs, vds + dv);
-        
+
         let num_d_id_d_vgs = (id_vgs - id) / dv;
         let num_d_id_d_vds = (id_vds - id) / dv;
-        
+
         // Should match within 1%
         assert!((d_id_d_vgs - num_d_id_d_vgs).abs() / d_id_d_vgs.abs() < 0.01);
         assert!((d_id_d_vds - num_d_id_d_vds).abs() / d_id_d_vds.abs() < 0.01);
@@ -308,19 +326,23 @@ mod tests {
 
         // Numerical verification (central difference)
         let eps = 1e-6;
-        let num_d_id_d_vgs = (jfet.drain_current(vgs + eps, vds) - jfet.drain_current(vgs - eps, vds)) / (2.0 * eps);
-        let num_d_id_d_vds = (jfet.drain_current(vgs, vds + eps) - jfet.drain_current(vgs, vds - eps)) / (2.0 * eps);
+        let num_d_id_d_vgs =
+            (jfet.drain_current(vgs + eps, vds) - jfet.drain_current(vgs - eps, vds)) / (2.0 * eps);
+        let num_d_id_d_vds =
+            (jfet.drain_current(vgs, vds + eps) - jfet.drain_current(vgs, vds - eps)) / (2.0 * eps);
 
         // Should match within 1%
         assert!(
             (d_id_d_vgs - num_d_id_d_vgs).abs() / num_d_id_d_vgs.abs().max(1e-15) < 0.01,
             "P-channel gm: analytical={:.6e}, numerical={:.6e}",
-            d_id_d_vgs, num_d_id_d_vgs
+            d_id_d_vgs,
+            num_d_id_d_vgs
         );
         assert!(
             (d_id_d_vds - num_d_id_d_vds).abs() / num_d_id_d_vds.abs().max(1e-15) < 0.01,
             "P-channel gds: analytical={:.6e}, numerical={:.6e}",
-            d_id_d_vds, num_d_id_d_vds
+            d_id_d_vds,
+            num_d_id_d_vds
         );
     }
 
