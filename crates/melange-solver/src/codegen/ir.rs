@@ -117,7 +117,12 @@ pub struct SolverConfig {
     /// Output scale factors applied after DC blocking (one per output)
     #[serde(default = "default_output_scales")]
     pub output_scales: Vec<f64>,
+    /// Silent samples to process after pot-triggered matrix rebuild (default 64).
+    #[serde(default = "default_pot_settle_samples")]
+    pub pot_settle_samples: usize,
 }
+
+fn default_pot_settle_samples() -> usize { 64 }
 
 fn default_output_nodes() -> Vec<usize> {
     vec![0]
@@ -831,6 +836,7 @@ impl CircuitIR {
             input_resistance: config.input_resistance,
             oversampling_factor: os_factor,
             output_scales: config.output_scales.clone(),
+            pot_settle_samples: config.pot_settle_samples,
         };
 
         let metadata = CircuitMetadata {
@@ -1188,6 +1194,7 @@ impl CircuitIR {
             input_resistance: config.input_resistance,
             oversampling_factor: config.oversampling_factor,
             output_scales: config.output_scales.clone(),
+            pot_settle_samples: config.pot_settle_samples,
         };
 
         let metadata = CircuitMetadata {

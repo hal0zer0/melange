@@ -48,7 +48,7 @@ R9    coll2 out    6.8K
 R10   out   fb     56K
 
 * --- Tremolo LDR (dynamic pot) ---
-R_ldr fb    0      31623
+R_ldr fb    0      100k
 .pot R_ldr 1k 1Meg "Tremolo"
 
 * --- Supply ---

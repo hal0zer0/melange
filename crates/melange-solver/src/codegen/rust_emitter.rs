@@ -2103,16 +2103,11 @@ impl RustEmitter {
         }
         code.push_str("        if needs_rebuild {\n");
         code.push_str("            state.rebuild_matrices();\n");
-        code.push_str("            // Re-initialize v_prev to the new linear DC operating point.\n");
-        code.push_str("            // Without this, the NR starts from the old DC state and can\n");
-        code.push_str("            // converge to a parasitic metastable point (e.g., BJT cutoff).\n");
-        code.push_str("            for i in 0..N {\n");
-        code.push_str("                let mut sum = 0.0;\n");
-        code.push_str("                for j in 0..N { sum += state.s[i][j] * RHS_CONST[j]; }\n");
-        code.push_str("                state.v_prev[i] = sum;\n");
-        code.push_str("            }\n");
-        code.push_str("            state.i_nl_prev = [0.0; M];\n");
-        code.push_str("            state.i_nl_prev_prev = [0.0; M];\n");
+        code.push_str("            // After rebuild, the caller is responsible for settling the\n");
+        code.push_str("            // circuit to the new DC operating point. For slowly-varying\n");
+        code.push_str("            // pots (tremolo), the per-sample changes are small enough\n");
+        code.push_str("            // that v_prev tracks naturally. For instantaneous jumps,\n");
+        code.push_str("            // the caller should process silent samples before audio.\n");
         code.push_str("        }\n");
         code.push_str("    }\n");
         code

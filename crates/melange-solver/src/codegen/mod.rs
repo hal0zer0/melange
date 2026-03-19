@@ -58,6 +58,10 @@ pub struct CodegenConfig {
     /// Set to false for circuits with output coupling caps or when the downstream
     /// pipeline handles DC offset. Removes the 5Hz HPF and its settling time.
     pub dc_block: bool,
+    /// Number of silent samples to process after pot-triggered matrix rebuild.
+    /// Settles the NR to the new nonlinear DC operating point. Default 64.
+    /// Set to 0 for zero-latency pot changes (may glitch on large pot swings).
+    pub pot_settle_samples: usize,
 }
 
 impl Default for CodegenConfig {
@@ -76,6 +80,7 @@ impl Default for CodegenConfig {
             dc_op_max_iterations: 200,
             dc_op_tolerance: 1e-9,
             dc_block: true,
+            pot_settle_samples: 64,
         }
     }
 }
