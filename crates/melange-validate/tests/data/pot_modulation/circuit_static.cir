@@ -1,0 +1,18 @@
+* Pot Modulation Test Circuit - Static baseline
+* Same topology as circuit.cir but with fixed R_ldr = 10k
+
+VIN in 0 DC 0 AC 1
+R1 in mid 1k
+R_ldr mid out 10k
+C1 out 0 100n
+D1 out 0 D1N4148
+Rload out 0 100k
+
+.MODEL D1N4148 D(IS=2.52e-9 N=1.752)
+
+.pot R_ldr 1k 100k
+
+.TRAN 1u 10m
+.PRINT TRAN V(out) V(in)
+
+.END

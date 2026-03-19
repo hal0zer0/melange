@@ -1,0 +1,18 @@
+* Pot Modulation Test Circuit (ngspice version)
+* R1(1k) -> mid -> B_ldr(time-varying) -> out -> C1(1n) || D1 || Rload(100k) -> ground
+* B-source models time-varying resistance: R(t) = 5.5k + 4.5k * sin(2*pi*5000*t)
+* Sweeps between 1k and 10k at 5kHz modulation rate
+
+VIN in 0 DC 0 AC 1
+R1 in mid 1k
+B_ldr mid out I=V(mid,out)/(5500+4500*sin(2*3.14159265358979*5000*time))
+C1 out 0 1n
+D1 out 0 D1N4148
+Rload out 0 100k
+
+.MODEL D1N4148 D(IS=2.52e-9 N=1.752)
+
+.TRAN 1u 100m
+.PRINT TRAN V(out) V(in)
+
+.END

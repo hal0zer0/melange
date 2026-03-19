@@ -1,0 +1,15 @@
+* Pot Modulation Test Circuit - Melange version (no VIN, with .pot)
+* Input via conductance stamping, R_ldr as dynamic pot
+* R_ldr nominal = 5.5k (center of 1k-10k sweep)
+
+R1 in mid 1k
+R_ldr mid out 5500
+C1 out 0 1n
+D1 out 0 D1N4148
+Rload out 0 100k
+
+.MODEL D1N4148 D(IS=2.52e-9 N=1.752)
+
+.pot R_ldr 1k 100k
+
+.END
