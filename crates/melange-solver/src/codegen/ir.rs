@@ -1563,7 +1563,10 @@ impl CircuitIR {
                 let vbc = v_b - v_c;
                 let sign = if bp.is_pnp { -1.0 } else { 1.0 };
                 let vbc_eff = sign * vbc;
-                if vbc_eff < -1.0 && !bp.has_parasitics() && !bp.is_gummel_poon() {
+                // Forward-active: allow parasitics and GP models.
+                // 1D FA ignores parasitics (small for forward-active: Ib*RB << Vbe).
+                // GP qb(Vbc) is ~constant when Vbc is deeply reverse-biased.
+                if vbc_eff < -1.0 {
                     let name = dev.name.to_ascii_uppercase();
                     log::info!(
                         "BJT '{}' forward-active (Vbc={:.3}V). Using 1D model.",

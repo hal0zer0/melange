@@ -90,6 +90,12 @@ enum Commands {
         /// Oversampling factor (1=none, 2=2x, 4=4x). Higher reduces aliasing and improves NR stability.
         #[arg(long, default_value = "1")]
         oversampling: usize,
+
+        /// Solver type: auto (default), dk, nodal.
+        /// Auto selects DK for most circuits, nodal for multi-transformer.
+        /// Use nodal for large M circuits where DK NR doesn't converge.
+        #[arg(long, default_value = "auto")]
+        solver: String,
     },
 
     /// Validate circuit against ngspice reference simulation
@@ -316,6 +322,7 @@ fn main() -> Result<()> {
             no_dc_block,
             input_resistance: input_resistance_flag,
             oversampling,
+            solver,
         } => {
             // Validate numeric CLI parameters
             if sample_rate <= 0.0 || !sample_rate.is_finite() {
@@ -353,6 +360,7 @@ fn main() -> Result<()> {
                 input_resistance_flag,
                 oversampling,
                 no_dc_block,
+                &solver,
             )
         }
         Commands::Validate {
@@ -491,6 +499,7 @@ fn compile_circuit_source(
     input_resistance_flag: Option<f64>,
     oversampling: usize,
     no_dc_block: bool,
+    solver_override: &str,
 ) -> Result<()> {
     use melange_solver::{
         codegen::{CodeGenerator, CodegenConfig},
@@ -633,9 +642,15 @@ fn compile_circuit_source(
         input_resistance,
         ..melange_solver::codegen::CodegenConfig::default()
     };
-    let forward_active = melange_solver::codegen::ir::CircuitIR::detect_forward_active_bjts(
-        &mna, &netlist, &fa_config,
-    );
+    // Skip FA detection for nodal solver (it handles all M natively via N×N NR).
+    // FA only benefits the DK solver where M×M NR cost dominates.
+    let forward_active = if solver_override == "nodal" {
+        std::collections::HashSet::new()
+    } else {
+        melange_solver::codegen::ir::CircuitIR::detect_forward_active_bjts(
+            &mna, &netlist, &fa_config,
+        )
+    };
     if !forward_active.is_empty() {
         println!(
             "  Forward-active BJTs: {:?} (M reduces by {})",
@@ -736,13 +751,14 @@ fn compile_circuit_source(
         } else {
             0
         };
-    let use_nodal_codegen = has_inductors_compile && n_xfmr_groups > 1;
+    let use_nodal_codegen = match solver_override {
+        "nodal" => true,
+        "dk" => false,
+        _ => has_inductors_compile && n_xfmr_groups > 1, // auto
+    };
 
     let generated = if use_nodal_codegen {
-        println!(
-            "  Using nodal solver codegen ({} transformer groups — DK K matrix unstable)",
-            n_xfmr_groups
-        );
+        println!("  Using nodal solver codegen");
         generator
             .generate_nodal(&mna, &netlist)
             .with_context(|| "Nodal code generation failed")?
