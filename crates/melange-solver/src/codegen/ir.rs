@@ -171,6 +171,14 @@ pub struct Matrices {
     /// RHS constant for backward Euler (DC sources × 1, not × 2)
     #[serde(default)]
     pub rhs_const_be: Vec<f64>,
+
+    // --- Schur complement matrices for nodal solver (S = A^{-1}, computed at codegen time) ---
+    /// S_be = A_be^{-1}, N×N row-major (backward Euler, for BE fallback in Schur NR)
+    #[serde(default)]
+    pub s_be: Vec<f64>,
+    /// K_be = N_v * S_be * N_i, M×M row-major (backward Euler kernel for BE fallback)
+    #[serde(default)]
+    pub k_be: Vec<f64>,
 }
 
 /// Potentiometer parameters for code generation (Sherman-Morrison precomputed data).
@@ -1027,6 +1035,8 @@ impl CircuitIR {
                 a_matrix_be: Vec::new(),
                 a_neg_be: Vec::new(),
                 rhs_const_be: Vec::new(),
+                s_be: Vec::new(),
+                k_be: Vec::new(),
             }
         } else {
             Matrices {
@@ -1042,6 +1052,8 @@ impl CircuitIR {
                 a_matrix_be: Vec::new(),
                 a_neg_be: Vec::new(),
                 rhs_const_be: Vec::new(),
+                s_be: Vec::new(),
+                k_be: Vec::new(),
             }
         };
 
@@ -1403,9 +1415,25 @@ impl CircuitIR {
             }
         }
 
+        // Compute S = A^{-1} for Schur complement NR (O(M³) instead of O(N³) per iteration)
+        let s_flat = invert_flat_matrix(&a_flat, n)?;
+        let k_flat = if m > 0 {
+            compute_k_from_s(&s_flat, &n_v_flat, &n_i_flat, n, m)
+        } else {
+            Vec::new()
+        };
+
+        // Also compute S_be = A_be^{-1} for backward Euler fallback
+        let s_be_flat = invert_flat_matrix(&a_be_flat, n)?;
+        let k_be_flat = if m > 0 {
+            compute_k_from_s(&s_be_flat, &n_v_flat, &n_i_flat, n, m)
+        } else {
+            Vec::new()
+        };
+
         let matrices = Matrices {
-            s: Vec::new(), // not used in nodal mode
-            k: Vec::new(), // not used in nodal mode
+            s: s_flat,
+            k: k_flat,
             a_neg: a_neg_flat,
             n_v: n_v_flat,
             n_i: n_i_flat,
@@ -1416,6 +1444,8 @@ impl CircuitIR {
             a_matrix_be: a_be_flat,
             a_neg_be: a_neg_be_flat,
             rhs_const_be,
+            s_be: s_be_flat,
+            k_be: k_be_flat,
         };
 
         // Run DC OP
@@ -1439,12 +1469,12 @@ impl CircuitIR {
         let mut device_slots = Self::build_device_info_with_mna(netlist, Some(mna))?;
         Self::resolve_mosfet_nodes(&mut device_slots, mna);
 
-        // Sparsity analysis
+        // Sparsity analysis (K is now computed for Schur complement NR)
         let sparsity = SparseInfo {
             a_neg: analyze_matrix_sparsity(&matrices.a_neg, n, n),
             n_v: analyze_matrix_sparsity(&matrices.n_v, m, n),
             n_i: analyze_matrix_sparsity(&matrices.n_i, n, m),
-            k: analyze_matrix_sparsity(&[], 0, 0), // no K in nodal mode
+            k: analyze_matrix_sparsity(&matrices.k, m, m),
         };
 
         Ok(CircuitIR {
@@ -2193,5 +2223,15 @@ impl CircuitIR {
     /// Access A_neg_be matrix element A_neg_be[i][j] (backward Euler history, nodal mode only)
     pub fn a_neg_be(&self, i: usize, j: usize) -> f64 {
         self.matrices.a_neg_be[i * self.topology.n + j]
+    }
+
+    /// Access S_be matrix element S_be[i][j] (backward Euler, nodal Schur)
+    pub fn s_be(&self, i: usize, j: usize) -> f64 {
+        self.matrices.s_be[i * self.topology.n + j]
+    }
+
+    /// Access K_be matrix element K_be[i][j] (backward Euler, nodal Schur)
+    pub fn k_be(&self, i: usize, j: usize) -> f64 {
+        self.matrices.k_be[i * self.topology.m + j]
     }
 }

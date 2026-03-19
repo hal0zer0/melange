@@ -2763,6 +2763,120 @@ fn emit_nr_limit_and_converge(
     code.push_str(&format!("{indent}}}\n"));
 }
 
+/// Emit NR limit/converge for Schur complement process_sample (uses `break` not `return`).
+///
+/// Same as `emit_nr_limit_and_converge` but ends the NR loop with `break` instead of
+/// `return i_nl`, since we're inside `process_sample` not a standalone `solve_nonlinear`.
+fn emit_schur_nr_limit_and_converge(
+    code: &mut String,
+    ir: &CircuitIR,
+    dim: usize,
+    indent: &str,
+    k_matrix_expr: &str,
+) {
+    // Compute implied voltage changes: dv[i] = -sum_j K[i][j] * delta[j]
+    code.push_str(&format!(
+        "{indent}// Voltage-space limiting (SPICE pnjlim/fetlim through K matrix)\n"
+    ));
+    for i in 0..dim {
+        code.push_str(&format!("{indent}let dv{i} = -("));
+        let mut first = true;
+        for j in 0..dim {
+            if !first {
+                code.push_str(" + ");
+            }
+            code.push_str(&format!("{k_matrix_expr}[{i}][{j}] * delta{j}"));
+            first = false;
+        }
+        code.push_str(");\n");
+    }
+
+    // Compute scalar damping factor from per-device limiting
+    code.push_str(&format!("{indent}let mut alpha = 1.0_f64;\n"));
+    for (dev_num, slot) in ir.device_slots.iter().enumerate() {
+        for d in 0..slot.dimension {
+            let i = slot.start_idx + d;
+            code.push_str(&format!("{indent}if dv{i}.abs() > 1e-15 {{\n"));
+            match (&slot.device_type, d) {
+                (DeviceType::Diode, _) => {
+                    code.push_str(&format!(
+                        "{indent}    let v_lim = pnjlim(v_d{i} + dv{i}, v_d{i}, state.device_{dev_num}_n_vt, DEVICE_{dev_num}_VCRIT);\n"
+                    ));
+                }
+                (DeviceType::Bjt, _) | (DeviceType::BjtForwardActive, _) => {
+                    code.push_str(&format!(
+                        "{indent}    let v_lim = pnjlim(v_d{i} + dv{i}, v_d{i}, state.device_{dev_num}_vt, DEVICE_{dev_num}_VCRIT);\n"
+                    ));
+                }
+                (DeviceType::Jfet, 0) => {
+                    code.push_str(&format!(
+                        "{indent}    let v_lim = fetlim(v_d{i} + dv{i}, v_d{i}, 0.0);\n"
+                    ));
+                }
+                (DeviceType::Jfet, _) => {
+                    code.push_str(&format!(
+                        "{indent}    let v_lim = fetlim(v_d{i} + dv{i}, v_d{i}, state.device_{dev_num}_vp);\n"
+                    ));
+                }
+                (DeviceType::Mosfet, 0) => {
+                    code.push_str(&format!(
+                        "{indent}    let v_lim = fetlim(v_d{i} + dv{i}, v_d{i}, 0.0);\n"
+                    ));
+                }
+                (DeviceType::Mosfet, _) => {
+                    code.push_str(&format!(
+                        "{indent}    let v_lim = fetlim(v_d{i} + dv{i}, v_d{i}, state.device_{dev_num}_vt);\n"
+                    ));
+                }
+                (DeviceType::Tube, 0) => {
+                    code.push_str(&format!(
+                        "{indent}    let v_lim = pnjlim(v_d{i} + dv{i}, v_d{i}, state.device_{dev_num}_vgk_onset / 3.0, DEVICE_{dev_num}_VCRIT);\n"
+                    ));
+                }
+                (DeviceType::Tube, _) => {
+                    code.push_str(&format!(
+                        "{indent}    let v_lim = fetlim(v_d{i} + dv{i}, v_d{i}, 0.0);\n"
+                    ));
+                }
+            }
+            code.push_str(&format!(
+                "{indent}    let ratio = ((v_lim - v_d{i}) / dv{i}).max(0.01);\n"
+            ));
+            code.push_str(&format!(
+                "{indent}    if ratio < alpha {{ alpha = ratio; }}\n"
+            ));
+            code.push_str(&format!("{indent}}}\n"));
+        }
+    }
+
+    // Apply damped step
+    for i in 0..dim {
+        code.push_str(&format!("{indent}i_nl[{i}] -= alpha * delta{i};\n"));
+    }
+
+    // Convergence check — break from loop (not return)
+    code.push_str(&format!(
+        "\n{indent}// Convergence check (max-norm on actual step)\n"
+    ));
+    code.push_str(&format!("{indent}if "));
+    for i in 0..dim {
+        if i > 0 {
+            code.push_str(".max(");
+        }
+        code.push_str(&format!("(alpha * delta{i}).abs()"));
+        if i > 0 {
+            code.push(')');
+        }
+    }
+    code.push_str(" < TOL {\n");
+    code.push_str(&format!(
+        "{indent}    state.last_nr_iterations = iter as u32;\n"
+    ));
+    code.push_str(&format!("{indent}    converged = true;\n"));
+    code.push_str(&format!("{indent}    break;\n"));
+    code.push_str(&format!("{indent}}}\n"));
+}
+
 impl RustEmitter {
     /// Generate solve_nonlinear function using Newton-Raphson.
     ///
@@ -3298,6 +3412,71 @@ impl RustEmitter {
         emit_nr_singular_fallback(code, dim, "            ");
         code.push_str("        }\n");
     }
+
+    /// Generate Gauss elimination for Schur NR (uses `break` not `return`).
+    fn generate_schur_gauss_elim(code: &mut String, ir: &CircuitIR, dim: usize) {
+        code.push_str(&format!(
+            "        // Solve {dim}x{dim} system via inline Gaussian elimination\n"
+        ));
+
+        code.push_str("        let mut a = [\n");
+        for i in 0..dim {
+            let row = (0..dim)
+                .map(|j| format!("j{i}{j}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            code.push_str(&format!("            [{row}],\n"));
+        }
+        code.push_str("        ];\n");
+
+        let b_init = (0..dim)
+            .map(|i| format!("f{i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        code.push_str(&format!("        let mut b = [{b_init}];\n"));
+
+        code.push_str(&format!(
+            "        let mut singular = false;\n\
+             \x20       for col in 0..{dim} {{\n\
+             \x20           let mut max_row = col;\n\
+             \x20           let mut max_val = a[col][col].abs();\n\
+             \x20           for row in (col+1)..{dim} {{\n\
+             \x20               if a[row][col].abs() > max_val {{\n\
+             \x20                   max_val = a[row][col].abs();\n\
+             \x20                   max_row = row;\n\
+             \x20               }}\n\
+             \x20           }}\n\
+             \x20           if max_val < 1e-15 {{ singular = true; break; }}\n\
+             \x20           if max_row != col {{ a.swap(col, max_row); b.swap(col, max_row); }}\n\
+             \x20           let pivot = a[col][col];\n\
+             \x20           for row in (col+1)..{dim} {{\n\
+             \x20               let factor = a[row][col] / pivot;\n\
+             \x20               for j in (col+1)..{dim} {{ a[row][j] -= factor * a[col][j]; }}\n\
+             \x20               b[row] -= factor * b[col];\n\
+             \x20           }}\n\
+             \x20       }}\n"
+        ));
+
+        code.push_str(&format!(
+            "        if !singular {{\n\
+             \x20           for i in (0..{dim}).rev() {{\n\
+             \x20               let mut sum = b[i];\n\
+             \x20               for j in (i+1)..{dim} {{ sum -= a[i][j] * b[j]; }}\n\
+             \x20               if a[i][i].abs() < 1e-15 {{ singular = true; break; }}\n\
+             \x20               b[i] = sum / a[i][i];\n\
+             \x20           }}\n\
+             \x20       }}\n"
+        ));
+
+        code.push_str("        if !singular {\n");
+        for i in 0..dim {
+            code.push_str(&format!("            let delta{i} = b[{i}];\n"));
+        }
+        emit_schur_nr_limit_and_converge(code, ir, dim, "            ", "state.k");
+        code.push_str("        } else {\n");
+        emit_nr_singular_fallback(code, dim, "            ");
+        code.push_str("        }\n");
+    }
 }
 
 // ============================================================================
@@ -3328,11 +3507,11 @@ impl RustEmitter {
         // Nodal-specific: state struct, Default, set_sample_rate, reset
         code.push_str(&self.emit_nodal_state(ir));
 
-        // Nodal-specific: LU solve function
-        code.push_str(&Self::emit_nodal_lu_solve(ir));
+        // Nodal-specific: invert_n function (for rebuild_matrices at runtime)
+        code.push_str(&Self::emit_nodal_invert_n(ir));
 
-        // Nodal-specific: process_sample with full NR loop
-        code.push_str(&Self::emit_nodal_process_sample(ir));
+        // Nodal-specific: Schur complement process_sample (M-dim NR via precomputed S = A^{-1})
+        code.push_str(&Self::emit_nodal_schur_process_sample(ir)?);
 
         if ir.solver_config.oversampling_factor > 1 {
             code.push_str(&Self::emit_oversampler(ir));
@@ -3491,6 +3670,70 @@ impl RustEmitter {
             code.push_str(&format!("    [{}],\n", row));
         }
         code.push_str("];\n\n");
+
+        // Schur complement matrices: S = A^{-1}, K = N_v * S * N_i, S_NI = S * N_i
+        code.push_str("/// S matrix: A^{-1} (precomputed inverse, trapezoidal, at SAMPLE_RATE)\nconst S_DEFAULT: [[f64; N]; N] = [\n");
+        for row in format_matrix_rows(n, n, |i, j| ir.s(i, j)) {
+            code.push_str(&format!("    [{}],\n", row));
+        }
+        code.push_str("];\n\n");
+
+        if m > 0 {
+            code.push_str("/// K matrix: N_v * S * N_i (nonlinear kernel, trapezoidal, at SAMPLE_RATE)\nconst K_DEFAULT: [[f64; M]; M] = [\n");
+            for row in format_matrix_rows(m, m, |i, j| ir.k(i, j)) {
+                code.push_str(&format!("    [{}],\n", row));
+            }
+            code.push_str("];\n\n");
+
+            // S_NI = S * N_i (N × M)
+            code.push_str("/// S_NI matrix: S * N_i (precomputed for final voltage recovery, N x M)\nconst S_NI_DEFAULT: [[f64; M]; N] = [\n");
+            for i in 0..n {
+                let row: Vec<String> = (0..m)
+                    .map(|j| {
+                        let mut val = 0.0;
+                        for k in 0..n {
+                            val += ir.s(i, k) * ir.n_i(k, j);
+                        }
+                        fmt_f64(val)
+                    })
+                    .collect();
+                code.push_str(&format!("    [{}],\n", row.join(", ")));
+            }
+            code.push_str("];\n\n");
+        }
+
+        // Backward Euler Schur complement matrices
+        if !ir.matrices.s_be.is_empty() {
+            code.push_str("/// S_be matrix: A_be^{-1} (backward Euler, at SAMPLE_RATE)\nconst S_BE_DEFAULT: [[f64; N]; N] = [\n");
+            for row in format_matrix_rows(n, n, |i, j| ir.s_be(i, j)) {
+                code.push_str(&format!("    [{}],\n", row));
+            }
+            code.push_str("];\n\n");
+
+            if m > 0 && !ir.matrices.k_be.is_empty() {
+                code.push_str("/// K_be matrix: N_v * S_be * N_i (backward Euler kernel)\nconst K_BE_DEFAULT: [[f64; M]; M] = [\n");
+                for row in format_matrix_rows(m, m, |i, j| ir.k_be(i, j)) {
+                    code.push_str(&format!("    [{}],\n", row));
+                }
+                code.push_str("];\n\n");
+
+                // S_NI_be = S_be * N_i (N × M)
+                code.push_str("/// S_NI_be matrix: S_be * N_i (backward Euler, for final voltage recovery)\nconst S_NI_BE_DEFAULT: [[f64; M]; N] = [\n");
+                for i in 0..n {
+                    let row: Vec<String> = (0..m)
+                        .map(|j| {
+                            let mut val = 0.0;
+                            for k in 0..n {
+                                val += ir.s_be(i, k) * ir.n_i(k, j);
+                            }
+                            fmt_f64(val)
+                        })
+                        .collect();
+                    code.push_str(&format!("    [{}],\n", row.join(", ")));
+                }
+                code.push_str("];\n\n");
+            }
+        }
 
         // RHS_CONST (trapezoidal)
         if ir.has_dc_sources {
@@ -3703,6 +3946,25 @@ impl RustEmitter {
         code.push_str("    /// A_neg_be matrix: (1/T)*C (backward Euler history), recomputed by set_sample_rate\n");
         code.push_str("    pub a_neg_be: [[f64; N]; N],\n");
 
+        // Schur complement matrices (precomputed S = A^{-1}, K = N_v*S*N_i, S_NI = S*N_i)
+        code.push_str("    /// S matrix: A^{-1} (trapezoidal), recomputed by set_sample_rate\n");
+        code.push_str("    pub s: [[f64; N]; N],\n");
+        if m > 0 {
+            code.push_str("    /// K matrix: N_v * S * N_i (nonlinear kernel), recomputed by set_sample_rate\n");
+            code.push_str("    pub k: [[f64; M]; M],\n");
+            code.push_str("    /// S_NI matrix: S * N_i (voltage recovery), recomputed by set_sample_rate\n");
+            code.push_str("    pub s_ni: [[f64; M]; N],\n");
+        }
+        code.push_str("    /// S_be matrix: A_be^{-1} (backward Euler), recomputed by set_sample_rate\n");
+        code.push_str("    pub s_be: [[f64; N]; N],\n");
+        if m > 0 {
+            code.push_str("    /// K_be matrix: N_v * S_be * N_i (BE kernel), recomputed by set_sample_rate\n");
+            code.push_str("    pub k_be: [[f64; M]; M],\n");
+            code.push_str("    /// S_NI_be matrix: S_be * N_i (BE voltage recovery), recomputed by set_sample_rate\n");
+            code.push_str("    pub s_ni_be: [[f64; M]; N],\n");
+        }
+        code.push('\n');
+
         // Mutable G and C for pot/switch re-stamping
         if has_pots || has_switches {
             code.push_str("    /// Working G matrix (modified by pots/switches)\n");
@@ -3849,6 +4111,16 @@ impl RustEmitter {
         code.push_str("            a_neg: A_NEG_DEFAULT,\n");
         code.push_str("            a_be: A_BE_DEFAULT,\n");
         code.push_str("            a_neg_be: A_NEG_BE_DEFAULT,\n");
+        code.push_str("            s: S_DEFAULT,\n");
+        if m > 0 {
+            code.push_str("            k: K_DEFAULT,\n");
+            code.push_str("            s_ni: S_NI_DEFAULT,\n");
+        }
+        code.push_str("            s_be: S_BE_DEFAULT,\n");
+        if m > 0 {
+            code.push_str("            k_be: K_BE_DEFAULT,\n");
+            code.push_str("            s_ni_be: S_NI_BE_DEFAULT,\n");
+        }
 
         if has_pots || has_switches {
             code.push_str("            g_work: G,\n");
@@ -3944,6 +4216,17 @@ impl RustEmitter {
         code.push_str("        self.diag_nr_max_iter_count = 0;\n");
         code.push_str("        self.diag_be_fallback_count = 0;\n");
         code.push_str("        self.diag_nan_reset_count = 0;\n");
+        // Reset Schur complement matrices to defaults
+        code.push_str("        self.s = S_DEFAULT;\n");
+        if m > 0 {
+            code.push_str("        self.k = K_DEFAULT;\n");
+            code.push_str("        self.s_ni = S_NI_DEFAULT;\n");
+        }
+        code.push_str("        self.s_be = S_BE_DEFAULT;\n");
+        if m > 0 {
+            code.push_str("        self.k_be = K_BE_DEFAULT;\n");
+            code.push_str("        self.s_ni_be = S_NI_BE_DEFAULT;\n");
+        }
         if has_pots || has_switches {
             code.push_str("        self.g_work = G;\n");
             code.push_str("        self.c_work = C;\n");
@@ -4016,6 +4299,14 @@ impl RustEmitter {
         code.push_str("            self.a_neg = A_NEG_DEFAULT;\n");
         code.push_str("            self.a_be = A_BE_DEFAULT;\n");
         code.push_str("            self.a_neg_be = A_NEG_BE_DEFAULT;\n");
+        code.push_str("            self.s = S_DEFAULT;\n");
+        code.push_str("            self.s_be = S_BE_DEFAULT;\n");
+        if m > 0 {
+            code.push_str("            self.k = K_DEFAULT;\n");
+            code.push_str("            self.s_ni = S_NI_DEFAULT;\n");
+            code.push_str("            self.k_be = K_BE_DEFAULT;\n");
+            code.push_str("            self.s_ni_be = S_NI_BE_DEFAULT;\n");
+        }
         if ir.dc_block {
             code.push_str("            self.dc_block_r = DC_BLOCK_R;\n");
             code.push_str("            self.dc_block_x_prev = [0.0; NUM_OUTPUTS];\n");
@@ -4089,9 +4380,10 @@ impl RustEmitter {
             "C"
         };
 
-        code.push_str("    /// Recompute A, A_neg, A_be, A_neg_be from G and C matrices.\n");
+        code.push_str("    /// Recompute A, A_neg, A_be, A_neg_be, S, K, S_NI (and BE variants) from G and C.\n");
         code.push_str("    ///\n");
         code.push_str("    /// Called by set_sample_rate, set_pot, and set_switch.\n");
+        code.push_str("    /// Includes O(N^3) matrix inversion for Schur complement NR.\n");
         code.push_str("    pub fn rebuild_matrices(&mut self, internal_rate: f64) {\n");
         code.push_str("        let alpha = 2.0 * internal_rate;\n");
         code.push_str("        let alpha_be = internal_rate;\n\n");
@@ -4120,6 +4412,63 @@ impl RustEmitter {
                 n_nodes, n_aug
             ));
         }
+
+        // Recompute Schur complement matrices: S = A^{-1}, K = N_v*S*N_i, S_NI = S*N_i
+        code.push_str("\n        // Recompute S = A^{-1} (trapezoidal)\n");
+        code.push_str("        if let Some(inv) = invert_n(&self.a) {\n");
+        code.push_str("            self.s = inv;\n");
+        if m > 0 {
+            // Compute K = N_v * S * N_i
+            code.push_str("            // K = N_v * S * N_i\n");
+            code.push_str("            for i in 0..M {\n");
+            code.push_str("                for j in 0..M {\n");
+            code.push_str("                    let mut sum = 0.0;\n");
+            code.push_str("                    for a in 0..N {\n");
+            code.push_str("                        let mut s_ni_aj = 0.0;\n");
+            code.push_str("                        for b in 0..N { s_ni_aj += self.s[a][b] * N_I[b][j]; }\n");
+            code.push_str("                        sum += N_V[i][a] * s_ni_aj;\n");
+            code.push_str("                    }\n");
+            code.push_str("                    self.k[i][j] = sum;\n");
+            code.push_str("                }\n");
+            code.push_str("            }\n");
+            // Compute S_NI = S * N_i
+            code.push_str("            // S_NI = S * N_i\n");
+            code.push_str("            for i in 0..N {\n");
+            code.push_str("                for j in 0..M {\n");
+            code.push_str("                    let mut sum = 0.0;\n");
+            code.push_str("                    for a in 0..N { sum += self.s[i][a] * N_I[a][j]; }\n");
+            code.push_str("                    self.s_ni[i][j] = sum;\n");
+            code.push_str("                }\n");
+            code.push_str("            }\n");
+        }
+        code.push_str("        }\n");
+
+        // Recompute S_be = A_be^{-1}
+        code.push_str("        // Recompute S_be = A_be^{-1} (backward Euler)\n");
+        code.push_str("        if let Some(inv) = invert_n(&self.a_be) {\n");
+        code.push_str("            self.s_be = inv;\n");
+        if m > 0 {
+            code.push_str("            for i in 0..M {\n");
+            code.push_str("                for j in 0..M {\n");
+            code.push_str("                    let mut sum = 0.0;\n");
+            code.push_str("                    for a in 0..N {\n");
+            code.push_str("                        let mut s_ni_aj = 0.0;\n");
+            code.push_str("                        for b in 0..N { s_ni_aj += self.s_be[a][b] * N_I[b][j]; }\n");
+            code.push_str("                        sum += N_V[i][a] * s_ni_aj;\n");
+            code.push_str("                    }\n");
+            code.push_str("                    self.k_be[i][j] = sum;\n");
+            code.push_str("                }\n");
+            code.push_str("            }\n");
+            code.push_str("            for i in 0..N {\n");
+            code.push_str("                for j in 0..M {\n");
+            code.push_str("                    let mut sum = 0.0;\n");
+            code.push_str("                    for a in 0..N { sum += self.s_be[i][a] * N_I[a][j]; }\n");
+            code.push_str("                    self.s_ni_be[i][j] = sum;\n");
+            code.push_str("                }\n");
+            code.push_str("            }\n");
+        }
+        code.push_str("        }\n");
+
         code.push_str("    }\n\n");
 
         // set_pot_N() methods — O(1) delta stamping into A/A_neg/A_be matrices
@@ -4306,7 +4655,797 @@ impl RustEmitter {
         code
     }
 
+    /// Emit `invert_n` function: runtime N×N matrix inversion via Gauss-Jordan.
+    ///
+    /// Used by `rebuild_matrices()` to recompute S = A^{-1} when sample rate or
+    /// pot/switch values change.
+    fn emit_nodal_invert_n(_ir: &CircuitIR) -> String {
+        let mut code = section_banner("MATRIX INVERSION (for rebuild_matrices)");
+
+        code.push_str("/// Invert an N×N matrix using Gauss-Jordan elimination with partial pivoting.\n");
+        code.push_str("/// Returns None if the matrix is singular.\n");
+        code.push_str("#[inline(never)]\n");
+        code.push_str("fn invert_n(a: &[[f64; N]; N]) -> Option<[[f64; N]; N]> {\n");
+        code.push_str("    let mut aug = [[0.0f64; 2 * N]; N];\n");
+        code.push_str("    for i in 0..N {\n");
+        code.push_str("        for j in 0..N {\n");
+        code.push_str("            aug[i][j] = a[i][j];\n");
+        code.push_str("        }\n");
+        code.push_str("        aug[i][N + i] = 1.0;\n");
+        code.push_str("    }\n\n");
+
+        // Forward elimination with partial pivoting
+        code.push_str("    for col in 0..N {\n");
+        code.push_str("        let mut max_row = col;\n");
+        code.push_str("        let mut max_val = aug[col][col].abs();\n");
+        code.push_str("        for row in (col + 1)..N {\n");
+        code.push_str("            let v = aug[row][col].abs();\n");
+        code.push_str("            if v > max_val { max_val = v; max_row = row; }\n");
+        code.push_str("        }\n");
+        code.push_str("        if max_val < 1e-30 { return None; }\n");
+        code.push_str("        if max_row != col { aug.swap(col, max_row); }\n");
+        code.push_str("        let pivot = aug[col][col];\n");
+        code.push_str("        for row in (col + 1)..N {\n");
+        code.push_str("            let factor = aug[row][col] / pivot;\n");
+        code.push_str("            for j in col..(2 * N) { aug[row][j] -= factor * aug[col][j]; }\n");
+        code.push_str("        }\n");
+        code.push_str("    }\n\n");
+
+        // Back substitution
+        code.push_str("    for col in (0..N).rev() {\n");
+        code.push_str("        let pivot = aug[col][col];\n");
+        code.push_str("        if pivot.abs() < 1e-30 { return None; }\n");
+        code.push_str("        for j in 0..(2 * N) { aug[col][j] /= pivot; }\n");
+        code.push_str("        for row in 0..col {\n");
+        code.push_str("            let factor = aug[row][col];\n");
+        code.push_str("            for j in 0..(2 * N) { aug[row][j] -= factor * aug[col][j]; }\n");
+        code.push_str("        }\n");
+        code.push_str("    }\n\n");
+
+        // Extract result
+        code.push_str("    let mut result = [[0.0f64; N]; N];\n");
+        code.push_str("    for i in 0..N {\n");
+        code.push_str("        for j in 0..N { result[i][j] = aug[i][N + j]; }\n");
+        code.push_str("    }\n");
+        code.push_str("    Some(result)\n");
+        code.push_str("}\n\n");
+
+        code
+    }
+
+    /// Emit process_sample using Schur complement: precomputed S = A^{-1}, M-dim NR.
+    ///
+    /// This replaces the old O(N^3)-per-iteration LU solve with:
+    /// 1. Build RHS (same as before)
+    /// 2. Linear prediction: v_pred = S * rhs (O(N^2))
+    /// 3. Extract device voltages: p = N_v * v_pred (O(M*N))
+    /// 4. M-dim NR (same as DK: O(M^3) per iteration)
+    /// 5. Recover full v = v_pred + S_NI * i_nl (O(M*N))
+    fn emit_nodal_schur_process_sample(ir: &CircuitIR) -> Result<String, CodegenError> {
+        let n = ir.topology.n;
+        let m = ir.topology.m;
+        let n_nodes = if ir.topology.n_nodes > 0 {
+            ir.topology.n_nodes
+        } else {
+            n
+        };
+        let num_outputs = ir.solver_config.output_nodes.len();
+        let os_factor = ir.solver_config.oversampling_factor;
+        let has_pots = !ir.pots.is_empty();
+
+        let mut code = section_banner("PROCESS SAMPLE (Schur complement: M-dim NR via precomputed S = A^{-1})");
+
+        // Function signature
+        if os_factor > 1 {
+            code.push_str("/// Process a single sample at the internal (oversampled) rate.\n");
+            code.push_str("///\n");
+            code.push_str("/// Called by `process_sample()` through the oversampling chain.\n");
+            code.push_str("#[inline(always)]\n");
+            code.push_str("fn process_sample_inner(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS] {\n");
+        } else {
+            code.push_str("/// Process a single audio sample through the circuit.\n");
+            code.push_str("///\n");
+            code.push_str("/// Uses Schur complement NR: precomputes S = A^{-1}, iterates in M-space.\n");
+            code.push_str("/// Cost: O(N^2) linear prediction + O(M^3) per NR iteration.\n");
+            code.push_str("#[inline]\n");
+            code.push_str("pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS] {\n");
+        }
+
+        // Input sanitization
+        code.push_str(
+            "    let input = if input.is_finite() { input.clamp(-100.0, 100.0) } else { 0.0 };\n\n",
+        );
+
+        // Step 1: Build RHS = rhs_const + A_neg * v_prev + N_i * i_nl_prev + input (sparse)
+        code.push_str("    // Step 1: Build RHS (sparse A_neg * v_prev + sparse N_i * i_nl_prev)\n");
+        if ir.has_dc_sources {
+            code.push_str("    let mut rhs = RHS_CONST;\n");
+        } else {
+            code.push_str("    let mut rhs = [0.0f64; N];\n");
+        }
+        // Sparse A_neg * v_prev
+        for i in 0..n {
+            let nz_cols = &ir.sparsity.a_neg.nz_by_row[i];
+            if nz_cols.is_empty() {
+                continue;
+            }
+            for &j in nz_cols {
+                code.push_str(&format!(
+                    "    rhs[{}] += state.a_neg[{}][{}] * state.v_prev[{}];\n",
+                    i, i, j, j
+                ));
+            }
+        }
+        // Sparse N_i * i_nl_prev
+        if m > 0 {
+            for i in 0..n {
+                for &j in &ir.sparsity.n_i.nz_by_row[i] {
+                    code.push_str(&format!(
+                        "    rhs[{}] += N_I[{}][{}] * state.i_nl_prev[{}];\n",
+                        i, i, j, j
+                    ));
+                }
+            }
+        }
+        code.push('\n');
+
+        // Input source (Thevenin, trapezoidal)
+        code.push_str("    // Input source (Thevenin, trapezoidal)\n");
+        code.push_str("    let input_conductance = 1.0 / INPUT_RESISTANCE;\n");
+        code.push_str("    rhs[INPUT_NODE] += (input + state.input_prev) * input_conductance;\n");
+        code.push_str("    state.input_prev = input;\n\n");
+
+        // Step 2: Linear prediction v_pred = S * rhs (O(N^2))
+        code.push_str("    // Step 2: Linear prediction v_pred = S * rhs (O(N^2))\n");
+        code.push_str("    let mut v_pred = [0.0f64; N];\n");
+        code.push_str("    for i in 0..N {\n");
+        code.push_str("        let mut sum = 0.0;\n");
+        code.push_str("        for j in 0..N { sum += state.s[i][j] * rhs[j]; }\n");
+        code.push_str("        v_pred[i] = sum;\n");
+        code.push_str("    }\n\n");
+
+        // Handle linear circuits (M=0): v_pred is the final answer
+        if m == 0 {
+            code.push_str("    // Linear circuit: v = v_pred (no NR needed)\n");
+            code.push_str("    let v = v_pred;\n\n");
+        } else {
+            // Step 3: Extract device voltages p = N_v * v_pred (O(M*N))
+            code.push_str("    // Step 3: Extract device voltages p = N_v * v_pred (sparse)\n");
+            code.push_str("    let mut p = [0.0f64; M];\n");
+            for i in 0..m {
+                let nz_cols = &ir.sparsity.n_v.nz_by_row[i];
+                if nz_cols.is_empty() {
+                    continue;
+                }
+                let terms: Vec<String> = nz_cols
+                    .iter()
+                    .map(|&j| format!("N_V[{}][{}] * v_pred[{}]", i, j, j))
+                    .collect();
+                code.push_str(&format!("    p[{}] = {};\n", i, terms.join(" + ")));
+            }
+            code.push('\n');
+
+            // Step 4: M-dim NR (same structure as DK solve_nonlinear)
+            code.push_str("    // Step 4: M-dim Newton-Raphson (Schur complement)\n");
+            code.push_str("    // First-order predictor warm start\n");
+            code.push_str("    let mut i_nl = [0.0f64; M];\n");
+            code.push_str("    for i in 0..M {\n");
+            code.push_str("        i_nl[i] = 2.0 * state.i_nl_prev[i] - state.i_nl_prev_prev[i];\n");
+            code.push_str("    }\n");
+            code.push_str("    let mut converged = false;\n");
+            code.push_str("    state.last_nr_iterations = MAX_ITER as u32;\n\n");
+
+            // Trapezoidal NR loop
+            code.push_str("    for iter in 0..MAX_ITER {\n");
+
+            // 4a. Compute v_d = p + K * i_nl
+            code.push_str("        // 4a. Compute controlling voltages: v_d = p + K * i_nl\n");
+            for i in 0..m {
+                code.push_str(&format!("        let v_d{} = p[{}]", i, i));
+                for &j in &ir.sparsity.k.nz_by_row[i] {
+                    code.push_str(&format!(" + state.k[{}][{}] * i_nl[{}]", i, j, j));
+                }
+                code.push_str(";\n");
+            }
+            code.push('\n');
+
+            // 4b. Evaluate device currents and Jacobian (reuse DK style)
+            code.push_str("        // 4b. Evaluate device currents and Jacobians\n");
+            for (dev_num, slot) in ir.device_slots.iter().enumerate() {
+                Self::emit_dk_device_eval_for_nodal_schur(&mut code, dev_num, slot)?;
+            }
+            code.push('\n');
+
+            // 4c. Residuals
+            code.push_str("        // 4c. Residuals: f(i) = i_nl - i_dev = 0\n");
+            for i in 0..m {
+                code.push_str(&format!("        let f{} = i_nl[{}] - i_dev{};\n", i, i, i));
+            }
+            code.push('\n');
+
+            // 4d. NR Jacobian: J[i][j] = delta_ij - sum_k(jdev_ik * K[k][j])
+            code.push_str("        // 4d. Jacobian: J[i][j] = delta_ij - jdev * K\n");
+            for i in 0..m {
+                let slot = ir
+                    .device_slots
+                    .iter()
+                    .find(|s| i >= s.start_idx && i < s.start_idx + s.dimension)
+                    .ok_or_else(|| {
+                        CodegenError::InvalidConfig(format!(
+                            "no device slot found for M-dimension index {}", i
+                        ))
+                    })?;
+                let blk_start = slot.start_idx;
+                let blk_dim = slot.dimension;
+                for j in 0..m {
+                    let diag = if i == j { "1.0" } else { "0.0" };
+                    let mut terms = String::new();
+                    for k in blk_start..blk_start + blk_dim {
+                        terms.push_str(&format!(" - jdev_{}_{} * state.k[{}][{}]", i, k, k, j));
+                    }
+                    code.push_str(&format!("        let j{}{} = {}{};\n", i, j, diag, terms));
+                }
+            }
+            code.push('\n');
+
+            // 4e. Solve the M×M linear system (1×1, 2×2 Cramer, 3..16 Gauss)
+            // Uses `break` on convergence (not `return i_nl` like DK's solve_nonlinear)
+            match m {
+                1 => {
+                    code.push_str("        // Solve 1x1: delta = f / J\n");
+                    code.push_str("        let det = j00;\n");
+                    code.push_str("        if det.abs() < 1e-15 {\n");
+                    emit_nr_singular_fallback(&mut code, 1, "            ");
+                    code.push_str("            continue;\n");
+                    code.push_str("        }\n");
+                    code.push_str("        let delta0 = f0 / det;\n\n");
+                    emit_schur_nr_limit_and_converge(&mut code, ir, 1, "        ", "state.k");
+                }
+                2 => {
+                    code.push_str("        // Solve 2x2 (Cramer's rule)\n");
+                    code.push_str("        let det = j00 * j11 - j01 * j10;\n");
+                    code.push_str("        if det.abs() < 1e-15 {\n");
+                    emit_nr_singular_fallback(&mut code, 2, "            ");
+                    code.push_str("            continue;\n");
+                    code.push_str("        }\n");
+                    code.push_str("        let inv_det = 1.0 / det;\n");
+                    code.push_str("        let delta0 = inv_det * (j11 * f0 - j01 * f1);\n");
+                    code.push_str("        let delta1 = inv_det * (-j10 * f0 + j00 * f1);\n\n");
+                    emit_schur_nr_limit_and_converge(&mut code, ir, 2, "        ", "state.k");
+                }
+                3..=16 => {
+                    Self::generate_schur_gauss_elim(&mut code, ir, m);
+                }
+                _ => {
+                    return Err(CodegenError::UnsupportedTopology(format!(
+                        "M={} not supported (max {})", m, crate::dk::MAX_M
+                    )));
+                }
+            }
+
+            code.push_str("    }\n\n"); // end trapezoidal NR loop
+
+            // Step 5: Recover full v = v_pred + S_NI * i_nl
+            code.push_str("    // Step 5: Recover full node voltages: v = v_pred + S_NI * i_nl\n");
+            code.push_str("    let mut v = v_pred;\n");
+            code.push_str("    for i in 0..N {\n");
+            code.push_str("        for j in 0..M { v[i] += state.s_ni[i][j] * i_nl[j]; }\n");
+            code.push_str("    }\n");
+            code.push_str("    let converged = state.last_nr_iterations < MAX_ITER as u32;\n\n");
+
+            // Backward Euler fallback
+            code.push_str("    // Backward Euler fallback\n");
+            code.push_str("    if !converged {\n");
+            code.push_str("        state.diag_nr_max_iter_count += 1;\n");
+            code.push_str("        state.diag_be_fallback_count += 1;\n\n");
+
+            // Rebuild RHS with BE matrices
+            code.push_str("        // Rebuild RHS with backward Euler matrices\n");
+            code.push_str("        let mut rhs_be = [0.0f64; N];\n");
+            code.push_str("        for i in 0..N {\n");
+            if ir.has_dc_sources && !ir.matrices.rhs_const_be.is_empty() {
+                code.push_str("            let mut sum = RHS_CONST_BE[i];\n");
+            } else {
+                code.push_str("            let mut sum = 0.0;\n");
+            }
+            code.push_str("            for j in 0..N { sum += state.a_neg_be[i][j] * state.v_prev[j]; }\n");
+            code.push_str("            for j in 0..M { sum += N_I[i][j] * state.i_nl_prev[j]; }\n");
+            code.push_str("            rhs_be[i] = sum;\n");
+            code.push_str("        }\n");
+            code.push_str("        rhs_be[INPUT_NODE] += input * input_conductance;\n\n");
+
+            // BE linear prediction
+            code.push_str("        // BE linear prediction: v_pred_be = S_be * rhs_be\n");
+            code.push_str("        let mut v_pred_be = [0.0f64; N];\n");
+            code.push_str("        for i in 0..N {\n");
+            code.push_str("            let mut sum = 0.0;\n");
+            code.push_str("            for j in 0..N { sum += state.s_be[i][j] * rhs_be[j]; }\n");
+            code.push_str("            v_pred_be[i] = sum;\n");
+            code.push_str("        }\n\n");
+
+            // BE device voltages
+            code.push_str("        let mut p_be = [0.0f64; M];\n");
+            code.push_str("        for i in 0..M {\n");
+            code.push_str("            let mut sum = 0.0;\n");
+            code.push_str("            for j in 0..N { sum += N_V[i][j] * v_pred_be[j]; }\n");
+            code.push_str("            p_be[i] = sum;\n");
+            code.push_str("        }\n\n");
+
+            // BE NR loop (use k_be, s_ni_be)
+            code.push_str("        // Reset i_nl to predictor for BE attempt\n");
+            code.push_str("        for i in 0..M {\n");
+            code.push_str("            i_nl[i] = 2.0 * state.i_nl_prev[i] - state.i_nl_prev_prev[i];\n");
+            code.push_str("        }\n\n");
+
+            code.push_str("        for _iter in 0..MAX_ITER {\n");
+
+            // v_d = p_be + K_be * i_nl
+            for i in 0..m {
+                code.push_str(&format!("            let v_d{} = p_be[{}]", i, i));
+                for j in 0..m {
+                    code.push_str(&format!(" + state.k_be[{}][{}] * i_nl[{}]", i, j, j));
+                }
+                code.push_str(";\n");
+            }
+            code.push('\n');
+
+            // Evaluate devices (reuse same functions)
+            for (dev_num, slot) in ir.device_slots.iter().enumerate() {
+                Self::emit_dk_device_eval_for_nodal_schur_indented(&mut code, dev_num, slot, "            ")?;
+            }
+            code.push('\n');
+
+            // Residuals
+            for i in 0..m {
+                code.push_str(&format!("            let f{} = i_nl[{}] - i_dev{};\n", i, i, i));
+            }
+            code.push('\n');
+
+            // Jacobian (using k_be)
+            for i in 0..m {
+                let slot = ir
+                    .device_slots
+                    .iter()
+                    .find(|s| i >= s.start_idx && i < s.start_idx + s.dimension)
+                    .unwrap();
+                let blk_start = slot.start_idx;
+                let blk_dim = slot.dimension;
+                for j in 0..m {
+                    let diag = if i == j { "1.0" } else { "0.0" };
+                    let mut terms = String::new();
+                    for k in blk_start..blk_start + blk_dim {
+                        terms.push_str(&format!(" - jdev_{}_{} * state.k_be[{}][{}]", i, k, k, j));
+                    }
+                    code.push_str(&format!("            let j{}{} = {}{};\n", i, j, diag, terms));
+                }
+            }
+            code.push('\n');
+
+            // Solve (same structure but at 12-space indent)
+            match m {
+                1 => {
+                    code.push_str("            let det = j00;\n");
+                    code.push_str("            if det.abs() < 1e-15 { i_nl[0] -= (f0 * 0.5).clamp(-0.01, 0.01); continue; }\n");
+                    code.push_str("            let delta0 = f0 / det;\n");
+                    // Simple inline limit+converge for BE
+                    Self::emit_be_nr_limit_and_converge(&mut code, ir, m, "            ");
+                }
+                2 => {
+                    code.push_str("            let det = j00 * j11 - j01 * j10;\n");
+                    code.push_str("            if det.abs() < 1e-15 { i_nl[0] -= (f0 * 0.5).clamp(-0.01, 0.01); i_nl[1] -= (f1 * 0.5).clamp(-0.01, 0.01); continue; }\n");
+                    code.push_str("            let inv_det = 1.0 / det;\n");
+                    code.push_str("            let delta0 = inv_det * (j11 * f0 - j01 * f1);\n");
+                    code.push_str("            let delta1 = inv_det * (-j10 * f0 + j00 * f1);\n");
+                    Self::emit_be_nr_limit_and_converge(&mut code, ir, m, "            ");
+                }
+                3..=16 => {
+                    // Inline Gaussian elimination for BE
+                    code.push_str(&format!("            let mut a = [\n"));
+                    for i in 0..m {
+                        let row = (0..m)
+                            .map(|j| format!("j{i}{j}"))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        code.push_str(&format!("                [{row}],\n"));
+                    }
+                    code.push_str("            ];\n");
+                    let b_init = (0..m)
+                        .map(|i| format!("f{i}"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    code.push_str(&format!("            let mut b = [{b_init}];\n"));
+                    code.push_str(&format!(
+                        "            let mut singular = false;\n\
+                         \x20           for col in 0..{m} {{\n\
+                         \x20               let mut max_row = col;\n\
+                         \x20               let mut max_val = a[col][col].abs();\n\
+                         \x20               for row in (col+1)..{m} {{\n\
+                         \x20                   if a[row][col].abs() > max_val {{ max_val = a[row][col].abs(); max_row = row; }}\n\
+                         \x20               }}\n\
+                         \x20               if max_val < 1e-15 {{ singular = true; break; }}\n\
+                         \x20               if max_row != col {{ a.swap(col, max_row); b.swap(col, max_row); }}\n\
+                         \x20               let pivot = a[col][col];\n\
+                         \x20               for row in (col+1)..{m} {{\n\
+                         \x20                   let factor = a[row][col] / pivot;\n\
+                         \x20                   for j in (col+1)..{m} {{ a[row][j] -= factor * a[col][j]; }}\n\
+                         \x20                   b[row] -= factor * b[col];\n\
+                         \x20               }}\n\
+                         \x20           }}\n"
+                    ));
+                    code.push_str(&format!(
+                        "            if !singular {{\n\
+                         \x20               for i in (0..{m}).rev() {{\n\
+                         \x20                   let mut sum = b[i];\n\
+                         \x20                   for j in (i+1)..{m} {{ sum -= a[i][j] * b[j]; }}\n\
+                         \x20                   if a[i][i].abs() < 1e-15 {{ singular = true; break; }}\n\
+                         \x20                   b[i] = sum / a[i][i];\n\
+                         \x20               }}\n\
+                         \x20           }}\n"
+                    ));
+                    code.push_str("            if !singular {\n");
+                    for i in 0..m {
+                        code.push_str(&format!("                let delta{i} = b[{i}];\n"));
+                    }
+                    Self::emit_be_nr_limit_and_converge(&mut code, ir, m, "                ");
+                    code.push_str("            } else {\n");
+                    for i in 0..m {
+                        code.push_str(&format!("                i_nl[{i}] -= (f{i} * 0.5).clamp(-0.01, 0.01);\n"));
+                    }
+                    code.push_str("            }\n");
+                }
+                _ => {}
+            }
+
+            code.push_str("        }\n\n"); // end BE NR loop
+
+            // Recover full v from BE
+            code.push_str("        // Recover full v from BE solve\n");
+            code.push_str("        v = v_pred_be;\n");
+            code.push_str("        for i in 0..N {\n");
+            code.push_str("            for j in 0..M { v[i] += state.s_ni_be[i][j] * i_nl[j]; }\n");
+            code.push_str("        }\n");
+            code.push_str("    }\n\n"); // end BE fallback block
+        }
+
+        // State update
+        code.push_str("    // State update\n");
+        code.push_str("    state.v_prev = v;\n");
+        if m > 0 {
+            code.push_str("    state.i_nl_prev_prev = state.i_nl_prev;\n");
+            code.push_str("    state.i_nl_prev = i_nl;\n");
+        }
+        for (idx, _pot) in ir.pots.iter().enumerate() {
+            code.push_str(&format!(
+                "    state.pot_{}_resistance_prev = state.pot_{}_resistance;\n",
+                idx, idx
+            ));
+        }
+        code.push('\n');
+
+        // BJT self-heating thermal update
+        for (dev_num, slot) in ir.device_slots.iter().enumerate() {
+            if let super::ir::DeviceParams::Bjt(bp) = &slot.params
+                && bp.has_self_heating()
+            {
+                let s = slot.start_idx;
+                let s1 = s + 1;
+                code.push_str(&format!(
+                    "    {{ // BJT {dev_num} self-heating thermal update\n\
+                     \x20       let ic = i_nl[{s}];\n\
+                     \x20       let ib = i_nl[{s1}];\n\
+                     \x20       let mut vbe_sum = 0.0f64;\n\
+                     \x20       let mut vbc_sum = 0.0f64;\n\
+                     \x20       for j in 0..N {{ vbe_sum += N_V[{s}][j] * v[j]; }}\n\
+                     \x20       for j in 0..N {{ vbc_sum += N_V[{s1}][j] * v[j]; }}\n\
+                     \x20       let vce = vbe_sum - vbc_sum;\n\
+                     \x20       let p = vce * ic + vbe_sum * ib;\n\
+                     \x20       let dt = 1.0 / SAMPLE_RATE;\n\
+                     \x20       let d_tj = (p - (state.device_{dev_num}_tj - DEVICE_{dev_num}_TAMB) / DEVICE_{dev_num}_RTH) / DEVICE_{dev_num}_CTH * dt;\n\
+                     \x20       state.device_{dev_num}_tj += d_tj;\n\
+                     \x20       state.device_{dev_num}_tj = state.device_{dev_num}_tj.clamp(200.0, 500.0);\n\
+                     \x20       state.device_{dev_num}_vt = BOLTZMANN_Q * state.device_{dev_num}_tj;\n\
+                     \x20       let t_ratio = state.device_{dev_num}_tj / DEVICE_{dev_num}_TAMB;\n\
+                     \x20       let vt_nom = BOLTZMANN_Q * DEVICE_{dev_num}_TAMB;\n\
+                     \x20       state.device_{dev_num}_is = DEVICE_{dev_num}_IS_NOM\n\
+                     \x20           * t_ratio.powf(DEVICE_{dev_num}_XTI)\n\
+                     \x20           * fast_exp((DEVICE_{dev_num}_EG / vt_nom) * (1.0 - DEVICE_{dev_num}_TAMB / state.device_{dev_num}_tj));\n\
+                     \x20   }}\n"
+                ));
+            }
+        }
+
+        // NaN check
+        code.push_str("    // Sanitize state: if NaN/inf entered, reset to DC operating point\n");
+        code.push_str("    if !state.v_prev.iter().all(|x| x.is_finite()) {\n");
+        code.push_str("        state.v_prev = state.dc_operating_point;\n");
+        code.push_str("        state.i_nl_prev = [0.0; M];\n");
+        code.push_str("        state.i_nl_prev_prev = [0.0; M];\n");
+        code.push_str("        state.input_prev = 0.0;\n");
+        for (dev_num, slot) in ir.device_slots.iter().enumerate() {
+            if let super::ir::DeviceParams::Bjt(bp) = &slot.params
+                && bp.has_self_heating()
+            {
+                code.push_str(&format!(
+                    "        state.device_{dev_num}_tj = DEVICE_{dev_num}_TAMB;\n\
+                     \x20       state.device_{dev_num}_is = DEVICE_{dev_num}_IS;\n\
+                     \x20       state.device_{dev_num}_vt = DEVICE_{dev_num}_VT;\n"
+                ));
+            }
+        }
+        code.push_str("        state.diag_nan_reset_count += 1;\n");
+        code.push_str("        return [0.0; NUM_OUTPUTS];\n");
+        code.push_str("    }\n\n");
+
+        // Output extraction
+        code.push_str("    // Extract outputs, DC blocking, and scaling\n");
+        code.push_str("    let mut output = [0.0f64; NUM_OUTPUTS];\n");
+        code.push_str("    for out_idx in 0..NUM_OUTPUTS {\n");
+        code.push_str("        let raw_out = v[OUTPUT_NODES[out_idx]];\n");
+        code.push_str("        let raw_out = if raw_out.is_finite() { raw_out } else { 0.0 };\n");
+        if ir.dc_block {
+            code.push_str("        let dc_blocked = raw_out - state.dc_block_x_prev[out_idx]\n");
+            code.push_str("            + state.dc_block_r * state.dc_block_y_prev[out_idx];\n");
+            code.push_str("        state.dc_block_x_prev[out_idx] = raw_out;\n");
+            code.push_str("        state.dc_block_y_prev[out_idx] = dc_blocked;\n");
+            code.push_str("        let scaled = dc_blocked * OUTPUT_SCALES[out_idx];\n");
+        } else {
+            code.push_str("        let scaled = raw_out * OUTPUT_SCALES[out_idx];\n");
+        }
+        code.push_str("        let abs_out = scaled.abs();\n");
+        code.push_str(
+            "        if abs_out > state.diag_peak_output { state.diag_peak_output = abs_out; }\n",
+        );
+        if ir.dc_block {
+            code.push_str("        if abs_out > 10.0 { state.diag_clamp_count += 1; }\n");
+            code.push_str("        output[out_idx] = scaled.clamp(-10.0, 10.0);\n");
+        } else {
+            code.push_str(
+                "        output[out_idx] = if scaled.is_finite() { scaled } else { 0.0 };\n",
+            );
+        }
+        code.push_str("    }\n");
+        code.push_str("    output\n");
+        code.push_str("}\n\n");
+
+        let _ = (num_outputs, n_nodes, has_pots);
+
+        Ok(code)
+    }
+
+    /// Emit DK-style device evaluation for a single device in Schur NR (default indent "        ").
+    fn emit_dk_device_eval_for_nodal_schur(
+        code: &mut String,
+        dev_num: usize,
+        slot: &super::ir::DeviceSlot,
+    ) -> Result<(), CodegenError> {
+        Self::emit_dk_device_eval_for_nodal_schur_indented(code, dev_num, slot, "        ")
+    }
+
+    /// Emit DK-style device evaluation for a single device at given indent.
+    ///
+    /// Declares `i_dev{s}` and `jdev_{i}_{j}` local variables matching the
+    /// DK `solve_nonlinear` naming convention. Uses `v_d{s}` from the caller.
+    fn emit_dk_device_eval_for_nodal_schur_indented(
+        code: &mut String,
+        dev_num: usize,
+        slot: &super::ir::DeviceSlot,
+        indent: &str,
+    ) -> Result<(), CodegenError> {
+        use super::ir::{DeviceParams, DeviceType};
+        let s = slot.start_idx;
+        let d = dev_num;
+
+        match (&slot.device_type, &slot.params) {
+            (DeviceType::Diode, DeviceParams::Diode(dp)) => {
+                if dp.has_rs() && dp.has_bv() {
+                    code.push_str(&format!(
+                        "{indent}let i_dev{s} = diode_current_with_rs(v_d{s}, state.device_{d}_is, state.device_{d}_n_vt, DEVICE_{d}_RS) + diode_breakdown_current(v_d{s}, state.device_{d}_n_vt, DEVICE_{d}_BV, DEVICE_{d}_IBV);\n\
+                         {indent}let jdev_{s}_{s} = diode_conductance_with_rs(v_d{s}, state.device_{d}_is, state.device_{d}_n_vt, DEVICE_{d}_RS) + diode_breakdown_conductance(v_d{s}, state.device_{d}_n_vt, DEVICE_{d}_BV, DEVICE_{d}_IBV);\n"
+                    ));
+                } else if dp.has_rs() {
+                    code.push_str(&format!(
+                        "{indent}let i_dev{s} = diode_current_with_rs(v_d{s}, state.device_{d}_is, state.device_{d}_n_vt, DEVICE_{d}_RS);\n\
+                         {indent}let jdev_{s}_{s} = diode_conductance_with_rs(v_d{s}, state.device_{d}_is, state.device_{d}_n_vt, DEVICE_{d}_RS);\n"
+                    ));
+                } else if dp.has_bv() {
+                    code.push_str(&format!(
+                        "{indent}let i_dev{s} = diode_current(v_d{s}, state.device_{d}_is, state.device_{d}_n_vt) + diode_breakdown_current(v_d{s}, state.device_{d}_n_vt, DEVICE_{d}_BV, DEVICE_{d}_IBV);\n\
+                         {indent}let jdev_{s}_{s} = diode_conductance(v_d{s}, state.device_{d}_is, state.device_{d}_n_vt) + diode_breakdown_conductance(v_d{s}, state.device_{d}_n_vt, DEVICE_{d}_BV, DEVICE_{d}_IBV);\n"
+                    ));
+                } else {
+                    code.push_str(&format!(
+                        "{indent}let i_dev{s} = diode_current(v_d{s}, state.device_{d}_is, state.device_{d}_n_vt);\n\
+                         {indent}let jdev_{s}_{s} = diode_conductance(v_d{s}, state.device_{d}_is, state.device_{d}_n_vt);\n"
+                    ));
+                }
+            }
+            (DeviceType::Bjt, DeviceParams::Bjt(bp)) => {
+                let s1 = s + 1;
+                if bp.has_parasitics() {
+                    code.push_str(&format!(
+                        "{indent}let (i_dev{s}, i_dev{s1}, bjt{d}_jac) = bjt_with_parasitics(v_d{s}, v_d{s1}, state.device_{d}_is, state.device_{d}_vt, DEVICE_{d}_NF, state.device_{d}_bf, state.device_{d}_br, DEVICE_{d}_SIGN, DEVICE_{d}_USE_GP, DEVICE_{d}_VAF, DEVICE_{d}_VAR, DEVICE_{d}_IKF, DEVICE_{d}_IKR, DEVICE_{d}_ISE, DEVICE_{d}_NE, DEVICE_{d}_RB, DEVICE_{d}_RC, DEVICE_{d}_RE);\n"
+                    ));
+                } else {
+                    code.push_str(&format!(
+                        "{indent}let i_dev{s} = bjt_ic(v_d{s}, v_d{s1}, state.device_{d}_is, state.device_{d}_vt, DEVICE_{d}_NF, state.device_{d}_br, DEVICE_{d}_SIGN, DEVICE_{d}_USE_GP, DEVICE_{d}_VAF, DEVICE_{d}_VAR, DEVICE_{d}_IKF, DEVICE_{d}_IKR);\n\
+                         {indent}let i_dev{s1} = bjt_ib(v_d{s}, v_d{s1}, state.device_{d}_is, state.device_{d}_vt, DEVICE_{d}_NF, state.device_{d}_bf, state.device_{d}_br, DEVICE_{d}_SIGN, DEVICE_{d}_ISE, DEVICE_{d}_NE);\n\
+                         {indent}let bjt{d}_jac = bjt_jacobian(v_d{s}, v_d{s1}, state.device_{d}_is, state.device_{d}_vt, DEVICE_{d}_NF, state.device_{d}_bf, state.device_{d}_br, DEVICE_{d}_SIGN, DEVICE_{d}_USE_GP, DEVICE_{d}_VAF, DEVICE_{d}_VAR, DEVICE_{d}_IKF, DEVICE_{d}_IKR, DEVICE_{d}_ISE, DEVICE_{d}_NE);\n"
+                    ));
+                }
+                code.push_str(&format!(
+                    "{indent}let jdev_{s}_{s} = bjt{d}_jac[0];\n\
+                     {indent}let jdev_{s}_{s1} = bjt{d}_jac[1];\n\
+                     {indent}let jdev_{s1}_{s} = bjt{d}_jac[2];\n\
+                     {indent}let jdev_{s1}_{s1} = bjt{d}_jac[3];\n"
+                ));
+            }
+            (DeviceType::BjtForwardActive, DeviceParams::Bjt(_bp)) => {
+                code.push_str(&format!(
+                    "{indent}let vbe_{d} = v_d{s} * DEVICE_{d}_SIGN;\n\
+                     {indent}let exp_be_{d} = fast_exp(vbe_{d} / (DEVICE_{d}_NF * state.device_{d}_vt));\n\
+                     {indent}let i_dev{s} = state.device_{d}_is * (exp_be_{d} - 1.0) * DEVICE_{d}_SIGN;\n\
+                     {indent}let jdev_{s}_{s} = state.device_{d}_is / (DEVICE_{d}_NF * state.device_{d}_vt) * exp_be_{d};\n"
+                ));
+            }
+            (DeviceType::Jfet, DeviceParams::Jfet(jp)) => {
+                let s1 = s + 1;
+                code.push_str(&format!(
+                    "{indent}let i_dev{s} = jfet_id(v_d{s1}, v_d{s}, state.device_{d}_idss, state.device_{d}_vp, state.device_{d}_lambda, DEVICE_{d}_SIGN);\n\
+                     {indent}let i_dev{s1} = jfet_ig(v_d{s1}, DEVICE_{d}_SIGN);\n"
+                ));
+                if jp.has_rd_rs() {
+                    code.push_str(&format!(
+                        "{indent}let jfet{d}_jac = jfet_jacobian_with_rd_rs(v_d{s1}, v_d{s}, state.device_{d}_idss, state.device_{d}_vp, state.device_{d}_lambda, DEVICE_{d}_SIGN, DEVICE_{d}_RD, DEVICE_{d}_RS_PARAM);\n"
+                    ));
+                } else {
+                    code.push_str(&format!(
+                        "{indent}let jfet{d}_jac = jfet_jacobian(v_d{s1}, v_d{s}, state.device_{d}_idss, state.device_{d}_vp, state.device_{d}_lambda, DEVICE_{d}_SIGN);\n"
+                    ));
+                }
+                code.push_str(&format!(
+                    "{indent}let jdev_{s}_{s} = jfet{d}_jac[1];\n\
+                     {indent}let jdev_{s}_{s1} = jfet{d}_jac[0];\n\
+                     {indent}let jdev_{s1}_{s} = jfet{d}_jac[3];\n\
+                     {indent}let jdev_{s1}_{s1} = jfet{d}_jac[2];\n"
+                ));
+            }
+            (DeviceType::Mosfet, DeviceParams::Mosfet(mp)) => {
+                let s1 = s + 1;
+                code.push_str(&format!(
+                    "{indent}let i_dev{s} = mosfet_id(v_d{s1}, v_d{s}, state.device_{d}_kp, state.device_{d}_vt, state.device_{d}_lambda, DEVICE_{d}_SIGN);\n\
+                     {indent}let i_dev{s1} = mosfet_ig(v_d{s1}, DEVICE_{d}_SIGN);\n"
+                ));
+                if mp.has_rd_rs() {
+                    code.push_str(&format!(
+                        "{indent}let mos{d}_jac = mosfet_jacobian_with_rd_rs(v_d{s1}, v_d{s}, state.device_{d}_kp, state.device_{d}_vt, state.device_{d}_lambda, DEVICE_{d}_SIGN, DEVICE_{d}_RD, DEVICE_{d}_RS_PARAM);\n"
+                    ));
+                } else {
+                    code.push_str(&format!(
+                        "{indent}let mos{d}_jac = mosfet_jacobian(v_d{s1}, v_d{s}, state.device_{d}_kp, state.device_{d}_vt, state.device_{d}_lambda, DEVICE_{d}_SIGN);\n"
+                    ));
+                }
+                code.push_str(&format!(
+                    "{indent}let jdev_{s}_{s} = mos{d}_jac[1];\n\
+                     {indent}let jdev_{s}_{s1} = mos{d}_jac[0];\n\
+                     {indent}let jdev_{s1}_{s} = mos{d}_jac[3];\n\
+                     {indent}let jdev_{s1}_{s1} = mos{d}_jac[2];\n"
+                ));
+            }
+            (DeviceType::Tube, DeviceParams::Tube(tp)) => {
+                let s1 = s + 1;
+                if tp.has_rgi() {
+                    code.push_str(&format!(
+                        "{indent}let i_dev{s} = tube_ip_with_rgi(v_d{s}, v_d{s1}, state.device_{d}_mu, state.device_{d}_ex, state.device_{d}_kg1, state.device_{d}_kp, state.device_{d}_kvb, state.device_{d}_lambda, state.device_{d}_ig_max, state.device_{d}_vgk_onset, DEVICE_{d}_RGI);\n\
+                         {indent}let i_dev{s1} = tube_ig_with_rgi(v_d{s}, state.device_{d}_ig_max, state.device_{d}_vgk_onset, DEVICE_{d}_RGI);\n\
+                         {indent}let tube{d}_jac = tube_jacobian_with_rgi(v_d{s}, v_d{s1}, state.device_{d}_mu, state.device_{d}_ex, state.device_{d}_kg1, state.device_{d}_kp, state.device_{d}_kvb, state.device_{d}_ig_max, state.device_{d}_vgk_onset, state.device_{d}_lambda, DEVICE_{d}_RGI);\n"
+                    ));
+                } else {
+                    code.push_str(&format!(
+                        "{indent}let i_dev{s} = tube_ip(v_d{s}, v_d{s1}, state.device_{d}_mu, state.device_{d}_ex, state.device_{d}_kg1, state.device_{d}_kp, state.device_{d}_kvb, state.device_{d}_lambda);\n\
+                         {indent}let i_dev{s1} = tube_ig(v_d{s}, state.device_{d}_ig_max, state.device_{d}_vgk_onset);\n\
+                         {indent}let tube{d}_jac = tube_jacobian(v_d{s}, v_d{s1}, state.device_{d}_mu, state.device_{d}_ex, state.device_{d}_kg1, state.device_{d}_kp, state.device_{d}_kvb, state.device_{d}_ig_max, state.device_{d}_vgk_onset, state.device_{d}_lambda);\n"
+                    ));
+                }
+                code.push_str(&format!(
+                    "{indent}let jdev_{s}_{s} = tube{d}_jac[0];\n\
+                     {indent}let jdev_{s}_{s1} = tube{d}_jac[1];\n\
+                     {indent}let jdev_{s1}_{s} = tube{d}_jac[2];\n\
+                     {indent}let jdev_{s1}_{s1} = tube{d}_jac[3];\n"
+                ));
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Emit voltage limiting + convergence + step for BE fallback NR in Schur mode.
+    fn emit_be_nr_limit_and_converge(
+        code: &mut String,
+        ir: &CircuitIR,
+        dim: usize,
+        indent: &str,
+    ) {
+        // Compute voltage-space changes for limiting
+        for i in 0..dim {
+            code.push_str(&format!("{indent}let dv{i} = -("));
+            let mut first = true;
+            for j in 0..dim {
+                if !first { code.push_str(" + "); }
+                code.push_str(&format!("state.k_be[{i}][{j}] * delta{j}"));
+                first = false;
+            }
+            code.push_str(");\n");
+        }
+
+        // Damping from per-device limiting
+        code.push_str(&format!("{indent}let mut alpha = 1.0_f64;\n"));
+        for (dev_num, slot) in ir.device_slots.iter().enumerate() {
+            for d in 0..slot.dimension {
+                let i = slot.start_idx + d;
+                code.push_str(&format!("{indent}if dv{i}.abs() > 1e-15 {{\n"));
+                match (&slot.device_type, d) {
+                    (super::ir::DeviceType::Diode, _) => {
+                        code.push_str(&format!(
+                            "{indent}    let v_lim = pnjlim(v_d{i} + dv{i}, v_d{i}, state.device_{dev_num}_n_vt, DEVICE_{dev_num}_VCRIT);\n"
+                        ));
+                    }
+                    (super::ir::DeviceType::Bjt, _) | (super::ir::DeviceType::BjtForwardActive, _) => {
+                        code.push_str(&format!(
+                            "{indent}    let v_lim = pnjlim(v_d{i} + dv{i}, v_d{i}, state.device_{dev_num}_vt, DEVICE_{dev_num}_VCRIT);\n"
+                        ));
+                    }
+                    (super::ir::DeviceType::Jfet, 0) | (super::ir::DeviceType::Mosfet, 0) => {
+                        code.push_str(&format!(
+                            "{indent}    let v_lim = fetlim(v_d{i} + dv{i}, v_d{i}, 0.0);\n"
+                        ));
+                    }
+                    (super::ir::DeviceType::Jfet, _) => {
+                        code.push_str(&format!(
+                            "{indent}    let v_lim = fetlim(v_d{i} + dv{i}, v_d{i}, state.device_{dev_num}_vp);\n"
+                        ));
+                    }
+                    (super::ir::DeviceType::Mosfet, _) => {
+                        code.push_str(&format!(
+                            "{indent}    let v_lim = fetlim(v_d{i} + dv{i}, v_d{i}, state.device_{dev_num}_vt);\n"
+                        ));
+                    }
+                    (super::ir::DeviceType::Tube, 0) => {
+                        code.push_str(&format!(
+                            "{indent}    let v_lim = pnjlim(v_d{i} + dv{i}, v_d{i}, state.device_{dev_num}_vgk_onset / 3.0, DEVICE_{dev_num}_VCRIT);\n"
+                        ));
+                    }
+                    (super::ir::DeviceType::Tube, _) => {
+                        code.push_str(&format!(
+                            "{indent}    let v_lim = fetlim(v_d{i} + dv{i}, v_d{i}, 0.0);\n"
+                        ));
+                    }
+                }
+                code.push_str(&format!(
+                    "{indent}    let ratio = ((v_lim - v_d{i}) / dv{i}).max(0.01);\n\
+                     {indent}    if ratio < alpha {{ alpha = ratio; }}\n\
+                     {indent}}}\n"
+                ));
+            }
+        }
+
+        // Apply damped step
+        for i in 0..dim {
+            code.push_str(&format!("{indent}i_nl[{i}] -= alpha * delta{i};\n"));
+        }
+
+        // Convergence check
+        code.push_str(&format!("{indent}if "));
+        for i in 0..dim {
+            if i > 0 { code.push_str(".max("); }
+            code.push_str(&format!("(alpha * delta{i}).abs()"));
+            if i > 0 { code.push(')'); }
+        }
+        code.push_str(&format!(" < TOL {{ state.last_nr_iterations = _iter as u32; break; }}\n"));
+    }
+
     /// Emit LU solve function for the nodal solver (N x N with partial pivoting).
+    /// LEGACY: kept for reference, no longer called in Schur path.
+    #[allow(dead_code)]
     fn emit_nodal_lu_solve(_ir: &CircuitIR) -> String {
         let mut code = section_banner(
             "LU SOLVE (Equilibrated Gaussian elimination with iterative refinement)",
@@ -4429,10 +5568,11 @@ impl RustEmitter {
         code
     }
 
-    /// Emit the complete process_sample function for the nodal solver.
+    /// LEGACY: Emit the complete process_sample function for the nodal solver (O(N^3) LU path).
     ///
-    /// This is the core NR loop: build RHS, iterate (Jacobian stamp, LU solve,
-    /// SPICE limiting, damping, convergence), BE fallback, state update.
+    /// Replaced by `emit_nodal_schur_process_sample` which uses O(M^3) NR via precomputed S.
+    /// Kept for reference and potential fallback.
+    #[allow(dead_code)]
     fn emit_nodal_process_sample(ir: &CircuitIR) -> String {
         let n = ir.topology.n;
         let m = ir.topology.m;
@@ -5221,7 +6361,8 @@ impl RustEmitter {
         let _ = _m;
     }
 
-    /// Emit final device evaluation at converged point (writes into existing `i_nl`).
+    /// LEGACY: Emit final device evaluation at converged point (writes into existing `i_nl`).
+    #[allow(dead_code)]
     fn emit_nodal_device_evaluation_final(code: &mut String, ir: &CircuitIR, indent: &str) {
         for (dev_num, slot) in ir.device_slots.iter().enumerate() {
             let s = slot.start_idx;
@@ -5317,15 +6458,17 @@ impl RustEmitter {
         }
     }
 
-    /// Emit SPICE voltage limiting for nodal solver (trapezoidal NR, at default indent).
+    /// LEGACY: Emit SPICE voltage limiting for nodal solver (trapezoidal NR, at default indent).
+    #[allow(dead_code)]
     fn emit_nodal_voltage_limiting(code: &mut String, ir: &CircuitIR) {
         Self::emit_nodal_voltage_limiting_indented(code, ir, "        ");
     }
 
-    /// Emit SPICE voltage limiting for nodal solver at a given indent level.
+    /// LEGACY: Emit SPICE voltage limiting for nodal solver at a given indent level.
     ///
     /// For each nonlinear device dimension, computes the proposed device voltage
     /// from v_new via N_v, applies pnjlim/fetlim, and reduces alpha if needed.
+    #[allow(dead_code)]
     fn emit_nodal_voltage_limiting_indented(code: &mut String, ir: &CircuitIR, indent: &str) {
         let n = ir.topology.n;
 
