@@ -152,9 +152,8 @@ fn test_nodal_ir_construction() {
     assert!(!ir.matrices.g_matrix.is_empty());
     assert!(!ir.matrices.c_matrix.is_empty());
 
-    // DK matrices empty (not used in nodal mode)
-    assert!(ir.matrices.s.is_empty());
-    assert!(ir.matrices.k.is_empty());
+    // Schur complement: S is computed for nodal mode (K only if M > 0)
+    assert!(!ir.matrices.s.is_empty(), "S should be computed for Schur complement");
 
     // No companion model state
     assert!(ir.inductors.is_empty());
@@ -260,8 +259,8 @@ fn test_nodal_codegen_structure() {
     // Process sample with NR loop
     assert!(code.contains("process_sample"), "missing process_sample");
     assert!(
-        code.contains("perm"),
-        "missing LU solve (pivot permutation)"
+        code.contains("v_pred") || code.contains("perm"),
+        "missing Schur complement (v_pred) or LU solve (perm)"
     );
 
     // Device functions

@@ -379,9 +379,10 @@ fn test_detect_forward_active_pnp() {
 
 /// BJT with parasitic resistances (RB/RC/RE > 0) should NOT be detected.
 /// The forward-active optimization is excluded for BJTs with parasitics
-/// because inner NR changes the dimension structure.
+/// BJT with parasitics IS now detected as forward-active.
+/// The 1D FA model ignores parasitics (small for forward-active operation).
 #[test]
-fn test_detect_not_forward_active_with_parasitics() {
+fn test_detect_forward_active_with_parasitics() {
     let (netlist, mut mna) = build_mna_with_gin(BJT_WITH_PARASITICS);
 
     let device_slots = CircuitIR::build_device_info(&netlist).unwrap_or_default();
@@ -393,16 +394,15 @@ fn test_detect_not_forward_active_with_parasitics() {
     let fa = CircuitIR::detect_forward_active_bjts(&mna, &netlist, &config);
 
     assert!(
-        fa.is_empty(),
-        "BJT with parasitics should NOT be detected as forward-active. Got: {:?}",
-        fa
+        !fa.is_empty(),
+        "BJT with parasitics SHOULD be detected as forward-active (parasitics ignored in 1D model)"
     );
 }
 
-/// BJT with Gummel-Poon params (VAF finite) should NOT be detected.
-/// GP model needs 2D for full Early effect accuracy.
+/// BJT with Gummel-Poon params IS now detected as forward-active.
+/// GP qb(Vbc) is ~constant when Vbc is deeply reverse-biased.
 #[test]
-fn test_detect_not_forward_active_with_gummel_poon() {
+fn test_detect_forward_active_with_gummel_poon() {
     let (netlist, mut mna) = build_mna_with_gin(BJT_WITH_GP);
 
     let device_slots = CircuitIR::build_device_info(&netlist).unwrap_or_default();
@@ -414,9 +414,8 @@ fn test_detect_not_forward_active_with_gummel_poon() {
     let fa = CircuitIR::detect_forward_active_bjts(&mna, &netlist, &config);
 
     assert!(
-        fa.is_empty(),
-        "BJT with GP params should NOT be detected as forward-active. Got: {:?}",
-        fa
+        !fa.is_empty(),
+        "BJT with GP params SHOULD be detected as forward-active (qb ~constant at deep reverse bias)"
     );
 }
 
