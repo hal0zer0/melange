@@ -650,6 +650,7 @@ fn build_device_slots(netlist: &Netlist, _mna: &MnaSystem) -> Vec<DeviceSlot> {
                         bv: f64::INFINITY,
                         ibv: 1e-10,
                     }),
+                    has_internal_mna_nodes: false,
                 });
                 dim_offset += 1;
             }
@@ -692,6 +693,7 @@ fn build_device_slots(netlist: &Netlist, _mna: &MnaSystem) -> Vec<DeviceSlot> {
                         eg: 1.11,
                         tamb: 300.15,
                     }),
+                    has_internal_mna_nodes: false,
                 });
                 dim_offset += 2;
             }
@@ -812,4 +814,82 @@ fn is_bjt_pnp(netlist: &Netlist, name: &str) -> bool {
         .find(|m| m.name.eq_ignore_ascii_case(model))
         .map(|m| m.model_type.to_uppercase().starts_with("PNP"))
         .unwrap_or(false)
+}
+
+// =============================================================================
+// Power amplifier DC OP (internal nodes for parasitic BJTs)
+// =============================================================================
+
+#[test]
+fn test_power_amp_dc_op_converges() {
+    // Wurlitzer 200A power amplifier: 8 BJTs, Class AB push-pull.
+    // Q2N5087 has RB=120Ω — the old 3-iteration inner loop failed to converge.
+    // Internal nodes fix: parasitic R in global matrix, intrinsic model on junctions.
+    let src = std::fs::read_to_string("../../circuits/wurli-power-amp.cir")
+        .expect("wurli-power-amp.cir not found");
+    let netlist = Netlist::parse(&src).expect("parse failed");
+    let mut mna = MnaSystem::from_netlist(&netlist).expect("MNA failed");
+
+    // Stamp input conductance (1Ω)
+    let input_node = mna.node_map.get("in").copied().unwrap_or(1).saturating_sub(1);
+    if input_node < mna.n {
+        mna.g[input_node][input_node] += 1.0;
+    }
+
+    // Build full device slots (with GP params including RB/RC/RE)
+    let slots = CircuitIR::build_device_info(&netlist).expect("device info");
+
+    let config = DcOpConfig {
+        input_node,
+        input_resistance: 1.0,
+        ..DcOpConfig::default()
+    };
+
+    // Verify parasitic BJTs are present
+    let parasitic_count = slots.iter().filter(|s| {
+        matches!(&s.params, DeviceParams::Bjt(bp) if bp.has_parasitics())
+    }).count();
+    assert_eq!(parasitic_count, 8, "All 8 BJTs should have parasitic R");
+
+    let result = solve_dc_operating_point(&mna, &slots, &config);
+
+    assert!(
+        result.converged,
+        "Power amp DC OP should converge (method: {:?}, iters: {})",
+        result.method, result.iterations
+    );
+
+    // ngspice reference values:
+    // v(out) = -0.063V, v(emit_pair) = 0.662V, v(drv_bot) = -0.727V
+    // v(vas_out) = 0.445V, v(coll7) = -21.81V
+
+    let out_idx = mna.node_map.get("out").copied().unwrap_or(0).saturating_sub(1);
+    let emit_pair_idx = mna.node_map.get("emit_pair").copied().unwrap_or(0).saturating_sub(1);
+
+    // Compare against ngspice reference values (within 0.5V tolerance for bias points)
+    if out_idx < result.v_node.len() {
+        let v_out = result.v_node[out_idx];
+        assert!(
+            (v_out - (-0.063)).abs() < 0.5,
+            "v(out) should be near -0.063V (ngspice), got {:.4}V",
+            v_out
+        );
+    }
+
+    if emit_pair_idx < result.v_node.len() {
+        let v_ep = result.v_node[emit_pair_idx];
+        assert!(
+            (v_ep - 0.662).abs() < 0.5,
+            "v(emit_pair) should be near 0.662V (ngspice), got {:.4}V",
+            v_ep
+        );
+    }
+
+    // At least some BJTs should be conducting (nonzero i_nl)
+    let max_i = result.i_nl.iter().map(|x| x.abs()).fold(0.0_f64, f64::max);
+    assert!(
+        max_i > 1e-6,
+        "At least one BJT should be conducting at DC OP, max |i_nl| = {:.2e}",
+        max_i
+    );
 }

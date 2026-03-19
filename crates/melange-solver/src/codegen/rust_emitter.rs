@@ -1128,26 +1128,23 @@ impl RustEmitter {
 
     /// Emit fast exp() approximation function.
     ///
-    /// Provides two implementations selectable at compile time via `MELANGE_FAST_EXP`:
-    /// 1. Default: `x.clamp().exp()` -- uses hardware/libm exp, optimal on x86-64 with glibc
-    /// 2. Polynomial: range reduction + 5th-order minimax -- no libm dependency, optimal on
-    ///    ARM, WASM, or platforms without fast hardware exp
+    /// Default: polynomial range reduction + 5th-order minimax (~6 cycles, <0.0004% error).
+    /// Opt-in: `--cfg melange_precise_exp` uses hardware/libm exp (~38 cycles).
     ///
     /// Accuracy of polynomial path: <0.0004% max relative error over [-40, 40].
-    /// Both paths produce identical results to within 0.0004%.
     fn emit_fast_exp() -> String {
         let mut code = String::new();
         code.push_str(
             "/// Fast exp() for audio circuit simulation.\n\
              /// Input clamped to [-40, 40] (matches melange safe_exp convention).\n\
              ///\n\
-             /// To use the polynomial approximation (faster on ARM/WASM, no libm dependency),\n\
-             /// compile with: `--cfg melange_fast_exp`\n\
+             /// Default: polynomial approximation (<0.0004% error, ~6x faster than libm).\n\
+             /// To use hardware/libm exp, compile with: `--cfg melange_precise_exp`\n\
              #[inline(always)]\n\
              fn fast_exp(x: f64) -> f64 {\n\
-             \x20   #[cfg(not(melange_fast_exp))]\n\
+             \x20   #[cfg(melange_precise_exp)]\n\
              \x20   { x.clamp(-40.0, 40.0).exp() }\n\
-             \x20   #[cfg(melange_fast_exp)]\n\
+             \x20   #[cfg(not(melange_precise_exp))]\n\
              \x20   {\n\
              \x20       // Range reduction + 5th-order minimax polynomial. <0.0004% max relative error.\n\
              \x20       // No lookup tables, no libm dependency, branchless hot path.\n\
@@ -3078,21 +3075,16 @@ impl RustEmitter {
                             DeviceParams::Bjt(bp) => bp,
                             _ => unreachable!(),
                         };
-                        if bp.has_parasitics() {
+                        if bp.has_parasitics() && !slot.has_internal_mna_nodes {
                             // Use inner 2D NR for parasitic resistances
                             code.push_str(&format!(
                                 "        let (i_dev{s}, i_dev{s1}, bjt{d}_jac) = bjt_with_parasitics(v_d{s}, v_d{s1}, state.device_{d}_is, state.device_{d}_vt, DEVICE_{d}_NF, state.device_{d}_bf, state.device_{d}_br, DEVICE_{d}_SIGN, DEVICE_{d}_USE_GP, DEVICE_{d}_VAF, DEVICE_{d}_VAR, DEVICE_{d}_IKF, DEVICE_{d}_IKR, DEVICE_{d}_ISE, DEVICE_{d}_NE, DEVICE_{d}_RB, DEVICE_{d}_RC, DEVICE_{d}_RE);\n"
                             ));
                         } else {
-                            // IS, VT, BETA_R, NF from state; SIGN, USE_GP, VAF, VAR, IKF, ISE, NE stay as const
+                            // Combined evaluation: shared exp() across ic, ib, jacobian
+                            // (parasitics handled by MNA internal nodes when has_internal_mna_nodes)
                             code.push_str(&format!(
-                                "        let i_dev{s} = bjt_ic(v_d{s}, v_d{s1}, state.device_{d}_is, state.device_{d}_vt, DEVICE_{d}_NF, state.device_{d}_br, DEVICE_{d}_SIGN, DEVICE_{d}_USE_GP, DEVICE_{d}_VAF, DEVICE_{d}_VAR, DEVICE_{d}_IKF, DEVICE_{d}_IKR);\n"
-                            ));
-                            code.push_str(&format!(
-                                "        let i_dev{s1} = bjt_ib(v_d{s}, v_d{s1}, state.device_{d}_is, state.device_{d}_vt, DEVICE_{d}_NF, state.device_{d}_bf, state.device_{d}_br, DEVICE_{d}_SIGN, DEVICE_{d}_ISE, DEVICE_{d}_NE);\n"
-                            ));
-                            code.push_str(&format!(
-                                "        let bjt{d}_jac = bjt_jacobian(v_d{s}, v_d{s1}, state.device_{d}_is, state.device_{d}_vt, DEVICE_{d}_NF, state.device_{d}_bf, state.device_{d}_br, DEVICE_{d}_SIGN, DEVICE_{d}_USE_GP, DEVICE_{d}_VAF, DEVICE_{d}_VAR, DEVICE_{d}_IKF, DEVICE_{d}_IKR, DEVICE_{d}_ISE, DEVICE_{d}_NE);\n"
+                                "        let (i_dev{s}, i_dev{s1}, bjt{d}_jac) = bjt_evaluate(v_d{s}, v_d{s1}, state.device_{d}_is, state.device_{d}_vt, DEVICE_{d}_NF, state.device_{d}_bf, state.device_{d}_br, DEVICE_{d}_SIGN, DEVICE_{d}_USE_GP, DEVICE_{d}_VAF, DEVICE_{d}_VAR, DEVICE_{d}_IKF, DEVICE_{d}_IKR, DEVICE_{d}_ISE, DEVICE_{d}_NE);\n"
                             ));
                         }
                         code.push_str(&format!(
@@ -5319,15 +5311,15 @@ impl RustEmitter {
             }
             (DeviceType::Bjt, DeviceParams::Bjt(bp)) => {
                 let s1 = s + 1;
-                if bp.has_parasitics() {
+                if bp.has_parasitics() && !slot.has_internal_mna_nodes {
                     code.push_str(&format!(
                         "{indent}let (i_dev{s}, i_dev{s1}, bjt{d}_jac) = bjt_with_parasitics(v_d{s}, v_d{s1}, state.device_{d}_is, state.device_{d}_vt, DEVICE_{d}_NF, state.device_{d}_bf, state.device_{d}_br, DEVICE_{d}_SIGN, DEVICE_{d}_USE_GP, DEVICE_{d}_VAF, DEVICE_{d}_VAR, DEVICE_{d}_IKF, DEVICE_{d}_IKR, DEVICE_{d}_ISE, DEVICE_{d}_NE, DEVICE_{d}_RB, DEVICE_{d}_RC, DEVICE_{d}_RE);\n"
                     ));
                 } else {
+                    // Combined evaluation: shared exp() across ic, ib, jacobian
+                    // (parasitics handled by MNA internal nodes when has_internal_mna_nodes)
                     code.push_str(&format!(
-                        "{indent}let i_dev{s} = bjt_ic(v_d{s}, v_d{s1}, state.device_{d}_is, state.device_{d}_vt, DEVICE_{d}_NF, state.device_{d}_br, DEVICE_{d}_SIGN, DEVICE_{d}_USE_GP, DEVICE_{d}_VAF, DEVICE_{d}_VAR, DEVICE_{d}_IKF, DEVICE_{d}_IKR);\n\
-                         {indent}let i_dev{s1} = bjt_ib(v_d{s}, v_d{s1}, state.device_{d}_is, state.device_{d}_vt, DEVICE_{d}_NF, state.device_{d}_bf, state.device_{d}_br, DEVICE_{d}_SIGN, DEVICE_{d}_ISE, DEVICE_{d}_NE);\n\
-                         {indent}let bjt{d}_jac = bjt_jacobian(v_d{s}, v_d{s1}, state.device_{d}_is, state.device_{d}_vt, DEVICE_{d}_NF, state.device_{d}_bf, state.device_{d}_br, DEVICE_{d}_SIGN, DEVICE_{d}_USE_GP, DEVICE_{d}_VAF, DEVICE_{d}_VAR, DEVICE_{d}_IKF, DEVICE_{d}_IKR, DEVICE_{d}_ISE, DEVICE_{d}_NE);\n"
+                        "{indent}let (i_dev{s}, i_dev{s1}, bjt{d}_jac) = bjt_evaluate(v_d{s}, v_d{s1}, state.device_{d}_is, state.device_{d}_vt, DEVICE_{d}_NF, state.device_{d}_bf, state.device_{d}_br, DEVICE_{d}_SIGN, DEVICE_{d}_USE_GP, DEVICE_{d}_VAF, DEVICE_{d}_VAR, DEVICE_{d}_IKF, DEVICE_{d}_IKR, DEVICE_{d}_ISE, DEVICE_{d}_NE);\n"
                     ));
                 }
                 code.push_str(&format!(
@@ -6296,9 +6288,9 @@ impl RustEmitter {
                 }
                 (DeviceType::Bjt, DeviceParams::Bjt(bp)) => {
                     let s1 = s + 1;
-                    if bp.has_parasitics() {
+                    if bp.has_parasitics() && !slot.has_internal_mna_nodes {
                         code.push_str(&format!(
-                            "{indent}{{ // BJT {dev_num} (RB/RC/RE)\n\
+                            "{indent}{{ // BJT {dev_num} (RB/RC/RE inner NR)\n\
                              {indent}    let vbe = v_nl[{s}] * DEVICE_{dev_num}_SIGN;\n\
                              {indent}    let vbc = v_nl[{s1}] * DEVICE_{dev_num}_SIGN;\n\
                              {indent}    let (ic, ib, jac) = bjt_with_parasitics(vbe, vbc, state.device_{dev_num}_is, state.device_{dev_num}_vt, DEVICE_{dev_num}_NF, state.device_{dev_num}_bf, state.device_{dev_num}_br, DEVICE_{dev_num}_SIGN, DEVICE_{dev_num}_USE_GP, DEVICE_{dev_num}_VAF, DEVICE_{dev_num}_VAR, DEVICE_{dev_num}_IKF, DEVICE_{dev_num}_IKR, DEVICE_{dev_num}_ISE, DEVICE_{dev_num}_NE, DEVICE_{dev_num}_RB, DEVICE_{dev_num}_RC, DEVICE_{dev_num}_RE);\n\
@@ -6311,13 +6303,12 @@ impl RustEmitter {
                              {indent}}}\n"
                         ));
                     } else {
+                        let mna_note = if slot.has_internal_mna_nodes { " (MNA internal nodes)" } else { "" };
                         code.push_str(&format!(
-                            "{indent}{{ // BJT {dev_num}\n\
+                            "{indent}{{ // BJT {dev_num}{mna_note}\n\
                              {indent}    let vbe = v_nl[{s}] * DEVICE_{dev_num}_SIGN;\n\
                              {indent}    let vbc = v_nl[{s1}] * DEVICE_{dev_num}_SIGN;\n\
-                             {indent}    let ic = bjt_ic(vbe, vbc, state.device_{dev_num}_is, state.device_{dev_num}_vt, DEVICE_{dev_num}_NF, state.device_{dev_num}_br, DEVICE_{dev_num}_SIGN, DEVICE_{dev_num}_USE_GP, DEVICE_{dev_num}_VAF, DEVICE_{dev_num}_VAR, DEVICE_{dev_num}_IKF, DEVICE_{dev_num}_IKR);\n\
-                             {indent}    let ib = bjt_ib(vbe, vbc, state.device_{dev_num}_is, state.device_{dev_num}_vt, DEVICE_{dev_num}_NF, state.device_{dev_num}_bf, state.device_{dev_num}_br, DEVICE_{dev_num}_SIGN, DEVICE_{dev_num}_ISE, DEVICE_{dev_num}_NE);\n\
-                             {indent}    let jac = bjt_jacobian(vbe, vbc, state.device_{dev_num}_is, state.device_{dev_num}_vt, DEVICE_{dev_num}_NF, state.device_{dev_num}_bf, state.device_{dev_num}_br, DEVICE_{dev_num}_SIGN, DEVICE_{dev_num}_USE_GP, DEVICE_{dev_num}_VAF, DEVICE_{dev_num}_VAR, DEVICE_{dev_num}_IKF, DEVICE_{dev_num}_IKR, DEVICE_{dev_num}_ISE, DEVICE_{dev_num}_NE);\n\
+                             {indent}    let (ic, ib, jac) = bjt_evaluate(vbe, vbc, state.device_{dev_num}_is, state.device_{dev_num}_vt, DEVICE_{dev_num}_NF, state.device_{dev_num}_bf, state.device_{dev_num}_br, DEVICE_{dev_num}_SIGN, DEVICE_{dev_num}_USE_GP, DEVICE_{dev_num}_VAF, DEVICE_{dev_num}_VAR, DEVICE_{dev_num}_IKF, DEVICE_{dev_num}_IKR, DEVICE_{dev_num}_ISE, DEVICE_{dev_num}_NE);\n\
                              {indent}    i_nl[{s}] = ic * DEVICE_{dev_num}_SIGN;\n\
                              {indent}    i_nl[{s1}] = ib * DEVICE_{dev_num}_SIGN;\n\
                              {indent}    j_dev[{s} * M + {s}] = jac[0];\n\
@@ -6489,7 +6480,7 @@ impl RustEmitter {
                 }
                 (DeviceType::Bjt, DeviceParams::Bjt(bp)) => {
                     let s1 = s + 1;
-                    if bp.has_parasitics() {
+                    if bp.has_parasitics() && !slot.has_internal_mna_nodes {
                         code.push_str(&format!(
                             "{indent}{{ let vbe = v_nl_final[{s}] * DEVICE_{dev_num}_SIGN;\n\
                              {indent}  let vbc = v_nl_final[{s1}] * DEVICE_{dev_num}_SIGN;\n\
@@ -6502,8 +6493,9 @@ impl RustEmitter {
                         code.push_str(&format!(
                             "{indent}{{ let vbe = v_nl_final[{s}] * DEVICE_{dev_num}_SIGN;\n\
                              {indent}  let vbc = v_nl_final[{s1}] * DEVICE_{dev_num}_SIGN;\n\
-                             {indent}  i_nl[{s}] = bjt_ic(vbe, vbc, state.device_{dev_num}_is, state.device_{dev_num}_vt, DEVICE_{dev_num}_NF, state.device_{dev_num}_br, DEVICE_{dev_num}_SIGN, DEVICE_{dev_num}_USE_GP, DEVICE_{dev_num}_VAF, DEVICE_{dev_num}_VAR, DEVICE_{dev_num}_IKF, DEVICE_{dev_num}_IKR);\n\
-                             {indent}  i_nl[{s1}] = bjt_ib(vbe, vbc, state.device_{dev_num}_is, state.device_{dev_num}_vt, DEVICE_{dev_num}_NF, state.device_{dev_num}_bf, state.device_{dev_num}_br, DEVICE_{dev_num}_SIGN, DEVICE_{dev_num}_ISE, DEVICE_{dev_num}_NE);\n\
+                             {indent}  let (ic, ib, _) = bjt_evaluate(vbe, vbc, state.device_{dev_num}_is, state.device_{dev_num}_vt, DEVICE_{dev_num}_NF, state.device_{dev_num}_bf, state.device_{dev_num}_br, DEVICE_{dev_num}_SIGN, DEVICE_{dev_num}_USE_GP, DEVICE_{dev_num}_VAF, DEVICE_{dev_num}_VAR, DEVICE_{dev_num}_IKF, DEVICE_{dev_num}_IKR, DEVICE_{dev_num}_ISE, DEVICE_{dev_num}_NE);\n\
+                             {indent}  i_nl[{s}] = ic;\n\
+                             {indent}  i_nl[{s1}] = ib;\n\
                              {indent}}}\n"
                         ));
                     }

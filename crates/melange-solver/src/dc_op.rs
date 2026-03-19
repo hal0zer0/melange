@@ -98,6 +98,20 @@ pub fn evaluate_devices(
     j_dev: &mut [f64],
     m: usize,
 ) {
+    evaluate_devices_inner(v_nl, device_slots, i_nl, j_dev, m, false);
+}
+
+/// Like `evaluate_devices`, but when `internal_junctions` is true, skip the
+/// parasitic inner loop because v_nl already represents internal junction
+/// voltages (from DC system with expanded internal nodes).
+fn evaluate_devices_inner(
+    v_nl: &[f64],
+    device_slots: &[DeviceSlot],
+    i_nl: &mut [f64],
+    j_dev: &mut [f64],
+    m: usize,
+    internal_junctions: bool,
+) {
     // Zero outputs
     for x in i_nl.iter_mut() {
         *x = 0.0;
@@ -140,10 +154,11 @@ pub fn evaluate_devices(
                 let vbe = v_nl[s];
                 let vbc = v_nl[s + 1];
 
-                // If the BJT has parasitic resistances, iteratively estimate
-                // internal junction voltages. 3 inner iterations suffice for the
-                // DC OP (the transient solver's inner NR refines further).
-                let (vbe_int, vbc_int) = if bp.has_parasitics() {
+                // If the BJT has parasitic resistances and we're NOT using
+                // internal junction nodes, iteratively estimate internal junction
+                // voltages. When internal_junctions is true, v_nl already contains
+                // the correct internal voltages from dc_n_v.
+                let (vbe_int, vbc_int) = if bp.has_parasitics() && !internal_junctions {
                     let mut vbe_i = vbe;
                     let mut vbc_i = vbc;
                     for _ in 0..3 {
@@ -255,16 +270,48 @@ pub fn evaluate_devices(
     }
 }
 
+/// Internal node mapping for a BJT with parasitic resistances in the DC system.
+/// When RB/RC/RE > 0, internal nodes are created so the intrinsic BJT model
+/// operates on internal junction voltages while parasitic R is in the global matrix.
+struct BjtInternalNodes {
+    start_idx: usize,        // M-dimension start index
+    ext_base: usize,         // 1-indexed external node (0=ground)
+    ext_collector: usize,
+    ext_emitter: usize,
+    int_base: usize,         // 0-indexed into g_dc (same as ext if R=0)
+    int_collector: usize,
+    int_emitter: usize,
+}
+
+/// Extended DC system info including internal nodes for parasitic BJTs.
+struct DcSystemInfo {
+    g_dc: Vec<Vec<f64>>,
+    b_dc: Vec<f64>,
+    n_dc: usize,
+    /// DC-local N_v (M × n_dc) — uses internal nodes for parasitic BJTs
+    dc_n_v: Vec<Vec<f64>>,
+    /// DC-local N_i (n_dc × M) — uses internal nodes for parasitic BJTs
+    dc_n_i: Vec<Vec<f64>>,
+    /// Internal node mappings (empty if no parasitic BJTs)
+    bjt_internal: Vec<BjtInternalNodes>,
+    /// Index where internal BJT nodes start (for damping).
+    internal_node_start: usize,
+}
+
 /// Build the DC conductance matrix and source vector from MNA.
 ///
 /// At DC:
 /// - Capacitors are open circuits (not stamped, so C rows in G are absent)
-/// - Inductors are short circuits (DC_SHORT_CONDUCTANCE in the n×n node block)
-/// - Voltage sources use augmented MNA (already in mna.g n_aug × n_aug)
-/// - Input conductance is included in the n×n node block
+/// - Inductors are short circuits (augmented MNA constraints)
+/// - Voltage sources use augmented MNA (already in mna.g)
+/// - BJTs with parasitic R get internal nodes (like ngspice basePrime/colPrime/emitPrime)
 ///
-/// Returns (g_dc, b_dc) as n_aug-sized structures.
-fn build_dc_system(mna: &MnaSystem, config: &DcOpConfig) -> (Vec<Vec<f64>>, Vec<f64>, usize) {
+/// Returns DcSystemInfo with expanded matrices.
+fn build_dc_system(
+    mna: &MnaSystem,
+    device_slots: &[DeviceSlot],
+    config: &DcOpConfig,
+) -> DcSystemInfo {
     let n = mna.n;
     let n_aug = mna.n_aug;
 
@@ -342,23 +389,172 @@ fn build_dc_system(mna: &MnaSystem, config: &DcOpConfig) -> (Vec<Vec<f64>>, Vec<
         inject_rhs_current(&mut b_dc, src.n_minus_idx, -src.dc_value);
     }
 
-    // Regularize: add a small conductance from every circuit node to ground.
-    // This prevents singular matrices from floating node clusters (nodes connected
-    // only through capacitors or to each other without any path to ground).
-    // Standard SPICE practice: Gmin is applied to every node diagonal.
-    // 1e-12 S = 1 TΩ to ground — negligible current but ensures solvability.
+    // === BJT internal nodes for parasitic resistances ===
+    // Like ngspice basePrime/colPrime/emitPrime: create internal nodes so the
+    // intrinsic model operates at correct junction voltages while parasitic R
+    // is in the global matrix. This fixes DC OP convergence for Class AB amps.
+    let mut bjt_internal = Vec::new();
+    let internal_node_start = n_dc; // where internal nodes begin
+    let mut n_dc = n_dc; // will grow as we add internal nodes
+
+    for (slot_idx, slot) in device_slots.iter().enumerate() {
+        if let DeviceParams::Bjt(bp) = &slot.params {
+            // Skip if MNA already has internal nodes for this BJT
+            let has_mna_internal = mna.bjt_internal_nodes.iter().any(|n| n.start_idx == slot.start_idx);
+            if bp.has_parasitics() && slot.dimension == 2 && !has_mna_internal {
+                // Get external node indices (1-indexed, 0=ground)
+                if slot_idx < mna.nonlinear_devices.len() {
+                    let dev = &mna.nonlinear_devices[slot_idx];
+                    let ext_c = dev.node_indices[0]; // collector
+                    let ext_b = dev.node_indices[1]; // base
+                    let ext_e = dev.node_indices[2]; // emitter
+
+                    // Create internal nodes for non-zero resistances
+                    let int_b = if bp.rb > 0.0 { let idx = n_dc; n_dc += 1; idx } else if ext_b > 0 { ext_b - 1 } else { 0 };
+                    let int_c = if bp.rc > 0.0 { let idx = n_dc; n_dc += 1; idx } else if ext_c > 0 { ext_c - 1 } else { 0 };
+                    let int_e = if bp.re > 0.0 { let idx = n_dc; n_dc += 1; idx } else if ext_e > 0 { ext_e - 1 } else { 0 };
+
+                    bjt_internal.push(BjtInternalNodes {
+                        start_idx: slot.start_idx,
+                        ext_base: ext_b, ext_collector: ext_c, ext_emitter: ext_e,
+                        int_base: int_b, int_collector: int_c, int_emitter: int_e,
+                    });
+                }
+            }
+        }
+    }
+
+    // Expand g_dc and b_dc to new n_dc if internal nodes were added
+    if n_dc > g_dc.len() {
+        let old_n = g_dc.len();
+        for row in g_dc.iter_mut() {
+            row.resize(n_dc, 0.0);
+        }
+        for _ in old_n..n_dc {
+            g_dc.push(vec![0.0; n_dc]);
+        }
+        b_dc.resize(n_dc, 0.0);
+    }
+
+    // Stamp parasitic conductances between external and internal nodes
+    for bjt in &bjt_internal {
+        if let Some(slot) = device_slots.iter().find(|s| s.start_idx == bjt.start_idx) {
+            if let DeviceParams::Bjt(bp) = &slot.params {
+                // RB: external base ↔ internal base
+                if bp.rb > 0.0 {
+                    let g = 1.0 / bp.rb;
+                    if bjt.ext_base > 0 {
+                        let eb = bjt.ext_base - 1;
+                        g_dc[eb][eb] += g;
+                        g_dc[eb][bjt.int_base] -= g;
+                        g_dc[bjt.int_base][eb] -= g;
+                    }
+                    g_dc[bjt.int_base][bjt.int_base] += g;
+                }
+                // RC: external collector ↔ internal collector
+                if bp.rc > 0.0 {
+                    let g = 1.0 / bp.rc;
+                    if bjt.ext_collector > 0 {
+                        let ec = bjt.ext_collector - 1;
+                        g_dc[ec][ec] += g;
+                        g_dc[ec][bjt.int_collector] -= g;
+                        g_dc[bjt.int_collector][ec] -= g;
+                    }
+                    g_dc[bjt.int_collector][bjt.int_collector] += g;
+                }
+                // RE: external emitter ↔ internal emitter
+                if bp.re > 0.0 {
+                    let g = 1.0 / bp.re;
+                    if bjt.ext_emitter > 0 {
+                        let ee = bjt.ext_emitter - 1;
+                        g_dc[ee][ee] += g;
+                        g_dc[ee][bjt.int_emitter] -= g;
+                        g_dc[bjt.int_emitter][ee] -= g;
+                    }
+                    g_dc[bjt.int_emitter][bjt.int_emitter] += g;
+                }
+            }
+        }
+    }
+
+    // Regularize: Gmin on all circuit nodes AND internal nodes
     let gmin_floor = 1e-12;
     for i in 0..n {
         g_dc[i][i] += gmin_floor;
     }
+    // Also regularize internal nodes
+    for bjt in &bjt_internal {
+        if let Some(slot) = device_slots.iter().find(|s| s.start_idx == bjt.start_idx) {
+            if let DeviceParams::Bjt(bp) = &slot.params {
+                if bp.rb > 0.0 { g_dc[bjt.int_base][bjt.int_base] += gmin_floor; }
+                if bp.rc > 0.0 { g_dc[bjt.int_collector][bjt.int_collector] += gmin_floor; }
+                if bp.re > 0.0 { g_dc[bjt.int_emitter][bjt.int_emitter] += gmin_floor; }
+            }
+        }
+    }
 
-    (g_dc, b_dc, n_dc)
+    // Build DC-local N_v (M × n_dc) and N_i (n_dc × M)
+    // Start from MNA's N_v/N_i, then redirect parasitic BJTs to internal nodes
+    let m = mna.m;
+    let mut dc_n_v = vec![vec![0.0; n_dc]; m];
+    let mut dc_n_i = vec![vec![0.0; m]; n_dc];
+
+    // Copy MNA matrices (n_aug portion)
+    for i in 0..m {
+        for j in 0..n_aug.min(n_dc) {
+            dc_n_v[i][j] = mna.n_v[i][j];
+        }
+    }
+    for i in 0..n_aug.min(n_dc) {
+        for j in 0..m {
+            dc_n_i[i][j] = mna.n_i[i][j];
+        }
+    }
+
+    // Redirect parasitic BJTs to internal nodes
+    for bjt in &bjt_internal {
+        let s = bjt.start_idx;
+        if s + 1 >= m { continue; }
+
+        // Clear external entries for this BJT
+        for j in 0..n_dc { dc_n_v[s][j] = 0.0; dc_n_v[s + 1][j] = 0.0; }
+        for i in 0..n_dc { dc_n_i[i][s] = 0.0; dc_n_i[i][s + 1] = 0.0; }
+
+        // N_v: extract Vbe_int = V(basePrime) - V(emitterPrime)
+        dc_n_v[s][bjt.int_base] = 1.0;
+        dc_n_v[s][bjt.int_emitter] = -1.0;
+        // N_v: extract Vbc_int = V(basePrime) - V(collectorPrime)
+        dc_n_v[s + 1][bjt.int_base] = 1.0;
+        dc_n_v[s + 1][bjt.int_collector] = -1.0;
+
+        // N_i: Ic enters collectorPrime, exits emitterPrime
+        dc_n_i[bjt.int_collector][s] = -1.0;
+        dc_n_i[bjt.int_emitter][s] = 1.0;
+        // N_i: Ib enters basePrime, exits emitterPrime
+        dc_n_i[bjt.int_base][s + 1] = -1.0;
+        dc_n_i[bjt.int_emitter][s + 1] = 1.0;
+    }
+
+    DcSystemInfo {
+        g_dc,
+        b_dc,
+        n_dc,
+        dc_n_v,
+        dc_n_i,
+        bjt_internal,
+        internal_node_start,
+    }
 }
 
 /// Compute v_nl = N_v · v (extract controlling voltages from node voltages).
 pub fn extract_nl_voltages(mna: &MnaSystem, v: &[f64], v_nl: &mut [f64]) {
-    for (i, v_nl_i) in v_nl.iter_mut().enumerate().take(mna.m) {
-        *v_nl_i = mna.n_v[i]
+    extract_nl_voltages_with(mna.m, &mna.n_v, v, v_nl);
+}
+
+/// Compute v_nl = N_v · v using an explicit N_v matrix (M × n_dc).
+fn extract_nl_voltages_with(m: usize, n_v: &[Vec<f64>], v: &[f64], v_nl: &mut [f64]) {
+    for (i, v_nl_i) in v_nl.iter_mut().enumerate().take(m) {
+        *v_nl_i = n_v[i]
             .iter()
             .zip(v.iter())
             .map(|(nv, vi)| nv * vi)
@@ -575,6 +771,18 @@ struct DcCircuit<'a> {
     mna: &'a MnaSystem,
     device_slots: &'a [DeviceSlot],
     config: &'a DcOpConfig,
+    /// DC-local N_v (M × n_dc) — may have internal nodes for parasitic BJTs
+    dc_n_v: &'a [Vec<f64>],
+    /// DC-local N_i (n_dc × M) — may have internal nodes for parasitic BJTs
+    dc_n_i: &'a [Vec<f64>],
+    /// DC system dimension (may be > n_aug due to inductors + internal nodes)
+    n_dc: usize,
+    /// Whether internal junction nodes are present (skip parasitic inner loop)
+    has_internal_nodes: bool,
+    /// Index where internal BJT nodes start (for damping).
+    /// Augmented variables (n..n_aug_plus_ind) are NOT damped, but internal
+    /// nodes (n_aug_plus_ind..n_dc) MUST be damped like circuit nodes.
+    internal_node_start: usize,
 }
 
 /// Uses companion formulation at each iteration:
@@ -585,13 +793,13 @@ struct DcCircuit<'a> {
 /// Returns (converged, iterations).
 fn nr_dc_solve(
     circuit: &DcCircuit,
-    v: &mut [f64],
+    v: &mut Vec<f64>,
     v_nl: &mut [f64],
     i_nl: &mut [f64],
     source_scale: f64,
     gmin: f64,
 ) -> (bool, usize) {
-    let n_dc = circuit.g_dc.len(); // DC system dimension (may be > n_aug due to inductor constraints)
+    let n_dc = circuit.n_dc;
     let m = circuit.mna.m;
 
     // Pre-allocate working buffers (all n_dc-sized)
@@ -604,13 +812,24 @@ fn nr_dc_solve(
     let config = circuit.config;
     let g_dc = circuit.g_dc;
     let b_dc = circuit.b_dc;
+    let dc_n_v = circuit.dc_n_v;
+    let dc_n_i = circuit.dc_n_i;
+
+    // Ensure v is the right size for the DC system (may be larger than MNA due to internal nodes)
+    if v.len() < n_dc {
+        v.resize(n_dc, 0.0);
+    }
+
+    let internal_junctions = circuit.has_internal_nodes;
 
     for iter in 0..config.max_iterations {
-        // 1. Extract controlling voltages: v_nl = N_v · v  (N_v is M × n_aug)
-        extract_nl_voltages(mna, v, v_nl);
+        // 1. Extract controlling voltages: v_nl = dc_N_v · v  (dc_N_v is M × n_dc)
+        extract_nl_voltages_with(m, dc_n_v, v, v_nl);
 
         // 2. Evaluate device currents and Jacobian
-        evaluate_devices(v_nl, device_slots, i_nl, &mut j_dev, m);
+        // When internal nodes are present, v_nl already has true junction voltages
+        // — skip the parasitic inner loop to avoid double-correction.
+        evaluate_devices_inner(v_nl, device_slots, i_nl, &mut j_dev, m, internal_junctions);
 
         // Check for NaN/Inf in device evaluation
         if i_nl.iter().any(|x| !x.is_finite()) || j_dev.iter().any(|x| !x.is_finite()) {
@@ -639,13 +858,12 @@ fn nr_dc_solve(
         }
 
         // Add Gmin conductance across each nonlinear device's controlling nodes.
-        // n_v[nl_idx] has n_aug entries; only the first n_nodes are nonzero,
-        // but we iterate over all to be safe.
+        // dc_n_v[nl_idx] has n_dc entries; only some are nonzero.
         if gmin > 0.0 {
             for slot in device_slots {
                 for d in 0..slot.dimension {
                     let nl_idx = slot.start_idx + d;
-                    for (j, &nv_val) in mna.n_v[nl_idx].iter().enumerate() {
+                    for (j, &nv_val) in dc_n_v[nl_idx].iter().enumerate() {
                         if nv_val.abs() > 1e-15 {
                             g_aug[j][j] += gmin * nv_val.abs();
                         }
@@ -655,15 +873,13 @@ fn nr_dc_solve(
         }
 
         // Stamp -N_i · J_dev · N_v into G_aug (companion linearization).
-        // G_aug = G_dc - N_i · J_dev · N_v
-        // N_i is n_aug × M, N_v is M × n_aug. The nonlinear device entries
-        // are only in rows/cols < n_nodes, so inductor constraint rows are unaffected.
-        let n_mna = mna.n_aug; // MNA system dimension (excludes DC inductor constraints)
-        for (a, g_aug_a) in g_aug.iter_mut().enumerate().take(n_mna) {
-            for (b, g_aug_ab) in g_aug_a.iter_mut().enumerate().take(n_mna) {
+        // G_aug = G_dc - dc_N_i · J_dev · dc_N_v
+        // dc_N_i is n_dc × M, dc_N_v is M × n_dc.
+        for (a, g_aug_a) in g_aug.iter_mut().enumerate().take(n_dc) {
+            for (b, g_aug_ab) in g_aug_a.iter_mut().enumerate().take(n_dc) {
                 let mut sum = 0.0;
                 for i in 0..m {
-                    let ni_ai = mna.n_i[a][i];
+                    let ni_ai = dc_n_i[a][i];
                     if ni_ai.abs() < 1e-30 {
                         continue;
                     }
@@ -672,7 +888,7 @@ fn nr_dc_solve(
                         if jd.abs() < 1e-30 {
                             continue;
                         }
-                        let nv_jb = mna.n_v[j][b];
+                        let nv_jb = dc_n_v[j][b];
                         if nv_jb.abs() < 1e-30 {
                             continue;
                         }
@@ -683,23 +899,22 @@ fn nr_dc_solve(
             }
         }
 
-        // 4. Build companion RHS: rhs = b_dc_scaled + N_i · (i_nl - J_dev · v_nl)
+        // 4. Build companion RHS: rhs = b_dc_scaled + dc_N_i · (i_nl - J_dev · v_nl)
         //    Source stepping scales ALL sources (both current sources in node rows AND
         //    voltage source constraints in augmented rows). This ramps the supply from
         //    0V to full, letting BJTs gradually turn on at each step.
         //    Inductor short-circuit constraints (V=0) are unaffected by scaling.
-        let n = mna.n;
         let n_aug = mna.n_aug;
         for i in 0..n_aug {
             rhs[i] = b_dc[i] * source_scale;
         }
-        // Inductor short-circuit constraints (V=0): always zero, scaling is no-op
+        // Inductor short-circuit constraints and internal nodes: no source scaling
         for i in n_aug..n_dc {
-            rhs[i] = b_dc[i]; // b_dc[i] = 0 for inductor constraints
+            rhs[i] = b_dc[i]; // b_dc[i] = 0 for inductor constraints and internal nodes
         }
 
         // Compute companion current: i_companion = i_nl - J_dev · v_nl
-        // Then inject: rhs += N_i · i_companion (only into node rows; augmented rows unaffected)
+        // Then inject: rhs += dc_N_i · i_companion
         for i in 0..m {
             let mut jdev_vnl_i = 0.0;
             for j in 0..m {
@@ -707,9 +922,9 @@ fn nr_dc_solve(
             }
             let i_comp = i_nl[i] - jdev_vnl_i;
 
-            // Inject into RHS: rhs[a] += N_i[a][i] * i_comp
-            for (a, rhs_a) in rhs.iter_mut().enumerate().take(n_mna) {
-                *rhs_a += mna.n_i[a][i] * i_comp;
+            // Inject into RHS: rhs[a] += dc_N_i[a][i] * i_comp
+            for (a, rhs_a) in rhs.iter_mut().enumerate().take(n_dc) {
+                *rhs_a += dc_n_i[a][i] * i_comp;
             }
         }
 
@@ -734,16 +949,10 @@ fn nr_dc_solve(
         // First, apply pnjlim to PN junction controlling voltages.
         // Extract old and new v_nl to apply junction-aware limiting.
         let mut v_nl_new = vec![0.0; m];
-        for (i, v_nl_new_i) in v_nl_new.iter_mut().enumerate().take(m) {
-            *v_nl_new_i = mna.n_v[i]
-                .iter()
-                .zip(v_new.iter())
-                .map(|(nv, vi)| nv * vi)
-                .sum();
-        }
+        extract_nl_voltages_with(m, dc_n_v, &v_new, &mut v_nl_new);
 
         // Apply pnjlim per PN junction dimension, accumulate corrections
-        // into node voltages via N_v^T (pseudo-inverse: just distribute back).
+        // into node voltages via dc_N_v^T (pseudo-inverse: just distribute back).
         let mut pn_corrections = vec![0.0; n_dc];
         for slot in device_slots {
             match (&slot.device_type, &slot.params) {
@@ -756,13 +965,22 @@ fn nr_dc_solve(
                     let v_lim = pnjlim(v_raw, v_old, vt, vcrit);
                     if (v_lim - v_raw).abs() > 1e-15 {
                         let correction = v_lim - v_raw;
-                        for j in 0..n_mna {
-                            pn_corrections[j] += mna.n_v[idx][j] * correction;
+                        for j in 0..n_dc {
+                            pn_corrections[j] += dc_n_v[idx][j] * correction;
                         }
                     }
                 }
                 (DeviceType::Bjt, DeviceParams::Bjt(bp))
                 | (DeviceType::BjtForwardActive, DeviceParams::Bjt(bp)) => {
+                    // When internal nodes are present for parasitic BJTs, skip pnjlim
+                    // correction distribution. The N_v^T distribution pushes corrections
+                    // equally to both internal nodes, which badly destabilizes the weakly-
+                    // connected internal base (dragging it far from ext_base). The parasitic
+                    // R in G_aug provides natural damping — let the NR handle it.
+                    if internal_junctions && bp.has_parasitics() {
+                        continue;
+                    }
+
                     let vt = bp.nf * bp.vt;
                     let vcrit = pn_vcrit(vt, bp.is);
                     // Vbe dimension
@@ -773,8 +991,8 @@ fn nr_dc_solve(
                     let v_lim_be = pnjlim(v_raw_be, v_old_be, vt, vcrit);
                     if (v_lim_be - v_raw_be).abs() > 1e-15 {
                         let correction = sign * (v_lim_be - v_raw_be);
-                        for j in 0..n_mna {
-                            pn_corrections[j] += mna.n_v[be_idx][j] * correction;
+                        for j in 0..n_dc {
+                            pn_corrections[j] += dc_n_v[be_idx][j] * correction;
                         }
                     }
                     // Vbc dimension (if 2D)
@@ -785,8 +1003,8 @@ fn nr_dc_solve(
                         let v_lim_bc = pnjlim(v_raw_bc, v_old_bc, vt, vcrit);
                         if (v_lim_bc - v_raw_bc).abs() > 1e-15 {
                             let correction = sign * (v_lim_bc - v_raw_bc);
-                            for j in 0..n_mna {
-                                pn_corrections[j] += mna.n_v[bc_idx][j] * correction;
+                            for j in 0..n_dc {
+                                pn_corrections[j] += dc_n_v[bc_idx][j] * correction;
                             }
                         }
                     }
@@ -801,10 +1019,18 @@ fn nr_dc_solve(
             .map(|(&vn, &corr)| vn + corr)
             .collect();
 
-        // Global node voltage damping: if max change > 10V, scale all node updates
+        // Global node voltage damping: if max change > 10V, scale all node updates.
+        // Includes both external circuit nodes (0..n) and internal parasitic nodes.
+        let n = mna.n;
+        let int_start = circuit.internal_node_start;
         let v_max_step = 50.0;
         let mut max_delta = 0.0_f64;
+        // Compute max delta across circuit nodes AND internal nodes
         for i in 0..n {
+            let delta = (v_limited[i] - v[i]).abs();
+            max_delta = max_delta.max(delta);
+        }
+        for i in int_start..n_dc {
             let delta = (v_limited[i] - v[i]).abs();
             max_delta = max_delta.max(delta);
         }
@@ -817,8 +1043,9 @@ fn nr_dc_solve(
         let mut final_max_delta = 0.0_f64;
         for i in 0..n_dc {
             let delta = v_limited[i] - v[i];
-            let limited = if i < n {
-                // Node voltages: apply damping + flat clamp
+            let is_node = i < n || i >= int_start;
+            let limited = if is_node {
+                // Circuit node or internal parasitic node: apply damping + flat clamp
                 let damped = delta * damping;
                 damped.clamp(-v_max_step, v_max_step)
             } else {
@@ -832,15 +1059,15 @@ fn nr_dc_solve(
 
         if max_delta < config.tolerance {
             // Final evaluation at converged point
-            extract_nl_voltages(mna, v, v_nl);
-            evaluate_devices(v_nl, device_slots, i_nl, &mut j_dev, m);
+            extract_nl_voltages_with(m, dc_n_v, v, v_nl);
+            evaluate_devices_inner(v_nl, device_slots, i_nl, &mut j_dev, m, internal_junctions);
             return (true, iter + 1);
         }
     }
 
     // Final evaluation even on non-convergence
-    extract_nl_voltages(mna, v, v_nl);
-    evaluate_devices(v_nl, device_slots, i_nl, &mut vec![0.0; m * m], m);
+    extract_nl_voltages_with(m, dc_n_v, v, v_nl);
+    evaluate_devices_inner(v_nl, device_slots, i_nl, &mut vec![0.0; m * m], m, internal_junctions);
     (false, config.max_iterations)
 }
 
@@ -859,12 +1086,24 @@ pub fn solve_dc_operating_point(
 ) -> DcOpResult {
     let m = mna.m;
 
-    // Build DC system. Dimension n_dc = n_aug + num_inductors (inductor short-circuit constraints).
-    let (g_dc, b_dc, n_dc) = build_dc_system(mna, config);
+    // Build DC system with internal nodes for parasitic BJTs.
+    // Dimension n_dc = n_aug + num_inductors + num_internal_nodes.
+    let dc_sys = build_dc_system(mna, device_slots, config);
+    let n_dc = dc_sys.n_dc;
+
+    let has_mna_internal = !mna.bjt_internal_nodes.is_empty();
+    if !dc_sys.bjt_internal.is_empty() {
+        log::info!(
+            "DC OP: {} parasitic BJTs expanded to internal nodes, n_dc={} (mna.n_aug={})",
+            dc_sys.bjt_internal.len(),
+            n_dc,
+            mna.n_aug
+        );
+    }
 
     // Compute linear initial guess. The g_dc matrix already has Gmin floor
     // regularization for floating nodes, so this should not be singular.
-    let v_linear = solve_linear(&g_dc, &b_dc).unwrap_or_else(|| vec![0.0; n_dc]);
+    let v_linear = solve_linear(&dc_sys.g_dc, &dc_sys.b_dc).unwrap_or_else(|| vec![0.0; n_dc]);
 
     // If no nonlinear devices, return linear result
     if m == 0 || device_slots.is_empty() {
@@ -878,21 +1117,101 @@ pub fn solve_dc_operating_point(
         };
     }
 
+    let has_internal_nodes = !dc_sys.bjt_internal.is_empty() || has_mna_internal;
     let circuit = DcCircuit {
-        g_dc: &g_dc,
-        b_dc: &b_dc,
+        g_dc: &dc_sys.g_dc,
+        b_dc: &dc_sys.b_dc,
         mna,
         device_slots,
         config,
+        dc_n_v: &dc_sys.dc_n_v,
+        dc_n_i: &dc_sys.dc_n_i,
+        n_dc,
+        has_internal_nodes,
+        internal_node_start: if has_mna_internal {
+            // MNA internal nodes start at the lowest internal node index
+            mna.bjt_internal_nodes.iter()
+                .flat_map(|n| [n.int_base, n.int_collector, n.int_emitter].into_iter().flatten())
+                .min()
+                .unwrap_or(dc_sys.internal_node_start)
+        } else {
+            dc_sys.internal_node_start
+        },
     };
 
     // Clamp junction voltages in the linear initial guess to prevent
     // extreme forward bias (which causes exp() saturation and NR divergence).
     // For multi-stage direct-coupled BJT circuits, the linear guess often has
     // junction voltages of several volts because the BJT is not conducting.
-    let v_clamped = clamp_junction_voltages(mna, device_slots, &v_linear);
+    let mut v_clamped = clamp_junction_voltages(mna, device_slots, &v_linear);
+    // Extend to n_dc if internal nodes were added
+    v_clamped.resize(n_dc, 0.0);
+    // Initialize internal node voltages from clamped external nodes
+    for bjt in &dc_sys.bjt_internal {
+        if let Some(slot) = device_slots.iter().find(|s| s.start_idx == bjt.start_idx) {
+            if let DeviceParams::Bjt(bp) = &slot.params {
+                if bp.rb > 0.0 && bjt.ext_base > 0 {
+                    v_clamped[bjt.int_base] = v_clamped[bjt.ext_base - 1];
+                }
+                if bp.rc > 0.0 && bjt.ext_collector > 0 {
+                    v_clamped[bjt.int_collector] = v_clamped[bjt.ext_collector - 1];
+                }
+                if bp.re > 0.0 && bjt.ext_emitter > 0 {
+                    let base_v = if bp.rb > 0.0 {
+                        v_clamped[bjt.int_base]
+                    } else if bjt.ext_base > 0 {
+                        v_clamped[bjt.ext_base - 1]
+                    } else {
+                        0.0
+                    };
+                    let sign = if bp.is_pnp { -1.0 } else { 1.0 };
+                    v_clamped[bjt.int_emitter] = base_v - sign * 0.65;
+                }
+            }
+        }
+    }
 
-    let mut v = v_clamped;
+    // Also initialize MNA-level internal nodes (from expand_bjt_internal_nodes)
+    for mna_bjt in &mna.bjt_internal_nodes {
+        if let Some(slot) = device_slots.iter().find(|s| s.start_idx == mna_bjt.start_idx) {
+            if let DeviceParams::Bjt(bp) = &slot.params {
+                // Find external node indices from MNA nonlinear device info
+                let dev_info = mna.nonlinear_devices.iter()
+                    .find(|d| d.start_idx == mna_bjt.start_idx);
+                if let Some(dev) = dev_info {
+                    let ext_c = dev.node_indices[0]; // 1-indexed
+                    let ext_b = dev.node_indices[1];
+                    let ext_e = dev.node_indices[2];
+
+                    if let Some(ib) = mna_bjt.int_base {
+                        if ext_b > 0 && ib < v_clamped.len() {
+                            v_clamped[ib] = v_clamped[ext_b - 1];
+                        }
+                    }
+                    if let Some(ic) = mna_bjt.int_collector {
+                        if ext_c > 0 && ic < v_clamped.len() {
+                            v_clamped[ic] = v_clamped[ext_c - 1];
+                        }
+                    }
+                    if let Some(ie) = mna_bjt.int_emitter {
+                        if ext_e > 0 && ie < v_clamped.len() {
+                            let base_v = if let Some(ib) = mna_bjt.int_base {
+                                v_clamped[ib]
+                            } else if ext_b > 0 {
+                                v_clamped[ext_b - 1]
+                            } else {
+                                0.0
+                            };
+                            let sign = if bp.is_pnp { -1.0 } else { 1.0 };
+                            v_clamped[ie] = base_v - sign * 0.65;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let mut v = v_clamped.clone();
     let mut v_nl = vec![0.0; m];
     let mut i_nl = vec![0.0; m];
 
@@ -925,6 +1244,8 @@ pub fn solve_dc_operating_point(
     }
     log::info!("DC OP Strategy 1 (Direct NR): converged={} iters={} active_junctions={}", converged, iters, has_active_junction);
     if converged && has_active_junction {
+        // Return only the MNA-sized portion (truncate internal nodes)
+        v.truncate(n_dc);
         return DcOpResult {
             v_node: v,
             v_nl,
@@ -935,43 +1256,68 @@ pub fn solve_dc_operating_point(
         };
     }
 
-    // Strategy 2: Source stepping
-    // Ramp DC sources from 0 to full value, NR at each stage
-    let mut v = vec![0.0; n_dc]; // Start from zero for source stepping
+    // Strategy 2: Source stepping (two attempts)
+    // Attempt A: Start from v=0, ramp sources from 0 to full.
+    // Attempt B: Start from clamped linear guess (pre-biased junctions).
+    //
+    // For feedback amplifiers, starting from v=0 often converges to the degenerate
+    // "all off" solution because the feedback loop is open. Starting from the clamped
+    // guess pre-biases junctions so the NR maintains active operation as sources ramp.
+    let ss_starts: [Vec<f64>; 2] = [
+        vec![0.0; n_dc],   // Classic source stepping from zero
+        v_clamped.clone(),  // Source stepping from clamped guess
+    ];
+
+    let mut v = vec![0.0; n_dc];
     let mut total_iters = 0;
-    let mut source_stepping_converged = true;
+    let mut source_stepping_converged = false;
 
-    for step in 1..=config.source_steps {
-        let scale = step as f64 / config.source_steps as f64;
-        let (converged, iters) = nr_dc_solve(&circuit, &mut v, &mut v_nl, &mut i_nl, scale, 0.0);
-        total_iters += iters;
-        if !converged {
-            source_stepping_converged = false;
-            break;
-        }
-    }
+    for (attempt, start) in ss_starts.iter().enumerate() {
+        v.clone_from(start);
+        let mut this_iters = 0;
+        let mut this_converged = true;
 
-    // Apply the same degenerate check to source stepping result
-    let mut ss_has_active = m == 0;
-    if source_stepping_converged && m > 0 {
-        extract_nl_voltages(mna, &v, &mut v_nl);
-        for slot in device_slots {
-            if let DeviceParams::Bjt(bp) = &slot.params {
-                if slot.start_idx < v_nl.len() {
-                    let sign = if bp.is_pnp { -1.0 } else { 1.0 };
-                    if (sign * v_nl[slot.start_idx]) > 0.3 {
-                        ss_has_active = true;
-                        break;
-                    }
-                }
-            } else {
-                ss_has_active = true;
+        for step in 1..=config.source_steps {
+            let scale = step as f64 / config.source_steps as f64;
+            let (converged, iters) = nr_dc_solve(&circuit, &mut v, &mut v_nl, &mut i_nl, scale, 0.0);
+            this_iters += iters;
+            if !converged {
+                this_converged = false;
                 break;
             }
         }
+        total_iters += this_iters;
+
+        if this_converged {
+            // Check for degenerate solution
+            extract_nl_voltages_with(m, &dc_sys.dc_n_v, &v, &mut v_nl);
+            let mut has_active = m == 0;
+            for slot in device_slots {
+                if let DeviceParams::Bjt(bp) = &slot.params {
+                    if slot.start_idx < v_nl.len() {
+                        let sign = if bp.is_pnp { -1.0 } else { 1.0 };
+                        if (sign * v_nl[slot.start_idx]) > 0.3 {
+                            has_active = true;
+                            break;
+                        }
+                    }
+                } else {
+                    has_active = true;
+                    break;
+                }
+            }
+            if has_active {
+                log::info!("DC OP Strategy 2 (Source stepping attempt {}, {} steps): converged, active, iters={}",
+                    attempt, config.source_steps, this_iters);
+                source_stepping_converged = true;
+                break;
+            }
+            log::info!("DC OP Strategy 2 attempt {}: converged but degenerate", attempt);
+        }
     }
-    log::info!("DC OP Strategy 2 (Source stepping, {} steps): converged={} active={} iters={}", config.source_steps, source_stepping_converged, ss_has_active, total_iters);
-    if source_stepping_converged && ss_has_active {
+
+    log::info!("DC OP Strategy 2 (Source stepping): converged={} iters={}", source_stepping_converged, total_iters);
+    if source_stepping_converged {
         return DcOpResult {
             v_node: v,
             v_nl,
@@ -989,6 +1335,40 @@ pub fn solve_dc_operating_point(
     // guess has a better chance of finding the active OP because the junction
     // voltages are pre-set to reasonable values.
     let mut v = clamp_junction_voltages(mna, device_slots, &v_linear);
+    v.resize(n_dc, 0.0);
+    // Initialize internal nodes for Gmin stepping too
+    for bjt in &dc_sys.bjt_internal {
+        if let Some(slot) = device_slots.iter().find(|s| s.start_idx == bjt.start_idx) {
+            if let DeviceParams::Bjt(bp) = &slot.params {
+                if bp.rb > 0.0 && bjt.ext_base > 0 { v[bjt.int_base] = v[bjt.ext_base - 1]; }
+                if bp.rc > 0.0 && bjt.ext_collector > 0 { v[bjt.int_collector] = v[bjt.ext_collector - 1]; }
+                if bp.re > 0.0 && bjt.ext_emitter > 0 {
+                    let base_v = if bp.rb > 0.0 { v[bjt.int_base] } else if bjt.ext_base > 0 { v[bjt.ext_base - 1] } else { 0.0 };
+                    let sign = if bp.is_pnp { -1.0 } else { 1.0 };
+                    v[bjt.int_emitter] = base_v - sign * 0.65;
+                }
+            }
+        }
+    }
+    // Also init MNA-level internal nodes for Gmin stepping
+    for mna_bjt in &mna.bjt_internal_nodes {
+        if let Some(slot) = device_slots.iter().find(|s| s.start_idx == mna_bjt.start_idx) {
+            if let DeviceParams::Bjt(bp) = &slot.params {
+                if let Some(dev) = mna.nonlinear_devices.iter().find(|d| d.start_idx == mna_bjt.start_idx) {
+                    let (ext_c, ext_b, ext_e) = (dev.node_indices[0], dev.node_indices[1], dev.node_indices[2]);
+                    if let Some(ib) = mna_bjt.int_base { if ext_b > 0 && ib < v.len() { v[ib] = v[ext_b - 1]; } }
+                    if let Some(ic) = mna_bjt.int_collector { if ext_c > 0 && ic < v.len() { v[ic] = v[ext_c - 1]; } }
+                    if let Some(ie) = mna_bjt.int_emitter {
+                        if ext_e > 0 && ie < v.len() {
+                            let base_v = mna_bjt.int_base.map(|ib| v[ib]).unwrap_or_else(|| if ext_b > 0 { v[ext_b - 1] } else { 0.0 });
+                            let sign = if bp.is_pnp { -1.0 } else { 1.0 };
+                            v[ie] = base_v - sign * 0.65;
+                        }
+                    }
+                }
+            }
+        }
+    }
     let mut total_iters = 0;
     let mut gmin_converged = true;
 

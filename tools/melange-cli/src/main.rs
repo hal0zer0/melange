@@ -626,8 +626,8 @@ fn compile_circuit_source(
         }
     }
 
-    // Stamp junction capacitances from device model parameters into MNA C matrix.
-    // Must happen BEFORE kernel build so caps are included in A = G + 2C/T.
+    // Stamp junction capacitances BEFORE FA detection (caps affect DC OP).
+    // Internal node expansion happens AFTER FA detection to avoid disrupting it.
     {
         let device_slots =
             melange_solver::codegen::ir::CircuitIR::build_device_info(&netlist).unwrap_or_default();
@@ -666,7 +666,7 @@ fn compile_circuit_source(
         if input_node_idx < mna.n {
             mna.g[input_node_idx][input_node_idx] += input_conductance;
         }
-        // Re-stamp junction capacitances
+        // Re-stamp junction capacitances on rebuilt MNA
         {
             let device_slots = melange_solver::codegen::ir::CircuitIR::build_device_info_with_mna(
                 &netlist,
@@ -678,6 +678,10 @@ fn compile_circuit_source(
             }
         }
     }
+
+    // NOTE: Internal node expansion for parasitic BJTs is deferred until after
+    // solver routing. The DK path handles parasitics via bjt_with_parasitics() inner NR.
+    // Only the nodal path benefits from MNA-level internal nodes (eliminates inner NR).
 
     // Step 3: Create DK kernel
     // Use augmented MNA for inductor circuits (well-conditioned for large L)
@@ -756,15 +760,36 @@ fn compile_circuit_source(
     let use_nodal_codegen = match solver_override {
         "nodal" => true,
         "dk" => false,
-        _ => has_inductors_compile && n_xfmr_groups > 1, // auto
+        _ => {
+            // Auto-select nodal when:
+            // 1. Multi-transformer circuits (DK K matrix unstable for inter-transformer coupling)
+            // 2. Large M (≥10): M×M Gauss elimination is expensive and NR can diverge.
+            //    Nodal's N×N LU is more robust and often faster when M is large.
+            let multi_xfmr = has_inductors_compile && n_xfmr_groups > 1;
+            let large_m = kernel.m >= 10;
+            multi_xfmr || large_m
+        }
     };
 
     let generated = if use_nodal_codegen {
         println!("  Using nodal solver codegen");
+        // Expand MNA with internal nodes for parasitic BJTs before nodal codegen.
+        // The nodal N×N NR naturally handles the expanded system.
+        {
+            let device_slots = melange_solver::codegen::ir::CircuitIR::build_device_info_with_mna(
+                &netlist, Some(&mna),
+            ).unwrap_or_default();
+            if !device_slots.is_empty() {
+                mna.expand_bjt_internal_nodes(&device_slots);
+            }
+        }
         generator
             .generate_nodal(&mna, &netlist)
             .with_context(|| "Nodal code generation failed")?
     } else {
+        // DK path: do NOT expand internal nodes. The DK kernel is ill-conditioned
+        // with high-conductance parasitic nodes. Instead, bjt_with_parasitics()
+        // inner NR handles parasitics in the generated code.
         if has_inductors_compile {
             println!("  Using DK codegen with augmented MNA for inductors");
         }
@@ -1162,12 +1187,13 @@ fn simulate_circuit_source(
         mna.nonlinear_devices.len()
     );
 
-    // Stamp junction capacitances from device model parameters into MNA C matrix.
-    // Must happen BEFORE kernel build so caps are included in A = G + 2C/T.
+    // Expand MNA with internal nodes for parasitic BJTs, then stamp junction caps.
+    // Must happen BEFORE kernel build so parasitic R and caps are in A = G + 2C/T.
     {
         let device_slots =
             melange_solver::codegen::ir::CircuitIR::build_device_info(&netlist).unwrap_or_default();
         if !device_slots.is_empty() {
+            mna.expand_bjt_internal_nodes(&device_slots);
             mna.stamp_device_junction_caps(&device_slots);
         }
     }
@@ -1884,11 +1910,12 @@ fn analyze_freq_response(
         );
     }
 
-    // Stamp junction capacitances from device model parameters into MNA C matrix.
+    // Expand MNA with internal nodes for parasitic BJTs, then stamp junction caps.
     {
         let device_slots =
             melange_solver::codegen::ir::CircuitIR::build_device_info(&netlist).unwrap_or_default();
         if !device_slots.is_empty() {
+            mna.expand_bjt_internal_nodes(&device_slots);
             mna.stamp_device_junction_caps(&device_slots);
         }
     }
@@ -2424,6 +2451,7 @@ fn build_device_slots(
                         bv: find_param(&model_name, "BV").unwrap_or(f64::INFINITY),
                         ibv: find_param(&model_name, "IBV").unwrap_or(1e-10),
                     }),
+                    has_internal_mna_nodes: false,
                 });
             }
             melange_solver::mna::NonlinearDeviceType::Bjt => {
@@ -2479,6 +2507,7 @@ fn build_device_slots(
                         eg: 1.11,
                         tamb: 300.15,
                     }),
+                    has_internal_mna_nodes: false,
                 });
             }
             melange_solver::mna::NonlinearDeviceType::Jfet => {
@@ -2525,6 +2554,7 @@ fn build_device_slots(
                         rd: find_param(&model_name, "RD").unwrap_or(0.0),
                         rs_param: find_param(&model_name, "RS").unwrap_or(0.0),
                     }),
+                    has_internal_mna_nodes: false,
                 });
             }
             melange_solver::mna::NonlinearDeviceType::Mosfet => {
@@ -2571,6 +2601,7 @@ fn build_device_slots(
                         source_node: 0,
                         bulk_node: 0,
                     }),
+                    has_internal_mna_nodes: false,
                 });
             }
             melange_solver::mna::NonlinearDeviceType::Tube => {
@@ -2615,6 +2646,7 @@ fn build_device_slots(
                         ccp: find_param(&model_name, "CCP").unwrap_or(0.0),
                         rgi: find_param(&model_name, "RGI").unwrap_or(0.0),
                     }),
+                    has_internal_mna_nodes: false,
                 });
             }
             melange_solver::mna::NonlinearDeviceType::BjtForwardActive => {
@@ -2670,6 +2702,7 @@ fn build_device_slots(
                         eg: 1.11,
                         tamb: 300.15,
                     }),
+                    has_internal_mna_nodes: false,
                 });
             }
         }

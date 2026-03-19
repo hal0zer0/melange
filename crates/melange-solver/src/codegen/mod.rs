@@ -196,7 +196,22 @@ impl CodeGenerator {
             )));
         }
 
-        let ir = CircuitIR::from_kernel(kernel, mna, netlist, &self.config)?;
+        self.generate_with_dc_op(kernel, mna, netlist, None)
+    }
+
+    /// Generate Rust solver code with a pre-computed DC operating point.
+    ///
+    /// When `dc_op` is provided, it is used instead of running the internal DC OP solver.
+    /// This is useful when the MNA has been expanded (e.g., with internal nodes for
+    /// parasitic BJTs) after the DC OP was computed on the original system.
+    pub fn generate_with_dc_op(
+        &self,
+        kernel: &DkKernel,
+        mna: &MnaSystem,
+        netlist: &Netlist,
+        dc_op: Option<crate::dc_op::DcOpResult>,
+    ) -> Result<GeneratedCode, CodegenError> {
+        let ir = CircuitIR::from_kernel_with_dc_op(kernel, mna, netlist, &self.config, dc_op)?;
         let code = RustEmitter::new()?.emit(&ir)?;
 
         Ok(GeneratedCode {

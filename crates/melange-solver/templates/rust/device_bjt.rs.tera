@@ -144,6 +144,96 @@ fn bjt_jacobian(vbe: f64, vbc: f64, is: f64, vt: f64, nf: f64,
     [quotient_dvbe, quotient_dvbc - d_bc_term_dvbc, dib_dvbe, dib_dvbc]
 }
 
+/// Combined BJT evaluation: returns (Ic, Ib, [dIc/dVbe, dIc/dVbc, dIb/dVbe, dIb/dVbc]).
+///
+/// Computes exp(Vbe/(NF*VT)) and exp(Vbc/VT) once and shares them across current
+/// and Jacobian calculations. Reduces from 8-10 exp() to 2-3 per evaluation.
+#[inline(always)]
+fn bjt_evaluate(vbe: f64, vbc: f64, is: f64, vt: f64, nf: f64,
+                beta_f: f64, beta_r: f64, sign: f64,
+                use_gp: bool, vaf: f64, var: f64, ikf: f64, ikr: f64,
+                ise: f64, ne: f64) -> (f64, f64, [f64; 4]) {
+    let vbe_eff = sign * vbe;
+    let vbc_eff = sign * vbc;
+    let nf_vt = nf * vt;
+
+    // Shared exponentials (computed once)
+    let exp_be = safe_exp(vbe_eff / nf_vt);
+    let exp_bc = safe_exp(vbc_eff / vt);
+
+    // ISE leakage exponential (computed once, only when needed)
+    let exp_be_leak = if ise > 0.0 {
+        safe_exp(vbe_eff / (ne * vt))
+    } else {
+        0.0
+    };
+
+    // === Collector current ===
+    let i_cc = is * (exp_be - exp_bc);
+
+    // === Base current (not modified by GP) ===
+    let mut ib_raw = is / beta_f * (exp_be - 1.0) + is / beta_r * (exp_bc - 1.0);
+    if ise > 0.0 {
+        ib_raw += ise * (exp_be_leak - 1.0);
+    }
+
+    // === Base current Jacobian ===
+    let mut dib_dvbe = (is / (beta_f * nf_vt)) * exp_be;
+    let dib_dvbc = (is / (beta_r * vt)) * exp_bc;
+    if ise > 0.0 {
+        let ne_vt = ne * vt;
+        dib_dvbe += (ise / ne_vt) * exp_be_leak;
+    }
+
+    if !use_gp {
+        // Ebers-Moll
+        let ic = sign * (i_cc - is / beta_r * (exp_bc - 1.0));
+        let ib = sign * ib_raw;
+        let dic_dvbe = is / nf_vt * exp_be;
+        let dic_dvbc = -(is / vt) * exp_bc - (is / (beta_r * vt)) * exp_bc;
+        return (ic, ib, [dic_dvbe, dic_dvbc, dib_dvbe, dib_dvbc]);
+    }
+
+    // Gummel-Poon
+    // q1 and derivatives
+    let q1_denom = 1.0 - vbe_eff / var - vbc_eff / vaf;
+    let (q1, dq1_dvbe, dq1_dvbc) = if q1_denom.abs() < 1e-30 {
+        (1.0, 0.0, 0.0)
+    } else {
+        let q1 = 1.0 / q1_denom;
+        (q1, q1 * q1 / var, q1 * q1 / vaf)
+    };
+
+    // q2 and derivatives (uses shared exp_be, exp_bc)
+    let q2 = is * exp_be / ikf + is * exp_bc / ikr;
+    let dq2_dvbe = is / (nf_vt * ikf) * exp_be;
+    let dq2_dvbc = is / (vt * ikr) * exp_bc;
+
+    // Discriminant D = sqrt(1 + 4*q2)
+    let disc = (1.0 + 4.0 * q2).max(0.0);
+    let d = disc.sqrt();
+    let dd_dvbe = if d > 1e-15 { 2.0 * dq2_dvbe / d } else { 0.0 };
+    let dd_dvbc = if d > 1e-15 { 2.0 * dq2_dvbc / d } else { 0.0 };
+
+    // qb = q1 * (1 + D) / 2
+    let qb = q1 * (1.0 + d) / 2.0;
+    let dqb_dvbe = dq1_dvbe * (1.0 + d) / 2.0 + q1 * dd_dvbe / 2.0;
+    let dqb_dvbc = dq1_dvbc * (1.0 + d) / 2.0 + q1 * dd_dvbc / 2.0;
+
+    let ic = sign * (i_cc / qb - is / beta_r * (exp_bc - 1.0));
+    let ib = sign * ib_raw;
+
+    // Quotient rule: d(Icc/qb)/dV = (dIcc/dV * qb - Icc * dqb/dV) / qb^2
+    let dicc_dvbe = is / nf_vt * exp_be;
+    let dicc_dvbc = -is / vt * exp_bc;
+    let qb2 = (qb * qb).max(1e-30);
+    let quotient_dvbe = (dicc_dvbe * qb - i_cc * dqb_dvbe) / qb2;
+    let quotient_dvbc = (dicc_dvbc * qb - i_cc * dqb_dvbc) / qb2;
+    let d_bc_term_dvbc = is / (beta_r * vt) * exp_bc;
+
+    (ic, ib, [quotient_dvbe, quotient_dvbc - d_bc_term_dvbc, dib_dvbe, dib_dvbc])
+}
+
 /// BJT with parasitic resistances (RB, RC, RE).
 ///
 /// Given external junction voltages (Vbe_ext, Vbc_ext), solves for internal
@@ -173,9 +263,7 @@ fn bjt_with_parasitics(
     let mut vbc_int = vbc_ext;
 
     for _iter in 0..INNER_MAX_ITER {
-        let ic = bjt_ic(vbe_int, vbc_int, is, vt, nf, beta_r, sign, use_gp, vaf, var, ikf, ikr);
-        let ib = bjt_ib(vbe_int, vbc_int, is, vt, nf, beta_f, beta_r, sign, ise, ne);
-        let jac_int = bjt_jacobian(vbe_int, vbc_int, is, vt, nf, beta_f, beta_r, sign, use_gp, vaf, var, ikf, ikr, ise, ne);
+        let (ic, ib, jac_int) = bjt_evaluate(vbe_int, vbc_int, is, vt, nf, beta_f, beta_r, sign, use_gp, vaf, var, ikf, ikr, ise, ne);
         let dic_dvbe = jac_int[0];
         let dic_dvbc = jac_int[1];
         let dib_dvbe = jac_int[2];
@@ -212,9 +300,7 @@ fn bjt_with_parasitics(
     }
 
     // Final evaluation at converged internal voltages
-    let ic = bjt_ic(vbe_int, vbc_int, is, vt, nf, beta_r, sign, use_gp, vaf, var, ikf, ikr);
-    let ib = bjt_ib(vbe_int, vbc_int, is, vt, nf, beta_f, beta_r, sign, ise, ne);
-    let jac_int = bjt_jacobian(vbe_int, vbc_int, is, vt, nf, beta_f, beta_r, sign, use_gp, vaf, var, ikf, ikr, ise, ne);
+    let (ic, ib, jac_int) = bjt_evaluate(vbe_int, vbc_int, is, vt, nf, beta_f, beta_r, sign, use_gp, vaf, var, ikf, ikr, ise, ne);
 
     // External Jacobian: J_ext = J_device * J_F^{-1}
     // J_F = [[j11, j12], [j21, j22]] (recompute at converged point)

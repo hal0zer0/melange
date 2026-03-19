@@ -846,6 +846,7 @@ fn build_device_slots_from_netlist(
                         bv: f64::INFINITY,
                         ibv: 1e-10,
                     }),
+                    has_internal_mna_nodes: false,
                 });
                 dim_offset += 1;
             }
@@ -888,6 +889,7 @@ fn build_device_slots_from_netlist(
                         eg: 1.11,
                         tamb: 300.15,
                     }),
+                    has_internal_mna_nodes: false,
                 });
                 dim_offset += 2;
             }

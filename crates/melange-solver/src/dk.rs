@@ -633,19 +633,30 @@ impl DkKernel {
         let n_v = flatten_matrix(&n_v_2d, m, n);
         let n_i = flatten_matrix(&n_i_2d, n, m);
 
-        // Build A_neg = (2/T)*C - G, zeroing VS/VCVS rows only (not inductor rows)
+        // Build A_neg = (2/T)*C - G, zeroing VS/VCVS/ideal-transformer rows only.
+        // Internal BJT nodes and inductor branch rows are NOT zeroed (they need history).
         let mut a_neg_2d = vec![vec![0.0; n]; n];
         for i in 0..n {
             for j in 0..n {
                 a_neg_2d[i][j] = alpha * c_nod[i][j] - g_nod[i][j];
             }
         }
-        if n_aug > n_nodes {
-            for i in n_nodes..n_aug {
-                for j in 0..n {
-                    a_neg_2d[i][j] = 0.0;
-                }
+        // Zero algebraic constraint rows (VS, VCVS, ideal transformers)
+        for vs in &mna.voltage_sources {
+            let row = n_nodes + vs.ext_idx;
+            if row < n {
+                for j in 0..n { a_neg_2d[row][j] = 0.0; }
             }
+        }
+        let num_vs = mna.voltage_sources.len();
+        for (vcvs_idx, _) in mna.vcvs_sources.iter().enumerate() {
+            let row = n_nodes + num_vs + vcvs_idx;
+            if row < n { for j in 0..n { a_neg_2d[row][j] = 0.0; } }
+        }
+        let num_vcvs = mna.vcvs_sources.len();
+        for (xfmr_idx, _) in mna.ideal_transformers.iter().enumerate() {
+            let row = n_nodes + num_vs + num_vcvs + xfmr_idx;
+            if row < n { for j in 0..n { a_neg_2d[row][j] = 0.0; } }
         }
         let a_neg = flatten_matrix(&a_neg_2d, n, n);
 

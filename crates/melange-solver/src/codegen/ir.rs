@@ -85,8 +85,8 @@ pub struct Topology {
     pub num_devices: usize,
     /// Boundary between VS/VCVS rows and inductor branch variables.
     /// Equal to mna.n_aug (= n_nodes + num_vs + num_vcvs).
-    /// When augmented_inductors is true, A_neg rows n_nodes..n_aug should be zeroed,
-    /// but inductor rows n_aug..n should NOT be zeroed.
+    /// A_neg rows for VS/VCVS algebraic constraints (at n_nodes + vs.ext_idx etc.)
+    /// should be zeroed. Inductor rows (n_aug..n) and internal BJT node rows should NOT.
     #[serde(default)]
     pub n_aug: usize,
     /// True when inductors use augmented MNA (branch current variables in G/C)
@@ -482,6 +482,10 @@ pub struct DeviceSlot {
     pub dimension: usize,
     /// Per-device resolved parameters (from `.model` directive or defaults)
     pub params: DeviceParams,
+    /// True if parasitic R is handled via MNA internal nodes (not inner NR loop).
+    /// When true, codegen emits direct bjt_evaluate() instead of bjt_with_parasitics().
+    #[serde(default)]
+    pub has_internal_mna_nodes: bool,
 }
 
 /// JFET model parameters (resolved from `.model` directive or defaults).
@@ -864,6 +868,22 @@ impl CircuitIR {
         netlist: &Netlist,
         config: &CodegenConfig,
     ) -> Result<Self, CodegenError> {
+        Self::from_kernel_with_dc_op(kernel, mna, netlist, config, None)
+    }
+
+    /// Build CircuitIR from DK kernel with an optional pre-computed DC operating point.
+    ///
+    /// When `dc_op_result` is provided, it is used instead of running the DC OP solver.
+    /// This is useful when the MNA has been expanded with internal nodes after the DC OP
+    /// was computed on the original (unexpanded) MNA — the DC OP converges better on
+    /// the smaller system.
+    pub fn from_kernel_with_dc_op(
+        kernel: &DkKernel,
+        mna: &MnaSystem,
+        netlist: &Netlist,
+        config: &CodegenConfig,
+        dc_op_result: Option<dc_op::DcOpResult>,
+    ) -> Result<Self, CodegenError> {
         let n = kernel.n; // = n_aug (system dimension)
         let n_nodes = kernel.n_nodes; // original circuit node count
         let m = kernel.m;
@@ -1005,15 +1025,23 @@ impl CircuitIR {
                 }
             }
 
-            // Zero VS/VCVS algebraic rows in A_neg (NOT inductor rows).
-            // These have no capacitance and no history — rhs_const provides V_dc directly.
-            let a_neg_zero_end = if augmented_inductors { mna.n_aug } else { n };
-            if n_nodes < a_neg_zero_end {
-                for i in n_nodes..a_neg_zero_end {
-                    for j in 0..n {
-                        a_neg_flat[i * n + j] = 0.0;
-                    }
+            // Zero VS/VCVS/ideal-transformer algebraic rows in A_neg (NOT inductor
+            // rows or internal BJT node rows — they need trapezoidal history).
+            for vs in &mna.voltage_sources {
+                let row = n_nodes + vs.ext_idx;
+                if row < n {
+                    for j in 0..n { a_neg_flat[row * n + j] = 0.0; }
                 }
+            }
+            let num_vs = mna.voltage_sources.len();
+            for (vcvs_idx, _) in mna.vcvs_sources.iter().enumerate() {
+                let row = n_nodes + num_vs + vcvs_idx;
+                if row < n { for j in 0..n { a_neg_flat[row * n + j] = 0.0; } }
+            }
+            let num_vcvs = mna.vcvs_sources.len();
+            for (xfmr_idx, _) in mna.ideal_transformers.iter().enumerate() {
+                let row = n_nodes + num_vs + num_vcvs + xfmr_idx;
+                if row < n { for j in 0..n { a_neg_flat[row * n + j] = 0.0; } }
             }
 
             // Invert A to get S
@@ -1219,18 +1247,25 @@ impl CircuitIR {
 
         let has_dc_sources = kernel.rhs_const.iter().any(|&v| v != 0.0);
 
-        // Use nonlinear DC OP solver (falls back to linear for M=0)
-        let dc_op_config = DcOpConfig {
-            tolerance: config.dc_op_tolerance,
-            max_iterations: config.dc_op_max_iterations,
-            input_node: config.input_node,
-            input_resistance: config.input_resistance,
-            ..DcOpConfig::default()
+        // Use pre-computed DC OP if available, otherwise run solver.
+        // Pre-computed DC OP is used when the MNA has been expanded with internal
+        // nodes — the solver converges better on the original (unexpanded) system.
+        let dc_result = if let Some(pre) = dc_op_result {
+            pre
+        } else {
+            let dc_op_config = DcOpConfig {
+                tolerance: config.dc_op_tolerance,
+                max_iterations: config.dc_op_max_iterations,
+                input_node: config.input_node,
+                input_resistance: config.input_resistance,
+                ..DcOpConfig::default()
+            };
+            dc_op::solve_dc_operating_point(mna, &device_slots, &dc_op_config)
         };
-        let dc_result = dc_op::solve_dc_operating_point(mna, &device_slots, &dc_op_config);
         // Check DC OP significance on the truncated vector (n_aug), not the full
         // n_dc vector which includes inductor branch currents.
-        let dc_op_truncated = &dc_result.v_node[..kernel.n];
+        let dc_op_len = dc_result.v_node.len();
+        let dc_op_truncated = &dc_result.v_node[..kernel.n.min(dc_op_len)];
         let has_dc_op = dc_op_truncated.iter().any(|&v| v.abs() > 1e-15);
         let dc_op_converged = dc_result.converged;
         let dc_nl_currents = dc_result.i_nl.clone();
@@ -1264,12 +1299,13 @@ impl CircuitIR {
             // but the kernel dimension is n_nodal = n_aug + n_inductor_vars.
             // Pad with zeros for inductor branch currents (DC OP doesn't solve them).
             // For companion model, truncate to kernel.n (= n_aug).
-            dc_operating_point: if augmented_inductors {
+            dc_operating_point: {
+                // DC OP may return fewer nodes than kernel.n (e.g., when computed
+                // on unexpanded MNA before internal node expansion). Pad with zeros.
                 let mut dc = dc_result.v_node.clone();
-                dc.resize(kernel.n, 0.0); // pad with zeros for inductor branch currents
+                dc.resize(kernel.n, 0.0);
+                dc.truncate(kernel.n);
                 dc
-            } else {
-                dc_result.v_node[..kernel.n].to_vec()
             },
             device_slots,
             has_dc_sources,
@@ -1357,10 +1393,21 @@ impl CircuitIR {
                 a_neg_flat[i * n + j] = alpha * c - g;
             }
         }
-        // Zero VS/VCVS algebraic rows in A_neg (NOT inductor rows)
-        for i in n_nodes..n_aug {
-            for j in 0..n {
-                a_neg_flat[i * n + j] = 0.0;
+        // Zero VS/VCVS/ideal-transformer algebraic rows in A_neg (NOT inductor or internal node rows)
+        {
+            let num_vs = mna.voltage_sources.len();
+            let num_vcvs = mna.vcvs_sources.len();
+            for vs in &mna.voltage_sources {
+                let row = n_nodes + vs.ext_idx;
+                if row < n { for j in 0..n { a_neg_flat[row * n + j] = 0.0; } }
+            }
+            for (idx, _) in mna.vcvs_sources.iter().enumerate() {
+                let row = n_nodes + num_vs + idx;
+                if row < n { for j in 0..n { a_neg_flat[row * n + j] = 0.0; } }
+            }
+            for (idx, _) in mna.ideal_transformers.iter().enumerate() {
+                let row = n_nodes + num_vs + num_vcvs + idx;
+                if row < n { for j in 0..n { a_neg_flat[row * n + j] = 0.0; } }
             }
         }
 
@@ -1375,9 +1422,21 @@ impl CircuitIR {
                 a_neg_be_flat[i * n + j] = alpha_be * c;
             }
         }
-        for i in n_nodes..n_aug {
-            for j in 0..n {
-                a_neg_be_flat[i * n + j] = 0.0;
+        // Zero same algebraic rows in A_neg_be
+        {
+            let num_vs = mna.voltage_sources.len();
+            let num_vcvs = mna.vcvs_sources.len();
+            for vs in &mna.voltage_sources {
+                let row = n_nodes + vs.ext_idx;
+                if row < n { for j in 0..n { a_neg_be_flat[row * n + j] = 0.0; } }
+            }
+            for (idx, _) in mna.vcvs_sources.iter().enumerate() {
+                let row = n_nodes + num_vs + idx;
+                if row < n { for j in 0..n { a_neg_be_flat[row * n + j] = 0.0; } }
+            }
+            for (idx, _) in mna.ideal_transformers.iter().enumerate() {
+                let row = n_nodes + num_vs + num_vcvs + idx;
+                if row < n { for j in 0..n { a_neg_be_flat[row * n + j] = 0.0; } }
             }
         }
 
@@ -1454,8 +1513,11 @@ impl CircuitIR {
             input_resistance: config.input_resistance,
             ..DcOpConfig::default()
         };
+        // Build device info with MNA so FA reductions are reflected in dimensions
+        let mut device_slots = Self::build_device_info_with_mna(netlist, Some(mna))?;
+
         let dc_result =
-            dc_op::solve_dc_operating_point(mna, &Self::build_device_info(netlist)?, &dc_op_config);
+            dc_op::solve_dc_operating_point(mna, &device_slots, &dc_op_config);
         let dc_op_truncated = &dc_result.v_node[..n_aug.min(dc_result.v_node.len())];
         let has_dc_op = dc_op_truncated.iter().any(|&v| v.abs() > 1e-15);
         let dc_op_converged = dc_result.converged;
@@ -1465,8 +1527,6 @@ impl CircuitIR {
         // Pad DC OP to n_nodal (inductor branch currents = 0)
         let mut dc_operating_point = dc_result.v_node.clone();
         dc_operating_point.resize(n, 0.0);
-
-        let mut device_slots = Self::build_device_info_with_mna(netlist, Some(mna))?;
         Self::resolve_mosfet_nodes(&mut device_slots, mna);
 
         // Sparsity analysis (K is now computed for Schur complement NR)
@@ -1632,6 +1692,7 @@ impl CircuitIR {
                         start_idx: dim_offset,
                         dimension: 1,
                         params: DeviceParams::Diode(params),
+                        has_internal_mna_nodes: false,
                     });
                     dim_offset += 1;
                     nl_dev_idx += 1;
@@ -1654,6 +1715,7 @@ impl CircuitIR {
                         start_idx: dim_offset,
                         dimension: dim,
                         params: DeviceParams::Bjt(params),
+                        has_internal_mna_nodes: false,
                     });
                     dim_offset += dim;
                     nl_dev_idx += 1;
@@ -1665,6 +1727,7 @@ impl CircuitIR {
                         start_idx: dim_offset,
                         dimension: 2,
                         params: DeviceParams::Jfet(params),
+                        has_internal_mna_nodes: false,
                     });
                     dim_offset += 2;
                     nl_dev_idx += 1;
@@ -1676,6 +1739,7 @@ impl CircuitIR {
                         start_idx: dim_offset,
                         dimension: 2,
                         params: DeviceParams::Tube(params),
+                        has_internal_mna_nodes: false,
                     });
                     dim_offset += 2;
                     nl_dev_idx += 1;
@@ -1687,11 +1751,23 @@ impl CircuitIR {
                         start_idx: dim_offset,
                         dimension: 2,
                         params: DeviceParams::Mosfet(params),
+                        has_internal_mna_nodes: false,
                     });
                     dim_offset += 2;
                     nl_dev_idx += 1;
                 }
                 _ => {}
+            }
+        }
+
+        // Mark BJTs with MNA-level internal nodes
+        if let Some(m) = mna {
+            for slot in &mut slots {
+                if slot.device_type == DeviceType::Bjt {
+                    if m.bjt_internal_nodes.iter().any(|n| n.start_idx == slot.start_idx) {
+                        slot.has_internal_mna_nodes = true;
+                    }
+                }
             }
         }
 
