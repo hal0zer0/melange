@@ -2103,11 +2103,13 @@ impl RustEmitter {
         }
         code.push_str("        if needs_rebuild {\n");
         code.push_str("            state.rebuild_matrices();\n");
-        code.push_str("            // After rebuild, the caller is responsible for settling the\n");
-        code.push_str("            // circuit to the new DC operating point. For slowly-varying\n");
-        code.push_str("            // pots (tremolo), the per-sample changes are small enough\n");
-        code.push_str("            // that v_prev tracks naturally. For instantaneous jumps,\n");
-        code.push_str("            // the caller should process silent samples before audio.\n");
+        code.push_str("            // Don't re-init v_prev — keep the current DC state and let\n");
+        code.push_str("            // the trapezoidal integration track to the new OP naturally.\n");
+        code.push_str("            // The linear DC prediction (S * RHS_CONST) causes metastable\n");
+        code.push_str("            // convergence at extreme pot values. Keeping v_prev works if\n");
+        code.push_str("            // the pot change is incremental (smooth modulation). For\n");
+        code.push_str("            // instantaneous jumps, the caller should ramp the pot value.\n");
+        code.push_str("            state.i_nl_prev_prev = state.i_nl_prev;\n");
         code.push_str("        }\n");
         code.push_str("    }\n");
         code
