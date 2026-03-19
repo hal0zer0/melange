@@ -14,6 +14,7 @@ use crate::mna::{MnaSystem, inject_rhs_current};
 use melange_devices::bjt::{BjtEbersMoll, BjtGummelPoon, BjtPolarity};
 use melange_devices::diode::DiodeShockley;
 use melange_devices::tube::KorenTriode;
+use melange_primitives::nr::{pn_vcrit, pnjlim};
 
 /// Configuration for the DC operating point solver.
 #[derive(Debug, Clone)]
@@ -41,7 +42,7 @@ impl Default for DcOpConfig {
         Self {
             tolerance: 1e-9,
             max_iterations: 200,
-            source_steps: 10,
+            source_steps: 50,
             gmin_start: 1e-2,
             gmin_end: 1e-12,
             gmin_steps: 10,
@@ -135,26 +136,43 @@ pub fn evaluate_devices(
                 let vbe = v_nl[s];
                 let vbc = v_nl[s + 1];
 
+                // If the BJT has parasitic resistances, iteratively estimate
+                // internal junction voltages. 3 inner iterations suffice for the
+                // DC OP (the transient solver's inner NR refines further).
+                let (vbe_int, vbc_int) = if bp.has_parasitics() {
+                    let mut vbe_i = vbe;
+                    let mut vbc_i = vbc;
+                    for _ in 0..3 {
+                        let ic = em.collector_current(vbe_i, vbc_i);
+                        let ib = em.base_current(vbe_i, vbc_i);
+                        vbe_i = vbe - ib * bp.rb - (ic + ib) * bp.re;
+                        vbc_i = vbc - ib * bp.rb + ic * bp.rc;
+                    }
+                    (vbe_i, vbc_i)
+                } else {
+                    (vbe, vbc)
+                };
+
                 if bp.is_gummel_poon() {
                     // Gummel-Poon model (Early effect + high injection)
                     let gp = BjtGummelPoon::new(em, bp.vaf, bp.var, bp.ikf, bp.ikr);
                     use melange_devices::NonlinearDevice;
-                    i_nl[s] = gp.collector_current(vbe, vbc);
-                    i_nl[s + 1] = em.base_current(vbe, vbc); // base current unchanged by GP
-                    let jac = gp.jacobian(&[vbe, vbc]);
+                    i_nl[s] = gp.collector_current(vbe_int, vbc_int);
+                    i_nl[s + 1] = em.base_current(vbe_int, vbc_int);
+                    let jac = gp.jacobian(&[vbe_int, vbc_int]);
                     j_dev[s * m + s] = jac[0]; // dIc/dVbe
                     j_dev[s * m + (s + 1)] = jac[1]; // dIc/dVbc
-                    j_dev[(s + 1) * m + s] = em.base_current_jacobian_dvbe(vbe, vbc);
-                    j_dev[(s + 1) * m + (s + 1)] = em.base_current_jacobian_dvbc(vbe, vbc);
+                    j_dev[(s + 1) * m + s] = em.base_current_jacobian_dvbe(vbe_int, vbc_int);
+                    j_dev[(s + 1) * m + (s + 1)] = em.base_current_jacobian_dvbc(vbe_int, vbc_int);
                 } else {
                     // Standard Ebers-Moll
-                    i_nl[s] = em.collector_current(vbe, vbc);
-                    i_nl[s + 1] = em.base_current(vbe, vbc);
-                    let (dic_dvbe, dic_dvbc) = em.collector_jacobian(vbe, vbc);
+                    i_nl[s] = em.collector_current(vbe_int, vbc_int);
+                    i_nl[s + 1] = em.base_current(vbe_int, vbc_int);
+                    let (dic_dvbe, dic_dvbc) = em.collector_jacobian(vbe_int, vbc_int);
                     j_dev[s * m + s] = dic_dvbe;
                     j_dev[s * m + (s + 1)] = dic_dvbc;
-                    j_dev[(s + 1) * m + s] = em.base_current_jacobian_dvbe(vbe, vbc);
-                    j_dev[(s + 1) * m + (s + 1)] = em.base_current_jacobian_dvbc(vbe, vbc);
+                    j_dev[(s + 1) * m + s] = em.base_current_jacobian_dvbe(vbe_int, vbc_int);
+                    j_dev[(s + 1) * m + (s + 1)] = em.base_current_jacobian_dvbc(vbe_int, vbc_int);
                 }
             }
             (DeviceType::Jfet, DeviceParams::Jfet(jp)) => {
@@ -481,6 +499,10 @@ fn clamp_junction_voltages(
                     continue;
                 }
 
+                // Determine PNP vs NPN. For PNP, forward-active Vbe < 0.
+                let is_pnp = matches!(&slot.params, DeviceParams::Bjt(bp) if bp.is_pnp);
+                let sign: f64 = if is_pnp { -1.0 } else { 1.0 };
+
                 // Find base and emitter nodes from Vbe N_v row
                 let nv_vbe = &mna.n_v[vbe_idx];
                 let mut base_node = None;
@@ -494,9 +516,9 @@ fn clamp_junction_voltages(
                     }
                 }
 
-                // Set emitter so Vbe = 0.65V
+                // Set emitter so Vbe = sign * 0.65V (positive for NPN, negative for PNP)
                 if let (Some(b), Some(e)) = (base_node, emitter_node) {
-                    let new_ve = v[b] - 0.65;
+                    let new_ve = v[b] - sign * 0.65;
                     if (v[e] - new_ve).abs() > 0.1 {
                         v[e] = new_ve;
                     }
@@ -512,13 +534,21 @@ fn clamp_junction_voltages(
                         }
                     }
 
-                    // Set collector for forward-active mode: Vbc < 0 (reverse biased).
-                    // Place collector at base + 30% of (V_supply - V_base).
+                    // Set collector for forward-active mode: Vbc reverse biased.
+                    // NPN: collector ABOVE base (Vbc < 0). PNP: collector BELOW base (Vbc > 0).
                     if let (Some(b), Some(c)) = (base_node, collector_node) {
                         let vbc = v[b] - v[c];
-                        if vbc > -0.5 {
-                            let v_supply = v.iter().take(mna.n).cloned().fold(0.0_f64, f64::max);
-                            v[c] = v[b] + (v_supply - v[b]) * 0.3;
+                        let need_adjust = if is_pnp { vbc < 0.5 } else { vbc > -0.5 };
+                        if need_adjust {
+                            if is_pnp {
+                                // PNP: collector below base. Find lowest voltage as "ground".
+                                let v_ground = v.iter().take(mna.n).cloned().fold(f64::MAX, f64::min);
+                                v[c] = v[b] - (v[b] - v_ground) * 0.3;
+                            } else {
+                                // NPN: collector above base. Find highest voltage as supply.
+                                let v_supply = v.iter().take(mna.n).cloned().fold(0.0_f64, f64::max);
+                                v[c] = v[b] + (v_supply - v[b]) * 0.3;
+                            }
                         }
                     }
                 }
@@ -650,17 +680,18 @@ fn nr_dc_solve(
         }
 
         // 4. Build companion RHS: rhs = b_dc_scaled + N_i · (i_nl - J_dev · v_nl)
-        //    For augmented rows (VS/VCVS constraints), source_scale applies only to
-        //    the node-row current sources. VS constraint rows (b_dc[k] = V_dc) must
-        //    be fully enforced regardless of scale (they are not "sources" being ramped).
-        //    We apply source_scale only to node rows (0..n) but keep constraint rows exact.
+        //    Source stepping scales ALL sources (both current sources in node rows AND
+        //    voltage source constraints in augmented rows). This ramps the supply from
+        //    0V to full, letting BJTs gradually turn on at each step.
+        //    Inductor short-circuit constraints (V=0) are unaffected by scaling.
         let n = mna.n;
-        for i in 0..n {
+        let n_aug = mna.n_aug;
+        for i in 0..n_aug {
             rhs[i] = b_dc[i] * source_scale;
         }
-        // VS/VCVS/inductor constraint rows are always fully applied (not scaled)
-        for i in n..n_dc {
-            rhs[i] = b_dc[i];
+        // Inductor short-circuit constraints (V=0): always zero, scaling is no-op
+        for i in n_aug..n_dc {
+            rhs[i] = b_dc[i]; // b_dc[i] = 0 for inductor constraints
         }
 
         // Compute companion current: i_companion = i_nl - J_dev · v_nl
@@ -693,23 +724,107 @@ fn nr_dc_solve(
         };
 
         // 6. Voltage limiting and convergence check.
-        //    Use a flat clamp with a generous limit. The logarithmic limiter is
-        //    too aggressive for tube circuits where controlling voltages are in
-        //    the tens-of-volts range (not millivolts like PN junctions).
-        //    50V per step allows fast convergence while preventing wild oscillation.
+        //    Apply SPICE pnjlim to PN junction dimensions, global node damping
+        //    for large updates, and a generous flat clamp for non-junction nodes.
+
+        // First, apply pnjlim to PN junction controlling voltages.
+        // Extract old and new v_nl to apply junction-aware limiting.
+        let mut v_nl_new = vec![0.0; m];
+        for (i, v_nl_new_i) in v_nl_new.iter_mut().enumerate().take(m) {
+            *v_nl_new_i = mna.n_v[i]
+                .iter()
+                .zip(v_new.iter())
+                .map(|(nv, vi)| nv * vi)
+                .sum();
+        }
+
+        // Apply pnjlim per PN junction dimension, accumulate corrections
+        // into node voltages via N_v^T (pseudo-inverse: just distribute back).
+        let mut pn_corrections = vec![0.0; n_dc];
+        for slot in device_slots {
+            match (&slot.device_type, &slot.params) {
+                (DeviceType::Diode, DeviceParams::Diode(dp)) => {
+                    let idx = slot.start_idx;
+                    let vt = dp.n_vt; // pre-multiplied n*Vt
+                    let vcrit = pn_vcrit(vt, dp.is);
+                    let v_old = v_nl[idx];
+                    let v_raw = v_nl_new[idx];
+                    let v_lim = pnjlim(v_raw, v_old, vt, vcrit);
+                    if (v_lim - v_raw).abs() > 1e-15 {
+                        let correction = v_lim - v_raw;
+                        for j in 0..n_mna {
+                            pn_corrections[j] += mna.n_v[idx][j] * correction;
+                        }
+                    }
+                }
+                (DeviceType::Bjt, DeviceParams::Bjt(bp))
+                | (DeviceType::BjtForwardActive, DeviceParams::Bjt(bp)) => {
+                    let vt = bp.nf * bp.vt;
+                    let vcrit = pn_vcrit(vt, bp.is);
+                    // Vbe dimension
+                    let be_idx = slot.start_idx;
+                    let sign = if bp.is_pnp { -1.0 } else { 1.0 };
+                    let v_old_be = sign * v_nl[be_idx];
+                    let v_raw_be = sign * v_nl_new[be_idx];
+                    let v_lim_be = pnjlim(v_raw_be, v_old_be, vt, vcrit);
+                    if (v_lim_be - v_raw_be).abs() > 1e-15 {
+                        let correction = sign * (v_lim_be - v_raw_be);
+                        for j in 0..n_mna {
+                            pn_corrections[j] += mna.n_v[be_idx][j] * correction;
+                        }
+                    }
+                    // Vbc dimension (if 2D)
+                    if slot.dimension > 1 {
+                        let bc_idx = slot.start_idx + 1;
+                        let v_old_bc = sign * v_nl[bc_idx];
+                        let v_raw_bc = sign * v_nl_new[bc_idx];
+                        let v_lim_bc = pnjlim(v_raw_bc, v_old_bc, vt, vcrit);
+                        if (v_lim_bc - v_raw_bc).abs() > 1e-15 {
+                            let correction = sign * (v_lim_bc - v_raw_bc);
+                            for j in 0..n_mna {
+                                pn_corrections[j] += mna.n_v[bc_idx][j] * correction;
+                            }
+                        }
+                    }
+                }
+                _ => {} // FETs and tubes: no PN junction limiting needed
+            }
+        }
+
+        // Apply pnjlim corrections to v_new
+        let v_limited: Vec<f64> = v_new.iter()
+            .zip(pn_corrections.iter())
+            .map(|(&vn, &corr)| vn + corr)
+            .collect();
+
+        // Global node voltage damping: if max change > 10V, scale all node updates
         let v_max_step = 50.0;
         let mut max_delta = 0.0_f64;
+        for i in 0..n {
+            let delta = (v_limited[i] - v[i]).abs();
+            max_delta = max_delta.max(delta);
+        }
+        let damping = if max_delta > 10.0 {
+            (10.0 / max_delta).max(0.1)
+        } else {
+            1.0
+        };
+
+        let mut final_max_delta = 0.0_f64;
         for i in 0..n_dc {
-            let delta = v_new[i] - v[i];
+            let delta = v_limited[i] - v[i];
             let limited = if i < n {
-                delta.clamp(-v_max_step, v_max_step)
+                // Node voltages: apply damping + flat clamp
+                let damped = delta * damping;
+                damped.clamp(-v_max_step, v_max_step)
             } else {
-                // Augmented variables (VS currents): apply directly without limiting
+                // Augmented variables (VS currents, inductor currents): apply directly
                 delta
             };
             v[i] += limited;
-            max_delta = max_delta.max(limited.abs());
+            final_max_delta = final_max_delta.max(limited.abs());
         }
+        let max_delta = final_max_delta;
 
         if max_delta < config.tolerance {
             // Final evaluation at converged point
@@ -779,7 +894,33 @@ pub fn solve_dc_operating_point(
 
     // Strategy 1: Direct NR from junction-clamped linear guess
     let (converged, iters) = nr_dc_solve(&circuit, &mut v, &mut v_nl, &mut i_nl, 1.0, 0.0);
-    if converged {
+    // Sanity check: verify the solution isn't degenerate (all nodes at supply rails).
+    // A degenerate solution has all BJTs off — check that at least one junction is forward-biased.
+    let mut has_active_junction = m == 0; // linear circuits are always OK
+    if converged && m > 0 {
+        for slot in device_slots {
+            match &slot.params {
+                DeviceParams::Bjt(bp) => {
+                    let vbe = v_nl[slot.start_idx];
+                    let sign = if bp.is_pnp { -1.0 } else { 1.0 };
+                    // Forward-biased junction: |Vbe| > 0.3V
+                    if (sign * vbe) > 0.3 {
+                        has_active_junction = true;
+                        break;
+                    }
+                }
+                DeviceParams::Diode(_) => {
+                    if v_nl[slot.start_idx].abs() > 0.3 {
+                        has_active_junction = true;
+                        break;
+                    }
+                }
+                _ => { has_active_junction = true; break; } // non-BJT devices: trust the result
+            }
+        }
+    }
+    log::info!("DC OP Strategy 1 (Direct NR): converged={} iters={} active_junctions={}", converged, iters, has_active_junction);
+    if converged && has_active_junction {
         return DcOpResult {
             v_node: v,
             v_nl,
@@ -806,6 +947,7 @@ pub fn solve_dc_operating_point(
         }
     }
 
+    log::info!("DC OP Strategy 2 (Source stepping, {} steps): converged={} iters={}", config.source_steps, source_stepping_converged, total_iters);
     if source_stepping_converged {
         return DcOpResult {
             v_node: v,
@@ -839,6 +981,7 @@ pub fn solve_dc_operating_point(
         }
     }
 
+    log::info!("DC OP Strategy 3 (Gmin stepping): converged={} iters={}", gmin_converged, total_iters);
     // Final solve without Gmin
     if gmin_converged {
         let (converged, iters) = nr_dc_solve(&circuit, &mut v, &mut v_nl, &mut i_nl, 1.0, 0.0);
