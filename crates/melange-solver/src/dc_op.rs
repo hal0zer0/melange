@@ -951,8 +951,27 @@ pub fn solve_dc_operating_point(
         }
     }
 
-    log::info!("DC OP Strategy 2 (Source stepping, {} steps): converged={} iters={}", config.source_steps, source_stepping_converged, total_iters);
-    if source_stepping_converged {
+    // Apply the same degenerate check to source stepping result
+    let mut ss_has_active = m == 0;
+    if source_stepping_converged && m > 0 {
+        extract_nl_voltages(mna, &v, &mut v_nl);
+        for slot in device_slots {
+            if let DeviceParams::Bjt(bp) = &slot.params {
+                if slot.start_idx < v_nl.len() {
+                    let sign = if bp.is_pnp { -1.0 } else { 1.0 };
+                    if (sign * v_nl[slot.start_idx]) > 0.3 {
+                        ss_has_active = true;
+                        break;
+                    }
+                }
+            } else {
+                ss_has_active = true;
+                break;
+            }
+        }
+    }
+    log::info!("DC OP Strategy 2 (Source stepping, {} steps): converged={} active={} iters={}", config.source_steps, source_stepping_converged, ss_has_active, total_iters);
+    if source_stepping_converged && ss_has_active {
         return DcOpResult {
             v_node: v,
             v_nl,
@@ -965,7 +984,11 @@ pub fn solve_dc_operating_point(
 
     // Strategy 3: Gmin stepping
     // Add large conductance across nonlinear devices, then ramp down
-    let mut v = v_linear.clone(); // Start from linear guess
+    // Start Gmin from the clamped guess (better for BJT circuits than raw linear).
+    // Source stepping may have found a degenerate solution; Gmin from the clamped
+    // guess has a better chance of finding the active OP because the junction
+    // voltages are pre-set to reasonable values.
+    let mut v = clamp_junction_voltages(mna, device_slots, &v_linear);
     let mut total_iters = 0;
     let mut gmin_converged = true;
 

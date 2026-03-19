@@ -406,13 +406,15 @@ fn run_crossval(
 // Cross-validation tests
 // ============================================================================
 
-/// Diode clipper: codegen vs runtime should match to < 1e-6.
+/// Diode clipper: codegen vs runtime should match to < 5e-6.
+/// (Tolerance relaxed: codegen uses per-device alpha + RELTOL convergence,
+/// runtime uses scalar alpha + flat TOL — slight convergence point difference.)
 #[test]
 fn test_codegen_vs_runtime_diode_clipper() {
     let (max_diff, _) = run_crossval(DIODE_CLIPPER, 2.0, 480, 10, "diode");
     assert!(
-        max_diff < 1e-6,
-        "Diode clipper: codegen vs runtime max diff = {:.2e} (expected < 1e-6)",
+        max_diff < 5e-6,
+        "Diode clipper: codegen vs runtime max diff = {:.2e} (expected < 5e-6)",
         max_diff
     );
 }

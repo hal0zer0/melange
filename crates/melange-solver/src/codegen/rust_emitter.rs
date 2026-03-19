@@ -2672,8 +2672,11 @@ fn emit_nr_limit_and_converge(
         code.push_str(");\n");
     }
 
-    // Compute scalar damping factor from per-device limiting
-    code.push_str(&format!("{indent}let mut alpha = 1.0_f64;\n"));
+    // Compute per-dimension damping factor from per-device limiting
+    code.push_str(&format!(
+        "{indent}let mut alpha = [1.0_f64; {dim}];\n"
+    ));
+    code.push_str(&format!("{indent}let mut any_limited = false;\n"));
     for (dev_num, slot) in ir.device_slots.iter().enumerate() {
         for d in 0..slot.dimension {
             let i = slot.start_idx + d;
@@ -2730,36 +2733,62 @@ fn emit_nr_limit_and_converge(
                 "{indent}    let ratio = ((v_lim - v_d{i}) / dv{i}).max(0.01);\n"
             ));
             code.push_str(&format!(
-                "{indent}    if ratio < alpha {{ alpha = ratio; }}\n"
+                "{indent}    if ratio < alpha[{i}] {{ alpha[{i}] = ratio; if ratio < 1.0 {{ any_limited = true; }} }}\n"
             ));
             code.push_str(&format!("{indent}}}\n"));
         }
     }
 
-    // Apply damped step
-    for i in 0..dim {
-        code.push_str(&format!("{indent}i_nl[{i}] -= alpha * delta{i};\n"));
+    // Enforce per-device grouping: both dims of a 2D device share the minimum alpha
+    for slot in &ir.device_slots {
+        if slot.dimension > 1 {
+            let s = slot.start_idx;
+            let s1 = s + 1;
+            code.push_str(&format!(
+                "{indent}{{ let dev_alpha = alpha[{s}].min(alpha[{s1}]); alpha[{s}] = dev_alpha; alpha[{s1}] = dev_alpha; }}\n"
+            ));
+        }
     }
 
-    // Convergence check on actual step taken
+    // Global voltage backstop: no device voltage changes by more than 3.5V
     code.push_str(&format!(
-        "\n{indent}// Convergence check (max-norm on actual step)\n"
+        "{indent}// Global voltage backstop: limit max voltage change to 3.5V\n"
     ));
-    code.push_str(&format!("{indent}if "));
+    code.push_str(&format!("{indent}let max_dv = "));
     for i in 0..dim {
         if i > 0 {
-            code.push_str(".max(");
-        }
-        code.push_str(&format!("(alpha * delta{i}).abs()"));
-        if i > 0 {
-            code.push(')');
+            code.push_str(&format!(".max((dv{i} * alpha[{i}]).abs())"));
+        } else {
+            code.push_str(&format!("(dv{i} * alpha[{i}]).abs()"));
         }
     }
-    code.push_str(" < TOL {\n");
+    code.push_str(";\n");
     code.push_str(&format!(
-        "{indent}    state.last_nr_iterations = iter as u32;\n"
+        "{indent}if max_dv > 3.5 {{ let factor = (3.5 / max_dv).max(0.1); for a in alpha.iter_mut() {{ *a *= factor; }} }}\n"
     ));
-    code.push_str(&format!("{indent}    return i_nl;\n"));
+
+    // Apply damped step
+    for i in 0..dim {
+        code.push_str(&format!("{indent}i_nl[{i}] -= alpha[{i}] * delta{i};\n"));
+    }
+
+    // RELTOL convergence check (SPICE-standard)
+    code.push_str(&format!(
+        "\n{indent}// Convergence check (SPICE RELTOL=0.001, VNTOL=1e-6)\n"
+    ));
+    code.push_str(&format!("{indent}if !any_limited {{\n"));
+    code.push_str(&format!("{indent}    let mut nr_converged = true;\n"));
+    for i in 0..dim {
+        code.push_str(&format!(
+            "{indent}    {{ let step = alpha[{i}] * delta{i}; let v_new = v_d{i} + dv{i} * alpha[{i}]; let threshold = 1e-3 * v_d{i}.abs().max(v_new.abs()) + 1e-6; if step.abs() > threshold {{ nr_converged = false; }} }}\n"
+        ));
+    }
+    code.push_str(&format!("{indent}    if nr_converged {{\n"));
+    code.push_str(&format!(
+        "{indent}        state.last_nr_iterations = iter as u32;\n"
+    ));
+    code.push_str(&format!("{indent}        return i_nl;\n"));
+    code.push_str(&format!("{indent}    }}\n"));
     code.push_str(&format!("{indent}}}\n"));
 }
 
@@ -2791,8 +2820,11 @@ fn emit_schur_nr_limit_and_converge(
         code.push_str(");\n");
     }
 
-    // Compute scalar damping factor from per-device limiting
-    code.push_str(&format!("{indent}let mut alpha = 1.0_f64;\n"));
+    // Compute per-dimension damping factor from per-device limiting
+    code.push_str(&format!(
+        "{indent}let mut alpha = [1.0_f64; {dim}];\n"
+    ));
+    code.push_str(&format!("{indent}let mut any_limited = false;\n"));
     for (dev_num, slot) in ir.device_slots.iter().enumerate() {
         for d in 0..slot.dimension {
             let i = slot.start_idx + d;
@@ -2843,37 +2875,63 @@ fn emit_schur_nr_limit_and_converge(
                 "{indent}    let ratio = ((v_lim - v_d{i}) / dv{i}).max(0.01);\n"
             ));
             code.push_str(&format!(
-                "{indent}    if ratio < alpha {{ alpha = ratio; }}\n"
+                "{indent}    if ratio < alpha[{i}] {{ alpha[{i}] = ratio; if ratio < 1.0 {{ any_limited = true; }} }}\n"
             ));
             code.push_str(&format!("{indent}}}\n"));
         }
     }
 
-    // Apply damped step
-    for i in 0..dim {
-        code.push_str(&format!("{indent}i_nl[{i}] -= alpha * delta{i};\n"));
+    // Enforce per-device grouping: both dims of a 2D device share the minimum alpha
+    for slot in &ir.device_slots {
+        if slot.dimension > 1 {
+            let s = slot.start_idx;
+            let s1 = s + 1;
+            code.push_str(&format!(
+                "{indent}{{ let dev_alpha = alpha[{s}].min(alpha[{s1}]); alpha[{s}] = dev_alpha; alpha[{s1}] = dev_alpha; }}\n"
+            ));
+        }
     }
 
-    // Convergence check — break from loop (not return)
+    // Global voltage backstop: no device voltage changes by more than 3.5V
     code.push_str(&format!(
-        "\n{indent}// Convergence check (max-norm on actual step)\n"
+        "{indent}// Global voltage backstop: limit max voltage change to 3.5V\n"
     ));
-    code.push_str(&format!("{indent}if "));
+    code.push_str(&format!("{indent}let max_dv = "));
     for i in 0..dim {
         if i > 0 {
-            code.push_str(".max(");
-        }
-        code.push_str(&format!("(alpha * delta{i}).abs()"));
-        if i > 0 {
-            code.push(')');
+            code.push_str(&format!(".max((dv{i} * alpha[{i}]).abs())"));
+        } else {
+            code.push_str(&format!("(dv{i} * alpha[{i}]).abs()"));
         }
     }
-    code.push_str(" < TOL {\n");
+    code.push_str(";\n");
     code.push_str(&format!(
-        "{indent}    state.last_nr_iterations = iter as u32;\n"
+        "{indent}if max_dv > 3.5 {{ let factor = (3.5 / max_dv).max(0.1); for a in alpha.iter_mut() {{ *a *= factor; }} }}\n"
     ));
-    code.push_str(&format!("{indent}    converged = true;\n"));
-    code.push_str(&format!("{indent}    break;\n"));
+
+    // Apply damped step
+    for i in 0..dim {
+        code.push_str(&format!("{indent}i_nl[{i}] -= alpha[{i}] * delta{i};\n"));
+    }
+
+    // RELTOL convergence check — break from loop (not return)
+    code.push_str(&format!(
+        "\n{indent}// Convergence check (SPICE RELTOL=0.001, VNTOL=1e-6)\n"
+    ));
+    code.push_str(&format!("{indent}if !any_limited {{\n"));
+    code.push_str(&format!("{indent}    let mut nr_converged = true;\n"));
+    for i in 0..dim {
+        code.push_str(&format!(
+            "{indent}    {{ let step = alpha[{i}] * delta{i}; let v_new = v_d{i} + dv{i} * alpha[{i}]; let threshold = 1e-3 * v_d{i}.abs().max(v_new.abs()) + 1e-6; if step.abs() > threshold {{ nr_converged = false; }} }}\n"
+        ));
+    }
+    code.push_str(&format!("{indent}    if nr_converged {{\n"));
+    code.push_str(&format!(
+        "{indent}        state.last_nr_iterations = iter as u32;\n"
+    ));
+    code.push_str(&format!("{indent}        converged = true;\n"));
+    code.push_str(&format!("{indent}        break;\n"));
+    code.push_str(&format!("{indent}    }}\n"));
     code.push_str(&format!("{indent}}}\n"));
 }
 
@@ -5377,8 +5435,11 @@ impl RustEmitter {
             code.push_str(");\n");
         }
 
-        // Damping from per-device limiting
-        code.push_str(&format!("{indent}let mut alpha = 1.0_f64;\n"));
+        // Compute per-dimension damping factor from per-device limiting
+        code.push_str(&format!(
+            "{indent}let mut alpha = [1.0_f64; {dim}];\n"
+        ));
+        code.push_str(&format!("{indent}let mut any_limited = false;\n"));
         for (dev_num, slot) in ir.device_slots.iter().enumerate() {
             for d in 0..slot.dimension {
                 let i = slot.start_idx + d;
@@ -5422,25 +5483,56 @@ impl RustEmitter {
                 }
                 code.push_str(&format!(
                     "{indent}    let ratio = ((v_lim - v_d{i}) / dv{i}).max(0.01);\n\
-                     {indent}    if ratio < alpha {{ alpha = ratio; }}\n\
+                     {indent}    if ratio < alpha[{i}] {{ alpha[{i}] = ratio; if ratio < 1.0 {{ any_limited = true; }} }}\n\
                      {indent}}}\n"
                 ));
             }
         }
 
-        // Apply damped step
-        for i in 0..dim {
-            code.push_str(&format!("{indent}i_nl[{i}] -= alpha * delta{i};\n"));
+        // Enforce per-device grouping: both dims of a 2D device share the minimum alpha
+        for slot in &ir.device_slots {
+            if slot.dimension > 1 {
+                let s = slot.start_idx;
+                let s1 = s + 1;
+                code.push_str(&format!(
+                    "{indent}{{ let dev_alpha = alpha[{s}].min(alpha[{s1}]); alpha[{s}] = dev_alpha; alpha[{s1}] = dev_alpha; }}\n"
+                ));
+            }
         }
 
-        // Convergence check
-        code.push_str(&format!("{indent}if "));
+        // Global voltage backstop: no device voltage changes by more than 3.5V
+        code.push_str(&format!(
+            "{indent}// Global voltage backstop: limit max voltage change to 3.5V\n"
+        ));
+        code.push_str(&format!("{indent}let max_dv = "));
         for i in 0..dim {
-            if i > 0 { code.push_str(".max("); }
-            code.push_str(&format!("(alpha * delta{i}).abs()"));
-            if i > 0 { code.push(')'); }
+            if i > 0 {
+                code.push_str(&format!(".max((dv{i} * alpha[{i}]).abs())"));
+            } else {
+                code.push_str(&format!("(dv{i} * alpha[{i}]).abs()"));
+            }
         }
-        code.push_str(&format!(" < TOL {{ state.last_nr_iterations = _iter as u32; break; }}\n"));
+        code.push_str(";\n");
+        code.push_str(&format!(
+            "{indent}if max_dv > 3.5 {{ let factor = (3.5 / max_dv).max(0.1); for a in alpha.iter_mut() {{ *a *= factor; }} }}\n"
+        ));
+
+        // Apply damped step
+        for i in 0..dim {
+            code.push_str(&format!("{indent}i_nl[{i}] -= alpha[{i}] * delta{i};\n"));
+        }
+
+        // RELTOL convergence check
+        code.push_str(&format!("{indent}// Convergence check (SPICE RELTOL=0.001, VNTOL=1e-6)\n"));
+        code.push_str(&format!("{indent}if !any_limited {{\n"));
+        code.push_str(&format!("{indent}    let mut nr_converged = true;\n"));
+        for i in 0..dim {
+            code.push_str(&format!(
+                "{indent}    {{ let step = alpha[{i}] * delta{i}; let v_new = v_d{i} + dv{i} * alpha[{i}]; let threshold = 1e-3 * v_d{i}.abs().max(v_new.abs()) + 1e-6; if step.abs() > threshold {{ nr_converged = false; }} }}\n"
+            ));
+        }
+        code.push_str(&format!("{indent}    if nr_converged {{ state.last_nr_iterations = _iter as u32; break; }}\n"));
+        code.push_str(&format!("{indent}}}\n"));
     }
 
     /// Emit LU solve function for the nodal solver (N x N with partial pivoting).
