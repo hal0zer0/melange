@@ -105,6 +105,8 @@ pub struct CircuitState {
 {% for default in pot_defaults %}
     /// Potentiometer {{ loop.index0 }} current resistance (ohms)
     pub pot_{{ loop.index0 }}_resistance: f64,
+    /// Potentiometer {{ loop.index0 }} previous timestep resistance (for trapezoidal A_neg correction)
+    pub pot_{{ loop.index0 }}_resistance_prev: f64,
 {% endfor %}
 {% if oversampling_factor > 1 %}
     /// Oversampler upsampling half-band filter state (single input)
@@ -211,6 +213,7 @@ impl Default for CircuitState {
 {% endif %}
 {% for default in pot_defaults %}
             pot_{{ loop.index0 }}_resistance: {{ default }},
+            pot_{{ loop.index0 }}_resistance_prev: {{ default }},
 {% endfor %}
 {% if oversampling_factor > 1 %}
             os_up_state: [0.0; {{ os_state_size }}],
@@ -286,6 +289,7 @@ impl CircuitState {
 {% endif %}
 {% for default in pot_defaults %}
         self.pot_{{ loop.index0 }}_resistance = {{ default }};
+        self.pot_{{ loop.index0 }}_resistance_prev = {{ default }};
 {% endfor %}
 {% if num_switches > 0 %}
 {% for idx in switch_indices %}

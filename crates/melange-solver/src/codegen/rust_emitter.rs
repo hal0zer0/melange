@@ -2169,10 +2169,18 @@ impl RustEmitter {
     }
 
     fn emit_a_neg_correction(code: &mut String, idx: usize, pot: &PotentiometerIR) {
-        // A_neg correction: delta_g changes the effective A_neg matrix
-        // The pot conductance change affects the RHS through v_prev:
-        // rhs[p] -= delta_g * (v_prev[p] - v_prev[q])
-        // rhs[q] += delta_g * (v_prev[p] - v_prev[q])  (if not grounded)
+        // A_neg correction: the backward term uses the PREVIOUS timestep's conductance.
+        // Trapezoidal discretization of time-varying G(t):
+        //   Forward: A[n] = G[n] + (2/T)*C → uses current delta_g (in SM correction)
+        //   Backward: A_neg[n-1] = (2/T)*C - G[n-1] → uses previous delta_g
+        // Using current delta_g here causes artifacts when pot changes between samples
+        // (e.g., tremolo LDR modulation at 5.63 Hz).
+        code.push_str(&format!(
+            "    let delta_g_{idx}_prev = {{\n\
+             \x20       let r = state.pot_{idx}_resistance_prev.clamp(POT_{idx}_MIN_R, POT_{idx}_MAX_R);\n\
+             \x20       1.0 / r - POT_{idx}_G_NOM\n\
+             \x20   }};\n"
+        ));
         if pot.node_p > 0 && pot.node_q > 0 {
             let p = pot.node_p - 1;
             let q = pot.node_q - 1;
@@ -2181,20 +2189,20 @@ impl RustEmitter {
                 idx, p, q
             ));
             code.push_str(&format!(
-                "    rhs[{}] -= delta_g_{} * v_diff_{};\n", p, idx, idx
+                "    rhs[{}] -= delta_g_{}_prev * v_diff_{};\n", p, idx, idx
             ));
             code.push_str(&format!(
-                "    rhs[{}] += delta_g_{} * v_diff_{};\n", q, idx, idx
+                "    rhs[{}] += delta_g_{}_prev * v_diff_{};\n", q, idx, idx
             ));
         } else if pot.node_p > 0 {
             let p = pot.node_p - 1;
             code.push_str(&format!(
-                "    rhs[{}] -= delta_g_{} * state.v_prev[{}];\n", p, idx, p
+                "    rhs[{}] -= delta_g_{}_prev * state.v_prev[{}];\n", p, idx, p
             ));
         } else if pot.node_q > 0 {
             let q = pot.node_q - 1;
             code.push_str(&format!(
-                "    rhs[{}] -= delta_g_{} * state.v_prev[{}];\n", q, idx, q
+                "    rhs[{}] -= delta_g_{}_prev * state.v_prev[{}];\n", q, idx, q
             ));
         }
     }
@@ -3326,8 +3334,10 @@ impl RustEmitter {
         for (idx, _pot) in ir.pots.iter().enumerate() {
             code.push_str(&format!(
                 "    /// Potentiometer {}: current resistance (ohms)\n\
-                 \x20   pub pot_{}_resistance: f64,\n",
-                idx, idx
+                 \x20   pub pot_{}_resistance: f64,\n\
+                 \x20   /// Potentiometer {}: previous timestep resistance (trapezoidal A_neg)\n\
+                 \x20   pub pot_{}_resistance_prev: f64,\n",
+                idx, idx, idx, idx
             ));
         }
         if has_pots {
@@ -3456,9 +3466,11 @@ impl RustEmitter {
         }
 
         for (idx, pot) in ir.pots.iter().enumerate() {
+            let r_nom = 1.0 / pot.g_nominal;
             code.push_str(&format!(
-                "            pot_{}_resistance: {:.17e},\n",
-                idx, 1.0 / pot.g_nominal
+                "            pot_{}_resistance: {:.17e},\n\
+                 \x20           pot_{}_resistance_prev: {:.17e},\n",
+                idx, r_nom, idx, r_nom
             ));
         }
 
@@ -3547,9 +3559,11 @@ impl RustEmitter {
             code.push_str("        self.c_work = C;\n");
         }
         for (idx, pot) in ir.pots.iter().enumerate() {
+            let r_nom = 1.0 / pot.g_nominal;
             code.push_str(&format!(
-                "        self.pot_{}_resistance = {:.17e};\n",
-                idx, 1.0 / pot.g_nominal
+                "        self.pot_{}_resistance = {:.17e};\n\
+                 \x20       self.pot_{}_resistance_prev = {:.17e};\n",
+                idx, r_nom, idx, r_nom
             ));
         }
         for (idx, _sw) in ir.switches.iter().enumerate() {
@@ -4395,6 +4409,11 @@ impl RustEmitter {
         if m > 0 {
             code.push_str("    state.i_nl_prev_prev = state.i_nl_prev;\n");
             code.push_str("    state.i_nl_prev = i_nl;\n");
+        }
+        for (idx, _pot) in ir.pots.iter().enumerate() {
+            code.push_str(&format!(
+                "    state.pot_{}_resistance_prev = state.pot_{}_resistance;\n", idx, idx
+            ));
         }
         code.push('\n');
 

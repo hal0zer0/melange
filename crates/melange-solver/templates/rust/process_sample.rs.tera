@@ -72,6 +72,8 @@ pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS
     state.i_nl_prev_prev = state.i_nl_prev;
     state.i_nl_prev = i_nl;
     state.input_prev = input;
+{% for default in pot_defaults %}    state.pot_{{ loop.index0 }}_resistance_prev = state.pot_{{ loop.index0 }}_resistance;
+{% endfor %}
 {% if num_inductors > 0 %}
 
     // Step 7b: Update inductor companion model state
@@ -132,6 +134,7 @@ pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS
         state.ci_i1_hist = [0.0; {{ num_coupled_inductors }}];
         state.ci_i2_hist = [0.0; {{ num_coupled_inductors }}];
 {% endif %}{% if num_transformer_groups > 0 %}{{ xfmr_nan_reset_lines }}{% endif %}{% for default in pot_defaults %}        state.pot_{{ loop.index0 }}_resistance = {{ default }};
+        state.pot_{{ loop.index0 }}_resistance_prev = {{ default }};
 {% endfor %}{% if num_thermal_devices > 0 %}{% for td in thermal_devices %}        state.device_{{ td.dev_num }}_tj = DEVICE_{{ td.dev_num }}_TAMB;
         state.device_{{ td.dev_num }}_is = DEVICE_{{ td.dev_num }}_IS;
         state.device_{{ td.dev_num }}_vt = DEVICE_{{ td.dev_num }}_VT;
