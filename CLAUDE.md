@@ -151,7 +151,7 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
   - Sherman-Morrison rank-1 updates: O(N²) correction instead of O(N³) re-inversion
   - Precomputed SM vectors (SU, USU, NV_SU, U_NI) baked into generated constants
   - Corrections applied to S, K, A_neg, and S*N_i products in codegen
-  - **Runtime solver**: `CircuitSolver.set_pot(index, resistance)` with pre-allocated SM buffers (real-time safe)
+  - **Runtime solver**: No pot support (codegen-only). `CircuitSolver` uses nominal kernel.
   - Plugin template auto-generates `FloatParam` knobs for each pot
   - Max 32 pots per circuit; pot value stored in `CircuitState`
 - **Plugin level params always included**: Input Level (0 dB default, -36 to +12 dB) and Output Level (0 dB default, -60 to +12 dB)
