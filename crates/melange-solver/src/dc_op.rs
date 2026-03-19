@@ -127,6 +127,10 @@ pub fn evaluate_devices(
                 j_dev[s * m + s] = bp.is / (bp.nf * bp.vt) * exp_be;
             }
             (DeviceType::Bjt, DeviceParams::Bjt(bp)) => {
+                if s + 1 >= v_nl.len() {
+                    log::warn!("DC OP: BJT at start_idx={} needs 2 dims but v_nl.len()={}", s, v_nl.len());
+                    continue;
+                }
                 let polarity = if bp.is_pnp {
                     BjtPolarity::Pnp
                 } else {

@@ -644,6 +644,8 @@ fn compile_circuit_source(
     };
     // Skip FA detection for nodal solver (it handles all M natively via N×N NR).
     // FA only benefits the DK solver where M×M NR cost dominates.
+    // Skip FA detection for nodal solver — the nodal-Schur path handles all M natively
+    // and the FA+nodal DC OP interaction has indexing issues that need separate fixing.
     let forward_active = if solver_override == "nodal" {
         std::collections::HashSet::new()
     } else {
