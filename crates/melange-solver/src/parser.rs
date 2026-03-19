@@ -989,9 +989,15 @@ impl Parser {
         };
 
         // Extract params from between parentheses (if any)
+        // SPICE allows both space-separated and comma-separated params:
+        //   NPN(IS=1e-14 BF=200 RE=0.001)    — spaces only
+        //   NPN(IS=1e-14,BF=200,RE=0.001)    — commas only
+        //   NPN(IS=1e-14, BF=200, RE=0.001)  — commas + spaces
         if let (Some(open), Some(close)) = (rest.find('('), rest.rfind(')')) {
             let params_str = &rest[open + 1..close];
-            for token in params_str.split_whitespace() {
+            for token in params_str.split(|c: char| c.is_ascii_whitespace() || c == ',') {
+                let token = token.trim();
+                if token.is_empty() { continue; }
                 if let Some(eq_pos) = token.find('=') {
                     let key = token[..eq_pos].to_ascii_uppercase();
                     let value_str = &token[eq_pos + 1..];
