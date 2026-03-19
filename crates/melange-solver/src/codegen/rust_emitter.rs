@@ -4477,8 +4477,12 @@ impl RustEmitter {
         }
         code.push_str("        let abs_out = scaled.abs();\n");
         code.push_str("        if abs_out > state.diag_peak_output { state.diag_peak_output = abs_out; }\n");
-        code.push_str("        if abs_out > 10.0 { state.diag_clamp_count += 1; }\n");
-        code.push_str("        output[out_idx] = scaled.clamp(-10.0, 10.0);\n");
+        if ir.dc_block {
+            code.push_str("        if abs_out > 10.0 { state.diag_clamp_count += 1; }\n");
+            code.push_str("        output[out_idx] = scaled.clamp(-10.0, 10.0);\n");
+        } else {
+            code.push_str("        output[out_idx] = if scaled.is_finite() { scaled } else { 0.0 };\n");
+        }
         code.push_str("    }\n");
         code.push_str("    output\n");
         code.push_str("}\n\n");

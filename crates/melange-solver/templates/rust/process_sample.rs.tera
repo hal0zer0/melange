@@ -158,8 +158,10 @@ pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS
 {% else %}        let scaled = raw_out * OUTPUT_SCALES[out_idx];
 {% endif %}        let abs_out = scaled.abs();
         if abs_out > state.diag_peak_output { state.diag_peak_output = abs_out; }
-        if abs_out > 10.0 { state.diag_clamp_count += 1; }
+{% if dc_block %}        if abs_out > 10.0 { state.diag_clamp_count += 1; }
         output[out_idx] = scaled.clamp(-10.0, 10.0);
+{% else %}        output[out_idx] = if scaled.is_finite() { scaled } else { 0.0 };
+{% endif %}
     }
     output
 }
