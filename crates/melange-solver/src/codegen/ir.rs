@@ -965,8 +965,7 @@ impl CircuitIR {
                 for i in 0..n { x[i] = y[i] / norm; }
             }
             if spectral_radius > 1.002 {
-                log::info!("Auto-selecting backward Euler: spectral radius {:.4} > 1.001 (trapezoidal unstable)", spectral_radius);
-                eprintln!("  Auto-selecting backward Euler (spectral radius {:.4} > 1.001)", spectral_radius);
+                log::info!("Auto-selecting backward Euler: spectral radius {:.4} > 1.002 (trapezoidal unstable)", spectral_radius);
                 true
             } else {
                 false

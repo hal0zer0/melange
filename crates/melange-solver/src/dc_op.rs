@@ -150,7 +150,7 @@ fn evaluate_devices_inner(
                 } else {
                     BjtPolarity::Npn
                 };
-                let em = BjtEbersMoll::new(bp.is, bp.vt, bp.beta_f, bp.beta_r, polarity);
+                let em = BjtEbersMoll::new(bp.is, bp.vt, bp.beta_f, bp.beta_r, polarity).with_nf(bp.nf);
                 let vbe = v_nl[s];
                 let vbc = v_nl[s + 1];
 

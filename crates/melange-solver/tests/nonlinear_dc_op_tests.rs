@@ -734,7 +734,8 @@ fn build_device_entries(
                 } else {
                     BjtPolarity::Npn
                 };
-                let bjt = BjtEbersMoll::new(is, 0.02585, bf, br, polarity);
+                let nf = find_bjt_param(netlist, &dev_info.name, "NF").unwrap_or(1.0);
+                let bjt = BjtEbersMoll::new(is, 0.02585, bf, br, polarity).with_nf(nf);
                 devices.push(DeviceEntry::new_bjt(bjt, dev_info.start_idx));
             }
             _ => {}

@@ -314,16 +314,8 @@ impl DeviceEntry {
             }
             DeviceEntry::Bjt { device, .. } => {
                 let (dic_dvbe, dic_dvbc) = device.collector_jacobian(v[0], v[1]);
-                // For BJT: we need ∂Ib/∂Vbe and ∂Ib/∂Vbc
-                let vbe = v[0];
-                let vbc = v[1];
-                let s = device.sign();
-                let vbe_eff = s * vbe;
-                let vbc_eff = s * vbc;
-                let exp_be = melange_devices::safeguards::safe_exp(vbe_eff / device.vt);
-                let exp_bc = melange_devices::safeguards::safe_exp(vbc_eff / device.vt);
-                let dib_dvbe = s * s * (device.is * device.beta_f.recip() / device.vt) * exp_be;
-                let dib_dvbc = s * s * (device.is * device.beta_r.recip() / device.vt) * exp_bc;
+                let dib_dvbe = device.base_current_jacobian_dvbe(v[0], v[1]);
+                let dib_dvbc = device.base_current_jacobian_dvbc(v[0], v[1]);
                 smallvec![dic_dvbe, dic_dvbc, dib_dvbe, dib_dvbc]
             }
             DeviceEntry::Jfet { device, .. } => {

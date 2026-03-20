@@ -439,7 +439,8 @@ fn build_devices_from_netlist(
                 let beta_f = model_params.1.unwrap_or(200.0);
                 let beta_r = model_params.2.unwrap_or(3.0);
                 let polarity = find_bjt_polarity(netlist, &dev_info.name);
-                let bjt = BjtEbersMoll::new_room_temp(is, beta_f, beta_r, polarity);
+                let nf = find_bjt_nf(netlist, &dev_info.name);
+                let bjt = BjtEbersMoll::new_room_temp(is, beta_f, beta_r, polarity).with_nf(nf);
                 devices.push(DeviceEntry::new_bjt(bjt, dev_info.start_idx));
             }
             melange_solver::mna::NonlinearDeviceType::Jfet => {
@@ -578,6 +579,32 @@ fn find_bjt_polarity(netlist: &melange_solver::parser::Netlist, device_name: &st
     }
 
     BjtPolarity::Npn
+}
+
+/// Look up BJT forward emission coefficient NF from model params.
+fn find_bjt_nf(netlist: &melange_solver::parser::Netlist, device_name: &str) -> f64 {
+    let model_name = netlist.elements.iter().find_map(|e| {
+        if let melange_solver::parser::Element::Bjt { name, model, .. } = e {
+            if name == device_name {
+                return Some(model.clone());
+            }
+        }
+        None
+    });
+    let model_name = match model_name {
+        Some(name) => name,
+        None => return 1.0,
+    };
+    for model in &netlist.models {
+        if model.name == model_name {
+            for (key, value) in &model.params {
+                if key.eq_ignore_ascii_case("NF") {
+                    return *value;
+                }
+            }
+        }
+    }
+    1.0
 }
 
 /// Find JFET device from netlist, constructing a Jfet with model params.

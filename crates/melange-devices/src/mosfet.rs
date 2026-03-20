@@ -245,6 +245,112 @@ mod tests {
         );
     }
 
+    /// Comprehensive multi-region FD Jacobian test covering cutoff boundary,
+    /// linear/triode, saturation, and P-channel operation.
+    #[test]
+    fn test_mosfet_multi_region_fd_jacobian() {
+        let eps = 1e-7;
+
+        // N-channel: Vt=2.0, Kp=0.1, lambda=0.01
+        let n_mos = Mosfet::n_2n7000();
+
+        // Operating points covering all regions:
+        // (Vgs, Vds, description)
+        let n_points: &[(f64, f64, &str)] = &[
+            // Near cutoff boundary: Vgs above Vt with enough margin for FD
+            (2.5, 5.0, "N near cutoff boundary"),
+            // Saturation: Vds > Vgs - Vt
+            (5.0, 10.0, "N saturation Vgs=5 Vds=10"),
+            (3.0, 5.0, "N saturation Vgs=3 Vds=5"),
+            (4.0, 8.0, "N saturation Vgs=4 Vds=8"),
+            // Linear/triode: Vds < Vgs - Vt
+            (5.0, 1.0, "N linear Vgs=5 Vds=1"),
+            (5.0, 0.5, "N linear Vgs=5 Vds=0.5"),
+            (10.0, 2.0, "N linear Vgs=10 Vds=2"),
+        ];
+
+        for &(vgs, vds, desc) in n_points {
+            let (d_id_d_vgs, d_id_d_vds) = n_mos.jacobian_partial(vgs, vds);
+
+            let fd_vgs = (n_mos.drain_current(vgs + eps, vds)
+                - n_mos.drain_current(vgs - eps, vds))
+                / (2.0 * eps);
+            let fd_vds = (n_mos.drain_current(vgs, vds + eps)
+                - n_mos.drain_current(vgs, vds - eps))
+                / (2.0 * eps);
+
+            for (name, analytic, fd) in [
+                ("dId/dVgs", d_id_d_vgs, fd_vgs),
+                ("dId/dVds", d_id_d_vds, fd_vds),
+            ] {
+                let rel_err = if fd.abs() > 1e-15 {
+                    (analytic - fd).abs() / fd.abs()
+                } else {
+                    analytic.abs()
+                };
+                assert!(
+                    rel_err < 0.01,
+                    "N-MOSFET {} at {} (Vgs={}, Vds={}): analytic={:.6e} fd={:.6e} err={:.2e}",
+                    name,
+                    desc,
+                    vgs,
+                    vds,
+                    analytic,
+                    fd,
+                    rel_err
+                );
+            }
+        }
+
+        // P-channel: Vt=-2.0, Kp=0.1, lambda=0.01
+        let p_mos = Mosfet::new(ChannelType::P, -2.0, 0.1, 0.01);
+
+        let p_points: &[(f64, f64, &str)] = &[
+            // P-channel near cutoff boundary: Vgs below -Vt with enough margin for FD
+            (-2.5, -5.0, "P near cutoff boundary"),
+            // P-channel saturation: |Vds| > |Vgs - Vt|
+            (-5.0, -10.0, "P saturation Vgs=-5 Vds=-10"),
+            (-3.0, -5.0, "P saturation Vgs=-3 Vds=-5"),
+            // P-channel linear: |Vds| < |Vgs - Vt|
+            (-5.0, -1.0, "P linear Vgs=-5 Vds=-1"),
+            (-5.0, -0.5, "P linear Vgs=-5 Vds=-0.5"),
+            (-10.0, -2.0, "P linear Vgs=-10 Vds=-2"),
+        ];
+
+        for &(vgs, vds, desc) in p_points {
+            let (d_id_d_vgs, d_id_d_vds) = p_mos.jacobian_partial(vgs, vds);
+
+            let fd_vgs = (p_mos.drain_current(vgs + eps, vds)
+                - p_mos.drain_current(vgs - eps, vds))
+                / (2.0 * eps);
+            let fd_vds = (p_mos.drain_current(vgs, vds + eps)
+                - p_mos.drain_current(vgs, vds - eps))
+                / (2.0 * eps);
+
+            for (name, analytic, fd) in [
+                ("dId/dVgs", d_id_d_vgs, fd_vgs),
+                ("dId/dVds", d_id_d_vds, fd_vds),
+            ] {
+                let rel_err = if fd.abs() > 1e-15 {
+                    (analytic - fd).abs() / fd.abs()
+                } else {
+                    analytic.abs()
+                };
+                assert!(
+                    rel_err < 0.01,
+                    "P-MOSFET {} at {} (Vgs={}, Vds={}): analytic={:.6e} fd={:.6e} err={:.2e}",
+                    name,
+                    desc,
+                    vgs,
+                    vds,
+                    analytic,
+                    fd,
+                    rel_err
+                );
+            }
+        }
+    }
+
     #[test]
     #[should_panic(expected = "Kp must be positive")]
     fn test_mosfet_zero_kp_rejected() {

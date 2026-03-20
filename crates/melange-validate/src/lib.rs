@@ -581,9 +581,10 @@ fn build_devices_from_netlist(
                 let is = model_params.0.unwrap_or(1e-15);
                 let beta_f = model_params.1.unwrap_or(200.0);
                 let beta_r = model_params.2.unwrap_or(3.0);
+                let nf = find_bjt_nf(netlist, &dev_info.name);
                 let polarity = find_bjt_polarity(netlist, &dev_info.name);
                 let bjt =
-                    melange_devices::BjtEbersMoll::new_room_temp(is, beta_f, beta_r, polarity);
+                    melange_devices::BjtEbersMoll::new_room_temp(is, beta_f, beta_r, polarity).with_nf(nf);
                 devices.push(melange_solver::solver::DeviceEntry::new_bjt(
                     bjt,
                     dev_info.start_idx,
@@ -814,6 +815,35 @@ fn find_bjt_polarity(
     }
 
     melange_devices::BjtPolarity::Npn
+}
+
+/// Look up BJT forward emission coefficient NF from model params. Returns 1.0 if not found.
+fn find_bjt_nf(
+    netlist: &melange_solver::parser::Netlist,
+    device_name: &str,
+) -> f64 {
+    let model_name = netlist.elements.iter().find_map(|e| {
+        if let melange_solver::parser::Element::Bjt { name, model, .. } = e
+            && name == device_name
+        {
+            return Some(model.clone());
+        }
+        None
+    });
+    let model_name = match model_name {
+        Some(name) => name,
+        None => return 1.0,
+    };
+    for model in &netlist.models {
+        if model.name == model_name {
+            for (key, value) in &model.params {
+                if key.eq_ignore_ascii_case("NF") {
+                    return *value;
+                }
+            }
+        }
+    }
+    1.0
 }
 
 /// Build device slots for the DC OP solver from a parsed netlist

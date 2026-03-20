@@ -2845,7 +2845,7 @@ fn emit_nr_limit_and_converge(
     code.push_str(&format!("{indent}    let mut nr_converged = true;\n"));
     for i in 0..dim {
         code.push_str(&format!(
-            "{indent}    {{ let step = alpha[{i}] * delta{i}; let v_new = v_d{i} + dv{i} * alpha[{i}]; let threshold = 1e-3 * v_d{i}.abs().max(v_new.abs()) + 1e-6; if step.abs() > threshold {{ nr_converged = false; }} }}\n"
+            "{indent}    {{ let step = dv{i} * alpha[{i}]; let v_new = v_d{i} + step; let threshold = 1e-3 * v_d{i}.abs().max(v_new.abs()) + 1e-6; if step.abs() > threshold {{ nr_converged = false; }} }}\n"
         ));
     }
     code.push_str(&format!("{indent}    if nr_converged {{\n"));
@@ -5565,7 +5565,7 @@ impl RustEmitter {
         code.push_str(&format!("{indent}    let mut nr_converged = true;\n"));
         for i in 0..dim {
             code.push_str(&format!(
-                "{indent}    {{ let step = alpha[{i}] * delta{i}; let v_new = v_d{i} + dv{i} * alpha[{i}]; let threshold = 1e-3 * v_d{i}.abs().max(v_new.abs()) + 1e-6; if step.abs() > threshold {{ nr_converged = false; }} }}\n"
+                "{indent}    {{ let step = dv{i} * alpha[{i}]; let v_new = v_d{i} + step; let threshold = 1e-3 * v_d{i}.abs().max(v_new.abs()) + 1e-6; if step.abs() > threshold {{ nr_converged = false; }} }}\n"
             ));
         }
         code.push_str(&format!("{indent}    if nr_converged {{ state.last_nr_iterations = _iter as u32; break; }}\n"));
@@ -6341,11 +6341,11 @@ impl RustEmitter {
                     if bp.has_parasitics() && !slot.has_internal_mna_nodes {
                         code.push_str(&format!(
                             "{indent}{{ // BJT {dev_num} (RB/RC/RE inner NR)\n\
-                             {indent}    let vbe = v_nl[{s}] * DEVICE_{dev_num}_SIGN;\n\
-                             {indent}    let vbc = v_nl[{s1}] * DEVICE_{dev_num}_SIGN;\n\
+                             {indent}    let vbe = v_nl[{s}];\n\
+                             {indent}    let vbc = v_nl[{s1}];\n\
                              {indent}    let (ic, ib, jac) = bjt_with_parasitics(vbe, vbc, state.device_{dev_num}_is, state.device_{dev_num}_vt, DEVICE_{dev_num}_NF, state.device_{dev_num}_bf, state.device_{dev_num}_br, DEVICE_{dev_num}_SIGN, DEVICE_{dev_num}_USE_GP, DEVICE_{dev_num}_VAF, DEVICE_{dev_num}_VAR, DEVICE_{dev_num}_IKF, DEVICE_{dev_num}_IKR, DEVICE_{dev_num}_ISE, DEVICE_{dev_num}_NE, DEVICE_{dev_num}_RB, DEVICE_{dev_num}_RC, DEVICE_{dev_num}_RE);\n\
-                             {indent}    i_nl[{s}] = ic * DEVICE_{dev_num}_SIGN;\n\
-                             {indent}    i_nl[{s1}] = ib * DEVICE_{dev_num}_SIGN;\n\
+                             {indent}    i_nl[{s}] = ic;\n\
+                             {indent}    i_nl[{s1}] = ib;\n\
                              {indent}    j_dev[{s} * M + {s}] = jac[0];\n\
                              {indent}    j_dev[{s} * M + {s1}] = jac[1];\n\
                              {indent}    j_dev[{s1} * M + {s}] = jac[2];\n\
@@ -6356,11 +6356,11 @@ impl RustEmitter {
                         let mna_note = if slot.has_internal_mna_nodes { " (MNA internal nodes)" } else { "" };
                         code.push_str(&format!(
                             "{indent}{{ // BJT {dev_num}{mna_note}\n\
-                             {indent}    let vbe = v_nl[{s}] * DEVICE_{dev_num}_SIGN;\n\
-                             {indent}    let vbc = v_nl[{s1}] * DEVICE_{dev_num}_SIGN;\n\
+                             {indent}    let vbe = v_nl[{s}];\n\
+                             {indent}    let vbc = v_nl[{s1}];\n\
                              {indent}    let (ic, ib, jac) = bjt_evaluate(vbe, vbc, state.device_{dev_num}_is, state.device_{dev_num}_vt, DEVICE_{dev_num}_NF, state.device_{dev_num}_bf, state.device_{dev_num}_br, DEVICE_{dev_num}_SIGN, DEVICE_{dev_num}_USE_GP, DEVICE_{dev_num}_VAF, DEVICE_{dev_num}_VAR, DEVICE_{dev_num}_IKF, DEVICE_{dev_num}_IKR, DEVICE_{dev_num}_ISE, DEVICE_{dev_num}_NE);\n\
-                             {indent}    i_nl[{s}] = ic * DEVICE_{dev_num}_SIGN;\n\
-                             {indent}    i_nl[{s1}] = ib * DEVICE_{dev_num}_SIGN;\n\
+                             {indent}    i_nl[{s}] = ic;\n\
+                             {indent}    i_nl[{s1}] = ib;\n\
                              {indent}    j_dev[{s} * M + {s}] = jac[0];\n\
                              {indent}    j_dev[{s} * M + {s1}] = jac[1];\n\
                              {indent}    j_dev[{s1} * M + {s}] = jac[2];\n\
@@ -6532,8 +6532,8 @@ impl RustEmitter {
                     let s1 = s + 1;
                     if bp.has_parasitics() && !slot.has_internal_mna_nodes {
                         code.push_str(&format!(
-                            "{indent}{{ let vbe = v_nl_final[{s}] * DEVICE_{dev_num}_SIGN;\n\
-                             {indent}  let vbc = v_nl_final[{s1}] * DEVICE_{dev_num}_SIGN;\n\
+                            "{indent}{{ let vbe = v_nl_final[{s}];\n\
+                             {indent}  let vbc = v_nl_final[{s1}];\n\
                              {indent}  let (ic, ib, _jac) = bjt_with_parasitics(vbe, vbc, state.device_{dev_num}_is, state.device_{dev_num}_vt, DEVICE_{dev_num}_NF, state.device_{dev_num}_bf, state.device_{dev_num}_br, DEVICE_{dev_num}_SIGN, DEVICE_{dev_num}_USE_GP, DEVICE_{dev_num}_VAF, DEVICE_{dev_num}_VAR, DEVICE_{dev_num}_IKF, DEVICE_{dev_num}_IKR, DEVICE_{dev_num}_ISE, DEVICE_{dev_num}_NE, DEVICE_{dev_num}_RB, DEVICE_{dev_num}_RC, DEVICE_{dev_num}_RE);\n\
                              {indent}  i_nl[{s}] = ic;\n\
                              {indent}  i_nl[{s1}] = ib;\n\
@@ -6541,8 +6541,8 @@ impl RustEmitter {
                         ));
                     } else {
                         code.push_str(&format!(
-                            "{indent}{{ let vbe = v_nl_final[{s}] * DEVICE_{dev_num}_SIGN;\n\
-                             {indent}  let vbc = v_nl_final[{s1}] * DEVICE_{dev_num}_SIGN;\n\
+                            "{indent}{{ let vbe = v_nl_final[{s}];\n\
+                             {indent}  let vbc = v_nl_final[{s1}];\n\
                              {indent}  let (ic, ib, _) = bjt_evaluate(vbe, vbc, state.device_{dev_num}_is, state.device_{dev_num}_vt, DEVICE_{dev_num}_NF, state.device_{dev_num}_bf, state.device_{dev_num}_br, DEVICE_{dev_num}_SIGN, DEVICE_{dev_num}_USE_GP, DEVICE_{dev_num}_VAF, DEVICE_{dev_num}_VAR, DEVICE_{dev_num}_IKF, DEVICE_{dev_num}_IKR, DEVICE_{dev_num}_ISE, DEVICE_{dev_num}_NE);\n\
                              {indent}  i_nl[{s}] = ic;\n\
                              {indent}  i_nl[{s1}] = ib;\n\

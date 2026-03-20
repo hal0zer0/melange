@@ -1524,7 +1524,8 @@ fn simulate_circuit_source(
                 } else {
                     BjtPolarity::Npn
                 };
-                let bjt = BjtEbersMoll::new(is, melange_primitives::VT_ROOM, bf, br, polarity);
+                let nf = find_model_param(model_name, "NF").unwrap_or(1.0);
+                let bjt = BjtEbersMoll::new(is, melange_primitives::VT_ROOM, bf, br, polarity).with_nf(nf);
                 devices.push(DeviceEntry::new_bjt(bjt, dev_info.start_idx));
             }
             melange_solver::mna::NonlinearDeviceType::Jfet => {
@@ -1659,7 +1660,8 @@ fn simulate_circuit_source(
                 } else {
                     BjtPolarity::Npn
                 };
-                let bjt = BjtEbersMoll::new(is, melange_primitives::VT_ROOM, bf, br, polarity);
+                let nf = find_model_param(model_name, "NF").unwrap_or(1.0);
+                let bjt = BjtEbersMoll::new(is, melange_primitives::VT_ROOM, bf, br, polarity).with_nf(nf);
                 devices.push(DeviceEntry::new_bjt(bjt, dev_info.start_idx));
             }
         }
@@ -2470,8 +2472,9 @@ fn build_device_entries(
                 } else {
                     BjtPolarity::Npn
                 };
+                let nf = find_model_param(model_name, "NF").unwrap_or(1.0);
                 devices.push(DeviceEntry::new_bjt(
-                    BjtEbersMoll::new(is, melange_primitives::VT_ROOM, bf, br, polarity),
+                    BjtEbersMoll::new(is, melange_primitives::VT_ROOM, bf, br, polarity).with_nf(nf),
                     dev_info.start_idx,
                 ));
             }
@@ -2606,8 +2609,9 @@ fn build_device_entries(
                 } else {
                     BjtPolarity::Npn
                 };
+                let nf = find_model_param(model_name, "NF").unwrap_or(1.0);
                 devices.push(DeviceEntry::new_bjt(
-                    BjtEbersMoll::new(is, melange_primitives::VT_ROOM, bf, br, polarity),
+                    BjtEbersMoll::new(is, melange_primitives::VT_ROOM, bf, br, polarity).with_nf(nf),
                     dev_info.start_idx,
                 ));
             }

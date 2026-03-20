@@ -30,6 +30,9 @@ pub struct BjtEbersMoll {
     pub beta_f: f64,
     /// Reverse current gain (beta_r)
     pub beta_r: f64,
+    /// Forward emission coefficient (NF). Default 1.0.
+    /// Forward exponential uses exp(Vbe / (NF * VT)).
+    pub nf: f64,
     /// Polarity (NPN or PNP)
     pub polarity: BjtPolarity,
     /// Precomputed: 1 / beta_f
@@ -39,22 +42,29 @@ pub struct BjtEbersMoll {
 }
 
 impl BjtEbersMoll {
-    /// Create a new BJT model.
+    /// Create a new BJT model (NF defaults to 1.0).
     pub fn new(is: f64, vt: f64, beta_f: f64, beta_r: f64, polarity: BjtPolarity) -> Self {
         Self {
             is,
             vt,
             beta_f,
             beta_r,
+            nf: 1.0,
             polarity,
             inv_beta_f: 1.0 / beta_f,
             inv_beta_r: 1.0 / beta_r,
         }
     }
 
-    /// Create at room temperature.
+    /// Create at room temperature (NF defaults to 1.0).
     pub fn new_room_temp(is: f64, beta_f: f64, beta_r: f64, polarity: BjtPolarity) -> Self {
         Self::new(is, VT_ROOM, beta_f, beta_r, polarity)
+    }
+
+    /// Builder: set forward emission coefficient NF.
+    pub fn with_nf(mut self, nf: f64) -> Self {
+        self.nf = nf;
+        self
     }
 
     /// 2N2222A NPN transistor (common general-purpose).
@@ -94,13 +104,14 @@ impl BjtEbersMoll {
     /// Returns positive current into collector for NPN.
     pub fn collector_current(&self, vbe: f64, vbc: f64) -> f64 {
         let s = self.sign();
+        let nf_vt = self.nf * self.vt;
 
         // Apply polarity to voltages
         let vbe_eff = s * vbe;
         let vbc_eff = s * vbc;
 
-        // Transport current
-        let exp_be = safeguards::safe_exp(vbe_eff / self.vt);
+        // Transport current (forward uses NF*VT, reverse uses VT)
+        let exp_be = safeguards::safe_exp(vbe_eff / nf_vt);
         let exp_bc = safeguards::safe_exp(vbc_eff / self.vt);
         let i_cc = self.is * (exp_be - exp_bc);
 
@@ -113,14 +124,15 @@ impl BjtEbersMoll {
     /// Calculate base current given Vbe and Vbc.
     pub fn base_current(&self, vbe: f64, vbc: f64) -> f64 {
         let s = self.sign();
+        let nf_vt = self.nf * self.vt;
 
         let vbe_eff = s * vbe;
         let vbc_eff = s * vbc;
 
-        let exp_be = safeguards::safe_exp(vbe_eff / self.vt);
+        let exp_be = safeguards::safe_exp(vbe_eff / nf_vt);
         let exp_bc = safeguards::safe_exp(vbc_eff / self.vt);
 
-        // Base current
+        // Base current (forward uses NF*VT, reverse uses VT)
         let ib =
             self.is * self.inv_beta_f * (exp_be - 1.0) + self.is * self.inv_beta_r * (exp_bc - 1.0);
 
@@ -130,11 +142,12 @@ impl BjtEbersMoll {
     /// Partial derivative of base current with respect to Vbe.
     pub fn base_current_jacobian_dvbe(&self, vbe: f64, _vbc: f64) -> f64 {
         let s = self.sign();
+        let nf_vt = self.nf * self.vt;
         let vbe_eff = s * vbe;
-        let exp_be = safeguards::safe_exp(vbe_eff / self.vt);
+        let exp_be = safeguards::safe_exp(vbe_eff / nf_vt);
 
-        // ∂Ib/∂Vbe = (Is/(βf*Vt)) * exp(Vbe/Vt)
-        let dib_dvbe = self.is * self.inv_beta_f / self.vt * exp_be;
+        // ∂Ib/∂Vbe = (Is/(βf*NF*Vt)) * exp(Vbe/(NF*Vt))
+        let dib_dvbe = self.is * self.inv_beta_f / nf_vt * exp_be;
 
         // Apply chain rule for polarity (s * s = 1, so no sign change)
         s * s * dib_dvbe
@@ -163,15 +176,16 @@ impl BjtEbersMoll {
     /// Returns (∂Ic/∂Vbe, ∂Ic/∂Vbc)
     pub fn collector_jacobian(&self, vbe: f64, vbc: f64) -> (f64, f64) {
         let s = self.sign();
+        let nf_vt = self.nf * self.vt;
 
         let vbe_eff = s * vbe;
         let vbc_eff = s * vbc;
 
-        let exp_be = safeguards::safe_exp(vbe_eff / self.vt);
+        let exp_be = safeguards::safe_exp(vbe_eff / nf_vt);
         let exp_bc = safeguards::safe_exp(vbc_eff / self.vt);
 
-        // ∂Ic/∂Vbe = (Is/Vt) * exp(Vbe/Vt)
-        let d_ic_d_vbe = (self.is / self.vt) * exp_be;
+        // ∂Ic/∂Vbe = (Is/(NF*Vt)) * exp(Vbe/(NF*Vt))
+        let d_ic_d_vbe = (self.is / nf_vt) * exp_be;
 
         // ∂Ic/∂Vbc = -(Is/Vt) * exp(Vbc/Vt) - (Is/(βr*Vt)) * exp(Vbc/Vt)
         let d_ic_d_vbc =
@@ -243,6 +257,7 @@ impl BjtGummelPoon {
     /// Base charge factor qb (accounts for Early effect and high injection).
     fn qb(&self, vbe: f64, vbc: f64) -> f64 {
         let s = self.base.sign();
+        let nf_vt = self.base.nf * self.base.vt;
         let vbe_eff = s * vbe;
         let vbc_eff = s * vbc;
 
@@ -253,8 +268,8 @@ impl BjtGummelPoon {
         }
         let q1 = 1.0 / q1_denom;
 
-        // High-level injection (use safe_exp to prevent overflow)
-        let exp_be = safeguards::safe_exp(vbe_eff / self.base.vt);
+        // High-level injection (forward uses NF*VT, reverse uses VT)
+        let exp_be = safeguards::safe_exp(vbe_eff / nf_vt);
         let exp_bc = safeguards::safe_exp(vbc_eff / self.base.vt);
         let q2 = self.base.is * exp_be / self.ikf + self.base.is * exp_bc / self.ikr;
 
@@ -264,10 +279,11 @@ impl BjtGummelPoon {
     /// Collector current with Early effect and high injection.
     pub fn collector_current(&self, vbe: f64, vbc: f64) -> f64 {
         let s = self.base.sign();
+        let nf_vt = self.base.nf * self.base.vt;
         let vbe_eff = s * vbe;
         let vbc_eff = s * vbc;
 
-        let exp_be = safeguards::safe_exp(vbe_eff / self.base.vt);
+        let exp_be = safeguards::safe_exp(vbe_eff / nf_vt);
         let exp_bc = safeguards::safe_exp(vbc_eff / self.base.vt);
 
         let i_cc = self.base.is * (exp_be - exp_bc);
@@ -289,14 +305,15 @@ impl NonlinearDevice<2> for BjtGummelPoon {
         let vbe_eff = s * v[0];
         let vbc_eff = s * v[1];
         let vt = self.base.vt;
+        let nf_vt = self.base.nf * vt;
         let is = self.base.is;
 
-        let exp_be = safeguards::safe_exp(vbe_eff / vt);
+        let exp_be = safeguards::safe_exp(vbe_eff / nf_vt);
         let exp_bc = safeguards::safe_exp(vbc_eff / vt);
 
-        // Transport current and derivatives (in effective voltage space)
+        // Transport current and derivatives (forward uses NF*VT, reverse uses VT)
         let icc = is * (exp_be - exp_bc);
-        let dicc_dvbe = is / vt * exp_be;
+        let dicc_dvbe = is / nf_vt * exp_be;
         let dicc_dvbc = -is / vt * exp_bc;
 
         // Base charge factor q1 (matches qb() singularity handling)
@@ -308,9 +325,9 @@ impl NonlinearDevice<2> for BjtGummelPoon {
             (q1, q1 * q1 / self.var, q1 * q1 / self.vaf)
         };
 
-        // High injection q2 = Is*exp(Vbe/Vt)/IKF + Is*exp(Vbc/Vt)/IKR
+        // High injection q2 = Is*exp(Vbe/(NF*Vt))/IKF + Is*exp(Vbc/Vt)/IKR
         let q2 = is * exp_be / self.ikf + is * exp_bc / self.ikr;
-        let dq2_dvbe = is / (vt * self.ikf) * exp_be;
+        let dq2_dvbe = is / (nf_vt * self.ikf) * exp_be;
         let dq2_dvbc = is / (vt * self.ikr) * exp_bc;
 
         // Discriminant D = sqrt(1 + 4*q2)
@@ -1439,6 +1456,119 @@ mod tests {
                 beta_fwd
             );
         }
+    }
+
+    /// Verify that NF != 1.0 changes collector and base currents.
+    #[test]
+    fn test_ebers_moll_nf_effect() {
+        let bjt_nf1 = BjtEbersMoll::npn_2n2222a(); // nf=1.0 default
+        let bjt_nf103 = BjtEbersMoll::npn_2n2222a().with_nf(1.003);
+
+        let vbe = 0.7;
+        let vbc = -5.0;
+
+        let ic1 = bjt_nf1.collector_current(vbe, vbc);
+        let ic103 = bjt_nf103.collector_current(vbe, vbc);
+
+        // NF=1.003 uses exp(Vbe/(1.003*Vt)) < exp(Vbe/Vt), so less current
+        assert!(
+            ic1 > ic103,
+            "NF=1.0 Ic ({:.6e}) should exceed NF=1.003 Ic ({:.6e})",
+            ic1,
+            ic103
+        );
+
+        // The difference should be measurable but not extreme
+        let ratio = ic103 / ic1;
+        assert!(
+            ratio > 0.85 && ratio < 1.0,
+            "Ic ratio {:.6} should be close to but below 1.0",
+            ratio
+        );
+
+        // Base current also affected
+        let ib1 = bjt_nf1.base_current(vbe, vbc);
+        let ib103 = bjt_nf103.base_current(vbe, vbc);
+        assert!(ib1 > ib103, "NF=1.0 Ib should exceed NF=1.003 Ib");
+    }
+
+    /// Verify Jacobian with NF != 1.0 matches finite difference.
+    #[test]
+    fn test_ebers_moll_nf_jacobian_finite_difference() {
+        let bjt = BjtEbersMoll::npn_2n2222a().with_nf(1.003);
+        let eps = 1e-7;
+
+        for &(vbe, vbc) in &[(0.7, -5.0), (0.6, -2.0), (0.65, -10.0)] {
+            let (dic_dvbe, dic_dvbc) = bjt.collector_jacobian(vbe, vbc);
+            let dib_dvbe = bjt.base_current_jacobian_dvbe(vbe, vbc);
+            let dib_dvbc = bjt.base_current_jacobian_dvbc(vbe, vbc);
+
+            // FD for collector
+            let fd_dic_dvbe = (bjt.collector_current(vbe + eps, vbc)
+                - bjt.collector_current(vbe - eps, vbc))
+                / (2.0 * eps);
+            let fd_dic_dvbc = (bjt.collector_current(vbe, vbc + eps)
+                - bjt.collector_current(vbe, vbc - eps))
+                / (2.0 * eps);
+
+            // FD for base
+            let fd_dib_dvbe = (bjt.base_current(vbe + eps, vbc)
+                - bjt.base_current(vbe - eps, vbc))
+                / (2.0 * eps);
+            let fd_dib_dvbc = (bjt.base_current(vbe, vbc + eps)
+                - bjt.base_current(vbe, vbc - eps))
+                / (2.0 * eps);
+
+            // Check all four entries
+            for (name, analytic, fd) in [
+                ("dIc/dVbe", dic_dvbe, fd_dic_dvbe),
+                ("dIc/dVbc", dic_dvbc, fd_dic_dvbc),
+                ("dIb/dVbe", dib_dvbe, fd_dib_dvbe),
+                ("dIb/dVbc", dib_dvbc, fd_dib_dvbc),
+            ] {
+                let rel_err = if fd.abs() > 1e-15 {
+                    (analytic - fd).abs() / fd.abs()
+                } else {
+                    analytic.abs()
+                };
+                assert!(
+                    rel_err < 1e-4,
+                    "NF=1.003 {} at ({}, {}): analytic={:.6e} fd={:.6e} err={:.2e}",
+                    name,
+                    vbe,
+                    vbc,
+                    analytic,
+                    fd,
+                    rel_err
+                );
+            }
+        }
+    }
+
+    /// Verify NF works correctly for PNP.
+    #[test]
+    fn test_ebers_moll_nf_pnp() {
+        let pnp = BjtEbersMoll::pnp_2n3906().with_nf(1.5);
+
+        // PNP forward active: Vbe=-0.7, Vbc=+5
+        let ic = pnp.collector_current(-0.7, 5.0);
+        assert!(ic < 0.0, "PNP Ic should be negative: {:.6e}", ic);
+        assert!(ic.is_finite());
+
+        // FD Jacobian should match
+        let eps = 1e-7;
+        let (dic_dvbe, _) = pnp.collector_jacobian(-0.7, 5.0);
+        let fd = (pnp.collector_current(-0.7 + eps, 5.0)
+            - pnp.collector_current(-0.7 - eps, 5.0))
+            / (2.0 * eps);
+        let rel_err = (dic_dvbe - fd).abs() / fd.abs();
+        assert!(
+            rel_err < 1e-4,
+            "PNP NF=1.5 dIc/dVbe: analytic={:.6e} fd={:.6e} err={:.2e}",
+            dic_dvbe,
+            fd,
+            rel_err
+        );
     }
 
     /// GP Jacobian finite-difference sweep across many operating points.

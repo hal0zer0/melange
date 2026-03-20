@@ -737,6 +737,193 @@ mod tests {
         }
     }
 
+    /// Verify plate current and Jacobian with positive grid voltage (grid current region).
+    #[test]
+    fn test_triode_grid_current_region_fd_jacobian() {
+        let tube = KorenTriode::ecc83();
+        let eps = 1e-7;
+
+        // Grid current region: Vgk > 0
+        let grid_positive_points: &[(f64, f64, &str)] = &[
+            (0.5, 250.0, "Vgk=0.5 moderate grid current"),
+            (1.0, 250.0, "Vgk=1.0 strong grid current"),
+            (2.0, 200.0, "Vgk=2.0 heavy grid current"),
+            (0.1, 300.0, "Vgk=0.1 onset of grid current"),
+        ];
+
+        for &(vgk, vpk, desc) in grid_positive_points {
+            // Check plate current Jacobian
+            let jac = tube.jacobian(&[vgk, vpk]);
+
+            let fd_dvgk = (tube.plate_current(vgk + eps, vpk)
+                - tube.plate_current(vgk - eps, vpk))
+                / (2.0 * eps);
+            let fd_dvpk = (tube.plate_current(vgk, vpk + eps)
+                - tube.plate_current(vgk, vpk - eps))
+                / (2.0 * eps);
+
+            for (name, analytic, fd) in [
+                ("dIp/dVgk", jac[0], fd_dvgk),
+                ("dIp/dVpk", jac[1], fd_dvpk),
+            ] {
+                let rel_err = if fd.abs() > 1e-15 {
+                    (analytic - fd).abs() / fd.abs()
+                } else {
+                    analytic.abs()
+                };
+                assert!(
+                    rel_err < 0.01,
+                    "Grid current region {} at {} (Vgk={}, Vpk={}): analytic={:.6e} fd={:.6e} err={:.2e}",
+                    name, desc, vgk, vpk, analytic, fd, rel_err
+                );
+            }
+
+            // Also check grid current Jacobian
+            let ig_jac = tube.grid_current_jacobian(vgk);
+            let ig_fd = (tube.grid_current(vgk + eps) - tube.grid_current(vgk - eps))
+                / (2.0 * eps);
+            let ig_err = if ig_fd.abs() > 1e-15 {
+                (ig_jac - ig_fd).abs() / ig_fd.abs()
+            } else {
+                ig_jac.abs()
+            };
+            assert!(
+                ig_err < 0.01,
+                "Grid Ig Jacobian at {} (Vgk={}): analytic={:.6e} fd={:.6e} err={:.2e}",
+                desc, vgk, ig_jac, ig_fd, ig_err
+            );
+
+            // Grid current should be positive for Vgk > 0
+            let ig = tube.grid_current(vgk);
+            assert!(
+                ig > 0.0,
+                "Grid current should be positive at Vgk={}: {:.6e}",
+                vgk,
+                ig
+            );
+        }
+    }
+
+    /// Verify Jacobian at low plate voltage where E1 is small.
+    #[test]
+    fn test_triode_low_plate_voltage_fd_jacobian() {
+        let tube = KorenTriode::ecc83();
+        let eps = 1e-7;
+
+        let low_vpk_points: &[(f64, f64, &str)] = &[
+            (0.0, 5.0, "Vgk=0 Vpk=5"),
+            (0.0, 10.0, "Vgk=0 Vpk=10"),
+            (-1.0, 5.0, "Vgk=-1 Vpk=5"),
+            (-1.0, 20.0, "Vgk=-1 Vpk=20"),
+            (0.0, 1.0, "Vgk=0 Vpk=1"),
+        ];
+
+        for &(vgk, vpk, desc) in low_vpk_points {
+            let jac = tube.jacobian(&[vgk, vpk]);
+
+            // Both Jacobian entries must be finite
+            assert!(
+                jac[0].is_finite(),
+                "dIp/dVgk must be finite at {} (Vgk={}, Vpk={}): {}",
+                desc, vgk, vpk, jac[0]
+            );
+            assert!(
+                jac[1].is_finite(),
+                "dIp/dVpk must be finite at {} (Vgk={}, Vpk={}): {}",
+                desc, vgk, vpk, jac[1]
+            );
+
+            let fd_dvgk = (tube.plate_current(vgk + eps, vpk)
+                - tube.plate_current(vgk - eps, vpk))
+                / (2.0 * eps);
+            let fd_dvpk = (tube.plate_current(vgk, vpk + eps)
+                - tube.plate_current(vgk, vpk - eps))
+                / (2.0 * eps);
+
+            for (name, analytic, fd) in [
+                ("dIp/dVgk", jac[0], fd_dvgk),
+                ("dIp/dVpk", jac[1], fd_dvpk),
+            ] {
+                let rel_err = if fd.abs() > 1e-15 {
+                    (analytic - fd).abs() / fd.abs()
+                } else {
+                    analytic.abs()
+                };
+                assert!(
+                    rel_err < 0.01,
+                    "Low Vpk {} at {} (Vgk={}, Vpk={}): analytic={:.6e} fd={:.6e} err={:.2e}",
+                    name, desc, vgk, vpk, analytic, fd, rel_err
+                );
+            }
+        }
+    }
+
+    /// Verify Jacobian near cutoff where plate current approaches zero.
+    #[test]
+    fn test_triode_near_cutoff_fd_jacobian() {
+        let tube = KorenTriode::ecc83();
+        let eps = 1e-7;
+
+        // Near-cutoff: very negative Vgk where Ip is very small but nonzero
+        let cutoff_points: &[(f64, f64, &str)] = &[
+            (-3.0, 250.0, "Vgk=-3 near cutoff"),
+            (-3.5, 250.0, "Vgk=-3.5 deep cutoff"),
+            (-2.5, 150.0, "Vgk=-2.5 low Vpk"),
+            (-4.0, 300.0, "Vgk=-4 very deep cutoff"),
+        ];
+
+        for &(vgk, vpk, desc) in cutoff_points {
+            let ip = tube.plate_current(vgk, vpk);
+            let jac = tube.jacobian(&[vgk, vpk]);
+
+            // Plate current should be very small but non-negative
+            assert!(
+                ip >= 0.0,
+                "Ip should be non-negative near cutoff at {}: {:.6e}",
+                desc,
+                ip
+            );
+            assert!(ip.is_finite(), "Ip must be finite at {}", desc);
+
+            // Jacobian must be finite
+            assert!(
+                jac[0].is_finite(),
+                "dIp/dVgk must be finite at {}: {}",
+                desc,
+                jac[0]
+            );
+            assert!(
+                jac[1].is_finite(),
+                "dIp/dVpk must be finite at {}: {}",
+                desc,
+                jac[1]
+            );
+
+            let fd_dvgk = (tube.plate_current(vgk + eps, vpk)
+                - tube.plate_current(vgk - eps, vpk))
+                / (2.0 * eps);
+            let fd_dvpk = (tube.plate_current(vgk, vpk + eps)
+                - tube.plate_current(vgk, vpk - eps))
+                / (2.0 * eps);
+
+            for (name, analytic, fd) in [
+                ("dIp/dVgk", jac[0], fd_dvgk),
+                ("dIp/dVpk", jac[1], fd_dvpk),
+            ] {
+                let rel_err = if fd.abs() > 1e-15 {
+                    (analytic - fd).abs() / fd.abs()
+                } else {
+                    analytic.abs()
+                };
+                assert!(
+                    rel_err < 0.01,
+                    "Near-cutoff {} at {} (Vgk={}, Vpk={}): analytic={:.6e} fd={:.6e} err={:.2e}",
+                    name, desc, vgk, vpk, analytic, fd, rel_err
+                );
+            }
+        }
+    }
+
     /// Verify Jacobian with lambda against finite differences.
     #[test]
     fn test_jacobian_with_lambda_finite_difference() {

@@ -346,6 +346,111 @@ mod tests {
         );
     }
 
+    /// Comprehensive multi-region FD Jacobian test covering cutoff boundary,
+    /// linear/triode, saturation, and P-channel operation.
+    #[test]
+    fn test_jfet_multi_region_fd_jacobian() {
+        let eps = 1e-7;
+
+        // N-channel: Vp = -0.8, IDSS = 0.3e-3
+        let n_jfet = Jfet::n_j201();
+
+        // Operating points covering all regions:
+        // (Vgs, Vds, description)
+        let n_points: &[(f64, f64, &str)] = &[
+            // Cutoff boundary: Vgs just above Vp
+            (-0.75, 5.0, "N cutoff boundary"),
+            // Saturation: Vgs=0, Vds >> Vgs-Vp
+            (0.0, 5.0, "N saturation Vgs=0"),
+            (-0.3, 5.0, "N saturation Vgs=-0.3"),
+            (-0.5, 3.0, "N saturation Vgs=-0.5"),
+            // Linear/triode: Vds < Vgs - Vp
+            (0.0, 0.2, "N linear Vds=0.2"),
+            (0.0, 0.5, "N linear Vds=0.5"),
+            (-0.3, 0.1, "N linear Vgs=-0.3 Vds=0.1"),
+        ];
+
+        for &(vgs, vds, desc) in n_points {
+            let (d_id_d_vgs, d_id_d_vds) = n_jfet.jacobian_partial(vgs, vds);
+
+            let fd_vgs = (n_jfet.drain_current(vgs + eps, vds)
+                - n_jfet.drain_current(vgs - eps, vds))
+                / (2.0 * eps);
+            let fd_vds = (n_jfet.drain_current(vgs, vds + eps)
+                - n_jfet.drain_current(vgs, vds - eps))
+                / (2.0 * eps);
+
+            for (name, analytic, fd) in [
+                ("dId/dVgs", d_id_d_vgs, fd_vgs),
+                ("dId/dVds", d_id_d_vds, fd_vds),
+            ] {
+                let rel_err = if fd.abs() > 1e-15 {
+                    (analytic - fd).abs() / fd.abs()
+                } else {
+                    analytic.abs()
+                };
+                assert!(
+                    rel_err < 0.01,
+                    "N-JFET {} at {} (Vgs={}, Vds={}): analytic={:.6e} fd={:.6e} err={:.2e}",
+                    name,
+                    desc,
+                    vgs,
+                    vds,
+                    analytic,
+                    fd,
+                    rel_err
+                );
+            }
+        }
+
+        // P-channel: Vp = 2.5, IDSS = 5e-3
+        let p_jfet = Jfet::p_2n5460();
+
+        let p_points: &[(f64, f64, &str)] = &[
+            // P-channel cutoff boundary: Vgs just below Vp
+            (2.4, -5.0, "P cutoff boundary"),
+            // P-channel saturation: Vgs=0, Vds negative
+            (0.0, -5.0, "P saturation Vgs=0"),
+            (1.0, -5.0, "P saturation Vgs=1.0"),
+            // P-channel linear: |Vds| < |Vgs - Vp|
+            (0.0, -0.5, "P linear Vds=-0.5"),
+            (1.0, -0.2, "P linear Vgs=1 Vds=-0.2"),
+        ];
+
+        for &(vgs, vds, desc) in p_points {
+            let (d_id_d_vgs, d_id_d_vds) = p_jfet.jacobian_partial(vgs, vds);
+
+            let fd_vgs = (p_jfet.drain_current(vgs + eps, vds)
+                - p_jfet.drain_current(vgs - eps, vds))
+                / (2.0 * eps);
+            let fd_vds = (p_jfet.drain_current(vgs, vds + eps)
+                - p_jfet.drain_current(vgs, vds - eps))
+                / (2.0 * eps);
+
+            for (name, analytic, fd) in [
+                ("dId/dVgs", d_id_d_vgs, fd_vgs),
+                ("dId/dVds", d_id_d_vds, fd_vds),
+            ] {
+                let rel_err = if fd.abs() > 1e-15 {
+                    (analytic - fd).abs() / fd.abs()
+                } else {
+                    analytic.abs()
+                };
+                assert!(
+                    rel_err < 0.01,
+                    "P-JFET {} at {} (Vgs={}, Vds={}): analytic={:.6e} fd={:.6e} err={:.2e}",
+                    name,
+                    desc,
+                    vgs,
+                    vds,
+                    analytic,
+                    fd,
+                    rel_err
+                );
+            }
+        }
+    }
+
     #[test]
     #[should_panic(expected = "Vp must be non-zero")]
     fn test_jfet_vp_zero_rejected() {

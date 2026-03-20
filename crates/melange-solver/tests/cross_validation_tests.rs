@@ -172,13 +172,14 @@ fn build_device_entries(netlist: &Netlist, mna: &MnaSystem) -> Vec<DeviceEntry> 
                 } else {
                     melange_devices::BjtPolarity::Npn
                 };
+                let nf = find_model_param(&model, "NF").unwrap_or(1.0);
                 let bjt = melange_devices::BjtEbersMoll::new(
                     is,
                     melange_primitives::VT_ROOM,
                     bf,
                     br,
                     polarity,
-                );
+                ).with_nf(nf);
                 devices.push(DeviceEntry::new_bjt(bjt, dev_info.start_idx));
             }
             melange_solver::mna::NonlinearDeviceType::Jfet => {
@@ -547,5 +548,374 @@ fn test_sherman_morrison_pot_data_sanity() {
     println!(
         "SM sanity: N={}, M={}, pot min_R={:.0}, max_R={:.0}, g_nom={:.6e}",
         n, kernel.m, pot.min_resistance, pot.max_resistance, pot.g_nominal
+    );
+}
+
+// ============================================================================
+// Additional circuit constants
+// ============================================================================
+
+const PNP_CE: &str = "\
+PNP Common Emitter
+Cin in base 10u
+Vcc vcc 0 DC 12
+R1 vcc base 100k
+R2 base 0 22k
+Q1 coll base emit MYPNP
+Rc coll 0 4.7k
+Re vcc emit 1k
+Ce vcc emit 100u
+Cout coll out 10u
+Rload out 0 100k
+.model MYPNP PNP(IS=1e-14 BF=200 BR=3)
+";
+
+const BJT_CE_GP: &str = "\
+BJT CE Gummel-Poon
+Cin in base 10u
+R1 vcc base 100k
+R2 base 0 22k
+Q1 coll base emit MYGP
+Rc vcc coll 4.7k
+Re emit 0 1k
+Ce emit 0 100u
+Cout coll out 10u
+Rload out 0 100k
+Vcc vcc 0 DC 12
+.model MYGP NPN(IS=1e-14 BF=200 BR=3 VAF=100 IKF=0.3)
+";
+
+const BJT_CE_EM: &str = "\
+BJT CE Ebers-Moll
+Cin in base 10u
+R1 vcc base 100k
+R2 base 0 22k
+Q1 coll base emit MYEM
+Rc vcc coll 4.7k
+Re emit 0 1k
+Ce emit 0 100u
+Cout coll out 10u
+Rload out 0 100k
+Vcc vcc 0 DC 12
+.model MYEM NPN(IS=1e-14 BF=200 BR=3)
+";
+
+const BJT_CE_NF: &str = "\
+BJT CE with NF
+Cin in base 10u
+R1 vcc base 100k
+R2 base 0 22k
+Q1 coll base emit MYNF
+Rc vcc coll 4.7k
+Re emit 0 1k
+Ce emit 0 100u
+Cout coll out 10u
+Rload out 0 100k
+Vcc vcc 0 DC 12
+.model MYNF NPN(IS=1e-14 BF=200 BR=3 NF=1.5)
+";
+
+// ============================================================================
+// Test A: PNP BJT cross-validation
+// ============================================================================
+
+/// PNP common-emitter: codegen vs runtime should match to < 1e-4.
+/// Validates that PNP polarity flows correctly through both paths.
+#[test]
+fn test_codegen_vs_runtime_pnp_bjt() {
+    let (max_diff, max_out) = run_crossval(PNP_CE, 0.01, 4800, 2400, "pnp_bjt");
+    assert!(
+        max_out > 1e-4,
+        "PNP CE: output should be non-zero, got {:.2e}",
+        max_out
+    );
+    assert!(
+        max_diff < 1e-4,
+        "PNP CE: codegen vs runtime max diff = {:.2e} (expected < 1e-4)",
+        max_diff
+    );
+}
+
+// ============================================================================
+// Test B: Nodal vs DK solver path cross-validation
+// ============================================================================
+
+/// Diode clipper: nodal codegen vs DK codegen should produce matching output.
+/// Both paths solve the same circuit equations with different numerical methods
+/// (DK: precomputed S=A^-1, M-dim NR; Nodal: full N-dim LU per NR iteration).
+#[test]
+fn test_nodal_vs_dk_diode_clipper() {
+    let sample_rate = 48000.0;
+    let num_samples = 480;
+    let skip_samples = 10;
+    let amplitude = 2.0;
+
+    let netlist = Netlist::parse(DIODE_CLIPPER).expect("parse");
+    let mut mna = MnaSystem::from_netlist(&netlist).expect("mna");
+    let input_node = mna
+        .node_map
+        .get("in")
+        .copied()
+        .unwrap_or(1)
+        .saturating_sub(1);
+    let output_node = mna
+        .node_map
+        .get("out")
+        .copied()
+        .unwrap_or(2)
+        .saturating_sub(1);
+    mna.g[input_node][input_node] += 1.0;
+
+    // --- DK path ---
+    let kernel = DkKernel::from_mna(&mna, sample_rate).expect("dk kernel");
+    let dk_config = CodegenConfig {
+        circuit_name: "xval_dk_diode".to_string(),
+        sample_rate,
+        input_node,
+        output_nodes: vec![output_node],
+        input_resistance: 1.0,
+        ..CodegenConfig::default()
+    };
+    let dk_codegen = CodeGenerator::new(dk_config);
+    let dk_result = dk_codegen
+        .generate(&kernel, &mna, &netlist)
+        .expect("dk codegen");
+    let dk_output = compile_and_run_codegen_with_amplitude(
+        &dk_result.code,
+        num_samples,
+        sample_rate,
+        amplitude,
+        "nodal_vs_dk_dk",
+    );
+
+    // --- Nodal path ---
+    let nodal_config = CodegenConfig {
+        circuit_name: "xval_nodal_diode".to_string(),
+        sample_rate,
+        input_node,
+        output_nodes: vec![output_node],
+        input_resistance: 1.0,
+        ..CodegenConfig::default()
+    };
+    let nodal_codegen = CodeGenerator::new(nodal_config);
+    let nodal_result = nodal_codegen
+        .generate_nodal(&mna, &netlist)
+        .expect("nodal codegen");
+    let nodal_output = compile_and_run_codegen_with_amplitude(
+        &nodal_result.code,
+        num_samples,
+        sample_rate,
+        amplitude,
+        "nodal_vs_dk_nodal",
+    );
+
+    assert_eq!(
+        dk_output.len(),
+        nodal_output.len(),
+        "DK vs Nodal: sample count mismatch"
+    );
+
+    // Compare outputs — both solve the same equations, so should match closely.
+    // Tolerance is slightly relaxed (0.1% of peak) because:
+    // - DK uses precomputed S=A^-1 with M-dim NR
+    // - Nodal uses per-iteration LU factorization with N-dim NR
+    // - DC operating point may converge to slightly different values
+    let mut max_diff = 0.0f64;
+    let mut max_abs = 0.0f64;
+    for i in skip_samples..num_samples {
+        let diff = (dk_output[i] - nodal_output[i]).abs();
+        max_diff = max_diff.max(diff);
+        max_abs = max_abs.max(dk_output[i].abs().max(nodal_output[i].abs()));
+    }
+
+    let rel_diff = if max_abs > 1e-10 {
+        max_diff / max_abs
+    } else {
+        max_diff
+    };
+
+    println!(
+        "Nodal vs DK: max_diff={:.2e}, max_abs={:.4}, rel_diff={:.2e}",
+        max_diff, max_abs, rel_diff
+    );
+
+    assert!(
+        max_abs > 1e-4,
+        "Both paths should produce non-zero output, got {:.2e}",
+        max_abs
+    );
+    assert!(
+        rel_diff < 1e-3,
+        "Nodal vs DK: relative diff = {:.2e} (expected < 1e-3, i.e. 0.1%)",
+        rel_diff
+    );
+}
+
+// ============================================================================
+// Test C: Gummel-Poon vs Ebers-Moll codegen comparison
+// ============================================================================
+
+/// Gummel-Poon (VAF=100, IKF=0.3) vs Ebers-Moll should produce different output.
+/// GP models Early effect (output resistance) and high-injection limiting, which
+/// reduces gain at higher signal levels compared to the ideal Ebers-Moll model.
+#[test]
+fn test_codegen_gummel_poon_vs_ebers_moll() {
+    let sample_rate = 48000.0;
+    let num_samples = 4800;
+    let skip_samples = 2400; // let DC OP settle
+    let amplitude = 0.01;
+
+    // --- Gummel-Poon codegen ---
+    let gp_netlist = Netlist::parse(BJT_CE_GP).expect("parse GP");
+    let mut gp_mna = MnaSystem::from_netlist(&gp_netlist).expect("mna GP");
+    let gp_input = gp_mna
+        .node_map
+        .get("in")
+        .copied()
+        .unwrap_or(1)
+        .saturating_sub(1);
+    let gp_output = gp_mna
+        .node_map
+        .get("out")
+        .copied()
+        .unwrap_or(2)
+        .saturating_sub(1);
+    gp_mna.g[gp_input][gp_input] += 1.0;
+    let gp_kernel = DkKernel::from_mna(&gp_mna, sample_rate).expect("gp kernel");
+    let gp_config = CodegenConfig {
+        circuit_name: "crossval_gp".to_string(),
+        sample_rate,
+        input_node: gp_input,
+        output_nodes: vec![gp_output],
+        input_resistance: 1.0,
+        ..CodegenConfig::default()
+    };
+    let gp_codegen = CodeGenerator::new(gp_config);
+    let gp_result = gp_codegen
+        .generate(&gp_kernel, &gp_mna, &gp_netlist)
+        .expect("gp codegen");
+    let gp_samples = compile_and_run_codegen_with_amplitude(
+        &gp_result.code,
+        num_samples,
+        sample_rate,
+        amplitude,
+        "gp_model",
+    );
+
+    // --- Ebers-Moll codegen ---
+    let em_netlist = Netlist::parse(BJT_CE_EM).expect("parse EM");
+    let mut em_mna = MnaSystem::from_netlist(&em_netlist).expect("mna EM");
+    let em_input = em_mna
+        .node_map
+        .get("in")
+        .copied()
+        .unwrap_or(1)
+        .saturating_sub(1);
+    let em_output = em_mna
+        .node_map
+        .get("out")
+        .copied()
+        .unwrap_or(2)
+        .saturating_sub(1);
+    em_mna.g[em_input][em_input] += 1.0;
+    let em_kernel = DkKernel::from_mna(&em_mna, sample_rate).expect("em kernel");
+    let em_config = CodegenConfig {
+        circuit_name: "crossval_em".to_string(),
+        sample_rate,
+        input_node: em_input,
+        output_nodes: vec![em_output],
+        input_resistance: 1.0,
+        ..CodegenConfig::default()
+    };
+    let em_codegen = CodeGenerator::new(em_config);
+    let em_result = em_codegen
+        .generate(&em_kernel, &em_mna, &em_netlist)
+        .expect("em codegen");
+    let em_samples = compile_and_run_codegen_with_amplitude(
+        &em_result.code,
+        num_samples,
+        sample_rate,
+        amplitude,
+        "em_model",
+    );
+
+    assert_eq!(gp_samples.len(), em_samples.len(), "sample count mismatch");
+
+    // Both should produce non-trivial output
+    let gp_peak: f64 = gp_samples[skip_samples..]
+        .iter()
+        .map(|s| s.abs())
+        .fold(0.0, f64::max);
+    let em_peak: f64 = em_samples[skip_samples..]
+        .iter()
+        .map(|s| s.abs())
+        .fold(0.0, f64::max);
+
+    println!(
+        "GP vs EM: gp_peak={:.4e}, em_peak={:.4e}",
+        gp_peak, em_peak
+    );
+
+    assert!(
+        gp_peak > 1e-5,
+        "GP output should be non-zero, got {:.2e}",
+        gp_peak
+    );
+    assert!(
+        em_peak > 1e-5,
+        "EM output should be non-zero, got {:.2e}",
+        em_peak
+    );
+
+    // GP and EM should produce DIFFERENT outputs because GP includes:
+    // - Early effect (VAF=100): output resistance ~ VAF/Ic
+    // - High-injection limiting (IKF=0.3): gain compression at high current
+    // We check that there is a measurable difference (> 1% relative).
+    let mut max_diff = 0.0f64;
+    let mut max_abs = 0.0f64;
+    for i in skip_samples..num_samples {
+        let diff = (gp_samples[i] - em_samples[i]).abs();
+        max_diff = max_diff.max(diff);
+        max_abs = max_abs.max(gp_samples[i].abs().max(em_samples[i].abs()));
+    }
+
+    let rel_diff = if max_abs > 1e-10 {
+        max_diff / max_abs
+    } else {
+        0.0
+    };
+
+    println!(
+        "GP vs EM divergence: max_diff={:.2e}, rel_diff={:.2e}",
+        max_diff, rel_diff
+    );
+
+    assert!(
+        rel_diff > 0.01,
+        "GP and EM should differ by > 1%, got {:.2e} (models may not be differentiating)",
+        rel_diff
+    );
+}
+
+// ============================================================================
+// Test D: NF cross-validation (codegen vs runtime)
+// ============================================================================
+
+/// BJT with NF=1.5: codegen vs runtime should match to < 1e-4.
+/// NF (forward emission coefficient) changes the exponential slope of the
+/// forward junction, effectively reducing gain. This test verifies NF flows
+/// correctly through both the codegen and runtime pipelines.
+#[test]
+fn test_codegen_vs_runtime_bjt_nf() {
+    let (max_diff, max_out) = run_crossval(BJT_CE_NF, 0.01, 4800, 2400, "bjt_nf");
+    assert!(
+        max_out > 1e-4,
+        "BJT NF: output should be non-zero, got {:.2e}",
+        max_out
+    );
+    assert!(
+        max_diff < 1e-4,
+        "BJT NF: codegen vs runtime max diff = {:.2e} (expected < 1e-4)",
+        max_diff
     );
 }

@@ -127,7 +127,6 @@ pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS
     };
 {% endif %}
 
-{% if has_be_fallback %}
     // Step 6c: Global node voltage damping safety net.
     // Even after BE fallback, clamp any excessive node voltage changes.
     // Keeps i_nl_prev consistent with v_prev for next sample's RHS.
@@ -152,7 +151,6 @@ pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS
             (v, i_nl)
         }
     };
-{% endif %}
 
     // Step 7: Update state for next iteration
     state.v_prev = v;

@@ -113,6 +113,7 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
 | BJT output wrong | No DC operating point | Call `initialize_dc_op()` or use `DC_NL_I` codegen constant |
 | BJT period-3 oscillation | Backward Euler for nonlinear currents | Fixed: use full i_nl in correction (not delta) |
 | DC OP NR diverges | Wrong Jacobian sign | Use `G_aug = G_dc - N_i·J_dev·N_v` (subtraction!) |
+| DC OP degenerate (all BJTs off) | Parasitic R (RB/RC/RE) in inner loop | Internal nodes in DC system (basePrime/colPrime/emitPrime) |
 | NodalSolver NaN after DC OP | Inductor currents not initialized | Copy full v_node (incl. inductor branch currents) from DC OP |
 | NodalSolver wrong A_neg | Inductor rows zeroed | Only zero VS/VCVS rows (n_nodes..n_aug), NOT inductor rows (n_aug..n_nodal) |
 
@@ -127,6 +128,7 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
 - Codegen uses proper trapezoidal RHS with `input_prev` tracking (matches runtime solver)
 - Per-device `.model` params: each device gets its own IS, N, BF, BR, VT (heterogeneous models supported)
 - Nonlinear DC operating point solver (LU decomposition with partial pivoting, logarithmic junction-aware voltage limiting, source stepping and Gmin stepping fallbacks)
+- DC OP internal nodes for parasitic BJTs: basePrime/colPrime/emitPrime nodes (like ngspice) for correct convergence with RB/RC/RE
 - DC OP integrated into codegen (`DC_NL_I` constant) and runtime (`initialize_dc_op()`)
 - DC operating point calculation includes input conductance
 - Plugin template generates per-channel state for stereo (no cross-channel corruption)
@@ -214,10 +216,15 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
   - Uses NodalSolver codegen path (2 transformer groups → DK K matrix unstable)
   - Gain: +21-27 dB (amp) - 23 dB (EQ) = -2 to +4 dB net (target: 0 dB)
   - Not realtime (0.6×) — needs Schur complement optimization
-- `circuits/wurli-preamp.cir`: Wurlitzer 200A preamp (N=11, M=5, 2 BJTs + 1 diode, 1 pot)
+- `circuits/wurli-preamp.cir`: Wurlitzer 200A preamp (N=11, M=5→3 FA, 2 BJTs + 1 diode, 1 pot)
   - Flattened from openwurli/spice/subcircuits/preamp.cir
   - R1-Cin series input coupling via intermediate node (mid_in)
   - 0.1V in → 9.12V peak out at R_ldr=100K nominal
+- `circuits/wurli-power-amp.cir`: Wurlitzer 200A power amplifier (N=20, M=16→9 FA, 8 BJTs, Class AB)
+  - Quasi-complementary push-pull: PNP diff pair → NPN VAS → Sziklai output pairs
+  - DC OP: v(out)=-0.065V (ngspice: -0.063V), internal nodes for parasitic BJTs (RB up to 120Ω)
+  - FA detection: 7/8 BJTs forward-active (Q9 Vbe multiplier excluded — near saturation)
+  - DK codegen M=9: stable, 0.4× realtime (optimized). Nodal codegen: stable, 0.04× realtime.
 - `circuits/tweed-preamp.cir`: Fender-style 2-stage 12AX7 guitar amp (N=13, M=4, 1 pot, 1 switch)
   - Two 12AX7 triode stages, interstage volume pot (shunt, 500Ω-500kΩ), bright switch (3-pos)
   - Stage 1: fully bypassed cathode (25µF, max gain); Stage 2: partial bypass (0.68µF, ~156Hz)
