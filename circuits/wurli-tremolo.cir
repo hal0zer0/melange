@@ -39,5 +39,8 @@ Cpar  out   0      1P
 * --- Supply ---
 V1    vcc   0      DC 15
 
+* --- Self-oscillating: high input impedance to avoid loading output ---
+.input_impedance 10MEG
+
 * --- Device model ---
 .model Q2N2924 NPN(IS=1.4e-14 BF=200)

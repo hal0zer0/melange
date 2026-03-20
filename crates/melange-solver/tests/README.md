@@ -1,61 +1,38 @@
 # Melange Solver Test Suite
 
-## Testing Philosophy
+## Test Files
 
-**GOLD STANDARD PRINCIPLES:**
-1. **No untested code path** - Every function has test coverage
-2. **Fail fast, fail loud** - Tests catch bugs at build time, not in DAWs
-3. **Speaker safety first** - Output bounds are guaranteed, never assumed
-4. **Real-world validation** - Generated code is compiled and executed
-5. **Regression immunity** - Every bug becomes a test
-
-## Test Organization
-
-### Unit Tests (`src/*/tests`)
-- Fast (< 1ms each)
-- Isolated (no I/O, no compilation)
-- Comprehensive edge cases
-
-### Integration Tests (`tests/integration/`)
-- End-to-end circuit simulation
-- Generated code compilation
-- Long-running stability (1M+ samples)
-
-### Property Tests (`tests/property/`)
-- Fuzzing with random inputs
-- Invariant checking
-- Convergence validation
-
-### Safety Tests (`tests/safety/`)
-- Output bounds verification
-- DC offset detection
-- NaN/inf prevention
+| File | Tests | Description |
+|------|-------|-------------|
+| `codegen_verification_tests.rs` | 128 | Codegen template output: constants, matrices, device calls, NR structure |
+| `coupled_inductor_tests.rs` | 50 | Coupled inductors and transformers |
+| `augmented_mna_tests.rs` | 10 | Augmented MNA for inductor branch variables |
+| `nodal_codegen_tests.rs` | 11 | Nodal solver codegen (compile checks) |
+| `inductor_tests.rs` | 35 | Inductor companion models |
+| `nonlinear_dc_op_tests.rs` | 13 | DC operating point solver |
+| `pot_tests.rs` | 22 | Dynamic potentiometers (Sherman-Morrison) |
+| `switch_tests.rs` | 20 | Switch directives |
+| `subcircuit_tests.rs` | 22 | Subcircuit expansion |
+| `safety_tests.rs` | 8 | Output bounds, NaN prevention |
+| `forward_active_bjt_tests.rs` | 6 | FA BJT detection and codegen |
+| `matrix_math_tests.rs` | 9 | Linear algebra utilities |
+| `cross_validation_tests.rs` | 6 | Runtime solver vs codegen comparison (gold standard) |
 
 ## Running Tests
 
 ```bash
-# All tests
-cargo test --package melange-solver
-
-# Fast unit tests only
-cargo test --package melange-solver --lib
-
-# Integration tests (slower)
-cargo test --package melange-solver --test '*'
-
-# Safety-critical tests
-cargo test --package melange-solver safety
-
-# With coverage
-cargo tarpaulin --package melange-solver
+cargo test -p melange-solver          # All solver tests (~930 tests)
+cargo test -p melange-validate --test spice_validation -- --include-ignored  # SPICE comparison (needs ngspice)
+cargo test --workspace                # Everything
 ```
 
-## Critical Test Criteria
+## SPICE Validation (requires ngspice)
 
-Every generated circuit MUST pass:
-1. S matrix: diagonal values 0.01 - 100
-2. K matrix: ||K|| < 1e6
-3. Zero input → |output| < 0.01V after 1000 samples
-4. Sine wave → |output| < 10V for 1M samples
-5. No NaN/inf in 1M samples
-6. Reset returns to within 1% of initial state
+14 tests in `melange-validate` compare output against ngspice. Gated by `#[ignore]`.
+Run with `--include-ignored` when ngspice is installed.
+
+## Cross-Validation Tests
+
+`cross_validation_tests.rs` compiles generated code AND runs it, comparing against the runtime
+solver for the same circuit. These are the highest-value tests for numerical correctness.
+Currently covers: RC circuit, diode clipper, BJT CE, JFET CS, MOSFET CS, triode CC.

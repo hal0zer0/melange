@@ -10,3 +10,4 @@ __pycache__/
 .claude/
 test.rs
 test_output.txt
+out
