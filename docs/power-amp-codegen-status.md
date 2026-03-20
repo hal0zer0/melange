@@ -1,8 +1,8 @@
 # Wurli Power Amp Codegen — Status Summary
 
-**Date**: 2026-03-19
+**Date**: 2026-03-20
 **Circuit**: `circuits/wurli-power-amp.cir` (8-BJT quasi-complementary Class AB, ~20W)
-**Result**: Stable codegen at 3.4× realtime (48kHz), DC OP converged
+**Result**: BLOCKED — DK M-dim NR cannot converge for this feedback topology. All codegen configs rail at ±10V. Use behavioral model.
 
 ## What Ships
 
