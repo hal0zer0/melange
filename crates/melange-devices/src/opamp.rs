@@ -130,4 +130,98 @@ mod tests {
         let i_sat = opa.current(&[1.0]);
         assert!(i_sat <= opa.vout_max);
     }
+
+    /// Verify SimpleOpamp linear gain accuracy.
+    #[test]
+    fn test_simple_opamp_gain() {
+        let gain = 200e3;
+        let opa = SimpleOpamp::new(gain, 10e6, 12.0);
+
+        // Small signal: output = gain * input
+        let vin = 1e-5; // 10µV — well within linear range
+        let vout = opa.current(&[vin]);
+        let actual_gain = vout / vin;
+        assert!(
+            (actual_gain - gain).abs() / gain < 1e-6,
+            "Gain should be {:.0}, got {:.0}",
+            gain,
+            actual_gain
+        );
+    }
+
+    /// Verify positive and negative saturation.
+    #[test]
+    fn test_simple_opamp_saturation() {
+        let opa = SimpleOpamp::new(100e3, 10e6, 12.0);
+
+        // Positive saturation
+        let vout_pos = opa.current(&[1.0]); // 1V * 100k = 100kV → clamps to +12
+        assert_eq!(vout_pos, 12.0, "Positive saturation should clamp to vout_max");
+
+        // Negative saturation
+        let vout_neg = opa.current(&[-1.0]);
+        assert_eq!(vout_neg, -12.0, "Negative saturation should clamp to vout_min");
+
+        // Just at boundary
+        let vin_edge = 12.0 / 100e3; // exactly at saturation
+        let vout_edge = opa.current(&[vin_edge]);
+        assert!(
+            (vout_edge - 12.0).abs() < 1e-6,
+            "At saturation boundary: {:.6}",
+            vout_edge
+        );
+    }
+
+    /// Verify Jacobian matches finite difference.
+    #[test]
+    fn test_simple_opamp_jacobian_fd() {
+        let opa = SimpleOpamp::new(100e3, 10e6, 12.0);
+        let eps = 1e-9;
+
+        // Linear region
+        let vin = 1e-5;
+        let jac = opa.jacobian(&[vin]);
+        let fd = (opa.current(&[vin + eps]) - opa.current(&[vin - eps])) / (2.0 * eps);
+        assert!(
+            (jac[0] - fd).abs() / fd.abs() < 1e-4,
+            "Linear region: jac={:.6e}, fd={:.6e}",
+            jac[0],
+            fd
+        );
+
+        // Saturated region (Jacobian should be 0)
+        let jac_sat = opa.jacobian(&[1.0]);
+        assert_eq!(jac_sat[0], 0.0, "Saturated Jacobian should be 0");
+
+        let jac_neg_sat = opa.jacobian(&[-1.0]);
+        assert_eq!(jac_neg_sat[0], 0.0, "Negative saturated Jacobian should be 0");
+    }
+
+    /// Verify all preset constructors produce valid models.
+    #[test]
+    fn test_boyle_presets() {
+        for (name, opa) in [
+            ("LM741", BoyleOpamp::lm741()),
+            ("TL072", BoyleOpamp::tl072()),
+            ("NE5532", BoyleOpamp::ne5532()),
+        ] {
+            assert!(opa.gain > 1e4, "{name}: gain too low: {:.0}", opa.gain);
+            assert!(opa.dominant_pole > 0.0, "{name}: invalid pole");
+            assert!(
+                opa.second_pole > opa.dominant_pole,
+                "{name}: second pole should exceed dominant"
+            );
+            assert!(opa.vout_max > 0.0, "{name}: invalid vout_max");
+            assert_eq!(opa.vout_min, -opa.vout_max, "{name}: symmetric rails");
+            assert!(opa.slew_rate > 0.0, "{name}: invalid slew rate");
+        }
+    }
+
+    /// Verify SimpleOpamp zero input gives zero output.
+    #[test]
+    fn test_simple_opamp_zero() {
+        let opa = SimpleOpamp::new(100e3, 10e6, 12.0);
+        assert_eq!(opa.current(&[0.0]), 0.0);
+        assert_eq!(opa.jacobian(&[0.0])[0], 100e3);
+    }
 }

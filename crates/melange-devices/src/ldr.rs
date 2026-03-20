@@ -254,6 +254,201 @@ mod tests {
         );
     }
 
+    /// Verify attack is faster than release by measuring time constants.
+    /// After N samples at cv=1.0, attack should reach ~63% of the way to r_min.
+    /// After same N samples at cv=0.0, release should reach ~63% of the way to r_max.
+    #[test]
+    fn test_ldr_attack_release_time_constants() {
+        let sr = 44100.0;
+        let mut ldr = CdsLdr::vtl5c3(sr);
+
+        // VTL5C3: attack_tau=0.005s, release_tau=0.2s
+        // After attack_tau * sr samples ≈ 220 samples, should be ~63% toward r_min
+        let attack_samples = (0.005 * sr) as usize;
+
+        ldr.reset(); // start at r_max
+        let r_start = ldr.resistance();
+        for _ in 0..attack_samples {
+            ldr.update(1.0);
+        }
+        let r_after_attack = ldr.resistance();
+        let attack_progress = (r_start - r_after_attack) / (r_start - ldr.r_min);
+
+        // Should be approximately 63% (1 - 1/e) after one time constant
+        assert!(
+            attack_progress > 0.4 && attack_progress < 0.9,
+            "Attack progress after 1 tau: {:.1}% (expected ~63%)",
+            attack_progress * 100.0
+        );
+
+        // Now test release: start at r_min, go dark
+        ldr.reset_to(ldr.r_min);
+        let release_samples = (0.2 * sr) as usize;
+        let r_start_rel = ldr.resistance();
+        for _ in 0..release_samples {
+            ldr.update(0.0);
+        }
+        let r_after_release = ldr.resistance();
+        let release_progress = (r_after_release - r_start_rel) / (ldr.r_max - r_start_rel);
+
+        assert!(
+            release_progress > 0.4 && release_progress < 0.9,
+            "Release progress after 1 tau: {:.1}% (expected ~63%)",
+            release_progress * 100.0
+        );
+
+        // Attack tau (0.005) << release tau (0.2), so attack should be 40x faster
+        // Verify by comparing progress at the SAME number of samples
+        let test_samples = 500;
+        ldr.reset();
+        for _ in 0..test_samples {
+            ldr.update(1.0);
+        }
+        let r_attack_500 = ldr.resistance();
+
+        ldr.reset_to(ldr.r_min);
+        for _ in 0..test_samples {
+            ldr.update(0.0);
+        }
+        let r_release_500 = ldr.resistance();
+
+        let attack_frac = (ldr.r_max - r_attack_500) / (ldr.r_max - ldr.r_min);
+        let release_frac = (r_release_500 - ldr.r_min) / (ldr.r_max - ldr.r_min);
+
+        assert!(
+            attack_frac > release_frac * 5.0,
+            "Attack should be much faster: attack={:.1}% vs release={:.1}%",
+            attack_frac * 100.0,
+            release_frac * 100.0
+        );
+    }
+
+    /// Verify power law gamma shapes the control curve.
+    /// gamma < 1 makes curve concave (fast initial, slow final)
+    /// gamma = 1 is linear
+    #[test]
+    fn test_ldr_gamma_power_law() {
+        let sr = 44100.0;
+
+        // gamma=0.5 (concave) vs gamma=1.0 (linear)
+        let mut ldr_g05 = CdsLdr::new(100.0, 1e6, 0.5, 0.001, 0.001, sr);
+        let mut ldr_g10 = CdsLdr::new(100.0, 1e6, 1.0, 0.001, 0.001, sr);
+
+        // At cv=0.5, gamma=0.5 gives (1-0.5)^0.5 = 0.707, gamma=1.0 gives 0.5
+        // So target_r = r_min + (r_max - r_min) * factor
+        // gamma=0.5: factor=0.707 → higher resistance (closer to dark)
+        // gamma=1.0: factor=0.5 → lower resistance
+
+        // Settle both at cv=0.5
+        for _ in 0..100000 {
+            ldr_g05.update(0.5);
+            ldr_g10.update(0.5);
+        }
+
+        // gamma=0.5 should have higher resistance at cv=0.5
+        assert!(
+            ldr_g05.resistance() > ldr_g10.resistance(),
+            "gamma=0.5 R={:.0} should be > gamma=1.0 R={:.0} at cv=0.5",
+            ldr_g05.resistance(),
+            ldr_g10.resistance()
+        );
+
+        // Both should converge to same r_min at cv=1.0
+        for _ in 0..100000 {
+            ldr_g05.update(1.0);
+            ldr_g10.update(1.0);
+        }
+        let diff = (ldr_g05.resistance() - ldr_g10.resistance()).abs();
+        assert!(
+            diff < 10.0,
+            "Both should converge to r_min: g05={:.1}, g10={:.1}",
+            ldr_g05.resistance(),
+            ldr_g10.resistance()
+        );
+    }
+
+    /// Verify control voltage clamping and edge cases.
+    #[test]
+    fn test_ldr_control_voltage_edges() {
+        let mut ldr = CdsLdr::vtl5c3(44100.0);
+
+        // Negative CV should be treated as 0 (dark)
+        ldr.reset();
+        let r_before = ldr.resistance();
+        ldr.update(-1.0);
+        assert!(
+            (ldr.resistance() - r_before).abs() / r_before < 0.001,
+            "Negative CV should clamp to 0 (dark)"
+        );
+
+        // CV > 1 should be treated as 1 (full brightness)
+        ldr.reset();
+        for _ in 0..50000 {
+            ldr.update(5.0);
+        }
+        let r_overcv = ldr.resistance();
+
+        ldr.reset();
+        for _ in 0..50000 {
+            ldr.update(1.0);
+        }
+        let r_cv1 = ldr.resistance();
+
+        let diff = (r_overcv - r_cv1).abs();
+        assert!(
+            diff < 1.0,
+            "CV>1 should equal CV=1: r(5.0)={:.1}, r(1.0)={:.1}",
+            r_overcv,
+            r_cv1
+        );
+    }
+
+    /// Verify reset_to clamps to valid range.
+    #[test]
+    fn test_ldr_reset_to_clamping() {
+        let mut ldr = CdsLdr::vtl5c3(44100.0);
+
+        ldr.reset_to(0.0); // below r_min
+        assert_eq!(ldr.resistance(), ldr.r_min);
+
+        ldr.reset_to(1e12); // above r_max
+        assert_eq!(ldr.resistance(), ldr.r_max);
+
+        ldr.reset_to(1000.0); // normal value
+        assert_eq!(ldr.resistance(), 1000.0);
+    }
+
+    /// Verify sample rate changes time constant behavior correctly.
+    #[test]
+    fn test_ldr_sample_rate_independence() {
+        // Same physical time (0.01s) at different sample rates should give similar result
+        let tau = 0.005;
+
+        let mut ldr_441 = CdsLdr::new(100.0, 1e6, 0.7, tau, 0.2, 44100.0);
+        let mut ldr_96 = CdsLdr::new(100.0, 1e6, 0.7, tau, 0.2, 96000.0);
+
+        let time = 0.01; // 2 time constants
+        let n_441 = (time * 44100.0) as usize;
+        let n_96 = (time * 96000.0) as usize;
+
+        for _ in 0..n_441 {
+            ldr_441.update(1.0);
+        }
+        for _ in 0..n_96 {
+            ldr_96.update(1.0);
+        }
+
+        let rel_diff = (ldr_441.resistance() - ldr_96.resistance()).abs()
+            / ldr_441.resistance();
+        assert!(
+            rel_diff < 0.01,
+            "Same time at different rates should match: r@44.1k={:.1}, r@96k={:.1}, diff={:.2}%",
+            ldr_441.resistance(),
+            ldr_96.resistance(),
+            rel_diff * 100.0
+        );
+    }
+
     /// Verify LDR current and jacobian are finite even with very small r_min.
     #[test]
     fn test_ldr_finite_at_small_resistance() {
