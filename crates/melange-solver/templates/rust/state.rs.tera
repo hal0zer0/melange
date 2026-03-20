@@ -436,7 +436,9 @@ impl CircuitState {
         }
 
         let internal_rate = sample_rate * OVERSAMPLING_FACTOR as f64;
-        let alpha = 2.0 * internal_rate;
+{% if backward_euler %}        let alpha = internal_rate;
+{% else %}        let alpha = 2.0 * internal_rate;
+{% endif %}
 {% if num_inductors > 0 or num_coupled_inductors > 0 or num_transformer_groups > 0 %}        let t = 1.0 / internal_rate;
 {% endif %}
         // Build A = G + alpha*C
@@ -447,13 +449,21 @@ impl CircuitState {
             }
         }
 
-        // Build A_neg = alpha*C - G
+{% if backward_euler %}        // Build A_neg = alpha*C (backward Euler: no -G term)
+        let mut a_neg = [[0.0f64; N]; N];
+        for i in 0..N {
+            for j in 0..N {
+                a_neg[i][j] = alpha * C[i][j];
+            }
+        }
+{% else %}        // Build A_neg = alpha*C - G (trapezoidal)
         let mut a_neg = [[0.0f64; N]; N];
         for i in 0..N {
             for j in 0..N {
                 a_neg[i][j] = alpha * C[i][j] - G[i][j];
             }
         }
+{% endif %}
 {% if has_augmented %}
         // Zero VS/VCVS algebraic rows in A_neg (NOT inductor rows).
         // These have no capacitance and no history — rhs_const provides V_dc directly.

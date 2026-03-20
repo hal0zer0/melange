@@ -99,7 +99,7 @@ pub struct Topology {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SolverConfig {
     pub sample_rate: f64,
-    /// alpha = 2 * internal_sample_rate (trapezoidal integration constant)
+    /// alpha = 2/T (trapezoidal) or 1/T (backward Euler) at internal sample rate
     pub alpha: f64,
     pub tolerance: f64,
     pub max_iterations: usize,
@@ -117,6 +117,9 @@ pub struct SolverConfig {
     /// Silent samples to process after pot-triggered matrix rebuild (default 64).
     #[serde(default = "default_pot_settle_samples")]
     pub pot_settle_samples: usize,
+    /// Use backward Euler integration (unconditionally stable, first-order).
+    #[serde(default)]
+    pub backward_euler: bool,
 }
 
 fn default_pot_settle_samples() -> usize {
@@ -468,6 +471,22 @@ impl BjtParams {
     /// Returns true if self-heating is enabled (RTH is finite).
     pub fn has_self_heating(&self) -> bool {
         self.rth.is_finite()
+    }
+    /// Returns the 2x2 parasitic R coupling matrix R_p for K_eff = K - R_p.
+    ///
+    /// Layout: `[R_p[be,be], R_p[be,bc], R_p[bc,be], R_p[bc,bc]]`
+    /// where be = Vbe→Ic dimension (start_idx), bc = Vbc→Ib dimension (start_idx+1).
+    ///
+    /// The DK NR residual with parasitic absorption is:
+    ///   f(i) = i - i_device(p + K_eff * i)
+    /// where K_eff = K_original - R_p, and i_device uses the intrinsic model.
+    pub fn r_p_matrix(&self) -> [f64; 4] {
+        [
+            self.re,            // R_p[be,be]: Vbe drop from Ic * RE
+            self.rb + self.re,  // R_p[be,bc]: Vbe drop from Ib * (RB + RE)
+            -self.rc,           // R_p[bc,be]: Vbc drop from -Ic * RC
+            self.rb,            // R_p[bc,bc]: Vbc drop from Ib * RB
+        ]
     }
 }
 
@@ -913,9 +932,12 @@ impl CircuitIR {
         let os_factor = config.oversampling_factor;
         let internal_rate = config.sample_rate * os_factor as f64;
 
+        let be = config.backward_euler;
+        let alpha = if be { internal_rate } else { 2.0 * internal_rate };
+
         let solver_config = SolverConfig {
             sample_rate: config.sample_rate,
-            alpha: 2.0 * internal_rate,
+            alpha,
             tolerance: config.tolerance,
             max_iterations: config.max_iterations,
             input_node: config.input_node,
@@ -924,6 +946,7 @@ impl CircuitIR {
             oversampling_factor: os_factor,
             output_scales: config.output_scales.clone(),
             pot_settle_samples: config.pot_settle_samples,
+            backward_euler: be,
         };
 
         let metadata = CircuitMetadata {
@@ -1057,6 +1080,67 @@ impl CircuitIR {
                 n_v: kernel.n_v.clone(),
                 n_i: kernel.n_i.clone(),
                 rhs_const: kernel.rhs_const.clone(),
+                g_matrix,
+                c_matrix,
+                a_matrix: Vec::new(),
+                a_matrix_be: Vec::new(),
+                a_neg_be: Vec::new(),
+                rhs_const_be: Vec::new(),
+                s_be: Vec::new(),
+                k_be: Vec::new(),
+            }
+        } else if be {
+            // Backward Euler: recompute S, A_neg, K from G/C with alpha = 1/T
+            let mut a_flat = vec![0.0f64; n * n];
+            let mut a_neg_flat = vec![0.0f64; n * n];
+            for i in 0..n {
+                for j in 0..n {
+                    let g = g_matrix[i * n + j];
+                    let c = c_matrix[i * n + j];
+                    a_flat[i * n + j] = g + alpha * c;
+                    a_neg_flat[i * n + j] = alpha * c; // BE: no -G term
+                }
+            }
+            // Zero VS/VCVS algebraic rows in A_neg
+            for vs in &mna.voltage_sources {
+                let row = mna.n + vs.ext_idx;
+                if row < n { for j in 0..n { a_neg_flat[row * n + j] = 0.0; } }
+            }
+            let num_vs = mna.voltage_sources.len();
+            for (idx, _) in mna.vcvs_sources.iter().enumerate() {
+                let row = mna.n + num_vs + idx;
+                if row < n { for j in 0..n { a_neg_flat[row * n + j] = 0.0; } }
+            }
+            let num_vcvs = mna.vcvs_sources.len();
+            for (idx, _) in mna.ideal_transformers.iter().enumerate() {
+                let row = mna.n + num_vs + num_vcvs + idx;
+                if row < n { for j in 0..n { a_neg_flat[row * n + j] = 0.0; } }
+            }
+            let s_flat = invert_flat_matrix(&a_flat, n)?;
+            let k_flat = if m > 0 {
+                compute_k_from_s(&s_flat, &kernel.n_v, &kernel.n_i, n, m)
+            } else {
+                Vec::new()
+            };
+            // BE rhs_const: current sources x1 (not x2), VS x1
+            let mut rhs_const_be = vec![0.0f64; n];
+            for src in &mna.current_sources {
+                crate::mna::inject_rhs_current(&mut rhs_const_be, src.n_plus_idx, src.dc_value);
+                crate::mna::inject_rhs_current(&mut rhs_const_be, src.n_minus_idx, -src.dc_value);
+            }
+            for vs in &mna.voltage_sources {
+                let k_row = mna.n + vs.ext_idx;
+                if k_row < n {
+                    rhs_const_be[k_row] = vs.dc_value;
+                }
+            }
+            Matrices {
+                s: s_flat,
+                a_neg: a_neg_flat,
+                k: k_flat,
+                n_v: kernel.n_v.clone(),
+                n_i: kernel.n_i.clone(),
+                rhs_const: rhs_const_be,
                 g_matrix,
                 c_matrix,
                 a_matrix: Vec::new(),
@@ -1347,7 +1431,7 @@ impl CircuitIR {
 
         let sample_rate = config.sample_rate;
         let internal_rate = sample_rate * config.oversampling_factor as f64;
-        let alpha = 2.0 * internal_rate;
+        let alpha = if config.backward_euler { internal_rate } else { 2.0 * internal_rate };
         let alpha_be = internal_rate;
 
         let topology = Topology {
@@ -1370,6 +1454,7 @@ impl CircuitIR {
             oversampling_factor: config.oversampling_factor,
             output_scales: config.output_scales.clone(),
             pot_settle_samples: config.pot_settle_samples,
+            backward_euler: config.backward_euler,
         };
 
         let metadata = CircuitMetadata {

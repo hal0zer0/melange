@@ -67,6 +67,7 @@ fn main() {
         dc_op_tolerance: 1e-9,
         dc_block: true,
         pot_settle_samples: 64,
+        backward_euler: false,
     };
     let ir = CircuitIR::from_mna(&mna, &netlist, &config).expect("failed to build CircuitIR");
 

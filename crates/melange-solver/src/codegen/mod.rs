@@ -62,6 +62,11 @@ pub struct CodegenConfig {
     /// Settles the NR to the new nonlinear DC operating point. Default 64.
     /// Set to 0 for zero-latency pot changes (may glitch on large pot swings).
     pub pot_settle_samples: usize,
+    /// Use backward Euler integration instead of trapezoidal.
+    /// Unconditionally stable (L-stable) — fixes divergence in high-gain feedback
+    /// amplifiers where trapezoidal's imaginary-axis preservation causes oscillation.
+    /// Trades second-order accuracy for first-order, giving slight HF rolloff.
+    pub backward_euler: bool,
 }
 
 impl Default for CodegenConfig {
@@ -81,6 +86,7 @@ impl Default for CodegenConfig {
             dc_op_tolerance: 1e-9,
             dc_block: true,
             pot_settle_samples: 64,
+            backward_euler: false,
         }
     }
 }

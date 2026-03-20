@@ -96,6 +96,12 @@ enum Commands {
         /// Use nodal for large M circuits where DK NR doesn't converge.
         #[arg(long, default_value = "auto")]
         solver: String,
+
+        /// Use backward Euler integration instead of trapezoidal.
+        /// Unconditionally stable — fixes divergence in high-gain feedback amplifiers.
+        /// Trades second-order accuracy for first-order (slight HF rolloff).
+        #[arg(long)]
+        backward_euler: bool,
     },
 
     /// Validate circuit against ngspice reference simulation
@@ -323,6 +329,7 @@ fn main() -> Result<()> {
             input_resistance: input_resistance_flag,
             oversampling,
             solver,
+            backward_euler,
         } => {
             // Validate numeric CLI parameters
             if sample_rate <= 0.0 || !sample_rate.is_finite() {
@@ -361,6 +368,7 @@ fn main() -> Result<()> {
                 oversampling,
                 no_dc_block,
                 &solver,
+                backward_euler,
             )
         }
         Commands::Validate {
@@ -500,6 +508,7 @@ fn compile_circuit_source(
     oversampling: usize,
     no_dc_block: bool,
     solver_override: &str,
+    backward_euler: bool,
 ) -> Result<()> {
     use melange_solver::{
         codegen::{CodeGenerator, CodegenConfig},
@@ -743,6 +752,7 @@ fn compile_circuit_source(
         input_resistance,
         oversampling_factor: oversampling,
         dc_block: !no_dc_block,
+        backward_euler,
         ..CodegenConfig::default()
     };
 
