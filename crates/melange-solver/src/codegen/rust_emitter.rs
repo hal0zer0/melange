@@ -1942,6 +1942,8 @@ impl RustEmitter {
     fn emit_process_sample(&self, ir: &CircuitIR) -> Result<String, CodegenError> {
         let mut ctx = Context::new();
         ctx.insert("augmented_inductors", &ir.topology.augmented_inductors);
+        let n_nodes = if ir.topology.n_nodes > 0 { ir.topology.n_nodes } else { ir.topology.n };
+        ctx.insert("n_nodes", &n_nodes);
         // When augmented_inductors is true, companion model state update is not needed —
         // A_neg handles all inductor history through the augmented G/C matrices.
         let num_inductors = if ir.topology.augmented_inductors {
