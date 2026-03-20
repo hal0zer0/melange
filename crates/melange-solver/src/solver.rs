@@ -715,6 +715,31 @@ impl CircuitSolver {
         })
     }
 
+    /// Apply K_eff parasitic R corrections for BJTs with parasitic resistances.
+    ///
+    /// For each BJT with non-zero RB/RC/RE, subtracts the R_p coupling matrix from
+    /// the K matrix's 2×2 device block. This absorbs parasitic R into the DK kernel,
+    /// so the NR uses intrinsic device voltages (no inner parasitic NR needed).
+    ///
+    /// Call after `new()` and before `process_sample()`. The corrections are:
+    /// - K_eff[be,be] -= RE
+    /// - K_eff[be,bc] -= (RB + RE)
+    /// - K_eff[bc,be] -= (-RC)  (i.e., += RC)
+    /// - K_eff[bc,bc] -= RB
+    pub fn apply_k_eff_corrections(&mut self, corrections: &[(usize, f64, f64, f64)]) {
+        let m = self.kernel.m;
+        for &(start_idx, rb, rc, re) in corrections {
+            if start_idx + 1 >= m {
+                continue;
+            }
+            let s = start_idx;
+            self.kernel.k[s * m + s] -= re;
+            self.kernel.k[s * m + (s + 1)] -= rb + re;
+            self.kernel.k[(s + 1) * m + s] += rc;
+            self.kernel.k[(s + 1) * m + (s + 1)] -= rb;
+        }
+    }
+
     /// Returns the convergence reason from the most recent call to
     /// [`process_sample`](Self::process_sample).
     ///

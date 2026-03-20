@@ -1604,6 +1604,24 @@ fn simulate_circuit_source(
             .with_context(|| "Failed to create circuit solver")?;
         solver.input_conductance = input_conductance;
 
+        // Apply K_eff parasitic R corrections for BJTs
+        {
+            let device_slots = build_device_slots(&netlist, &mna);
+            let mut k_eff_corrections = Vec::new();
+            for slot in &device_slots {
+                if let melange_solver::codegen::ir::DeviceParams::Bjt(bp) = &slot.params {
+                    if bp.has_parasitics()
+                        && slot.device_type == melange_solver::codegen::ir::DeviceType::Bjt
+                    {
+                        k_eff_corrections.push((slot.start_idx, bp.rb, bp.rc, bp.re));
+                    }
+                }
+            }
+            if !k_eff_corrections.is_empty() {
+                solver.apply_k_eff_corrections(&k_eff_corrections);
+            }
+        }
+
         // Initialize DC operating point for nonlinear circuits
         if has_nonlinear {
             println!("  Initializing DC operating point...");
@@ -1986,6 +2004,22 @@ fn analyze_freq_response(
             CircuitSolver::new(kernel.clone(), devices, input_node_idx, output_node_idx)
                 .with_context(|| "Failed to create circuit solver")?;
         solver.input_conductance = input_conductance;
+        // Apply K_eff parasitic R corrections for BJTs
+        {
+            let mut k_corrections = Vec::new();
+            for slot in &device_slots {
+                if let melange_solver::codegen::ir::DeviceParams::Bjt(bp) = &slot.params {
+                    if bp.has_parasitics()
+                        && slot.device_type == melange_solver::codegen::ir::DeviceType::Bjt
+                    {
+                        k_corrections.push((slot.start_idx, bp.rb, bp.rc, bp.re));
+                    }
+                }
+            }
+            if !k_corrections.is_empty() {
+                solver.apply_k_eff_corrections(&k_corrections);
+            }
+        }
         solver.initialize_dc_op(&mna, &device_slots);
         Some(BaseSolver::Dk(solver))
     } else {
