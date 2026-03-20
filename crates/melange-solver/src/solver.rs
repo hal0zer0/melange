@@ -1218,29 +1218,36 @@ impl CircuitSolver {
                 continue;
             }
 
-            // Compute voltage-space step: delta_v[i] = -sum_j K[i][j] * delta[j]
-            // Then apply SPICE limiting in voltage space and compute damping factor.
+            // Trial-voltage approach: compute device voltages after full NR step,
+            // then limit those directly. Avoids K-amplification problem where large K
+            // entries (from K_eff parasitic corrections) cause extreme dv that gets
+            // over-damped, preventing convergence.
             let mut alpha = 1.0_f64;
-            for device in &self.devices {
-                let idx = device.start_idx();
-                for d in 0..device.dimension() {
-                    let i = idx + d;
-                    // Implied voltage change from current-space step
-                    let mut dv = 0.0;
-                    for j in 0..m {
-                        dv -= self.kernel.k[i * m + j] * self.delta[j];
-                    }
-                    if dv.abs() > 1e-15 {
+            {
+                // Compute trial i_nl after full step
+                let mut i_trial = [0.0_f64; 16]; // MAX_M
+                for i in 0..m {
+                    i_trial[i] = self.i_nl[i] - self.delta[i];
+                }
+                // Compute trial device voltages: v_trial = p + K * i_trial
+                for device in &self.devices {
+                    let idx = device.start_idx();
+                    for d in 0..device.dimension() {
+                        let i = idx + d;
+                        let mut v_trial = self.p[i];
+                        let k_row = i * m;
+                        for j in 0..m {
+                            v_trial += self.kernel.k[k_row + j] * i_trial[j];
+                        }
                         let v_old = self.v_nl[i];
-                        let v_proposed = v_old + dv;
-                        let v_limited = device.limit_voltage(d, v_proposed, v_old);
-                        let dv_limited = v_limited - v_old;
-                        let ratio = dv_limited / dv;
-                        // ratio can be negative if limiter reverses direction (rare);
-                        // in that case take a small step rather than going backwards
-                        let ratio = ratio.max(0.01);
-                        if ratio < alpha {
-                            alpha = ratio;
+                        let dv = v_trial - v_old;
+                        if dv.abs() > 1e-15 {
+                            let v_limited = device.limit_voltage(d, v_trial, v_old);
+                            let dv_limited = v_limited - v_old;
+                            let ratio = (dv_limited / dv).clamp(0.01, 1.0);
+                            if ratio < alpha {
+                                alpha = ratio;
+                            }
                         }
                     }
                 }
