@@ -708,6 +708,50 @@ impl RustEmitter {
             .collect();
         ctx.insert("s_ni_rows", &s_ni_rows);
 
+        // Backward Euler fallback constants (for BE fallback in DK NR solver)
+        let has_be_fallback = !ir.matrices.s_be.is_empty() && m > 0;
+        ctx.insert("has_be_fallback", &has_be_fallback);
+        if has_be_fallback {
+            ctx.insert("s_be_rows", &format_matrix_rows(n, n, |i, j| ir.s_be(i, j)));
+            ctx.insert("k_be_rows", &format_matrix_rows(m, m, |i, j| ir.k_be(i, j)));
+            ctx.insert(
+                "a_neg_be_rows",
+                &format_matrix_rows(n, n, |i, j| ir.a_neg_be(i, j)),
+            );
+
+            // S_NI_be = S_be * N_i (N x M)
+            let s_ni_be_rows: Vec<String> = (0..n)
+                .map(|i| {
+                    (0..m)
+                        .map(|j| {
+                            let mut val = 0.0;
+                            for k in 0..n {
+                                val += ir.s_be(i, k) * ir.n_i(k, j);
+                            }
+                            fmt_f64(val)
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .collect();
+            ctx.insert("s_ni_be_rows", &s_ni_be_rows);
+
+            // RHS_CONST_BE (backward Euler: DC sources x1)
+            if ir.has_dc_sources && !ir.matrices.rhs_const_be.is_empty() {
+                let rhs_const_be_values = (0..n)
+                    .map(|i| {
+                        if i < ir.matrices.rhs_const_be.len() {
+                            fmt_f64(ir.matrices.rhs_const_be[i])
+                        } else {
+                            fmt_f64(0.0)
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                ctx.insert("rhs_const_be_values", &rhs_const_be_values);
+            }
+        }
+
         // Switch constants
         let num_switches = ir.switches.len();
         ctx.insert("num_switches", &num_switches);
@@ -951,6 +995,10 @@ impl RustEmitter {
         }
 
         ctx.insert("dc_block", &ir.dc_block);
+
+        // Backward Euler fallback state fields (for BE fallback in DK NR solver)
+        let has_be_fallback = !ir.matrices.s_be.is_empty() && ir.topology.m > 0;
+        ctx.insert("has_be_fallback", &has_be_fallback);
 
         self.render("state", &ctx)
     }
@@ -1944,6 +1992,19 @@ impl RustEmitter {
         ctx.insert("augmented_inductors", &ir.topology.augmented_inductors);
         let n_nodes = if ir.topology.n_nodes > 0 { ir.topology.n_nodes } else { ir.topology.n };
         ctx.insert("n_nodes", &n_nodes);
+        // BE fallback activates only for circuits with ill-conditioned K (parasitic R
+        // or high loop gain). Well-conditioned circuits don't need it and the BE step
+        // reduces accuracy. Threshold: any K diagonal with magnitude > 50.
+        let has_be_fallback = if !ir.matrices.s_be.is_empty() && ir.topology.m > 0 {
+            let k = &ir.matrices.k;
+            let m = ir.topology.m;
+            (0..m).any(|i| k[i * m + i].abs() > 50.0)
+        } else {
+            false
+        };
+        ctx.insert("has_be_fallback", &has_be_fallback);
+        ctx.insert("has_dc_sources", &ir.has_dc_sources);
+        ctx.insert("max_iter", &ir.solver_config.max_iterations);
         // When augmented_inductors is true, companion model state update is not needed —
         // A_neg handles all inductor history through the augmented G/C matrices.
         let num_inductors = if ir.topology.augmented_inductors {

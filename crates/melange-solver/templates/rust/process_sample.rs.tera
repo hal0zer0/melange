@@ -66,12 +66,60 @@ pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS
 
     // Step 6: Update history (no-op, handled by A_neg formulation)
     update_history(&v, state);
+{% if has_be_fallback %}
+    // Step 6b: Backward Euler fallback for trapezoidal instability.
+    // If trapezoidal NR didn't converge, retry the entire sample with L-stable
+    // backward Euler integration. BE damps all oscillatory modes including the
+    // marginally stable poles that trapezoidal preserves on the unit circle.
+    let converged_trap = state.last_nr_iterations < {{ max_iter }} as u32;
+    let (v, i_nl) = if !converged_trap {
+        state.diag_nr_max_iter_count += 1;
+        state.diag_be_fallback_count += 1;
+        // Rebuild RHS with backward Euler matrices
+        let mut rhs_be = [0.0f64; N];
+        for i in 0..N {
+{% if has_dc_sources %}            let mut sum = RHS_CONST_BE[i];
+{% else %}            let mut sum = 0.0;
+{% endif %}            for j in 0..N { sum += state.a_neg_be[i][j] * state.v_prev[j]; }
+            for j in 0..M { sum += N_I[j][i] * state.i_nl_prev[j]; }
+            rhs_be[i] = sum;
+        }
+        rhs_be[INPUT_NODE] += input / INPUT_RESISTANCE;
+        // BE linear prediction: v_pred_be = S_be * rhs_be
+        let mut v_pred_be = [0.0f64; N];
+        for i in 0..N {
+            let mut sum = 0.0;
+            for j in 0..N { sum += state.s_be[i][j] * rhs_be[j]; }
+            v_pred_be[i] = sum;
+        }
+        // BE controlling voltages
+        let mut p_be = [0.0f64; M];
+        for i in 0..M {
+            let mut sum = 0.0;
+            for j in 0..N { sum += N_V[i][j] * v_pred_be[j]; }
+            p_be[i] = sum;
+        }
+        // BE NR solve: swap k/k_be so solve_nonlinear uses BE kernel
+        std::mem::swap(&mut state.k, &mut state.k_be);
+        std::mem::swap(&mut state.s_ni, &mut state.s_ni_be);
+{% if use_k_eff is defined and use_k_eff %}        let i_nl_be = solve_nonlinear(&p_be, &k_eff, state);
+{% else %}        let i_nl_be = solve_nonlinear(&p_be, state);
+{% endif %}        std::mem::swap(&mut state.k, &mut state.k_be);
+        std::mem::swap(&mut state.s_ni, &mut state.s_ni_be);
+        // Recover full v from BE
+        let mut v_be = v_pred_be;
+        for i in 0..N {
+            for j in 0..M { v_be[i] += state.s_ni_be[i][j] * i_nl_be[j]; }
+        }
+        (v_be, i_nl_be)
+    } else {
+        (v, i_nl)
+    };
+{% endif %}
 
-    // Step 6b: Global node voltage damping (matches runtime CircuitSolver).
-    // If any circuit node voltage changed by >10V in this sample, scale the
-    // entire step so the maximum change equals the threshold. Also scale i_nl
-    // proportionally to keep i_nl_prev consistent with v_prev for next sample's
-    // RHS (otherwise N_i * i_nl_prev feeds back divergent currents).
+    // Step 6c: Global node voltage damping safety net.
+    // Even after BE fallback, clamp any excessive node voltage changes.
+    // Keeps i_nl_prev consistent with v_prev for next sample's RHS.
     let (v, i_nl) = {
         let mut max_delta = 0.0_f64;
         for i in 0..{{ n_nodes }} {

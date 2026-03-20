@@ -1151,6 +1151,51 @@ impl CircuitIR {
                 k_be: Vec::new(),
             }
         } else {
+            // Compute BE fallback matrices for per-sample trap→BE fallback.
+            // alpha_be = 1/T (half of trapezoidal alpha = 2/T)
+            let alpha_be = internal_rate;
+            let mut a_be_flat = vec![0.0f64; n * n];
+            let mut a_neg_be_flat = vec![0.0f64; n * n];
+            for i in 0..n {
+                for j in 0..n {
+                    let g = g_matrix[i * n + j];
+                    let c = c_matrix[i * n + j];
+                    a_be_flat[i * n + j] = g + alpha_be * c;
+                    a_neg_be_flat[i * n + j] = alpha_be * c; // BE: no -G term
+                }
+            }
+            // Zero VS/VCVS algebraic rows in A_neg_be
+            for vs in &mna.voltage_sources {
+                let row = mna.n + vs.ext_idx;
+                if row < n { for j in 0..n { a_neg_be_flat[row * n + j] = 0.0; } }
+            }
+            let num_vs = mna.voltage_sources.len();
+            for (idx, _) in mna.vcvs_sources.iter().enumerate() {
+                let row = mna.n + num_vs + idx;
+                if row < n { for j in 0..n { a_neg_be_flat[row * n + j] = 0.0; } }
+            }
+            let num_vcvs = mna.vcvs_sources.len();
+            for (idx, _) in mna.ideal_transformers.iter().enumerate() {
+                let row = mna.n + num_vs + num_vcvs + idx;
+                if row < n { for j in 0..n { a_neg_be_flat[row * n + j] = 0.0; } }
+            }
+            let s_be_flat = invert_flat_matrix(&a_be_flat, n).unwrap_or_default();
+            let k_be_flat = if m > 0 && !s_be_flat.is_empty() {
+                compute_k_from_s(&s_be_flat, &kernel.n_v, &kernel.n_i, n, m)
+            } else {
+                Vec::new()
+            };
+            // BE rhs_const: current sources ×1, VS ×1
+            let mut rhs_const_be_vec = vec![0.0f64; n];
+            for src in &mna.current_sources {
+                crate::mna::inject_rhs_current(&mut rhs_const_be_vec, src.n_plus_idx, src.dc_value);
+                crate::mna::inject_rhs_current(&mut rhs_const_be_vec, src.n_minus_idx, -src.dc_value);
+            }
+            for vs in &mna.voltage_sources {
+                let k_row = mna.n + vs.ext_idx;
+                if k_row < n { rhs_const_be_vec[k_row] = vs.dc_value; }
+            }
+
             Matrices {
                 s: kernel.s.clone(),
                 a_neg: kernel.a_neg.clone(),
@@ -1161,11 +1206,11 @@ impl CircuitIR {
                 g_matrix,
                 c_matrix,
                 a_matrix: Vec::new(),
-                a_matrix_be: Vec::new(),
-                a_neg_be: Vec::new(),
-                rhs_const_be: Vec::new(),
-                s_be: Vec::new(),
-                k_be: Vec::new(),
+                a_matrix_be: a_be_flat,
+                a_neg_be: a_neg_be_flat,
+                rhs_const_be: rhs_const_be_vec,
+                s_be: s_be_flat,
+                k_be: k_be_flat,
             }
         };
 

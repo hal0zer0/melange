@@ -81,6 +81,32 @@ pub const N_I: [[f64; N]; M] = [
 pub const S_NI_DEFAULT: [[f64; M]; N] = [
 {% for row in s_ni_rows %}    [{{ row }}],
 {% endfor %}];
+{% if has_be_fallback %}
+
+/// S_be matrix: A_be^{-1} (backward Euler, at SAMPLE_RATE)
+pub const S_BE_DEFAULT: [[f64; N]; N] = [
+{% for row in s_be_rows %}    [{{ row }}],
+{% endfor %}];
+
+/// K_be matrix: N_v * S_be * N_i (backward Euler kernel, at SAMPLE_RATE)
+pub const K_BE_DEFAULT: [[f64; M]; M] = [
+{% for row in k_be_rows %}    [{{ row }}],
+{% endfor %}];
+
+/// S_NI_be matrix: S_be * N_i (backward Euler, at SAMPLE_RATE)
+pub const S_NI_BE_DEFAULT: [[f64; M]; N] = [
+{% for row in s_ni_be_rows %}    [{{ row }}],
+{% endfor %}];
+
+/// A_neg_be matrix: (1/T)*C (backward Euler history, at SAMPLE_RATE)
+pub const A_NEG_BE_DEFAULT: [[f64; N]; N] = [
+{% for row in a_neg_be_rows %}    [{{ row }}],
+{% endfor %}];
+{% if has_dc_sources and rhs_const_be_values is defined %}
+/// RHS constant contribution from DC sources (backward Euler: all rows x1)
+pub const RHS_CONST_BE: [f64; N] = [{{ rhs_const_be_values }}];
+{% endif %}
+{% endif %}
 {% if num_inductors > 0 %}
 
 /// Number of inductors

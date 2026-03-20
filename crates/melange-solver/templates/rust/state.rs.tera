@@ -62,6 +62,22 @@ pub struct CircuitState {
 
     /// S * N_i product, recomputed by set_sample_rate
     pub s_ni: [[f64; M]; N],
+{% if has_be_fallback %}
+    /// S_be = A_be^{-1} (backward Euler), recomputed by set_sample_rate
+    pub s_be: [[f64; N]; N],
+
+    /// K_be = N_v * S_be * N_i (backward Euler kernel), recomputed by set_sample_rate
+    pub k_be: [[f64; M]; M],
+
+    /// S_be * N_i product (backward Euler), recomputed by set_sample_rate
+    pub s_ni_be: [[f64; M]; N],
+
+    /// A_neg_be = (1/T)*C (backward Euler history), recomputed by set_sample_rate
+    pub a_neg_be: [[f64; N]; N],
+
+    /// Diagnostic: number of backward Euler fallback activations
+    pub diag_be_fallback_count: u64,
+{% endif %}
 {% if num_inductors > 0 %}
     /// Inductor previous currents
     pub ind_i_prev: [f64; {{ num_inductors }}],
@@ -186,6 +202,13 @@ impl Default for CircuitState {
             a_neg: A_NEG_DEFAULT,
             k: K_DEFAULT,
             s_ni: S_NI_DEFAULT,
+{% if has_be_fallback %}
+            s_be: S_BE_DEFAULT,
+            k_be: K_BE_DEFAULT,
+            s_ni_be: S_NI_BE_DEFAULT,
+            a_neg_be: A_NEG_BE_DEFAULT,
+            diag_be_fallback_count: 0,
+{% endif %}
 {% if num_inductors > 0 %}
             ind_i_prev: [0.0; {{ num_inductors }}],
             ind_v_prev: [0.0; {{ num_inductors }}],
@@ -267,6 +290,9 @@ impl CircuitState {
         self.diag_nr_max_iter_count = 0;
         self.diag_nan_reset_count = 0;
         self.diag_singular_matrix_count = 0;
+{% if has_be_fallback %}
+        self.diag_be_fallback_count = 0;
+{% endif %}
 {% if num_inductors > 0 %}
         self.ind_i_prev = [0.0; {{ num_inductors }}];
         self.ind_v_prev = [0.0; {{ num_inductors }}];
@@ -346,6 +372,12 @@ impl CircuitState {
                 self.a_neg = A_NEG_DEFAULT;
                 self.k = K_DEFAULT;
                 self.s_ni = S_NI_DEFAULT;
+{% if has_be_fallback %}
+                self.s_be = S_BE_DEFAULT;
+                self.k_be = K_BE_DEFAULT;
+                self.s_ni_be = S_NI_BE_DEFAULT;
+                self.a_neg_be = A_NEG_BE_DEFAULT;
+{% endif %}
 {% if num_inductors > 0 %}
                 self.ind_g_eq = [{% for ind in inductors %}IND_{{ loop.index0 }}_G_EQ{% if not loop.last %}, {% endif %}{% endfor %}];
 {% endif %}
@@ -404,6 +436,12 @@ impl CircuitState {
             self.a_neg = A_NEG_DEFAULT;
             self.k = K_DEFAULT;
             self.s_ni = S_NI_DEFAULT;
+{% if has_be_fallback %}
+            self.s_be = S_BE_DEFAULT;
+            self.k_be = K_BE_DEFAULT;
+            self.s_ni_be = S_NI_BE_DEFAULT;
+            self.a_neg_be = A_NEG_BE_DEFAULT;
+{% endif %}
 {% if num_inductors > 0 %}
             self.ind_g_eq = [{% for ind in inductors %}IND_{{ loop.index0 }}_G_EQ{% if not loop.last %}, {% endif %}{% endfor %}];
 {% endif %}
@@ -562,6 +600,62 @@ impl CircuitState {
         self.a_neg = a_neg;
         self.k = k;
         self.s_ni = s_ni;
+{% if has_be_fallback %}
+
+        // Recompute backward Euler fallback matrices
+        let alpha_be = internal_rate; // 1/T for backward Euler
+        let mut a_be = [[0.0f64; N]; N];
+        for i in 0..N {
+            for j in 0..N {
+                a_be[i][j] = G[i][j] + alpha_be * C[i][j];
+            }
+        }
+        let mut a_neg_be = [[0.0f64; N]; N];
+        for i in 0..N {
+            for j in 0..N {
+                a_neg_be[i][j] = alpha_be * C[i][j];
+            }
+        }
+{% if has_augmented %}
+{% if augmented_inductors %}
+        for i in {{ n_nodes }}..{{ n_aug }} {
+{% else %}
+        for i in {{ n_nodes }}..N {
+{% endif %}
+            for j in 0..N {
+                a_neg_be[i][j] = 0.0;
+            }
+        }
+{% endif %}
+        let (s_be, singular_be) = invert_n(a_be);
+        if singular_be {
+            self.diag_singular_matrix_count += 1;
+        }
+        let mut s_ni_be = [[0.0f64; M]; N];
+        for i in 0..N {
+            for j in 0..M {
+                let mut sum = 0.0;
+                for kk in 0..N {
+                    sum += s_be[i][kk] * N_I[j][kk];
+                }
+                s_ni_be[i][j] = sum;
+            }
+        }
+        let mut k_be = [[0.0f64; M]; M];
+        for i in 0..M {
+            for j in 0..M {
+                let mut sum = 0.0;
+                for n_idx in 0..N {
+                    sum += N_V[i][n_idx] * s_ni_be[n_idx][j];
+                }
+                k_be[i][j] = sum;
+            }
+        }
+        self.s_be = s_be;
+        self.k_be = k_be;
+        self.s_ni_be = s_ni_be;
+        self.a_neg_be = a_neg_be;
+{% endif %}
 {% if num_pots > 0 %}
 
         // Recompute Sherman-Morrison vectors for pots
