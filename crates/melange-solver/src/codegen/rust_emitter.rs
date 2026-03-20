@@ -4920,6 +4920,31 @@ impl RustEmitter {
             }
             code.push('\n');
 
+            // Step 3c: MOSFET body effect update (from v_pred, before NR)
+            for (dev_num, slot) in ir.device_slots.iter().enumerate() {
+                if let DeviceParams::Mosfet(mp) = &slot.params {
+                    if mp.has_body_effect() {
+                        let vs_expr = if mp.source_node > 0 {
+                            format!("v_pred[{}]", mp.source_node - 1)
+                        } else {
+                            "0.0".to_string()
+                        };
+                        let vb_expr = if mp.bulk_node > 0 {
+                            format!("v_pred[{}]", mp.bulk_node - 1)
+                        } else {
+                            "0.0".to_string()
+                        };
+                        let sign = if mp.is_p_channel { -1.0 } else { 1.0 };
+                        code.push_str(&format!(
+                            "    {{ // MOSFET {dev_num} body effect\n\
+                             \x20       let vsb = ({sign:.1}) * ({vs_expr} - {vb_expr});\n\
+                             \x20       state.device_{dev_num}_vt = DEVICE_{dev_num}_VT + DEVICE_{dev_num}_GAMMA * ((DEVICE_{dev_num}_PHI + vsb.max(0.0)).sqrt() - DEVICE_{dev_num}_PHI.sqrt());\n\
+                             \x20   }}\n"
+                        ));
+                    }
+                }
+            }
+
             // Step 4: M-dim NR (same structure as DK solve_nonlinear)
             code.push_str("    // Step 4: M-dim Newton-Raphson (Schur complement)\n");
             code.push_str("    // First-order predictor warm start\n");
