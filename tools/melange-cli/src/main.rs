@@ -892,19 +892,60 @@ fn compile_circuit_source(
         } else {
             0
         };
+    // Check trapezoidal stability: spectral radius of S*A_neg > 1.001 means
+    // the trapezoidal method will ring. Route to nodal (not DK+BE) since nodal
+    // handles stiff circuits correctly via voltage-space NR.
+    let dk_unstable = if !dk_failed && kernel.m > 0 {
+        let n_k = kernel.n;
+        let mut x = vec![1.0 / (n_k as f64).sqrt(); n_k];
+        let mut y = vec![0.0; n_k];
+        let mut rho = 0.0;
+        for _ in 0..20 {
+            let mut ax = vec![0.0; n_k];
+            for i in 0..n_k { for j in 0..n_k { ax[i] += kernel.a_neg[i * n_k + j] * x[j]; } }
+            for i in 0..n_k { y[i] = 0.0; for j in 0..n_k { y[i] += kernel.s[i * n_k + j] * ax[j]; } }
+            let norm: f64 = y.iter().map(|v| v * v).sum::<f64>().sqrt();
+            if norm < 1e-30 { break; }
+            rho = norm / x.iter().map(|v| v * v).sum::<f64>().sqrt();
+            for i in 0..n_k { x[i] = y[i] / norm; }
+        }
+        if rho > 1.002 {
+            println!("  Trapezoidal unstable (spectral radius {:.4}), routing to nodal", rho);
+            true
+        } else { false }
+    } else { false };
+
     let use_nodal_codegen = match solver_override {
         "nodal" => true,
         "dk" => false,
         _ => {
             // Auto-select nodal when:
             // 1. DK kernel failed (positive feedback / oscillator circuits)
-            // 2. Multi-transformer circuits (DK K matrix unstable for inter-transformer coupling)
-            // 3. Large M (≥10): M×M Gauss elimination is expensive and NR can diverge.
+            // 2. DK trapezoidal unstable (spectral radius > 1.001, stiff circuits)
+            // 3. Multi-transformer circuits (DK K matrix unstable for inter-transformer coupling)
+            // 4. Large M (≥10): M×M Gauss elimination is expensive and NR can diverge.
             let multi_xfmr = has_inductors_compile && n_xfmr_groups > 1;
             let large_m = kernel.m >= 10;
-            dk_failed || multi_xfmr || large_m
+            dk_failed || dk_unstable || multi_xfmr || large_m
         }
     };
+
+    // When auto-routing to nodal (not user-requested), undo FA reduction.
+    // FA assumes permanently forward-active BJTs, but circuits that need nodal
+    // (oscillators, high-gain feedback) have BJTs that swing between regions.
+    if use_nodal_codegen && solver_override != "nodal" && !forward_active.is_empty() {
+        println!("  Undoing FA reduction for nodal path (BJTs may leave forward-active during transient)");
+        mna = MnaSystem::from_netlist(&netlist)
+            .with_context(|| "Failed to rebuild MNA without FA")?;
+        if input_node_idx < mna.n {
+            mna.g[input_node_idx][input_node_idx] += input_conductance;
+        }
+        let device_slots =
+            melange_solver::codegen::ir::CircuitIR::build_device_info(&netlist).unwrap_or_default();
+        if !device_slots.is_empty() {
+            mna.stamp_device_junction_caps(&device_slots);
+        }
+    }
 
     let generated = if use_nodal_codegen {
         println!("  Using nodal solver codegen");

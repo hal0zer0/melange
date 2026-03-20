@@ -933,8 +933,10 @@ impl CircuitIR {
         let internal_rate = config.sample_rate * os_factor as f64;
 
         // Auto-detect stiffness: if the trapezoidal time-stepping operator S*A_neg
-        // has spectral radius > 0.999 (near or above stability boundary), the circuit
+        // has spectral radius > 1.001 (above stability boundary), the circuit
         // is too stiff for trapezoidal and needs backward Euler.
+        // Note: for DK codegen, auto_be=true means the circuit should be routed
+        // to the nodal solver instead (BE on DK still diverges for high-S circuits).
         let auto_be = if !config.backward_euler && n > 0 {
             // Compute spectral radius estimate via power iteration on S_trap * A_neg_trap
             let s_trap = &kernel.s;
@@ -962,7 +964,7 @@ impl CircuitIR {
                 spectral_radius = norm / x.iter().map(|v| v * v).sum::<f64>().sqrt();
                 for i in 0..n { x[i] = y[i] / norm; }
             }
-            if spectral_radius > 1.001 {
+            if spectral_radius > 1.002 {
                 log::info!("Auto-selecting backward Euler: spectral radius {:.4} > 1.001 (trapezoidal unstable)", spectral_radius);
                 eprintln!("  Auto-selecting backward Euler (spectral radius {:.4} > 1.001)", spectral_radius);
                 true
