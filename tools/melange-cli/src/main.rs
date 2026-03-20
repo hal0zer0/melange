@@ -783,15 +783,25 @@ fn compile_circuit_source(
 
     let generated = if use_nodal_codegen {
         println!("  Using nodal solver codegen");
-        // Expand MNA with internal nodes for parasitic BJTs before nodal codegen.
-        // The nodal N×N NR naturally handles the expanded system.
-        {
+        // Expand MNA with internal nodes for parasitic BJTs.
+        // Skip expansion if K will be ill-conditioned (K_diag < -100), which triggers
+        // the full N×N LU path instead of Schur. The LU path handles parasitics via
+        // bjt_with_parasitics() — internal nodes would increase N without benefit.
+        let k_diag_min = if kernel.m > 0 {
+            (0..kernel.m).map(|i| kernel.k[i * kernel.m + i]).fold(0.0_f64, f64::min)
+        } else {
+            0.0
+        };
+        let skip_expansion = k_diag_min < -100.0;
+        if !skip_expansion {
             let device_slots = melange_solver::codegen::ir::CircuitIR::build_device_info_with_mna(
                 &netlist, Some(&mna),
             ).unwrap_or_default();
             if !device_slots.is_empty() {
                 mna.expand_bjt_internal_nodes(&device_slots);
             }
+        } else {
+            println!("  Skipping internal node expansion (K ill-conditioned, using full LU)");
         }
         generator
             .generate_nodal(&mna, &netlist)

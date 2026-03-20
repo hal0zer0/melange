@@ -2800,115 +2800,79 @@ fn emit_schur_nr_limit_and_converge(
     indent: &str,
     k_matrix_expr: &str,
 ) {
-    // Compute implied voltage changes: dv[i] = -sum_j K[i][j] * delta[j]
+    // Trial-voltage approach: compute new device voltages after full NR step,
+    // then limit those directly. This avoids the K-amplification problem where
+    // large K entries cause dv = -K*delta to be huge even for small delta,
+    // leading to extreme damping ratios that prevent convergence.
     code.push_str(&format!(
-        "{indent}// Voltage-space limiting (SPICE pnjlim/fetlim through K matrix)\n"
+        "{indent}// Trial voltages: apply full NR step, then limit\n"
     ));
+    // i_nl_trial = i_nl - delta
     for i in 0..dim {
-        code.push_str(&format!("{indent}let dv{i} = -("));
-        let mut first = true;
+        code.push_str(&format!("{indent}let i_trial{i} = i_nl[{i}] - delta{i};\n"));
+    }
+    // v_d_trial = p + K * i_nl_trial (new device voltages after full step)
+    for i in 0..dim {
+        code.push_str(&format!("{indent}let v_trial{i} = p[{i}]"));
         for j in 0..dim {
-            if !first {
-                code.push_str(" + ");
-            }
-            code.push_str(&format!("{k_matrix_expr}[{i}][{j}] * delta{j}"));
-            first = false;
+            code.push_str(&format!(" + {k_matrix_expr}[{i}][{j}] * i_trial{j}"));
         }
-        code.push_str(");\n");
+        code.push_str(";\n");
     }
 
-    // Compute per-dimension damping factor from per-device limiting
-    code.push_str(&format!(
-        "{indent}let mut alpha = [1.0_f64; {dim}];\n"
-    ));
+    // Per-device voltage limiting on trial voltages
     code.push_str(&format!("{indent}let mut any_limited = false;\n"));
     for (dev_num, slot) in ir.device_slots.iter().enumerate() {
         for d in 0..slot.dimension {
             let i = slot.start_idx + d;
-            code.push_str(&format!("{indent}if dv{i}.abs() > 1e-15 {{\n"));
-            match (&slot.device_type, d) {
-                (DeviceType::Diode, _) => {
-                    code.push_str(&format!(
-                        "{indent}    let v_lim = pnjlim(v_d{i} + dv{i}, v_d{i}, state.device_{dev_num}_n_vt, DEVICE_{dev_num}_VCRIT);\n"
-                    ));
-                }
-                (DeviceType::Bjt, _) | (DeviceType::BjtForwardActive, _) => {
-                    code.push_str(&format!(
-                        "{indent}    let v_lim = pnjlim(v_d{i} + dv{i}, v_d{i}, state.device_{dev_num}_vt, DEVICE_{dev_num}_VCRIT);\n"
-                    ));
-                }
-                (DeviceType::Jfet, 0) => {
-                    code.push_str(&format!(
-                        "{indent}    let v_lim = fetlim(v_d{i} + dv{i}, v_d{i}, 0.0);\n"
-                    ));
-                }
-                (DeviceType::Jfet, _) => {
-                    code.push_str(&format!(
-                        "{indent}    let v_lim = fetlim(v_d{i} + dv{i}, v_d{i}, state.device_{dev_num}_vp);\n"
-                    ));
-                }
-                (DeviceType::Mosfet, 0) => {
-                    code.push_str(&format!(
-                        "{indent}    let v_lim = fetlim(v_d{i} + dv{i}, v_d{i}, 0.0);\n"
-                    ));
-                }
-                (DeviceType::Mosfet, _) => {
-                    code.push_str(&format!(
-                        "{indent}    let v_lim = fetlim(v_d{i} + dv{i}, v_d{i}, state.device_{dev_num}_vt);\n"
-                    ));
-                }
-                (DeviceType::Tube, 0) => {
-                    code.push_str(&format!(
-                        "{indent}    let v_lim = pnjlim(v_d{i} + dv{i}, v_d{i}, state.device_{dev_num}_vgk_onset / 3.0, DEVICE_{dev_num}_VCRIT);\n"
-                    ));
-                }
-                (DeviceType::Tube, _) => {
-                    code.push_str(&format!(
-                        "{indent}    let v_lim = fetlim(v_d{i} + dv{i}, v_d{i}, 0.0);\n"
-                    ));
-                }
-            }
-            code.push_str(&format!(
-                "{indent}    let ratio = ((v_lim - v_d{i}) / dv{i}).max(0.01);\n"
-            ));
-            code.push_str(&format!(
-                "{indent}    if ratio < alpha[{i}] {{ alpha[{i}] = ratio; if ratio < 1.0 {{ any_limited = true; }} }}\n"
-            ));
-            code.push_str(&format!("{indent}}}\n"));
+            // Apply pnjlim/fetlim: limit v_trial relative to v_d (current)
+            let lim_expr = match (&slot.device_type, d) {
+                (DeviceType::Diode, _) => format!(
+                    "pnjlim(v_trial{i}, v_d{i}, state.device_{dev_num}_n_vt, DEVICE_{dev_num}_VCRIT)"
+                ),
+                (DeviceType::Bjt, _) | (DeviceType::BjtForwardActive, _) => format!(
+                    "pnjlim(v_trial{i}, v_d{i}, state.device_{dev_num}_vt, DEVICE_{dev_num}_VCRIT)"
+                ),
+                (DeviceType::Jfet, 0) => format!("fetlim(v_trial{i}, v_d{i}, 0.0)"),
+                (DeviceType::Jfet, _) => format!("fetlim(v_trial{i}, v_d{i}, state.device_{dev_num}_vp)"),
+                (DeviceType::Mosfet, 0) => format!("fetlim(v_trial{i}, v_d{i}, 0.0)"),
+                (DeviceType::Mosfet, _) => format!("fetlim(v_trial{i}, v_d{i}, state.device_{dev_num}_vt)"),
+                (DeviceType::Tube, 0) => format!(
+                    "pnjlim(v_trial{i}, v_d{i}, state.device_{dev_num}_vgk_onset / 3.0, DEVICE_{dev_num}_VCRIT)"
+                ),
+                (DeviceType::Tube, _) => format!("fetlim(v_trial{i}, v_d{i}, 0.0)"),
+            };
+            code.push_str(&format!("{indent}let v_lim{i} = {lim_expr};\n"));
         }
     }
 
-    // Enforce per-device grouping: both dims of a 2D device share the minimum alpha
-    for slot in &ir.device_slots {
-        if slot.dimension > 1 {
-            let s = slot.start_idx;
-            let s1 = s + 1;
-            code.push_str(&format!(
-                "{indent}{{ let dev_alpha = alpha[{s}].min(alpha[{s1}]); alpha[{s}] = dev_alpha; alpha[{s1}] = dev_alpha; }}\n"
-            ));
-        }
+    // Compute global damping: ratio of limited voltage change to full voltage change
+    // Use the minimum ratio across all dimensions (most conservative)
+    code.push_str(&format!("{indent}let mut global_alpha = 1.0_f64;\n"));
+    for i in 0..dim {
+        code.push_str(&format!(
+            "{indent}{{ let dv_full = v_trial{i} - v_d{i}; let dv_lim = v_lim{i} - v_d{i}; \
+             if dv_full.abs() > 1e-15 {{ let r = (dv_lim / dv_full).clamp(0.01, 1.0); \
+             if r < global_alpha {{ global_alpha = r; any_limited = true; }} }} }}\n"
+        ));
     }
 
     // Global voltage backstop: no device voltage changes by more than 3.5V
-    code.push_str(&format!(
-        "{indent}// Global voltage backstop: limit max voltage change to 3.5V\n"
-    ));
-    code.push_str(&format!("{indent}let max_dv = "));
+    code.push_str(&format!("{indent}{{ let max_dv = "));
     for i in 0..dim {
         if i > 0 {
-            code.push_str(&format!(".max((dv{i} * alpha[{i}]).abs())"));
+            code.push_str(&format!(".max(((v_trial{i} - v_d{i}) * global_alpha).abs())"));
         } else {
-            code.push_str(&format!("(dv{i} * alpha[{i}]).abs()"));
+            code.push_str(&format!("((v_trial{i} - v_d{i}) * global_alpha).abs()"));
         }
     }
-    code.push_str(";\n");
     code.push_str(&format!(
-        "{indent}if max_dv > 3.5 {{ let factor = (3.5 / max_dv).max(0.1); for a in alpha.iter_mut() {{ *a *= factor; }} }}\n"
+        "; if max_dv > 3.5 {{ global_alpha *= (3.5 / max_dv).max(0.1); any_limited = true; }} }}\n"
     ));
 
-    // Apply damped step
+    // Apply globally damped step
     for i in 0..dim {
-        code.push_str(&format!("{indent}i_nl[{i}] -= alpha[{i}] * delta{i};\n"));
+        code.push_str(&format!("{indent}i_nl[{i}] -= global_alpha * delta{i};\n"));
     }
 
     // RELTOL convergence check — break from loop (not return)
@@ -2919,7 +2883,7 @@ fn emit_schur_nr_limit_and_converge(
     code.push_str(&format!("{indent}    let mut nr_converged = true;\n"));
     for i in 0..dim {
         code.push_str(&format!(
-            "{indent}    {{ let step = alpha[{i}] * delta{i}; let v_new = v_d{i} + dv{i} * alpha[{i}]; let threshold = 1e-3 * v_d{i}.abs().max(v_new.abs()) + 1e-6; if step.abs() > threshold {{ nr_converged = false; }} }}\n"
+            "{indent}    {{ let dv = (v_trial{i} - v_d{i}) * global_alpha; let threshold = 1e-3 * v_d{i}.abs().max((v_d{i} + dv).abs()) + 1e-6; if dv.abs() > threshold {{ nr_converged = false; }} }}\n"
         ));
     }
     code.push_str(&format!("{indent}    if nr_converged {{\n"));
@@ -3560,8 +3524,21 @@ impl RustEmitter {
         // Nodal-specific: invert_n function (for rebuild_matrices at runtime)
         code.push_str(&Self::emit_nodal_invert_n(ir));
 
-        // Nodal-specific: Schur complement process_sample (M-dim NR via precomputed S = A^{-1})
-        code.push_str(&Self::emit_nodal_schur_process_sample(ir)?);
+        // Nodal process_sample: use Schur (M-dim NR) unless K is ill-conditioned,
+        // in which case fall back to full N×N LU NR.
+        let k_diag_min = if ir.topology.m > 0 {
+            (0..ir.topology.m).map(|i| ir.matrices.k[i * ir.topology.m + i]).fold(0.0_f64, f64::min)
+        } else {
+            0.0
+        };
+        let use_full_nodal = k_diag_min < -100.0; // K ill-conditioned from parasitic R
+        if use_full_nodal {
+            log::info!("Nodal: using full N×N LU NR (K_diag_min={:.1}, ill-conditioned)", k_diag_min);
+            code.push_str(&Self::emit_nodal_lu_solve(ir));
+            code.push_str(&Self::emit_nodal_process_sample(ir));
+        } else {
+            code.push_str(&Self::emit_nodal_schur_process_sample(ir)?);
+        }
 
         if ir.solver_config.oversampling_factor > 1 {
             code.push_str(&Self::emit_oversampler(ir));
@@ -5728,10 +5705,15 @@ impl RustEmitter {
         }
         code.push('\n');
 
-        // Input source (Thevenin, trapezoidal)
-        code.push_str("    // Input source (Thevenin, trapezoidal)\n");
+        // Input source (Thevenin)
         code.push_str("    let input_conductance = 1.0 / INPUT_RESISTANCE;\n");
-        code.push_str("    rhs[INPUT_NODE] += (input + state.input_prev) * input_conductance;\n");
+        if ir.solver_config.backward_euler {
+            code.push_str("    // Input source (backward Euler: V_in * G_in)\n");
+            code.push_str("    rhs[INPUT_NODE] += input * input_conductance;\n");
+        } else {
+            code.push_str("    // Input source (trapezoidal: (V_in + V_in_prev) * G_in)\n");
+            code.push_str("    rhs[INPUT_NODE] += (input + state.input_prev) * input_conductance;\n");
+        }
         code.push_str("    state.input_prev = input;\n\n");
 
         // Handle linear circuits (M=0): direct LU solve, no NR iteration

@@ -1467,7 +1467,8 @@ impl CircuitIR {
         let g_matrix = dk::flatten_matrix(&aug.g, n, n);
         let c_matrix = dk::flatten_matrix(&aug.c, n, n);
 
-        // Build trapezoidal A = G + alpha*C, A_neg = alpha*C - G
+        // Build A = G + alpha*C, A_neg = alpha*C - G (trapezoidal) or alpha*C (BE)
+        let be = config.backward_euler;
         let mut a_flat = vec![0.0f64; n * n];
         let mut a_neg_flat = vec![0.0f64; n * n];
         for i in 0..n {
@@ -1475,7 +1476,7 @@ impl CircuitIR {
                 let g = aug.g[i][j];
                 let c = aug.c[i][j];
                 a_flat[i * n + j] = g + alpha * c;
-                a_neg_flat[i * n + j] = alpha * c - g;
+                a_neg_flat[i * n + j] = if be { alpha * c } else { alpha * c - g };
             }
         }
         // Zero VS/VCVS/ideal-transformer algebraic rows in A_neg (NOT inductor or internal node rows)
@@ -1539,14 +1540,27 @@ impl CircuitIR {
             }
         }
 
-        // Build trapezoidal rhs_const (node rows ×2, VS rows ×1)
-        let rhs_const_base = dk::build_rhs_const(mna);
-        let mut rhs_const = vec![0.0f64; n];
-        for i in 0..n_aug {
-            rhs_const[i] = rhs_const_base[i];
-        }
+        // Build rhs_const: trapezoidal (node rows ×2, VS rows ×1) or BE (all ×1)
+        let rhs_const = if be {
+            // BE: current sources ×1 (not ×2), VS ×1
+            let mut rc = vec![0.0f64; n];
+            for src in &mna.current_sources {
+                crate::mna::inject_rhs_current(&mut rc, src.n_plus_idx, src.dc_value);
+                crate::mna::inject_rhs_current(&mut rc, src.n_minus_idx, -src.dc_value);
+            }
+            for vs in &mna.voltage_sources {
+                let k = mna.n + vs.ext_idx;
+                if k < n { rc[k] = vs.dc_value; }
+            }
+            rc
+        } else {
+            let rhs_const_base = dk::build_rhs_const(mna);
+            let mut rc = vec![0.0f64; n];
+            for i in 0..n_aug { rc[i] = rhs_const_base[i]; }
+            rc
+        };
 
-        // Build BE rhs_const (node rows ×1, VS rows ×1)
+        // Build BE rhs_const (node rows ×1, VS rows ×1) — for fallback
         let mut rhs_const_be = vec![0.0f64; n];
         for src in &mna.current_sources {
             crate::mna::inject_rhs_current(&mut rhs_const_be, src.n_plus_idx, src.dc_value);
