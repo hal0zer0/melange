@@ -932,7 +932,47 @@ impl CircuitIR {
         let os_factor = config.oversampling_factor;
         let internal_rate = config.sample_rate * os_factor as f64;
 
-        let be = config.backward_euler;
+        // Auto-detect stiffness: if the trapezoidal time-stepping operator S*A_neg
+        // has spectral radius > 0.999 (near or above stability boundary), the circuit
+        // is too stiff for trapezoidal and needs backward Euler.
+        let auto_be = if !config.backward_euler && n > 0 {
+            // Compute spectral radius estimate via power iteration on S_trap * A_neg_trap
+            let s_trap = &kernel.s;
+            let a_neg_trap = &kernel.a_neg;
+            // One matrix-vector multiply: y = S * A_neg * x, iterate to find dominant eigenvalue
+            let mut x = vec![1.0 / (n as f64).sqrt(); n];
+            let mut y = vec![0.0; n];
+            let mut spectral_radius = 0.0;
+            for _ in 0..20 { // 20 power iterations
+                // y = S * (A_neg * x)
+                let mut ax = vec![0.0; n];
+                for i in 0..n {
+                    for j in 0..n {
+                        ax[i] += a_neg_trap[i * n + j] * x[j];
+                    }
+                }
+                for i in 0..n {
+                    y[i] = 0.0;
+                    for j in 0..n {
+                        y[i] += s_trap[i * n + j] * ax[j];
+                    }
+                }
+                let norm: f64 = y.iter().map(|v| v * v).sum::<f64>().sqrt();
+                if norm < 1e-30 { break; }
+                spectral_radius = norm / x.iter().map(|v| v * v).sum::<f64>().sqrt();
+                for i in 0..n { x[i] = y[i] / norm; }
+            }
+            if spectral_radius > 1.001 {
+                log::info!("Auto-selecting backward Euler: spectral radius {:.4} > 1.001 (trapezoidal unstable)", spectral_radius);
+                eprintln!("  Auto-selecting backward Euler (spectral radius {:.4} > 1.001)", spectral_radius);
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        let be = config.backward_euler || auto_be;
         let alpha = if be { internal_rate } else { 2.0 * internal_rate };
 
         let solver_config = SolverConfig {
@@ -1151,51 +1191,7 @@ impl CircuitIR {
                 k_be: Vec::new(),
             }
         } else {
-            // Compute BE fallback matrices for per-sample trap→BE fallback.
-            // alpha_be = 1/T (half of trapezoidal alpha = 2/T)
-            let alpha_be = internal_rate;
-            let mut a_be_flat = vec![0.0f64; n * n];
-            let mut a_neg_be_flat = vec![0.0f64; n * n];
-            for i in 0..n {
-                for j in 0..n {
-                    let g = g_matrix[i * n + j];
-                    let c = c_matrix[i * n + j];
-                    a_be_flat[i * n + j] = g + alpha_be * c;
-                    a_neg_be_flat[i * n + j] = alpha_be * c; // BE: no -G term
-                }
-            }
-            // Zero VS/VCVS algebraic rows in A_neg_be
-            for vs in &mna.voltage_sources {
-                let row = mna.n + vs.ext_idx;
-                if row < n { for j in 0..n { a_neg_be_flat[row * n + j] = 0.0; } }
-            }
-            let num_vs = mna.voltage_sources.len();
-            for (idx, _) in mna.vcvs_sources.iter().enumerate() {
-                let row = mna.n + num_vs + idx;
-                if row < n { for j in 0..n { a_neg_be_flat[row * n + j] = 0.0; } }
-            }
-            let num_vcvs = mna.vcvs_sources.len();
-            for (idx, _) in mna.ideal_transformers.iter().enumerate() {
-                let row = mna.n + num_vs + num_vcvs + idx;
-                if row < n { for j in 0..n { a_neg_be_flat[row * n + j] = 0.0; } }
-            }
-            let s_be_flat = invert_flat_matrix(&a_be_flat, n).unwrap_or_default();
-            let k_be_flat = if m > 0 && !s_be_flat.is_empty() {
-                compute_k_from_s(&s_be_flat, &kernel.n_v, &kernel.n_i, n, m)
-            } else {
-                Vec::new()
-            };
-            // BE rhs_const: current sources ×1, VS ×1
-            let mut rhs_const_be_vec = vec![0.0f64; n];
-            for src in &mna.current_sources {
-                crate::mna::inject_rhs_current(&mut rhs_const_be_vec, src.n_plus_idx, src.dc_value);
-                crate::mna::inject_rhs_current(&mut rhs_const_be_vec, src.n_minus_idx, -src.dc_value);
-            }
-            for vs in &mna.voltage_sources {
-                let k_row = mna.n + vs.ext_idx;
-                if k_row < n { rhs_const_be_vec[k_row] = vs.dc_value; }
-            }
-
+            // Standard trapezoidal: use kernel matrices directly, no BE fallback.
             Matrices {
                 s: kernel.s.clone(),
                 a_neg: kernel.a_neg.clone(),
@@ -1206,13 +1202,17 @@ impl CircuitIR {
                 g_matrix,
                 c_matrix,
                 a_matrix: Vec::new(),
-                a_matrix_be: a_be_flat,
-                a_neg_be: a_neg_be_flat,
-                rhs_const_be: rhs_const_be_vec,
-                s_be: s_be_flat,
-                k_be: k_be_flat,
+                a_matrix_be: Vec::new(),
+                a_neg_be: Vec::new(),
+                rhs_const_be: Vec::new(),
+                s_be: Vec::new(),
+                k_be: Vec::new(),
             }
         };
+
+        // Note: BE fallback matrices are only populated when be=true (auto-detected
+        // or --backward-euler flag). Normal trapezoidal circuits have empty s_be/k_be/etc.
+        // This ensures no state struct layout changes for well-conditioned circuits.
 
         let mut device_slots = Self::build_device_info_with_mna(netlist, Some(mna))?;
         Self::resolve_mosfet_nodes(&mut device_slots, mna);

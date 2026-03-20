@@ -25,6 +25,10 @@ pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS
     // Compute Sherman-Morrison scale factors for potentiometers
 {{ sm_scale_lines }}{% endif %}
 
+{% if has_be_fallback %}    // Pre-check: force BE if cooldown active from previous ringing detection.
+    let force_be = state.be_cooldown > 0;
+    if state.be_cooldown > 0 { state.be_cooldown -= 1; }
+{% endif %}
     // Step 1: Build RHS vector from history and input
     let {% if num_pots > 0 %}mut {% endif %}rhs = build_rhs(input, state.input_prev, state);
 {% if num_pots > 0 %}
@@ -68,12 +72,18 @@ pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS
     update_history(&v, state);
 {% if has_be_fallback %}
     // Step 6b: Backward Euler fallback for trapezoidal instability.
-    // If trapezoidal NR didn't converge, retry the entire sample with L-stable
-    // backward Euler integration. BE damps all oscillatory modes including the
-    // marginally stable poles that trapezoidal preserves on the unit circle.
-    let converged_trap = state.last_nr_iterations < {{ max_iter }} as u32;
-    let (v, i_nl) = if !converged_trap {
-        state.diag_nr_max_iter_count += 1;
+    // Triggers when: (a) trapezoidal NR didn't converge, OR (b) any node voltage
+    // exceeds supply rails (trapezoidal ringing artifact), OR (c) previous sample
+    // used BE (cooldown: stay on BE until ringing decays).
+    // BE is L-stable and damps all oscillatory modes that trapezoidal preserves.
+    let nr_failed = state.last_nr_iterations >= {{ max_iter }} as u32;
+    let ringing = v.iter().take({{ n_nodes }}).any(|&x| x.abs() > {{ v_max_dc }});
+    let need_be = nr_failed || ringing || force_be;
+    let (v, i_nl) = if need_be {
+        if nr_failed { state.diag_nr_max_iter_count += 1; }
+        // Set cooldown: stay on BE long enough for trapezoidal ringing to decay.
+        // 64 samples ≈ 1.5ms at 44.1kHz — enough for most parasitic modes.
+        if ringing || nr_failed { state.be_cooldown = 64; }
         state.diag_be_fallback_count += 1;
         // Rebuild RHS with backward Euler matrices
         let mut rhs_be = [0.0f64; N];
@@ -117,6 +127,7 @@ pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS
     };
 {% endif %}
 
+{% if has_be_fallback %}
     // Step 6c: Global node voltage damping safety net.
     // Even after BE fallback, clamp any excessive node voltage changes.
     // Keeps i_nl_prev consistent with v_prev for next sample's RHS.
@@ -141,6 +152,7 @@ pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS
             (v, i_nl)
         }
     };
+{% endif %}
 
     // Step 7: Update state for next iteration
     state.v_prev = v;

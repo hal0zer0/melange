@@ -999,6 +999,7 @@ impl RustEmitter {
         // Backward Euler fallback state fields (for BE fallback in DK NR solver)
         let has_be_fallback = !ir.matrices.s_be.is_empty() && ir.topology.m > 0;
         ctx.insert("has_be_fallback", &has_be_fallback);
+        ctx.insert("backward_euler", &ir.solver_config.backward_euler);
 
         self.render("state", &ctx)
     }
@@ -1834,6 +1835,7 @@ impl RustEmitter {
 
         ctx.insert("has_dc_sources", &ir.has_dc_sources);
         ctx.insert("augmented_inductors", &ir.topology.augmented_inductors);
+        ctx.insert("backward_euler", &ir.solver_config.backward_euler);
 
         // When augmented_inductors is true, companion model history is handled by A_neg,
         // so num_inductors/num_coupled_inductors/num_transformer_groups should be 0
@@ -1992,19 +1994,22 @@ impl RustEmitter {
         ctx.insert("augmented_inductors", &ir.topology.augmented_inductors);
         let n_nodes = if ir.topology.n_nodes > 0 { ir.topology.n_nodes } else { ir.topology.n };
         ctx.insert("n_nodes", &n_nodes);
-        // BE fallback activates only for circuits with ill-conditioned K (parasitic R
-        // or high loop gain). Well-conditioned circuits don't need it and the BE step
-        // reduces accuracy. Threshold: any K diagonal with magnitude > 50.
-        let has_be_fallback = if !ir.matrices.s_be.is_empty() && ir.topology.m > 0 {
-            let k = &ir.matrices.k;
-            let m = ir.topology.m;
-            (0..m).any(|i| k[i * m + i].abs() > 50.0)
-        } else {
-            false
-        };
+        // BE fallback in process_sample: only for circuits NOT using auto-BE (which
+        // already uses BE for ALL samples). Avoids changing output of well-conditioned
+        // circuits where the fallback would trigger on legitimate transient overshoots.
+        let has_be_fallback = !ir.matrices.s_be.is_empty()
+            && ir.topology.m > 0
+            && !ir.solver_config.backward_euler;
         ctx.insert("has_be_fallback", &has_be_fallback);
         ctx.insert("has_dc_sources", &ir.has_dc_sources);
         ctx.insert("max_iter", &ir.solver_config.max_iterations);
+        // V_MAX_DC: maximum physically reasonable node voltage (supply rails + margin).
+        // Used by BE fallback to detect trapezoidal ringing artifacts.
+        let v_max_dc = ir.dc_operating_point.iter()
+            .map(|v| v.abs())
+            .fold(0.0_f64, f64::max)
+            .max(1.0) * 3.0 + 10.0; // 3× margin + 10V headroom (generous for transients)
+        ctx.insert("v_max_dc", &format!("{:.17e}", v_max_dc));
         // When augmented_inductors is true, companion model state update is not needed —
         // A_neg handles all inductor history through the augmented G/C matrices.
         let num_inductors = if ir.topology.augmented_inductors {
