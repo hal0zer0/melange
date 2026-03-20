@@ -830,7 +830,7 @@ impl CircuitSolver {
         // across samples. When damping triggers, re-evaluate device currents at the
         // damped state to keep i_nl_prev consistent with v_prev (otherwise the
         // N_i * i_nl_prev term in the next sample's RHS feeds back the divergent currents).
-        const NODE_DAMP_THRESHOLD: f64 = 10.0;
+        const NODE_DAMP_THRESHOLD: f64 = 2.0;
         {
             let n_nodes = self.kernel.n_nodes;
             let m = self.kernel.m;
