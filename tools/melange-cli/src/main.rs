@@ -788,15 +788,50 @@ fn compile_circuit_source(
         || !mna.coupled_inductors.is_empty()
         || !mna.transformer_groups.is_empty();
     println!("Step 3: Creating DK kernel...");
-    let kernel = if has_inductors_compile {
+    let kernel_result = if has_inductors_compile {
         println!("  Using augmented MNA for inductors");
         DkKernel::from_mna_augmented(&mna, sample_rate)
-            .with_context(|| "Failed to create augmented DK kernel")?
     } else {
-        DkKernel::from_mna(&mna, sample_rate).with_context(|| "Failed to create DK kernel")?
+        DkKernel::from_mna(&mna, sample_rate)
     };
-
-    println!("  ✓ Matrix dimensions: N={}, M={}", kernel.n, kernel.m);
+    // If DK kernel fails (e.g., positive feedback / oscillator circuit),
+    // auto-fall back to nodal solver which has no K diagonal constraint.
+    let (kernel, dk_failed) = match kernel_result {
+        Ok(k) => {
+            println!("  ✓ Matrix dimensions: N={}, M={}", k.n, k.m);
+            (k, false)
+        }
+        Err(ref e) => {
+            if solver_override == "dk" {
+                // User explicitly requested DK — propagate the error
+                kernel_result.with_context(|| "Failed to create DK kernel")?;
+                unreachable!()
+            } else {
+                println!("  DK kernel failed: {}", e);
+                println!("  Auto-selecting nodal solver (handles positive feedback / oscillators)");
+                // Build a dummy kernel for dimension info — nodal path doesn't use it
+                let m = mna.m;
+                let n = mna.n_aug;
+                let dummy = DkKernel {
+                    n, m,
+                    n_nodes: mna.n,
+                    num_devices: mna.num_devices,
+                    sample_rate,
+                    s: vec![0.0; n * n],
+                    a_neg: vec![0.0; n * n],
+                    k: vec![0.0; m * m],
+                    n_v: vec![0.0; m * n],
+                    n_i: vec![0.0; n * m],
+                    rhs_const: vec![0.0; n],
+                    inductors: vec![],
+                    coupled_inductors: vec![],
+                    transformer_groups: vec![],
+                    pots: vec![],
+                };
+                (dummy, true)
+            }
+        }
+    };
 
     // Step 4: Generate code
     println!("Step 4: Generating Rust code...");
@@ -862,12 +897,12 @@ fn compile_circuit_source(
         "dk" => false,
         _ => {
             // Auto-select nodal when:
-            // 1. Multi-transformer circuits (DK K matrix unstable for inter-transformer coupling)
-            // 2. Large M (≥10): M×M Gauss elimination is expensive and NR can diverge.
-            //    Nodal's N×N LU is more robust and often faster when M is large.
+            // 1. DK kernel failed (positive feedback / oscillator circuits)
+            // 2. Multi-transformer circuits (DK K matrix unstable for inter-transformer coupling)
+            // 3. Large M (≥10): M×M Gauss elimination is expensive and NR can diverge.
             let multi_xfmr = has_inductors_compile && n_xfmr_groups > 1;
             let large_m = kernel.m >= 10;
-            multi_xfmr || large_m
+            dk_failed || multi_xfmr || large_m
         }
     };
 
