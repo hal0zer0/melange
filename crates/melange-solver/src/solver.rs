@@ -1247,8 +1247,9 @@ impl CircuitSolver {
             }
 
             // Node voltage damping (ngspice CKTnodeDamping):
-            // Check if the implied node voltage change from this NR step exceeds 10V.
+            // Check if the implied node voltage change from this NR step exceeds 2V.
             // Uses precomputed S*N_i to map current-space delta to node voltage space.
+            // Threshold matches the post-solve damping (2V for high-gain feedback amps).
             {
                 let n_nodes = self.kernel.n_nodes;
                 let mut max_node_dv = 0.0_f64;
@@ -1260,8 +1261,8 @@ impl CircuitSolver {
                     }
                     max_node_dv = max_node_dv.max((alpha * dv).abs());
                 }
-                if max_node_dv > 10.0 {
-                    alpha *= (10.0 / max_node_dv).max(0.01);
+                if max_node_dv > 2.0 {
+                    alpha *= (2.0 / max_node_dv).max(0.01);
                 }
             }
 
