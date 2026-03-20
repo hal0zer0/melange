@@ -688,6 +688,96 @@ fn compile_circuit_source(
         }
     }
 
+    // Linearize BJTs specified by .linearize directives
+    let linearized: std::collections::HashSet<String> = netlist
+        .linearize_devices
+        .iter()
+        .cloned()
+        .collect();
+    if !linearized.is_empty() {
+        // Compute DC OP on current MNA to get g-parameters for linearized BJTs
+        let device_slots = melange_solver::codegen::ir::CircuitIR::build_device_info_with_mna(
+            &netlist, Some(&mna),
+        ).unwrap_or_default();
+        let dc_op_config = melange_solver::dc_op::DcOpConfig {
+            input_node: input_node_idx,
+            input_resistance,
+            ..melange_solver::dc_op::DcOpConfig::default()
+        };
+        let dc_result = melange_solver::dc_op::solve_dc_operating_point(
+            &mna, &device_slots, &dc_op_config,
+        );
+
+        // Extract g-parameters from DC OP Jacobian for each linearized BJT
+        let mut lin_infos = Vec::new();
+        for slot in &device_slots {
+            if let melange_solver::codegen::ir::DeviceParams::Bjt(bp) = &slot.params {
+                // Find the device name from MNA nonlinear_devices
+                let dev = mna.nonlinear_devices.iter().find(|d| d.start_idx == slot.start_idx);
+                if let Some(dev) = dev {
+                    if linearized.contains(&dev.name.to_ascii_uppercase()) {
+                        let s = slot.start_idx;
+                        // Extract v_nl at DC OP
+                        let vbe = dc_result.v_nl.get(s).copied().unwrap_or(0.0);
+                        let vbc = dc_result.v_nl.get(s + 1).copied().unwrap_or(0.0);
+                        let ic = dc_result.i_nl.get(s).copied().unwrap_or(0.0);
+                        let ib = dc_result.i_nl.get(s + 1).copied().unwrap_or(0.0);
+
+                        // Compute Jacobian at DC OP
+                        let sign = if bp.is_pnp { -1.0 } else { 1.0 };
+                        let vbe_eff = sign * vbe;
+                        let vbc_eff = sign * vbc;
+                        let nf_vt = bp.nf * bp.vt;
+                        let exp_be = (vbe_eff / nf_vt).clamp(-40.0, 40.0).exp();
+                        let exp_bc = (vbc_eff / bp.vt).clamp(-40.0, 40.0).exp();
+
+                        // dIc/dVbe (transconductance)
+                        let gm = bp.is / nf_vt * exp_be;
+                        // dIc/dVbc
+                        let gmu = (bp.is / bp.vt * exp_bc + bp.is / (bp.beta_r * bp.vt) * exp_bc).abs();
+                        // dIb/dVbe
+                        let gpi = bp.is / (bp.beta_f * nf_vt) * exp_be;
+                        // dIb/dVbc
+                        let go = bp.is / (bp.beta_r * bp.vt) * exp_bc;
+
+                        let (nc, nb, ne) = (dev.node_indices[0], dev.node_indices[1], dev.node_indices[2]);
+                        println!(
+                            "  Linearized {}: gm={:.4e} gpi={:.4e} gmu={:.4e} Ic_dc={:.4e} Ib_dc={:.4e}",
+                            dev.name, gm, gpi, gmu, ic, ib
+                        );
+                        lin_infos.push(melange_solver::mna::LinearizedBjtInfo {
+                            name: dev.name.clone(),
+                            nc, nb, ne,
+                            gm, gpi, gmu, go,
+                            ic_dc: ic, ib_dc: ib,
+                        });
+                    }
+                }
+            }
+        }
+
+        // Rebuild MNA with forward-active + linearized
+        mna = MnaSystem::from_netlist_with_linearized(&netlist, &forward_active, &linearized)
+            .with_context(|| "Failed to rebuild MNA with linearized BJTs")?;
+        if input_node_idx < mna.n {
+            mna.g[input_node_idx][input_node_idx] += input_conductance;
+        }
+        // Re-stamp junction caps
+        {
+            let ds = melange_solver::codegen::ir::CircuitIR::build_device_info_with_mna(
+                &netlist, Some(&mna),
+            ).unwrap_or_default();
+            if !ds.is_empty() { mna.stamp_device_junction_caps(&ds); }
+        }
+        // Stamp linearized g-parameters into G
+        mna.linearized_bjts = lin_infos;
+        mna.stamp_linearized_bjts();
+        println!(
+            "  Linearized {} BJTs (M reduced by {})",
+            linearized.len(), linearized.len() * 2
+        );
+    }
+
     // NOTE: Internal node expansion for parasitic BJTs is deferred until after
     // solver routing. The DK path handles parasitics via bjt_with_parasitics() inner NR.
     // Only the nodal path benefits from MNA-level internal nodes (eliminates inner NR).

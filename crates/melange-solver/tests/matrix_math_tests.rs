@@ -563,6 +563,7 @@ fn test_singular_matrix_error_path() {
         switches: vec![],
         opamps: vec![],
         bjt_internal_nodes: vec![],
+        linearized_bjts: vec![],
     };
 
     let result = DkKernel::from_mna(&mna, 44100.0);

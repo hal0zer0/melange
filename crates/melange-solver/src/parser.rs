@@ -32,6 +32,12 @@ pub struct Netlist {
     pub delay_feedback_nodes: Vec<String>,
     /// Input impedance directive (.input_impedance)
     pub input_impedance: Option<f64>,
+    /// Linearize directives (.linearize Q9)
+    /// BJTs listed here are linearized at their DC operating point:
+    /// small-signal conductances (gm, gpi, gmu) are stamped into G,
+    /// DC bias currents added to rhs_const, and the BJT is removed
+    /// from the nonlinear system (M dimension reduced by 2 per device).
+    pub linearize_devices: Vec<String>,
 }
 
 /// A potentiometer directive (.pot Rname min max).
@@ -98,6 +104,7 @@ impl Netlist {
             couplings: Vec::new(),
             delay_feedback_nodes: Vec::new(),
             input_impedance: None,
+            linearize_devices: Vec::new(),
         }
     }
 
@@ -1060,6 +1067,15 @@ impl Parser {
                 }
                 for name in &parts[1..] {
                     netlist.delay_feedback_nodes.push(name.to_string());
+                }
+            }
+            ".linearize" => {
+                // .linearize Q9 — linearize BJT at DC operating point
+                if parts.len() < 2 {
+                    return Err(self.error(".linearize requires at least one device name"));
+                }
+                for name in &parts[1..] {
+                    netlist.linearize_devices.push(name.to_ascii_uppercase());
                 }
             }
             ".input_impedance" => {

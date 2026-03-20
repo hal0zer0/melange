@@ -1796,7 +1796,14 @@ impl CircuitIR {
                     dim_offset += 1;
                     nl_dev_idx += 1;
                 }
-                Element::Bjt { model, .. } => {
+                Element::Bjt { name, model, .. } => {
+                    // Skip linearized BJTs — they're not in the nonlinear system
+                    let is_linearized = mna.is_some_and(|m| {
+                        m.linearized_bjts.iter().any(|l| l.name.eq_ignore_ascii_case(name))
+                    });
+                    if is_linearized {
+                        continue; // Don't create a DeviceSlot, don't increment nl_dev_idx
+                    }
                     let params = Self::resolve_bjt_params(netlist, model)?;
                     // Check if MNA has this BJT as forward-active (1D)
                     let is_fa = mna.is_some_and(|m| {

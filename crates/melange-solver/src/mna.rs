@@ -80,6 +80,9 @@ pub struct MnaSystem {
     /// Internal nodes for parasitic BJTs (RB/RC/RE in transient MNA).
     /// Empty when no parasitic BJTs are present or all are forward-active.
     pub bjt_internal_nodes: Vec<BjtTransientInternalNodes>,
+    /// Linearized BJTs: small-signal conductances stamped into G.
+    /// These BJTs are NOT in the nonlinear device list (M reduced by 2 each).
+    pub linearized_bjts: Vec<LinearizedBjtInfo>,
 }
 
 /// Augmented-MNA extra row/column info for a VCVS element.
@@ -222,6 +225,27 @@ pub struct BjtTransientInternalNodes {
     pub int_emitter: Option<usize>,
 }
 
+/// Linearized BJT info: small-signal conductances stamped into G at DC OP.
+///
+/// The BJT is removed from the nonlinear system (M reduced by 2) and its
+/// behavior captured by g-parameters and DC bias currents in the linear system.
+#[derive(Debug, Clone)]
+pub struct LinearizedBjtInfo {
+    pub name: String,
+    /// 1-indexed node indices (0 = ground)
+    pub nc: usize,
+    pub nb: usize,
+    pub ne: usize,
+    /// Small-signal conductances (computed from DC OP Jacobian)
+    pub gm: f64,   // dIc/dVbe (transconductance)
+    pub gpi: f64,   // dIb/dVbe (input conductance)
+    pub gmu: f64,   // dIc/dVbc (feedback conductance)
+    pub go: f64,    // dIb/dVbc (reverse base conductance)
+    /// DC bias currents
+    pub ic_dc: f64,
+    pub ib_dc: f64,
+}
+
 /// Voltage source information for extended MNA.
 #[derive(Debug, Clone)]
 pub struct VoltageSourceInfo {
@@ -352,6 +376,7 @@ impl MnaSystem {
             switches: Vec::new(),
             opamps: Vec::new(),
             bjt_internal_nodes: Vec::new(),
+            linearized_bjts: Vec::new(),
         }
     }
 
@@ -373,6 +398,121 @@ impl MnaSystem {
         let mut builder = MnaBuilder::new();
         builder.forward_active_bjts = forward_active.clone();
         builder.build(netlist)
+    }
+
+    /// Build MNA system with forward-active and linearized BJTs.
+    ///
+    /// Linearized BJTs are completely removed from the nonlinear system (M reduced
+    /// by 2 per device). Their small-signal conductances must be stamped separately
+    /// via `stamp_linearized_bjts()` after DC OP computation.
+    pub fn from_netlist_with_linearized(
+        netlist: &Netlist,
+        forward_active: &std::collections::HashSet<String>,
+        linearized: &std::collections::HashSet<String>,
+    ) -> Result<Self, MnaError> {
+        let mut builder = MnaBuilder::new();
+        builder.forward_active_bjts = forward_active.clone();
+        builder.linearized_bjts = linearized.clone();
+        builder.build(netlist)
+    }
+
+    /// Stamp linearized BJT small-signal conductances into G matrix.
+    ///
+    /// Must be called AFTER DC OP computation provides the g-parameters.
+    /// Each linearized BJT gets:
+    /// - gm (VCCS): Ic = gm * Vbe, current flows C→E controlled by B-E
+    /// - gpi (conductance): dIb/dVbe between B and E
+    /// - gmu (conductance): dIc/dVbc between B and C
+    /// - go (conductance): dIb/dVbc between B and C
+    /// - DC bias currents as current source injections
+    pub fn stamp_linearized_bjts(&mut self) {
+        for bjt in &self.linearized_bjts.clone() {
+            let nc = bjt.nc; // 1-indexed
+            let nb = bjt.nb;
+            let ne = bjt.ne;
+
+            // gpi: conductance between B and E (dIb/dVbe)
+            if bjt.gpi.abs() > 1e-30 {
+                if nb > 0 && ne > 0 {
+                    let b = nb - 1;
+                    let e = ne - 1;
+                    self.g[b][b] += bjt.gpi;
+                    self.g[e][e] += bjt.gpi;
+                    self.g[b][e] -= bjt.gpi;
+                    self.g[e][b] -= bjt.gpi;
+                } else if nb > 0 {
+                    self.g[nb - 1][nb - 1] += bjt.gpi;
+                } else if ne > 0 {
+                    self.g[ne - 1][ne - 1] += bjt.gpi;
+                }
+            }
+
+            // gm: VCCS — Ic = gm * Vbe, current flows from C to E, controlled by B-E
+            // Stamp: G[c][b] += gm, G[c][e] -= gm, G[e][b] -= gm, G[e][e] += gm
+            if bjt.gm.abs() > 1e-30 {
+                if nc > 0 && nb > 0 { self.g[nc - 1][nb - 1] += bjt.gm; }
+                if nc > 0 && ne > 0 { self.g[nc - 1][ne - 1] -= bjt.gm; }
+                if ne > 0 && nb > 0 { self.g[ne - 1][nb - 1] -= bjt.gm; }
+                if ne > 0 { self.g[ne - 1][ne - 1] += bjt.gm; }
+            }
+
+            // gmu: conductance between B and C (dIc/dVbc)
+            if bjt.gmu.abs() > 1e-30 {
+                if nb > 0 && nc > 0 {
+                    let b = nb - 1;
+                    let c = nc - 1;
+                    self.g[b][b] += bjt.gmu;
+                    self.g[c][c] += bjt.gmu;
+                    self.g[b][c] -= bjt.gmu;
+                    self.g[c][b] -= bjt.gmu;
+                } else if nb > 0 {
+                    self.g[nb - 1][nb - 1] += bjt.gmu;
+                } else if nc > 0 {
+                    self.g[nc - 1][nc - 1] += bjt.gmu;
+                }
+            }
+
+            // go: conductance between B and C (dIb/dVbc)
+            if bjt.go.abs() > 1e-30 {
+                if nb > 0 && nc > 0 {
+                    let b = nb - 1;
+                    let c = nc - 1;
+                    self.g[b][b] += bjt.go;
+                    self.g[c][c] += bjt.go;
+                    self.g[b][c] -= bjt.go;
+                    self.g[c][b] -= bjt.go;
+                }
+            }
+
+            // DC bias currents (as current source injections)
+            // Ic flows into collector, out of emitter
+            if nc > 0 {
+                self.current_sources.push(CurrentSourceInfo {
+                    name: format!("{}_Ic_dc", bjt.name),
+                    n_plus_idx: 0,
+                    n_minus_idx: nc,
+                    dc_value: bjt.ic_dc,
+                });
+            }
+            // Ib flows into base, out of emitter
+            if nb > 0 {
+                self.current_sources.push(CurrentSourceInfo {
+                    name: format!("{}_Ib_dc", bjt.name),
+                    n_plus_idx: 0,
+                    n_minus_idx: nb,
+                    dc_value: bjt.ib_dc,
+                });
+            }
+            // Ie = -(Ic + Ib) flows out of emitter
+            if ne > 0 {
+                self.current_sources.push(CurrentSourceInfo {
+                    name: format!("{}_Ie_dc", bjt.name),
+                    n_plus_idx: ne,
+                    n_minus_idx: 0,
+                    dc_value: bjt.ic_dc + bjt.ib_dc,
+                });
+            }
+        }
     }
 
     /// Stamp a resistor between two nodes.
@@ -1469,6 +1609,8 @@ struct MnaBuilder {
     total_dimension: usize,
     /// BJT names to model as forward-active (1D instead of 2D)
     forward_active_bjts: std::collections::HashSet<String>,
+    /// BJT names to linearize at DC OP (removed from nonlinear system entirely)
+    linearized_bjts: std::collections::HashSet<String>,
 }
 
 #[allow(dead_code)]
@@ -1513,6 +1655,7 @@ impl MnaBuilder {
             elements: Vec::new(),
             total_dimension: 0,
             forward_active_bjts: std::collections::HashSet::new(),
+            linearized_bjts: std::collections::HashSet::new(),
         }
     }
 
@@ -2783,24 +2926,34 @@ impl MnaBuilder {
                         name
                     )));
                 }
-                let is_forward_active = self
-                    .forward_active_bjts
+                let is_linearized = self
+                    .linearized_bjts
                     .contains(&name.to_ascii_uppercase());
-                let (device_type, dimension) = if is_forward_active {
-                    (NonlinearDeviceType::BjtForwardActive, 1)
+                if is_linearized {
+                    // Linearized BJTs are removed from the nonlinear system entirely.
+                    // Their small-signal conductances are stamped into G after DC OP.
+                    // Don't push to nonlinear_devices, don't increment total_dimension.
+                    log::info!("BJT '{}' linearized at DC OP (removed from NR, M reduced by 2)", name);
                 } else {
-                    (NonlinearDeviceType::Bjt, 2)
-                };
-                let start_idx = self.total_dimension;
-                self.total_dimension += dimension;
-                self.nonlinear_devices.push(NonlinearDeviceInfo {
-                    name: name.clone(),
-                    device_type,
-                    dimension,
-                    start_idx,
-                    nodes: vec![nc.clone(), nb.clone(), ne.clone()],
-                    node_indices,
-                });
+                    let is_forward_active = self
+                        .forward_active_bjts
+                        .contains(&name.to_ascii_uppercase());
+                    let (device_type, dimension) = if is_forward_active {
+                        (NonlinearDeviceType::BjtForwardActive, 1)
+                    } else {
+                        (NonlinearDeviceType::Bjt, 2)
+                    };
+                    let start_idx = self.total_dimension;
+                    self.total_dimension += dimension;
+                    self.nonlinear_devices.push(NonlinearDeviceInfo {
+                        name: name.clone(),
+                        device_type,
+                        dimension,
+                        start_idx,
+                        nodes: vec![nc.clone(), nb.clone(), ne.clone()],
+                        node_indices,
+                    });
+                }
             }
             Element::Jfet {
                 name, nd, ng, ns, ..
