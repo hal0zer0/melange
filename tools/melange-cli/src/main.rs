@@ -114,6 +114,12 @@ enum Commands {
         /// Add wet/dry mix parameter to generated plugin
         #[arg(long)]
         wet_dry_mix: bool,
+
+        /// Disable ear-protection output limiter. The limiter is a transparent soft
+        /// clipper that engages near 0 dBFS to protect speakers and hearing.
+        /// On by default — use this flag only for measurement or testing.
+        #[arg(long)]
+        no_ear_protection: bool,
     },
 
     /// Validate circuit against ngspice reference simulation
@@ -345,6 +351,7 @@ fn main() -> Result<()> {
             name,
             mono,
             wet_dry_mix,
+            no_ear_protection,
         } => {
             // Validate numeric CLI parameters
             if sample_rate <= 0.0 || !sample_rate.is_finite() {
@@ -387,6 +394,7 @@ fn main() -> Result<()> {
                 name.as_deref(),
                 mono,
                 wet_dry_mix,
+                !no_ear_protection,
             )
         }
         Commands::Validate {
@@ -530,6 +538,7 @@ fn compile_circuit_source(
     plugin_name: Option<&str>,
     mono: bool,
     wet_dry_mix: bool,
+    ear_protection: bool,
 ) -> Result<()> {
     use melange_solver::{
         codegen::{CodeGenerator, CodegenConfig},
@@ -1158,6 +1167,7 @@ fn compile_circuit_source(
                 plugin_name,
                 mono,
                 wet_dry_mix,
+                ear_protection,
             };
             plugin_template::generate_plugin_project_with_oversampling(
                 &project_dir,

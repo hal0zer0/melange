@@ -37,6 +37,8 @@ pub struct PluginOptions<'a> {
     pub mono: bool,
     /// Add a wet/dry mix parameter to the generated plugin.
     pub wet_dry_mix: bool,
+    /// Add ear-protection soft limiter on final output (default: true).
+    pub ear_protection: bool,
 }
 
 /// Generate a complete plugin project
@@ -290,9 +292,13 @@ fn generate_params_struct(
     pots: &[PotParamInfo],
     switches: &[SwitchParamInfo],
     wet_dry_mix: bool,
+    ear_protection: bool,
 ) -> String {
-    let has_any_params =
-        with_level_params || !pots.is_empty() || !switches.is_empty() || wet_dry_mix;
+    let has_any_params = with_level_params
+        || !pots.is_empty()
+        || !switches.is_empty()
+        || wet_dry_mix
+        || ear_protection;
     if !has_any_params {
         return "#[derive(Params, Default)]\npub struct CircuitParams {}".to_string();
     }
@@ -308,6 +314,11 @@ fn generate_params_struct(
     if wet_dry_mix {
         fields.push_str(MIX_PARAM_FIELD);
         defaults.push_str(MIX_PARAM_DEFAULT);
+    }
+
+    if ear_protection {
+        fields.push_str(EAR_PROTECTION_PARAM_FIELD);
+        defaults.push_str(EAR_PROTECTION_PARAM_DEFAULT);
     }
 
     for pot in pots {
@@ -342,38 +353,59 @@ fn generate_process_loop(
     nodal_mode: bool,
     mono: bool,
     wet_dry_mix: bool,
+    ear_protection: bool,
 ) -> String {
-    let has_any_params =
-        with_level_params || !pots.is_empty() || !switches.is_empty() || wet_dry_mix;
+    // Final output expression: ear protection applies soft limiter when enabled at runtime
+    let output_write = if ear_protection {
+        "*sample = if out.is_finite() { if ep { ear_protection_limit(out) } else { out } } else { 0.0 };"
+    } else {
+        "*sample = if out.is_finite() { out.clamp(-1.0, 1.0) } else { 0.0 };"
+    };
+
+    // Read ear protection toggle per buffer (BoolParam doesn't smooth)
+    let ep_read = if ear_protection {
+        "            let ep = self.params.ear_protection.value();\n"
+    } else {
+        ""
+    };
+
+    let has_any_params = with_level_params
+        || !pots.is_empty()
+        || !switches.is_empty()
+        || wet_dry_mix
+        || ear_protection;
     if !has_any_params && num_outputs <= 1 {
         if mono {
-            return r#"        for channel_samples in buffer.iter_samples() {
-            let sample = channel_samples.into_iter().next().unwrap();
-            let state = &mut self.circuit_states[0];
-            let out = process_sample(*sample as f64, state)[0] as f32;
-            *sample = if out.is_finite() { out.clamp(-1.0, 1.0) } else { 0.0 };
-        }"#
-            .to_string();
+            return format!(
+                "        for channel_samples in buffer.iter_samples() {{\n\
+                 \x20           let sample = channel_samples.into_iter().next().unwrap();\n\
+                 \x20           let state = &mut self.circuit_states[0];\n\
+                 \x20           let out = process_sample(*sample as f64, state)[0] as f32;\n\
+                 \x20           {output_write}\n\
+                 \x20       }}"
+            );
         }
-        return r#"        for channel_samples in buffer.iter_samples() {
-            for (ch, sample) in channel_samples.into_iter().enumerate() {
-                let state = &mut self.circuit_states[ch];
-                let out = process_sample(*sample as f64, state)[0] as f32;
-                *sample = if out.is_finite() { out.clamp(-1.0, 1.0) } else { 0.0 };
-            }
-        }"#
-        .to_string();
+        return format!(
+            "        for channel_samples in buffer.iter_samples() {{\n\
+             \x20           for (ch, sample) in channel_samples.into_iter().enumerate() {{\n\
+             \x20               let state = &mut self.circuit_states[ch];\n\
+             \x20               let out = process_sample(*sample as f64, state)[0] as f32;\n\
+             \x20               {output_write}\n\
+             \x20           }}\n\
+             \x20       }}"
+        );
     }
     if !has_any_params && num_outputs > 1 {
-        return r#"        for mut channel_samples in buffer.iter_samples() {
-            let input = *channel_samples.get_mut(0).unwrap() as f64;
-            let outs = process_sample(input, &mut self.circuit_state);
-            for (ch, sample) in channel_samples.into_iter().enumerate() {
-                let out = outs[ch.min(NUM_OUTPUTS - 1)] as f32;
-                *sample = if out.is_finite() { out.clamp(-1.0, 1.0) } else { 0.0 };
-            }
-        }"#
-        .to_string();
+        return format!(
+            "        for mut channel_samples in buffer.iter_samples() {{\n\
+             \x20           let input = *channel_samples.get_mut(0).unwrap() as f64;\n\
+             \x20           let outs = process_sample(input, &mut self.circuit_state);\n\
+             \x20           for (ch, sample) in channel_samples.into_iter().enumerate() {{\n\
+             \x20               let out = outs[ch.min(NUM_OUTPUTS - 1)] as f32;\n\
+             \x20               {output_write}\n\
+             \x20           }}\n\
+             \x20       }}"
+        );
     }
 
     let gain_reads = if with_level_params {
@@ -477,7 +509,7 @@ fn generate_process_loop(
              {dry_capture}\
              {sample_processing}\
              {mix_blend}\
-             \x20               *sample = if out.is_finite() {{ out.clamp(-1.0, 1.0) }} else {{ 0.0 }};\n"
+             \x20               {output_write}\n"
         )
     } else {
         format!(
@@ -487,13 +519,14 @@ fn generate_process_loop(
              {dry_capture}\
              {sample_processing}\
              {mix_blend}\
-             \x20               *sample = if out.is_finite() {{ out.clamp(-1.0, 1.0) }} else {{ 0.0 }};\n\
+             \x20               {output_write}\n\
              \x20           }}\n"
         )
     };
 
     format!(
         "{switch_pre_loop}\
+         {ep_read}\
          \x20       for channel_samples in buffer.iter_samples() {{\n\
          {gain_reads}\
          {mix_read}\
@@ -556,6 +589,16 @@ const MIX_PARAM_DEFAULT: &str = r#"            mix: FloatParam::new(
             .with_string_to_value(Arc::new(|s| s.trim_end_matches('%').trim().parse::<f32>().ok().map(|v| v / 100.0))),
 "#;
 
+const EAR_PROTECTION_PARAM_FIELD: &str = r#"    #[id = "ear_protection"]
+    pub ear_protection: BoolParam,
+"#;
+
+const EAR_PROTECTION_PARAM_DEFAULT: &str = r#"            ear_protection: BoolParam::new(
+                "Ear Protection",
+                true,
+            ),
+"#;
+
 fn generate_lib_rs(
     circuit_name: &str,
     with_level_params: bool,
@@ -577,8 +620,13 @@ fn generate_lib_rs(
     };
     let clap_id = format!("com.melange.{circuit_name}");
     let vst3_id_str = compute_vst3_id(circuit_name);
-    let params_struct =
-        generate_params_struct(with_level_params, pots, switches, options.wet_dry_mix);
+    let params_struct = generate_params_struct(
+        with_level_params,
+        pots,
+        switches,
+        options.wet_dry_mix,
+        options.ear_protection,
+    );
     let process_loop = generate_process_loop(
         with_level_params,
         pots,
@@ -587,6 +635,7 @@ fn generate_lib_rs(
         nodal_mode,
         options.mono,
         options.wet_dry_mix,
+        options.ear_protection,
     );
 
     // Conditional sections based on num_outputs
@@ -788,6 +837,33 @@ fn generate_lib_rs(
         String::new()
     };
 
+    let ear_protection_fn = if options.ear_protection {
+        r#"
+/// Ear-protection soft limiter: transparent below 0.9, smoothly limits to ±1.0.
+/// Cubic soft-knee — zero latency, no state, no artifacts.
+/// Disable with `--no-ear-protection` if you need unprocessed output for measurement.
+#[inline(always)]
+fn ear_protection_limit(x: f32) -> f32 {
+    const KNEE: f32 = 0.9;
+    if x.abs() <= KNEE {
+        x
+    } else {
+        // Cubic soft-clip: maps [KNEE, inf) -> [KNEE, 1.0) smoothly
+        let sign = x.signum();
+        let abs_x = x.abs();
+        let over = abs_x - KNEE;
+        let range = 1.0 - KNEE; // 0.1
+        let t = (over / range).min(1.0); // 0..1 in the knee region
+        // Cubic ease-out: fast rise, smooth approach to 1.0
+        sign * (KNEE + range * (1.0 - (1.0 - t) * (1.0 - t) * (1.0 - t)))
+    }
+}
+"#
+        .to_string()
+    } else {
+        String::new()
+    };
+
     format!(
         r#"// =============================================================================
 // {display_name} — generated by Melange
@@ -813,7 +889,7 @@ use std::sync::Arc;
 
 mod circuit;
 {circuit_import}
-
+{ear_protection_fn}
 {plugin_struct}
 
 {plugin_default}

@@ -304,6 +304,10 @@ cargo run -p melange-cli -- compile tube-screamer --format plugin -o my-plugin
 
 Melange was extracted from the [OpenWurli](https://github.com/openwurli/openwurli) project, a Wurlitzer 200A virtual instrument. The DK solver, device models, and validation pipeline were generalized into this standalone toolkit.
 
+## Roadmap
+
+Melange currently generates self-contained Rust code. Multi-language codegen is coming soon — the internal intermediate representation (`CircuitIR`) and `Emitter` trait are already language-agnostic by design. C++ will be the first additional target, with other languages to follow based on community interest. The goal is to let you compile a SPICE netlist directly to native code in whatever language your plugin framework or audio engine uses.
+
 ## Known Limitations
 
 - **Fixed temperature (27°C)**: All device models simulate at 300.15K. Temperature-dependent effects (IS, VT scaling) are not modeled at runtime.
