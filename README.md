@@ -284,9 +284,20 @@ Circuits can be referenced as:
 ## Building
 
 ```bash
+# Install the melange CLI
+cargo install --path tools/melange-cli
+
+# Now use it directly
+melange builtins
+melange compile tube-screamer --format plugin -o my-plugin
+```
+
+Or build and run from the repo without installing:
+
+```bash
 cargo build --workspace       # Build everything
 cargo test --workspace        # Run all tests (~990 tests)
-cargo run -p melange-cli      # Run the CLI
+cargo run -p melange-cli -- compile tube-screamer --format plugin -o my-plugin
 ```
 
 ## Origin
