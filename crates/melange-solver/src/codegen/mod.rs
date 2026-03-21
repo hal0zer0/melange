@@ -80,6 +80,37 @@ pub struct CodegenConfig {
 }
 
 #[cfg(feature = "codegen")]
+impl CodegenConfig {
+    /// Validate configuration parameters.
+    pub fn validate(&self) -> Result<(), CodegenError> {
+        if !(self.sample_rate > 0.0 && self.sample_rate.is_finite()) {
+            return Err(CodegenError::InvalidConfig(format!(
+                "sample_rate must be positive and finite, got {}",
+                self.sample_rate
+            )));
+        }
+        if !(self.tolerance > 0.0 && self.tolerance.is_finite()) {
+            return Err(CodegenError::InvalidConfig(format!(
+                "tolerance must be positive and finite, got {}",
+                self.tolerance
+            )));
+        }
+        if self.max_iterations == 0 {
+            return Err(CodegenError::InvalidConfig(
+                "max_iterations must be > 0".to_string(),
+            ));
+        }
+        if !(self.input_resistance > 0.0 && self.input_resistance.is_finite()) {
+            return Err(CodegenError::InvalidConfig(format!(
+                "input_resistance must be positive and finite, got {}",
+                self.input_resistance
+            )));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(feature = "codegen")]
 impl Default for CodegenConfig {
     fn default() -> Self {
         Self {
@@ -104,6 +135,7 @@ impl Default for CodegenConfig {
 
 /// Error type for code generation failures
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum CodegenError {
     /// Invalid kernel configuration
     InvalidKernel(String),
@@ -191,6 +223,7 @@ impl CodeGenerator {
         netlist: &Netlist,
     ) -> Result<GeneratedCode, CodegenError> {
         // Validate config
+        self.config.validate()?;
         match self.config.oversampling_factor {
             1 | 2 | 4 => {}
             f => {
@@ -198,12 +231,6 @@ impl CodeGenerator {
                     "oversampling_factor must be 1, 2, or 4, got {f}"
                 )));
             }
-        }
-        if self.config.input_resistance <= 0.0 || !self.config.input_resistance.is_finite() {
-            return Err(CodegenError::InvalidConfig(format!(
-                "input_resistance must be positive finite, got {}",
-                self.config.input_resistance
-            )));
         }
         if self.config.input_node >= kernel.n {
             return Err(CodegenError::InvalidConfig(format!(
@@ -274,6 +301,7 @@ impl CodeGenerator {
         netlist: &Netlist,
     ) -> Result<GeneratedCode, CodegenError> {
         // Validate config (same checks as generate, but against MNA dimensions)
+        self.config.validate()?;
         match self.config.oversampling_factor {
             1 | 2 | 4 => {}
             f => {
@@ -281,12 +309,6 @@ impl CodeGenerator {
                     "oversampling_factor must be 1, 2, or 4, got {f}"
                 )));
             }
-        }
-        if self.config.input_resistance <= 0.0 || !self.config.input_resistance.is_finite() {
-            return Err(CodegenError::InvalidConfig(format!(
-                "input_resistance must be positive finite, got {}",
-                self.config.input_resistance
-            )));
         }
         if self.config.input_node >= mna.n {
             return Err(CodegenError::InvalidConfig(format!(

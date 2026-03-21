@@ -14,7 +14,7 @@ fn mosfet_id(vgs: f64, vds: f64, kp: f64, vt: f64, lambda: f64, sign: f64) -> f6
     let vov = vgs_eff - vt_abs; // Overdrive voltage
     if vov <= 0.0 {
         // Subthreshold: weak exponential for smooth NR convergence
-        return sign * 1e-12 * (vov / (2.0 * 0.025851991)).exp().min(1.0);
+        return sign * 1e-12 * fast_exp(vov / (2.0 * 0.025851991)).min(1.0);
     }
     if vds_eff < vov {
         // Triode region: Id = kp * ((Vgs-Vt)*Vds - 0.5*Vds^2) * (1 + lambda*Vds)
@@ -41,8 +41,8 @@ fn mosfet_jacobian(vgs: f64, vds: f64, kp: f64, vt: f64, lambda: f64, sign: f64)
     let vov = vgs_eff - vt_abs;
     if vov <= 0.0 {
         // Subthreshold: derivative of weak exponential
-        let sub = 1e-12 * (vov / (2.0 * 0.025851991)).exp().min(1.0);
-        let gm = if sub < 1e-12 { sub / (2.0 * 0.025851991) } else { 0.0 };
+        let sub = 1e-12 * fast_exp(vov / (2.0 * 0.025851991)).min(1.0);
+        let gm = sub / (2.0 * 0.025851991);
         return [gm, 0.0, 0.0, 0.0];
     }
 

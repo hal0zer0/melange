@@ -21,7 +21,7 @@ fn diode_conductance(v_d: f64, is: f64, n_vt: f64) -> f64 {
 fn diode_current_with_rs(v_d: f64, is: f64, n_vt: f64, rs: f64) -> f64 {
     let max_step = 4.0 * n_vt;
     let mut v_j = if v_d > 0.0 { v_d.min(0.7) } else { v_d };
-    for _ in 0..15 {
+    for _ in 0..8 {
         let id = diode_current(v_j, is, n_vt);
         let gd = diode_conductance(v_j, is, n_vt);
         let f = v_j + id * rs - v_d;
@@ -40,7 +40,7 @@ fn diode_current_with_rs(v_d: f64, is: f64, n_vt: f64, rs: f64) -> f64 {
 fn diode_conductance_with_rs(v_d: f64, is: f64, n_vt: f64, rs: f64) -> f64 {
     let max_step = 4.0 * n_vt;
     let mut v_j = if v_d > 0.0 { v_d.min(0.7) } else { v_d };
-    for _ in 0..15 {
+    for _ in 0..8 {
         let id = diode_current(v_j, is, n_vt);
         let gd = diode_conductance(v_j, is, n_vt);
         let f = v_j + id * rs - v_d;
@@ -58,7 +58,6 @@ fn diode_conductance_with_rs(v_d: f64, is: f64, n_vt: f64, rs: f64) -> f64 {
 /// Added to diode current when v_d < -BV.
 #[inline(always)]
 fn diode_breakdown_current(v_d: f64, n_vt: f64, bv: f64, ibv: f64) -> f64 {
-    if v_d >= -bv { return 0.0; }
     let x = (-(v_d + bv) / n_vt).clamp(-40.0, 40.0);
     -ibv * fast_exp(x)
 }
@@ -66,7 +65,6 @@ fn diode_breakdown_current(v_d: f64, n_vt: f64, bv: f64, ibv: f64) -> f64 {
 /// Reverse breakdown conductance: dI_bv/dv = IBV/n_vt * exp(-(v_d + BV) / n_vt)
 #[inline(always)]
 fn diode_breakdown_conductance(v_d: f64, n_vt: f64, bv: f64, ibv: f64) -> f64 {
-    if v_d >= -bv { return 0.0; }
     let x = (-(v_d + bv) / n_vt).clamp(-40.0, 40.0);
     ibv / n_vt * fast_exp(x)
 }

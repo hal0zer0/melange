@@ -580,13 +580,13 @@ mod tests {
             "Should be near cutoff at Vgk=-4"
         );
 
-        // Verify Kg1 is the only difference from default
+        // Fitted parameters now match default (both use Kg1=3000)
         let default = KorenTriode::ecc83();
         assert_eq!(tube.mu, default.mu);
         assert_eq!(tube.ex, default.ex);
         assert_eq!(tube.kp, default.kp);
         assert_eq!(tube.kvb, default.kvb);
-        assert!(tube.kg1 > default.kg1, "Fitted Kg1 should be larger");
+        assert_eq!(tube.kg1, default.kg1, "Fitted and default now use same Kg1=3000");
     }
 
     /// Verify triode Jacobian against finite differences.
@@ -761,7 +761,8 @@ mod tests {
     /// Verify lambda multiplier increases plate current proportional to Vpk.
     #[test]
     fn test_lambda_early_effect() {
-        let tube_no_lambda = KorenTriode::ecc83();
+        let tube_no_lambda =
+            KorenTriode::with_all_params(100.0, 1.4, 1060.0, 600.0, 300.0, 2e-3, 0.5, 0.0);
         let tube_with_lambda =
             KorenTriode::with_all_params(100.0, 1.4, 1060.0, 600.0, 300.0, 2e-3, 0.5, 0.001);
 

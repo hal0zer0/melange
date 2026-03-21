@@ -113,13 +113,11 @@ fn nonlinear_config() -> ComparisonConfig {
 /// BJT-specific tolerances.
 ///
 /// BJT circuits have larger error vs SPICE because:
-/// - Ebers-Moll (melange) vs Gummel-Poon (ngspice) model differences
+/// - Gummel-Poon implementation differences (melange vs ngspice)
 /// - ~0.5V DC offset from different model operating points
 /// - ~10% gain mismatch (182x melange vs 201x ngspice)
 ///
-/// Measured values (2026-03-01): RMS 35%, peak 1.56V, correlation 0.965
-// TODO: Tighten tolerances once GP model is validated end-to-end:
-//   rms_error_tolerance: 0.15 (15%), correlation_min: 0.97
+/// Measured values (2026-03-19): RMS 12%, peak 0.38V, correlation 0.998
 fn bjt_config() -> ComparisonConfig {
     ComparisonConfig {
         rms_error_tolerance: 0.15, // 15% — GP model with ISE/NE leakage (measured: 11.8%)

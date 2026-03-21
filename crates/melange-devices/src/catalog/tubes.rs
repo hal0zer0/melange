@@ -31,13 +31,28 @@ pub struct TubeCatalogEntry {
 /// The tube catalog.
 pub const CATALOG: &[TubeCatalogEntry] = &[
     // 12AX7 / ECC83 — high-mu twin triode, the workhorse of guitar amps.
-    // Koren 1996 Table 1: mu=100, ex=1.4, Kg1=1060, Kp=600, Kvb=300
-    // NOTE: Overestimates plate current vs RCA datasheet (~3.4mA vs ~1.2mA at Vgk=0, Vpk=250V).
-    // Retained as default because tweed-preamp SPICE validation depends on it (0.989 correlation).
-    // For datasheet-accurate plate current, use "12AX7F" (fitted) entry below.
-    //   Default:  Vgk=0 → 3.40mA,  Vgk=-1 → 1.69mA,  Vgk=-2 → 0.48mA  (at Vpk=250V)
+    // Koren 1996 mu/ex/Kp/Kvb with Kg1=3000 (datasheet-accurate).
+    // Ip ∝ 1/Kg1; Kg1=3000 gives ~1.2mA at Vgk=0, Vpk=250V (matches RCA datasheet).
+    //   Default:  Vgk=0 → 1.20mA,  Vgk=-1 → 0.60mA,  Vgk=-2 → 0.17mA  (at Vpk=250V)
+    //   Datasheet: Vgk=0 → ~1.2mA,  Vgk=-1 → ~0.5mA,  Vgk=-2 → ~0.1mA  (RCA 12AX7)
     TubeCatalogEntry {
         names: &["12AX7", "ECC83", "7025", "CV4004"],
+        mu: 100.0,
+        ex: 1.4,
+        kg1: 3000.0,
+        kp: 600.0,
+        kvb: 300.0,
+        ig_max: 2e-3,
+        vgk_onset: 0.5,
+        lambda: 0.0,
+        source: "Koren 1996 with Kg1=3000 (datasheet-accurate)",
+    },
+    // 12AX7K — Koren 1996 original parameters (Kg1=1060).
+    // Overestimates plate current vs RCA datasheet (~3.4mA vs ~1.2mA at Vgk=0, Vpk=250V).
+    // Retained for backwards compatibility with circuits calibrated to Koren 1996.
+    //   Koren:    Vgk=0 → 3.40mA,  Vgk=-1 → 1.69mA,  Vgk=-2 → 0.48mA  (at Vpk=250V)
+    TubeCatalogEntry {
+        names: &["12AX7K", "ECC83K"],
         mu: 100.0,
         ex: 1.4,
         kg1: 1060.0,
@@ -46,13 +61,10 @@ pub const CATALOG: &[TubeCatalogEntry] = &[
         ig_max: 2e-3,
         vgk_onset: 0.5,
         lambda: 0.0,
-        source: "Koren 1996 Table 1",
+        source: "Koren 1996 Table 1 (original Kg1=1060)",
     },
-    // 12AX7F — 12AX7 with Kg1 re-fit to match RCA datasheet plate current.
-    // Only Kg1 changed (1060 → 3000); mu/ex/Kp/Kvb identical to Koren 1996.
-    // Ip ∝ 1/Kg1, so Kg1_new = 1060 * (3.40/1.20) ≈ 3000.
-    //   Fitted:   Vgk=0 → 1.20mA,  Vgk=-1 → 0.60mA,  Vgk=-2 → 0.17mA  (at Vpk=250V)
-    //   Datasheet: Vgk=0 → ~1.2mA,  Vgk=-1 → ~0.5mA,  Vgk=-2 → ~0.1mA  (RCA 12AX7)
+    // 12AX7F — 12AX7 fitted alias (same as default 12AX7 with Kg1=3000).
+    // Kept for backwards compatibility with netlists using "12AX7F".
     TubeCatalogEntry {
         names: &["12AX7F", "ECC83F"],
         mu: 100.0,
@@ -269,6 +281,7 @@ mod tests {
 
     #[test]
     fn test_ecc83_matches_catalog() {
+        // ecc83() factory now uses catalog "12AX7" (Kg1=3000, datasheet-accurate)
         let factory = KorenTriode::ecc83();
         let cat = lookup("12AX7").unwrap();
         assert_eq!(factory.mu, cat.mu);
@@ -351,21 +364,12 @@ mod tests {
     #[test]
     fn test_12ax7_operating_points() {
         let t = make_tube(lookup("12AX7").unwrap());
-        // Koren model at Vgk=0V, Vpk=250V → Ip ≈ 3.4mA
-        // (RCA tube manual says ~1.2mA; Koren overestimates at zero grid bias)
+        // Kg1=3000 (datasheet-accurate): Vgk=0V, Vpk=250V → Ip ≈ 1.2mA
         let ip0 = t.plate_current(0.0, 250.0);
-        assert!(
-            ip0 > 0.5e-3 && ip0 < 10e-3,
-            "12AX7 Vgk=0: Ip={:.3}mA",
-            ip0 * 1e3
-        );
-        // Vgk=-1V, Vpk=250V: Koren gives ~1.7mA (datasheet: ~0.5mA)
+        assert_ip_approx(ip0, 1.2e-3, 0.2e-3, "12AX7 Vgk=0");
+        // Vgk=-1V, Vpk=250V: ~0.6mA (datasheet: ~0.5mA)
         let ip_m1 = t.plate_current(-1.0, 250.0);
-        assert!(
-            ip_m1 > 0.1e-3 && ip_m1 < 5e-3,
-            "12AX7 Vgk=-1: Ip={:.3}mA",
-            ip_m1 * 1e3
-        );
+        assert_ip_approx(ip_m1, 0.5e-3, 0.15e-3, "12AX7 Vgk=-1");
         // Monotonicity: more negative grid → less current
         assert!(
             ip_m1 < ip0,

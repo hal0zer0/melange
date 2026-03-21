@@ -13,7 +13,7 @@ fn jfet_id(vgs: f64, vds: f64, idss: f64, vp: f64, lambda: f64, sign: f64) -> f6
     let vgst = vgs_eff - vp_eff;
     if vgst <= 0.0 {
         // Subthreshold: weak exponential for smooth NR convergence
-        return sign * 1e-12 * (vgst / (2.0 * 0.025851991)).exp().min(1.0);
+        return sign * 1e-12 * fast_exp(vgst / (2.0 * 0.025851991)).min(1.0);
     }
     let vp_abs = vp.abs();
     let vds_sat = vgst;
@@ -43,8 +43,8 @@ fn jfet_jacobian(vgs: f64, vds: f64, idss: f64, vp: f64, lambda: f64, sign: f64)
     let vgst = vgs_eff - vp_eff;
     if vgst <= 0.0 {
         // Subthreshold: derivative of weak exponential
-        let sub = 1e-12 * (vgst / (2.0 * 0.025851991)).exp().min(1.0);
-        let gm = if sub < 1e-12 { sub / (2.0 * 0.025851991) } else { 0.0 };
+        let sub = 1e-12 * fast_exp(vgst / (2.0 * 0.025851991)).min(1.0);
+        let gm = sub / (2.0 * 0.025851991);
         return [gm, 0.0, 0.0, 0.0];
     }
     let vp_abs = vp.abs();

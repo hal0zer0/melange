@@ -342,6 +342,7 @@ impl TubeParams {
 
 /// Nonlinear device type tag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum DeviceType {
     Diode,
     Bjt,

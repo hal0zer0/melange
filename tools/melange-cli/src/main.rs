@@ -880,6 +880,16 @@ fn compile_circuit_source(
         .and_then(|s| s.to_str())
         .unwrap_or("circuit")
         .to_string();
+    let circuit_name: String = circuit_name
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+        .collect();
+    let circuit_name = if circuit_name.starts_with(|c: char| c.is_ascii_digit()) {
+        format!("circuit_{circuit_name}")
+    } else {
+        circuit_name
+    };
 
     // Parse comma-separated output nodes
     let output_node_names: Vec<&str> = output_node.split(',').map(|s| s.trim()).collect();
@@ -1084,11 +1094,19 @@ fn compile_circuit_source(
             };
 
             // Get a sanitized circuit name
-            let circuit_name = project_dir
+            let circuit_name: String = project_dir
                 .file_name()
                 .and_then(|s| s.to_str())
                 .unwrap_or("circuit")
-                .to_string();
+                .to_lowercase()
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+                .collect();
+            let circuit_name = if circuit_name.starts_with(|c: char| c.is_ascii_digit()) {
+                format!("circuit_{circuit_name}")
+            } else {
+                circuit_name
+            };
 
             // Build pot/switch parameter info from MNA data (works for both DK and nodal paths).
             let pot_params: Vec<plugin_template::PotParamInfo> = mna
@@ -1154,20 +1172,13 @@ fn compile_circuit_source(
                     .and_then(|n| n.to_str())
                     .unwrap_or("<project-dir>")
             );
-            println!("  cargo build --release");
-            println!();
-            println!("The compiled plugin will be at:");
-            println!("  target/release/lib{}.so", circuit_name.replace("-", "_"));
-            println!();
-            println!("To install the CLAP plugin:");
-            println!("  mkdir -p ~/.clap");
             println!(
-                "  cp target/release/lib{}.so ~/.clap/{}.clap",
-                circuit_name.replace("-", "_"),
+                "  cargo nih-plug bundle {} --release",
                 circuit_name
             );
             println!();
-            println!("The VST3 plugin is included in the same binary.");
+            println!("The compiled plugin (CLAP + VST3) will be in:");
+            println!("  target/bundled/");
         }
     }
 

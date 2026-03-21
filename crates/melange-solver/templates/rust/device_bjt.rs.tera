@@ -23,11 +23,10 @@ fn bjt_qb(vbe: f64, vbc: f64, is: f64, vt: f64, nf: f64, nr: f64, sign: f64,
     if q1_denom.abs() < 1e-30 { return 1.0; }
     let q1 = 1.0 / q1_denom;
 
-    // High-level injection: q2 = Is*exp(Vbe/(NF*Vt))/IKF + Is*exp(Vbc/(NR*Vt))/IKR
-    let nf_vt = nf * vt;
-    let nr_vt = nr * vt;
-    let exp_be = safe_exp(vbe_eff / nf_vt);
-    let exp_bc = safe_exp(vbc_eff / nr_vt);
+    // High-level injection: q2 = Is*exp(Vbe/Vt)/IKF + Is*exp(Vbc/Vt)/IKR
+    // SPICE3f5: q2 uses ideality factor 1.0 (plain Vt), not NF/NR
+    let exp_be = safe_exp(vbe_eff / vt);
+    let exp_bc = safe_exp(vbc_eff / vt);
     let q2 = is * exp_be / ikf + is * exp_bc / ikr;
 
     q1 * (1.0 + (1.0 + 4.0 * q2).max(0.0).sqrt()) / 2.0
@@ -153,10 +152,13 @@ fn bjt_jacobian(vbe: f64, vbc: f64, is: f64, vt: f64, nf: f64, nr: f64,
         (q1, q1 * q1 / var, q1 * q1 / vaf)
     };
 
-    // q2 and derivatives: q2 = Is*exp(Vbe/(NF*Vt))/IKF + Is*exp(Vbc/(NR*Vt))/IKR
-    let q2 = is * exp_be / ikf + is * exp_bc / ikr;
-    let dq2_dvbe = is / (nf_vt * ikf) * exp_be;
-    let dq2_dvbc = is / (nr_vt * ikr) * exp_bc;
+    // q2 and derivatives: q2 = Is*exp(Vbe/Vt)/IKF + Is*exp(Vbc/Vt)/IKR
+    // SPICE3f5: q2 uses ideality factor 1.0 (plain Vt), not NF/NR
+    let exp_be_q2 = safe_exp(vbe_eff / vt);
+    let exp_bc_q2 = safe_exp(vbc_eff / vt);
+    let q2 = is * exp_be_q2 / ikf + is * exp_bc_q2 / ikr;
+    let dq2_dvbe = is / (vt * ikf) * exp_be_q2;
+    let dq2_dvbc = is / (vt * ikr) * exp_bc_q2;
 
     // Discriminant D = sqrt(1 + 4*q2)
     let disc = (1.0 + 4.0 * q2).max(0.0);
@@ -260,10 +262,12 @@ fn bjt_evaluate(vbe: f64, vbc: f64, is: f64, vt: f64, nf: f64, nr: f64,
         (q1, q1 * q1 / var, q1 * q1 / vaf)
     };
 
-    // q2 and derivatives (uses shared exp_be, exp_bc)
-    let q2 = is * exp_be / ikf + is * exp_bc / ikr;
-    let dq2_dvbe = is / (nf_vt * ikf) * exp_be;
-    let dq2_dvbc = is / (nr_vt * ikr) * exp_bc;
+    // q2 and derivatives: q2 uses ideality factor 1.0 (plain Vt), not NF/NR (SPICE3f5)
+    let exp_be_q2 = safe_exp(vbe_eff / vt);
+    let exp_bc_q2 = safe_exp(vbc_eff / vt);
+    let q2 = is * exp_be_q2 / ikf + is * exp_bc_q2 / ikr;
+    let dq2_dvbe = is / (vt * ikf) * exp_be_q2;
+    let dq2_dvbc = is / (vt * ikr) * exp_bc_q2;
 
     // Discriminant D = sqrt(1 + 4*q2)
     let disc = (1.0 + 4.0 * q2).max(0.0);

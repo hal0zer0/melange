@@ -179,7 +179,13 @@ pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS
         state.device_{{ td.dev_num }}_is = DEVICE_{{ td.dev_num }}_IS;
         state.device_{{ td.dev_num }}_vt = DEVICE_{{ td.dev_num }}_VT;
 {% endfor %}{% endif %}        state.diag_nan_reset_count += 1;
-        return [0.0; NUM_OUTPUTS];
+        // Return DC operating point output instead of zero to avoid discontinuity
+        let mut dc_output = [0.0f64; NUM_OUTPUTS];
+        for out_idx in 0..NUM_OUTPUTS {
+            let raw = state.dc_operating_point[OUTPUT_NODES[out_idx]];
+            dc_output[out_idx] = (raw * OUTPUT_SCALES[out_idx]).clamp(-10.0, 10.0);
+        }
+        return dc_output;
     }
 
     // Update state for next iteration
@@ -249,7 +255,8 @@ pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS
 {% if dc_block %}        let dc_blocked = raw_out - state.dc_block_x_prev[out_idx]
             + state.dc_block_r * state.dc_block_y_prev[out_idx];
         state.dc_block_x_prev[out_idx] = raw_out;
-        state.dc_block_y_prev[out_idx] = dc_blocked.clamp(-100.0, 100.0);
+        // Tiny bias prevents denormals in DC block feedback during silence
+        state.dc_block_y_prev[out_idx] = (dc_blocked + 1e-25).clamp(-100.0, 100.0);
         let scaled = dc_blocked * OUTPUT_SCALES[out_idx];
 {% else %}        let scaled = raw_out * OUTPUT_SCALES[out_idx];
 {% endif %}        let abs_out = scaled.abs();

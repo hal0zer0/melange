@@ -1172,8 +1172,8 @@ impl RustEmitter {
             code.push_str("const BOLTZMANN_Q: f64 = 8.617333262e-5;\n\n");
         }
 
-        // Fast exp() approximation (needed by diode, BJT, tube device models)
-        if has_diode || has_bjt || has_tube {
+        // Fast exp() approximation (needed by all nonlinear device models)
+        if has_diode || has_bjt || has_jfet || has_mosfet || has_tube {
             code.push_str(&Self::emit_fast_exp());
         }
 

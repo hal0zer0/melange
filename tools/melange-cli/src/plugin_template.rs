@@ -214,6 +214,7 @@ fn generate_pot_field(pot: &PotParamInfo) -> String {
 }
 
 fn generate_pot_default(pot: &PotParamInfo) -> String {
+    let name = pot.name.replace('\\', "\\\\").replace('"', "\\\"");
     let use_log = pot.max_resistance / pot.min_resistance > 10.0;
     if use_log {
         format!(
@@ -230,7 +231,7 @@ fn generate_pot_default(pot: &PotParamInfo) -> String {
             .with_unit(" \u{{2126}}"),
 "#,
             idx = pot.index,
-            name = pot.name,
+            name = name,
             default = pot.default_resistance,
             min = pot.min_resistance,
             max = pot.max_resistance,
@@ -251,7 +252,7 @@ fn generate_pot_default(pot: &PotParamInfo) -> String {
             .with_unit(" \u{{2126}}"),
 "#,
             idx = pot.index,
-            name = pot.name,
+            name = name,
             default = pot.default_resistance,
             min = pot.min_resistance,
             max = pot.max_resistance,
@@ -267,6 +268,7 @@ fn generate_switch_field(sw: &SwitchParamInfo) -> String {
 }
 
 fn generate_switch_default(sw: &SwitchParamInfo) -> String {
+    let name = sw.name.replace('\\', "\\\\").replace('"', "\\\"");
     format!(
         r#"            switch_{idx}: IntParam::new(
                 "{name}",
@@ -278,7 +280,7 @@ fn generate_switch_default(sw: &SwitchParamInfo) -> String {
             ),
 "#,
         idx = sw.index,
-        name = sw.name,
+        name = name,
         max = sw.num_positions as i32 - 1,
     )
 }
@@ -363,8 +365,8 @@ fn generate_process_loop(
         .to_string();
     }
     if !has_any_params && num_outputs > 1 {
-        return r#"        for channel_samples in buffer.iter_samples() {
-            let input = *channel_samples.into_iter().next().unwrap() as f64;
+        return r#"        for mut channel_samples in buffer.iter_samples() {
+            let input = *channel_samples.get_mut(0).unwrap() as f64;
             let outs = process_sample(input, &mut self.circuit_state);
             for (ch, sample) in channel_samples.into_iter().enumerate() {
                 let out = outs[ch.min(NUM_OUTPUTS - 1)] as f32;
@@ -447,10 +449,10 @@ fn generate_process_loop(
     let sample_processing = if num_outputs > 1 {
         if with_level_params {
             "                let input = *sample as f64 * input_gain as f64;\n\
-             \x20               let out = process_sample(input, state)[0] as f32;\n\
+             \x20               let out = process_sample(input, state)[ch.min(NUM_OUTPUTS - 1)] as f32;\n\
              \x20               let out = out * output_gain;\n"
         } else {
-            "                let out = process_sample(*sample as f64, state)[0] as f32;\n"
+            "                let out = process_sample(*sample as f64, state)[ch.min(NUM_OUTPUTS - 1)] as f32;\n"
         }
     } else if with_level_params {
         "                let input = *sample as f64 * input_gain as f64;\n\
@@ -549,8 +551,9 @@ const MIX_PARAM_DEFAULT: &str = r#"            mix: FloatParam::new(
                 },
             )
             .with_smoother(SmoothingStyle::Linear(10.0))
-            .with_unit(" %")
-            .with_value_to_string(formatters::v2s_f32_rounded(0)),
+            .with_unit("%")
+            .with_value_to_string(Arc::new(|v| format!("{:.0}", v * 100.0)))
+            .with_string_to_value(Arc::new(|s| s.trim_end_matches('%').trim().parse::<f32>().ok().map(|v| v / 100.0))),
 "#;
 
 fn generate_lib_rs(

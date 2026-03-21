@@ -31,6 +31,7 @@ pub enum SolverMode {
 /// struct contains every piece of data an emitter needs — matrices, device
 /// parameters, solver config — without referencing the builder types.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct CircuitIR {
     pub metadata: CircuitMetadata,
     pub topology: Topology,
@@ -71,6 +72,7 @@ pub struct CircuitMetadata {
 
 /// Circuit topology dimensions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Topology {
     /// System dimension = n_aug (n + num_vs + num_vcvs), or n_nodal when augmented inductors are used.
     /// This is the size of all N-indexed matrices and vectors in the solver.
@@ -97,6 +99,7 @@ pub struct Topology {
 
 /// Solver configuration baked into the generated code.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct SolverConfig {
     pub sample_rate: f64,
     /// alpha = 2/T (trapezoidal) or 1/T (backward Euler) at internal sample rate

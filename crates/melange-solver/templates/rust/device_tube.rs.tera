@@ -82,7 +82,7 @@ fn tube_jacobian(vgk: f64, vpk: f64, mu: f64, ex: f64, kg1: f64, kp: f64, kvb: f
 #[inline(always)]
 fn tube_solve_vgk_int(vgk_ext: f64, ig_max: f64, vgk_onset: f64, rgi: f64) -> f64 {
     let mut vgk_int = vgk_ext;
-    for _ in 0..15 {
+    for _ in 0..8 {
         let ig = tube_ig(vgk_int, ig_max, vgk_onset);
         let dig = tube_ig_deriv(vgk_int, ig_max, vgk_onset);
         // f(vgk_int) = vgk_int + ig * rgi - vgk_ext

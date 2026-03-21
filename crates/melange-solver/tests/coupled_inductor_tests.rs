@@ -875,8 +875,10 @@ fn test_codegen_nan_sanitization() {
     assert!(sanitize_idx.is_some(), "Should have NaN sanitization block");
 
     let after_sanitize = &code[sanitize_idx.unwrap()..];
+    // NaN reset now returns DC operating point output instead of zeros
     let return_idx = after_sanitize
-        .find("return [0.0; NUM_OUTPUTS];")
+        .find("return dc_output;")
+        .or_else(|| after_sanitize.find("return [0.0; NUM_OUTPUTS];"))
         .expect("Missing return in sanitization");
     let sanitize_block = &after_sanitize[..return_idx];
 
