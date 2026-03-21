@@ -18,6 +18,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
       - run: cargo test --workspace
 
   clippy:
@@ -29,6 +30,7 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
       - run: cargo clippy --workspace -- -D warnings
 
   format:
@@ -48,6 +50,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
       - run: cargo build --release -p melange-cli
       - uses: actions/upload-artifact@v4
         with:
@@ -61,5 +64,5 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: sudo apt-get update && sudo apt-get install -y ngspice
+      - run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev ngspice
       - run: cargo test -p melange-validate --test spice_validation -- --include-ignored

@@ -237,10 +237,10 @@ pub struct LinearizedBjtInfo {
     pub nb: usize,
     pub ne: usize,
     /// Small-signal conductances (computed from DC OP Jacobian)
-    pub gm: f64,   // dIc/dVbe (transconductance)
-    pub gpi: f64,   // dIb/dVbe (input conductance)
-    pub gmu: f64,   // dIc/dVbc (feedback conductance)
-    pub go: f64,    // dIb/dVbc (reverse base conductance)
+    pub gm: f64, // dIc/dVbe (transconductance)
+    pub gpi: f64, // dIb/dVbe (input conductance)
+    pub gmu: f64, // dIc/dVbc (feedback conductance)
+    pub go: f64,  // dIb/dVbc (reverse base conductance)
     /// DC bias currents
     pub ic_dc: f64,
     pub ib_dc: f64,
@@ -450,10 +450,18 @@ impl MnaSystem {
             // gm: VCCS — Ic = gm * Vbe, current flows from C to E, controlled by B-E
             // Stamp: G[c][b] += gm, G[c][e] -= gm, G[e][b] -= gm, G[e][e] += gm
             if bjt.gm.abs() > 1e-30 {
-                if nc > 0 && nb > 0 { self.g[nc - 1][nb - 1] += bjt.gm; }
-                if nc > 0 && ne > 0 { self.g[nc - 1][ne - 1] -= bjt.gm; }
-                if ne > 0 && nb > 0 { self.g[ne - 1][nb - 1] -= bjt.gm; }
-                if ne > 0 { self.g[ne - 1][ne - 1] += bjt.gm; }
+                if nc > 0 && nb > 0 {
+                    self.g[nc - 1][nb - 1] += bjt.gm;
+                }
+                if nc > 0 && ne > 0 {
+                    self.g[nc - 1][ne - 1] -= bjt.gm;
+                }
+                if ne > 0 && nb > 0 {
+                    self.g[ne - 1][nb - 1] -= bjt.gm;
+                }
+                if ne > 0 {
+                    self.g[ne - 1][ne - 1] += bjt.gm;
+                }
             }
 
             // gmu: conductance between B and C (dIc/dVbc)
@@ -473,15 +481,13 @@ impl MnaSystem {
             }
 
             // go: conductance between B and C (dIb/dVbc)
-            if bjt.go.abs() > 1e-30 {
-                if nb > 0 && nc > 0 {
-                    let b = nb - 1;
-                    let c = nc - 1;
-                    self.g[b][b] += bjt.go;
-                    self.g[c][c] += bjt.go;
-                    self.g[b][c] -= bjt.go;
-                    self.g[c][b] -= bjt.go;
-                }
+            if bjt.go.abs() > 1e-30 && nb > 0 && nc > 0 {
+                let b = nb - 1;
+                let c = nc - 1;
+                self.g[b][b] += bjt.go;
+                self.g[c][c] += bjt.go;
+                self.g[b][c] -= bjt.go;
+                self.g[c][b] -= bjt.go;
             }
 
             // DC bias currents (as current source injections)
@@ -613,7 +619,10 @@ impl MnaSystem {
                         dev_info.node_indices[2],
                     );
                     // If internal nodes exist, stamp caps at internal nodes (not external)
-                    let int = self.bjt_internal_nodes.iter().find(|n| n.start_idx == slot.start_idx);
+                    let int = self
+                        .bjt_internal_nodes
+                        .iter()
+                        .find(|n| n.start_idx == slot.start_idx);
                     // CJE: base-emitter junction
                     if p.cje > 0.0 {
                         let cap_b = int.and_then(|n| n.int_base).map(|i| i + 1).unwrap_or(nb);
@@ -623,7 +632,10 @@ impl MnaSystem {
                     // CJC: base-collector junction
                     if p.cjc > 0.0 {
                         let cap_b = int.and_then(|n| n.int_base).map(|i| i + 1).unwrap_or(nb);
-                        let cap_c = int.and_then(|n| n.int_collector).map(|i| i + 1).unwrap_or(nc);
+                        let cap_c = int
+                            .and_then(|n| n.int_collector)
+                            .map(|i| i + 1)
+                            .unwrap_or(nc);
                         caps.push((cap_b, cap_c, p.cjc));
                     }
                 }
@@ -704,7 +716,7 @@ impl MnaSystem {
         }
 
         let mut expansions = Vec::new();
-        for (_dev_idx, (dev_info, slot)) in self.nonlinear_devices.iter().zip(device_slots.iter()).enumerate() {
+        for (dev_info, slot) in self.nonlinear_devices.iter().zip(device_slots.iter()) {
             if slot.device_type == DeviceType::Bjt {
                 if let DeviceParams::Bjt(bp) = &slot.params {
                     if bp.has_parasitics() && dev_info.node_indices.len() >= 3 {
@@ -730,9 +742,15 @@ impl MnaSystem {
         // Count new internal nodes needed
         let mut num_new = 0usize;
         for exp in &expansions {
-            if exp.rb > 0.0 { num_new += 1; }
-            if exp.rc > 0.0 { num_new += 1; }
-            if exp.re > 0.0 { num_new += 1; }
+            if exp.rb > 0.0 {
+                num_new += 1;
+            }
+            if exp.rc > 0.0 {
+                num_new += 1;
+            }
+            if exp.re > 0.0 {
+                num_new += 1;
+            }
         }
 
         let old_n_aug = self.n_aug;
@@ -767,14 +785,44 @@ impl MnaSystem {
             let s = exp.start_idx;
 
             // Create internal node indices (0-indexed into the matrix)
-            let int_b = if exp.rb > 0.0 { let idx = next_idx; next_idx += 1; Some(idx) } else { None };
-            let int_c = if exp.rc > 0.0 { let idx = next_idx; next_idx += 1; Some(idx) } else { None };
-            let int_e = if exp.re > 0.0 { let idx = next_idx; next_idx += 1; Some(idx) } else { None };
+            let int_b = if exp.rb > 0.0 {
+                let idx = next_idx;
+                next_idx += 1;
+                Some(idx)
+            } else {
+                None
+            };
+            let int_c = if exp.rc > 0.0 {
+                let idx = next_idx;
+                next_idx += 1;
+                Some(idx)
+            } else {
+                None
+            };
+            let int_e = if exp.re > 0.0 {
+                let idx = next_idx;
+                next_idx += 1;
+                Some(idx)
+            } else {
+                None
+            };
 
             // External node indices (0-indexed; None if grounded)
-            let ext_b_0 = if exp.ext_b > 0 { Some(exp.ext_b - 1) } else { None };
-            let ext_c_0 = if exp.ext_c > 0 { Some(exp.ext_c - 1) } else { None };
-            let ext_e_0 = if exp.ext_e > 0 { Some(exp.ext_e - 1) } else { None };
+            let ext_b_0 = if exp.ext_b > 0 {
+                Some(exp.ext_b - 1)
+            } else {
+                None
+            };
+            let ext_c_0 = if exp.ext_c > 0 {
+                Some(exp.ext_c - 1)
+            } else {
+                None
+            };
+            let ext_e_0 = if exp.ext_e > 0 {
+                Some(exp.ext_e - 1)
+            } else {
+                None
+            };
 
             // Stamp parasitic conductances in G: 1/R between external and internal
             if let Some(ib) = int_b {
@@ -811,22 +859,44 @@ impl MnaSystem {
             let eff_e = int_e.or(ext_e_0);
 
             // Clear existing N_v/N_i entries for this BJT
-            for j in 0..new_n_aug { self.n_v[s][j] = 0.0; self.n_v[s + 1][j] = 0.0; }
-            for i in 0..new_n_aug { self.n_i[i][s] = 0.0; self.n_i[i][s + 1] = 0.0; }
+            for j in 0..new_n_aug {
+                self.n_v[s][j] = 0.0;
+                self.n_v[s + 1][j] = 0.0;
+            }
+            for i in 0..new_n_aug {
+                self.n_i[i][s] = 0.0;
+                self.n_i[i][s + 1] = 0.0;
+            }
 
             // Re-stamp N_v: Vbe_int = V(basePrime) - V(emitterPrime)
-            if let Some(b) = eff_b { self.n_v[s][b] = 1.0; }
-            if let Some(e) = eff_e { self.n_v[s][e] = -1.0; }
+            if let Some(b) = eff_b {
+                self.n_v[s][b] = 1.0;
+            }
+            if let Some(e) = eff_e {
+                self.n_v[s][e] = -1.0;
+            }
             // N_v: Vbc_int = V(basePrime) - V(collectorPrime)
-            if let Some(b) = eff_b { self.n_v[s + 1][b] = 1.0; }
-            if let Some(c) = eff_c { self.n_v[s + 1][c] = -1.0; }
+            if let Some(b) = eff_b {
+                self.n_v[s + 1][b] = 1.0;
+            }
+            if let Some(c) = eff_c {
+                self.n_v[s + 1][c] = -1.0;
+            }
 
             // N_i: Ic enters collectorPrime, exits emitterPrime
-            if let Some(c) = eff_c { self.n_i[c][s] = -1.0; }
-            if let Some(e) = eff_e { self.n_i[e][s] = 1.0; }
+            if let Some(c) = eff_c {
+                self.n_i[c][s] = -1.0;
+            }
+            if let Some(e) = eff_e {
+                self.n_i[e][s] = 1.0;
+            }
             // N_i: Ib enters basePrime, exits emitterPrime
-            if let Some(b) = eff_b { self.n_i[b][s + 1] = -1.0; }
-            if let Some(e) = eff_e { self.n_i[e][s + 1] = 1.0; }
+            if let Some(b) = eff_b {
+                self.n_i[b][s + 1] = -1.0;
+            }
+            if let Some(e) = eff_e {
+                self.n_i[e][s + 1] = 1.0;
+            }
 
             self.bjt_internal_nodes.push(BjtTransientInternalNodes {
                 device_name: exp.device_name.clone(),
@@ -838,7 +908,13 @@ impl MnaSystem {
 
             log::debug!(
                 "BJT {} internal nodes: base={:?} collector={:?} emitter={:?} (RB={} RC={} RE={})",
-                exp.device_name, int_b, int_c, int_e, exp.rb, exp.rc, exp.re,
+                exp.device_name,
+                int_b,
+                int_c,
+                int_e,
+                exp.rb,
+                exp.rc,
+                exp.re,
             );
         }
 
@@ -968,7 +1044,11 @@ impl MnaSystem {
     /// constraints with no capacitance. In A_neg (g_sign < 0), those rows must be ALL
     /// ZEROS because there is no trapezoidal history for algebraic constraints.
     #[allow(clippy::needless_range_loop)]
-    fn build_discretized_matrix(&self, sample_rate: f64, g_sign: f64) -> Result<Vec<Vec<f64>>, MnaError> {
+    fn build_discretized_matrix(
+        &self,
+        sample_rate: f64,
+        g_sign: f64,
+    ) -> Result<Vec<Vec<f64>>, MnaError> {
         if !(sample_rate > 0.0 && sample_rate.is_finite()) {
             return Err(MnaError::InvalidParameter(format!(
                 "invalid sample_rate: {} (must be positive and finite)",
@@ -1708,7 +1788,8 @@ impl MnaBuilder {
                             "ROUT" => oa.r_out = *val,
                             _ => log::warn!(
                                 ".model {}: unrecognized parameter '{}' (ignored)",
-                                m.name, key
+                                m.name,
+                                key
                             ),
                         }
                     }
@@ -1720,7 +1801,8 @@ impl MnaBuilder {
         let n = self.next_node_idx - 1; // Exclude ground
         if n > MAX_N {
             return Err(MnaError::TopologyError(format!(
-                "Circuit has {} nodes, exceeding MAX_N={}", n, MAX_N
+                "Circuit has {} nodes, exceeding MAX_N={}",
+                n, MAX_N
             )));
         }
         let m = self.total_dimension;
@@ -2948,14 +3030,15 @@ impl MnaBuilder {
                         name
                     )));
                 }
-                let is_linearized = self
-                    .linearized_bjts
-                    .contains(&name.to_ascii_uppercase());
+                let is_linearized = self.linearized_bjts.contains(&name.to_ascii_uppercase());
                 if is_linearized {
                     // Linearized BJTs are removed from the nonlinear system entirely.
                     // Their small-signal conductances are stamped into G after DC OP.
                     // Don't push to nonlinear_devices, don't increment total_dimension.
-                    log::info!("BJT '{}' linearized at DC OP (removed from NR, M reduced by 2)", name);
+                    log::info!(
+                        "BJT '{}' linearized at DC OP (removed from NR, M reduced by 2)",
+                        name
+                    );
                 } else {
                     let is_forward_active = self
                         .forward_active_bjts

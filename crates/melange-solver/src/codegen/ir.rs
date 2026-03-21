@@ -574,7 +574,8 @@ impl CircuitIR {
             let mut x = vec![1.0 / (n as f64).sqrt(); n];
             let mut y = vec![0.0; n];
             let mut spectral_radius = 0.0;
-            for _ in 0..20 { // 20 power iterations
+            for _ in 0..20 {
+                // 20 power iterations
                 // y = S * (A_neg * x)
                 let mut ax = vec![0.0; n];
                 for i in 0..n {
@@ -589,9 +590,13 @@ impl CircuitIR {
                     }
                 }
                 let norm: f64 = y.iter().map(|v| v * v).sum::<f64>().sqrt();
-                if norm < 1e-30 { break; }
+                if norm < 1e-30 {
+                    break;
+                }
                 spectral_radius = norm / x.iter().map(|v| v * v).sum::<f64>().sqrt();
-                for i in 0..n { x[i] = y[i] / norm; }
+                for i in 0..n {
+                    x[i] = y[i] / norm;
+                }
             }
             if spectral_radius > 1.002 {
                 log::info!("Auto-selecting backward Euler: spectral radius {:.4} > 1.002 (trapezoidal unstable)", spectral_radius);
@@ -603,7 +608,11 @@ impl CircuitIR {
             false
         };
         let be = config.backward_euler || auto_be;
-        let alpha = if be { internal_rate } else { 2.0 * internal_rate };
+        let alpha = if be {
+            internal_rate
+        } else {
+            2.0 * internal_rate
+        };
 
         // Validate output_nodes against circuit node count
         for (i, &node) in config.output_nodes.iter().enumerate() {
@@ -733,18 +742,28 @@ impl CircuitIR {
             for vs in &mna.voltage_sources {
                 let row = n_nodes + vs.ext_idx;
                 if row < n {
-                    for j in 0..n { a_neg_flat[row * n + j] = 0.0; }
+                    for j in 0..n {
+                        a_neg_flat[row * n + j] = 0.0;
+                    }
                 }
             }
             let num_vs = mna.voltage_sources.len();
             for (vcvs_idx, _) in mna.vcvs_sources.iter().enumerate() {
                 let row = n_nodes + num_vs + vcvs_idx;
-                if row < n { for j in 0..n { a_neg_flat[row * n + j] = 0.0; } }
+                if row < n {
+                    for j in 0..n {
+                        a_neg_flat[row * n + j] = 0.0;
+                    }
+                }
             }
             let num_vcvs = mna.vcvs_sources.len();
             for (xfmr_idx, _) in mna.ideal_transformers.iter().enumerate() {
                 let row = n_nodes + num_vs + num_vcvs + xfmr_idx;
-                if row < n { for j in 0..n { a_neg_flat[row * n + j] = 0.0; } }
+                if row < n {
+                    for j in 0..n {
+                        a_neg_flat[row * n + j] = 0.0;
+                    }
+                }
             }
 
             // Invert A to get S
@@ -784,17 +803,29 @@ impl CircuitIR {
             // Zero VS/VCVS algebraic rows in A_neg
             for vs in &mna.voltage_sources {
                 let row = mna.n + vs.ext_idx;
-                if row < n { for j in 0..n { a_neg_flat[row * n + j] = 0.0; } }
+                if row < n {
+                    for j in 0..n {
+                        a_neg_flat[row * n + j] = 0.0;
+                    }
+                }
             }
             let num_vs = mna.voltage_sources.len();
             for (idx, _) in mna.vcvs_sources.iter().enumerate() {
                 let row = mna.n + num_vs + idx;
-                if row < n { for j in 0..n { a_neg_flat[row * n + j] = 0.0; } }
+                if row < n {
+                    for j in 0..n {
+                        a_neg_flat[row * n + j] = 0.0;
+                    }
+                }
             }
             let num_vcvs = mna.vcvs_sources.len();
             for (idx, _) in mna.ideal_transformers.iter().enumerate() {
                 let row = mna.n + num_vs + num_vcvs + idx;
-                if row < n { for j in 0..n { a_neg_flat[row * n + j] = 0.0; } }
+                if row < n {
+                    for j in 0..n {
+                        a_neg_flat[row * n + j] = 0.0;
+                    }
+                }
             }
             let s_flat = invert_flat_matrix(&a_flat, n)?;
             let k_flat = if m > 0 {
@@ -1106,7 +1137,9 @@ impl CircuitIR {
 
         if m > dk::MAX_M {
             return Err(CodegenError::InvalidConfig(format!(
-                "Nonlinear dimension M={} exceeds MAX_M={}", m, dk::MAX_M
+                "Nonlinear dimension M={} exceeds MAX_M={}",
+                m,
+                dk::MAX_M
             )));
         }
 
@@ -1122,7 +1155,11 @@ impl CircuitIR {
 
         let sample_rate = config.sample_rate;
         let internal_rate = sample_rate * config.oversampling_factor as f64;
-        let alpha = if config.backward_euler { internal_rate } else { 2.0 * internal_rate };
+        let alpha = if config.backward_euler {
+            internal_rate
+        } else {
+            2.0 * internal_rate
+        };
         let alpha_be = internal_rate;
 
         let topology = Topology {
@@ -1186,15 +1223,27 @@ impl CircuitIR {
             let num_vcvs = mna.vcvs_sources.len();
             for vs in &mna.voltage_sources {
                 let row = n_nodes + vs.ext_idx;
-                if row < n { for j in 0..n { a_neg_flat[row * n + j] = 0.0; } }
+                if row < n {
+                    for j in 0..n {
+                        a_neg_flat[row * n + j] = 0.0;
+                    }
+                }
             }
             for (idx, _) in mna.vcvs_sources.iter().enumerate() {
                 let row = n_nodes + num_vs + idx;
-                if row < n { for j in 0..n { a_neg_flat[row * n + j] = 0.0; } }
+                if row < n {
+                    for j in 0..n {
+                        a_neg_flat[row * n + j] = 0.0;
+                    }
+                }
             }
             for (idx, _) in mna.ideal_transformers.iter().enumerate() {
                 let row = n_nodes + num_vs + num_vcvs + idx;
-                if row < n { for j in 0..n { a_neg_flat[row * n + j] = 0.0; } }
+                if row < n {
+                    for j in 0..n {
+                        a_neg_flat[row * n + j] = 0.0;
+                    }
+                }
             }
         }
 
@@ -1215,15 +1264,27 @@ impl CircuitIR {
             let num_vcvs = mna.vcvs_sources.len();
             for vs in &mna.voltage_sources {
                 let row = n_nodes + vs.ext_idx;
-                if row < n { for j in 0..n { a_neg_be_flat[row * n + j] = 0.0; } }
+                if row < n {
+                    for j in 0..n {
+                        a_neg_be_flat[row * n + j] = 0.0;
+                    }
+                }
             }
             for (idx, _) in mna.vcvs_sources.iter().enumerate() {
                 let row = n_nodes + num_vs + idx;
-                if row < n { for j in 0..n { a_neg_be_flat[row * n + j] = 0.0; } }
+                if row < n {
+                    for j in 0..n {
+                        a_neg_be_flat[row * n + j] = 0.0;
+                    }
+                }
             }
             for (idx, _) in mna.ideal_transformers.iter().enumerate() {
                 let row = n_nodes + num_vs + num_vcvs + idx;
-                if row < n { for j in 0..n { a_neg_be_flat[row * n + j] = 0.0; } }
+                if row < n {
+                    for j in 0..n {
+                        a_neg_be_flat[row * n + j] = 0.0;
+                    }
+                }
             }
         }
 
@@ -1251,13 +1312,17 @@ impl CircuitIR {
             }
             for vs in &mna.voltage_sources {
                 let k = mna.n + vs.ext_idx;
-                if k < n { rc[k] = vs.dc_value; }
+                if k < n {
+                    rc[k] = vs.dc_value;
+                }
             }
             rc
         } else {
             let rhs_const_base = dk::build_rhs_const(mna);
             let mut rc = vec![0.0f64; n];
-            for i in 0..n_aug { rc[i] = rhs_const_base[i]; }
+            for i in 0..n_aug {
+                rc[i] = rhs_const_base[i];
+            }
             rc
         };
 
@@ -1316,8 +1381,7 @@ impl CircuitIR {
         // Build device info with MNA so FA reductions are reflected in dimensions
         let mut device_slots = Self::build_device_info_with_mna(netlist, Some(mna))?;
 
-        let dc_result =
-            dc_op::solve_dc_operating_point(mna, &device_slots, &dc_op_config);
+        let dc_result = dc_op::solve_dc_operating_point(mna, &device_slots, &dc_op_config);
         let dc_op_truncated = &dc_result.v_node[..n_aug.min(dc_result.v_node.len())];
         let has_dc_op = dc_op_truncated.iter().any(|&v| v.abs() > 1e-15);
         let dc_op_converged = dc_result.converged;
@@ -1433,9 +1497,7 @@ impl CircuitIR {
 
         let mut forward_active = std::collections::HashSet::new();
         for (slot_idx, slot) in device_slots.iter().enumerate() {
-            if slot.device_type == DeviceType::Bjt
-                && slot_idx < mna.nonlinear_devices.len()
-            {
+            if slot.device_type == DeviceType::Bjt && slot_idx < mna.nonlinear_devices.len() {
                 let bp = if let DeviceParams::Bjt(bp) = &slot.params {
                     bp
                 } else {
@@ -1504,7 +1566,9 @@ impl CircuitIR {
                 Element::Bjt { name, model, .. } => {
                     // Skip linearized BJTs — they're not in the nonlinear system
                     let is_linearized = mna.is_some_and(|m| {
-                        m.linearized_bjts.iter().any(|l| l.name.eq_ignore_ascii_case(name))
+                        m.linearized_bjts
+                            .iter()
+                            .any(|l| l.name.eq_ignore_ascii_case(name))
                     });
                     if is_linearized {
                         continue; // Don't create a DeviceSlot, don't increment nl_dev_idx
@@ -1574,10 +1638,12 @@ impl CircuitIR {
         // Mark BJTs with MNA-level internal nodes
         if let Some(m) = mna {
             for slot in &mut slots {
-                if slot.device_type == DeviceType::Bjt {
-                    if m.bjt_internal_nodes.iter().any(|n| n.start_idx == slot.start_idx) {
-                        slot.has_internal_mna_nodes = true;
-                    }
+                if slot.device_type == DeviceType::Bjt
+                    && m.bjt_internal_nodes
+                        .iter()
+                        .any(|n| n.start_idx == slot.start_idx)
+                {
+                    slot.has_internal_mna_nodes = true;
                 }
             }
         }
@@ -1653,8 +1719,7 @@ impl CircuitIR {
             validate_positive_finite(ibv, "diode model IBV")?;
         }
 
-        Self::warn_unrecognized_params(netlist, model,
-            &["IS", "N", "CJO", "RS", "BV", "IBV"]);
+        Self::warn_unrecognized_params(netlist, model, &["IS", "N", "CJO", "RS", "BV", "IBV"]);
 
         Ok(DiodeParams {
             is,
@@ -1837,10 +1902,14 @@ impl CircuitIR {
             )));
         }
 
-        Self::warn_unrecognized_params(netlist, model,
-            &["IS", "BF", "BR", "VAF", "VAR", "IKF", "IKR", "CJE", "CJC",
-              "NF", "NR", "ISE", "NE", "ISC", "NC",
-              "RB", "RC", "RE", "RTH", "CTH", "XTI", "EG", "TAMB"]);
+        Self::warn_unrecognized_params(
+            netlist,
+            model,
+            &[
+                "IS", "BF", "BR", "VAF", "VAR", "IKF", "IKR", "CJE", "CJC", "NF", "NR", "ISE",
+                "NE", "ISC", "NC", "RB", "RC", "RE", "RTH", "CTH", "XTI", "EG", "TAMB",
+            ],
+        );
 
         Ok(BjtParams {
             is,
@@ -1921,8 +1990,11 @@ impl CircuitIR {
         let rd = Self::lookup_model_param(netlist, model, "RD").unwrap_or(0.0);
         let rs_param = Self::lookup_model_param(netlist, model, "RS").unwrap_or(0.0);
 
-        Self::warn_unrecognized_params(netlist, model,
-            &["VTO", "BETA", "IDSS", "LAMBDA", "CGS", "CGD", "RD", "RS"]);
+        Self::warn_unrecognized_params(
+            netlist,
+            model,
+            &["VTO", "BETA", "IDSS", "LAMBDA", "CGS", "CGD", "RD", "RS"],
+        );
 
         Ok(JfetParams {
             idss,
@@ -1994,8 +2066,13 @@ impl CircuitIR {
             )));
         }
 
-        Self::warn_unrecognized_params(netlist, model,
-            &["KP", "VTO", "LAMBDA", "CGS", "CGD", "RD", "RS", "GAMMA", "PHI"]);
+        Self::warn_unrecognized_params(
+            netlist,
+            model,
+            &[
+                "KP", "VTO", "LAMBDA", "CGS", "CGD", "RD", "RS", "GAMMA", "PHI",
+            ],
+        );
 
         // source_node and bulk_node will be resolved later from the MNA system
         Ok(MosfetParams {
@@ -2072,9 +2149,24 @@ impl CircuitIR {
             )));
         }
 
-        Self::warn_unrecognized_params(netlist, model,
-            &["MU", "EX", "KG1", "KP", "KVB", "IG_MAX", "VGK_ONSET", "LAMBDA",
-              "CCG", "CGP", "CCP", "RGI"]);
+        Self::warn_unrecognized_params(
+            netlist,
+            model,
+            &[
+                "MU",
+                "EX",
+                "KG1",
+                "KP",
+                "KVB",
+                "IG_MAX",
+                "VGK_ONSET",
+                "LAMBDA",
+                "CCG",
+                "CGP",
+                "CCP",
+                "RGI",
+            ],
+        );
 
         Ok(TubeParams {
             mu,
@@ -2094,13 +2186,18 @@ impl CircuitIR {
 
     /// Warn on unrecognized .model parameters (typo protection).
     fn warn_unrecognized_params(netlist: &Netlist, model_name: &str, known: &[&str]) {
-        if let Some(m) = netlist.models.iter().find(|m| m.name.eq_ignore_ascii_case(model_name)) {
+        if let Some(m) = netlist
+            .models
+            .iter()
+            .find(|m| m.name.eq_ignore_ascii_case(model_name))
+        {
             for (key, _) in &m.params {
                 let upper = key.to_ascii_uppercase();
                 if !known.iter().any(|k| k.eq_ignore_ascii_case(&upper)) {
                     log::warn!(
                         ".model {}: unrecognized parameter '{}' (ignored)",
-                        model_name, key,
+                        model_name,
+                        key,
                     );
                 }
             }

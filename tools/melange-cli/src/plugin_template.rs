@@ -96,10 +96,7 @@ pub fn generate_plugin_project_with_oversampling(
         ),
     )?;
     // .gitignore for generated plugin project
-    std::fs::write(
-        output_dir.join(".gitignore"),
-        "/target\n",
-    )?;
+    std::fs::write(output_dir.join(".gitignore"), "/target\n")?;
     // README.md for generated plugin project
     std::fs::write(
         output_dir.join("README.md"),
@@ -130,7 +127,7 @@ fn generate_readme(circuit_name: &str, plugin_name: Option<&str>) -> String {
         name.to_string()
     } else {
         circuit_name
-            .split(|c| c == '-' || c == '_')
+            .split(['-', '_'])
             .map(capitalize_word)
             .collect::<Vec<_>>()
             .join(" ")
@@ -173,7 +170,16 @@ pub(crate) fn test_generate_lib_rs(
     with_level_params: bool,
     pots: &[PotParamInfo],
 ) -> String {
-    generate_lib_rs(circuit_name, with_level_params, pots, &[], 1, false, 1, &PluginOptions::default())
+    generate_lib_rs(
+        circuit_name,
+        with_level_params,
+        pots,
+        &[],
+        1,
+        false,
+        1,
+        &PluginOptions::default(),
+    )
 }
 
 /// Capitalize first character, lowercase the rest (e.g., "hello" -> "Hello", "LOUD" -> "Loud").
@@ -283,7 +289,8 @@ fn generate_params_struct(
     switches: &[SwitchParamInfo],
     wet_dry_mix: bool,
 ) -> String {
-    let has_any_params = with_level_params || !pots.is_empty() || !switches.is_empty() || wet_dry_mix;
+    let has_any_params =
+        with_level_params || !pots.is_empty() || !switches.is_empty() || wet_dry_mix;
     if !has_any_params {
         return "#[derive(Params, Default)]\npub struct CircuitParams {}".to_string();
     }
@@ -334,7 +341,8 @@ fn generate_process_loop(
     mono: bool,
     wet_dry_mix: bool,
 ) -> String {
-    let has_any_params = with_level_params || !pots.is_empty() || !switches.is_empty() || wet_dry_mix;
+    let has_any_params =
+        with_level_params || !pots.is_empty() || !switches.is_empty() || wet_dry_mix;
     if !has_any_params && num_outputs <= 1 {
         if mono {
             return r#"        for channel_samples in buffer.iter_samples() {
@@ -559,22 +567,31 @@ fn generate_lib_rs(
         name.to_string()
     } else {
         circuit_name
-            .split(|c| c == '-' || c == '_')
+            .split(['-', '_'])
             .map(capitalize_word)
             .collect::<Vec<_>>()
             .join(" ")
     };
     let clap_id = format!("com.melange.{circuit_name}");
     let vst3_id_str = compute_vst3_id(circuit_name);
-    let params_struct = generate_params_struct(with_level_params, pots, switches, options.wet_dry_mix);
-    let process_loop =
-        generate_process_loop(with_level_params, pots, switches, num_outputs, nodal_mode, options.mono, options.wet_dry_mix);
+    let params_struct =
+        generate_params_struct(with_level_params, pots, switches, options.wet_dry_mix);
+    let process_loop = generate_process_loop(
+        with_level_params,
+        pots,
+        switches,
+        num_outputs,
+        nodal_mode,
+        options.mono,
+        options.wet_dry_mix,
+    );
 
     // Conditional sections based on num_outputs
-    let (circuit_import, plugin_struct, plugin_default, init_method, reset_method) =
-        if num_outputs > 1 {
-            // Multi-output: single circuit state, mono input → multi-output
-            (
+    let (circuit_import, plugin_struct, plugin_default, init_method, reset_method) = if num_outputs
+        > 1
+    {
+        // Multi-output: single circuit state, mono input → multi-output
+        (
                 "use circuit::{process_sample, CircuitState, NUM_OUTPUTS};".to_string(),
                 "pub struct CircuitPlugin {\n\
                  \x20   params: Arc<CircuitParams>,\n\
@@ -624,9 +641,9 @@ fn generate_lib_rs(
                  \x20   }"
                     .to_string(),
             )
-        } else if options.mono {
-            // Mono: single-channel state
-            (
+    } else if options.mono {
+        // Mono: single-channel state
+        (
                 "use circuit::{process_sample, CircuitState};".to_string(),
                 "pub struct CircuitPlugin {\n\
                  \x20   params: Arc<CircuitParams>,\n\
@@ -681,9 +698,9 @@ fn generate_lib_rs(
                  \x20   }"
                     .to_string(),
             )
-        } else {
-            // Single output: per-channel state duplication (stereo from mono)
-            (
+    } else {
+        // Single output: per-channel state duplication (stereo from mono)
+        (
                 "use circuit::{process_sample, CircuitState};".to_string(),
                 "pub struct CircuitPlugin {\n\
                  \x20   params: Arc<CircuitParams>,\n\
@@ -740,11 +757,15 @@ fn generate_lib_rs(
                  \x20   }"
                     .to_string(),
             )
-        };
+    };
 
     // Audio channel count for IO layout
     let num_channels = if options.mono { 1 } else { 2 };
-    let clap_channel_feature = if options.mono { "ClapFeature::Mono" } else { "ClapFeature::Stereo" };
+    let clap_channel_feature = if options.mono {
+        "ClapFeature::Mono"
+    } else {
+        "ClapFeature::Stereo"
+    };
 
     // Oversampling latency: half-band IIR group delay in output samples
     let latency_method = if oversampling_factor > 1 {
@@ -1374,7 +1395,10 @@ mod tests {
 
     #[test]
     fn lib_with_custom_name() {
-        let opts = PluginOptions { plugin_name: Some("My Custom Plugin"), ..Default::default() };
+        let opts = PluginOptions {
+            plugin_name: Some("My Custom Plugin"),
+            ..Default::default()
+        };
         let lib = generate_lib_rs("test-circuit", false, &[], &[], 1, false, 1, &opts);
         assert!(lib.contains("const NAME: &'static str = \"My Custom Plugin\""));
     }
@@ -1390,7 +1414,10 @@ mod tests {
 
     #[test]
     fn lib_mono_has_single_channel_io() {
-        let opts = PluginOptions { mono: true, ..Default::default() };
+        let opts = PluginOptions {
+            mono: true,
+            ..Default::default()
+        };
         let lib = generate_lib_rs("test", false, &[], &[], 1, false, 1, &opts);
         assert!(lib.contains("main_input_channels: NonZeroU32::new(1)"));
         assert!(lib.contains("main_output_channels: NonZeroU32::new(1)"));
@@ -1398,7 +1425,10 @@ mod tests {
 
     #[test]
     fn lib_mono_has_mono_clap_feature() {
-        let opts = PluginOptions { mono: true, ..Default::default() };
+        let opts = PluginOptions {
+            mono: true,
+            ..Default::default()
+        };
         let lib = generate_lib_rs("test", false, &[], &[], 1, false, 1, &opts);
         assert!(lib.contains("ClapFeature::Mono"));
         assert!(!lib.contains("ClapFeature::Stereo"));
@@ -1414,7 +1444,10 @@ mod tests {
 
     #[test]
     fn lib_mono_has_single_state() {
-        let opts = PluginOptions { mono: true, ..Default::default() };
+        let opts = PluginOptions {
+            mono: true,
+            ..Default::default()
+        };
         let lib = generate_lib_rs("test", false, &[], &[], 1, false, 1, &opts);
         assert!(lib.contains("circuit_states: vec![CircuitState::default(); 1]"));
     }
@@ -1423,7 +1456,10 @@ mod tests {
 
     #[test]
     fn lib_with_wet_dry_mix_has_mix_param() {
-        let opts = PluginOptions { wet_dry_mix: true, ..Default::default() };
+        let opts = PluginOptions {
+            wet_dry_mix: true,
+            ..Default::default()
+        };
         let lib = generate_lib_rs("test", false, &[], &[], 1, false, 1, &opts);
         assert!(lib.contains("#[id = \"mix\"]"));
         assert!(lib.contains("pub mix: FloatParam"));
@@ -1431,7 +1467,10 @@ mod tests {
 
     #[test]
     fn lib_with_wet_dry_mix_has_blend_in_process() {
-        let opts = PluginOptions { wet_dry_mix: true, ..Default::default() };
+        let opts = PluginOptions {
+            wet_dry_mix: true,
+            ..Default::default()
+        };
         let lib = generate_lib_rs("test", false, &[], &[], 1, false, 1, &opts);
         assert!(lib.contains("let dry = *sample;"));
         assert!(lib.contains("mix * out + (1.0 - mix) * dry"));
@@ -1447,7 +1486,10 @@ mod tests {
 
     #[test]
     fn lib_with_wet_dry_mix_default_is_fully_wet() {
-        let opts = PluginOptions { wet_dry_mix: true, ..Default::default() };
+        let opts = PluginOptions {
+            wet_dry_mix: true,
+            ..Default::default()
+        };
         let lib = generate_lib_rs("test", false, &[], &[], 1, false, 1, &opts);
         // Mix default should be 1.0 (fully wet)
         assert!(lib.contains("\"Mix\""));
@@ -1495,7 +1537,10 @@ mod tests {
 
     #[test]
     fn lib_mono_with_level_params() {
-        let opts = PluginOptions { mono: true, ..Default::default() };
+        let opts = PluginOptions {
+            mono: true,
+            ..Default::default()
+        };
         let lib = generate_lib_rs("test", true, &[], &[], 1, false, 1, &opts);
         assert!(lib.contains("main_input_channels: NonZeroU32::new(1)"));
         assert!(lib.contains("pub input_level: FloatParam"));
@@ -1504,7 +1549,10 @@ mod tests {
 
     #[test]
     fn lib_wet_dry_with_level_params() {
-        let opts = PluginOptions { wet_dry_mix: true, ..Default::default() };
+        let opts = PluginOptions {
+            wet_dry_mix: true,
+            ..Default::default()
+        };
         let lib = generate_lib_rs("test", true, &[], &[], 1, false, 1, &opts);
         assert!(lib.contains("pub input_level: FloatParam"));
         assert!(lib.contains("pub mix: FloatParam"));

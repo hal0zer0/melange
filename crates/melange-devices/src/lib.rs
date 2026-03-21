@@ -21,7 +21,7 @@ pub mod mosfet;
 pub mod opamp;
 pub mod tube;
 
-pub use bjt::{BjtEbersMoll, BjtGummelPoon, BjtPolarity, BjtRegion, classify_region};
+pub use bjt::{classify_region, BjtEbersMoll, BjtGummelPoon, BjtPolarity, BjtRegion};
 pub use diode::{DiodeShockley, DiodeWithRs, Led};
 pub use jfet::{Jfet, JfetChannel};
 pub use ldr::CdsLdr;

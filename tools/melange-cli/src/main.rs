@@ -710,31 +710,32 @@ fn compile_circuit_source(
     }
 
     // Linearize BJTs specified by .linearize directives
-    let linearized: std::collections::HashSet<String> = netlist
-        .linearize_devices
-        .iter()
-        .cloned()
-        .collect();
+    let linearized: std::collections::HashSet<String> =
+        netlist.linearize_devices.iter().cloned().collect();
     if !linearized.is_empty() {
         // Compute DC OP on current MNA to get g-parameters for linearized BJTs
         let device_slots = melange_solver::codegen::ir::CircuitIR::build_device_info_with_mna(
-            &netlist, Some(&mna),
-        ).unwrap_or_default();
+            &netlist,
+            Some(&mna),
+        )
+        .unwrap_or_default();
         let dc_op_config = melange_solver::dc_op::DcOpConfig {
             input_node: input_node_idx,
             input_resistance,
             ..melange_solver::dc_op::DcOpConfig::default()
         };
-        let dc_result = melange_solver::dc_op::solve_dc_operating_point(
-            &mna, &device_slots, &dc_op_config,
-        );
+        let dc_result =
+            melange_solver::dc_op::solve_dc_operating_point(&mna, &device_slots, &dc_op_config);
 
         // Extract g-parameters from DC OP Jacobian for each linearized BJT
         let mut lin_infos = Vec::new();
         for slot in &device_slots {
             if let melange_solver::codegen::ir::DeviceParams::Bjt(bp) = &slot.params {
                 // Find the device name from MNA nonlinear_devices
-                let dev = mna.nonlinear_devices.iter().find(|d| d.start_idx == slot.start_idx);
+                let dev = mna
+                    .nonlinear_devices
+                    .iter()
+                    .find(|d| d.start_idx == slot.start_idx);
                 if let Some(dev) = dev {
                     if linearized.contains(&dev.name.to_ascii_uppercase()) {
                         let s = slot.start_idx;
@@ -755,22 +756,33 @@ fn compile_circuit_source(
                         // dIc/dVbe (transconductance)
                         let gm = bp.is / nf_vt * exp_be;
                         // dIc/dVbc
-                        let gmu = (bp.is / bp.vt * exp_bc + bp.is / (bp.beta_r * bp.vt) * exp_bc).abs();
+                        let gmu =
+                            (bp.is / bp.vt * exp_bc + bp.is / (bp.beta_r * bp.vt) * exp_bc).abs();
                         // dIb/dVbe
                         let gpi = bp.is / (bp.beta_f * nf_vt) * exp_be;
                         // dIb/dVbc
                         let go = bp.is / (bp.beta_r * bp.vt) * exp_bc;
 
-                        let (nc, nb, ne) = (dev.node_indices[0], dev.node_indices[1], dev.node_indices[2]);
+                        let (nc, nb, ne) = (
+                            dev.node_indices[0],
+                            dev.node_indices[1],
+                            dev.node_indices[2],
+                        );
                         println!(
                             "  Linearized {}: gm={:.4e} gpi={:.4e} gmu={:.4e} Ic_dc={:.4e} Ib_dc={:.4e}",
                             dev.name, gm, gpi, gmu, ic, ib
                         );
                         lin_infos.push(melange_solver::mna::LinearizedBjtInfo {
                             name: dev.name.clone(),
-                            nc, nb, ne,
-                            gm, gpi, gmu, go,
-                            ic_dc: ic, ib_dc: ib,
+                            nc,
+                            nb,
+                            ne,
+                            gm,
+                            gpi,
+                            gmu,
+                            go,
+                            ic_dc: ic,
+                            ib_dc: ib,
                         });
                     }
                 }
@@ -786,16 +798,21 @@ fn compile_circuit_source(
         // Re-stamp junction caps
         {
             let ds = melange_solver::codegen::ir::CircuitIR::build_device_info_with_mna(
-                &netlist, Some(&mna),
-            ).unwrap_or_default();
-            if !ds.is_empty() { mna.stamp_device_junction_caps(&ds); }
+                &netlist,
+                Some(&mna),
+            )
+            .unwrap_or_default();
+            if !ds.is_empty() {
+                mna.stamp_device_junction_caps(&ds);
+            }
         }
         // Stamp linearized g-parameters into G
         mna.linearized_bjts = lin_infos;
         mna.stamp_linearized_bjts();
         println!(
             "  Linearized {} BJTs (M reduced by {})",
-            linearized.len(), linearized.len() * 2
+            linearized.len(),
+            linearized.len() * 2
         );
     }
 
@@ -834,7 +851,8 @@ fn compile_circuit_source(
                 let m = mna.m;
                 let n = mna.n_aug;
                 let dummy = DkKernel {
-                    n, m,
+                    n,
+                    m,
                     n_nodes: mna.n,
                     num_devices: mna.num_devices,
                     sample_rate,
@@ -923,18 +941,38 @@ fn compile_circuit_source(
         let mut rho = 0.0;
         for _ in 0..20 {
             let mut ax = vec![0.0; n_k];
-            for i in 0..n_k { for j in 0..n_k { ax[i] += kernel.a_neg[i * n_k + j] * x[j]; } }
-            for i in 0..n_k { y[i] = 0.0; for j in 0..n_k { y[i] += kernel.s[i * n_k + j] * ax[j]; } }
+            for (i, ax_i) in ax.iter_mut().enumerate() {
+                for (j, x_j) in x.iter().enumerate() {
+                    *ax_i += kernel.a_neg[i * n_k + j] * x_j;
+                }
+            }
+            for (i, y_i) in y.iter_mut().enumerate() {
+                *y_i = 0.0;
+                for (j, ax_j) in ax.iter().enumerate() {
+                    *y_i += kernel.s[i * n_k + j] * ax_j;
+                }
+            }
             let norm: f64 = y.iter().map(|v| v * v).sum::<f64>().sqrt();
-            if norm < 1e-30 { break; }
+            if norm < 1e-30 {
+                break;
+            }
             rho = norm / x.iter().map(|v| v * v).sum::<f64>().sqrt();
-            for i in 0..n_k { x[i] = y[i] / norm; }
+            for i in 0..n_k {
+                x[i] = y[i] / norm;
+            }
         }
         if rho > 1.002 {
-            println!("  Trapezoidal unstable (spectral radius {:.4}), routing to nodal", rho);
+            println!(
+                "  Trapezoidal unstable (spectral radius {:.4}), routing to nodal",
+                rho
+            );
             true
-        } else { false }
-    } else { false };
+        } else {
+            false
+        }
+    } else {
+        false
+    };
 
     let use_nodal_codegen = match solver_override {
         "nodal" => true,
@@ -975,15 +1013,19 @@ fn compile_circuit_source(
         // the full N×N LU path instead of Schur. The LU path handles parasitics via
         // bjt_with_parasitics() — internal nodes would increase N without benefit.
         let k_diag_min = if kernel.m > 0 {
-            (0..kernel.m).map(|i| kernel.k[i * kernel.m + i]).fold(0.0_f64, f64::min)
+            (0..kernel.m)
+                .map(|i| kernel.k[i * kernel.m + i])
+                .fold(0.0_f64, f64::min)
         } else {
             0.0
         };
         let skip_expansion = k_diag_min < -100.0;
         if !skip_expansion {
             let device_slots = melange_solver::codegen::ir::CircuitIR::build_device_info_with_mna(
-                &netlist, Some(&mna),
-            ).unwrap_or_default();
+                &netlist,
+                Some(&mna),
+            )
+            .unwrap_or_default();
             if !device_slots.is_empty() {
                 mna.expand_bjt_internal_nodes(&device_slots);
             }
@@ -1144,8 +1186,8 @@ fn validate_circuit_source(
     relaxed: bool,
 ) -> Result<()> {
     use melange_validate::{
-        ValidationOptions, comparison::ComparisonConfig, spice_runner::is_ngspice_available,
-        validate_circuit_with_options,
+        comparison::ComparisonConfig, spice_runner::is_ngspice_available,
+        validate_circuit_with_options, ValidationOptions,
     };
 
     println!("melange validate");
@@ -1553,7 +1595,8 @@ fn simulate_circuit_source(
                     BjtPolarity::Npn
                 };
                 let nf = find_model_param(model_name, "NF").unwrap_or(1.0);
-                let bjt = BjtEbersMoll::new(is, melange_primitives::VT_ROOM, bf, br, polarity).with_nf(nf);
+                let bjt = BjtEbersMoll::new(is, melange_primitives::VT_ROOM, bf, br, polarity)
+                    .with_nf(nf);
                 devices.push(DeviceEntry::new_bjt(bjt, dev_info.start_idx));
             }
             melange_solver::mna::NonlinearDeviceType::Jfet => {
@@ -1689,7 +1732,8 @@ fn simulate_circuit_source(
                     BjtPolarity::Npn
                 };
                 let nf = find_model_param(model_name, "NF").unwrap_or(1.0);
-                let bjt = BjtEbersMoll::new(is, melange_primitives::VT_ROOM, bf, br, polarity).with_nf(nf);
+                let bjt = BjtEbersMoll::new(is, melange_primitives::VT_ROOM, bf, br, polarity)
+                    .with_nf(nf);
                 devices.push(DeviceEntry::new_bjt(bjt, dev_info.start_idx));
             }
         }
@@ -2506,7 +2550,8 @@ fn build_device_entries(
                 };
                 let nf = find_model_param(model_name, "NF").unwrap_or(1.0);
                 devices.push(DeviceEntry::new_bjt(
-                    BjtEbersMoll::new(is, melange_primitives::VT_ROOM, bf, br, polarity).with_nf(nf),
+                    BjtEbersMoll::new(is, melange_primitives::VT_ROOM, bf, br, polarity)
+                        .with_nf(nf),
                     dev_info.start_idx,
                 ));
             }
@@ -2643,7 +2688,8 @@ fn build_device_entries(
                 };
                 let nf = find_model_param(model_name, "NF").unwrap_or(1.0);
                 devices.push(DeviceEntry::new_bjt(
-                    BjtEbersMoll::new(is, melange_primitives::VT_ROOM, bf, br, polarity).with_nf(nf),
+                    BjtEbersMoll::new(is, melange_primitives::VT_ROOM, bf, br, polarity)
+                        .with_nf(nf),
                     dev_info.start_idx,
                 ));
             }
@@ -3067,7 +3113,7 @@ fn list_nodes_source(circuit_source: &circuits::CircuitSource) -> Result<()> {
 }
 
 fn handle_sources(action: SourceAction) -> Result<()> {
-    use crate::sources::{SourcesConfig, format_sources_list};
+    use crate::sources::{format_sources_list, SourcesConfig};
 
     match action {
         SourceAction::List => {
@@ -3156,7 +3202,7 @@ fn list_builtins() -> Result<()> {
 }
 
 fn handle_cache(action: CacheAction) -> Result<()> {
-    use crate::cache::{Cache, format_cache_list};
+    use crate::cache::{format_cache_list, Cache};
 
     match action {
         CacheAction::List => {

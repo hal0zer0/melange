@@ -9,9 +9,9 @@
 use serde::Serialize;
 use tera::{Context, Tera};
 
-use super::CodegenError;
 use super::emitter::Emitter;
 use super::ir::{CircuitIR, DeviceParams, DeviceType, PotentiometerIR};
+use super::CodegenError;
 
 /// Inductor data passed to Tera templates.
 #[derive(Serialize)]
@@ -2044,23 +2044,30 @@ impl RustEmitter {
     fn emit_process_sample(&self, ir: &CircuitIR) -> Result<String, CodegenError> {
         let mut ctx = Context::new();
         ctx.insert("augmented_inductors", &ir.topology.augmented_inductors);
-        let n_nodes = if ir.topology.n_nodes > 0 { ir.topology.n_nodes } else { ir.topology.n };
+        let n_nodes = if ir.topology.n_nodes > 0 {
+            ir.topology.n_nodes
+        } else {
+            ir.topology.n
+        };
         ctx.insert("n_nodes", &n_nodes);
         // BE fallback in process_sample: only for circuits NOT using auto-BE (which
         // already uses BE for ALL samples). Avoids changing output of well-conditioned
         // circuits where the fallback would trigger on legitimate transient overshoots.
-        let has_be_fallback = !ir.matrices.s_be.is_empty()
-            && ir.topology.m > 0
-            && !ir.solver_config.backward_euler;
+        let has_be_fallback =
+            !ir.matrices.s_be.is_empty() && ir.topology.m > 0 && !ir.solver_config.backward_euler;
         ctx.insert("has_be_fallback", &has_be_fallback);
         ctx.insert("has_dc_sources", &ir.has_dc_sources);
         ctx.insert("max_iter", &ir.solver_config.max_iterations);
         // V_MAX_DC: maximum physically reasonable node voltage (supply rails + margin).
         // Used by BE fallback to detect trapezoidal ringing artifacts.
-        let v_max_dc = ir.dc_operating_point.iter()
+        let v_max_dc = ir
+            .dc_operating_point
+            .iter()
             .map(|v| v.abs())
             .fold(0.0_f64, f64::max)
-            .max(1.0) * 3.0 + 10.0; // 3× margin + 10V headroom (generous for transients)
+            .max(1.0)
+            * 3.0
+            + 10.0; // 3× margin + 10V headroom (generous for transients)
         ctx.insert("v_max_dc", &format!("{:.17e}", v_max_dc));
         // When augmented_inductors is true, companion model state update is not needed —
         // A_neg handles all inductor history through the augmented G/C matrices.
@@ -2790,9 +2797,7 @@ fn emit_nr_limit_and_converge(
     }
 
     // Compute per-dimension damping factor from per-device limiting
-    code.push_str(&format!(
-        "{indent}let mut alpha = [1.0_f64; {dim}];\n"
-    ));
+    code.push_str(&format!("{indent}let mut alpha = [1.0_f64; {dim}];\n"));
     code.push_str(&format!("{indent}let mut any_limited = false;\n"));
     for (dev_num, slot) in ir.device_slots.iter().enumerate() {
         for d in 0..slot.dimension {
@@ -2981,14 +2986,16 @@ fn emit_schur_nr_limit_and_converge(
     code.push_str(&format!("{indent}{{ let max_dv = "));
     for i in 0..dim {
         if i > 0 {
-            code.push_str(&format!(".max(((v_trial{i} - v_d{i}) * global_alpha).abs())"));
+            code.push_str(&format!(
+                ".max(((v_trial{i} - v_d{i}) * global_alpha).abs())"
+            ));
         } else {
             code.push_str(&format!("((v_trial{i} - v_d{i}) * global_alpha).abs()"));
         }
     }
-    code.push_str(&format!(
-        "; if max_dv > 3.5 {{ global_alpha *= (3.5 / max_dv).max(0.1); any_limited = true; }} }}\n"
-    ));
+    code.push_str(
+        "; if max_dv > 3.5 { global_alpha *= (3.5 / max_dv).max(0.1); any_limited = true; } }\n",
+    );
 
     // Apply globally damped step
     for i in 0..dim {
@@ -3635,13 +3642,18 @@ impl RustEmitter {
         // Nodal process_sample: use Schur (M-dim NR) unless K is ill-conditioned,
         // in which case fall back to full N×N LU NR.
         let k_diag_min = if ir.topology.m > 0 {
-            (0..ir.topology.m).map(|i| ir.matrices.k[i * ir.topology.m + i]).fold(0.0_f64, f64::min)
+            (0..ir.topology.m)
+                .map(|i| ir.matrices.k[i * ir.topology.m + i])
+                .fold(0.0_f64, f64::min)
         } else {
             0.0
         };
         let use_full_nodal = k_diag_min < -100.0; // K ill-conditioned from parasitic R
         if use_full_nodal {
-            log::info!("Nodal: using full N×N LU NR (K_diag_min={:.1}, ill-conditioned)", k_diag_min);
+            log::info!(
+                "Nodal: using full N×N LU NR (K_diag_min={:.1}, ill-conditioned)",
+                k_diag_min
+            );
             code.push_str(&Self::emit_nodal_lu_solve(ir));
             code.push_str(&Self::emit_nodal_process_sample(ir));
         } else {
@@ -3679,9 +3691,7 @@ impl RustEmitter {
         code.push_str(&format!("pub const N: usize = {};\n\n", n));
         code.push_str("/// Number of original circuit nodes (excluding ground)\n");
         code.push_str(&format!("pub const N_NODES: usize = {};\n\n", n_nodes));
-        code.push_str(
-            "/// Boundary between VS/VCVS rows and inductor branch variables\n",
-        );
+        code.push_str("/// Boundary between VS/VCVS rows and inductor branch variables\n");
         code.push_str(&format!("pub const N_AUG: usize = {};\n\n", n_aug));
         code.push_str("/// Total nonlinear dimension (sum of device dimensions)\n");
         code.push_str(&format!("pub const M: usize = {};\n\n", m));
@@ -4087,10 +4097,14 @@ impl RustEmitter {
         if m > 0 {
             code.push_str("    /// K matrix: N_v * S * N_i (nonlinear kernel), recomputed by set_sample_rate\n");
             code.push_str("    pub k: [[f64; M]; M],\n");
-            code.push_str("    /// S_NI matrix: S * N_i (voltage recovery), recomputed by set_sample_rate\n");
+            code.push_str(
+                "    /// S_NI matrix: S * N_i (voltage recovery), recomputed by set_sample_rate\n",
+            );
             code.push_str("    pub s_ni: [[f64; M]; N],\n");
         }
-        code.push_str("    /// S_be matrix: A_be^{-1} (backward Euler), recomputed by set_sample_rate\n");
+        code.push_str(
+            "    /// S_be matrix: A_be^{-1} (backward Euler), recomputed by set_sample_rate\n",
+        );
         code.push_str("    pub s_be: [[f64; N]; N],\n");
         if m > 0 {
             code.push_str("    /// K_be matrix: N_v * S_be * N_i (BE kernel), recomputed by set_sample_rate\n");
@@ -4560,7 +4574,9 @@ impl RustEmitter {
             code.push_str("                    let mut sum = 0.0;\n");
             code.push_str("                    for a in 0..N {\n");
             code.push_str("                        let mut s_ni_aj = 0.0;\n");
-            code.push_str("                        for b in 0..N { s_ni_aj += self.s[a][b] * N_I[b][j]; }\n");
+            code.push_str(
+                "                        for b in 0..N { s_ni_aj += self.s[a][b] * N_I[b][j]; }\n",
+            );
             code.push_str("                        sum += N_V[i][a] * s_ni_aj;\n");
             code.push_str("                    }\n");
             code.push_str("                    self.k[i][j] = sum;\n");
@@ -4571,7 +4587,9 @@ impl RustEmitter {
             code.push_str("            for i in 0..N {\n");
             code.push_str("                for j in 0..M {\n");
             code.push_str("                    let mut sum = 0.0;\n");
-            code.push_str("                    for a in 0..N { sum += self.s[i][a] * N_I[a][j]; }\n");
+            code.push_str(
+                "                    for a in 0..N { sum += self.s[i][a] * N_I[a][j]; }\n",
+            );
             code.push_str("                    self.s_ni[i][j] = sum;\n");
             code.push_str("                }\n");
             code.push_str("            }\n");
@@ -4597,7 +4615,9 @@ impl RustEmitter {
             code.push_str("            for i in 0..N {\n");
             code.push_str("                for j in 0..M {\n");
             code.push_str("                    let mut sum = 0.0;\n");
-            code.push_str("                    for a in 0..N { sum += self.s_be[i][a] * N_I[a][j]; }\n");
+            code.push_str(
+                "                    for a in 0..N { sum += self.s_be[i][a] * N_I[a][j]; }\n",
+            );
             code.push_str("                    self.s_ni_be[i][j] = sum;\n");
             code.push_str("                }\n");
             code.push_str("            }\n");
@@ -4798,7 +4818,9 @@ impl RustEmitter {
     fn emit_nodal_invert_n(_ir: &CircuitIR) -> String {
         let mut code = section_banner("MATRIX INVERSION (for rebuild_matrices)");
 
-        code.push_str("/// Invert an N×N matrix using Gauss-Jordan elimination with partial pivoting.\n");
+        code.push_str(
+            "/// Invert an N×N matrix using Gauss-Jordan elimination with partial pivoting.\n",
+        );
         code.push_str("/// Returns None if the matrix is singular.\n");
         code.push_str("#[inline(never)]\n");
         code.push_str("fn invert_n(a: &[[f64; N]; N]) -> Option<[[f64; N]; N]> {\n");
@@ -4823,7 +4845,9 @@ impl RustEmitter {
         code.push_str("        let pivot = aug[col][col];\n");
         code.push_str("        for row in (col + 1)..N {\n");
         code.push_str("            let factor = aug[row][col] / pivot;\n");
-        code.push_str("            for j in col..(2 * N) { aug[row][j] -= factor * aug[col][j]; }\n");
+        code.push_str(
+            "            for j in col..(2 * N) { aug[row][j] -= factor * aug[col][j]; }\n",
+        );
         code.push_str("        }\n");
         code.push_str("    }\n\n");
 
@@ -4869,7 +4893,9 @@ impl RustEmitter {
         let os_factor = ir.solver_config.oversampling_factor;
         let has_pots = !ir.pots.is_empty();
 
-        let mut code = section_banner("PROCESS SAMPLE (Schur complement: M-dim NR via precomputed S = A^{-1})");
+        let mut code = section_banner(
+            "PROCESS SAMPLE (Schur complement: M-dim NR via precomputed S = A^{-1})",
+        );
 
         // Function signature
         if os_factor > 1 {
@@ -4881,7 +4907,9 @@ impl RustEmitter {
         } else {
             code.push_str("/// Process a single audio sample through the circuit.\n");
             code.push_str("///\n");
-            code.push_str("/// Uses Schur complement NR: precomputes S = A^{-1}, iterates in M-space.\n");
+            code.push_str(
+                "/// Uses Schur complement NR: precomputes S = A^{-1}, iterates in M-space.\n",
+            );
             code.push_str("/// Cost: O(N^2) linear prediction + O(M^3) per NR iteration.\n");
             code.push_str("#[inline]\n");
             code.push_str("pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS] {\n");
@@ -4893,7 +4921,9 @@ impl RustEmitter {
         );
 
         // Step 1: Build RHS = rhs_const + A_neg * v_prev + N_i * i_nl_prev + input (sparse)
-        code.push_str("    // Step 1: Build RHS (sparse A_neg * v_prev + sparse N_i * i_nl_prev)\n");
+        code.push_str(
+            "    // Step 1: Build RHS (sparse A_neg * v_prev + sparse N_i * i_nl_prev)\n",
+        );
         if ir.has_dc_sources {
             code.push_str("    let mut rhs = RHS_CONST;\n");
         } else {
@@ -4991,7 +5021,9 @@ impl RustEmitter {
             code.push_str("    // First-order predictor warm start\n");
             code.push_str("    let mut i_nl = [0.0f64; M];\n");
             code.push_str("    for i in 0..M {\n");
-            code.push_str("        i_nl[i] = 2.0 * state.i_nl_prev[i] - state.i_nl_prev_prev[i];\n");
+            code.push_str(
+                "        i_nl[i] = 2.0 * state.i_nl_prev[i] - state.i_nl_prev_prev[i];\n",
+            );
             code.push_str("    }\n");
             code.push_str("    let mut converged = false;\n");
             code.push_str("    state.last_nr_iterations = MAX_ITER as u32;\n\n");
@@ -5033,7 +5065,8 @@ impl RustEmitter {
                     .find(|s| i >= s.start_idx && i < s.start_idx + s.dimension)
                     .ok_or_else(|| {
                         CodegenError::InvalidConfig(format!(
-                            "no device slot found for M-dimension index {}", i
+                            "no device slot found for M-dimension index {}",
+                            i
                         ))
                     })?;
                 let blk_start = slot.start_idx;
@@ -5079,7 +5112,9 @@ impl RustEmitter {
                 }
                 _ => {
                     return Err(CodegenError::UnsupportedTopology(format!(
-                        "M={} not supported (max {})", m, crate::dk::MAX_M
+                        "M={} not supported (max {})",
+                        m,
+                        crate::dk::MAX_M
                     )));
                 }
             }
@@ -5109,7 +5144,9 @@ impl RustEmitter {
             } else {
                 code.push_str("            let mut sum = 0.0;\n");
             }
-            code.push_str("            for j in 0..N { sum += state.a_neg_be[i][j] * state.v_prev[j]; }\n");
+            code.push_str(
+                "            for j in 0..N { sum += state.a_neg_be[i][j] * state.v_prev[j]; }\n",
+            );
             code.push_str("            for j in 0..M { sum += N_I[i][j] * state.i_nl_prev[j]; }\n");
             code.push_str("            rhs_be[i] = sum;\n");
             code.push_str("        }\n");
@@ -5135,7 +5172,9 @@ impl RustEmitter {
             // BE NR loop (use k_be, s_ni_be)
             code.push_str("        // Reset i_nl to predictor for BE attempt\n");
             code.push_str("        for i in 0..M {\n");
-            code.push_str("            i_nl[i] = 2.0 * state.i_nl_prev[i] - state.i_nl_prev_prev[i];\n");
+            code.push_str(
+                "            i_nl[i] = 2.0 * state.i_nl_prev[i] - state.i_nl_prev_prev[i];\n",
+            );
             code.push_str("        }\n\n");
 
             code.push_str("        for _iter in 0..MAX_ITER {\n");
@@ -5152,13 +5191,21 @@ impl RustEmitter {
 
             // Evaluate devices (reuse same functions)
             for (dev_num, slot) in ir.device_slots.iter().enumerate() {
-                Self::emit_dk_device_eval_for_nodal_schur_indented(&mut code, dev_num, slot, "            ")?;
+                Self::emit_dk_device_eval_for_nodal_schur_indented(
+                    &mut code,
+                    dev_num,
+                    slot,
+                    "            ",
+                )?;
             }
             code.push('\n');
 
             // Residuals
             for i in 0..m {
-                code.push_str(&format!("            let f{} = i_nl[{}] - i_dev{};\n", i, i, i));
+                code.push_str(&format!(
+                    "            let f{} = i_nl[{}] - i_dev{};\n",
+                    i, i, i
+                ));
             }
             code.push('\n');
 
@@ -5168,9 +5215,12 @@ impl RustEmitter {
                     .device_slots
                     .iter()
                     .find(|s| i >= s.start_idx && i < s.start_idx + s.dimension)
-                    .ok_or_else(|| CodegenError::InvalidConfig(
-                        format!("No device slot found for NR dimension index {}", i)
-                    ))?;
+                    .ok_or_else(|| {
+                        CodegenError::InvalidConfig(format!(
+                            "No device slot found for NR dimension index {}",
+                            i
+                        ))
+                    })?;
                 let blk_start = slot.start_idx;
                 let blk_dim = slot.dimension;
                 for j in 0..m {
@@ -5179,7 +5229,10 @@ impl RustEmitter {
                     for k in blk_start..blk_start + blk_dim {
                         terms.push_str(&format!(" - jdev_{}_{} * state.k_be[{}][{}]", i, k, k, j));
                     }
-                    code.push_str(&format!("            let j{}{} = {}{};\n", i, j, diag, terms));
+                    code.push_str(&format!(
+                        "            let j{}{} = {}{};\n",
+                        i, j, diag, terms
+                    ));
                 }
             }
             code.push('\n');
@@ -5203,7 +5256,7 @@ impl RustEmitter {
                 }
                 3..=16 => {
                     // Inline Gaussian elimination for BE
-                    code.push_str(&format!("            let mut a = [\n"));
+                    code.push_str("            let mut a = [\n");
                     for i in 0..m {
                         let row = (0..m)
                             .map(|j| format!("j{i}{j}"))
@@ -5252,7 +5305,9 @@ impl RustEmitter {
                     Self::emit_be_nr_limit_and_converge(&mut code, ir, m, "                ");
                     code.push_str("            } else {\n");
                     for i in 0..m {
-                        code.push_str(&format!("                i_nl[{i}] -= (f{i} * 0.5).clamp(-0.01, 0.01);\n"));
+                        code.push_str(&format!(
+                            "                i_nl[{i}] -= (f{i} * 0.5).clamp(-0.01, 0.01);\n"
+                        ));
                     }
                     code.push_str("            }\n");
                 }
@@ -5519,18 +5574,15 @@ impl RustEmitter {
     }
 
     /// Emit voltage limiting + convergence + step for BE fallback NR in Schur mode.
-    fn emit_be_nr_limit_and_converge(
-        code: &mut String,
-        ir: &CircuitIR,
-        dim: usize,
-        indent: &str,
-    ) {
+    fn emit_be_nr_limit_and_converge(code: &mut String, ir: &CircuitIR, dim: usize, indent: &str) {
         // Compute voltage-space changes for limiting
         for i in 0..dim {
             code.push_str(&format!("{indent}let dv{i} = -("));
             let mut first = true;
             for j in 0..dim {
-                if !first { code.push_str(" + "); }
+                if !first {
+                    code.push_str(" + ");
+                }
                 code.push_str(&format!("state.k_be[{i}][{j}] * delta{j}"));
                 first = false;
             }
@@ -5538,9 +5590,7 @@ impl RustEmitter {
         }
 
         // Compute per-dimension damping factor from per-device limiting
-        code.push_str(&format!(
-            "{indent}let mut alpha = [1.0_f64; {dim}];\n"
-        ));
+        code.push_str(&format!("{indent}let mut alpha = [1.0_f64; {dim}];\n"));
         code.push_str(&format!("{indent}let mut any_limited = false;\n"));
         for (dev_num, slot) in ir.device_slots.iter().enumerate() {
             for d in 0..slot.dimension {
@@ -5552,7 +5602,8 @@ impl RustEmitter {
                             "{indent}    let v_lim = pnjlim(v_d{i} + dv{i}, v_d{i}, state.device_{dev_num}_n_vt, DEVICE_{dev_num}_VCRIT);\n"
                         ));
                     }
-                    (super::ir::DeviceType::Bjt, _) | (super::ir::DeviceType::BjtForwardActive, _) => {
+                    (super::ir::DeviceType::Bjt, _)
+                    | (super::ir::DeviceType::BjtForwardActive, _) => {
                         code.push_str(&format!(
                             "{indent}    let v_lim = pnjlim(v_d{i} + dv{i}, v_d{i}, state.device_{dev_num}_vt, DEVICE_{dev_num}_VCRIT);\n"
                         ));
@@ -5625,7 +5676,9 @@ impl RustEmitter {
         }
 
         // RELTOL convergence check
-        code.push_str(&format!("{indent}// Convergence check (SPICE RELTOL=0.001, VNTOL=1e-6)\n"));
+        code.push_str(&format!(
+            "{indent}// Convergence check (SPICE RELTOL=0.001, VNTOL=1e-6)\n"
+        ));
         code.push_str(&format!("{indent}if !any_limited {{\n"));
         code.push_str(&format!("{indent}    let mut nr_converged = true;\n"));
         for i in 0..dim {
@@ -5633,7 +5686,9 @@ impl RustEmitter {
                 "{indent}    {{ let step = dv{i} * alpha[{i}]; let v_new = v_d{i} + step; let threshold = 1e-3 * v_d{i}.abs().max(v_new.abs()) + 1e-6; if step.abs() > threshold {{ nr_converged = false; }} }}\n"
             ));
         }
-        code.push_str(&format!("{indent}    if nr_converged {{ state.last_nr_iterations = _iter as u32; break; }}\n"));
+        code.push_str(&format!(
+            "{indent}    if nr_converged {{ state.last_nr_iterations = _iter as u32; break; }}\n"
+        ));
         code.push_str(&format!("{indent}}}\n"));
     }
 
@@ -5845,7 +5900,9 @@ impl RustEmitter {
             code.push_str("    rhs[INPUT_NODE] += input * input_conductance;\n");
         } else {
             code.push_str("    // Input source (trapezoidal: (V_in + V_in_prev) * G_in)\n");
-            code.push_str("    rhs[INPUT_NODE] += (input + state.input_prev) * input_conductance;\n");
+            code.push_str(
+                "    rhs[INPUT_NODE] += (input + state.input_prev) * input_conductance;\n",
+            );
         }
         code.push_str("    state.input_prev = input;\n\n");
 
@@ -6425,7 +6482,11 @@ impl RustEmitter {
                              {indent}}}\n"
                         ));
                     } else {
-                        let mna_note = if slot.has_internal_mna_nodes { " (MNA internal nodes)" } else { "" };
+                        let mna_note = if slot.has_internal_mna_nodes {
+                            " (MNA internal nodes)"
+                        } else {
+                            ""
+                        };
                         code.push_str(&format!(
                             "{indent}{{ // BJT {dev_num}{mna_note}\n\
                              {indent}    let vbe = v_nl[{s}];\n\

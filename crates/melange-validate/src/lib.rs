@@ -51,9 +51,9 @@ pub mod comparison;
 pub mod spice_runner;
 pub mod visualizer;
 
-pub use comparison::{ComparisonConfig, ComparisonReport, Signal, batch_compare, compare_signals};
+pub use comparison::{batch_compare, compare_signals, ComparisonConfig, ComparisonReport, Signal};
 pub use spice_runner::{
-    SpiceData, SpiceError, run_transient, run_transient_with_pwl, run_transient_with_thevenin_pwl,
+    run_transient, run_transient_with_pwl, run_transient_with_thevenin_pwl, SpiceData, SpiceError,
 };
 pub use visualizer::{generate_csv, generate_html_report, generate_json_report};
 
@@ -584,7 +584,8 @@ fn build_devices_from_netlist(
                 let nf = find_bjt_nf(netlist, &dev_info.name);
                 let polarity = find_bjt_polarity(netlist, &dev_info.name);
                 let bjt =
-                    melange_devices::BjtEbersMoll::new_room_temp(is, beta_f, beta_r, polarity).with_nf(nf);
+                    melange_devices::BjtEbersMoll::new_room_temp(is, beta_f, beta_r, polarity)
+                        .with_nf(nf);
                 devices.push(melange_solver::solver::DeviceEntry::new_bjt(
                     bjt,
                     dev_info.start_idx,
@@ -818,10 +819,7 @@ fn find_bjt_polarity(
 }
 
 /// Look up BJT forward emission coefficient NF from model params. Returns 1.0 if not found.
-fn find_bjt_nf(
-    netlist: &melange_solver::parser::Netlist,
-    device_name: &str,
-) -> f64 {
+fn find_bjt_nf(netlist: &melange_solver::parser::Netlist, device_name: &str) -> f64 {
     let model_name = netlist.elements.iter().find_map(|e| {
         if let melange_solver::parser::Element::Bjt { name, model, .. } = e {
             if name == device_name {
