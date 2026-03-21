@@ -4,5 +4,8 @@
 // ============================================================================
 
 #![allow(clippy::excessive_precision)]
+#![allow(clippy::needless_range_loop)]
+#![allow(clippy::too_many_arguments)]
+#![allow(unexpected_cfgs)]
 #![allow(dead_code)]
 

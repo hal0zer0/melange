@@ -76,7 +76,7 @@ pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS
     // exceeds supply rails (trapezoidal ringing artifact), OR (c) previous sample
     // used BE (cooldown: stay on BE until ringing decays).
     // BE is L-stable and damps all oscillatory modes that trapezoidal preserves.
-    let nr_failed = state.last_nr_iterations >= {{ max_iter }} as u32;
+    let nr_failed = state.last_nr_iterations >= {{ max_iter }}_u32;
     let ringing = v.iter().take({{ n_nodes }}).any(|&x| x.abs() > {{ v_max_dc }});
     let need_be = nr_failed || ringing || force_be;
     let (v, i_nl) = if need_be {
@@ -236,7 +236,7 @@ pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS
     // (NaN check already done in Step 7, before state update)
 
     {% if m > 0 %}
-    if state.last_nr_iterations >= {{ max_iter }} as u32 {
+    if state.last_nr_iterations >= {{ max_iter }}_u32 {
         state.diag_nr_max_iter_count += 1;
     }
     {% endif %}

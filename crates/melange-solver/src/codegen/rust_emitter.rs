@@ -1224,7 +1224,7 @@ impl RustEmitter {
              \x20       // Range reduction + 5th-order minimax polynomial. <0.0004% max relative error.\n\
              \x20       // No lookup tables, no libm dependency, branchless hot path.\n\
              \x20       let x = x.clamp(-40.0, 40.0);\n\
-             \x20       const LN2_INV: f64 = 1.4426950408889634;\n\
+             \x20       const LN2_INV: f64 = std::f64::consts::LOG2_E;\n\
              \x20       const LN2_HI: f64 = 0.6931471803691238;\n\
              \x20       const LN2_LO: f64 = 1.9082149292705877e-10;\n\
              \x20       const SHIFT: f64 = 6755399441055744.0; // 2^52 + 2^51\n\
@@ -1261,7 +1261,7 @@ impl RustEmitter {
              \x20       let u = (m - 1.0) / (m + 1.0);\n\
              \x20       let u2 = u * u;\n\
              \x20       let ln_m = 2.0 * u * (1.0 + u2 * (0.3333333333333333 + u2 * (0.2 + u2 * 0.14285714285714285)));\n\
-             \x20       ln_m + (e as f64) * 0.6931471805599453 // e * ln(2)\n\
+             \x20       ln_m + (e as f64) * std::f64::consts::LN_2\n\
              \x20   }\n\
              }\n\n",
         );
@@ -1643,17 +1643,26 @@ impl RustEmitter {
             code.push_str("\n        // Recompute Sherman-Morrison vectors for pots\n");
             for idx in 0..num_pots {
                 let pot = &ir.pots[idx];
-                code.push_str(&format!(
-                    "        {{\n\
-                     \x20           let mut u = [0.0f64; N];\n\
-                     \x20           if POT_{idx}_NODE_P > 0 {{ u[POT_{idx}_NODE_P - 1] = 1.0; }}\n\
-                     \x20           if POT_{idx}_NODE_Q > 0 {{ u[POT_{idx}_NODE_Q - 1] = -1.0; }}\n\
-                     \x20           let mut su = [0.0f64; N];\n\
-                     \x20           for i in 0..N {{ let mut sum = 0.0; for j in 0..N {{ sum += self.s[i][j] * u[j]; }} su[i] = sum; }}\n\
+                code.push_str(
+                    "        {\n\
+                     \x20           let mut u = [0.0f64; N];\n",
+                );
+                if pot.node_p > 0 {
+                    code.push_str(&format!(
+                        "            u[POT_{idx}_NODE_P - 1] = 1.0;\n",
+                    ));
+                }
+                if pot.node_q > 0 {
+                    code.push_str(&format!(
+                        "            u[POT_{idx}_NODE_Q - 1] = -1.0;\n",
+                    ));
+                }
+                code.push_str(
+                    "            let mut su = [0.0f64; N];\n\
+                     \x20           for i in 0..N { let mut sum = 0.0; for j in 0..N { sum += self.s[i][j] * u[j]; } su[i] = sum; }\n\
                      \x20           let mut usu = 0.0f64;\n\
-                     \x20           for i in 0..N {{ usu += u[i] * su[i]; }}\n",
-                    idx = idx,
-                ));
+                     \x20           for i in 0..N { usu += u[i] * su[i]; }\n",
+                );
                 if m > 0 {
                     code.push_str(&format!(
                         "            let mut nv_su = [0.0f64; M];\n\
@@ -4483,9 +4492,6 @@ impl RustEmitter {
             "        let internal_rate = sample_rate * {}.0;\n",
             ir.solver_config.oversampling_factor
         ));
-        code.push_str("        let alpha = 2.0 * internal_rate;\n");
-        code.push_str("        let alpha_be = internal_rate;\n\n");
-
         if has_pots || has_switches {
             code.push_str("        self.current_sample_rate = internal_rate;\n");
         }
@@ -5978,11 +5984,12 @@ impl RustEmitter {
                             if ni_nodes.is_empty() || nv_nodes.is_empty() {
                                 continue;
                             }
+                            let jd_ij = i * m + j;
                             for &a in ni_nodes {
                                 for &b in nv_nodes {
                                     code.push_str(&format!(
-                                        "        g_aug[{}][{}] -= N_I[{}][{}] * j_dev[{} * M + {}] * N_V[{}][{}];\n",
-                                        a, b, a, i, i, j, j, b
+                                        "        g_aug[{}][{}] -= N_I[{}][{}] * j_dev[{}] * N_V[{}][{}];\n",
+                                        a, b, a, i, jd_ij, j, b
                                     ));
                                 }
                             }
@@ -6015,7 +6022,8 @@ impl RustEmitter {
                         let jdv_terms: Vec<String> = (0..dim)
                             .map(|dj| {
                                 let j = s + dj;
-                                format!("j_dev[{} * M + {}] * v_nl[{}]", i, j, j)
+                                let jd_ij = i * m + j;
+                                format!("j_dev[{}] * v_nl[{}]", jd_ij, j)
                             })
                             .collect();
                         code.push_str(&format!(
@@ -6169,12 +6177,13 @@ impl RustEmitter {
                         let i = s + di;
                         for dj in 0..dim {
                             let j = s + dj;
+                            let jd_ij = i * m + j;
                             let nv_nodes = &ir.sparsity.n_v.nz_by_row[j];
                             for &a in &ni_nz_by_dev[i] {
                                 for &b in nv_nodes {
                                     code.push_str(&format!(
-                                        "            g_aug[{}][{}] -= N_I[{}][{}] * j_dev[{} * M + {}] * N_V[{}][{}];\n",
-                                        a, b, a, i, i, j, j, b
+                                        "            g_aug[{}][{}] -= N_I[{}][{}] * j_dev[{}] * N_V[{}][{}];\n",
+                                        a, b, a, i, jd_ij, j, b
                                     ));
                                 }
                             }
@@ -6201,7 +6210,8 @@ impl RustEmitter {
                         let jdv_terms: Vec<String> = (0..dim)
                             .map(|dj| {
                                 let j = s + dj;
-                                format!("j_dev[{} * M + {}] * v_nl[{}]", i, j, j)
+                                let jd_ij = i * m + j;
+                                format!("j_dev[{}] * v_nl[{}]", jd_ij, j)
                             })
                             .collect();
                         code.push_str(&format!(
@@ -6409,10 +6419,12 @@ impl RustEmitter {
 
     /// Emit device evaluation code WITHOUT declarations (writes to existing i_nl, j_dev).
     fn emit_nodal_device_evaluation_body(code: &mut String, ir: &CircuitIR, indent: &str) {
-        let _m = ir.topology.m;
+        let m = ir.topology.m;
 
         for (dev_num, slot) in ir.device_slots.iter().enumerate() {
             let s = slot.start_idx;
+            // Pre-compute flat j_dev index for diagonal (avoids `0 * M + 0` identity_op in generated code)
+            let jd_ss = s * m + s;
             match (&slot.device_type, &slot.params) {
                 (DeviceType::Diode, DeviceParams::Diode(dp)) => {
                     if dp.has_rs() {
@@ -6434,7 +6446,7 @@ impl RustEmitter {
                         code.push_str(&format!(
                             "{indent}{{ // Diode {dev_num} (RS={has_rs}, BV={has_bv})\n\
                              {indent}    i_nl[{s}] = diode_current_with_rs(v_nl[{s}], state.device_{dev_num}_is, state.device_{dev_num}_n_vt, DEVICE_{dev_num}_RS){bv_i};\n\
-                             {indent}    j_dev[{s} * M + {s}] = diode_conductance_with_rs(v_nl[{s}], state.device_{dev_num}_is, state.device_{dev_num}_n_vt, DEVICE_{dev_num}_RS){bv_g};\n\
+                             {indent}    j_dev[{jd_ss}] = diode_conductance_with_rs(v_nl[{s}], state.device_{dev_num}_is, state.device_{dev_num}_n_vt, DEVICE_{dev_num}_RS){bv_g};\n\
                              {indent}}}\n",
                             has_rs = dp.has_rs(), has_bv = dp.has_bv(),
                         ));
@@ -6448,7 +6460,7 @@ impl RustEmitter {
                              {indent}    i_nl[{s}] = state.device_{dev_num}_is * (e - 1.0) + diode_breakdown_current(v, state.device_{dev_num}_n_vt, DEVICE_{dev_num}_BV, DEVICE_{dev_num}_IBV);\n\
                              {indent}    let g = state.device_{dev_num}_is * e / state.device_{dev_num}_n_vt;\n\
                              {indent}    let g_base = if v > 40.0 * state.device_{dev_num}_n_vt {{ g + state.device_{dev_num}_is / state.device_{dev_num}_n_vt }} else {{ g }};\n\
-                             {indent}    j_dev[{s} * M + {s}] = g_base + diode_breakdown_conductance(v, state.device_{dev_num}_n_vt, DEVICE_{dev_num}_BV, DEVICE_{dev_num}_IBV);\n\
+                             {indent}    j_dev[{jd_ss}] = g_base + diode_breakdown_conductance(v, state.device_{dev_num}_n_vt, DEVICE_{dev_num}_BV, DEVICE_{dev_num}_IBV);\n\
                              {indent}}}\n"
                         ));
                     } else {
@@ -6460,13 +6472,16 @@ impl RustEmitter {
                              {indent}    let e = fast_exp(v_clamped / state.device_{dev_num}_n_vt);\n\
                              {indent}    i_nl[{s}] = state.device_{dev_num}_is * (e - 1.0);\n\
                              {indent}    let g = state.device_{dev_num}_is * e / state.device_{dev_num}_n_vt;\n\
-                             {indent}    j_dev[{s} * M + {s}] = if v > 40.0 * state.device_{dev_num}_n_vt {{ g + state.device_{dev_num}_is / state.device_{dev_num}_n_vt }} else {{ g }};\n\
+                             {indent}    j_dev[{jd_ss}] = if v > 40.0 * state.device_{dev_num}_n_vt {{ g + state.device_{dev_num}_is / state.device_{dev_num}_n_vt }} else {{ g }};\n\
                              {indent}}}\n"
                         ));
                     }
                 }
                 (DeviceType::Bjt, DeviceParams::Bjt(bp)) => {
                     let s1 = s + 1;
+                    let jd_01 = s * m + s1;
+                    let jd_10 = s1 * m + s;
+                    let jd_11 = s1 * m + s1;
                     if bp.has_parasitics() && !slot.has_internal_mna_nodes {
                         code.push_str(&format!(
                             "{indent}{{ // BJT {dev_num} (RB/RC/RE inner NR)\n\
@@ -6475,10 +6490,10 @@ impl RustEmitter {
                              {indent}    let (ic, ib, jac) = bjt_with_parasitics(vbe, vbc, state.device_{dev_num}_is, state.device_{dev_num}_vt, DEVICE_{dev_num}_NF, DEVICE_{dev_num}_NR, state.device_{dev_num}_bf, state.device_{dev_num}_br, DEVICE_{dev_num}_SIGN, DEVICE_{dev_num}_USE_GP, DEVICE_{dev_num}_VAF, DEVICE_{dev_num}_VAR, DEVICE_{dev_num}_IKF, DEVICE_{dev_num}_IKR, DEVICE_{dev_num}_ISE, DEVICE_{dev_num}_NE, DEVICE_{dev_num}_ISC, DEVICE_{dev_num}_NC, DEVICE_{dev_num}_RB, DEVICE_{dev_num}_RC, DEVICE_{dev_num}_RE);\n\
                              {indent}    i_nl[{s}] = ic;\n\
                              {indent}    i_nl[{s1}] = ib;\n\
-                             {indent}    j_dev[{s} * M + {s}] = jac[0];\n\
-                             {indent}    j_dev[{s} * M + {s1}] = jac[1];\n\
-                             {indent}    j_dev[{s1} * M + {s}] = jac[2];\n\
-                             {indent}    j_dev[{s1} * M + {s1}] = jac[3];\n\
+                             {indent}    j_dev[{jd_ss}] = jac[0];\n\
+                             {indent}    j_dev[{jd_01}] = jac[1];\n\
+                             {indent}    j_dev[{jd_10}] = jac[2];\n\
+                             {indent}    j_dev[{jd_11}] = jac[3];\n\
                              {indent}}}\n"
                         ));
                     } else {
@@ -6494,10 +6509,10 @@ impl RustEmitter {
                              {indent}    let (ic, ib, jac) = bjt_evaluate(vbe, vbc, state.device_{dev_num}_is, state.device_{dev_num}_vt, DEVICE_{dev_num}_NF, DEVICE_{dev_num}_NR, state.device_{dev_num}_bf, state.device_{dev_num}_br, DEVICE_{dev_num}_SIGN, DEVICE_{dev_num}_USE_GP, DEVICE_{dev_num}_VAF, DEVICE_{dev_num}_VAR, DEVICE_{dev_num}_IKF, DEVICE_{dev_num}_IKR, DEVICE_{dev_num}_ISE, DEVICE_{dev_num}_NE, DEVICE_{dev_num}_ISC, DEVICE_{dev_num}_NC);\n\
                              {indent}    i_nl[{s}] = ic;\n\
                              {indent}    i_nl[{s1}] = ib;\n\
-                             {indent}    j_dev[{s} * M + {s}] = jac[0];\n\
-                             {indent}    j_dev[{s} * M + {s1}] = jac[1];\n\
-                             {indent}    j_dev[{s1} * M + {s}] = jac[2];\n\
-                             {indent}    j_dev[{s1} * M + {s1}] = jac[3];\n\
+                             {indent}    j_dev[{jd_ss}] = jac[0];\n\
+                             {indent}    j_dev[{jd_01}] = jac[1];\n\
+                             {indent}    j_dev[{jd_10}] = jac[2];\n\
+                             {indent}    j_dev[{jd_11}] = jac[3];\n\
                              {indent}}}\n"
                         ));
                     }
@@ -6509,12 +6524,15 @@ impl RustEmitter {
                          {indent}    let vbe = v_nl[{s}] * DEVICE_{dev_num}_SIGN;\n\
                          {indent}    let exp_be = fast_exp(vbe / (DEVICE_{dev_num}_NF * state.device_{dev_num}_vt));\n\
                          {indent}    i_nl[{s}] = state.device_{dev_num}_is * (exp_be - 1.0) * DEVICE_{dev_num}_SIGN;\n\
-                         {indent}    j_dev[{s} * M + {s}] = state.device_{dev_num}_is / (DEVICE_{dev_num}_NF * state.device_{dev_num}_vt) * exp_be;\n\
+                         {indent}    j_dev[{jd_ss}] = state.device_{dev_num}_is / (DEVICE_{dev_num}_NF * state.device_{dev_num}_vt) * exp_be;\n\
                          {indent}}}\n"
                     ));
                 }
                 (DeviceType::Jfet, DeviceParams::Jfet(jp)) => {
                     let s1 = s + 1;
+                    let jd_01 = s * m + s1;
+                    let jd_10 = s1 * m + s;
+                    let jd_11 = s1 * m + s1;
                     let jac_fn = if jp.has_rd_rs() {
                         format!(
                             "jfet_jacobian_with_rd_rs(vgs, vds, state.device_{dev_num}_idss, state.device_{dev_num}_vp, state.device_{dev_num}_lambda, sign, DEVICE_{dev_num}_RD, DEVICE_{dev_num}_RS_PARAM)"
@@ -6532,15 +6550,18 @@ impl RustEmitter {
                          {indent}    i_nl[{s}] = jfet_id(vgs, vds, state.device_{dev_num}_idss, state.device_{dev_num}_vp, state.device_{dev_num}_lambda, sign);\n\
                          {indent}    i_nl[{s1}] = jfet_ig(vgs, sign);\n\
                          {indent}    let jac = {jac_fn};\n\
-                         {indent}    j_dev[{s} * M + {s}] = jac[0];\n\
-                         {indent}    j_dev[{s} * M + {s1}] = jac[1];\n\
-                         {indent}    j_dev[{s1} * M + {s}] = jac[2];\n\
-                         {indent}    j_dev[{s1} * M + {s1}] = jac[3];\n\
+                         {indent}    j_dev[{jd_ss}] = jac[0];\n\
+                         {indent}    j_dev[{jd_01}] = jac[1];\n\
+                         {indent}    j_dev[{jd_10}] = jac[2];\n\
+                         {indent}    j_dev[{jd_11}] = jac[3];\n\
                          {indent}}}\n"
                     ));
                 }
                 (DeviceType::Mosfet, DeviceParams::Mosfet(mp)) => {
                     let s1 = s + 1;
+                    let jd_01 = s * m + s1;
+                    let jd_10 = s1 * m + s;
+                    let jd_11 = s1 * m + s1;
                     // For body effect, compute VT_eff from node voltages at each NR iteration
                     let vt_expr = if mp.has_body_effect() {
                         let vs_expr = if mp.source_node > 0 {
@@ -6581,15 +6602,18 @@ impl RustEmitter {
                          {indent}    i_nl[{s}] = mosfet_id(vgs, vds, state.device_{dev_num}_kp, {vt_expr}, state.device_{dev_num}_lambda, sign);\n\
                          {indent}    i_nl[{s1}] = 0.0; // Insulated gate\n\
                          {indent}    let jac = {jac_fn};\n\
-                         {indent}    j_dev[{s} * M + {s}] = jac[0];\n\
-                         {indent}    j_dev[{s} * M + {s1}] = jac[1];\n\
-                         {indent}    j_dev[{s1} * M + {s}] = jac[2];\n\
-                         {indent}    j_dev[{s1} * M + {s1}] = jac[3];\n\
+                         {indent}    j_dev[{jd_ss}] = jac[0];\n\
+                         {indent}    j_dev[{jd_01}] = jac[1];\n\
+                         {indent}    j_dev[{jd_10}] = jac[2];\n\
+                         {indent}    j_dev[{jd_11}] = jac[3];\n\
                          {indent}}}\n"
                     ));
                 }
                 (DeviceType::Tube, DeviceParams::Tube(tp)) => {
                     let s1 = s + 1;
+                    let jd_01 = s * m + s1;
+                    let jd_10 = s1 * m + s;
+                    let jd_11 = s1 * m + s1;
                     if tp.has_rgi() {
                         code.push_str(&format!(
                             "{indent}{{ // Tube {dev_num} (RGI)\n\
@@ -6597,10 +6621,10 @@ impl RustEmitter {
                              {indent}    let vpk = v_nl[{s1}];\n\
                              {indent}    let (ip_t, ig_t, jac) = tube_evaluate_with_rgi(vgk, vpk, state.device_{dev_num}_mu, state.device_{dev_num}_ex, state.device_{dev_num}_kg1, state.device_{dev_num}_kp, state.device_{dev_num}_kvb, state.device_{dev_num}_ig_max, state.device_{dev_num}_vgk_onset, state.device_{dev_num}_lambda, DEVICE_{dev_num}_RGI);\n\
                              {indent}    i_nl[{s}] = ip_t; i_nl[{s1}] = ig_t;\n\
-                             {indent}    j_dev[{s} * M + {s}] = jac[0];\n\
-                             {indent}    j_dev[{s} * M + {s1}] = jac[1];\n\
-                             {indent}    j_dev[{s1} * M + {s}] = jac[2];\n\
-                             {indent}    j_dev[{s1} * M + {s1}] = jac[3];\n\
+                             {indent}    j_dev[{jd_ss}] = jac[0];\n\
+                             {indent}    j_dev[{jd_01}] = jac[1];\n\
+                             {indent}    j_dev[{jd_10}] = jac[2];\n\
+                             {indent}    j_dev[{jd_11}] = jac[3];\n\
                              {indent}}}\n"
                         ));
                     } else {
@@ -6610,10 +6634,10 @@ impl RustEmitter {
                              {indent}    let vpk = v_nl[{s1}];\n\
                              {indent}    let (ip_t, ig_t, jac) = tube_evaluate(vgk, vpk, state.device_{dev_num}_mu, state.device_{dev_num}_ex, state.device_{dev_num}_kg1, state.device_{dev_num}_kp, state.device_{dev_num}_kvb, state.device_{dev_num}_ig_max, state.device_{dev_num}_vgk_onset, state.device_{dev_num}_lambda);\n\
                              {indent}    i_nl[{s}] = ip_t; i_nl[{s1}] = ig_t;\n\
-                             {indent}    j_dev[{s} * M + {s}] = jac[0];\n\
-                             {indent}    j_dev[{s} * M + {s1}] = jac[1];\n\
-                             {indent}    j_dev[{s1} * M + {s}] = jac[2];\n\
-                             {indent}    j_dev[{s1} * M + {s1}] = jac[3];\n\
+                             {indent}    j_dev[{jd_ss}] = jac[0];\n\
+                             {indent}    j_dev[{jd_01}] = jac[1];\n\
+                             {indent}    j_dev[{jd_10}] = jac[2];\n\
+                             {indent}    j_dev[{jd_11}] = jac[3];\n\
                              {indent}}}\n"
                         ));
                     }
@@ -6621,8 +6645,6 @@ impl RustEmitter {
                 _ => {} // Mismatched type/params — skip
             }
         }
-
-        let _ = _m;
     }
 
     /// LEGACY: Emit final device evaluation at converged point (writes into existing `i_nl`).
