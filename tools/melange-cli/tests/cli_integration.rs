@@ -74,7 +74,10 @@ fn run_melange_fail(args: &[&str]) -> String {
 #[test]
 fn test_builtins_lists_circuits() {
     let stdout = run_melange(&["builtins"]);
-    assert!(stdout.contains("rc-lowpass"), "Should list rc-lowpass builtin");
+    assert!(
+        stdout.contains("rc-lowpass"),
+        "Should list rc-lowpass builtin"
+    );
     assert!(
         stdout.contains("Available builtin circuits"),
         "Should have header"

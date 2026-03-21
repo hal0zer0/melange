@@ -61,9 +61,9 @@ pub mod solver;
 mod dk_math_verification;
 
 // Explicit re-exports of commonly used types (avoid glob pollution).
+pub use codegen::CodegenError;
 #[cfg(feature = "codegen")]
 pub use codegen::{CodeGenerator, CodegenConfig, GeneratedCode};
-pub use codegen::CodegenError;
 pub use device_types::{
     BjtParams, DeviceParams, DeviceSlot, DeviceType, DiodeParams, JfetParams, MosfetParams,
     TubeParams,

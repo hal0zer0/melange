@@ -1,43 +1,49 @@
-* Tube Screamer Style Overdrive
-* Inspired by the Ibanez TS-9 circuit topology
+Tube Screamer TS808
+* Ibanez TS-9 / TS808 style overdrive
 * This implementation: Copyright (c) 2026 Melange Contributors
 * License: MIT OR Apache-2.0
 *
 * Note: This is a clean-room implementation of a well-known
 * circuit topology. "Tube Screamer" is a trademark of Ibanez.
 *
-* Simplified as a shunt diode clipper with input drive and tone.
-* The original uses an op-amp for gain; this passive version
-* achieves clipping through direct signal drive.
+* The key topology: an inverting op-amp stage with antiparallel
+* diodes in the feedback loop. The diodes clip the signal at
+* ~0.6V, creating the characteristic soft-clipping overdrive.
+* The Drive pot controls input gain (R_drive), while R_fb sets
+* the minimum feedback (clean headroom). The Tone pot is a
+* simple RC lowpass after the clipping stage.
 
-* Diode model - 1N4148 (classic TS9 clipping diode)
+* --- Input coupling ---
+Cin in n1 0.047u
+R_pull in 0 1Meg
+
+* --- Op-amp clipping stage (inverting amplifier with diode feedback) ---
+* R_drive: input-to-inverting-input resistor (sets gain = R_fb / R_drive)
+* R_fb: feedback resistor in parallel with clipping diodes
+* D1, D2: antiparallel 1N4148 — THIS is what makes it a Tube Screamer
+* U1: JRC4558 op-amp (non-inv=ground, inv=n2, out=n3)
+*     With ideal op-amp and no rails, ground reference works directly.
+R_drive n1 n2 51k
+R_fb n2 n3 51k
+D1 n3 n2 D1N4148
+D2 n2 n3 D1N4148
+U1 0 n2 n3 JRC4558
+
+* --- Tone control ---
+* Simple RC lowpass: R_tone + C_tone to ground
+R_tone n3 n4 10k
+C_tone n4 0 0.022u
+
+* --- Output ---
+C_out n4 out 0.1u
+R_out out 0 1Meg
+
+* --- Models ---
 .model D1N4148 D(IS=2.52e-9 RS=0.568 N=1.752)
+.model JRC4558 OA(AOL=200000 ROUT=75)
 
-* Input coupling
-C1 in n1 0.047u
-
-* Input pulldown
-R1 n1 0 1meg
-
-* Drive resistor (controls clipping threshold)
-R2 n1 n2 4.7k
-
-* Anti-parallel silicon diodes for symmetric clipping
-D1 n2 0 D1N4148
-D2 0 n2 D1N4148
-
-* Stability cap
-C2 n2 0 100p
-
-* Tone stack - simple RC lowpass
-R3 n2 n3 10k
-C3 n3 0 0.022u
-
-* Output coupling
-R4 n3 out 10k
-C4 out 0 0.1u
-
-* Output pulldown
-R5 out 0 1meg
+* --- Controls ---
+.pot R_drive 4.7k 500k "Drive"
+.pot R_tone 220 22k "Tone"
 
 .END

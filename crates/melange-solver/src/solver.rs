@@ -6,9 +6,11 @@
 //! All processing uses pre-allocated buffers - no heap allocation in the audio thread.
 
 use crate::dk::DkKernel;
-use melange_devices::{BjtEbersMoll, DiodeShockley, Jfet, KorenTriode, Mosfet, NonlinearDevice};
+use melange_devices::{
+    BjtEbersMoll, BjtGummelPoon, DiodeShockley, Jfet, KorenTriode, Mosfet, NonlinearDevice,
+};
 use melange_primitives::nr::{fetlim, nr_solve_1d, nr_solve_2d, pn_vcrit, pnjlim};
-use smallvec::{SmallVec, smallvec};
+use smallvec::{smallvec, SmallVec};
 
 /// Error type for solver construction and validation.
 #[derive(Debug, Clone)]
@@ -145,6 +147,11 @@ pub enum DeviceEntry {
         device: BjtEbersMoll,
         start_idx: usize,
     },
+    /// BJT Gummel-Poon model (2D) — includes Early effect and high-injection
+    BjtGP {
+        device: BjtGummelPoon,
+        start_idx: usize,
+    },
     /// JFET Shichman-Hodges model (2D)
     Jfet { device: Jfet, start_idx: usize },
     /// MOSFET Level 1 model (2D)
@@ -177,6 +184,11 @@ impl DeviceEntry {
         Self::Bjt { device, start_idx }
     }
 
+    /// Create a new Gummel-Poon BJT device entry.
+    pub fn new_bjt_gp(device: BjtGummelPoon, start_idx: usize) -> Self {
+        Self::BjtGP { device, start_idx }
+    }
+
     /// Create a new JFET device entry.
     pub fn new_jfet(device: Jfet, start_idx: usize) -> Self {
         Self::Jfet { device, start_idx }
@@ -199,6 +211,7 @@ impl DeviceEntry {
             DeviceEntry::DiodeWithRs { .. } => 1,
             DeviceEntry::Led { .. } => 1,
             DeviceEntry::Bjt { .. } => 2,
+            DeviceEntry::BjtGP { .. } => 2,
             DeviceEntry::Jfet { .. } => 2,
             DeviceEntry::Mosfet { .. } => 2,
             DeviceEntry::Tube { .. } => 2,
@@ -212,6 +225,7 @@ impl DeviceEntry {
             DeviceEntry::DiodeWithRs { start_idx, .. } => *start_idx,
             DeviceEntry::Led { start_idx, .. } => *start_idx,
             DeviceEntry::Bjt { start_idx, .. } => *start_idx,
+            DeviceEntry::BjtGP { start_idx, .. } => *start_idx,
             DeviceEntry::Jfet { start_idx, .. } => *start_idx,
             DeviceEntry::Mosfet { start_idx, .. } => *start_idx,
             DeviceEntry::Tube { start_idx, .. } => *start_idx,
@@ -244,6 +258,11 @@ impl DeviceEntry {
                 // Both junctions (Vbe, Vbc) use pnjlim with thermal voltage
                 let vcrit = pn_vcrit(device.vt, device.is);
                 pnjlim(vnew, vold, device.vt, vcrit)
+            }
+            DeviceEntry::BjtGP { device, .. } => {
+                // Both junctions (Vbe, Vbc) use pnjlim with thermal voltage
+                let vcrit = pn_vcrit(device.base.vt, device.base.is);
+                pnjlim(vnew, vold, device.base.vt, vcrit)
             }
             DeviceEntry::Jfet { device, .. } => {
                 if dim == 0 {
@@ -300,6 +319,11 @@ impl DeviceEntry {
                 let ib = device.base_current(v[0], v[1]);
                 smallvec![ic, ib]
             }
+            DeviceEntry::BjtGP { device, .. } => {
+                let ic = device.collector_current(v[0], v[1]);
+                let ib = device.base_current(v[0], v[1]);
+                smallvec![ic, ib]
+            }
             DeviceEntry::Jfet { device, .. } => {
                 // dim 0 = Vds (v[0]), dim 1 = Vgs (v[1])
                 let id = device.drain_current(v[1], v[0]);
@@ -343,6 +367,21 @@ impl DeviceEntry {
                 let (dic_dvbe, dic_dvbc) = device.collector_jacobian(v[0], v[1]);
                 let dib_dvbe = device.base_current_jacobian_dvbe(v[0], v[1]);
                 let dib_dvbc = device.base_current_jacobian_dvbc(v[0], v[1]);
+                smallvec![dic_dvbe, dic_dvbc, dib_dvbe, dib_dvbc]
+            }
+            DeviceEntry::BjtGP { device, .. } => {
+                // Collector Jacobian from NonlinearDevice<2> trait (analytical)
+                let ic_jac = NonlinearDevice::<2>::jacobian(device, &[v[0], v[1]]);
+                let dic_dvbe = ic_jac[0];
+                let dic_dvbc = ic_jac[1];
+                // Base current Jacobian via numerical central differences
+                const H: f64 = 1e-8;
+                let dib_dvbe = (device.base_current(v[0] + H, v[1])
+                    - device.base_current(v[0] - H, v[1]))
+                    / (2.0 * H);
+                let dib_dvbc = (device.base_current(v[0], v[1] + H)
+                    - device.base_current(v[0], v[1] - H))
+                    / (2.0 * H);
                 smallvec![dic_dvbe, dic_dvbc, dib_dvbe, dib_dvbc]
             }
             DeviceEntry::Jfet { device, .. } => {
@@ -401,6 +440,7 @@ impl DeviceEntry {
             DeviceEntry::DiodeWithRs { device, .. } => device.conductance_at(v),
             DeviceEntry::Led { device, .. } => device.jacobian(&[v])[0],
             DeviceEntry::Bjt { .. } => 0.0,
+            DeviceEntry::BjtGP { .. } => 0.0,
             DeviceEntry::Jfet { .. } => 0.0,
             DeviceEntry::Mosfet { .. } => 0.0,
             DeviceEntry::Tube { .. } => 0.0,
@@ -416,6 +456,7 @@ impl DeviceEntry {
             DeviceEntry::DiodeWithRs { device, .. } => device.current_at(v),
             DeviceEntry::Led { device, .. } => device.current(&[v]),
             DeviceEntry::Bjt { .. } => 0.0,
+            DeviceEntry::BjtGP { .. } => 0.0,
             DeviceEntry::Jfet { .. } => 0.0,
             DeviceEntry::Mosfet { .. } => 0.0,
             DeviceEntry::Tube { .. } => 0.0,
@@ -2918,8 +2959,8 @@ C1 in 0 1u
 // FLOPs per iteration — well within real-time budget at 48kHz.
 // ==========================================================================
 
-use crate::device_types::{DeviceParams, DeviceSlot};
 use crate::dc_op;
+use crate::device_types::{DeviceParams, DeviceSlot};
 use crate::mna::MnaSystem;
 
 /// Apply SPICE-style voltage limiting for a DeviceSlot dimension.
@@ -3102,7 +3143,11 @@ impl NodalSolver {
             .iter()
             .filter_map(|name| {
                 mna.node_map.get(name).map(|&idx| {
-                    if idx > 0 { idx - 1 } else { usize::MAX } // 0 = ground, skip
+                    if idx > 0 {
+                        idx - 1
+                    } else {
+                        usize::MAX
+                    } // 0 = ground, skip
                 })
             })
             .filter(|&idx| idx < n_nodes)
@@ -3507,7 +3552,9 @@ impl NodalSolver {
             {
                 let n_nodes = self.kernel.n_nodes;
                 let mut max_v = 0.0_f64;
-                for i in 0..n_nodes { max_v = max_v.max(v[i].abs()); }
+                for i in 0..n_nodes {
+                    max_v = max_v.max(v[i].abs());
+                }
                 let damp_thresh = 10.0_f64.max(max_v * 0.05);
                 let mut max_node_dv = 0.0_f64;
                 for i in 0..n_nodes {
@@ -3691,7 +3738,9 @@ impl NodalSolver {
                 {
                     let n_nodes = self.kernel.n_nodes;
                     let mut max_v = 0.0_f64;
-                    for i in 0..n_nodes { max_v = max_v.max(v[i].abs()); }
+                    for i in 0..n_nodes {
+                        max_v = max_v.max(v[i].abs());
+                    }
                     let damp_thresh = 10.0_f64.max(max_v * 0.05);
                     let mut max_node_dv = 0.0_f64;
                     for i in 0..n_nodes {

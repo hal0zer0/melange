@@ -147,6 +147,7 @@ fn get_builtin(name: &str) -> Option<String> {
         "big-muff" => Some(include_str!("builtins/big-muff.cir").to_string()),
         "rc-lowpass" => Some(include_str!("builtins/rc-lowpass.cir").to_string()),
         "mordor-screamer" => Some(include_str!("builtins/mordor-screamer.cir").to_string()),
+        "tube-preamp" => Some(include_str!("builtins/tube-preamp.cir").to_string()),
         _ => None,
     }
 }
@@ -176,10 +177,17 @@ pub fn list_builtins() -> Vec<(&'static str, &'static str)> {
     vec![
         (
             "tube-screamer",
-            "Classic op-amp clipper (Tube Screamer style)",
+            "Op-amp overdrive with diode feedback clipping (TS808 style)",
         ),
         ("fuzz-face", "2-transistor fuzz (Fuzz Face style)"),
-        ("big-muff", "4-transistor fuzz (Big Muff style)"),
+        (
+            "big-muff",
+            "4-transistor fuzz with dual clipping (Big Muff style)",
+        ),
+        (
+            "tube-preamp",
+            "Common-cathode 12AX7 triode gain stage with tone control",
+        ),
         ("rc-lowpass", "Simple RC lowpass filter for testing"),
         (
             "mordor-screamer",

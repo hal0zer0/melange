@@ -4,7 +4,7 @@
 //! - Ebers-Moll model (basic, good for most audio applications)
 //! - Gummel-Poon model (extended with Early effect and high-level injection)
 
-use crate::{NonlinearDevice, VT_ROOM, safeguards};
+use crate::{safeguards, NonlinearDevice, VT_ROOM};
 
 /// BJT polarity (NPN or PNP).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,6 +36,14 @@ pub struct BjtEbersMoll {
     /// Reverse emission coefficient (NR). Default 1.0.
     /// Reverse exponential uses exp(Vbc / (NR * VT)).
     pub nr: f64,
+    /// Base-emitter leakage saturation current [A]. Default 0.0 (disabled).
+    pub ise: f64,
+    /// Base-emitter leakage emission coefficient. Default 1.5.
+    pub ne: f64,
+    /// Base-collector leakage saturation current [A]. Default 0.0 (disabled).
+    pub isc: f64,
+    /// Base-collector leakage emission coefficient. Default 1.0.
+    pub nc: f64,
     /// Polarity (NPN or PNP)
     pub polarity: BjtPolarity,
     /// Precomputed: 1 / beta_f
@@ -45,7 +53,7 @@ pub struct BjtEbersMoll {
 }
 
 impl BjtEbersMoll {
-    /// Create a new BJT model (NF and NR default to 1.0).
+    /// Create a new BJT model (NF, NR default to 1.0; ISE, ISC default to 0.0).
     pub fn new(is: f64, vt: f64, beta_f: f64, beta_r: f64, polarity: BjtPolarity) -> Self {
         Self {
             is,
@@ -54,6 +62,10 @@ impl BjtEbersMoll {
             beta_r,
             nf: 1.0,
             nr: 1.0,
+            ise: 0.0,
+            ne: 1.5,
+            isc: 0.0,
+            nc: 1.0,
             polarity,
             inv_beta_f: 1.0 / beta_f,
             inv_beta_r: 1.0 / beta_r,
@@ -74,6 +86,18 @@ impl BjtEbersMoll {
     /// Builder: set reverse emission coefficient NR.
     pub fn with_nr(mut self, nr: f64) -> Self {
         self.nr = nr;
+        self
+    }
+
+    /// Builder: set base-emitter and base-collector leakage parameters.
+    ///
+    /// ISE/ISC are leakage saturation currents; NE/NC are leakage emission coefficients.
+    /// Default ISE=0.0, NE=1.5, ISC=0.0, NC=1.0 (zero ISE/ISC means no leakage).
+    pub fn with_leakage(mut self, ise: f64, ne: f64, isc: f64, nc: f64) -> Self {
+        self.ise = ise;
+        self.ne = ne;
+        self.isc = isc;
+        self.nc = nc;
         self
     }
 
@@ -133,6 +157,10 @@ impl BjtEbersMoll {
     }
 
     /// Calculate base current given Vbe and Vbc.
+    ///
+    /// Includes leakage terms when ISE > 0 or ISC > 0:
+    ///   Ib = IS/BF * (exp(Vbe/(NF*VT))-1) + ISE * (exp(Vbe/(NE*VT))-1)
+    ///      + IS/BR * (exp(Vbc/(NR*VT))-1) + ISC * (exp(Vbc/(NC*VT))-1)
     pub fn base_current(&self, vbe: f64, vbc: f64) -> f64 {
         let s = self.sign();
         let nf_vt = self.nf * self.vt;
@@ -144,11 +172,23 @@ impl BjtEbersMoll {
         let exp_be = safeguards::safe_exp(vbe_eff / nf_vt);
         let exp_bc = safeguards::safe_exp(vbc_eff / nr_vt);
 
-        // Base current (forward uses NF*VT, reverse uses NR*VT)
-        let ib =
-            self.is * self.inv_beta_f * (exp_be - 1.0) + self.is * self.inv_beta_r * (exp_bc - 1.0);
+        // Ideal base current terms (forward uses NF*VT, reverse uses NR*VT)
+        let ib_fwd = self.is * self.inv_beta_f * (exp_be - 1.0);
+        let ib_rev = self.is * self.inv_beta_r * (exp_bc - 1.0);
 
-        s * ib
+        // Leakage terms
+        let ib_leak_be = if self.ise > 0.0 {
+            self.ise * (safeguards::safe_exp(vbe_eff / (self.ne * self.vt)) - 1.0)
+        } else {
+            0.0
+        };
+        let ib_leak_bc = if self.isc > 0.0 {
+            self.isc * (safeguards::safe_exp(vbc_eff / (self.nc * self.vt)) - 1.0)
+        } else {
+            0.0
+        };
+
+        s * (ib_fwd + ib_rev + ib_leak_be + ib_leak_bc)
     }
 
     /// Partial derivative of base current with respect to Vbe.
@@ -159,7 +199,14 @@ impl BjtEbersMoll {
         let exp_be = safeguards::safe_exp(vbe_eff / nf_vt);
 
         // ∂Ib/∂Vbe = (Is/(βf*NF*Vt)) * exp(Vbe/(NF*Vt))
-        let dib_dvbe = self.is * self.inv_beta_f / nf_vt * exp_be;
+        let mut dib_dvbe = self.is * self.inv_beta_f / nf_vt * exp_be;
+
+        // Leakage derivative: ∂Ib_leak_be/∂Vbe = ISE/(NE*VT) * exp(Vbe/(NE*VT))
+        if self.ise > 0.0 {
+            let ne_vt = self.ne * self.vt;
+            let exp_leak_be = safeguards::safe_exp(vbe_eff / ne_vt);
+            dib_dvbe += self.ise / ne_vt * exp_leak_be;
+        }
 
         // Apply chain rule for polarity (s * s = 1, so no sign change)
         s * s * dib_dvbe
@@ -173,7 +220,14 @@ impl BjtEbersMoll {
         let exp_bc = safeguards::safe_exp(vbc_eff / nr_vt);
 
         // ∂Ib/∂Vbc = (Is/(βr*NR*Vt)) * exp(Vbc/(NR*Vt))
-        let dib_dvbc = self.is * self.inv_beta_r / nr_vt * exp_bc;
+        let mut dib_dvbc = self.is * self.inv_beta_r / nr_vt * exp_bc;
+
+        // Leakage derivative: ∂Ib_leak_bc/∂Vbc = ISC/(NC*VT) * exp(Vbc/(NC*VT))
+        if self.isc > 0.0 {
+            let nc_vt = self.nc * self.vt;
+            let exp_leak_bc = safeguards::safe_exp(vbc_eff / nc_vt);
+            dib_dvbc += self.isc / nc_vt * exp_leak_bc;
+        }
 
         // Apply chain rule for polarity
         s * s * dib_dvbc
@@ -202,8 +256,7 @@ impl BjtEbersMoll {
         let d_ic_d_vbe = (self.is / nf_vt) * exp_be;
 
         // ∂Ic/∂Vbc = -(Is/(NR*Vt)) * exp(Vbc/(NR*Vt)) - (Is/(βr*NR*Vt)) * exp(Vbc/(NR*Vt))
-        let d_ic_d_vbc =
-            -(self.is / nr_vt) * exp_bc - (self.is * self.inv_beta_r / nr_vt) * exp_bc;
+        let d_ic_d_vbc = -(self.is / nr_vt) * exp_bc - (self.is * self.inv_beta_r / nr_vt) * exp_bc;
 
         // Apply chain rule for polarity
         (s * s * d_ic_d_vbe, s * s * d_ic_d_vbc)
@@ -293,9 +346,12 @@ impl BjtGummelPoon {
 
     /// Base current with GP modification: forward ideal component divided by qb.
     ///
-    /// Ib = Is/BF * (exp(Vbe/(NF*VT)) - 1) / qb + Is/BR * (exp(Vbc/(NR*VT)) - 1)
+    /// `Ib = Is/BF * (exp(Vbe/(NF*VT)) - 1) / qb + Is/BR * (exp(Vbc/(NR*VT)) - 1)`
+    /// `   + ISE * (exp(Vbe/(NE*VT)) - 1) + ISC * (exp(Vbc/(NC*VT)) - 1)`
+    ///
     /// The forward ideal component (Is/BF term) is divided by qb to account
-    /// for Early effect and high-level injection. Reverse component unchanged.
+    /// for Early effect and high-level injection. Reverse component and
+    /// leakage terms are unchanged (not affected by qb).
     pub fn base_current(&self, vbe: f64, vbc: f64) -> f64 {
         let s = self.base.sign();
         let nf_vt = self.base.nf * self.base.vt;
@@ -310,7 +366,19 @@ impl BjtGummelPoon {
         let ib_fwd = self.base.is * self.base.inv_beta_f * (exp_be - 1.0) / qb;
         let ib_rev = self.base.is * self.base.inv_beta_r * (exp_bc - 1.0);
 
-        s * (ib_fwd + ib_rev)
+        // Leakage terms (same as Ebers-Moll, not affected by qb)
+        let ib_leak_be = if self.base.ise > 0.0 {
+            self.base.ise * (safeguards::safe_exp(vbe_eff / (self.base.ne * self.base.vt)) - 1.0)
+        } else {
+            0.0
+        };
+        let ib_leak_bc = if self.base.isc > 0.0 {
+            self.base.isc * (safeguards::safe_exp(vbc_eff / (self.base.nc * self.base.vt)) - 1.0)
+        } else {
+            0.0
+        };
+
+        s * (ib_fwd + ib_rev + ib_leak_be + ib_leak_bc)
     }
 
     /// Collector current with Early effect and high injection.
@@ -1551,12 +1619,10 @@ mod tests {
                 / (2.0 * eps);
 
             // FD for base
-            let fd_dib_dvbe = (bjt.base_current(vbe + eps, vbc)
-                - bjt.base_current(vbe - eps, vbc))
-                / (2.0 * eps);
-            let fd_dib_dvbc = (bjt.base_current(vbe, vbc + eps)
-                - bjt.base_current(vbe, vbc - eps))
-                / (2.0 * eps);
+            let fd_dib_dvbe =
+                (bjt.base_current(vbe + eps, vbc) - bjt.base_current(vbe - eps, vbc)) / (2.0 * eps);
+            let fd_dib_dvbc =
+                (bjt.base_current(vbe, vbc + eps) - bjt.base_current(vbe, vbc - eps)) / (2.0 * eps);
 
             // Check all four entries
             for (name, analytic, fd) in [
@@ -1597,8 +1663,7 @@ mod tests {
         // FD Jacobian should match
         let eps = 1e-7;
         let (dic_dvbe, _) = pnp.collector_jacobian(-0.7, 5.0);
-        let fd = (pnp.collector_current(-0.7 + eps, 5.0)
-            - pnp.collector_current(-0.7 - eps, 5.0))
+        let fd = (pnp.collector_current(-0.7 + eps, 5.0) - pnp.collector_current(-0.7 - eps, 5.0))
             / (2.0 * eps);
         let rel_err = (dic_dvbe - fd).abs() / fd.abs();
         assert!(

@@ -1,5 +1,5 @@
-use melange_solver::codegen::CodegenConfig;
 use melange_solver::codegen::ir::CircuitIR;
+use melange_solver::codegen::CodegenConfig;
 use melange_solver::dk::DkKernel;
 use melange_solver::mna::MnaSystem;
 use melange_solver::parser::Netlist;
@@ -187,7 +187,8 @@ fn main() {
     println!("Peak DC-blocked output: {:.4}V", peak_out);
     println!(
         "NR max iterations: {} / {} samples",
-        solver.diag_nr_max_iter_count(), num_samples
+        solver.diag_nr_max_iter_count(),
+        num_samples
     );
     println!("NaN resets: {}", solver.diag_nan_reset_count());
     println!("Clamp count: {}", solver.diag_clamp_count());

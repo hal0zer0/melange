@@ -156,11 +156,17 @@ mod tests {
 
         // Positive saturation
         let vout_pos = opa.current(&[1.0]); // 1V * 100k = 100kV → clamps to +12
-        assert_eq!(vout_pos, 12.0, "Positive saturation should clamp to vout_max");
+        assert_eq!(
+            vout_pos, 12.0,
+            "Positive saturation should clamp to vout_max"
+        );
 
         // Negative saturation
         let vout_neg = opa.current(&[-1.0]);
-        assert_eq!(vout_neg, -12.0, "Negative saturation should clamp to vout_min");
+        assert_eq!(
+            vout_neg, -12.0,
+            "Negative saturation should clamp to vout_min"
+        );
 
         // Just at boundary
         let vin_edge = 12.0 / 100e3; // exactly at saturation
@@ -194,7 +200,10 @@ mod tests {
         assert_eq!(jac_sat[0], 0.0, "Saturated Jacobian should be 0");
 
         let jac_neg_sat = opa.jacobian(&[-1.0]);
-        assert_eq!(jac_neg_sat[0], 0.0, "Negative saturated Jacobian should be 0");
+        assert_eq!(
+            jac_neg_sat[0], 0.0,
+            "Negative saturated Jacobian should be 0"
+        );
     }
 
     /// Verify all preset constructors produce valid models.

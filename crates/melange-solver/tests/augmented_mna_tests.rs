@@ -14,8 +14,8 @@
 //! - NR converges for linear circuits (no max-iter or NaN)
 //! - No-inductor circuits are unaffected (exact match with LinearSolver)
 
-use melange_solver::codegen::CodegenConfig;
 use melange_solver::codegen::ir::CircuitIR;
+use melange_solver::codegen::CodegenConfig;
 use melange_solver::dk::DkKernel;
 use melange_solver::mna::MnaSystem;
 use melange_solver::parser::Netlist;
@@ -163,7 +163,8 @@ fn test_augmented_rl_step_response() {
 
     // Linear circuit: NR must converge every sample
     assert_eq!(
-        solver.diag_nr_max_iter_count(), 0,
+        solver.diag_nr_max_iter_count(),
+        0,
         "NR converged on every sample"
     );
     assert_eq!(solver.diag_nan_reset_count(), 0, "No NaN resets");
@@ -228,7 +229,8 @@ fn test_large_inductor_stability() {
 
     assert_eq!(solver.diag_nan_reset_count(), 0, "No NaN resets");
     assert_eq!(
-        solver.diag_nr_max_iter_count(), 0,
+        solver.diag_nr_max_iter_count(),
+        0,
         "NR converged on every sample"
     );
 }

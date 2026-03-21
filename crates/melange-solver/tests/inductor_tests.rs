@@ -595,7 +595,8 @@ fn test_inductor_codegen_sanitization() {
 
     // NaN sanitization should reset inductor state
     // NaN check now happens before state write: checks local `v` not `state.v_prev`
-    let sanitize_idx = code.find("if !v.iter().all(|x| x.is_finite())")
+    let sanitize_idx = code
+        .find("if !v.iter().all(|x| x.is_finite())")
         .or_else(|| code.find("if !state.v_prev.iter().all(|x| x.is_finite())"));
     assert!(sanitize_idx.is_some(), "Should have NaN sanitization block");
 

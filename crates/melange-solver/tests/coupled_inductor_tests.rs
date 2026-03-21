@@ -869,7 +869,8 @@ fn test_codegen_nan_sanitization() {
     let code = generate_code(SIMPLE_COUPLED);
 
     // NaN check now happens before state write: checks local `v` not `state.v_prev`
-    let sanitize_idx = code.find("if !v.iter().all(|x| x.is_finite())")
+    let sanitize_idx = code
+        .find("if !v.iter().all(|x| x.is_finite())")
         .or_else(|| code.find("if !state.v_prev.iter().all(|x| x.is_finite())"));
     assert!(sanitize_idx.is_some(), "Should have NaN sanitization block");
 

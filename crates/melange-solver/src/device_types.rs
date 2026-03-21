@@ -186,10 +186,10 @@ impl BjtParams {
     /// where K_eff = K_original - R_p, and i_device uses the intrinsic model.
     pub fn r_p_matrix(&self) -> [f64; 4] {
         [
-            self.re,            // R_p[be,be]: Vbe drop from Ic * RE
-            self.rb + self.re,  // R_p[be,bc]: Vbe drop from Ib * (RB + RE)
-            -self.rc,           // R_p[bc,be]: Vbc drop from -Ic * RC
-            self.rb,            // R_p[bc,bc]: Vbc drop from Ib * RB
+            self.re,           // R_p[be,be]: Vbe drop from Ic * RE
+            self.rb + self.re, // R_p[be,bc]: Vbe drop from Ib * (RB + RE)
+            -self.rc,          // R_p[bc,be]: Vbc drop from -Ic * RC
+            self.rb,           // R_p[bc,bc]: Vbc drop from Ib * RB
         ]
     }
 }

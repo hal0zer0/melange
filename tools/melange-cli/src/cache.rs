@@ -53,8 +53,9 @@ impl Cache {
                 if let Ok(modified) = metadata.modified() {
                     if let Ok(age) = std::time::SystemTime::now().duration_since(modified) {
                         if age < std::time::Duration::from_secs(24 * 3600) {
-                            return std::fs::read_to_string(&cache_path)
-                                .with_context(|| format!("Failed to read cached file: {}", cache_path.display()));
+                            return std::fs::read_to_string(&cache_path).with_context(|| {
+                                format!("Failed to read cached file: {}", cache_path.display())
+                            });
                         }
                     }
                 }

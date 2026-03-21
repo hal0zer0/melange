@@ -391,7 +391,10 @@ mod tests {
         let ip_m2 = t.plate_current(-2.0, 250.0);
         assert_ip_approx(ip_m2, 0.1e-3, 0.1e-3, "12AX7F Vgk=-2");
         // Monotonicity
-        assert!(ip_m1 < ip0, "12AX7F: Ip should decrease with more negative Vgk");
+        assert!(
+            ip_m1 < ip0,
+            "12AX7F: Ip should decrease with more negative Vgk"
+        );
         assert!(ip_m2 < ip_m1, "12AX7F: Ip should decrease further");
         // Cutoff: Vgk=-4V → Ip near zero
         assert!(

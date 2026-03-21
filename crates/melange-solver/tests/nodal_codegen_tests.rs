@@ -139,7 +139,7 @@ fn test_nodal_ir_construction() {
     assert_eq!(ir.solver_mode, SolverMode::Nodal);
     assert!(ir.topology.augmented_inductors);
     assert_eq!(ir.topology.m, 0); // no nonlinear devices
-    // n_nodal = n_aug + 1 inductor
+                                  // n_nodal = n_aug + 1 inductor
     assert_eq!(ir.topology.n, mna.n_aug + 1);
     assert_eq!(ir.topology.n_aug, mna.n_aug);
     assert_eq!(ir.topology.n_nodes, mna.n);
@@ -153,7 +153,10 @@ fn test_nodal_ir_construction() {
     assert!(!ir.matrices.c_matrix.is_empty());
 
     // Schur complement: S is computed for nodal mode (K only if M > 0)
-    assert!(!ir.matrices.s.is_empty(), "S should be computed for Schur complement");
+    assert!(
+        !ir.matrices.s.is_empty(),
+        "S should be computed for Schur complement"
+    );
 
     // No companion model state
     assert!(ir.inductors.is_empty());
@@ -189,7 +192,7 @@ fn test_nodal_ir_tube_transformer() {
 
     assert_eq!(ir.solver_mode, SolverMode::Nodal);
     assert_eq!(ir.topology.m, 2); // 1 tube = 2 dims
-    // 3-winding transformer = 3 augmented variables
+                                  // 3-winding transformer = 3 augmented variables
     assert_eq!(ir.topology.n, mna.n_aug + 3);
     assert!(ir.has_dc_op); // VCC = 250V
 }

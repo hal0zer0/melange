@@ -93,9 +93,9 @@ Melange ships with classic circuits ready to compile:
 
 | Circuit | Description |
 |---------|-------------|
-| `tube-screamer` | Diode clipper (Tube Screamer style) |
+| `tube-screamer` | Op-amp overdrive with diode feedback clipping (TS808 style) |
 | `fuzz-face` | 2-transistor fuzz (Fuzz Face style) |
-| `big-muff` | 4-transistor fuzz (Big Muff style) |
+| `big-muff` | 4-transistor fuzz with dual clipping (Big Muff style) |
 | `tube-preamp` | Common-cathode 12AX7 triode gain stage with tone control |
 | `rc-lowpass` | Simple RC lowpass filter for testing |
 | `mordor-screamer` | High-gain distortion forged in Mount Doom |

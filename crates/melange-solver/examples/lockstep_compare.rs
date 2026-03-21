@@ -7,8 +7,8 @@
 /// the exact same algorithm that `emit_nodal_process_sample` would generate.
 
 fn main() {
-    use melange_solver::codegen::CodegenConfig;
     use melange_solver::codegen::ir::CircuitIR;
+    use melange_solver::codegen::CodegenConfig;
     use melange_solver::dk::DkKernel;
     use melange_solver::mna::MnaSystem;
     use melange_solver::parser::Netlist;
@@ -290,7 +290,10 @@ fn main() {
                     if diff > 1e-15 {
                         println!(
                             "    i_nl[{:2}]: diff={:+.6e}  runtime={:+.10e}  codegen={:+.10e}",
-                            i, diff, runtime.i_nl_prev()[i], cg_i_nl_prev[i]
+                            i,
+                            diff,
+                            runtime.i_nl_prev()[i],
+                            cg_i_nl_prev[i]
                         );
                     }
                 }
@@ -323,8 +326,14 @@ fn main() {
         Some(s) => println!("  First divergence > 1e-10: sample {}", s),
         None => println!("  No divergence > 1e-10 detected"),
     }
-    println!("  Runtime BE fallbacks: {}", runtime.diag_be_fallback_count());
-    println!("  Runtime NR max-iter: {}", runtime.diag_nr_max_iter_count());
+    println!(
+        "  Runtime BE fallbacks: {}",
+        runtime.diag_be_fallback_count()
+    );
+    println!(
+        "  Runtime NR max-iter: {}",
+        runtime.diag_nr_max_iter_count()
+    );
 }
 
 /// Replicate the codegen's process_sample algorithm using IR matrices.
@@ -389,7 +398,7 @@ fn codegen_process_sample(
     let mut converged = false;
     let mut i_nl = vec![0.0f64; m];
     let mut j_dev = vec![0.0f64; m * m];
-    let mut nr_iters_used = 0u32;
+    let mut _nr_iters_used = 0u32;
 
     for _iter in 0..max_iter {
         // 2a. Extract nonlinear voltages: v_nl = N_v * v
@@ -523,7 +532,7 @@ fn codegen_process_sample(
 
         if converged_check {
             converged = true;
-            nr_iters_used = _iter as u32;
+            _nr_iters_used = _iter as u32;
             // Final device evaluation at converged point
             let mut v_nl_final = vec![0.0f64; m];
             for i in 0..m {
@@ -715,7 +724,11 @@ fn codegen_process_sample(
 
     // Return raw output (node voltage, before DC blocking)
     let out_node = ir.solver_config.output_nodes[0];
-    if out_node < n { v_prev[out_node] } else { 0.0 }
+    if out_node < n {
+        v_prev[out_node]
+    } else {
+        0.0
+    }
 }
 
 /// Device evaluation matching the codegen's inline code (current + Jacobian).

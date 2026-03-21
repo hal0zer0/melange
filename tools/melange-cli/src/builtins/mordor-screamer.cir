@@ -35,5 +35,7 @@ R3 n3 0 10k
 * Output buffer
 R4 n2 out 100
 C4 out 0 0.1u
+* Output pulldown resistor (prevents DC offset on output node)
+R_pull_out out 0 1Meg
 
 .END

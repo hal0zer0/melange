@@ -11,7 +11,7 @@
 //! - 1 BJT: M = 2 (Vbe, Vbc)
 //! - 2 diodes + 1 BJT: M = 1 + 1 + 2 = 4
 
-use crate::mna::{MnaSystem, inject_rhs_current, invert_small_matrix};
+use crate::mna::{inject_rhs_current, invert_small_matrix, MnaSystem};
 use std::sync::Arc;
 
 /// Information about an inductor for companion model.
@@ -677,18 +677,28 @@ impl DkKernel {
         for vs in &mna.voltage_sources {
             let row = n_nodes + vs.ext_idx;
             if row < n {
-                for j in 0..n { a_neg_2d[row][j] = 0.0; }
+                for j in 0..n {
+                    a_neg_2d[row][j] = 0.0;
+                }
             }
         }
         let num_vs = mna.voltage_sources.len();
         for (vcvs_idx, _) in mna.vcvs_sources.iter().enumerate() {
             let row = n_nodes + num_vs + vcvs_idx;
-            if row < n { for j in 0..n { a_neg_2d[row][j] = 0.0; } }
+            if row < n {
+                for j in 0..n {
+                    a_neg_2d[row][j] = 0.0;
+                }
+            }
         }
         let num_vcvs = mna.vcvs_sources.len();
         for (xfmr_idx, _) in mna.ideal_transformers.iter().enumerate() {
             let row = n_nodes + num_vs + num_vcvs + xfmr_idx;
-            if row < n { for j in 0..n { a_neg_2d[row][j] = 0.0; } }
+            if row < n {
+                for j in 0..n {
+                    a_neg_2d[row][j] = 0.0;
+                }
+            }
         }
         let a_neg = flatten_matrix(&a_neg_2d, n, n);
 

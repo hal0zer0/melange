@@ -1,42 +1,63 @@
-* Fuzz Face Style Fuzz Pedal
-* Inspired by the Arbiter Fuzz Face circuit topology
+Fuzz Face Style Fuzz Pedal
+* Inspired by the Dallas Arbiter Fuzz Face circuit topology (NPN silicon adaptation)
 * This implementation: Copyright (c) 2026 Melange Contributors
 * License: MIT OR Apache-2.0
 *
 * Note: This is a clean-room implementation of a well-known
-* circuit topology. "Fuzz Face" is a trademark of Dallas Arbiter.
+* circuit topology. "Fuzz Face" is a trademark of Dunlop/Dallas Arbiter.
 *
-* Classic 2-transistor NPN fuzz circuit
-* Q1: Input buffer/gain, Q2: Output driver
+* NPN silicon 2-transistor fuzz (2N3904-class)
+* Q1: Common-emitter input stage (grounded emitter)
+* Q2: Common-emitter output stage (emitter degeneration via Fuzz pot)
+*
+* KEY topology features:
+* 1. Q1 collector DC-coupled to Q2 base (no coupling cap) — sets Q2 bias
+* 2. R_fb from Q2 collector back to Q1 base — DC bias + AC negative feedback
+* 3. Fuzz pot varies Q2 emitter degeneration (less R = more gain = more fuzz)
 
-* Input coupling and biasing
-C1 in 1 2.2u
-R1 1 2 33k
-R2 2 3 33k
-R3 3 0 470
+* --- Input coupling ---
+* Audio input through 2.2uF cap to Q1 base
+Cin in base1 2.2u
 
-* Volume control
-RV1 4 out 500k
+* --- DC feedback from Q2 collector to Q1 base ---
+* Sets Q1 bias point AND provides AC negative feedback
+R_fb coll2 base1 100k
 
-* Q1 - First transistor (AC128/2N2222 equivalent)
-Q1 2 1 3 QNPN
+* --- Q1: Input stage (common-emitter, grounded emitter) ---
+Q1 coll1 base1 0 QNPN
 
-* Q2 - Second transistor
-Q2 out 4 5 QNPN
-R4 5 0 470
+* --- Q1 collector load (also biases Q2 base via DC coupling) ---
+R_c1 vcc coll1 8.2k
 
-* Feedback network
-C2 4 2 10u
-R5 4 vcc 100k
+* --- Q2: Output stage (DC-coupled base from Q1 collector) ---
+Q2 coll2 coll1 emit2 QNPN
 
-* Power supply and filtering
-VCC vcc 0 9V
-C3 vcc 0 100u
+* --- Q2 collector load ---
+R_c2 vcc coll2 33k
 
-* Fuzz control (inter-stage resistor)
-RV2 3 4 1k
+* --- Q2 emitter degeneration: Fuzz pot + fixed resistor to ground ---
+* Fuzz pot (1k): low resistance = less degeneration = more gain/fuzz
+RV_fuzz emit2 e2_mid 1k
+R_e e2_mid 0 390
 
-* Device models
-.model QNPN NPN(IS=1e-15 BF=200 NF=1 VAF=100 IKF=0.3 ISE=1e-12 NE=1.5 BR=1 NR=1 VAR=100 IKR=0.3 ISC=1e-12 NC=1.5 RB=10 RE=1 RC=1 CJE=20p CJC=10p TF=1n TR=100n EG=1.11 XTI=3 XTB=0)
+* --- Output volume control ---
+* Voltage divider from Q2 collector, with load resistor to ground
+RV_vol coll2 vol_out 500k
+R_vol_gnd vol_out 0 10k
+
+* --- Output coupling ---
+Cout vol_out out 10u
+R_out out 0 1Meg
+
+* --- Power supply ---
+VCC vcc 0 9
+C_supply vcc 0 100u
+
+* --- Device models ---
+.model QNPN NPN(IS=1e-14 BF=200)
+
+* --- Pot directives ---
+.pot RV_fuzz 10 1k "Fuzz"
+.pot RV_vol 500 500k "Volume"
 
 .END

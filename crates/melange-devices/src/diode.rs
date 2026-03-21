@@ -1,6 +1,6 @@
 //! Diode models for circuit simulation.
 
-use crate::{NonlinearDevice, VT_ROOM, safeguards};
+use crate::{safeguards, NonlinearDevice, VT_ROOM};
 
 /// Shockley diode equation model.
 ///

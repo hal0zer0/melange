@@ -4,11 +4,9 @@
 //! circuits with diodes and BJTs.
 
 use melange_solver::codegen::ir::CircuitIR;
-use melange_solver::device_types::{
-    BjtParams, DeviceParams, DeviceSlot, DeviceType, DiodeParams,
-};
 use melange_solver::codegen::{CodeGenerator, CodegenConfig};
-use melange_solver::dc_op::{DcOpConfig, DcOpMethod, solve_dc_operating_point};
+use melange_solver::dc_op::{solve_dc_operating_point, DcOpConfig, DcOpMethod};
+use melange_solver::device_types::{BjtParams, DeviceParams, DeviceSlot, DeviceType, DiodeParams};
 use melange_solver::dk::DkKernel;
 use melange_solver::mna::MnaSystem;
 use melange_solver::parser::Netlist;
@@ -836,7 +834,12 @@ fn test_power_amp_dc_op_converges() {
     let mut mna = MnaSystem::from_netlist(&netlist).expect("MNA failed");
 
     // Stamp input conductance (1Ω)
-    let input_node = mna.node_map.get("in").copied().unwrap_or(1).saturating_sub(1);
+    let input_node = mna
+        .node_map
+        .get("in")
+        .copied()
+        .unwrap_or(1)
+        .saturating_sub(1);
     if input_node < mna.n {
         mna.g[input_node][input_node] += 1.0;
     }
@@ -851,9 +854,10 @@ fn test_power_amp_dc_op_converges() {
     };
 
     // Verify parasitic BJTs are present
-    let parasitic_count = slots.iter().filter(|s| {
-        matches!(&s.params, DeviceParams::Bjt(bp) if bp.has_parasitics())
-    }).count();
+    let parasitic_count = slots
+        .iter()
+        .filter(|s| matches!(&s.params, DeviceParams::Bjt(bp) if bp.has_parasitics()))
+        .count();
     assert_eq!(parasitic_count, 8, "All 8 BJTs should have parasitic R");
 
     let result = solve_dc_operating_point(&mna, &slots, &config);
@@ -868,8 +872,18 @@ fn test_power_amp_dc_op_converges() {
     // v(out) = -0.063V, v(emit_pair) = 0.662V, v(drv_bot) = -0.727V
     // v(vas_out) = 0.445V, v(coll7) = -21.81V
 
-    let out_idx = mna.node_map.get("out").copied().unwrap_or(0).saturating_sub(1);
-    let emit_pair_idx = mna.node_map.get("emit_pair").copied().unwrap_or(0).saturating_sub(1);
+    let out_idx = mna
+        .node_map
+        .get("out")
+        .copied()
+        .unwrap_or(0)
+        .saturating_sub(1);
+    let emit_pair_idx = mna
+        .node_map
+        .get("emit_pair")
+        .copied()
+        .unwrap_or(0)
+        .saturating_sub(1);
 
     // Compare against ngspice reference values (within 0.5V tolerance for bias points)
     if out_idx < result.v_node.len() {

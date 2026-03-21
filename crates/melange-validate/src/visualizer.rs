@@ -800,7 +800,7 @@ fn generate_failures_html(report: &ComparisonReport) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::comparison::{ComparisonConfig, compare_signals};
+    use crate::comparison::{compare_signals, ComparisonConfig};
 
     #[test]
     fn test_generate_csv() {

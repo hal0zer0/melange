@@ -1012,8 +1012,8 @@ fn test_lu_decompose_floating_node_with_inductor_short() {
 #[test]
 #[ignore = "Pultec nodal DC OP uses stale node name from pre-topology-fix circuit"]
 fn test_dc_op_pultec_nonlinear_nodal() {
-    use melange_solver::codegen::CodegenConfig;
     use melange_solver::codegen::ir::CircuitIR;
+    use melange_solver::codegen::CodegenConfig;
     use melange_solver::dk::DkKernel;
     use melange_solver::mna::MnaSystem;
     use melange_solver::parser::Netlist;
@@ -1085,7 +1085,9 @@ fn test_dc_op_pultec_nonlinear_nodal() {
     }
     eprintln!(
         "10ms silence: peak={:.6}V, NR max iter={}, NaN resets={}",
-        peak, solver.diag_nr_max_iter_count(), solver.diag_nan_reset_count()
+        peak,
+        solver.diag_nr_max_iter_count(),
+        solver.diag_nan_reset_count()
     );
 
     assert_eq!(solver.diag_nan_reset_count(), 0, "No NaN resets expected");

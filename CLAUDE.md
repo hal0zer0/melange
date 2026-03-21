@@ -138,7 +138,7 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
 - Logging via `log` crate (no `eprintln!` in library code)
 - MAX_M=16 bound prevents unbounded allocation in DK kernel
 - CLI reports errors for unresolved node names (no silent defaults)
-- **BJT common-emitter amplifier**: SPICE validation passes (correlation 0.965, 35% RMS)
+- **BJT common-emitter amplifier**: SPICE validation passes (correlation 0.998, 12% RMS)
   - Trapezoidal nonlinear integration: correction uses full `S*N_i*i_nl` (not delta)
   - Combined with `N_i*i_nl_prev` in RHS, gives proper trapezoidal average
   - **Gummel-Poon model**: `BjtParams` includes VAF, VAR, IKF, IKR; `bjt_qb()` base charge modulation

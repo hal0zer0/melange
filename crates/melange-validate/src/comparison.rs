@@ -3,7 +3,7 @@
 //! This module provides comprehensive signal comparison with multiple error metrics
 //! including time-domain errors, correlation, and spectral analysis (THD).
 
-use rustfft::{FftPlanner, num_complex::Complex};
+use rustfft::{num_complex::Complex, FftPlanner};
 use std::f64::consts::PI;
 
 /// A signal with associated sample rate for comparison

@@ -10,7 +10,7 @@
 //! call into this module.
 
 use crate::device_types::{DeviceParams, DeviceSlot, DeviceType};
-use crate::mna::{MnaSystem, inject_rhs_current};
+use crate::mna::{inject_rhs_current, MnaSystem};
 use melange_devices::bjt::{BjtEbersMoll, BjtGummelPoon, BjtPolarity};
 use melange_devices::diode::DiodeShockley;
 use melange_devices::tube::KorenTriode;
@@ -142,7 +142,11 @@ fn evaluate_devices_inner(
             }
             (DeviceType::Bjt, DeviceParams::Bjt(bp)) => {
                 if s + 1 >= v_nl.len() {
-                    log::warn!("DC OP: BJT at start_idx={} needs 2 dims but v_nl.len()={}", s, v_nl.len());
+                    log::warn!(
+                        "DC OP: BJT at start_idx={} needs 2 dims but v_nl.len()={}",
+                        s,
+                        v_nl.len()
+                    );
                     continue;
                 }
                 let polarity = if bp.is_pnp {
@@ -150,7 +154,9 @@ fn evaluate_devices_inner(
                 } else {
                     BjtPolarity::Npn
                 };
-                let em = BjtEbersMoll::new(bp.is, bp.vt, bp.beta_f, bp.beta_r, polarity).with_nf(bp.nf).with_nr(bp.nr);
+                let em = BjtEbersMoll::new(bp.is, bp.vt, bp.beta_f, bp.beta_r, polarity)
+                    .with_nf(bp.nf)
+                    .with_nr(bp.nr);
                 let vbe = v_nl[s];
                 let vbc = v_nl[s + 1];
 
@@ -274,11 +280,11 @@ fn evaluate_devices_inner(
 /// When RB/RC/RE > 0, internal nodes are created so the intrinsic BJT model
 /// operates on internal junction voltages while parasitic R is in the global matrix.
 struct BjtInternalNodes {
-    start_idx: usize,        // M-dimension start index
-    ext_base: usize,         // 1-indexed external node (0=ground)
+    start_idx: usize, // M-dimension start index
+    ext_base: usize,  // 1-indexed external node (0=ground)
     ext_collector: usize,
     ext_emitter: usize,
-    int_base: usize,         // 0-indexed into g_dc (same as ext if R=0)
+    int_base: usize, // 0-indexed into g_dc (same as ext if R=0)
     int_collector: usize,
     int_emitter: usize,
 }
@@ -357,7 +363,7 @@ fn build_dc_system(
     // Same stamp as a voltage source with V_dc = 0.
     for (idx, &(ni, nj)) in inductor_pairs.iter().enumerate() {
         let k = n_aug + idx; // augmented row/col for this inductor
-        // KVL row: V(ni) - V(nj) = 0
+                             // KVL row: V(ni) - V(nj) = 0
         if ni > 0 {
             g_dc[k][ni - 1] += 1.0;
         }
@@ -400,7 +406,10 @@ fn build_dc_system(
     for (slot_idx, slot) in device_slots.iter().enumerate() {
         if let DeviceParams::Bjt(bp) = &slot.params {
             // Skip if MNA already has internal nodes for this BJT
-            let has_mna_internal = mna.bjt_internal_nodes.iter().any(|n| n.start_idx == slot.start_idx);
+            let has_mna_internal = mna
+                .bjt_internal_nodes
+                .iter()
+                .any(|n| n.start_idx == slot.start_idx);
             if bp.has_parasitics() && slot.dimension == 2 && !has_mna_internal {
                 // Get external node indices (1-indexed, 0=ground)
                 if slot_idx < mna.nonlinear_devices.len() {
@@ -410,14 +419,42 @@ fn build_dc_system(
                     let ext_e = dev.node_indices[2]; // emitter
 
                     // Create internal nodes for non-zero resistances
-                    let int_b = if bp.rb > 0.0 { let idx = n_dc; n_dc += 1; idx } else if ext_b > 0 { ext_b - 1 } else { 0 };
-                    let int_c = if bp.rc > 0.0 { let idx = n_dc; n_dc += 1; idx } else if ext_c > 0 { ext_c - 1 } else { 0 };
-                    let int_e = if bp.re > 0.0 { let idx = n_dc; n_dc += 1; idx } else if ext_e > 0 { ext_e - 1 } else { 0 };
+                    let int_b = if bp.rb > 0.0 {
+                        let idx = n_dc;
+                        n_dc += 1;
+                        idx
+                    } else if ext_b > 0 {
+                        ext_b - 1
+                    } else {
+                        0
+                    };
+                    let int_c = if bp.rc > 0.0 {
+                        let idx = n_dc;
+                        n_dc += 1;
+                        idx
+                    } else if ext_c > 0 {
+                        ext_c - 1
+                    } else {
+                        0
+                    };
+                    let int_e = if bp.re > 0.0 {
+                        let idx = n_dc;
+                        n_dc += 1;
+                        idx
+                    } else if ext_e > 0 {
+                        ext_e - 1
+                    } else {
+                        0
+                    };
 
                     bjt_internal.push(BjtInternalNodes {
                         start_idx: slot.start_idx,
-                        ext_base: ext_b, ext_collector: ext_c, ext_emitter: ext_e,
-                        int_base: int_b, int_collector: int_c, int_emitter: int_e,
+                        ext_base: ext_b,
+                        ext_collector: ext_c,
+                        ext_emitter: ext_e,
+                        int_base: int_b,
+                        int_collector: int_c,
+                        int_emitter: int_e,
                     });
                 }
             }
@@ -486,9 +523,15 @@ fn build_dc_system(
     for bjt in &bjt_internal {
         if let Some(slot) = device_slots.iter().find(|s| s.start_idx == bjt.start_idx) {
             if let DeviceParams::Bjt(bp) = &slot.params {
-                if bp.rb > 0.0 { g_dc[bjt.int_base][bjt.int_base] += gmin_floor; }
-                if bp.rc > 0.0 { g_dc[bjt.int_collector][bjt.int_collector] += gmin_floor; }
-                if bp.re > 0.0 { g_dc[bjt.int_emitter][bjt.int_emitter] += gmin_floor; }
+                if bp.rb > 0.0 {
+                    g_dc[bjt.int_base][bjt.int_base] += gmin_floor;
+                }
+                if bp.rc > 0.0 {
+                    g_dc[bjt.int_collector][bjt.int_collector] += gmin_floor;
+                }
+                if bp.re > 0.0 {
+                    g_dc[bjt.int_emitter][bjt.int_emitter] += gmin_floor;
+                }
             }
         }
     }
@@ -514,11 +557,19 @@ fn build_dc_system(
     // Redirect parasitic BJTs to internal nodes
     for bjt in &bjt_internal {
         let s = bjt.start_idx;
-        if s + 1 >= m { continue; }
+        if s + 1 >= m {
+            continue;
+        }
 
         // Clear external entries for this BJT
-        for j in 0..n_dc { dc_n_v[s][j] = 0.0; dc_n_v[s + 1][j] = 0.0; }
-        for i in 0..n_dc { dc_n_i[i][s] = 0.0; dc_n_i[i][s + 1] = 0.0; }
+        for j in 0..n_dc {
+            dc_n_v[s][j] = 0.0;
+            dc_n_v[s + 1][j] = 0.0;
+        }
+        for i in 0..n_dc {
+            dc_n_i[i][s] = 0.0;
+            dc_n_i[i][s + 1] = 0.0;
+        }
 
         // N_v: extract Vbe_int = V(basePrime) - V(emitterPrime)
         dc_n_v[s][bjt.int_base] = 1.0;
@@ -554,11 +605,7 @@ pub fn extract_nl_voltages(mna: &MnaSystem, v: &[f64], v_nl: &mut [f64]) {
 /// Compute v_nl = N_v · v using an explicit N_v matrix (M × n_dc).
 fn extract_nl_voltages_with(m: usize, n_v: &[Vec<f64>], v: &[f64], v_nl: &mut [f64]) {
     for (i, v_nl_i) in v_nl.iter_mut().enumerate().take(m) {
-        *v_nl_i = n_v[i]
-            .iter()
-            .zip(v.iter())
-            .map(|(nv, vi)| nv * vi)
-            .sum();
+        *v_nl_i = n_v[i].iter().zip(v.iter()).map(|(nv, vi)| nv * vi).sum();
     }
 }
 
@@ -742,11 +789,13 @@ fn clamp_junction_voltages(
                         if need_adjust {
                             if is_pnp {
                                 // PNP: collector below base. Find lowest voltage as "ground".
-                                let v_ground = v.iter().take(mna.n).cloned().fold(f64::MAX, f64::min);
+                                let v_ground =
+                                    v.iter().take(mna.n).cloned().fold(f64::MAX, f64::min);
                                 v[c] = v[b] - (v[b] - v_ground) * 0.3;
                             } else {
                                 // NPN: collector above base. Find highest voltage as supply.
-                                let v_supply = v.iter().take(mna.n).cloned().fold(0.0_f64, f64::max);
+                                let v_supply =
+                                    v.iter().take(mna.n).cloned().fold(0.0_f64, f64::max);
                                 v[c] = v[b] + (v_supply - v[b]) * 0.3;
                             }
                         }
@@ -1016,7 +1065,8 @@ fn nr_dc_solve(
         }
 
         // Apply pnjlim corrections to v_new
-        let v_limited: Vec<f64> = v_new.iter()
+        let v_limited: Vec<f64> = v_new
+            .iter()
             .zip(pn_corrections.iter())
             .map(|(&vn, &corr)| vn + corr)
             .collect();
@@ -1069,7 +1119,14 @@ fn nr_dc_solve(
 
     // Final evaluation even on non-convergence
     extract_nl_voltages_with(m, dc_n_v, v, v_nl);
-    evaluate_devices_inner(v_nl, device_slots, i_nl, &mut vec![0.0; m * m], m, internal_junctions);
+    evaluate_devices_inner(
+        v_nl,
+        device_slots,
+        i_nl,
+        &mut vec![0.0; m * m],
+        m,
+        internal_junctions,
+    );
     (false, config.max_iterations)
 }
 
@@ -1132,8 +1189,13 @@ pub fn solve_dc_operating_point(
         has_internal_nodes,
         internal_node_start: if has_mna_internal {
             // MNA internal nodes start at the lowest internal node index
-            mna.bjt_internal_nodes.iter()
-                .flat_map(|n| [n.int_base, n.int_collector, n.int_emitter].into_iter().flatten())
+            mna.bjt_internal_nodes
+                .iter()
+                .flat_map(|n| {
+                    [n.int_base, n.int_collector, n.int_emitter]
+                        .into_iter()
+                        .flatten()
+                })
                 .min()
                 .unwrap_or(dc_sys.internal_node_start)
         } else {
@@ -1175,10 +1237,15 @@ pub fn solve_dc_operating_point(
 
     // Also initialize MNA-level internal nodes (from expand_bjt_internal_nodes)
     for mna_bjt in &mna.bjt_internal_nodes {
-        if let Some(slot) = device_slots.iter().find(|s| s.start_idx == mna_bjt.start_idx) {
+        if let Some(slot) = device_slots
+            .iter()
+            .find(|s| s.start_idx == mna_bjt.start_idx)
+        {
             if let DeviceParams::Bjt(bp) = &slot.params {
                 // Find external node indices from MNA nonlinear device info
-                let dev_info = mna.nonlinear_devices.iter()
+                let dev_info = mna
+                    .nonlinear_devices
+                    .iter()
                     .find(|d| d.start_idx == mna_bjt.start_idx);
                 if let Some(dev) = dev_info {
                     let ext_c = dev.node_indices[0]; // 1-indexed
@@ -1240,11 +1307,19 @@ pub fn solve_dc_operating_point(
                         break;
                     }
                 }
-                _ => { has_active_junction = true; break; } // non-BJT devices: trust the result
+                _ => {
+                    has_active_junction = true;
+                    break;
+                } // non-BJT devices: trust the result
             }
         }
     }
-    log::info!("DC OP Strategy 1 (Direct NR): converged={} iters={} active_junctions={}", converged, iters, has_active_junction);
+    log::info!(
+        "DC OP Strategy 1 (Direct NR): converged={} iters={} active_junctions={}",
+        converged,
+        iters,
+        has_active_junction
+    );
     if converged && has_active_junction {
         // Return only the MNA-sized portion (truncate internal nodes)
         v.truncate(n_dc);
@@ -1267,7 +1342,7 @@ pub fn solve_dc_operating_point(
     // guess pre-biases junctions so the NR maintains active operation as sources ramp.
     let ss_starts: [Vec<f64>; 2] = [
         vec![0.0; n_dc],   // Classic source stepping from zero
-        v_clamped.clone(),  // Source stepping from clamped guess
+        v_clamped.clone(), // Source stepping from clamped guess
     ];
 
     let mut v = vec![0.0; n_dc];
@@ -1281,7 +1356,8 @@ pub fn solve_dc_operating_point(
 
         for step in 1..=config.source_steps {
             let scale = step as f64 / config.source_steps as f64;
-            let (converged, iters) = nr_dc_solve(&circuit, &mut v, &mut v_nl, &mut i_nl, scale, 0.0);
+            let (converged, iters) =
+                nr_dc_solve(&circuit, &mut v, &mut v_nl, &mut i_nl, scale, 0.0);
             this_iters += iters;
             if !converged {
                 this_converged = false;
@@ -1314,11 +1390,18 @@ pub fn solve_dc_operating_point(
                 source_stepping_converged = true;
                 break;
             }
-            log::info!("DC OP Strategy 2 attempt {}: converged but degenerate", attempt);
+            log::info!(
+                "DC OP Strategy 2 attempt {}: converged but degenerate",
+                attempt
+            );
         }
     }
 
-    log::info!("DC OP Strategy 2 (Source stepping): converged={} iters={}", source_stepping_converged, total_iters);
+    log::info!(
+        "DC OP Strategy 2 (Source stepping): converged={} iters={}",
+        source_stepping_converged,
+        total_iters
+    );
     if source_stepping_converged {
         return DcOpResult {
             v_node: v,
@@ -1342,10 +1425,20 @@ pub fn solve_dc_operating_point(
     for bjt in &dc_sys.bjt_internal {
         if let Some(slot) = device_slots.iter().find(|s| s.start_idx == bjt.start_idx) {
             if let DeviceParams::Bjt(bp) = &slot.params {
-                if bp.rb > 0.0 && bjt.ext_base > 0 { v[bjt.int_base] = v[bjt.ext_base - 1]; }
-                if bp.rc > 0.0 && bjt.ext_collector > 0 { v[bjt.int_collector] = v[bjt.ext_collector - 1]; }
+                if bp.rb > 0.0 && bjt.ext_base > 0 {
+                    v[bjt.int_base] = v[bjt.ext_base - 1];
+                }
+                if bp.rc > 0.0 && bjt.ext_collector > 0 {
+                    v[bjt.int_collector] = v[bjt.ext_collector - 1];
+                }
                 if bp.re > 0.0 && bjt.ext_emitter > 0 {
-                    let base_v = if bp.rb > 0.0 { v[bjt.int_base] } else if bjt.ext_base > 0 { v[bjt.ext_base - 1] } else { 0.0 };
+                    let base_v = if bp.rb > 0.0 {
+                        v[bjt.int_base]
+                    } else if bjt.ext_base > 0 {
+                        v[bjt.ext_base - 1]
+                    } else {
+                        0.0
+                    };
                     let sign = if bp.is_pnp { -1.0 } else { 1.0 };
                     v[bjt.int_emitter] = base_v - sign * 0.65;
                 }
@@ -1354,15 +1447,40 @@ pub fn solve_dc_operating_point(
     }
     // Also init MNA-level internal nodes for Gmin stepping
     for mna_bjt in &mna.bjt_internal_nodes {
-        if let Some(slot) = device_slots.iter().find(|s| s.start_idx == mna_bjt.start_idx) {
+        if let Some(slot) = device_slots
+            .iter()
+            .find(|s| s.start_idx == mna_bjt.start_idx)
+        {
             if let DeviceParams::Bjt(bp) = &slot.params {
-                if let Some(dev) = mna.nonlinear_devices.iter().find(|d| d.start_idx == mna_bjt.start_idx) {
-                    let (ext_c, ext_b, ext_e) = (dev.node_indices[0], dev.node_indices[1], dev.node_indices[2]);
-                    if let Some(ib) = mna_bjt.int_base { if ext_b > 0 && ib < v.len() { v[ib] = v[ext_b - 1]; } }
-                    if let Some(ic) = mna_bjt.int_collector { if ext_c > 0 && ic < v.len() { v[ic] = v[ext_c - 1]; } }
+                if let Some(dev) = mna
+                    .nonlinear_devices
+                    .iter()
+                    .find(|d| d.start_idx == mna_bjt.start_idx)
+                {
+                    let (ext_c, ext_b, ext_e) = (
+                        dev.node_indices[0],
+                        dev.node_indices[1],
+                        dev.node_indices[2],
+                    );
+                    if let Some(ib) = mna_bjt.int_base {
+                        if ext_b > 0 && ib < v.len() {
+                            v[ib] = v[ext_b - 1];
+                        }
+                    }
+                    if let Some(ic) = mna_bjt.int_collector {
+                        if ext_c > 0 && ic < v.len() {
+                            v[ic] = v[ext_c - 1];
+                        }
+                    }
                     if let Some(ie) = mna_bjt.int_emitter {
                         if ext_e > 0 && ie < v.len() {
-                            let base_v = mna_bjt.int_base.map(|ib| v[ib]).unwrap_or_else(|| if ext_b > 0 { v[ext_b - 1] } else { 0.0 });
+                            let base_v = mna_bjt.int_base.map(|ib| v[ib]).unwrap_or_else(|| {
+                                if ext_b > 0 {
+                                    v[ext_b - 1]
+                                } else {
+                                    0.0
+                                }
+                            });
                             let sign = if bp.is_pnp { -1.0 } else { 1.0 };
                             v[ie] = base_v - sign * 0.65;
                         }
@@ -1390,7 +1508,11 @@ pub fn solve_dc_operating_point(
         }
     }
 
-    log::info!("DC OP Strategy 3 (Gmin stepping): converged={} iters={}", gmin_converged, total_iters);
+    log::info!(
+        "DC OP Strategy 3 (Gmin stepping): converged={} iters={}",
+        gmin_converged,
+        total_iters
+    );
     // Final solve without Gmin
     if gmin_converged {
         let (converged, iters) = nr_dc_solve(&circuit, &mut v, &mut v_nl, &mut i_nl, 1.0, 0.0);

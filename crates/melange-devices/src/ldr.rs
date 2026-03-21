@@ -438,8 +438,7 @@ mod tests {
             ldr_96.update(1.0);
         }
 
-        let rel_diff = (ldr_441.resistance() - ldr_96.resistance()).abs()
-            / ldr_441.resistance();
+        let rel_diff = (ldr_441.resistance() - ldr_96.resistance()).abs() / ldr_441.resistance();
         assert!(
             rel_diff < 0.01,
             "Same time at different rates should match: r@44.1k={:.1}, r@96k={:.1}, diff={:.2}%",

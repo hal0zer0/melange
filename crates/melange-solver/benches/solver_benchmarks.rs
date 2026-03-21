@@ -6,7 +6,7 @@
 //! - Matrix operations (S * rhs, K * i_nl)
 //! - Device evaluation (diode/BJT current and jacobian)
 
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use melange_devices::{BjtEbersMoll, DiodeShockley};
 use melange_primitives::nr::{nr_solve_1d, nr_solve_2d, pn_vcrit, pnjlim};
 use melange_solver::{

@@ -816,17 +816,14 @@ mod tests {
             // Check plate current Jacobian
             let jac = tube.jacobian(&[vgk, vpk]);
 
-            let fd_dvgk = (tube.plate_current(vgk + eps, vpk)
-                - tube.plate_current(vgk - eps, vpk))
+            let fd_dvgk = (tube.plate_current(vgk + eps, vpk) - tube.plate_current(vgk - eps, vpk))
                 / (2.0 * eps);
-            let fd_dvpk = (tube.plate_current(vgk, vpk + eps)
-                - tube.plate_current(vgk, vpk - eps))
+            let fd_dvpk = (tube.plate_current(vgk, vpk + eps) - tube.plate_current(vgk, vpk - eps))
                 / (2.0 * eps);
 
-            for (name, analytic, fd) in [
-                ("dIp/dVgk", jac[0], fd_dvgk),
-                ("dIp/dVpk", jac[1], fd_dvpk),
-            ] {
+            for (name, analytic, fd) in
+                [("dIp/dVgk", jac[0], fd_dvgk), ("dIp/dVpk", jac[1], fd_dvpk)]
+            {
                 let rel_err = if fd.abs() > 1e-15 {
                     (analytic - fd).abs() / fd.abs()
                 } else {
@@ -841,8 +838,7 @@ mod tests {
 
             // Also check grid current Jacobian
             let ig_jac = tube.grid_current_jacobian(vgk);
-            let ig_fd = (tube.grid_current(vgk + eps) - tube.grid_current(vgk - eps))
-                / (2.0 * eps);
+            let ig_fd = (tube.grid_current(vgk + eps) - tube.grid_current(vgk - eps)) / (2.0 * eps);
             let ig_err = if ig_fd.abs() > 1e-15 {
                 (ig_jac - ig_fd).abs() / ig_fd.abs()
             } else {
@@ -851,7 +847,11 @@ mod tests {
             assert!(
                 ig_err < 0.01,
                 "Grid Ig Jacobian at {} (Vgk={}): analytic={:.6e} fd={:.6e} err={:.2e}",
-                desc, vgk, ig_jac, ig_fd, ig_err
+                desc,
+                vgk,
+                ig_jac,
+                ig_fd,
+                ig_err
             );
 
             // Grid current should be positive for Vgk > 0
@@ -886,25 +886,28 @@ mod tests {
             assert!(
                 jac[0].is_finite(),
                 "dIp/dVgk must be finite at {} (Vgk={}, Vpk={}): {}",
-                desc, vgk, vpk, jac[0]
+                desc,
+                vgk,
+                vpk,
+                jac[0]
             );
             assert!(
                 jac[1].is_finite(),
                 "dIp/dVpk must be finite at {} (Vgk={}, Vpk={}): {}",
-                desc, vgk, vpk, jac[1]
+                desc,
+                vgk,
+                vpk,
+                jac[1]
             );
 
-            let fd_dvgk = (tube.plate_current(vgk + eps, vpk)
-                - tube.plate_current(vgk - eps, vpk))
+            let fd_dvgk = (tube.plate_current(vgk + eps, vpk) - tube.plate_current(vgk - eps, vpk))
                 / (2.0 * eps);
-            let fd_dvpk = (tube.plate_current(vgk, vpk + eps)
-                - tube.plate_current(vgk, vpk - eps))
+            let fd_dvpk = (tube.plate_current(vgk, vpk + eps) - tube.plate_current(vgk, vpk - eps))
                 / (2.0 * eps);
 
-            for (name, analytic, fd) in [
-                ("dIp/dVgk", jac[0], fd_dvgk),
-                ("dIp/dVpk", jac[1], fd_dvpk),
-            ] {
+            for (name, analytic, fd) in
+                [("dIp/dVgk", jac[0], fd_dvgk), ("dIp/dVpk", jac[1], fd_dvpk)]
+            {
                 let rel_err = if fd.abs() > 1e-15 {
                     (analytic - fd).abs() / fd.abs()
                 } else {
@@ -913,7 +916,13 @@ mod tests {
                 assert!(
                     rel_err < 0.01,
                     "Low Vpk {} at {} (Vgk={}, Vpk={}): analytic={:.6e} fd={:.6e} err={:.2e}",
-                    name, desc, vgk, vpk, analytic, fd, rel_err
+                    name,
+                    desc,
+                    vgk,
+                    vpk,
+                    analytic,
+                    fd,
+                    rel_err
                 );
             }
         }
@@ -960,17 +969,14 @@ mod tests {
                 jac[1]
             );
 
-            let fd_dvgk = (tube.plate_current(vgk + eps, vpk)
-                - tube.plate_current(vgk - eps, vpk))
+            let fd_dvgk = (tube.plate_current(vgk + eps, vpk) - tube.plate_current(vgk - eps, vpk))
                 / (2.0 * eps);
-            let fd_dvpk = (tube.plate_current(vgk, vpk + eps)
-                - tube.plate_current(vgk, vpk - eps))
+            let fd_dvpk = (tube.plate_current(vgk, vpk + eps) - tube.plate_current(vgk, vpk - eps))
                 / (2.0 * eps);
 
-            for (name, analytic, fd) in [
-                ("dIp/dVgk", jac[0], fd_dvgk),
-                ("dIp/dVpk", jac[1], fd_dvpk),
-            ] {
+            for (name, analytic, fd) in
+                [("dIp/dVgk", jac[0], fd_dvgk), ("dIp/dVpk", jac[1], fd_dvpk)]
+            {
                 let rel_err = if fd.abs() > 1e-15 {
                     (analytic - fd).abs() / fd.abs()
                 } else {
@@ -979,7 +985,13 @@ mod tests {
                 assert!(
                     rel_err < 0.01,
                     "Near-cutoff {} at {} (Vgk={}, Vpk={}): analytic={:.6e} fd={:.6e} err={:.2e}",
-                    name, desc, vgk, vpk, analytic, fd, rel_err
+                    name,
+                    desc,
+                    vgk,
+                    vpk,
+                    analytic,
+                    fd,
+                    rel_err
                 );
             }
         }

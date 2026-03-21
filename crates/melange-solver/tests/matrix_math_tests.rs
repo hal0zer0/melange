@@ -7,7 +7,7 @@
 //! - NR convergence with correct vs. negated K sign
 
 use melange_devices::DiodeShockley;
-use melange_primitives::nr::{NrResult, nr_solve_1d};
+use melange_primitives::nr::{nr_solve_1d, NrResult};
 use melange_solver::dk::DkKernel;
 use melange_solver::mna::MnaSystem;
 use melange_solver::parser::Netlist;

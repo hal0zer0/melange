@@ -179,7 +179,8 @@ fn build_device_entries(netlist: &Netlist, mna: &MnaSystem) -> Vec<DeviceEntry> 
                     bf,
                     br,
                     polarity,
-                ).with_nf(nf);
+                )
+                .with_nf(nf);
                 devices.push(DeviceEntry::new_bjt(bjt, dev_info.start_idx));
             }
             melange_solver::mna::NonlinearDeviceType::Jfet => {
@@ -851,10 +852,7 @@ fn test_codegen_gummel_poon_vs_ebers_moll() {
         .map(|s| s.abs())
         .fold(0.0, f64::max);
 
-    println!(
-        "GP vs EM: gp_peak={:.4e}, em_peak={:.4e}",
-        gp_peak, em_peak
-    );
+    println!("GP vs EM: gp_peak={:.4e}, em_peak={:.4e}", gp_peak, em_peak);
 
     assert!(
         gp_peak > 1e-5,
@@ -1029,10 +1027,7 @@ fn test_codegen_zener_breakdown() {
         .copied()
         .fold(f64::MAX, f64::min);
 
-    println!(
-        "Zener min={:.4}, Normal min={:.4}",
-        zener_min, normal_min
-    );
+    println!("Zener min={:.4}, Normal min={:.4}", zener_min, normal_min);
 
     // With BV=5.0, Zener should clamp around -5V to -6V.
     // Without BV, normal diode passes full negative swing through R1.
@@ -1040,7 +1035,8 @@ fn test_codegen_zener_breakdown() {
     assert!(
         zener_min > normal_min,
         "Zener should clamp negative voltage: zener_min={:.4} should be > normal_min={:.4}",
-        zener_min, normal_min
+        zener_min,
+        normal_min
     );
 
     // Zener negative peak should be limited approximately near -BV (allow some margin for R1 drop)
@@ -1096,8 +1092,7 @@ fn test_codegen_bjt_parasitic_resistances() {
     let amplitude = 0.01;
 
     // --- With parasitic R ---
-    let (pr_nl, pr_mna, pr_kernel, pr_in, pr_out) =
-        build_pipeline(BJT_CE_PARASITIC, sample_rate);
+    let (pr_nl, pr_mna, pr_kernel, pr_in, pr_out) = build_pipeline(BJT_CE_PARASITIC, sample_rate);
     let pr_config = CodegenConfig {
         circuit_name: "xval_bjt_pr".to_string(),
         sample_rate,
@@ -1202,7 +1197,8 @@ fn test_codegen_bjt_parasitic_resistances() {
         assert!(
             s.is_finite(),
             "Parasitic BJT: NaN/Inf at sample {}: {}",
-            i, s
+            i,
+            s
         );
     }
 }
@@ -1252,8 +1248,7 @@ fn test_codegen_mosfet_body_effect() {
     let amplitude = 0.05;
 
     // --- With body effect ---
-    let (be_nl, be_mna, be_kernel, be_in, be_out) =
-        build_pipeline(MOSFET_CS_BODY, sample_rate);
+    let (be_nl, be_mna, be_kernel, be_in, be_out) = build_pipeline(MOSFET_CS_BODY, sample_rate);
     let be_config = CodegenConfig {
         circuit_name: "xval_mos_be".to_string(),
         sample_rate,
@@ -1286,8 +1281,7 @@ fn test_codegen_mosfet_body_effect() {
     );
 
     // --- Without body effect ---
-    let (nb_nl, nb_mna, nb_kernel, nb_in, nb_out) =
-        build_pipeline(MOSFET_CS_NO_BODY, sample_rate);
+    let (nb_nl, nb_mna, nb_kernel, nb_in, nb_out) = build_pipeline(MOSFET_CS_NO_BODY, sample_rate);
     let nb_config = CodegenConfig {
         circuit_name: "xval_mos_nb".to_string(),
         sample_rate,
@@ -1324,8 +1318,16 @@ fn test_codegen_mosfet_body_effect() {
         be_peak, nb_peak
     );
 
-    assert!(be_peak > 1e-5, "Body effect output non-zero: {:.2e}", be_peak);
-    assert!(nb_peak > 1e-5, "No body effect output non-zero: {:.2e}", nb_peak);
+    assert!(
+        be_peak > 1e-5,
+        "Body effect output non-zero: {:.2e}",
+        be_peak
+    );
+    assert!(
+        nb_peak > 1e-5,
+        "No body effect output non-zero: {:.2e}",
+        nb_peak
+    );
 
     // Body effect increases Vt → reduces gain → outputs should differ
     let mut max_diff = 0.0f64;
@@ -1335,7 +1337,11 @@ fn test_codegen_mosfet_body_effect() {
         max_diff = max_diff.max(diff);
         max_abs = max_abs.max(be_output[i].abs().max(nb_output[i].abs()));
     }
-    let rel_diff = if max_abs > 1e-10 { max_diff / max_abs } else { 0.0 };
+    let rel_diff = if max_abs > 1e-10 {
+        max_diff / max_abs
+    } else {
+        0.0
+    };
 
     println!(
         "Body effect divergence: max_diff={:.2e}, rel_diff={:.2e}",
@@ -1383,8 +1389,7 @@ fn test_schur_nodal_diode_inductor() {
     let skip_samples = 480;
     let amplitude = 2.0;
 
-    let (nl, mna, _, in_node, out_node) =
-        build_pipeline(DIODE_CLIPPER_WITH_INDUCTOR, sample_rate);
+    let (nl, mna, _, in_node, out_node) = build_pipeline(DIODE_CLIPPER_WITH_INDUCTOR, sample_rate);
 
     // This circuit has inductors + nonlinear devices, so generate_nodal
     // should be used (the DK kernel may auto-route to nodal anyway).
@@ -1439,7 +1444,8 @@ fn test_schur_nodal_diode_inductor() {
     }
 
     // Verify output has AC content (not just DC)
-    let mean: f64 = output[skip_samples..].iter().sum::<f64>() / (num_samples - skip_samples) as f64;
+    let mean: f64 =
+        output[skip_samples..].iter().sum::<f64>() / (num_samples - skip_samples) as f64;
     let variance: f64 = output[skip_samples..]
         .iter()
         .map(|s| (s - mean).powi(2))

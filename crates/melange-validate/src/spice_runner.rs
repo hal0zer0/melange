@@ -84,7 +84,11 @@ impl SpiceData {
             return 0.0;
         }
         let dt = self.time[1] - self.time[0];
-        if dt > 0.0 { 1.0 / dt } else { self.sample_rate }
+        if dt > 0.0 {
+            1.0 / dt
+        } else {
+            self.sample_rate
+        }
     }
 }
 

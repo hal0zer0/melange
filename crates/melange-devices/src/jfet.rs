@@ -1,6 +1,6 @@
 //! JFET (Junction Field-Effect Transistor) models.
 
-use crate::{NonlinearDevice, VT_ROOM, safeguards};
+use crate::{safeguards, NonlinearDevice, VT_ROOM};
 
 /// JFET channel type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -142,7 +142,11 @@ impl Jfet {
         if vgst <= 0.0 {
             // Subthreshold: derivative of weak exponential
             let sub = 1e-12 * (vgst / (2.0 * VT_ROOM)).exp().min(1.0);
-            let gm = if sub < 1e-12 { sub / (2.0 * VT_ROOM) } else { 0.0 };
+            let gm = if sub < 1e-12 {
+                sub / (2.0 * VT_ROOM)
+            } else {
+                0.0
+            };
             return (gm, 0.0);
         }
 

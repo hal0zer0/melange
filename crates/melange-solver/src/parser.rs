@@ -769,11 +769,7 @@ fn max_subcircuit_depth(
 
             if !pushed {
                 // All children resolved — compute this node's depth
-                let max_child_depth = children
-                    .iter()
-                    .filter_map(|&c| depth[c])
-                    .max()
-                    .unwrap_or(0);
+                let max_child_depth = children.iter().filter_map(|&c| depth[c]).max().unwrap_or(0);
                 depth[node] = Some(max_child_depth + 1);
                 stack.pop();
             }
@@ -1674,10 +1670,9 @@ impl Parser {
                             if next_upper == "DC" || next_upper == "AC" {
                                 (0.0, 2)
                             } else {
-                                return Err(self.error(format!(
-                                    "Invalid AC phase: {}",
-                                    parts[i + 2]
-                                )));
+                                return Err(
+                                    self.error(format!("Invalid AC phase: {}", parts[i + 2]))
+                                );
                             }
                         }
                     }
