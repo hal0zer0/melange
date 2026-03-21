@@ -33,6 +33,9 @@ pub struct BjtEbersMoll {
     /// Forward emission coefficient (NF). Default 1.0.
     /// Forward exponential uses exp(Vbe / (NF * VT)).
     pub nf: f64,
+    /// Reverse emission coefficient (NR). Default 1.0.
+    /// Reverse exponential uses exp(Vbc / (NR * VT)).
+    pub nr: f64,
     /// Polarity (NPN or PNP)
     pub polarity: BjtPolarity,
     /// Precomputed: 1 / beta_f
@@ -42,7 +45,7 @@ pub struct BjtEbersMoll {
 }
 
 impl BjtEbersMoll {
-    /// Create a new BJT model (NF defaults to 1.0).
+    /// Create a new BJT model (NF and NR default to 1.0).
     pub fn new(is: f64, vt: f64, beta_f: f64, beta_r: f64, polarity: BjtPolarity) -> Self {
         Self {
             is,
@@ -50,6 +53,7 @@ impl BjtEbersMoll {
             beta_f,
             beta_r,
             nf: 1.0,
+            nr: 1.0,
             polarity,
             inv_beta_f: 1.0 / beta_f,
             inv_beta_r: 1.0 / beta_r,
@@ -64,6 +68,12 @@ impl BjtEbersMoll {
     /// Builder: set forward emission coefficient NF.
     pub fn with_nf(mut self, nf: f64) -> Self {
         self.nf = nf;
+        self
+    }
+
+    /// Builder: set reverse emission coefficient NR.
+    pub fn with_nr(mut self, nr: f64) -> Self {
+        self.nr = nr;
         self
     }
 
@@ -105,17 +115,18 @@ impl BjtEbersMoll {
     pub fn collector_current(&self, vbe: f64, vbc: f64) -> f64 {
         let s = self.sign();
         let nf_vt = self.nf * self.vt;
+        let nr_vt = self.nr * self.vt;
 
         // Apply polarity to voltages
         let vbe_eff = s * vbe;
         let vbc_eff = s * vbc;
 
-        // Transport current (forward uses NF*VT, reverse uses VT)
+        // Transport current (forward uses NF*VT, reverse uses NR*VT)
         let exp_be = safeguards::safe_exp(vbe_eff / nf_vt);
-        let exp_bc = safeguards::safe_exp(vbc_eff / self.vt);
+        let exp_bc = safeguards::safe_exp(vbc_eff / nr_vt);
         let i_cc = self.is * (exp_be - exp_bc);
 
-        // Collector current: Ic = I_cc - Is/βr * (exp(Vbc/Vt) - 1)
+        // Collector current: Ic = I_cc - Is/βr * (exp(Vbc/(NR*Vt)) - 1)
         let ic = i_cc - self.is * self.inv_beta_r * (exp_bc - 1.0);
 
         s * ic // Apply polarity to current
@@ -125,14 +136,15 @@ impl BjtEbersMoll {
     pub fn base_current(&self, vbe: f64, vbc: f64) -> f64 {
         let s = self.sign();
         let nf_vt = self.nf * self.vt;
+        let nr_vt = self.nr * self.vt;
 
         let vbe_eff = s * vbe;
         let vbc_eff = s * vbc;
 
         let exp_be = safeguards::safe_exp(vbe_eff / nf_vt);
-        let exp_bc = safeguards::safe_exp(vbc_eff / self.vt);
+        let exp_bc = safeguards::safe_exp(vbc_eff / nr_vt);
 
-        // Base current (forward uses NF*VT, reverse uses VT)
+        // Base current (forward uses NF*VT, reverse uses NR*VT)
         let ib =
             self.is * self.inv_beta_f * (exp_be - 1.0) + self.is * self.inv_beta_r * (exp_bc - 1.0);
 
@@ -156,11 +168,12 @@ impl BjtEbersMoll {
     /// Partial derivative of base current with respect to Vbc.
     pub fn base_current_jacobian_dvbc(&self, _vbe: f64, vbc: f64) -> f64 {
         let s = self.sign();
+        let nr_vt = self.nr * self.vt;
         let vbc_eff = s * vbc;
-        let exp_bc = safeguards::safe_exp(vbc_eff / self.vt);
+        let exp_bc = safeguards::safe_exp(vbc_eff / nr_vt);
 
-        // ∂Ib/∂Vbc = (Is/(βr*Vt)) * exp(Vbc/Vt)
-        let dib_dvbc = self.is * self.inv_beta_r / self.vt * exp_bc;
+        // ∂Ib/∂Vbc = (Is/(βr*NR*Vt)) * exp(Vbc/(NR*Vt))
+        let dib_dvbc = self.is * self.inv_beta_r / nr_vt * exp_bc;
 
         // Apply chain rule for polarity
         s * s * dib_dvbc
@@ -177,19 +190,20 @@ impl BjtEbersMoll {
     pub fn collector_jacobian(&self, vbe: f64, vbc: f64) -> (f64, f64) {
         let s = self.sign();
         let nf_vt = self.nf * self.vt;
+        let nr_vt = self.nr * self.vt;
 
         let vbe_eff = s * vbe;
         let vbc_eff = s * vbc;
 
         let exp_be = safeguards::safe_exp(vbe_eff / nf_vt);
-        let exp_bc = safeguards::safe_exp(vbc_eff / self.vt);
+        let exp_bc = safeguards::safe_exp(vbc_eff / nr_vt);
 
         // ∂Ic/∂Vbe = (Is/(NF*Vt)) * exp(Vbe/(NF*Vt))
         let d_ic_d_vbe = (self.is / nf_vt) * exp_be;
 
-        // ∂Ic/∂Vbc = -(Is/Vt) * exp(Vbc/Vt) - (Is/(βr*Vt)) * exp(Vbc/Vt)
+        // ∂Ic/∂Vbc = -(Is/(NR*Vt)) * exp(Vbc/(NR*Vt)) - (Is/(βr*NR*Vt)) * exp(Vbc/(NR*Vt))
         let d_ic_d_vbc =
-            -(self.is / self.vt) * exp_bc - (self.is * self.inv_beta_r / self.vt) * exp_bc;
+            -(self.is / nr_vt) * exp_bc - (self.is * self.inv_beta_r / nr_vt) * exp_bc;
 
         // Apply chain rule for polarity
         (s * s * d_ic_d_vbe, s * s * d_ic_d_vbc)
@@ -258,6 +272,7 @@ impl BjtGummelPoon {
     fn qb(&self, vbe: f64, vbc: f64) -> f64 {
         let s = self.base.sign();
         let nf_vt = self.base.nf * self.base.vt;
+        let nr_vt = self.base.nr * self.base.vt;
         let vbe_eff = s * vbe;
         let vbc_eff = s * vbc;
 
@@ -268,23 +283,46 @@ impl BjtGummelPoon {
         }
         let q1 = 1.0 / q1_denom;
 
-        // High-level injection (forward uses NF*VT, reverse uses VT)
+        // High-level injection (forward uses NF*VT, reverse uses NR*VT)
         let exp_be = safeguards::safe_exp(vbe_eff / nf_vt);
-        let exp_bc = safeguards::safe_exp(vbc_eff / self.base.vt);
+        let exp_bc = safeguards::safe_exp(vbc_eff / nr_vt);
         let q2 = self.base.is * exp_be / self.ikf + self.base.is * exp_bc / self.ikr;
 
         q1 * (1.0 + (1.0 + 4.0 * q2).max(0.0).sqrt()) / 2.0
+    }
+
+    /// Base current with GP modification: forward ideal component divided by qb.
+    ///
+    /// Ib = Is/BF * (exp(Vbe/(NF*VT)) - 1) / qb + Is/BR * (exp(Vbc/(NR*VT)) - 1)
+    /// The forward ideal component (Is/BF term) is divided by qb to account
+    /// for Early effect and high-level injection. Reverse component unchanged.
+    pub fn base_current(&self, vbe: f64, vbc: f64) -> f64 {
+        let s = self.base.sign();
+        let nf_vt = self.base.nf * self.base.vt;
+        let nr_vt = self.base.nr * self.base.vt;
+        let vbe_eff = s * vbe;
+        let vbc_eff = s * vbc;
+
+        let exp_be = safeguards::safe_exp(vbe_eff / nf_vt);
+        let exp_bc = safeguards::safe_exp(vbc_eff / nr_vt);
+
+        let qb = self.qb(vbe, vbc);
+        let ib_fwd = self.base.is * self.base.inv_beta_f * (exp_be - 1.0) / qb;
+        let ib_rev = self.base.is * self.base.inv_beta_r * (exp_bc - 1.0);
+
+        s * (ib_fwd + ib_rev)
     }
 
     /// Collector current with Early effect and high injection.
     pub fn collector_current(&self, vbe: f64, vbc: f64) -> f64 {
         let s = self.base.sign();
         let nf_vt = self.base.nf * self.base.vt;
+        let nr_vt = self.base.nr * self.base.vt;
         let vbe_eff = s * vbe;
         let vbc_eff = s * vbc;
 
         let exp_be = safeguards::safe_exp(vbe_eff / nf_vt);
-        let exp_bc = safeguards::safe_exp(vbc_eff / self.base.vt);
+        let exp_bc = safeguards::safe_exp(vbc_eff / nr_vt);
 
         let i_cc = self.base.is * (exp_be - exp_bc);
         let qb = self.qb(vbe, vbc);
@@ -306,15 +344,16 @@ impl NonlinearDevice<2> for BjtGummelPoon {
         let vbc_eff = s * v[1];
         let vt = self.base.vt;
         let nf_vt = self.base.nf * vt;
+        let nr_vt = self.base.nr * vt;
         let is = self.base.is;
 
         let exp_be = safeguards::safe_exp(vbe_eff / nf_vt);
-        let exp_bc = safeguards::safe_exp(vbc_eff / vt);
+        let exp_bc = safeguards::safe_exp(vbc_eff / nr_vt);
 
-        // Transport current and derivatives (forward uses NF*VT, reverse uses VT)
+        // Transport current and derivatives (forward uses NF*VT, reverse uses NR*VT)
         let icc = is * (exp_be - exp_bc);
         let dicc_dvbe = is / nf_vt * exp_be;
-        let dicc_dvbc = -is / vt * exp_bc;
+        let dicc_dvbc = -is / nr_vt * exp_bc;
 
         // Base charge factor q1 (matches qb() singularity handling)
         let q1_denom = 1.0 - vbe_eff / self.var - vbc_eff / self.vaf;
@@ -325,10 +364,10 @@ impl NonlinearDevice<2> for BjtGummelPoon {
             (q1, q1 * q1 / self.var, q1 * q1 / self.vaf)
         };
 
-        // High injection q2 = Is*exp(Vbe/(NF*Vt))/IKF + Is*exp(Vbc/Vt)/IKR
+        // High injection q2 = Is*exp(Vbe/(NF*Vt))/IKF + Is*exp(Vbc/(NR*Vt))/IKR
         let q2 = is * exp_be / self.ikf + is * exp_bc / self.ikr;
         let dq2_dvbe = is / (nf_vt * self.ikf) * exp_be;
-        let dq2_dvbc = is / (vt * self.ikr) * exp_bc;
+        let dq2_dvbc = is / (nr_vt * self.ikr) * exp_bc;
 
         // Discriminant D = sqrt(1 + 4*q2)
         let disc = (1.0 + 4.0 * q2).max(0.0);
@@ -348,7 +387,7 @@ impl NonlinearDevice<2> for BjtGummelPoon {
         let quotient_dvbe = (dicc_dvbe * qb - icc * dqb_dvbe) / qb2_safe;
         let quotient_dvbc = (dicc_dvbc * qb - icc * dqb_dvbc) / qb2_safe;
 
-        let d_bc_term_dvbc = is * self.base.inv_beta_r / vt * exp_bc;
+        let d_bc_term_dvbc = is * self.base.inv_beta_r / nr_vt * exp_bc;
 
         // Polarity: dIc/dVbe = s * dIc_eff/dVbe_eff * s = dIc_eff/dVbe_eff (s² = 1)
         [quotient_dvbe, quotient_dvbc - d_bc_term_dvbc]

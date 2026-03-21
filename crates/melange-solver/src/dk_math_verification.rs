@@ -74,7 +74,7 @@ C1 out 0 1u
         let alpha = 2.0 / t; // 2/T for trapezoidal
 
         // Get A from MNA system
-        let a = mna.get_a_matrix(sample_rate);
+        let a = mna.get_a_matrix(sample_rate).unwrap();
 
         // Manually compute A = G + (2/T)*C
         let n = mna.n;
@@ -136,7 +136,7 @@ C1 out 0 1u
         let alpha = 2.0 / t;
 
         // Get A_neg from MNA system
-        let a_neg = mna.get_a_neg_matrix(sample_rate);
+        let a_neg = mna.get_a_neg_matrix(sample_rate).unwrap();
 
         // Manually compute A_neg = (2/T)*C - G
         let n = mna.n;
@@ -191,7 +191,7 @@ C1 out 0 1u
         let mna = MnaSystem::from_netlist(&netlist).unwrap();
 
         let sample_rate = 44100.0;
-        let a = mna.get_a_matrix(sample_rate);
+        let a = mna.get_a_matrix(sample_rate).unwrap();
 
         // Compute S = A^{-1}
         let s = invert_matrix(&a).unwrap();
@@ -409,8 +409,8 @@ C1 out 0 1u
         let sample_rate = 44100.0;
         let t = 1.0 / sample_rate;
 
-        let a = mna.get_a_matrix(sample_rate);
-        let a_neg = mna.get_a_neg_matrix(sample_rate);
+        let a = mna.get_a_matrix(sample_rate).unwrap();
+        let a_neg = mna.get_a_neg_matrix(sample_rate).unwrap();
 
         // Compute A + A_neg
         let n = mna.n;
@@ -452,8 +452,8 @@ C1 out 0 1u
 
         let sample_rate = 44100.0;
 
-        let a = mna.get_a_matrix(sample_rate);
-        let a_neg = mna.get_a_neg_matrix(sample_rate);
+        let a = mna.get_a_matrix(sample_rate).unwrap();
+        let a_neg = mna.get_a_neg_matrix(sample_rate).unwrap();
 
         // Compute A - A_neg
         let n = mna.n;

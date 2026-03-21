@@ -106,8 +106,31 @@ impl KorenTriode {
     }
 
     /// 12AX7 (ECC83) - high-mu twin triode, common in guitar amps.
+    ///
+    /// Uses original Koren 1996 parameters (Kg1=1060). Overestimates plate current
+    /// vs datasheet (~3.4mA vs ~1.2mA at Vgk=0, Vpk=250V). For datasheet-accurate
+    /// plate current, use [`ecc83_fitted`](Self::ecc83_fitted).
     pub fn ecc83() -> Self {
         let c = crate::catalog::tubes::lookup("12AX7").unwrap();
+        Self::with_all_params(
+            c.mu,
+            c.ex,
+            c.kg1,
+            c.kp,
+            c.kvb,
+            c.ig_max,
+            c.vgk_onset,
+            c.lambda,
+        )
+    }
+
+    /// 12AX7 (ECC83) fitted to RCA datasheet - high-mu twin triode.
+    ///
+    /// Kg1 re-fit from 1060 to 3000 to match RCA 12AX7 datasheet:
+    /// ~1.2mA at Vgk=0, Vpk=250V (vs ~3.4mA with original Koren params).
+    /// All other parameters identical to [`ecc83`](Self::ecc83).
+    pub fn ecc83_fitted() -> Self {
+        let c = crate::catalog::tubes::lookup("12AX7F").unwrap();
         Self::with_all_params(
             c.mu,
             c.ex,
@@ -176,9 +199,7 @@ impl KorenTriode {
     ///   Ip_koren = E1^ex / Kg1   (if E1 > 0)
     ///   Ip = Ip_koren * (1 + lambda * Vpk)
     pub fn plate_current(&self, vgk: f64, vpk: f64) -> f64 {
-        if vpk <= 0.0 {
-            return 0.0;
-        }
+        let vpk = vpk.max(1e-3); // Soft floor: prevents hard zero discontinuity
 
         let s = (self.kvb + vpk * vpk).sqrt();
         let inner = self.kp * (1.0 / self.mu + vgk / s);
@@ -246,11 +267,7 @@ impl NonlinearDevice<2> for KorenTriode {
     ///   dIp/dVpk = dIp_koren/dVpk * (1 + lambda * Vpk) + Ip_koren * lambda
     fn jacobian(&self, v: &[f64; 2]) -> [f64; 2] {
         let vgk = v[0];
-        let vpk = v[1];
-
-        if vpk <= 0.0 {
-            return [0.0, 0.0];
-        }
+        let vpk = v[1].max(1e-3); // Soft floor: matches plate_current
 
         let s = (self.kvb + vpk * vpk).sqrt();
         let inner = self.kp * (1.0 / self.mu + vgk / s);
@@ -526,6 +543,50 @@ mod tests {
             "Ip(Vgk=-4, Vpk=250) = {:.4}mA, expected near cutoff",
             ip_m4 * 1000.0
         );
+    }
+
+    #[test]
+    fn test_12ax7_fitted_plate_curves() {
+        let tube = KorenTriode::ecc83_fitted();
+
+        // Fitted to RCA datasheet: Vgk=0, Vpk=250V → ~1.2mA
+        let ip_0 = tube.plate_current(0.0, 250.0);
+        assert!(
+            ip_0 > 1.0e-3 && ip_0 < 1.4e-3,
+            "Ip(Vgk=0, Vpk=250) = {:.4}mA, expected ~1.2mA",
+            ip_0 * 1000.0
+        );
+
+        // Vgk=-1V: fitted → ~0.59mA (datasheet: ~0.5mA)
+        let ip_m1 = tube.plate_current(-1.0, 250.0);
+        assert!(
+            ip_m1 > 0.3e-3 && ip_m1 < 0.8e-3,
+            "Ip(Vgk=-1, Vpk=250) = {:.4}mA, expected ~0.5-0.6mA",
+            ip_m1 * 1000.0
+        );
+
+        // Vgk=-2V: fitted → ~0.17mA (datasheet: ~0.1mA)
+        let ip_m2 = tube.plate_current(-2.0, 250.0);
+        assert!(
+            ip_m2 > 0.05e-3 && ip_m2 < 0.3e-3,
+            "Ip(Vgk=-2, Vpk=250) = {:.4}mA, expected ~0.1-0.2mA",
+            ip_m2 * 1000.0
+        );
+
+        // Monotonicity and cutoff
+        assert!(ip_0 > ip_m1 && ip_m1 > ip_m2);
+        assert!(
+            tube.plate_current(-4.0, 250.0) < 0.01e-3,
+            "Should be near cutoff at Vgk=-4"
+        );
+
+        // Verify Kg1 is the only difference from default
+        let default = KorenTriode::ecc83();
+        assert_eq!(tube.mu, default.mu);
+        assert_eq!(tube.ex, default.ex);
+        assert_eq!(tube.kp, default.kp);
+        assert_eq!(tube.kvb, default.kvb);
+        assert!(tube.kg1 > default.kg1, "Fitted Kg1 should be larger");
     }
 
     /// Verify triode Jacobian against finite differences.

@@ -289,382 +289,11 @@ pub struct TransformerGroupIR {
     pub y_matrix: Vec<f64>,
 }
 
-/// Per-device resolved parameters, stored in each `DeviceSlot`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum DeviceParams {
-    Diode(DiodeParams),
-    Bjt(BjtParams),
-    Jfet(JfetParams),
-    Mosfet(MosfetParams),
-    Tube(TubeParams),
-}
-
-/// Diode model parameters (resolved from `.model` directive or defaults).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DiodeParams {
-    /// Saturation current
-    pub is: f64,
-    /// Ideality factor * thermal voltage
-    pub n_vt: f64,
-    /// Zero-bias junction capacitance [F] (0.0 = disabled)
-    #[serde(default)]
-    pub cjo: f64,
-    /// Series resistance [Ohms] (0.0 = disabled)
-    #[serde(default)]
-    pub rs: f64,
-    /// Reverse breakdown voltage [V] (infinity = disabled)
-    #[serde(
-        default = "default_infinity",
-        deserialize_with = "deserialize_f64_or_infinity"
-    )]
-    pub bv: f64,
-    /// Reverse breakdown current [A] (default 1e-10)
-    #[serde(default = "default_ibv")]
-    pub ibv: f64,
-}
-
-/// BJT parameters (Ebers-Moll or Gummel-Poon, resolved from `.model` directive).
-///
-/// When `vaf`, `var`, `ikf`, `ikr` are all infinite (the default), this reduces
-/// to the basic Ebers-Moll model (backward compatible). Any finite GP parameter
-/// activates the Gummel-Poon extension with Early effect and high-injection.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BjtParams {
-    /// Saturation current
-    pub is: f64,
-    /// Thermal voltage
-    pub vt: f64,
-    /// Forward current gain
-    pub beta_f: f64,
-    /// Reverse current gain
-    pub beta_r: f64,
-    /// True if PNP (false = NPN)
-    #[serde(default)]
-    pub is_pnp: bool,
-    /// Forward Early voltage [V] (inf = no Early effect)
-    #[serde(
-        default = "default_infinity",
-        deserialize_with = "deserialize_f64_or_infinity"
-    )]
-    pub vaf: f64,
-    /// Reverse Early voltage [V] (inf = no Early effect)
-    #[serde(
-        default = "default_infinity",
-        deserialize_with = "deserialize_f64_or_infinity"
-    )]
-    pub var: f64,
-    /// Forward knee current [A] (inf = no high injection)
-    #[serde(
-        default = "default_infinity",
-        deserialize_with = "deserialize_f64_or_infinity"
-    )]
-    pub ikf: f64,
-    /// Reverse knee current [A] (inf = no high injection)
-    #[serde(
-        default = "default_infinity",
-        deserialize_with = "deserialize_f64_or_infinity"
-    )]
-    pub ikr: f64,
-    /// Base-emitter junction capacitance [F] (0.0 = disabled)
-    #[serde(default)]
-    pub cje: f64,
-    /// Base-collector junction capacitance [F] (0.0 = disabled)
-    #[serde(default)]
-    pub cjc: f64,
-    /// Forward emission coefficient (1.0 = ideal, default)
-    #[serde(default = "default_one")]
-    pub nf: f64,
-    /// B-E leakage saturation current [A] (0.0 = disabled, default)
-    #[serde(default)]
-    pub ise: f64,
-    /// B-E leakage emission coefficient (default 1.5)
-    #[serde(default = "default_ne")]
-    pub ne: f64,
-    /// Base series resistance [Ohms] (0.0 = disabled)
-    #[serde(default)]
-    pub rb: f64,
-    /// Collector series resistance [Ohms] (0.0 = disabled)
-    #[serde(default)]
-    pub rc: f64,
-    /// Emitter series resistance [Ohms] (0.0 = disabled)
-    #[serde(default)]
-    pub re: f64,
-    /// Thermal resistance [K/W] (inf = disabled, default)
-    #[serde(
-        default = "default_infinity",
-        deserialize_with = "deserialize_f64_or_infinity"
-    )]
-    pub rth: f64,
-    /// Thermal capacitance [J/K] (default 1e-3, typical TO-92)
-    #[serde(default = "default_cth")]
-    pub cth: f64,
-    /// IS temperature exponent (default 3.0)
-    #[serde(default = "default_xti")]
-    pub xti: f64,
-    /// Bandgap energy [eV] (default 1.11, silicon)
-    #[serde(default = "default_eg")]
-    pub eg: f64,
-    /// Ambient temperature [K] (default 300.15 = 27C)
-    #[serde(default = "default_tamb")]
-    pub tamb: f64,
-}
-
-fn default_infinity() -> f64 {
-    f64::INFINITY
-}
-
-fn default_ibv() -> f64 {
-    1e-10
-}
-
-fn default_one() -> f64 {
-    1.0
-}
-
-fn default_ne() -> f64 {
-    1.5
-}
-
-fn default_cth() -> f64 {
-    1e-3
-}
-
-fn default_xti() -> f64 {
-    3.0
-}
-
-fn default_eg() -> f64 {
-    1.11
-}
-
-fn default_tamb() -> f64 {
-    300.15
-}
-
-/// Deserialize an f64 that may be null (JSON cannot represent infinity).
-/// Maps null → f64::INFINITY so old serialized data is handled gracefully.
-fn deserialize_f64_or_infinity<'de, D>(deserializer: D) -> Result<f64, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let opt: Option<f64> = Option::deserialize(deserializer)?;
-    Ok(opt.unwrap_or(f64::INFINITY))
-}
-
-impl BjtParams {
-    /// Returns true if any Gummel-Poon parameter is finite.
-    pub fn is_gummel_poon(&self) -> bool {
-        self.vaf.is_finite() || self.var.is_finite() || self.ikf.is_finite() || self.ikr.is_finite()
-    }
-    /// Returns true if non-ideal emission coefficient (NF != 1.0) is active.
-    pub fn has_nf(&self) -> bool {
-        (self.nf - 1.0).abs() > 1e-15
-    }
-    /// Returns true if B-E leakage current (ISE) is enabled.
-    pub fn has_ise(&self) -> bool {
-        self.ise > 0.0
-    }
-    /// Returns true if any parasitic resistance (RB/RC/RE) is enabled.
-    pub fn has_parasitics(&self) -> bool {
-        self.rb > 0.0 || self.rc > 0.0 || self.re > 0.0
-    }
-    /// Returns true if self-heating is enabled (RTH is finite).
-    pub fn has_self_heating(&self) -> bool {
-        self.rth.is_finite()
-    }
-    /// Returns the 2x2 parasitic R coupling matrix R_p for K_eff = K - R_p.
-    ///
-    /// Layout: `[R_p[be,be], R_p[be,bc], R_p[bc,be], R_p[bc,bc]]`
-    /// where be = Vbe→Ic dimension (start_idx), bc = Vbc→Ib dimension (start_idx+1).
-    ///
-    /// The DK NR residual with parasitic absorption is:
-    ///   f(i) = i - i_device(p + K_eff * i)
-    /// where K_eff = K_original - R_p, and i_device uses the intrinsic model.
-    pub fn r_p_matrix(&self) -> [f64; 4] {
-        [
-            self.re,            // R_p[be,be]: Vbe drop from Ic * RE
-            self.rb + self.re,  // R_p[be,bc]: Vbe drop from Ib * (RB + RE)
-            -self.rc,           // R_p[bc,be]: Vbc drop from -Ic * RC
-            self.rb,            // R_p[bc,bc]: Vbc drop from Ib * RB
-        ]
-    }
-}
-
-/// A slot in the nonlinear system: maps a device to its M-dimension range.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DeviceSlot {
-    /// Device type tag (for NR dispatch)
-    pub device_type: DeviceType,
-    /// Starting index in the M-dimension vectors
-    pub start_idx: usize,
-    /// Number of dimensions this device occupies
-    pub dimension: usize,
-    /// Per-device resolved parameters (from `.model` directive or defaults)
-    pub params: DeviceParams,
-    /// True if parasitic R is handled via MNA internal nodes (not inner NR loop).
-    /// When true, codegen emits direct bjt_evaluate() instead of bjt_with_parasitics().
-    #[serde(default)]
-    pub has_internal_mna_nodes: bool,
-}
-
-/// JFET model parameters (resolved from `.model` directive or defaults).
-///
-/// Codegen uses 2D Shichman-Hodges: Vgs and Vds control Id (triode + saturation regions).
-/// Gate current Ig (dimension 2) is effectively zero for reverse-biased gate.
-/// This matches the MNA stamping where JFET is 2D (dimension=2, controlling voltages=Vgs, Vds).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct JfetParams {
-    /// Saturation current IDSS [A]
-    pub idss: f64,
-    /// Pinch-off voltage [V] (negative for N-channel, positive for P-channel)
-    pub vp: f64,
-    /// Channel length modulation [1/V]
-    pub lambda: f64,
-    /// True if P-channel (false = N-channel)
-    pub is_p_channel: bool,
-    /// Gate-source junction capacitance [F] (0.0 = disabled)
-    #[serde(default)]
-    pub cgs: f64,
-    /// Gate-drain junction capacitance [F] (0.0 = disabled)
-    #[serde(default)]
-    pub cgd: f64,
-    /// Drain ohmic resistance [Ohms] (0.0 = disabled)
-    #[serde(default)]
-    pub rd: f64,
-    /// Source ohmic resistance [Ohms] (0.0 = disabled)
-    #[serde(default)]
-    pub rs_param: f64,
-}
-
-impl JfetParams {
-    /// Returns true if either drain or source resistance is enabled.
-    pub fn has_rd_rs(&self) -> bool {
-        self.rd > 0.0 || self.rs_param > 0.0
-    }
-}
-
-/// MOSFET model parameters (Level 1 SPICE, triode + saturation).
-///
-/// Codegen uses 2D: Vgs and Vds control Id (triode + saturation regions).
-/// Gate current Ig (dimension 2) is zero (insulated gate).
-/// MNA stamping: 2D (dimension=2, controlling voltages=Vgs, Vds).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MosfetParams {
-    /// Transconductance parameter KP [A/V²]
-    pub kp: f64,
-    /// Threshold voltage VT [V] (positive for N-channel, negative for P-channel)
-    pub vt: f64,
-    /// Channel length modulation [1/V]
-    pub lambda: f64,
-    /// True if P-channel (false = N-channel)
-    pub is_p_channel: bool,
-    /// Gate-source capacitance [F] (0.0 = disabled)
-    #[serde(default)]
-    pub cgs: f64,
-    /// Gate-drain capacitance [F] (0.0 = disabled)
-    #[serde(default)]
-    pub cgd: f64,
-    /// Drain ohmic resistance [Ohms] (0.0 = disabled)
-    #[serde(default)]
-    pub rd: f64,
-    /// Source ohmic resistance [Ohms] (0.0 = disabled)
-    #[serde(default)]
-    pub rs_param: f64,
-    /// Body effect coefficient GAMMA [V^0.5] (0.0 = disabled)
-    #[serde(default)]
-    pub gamma: f64,
-    /// Surface potential PHI [V] (default 0.6)
-    #[serde(default = "default_phi")]
-    pub phi: f64,
-    /// Source node index in N-dimensional system (needed for body effect Vsb computation)
-    #[serde(default)]
-    pub source_node: usize,
-    /// Bulk node index in N-dimensional system (needed for body effect Vsb computation)
-    #[serde(default)]
-    pub bulk_node: usize,
-}
-
-fn default_phi() -> f64 {
-    0.6
-}
-
-impl MosfetParams {
-    /// Returns true if either drain or source resistance is enabled.
-    pub fn has_rd_rs(&self) -> bool {
-        self.rd > 0.0 || self.rs_param > 0.0
-    }
-    /// Returns true if body effect is enabled.
-    pub fn has_body_effect(&self) -> bool {
-        self.gamma > 0.0
-    }
-}
-
-/// Tube/triode model parameters (Koren + improved grid current).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TubeParams {
-    /// Amplification factor (mu)
-    pub mu: f64,
-    /// Exponent for Koren's equation
-    pub ex: f64,
-    /// Kg1 coefficient
-    pub kg1: f64,
-    /// Kp coefficient
-    pub kp: f64,
-    /// Kvb coefficient (for knee shaping)
-    pub kvb: f64,
-    /// Maximum grid current [A]
-    pub ig_max: f64,
-    /// Grid current onset voltage [V]
-    pub vgk_onset: f64,
-    /// Channel-length modulation coefficient [1/V]. 0.0 = disabled (default).
-    #[serde(default)]
-    pub lambda: f64,
-    /// Cathode-grid capacitance [F] (0.0 = disabled)
-    #[serde(default)]
-    pub ccg: f64,
-    /// Grid-plate capacitance [F] (0.0 = disabled)
-    #[serde(default)]
-    pub cgp: f64,
-    /// Cathode-plate capacitance [F] (0.0 = disabled)
-    #[serde(default)]
-    pub ccp: f64,
-    /// Grid internal resistance [Ohms] (0.0 = disabled)
-    #[serde(default)]
-    pub rgi: f64,
-}
-
-impl TubeParams {
-    /// Returns true if grid internal resistance is enabled.
-    pub fn has_rgi(&self) -> bool {
-        self.rgi > 0.0
-    }
-}
-
-impl DiodeParams {
-    /// Returns true if series resistance is enabled.
-    pub fn has_rs(&self) -> bool {
-        self.rs > 0.0
-    }
-    /// Returns true if reverse breakdown is enabled.
-    pub fn has_bv(&self) -> bool {
-        self.bv.is_finite()
-    }
-}
-
-impl DeviceParams {}
-
-/// Nonlinear device type tag.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum DeviceType {
-    Diode,
-    Bjt,
-    /// Forward-active BJT: 1D model (Vbe→Ic only). Vbc is always reverse-biased.
-    /// Ib = Ic/BF is folded into N_i stamping. Reduces M by 1.
-    BjtForwardActive,
-    Jfet,
-    Mosfet,
-    Tube,
-}
+// Re-export device types from the shared module (always compiled, no tera dependency).
+pub use crate::device_types::{
+    BjtParams, DeviceParams, DeviceSlot, DeviceType, DiodeParams, JfetParams, MosfetParams,
+    TubeParams,
+};
 
 /// Sparsity pattern for a single matrix.
 ///
@@ -975,6 +604,16 @@ impl CircuitIR {
         };
         let be = config.backward_euler || auto_be;
         let alpha = if be { internal_rate } else { 2.0 * internal_rate };
+
+        // Validate output_nodes against circuit node count
+        for (i, &node) in config.output_nodes.iter().enumerate() {
+            if node >= n_nodes {
+                return Err(CodegenError::InvalidConfig(format!(
+                    "output_nodes[{}] = {} >= n_nodes={} (circuit node count)",
+                    i, node, n_nodes
+                )));
+            }
+        }
 
         let solver_config = SolverConfig {
             sample_rate: config.sample_rate,
@@ -1465,6 +1104,12 @@ impl CircuitIR {
         let n_aug = mna.n_aug;
         let m = mna.m;
 
+        if m > dk::MAX_M {
+            return Err(CodegenError::InvalidConfig(format!(
+                "Nonlinear dimension M={} exceeds MAX_M={}", m, dk::MAX_M
+            )));
+        }
+
         // Build augmented G/C matrices (includes inductor branch variables)
         let mut aug = mna.build_augmented_matrices();
         let n = aug.n_nodal;
@@ -1488,6 +1133,16 @@ impl CircuitIR {
             n_aug,
             augmented_inductors: true,
         };
+
+        // Validate output_nodes against circuit node count
+        for (i, &node) in config.output_nodes.iter().enumerate() {
+            if node >= n_nodes {
+                return Err(CodegenError::InvalidConfig(format!(
+                    "output_nodes[{}] = {} >= n_nodes={} (circuit node count)",
+                    i, node, n_nodes
+                )));
+            }
+        }
 
         let solver_config = SolverConfig {
             sample_rate,
@@ -1779,9 +1434,13 @@ impl CircuitIR {
         let mut forward_active = std::collections::HashSet::new();
         for (slot_idx, slot) in device_slots.iter().enumerate() {
             if slot.device_type == DeviceType::Bjt
-                && let DeviceParams::Bjt(bp) = &slot.params
                 && slot_idx < mna.nonlinear_devices.len()
             {
+                let bp = if let DeviceParams::Bjt(bp) = &slot.params {
+                    bp
+                } else {
+                    continue;
+                };
                 let dev = &mna.nonlinear_devices[slot_idx];
                 let nc = dev.node_indices[0];
                 let nb = dev.node_indices[1];
@@ -1994,6 +1653,9 @@ impl CircuitIR {
             validate_positive_finite(ibv, "diode model IBV")?;
         }
 
+        Self::warn_unrecognized_params(netlist, model,
+            &["IS", "N", "CJO", "RS", "BV", "IBV"]);
+
         Ok(DiodeParams {
             is,
             n_vt: n * vt,
@@ -2095,6 +1757,30 @@ impl CircuitIR {
             )));
         }
 
+        // Reverse emission coefficient (default 1.0 = ideal)
+        let nr = Self::lookup_model_param(netlist, model, "NR").unwrap_or(1.0);
+        if nr <= 0.0 || !nr.is_finite() {
+            return Err(CodegenError::InvalidConfig(format!(
+                "BJT model NR must be positive and finite, got {nr}"
+            )));
+        }
+
+        // B-C leakage saturation current (default 0.0 = disabled)
+        let isc = Self::lookup_model_param(netlist, model, "ISC").unwrap_or(0.0);
+        if isc < 0.0 || !isc.is_finite() {
+            return Err(CodegenError::InvalidConfig(format!(
+                "BJT model ISC must be non-negative and finite, got {isc}"
+            )));
+        }
+
+        // B-C leakage emission coefficient (default 2.0)
+        let nc = Self::lookup_model_param(netlist, model, "NC").unwrap_or(2.0);
+        if nc <= 0.0 || !nc.is_finite() {
+            return Err(CodegenError::InvalidConfig(format!(
+                "BJT model NC must be positive and finite, got {nc}"
+            )));
+        }
+
         // Parasitic series resistances (optional, default 0.0)
         let rb = Self::lookup_model_param(netlist, model, "RB").unwrap_or(0.0);
         let rc = Self::lookup_model_param(netlist, model, "RC").unwrap_or(0.0);
@@ -2151,6 +1837,11 @@ impl CircuitIR {
             )));
         }
 
+        Self::warn_unrecognized_params(netlist, model,
+            &["IS", "BF", "BR", "VAF", "VAR", "IKF", "IKR", "CJE", "CJC",
+              "NF", "NR", "ISE", "NE", "ISC", "NC",
+              "RB", "RC", "RE", "RTH", "CTH", "XTI", "EG", "TAMB"]);
+
         Ok(BjtParams {
             is,
             vt,
@@ -2164,8 +1855,11 @@ impl CircuitIR {
             cje,
             cjc,
             nf,
+            nr,
             ise,
             ne,
+            isc,
+            nc,
             rb,
             rc,
             re,
@@ -2226,6 +1920,9 @@ impl CircuitIR {
         // Ohmic drain/source resistances (optional, default 0.0)
         let rd = Self::lookup_model_param(netlist, model, "RD").unwrap_or(0.0);
         let rs_param = Self::lookup_model_param(netlist, model, "RS").unwrap_or(0.0);
+
+        Self::warn_unrecognized_params(netlist, model,
+            &["VTO", "BETA", "IDSS", "LAMBDA", "CGS", "CGD", "RD", "RS"]);
 
         Ok(JfetParams {
             idss,
@@ -2296,6 +1993,9 @@ impl CircuitIR {
                 "MOSFET model PHI must be positive and finite, got {phi}"
             )));
         }
+
+        Self::warn_unrecognized_params(netlist, model,
+            &["KP", "VTO", "LAMBDA", "CGS", "CGD", "RD", "RS", "GAMMA", "PHI"]);
 
         // source_node and bulk_node will be resolved later from the MNA system
         Ok(MosfetParams {
@@ -2372,6 +2072,10 @@ impl CircuitIR {
             )));
         }
 
+        Self::warn_unrecognized_params(netlist, model,
+            &["MU", "EX", "KG1", "KP", "KVB", "IG_MAX", "VGK_ONSET", "LAMBDA",
+              "CCG", "CGP", "CCP", "RGI"]);
+
         Ok(TubeParams {
             mu,
             ex,
@@ -2388,7 +2092,21 @@ impl CircuitIR {
         })
     }
 
-    /// Build the legacy `devices` list (first occurrence of each device type).
+    /// Warn on unrecognized .model parameters (typo protection).
+    fn warn_unrecognized_params(netlist: &Netlist, model_name: &str, known: &[&str]) {
+        if let Some(m) = netlist.models.iter().find(|m| m.name.eq_ignore_ascii_case(model_name)) {
+            for (key, _) in &m.params {
+                let upper = key.to_ascii_uppercase();
+                if !known.iter().any(|k| k.eq_ignore_ascii_case(&upper)) {
+                    log::warn!(
+                        ".model {}: unrecognized parameter '{}' (ignored)",
+                        model_name, key,
+                    );
+                }
+            }
+        }
+    }
+
     /// Look up a parameter from a `.model` directive, case-insensitive.
     fn lookup_model_param(netlist: &Netlist, model_name: &str, param_name: &str) -> Option<f64> {
         netlist

@@ -174,6 +174,8 @@ pub enum DkError {
         /// The non-negative value found.
         value: f64,
     },
+    /// An upstream MNA error.
+    Mna(crate::mna::MnaError),
 }
 
 impl std::fmt::Display for DkError {
@@ -195,11 +197,18 @@ impl std::fmt::Display for DkError {
                     index, index, value
                 )
             }
+            DkError::Mna(e) => write!(f, "DK error: {}", e),
         }
     }
 }
 
 impl std::error::Error for DkError {}
+
+impl From<crate::mna::MnaError> for DkError {
+    fn from(e: crate::mna::MnaError) -> Self {
+        DkError::Mna(e)
+    }
+}
 
 /// Maximum supported nonlinear dimension (sum of all device dimensions).
 ///
@@ -209,6 +218,15 @@ impl std::error::Error for DkError {}
 /// M=16 supports: full tube preamp (4 triodes × 2 = 8) + bias diodes,
 /// or complex multi-device circuits.
 pub const MAX_M: usize = 16;
+
+/// Maximum supported system dimension (total rows/columns in the A/S matrices).
+///
+/// Includes circuit nodes, voltage source branch currents, VCVS augmented rows,
+/// and inductor branch variables. Prevents O(N^3) blowup from matrix inversion
+/// on pathologically large circuits.
+///
+/// N=256 is generous for any real audio circuit (Pultec EQP-1A is ~41 nodes).
+pub const MAX_N: usize = 256;
 
 impl DkKernel {
     /// Build DK kernel from MNA system.
@@ -236,8 +254,15 @@ impl DkKernel {
             )));
         }
 
+        if n > MAX_N {
+            return Err(DkError::InvalidParameter(format!(
+                "System dimension {} exceeds MAX_N={} (too many nodes)",
+                n, MAX_N
+            )));
+        }
+
         // Get A matrix (n_aug × n_aug)
-        let a = mna.get_a_matrix(sample_rate);
+        let a = mna.get_a_matrix(sample_rate)?;
 
         // Invert A to get S
         let s_2d = invert_matrix(&a)
@@ -291,7 +316,7 @@ impl DkKernel {
         let k = flatten_matrix(&k_2d, m, m);
 
         // Get A_neg matrix for history (augmented rows are all zeros — algebraic constraints)
-        let a_neg_2d = mna.get_a_neg_matrix(sample_rate);
+        let a_neg_2d = mna.get_a_neg_matrix(sample_rate)?;
         let a_neg = flatten_matrix(&a_neg_2d, n, n);
 
         // Build constant sources from voltage and current sources
@@ -524,6 +549,13 @@ impl DkKernel {
         let n_xfmr_windings: usize = mna.transformer_groups.iter().map(|g| g.num_windings).sum();
         let n_inductor_vars = n_uncoupled + n_coupled_windings + n_xfmr_windings;
         let n = n_aug + n_inductor_vars; // n_nodal
+
+        if n > MAX_N {
+            return Err(DkError::InvalidParameter(format!(
+                "System dimension {} exceeds MAX_N={} (too many nodes)",
+                n, MAX_N
+            )));
+        }
 
         let t = 1.0 / sample_rate;
         let alpha = 2.0 / t;

@@ -933,8 +933,10 @@ fn test_codegen_sanitization_resets_pot() {
 
     // The NaN sanitization block should reset pot resistance
     // Find the sanitization block and check it contains pot reset
+    // NaN check now happens before state write: checks local `v` not `state.v_prev`
     let sanitize_idx = code
-        .find("if !state.v_prev.iter().all(|x| x.is_finite())")
+        .find("if !v.iter().all(|x| x.is_finite())")
+        .or_else(|| code.find("if !state.v_prev.iter().all(|x| x.is_finite())"))
         .expect("Missing sanitization block");
     let after_sanitize = &code[sanitize_idx..];
     let return_idx = after_sanitize

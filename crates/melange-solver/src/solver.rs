@@ -17,6 +17,16 @@ pub enum SolverError {
     DimensionMismatch { expected: usize, got: usize },
     /// A 2D device has an out-of-bounds start index.
     DeviceIndexOutOfBounds { start_idx: usize, m: usize },
+    /// An upstream DK error.
+    Dk(crate::dk::DkError),
+    /// System dimension is zero (no nodes).
+    InvalidDimension { what: &'static str, value: usize },
+    /// A node index is out of bounds for the system dimension.
+    InvalidNodeIndex {
+        role: &'static str,
+        index: usize,
+        max: usize,
+    },
 }
 
 impl std::fmt::Display for SolverError {
@@ -32,11 +42,28 @@ impl std::fmt::Display for SolverError {
                 "2D device start_idx {} out of bounds for M={}",
                 start_idx, m
             ),
+            SolverError::Dk(e) => write!(f, "Solver error: {}", e),
+            SolverError::InvalidDimension { what, value } => {
+                write!(f, "Invalid {}: {} (must be > 0)", what, value)
+            }
+            SolverError::InvalidNodeIndex { role, index, max } => {
+                write!(
+                    f,
+                    "{} node index {} out of bounds (system has {} nodes)",
+                    role, index, max
+                )
+            }
         }
     }
 }
 
 impl std::error::Error for SolverError {}
+
+impl From<crate::dk::DkError> for SolverError {
+    fn from(e: crate::dk::DkError) -> Self {
+        SolverError::Dk(e)
+    }
+}
 
 /// Sanitize an audio input sample: replace NaN/Inf with 0, clamp to [-100, 100].
 fn sanitize_input(input: f64) -> f64 {
@@ -537,15 +564,15 @@ fn gauss_solve_inplace(a: &mut [f64], b: &mut [f64], n: usize) -> bool {
 #[derive(Clone)]
 pub struct CircuitSolver {
     /// DK kernel
-    pub kernel: DkKernel,
+    pub(crate) kernel: DkKernel,
     /// Nonlinear device entries
-    pub devices: Vec<DeviceEntry>,
+    pub(crate) devices: Vec<DeviceEntry>,
     /// Previous node voltages
-    pub v_prev: Vec<f64>,
+    pub(crate) v_prev: Vec<f64>,
     /// Previous nonlinear voltages (for warm start), size = total dimension m
-    pub v_nl_prev: Vec<f64>,
+    pub(crate) v_nl_prev: Vec<f64>,
     /// Previous nonlinear currents, size = total dimension m
-    pub i_nl_prev: Vec<f64>,
+    pub(crate) i_nl_prev: Vec<f64>,
     /// Pre-allocated RHS buffer
     rhs: Vec<f64>,
     /// Pre-allocated prediction buffer
@@ -573,33 +600,33 @@ pub struct CircuitSolver {
     /// Maps current-space NR steps to node voltage changes for damping.
     s_ni_nodes: Vec<f64>,
     /// Input node index
-    pub input_node: usize,
+    pub(crate) input_node: usize,
     /// Output node index
-    pub output_node: usize,
+    pub(crate) output_node: usize,
     /// Input conductance (1/R_in) for proper Thevenin source modeling
-    pub input_conductance: f64,
+    pub(crate) input_conductance: f64,
     /// Previous input sample for trapezoidal integration
     input_prev: f64,
     /// Maximum NR iterations per sample
-    pub max_iter: u32,
+    pub(crate) max_iter: u32,
     /// NR tolerance
-    pub tol: f64,
+    pub(crate) tol: f64,
     /// Reason the NR solver stopped on the most recent sample.
     last_convergence_reason: ConvergenceReason,
     /// DC blocking filter state (previous input)
-    pub dc_block_x_prev: f64,
+    pub(crate) dc_block_x_prev: f64,
     /// DC blocking filter state (previous output)
-    pub dc_block_y_prev: f64,
+    pub(crate) dc_block_y_prev: f64,
     /// DC blocking filter coefficient (1 - 2*pi*5/sr)
-    pub dc_block_r: f64,
+    pub(crate) dc_block_r: f64,
     /// Diagnostics: peak absolute output seen
-    pub diag_peak_output: f64,
+    pub(crate) diag_peak_output: f64,
     /// Diagnostics: number of samples that exceeded clamp threshold
-    pub diag_clamp_count: u64,
+    pub(crate) diag_clamp_count: u64,
     /// Diagnostics: number of times NR hit max iterations
-    pub diag_nr_max_iter_count: u64,
+    pub(crate) diag_nr_max_iter_count: u64,
     /// Diagnostics: number of times state was reset due to NaN
-    pub diag_nan_reset_count: u64,
+    pub(crate) diag_nan_reset_count: u64,
 }
 
 impl CircuitSolver {
@@ -707,6 +734,81 @@ impl CircuitSolver {
         })
     }
 
+    /// Get the input conductance (1/R_in).
+    pub fn input_conductance(&self) -> f64 {
+        self.input_conductance
+    }
+
+    /// Set the input conductance (1/R_in) for proper Thevenin source modeling.
+    pub fn set_input_conductance(&mut self, g: f64) {
+        self.input_conductance = g;
+    }
+
+    /// Get the nonlinear dimension M (total voltage dimensions across all devices).
+    pub fn m(&self) -> usize {
+        self.kernel.m
+    }
+
+    /// Get the number of circuit nodes (excluding ground and augmented variables).
+    pub fn n_nodes(&self) -> usize {
+        self.kernel.n_nodes
+    }
+
+    /// Get the system dimension N (includes augmented VS/VCVS/inductor variables).
+    pub fn n(&self) -> usize {
+        self.kernel.n
+    }
+
+    /// Get the number of potentiometers.
+    pub fn num_pots(&self) -> usize {
+        self.kernel.pots.len()
+    }
+
+    /// Get a reference to the DK kernel.
+    pub fn kernel(&self) -> &DkKernel {
+        &self.kernel
+    }
+
+    /// Get a mutable reference to the DK kernel.
+    pub fn kernel_mut(&mut self) -> &mut DkKernel {
+        &mut self.kernel
+    }
+
+    /// Get a reference to the previous node voltages.
+    pub fn v_prev(&self) -> &[f64] {
+        &self.v_prev
+    }
+
+    /// Get a reference to the previous nonlinear currents.
+    pub fn i_nl_prev(&self) -> &[f64] {
+        &self.i_nl_prev
+    }
+
+    /// Set the maximum NR iterations per sample.
+    pub fn set_max_iter(&mut self, max_iter: u32) {
+        self.max_iter = max_iter;
+    }
+
+    /// Diagnostics: peak absolute output seen.
+    pub fn diag_peak_output(&self) -> f64 {
+        self.diag_peak_output
+    }
+
+    /// Diagnostics: number of samples that exceeded clamp threshold.
+    pub fn diag_clamp_count(&self) -> u64 {
+        self.diag_clamp_count
+    }
+
+    /// Diagnostics: number of times NR hit max iterations.
+    pub fn diag_nr_max_iter_count(&self) -> u64 {
+        self.diag_nr_max_iter_count
+    }
+
+    /// Diagnostics: number of times state was reset due to NaN.
+    pub fn diag_nan_reset_count(&self) -> u64 {
+        self.diag_nan_reset_count
+    }
+
     /// Apply K_eff parasitic R corrections for BJTs with parasitic resistances.
     ///
     /// For each BJT with non-zero RB/RC/RE, subtracts the R_p coupling matrix from
@@ -757,7 +859,7 @@ impl CircuitSolver {
     pub fn initialize_dc_op(
         &mut self,
         mna: &crate::mna::MnaSystem,
-        device_slots: &[crate::codegen::ir::DeviceSlot],
+        device_slots: &[crate::device_types::DeviceSlot],
     ) -> bool {
         let config = crate::dc_op::DcOpConfig {
             input_node: self.input_node,
@@ -847,7 +949,14 @@ impl CircuitSolver {
         // across samples. When damping triggers, re-evaluate device currents at the
         // damped state to keep i_nl_prev consistent with v_prev (otherwise the
         // N_i * i_nl_prev term in the next sample's RHS feeds back the divergent currents).
-        const NODE_DAMP_THRESHOLD: f64 = 2.0;
+        // Adaptive threshold: max(2V, 5% of max node voltage) — avoids over-damping tube plates
+        let node_damp_threshold = {
+            let mut max_v = 0.0_f64;
+            for i in 0..self.kernel.n_nodes {
+                max_v = max_v.max(self.v_prev[i].abs());
+            }
+            2.0_f64.max(max_v * 0.05)
+        };
         {
             let n_nodes = self.kernel.n_nodes;
             let m = self.kernel.m;
@@ -858,8 +967,8 @@ impl CircuitSolver {
                     max_node_delta = delta;
                 }
             }
-            if max_node_delta > NODE_DAMP_THRESHOLD {
-                let damp = (NODE_DAMP_THRESHOLD / max_node_delta).max(0.1);
+            if max_node_delta > node_damp_threshold {
+                let damp = (node_damp_threshold / max_node_delta).max(0.1);
                 let n = self.kernel.n;
                 for i in 0..n {
                     self.v_pred[i] = self.v_prev[i] + damp * (self.v_pred[i] - self.v_prev[i]);
@@ -913,7 +1022,7 @@ impl CircuitSolver {
         let raw_out = if raw_out.is_finite() { raw_out } else { 0.0 };
         let dc_blocked = raw_out - self.dc_block_x_prev + self.dc_block_r * self.dc_block_y_prev;
         self.dc_block_x_prev = raw_out;
-        self.dc_block_y_prev = dc_blocked;
+        self.dc_block_y_prev = dc_blocked.clamp(-100.0, 100.0);
 
         // Diagnostics
         let abs_out = dc_blocked.abs();
@@ -1217,7 +1326,7 @@ impl CircuitSolver {
             let mut alpha = 1.0_f64;
             {
                 // Compute trial i_nl after full step
-                let mut i_trial = [0.0_f64; 16]; // MAX_M
+                let mut i_trial = [0.0_f64; crate::dk::MAX_M];
                 for i in 0..m {
                     i_trial[i] = self.i_nl[i] - self.delta[i];
                 }
@@ -1246,11 +1355,14 @@ impl CircuitSolver {
             }
 
             // Node voltage damping (ngspice CKTnodeDamping):
-            // Check if the implied node voltage change from this NR step exceeds 2V.
-            // Uses precomputed S*N_i to map current-space delta to node voltage space.
-            // Threshold matches the post-solve damping (2V for high-gain feedback amps).
+            // Adaptive threshold: max(2V, 5% of max node voltage)
             {
                 let n_nodes = self.kernel.n_nodes;
+                let mut max_v = 0.0_f64;
+                for i in 0..n_nodes {
+                    max_v = max_v.max(self.v_prev[i].abs());
+                }
+                let damp_thresh = 2.0_f64.max(max_v * 0.05);
                 let mut max_node_dv = 0.0_f64;
                 for i in 0..n_nodes {
                     let mut dv = 0.0;
@@ -1260,8 +1372,8 @@ impl CircuitSolver {
                     }
                     max_node_dv = max_node_dv.max((alpha * dv).abs());
                 }
-                if max_node_dv > 2.0 {
-                    alpha *= (2.0 / max_node_dv).max(0.01);
+                if max_node_dv > damp_thresh {
+                    alpha *= (damp_thresh / max_node_dv).max(0.01);
                 }
             }
 
@@ -1363,21 +1475,21 @@ pub struct LinearSolver {
     input_node: usize,
     output_node: usize,
     /// Input conductance (1/R_in) for proper Thevenin source modeling
-    pub input_conductance: f64,
+    pub(crate) input_conductance: f64,
     /// Previous input sample for trapezoidal integration
     input_prev: f64,
     /// DC blocking filter state (previous input)
-    pub dc_block_x_prev: f64,
+    pub(crate) dc_block_x_prev: f64,
     /// DC blocking filter state (previous output)
-    pub dc_block_y_prev: f64,
+    pub(crate) dc_block_y_prev: f64,
     /// DC blocking filter coefficient (1 - 2*pi*5/sr)
-    pub dc_block_r: f64,
+    pub(crate) dc_block_r: f64,
     /// Diagnostics: peak absolute output seen
-    pub diag_peak_output: f64,
+    pub(crate) diag_peak_output: f64,
     /// Diagnostics: number of samples that exceeded clamp threshold
-    pub diag_clamp_count: u64,
+    pub(crate) diag_clamp_count: u64,
     /// Diagnostics: number of times state was reset due to NaN
-    pub diag_nan_reset_count: u64,
+    pub(crate) diag_nan_reset_count: u64,
 }
 
 impl LinearSolver {
@@ -1401,6 +1513,31 @@ impl LinearSolver {
             diag_clamp_count: 0,
             diag_nan_reset_count: 0,
         }
+    }
+
+    /// Get the input conductance (1/R_in).
+    pub fn input_conductance(&self) -> f64 {
+        self.input_conductance
+    }
+
+    /// Set the input conductance (1/R_in) for proper Thevenin source modeling.
+    pub fn set_input_conductance(&mut self, g: f64) {
+        self.input_conductance = g;
+    }
+
+    /// Diagnostics: peak absolute output seen.
+    pub fn diag_peak_output(&self) -> f64 {
+        self.diag_peak_output
+    }
+
+    /// Diagnostics: number of samples that exceeded clamp threshold.
+    pub fn diag_clamp_count(&self) -> u64 {
+        self.diag_clamp_count
+    }
+
+    /// Diagnostics: number of times state was reset due to NaN.
+    pub fn diag_nan_reset_count(&self) -> u64 {
+        self.diag_nan_reset_count
     }
 
     /// Process a single sample.
@@ -1500,7 +1637,7 @@ impl LinearSolver {
         let raw_out = if raw_out.is_finite() { raw_out } else { 0.0 };
         let dc_blocked = raw_out - self.dc_block_x_prev + self.dc_block_r * self.dc_block_y_prev;
         self.dc_block_x_prev = raw_out;
-        self.dc_block_y_prev = dc_blocked;
+        self.dc_block_y_prev = dc_blocked.clamp(-100.0, 100.0);
 
         // Diagnostics
         let abs_out = dc_blocked.abs();
@@ -2781,7 +2918,7 @@ C1 in 0 1u
 // FLOPs per iteration — well within real-time budget at 48kHz.
 // ==========================================================================
 
-use crate::codegen::ir::{DeviceParams, DeviceSlot};
+use crate::device_types::{DeviceParams, DeviceSlot};
 use crate::dc_op;
 use crate::mna::MnaSystem;
 
@@ -2841,7 +2978,7 @@ fn limit_slot_voltage(slot: &DeviceSlot, dim: usize, vnew: f64, vold: f64) -> f6
 #[derive(Clone)]
 pub struct NodalSolver {
     /// DK kernel (retained for kernel.n_nodes, kernel.m, kernel.sample_rate)
-    pub kernel: DkKernel,
+    pub(crate) kernel: DkKernel,
     /// Total system dimension: n_aug + inductor branch variables
     n_nodal: usize,
     /// G_nodal (conductance) matrix, stored for BE fallback rebuild
@@ -2865,9 +3002,9 @@ pub struct NodalSolver {
     /// Device slots for device evaluation (same format as dc_op)
     device_slots: Vec<DeviceSlot>,
     /// Previous state vector (n_nodal: node voltages + VS currents + inductor currents)
-    pub v_prev: Vec<f64>,
+    pub(crate) v_prev: Vec<f64>,
     /// Previous nonlinear currents (M) for trapezoidal integration
-    pub i_nl_prev: Vec<f64>,
+    pub(crate) i_nl_prev: Vec<f64>,
     /// Pre-allocated working buffers
     rhs: Vec<f64>,
     v_nl: Vec<f64>,
@@ -2876,24 +3013,24 @@ pub struct NodalSolver {
     g_aug: Vec<Vec<f64>>,
     rhs_work: Vec<f64>,
     /// Input/output
-    pub input_node: usize,
-    pub output_node: usize,
-    pub input_conductance: f64,
+    pub(crate) input_node: usize,
+    pub(crate) output_node: usize,
+    pub(crate) input_conductance: f64,
     input_prev: f64,
     /// NR config
-    pub max_iter: u32,
-    pub tol: f64,
+    pub(crate) max_iter: u32,
+    pub(crate) tol: f64,
     /// DC blocking filter
-    pub dc_block_x_prev: f64,
-    pub dc_block_y_prev: f64,
-    pub dc_block_r: f64,
+    pub(crate) dc_block_x_prev: f64,
+    pub(crate) dc_block_y_prev: f64,
+    pub(crate) dc_block_r: f64,
     /// Diagnostics
-    pub diag_peak_output: f64,
-    pub diag_clamp_count: u64,
-    pub diag_nr_max_iter_count: u64,
-    pub diag_nan_reset_count: u64,
+    pub(crate) diag_peak_output: f64,
+    pub(crate) diag_clamp_count: u64,
+    pub(crate) diag_nr_max_iter_count: u64,
+    pub(crate) diag_nan_reset_count: u64,
     /// Diagnostics: number of samples where BE fallback was used
-    pub diag_be_fallback_count: u64,
+    pub(crate) diag_be_fallback_count: u64,
     /// Node indices frozen during NR (from .delay_feedback directives).
     /// These nodes use v_prev values during NR iteration, breaking feedback loops.
     delayed_node_indices: Vec<usize>,
@@ -2912,10 +3049,34 @@ impl NodalSolver {
         device_slots: Vec<DeviceSlot>,
         input_node: usize,
         output_node: usize,
-    ) -> Self {
+    ) -> Result<Self, SolverError> {
         let n_aug = mna.n_aug; // original system dimension (not kernel.n which may be augmented)
         let n_nodes = kernel.n_nodes;
         let m = kernel.m;
+
+        // Validate system dimension
+        if n_nodes == 0 {
+            return Err(SolverError::InvalidDimension {
+                what: "system node count (n_nodes)",
+                value: 0,
+            });
+        }
+
+        // Validate input/output node indices are within the node space
+        if input_node >= n_nodes {
+            return Err(SolverError::InvalidNodeIndex {
+                role: "input",
+                index: input_node,
+                max: n_nodes,
+            });
+        }
+        if output_node >= n_nodes {
+            return Err(SolverError::InvalidNodeIndex {
+                role: "output",
+                index: output_node,
+                max: n_nodes,
+            });
+        }
 
         // Build augmented G/C matrices using shared method
         let aug = mna.build_augmented_matrices();
@@ -3042,7 +3203,7 @@ impl NodalSolver {
             );
         }
 
-        Self {
+        Ok(Self {
             kernel,
             n_nodal,
             _g_nodal: g_nod,
@@ -3079,7 +3240,67 @@ impl NodalSolver {
             diag_nan_reset_count: 0,
             diag_be_fallback_count: 0,
             delayed_node_indices,
-        }
+        })
+    }
+
+    /// Get the input conductance (1/R_in).
+    pub fn input_conductance(&self) -> f64 {
+        self.input_conductance
+    }
+
+    /// Set the input conductance (1/R_in) for proper Thevenin source modeling.
+    pub fn set_input_conductance(&mut self, g: f64) {
+        self.input_conductance = g;
+    }
+
+    /// Get the nonlinear dimension M.
+    pub fn m(&self) -> usize {
+        self.kernel.m
+    }
+
+    /// Get the number of circuit nodes (excluding ground and augmented variables).
+    pub fn n_nodes(&self) -> usize {
+        self.kernel.n_nodes
+    }
+
+    /// Get a reference to the DK kernel.
+    pub fn kernel(&self) -> &DkKernel {
+        &self.kernel
+    }
+
+    /// Get a reference to the previous state vector (node voltages + VS currents + inductor currents).
+    pub fn v_prev(&self) -> &[f64] {
+        &self.v_prev
+    }
+
+    /// Get a reference to the previous nonlinear currents.
+    pub fn i_nl_prev(&self) -> &[f64] {
+        &self.i_nl_prev
+    }
+
+    /// Diagnostics: peak absolute output seen.
+    pub fn diag_peak_output(&self) -> f64 {
+        self.diag_peak_output
+    }
+
+    /// Get the diagnostic NR max-iteration count.
+    pub fn diag_nr_max_iter_count(&self) -> u64 {
+        self.diag_nr_max_iter_count
+    }
+
+    /// Get the diagnostic NaN reset count.
+    pub fn diag_nan_reset_count(&self) -> u64 {
+        self.diag_nan_reset_count
+    }
+
+    /// Get the diagnostic clamp count.
+    pub fn diag_clamp_count(&self) -> u64 {
+        self.diag_clamp_count
+    }
+
+    /// Get the diagnostic backward Euler fallback count.
+    pub fn diag_be_fallback_count(&self) -> u64 {
+        self.diag_be_fallback_count
     }
 
     /// Initialize from DC operating point.
@@ -3282,10 +3503,12 @@ impl NodalSolver {
                 }
             }
 
-            // Layer 2: Global node voltage damping (10V threshold, ngspice CKTnodeDamping)
-            // Skip delayed nodes (they're frozen at v_prev) but damp everything else.
+            // Layer 2: Global node voltage damping (adaptive, ngspice CKTnodeDamping)
             {
                 let n_nodes = self.kernel.n_nodes;
+                let mut max_v = 0.0_f64;
+                for i in 0..n_nodes { max_v = max_v.max(v[i].abs()); }
+                let damp_thresh = 10.0_f64.max(max_v * 0.05);
                 let mut max_node_dv = 0.0_f64;
                 for i in 0..n_nodes {
                     if self.delayed_node_indices.contains(&i) {
@@ -3294,8 +3517,8 @@ impl NodalSolver {
                     let dv = alpha * (v_new[i] - v[i]);
                     max_node_dv = max_node_dv.max(dv.abs());
                 }
-                if max_node_dv > 10.0 {
-                    alpha *= (10.0 / max_node_dv).max(0.01);
+                if max_node_dv > damp_thresh {
+                    alpha *= (damp_thresh / max_node_dv).max(0.01);
                 }
             }
 
@@ -3467,6 +3690,9 @@ impl NodalSolver {
                 }
                 {
                     let n_nodes = self.kernel.n_nodes;
+                    let mut max_v = 0.0_f64;
+                    for i in 0..n_nodes { max_v = max_v.max(v[i].abs()); }
+                    let damp_thresh = 10.0_f64.max(max_v * 0.05);
                     let mut max_node_dv = 0.0_f64;
                     for i in 0..n_nodes {
                         if self.delayed_node_indices.contains(&i) {
@@ -3475,8 +3701,8 @@ impl NodalSolver {
                         let dv = alpha * (v_new[i] - v[i]);
                         max_node_dv = max_node_dv.max(dv.abs());
                     }
-                    if max_node_dv > 10.0 {
-                        alpha *= (10.0 / max_node_dv).max(0.01);
+                    if max_node_dv > damp_thresh {
+                        alpha *= (damp_thresh / max_node_dv).max(0.01);
                     }
                 }
 
@@ -3585,7 +3811,7 @@ impl NodalSolver {
         let raw_out = if raw_out.is_finite() { raw_out } else { 0.0 };
         let dc_blocked = raw_out - self.dc_block_x_prev + self.dc_block_r * self.dc_block_y_prev;
         self.dc_block_x_prev = raw_out;
-        self.dc_block_y_prev = dc_blocked;
+        self.dc_block_y_prev = dc_blocked.clamp(-100.0, 100.0);
 
         let abs_out = dc_blocked.abs();
         if abs_out > self.diag_peak_output {

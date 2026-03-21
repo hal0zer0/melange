@@ -1,3 +1,6 @@
+//! Plugin integration layer for melange-generated audio processors (nih-plug).
+//! Part of the [melange](https://github.com/hal0zer0/melange) circuit simulation toolkit.
+
 // melange-plugin: nih-plug integration helpers
 //
 // Layer 5 of the melange stack. Glue between melange circuit models and plugin frameworks:

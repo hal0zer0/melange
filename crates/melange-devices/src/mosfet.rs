@@ -2,7 +2,7 @@
 //!
 //! Simple square-law and level-1 SPICE models.
 
-use crate::NonlinearDevice;
+use crate::{NonlinearDevice, VT_ROOM};
 
 /// MOSFET channel type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,11 +66,12 @@ impl Mosfet {
         let vds_eff = s * vds;
 
         let vt_abs = self.vt.abs();
-        if vgs_eff <= vt_abs {
-            return 0.0; // Cutoff
-        }
-
         let vov = vgs_eff - vt_abs; // Overdrive voltage
+
+        if vov <= 0.0 {
+            // Subthreshold: weak exponential for smooth NR convergence
+            return s * 1e-12 * (vov / (2.0 * VT_ROOM)).exp().min(1.0);
+        }
 
         if vds_eff < vov {
             // Linear (triode) region
@@ -92,11 +93,14 @@ impl Mosfet {
         let vds_eff = s * vds;
 
         let vt_abs = self.vt.abs();
-        if vgs_eff <= vt_abs {
-            return (0.0, 0.0);
-        }
-
         let vov = vgs_eff - vt_abs;
+
+        if vov <= 0.0 {
+            // Subthreshold: derivative of weak exponential
+            let sub = 1e-12 * (vov / (2.0 * VT_ROOM)).exp().min(1.0);
+            let gm = if sub < 1e-12 { sub / (2.0 * VT_ROOM) } else { 0.0 };
+            return (gm, 0.0);
+        }
 
         // ∂Id/∂Vgs
         let d_id_d_vgs = if vds_eff < vov {

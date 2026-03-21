@@ -70,7 +70,7 @@ fn test_full_solver_rc_lowpass() {
 
     // Single-node RC: input and output are both node 0
     let mut solver = LinearSolver::new(kernel, 0, 0);
-    solver.input_conductance = 0.001; // G_in = 1/R1 = 1/1k
+    solver.set_input_conductance(0.001); // G_in = 1/R1 = 1/1k
 
     // Process 500 samples of 1V DC step
     let num_samples = 500;
@@ -136,7 +136,7 @@ fn test_diode_clipper_solver() {
     let mut solver =
         melange_solver::solver::CircuitSolver::new(kernel, devices, input_node, output_node)
             .unwrap();
-    solver.input_conductance = 0.001; // Rin = 1k
+    solver.set_input_conductance(0.001); // Rin = 1k
 
     // Small signal: output should be proportional to input (not clipped)
     let small_out = solver.process_sample(0.01);

@@ -3,9 +3,11 @@
 *The spice must flow.*
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-2024%20edition-orange.svg)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-2021%20edition-orange.svg)](https://www.rust-lang.org)
 
 An open-source Rust toolkit for translating analog circuit schematics into real-time audio DSP code. Melange bridges the gap between SPICE simulation and production audio plugins — automating the pipeline that every circuit modeler currently does by hand.
+
+> **IMPORTANT: Always use ear protection when prototyping with Melange.** Generated circuits can produce unexpected gain levels or unstable output. Melange cannot guarantee safe listening volumes — always start with your monitor level at zero and increase gradually.
 
 ## The Problem
 
@@ -20,6 +22,8 @@ There is no open-source tool that takes a circuit netlist and produces optimized
 **Melange automates steps 2-5.**
 
 ## One Command, Done
+
+**NOTE** This project is in early alpha, and the current development focus has been on supporting the hardware needed for the OpenWurli project. Additional circuit tests are in the works. 
 
 ### SPICE netlist to audio plugin
 
@@ -89,17 +93,17 @@ Melange ships with classic circuits ready to compile:
 
 | Circuit | Description |
 |---------|-------------|
-| `tube-screamer` | Classic op-amp clipper (Tube Screamer style) |
+| `tube-screamer` | Diode clipper (Tube Screamer style) |
 | `fuzz-face` | 2-transistor fuzz (Fuzz Face style) |
 | `big-muff` | 4-transistor fuzz (Big Muff style) |
+| `tube-preamp` | Common-cathode 12AX7 triode gain stage with tone control |
 | `rc-lowpass` | Simple RC lowpass filter for testing |
 | `mordor-screamer` | High-gain distortion forged in Mount Doom |
 
-Plus real-world validated circuits in `circuits/`:
+Plus example circuits in `circuits/`:
 
 | Circuit | Description |
 |---------|-------------|
-| `pultec-eq.cir` | Pultec EQP-1A passive tube EQ (3 switches, 5 pots, 12AX7) |
 | `wurli-preamp.cir` | Wurlitzer 200A preamp (2-stage BJT, LDR tremolo pot) |
 | `tweed-preamp.cir` | Fender-style 2-stage 12AX7 guitar amp (volume pot, bright switch) |
 
@@ -113,7 +117,7 @@ The generated code is completely standalone — zero runtime dependencies on mel
 - Sherman-Morrison rank-1 updates for dynamic potentiometers (O(N^2) not O(N^3))
 - Matrix rebuild for runtime sample rate changes
 - DC blocking filter (5 Hz HPF)
-- Input/Output Level parameters (input defaults to -12 dB for safe levels)
+- Input/Output Level parameters (both default to 0 dB)
 - Optional 2x/4x oversampling (self-contained polyphase half-band IIR)
 - All buffers pre-allocated — zero heap allocation in the audio path
 
@@ -153,7 +157,7 @@ Without labels, params use the component name (e.g. "R_vol", "Switch 0 (C_bright
 
 - **SPICE Netlist Parser**: Industry-standard SPICE netlists with `.model` and `.subckt` support
 - **MNA/DK Solver**: Modified Nodal Analysis with Discrete K-method (Yeh 2009)
-- **7 Device Models**: Diode, BJT (Ebers-Moll/Gummel-Poon), JFET, MOSFET, vacuum tube (Koren), op-amp
+- **Device Models**: Diode, BJT (Ebers-Moll/Gummel-Poon), JFET, MOSFET, vacuum tube (Koren), op-amp, CdS LDR
 - **Dynamic Controls**: `.pot` (potentiometers) and `.switch` (ganged component switching) directives
 - **Real-Time Safe**: Zero heap allocation in audio callback, no `unsafe` code, f64 precision
 - **Code Generation**: Optimized Rust with compile-time constants, sparse matrices, unrolled loops
@@ -178,20 +182,29 @@ Each crate is useful independently. The pipeline:
 SPICE Netlist → Parser → MNA System → DK Kernel → CircuitIR → Rust Emitter → Source Code
 ```
 
+## Solver Routing
+
+Melange has two solver backends, automatically selected based on circuit complexity:
+
+- **DK solver** (fast, O(M^2) per sample): Used for circuits with 1 or fewer transformer groups and fewer than 10 nonlinear devices. Potentiometers use O(N^2) Sherman-Morrison rank-1 updates — smooth, glitch-free. Typical performance: 100-600x realtime.
+- **Nodal solver** (robust, O(N^2) per sample): Used for complex circuits with multiple transformer groups or many nonlinear devices. Potentiometers trigger a full matrix rebuild on value change. Typical performance: 0.5-1.5x realtime for large circuits.
+
+`melange compile` auto-selects the best solver for each circuit. Override with `--solver dk` or `--solver nodal`.
+
 ## Supported Components
 
 | Component | Runtime | Codegen | Notes |
 |-----------|---------|---------|-------|
 | Resistor/Capacitor/Inductor | yes | yes | Trapezoidal companion models |
 | Diode | yes | yes | Shockley equation, series resistance, LED |
-| BJT | yes | yes | Ebers-Moll, Gummel-Poon, self-heating, charge storage |
+| BJT | yes | yes | Ebers-Moll, Gummel-Poon, junction capacitances, parasitic R |
 | JFET | yes | yes | Shichman-Hodges 2D (triode + saturation) |
 | MOSFET | yes | yes | Level 1 SPICE 2D (triode + saturation) |
 | Vacuum Tube | yes | yes | Koren triode + Leach grid current + lambda |
 | Op-Amp | yes | yes | VCCS macromodel (linear) |
 | CdS LDR | yes | — | VTL5C3/4, NSL-32 with asymmetric envelope |
 | Voltage Source | yes | yes | DC (Norton equivalent) |
-| Potentiometer | yes | yes | Sherman-Morrison rank-1 updates |
+| Potentiometer | — | yes | Sherman-Morrison rank-1 updates (codegen only) |
 | Switch | — | yes | Ganged R/C/L component switching |
 
 ## Quick Start (Library)
@@ -221,20 +234,28 @@ let kernel = DkKernel::from_mna(&mna, 44100.0)?;
 melange compile <circuit> -o <output>     Compile circuit to Rust code or plugin project
 melange simulate <circuit> -o <output>    Simulate circuit, write WAV output
 melange analyze <circuit>                 Analyze circuit frequency response
-melange validate <circuit> -r <ref>       Compare against SPICE reference
+melange validate <circuit>                 Compare against ngspice reference
 melange nodes <circuit>                   List nodes and devices in a circuit
 melange builtins                          List built-in circuits
 melange sources add <name> <url>          Add a git repo as a circuit source
 melange sources list                      List configured sources
+melange sources show <name>               Show details of a circuit source
+melange sources remove <name>             Remove a circuit source
 melange cache list|clear|stats            Manage cached circuits
 ```
 
 Key `compile` options:
 ```
 --format plugin          Generate a complete nih-plug project (default: code)
---no-level-params        Omit Input/Output Level parameters from plugin
---output-scale <f64>     Scale factor for circuit output (default: 1.0)
 -s, --sample-rate <Hz>   Target sample rate (default: 48000)
+--solver <auto|dk|nodal> Solver backend (default: auto)
+--oversampling <1|2|4>   Oversampling factor (default: 1)
+--output-scale <f64>     Scale factor for circuit output (default: 1.0)
+--no-level-params        Omit Input/Output Level parameters from plugin
+--no-dc-block            Disable DC blocking filter
+--mono                   Generate mono plugin (default: stereo)
+-I, --input-node <name>  Input node name (default: "in")
+-n, --output-node <name> Output node name (default: "out")
 ```
 
 Key `analyze` options:
@@ -255,7 +276,7 @@ Circuits can be referenced as:
 
 ## Requirements
 
-- Rust 1.85+ (2024 edition)
+- Rust 1.85+ (2021 edition)
 - No external dependencies for core library or generated code
 - Optional: ngspice for SPICE validation
 - Optional: zig + cargo-zigbuild for macOS cross-compilation
@@ -264,7 +285,7 @@ Circuits can be referenced as:
 
 ```bash
 cargo build --workspace       # Build everything
-cargo test --workspace        # Run all tests (~730 tests)
+cargo test --workspace        # Run all tests (~990 tests)
 cargo run -p melange-cli      # Run the CLI
 ```
 
@@ -272,14 +293,45 @@ cargo run -p melange-cli      # Run the CLI
 
 Melange was extracted from the [OpenWurli](https://github.com/openwurli/openwurli) project, a Wurlitzer 200A virtual instrument. The DK solver, device models, and validation pipeline were generalized into this standalone toolkit.
 
+## Known Limitations
+
+- **Fixed temperature (27°C)**: All device models simulate at 300.15K. Temperature-dependent effects (IS, VT scaling) are not modeled at runtime.
+- **Triode tubes only**: Pentode tubes (EL84, 6L6, EL34) are not yet supported. 12AX7, 12AU7, and other preamp triodes work fully.
+- **Ideal transformers**: Coupled inductors assume constant coupling coefficient with no core saturation or hysteresis. Suitable for AC signal coupling, not power transformer simulation.
+- **Linear op-amps**: Op-amp model is a VCCS macromodel with no slew-rate limiting or output saturation.
+- **No noise simulation**: Shot noise, thermal noise, and 1/f noise are not modeled.
+- **Max 16 nonlinear devices** per circuit (DK path). Circuits exceeding this use the nodal solver.
+
 ## License
 
 This project is licensed under the [GNU General Public License v3.0 or later](LICENSE) (GPL-3.0-or-later).
 
 Melange includes code derived from the [OpenWurli](https://github.com/openwurli/openwurli) project, which is licensed under GPL-3.0.
 
+> **Melange needs additional maintainers!** The current maintainer is a SWE but does not have the necessary electrical engineering or Rust expertise to maintain a project of this complexity long-term. If you've got the skills to help, please get in touch.
+
 ## Acknowledgments
 
-- David Yeh's 2009 thesis on the Discrete K-method
-- SPICE — the original circuit simulator by Larry Nagel
-- The audio DSP community
+Melange builds on decades of research in circuit simulation and audio DSP:
+
+**Core methods:**
+- David Yeh — Discrete K-method for audio circuit simulation (PhD thesis, Stanford, 2009)
+- Larry Nagel — SPICE (UC Berkeley); SPICE3f5 source for pnjlim/fetlim voltage limiting
+- Ho, Ruehli, Brennan — Modified Nodal Analysis (IEEE Trans. CAS, 1975)
+- Sherman & Morrison — rank-1 matrix update formula (used for dynamic potentiometers)
+
+**Device models:**
+- Hermann Gummel & H.C. Poon — BJT model with Early effect and high-injection (Bell Labs, 1970)
+- Jiri Shichman & David Hodges — JFET model (IEEE JSSC, 1968)
+- Norman Koren — triode vacuum tube model (1996)
+- Marshall Leach — grid current model for vacuum tubes
+- William Shockley — semiconductor diode equation
+
+**DSP & filters:**
+- Olli Niemitalo — polyphase allpass half-band IIR filters for oversampling
+- Vadim Zavalishin — topology-preserving transform (TPT) filters
+
+**References:**
+- Pillage, Rohrer, Visweswariah — *Electronic Circuit and System Simulation Methods* (McGraw-Hill, 1995)
+- [Hack Audio circuit modeling tutorial](https://hackaudio.com/tutorial-courses/audio-circuit-modeling-tutorial/)
+- [TU Delft analog electronics webbook](https://analog-electronics.ewi.tudelft.nl/webbook/SED/)

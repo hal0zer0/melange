@@ -47,8 +47,9 @@ fn main() {
         device_slots.clone(),
         input_node - 1,
         output_node - 1,
-    );
-    runtime.input_conductance = input_conductance;
+    )
+    .expect("Failed to create nodal solver");
+    runtime.set_input_conductance(input_conductance);
     runtime.initialize_dc_op(&mna, &device_slots);
 
     // ── Step 3: Build codegen IR ───────────────────────────────────────
@@ -88,8 +89,8 @@ fn main() {
     // ── Step 4: Initialize codegen state from RUNTIME's post-warmup state ─
     // Force bit-identical initial conditions to isolate per-sample divergence.
     // Both paths will start from the exact same v_prev and i_nl_prev.
-    let mut cg_v_prev = runtime.v_prev.clone();
-    let mut cg_i_nl_prev = runtime.i_nl_prev.clone();
+    let mut cg_v_prev = runtime.v_prev().to_vec();
+    let mut cg_i_nl_prev = runtime.i_nl_prev().to_vec();
     let mut cg_input_prev = 0.0f64; // runtime's input_prev is also 0.0 after silence warm-up
 
     println!("\nInitial state: FORCED IDENTICAL (copied from runtime post-warmup)");
@@ -224,7 +225,7 @@ fn main() {
         let mut sample_max_v_diff = 0.0f64;
         let mut sample_max_v_idx = 0;
         for i in 0..n {
-            let diff = (runtime.v_prev[i] - cg_v_prev[i]).abs();
+            let diff = (runtime.v_prev()[i] - cg_v_prev[i]).abs();
             if diff > sample_max_v_diff {
                 sample_max_v_diff = diff;
                 sample_max_v_idx = i;
@@ -235,7 +236,7 @@ fn main() {
         let mut sample_max_i_diff = 0.0f64;
         let mut sample_max_i_idx = 0;
         for i in 0..m {
-            let diff = (runtime.i_nl_prev[i] - cg_i_nl_prev[i]).abs();
+            let diff = (runtime.i_nl_prev()[i] - cg_i_nl_prev[i]).abs();
             if diff > sample_max_i_diff {
                 sample_max_i_diff = diff;
                 sample_max_i_idx = i;
@@ -268,8 +269,8 @@ fn main() {
                 .map(|i| {
                     (
                         i,
-                        (runtime.v_prev[i] - cg_v_prev[i]).abs(),
-                        runtime.v_prev[i],
+                        (runtime.v_prev()[i] - cg_v_prev[i]).abs(),
+                        runtime.v_prev()[i],
                         cg_v_prev[i],
                     )
                 })
@@ -285,11 +286,11 @@ fn main() {
             if m > 0 {
                 println!("\n  Nonlinear currents:");
                 for i in 0..m {
-                    let diff = (runtime.i_nl_prev[i] - cg_i_nl_prev[i]).abs();
+                    let diff = (runtime.i_nl_prev()[i] - cg_i_nl_prev[i]).abs();
                     if diff > 1e-15 {
                         println!(
                             "    i_nl[{:2}]: diff={:+.6e}  runtime={:+.10e}  codegen={:+.10e}",
-                            i, diff, runtime.i_nl_prev[i], cg_i_nl_prev[i]
+                            i, diff, runtime.i_nl_prev()[i], cg_i_nl_prev[i]
                         );
                     }
                 }
@@ -322,8 +323,8 @@ fn main() {
         Some(s) => println!("  First divergence > 1e-10: sample {}", s),
         None => println!("  No divergence > 1e-10 detected"),
     }
-    println!("  Runtime BE fallbacks: {}", runtime.diag_be_fallback_count);
-    println!("  Runtime NR max-iter: {}", runtime.diag_nr_max_iter_count);
+    println!("  Runtime BE fallbacks: {}", runtime.diag_be_fallback_count());
+    println!("  Runtime NR max-iter: {}", runtime.diag_nr_max_iter_count());
 }
 
 /// Replicate the codegen's process_sample algorithm using IR matrices.

@@ -274,13 +274,13 @@ pub fn validate_circuit_with_options(
 
     // Strip VIN for melange (auto-detect and remove input voltage source)
     let (stripped_netlist, dc_offset) = strip_vin_source(&netlist_str, input_node);
-    if let Some(dc) = dc_offset
-        && dc.abs() > 1e-12
-    {
-        log::warn!(
-            "VIN has DC offset of {:.3}V — melange will not reproduce this offset",
-            dc
-        );
+    if let Some(dc) = dc_offset {
+        if dc.abs() > 1e-12 {
+            log::warn!(
+                "VIN has DC offset of {:.3}V — melange will not reproduce this offset",
+                dc
+            );
+        }
     }
 
     // Calculate timing parameters
@@ -527,7 +527,7 @@ fn run_melange_solver_from_str(
     let mut solver =
         melange_solver::solver::CircuitSolver::new(kernel, devices, input_node, output_node)
             .map_err(|e| ValidationError::Solver(format!("Solver error: {}", e)))?;
-    solver.input_conductance = input_conductance;
+    solver.set_input_conductance(input_conductance);
 
     // Initialize nonlinear DC operating point (essential for BJT circuits)
     if mna.m > 0 {
@@ -702,10 +702,10 @@ fn find_diode_model(
 ) -> (Option<f64>, Option<f64>) {
     // First, find the device to get its model name
     let model_name = netlist.elements.iter().find_map(|e| {
-        if let melange_solver::parser::Element::Diode { name, model, .. } = e
-            && name == device_name
-        {
-            return Some(model.clone());
+        if let melange_solver::parser::Element::Diode { name, model, .. } = e {
+            if name == device_name {
+                return Some(model.clone());
+            }
         }
         None
     });
@@ -743,10 +743,10 @@ fn find_bjt_model(
 ) -> (Option<f64>, Option<f64>, Option<f64>) {
     // First, find the device to get its model name
     let model_name = netlist.elements.iter().find_map(|e| {
-        if let melange_solver::parser::Element::Bjt { name, model, .. } = e
-            && name == device_name
-        {
-            return Some(model.clone());
+        if let melange_solver::parser::Element::Bjt { name, model, .. } = e {
+            if name == device_name {
+                return Some(model.clone());
+            }
         }
         None
     });
@@ -788,10 +788,10 @@ fn find_bjt_polarity(
 ) -> melange_devices::BjtPolarity {
     // First, find the device to get its model name
     let model_name = netlist.elements.iter().find_map(|e| {
-        if let melange_solver::parser::Element::Bjt { name, model, .. } = e
-            && name == device_name
-        {
-            return Some(model.clone());
+        if let melange_solver::parser::Element::Bjt { name, model, .. } = e {
+            if name == device_name {
+                return Some(model.clone());
+            }
         }
         None
     });
@@ -823,10 +823,10 @@ fn find_bjt_nf(
     device_name: &str,
 ) -> f64 {
     let model_name = netlist.elements.iter().find_map(|e| {
-        if let melange_solver::parser::Element::Bjt { name, model, .. } = e
-            && name == device_name
-        {
-            return Some(model.clone());
+        if let melange_solver::parser::Element::Bjt { name, model, .. } = e {
+            if name == device_name {
+                return Some(model.clone());
+            }
         }
         None
     });
@@ -849,8 +849,8 @@ fn find_bjt_nf(
 /// Build device slots for the DC OP solver from a parsed netlist
 fn build_device_slots_from_netlist(
     netlist: &melange_solver::parser::Netlist,
-) -> Vec<melange_solver::codegen::ir::DeviceSlot> {
-    use melange_solver::codegen::ir::{
+) -> Vec<melange_solver::device_types::DeviceSlot> {
+    use melange_solver::device_types::{
         BjtParams, DeviceParams, DeviceSlot, DeviceType, DiodeParams,
     };
 
@@ -908,8 +908,11 @@ fn build_device_slots_from_netlist(
                         cje: 0.0,
                         cjc: 0.0,
                         nf: 1.0,
+                        nr: 1.0,
                         ise: 0.0,
                         ne: 1.5,
+                        isc: 0.0,
+                        nc: 2.0,
                         rb: 0.0,
                         rc: 0.0,
                         re: 0.0,

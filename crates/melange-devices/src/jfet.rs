@@ -104,7 +104,8 @@ impl Jfet {
         let vgst = vgs_eff - vp_eff;
 
         if vgst <= 0.0 {
-            return 0.0; // Cutoff
+            // Subthreshold: weak exponential for smooth NR convergence
+            return s * 1e-12 * (vgst / (2.0 * VT_ROOM)).exp().min(1.0);
         }
 
         // Saturation voltage (Vds at which device enters saturation)
@@ -139,7 +140,10 @@ impl Jfet {
         };
         let vgst = vgs_eff - vp_eff;
         if vgst <= 0.0 {
-            return (0.0, 0.0);
+            // Subthreshold: derivative of weak exponential
+            let sub = 1e-12 * (vgst / (2.0 * VT_ROOM)).exp().min(1.0);
+            let gm = if sub < 1e-12 { sub / (2.0 * VT_ROOM) } else { 0.0 };
+            return (gm, 0.0);
         }
 
         let vds_sat = vgst;

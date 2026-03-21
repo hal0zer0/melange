@@ -1,3 +1,6 @@
+//! DSP building blocks for real-time audio: biquad filters, Newton-Raphson helpers, and oversampling.
+//! Part of the [melange](https://github.com/hal0zer0/melange) circuit simulation toolkit.
+
 // melange-primitives: DSP building blocks for real-time circuit simulation
 //
 // Layer 1 of the melange stack. Zero-allocation primitives (no_std planned, not yet enabled):

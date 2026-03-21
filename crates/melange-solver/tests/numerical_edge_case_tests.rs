@@ -65,7 +65,7 @@ fn test_very_small_capacitor_1pf() {
     let in_idx = *mna.node_map.get("in").unwrap() - 1;
     let out_idx = out_idx_raw - 1;
     let mut solver = LinearSolver::new(kernel, in_idx, out_idx);
-    solver.input_conductance = 0.001; // 1/1k
+    solver.set_input_conductance(0.001); // 1/1k
 
     for i in 0..200 {
         let output = solver.process_sample(1.0);
@@ -89,7 +89,7 @@ fn test_very_small_capacitor_100ff() {
     let in_idx = *mna.node_map.get("in").unwrap() - 1;
     let out_idx = *mna.node_map.get("out").unwrap() - 1;
     let mut solver = LinearSolver::new(kernel, in_idx, out_idx);
-    solver.input_conductance = 1.0 / 10000.0;
+    solver.set_input_conductance(1.0 / 10000.0);
 
     for i in 0..100 {
         let output = solver.process_sample(1.0);
@@ -118,7 +118,7 @@ fn test_very_small_capacitor_with_diode() {
     let diode = DiodeShockley::new_room_temp(1e-15, 1.0);
     let devices = vec![DeviceEntry::new_diode(diode, 0)];
     let mut solver = CircuitSolver::new(kernel, devices, in_idx, out_idx).unwrap();
-    solver.input_conductance = 0.001;
+    solver.set_input_conductance(0.001);
 
     for i in 0..200 {
         let output = solver.process_sample(1.0);
@@ -163,7 +163,7 @@ fn test_very_large_resistor_10m() {
     let in_idx = in_idx_raw - 1;
     let out_idx = *mna.node_map.get("out").unwrap() - 1;
     let mut solver = LinearSolver::new(kernel, in_idx, out_idx);
-    solver.input_conductance = 1e-7; // 1/10M
+    solver.set_input_conductance(1e-7); // 1/10M
 
     // With RC = 10M * 1u = 10s = 441,000 samples, the time constant is very long.
     // After 100 samples, output should be very small (barely charged).
@@ -199,7 +199,7 @@ fn test_impedance_mismatch_10m_and_1ohm() {
     let in_idx = *mna.node_map.get("in").unwrap() - 1;
     let out_idx = *mna.node_map.get("out").unwrap() - 1;
     let mut solver = LinearSolver::new(kernel, in_idx, out_idx);
-    solver.input_conductance = 1e-7;
+    solver.set_input_conductance(1e-7);
 
     for i in 0..100 {
         let output = solver.process_sample(1.0);
@@ -283,7 +283,7 @@ fn test_diode_extreme_small_is_in_circuit() {
     let devices = vec![DeviceEntry::new_diode(diode, 0)];
 
     let mut solver = CircuitSolver::new(kernel, devices, in_idx, out_idx).unwrap();
-    solver.input_conductance = 0.001;
+    solver.set_input_conductance(0.001);
 
     for i in 0..200 {
         let output = solver.process_sample(1.0);
@@ -523,7 +523,7 @@ fn test_near_singular_low_impedance_node() {
     let in_idx = *mna.node_map.get("in").unwrap() - 1;
     let out_idx = *mna.node_map.get("out").unwrap() - 1;
     let mut solver = LinearSolver::new(kernel, in_idx, out_idx);
-    solver.input_conductance = 0.001;
+    solver.set_input_conductance(0.001);
 
     // The output node is almost shorted to ground, so output should be ~0
     for i in 0..100 {
@@ -593,7 +593,7 @@ fn test_high_sample_rate_small_cap() {
     let in_idx = *mna.node_map.get("in").unwrap() - 1;
     let out_idx = *mna.node_map.get("out").unwrap() - 1;
     let mut solver = LinearSolver::new(kernel, in_idx, out_idx);
-    solver.input_conductance = 0.001;
+    solver.set_input_conductance(0.001);
 
     for i in 0..100 {
         let output = solver.process_sample(1.0);
@@ -767,7 +767,7 @@ fn test_large_rc_chain() {
     let in_idx = *mna.node_map.get("in").unwrap() - 1;
     let out_idx = *mna.node_map.get("out").unwrap() - 1;
     let mut solver = LinearSolver::new(kernel, in_idx, out_idx);
-    solver.input_conductance = 0.001;
+    solver.set_input_conductance(0.001);
 
     for i in 0..500 {
         let output = solver.process_sample(1.0);
@@ -855,7 +855,7 @@ fn test_very_small_inductor() {
     let in_idx = *mna.node_map.get("in").unwrap() - 1;
     let out_idx = *mna.node_map.get("out").unwrap() - 1;
     let mut solver = LinearSolver::new(kernel, in_idx, out_idx);
-    solver.input_conductance = 0.001;
+    solver.set_input_conductance(0.001);
 
     for i in 0..200 {
         let output = solver.process_sample(1.0);

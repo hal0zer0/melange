@@ -12,7 +12,7 @@ path = "src/main.rs"
 [dependencies]
 melange-primitives = { workspace = true }
 melange-devices = { workspace = true }
-melange-solver = { workspace = true }
+melange-solver = { workspace = true, features = ["codegen"] }
 melange-validate = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 anyhow = "1.0"

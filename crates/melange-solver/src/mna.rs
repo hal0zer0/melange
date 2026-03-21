@@ -579,8 +579,8 @@ impl MnaSystem {
     /// Must be called BEFORE building the DK kernel (so caps are included in A = G + 2C/T).
     ///
     /// Device slots must be in the same order as `self.nonlinear_devices`.
-    pub fn stamp_device_junction_caps(&mut self, device_slots: &[crate::codegen::ir::DeviceSlot]) {
-        use crate::codegen::ir::DeviceParams;
+    pub fn stamp_device_junction_caps(&mut self, device_slots: &[crate::device_types::DeviceSlot]) {
+        use crate::device_types::DeviceParams;
 
         // Collect (node_a, node_b, cap) tuples first to avoid borrow conflict
         // (self.nonlinear_devices borrowed immutably, self.stamp_capacitor_raw borrows mutably).
@@ -688,8 +688,8 @@ impl MnaSystem {
     ///
     /// Must be called AFTER the MNA is fully built (all matrices at n_aug dimension)
     /// but BEFORE DK kernel construction.
-    pub fn expand_bjt_internal_nodes(&mut self, device_slots: &[crate::codegen::ir::DeviceSlot]) {
-        use crate::codegen::ir::{DeviceParams, DeviceType};
+    pub fn expand_bjt_internal_nodes(&mut self, device_slots: &[crate::device_types::DeviceSlot]) {
+        use crate::device_types::{DeviceParams, DeviceType};
 
         // Collect expansion info first
         struct Expansion {
@@ -968,10 +968,12 @@ impl MnaSystem {
     /// constraints with no capacitance. In A_neg (g_sign < 0), those rows must be ALL
     /// ZEROS because there is no trapezoidal history for algebraic constraints.
     #[allow(clippy::needless_range_loop)]
-    fn build_discretized_matrix(&self, sample_rate: f64, g_sign: f64) -> Vec<Vec<f64>> {
+    fn build_discretized_matrix(&self, sample_rate: f64, g_sign: f64) -> Result<Vec<Vec<f64>>, MnaError> {
         if !(sample_rate > 0.0 && sample_rate.is_finite()) {
-            log::warn!("invalid sample_rate {}, using 44100.0", sample_rate);
-            return self.build_discretized_matrix(44100.0, g_sign);
+            return Err(MnaError::InvalidParameter(format!(
+                "invalid sample_rate: {} (must be positive and finite)",
+                sample_rate
+            )));
         }
         let t = 1.0 / sample_rate;
         let alpha = 2.0 / t; // 2/T for trapezoidal
@@ -1115,16 +1117,15 @@ impl MnaSystem {
             }
         }
 
-        mat
+        Ok(mat)
     }
 
     /// Get the A matrix for a given sample rate (trapezoidal discretization).
     ///
     /// A = G + (2/T)*C (includes inductor companion model conductances)
     ///
-    /// # Panics
-    /// Panics if `sample_rate` is not positive and finite.
-    pub fn get_a_matrix(&self, sample_rate: f64) -> Vec<Vec<f64>> {
+    /// Returns `Err(MnaError::InvalidParameter)` if `sample_rate` is not positive and finite.
+    pub fn get_a_matrix(&self, sample_rate: f64) -> Result<Vec<Vec<f64>>, MnaError> {
         self.build_discretized_matrix(sample_rate, 1.0)
     }
 
@@ -1132,9 +1133,8 @@ impl MnaSystem {
     ///
     /// A_neg = (2/T)*C - G (includes inductor companion model)
     ///
-    /// # Panics
-    /// Panics if `sample_rate` is not positive and finite.
-    pub fn get_a_neg_matrix(&self, sample_rate: f64) -> Vec<Vec<f64>> {
+    /// Returns `Err(MnaError::InvalidParameter)` if `sample_rate` is not positive and finite.
+    pub fn get_a_neg_matrix(&self, sample_rate: f64) -> Result<Vec<Vec<f64>>, MnaError> {
         self.build_discretized_matrix(sample_rate, -1.0)
     }
 
@@ -1394,6 +1394,10 @@ pub const DC_SHORT_CONDUCTANCE: f64 = 1e3;
 /// physical junction capacitance without introducing artificial ground coupling.
 pub const PARASITIC_CAP: f64 = 10e-12;
 
+/// Maximum circuit node count. Prevents unbounded allocation from pathological netlists.
+/// 256 is generous for any real audio circuit (Pultec EQP-1A uses ~41 nodes).
+pub const MAX_N: usize = 256;
+
 /// Error type for MNA assembly.
 #[derive(Debug, Clone)]
 pub enum MnaError {
@@ -1407,6 +1411,8 @@ pub enum MnaError {
     InvalidParameter(String),
     /// A circuit topology error (e.g., unknown node reference).
     TopologyError(String),
+    /// An upstream parse error.
+    Parse(crate::parser::ParseError),
 }
 
 impl std::fmt::Display for MnaError {
@@ -1425,11 +1431,18 @@ impl std::fmt::Display for MnaError {
             }
             MnaError::InvalidParameter(msg) => write!(f, "MNA error: {}", msg),
             MnaError::TopologyError(msg) => write!(f, "MNA error: {}", msg),
+            MnaError::Parse(e) => write!(f, "MNA error: {}", e),
         }
     }
 }
 
 impl std::error::Error for MnaError {}
+
+impl From<crate::parser::ParseError> for MnaError {
+    fn from(e: crate::parser::ParseError) -> Self {
+        MnaError::Parse(e)
+    }
+}
 
 /// Invert a small NxN matrix using Gaussian elimination with partial pivoting.
 /// Used for multi-winding transformer inductance matrix inversion.
@@ -1677,23 +1690,27 @@ impl MnaBuilder {
                 .iter()
                 .filter(|e| matches!(e, Element::Opamp { .. })),
         ) {
-            if let Element::Opamp { model, .. } = elem
-                && let Some(m) = netlist
+            if let Element::Opamp { model, .. } = elem {
+                if let Some(m) = netlist
                     .models
                     .iter()
                     .find(|m| m.name.eq_ignore_ascii_case(model))
-            {
-                if m.model_type != "OA" {
-                    return Err(MnaError::InvalidParameter(format!(
-                        "Op-amp {} references model '{}' with type '{}', expected 'OA'",
-                        model, m.name, m.model_type
-                    )));
-                }
-                for (key, val) in &m.params {
-                    match key.to_ascii_uppercase().as_str() {
-                        "AOL" => oa.aol = *val,
-                        "ROUT" => oa.r_out = *val,
-                        _ => {} // Ignore unknown params (GBW, etc.)
+                {
+                    if m.model_type != "OA" {
+                        return Err(MnaError::InvalidParameter(format!(
+                            "Op-amp {} references model '{}' with type '{}', expected 'OA'",
+                            model, m.name, m.model_type
+                        )));
+                    }
+                    for (key, val) in &m.params {
+                        match key.to_ascii_uppercase().as_str() {
+                            "AOL" => oa.aol = *val,
+                            "ROUT" => oa.r_out = *val,
+                            _ => log::warn!(
+                                ".model {}: unrecognized parameter '{}' (ignored)",
+                                m.name, key
+                            ),
+                        }
                     }
                 }
             }
@@ -1701,6 +1718,11 @@ impl MnaBuilder {
 
         // Create MNA system with correct dimensions
         let n = self.next_node_idx - 1; // Exclude ground
+        if n > MAX_N {
+            return Err(MnaError::TopologyError(format!(
+                "Circuit has {} nodes, exceeding MAX_N={}", n, MAX_N
+            )));
+        }
         let m = self.total_dimension;
         let num_devices = self.nonlinear_devices.len();
         let num_vs = self.voltage_sources.len();
@@ -2289,39 +2311,39 @@ impl MnaBuilder {
         //                          G[k][ctrl+]=-gain, G[k][ctrl-]=+gain
         let mut vcvs_idx = 0;
         for elem in &self.elements {
-            if let ElementType::Vcvs = elem.element_type
-                && elem.nodes.len() >= 4
-            {
-                let k = n_base + num_vs + vcvs_idx;
-                let out_p = elem.nodes[0];
-                let out_n = elem.nodes[1];
-                let ctrl_p = elem.nodes[2];
-                let ctrl_n = elem.nodes[3];
-                let gain = elem.value;
+            if let ElementType::Vcvs = elem.element_type {
+                if elem.nodes.len() >= 4 {
+                    let k = n_base + num_vs + vcvs_idx;
+                    let out_p = elem.nodes[0];
+                    let out_n = elem.nodes[1];
+                    let ctrl_p = elem.nodes[2];
+                    let ctrl_n = elem.nodes[3];
+                    let gain = elem.value;
 
-                // Current injection column: j_vcvs enters out+, exits out-
-                if out_p > 0 {
-                    mna.g[out_p - 1][k] += 1.0;
-                }
-                if out_n > 0 {
-                    mna.g[out_n - 1][k] -= 1.0;
-                }
-                // KVL constraint row: V_out+ - V_out- - gain*(V_ctrl+ - V_ctrl-) = 0
-                if out_p > 0 {
-                    mna.g[k][out_p - 1] += 1.0;
-                }
-                if out_n > 0 {
-                    mna.g[k][out_n - 1] -= 1.0;
-                }
-                if ctrl_p > 0 {
-                    mna.g[k][ctrl_p - 1] -= gain;
-                }
-                if ctrl_n > 0 {
-                    mna.g[k][ctrl_n - 1] += gain;
-                }
+                    // Current injection column: j_vcvs enters out+, exits out-
+                    if out_p > 0 {
+                        mna.g[out_p - 1][k] += 1.0;
+                    }
+                    if out_n > 0 {
+                        mna.g[out_n - 1][k] -= 1.0;
+                    }
+                    // KVL constraint row: V_out+ - V_out- - gain*(V_ctrl+ - V_ctrl-) = 0
+                    if out_p > 0 {
+                        mna.g[k][out_p - 1] += 1.0;
+                    }
+                    if out_n > 0 {
+                        mna.g[k][out_n - 1] -= 1.0;
+                    }
+                    if ctrl_p > 0 {
+                        mna.g[k][ctrl_p - 1] -= gain;
+                    }
+                    if ctrl_n > 0 {
+                        mna.g[k][ctrl_n - 1] += gain;
+                    }
 
-                mna.vcvs_sources.push(VcvsAugInfo { aug_idx: vcvs_idx });
-                vcvs_idx += 1;
+                    mna.vcvs_sources.push(VcvsAugInfo { aug_idx: vcvs_idx });
+                    vcvs_idx += 1;
+                }
             }
         }
 

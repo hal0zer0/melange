@@ -102,6 +102,18 @@ enum Commands {
         /// Trades second-order accuracy for first-order (slight HF rolloff).
         #[arg(long)]
         backward_euler: bool,
+
+        /// Plugin display name (defaults to capitalized circuit filename)
+        #[arg(long)]
+        name: Option<String>,
+
+        /// Generate mono (1-channel) plugin instead of stereo
+        #[arg(long)]
+        mono: bool,
+
+        /// Add wet/dry mix parameter to generated plugin
+        #[arg(long)]
+        wet_dry_mix: bool,
     },
 
     /// Validate circuit against ngspice reference simulation
@@ -330,6 +342,9 @@ fn main() -> Result<()> {
             oversampling,
             solver,
             backward_euler,
+            name,
+            mono,
+            wet_dry_mix,
         } => {
             // Validate numeric CLI parameters
             if sample_rate <= 0.0 || !sample_rate.is_finite() {
@@ -369,6 +384,9 @@ fn main() -> Result<()> {
                 no_dc_block,
                 &solver,
                 backward_euler,
+                name.as_deref(),
+                mono,
+                wet_dry_mix,
             )
         }
         Commands::Validate {
@@ -509,6 +527,9 @@ fn compile_circuit_source(
     no_dc_block: bool,
     solver_override: &str,
     backward_euler: bool,
+    plugin_name: Option<&str>,
+    mono: bool,
+    wet_dry_mix: bool,
 ) -> Result<()> {
     use melange_solver::{
         codegen::{CodeGenerator, CodegenConfig},
@@ -1061,7 +1082,12 @@ fn compile_circuit_source(
                 })
                 .collect();
 
-            plugin_template::generate_plugin_project(
+            let plugin_options = plugin_template::PluginOptions {
+                plugin_name,
+                mono,
+                wet_dry_mix,
+            };
+            plugin_template::generate_plugin_project_with_oversampling(
                 &project_dir,
                 &generated.code,
                 &circuit_name,
@@ -1070,6 +1096,8 @@ fn compile_circuit_source(
                 &switch_params,
                 output_node_indices.len(),
                 has_inductors_compile,
+                oversampling,
+                &plugin_options,
             )?;
 
             println!("  ✓ Done!");
@@ -1680,7 +1708,7 @@ fn simulate_circuit_source(
         // Linear circuit: use LinearSolver
         let mut solver =
             melange_solver::solver::LinearSolver::new(kernel, input_node_idx, output_node_idx);
-        solver.input_conductance = input_conductance;
+        solver.set_input_conductance(input_conductance);
 
         println!("  Linear solver ready");
         println!();
@@ -1692,11 +1720,11 @@ fn simulate_circuit_source(
             output_samples.push(solver.process_sample(s));
         }
 
-        eprintln!("  Peak output: {:.2}V", solver.diag_peak_output);
-        if solver.diag_clamp_count > 0 {
+        eprintln!("  Peak output: {:.2}V", solver.diag_peak_output());
+        if solver.diag_clamp_count() > 0 {
             eprintln!(
                 "  WARNING: Output exceeded ±10V {} times -- try reducing --amplitude or adding gain reduction to the circuit",
-                solver.diag_clamp_count
+                solver.diag_clamp_count()
             );
         }
 
@@ -1711,8 +1739,9 @@ fn simulate_circuit_source(
             device_slots.clone(),
             input_node_idx,
             output_node_idx,
-        );
-        solver.input_conductance = input_conductance;
+        )
+        .with_context(|| "Failed to create nodal solver")?;
+        solver.set_input_conductance(input_conductance);
 
         if has_nonlinear {
             println!("  Initializing DC operating point (nodal)...");
@@ -1734,7 +1763,7 @@ fn simulate_circuit_source(
                 .map(|d| d.dimension)
                 .sum::<usize>(),
             n_inductor_vars,
-            solver.v_prev.len()
+            solver.v_prev().len()
         );
         println!();
 
@@ -1745,24 +1774,24 @@ fn simulate_circuit_source(
             output_samples.push(solver.process_sample(s));
         }
 
-        eprintln!("  Peak output: {:.2}V", solver.diag_peak_output);
-        if solver.diag_clamp_count > 0 {
+        eprintln!("  Peak output: {:.2}V", solver.diag_peak_output());
+        if solver.diag_clamp_count() > 0 {
             eprintln!(
                 "  WARNING: Output exceeded ±10V {} times -- try reducing --amplitude or adding gain reduction to the circuit",
-                solver.diag_clamp_count
+                solver.diag_clamp_count()
             );
         }
-        if solver.diag_nr_max_iter_count > 0 {
+        if solver.diag_nr_max_iter_count() > 0 {
             eprintln!(
                 "  NR max iterations: {} times",
-                solver.diag_nr_max_iter_count
+                solver.diag_nr_max_iter_count()
             );
         }
-        if solver.diag_be_fallback_count > 0 {
-            eprintln!("  BE fallback: {} samples", solver.diag_be_fallback_count);
+        if solver.diag_be_fallback_count() > 0 {
+            eprintln!("  BE fallback: {} samples", solver.diag_be_fallback_count());
         }
-        if solver.diag_nan_reset_count > 0 {
-            eprintln!("  NaN resets: {}", solver.diag_nan_reset_count);
+        if solver.diag_nan_reset_count() > 0 {
+            eprintln!("  NaN resets: {}", solver.diag_nan_reset_count());
         }
 
         write_wav(opts.output, actual_sample_rate, &output_samples)?;
@@ -1770,7 +1799,7 @@ fn simulate_circuit_source(
         // Nonlinear circuit: use CircuitSolver (DK method)
         let mut solver = CircuitSolver::new(kernel, devices, input_node_idx, output_node_idx)
             .with_context(|| "Failed to create circuit solver")?;
-        solver.input_conductance = input_conductance;
+        solver.set_input_conductance(input_conductance);
 
         // Apply K_eff parasitic R corrections for BJTs
         {
@@ -1817,21 +1846,21 @@ fn simulate_circuit_source(
             output_samples.push(solver.process_sample(s));
         }
 
-        eprintln!("  Peak output: {:.2}V", solver.diag_peak_output);
-        if solver.diag_clamp_count > 0 {
+        eprintln!("  Peak output: {:.2}V", solver.diag_peak_output());
+        if solver.diag_clamp_count() > 0 {
             eprintln!(
                 "  WARNING: Output exceeded ±10V {} times -- try reducing --amplitude or adding gain reduction to the circuit",
-                solver.diag_clamp_count
+                solver.diag_clamp_count()
             );
         }
-        if solver.diag_nr_max_iter_count > 0 {
+        if solver.diag_nr_max_iter_count() > 0 {
             eprintln!(
                 "  NR max iterations: {} times",
-                solver.diag_nr_max_iter_count
+                solver.diag_nr_max_iter_count()
             );
         }
-        if solver.diag_nan_reset_count > 0 {
-            eprintln!("  NaN resets: {}", solver.diag_nan_reset_count);
+        if solver.diag_nan_reset_count() > 0 {
+            eprintln!("  NaN resets: {}", solver.diag_nan_reset_count());
         }
 
         write_wav(opts.output, actual_sample_rate, &output_samples)?;
@@ -1939,10 +1968,11 @@ fn analyze_freq_response(
                 if let melange_solver::parser::Element::Resistor {
                     name: n, value: v, ..
                 } = e
-                    && n.eq_ignore_ascii_case(&resistor_name)
                 {
-                    *v = value;
-                    return true;
+                    if n.eq_ignore_ascii_case(&resistor_name) {
+                        *v = value;
+                        return true;
+                    }
                 }
                 false
             });
@@ -1966,10 +1996,11 @@ fn analyze_freq_response(
                     if let melange_solver::parser::Element::Resistor {
                         name: n, value: v, ..
                     } = e
-                        && n.eq_ignore_ascii_case(&pot.resistor_name)
                     {
-                        *v = default;
-                        break;
+                        if n.eq_ignore_ascii_case(&pot.resistor_name) {
+                            *v = default;
+                            break;
+                        }
                     }
                 }
             }
@@ -2162,8 +2193,9 @@ fn analyze_freq_response(
             device_slots.clone(),
             input_node_idx,
             output_node_idx,
-        );
-        solver.input_conductance = input_conductance;
+        )
+        .with_context(|| "Failed to create nodal solver")?;
+        solver.set_input_conductance(input_conductance);
         solver.initialize_dc_op(&mna, &device_slots);
         Some(BaseSolver::Nodal(solver))
     } else if has_nonlinear {
@@ -2171,7 +2203,7 @@ fn analyze_freq_response(
         let mut solver =
             CircuitSolver::new(kernel.clone(), devices, input_node_idx, output_node_idx)
                 .with_context(|| "Failed to create circuit solver")?;
-        solver.input_conductance = input_conductance;
+        solver.set_input_conductance(input_conductance);
         // Apply K_eff parasitic R corrections for BJTs
         {
             let mut k_corrections = Vec::new();
@@ -2201,7 +2233,7 @@ fn analyze_freq_response(
         let (gain_db, phase_deg) = match &base_solver {
             None => {
                 let mut solver = LinearSolver::new(kernel.clone(), input_node_idx, output_node_idx);
-                solver.input_conductance = input_conductance;
+                solver.set_input_conductance(input_conductance);
                 measure_at_frequency(
                     &mut SolverWrapper::Linear(&mut solver),
                     freq,
@@ -2720,8 +2752,11 @@ fn build_device_slots(
                         cje: find_param(&model_name, "CJE").unwrap_or(0.0),
                         cjc: find_param(&model_name, "CJC").unwrap_or(0.0),
                         nf: find_param(&model_name, "NF").unwrap_or(1.0),
+                        nr: find_param(&model_name, "NR").unwrap_or(1.0),
                         ise: find_param(&model_name, "ISE").unwrap_or(0.0),
                         ne: find_param(&model_name, "NE").unwrap_or(1.5),
+                        isc: find_param(&model_name, "ISC").unwrap_or(0.0),
+                        nc: find_param(&model_name, "NC").unwrap_or(2.0),
                         rb: find_param(&model_name, "RB").unwrap_or(0.0),
                         rc: find_param(&model_name, "RC").unwrap_or(0.0),
                         re: find_param(&model_name, "RE").unwrap_or(0.0),
@@ -2915,8 +2950,11 @@ fn build_device_slots(
                         cje: find_param(&model_name, "CJE").unwrap_or(0.0),
                         cjc: find_param(&model_name, "CJC").unwrap_or(0.0),
                         nf: find_param(&model_name, "NF").unwrap_or(1.0),
+                        nr: find_param(&model_name, "NR").unwrap_or(1.0),
                         ise: find_param(&model_name, "ISE").unwrap_or(0.0),
                         ne: find_param(&model_name, "NE").unwrap_or(1.5),
+                        isc: find_param(&model_name, "ISC").unwrap_or(0.0),
+                        nc: find_param(&model_name, "NC").unwrap_or(2.0),
                         rb: find_param(&model_name, "RB").unwrap_or(0.0),
                         rc: find_param(&model_name, "RC").unwrap_or(0.0),
                         re: find_param(&model_name, "RE").unwrap_or(0.0),

@@ -3,8 +3,9 @@
 //! Validates that the DC OP solver correctly finds bias points for
 //! circuits with diodes and BJTs.
 
-use melange_solver::codegen::ir::{
-    BjtParams, CircuitIR, DeviceParams, DeviceSlot, DeviceType, DiodeParams,
+use melange_solver::codegen::ir::CircuitIR;
+use melange_solver::device_types::{
+    BjtParams, DeviceParams, DeviceSlot, DeviceType, DiodeParams,
 };
 use melange_solver::codegen::{CodeGenerator, CodegenConfig};
 use melange_solver::dc_op::{DcOpConfig, DcOpMethod, solve_dc_operating_point};
@@ -595,11 +596,11 @@ fn test_runtime_solver_dc_op_init() {
         .saturating_sub(1);
 
     let mut solver = CircuitSolver::new(kernel, devices, input_node, output_node).unwrap();
-    solver.input_conductance = 1.0;
+    solver.set_input_conductance(1.0);
 
     // Before DC OP init: everything should be zero
     assert!(
-        solver.v_prev.iter().all(|&v| v == 0.0),
+        solver.v_prev().iter().all(|&v| v == 0.0),
         "v_prev should be zero before initialize_dc_op"
     );
 
@@ -608,16 +609,16 @@ fn test_runtime_solver_dc_op_init() {
 
     // After DC OP init: v_prev should have nonzero values
     assert!(
-        solver.v_prev.iter().any(|&v| v.abs() > 0.1),
+        solver.v_prev().iter().any(|&v| v.abs() > 0.1),
         "v_prev should be nonzero after initialize_dc_op: {:?}",
-        solver.v_prev
+        solver.v_prev()
     );
 
     // i_nl_prev should also be nonzero (diode is conducting)
     assert!(
-        solver.i_nl_prev.iter().any(|&i| i.abs() > 1e-6),
+        solver.i_nl_prev().iter().any(|&i| i.abs() > 1e-6),
         "i_nl_prev should be nonzero after initialize_dc_op: {:?}",
-        solver.i_nl_prev
+        solver.i_nl_prev()
     );
 }
 
@@ -682,8 +683,11 @@ fn build_device_slots(netlist: &Netlist, _mna: &MnaSystem) -> Vec<DeviceSlot> {
                         cje: 0.0,
                         cjc: 0.0,
                         nf: 1.0,
+                        nr: 1.0,
                         ise: 0.0,
                         ne: 1.5,
+                        isc: 0.0,
+                        nc: 2.0,
                         rb: 0.0,
                         rc: 0.0,
                         re: 0.0,

@@ -330,7 +330,7 @@ fn run_melange_solver(
 
     // Create solver with matching input_conductance
     let mut solver = CircuitSolver::new(kernel, devices, input_node, output_node).unwrap();
-    solver.input_conductance = input_conductance;
+    solver.set_input_conductance(input_conductance);
 
     // Initialize nonlinear DC operating point (essential for BJT circuits)
     if mna.m > 0 {
@@ -396,8 +396,9 @@ fn run_melange_solver_nodal(
         device_slots.clone(),
         input_node,
         output_node,
-    );
-    solver.input_conductance = input_conductance;
+    )
+    .expect("Failed to create nodal solver");
+    solver.set_input_conductance(input_conductance);
 
     if mna.m > 0 {
         solver.initialize_dc_op(&mna, &device_slots);
@@ -773,8 +774,8 @@ fn find_tube_device(
 /// Build device slots for the DC OP solver from a parsed netlist.
 fn build_device_slots_from_netlist(
     netlist: &melange_solver::parser::Netlist,
-) -> Vec<melange_solver::codegen::ir::DeviceSlot> {
-    use melange_solver::codegen::ir::{
+) -> Vec<melange_solver::device_types::DeviceSlot> {
+    use melange_solver::device_types::{
         BjtParams, DeviceParams, DeviceSlot, DeviceType, DiodeParams, JfetParams, MosfetParams,
         TubeParams,
     };
@@ -846,8 +847,11 @@ fn build_device_slots_from_netlist(
                         cje: 0.0,
                         cjc: 0.0,
                         nf: 1.0,
+                        nr: 1.0,
                         ise: 0.0,
                         ne: 1.5,
+                        isc: 0.0,
+                        nc: 2.0,
                         rb: 0.0,
                         rc: 0.0,
                         re: 0.0,
@@ -1982,7 +1986,7 @@ fn run_melange_with_pot_modulation(
     let devices = build_devices_from_netlist(&netlist, &mna)?;
 
     let mut solver = CircuitSolver::new(kernel, devices, input_node, output_node).unwrap();
-    solver.input_conductance = input_conductance;
+    solver.set_input_conductance(input_conductance);
 
     // Initialize DC OP
     if mna.m > 0 {
@@ -1990,8 +1994,8 @@ fn run_melange_with_pot_modulation(
         solver.initialize_dc_op(&mna, &device_slots);
     }
 
-    let m = solver.kernel.m;
-    let n_nodes = solver.kernel.n_nodes;
+    let m = solver.m();
+    let n_nodes = solver.n_nodes();
 
     // Pre-allocate s_ni_nodes buffer
     let mut s_ni_nodes = vec![0.0; n_nodes * m];
@@ -2015,11 +2019,11 @@ fn run_melange_with_pot_modulation(
         };
 
         // Reset S and a_neg to nominal, then apply corrections
-        solver.kernel.s.copy_from_slice(&s_nominal);
-        solver.kernel.a_neg.copy_from_slice(&a_neg_nominal);
+        solver.kernel_mut().s.copy_from_slice(&s_nominal);
+        solver.kernel_mut().a_neg.copy_from_slice(&a_neg_nominal);
 
         apply_pot_to_kernel(
-            &mut solver.kernel,
+            solver.kernel_mut(),
             0,
             delta_g_s,
             delta_g_a_neg,

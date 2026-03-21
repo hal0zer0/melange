@@ -9,7 +9,7 @@
 //! Both `CircuitIR::from_kernel()` (codegen) and `CircuitSolver` (runtime)
 //! call into this module.
 
-use crate::codegen::ir::{DeviceParams, DeviceSlot, DeviceType};
+use crate::device_types::{DeviceParams, DeviceSlot, DeviceType};
 use crate::mna::{MnaSystem, inject_rhs_current};
 use melange_devices::bjt::{BjtEbersMoll, BjtGummelPoon, BjtPolarity};
 use melange_devices::diode::DiodeShockley;
@@ -150,7 +150,7 @@ fn evaluate_devices_inner(
                 } else {
                     BjtPolarity::Npn
                 };
-                let em = BjtEbersMoll::new(bp.is, bp.vt, bp.beta_f, bp.beta_r, polarity).with_nf(bp.nf);
+                let em = BjtEbersMoll::new(bp.is, bp.vt, bp.beta_f, bp.beta_r, polarity).with_nf(bp.nf).with_nr(bp.nr);
                 let vbe = v_nl[s];
                 let vbc = v_nl[s + 1];
 
@@ -981,14 +981,15 @@ fn nr_dc_solve(
                         continue;
                     }
 
-                    let vt = bp.nf * bp.vt;
-                    let vcrit = pn_vcrit(vt, bp.is);
+                    let nf_vt = bp.nf * bp.vt;
+                    let nr_vt = bp.nr * bp.vt;
+                    let vcrit_be = pn_vcrit(nf_vt, bp.is);
                     // Vbe dimension
                     let be_idx = slot.start_idx;
                     let sign = if bp.is_pnp { -1.0 } else { 1.0 };
                     let v_old_be = sign * v_nl[be_idx];
                     let v_raw_be = sign * v_nl_new[be_idx];
-                    let v_lim_be = pnjlim(v_raw_be, v_old_be, vt, vcrit);
+                    let v_lim_be = pnjlim(v_raw_be, v_old_be, nf_vt, vcrit_be);
                     if (v_lim_be - v_raw_be).abs() > 1e-15 {
                         let correction = sign * (v_lim_be - v_raw_be);
                         for j in 0..n_dc {
@@ -998,9 +999,10 @@ fn nr_dc_solve(
                     // Vbc dimension (if 2D)
                     if slot.dimension > 1 {
                         let bc_idx = slot.start_idx + 1;
+                        let vcrit_bc = pn_vcrit(nr_vt, bp.is);
                         let v_old_bc = sign * v_nl[bc_idx];
                         let v_raw_bc = sign * v_nl_new[bc_idx];
-                        let v_lim_bc = pnjlim(v_raw_bc, v_old_bc, vt, vcrit);
+                        let v_lim_bc = pnjlim(v_raw_bc, v_old_bc, nr_vt, vcrit_bc);
                         if (v_lim_bc - v_raw_bc).abs() > 1e-15 {
                             let correction = sign * (v_lim_bc - v_raw_bc);
                             for j in 0..n_dc {

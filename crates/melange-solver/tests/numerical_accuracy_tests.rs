@@ -37,7 +37,7 @@ fn test_rc_lowpass_exact_time_constant() {
 
     let kernel = DkKernel::from_mna(&mna, SAMPLE_RATE).unwrap();
     let mut solver = LinearSolver::new(kernel, in_idx, in_idx);
-    solver.input_conductance = 0.001; // 1/R1 = 1/1k
+    solver.set_input_conductance(0.001); // 1/R1 = 1/1k
 
     // Apply 1V DC step for 300 samples
     let num_samples = 300;
@@ -106,7 +106,7 @@ fn test_rc_highpass_impulse_response() {
 
     let kernel = DkKernel::from_mna(&mna, SAMPLE_RATE).unwrap();
     let mut solver = LinearSolver::new(kernel, in_idx, in_idx);
-    solver.input_conductance = 0.001; // 1/R1 = 1/1k
+    solver.set_input_conductance(0.001); // 1/R1 = 1/1k
 
     // Apply single impulse: 1V for one sample, then 0V
     let num_samples = 300;
@@ -182,7 +182,7 @@ fn test_diode_forward_voltage_shunt_clipper() {
     let devices = vec![DeviceEntry::new_diode(diode, 0)];
 
     let mut solver = CircuitSolver::new(kernel, devices, in_idx, out_idx).unwrap();
-    solver.input_conductance = 0.001; // 1/Rin = 1/1k
+    solver.set_input_conductance(0.001); // 1/Rin = 1/1k
 
     // Apply 5V DC step for 1000 samples (allow ample settling time)
     let num_samples = 1000;
@@ -257,7 +257,7 @@ fn test_diode_logarithmic_voltage_scaling() {
         let in_idx = *mna.node_map.get("in").unwrap() - 1;
         let out_idx = *mna.node_map.get("out").unwrap() - 1;
         let mut solver = CircuitSolver::new(kernel, devices, in_idx, out_idx).unwrap();
-        solver.input_conductance = 0.001;
+        solver.set_input_conductance(0.001);
         let mut last = 0.0;
         for _ in 0..500 {
             last = solver.process_sample(input_v);
@@ -335,7 +335,7 @@ fn test_multi_device_two_diodes_converges() {
     ];
 
     let mut solver = CircuitSolver::new(kernel, devices, in_idx, out_idx).unwrap();
-    solver.input_conductance = 0.001; // 1/Rin = 1/1k
+    solver.set_input_conductance(0.001); // 1/Rin = 1/1k
 
     // Process 200 samples of 1V DC step
     let num_samples = 200;
@@ -399,7 +399,7 @@ fn test_multi_device_three_devices_converges() {
     ];
 
     let mut solver = CircuitSolver::new(kernel, devices, in_idx, out_idx).unwrap();
-    solver.input_conductance = 0.001;
+    solver.set_input_conductance(0.001);
 
     // Process 200 samples of 1V DC step
     let num_samples = 200;
@@ -456,7 +456,7 @@ fn test_bjt_common_emitter_bias_point() {
     let devices = vec![DeviceEntry::new_bjt(bjt, 0)];
 
     let mut solver = CircuitSolver::new(kernel, devices, b_idx, c_idx).unwrap();
-    solver.input_conductance = 1.0 / 100000.0; // Rb = 100k
+    solver.set_input_conductance(1.0 / 100000.0); // Rb = 100k
 
     // Apply 0.7V DC bias for 200 samples to forward-bias the base
     let num_samples = 200;
@@ -513,7 +513,7 @@ fn test_purely_resistive_circuit_with_cap_stable() {
         let diode = DiodeShockley::new_room_temp(1e-15, 1.0);
         let devices = vec![DeviceEntry::new_diode(diode, 0)];
         let mut solver = CircuitSolver::new(kernel, devices, in_idx, out_idx).unwrap();
-        solver.input_conductance = 0.001;
+        solver.set_input_conductance(0.001);
         let mut output = vec![0.0; 100];
         for i in 0..100 {
             output[i] = solver.process_sample(1.0);
@@ -593,7 +593,7 @@ fn test_solver_output_never_exceeds_10v_for_any_input() {
     let devices = vec![DeviceEntry::new_diode(diode, 0)];
 
     let mut solver = CircuitSolver::new(kernel, devices, in_idx, out_idx).unwrap();
-    solver.input_conductance = 0.001;
+    solver.set_input_conductance(0.001);
 
     let extreme_inputs = [
         0.0, 1.0, -1.0, 5.0, -5.0, 10.0, -10.0, 100.0, -100.0, 0.001, -0.001,
@@ -645,7 +645,7 @@ fn test_zero_input_produces_zero_output() {
     let devices = vec![DeviceEntry::new_diode(diode, 0)];
 
     let mut solver = CircuitSolver::new(kernel, devices, in_idx, out_idx).unwrap();
-    solver.input_conductance = 0.001;
+    solver.set_input_conductance(0.001);
 
     // Process 100 samples of 0V input
     for i in 0..100 {
@@ -679,7 +679,7 @@ fn test_solver_handles_nan_input() {
     let devices = vec![DeviceEntry::new_diode(diode, 0)];
 
     let mut solver = CircuitSolver::new(kernel, devices, in_idx, out_idx).unwrap();
-    solver.input_conductance = 0.001;
+    solver.set_input_conductance(0.001);
 
     // Process normal samples first
     for _ in 0..10 {
@@ -760,7 +760,7 @@ fn test_inductor_rl_circuit_finite_output() {
     let out_idx = *mna.node_map.get("out").unwrap() - 1;
 
     let mut solver = LinearSolver::new(kernel, in_idx, out_idx);
-    solver.input_conductance = 0.001; // 1/1k
+    solver.set_input_conductance(0.001); // 1/1k
 
     // Apply 1V DC step for 500 samples
     let num_samples = 500;
@@ -799,7 +799,7 @@ fn test_m3_three_diodes_converges() {
     ];
 
     let mut solver = CircuitSolver::new(kernel, devices, in_idx, out_idx).unwrap();
-    solver.input_conductance = 0.001;
+    solver.set_input_conductance(0.001);
 
     for i in 0..200 {
         let output = solver.process_sample(1.0);
@@ -833,7 +833,7 @@ fn test_m4_four_diodes_converges() {
     ];
 
     let mut solver = CircuitSolver::new(kernel, devices, in_idx, out_idx).unwrap();
-    solver.input_conductance = 0.001;
+    solver.set_input_conductance(0.001);
 
     for i in 0..200 {
         let output = solver.process_sample(1.0);
@@ -873,7 +873,7 @@ fn test_multi_inductor_pi_filter() {
     let out_idx = *mna.node_map.get("out").unwrap() - 1;
 
     let mut solver = LinearSolver::new(kernel, in_idx, out_idx);
-    solver.input_conductance = 1.0 / 100.0; // 1/R1
+    solver.set_input_conductance(1.0 / 100.0); // 1/R1
 
     // Apply 1V DC step for 500 samples
     for i in 0..500 {
@@ -915,9 +915,9 @@ fn test_nr_max_iterations_graceful_degradation() {
     let devices = vec![DeviceEntry::new_diode(diode, 0)];
 
     let mut solver = CircuitSolver::new(kernel, devices, in_idx, out_idx).unwrap();
-    solver.input_conductance = 0.001;
+    solver.set_input_conductance(0.001);
     // Use very few max iterations to force early termination
-    solver.max_iter = 2;
+    solver.set_max_iter(2);
 
     // Drive with large input to stress the NR solver
     for i in 0..100 {
@@ -952,7 +952,7 @@ fn test_nr_nan_recovery() {
     let devices = vec![DeviceEntry::new_diode(diode, 0)];
 
     let mut solver = CircuitSolver::new(kernel, devices, in_idx, out_idx).unwrap();
-    solver.input_conductance = 0.001;
+    solver.set_input_conductance(0.001);
 
     // Normal operation
     for _ in 0..20 {
@@ -1011,7 +1011,7 @@ fn test_inductor_nan_reset_recovery() {
     let out_idx = *mna.node_map.get("out").unwrap() - 1;
 
     let mut solver = LinearSolver::new(kernel, in_idx, out_idx);
-    solver.input_conductance = 0.001;
+    solver.set_input_conductance(0.001);
 
     // Normal operation
     for _ in 0..50 {

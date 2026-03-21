@@ -752,8 +752,8 @@ fn test_codegen_bjt_nr_solver_generates_device_calls() {
     // BJT NR solver should call bjt_evaluate (combined ic+ib+jacobian with shared exp)
     // with state fields for IS, VT, BETA_F, BETA_R and const for SIGN/NF/GP/ISE/NE params
     assert!(
-        code.contains("bjt_evaluate(v_d0, v_d1, state.device_0_is, state.device_0_vt, DEVICE_0_NF, state.device_0_bf, state.device_0_br, DEVICE_0_SIGN, DEVICE_0_USE_GP, DEVICE_0_VAF, DEVICE_0_VAR, DEVICE_0_IKF, DEVICE_0_IKR, DEVICE_0_ISE, DEVICE_0_NE)"),
-        "NR solver should call bjt_evaluate with state fields for IS/VT/BF/BR and const for SIGN/NF/GP/ISE/NE params."
+        code.contains("bjt_evaluate(v_d0, v_d1, state.device_0_is, state.device_0_vt, DEVICE_0_NF, DEVICE_0_NR, state.device_0_bf, state.device_0_br, DEVICE_0_SIGN, DEVICE_0_USE_GP, DEVICE_0_VAF, DEVICE_0_VAR, DEVICE_0_IKF, DEVICE_0_IKR, DEVICE_0_ISE, DEVICE_0_NE, DEVICE_0_ISC, DEVICE_0_NC)"),
+        "NR solver should call bjt_evaluate with state fields for IS/VT/BF/BR and const for SIGN/NF/NR/GP/ISE/NE/ISC/NC params."
     );
 
     // Should assign all 4 Jacobian entries from the bjt_jacobian result
@@ -864,7 +864,7 @@ fn test_codegen_mixed_diode_bjt_device_map() {
     );
 
     // BJT at indices 1,2 (device 1) with bjt_evaluate (combined ic+ib+jac)
-    assert!(code.contains("bjt_evaluate(v_d1, v_d2, state.device_1_is, state.device_1_vt, DEVICE_1_NF, state.device_1_bf, state.device_1_br, DEVICE_1_SIGN, DEVICE_1_USE_GP, DEVICE_1_VAF, DEVICE_1_VAR, DEVICE_1_IKF, DEVICE_1_IKR, DEVICE_1_ISE, DEVICE_1_NE)"), "BJT evaluate at indices 1,2");
+    assert!(code.contains("bjt_evaluate(v_d1, v_d2, state.device_1_is, state.device_1_vt, DEVICE_1_NF, DEVICE_1_NR, state.device_1_bf, state.device_1_br, DEVICE_1_SIGN, DEVICE_1_USE_GP, DEVICE_1_VAF, DEVICE_1_VAR, DEVICE_1_IKF, DEVICE_1_IKR, DEVICE_1_ISE, DEVICE_1_NE, DEVICE_1_ISC, DEVICE_1_NC)"), "BJT evaluate at indices 1,2");
 
     // All 3 residuals
     assert!(code.contains("let f0 = i_nl[0] - i_dev0"), "Residual f0");
@@ -2058,7 +2058,7 @@ Rbias vcc 0 10k
     let devices = vec![DeviceEntry::new_bjt(bjt, 0)];
 
     let mut solver = CircuitSolver::new(kernel_rt, devices, input_node, output_node).unwrap();
-    solver.input_conductance = 1.0;
+    solver.set_input_conductance(1.0);
 
     // Feed a sine wave and verify output is finite and stable
     let mut outputs = Vec::new();
@@ -3863,8 +3863,11 @@ fn test_ir_bjt_params_gp_serde_roundtrip() {
         cje: 0.0,
         cjc: 0.0,
         nf: 1.0,
+        nr: 1.0,
         ise: 0.0,
         ne: 1.5,
+        isc: 0.0,
+        nc: 2.0,
         rb: 0.0,
         rc: 0.0,
         re: 0.0,

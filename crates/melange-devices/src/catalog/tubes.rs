@@ -32,6 +32,10 @@ pub struct TubeCatalogEntry {
 pub const CATALOG: &[TubeCatalogEntry] = &[
     // 12AX7 / ECC83 — high-mu twin triode, the workhorse of guitar amps.
     // Koren 1996 Table 1: mu=100, ex=1.4, Kg1=1060, Kp=600, Kvb=300
+    // NOTE: Overestimates plate current vs RCA datasheet (~3.4mA vs ~1.2mA at Vgk=0, Vpk=250V).
+    // Retained as default because tweed-preamp SPICE validation depends on it (0.989 correlation).
+    // For datasheet-accurate plate current, use "12AX7F" (fitted) entry below.
+    //   Default:  Vgk=0 → 3.40mA,  Vgk=-1 → 1.69mA,  Vgk=-2 → 0.48mA  (at Vpk=250V)
     TubeCatalogEntry {
         names: &["12AX7", "ECC83", "7025", "CV4004"],
         mu: 100.0,
@@ -43,6 +47,23 @@ pub const CATALOG: &[TubeCatalogEntry] = &[
         vgk_onset: 0.5,
         lambda: 0.0,
         source: "Koren 1996 Table 1",
+    },
+    // 12AX7F — 12AX7 with Kg1 re-fit to match RCA datasheet plate current.
+    // Only Kg1 changed (1060 → 3000); mu/ex/Kp/Kvb identical to Koren 1996.
+    // Ip ∝ 1/Kg1, so Kg1_new = 1060 * (3.40/1.20) ≈ 3000.
+    //   Fitted:   Vgk=0 → 1.20mA,  Vgk=-1 → 0.60mA,  Vgk=-2 → 0.17mA  (at Vpk=250V)
+    //   Datasheet: Vgk=0 → ~1.2mA,  Vgk=-1 → ~0.5mA,  Vgk=-2 → ~0.1mA  (RCA 12AX7)
+    TubeCatalogEntry {
+        names: &["12AX7F", "ECC83F"],
+        mu: 100.0,
+        ex: 1.4,
+        kg1: 3000.0,
+        kp: 600.0,
+        kvb: 300.0,
+        ig_max: 2e-3,
+        vgk_onset: 0.5,
+        lambda: 0.0,
+        source: "Koren 1996 with Kg1 re-fit to RCA 12AX7 datasheet (Ip=1.2mA at Vgk=0, Vpk=250V)",
     },
     // 12AU7 / ECC82 — medium-mu twin triode (mu≈17).
     // Koren fit to Sylvania data: mu=21.5, ex=1.3, Kg1=1180, Kp=84, Kvb=300
@@ -290,6 +311,17 @@ mod tests {
         assert_eq!(factory.kvb, cat.kvb);
     }
 
+    #[test]
+    fn test_12ax7f_matches_catalog() {
+        let factory = KorenTriode::ecc83_fitted();
+        let cat = lookup("12AX7F").unwrap();
+        assert_eq!(factory.mu, cat.mu);
+        assert_eq!(factory.ex, cat.ex);
+        assert_eq!(factory.kg1, cat.kg1);
+        assert_eq!(factory.kp, cat.kp);
+        assert_eq!(factory.kvb, cat.kvb);
+    }
+
     // --- Tier 2: Datasheet operating point verification ---
 
     fn make_tube(entry: &TubeCatalogEntry) -> KorenTriode {
@@ -343,6 +375,28 @@ mod tests {
         assert!(
             t.plate_current(-4.0, 250.0) < 0.01e-3,
             "12AX7 should be near cutoff at Vgk=-4"
+        );
+    }
+
+    #[test]
+    fn test_12ax7f_operating_points() {
+        let t = make_tube(lookup("12AX7F").unwrap());
+        // Fitted to RCA 12AX7 datasheet: Vgk=0, Vpk=250V → ~1.2mA
+        let ip0 = t.plate_current(0.0, 250.0);
+        assert_ip_approx(ip0, 1.2e-3, 0.1e-3, "12AX7F Vgk=0");
+        // Vgk=-1V, Vpk=250V: fitted → ~0.59mA (datasheet: ~0.5mA)
+        let ip_m1 = t.plate_current(-1.0, 250.0);
+        assert_ip_approx(ip_m1, 0.5e-3, 0.15e-3, "12AX7F Vgk=-1");
+        // Vgk=-2V, Vpk=250V: fitted → ~0.17mA (datasheet: ~0.1mA)
+        let ip_m2 = t.plate_current(-2.0, 250.0);
+        assert_ip_approx(ip_m2, 0.1e-3, 0.1e-3, "12AX7F Vgk=-2");
+        // Monotonicity
+        assert!(ip_m1 < ip0, "12AX7F: Ip should decrease with more negative Vgk");
+        assert!(ip_m2 < ip_m1, "12AX7F: Ip should decrease further");
+        // Cutoff: Vgk=-4V → Ip near zero
+        assert!(
+            t.plate_current(-4.0, 250.0) < 0.01e-3,
+            "12AX7F should be near cutoff at Vgk=-4"
         );
     }
 
@@ -478,6 +532,10 @@ mod tests {
     #[test]
     fn test_12ax7_jacobian() {
         check_jacobian(lookup("12AX7").unwrap());
+    }
+    #[test]
+    fn test_12ax7f_jacobian() {
+        check_jacobian(lookup("12AX7F").unwrap());
     }
     #[test]
     fn test_12au7_jacobian() {

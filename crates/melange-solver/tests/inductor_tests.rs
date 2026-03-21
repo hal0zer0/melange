@@ -165,7 +165,7 @@ fn test_rl_step_response() {
     let out_idx = *mna.node_map.get("out").unwrap() - 1;
 
     let mut solver = LinearSolver::new(kernel, in_idx, out_idx);
-    solver.input_conductance = 1.0 / input_resistance;
+    solver.set_input_conductance(1.0 / input_resistance);
 
     // Apply 1V DC step for 500 samples (many time constants)
     let num_samples = 500;
@@ -232,7 +232,7 @@ fn test_inductor_current_continuity() {
     let out_idx = *mna.node_map.get("out").unwrap() - 1;
 
     let mut solver = LinearSolver::new(kernel, in_idx, out_idx);
-    solver.input_conductance = 1.0 / input_resistance;
+    solver.set_input_conductance(1.0 / input_resistance);
 
     // Phase 1: Drive with DC step (200 samples) to build up inductor current
     let mut output_phase1 = vec![0.0; 200];
@@ -468,7 +468,7 @@ fn test_rlc_circuit_behavior() {
     let out_idx = *mna.node_map.get("out").unwrap() - 1;
 
     let mut solver = LinearSolver::new(kernel, in_idx, out_idx);
-    solver.input_conductance = 1.0 / input_resistance;
+    solver.set_input_conductance(1.0 / input_resistance);
 
     // Apply impulse: 1 sample of 1.0 then zeros
     let num_samples = 2000;
@@ -534,7 +534,7 @@ fn test_inductor_mna_stamping() {
     );
 
     // The A matrix should include inductor companion model conductance g_eq = T/(2L)
-    let a = mna.get_a_matrix(44100.0);
+    let a = mna.get_a_matrix(44100.0).unwrap();
     let out_idx = *mna.node_map.get("out").unwrap() - 1;
 
     // The diagonal element for the output node should include:
@@ -594,7 +594,9 @@ fn test_inductor_codegen_sanitization() {
     let code = generate_code(RL_LOWPASS_SPICE);
 
     // NaN sanitization should reset inductor state
-    let sanitize_idx = code.find("if !state.v_prev.iter().all(|x| x.is_finite())");
+    // NaN check now happens before state write: checks local `v` not `state.v_prev`
+    let sanitize_idx = code.find("if !v.iter().all(|x| x.is_finite())")
+        .or_else(|| code.find("if !state.v_prev.iter().all(|x| x.is_finite())"));
     assert!(sanitize_idx.is_some(), "Should have NaN sanitization block");
 
     let after_sanitize = &code[sanitize_idx.unwrap()..];
@@ -696,7 +698,7 @@ C1 out 0 1p
     let out_idx = *mna.node_map.get("out").unwrap() - 1;
 
     let mut solver = LinearSolver::new(kernel, in_idx, out_idx);
-    solver.input_conductance = 1.0 / input_resistance;
+    solver.set_input_conductance(1.0 / input_resistance);
 
     // Apply 1V DC step
     let num_samples = 500;

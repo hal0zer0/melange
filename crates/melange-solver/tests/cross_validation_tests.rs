@@ -345,7 +345,7 @@ fn run_crossval(
     // --- Runtime path ---
     let devices = build_device_entries(&netlist, &mna);
     let mut solver = CircuitSolver::new(kernel.clone(), devices, input_node, output_node).unwrap();
-    solver.input_conductance = 1.0;
+    solver.set_input_conductance(1.0);
 
     // DC OP for nonlinear circuits
     if kernel.m > 0 {

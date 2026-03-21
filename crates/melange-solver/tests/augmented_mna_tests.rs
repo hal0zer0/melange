@@ -67,8 +67,9 @@ fn build_linear_nodal(
         ir.device_slots.clone(),
         in_idx,
         out_idx,
-    );
-    solver.input_conductance = 1.0 / r_in;
+    )
+    .unwrap();
+    solver.set_input_conductance(1.0 / r_in);
     (solver, mna)
 }
 
@@ -162,10 +163,10 @@ fn test_augmented_rl_step_response() {
 
     // Linear circuit: NR must converge every sample
     assert_eq!(
-        solver.diag_nr_max_iter_count, 0,
+        solver.diag_nr_max_iter_count(), 0,
         "NR converged on every sample"
     );
-    assert_eq!(solver.diag_nan_reset_count, 0, "No NaN resets");
+    assert_eq!(solver.diag_nan_reset_count(), 0, "No NaN resets");
 }
 
 // ---------------------------------------------------------------------------
@@ -184,7 +185,7 @@ C1 out 0 100n
 
     let (mut nodal, mna) = build_linear_nodal(spice, "in", "out", r_in, sr);
     assert_eq!(
-        nodal.v_prev.len(),
+        nodal.v_prev().len(),
         mna.n_aug,
         "No inductors: n_nodal == n_aug"
     );
@@ -193,7 +194,7 @@ C1 out 0 100n
     let in_idx = *mna_lin.node_map.get("in").unwrap() - 1;
     let out_idx = *mna_lin.node_map.get("out").unwrap() - 1;
     let mut linear = LinearSolver::new(kernel_lin, in_idx, out_idx);
-    linear.input_conductance = 1.0 / r_in;
+    linear.set_input_conductance(1.0 / r_in);
 
     let mut max_diff = 0.0_f64;
     for i in 0..200 {
@@ -225,9 +226,9 @@ fn test_large_inductor_stability() {
         assert!(out.is_finite(), "Output finite for 130H inductor");
     }
 
-    assert_eq!(solver.diag_nan_reset_count, 0, "No NaN resets");
+    assert_eq!(solver.diag_nan_reset_count(), 0, "No NaN resets");
     assert_eq!(
-        solver.diag_nr_max_iter_count, 0,
+        solver.diag_nr_max_iter_count(), 0,
         "NR converged on every sample"
     );
 }
@@ -252,14 +253,14 @@ fn test_large_inductor_steady_state() {
 
     // At DC: L is short, V_out = 0 (all voltage across R_in + R)
     // Inductor current = V_in / (R_in + R) = 1.0 / 10001 ≈ 1.0e-4 A
-    let v_out = solver.v_prev[*mna.node_map.get("out").unwrap() - 1];
+    let v_out = solver.v_prev()[*mna.node_map.get("out").unwrap() - 1];
     assert!(
         v_out.abs() < 0.01,
         "V_out at DC should be ~0, got {:.6}",
         v_out
     );
 
-    let j_l = solver.v_prev[n_aug]; // inductor branch current
+    let j_l = solver.v_prev()[n_aug]; // inductor branch current
     let expected_i = 1.0 / (r_in + r);
     assert!(
         (j_l - expected_i).abs() < 0.01 * expected_i,
@@ -282,7 +283,7 @@ fn test_augmented_dimensions() {
     {
         let (solver, mna) = build_linear_nodal(RL_LOWPASS, "in", "out", r_in, sr);
         assert_eq!(
-            solver.v_prev.len(),
+            solver.v_prev().len(),
             mna.n_aug + 1,
             "RL: 1 inductor → n_nodal = n_aug + 1"
         );
@@ -292,7 +293,7 @@ fn test_augmented_dimensions() {
     {
         let (solver, mna) = build_linear_nodal(STEP_UP_XFMR, "in", "out", r_in, sr);
         assert_eq!(
-            solver.v_prev.len(),
+            solver.v_prev().len(),
             mna.n_aug + 2,
             "Transformer: 2 windings → n_nodal = n_aug + 2"
         );
@@ -302,7 +303,7 @@ fn test_augmented_dimensions() {
     {
         let (solver, mna) = build_linear_nodal(THREE_WINDING, "in", "out", r_in, sr);
         assert_eq!(
-            solver.v_prev.len(),
+            solver.v_prev().len(),
             mna.n_aug + 3,
             "3-winding xfmr → n_nodal = n_aug + 3"
         );
@@ -325,7 +326,7 @@ fn test_inductor_branch_currents() {
         solver.process_sample(1.0);
     }
 
-    let j_l = solver.v_prev[n_aug];
+    let j_l = solver.v_prev()[n_aug];
     assert!(j_l.is_finite(), "Inductor current finite: {}", j_l);
 
     // At DC: I_L = V_in / (R_in + R1) = 1.0 / 1001 ≈ 9.99e-4 A
@@ -360,8 +361,8 @@ fn test_coupled_inductor_energy_transfer() {
         "Transformer transfers energy: peak = {:.6}",
         peak_out
     );
-    assert_eq!(solver.diag_nan_reset_count, 0, "No NaN resets");
-    assert_eq!(solver.diag_nr_max_iter_count, 0, "NR converged");
+    assert_eq!(solver.diag_nan_reset_count(), 0, "No NaN resets");
+    assert_eq!(solver.diag_nr_max_iter_count(), 0, "NR converged");
 }
 
 // ---------------------------------------------------------------------------
@@ -386,8 +387,8 @@ fn test_three_winding_transformer() {
         "3-winding xfmr transfers energy: peak = {:.6}",
         peak_out
     );
-    assert_eq!(solver.diag_nan_reset_count, 0, "No NaN resets");
-    assert_eq!(solver.diag_nr_max_iter_count, 0, "NR converged");
+    assert_eq!(solver.diag_nan_reset_count(), 0, "No NaN resets");
+    assert_eq!(solver.diag_nr_max_iter_count(), 0, "NR converged");
 }
 
 // ---------------------------------------------------------------------------
@@ -406,7 +407,7 @@ fn test_same_steady_state() {
     let in_idx = *mna_lin.node_map.get("in").unwrap() - 1;
     let out_lin_idx = *mna_lin.node_map.get("out").unwrap() - 1;
     let mut linear = LinearSolver::new(kernel_lin, in_idx, out_lin_idx);
-    linear.input_conductance = 1.0 / r_in;
+    linear.set_input_conductance(1.0 / r_in);
 
     // Drive with DC step for many time constants (tau = L/R = 0.1ms ≈ 5 samples)
     for _ in 0..1000 {
@@ -415,7 +416,7 @@ fn test_same_steady_state() {
     }
 
     // At DC steady state, both should agree: V_out → 0 (L shorts to ground)
-    let v_nodal = nodal.v_prev[out_idx];
+    let v_nodal = nodal.v_prev()[out_idx];
     // Linear solver output includes DC blocking, so compare DC-blocked outputs
     let out_nodal = nodal.process_sample(1.0);
     let out_linear = linear.process_sample(1.0);

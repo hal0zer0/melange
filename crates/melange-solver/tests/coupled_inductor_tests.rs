@@ -482,7 +482,7 @@ C1 a 0 1p
 C2 b 0 1p
 ";
     let (_, mna, _) = build_pipeline(spice);
-    let a = mna.get_a_matrix(44100.0);
+    let a = mna.get_a_matrix(44100.0).unwrap();
 
     let a_idx = *mna.node_map.get("a").unwrap() - 1;
     let b_idx = *mna.node_map.get("b").unwrap() - 1;
@@ -868,7 +868,9 @@ fn test_codegen_process_sample_update() {
 fn test_codegen_nan_sanitization() {
     let code = generate_code(SIMPLE_COUPLED);
 
-    let sanitize_idx = code.find("if !state.v_prev.iter().all(|x| x.is_finite())");
+    // NaN check now happens before state write: checks local `v` not `state.v_prev`
+    let sanitize_idx = code.find("if !v.iter().all(|x| x.is_finite())")
+        .or_else(|| code.find("if !state.v_prev.iter().all(|x| x.is_finite())"));
     assert!(sanitize_idx.is_some(), "Should have NaN sanitization block");
 
     let after_sanitize = &code[sanitize_idx.unwrap()..];
@@ -952,7 +954,7 @@ fn test_step_up_transformer_voltage_ratio() {
     let out_idx = *mna.node_map.get("out").unwrap() - 1;
 
     let mut solver = LinearSolver::new(kernel, in_idx, out_idx);
-    solver.input_conductance = 1.0 / input_resistance;
+    solver.set_input_conductance(1.0 / input_resistance);
 
     // Drive with 100Hz sine for 4410 samples (10 cycles at 44.1kHz)
     let num_samples = 4410;
@@ -992,7 +994,7 @@ fn test_step_down_transformer_voltage_ratio() {
     let out_idx = *mna.node_map.get("out").unwrap() - 1;
 
     let mut solver = LinearSolver::new(kernel, in_idx, out_idx);
-    solver.input_conductance = 1.0 / input_resistance;
+    solver.set_input_conductance(1.0 / input_resistance);
 
     let num_samples = 4410;
     let mut output = vec![0.0; num_samples];
@@ -1031,7 +1033,7 @@ fn test_weak_coupling_minimal_transfer() {
     let out_idx = *mna.node_map.get("out").unwrap() - 1;
 
     let mut solver = LinearSolver::new(kernel, in_idx, out_idx);
-    solver.input_conductance = 1.0 / input_resistance;
+    solver.set_input_conductance(1.0 / input_resistance);
 
     let num_samples = 4410;
     let mut output_weak = vec![0.0; num_samples];
@@ -1047,7 +1049,7 @@ fn test_weak_coupling_minimal_transfer() {
     let out_idx2 = *mna2.node_map.get("out").unwrap() - 1;
 
     let mut solver2 = LinearSolver::new(kernel2, in_idx2, out_idx2);
-    solver2.input_conductance = 1.0 / input_resistance;
+    solver2.set_input_conductance(1.0 / input_resistance);
 
     let mut output_strong = vec![0.0; num_samples];
     for i in 0..num_samples {
@@ -1083,7 +1085,7 @@ fn test_unity_transformer_voltage_ratio() {
     let out_idx = *mna.node_map.get("out").unwrap() - 1;
 
     let mut solver = LinearSolver::new(kernel, in_idx, out_idx);
-    solver.input_conductance = 1.0 / input_resistance;
+    solver.set_input_conductance(1.0 / input_resistance);
 
     let num_samples = 4410;
     let mut output = vec![0.0; num_samples];
@@ -1125,7 +1127,7 @@ fn test_transformer_all_finite() {
         let out_idx = *mna.node_map.get("out").unwrap() - 1;
 
         let mut solver = LinearSolver::new(kernel, in_idx, out_idx);
-        solver.input_conductance = 1.0 / input_resistance;
+        solver.set_input_conductance(1.0 / input_resistance);
 
         let num_samples = 1000;
         for i in 0..num_samples {
@@ -1155,7 +1157,7 @@ fn test_runtime_solver_step_response() {
     let out_idx = *mna.node_map.get("out").unwrap() - 1;
 
     let mut solver = LinearSolver::new(kernel, in_idx, out_idx);
-    solver.input_conductance = 1.0 / input_resistance;
+    solver.set_input_conductance(1.0 / input_resistance);
 
     // Apply DC step
     let mut output = vec![0.0; 500];
@@ -1181,7 +1183,7 @@ fn test_runtime_solver_ac_passes() {
     let out_idx = *mna.node_map.get("out").unwrap() - 1;
 
     let mut solver = LinearSolver::new(kernel, in_idx, out_idx);
-    solver.input_conductance = 1.0 / input_resistance;
+    solver.set_input_conductance(1.0 / input_resistance);
 
     // Drive with 1kHz sine for 500 samples (~11 cycles)
     let num_samples = 500;
@@ -1292,7 +1294,7 @@ C3 c 0 1p
 C4 d 0 1p
 ";
     let (_, mna, _) = build_pipeline(spice);
-    let a = mna.get_a_matrix(44100.0);
+    let a = mna.get_a_matrix(44100.0).unwrap();
     let n = a.len();
 
     // The A matrix should be symmetric for a linear circuit with coupled inductors
@@ -1322,7 +1324,7 @@ fn test_floating_transformer_behavioral() {
     let out_idx = *mna.node_map.get("out").unwrap() - 1;
 
     let mut solver = LinearSolver::new(kernel, in_idx, out_idx);
-    solver.input_conductance = 1.0 / input_resistance;
+    solver.set_input_conductance(1.0 / input_resistance);
 
     let num_samples = 4410;
     let freq = 1000.0;
@@ -1380,7 +1382,7 @@ C3 out 0 100p
     let in_idx = *mna2.node_map.get("in").unwrap() - 1;
     let out_idx = *mna2.node_map.get("out").unwrap() - 1;
     let mut solver = LinearSolver::new(kernel, in_idx, out_idx);
-    solver.input_conductance = 1.0 / input_resistance;
+    solver.set_input_conductance(1.0 / input_resistance);
 
     for i in 0..500 {
         let input = (2.0 * std::f64::consts::PI * 1000.0 * i as f64 / 44100.0).sin();
@@ -1462,7 +1464,7 @@ C3 out 0 100p
     let in_idx = *mna2.node_map.get("in").unwrap() - 1;
     let out_idx = *mna2.node_map.get("out").unwrap() - 1;
     let mut solver = LinearSolver::new(kernel2, in_idx, out_idx);
-    solver.input_conductance = 1.0 / input_resistance;
+    solver.set_input_conductance(1.0 / input_resistance);
 
     for i in 0..200 {
         let input = (2.0 * std::f64::consts::PI * 1000.0 * i as f64 / 44100.0).sin();
@@ -1560,7 +1562,7 @@ C1 a 0 1p
 C2 b 0 1p
 ";
     let (_, mna, _) = build_pipeline(spice);
-    let a = mna.get_a_matrix(44100.0);
+    let a = mna.get_a_matrix(44100.0).unwrap();
 
     let a_idx = *mna.node_map.get("a").unwrap() - 1;
     let b_idx = *mna.node_map.get("b").unwrap() - 1;

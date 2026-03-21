@@ -113,13 +113,13 @@ fn self_heating_device_data(ir: &CircuitIR) -> Vec<SelfHeatingDeviceData> {
         .iter()
         .enumerate()
         .filter_map(|(dev_num, slot)| {
-            if let DeviceParams::Bjt(bp) = &slot.params
-                && bp.has_self_heating()
-            {
-                return Some(SelfHeatingDeviceData {
-                    dev_num,
-                    start_idx: slot.start_idx,
-                });
+            if let DeviceParams::Bjt(bp) = &slot.params {
+                if bp.has_self_heating() {
+                    return Some(SelfHeatingDeviceData {
+                        dev_num,
+                        start_idx: slot.start_idx,
+                    });
+                }
             }
             None
         })
@@ -358,6 +358,27 @@ fn section_banner(title: &str) -> String {
     )
 }
 
+/// Collapse 3+ consecutive blank lines down to 2.
+///
+/// Post-processing pass applied to generated code for cleaner output.
+fn collapse_blank_lines(code: &str) -> String {
+    let mut result = String::with_capacity(code.len());
+    let mut blank_count = 0;
+    for line in code.lines() {
+        if line.trim().is_empty() {
+            blank_count += 1;
+            if blank_count <= 2 {
+                result.push('\n');
+            }
+        } else {
+            blank_count = 0;
+            result.push_str(line);
+            result.push('\n');
+        }
+    }
+    result
+}
+
 /// Format a slice of f64 as comma-separated full-precision values.
 fn format_f64_slice(values: &[f64]) -> String {
     values
@@ -527,10 +548,12 @@ impl Emitter for RustEmitter {
             }
         }
 
-        match ir.solver_mode {
-            SolverMode::Dk => self.emit_dk(ir),
-            SolverMode::Nodal => self.emit_nodal(ir),
-        }
+        let code = match ir.solver_mode {
+            SolverMode::Dk => self.emit_dk(ir)?,
+            SolverMode::Nodal => self.emit_nodal(ir)?,
+        };
+
+        Ok(collapse_blank_lines(&code))
     }
 }
 
@@ -1042,8 +1065,11 @@ impl RustEmitter {
                     emit_device_const(&mut code, dev_num, "BETA_F", bp.beta_f);
                     emit_device_const(&mut code, dev_num, "BETA_R", bp.beta_r);
                     emit_device_const(&mut code, dev_num, "NF", bp.nf);
+                    emit_device_const(&mut code, dev_num, "NR", bp.nr);
                     emit_device_const(&mut code, dev_num, "ISE", bp.ise);
                     emit_device_const(&mut code, dev_num, "NE", bp.ne);
+                    emit_device_const(&mut code, dev_num, "ISC", bp.isc);
+                    emit_device_const(&mut code, dev_num, "NC", bp.nc);
                     let sign = if bp.is_pnp { -1.0 } else { 1.0 };
                     code.push_str(&format!(
                         "const DEVICE_{}_SIGN: f64 = {:.1};\n",
@@ -1210,6 +1236,32 @@ impl RustEmitter {
              \x20           + f * (0.04166666666665876 + f * 0.008333333333492337))));\n\
              \x20       let pow2n = f64::from_bits(((1023 + n_i64) as u64) << 52);\n\
              \x20       p * pow2n\n\
+             \x20   }\n\
+             }\n\n",
+        );
+        // fast_ln: used in tube softplus ln(1+exp(x))
+        code.push_str(
+            "/// Fast ln() for audio circuit simulation.\n\
+             /// Symmetric log series (~0.005% max relative error, ~3x faster than libm).\n\
+             /// Only valid for positive inputs.\n\
+             #[inline(always)]\n\
+             fn fast_ln(x: f64) -> f64 {\n\
+             \x20   #[cfg(melange_precise_exp)]\n\
+             \x20   { x.ln() }\n\
+             \x20   #[cfg(not(melange_precise_exp))]\n\
+             \x20   {\n\
+             \x20       // Extract exponent and mantissa from IEEE 754 double\n\
+             \x20       let bits = x.to_bits();\n\
+             \x20       let e = ((bits >> 52) & 0x7FF) as i64 - 1023;\n\
+             \x20       // Normalize mantissa to [1, 2)\n\
+             \x20       let m_bits = (bits & 0x000F_FFFF_FFFF_FFFF) | 0x3FF0_0000_0000_0000;\n\
+             \x20       let m = f64::from_bits(m_bits);\n\
+             \x20       // Symmetric log series: u = (m-1)/(m+1), ln(m) = 2u(1 + u²/3 + u⁴/5 + u⁶/7)\n\
+             \x20       // For m in [1,2), u in [0,1/3): converges much faster than Taylor.\n\
+             \x20       let u = (m - 1.0) / (m + 1.0);\n\
+             \x20       let u2 = u * u;\n\
+             \x20       let ln_m = 2.0 * u * (1.0 + u2 * (0.3333333333333333 + u2 * (0.2 + u2 * 0.14285714285714285)));\n\
+             \x20       ln_m + (e as f64) * 0.6931471805599453 // e * ln(2)\n\
              \x20   }\n\
              }\n\n",
         );
@@ -2164,27 +2216,27 @@ impl RustEmitter {
         let mut body_effect_update = String::new();
         if ir.solver_mode == super::ir::SolverMode::Dk {
             for (dev_num, slot) in ir.device_slots.iter().enumerate() {
-                if let DeviceParams::Mosfet(mp) = &slot.params
-                    && mp.has_body_effect()
-                {
-                    // Extract Vsb from v_pred (node indices are 1-based; 0 = ground)
-                    let vs_expr = if mp.source_node > 0 {
-                        format!("v_pred[{}]", mp.source_node - 1)
-                    } else {
-                        "0.0".to_string()
-                    };
-                    let vb_expr = if mp.bulk_node > 0 {
-                        format!("v_pred[{}]", mp.bulk_node - 1)
-                    } else {
-                        "0.0".to_string()
-                    };
-                    let sign = if mp.is_p_channel { -1.0 } else { 1.0 };
-                    body_effect_update.push_str(&format!(
-                            "    {{ // MOSFET {dev_num} body effect\n\
-                             \x20       let vsb = ({sign:.1}) * ({vs_expr} - {vb_expr});\n\
-                             \x20       state.device_{dev_num}_vt = DEVICE_{dev_num}_VT + DEVICE_{dev_num}_GAMMA * ((DEVICE_{dev_num}_PHI + vsb.max(0.0)).sqrt() - DEVICE_{dev_num}_PHI.sqrt());\n\
-                             \x20   }}\n"
-                        ));
+                if let DeviceParams::Mosfet(mp) = &slot.params {
+                    if mp.has_body_effect() {
+                        // Extract Vsb from v_pred (node indices are 1-based; 0 = ground)
+                        let vs_expr = if mp.source_node > 0 {
+                            format!("v_pred[{}]", mp.source_node - 1)
+                        } else {
+                            "0.0".to_string()
+                        };
+                        let vb_expr = if mp.bulk_node > 0 {
+                            format!("v_pred[{}]", mp.bulk_node - 1)
+                        } else {
+                            "0.0".to_string()
+                        };
+                        let sign = if mp.is_p_channel { -1.0 } else { 1.0 };
+                        body_effect_update.push_str(&format!(
+                                "    {{ // MOSFET {dev_num} body effect\n\
+                                 \x20       let vsb = ({sign:.1}) * ({vs_expr} - {vb_expr});\n\
+                                 \x20       state.device_{dev_num}_vt = DEVICE_{dev_num}_VT + DEVICE_{dev_num}_GAMMA * ((DEVICE_{dev_num}_PHI + vsb.max(0.0)).sqrt() - DEVICE_{dev_num}_PHI.sqrt());\n\
+                                 \x20   }}\n"
+                            ));
+                    }
                 }
             }
         }
@@ -2195,33 +2247,33 @@ impl RustEmitter {
         // BJT self-heating thermal update (after NR, before state save)
         let mut thermal_update = String::new();
         for (dev_num, slot) in ir.device_slots.iter().enumerate() {
-            if let DeviceParams::Bjt(bp) = &slot.params
-                && bp.has_self_heating()
-            {
-                let s = slot.start_idx;
-                let s1 = s + 1;
-                // Extract Ic, Ib from converged i_nl; compute Vbe, Vbc from final v
-                thermal_update.push_str(&format!(
-                        "    {{ // BJT {dev_num} self-heating thermal update\n\
-                         \x20       let ic = i_nl[{s}];\n\
-                         \x20       let ib = i_nl[{s1}];\n\
-                         \x20       let v_nl_th = extract_controlling_voltages(&v);\n\
-                         \x20       let vbe = v_nl_th[{s}];\n\
-                         \x20       let vbc = v_nl_th[{s1}];\n\
-                         \x20       let vce = vbe - vbc;\n\
-                         \x20       let p = vce * ic + vbe * ib;\n\
-                         \x20       let dt = 1.0 / SAMPLE_RATE;\n\
-                         \x20       let d_tj = (p - (state.device_{dev_num}_tj - DEVICE_{dev_num}_TAMB) / DEVICE_{dev_num}_RTH) / DEVICE_{dev_num}_CTH * dt;\n\
-                         \x20       state.device_{dev_num}_tj += d_tj;\n\
-                         \x20       state.device_{dev_num}_tj = state.device_{dev_num}_tj.clamp(200.0, 500.0);\n\
-                         \x20       state.device_{dev_num}_vt = BOLTZMANN_Q * state.device_{dev_num}_tj;\n\
-                         \x20       let t_ratio = state.device_{dev_num}_tj / DEVICE_{dev_num}_TAMB;\n\
-                         \x20       let vt_nom = BOLTZMANN_Q * DEVICE_{dev_num}_TAMB;\n\
-                         \x20       state.device_{dev_num}_is = DEVICE_{dev_num}_IS_NOM\n\
-                         \x20           * t_ratio.powf(DEVICE_{dev_num}_XTI)\n\
-                         \x20           * fast_exp((DEVICE_{dev_num}_EG / vt_nom) * (1.0 - DEVICE_{dev_num}_TAMB / state.device_{dev_num}_tj));\n\
-                         \x20   }}\n"
-                    ));
+            if let DeviceParams::Bjt(bp) = &slot.params {
+                if bp.has_self_heating() {
+                    let s = slot.start_idx;
+                    let s1 = s + 1;
+                    // Extract Ic, Ib from converged i_nl; compute Vbe, Vbc from final v
+                    thermal_update.push_str(&format!(
+                            "    {{ // BJT {dev_num} self-heating thermal update\n\
+                             \x20       let ic = i_nl[{s}];\n\
+                             \x20       let ib = i_nl[{s1}];\n\
+                             \x20       let v_nl_th = extract_controlling_voltages(&v);\n\
+                             \x20       let vbe = v_nl_th[{s}];\n\
+                             \x20       let vbc = v_nl_th[{s1}];\n\
+                             \x20       let vce = vbe - vbc;\n\
+                             \x20       let p = vce * ic + vbe * ib;\n\
+                             \x20       let dt = 1.0 / SAMPLE_RATE;\n\
+                             \x20       let d_tj = (p - (state.device_{dev_num}_tj - DEVICE_{dev_num}_TAMB) / DEVICE_{dev_num}_RTH) / DEVICE_{dev_num}_CTH * dt;\n\
+                             \x20       state.device_{dev_num}_tj += d_tj;\n\
+                             \x20       state.device_{dev_num}_tj = state.device_{dev_num}_tj.clamp(200.0, 500.0);\n\
+                             \x20       state.device_{dev_num}_vt = BOLTZMANN_Q * state.device_{dev_num}_tj;\n\
+                             \x20       let t_ratio = state.device_{dev_num}_tj / DEVICE_{dev_num}_TAMB;\n\
+                             \x20       let vt_nom = BOLTZMANN_Q * DEVICE_{dev_num}_TAMB;\n\
+                             \x20       state.device_{dev_num}_is = DEVICE_{dev_num}_IS_NOM\n\
+                             \x20           * t_ratio.powf(DEVICE_{dev_num}_XTI)\n\
+                             \x20           * fast_exp((DEVICE_{dev_num}_EG / vt_nom) * (1.0 - DEVICE_{dev_num}_TAMB / state.device_{dev_num}_tj));\n\
+                             \x20   }}\n"
+                        ));
+                }
             }
         }
         if !thermal_update.is_empty() {
@@ -3110,13 +3162,13 @@ impl RustEmitter {
                         if bp.has_parasitics() && !slot.has_internal_mna_nodes {
                             // Use inner 2D NR for parasitic resistances
                             code.push_str(&format!(
-                                "        let (i_dev{s}, i_dev{s1}, bjt{d}_jac) = bjt_with_parasitics(v_d{s}, v_d{s1}, state.device_{d}_is, state.device_{d}_vt, DEVICE_{d}_NF, state.device_{d}_bf, state.device_{d}_br, DEVICE_{d}_SIGN, DEVICE_{d}_USE_GP, DEVICE_{d}_VAF, DEVICE_{d}_VAR, DEVICE_{d}_IKF, DEVICE_{d}_IKR, DEVICE_{d}_ISE, DEVICE_{d}_NE, DEVICE_{d}_RB, DEVICE_{d}_RC, DEVICE_{d}_RE);\n"
+                                "        let (i_dev{s}, i_dev{s1}, bjt{d}_jac) = bjt_with_parasitics(v_d{s}, v_d{s1}, state.device_{d}_is, state.device_{d}_vt, DEVICE_{d}_NF, DEVICE_{d}_NR, state.device_{d}_bf, state.device_{d}_br, DEVICE_{d}_SIGN, DEVICE_{d}_USE_GP, DEVICE_{d}_VAF, DEVICE_{d}_VAR, DEVICE_{d}_IKF, DEVICE_{d}_IKR, DEVICE_{d}_ISE, DEVICE_{d}_NE, DEVICE_{d}_ISC, DEVICE_{d}_NC, DEVICE_{d}_RB, DEVICE_{d}_RC, DEVICE_{d}_RE);\n"
                             ));
                         } else {
                             // Combined evaluation: shared exp() across ic, ib, jacobian
                             // (parasitics handled by MNA internal nodes when has_internal_mna_nodes)
                             code.push_str(&format!(
-                                "        let (i_dev{s}, i_dev{s1}, bjt{d}_jac) = bjt_evaluate(v_d{s}, v_d{s1}, state.device_{d}_is, state.device_{d}_vt, DEVICE_{d}_NF, state.device_{d}_bf, state.device_{d}_br, DEVICE_{d}_SIGN, DEVICE_{d}_USE_GP, DEVICE_{d}_VAF, DEVICE_{d}_VAR, DEVICE_{d}_IKF, DEVICE_{d}_IKR, DEVICE_{d}_ISE, DEVICE_{d}_NE);\n"
+                                "        let (i_dev{s}, i_dev{s1}, bjt{d}_jac) = bjt_evaluate(v_d{s}, v_d{s1}, state.device_{d}_is, state.device_{d}_vt, DEVICE_{d}_NF, DEVICE_{d}_NR, state.device_{d}_bf, state.device_{d}_br, DEVICE_{d}_SIGN, DEVICE_{d}_USE_GP, DEVICE_{d}_VAF, DEVICE_{d}_VAR, DEVICE_{d}_IKF, DEVICE_{d}_IKR, DEVICE_{d}_ISE, DEVICE_{d}_NE, DEVICE_{d}_ISC, DEVICE_{d}_NC);\n"
                             ));
                         }
                         code.push_str(&format!(
@@ -3274,24 +3326,12 @@ impl RustEmitter {
                         if tp.has_rgi() {
                             // RGI: solve for internal Vgk, evaluate at internal voltage
                             code.push_str(&format!(
-                                "        let i_dev{s} = tube_ip_with_rgi(v_d{s}, v_d{s1}, state.device_{d}_mu, state.device_{d}_ex, state.device_{d}_kg1, state.device_{d}_kp, state.device_{d}_kvb, state.device_{d}_lambda, state.device_{d}_ig_max, state.device_{d}_vgk_onset, DEVICE_{d}_RGI);\n"
-                            ));
-                            code.push_str(&format!(
-                                "        let i_dev{s1} = tube_ig_with_rgi(v_d{s}, state.device_{d}_ig_max, state.device_{d}_vgk_onset, DEVICE_{d}_RGI);\n"
-                            ));
-                            code.push_str(&format!(
-                                "        let tube{d}_jac = tube_jacobian_with_rgi(v_d{s}, v_d{s1}, state.device_{d}_mu, state.device_{d}_ex, state.device_{d}_kg1, state.device_{d}_kp, state.device_{d}_kvb, state.device_{d}_ig_max, state.device_{d}_vgk_onset, state.device_{d}_lambda, DEVICE_{d}_RGI);\n"
+                                "        let (i_dev{s}, i_dev{s1}, tube{d}_jac) = tube_evaluate_with_rgi(v_d{s}, v_d{s1}, state.device_{d}_mu, state.device_{d}_ex, state.device_{d}_kg1, state.device_{d}_kp, state.device_{d}_kvb, state.device_{d}_ig_max, state.device_{d}_vgk_onset, state.device_{d}_lambda, DEVICE_{d}_RGI);\n"
                             ));
                         } else {
                             // Standard tube (no RGI)
                             code.push_str(&format!(
-                                "        let i_dev{s} = tube_ip(v_d{s}, v_d{s1}, state.device_{d}_mu, state.device_{d}_ex, state.device_{d}_kg1, state.device_{d}_kp, state.device_{d}_kvb, state.device_{d}_lambda);\n"
-                            ));
-                            code.push_str(&format!(
-                                "        let i_dev{s1} = tube_ig(v_d{s}, state.device_{d}_ig_max, state.device_{d}_vgk_onset);\n"
-                            ));
-                            code.push_str(&format!(
-                                "        let tube{d}_jac = tube_jacobian(v_d{s}, v_d{s1}, state.device_{d}_mu, state.device_{d}_ex, state.device_{d}_kg1, state.device_{d}_kp, state.device_{d}_kvb, state.device_{d}_ig_max, state.device_{d}_vgk_onset, state.device_{d}_lambda);\n"
+                                "        let (i_dev{s}, i_dev{s1}, tube{d}_jac) = tube_evaluate(v_d{s}, v_d{s1}, state.device_{d}_mu, state.device_{d}_ex, state.device_{d}_kg1, state.device_{d}_kp, state.device_{d}_kvb, state.device_{d}_ig_max, state.device_{d}_vgk_onset, state.device_{d}_lambda);\n"
                             ));
                         }
                         code.push_str(&format!(
@@ -4584,7 +4624,8 @@ impl RustEmitter {
                 idx
             ));
             code.push_str(&format!(
-                "        let r = resistance.clamp(POT_{}_MIN_R, POT_{}_MAX_R);\n\
+                "        if !resistance.is_finite() {{ return; }}\n\
+                 \x20       let r = resistance.clamp(POT_{}_MIN_R, POT_{}_MAX_R);\n\
                  \x20       if (r - self.pot_{}_resistance).abs() < 1e-12 {{ return; }}\n\n\
                  \x20       // Delta conductance: stamp into A, A_neg, A_be (NOT A_neg_be: no G term)\n\
                  \x20       let delta_g = 1.0 / r - 1.0 / self.pot_{}_resistance;\n",
@@ -5127,7 +5168,9 @@ impl RustEmitter {
                     .device_slots
                     .iter()
                     .find(|s| i >= s.start_idx && i < s.start_idx + s.dimension)
-                    .unwrap();
+                    .ok_or_else(|| CodegenError::InvalidConfig(
+                        format!("No device slot found for NR dimension index {}", i)
+                    ))?;
                 let blk_start = slot.start_idx;
                 let blk_dim = slot.dimension;
                 for j in 0..m {
@@ -5227,6 +5270,27 @@ impl RustEmitter {
             code.push_str("    }\n\n"); // end BE fallback block
         }
 
+        // NaN check BEFORE state update (prevents corruption of v_prev/i_nl_prev)
+        code.push_str("    if !v.iter().all(|x| x.is_finite()) {\n");
+        code.push_str("        state.v_prev = state.dc_operating_point;\n");
+        code.push_str("        state.i_nl_prev = [0.0; M];\n");
+        code.push_str("        state.i_nl_prev_prev = [0.0; M];\n");
+        code.push_str("        state.input_prev = 0.0;\n");
+        for (dev_num, slot) in ir.device_slots.iter().enumerate() {
+            if let super::ir::DeviceParams::Bjt(bp) = &slot.params {
+                if bp.has_self_heating() {
+                    code.push_str(&format!(
+                        "        state.device_{dev_num}_tj = DEVICE_{dev_num}_TAMB;\n\
+                         \x20       state.device_{dev_num}_is = DEVICE_{dev_num}_IS;\n\
+                         \x20       state.device_{dev_num}_vt = DEVICE_{dev_num}_VT;\n"
+                    ));
+                }
+            }
+        }
+        code.push_str("        state.diag_nan_reset_count += 1;\n");
+        code.push_str("        return [0.0; NUM_OUTPUTS];\n");
+        code.push_str("    }\n\n");
+
         // State update
         code.push_str("    // State update\n");
         code.push_str("    state.v_prev = v;\n");
@@ -5244,57 +5308,37 @@ impl RustEmitter {
 
         // BJT self-heating thermal update
         for (dev_num, slot) in ir.device_slots.iter().enumerate() {
-            if let super::ir::DeviceParams::Bjt(bp) = &slot.params
-                && bp.has_self_heating()
-            {
-                let s = slot.start_idx;
-                let s1 = s + 1;
-                code.push_str(&format!(
-                    "    {{ // BJT {dev_num} self-heating thermal update\n\
-                     \x20       let ic = i_nl[{s}];\n\
-                     \x20       let ib = i_nl[{s1}];\n\
-                     \x20       let mut vbe_sum = 0.0f64;\n\
-                     \x20       let mut vbc_sum = 0.0f64;\n\
-                     \x20       for j in 0..N {{ vbe_sum += N_V[{s}][j] * v[j]; }}\n\
-                     \x20       for j in 0..N {{ vbc_sum += N_V[{s1}][j] * v[j]; }}\n\
-                     \x20       let vce = vbe_sum - vbc_sum;\n\
-                     \x20       let p = vce * ic + vbe_sum * ib;\n\
-                     \x20       let dt = 1.0 / SAMPLE_RATE;\n\
-                     \x20       let d_tj = (p - (state.device_{dev_num}_tj - DEVICE_{dev_num}_TAMB) / DEVICE_{dev_num}_RTH) / DEVICE_{dev_num}_CTH * dt;\n\
-                     \x20       state.device_{dev_num}_tj += d_tj;\n\
-                     \x20       state.device_{dev_num}_tj = state.device_{dev_num}_tj.clamp(200.0, 500.0);\n\
-                     \x20       state.device_{dev_num}_vt = BOLTZMANN_Q * state.device_{dev_num}_tj;\n\
-                     \x20       let t_ratio = state.device_{dev_num}_tj / DEVICE_{dev_num}_TAMB;\n\
-                     \x20       let vt_nom = BOLTZMANN_Q * DEVICE_{dev_num}_TAMB;\n\
-                     \x20       state.device_{dev_num}_is = DEVICE_{dev_num}_IS_NOM\n\
-                     \x20           * t_ratio.powf(DEVICE_{dev_num}_XTI)\n\
-                     \x20           * fast_exp((DEVICE_{dev_num}_EG / vt_nom) * (1.0 - DEVICE_{dev_num}_TAMB / state.device_{dev_num}_tj));\n\
-                     \x20   }}\n"
-                ));
+            if let super::ir::DeviceParams::Bjt(bp) = &slot.params {
+                if bp.has_self_heating() {
+                    let s = slot.start_idx;
+                    let s1 = s + 1;
+                    code.push_str(&format!(
+                        "    {{ // BJT {dev_num} self-heating thermal update\n\
+                         \x20       let ic = i_nl[{s}];\n\
+                         \x20       let ib = i_nl[{s1}];\n\
+                         \x20       let mut vbe_sum = 0.0f64;\n\
+                         \x20       let mut vbc_sum = 0.0f64;\n\
+                         \x20       for j in 0..N {{ vbe_sum += N_V[{s}][j] * v[j]; }}\n\
+                         \x20       for j in 0..N {{ vbc_sum += N_V[{s1}][j] * v[j]; }}\n\
+                         \x20       let vce = vbe_sum - vbc_sum;\n\
+                         \x20       let p = vce * ic + vbe_sum * ib;\n\
+                         \x20       let dt = 1.0 / SAMPLE_RATE;\n\
+                         \x20       let d_tj = (p - (state.device_{dev_num}_tj - DEVICE_{dev_num}_TAMB) / DEVICE_{dev_num}_RTH) / DEVICE_{dev_num}_CTH * dt;\n\
+                         \x20       state.device_{dev_num}_tj += d_tj;\n\
+                         \x20       state.device_{dev_num}_tj = state.device_{dev_num}_tj.clamp(200.0, 500.0);\n\
+                         \x20       state.device_{dev_num}_vt = BOLTZMANN_Q * state.device_{dev_num}_tj;\n\
+                         \x20       let t_ratio = state.device_{dev_num}_tj / DEVICE_{dev_num}_TAMB;\n\
+                         \x20       let vt_nom = BOLTZMANN_Q * DEVICE_{dev_num}_TAMB;\n\
+                         \x20       state.device_{dev_num}_is = DEVICE_{dev_num}_IS_NOM\n\
+                         \x20           * t_ratio.powf(DEVICE_{dev_num}_XTI)\n\
+                         \x20           * fast_exp((DEVICE_{dev_num}_EG / vt_nom) * (1.0 - DEVICE_{dev_num}_TAMB / state.device_{dev_num}_tj));\n\
+                         \x20   }}\n"
+                    ));
+                }
             }
         }
 
-        // NaN check
-        code.push_str("    // Sanitize state: if NaN/inf entered, reset to DC operating point\n");
-        code.push_str("    if !state.v_prev.iter().all(|x| x.is_finite()) {\n");
-        code.push_str("        state.v_prev = state.dc_operating_point;\n");
-        code.push_str("        state.i_nl_prev = [0.0; M];\n");
-        code.push_str("        state.i_nl_prev_prev = [0.0; M];\n");
-        code.push_str("        state.input_prev = 0.0;\n");
-        for (dev_num, slot) in ir.device_slots.iter().enumerate() {
-            if let super::ir::DeviceParams::Bjt(bp) = &slot.params
-                && bp.has_self_heating()
-            {
-                code.push_str(&format!(
-                    "        state.device_{dev_num}_tj = DEVICE_{dev_num}_TAMB;\n\
-                     \x20       state.device_{dev_num}_is = DEVICE_{dev_num}_IS;\n\
-                     \x20       state.device_{dev_num}_vt = DEVICE_{dev_num}_VT;\n"
-                ));
-            }
-        }
-        code.push_str("        state.diag_nan_reset_count += 1;\n");
-        code.push_str("        return [0.0; NUM_OUTPUTS];\n");
-        code.push_str("    }\n\n");
+        // (NaN check already done before state update)
 
         // Output extraction
         code.push_str("    // Extract outputs, DC blocking, and scaling\n");
@@ -5383,13 +5427,13 @@ impl RustEmitter {
                 let s1 = s + 1;
                 if bp.has_parasitics() && !slot.has_internal_mna_nodes {
                     code.push_str(&format!(
-                        "{indent}let (i_dev{s}, i_dev{s1}, bjt{d}_jac) = bjt_with_parasitics(v_d{s}, v_d{s1}, state.device_{d}_is, state.device_{d}_vt, DEVICE_{d}_NF, state.device_{d}_bf, state.device_{d}_br, DEVICE_{d}_SIGN, DEVICE_{d}_USE_GP, DEVICE_{d}_VAF, DEVICE_{d}_VAR, DEVICE_{d}_IKF, DEVICE_{d}_IKR, DEVICE_{d}_ISE, DEVICE_{d}_NE, DEVICE_{d}_RB, DEVICE_{d}_RC, DEVICE_{d}_RE);\n"
+                        "{indent}let (i_dev{s}, i_dev{s1}, bjt{d}_jac) = bjt_with_parasitics(v_d{s}, v_d{s1}, state.device_{d}_is, state.device_{d}_vt, DEVICE_{d}_NF, DEVICE_{d}_NR, state.device_{d}_bf, state.device_{d}_br, DEVICE_{d}_SIGN, DEVICE_{d}_USE_GP, DEVICE_{d}_VAF, DEVICE_{d}_VAR, DEVICE_{d}_IKF, DEVICE_{d}_IKR, DEVICE_{d}_ISE, DEVICE_{d}_NE, DEVICE_{d}_ISC, DEVICE_{d}_NC, DEVICE_{d}_RB, DEVICE_{d}_RC, DEVICE_{d}_RE);\n"
                     ));
                 } else {
                     // Combined evaluation: shared exp() across ic, ib, jacobian
                     // (parasitics handled by MNA internal nodes when has_internal_mna_nodes)
                     code.push_str(&format!(
-                        "{indent}let (i_dev{s}, i_dev{s1}, bjt{d}_jac) = bjt_evaluate(v_d{s}, v_d{s1}, state.device_{d}_is, state.device_{d}_vt, DEVICE_{d}_NF, state.device_{d}_bf, state.device_{d}_br, DEVICE_{d}_SIGN, DEVICE_{d}_USE_GP, DEVICE_{d}_VAF, DEVICE_{d}_VAR, DEVICE_{d}_IKF, DEVICE_{d}_IKR, DEVICE_{d}_ISE, DEVICE_{d}_NE);\n"
+                        "{indent}let (i_dev{s}, i_dev{s1}, bjt{d}_jac) = bjt_evaluate(v_d{s}, v_d{s1}, state.device_{d}_is, state.device_{d}_vt, DEVICE_{d}_NF, DEVICE_{d}_NR, state.device_{d}_bf, state.device_{d}_br, DEVICE_{d}_SIGN, DEVICE_{d}_USE_GP, DEVICE_{d}_VAF, DEVICE_{d}_VAR, DEVICE_{d}_IKF, DEVICE_{d}_IKR, DEVICE_{d}_ISE, DEVICE_{d}_NE, DEVICE_{d}_ISC, DEVICE_{d}_NC);\n"
                     ));
                 }
                 code.push_str(&format!(
@@ -5455,15 +5499,11 @@ impl RustEmitter {
                 let s1 = s + 1;
                 if tp.has_rgi() {
                     code.push_str(&format!(
-                        "{indent}let i_dev{s} = tube_ip_with_rgi(v_d{s}, v_d{s1}, state.device_{d}_mu, state.device_{d}_ex, state.device_{d}_kg1, state.device_{d}_kp, state.device_{d}_kvb, state.device_{d}_lambda, state.device_{d}_ig_max, state.device_{d}_vgk_onset, DEVICE_{d}_RGI);\n\
-                         {indent}let i_dev{s1} = tube_ig_with_rgi(v_d{s}, state.device_{d}_ig_max, state.device_{d}_vgk_onset, DEVICE_{d}_RGI);\n\
-                         {indent}let tube{d}_jac = tube_jacobian_with_rgi(v_d{s}, v_d{s1}, state.device_{d}_mu, state.device_{d}_ex, state.device_{d}_kg1, state.device_{d}_kp, state.device_{d}_kvb, state.device_{d}_ig_max, state.device_{d}_vgk_onset, state.device_{d}_lambda, DEVICE_{d}_RGI);\n"
+                        "{indent}let (i_dev{s}, i_dev{s1}, tube{d}_jac) = tube_evaluate_with_rgi(v_d{s}, v_d{s1}, state.device_{d}_mu, state.device_{d}_ex, state.device_{d}_kg1, state.device_{d}_kp, state.device_{d}_kvb, state.device_{d}_ig_max, state.device_{d}_vgk_onset, state.device_{d}_lambda, DEVICE_{d}_RGI);\n"
                     ));
                 } else {
                     code.push_str(&format!(
-                        "{indent}let i_dev{s} = tube_ip(v_d{s}, v_d{s1}, state.device_{d}_mu, state.device_{d}_ex, state.device_{d}_kg1, state.device_{d}_kp, state.device_{d}_kvb, state.device_{d}_lambda);\n\
-                         {indent}let i_dev{s1} = tube_ig(v_d{s}, state.device_{d}_ig_max, state.device_{d}_vgk_onset);\n\
-                         {indent}let tube{d}_jac = tube_jacobian(v_d{s}, v_d{s1}, state.device_{d}_mu, state.device_{d}_ex, state.device_{d}_kg1, state.device_{d}_kp, state.device_{d}_kvb, state.device_{d}_ig_max, state.device_{d}_vgk_onset, state.device_{d}_lambda);\n"
+                        "{indent}let (i_dev{s}, i_dev{s1}, tube{d}_jac) = tube_evaluate(v_d{s}, v_d{s1}, state.device_{d}_mu, state.device_{d}_ex, state.device_{d}_kg1, state.device_{d}_kp, state.device_{d}_kvb, state.device_{d}_ig_max, state.device_{d}_vgk_onset, state.device_{d}_lambda);\n"
                     ));
                 }
                 code.push_str(&format!(
@@ -5956,8 +5996,8 @@ impl RustEmitter {
             Self::emit_nodal_voltage_limiting(&mut code, ir);
             code.push('\n');
 
-            // Layer 2: Global node voltage damping (10V threshold)
-            code.push_str("        // Layer 2: Global node voltage damping (10V threshold)\n");
+            // Layer 2: Global node voltage damping (adaptive threshold)
+            code.push_str("        // Layer 2: Global node voltage damping\n");
             code.push_str("        {\n");
             code.push_str("            let mut max_node_dv = 0.0_f64;\n");
             code.push_str(&format!(
@@ -5967,8 +6007,15 @@ impl RustEmitter {
                  \x20           }}\n",
                 n_nodes
             ));
-            code.push_str("            if max_node_dv > 10.0 {\n");
-            code.push_str("                alpha *= (10.0 / max_node_dv).max(0.01);\n");
+            // Adaptive threshold: max(10V, 5% of max node voltage)
+            code.push_str("            let mut max_v = 0.0_f64;\n");
+            code.push_str(&format!(
+                "            for i in 0..{} {{ max_v = max_v.max(v[i].abs()); }}\n",
+                n_nodes
+            ));
+            code.push_str("            let damp_thresh = 10.0_f64.max(max_v * 0.05);\n");
+            code.push_str("            if max_node_dv > damp_thresh {\n");
+            code.push_str("                alpha *= (damp_thresh / max_node_dv).max(0.01);\n");
             code.push_str("            }\n");
             code.push_str("        }\n\n");
 
@@ -6176,6 +6223,27 @@ impl RustEmitter {
             code.push_str("    }\n\n"); // end BE fallback block
         }
 
+        // NaN check BEFORE state update (prevents corruption of v_prev/i_nl_prev)
+        code.push_str("    if !v.iter().all(|x| x.is_finite()) {\n");
+        code.push_str("        state.v_prev = state.dc_operating_point;\n");
+        code.push_str("        state.i_nl_prev = [0.0; M];\n");
+        code.push_str("        state.i_nl_prev_prev = [0.0; M];\n");
+        code.push_str("        state.input_prev = 0.0;\n");
+        for (dev_num, slot) in ir.device_slots.iter().enumerate() {
+            if let DeviceParams::Bjt(bp) = &slot.params {
+                if bp.has_self_heating() {
+                    code.push_str(&format!(
+                        "        state.device_{dev_num}_tj = DEVICE_{dev_num}_TAMB;\n\
+                         \x20       state.device_{dev_num}_is = DEVICE_{dev_num}_IS;\n\
+                         \x20       state.device_{dev_num}_vt = DEVICE_{dev_num}_VT;\n"
+                    ));
+                }
+            }
+        }
+        code.push_str("        state.diag_nan_reset_count += 1;\n");
+        code.push_str("        return [0.0; NUM_OUTPUTS];\n");
+        code.push_str("    }\n\n");
+
         // Step 3: Update state
         code.push_str("    // Step 3: Update state\n");
         code.push_str("    state.v_prev = v;\n");
@@ -6193,59 +6261,38 @@ impl RustEmitter {
 
         // Step 3b: BJT self-heating thermal update (quasi-static, outside NR)
         for (dev_num, slot) in ir.device_slots.iter().enumerate() {
-            if let DeviceParams::Bjt(bp) = &slot.params
-                && bp.has_self_heating()
-            {
-                let s = slot.start_idx;
-                let s1 = s + 1;
-                code.push_str(&format!(
-                        "    {{ // BJT {dev_num} self-heating thermal update\n\
-                         \x20       let ic = i_nl[{s}];\n\
-                         \x20       let ib = i_nl[{s1}];\n\
-                         \x20       // Extract controlling voltages from final node voltages\n\
-                         \x20       let mut vbe_sum = 0.0f64;\n\
-                         \x20       let mut vbc_sum = 0.0f64;\n\
-                         \x20       for j in 0..N {{ vbe_sum += N_V[{s}][j] * v[j]; }}\n\
-                         \x20       for j in 0..N {{ vbc_sum += N_V[{s1}][j] * v[j]; }}\n\
-                         \x20       let vce = vbe_sum - vbc_sum;\n\
-                         \x20       let p = vce * ic + vbe_sum * ib;\n\
-                         \x20       let dt = 1.0 / SAMPLE_RATE;\n\
-                         \x20       let d_tj = (p - (state.device_{dev_num}_tj - DEVICE_{dev_num}_TAMB) / DEVICE_{dev_num}_RTH) / DEVICE_{dev_num}_CTH * dt;\n\
-                         \x20       state.device_{dev_num}_tj += d_tj;\n\
-                         \x20       state.device_{dev_num}_tj = state.device_{dev_num}_tj.clamp(200.0, 500.0);\n\
-                         \x20       state.device_{dev_num}_vt = BOLTZMANN_Q * state.device_{dev_num}_tj;\n\
-                         \x20       let t_ratio = state.device_{dev_num}_tj / DEVICE_{dev_num}_TAMB;\n\
-                         \x20       let vt_nom = BOLTZMANN_Q * DEVICE_{dev_num}_TAMB;\n\
-                         \x20       state.device_{dev_num}_is = DEVICE_{dev_num}_IS_NOM\n\
-                         \x20           * t_ratio.powf(DEVICE_{dev_num}_XTI)\n\
-                         \x20           * fast_exp((DEVICE_{dev_num}_EG / vt_nom) * (1.0 - DEVICE_{dev_num}_TAMB / state.device_{dev_num}_tj));\n\
-                         \x20   }}\n"
-                    ));
+            if let DeviceParams::Bjt(bp) = &slot.params {
+                if bp.has_self_heating() {
+                    let s = slot.start_idx;
+                    let s1 = s + 1;
+                    code.push_str(&format!(
+                            "    {{ // BJT {dev_num} self-heating thermal update\n\
+                             \x20       let ic = i_nl[{s}];\n\
+                             \x20       let ib = i_nl[{s1}];\n\
+                             \x20       // Extract controlling voltages from final node voltages\n\
+                             \x20       let mut vbe_sum = 0.0f64;\n\
+                             \x20       let mut vbc_sum = 0.0f64;\n\
+                             \x20       for j in 0..N {{ vbe_sum += N_V[{s}][j] * v[j]; }}\n\
+                             \x20       for j in 0..N {{ vbc_sum += N_V[{s1}][j] * v[j]; }}\n\
+                             \x20       let vce = vbe_sum - vbc_sum;\n\
+                             \x20       let p = vce * ic + vbe_sum * ib;\n\
+                             \x20       let dt = 1.0 / SAMPLE_RATE;\n\
+                             \x20       let d_tj = (p - (state.device_{dev_num}_tj - DEVICE_{dev_num}_TAMB) / DEVICE_{dev_num}_RTH) / DEVICE_{dev_num}_CTH * dt;\n\
+                             \x20       state.device_{dev_num}_tj += d_tj;\n\
+                             \x20       state.device_{dev_num}_tj = state.device_{dev_num}_tj.clamp(200.0, 500.0);\n\
+                             \x20       state.device_{dev_num}_vt = BOLTZMANN_Q * state.device_{dev_num}_tj;\n\
+                             \x20       let t_ratio = state.device_{dev_num}_tj / DEVICE_{dev_num}_TAMB;\n\
+                             \x20       let vt_nom = BOLTZMANN_Q * DEVICE_{dev_num}_TAMB;\n\
+                             \x20       state.device_{dev_num}_is = DEVICE_{dev_num}_IS_NOM\n\
+                             \x20           * t_ratio.powf(DEVICE_{dev_num}_XTI)\n\
+                             \x20           * fast_exp((DEVICE_{dev_num}_EG / vt_nom) * (1.0 - DEVICE_{dev_num}_TAMB / state.device_{dev_num}_tj));\n\
+                             \x20   }}\n"
+                        ));
+                }
             }
         }
 
-        // NaN check
-        code.push_str("    // Sanitize state: if NaN/inf entered, reset to DC operating point\n");
-        code.push_str("    if !state.v_prev.iter().all(|x| x.is_finite()) {\n");
-        code.push_str("        state.v_prev = state.dc_operating_point;\n");
-        code.push_str("        state.i_nl_prev = [0.0; M];\n");
-        code.push_str("        state.i_nl_prev_prev = [0.0; M];\n");
-        code.push_str("        state.input_prev = 0.0;\n");
-        // Reset thermal state on NaN
-        for (dev_num, slot) in ir.device_slots.iter().enumerate() {
-            if let DeviceParams::Bjt(bp) = &slot.params
-                && bp.has_self_heating()
-            {
-                code.push_str(&format!(
-                    "        state.device_{dev_num}_tj = DEVICE_{dev_num}_TAMB;\n\
-                         \x20       state.device_{dev_num}_is = DEVICE_{dev_num}_IS;\n\
-                         \x20       state.device_{dev_num}_vt = DEVICE_{dev_num}_VT;\n"
-                ));
-            }
-        }
-        code.push_str("        state.diag_nan_reset_count += 1;\n");
-        code.push_str("        return [0.0; NUM_OUTPUTS];\n");
-        code.push_str("    }\n\n");
+        // (NaN check already done before state update)
 
         if m > 0 {
             code.push_str("    if state.last_nr_iterations >= MAX_ITER as u32 {\n");
@@ -6368,7 +6415,7 @@ impl RustEmitter {
                             "{indent}{{ // BJT {dev_num} (RB/RC/RE inner NR)\n\
                              {indent}    let vbe = v_nl[{s}];\n\
                              {indent}    let vbc = v_nl[{s1}];\n\
-                             {indent}    let (ic, ib, jac) = bjt_with_parasitics(vbe, vbc, state.device_{dev_num}_is, state.device_{dev_num}_vt, DEVICE_{dev_num}_NF, state.device_{dev_num}_bf, state.device_{dev_num}_br, DEVICE_{dev_num}_SIGN, DEVICE_{dev_num}_USE_GP, DEVICE_{dev_num}_VAF, DEVICE_{dev_num}_VAR, DEVICE_{dev_num}_IKF, DEVICE_{dev_num}_IKR, DEVICE_{dev_num}_ISE, DEVICE_{dev_num}_NE, DEVICE_{dev_num}_RB, DEVICE_{dev_num}_RC, DEVICE_{dev_num}_RE);\n\
+                             {indent}    let (ic, ib, jac) = bjt_with_parasitics(vbe, vbc, state.device_{dev_num}_is, state.device_{dev_num}_vt, DEVICE_{dev_num}_NF, DEVICE_{dev_num}_NR, state.device_{dev_num}_bf, state.device_{dev_num}_br, DEVICE_{dev_num}_SIGN, DEVICE_{dev_num}_USE_GP, DEVICE_{dev_num}_VAF, DEVICE_{dev_num}_VAR, DEVICE_{dev_num}_IKF, DEVICE_{dev_num}_IKR, DEVICE_{dev_num}_ISE, DEVICE_{dev_num}_NE, DEVICE_{dev_num}_ISC, DEVICE_{dev_num}_NC, DEVICE_{dev_num}_RB, DEVICE_{dev_num}_RC, DEVICE_{dev_num}_RE);\n\
                              {indent}    i_nl[{s}] = ic;\n\
                              {indent}    i_nl[{s1}] = ib;\n\
                              {indent}    j_dev[{s} * M + {s}] = jac[0];\n\
@@ -6383,7 +6430,7 @@ impl RustEmitter {
                             "{indent}{{ // BJT {dev_num}{mna_note}\n\
                              {indent}    let vbe = v_nl[{s}];\n\
                              {indent}    let vbc = v_nl[{s1}];\n\
-                             {indent}    let (ic, ib, jac) = bjt_evaluate(vbe, vbc, state.device_{dev_num}_is, state.device_{dev_num}_vt, DEVICE_{dev_num}_NF, state.device_{dev_num}_bf, state.device_{dev_num}_br, DEVICE_{dev_num}_SIGN, DEVICE_{dev_num}_USE_GP, DEVICE_{dev_num}_VAF, DEVICE_{dev_num}_VAR, DEVICE_{dev_num}_IKF, DEVICE_{dev_num}_IKR, DEVICE_{dev_num}_ISE, DEVICE_{dev_num}_NE);\n\
+                             {indent}    let (ic, ib, jac) = bjt_evaluate(vbe, vbc, state.device_{dev_num}_is, state.device_{dev_num}_vt, DEVICE_{dev_num}_NF, DEVICE_{dev_num}_NR, state.device_{dev_num}_bf, state.device_{dev_num}_br, DEVICE_{dev_num}_SIGN, DEVICE_{dev_num}_USE_GP, DEVICE_{dev_num}_VAF, DEVICE_{dev_num}_VAR, DEVICE_{dev_num}_IKF, DEVICE_{dev_num}_IKR, DEVICE_{dev_num}_ISE, DEVICE_{dev_num}_NE, DEVICE_{dev_num}_ISC, DEVICE_{dev_num}_NC);\n\
                              {indent}    i_nl[{s}] = ic;\n\
                              {indent}    i_nl[{s1}] = ib;\n\
                              {indent}    j_dev[{s} * M + {s}] = jac[0];\n\
@@ -6487,9 +6534,8 @@ impl RustEmitter {
                             "{indent}{{ // Tube {dev_num} (RGI)\n\
                              {indent}    let vgk = v_nl[{s}];\n\
                              {indent}    let vpk = v_nl[{s1}];\n\
-                             {indent}    i_nl[{s}] = tube_ip_with_rgi(vgk, vpk, state.device_{dev_num}_mu, state.device_{dev_num}_ex, state.device_{dev_num}_kg1, state.device_{dev_num}_kp, state.device_{dev_num}_kvb, state.device_{dev_num}_lambda, state.device_{dev_num}_ig_max, state.device_{dev_num}_vgk_onset, DEVICE_{dev_num}_RGI);\n\
-                             {indent}    i_nl[{s1}] = tube_ig_with_rgi(vgk, state.device_{dev_num}_ig_max, state.device_{dev_num}_vgk_onset, DEVICE_{dev_num}_RGI);\n\
-                             {indent}    let jac = tube_jacobian_with_rgi(vgk, vpk, state.device_{dev_num}_mu, state.device_{dev_num}_ex, state.device_{dev_num}_kg1, state.device_{dev_num}_kp, state.device_{dev_num}_kvb, state.device_{dev_num}_ig_max, state.device_{dev_num}_vgk_onset, state.device_{dev_num}_lambda, DEVICE_{dev_num}_RGI);\n\
+                             {indent}    let (ip_t, ig_t, jac) = tube_evaluate_with_rgi(vgk, vpk, state.device_{dev_num}_mu, state.device_{dev_num}_ex, state.device_{dev_num}_kg1, state.device_{dev_num}_kp, state.device_{dev_num}_kvb, state.device_{dev_num}_ig_max, state.device_{dev_num}_vgk_onset, state.device_{dev_num}_lambda, DEVICE_{dev_num}_RGI);\n\
+                             {indent}    i_nl[{s}] = ip_t; i_nl[{s1}] = ig_t;\n\
                              {indent}    j_dev[{s} * M + {s}] = jac[0];\n\
                              {indent}    j_dev[{s} * M + {s1}] = jac[1];\n\
                              {indent}    j_dev[{s1} * M + {s}] = jac[2];\n\
@@ -6501,9 +6547,8 @@ impl RustEmitter {
                             "{indent}{{ // Tube {dev_num}\n\
                              {indent}    let vgk = v_nl[{s}];\n\
                              {indent}    let vpk = v_nl[{s1}];\n\
-                             {indent}    i_nl[{s}] = tube_ip(vgk, vpk, state.device_{dev_num}_mu, state.device_{dev_num}_ex, state.device_{dev_num}_kg1, state.device_{dev_num}_kp, state.device_{dev_num}_kvb, state.device_{dev_num}_lambda);\n\
-                             {indent}    i_nl[{s1}] = tube_ig(vgk, state.device_{dev_num}_ig_max, state.device_{dev_num}_vgk_onset);\n\
-                             {indent}    let jac = tube_jacobian(vgk, vpk, state.device_{dev_num}_mu, state.device_{dev_num}_ex, state.device_{dev_num}_kg1, state.device_{dev_num}_kp, state.device_{dev_num}_kvb, state.device_{dev_num}_ig_max, state.device_{dev_num}_vgk_onset, state.device_{dev_num}_lambda);\n\
+                             {indent}    let (ip_t, ig_t, jac) = tube_evaluate(vgk, vpk, state.device_{dev_num}_mu, state.device_{dev_num}_ex, state.device_{dev_num}_kg1, state.device_{dev_num}_kp, state.device_{dev_num}_kvb, state.device_{dev_num}_ig_max, state.device_{dev_num}_vgk_onset, state.device_{dev_num}_lambda);\n\
+                             {indent}    i_nl[{s}] = ip_t; i_nl[{s1}] = ig_t;\n\
                              {indent}    j_dev[{s} * M + {s}] = jac[0];\n\
                              {indent}    j_dev[{s} * M + {s1}] = jac[1];\n\
                              {indent}    j_dev[{s1} * M + {s}] = jac[2];\n\
@@ -6559,7 +6604,7 @@ impl RustEmitter {
                         code.push_str(&format!(
                             "{indent}{{ let vbe = v_nl_final[{s}];\n\
                              {indent}  let vbc = v_nl_final[{s1}];\n\
-                             {indent}  let (ic, ib, _jac) = bjt_with_parasitics(vbe, vbc, state.device_{dev_num}_is, state.device_{dev_num}_vt, DEVICE_{dev_num}_NF, state.device_{dev_num}_bf, state.device_{dev_num}_br, DEVICE_{dev_num}_SIGN, DEVICE_{dev_num}_USE_GP, DEVICE_{dev_num}_VAF, DEVICE_{dev_num}_VAR, DEVICE_{dev_num}_IKF, DEVICE_{dev_num}_IKR, DEVICE_{dev_num}_ISE, DEVICE_{dev_num}_NE, DEVICE_{dev_num}_RB, DEVICE_{dev_num}_RC, DEVICE_{dev_num}_RE);\n\
+                             {indent}  let (ic, ib, _jac) = bjt_with_parasitics(vbe, vbc, state.device_{dev_num}_is, state.device_{dev_num}_vt, DEVICE_{dev_num}_NF, DEVICE_{dev_num}_NR, state.device_{dev_num}_bf, state.device_{dev_num}_br, DEVICE_{dev_num}_SIGN, DEVICE_{dev_num}_USE_GP, DEVICE_{dev_num}_VAF, DEVICE_{dev_num}_VAR, DEVICE_{dev_num}_IKF, DEVICE_{dev_num}_IKR, DEVICE_{dev_num}_ISE, DEVICE_{dev_num}_NE, DEVICE_{dev_num}_ISC, DEVICE_{dev_num}_NC, DEVICE_{dev_num}_RB, DEVICE_{dev_num}_RC, DEVICE_{dev_num}_RE);\n\
                              {indent}  i_nl[{s}] = ic;\n\
                              {indent}  i_nl[{s1}] = ib;\n\
                              {indent}}}\n"
@@ -6568,7 +6613,7 @@ impl RustEmitter {
                         code.push_str(&format!(
                             "{indent}{{ let vbe = v_nl_final[{s}];\n\
                              {indent}  let vbc = v_nl_final[{s1}];\n\
-                             {indent}  let (ic, ib, _) = bjt_evaluate(vbe, vbc, state.device_{dev_num}_is, state.device_{dev_num}_vt, DEVICE_{dev_num}_NF, state.device_{dev_num}_bf, state.device_{dev_num}_br, DEVICE_{dev_num}_SIGN, DEVICE_{dev_num}_USE_GP, DEVICE_{dev_num}_VAF, DEVICE_{dev_num}_VAR, DEVICE_{dev_num}_IKF, DEVICE_{dev_num}_IKR, DEVICE_{dev_num}_ISE, DEVICE_{dev_num}_NE);\n\
+                             {indent}  let (ic, ib, _) = bjt_evaluate(vbe, vbc, state.device_{dev_num}_is, state.device_{dev_num}_vt, DEVICE_{dev_num}_NF, DEVICE_{dev_num}_NR, state.device_{dev_num}_bf, state.device_{dev_num}_br, DEVICE_{dev_num}_SIGN, DEVICE_{dev_num}_USE_GP, DEVICE_{dev_num}_VAF, DEVICE_{dev_num}_VAR, DEVICE_{dev_num}_IKF, DEVICE_{dev_num}_IKR, DEVICE_{dev_num}_ISE, DEVICE_{dev_num}_NE, DEVICE_{dev_num}_ISC, DEVICE_{dev_num}_NC);\n\
                              {indent}  i_nl[{s}] = ic;\n\
                              {indent}  i_nl[{s1}] = ib;\n\
                              {indent}}}\n"

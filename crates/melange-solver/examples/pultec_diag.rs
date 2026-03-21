@@ -48,7 +48,7 @@ fn main() {
     );
 
     println!("\ncond(A_companion) ~ {:.2e} (old companion model)", {
-        let a = mna.get_a_matrix(sample_rate);
+        let a = mna.get_a_matrix(sample_rate).unwrap();
         let norm_a: f64 = a
             .iter()
             .map(|row| row.iter().map(|x| x.abs()).sum::<f64>())
@@ -81,8 +81,9 @@ fn main() {
         ir.device_slots.clone(),
         in_node - 1,
         out_node - 1,
-    );
-    solver.input_conductance = g_in;
+    )
+    .expect("Failed to create nodal solver");
+    solver.set_input_conductance(g_in);
 
     // Initialize DC OP
     println!("\nInitializing DC operating point...");
@@ -94,8 +95,8 @@ fn main() {
         "vcc", "v250", "plate1", "cathode", "bias_31v", "cath2", "out",
     ] {
         if let Some(&idx) = node_map.get(*name) {
-            if idx > 0 && idx <= solver.v_prev.len() {
-                println!("  V({}) = {:.2}V", name, solver.v_prev[idx - 1]);
+            if idx > 0 && idx <= solver.v_prev().len() {
+                println!("  V({}) = {:.2}V", name, solver.v_prev()[idx - 1]);
             }
         }
     }
@@ -155,8 +156,8 @@ fn main() {
         peak_out = peak_out.max(out.abs());
 
         // Check raw output node voltage (before DC blocking)
-        let raw = if out_node > 0 && (out_node - 1) < solver.v_prev.len() {
-            solver.v_prev[out_node - 1]
+        let raw = if out_node > 0 && (out_node - 1) < solver.v_prev().len() {
+            solver.v_prev()[out_node - 1]
         } else {
             0.0
         };
@@ -173,8 +174,8 @@ fn main() {
                 "out_tap", "grid1", "plate1", "grid2a", "plate2a", "opt_a", "fb_s3", "fb_s5",
             ] {
                 if let Some(&idx) = node_map.get(*name) {
-                    if idx > 0 && (idx - 1) < solver.v_prev.len() {
-                        key_info.push_str(&format!(" {}={:.2}", name, solver.v_prev[idx - 1]));
+                    if idx > 0 && (idx - 1) < solver.v_prev().len() {
+                        key_info.push_str(&format!(" {}={:.2}", name, solver.v_prev()[idx - 1]));
                     }
                 }
             }
@@ -186,8 +187,8 @@ fn main() {
     println!("Peak DC-blocked output: {:.4}V", peak_out);
     println!(
         "NR max iterations: {} / {} samples",
-        solver.diag_nr_max_iter_count, num_samples
+        solver.diag_nr_max_iter_count(), num_samples
     );
-    println!("NaN resets: {}", solver.diag_nan_reset_count);
-    println!("Clamp count: {}", solver.diag_clamp_count);
+    println!("NaN resets: {}", solver.diag_nan_reset_count());
+    println!("Clamp count: {}", solver.diag_clamp_count());
 }

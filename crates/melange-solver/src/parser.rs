@@ -128,6 +128,8 @@ impl Netlist {
     /// - Port count mismatch
     /// - Recursive subcircuit cycle
     /// - Duplicate subcircuit names
+    /// - Nesting depth exceeds 8 levels
+    /// - Cumulative element count exceeds 10,000
     pub fn expand_subcircuits(&mut self) -> Result<(), ParseError> {
         if self.subcircuits.is_empty() {
             return Ok(());
@@ -149,7 +151,25 @@ impl Netlist {
         // Cycle detection
         detect_subcircuit_cycles(&self.subcircuits, &lookup)?;
 
-        // Iterative expansion (max 32 passes for deeply nested subcircuits)
+        // Nesting depth limit
+        const MAX_NESTING_DEPTH: usize = 8;
+        let depth = max_subcircuit_depth(&self.subcircuits, &lookup);
+        if depth > MAX_NESTING_DEPTH {
+            return Err(ParseError {
+                line: 0,
+                message: format!(
+                    "Subcircuit nesting depth {} exceeds maximum of {}",
+                    depth, MAX_NESTING_DEPTH
+                ),
+            });
+        }
+
+        // Iterative expansion (max 32 passes for deeply nested subcircuits).
+        // Track cumulative element count across all passes to prevent
+        // deeply nested subcircuits from exceeding the limit incrementally.
+        const MAX_ELEMENTS: usize = 10_000;
+        let mut cumulative_elements: usize = 0;
+
         for _pass in 0..32 {
             let has_instances = self
                 .elements
@@ -160,6 +180,7 @@ impl Netlist {
             }
 
             let mut new_elements = Vec::with_capacity(self.elements.len());
+            let mut elements_added_this_pass: usize = 0;
             for elem in &self.elements {
                 if let Element::SubcktInstance {
                     name: inst_name,
@@ -201,12 +222,29 @@ impl Netlist {
                     // Expand each element from the subcircuit definition
                     for sc_elem in &sc.elements {
                         new_elements.push(sc_elem.remap_for_subcircuit(inst_name, &node_map));
+                        elements_added_this_pass += 1;
                     }
                 } else {
                     new_elements.push(elem.clone());
                 }
             }
             self.elements = new_elements;
+            cumulative_elements += elements_added_this_pass;
+
+            // Element count limit: prevent combinatorial explosion from nested subcircuits.
+            // Check both the current element count and the cumulative count across all passes.
+            if self.elements.len() > MAX_ELEMENTS || cumulative_elements > MAX_ELEMENTS {
+                return Err(ParseError {
+                    line: 0,
+                    message: format!(
+                        "Element count exceeds limit of {} after subcircuit expansion \
+                         (current: {}, cumulative elements created: {})",
+                        MAX_ELEMENTS,
+                        self.elements.len(),
+                        cumulative_elements
+                    ),
+                });
+            }
         }
 
         // Verify no unexpanded instances remain
@@ -670,6 +708,79 @@ fn detect_subcircuit_cycles(
     }
 
     Ok(())
+}
+
+/// Compute the maximum nesting depth of subcircuit definitions.
+///
+/// A subcircuit with no nested `X` instances has depth 1.
+/// A subcircuit that instantiates another subcircuit of depth D has depth D+1.
+/// Returns the maximum depth across all subcircuits, or 0 if there are none.
+///
+/// Assumes no cycles (call `detect_subcircuit_cycles` first).
+fn max_subcircuit_depth(
+    subcircuits: &[Subcircuit],
+    lookup: &std::collections::HashMap<String, usize>,
+) -> usize {
+    let n = subcircuits.len();
+    if n == 0 {
+        return 0;
+    }
+
+    // Pre-compute children for each subcircuit (indices of subcircuits it instantiates)
+    let children_of: Vec<Vec<usize>> = subcircuits
+        .iter()
+        .map(|sc| {
+            sc.elements
+                .iter()
+                .filter_map(|e| {
+                    if let Element::SubcktInstance { subckt, .. } = e {
+                        lookup.get(&subckt.to_ascii_lowercase()).copied()
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        })
+        .collect();
+
+    // Memoized iterative DFS depth computation
+    let mut depth: Vec<Option<usize>> = vec![None; n];
+
+    for start in 0..n {
+        if depth[start].is_some() {
+            continue;
+        }
+        // Work stack: (subckt_idx, child_cursor)
+        let mut stack: Vec<(usize, usize)> = vec![(start, 0)];
+        while let Some(&mut (node, ref mut cursor)) = stack.last_mut() {
+            let children = &children_of[node];
+
+            // Advance cursor past already-resolved children
+            let mut pushed = false;
+            while *cursor < children.len() {
+                let child = children[*cursor];
+                *cursor += 1;
+                if depth[child].is_none() {
+                    stack.push((child, 0));
+                    pushed = true;
+                    break;
+                }
+            }
+
+            if !pushed {
+                // All children resolved — compute this node's depth
+                let max_child_depth = children
+                    .iter()
+                    .filter_map(|&c| depth[c])
+                    .max()
+                    .unwrap_or(0);
+                depth[node] = Some(max_child_depth + 1);
+                stack.pop();
+            }
+        }
+    }
+
+    depth.iter().filter_map(|d| *d).max().unwrap_or(0)
 }
 
 /// A model definition (.model).
@@ -1554,13 +1665,27 @@ impl Parser {
             } else if part_upper == "AC" && i + 1 < parts.len() {
                 let mag = parse_value(parts[i + 1])
                     .map_err(|_| self.error(format!("Invalid AC magnitude: {}", parts[i + 1])))?;
-                let phase = if i + 2 < parts.len() {
-                    parse_value(parts[i + 2]).unwrap_or(0.0)
+                let (phase, consumed) = if i + 2 < parts.len() {
+                    match parse_value(parts[i + 2]) {
+                        Ok(v) => (v, 3),
+                        Err(_) => {
+                            // Check if the token is a keyword for the next iteration
+                            let next_upper = parts[i + 2].to_uppercase();
+                            if next_upper == "DC" || next_upper == "AC" {
+                                (0.0, 2)
+                            } else {
+                                return Err(self.error(format!(
+                                    "Invalid AC phase: {}",
+                                    parts[i + 2]
+                                )));
+                            }
+                        }
+                    }
                 } else {
-                    0.0
+                    (0.0, 2)
                 };
                 ac = Some((mag, phase));
-                i += 3;
+                i += consumed;
             } else if dc.is_none() {
                 // Bare value is DC
                 dc = Some(

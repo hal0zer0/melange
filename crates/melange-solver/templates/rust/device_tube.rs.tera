@@ -11,12 +11,12 @@
 #[inline(always)]
 fn tube_ip(vgk: f64, vpk: f64, mu: f64, ex: f64, kg1: f64, kp: f64, kvb: f64,
            lambda: f64) -> f64 {
-    if vpk <= 0.0 { return 0.0; }
+    let vpk = vpk.max(1e-3); // Soft floor: prevents hard zero discontinuity
     let s = (kvb + vpk * vpk).sqrt();
     let inner = kp * (1.0 / mu + vgk / s);
     let softplus = if inner > 20.0 { inner }
                    else if inner < -20.0 { 0.0 }
-                   else { (1.0 + fast_exp(inner)).ln() };
+                   else { fast_ln(1.0 + fast_exp(inner)) };
     let e1 = (vpk / kp) * softplus;
     let ip_koren = if e1 <= 0.0 { 0.0 } else { e1.powf(ex) / kg1 };
     ip_koren * (1.0 + lambda * vpk)
@@ -49,7 +49,7 @@ fn tube_jacobian(vgk: f64, vpk: f64, mu: f64, ex: f64, kg1: f64, kp: f64, kvb: f
     let dig_dvgk = tube_ig_deriv(vgk, ig_max, vgk_onset);
 
     // Plate current Jacobian
-    if vpk <= 0.0 { return [0.0, 0.0, dig_dvgk, 0.0]; }
+    let vpk = vpk.max(1e-3); // Soft floor: matches tube_ip
 
     let s = (kvb + vpk * vpk).sqrt();
     let inner = kp * (1.0 / mu + vgk / s);
@@ -58,7 +58,7 @@ fn tube_jacobian(vgk: f64, vpk: f64, mu: f64, ex: f64, kg1: f64, kp: f64, kvb: f
                               else if inner < -20.0 { (0.0, 0.0) }
                               else {
                                   let exp_inner = fast_exp(inner);
-                                  (exp_inner / (1.0 + exp_inner), (1.0 + exp_inner).ln())
+                                  (exp_inner / (1.0 + exp_inner), fast_ln(1.0 + exp_inner))
                               };
 
     let e1 = (vpk / kp) * softplus;
@@ -126,4 +126,60 @@ fn tube_jacobian_with_rgi(vgk: f64, vpk: f64, mu: f64, ex: f64, kg1: f64, kp: f6
     // dIg/dVgk_ext = dIg/dVgk_int * dvgk_int/dvgk_ext
     // dIg/dVpk = 0 unchanged
     [jac[0] * dvgk_int_dvgk_ext, jac[1], jac[2] * dvgk_int_dvgk_ext, jac[3]]
+}
+
+/// Combined tube evaluation: returns (Ip, Ig, [dIp/dVgk, dIp/dVpk, dIg/dVgk, dIg/dVpk]).
+///
+/// Computes e1.powf(ex) once and shares across Ip and Jacobian, saving ~100 powf/sample
+/// per tube. Equivalent to calling tube_ip + tube_ig + tube_jacobian separately.
+#[inline(always)]
+fn tube_evaluate(vgk: f64, vpk: f64, mu: f64, ex: f64, kg1: f64, kp: f64, kvb: f64,
+                 ig_max: f64, vgk_onset: f64, lambda: f64) -> (f64, f64, [f64; 4]) {
+    let ig = tube_ig(vgk, ig_max, vgk_onset);
+    let dig_dvgk = tube_ig_deriv(vgk, ig_max, vgk_onset);
+
+    let vpk = vpk.max(1e-3);
+    let s = (kvb + vpk * vpk).sqrt();
+    let inner = kp * (1.0 / mu + vgk / s);
+
+    let (sigmoid, softplus) = if inner > 20.0 { (1.0, inner) }
+                               else if inner < -20.0 { (0.0, 0.0) }
+                               else {
+                                   let exp_inner = fast_exp(inner);
+                                   (exp_inner / (1.0 + exp_inner), fast_ln(1.0 + exp_inner))
+                               };
+
+    let e1 = (vpk / kp) * softplus;
+    if e1 <= 1e-10 {
+        return (0.0, ig, [0.0, 0.0, dig_dvgk, 0.0]);
+    }
+
+    // Shared: compute e1^ex once, derive e1^(ex-1) = e1^ex / e1
+    let e1_pow_ex = e1.powf(ex);
+    let ip_koren = e1_pow_ex / kg1;
+    let lambda_factor = 1.0 + lambda * vpk;
+    let ip = ip_koren * lambda_factor;
+
+    let dip_de1 = ex * e1_pow_ex / (e1 * kg1);
+    let de1_dvgk = vpk * sigmoid / s;
+    let de1_dvpk = softplus / kp - sigmoid * vgk * vpk * vpk / (s * s * s);
+
+    let dip_koren_dvgk = dip_de1 * de1_dvgk;
+    let dip_koren_dvpk = dip_de1 * de1_dvpk;
+
+    (ip, ig, [dip_koren_dvgk * lambda_factor,
+              dip_koren_dvpk * lambda_factor + ip_koren * lambda,
+              dig_dvgk, 0.0])
+}
+
+/// Combined tube evaluation with RGI: includes internal Vgk solve and chain rule correction.
+#[inline(always)]
+fn tube_evaluate_with_rgi(vgk: f64, vpk: f64, mu: f64, ex: f64, kg1: f64, kp: f64, kvb: f64,
+                          ig_max: f64, vgk_onset: f64, lambda: f64, rgi: f64) -> (f64, f64, [f64; 4]) {
+    let vgk_int = tube_solve_vgk_int(vgk, ig_max, vgk_onset, rgi);
+    let (ip, _, jac) = tube_evaluate(vgk_int, vpk, mu, ex, kg1, kp, kvb, ig_max, vgk_onset, lambda);
+    let ig = tube_ig(vgk_int, ig_max, vgk_onset);
+    let dig_dvgk_int = tube_ig_deriv(vgk_int, ig_max, vgk_onset);
+    let dvgk_int_dvgk_ext = 1.0 / (1.0 + dig_dvgk_int * rgi);
+    (ip, ig, [jac[0] * dvgk_int_dvgk_ext, jac[1], jac[2] * dvgk_int_dvgk_ext, jac[3]])
 }

@@ -51,6 +51,7 @@
 
 pub mod codegen;
 pub mod dc_op;
+pub mod device_types;
 pub mod dk;
 pub mod mna;
 pub mod parser;
@@ -60,8 +61,14 @@ pub mod solver;
 mod dk_math_verification;
 
 // Explicit re-exports of commonly used types (avoid glob pollution).
-pub use codegen::{CodeGenerator, CodegenConfig, CodegenError, GeneratedCode};
-pub use dk::DkKernel;
-pub use mna::MnaSystem;
-pub use parser::Netlist;
-pub use solver::{CircuitSolver, LinearSolver, SolverError};
+#[cfg(feature = "codegen")]
+pub use codegen::{CodeGenerator, CodegenConfig, GeneratedCode};
+pub use codegen::CodegenError;
+pub use device_types::{
+    BjtParams, DeviceParams, DeviceSlot, DeviceType, DiodeParams, JfetParams, MosfetParams,
+    TubeParams,
+};
+pub use dk::{DkError, DkKernel};
+pub use mna::{MnaError, MnaSystem};
+pub use parser::{Netlist, ParseError};
+pub use solver::{CircuitSolver, LinearSolver, NodalSolver, SolverError};

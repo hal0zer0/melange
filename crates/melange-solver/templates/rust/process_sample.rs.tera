@@ -128,16 +128,22 @@ pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS
 {% endif %}
 
     // Step 6c: Global node voltage damping safety net.
-    // Even after BE fallback, clamp any excessive node voltage changes.
-    // Keeps i_nl_prev consistent with v_prev for next sample's RHS.
+    // Threshold scales with max DC OP voltage so tube 250V circuits aren't over-damped.
     let (v, i_nl) = {
         let mut max_delta = 0.0_f64;
         for i in 0..{{ n_nodes }} {
             let d = (v[i] - state.v_prev[i]).abs();
             if d > max_delta { max_delta = d; }
         }
-        if max_delta > 2.0 {
-            let damp = (2.0 / max_delta).max(0.01);
+        // Adaptive threshold: max(2V, 5% of max DC OP node voltage)
+        let mut max_dc = 0.0_f64;
+        for i in 0..{{ n_nodes }} {
+            let a = state.dc_operating_point[i].abs();
+            if a > max_dc { max_dc = a; }
+        }
+        let damp_thresh = max_dc.mul_add(0.05, 2.0);
+        if max_delta > damp_thresh {
+            let damp = (damp_thresh / max_delta).max(0.01);
             let mut v_d = v;
             for i in 0..N {
                 v_d[i] = state.v_prev[i] + damp * (v[i] - state.v_prev[i]);
@@ -152,7 +158,31 @@ pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS
         }
     };
 
-    // Step 7: Update state for next iteration
+    // Step 7: Check for NaN/inf BEFORE updating state (prevents corruption of v_prev/i_nl_prev)
+    if !v.iter().all(|x| x.is_finite()) {
+        state.v_prev = state.dc_operating_point;
+        state.i_nl_prev = [0.0; M];
+        state.i_nl_prev_prev = [0.0; M];
+        state.input_prev = 0.0;
+{% if num_inductors > 0 %}        state.ind_i_prev = [0.0; {{ num_inductors }}];
+        state.ind_v_prev = [0.0; {{ num_inductors }}];
+        state.ind_i_hist = [0.0; {{ num_inductors }}];
+{% endif %}{% if num_coupled_inductors > 0 %}        state.ci_i1_prev = [0.0; {{ num_coupled_inductors }}];
+        state.ci_i2_prev = [0.0; {{ num_coupled_inductors }}];
+        state.ci_v1_prev = [0.0; {{ num_coupled_inductors }}];
+        state.ci_v2_prev = [0.0; {{ num_coupled_inductors }}];
+        state.ci_i1_hist = [0.0; {{ num_coupled_inductors }}];
+        state.ci_i2_hist = [0.0; {{ num_coupled_inductors }}];
+{% endif %}{% if num_transformer_groups > 0 %}{{ xfmr_nan_reset_lines }}{% endif %}{% for default in pot_defaults %}        state.pot_{{ loop.index0 }}_resistance = {{ default }};
+        state.pot_{{ loop.index0 }}_resistance_prev = {{ default }};
+{% endfor %}{% if num_thermal_devices > 0 %}{% for td in thermal_devices %}        state.device_{{ td.dev_num }}_tj = DEVICE_{{ td.dev_num }}_TAMB;
+        state.device_{{ td.dev_num }}_is = DEVICE_{{ td.dev_num }}_IS;
+        state.device_{{ td.dev_num }}_vt = DEVICE_{{ td.dev_num }}_VT;
+{% endfor %}{% endif %}        state.diag_nan_reset_count += 1;
+        return [0.0; NUM_OUTPUTS];
+    }
+
+    // Update state for next iteration
     state.v_prev = v;
     state.i_nl_prev_prev = state.i_nl_prev;
     state.i_nl_prev = i_nl;
@@ -203,29 +233,7 @@ pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS
     // Step 7e: BJT self-heating thermal update (quasi-static, outside NR)
 {{ thermal_update }}{% endif %}
 
-    // Step 8: Sanitize state — if NaN/inf entered, reset to DC operating point
-    if !state.v_prev.iter().all(|x| x.is_finite()) {
-        state.v_prev = state.dc_operating_point;
-        state.i_nl_prev = [0.0; M];
-        state.i_nl_prev_prev = [0.0; M];
-        state.input_prev = 0.0;
-{% if num_inductors > 0 %}        state.ind_i_prev = [0.0; {{ num_inductors }}];
-        state.ind_v_prev = [0.0; {{ num_inductors }}];
-        state.ind_i_hist = [0.0; {{ num_inductors }}];
-{% endif %}{% if num_coupled_inductors > 0 %}        state.ci_i1_prev = [0.0; {{ num_coupled_inductors }}];
-        state.ci_i2_prev = [0.0; {{ num_coupled_inductors }}];
-        state.ci_v1_prev = [0.0; {{ num_coupled_inductors }}];
-        state.ci_v2_prev = [0.0; {{ num_coupled_inductors }}];
-        state.ci_i1_hist = [0.0; {{ num_coupled_inductors }}];
-        state.ci_i2_hist = [0.0; {{ num_coupled_inductors }}];
-{% endif %}{% if num_transformer_groups > 0 %}{{ xfmr_nan_reset_lines }}{% endif %}{% for default in pot_defaults %}        state.pot_{{ loop.index0 }}_resistance = {{ default }};
-        state.pot_{{ loop.index0 }}_resistance_prev = {{ default }};
-{% endfor %}{% if num_thermal_devices > 0 %}{% for td in thermal_devices %}        state.device_{{ td.dev_num }}_tj = DEVICE_{{ td.dev_num }}_TAMB;
-        state.device_{{ td.dev_num }}_is = DEVICE_{{ td.dev_num }}_IS;
-        state.device_{{ td.dev_num }}_vt = DEVICE_{{ td.dev_num }}_VT;
-{% endfor %}{% endif %}        state.diag_nan_reset_count += 1;
-        return [0.0; NUM_OUTPUTS];
-    }
+    // (NaN check already done in Step 7, before state update)
 
     {% if m > 0 %}
     if state.last_nr_iterations >= {{ max_iter }} as u32 {
@@ -241,7 +249,7 @@ pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS
 {% if dc_block %}        let dc_blocked = raw_out - state.dc_block_x_prev[out_idx]
             + state.dc_block_r * state.dc_block_y_prev[out_idx];
         state.dc_block_x_prev[out_idx] = raw_out;
-        state.dc_block_y_prev[out_idx] = dc_blocked;
+        state.dc_block_y_prev[out_idx] = dc_blocked.clamp(-100.0, 100.0);
         let scaled = dc_blocked * OUTPUT_SCALES[out_idx];
 {% else %}        let scaled = raw_out * OUTPUT_SCALES[out_idx];
 {% endif %}        let abs_out = scaled.abs();

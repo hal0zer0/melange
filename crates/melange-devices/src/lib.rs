@@ -1,3 +1,6 @@
+//! Device models for analog circuit components (diode, BJT, JFET, MOSFET, triode, op-amp, LDR).
+//! Part of the [melange](https://github.com/hal0zer0/melange) circuit simulation toolkit.
+
 // melange-devices: Parameterized nonlinear component models
 //
 // Layer 2 of the melange stack. Each device implements the NonlinearDevice trait

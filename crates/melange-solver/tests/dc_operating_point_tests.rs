@@ -1046,16 +1046,17 @@ fn test_dc_op_pultec_nonlinear_nodal() {
         ir.device_slots.clone(),
         in_node - 1,
         out_node - 1,
-    );
-    solver.input_conductance = 1.0 / 600.0;
+    )
+    .unwrap();
+    solver.set_input_conductance(1.0 / 600.0);
     solver.initialize_dc_op(&mna, &ir.device_slots);
 
     // Check DC voltages from schematic annotations:
     // +290V VCC, +250V bias, +140V plates, +40V 12AU7 cathode, +31V bias, +1.3V 12AX7 cathode
     let v = |name: &str| -> f64 {
         let idx = *mna.node_map.get(name).unwrap();
-        if idx > 0 && idx <= solver.v_prev.len() {
-            solver.v_prev[idx - 1]
+        if idx > 0 && idx <= solver.v_prev().len() {
+            solver.v_prev()[idx - 1]
         } else {
             0.0
         }
@@ -1084,10 +1085,10 @@ fn test_dc_op_pultec_nonlinear_nodal() {
     }
     eprintln!(
         "10ms silence: peak={:.6}V, NR max iter={}, NaN resets={}",
-        peak, solver.diag_nr_max_iter_count, solver.diag_nan_reset_count
+        peak, solver.diag_nr_max_iter_count(), solver.diag_nan_reset_count()
     );
 
-    assert_eq!(solver.diag_nan_reset_count, 0, "No NaN resets expected");
+    assert_eq!(solver.diag_nan_reset_count(), 0, "No NaN resets expected");
     // Augmented MNA for inductors eliminated companion model stiffness (cond 4e9 → well-conditioned).
     // NR still hits max iterations on most samples due to Koren triode nonlinearity at high
     // plate voltages — needs per-device SPICE-style voltage limiting in the full-nodal solver.

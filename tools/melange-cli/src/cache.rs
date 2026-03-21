@@ -48,15 +48,17 @@ impl Cache {
         let cache_path = self.url_to_cache_path(url);
 
         // Check if we can use cached version
-        if !force_refresh
-            && cache_path.exists()
-            && let Ok(metadata) = std::fs::metadata(&cache_path)
-            && let Ok(modified) = metadata.modified()
-            && let Ok(age) = std::time::SystemTime::now().duration_since(modified)
-            && age < std::time::Duration::from_secs(24 * 3600)
-        {
-            return std::fs::read_to_string(&cache_path)
-                .with_context(|| format!("Failed to read cached file: {}", cache_path.display()));
+        if !force_refresh && cache_path.exists() {
+            if let Ok(metadata) = std::fs::metadata(&cache_path) {
+                if let Ok(modified) = metadata.modified() {
+                    if let Ok(age) = std::time::SystemTime::now().duration_since(modified) {
+                        if age < std::time::Duration::from_secs(24 * 3600) {
+                            return std::fs::read_to_string(&cache_path)
+                                .with_context(|| format!("Failed to read cached file: {}", cache_path.display()));
+                        }
+                    }
+                }
+            }
         }
 
         // Fetch from URL using blocking client
@@ -178,9 +180,11 @@ fn fetch_url_sync(url: &str) -> Result<String> {
         .call()
         .with_context(|| format!("Failed to fetch URL: {}", url))?;
 
+    const MAX_RESPONSE_BYTES: u64 = 10 * 1024 * 1024; // 10 MB
     let mut content = String::new();
     response
         .into_reader()
+        .take(MAX_RESPONSE_BYTES)
         .read_to_string(&mut content)
         .with_context(|| "Failed to read response body")?;
 

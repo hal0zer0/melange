@@ -14,19 +14,29 @@
 //! - [`emitter::Emitter`] — trait that language backends implement
 //! - [`rust_emitter::RustEmitter`] — Rust language backend
 
+#[cfg(feature = "codegen")]
 pub mod emitter;
+#[cfg(feature = "codegen")]
 pub mod ir;
+#[cfg(feature = "codegen")]
 pub mod rust_emitter;
 
+#[cfg(feature = "codegen")]
 use crate::dk::DkKernel;
+#[cfg(feature = "codegen")]
 use crate::mna::MnaSystem;
+#[cfg(feature = "codegen")]
 use crate::parser::Netlist;
 
+#[cfg(feature = "codegen")]
 use emitter::Emitter;
+#[cfg(feature = "codegen")]
 use ir::CircuitIR;
+#[cfg(feature = "codegen")]
 use rust_emitter::RustEmitter;
 
 /// Configuration for code generation
+#[cfg(feature = "codegen")]
 #[derive(Debug, Clone)]
 pub struct CodegenConfig {
     /// Circuit name for generated code
@@ -69,6 +79,7 @@ pub struct CodegenConfig {
     pub backward_euler: bool,
 }
 
+#[cfg(feature = "codegen")]
 impl Default for CodegenConfig {
     fn default() -> Self {
         Self {
@@ -104,6 +115,10 @@ pub enum CodegenError {
     InvalidConfig(String),
     /// Template rendering error
     TemplateError(String),
+    /// An upstream DK error
+    Dk(crate::dk::DkError),
+    /// An upstream MNA error
+    Mna(crate::mna::MnaError),
 }
 
 impl std::fmt::Display for CodegenError {
@@ -114,6 +129,8 @@ impl std::fmt::Display for CodegenError {
             CodegenError::InvalidDevice(s) => ("Invalid device", s.as_str()),
             CodegenError::InvalidConfig(s) => ("Invalid config", s.as_str()),
             CodegenError::TemplateError(s) => ("Template error", s.as_str()),
+            CodegenError::Dk(e) => return write!(f, "Codegen error: {}", e),
+            CodegenError::Mna(e) => return write!(f, "Codegen error: {}", e),
         };
         write!(f, "{label}: {msg}")
     }
@@ -121,7 +138,20 @@ impl std::fmt::Display for CodegenError {
 
 impl std::error::Error for CodegenError {}
 
+impl From<crate::dk::DkError> for CodegenError {
+    fn from(e: crate::dk::DkError) -> Self {
+        CodegenError::Dk(e)
+    }
+}
+
+impl From<crate::mna::MnaError> for CodegenError {
+    fn from(e: crate::mna::MnaError) -> Self {
+        CodegenError::Mna(e)
+    }
+}
+
 /// Generated circuit solver code.
+#[cfg(feature = "codegen")]
 #[derive(Debug, Clone)]
 pub struct GeneratedCode {
     /// The generated Rust source code
@@ -133,10 +163,12 @@ pub struct GeneratedCode {
 }
 
 /// Code generator for circuit solvers
+#[cfg(feature = "codegen")]
 pub struct CodeGenerator {
     config: CodegenConfig,
 }
 
+#[cfg(feature = "codegen")]
 impl CodeGenerator {
     /// Create a new code generator with the given configuration
     pub fn new(config: CodegenConfig) -> Self {

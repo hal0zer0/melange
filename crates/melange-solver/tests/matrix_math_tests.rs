@@ -349,7 +349,7 @@ fn test_s_matrix_positive_diagonal() {
         }
 
         // Verify S * A ≈ I (identity) within tolerance
-        let a = mna.get_a_matrix(44100.0);
+        let a = mna.get_a_matrix(44100.0).unwrap();
         let tol = 1e-10;
 
         for i in 0..n {
