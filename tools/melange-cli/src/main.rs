@@ -883,7 +883,13 @@ fn compile_circuit_source(
     let circuit_name: String = circuit_name
         .to_lowercase()
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     let circuit_name = if circuit_name.starts_with(|c: char| c.is_ascii_digit()) {
         format!("circuit_{circuit_name}")
@@ -1100,7 +1106,13 @@ fn compile_circuit_source(
                 .unwrap_or("circuit")
                 .to_lowercase()
                 .chars()
-                .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() || c == '_' {
+                        c
+                    } else {
+                        '_'
+                    }
+                })
                 .collect();
             let circuit_name = if circuit_name.starts_with(|c: char| c.is_ascii_digit()) {
                 format!("circuit_{circuit_name}")
@@ -1172,10 +1184,7 @@ fn compile_circuit_source(
                     .and_then(|n| n.to_str())
                     .unwrap_or("<project-dir>")
             );
-            println!(
-                "  cargo nih-plug bundle {} --release",
-                circuit_name
-            );
+            println!("  cargo nih-plug bundle {} --release", circuit_name);
             println!();
             println!("The compiled plugin (CLAP + VST3) will be in:");
             println!("  target/bundled/");

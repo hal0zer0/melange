@@ -586,7 +586,10 @@ mod tests {
         assert_eq!(tube.ex, default.ex);
         assert_eq!(tube.kp, default.kp);
         assert_eq!(tube.kvb, default.kvb);
-        assert_eq!(tube.kg1, default.kg1, "Fitted and default now use same Kg1=3000");
+        assert_eq!(
+            tube.kg1, default.kg1,
+            "Fitted and default now use same Kg1=3000"
+        );
     }
 
     /// Verify triode Jacobian against finite differences.

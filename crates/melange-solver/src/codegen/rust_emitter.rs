@@ -1648,14 +1648,10 @@ impl RustEmitter {
                      \x20           let mut u = [0.0f64; N];\n",
                 );
                 if pot.node_p > 0 {
-                    code.push_str(&format!(
-                        "            u[POT_{idx}_NODE_P - 1] = 1.0;\n",
-                    ));
+                    code.push_str(&format!("            u[POT_{idx}_NODE_P - 1] = 1.0;\n",));
                 }
                 if pot.node_q > 0 {
-                    code.push_str(&format!(
-                        "            u[POT_{idx}_NODE_Q - 1] = -1.0;\n",
-                    ));
+                    code.push_str(&format!("            u[POT_{idx}_NODE_Q - 1] = -1.0;\n",));
                 }
                 code.push_str(
                     "            let mut su = [0.0f64; N];\n\
