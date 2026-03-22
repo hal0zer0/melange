@@ -1532,6 +1532,7 @@ fn simulate_circuit_source(
         || !mna.transformer_groups.is_empty();
 
     println!("Step 4: Building DK kernel at {} Hz...", actual_sample_rate);
+    let mut dk_failed = false;
     let kernel = if has_inductors && opts.solver != "dk" {
         // Use augmented MNA for inductors (well-conditioned for large L)
         println!("  Using augmented MNA for {} inductor variables", {
@@ -1546,8 +1547,20 @@ fn simulate_circuit_source(
         DkKernel::from_mna_augmented(&mna, actual_sample_rate)
             .with_context(|| "Failed to create augmented DK kernel")?
     } else {
-        DkKernel::from_mna(&mna, actual_sample_rate)
-            .with_context(|| "Failed to create DK kernel")?
+        match DkKernel::from_mna(&mna, actual_sample_rate) {
+            Ok(k) => k,
+            Err(e) => {
+                if opts.solver == "dk" {
+                    anyhow::bail!("Failed to create DK kernel: {e}");
+                }
+                println!("  DK kernel failed: {e}");
+                println!("  Auto-selecting nodal solver");
+                dk_failed = true;
+                // Dummy kernel for dimension info — nodal solver rebuilds from MNA
+                DkKernel::from_mna_augmented(&mna, actual_sample_rate)
+                    .with_context(|| "Failed to create augmented DK kernel as fallback")?
+            }
+        }
     };
     println!("  N={}, M={}", kernel.n, kernel.m);
 
@@ -1792,11 +1805,11 @@ fn simulate_circuit_source(
 
     let has_nonlinear = !devices.is_empty();
 
-    // Determine solver type: auto picks nodal for nonlinear circuits with inductors
+    // Determine solver type: auto picks nodal for inductors or DK failure
     let use_nodal = match opts.solver {
         "nodal" => true,
         "dk" => false,
-        _ => has_nonlinear && has_inductors, // "auto"
+        _ => dk_failed || (has_nonlinear && has_inductors), // "auto"
     };
 
     if kernel.m == 0 && !use_nodal {
