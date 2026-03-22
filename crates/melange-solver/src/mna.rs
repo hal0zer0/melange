@@ -292,6 +292,11 @@ pub struct OpampInfo {
     /// Output saturation voltage [V] (default: infinity = no saturation).
     /// Typical NE5534: 13.0. When finite, output is clamped to ±VSAT.
     pub vsat: f64,
+    /// Gain-bandwidth product [Hz] (default: infinity = no dominant pole).
+    /// When finite, a dominant pole capacitor C = AOL / (2π × GBW × ROUT)
+    /// is stamped at the output node, modeling the op-amp's frequency rolloff.
+    /// Typical NE5534: 10e6. TL074: 3e6.
+    pub gbw: f64,
 }
 
 /// VCA (Voltage-Controlled Amplifier) info for MNA system.
@@ -1829,6 +1834,7 @@ impl MnaBuilder {
                             "AOL" => oa.aol = *val,
                             "ROUT" => oa.r_out = *val,
                             "VSAT" => oa.vsat = *val,
+                            "GBW" => oa.gbw = *val,
                             _ => log::warn!(
                                 ".model {}: unrecognized parameter '{}' (ignored)",
                                 m.name,
@@ -2618,6 +2624,23 @@ impl MnaBuilder {
             }
         }
 
+        // Stamp op-amp dominant pole capacitors (GBW-limited bandwidth)
+        // C_dom = AOL / (2π × GBW × ROUT) models the single-pole rolloff
+        for oa in &mna.opamps {
+            if oa.gbw.is_finite() && oa.gbw > 0.0 && oa.n_out_idx > 0 {
+                let c_dom = oa.aol / (2.0 * std::f64::consts::PI * oa.gbw * oa.r_out);
+                let o = oa.n_out_idx - 1;
+                mna.c[o][o] += c_dom;
+                log::debug!(
+                    "Op-amp {}: GBW={:.0}Hz, C_dominant={:.3e}F at node {}",
+                    oa.name,
+                    oa.gbw,
+                    c_dom,
+                    oa.n_out_idx
+                );
+            }
+        }
+
         // Stamp nonlinear devices (collect indices first to avoid borrow issues)
         let device_info: Vec<_> = mna
             .nonlinear_devices
@@ -3294,6 +3317,7 @@ impl MnaBuilder {
                     aol: 200_000.0,
                     r_out: 1.0,
                     vsat: f64::INFINITY,
+                    gbw: f64::INFINITY,
                 });
             }
             Element::Vcvs {

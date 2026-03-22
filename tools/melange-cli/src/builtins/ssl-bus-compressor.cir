@@ -8,13 +8,13 @@ SSL 4000E Bus Compressor (Gyraf GSSL Rev 9)
 * Sidechain VCA: THAT2181 (summed L+R via 47K+47K)
 
 * --- Device Models ---
-* NOTE: AOL values are datasheet open-loop DC gain. The op-amp model is a
-* pure VCCS with no bandwidth limiting. For circuits with many op-amps,
-* the nodal solver may need Gmin regularization or VSAT clamping (pending).
-.model OA_NE5534 OA(AOL=100000 ROUT=50 VSAT=13)
-.model OA_NE5532 OA(AOL=100000 ROUT=100 VSAT=13)
-.model OA_TL074 OA(AOL=200000 ROUT=100 VSAT=11)
-.model OA_TL072 OA(AOL=200000 ROUT=100 VSAT=11)
+* GBW models dominant pole: C_dom = AOL / (2π × GBW × ROUT)
+* NE5534: GBW=10MHz, AOL=100dB → C_dom = 31.8nF
+* TL074:  GBW=3MHz,  AOL=106dB → C_dom = 106nF
+.model OA_NE5534 OA(AOL=100000 ROUT=50 VSAT=13 GBW=10MEG)
+.model OA_NE5532 OA(AOL=100000 ROUT=100 VSAT=13 GBW=10MEG)
+.model OA_TL074 OA(AOL=200000 ROUT=100 VSAT=11 GBW=3MEG)
+.model OA_TL072 OA(AOL=200000 ROUT=100 VSAT=11 GBW=3MEG)
 .model D1N4148 D(IS=2.52e-9 N=1.752 BV=100 IBV=100U CJO=4e-12)
 .model DBX202 VCA(VSCALE=0.05298 G0=1.0 THD=0.002)
 .model THAT2181 VCA(VSCALE=0.05298 G0=1.0)
