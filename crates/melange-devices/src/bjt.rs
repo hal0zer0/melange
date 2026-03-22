@@ -324,8 +324,7 @@ impl BjtGummelPoon {
     /// Base charge factor qb (accounts for Early effect and high injection).
     fn qb(&self, vbe: f64, vbc: f64) -> f64 {
         let s = self.base.sign();
-        let nf_vt = self.base.nf * self.base.vt;
-        let nr_vt = self.base.nr * self.base.vt;
+        let vt = self.base.vt;
         let vbe_eff = s * vbe;
         let vbc_eff = s * vbc;
 
@@ -336,9 +335,9 @@ impl BjtGummelPoon {
         }
         let q1 = 1.0 / q1_denom;
 
-        // High-level injection (forward uses NF*VT, reverse uses NR*VT)
-        let exp_be = safeguards::safe_exp(vbe_eff / nf_vt);
-        let exp_bc = safeguards::safe_exp(vbc_eff / nr_vt);
+        // High-level injection (uses plain VT, not NF*VT or NR*VT)
+        let exp_be = safeguards::safe_exp(vbe_eff / vt);
+        let exp_bc = safeguards::safe_exp(vbc_eff / vt);
         let q2 = self.base.is * exp_be / self.ikf + self.base.is * exp_bc / self.ikr;
 
         q1 * (1.0 + (1.0 + 4.0 * q2).max(0.0).sqrt()) / 2.0
@@ -432,10 +431,12 @@ impl NonlinearDevice<2> for BjtGummelPoon {
             (q1, q1 * q1 / self.var, q1 * q1 / self.vaf)
         };
 
-        // High injection q2 = Is*exp(Vbe/(NF*Vt))/IKF + Is*exp(Vbc/(NR*Vt))/IKR
-        let q2 = is * exp_be / self.ikf + is * exp_bc / self.ikr;
-        let dq2_dvbe = is / (nf_vt * self.ikf) * exp_be;
-        let dq2_dvbc = is / (nr_vt * self.ikr) * exp_bc;
+        // High injection q2 uses plain VT (not NF*VT or NR*VT)
+        let exp_be_vt = safeguards::safe_exp(vbe_eff / vt);
+        let exp_bc_vt = safeguards::safe_exp(vbc_eff / vt);
+        let q2 = is * exp_be_vt / self.ikf + is * exp_bc_vt / self.ikr;
+        let dq2_dvbe = is / (vt * self.ikf) * exp_be_vt;
+        let dq2_dvbc = is / (vt * self.ikr) * exp_bc_vt;
 
         // Discriminant D = sqrt(1 + 4*q2)
         let disc = (1.0 + 4.0 * q2).max(0.0);

@@ -436,17 +436,30 @@ fn generate_process_loop(
     let switch_pre_loop: String = switches
         .iter()
         .map(|s| {
-            format!(
-                "        {{\n\
-                 \x20           let sw_{i}_pos = self.params.switch_{i}.value() as usize;\n\
-                 \x20           for state in self.circuit_states.iter_mut() {{\n\
-                 \x20               if state.switch_{i}_position != sw_{i}_pos {{\n\
-                 \x20                   state.set_switch_{i}(sw_{i}_pos);\n\
-                 \x20               }}\n\
-                 \x20           }}\n\
-                 \x20       }}\n",
-                i = s.index,
-            )
+            if num_outputs > 1 {
+                format!(
+                    "        {{\n\
+                     \x20           let sw_{i}_pos = self.params.switch_{i}.value() as usize;\n\
+                     \x20           let state = &mut self.circuit_state;\n\
+                     \x20           if state.switch_{i}_position != sw_{i}_pos {{\n\
+                     \x20               state.set_switch_{i}(sw_{i}_pos);\n\
+                     \x20           }}\n\
+                     \x20       }}\n",
+                    i = s.index,
+                )
+            } else {
+                format!(
+                    "        {{\n\
+                     \x20           let sw_{i}_pos = self.params.switch_{i}.value() as usize;\n\
+                     \x20           for state in self.circuit_states.iter_mut() {{\n\
+                     \x20               if state.switch_{i}_position != sw_{i}_pos {{\n\
+                     \x20                   state.set_switch_{i}(sw_{i}_pos);\n\
+                     \x20               }}\n\
+                     \x20           }}\n\
+                     \x20       }}\n",
+                    i = s.index,
+                )
+            }
         })
         .collect();
 
@@ -480,11 +493,10 @@ fn generate_process_loop(
 
     let sample_processing = if num_outputs > 1 {
         if with_level_params {
-            "                let input = *sample as f64 * input_gain as f64;\n\
-             \x20               let out = process_sample(input, state)[ch.min(NUM_OUTPUTS - 1)] as f32;\n\
-             \x20               let out = out * output_gain;\n"
+            "                let input = input_sample as f64 * input_gain as f64;\n\
+             \x20               let outs = process_sample(input, state);\n"
         } else {
-            "                let out = process_sample(*sample as f64, state)[ch.min(NUM_OUTPUTS - 1)] as f32;\n"
+            "                let outs = process_sample(input_sample as f64, state);\n"
         }
     } else if with_level_params {
         "                let input = *sample as f64 * input_gain as f64;\n\
@@ -500,8 +512,34 @@ fn generate_process_loop(
         ""
     };
 
-    // Build the inner loop: either mono (single channel) or stereo (per-channel)
-    let inner_loop = if mono {
+    // Build the inner loop: multi-output, mono, or stereo
+    let inner_loop = if num_outputs > 1 {
+        // Multi-output: ONE circuit instance, input from channel 0, multiple output channels
+        let multi_dry_capture = if wet_dry_mix {
+            "                let dry = input_sample;\n"
+        } else {
+            ""
+        };
+        let output_gain_line = if with_level_params {
+            "                    let out = out * output_gain;\n"
+        } else {
+            ""
+        };
+        format!(
+            "\x20           let mut channel_samples = channel_samples;\n\
+             \x20               let input_sample = *channel_samples.get_mut(0).unwrap();\n\
+             \x20               let state = &mut self.circuit_state;\n\
+             {pot_assignments}\
+             {multi_dry_capture}\
+             {sample_processing}\
+             \x20               for (ch, sample) in channel_samples.into_iter().enumerate() {{\n\
+             \x20                   let out = outs[ch.min(NUM_OUTPUTS - 1)] as f32;\n\
+             {output_gain_line}\
+             {mix_blend}\
+             \x20                   {output_write}\n\
+             \x20               }}\n",
+        )
+    } else if mono {
         format!(
             "\x20           let sample = channel_samples.into_iter().next().unwrap();\n\
              \x20               let state = &mut self.circuit_states[0];\n\

@@ -276,6 +276,27 @@ impl CodeGenerator {
         netlist: &Netlist,
         dc_op: Option<crate::dc_op::DcOpResult>,
     ) -> Result<GeneratedCode, CodegenError> {
+        // Auto-insert parasitic caps if C matrix is all zeros and circuit has
+        // nonlinear devices. The IR stores G/C for runtime sample rate recomputation,
+        // so these must include the parasitic caps (matching the kernel, which also
+        // auto-inserts them in from_mna/from_mna_augmented).
+        let patched_mna;
+        let mna = if mna.m > 0 && !mna.c.iter().any(|row| row.iter().any(|&v| v != 0.0)) {
+            log::info!(
+                "Codegen: C matrix is all zeros with M={} nonlinear devices; \
+                 auto-inserting parasitic caps for IR",
+                mna.m
+            );
+            patched_mna = {
+                let mut m = mna.clone();
+                m.add_parasitic_caps();
+                m
+            };
+            &patched_mna
+        } else {
+            mna
+        };
+
         let ir = CircuitIR::from_kernel_with_dc_op(kernel, mna, netlist, &self.config, dc_op)?;
         let code = RustEmitter::new()?.emit(&ir)?;
 
@@ -336,6 +357,26 @@ impl CodeGenerator {
                 self.config.output_nodes.len()
             )));
         }
+
+        // Auto-insert parasitic caps if C matrix is all zeros and circuit has
+        // nonlinear devices. Without capacitors, A = G and the trapezoidal
+        // integrator degenerates (no energy storage → no dynamics).
+        let patched_mna;
+        let mna = if mna.m > 0 && !mna.c.iter().any(|row| row.iter().any(|&v| v != 0.0)) {
+            log::info!(
+                "Codegen nodal: C matrix is all zeros with M={} nonlinear devices; \
+                 auto-inserting parasitic caps",
+                mna.m
+            );
+            patched_mna = {
+                let mut m = mna.clone();
+                m.add_parasitic_caps();
+                m
+            };
+            &patched_mna
+        } else {
+            mna
+        };
 
         let ir = CircuitIR::from_mna(mna, netlist, &self.config)?;
         let code = RustEmitter::new()?.emit(&ir)?;

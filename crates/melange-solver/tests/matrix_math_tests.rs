@@ -327,6 +327,7 @@ fn test_s_matrix_positive_diagonal() {
              Rc c 0 1k\n\
              Rb b 0 100k\n\
              Re e 0 1k\n\
+             C1 c 0 10p\n\
              .model 2N2222 NPN(IS=1e-15 BF=200)\n",
         ),
     ];

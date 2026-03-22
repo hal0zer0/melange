@@ -50,7 +50,8 @@ base charge factor that accounts for Early effect and high-injection.
 ```
 q1 = 1 / (1 - Vbe/VAR - Vbc/VAF)       [Early effect]
 
-q2 = IS*exp(Vbe/Vt)/IKF + IS*exp(Vbc/Vt)/IKR   [High-injection]
+q2 = IS*exp(Vbe/VT)/IKF + IS*exp(Vbc/VT)/IKR   [High-injection]
+     Note: q2 uses bare VT, not NF*VT or NR*VT.
 
 qb = q1 * (1 + sqrt(1 + 4*q2)) / 2
 ```
@@ -76,9 +77,14 @@ Ic = sign * (Icc / qb - IS/beta_R * (exp(Vbc/Vt) - 1))
 
 ## Base Current
 
-**Not modified by Gummel-Poon**. Uses standard Ebers-Moll:
+Forward ideal component `IS/BF * (exp(Vbe/(NF*VT)) - 1)` is divided by qb when GP
+is active. Reverse component and ISE/ISC leakage are not modified.
+
 ```
-Ib = sign * (IS/beta_F * (exp(Vbe/Vt) - 1) + IS/beta_R * (exp(Vbc/Vt) - 1))
+Ib = sign * (IS/beta_F * (exp(Vbe/(NF*Vt)) - 1) / qb
+           + IS/beta_R * (exp(Vbc/(NR*Vt)) - 1)
+           + ISE * (exp(Vbe/(NE*Vt)) - 1)
+           + ISC * (exp(Vbc/(NC*Vt)) - 1))
 ```
 
 ## Jacobian (2x2 Block)
@@ -91,8 +97,8 @@ The GP Jacobian requires the quotient rule through qb:
 dq1/dVbe = q1^2 / VAR
 dq1/dVbc = q1^2 / VAF
 
-dq2/dVbe = IS / (Vt * IKF) * exp(Vbe/Vt)
-dq2/dVbc = IS / (Vt * IKR) * exp(Vbc/Vt)
+dq2/dVbe = IS / (VT * IKF) * exp(Vbe/VT)      [plain VT, not NF*VT]
+dq2/dVbc = IS / (VT * IKR) * exp(Vbc/VT)      [plain VT, not NR*VT]
 
 D = sqrt(1 + 4*q2)
 dD/dVbe = 2 * dq2/dVbe / D       (if D > 1e-15, else 0)
@@ -118,10 +124,16 @@ d(Icc/qb)/dVbc = (dIcc/dVbc * qb - Icc * dqb/dVbc) / qb2_safe
 
 ```
 dIc/dVbe = d(Icc/qb)/dVbe                              [no beta_R term]
-dIc/dVbc = d(Icc/qb)/dVbc - IS/(beta_R * Vt) * exp(Vbc/Vt)
+dIc/dVbc = d(Icc/qb)/dVbc - IS/(beta_R * NR*Vt) * exp(Vbc/(NR*Vt))
 
-dIb/dVbe = IS/(beta_F * Vt) * exp(Vbe/Vt)              [unchanged from EM]
-dIb/dVbc = IS/(beta_R * Vt) * exp(Vbc/Vt)
+ib_fwd = IS/beta_F * (exp(Vbe/(NF*Vt)) - 1)
+dib_fwd/dVbe = IS/(beta_F * NF*Vt) * exp(Vbe/(NF*Vt))
+
+d(ib_fwd/qb)/dVbe = (dib_fwd/dVbe * qb - ib_fwd * dqb/dVbe) / qb^2
+                                                        [quotient rule]
+
+dIb/dVbe = d(ib_fwd/qb)/dVbe                           [GP: forward divided by qb]
+dIb/dVbc = IS/(beta_R * NR*Vt) * exp(Vbc/(NR*Vt))      [reverse unchanged]
 
 bjt_jacobian returns [dIc/dVbe, dIc/dVbc, dIb/dVbe, dIb/dVbc]
 ```
@@ -132,7 +144,7 @@ In `dc_op.rs`, when `bp.is_gummel_poon()`:
 ```rust
 let gp = BjtGummelPoon::new(em, bp.vaf, bp.var, bp.ikf, bp.ikr);
 i_nl[s] = gp.collector_current(vbe, vbc);      // GP-modulated
-i_nl[s+1] = em.base_current(vbe, vbc);         // Standard EM
+i_nl[s+1] = gp.base_current(vbe, vbc);         // GP-modulated (fwd/qb)
 j_dev[s,s] = gp.jacobian[0];                   // GP Jacobian
 j_dev[s,s+1] = gp.jacobian[1];
 j_dev[s+1,s] = em.base_jacobian_dvbe;          // Standard EM

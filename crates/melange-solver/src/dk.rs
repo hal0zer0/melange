@@ -243,6 +243,25 @@ impl DkKernel {
             )));
         }
 
+        // Auto-insert parasitic caps if C matrix is all zeros and circuit has
+        // nonlinear devices. Without capacitors, A = G and the trapezoidal
+        // integrator degenerates (no energy storage → no dynamics).
+        let patched_mna;
+        let mna = if mna.m > 0 && !mna.c.iter().any(|row| row.iter().any(|&v| v != 0.0)) {
+            log::info!(
+                "C matrix is all zeros with M={} nonlinear devices; auto-inserting parasitic caps",
+                mna.m
+            );
+            patched_mna = {
+                let mut m = mna.clone();
+                m.add_parasitic_caps();
+                m
+            };
+            &patched_mna
+        } else {
+            mna
+        };
+
         let n_nodes = mna.n;
         let n = mna.n_aug; // augmented system dimension
         let m = mna.m;
@@ -531,6 +550,25 @@ impl DkKernel {
                 sample_rate
             )));
         }
+
+        // Auto-insert parasitic caps if C matrix is all zeros and circuit has
+        // nonlinear devices. Without capacitors, A = G and the trapezoidal
+        // integrator degenerates (no energy storage → no dynamics).
+        let patched_mna;
+        let mna = if mna.m > 0 && !mna.c.iter().any(|row| row.iter().any(|&v| v != 0.0)) {
+            log::info!(
+                "C matrix is all zeros with M={} nonlinear devices; auto-inserting parasitic caps",
+                mna.m
+            );
+            patched_mna = {
+                let mut m = mna.clone();
+                m.add_parasitic_caps();
+                m
+            };
+            &patched_mna
+        } else {
+            mna
+        };
 
         let n_nodes = mna.n;
         let n_aug = mna.n_aug;

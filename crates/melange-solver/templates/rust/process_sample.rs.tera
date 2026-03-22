@@ -161,8 +161,11 @@ pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS
     // Step 7: Check for NaN/inf BEFORE updating state (prevents corruption of v_prev/i_nl_prev)
     if !v.iter().all(|x| x.is_finite()) {
         state.v_prev = state.dc_operating_point;
-        state.i_nl_prev = [0.0; M];
+{% if has_dc_nl %}        state.i_nl_prev = DC_NL_I;
+        state.i_nl_prev_prev = DC_NL_I;
+{% else %}        state.i_nl_prev = [0.0; M];
         state.i_nl_prev_prev = [0.0; M];
+{% endif %}
         state.input_prev = 0.0;
 {% if num_inductors > 0 %}        state.ind_i_prev = [0.0; {{ num_inductors }}];
         state.ind_v_prev = [0.0; {{ num_inductors }}];
@@ -178,7 +181,12 @@ pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS
 {% endfor %}{% if num_thermal_devices > 0 %}{% for td in thermal_devices %}        state.device_{{ td.dev_num }}_tj = DEVICE_{{ td.dev_num }}_TAMB;
         state.device_{{ td.dev_num }}_is = DEVICE_{{ td.dev_num }}_IS;
         state.device_{{ td.dev_num }}_vt = DEVICE_{{ td.dev_num }}_VT;
-{% endfor %}{% endif %}        state.diag_nan_reset_count += 1;
+{% endfor %}{% endif %}{% if has_be_fallback %}        state.be_cooldown = 0;
+{% endif %}{% if oversampling_factor > 1 %}        state.os_up_state = [0.0; {{ os_state_size }}];
+        state.os_dn_state = [[0.0; {{ os_state_size }}]; NUM_OUTPUTS];
+{% endif %}{% if oversampling_4x %}        state.os_up_state_outer = [0.0; {{ os_state_size_outer }}];
+        state.os_dn_state_outer = [[0.0; {{ os_state_size_outer }}]; NUM_OUTPUTS];
+{% endif %}        state.diag_nan_reset_count += 1;
         // Return DC operating point output instead of zero to avoid discontinuity
         let mut dc_output = [0.0f64; NUM_OUTPUTS];
         for out_idx in 0..NUM_OUTPUTS {

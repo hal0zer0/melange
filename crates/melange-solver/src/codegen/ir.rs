@@ -1701,6 +1701,11 @@ impl CircuitIR {
 
         // Junction capacitance (optional, default 0.0)
         let cjo = Self::lookup_model_param(netlist, model, "CJO").unwrap_or(0.0);
+        if cjo < 0.0 || !cjo.is_finite() {
+            return Err(CodegenError::InvalidConfig(format!(
+                "diode model CJO must be non-negative and finite, got {cjo}"
+            )));
+        }
 
         // Series resistance (optional, default 0.0)
         let rs = Self::lookup_model_param(netlist, model, "RS").unwrap_or(0.0);
@@ -1799,7 +1804,17 @@ impl CircuitIR {
 
         // Junction capacitances (optional, default 0.0)
         let cje = Self::lookup_model_param(netlist, model, "CJE").unwrap_or(0.0);
+        if cje < 0.0 || !cje.is_finite() {
+            return Err(CodegenError::InvalidConfig(format!(
+                "BJT model CJE must be non-negative and finite, got {cje}"
+            )));
+        }
         let cjc = Self::lookup_model_param(netlist, model, "CJC").unwrap_or(0.0);
+        if cjc < 0.0 || !cjc.is_finite() {
+            return Err(CodegenError::InvalidConfig(format!(
+                "BJT model CJC must be non-negative and finite, got {cjc}"
+            )));
+        }
 
         // Forward emission coefficient (default 1.0 = ideal)
         let nf = Self::lookup_model_param(netlist, model, "NF").unwrap_or(1.0);
@@ -1987,11 +2002,31 @@ impl CircuitIR {
 
         // Junction capacitances (optional, default 0.0)
         let cgs = Self::lookup_model_param(netlist, model, "CGS").unwrap_or(0.0);
+        if cgs < 0.0 || !cgs.is_finite() {
+            return Err(CodegenError::InvalidConfig(format!(
+                "JFET model CGS must be non-negative and finite, got {cgs}"
+            )));
+        }
         let cgd = Self::lookup_model_param(netlist, model, "CGD").unwrap_or(0.0);
+        if cgd < 0.0 || !cgd.is_finite() {
+            return Err(CodegenError::InvalidConfig(format!(
+                "JFET model CGD must be non-negative and finite, got {cgd}"
+            )));
+        }
 
         // Ohmic drain/source resistances (optional, default 0.0)
         let rd = Self::lookup_model_param(netlist, model, "RD").unwrap_or(0.0);
+        if rd < 0.0 || !rd.is_finite() {
+            return Err(CodegenError::InvalidConfig(format!(
+                "JFET model RD must be non-negative and finite, got {rd}"
+            )));
+        }
         let rs_param = Self::lookup_model_param(netlist, model, "RS").unwrap_or(0.0);
+        if rs_param < 0.0 || !rs_param.is_finite() {
+            return Err(CodegenError::InvalidConfig(format!(
+                "JFET model RS must be non-negative and finite, got {rs_param}"
+            )));
+        }
 
         Self::warn_unrecognized_params(
             netlist,
@@ -2049,11 +2084,31 @@ impl CircuitIR {
 
         // Junction capacitances (optional, default 0.0)
         let cgs = Self::lookup_model_param(netlist, model, "CGS").unwrap_or(0.0);
+        if cgs < 0.0 || !cgs.is_finite() {
+            return Err(CodegenError::InvalidConfig(format!(
+                "MOSFET model CGS must be non-negative and finite, got {cgs}"
+            )));
+        }
         let cgd = Self::lookup_model_param(netlist, model, "CGD").unwrap_or(0.0);
+        if cgd < 0.0 || !cgd.is_finite() {
+            return Err(CodegenError::InvalidConfig(format!(
+                "MOSFET model CGD must be non-negative and finite, got {cgd}"
+            )));
+        }
 
         // Ohmic drain/source resistances (optional, default 0.0)
         let rd = Self::lookup_model_param(netlist, model, "RD").unwrap_or(0.0);
+        if rd < 0.0 || !rd.is_finite() {
+            return Err(CodegenError::InvalidConfig(format!(
+                "MOSFET model RD must be non-negative and finite, got {rd}"
+            )));
+        }
         let rs_param = Self::lookup_model_param(netlist, model, "RS").unwrap_or(0.0);
+        if rs_param < 0.0 || !rs_param.is_finite() {
+            return Err(CodegenError::InvalidConfig(format!(
+                "MOSFET model RS must be non-negative and finite, got {rs_param}"
+            )));
+        }
 
         // Body effect parameters (optional, default 0.0 = disabled)
         let gamma = Self::lookup_model_param(netlist, model, "GAMMA").unwrap_or(0.0);
@@ -2141,14 +2196,29 @@ impl CircuitIR {
 
         // Inter-electrode capacitances (optional, default 0.0)
         let ccg = Self::lookup_model_param(netlist, model, "CCG").unwrap_or(0.0);
+        if ccg < 0.0 || !ccg.is_finite() {
+            return Err(CodegenError::InvalidConfig(format!(
+                "tube model CCG must be non-negative and finite, got {ccg}"
+            )));
+        }
         let cgp = Self::lookup_model_param(netlist, model, "CGP").unwrap_or(0.0);
+        if cgp < 0.0 || !cgp.is_finite() {
+            return Err(CodegenError::InvalidConfig(format!(
+                "tube model CGP must be non-negative and finite, got {cgp}"
+            )));
+        }
         let ccp = Self::lookup_model_param(netlist, model, "CCP").unwrap_or(0.0);
+        if ccp < 0.0 || !ccp.is_finite() {
+            return Err(CodegenError::InvalidConfig(format!(
+                "tube model CCP must be non-negative and finite, got {ccp}"
+            )));
+        }
 
         // Grid internal resistance (optional, default 0.0 = disabled)
         let rgi = Self::lookup_model_param(netlist, model, "RGI").unwrap_or(0.0);
-        if rgi < 0.0 {
+        if rgi < 0.0 || !rgi.is_finite() {
             return Err(CodegenError::InvalidConfig(format!(
-                "tube model RGI must be non-negative, got {rgi}"
+                "tube model RGI must be non-negative and finite, got {rgi}"
             )));
         }
 

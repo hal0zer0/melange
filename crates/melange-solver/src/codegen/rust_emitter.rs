@@ -2170,6 +2170,22 @@ impl RustEmitter {
 
         let os_factor = ir.solver_config.oversampling_factor;
         ctx.insert("oversampling_factor", &os_factor);
+        if os_factor > 1 {
+            let os_info = oversampling_info(os_factor);
+            ctx.insert("os_state_size", &os_info.state_size);
+            ctx.insert("oversampling_4x", &(os_factor == 4));
+            if os_factor == 4 {
+                ctx.insert("os_state_size_outer", &os_info.state_size_outer);
+            }
+        } else {
+            ctx.insert("oversampling_4x", &false);
+        }
+
+        // DC nonlinear currents availability (for NaN reset path)
+        let has_dc_nl = ir.topology.m > 0
+            && !ir.dc_nl_currents.is_empty()
+            && ir.dc_nl_currents.iter().any(|&v| v.abs() > 1e-30);
+        ctx.insert("has_dc_nl", &has_dc_nl);
 
         let num_outputs = ir.solver_config.output_nodes.len();
         ctx.insert("num_outputs", &num_outputs);
