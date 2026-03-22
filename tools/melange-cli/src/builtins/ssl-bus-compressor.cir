@@ -122,20 +122,17 @@ Rbias_orn out_rn  0  47K
 Cbyp_rout rout_p_pre rout_n_pre  100N
 
 * ============================================================
-* SIDECHAIN VCA (THAT 2181)
-* sig+: sc_sym (summed L+R via 47K+47K)
-* sig-: sc_vca_out (to TL074 buffer virtual ground)
-* ctrl+: sc_ec_pos (Pin 5, EC+)
-* ctrl-: sc_ec_neg (Pin 3, EC-)
+* SIDECHAIN SIGNAL SUMMING + THAT2181 (unity-gain current buffer)
+* The THAT2181 operates at fixed unity gain (EC+/EC- both at -12V).
+* It acts as a current buffer, not a variable-gain element.
+* Threshold CV (cv_to_sc) is mixed into the summing node via 470R —
+* it works by DC offset, not gain control.
 * ============================================================
 Rsc_l  lin_out  sc_sym  47K
 Rsc_r  rin_out  sc_sym  47K
-Rsc_cv  cv_to_sc  sc_ec_neg  470
-Rsc_ec_bias  sc_ec_neg  vee12  15K
-Csc_ec_sym  sc_ec_neg  sc_sym  100P
-Rsc_ec_10k  sc_ec_neg  sc_ec_pos  10K
-Rsc_pin5  sc_ec_pos  vee12  47
-Y3 sc_sym sc_vca_out sc_ec_pos sc_ec_neg THAT2181
+Rsc_cv  cv_to_sc  sc_sym  470
+* THAT2181 at fixed unity gain — modeled as 1 ohm pass-through
+Rsc_vca  sc_sym  sc_vca_out  1
 
 * ============================================================
 * SIDECHAIN BUFFER (TL074 Section B)

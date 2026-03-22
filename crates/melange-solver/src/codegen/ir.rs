@@ -1125,6 +1125,17 @@ impl CircuitIR {
                 let mut dc = dc_result.v_node.clone();
                 dc.resize(kernel.n, 0.0);
                 dc.truncate(kernel.n);
+                // Clamp op-amp Boyle internal nodes to VSAT.
+                // The DC OP solver doesn't know about VSAT and can converge
+                // to voltages beyond rail limits at internal nodes.
+                for oa in &mna.opamps {
+                    if oa.vsat.is_finite() && oa.n_out_idx > 0 {
+                        let o = oa.n_out_idx - 1;
+                        if o < dc.len() {
+                            dc[o] = dc[o].clamp(-oa.vsat, oa.vsat);
+                        }
+                    }
+                }
                 dc
             },
             device_slots,
@@ -1420,6 +1431,15 @@ impl CircuitIR {
         // Pad DC OP to n_nodal (inductor branch currents = 0)
         let mut dc_operating_point = dc_result.v_node.clone();
         dc_operating_point.resize(n, 0.0);
+        // Clamp op-amp nodes to VSAT (DC OP can converge beyond rail limits)
+        for oa in &mna.opamps {
+            if oa.vsat.is_finite() && oa.n_out_idx > 0 {
+                let o = oa.n_out_idx - 1;
+                if o < dc_operating_point.len() {
+                    dc_operating_point[o] = dc_operating_point[o].clamp(-oa.vsat, oa.vsat);
+                }
+            }
+        }
         Self::resolve_mosfet_nodes(&mut device_slots, mna);
 
         // Sparsity analysis (K is now computed for Schur complement NR)
