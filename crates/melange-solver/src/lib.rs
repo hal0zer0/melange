@@ -70,7 +70,7 @@ pub use codegen::CodegenError;
 pub use codegen::{CodeGenerator, CodegenConfig, GeneratedCode};
 pub use device_types::{
     BjtParams, DeviceParams, DeviceSlot, DeviceType, DiodeParams, JfetParams, MosfetParams,
-    TubeParams,
+    TubeParams, VcaParams,
 };
 pub use dk::{DkError, DkKernel};
 pub use mna::{MnaError, MnaSystem};

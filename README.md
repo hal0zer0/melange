@@ -7,7 +7,7 @@
 
 An open-source Rust toolkit for translating analog circuit schematics into real-time audio DSP code. Melange bridges the gap between SPICE simulation and production audio plugins — automating the pipeline that every circuit modeler currently does by hand.
 
-> **IMPORTANT: Always use ear protection when prototyping with Melange.** Generated circuits can produce unexpected gain levels or unstable output. Melange cannot guarantee safe listening volumes — always start with your monitor level at zero and increase gradually.
+> **IMPORTANT: Always use caution when listening to Melange output.** Generated plugins include a default-on ear-protection soft limiter that prevents output from exceeding 0 dBFS, but circuits can still produce unexpected gain levels or unstable behavior. Always start with your monitor level at zero and increase gradually. The limiter can be toggled off at runtime or disabled entirely with `--no-ear-protection`.
 
 ## The Problem
 

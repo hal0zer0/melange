@@ -815,6 +815,7 @@ fn limit_slot_voltage_codegen(
                 fetlim(vnew, vold, 0.0)
             }
         }
+        DeviceParams::Vca(_) => vnew,
     }
 }
 

@@ -563,6 +563,7 @@ fn test_singular_matrix_error_path() {
         pots: vec![],
         switches: vec![],
         opamps: vec![],
+        vcas: vec![],
         bjt_internal_nodes: vec![],
         linearized_bjts: vec![],
     };

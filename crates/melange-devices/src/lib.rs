@@ -1,4 +1,4 @@
-//! Device models for analog circuit components (diode, BJT, JFET, MOSFET, triode, op-amp, LDR).
+//! Device models for analog circuit components (diode, BJT, JFET, MOSFET, triode, op-amp, LDR, VCA).
 //! Part of the [melange](https://github.com/hal0zer0/melange) circuit simulation toolkit.
 
 // melange-devices: Parameterized nonlinear component models
@@ -20,6 +20,7 @@ pub mod ldr;
 pub mod mosfet;
 pub mod opamp;
 pub mod tube;
+pub mod vca;
 
 pub use bjt::{classify_region, BjtEbersMoll, BjtGummelPoon, BjtPolarity, BjtRegion};
 pub use diode::{DiodeShockley, DiodeWithRs, Led};
@@ -28,6 +29,7 @@ pub use ldr::CdsLdr;
 pub use mosfet::{ChannelType as MosfetChannelType, Mosfet};
 pub use opamp::{IdealOpamp, SimpleOpamp};
 pub use tube::KorenTriode;
+pub use vca::Vca;
 
 /// A nonlinear circuit element for use in MNA/DK solvers.
 ///

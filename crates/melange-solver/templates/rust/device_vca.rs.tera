@@ -1,0 +1,22 @@
+// VCA (Voltage-Controlled Amplifier) — THAT 2180 / DBX 2150 Blackmer model.
+// Current-mode exponential gain: I_sig = G0 * exp(-Vc / Vscale) * V_sig
+
+/// VCA signal current: I = G0 * exp(-Vc / Vscale) * V_signal
+#[inline(always)]
+fn vca_current(v_sig: f64, v_ctrl: f64, g0: f64, vscale: f64) -> f64 {
+    let gain = g0 * fast_exp(-v_ctrl / vscale);
+    gain * v_sig
+}
+
+/// VCA control port current (always zero — high-impedance control input)
+#[inline(always)]
+fn vca_ctrl_current() -> f64 {
+    0.0
+}
+
+/// VCA Jacobian: [dI_sig/dV_sig, dI_sig/dV_ctrl, dI_ctrl/dV_sig, dI_ctrl/dV_ctrl]
+#[inline(always)]
+fn vca_jacobian(v_sig: f64, v_ctrl: f64, g0: f64, vscale: f64) -> [f64; 4] {
+    let gain = g0 * fast_exp(-v_ctrl / vscale);
+    [gain, -gain * v_sig / vscale, 0.0, 0.0]
+}

@@ -161,6 +161,11 @@ pub enum DeviceEntry {
         device: KorenTriode,
         start_idx: usize,
     },
+    /// VCA (THAT 2180-style Blackmer) model (2D: signal current + zero control current)
+    Vca {
+        device: melange_devices::Vca,
+        start_idx: usize,
+    },
 }
 
 impl DeviceEntry {
@@ -204,6 +209,11 @@ impl DeviceEntry {
         Self::Tube { device, start_idx }
     }
 
+    /// Create a new VCA device entry.
+    pub fn new_vca(device: melange_devices::Vca, start_idx: usize) -> Self {
+        Self::Vca { device, start_idx }
+    }
+
     /// Get the device dimension (1, 2, etc.)
     pub fn dimension(&self) -> usize {
         match self {
@@ -215,6 +225,7 @@ impl DeviceEntry {
             DeviceEntry::Jfet { .. } => 2,
             DeviceEntry::Mosfet { .. } => 2,
             DeviceEntry::Tube { .. } => 2,
+            DeviceEntry::Vca { .. } => 2,
         }
     }
 
@@ -229,6 +240,7 @@ impl DeviceEntry {
             DeviceEntry::Jfet { start_idx, .. } => *start_idx,
             DeviceEntry::Mosfet { start_idx, .. } => *start_idx,
             DeviceEntry::Tube { start_idx, .. } => *start_idx,
+            DeviceEntry::Vca { start_idx, .. } => *start_idx,
         }
     }
 
@@ -292,6 +304,7 @@ impl DeviceEntry {
                     fetlim(vnew, vold, 0.0)
                 }
             }
+            DeviceEntry::Vca { .. } => vnew, // fast_exp clamps internally
         }
     }
 
@@ -340,6 +353,10 @@ impl DeviceEntry {
                 let ip = device.plate_current(v[0], v[1]);
                 let ig = device.grid_current(v[0]);
                 smallvec![ip, ig]
+            }
+            DeviceEntry::Vca { device, .. } => {
+                let i_sig = device.current(v[0], v[1]);
+                smallvec![i_sig, 0.0]
             }
         }
     }
@@ -428,6 +445,10 @@ impl DeviceEntry {
                 let dig_dvgk = device.grid_current_jacobian(v[0]);
                 smallvec![dip_dvgk, dip_dvpk, dig_dvgk, 0.0]
             }
+            DeviceEntry::Vca { device, .. } => {
+                let jac = device.jacobian(v[0], v[1]);
+                smallvec![jac[0], jac[1], jac[2], jac[3]]
+            }
         }
     }
 
@@ -444,6 +465,7 @@ impl DeviceEntry {
             DeviceEntry::Jfet { .. } => 0.0,
             DeviceEntry::Mosfet { .. } => 0.0,
             DeviceEntry::Tube { .. } => 0.0,
+            DeviceEntry::Vca { .. } => 0.0,
         }
     }
 
@@ -460,6 +482,7 @@ impl DeviceEntry {
             DeviceEntry::Jfet { .. } => 0.0,
             DeviceEntry::Mosfet { .. } => 0.0,
             DeviceEntry::Tube { .. } => 0.0,
+            DeviceEntry::Vca { .. } => 0.0,
         }
     }
 
@@ -3002,6 +3025,10 @@ fn limit_slot_voltage(slot: &DeviceSlot, dim: usize, vnew: f64, vold: f64) -> f6
                 // Vpk — plate current is well-behaved
                 fetlim(vnew, vold, 0.0)
             }
+        }
+        DeviceParams::Vca(_) => {
+            // VCA: fast_exp already clamps to [-40, 40], no explicit limiting needed
+            vnew
         }
     }
 }

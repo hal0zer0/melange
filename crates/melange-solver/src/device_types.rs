@@ -13,6 +13,7 @@ pub enum DeviceParams {
     Jfet(JfetParams),
     Mosfet(MosfetParams),
     Tube(TubeParams),
+    Vca(VcaParams),
 }
 
 impl DeviceParams {}
@@ -340,6 +341,19 @@ impl TubeParams {
     }
 }
 
+/// VCA (Voltage-Controlled Amplifier) parameters.
+///
+/// Models a THAT 2180 / DBX 2150 Blackmer-style current-mode exponential gain element.
+/// Gain law: `I_signal = G0 * exp(-V_control / VSCALE) * V_signal`
+/// Control port draws no current (ideal high-Z).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VcaParams {
+    /// Control voltage scaling (V/neper)
+    pub vscale: f64,
+    /// Unity-gain conductance (S)
+    pub g0: f64,
+}
+
 /// Nonlinear device type tag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -352,6 +366,7 @@ pub enum DeviceType {
     Jfet,
     Mosfet,
     Tube,
+    Vca,
 }
 
 // --- Serde helper functions ---

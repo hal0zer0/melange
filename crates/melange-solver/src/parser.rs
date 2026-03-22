@@ -1,7 +1,7 @@
 //! SPICE netlist parser.
 //!
 //! Parses a subset of SPICE sufficient for audio circuits:
-//! - Components: R, C, L, V (DC/AC), I, D, Q, J, M, U (op-amp), E (VCVS), G (VCCS), X
+//! - Components: R, C, L, V (DC/AC), I, D, Q, J, M, U (op-amp), E (VCVS), G (VCCS), Y (VCA), X
 //! - Directives: .model, .subckt, .param, .pot, .switch, .input_impedance, .end
 //!
 //! The parser builds an AST (Abstract Syntax Tree) representation
@@ -366,6 +366,22 @@ pub enum Element {
         /// Model name (references .model with TUBE type)
         model: String,
     },
+    /// VCA: Yname sig+ sig- ctrl+ ctrl- modelname
+    ///
+    /// M=2 per VCA: signal current (I_sig) and control current (I_ctrl=0).
+    Vca {
+        name: String,
+        /// Signal positive node
+        n_sig_p: String,
+        /// Signal negative node
+        n_sig_n: String,
+        /// Control positive node
+        n_ctrl_p: String,
+        /// Control negative node
+        n_ctrl_n: String,
+        /// Model name (references .model with VCA type)
+        model: String,
+    },
     /// Voltage-Controlled Voltage Source: Ename out+ out- ctrl+ ctrl- gain
     ///
     /// Modeled as Norton equivalent (VCCS + output conductance).
@@ -422,6 +438,7 @@ impl Element {
             | Element::Mosfet { name, .. }
             | Element::Opamp { name, .. }
             | Element::Triode { name, .. }
+            | Element::Vca { name, .. }
             | Element::Vcvs { name, .. }
             | Element::Vccs { name, .. }
             | Element::SubcktInstance { name, .. } => name,
@@ -436,7 +453,8 @@ impl Element {
             | Element::Jfet { model, .. }
             | Element::Mosfet { model, .. }
             | Element::Opamp { model, .. }
-            | Element::Triode { model, .. } => Some(model),
+            | Element::Triode { model, .. }
+            | Element::Vca { model, .. } => Some(model),
             _ => None,
         }
     }
@@ -600,6 +618,21 @@ impl Element {
                 n_grid: remap(n_grid),
                 n_plate: remap(n_plate),
                 n_cathode: remap(n_cathode),
+                model: model.clone(),
+            },
+            Element::Vca {
+                name,
+                n_sig_p,
+                n_sig_n,
+                n_ctrl_p,
+                n_ctrl_n,
+                model,
+            } => Element::Vca {
+                name: prefixed(name),
+                n_sig_p: remap(n_sig_p),
+                n_sig_n: remap(n_sig_n),
+                n_ctrl_p: remap(n_ctrl_p),
+                n_ctrl_n: remap(n_ctrl_n),
                 model: model.clone(),
             },
             Element::Vcvs {
@@ -1589,6 +1622,7 @@ impl Parser {
             'M' => self.parse_mosfet(&parts),
             'T' => self.parse_triode(&parts),
             'U' => self.parse_opamp(&parts),
+            'Y' => self.parse_vca(&parts),
             'E' => self.parse_vcvs(&parts),
             'G' => self.parse_vccs(&parts),
             'X' => self.parse_subckt_instance(&parts),
@@ -1798,6 +1832,21 @@ impl Parser {
             n_plate: parts[2].to_string(),
             n_cathode: parts[3].to_string(),
             model: parts[4].to_string(),
+        })
+    }
+
+    fn parse_vca(&self, parts: &[&str]) -> Result<Element, ParseError> {
+        // Yname sig+ sig- ctrl+ ctrl- modelname
+        self.require_parts(parts, 6, "Yname sig+ sig- ctrl+ ctrl- modelname")?;
+        // Validate signal pair not self-connected
+        self.check_self_connection(parts[1], parts[2], parts[0])?;
+        Ok(Element::Vca {
+            name: parts[0].to_string(),
+            n_sig_p: parts[1].to_string(),
+            n_sig_n: parts[2].to_string(),
+            n_ctrl_p: parts[3].to_string(),
+            n_ctrl_n: parts[4].to_string(),
+            model: parts[5].to_string(),
         })
     }
 

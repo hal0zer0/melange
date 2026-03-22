@@ -239,6 +239,12 @@ fn build_device_entries(netlist: &Netlist, mna: &MnaSystem) -> Vec<DeviceEntry> 
                 );
                 devices.push(DeviceEntry::new_tube(tube, dev_info.start_idx));
             }
+            melange_solver::mna::NonlinearDeviceType::Vca => {
+                let vscale = find_model_param(&model, "VSCALE").unwrap_or(0.00528);
+                let g0 = find_model_param(&model, "G0").unwrap_or(1.0);
+                let vca = melange_devices::Vca::new(vscale, g0);
+                devices.push(DeviceEntry::new_vca(vca, dev_info.start_idx));
+            }
         }
     }
     devices

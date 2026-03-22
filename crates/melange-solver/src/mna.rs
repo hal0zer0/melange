@@ -77,6 +77,8 @@ pub struct MnaSystem {
     pub switches: Vec<SwitchInfo>,
     /// Op-amp info (for VCCS stamping)
     pub opamps: Vec<OpampInfo>,
+    /// VCA info (nonlinear voltage-controlled amplifier)
+    pub vcas: Vec<VcaInfo>,
     /// Internal nodes for parasitic BJTs (RB/RC/RE in transient MNA).
     /// Empty when no parasitic BJTs are present or all are forward-active.
     pub bjt_internal_nodes: Vec<BjtTransientInternalNodes>,
@@ -203,6 +205,7 @@ pub enum NonlinearDeviceType {
     Jfet,
     Mosfet,
     Tube,
+    Vca,
 }
 
 /// Internal node indices for a parasitic BJT in the transient MNA system.
@@ -286,6 +289,30 @@ pub struct OpampInfo {
     pub aol: f64,
     /// Output resistance in ohms (default 1)
     pub r_out: f64,
+}
+
+/// VCA (Voltage-Controlled Amplifier) info for MNA system.
+///
+/// A 4-terminal nonlinear device with signal and control paths:
+/// - sig+/sig-: signal current path (I_sig = G0 * exp(-V_ctrl / VSCALE) * V_sig)
+/// - ctrl+/ctrl-: control voltage (high impedance, draws no current)
+///
+/// M=2 per VCA: dim 0 maps V_signal → I_signal, dim 1 maps V_control → I_control (= 0).
+#[derive(Debug, Clone)]
+pub struct VcaInfo {
+    pub name: String,
+    /// Signal positive node index (1-indexed, 0 = ground)
+    pub n_sig_p_idx: usize,
+    /// Signal negative node index (1-indexed, 0 = ground)
+    pub n_sig_n_idx: usize,
+    /// Control positive node index (1-indexed, 0 = ground)
+    pub n_ctrl_p_idx: usize,
+    /// Control negative node index (1-indexed, 0 = ground)
+    pub n_ctrl_n_idx: usize,
+    /// Control voltage scale (default 0.00528 V)
+    pub vscale: f64,
+    /// Nominal gain at V_ctrl = 0 (default 1.0)
+    pub g0: f64,
 }
 
 /// Component within a switch directive, resolved to MNA node indices.
@@ -375,6 +402,7 @@ impl MnaSystem {
             pots: Vec::new(),
             switches: Vec::new(),
             opamps: Vec::new(),
+            vcas: Vec::new(),
             bjt_internal_nodes: Vec::new(),
             linearized_bjts: Vec::new(),
         }
@@ -673,6 +701,9 @@ impl MnaSystem {
                     if p.cjo > 0.0 {
                         caps.push((na, nc, p.cjo));
                     }
+                }
+                DeviceParams::Vca(_) => {
+                    // VCA has no junction capacitances
                 }
             }
         }
@@ -1292,6 +1323,11 @@ impl MnaSystem {
                     // Plate-cathode (Cpk)
                     junctions.push((dev.name.clone(), np, nk));
                 }
+                NonlinearDeviceType::Vca => {
+                    // node_indices: [sig_p, sig_n, ctrl_p, ctrl_n]
+                    // Signal path junction (sig+ to sig-)
+                    junctions.push((dev.name.clone(), dev.node_indices[0], dev.node_indices[1]));
+                }
             }
         }
 
@@ -1697,6 +1733,7 @@ struct MnaBuilder {
     current_sources: Vec<CurrentSourceInfo>,
     inductors: Vec<InductorElement>,
     opamps: Vec<OpampInfo>,
+    vcas: Vec<VcaInfo>,
     elements: Vec<ElementInfo>,
     /// Total voltage dimension accumulated so far
     total_dimension: usize,
@@ -1730,6 +1767,7 @@ enum ElementType {
     Opamp,
     Vcvs,
     Vccs,
+    Vca,
 }
 
 impl MnaBuilder {
@@ -1745,6 +1783,7 @@ impl MnaBuilder {
             current_sources: Vec::new(),
             inductors: Vec::new(),
             opamps: Vec::new(),
+            vcas: Vec::new(),
             elements: Vec::new(),
             total_dimension: 0,
             forward_active_bjts: std::collections::HashSet::new(),
@@ -1788,6 +1827,40 @@ impl MnaBuilder {
                             "ROUT" => oa.r_out = *val,
                             _ => log::warn!(
                                 ".model {}: unrecognized parameter '{}' (ignored)",
+                                m.name,
+                                key
+                            ),
+                        }
+                    }
+                }
+            }
+        }
+
+        // Resolve VCA model parameters from netlist .model directives
+        for (vca, elem) in self.vcas.iter_mut().zip(
+            netlist
+                .elements
+                .iter()
+                .filter(|e| matches!(e, Element::Vca { .. })),
+        ) {
+            if let Element::Vca { model, .. } = elem {
+                if let Some(m) = netlist
+                    .models
+                    .iter()
+                    .find(|m| m.name.eq_ignore_ascii_case(model))
+                {
+                    if m.model_type != "VCA" {
+                        return Err(MnaError::InvalidParameter(format!(
+                            "VCA {} references model '{}' with type '{}', expected 'VCA'",
+                            model, m.name, m.model_type
+                        )));
+                    }
+                    for (key, val) in &m.params {
+                        match key.to_ascii_uppercase().as_str() {
+                            "VSCALE" => vca.vscale = *val,
+                            "G0" => vca.g0 = *val,
+                            _ => log::warn!(
+                                ".model {}: unrecognized VCA parameter '{}' (ignored)",
                                 m.name,
                                 key
                             ),
@@ -2321,6 +2394,7 @@ impl MnaBuilder {
         mna.current_sources = self.current_sources;
         mna.inductors = self.inductors;
         mna.opamps = self.opamps;
+        mna.vcas = self.vcas;
 
         // -----------------------------------------------------------------
         // Expand matrices for augmented MNA (voltage sources + VCVS).
@@ -2828,6 +2902,46 @@ impl MnaBuilder {
                         }
                     }
                 }
+                NonlinearDeviceType::Vca => {
+                    // VCA: 2D — dim 0: V_signal → I_signal, dim 1: V_control → I_control (=0)
+                    //
+                    // 4 terminals: [sig_p, sig_n, ctrl_p, ctrl_n]
+                    // Dimension pairing:
+                    //   dim 0: N_v extracts V_signal = V(sig+) - V(sig-)
+                    //          N_i injects I_signal at sig+/sig- (current path)
+                    //   dim 1: N_v extracts V_control = V(ctrl+) - V(ctrl-)
+                    //          N_i = 0 (control draws no current)
+                    if node_indices.len() >= 4 {
+                        let sp_raw = node_indices[0]; // sig+
+                        let sn_raw = node_indices[1]; // sig-
+                        let cp_raw = node_indices[2]; // ctrl+
+                        let cn_raw = node_indices[3]; // ctrl-
+
+                        // N_v row 0 (V_signal): +1 at sig+, -1 at sig-
+                        if sp_raw > 0 {
+                            mna.n_v[start_idx][sp_raw - 1] = 1.0;
+                        }
+                        if sn_raw > 0 {
+                            mna.n_v[start_idx][sn_raw - 1] = -1.0;
+                        }
+                        // N_v row 1 (V_control): +1 at ctrl+, -1 at ctrl-
+                        if cp_raw > 0 {
+                            mna.n_v[start_idx + 1][cp_raw - 1] = 1.0;
+                        }
+                        if cn_raw > 0 {
+                            mna.n_v[start_idx + 1][cn_raw - 1] = -1.0;
+                        }
+
+                        // N_i col 0 (I_signal): -1 at sig+ (extracted), +1 at sig- (injected)
+                        if sp_raw > 0 {
+                            mna.n_i[sp_raw - 1][start_idx] = -1.0;
+                        }
+                        if sn_raw > 0 {
+                            mna.n_i[sn_raw - 1][start_idx] = 1.0;
+                        }
+                        // N_i col 1 (I_control): NO stamping — control draws no current
+                    }
+                }
             }
         }
 
@@ -2883,6 +2997,13 @@ impl MnaBuilder {
                 ctrl_n,
                 ..
             } => vec![out_p, out_n, ctrl_p, ctrl_n],
+            Element::Vca {
+                n_sig_p,
+                n_sig_n,
+                n_ctrl_p,
+                n_ctrl_n,
+                ..
+            } => vec![n_sig_p, n_sig_n, n_ctrl_p, n_ctrl_n],
             Element::SubcktInstance { name, .. } => {
                 return Err(MnaError::TopologyError(format!(
                     "subcircuit instance '{}' not supported (expand subcircuits before MNA)",
@@ -3214,6 +3335,55 @@ impl MnaBuilder {
                     value: *gm,
                     name: name.clone(),
                     dc_value: None,
+                });
+            }
+            Element::Vca {
+                name,
+                n_sig_p,
+                n_sig_n,
+                n_ctrl_p,
+                n_ctrl_n,
+                ..
+            } => {
+                let sp = self.node_map[n_sig_p];
+                let sn = self.node_map[n_sig_n];
+                let cp = self.node_map[n_ctrl_p];
+                let cn = self.node_map[n_ctrl_n];
+
+                let node_indices = vec![sp, sn, cp, cn];
+
+                if node_indices.iter().all(|&idx| idx == 0) {
+                    return Err(MnaError::TopologyError(format!(
+                        "VCA '{}' has all terminals grounded",
+                        name
+                    )));
+                }
+
+                let start_idx = self.total_dimension;
+                self.total_dimension += 2; // 2D: I_signal(V_sig, V_ctrl) + I_control(=0)
+
+                self.nonlinear_devices.push(NonlinearDeviceInfo {
+                    name: name.clone(),
+                    device_type: NonlinearDeviceType::Vca,
+                    dimension: 2,
+                    start_idx,
+                    nodes: vec![
+                        n_sig_p.clone(),
+                        n_sig_n.clone(),
+                        n_ctrl_p.clone(),
+                        n_ctrl_n.clone(),
+                    ],
+                    node_indices,
+                });
+
+                self.vcas.push(VcaInfo {
+                    name: name.clone(),
+                    n_sig_p_idx: sp,
+                    n_sig_n_idx: sn,
+                    n_ctrl_p_idx: cp,
+                    n_ctrl_n_idx: cn,
+                    vscale: 0.00528, // default, resolved from model later
+                    g0: 1.0,
                 });
             }
             Element::SubcktInstance { name, .. } => {
@@ -3982,5 +4152,121 @@ R2 emit 0 100
             off_diag_count, 6,
             "Expected 6 off-diagonal C entries (1 diode junction + 2 BJT junctions), got {off_diag_count}"
         );
+    }
+
+    // ===== VCA MNA tests =====
+
+    #[test]
+    fn test_mna_vca_basic() {
+        let spice = r#"VCA Test
+R1 sig_in 0 1k
+R2 sig_out 0 1k
+R3 ctrl 0 100k
+Y1 sig_in sig_out ctrl 0 vca1
+.model vca1 VCA(VSCALE=0.00528 G0=1.0)
+"#;
+        let netlist = Netlist::parse(spice).unwrap();
+        let mna = MnaSystem::from_netlist(&netlist).unwrap();
+
+        assert_eq!(mna.m, 2, "VCA should add M=2 (signal + control dimensions)");
+        assert_eq!(mna.num_devices, 1, "Should have 1 nonlinear device");
+        assert_eq!(mna.vcas.len(), 1, "Should have 1 VCA");
+        assert_eq!(
+            mna.nonlinear_devices[0].device_type,
+            NonlinearDeviceType::Vca
+        );
+        assert_eq!(mna.nonlinear_devices[0].dimension, 2);
+        assert_eq!(mna.nonlinear_devices[0].start_idx, 0);
+
+        // Check VCA model parameters resolved
+        assert!((mna.vcas[0].vscale - 0.00528).abs() < 1e-10);
+        assert!((mna.vcas[0].g0 - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_mna_vca_nv_stamping() {
+        // VCA with all terminals non-ground
+        let spice = r#"VCA N_v Test
+R1 sp 0 1k
+R2 sn 0 1k
+R3 cp 0 100k
+R4 cn 0 100k
+Y1 sp sn cp cn vca1
+.model vca1 VCA(VSCALE=0.00528 G0=1.0)
+"#;
+        let netlist = Netlist::parse(spice).unwrap();
+        let mna = MnaSystem::from_netlist(&netlist).unwrap();
+
+        let sp_idx = *mna.node_map.get("sp").unwrap();
+        let sn_idx = *mna.node_map.get("sn").unwrap();
+        let cp_idx = *mna.node_map.get("cp").unwrap();
+        let cn_idx = *mna.node_map.get("cn").unwrap();
+
+        // N_v row 0 (V_signal): +1 at sig+, -1 at sig-
+        assert_eq!(mna.n_v[0][sp_idx - 1], 1.0, "N_v[0][sig+] should be +1");
+        assert_eq!(mna.n_v[0][sn_idx - 1], -1.0, "N_v[0][sig-] should be -1");
+
+        // N_v row 1 (V_control): +1 at ctrl+, -1 at ctrl-
+        assert_eq!(mna.n_v[1][cp_idx - 1], 1.0, "N_v[1][ctrl+] should be +1");
+        assert_eq!(mna.n_v[1][cn_idx - 1], -1.0, "N_v[1][ctrl-] should be -1");
+
+        // Verify no cross-contamination: signal row has no ctrl nodes
+        assert_eq!(mna.n_v[0][cp_idx - 1], 0.0, "N_v[0][ctrl+] should be 0");
+        assert_eq!(mna.n_v[0][cn_idx - 1], 0.0, "N_v[0][ctrl-] should be 0");
+        // Control row has no signal nodes
+        assert_eq!(mna.n_v[1][sp_idx - 1], 0.0, "N_v[1][sig+] should be 0");
+        assert_eq!(mna.n_v[1][sn_idx - 1], 0.0, "N_v[1][sig-] should be 0");
+    }
+
+    #[test]
+    fn test_mna_vca_ni_stamping() {
+        // VCA: signal current at sig+/sig-, no control current
+        let spice = r#"VCA N_i Test
+R1 sp 0 1k
+R2 sn 0 1k
+R3 cp 0 100k
+R4 cn 0 100k
+Y1 sp sn cp cn vca1
+.model vca1 VCA(VSCALE=0.00528 G0=1.0)
+"#;
+        let netlist = Netlist::parse(spice).unwrap();
+        let mna = MnaSystem::from_netlist(&netlist).unwrap();
+
+        let sp_idx = *mna.node_map.get("sp").unwrap();
+        let sn_idx = *mna.node_map.get("sn").unwrap();
+        let cp_idx = *mna.node_map.get("cp").unwrap();
+        let cn_idx = *mna.node_map.get("cn").unwrap();
+
+        // N_i col 0 (I_signal): -1 at sig+ (extracted), +1 at sig- (injected)
+        assert_eq!(
+            mna.n_i[sp_idx - 1][0],
+            -1.0,
+            "N_i[sig+][0] should be -1 (current extracted)"
+        );
+        assert_eq!(
+            mna.n_i[sn_idx - 1][0],
+            1.0,
+            "N_i[sig-][0] should be +1 (current injected)"
+        );
+
+        // N_i col 1 (I_control): NO stamping — control draws no current
+        assert_eq!(
+            mna.n_i[cp_idx - 1][1],
+            0.0,
+            "N_i[ctrl+][1] should be 0 (no control current)"
+        );
+        assert_eq!(
+            mna.n_i[cn_idx - 1][1],
+            0.0,
+            "N_i[ctrl-][1] should be 0 (no control current)"
+        );
+
+        // Also verify no signal current in control nodes
+        assert_eq!(mna.n_i[cp_idx - 1][0], 0.0, "N_i[ctrl+][0] should be 0");
+        assert_eq!(mna.n_i[cn_idx - 1][0], 0.0, "N_i[ctrl-][0] should be 0");
+
+        // No control current in signal nodes either (col 1)
+        assert_eq!(mna.n_i[sp_idx - 1][1], 0.0, "N_i[sig+][1] should be 0");
+        assert_eq!(mna.n_i[sn_idx - 1][1], 0.0, "N_i[sig-][1] should be 0");
     }
 }

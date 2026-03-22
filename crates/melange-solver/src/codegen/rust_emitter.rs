@@ -242,6 +242,19 @@ fn device_param_template_data(ir: &CircuitIR) -> Vec<DeviceParamTemplateData> {
                         },
                     ],
                 ),
+                DeviceParams::Vca(_) => (
+                    "Vca".to_string(),
+                    vec![
+                        DeviceParamEntry {
+                            field_suffix: "vscale".into(),
+                            const_suffix: "VSCALE".into(),
+                        },
+                        DeviceParamEntry {
+                            field_suffix: "g0".into(),
+                            const_suffix: "G0".into(),
+                        },
+                    ],
+                ),
             };
             DeviceParamTemplateData {
                 dev_num,
@@ -472,6 +485,7 @@ const TMPL_DEVICE_BJT: &str = include_str!("../../templates/rust/device_bjt.rs.t
 const TMPL_DEVICE_JFET: &str = include_str!("../../templates/rust/device_jfet.rs.tera");
 const TMPL_DEVICE_MOSFET: &str = include_str!("../../templates/rust/device_mosfet.rs.tera");
 const TMPL_DEVICE_TUBE: &str = include_str!("../../templates/rust/device_tube.rs.tera");
+const TMPL_DEVICE_VCA: &str = include_str!("../../templates/rust/device_vca.rs.tera");
 const TMPL_BUILD_RHS: &str = include_str!("../../templates/rust/build_rhs.rs.tera");
 const TMPL_MAT_VEC_MUL_S: &str = include_str!("../../templates/rust/mat_vec_mul_s.rs.tera");
 const TMPL_EXTRACT_VOLTAGES: &str = include_str!("../../templates/rust/extract_voltages.rs.tera");
@@ -497,6 +511,7 @@ impl RustEmitter {
             ("device_jfet", TMPL_DEVICE_JFET),
             ("device_mosfet", TMPL_DEVICE_MOSFET),
             ("device_tube", TMPL_DEVICE_TUBE),
+            ("device_vca", TMPL_DEVICE_VCA),
             ("build_rhs", TMPL_BUILD_RHS),
             ("mat_vec_mul_s", TMPL_MAT_VEC_MUL_S),
             ("extract_voltages", TMPL_EXTRACT_VOLTAGES),
@@ -1035,6 +1050,7 @@ impl RustEmitter {
         let mut has_jfet = false;
         let mut has_mosfet = false;
         let mut has_tube = false;
+        let mut has_vca = false;
         let mut has_bjt_self_heating = false;
 
         for (dev_num, slot) in ir.device_slots.iter().enumerate() {
@@ -1163,6 +1179,12 @@ impl RustEmitter {
                     emit_device_const(&mut code, dev_num, "VCRIT", vcrit);
                     code.push('\n');
                 }
+                DeviceParams::Vca(vp) => {
+                    has_vca = true;
+                    emit_device_const(&mut code, dev_num, "VSCALE", vp.vscale);
+                    emit_device_const(&mut code, dev_num, "G0", vp.g0);
+                    code.push('\n');
+                }
             }
         }
 
@@ -1173,12 +1195,12 @@ impl RustEmitter {
         }
 
         // Fast exp() approximation (needed by all nonlinear device models)
-        if has_diode || has_bjt || has_jfet || has_mosfet || has_tube {
+        if has_diode || has_bjt || has_jfet || has_mosfet || has_tube || has_vca {
             code.push_str(&Self::emit_fast_exp());
         }
 
         // SPICE voltage limiting functions (needed by all nonlinear devices)
-        if has_diode || has_bjt || has_jfet || has_mosfet || has_tube {
+        if has_diode || has_bjt || has_jfet || has_mosfet || has_tube || has_vca {
             code.push_str(&self.render("spice_limiting", &Context::new())?);
         }
 
@@ -1196,6 +1218,9 @@ impl RustEmitter {
         }
         if has_tube {
             code.push_str(&self.render("device_tube", &Context::new())?);
+        }
+        if has_vca {
+            code.push_str(&self.render("device_vca", &Context::new())?);
         }
 
         Ok(code)
@@ -2871,6 +2896,10 @@ fn emit_nr_limit_and_converge(
                         "{indent}    let v_lim = fetlim(v_d{i} + dv{i}, v_d{i}, 0.0);\n"
                     ));
                 }
+                (DeviceType::Vca, _) => {
+                    // VCA: no junction limiting needed — fast_exp already clamps
+                    code.push_str(&format!("{indent}    let v_lim = v_d{i} + dv{i};\n"));
+                }
             }
             code.push_str(&format!(
                 "{indent}    let ratio = ((v_lim - v_d{i}) / dv{i}).max(0.01);\n"
@@ -2987,6 +3016,7 @@ fn emit_schur_nr_limit_and_converge(
                     "pnjlim(v_trial{i}, v_d{i}, state.device_{dev_num}_vgk_onset / 3.0, DEVICE_{dev_num}_VCRIT)"
                 ),
                 (DeviceType::Tube, _) => format!("fetlim(v_trial{i}, v_d{i}, 0.0)"),
+                (DeviceType::Vca, _) => format!("v_trial{i}"), // No limiting needed
             };
             code.push_str(&format!("{indent}let v_lim{i} = {lim_expr};\n"));
         }
@@ -3376,6 +3406,35 @@ impl RustEmitter {
                         ));
                         code.push_str(&format!(
                             "        let jdev_{}_{} = tube{}_jac[3];\n",
+                            s1, s1, d
+                        ));
+                    }
+                    DeviceType::Vca => {
+                        let s = slot.start_idx;
+                        let s1 = s + 1;
+                        let d = dev_num;
+                        // VCA dim 0 = V_sig, dim 1 = V_ctrl (direct mapping, no swap)
+                        code.push_str(&format!(
+                            "        let i_dev{s} = vca_current(v_d{s}, v_d{s1}, state.device_{d}_g0, state.device_{d}_vscale);\n"
+                        ));
+                        code.push_str(&format!("        let i_dev{s1} = 0.0;\n"));
+                        code.push_str(&format!(
+                            "        let vca{d}_jac = vca_jacobian(v_d{s}, v_d{s1}, state.device_{d}_g0, state.device_{d}_vscale);\n"
+                        ));
+                        code.push_str(&format!(
+                            "        let jdev_{}_{} = vca{}_jac[0];\n",
+                            s, s, d
+                        ));
+                        code.push_str(&format!(
+                            "        let jdev_{}_{} = vca{}_jac[1];\n",
+                            s, s1, d
+                        ));
+                        code.push_str(&format!(
+                            "        let jdev_{}_{} = vca{}_jac[2];\n",
+                            s1, s, d
+                        ));
+                        code.push_str(&format!(
+                            "        let jdev_{}_{} = vca{}_jac[3];\n",
                             s1, s1, d
                         ));
                     }
@@ -5586,6 +5645,18 @@ impl RustEmitter {
                      {indent}let jdev_{s1}_{s1} = tube{d}_jac[3];\n"
                 ));
             }
+            (DeviceType::Vca, DeviceParams::Vca(_vp)) => {
+                let s1 = s + 1;
+                code.push_str(&format!(
+                    "{indent}let i_dev{s} = vca_current(v_d{s}, v_d{s1}, state.device_{d}_g0, state.device_{d}_vscale);\n\
+                     {indent}let i_dev{s1} = 0.0;\n\
+                     {indent}let vca{d}_jac = vca_jacobian(v_d{s}, v_d{s1}, state.device_{d}_g0, state.device_{d}_vscale);\n\
+                     {indent}let jdev_{s}_{s} = vca{d}_jac[0];\n\
+                     {indent}let jdev_{s}_{s1} = vca{d}_jac[1];\n\
+                     {indent}let jdev_{s1}_{s} = vca{d}_jac[2];\n\
+                     {indent}let jdev_{s1}_{s1} = vca{d}_jac[3];\n"
+                ));
+            }
             _ => {}
         }
         Ok(())
@@ -5650,6 +5721,10 @@ impl RustEmitter {
                         code.push_str(&format!(
                             "{indent}    let v_lim = fetlim(v_d{i} + dv{i}, v_d{i}, 0.0);\n"
                         ));
+                    }
+                    (super::ir::DeviceType::Vca, _) => {
+                        // VCA: no junction limiting needed — fast_exp already clamps
+                        code.push_str(&format!("{indent}    let v_lim = v_d{i} + dv{i};\n"));
                     }
                 }
                 code.push_str(&format!(
@@ -6654,6 +6729,25 @@ impl RustEmitter {
                         ));
                     }
                 }
+                (DeviceType::Vca, DeviceParams::Vca(_vp)) => {
+                    let s1 = s + 1;
+                    let jd_01 = s * m + s1;
+                    let jd_10 = s1 * m + s;
+                    let jd_11 = s1 * m + s1;
+                    code.push_str(&format!(
+                        "{indent}{{ // VCA {dev_num}\n\
+                         {indent}    let v_sig = v_nl[{s}];\n\
+                         {indent}    let v_ctrl = v_nl[{s1}];\n\
+                         {indent}    i_nl[{s}] = vca_current(v_sig, v_ctrl, state.device_{dev_num}_g0, state.device_{dev_num}_vscale);\n\
+                         {indent}    i_nl[{s1}] = 0.0;\n\
+                         {indent}    let jac = vca_jacobian(v_sig, v_ctrl, state.device_{dev_num}_g0, state.device_{dev_num}_vscale);\n\
+                         {indent}    j_dev[{jd_ss}] = jac[0];\n\
+                         {indent}    j_dev[{jd_01}] = jac[1];\n\
+                         {indent}    j_dev[{jd_10}] = jac[2];\n\
+                         {indent}    j_dev[{jd_11}] = jac[3];\n\
+                         {indent}}}\n"
+                    ));
+                }
                 _ => {} // Mismatched type/params — skip
             }
         }
@@ -6752,6 +6846,13 @@ impl RustEmitter {
                         ));
                     }
                 }
+                (DeviceType::Vca, DeviceParams::Vca(_vp)) => {
+                    let s1 = s + 1;
+                    code.push_str(&format!(
+                        "{indent}i_nl[{s}] = vca_current(v_nl_final[{s}], v_nl_final[{s1}], state.device_{dev_num}_g0, state.device_{dev_num}_vscale);\n\
+                         {indent}i_nl[{s1}] = 0.0;\n"
+                    ));
+                }
                 _ => {}
             }
         }
@@ -6828,6 +6929,10 @@ impl RustEmitter {
                         code.push_str(&format!(
                             "{indent}        let v_lim = fetlim(v_nl_proposed, v_nl_current, 0.0);\n"
                         ));
+                    }
+                    (DeviceType::Vca, _) => {
+                        // VCA: no junction limiting needed — fast_exp already clamps
+                        code.push_str(&format!("{indent}        let v_lim = v_nl_proposed;\n"));
                     }
                 }
 

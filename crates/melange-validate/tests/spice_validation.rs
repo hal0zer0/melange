@@ -481,6 +481,11 @@ fn build_devices_from_netlist(
                 let tube = find_tube_device(netlist, &dev_info.name);
                 devices.push(DeviceEntry::new_tube(tube, dev_info.start_idx));
             }
+            melange_solver::mna::NonlinearDeviceType::Vca => {
+                // VCA not used in SPICE validation tests yet
+                let vca = melange_devices::Vca::default();
+                devices.push(DeviceEntry::new_vca(vca, dev_info.start_idx));
+            }
         }
     }
 

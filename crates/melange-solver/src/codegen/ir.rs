@@ -295,7 +295,7 @@ pub struct TransformerGroupIR {
 // Re-export device types from the shared module (always compiled, no tera dependency).
 pub use crate::device_types::{
     BjtParams, DeviceParams, DeviceSlot, DeviceType, DiodeParams, JfetParams, MosfetParams,
-    TubeParams,
+    TubeParams, VcaParams,
 };
 
 /// Sparsity pattern for a single matrix.
@@ -1634,6 +1634,18 @@ impl CircuitIR {
                     dim_offset += 2;
                     nl_dev_idx += 1;
                 }
+                Element::Vca { model, .. } => {
+                    let params = Self::resolve_vca_params(netlist, model)?;
+                    slots.push(DeviceSlot {
+                        device_type: DeviceType::Vca,
+                        start_idx: dim_offset,
+                        dimension: 2,
+                        params: DeviceParams::Vca(params),
+                        has_internal_mna_nodes: false,
+                    });
+                    dim_offset += 2;
+                    nl_dev_idx += 1;
+                }
                 _ => {}
             }
         }
@@ -2255,6 +2267,21 @@ impl CircuitIR {
             ccp,
             rgi,
         })
+    }
+
+    /// Resolve VCA model parameters from the netlist, with validation.
+    ///
+    /// 2D current-mode exponential gain: I_sig = G0 * exp(-Vc / VSCALE) * V_sig
+    fn resolve_vca_params(netlist: &Netlist, model: &str) -> Result<VcaParams, CodegenError> {
+        let vscale = Self::lookup_model_param(netlist, model, "VSCALE").unwrap_or(0.00528);
+        let g0 = Self::lookup_model_param(netlist, model, "G0").unwrap_or(1.0);
+
+        validate_positive_finite(vscale, "VCA model VSCALE")?;
+        validate_positive_finite(g0, "VCA model G0")?;
+
+        Self::warn_unrecognized_params(netlist, model, &["VSCALE", "G0"]);
+
+        Ok(VcaParams { vscale, g0 })
     }
 
     /// Warn on unrecognized .model parameters (typo protection).

@@ -1730,6 +1730,27 @@ fn simulate_circuit_source(
                     KorenTriode::with_all_params(mu, ex, kg1, kp, kvb, ig_max, vgk_onset, lambda);
                 devices.push(DeviceEntry::new_tube(tube, dev_info.start_idx));
             }
+            melange_solver::mna::NonlinearDeviceType::Vca => {
+                let model_name = netlist
+                    .elements
+                    .iter()
+                    .find_map(|e| {
+                        if let melange_solver::parser::Element::Vca { name, model, .. } = e {
+                            if name.eq_ignore_ascii_case(&dev_info.name) {
+                                Some(model.as_str())
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or("");
+                let vscale = find_model_param(model_name, "VSCALE").unwrap_or(0.00528);
+                let g0 = find_model_param(model_name, "G0").unwrap_or(1.0);
+                let vca = melange_devices::Vca::new(vscale, g0);
+                devices.push(DeviceEntry::new_vca(vca, dev_info.start_idx));
+            }
             melange_solver::mna::NonlinearDeviceType::BjtForwardActive => {
                 // BjtForwardActive uses the same runtime 2D model as Bjt
                 let model_name = netlist
@@ -2685,6 +2706,27 @@ fn build_device_entries(
                     KorenTriode::with_all_params(mu, ex, kg1, kp, kvb, ig_max, vgk_onset, lambda);
                 devices.push(DeviceEntry::new_tube(tube, dev_info.start_idx));
             }
+            melange_solver::mna::NonlinearDeviceType::Vca => {
+                let model_name = netlist
+                    .elements
+                    .iter()
+                    .find_map(|e| {
+                        if let melange_solver::parser::Element::Vca { name, model, .. } = e {
+                            if name.eq_ignore_ascii_case(&dev_info.name) {
+                                Some(model.as_str())
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or("");
+                let vscale = find_model_param(model_name, "VSCALE").unwrap_or(0.00528);
+                let g0 = find_model_param(model_name, "G0").unwrap_or(1.0);
+                let vca = melange_devices::Vca::new(vscale, g0);
+                devices.push(DeviceEntry::new_vca(vca, dev_info.start_idx));
+            }
             melange_solver::mna::NonlinearDeviceType::BjtForwardActive => {
                 // BjtForwardActive uses the same runtime 2D model as Bjt
                 let model_name = netlist
@@ -2981,6 +3023,32 @@ fn build_device_slots(
                         ccp: find_param(&model_name, "CCP").unwrap_or(0.0),
                         rgi: find_param(&model_name, "RGI").unwrap_or(0.0),
                     }),
+                    has_internal_mna_nodes: false,
+                });
+            }
+            melange_solver::mna::NonlinearDeviceType::Vca => {
+                let model_name = netlist
+                    .elements
+                    .iter()
+                    .find_map(|e| {
+                        if let melange_solver::parser::Element::Vca { name, model, .. } = e {
+                            if name.eq_ignore_ascii_case(&dev_info.name) {
+                                Some(model.clone())
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_default();
+                let vscale = find_param(&model_name, "VSCALE").unwrap_or(0.00528);
+                let g0 = find_param(&model_name, "G0").unwrap_or(1.0);
+                slots.push(DeviceSlot {
+                    device_type: DeviceType::Vca,
+                    start_idx: dev_info.start_idx,
+                    dimension: 2,
+                    params: DeviceParams::Vca(melange_solver::VcaParams { vscale, g0 }),
                     has_internal_mna_nodes: false,
                 });
             }
