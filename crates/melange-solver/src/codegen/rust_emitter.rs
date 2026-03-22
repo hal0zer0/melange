@@ -3025,12 +3025,15 @@ fn emit_schur_nr_limit_and_converge(
     }
 
     // Compute global damping: ratio of limited voltage change to full voltage change
-    // Use the minimum ratio across all dimensions (most conservative)
+    // Use the minimum ratio across all dimensions (most conservative).
+    // When dv_lim and dv_full have opposite signs (limiter reversed direction,
+    // common with positive K diagonal), clamp to 0 — don't take the step.
     code.push_str(&format!("{indent}let mut global_alpha = 1.0_f64;\n"));
     for i in 0..dim {
         code.push_str(&format!(
             "{indent}{{ let dv_full = v_trial{i} - v_d{i}; let dv_lim = v_lim{i} - v_d{i}; \
-             if dv_full.abs() > 1e-15 {{ let r = (dv_lim / dv_full).clamp(0.01, 1.0); \
+             if dv_full.abs() > 1e-15 {{ let r = if dv_full * dv_lim < 0.0 {{ 0.0 }} \
+             else {{ (dv_lim / dv_full).clamp(0.0, 1.0) }}; \
              if r < global_alpha {{ global_alpha = r; any_limited = true; }} }} }}\n"
         ));
     }
