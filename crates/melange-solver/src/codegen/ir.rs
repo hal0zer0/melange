@@ -2276,6 +2276,7 @@ impl CircuitIR {
         let vscale = Self::lookup_model_param(netlist, model, "VSCALE").unwrap_or(0.05298);
         let g0 = Self::lookup_model_param(netlist, model, "G0").unwrap_or(1.0);
         let thd = Self::lookup_model_param(netlist, model, "THD").unwrap_or(0.0);
+        let noise_floor = Self::lookup_model_param(netlist, model, "NOISE_FLOOR").unwrap_or(0.0);
 
         validate_positive_finite(vscale, "VCA model VSCALE")?;
         validate_positive_finite(g0, "VCA model G0")?;
@@ -2284,10 +2285,20 @@ impl CircuitIR {
                 "VCA model THD must be non-negative and finite, got {thd}"
             )));
         }
+        if noise_floor < 0.0 || !noise_floor.is_finite() {
+            return Err(CodegenError::InvalidConfig(format!(
+                "VCA model NOISE_FLOOR must be non-negative and finite, got {noise_floor}"
+            )));
+        }
 
-        Self::warn_unrecognized_params(netlist, model, &["VSCALE", "G0", "THD"]);
+        Self::warn_unrecognized_params(netlist, model, &["VSCALE", "G0", "THD", "NOISE_FLOOR"]);
 
-        Ok(VcaParams { vscale, g0, thd })
+        Ok(VcaParams {
+            vscale,
+            g0,
+            thd,
+            noise_floor,
+        })
     }
 
     /// Warn on unrecognized .model parameters (typo protection).

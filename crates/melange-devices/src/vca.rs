@@ -20,6 +20,11 @@ pub struct Vca {
     /// THD coefficient for gain-dependent cubic distortion.
     /// 0.0 = ideal (default), typical THAT 2180: 0.001
     pub thd: f64,
+    /// Noise RMS voltage referred to VCA output, in volts.
+    /// Scales as 1/sqrt(gain) — noise rises with gain reduction.
+    /// THAT 2180A typical: ~3e-6 at unity, rising to ~100e-6 at 40dB GR.
+    /// Default: 0.0 (disabled).
+    pub noise_floor: f64,
 }
 
 impl Default for Vca {
@@ -28,6 +33,7 @@ impl Default for Vca {
             vscale: 0.05298, // THAT 2180A: 6.1 mV/dB → 6.1e-3 / (ln(10)/20) V/neper
             g0: 1.0,
             thd: 0.0,
+            noise_floor: 0.0,
         }
     }
 }
@@ -38,11 +44,17 @@ impl Vca {
             vscale,
             g0,
             thd: 0.0,
+            noise_floor: 0.0,
         }
     }
 
     pub fn new_with_thd(vscale: f64, g0: f64, thd: f64) -> Self {
-        Self { vscale, g0, thd }
+        Self {
+            vscale,
+            g0,
+            thd,
+            noise_floor: 0.0,
+        }
     }
 
     /// Compute signal current: I = G0 * exp(-Vc / Vscale) * V_sig

@@ -356,6 +356,11 @@ pub struct VcaParams {
     /// THD coefficient for gain-dependent cubic distortion (0.0 = ideal, default)
     #[serde(default)]
     pub thd: f64,
+    /// Noise floor RMS voltage [V] at unity gain (0.0 = disabled, default).
+    /// Noise rises with gain reduction as 1/sqrt(gain).
+    /// THAT 2180A typical: 3e-6.
+    #[serde(default)]
+    pub noise_floor: f64,
 }
 
 /// Nonlinear device type tag.

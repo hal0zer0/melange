@@ -289,6 +289,9 @@ pub struct OpampInfo {
     pub aol: f64,
     /// Output resistance in ohms (default 1)
     pub r_out: f64,
+    /// Output saturation voltage [V] (default: infinity = no saturation).
+    /// Typical NE5534: 13.0. When finite, output is clamped to ±VSAT.
+    pub vsat: f64,
 }
 
 /// VCA (Voltage-Controlled Amplifier) info for MNA system.
@@ -1825,6 +1828,7 @@ impl MnaBuilder {
                         match key.to_ascii_uppercase().as_str() {
                             "AOL" => oa.aol = *val,
                             "ROUT" => oa.r_out = *val,
+                            "VSAT" => oa.vsat = *val,
                             _ => log::warn!(
                                 ".model {}: unrecognized parameter '{}' (ignored)",
                                 m.name,
@@ -3289,6 +3293,7 @@ impl MnaBuilder {
                     n_out_idx: no_idx,
                     aol: 200_000.0,
                     r_out: 1.0,
+                    vsat: f64::INFINITY,
                 });
             }
             Element::Vcvs {

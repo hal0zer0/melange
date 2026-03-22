@@ -1184,6 +1184,7 @@ impl RustEmitter {
                     emit_device_const(&mut code, dev_num, "VSCALE", vp.vscale);
                     emit_device_const(&mut code, dev_num, "G0", vp.g0);
                     emit_device_const(&mut code, dev_num, "THD", vp.thd);
+                    emit_device_const(&mut code, dev_num, "NOISE_FLOOR", vp.noise_floor);
                     code.push('\n');
                 }
             }
