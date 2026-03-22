@@ -320,15 +320,28 @@ impl DkKernel {
         // Then: N_v * (S * N_i) (M x M)
         let k_2d = mat_mul(&mna.n_v, &s_ni);
 
-        // Validate K diagonal: all K[i][i] must be negative for stable NR feedback.
+        // Validate K diagonal: K[i][i] must be negative for stable NR feedback.
         // A non-negative diagonal indicates incorrect circuit topology or wiring.
-        // Only check when M > 0 (nonlinear devices present); for M=0, K is empty.
+        // Exception: dimensions where N_i column is all zeros (e.g., VCA control port,
+        // MOSFET insulated gate) have K[i][i] = 0 by construction — no current feedback.
+        // These dimensions are valid; the NR system has an identity row there.
         for (i, row) in k_2d.iter().enumerate() {
             if row[i] >= 0.0 {
-                return Err(DkError::InvalidKDiagonal {
-                    index: i,
-                    value: row[i],
-                });
+                // Check if this dimension has zero N_i column (no current injection)
+                let ni_col_all_zero = mna.n_i.iter().all(|ni_row| ni_row[i].abs() < 1e-30);
+                if ni_col_all_zero {
+                    log::debug!(
+                        "K[{}][{}] = {} (zero N_i column — no current feedback, OK)",
+                        i,
+                        i,
+                        row[i]
+                    );
+                } else {
+                    return Err(DkError::InvalidKDiagonal {
+                        index: i,
+                        value: row[i],
+                    });
+                }
             }
         }
 

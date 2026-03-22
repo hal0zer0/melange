@@ -265,6 +265,19 @@ fn evaluate_devices_inner(
                 j_dev[(s + 1) * m + s] = tube.grid_current_jacobian(vgk); // dIg/dVgk
                 j_dev[(s + 1) * m + (s + 1)] = 0.0; // dIg/dVpk = 0
             }
+            (DeviceType::Vca, DeviceParams::Vca(vp)) => {
+                // 2D VCA: dim 0 = V_signal (at start_idx), dim 1 = V_control (at start_idx+1)
+                let v_sig = v_nl[s];
+                let v_ctrl = v_nl[s + 1];
+                let vca = melange_devices::Vca::new(vp.vscale, vp.g0);
+                i_nl[s] = vca.current(v_sig, v_ctrl);
+                i_nl[s + 1] = 0.0; // Control port draws no current
+                let jac = vca.jacobian(v_sig, v_ctrl);
+                j_dev[s * m + s] = jac[0]; // dI_sig/dV_sig
+                j_dev[s * m + (s + 1)] = jac[1]; // dI_sig/dV_ctrl
+                j_dev[(s + 1) * m + s] = 0.0; // dI_ctrl/dV_sig = 0
+                j_dev[(s + 1) * m + (s + 1)] = 0.0; // dI_ctrl/dV_ctrl = 0
+            }
             _ => {
                 // Mismatched type/params — warn instead of silently skipping
                 log::warn!(
