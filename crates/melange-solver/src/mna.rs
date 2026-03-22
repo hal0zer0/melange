@@ -294,9 +294,12 @@ pub struct OpampInfo {
     pub vsat: f64,
     /// Gain-bandwidth product [Hz] (default: infinity = no dominant pole).
     /// When finite, a dominant pole capacitor C = AOL / (2π × GBW × ROUT)
-    /// is stamped at the output node, modeling the op-amp's frequency rolloff.
+    /// is stamped at an internal Boyle gain node.
     /// Typical NE5534: 10e6. TL074: 3e6.
     pub gbw: f64,
+    /// Boyle internal gain node index (1-indexed, 0 = none).
+    /// Set during MNA stamping when GBW is finite.
+    pub n_internal_idx: usize,
 }
 
 /// VCA (Voltage-Controlled Amplifier) info for MNA system.
@@ -2619,7 +2622,7 @@ impl MnaBuilder {
         // The internal node keeps the dominant pole cap from loading the feedback network.
         let opamp_int_base = n_base + num_vs + num_vcvs + num_ideal_xfmr;
         let mut opamp_int_idx = 0;
-        for oa in &mna.opamps {
+        for oa in &mut mna.opamps {
             let gm = oa.aol / oa.r_out;
             let go = 1.0 / oa.r_out;
             let out = oa.n_out_idx;
@@ -2637,6 +2640,7 @@ impl MnaBuilder {
                 // Boyle macromodel: VCCS drives internal node, ROUT connects to output
                 let int = opamp_int_base + opamp_int_idx;
                 opamp_int_idx += 1;
+                oa.n_internal_idx = int + 1; // Store as 1-indexed (0 = none)
 
                 // VCCS: Gm*(V+ - V-) into internal node
                 if np > 0 {
@@ -3352,6 +3356,7 @@ impl MnaBuilder {
                     r_out: 1.0,
                     vsat: f64::INFINITY,
                     gbw: f64::INFINITY,
+                    n_internal_idx: 0,
                 });
             }
             Element::Vcvs {

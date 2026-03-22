@@ -200,6 +200,10 @@ pub struct Matrices {
 pub struct OpampIR {
     /// Output node index (0-indexed, in the N-dimensional system)
     pub n_out_idx: usize,
+    /// Boyle internal gain node index (0-indexed), if GBW is finite.
+    /// This node also needs VSAT clamping to prevent divergence.
+    #[serde(default)]
+    pub n_internal_idx: Option<usize>,
     /// Output saturation voltage (INFINITY = no saturation)
     pub vsat: f64,
 }
@@ -1154,7 +1158,12 @@ impl CircuitIR {
                 .iter()
                 .filter(|oa| oa.vsat.is_finite() && oa.n_out_idx > 0)
                 .map(|oa| OpampIR {
-                    n_out_idx: oa.n_out_idx - 1, // Convert from 1-indexed to 0-indexed
+                    n_out_idx: oa.n_out_idx - 1,
+                    n_internal_idx: if oa.n_internal_idx > 0 {
+                        Some(oa.n_internal_idx - 1)
+                    } else {
+                        None
+                    },
                     vsat: oa.vsat,
                 })
                 .collect(),
@@ -1431,12 +1440,18 @@ impl CircuitIR {
         // Pad DC OP to n_nodal (inductor branch currents = 0)
         let mut dc_operating_point = dc_result.v_node.clone();
         dc_operating_point.resize(n, 0.0);
-        // Clamp op-amp nodes to VSAT (DC OP can converge beyond rail limits)
+        // Clamp op-amp output + internal Boyle nodes to VSAT
         for oa in &mna.opamps {
             if oa.vsat.is_finite() && oa.n_out_idx > 0 {
                 let o = oa.n_out_idx - 1;
                 if o < dc_operating_point.len() {
                     dc_operating_point[o] = dc_operating_point[o].clamp(-oa.vsat, oa.vsat);
+                }
+                if oa.n_internal_idx > 0 {
+                    let int = oa.n_internal_idx - 1;
+                    if int < dc_operating_point.len() {
+                        dc_operating_point[int] = dc_operating_point[int].clamp(-oa.vsat, oa.vsat);
+                    }
                 }
             }
         }
@@ -1513,7 +1528,12 @@ impl CircuitIR {
                 .iter()
                 .filter(|oa| oa.vsat.is_finite() && oa.n_out_idx > 0)
                 .map(|oa| OpampIR {
-                    n_out_idx: oa.n_out_idx - 1, // Convert from 1-indexed to 0-indexed
+                    n_out_idx: oa.n_out_idx - 1,
+                    n_internal_idx: if oa.n_internal_idx > 0 {
+                        Some(oa.n_internal_idx - 1)
+                    } else {
+                        None
+                    },
                     vsat: oa.vsat,
                 })
                 .collect(),

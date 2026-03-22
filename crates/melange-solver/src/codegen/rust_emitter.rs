@@ -6014,7 +6014,7 @@ impl RustEmitter {
             code.push_str("        v = state.v_prev;\n");
             code.push_str("    }\n\n");
 
-            // Clamp op-amp outputs to VSAT (linear path)
+            // Clamp op-amp outputs and internal Boyle nodes to VSAT (linear path)
             if !ir.opamps.is_empty() {
                 code.push_str("    // Clamp op-amp outputs to VSAT\n");
                 for oa in &ir.opamps {
@@ -6024,6 +6024,14 @@ impl RustEmitter {
                         neg = -oa.vsat,
                         pos = oa.vsat,
                     ));
+                    if let Some(int_idx) = oa.n_internal_idx {
+                        code.push_str(&format!(
+                            "    v[{idx}] = v[{idx}].clamp({neg:.17e}, {pos:.17e});\n",
+                            idx = int_idx,
+                            neg = -oa.vsat,
+                            pos = oa.vsat,
+                        ));
+                    }
                 }
                 code.push('\n');
             }
@@ -6171,6 +6179,14 @@ impl RustEmitter {
                         neg = -oa.vsat,
                         pos = oa.vsat,
                     ));
+                    if let Some(int_idx) = oa.n_internal_idx {
+                        code.push_str(&format!(
+                            "        v_new[{idx}] = v_new[{idx}].clamp({neg:.17e}, {pos:.17e});\n",
+                            idx = int_idx,
+                            neg = -oa.vsat,
+                            pos = oa.vsat,
+                        ));
+                    }
                 }
                 code.push('\n');
             }
@@ -6370,6 +6386,12 @@ impl RustEmitter {
                         neg = -oa.vsat,
                         pos = oa.vsat,
                     ));
+                    if let Some(int_idx) = oa.n_internal_idx {
+                        code.push_str(&format!(
+                            "            v_new[{idx}] = v_new[{idx}].clamp({neg:.17e}, {pos:.17e});\n",
+                            idx = int_idx, neg = -oa.vsat, pos = oa.vsat,
+                        ));
+                    }
                 }
                 code.push('\n');
             }
