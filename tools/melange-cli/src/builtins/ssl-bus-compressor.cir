@@ -231,8 +231,10 @@ Cfb_integ  node_d  integ_inv  10P
 * Output: CV TO VCA'S (controls both audio DBX202 VCAs)
 * ============================================================
 Rmakeup_bias  vcc12  makeup_top  120K
-Rpot_mk_a  makeup_top  makeup_wiper  25K
-Rpot_mk_b  makeup_wiper  node_d  25K
+* Pot at minimum (wiper near node_d) for unity gain at rest
+* Turn CW to add makeup gain (compensate for compression)
+Rpot_mk_a  makeup_top  makeup_wiper  49900
+Rpot_mk_b  makeup_wiper  node_d  100
 Rmakeup_620k makeup_wiper  cv_sum_mk  620K
 U11  0  cv_sum_mk  cv_vca_pre  OA_TL072
 Rfb_makeup  cv_vca_pre  cv_sum_mk  100K
