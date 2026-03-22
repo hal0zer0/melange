@@ -2419,7 +2419,13 @@ impl MnaBuilder {
             .filter(|e| matches!(e.element_type, ElementType::Vcvs))
             .count();
         let num_ideal_xfmr = mna.ideal_transformers.len();
-        let n_aug = n_base + num_vs + num_vcvs + num_ideal_xfmr;
+        // Count op-amps with GBW (each gets an internal gain node)
+        let num_opamp_internal = mna
+            .opamps
+            .iter()
+            .filter(|oa| oa.gbw.is_finite() && oa.gbw > 0.0)
+            .count();
+        let n_aug = n_base + num_vs + num_vcvs + num_ideal_xfmr + num_opamp_internal;
         mna.n_aug = n_aug;
 
         // Expand G, C, N_v, N_i to n_aug dimensions (extra rows/cols are zero).
@@ -2603,17 +2609,62 @@ impl MnaBuilder {
             }
         }
 
-        // Stamp op-amps as VCCS into G matrix
+        // Stamp op-amps as VCCS into G matrix.
+        // When GBW is specified, use Boyle macromodel with internal gain node:
+        //   Gm*(V+ - V-) → [internal] --ROUT--> [output]
+        //                      |
+        //                    C_dom = AOL / (2π × GBW × ROUT)
+        //                      |
+        //                     GND
+        // The internal node keeps the dominant pole cap from loading the feedback network.
+        let opamp_int_base = n_base + num_vs + num_vcvs + num_ideal_xfmr;
+        let mut opamp_int_idx = 0;
         for oa in &mna.opamps {
-            let gm = oa.aol / oa.r_out; // Transconductance
-            let go = 1.0 / oa.r_out; // Output conductance
-
+            let gm = oa.aol / oa.r_out;
+            let go = 1.0 / oa.r_out;
             let out = oa.n_out_idx;
             let np = oa.n_plus_idx;
             let nm = oa.n_minus_idx;
 
-            if out > 0 {
-                let o = out - 1;
+            if out == 0 {
+                continue;
+            }
+            let o = out - 1;
+
+            let has_gbw = oa.gbw.is_finite() && oa.gbw > 0.0;
+
+            if has_gbw {
+                // Boyle macromodel: VCCS drives internal node, ROUT connects to output
+                let int = opamp_int_base + opamp_int_idx;
+                opamp_int_idx += 1;
+
+                // VCCS: Gm*(V+ - V-) into internal node
+                if np > 0 {
+                    mna.g[int][np - 1] += gm;
+                }
+                if nm > 0 {
+                    mna.g[int][nm - 1] -= gm;
+                }
+
+                // ROUT: resistor between internal and output
+                mna.g[int][int] += go;
+                mna.g[int][o] -= go;
+                mna.g[o][int] -= go;
+                mna.g[o][o] += go;
+
+                // Dominant pole cap at internal node
+                let c_dom = oa.aol / (2.0 * std::f64::consts::PI * oa.gbw * oa.r_out);
+                mna.c[int][int] += c_dom;
+
+                log::debug!(
+                    "Op-amp {} (Boyle): GBW={:.0}Hz, C_dom={:.3e}F, internal node={}",
+                    oa.name,
+                    oa.gbw,
+                    c_dom,
+                    int
+                );
+            } else {
+                // Simple VCCS (no GBW): direct stamp at output (original behavior)
                 if np > 0 {
                     mna.g[o][np - 1] += gm;
                 }
@@ -2621,23 +2672,6 @@ impl MnaBuilder {
                     mna.g[o][nm - 1] -= gm;
                 }
                 mna.g[o][o] += go;
-            }
-        }
-
-        // Stamp op-amp dominant pole capacitors (GBW-limited bandwidth)
-        // C_dom = AOL / (2π × GBW × ROUT) models the single-pole rolloff
-        for oa in &mna.opamps {
-            if oa.gbw.is_finite() && oa.gbw > 0.0 && oa.n_out_idx > 0 {
-                let c_dom = oa.aol / (2.0 * std::f64::consts::PI * oa.gbw * oa.r_out);
-                let o = oa.n_out_idx - 1;
-                mna.c[o][o] += c_dom;
-                log::debug!(
-                    "Op-amp {}: GBW={:.0}Hz, C_dominant={:.3e}F at node {}",
-                    oa.name,
-                    oa.gbw,
-                    c_dom,
-                    oa.n_out_idx
-                );
             }
         }
 
