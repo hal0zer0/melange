@@ -3730,7 +3730,10 @@ impl RustEmitter {
         } else {
             0.0
         };
-        let use_full_nodal = k_diag_min < -100.0; // K ill-conditioned from parasitic R
+        // Use full N×N LU only for extremely ill-conditioned K (parasitic R edge cases).
+        // Large K entries from high-gain op-amps are handled correctly by Schur NR
+        // since the device Jacobians scale appropriately.
+        let use_full_nodal = k_diag_min < -1e12;
         if use_full_nodal {
             log::info!(
                 "Nodal: using full N×N LU NR (K_diag_min={:.1}, ill-conditioned)",
