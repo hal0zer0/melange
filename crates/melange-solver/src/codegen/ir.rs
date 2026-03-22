@@ -57,6 +57,10 @@ pub struct CircuitIR {
     pub transformer_groups: Vec<TransformerGroupIR>,
     pub pots: Vec<PotentiometerIR>,
     pub switches: Vec<SwitchIR>,
+    /// Op-amp output voltage saturation clamps.
+    /// Only populated for op-amps with finite VSAT.
+    #[serde(default)]
+    pub opamps: Vec<OpampIR>,
     /// Pre-analyzed sparsity patterns for compile-time matrices.
     #[serde(default)]
     pub sparsity: SparseInfo,
@@ -185,6 +189,19 @@ pub struct Matrices {
     /// K_be = N_v * S_be * N_i, M×M row-major (backward Euler kernel for BE fallback)
     #[serde(default)]
     pub k_be: Vec<f64>,
+}
+
+/// Op-amp output voltage saturation for code generation.
+///
+/// When VSAT is finite, the op-amp output node voltage is clamped to ±VSAT
+/// after each LU solve in the nodal solver. This prevents runaway voltages
+/// in open-loop or high-gain configurations.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpampIR {
+    /// Output node index (0-indexed, in the N-dimensional system)
+    pub n_out_idx: usize,
+    /// Output saturation voltage (INFINITY = no saturation)
+    pub vsat: f64,
 }
 
 /// Potentiometer parameters for code generation (Sherman-Morrison precomputed data).
@@ -1121,6 +1138,15 @@ impl CircuitIR {
             transformer_groups,
             pots,
             switches,
+            opamps: mna
+                .opamps
+                .iter()
+                .filter(|oa| oa.vsat.is_finite() && oa.n_out_idx > 0)
+                .map(|oa| OpampIR {
+                    n_out_idx: oa.n_out_idx - 1, // Convert from 1-indexed to 0-indexed
+                    vsat: oa.vsat,
+                })
+                .collect(),
             sparsity,
         })
     }
@@ -1460,6 +1486,15 @@ impl CircuitIR {
                         positions: sw.positions.clone(),
                         num_positions: sw.positions.len(),
                     }
+                })
+                .collect(),
+            opamps: mna
+                .opamps
+                .iter()
+                .filter(|oa| oa.vsat.is_finite() && oa.n_out_idx > 0)
+                .map(|oa| OpampIR {
+                    n_out_idx: oa.n_out_idx - 1, // Convert from 1-indexed to 0-indexed
+                    vsat: oa.vsat,
                 })
                 .collect(),
             sparsity,

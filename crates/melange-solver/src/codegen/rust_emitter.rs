@@ -6005,10 +6005,28 @@ impl RustEmitter {
         if m == 0 {
             code.push_str("    // Linear circuit: direct LU solve (no NR needed)\n");
             code.push_str("    let mut g_aug = state.a;\n");
+            code.push_str(
+                "    // Gmin regularization: improves conditioning for high-gain VCCS (op-amps)\n",
+            );
+            code.push_str("    for i in 0..N_NODES { g_aug[i][i] += 1e-9; }\n");
             code.push_str("    let mut v = rhs;\n");
             code.push_str("    if !lu_solve(&mut g_aug, &mut v) {\n");
             code.push_str("        v = state.v_prev;\n");
             code.push_str("    }\n\n");
+
+            // Clamp op-amp outputs to VSAT (linear path)
+            if !ir.opamps.is_empty() {
+                code.push_str("    // Clamp op-amp outputs to VSAT\n");
+                for oa in &ir.opamps {
+                    code.push_str(&format!(
+                        "    v[{idx}] = v[{idx}].clamp({neg:.17e}, {pos:.17e});\n",
+                        idx = oa.n_out_idx,
+                        neg = -oa.vsat,
+                        pos = oa.vsat,
+                    ));
+                }
+                code.push('\n');
+            }
         } else {
             // Step 2: Newton-Raphson in full augmented voltage space
             code.push_str("    // Step 2: Newton-Raphson in full augmented voltage space\n");
@@ -6051,6 +6069,8 @@ impl RustEmitter {
                 "        // 2c. Build Jacobian: G_aug = A - N_i * J_dev * N_v (sparse)\n",
             );
             code.push_str("        let mut g_aug = state.a;\n");
+            code.push_str("        // Gmin regularization\n");
+            code.push_str("        for i in 0..N_NODES { g_aug[i][i] += 1e-9; }\n");
             {
                 // Build transpose of N_i sparsity: for each device dim i, which nodes a are nonzero
                 let mut ni_nz_by_dev = vec![Vec::new(); m];
@@ -6140,6 +6160,20 @@ impl RustEmitter {
             code.push_str("            state.diag_nr_max_iter_count += 1;\n");
             code.push_str("            break;\n");
             code.push_str("        }\n\n");
+
+            // Clamp op-amp outputs to VSAT (trapezoidal NR path)
+            if !ir.opamps.is_empty() {
+                code.push_str("        // Clamp op-amp outputs to VSAT\n");
+                for oa in &ir.opamps {
+                    code.push_str(&format!(
+                        "        v_new[{idx}] = v_new[{idx}].clamp({neg:.17e}, {pos:.17e});\n",
+                        idx = oa.n_out_idx,
+                        neg = -oa.vsat,
+                        pos = oa.vsat,
+                    ));
+                }
+                code.push('\n');
+            }
 
             // 2f. SPICE-style voltage limiting + global node damping
             code.push_str("        // 2f. SPICE voltage limiting + node damping\n");
@@ -6252,6 +6286,8 @@ impl RustEmitter {
 
             // Build Jacobian for BE (sparse, same structure as trapezoidal)
             code.push_str("            let mut g_aug = state.a_be;\n");
+            code.push_str("            // Gmin regularization\n");
+            code.push_str("            for i in 0..N_NODES { g_aug[i][i] += 1e-9; }\n");
             {
                 let mut ni_nz_by_dev = vec![Vec::new(); m];
                 for (a, cols) in ir.sparsity.n_i.nz_by_row.iter().enumerate() {
@@ -6323,6 +6359,20 @@ impl RustEmitter {
             // LU solve for BE
             code.push_str("            let mut v_new = rhs_work;\n");
             code.push_str("            if !lu_solve(&mut g_aug, &mut v_new) { break; }\n\n");
+
+            // Clamp op-amp outputs to VSAT (BE fallback path)
+            if !ir.opamps.is_empty() {
+                code.push_str("            // Clamp op-amp outputs to VSAT\n");
+                for oa in &ir.opamps {
+                    code.push_str(&format!(
+                        "            v_new[{idx}] = v_new[{idx}].clamp({neg:.17e}, {pos:.17e});\n",
+                        idx = oa.n_out_idx,
+                        neg = -oa.vsat,
+                        pos = oa.vsat,
+                    ));
+                }
+                code.push('\n');
+            }
 
             // Limiting and damping for BE (same structure)
             code.push_str("            let mut alpha = 1.0_f64;\n");
