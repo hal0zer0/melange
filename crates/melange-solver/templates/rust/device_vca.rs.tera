@@ -1,11 +1,17 @@
 // VCA (Voltage-Controlled Amplifier) — THAT 2180 / DBX 2150 Blackmer model.
 // Current-mode exponential gain: I_sig = G0 * exp(-Vc / Vscale) * V_sig
+// With THD: I = gain * (V_sig + thd_factor * V_sig^3), thd_factor = thd * (1 - gain.min(1))
 
-/// VCA signal current: I = G0 * exp(-Vc / Vscale) * V_signal
+/// VCA signal current: I = G0 * exp(-Vc / Vscale) * V_signal (+ cubic THD)
 #[inline(always)]
-fn vca_current(v_sig: f64, v_ctrl: f64, g0: f64, vscale: f64) -> f64 {
+fn vca_current(v_sig: f64, v_ctrl: f64, g0: f64, vscale: f64, thd: f64) -> f64 {
     let gain = g0 * fast_exp(-v_ctrl / vscale);
-    gain * v_sig
+    if thd == 0.0 {
+        gain * v_sig
+    } else {
+        let thd_factor = thd * (1.0 - gain.min(1.0));
+        gain * (v_sig + thd_factor * v_sig * v_sig * v_sig)
+    }
 }
 
 /// VCA control port current (always zero — high-impedance control input)
@@ -16,7 +22,15 @@ fn vca_ctrl_current() -> f64 {
 
 /// VCA Jacobian: [dI_sig/dV_sig, dI_sig/dV_ctrl, dI_ctrl/dV_sig, dI_ctrl/dV_ctrl]
 #[inline(always)]
-fn vca_jacobian(v_sig: f64, v_ctrl: f64, g0: f64, vscale: f64) -> [f64; 4] {
+fn vca_jacobian(v_sig: f64, v_ctrl: f64, g0: f64, vscale: f64, thd: f64) -> [f64; 4] {
     let gain = g0 * fast_exp(-v_ctrl / vscale);
-    [gain, -gain * v_sig / vscale, 0.0, 0.0]
+    if thd == 0.0 {
+        [gain, -gain * v_sig / vscale, 0.0, 0.0]
+    } else {
+        let thd_factor = thd * (1.0 - gain.min(1.0));
+        let sig_with_thd = v_sig + thd_factor * v_sig * v_sig * v_sig;
+        let di_dvsig = gain * (1.0 + 3.0 * thd_factor * v_sig * v_sig);
+        let di_dvctrl = -gain * sig_with_thd / vscale;
+        [di_dvsig, di_dvctrl, 0.0, 0.0]
+    }
 }

@@ -1183,6 +1183,7 @@ impl RustEmitter {
                     has_vca = true;
                     emit_device_const(&mut code, dev_num, "VSCALE", vp.vscale);
                     emit_device_const(&mut code, dev_num, "G0", vp.g0);
+                    emit_device_const(&mut code, dev_num, "THD", vp.thd);
                     code.push('\n');
                 }
             }
@@ -3415,11 +3416,11 @@ impl RustEmitter {
                         let d = dev_num;
                         // VCA dim 0 = V_sig, dim 1 = V_ctrl (direct mapping, no swap)
                         code.push_str(&format!(
-                            "        let i_dev{s} = vca_current(v_d{s}, v_d{s1}, state.device_{d}_g0, state.device_{d}_vscale);\n"
+                            "        let i_dev{s} = vca_current(v_d{s}, v_d{s1}, state.device_{d}_g0, state.device_{d}_vscale, DEVICE_{d}_THD);\n"
                         ));
                         code.push_str(&format!("        let i_dev{s1} = 0.0;\n"));
                         code.push_str(&format!(
-                            "        let vca{d}_jac = vca_jacobian(v_d{s}, v_d{s1}, state.device_{d}_g0, state.device_{d}_vscale);\n"
+                            "        let vca{d}_jac = vca_jacobian(v_d{s}, v_d{s1}, state.device_{d}_g0, state.device_{d}_vscale, DEVICE_{d}_THD);\n"
                         ));
                         code.push_str(&format!(
                             "        let jdev_{}_{} = vca{}_jac[0];\n",
@@ -5648,9 +5649,9 @@ impl RustEmitter {
             (DeviceType::Vca, DeviceParams::Vca(_vp)) => {
                 let s1 = s + 1;
                 code.push_str(&format!(
-                    "{indent}let i_dev{s} = vca_current(v_d{s}, v_d{s1}, state.device_{d}_g0, state.device_{d}_vscale);\n\
+                    "{indent}let i_dev{s} = vca_current(v_d{s}, v_d{s1}, state.device_{d}_g0, state.device_{d}_vscale, DEVICE_{d}_THD);\n\
                      {indent}let i_dev{s1} = 0.0;\n\
-                     {indent}let vca{d}_jac = vca_jacobian(v_d{s}, v_d{s1}, state.device_{d}_g0, state.device_{d}_vscale);\n\
+                     {indent}let vca{d}_jac = vca_jacobian(v_d{s}, v_d{s1}, state.device_{d}_g0, state.device_{d}_vscale, DEVICE_{d}_THD);\n\
                      {indent}let jdev_{s}_{s} = vca{d}_jac[0];\n\
                      {indent}let jdev_{s}_{s1} = vca{d}_jac[1];\n\
                      {indent}let jdev_{s1}_{s} = vca{d}_jac[2];\n\
@@ -6738,9 +6739,9 @@ impl RustEmitter {
                         "{indent}{{ // VCA {dev_num}\n\
                          {indent}    let v_sig = v_nl[{s}];\n\
                          {indent}    let v_ctrl = v_nl[{s1}];\n\
-                         {indent}    i_nl[{s}] = vca_current(v_sig, v_ctrl, state.device_{dev_num}_g0, state.device_{dev_num}_vscale);\n\
+                         {indent}    i_nl[{s}] = vca_current(v_sig, v_ctrl, state.device_{dev_num}_g0, state.device_{dev_num}_vscale, DEVICE_{dev_num}_THD);\n\
                          {indent}    i_nl[{s1}] = 0.0;\n\
-                         {indent}    let jac = vca_jacobian(v_sig, v_ctrl, state.device_{dev_num}_g0, state.device_{dev_num}_vscale);\n\
+                         {indent}    let jac = vca_jacobian(v_sig, v_ctrl, state.device_{dev_num}_g0, state.device_{dev_num}_vscale, DEVICE_{dev_num}_THD);\n\
                          {indent}    j_dev[{jd_ss}] = jac[0];\n\
                          {indent}    j_dev[{jd_01}] = jac[1];\n\
                          {indent}    j_dev[{jd_10}] = jac[2];\n\
@@ -6849,7 +6850,7 @@ impl RustEmitter {
                 (DeviceType::Vca, DeviceParams::Vca(_vp)) => {
                     let s1 = s + 1;
                     code.push_str(&format!(
-                        "{indent}i_nl[{s}] = vca_current(v_nl_final[{s}], v_nl_final[{s1}], state.device_{dev_num}_g0, state.device_{dev_num}_vscale);\n\
+                        "{indent}i_nl[{s}] = vca_current(v_nl_final[{s}], v_nl_final[{s1}], state.device_{dev_num}_g0, state.device_{dev_num}_vscale, DEVICE_{dev_num}_THD);\n\
                          {indent}i_nl[{s1}] = 0.0;\n"
                     ));
                 }

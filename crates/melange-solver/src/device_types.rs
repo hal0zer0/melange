@@ -345,6 +345,7 @@ impl TubeParams {
 ///
 /// Models a THAT 2180 / DBX 2150 Blackmer-style current-mode exponential gain element.
 /// Gain law: `I_signal = G0 * exp(-V_control / VSCALE) * V_signal`
+/// With THD: `I = gain * (V_sig + thd_factor * V_sig^3)`, `thd_factor = thd * (1 - gain.min(1))`
 /// Control port draws no current (ideal high-Z).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VcaParams {
@@ -352,6 +353,9 @@ pub struct VcaParams {
     pub vscale: f64,
     /// Unity-gain conductance (S)
     pub g0: f64,
+    /// THD coefficient for gain-dependent cubic distortion (0.0 = ideal, default)
+    #[serde(default)]
+    pub thd: f64,
 }
 
 /// Nonlinear device type tag.

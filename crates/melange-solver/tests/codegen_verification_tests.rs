@@ -4860,6 +4860,16 @@ C1 out 0 100n
 .model D1N4148 D(IS=2.52e-9 N=1.752)
 ";
 
+const VCA_GAIN_STAGE_SPICE: &str = "\
+VCA Gain Stage
+Rin in sig_in 1k
+Y1 sig_in 0 ctrl 0 VCA2180
+Rctrl ctrl 0 100k
+Rload sig_in out 10k
+C1 out 0 1u
+.model VCA2180 VCA(VSCALE=0.05298 G0=1.0)
+";
+
 /// VCCS circuit: verify codegen produces valid code (linear, M=0).
 #[test]
 fn test_vccs_codegen_compiles_and_runs() {
@@ -5705,6 +5715,100 @@ fn test_runtime_device_params_compile_and_run_bjt() {
     if !run.status.success() {
         panic!(
             "BJT runtime params compile-and-run test failed:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&run.stdout),
+            String::from_utf8_lossy(&run.stderr)
+        );
+    }
+}
+
+// ==========================================================================
+// VCA codegen compile-and-run test
+// ==========================================================================
+
+#[test]
+fn test_vca_codegen_compiles_and_runs() {
+    let (netlist, mna, kernel) = build_pipeline(VCA_GAIN_STAGE_SPICE);
+    let input_node_idx = mna.node_map["in"] - 1;
+    let output_node_idx = mna.node_map["out"] - 1;
+    let config = CodegenConfig {
+        circuit_name: "vca_gain_stage_run".to_string(),
+        sample_rate: 44100.0,
+        input_node: input_node_idx,
+        output_nodes: vec![output_node_idx],
+        input_resistance: 1.0,
+        ..CodegenConfig::default()
+    };
+    let codegen = CodeGenerator::new(config);
+    let result = codegen
+        .generate(&kernel, &mna, &netlist)
+        .expect("codegen failed");
+
+    let test_harness = format!(
+        "{}\n\
+         fn main() {{\n\
+             let mut state = CircuitState::default();\n\
+             \n\
+             // Warm up with 200 silent samples to let DC OP settle\n\
+             for _ in 0..200 {{\n\
+                 let out = process_sample(0.0, &mut state)[0];\n\
+                 assert!(out.is_finite(), \"Warmup output must be finite\");\n\
+             }}\n\
+             \n\
+             // Feed a 1kHz sine wave (100mV amplitude) for 500 samples\n\
+             let mut max_abs_out = 0.0f64;\n\
+             let mut any_nonzero = false;\n\
+             for i in 0..500 {{\n\
+                 let t = i as f64 / 44100.0;\n\
+                 let input = 0.1 * (2.0 * std::f64::consts::PI * 1000.0 * t).sin();\n\
+                 let out = process_sample(input, &mut state)[0];\n\
+                 assert!(out.is_finite(), \"Output at sample {{}} must be finite, got {{}}\", i, out);\n\
+                 if out.abs() > 1e-6 {{ any_nonzero = true; }}\n\
+                 if out.abs() > max_abs_out {{ max_abs_out = out.abs(); }}\n\
+             }}\n\
+             \n\
+             assert!(any_nonzero, \"VCA gain stage output should not be all zeros\");\n\
+             eprintln!(\"VCA gain stage test passed! max_abs_out={{}}\", max_abs_out);\n\
+         }}\n",
+        result.code
+    );
+
+    let tmp_dir = std::env::temp_dir();
+    let src_path = tmp_dir.join("melange_vca_run_test.rs");
+    let bin_path = tmp_dir.join("melange_vca_run_test");
+    {
+        let mut f = std::fs::File::create(&src_path).expect("create temp file");
+        f.write_all(test_harness.as_bytes())
+            .expect("write temp file");
+    }
+
+    let compile = std::process::Command::new("rustc")
+        .args([
+            src_path.to_str().unwrap(),
+            "-o",
+            bin_path.to_str().unwrap(),
+            "--edition",
+            "2021",
+        ])
+        .output()
+        .expect("run rustc");
+
+    if !compile.status.success() {
+        let _ = std::fs::remove_file(&src_path);
+        panic!(
+            "VCA compile-and-run test failed to compile:\n{}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+    }
+
+    let run = std::process::Command::new(&bin_path)
+        .output()
+        .expect("run test binary");
+    let _ = std::fs::remove_file(&src_path);
+    let _ = std::fs::remove_file(&bin_path);
+
+    if !run.status.success() {
+        panic!(
+            "VCA compile-and-run test failed:\nstdout: {}\nstderr: {}",
             String::from_utf8_lossy(&run.stdout),
             String::from_utf8_lossy(&run.stderr)
         );

@@ -2275,13 +2275,19 @@ impl CircuitIR {
     fn resolve_vca_params(netlist: &Netlist, model: &str) -> Result<VcaParams, CodegenError> {
         let vscale = Self::lookup_model_param(netlist, model, "VSCALE").unwrap_or(0.05298);
         let g0 = Self::lookup_model_param(netlist, model, "G0").unwrap_or(1.0);
+        let thd = Self::lookup_model_param(netlist, model, "THD").unwrap_or(0.0);
 
         validate_positive_finite(vscale, "VCA model VSCALE")?;
         validate_positive_finite(g0, "VCA model G0")?;
+        if thd < 0.0 || !thd.is_finite() {
+            return Err(CodegenError::InvalidConfig(format!(
+                "VCA model THD must be non-negative and finite, got {thd}"
+            )));
+        }
 
-        Self::warn_unrecognized_params(netlist, model, &["VSCALE", "G0"]);
+        Self::warn_unrecognized_params(netlist, model, &["VSCALE", "G0", "THD"]);
 
-        Ok(VcaParams { vscale, g0 })
+        Ok(VcaParams { vscale, g0, thd })
     }
 
     /// Warn on unrecognized .model parameters (typo protection).

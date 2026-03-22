@@ -148,6 +148,9 @@ fn get_builtin(name: &str) -> Option<String> {
         "rc-lowpass" => Some(include_str!("builtins/rc-lowpass.cir").to_string()),
         "mordor-screamer" => Some(include_str!("builtins/mordor-screamer.cir").to_string()),
         "tube-preamp" => Some(include_str!("builtins/tube-preamp.cir").to_string()),
+        "ssl-bus-compressor" | "ssl-4000" => {
+            Some(include_str!("builtins/ssl-bus-compressor.cir").to_string())
+        }
         _ => None,
     }
 }
@@ -192,6 +195,10 @@ pub fn list_builtins() -> Vec<(&'static str, &'static str)> {
         (
             "mordor-screamer",
             "High-gain distortion forged in Mount Doom",
+        ),
+        (
+            "ssl-bus-compressor",
+            "SSL 4000E bus compressor (VCA + sidechain)",
         ),
     ]
 }

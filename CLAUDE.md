@@ -17,7 +17,7 @@ cargo run -p melange-cli
 ```
 crates/
   melange-primitives/   # Layer 1: DSP building blocks (filters, NR helpers, oversampling)
-  melange-devices/      # Layer 2: Component models (diode, BJT, JFET, MOSFET, tube, opamp, LDR)
+  melange-devices/      # Layer 2: Component models (diode, BJT, JFET, MOSFET, tube, opamp, VCA, LDR)
   melange-solver/       # Layer 3: MNA/DK solver + codegen (CORE)
   melange-validate/     # Layer 4: SPICE validation against ngspice
   melange-plugin/       # Layer 5: nih-plug integration (stub)
@@ -39,7 +39,7 @@ dense equations, code patterns, and cross-references. The full index is at `docs
 | `docs/aidocs/NR_SOLVER.md` | Changing Newton-Raphson iteration or Jacobian |
 | `docs/aidocs/VOLTAGE_LIMITING.md` | Changing NR voltage limiting (pnjlim/fetlim), convergence, damping |
 | `docs/aidocs/DC_OP.md` | Changing DC operating point solver or bias initialization |
-| `docs/aidocs/DEVICE_MODELS.md` | Changing diode/BJT/JFET/MOSFET/tube/opamp equations |
+| `docs/aidocs/DEVICE_MODELS.md` | Changing diode/BJT/JFET/MOSFET/tube/opamp/VCA equations |
 | `docs/aidocs/GUMMEL_POON.md` | Changing Gummel-Poon BJT model, qb() function, GP Jacobian |
 | `docs/aidocs/LINEAR_ALGEBRA.md` | Changing matrix inversion, LU decomposition, Gaussian elimination |
 | `docs/aidocs/SHERMAN_MORRISON.md` | Changing dynamic potentiometers, rank-1 updates, SM vectors |
@@ -71,6 +71,7 @@ RHS input = (V_in(n+1) + V_in(n)) * G_in   (proper trapezoidal, NOT 2*V*G)
 - JFETs: 2D per device (Vgs→Id at start_idx, Vds→Ig at start_idx+1)
 - MOSFETs: 2D per device (Vgs→Id at start_idx, Vds→Ig at start_idx+1)
 - Tubes: 2D per device (Vgk→Ip at start_idx, Vpk→Ig at start_idx+1)
+- VCAs: 2D per device (Vsig→Isig at start_idx, Vctrl→Ictrl at start_idx+1)
 - Device map built from netlist element order, mirrors MNA builder
 - Codegen uses `jdev_i_k` naming for block-diagonal Jacobian entries
 
@@ -121,7 +122,7 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
 
 ### Working
 - Linear circuit simulation (RC lowpass matches ngspice to 0.03% RMS, 8-nines correlation)
-- MNA stamping for R, C, L, voltage sources, current sources, diodes, BJTs, JFETs, MOSFETs, tubes, op-amps
+- MNA stamping for R, C, L, voltage sources, current sources, diodes, BJTs, JFETs, MOSFETs, tubes, op-amps, VCAs
 - DK kernel build with proper trapezoidal discretization
 - NR solver: 1D, 2D (two 1D devices), and M-dimensional
 - Codegen for diode, BJT, JFET, and tube/triode circuits (up to M=16, Gaussian elimination for M=3..16)
@@ -179,6 +180,14 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
   - `mosfet_id(vgs, vds, kp, vt, lambda, sign)`, `mosfet_ig(vgs, sign)`, `mosfet_jacobian()` -> [f64; 4]
   - Constants: `DEVICE_{n}_KP`, `DEVICE_{n}_VT`, `DEVICE_{n}_LAMBDA`, `DEVICE_{n}_SIGN`
   - N-channel (NM) defaults: VTO=2.0, KP=0.1; P-channel (PM) defaults: VTO=-2.0
+- **VCA (Voltage-Controlled Amplifier) codegen**: 2D current-mode exponential gain (THAT 2180 / DBX 2150)
+  - `vca_current(v_sig, v_ctrl, g0, vscale, thd)`, `vca_jacobian()` → [f64; 4]
+  - Gain law: I = G0 * exp(-Vc/Vscale) * (V_sig + thd_factor * V_sig³)
+  - THD: gain-dependent cubic nonlinearity (0 at unity, rises with gain reduction)
+  - Parameters: VSCALE (V/neper, default 0.05298 for THAT 2180A), G0, THD
+  - 4 terminals: sig+, sig-, ctrl+, ctrl- (control port is high-impedance)
+  - DK K-diagonal check skips zero-current dimensions (VCA control draws no current)
+  - DC OP solver handles VCA quiescent point initialization
 - **Multi-output (stereo) support in codegen pipeline**
   - `output_nodes` and `output_scales` in `CodegenConfig` for multi-channel output
 - **Subcircuit expansion** (`.subckt` / `X` elements)
@@ -230,6 +239,7 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
   - Stage 1: fully bypassed cathode (25µF, max gain); Stage 2: partial bypass (0.68µF, ~156Hz)
   - Output pad (390k/6.8k, -35dB) models output transformer attenuation
   - 50mV in → 549mV out (11x / 20.8dB gain), zero NR divergence
+- `ssl-bus-compressor` (builtin): SSL 4000E bus compressor (4 op-amps, 1 VCA, 2 diodes, 2 pots, 2 switches)
 
 ### Pending Work
 

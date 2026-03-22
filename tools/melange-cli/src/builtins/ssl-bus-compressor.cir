@@ -1,0 +1,67 @@
+SSL 4000E Bus Compressor
+* Simplified model of the SSL 4000E/G stereo bus compressor.
+* This implementation: Copyright (c) 2026 Melange Contributors
+* License: MIT OR Apache-2.0
+*
+* Note: This is a clean-room implementation of a well-known
+* circuit topology. "SSL" is a trademark of Solid State Logic.
+*
+* Audio path: input buffer -> VCA -> I-V converter -> makeup gain
+* Sidechain: full-wave rectifier -> attack/release RC -> VCA control
+*
+* Reference: Gyraf Audio GSSL clone schematic
+* VCA: THAT 2180A (Blackmer current-mode exponential)
+* Op-amps: NE5534 (input, sidechain), NE5532 (output)
+
+* --- Device models ---
+.model OA5534 OA(AOL=100000 ROUT=75)
+.model OA5532 OA(AOL=100000 ROUT=100)
+.model VCA2180 VCA(VSCALE=0.05298 G0=1.0)
+.model D4148 D(IS=2.52e-9 N=1.752 RS=0.568 CJO=4e-12)
+
+* === AUDIO PATH ===
+
+* --- Input buffer (NE5534 voltage follower) ---
+R_in in buf_in 10k
+U1 in buf_in buf OA5534
+R_buf buf_in buf 10k
+
+* --- VCA drive (27k sets current-mode operating point) ---
+R_drive buf vca_in 27k
+Y1 vca_in 0 sc_out 0 VCA2180
+
+* --- I-V converter (NE5532 transimpedance amp) ---
+R_iv vca_in iv_inv 10k
+U2 0 iv_inv iv_out OA5532
+R_ivfb iv_inv iv_out 10k
+
+* --- Makeup gain stage (NE5532 inverting amp, pot-controlled) ---
+R_mk_in iv_out mk_inv 10k
+U3 0 mk_inv out OA5532
+R_mk_fb mk_inv out 100k
+
+* === SIDECHAIN ===
+
+* --- Sidechain buffer + full-wave rectifier ---
+* Precision rectifier using op-amp + diodes
+R_sc_in buf sc_inv 10k
+U4 0 sc_inv rect_out OA5534
+R_sc_fb sc_inv rect_out 100k
+D1 rect_out rect_p D4148
+D2 0 rect_out D4148
+
+* --- Threshold control (voltage divider sets detection level) ---
+R_thr_top rect_p thr_tap 100k
+R_thr_bot thr_tap 0 10k
+
+* --- Attack/Release timing network ---
+C_att thr_tap sc_out 1u
+R_rel sc_out 0 100k
+
+* --- Controls ---
+.pot R_mk_fb 1k 200k "Makeup Gain"
+.pot R_thr_top 1k 1MEG "Threshold"
+.switch C_att 10n 30n 100n 300n 1u 3u "Attack"
+.switch R_rel 10k 33k 100k 200k 600k "Release"
+
+.END

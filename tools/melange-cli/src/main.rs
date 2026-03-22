@@ -3044,11 +3044,12 @@ fn build_device_slots(
                     .unwrap_or_default();
                 let vscale = find_param(&model_name, "VSCALE").unwrap_or(0.05298);
                 let g0 = find_param(&model_name, "G0").unwrap_or(1.0);
+                let thd = find_param(&model_name, "THD").unwrap_or(0.0);
                 slots.push(DeviceSlot {
                     device_type: DeviceType::Vca,
                     start_idx: dev_info.start_idx,
                     dimension: 2,
-                    params: DeviceParams::Vca(melange_solver::VcaParams { vscale, g0 }),
+                    params: DeviceParams::Vca(melange_solver::VcaParams { vscale, g0, thd }),
                     has_internal_mna_nodes: false,
                 });
             }

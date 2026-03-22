@@ -235,6 +235,56 @@ AOL = 200000  (open-loop gain)
 ROUT = 1 ohm  (output resistance)
 ```
 
+## VCA (Voltage-Controlled Amplifier)
+
+### Blackmer Model (THAT 2180 / DBX 2150)
+
+Current-mode exponential gain element. The THAT 2180 is a log-antilog
+VCA where gain is exponentially controlled by a voltage:
+
+### Gain Law
+```
+G(Vc) = G0 * exp(-Vc / Vscale)
+I_signal = G(Vc) * (V_sig + thd_factor * V_sig³)
+I_control = 0  (high-impedance control input)
+
+where thd_factor = THD * (1 - min(G(Vc), 1.0))
+```
+
+### Parameters
+
+| Parameter | Default | Unit | Description |
+|-----------|---------|------|-------------|
+| VSCALE | 0.05298 | V/neper | Control voltage scaling. THAT 2180A: 6.1 mV/dB = 6.1e-3 / (ln(10)/20) |
+| G0 | 1.0 | S | Unity-gain conductance |
+| THD | 0.0 | - | Gain-dependent distortion coefficient (0 = ideal, 0.002 typical for THAT 2180A) |
+
+### Conversion: mV/dB to V/neper
+```
+VSCALE = sensitivity_mV_per_dB * 1e-3 / (ln(10) / 20)
+```
+For THAT 2180A (6.1 mV/dB): VSCALE = 6.1e-3 / 0.11513 = 0.05298
+
+### Device Jacobian (2x2)
+```
+[dI_sig/dV_sig,   dI_sig/dV_ctrl]   [G*(1+3*thd*V²),  -G*V_thd/Vscale]
+[dI_ctrl/dV_sig,  dI_ctrl/dV_ctrl] = [0,                0              ]
+```
+
+### Netlist Syntax
+```spice
+Y1 sig+ sig- ctrl+ ctrl- modelname
+.model modelname VCA(VSCALE=0.05298 G0=1.0 THD=0.002)
+```
+
+### N_v / N_i Stamping (4-terminal)
+```
+N_v[i][sig+] = +1, N_v[i][sig-] = -1       (signal voltage)
+N_v[i+1][ctrl+] = +1, N_v[i+1][ctrl-] = -1 (control voltage)
+N_i[sig+][i] = -1, N_i[sig-][i] = +1       (signal current)
+N_i[:][i+1] = 0                              (control draws no current)
+```
+
 ## Temperature Dependence
 ```
 VT = k*T/q  (thermal voltage)
