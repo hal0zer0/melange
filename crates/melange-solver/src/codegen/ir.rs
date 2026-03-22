@@ -2273,7 +2273,7 @@ impl CircuitIR {
     ///
     /// 2D current-mode exponential gain: I_sig = G0 * exp(-Vc / VSCALE) * V_sig
     fn resolve_vca_params(netlist: &Netlist, model: &str) -> Result<VcaParams, CodegenError> {
-        let vscale = Self::lookup_model_param(netlist, model, "VSCALE").unwrap_or(0.00528);
+        let vscale = Self::lookup_model_param(netlist, model, "VSCALE").unwrap_or(0.05298);
         let g0 = Self::lookup_model_param(netlist, model, "G0").unwrap_or(1.0);
 
         validate_positive_finite(vscale, "VCA model VSCALE")?;

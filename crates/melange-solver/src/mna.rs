@@ -309,7 +309,7 @@ pub struct VcaInfo {
     pub n_ctrl_p_idx: usize,
     /// Control negative node index (1-indexed, 0 = ground)
     pub n_ctrl_n_idx: usize,
-    /// Control voltage scale (default 0.00528 V)
+    /// Control voltage scale (default 0.05298 V/neper, THAT 2180A)
     pub vscale: f64,
     /// Nominal gain at V_ctrl = 0 (default 1.0)
     pub g0: f64,
@@ -3382,7 +3382,7 @@ impl MnaBuilder {
                     n_sig_n_idx: sn,
                     n_ctrl_p_idx: cp,
                     n_ctrl_n_idx: cn,
-                    vscale: 0.00528, // default, resolved from model later
+                    vscale: 0.05298, // default, resolved from model later
                     g0: 1.0,
                 });
             }
@@ -4163,7 +4163,7 @@ R1 sig_in 0 1k
 R2 sig_out 0 1k
 R3 ctrl 0 100k
 Y1 sig_in sig_out ctrl 0 vca1
-.model vca1 VCA(VSCALE=0.00528 G0=1.0)
+.model vca1 VCA(VSCALE=0.05298 G0=1.0)
 "#;
         let netlist = Netlist::parse(spice).unwrap();
         let mna = MnaSystem::from_netlist(&netlist).unwrap();
@@ -4179,7 +4179,7 @@ Y1 sig_in sig_out ctrl 0 vca1
         assert_eq!(mna.nonlinear_devices[0].start_idx, 0);
 
         // Check VCA model parameters resolved
-        assert!((mna.vcas[0].vscale - 0.00528).abs() < 1e-10);
+        assert!((mna.vcas[0].vscale - 0.05298).abs() < 1e-10);
         assert!((mna.vcas[0].g0 - 1.0).abs() < 1e-10);
     }
 
@@ -4192,7 +4192,7 @@ R2 sn 0 1k
 R3 cp 0 100k
 R4 cn 0 100k
 Y1 sp sn cp cn vca1
-.model vca1 VCA(VSCALE=0.00528 G0=1.0)
+.model vca1 VCA(VSCALE=0.05298 G0=1.0)
 "#;
         let netlist = Netlist::parse(spice).unwrap();
         let mna = MnaSystem::from_netlist(&netlist).unwrap();
@@ -4227,7 +4227,7 @@ R2 sn 0 1k
 R3 cp 0 100k
 R4 cn 0 100k
 Y1 sp sn cp cn vca1
-.model vca1 VCA(VSCALE=0.00528 G0=1.0)
+.model vca1 VCA(VSCALE=0.05298 G0=1.0)
 "#;
         let netlist = Netlist::parse(spice).unwrap();
         let mna = MnaSystem::from_netlist(&netlist).unwrap();

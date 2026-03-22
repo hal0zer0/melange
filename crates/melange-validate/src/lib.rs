@@ -662,7 +662,7 @@ fn build_devices_from_netlist(
             }
             melange_solver::mna::NonlinearDeviceType::Vca => {
                 let model_name = find_device_model_name::<b'Y'>(netlist, &dev_info.name);
-                let vscale = find_model_param(&model_name, "VSCALE").unwrap_or(0.00528);
+                let vscale = find_model_param(&model_name, "VSCALE").unwrap_or(0.05298);
                 let g0 = find_model_param(&model_name, "G0").unwrap_or(1.0);
                 let vca = melange_devices::Vca::new(vscale, g0);
                 devices.push(melange_solver::solver::DeviceEntry::new_vca(

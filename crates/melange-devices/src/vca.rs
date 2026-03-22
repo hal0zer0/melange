@@ -13,7 +13,7 @@ use crate::safeguards;
 /// THAT 2180-style Blackmer VCA parameters.
 #[derive(Debug, Clone)]
 pub struct Vca {
-    /// Control voltage scaling (V/neper). THAT 2180A default: 0.00528
+    /// Control voltage scaling (V/neper). THAT 2180A default: 0.05298
     pub vscale: f64,
     /// Unity-gain conductance (S). Default: 1.0
     pub g0: f64,
@@ -22,7 +22,7 @@ pub struct Vca {
 impl Default for Vca {
     fn default() -> Self {
         Self {
-            vscale: 0.00528, // THAT 2180A: 6.1 mV/dB = 6.1e-3 * 20/ln(10)
+            vscale: 0.05298, // THAT 2180A: 6.1 mV/dB → 6.1e-3 / (ln(10)/20) V/neper
             g0: 1.0,
         }
     }

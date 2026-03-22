@@ -1746,7 +1746,7 @@ fn simulate_circuit_source(
                         }
                     })
                     .unwrap_or("");
-                let vscale = find_model_param(model_name, "VSCALE").unwrap_or(0.00528);
+                let vscale = find_model_param(model_name, "VSCALE").unwrap_or(0.05298);
                 let g0 = find_model_param(model_name, "G0").unwrap_or(1.0);
                 let vca = melange_devices::Vca::new(vscale, g0);
                 devices.push(DeviceEntry::new_vca(vca, dev_info.start_idx));
@@ -2722,7 +2722,7 @@ fn build_device_entries(
                         }
                     })
                     .unwrap_or("");
-                let vscale = find_model_param(model_name, "VSCALE").unwrap_or(0.00528);
+                let vscale = find_model_param(model_name, "VSCALE").unwrap_or(0.05298);
                 let g0 = find_model_param(model_name, "G0").unwrap_or(1.0);
                 let vca = melange_devices::Vca::new(vscale, g0);
                 devices.push(DeviceEntry::new_vca(vca, dev_info.start_idx));
@@ -3042,7 +3042,7 @@ fn build_device_slots(
                         }
                     })
                     .unwrap_or_default();
-                let vscale = find_param(&model_name, "VSCALE").unwrap_or(0.00528);
+                let vscale = find_param(&model_name, "VSCALE").unwrap_or(0.05298);
                 let g0 = find_param(&model_name, "G0").unwrap_or(1.0);
                 slots.push(DeviceSlot {
                     device_type: DeviceType::Vca,
