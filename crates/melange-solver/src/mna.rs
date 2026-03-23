@@ -1857,6 +1857,20 @@ impl MnaBuilder {
             }
         }
 
+        // Default VSAT when GBW is specified: the Boyle internal node needs
+        // output clamping to prevent runaway. Real op-amps always have finite
+        // output swing. Default to 13V (typical for ±15V supply).
+        for oa in self.opamps.iter_mut() {
+            if oa.gbw.is_finite() && !oa.vsat.is_finite() {
+                oa.vsat = 13.0;
+                log::debug!(
+                    "Op-amp {}: GBW={:.0}Hz but no VSAT specified, defaulting to ±13V",
+                    oa.name,
+                    oa.gbw
+                );
+            }
+        }
+
         // Resolve VCA model parameters from netlist .model directives
         for (vca, elem) in self.vcas.iter_mut().zip(
             netlist
