@@ -229,7 +229,7 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
   - HS-29: 1:2 step-up, 37H, true push-pull grid drive (both grids from CT secondary)
   - S-217-D: 220H primary (30Hz), 71-turn tertiary feedback, 220pF 12AU7 grid stabilization
   - Uses nodal Schur codegen path (2 transformer groups → DK K matrix unstable)
-  - Gain: +22-29 dB (amp), consistent 20Hz-10kHz with natural HF rolloff
+  - All 7 pots + 3 switches produce correct EQ curves (LF Boost/Atten, HF Boost/Cut, Pultec trick)
   - 15.4× realtime (1.3 µs/sample), zero NR failures
 - `circuits/wurli-preamp.cir`: Wurlitzer 200A preamp (N=11, M=5→3 FA, 2 BJTs + 1 diode, 1 pot)
   - Flattened from openwurli/spice/subcircuits/preamp.cir

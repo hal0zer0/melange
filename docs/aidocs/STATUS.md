@@ -58,7 +58,7 @@ K≈0 detection: max|K| < 1e-6 with M > 0.
 | tweed-preamp | 13 | 4 | DK | fast | 2× 12AX7, 1 pot, 1 switch |
 | wurli-preamp | 11 | 3-5 | DK | fast | 2 BJTs + 1 diode, FA detection |
 | wurli-power-amp | 20 | 9-16 | DK/Nodal | 0.4× / 0.04× | Class AB, 8 BJTs |
-| pultec-eq | 41 | 8 | Nodal Schur | 15.4× | 4 tubes, 2 xfmrs, 7 pots, 3 switches. Freq response verified 2026-03-23. |
+| pultec-eq | 41 | 8 | Nodal Schur | 15.4× | 4 tubes, 2 xfmrs, 7 pots, 3 switches. All EQ curves verified 2026-03-23. |
 | ssl-bus-compressor | 28 | 2 | Nodal full LU | — | 4 op-amps, 1 VCA, 2 diodes |
 
 ## Pultec Schematic Data (Verified 2026-03-16)
