@@ -6058,27 +6058,9 @@ impl RustEmitter {
             code.push_str("        v = state.v_prev;\n");
             code.push_str("    }\n\n");
 
-            // Clamp op-amp outputs and internal Boyle nodes to VSAT (linear path)
-            if !ir.opamps.is_empty() {
-                code.push_str("    // Clamp op-amp outputs to VSAT\n");
-                for oa in &ir.opamps {
-                    code.push_str(&format!(
-                        "    v[{idx}] = v[{idx}].clamp({neg:.17e}, {pos:.17e});\n",
-                        idx = oa.n_out_idx,
-                        neg = -oa.vsat,
-                        pos = oa.vsat,
-                    ));
-                    if let Some(int_idx) = oa.n_internal_idx {
-                        code.push_str(&format!(
-                            "    v[{idx}] = v[{idx}].clamp({neg:.17e}, {pos:.17e});\n",
-                            idx = int_idx,
-                            neg = -oa.vsat,
-                            pos = oa.vsat,
-                        ));
-                    }
-                }
-                code.push('\n');
-            }
+            // No VSAT clamping — matches runtime NodalSolver. Clamping any node
+            // creates inconsistency with unclamped neighbors (e.g., 100Ω apart but
+            // 227V difference), corrupting the trapezoidal history feedback.
         } else {
             // Step 2: Newton-Raphson in full augmented voltage space
             code.push_str("    // Step 2: Newton-Raphson in full augmented voltage space\n");
@@ -6669,29 +6651,11 @@ impl RustEmitter {
         code.push_str("        return [0.0; NUM_OUTPUTS];\n");
         code.push_str("    }\n\n");
 
-        // Post-NR VSAT clamping: clamp op-amp output nodes AFTER convergence,
-        // before storing in state. This prevents unrealistic voltages from feeding
-        // back through a_neg without creating mid-NR discontinuities.
-        if !ir.opamps.is_empty() {
-            code.push_str("    // Clamp op-amp outputs to VSAT (post-NR, before state update)\n");
-            for oa in &ir.opamps {
-                code.push_str(&format!(
-                    "    v[{idx}] = v[{idx}].clamp({neg:.17e}, {pos:.17e});\n",
-                    idx = oa.n_out_idx,
-                    neg = -oa.vsat,
-                    pos = oa.vsat,
-                ));
-                if let Some(int_idx) = oa.n_internal_idx {
-                    code.push_str(&format!(
-                        "    v[{idx}] = v[{idx}].clamp({neg:.17e}, {pos:.17e});\n",
-                        idx = int_idx,
-                        neg = -oa.vsat,
-                        pos = oa.vsat,
-                    ));
-                }
-            }
-            code.push('\n');
-        }
+        // No VSAT clamping on v — clamping any subset of nodes creates physical
+        // inconsistency with unclamped neighbors (e.g., 100Ω resistor between
+        // clamped node at 13V and unclamped node at 240V), corrupting the
+        // trapezoidal history (a_neg * v_prev). Matches runtime NodalSolver.
+        // Output is clamped downstream by DC block (±10V) or ear protection.
 
         // Step 3: Update state
         code.push_str("    // Step 3: Update state\n");
