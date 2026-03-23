@@ -324,6 +324,12 @@ pub struct VcaInfo {
     pub vscale: f64,
     /// Nominal gain at V_ctrl = 0 (default 1.0)
     pub g0: f64,
+    /// Current mode: I_out = G(Vc) * I_in (THAT 2180 style translinear).
+    /// When false (default): voltage mode, I_out = G(Vc) * V_sig.
+    pub current_mode: bool,
+    /// Augmented row index for current-sensing source (1-indexed, 0 = none).
+    /// Set during MNA stamping when current_mode is true.
+    pub n_sense_idx: usize,
 }
 
 /// Component within a switch directive, resolved to MNA node indices.
@@ -1872,6 +1878,7 @@ impl MnaBuilder {
                         match key.to_ascii_uppercase().as_str() {
                             "VSCALE" => vca.vscale = *val,
                             "G0" => vca.g0 = *val,
+                            "MODE" => vca.current_mode = *val != 0.0,
                             _ => log::warn!(
                                 ".model {}: unrecognized VCA parameter '{}' (ignored)",
                                 m.name,
@@ -2428,7 +2435,10 @@ impl MnaBuilder {
             .iter()
             .filter(|oa| oa.gbw.is_finite() && oa.gbw > 0.0)
             .count();
-        let n_aug = n_base + num_vs + num_vcvs + num_ideal_xfmr + num_opamp_internal;
+        // Count current-mode VCAs (each needs an augmented row for current sensing)
+        let num_vca_sense = mna.vcas.iter().filter(|v| v.current_mode).count();
+        let n_aug =
+            n_base + num_vs + num_vcvs + num_ideal_xfmr + num_opamp_internal + num_vca_sense;
         mna.n_aug = n_aug;
 
         // Expand G, C, N_v, N_i to n_aug dimensions (extra rows/cols are zero).
@@ -2676,6 +2686,22 @@ impl MnaBuilder {
                     mna.g[o][nm - 1] -= gm;
                 }
                 mna.g[o][o] += go;
+            }
+        }
+
+        // Allocate augmented rows for current-mode VCA sensing sources
+        let vca_sense_base = opamp_int_base + num_opamp_internal;
+        let mut vca_sense_idx = 0;
+        for vca in &mut mna.vcas {
+            if vca.current_mode {
+                let k = vca_sense_base + vca_sense_idx;
+                vca_sense_idx += 1;
+                vca.n_sense_idx = k + 1; // 1-indexed
+                log::debug!(
+                    "VCA {} (current mode): sensing source at augmented row {}",
+                    vca.name,
+                    k
+                );
             }
         }
 
@@ -2968,41 +2994,85 @@ impl MnaBuilder {
                     }
                 }
                 NonlinearDeviceType::Vca => {
-                    // VCA: 2D — dim 0: V_signal → I_signal, dim 1: V_control → I_control (=0)
-                    //
+                    // VCA: 2D — dim 0: signal, dim 1: control (I_ctrl = 0)
                     // 4 terminals: [sig_p, sig_n, ctrl_p, ctrl_n]
-                    // Dimension pairing:
-                    //   dim 0: N_v extracts V_signal = V(sig+) - V(sig-)
-                    //          N_i injects I_signal at sig+/sig- (current path)
-                    //   dim 1: N_v extracts V_control = V(ctrl+) - V(ctrl-)
-                    //          N_i = 0 (control draws no current)
                     if node_indices.len() >= 4 {
                         let sp_raw = node_indices[0]; // sig+
                         let sn_raw = node_indices[1]; // sig-
                         let cp_raw = node_indices[2]; // ctrl+
                         let cn_raw = node_indices[3]; // ctrl-
 
-                        // N_v row 0 (V_signal): +1 at sig+, -1 at sig-
-                        if sp_raw > 0 {
-                            mna.n_v[start_idx][sp_raw - 1] = 1.0;
+                        // Find the VcaInfo for this device to check current_mode
+                        let vca_idx = mna
+                            .vcas
+                            .iter()
+                            .position(|v| v.name == dev_name)
+                            .unwrap_or(0);
+                        let is_current_mode = mna.vcas[vca_idx].current_mode;
+
+                        if is_current_mode {
+                            // CURRENT MODE (THAT 2180 style translinear):
+                            //   I_out = G(Vc) * I_in
+                            //
+                            // A 0V voltage source at sig+ senses I_in as an augmented
+                            // MNA variable. The NR dim 0 extracts this branch current
+                            // via N_v, and N_i injects G*I_in at sig-.
+                            //
+                            // Augmented row k: stamps ±1 for the 0V sensing source
+                            // at sig+ (series with whatever drives the VCA input).
+                            let k = mna.vcas[vca_idx].n_sense_idx;
+                            if k > 0 {
+                                let k0 = k - 1; // 0-indexed
+
+                                // 0V source between sig+ external and sig+ internal
+                                // KVL: V(sig+) - V(sig+_int) = 0
+                                // We stamp into G: g[k][sig+] = +1, g[k][sig+_int] = -1
+                                // But sig+_int doesn't exist as separate node —
+                                // the source IS at sig+, sensing current INTO sig+.
+                                // Stamp like a VS: g[k][sig+] = +1 and g[sig+][k] = +1
+                                if sp_raw > 0 {
+                                    mna.g[k0][sp_raw - 1] += 1.0;
+                                    mna.g[sp_raw - 1][k0] += 1.0;
+                                }
+                                if sn_raw > 0 {
+                                    mna.g[k0][sn_raw - 1] -= 1.0;
+                                    mna.g[sn_raw - 1][k0] -= 1.0;
+                                }
+
+                                // N_v row 0: extract branch current (augmented variable)
+                                // The branch current is at index k0 in the voltage vector
+                                mna.n_v[start_idx][k0] = 1.0;
+
+                                // N_i col 0: inject I_out = G*I_in at sig- only
+                                // (not sig+ — the sensing source handles sig+ current)
+                                if sn_raw > 0 {
+                                    mna.n_i[sn_raw - 1][start_idx] = 1.0;
+                                }
+                            }
+                        } else {
+                            // VOLTAGE MODE (original): I_out = G(Vc) * V_sig
+                            // N_v row 0 (V_signal): +1 at sig+, -1 at sig-
+                            if sp_raw > 0 {
+                                mna.n_v[start_idx][sp_raw - 1] = 1.0;
+                            }
+                            if sn_raw > 0 {
+                                mna.n_v[start_idx][sn_raw - 1] = -1.0;
+                            }
+                            // N_i col 0 (I_signal): -1 at sig+ (extracted), +1 at sig- (injected)
+                            if sp_raw > 0 {
+                                mna.n_i[sp_raw - 1][start_idx] = -1.0;
+                            }
+                            if sn_raw > 0 {
+                                mna.n_i[sn_raw - 1][start_idx] = 1.0;
+                            }
                         }
-                        if sn_raw > 0 {
-                            mna.n_v[start_idx][sn_raw - 1] = -1.0;
-                        }
-                        // N_v row 1 (V_control): +1 at ctrl+, -1 at ctrl-
+
+                        // N_v row 1 (V_control): +1 at ctrl+, -1 at ctrl- (same for both modes)
                         if cp_raw > 0 {
                             mna.n_v[start_idx + 1][cp_raw - 1] = 1.0;
                         }
                         if cn_raw > 0 {
                             mna.n_v[start_idx + 1][cn_raw - 1] = -1.0;
-                        }
-
-                        // N_i col 0 (I_signal): -1 at sig+ (extracted), +1 at sig- (injected)
-                        if sp_raw > 0 {
-                            mna.n_i[sp_raw - 1][start_idx] = -1.0;
-                        }
-                        if sn_raw > 0 {
-                            mna.n_i[sn_raw - 1][start_idx] = 1.0;
                         }
                         // N_i col 1 (I_control): NO stamping — control draws no current
                     }
@@ -3452,6 +3522,8 @@ impl MnaBuilder {
                     n_ctrl_n_idx: cn,
                     vscale: 0.05298, // default, resolved from model later
                     g0: 1.0,
+                    current_mode: false,
+                    n_sense_idx: 0,
                 });
             }
             Element::SubcktInstance { name, .. } => {

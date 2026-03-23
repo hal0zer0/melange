@@ -2366,7 +2366,11 @@ impl CircuitIR {
             )));
         }
 
-        Self::warn_unrecognized_params(netlist, model, &["VSCALE", "G0", "THD", "NOISE_FLOOR"]);
+        Self::warn_unrecognized_params(
+            netlist,
+            model,
+            &["VSCALE", "G0", "THD", "NOISE_FLOOR", "MODE"],
+        );
 
         Ok(VcaParams {
             vscale,
