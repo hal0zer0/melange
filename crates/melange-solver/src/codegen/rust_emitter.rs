@@ -4333,7 +4333,7 @@ impl RustEmitter {
         // Default impl
         code.push_str("impl Default for CircuitState {\n");
         code.push_str("    fn default() -> Self {\n");
-        code.push_str("        Self {\n");
+        code.push_str("        let mut state = Self {\n");
         if has_dc_op {
             code.push_str("            v_prev: DC_OP,\n");
         } else {
@@ -4451,7 +4451,9 @@ impl RustEmitter {
             }
         }
 
-        code.push_str("        }\n");
+        code.push_str("        };\n");
+        code.push_str("        state.warmup();\n");
+        code.push_str("        state\n");
         code.push_str("    }\n");
         code.push_str("}\n\n");
 
@@ -4546,6 +4548,26 @@ impl RustEmitter {
                 ));
             }
         }
+        code.push_str("    }\n\n");
+
+        // warmup()
+        code.push_str(
+            "    /// Run silent warmup samples to settle into the correct operating point.\n",
+        );
+        code.push_str("    ///\n");
+        code.push_str(
+            "    /// Call after construction or reset() to ensure the circuit settles into\n",
+        );
+        code.push_str(
+            "    /// the physically correct basin of attraction. Without warmup, circuits\n",
+        );
+        code.push_str("    /// with high-gain op-amps may lock into a parasitic equilibrium.\n");
+        code.push_str("    ///\n");
+        code.push_str("    /// The default `CircuitState::default()` calls this automatically.\n");
+        code.push_str("    pub fn warmup(&mut self) {\n");
+        code.push_str("        for _ in 0..50 {\n");
+        code.push_str("            process_sample(0.0, self);\n");
+        code.push_str("        }\n");
         code.push_str("    }\n\n");
 
         // set_dc_operating_point()
