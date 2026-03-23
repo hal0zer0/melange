@@ -3724,24 +3724,43 @@ impl RustEmitter {
         // Nodal-specific: invert_n function (for rebuild_matrices at runtime)
         code.push_str(&Self::emit_nodal_invert_n(ir));
 
-        // Nodal process_sample: use Schur (M-dim NR) unless K is ill-conditioned,
-        // in which case fall back to full N×N LU NR.
-        let k_diag_min = if ir.topology.m > 0 {
-            (0..ir.topology.m)
-                .map(|i| ir.matrices.k[i * ir.topology.m + i])
+        // Nodal process_sample: use Schur (M-dim NR) unless K has issues.
+        // Schur NR assumes K is naturally negative (J = I - J_dev*K has positive diagonal).
+        // With positive K diagonal + current injection, J diagonal flips negative → divergence.
+        // Route to full N×N LU NR (like ngspice) which builds G_aug per iteration directly.
+        let m = ir.topology.m;
+        let has_positive_k_with_current = if m > 0 {
+            (0..m).any(|i| {
+                let k_ii = ir.matrices.k[i * m + i];
+                if k_ii <= 0.0 {
+                    return false;
+                }
+                // Only flag positive K for dimensions with actual current injection
+                // (VCA control ports have zero N_i column — positive K there is harmless)
+                ir.sparsity.n_i.nz_by_row.iter().any(|row| row.contains(&i))
+            })
+        } else {
+            false
+        };
+        let k_diag_min = if m > 0 {
+            (0..m)
+                .map(|i| ir.matrices.k[i * m + i])
                 .fold(0.0_f64, f64::min)
         } else {
             0.0
         };
-        // Use full N×N LU only for extremely ill-conditioned K (parasitic R edge cases).
-        // Large K entries from high-gain op-amps are handled correctly by Schur NR
-        // since the device Jacobians scale appropriately.
-        let use_full_nodal = k_diag_min < -1e12;
+        let use_full_nodal = has_positive_k_with_current || k_diag_min < -1e12;
         if use_full_nodal {
-            log::info!(
-                "Nodal: using full N×N LU NR (K_diag_min={:.1}, ill-conditioned)",
-                k_diag_min
-            );
+            if has_positive_k_with_current {
+                log::info!(
+                    "Nodal: using full N×N LU NR (positive K diagonal with current injection)"
+                );
+            } else {
+                log::info!(
+                    "Nodal: using full N×N LU NR (K_diag_min={:.1}, ill-conditioned)",
+                    k_diag_min
+                );
+            }
             code.push_str(&Self::emit_nodal_lu_solve(ir));
             code.push_str(&Self::emit_nodal_process_sample(ir));
         } else {
@@ -4165,7 +4184,9 @@ impl RustEmitter {
         code.push_str("    /// Diagnostic: number of backward Euler fallback activations\n");
         code.push_str("    pub diag_be_fallback_count: u64,\n");
         code.push_str("    /// Diagnostic: number of times NaN triggered state reset\n");
-        code.push_str("    pub diag_nan_reset_count: u64,\n\n");
+        code.push_str("    pub diag_nan_reset_count: u64,\n");
+        code.push_str("    /// Diagnostic: number of samples that needed adaptive sub-stepping\n");
+        code.push_str("    pub diag_substep_count: u64,\n\n");
         code.push_str(
             "    /// A matrix: G + alpha*C (trapezoidal), recomputed by set_sample_rate\n",
         );
@@ -4344,6 +4365,7 @@ impl RustEmitter {
         code.push_str("            diag_nr_max_iter_count: 0,\n");
         code.push_str("            diag_be_fallback_count: 0,\n");
         code.push_str("            diag_nan_reset_count: 0,\n");
+        code.push_str("            diag_substep_count: 0,\n");
         code.push_str("            a: A_DEFAULT,\n");
         code.push_str("            a_neg: A_NEG_DEFAULT,\n");
         code.push_str("            a_be: A_BE_DEFAULT,\n");
@@ -6014,7 +6036,7 @@ impl RustEmitter {
             code.push_str(
                 "    // Gmin regularization: improves conditioning for high-gain VCCS (op-amps)\n",
             );
-            code.push_str("    for i in 0..N_NODES { g_aug[i][i] += 1e-9; }\n");
+            code.push_str("    for i in 0..N_NODES { g_aug[i][i] += 1e-6; }\n");
             code.push_str("    let mut v = rhs;\n");
             code.push_str("    if !lu_solve(&mut g_aug, &mut v) {\n");
             code.push_str("        v = state.v_prev;\n");
@@ -6084,7 +6106,7 @@ impl RustEmitter {
             );
             code.push_str("        let mut g_aug = state.a;\n");
             code.push_str("        // Gmin regularization\n");
-            code.push_str("        for i in 0..N_NODES { g_aug[i][i] += 1e-9; }\n");
+            code.push_str("        for i in 0..N_NODES { g_aug[i][i] += 1e-6; }\n");
             {
                 // Build transpose of N_i sparsity: for each device dim i, which nodes a are nonzero
                 let mut ni_nz_by_dev = vec![Vec::new(); m];
@@ -6261,8 +6283,197 @@ impl RustEmitter {
             code.push_str("        }\n");
             code.push_str("    }\n\n"); // end trapezoidal NR loop
 
+            // Adaptive sub-stepping: when trapezoidal NR fails, subdivide the timestep
+            // and retry with tighter capacitor conductances. This is how ngspice handles
+            // positive-feedback circuits (compressor sidechains, oscillators, etc.).
+            code.push_str("    // Adaptive sub-stepping: retry with subdivided timestep\n");
+            code.push_str("    if !converged {\n");
+            code.push_str("        'substep: for subdiv_power in 1..=3u32 {\n");
+            code.push_str("            let subdiv = 1u32 << subdiv_power; // 2, 4, 8\n");
+            code.push_str(&format!(
+                "            let alpha_sub = {:.17e} * subdiv as f64;\n",
+                2.0 * ir.solver_config.sample_rate * ir.solver_config.oversampling_factor as f64
+            ));
+            code.push_str("            // Rebuild A and A_neg at finer timestep\n");
+            code.push_str("            let mut a_sub = [[0.0f64; N]; N];\n");
+            code.push_str("            let mut a_neg_sub = [[0.0f64; N]; N];\n");
+            code.push_str("            for i in 0..N {\n");
+            code.push_str("                for j in 0..N {\n");
+            code.push_str("                    a_sub[i][j] = G[i][j] + alpha_sub * C[i][j];\n");
+            code.push_str("                    a_neg_sub[i][j] = alpha_sub * C[i][j] - G[i][j];\n");
+            code.push_str("                }\n");
+            code.push_str("            }\n");
+            // Zero VS/VCVS algebraic rows
+            let n_aug = ir.topology.n_aug;
+            if n_nodes < n_aug {
+                code.push_str(&format!(
+                    "            for i in {}..{} {{ for j in 0..N {{ a_neg_sub[i][j] = 0.0; }} }}\n",
+                    n_nodes, n_aug
+                ));
+            }
+            // Gmin on A_sub
+            code.push_str("            for i in 0..N_NODES { a_sub[i][i] += 1e-6; }\n");
+            code.push_str("            // Run subdivided sub-steps\n");
+            code.push_str("            let mut v_sub = state.v_prev;\n");
+            code.push_str("            let mut i_nl_sub = state.i_nl_prev;\n");
+            code.push_str(
+                "            let input_step = (input - state.input_prev) / subdiv as f64;\n",
+            );
+            code.push_str("            let mut all_sub_converged = true;\n");
+            code.push_str("            for step in 0..subdiv {\n");
+            code.push_str(
+                "                let inp_s = state.input_prev + input_step * (step + 1) as f64;\n",
+            );
+            code.push_str(
+                "                let inp_prev_s = state.input_prev + input_step * step as f64;\n",
+            );
+            // Build sub-step RHS
+            code.push_str("                // Sub-step RHS\n");
+            if ir.has_dc_sources {
+                code.push_str("                let mut rhs_s = RHS_CONST;\n");
+            } else {
+                code.push_str("                let mut rhs_s = [0.0f64; N];\n");
+            }
+            code.push_str("                for i in 0..N { for j in 0..N { rhs_s[i] += a_neg_sub[i][j] * v_sub[j]; } }\n");
+            if m > 0 {
+                code.push_str("                for i in 0..N { for j in 0..M { rhs_s[i] += N_I[i][j] * i_nl_sub[j]; } }\n");
+            }
+            code.push_str("                rhs_s[INPUT_NODE] += (inp_s + inp_prev_s) * (1.0 / INPUT_RESISTANCE);\n");
+            // Sub-step NR loop
+            code.push_str("                let mut sub_converged = false;\n");
+            code.push_str("                for _iter in 0..MAX_ITER {\n");
+            code.push_str("                    let mut v_nl = [0.0f64; M];\n");
+            code.push_str("                    for i in 0..M { for j in 0..N { v_nl[i] += N_V[i][j] * v_sub[j]; } }\n");
+            code.push_str("                    let mut i_nl = [0.0f64; M];\n");
+            code.push_str("                    let mut j_dev = [0.0f64; M * M];\n");
+            // Device evaluation
+            Self::emit_nodal_device_evaluation_body(&mut code, ir, "                    ");
+            code.push('\n');
+            // Build G_aug from a_sub
+            code.push_str("                    let mut g_s = a_sub;\n");
+            {
+                let mut ni_nz_by_dev = vec![Vec::new(); m];
+                for (a, cols) in ir.sparsity.n_i.nz_by_row.iter().enumerate() {
+                    for &i in cols {
+                        ni_nz_by_dev[i].push(a);
+                    }
+                }
+                for slot in &ir.device_slots {
+                    let s = slot.start_idx;
+                    let dim = slot.dimension;
+                    for di in 0..dim {
+                        let i = s + di;
+                        let ni_nodes = &ni_nz_by_dev[i];
+                        for dj in 0..dim {
+                            let j = s + dj;
+                            let jd_ij = i * m + j;
+                            let nv_nodes = &ir.sparsity.n_v.nz_by_row[j];
+                            if ni_nodes.is_empty() || nv_nodes.is_empty() {
+                                continue;
+                            }
+                            for &a in ni_nodes {
+                                for &b in nv_nodes {
+                                    code.push_str(&format!(
+                                        "                    g_s[{}][{}] -= N_I[{}][{}] * j_dev[{}] * N_V[{}][{}];\n",
+                                        a, b, a, i, jd_ij, j, b
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // Build companion RHS
+            code.push_str("                    let mut rhs_w = rhs_s;\n");
+            {
+                let mut ni_nz_by_dev = vec![Vec::new(); m];
+                for (a, cols) in ir.sparsity.n_i.nz_by_row.iter().enumerate() {
+                    for &i in cols {
+                        ni_nz_by_dev[i].push(a);
+                    }
+                }
+                for slot in &ir.device_slots {
+                    let s = slot.start_idx;
+                    let dim = slot.dimension;
+                    for di in 0..dim {
+                        let i = s + di;
+                        let jdv_terms: Vec<String> = (0..dim)
+                            .map(|dj| {
+                                let j = s + dj;
+                                let jd_ij = i * m + j;
+                                format!("j_dev[{}] * v_nl[{}]", jd_ij, j)
+                            })
+                            .collect();
+                        code.push_str(&format!(
+                            "                    {{ let i_comp = i_nl[{}] - ({});\n",
+                            i,
+                            jdv_terms.join(" + ")
+                        ));
+                        for &a in &ni_nz_by_dev[i] {
+                            code.push_str(&format!(
+                                "                      rhs_w[{}] += N_I[{}][{}] * i_comp;\n",
+                                a, a, i
+                            ));
+                        }
+                        code.push_str("                    }\n");
+                    }
+                }
+            }
+            // LU solve
+            code.push_str("                    let mut v_new_s = rhs_w;\n");
+            code.push_str("                    if !lu_solve(&mut g_s, &mut v_new_s) { break; }\n");
+            // VSAT clamping
+            if !ir.opamps.is_empty() {
+                for oa in &ir.opamps {
+                    code.push_str(&format!(
+                        "                    v_new_s[{idx}] = v_new_s[{idx}].clamp({neg:.17e}, {pos:.17e});\n",
+                        idx = oa.n_out_idx, neg = -oa.vsat, pos = oa.vsat,
+                    ));
+                    if let Some(int_idx) = oa.n_internal_idx {
+                        code.push_str(&format!(
+                            "                    v_new_s[{idx}] = v_new_s[{idx}].clamp({neg:.17e}, {pos:.17e});\n",
+                            idx = int_idx, neg = -oa.vsat, pos = oa.vsat,
+                        ));
+                    }
+                }
+            }
+            // Convergence check + update
+            code.push_str("                    let mut max_step = 0.0f64;\n");
+            code.push_str("                    for i in 0..N_NODES {\n");
+            code.push_str("                        let step = v_new_s[i] - v_sub[i];\n");
+            code.push_str(
+                "                        if step.abs() > max_step { max_step = step.abs(); }\n",
+            );
+            code.push_str("                    }\n");
+            code.push_str("                    v_sub = v_new_s;\n");
+            code.push_str("                    // Re-extract i_nl at converged v\n");
+            code.push_str("                    let mut v_nl_f = [0.0f64; M];\n");
+            code.push_str("                    for i in 0..M { for j in 0..N { v_nl_f[i] += N_V[i][j] * v_sub[j]; } }\n");
+            code.push_str("                    i_nl_sub = [0.0f64; M];\n");
+            Self::emit_nodal_device_evaluation_body(&mut code, ir, "                    ");
+            code.push_str("                    if max_step < TOL + 1e-3 {\n");
+            code.push_str("                        sub_converged = true;\n");
+            code.push_str("                        break;\n");
+            code.push_str("                    }\n");
+            code.push_str("                }\n"); // end sub-step NR loop
+            code.push_str(
+                "                if !sub_converged { all_sub_converged = false; break; }\n",
+            );
+            code.push_str("            }\n"); // end sub-step loop
+            code.push_str("            if all_sub_converged {\n");
+            code.push_str("                v = v_sub;\n");
+            code.push_str("                i_nl = i_nl_sub;\n");
+            code.push_str("                converged = true;\n");
+            code.push_str("                state.diag_substep_count += 1;\n");
+            code.push_str("                break 'substep;\n");
+            code.push_str("            }\n");
+            code.push_str("        }\n"); // end subdiv_power loop
+            code.push_str("    }\n\n"); // end if !converged
+
             // Backward Euler fallback
-            code.push_str("    // Backward Euler fallback: if trapezoidal NR didn't converge, retry with BE\n");
+            code.push_str(
+                "    // Backward Euler fallback: if trapezoidal NR and sub-stepping both failed\n",
+            );
             code.push_str("    if !converged {\n");
             code.push_str("        state.diag_nr_max_iter_count += 1;\n\n");
 
@@ -6309,7 +6520,7 @@ impl RustEmitter {
             // Build Jacobian for BE (sparse, same structure as trapezoidal)
             code.push_str("            let mut g_aug = state.a_be;\n");
             code.push_str("            // Gmin regularization\n");
-            code.push_str("            for i in 0..N_NODES { g_aug[i][i] += 1e-9; }\n");
+            code.push_str("            for i in 0..N_NODES { g_aug[i][i] += 1e-6; }\n");
             {
                 let mut ni_nz_by_dev = vec![Vec::new(); m];
                 for (a, cols) in ir.sparsity.n_i.nz_by_row.iter().enumerate() {
