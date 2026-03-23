@@ -3596,6 +3596,17 @@ impl NodalSolver {
                 }
             }
 
+            // Compute step magnitudes BEFORE updating v (for convergence check).
+            // Must be done before v[i] is modified, otherwise delta is zero when alpha=1.
+            let converged_check = (0..n).all(|i| {
+                if self.delayed_node_indices.contains(&i) {
+                    return true;
+                }
+                let step = alpha * (v_new[i] - v[i]);
+                let threshold = 1e-3 * v[i].abs().max((v[i] + step).abs()) + self.tol;
+                step.abs() < threshold
+            });
+
             // Apply damped Newton step, then freeze delayed nodes.
             for i in 0..n {
                 v[i] += alpha * (v_new[i] - v[i]);
@@ -3604,17 +3615,6 @@ impl NodalSolver {
             for &idx in &self.delayed_node_indices {
                 v[idx] = self.v_prev[idx];
             }
-
-            // SPICE-style convergence: RELTOL * max(|v_new|, |v_old|) + VNTOL
-            // For a 290V node: threshold = 0.001*290 + 1e-6 = 0.29V (vs fixed 1e-6)
-            let converged_check = (0..n).all(|i| {
-                if self.delayed_node_indices.contains(&i) {
-                    return true;
-                }
-                let abs_delta = (alpha * (v_new[i] - v[i])).abs(); // actual step taken
-                let threshold = 1e-3 * v[i].abs().max(v_new[i].abs()) + self.tol;
-                abs_delta < threshold
-            });
 
             if converged_check {
                 converged = true;

@@ -6275,7 +6275,7 @@ impl RustEmitter {
             code.push_str("        for i in 0..N {\n");
             code.push_str("            let step = alpha * (v_new[i] - v[i]);\n");
             code.push_str(
-                "            let threshold = 1e-6 * v[i].abs().max((v[i] + step).abs()) + TOL;\n",
+                "            let threshold = 1e-3 * v[i].abs().max((v[i] + step).abs()) + 1e-6;\n",
             );
             code.push_str("            if step.abs() >= threshold { max_step_exceeded = true; }\n");
             code.push_str("            v[i] += step;\n");
@@ -6648,7 +6648,7 @@ impl RustEmitter {
             code.push_str("            let mut be_step_exceeded = false;\n");
             code.push_str("            for i in 0..N {\n");
             code.push_str("                let step = alpha * (v_new[i] - v[i]);\n");
-            code.push_str("                let threshold = 1e-6 * v[i].abs().max((v[i] + step).abs()) + TOL;\n");
+            code.push_str("                let threshold = 1e-3 * v[i].abs().max((v[i] + step).abs()) + 1e-6;\n");
             code.push_str(
                 "                if step.abs() >= threshold { be_step_exceeded = true; }\n",
             );
