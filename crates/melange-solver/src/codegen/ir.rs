@@ -1488,21 +1488,17 @@ impl CircuitIR {
                     std::collections::HashMap::new();
                 let mut var_idx = n_aug;
                 for ind in &mna.inductors {
-                    inductor_aug_rows
-                        .insert(ind.name.to_ascii_uppercase(), var_idx);
+                    inductor_aug_rows.insert(ind.name.to_ascii_uppercase(), var_idx);
                     var_idx += 1;
                 }
                 for ci in &mna.coupled_inductors {
-                    inductor_aug_rows
-                        .insert(ci.l1_name.to_ascii_uppercase(), var_idx);
-                    inductor_aug_rows
-                        .insert(ci.l2_name.to_ascii_uppercase(), var_idx + 1);
+                    inductor_aug_rows.insert(ci.l1_name.to_ascii_uppercase(), var_idx);
+                    inductor_aug_rows.insert(ci.l2_name.to_ascii_uppercase(), var_idx + 1);
                     var_idx += 2;
                 }
                 for group in &mna.transformer_groups {
                     for (widx, name) in group.winding_names.iter().enumerate() {
-                        inductor_aug_rows
-                            .insert(name.to_ascii_uppercase(), var_idx + widx);
+                        inductor_aug_rows.insert(name.to_ascii_uppercase(), var_idx + widx);
                     }
                     var_idx += group.num_windings;
                 }
@@ -1510,34 +1506,32 @@ impl CircuitIR {
                 mna.switches
                     .iter()
                     .enumerate()
-                    .map(|(idx, sw)| {
-                        SwitchIR {
-                            index: idx,
-                            components: sw
-                                .components
-                                .iter()
-                                .map(|comp| {
-                                    let augmented_row = if comp.component_type == 'L' {
-                                        inductor_aug_rows
-                                            .get(&comp.name.to_ascii_uppercase())
-                                            .copied()
-                                    } else {
-                                        None
-                                    };
-                                    SwitchComponentIR {
-                                        name: comp.name.clone(),
-                                        component_type: comp.component_type,
-                                        node_p: comp.node_p,
-                                        node_q: comp.node_q,
-                                        nominal_value: comp.nominal_value,
-                                        inductor_index: None,
-                                        augmented_row,
-                                    }
-                                })
-                                .collect(),
-                            positions: sw.positions.clone(),
-                            num_positions: sw.positions.len(),
-                        }
+                    .map(|(idx, sw)| SwitchIR {
+                        index: idx,
+                        components: sw
+                            .components
+                            .iter()
+                            .map(|comp| {
+                                let augmented_row = if comp.component_type == 'L' {
+                                    inductor_aug_rows
+                                        .get(&comp.name.to_ascii_uppercase())
+                                        .copied()
+                                } else {
+                                    None
+                                };
+                                SwitchComponentIR {
+                                    name: comp.name.clone(),
+                                    component_type: comp.component_type,
+                                    node_p: comp.node_p,
+                                    node_q: comp.node_q,
+                                    nominal_value: comp.nominal_value,
+                                    inductor_index: None,
+                                    augmented_row,
+                                }
+                            })
+                            .collect(),
+                        positions: sw.positions.clone(),
+                        num_positions: sw.positions.len(),
                     })
                     .collect()
             },

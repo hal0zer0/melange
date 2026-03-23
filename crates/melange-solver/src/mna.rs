@@ -1965,7 +1965,8 @@ impl MnaBuilder {
             .pots
             .iter()
             .filter_map(|p| {
-                p.default_value.map(|dv| (p.resistor_name.to_ascii_uppercase(), dv))
+                p.default_value
+                    .map(|dv| (p.resistor_name.to_ascii_uppercase(), dv))
             })
             .collect();
         mna.pot_default_overrides = pot_default_overrides;

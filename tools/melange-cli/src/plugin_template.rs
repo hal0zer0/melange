@@ -420,15 +420,20 @@ fn generate_process_loop(
         ""
     };
 
-    let pot_reads: String = pots
-        .iter()
-        .map(|p| {
-            format!(
-                "            let pot_{i}_val = self.params.pot_{i}.smoothed.next() as f64;\n",
-                i = p.index,
-            )
-        })
-        .collect();
+    // Pot reads: per-sample for DK (SM correction is O(N²)),
+    // per-block for nodal (set_pot triggers O(N³) rebuild)
+    let pot_reads: String = if nodal_mode {
+        String::new() // moved to pot_pre_loop
+    } else {
+        pots.iter()
+            .map(|p| {
+                format!(
+                    "            let pot_{i}_val = self.params.pot_{i}.smoothed.next() as f64;\n",
+                    i = p.index,
+                )
+            })
+            .collect()
+    };
 
     // Switch reads + assignments: done once per buffer before the sample loop
     // (no smoother, and set_switch triggers O(N³) matrix rebuild)
@@ -462,24 +467,54 @@ fn generate_process_loop(
         })
         .collect();
 
-    let pot_assignments: String = pots
-        .iter()
-        .map(|p| {
-            if nodal_mode {
-                // Nodal path: call set_pot_N() to re-stamp G and rebuild matrices (only on change)
-                format!(
-                    "                state.set_pot_{i}(pot_{i}_val);\n",
-                    i = p.index,
-                )
-            } else {
+    let pot_assignments: String = if nodal_mode {
+        String::new() // moved to pot_pre_loop
+    } else {
+        pots.iter()
+            .map(|p| {
                 // DK path: set resistance directly (SM correction applied per-sample in process_sample)
                 format!(
                     "                state.pot_{i}_resistance = pot_{i}_val;\n",
                     i = p.index,
                 )
-            }
-        })
-        .collect();
+            })
+            .collect()
+    };
+
+    // Nodal pot reads: done once per buffer before the sample loop (O(N³) rebuild per change)
+    let pot_pre_loop: String = if nodal_mode && !pots.is_empty() {
+        let reads: String = pots
+            .iter()
+            .map(|p| {
+                format!(
+                    "            let pot_{i}_val = self.params.pot_{i}.value() as f64;\n",
+                    i = p.index
+                )
+            })
+            .collect();
+        let assigns: String = if num_outputs > 1 {
+            // Single state for multi-output
+            pots.iter()
+                .map(|p| {
+                    format!(
+                        "            self.circuit_state.set_pot_{i}(pot_{i}_val);\n",
+                        i = p.index
+                    )
+                })
+                .collect()
+        } else {
+            // Per-channel states
+            pots.iter().map(|p| {
+                format!(
+                    "            for state in self.circuit_states.iter_mut() {{ state.set_pot_{i}(pot_{i}_val); }}\n",
+                    i = p.index
+                )
+            }).collect()
+        };
+        format!("        {{ // Per-block pot updates (nodal: O(N³) rebuild on change)\n{reads}{assigns}        }}\n")
+    } else {
+        String::new()
+    };
 
     // Switch assignments removed from inner loop — handled in switch_pre_loop above
 
@@ -563,6 +598,7 @@ fn generate_process_loop(
 
     format!(
         "{switch_pre_loop}\
+         {pot_pre_loop}\
          {ep_read}\
          \x20       for channel_samples in buffer.iter_samples() {{\n\
          {gain_reads}\

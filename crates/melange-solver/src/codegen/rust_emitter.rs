@@ -3771,8 +3771,7 @@ impl RustEmitter {
             0.0
         };
         let k_degenerate = m > 0 && k_max_abs < 1e-6;
-        let use_full_nodal =
-            has_positive_k_with_current || k_diag_min < -1e12 || k_degenerate;
+        let use_full_nodal = has_positive_k_with_current || k_diag_min < -1e12 || k_degenerate;
         if use_full_nodal {
             if has_positive_k_with_current {
                 log::info!(
