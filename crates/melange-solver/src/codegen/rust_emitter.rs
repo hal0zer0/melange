@@ -3749,11 +3749,27 @@ impl RustEmitter {
         } else {
             0.0
         };
-        let use_full_nodal = has_positive_k_with_current || k_diag_min < -1e12;
+        // Also check for degenerate K (all near-zero) — Schur decomposition is
+        // numerically unstable when K provides no NR feedback, because the S_NI
+        // amplification creates positive feedback through a_neg without damping.
+        let k_max_abs = if m > 0 {
+            (0..m * m)
+                .map(|i| ir.matrices.k[i].abs())
+                .fold(0.0_f64, f64::max)
+        } else {
+            0.0
+        };
+        let k_degenerate = m > 0 && k_max_abs < 1e-6;
+        let use_full_nodal = has_positive_k_with_current || k_diag_min < -1e12 || k_degenerate;
         if use_full_nodal {
             if has_positive_k_with_current {
                 log::info!(
                     "Nodal: using full N×N LU NR (positive K diagonal with current injection)"
+                );
+            } else if k_degenerate {
+                log::info!(
+                    "Nodal: using full N×N LU NR (K degenerate, max|K|={:.2e})",
+                    k_max_abs
                 );
             } else {
                 log::info!(
