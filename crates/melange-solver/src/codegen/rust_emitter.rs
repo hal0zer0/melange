@@ -6052,7 +6052,7 @@ impl RustEmitter {
             code.push_str(
                 "    // Gmin regularization: improves conditioning for high-gain VCCS (op-amps)\n",
             );
-            code.push_str("    for i in 0..N_NODES { g_aug[i][i] += 1e-6; }\n");
+            code.push_str("    for i in 0..N_NODES { g_aug[i][i] += 1e-12; }\n");
             code.push_str("    let mut v = rhs;\n");
             code.push_str("    if !lu_solve(&mut g_aug, &mut v) {\n");
             code.push_str("        v = state.v_prev;\n");
@@ -6122,7 +6122,7 @@ impl RustEmitter {
             );
             code.push_str("        let mut g_aug = state.a;\n");
             code.push_str("        // Gmin regularization\n");
-            code.push_str("        for i in 0..N_NODES { g_aug[i][i] += 1e-6; }\n");
+            code.push_str("        for i in 0..N_NODES { g_aug[i][i] += 1e-12; }\n");
             {
                 // Build transpose of N_i sparsity: for each device dim i, which nodes a are nonzero
                 let mut ni_nz_by_dev = vec![Vec::new(); m];
@@ -6536,7 +6536,7 @@ impl RustEmitter {
             // Build Jacobian for BE (sparse, same structure as trapezoidal)
             code.push_str("            let mut g_aug = state.a_be;\n");
             code.push_str("            // Gmin regularization\n");
-            code.push_str("            for i in 0..N_NODES { g_aug[i][i] += 1e-6; }\n");
+            code.push_str("            for i in 0..N_NODES { g_aug[i][i] += 1e-12; }\n");
             {
                 let mut ni_nz_by_dev = vec![Vec::new(); m];
                 for (a, cols) in ir.sparsity.n_i.nz_by_row.iter().enumerate() {
