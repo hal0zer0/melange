@@ -226,7 +226,7 @@ fn generate_pot_default(pot: &PotParamInfo) -> String {
                 FloatRange::Skewed {{
                     min: {min:.1},
                     max: {max:.1},
-                    factor: FloatRange::skew_factor({min_ln}, {max_ln}),
+                    factor: FloatRange::skew_factor({center:.1}),
                 }},
             )
             .with_smoother(SmoothingStyle::Linear(10.0))
@@ -237,8 +237,7 @@ fn generate_pot_default(pot: &PotParamInfo) -> String {
             default = pot.default_resistance,
             min = pot.min_resistance,
             max = pot.max_resistance,
-            min_ln = pot.min_resistance.ln(),
-            max_ln = pot.max_resistance.ln(),
+            center = (pot.min_resistance * pot.max_resistance).sqrt(),
         )
     } else {
         format!(
