@@ -215,7 +215,7 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
 - **Runtime solver** (`DeviceEntry`) supports all device types: Diode, DiodeWithRs, Led, BJT, JFET, MOSFET, Tube
 - **NodalSolver transient NR**: Converges for all physically valid circuits including Pultec EQP-1A (4 tubes, 2 transformers, global NFB). Requires positive-definite inductance matrices (validated at MNA build time).
 - **`melange simulate`**: auto-selects NodalSolver for nonlinear circuits with inductors, CircuitSolver (DK) otherwise. `--solver nodal|dk` override available.
-- **Performance**: DK codegen circuits run 100-600× realtime. Nodal codegen (multi-transformer): ~0.6× realtime for Pultec (41-node, 8 NL). Schur complement reduction planned for multi-transformer realtime.
+- **Performance**: DK codegen circuits run 100-600× realtime. Nodal Schur codegen: 15× realtime for Pultec (41-node, 8 NL, 2 transformers). Nodal full-LU: slower but used only for K≈0 circuits (VCA).
 
 ### Cross-Compilation (macOS from Linux)
 - Zig 0.13 + cargo-zigbuild + macOS SDK 13.3 + rcodesign (ad-hoc signing)
@@ -228,9 +228,9 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
   - Verified against Sowter DWG E-72,658-2 schematic + Peerless/Triad winding data (2026-03-18)
   - HS-29: 1:2 step-up, 37H, true push-pull grid drive (both grids from CT secondary)
   - S-217-D: 220H primary (30Hz), 71-turn tertiary feedback, 220pF 12AU7 grid stabilization
-  - Uses NodalSolver codegen path (2 transformer groups → DK K matrix unstable)
-  - Gain: +21-27 dB (amp) - 23 dB (EQ) = -2 to +4 dB net (target: 0 dB)
-  - Not realtime (0.6×) — needs Schur complement optimization
+  - Uses nodal Schur codegen path (2 transformer groups → DK K matrix unstable)
+  - Gain: +22-29 dB (amp), consistent 20Hz-10kHz with natural HF rolloff
+  - 15.4× realtime (1.3 µs/sample), zero NR failures
 - `circuits/wurli-preamp.cir`: Wurlitzer 200A preamp (N=11, M=5→3 FA, 2 BJTs + 1 diode, 1 pot)
   - Flattened from openwurli/spice/subcircuits/preamp.cir
   - R1-Cin series input coupling via intermediate node (mid_in)
@@ -257,11 +257,11 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
 - **Validate wurli-preamp**: SPICE comparison, gain at R_ldr extremes, frequency response
 - **Documentation**: User-facing docs, example circuits, getting-started guide
 
-#### Performance — Schur Complement for Multi-Transformer
-- Reduce N×N NR to M×M for nodal path (same as DK but handling multi-transformer coupling)
-- Would bring Pultec from 0.6× to ~8× realtime
-- Jacobian reuse (chord method): additional 2-3× on top
-- Fast exp() approximation: 15-25% free speedup
+#### Performance — Further Optimization
+- Pultec already at 15× RT (Schur complement implemented). Further optimization optional:
+- Hot/cold state split: 112KB struct → ~30KB hot path (L1 cache friendly)
+- Jacobian reuse (chord method): skip tube Jacobian re-evaluation on NR iterations 1+
+- fast_powf for Koren tube model: replace libm powf (~40ns) with fast approximation (~10ns)
 
 #### Future — Multi-Language Codegen
 The `Emitter` trait + `CircuitIR` are language-agnostic by design. Once Rust output is complete, planned targets in priority order: C++ (pro plugin devs), FAUST (compiles to 30+ targets), Python/NumPy (prototyping), MATLAB/Octave (academic).
