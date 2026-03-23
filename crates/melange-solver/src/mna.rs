@@ -327,9 +327,11 @@ pub struct VcaInfo {
     /// Current mode: I_out = G(Vc) * I_in (THAT 2180 style translinear).
     /// When false (default): voltage mode, I_out = G(Vc) * V_sig.
     pub current_mode: bool,
-    /// Augmented row index for current-sensing source (1-indexed, 0 = none).
-    /// Set during MNA stamping when current_mode is true.
+    /// Augmented row for current-sensing branch current (1-indexed, 0 = none).
     pub n_sense_idx: usize,
+    /// Internal signal node sig+_int (1-indexed, 0 = none).
+    /// Between sensing source and dummy termination resistor.
+    pub n_internal_idx: usize,
 }
 
 /// Component within a switch directive, resolved to MNA node indices.
@@ -2436,9 +2438,12 @@ impl MnaBuilder {
             .filter(|oa| oa.gbw.is_finite() && oa.gbw > 0.0)
             .count();
         // Count current-mode VCAs (each needs an augmented row for current sensing)
-        let num_vca_sense = mna.vcas.iter().filter(|v| v.current_mode).count();
+        // Each current-mode VCA needs 2 augmented rows:
+        // [0] internal node (sig+_int) with dummy R to ground
+        // [1] sensing source branch current
+        let num_vca_augmented = mna.vcas.iter().filter(|v| v.current_mode).count() * 2;
         let n_aug =
-            n_base + num_vs + num_vcvs + num_ideal_xfmr + num_opamp_internal + num_vca_sense;
+            n_base + num_vs + num_vcvs + num_ideal_xfmr + num_opamp_internal + num_vca_augmented;
         mna.n_aug = n_aug;
 
         // Expand G, C, N_v, N_i to n_aug dimensions (extra rows/cols are zero).
@@ -2690,17 +2695,27 @@ impl MnaBuilder {
         }
 
         // Allocate augmented rows for current-mode VCA sensing sources
-        let vca_sense_base = opamp_int_base + num_opamp_internal;
-        let mut vca_sense_idx = 0;
+        let vca_aug_base = opamp_int_base + num_opamp_internal;
+        let mut vca_aug_idx = 0;
         for vca in &mut mna.vcas {
             if vca.current_mode {
-                let k = vca_sense_base + vca_sense_idx;
-                vca_sense_idx += 1;
-                vca.n_sense_idx = k + 1; // 1-indexed
+                let int_node = vca_aug_base + vca_aug_idx; // sig+_int
+                let sense_row = vca_aug_base + vca_aug_idx + 1; // branch current
+                vca_aug_idx += 2;
+                vca.n_internal_idx = int_node + 1; // 1-indexed
+                vca.n_sense_idx = sense_row + 1; // 1-indexed
+
+                // Stamp dummy resistor from sig+_int to ground (1 megaohm)
+                // This terminates the internal node so KCL is satisfied
+                // without creating a current path to sig-
+                let g_dummy = 1e-6; // 1/1MEG
+                mna.g[int_node][int_node] += g_dummy;
+
                 log::debug!(
-                    "VCA {} (current mode): sensing source at augmented row {}",
+                    "VCA {} (current mode): internal={}, sense={}, Rdummy=1MEG",
                     vca.name,
-                    k
+                    int_node,
+                    sense_row
                 );
             }
         }
@@ -3014,37 +3029,38 @@ impl MnaBuilder {
                             // CURRENT MODE (THAT 2180 style translinear):
                             //   I_out = G(Vc) * I_in
                             //
-                            // A 0V voltage source at sig+ senses I_in as an augmented
-                            // MNA variable. The NR dim 0 extracts this branch current
-                            // via N_v, and N_i injects G*I_in at sig-.
+                            // Uses an internal node (sig+_int) to break the path between
+                            // sig+ and sig-. The 0V sensing source between sig+ and
+                            // sig+_int measures I_in. A dummy 1MEG resistor terminates
+                            // sig+_int to ground (the VCA absorbs the input current).
+                            // N_i injects G*I_in at sig- independently — no linear
+                            // pass-through from sig+ to sig-.
                             //
-                            // Augmented row k: stamps ±1 for the 0V sensing source
-                            // at sig+ (series with whatever drives the VCA input).
+                            // This matches ngspice's CCCS topology:
+                            //   Vsense sig+ sig+_int 0
+                            //   Rdummy sig+_int 0 1MEG
+                            //   Bvca 0 sig- I={G*I(Vsense)}
                             let k = mna.vcas[vca_idx].n_sense_idx;
-                            if k > 0 {
-                                let k0 = k - 1; // 0-indexed
+                            let int = mna.vcas[vca_idx].n_internal_idx;
+                            if k > 0 && int > 0 {
+                                let k0 = k - 1; // sense row (0-indexed)
+                                let int0 = int - 1; // internal node (0-indexed)
 
-                                // 0V source between sig+ external and sig+ internal
+                                // 0V sensing source between sig+ and sig+_int
                                 // KVL: V(sig+) - V(sig+_int) = 0
-                                // We stamp into G: g[k][sig+] = +1, g[k][sig+_int] = -1
-                                // But sig+_int doesn't exist as separate node —
-                                // the source IS at sig+, sensing current INTO sig+.
-                                // Stamp like a VS: g[k][sig+] = +1 and g[sig+][k] = +1
                                 if sp_raw > 0 {
                                     mna.g[k0][sp_raw - 1] += 1.0;
                                     mna.g[sp_raw - 1][k0] += 1.0;
                                 }
-                                if sn_raw > 0 {
-                                    mna.g[k0][sn_raw - 1] -= 1.0;
-                                    mna.g[sn_raw - 1][k0] -= 1.0;
-                                }
+                                mna.g[k0][int0] -= 1.0;
+                                mna.g[int0][k0] -= 1.0;
+                                // (Rdummy at sig+_int already stamped during allocation)
 
-                                // N_v row 0: extract branch current (augmented variable)
-                                // The branch current is at index k0 in the voltage vector
+                                // N_v row 0: extract branch current (sense variable)
                                 mna.n_v[start_idx][k0] = 1.0;
 
-                                // N_i col 0: inject I_out = G*I_in at sig- only
-                                // (not sig+ — the sensing source handles sig+ current)
+                                // N_i col 0: inject I_out = G*I_in at sig- ONLY
+                                // No injection at sig+ — decoupled input/output
                                 if sn_raw > 0 {
                                     mna.n_i[sn_raw - 1][start_idx] = 1.0;
                                 }
@@ -3524,6 +3540,7 @@ impl MnaBuilder {
                     g0: 1.0,
                     current_mode: false,
                     n_sense_idx: 0,
+                    n_internal_idx: 0,
                 });
             }
             Element::SubcktInstance { name, .. } => {
