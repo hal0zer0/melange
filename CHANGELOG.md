@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **VCA device type**: THAT 2180 / DBX 2150 Blackmer model (`Y` element prefix)
+  - 4-terminal current-mode exponential gain: `I = G0 * exp(-Vc/VSCALE) * V_sig`
+  - Gain-dependent THD parameter for harmonic distortion modeling
+  - NOISE_FLOOR parameter (parse-only, for future plugin-level noise injection)
+  - Full pipeline: parser, MNA, DK, nodal, codegen, runtime, CLI
+- **Boyle op-amp macromodel**: GBW parameter adds internal gain node with dominant pole
+  - `C_dom = AOL / (2π × GBW × ROUT)` at internal node, ROUT to output
+  - Proper bandwidth limiting without loading feedback network
+- **Op-amp VSAT clamping**: output + internal Boyle nodes clamped after LU solve
+- **Nodal solver Gmin regularization**: 1e-6 S on circuit nodes for conditioning
+- **Adaptive sub-stepping**: when trapezoidal NR fails, subdivide timestep (2×/4×/8×)
+  with recomputed `A = G + (2*subdiv/T)*C` for better conditioning
+- **Positive-K routing**: circuits with positive K diagonal automatically use
+  full N×N LU NR instead of Schur M-dim (handles positive-feedback topologies)
+- **SSL 4000E bus compressor** builtin circuit (from schemer schematic transcription)
+- **Ear-protection soft limiter**: default-on `BoolParam` in generated plugins,
+  cubic soft-knee at 0.9, toggleable at runtime, `--no-ear-protection` to omit
+- **Codegen clippy fixes**: 9 lint categories suppressed in generated code headers
+
+### Fixed
+- VCA VSCALE default: 0.00528 → 0.05298 (was 10x off)
+- GP q2 uses plain VT (not NF*VT) matching SPICE3f5
+- Runtime GP q2 consistency (codegen was fixed, runtime wasn't)
+- 12AX7 default Kg1: 1060 → 3000 (datasheet-accurate plate current)
+- JFET/MOSFET subthreshold Jacobian gm=0 at threshold
+- Diode BV smooth transition (removed hard step)
+- Multi-output plugin template struct field mismatch
+- NaN reset uses DC_NL_I + clears oversampling state + BE cooldown
+- Junction capacitance validation (CJO/CJE/CJC/CGS/CGD/CCG/CGP/CCP)
+- JFET/MOSFET RD/RS validation, tube RGI finiteness check
+- Parasitic cap auto-insertion in production (was test-only)
+- DC block denormal protection (+1e-25 bias)
+- Plugin CLI build instructions (cargo nih-plug bundle)
+- Mix parameter display (0-100% not 0-1%)
+- Circuit name sanitization, pot/switch label escaping
+
 ## [0.2.0] - 2026-03-19
 
 ### Added
