@@ -85,6 +85,10 @@ pub struct MnaSystem {
     /// Linearized BJTs: small-signal conductances stamped into G.
     /// These BJTs are NOT in the nonlinear device list (M reduced by 2 each).
     pub linearized_bjts: Vec<LinearizedBjtInfo>,
+    /// Pot default overrides: resistor name (uppercase) → default resistance.
+    /// When a .pot has a default value, the G matrix is stamped at this value
+    /// (not the component declaration value). Empty for circuits without .pot defaults.
+    pub pot_default_overrides: HashMap<String, f64>,
 }
 
 /// Augmented-MNA extra row/column info for a VCVS element.
@@ -424,6 +428,7 @@ impl MnaSystem {
             vcas: Vec::new(),
             bjt_internal_nodes: Vec::new(),
             linearized_bjts: Vec::new(),
+            pot_default_overrides: HashMap::new(),
         }
     }
 
@@ -1934,11 +1939,13 @@ impl MnaBuilder {
                 let node_p = self.node_map[n_plus];
                 let node_q = self.node_map[n_minus];
                 let grounded = node_p == 0 || node_q == 0;
+                // Use pot default if specified, otherwise fall back to component value
+                let nominal_r = pot_dir.default_value.unwrap_or(*value);
                 mna.pots.push(PotInfo {
                     name: pot_dir.resistor_name.clone(),
                     node_p,
                     node_q,
-                    g_nominal: 1.0 / *value,
+                    g_nominal: 1.0 / nominal_r,
                     min_resistance: pot_dir.min_value,
                     max_resistance: pot_dir.max_value,
                     grounded,
@@ -1950,6 +1957,18 @@ impl MnaBuilder {
                 )));
             }
         }
+
+        // Build pot default override map: resistor name → default resistance.
+        // When a .pot has a default value that differs from the component value,
+        // the G matrix should be stamped at the pot default, not the component value.
+        let pot_default_overrides: std::collections::HashMap<String, f64> = netlist
+            .pots
+            .iter()
+            .filter_map(|p| {
+                p.default_value.map(|dv| (p.resistor_name.to_ascii_uppercase(), dv))
+            })
+            .collect();
+        mna.pot_default_overrides = pot_default_overrides;
 
         // Resolve switch directives
         for sw_dir in &netlist.switches {
@@ -2601,7 +2620,14 @@ impl MnaBuilder {
             match elem.element_type {
                 ElementType::Resistor => {
                     if elem.nodes.len() >= 2 && elem.value != 0.0 {
-                        let g = 1.0 / elem.value;
+                        // Use pot default override if available (stamps G at the pot's
+                        // default position rather than the component declaration value)
+                        let r = mna
+                            .pot_default_overrides
+                            .get(&elem.name.to_ascii_uppercase())
+                            .copied()
+                            .unwrap_or(elem.value);
+                        let g = 1.0 / r;
                         stamp_conductance_to_ground(&mut mna.g, elem.nodes[0], elem.nodes[1], g);
                     }
                 }

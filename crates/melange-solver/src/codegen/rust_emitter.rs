@@ -1393,11 +1393,20 @@ impl RustEmitter {
                         ));
                     }
                     'L' => {
-                        // Inductors: don't modify G/C here; handled in inductor companion stamp below
-                        code.push_str(
-                            "            // Inductor: handled in companion model stamp below\n",
-                        );
-                        code.push_str("            let _ = new_val;\n");
+                        if let Some(aug_row) = comp.augmented_row {
+                            // Augmented MNA: L value lives on diagonal of branch variable row
+                            code.push_str(&format!(
+                                "            let delta_l = new_val - {};\n\
+                                 \x20           c_eff[{}][{}] += delta_l;\n",
+                                nominal, aug_row, aug_row,
+                            ));
+                        } else {
+                            // DK companion model: handled in inductor companion stamp below
+                            code.push_str(
+                                "            // Inductor: handled in companion model stamp below\n",
+                            );
+                            code.push_str("            let _ = new_val;\n");
+                        }
                     }
                     _ => {}
                 }
@@ -4783,8 +4792,8 @@ impl RustEmitter {
             code.push_str(&format!(
                 "    /// Set potentiometer {} resistance (clamped to [{:.1}..{:.1}] ohms).\n\
                  \x20   ///\n\
-                 \x20   /// O(1) cost: stamps delta conductance directly into A matrices.\n\
-                 \x20   /// Safe to call per-sample.\n",
+                 \x20   /// Updates g_work and rebuilds all matrices (O(N^3)).\n\
+                 \x20   /// Call per-block, not per-sample.\n",
                 idx, pot.min_resistance, pot.max_resistance
             ));
             code.push_str(&format!(
@@ -4867,6 +4876,7 @@ impl RustEmitter {
             }
 
             code.push_str(&format!("\n        self.pot_{}_resistance = r;\n", idx));
+            code.push_str("        self.rebuild_matrices(self.current_sample_rate);\n");
             code.push_str("    }\n\n");
         }
 
@@ -4916,30 +4926,39 @@ impl RustEmitter {
                     ));
                 }
 
-                // Stamp delta
-                if np > 0 {
+                // Stamp delta into g_work or c_work
+                if comp.component_type == 'L' && comp.augmented_row.is_some() {
+                    // Augmented MNA: L value on diagonal of branch variable row
+                    let aug_row = comp.augmented_row.unwrap();
                     code.push_str(&format!(
-                        "        self.{matrix}[{}][{}] += delta_{ci};\n",
-                        np - 1,
-                        np - 1
+                        "        self.c_work[{aug_row}][{aug_row}] += delta_{ci};\n"
                     ));
-                }
-                if nq > 0 {
-                    code.push_str(&format!(
-                        "        self.{matrix}[{}][{}] += delta_{ci};\n",
-                        nq - 1,
-                        nq - 1
-                    ));
-                }
-                if np > 0 && nq > 0 {
-                    code.push_str(&format!(
-                        "        self.{matrix}[{}][{}] -= delta_{ci};\n\
-                         \x20       self.{matrix}[{}][{}] -= delta_{ci};\n",
-                        np - 1,
-                        nq - 1,
-                        nq - 1,
-                        np - 1
-                    ));
+                } else {
+                    // R or C: conductance stamp at circuit nodes
+                    if np > 0 {
+                        code.push_str(&format!(
+                            "        self.{matrix}[{}][{}] += delta_{ci};\n",
+                            np - 1,
+                            np - 1
+                        ));
+                    }
+                    if nq > 0 {
+                        code.push_str(&format!(
+                            "        self.{matrix}[{}][{}] += delta_{ci};\n",
+                            nq - 1,
+                            nq - 1
+                        ));
+                    }
+                    if np > 0 && nq > 0 {
+                        code.push_str(&format!(
+                            "        self.{matrix}[{}][{}] -= delta_{ci};\n\
+                             \x20       self.{matrix}[{}][{}] -= delta_{ci};\n",
+                            np - 1,
+                            nq - 1,
+                            nq - 1,
+                            np - 1
+                        ));
+                    }
                 }
                 code.push('\n');
             }

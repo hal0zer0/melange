@@ -247,6 +247,11 @@ pub struct SwitchComponentIR {
     pub nominal_value: f64,
     /// For 'L' components: index into the inductors vec (for g_eq recomputation)
     pub inductor_index: Option<usize>,
+    /// For 'L' components in augmented MNA: row index in augmented C matrix
+    /// where the inductance value lives (c_work[k][k] = L). None for DK path
+    /// or non-inductor components.
+    #[serde(default)]
+    pub augmented_row: Option<usize>,
 }
 
 /// Switch parameters for code generation.
@@ -1057,6 +1062,7 @@ impl CircuitIR {
                             node_q: comp.node_q,
                             nominal_value: comp.nominal_value,
                             inductor_index,
+                            augmented_row: None, // DK path uses companion model
                         }
                     })
                     .collect();
@@ -1474,32 +1480,67 @@ impl CircuitIR {
                     grounded: p.grounded,
                 })
                 .collect(),
-            switches: mna
-                .switches
-                .iter()
-                .enumerate()
-                .map(|(idx, sw)| {
-                    SwitchIR {
-                        index: idx,
-                        components: sw
-                            .components
-                            .iter()
-                            .map(|comp| {
-                                SwitchComponentIR {
-                                    name: comp.name.clone(),
-                                    component_type: comp.component_type,
-                                    node_p: comp.node_p,
-                                    node_q: comp.node_q,
-                                    nominal_value: comp.nominal_value,
-                                    inductor_index: None, // augmented MNA handles inductors differently
-                                }
-                            })
-                            .collect(),
-                        positions: sw.positions.clone(),
-                        num_positions: sw.positions.len(),
+            switches: {
+                // Build inductor name → augmented row mapping for switch L components.
+                // In augmented MNA, each inductor's L value lives on the C matrix diagonal
+                // at row n_aug + offset (not at circuit node rows).
+                let mut inductor_aug_rows: std::collections::HashMap<String, usize> =
+                    std::collections::HashMap::new();
+                let mut var_idx = n_aug;
+                for ind in &mna.inductors {
+                    inductor_aug_rows
+                        .insert(ind.name.to_ascii_uppercase(), var_idx);
+                    var_idx += 1;
+                }
+                for ci in &mna.coupled_inductors {
+                    inductor_aug_rows
+                        .insert(ci.l1_name.to_ascii_uppercase(), var_idx);
+                    inductor_aug_rows
+                        .insert(ci.l2_name.to_ascii_uppercase(), var_idx + 1);
+                    var_idx += 2;
+                }
+                for group in &mna.transformer_groups {
+                    for (widx, name) in group.winding_names.iter().enumerate() {
+                        inductor_aug_rows
+                            .insert(name.to_ascii_uppercase(), var_idx + widx);
                     }
-                })
-                .collect(),
+                    var_idx += group.num_windings;
+                }
+
+                mna.switches
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, sw)| {
+                        SwitchIR {
+                            index: idx,
+                            components: sw
+                                .components
+                                .iter()
+                                .map(|comp| {
+                                    let augmented_row = if comp.component_type == 'L' {
+                                        inductor_aug_rows
+                                            .get(&comp.name.to_ascii_uppercase())
+                                            .copied()
+                                    } else {
+                                        None
+                                    };
+                                    SwitchComponentIR {
+                                        name: comp.name.clone(),
+                                        component_type: comp.component_type,
+                                        node_p: comp.node_p,
+                                        node_q: comp.node_q,
+                                        nominal_value: comp.nominal_value,
+                                        inductor_index: None,
+                                        augmented_row,
+                                    }
+                                })
+                                .collect(),
+                            positions: sw.positions.clone(),
+                            num_positions: sw.positions.len(),
+                        }
+                    })
+                    .collect()
+            },
             opamps: mna
                 .opamps
                 .iter()
