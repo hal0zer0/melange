@@ -121,6 +121,37 @@ pub const CATALOG: &[TubeCatalogEntry] = &[
         lambda: 0.0,
         source: "Koren fit to RCA 6SL7GT datasheet",
     },
+    // 6SN7 / 6SN7GT — medium-mu dual triode (mu=20), the "Fairchild tube".
+    // Koren fit to Sylvania/RCA 6SN7GT datasheet curves.
+    // Like all Koren single-mu fits, overestimates current at Vgk=0.
+    //   Koren:    Vgk=0 → ~20mA,  Vgk=-4 → ~12mA,  Vgk=-8 → ~5mA  (at Vpk=250V)
+    //   Datasheet: Vgk=0 → ~9mA,  Vgk=-4 → ~3mA,  Vgk=-8 → ~0.5mA (RCA 6SN7GT)
+    TubeCatalogEntry {
+        names: &["6SN7", "6SN7GT", "6SN7GTA", "6SN7GTB"],
+        mu: 20.0,
+        ex: 1.4,
+        kg1: 1680.0,
+        kp: 600.0,
+        kvb: 300.0,
+        ig_max: 2e-3,
+        vgk_onset: 0.5,
+        lambda: 0.0,
+        source: "Koren fit to Sylvania/RCA 6SN7GT datasheet",
+    },
+    // 6J5 / 6J5GT — single triode version of 6SN7 (same electrical characteristics).
+    // Identical Koren parameters; only physical packaging differs (single vs dual triode).
+    TubeCatalogEntry {
+        names: &["6J5", "6J5GT"],
+        mu: 20.0,
+        ex: 1.4,
+        kg1: 1680.0,
+        kp: 600.0,
+        kvb: 300.0,
+        ig_max: 2e-3,
+        vgk_onset: 0.5,
+        lambda: 0.0,
+        source: "Same as 6SN7GT (single triode version)",
+    },
     // 6V6 / 6V6GT — beam power tube (triode-connected).
     // Koren fit for triode mode: mu=8.7, ex=1.35, Kg1=1460, Kp=48, Kvb=12
     TubeCatalogEntry {
@@ -452,6 +483,70 @@ mod tests {
     }
 
     #[test]
+    fn test_6sn7_lookup() {
+        let entry = lookup("6SN7").unwrap();
+        assert_eq!(entry.mu, 20.0);
+        assert_eq!(entry.ex, 1.4);
+        assert_eq!(entry.kg1, 1680.0);
+        assert_eq!(entry.kp, 600.0);
+        assert_eq!(entry.kvb, 300.0);
+        // All aliases should resolve to the same entry
+        assert!(lookup("6SN7GT").is_some());
+        assert!(lookup("6SN7GTA").is_some());
+        assert!(lookup("6SN7GTB").is_some());
+        assert!(lookup("6sn7").is_some()); // case insensitive
+    }
+
+    #[test]
+    fn test_6j5_matches_6sn7() {
+        let sn7 = lookup("6SN7").unwrap();
+        let j5 = lookup("6J5").unwrap();
+        // 6J5 is the single triode version of 6SN7 — same electrical params
+        assert_eq!(j5.mu, sn7.mu);
+        assert_eq!(j5.ex, sn7.ex);
+        assert_eq!(j5.kg1, sn7.kg1);
+        assert_eq!(j5.kp, sn7.kp);
+        assert_eq!(j5.kvb, sn7.kvb);
+        assert_eq!(j5.ig_max, sn7.ig_max);
+        assert_eq!(j5.vgk_onset, sn7.vgk_onset);
+        assert_eq!(j5.lambda, sn7.lambda);
+        // 6J5GT alias
+        assert!(lookup("6J5GT").is_some());
+    }
+
+    #[test]
+    fn test_6sn7_operating_points() {
+        let t = make_tube(lookup("6SN7").unwrap());
+        // RCA 6SN7GT datasheet: Vgk=0V, Vpk=250V → Ip ≈ 9mA
+        // Koren single-mu model overestimates (~20mA), same pattern as 12AU7.
+        // Accept wide range: model accuracy vs datasheet is known limitation.
+        let ip0 = t.plate_current(0.0, 250.0);
+        assert!(
+            ip0 > 5e-3 && ip0 < 40e-3,
+            "6SN7 Vgk=0: Ip={:.1}mA (datasheet ~9mA, Koren overestimates)",
+            ip0 * 1e3
+        );
+        // RCA datasheet: Vgk=-8V, Vpk=250V → Ip ≈ 0.5mA (near cutoff)
+        // Koren model gives ~5mA (overestimates near cutoff)
+        let ip_m8 = t.plate_current(-8.0, 250.0);
+        assert!(
+            ip_m8 > 0.1e-3 && ip_m8 < 15e-3,
+            "6SN7 Vgk=-8: Ip={:.1}mA (datasheet ~0.5mA)",
+            ip_m8 * 1e3
+        );
+        // Monotonicity: more negative grid → less current
+        assert!(
+            ip_m8 < ip0,
+            "6SN7: Ip should decrease with more negative Vgk"
+        );
+        // Deep cutoff: Vgk=-20V → Ip ≈ 0 (6SN7 has low mu, needs deeper cutoff like 12AU7)
+        assert!(
+            t.plate_current(-20.0, 250.0) < 0.1e-3,
+            "6SN7 should be near cutoff at Vgk=-20"
+        );
+    }
+
+    #[test]
     fn test_6v6_triode_operating_points() {
         let t = make_tube(lookup("6V6").unwrap());
         // 6V6 triode-connected: Vgk=0V, Vpk=250V → Ip ≈ 40-60mA
@@ -555,6 +650,14 @@ mod tests {
     #[test]
     fn test_6sl7_jacobian() {
         check_jacobian(lookup("6SL7").unwrap());
+    }
+    #[test]
+    fn test_6sn7_jacobian() {
+        check_jacobian(lookup("6SN7").unwrap());
+    }
+    #[test]
+    fn test_6j5_jacobian() {
+        check_jacobian(lookup("6J5").unwrap());
     }
     #[test]
     fn test_6v6_jacobian() {
