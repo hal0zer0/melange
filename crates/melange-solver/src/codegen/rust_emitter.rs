@@ -6213,27 +6213,9 @@ impl RustEmitter {
             code.push_str("            break;\n");
             code.push_str("        }\n\n");
 
-            // Clamp op-amp outputs to VSAT (trapezoidal NR path)
-            if !ir.opamps.is_empty() {
-                code.push_str("        // Clamp op-amp outputs to VSAT\n");
-                for oa in &ir.opamps {
-                    code.push_str(&format!(
-                        "        v_new[{idx}] = v_new[{idx}].clamp({neg:.17e}, {pos:.17e});\n",
-                        idx = oa.n_out_idx,
-                        neg = -oa.vsat,
-                        pos = oa.vsat,
-                    ));
-                    if let Some(int_idx) = oa.n_internal_idx {
-                        code.push_str(&format!(
-                            "        v_new[{idx}] = v_new[{idx}].clamp({neg:.17e}, {pos:.17e});\n",
-                            idx = int_idx,
-                            neg = -oa.vsat,
-                            pos = oa.vsat,
-                        ));
-                    }
-                }
-                code.push('\n');
-            }
+            // NOTE: no VSAT clamping inside NR loop — mid-NR clamping creates
+            // discontinuities the Jacobian doesn't account for, causing oscillation.
+            // VSAT is applied post-convergence (matching runtime NodalSolver).
 
             // 2f. SPICE-style voltage limiting + global node damping
             code.push_str("        // 2f. SPICE voltage limiting + node damping\n");
@@ -6609,25 +6591,7 @@ impl RustEmitter {
             code.push_str("            let mut v_new = rhs_work;\n");
             code.push_str("            if !lu_solve(&mut g_aug, &mut v_new) { break; }\n\n");
 
-            // Clamp op-amp outputs to VSAT (BE fallback path)
-            if !ir.opamps.is_empty() {
-                code.push_str("            // Clamp op-amp outputs to VSAT\n");
-                for oa in &ir.opamps {
-                    code.push_str(&format!(
-                        "            v_new[{idx}] = v_new[{idx}].clamp({neg:.17e}, {pos:.17e});\n",
-                        idx = oa.n_out_idx,
-                        neg = -oa.vsat,
-                        pos = oa.vsat,
-                    ));
-                    if let Some(int_idx) = oa.n_internal_idx {
-                        code.push_str(&format!(
-                            "            v_new[{idx}] = v_new[{idx}].clamp({neg:.17e}, {pos:.17e});\n",
-                            idx = int_idx, neg = -oa.vsat, pos = oa.vsat,
-                        ));
-                    }
-                }
-                code.push('\n');
-            }
+            // No VSAT clamping inside BE NR loop (same reason as trapezoidal).
 
             // Limiting and damping for BE (same structure)
             code.push_str("            let mut alpha = 1.0_f64;\n");
@@ -6704,6 +6668,30 @@ impl RustEmitter {
         code.push_str("        state.diag_nan_reset_count += 1;\n");
         code.push_str("        return [0.0; NUM_OUTPUTS];\n");
         code.push_str("    }\n\n");
+
+        // Post-NR VSAT clamping: clamp op-amp output nodes AFTER convergence,
+        // before storing in state. This prevents unrealistic voltages from feeding
+        // back through a_neg without creating mid-NR discontinuities.
+        if !ir.opamps.is_empty() {
+            code.push_str("    // Clamp op-amp outputs to VSAT (post-NR, before state update)\n");
+            for oa in &ir.opamps {
+                code.push_str(&format!(
+                    "    v[{idx}] = v[{idx}].clamp({neg:.17e}, {pos:.17e});\n",
+                    idx = oa.n_out_idx,
+                    neg = -oa.vsat,
+                    pos = oa.vsat,
+                ));
+                if let Some(int_idx) = oa.n_internal_idx {
+                    code.push_str(&format!(
+                        "    v[{idx}] = v[{idx}].clamp({neg:.17e}, {pos:.17e});\n",
+                        idx = int_idx,
+                        neg = -oa.vsat,
+                        pos = oa.vsat,
+                    ));
+                }
+            }
+            code.push('\n');
+        }
 
         // Step 3: Update state
         code.push_str("    // Step 3: Update state\n");
