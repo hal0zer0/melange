@@ -49,6 +49,7 @@ dense equations, code patterns, and cross-references. The full index is at `docs
 | `docs/aidocs/SIGNAL_LEVELS.md` | Changing signal levels, DC blocking, output scaling |
 | `docs/aidocs/DEBUGGING.md` | Diagnosing solver output issues, known failure signatures |
 | `docs/aidocs/SPICE_VALIDATION.md` | Running or modifying SPICE validation tests |
+| `docs/aidocs/STATUS.md` | Checking validation results, device support, solver routing, circuit status |
 
 ### Critical Sign Conventions
 
@@ -116,7 +117,9 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
 | DC OP NR diverges | Wrong Jacobian sign | Use `G_aug = G_dc - N_i·J_dev·N_v` (subtraction!) |
 | DC OP degenerate (all BJTs off) | Parasitic R (RB/RC/RE) in inner loop | Internal nodes in DC system (basePrime/colPrime/emitPrime) |
 | NodalSolver NaN after DC OP | Inductor currents not initialized | Copy full v_node (incl. inductor branch currents) from DC OP |
-| NodalSolver wrong A_neg | Inductor rows zeroed | Only zero VS/VCVS rows (n_nodes..n_aug), NOT inductor rows (n_aug..n_nodal) |
+| NodalSolver wrong A_neg | Inductor rows zeroed | Zero n_nodes..n_aug (all augmented), NOT n_aug..n_nodal (inductor branches) |
+| Codegen diverges ~5000 samples | Boyle A_neg trapezoidal instability | A_neg must zero ALL augmented rows (Gm ±2000 creates spectral radius > 1) |
+| Codegen stable but wrong level | K≈0, Schur NR has J=I (no damping) | Route K≈0 circuits to full N×N LU NR (device Jacobian in G_aug) |
 
 ## Current Status (2026-03-15)
 
@@ -198,7 +201,10 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
 - **Parasitic cap auto-insertion**: 10pF across device junctions (not to ground) when nonlinear circuit has no caps; stabilizes trapezoidal rule in `from_mna()`
 - **Augmented MNA for inductors**: Each inductor winding adds a branch current variable with L in C matrix (2L/T diagonal, well-conditioned). Replaces companion model (T/(2L) ≈ 8e-8 S for 130H). Supports uncoupled, coupled pairs, and multi-winding transformer groups.
 - **DK codegen with augmented MNA**: Single-transformer inductor circuits use the fast DK path (M×M NR). Simple inductor+diode: 581× realtime. Auto-selected when ≤1 transformer group.
-- **NodalSolver codegen** (fallback for multi-transformer): Full N-dim NR per sample. LU solve with partial pivoting, SPICE pnjlim/fetlim, ngspice node damping, RELTOL convergence, BE fallback. Auto-selected for circuits with 2+ transformer groups (DK K matrix unstable for inter-transformer coupling).
+- **NodalSolver codegen** (fallback for multi-transformer and K≈0): Two paths:
+  - **Schur** (O(N²+M³)): Precomputed S = A^{-1}, M-dim NR. Used when K is well-conditioned.
+  - **Full LU** (O(N³) per iter): Builds G_aug = A - N_I*J_dev*N_V each iteration. Auto-selected for K≈0 (current-mode VCA), positive K diagonal, or K ill-conditioned. Matches runtime NodalSolver exactly.
+  - Auto-selected for 2+ transformer groups, M≥10, or when DK K diagonal check fails.
 - **`melange analyze` with --pot/--switch**: Set pot values and switch positions for frequency sweeps. Auto-applies .pot defaults. NodalSolver support for inductor circuits. 5-second minimum settle time for transformer circuits.
 - **Device model features**: Junction capacitances (CCG/CGP/CCP, CJE/CJC, CGS/CGD, CJO), parasitic resistances (RS, RB/RC/RE, RD/RS, RGI), diode breakdown (BV/IBV), MOSFET body effect (GAMMA/PHI), BJT NF/ISE/NE emission params
 
@@ -240,6 +246,8 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
   - Output pad (390k/6.8k, -35dB) models output transformer attenuation
   - 50mV in → 549mV out (11x / 20.8dB gain), zero NR divergence
 - `ssl-bus-compressor` (builtin): SSL 4000E bus compressor (4 op-amps, 1 VCA, 2 diodes, 2 pots, 2 switches)
+  - Audio path codegen validated: -62.8 dB output matches runtime NodalSolver exactly
+  - Uses nodal full-LU path (K≈0 from current-mode VCA, N=28, M=2)
 
 ### Pending Work
 

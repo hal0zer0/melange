@@ -1266,31 +1266,27 @@ impl CircuitIR {
                 a_neg_flat[i * n + j] = if be { alpha * c } else { alpha * c - g };
             }
         }
-        // Zero VS/VCVS/ideal-transformer algebraic rows in A_neg (NOT inductor or internal node rows)
-        {
-            let num_vs = mna.voltage_sources.len();
-            let num_vcvs = mna.vcvs_sources.len();
-            for vs in &mna.voltage_sources {
-                let row = n_nodes + vs.ext_idx;
-                if row < n {
+        // Zero ALL augmented rows in A_neg (n_nodes..n_aug).
+        // This matches the runtime NodalSolver (solver.rs line ~3199) which
+        // zeros all rows from n_nodes..n_aug, not just VS/VCVS rows.
+        //
+        // For augmented variables that are algebraic (VS, VCVS), this is
+        // mandatory — they have no dynamics (no C), so A_neg = -G and the
+        // trapezoidal history term A_neg*v_prev would inject unstable feedback.
+        //
+        // For Boyle op-amp internal nodes, zeroing A_neg effectively uses
+        // backward Euler instead of trapezoidal for the dominant pole. This is
+        // unconditionally stable and avoids the Gm-induced spectral radius > 1
+        // instability that trapezoidal creates for high-gain VCCS elements
+        // (AOL>10000 → Gm>1000 → A_neg has ±1000 entries → unstable feedback).
+        //
+        // Inductor branch rows (n_aug..n_nodal) are NOT zeroed — they have
+        // real L dynamics in C that need trapezoidal integration.
+        if n_aug > n_nodes {
+            for i in n_nodes..n_aug {
+                if i < n {
                     for j in 0..n {
-                        a_neg_flat[row * n + j] = 0.0;
-                    }
-                }
-            }
-            for (idx, _) in mna.vcvs_sources.iter().enumerate() {
-                let row = n_nodes + num_vs + idx;
-                if row < n {
-                    for j in 0..n {
-                        a_neg_flat[row * n + j] = 0.0;
-                    }
-                }
-            }
-            for (idx, _) in mna.ideal_transformers.iter().enumerate() {
-                let row = n_nodes + num_vs + num_vcvs + idx;
-                if row < n {
-                    for j in 0..n {
-                        a_neg_flat[row * n + j] = 0.0;
+                        a_neg_flat[i * n + j] = 0.0;
                     }
                 }
             }
@@ -1307,31 +1303,12 @@ impl CircuitIR {
                 a_neg_be_flat[i * n + j] = alpha_be * c;
             }
         }
-        // Zero same algebraic rows in A_neg_be
-        {
-            let num_vs = mna.voltage_sources.len();
-            let num_vcvs = mna.vcvs_sources.len();
-            for vs in &mna.voltage_sources {
-                let row = n_nodes + vs.ext_idx;
-                if row < n {
+        // Zero all augmented rows in A_neg_be (matching A_neg treatment)
+        if n_aug > n_nodes {
+            for i in n_nodes..n_aug {
+                if i < n {
                     for j in 0..n {
-                        a_neg_be_flat[row * n + j] = 0.0;
-                    }
-                }
-            }
-            for (idx, _) in mna.vcvs_sources.iter().enumerate() {
-                let row = n_nodes + num_vs + idx;
-                if row < n {
-                    for j in 0..n {
-                        a_neg_be_flat[row * n + j] = 0.0;
-                    }
-                }
-            }
-            for (idx, _) in mna.ideal_transformers.iter().enumerate() {
-                let row = n_nodes + num_vs + num_vcvs + idx;
-                if row < n {
-                    for j in 0..n {
-                        a_neg_be_flat[row * n + j] = 0.0;
+                        a_neg_be_flat[i * n + j] = 0.0;
                     }
                 }
             }

@@ -23,6 +23,7 @@ AI agent consumption: dense equations, code patterns, cross-references, no narra
 | Debugging solver output issues | [DEBUGGING.md](DEBUGGING.md) |
 | Changing signal levels or DC blocking | [SIGNAL_LEVELS.md](SIGNAL_LEVELS.md) |
 | Running SPICE validation tests | [SPICE_VALIDATION.md](SPICE_VALIDATION.md) |
+| Checking project status, validation results, routing | [STATUS.md](STATUS.md) |
 
 ## Critical Equations (Verified)
 

@@ -3749,9 +3749,11 @@ impl RustEmitter {
         } else {
             0.0
         };
-        // Also check for degenerate K (all near-zero) — Schur decomposition is
-        // numerically unstable when K provides no NR feedback, because the S_NI
-        // amplification creates positive feedback through a_neg without damping.
+        // Check for degenerate K (all near-zero). When K ≈ 0, the Schur NR
+        // has J = I (identity) — no device feedback. The device Jacobian that
+        // provides essential damping for high-gain active elements (Boyle op-amps)
+        // is invisible to the Schur decomposition. The full N×N LU NR must be
+        // used instead, as it builds G_aug = A - N_I*J_dev*N_V each iteration.
         let k_max_abs = if m > 0 {
             (0..m * m)
                 .map(|i| ir.matrices.k[i].abs())
@@ -3760,7 +3762,8 @@ impl RustEmitter {
             0.0
         };
         let k_degenerate = m > 0 && k_max_abs < 1e-6;
-        let use_full_nodal = has_positive_k_with_current || k_diag_min < -1e12 || k_degenerate;
+        let use_full_nodal =
+            has_positive_k_with_current || k_diag_min < -1e12 || k_degenerate;
         if use_full_nodal {
             if has_positive_k_with_current {
                 log::info!(
@@ -3768,7 +3771,7 @@ impl RustEmitter {
                 );
             } else if k_degenerate {
                 log::info!(
-                    "Nodal: using full N×N LU NR (K degenerate, max|K|={:.2e})",
+                    "Nodal: using full N×N LU NR (K degenerate, max|K|={:.2e} — device Jacobian provides essential damping)",
                     k_max_abs
                 );
             } else {
@@ -5978,11 +5981,11 @@ impl RustEmitter {
         code
     }
 
-    /// LEGACY: Emit the complete process_sample function for the nodal solver (O(N^3) LU path).
+    /// Emit the complete process_sample function for the nodal solver (O(N^3) LU path).
     ///
-    /// Replaced by `emit_nodal_schur_process_sample` which uses O(M^3) NR via precomputed S.
-    /// Kept for reference and potential fallback.
-    #[allow(dead_code)]
+    /// Used when the Schur path is unstable: K ≈ 0 (device Jacobian provides
+    /// essential damping not captured by Schur), positive K diagonal, or
+    /// ill-conditioned K. Matches the runtime NodalSolver's solve_equilibrated().
     fn emit_nodal_process_sample(ir: &CircuitIR) -> String {
         let n = ir.topology.n;
         let m = ir.topology.m;
