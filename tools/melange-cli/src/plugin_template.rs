@@ -619,9 +619,9 @@ const LEVEL_PARAM_DEFAULTS: &str = r#"            input_level: FloatParam::new(
                 "Input Level",
                 util::db_to_gain(0.0),
                 FloatRange::Skewed {
-                    min: util::db_to_gain(-36.0),
-                    max: util::db_to_gain(12.0),
-                    factor: FloatRange::gain_skew_factor(-36.0, 12.0),
+                    min: util::db_to_gain(-24.0),
+                    max: util::db_to_gain(24.0),
+                    factor: FloatRange::gain_skew_factor(-24.0, 24.0),
                 },
             )
             .with_smoother(SmoothingStyle::Logarithmic(50.0))
@@ -633,9 +633,9 @@ const LEVEL_PARAM_DEFAULTS: &str = r#"            input_level: FloatParam::new(
                 "Output Level",
                 util::db_to_gain(0.0),
                 FloatRange::Skewed {
-                    min: util::db_to_gain(-60.0),
-                    max: util::db_to_gain(48.0),
-                    factor: FloatRange::gain_skew_factor(-60.0, 48.0),
+                    min: util::db_to_gain(-24.0),
+                    max: util::db_to_gain(24.0),
+                    factor: FloatRange::gain_skew_factor(-24.0, 24.0),
                 },
             )
             .with_smoother(SmoothingStyle::Logarithmic(50.0))
