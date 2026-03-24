@@ -229,20 +229,26 @@ R_stop2b plate2b opt_b 360
 * Center tap to B+ (low-R connection, transformer primary IS the plate load)
 R_opt_ct vcc opt_ct 1m
 
-* Push-pull primary halves
-L_opt_a opt_a opt_ct 55
-L_opt_b opt_ct opt_b 55
+* Push-pull primary halves (through winding DCR)
+* DCR: 190Ω per primary half (CJ measurements, GroupDIY thread 51046)
+R_dcr_a opt_a opt_a_w 190
+R_dcr_b opt_b opt_b_w 190
+L_opt_a opt_a_w opt_ct 55
+L_opt_b opt_ct opt_b_w 55
 
-* Secondary (output)
-L_opt_sec out 0 11
+* Secondary (through winding DCR)
+* DCR: 18Ω (CJ measurements)
+R_dcr_sec out_w out 18
+L_opt_sec out_w 0 11
 
 * Coupling between primary halves and secondary.
-* Measured k ≈ 0.9998 (from L_leak=19mH, L_pri=38.1H) but k>0.95
-* causes convergence failure in trapezoidal companion models for 3+
-* winding transformers. Using k=0.95, validated in ngspice.
-K_opta L_opt_a L_opt_sec 0.95
-K_optb L_opt_b L_opt_sec 0.95
-K_optab L_opt_a L_opt_b 0.95
+* K = sqrt(1 - L_leak/L_pri) = sqrt(1 - 0.019/38.1) = 0.99975
+* (from CineMag CM-S217D L_leak=19mH, L_pri=38.1H at 1kHz).
+* Previous K=0.95 created 195× too much leakage, causing -3dB at 89Hz.
+* Augmented MNA solver handles K>0.95 (old companion model limitation removed).
+K_opta L_opt_a L_opt_sec 0.999
+K_optb L_opt_b L_opt_sec 0.999
+K_optab L_opt_a L_opt_b 0.999
 
 * === FEEDBACK: S-217-D TERTIARY WINDING (pins 3-5) ===
 * Peerless winding data: 71 turns/coil × 2 coils = 142 turns total.
@@ -254,20 +260,20 @@ K_optab L_opt_a L_opt_b 0.95
 *   fb_s5 → 360Ω → cathode (both to shared cathode, per Sowter schematic)
 *   Provides ~0.8 dB common-mode NFB in a perfectly balanced push-pull.
 *   Real hardware gets additional 1-3 dB from tube/transformer mismatch.
-L_fb_a fb_s5 fb_s3 447m
+* Tertiary winding DCR: 17Ω (CJ measurements)
+R_dcr_fb fb_s3_w fb_s3 17
+L_fb_a fb_s5 fb_s3_w 447m
 R_fb_shunt fb_s3 fb_s5 1000
 R_fb_dcref fb_s5 0 1Meg
 R_fb_a fb_s3 cathode 360
 R_fb_b fb_s5 cathode 360
-* Coupling: tertiary to both primary halves and secondary (all on same core).
-K_fba L_opt_a L_fb_a 0.95
-K_fbb L_opt_b L_fb_a 0.95
-K_sec_fb L_opt_sec L_fb_a 0.95
+* Coupling: tertiary is bifilar with primary (K ≥ 0.999, CineMag spec).
+K_fba L_opt_a L_fb_a 0.999
+K_fbb L_opt_b L_fb_a 0.999
+K_sec_fb L_opt_sec L_fb_a 0.999
 
 * Output load — S-217-D spec: "OUTPUT TO 600Ω LOAD"
 * The Pultec was designed for 600Ω terminated operation.
-* Note: our simplified transformer model (no winding R or leakage L)
-* causes more HF rolloff than the real hardware at 600Ω loading.
 Rload out 0 600
 
 * === SWITCH DIRECTIVES ===
@@ -302,8 +308,8 @@ Rload out 0 600
 * LF Atten: 100k audio pot (parallel with LF atten cap)
 .pot R_lfc 100 100k 100 "LF Atten"
 * HF Cut: 3-terminal 1k linear pot (upper + lower arms, link inversely)
-* Default: wiper at top (no cut) — upper=min disconnects cap from signal path
-.pot R_hfc_u 100 1k 100 "HF Cut (upper)"
-.pot R_hfc_l 100 1k 1k "HF Cut (lower)"
+* Default: wiper at mid side (no cut). R_hfc_u=max keeps eq isolated from cap.
+.pot R_hfc_u 100 1k 1k "HF Cut (upper)"
+.pot R_hfc_l 100 1k 100 "HF Cut (lower)"
 
 .END
