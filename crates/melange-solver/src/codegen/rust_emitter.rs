@@ -3796,6 +3796,8 @@ impl RustEmitter {
                 );
             }
             code.push_str(&Self::emit_nodal_lu_solve(ir));
+            code.push_str(&Self::emit_nodal_lu_factor(ir));
+            code.push_str(&Self::emit_nodal_lu_back_solve(ir));
             code.push_str(&Self::emit_nodal_process_sample(ir));
         } else {
             code.push_str(&Self::emit_nodal_schur_process_sample(ir)?);
@@ -3841,6 +3843,11 @@ impl RustEmitter {
             "pub const MAX_ITER: usize = {};\n\n",
             ir.solver_config.max_iterations
         ));
+        code.push_str("/// Chord method: re-factor Jacobian every N iterations (full LU path only).\n");
+        code.push_str("/// Iter 0 always factors. Between refactors, O(N²) back-solve reuses stored LU.\n");
+        code.push_str("/// Must be odd — even values can cause refactoring/convergence resonance.\n");
+        code.push_str("pub const CHORD_REFACTOR: usize = 5;\n\n");
+
         code.push_str("/// NR convergence tolerance (VNTOL)\n");
         code.push_str(&format!(
             "pub const TOL: f64 = {};\n\n",
@@ -6012,6 +6019,107 @@ impl RustEmitter {
         code
     }
 
+    /// Emit LU factorization function (chord method: factor once, solve many times).
+    ///
+    /// Equilibrates, then LU-factorizes with partial pivoting. The factored matrix,
+    /// scaling vector `d`, and permutation `perm` are stored for repeated back-solves.
+    fn emit_nodal_lu_factor(_ir: &CircuitIR) -> String {
+        let mut code = String::new();
+
+        code.push_str("/// LU factorization with diagonal equilibration and partial pivoting.\n");
+        code.push_str("///\n");
+        code.push_str("/// After this call, `a` contains the LU factors, `d` the equilibration\n");
+        code.push_str("/// scaling, and `perm` the row permutation. Use `lu_back_solve` to solve.\n");
+        code.push_str("#[inline(always)]\n");
+        code.push_str("fn lu_factor(a: &mut [[f64; N]; N], d: &mut [f64; N], perm: &mut [usize; N]) -> bool {\n");
+
+        // Step 1: Equilibrate
+        code.push_str("    // Diagonal equilibration: d[i] = 1/sqrt(|A[i][i]|)\n");
+        code.push_str("    for i in 0..N {\n");
+        code.push_str("        let diag = a[i][i].abs();\n");
+        code.push_str("        d[i] = if diag > 1e-30 { 1.0 / diag.sqrt() } else { 1.0 };\n");
+        code.push_str("    }\n");
+        code.push_str("    for i in 0..N {\n");
+        code.push_str("        for j in 0..N {\n");
+        code.push_str("            a[i][j] *= d[i] * d[j];\n");
+        code.push_str("        }\n");
+        code.push_str("    }\n\n");
+
+        // Step 2: LU factorize with partial pivoting
+        code.push_str("    // LU factorize with partial pivoting\n");
+        code.push_str("    for i in 0..N { perm[i] = i; }\n");
+        code.push_str("    for col in 0..N {\n");
+        code.push_str("        let mut max_row = col;\n");
+        code.push_str("        let mut max_val = a[col][col].abs();\n");
+        code.push_str("        for row in (col + 1)..N {\n");
+        code.push_str("            if a[row][col].abs() > max_val {\n");
+        code.push_str("                max_val = a[row][col].abs();\n");
+        code.push_str("                max_row = row;\n");
+        code.push_str("            }\n");
+        code.push_str("        }\n");
+        code.push_str("        if max_val < 1e-30 { return false; }\n");
+        code.push_str("        if max_row != col {\n");
+        code.push_str("            a.swap(col, max_row);\n");
+        code.push_str("            perm.swap(col, max_row);\n");
+        code.push_str("        }\n");
+        code.push_str("        let pivot = a[col][col];\n");
+        code.push_str("        for row in (col + 1)..N {\n");
+        code.push_str("            let factor = a[row][col] / pivot;\n");
+        code.push_str("            a[row][col] = factor;\n");
+        code.push_str("            for j in (col + 1)..N {\n");
+        code.push_str("                a[row][j] -= factor * a[col][j];\n");
+        code.push_str("            }\n");
+        code.push_str("        }\n");
+        code.push_str("    }\n");
+        code.push_str("    true\n");
+        code.push_str("}\n\n");
+
+        code
+    }
+
+    /// Emit forward/backward substitution using pre-factored LU (chord method).
+    ///
+    /// O(N²) per call — no factorization. Used on NR iterations 1+ where the
+    /// Jacobian is reused from iteration 0 (chord / modified Newton-Raphson).
+    fn emit_nodal_lu_back_solve(_ir: &CircuitIR) -> String {
+        let mut code = String::new();
+
+        code.push_str("/// Solve using pre-factored LU: forward/backward substitution + de-equilibrate.\n");
+        code.push_str("///\n");
+        code.push_str("/// `a_lu` contains LU factors from `lu_factor`. `d` and `perm` are the\n");
+        code.push_str("/// equilibration and permutation from the same call. On return, `b`\n");
+        code.push_str("/// contains the solution. O(N²) — no iterative refinement.\n");
+        code.push_str("#[inline(always)]\n");
+        code.push_str("fn lu_back_solve(a_lu: &[[f64; N]; N], d: &[f64; N], perm: &[usize; N], b: &mut [f64; N]) {\n");
+
+        // Apply permutation + equilibration scaling to RHS
+        code.push_str("    let mut x = [0.0f64; N];\n");
+        code.push_str("    for i in 0..N { x[i] = d[perm[i]] * b[perm[i]]; }\n\n");
+
+        // Forward substitution (L)
+        code.push_str("    // Forward substitution (L)\n");
+        code.push_str("    for i in 1..N {\n");
+        code.push_str("        let mut sum = 0.0;\n");
+        code.push_str("        for j in 0..i { sum += a_lu[i][j] * x[j]; }\n");
+        code.push_str("        x[i] -= sum;\n");
+        code.push_str("    }\n");
+
+        // Backward substitution (U)
+        code.push_str("    // Backward substitution (U)\n");
+        code.push_str("    for i in (0..N).rev() {\n");
+        code.push_str("        let mut sum = 0.0;\n");
+        code.push_str("        for j in (i + 1)..N { sum += a_lu[i][j] * x[j]; }\n");
+        code.push_str("        x[i] = (x[i] - sum) / a_lu[i][i];\n");
+        code.push_str("    }\n\n");
+
+        // De-equilibrate
+        code.push_str("    // De-equilibrate\n");
+        code.push_str("    for i in 0..N { b[i] = d[i] * x[i]; }\n");
+        code.push_str("}\n\n");
+
+        code
+    }
+
     /// Emit the complete process_sample function for the nodal solver (O(N^3) LU path).
     ///
     /// Used when the Schur path is unstable: K ≈ 0 (device Jacobian provides
@@ -6124,6 +6232,13 @@ impl RustEmitter {
             code.push_str("    let mut converged = false;\n");
             code.push_str("    let mut i_nl = [0.0f64; M];\n\n");
 
+            // Chord method: factor LU once on iter 0, reuse on iter 1+
+            code.push_str("    // Chord method state: LU factored once, reused across NR iterations\n");
+            code.push_str("    let mut chord_lu = [[0.0f64; N]; N];\n");
+            code.push_str("    let mut chord_d = [1.0f64; N];\n");
+            code.push_str("    let mut chord_perm = [0usize; N];\n");
+            code.push_str("    let mut chord_j_dev = [0.0f64; M * M];\n\n");
+
             // Trapezoidal NR loop
             code.push_str("    for iter in 0..MAX_ITER {\n");
 
@@ -6152,15 +6267,19 @@ impl RustEmitter {
             Self::emit_nodal_device_evaluation_body(&mut code, ir, "        ");
             code.push('\n');
 
-            // 2c. Build Jacobian: G_aug = A - N_i * J_dev * N_v (sparse)
+            // 2c. Build and factor Jacobian: G_aug = A - N_i * J_dev * N_v (chord method)
+            // Factor LU periodically: iter 0, then every CHORD_REFACTOR iterations.
+            // Between refactors, reuse stored LU for O(N²) back-solve instead of O(N³) factor.
             // J_dev is block-diagonal; N_i and N_v have ~2 nonzero entries per device dim.
             // Compile-time unrolled: ~64 stamps for 4 tubes vs 107K dense iterations.
             code.push_str(
-                "        // 2c. Build Jacobian: G_aug = A - N_i * J_dev * N_v (sparse)\n",
+                "        // 2c. Build and factor Jacobian (chord: refactor periodically)\n",
             );
-            code.push_str("        let mut g_aug = state.a;\n");
-            code.push_str("        // Gmin regularization\n");
-            code.push_str("        for i in 0..N_NODES { g_aug[i][i] += 1e-12; }\n");
+            code.push_str("        if iter % CHORD_REFACTOR == 0 {\n");
+            code.push_str("            chord_j_dev = j_dev;\n");
+            code.push_str("            chord_lu = state.a;\n");
+            code.push_str("            // Gmin regularization\n");
+            code.push_str("            for i in 0..N_NODES { chord_lu[i][i] += 1e-12; }\n");
             {
                 // Build transpose of N_i sparsity: for each device dim i, which nodes a are nonzero
                 let mut ni_nz_by_dev = vec![Vec::new(); m];
@@ -6187,7 +6306,7 @@ impl RustEmitter {
                             for &a in ni_nodes {
                                 for &b in nv_nodes {
                                     code.push_str(&format!(
-                                        "        g_aug[{}][{}] -= N_I[{}][{}] * j_dev[{}] * N_V[{}][{}];\n",
+                                        "            chord_lu[{}][{}] -= N_I[{}][{}] * j_dev[{}] * N_V[{}][{}];\n",
                                         a, b, a, i, jd_ij, j, b
                                     ));
                                 }
@@ -6196,11 +6315,17 @@ impl RustEmitter {
                     }
                 }
             }
-            code.push('\n');
+            code.push_str("            if !lu_factor(&mut chord_lu, &mut chord_d, &mut chord_perm) {\n");
+            code.push_str("                state.diag_nr_max_iter_count += 1;\n");
+            code.push_str("                break;\n");
+            code.push_str("            }\n");
+            code.push_str("        }\n\n");
 
-            // 2d. Build companion RHS: rhs_base + N_i * (i_nl - J_dev * v_nl) (sparse)
+            // 2d. Build companion RHS: rhs_base + N_i * (i_nl - J_dev_0 * v_nl) (sparse)
+            // Uses chord_j_dev (from iter 0) to match the LU factorization.
+            // Using current j_dev here would create an inconsistent fixed point.
             code.push_str(
-                "        // 2d. Build companion RHS: rhs + N_i * (i_nl - J_dev * v_nl) (sparse)\n",
+                "        // 2d. Build companion RHS: rhs + N_i * (i_nl - chord_J_dev * v_nl) (sparse)\n",
             );
             code.push_str("        let mut rhs_work = rhs;\n");
             {
@@ -6217,12 +6342,12 @@ impl RustEmitter {
                     let dim = slot.dimension;
                     for di in 0..dim {
                         let i = s + di;
-                        // Compute jdev_vnl = sum_j j_dev[i*M+j] * v_nl[j] (only within block)
+                        // Compute chord_jdev_vnl = sum_j chord_j_dev[i*M+j] * v_nl[j] (only within block)
                         let jdv_terms: Vec<String> = (0..dim)
                             .map(|dj| {
                                 let j = s + dj;
                                 let jd_ij = i * m + j;
-                                format!("j_dev[{}] * v_nl[{}]", jd_ij, j)
+                                format!("chord_j_dev[{}] * v_nl[{}]", jd_ij, j)
                             })
                             .collect();
                         code.push_str(&format!(
@@ -6243,13 +6368,10 @@ impl RustEmitter {
             }
             code.push('\n');
 
-            // 2e. LU solve: v_new = G_aug^{-1} * rhs_work
-            code.push_str("        // 2e. LU solve: v_new = G_aug^{-1} * rhs_work\n");
+            // 2e. Solve with stored LU factors (O(N²) back-solve)
+            code.push_str("        // 2e. Solve with stored LU factors (chord: O(N²) back-solve)\n");
             code.push_str("        let mut v_new = rhs_work;\n");
-            code.push_str("        if !lu_solve(&mut g_aug, &mut v_new) {\n");
-            code.push_str("            state.diag_nr_max_iter_count += 1;\n");
-            code.push_str("            break;\n");
-            code.push_str("        }\n\n");
+            code.push_str("        lu_back_solve(&chord_lu, &chord_d, &chord_perm, &mut v_new);\n\n");
 
             // NOTE: no VSAT clamping inside NR loop — mid-NR clamping creates
             // discontinuities the Jacobian doesn't account for, causing oscillation.

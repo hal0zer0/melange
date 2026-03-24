@@ -204,6 +204,7 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
 - **NodalSolver codegen** (fallback for multi-transformer and K≈0): Two paths:
   - **Schur** (O(N²+M³)): Precomputed S = A^{-1}, M-dim NR. Used when K is well-conditioned.
   - **Full LU** (O(N³) per iter): Builds G_aug = A - N_I*J_dev*N_V each iteration. Auto-selected for K≈0 (current-mode VCA), positive K diagonal, or K ill-conditioned. Matches runtime NodalSolver exactly.
+  - **Chord method** (full LU only): `lu_factor` on iter 0 + every CHORD_REFACTOR iters, `lu_back_solve` (O(N²)) between. CHORD_REFACTOR=5 (must be odd). RHS uses saved `chord_j_dev` (NOT current `j_dev`). 2.6× speedup on split cathode Pultec.
   - Auto-selected for 2+ transformer groups, M≥10, or when DK K diagonal check fails.
 - **`melange analyze` with --pot/--switch**: Set pot values and switch positions for frequency sweeps. Auto-applies .pot defaults. NodalSolver support for inductor circuits. 5-second minimum settle time for transformer circuits.
 - **Device model features**: Junction capacitances (CCG/CGP/CCP, CJE/CJC, CGS/CGD, CJO), parasitic resistances (RS, RB/RC/RE, RD/RS, RGI), diode breakdown (BV/IBV), MOSFET body effect (GAMMA/PHI), BJT NF/ISE/NE emission params
@@ -215,7 +216,7 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
 - **Runtime solver** (`DeviceEntry`) supports all device types: Diode, DiodeWithRs, Led, BJT, JFET, MOSFET, Tube
 - **NodalSolver transient NR**: Converges for all physically valid circuits including Pultec EQP-1A (4 tubes, 2 transformers, global NFB). Requires positive-definite inductance matrices (validated at MNA build time).
 - **`melange simulate`**: auto-selects NodalSolver for nonlinear circuits with inductors, CircuitSolver (DK) otherwise. `--solver nodal|dk` override available.
-- **Performance**: DK codegen circuits run 100-600× realtime. Nodal Schur codegen: 15× realtime for Pultec (41-node, 8 NL, 2 transformers). Nodal full-LU: slower but used only for K≈0 circuits (VCA).
+- **Performance**: DK codegen circuits run 100-600× realtime. Nodal full-LU with chord: 2.9× realtime for original Pultec (41-node, 8 NL, 2 transformers), 0.6× for split cathode variant.
 
 ### Cross-Compilation (macOS from Linux)
 - Zig 0.13 + cargo-zigbuild + macOS SDK 13.3 + rcodesign (ad-hoc signing)
@@ -230,7 +231,7 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
   - S-217-D: 220H primary (30Hz), 71-turn tertiary feedback, 220pF 12AU7 grid stabilization
   - Uses nodal Schur codegen path (2 transformer groups → DK K matrix unstable)
   - All 7 pots + 3 switches produce correct EQ curves (LF Boost/Atten, HF Boost/Cut, Pultec trick)
-  - 15.4× realtime (1.3 µs/sample), zero NR failures
+  - 2.9× realtime (7.1 µs/sample) on full LU with chord method, zero NR failures
 - `circuits/wurli-preamp.cir`: Wurlitzer 200A preamp (N=11, M=5→3 FA, 2 BJTs + 1 diode, 1 pot)
   - Flattened from openwurli/spice/subcircuits/preamp.cir
   - R1-Cin series input coupling via intermediate node (mid_in)
