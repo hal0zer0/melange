@@ -4227,7 +4227,25 @@ impl RustEmitter {
         code.push_str("    /// Diagnostic: number of times NaN triggered state reset\n");
         code.push_str("    pub diag_nan_reset_count: u64,\n");
         code.push_str("    /// Diagnostic: number of samples that needed adaptive sub-stepping\n");
-        code.push_str("    pub diag_substep_count: u64,\n\n");
+        code.push_str("    pub diag_substep_count: u64,\n");
+        code.push_str("    /// Diagnostic: number of LU refactorizations performed\n");
+        code.push_str("    pub diag_refactor_count: u64,\n\n");
+
+        // Cross-timestep chord state (persisted LU for full LU path)
+        if m > 0 {
+            code.push_str("    // --- Cross-timestep chord method state (persisted LU factors) ---\n");
+            code.push_str("    /// LU-factored Jacobian from previous convergence (chord method)\n");
+            code.push_str("    pub chord_lu: [[f64; N]; N],\n");
+            code.push_str("    /// Equilibration scaling from LU factorization\n");
+            code.push_str("    pub chord_d: [f64; N],\n");
+            code.push_str("    /// Row permutation from LU factorization\n");
+            code.push_str("    pub chord_perm: [usize; N],\n");
+            code.push_str("    /// Device Jacobian consistent with chord_lu (for companion RHS)\n");
+            code.push_str("    pub chord_j_dev: [f64; M * M],\n");
+            code.push_str("    /// Whether chord LU factors are valid (false until first convergence)\n");
+            code.push_str("    pub chord_valid: bool,\n\n");
+        }
+
         code.push_str(
             "    /// A matrix: G + alpha*C (trapezoidal), recomputed by set_sample_rate\n",
         );
@@ -4407,6 +4425,14 @@ impl RustEmitter {
         code.push_str("            diag_be_fallback_count: 0,\n");
         code.push_str("            diag_nan_reset_count: 0,\n");
         code.push_str("            diag_substep_count: 0,\n");
+        code.push_str("            diag_refactor_count: 0,\n");
+        if m > 0 {
+            code.push_str("            chord_lu: [[0.0; N]; N],\n");
+            code.push_str("            chord_d: [1.0; N],\n");
+            code.push_str("            chord_perm: {{ let mut p = [0usize; N]; let mut i = 0; while i < N { p[i] = i; i += 1; } p }},\n");
+            code.push_str("            chord_j_dev: [0.0; M * M],\n");
+            code.push_str("            chord_valid: false,\n");
+        }
         code.push_str("            a: A_DEFAULT,\n");
         code.push_str("            a_neg: A_NEG_DEFAULT,\n");
         code.push_str("            a_be: A_BE_DEFAULT,\n");
@@ -4498,6 +4524,9 @@ impl RustEmitter {
         }
         code.push_str("        self.input_prev = 0.0;\n");
         code.push_str("        self.last_nr_iterations = 0;\n");
+        if m > 0 {
+            code.push_str("        self.chord_valid = false;\n");
+        }
         // Re-init DC blocker from DC OP (prevents transient on reset)
         if ir.dc_block {
             let output_nodes = &ir.solver_config.output_nodes;
@@ -6232,12 +6261,15 @@ impl RustEmitter {
             code.push_str("    let mut converged = false;\n");
             code.push_str("    let mut i_nl = [0.0f64; M];\n\n");
 
-            // Chord method: factor LU once on iter 0, reuse on iter 1+
-            code.push_str("    // Chord method state: LU factored once, reused across NR iterations\n");
-            code.push_str("    let mut chord_lu = [[0.0f64; N]; N];\n");
-            code.push_str("    let mut chord_d = [1.0f64; N];\n");
-            code.push_str("    let mut chord_perm = [0usize; N];\n");
-            code.push_str("    let mut chord_j_dev = [0.0f64; M * M];\n\n");
+            // Cross-timestep chord: reuse LU factors from previous sample when valid.
+            // Local aliases avoid repeated state.chord_* indirection in the hot loop.
+            // After convergence, chord_lu/d/perm/j_dev are persisted back to state.
+            code.push_str("    // Cross-timestep chord: start from previous sample's converged LU\n");
+            code.push_str("    let mut chord_lu = state.chord_lu;\n");
+            code.push_str("    let mut chord_d = state.chord_d;\n");
+            code.push_str("    let mut chord_perm = state.chord_perm;\n");
+            code.push_str("    let mut chord_j_dev = state.chord_j_dev;\n");
+            code.push_str("    let mut chord_valid = state.chord_valid;\n\n");
 
             // Trapezoidal NR loop
             code.push_str("    for iter in 0..MAX_ITER {\n");
@@ -6273,9 +6305,11 @@ impl RustEmitter {
             // J_dev is block-diagonal; N_i and N_v have ~2 nonzero entries per device dim.
             // Compile-time unrolled: ~64 stamps for 4 tubes vs 107K dense iterations.
             code.push_str(
-                "        // 2c. Build and factor Jacobian (chord: refactor periodically)\n",
+                "        // 2c. Build and factor Jacobian (adaptive chord: reuse across timesteps)\n",
             );
-            code.push_str("        if iter % CHORD_REFACTOR == 0 {\n");
+            // Refactor when: (a) no valid LU, or (b) within-sample periodic refresh
+            code.push_str("        let need_refactor = !chord_valid || (iter > 0 && iter % CHORD_REFACTOR == 0);\n");
+            code.push_str("        if need_refactor {\n");
             code.push_str("            chord_j_dev = j_dev;\n");
             code.push_str("            chord_lu = state.a;\n");
             code.push_str("            // Gmin regularization\n");
@@ -6319,6 +6353,8 @@ impl RustEmitter {
             code.push_str("                state.diag_nr_max_iter_count += 1;\n");
             code.push_str("                break;\n");
             code.push_str("            }\n");
+            code.push_str("            chord_valid = true;\n");
+            code.push_str("            state.diag_refactor_count += 1;\n");
             code.push_str("        }\n\n");
 
             // 2d. Build companion RHS: rhs_base + N_i * (i_nl - J_dev_0 * v_nl) (sparse)
@@ -6831,6 +6867,7 @@ impl RustEmitter {
             }
         }
         code.push_str("        state.diag_nan_reset_count += 1;\n");
+        code.push_str("        state.chord_valid = false;\n");
         code.push_str("        return [0.0; NUM_OUTPUTS];\n");
         code.push_str("    }\n\n");
 
@@ -6846,6 +6883,12 @@ impl RustEmitter {
         if m > 0 {
             code.push_str("    state.i_nl_prev_prev = state.i_nl_prev;\n");
             code.push_str("    state.i_nl_prev = i_nl;\n");
+            // Persist chord LU for cross-timestep reuse
+            code.push_str("    state.chord_lu = chord_lu;\n");
+            code.push_str("    state.chord_d = chord_d;\n");
+            code.push_str("    state.chord_perm = chord_perm;\n");
+            code.push_str("    state.chord_j_dev = chord_j_dev;\n");
+            code.push_str("    state.chord_valid = chord_valid;\n");
         }
         for (idx, _pot) in ir.pots.iter().enumerate() {
             code.push_str(&format!(
