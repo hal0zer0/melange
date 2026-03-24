@@ -634,8 +634,8 @@ const LEVEL_PARAM_DEFAULTS: &str = r#"            input_level: FloatParam::new(
                 util::db_to_gain(0.0),
                 FloatRange::Skewed {
                     min: util::db_to_gain(-60.0),
-                    max: util::db_to_gain(12.0),
-                    factor: FloatRange::gain_skew_factor(-60.0, 12.0),
+                    max: util::db_to_gain(48.0),
+                    factor: FloatRange::gain_skew_factor(-60.0, 48.0),
                 },
             )
             .with_smoother(SmoothingStyle::Logarithmic(50.0))
@@ -758,11 +758,7 @@ fn generate_lib_rs(
                  \x20   }"
                     .to_string(),
                 "    fn reset(&mut self) {\n\
-                 \x20       let sr = self.current_sample_rate;\n\
-                 \x20       self.circuit_state = CircuitState::default();\n\
-                 \x20       if sr > 0.0 {\n\
-                 \x20           self.circuit_state.set_sample_rate(sr);\n\
-                 \x20       }\n\
+                 \x20       self.circuit_state.reset();\n\
                  \x20   }"
                     .to_string(),
             )
@@ -813,12 +809,8 @@ fn generate_lib_rs(
                  \x20   }"
                     .to_string(),
                 "    fn reset(&mut self) {\n\
-                 \x20       let sr = self.current_sample_rate;\n\
                  \x20       for state in &mut self.circuit_states {\n\
-                 \x20           *state = CircuitState::default();\n\
-                 \x20           if sr > 0.0 {\n\
-                 \x20               state.set_sample_rate(sr);\n\
-                 \x20           }\n\
+                 \x20           state.reset();\n\
                  \x20       }\n\
                  \x20   }"
                     .to_string(),
@@ -872,12 +864,8 @@ fn generate_lib_rs(
                  \x20   }"
                     .to_string(),
                 "    fn reset(&mut self) {\n\
-                 \x20       let sr = self.current_sample_rate;\n\
                  \x20       for state in &mut self.circuit_states {\n\
-                 \x20           *state = CircuitState::default();\n\
-                 \x20           if sr > 0.0 {\n\
-                 \x20               state.set_sample_rate(sr);\n\
-                 \x20           }\n\
+                 \x20           state.reset();\n\
                  \x20       }\n\
                  \x20   }"
                     .to_string(),
@@ -1224,7 +1212,7 @@ mod tests {
     fn lib_contains_reset_method() {
         let lib = test_generate_lib_rs("test", false, &[]);
         assert!(lib.contains("fn reset(&mut self)"));
-        assert!(lib.contains("CircuitState::default()"));
+        assert!(lib.contains("state.reset()"));
     }
 
     #[test]
