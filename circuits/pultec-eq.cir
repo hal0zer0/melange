@@ -251,21 +251,24 @@ K_optab L_opt_a L_opt_b 0.95
 *
 * Feedback network (4 components, schematic-verified):
 *   fb_s3 → 360Ω → cathode (series-voltage NFB)
-*   fb_s5 → 360Ω → ground (return path)
-*   Current loop: tertiary → 360Ω → cathode → 820Ω → GND → 360Ω → tertiary
-*   53% of tertiary voltage (820/1540) appears at cathode.
+*   fb_s5 → 360Ω → cathode (both to shared cathode, per Sowter schematic)
+*   Provides ~0.8 dB common-mode NFB in a perfectly balanced push-pull.
+*   Real hardware gets additional 1-3 dB from tube/transformer mismatch.
 L_fb_a fb_s5 fb_s3 447m
 R_fb_shunt fb_s3 fb_s5 1000
 R_fb_dcref fb_s5 0 1Meg
 R_fb_a fb_s3 cathode 360
-R_fb_b fb_s5 0 360
+R_fb_b fb_s5 cathode 360
 * Coupling: tertiary to both primary halves and secondary (all on same core).
 K_fba L_opt_a L_fb_a 0.95
 K_fbb L_opt_b L_fb_a 0.95
 K_sec_fb L_opt_sec L_fb_a 0.95
 
-* Output load (high-impedance bridging, typical of modern equipment)
-Rload out 0 100k
+* Output load — S-217-D spec: "OUTPUT TO 600Ω LOAD"
+* The Pultec was designed for 600Ω terminated operation.
+* Note: our simplified transformer model (no winding R or leakage L)
+* causes more HF rolloff than the real hardware at 600Ω loading.
+Rload out 0 600
 
 * === SWITCH DIRECTIVES ===
 * HF Boost frequency: 7 positions (ganged C + L)
