@@ -56,8 +56,10 @@
 *   Vp=100V Vg=-1V → Ip=0.55mA (all within 1.1%)
 *
 .model 12AX7 TRIODE(MU=99.25 EX=1.029 KG1=674.9 KP=1500 KVB=3000 CCG=1.6p CGP=1.7p CCP=0.46p)
-* 12AU7 params from catalog (Koren fit to Sylvania datasheet)
-.model 12AU7 TRIODE(MU=21.5 EX=1.3 KG1=1180 KP=84 KVB=300 CCG=2.3p CGP=2.2p CCP=0.5p)
+* 12AU7 params fitted to Sylvania datasheet operating points:
+*   Vp=250V Vg=-8.5V → Ip=10.5mA, Vp=250V Vg=-9.0V → Ip=8.5mA,
+*   Vp=100V Vg=-4.0V → Ip=3.8mA (all within 0.2%)
+.model 12AU7 TRIODE(MU=21.91 EX=1.612 KG1=798.3 KP=16579 KVB=14135 CCG=2.3p CGP=2.2p CCP=0.5p)
 .input_impedance 600
 
 * B+ power supply — from Sowter schematic DWG E-72,658-2
