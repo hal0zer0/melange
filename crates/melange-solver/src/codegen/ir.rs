@@ -364,19 +364,22 @@ pub struct SparseInfo {
 /// Compile-time sparse LU elimination schedule.
 ///
 /// Computed at codegen time from the G_aug = A - N_i*J_dev*N_v sparsity pattern.
-/// The emitter generates straight-line code with one operation per `LuOp` —
-/// no loops, no indirect indexing, no runtime sparsity tracking.
+/// The emitter generates straight-line code with one operation per `LuOp`.
+///
+/// **All indices are in the original node ordering.** The AMD fill-reducing
+/// ordering determines the ORDER of emitted operations, not the physical
+/// layout. No runtime permutation arrays are needed.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct LuSparsity {
-    /// Fill-reducing column permutation (AMD ordering)
-    pub col_perm: Vec<usize>,
-    /// Row pre-permutation to fix zero diagonals (voltage source rows)
-    pub row_perm: Vec<usize>,
-    /// Straight-line elimination operations (in execution order)
+    /// Straight-line elimination operations (original indices, AMD emission order)
     pub ops: Vec<LuOp>,
-    /// Nonzero positions in L (below diagonal), after permutation
+    /// AMD elimination order: elim_order[step] = original column eliminated at that step
+    pub elim_order: Vec<usize>,
+    /// Row swaps applied before elimination (for zero diagonals)
+    pub row_swaps: Vec<(usize, usize)>,
+    /// L entries (row, col) in original indices, ordered for forward substitution
     pub l_nnz: Vec<(usize, usize)>,
-    /// Nonzero positions in U (on/above diagonal), after permutation
+    /// U entries (row, col) in original indices, ordered for backward substitution
     pub u_nnz: Vec<(usize, usize)>,
     /// Total FLOPs for factorization
     pub factor_flops: usize,
@@ -387,6 +390,7 @@ pub struct LuSparsity {
 }
 
 /// A single operation in the sparse LU elimination sequence.
+/// All row/col indices are in the **original** node ordering.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum LuOp {
     /// `a[row][col] /= a[col][col]` — compute L factor
@@ -536,127 +540,121 @@ fn amd_ordering(pattern: &[Vec<usize>], n: usize) -> Vec<usize> {
 ///
 /// After column permutation by `col_perm`, some diagonal entries may be
 /// structurally zero. This finds row swaps to place nonzeros on the diagonal.
-fn fix_zero_diagonals(pattern: &[Vec<usize>], col_perm: &[usize], n: usize) -> Vec<usize> {
-    // Build permuted pattern: permuted_row[i] has columns in permuted space
-    let mut col_to_pcol = vec![0; n];
-    for (pcol, &orig_col) in col_perm.iter().enumerate() {
-        col_to_pcol[orig_col] = pcol;
-    }
+/// Find row swaps needed for zero diagonals in AMD elimination order.
+///
+/// For each step k in the AMD order, if the pivot position a[order[k]][order[k]]
+/// has no structural nonzero, find a later row to swap with. Returns (r1, r2) pairs.
+fn find_row_swaps(
+    pattern: &[Vec<usize>],
+    elim_order: &[usize],
+    n: usize,
+) -> Vec<(usize, usize)> {
+    let mut eliminated = vec![false; n];
+    let mut swaps = Vec::new();
 
-    let mut row_perm: Vec<usize> = (0..n).collect();
-
-    // Greedy: for each column k, ensure row_perm[k]'s row has a nonzero at column col_perm[k]
-    for k in 0..n {
-        let target_col = col_perm[k];
-        // Check if current row has nonzero at target_col
-        let cur_row = row_perm[k];
-        if pattern[cur_row].contains(&target_col) {
-            continue;
-        }
-        // Find a row below k that has nonzero at target_col
-        let mut found = false;
-        for j in (k + 1)..n {
-            let cand_row = row_perm[j];
-            if pattern[cand_row].contains(&target_col) {
-                row_perm.swap(k, j);
-                found = true;
-                break;
+    for &pivot_col in elim_order {
+        // Check if pivot_col's row has a nonzero at column pivot_col
+        if !pattern[pivot_col].contains(&pivot_col) {
+            // Find an un-eliminated row that has nonzero at pivot_col
+            for r in 0..n {
+                if !eliminated[r] && r != pivot_col && pattern[r].contains(&pivot_col) {
+                    swaps.push((pivot_col, r));
+                    break;
+                }
             }
         }
-        if !found {
-            // No row has a nonzero here — matrix may be singular.
-            // Leave as-is; dense fallback will handle it at runtime.
-            log::warn!(
-                "Sparse LU: no nonzero at diagonal position {} (col {}), dense fallback may be needed",
-                k, target_col
-            );
-        }
+        eliminated[pivot_col] = true;
     }
 
-    row_perm
+    if !swaps.is_empty() {
+        log::info!("Sparse LU: {} row swaps needed for zero diagonals", swaps.len());
+    }
+
+    swaps
 }
 
-/// Symbolic LU factorization: determine fill-in pattern and elimination schedule.
+/// Symbolic LU factorization in original index space.
 ///
-/// Given the G_aug sparsity pattern (after row/column permutation), traces
-/// Gaussian elimination symbolically to find:
-/// - Which (row, col) positions get fill-in during factorization
-/// - The exact sequence of DivPivot and SubMul operations needed
-/// - The L and U nonzero patterns for forward/backward substitution
+/// Traces Gaussian elimination symbolically with AMD ordering to find:
+/// - Fill-in pattern and elimination operations (in original indices)
+/// - L and U nonzero patterns for forward/backward substitution
+///
+/// All indices in the output are **original node indices**. The AMD ordering
+/// determines the ORDER of operations, not the physical layout.
 fn symbolic_lu(
     pattern: &[Vec<usize>],
-    row_perm: &[usize],
-    col_perm: &[usize],
+    elim_order: &[usize],
+    row_swaps: &[(usize, usize)],
     n: usize,
 ) -> LuSparsity {
-    // Build permuted pattern in (prow, pcol) space
-    let mut col_to_pcol = vec![0; n];
-    for (pcol, &orig_col) in col_perm.iter().enumerate() {
-        col_to_pcol[orig_col] = pcol;
+    // Build working pattern (mutable, tracks fill-in) — apply row swaps
+    let mut pat: Vec<std::collections::BTreeSet<usize>> = pattern
+        .iter()
+        .map(|row| row.iter().copied().collect())
+        .collect();
+    for &(r1, r2) in row_swaps {
+        let tmp = pat[r1].clone();
+        pat[r1] = pat[r2].clone();
+        pat[r2] = tmp;
     }
 
-    // pmat[prow][pcol] = true if nonzero
-    let mut pmat: Vec<std::collections::BTreeSet<usize>> =
-        (0..n).map(|_| std::collections::BTreeSet::new()).collect();
-    for prow in 0..n {
-        let orig_row = row_perm[prow];
-        for &orig_col in &pattern[orig_row] {
-            pmat[prow].insert(col_to_pcol[orig_col]);
-        }
-    }
+    // Track which nodes have been eliminated (by original index)
+    let mut eliminated = vec![false; n];
 
     let mut ops = Vec::new();
     let mut l_nnz = Vec::new();
     let mut u_nnz = Vec::new();
     let mut factor_flops = 0usize;
 
-    // Gaussian elimination in permuted space
-    for col in 0..n {
-        // U entries: row=col, all columns >= col that are nonzero in pmat[col]
-        for &j in &pmat[col] {
-            if j >= col {
-                u_nnz.push((col, j));
-            }
+    for &pivot in elim_order {
+        eliminated[pivot] = true;
+
+        // U entries: row=pivot, columns that are NOT yet eliminated (including pivot itself)
+        let u_cols: Vec<usize> = pat[pivot]
+            .iter()
+            .copied()
+            .filter(|&c| !eliminated[c] || c == pivot)
+            .collect();
+        for &c in &u_cols {
+            u_nnz.push((pivot, c));
         }
 
-        // For each row below col that has a nonzero in column col
-        let rows_with_entry: Vec<usize> = (col + 1..n)
-            .filter(|&r| pmat[r].contains(&col))
+        // Find rows that have nonzero at column `pivot` and are not yet eliminated
+        let rows_to_elim: Vec<usize> = (0..n)
+            .filter(|&r| !eliminated[r] && pat[r].contains(&pivot))
             .collect();
 
-        for &row in &rows_with_entry {
-            // L factor: a[row][col] /= a[col][col]
-            ops.push(LuOp::DivPivot { row, col });
-            l_nnz.push((row, col));
+        for &row in &rows_to_elim {
+            // L factor: a[row][pivot] /= a[pivot][pivot]
+            ops.push(LuOp::DivPivot { row, col: pivot });
+            l_nnz.push((row, pivot));
             factor_flops += 1;
 
-            // Elimination: for each column j > col in pivot row
-            let pivot_cols: Vec<usize> = pmat[col]
+            // Elimination: for each non-eliminated column in pivot row (except pivot itself)
+            let pivot_cols: Vec<usize> = pat[pivot]
                 .iter()
                 .copied()
-                .filter(|&j| j > col)
+                .filter(|&c| !eliminated[c] && c != pivot)
                 .collect();
             for &j in &pivot_cols {
-                ops.push(LuOp::SubMul { row, col, j });
+                ops.push(LuOp::SubMul { row, col: pivot, j });
                 factor_flops += 2; // multiply + subtract
-                // Fill-in: position (row, j) becomes nonzero
-                pmat[row].insert(j);
+                pat[row].insert(j); // fill-in
             }
         }
     }
 
-    // Solve FLOPs: forward sub touches L entries, backward sub touches U entries
     let solve_flops = l_nnz.len() * 2 + u_nnz.len() * 2;
 
     log::info!(
-        "Sparse LU: N={}, factor_flops={} (dense would be {}), L_nnz={}, U_nnz={}, solve_flops={} (dense would be {})",
+        "Sparse LU: N={}, factor_flops={} (dense ~{}), L_nnz={}, U_nnz={}, solve_flops={} (dense ~{})",
         n, factor_flops, n * n * n / 3, l_nnz.len(), u_nnz.len(), solve_flops, n * n * 2,
     );
 
     LuSparsity {
-        col_perm: col_perm.to_vec(),
-        row_perm: row_perm.to_vec(),
         ops,
+        elim_order: elim_order.to_vec(),
+        row_swaps: row_swaps.to_vec(),
         l_nnz,
         u_nnz,
         factor_flops,
@@ -1788,12 +1786,10 @@ impl CircuitIR {
             );
             // Only use sparse LU if matrix is sufficiently sparse (< 40% density)
             // and large enough to benefit (N >= 8)
-            // TODO: sparse LU has a permutation bug — disabled until fixed.
-            // When enabled, reduces factorization from O(N³) to ~1000 FLOPs for Pultec.
-            if false && density < 0.4 && n >= 8 {
-                let col_perm = amd_ordering(&g_aug_pattern, n);
-                let row_perm = fix_zero_diagonals(&g_aug_pattern, &col_perm, n);
-                let lu = symbolic_lu(&g_aug_pattern, &row_perm, &col_perm, n);
+            if density < 0.4 && n >= 8 {
+                let elim_order = amd_ordering(&g_aug_pattern, n);
+                let row_swaps = find_row_swaps(&g_aug_pattern, &elim_order, n);
+                let lu = symbolic_lu(&g_aug_pattern, &elim_order, &row_swaps, n);
                 Some(lu)
             } else {
                 log::info!("Sparse LU: skipping (density {:.1}%, N={})", density * 100.0, n);
