@@ -3771,7 +3771,9 @@ impl RustEmitter {
             0.0
         };
         let k_degenerate = m > 0 && k_max_abs < 1e-6;
-        let use_full_nodal = has_positive_k_with_current || k_diag_min < -1e12 || k_degenerate;
+        let schur_unstable = ir.matrices.spectral_radius_s_aneg > 0.999;
+        let use_full_nodal =
+            has_positive_k_with_current || k_diag_min < -1e12 || k_degenerate || schur_unstable;
         if use_full_nodal {
             if has_positive_k_with_current {
                 log::info!(
@@ -3781,6 +3783,11 @@ impl RustEmitter {
                 log::info!(
                     "Nodal: using full N×N LU NR (K degenerate, max|K|={:.2e} — device Jacobian provides essential damping)",
                     k_max_abs
+                );
+            } else if schur_unstable {
+                log::info!(
+                    "Nodal: using full N×N LU NR (spectral_radius(S*A_neg) = {:.4}, Schur feedback unstable)",
+                    ir.matrices.spectral_radius_s_aneg
                 );
             } else {
                 log::info!(
@@ -4559,6 +4566,7 @@ impl RustEmitter {
                 ));
             }
         }
+        code.push_str("        self.warmup();\n");
         code.push_str("    }\n\n");
 
         // warmup()
@@ -5494,8 +5502,13 @@ impl RustEmitter {
         // NaN check BEFORE state update (prevents corruption of v_prev/i_nl_prev)
         code.push_str("    if !v.iter().all(|x| x.is_finite()) {\n");
         code.push_str("        state.v_prev = state.dc_operating_point;\n");
-        code.push_str("        state.i_nl_prev = [0.0; M];\n");
-        code.push_str("        state.i_nl_prev_prev = [0.0; M];\n");
+        if ir.dc_nl_currents.iter().any(|&v| v != 0.0) {
+            code.push_str("        state.i_nl_prev = DC_NL_I;\n");
+            code.push_str("        state.i_nl_prev_prev = DC_NL_I;\n");
+        } else {
+            code.push_str("        state.i_nl_prev = [0.0; M];\n");
+            code.push_str("        state.i_nl_prev_prev = [0.0; M];\n");
+        }
         code.push_str("        state.input_prev = 0.0;\n");
         for (dev_num, slot) in ir.device_slots.iter().enumerate() {
             if let super::ir::DeviceParams::Bjt(bp) = &slot.params {
@@ -6676,8 +6689,13 @@ impl RustEmitter {
         // NaN check BEFORE state update (prevents corruption of v_prev/i_nl_prev)
         code.push_str("    if !v.iter().all(|x| x.is_finite()) {\n");
         code.push_str("        state.v_prev = state.dc_operating_point;\n");
-        code.push_str("        state.i_nl_prev = [0.0; M];\n");
-        code.push_str("        state.i_nl_prev_prev = [0.0; M];\n");
+        if ir.dc_nl_currents.iter().any(|&v| v != 0.0) {
+            code.push_str("        state.i_nl_prev = DC_NL_I;\n");
+            code.push_str("        state.i_nl_prev_prev = DC_NL_I;\n");
+        } else {
+            code.push_str("        state.i_nl_prev = [0.0; M];\n");
+            code.push_str("        state.i_nl_prev_prev = [0.0; M];\n");
+        }
         code.push_str("        state.input_prev = 0.0;\n");
         for (dev_num, slot) in ir.device_slots.iter().enumerate() {
             if let DeviceParams::Bjt(bp) = &slot.params {

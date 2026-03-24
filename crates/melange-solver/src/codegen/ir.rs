@@ -189,6 +189,10 @@ pub struct Matrices {
     /// K_be = N_v * S_be * N_i, M×M row-major (backward Euler kernel for BE fallback)
     #[serde(default)]
     pub k_be: Vec<f64>,
+    /// Spectral radius of S * A_neg (trapezoidal feedback operator).
+    /// Values > 1 mean the Schur path is unstable. Only computed for nodal path.
+    #[serde(default)]
+    pub spectral_radius_s_aneg: f64,
 }
 
 /// Op-amp output voltage saturation for code generation.
@@ -816,6 +820,7 @@ impl CircuitIR {
                 rhs_const_be: Vec::new(),
                 s_be: Vec::new(),
                 k_be: Vec::new(),
+                spectral_radius_s_aneg: 0.0,
             }
         } else if be {
             // Backward Euler: recompute S, A_neg, K from G/C with alpha = 1/T
@@ -889,6 +894,7 @@ impl CircuitIR {
                 rhs_const_be: Vec::new(),
                 s_be: Vec::new(),
                 k_be: Vec::new(),
+                spectral_radius_s_aneg: 0.0,
             }
         } else {
             // Standard trapezoidal: use kernel matrices directly, no BE fallback.
@@ -907,6 +913,7 @@ impl CircuitIR {
                 rhs_const_be: Vec::new(),
                 s_be: Vec::new(),
                 k_be: Vec::new(),
+                spectral_radius_s_aneg: 0.0,
             }
         };
 
@@ -1387,6 +1394,49 @@ impl CircuitIR {
             Vec::new()
         };
 
+        // Compute spectral radius of S * A_neg to detect Schur instability.
+        // When rho(S * A_neg) > 1, the trapezoidal feedback v_pred = S*(A_neg*v_prev + ...)
+        // amplifies errors exponentially. Route to full LU NR instead.
+        let spectral_radius_s_aneg = if n > 0 && !s_flat.is_empty() {
+            let mut x = vec![1.0 / (n as f64).sqrt(); n];
+            let mut rho = 0.0f64;
+            for _ in 0..100 {
+                // y = S * (A_neg * x)
+                let mut ax = vec![0.0; n];
+                for i in 0..n {
+                    for j in 0..n {
+                        ax[i] += a_neg_flat[i * n + j] * x[j];
+                    }
+                }
+                let mut y = vec![0.0; n];
+                for i in 0..n {
+                    for j in 0..n {
+                        y[i] += s_flat[i * n + j] * ax[j];
+                    }
+                }
+                let norm: f64 = y.iter().map(|v| v * v).sum::<f64>().sqrt();
+                if norm < 1e-30 {
+                    break;
+                }
+                rho = norm / x.iter().map(|v| v * v).sum::<f64>().sqrt();
+                for v in &mut x {
+                    *v = 0.0;
+                }
+                for (i, yi) in y.iter().enumerate() {
+                    x[i] = yi / norm;
+                }
+            }
+            if rho > 0.999 {
+                log::info!(
+                    "Nodal: spectral_radius(S*A_neg) = {:.4} (> 0.999, Schur path unstable)",
+                    rho
+                );
+            }
+            rho
+        } else {
+            0.0
+        };
+
         let matrices = Matrices {
             s: s_flat,
             k: k_flat,
@@ -1402,6 +1452,7 @@ impl CircuitIR {
             rhs_const_be,
             s_be: s_be_flat,
             k_be: k_be_flat,
+            spectral_radius_s_aneg,
         };
 
         // Run DC OP
