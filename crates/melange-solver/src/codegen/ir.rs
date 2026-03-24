@@ -357,6 +357,42 @@ pub struct SparseInfo {
     pub n_i: MatrixSparsity,
     /// K matrix (M×M) — nonlinear kernel
     pub k: MatrixSparsity,
+    /// Sparse LU elimination schedule for G_aug (full LU path only)
+    pub lu: Option<LuSparsity>,
+}
+
+/// Compile-time sparse LU elimination schedule.
+///
+/// Computed at codegen time from the G_aug = A - N_i*J_dev*N_v sparsity pattern.
+/// The emitter generates straight-line code with one operation per `LuOp` —
+/// no loops, no indirect indexing, no runtime sparsity tracking.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LuSparsity {
+    /// Fill-reducing column permutation (AMD ordering)
+    pub col_perm: Vec<usize>,
+    /// Row pre-permutation to fix zero diagonals (voltage source rows)
+    pub row_perm: Vec<usize>,
+    /// Straight-line elimination operations (in execution order)
+    pub ops: Vec<LuOp>,
+    /// Nonzero positions in L (below diagonal), after permutation
+    pub l_nnz: Vec<(usize, usize)>,
+    /// Nonzero positions in U (on/above diagonal), after permutation
+    pub u_nnz: Vec<(usize, usize)>,
+    /// Total FLOPs for factorization
+    pub factor_flops: usize,
+    /// Total FLOPs for forward+backward solve
+    pub solve_flops: usize,
+    /// Matrix dimension
+    pub n: usize,
+}
+
+/// A single operation in the sparse LU elimination sequence.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum LuOp {
+    /// `a[row][col] /= a[col][col]` — compute L factor
+    DivPivot { row: usize, col: usize },
+    /// `a[row][j] -= a[row][col] * a[col][j]` — elimination
+    SubMul { row: usize, col: usize, j: usize },
 }
 
 /// Threshold below which matrix entries are treated as structural zeros.
@@ -381,6 +417,251 @@ fn analyze_matrix_sparsity(data: &[f64], rows: usize, cols: usize) -> MatrixSpar
         cols,
         nnz,
         nz_by_row,
+    }
+}
+
+/// Compute sparsity pattern of G_aug = A - N_i * J_dev * N_v.
+///
+/// The pattern is the union of A's nonzeros and the Jacobian stamp positions.
+/// This is topology-fixed: pot/switch changes only modify values, not positions.
+fn compute_g_aug_pattern(
+    a_flat: &[f64],
+    n_i_flat: &[f64],
+    n_v_flat: &[f64],
+    n: usize,
+    m: usize,
+    device_slots: &[DeviceSlot],
+) -> Vec<Vec<usize>> {
+    // Start with A's nonzero pattern
+    let mut pattern: Vec<std::collections::BTreeSet<usize>> =
+        (0..n).map(|_| std::collections::BTreeSet::new()).collect();
+
+    for i in 0..n {
+        for j in 0..n {
+            if a_flat[i * n + j].abs() >= SPARSITY_THRESHOLD {
+                pattern[i].insert(j);
+            }
+        }
+    }
+
+    // Add Jacobian stamp positions: N_i[:,dev_i] * N_v[dev_j,:]
+    // for each device block (di, dj) within the block-diagonal J_dev
+    let mut ni_nz_by_dev = vec![Vec::new(); m];
+    for a in 0..n {
+        for &i in (0..m).collect::<Vec<_>>().iter() {
+            if n_i_flat[a * m + i].abs() >= SPARSITY_THRESHOLD {
+                ni_nz_by_dev[i].push(a);
+            }
+        }
+    }
+
+    for slot in device_slots {
+        let s = slot.start_idx;
+        let dim = slot.dimension;
+        for di in 0..dim {
+            let dev_i = s + di;
+            let ni_nodes = &ni_nz_by_dev[dev_i];
+            for dj in 0..dim {
+                let dev_j = s + dj;
+                for b in 0..n {
+                    if n_v_flat[dev_j * n + b].abs() >= SPARSITY_THRESHOLD {
+                        for &a in ni_nodes {
+                            pattern[a].insert(b);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    pattern.into_iter().map(|s| s.into_iter().collect()).collect()
+}
+
+/// Approximate Minimum Degree (AMD) ordering for fill-reducing LU.
+///
+/// Greedy heuristic: at each step, eliminate the node with the fewest
+/// connections in the current elimination graph. This is a simplified AMD
+/// that works well for circuit matrices (typically near-optimal for N<100).
+fn amd_ordering(pattern: &[Vec<usize>], n: usize) -> Vec<usize> {
+    // Build symmetric adjacency (LU fill depends on structural symmetry)
+    let mut adj: Vec<std::collections::BTreeSet<usize>> =
+        (0..n).map(|i| pattern[i].iter().copied().collect()).collect();
+    // Symmetrize: if (i,j) exists, add (j,i)
+    for i in 0..n {
+        let cols: Vec<usize> = adj[i].iter().copied().collect();
+        for j in cols {
+            adj[j].insert(i);
+        }
+    }
+
+    let mut perm = Vec::with_capacity(n);
+    let mut eliminated = vec![false; n];
+
+    for _ in 0..n {
+        // Find un-eliminated node with minimum degree (ties broken by index)
+        let mut best = usize::MAX;
+        let mut best_deg = usize::MAX;
+        for i in 0..n {
+            if eliminated[i] {
+                continue;
+            }
+            let deg = adj[i].iter().filter(|&&j| !eliminated[j]).count();
+            if deg < best_deg {
+                best_deg = deg;
+                best = i;
+            }
+        }
+        perm.push(best);
+        eliminated[best] = true;
+
+        // Update elimination graph: connect all neighbors of `best` to each other
+        let neighbors: Vec<usize> = adj[best]
+            .iter()
+            .copied()
+            .filter(|&j| !eliminated[j])
+            .collect();
+        for &u in &neighbors {
+            for &v in &neighbors {
+                if u != v {
+                    adj[u].insert(v);
+                }
+            }
+        }
+    }
+
+    perm
+}
+
+/// Row pre-permutation to fix zero diagonals (voltage source constraint rows).
+///
+/// After column permutation by `col_perm`, some diagonal entries may be
+/// structurally zero. This finds row swaps to place nonzeros on the diagonal.
+fn fix_zero_diagonals(pattern: &[Vec<usize>], col_perm: &[usize], n: usize) -> Vec<usize> {
+    // Build permuted pattern: permuted_row[i] has columns in permuted space
+    let mut col_to_pcol = vec![0; n];
+    for (pcol, &orig_col) in col_perm.iter().enumerate() {
+        col_to_pcol[orig_col] = pcol;
+    }
+
+    let mut row_perm: Vec<usize> = (0..n).collect();
+
+    // Greedy: for each column k, ensure row_perm[k]'s row has a nonzero at column col_perm[k]
+    for k in 0..n {
+        let target_col = col_perm[k];
+        // Check if current row has nonzero at target_col
+        let cur_row = row_perm[k];
+        if pattern[cur_row].contains(&target_col) {
+            continue;
+        }
+        // Find a row below k that has nonzero at target_col
+        let mut found = false;
+        for j in (k + 1)..n {
+            let cand_row = row_perm[j];
+            if pattern[cand_row].contains(&target_col) {
+                row_perm.swap(k, j);
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            // No row has a nonzero here — matrix may be singular.
+            // Leave as-is; dense fallback will handle it at runtime.
+            log::warn!(
+                "Sparse LU: no nonzero at diagonal position {} (col {}), dense fallback may be needed",
+                k, target_col
+            );
+        }
+    }
+
+    row_perm
+}
+
+/// Symbolic LU factorization: determine fill-in pattern and elimination schedule.
+///
+/// Given the G_aug sparsity pattern (after row/column permutation), traces
+/// Gaussian elimination symbolically to find:
+/// - Which (row, col) positions get fill-in during factorization
+/// - The exact sequence of DivPivot and SubMul operations needed
+/// - The L and U nonzero patterns for forward/backward substitution
+fn symbolic_lu(
+    pattern: &[Vec<usize>],
+    row_perm: &[usize],
+    col_perm: &[usize],
+    n: usize,
+) -> LuSparsity {
+    // Build permuted pattern in (prow, pcol) space
+    let mut col_to_pcol = vec![0; n];
+    for (pcol, &orig_col) in col_perm.iter().enumerate() {
+        col_to_pcol[orig_col] = pcol;
+    }
+
+    // pmat[prow][pcol] = true if nonzero
+    let mut pmat: Vec<std::collections::BTreeSet<usize>> =
+        (0..n).map(|_| std::collections::BTreeSet::new()).collect();
+    for prow in 0..n {
+        let orig_row = row_perm[prow];
+        for &orig_col in &pattern[orig_row] {
+            pmat[prow].insert(col_to_pcol[orig_col]);
+        }
+    }
+
+    let mut ops = Vec::new();
+    let mut l_nnz = Vec::new();
+    let mut u_nnz = Vec::new();
+    let mut factor_flops = 0usize;
+
+    // Gaussian elimination in permuted space
+    for col in 0..n {
+        // U entries: row=col, all columns >= col that are nonzero in pmat[col]
+        for &j in &pmat[col] {
+            if j >= col {
+                u_nnz.push((col, j));
+            }
+        }
+
+        // For each row below col that has a nonzero in column col
+        let rows_with_entry: Vec<usize> = (col + 1..n)
+            .filter(|&r| pmat[r].contains(&col))
+            .collect();
+
+        for &row in &rows_with_entry {
+            // L factor: a[row][col] /= a[col][col]
+            ops.push(LuOp::DivPivot { row, col });
+            l_nnz.push((row, col));
+            factor_flops += 1;
+
+            // Elimination: for each column j > col in pivot row
+            let pivot_cols: Vec<usize> = pmat[col]
+                .iter()
+                .copied()
+                .filter(|&j| j > col)
+                .collect();
+            for &j in &pivot_cols {
+                ops.push(LuOp::SubMul { row, col, j });
+                factor_flops += 2; // multiply + subtract
+                // Fill-in: position (row, j) becomes nonzero
+                pmat[row].insert(j);
+            }
+        }
+    }
+
+    // Solve FLOPs: forward sub touches L entries, backward sub touches U entries
+    let solve_flops = l_nnz.len() * 2 + u_nnz.len() * 2;
+
+    log::info!(
+        "Sparse LU: N={}, factor_flops={} (dense would be {}), L_nnz={}, U_nnz={}, solve_flops={} (dense would be {})",
+        n, factor_flops, n * n * n / 3, l_nnz.len(), u_nnz.len(), solve_flops, n * n * 2,
+    );
+
+    LuSparsity {
+        col_perm: col_perm.to_vec(),
+        row_perm: row_perm.to_vec(),
+        ops,
+        l_nnz,
+        u_nnz,
+        factor_flops,
+        solve_flops,
+        n,
     }
 }
 
@@ -1124,6 +1405,7 @@ impl CircuitIR {
             n_v: analyze_matrix_sparsity(&matrices.n_v, m, n),
             n_i: analyze_matrix_sparsity(&matrices.n_i, n, m),
             k: analyze_matrix_sparsity(&matrices.k, m, m),
+            lu: None, // DK path doesn't use full LU
         };
 
         Ok(CircuitIR {
@@ -1492,11 +1774,41 @@ impl CircuitIR {
         Self::resolve_mosfet_nodes(&mut device_slots, mna);
 
         // Sparsity analysis (K is now computed for Schur complement NR)
+        let lu_sparsity = if m > 0 {
+            // Compute G_aug = A - N_i*J_dev*N_v sparsity pattern
+            let g_aug_pattern = compute_g_aug_pattern(
+                &matrices.a_matrix, &matrices.n_i, &matrices.n_v,
+                n, m, &device_slots,
+            );
+            let g_aug_nnz: usize = g_aug_pattern.iter().map(|r| r.len()).sum();
+            let density = g_aug_nnz as f64 / (n * n) as f64;
+            log::info!(
+                "Sparse LU: G_aug pattern has {} nonzeros out of {} ({:.1}% density)",
+                g_aug_nnz, n * n, density * 100.0
+            );
+            // Only use sparse LU if matrix is sufficiently sparse (< 40% density)
+            // and large enough to benefit (N >= 8)
+            // TODO: sparse LU has a permutation bug — disabled until fixed.
+            // When enabled, reduces factorization from O(N³) to ~1000 FLOPs for Pultec.
+            if false && density < 0.4 && n >= 8 {
+                let col_perm = amd_ordering(&g_aug_pattern, n);
+                let row_perm = fix_zero_diagonals(&g_aug_pattern, &col_perm, n);
+                let lu = symbolic_lu(&g_aug_pattern, &row_perm, &col_perm, n);
+                Some(lu)
+            } else {
+                log::info!("Sparse LU: skipping (density {:.1}%, N={})", density * 100.0, n);
+                None
+            }
+        } else {
+            None
+        };
+
         let sparsity = SparseInfo {
             a_neg: analyze_matrix_sparsity(&matrices.a_neg, n, n),
             n_v: analyze_matrix_sparsity(&matrices.n_v, m, n),
             n_i: analyze_matrix_sparsity(&matrices.n_i, n, m),
             k: analyze_matrix_sparsity(&matrices.k, m, m),
+            lu: lu_sparsity,
         };
 
         Ok(CircuitIR {
