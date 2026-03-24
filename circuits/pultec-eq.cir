@@ -250,9 +250,9 @@ L_opt_sec out_w 0 11
 * (from CineMag CM-S217D L_leak=19mH, L_pri=38.1H at 1kHz).
 * Previous K=0.95 created 195× too much leakage, causing -3dB at 89Hz.
 * Augmented MNA solver handles K>0.95 (old companion model limitation removed).
-K_opta L_opt_a L_opt_sec 0.999
-K_optb L_opt_b L_opt_sec 0.999
-K_optab L_opt_a L_opt_b 0.999
+K_opta L_opt_a L_opt_sec 0.9999
+K_optb L_opt_b L_opt_sec 0.9999
+K_optab L_opt_a L_opt_b 0.9999
 
 * === FEEDBACK: S-217-D TERTIARY WINDING (pins 3-5) ===
 * Peerless winding data: 71 turns/coil × 2 coils = 142 turns total.
@@ -272,9 +272,9 @@ R_fb_gnd fb_s5 0 1000
 R_fb_a fb_s3 cathode1 360
 R_fb_b fb_s5 cathode2 360
 * Coupling: tertiary is bifilar with primary (K ≥ 0.999, CineMag spec).
-K_fba L_opt_a L_fb_a 0.999
-K_fbb L_opt_b L_fb_a 0.999
-K_sec_fb L_opt_sec L_fb_a 0.999
+K_fba L_opt_a L_fb_a 0.9999
+K_fbb L_opt_b L_fb_a 0.9999
+K_sec_fb L_opt_sec L_fb_a 0.9999
 
 * Output load — S-217-D spec: "OUTPUT TO 600Ω LOAD"
 * The Pultec was designed for 600Ω terminated operation.
