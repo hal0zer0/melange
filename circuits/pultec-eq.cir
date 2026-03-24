@@ -27,10 +27,10 @@
 *   plate1/plate2 → .25µF → 12AU7 push-pull grids → plates →
 *   360Ω stoppers → S-217-D output xfmr → out
 *
-* Feedback: S-217-D tertiary (pins 3-5, 1000Ω shunt) →
-*   pin 3 → 360Ω → cathode (12AX7 pin 3)
-*   pin 5 → 360Ω → cathode (12AX7 pin 8)
-*   Both cathodes tied together. Series-voltage NFB → 0dB overall gain
+* Feedback: S-217-D tertiary (pins 3-5, 1kΩ to ground) →
+*   pin 3 → 360Ω → cathode1 (12AX7 pin 3)
+*   pin 5 → 360Ω → cathode2 (12AX7 pin 8)
+*   Cathodes separated (820Ω between). Differential NFB → ~0dB overall gain
 *
 * Controls (8 total — but 7 pots due to 3-terminal pot modeling):
 *   3 switches: HF Boost Freq (7-pos), LF Freq (4-pos), HF Cut Freq (3-pos)
@@ -259,11 +259,11 @@ K_optab L_opt_a L_opt_b 0.999
 * L_tert = L_pri_half × (142/1575)² = 55 × 0.00813 = 0.447H (scaled with 220H primary).
 * 1000Ω 1W shunt across pins 3-5 (confirmed on schematic).
 *
-* Feedback network (4 components, schematic-verified):
-*   fb_s3 → 360Ω → cathode (series-voltage NFB)
-*   fb_s5 → 360Ω → cathode (both to shared cathode, per Sowter schematic)
-*   Provides ~0.8 dB common-mode NFB in a perfectly balanced push-pull.
-*   Real hardware gets additional 1-3 dB from tube/transformer mismatch.
+* Feedback network (schematic-verified, proven by DC voltage annotations):
+*   fb_s3 → 360Ω → cathode1 (differential NFB)
+*   fb_s5 → 360Ω → cathode2 (differential NFB)
+*   1kΩ from fb_s5 to ground (DC reference, NOT across winding)
+*   DC proof: +1.1V at pins, +1.3V at cathodes (I=1.12mA × 1kΩ = 1.12V).
 * Tertiary winding DCR: 17Ω (CJ measurements)
 R_dcr_fb fb_s3_w fb_s3 17
 L_fb_a fb_s3_w fb_s5 447m
