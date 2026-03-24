@@ -302,7 +302,8 @@ Rload out 0 600
 * LF Atten: 100k audio pot (parallel with LF atten cap)
 .pot R_lfc 100 100k 100 "LF Atten"
 * HF Cut: 3-terminal 1k linear pot (upper + lower arms, link inversely)
-.pot R_hfc_u 100 1k 1k "HF Cut (upper)"
-.pot R_hfc_l 100 1k 100 "HF Cut (lower)"
+* Default: wiper at top (no cut) — upper=min disconnects cap from signal path
+.pot R_hfc_u 100 1k 100 "HF Cut (upper)"
+.pot R_hfc_l 100 1k 1k "HF Cut (lower)"
 
 .END
