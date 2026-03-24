@@ -4987,9 +4987,8 @@ impl RustEmitter {
                 }
 
                 // Stamp delta into g_work or c_work
-                if comp.component_type == 'L' && comp.augmented_row.is_some() {
+                if let Some(aug_row) = comp.augmented_row.filter(|_| comp.component_type == 'L') {
                     // Augmented MNA: L value on diagonal of branch variable row
-                    let aug_row = comp.augmented_row.unwrap();
                     code.push_str(&format!(
                         "        self.c_work[{aug_row}][{aug_row}] += delta_{ci};\n"
                     ));

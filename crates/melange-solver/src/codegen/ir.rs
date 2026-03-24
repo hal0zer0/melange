@@ -1702,9 +1702,7 @@ impl CircuitIR {
                     break;
                 }
                 rho = norm / x.iter().map(|v| v * v).sum::<f64>().sqrt();
-                for v in &mut x {
-                    *v = 0.0;
-                }
+                x.fill(0.0);
                 for (i, yi) in y.iter().enumerate() {
                     x[i] = yi / norm;
                 }
