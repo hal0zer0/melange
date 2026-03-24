@@ -218,6 +218,7 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
 - BJT Gummel-Poon: self-heating (Rth/Cth) and charge storage (CJE/CJC/TF) available; no substrate current or avalanche breakdown
 - **Runtime solver** (`DeviceEntry`) supports all device types: Diode, DiodeWithRs, Led, BJT, JFET, MOSFET, Tube
 - **NodalSolver transient NR**: Converges for all physically valid circuits including Pultec EQP-1A (4 tubes, 2 transformers, global NFB). Requires positive-definite inductance matrices (validated at MNA build time).
+- **Coupled-inductor push-pull NFB limitation**: The K coupling model cannot provide >7 dB of cathode NFB in push-pull circuits due to PD constraint on the inductance matrix. The real mechanism requires distributed coupling geometry (position-dependent turn-to-turn coupling) that K coefficients can't represent. Fix: ideal transformer formulation (dependent sources + explicit leakage/magnetizing L). Pultec currently runs at +22 dB instead of 0 dB due to this.
 - **`melange simulate`**: auto-selects NodalSolver for nonlinear circuits with inductors, CircuitSolver (DK) otherwise. `--solver nodal|dk` override available.
 - **Performance**: DK codegen circuits run 100-600× realtime. Nodal full-LU (chord + cross-timestep + sparse LU): 11.3× realtime for Pultec (41-node, 8 NL, 2 transformers), 2.5× for split cathode variant.
 
@@ -271,6 +272,7 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
 The `Emitter` trait + `CircuitIR` are language-agnostic by design. Once Rust output is complete, planned targets in priority order: C++ (pro plugin devs), FAUST (compiles to 30+ targets), Python/NumPy (prototyping), MATLAB/Octave (academic).
 
 #### Deferred
+- **Ideal transformer formulation**: Dependent sources + explicit leakage/magnetizing L. Removes PD constraint from coupled inductors, enables correct push-pull cathode NFB. Required for Pultec 0 dB gain and any future push-pull circuit with global NFB.
 - **Phase 6a/6b** (type safety): NodeIdx newtype and field visibility
 - **Phase 7** (crate split): Extract melange-parser, melange-codegen
 - **M>16**: Iterative/sparse NR for very large nonlinear systems
