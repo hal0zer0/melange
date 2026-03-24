@@ -589,15 +589,8 @@ fn test_gain_sanity_two_tube() {
 ///
 /// The real Pultec EQP-1A is nominally unity gain (±2 dB) with all controls flat.
 /// The tube makeup amp compensates for the passive EQ insertion loss.
-///
-/// KNOWN ISSUE: Our circuit currently shows +31 dB gain because the push-pull
-/// NFB loop is defeated by the shared cathode topology. The AC analysis (linearized)
-/// shows correct ~+2 dB gain, but the transient solver sees +31 dB.
-/// This test documents the expected behavior and will pass once the NFB is fixed.
-///
-/// Run with: cargo test --test full_lu_optimization_tests -- --include-ignored test_gain_sanity_pultec
+/// The differential NFB via the S-217-D tertiary provides ~21 dB of loop gain.
 #[test]
-#[ignore = "Pultec NFB loop not working: +31 dB gain instead of ~0 dB (see docs/pultec-gain-staging-investigation.md)"]
 fn test_gain_sanity_pultec() {
     // Find circuits/ relative to the workspace root (test CWD varies)
     let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
