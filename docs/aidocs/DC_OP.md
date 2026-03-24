@@ -92,7 +92,7 @@ Works for simple circuits (single diode with VCC).
 
 ### 2. Source Stepping (DcOpMethod::SourceStepping)
 
-Scale all DC sources from 0 → full value in `source_steps` stages (default 10).
+Scale all DC sources from 0 → full value in `source_steps` stages (default 50).
 At each stage, run NR to convergence, then warm-start the next stage.
 Start from v=0 (not linear guess).
 

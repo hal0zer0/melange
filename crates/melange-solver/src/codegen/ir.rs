@@ -1751,7 +1751,8 @@ impl CircuitIR {
         let dc_nl_currents = dc_result.i_nl.clone();
         let has_dc_sources = !mna.voltage_sources.is_empty() || !mna.current_sources.is_empty();
 
-        // Pad DC OP to n_nodal (inductor branch currents = 0)
+        // Resize DC OP to n_nodal: keeps inductor branch currents from DC solver,
+        // truncates internal BJT nodes (not needed in transient).
         let mut dc_operating_point = dc_result.v_node.clone();
         dc_operating_point.resize(n, 0.0);
         // Clamp op-amp output + internal Boyle nodes to VSAT

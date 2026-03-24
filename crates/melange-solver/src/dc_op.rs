@@ -372,18 +372,19 @@ fn build_dc_system(
     }
 
     // Stamp inductor short-circuit constraints as augmented rows/cols.
-    // For inductor between nodes ni, nj: V(ni) - V(nj) = 0 with current j_ind.
-    // Same stamp as a voltage source with V_dc = 0.
+    // At DC, inductors enforce V(ni) - V(nj) = 0 (zero resistance).
+    // KVL row uses inductor convention (-V_i + V_j) to match the augmented MNA
+    // transient solver, so the branch current polarity is consistent.
     for (idx, &(ni, nj)) in inductor_pairs.iter().enumerate() {
         let k = n_aug + idx; // augmented row/col for this inductor
-                             // KVL row: V(ni) - V(nj) = 0
+                             // KVL row: -V(ni) + V(nj) = 0 (inductor convention)
         if ni > 0 {
-            g_dc[k][ni - 1] += 1.0;
+            g_dc[k][ni - 1] -= 1.0;
         }
         if nj > 0 {
-            g_dc[k][nj - 1] -= 1.0;
+            g_dc[k][nj - 1] += 1.0;
         }
-        // Current injection column: j_ind enters ni, exits nj
+        // KCL: current j_ind enters node_i, exits node_j
         if ni > 0 {
             g_dc[ni - 1][k] += 1.0;
         }
@@ -848,7 +849,7 @@ struct DcCircuit<'a> {
 }
 
 /// Uses companion formulation at each iteration:
-///   G_aug = G_dc + N_i · J_dev · N_v
+///   G_aug = G_dc - N_i · J_dev · N_v
 ///   rhs = b_dc + N_i · (i_nl - J_dev · v_nl)
 ///   v_new = G_aug^{-1} · rhs
 ///
