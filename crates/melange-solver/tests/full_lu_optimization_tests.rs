@@ -482,3 +482,222 @@ fn main() {
     // No NR failures
     assert!(output.contains("nr_fail=0"));
 }
+
+// ── Gain sanity tests ────────────────────────────────────────────────
+
+/// Helper: generate nodal code, process samples, return gain in dB.
+fn measure_codegen_gain(spice: &str, amplitude: f64, tag: &str) -> (f64, f64, u64) {
+    let code = generate_nodal_code(spice, 48000.0);
+
+    let main_code = format!(
+        r#"
+fn main() {{
+    let mut state = CircuitState::default();
+    let mut peak = 0.0f64;
+    for i in 0..4800u32 {{
+        let t = i as f64 / 48000.0;
+        let input = {amplitude:?} * (2.0 * std::f64::consts::PI * 1000.0 * t).sin();
+        let output = process_sample(input, &mut state);
+        if i >= 2400 {{ // skip first 50ms (DC settling)
+            let v = output[0].abs();
+            if v > peak {{ peak = v; }}
+        }}
+    }}
+    let gain_db = if peak > 1e-20 {{ 20.0 * (peak / {amplitude:?}_f64).log10() }} else {{ -999.0 }};
+    println!("peak={{:.8e}}", peak);
+    println!("gain_db={{:.2}}", gain_db);
+    println!("nr_fail={{}}", state.diag_nr_max_iter_count);
+    println!("nan_reset={{}}", state.diag_nan_reset_count);
+}}
+"#
+    );
+
+    let output = compile_and_run(&code, &main_code, tag);
+
+    let peak = output
+        .lines()
+        .find(|l| l.starts_with("peak="))
+        .and_then(|l| l.strip_prefix("peak="))
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    let gain_db = output
+        .lines()
+        .find(|l| l.starts_with("gain_db="))
+        .and_then(|l| l.strip_prefix("gain_db="))
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(-999.0);
+    let nr_fail = output
+        .lines()
+        .find(|l| l.starts_with("nr_fail="))
+        .and_then(|l| l.strip_prefix("nr_fail="))
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0);
+
+    (peak, gain_db, nr_fail)
+}
+
+/// Verify diode clipper has reasonable gain (should clip, not amplify wildly).
+/// A diode clipper with 2V input should clip to ~0.6V (diode forward voltage).
+#[test]
+fn test_gain_sanity_diode_clipper() {
+    let (peak, gain_db, nr_fail) = measure_codegen_gain(DIODE_CLIPPER, 2.0, "gain_diode");
+
+    eprintln!("Diode clipper: peak={peak:.4}V, gain={gain_db:.1} dB, nr_fail={nr_fail}");
+
+    assert!(
+        peak > 0.1 && peak < 5.0,
+        "Diode clipper peak should be 0.1-5V (clipping), got {peak:.4}V"
+    );
+    assert!(nr_fail == 0, "No NR failures expected, got {nr_fail}");
+}
+
+/// Verify BJT CE amp has reasonable gain.
+/// A CE amp with 10mV input and 4.7k collector load at 12V should give ~10-100× voltage gain.
+#[test]
+fn test_gain_sanity_bjt_ce() {
+    let (peak, gain_db, nr_fail) = measure_codegen_gain(BJT_CE, 0.01, "gain_bjt");
+
+    eprintln!("BJT CE: peak={peak:.4}V, gain={gain_db:.1} dB, nr_fail={nr_fail}");
+
+    // CE amp gain depends heavily on bias point and coupling caps.
+    // With emitter bypass cap and DC blocking on output, gain should be positive
+    // but exact value depends on operating point. Main check: not wildly wrong.
+    assert!(
+        gain_db > -20.0 && gain_db < 60.0,
+        "BJT CE gain should be -20 to 60 dB (reasonable for CE amp), got {gain_db:.1} dB"
+    );
+    assert!(nr_fail == 0, "No NR failures expected, got {nr_fail}");
+}
+
+/// Verify two-tube preamp has reasonable gain.
+/// Two 12AX7 gain stages: each ~30-40 dB, but with plate-loading and coupling losses,
+/// expect 30-60 dB total. Should NOT be > 80 dB (positive feedback / instability).
+#[test]
+fn test_gain_sanity_two_tube() {
+    let (peak, gain_db, nr_fail) = measure_codegen_gain(TWO_TUBE_STAGE, 0.005, "gain_tube");
+
+    eprintln!("Two-tube: peak={peak:.4}V, gain={gain_db:.1} dB, nr_fail={nr_fail}");
+
+    assert!(
+        gain_db > 10.0 && gain_db < 80.0,
+        "Two-tube gain should be 10-80 dB, got {gain_db:.1} dB"
+    );
+    assert!(nr_fail == 0, "No NR failures expected, got {nr_fail}");
+}
+
+/// Verify Pultec EQ gain is within expected range.
+///
+/// The real Pultec EQP-1A is nominally unity gain (±2 dB) with all controls flat.
+/// The tube makeup amp compensates for the passive EQ insertion loss.
+///
+/// KNOWN ISSUE: Our circuit currently shows +31 dB gain because the push-pull
+/// NFB loop is defeated by the shared cathode topology. The AC analysis (linearized)
+/// shows correct ~+2 dB gain, but the transient solver sees +31 dB.
+/// This test documents the expected behavior and will pass once the NFB is fixed.
+///
+/// Run with: cargo test --test full_lu_optimization_tests -- --include-ignored test_gain_sanity_pultec
+#[test]
+#[ignore = "Pultec NFB loop not working: +31 dB gain instead of ~0 dB (see docs/pultec-gain-staging-investigation.md)"]
+fn test_gain_sanity_pultec() {
+    // Find circuits/ relative to the workspace root (test CWD varies)
+    let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
+    let pultec_path = workspace_root.join("circuits/pultec-eq.cir");
+    if !pultec_path.exists() {
+        panic!("Pultec circuit not found at {:?}", pultec_path);
+    }
+    let spice = std::fs::read_to_string(&pultec_path).unwrap();
+    let netlist = Netlist::parse(&spice).expect("parse");
+    let mut mna = MnaSystem::from_netlist(&netlist).expect("mna");
+
+    let input_node = mna
+        .node_map
+        .get("in")
+        .copied()
+        .unwrap_or(1)
+        .saturating_sub(1);
+    // Output is "out" node
+    let output_node = mna
+        .node_map
+        .get("out")
+        .copied()
+        .unwrap_or(2)
+        .saturating_sub(1);
+
+    let input_r = 600.0; // from .input_impedance directive
+    let g_in = 1.0 / input_r;
+    mna.g[input_node][input_node] += g_in;
+
+    let config = CodegenConfig {
+        circuit_name: "pultec_gain_test".to_string(),
+        sample_rate: 48000.0,
+        input_node,
+        output_nodes: vec![output_node],
+        input_resistance: input_r,
+        ..CodegenConfig::default()
+    };
+    let codegen = CodeGenerator::new(config);
+    let result = codegen
+        .generate_nodal(&mna, &netlist)
+        .expect("nodal codegen");
+
+    let amplitude = 0.01; // 10mV — well within linear range of tubes
+    let main_code = format!(
+        r#"
+fn main() {{
+    let mut state = CircuitState::default();
+    let mut peak = 0.0f64;
+    let mut nr_fail_total = 0u64;
+    for i in 0..9600u32 {{
+        let t = i as f64 / 48000.0;
+        let input = {amplitude:?} * (2.0 * std::f64::consts::PI * 1000.0 * t).sin();
+        let output = process_sample(input, &mut state);
+        if i >= 4800 {{
+            let v = output[0].abs();
+            if v > peak {{ peak = v; }}
+        }}
+        nr_fail_total = state.diag_nr_max_iter_count;
+    }}
+    let gain_db = if peak > 1e-20 {{ 20.0 * (peak / {amplitude:?}_f64).log10() }} else {{ -999.0 }};
+    println!("peak={{:.8e}}", peak);
+    println!("gain_db={{:.2}}", gain_db);
+    println!("nr_fail={{}}", nr_fail_total);
+    println!("nan_reset={{}}", state.diag_nan_reset_count);
+}}
+"#
+    );
+
+    let output = compile_and_run(&result.code, &main_code, "gain_pultec");
+
+    let gain_db: f64 = output
+        .lines()
+        .find(|l| l.starts_with("gain_db="))
+        .and_then(|l| l.strip_prefix("gain_db="))
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(-999.0);
+    let nr_fail: u64 = output
+        .lines()
+        .find(|l| l.starts_with("nr_fail="))
+        .and_then(|l| l.strip_prefix("nr_fail="))
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+
+    eprintln!("Pultec: gain={gain_db:.1} dB, nr_fail={nr_fail}");
+    eprintln!("Output:\n{output}");
+
+    // The circuit must produce finite output with zero NR failures at 10mV
+    assert!(nr_fail == 0, "Pultec at 10mV should have zero NR failures, got {nr_fail}");
+
+    // KNOWN ISSUE: gain is +31 dB instead of ~0 dB (NFB loop defeated by shared cathode).
+    // This assertion documents the expected correct behavior.
+    // When the NFB is fixed, this test will pass. Until then, it tracks the known issue.
+    assert!(
+        gain_db < 6.0,
+        "Pultec gain should be < +6 dB (nominally unity with NFB). \
+         Got {gain_db:.1} dB — NFB loop is not working. \
+         See docs/pultec-gain-staging-investigation.md"
+    );
+}
