@@ -150,9 +150,9 @@ C_ct_bypass hs29_ct 0 270p
 * True push-pull: grid1 and grid2 receive equal and opposite signals.
 
 * 12AX7 section 1 (pins 1,2,3)
-T1a grid1 plate1 cathode 12AX7
+T1a grid1 plate1 cathode1 12AX7
 * 12AX7 section 2 (pins 6,7,8)
-T1b grid2 plate2 cathode 12AX7
+T1b grid2 plate2 cathode2 12AX7
 
 * Plate load resistors (200K/1W from Node G, per schematic supply chain).
 * "Node G feeds: 12AX7 plates (through 200K Ra)" — NOT from +250V rail.
@@ -166,11 +166,11 @@ Ra2 node_g plate2 200k
 * Previous 20nF was a 1000x error — 20nF with 200K plates gives f_c=80Hz, killing treble.
 C_plate_bridge plate1 plate2 20p
 
-* Shared cathode bias (820Ω to ground, unbypassed).
-* Both cathodes (pins 3, 8) tied together. 820Ω to ground provides self-bias.
+* Cathode bias (820Ω BETWEEN cathodes, not to ground).
+* Cathodes separated: 820Ω between pin 3 (cathode1) and pin 8 (cathode2).
 * S-217-D feedback tertiary connects to cathode through both 360Ω resistors.
 * No cathode bypass cap — confirmed by schemer on both EQP-1A and EQP-1R.
-Rk cathode 0 820
+Rk cathode1 cathode2 820
 
 * === INTERSTAGE COUPLING: 12AX7 plates → 12AU7 grids ===
 * .25µF caps provide direct AC coupling from 12AX7 plates to 12AU7 grids.
@@ -266,11 +266,11 @@ K_optab L_opt_a L_opt_b 0.999
 *   Real hardware gets additional 1-3 dB from tube/transformer mismatch.
 * Tertiary winding DCR: 17Ω (CJ measurements)
 R_dcr_fb fb_s3_w fb_s3 17
-L_fb_a fb_s5 fb_s3_w 447m
-R_fb_shunt fb_s3 fb_s5 1000
-R_fb_dcref fb_s5 0 1Meg
-R_fb_a fb_s3 cathode 360
-R_fb_b fb_s5 cathode 360
+L_fb_a fb_s3_w fb_s5 447m
+R_fb_gnd fb_s5 0 1000
+* R_fb_dcref removed — R_fb_gnd provides ground reference
+R_fb_a fb_s3 cathode1 360
+R_fb_b fb_s5 cathode2 360
 * Coupling: tertiary is bifilar with primary (K ≥ 0.999, CineMag spec).
 K_fba L_opt_a L_fb_a 0.999
 K_fbb L_opt_b L_fb_a 0.999
