@@ -478,7 +478,10 @@ fn compute_g_aug_pattern(
         }
     }
 
-    pattern.into_iter().map(|s| s.into_iter().collect()).collect()
+    pattern
+        .into_iter()
+        .map(|s| s.into_iter().collect())
+        .collect()
 }
 
 /// Approximate Minimum Degree (AMD) ordering for fill-reducing LU.
@@ -488,8 +491,9 @@ fn compute_g_aug_pattern(
 /// that works well for circuit matrices (typically near-optimal for N<100).
 fn amd_ordering(pattern: &[Vec<usize>], n: usize) -> Vec<usize> {
     // Build symmetric adjacency (LU fill depends on structural symmetry)
-    let mut adj: Vec<std::collections::BTreeSet<usize>> =
-        (0..n).map(|i| pattern[i].iter().copied().collect()).collect();
+    let mut adj: Vec<std::collections::BTreeSet<usize>> = (0..n)
+        .map(|i| pattern[i].iter().copied().collect())
+        .collect();
     // Symmetrize: if (i,j) exists, add (j,i)
     for i in 0..n {
         let cols: Vec<usize> = adj[i].iter().copied().collect();
@@ -544,11 +548,7 @@ fn amd_ordering(pattern: &[Vec<usize>], n: usize) -> Vec<usize> {
 ///
 /// For each step k in the AMD order, if the pivot position a[order[k]][order[k]]
 /// has no structural nonzero, find a later row to swap with. Returns (r1, r2) pairs.
-fn find_row_swaps(
-    pattern: &[Vec<usize>],
-    elim_order: &[usize],
-    n: usize,
-) -> Vec<(usize, usize)> {
+fn find_row_swaps(pattern: &[Vec<usize>], elim_order: &[usize], n: usize) -> Vec<(usize, usize)> {
     let mut eliminated = vec![false; n];
     let mut swaps = Vec::new();
 
@@ -567,7 +567,10 @@ fn find_row_swaps(
     }
 
     if !swaps.is_empty() {
-        log::info!("Sparse LU: {} row swaps needed for zero diagonals", swaps.len());
+        log::info!(
+            "Sparse LU: {} row swaps needed for zero diagonals",
+            swaps.len()
+        );
     }
 
     swaps
@@ -1776,14 +1779,20 @@ impl CircuitIR {
         let lu_sparsity = if m > 0 {
             // Compute G_aug = A - N_i*J_dev*N_v sparsity pattern
             let g_aug_pattern = compute_g_aug_pattern(
-                &matrices.a_matrix, &matrices.n_i, &matrices.n_v,
-                n, m, &device_slots,
+                &matrices.a_matrix,
+                &matrices.n_i,
+                &matrices.n_v,
+                n,
+                m,
+                &device_slots,
             );
             let g_aug_nnz: usize = g_aug_pattern.iter().map(|r| r.len()).sum();
             let density = g_aug_nnz as f64 / (n * n) as f64;
             log::info!(
                 "Sparse LU: G_aug pattern has {} nonzeros out of {} ({:.1}% density)",
-                g_aug_nnz, n * n, density * 100.0
+                g_aug_nnz,
+                n * n,
+                density * 100.0
             );
             // Only use sparse LU if matrix is sufficiently sparse (< 40% density)
             // and large enough to benefit (N >= 8)
@@ -1793,7 +1802,11 @@ impl CircuitIR {
                 let lu = symbolic_lu(&g_aug_pattern, &elim_order, &row_swaps, n);
                 Some(lu)
             } else {
-                log::info!("Sparse LU: skipping (density {:.1}%, N={})", density * 100.0, n);
+                log::info!(
+                    "Sparse LU: skipping (density {:.1}%, N={})",
+                    density * 100.0,
+                    n
+                );
                 None
             }
         } else {

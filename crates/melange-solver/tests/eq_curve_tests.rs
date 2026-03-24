@@ -86,8 +86,18 @@ fn load_pultec() -> (String, String) {
     let netlist = Netlist::parse(&spice).expect("parse");
     let mut mna = MnaSystem::from_netlist(&netlist).expect("mna");
 
-    let input_node = mna.node_map.get("in").copied().unwrap_or(1).saturating_sub(1);
-    let output_node = mna.node_map.get("out").copied().unwrap_or(2).saturating_sub(1);
+    let input_node = mna
+        .node_map
+        .get("in")
+        .copied()
+        .unwrap_or(1)
+        .saturating_sub(1);
+    let output_node = mna
+        .node_map
+        .get("out")
+        .copied()
+        .unwrap_or(2)
+        .saturating_sub(1);
     let input_r = 600.0;
     mna.g[input_node][input_node] += 1.0 / input_r;
 

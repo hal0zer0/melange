@@ -303,7 +303,10 @@ fn main() {
     let mut sum_ff = 0.0f64;
     let mut max_diff = 0.0f64;
     let mut max_abs = 0.0f64;
-    for (&r, &f) in reuse_values[skip..].iter().zip(forced_values[skip..].iter()) {
+    for (&r, &f) in reuse_values[skip..]
+        .iter()
+        .zip(forced_values[skip..].iter())
+    {
         sum_rf += r * f;
         sum_rr += r * r;
         sum_ff += f * f;
@@ -399,7 +402,10 @@ fn main() {
         "No NR failures expected. Output:\n{output}"
     );
     // No NaN
-    assert!(!output.contains("NAN_AT="), "No NaN expected. Output:\n{output}");
+    assert!(
+        !output.contains("NAN_AT="),
+        "No NaN expected. Output:\n{output}"
+    );
 }
 
 /// Verify sparse LU on a BJT circuit (tests 2D device Jacobian stamping).
@@ -682,7 +688,10 @@ fn main() {{
     eprintln!("Output:\n{output}");
 
     // The circuit must produce finite output with zero NR failures at 10mV
-    assert!(nr_fail == 0, "Pultec at 10mV should have zero NR failures, got {nr_fail}");
+    assert!(
+        nr_fail == 0,
+        "Pultec at 10mV should have zero NR failures, got {nr_fail}"
+    );
 
     // KNOWN ISSUE: gain is +31 dB instead of ~0 dB (NFB loop defeated by shared cathode).
     // This assertion documents the expected correct behavior.

@@ -3848,9 +3848,15 @@ impl RustEmitter {
             "pub const MAX_ITER: usize = {};\n\n",
             ir.solver_config.max_iterations
         ));
-        code.push_str("/// Chord method: re-factor Jacobian every N iterations (full LU path only).\n");
-        code.push_str("/// Iter 0 always factors. Between refactors, O(N²) back-solve reuses stored LU.\n");
-        code.push_str("/// Must be odd — even values can cause refactoring/convergence resonance.\n");
+        code.push_str(
+            "/// Chord method: re-factor Jacobian every N iterations (full LU path only).\n",
+        );
+        code.push_str(
+            "/// Iter 0 always factors. Between refactors, O(N²) back-solve reuses stored LU.\n",
+        );
+        code.push_str(
+            "/// Must be odd — even values can cause refactoring/convergence resonance.\n",
+        );
         code.push_str("pub const CHORD_REFACTOR: usize = 5;\n\n");
 
         code.push_str("/// NR convergence tolerance (VNTOL)\n");
@@ -4238,8 +4244,12 @@ impl RustEmitter {
 
         // Cross-timestep chord state (persisted LU for full LU path)
         if m > 0 {
-            code.push_str("    // --- Cross-timestep chord method state (persisted LU factors) ---\n");
-            code.push_str("    /// LU-factored Jacobian from previous convergence (chord method)\n");
+            code.push_str(
+                "    // --- Cross-timestep chord method state (persisted LU factors) ---\n",
+            );
+            code.push_str(
+                "    /// LU-factored Jacobian from previous convergence (chord method)\n",
+            );
             code.push_str("    pub chord_lu: [[f64; N]; N],\n");
             code.push_str("    /// Equilibration scaling from LU factorization\n");
             code.push_str("    pub chord_d: [f64; N],\n");
@@ -4247,7 +4257,9 @@ impl RustEmitter {
             code.push_str("    pub chord_perm: [usize; N],\n");
             code.push_str("    /// Device Jacobian consistent with chord_lu (for companion RHS)\n");
             code.push_str("    pub chord_j_dev: [f64; M * M],\n");
-            code.push_str("    /// Whether chord LU factors are valid (false until first convergence)\n");
+            code.push_str(
+                "    /// Whether chord LU factors are valid (false until first convergence)\n",
+            );
             code.push_str("    pub chord_valid: bool,\n\n");
         }
 
@@ -6063,7 +6075,9 @@ impl RustEmitter {
         code.push_str("/// LU factorization with diagonal equilibration and partial pivoting.\n");
         code.push_str("///\n");
         code.push_str("/// After this call, `a` contains the LU factors, `d` the equilibration\n");
-        code.push_str("/// scaling, and `perm` the row permutation. Use `lu_back_solve` to solve.\n");
+        code.push_str(
+            "/// scaling, and `perm` the row permutation. Use `lu_back_solve` to solve.\n",
+        );
         code.push_str("#[inline(always)]\n");
         code.push_str("fn lu_factor(a: &mut [[f64; N]; N], d: &mut [f64; N], perm: &mut [usize; N]) -> bool {\n");
 
@@ -6118,7 +6132,9 @@ impl RustEmitter {
     fn emit_nodal_lu_back_solve(_ir: &CircuitIR) -> String {
         let mut code = String::new();
 
-        code.push_str("/// Solve using pre-factored LU: forward/backward substitution + de-equilibrate.\n");
+        code.push_str(
+            "/// Solve using pre-factored LU: forward/backward substitution + de-equilibrate.\n",
+        );
         code.push_str("///\n");
         code.push_str("/// `a_lu` contains LU factors from `lu_factor`. `d` and `perm` are the\n");
         code.push_str("/// equilibration and permutation from the same call. On return, `b`\n");
@@ -6175,9 +6191,12 @@ impl RustEmitter {
         code.push_str("///\n");
         code.push_str(&format!(
             "/// {} FLOPs (vs ~{} dense). AMD fill-reducing ordering.\n",
-            lu.factor_flops, n * n * n / 3
+            lu.factor_flops,
+            n * n * n / 3
         ));
-        code.push_str("/// Returns false if a pivot is too small (fall back to dense lu_factor).\n");
+        code.push_str(
+            "/// Returns false if a pivot is too small (fall back to dense lu_factor).\n",
+        );
         code.push_str("#[inline(always)]\n");
         code.push_str("fn sparse_lu_factor(a: &mut [[f64; N]; N], d: &mut [f64; N]) -> bool {\n");
 
@@ -6213,9 +6232,7 @@ impl RustEmitter {
                     code.push_str(&format!(
                         "    if a[{col}][{col}].abs() < 1e-30 {{ return false; }}\n"
                     ));
-                    code.push_str(&format!(
-                        "    a[{row}][{col}] /= a[{col}][{col}];\n"
-                    ));
+                    code.push_str(&format!("    a[{row}][{col}] /= a[{col}][{col}];\n"));
                 }
                 LuOp::SubMul { row, col, j } => {
                     code.push_str(&format!(
@@ -6244,14 +6261,19 @@ impl RustEmitter {
         let n = lu.n;
 
         let mut code = String::new();
-        code.push_str("/// Sparse forward/backward substitution (compile-time unrolled, original indices).\n");
+        code.push_str(
+            "/// Sparse forward/backward substitution (compile-time unrolled, original indices).\n",
+        );
         code.push_str("///\n");
         code.push_str(&format!(
             "/// {} FLOPs (vs ~{} dense).\n",
-            lu.solve_flops, n * n * 2
+            lu.solve_flops,
+            n * n * 2
         ));
         code.push_str("#[inline(always)]\n");
-        code.push_str("fn sparse_lu_back_solve(a_lu: &[[f64; N]; N], d: &[f64; N], b: &mut [f64; N]) {\n");
+        code.push_str(
+            "fn sparse_lu_back_solve(a_lu: &[[f64; N]; N], d: &[f64; N], b: &mut [f64; N]) {\n",
+        );
 
         // Equilibrate RHS + apply static row swaps
         code.push_str("    let mut x = [0.0f64; N];\n");
@@ -6259,7 +6281,9 @@ impl RustEmitter {
         if !lu.row_swaps.is_empty() {
             code.push_str("    // Static row swaps (matching factorization)\n");
             for &(r1, r2) in &lu.row_swaps {
-                code.push_str(&format!("    {{ let tmp = x[{r1}]; x[{r1}] = x[{r2}]; x[{r2}] = tmp; }}\n"));
+                code.push_str(&format!(
+                    "    {{ let tmp = x[{r1}]; x[{r1}] = x[{r2}]; x[{r2}] = tmp; }}\n"
+                ));
             }
         }
         code.push('\n');
@@ -6268,9 +6292,7 @@ impl RustEmitter {
         // L entries are already ordered by elimination step in l_nnz
         code.push_str("    // Sparse forward substitution (L, AMD order)\n");
         for &(row, col) in &lu.l_nnz {
-            code.push_str(&format!(
-                "    x[{row}] -= a_lu[{row}][{col}] * x[{col}];\n"
-            ));
+            code.push_str(&format!("    x[{row}] -= a_lu[{row}][{col}] * x[{col}];\n"));
         }
 
         // Sparse backward substitution (U entries in reverse AMD order)
@@ -6288,14 +6310,10 @@ impl RustEmitter {
             for &pivot in lu.elim_order.iter().rev() {
                 if let Some(cols) = u_by_pivot.get(&pivot) {
                     for &c in cols {
-                        code.push_str(&format!(
-                            "    x[{pivot}] -= a_lu[{pivot}][{c}] * x[{c}];\n"
-                        ));
+                        code.push_str(&format!("    x[{pivot}] -= a_lu[{pivot}][{c}] * x[{c}];\n"));
                     }
                 }
-                code.push_str(&format!(
-                    "    x[{pivot}] /= a_lu[{pivot}][{pivot}];\n"
-                ));
+                code.push_str(&format!("    x[{pivot}] /= a_lu[{pivot}][{pivot}];\n"));
             }
         }
 
@@ -6422,7 +6440,9 @@ impl RustEmitter {
             // Cross-timestep chord: reuse LU factors from previous sample when valid.
             // Local aliases avoid repeated state.chord_* indirection in the hot loop.
             // After convergence, chord_lu/d/perm/j_dev are persisted back to state.
-            code.push_str("    // Cross-timestep chord: start from previous sample's converged LU\n");
+            code.push_str(
+                "    // Cross-timestep chord: start from previous sample's converged LU\n",
+            );
             code.push_str("    let mut chord_lu = state.chord_lu;\n");
             code.push_str("    let mut chord_d = state.chord_d;\n");
             code.push_str("    let mut chord_perm = state.chord_perm;\n");
@@ -6515,7 +6535,9 @@ impl RustEmitter {
                 code.push_str("                break;\n");
                 code.push_str("            }\n");
             } else {
-                code.push_str("            if !lu_factor(&mut chord_lu, &mut chord_d, &mut chord_perm) {\n");
+                code.push_str(
+                    "            if !lu_factor(&mut chord_lu, &mut chord_d, &mut chord_perm) {\n",
+                );
                 code.push_str("                state.diag_nr_max_iter_count += 1;\n");
                 code.push_str("                break;\n");
                 code.push_str("            }\n");
@@ -6577,9 +6599,13 @@ impl RustEmitter {
                 code.push_str("        let mut v_new = rhs_work;\n");
                 code.push_str("        sparse_lu_back_solve(&chord_lu, &chord_d, &mut v_new);\n\n");
             } else {
-                code.push_str("        // 2e. Solve with stored LU factors (chord: O(N²) back-solve)\n");
+                code.push_str(
+                    "        // 2e. Solve with stored LU factors (chord: O(N²) back-solve)\n",
+                );
                 code.push_str("        let mut v_new = rhs_work;\n");
-                code.push_str("        lu_back_solve(&chord_lu, &chord_d, &chord_perm, &mut v_new);\n\n");
+                code.push_str(
+                    "        lu_back_solve(&chord_lu, &chord_d, &chord_perm, &mut v_new);\n\n",
+                );
             }
 
             // NOTE: no VSAT clamping inside NR loop — mid-NR clamping creates

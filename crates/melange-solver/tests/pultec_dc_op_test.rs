@@ -18,11 +18,7 @@ use melange_solver::parser::Netlist;
 
 /// Helper: get a node voltage from DC OP result by name.
 /// Returns None if the node doesn't exist in the MNA system.
-fn get_node_voltage(
-    mna: &MnaSystem,
-    v_node: &[f64],
-    name: &str,
-) -> Option<f64> {
+fn get_node_voltage(mna: &MnaSystem, v_node: &[f64], name: &str) -> Option<f64> {
     let idx = mna.node_map.get(name).copied()?;
     if idx == 0 {
         // Ground node
@@ -100,8 +96,7 @@ fn pultec_dc_op_vcc_exact() {
     let (mna, result) = run_pultec_dc_op();
     assert!(result.converged, "DC OP must converge first");
 
-    let v_vcc = get_node_voltage(&mna, &result.v_node, "vcc")
-        .expect("node 'vcc' not found in MNA");
+    let v_vcc = get_node_voltage(&mna, &result.v_node, "vcc").expect("node 'vcc' not found in MNA");
     assert!(
         (v_vcc - 290.0).abs() < 0.1,
         "VCC should be 290V (from voltage source), got {:.3}V",
@@ -115,13 +110,14 @@ fn pultec_dc_op_node_g() {
     assert!(result.converged, "DC OP must converge first");
 
     // Node G: schematic says ~287V (290V minus small drop across 2200Ω)
-    let v_node_g = get_node_voltage(&mna, &result.v_node, "node_g")
-        .expect("node 'node_g' not found in MNA");
+    let v_node_g =
+        get_node_voltage(&mna, &result.v_node, "node_g").expect("node 'node_g' not found in MNA");
     let tolerance = 5.0;
     assert!(
         (v_node_g - 287.0).abs() < tolerance,
         "node_g: schematic ~287V, got {:.2}V (tolerance ±{:.0}V)",
-        v_node_g, tolerance
+        v_node_g,
+        tolerance
     );
 }
 
@@ -131,13 +127,14 @@ fn pultec_dc_op_v250_rail() {
     assert!(result.converged, "DC OP must converge first");
 
     // +250V rail: schematic says +250V (our Koren model shows ~263V)
-    let v250 = get_node_voltage(&mna, &result.v_node, "v250")
-        .expect("node 'v250' not found in MNA");
+    let v250 =
+        get_node_voltage(&mna, &result.v_node, "v250").expect("node 'v250' not found in MNA");
     let tolerance = 15.0;
     assert!(
         (v250 - 250.0).abs() < tolerance,
         "v250: schematic ~250V, got {:.2}V (tolerance ±{:.0}V)",
-        v250, tolerance
+        v250,
+        tolerance
     );
 }
 
@@ -150,20 +147,22 @@ fn pultec_dc_op_plate_voltages() {
     // differential NFB topology, the DC OP shifts (cathodes at different potentials).
     let tolerance = 35.0;
 
-    let v_plate1 = get_node_voltage(&mna, &result.v_node, "plate1")
-        .expect("node 'plate1' not found in MNA");
+    let v_plate1 =
+        get_node_voltage(&mna, &result.v_node, "plate1").expect("node 'plate1' not found in MNA");
     assert!(
         (v_plate1 - 140.0).abs() < tolerance,
         "plate1: schematic ~140V, got {:.2}V (tolerance ±{:.0}V)",
-        v_plate1, tolerance
+        v_plate1,
+        tolerance
     );
 
-    let v_plate2 = get_node_voltage(&mna, &result.v_node, "plate2")
-        .expect("node 'plate2' not found in MNA");
+    let v_plate2 =
+        get_node_voltage(&mna, &result.v_node, "plate2").expect("node 'plate2' not found in MNA");
     assert!(
         (v_plate2 - 140.0).abs() < tolerance,
         "plate2: schematic ~140V, got {:.2}V (tolerance ±{:.0}V)",
-        v_plate2, tolerance
+        v_plate2,
+        tolerance
     );
 
     // Plates may differ slightly with separated cathodes (asymmetric NFB)
@@ -172,7 +171,9 @@ fn pultec_dc_op_plate_voltages() {
         plate_diff < 10.0,
         "plate1 and plate2 should be reasonably close, but differ by {:.2}V \
          (plate1={:.2}V, plate2={:.2}V)",
-        plate_diff, v_plate1, v_plate2
+        plate_diff,
+        v_plate1,
+        v_plate2
     );
 }
 
@@ -191,12 +192,14 @@ fn pultec_dc_op_12ax7_cathode() {
     assert!(
         (v_cathode1 - 1.3).abs() < tolerance,
         "cathode1: schematic ~1.3V, got {:.3}V (tolerance ±{:.1}V)",
-        v_cathode1, tolerance
+        v_cathode1,
+        tolerance
     );
     assert!(
         (v_cathode2 - 1.3).abs() < tolerance,
         "cathode2: schematic ~1.3V, got {:.3}V (tolerance ±{:.1}V)",
-        v_cathode2, tolerance
+        v_cathode2,
+        tolerance
     );
 }
 
@@ -206,13 +209,14 @@ fn pultec_dc_op_12au7_cathode() {
     assert!(result.converged, "DC OP must converge first");
 
     // 12AU7 cathode: schematic says +40V (our model shows ~30.7V)
-    let v_cath2 = get_node_voltage(&mna, &result.v_node, "cath2")
-        .expect("node 'cath2' not found in MNA");
+    let v_cath2 =
+        get_node_voltage(&mna, &result.v_node, "cath2").expect("node 'cath2' not found in MNA");
     let tolerance = 10.0;
     assert!(
         (v_cath2 - 40.0).abs() < tolerance,
         "cath2: schematic ~40V, got {:.2}V (tolerance ±{:.0}V)",
-        v_cath2, tolerance
+        v_cath2,
+        tolerance
     );
 }
 
@@ -228,7 +232,8 @@ fn pultec_dc_op_grid_bias() {
     assert!(
         (v_bias - 31.0).abs() < tolerance,
         "bias_31v: schematic ~31V, got {:.2}V (tolerance ±{:.0}V)",
-        v_bias, tolerance
+        v_bias,
+        tolerance
     );
 }
 
@@ -286,16 +291,26 @@ fn pultec_dc_op_voltage_report() {
                 );
             }
             None => {
-                println!("{:<14} {:>10.2} {:>10} {:>10} {}", name, expected, "N/A", "-", description);
+                println!(
+                    "{:<14} {:>10.2} {:>10} {:>10} {}",
+                    name, expected, "N/A", "-", description
+                );
             }
         }
     }
 
     println!();
-    println!("Nonlinear currents (M={}): {:?}", result.i_nl.len(), result.i_nl);
+    println!(
+        "Nonlinear currents (M={}): {:?}",
+        result.i_nl.len(),
+        result.i_nl
+    );
     println!("=== End Report ===");
 
     // This test always passes — it's for diagnostic output only.
     // Use `cargo test -p melange-solver --test pultec_dc_op_test -- --nocapture` to see the report.
-    assert!(result.converged, "DC OP must converge for report to be meaningful");
+    assert!(
+        result.converged,
+        "DC OP must converge for report to be meaningful"
+    );
 }
