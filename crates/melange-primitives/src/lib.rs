@@ -1,18 +1,20 @@
-//! DSP building blocks for real-time audio: biquad filters, Newton-Raphson helpers, and oversampling.
-//! Part of the [melange](https://github.com/hal0zer0/melange) circuit simulation toolkit.
-
-// melange-primitives: DSP building blocks for real-time circuit simulation
-//
-// Layer 1 of the melange stack. Zero-allocation primitives (no_std planned, not yet enabled):
-// - Filter primitives (one-pole, biquad, DC blocker, TPT integrator)
-// - Polyphase IIR oversampling (configurable 2x/4x)
-// - Newton-Raphson solver templates (fixed iteration, NaN recovery)
-// - Per-instance variation (deterministic hash-based detuning)
-// - Companion model helpers (trapezoidal/bilinear discretization)
-
-// Note: no_std support planned for embedded targets
-// For now, we use std for floating-point math methods
-// #![no_std]
+//! DSP building blocks for real-time audio circuit simulation.
+//!
+//! Layer 1 of the melange stack — the foundation. Provides zero-allocation primitives
+//! used by the solver and generated code.
+//!
+//! # Modules
+//!
+//! - [`filters`] — One-pole, biquad, DC blocker, and TPT integrator filters
+//! - [`oversampling`] — Polyphase half-band IIR oversampling (2x/4x)
+//! - [`nr`] — Newton-Raphson helpers: `pnjlim`/`fetlim` voltage limiting, 1D/2D solvers
+//! - [`companion`] — Trapezoidal and backward Euler companion model discretization
+//! - [`util`] — Audio math utilities: dB conversion, soft clipping, thermal voltage, etc.
+//!
+//! # Real-Time Safety
+//!
+//! All types are designed for real-time audio: no heap allocation after construction,
+//! no panics on valid input, deterministic execution time.
 
 pub mod companion;
 pub mod filters;

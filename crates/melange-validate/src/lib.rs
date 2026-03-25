@@ -1,18 +1,16 @@
-// melange-validate: SPICE-to-Rust validation pipeline
-//
-// Layer 4 of the melange stack. Bridges ngspice simulation and Rust DSP output:
-// - ngspice runner (invoke simulation, parse raw/CSV output)
-// - Automated comparison: DC bias, AC sweep, transient, THD
-// - Tolerance-band assertions for integration into unit tests
-// - "Bisect the signal chain" debugging helpers
-// - Measurement routines (gain, frequency sweep, harmonics, spectral centroid)
-
-//! # Melange Validate
+//! SPICE-to-Rust validation pipeline.
 //!
-//! SPICE-to-Rust validation pipeline for the Melange circuit modeling toolkit.
+//! Layer 4 of the melange stack. Compares melange solver output against ngspice
+//! reference simulations with multiple error metrics (correlation, RMS error,
+//! peak error, spectral comparison).
 //!
-//! This crate provides infrastructure to compare melange solver output against
-//! ngspice reference simulations with multiple error metrics.
+//! # Modules
+//!
+//! - [`spice_runner`] — invoke ngspice, parse output (raw/CSV), manage temp files
+//! - [`comparison`] — signal comparison with configurable tolerances
+//! - [`visualizer`] — generate CSV, HTML, and JSON reports from comparison results
+//!
+//! Requires ngspice to be installed (`apt install ngspice` / `brew install ngspice`).
 //!
 //! ## Quick Start
 //!
@@ -59,6 +57,7 @@ pub use visualizer::{generate_csv, generate_html_report, generate_json_report};
 
 /// Errors that can occur during validation
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum ValidationError {
     /// SPICE simulation failed
     #[error("SPICE error: {0}")]

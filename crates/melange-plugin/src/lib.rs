@@ -1,10 +1,20 @@
-//! Plugin integration layer for melange-generated audio processors (nih-plug).
-//! Part of the [melange](https://github.com/hal0zer0/melange) circuit simulation toolkit.
-
-// melange-plugin: nih-plug integration helpers
-//
-// Layer 5 of the melange stack. Glue between melange circuit models and plugin frameworks:
-// - Parameter mapping (physical component values <-> plugin parameters)
+//! Plugin integration helpers for melange-generated audio processors.
+//!
+//! Layer 5 of the melange stack. Provides parameter mapping utilities for bridging
+//! physical component values (ohms, farads) to normalized plugin parameters [0.0, 1.0].
+//!
+//! # Usage
+//!
+//! This crate is used by melange-generated plugin projects. It re-exports
+//! `melange_primitives` and `melange_solver` so plugin code can access them
+//! through a single dependency.
+//!
+//! Most users interact with this crate indirectly through generated code.
+//! For direct use, the key types are:
+//!
+//! - [`ParamMapping`] — maps physical values to normalized plugin parameters
+//! - [`linear_param_map`] / [`linear_param_unmap`] — linear scaling
+//! - [`log_param_map`] / [`log_param_unmap`] — logarithmic scaling (audio taper pots)
 
 // Re-export dependencies so plugin code can access them through this crate
 pub use melange_primitives;

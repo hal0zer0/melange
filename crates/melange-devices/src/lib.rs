@@ -1,16 +1,30 @@
-//! Device models for analog circuit components (diode, BJT, JFET, MOSFET, triode, op-amp, LDR, VCA).
-//! Part of the [melange](https://github.com/hal0zer0/melange) circuit simulation toolkit.
-
-// melange-devices: Parameterized nonlinear component models
-//
-// Layer 2 of the melange stack. Each device implements the NonlinearDevice trait
-// providing i(v) and di/dv for use in MNA/DK solvers. Models include:
-// - BJT (Ebers-Moll, Gummel-Poon) with SPICE model card import
-// - Vacuum tubes (Koren triode/pentode)
-// - Diodes (Shockley equation)
-// - MOSFETs, JFETs
-// - Opamps (Boyle macromodel)
-// - CdS LDR photocell (asymmetric attack/release, power-law resistance)
+//! Parameterized nonlinear device models for analog circuit simulation.
+//!
+//! Layer 2 of the melange stack. Each device provides `i(v)` and `di/dv` for use in
+//! Newton-Raphson solvers. Models are parameterized from SPICE `.model` cards.
+//!
+//! # Supported Devices
+//!
+//! | Device | Struct | Dimensions | Model |
+//! |--------|--------|-----------|-------|
+//! | Diode | [`DiodeShockley`], [`DiodeWithRs`], [`Led`] | 1D | Shockley equation, optional Rs, BV |
+//! | BJT | [`BjtEbersMoll`], [`BjtGummelPoon`] | 2D (Vbe, Vbc) | Ebers-Moll / Gummel-Poon |
+//! | JFET | [`Jfet`] | 2D (Vgs, Vds) | Shichman-Hodges |
+//! | MOSFET | [`Mosfet`] | 2D (Vgs, Vds) | Level 1 SPICE |
+//! | Triode | [`KorenTriode`] | 2D (Vgk, Vpk) | Koren + Leach grid current |
+//! | VCA | [`Vca`] | 2D (Vsig, Vctrl) | THAT 2180 exponential |
+//! | Op-amp | [`SimpleOpamp`], [`IdealOpamp`] | linear | Boyle VCCS macromodel |
+//! | LDR | [`CdsLdr`] | — | VTL5C3/4, NSL-32 photocell |
+//!
+//! # Traits
+//!
+//! - [`NonlinearDevice<N>`] — core trait: `current(&[f64; N]) -> f64` and `jacobian(&[f64; N]) -> [f64; N]`
+//! - [`TwoTerminalDevice`] — convenience trait for N=1 devices (auto-implemented)
+//!
+//! # Catalog
+//!
+//! The [`catalog`] module provides lookup tables for common device models (2N2222, 1N4148,
+//! 12AX7, etc.) with pre-populated SPICE parameters.
 
 pub mod bjt;
 pub mod catalog;
@@ -81,17 +95,7 @@ impl<T: NonlinearDevice<1>> TwoTerminalDevice for T {
     }
 }
 
-pub use melange_primitives::VT_ROOM;
-
-/// Compute thermal voltage at a given temperature.
-pub fn thermal_voltage(temp_c: f64) -> f64 {
-    const K_BOLTZMANN: f64 = 1.380649e-23; // J/K
-    const Q_ELECTRON: f64 = 1.602176634e-19; // C
-    const T_ABS_ZERO: f64 = 273.15; // K
-
-    let temp_k = temp_c + T_ABS_ZERO;
-    K_BOLTZMANN * temp_k / Q_ELECTRON
-}
+pub use melange_primitives::{thermal_voltage, VT_ROOM};
 
 /// Safeguards for numerical stability in device models.
 pub mod safeguards {
@@ -135,18 +139,6 @@ pub mod safeguards {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_thermal_voltage() {
-        let vt = thermal_voltage(27.0);
-        // Allow for floating point precision in constants
-        assert!(
-            (vt - VT_ROOM).abs() < 1e-4,
-            "VT = {}, expected ~{}",
-            vt,
-            VT_ROOM
-        );
-    }
 
     #[test]
     fn test_safeguards() {

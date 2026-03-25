@@ -87,6 +87,13 @@ rcodesign sign target/universal2-apple-darwin/release/libmy_plugin.dylib
 # Universal Mac binary, ad-hoc signed. Ship it.
 ```
 
+## Documentation
+
+- **[Getting Started](docs/GETTING_STARTED.md)** — from zero to working plugin in 5 minutes
+- **[Netlist Writing Guide](docs/NETLIST_GUIDE.md)** — how to write SPICE netlists from schematics
+- **[Plugin Development Guide](docs/PLUGIN_GUIDE.md)** — customizing generated plugins
+- **[SPICE Grammar Reference](docs/spice-grammar.md)** — complete syntax for all elements and directives
+
 ## Built-in Circuits
 
 Melange ships with classic circuits ready to compile:
@@ -99,6 +106,7 @@ Melange ships with classic circuits ready to compile:
 | `tube-preamp` | Common-cathode 12AX7 triode gain stage with tone control |
 | `rc-lowpass` | Simple RC lowpass filter for testing |
 | `mordor-screamer` | High-gain distortion forged in Mount Doom |
+| `ssl-bus-compressor` | SSL 4000E bus compressor (VCA + sidechain) |
 
 Plus example circuits in `circuits/`:
 
@@ -106,6 +114,7 @@ Plus example circuits in `circuits/`:
 |---------|-------------|
 | `wurli-preamp.cir` | Wurlitzer 200A preamp (2-stage BJT, LDR tremolo pot) |
 | `tweed-preamp.cir` | Fender-style 2-stage 12AX7 guitar amp (volume pot, bright switch) |
+| `pultec-eq.cir` | Pultec EQP-1A passive EQ (4 tubes, 2 transformers, 7 pots, 3 switches) |
 
 ## What Gets Generated
 
@@ -184,12 +193,25 @@ SPICE Netlist → Parser → MNA System → DK Kernel → CircuitIR → Rust Emi
 
 ## Solver Routing
 
-Melange has two solver backends, automatically selected based on circuit complexity:
+Melange auto-selects the best solver backend for each circuit:
 
-- **DK solver** (fast, O(M^2) per sample): Used for circuits with 1 or fewer transformer groups and fewer than 10 nonlinear devices. Potentiometers use O(N^2) Sherman-Morrison rank-1 updates — smooth, glitch-free. Typical performance: 100-600x realtime.
-- **Nodal solver** (robust, O(N^2) per sample): Used for complex circuits with multiple transformer groups or many nonlinear devices. Potentiometers trigger a full matrix rebuild on value change. Typical performance: 0.5-1.5x realtime for large circuits.
+| Solver | When Selected | Performance | Pot Updates |
+|--------|--------------|-------------|-------------|
+| **DK** | M < 10, ≤ 1 transformer group | 100-600x realtime | Per-sample (Sherman-Morrison O(N^2)) |
+| **Nodal Schur** | M ≥ 10 or 2+ transformer groups | 10-50x realtime | Per-block (matrix rebuild) |
+| **Nodal Full LU** | K matrix ill-conditioned, VCA circuits, or complex feedback | 5-15x realtime | Per-block (matrix rebuild) |
 
-`melange compile` auto-selects the best solver for each circuit. Override with `--solver dk` or `--solver nodal`.
+Example circuits (48kHz, release build):
+
+| Circuit | N | M | Solver | Performance |
+|---------|---|---|--------|-------------|
+| RC lowpass | 2 | 0 | DK | >1000x |
+| Fuzz Face | 5 | 4 | DK | ~200x |
+| Tweed preamp (2x 12AX7) | 13 | 4 | DK | ~150x |
+| Wurli power amp (8 BJTs) | 20 | 16 | DK | ~20x |
+| Pultec EQP-1A (4 tubes, 2 transformers) | 41 | 8 | Nodal Full LU | ~11x |
+
+Override with `--solver dk` or `--solver nodal` if auto-selection doesn't suit your needs.
 
 ## Supported Components
 
@@ -201,7 +223,8 @@ Melange has two solver backends, automatically selected based on circuit complex
 | JFET | yes | yes | Shichman-Hodges 2D (triode + saturation) |
 | MOSFET | yes | yes | Level 1 SPICE 2D (triode + saturation) |
 | Vacuum Tube | yes | yes | Koren triode + Leach grid current + lambda |
-| Op-Amp | yes | yes | VCCS macromodel (linear) |
+| Op-Amp | yes | yes | Boyle VCCS macromodel (AOL, ROUT, optional GBW/VSAT) |
+| VCA | yes | yes | THAT 2180 exponential gain (current-mode, THD) |
 | CdS LDR | yes | — | VTL5C3/4, NSL-32 with asymmetric envelope |
 | Voltage Source | yes | yes | DC (Norton equivalent) |
 | Potentiometer | — | yes | Sherman-Morrison rank-1 updates (codegen only) |
@@ -308,14 +331,48 @@ Melange was extracted from the [OpenWurli](https://github.com/openwurli/openwurl
 
 Melange currently generates self-contained Rust code. Multi-language codegen is coming soon — the internal intermediate representation (`CircuitIR`) and `Emitter` trait are already language-agnostic by design. C++ will be the first additional target, with other languages to follow based on community interest. The goal is to let you compile a SPICE netlist directly to native code in whatever language your plugin framework or audio engine uses.
 
+## Resource Limits
+
+| Limit | Value | What Happens |
+|-------|-------|-------------|
+| Nonlinear dimensions (M) | 16 max on DK path | Auto-routes to nodal solver |
+| Circuit nodes (N) | 256 max | Rejected with error |
+| Elements after expansion | 10,000 max | Rejected with error |
+| Subcircuit nesting | 8 levels max | Rejected with error |
+| Pots per circuit | 32 max | Rejected with error |
+| Switches per circuit | 16 max | Rejected with error |
+
+M counts nonlinear *dimensions*, not devices: each diode adds 1, each BJT/JFET/MOSFET/tube/VCA adds 2.
+
 ## Known Limitations
 
-- **Fixed temperature (27°C)**: All device models simulate at 300.15K. Temperature-dependent effects (IS, VT scaling) are not modeled at runtime.
+- **Fixed temperature (27°C)**: All device models simulate at 300.15K. No temperature coefficients.
 - **Triode tubes only**: Pentode tubes (EL84, 6L6, EL34) are not yet supported. 12AX7, 12AU7, and other preamp triodes work fully.
-- **Ideal transformers**: Coupled inductors assume constant coupling coefficient with no core saturation or hysteresis. Suitable for AC signal coupling, not power transformer simulation.
-- **Linear op-amps**: Op-amp model is a VCCS macromodel with no slew-rate limiting or output saturation.
+- **Ideal transformers**: Coupled inductors assume constant coupling coefficient with no core saturation or hysteresis.
+- **Linear op-amps**: VCCS macromodel with optional GBW pole and VSAT, but no slew-rate limiting.
 - **No noise simulation**: Shot noise, thermal noise, and 1/f noise are not modeled.
-- **Max 16 nonlinear devices** per circuit (DK path). Circuits exceeding this use the nodal solver.
+
+## Audio Safety Features
+
+Three features protect your ears and speakers (all default-on, all optional):
+
+- **Ear protection** — soft limiter that engages near 0 dBFS. Toggle at runtime or disable with `--no-ear-protection`.
+- **DC blocking** — 5 Hz high-pass filter removes DC offset from circuit output. Settles in ~200ms. Disable with `--no-dc-block` if the circuit has its own output coupling capacitor.
+- **Oversampling** (opt-in) — 2x or 4x polyphase half-band IIR reduces aliasing from nonlinear devices. Enable with `--oversampling 2` or `--oversampling 4`. CPU cost scales linearly.
+
+## Troubleshooting
+
+| Symptom | Likely Cause | Fix |
+|---------|-------------|-----|
+| Plugin produces silence | Wrong input/output node names | Check `melange nodes circuit.cir`; use `--input-node` / `--output-node` |
+| Very quiet output | Circuit output is millivolts, not volts | Increase `--output-scale` or Input Level parameter |
+| NaN or oscillation | DC operating point failed to converge | Check biasing; try `--backward-euler` |
+| "M exceeds MAX_M" error | Too many nonlinear dimensions for DK solver | Use `--solver nodal` |
+| Clicks on parameter changes | Pot smoothing too short | Increase smoother duration in `lib.rs` |
+| ~3% error vs ngspice | Using wrong RHS formulation | Ensure trapezoidal (default); check `.OPTIONS INTERP` in SPICE netlist |
+| Output all zeros | VIN source in no-vin netlist | Check that the circuit file doesn't include VIN (melange provides input via conductance) |
+
+See [docs/PLUGIN_GUIDE.md](docs/PLUGIN_GUIDE.md) for plugin-specific troubleshooting.
 
 ## License
 

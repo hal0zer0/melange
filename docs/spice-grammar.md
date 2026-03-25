@@ -330,6 +330,174 @@ H1 2 0 Vmonitor 1000      ; 1 kΩ transresistance
 
 ---
 
+### K — Coupled Inductors / Transformer
+
+**Syntax:**
+```
+Kname L1name L2name coupling_coefficient
+```
+
+**Parameters:**
+| Parameter | Description |
+|-----------|-------------|
+| `L1name` | Name of first inductor |
+| `L2name` | Name of second inductor |
+| `coupling_coefficient` | Coupling factor k (0 < k < 1) |
+
+Mutual inductance: M = k * sqrt(L1 * L2). Turns ratio: N1:N2 = sqrt(L1/L2).
+
+**Examples:**
+```spice
+* Simple 1:2 step-up transformer
+L1 primary_p primary_n 10m
+L2 secondary_p secondary_n 40m
+K1 L1 L2 0.99
+
+* Multi-winding transformer (3 windings)
+L1 pri_p pri_n 37H         ; primary
+L2 sec_p sec_n 148H        ; secondary
+L3 tert_p tert_n 2H        ; tertiary (feedback)
+K1 L1 L2 0.9999
+K2 L1 L3 0.9999
+K3 L2 L3 0.9999
+```
+
+**Notes:**
+- Both inductors must be defined before the K statement
+- Cannot couple an inductor to itself
+- Multiple K statements can form multi-winding transformer groups
+- Core saturation and hysteresis are not modeled
+
+---
+
+### T — Triode (Vacuum Tube)
+
+**Syntax:**
+```
+Tname n_grid n_plate n_cathode modelname
+```
+
+**Parameters:**
+| Parameter | Description |
+|-----------|-------------|
+| `n_grid` | Grid terminal node |
+| `n_plate` | Plate (anode) terminal node |
+| `n_cathode` | Cathode terminal node |
+| `modelname` | Name of `.model` definition (type: TRIODE) |
+
+**Examples:**
+```spice
+T1 grid1 plate1 cathode1 12AX7
+T2 grid2 plate2 cathode2 12AU7
+
+.model 12AX7 TRIODE(MU=100 EX=1.4 KG1=1060 KP=600 KVB=300)
+.model 12AU7 TRIODE(MU=17 EX=1.3 KG1=1180 KP=84 KVB=300)
+```
+
+**Notes:**
+- Uses the Koren plate current model with Leach grid current
+- Only triodes are supported; pentode support is deferred
+- Terminal order is grid-plate-cathode (not plate-grid-cathode)
+
+---
+
+### U — Op-Amp (Operational Amplifier)
+
+**Syntax:**
+```
+Uname n_plus n_minus n_out modelname
+```
+
+**Parameters:**
+| Parameter | Description |
+|-----------|-------------|
+| `n_plus` | Non-inverting input (+) |
+| `n_minus` | Inverting input (-) |
+| `n_out` | Output node |
+| `modelname` | Name of `.model` definition (type: OA) |
+
+**Examples:**
+```spice
+* Inverting amplifier
+U1 in_pos in_neg out LM358
+Rin input in_neg 10k
+Rf in_neg out 100k
+R_bias in_pos 0 10k
+
+.model LM358 OA(AOL=200000 ROUT=75)
+```
+
+**Notes:**
+- Linear device (does not add nonlinear dimensions to the solver)
+- Modeled as Boyle VCCS macromodel with output resistance
+- Input impedance is infinite (no input bias current)
+
+---
+
+### Y — VCA (Voltage-Controlled Amplifier)
+
+**Syntax:**
+```
+Yname sig_p sig_n ctrl_p ctrl_n modelname
+```
+
+**Parameters:**
+| Parameter | Description |
+|-----------|-------------|
+| `sig_p` | Signal positive terminal |
+| `sig_n` | Signal negative terminal |
+| `ctrl_p` | Control voltage positive terminal |
+| `ctrl_n` | Control voltage negative terminal |
+| `modelname` | Name of `.model` definition (type: VCA) |
+
+**Examples:**
+```spice
+Y1 sig_in sig_out ctrl_in ctrl_ref VCA_2180
+Rload sig_out 0 10k
+
+.model VCA_2180 VCA(VSCALE=0.05298 G0=1.0 THD=0.001)
+```
+
+**Notes:**
+- 2D nonlinear device: signal path + control path
+- Control input is high-impedance (draws zero current)
+- Gain law: I = G0 * exp(-Vctrl / VSCALE) * Vsig
+- Models THAT 2180 / DBX 2150 style current-mode VCAs
+
+---
+
+### X — Subcircuit Instance
+
+**Syntax:**
+```
+Xname node1 node2 ... nodeN subcircuit_name
+```
+
+**Parameters:**
+| Parameter | Description |
+|-----------|-------------|
+| `node1..nodeN` | External nodes (in order matching `.subckt` definition) |
+| `subcircuit_name` | Name of `.subckt` block to instantiate |
+
+**Examples:**
+```spice
+.subckt PREAMP in out vcc
+R1 in 1 10k
+R2 1 out 100k
+Rload out vcc 4.7k
+.ends PREAMP
+
+X1 input mid vcc PREAMP
+X2 mid output vcc PREAMP
+```
+
+**Notes:**
+- Node count must match the `.subckt` definition
+- Subcircuits can be nested (max depth: 8 levels)
+- Maximum 10,000 elements after expansion
+
+---
+
 ## 2. Model Cards (.model)
 
 **Syntax:**
@@ -350,6 +518,9 @@ The `.model` statement defines the parameters for semiconductor devices. Paramet
 | `PJF` | JFET | P-channel JFET |
 | `NMOS` | MOSFET | N-channel MOSFET |
 | `PMOS` | MOSFET | P-channel MOSFET |
+| `TRIODE` | Tube | Vacuum tube triode (Koren model) |
+| `OA` | Op-Amp | Operational amplifier (Boyle VCCS) |
+| `VCA` | VCA | Voltage-controlled amplifier (THAT 2180) |
 
 ### Diode Parameters (Type: D)
 
@@ -379,10 +550,17 @@ The `.model` statement defines the parameters for semiconductor devices. Paramet
 | `BR` | 1.0 | Ideal maximum reverse beta |
 | `NF` | 1.0 | Forward emission coefficient |
 | `NR` | 1.0 | Reverse emission coefficient |
-| `VAF` | ∞ V | Forward Early voltage |
-| `VAR` | ∞ V | Reverse Early voltage |
+| `ISE` | 0 A | Base-emitter leakage saturation current |
+| `NE` | 1.5 | Base-emitter leakage emission coefficient |
+| `ISC` | 0 A | Base-collector leakage saturation current |
+| `NC` | 2.0 | Base-collector leakage emission coefficient |
+| `VAF` | ∞ V | Forward Early voltage (Gummel-Poon) |
+| `VAR` | ∞ V | Reverse Early voltage (Gummel-Poon) |
 | `IKF` | ∞ A | Forward beta high-current rolloff |
 | `IKR` | ∞ A | Reverse beta high-current rolloff |
+| `RB` | 0 Ω | Base series resistance |
+| `RC` | 0 Ω | Collector series resistance |
+| `RE` | 0 Ω | Emitter series resistance |
 | `CJE` | 0 F | Base-emitter zero-bias capacitance |
 | `CJC` | 0 F | Base-collector zero-bias capacitance |
 | `VJE` | 0.75 V | Base-emitter built-in potential |
@@ -392,9 +570,13 @@ The `.model` statement defines the parameters for semiconductor devices. Paramet
 | `TF` | 0 s | Ideal forward transit time |
 | `TR` | 0 s | Ideal reverse transit time |
 
+When `VAF`, `VAR`, `IKF`, or `IKR` are finite, the Gummel-Poon model is auto-selected (base charge modulation). Otherwise Ebers-Moll is used.
+
+When `RB`, `RC`, or `RE` are non-zero, internal nodes (basePrime, collectorPrime, emitterPrime) are added for parasitic resistance modeling.
+
 **Example:**
 ```spice
-.model 2N2222 NPN(IS=1e-15 BF=200 VAF=100 CJE=20p CJC=10p)
+.model 2N2222 NPN(IS=1e-15 BF=200 VAF=100 CJE=20p CJC=10p RB=10 RC=1 RE=0.1)
 .model 2N3906 PNP(IS=1.41e-15 BF=180 VAF=80)
 ```
 
@@ -402,42 +584,103 @@ The `.model` statement defines the parameters for semiconductor devices. Paramet
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `VTO` | -2.0 V | Threshold voltage |
-| `BETA` | 1e-4 A/V² | Transconductance parameter |
-| `LAMBDA` | 0 V⁻¹ | Channel-length modulation |
+| `VTO` | -2.0 V (NJF), +2.0 V (PJF) | Pinch-off voltage |
+| `IDSS` | 2e-3 A | Saturation drain current |
+| `BETA` | — | Transconductance parameter (converted: IDSS = BETA * VTO²) |
+| `LAMBDA` | 0.001 V⁻¹ | Channel-length modulation |
 | `RD` | 0 Ω | Drain ohmic resistance |
 | `RS` | 0 Ω | Source ohmic resistance |
 | `CGS` | 0 F | Gate-source capacitance |
 | `CGD` | 0 F | Gate-drain capacitance |
 | `PB` | 1.0 V | Gate junction potential |
 
+Either `IDSS` or `BETA` may be specified. If both are present, `IDSS` takes priority. If only `BETA` is given, it is converted to IDSS = BETA * VTO².
+
 **Example:**
 ```spice
-.model J2N5457 NJF(VTO=-1.5 BETA=1e-4 LAMBDA=0.01)
+.model J2N5457 NJF(VTO=-1.5 IDSS=2e-3 LAMBDA=0.01)
+.model J175 PJF(VTO=3.0 IDSS=2.5e-3)
 ```
 
 ### MOSFET Parameters (Types: NMOS, PMOS)
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `VTO` | 0.0 V | Threshold voltage |
+| `VTO` | 2.0 V (NMOS), -2.0 V (PMOS) | Threshold voltage |
 | `KP` | 2e-5 A/V² | Transconductance parameter |
-| `LAMBDA` | 0 V⁻¹ | Channel-length modulation |
+| `LAMBDA` | 0.01 V⁻¹ | Channel-length modulation |
 | `GAMMA` | 0 V¹/² | Body effect parameter |
 | `PHI` | 0.6 V | Surface potential |
 | `RD` | 0 Ω | Drain ohmic resistance |
 | `RS` | 0 Ω | Source ohmic resistance |
-| `CGSO` | 0 F/m | Gate-source overlap capacitance |
-| `CGDO` | 0 F/m | Gate-drain overlap capacitance |
-| `CGBO` | 0 F/m | Gate-bulk overlap capacitance |
-| `CJ` | 0 F/m² | Zero-bias bulk junction capacitance |
-| `MJ` | 0.5 | Bulk junction grading coefficient |
-| `PB` | 0.8 V | Bulk junction potential |
+| `CGS` | 0 F | Gate-source capacitance |
+| `CGD` | 0 F | Gate-drain capacitance |
+
+Level 1 SPICE model with triode + saturation regions. When `GAMMA` > 0, body effect modulates threshold voltage with source-bulk voltage.
 
 **Example:**
 ```spice
 .model NMOS1 NMOS(VTO=0.7 KP=50e-6 LAMBDA=0.02 GAMMA=0.37)
 .model PMOS1 PMOS(VTO=-0.8 KP=25e-6 LAMBDA=0.02)
+```
+
+### Triode Parameters (Type: TRIODE)
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `MU` | — (required) | Amplification factor (mu) |
+| `EX` | — (required) | Koren equation exponent |
+| `KG1` | — (required) | Koren Kg1 coefficient |
+| `KP` | — (required) | Koren Kp coefficient |
+| `KVB` | — (required) | Koren Kvb knee shaping coefficient |
+| `LAMBDA` | 0.0 V⁻¹ | Plate resistance modulation (Early effect) |
+| `IG_MAX` | 2e-3 A | Maximum grid current |
+| `VGK_ONSET` | 0.5 V | Grid current onset voltage |
+| `CCG` | 0 F | Cathode-grid capacitance |
+| `CGP` | 0 F | Grid-plate capacitance |
+| `CCP` | 0 F | Cathode-plate capacitance |
+| `RGI` | 0 Ω | Grid internal resistance |
+
+Uses the Koren plate current model (soft-knee saturation) with Leach power-law grid current. The five core parameters (MU, EX, KG1, KP, KVB) are required and tube-specific — look up values for your specific tube type (12AX7, 12AU7, etc.).
+
+**Example:**
+```spice
+.model 12AX7 TRIODE(MU=100 EX=1.4 KG1=1060 KP=600 KVB=300 CCG=1.6p CGP=1.7p CCP=0.46p)
+.model 12AU7 TRIODE(MU=17 EX=1.3 KG1=1180 KP=84 KVB=300)
+```
+
+### Op-Amp Parameters (Type: OA)
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `AOL` | 200000 | Open-loop voltage gain (V/V) |
+| `ROUT` | 1.0 Ω | Output resistance |
+| `GBW` | ∞ Hz | Gain-bandwidth product (single-pole rolloff) |
+| `VSAT` | ∞ V | Output saturation voltage (13.0V if GBW finite) |
+
+Linear device — does not add nonlinear dimensions to the solver. Modeled as Boyle VCCS macromodel with output resistance. Input impedance is infinite.
+
+**Example:**
+```spice
+.model LM358 OA(AOL=200000 ROUT=75)
+.model TL072 OA(AOL=200000 ROUT=50 GBW=3e6 VSAT=13)
+```
+
+### VCA Parameters (Type: VCA)
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `VSCALE` | 0.05298 V/neper | Control voltage scaling (THAT 2180A default) |
+| `G0` | 1.0 S | Unity-gain conductance |
+| `THD` | 0.0 | Gain-dependent cubic distortion coefficient |
+| `MODE` | 0 | 0 = voltage mode, 1 = current mode (CCCS) |
+
+Gain law: I_signal = G0 * exp(-V_control / VSCALE) * V_signal. THD adds cubic nonlinearity that rises with gain reduction. Control port is high-impedance (draws no current).
+
+**Example:**
+```spice
+.model THAT2180 VCA(VSCALE=0.05298 G0=1.0 THD=0.001)
+.model DBX2150 VCA(VSCALE=0.006 G0=0.1)
 ```
 
 ---
@@ -566,7 +809,122 @@ Marks the end of the netlist. Everything after `.end` is ignored.
 
 ---
 
-## 5. Analysis Directives (for validation only)
+## 5. Melange Extensions
+
+These directives are melange-specific and not part of standard SPICE. They control code generation and plugin parameter generation.
+
+### .pot — Dynamic Potentiometer
+
+Marks a resistor as runtime-variable. In generated plugins, each `.pot` becomes a parameter knob.
+
+**Syntax:**
+```
+.pot Rname min_value max_value [default_value] ["Label"]
+```
+
+| Field | Description |
+|-------|-------------|
+| `Rname` | Resistor name (must start with R) |
+| `min_value` | Minimum resistance (Ohms) |
+| `max_value` | Maximum resistance (Ohms) |
+| `default_value` | (Optional) Default resistance; must be between min and max. If omitted, uses the resistor's netlist nominal value. |
+| `"Label"` | (Optional) Quoted parameter label for plugin UI |
+
+**Constraints:** min < max (strictly). Maximum 32 `.pot` directives per circuit.
+
+**Examples:**
+```spice
+R_vol 1 0 50k
+.pot R_vol 1k 100k "Volume"
+
+R_tone mid out 10k
+.pot R_tone 500 50k 10k "Tone"
+```
+
+**Notes:**
+- DK codegen uses Sherman-Morrison rank-1 updates (O(N²) per pot change, per sample)
+- Nodal codegen rebuilds matrices on change (per block, not per sample)
+
+---
+
+### .switch — Multi-Position Component Switch
+
+Defines a rotary switch that selects among discrete component values. Multiple components can be ganged (switched simultaneously).
+
+**Syntax:**
+```
+.switch name1[,name2,...] pos0_vals pos1_vals [pos2_vals ...] ["Label"]
+```
+
+| Field | Description |
+|-------|-------------|
+| `name1,name2,...` | Comma-separated component names (R, C, or L only) |
+| `posN_vals` | Slash-separated values for each component at position N |
+| `"Label"` | (Optional) Quoted parameter label for plugin UI |
+
+**Constraints:** Minimum 2, maximum 32 positions. Maximum 16 `.switch` directives per circuit. All values must be positive and finite.
+
+**Examples:**
+```spice
+* Single component, 3 positions
+C_bright 1 0 120p
+.switch C_bright 1p 120p 470p "Bright"
+
+* Ganged: cap + inductor switched together
+C_hf 1 2 100n
+L_hf 1 3 100m
+.switch C_hf,L_hf 10n/10m 100n/100m 1u/1H "HF Select"
+```
+
+In the ganged example, position 0 sets C_hf=10n and L_hf=10m, position 1 sets C_hf=100n and L_hf=100m, etc.
+
+---
+
+### .input_impedance — Input Source Impedance
+
+Sets the Thevenin source resistance for the audio input node. Affects how the circuit loads the input signal.
+
+**Syntax:**
+```
+.input_impedance value
+```
+
+**Default:** 1 Ohm (near-ideal voltage source). Maximum one per netlist.
+
+**Example:**
+```spice
+.input_impedance 600
+```
+
+**Notes:**
+- Higher impedance (e.g. 10kOhm) will cause signal attenuation through coupling capacitors
+- Use 600 Ohm for professional line-level circuits
+- Can also be set via CLI: `--input-resistance 600`
+
+---
+
+### .linearize — Linearize Device at Operating Point
+
+Removes a nonlinear device from the Newton-Raphson system and replaces it with small-signal conductances at its DC operating point. Reduces the nonlinear dimension M.
+
+**Syntax:**
+```
+.linearize device_name
+```
+
+**Example:**
+```spice
+.linearize Q9
+```
+
+**Notes:**
+- Useful when a device is always in the same operating region (e.g., a Vbe multiplier)
+- Reduces computational cost by lowering M
+- The device still affects the circuit via its linearized conductances
+
+---
+
+## 6. Analysis Directives (for validation only)
 
 These directives are parsed but only used by the validation layer (melange-validate) for comparison against ngspice. They do not affect code generation.
 
@@ -651,7 +1009,7 @@ Specifies which variables to output during analysis.
 
 ---
 
-## 6. Not Supported
+## 7. Not Supported
 
 The following SPICE features are **not supported** by melange-solver:
 
@@ -661,9 +1019,8 @@ The following SPICE features are **not supported** by melange-solver:
 - Nonlinear magnetic core models
 
 ### Transmission Lines
-- Lossless transmission lines (`T`)
+- Lossless transmission lines
 - Lossy transmission lines (`O` / URC model)
-- Coupled transmission lines (`K` for transmission lines)
 
 ### Advanced Sources
 - Behavioral voltage/current sources (`B` sources)
@@ -707,7 +1064,7 @@ The following SPICE features are **not supported** by melange-solver:
 
 ---
 
-## 7. Netlist Preprocessing
+## 8. Netlist Preprocessing
 
 ### Case Insensitivity
 
@@ -792,7 +1149,7 @@ C1 in out 10uF     ; 10 μF
 
 ---
 
-## 8. Example Netlist
+## 9. Example Netlist
 
 A complete, parseable common-emitter amplifier:
 
