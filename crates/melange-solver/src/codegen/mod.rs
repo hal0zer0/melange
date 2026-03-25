@@ -106,6 +106,24 @@ impl CodegenConfig {
                 self.input_resistance
             )));
         }
+        for (i, &scale) in self.output_scales.iter().enumerate() {
+            if !scale.is_finite() {
+                return Err(CodegenError::InvalidConfig(format!(
+                    "output_scales[{}] must be finite, got {}",
+                    i, scale
+                )));
+            }
+        }
+        if !self.output_scales.is_empty()
+            && !self.output_nodes.is_empty()
+            && self.output_scales.len() != self.output_nodes.len()
+        {
+            return Err(CodegenError::InvalidConfig(format!(
+                "output_scales length ({}) must match output_nodes length ({})",
+                self.output_scales.len(),
+                self.output_nodes.len()
+            )));
+        }
         Ok(())
     }
 }

@@ -2799,52 +2799,72 @@ impl CircuitIR {
 
     /// Access S matrix element S[i][j]
     pub fn s(&self, i: usize, j: usize) -> f64 {
-        self.matrices.s[i * self.topology.n + j]
+        let n = self.topology.n;
+        debug_assert!(i < n && j < n, "s({}, {}) out of bounds for {}x{} matrix", i, j, n, n);
+        self.matrices.s[i * n + j]
     }
 
     /// Access K matrix element K[i][j]
     pub fn k(&self, i: usize, j: usize) -> f64 {
-        self.matrices.k[i * self.topology.m + j]
+        let m = self.topology.m;
+        debug_assert!(i < m && j < m, "k({}, {}) out of bounds for {}x{} matrix", i, j, m, m);
+        self.matrices.k[i * m + j]
     }
 
-    /// Access N_v matrix element N_v[i][j]
+    /// Access N_v matrix element N_v[i][j] (M×N storage: device × node)
     pub fn n_v(&self, i: usize, j: usize) -> f64 {
-        self.matrices.n_v[i * self.topology.n + j]
+        let n = self.topology.n;
+        debug_assert!(i < self.topology.m && j < n, "n_v({}, {}) out of bounds for {}x{} matrix", i, j, self.topology.m, n);
+        self.matrices.n_v[i * n + j]
     }
 
     /// Access N_i matrix element N_i[i][j] (N×M storage: node × device)
     pub fn n_i(&self, i: usize, j: usize) -> f64 {
-        self.matrices.n_i[i * self.topology.m + j]
+        let m = self.topology.m;
+        debug_assert!(i < self.topology.n && j < m, "n_i({}, {}) out of bounds for {}x{} matrix", i, j, self.topology.n, m);
+        self.matrices.n_i[i * m + j]
     }
 
     /// Access A_neg matrix element A_neg[i][j]
     pub fn a_neg(&self, i: usize, j: usize) -> f64 {
-        self.matrices.a_neg[i * self.topology.n + j]
+        let n = self.topology.n;
+        debug_assert!(i < n && j < n, "a_neg({}, {}) out of bounds for {}x{} matrix", i, j, n, n);
+        self.matrices.a_neg[i * n + j]
     }
 
     /// Access G matrix element G[i][j]
     pub fn g(&self, i: usize, j: usize) -> f64 {
-        self.matrices.g_matrix[i * self.topology.n + j]
+        let n = self.topology.n;
+        debug_assert!(i < n && j < n, "g({}, {}) out of bounds for {}x{} matrix", i, j, n, n);
+        self.matrices.g_matrix[i * n + j]
     }
 
     /// Access C matrix element C[i][j]
     pub fn c(&self, i: usize, j: usize) -> f64 {
-        self.matrices.c_matrix[i * self.topology.n + j]
+        let n = self.topology.n;
+        debug_assert!(i < n && j < n, "c({}, {}) out of bounds for {}x{} matrix", i, j, n, n);
+        self.matrices.c_matrix[i * n + j]
     }
 
     /// Access A matrix element A[i][j] (trapezoidal, nodal mode only)
     pub fn a_matrix(&self, i: usize, j: usize) -> f64 {
-        self.matrices.a_matrix[i * self.topology.n + j]
+        let n = self.topology.n;
+        debug_assert!(i < n && j < n, "a_matrix({}, {}) out of bounds for {}x{} matrix", i, j, n, n);
+        self.matrices.a_matrix[i * n + j]
     }
 
     /// Access A_be matrix element A_be[i][j] (backward Euler, nodal mode only)
     pub fn a_matrix_be(&self, i: usize, j: usize) -> f64 {
-        self.matrices.a_matrix_be[i * self.topology.n + j]
+        let n = self.topology.n;
+        debug_assert!(i < n && j < n, "a_matrix_be({}, {}) out of bounds for {}x{} matrix", i, j, n, n);
+        self.matrices.a_matrix_be[i * n + j]
     }
 
     /// Access A_neg_be matrix element A_neg_be[i][j] (backward Euler history, nodal mode only)
     pub fn a_neg_be(&self, i: usize, j: usize) -> f64 {
-        self.matrices.a_neg_be[i * self.topology.n + j]
+        let n = self.topology.n;
+        debug_assert!(i < n && j < n, "a_neg_be({}, {}) out of bounds for {}x{} matrix", i, j, n, n);
+        self.matrices.a_neg_be[i * n + j]
     }
 
     /// Access S_be matrix element S_be[i][j] (backward Euler, nodal Schur)

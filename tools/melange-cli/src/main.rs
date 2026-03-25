@@ -616,6 +616,12 @@ fn compile_circuit_source(
     } else {
         (1.0, "default")
     };
+    if !(input_resistance > 0.0 && input_resistance.is_finite()) {
+        anyhow::bail!(
+            "input resistance must be positive and finite, got {}",
+            input_resistance
+        );
+    }
     println!(
         "  Input resistance: {} ohm ({})",
         input_resistance, ir_source
@@ -1458,6 +1464,12 @@ fn simulate_circuit_source(
     } else {
         (1.0, "default")
     };
+    if !(input_resistance > 0.0 && input_resistance.is_finite()) {
+        anyhow::bail!(
+            "input resistance must be positive and finite, got {}",
+            input_resistance
+        );
+    }
     println!(
         "  Input resistance: {} ohm ({})",
         input_resistance, ir_source
@@ -2223,6 +2235,12 @@ fn analyze_freq_response(
     } else {
         (1.0, "default")
     };
+    if !(input_resistance > 0.0 && input_resistance.is_finite()) {
+        anyhow::bail!(
+            "input resistance must be positive and finite, got {}",
+            input_resistance
+        );
+    }
     let input_conductance = 1.0 / input_resistance;
     if input_node_idx < mna.n {
         mna.g[input_node_idx][input_node_idx] += input_conductance;

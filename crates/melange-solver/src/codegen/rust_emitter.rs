@@ -2428,9 +2428,9 @@ impl RustEmitter {
         );
 
         if factor == 2 {
-            Self::emit_2x_wrapper(&mut code, num_outputs);
+            Self::emit_2x_wrapper(&mut code, num_outputs, ir.dc_block);
         } else if factor == 4 {
-            Self::emit_4x_wrapper(&mut code, num_outputs);
+            Self::emit_4x_wrapper(&mut code, num_outputs, ir.dc_block);
         }
 
         code.push_str("}\n\n");
@@ -2476,7 +2476,7 @@ impl RustEmitter {
     }
 
     /// Emit the 2x oversampling wrapper body.
-    fn emit_2x_wrapper(code: &mut String, num_outputs: usize) {
+    fn emit_2x_wrapper(code: &mut String, num_outputs: usize, dc_block: bool) {
         // Upsample: halfband → 2 samples (single input)
         code.push_str(
             "    // Upsample: half-band filter produces 2 samples at internal rate\n\
@@ -2497,16 +2497,22 @@ impl RustEmitter {
         code.push_str("        let (dn1_even, _) = os_halfband(out_even[out_idx], &OS_COEFFS, &mut state.os_dn_state[out_idx]);\n");
         code.push_str("        let (_, dn2_odd) = os_halfband(out_odd[out_idx], &OS_COEFFS, &mut state.os_dn_state[out_idx]);\n");
         code.push_str("        let v = (dn1_even + dn2_odd) * 0.5;\n");
-        code.push_str(
-            "        result[out_idx] = if v.is_finite() { v.clamp(-10.0, 10.0) } else { 0.0 };\n",
-        );
+        if dc_block {
+            code.push_str(
+                "        result[out_idx] = if v.is_finite() { v.clamp(-10.0, 10.0) } else { 0.0 };\n",
+            );
+        } else {
+            code.push_str(
+                "        result[out_idx] = if v.is_finite() { v } else { 0.0 };\n",
+            );
+        }
         code.push_str("    }\n");
         code.push_str("    result\n");
         let _ = num_outputs; // used for signature type
     }
 
     /// Emit the 4x oversampling wrapper body (cascaded 2x stages).
-    fn emit_4x_wrapper(code: &mut String, num_outputs: usize) {
+    fn emit_4x_wrapper(code: &mut String, num_outputs: usize, dc_block: bool) {
         // Outer upsample: 1 → 2 at 2x rate (single input)
         code.push_str(
             "    // Outer upsample: 1 → 2 samples at 2x rate\n\
@@ -2557,9 +2563,15 @@ impl RustEmitter {
         code.push_str("            inner_out1[out_idx], &OS_COEFFS_OUTER, &mut state.os_dn_state_outer[out_idx],\n");
         code.push_str("        );\n");
         code.push_str("        let v = (dn_outer_e + dn_outer_o) * 0.5;\n");
-        code.push_str(
-            "        result[out_idx] = if v.is_finite() { v.clamp(-10.0, 10.0) } else { 0.0 };\n",
-        );
+        if dc_block {
+            code.push_str(
+                "        result[out_idx] = if v.is_finite() { v.clamp(-10.0, 10.0) } else { 0.0 };\n",
+            );
+        } else {
+            code.push_str(
+                "        result[out_idx] = if v.is_finite() { v } else { 0.0 };\n",
+            );
+        }
         code.push_str("    }\n");
         code.push_str("    result\n");
         let _ = num_outputs; // used for signature type
@@ -3187,7 +3199,7 @@ impl RustEmitter {
                         let d = dev_num;
                         let dp = match &slot.params {
                             DeviceParams::Diode(dp) => dp,
-                            _ => unreachable!(),
+                            other => panic!("BUG: device_type=Diode but params={:?}", other),
                         };
                         if dp.has_rs() && dp.has_bv() {
                             // RS + BV: solve inner NR for junction voltage, then add breakdown
@@ -3229,7 +3241,7 @@ impl RustEmitter {
                         let d = dev_num;
                         let bp = match &slot.params {
                             DeviceParams::Bjt(bp) => bp,
-                            _ => unreachable!(),
+                            other => panic!("BUG: device_type=Bjt but params={:?}", other),
                         };
                         if bp.has_parasitics() && !slot.has_internal_mna_nodes {
                             // Use inner 2D NR for parasitic resistances
@@ -3286,7 +3298,7 @@ impl RustEmitter {
                         let d = dev_num;
                         let jp = match &slot.params {
                             DeviceParams::Jfet(jp) => jp,
-                            _ => unreachable!(),
+                            other => panic!("BUG: device_type=Jfet but params={:?}", other),
                         };
                         // IDSS, VP, LAMBDA from state; SIGN stays as const.
                         // N_v ordering: dim s = Vds, dim s+1 = Vgs.
@@ -3342,7 +3354,7 @@ impl RustEmitter {
                         let d = dev_num;
                         let mp = match &slot.params {
                             DeviceParams::Mosfet(mp) => mp,
-                            _ => unreachable!(),
+                            other => panic!("BUG: device_type=Mosfet but params={:?}", other),
                         };
                         // KP, VT, LAMBDA from state; SIGN stays as const.
                         // N_v ordering: dim s = Vds, dim s+1 = Vgs.
@@ -3393,7 +3405,7 @@ impl RustEmitter {
                         let d = dev_num;
                         let tp = match &slot.params {
                             DeviceParams::Tube(tp) => tp,
-                            _ => unreachable!(),
+                            other => panic!("BUG: device_type=Tube but params={:?}", other),
                         };
                         if tp.has_rgi() {
                             // RGI: solve for internal Vgk, evaluate at internal voltage
