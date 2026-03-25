@@ -408,8 +408,8 @@ fn generate_process_loop(
     }
 
     let gain_reads = if with_level_params {
-        "            let input_gain = self.params.input_level.smoothed.next();\n\
-         \x20           let output_gain = self.params.output_level.smoothed.next();\n"
+        "            let input_gain = util::db_to_gain_fast(self.params.input_level.smoothed.next());\n\
+         \x20           let output_gain = util::db_to_gain_fast(self.params.output_level.smoothed.next());\n"
     } else {
         ""
     };
@@ -617,31 +617,25 @@ const LEVEL_PARAM_FIELDS: &str = r#"    #[id = "input_level"]
 
 const LEVEL_PARAM_DEFAULTS: &str = r#"            input_level: FloatParam::new(
                 "Input Level",
-                util::db_to_gain(0.0),
-                FloatRange::Skewed {
-                    min: util::db_to_gain(-24.0),
-                    max: util::db_to_gain(24.0),
-                    factor: FloatRange::gain_skew_factor(-24.0, 24.0),
+                0.0,
+                FloatRange::Linear {
+                    min: -24.0,
+                    max: 24.0,
                 },
             )
-            .with_smoother(SmoothingStyle::Logarithmic(50.0))
-            .with_unit(" dB")
-            .with_value_to_string(formatters::v2s_f32_gain_to_db(1))
-            .with_string_to_value(formatters::s2v_f32_gain_to_db()),
+            .with_smoother(SmoothingStyle::Linear(50.0))
+            .with_unit(" dB"),
 
             output_level: FloatParam::new(
                 "Output Level",
-                util::db_to_gain(0.0),
-                FloatRange::Skewed {
-                    min: util::db_to_gain(-24.0),
-                    max: util::db_to_gain(24.0),
-                    factor: FloatRange::gain_skew_factor(-24.0, 24.0),
+                0.0,
+                FloatRange::Linear {
+                    min: -24.0,
+                    max: 24.0,
                 },
             )
-            .with_smoother(SmoothingStyle::Logarithmic(50.0))
-            .with_unit(" dB")
-            .with_value_to_string(formatters::v2s_f32_gain_to_db(1))
-            .with_string_to_value(formatters::s2v_f32_gain_to_db()),
+            .with_smoother(SmoothingStyle::Linear(50.0))
+            .with_unit(" dB"),
 "#;
 
 const MIX_PARAM_FIELD: &str = r#"    #[id = "mix"]
@@ -1279,14 +1273,15 @@ mod tests {
         let lib = test_generate_lib_rs("test", true, &[]);
         assert!(lib.contains("input_gain"));
         assert!(lib.contains("output_gain"));
-        assert!(lib.contains("SmoothingStyle::Logarithmic"));
+        assert!(lib.contains("db_to_gain_fast"));
     }
 
     #[test]
-    fn lib_with_level_params_has_db_formatters() {
+    fn lib_with_level_params_has_db_range() {
         let lib = test_generate_lib_rs("test", true, &[]);
-        assert!(lib.contains("v2s_f32_gain_to_db"));
-        assert!(lib.contains("s2v_f32_gain_to_db"));
+        assert!(lib.contains("Input Level"));
+        assert!(lib.contains("Output Level"));
+        assert!(lib.contains("\" dB\""));
     }
 
     #[test]
