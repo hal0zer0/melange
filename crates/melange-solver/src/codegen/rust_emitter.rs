@@ -2502,9 +2502,7 @@ impl RustEmitter {
                 "        result[out_idx] = if v.is_finite() { v.clamp(-10.0, 10.0) } else { 0.0 };\n",
             );
         } else {
-            code.push_str(
-                "        result[out_idx] = if v.is_finite() { v } else { 0.0 };\n",
-            );
+            code.push_str("        result[out_idx] = if v.is_finite() { v } else { 0.0 };\n");
         }
         code.push_str("    }\n");
         code.push_str("    result\n");
@@ -2568,9 +2566,7 @@ impl RustEmitter {
                 "        result[out_idx] = if v.is_finite() { v.clamp(-10.0, 10.0) } else { 0.0 };\n",
             );
         } else {
-            code.push_str(
-                "        result[out_idx] = if v.is_finite() { v } else { 0.0 };\n",
-            );
+            code.push_str("        result[out_idx] = if v.is_finite() { v } else { 0.0 };\n");
         }
         code.push_str("    }\n");
         code.push_str("    result\n");
