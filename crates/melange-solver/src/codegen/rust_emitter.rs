@@ -4841,6 +4841,12 @@ impl RustEmitter {
         }
         code.push_str("        }\n");
 
+        // Invalidate cross-timestep chord LU — the A matrix changed
+        if m > 0 {
+            code.push_str("\n        // Invalidate chord LU cache (matrices changed)\n");
+            code.push_str("        self.chord_valid = false;\n");
+        }
+
         code.push_str("    }\n\n");
 
         // set_pot_N() methods — O(1) delta stamping into A/A_neg/A_be matrices

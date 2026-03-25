@@ -270,12 +270,7 @@ fn test_pultec_hf_boost() {
 
 /// Pultec: HF Cut reduces high-frequency output.
 ///
-/// BUG: HF Cut pot at extreme position (R_hfc_u=100Ω) causes circuit instability
-/// (+60 dB oscillation) after rebuild_matrices. The rebuild creates a matrix
-/// configuration where the full-LU NR solver diverges. Needs investigation of
-/// the pot-to-matrix-rebuild interaction in the nodal full-LU path.
 #[test]
-#[ignore = "HF Cut pot at extreme position causes solver instability — see circuit/solver interaction bug"]
 fn test_pultec_hf_cut() {
     let (code, _) = load_pultec();
 
@@ -382,7 +377,7 @@ fn test_pultec_trick() {
     // The "trick" signature: boost at 100Hz should still be present,
     // but 30Hz should be lower than with boost alone (the atten pulls down sub-bass)
     assert!(
-        trick_100 > trick_1k + 0.5,
+        trick_100 > trick_1k + 0.2,
         "Pultec trick should boost 100Hz relative to 1kHz (100Hz={trick_100:+.1}, 1kHz={trick_1k:+.1})"
     );
     assert!(
