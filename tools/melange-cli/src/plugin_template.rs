@@ -4,6 +4,22 @@ use std::path::Path;
 
 use anyhow::Result;
 
+/// FTZ (Flush-to-Zero) + DAZ (Denormals-are-Zero) initialization block for generated plugins.
+/// Note: uses `{{` for braces because this is substituted into a format!() string literal,
+/// where substituted values pass through as-is (Rust accepts nested use-tree braces).
+const FTZ_DAZ_BLOCK: &str = "\
+\x20       // Enable Flush-to-Zero and Denormals-are-Zero for audio performance\n\
+\x20       #[cfg(target_arch = \"x86_64\")]\n\
+\x20       unsafe {\n\
+\x20           use std::arch::x86_64::{{_mm_setcsr, _mm_getcsr, _MM_FLUSH_ZERO_ON}};\n\
+\x20           _mm_setcsr(_mm_getcsr() | _MM_FLUSH_ZERO_ON | (1 << 6)); // FTZ + DAZ\n\
+\x20       }\n\
+\x20       #[cfg(target_arch = \"x86\")]\n\
+\x20       unsafe {\n\
+\x20           use std::arch::x86::{{_mm_setcsr, _mm_getcsr, _MM_FLUSH_ZERO_ON}};\n\
+\x20           _mm_setcsr(_mm_getcsr() | _MM_FLUSH_ZERO_ON | (1 << 6)); // FTZ + DAZ\n\
+\x20       }\n";
+
 /// Pot info for plugin parameter generation.
 pub struct PotParamInfo {
     /// Index (0-based)
@@ -217,29 +233,7 @@ fn generate_pot_field(pot: &PotParamInfo) -> String {
 
 fn generate_pot_default(pot: &PotParamInfo) -> String {
     let name = pot.name.replace('\\', "\\\\").replace('"', "\\\"");
-    let use_log = pot.max_resistance / pot.min_resistance > 10.0;
-    if use_log {
-        format!(
-            r#"            pot_{idx}: FloatParam::new(
-                "{name}",
-                {default:.1},
-                FloatRange::Skewed {{
-                    min: {min:.1},
-                    max: {max:.1},
-                    factor: FloatRange::skew_factor({center:.1}),
-                }},
-            )
-            .with_smoother(SmoothingStyle::Linear(10.0))
-            .with_unit(" \u{{2126}}"),
-"#,
-            idx = pot.index,
-            name = name,
-            default = pot.default_resistance,
-            min = pot.min_resistance,
-            max = pot.max_resistance,
-            center = (pot.min_resistance * pot.max_resistance).sqrt(),
-        )
-    } else {
+    {
         format!(
             r#"            pot_{idx}: FloatParam::new(
                 "{name}",
@@ -444,24 +438,30 @@ fn generate_process_loop(
                 format!(
                     "        {{\n\
                      \x20           let sw_{i}_pos = self.params.switch_{i}.value() as usize;\n\
-                     \x20           let state = &mut self.circuit_state;\n\
-                     \x20           if state.switch_{i}_position != sw_{i}_pos {{\n\
-                     \x20               state.set_switch_{i}(sw_{i}_pos);\n\
-                     \x20           }}\n\
-                     \x20       }}\n",
-                    i = s.index,
-                )
-            } else {
-                format!(
-                    "        {{\n\
-                     \x20           let sw_{i}_pos = self.params.switch_{i}.value() as usize;\n\
-                     \x20           for state in self.circuit_states.iter_mut() {{\n\
+                     \x20           if sw_{i}_pos < {n} {{\n\
+                     \x20               let state = &mut self.circuit_state;\n\
                      \x20               if state.switch_{i}_position != sw_{i}_pos {{\n\
                      \x20                   state.set_switch_{i}(sw_{i}_pos);\n\
                      \x20               }}\n\
                      \x20           }}\n\
                      \x20       }}\n",
                     i = s.index,
+                    n = s.num_positions,
+                )
+            } else {
+                format!(
+                    "        {{\n\
+                     \x20           let sw_{i}_pos = self.params.switch_{i}.value() as usize;\n\
+                     \x20           if sw_{i}_pos < {n} {{\n\
+                     \x20               for state in self.circuit_states.iter_mut() {{\n\
+                     \x20                   if state.switch_{i}_position != sw_{i}_pos {{\n\
+                     \x20                       state.set_switch_{i}(sw_{i}_pos);\n\
+                     \x20                   }}\n\
+                     \x20               }}\n\
+                     \x20           }}\n\
+                     \x20       }}\n",
+                    i = s.index,
+                    n = s.num_positions,
                 )
             }
         })
@@ -482,12 +482,13 @@ fn generate_process_loop(
     };
 
     // Nodal pot reads: done once per buffer before the sample loop (O(N³) rebuild per change)
+    // Use smoothed value for zipper-free pot changes (consistent with DK path)
     let pot_pre_loop: String = if nodal_mode && !pots.is_empty() {
         let reads: String = pots
             .iter()
             .map(|p| {
                 format!(
-                    "            let pot_{i}_val = self.params.pot_{i}.value() as f64;\n",
+                    "            let pot_{i}_val = self.params.pot_{i}.smoothed.next() as f64;\n",
                     i = p.index
                 )
             })
@@ -733,24 +734,14 @@ fn generate_lib_rs(
                  \x20       _audio_io_layout: &AudioIOLayout,\n\
                  \x20       buffer_config: &BufferConfig,\n\
                  \x20       _context: &mut impl InitContext<Self>,\n\
-                 \x20   ) -> bool {\n\
-                 \x20       // Enable Flush-to-Zero and Denormals-are-Zero for audio performance\n\
-                 \x20       #[cfg(target_arch = \"x86_64\")]\n\
-                 \x20       unsafe {\n\
-                 \x20           use std::arch::x86_64::{{_mm_setcsr, _mm_getcsr, _MM_FLUSH_ZERO_ON}};\n\
-                 \x20           _mm_setcsr(_mm_getcsr() | _MM_FLUSH_ZERO_ON | (1 << 6)); // FTZ + DAZ\n\
-                 \x20       }\n\
-                 \x20       #[cfg(target_arch = \"x86\")]\n\
-                 \x20       unsafe {\n\
-                 \x20           use std::arch::x86::{{_mm_setcsr, _mm_getcsr, _MM_FLUSH_ZERO_ON}};\n\
-                 \x20           _mm_setcsr(_mm_getcsr() | _MM_FLUSH_ZERO_ON | (1 << 6)); // FTZ + DAZ\n\
-                 \x20       }\n\
-                 \x20       self.current_sample_rate = buffer_config.sample_rate as f64;\n\
+                 \x20   ) -> bool {\n"
+                    .to_string()
+                    + FTZ_DAZ_BLOCK
+                    + "\x20       self.current_sample_rate = buffer_config.sample_rate as f64;\n\
                  \x20       self.circuit_state = CircuitState::default();\n\
                  \x20       self.circuit_state.set_sample_rate(buffer_config.sample_rate as f64);\n\
                  \x20       true\n\
-                 \x20   }"
-                    .to_string(),
+                 \x20   }",
                 "    fn reset(&mut self) {\n\
                  \x20       self.circuit_state.reset();\n\
                  \x20   }"
@@ -781,27 +772,17 @@ fn generate_lib_rs(
                  \x20       _audio_io_layout: &AudioIOLayout,\n\
                  \x20       buffer_config: &BufferConfig,\n\
                  \x20       _context: &mut impl InitContext<Self>,\n\
-                 \x20   ) -> bool {\n\
-                 \x20       // Enable Flush-to-Zero and Denormals-are-Zero for audio performance\n\
-                 \x20       #[cfg(target_arch = \"x86_64\")]\n\
-                 \x20       unsafe {\n\
-                 \x20           use std::arch::x86_64::{{_mm_setcsr, _mm_getcsr, _MM_FLUSH_ZERO_ON}};\n\
-                 \x20           _mm_setcsr(_mm_getcsr() | _MM_FLUSH_ZERO_ON | (1 << 6)); // FTZ + DAZ\n\
-                 \x20       }\n\
-                 \x20       #[cfg(target_arch = \"x86\")]\n\
-                 \x20       unsafe {\n\
-                 \x20           use std::arch::x86::{{_mm_setcsr, _mm_getcsr, _MM_FLUSH_ZERO_ON}};\n\
-                 \x20           _mm_setcsr(_mm_getcsr() | _MM_FLUSH_ZERO_ON | (1 << 6)); // FTZ + DAZ\n\
-                 \x20       }\n\
-                 \x20       self.current_sample_rate = buffer_config.sample_rate as f64;\n\
+                 \x20   ) -> bool {\n"
+                    .to_string()
+                    + FTZ_DAZ_BLOCK
+                    + "\x20       self.current_sample_rate = buffer_config.sample_rate as f64;\n\
                  \x20       self.circuit_states = vec![{\n\
                  \x20           let mut s = CircuitState::default();\n\
                  \x20           s.set_sample_rate(buffer_config.sample_rate as f64);\n\
                  \x20           s\n\
                  \x20       }];\n\
                  \x20       true\n\
-                 \x20   }"
-                    .to_string(),
+                 \x20   }",
                 "    fn reset(&mut self) {\n\
                  \x20       for state in &mut self.circuit_states {\n\
                  \x20           state.reset();\n\
@@ -834,19 +815,10 @@ fn generate_lib_rs(
                  \x20       audio_io_layout: &AudioIOLayout,\n\
                  \x20       buffer_config: &BufferConfig,\n\
                  \x20       _context: &mut impl InitContext<Self>,\n\
-                 \x20   ) -> bool {\n\
-                 \x20       // Enable Flush-to-Zero and Denormals-are-Zero for audio performance\n\
-                 \x20       #[cfg(target_arch = \"x86_64\")]\n\
-                 \x20       unsafe {\n\
-                 \x20           use std::arch::x86_64::{{_mm_setcsr, _mm_getcsr, _MM_FLUSH_ZERO_ON}};\n\
-                 \x20           _mm_setcsr(_mm_getcsr() | _MM_FLUSH_ZERO_ON | (1 << 6)); // FTZ + DAZ\n\
-                 \x20       }\n\
-                 \x20       #[cfg(target_arch = \"x86\")]\n\
-                 \x20       unsafe {\n\
-                 \x20           use std::arch::x86::{{_mm_setcsr, _mm_getcsr, _MM_FLUSH_ZERO_ON}};\n\
-                 \x20           _mm_setcsr(_mm_getcsr() | _MM_FLUSH_ZERO_ON | (1 << 6)); // FTZ + DAZ\n\
-                 \x20       }\n\
-                 \x20       let num_channels = audio_io_layout.main_input_channels\n\
+                 \x20   ) -> bool {\n"
+                    .to_string()
+                    + FTZ_DAZ_BLOCK
+                    + "\x20       let num_channels = audio_io_layout.main_input_channels\n\
                  \x20           .map(|c| c.get() as usize).unwrap_or(2);\n\
                  \x20       self.current_sample_rate = buffer_config.sample_rate as f64;\n\
                  \x20       self.circuit_states = (0..num_channels).map(|_| {\n\
@@ -855,8 +827,7 @@ fn generate_lib_rs(
                  \x20           s\n\
                  \x20       }).collect();\n\
                  \x20       true\n\
-                 \x20   }"
-                    .to_string(),
+                 \x20   }",
                 "    fn reset(&mut self) {\n\
                  \x20       for state in &mut self.circuit_states {\n\
                  \x20           state.reset();\n\
@@ -922,6 +893,10 @@ fn ear_protection_limit(x: f32) -> f32 {
     format!(
         r#"// =============================================================================
 // {display_name} — generated by Melange
+//
+// This code is derived from GPL-licensed templates and device models in the
+// Melange project and is therefore subject to the GNU General Public License
+// v3.0 or later. See https://www.gnu.org/licenses/gpl-3.0.html
 // =============================================================================
 //
 // This file (lib.rs) is your plugin wrapper — customize freely:

@@ -378,6 +378,11 @@ See [docs/PLUGIN_GUIDE.md](docs/PLUGIN_GUIDE.md) for plugin-specific troubleshoo
 
 This project is licensed under the [GNU General Public License v3.0 or later](LICENSE) (GPL-3.0-or-later).
 
+**Generated code is also GPL-licensed.** Code produced by `melange compile` is derived from
+GPL-licensed templates and device models within this project, and is therefore subject to the
+same GPL-3.0-or-later license. If you distribute plugins or binaries built from Melange-generated
+code, you must comply with the GPL (including providing source code to recipients).
+
 Melange includes code derived from the [OpenWurli](https://github.com/openwurli/openwurli) project, which is licensed under GPL-3.0.
 
 > **Melange needs additional maintainers!** The current maintainer is a SWE but does not have the necessary electrical engineering or Rust expertise to maintain a project of this complexity long-term. If you've got the skills to help, please get in touch.
