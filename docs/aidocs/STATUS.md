@@ -25,7 +25,14 @@ Tests in `crates/melange-validate/tests/spice_validation.rs`. Uses ngspice batch
 - **BJT extras**: NF/ISE/NE (emission/leakage), Gummel-Poon (VAF/VAR/IKF/IKR)
 - **Diode**: BV/IBV (Zener breakdown)
 - **MOSFET**: GAMMA/PHI (body effect)
-- **Not implemented**: BJT self-heating (RTH/CTH), pentode support
+- **Not implemented**: BJT self-heating (RTH/CTH), pentode support, temperature coefficients, noise models
+- **Known model limitations**:
+  - Diode BV: hard clamp reverse breakdown (no smooth Zener knee)
+  - BJT GP Q1: singularity guard at `q1_denom <= 0` (physically near Early voltage limit)
+  - Tube Koren: no space-charge, no transit-time effects
+  - JFET/MOSFET subthreshold: hardcoded 2×VT slope (real devices: 60-120 mV/decade)
+  - Op-amp: ideal frequency response (no GBW pole, no slew rate)
+  - VCA noise_floor field exists but unused
 
 ## Codegen Device Support
 
@@ -46,7 +53,7 @@ M=1 direct, M=2 Cramer's, M=3..16 Gaussian elimination with partial pivoting.
 | Path | When Selected | Cost | Notes |
 |------|--------------|------|-------|
 | DK Schur | M<10, ≤1 xfmr, K well-conditioned | O(N²+M³)/sample | 100-600× realtime |
-| Nodal Schur | M≥10 or 2+ xfmr, K well-conditioned | O(N²+M³)/sample | Pultec: 0.6× RT |
+| Nodal Schur | M≥10 or 2+ xfmr, K well-conditioned | O(N²+M³)/sample | Medium-complexity circuits |
 | Nodal full LU | K≈0 (VCA), positive K diag, K ill-cond | O(N³)/sample | Matches runtime exactly |
 
 K≈0 detection: max|K| < 1e-6 with M > 0.
@@ -58,7 +65,7 @@ K≈0 detection: max|K| < 1e-6 with M > 0.
 | tweed-preamp | 13 | 4 | DK | fast | 2× 12AX7, 1 pot, 1 switch |
 | wurli-preamp | 11 | 3-5 | DK | fast | 2 BJTs + 1 diode, FA detection |
 | wurli-power-amp | 20 | 9-16 | DK/Nodal | 0.4× / 0.04× | Class AB, 8 BJTs |
-| pultec-eq | 41 | 8 | Nodal Schur | 15.4× | 4 tubes, 2 xfmrs, 7 pots, 3 switches. All EQ curves verified 2026-03-23. |
+| pultec-eq | 41 | 8 | Nodal full LU | ~11× | 4 tubes, 2 xfmrs, 7 pots, 3 switches. Chord + cross-timestep + sparse LU. All EQ curves verified 2026-03-23. |
 | ssl-bus-compressor | 28 | 2 | Nodal full LU | — | 4 op-amps, 1 VCA, 2 diodes |
 
 ## Pultec Schematic Data (Verified 2026-03-16)

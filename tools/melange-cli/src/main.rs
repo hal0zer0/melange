@@ -1486,12 +1486,22 @@ fn simulate_circuit_source(
     );
 
     // Expand MNA with internal nodes for parasitic BJTs, then stamp junction caps.
-    // Must happen BEFORE kernel build so parasitic R and caps are in A = G + 2C/T.
+    // Internal nodes cause ill-conditioning in the DK kernel (N×N inversion with
+    // large parasitic conductances). Only expand for nodal solver path.
+    // Junction caps are stamped to external nodes for DK (approximately correct).
     {
+        let will_use_nodal = {
+            let has_ind = !mna.inductors.is_empty()
+                || !mna.coupled_inductors.is_empty()
+                || !mna.transformer_groups.is_empty();
+            (has_ind && opts.solver != "dk") || opts.solver == "nodal"
+        };
         let device_slots =
             melange_solver::codegen::ir::CircuitIR::build_device_info(&netlist).unwrap_or_default();
         if !device_slots.is_empty() {
-            mna.expand_bjt_internal_nodes(&device_slots);
+            if will_use_nodal {
+                mna.expand_bjt_internal_nodes(&device_slots);
+            }
             mna.stamp_device_junction_caps(&device_slots);
         }
     }
@@ -1921,23 +1931,9 @@ fn simulate_circuit_source(
             .with_context(|| "Failed to create circuit solver")?;
         solver.set_input_conductance(input_conductance);
 
-        // Apply K_eff parasitic R corrections for BJTs
-        {
-            let device_slots = build_device_slots(&netlist, &mna);
-            let mut k_eff_corrections = Vec::new();
-            for slot in &device_slots {
-                if let melange_solver::codegen::ir::DeviceParams::Bjt(bp) = &slot.params {
-                    if bp.has_parasitics()
-                        && slot.device_type == melange_solver::codegen::ir::DeviceType::Bjt
-                    {
-                        k_eff_corrections.push((slot.start_idx, bp.rb, bp.rc, bp.re));
-                    }
-                }
-            }
-            if !k_eff_corrections.is_empty() {
-                solver.apply_k_eff_corrections(&k_eff_corrections);
-            }
-        }
+        // Note: K_eff parasitic R corrections are NOT applied here because
+        // expand_bjt_internal_nodes() already adds RB/RC/RE to the MNA G matrix.
+        // Applying both would double-account for parasitic resistances.
 
         // Initialize DC operating point for nonlinear circuits
         if has_nonlinear {
@@ -2273,22 +2269,25 @@ fn analyze_freq_response(
         );
     }
 
-    // Expand MNA with internal nodes for parasitic BJTs, then stamp junction caps.
-    {
-        let device_slots =
-            melange_solver::codegen::ir::CircuitIR::build_device_info(&netlist).unwrap_or_default();
-        if !device_slots.is_empty() {
-            mna.expand_bjt_internal_nodes(&device_slots);
-            mna.stamp_device_junction_caps(&device_slots);
-        }
-    }
-
     // Detect inductors — auto-select NodalSolver for nonlinear+inductor circuits
     let has_inductors = !mna.inductors.is_empty()
         || !mna.coupled_inductors.is_empty()
         || !mna.transformer_groups.is_empty();
     let has_nonlinear = !mna.nonlinear_devices.is_empty();
     let use_nodal = has_nonlinear && has_inductors;
+
+    // Expand MNA with internal nodes for parasitic BJTs, then stamp junction caps.
+    // Internal nodes cause ill-conditioning in the DK kernel. Only expand for nodal path.
+    {
+        let device_slots =
+            melange_solver::codegen::ir::CircuitIR::build_device_info(&netlist).unwrap_or_default();
+        if !device_slots.is_empty() {
+            if use_nodal {
+                mna.expand_bjt_internal_nodes(&device_slots);
+            }
+            mna.stamp_device_junction_caps(&device_slots);
+        }
+    }
 
     // Build kernel (uses augmented MNA for inductor circuits)
     let kernel = if use_nodal {
@@ -2330,22 +2329,9 @@ fn analyze_freq_response(
             CircuitSolver::new(kernel.clone(), devices, input_node_idx, output_node_idx)
                 .with_context(|| "Failed to create circuit solver")?;
         solver.set_input_conductance(input_conductance);
-        // Apply K_eff parasitic R corrections for BJTs
-        {
-            let mut k_corrections = Vec::new();
-            for slot in &device_slots {
-                if let melange_solver::codegen::ir::DeviceParams::Bjt(bp) = &slot.params {
-                    if bp.has_parasitics()
-                        && slot.device_type == melange_solver::codegen::ir::DeviceType::Bjt
-                    {
-                        k_corrections.push((slot.start_idx, bp.rb, bp.rc, bp.re));
-                    }
-                }
-            }
-            if !k_corrections.is_empty() {
-                solver.apply_k_eff_corrections(&k_corrections);
-            }
-        }
+        // Note: K_eff parasitic R corrections are NOT applied here because
+        // expand_bjt_internal_nodes() already adds RB/RC/RE to the MNA G matrix.
+        // Applying both would double-account for parasitic resistances.
         solver.initialize_dc_op(&mna, &device_slots);
         Some(BaseSolver::Dk(solver))
     } else {
@@ -2960,7 +2946,7 @@ fn build_device_slots(
                         cgs: find_param(&model_name, "CGS").unwrap_or(0.0),
                         cgd: find_param(&model_name, "CGD").unwrap_or(0.0),
                         rd: find_param(&model_name, "RD").unwrap_or(0.0),
-                        rs_param: find_param(&model_name, "RS").unwrap_or(0.0),
+                        rs: find_param(&model_name, "RS").unwrap_or(0.0),
                     }),
                     has_internal_mna_nodes: false,
                 });
@@ -3003,7 +2989,7 @@ fn build_device_slots(
                         cgs: find_param(&model_name, "CGS").unwrap_or(0.0),
                         cgd: find_param(&model_name, "CGD").unwrap_or(0.0),
                         rd: find_param(&model_name, "RD").unwrap_or(0.0),
-                        rs_param: find_param(&model_name, "RS").unwrap_or(0.0),
+                        rs: find_param(&model_name, "RS").unwrap_or(0.0),
                         gamma: find_param(&model_name, "GAMMA").unwrap_or(0.0),
                         phi: find_param(&model_name, "PHI").unwrap_or(0.6),
                         source_node: 0,
@@ -3076,7 +3062,6 @@ fn build_device_slots(
                 let vscale = find_param(&model_name, "VSCALE").unwrap_or(0.05298);
                 let g0 = find_param(&model_name, "G0").unwrap_or(1.0);
                 let thd = find_param(&model_name, "THD").unwrap_or(0.0);
-                let noise_floor = find_param(&model_name, "NOISE_FLOOR").unwrap_or(0.0);
                 slots.push(DeviceSlot {
                     device_type: DeviceType::Vca,
                     start_idx: dev_info.start_idx,
@@ -3085,7 +3070,6 @@ fn build_device_slots(
                         vscale,
                         g0,
                         thd,
-                        noise_floor,
                     }),
                     has_internal_mna_nodes: false,
                 });

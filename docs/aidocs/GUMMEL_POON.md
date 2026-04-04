@@ -57,7 +57,7 @@ qb = q1 * (1 + sqrt(1 + 4*q2)) / 2
 ```
 
 Singularity guards:
-- `|q1_denom| < 1e-30` -> qb = 1.0 (graceful fallback)
+- `q1_denom <= 0.0 || |q1_denom| < 1e-30` -> qb = 1.0 (prevents sign-flip near Early voltage)
 - `(1 + 4*q2).max(0.0)` -> discriminant floored at 0 (prevents sqrt of negative)
 - `safe_exp()` clamps exponent to [-40, 40]
 

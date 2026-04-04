@@ -138,7 +138,8 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
 - Plugin template generates per-channel state for stereo (no cross-channel corruption)
 - SPICE validation infrastructure with ngspice
 - Input validation: parser rejects negative/zero/NaN/Inf component values, self-connected components (including V/I sources), warns on unknown directives, errors on missing `.ends`; codegen validates node indices
-- Error types are enums (`MnaError`, `DkError`, `CodegenError` with `InvalidConfig`, `SolverError`) — no panicking library code
+- Error types are `#[non_exhaustive]` enums (`MnaError`, `DkError`, `CodegenError`, `SolverError`) — no panicking library code
+- `MAX_M` (=16) re-exported from `melange-solver` public API
 - Logging via `log` crate (no `eprintln!` in library code)
 - MAX_M=16 bound prevents unbounded allocation in DK kernel
 - CLI reports errors for unresolved node names (no silent defaults)
@@ -146,6 +147,7 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
   - Trapezoidal nonlinear integration: correction uses full `S*N_i*i_nl` (not delta)
   - Combined with `N_i*i_nl_prev` in RHS, gives proper trapezoidal average
   - **Gummel-Poon model**: `BjtParams` includes VAF, VAR, IKF, IKR; `bjt_qb()` base charge modulation
+  - Q1 Early effect guard: `q1_denom <= 0` clamps to 1.0 (prevents sign-flip near Early voltage)
   - USE_GP flag auto-detected from params; falls back to Ebers-Moll when GP params are infinite
   - **Junction capacitances**: CJE/CJC (BJT), CGS/CGD (JFET/MOSFET), CJO (diode), CCG/CGP/CCP (tube). Parsed from .model, stamped into MNA C matrix.
   - **Parasitic resistances**: RS (diode, inner NR), RB/RC/RE (BJT, 2D inner NR), RD/RS (JFET/MOSFET, closed-form), RGI (tube, 1D inner NR)
@@ -160,7 +162,7 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
   - **Runtime solver**: No pot support (codegen-only). `CircuitSolver` uses nominal kernel.
   - Plugin template auto-generates `FloatParam` knobs for each pot
   - Max 32 pots per circuit; pot value stored in `CircuitState`
-- **Plugin level params always included**: Input Level (0 dB default, -36 to +12 dB) and Output Level (0 dB default, -60 to +12 dB)
+- **Plugin level params always included**: Input Level (0 dB default, ±24 dB) and Output Level (0 dB default, ±24 dB)
   - Use `--no-level-params` CLI flag to opt out
 - **Oversampling in codegen** (2x/4x): self-contained polyphase half-band IIR in generated code
   - `CodegenConfig.oversampling_factor` = 1, 2, or 4
@@ -216,11 +218,14 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
 - Parasitic caps (10pF) auto-inserted across junctions for purely resistive nonlinear circuits
 - Tube Koren model: lambda parameter models finite plate resistance; no space-charge or transit-time effects
 - BJT Gummel-Poon: self-heating (Rth/Cth) and charge storage (CJE/CJC/TF) available; no substrate current or avalanche breakdown
+- All device models fixed at room temperature (27°C); no temperature coefficients (TNOM, TC1, TC2, XTI)
+- Op-amp model has ideal frequency response (no GBW pole, no slew rate limiting)
+- Pentode support deferred (3D device exceeds current 2D NR solver; workaround: triode-connect)
 - **Runtime solver** (`DeviceEntry`) supports all device types: Diode, DiodeWithRs, Led, BJT, JFET, MOSFET, Tube
 - **NodalSolver transient NR**: Converges for all physically valid circuits including Pultec EQP-1A (4 tubes, 2 transformers, global NFB). Requires positive-definite inductance matrices (validated at MNA build time).
-- **Coupled-inductor push-pull NFB limitation**: The K coupling model cannot provide >7 dB of cathode NFB in push-pull circuits due to PD constraint on the inductance matrix. The real mechanism requires distributed coupling geometry (position-dependent turn-to-turn coupling) that K coefficients can't represent. Fix: ideal transformer formulation (dependent sources + explicit leakage/magnetizing L). Pultec currently runs at +22 dB instead of 0 dB due to this.
+- **Coupled-inductor push-pull NFB**: Differential cathode injection with separated cathodes (820Ω between) and K=0.9999 provides 21 dB of NFB. Pultec at +1.8 dB (near unity). Ideal transformer formulation (dependent sources + explicit leakage/magnetizing L) deferred — current approach is sufficient.
 - **`melange simulate`**: auto-selects NodalSolver for nonlinear circuits with inductors, CircuitSolver (DK) otherwise. `--solver nodal|dk` override available.
-- **Performance**: DK codegen circuits run 100-600× realtime. Nodal full-LU (chord + cross-timestep + sparse LU): 11.3× realtime for Pultec (41-node, 8 NL, 2 transformers), 2.5× for split cathode variant.
+- **Performance**: DK codegen circuits run 100-600× realtime. Nodal full-LU (chord + cross-timestep + sparse LU): ~11× realtime for Pultec (41-node, 8 NL, 2 transformers).
 
 ### Cross-Compilation (macOS from Linux)
 - Zig 0.13 + cargo-zigbuild + macOS SDK 13.3 + rcodesign (ad-hoc signing)
@@ -229,28 +234,29 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
 - melange-cli does NOT cross-compile (ureq/dirs need CoreFoundation), but generated plugins do
 
 ### Validated Circuits
-- `circuits/pultec-eq.cir`: Pultec EQP-1A (4 tubes: 2×12AX7 + 2×12AU7, 2 transformers, 3 switches, 7 pots, global NFB)
+- `circuits/stable/pultec-eq.cir`: Pultec EQP-1A (4 tubes: 2×12AX7 + 2×12AU7, 2 transformers, 3 switches, 7 pots, global NFB)
   - Verified against Sowter DWG E-72,658-2 schematic + Peerless/Triad winding data (2026-03-18)
   - HS-29: 1:2 step-up, 37H, true push-pull grid drive (both grids from CT secondary)
   - S-217-D: 220H primary (30Hz), 71-turn tertiary feedback, 220pF 12AU7 grid stabilization
-  - Uses nodal Schur codegen path (2 transformer groups → DK K matrix unstable)
+  - Uses nodal full-LU codegen path (2 transformer groups → DK K matrix unstable)
+  - Gain: +1.8 dB at 1kHz (near unity), flat ±1 dB 20Hz-15kHz, 21 dB differential NFB working
   - All 7 pots + 3 switches produce correct EQ curves (LF Boost/Atten, HF Boost/Cut, Pultec trick)
-  - 11.3× realtime (1.8 µs/sample) on full LU with chord + cross-timestep + sparse LU, zero NR failures
-- `circuits/wurli-preamp.cir`: Wurlitzer 200A preamp (N=11, M=5→3 FA, 2 BJTs + 1 diode, 1 pot)
+  - ~11× realtime on full LU with chord + cross-timestep + sparse LU, zero NR failures at 1V
+- `circuits/stable/wurli-preamp.cir`: Wurlitzer 200A preamp (N=11, M=5→3 FA, 2 BJTs + 1 diode, 1 pot)
   - Flattened from openwurli/spice/subcircuits/preamp.cir
   - R1-Cin series input coupling via intermediate node (mid_in)
   - 0.1V in → 9.12V peak out at R_ldr=100K nominal
-- `circuits/wurli-power-amp.cir`: Wurlitzer 200A power amplifier (N=20, M=16→9 FA, 8 BJTs, Class AB)
-  - Quasi-complementary push-pull: PNP diff pair → NPN VAS → Sziklai output pairs
+- `circuits/testing/wurli-power-amp.cir`: Wurlitzer 200A power amplifier (N=20, M=16→9 FA, 8 BJTs, Class AB)
+  - Quasi-complementary push-pull: PNP diff pair ��� NPN VAS → Sziklai output pairs
   - DC OP: v(out)=-0.065V (ngspice: -0.063V), internal nodes for parasitic BJTs (RB up to 120Ω)
   - FA detection: 7/8 BJTs forward-active (Q9 Vbe multiplier excluded — near saturation)
   - DK codegen M=9: stable, 0.4× realtime (optimized). Nodal codegen: stable, 0.04× realtime.
-- `circuits/tweed-preamp.cir`: Fender-style 2-stage 12AX7 guitar amp (N=13, M=4, 1 pot, 1 switch)
+- `circuits/stable/tweed-preamp.cir`: Fender-style 2-stage 12AX7 guitar amp (N=13, M=4, 1 pot, 1 switch)
   - Two 12AX7 triode stages, interstage volume pot (shunt, 500Ω-500kΩ), bright switch (3-pos)
   - Stage 1: fully bypassed cathode (25µF, max gain); Stage 2: partial bypass (0.68µF, ~156Hz)
   - Output pad (390k/6.8k, -35dB) models output transformer attenuation
   - 50mV in → 549mV out (11x / 20.8dB gain), zero NR divergence
-- `ssl-bus-compressor` (builtin): SSL 4000E bus compressor (4 op-amps, 1 VCA, 2 diodes, 2 pots, 2 switches)
+- `circuits/unstable/ssl-bus-compressor.cir`: SSL 4000E bus compressor (4 op-amps, 1 VCA, 2 diodes, 2 pots, 2 switches)
   - Audio path codegen validated: -62.8 dB output matches runtime NodalSolver exactly
   - Uses nodal full-LU path (K≈0 from current-mode VCA, N=28, M=2)
 
@@ -263,16 +269,15 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
 - **Documentation**: User-facing docs, example circuits, getting-started guide
 
 #### Performance — Further Optimization
-- Pultec already at 15× RT (Schur complement implemented). Further optimization optional:
+- Pultec at ~11× RT (chord + cross-timestep + sparse LU). Further optimization optional:
 - Hot/cold state split: 112KB struct → ~30KB hot path (L1 cache friendly)
-- Jacobian reuse (chord method): skip tube Jacobian re-evaluation on NR iterations 1+
 - fast_powf for Koren tube model: replace libm powf (~40ns) with fast approximation (~10ns)
 
 #### Future — Multi-Language Codegen
 The `Emitter` trait + `CircuitIR` are language-agnostic by design. Once Rust output is complete, planned targets in priority order: C++ (pro plugin devs), FAUST (compiles to 30+ targets), Python/NumPy (prototyping), MATLAB/Octave (academic).
 
 #### Deferred
-- **Ideal transformer formulation**: Dependent sources + explicit leakage/magnetizing L. Removes PD constraint from coupled inductors, enables correct push-pull cathode NFB. Required for Pultec 0 dB gain and any future push-pull circuit with global NFB.
+- **Ideal transformer formulation**: Dependent sources + explicit leakage/magnetizing L. Removes PD constraint from coupled inductors. May improve push-pull circuits beyond current K model capabilities. Pultec now at +1.8 dB with current approach, so no longer blocking.
 - **Phase 6a/6b** (type safety): NodeIdx newtype and field visibility
 - **Phase 7** (crate split): Extract melange-parser, melange-codegen
 - **M>16**: Iterative/sparse NR for very large nonlinear systems
