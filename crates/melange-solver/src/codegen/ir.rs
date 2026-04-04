@@ -256,6 +256,26 @@ pub struct SwitchComponentIR {
     /// or non-inductor components.
     #[serde(default)]
     pub augmented_row: Option<usize>,
+    /// For 'L' components in a coupled inductor pair (DK path): index into
+    /// `coupled_inductors` vec. None for uncoupled inductors or non-inductors.
+    #[serde(default)]
+    pub coupled_inductor_index: Option<usize>,
+    /// Which winding (1 = L1, 2 = L2) within the coupled pair.
+    /// Only meaningful when `coupled_inductor_index` is Some.
+    #[serde(default)]
+    pub coupled_winding: Option<u8>,
+}
+
+/// Mutual inductance entry that must be recomputed when a switch changes
+/// an inductor value in the augmented MNA C matrix.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SwitchMutualEntry {
+    /// Augmented row index of first coupled inductor
+    pub row_a: usize,
+    /// Augmented row index of second coupled inductor
+    pub row_b: usize,
+    /// Coupling coefficient k from the K directive
+    pub coupling: f64,
 }
 
 /// Switch parameters for code generation.
@@ -269,6 +289,11 @@ pub struct SwitchIR {
     pub positions: Vec<Vec<f64>>,
     /// Number of positions
     pub num_positions: usize,
+    /// Off-diagonal mutual inductance entries that depend on inductor values
+    /// in this switch. After diagonal L updates, each entry is recomputed:
+    /// `C[a][b] = C[b][a] = k * sqrt(C[a][a] * C[b][b])`.
+    #[serde(default)]
+    pub mutual_entries: Vec<SwitchMutualEntry>,
 }
 
 /// Inductor parameters for code generation.
@@ -1344,6 +1369,25 @@ impl CircuitIR {
                         } else {
                             None
                         };
+                        // For coupled inductor windings (not in uncoupled list),
+                        // find the coupled pair index and winding number.
+                        let (coupled_inductor_index, coupled_winding) =
+                            if comp.component_type == 'L' && inductor_index.is_none() {
+                                let mut found = None;
+                                for (ci_idx, ci) in kernel.coupled_inductors.iter().enumerate() {
+                                    if ci.l1_name.eq_ignore_ascii_case(&comp.name) {
+                                        found = Some((ci_idx, 1u8));
+                                        break;
+                                    }
+                                    if ci.l2_name.eq_ignore_ascii_case(&comp.name) {
+                                        found = Some((ci_idx, 2u8));
+                                        break;
+                                    }
+                                }
+                                found.map_or((None, None), |(i, w)| (Some(i), Some(w)))
+                            } else {
+                                (None, None)
+                            };
                         SwitchComponentIR {
                             name: comp.name.clone(),
                             component_type: comp.component_type,
@@ -1352,6 +1396,8 @@ impl CircuitIR {
                             nominal_value: comp.nominal_value,
                             inductor_index,
                             augmented_row: None, // DK path uses companion model
+                            coupled_inductor_index,
+                            coupled_winding,
                         }
                     })
                     .collect();
@@ -1360,6 +1406,7 @@ impl CircuitIR {
                     components,
                     positions: sw.positions.clone(),
                     num_positions: sw.positions.len(),
+                    mutual_entries: Vec::new(), // DK path uses companion model
                 }
             })
             .collect();
@@ -1877,32 +1924,84 @@ impl CircuitIR {
                 mna.switches
                     .iter()
                     .enumerate()
-                    .map(|(idx, sw)| SwitchIR {
-                        index: idx,
-                        components: sw
+                    .map(|(idx, sw)| {
+                        // Collect inductor names in this switch for mutual lookup
+                        let switch_inductor_names: std::collections::HashSet<String> = sw
                             .components
                             .iter()
-                            .map(|comp| {
-                                let augmented_row = if comp.component_type == 'L' {
-                                    inductor_aug_rows
-                                        .get(&comp.name.to_ascii_uppercase())
-                                        .copied()
-                                } else {
-                                    None
-                                };
-                                SwitchComponentIR {
-                                    name: comp.name.clone(),
-                                    component_type: comp.component_type,
-                                    node_p: comp.node_p,
-                                    node_q: comp.node_q,
-                                    nominal_value: comp.nominal_value,
-                                    inductor_index: None,
-                                    augmented_row,
+                            .filter(|c| c.component_type == 'L')
+                            .map(|c| c.name.to_ascii_uppercase())
+                            .collect();
+
+                        // Build mutual entries for coupled pairs where at least one winding is in this switch
+                        let mut mutual_entries = Vec::new();
+                        for ci in &mna.coupled_inductors {
+                            let l1 = ci.l1_name.to_ascii_uppercase();
+                            let l2 = ci.l2_name.to_ascii_uppercase();
+                            if switch_inductor_names.contains(&l1) || switch_inductor_names.contains(&l2) {
+                                if let (Some(&ra), Some(&rb)) = (
+                                    inductor_aug_rows.get(&l1),
+                                    inductor_aug_rows.get(&l2),
+                                ) {
+                                    mutual_entries.push(SwitchMutualEntry {
+                                        row_a: ra,
+                                        row_b: rb,
+                                        coupling: ci.coupling,
+                                    });
                                 }
-                            })
-                            .collect(),
-                        positions: sw.positions.clone(),
-                        num_positions: sw.positions.len(),
+                            }
+                        }
+                        for group in &mna.transformer_groups {
+                            for i in 0..group.num_windings {
+                                for j in (i + 1)..group.num_windings {
+                                    let ni = group.winding_names[i].to_ascii_uppercase();
+                                    let nj = group.winding_names[j].to_ascii_uppercase();
+                                    if switch_inductor_names.contains(&ni) || switch_inductor_names.contains(&nj) {
+                                        if let (Some(&ra), Some(&rb)) = (
+                                            inductor_aug_rows.get(&ni),
+                                            inductor_aug_rows.get(&nj),
+                                        ) {
+                                            mutual_entries.push(SwitchMutualEntry {
+                                                row_a: ra,
+                                                row_b: rb,
+                                                coupling: group.coupling_matrix[i][j],
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        SwitchIR {
+                            index: idx,
+                            components: sw
+                                .components
+                                .iter()
+                                .map(|comp| {
+                                    let augmented_row = if comp.component_type == 'L' {
+                                        inductor_aug_rows
+                                            .get(&comp.name.to_ascii_uppercase())
+                                            .copied()
+                                    } else {
+                                        None
+                                    };
+                                    SwitchComponentIR {
+                                        name: comp.name.clone(),
+                                        component_type: comp.component_type,
+                                        node_p: comp.node_p,
+                                        node_q: comp.node_q,
+                                        nominal_value: comp.nominal_value,
+                                        inductor_index: None,
+                                        augmented_row,
+                                        coupled_inductor_index: None,
+                                        coupled_winding: None,
+                                    }
+                                })
+                                .collect(),
+                            positions: sw.positions.clone(),
+                            num_positions: sw.positions.len(),
+                            mutual_entries,
+                        }
                     })
                     .collect()
             },
@@ -2491,10 +2590,10 @@ impl CircuitIR {
                 "JFET model RD must be non-negative and finite, got {rd}"
             )));
         }
-        let rs_param = Self::lookup_model_param(netlist, model, "RS").unwrap_or(0.0);
-        if rs_param < 0.0 || !rs_param.is_finite() {
+        let rs = Self::lookup_model_param(netlist, model, "RS").unwrap_or(0.0);
+        if rs < 0.0 || !rs.is_finite() {
             return Err(CodegenError::InvalidConfig(format!(
-                "JFET model RS must be non-negative and finite, got {rs_param}"
+                "JFET model RS must be non-negative and finite, got {rs}"
             )));
         }
 
@@ -2512,7 +2611,7 @@ impl CircuitIR {
             cgs,
             cgd,
             rd,
-            rs_param,
+            rs,
         })
     }
 
@@ -2573,10 +2672,10 @@ impl CircuitIR {
                 "MOSFET model RD must be non-negative and finite, got {rd}"
             )));
         }
-        let rs_param = Self::lookup_model_param(netlist, model, "RS").unwrap_or(0.0);
-        if rs_param < 0.0 || !rs_param.is_finite() {
+        let rs = Self::lookup_model_param(netlist, model, "RS").unwrap_or(0.0);
+        if rs < 0.0 || !rs.is_finite() {
             return Err(CodegenError::InvalidConfig(format!(
-                "MOSFET model RS must be non-negative and finite, got {rs_param}"
+                "MOSFET model RS must be non-negative and finite, got {rs}"
             )));
         }
 
@@ -2611,7 +2710,7 @@ impl CircuitIR {
             cgs,
             cgd,
             rd,
-            rs_param,
+            rs,
             gamma,
             phi,
             source_node: 0,
@@ -2734,7 +2833,6 @@ impl CircuitIR {
         let vscale = Self::lookup_model_param(netlist, model, "VSCALE").unwrap_or(0.05298);
         let g0 = Self::lookup_model_param(netlist, model, "G0").unwrap_or(1.0);
         let thd = Self::lookup_model_param(netlist, model, "THD").unwrap_or(0.0);
-        let noise_floor = Self::lookup_model_param(netlist, model, "NOISE_FLOOR").unwrap_or(0.0);
 
         validate_positive_finite(vscale, "VCA model VSCALE")?;
         validate_positive_finite(g0, "VCA model G0")?;
@@ -2743,23 +2841,17 @@ impl CircuitIR {
                 "VCA model THD must be non-negative and finite, got {thd}"
             )));
         }
-        if noise_floor < 0.0 || !noise_floor.is_finite() {
-            return Err(CodegenError::InvalidConfig(format!(
-                "VCA model NOISE_FLOOR must be non-negative and finite, got {noise_floor}"
-            )));
-        }
 
         Self::warn_unrecognized_params(
             netlist,
             model,
-            &["VSCALE", "G0", "THD", "NOISE_FLOOR", "MODE"],
+            &["VSCALE", "G0", "THD", "MODE"],
         );
 
         Ok(VcaParams {
             vscale,
             g0,
             thd,
-            noise_floor,
         })
     }
 

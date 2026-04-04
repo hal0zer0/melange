@@ -157,6 +157,7 @@ pub struct DkKernel {
 
 /// Error type for DK reduction.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum DkError {
     /// The A matrix is singular or nearly singular and cannot be inverted.
     SingularMatrix(String),
@@ -1466,7 +1467,6 @@ fn infinity_norm(a: &[Vec<f64>]) -> f64 {
 }
 
 /// Matrix-vector multiplication: y = A * x
-#[allow(dead_code)]
 #[allow(clippy::needless_range_loop)]
 pub(crate) fn mat_vec_mul(a: &[Vec<f64>], x: &[f64]) -> Vec<f64> {
     let m = a.len();

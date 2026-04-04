@@ -1399,29 +1399,23 @@ C3 out 0 100p
 // ===========================================================================
 
 #[test]
-fn test_reject_coupled_inductor_in_switch() {
+fn test_accept_coupled_inductor_in_switch() {
     let spice = "\
-Switch Conflict
+Switch Coupled
 L1 a 0 10m
 L2 b 0 100m
 K1 L1 L2 0.95
-.switch L1 10m 20m
+.switch L1,L2 10m/100m 20m/200m
 R1 a 0 1k
 C1 a 0 1n
 C2 b 0 1n
 ";
     let netlist = Netlist::parse(spice).expect("parse should succeed");
-    let result = MnaSystem::from_netlist(&netlist);
-    assert!(
-        result.is_err(),
-        "Should reject coupled inductor that is also in a .switch directive"
-    );
-    let err = format!("{:?}", result.unwrap_err());
-    assert!(
-        err.contains("Coupled inductor") || err.contains("coupled"),
-        "Error should mention coupled inductor conflict: {}",
-        err
-    );
+    let mna = MnaSystem::from_netlist(&netlist)
+        .expect("coupled inductors in .switch should now be accepted");
+    assert_eq!(mna.switches.len(), 1, "should have 1 switch");
+    assert_eq!(mna.switches[0].components.len(), 2, "switch should have 2 components");
+    assert_eq!(mna.coupled_inductors.len(), 1, "should have 1 coupled pair");
 }
 
 // ===========================================================================

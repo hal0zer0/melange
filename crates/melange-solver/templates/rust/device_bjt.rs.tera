@@ -20,7 +20,7 @@ fn bjt_qb(vbe: f64, vbc: f64, is: f64, vt: f64, nf: f64, nr: f64, sign: f64,
 
     // Early effect: q1 = 1 / (1 - Vbe/VAR - Vbc/VAF)
     let q1_denom = 1.0 - vbe_eff / var - vbc_eff / vaf;
-    if q1_denom.abs() < 1e-30 { return 1.0; }
+    if q1_denom <= 0.0 || q1_denom.abs() < 1e-30 { return 1.0; }
     let q1 = 1.0 / q1_denom;
 
     // High-level injection: q2 = Is*exp(Vbe/Vt)/IKF + Is*exp(Vbc/Vt)/IKR
@@ -145,7 +145,7 @@ fn bjt_jacobian(vbe: f64, vbc: f64, is: f64, vt: f64, nf: f64, nr: f64,
 
     // q1 and derivatives
     let q1_denom = 1.0 - vbe_eff / var - vbc_eff / vaf;
-    let (q1, dq1_dvbe, dq1_dvbc) = if q1_denom.abs() < 1e-30 {
+    let (q1, dq1_dvbe, dq1_dvbc) = if q1_denom <= 0.0 || q1_denom.abs() < 1e-30 {
         (1.0, 0.0, 0.0)
     } else {
         let q1 = 1.0 / q1_denom;
@@ -255,7 +255,7 @@ fn bjt_evaluate(vbe: f64, vbc: f64, is: f64, vt: f64, nf: f64, nr: f64,
     // Gummel-Poon
     // q1 and derivatives
     let q1_denom = 1.0 - vbe_eff / var - vbc_eff / vaf;
-    let (q1, dq1_dvbe, dq1_dvbc) = if q1_denom.abs() < 1e-30 {
+    let (q1, dq1_dvbe, dq1_dvbc) = if q1_denom <= 0.0 || q1_denom.abs() < 1e-30 {
         (1.0, 0.0, 0.0)
     } else {
         let q1 = 1.0 / q1_denom;

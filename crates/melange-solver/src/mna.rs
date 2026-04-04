@@ -1540,6 +1540,7 @@ pub const MAX_N: usize = 256;
 
 /// Error type for MNA assembly.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum MnaError {
     /// A component has an invalid value (e.g., negative resistance).
     InvalidComponentValue {
@@ -1589,6 +1590,22 @@ impl From<crate::parser::ParseError> for MnaError {
 /// Returns identity matrix as fallback if singular (with log warning).
 pub(crate) fn invert_small_matrix(a: &[Vec<f64>]) -> Vec<Vec<f64>> {
     let n = a.len();
+    // Guard: NaN/Inf bypass the pivot < 1e-30 singularity check
+    for i in 0..n {
+        for j in 0..n {
+            if !a[i][j].is_finite() {
+                log::warn!(
+                    "Non-finite value in inductance matrix at [{i}][{j}]: {}",
+                    a[i][j]
+                );
+                let mut result = vec![vec![0.0; n]; n];
+                for k in 0..n {
+                    result[k][k] = 1.0;
+                }
+                return result;
+            }
+        }
+    }
     // Build augmented matrix [A | I]
     let mut aug = vec![vec![0.0f64; 2 * n]; n];
     for i in 0..n {
@@ -1767,31 +1784,21 @@ struct MnaBuilder {
     linearized_bjts: std::collections::HashSet<String>,
 }
 
-#[allow(dead_code)]
 struct ElementInfo {
     element_type: ElementType,
     nodes: Vec<usize>,
     value: f64,
     name: String,
-    dc_value: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
 enum ElementType {
     Resistor,
     Capacitor,
     Inductor,
     VoltageSource,
-    CurrentSource,
-    Diode,
-    Bjt,
-    Jfet,
-    Mosfet,
-    Opamp,
     Vcvs,
     Vccs,
-    Vca,
 }
 
 impl MnaBuilder {
@@ -2083,17 +2090,6 @@ impl MnaBuilder {
                         matches!(e, Element::Inductor { name, .. } if name.eq_ignore_ascii_case(ind_name))
                     })
                 {
-                    // Reject coupled inductors in .switch directives
-                    for sw in &netlist.switches {
-                        for comp_name in &sw.component_names {
-                            if comp_name.eq_ignore_ascii_case(name) {
-                                return Err(MnaError::TopologyError(format!(
-                                    "Coupled inductor '{}' cannot also be in a .switch directive",
-                                    comp_name
-                                )));
-                            }
-                        }
-                    }
                     inductor_refs.insert(lower, InductorRef {
                         name: name.clone(),
                         node_i: self.node_map[n_plus],
@@ -2664,7 +2660,6 @@ impl MnaBuilder {
                         stamp_vccs(&mut mna.g, out_p, out_n, ctrl_p, ctrl_n, gm);
                     }
                 }
-                _ => {} // Nonlinear and op-amps handled separately
             }
         }
 
@@ -3227,7 +3222,6 @@ impl MnaBuilder {
                     nodes: vec![self.node_map[n_plus], self.node_map[n_minus]],
                     value: *value,
                     name: name.clone(),
-                    dc_value: None,
                 });
             }
             Element::Capacitor {
@@ -3242,7 +3236,6 @@ impl MnaBuilder {
                     nodes: vec![self.node_map[n_plus], self.node_map[n_minus]],
                     value: *value,
                     name: name.clone(),
-                    dc_value: None,
                 });
             }
             Element::Inductor {
@@ -3258,7 +3251,6 @@ impl MnaBuilder {
                     nodes: vec![node_i, node_j],
                     value: *value,
                     name: name.clone(),
-                    dc_value: None,
                 });
                 // Also add to inductors list for DK kernel companion model
                 self.inductors.push(InductorElement {
@@ -3282,7 +3274,6 @@ impl MnaBuilder {
                     nodes: vec![self.node_map[n_plus], self.node_map[n_minus]],
                     value: dc.unwrap_or(0.0),
                     name: name.clone(),
-                    dc_value: *dc,
                 });
                 // ext_idx = 0-based index within voltage sources (used as offset in augmented rows)
                 let ext_idx = self.voltage_sources.len();
@@ -3506,7 +3497,6 @@ impl MnaBuilder {
                     ],
                     value: *gain,
                     name: name.clone(),
-                    dc_value: None,
                 });
             }
             Element::Vccs {
@@ -3529,7 +3519,6 @@ impl MnaBuilder {
                     ],
                     value: *gm,
                     name: name.clone(),
-                    dc_value: None,
                 });
             }
             Element::Vca {

@@ -1648,11 +1648,9 @@ R1 in 0 1k
 C1 out 0 1u
 Vin in 0 0
 .END"#;
-    let (netlist, mna, kernel) = build_pipeline(spice);
-    let config = default_config();
-    let codegen = CodeGenerator::new(config);
-    let result = codegen.generate(&kernel, &mna, &netlist);
-    assert!(result.is_err(), "IS=0 should be rejected");
+    // IS=0 is now rejected at parse time (model parameter validation)
+    let result = Netlist::parse(spice);
+    assert!(result.is_err(), "IS=0 should be rejected at parse time");
     let err = format!("{:?}", result.unwrap_err());
     assert!(err.contains("IS"), "Error should mention IS, got: {}", err);
 }
@@ -1666,11 +1664,9 @@ R1 in 0 1k
 C1 out 0 1u
 Vin in 0 0
 .END"#;
-    let (netlist, mna, kernel) = build_pipeline(spice);
-    let config = default_config();
-    let codegen = CodeGenerator::new(config);
-    let result = codegen.generate(&kernel, &mna, &netlist);
-    assert!(result.is_err(), "N=-1 should be rejected");
+    // N=-1 is now rejected at parse time (model parameter validation)
+    let result = Netlist::parse(spice);
+    assert!(result.is_err(), "N=-1 should be rejected at parse time");
     let err = format!("{:?}", result.unwrap_err());
     assert!(err.contains("N"), "Error should mention N, got: {}", err);
 }

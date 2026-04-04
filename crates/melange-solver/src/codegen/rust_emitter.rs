@@ -1125,7 +1125,7 @@ impl RustEmitter {
                     emit_device_const(&mut code, dev_num, "LAMBDA", jp.lambda);
                     if jp.has_rd_rs() {
                         emit_device_const(&mut code, dev_num, "RD", jp.rd);
-                        emit_device_const(&mut code, dev_num, "RS_PARAM", jp.rs_param);
+                        emit_device_const(&mut code, dev_num, "RS", jp.rs);
                     }
                     let sign = if jp.is_p_channel { -1.0 } else { 1.0 };
                     code.push_str(&format!(
@@ -1140,7 +1140,7 @@ impl RustEmitter {
                     emit_device_const(&mut code, dev_num, "LAMBDA", mp.lambda);
                     if mp.has_rd_rs() {
                         emit_device_const(&mut code, dev_num, "RD", mp.rd);
-                        emit_device_const(&mut code, dev_num, "RS_PARAM", mp.rs_param);
+                        emit_device_const(&mut code, dev_num, "RS", mp.rs);
                     }
                     if mp.has_body_effect() {
                         emit_device_const(&mut code, dev_num, "GAMMA", mp.gamma);
@@ -1184,7 +1184,6 @@ impl RustEmitter {
                     emit_device_const(&mut code, dev_num, "VSCALE", vp.vscale);
                     emit_device_const(&mut code, dev_num, "G0", vp.g0);
                     emit_device_const(&mut code, dev_num, "THD", vp.thd);
-                    emit_device_const(&mut code, dev_num, "NOISE_FLOOR", vp.noise_floor);
                     code.push('\n');
                 }
             }
@@ -1515,13 +1514,41 @@ impl RustEmitter {
             }
             code.push_str("\n        // Add coupled inductor companion model conductances\n");
             for (ci_idx, ci) in ir.coupled_inductors.iter().enumerate() {
+                // Check if either winding is switch-controlled
+                let mut l1_switch: Option<(usize, usize)> = None; // (sw_index, comp_index)
+                let mut l2_switch: Option<(usize, usize)> = None;
+                for sw in &ir.switches {
+                    for (comp_i, comp) in sw.components.iter().enumerate() {
+                        if comp.coupled_inductor_index == Some(ci_idx) {
+                            match comp.coupled_winding {
+                                Some(1) => l1_switch = Some((sw.index, comp_i)),
+                                Some(2) => l2_switch = Some((sw.index, comp_i)),
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+
+                let l1_expr = if let Some((sw_idx, comp_idx)) = l1_switch {
+                    format!("SWITCH_{}_COMP_{}_VALUES[self.switch_{}_position]", sw_idx, comp_idx, sw_idx)
+                } else {
+                    format!("CI_{}_L1_INDUCTANCE", ci_idx)
+                };
+                let l2_expr = if let Some((sw_idx, comp_idx)) = l2_switch {
+                    format!("SWITCH_{}_COMP_{}_VALUES[self.switch_{}_position]", sw_idx, comp_idx, sw_idx)
+                } else {
+                    format!("CI_{}_L2_INDUCTANCE", ci_idx)
+                };
+
                 code.push_str(&format!(
                     "        {{\n\
-                     \x20           let m_val = CI_{ci}_COUPLING * (CI_{ci}_L1_INDUCTANCE * CI_{ci}_L2_INDUCTANCE).sqrt();\n\
-                     \x20           let det = CI_{ci}_L1_INDUCTANCE * CI_{ci}_L2_INDUCTANCE - m_val * m_val;\n\
+                     \x20           let l1_val = {l1};\n\
+                     \x20           let l2_val = {l2};\n\
+                     \x20           let m_val = CI_{ci}_COUPLING * (l1_val * l2_val).sqrt();\n\
+                     \x20           let det = l1_val * l2_val - m_val * m_val;\n\
                      \x20           let half_t = t / 2.0;\n\
-                     \x20           let gs1 = half_t * CI_{ci}_L2_INDUCTANCE / det;\n\
-                     \x20           let gs2 = half_t * CI_{ci}_L1_INDUCTANCE / det;\n\
+                     \x20           let gs1 = half_t * l2_val / det;\n\
+                     \x20           let gs2 = half_t * l1_val / det;\n\
                      \x20           let gm = -half_t * m_val / det;\n\
                      \x20           self.ci_g_self_1[{ci}] = gs1;\n\
                      \x20           self.ci_g_self_2[{ci}] = gs2;\n\
@@ -1535,6 +1562,8 @@ impl RustEmitter {
                      \x20           stamp_mutual(&mut a_neg, CI_{ci}_L1_NODE_I, CI_{ci}_L1_NODE_J, CI_{ci}_L2_NODE_I, CI_{ci}_L2_NODE_J, -gm);\n\
                      \x20           stamp_mutual(&mut a_neg, CI_{ci}_L2_NODE_I, CI_{ci}_L2_NODE_J, CI_{ci}_L1_NODE_I, CI_{ci}_L1_NODE_J, -gm);\n\
                      \x20       }}\n",
+                    l1 = l1_expr,
+                    l2 = l2_expr,
                     ci = ci_idx,
                 ));
                 let _ = ci; // suppress unused warning
@@ -2808,13 +2837,16 @@ impl RustEmitter {
 // ============================================================================
 
 /// Emit damped fallback for singular Jacobian: half-step on residual, clamped.
+///
+/// Clamp scales with current magnitude to handle both small-signal (diodes at µA)
+/// and large-signal (BJTs at mA) operating points.
 fn emit_nr_singular_fallback(code: &mut String, dim: usize, indent: &str) {
     code.push_str(&format!(
-        "{indent}// Singular Jacobian — damped fallback (0.5 * residual)\n"
+        "{indent}// Singular Jacobian — damped fallback (0.5 * residual, adaptive clamp)\n"
     ));
     for i in 0..dim {
         code.push_str(&format!(
-            "{indent}i_nl[{i}] -= (f{i} * 0.5).clamp(-0.01, 0.01);\n"
+            "{indent}{{ let clamp = (i_nl[{i}].abs() * 0.1).max(0.01); i_nl[{i}] -= (f{i} * 0.5).clamp(-clamp, clamp); }}\n"
         ));
     }
 }
@@ -2941,9 +2973,20 @@ fn emit_nr_limit_and_converge(
         }
     }
 
-    // Global voltage backstop: no device voltage changes by more than 3.5V
+    // Global voltage backstop: adaptive limit based on DC operating point voltages.
+    // 3.5V for low-voltage circuits (9-15V pedals), scales up for tube circuits (250V+).
+    let max_dc_v = ir
+        .dc_operating_point
+        .iter()
+        .map(|v| v.abs())
+        .fold(0.0_f64, f64::max);
+    let dv_limit = if max_dc_v > 20.0 {
+        (max_dc_v * 0.15).max(3.5) // 15% of max DC voltage, at least 3.5V
+    } else {
+        3.5
+    };
     code.push_str(&format!(
-        "{indent}// Global voltage backstop: limit max voltage change to 3.5V\n"
+        "{indent}// Global voltage backstop: limit max voltage change to {dv_limit:.1}V\n"
     ));
     code.push_str(&format!("{indent}let max_dv = "));
     for i in 0..dim {
@@ -2955,7 +2998,7 @@ fn emit_nr_limit_and_converge(
     }
     code.push_str(";\n");
     code.push_str(&format!(
-        "{indent}if max_dv > 3.5 {{ let factor = (3.5 / max_dv).max(0.1); for a in alpha.iter_mut() {{ *a *= factor; }} }}\n"
+        "{indent}if max_dv > {dv_limit:.6} {{ let factor = ({dv_limit:.6} / max_dv).max(0.1); for a in alpha.iter_mut() {{ *a *= factor; }} }}\n"
     ));
 
     // Apply damped step
@@ -3055,7 +3098,17 @@ fn emit_schur_nr_limit_and_converge(
         ));
     }
 
-    // Global voltage backstop: no device voltage changes by more than 3.5V
+    // Global voltage backstop: adaptive limit based on DC operating point voltages
+    let max_dc_v = ir
+        .dc_operating_point
+        .iter()
+        .map(|v| v.abs())
+        .fold(0.0_f64, f64::max);
+    let dv_limit = if max_dc_v > 20.0 {
+        (max_dc_v * 0.15).max(3.5)
+    } else {
+        3.5
+    };
     code.push_str(&format!("{indent}{{ let max_dv = "));
     for i in 0..dim {
         if i > 0 {
@@ -3066,9 +3119,9 @@ fn emit_schur_nr_limit_and_converge(
             code.push_str(&format!("((v_trial{i} - v_d{i}) * global_alpha).abs()"));
         }
     }
-    code.push_str(
-        "; if max_dv > 3.5 { global_alpha *= (3.5 / max_dv).max(0.1); any_limited = true; } }\n",
-    );
+    code.push_str(&format!(
+        "; if max_dv > {dv_limit:.6} {{ global_alpha *= ({dv_limit:.6} / max_dv).max(0.1); any_limited = true; }} }}\n"
+    ));
 
     // Apply globally damped step
     for i in 0..dim {
@@ -3195,7 +3248,7 @@ impl RustEmitter {
                         let d = dev_num;
                         let dp = match &slot.params {
                             DeviceParams::Diode(dp) => dp,
-                            other => panic!("BUG: device_type=Diode but params={:?}", other),
+                            other => return Err(CodegenError::InvalidDevice(format!("device_type=Diode but params={:?}", other))),
                         };
                         if dp.has_rs() && dp.has_bv() {
                             // RS + BV: solve inner NR for junction voltage, then add breakdown
@@ -3237,7 +3290,7 @@ impl RustEmitter {
                         let d = dev_num;
                         let bp = match &slot.params {
                             DeviceParams::Bjt(bp) => bp,
-                            other => panic!("BUG: device_type=Bjt but params={:?}", other),
+                            other => return Err(CodegenError::InvalidDevice(format!("device_type=Bjt but params={:?}", other))),
                         };
                         if bp.has_parasitics() && !slot.has_internal_mna_nodes {
                             // Use inner 2D NR for parasitic resistances
@@ -3294,7 +3347,7 @@ impl RustEmitter {
                         let d = dev_num;
                         let jp = match &slot.params {
                             DeviceParams::Jfet(jp) => jp,
-                            other => panic!("BUG: device_type=Jfet but params={:?}", other),
+                            other => return Err(CodegenError::InvalidDevice(format!("device_type=Jfet but params={:?}", other))),
                         };
                         // IDSS, VP, LAMBDA from state; SIGN stays as const.
                         // N_v ordering: dim s = Vds, dim s+1 = Vgs.
@@ -3307,7 +3360,7 @@ impl RustEmitter {
                         ));
                         if jp.has_rd_rs() {
                             code.push_str(&format!(
-                                "        let jfet{d}_jac = jfet_jacobian_with_rd_rs(v_d{s1}, v_d{s}, state.device_{d}_idss, state.device_{d}_vp, state.device_{d}_lambda, DEVICE_{d}_SIGN, DEVICE_{d}_RD, DEVICE_{d}_RS_PARAM);\n"
+                                "        let jfet{d}_jac = jfet_jacobian_with_rd_rs(v_d{s1}, v_d{s}, state.device_{d}_idss, state.device_{d}_vp, state.device_{d}_lambda, DEVICE_{d}_SIGN, DEVICE_{d}_RD, DEVICE_{d}_RS);\n"
                             ));
                         } else {
                             code.push_str(&format!(
@@ -3350,7 +3403,7 @@ impl RustEmitter {
                         let d = dev_num;
                         let mp = match &slot.params {
                             DeviceParams::Mosfet(mp) => mp,
-                            other => panic!("BUG: device_type=Mosfet but params={:?}", other),
+                            other => return Err(CodegenError::InvalidDevice(format!("device_type=Mosfet but params={:?}", other))),
                         };
                         // KP, VT, LAMBDA from state; SIGN stays as const.
                         // N_v ordering: dim s = Vds, dim s+1 = Vgs.
@@ -3363,7 +3416,7 @@ impl RustEmitter {
                         ));
                         if mp.has_rd_rs() {
                             code.push_str(&format!(
-                                "        let mos{d}_jac = mosfet_jacobian_with_rd_rs(v_d{s1}, v_d{s}, state.device_{d}_kp, state.device_{d}_vt, state.device_{d}_lambda, DEVICE_{d}_SIGN, DEVICE_{d}_RD, DEVICE_{d}_RS_PARAM);\n"
+                                "        let mos{d}_jac = mosfet_jacobian_with_rd_rs(v_d{s1}, v_d{s}, state.device_{d}_kp, state.device_{d}_vt, state.device_{d}_lambda, DEVICE_{d}_SIGN, DEVICE_{d}_RD, DEVICE_{d}_RS);\n"
                             ));
                         } else {
                             code.push_str(&format!(
@@ -3401,7 +3454,7 @@ impl RustEmitter {
                         let d = dev_num;
                         let tp = match &slot.params {
                             DeviceParams::Tube(tp) => tp,
-                            other => panic!("BUG: device_type=Tube but params={:?}", other),
+                            other => return Err(CodegenError::InvalidDevice(format!("device_type=Tube but params={:?}", other))),
                         };
                         if tp.has_rgi() {
                             // RGI: solve for internal Vgk, evaluate at internal voltage
@@ -3558,12 +3611,12 @@ impl RustEmitter {
         code.push_str("    // Max iterations reached - return best guess\n");
         code.push_str("    state.last_nr_iterations = MAX_ITER as u32;\n");
 
-        // NaN/Inf check
-        code.push_str("    // Safety: check for NaN/Inf and clamp\n");
+        // NaN/Inf check — fall back to previous good values (not zero, which causes glitches)
+        code.push_str("    // Safety: check for NaN/Inf and fall back to previous values\n");
         for i in 0..m {
             code.push_str(&format!(
-                "    if !i_nl[{}].is_finite() {{ i_nl[{}] = 0.0; }}\n",
-                i, i
+                "    if !i_nl[{}].is_finite() {{ i_nl[{}] = state.i_nl_prev[{}]; }}\n",
+                i, i, i
             ));
         }
         code.push('\n');
@@ -5036,6 +5089,26 @@ impl RustEmitter {
                 code.push('\n');
             }
 
+            // Recompute off-diagonal mutual inductance entries
+            if !sw.mutual_entries.is_empty() {
+                code.push_str("        // Update mutual inductance off-diagonal entries\n");
+                for me in &sw.mutual_entries {
+                    code.push_str(&format!(
+                        "        {{\n\
+                         \x20           let m = {:.17e}_f64 * (self.c_work[{}][{}] * self.c_work[{}][{}]).sqrt();\n\
+                         \x20           self.c_work[{}][{}] = m;\n\
+                         \x20           self.c_work[{}][{}] = m;\n\
+                         \x20       }}\n",
+                        me.coupling,
+                        me.row_a, me.row_a,
+                        me.row_b, me.row_b,
+                        me.row_a, me.row_b,
+                        me.row_b, me.row_a,
+                    ));
+                }
+                code.push('\n');
+            }
+
             code.push_str(&format!(
                 "        self.switch_{}_position = position;\n",
                 idx
@@ -5759,7 +5832,7 @@ impl RustEmitter {
                 ));
                 if jp.has_rd_rs() {
                     code.push_str(&format!(
-                        "{indent}let jfet{d}_jac = jfet_jacobian_with_rd_rs(v_d{s1}, v_d{s}, state.device_{d}_idss, state.device_{d}_vp, state.device_{d}_lambda, DEVICE_{d}_SIGN, DEVICE_{d}_RD, DEVICE_{d}_RS_PARAM);\n"
+                        "{indent}let jfet{d}_jac = jfet_jacobian_with_rd_rs(v_d{s1}, v_d{s}, state.device_{d}_idss, state.device_{d}_vp, state.device_{d}_lambda, DEVICE_{d}_SIGN, DEVICE_{d}_RD, DEVICE_{d}_RS);\n"
                     ));
                 } else {
                     code.push_str(&format!(
@@ -5781,7 +5854,7 @@ impl RustEmitter {
                 ));
                 if mp.has_rd_rs() {
                     code.push_str(&format!(
-                        "{indent}let mos{d}_jac = mosfet_jacobian_with_rd_rs(v_d{s1}, v_d{s}, state.device_{d}_kp, state.device_{d}_vt, state.device_{d}_lambda, DEVICE_{d}_SIGN, DEVICE_{d}_RD, DEVICE_{d}_RS_PARAM);\n"
+                        "{indent}let mos{d}_jac = mosfet_jacobian_with_rd_rs(v_d{s1}, v_d{s}, state.device_{d}_kp, state.device_{d}_vt, state.device_{d}_lambda, DEVICE_{d}_SIGN, DEVICE_{d}_RD, DEVICE_{d}_RS);\n"
                     ));
                 } else {
                     code.push_str(&format!(
@@ -5914,9 +5987,19 @@ impl RustEmitter {
             }
         }
 
-        // Global voltage backstop: no device voltage changes by more than 3.5V
+        // Global voltage backstop: adaptive limit based on DC operating point voltages
+        let max_dc_v = ir
+            .dc_operating_point
+            .iter()
+            .map(|v| v.abs())
+            .fold(0.0_f64, f64::max);
+        let dv_limit = if max_dc_v > 20.0 {
+            (max_dc_v * 0.15).max(3.5)
+        } else {
+            3.5
+        };
         code.push_str(&format!(
-            "{indent}// Global voltage backstop: limit max voltage change to 3.5V\n"
+            "{indent}// Global voltage backstop: limit max voltage change to {dv_limit:.1}V\n"
         ));
         code.push_str(&format!("{indent}let max_dv = "));
         for i in 0..dim {
@@ -5928,7 +6011,7 @@ impl RustEmitter {
         }
         code.push_str(";\n");
         code.push_str(&format!(
-            "{indent}if max_dv > 3.5 {{ let factor = (3.5 / max_dv).max(0.1); for a in alpha.iter_mut() {{ *a *= factor; }} }}\n"
+            "{indent}if max_dv > {dv_limit:.6} {{ let factor = ({dv_limit:.6} / max_dv).max(0.1); for a in alpha.iter_mut() {{ *a *= factor; }} }}\n"
         ));
 
         // Apply damped step
@@ -5954,8 +6037,7 @@ impl RustEmitter {
     }
 
     /// Emit LU solve function for the nodal solver (N x N with partial pivoting).
-    /// LEGACY: kept for reference, no longer called in Schur path.
-    #[allow(dead_code)]
+    /// Used by the full-LU codegen path (not Schur).
     fn emit_nodal_lu_solve(_ir: &CircuitIR) -> String {
         let mut code = section_banner(
             "LU SOLVE (Equilibrated Gaussian elimination with iterative refinement)",
@@ -7187,20 +7269,6 @@ impl RustEmitter {
         code
     }
 
-    /// Emit device evaluation code for the NR loop body (trapezoidal, no indent prefix).
-    #[allow(dead_code)]
-    fn emit_nodal_device_evaluation(code: &mut String, ir: &CircuitIR) {
-        Self::emit_nodal_device_evaluation_indented(code, ir, "        ");
-    }
-
-    /// Emit device evaluation code with declarations (i_nl + j_dev).
-    #[allow(dead_code)]
-    fn emit_nodal_device_evaluation_indented(code: &mut String, ir: &CircuitIR, indent: &str) {
-        code.push_str(&format!("{indent}let mut i_nl = [0.0f64; M];\n"));
-        code.push_str(&format!("{indent}let mut j_dev = [0.0f64; M * M];\n"));
-        Self::emit_nodal_device_evaluation_body(code, ir, indent);
-    }
-
     /// Emit device evaluation code WITHOUT declarations (writes to existing i_nl, j_dev).
     fn emit_nodal_device_evaluation_body(code: &mut String, ir: &CircuitIR, indent: &str) {
         let m = ir.topology.m;
@@ -7319,7 +7387,7 @@ impl RustEmitter {
                     let jd_11 = s1 * m + s1;
                     let jac_fn = if jp.has_rd_rs() {
                         format!(
-                            "jfet_jacobian_with_rd_rs(vgs, vds, state.device_{dev_num}_idss, state.device_{dev_num}_vp, state.device_{dev_num}_lambda, sign, DEVICE_{dev_num}_RD, DEVICE_{dev_num}_RS_PARAM)"
+                            "jfet_jacobian_with_rd_rs(vgs, vds, state.device_{dev_num}_idss, state.device_{dev_num}_vp, state.device_{dev_num}_lambda, sign, DEVICE_{dev_num}_RD, DEVICE_{dev_num}_RS)"
                         )
                     } else {
                         format!(
@@ -7372,7 +7440,7 @@ impl RustEmitter {
                     };
                     let jac_fn = if mp.has_rd_rs() {
                         format!(
-                            "mosfet_jacobian_with_rd_rs(vgs, vds, state.device_{dev_num}_kp, {vt_expr}, state.device_{dev_num}_lambda, sign, DEVICE_{dev_num}_RD, DEVICE_{dev_num}_RS_PARAM)"
+                            "mosfet_jacobian_with_rd_rs(vgs, vds, state.device_{dev_num}_kp, {vt_expr}, state.device_{dev_num}_lambda, sign, DEVICE_{dev_num}_RD, DEVICE_{dev_num}_RS)"
                         )
                     } else {
                         format!(
@@ -7450,8 +7518,7 @@ impl RustEmitter {
         }
     }
 
-    /// LEGACY: Emit final device evaluation at converged point (writes into existing `i_nl`).
-    #[allow(dead_code)]
+    /// Emit final device evaluation at converged point (writes into existing `i_nl`).
     fn emit_nodal_device_evaluation_final(code: &mut String, ir: &CircuitIR, indent: &str) {
         for (dev_num, slot) in ir.device_slots.iter().enumerate() {
             let s = slot.start_idx;
@@ -7555,17 +7622,15 @@ impl RustEmitter {
         }
     }
 
-    /// LEGACY: Emit SPICE voltage limiting for nodal solver (trapezoidal NR, at default indent).
-    #[allow(dead_code)]
+    /// Emit SPICE voltage limiting for nodal solver (trapezoidal NR, at default indent).
     fn emit_nodal_voltage_limiting(code: &mut String, ir: &CircuitIR) {
         Self::emit_nodal_voltage_limiting_indented(code, ir, "        ");
     }
 
-    /// LEGACY: Emit SPICE voltage limiting for nodal solver at a given indent level.
+    /// Emit SPICE voltage limiting for nodal solver at a given indent level.
     ///
     /// For each nonlinear device dimension, computes the proposed device voltage
     /// from v_new via N_v, applies pnjlim/fetlim, and reduces alpha if needed.
-    #[allow(dead_code)]
     fn emit_nodal_voltage_limiting_indented(code: &mut String, ir: &CircuitIR, indent: &str) {
         let n = ir.topology.n;
 

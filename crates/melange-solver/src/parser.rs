@@ -1112,6 +1112,143 @@ impl Parser {
             }
         }
 
+        // Validate .model parameter ranges for device models.
+        // Catches obviously wrong values early instead of at solver runtime.
+        for model in &netlist.models {
+            Self::validate_model_params(model)?;
+        }
+
+        Ok(())
+    }
+
+    /// Validate that .model parameters are physically reasonable.
+    fn validate_model_params(model: &Model) -> Result<(), ParseError> {
+        for (key, value) in &model.params {
+            let key_upper = key.to_ascii_uppercase();
+
+            // Check for NaN/Inf in any parameter
+            if !value.is_finite() {
+                return Err(ParseError {
+                    line: 0,
+                    message: format!(
+                        ".model '{}': parameter {}={} is not finite",
+                        model.name, key, value
+                    ),
+                });
+            }
+
+            // Parameters that must be strictly positive
+            match key_upper.as_str() {
+                "IS" | "ISE" | "ISC" | "IDSS" | "G0" => {
+                    if *value <= 0.0 {
+                        return Err(ParseError {
+                            line: 0,
+                            message: format!(
+                                ".model '{}': {} must be > 0, got {}",
+                                model.name, key, value
+                            ),
+                        });
+                    }
+                }
+                // Forward/reverse gain must be positive
+                "BF" | "BR" => {
+                    if *value <= 0.0 {
+                        return Err(ParseError {
+                            line: 0,
+                            message: format!(
+                                ".model '{}': {} must be > 0, got {}",
+                                model.name, key, value
+                            ),
+                        });
+                    }
+                }
+                // Emission coefficients must be positive
+                "N" | "NF" | "NR" | "NE" | "NC" | "EX" => {
+                    if *value <= 0.0 {
+                        return Err(ParseError {
+                            line: 0,
+                            message: format!(
+                                ".model '{}': {} must be > 0, got {}",
+                                model.name, key, value
+                            ),
+                        });
+                    }
+                }
+                // Resistances must be non-negative
+                "RS" | "RB" | "RC" | "RE" | "RD" | "RGI" | "ROUT" => {
+                    if *value < 0.0 {
+                        return Err(ParseError {
+                            line: 0,
+                            message: format!(
+                                ".model '{}': {} must be >= 0, got {}",
+                                model.name, key, value
+                            ),
+                        });
+                    }
+                }
+                // Capacitances must be non-negative
+                "CJE" | "CJC" | "CGS" | "CGD" | "CJO" | "CCG" | "CGP" | "CCP" => {
+                    if *value < 0.0 {
+                        return Err(ParseError {
+                            line: 0,
+                            message: format!(
+                                ".model '{}': {} must be >= 0, got {}",
+                                model.name, key, value
+                            ),
+                        });
+                    }
+                }
+                // KP (transconductance) must be positive
+                "KP" => {
+                    if *value <= 0.0 {
+                        return Err(ParseError {
+                            line: 0,
+                            message: format!(
+                                ".model '{}': {} must be > 0, got {}",
+                                model.name, key, value
+                            ),
+                        });
+                    }
+                }
+                // Early voltages, knee currents must be positive when specified
+                "VAF" | "VAR" | "IKF" | "IKR" => {
+                    if *value <= 0.0 {
+                        return Err(ParseError {
+                            line: 0,
+                            message: format!(
+                                ".model '{}': {} must be > 0, got {}",
+                                model.name, key, value
+                            ),
+                        });
+                    }
+                }
+                // Tube parameters: MU, KG1, KVB must be positive (KP handled above)
+                "MU" | "KG1" | "KVB" => {
+                    if *value <= 0.0 {
+                        return Err(ParseError {
+                            line: 0,
+                            message: format!(
+                                ".model '{}': {} must be > 0, got {}",
+                                model.name, key, value
+                            ),
+                        });
+                    }
+                }
+                // AOL (open-loop gain) must be positive
+                "AOL" => {
+                    if *value <= 0.0 {
+                        return Err(ParseError {
+                            line: 0,
+                            message: format!(
+                                ".model '{}': {} must be > 0, got {}",
+                                model.name, key, value
+                            ),
+                        });
+                    }
+                }
+                _ => {} // Unknown params: no range check (warned elsewhere)
+            }
+        }
         Ok(())
     }
 
@@ -2042,6 +2179,14 @@ pub fn parse_value(s: &str) -> Result<f64, ParseFloatError> {
 /// Error type for float parsing failures.
 #[derive(Debug, Clone, Copy)]
 pub struct ParseFloatError;
+
+impl std::fmt::Display for ParseFloatError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "invalid float value")
+    }
+}
+
+impl std::error::Error for ParseFloatError {}
 
 #[cfg(test)]
 mod tests {

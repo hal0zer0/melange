@@ -264,7 +264,7 @@ pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS
             + state.dc_block_r * state.dc_block_y_prev[out_idx];
         state.dc_block_x_prev[out_idx] = raw_out;
         // Tiny bias prevents denormals in DC block feedback during silence
-        state.dc_block_y_prev[out_idx] = (dc_blocked + 1e-25).clamp(-100.0, 100.0);
+        state.dc_block_y_prev[out_idx] = (dc_blocked + 1e-20).clamp(-100.0, 100.0);
         let scaled = dc_blocked * OUTPUT_SCALES[out_idx];
 {% else %}        let scaled = raw_out * OUTPUT_SCALES[out_idx];
 {% endif %}        let abs_out = scaled.abs();

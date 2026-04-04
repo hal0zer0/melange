@@ -14,6 +14,7 @@ use smallvec::{smallvec, SmallVec};
 
 /// Error type for solver construction and validation.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum SolverError {
     /// Device dimensions don't match the kernel's nonlinear dimension M.
     DimensionMismatch { expected: usize, got: usize },

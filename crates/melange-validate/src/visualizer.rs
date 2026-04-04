@@ -10,6 +10,7 @@ use std::path::Path;
 
 /// Errors that can occur during report generation
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum VisualizerError {
     IoError(String),
     InvalidData(String),

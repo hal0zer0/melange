@@ -14,6 +14,7 @@ static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Errors that can occur when running SPICE simulations
 #[derive(Debug, Error, Clone)]
+#[non_exhaustive]
 pub enum SpiceError {
     /// ngspice executable not found in PATH
     #[error("ngspice not found in PATH. Please install ngspice.")]
