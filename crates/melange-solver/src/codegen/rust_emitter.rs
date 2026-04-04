@@ -2962,59 +2962,61 @@ fn emit_nr_limit_and_converge(
         }
     }
 
-    // Enforce per-device grouping: both dims of a 2D device share the minimum alpha
-    for slot in &ir.device_slots {
-        if slot.dimension > 1 {
-            let s = slot.start_idx;
-            let s1 = s + 1;
-            code.push_str(&format!(
-                "{indent}{{ let dev_alpha = alpha[{s}].min(alpha[{s1}]); alpha[{s}] = dev_alpha; alpha[{s1}] = dev_alpha; }}\n"
-            ));
-        }
-    }
+    // Scalar alpha: use the global minimum across ALL devices.
+    // Per-device alpha breaks the coupled Newton direction for multi-device
+    // systems (e.g., anti-parallel diodes), causing oscillation when limiting
+    // is asymmetric. Scalar alpha preserves the descent direction.
+    code.push_str(&format!("{indent}let alpha_scalar = alpha.iter().copied().fold(1.0_f64, f64::min);\n"));
+    code.push_str(&format!("{indent}if alpha_scalar < 1.0 {{ any_limited = true; }}\n"));
 
-    // Global voltage backstop: adaptive limit based on DC operating point voltages.
-    // 3.5V for low-voltage circuits (9-15V pedals), scales up for tube circuits (250V+).
-    let max_dc_v = ir
-        .dc_operating_point
-        .iter()
-        .map(|v| v.abs())
-        .fold(0.0_f64, f64::max);
-    let dv_limit = if max_dc_v > 20.0 {
-        (max_dc_v * 0.15).max(3.5) // 15% of max DC voltage, at least 3.5V
-    } else {
-        3.5
-    };
-    code.push_str(&format!(
-        "{indent}// Global voltage backstop: limit max voltage change to {dv_limit:.1}V\n"
-    ));
-    code.push_str(&format!("{indent}let max_dv = "));
+    // Current-space backstop: limit maximum current step per iteration.
+    // Unlike the old voltage-space backstop (3.5V), this is K-independent.
+    // When SM corrections weaken K, voltage backstops become pathologically
+    // restrictive (dv = K*delta shrinks, backstop ratio → 0.006). Current
+    // backstop avoids this because it operates directly on delta (current).
+    code.push_str(&format!("{indent}let max_di = "));
     for i in 0..dim {
         if i > 0 {
-            code.push_str(&format!(".max((dv{i} * alpha[{i}]).abs())"));
+            code.push_str(&format!(".max(delta{i}.abs())"));
         } else {
-            code.push_str(&format!("(dv{i} * alpha[{i}]).abs()"));
+            code.push_str(&format!("delta{i}.abs()"));
         }
     }
     code.push_str(";\n");
     code.push_str(&format!(
-        "{indent}if max_dv > {dv_limit:.6} {{ let factor = ({dv_limit:.6} / max_dv).max(0.1); for a in alpha.iter_mut() {{ *a *= factor; }} }}\n"
+        "{indent}let alpha_scalar = if max_di * alpha_scalar > 0.1 {{ (0.1 / max_di).max(0.01).min(alpha_scalar) }} else {{ alpha_scalar }};\n"
     ));
 
-    // Apply damped step
+    // Apply scalar-damped step
     for i in 0..dim {
-        code.push_str(&format!("{indent}i_nl[{i}] -= alpha[{i}] * delta{i};\n"));
+        code.push_str(&format!("{indent}i_nl[{i}] -= alpha_scalar * delta{i};\n"));
     }
 
-    // RELTOL convergence check (SPICE-standard)
+    // Dual convergence check:
+    // 1. Voltage-step (RELTOL): only checked when no limiting occurred
+    // 2. Current-residual (ABSTOL): ALWAYS checked, even after limiting
+    //
+    // The residual check is K-independent — if |f_i| is small, the solution
+    // is correct regardless of what pnjlim did to the step. This prevents
+    // the solver from burning iterations when limiting triggers frequently
+    // (common with weak K from SM pot corrections).
     code.push_str(&format!(
-        "\n{indent}// Convergence check (SPICE RELTOL=0.001, VNTOL=1e-6)\n"
+        "\n{indent}// Convergence: voltage-step (RELTOL, ungated) + current-residual (always)\n"
     ));
-    code.push_str(&format!("{indent}if !any_limited {{\n"));
+    code.push_str(&format!("{indent}{{\n"));
     code.push_str(&format!("{indent}    let mut nr_converged = true;\n"));
+    // Voltage-step check: only when not limited (step direction is reliable)
+    code.push_str(&format!("{indent}    if !any_limited {{\n"));
     for i in 0..dim {
         code.push_str(&format!(
-            "{indent}    {{ let step = dv{i} * alpha[{i}]; let v_new = v_d{i} + step; let threshold = 1e-3 * v_d{i}.abs().max(v_new.abs()) + 1e-6; if step.abs() > threshold {{ nr_converged = false; }} }}\n"
+            "{indent}        {{ let step = dv{i} * alpha_scalar; let v_new = v_d{i} + step; let v_thr = 1e-3 * v_d{i}.abs().max(v_new.abs()) + 1e-6; if step.abs() > v_thr {{ nr_converged = false; }} }}\n"
+        ));
+    }
+    code.push_str(&format!("{indent}    }}\n"));
+    // Current residual check: always (K-independent, catches cancellation artifacts)
+    for i in 0..dim {
+        code.push_str(&format!(
+            "{indent}    {{ let i_thr = 1e-3 * i_nl[{i}].abs().max(i_dev{i}.abs()).max(1e-9) + 1e-12; if f{i}.abs() > i_thr {{ nr_converged = false; }} }}\n"
         ));
     }
     code.push_str(&format!("{indent}    if nr_converged {{\n"));
