@@ -726,7 +726,7 @@ fn test_dc_op_pultec_linear() {
     use melange_solver::mna::MnaSystem;
     use melange_solver::parser::Netlist;
 
-    let src = std::fs::read_to_string("../../circuits/pultec-eq.cir").unwrap();
+    let src = std::fs::read_to_string("../../circuits/stable/pultec-eq.cir").unwrap();
     let netlist = Netlist::parse(&src).unwrap();
     let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
     let in_node = *mna.node_map.get("in").unwrap();
@@ -1019,7 +1019,7 @@ fn test_dc_op_pultec_nonlinear_nodal() {
     use melange_solver::parser::Netlist;
     use melange_solver::solver::NodalSolver;
 
-    let src = std::fs::read_to_string("../../circuits/pultec-eq.cir").unwrap();
+    let src = std::fs::read_to_string("../../circuits/stable/pultec-eq.cir").unwrap();
     let netlist = Netlist::parse(&src).unwrap();
     let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
     let in_node = *mna.node_map.get("in").unwrap();

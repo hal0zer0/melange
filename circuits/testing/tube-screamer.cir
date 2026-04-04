@@ -1,0 +1,67 @@
+Tube Screamer TS808
+* Ibanez TS-808 clipping stage — faithful to original topology
+* Reference: ElectroSmash TS808 analysis, R.G. Keen "Technology of the Tube Screamer"
+*
+* This implementation: Copyright (c) 2026 Melange Contributors
+* License: MIT OR Apache-2.0
+*
+* TOPOLOGY: Non-inverting op-amp with antiparallel diodes in feedback.
+* Audio enters the NON-INVERTING (+) input. The inverting (-) input
+* connects to the feedback network. This is what makes it a Tube Screamer —
+* the diodes limit the feedback, not the signal directly.
+*
+* The 4.7K + 0.047uF at the inverting input is the "ground impedance" that
+* sets the gain floor and creates the famous TS mid-hump: bass below ~720Hz
+* sees high impedance, so gain drops to unity and bass is NOT clipped.
+* Only mids and highs get the overdrive treatment.
+*
+* Gain = 1 + R_drive / (R4 + 1/jwC3)
+*   At 1kHz with min drive: 1 + 51K/4.7K = ~12x (21 dB)
+*   At 1kHz with max drive: 1 + 551K/4.7K = ~118x (41 dB)
+*   Below ~720Hz: gain rolls off to unity (mid-hump)
+*
+* Input/output buffers (BJT emitter followers in real TS808) are omitted —
+* they are unity gain and melange's input conductance handles impedance.
+* Volume pot omitted — use plugin Output Level parameter.
+
+* --- Input coupling ---
+Cin in n1 0.047u
+R_pull n1 0 1Meg
+
+* --- Non-inverting clipping amplifier ---
+* U1: V+ = n1 (audio), V- = n_inv (feedback), out = n_clip
+U1 n1 n_inv n_clip JRC4558
+
+* --- Inverting input ground impedance ---
+* HPF: bass below ~720Hz sees high Z, gain drops to unity = mid-hump
+R4 n_inv n_gnd 4.7k
+C3 n_gnd 0 0.047u
+
+* --- Feedback path (all in parallel: output to inverting input) ---
+* R_drive: 51K fixed + 500K pot range (min gain ~12x, max ~118x)
+R_drive n_clip n_inv 551k
+* Antiparallel 1N4148 clipping diodes (soft clip at ~0.6V)
+D1 n_clip n_inv D1N4148
+D2 n_inv n_clip D1N4148
+* 51pF cap rolls off HF content before diode clipping
+C4 n_clip n_inv 51p
+
+* --- Tone control (passive lowpass, simplified) ---
+* Real TS808 has R7(1K)+C5(0.22uF)+R8(220)+C6(0.22uF)+20K tone pot.
+* This simplified version: series R into shunt C, captures the essential
+* treble rolloff. Full tone stack can be added later.
+R7 n_clip n_tone 1k
+C5 n_tone 0 0.22u
+
+* --- Output coupling ---
+C_out n_tone out 0.1u
+R_out out 0 1Meg
+
+* --- Models ---
+.model D1N4148 D(IS=2.52e-9 RS=0.568 N=1.752)
+.model JRC4558 OA(AOL=200000 ROUT=75)
+
+* --- Controls ---
+.pot R_drive 51k 551k "Drive"
+
+.END

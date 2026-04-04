@@ -122,7 +122,7 @@ S-217-D primary (L_opt_a, L_opt_b) → S-217-D secondary (output)
 
 ## Circuit File
 
-`circuits/pultec-eq.cir` — currently at original topology (+31 dB). The R_fb_b fix is confirmed correct but produces -29 dB instead of ~0 dB.
+`circuits/stable/pultec-eq.cir` — currently at original topology (+31 dB). The R_fb_b fix is confirmed correct but produces -29 dB instead of ~0 dB.
 
 ## What We Need From Schemer
 

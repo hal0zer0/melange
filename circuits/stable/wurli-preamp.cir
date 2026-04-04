@@ -5,7 +5,6 @@
 *
 * N=10 nodes: in, mid_in, base1, emit1, coll1, emit2a, emit2b, coll2, out, fb
 * M=5 nonlinear dimensions: 2 BJTs (2D each) + 1 diode (1D)
-* C20 (220pF) removed: present on 206A only, NOT 200A.
 
 * --- Input coupling: R1 (22K) in series with Cin (0.022uF) ---
 * R1 is external to the original subcircuit (between pickup and preamp input).

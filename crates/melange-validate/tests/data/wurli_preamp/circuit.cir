@@ -10,7 +10,6 @@ Cin   mid_in base1   0.022U
 * --- Base1 bias network ---
 R2    vcc   base1  2MEG
 R3    base1 0      470K
-C20   base1 0      220P
 
 * --- Protection diode (reverse-biased under normal operation) ---
 D1    0     base1  D1N4148

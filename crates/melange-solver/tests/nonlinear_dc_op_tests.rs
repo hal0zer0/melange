@@ -828,7 +828,7 @@ fn test_power_amp_dc_op_converges() {
     // Wurlitzer 200A power amplifier: 8 BJTs, Class AB push-pull.
     // Q2N5087 has RB=120Ω — the old 3-iteration inner loop failed to converge.
     // Internal nodes fix: parasitic R in global matrix, intrinsic model on junctions.
-    let src = std::fs::read_to_string("../../circuits/wurli-power-amp.cir")
+    let src = std::fs::read_to_string("../../circuits/testing/wurli-power-amp.cir")
         .expect("wurli-power-amp.cir not found");
     let netlist = Netlist::parse(&src).expect("parse failed");
     let mut mna = MnaSystem::from_netlist(&netlist).expect("MNA failed");

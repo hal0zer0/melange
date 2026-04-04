@@ -6,7 +6,7 @@ use melange_solver::parser::Netlist;
 use melange_solver::solver::NodalSolver;
 
 fn main() {
-    let src = std::fs::read_to_string("circuits/pultec-eq.cir").unwrap();
+    let src = std::fs::read_to_string("circuits/stable/pultec-eq.cir").unwrap();
     let netlist = Netlist::parse(&src).unwrap();
     let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
 

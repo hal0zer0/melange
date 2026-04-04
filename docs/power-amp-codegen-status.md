@@ -1,13 +1,13 @@
 # Wurli Power Amp Codegen — Status Summary
 
 **Date**: 2026-03-20
-**Circuit**: `circuits/wurli-power-amp.cir` (8-BJT quasi-complementary Class AB, ~20W)
+**Circuit**: `circuits/testing/wurli-power-amp.cir` (8-BJT quasi-complementary Class AB, ~20W)
 **Result**: BLOCKED — DK M-dim NR cannot converge for this feedback topology. All codegen configs rail at ±10V. Use behavioral model.
 
 ## What Ships
 
 ```bash
-melange compile circuits/wurli-power-amp.cir -o power_amp.rs \
+melange compile circuits/testing/wurli-power-amp.cir -o power_amp.rs \
   --input-node out --output-node out
 ```
 

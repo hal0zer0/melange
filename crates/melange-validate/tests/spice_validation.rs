@@ -321,6 +321,15 @@ fn run_melange_solver(
         mna.g[input_node][input_node] += input_conductance;
     }
 
+    // Stamp junction caps (CJE, CJC etc.) — stabilizes trapezoidal integration
+    // for nodes that have no explicit capacitor (e.g. BJT collector nodes).
+    {
+        let device_slots = build_device_slots_from_netlist(&netlist);
+        if !device_slots.is_empty() {
+            mna.stamp_device_junction_caps(&device_slots);
+        }
+    }
+
     // Create DK kernel (now includes input conductance in G)
     let kernel = melange_solver::dk::DkKernel::from_mna(&mna, sample_rate)
         .map_err(|e| ValidationError::Solver(format!("DK kernel error: {:?}", e)))?;
@@ -339,71 +348,6 @@ fn run_melange_solver(
     }
 
     // Run simulation
-    let mut output = Vec::with_capacity(input_signal.len());
-    for &sample in input_signal.iter() {
-        output.push(solver.process_sample(sample));
-    }
-
-    Ok(output)
-}
-
-#[allow(dead_code)]
-/// Run melange solver on a netlist string using NodalSolver (full NR per sample).
-///
-/// This is more robust than `run_melange_solver` (DK/CircuitSolver) for multi-stage
-/// BJT circuits where the DK method's reduced-dimension NR can diverge.
-fn run_melange_solver_nodal(
-    netlist_str: &str,
-    input_signal: &[f64],
-    sample_rate: f64,
-) -> Result<Vec<f64>, ValidationError> {
-    use melange_solver::solver::NodalSolver;
-
-    let netlist = melange_solver::parser::Netlist::parse(netlist_str).map_err(|e| {
-        ValidationError::Solver(format!("Parse error at line {}: {}", e.line, e.message))
-    })?;
-
-    let mut mna = melange_solver::mna::MnaSystem::from_netlist(&netlist)
-        .map_err(|e| ValidationError::Solver(format!("MNA error: {}", e)))?;
-
-    let input_node = mna
-        .node_map
-        .get("in")
-        .copied()
-        .unwrap_or(1)
-        .saturating_sub(1);
-    let output_node = mna
-        .node_map
-        .get("out")
-        .copied()
-        .unwrap_or(2)
-        .saturating_sub(1);
-    let input_conductance = 1.0;
-
-    if input_node < mna.n {
-        mna.g[input_node][input_node] += input_conductance;
-    }
-
-    let kernel = melange_solver::dk::DkKernel::from_mna(&mna, sample_rate)
-        .map_err(|e| ValidationError::Solver(format!("DK kernel error: {:?}", e)))?;
-
-    let device_slots = build_device_slots_from_netlist(&netlist);
-
-    let mut solver = NodalSolver::new(
-        kernel,
-        &mna,
-        &netlist,
-        device_slots.clone(),
-        input_node,
-        output_node,
-    )
-    .expect("Failed to create nodal solver");
-    solver.set_input_conductance(input_conductance);
-
-    if mna.m > 0 {
-        solver.initialize_dc_op(&mna, &device_slots);
-    }
-
     let mut output = Vec::with_capacity(input_signal.len());
     for &sample in input_signal.iter() {
         output.push(solver.process_sample(sample));
@@ -928,7 +872,7 @@ fn build_device_slots_from_netlist(
                         cgs: 0.0,
                         cgd: 0.0,
                         rd: 0.0,
-                        rs_param: 0.0,
+                        rs: 0.0,
                     }),
                     has_internal_mna_nodes: false,
                 });
@@ -954,7 +898,7 @@ fn build_device_slots_from_netlist(
                         cgs: 0.0,
                         cgd: 0.0,
                         rd: 0.0,
-                        rs_param: 0.0,
+                        rs: 0.0,
                         gamma: 0.0,
                         phi: 0.6,
                         source_node: 0,
@@ -1546,6 +1490,269 @@ fn test_wurli_preamp_vs_spice() {
         melange_gain,
         spice_gain,
         gain_ratio
+    );
+}
+
+// =============================================================================
+// Neve 1073 Output Stage Validation
+// =============================================================================
+
+/// Run melange NodalSolver for circuits with inductors (transformers).
+/// The standard `run_melange_solver` uses CircuitSolver (DK path) which doesn't
+/// support coupled inductors. This function uses NodalSolver with augmented MNA.
+fn run_melange_nodal_solver(
+    netlist_str: &str,
+    input_signal: &[f64],
+    sample_rate: f64,
+) -> Result<Vec<f64>, ValidationError> {
+    use melange_solver::dk::DkKernel;
+    use melange_solver::solver::NodalSolver;
+
+    let netlist = melange_solver::parser::Netlist::parse(netlist_str).map_err(|e| {
+        ValidationError::Solver(format!("Parse error at line {}: {}", e.line, e.message))
+    })?;
+
+    let mut mna = melange_solver::mna::MnaSystem::from_netlist(&netlist)
+        .map_err(|e| ValidationError::Solver(format!("MNA error: {}", e)))?;
+
+    let input_node = mna
+        .node_map
+        .get("in")
+        .copied()
+        .unwrap_or(1)
+        .saturating_sub(1);
+    let output_node = mna
+        .node_map
+        .get("out")
+        .copied()
+        .unwrap_or(2)
+        .saturating_sub(1);
+    let input_conductance = 1.0;
+
+    if input_node < mna.n {
+        mna.g[input_node][input_node] += input_conductance;
+    }
+
+    let kernel = DkKernel::from_mna_augmented(&mna, sample_rate)
+        .map_err(|e| ValidationError::Solver(format!("DK kernel error: {:?}", e)))?;
+
+    let device_slots = build_device_slots_from_netlist(&netlist);
+
+    let mut solver = NodalSolver::new(
+        kernel,
+        &mna,
+        &netlist,
+        device_slots.clone(),
+        input_node,
+        output_node,
+    )
+    .map_err(|e| ValidationError::Solver(format!("NodalSolver error: {}", e)))?;
+    solver.set_input_conductance(input_conductance);
+
+    if mna.m > 0 {
+        solver.initialize_dc_op(&mna, &device_slots);
+    }
+
+    let mut output = Vec::with_capacity(input_signal.len());
+    for &sample in input_signal.iter() {
+        output.push(solver.process_sample(sample));
+    }
+
+    Ok(output)
+}
+
+/// Neve 1073 Output Amplifier (BA283 AM) vs ngspice
+///
+/// Class A output stage: 3 BJTs (2× BC184C + 1× 2N3055), LO1166 output transformer.
+/// CE input → Darlington CE → transformer. NFB via C4 through R1 to emitter.
+/// Uses NodalSolver (augmented MNA for coupled inductors).
+#[test]
+#[ignore] // requires ngspice
+fn test_neve_1073_output_vs_spice() {
+    assert!(is_ngspice_available(), "ngspice not found");
+
+    println!("\n=== Neve 1073 Output Amplifier Validation ===");
+    println!("Circuit: BA283 AM, 3 BJTs + LO1166 transformer, N=14, M=6");
+
+    let data_dir = test_data_dir().join("neve_1073_output");
+    let netlist_path = data_dir.join("circuit.cir");
+    let input_pwl_path = data_dir.join("input_pwl.txt");
+
+    let netlist_str = std::fs::read_to_string(&netlist_path).expect("Failed to read netlist");
+    let pwl_data = load_pwl_file(&input_pwl_path).expect("Failed to load PWL");
+    let duration = pwl_data.last().map(|(t, _)| *t).unwrap_or(0.01);
+    let tstep = 1.0 / SAMPLE_RATE;
+
+    // --- Run ngspice ---
+    let spice_data = run_transient_with_thevenin_pwl(
+        &netlist_str,
+        tstep,
+        duration,
+        "in",
+        &pwl_data,
+        1.0,
+        &["out".to_string()],
+    )
+    .expect("ngspice failed");
+
+    let mut spice_output = spice_data.get_node_voltage("out").unwrap().to_vec();
+    // DC-block: output has large DC offset from Class A bias through transformer
+    dc_block_signal(&mut spice_output, SAMPLE_RATE);
+    let input_signal = resample_pwl_to_signal(&pwl_data, SAMPLE_RATE, spice_output.len());
+
+    // --- Run melange (NodalSolver for inductor circuit) ---
+    let (stripped_netlist, _) = strip_vin_source(&netlist_str, "in");
+    let melange_output = run_melange_nodal_solver(&stripped_netlist, &input_signal, SAMPLE_RATE)
+        .expect("melange nodal solver failed");
+
+    // --- Compare ---
+    let config = bjt_config();
+    let spice_signal = Signal::new(spice_output.clone(), SAMPLE_RATE, "SPICE");
+    let melange_signal = Signal::new(melange_output.clone(), SAMPLE_RATE, "Melange");
+    let mut report = compare_signals(&spice_signal, &melange_signal, &config);
+    report.circuit_name = "neve_1073_output".to_string();
+    report.node_name = "out".to_string();
+
+    let result = ValidationResult {
+        report,
+        html_report_path: None,
+    };
+
+    print_validation_metrics(&result);
+
+    // --- Gain verification ---
+    let input_pp = input_signal
+        .iter()
+        .cloned()
+        .fold(f64::NEG_INFINITY, f64::max)
+        - input_signal.iter().cloned().fold(f64::INFINITY, f64::min);
+    let melange_pp = melange_output
+        .iter()
+        .cloned()
+        .fold(f64::NEG_INFINITY, f64::max)
+        - melange_output.iter().cloned().fold(f64::INFINITY, f64::min);
+    let spice_pp = spice_output
+        .iter()
+        .cloned()
+        .fold(f64::NEG_INFINITY, f64::max)
+        - spice_output.iter().cloned().fold(f64::INFINITY, f64::min);
+
+    let spice_gain = spice_pp / input_pp;
+    let melange_gain = melange_pp / input_pp;
+
+    println!("    Input PP: {:.4} V", input_pp);
+    println!(
+        "    SPICE output PP: {:.4} V (gain: {:.1}x / {:.1} dB)",
+        spice_pp,
+        spice_gain,
+        20.0 * spice_gain.log10()
+    );
+    println!(
+        "    Melange output PP: {:.4} V (gain: {:.1}x / {:.1} dB)",
+        melange_pp,
+        melange_gain,
+        20.0 * melange_gain.log10()
+    );
+}
+
+/// Neve 1073 Preamp (BA283 AV) vs ngspice
+///
+/// Class A preamp: 3× BC184C. CE(TR4) → DC-coupled CE(TR5) → EF(TR6).
+/// R11+R12 series collector load, R10 inter-stage DC feedback, R17 AC NFB.
+/// Uses CircuitSolver (DK path, no inductors). N=14, M=6.
+#[test]
+#[ignore] // requires ngspice
+fn test_neve_1073_preamp_vs_spice() {
+    assert!(is_ngspice_available(), "ngspice not found");
+
+    println!("\n=== Neve 1073 Preamp (BA283 AV) Validation ===");
+    println!("Circuit: 3× BC184C, CE→CE→EF, N=14, M=6");
+
+    let data_dir = test_data_dir().join("neve_1073_preamp");
+    let netlist_path = data_dir.join("circuit.cir");
+    let input_pwl_path = data_dir.join("input_pwl.txt");
+
+    let netlist_str = std::fs::read_to_string(&netlist_path).expect("Failed to read netlist");
+    let pwl_data = load_pwl_file(&input_pwl_path).expect("Failed to load PWL");
+    let duration = pwl_data.last().map(|(t, _)| *t).unwrap_or(0.01);
+    let tstep = 1.0 / SAMPLE_RATE;
+
+    // --- Run ngspice ---
+    let spice_data = run_transient_with_thevenin_pwl(
+        &netlist_str,
+        tstep,
+        duration,
+        "in",
+        &pwl_data,
+        1.0,
+        &["out".to_string()],
+    )
+    .expect("ngspice failed");
+
+    let mut spice_output = spice_data.get_node_voltage("out").unwrap().to_vec();
+    // DC-block: output has DC offset through C15/R20
+    dc_block_signal(&mut spice_output, SAMPLE_RATE);
+    let input_signal = resample_pwl_to_signal(&pwl_data, SAMPLE_RATE, spice_output.len());
+
+    // --- Run melange (CircuitSolver / DK path) ---
+    let (stripped_netlist, _) = strip_vin_source(&netlist_str, "in");
+    let melange_output = run_melange_solver(&stripped_netlist, &input_signal, SAMPLE_RATE)
+        .expect("melange solver failed");
+
+    // DC-block melange output too
+    let mut melange_dc_blocked = melange_output.clone();
+    dc_block_signal(&mut melange_dc_blocked, SAMPLE_RATE);
+
+    // --- Compare ---
+    let config = bjt_config();
+    let spice_signal = Signal::new(spice_output.clone(), SAMPLE_RATE, "SPICE");
+    let melange_signal = Signal::new(melange_dc_blocked.clone(), SAMPLE_RATE, "Melange");
+    let mut report = compare_signals(&spice_signal, &melange_signal, &config);
+    report.circuit_name = "neve_1073_preamp".to_string();
+    report.node_name = "out".to_string();
+
+    let result = ValidationResult {
+        report,
+        html_report_path: None,
+    };
+
+    print_validation_metrics(&result);
+
+    // --- Gain verification ---
+    let input_pp = input_signal
+        .iter()
+        .cloned()
+        .fold(f64::NEG_INFINITY, f64::max)
+        - input_signal.iter().cloned().fold(f64::INFINITY, f64::min);
+    let melange_pp = melange_dc_blocked
+        .iter()
+        .cloned()
+        .fold(f64::NEG_INFINITY, f64::max)
+        - melange_dc_blocked
+            .iter()
+            .cloned()
+            .fold(f64::INFINITY, f64::min);
+    let spice_pp = spice_output
+        .iter()
+        .cloned()
+        .fold(f64::NEG_INFINITY, f64::max)
+        - spice_output.iter().cloned().fold(f64::INFINITY, f64::min);
+
+    let spice_gain = spice_pp / input_pp;
+    let melange_gain = melange_pp / input_pp;
+
+    println!("    Input PP: {:.4} V", input_pp);
+    println!(
+        "    SPICE output PP: {:.4} V (gain: {:.1}x / {:.1} dB)",
+        spice_pp,
+        spice_gain,
+        20.0 * spice_gain.log10()
+    );
+    println!(
+        "    Melange output PP: {:.4} V (gain: {:.1}x / {:.1} dB)",
+        melange_pp,
+        melange_gain,
+        20.0 * melange_gain.log10()
     );
 }
 
@@ -2451,5 +2658,43 @@ Rload out 0 100k
         rms_diff_between_versions * 100.0,
         rms_diff_between_versions / noise_floor,
         noise_floor * 100.0
+    );
+}
+
+/// Test: Tube Screamer TS808 (Op-amp + Diode Clipping)
+///
+/// Tests the classic TS808 inverting op-amp with antiparallel diode
+/// feedback clipping. Op-amp modeled as VCCS + Rout (same model in
+/// both ngspice and melange). 0.5V input drives diodes into soft
+/// clipping at ~0.6V.
+///
+/// Circuit: JRC4558 op-amp (AOL=200000, ROUT=75), 2x 1N4148,
+///          51k drive/feedback, RC tone stack, output coupling
+/// Input: 1kHz sine, 0.5V amplitude
+/// Expected: Soft-clipped output ~0.17V peak
+#[test]
+#[ignore] // requires ngspice
+fn test_tube_screamer_vs_spice() {
+    assert!(is_ngspice_available(), "ngspice not found");
+
+    println!("\n=== Tube Screamer TS808 Validation ===");
+    println!("Circuit: Op-amp inverting + antiparallel diode clipping");
+
+    let result = run_validation("tube_screamer", "out", &nonlinear_config())
+        .expect("Failed to run validation");
+
+    print_validation_metrics(&result);
+
+    assert!(
+        result.report.passed,
+        "Tube Screamer validation failed:\n{}\nReport saved to: {:?}",
+        result.report.summary(),
+        result.html_report_path
+    );
+
+    assert!(
+        result.report.correlation_coefficient > 0.99,
+        "Correlation too low: {:.8}",
+        result.report.correlation_coefficient
     );
 }

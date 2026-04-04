@@ -82,17 +82,6 @@ impl SourcesConfig {
     fn default_config() -> Self {
         let mut sources = HashMap::new();
 
-        // Guitarix - popular guitar effects collection
-        sources.insert(
-            "guitarix".to_string(),
-            SourceConfig {
-                url: "https://raw.githubusercontent.com/brummer10/guitarix/master".to_string(),
-                license: Some("GPL-3.0".to_string()),
-                attribution: Some("Guitarix Project (brummer10)".to_string()),
-                subdirectory: Some("trunk/tools/ampsim".to_string()),
-            },
-        );
-
         // Tonestack - tone stack circuits
         sources.insert(
             "tonestack".to_string(),
@@ -274,18 +263,12 @@ mod tests {
     fn test_default_config() {
         let config = SourcesConfig::default_config();
         assert!(!config.sources.is_empty());
-        assert!(config.sources.contains_key("guitarix"));
         assert!(config.sources.contains_key("tonestack"));
     }
 
     #[test]
     fn test_resolve_circuit() {
         let config = SourcesConfig::default_config();
-
-        // With subdirectory
-        let url = config.resolve_circuit("guitarix", "bigmuff").unwrap();
-        assert!(url.contains("githubusercontent.com"));
-        assert!(url.ends_with("bigmuff.cir"));
 
         // Without extension
         let url = config

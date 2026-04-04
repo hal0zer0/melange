@@ -1,0 +1,42 @@
+Tube Screamer TS808 - SPICE Validation
+* Non-inverting op-amp clipping stage (faithful to real TS808 topology)
+* Op-amp modeled as VCCS + Rout (matches melange OA model)
+* Gm = AOL/ROUT = 200000/75 = 2666.667, Go = 1/ROUT = 1/75
+
+* --- Input coupling ---
+Cin in n1 0.047u
+R_pull n1 0 1Meg
+
+* --- Non-inverting clipping amplifier ---
+* Op-amp as VCCS: Gm*(V+ - V-) into output, with Rout to ground
+* V+ = n1 (audio), V- = n_inv (feedback junction), output = n_clip
+G1 0 n_clip n1 n_inv 2666.667
+Rout n_clip 0 75
+
+* --- Inverting input ground impedance ---
+R4 n_inv n_gnd 4.7k
+C3 n_gnd 0 0.047u
+
+* --- Feedback path ---
+R_drive n_clip n_inv 551k
+D1 n_clip n_inv D1N4148
+D2 n_inv n_clip D1N4148
+C4 n_clip n_inv 51p
+
+* --- Tone control ---
+R7 n_clip n_tone 1k
+C5 n_tone 0 0.22u
+
+* --- Output coupling ---
+C_out n_tone out 0.1u
+R_out out 0 1Meg
+
+* --- Models ---
+.model D1N4148 D(IS=2.52e-9 RS=0.568 N=1.752)
+
+* --- Simulation ---
+.OPTIONS INTERP
+.TRAN 0.208333u 10m
+.PRINT TRAN V(out) V(in)
+
+.END

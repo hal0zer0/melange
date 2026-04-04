@@ -1,8 +1,18 @@
 # Pultec EQP-1A Gain Staging Investigation
 
-## Problem
+## RESOLVED (2026-03-24)
 
-The melange Pultec circuit produces **+31 dB gain** at "all controls off" (pots at minimum).
+**Gain: +1.8 dB** at 1kHz (near unity). 21 dB of differential NFB working correctly.
+Fix: separated cathodes (820Ω between), 1kΩ to ground, differential injection, K=0.9999,
+12AX7/12AU7 Sylvania Koren params. See `circuits/stable/pultec-eq.cir` for current circuit.
+
+Remaining: +1.8 dB offset (12AU7 operating point), 20kHz resonance peak, HF rolloff >15kHz.
+
+---
+
+## Original Problem (historical)
+
+The melange Pultec circuit produced **+31 dB gain** at "all controls off" (pots at minimum).
 The real Pultec EQP-1A is **nominally unity gain** — the passive EQ network has ~16-20 dB
 insertion loss that the tube makeup amp compensates for. Our circuit is missing this insertion loss.
 
@@ -46,7 +56,7 @@ The 1V input causes tube plate voltages to swing to 1169V (from 290V DC OP).
 
 ## Circuit File
 
-**`circuits/pultec-eq.cir`** — 58 elements, 32 nodes, 4 tube devices (2× 12AX7, 2× 12AU7)
+**`circuits/stable/pultec-eq.cir`** — 58 elements, 32 nodes, 4 tube devices (2× 12AX7, 2× 12AU7)
 
 ### Passive EQ Network Topology
 
@@ -117,7 +127,7 @@ R3      out_tap mid 10k      ← LF path to mid node
 
 | File | Purpose |
 |------|---------|
-| `circuits/pultec-eq.cir` | Full SPICE netlist |
+| `circuits/stable/pultec-eq.cir` | Full SPICE netlist |
 | `docs/aidocs/STATUS.md` | Validation results and device support |
 | `docs/aidocs/DEVICE_MODELS.md` | Tube model equations (Koren) |
 

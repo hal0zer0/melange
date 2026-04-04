@@ -604,7 +604,7 @@ fn test_gain_sanity_pultec() {
         .unwrap()
         .parent()
         .unwrap();
-    let pultec_path = workspace_root.join("circuits/pultec-eq.cir");
+    let pultec_path = workspace_root.join("circuits/stable/pultec-eq.cir");
     if !pultec_path.exists() {
         panic!("Pultec circuit not found at {:?}", pultec_path);
     }
@@ -693,13 +693,12 @@ fn main() {{
         "Pultec at 10mV should have zero NR failures, got {nr_fail}"
     );
 
-    // KNOWN ISSUE: gain is +31 dB instead of ~0 dB (NFB loop defeated by shared cathode).
-    // This assertion documents the expected correct behavior.
-    // When the NFB is fixed, this test will pass. Until then, it tracks the known issue.
+    // NFB working: separated cathodes + differential injection gives 21 dB of NFB.
+    // Gain should be near unity (~+1.8 dB measured). Assert < +6 dB as regression guard.
     assert!(
         gain_db < 6.0,
         "Pultec gain should be < +6 dB (nominally unity with NFB). \
-         Got {gain_db:.1} dB — NFB loop is not working. \
+         Got {gain_db:.1} dB. \
          See docs/pultec-gain-staging-investigation.md"
     );
 }

@@ -18,8 +18,8 @@ fn main() {
     let num_samples = 500;
 
     // ── Step 1: Parse circuit ──────────────────────────────────────────
-    let source = std::fs::read_to_string("circuits/pultec-eq.cir")
-        .expect("failed to read circuits/pultec-eq.cir");
+    let source = std::fs::read_to_string("circuits/stable/pultec-eq.cir")
+        .expect("failed to read circuits/stable/pultec-eq.cir");
     let netlist = Netlist::parse(&source).expect("failed to parse netlist");
     let mut mna = MnaSystem::from_netlist(&netlist).expect("failed to build MNA");
 

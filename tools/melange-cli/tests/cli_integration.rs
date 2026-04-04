@@ -90,7 +90,7 @@ fn test_builtins_lists_circuits() {
 
 #[test]
 fn test_nodes_circuit_file() {
-    let stdout = run_melange(&["nodes", "circuits/wurli-preamp.cir"]);
+    let stdout = run_melange(&["nodes", "circuits/stable/wurli-preamp.cir"]);
     // Should list node names from the circuit
     assert!(
         stdout.contains("out") || stdout.contains("base") || stdout.contains("coll"),
@@ -110,7 +110,7 @@ fn test_compile_circuit_file() {
 
     let stdout = run_melange(&[
         "compile",
-        "circuits/wurli-preamp.cir",
+        "circuits/stable/wurli-preamp.cir",
         "--output",
         tmp_str,
         "--input-node",
@@ -146,7 +146,7 @@ fn test_compile_produces_compilable_rust() {
 
     run_melange(&[
         "compile",
-        "circuits/tweed-preamp.cir",
+        "circuits/stable/tweed-preamp.cir",
         "--output",
         tmp_rs.to_str().unwrap(),
         "--input-node",
@@ -185,7 +185,7 @@ fn test_simulate_sine_tone() {
 
     run_melange(&[
         "simulate",
-        "circuits/wurli-preamp.cir",
+        "circuits/stable/wurli-preamp.cir",
         "--input-node",
         "mid_in",
         "--output-node",
@@ -239,7 +239,7 @@ fn test_compile_missing_file() {
 fn test_compile_missing_node() {
     let stderr = run_melange_fail(&[
         "compile",
-        "circuits/wurli-preamp.cir",
+        "circuits/stable/wurli-preamp.cir",
         "--output",
         "/tmp/melange_cli_fail.rs",
         "--input-node",

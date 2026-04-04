@@ -325,8 +325,8 @@ fn test_nodal_codegen_be_fallback() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn test_nodal_codegen_pultec_simplified() {
-    let src = std::fs::read_to_string("../../circuits/pultec-simplified.cir").unwrap();
+fn test_nodal_codegen_pultec() {
+    let src = std::fs::read_to_string("../../circuits/stable/pultec-eq.cir").unwrap();
     let netlist = Netlist::parse(&src).unwrap();
     let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
     // Stamp input conductance

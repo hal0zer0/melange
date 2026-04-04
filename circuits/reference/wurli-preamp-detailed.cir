@@ -11,7 +11,6 @@
 * TOPOLOGY NOTES:
 *   R-2 (2M to +15V) and R-3 (470K to GND) are both at base1,
 *   providing the DC bias: Vth=2.85V -> Vb=2.45V with base current loading.
-*   C20 (220pF) also at base1 forms LPF with R-2||R-3=380K at ~1903 Hz.
 *
 *   FEEDBACK (CORRECTED Feb 2026):
 *   R-10 (56K) feeds from preamp output to fb_junct.
@@ -62,11 +61,9 @@ Cin   in    base1  0.022U
 * R-2 (2M) from Vcc to base1 -- DC pull-up
 * R-3 (470K) from base1 to ground -- DC pull-down
 * Thevenin: Vth = 15 * 470K / (2M + 470K) = 2.854V
-* C20 (220pF) shunt to ground -- LPF with R-2||R-3 = 380K, f_c ~1903 Hz
 * D-1 (1N4148 stand-in) reverse-biased protection diode
 R2    vcc   base1  2MEG
 R3    base1 gnd    470K
-C20   base1 gnd    220P
 D1    gnd   base1  D1N4148
 
 * --- Stage 1: TR-1 (2N5089 NPN common-emitter) ---

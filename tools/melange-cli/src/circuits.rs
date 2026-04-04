@@ -2,7 +2,7 @@
 //!
 //! Supports multiple circuit sources:
 //! - Builtins: Embedded circuits shipped with melange
-//! - Friendly sources: `source:circuit` pattern (e.g., guitarix:bigmuff)
+//! - Friendly sources: `source:circuit` pattern (e.g., melange:tube-screamer)
 //! - Direct URLs: Full HTTP(S) URLs
 //! - Local files: Path resolution
 
@@ -85,7 +85,7 @@ impl CircuitSource {
 /// let source = resolve("tube-screamer").unwrap();
 ///
 /// // Friendly source
-/// let source = resolve("guitarix:bigmuff").unwrap();
+/// let source = resolve("melange:tube-screamer").unwrap();
 ///
 /// // Direct URL
 /// let source = resolve("https://example.com/circuit.cir").unwrap();
@@ -142,14 +142,14 @@ pub fn resolve(circuit_ref: &str) -> Result<CircuitSource> {
 /// Get builtin circuit content
 fn get_builtin(name: &str) -> Option<String> {
     match name {
-        "tube-screamer" => Some(include_str!("builtins/tube-screamer.cir").to_string()),
-        "fuzz-face" => Some(include_str!("builtins/fuzz-face.cir").to_string()),
-        "big-muff" => Some(include_str!("builtins/big-muff.cir").to_string()),
-        "rc-lowpass" => Some(include_str!("builtins/rc-lowpass.cir").to_string()),
-        "mordor-screamer" => Some(include_str!("builtins/mordor-screamer.cir").to_string()),
-        "tube-preamp" => Some(include_str!("builtins/tube-preamp.cir").to_string()),
+        "tube-screamer" => Some(include_str!("../../../circuits/testing/tube-screamer.cir").to_string()),
+        "fuzz-face" => Some(include_str!("../../../circuits/unstable/fuzz-face.cir").to_string()),
+        "big-muff" => Some(include_str!("../../../circuits/unstable/big-muff.cir").to_string()),
+        "rc-lowpass" => Some(include_str!("../../../circuits/stable/rc-lowpass.cir").to_string()),
+        "mordor-screamer" => Some(include_str!("../../../circuits/testing/mordor-screamer.cir").to_string()),
+        "tube-preamp" => Some(include_str!("../../../circuits/testing/tube-preamp.cir").to_string()),
         "ssl-bus-compressor" | "ssl-4000" => {
-            Some(include_str!("builtins/ssl-bus-compressor.cir").to_string())
+            Some(include_str!("../../../circuits/unstable/ssl-bus-compressor.cir").to_string())
         }
         _ => None,
     }
@@ -229,19 +229,19 @@ mod tests {
 
     #[test]
     fn test_parse_friendly_ref_colon() {
-        let result = parse_friendly_ref("guitarix:bigmuff");
+        let result = parse_friendly_ref("melange:tube-screamer");
         assert_eq!(
             result,
-            Some(("guitarix".to_string(), "bigmuff".to_string()))
+            Some(("melange".to_string(), "tube-screamer".to_string()))
         );
     }
 
     #[test]
     fn test_parse_friendly_ref_at() {
-        let result = parse_friendly_ref("bigmuff@guitarix");
+        let result = parse_friendly_ref("tube-screamer@melange");
         assert_eq!(
             result,
-            Some(("guitarix".to_string(), "bigmuff".to_string()))
+            Some(("melange".to_string(), "tube-screamer".to_string()))
         );
     }
 

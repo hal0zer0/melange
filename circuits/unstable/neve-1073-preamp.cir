@@ -1,0 +1,106 @@
+* Neve 1073 Preamp (BA283 AV)
+* Class A, 3 BJTs: TR4/TR5/TR6 (all BC184C). No output transformer.
+* From Neve drawing EX/10 283, traced from SI14 Lab schematic with
+* user-verified node-by-node connections (junction dots, not hops).
+*
+* Topology: CE input (TR4) -> DC-coupled CE (TR5) -> EF buffer (TR6)
+* TR4 collector DC-couples directly to TR5 base (wire, no cap).
+* R11(33K)+R12(47K) in series = 80K DC collector load for TR4.
+*   C12(22u) decouples mid-node -> AC load = R12(47K) only.
+* DC bias: R10(68K) inter-stage feedback from Node D (TR5 emitter
+*   degeneration junction at ~5.4V) to TR4 base. Sets Ic4 ~ 0.2 mA.
+* AC NFB: R17(2K2) from TR6 emitter to TR4 emitter (series-shunt).
+*   C17(400u) AC-couples emit4 to Pin T; R18(390)||R19(1K8) shunt.
+* Gain: External boost resistor from Pin T to ground.
+*   Lower R = lower shunt = higher gain.
+*
+* DC operating point (calculated):
+*   TR4: Ic=0.2mA  Vc=7.7V  Vb=5.3V  Ve=4.7V  Vce=3.0V
+*   TR5: Ic=3.6mA  Vc=5.8V  Vb=7.7V  Ve=7.0V  (near saturation)
+*   TR6: Ve=5.1V  EF buffer
+*
+* Gain table (first stage, Pin T to ground):
+*   18 dB: open    23 dB: 330    28 dB: 120    33 dB: 56
+*   38 dB: 27      43 dB: 15     48 dB: 8.2
+*
+* External NFB (1073 mainboard): Pin S -> 18K -> Pin U
+
+* --- Pin U DC reference ---
+R9    in     0      120K
+
+* --- Input coupling ---
+C8    in     base4  10U
+
+* --- TR4: CE input stage (BC184C) ---
+* R10: inter-stage DC feedback from Node D (TR5 emitter junction) to base
+R10   base4  node_d  68K
+* C9: Miller compensation (base to collector)
+C9    base4  coll4   100P
+* C10: base-to-emitter HF bypass
+C10   base4  emit4   1500P
+* Collector load: R11+R12 in series (80K DC). C12 grounds mid-node at AC.
+R11   vcc    mid     33K
+R12   mid    coll4   47K
+C12   mid    0       22U
+Q4    coll4  base4  emit4  QBC184C
+
+* --- TR4 collector DC-couples to TR5 base ---
+* coll4 and base5 are the same node (direct wire, no component).
+* C11: HF bypass on TR5 base (= TR4 collector node)
+C11   coll4  0       680P
+
+* --- TR5: DC-coupled CE stage (BC184C) ---
+R13   vcc    coll5   5.1K
+Q5    coll5  coll4   emit5  QBC184C
+* Emitter degeneration: R14+R15 series, C13 bypasses R15 at AC
+R14   emit5  node_d  470
+R15   node_d 0       1.5K
+C13   node_d 0       125U
+* C14: TR5 emitter AC output to Pin S (external NFB path)
+C14   emit5  pin_s   22U
+R16   pin_s  0       10K
+
+* --- TR6: Emitter follower output (BC184C) ---
+* Collector direct to +24V. Base from TR5 collector (Node M).
+Q6    vcc    coll5   emit6  QBC184C
+* C16: HF bypass on TR6 emitter
+C16   emit6  0       1000P
+* R17: main AC feedback from TR6 emitter to TR4 emitter
+R17   emit6  emit4   2.2K
+* C15: output coupling cap to Pin P
+C15   emit6  out     22U
+* R20: output DC bias (Pin P to ground)
+R20   out    0       51K
+
+* --- Feedback / gain network at TR4 emitter ---
+* R18 provides DC ground path from emit4 (LEFT side of C17).
+* C17 AC-couples emit4 to Pin T (RIGHT side).
+* R19 + external boost resistor shunt Pin T to ground.
+* At AC, C17 shorts, so R_shunt = R18 || (R19 || R_boost).
+R18   emit4  0       390
+C17   emit4  pin_t   400U
+R19   pin_t  0       1.8K
+
+* --- Gain setting (28 dB: R_boost = 120 ohm) ---
+* Gain = (R17 + R_shunt) / R_shunt
+* Open: R_shunt = R18||(R19) = 390||1800 = 321 -> 17.9 dB
+* 120:  R_shunt = R18||(R19||120) = 390||112.5 = 87 -> 28.4 dB
+R_boost pin_t 0      120
+
+* --- External NFB (Pin S -> 18K -> Pin U, on 1073 mainboard) ---
+R_nfb  pin_s  in     18K
+
+* --- Supply ---
+VCC   vcc    0      DC 24
+
+* --- Device models ---
+.model QBC184C NPN(IS=1.8e-14 BF=420 NF=1 VAF=80
++ IKF=0.1 ISE=1e-30 NE=1.5 BR=20 NR=1 VAR=12
++ IKR=3e-4 RB=50 RE=0.5 RC=1
++ CJE=10e-12 VJE=0.7 MJE=0.33 CJC=4e-12 VJC=0.5 MJC=0.33
++ TF=5e-10 TR=1e-7)
+
+.TRAN 1u 50m
+.PRINT TRAN V(out) V(in_src) V(coll4) V(coll5) V(emit4) V(emit6)
+
+.END

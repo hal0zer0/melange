@@ -34,7 +34,7 @@ fn get_node_voltage(mna: &MnaSystem, v_node: &[f64], name: &str) -> Option<f64> 
 
 /// Load the Pultec circuit, build MNA, run DC OP, and return everything needed for assertions.
 fn run_pultec_dc_op() -> (MnaSystem, melange_solver::dc_op::DcOpResult) {
-    let src = std::fs::read_to_string("../../circuits/pultec-eq.cir")
+    let src = std::fs::read_to_string("../../circuits/stable/pultec-eq.cir")
         .expect("pultec-eq.cir not found — run from crates/melange-solver/");
     let netlist = Netlist::parse(&src).expect("Pultec netlist parse failed");
     let mut mna = MnaSystem::from_netlist(&netlist).expect("MNA build failed");

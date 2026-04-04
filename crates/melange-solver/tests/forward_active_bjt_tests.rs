@@ -796,7 +796,7 @@ fn test_codegen_forward_active_produces_output() {
 
 /// Read the wurli-preamp circuit file.
 fn load_wurli_preamp() -> String {
-    std::fs::read_to_string("/home/homeuser/dev/melange/circuits/wurli-preamp.cir")
+    std::fs::read_to_string("/home/homeuser/dev/melange/circuits/stable/wurli-preamp.cir")
         .expect("Could not read wurli-preamp.cir")
 }
 

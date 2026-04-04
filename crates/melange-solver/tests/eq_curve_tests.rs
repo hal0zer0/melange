@@ -81,7 +81,7 @@ fn load_pultec() -> (String, String) {
         .unwrap()
         .parent()
         .unwrap();
-    let path = workspace_root.join("circuits/pultec-eq.cir");
+    let path = workspace_root.join("circuits/stable/pultec-eq.cir");
     let spice = std::fs::read_to_string(&path).expect("pultec-eq.cir not found");
     let netlist = Netlist::parse(&spice).expect("parse");
     let mut mna = MnaSystem::from_netlist(&netlist).expect("mna");
