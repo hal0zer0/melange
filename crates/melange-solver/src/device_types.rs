@@ -238,13 +238,13 @@ pub struct JfetParams {
     pub rd: f64,
     /// Source ohmic resistance [Ohms] (0.0 = disabled)
     #[serde(default)]
-    pub rs_param: f64,
+    pub rs: f64,
 }
 
 impl JfetParams {
     /// Returns true if either drain or source resistance is enabled.
     pub fn has_rd_rs(&self) -> bool {
-        self.rd > 0.0 || self.rs_param > 0.0
+        self.rd > 0.0 || self.rs > 0.0
     }
 }
 
@@ -274,7 +274,7 @@ pub struct MosfetParams {
     pub rd: f64,
     /// Source ohmic resistance [Ohms] (0.0 = disabled)
     #[serde(default)]
-    pub rs_param: f64,
+    pub rs: f64,
     /// Body effect coefficient GAMMA [V^0.5] (0.0 = disabled)
     #[serde(default)]
     pub gamma: f64,
@@ -292,7 +292,7 @@ pub struct MosfetParams {
 impl MosfetParams {
     /// Returns true if either drain or source resistance is enabled.
     pub fn has_rd_rs(&self) -> bool {
-        self.rd > 0.0 || self.rs_param > 0.0
+        self.rd > 0.0 || self.rs > 0.0
     }
     /// Returns true if body effect is enabled.
     pub fn has_body_effect(&self) -> bool {
@@ -356,11 +356,6 @@ pub struct VcaParams {
     /// THD coefficient for gain-dependent cubic distortion (0.0 = ideal, default)
     #[serde(default)]
     pub thd: f64,
-    /// Noise floor RMS voltage [V] at unity gain (0.0 = disabled, default).
-    /// Noise rises with gain reduction as 1/sqrt(gain).
-    /// THAT 2180A typical: 3e-6.
-    #[serde(default)]
-    pub noise_floor: f64,
 }
 
 /// Nonlinear device type tag.

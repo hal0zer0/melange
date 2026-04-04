@@ -46,7 +46,7 @@ impl Jfet {
 
     /// 2N5457 N-channel JFET.
     pub fn n_2n5457() -> Self {
-        let c = crate::catalog::jfets::lookup("2N5457").unwrap();
+        let c = crate::catalog::jfets::lookup("2N5457").expect("2N5457 catalog entry");
         let mut j = Self::new(JfetChannel::N, c.vp, c.idss);
         j.lambda = c.lambda;
         j
@@ -54,7 +54,7 @@ impl Jfet {
 
     /// J201 N-channel JFET (common in audio).
     pub fn n_j201() -> Self {
-        let c = crate::catalog::jfets::lookup("J201").unwrap();
+        let c = crate::catalog::jfets::lookup("J201").expect("J201 catalog entry");
         let mut j = Self::new(JfetChannel::N, c.vp, c.idss);
         j.lambda = c.lambda;
         j
@@ -62,7 +62,7 @@ impl Jfet {
 
     /// 2N3819 N-channel JFET.
     pub fn n_2n3819() -> Self {
-        let c = crate::catalog::jfets::lookup("2N3819").unwrap();
+        let c = crate::catalog::jfets::lookup("2N3819").expect("2N3819 catalog entry");
         let mut j = Self::new(JfetChannel::N, c.vp, c.idss);
         j.lambda = c.lambda;
         j
@@ -70,7 +70,7 @@ impl Jfet {
 
     /// 2N5460 P-channel JFET.
     pub fn p_2n5460() -> Self {
-        let c = crate::catalog::jfets::lookup("2N5460").unwrap();
+        let c = crate::catalog::jfets::lookup("2N5460").expect("2N5460 catalog entry");
         let mut j = Self::new(JfetChannel::P, c.vp, c.idss);
         j.lambda = c.lambda;
         j

@@ -46,7 +46,7 @@ impl DiodeShockley {
 
     /// Create a 1N4148 signal diode (well-characterized).
     pub fn silicon_1n4148() -> Self {
-        let c = crate::catalog::diodes::lookup("1N4148").unwrap();
+        let c = crate::catalog::diodes::lookup("1N4148").expect("1N4148 catalog entry");
         Self::new_room_temp(c.is, c.n)
     }
 
@@ -57,13 +57,13 @@ impl DiodeShockley {
 
     /// Create a germanium diode (1N34A-like).
     pub fn germanium() -> Self {
-        let c = crate::catalog::diodes::lookup("1N34A").unwrap();
+        let c = crate::catalog::diodes::lookup("1N34A").expect("1N34A catalog entry");
         Self::new_room_temp(c.is, c.n)
     }
 
     /// Create a Schottky diode (1N5819-like).
     pub fn schottky() -> Self {
-        let c = crate::catalog::diodes::lookup("1N5819").unwrap();
+        let c = crate::catalog::diodes::lookup("1N5819").expect("1N5819 catalog entry");
         Self::new_room_temp(c.is, c.n)
     }
 

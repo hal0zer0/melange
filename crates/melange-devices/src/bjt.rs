@@ -103,26 +103,38 @@ impl BjtEbersMoll {
 
     /// 2N2222A NPN transistor (common general-purpose).
     pub fn npn_2n2222a() -> Self {
-        let c = crate::catalog::bjts::lookup("2N2222A").unwrap();
+        let c = crate::catalog::bjts::lookup("2N2222A").expect("2N2222A catalog entry");
         Self::new_room_temp(c.is, c.beta_f, c.beta_r, BjtPolarity::Npn)
     }
 
     /// 2N3904 NPN transistor.
     pub fn npn_2n3904() -> Self {
-        let c = crate::catalog::bjts::lookup("2N3904").unwrap();
+        let c = crate::catalog::bjts::lookup("2N3904").expect("2N3904 catalog entry");
         Self::new_room_temp(c.is, c.beta_f, c.beta_r, BjtPolarity::Npn)
     }
 
     /// 2N3906 PNP transistor.
     pub fn pnp_2n3906() -> Self {
-        let c = crate::catalog::bjts::lookup("2N3906").unwrap();
+        let c = crate::catalog::bjts::lookup("2N3906").expect("2N3906 catalog entry");
         Self::new_room_temp(c.is, c.beta_f, c.beta_r, BjtPolarity::Pnp)
     }
 
     /// AC128 Germanium PNP (vintage fuzz tones).
     pub fn pnp_ac128() -> Self {
-        let c = crate::catalog::bjts::lookup("AC128").unwrap();
+        let c = crate::catalog::bjts::lookup("AC128").expect("AC128 catalog entry");
         Self::new_room_temp(c.is, c.beta_f, c.beta_r, BjtPolarity::Pnp)
+    }
+
+    /// BC184C NPN transistor (Neve BA283 small-signal stages).
+    pub fn npn_bc184c() -> Self {
+        let c = crate::catalog::bjts::lookup("BC184C").expect("BC184C catalog entry");
+        Self::new_room_temp(c.is, c.beta_f, c.beta_r, BjtPolarity::Npn)
+    }
+
+    /// 2N3055 NPN power transistor (Neve BA283 Class A output).
+    pub fn npn_2n3055() -> Self {
+        let c = crate::catalog::bjts::lookup("2N3055").expect("2N3055 catalog entry");
+        Self::new_room_temp(c.is, c.beta_f, c.beta_r, BjtPolarity::Npn)
     }
 
     /// Get the sign multiplier for polarity.
@@ -328,9 +340,9 @@ impl BjtGummelPoon {
         let vbe_eff = s * vbe;
         let vbc_eff = s * vbc;
 
-        // Early effect
+        // Early effect — clamp to positive to prevent sign-flip near Early voltage
         let q1_denom = 1.0 - vbe_eff / self.var - vbc_eff / self.vaf;
-        if q1_denom.abs() < 1e-30 {
+        if q1_denom <= 0.0 || q1_denom.abs() < 1e-30 {
             return 1.0;
         }
         let q1 = 1.0 / q1_denom;
@@ -424,7 +436,7 @@ impl NonlinearDevice<2> for BjtGummelPoon {
 
         // Base charge factor q1 (matches qb() singularity handling)
         let q1_denom = 1.0 - vbe_eff / self.var - vbc_eff / self.vaf;
-        let (q1, dq1_dvbe, dq1_dvbc) = if q1_denom.abs() < 1e-30 {
+        let (q1, dq1_dvbe, dq1_dvbc) = if q1_denom <= 0.0 || q1_denom.abs() < 1e-30 {
             (1.0, 0.0, 0.0) // matches qb() fallback
         } else {
             let q1 = 1.0 / q1_denom;

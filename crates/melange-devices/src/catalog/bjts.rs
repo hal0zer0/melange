@@ -133,6 +133,36 @@ pub const CATALOG: &[BjtCatalogEntry] = &[
         ikr: f64::INFINITY,
         source: "Measured/estimated germanium parameters",
     },
+    // BC184C — NPN small signal (Philips/NXP, same family as BC182/BC183)
+    // Used in Neve BA283 amplifier modules. Similar to BC547C but higher IC max.
+    BjtCatalogEntry {
+        names: &["BC184C", "BC184"],
+        is: 1.8e-14,
+        vt: 0.025851991,
+        beta_f: 420.0,
+        beta_r: 20.0,
+        is_pnp: false,
+        vaf: 80.0,
+        var: 12.0,
+        ikf: 0.1,
+        ikr: 3.0e-4,
+        source: "Philips/NXP SPICE model (BC547C family, BF adjusted for BC184C datasheet)",
+    },
+    // 2N3055 — NPN power transistor (TO-3 package)
+    // Used in Neve BA283 Class A output stage (~70mA bias).
+    BjtCatalogEntry {
+        names: &["2N3055"],
+        is: 4.66e-12,
+        vt: 0.025851991,
+        beta_f: 360.0,
+        beta_r: 2.0,
+        is_pnp: false,
+        vaf: 100.0,
+        var: 20.0,
+        ikf: 0.25,
+        ikr: 0.01,
+        source: "ON Semiconductor / Motorola SPICE model",
+    },
 ];
 
 /// Look up a BJT by part number (case-insensitive).
@@ -427,5 +457,72 @@ mod tests {
     #[test]
     fn test_bc557b_jacobian() {
         check_bjt_jacobian(lookup("BC557B").unwrap());
+    }
+
+    // --- BC184C and 2N3055 (Neve BA283) ---
+
+    #[test]
+    fn test_bc184c_matches_catalog() {
+        let factory = BjtEbersMoll::npn_bc184c();
+        let cat = lookup("BC184C").unwrap();
+        assert_eq!(factory.is, cat.is);
+        assert_eq!(factory.beta_f, cat.beta_f);
+        assert_eq!(factory.beta_r, cat.beta_r);
+    }
+
+    #[test]
+    fn test_2n3055_matches_catalog() {
+        let factory = BjtEbersMoll::npn_2n3055();
+        let cat = lookup("2N3055").unwrap();
+        assert_eq!(factory.is, cat.is);
+        assert_eq!(factory.beta_f, cat.beta_f);
+        assert_eq!(factory.beta_r, cat.beta_r);
+    }
+
+    #[test]
+    fn test_bc184c_operating_points() {
+        let b = make_bjt(lookup("BC184C").unwrap());
+        let ic = b.collector_current(0.6, -4.4);
+        assert!(ic > 0.0, "BC184C should conduct at Vbe=0.6V");
+        let ib = b.base_current(0.6, -4.4);
+        if ib > 1e-12 {
+            let measured_beta = ic / ib;
+            assert!(
+                measured_beta > 100.0 && measured_beta < 800.0,
+                "BC184C beta={:.0} (expected ~420)",
+                measured_beta
+            );
+        }
+    }
+
+    #[test]
+    fn test_2n3055_operating_points() {
+        let b = make_bjt(lookup("2N3055").unwrap());
+        // Power transistor: check at higher current (70mA Class A bias)
+        let ic = b.collector_current(0.65, -23.0);
+        assert!(
+            ic > 10e-3,
+            "2N3055 Ic at Vbe=0.65V: {:.3}mA (expected >10mA)",
+            ic * 1e3
+        );
+        let ib = b.base_current(0.65, -23.0);
+        if ib > 1e-12 {
+            let measured_beta = ic / ib;
+            assert!(
+                measured_beta > 50.0 && measured_beta < 500.0,
+                "2N3055 beta={:.0} (expected ~360)",
+                measured_beta
+            );
+        }
+    }
+
+    #[test]
+    fn test_bc184c_jacobian() {
+        check_bjt_jacobian(lookup("BC184C").unwrap());
+    }
+
+    #[test]
+    fn test_2n3055_jacobian() {
+        check_bjt_jacobian(lookup("2N3055").unwrap());
     }
 }

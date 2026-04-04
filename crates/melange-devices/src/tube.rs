@@ -111,7 +111,7 @@ impl KorenTriode {
     /// vs datasheet (~3.4mA vs ~1.2mA at Vgk=0, Vpk=250V). For datasheet-accurate
     /// plate current, use [`ecc83_fitted`](Self::ecc83_fitted).
     pub fn ecc83() -> Self {
-        let c = crate::catalog::tubes::lookup("12AX7").unwrap();
+        let c = crate::catalog::tubes::lookup("12AX7").expect("12AX7 catalog entry");
         Self::with_all_params(
             c.mu,
             c.ex,
@@ -130,7 +130,7 @@ impl KorenTriode {
     /// ~1.2mA at Vgk=0, Vpk=250V (vs ~3.4mA with original Koren params).
     /// All other parameters identical to [`ecc83`](Self::ecc83).
     pub fn ecc83_fitted() -> Self {
-        let c = crate::catalog::tubes::lookup("12AX7F").unwrap();
+        let c = crate::catalog::tubes::lookup("12AX7F").expect("12AX7F catalog entry");
         Self::with_all_params(
             c.mu,
             c.ex,
@@ -145,7 +145,7 @@ impl KorenTriode {
 
     /// 12AU7 (ECC82) - medium-mu twin triode.
     pub fn ecc82() -> Self {
-        let c = crate::catalog::tubes::lookup("12AU7").unwrap();
+        let c = crate::catalog::tubes::lookup("12AU7").expect("12AU7 catalog entry");
         Self::with_all_params(
             c.mu,
             c.ex,
@@ -160,7 +160,7 @@ impl KorenTriode {
 
     /// 12AT7 (ECC81) - medium-mu triode.
     pub fn ecc81() -> Self {
-        let c = crate::catalog::tubes::lookup("12AT7").unwrap();
+        let c = crate::catalog::tubes::lookup("12AT7").expect("12AT7 catalog entry");
         Self::with_all_params(
             c.mu,
             c.ex,
@@ -175,7 +175,7 @@ impl KorenTriode {
 
     /// 6SL7 - high-mu octal triode.
     pub fn _6sl7() -> Self {
-        let c = crate::catalog::tubes::lookup("6SL7").unwrap();
+        let c = crate::catalog::tubes::lookup("6SL7").expect("6SL7 catalog entry");
         Self::with_all_params(
             c.mu,
             c.ex,

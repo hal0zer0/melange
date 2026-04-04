@@ -41,13 +41,13 @@ impl Mosfet {
 
     /// 2N7000 N-channel MOSFET (common small-signal).
     pub fn n_2n7000() -> Self {
-        let c = crate::catalog::mosfets::lookup("2N7000").unwrap();
+        let c = crate::catalog::mosfets::lookup("2N7000").expect("2N7000 catalog entry");
         Self::new(ChannelType::N, c.vt, c.kp, c.lambda)
     }
 
     /// BS170 N-channel MOSFET.
     pub fn n_bs170() -> Self {
-        let c = crate::catalog::mosfets::lookup("BS170").unwrap();
+        let c = crate::catalog::mosfets::lookup("BS170").expect("BS170 catalog entry");
         Self::new(ChannelType::N, c.vt, c.kp, c.lambda)
     }
 
