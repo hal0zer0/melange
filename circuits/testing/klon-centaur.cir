@@ -1,0 +1,158 @@
+Klon Centaur Gold Edition
+* Bill Finnegan, 1994 — faithful circuit model
+* Copyright (c) 2026 Melange Contributors
+* License: MIT OR Apache-2.0
+*
+* SIGNAL PATH:
+*   Input -> Buffer (U1A) -> splits into 3 parallel paths:
+*     1. Gain (U1B) -> Ge clipping (D2/D3) ----\
+*     2. Feedforward 1 (clean bass, always on) --+--> Summing (U2A) -> Tone (U2B) -> Output
+*     3. Feedforward 2 (clean variable, ganged) -/
+*
+* POWER: VCC=9V (U1), V2+=18V (U2+), V-=-9V (U2-), VB+=4.5V (bias)
+* NONLINEAR: 2x 1N34A germanium diodes, shunt to VB+ (M=2)
+* POTS: Gain (100kB dual-gang), Treble (10k wiper), Output (10k wiper)
+*
+* Key innovation: dual-ganged pot crossfades clean/clipped signal.
+* At low gain: mostly clean (transparent). At high gain: mostly clipped.
+* 27V headroom on U2 (charge pump) prevents post-clipping compression.
+
+* --- Device Models ---
+.model TL072_9V OA(AOL=200000 ROUT=50 GBW=3MEG VCC=9 VEE=0)
+.model TL072_27V OA(AOL=200000 ROUT=50 GBW=3MEG VCC=18 VEE=-9)
+.model D1N34A D(IS=2.6e-6 N=1.6 RS=7)
+
+* --- Power Supply ---
+* Charge pump modeled as ideal DC sources
+Vcc vcc 0 DC 9
+V2p v2p 0 DC 18
+Vneg vneg 0 DC -9
+Vbias vbias 0 DC 4.5
+
+* ============================================================
+* INPUT BUFFER (U1A — unity-gain follower)
+* Guitar -> R1 (ESD) -> C1 (DC block) -> U1A(+)
+* R2 biases input to VB+ (4.5V)
+* ============================================================
+R1 in buf_ac 10k
+C1 buf_ac buf_in 100n
+R2 buf_in vbias 1M
+U1A buf_in buf_out buf_out TL072_9V
+
+* ============================================================
+* GAIN STAGE (U1B — non-inverting amp, bandpass ~1kHz)
+* Gain = 1 + R12 / (R11 + R_gain + R3)
+*   Min gain (R_gain=100k): 4.6x (13 dB)
+*   Max gain (R_gain=0):   25.8x (28 dB)
+* C7/R11 HP at ~130 Hz, C8/R12 LP at ~970 Hz -> mid hump
+* ============================================================
+C3 buf_out gain_in 100n
+
+U1B gain_in gain_inv gain_out TL072_9V
+
+* Feedback: R12 || C8 from output to inverting input
+R12 gain_out gain_inv 422k
+C8 gain_out gain_inv 390p
+
+* Ground leg: R11 || C7 -> R_gain (pot) -> R3 -> VB+
+R11 gain_inv gain_gnd 15k
+C7 gain_inv gain_gnd 82n
+R_gain gain_gnd gain_r3 100k
+R3 gain_r3 vbias 2k
+
+* Input-to-ground coupling: C5 || R6 (frequency shaping)
+C5 gain_in gain_gnd 68n
+R6 gain_in gain_gnd 10k
+
+* ============================================================
+* CLIPPING STAGE (D2/D3 — shunt germanium to VB+)
+* Diodes are anti-parallel, shunt topology (NOT feedback).
+* At low gain: diodes inactive, clipping from op-amp rails.
+* At high gain: germanium soft knee engages (~0.3V Vf).
+* R16 provides DC bias path to VB+.
+* ============================================================
+C9 gain_out clip_ac 1u
+R13 clip_ac diode_jct 1k
+D2 diode_jct vbias D1N34A
+D3 vbias diode_jct D1N34A
+R16 diode_jct vbias 47k
+C10 diode_jct sum_inv 1u
+
+* ============================================================
+* FEEDFORWARD 1 (clean bass — always on)
+* LP filter: R7 + C16 to VB+, fc ~ 106 Hz
+* Preserves clean low end regardless of gain setting.
+* ============================================================
+R7 gain_in ff1_jct 1.5k
+C16 ff1_jct vbias 1u
+R19 ff1_jct sum_inv 15k
+
+* ============================================================
+* FEEDFORWARD 2 (clean variable — gain-dependent)
+* R5 || C4 input coupling, R8 series, R_blend (ganged pot).
+* GAIN2 inversely tracks GAIN1: high gain -> high R_blend
+* (attenuates clean), low gain -> low R_blend (passes clean).
+* Multi-branch filtering: R9/C6, R15/C11 shunts to VB+;
+* R17 || (R18+C12) to summing junction.
+* ============================================================
+R5 gain_in ff2_pre 5.1k
+C4 gain_in ff2_pre 68n
+R8 ff2_pre ff2_r8 1.5k
+R_blend ff2_r8 ff2_post 100k
+
+* Shunt LP filters to VB+
+R9 ff2_post ff2_r9 1k
+C6 ff2_r9 vbias 390n
+R15 ff2_post ff2_r15 22k
+C11 ff2_r15 vbias 2.2n
+
+* Parallel paths to summing junction
+R17 ff2_post sum_inv 27k
+R18 ff2_post ff2_c12 12k
+C12 ff2_c12 sum_inv 27n
+
+* ============================================================
+* SUMMING AMPLIFIER (U2A — inverting summer)
+* Combines clipped + FF1 + FF2 paths.
+* R20 || C13 feedback, LP at ~495 Hz.
+* Powered by -9V/+18V (27V headroom — never clips).
+* ============================================================
+U2A vbias sum_inv sum_out TL072_27V
+R20 sum_out sum_inv 392k
+C13 sum_out sum_inv 820p
+
+* ============================================================
+* TONE CONTROL (U2B — active high-shelf)
+* R22 input, R24 feedback (both 100k -> unity at DC).
+* C14 + treble wiper creates variable high-shelf:
+*   CW -> R21 -> sum_out (input): boosts treble
+*   CCW -> R23 -> tone_out (output): cuts treble
+* Shelf fc ~ 408 Hz, range -8 dB to +18 dB.
+* ============================================================
+R22 sum_out tone_inv 100k
+R24 tone_out tone_inv 100k
+C14 tone_inv tone_w 3.9n
+R_treble_cw tone_r21 tone_w 5k
+R_treble_ccw tone_w tone_r23 5k
+R21 sum_out tone_r21 1.8k
+R23 tone_r23 tone_out 4.7k
+U2B vbias tone_inv tone_out TL072_27V
+
+* ============================================================
+* OUTPUT STAGE
+* C15 DC block, R25 series, OUTPUT wiper pot, R28 pulldown.
+* ============================================================
+C15 tone_out out_ac 4.7u
+R25 out_ac out_top 560
+R_out_cw out_top out 5k
+R_out_ccw out 0 5k
+R28 out 0 100k
+
+* --- Controls ---
+.pot R_gain 100 100k
+.pot R_blend 100 100k
+.wiper R_treble_cw R_treble_ccw 10k 0.5 "Treble"
+.wiper R_out_cw R_out_ccw 10k 0.85 "Output"
+.gang "Gain" R_gain !R_blend
+
+.END
