@@ -2,7 +2,7 @@
 //!
 //! Parses a subset of SPICE sufficient for audio circuits:
 //! - Components: R, C, L, V (DC/AC), I, D, Q, J, M, U (op-amp), E (VCVS), G (VCCS), Y (VCA), X
-//! - Directives: .model, .subckt, .param, .pot, .switch, .input_impedance, .end
+//! - Directives: .model, .subckt, .param, .pot, .wiper, .switch, .input_impedance, .end
 //!
 //! The parser builds an AST (Abstract Syntax Tree) representation
 //! of the circuit that can be processed by the MNA assembler.
@@ -24,6 +24,10 @@ pub struct Netlist {
     pub pots: Vec<PotDirective>,
     /// Switch directives (.switch)
     pub switches: Vec<SwitchDirective>,
+    /// Wiper potentiometer directives (.wiper)
+    pub wipers: Vec<WiperDirective>,
+    /// Gang directives (.gang) — links multiple pots/wipers to one parameter
+    pub gangs: Vec<GangDirective>,
     /// Coupling directives (K elements for coupled inductors / transformers)
     pub couplings: Vec<CouplingDirective>,
     /// Delay feedback node names (.delay_feedback node1 node2 ...)
@@ -59,6 +63,25 @@ pub struct PotDirective {
     pub label: Option<String>,
 }
 
+/// A wiper potentiometer directive (.wiper R_cw R_ccw total_R).
+///
+/// Models a 3-terminal pot with top, wiper, and bottom lugs.
+/// Internally expands into two linked `PotDirective` entries that share
+/// a wiper node. A single UI parameter (position 0.0–1.0) controls both.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WiperDirective {
+    /// Name of the clockwise (top→wiper) leg resistor
+    pub resistor_cw: String,
+    /// Name of the counter-clockwise (wiper→bottom) leg resistor
+    pub resistor_ccw: String,
+    /// Total resistance (R_cw + R_ccw = total)
+    pub total_resistance: f64,
+    /// Default wiper position (0.0–1.0). None means 0.5.
+    pub default_position: Option<f64>,
+    /// Optional human-readable label (e.g. "Tone")
+    pub label: Option<String>,
+}
+
 /// A switch directive (.switch C1,L1 val0a/val0b val1a/val1b ...).
 ///
 /// Defines a rotary switch that selects among discrete component values.
@@ -72,6 +95,32 @@ pub struct SwitchDirective {
     pub positions: Vec<Vec<f64>>,
     /// Optional human-readable label (e.g. "Bright")
     pub label: Option<String>,
+}
+
+/// A gang directive (.gang "Label" member1 member2 ...).
+///
+/// Links multiple `.pot` and/or `.wiper` entries to a single UI parameter.
+/// All members are controlled by one position value (0.0–1.0).
+/// Pot members map position to resistance: R = max - pos * (max - min).
+/// Wiper members map position directly to wiper position.
+/// Prefix a member name with `!` to invert its response.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GangDirective {
+    /// Human-readable label for the gang parameter (e.g. "Gain")
+    pub label: String,
+    /// Members of this gang (pot or wiper component references)
+    pub members: Vec<GangMember>,
+    /// Default position (0.0–1.0). None means 0.5.
+    pub default_position: Option<f64>,
+}
+
+/// A member of a gang directive.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GangMember {
+    /// Resistor name (must exist in a .pot or .wiper directive)
+    pub resistor_name: String,
+    /// If true, this member's response is inverted (1.0 - pos)
+    pub inverted: bool,
 }
 
 /// A coupling directive (K element) for coupled inductors / transformers.
@@ -101,6 +150,8 @@ impl Netlist {
             params: Vec::new(),
             pots: Vec::new(),
             switches: Vec::new(),
+            wipers: Vec::new(),
+            gangs: Vec::new(),
             couplings: Vec::new(),
             delay_feedback_nodes: Vec::new(),
             input_impedance: None,
@@ -932,6 +983,7 @@ impl Parser {
             }
         }
 
+        Self::expand_wipers(&mut netlist)?;
         Self::validate_netlist(&netlist)?;
         Ok(netlist)
     }
@@ -989,6 +1041,53 @@ impl Parser {
                     ),
                 });
             }
+        }
+
+        // Verify all .wiper directives: both resistors must share exactly one node
+        for wiper in &netlist.wipers {
+            if wiper.resistor_cw.contains('.') || wiper.resistor_ccw.contains('.') {
+                continue; // Will be validated after subcircuit expansion
+            }
+            let find_nodes = |name: &str| -> Option<(String, String)> {
+                netlist.elements.iter().find_map(|e| {
+                    if let Element::Resistor {
+                        name: rn,
+                        n_plus,
+                        n_minus,
+                        ..
+                    } = e
+                    {
+                        if rn.eq_ignore_ascii_case(name) {
+                            Some((n_plus.clone(), n_minus.clone()))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                })
+            };
+            if let (Some((cw_a, cw_b)), Some((ccw_a, ccw_b))) = (
+                find_nodes(&wiper.resistor_cw),
+                find_nodes(&wiper.resistor_ccw),
+            ) {
+                let cw_nodes = [cw_a.as_str(), cw_b.as_str()];
+                let ccw_nodes = [ccw_a.as_str(), ccw_b.as_str()];
+                let shared: Vec<&&str> = cw_nodes
+                    .iter()
+                    .filter(|n| ccw_nodes.iter().any(|m| m.eq_ignore_ascii_case(n)))
+                    .collect();
+                if shared.is_empty() {
+                    return Err(ParseError {
+                        line: 0,
+                        message: format!(
+                            ".wiper resistors '{}' and '{}' do not share a node (wiper terminal)",
+                            wiper.resistor_cw, wiper.resistor_ccw
+                        ),
+                    });
+                }
+            }
+            // If resistors not found, the pot validation above already caught it
         }
 
         // Verify all .switch directives reference existing components
@@ -1116,6 +1215,47 @@ impl Parser {
         // Catches obviously wrong values early instead of at solver runtime.
         for model in &netlist.models {
             Self::validate_model_params(model)?;
+        }
+
+        // Validate .gang directives: each member must exist in .pot or .wiper,
+        // no member may appear in multiple gangs.
+        {
+            let mut gang_claimed: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for gang in &netlist.gangs {
+                for member in &gang.members {
+                    let name_upper = member.resistor_name.to_ascii_uppercase();
+
+                    // Check if this member is already claimed by another gang
+                    if !gang_claimed.insert(name_upper.clone()) {
+                        return Err(ParseError {
+                            line: 0,
+                            message: format!(
+                                ".gang: resistor '{}' appears in multiple .gang directives",
+                                member.resistor_name
+                            ),
+                        });
+                    }
+
+                    // Check if this member exists in a .pot or .wiper directive
+                    let in_pot = netlist
+                        .pots
+                        .iter()
+                        .any(|p| p.resistor_name.eq_ignore_ascii_case(&name_upper));
+                    let in_wiper = netlist.wipers.iter().any(|w| {
+                        w.resistor_cw.eq_ignore_ascii_case(&name_upper)
+                            || w.resistor_ccw.eq_ignore_ascii_case(&name_upper)
+                    });
+                    if !in_pot && !in_wiper {
+                        return Err(ParseError {
+                            line: 0,
+                            message: format!(
+                                ".gang: member '{}' not found in any .pot or .wiper directive",
+                                member.resistor_name
+                            ),
+                        });
+                    }
+                }
+            }
         }
 
         Ok(())
@@ -1332,6 +1472,14 @@ impl Parser {
             ".pot" => {
                 let pot = self.parse_pot_directive(&parts, netlist)?;
                 netlist.pots.push(pot);
+            }
+            ".wiper" => {
+                let wiper = self.parse_wiper_directive(&parts, netlist)?;
+                netlist.wipers.push(wiper);
+            }
+            ".gang" => {
+                let gang = self.parse_gang_directive(&parts)?;
+                netlist.gangs.push(gang);
             }
             ".switch" => {
                 let sw = self.parse_switch_directive(&parts, netlist)?;
@@ -1563,6 +1711,229 @@ impl Parser {
             max_value,
             default_value,
             label,
+        })
+    }
+
+    fn parse_wiper_directive(
+        &self,
+        parts: &[&str],
+        netlist: &Netlist,
+    ) -> Result<WiperDirective, ParseError> {
+        // .wiper R_cw R_ccw total_R [default_pos] ["Label"]
+        self.require_parts(parts, 4, ".wiper R_cw R_ccw total_resistance")?;
+
+        let resistor_cw = parts[1].to_string();
+        let resistor_ccw = parts[2].to_string();
+
+        // Both must be resistors
+        if !resistor_cw.to_ascii_uppercase().starts_with('R') {
+            return Err(self.error(format!(
+                ".wiper CW leg must be a resistor (name starting with R), got '{}'",
+                resistor_cw
+            )));
+        }
+        if !resistor_ccw.to_ascii_uppercase().starts_with('R') {
+            return Err(self.error(format!(
+                ".wiper CCW leg must be a resistor (name starting with R), got '{}'",
+                resistor_ccw
+            )));
+        }
+        if resistor_cw.eq_ignore_ascii_case(&resistor_ccw) {
+            return Err(self.error(
+                ".wiper CW and CCW legs must be different resistors",
+            ));
+        }
+
+        let total_resistance = self.parse_positive_value(parts[3], ".wiper total_resistance")?;
+        if total_resistance <= 20.0 {
+            return Err(self.error(format!(
+                ".wiper total_resistance ({}) must be > 20 ohms",
+                total_resistance
+            )));
+        }
+
+        // Check that neither resistor is already claimed by a .pot or another .wiper
+        let all_claimed: Vec<&str> = netlist
+            .pots
+            .iter()
+            .map(|p| p.resistor_name.as_str())
+            .chain(
+                netlist
+                    .wipers
+                    .iter()
+                    .flat_map(|w| [w.resistor_cw.as_str(), w.resistor_ccw.as_str()]),
+            )
+            .collect();
+        for name in [&resistor_cw, &resistor_ccw] {
+            if all_claimed
+                .iter()
+                .any(|c| c.eq_ignore_ascii_case(name))
+            {
+                return Err(self.error(format!(
+                    ".wiper resistor '{}' is already used by a .pot or .wiper directive",
+                    name
+                )));
+            }
+        }
+
+        // Each wiper adds 2 internal pots
+        if netlist.pots.len() + (netlist.wipers.len() + 1) * 2 > 32 {
+            return Err(self.error(
+                "Maximum of 32 combined .pot + .wiper leg entries supported",
+            ));
+        }
+
+        // Optional default position and label
+        let mut default_position = None;
+        let mut label_start = 4;
+
+        if parts.len() > 4 && !parts[4].starts_with('"') {
+            let pos: f64 = parts[4].parse().map_err(|_| {
+                self.error(format!(
+                    ".wiper default_position '{}' is not a valid number",
+                    parts[4]
+                ))
+            })?;
+            if !(0.0..=1.0).contains(&pos) {
+                return Err(self.error(format!(
+                    ".wiper default_position ({}) must be between 0.0 and 1.0",
+                    pos
+                )));
+            }
+            default_position = Some(pos);
+            label_start = 5;
+        }
+
+        let label = if parts.len() > label_start {
+            let rest = parts[label_start..].join(" ");
+            if rest.starts_with('"') {
+                let trimmed = rest.trim_matches('"');
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        Ok(WiperDirective {
+            resistor_cw,
+            resistor_ccw,
+            total_resistance,
+            default_position,
+            label,
+        })
+    }
+
+    /// Expand `.wiper` directives into two `PotDirective` entries each.
+    ///
+    /// Called after parsing but before validation. Each wiper creates two pots
+    /// with complementary default values and a min of 1Ω (wiper contact resistance).
+    fn expand_wipers(netlist: &mut Netlist) -> Result<(), ParseError> {
+        /// Minimum resistance per wiper leg (models wiper contact resistance).
+        /// Must be ≥10Ω for Sherman-Morrison numerical stability at extreme positions.
+        /// Real pots have 1–50Ω contact resistance; 10Ω is conservative.
+        const MIN_LEG_R: f64 = 10.0;
+
+        for wiper in &netlist.wipers {
+            let pos = wiper.default_position.unwrap_or(0.5);
+            let r_total = wiper.total_resistance;
+            // pos=1.0 → wiper at CW end → R_cw≈0, R_ccw≈total
+            let r_cw = (1.0 - pos) * (r_total - 2.0 * MIN_LEG_R) + MIN_LEG_R;
+            let r_ccw = pos * (r_total - 2.0 * MIN_LEG_R) + MIN_LEG_R;
+
+            netlist.pots.push(PotDirective {
+                resistor_name: wiper.resistor_cw.clone(),
+                min_value: MIN_LEG_R,
+                max_value: r_total - MIN_LEG_R,
+                default_value: Some(r_cw),
+                label: None, // label lives on the wiper group
+            });
+            netlist.pots.push(PotDirective {
+                resistor_name: wiper.resistor_ccw.clone(),
+                min_value: MIN_LEG_R,
+                max_value: r_total - MIN_LEG_R,
+                default_value: Some(r_ccw),
+                label: None,
+            });
+        }
+        Ok(())
+    }
+
+    /// Parse a `.gang` directive: `.gang "Label" member1 [!]member2 ... [default]`
+    ///
+    /// Groups existing `.pot` and `.wiper` entries under a single UI parameter.
+    /// Members are referenced by resistor name. Prefix with `!` to invert.
+    /// Optional trailing float is the default position (0.0–1.0).
+    fn parse_gang_directive(&self, parts: &[&str]) -> Result<GangDirective, ParseError> {
+        // .gang "Label" member1 member2 ... [default_pos]
+        if parts.len() < 4 {
+            return Err(ParseError {
+                line: 0,
+                message: ".gang requires at least a label and two member names".to_string(),
+            });
+        }
+
+        // Parse label (must be quoted)
+        let label_str = parts[1];
+        let label = if label_str.starts_with('"') && label_str.ends_with('"') && label_str.len() >= 2
+        {
+            label_str[1..label_str.len() - 1].to_string()
+        } else {
+            return Err(ParseError {
+                line: 0,
+                message: ".gang label must be a quoted string".to_string(),
+            });
+        };
+
+        // Parse members and optional trailing default position
+        let mut members = Vec::new();
+        let mut default_position = None;
+
+        for &part in &parts[2..] {
+            // Try to parse as a float (default position) — only valid as last arg
+            if let Ok(pos) = part.parse::<f64>() {
+                if pos >= 0.0 && pos <= 1.0 {
+                    default_position = Some(pos);
+                    continue;
+                }
+            }
+
+            // Parse as a member reference (optionally prefixed with !)
+            let (inverted, name) = if let Some(stripped) = part.strip_prefix('!') {
+                (true, stripped)
+            } else {
+                (false, part)
+            };
+
+            if name.is_empty() {
+                return Err(ParseError {
+                    line: 0,
+                    message: ".gang member name cannot be empty".to_string(),
+                });
+            }
+
+            members.push(GangMember {
+                resistor_name: name.to_ascii_uppercase(),
+                inverted,
+            });
+        }
+
+        if members.len() < 2 {
+            return Err(ParseError {
+                line: 0,
+                message: ".gang requires at least two members".to_string(),
+            });
+        }
+
+        Ok(GangDirective {
+            label,
+            members,
+            default_position,
         })
     }
 

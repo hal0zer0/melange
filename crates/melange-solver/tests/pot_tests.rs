@@ -263,8 +263,8 @@ fn test_codegen_pot_constants_emitted() {
     let code = generate_code(RC_POT_SPICE);
 
     // Check pot constants are present
-    assert!(code.contains("POT_0_SU"), "Missing POT_0_SU constant");
-    assert!(code.contains("POT_0_USU"), "Missing POT_0_USU constant");
+    assert!(code.contains("POT_0_G_NOM"), "Missing POT_0_G_NOM constant");
+    assert!(code.contains("POT_0_MIN_R"), "Missing POT_0_MIN_R constant");
     assert!(code.contains("POT_0_G_NOM"), "Missing POT_0_G_NOM constant");
     assert!(code.contains("POT_0_MIN_R"), "Missing POT_0_MIN_R constant");
     assert!(code.contains("POT_0_MAX_R"), "Missing POT_0_MAX_R constant");
@@ -282,41 +282,38 @@ fn test_codegen_pot_state_field() {
 }
 
 #[test]
-fn test_codegen_pot_sm_scale_helper() {
+fn test_codegen_pot_set_method() {
     let code = generate_code(RC_POT_SPICE);
 
-    // SM scale helper should exist
+    // Per-block rebuild: set_pot_0 method should exist
     assert!(
-        code.contains("fn sm_scale_0("),
-        "Missing sm_scale_0 helper function"
+        code.contains("fn set_pot_0("),
+        "Missing set_pot_0 method for per-block rebuild"
     );
-    assert!(code.contains("delta_g"), "SM helper should compute delta_g");
+    assert!(code.contains("rebuild_matrices"), "set_pot should call rebuild_matrices");
 }
 
 #[test]
 fn test_codegen_pot_process_sample_corrections() {
     let code = generate_code(RC_POT_SPICE);
 
-    // Process sample should have sequential SM setup with cross-corrections
+    // Per-block rebuild: process_sample should NOT have SM corrections
     assert!(
-        code.contains("delta_g_0"),
-        "Missing delta_g_0 in sequential SM setup"
+        !code.contains("delta_g_0"),
+        "SM delta_g should not be in process_sample (per-block rebuild)"
     );
     assert!(
-        code.contains("su_c0"),
-        "Missing corrected su_c0 in sequential SM setup"
+        !code.contains("su_c0"),
+        "SM su_c should not be in process_sample"
+    );
+    // Should have set_pot_0 method (from rebuild_matrices infrastructure)
+    assert!(
+        code.contains("fn set_pot_0"),
+        "Missing set_pot_0 method for per-block rebuild"
     );
     assert!(
-        code.contains("scale_c0"),
-        "Missing corrected scale_c0 in sequential SM setup"
-    );
-    assert!(
-        code.contains("let mut rhs"),
-        "RHS should be mutable when pots exist"
-    );
-    assert!(
-        code.contains("let mut v_pred"),
-        "v_pred should be mutable when pots exist"
+        code.contains("fn rebuild_matrices"),
+        "Missing rebuild_matrices method"
     );
 }
 
@@ -324,17 +321,9 @@ fn test_codegen_pot_process_sample_corrections() {
 fn test_codegen_pot_nr_k_correction() {
     let code = generate_code(DIODE_POT_SPICE);
 
-    // NR solver should use precomputed k_eff (corrected K matrix)
-    assert!(code.contains("k_eff"), "Missing k_eff in NR solver");
-    // k_eff is computed from nv_su_c and u_ni_c in process_sample
-    assert!(
-        code.contains("nv_su_c0"),
-        "Missing corrected nv_su_c0 for k_eff computation"
-    );
-    assert!(
-        code.contains("u_ni_c0"),
-        "Missing corrected u_ni_c0 for k_eff computation"
-    );
+    // Per-block rebuild: NR solver should use state.k directly (not k_eff)
+    assert!(!code.contains("k_eff"), "SM k_eff should not be in NR solver (per-block rebuild)");
+    assert!(code.contains("state.k["), "NR solver should use state.k directly");
 }
 
 #[test]
@@ -375,7 +364,7 @@ fn test_codegen_nonlinear_pot_compiles() {
         code.contains("fn solve_nonlinear("),
         "Missing solve_nonlinear"
     );
-    assert!(code.contains("fn sm_scale_0("), "Missing sm_scale_0");
+    assert!(code.contains("fn set_pot_0("), "Missing set_pot_0");
 }
 
 // ---------------------------------------------------------------------------
@@ -416,12 +405,12 @@ fn test_grounded_pot_codegen() {
     let code = generate_code(GROUNDED_POT_SPICE);
 
     assert!(
-        code.contains("POT_0_SU"),
-        "Missing POT_0_SU for grounded pot"
+        code.contains("POT_0_G_NOM"),
+        "Missing POT_0_G_NOM for grounded pot"
     );
     assert!(
-        code.contains("fn sm_scale_0("),
-        "Missing sm_scale_0 for grounded pot"
+        code.contains("fn set_pot_0("),
+        "Missing set_pot_0 for grounded pot"
     );
 
     // Grounded pot should only reference one node in A_neg correction
@@ -588,13 +577,11 @@ fn test_two_pot_pipeline() {
 fn test_two_pot_codegen() {
     let code = generate_code(TWO_POT_SPICE);
 
-    // Both pots should have constants and helpers
-    assert!(code.contains("POT_0_SU"), "Missing POT_0_SU");
-    assert!(code.contains("POT_1_SU"), "Missing POT_1_SU");
-    assert!(code.contains("POT_0_USU"), "Missing POT_0_USU");
-    assert!(code.contains("POT_1_USU"), "Missing POT_1_USU");
-    assert!(code.contains("fn sm_scale_0("), "Missing sm_scale_0");
-    assert!(code.contains("fn sm_scale_1("), "Missing sm_scale_1");
+    // Both pots should have constants and setters
+    assert!(code.contains("POT_0_G_NOM"), "Missing POT_0_G_NOM");
+    assert!(code.contains("POT_1_G_NOM"), "Missing POT_1_G_NOM");
+    assert!(code.contains("fn set_pot_0("), "Missing set_pot_0");
+    assert!(code.contains("fn set_pot_1("), "Missing set_pot_1");
     assert!(
         code.contains("pot_0_resistance"),
         "Missing pot_0_resistance"
@@ -604,12 +591,12 @@ fn test_two_pot_codegen() {
         "Missing pot_1_resistance"
     );
     assert!(
-        code.contains("delta_g_0"),
-        "Missing delta_g_0 in process_sample"
+        code.contains("fn set_pot_0"),
+        "Missing set_pot_0 method"
     );
     assert!(
-        code.contains("delta_g_1"),
-        "Missing delta_g_1 in process_sample"
+        code.contains("fn set_pot_1"),
+        "Missing set_pot_1 method"
     );
 }
 
@@ -880,18 +867,14 @@ fn test_grounded_pot_diode_pipeline() {
 fn test_codegen_sni_correction() {
     let code = generate_code(DIODE_POT_SPICE);
 
-    // S*N_i correction block should exist (M>0 and pots exist)
+    // Per-block rebuild: no SM S*N_i correction
     assert!(
-        code.contains("u_ni_dot_inl_0"),
-        "Missing u_ni_dot_inl in sni correction"
+        !code.contains("u_ni_dot_inl"),
+        "SM u_ni_dot_inl should not be present (per-block rebuild)"
     );
     assert!(
-        code.contains("sni_factor_0"),
-        "Missing sni_factor in sni correction"
-    );
-    assert!(
-        code.contains("let mut v = compute_final_voltages"),
-        "v should be mutable with pot+nonlinear"
+        !code.contains("sni_factor"),
+        "SM sni_factor should not be present (per-block rebuild)"
     );
 }
 
@@ -915,11 +898,11 @@ fn test_codegen_no_sni_correction_linear() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn test_codegen_nan_guard_in_sm_scale() {
+fn test_codegen_nan_guard_in_set_pot() {
     let code = generate_code(RC_POT_SPICE);
     assert!(
-        code.contains("if !r.is_finite()"),
-        "sm_scale should have NaN/Inf guard"
+        code.contains("if !resistance.is_finite()"),
+        "set_pot should have NaN/Inf guard"
     );
 }
 
@@ -956,31 +939,40 @@ fn test_codegen_sanitization_resets_pot() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn test_codegen_jacobian_uses_corrected_k() {
+fn test_codegen_jacobian_uses_state_k() {
     let code = generate_code(DIODE_POT_SPICE);
 
-    // The Jacobian should use precomputed k_eff (sequential SM corrected K)
+    // Per-block rebuild: Jacobian should use state.k directly (exact from rebuild)
     assert!(
-        code.contains("k_eff[0][0]"),
-        "Jacobian should use k_eff for SM-corrected K matrix"
+        code.contains("state.k["),
+        "Jacobian should use state.k (exact from per-block rebuild)"
+    );
+    assert!(
+        !code.contains("k_eff"),
+        "SM k_eff should not be present"
     );
 }
 
 // ---------------------------------------------------------------------------
-// S correction uses su^T*rhs (not u^T*rhs)
+// Per-block rebuild: no SM S correction in process_sample
 // ---------------------------------------------------------------------------
 
 #[test]
-fn test_codegen_s_correction_uses_su() {
+fn test_codegen_no_sm_s_correction() {
     let code = generate_code(RC_POT_SPICE);
 
-    // The S correction should compute su_c0^T * rhs using corrected local vectors
+    // Per-block rebuild: no SM corrections in process_sample
     assert!(
-        code.contains("su_c0[_k] * rhs[_k]"),
-        "S correction should use corrected su_c0 dot rhs via runtime loop"
+        !code.contains("su_dot_rhs"),
+        "SM su_dot_rhs should not be in process_sample (per-block rebuild)"
     );
     assert!(
-        code.contains("su_dot_rhs"),
-        "S correction variable should be named su_dot_rhs"
+        !code.contains("sm_scale"),
+        "SM sm_scale should not be in process_sample"
+    );
+    // Should have rebuild_matrices instead
+    assert!(
+        code.contains("fn rebuild_matrices"),
+        "Should have rebuild_matrices method"
     );
 }

@@ -89,6 +89,10 @@ pub struct MnaSystem {
     /// When a .pot has a default value, the G matrix is stamped at this value
     /// (not the component declaration value). Empty for circuits without .pot defaults.
     pub pot_default_overrides: HashMap<String, f64>,
+    /// Wiper potentiometer groups (links two pots as complementary legs).
+    pub wiper_groups: Vec<WiperGroupInfo>,
+    /// Gang groups (links multiple pots/wipers under one parameter).
+    pub gang_groups: Vec<GangGroupInfo>,
 }
 
 /// Augmented-MNA extra row/column info for a VCVS element.
@@ -295,7 +299,16 @@ pub struct OpampInfo {
     pub r_out: f64,
     /// Output saturation voltage [V] (default: infinity = no saturation).
     /// Typical NE5534: 13.0. When finite, output is clamped to ±VSAT.
+    /// Superseded by VCC/VEE when those are specified.
     pub vsat: f64,
+    /// Positive supply rail voltage [V] (default: infinity = no upper clamp).
+    /// When finite, output is clamped to ≤ VCC. Takes priority over VSAT.
+    /// Example: VCC=9 for single-supply 9V, VCC=18 for charge-pump 18V rail.
+    pub vcc: f64,
+    /// Negative supply rail voltage [V] (default: -infinity = no lower clamp).
+    /// When finite, output is clamped to ≥ VEE. Takes priority over VSAT.
+    /// Example: VEE=0 for single-supply, VEE=-9 for charge-pump negative rail.
+    pub vee: f64,
     /// Gain-bandwidth product [Hz] (default: infinity = no dominant pole).
     /// When finite, a dominant pole capacitor C = AOL / (2π × GBW × ROUT)
     /// is stamped at an internal Boyle gain node.
@@ -381,6 +394,40 @@ pub struct PotInfo {
     pub grounded: bool,
 }
 
+/// Wiper potentiometer group — links two `PotInfo` entries as complementary legs.
+///
+/// A single UI parameter (wiper position 0.0–1.0) controls both resistances:
+/// R_cw = pos * (total - 2) + 1, R_ccw = (1-pos) * (total - 2) + 1.
+#[derive(Debug, Clone)]
+pub struct WiperGroupInfo {
+    /// Index into `MnaSystem::pots` for the CW (top→wiper) leg
+    pub cw_pot_index: usize,
+    /// Index into `MnaSystem::pots` for the CCW (wiper→bottom) leg
+    pub ccw_pot_index: usize,
+    /// Total resistance (R_cw + R_ccw = total)
+    pub total_resistance: f64,
+    /// Default wiper position (0.0–1.0)
+    pub default_position: f64,
+    /// Optional human-readable label
+    pub label: Option<String>,
+}
+
+/// Gang group — links multiple `.pot` and/or `.wiper` entries under a single parameter.
+///
+/// All members are controlled by one position value (0.0–1.0).
+/// Pot members: R = max - pos * (max - min). Wiper members: wiper_pos = pos.
+#[derive(Debug, Clone)]
+pub struct GangGroupInfo {
+    /// Human-readable label for the gang parameter
+    pub label: String,
+    /// Pot members: (pot_index into MnaSystem::pots, inverted)
+    pub pot_members: Vec<(usize, bool)>,
+    /// Wiper group members: (wiper_group_index into MnaSystem::wiper_groups, inverted)
+    pub wiper_members: Vec<(usize, bool)>,
+    /// Default position (0.0–1.0)
+    pub default_position: f64,
+}
+
 /// Result of building augmented G/C matrices with inductor branch variables.
 ///
 /// Each inductor winding adds an extra variable (branch current) in the system.
@@ -429,6 +476,8 @@ impl MnaSystem {
             bjt_internal_nodes: Vec::new(),
             linearized_bjts: Vec::new(),
             pot_default_overrides: HashMap::new(),
+            wiper_groups: Vec::new(),
+            gang_groups: Vec::new(),
         }
     }
 
@@ -1857,6 +1906,8 @@ impl MnaBuilder {
                             "AOL" => oa.aol = *val,
                             "ROUT" => oa.r_out = *val,
                             "VSAT" => oa.vsat = *val,
+                            "VCC" => oa.vcc = *val,
+                            "VEE" => oa.vee = *val,
                             "GBW" => oa.gbw = *val,
                             _ => log::warn!(
                                 ".model {}: unrecognized parameter '{}' (ignored)",
@@ -1869,16 +1920,31 @@ impl MnaBuilder {
             }
         }
 
-        // Default VSAT when GBW is specified: the Boyle internal node needs
-        // output clamping to prevent runaway. Real op-amps always have finite
-        // output swing. Default to 13V (typical for ±15V supply).
+        // Resolve op-amp output voltage clamps from VCC/VEE/VSAT/GBW.
+        // Priority: VCC/VEE (explicit) > VSAT (symmetric) > GBW auto-default > none.
         for oa in self.opamps.iter_mut() {
-            if oa.gbw.is_finite() && !oa.vsat.is_finite() {
-                oa.vsat = 13.0;
+            // Resolve VCC (upper clamp): VCC > +VSAT > GBW auto-default
+            if !oa.vcc.is_finite() {
+                if oa.vsat.is_finite() {
+                    oa.vcc = oa.vsat;
+                } else if oa.gbw.is_finite() {
+                    oa.vcc = 13.0;
+                }
+            }
+            // Resolve VEE (lower clamp): VEE > -VSAT > GBW auto-default
+            if !oa.vee.is_finite() {
+                if oa.vsat.is_finite() {
+                    oa.vee = -oa.vsat;
+                } else if oa.gbw.is_finite() {
+                    oa.vee = -13.0;
+                }
+            }
+            if oa.vcc.is_finite() || oa.vee.is_finite() {
                 log::debug!(
-                    "Op-amp {}: GBW={:.0}Hz but no VSAT specified, defaulting to ±13V",
+                    "Op-amp {}: output clamp VCC={:.1}V, VEE={:.1}V",
                     oa.name,
-                    oa.gbw
+                    oa.vcc,
+                    oa.vee
                 );
             }
         }
@@ -1977,6 +2043,68 @@ impl MnaBuilder {
             })
             .collect();
         mna.pot_default_overrides = pot_default_overrides;
+
+        // Resolve wiper group directives: find the two pot indices for each wiper
+        for wiper_dir in &netlist.wipers {
+            let cw_idx = mna
+                .pots
+                .iter()
+                .position(|p| p.name.eq_ignore_ascii_case(&wiper_dir.resistor_cw));
+            let ccw_idx = mna
+                .pots
+                .iter()
+                .position(|p| p.name.eq_ignore_ascii_case(&wiper_dir.resistor_ccw));
+            if let (Some(cw), Some(ccw)) = (cw_idx, ccw_idx) {
+                mna.wiper_groups.push(WiperGroupInfo {
+                    cw_pot_index: cw,
+                    ccw_pot_index: ccw,
+                    total_resistance: wiper_dir.total_resistance,
+                    default_position: wiper_dir.default_position.unwrap_or(0.5),
+                    label: wiper_dir.label.clone(),
+                });
+            }
+            // If not found, the pot validation already caught it
+        }
+
+        // Resolve gang directives: link pot/wiper indices
+        for gang_dir in &netlist.gangs {
+            let mut pot_members = Vec::new();
+            let mut wiper_members = Vec::new();
+
+            for member in &gang_dir.members {
+                let name_upper = member.resistor_name.to_ascii_uppercase();
+
+                // Check if this member is a pot
+                if let Some(pot_idx) = mna
+                    .pots
+                    .iter()
+                    .position(|p| p.name.eq_ignore_ascii_case(&name_upper))
+                {
+                    // Check if this pot belongs to a wiper group
+                    let in_wiper = mna.wiper_groups.iter().enumerate().find(|(_, wg)| {
+                        wg.cw_pot_index == pot_idx || wg.ccw_pot_index == pot_idx
+                    });
+                    if let Some((wg_idx, _)) = in_wiper {
+                        // This is a wiper member — add the wiper group (avoid duplicates)
+                        if !wiper_members.iter().any(|&(idx, _): &(usize, bool)| idx == wg_idx) {
+                            wiper_members.push((wg_idx, member.inverted));
+                        }
+                    } else {
+                        // This is a standalone pot member
+                        pot_members.push((pot_idx, member.inverted));
+                    }
+                }
+                // If not found in pots, it might be a wiper resistor name that wasn't
+                // expanded. The parser validation already caught missing references.
+            }
+
+            mna.gang_groups.push(GangGroupInfo {
+                label: gang_dir.label.clone(),
+                pot_members,
+                wiper_members,
+                default_position: gang_dir.default_position.unwrap_or(0.5),
+            });
+        }
 
         // Resolve switch directives
         for sw_dir in &netlist.switches {
@@ -3473,6 +3601,8 @@ impl MnaBuilder {
                     aol: 200_000.0,
                     r_out: 1.0,
                     vsat: f64::INFINITY,
+                    vcc: f64::INFINITY,
+                    vee: f64::NEG_INFINITY,
                     gbw: f64::INFINITY,
                     n_internal_idx: 0,
                 });

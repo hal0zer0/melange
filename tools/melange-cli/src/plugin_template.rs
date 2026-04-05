@@ -34,6 +34,40 @@ pub struct PotParamInfo {
     pub default_resistance: f64,
 }
 
+/// Wiper pot info for plugin parameter generation.
+///
+/// A single position parameter (0.0–1.0) controls two linked pot resistances.
+pub struct WiperParamInfo {
+    /// Wiper group index (0-based, for `wiper_N` param naming)
+    pub wiper_index: usize,
+    /// Index into the pots array for the CW (top→wiper) leg
+    pub cw_pot_index: usize,
+    /// Index into the pots array for the CCW (wiper→bottom) leg
+    pub ccw_pot_index: usize,
+    /// Total resistance (R_cw + R_ccw = total)
+    pub total_resistance: f64,
+    /// Default wiper position (0.0–1.0)
+    pub default_position: f64,
+    /// Human-readable name (e.g., "Tone")
+    pub name: String,
+}
+
+/// Gang info for plugin parameter generation.
+///
+/// A single position parameter (0.0–1.0) controls multiple linked pots/wipers.
+pub struct GangParamInfo {
+    /// Gang index (0-based, for `gang_N` param naming)
+    pub index: usize,
+    /// Human-readable label (e.g., "Gain")
+    pub label: String,
+    /// Default position (0.0–1.0)
+    pub default_position: f64,
+    /// Pot members: (pot_index, min_r, max_r, inverted)
+    pub pot_members: Vec<(usize, f64, f64, bool)>,
+    /// Wiper members: (cw_pot_index, ccw_pot_index, total_r, inverted)
+    pub wiper_members: Vec<(usize, usize, f64, bool)>,
+}
+
 /// Switch info for plugin parameter generation.
 pub struct SwitchParamInfo {
     /// Index (0-based)
@@ -64,6 +98,8 @@ pub fn generate_plugin_project(
     circuit_name: &str,
     with_level_params: bool,
     pots: &[PotParamInfo],
+    wipers: &[WiperParamInfo],
+    gangs: &[GangParamInfo],
     switches: &[SwitchParamInfo],
     num_outputs: usize,
     nodal_mode: bool,
@@ -74,6 +110,8 @@ pub fn generate_plugin_project(
         circuit_name,
         with_level_params,
         pots,
+        wipers,
+        gangs,
         switches,
         num_outputs,
         nodal_mode,
@@ -88,6 +126,8 @@ pub fn generate_plugin_project_with_oversampling(
     circuit_name: &str,
     with_level_params: bool,
     pots: &[PotParamInfo],
+    wipers: &[WiperParamInfo],
+    gangs: &[GangParamInfo],
     switches: &[SwitchParamInfo],
     num_outputs: usize,
     nodal_mode: bool,
@@ -106,6 +146,8 @@ pub fn generate_plugin_project_with_oversampling(
             circuit_name,
             with_level_params,
             pots,
+            wipers,
+            gangs,
             switches,
             num_outputs,
             nodal_mode,
@@ -192,6 +234,8 @@ pub(crate) fn test_generate_lib_rs(
         circuit_name,
         with_level_params,
         pots,
+        &[],
+        &[],
         &[],
         1,
         false,
@@ -280,15 +324,45 @@ fn generate_switch_default(sw: &SwitchParamInfo) -> String {
     )
 }
 
+fn generate_wiper_field(wiper: &WiperParamInfo) -> String {
+    format!(
+        "    #[id = \"wiper_{idx}\"]\n    pub wiper_{idx}: FloatParam,\n",
+        idx = wiper.wiper_index,
+    )
+}
+
+fn generate_wiper_default(wiper: &WiperParamInfo) -> String {
+    let name = wiper.name.replace('\\', "\\\\").replace('"', "\\\"");
+    format!(
+        r#"            wiper_{idx}: FloatParam::new(
+                "{name}",
+                {default},
+                FloatRange::Linear {{
+                    min: 0.0,
+                    max: 1.0,
+                }},
+            )
+            .with_smoother(SmoothingStyle::Linear(10.0)),
+"#,
+        idx = wiper.wiper_index,
+        name = name,
+        default = wiper.default_position,
+    )
+}
+
 fn generate_params_struct(
     with_level_params: bool,
     pots: &[PotParamInfo],
+    wipers: &[WiperParamInfo],
+    gangs: &[GangParamInfo],
     switches: &[SwitchParamInfo],
     wet_dry_mix: bool,
     ear_protection: bool,
 ) -> String {
     let has_any_params = with_level_params
         || !pots.is_empty()
+        || !wipers.is_empty()
+        || !gangs.is_empty()
         || !switches.is_empty()
         || wet_dry_mix
         || ear_protection;
@@ -319,6 +393,33 @@ fn generate_params_struct(
         defaults.push_str(&generate_pot_default(pot));
     }
 
+    for wiper in wipers {
+        fields.push_str(&generate_wiper_field(wiper));
+        defaults.push_str(&generate_wiper_default(wiper));
+    }
+
+    for gang in gangs {
+        fields.push_str(&format!(
+            "    #[id = \"gang_{idx}\"]\n    pub gang_{idx}: FloatParam,\n",
+            idx = gang.index,
+        ));
+        let name = gang.label.replace('\\', "\\\\").replace('"', "\\\"");
+        defaults.push_str(&format!(
+            r#"            gang_{idx}: FloatParam::new(
+                "{name}",
+                {default},
+                FloatRange::Linear {{
+                    min: 0.0,
+                    max: 1.0,
+                }},
+            )
+            .with_smoother(SmoothingStyle::Linear(10.0)),
+"#,
+            idx = gang.index,
+            default = gang.default_position,
+        ));
+    }
+
     for sw in switches {
         fields.push_str(&generate_switch_field(sw));
         defaults.push_str(&generate_switch_default(sw));
@@ -341,6 +442,8 @@ impl Default for CircuitParams {{
 fn generate_process_loop(
     with_level_params: bool,
     pots: &[PotParamInfo],
+    wipers: &[WiperParamInfo],
+    gangs: &[GangParamInfo],
     switches: &[SwitchParamInfo],
     num_outputs: usize,
     nodal_mode: bool,
@@ -364,6 +467,7 @@ fn generate_process_loop(
 
     let has_any_params = with_level_params
         || !pots.is_empty()
+        || !wipers.is_empty()
         || !switches.is_empty()
         || wet_dry_mix
         || ear_protection;
@@ -414,20 +518,10 @@ fn generate_process_loop(
         ""
     };
 
-    // Pot reads: per-sample for DK (SM correction is O(N²)),
-    // per-block for nodal (set_pot triggers O(N³) rebuild)
-    let pot_reads: String = if nodal_mode {
-        String::new() // moved to pot_pre_loop
-    } else {
-        pots.iter()
-            .map(|p| {
-                format!(
-                    "            let pot_{i}_val = self.params.pot_{i}.smoothed.next() as f64;\n",
-                    i = p.index,
-                )
-            })
-            .collect()
-    };
+    // Pot and wiper reads: always per-block (set_pot triggers O(N³) rebuild).
+    // Per-sample SM was removed — per-block rebuild is exact and fast enough.
+    let pot_reads = String::new();
+    let wiper_reads = String::new();
 
     // Switch reads + assignments: done once per buffer before the sample loop
     // (no smoother, and set_switch triggers O(N³) matrix rebuild)
@@ -467,28 +561,25 @@ fn generate_process_loop(
         })
         .collect();
 
-    let pot_assignments: String = if nodal_mode {
-        String::new() // moved to pot_pre_loop
-    } else {
-        pots.iter()
-            .map(|p| {
-                // DK path: set resistance directly (SM correction applied per-sample in process_sample)
-                format!(
-                    "                state.pot_{i}_resistance = pot_{i}_val;\n",
-                    i = p.index,
-                )
-            })
-            .collect()
-    };
+    // Pot and wiper assignments: always per-block (moved to pre-loop).
+    let pot_assignments = String::new();
+    let wiper_assignments = String::new();
 
-    // Nodal pot reads: done once per buffer before the sample loop (O(N³) rebuild per change)
-    // Use smoothed value for zipper-free pot changes (consistent with DK path)
-    let pot_pre_loop: String = if nodal_mode && !pots.is_empty() {
+    // Gang reads: per-sample for DK, per-block for nodal
+    // Gang reads/assignments: always per-block (moved to pre-loop).
+    let gang_reads = String::new();
+    let gang_assignments = String::new();
+
+    // Per-block pot reads: done once per buffer before the sample loop.
+    // set_pot_N() triggers O(N³) rebuild; skips if value unchanged.
+    let pot_pre_loop: String = if !pots.is_empty() {
         let reads: String = pots
             .iter()
             .map(|p| {
+                // Use .value() not .smoothed.next() — smoother can't advance fast enough
+                // at per-block rate. set_pot_N() skips rebuild if value unchanged.
                 format!(
-                    "            let pot_{i}_val = self.params.pot_{i}.smoothed.next() as f64;\n",
+                    "            let pot_{i}_val = self.params.pot_{i}.value() as f64;\n",
                     i = p.index
                 )
             })
@@ -512,7 +603,115 @@ fn generate_process_loop(
                 )
             }).collect()
         };
-        format!("        {{ // Per-block pot updates (nodal: O(N³) rebuild on change)\n{reads}{assigns}        }}\n")
+        format!("        {{ // Per-block pot updates (O(N³) rebuild on change)\n{reads}{assigns}        }}\n")
+    } else {
+        String::new()
+    };
+
+    // Per-block wiper reads: done once per buffer before the sample loop.
+    let wiper_pre_loop: String = if !wipers.is_empty() {
+        let reads: String = wipers
+            .iter()
+            .map(|w| {
+                format!(
+                    "            let wiper_{i}_pos = self.params.wiper_{i}.value() as f64;\n",
+                    i = w.wiper_index
+                )
+            })
+            .collect();
+        let assigns: String = if num_outputs > 1 {
+            wipers
+                .iter()
+                .map(|w| {
+                    format!(
+                        "            self.circuit_state.set_pot_{cw}((1.0 - wiper_{i}_pos) * {range:.17e} + 10.0);\n\
+                         \x20           self.circuit_state.set_pot_{ccw}(wiper_{i}_pos * {range:.17e} + 10.0);\n",
+                        i = w.wiper_index,
+                        cw = w.cw_pot_index,
+                        ccw = w.ccw_pot_index,
+                        range = w.total_resistance - 20.0,
+                    )
+                })
+                .collect()
+        } else {
+            wipers.iter().map(|w| {
+                format!(
+                    "            for state in self.circuit_states.iter_mut() {{\n\
+                     \x20               state.set_pot_{cw}((1.0 - wiper_{i}_pos) * {range:.17e} + 10.0);\n\
+                     \x20               state.set_pot_{ccw}(wiper_{i}_pos * {range:.17e} + 10.0);\n\
+                     \x20           }}\n",
+                    i = w.wiper_index,
+                    cw = w.cw_pot_index,
+                    ccw = w.ccw_pot_index,
+                    range = w.total_resistance - 20.0,
+                )
+            }).collect()
+        };
+        format!("        {{ // Per-block wiper updates (O(N³) rebuild on change)\n{reads}{assigns}        }}\n")
+    } else {
+        String::new()
+    };
+
+    // Per-block gang reads: done once per buffer before the sample loop.
+    let gang_pre_loop: String = if !gangs.is_empty() {
+        let reads: String = gangs
+            .iter()
+            .map(|g| {
+                format!(
+                    "            let gang_{i}_pos = self.params.gang_{i}.smoothed.next() as f64;\n",
+                    i = g.index,
+                )
+            })
+            .collect();
+        let assigns: String = gangs
+            .iter()
+            .flat_map(|g| {
+                let mut lines = Vec::new();
+                for &(pot_idx, min_r, max_r, inverted) in &g.pot_members {
+                    let range = max_r - min_r;
+                    let (r_expr, comment) = if inverted {
+                        (format!("{min_r:.17e} + gang_{gi}_pos * {range:.17e}", gi = g.index), "inverted")
+                    } else {
+                        (format!("{max_r:.17e} - gang_{gi}_pos * {range:.17e}", gi = g.index), "")
+                    };
+                    let _ = comment; // suppress unused warning
+                    if num_outputs > 1 {
+                        lines.push(format!(
+                            "            self.circuit_state.set_pot_{pot_idx}({r_expr});\n",
+                        ));
+                    } else {
+                        lines.push(format!(
+                            "            for state in self.circuit_states.iter_mut() {{\n\
+                             \x20               state.set_pot_{pot_idx}({r_expr});\n\
+                             \x20           }}\n",
+                        ));
+                    }
+                }
+                for &(cw_idx, ccw_idx, total_r, inverted) in &g.wiper_members {
+                    let wrange = total_r - 20.0;
+                    let pos_expr = if inverted {
+                        format!("(1.0 - gang_{}_pos)", g.index)
+                    } else {
+                        format!("gang_{}_pos", g.index)
+                    };
+                    if num_outputs > 1 {
+                        lines.push(format!(
+                            "            self.circuit_state.set_pot_{cw_idx}((1.0 - {pos_expr}) * {wrange:.17e} + 10.0);\n\
+                             \x20           self.circuit_state.set_pot_{ccw_idx}({pos_expr} * {wrange:.17e} + 10.0);\n",
+                        ));
+                    } else {
+                        lines.push(format!(
+                            "            for state in self.circuit_states.iter_mut() {{\n\
+                             \x20               state.set_pot_{cw_idx}((1.0 - {pos_expr}) * {wrange:.17e} + 10.0);\n\
+                             \x20               state.set_pot_{ccw_idx}({pos_expr} * {wrange:.17e} + 10.0);\n\
+                             \x20           }}\n",
+                        ));
+                    }
+                }
+                lines
+            })
+            .collect();
+        format!("        {{ // Per-block gang updates (nodal: O(N³) rebuild on change)\n{reads}{assigns}        }}\n")
     } else {
         String::new()
     };
@@ -565,6 +764,8 @@ fn generate_process_loop(
              \x20               let input_sample = *channel_samples.get_mut(0).unwrap();\n\
              \x20               let state = &mut self.circuit_state;\n\
              {pot_assignments}\
+             {wiper_assignments}\
+             {gang_assignments}\
              {multi_dry_capture}\
              {sample_processing}\
              \x20               for (ch, sample) in channel_samples.into_iter().enumerate() {{\n\
@@ -579,6 +780,8 @@ fn generate_process_loop(
             "\x20           let sample = channel_samples.into_iter().next().unwrap();\n\
              \x20               let state = &mut self.circuit_states[0];\n\
              {pot_assignments}\
+             {wiper_assignments}\
+             {gang_assignments}\
              {dry_capture}\
              {sample_processing}\
              {mix_blend}\
@@ -589,6 +792,8 @@ fn generate_process_loop(
             "\x20           for (ch, sample) in channel_samples.into_iter().enumerate() {{\n\
              \x20               let state = &mut self.circuit_states[ch];\n\
              {pot_assignments}\
+             {wiper_assignments}\
+             {gang_assignments}\
              {dry_capture}\
              {sample_processing}\
              {mix_blend}\
@@ -600,11 +805,15 @@ fn generate_process_loop(
     format!(
         "{switch_pre_loop}\
          {pot_pre_loop}\
+         {wiper_pre_loop}\
+         {gang_pre_loop}\
          {ep_read}\
          \x20       for channel_samples in buffer.iter_samples() {{\n\
          {gain_reads}\
          {mix_read}\
          {pot_reads}\
+         {wiper_reads}\
+         {gang_reads}\
          {inner_loop}\
          \x20       }}"
     )
@@ -671,6 +880,8 @@ fn generate_lib_rs(
     circuit_name: &str,
     with_level_params: bool,
     pots: &[PotParamInfo],
+    wipers: &[WiperParamInfo],
+    gangs: &[GangParamInfo],
     switches: &[SwitchParamInfo],
     num_outputs: usize,
     nodal_mode: bool,
@@ -691,6 +902,8 @@ fn generate_lib_rs(
     let params_struct = generate_params_struct(
         with_level_params,
         pots,
+        wipers,
+        gangs,
         switches,
         options.wet_dry_mix,
         options.ear_protection,
@@ -698,6 +911,8 @@ fn generate_lib_rs(
     let process_loop = generate_process_loop(
         with_level_params,
         pots,
+        wipers,
+        gangs,
         switches,
         num_outputs,
         nodal_mode,
@@ -1323,8 +1538,8 @@ mod tests {
             default_resistance: 5000.0,
         }];
         let lib = test_generate_lib_rs("test", false, &pots);
-        assert!(lib.contains("pot_0_val = self.params.pot_0.smoothed.next()"));
-        assert!(lib.contains("state.pot_0_resistance = pot_0_val"));
+        assert!(lib.contains("pot_0_val = self.params.pot_0.value()"));
+        assert!(lib.contains("set_pot_0(pot_0_val)"));
     }
 
     #[test]
@@ -1350,8 +1565,8 @@ mod tests {
         assert!(lib.contains("#[id = \"pot_1\"]"));
         assert!(lib.contains("pub pot_0: FloatParam"));
         assert!(lib.contains("pub pot_1: FloatParam"));
-        assert!(lib.contains("state.pot_0_resistance = pot_0_val"));
-        assert!(lib.contains("state.pot_1_resistance = pot_1_val"));
+        assert!(lib.contains("set_pot_0(pot_0_val)"));
+        assert!(lib.contains("set_pot_1(pot_1_val)"));
     }
 
     #[test]
@@ -1387,6 +1602,8 @@ mod tests {
             false,
             &[],
             &[],
+            &[],
+            &[],
             1,
             false,
         );
@@ -1411,7 +1628,7 @@ mod tests {
         let dir = std::env::temp_dir().join("melange_test_plugin_circuit");
         let _ = std::fs::remove_dir_all(&dir);
         let circuit_code = "// This is the generated circuit code\npub fn process_sample() {}";
-        let result = generate_plugin_project(&dir, circuit_code, "test", false, &[], &[], 1, false);
+        let result = generate_plugin_project(&dir, circuit_code, "test", false, &[], &[], &[], &[], 1, false);
         assert!(result.is_ok());
         let written = std::fs::read_to_string(dir.join("src/circuit.rs")).unwrap();
         assert_eq!(written, circuit_code);
@@ -1423,7 +1640,7 @@ mod tests {
         let dir = std::env::temp_dir().join("melange_test_plugin_name");
         let _ = std::fs::remove_dir_all(&dir);
         let result =
-            generate_plugin_project(&dir, "// code", "my-cool-plugin", false, &[], &[], 1, false);
+            generate_plugin_project(&dir, "// code", "my-cool-plugin", false, &[], &[], &[], &[], 1, false);
         assert!(result.is_ok());
         let toml = std::fs::read_to_string(dir.join("Cargo.toml")).unwrap();
         assert!(toml.contains("name = \"my-cool-plugin\""));
@@ -1435,7 +1652,7 @@ mod tests {
         let dir = std::env::temp_dir().join("melange_test_plugin_lib");
         let _ = std::fs::remove_dir_all(&dir);
         let result =
-            generate_plugin_project(&dir, "// code", "my-plugin", false, &[], &[], 1, false);
+            generate_plugin_project(&dir, "// code", "my-plugin", false, &[], &[], &[], &[], 1, false);
         assert!(result.is_ok());
         let lib_rs = std::fs::read_to_string(dir.join("src/lib.rs")).unwrap();
         assert!(lib_rs.contains("CircuitPlugin"));
@@ -1449,8 +1666,8 @@ mod tests {
         let dir = std::env::temp_dir().join("melange_test_plugin_idempotent");
         let _ = std::fs::remove_dir_all(&dir);
         // Generate twice, should not fail
-        let _ = generate_plugin_project(&dir, "// v1", "test", false, &[], &[], 1, false);
-        let result = generate_plugin_project(&dir, "// v2", "test", false, &[], &[], 1, false);
+        let _ = generate_plugin_project(&dir, "// v1", "test", false, &[], &[], &[], &[], 1, false);
+        let result = generate_plugin_project(&dir, "// v2", "test", false, &[], &[], &[], &[], 1, false);
         assert!(result.is_ok());
         // Second write should overwrite
         let circuit = std::fs::read_to_string(dir.join("src/circuit.rs")).unwrap();
@@ -1509,14 +1726,14 @@ mod tests {
             plugin_name: Some("My Custom Plugin"),
             ..Default::default()
         };
-        let lib = generate_lib_rs("test-circuit", false, &[], &[], 1, false, 1, &opts);
+        let lib = generate_lib_rs("test-circuit", false, &[], &[], &[], &[], 1, false, 1, &opts);
         assert!(lib.contains("const NAME: &'static str = \"My Custom Plugin\""));
     }
 
     #[test]
     fn lib_without_custom_name_uses_auto() {
         let opts = PluginOptions::default();
-        let lib = generate_lib_rs("tube-screamer", false, &[], &[], 1, false, 1, &opts);
+        let lib = generate_lib_rs("tube-screamer", false, &[], &[], &[], &[], 1, false, 1, &opts);
         assert!(lib.contains("const NAME: &'static str = \"Tube Screamer\""));
     }
 
@@ -1528,7 +1745,7 @@ mod tests {
             mono: true,
             ..Default::default()
         };
-        let lib = generate_lib_rs("test", false, &[], &[], 1, false, 1, &opts);
+        let lib = generate_lib_rs("test", false, &[], &[], &[], &[], 1, false, 1, &opts);
         assert!(lib.contains("main_input_channels: NonZeroU32::new(1)"));
         assert!(lib.contains("main_output_channels: NonZeroU32::new(1)"));
     }
@@ -1539,7 +1756,7 @@ mod tests {
             mono: true,
             ..Default::default()
         };
-        let lib = generate_lib_rs("test", false, &[], &[], 1, false, 1, &opts);
+        let lib = generate_lib_rs("test", false, &[], &[], &[], &[], 1, false, 1, &opts);
         assert!(lib.contains("ClapFeature::Mono"));
         assert!(!lib.contains("ClapFeature::Stereo"));
     }
@@ -1547,7 +1764,7 @@ mod tests {
     #[test]
     fn lib_stereo_default_has_stereo_clap_feature() {
         let opts = PluginOptions::default();
-        let lib = generate_lib_rs("test", false, &[], &[], 1, false, 1, &opts);
+        let lib = generate_lib_rs("test", false, &[], &[], &[], &[], 1, false, 1, &opts);
         assert!(lib.contains("ClapFeature::Stereo"));
         assert!(!lib.contains("ClapFeature::Mono"));
     }
@@ -1558,7 +1775,7 @@ mod tests {
             mono: true,
             ..Default::default()
         };
-        let lib = generate_lib_rs("test", false, &[], &[], 1, false, 1, &opts);
+        let lib = generate_lib_rs("test", false, &[], &[], &[], &[], 1, false, 1, &opts);
         assert!(lib.contains("circuit_states: vec![CircuitState::default(); 1]"));
     }
 
@@ -1570,7 +1787,7 @@ mod tests {
             wet_dry_mix: true,
             ..Default::default()
         };
-        let lib = generate_lib_rs("test", false, &[], &[], 1, false, 1, &opts);
+        let lib = generate_lib_rs("test", false, &[], &[], &[], &[], 1, false, 1, &opts);
         assert!(lib.contains("#[id = \"mix\"]"));
         assert!(lib.contains("pub mix: FloatParam"));
     }
@@ -1581,7 +1798,7 @@ mod tests {
             wet_dry_mix: true,
             ..Default::default()
         };
-        let lib = generate_lib_rs("test", false, &[], &[], 1, false, 1, &opts);
+        let lib = generate_lib_rs("test", false, &[], &[], &[], &[], 1, false, 1, &opts);
         assert!(lib.contains("let dry = *sample;"));
         assert!(lib.contains("mix * out + (1.0 - mix) * dry"));
     }
@@ -1589,7 +1806,7 @@ mod tests {
     #[test]
     fn lib_without_wet_dry_mix_has_no_mix_param() {
         let opts = PluginOptions::default();
-        let lib = generate_lib_rs("test", false, &[], &[], 1, false, 1, &opts);
+        let lib = generate_lib_rs("test", false, &[], &[], &[], &[], 1, false, 1, &opts);
         assert!(!lib.contains("pub mix: FloatParam"));
         assert!(!lib.contains("let dry = *sample;"));
     }
@@ -1600,7 +1817,7 @@ mod tests {
             wet_dry_mix: true,
             ..Default::default()
         };
-        let lib = generate_lib_rs("test", false, &[], &[], 1, false, 1, &opts);
+        let lib = generate_lib_rs("test", false, &[], &[], &[], &[], 1, false, 1, &opts);
         // Mix default should be 1.0 (fully wet)
         assert!(lib.contains("\"Mix\""));
         assert!(lib.contains("1.0,"));
@@ -1617,6 +1834,8 @@ mod tests {
             "// circuit code stub",
             "test-circuit",
             false,
+            &[],
+            &[],
             &[],
             &[],
             1,
@@ -1651,7 +1870,7 @@ mod tests {
             mono: true,
             ..Default::default()
         };
-        let lib = generate_lib_rs("test", true, &[], &[], 1, false, 1, &opts);
+        let lib = generate_lib_rs("test", true, &[], &[], &[], &[], 1, false, 1, &opts);
         assert!(lib.contains("main_input_channels: NonZeroU32::new(1)"));
         assert!(lib.contains("pub input_level: FloatParam"));
         assert!(lib.contains("input_gain"));
@@ -1663,7 +1882,7 @@ mod tests {
             wet_dry_mix: true,
             ..Default::default()
         };
-        let lib = generate_lib_rs("test", true, &[], &[], 1, false, 1, &opts);
+        let lib = generate_lib_rs("test", true, &[], &[], &[], &[], 1, false, 1, &opts);
         assert!(lib.contains("pub input_level: FloatParam"));
         assert!(lib.contains("pub mix: FloatParam"));
         assert!(lib.contains("let dry = *sample;"));

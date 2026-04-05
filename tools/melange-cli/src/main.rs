@@ -881,6 +881,8 @@ fn compile_circuit_source(
                     coupled_inductors: vec![],
                     transformer_groups: vec![],
                     pots: vec![],
+                    wiper_groups: vec![],
+                    gang_groups: vec![],
                 };
                 (dummy, true)
             }
@@ -1169,6 +1171,84 @@ fn compile_circuit_source(
                 })
                 .collect();
 
+            // Build wiper params from MNA wiper groups
+            let wiper_params: Vec<plugin_template::WiperParamInfo> = mna
+                .wiper_groups
+                .iter()
+                .enumerate()
+                .map(|(idx, wg)| plugin_template::WiperParamInfo {
+                    wiper_index: idx,
+                    cw_pot_index: wg.cw_pot_index,
+                    ccw_pot_index: wg.ccw_pot_index,
+                    total_resistance: wg.total_resistance,
+                    default_position: wg.default_position,
+                    name: wg.label
+                        .clone()
+                        .unwrap_or_else(|| format!("Wiper {}", idx)),
+                })
+                .collect();
+
+            // Build gang params from MNA gang groups
+            let gang_params: Vec<plugin_template::GangParamInfo> = mna
+                .gang_groups
+                .iter()
+                .enumerate()
+                .map(|(idx, gg)| plugin_template::GangParamInfo {
+                    index: idx,
+                    label: gg.label.clone(),
+                    default_position: gg.default_position,
+                    pot_members: gg
+                        .pot_members
+                        .iter()
+                        .map(|&(pot_idx, inverted)| {
+                            (pot_idx, mna.pots[pot_idx].min_resistance, mna.pots[pot_idx].max_resistance, inverted)
+                        })
+                        .collect(),
+                    wiper_members: gg
+                        .wiper_members
+                        .iter()
+                        .map(|&(wg_idx, inverted)| {
+                            let wg = &mna.wiper_groups[wg_idx];
+                            (wg.cw_pot_index, wg.ccw_pot_index, wg.total_resistance, inverted)
+                        })
+                        .collect(),
+                })
+                .collect();
+
+            // Collect pot indices claimed by gangs
+            let gang_claimed_pots: std::collections::HashSet<usize> = gang_params
+                .iter()
+                .flat_map(|g| g.pot_members.iter().map(|&(idx, _, _, _)| idx))
+                .collect();
+            let gang_claimed_wipers: std::collections::HashSet<usize> = gang_params
+                .iter()
+                .flat_map(|g| {
+                    g.wiper_members
+                        .iter()
+                        .flat_map(|&(cw, ccw, _, _)| [cw, ccw])
+                })
+                .collect();
+
+            // Filter out wiper-claimed and gang-claimed pots from individual pot params
+            let wiper_claimed: std::collections::HashSet<usize> = wiper_params
+                .iter()
+                .flat_map(|w| [w.cw_pot_index, w.ccw_pot_index])
+                .collect();
+            let pot_params: Vec<_> = pot_params
+                .into_iter()
+                .filter(|p| {
+                    !wiper_claimed.contains(&p.index) && !gang_claimed_pots.contains(&p.index)
+                })
+                .collect();
+
+            // Filter out gang-claimed wipers from individual wiper params
+            let wiper_params: Vec<_> = wiper_params
+                .into_iter()
+                .filter(|w| {
+                    !gang_claimed_wipers.contains(&w.cw_pot_index)
+                })
+                .collect();
+
             let plugin_options = plugin_template::PluginOptions {
                 plugin_name,
                 mono,
@@ -1181,6 +1261,8 @@ fn compile_circuit_source(
                 &circuit_name,
                 with_level_params,
                 &pot_params,
+                &wiper_params,
+                &gang_params,
                 &switch_params,
                 output_node_indices.len(),
                 has_inductors_compile,
@@ -1930,6 +2012,7 @@ fn simulate_circuit_source(
         let mut solver = CircuitSolver::new(kernel, devices, input_node_idx, output_node_idx)
             .with_context(|| "Failed to create circuit solver")?;
         solver.set_input_conductance(input_conductance);
+        solver.set_opamp_clamps(&mna);
 
         // Note: K_eff parasitic R corrections are NOT applied here because
         // expand_bjt_internal_nodes() already adds RB/RC/RE to the MNA G matrix.
@@ -2097,6 +2180,14 @@ fn analyze_freq_response(
                     "Resistor '{}' referenced by pot not found in netlist",
                     resistor_name
                 );
+            }
+            // Also update PotDirective.default_value so MNA pot_default_overrides
+            // doesn't override the element value we just set.
+            for p in netlist.pots.iter_mut() {
+                if p.resistor_name.eq_ignore_ascii_case(&resistor_name) {
+                    p.default_value = Some(value);
+                    break;
+                }
             }
             overridden_resistors.insert(resistor_name.to_ascii_uppercase());
             eprintln!("  Pot override: {} = {:.1}", resistor_name, value);
@@ -2329,6 +2420,7 @@ fn analyze_freq_response(
             CircuitSolver::new(kernel.clone(), devices, input_node_idx, output_node_idx)
                 .with_context(|| "Failed to create circuit solver")?;
         solver.set_input_conductance(input_conductance);
+        solver.set_opamp_clamps(&mna);
         // Note: K_eff parasitic R corrections are NOT applied here because
         // expand_bjt_internal_nodes() already adds RB/RC/RE to the MNA G matrix.
         // Applying both would double-account for parasitic resistances.

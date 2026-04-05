@@ -583,7 +583,7 @@ impl RustEmitter {
         code.push_str(&self.emit_state(ir)?);
         code.push_str(&Self::emit_transformer_group_helpers(ir));
         code.push_str(&self.emit_device_models(ir)?);
-        code.push_str(&self.emit_pot_helpers(ir));
+        // SM pot helpers (sm_scale_N) removed — per-block rebuild replaces SM
         code.push_str(&self.emit_build_rhs(ir)?);
         code.push_str(&self.emit_mat_vec_mul_s(ir)?);
         code.push_str(&self.emit_extract_voltages(ir)?);
@@ -1008,10 +1008,11 @@ impl RustEmitter {
         // Switch data
         let num_switches = ir.switches.len();
         ctx.insert("num_switches", &num_switches);
-        if num_switches > 0 {
-            let switch_indices: Vec<usize> = (0..num_switches).collect();
-            ctx.insert("switch_indices", &switch_indices);
-            // Generate switch methods procedurally (too complex for Tera conditionals)
+        // Always provide switch_indices (empty when no switches) so template can iterate safely
+        let switch_indices: Vec<usize> = (0..num_switches).collect();
+        ctx.insert("switch_indices", &switch_indices);
+        // Generate pot/switch methods procedurally (rebuild_matrices, set_pot_N, set_switch_N)
+        if num_switches > 0 || num_pots > 0 {
             let switch_methods = self.emit_switch_methods(ir);
             ctx.insert("switch_methods", &switch_methods);
         }
@@ -1330,12 +1331,29 @@ impl RustEmitter {
             ));
         }
 
+        // Emit set_pot_N() methods for DK path
+        for (idx, pot) in ir.pots.iter().enumerate() {
+            code.push_str(&format!(
+                "    /// Set potentiometer {idx} resistance (clamped to [{:.1}..{:.1}] ohms).\n\
+                 \x20   ///\n\
+                 \x20   /// Triggers a full matrix rebuild. Call per-block, not per-sample.\n\
+                 \x20   pub fn set_pot_{idx}(&mut self, resistance: f64) {{\n\
+                 \x20       if !resistance.is_finite() {{ return; }}\n\
+                 \x20       let r = resistance.clamp(POT_{idx}_MIN_R, POT_{idx}_MAX_R);\n\
+                 \x20       if (r - self.pot_{idx}_resistance).abs() < 1e-12 {{ return; }}\n\
+                 \x20       self.pot_{idx}_resistance = r;\n\
+                 \x20       self.rebuild_matrices();\n\
+                 \x20   }}\n\n",
+                pot.min_resistance, pot.max_resistance,
+            ));
+        }
+
         // Emit rebuild_matrices()
         code.push_str(
             "    /// Rebuild all sample-rate-dependent matrices from G/C constants.\n\
              \x20   ///\n\
-             \x20   /// Applies switch position deltas to G/C, then rebuilds A, S, K, S*N_i.\n\
-             \x20   /// Called by `set_switch_N()` and `set_sample_rate()`.\n\
+             \x20   /// Applies switch/pot deltas to G/C, then rebuilds A, S, K, S*N_i.\n\
+             \x20   /// Called by `set_switch_N()`, `set_pot_N()`, and `set_sample_rate()`.\n\
              \x20   fn rebuild_matrices(&mut self) {\n\
              \x20       let internal_rate = self.current_sample_rate * OVERSAMPLING_FACTOR as f64;\n\
              \x20       let alpha = 2.0 * internal_rate;\n",
@@ -1353,7 +1371,7 @@ impl RustEmitter {
             .switches
             .iter()
             .any(|sw| sw.components.iter().any(|c| c.component_type == 'C'));
-        let g_mut = if has_r_switch { "mut " } else { "" };
+        let g_mut = if has_r_switch || num_pots > 0 { "mut " } else { "" };
         let c_mut = if has_c_switch { "mut " } else { "" };
         code.push_str(&format!(
             "\n\
@@ -1408,6 +1426,40 @@ impl RustEmitter {
                         }
                     }
                     _ => {}
+                }
+                code.push_str("        }\n");
+            }
+        }
+
+        // Apply pot conductance deltas (relative to nominal)
+        if num_pots > 0 {
+            code.push_str(
+                "\n\
+                 \x20       // Apply pot conductance deltas (current resistance vs nominal)\n",
+            );
+            for (idx, pot) in ir.pots.iter().enumerate() {
+                let np = pot.node_p;
+                let nq = pot.node_q;
+                code.push_str(&format!(
+                    "        {{\n\
+                     \x20           let delta_g = 1.0 / self.pot_{idx}_resistance - POT_{idx}_G_NOM;\n",
+                ));
+                if np > 0 {
+                    code.push_str(&format!(
+                        "            g_eff[{}][{}] += delta_g;\n", np - 1, np - 1
+                    ));
+                }
+                if nq > 0 {
+                    code.push_str(&format!(
+                        "            g_eff[{}][{}] += delta_g;\n", nq - 1, nq - 1
+                    ));
+                }
+                if np > 0 && nq > 0 {
+                    code.push_str(&format!(
+                        "            g_eff[{}][{}] -= delta_g;\n\
+                         \x20           g_eff[{}][{}] -= delta_g;\n",
+                        np - 1, nq - 1, nq - 1, np - 1
+                    ));
                 }
                 code.push_str("        }\n");
             }
@@ -1703,49 +1755,7 @@ impl RustEmitter {
             m = m,
         ));
 
-        // Pot SM recomputation
-        if num_pots > 0 {
-            code.push_str("\n        // Recompute Sherman-Morrison vectors for pots\n");
-            for idx in 0..num_pots {
-                let pot = &ir.pots[idx];
-                code.push_str(
-                    "        {\n\
-                     \x20           let mut u = [0.0f64; N];\n",
-                );
-                if pot.node_p > 0 {
-                    code.push_str(&format!("            u[POT_{idx}_NODE_P - 1] = 1.0;\n",));
-                }
-                if pot.node_q > 0 {
-                    code.push_str(&format!("            u[POT_{idx}_NODE_Q - 1] = -1.0;\n",));
-                }
-                code.push_str(
-                    "            let mut su = [0.0f64; N];\n\
-                     \x20           for i in 0..N { let mut sum = 0.0; for j in 0..N { sum += self.s[i][j] * u[j]; } su[i] = sum; }\n\
-                     \x20           let mut usu = 0.0f64;\n\
-                     \x20           for i in 0..N { usu += u[i] * su[i]; }\n",
-                );
-                if m > 0 {
-                    code.push_str(&format!(
-                        "            let mut nv_su = [0.0f64; M];\n\
-                         \x20           for i in 0..M {{ let mut sum = 0.0; for j in 0..N {{ sum += N_V[i][j] * su[j]; }} nv_su[i] = sum; }}\n\
-                         \x20           let mut u_ni = [0.0f64; M];\n\
-                         \x20           for j in 0..M {{ let mut sum = 0.0; for i in 0..N {{ sum += su[i] * N_I[j][i]; }} u_ni[j] = sum; }}\n\
-                         \x20           self.pot_{idx}_nv_su = nv_su;\n\
-                         \x20           self.pot_{idx}_u_ni = u_ni;\n",
-                        idx = idx,
-                    ));
-                } else {
-                    // Still need to declare nv_su/u_ni even if M=0
-                    let _ = pot;
-                }
-                code.push_str(&format!(
-                    "            self.pot_{idx}_su = su;\n\
-                     \x20           self.pot_{idx}_usu = usu;\n\
-                     \x20       }}\n",
-                    idx = idx,
-                ));
-            }
-        }
+        // SM pot recomputation removed — per-block rebuild handles pots exactly
 
         // Reset oversampler state
         if os_factor > 1 {
@@ -1784,47 +1794,15 @@ impl RustEmitter {
         if ir.pots.is_empty() {
             return String::new();
         }
-        let mut code =
-            section_banner("POTENTIOMETER CONSTANTS (Sherman-Morrison precomputed vectors)");
+        let mut code = section_banner("POTENTIOMETER CONSTANTS");
 
         for (idx, pot) in ir.pots.iter().enumerate() {
-            let su_values = format_f64_slice(&pot.su);
-            code.push_str(&format!(
-                "const POT_{}_SU: [f64; N] = [{}];\n",
-                idx, su_values
-            ));
-            code.push_str(&format!(
-                "const POT_{}_USU: f64 = {};\n",
-                idx,
-                fmt_f64(pot.usu)
-            ));
+            // G_NOM: nominal conductance for rebuild_matrices delta computation
             code.push_str(&format!(
                 "const POT_{}_G_NOM: f64 = {};\n",
                 idx,
                 fmt_f64(pot.g_nominal)
             ));
-
-            code.push_str(&format!(
-                "const POT_{}_NV_SU: [f64; M] = [{}];\n",
-                idx,
-                format_f64_slice(&pot.nv_su)
-            ));
-            code.push_str(&format!(
-                "const POT_{}_U_NI: [f64; M] = [{}];\n",
-                idx,
-                format_f64_slice(&pot.u_ni)
-            ));
-
-            // Node indices (1-indexed, 0 = ground) for set_sample_rate recomputation
-            code.push_str(&format!(
-                "const POT_{}_NODE_P: usize = {};\n",
-                idx, pot.node_p
-            ));
-            code.push_str(&format!(
-                "const POT_{}_NODE_Q: usize = {};\n",
-                idx, pot.node_q
-            ));
-
             code.push_str(&format!(
                 "const POT_{}_MIN_R: f64 = {};\n",
                 idx,
@@ -2296,13 +2274,8 @@ impl RustEmitter {
             }
             ctx.insert("sni_correction", &sni_correction);
 
-            // K_eff: precomputed corrected K matrix for NR solver (M > 0 with pots)
-            let use_k_eff = m > 0;
-            ctx.insert("use_k_eff", &use_k_eff);
-            if use_k_eff {
-                let k_eff_setup = Self::emit_k_eff_setup(&ir.pots, m);
-                ctx.insert("k_eff_setup", &k_eff_setup);
-            }
+            // SM k_eff removed — per-block rebuild keeps state.k exact
+            ctx.insert("use_k_eff", &false);
         }
 
         // MOSFET body effect: compute VT_eff from v_pred before NR (DK path only)
@@ -2379,6 +2352,34 @@ impl RustEmitter {
         }
 
         ctx.insert("dc_block", &ir.dc_block);
+
+        // Op-amp supply rail clamping data for DK template
+        if !ir.opamps.is_empty() {
+            let opamp_clamps: Vec<std::collections::HashMap<&str, String>> = ir
+                .opamps
+                .iter()
+                .map(|oa| {
+                    let mut m = std::collections::HashMap::new();
+                    m.insert("out_idx", oa.n_out_idx.to_string());
+                    m.insert("lo", format!("{:.17e}", oa.vclamp_lo));
+                    m.insert("hi", format!("{:.17e}", oa.vclamp_hi));
+                    m.insert(
+                        "has_internal",
+                        if oa.n_internal_idx.is_some() {
+                            "true".to_string()
+                        } else {
+                            "".to_string()
+                        },
+                    );
+                    m.insert(
+                        "int_idx",
+                        oa.n_internal_idx.unwrap_or(0).to_string(),
+                    );
+                    m
+                })
+                .collect();
+            ctx.insert("opamp_clamps", &opamp_clamps);
+        }
 
         self.render("process_sample", &ctx)
     }
@@ -2872,16 +2873,8 @@ fn emit_nr_limit_and_converge(
     for i in 0..dim {
         code.push_str(&format!("{indent}let dv{i} = -("));
         let mut first = true;
-        if has_pots {
-            for j in 0..dim {
-                if !first {
-                    code.push_str(" + ");
-                }
-                code.push_str(&format!("k_eff[{i}][{j}] * delta{j}"));
-                first = false;
-            }
-        } else {
-            // Use sparsity info when available
+        {
+            // state.k is exact (per-block rebuild), no k_eff needed
             for j in 0..dim {
                 if !first {
                     code.push_str(" + ");
@@ -3169,16 +3162,11 @@ impl RustEmitter {
         code.push_str("/// Solves: i_nl - i_d(p + K*i_nl) = 0\n");
         code.push_str("/// where p = N_v * v_pred is the linear prediction\n");
         let has_pots = !ir.pots.is_empty();
+        // Per-block rebuild keeps state.k exact — no k_eff parameter needed.
         code.push_str("#[inline(always)]\n");
-        if has_pots && m > 0 {
-            code.push_str(
-                "fn solve_nonlinear(p: &[f64; M], k_eff: &[[f64; M]; M], state: &mut CircuitState) -> [f64; M] {\n"
-            );
-        } else {
-            code.push_str(
-                "fn solve_nonlinear(p: &[f64; M], state: &mut CircuitState) -> [f64; M] {\n",
-            );
-        }
+        code.push_str(
+            "fn solve_nonlinear(p: &[f64; M], state: &mut CircuitState) -> [f64; M] {\n",
+        );
         code.push_str(&format!(
             "    const MAX_ITER: usize = {};\n",
             ir.solver_config.max_iterations
@@ -3216,19 +3204,8 @@ impl RustEmitter {
         code.push_str("    // Newton-Raphson iteration\n");
         code.push_str("    for iter in 0..MAX_ITER {\n\n");
 
-        // Compute v_d = p + K * i_nl
-        if has_pots && m > 0 {
-            // Use precomputed K_eff (corrected for all pots via sequential SM)
-            code.push_str("        // Compute controlling voltages: v_d = p + K_eff * i_nl\n");
-            for i in 0..m {
-                code.push_str(&format!("        let v_d{} = p[{}]", i, i));
-                for j in 0..m {
-                    code.push_str(&format!(" + k_eff[{}][{}] * i_nl[{}]", i, j, j));
-                }
-                code.push_str(";\n");
-            }
-        } else {
-            // Use base K matrix with sparsity optimization
+        // Compute v_d = p + K * i_nl (K is exact from rebuild_matrices)
+        {
             code.push_str("        // Compute controlling voltages: v_d = p + K * i_nl\n");
             for i in 0..m {
                 code.push_str(&format!("        let v_d{} = p[{}]", i, i));
@@ -3554,12 +3531,7 @@ impl RustEmitter {
                     let diag = if i == j { "1.0" } else { "0.0" };
                     let mut terms = String::new();
                     for k in blk_start..blk_start + blk_dim {
-                        if has_pots {
-                            // Use precomputed k_eff (corrected for all pots)
-                            terms.push_str(&format!(" - jdev_{}_{} * k_eff[{}][{}]", i, k, k, j));
-                        } else {
-                            terms.push_str(&format!(" - jdev_{}_{} * state.k[{}][{}]", i, k, k, j));
-                        }
+                        terms.push_str(&format!(" - jdev_{}_{} * state.k[{}][{}]", i, k, k, j));
                     }
                     code.push_str(&format!("        let j{}{} = {}{};\n", i, j, diag, terms));
                 }
@@ -5442,6 +5414,21 @@ impl RustEmitter {
             code.push_str("    for i in 0..N {\n");
             code.push_str("        for j in 0..M { v[i] += state.s_ni[i][j] * i_nl[j]; }\n");
             code.push_str("    }\n");
+
+            // Op-amp supply rail clamping (VCC/VEE) — post-NR
+            for oa in &ir.opamps {
+                code.push_str(&format!(
+                    "    v[{idx}] = v[{idx}].clamp({lo:.17e}, {hi:.17e});\n",
+                    idx = oa.n_out_idx, lo = oa.vclamp_lo, hi = oa.vclamp_hi,
+                ));
+                if let Some(int_idx) = oa.n_internal_idx {
+                    code.push_str(&format!(
+                        "    v[{idx}] = v[{idx}].clamp({lo:.17e}, {hi:.17e});\n",
+                        idx = int_idx, lo = oa.vclamp_lo, hi = oa.vclamp_hi,
+                    ));
+                }
+            }
+
             code.push_str("    let converged = state.last_nr_iterations < MAX_ITER as u32;\n\n");
 
             // Backward Euler fallback
@@ -5637,6 +5624,21 @@ impl RustEmitter {
             code.push_str("        for i in 0..N {\n");
             code.push_str("            for j in 0..M { v[i] += state.s_ni_be[i][j] * i_nl[j]; }\n");
             code.push_str("        }\n");
+
+            // Op-amp supply rail clamping (VCC/VEE) — post-BE recovery
+            for oa in &ir.opamps {
+                code.push_str(&format!(
+                    "        v[{idx}] = v[{idx}].clamp({lo:.17e}, {hi:.17e});\n",
+                    idx = oa.n_out_idx, lo = oa.vclamp_lo, hi = oa.vclamp_hi,
+                ));
+                if let Some(int_idx) = oa.n_internal_idx {
+                    code.push_str(&format!(
+                        "        v[{idx}] = v[{idx}].clamp({lo:.17e}, {hi:.17e});\n",
+                        idx = int_idx, lo = oa.vclamp_lo, hi = oa.vclamp_hi,
+                    ));
+                }
+            }
+
             code.push_str("    }\n\n"); // end BE fallback block
         }
 
@@ -6912,17 +6914,17 @@ impl RustEmitter {
             // LU solve
             code.push_str("                    let mut v_new_s = rhs_w;\n");
             code.push_str("                    if !lu_solve(&mut g_s, &mut v_new_s) { break; }\n");
-            // VSAT clamping
+            // Op-amp supply rail clamping (VCC/VEE)
             if !ir.opamps.is_empty() {
                 for oa in &ir.opamps {
                     code.push_str(&format!(
-                        "                    v_new_s[{idx}] = v_new_s[{idx}].clamp({neg:.17e}, {pos:.17e});\n",
-                        idx = oa.n_out_idx, neg = -oa.vsat, pos = oa.vsat,
+                        "                    v_new_s[{idx}] = v_new_s[{idx}].clamp({lo:.17e}, {hi:.17e});\n",
+                        idx = oa.n_out_idx, lo = oa.vclamp_lo, hi = oa.vclamp_hi,
                     ));
                     if let Some(int_idx) = oa.n_internal_idx {
                         code.push_str(&format!(
-                            "                    v_new_s[{idx}] = v_new_s[{idx}].clamp({neg:.17e}, {pos:.17e});\n",
-                            idx = int_idx, neg = -oa.vsat, pos = oa.vsat,
+                            "                    v_new_s[{idx}] = v_new_s[{idx}].clamp({lo:.17e}, {hi:.17e});\n",
+                            idx = int_idx, lo = oa.vclamp_lo, hi = oa.vclamp_hi,
                         ));
                     }
                 }

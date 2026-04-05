@@ -122,6 +122,65 @@ fn reset_transformer_groups(groups: &mut [crate::dk::TransformerGroupState]) {
     }
 }
 
+/// Op-amp output rail clamp info for runtime solvers.
+///
+/// Codegen clamps op-amp output (and Boyle internal) nodes to VCC/VEE after
+/// each NR iteration. Without this, op-amp outputs swing to AOL × Vdiff ≈ 1e6V
+/// during NR, causing downstream diode exponentials to overflow → NaN.
+#[derive(Debug, Clone)]
+struct OpampClamp {
+    /// 0-indexed output node in the voltage vector
+    out_idx: usize,
+    /// 0-indexed Boyle internal gain node (if GBW is finite)
+    internal_idx: Option<usize>,
+    /// Positive supply rail (upper clamp)
+    vcc: f64,
+    /// Negative supply rail (lower clamp)
+    vee: f64,
+}
+
+/// Build op-amp rail clamp list from MNA opamp info.
+fn build_opamp_clamps(mna: &crate::mna::MnaSystem, n_max: usize) -> Vec<OpampClamp> {
+    mna.opamps
+        .iter()
+        .filter_map(|oa| {
+            if !oa.vcc.is_finite() && !oa.vee.is_finite() {
+                return None; // No finite rails → no clamping needed
+            }
+            if oa.n_out_idx == 0 {
+                return None; // Output grounded
+            }
+            let out_idx = oa.n_out_idx - 1; // Convert 1-indexed to 0-indexed
+            if out_idx >= n_max {
+                return None;
+            }
+            let internal_idx = if oa.n_internal_idx > 0 {
+                let idx = oa.n_internal_idx - 1;
+                if idx < n_max { Some(idx) } else { None }
+            } else {
+                None
+            };
+            Some(OpampClamp {
+                out_idx,
+                internal_idx,
+                vcc: if oa.vcc.is_finite() { oa.vcc } else { f64::MAX },
+                vee: if oa.vee.is_finite() { oa.vee } else { f64::MIN },
+            })
+        })
+        .collect()
+}
+
+/// Apply op-amp rail clamping to a voltage vector.
+#[inline]
+fn apply_opamp_clamps(v: &mut [f64], clamps: &[OpampClamp]) {
+    for clamp in clamps {
+        v[clamp.out_idx] = v[clamp.out_idx].clamp(clamp.vee, clamp.vcc);
+        if let Some(int_idx) = clamp.internal_idx {
+            v[int_idx] = v[int_idx].clamp(clamp.vee, clamp.vcc);
+        }
+    }
+}
+
 /// Enum-based device entry for zero-cost dispatch in the audio hot path.
 ///
 /// This eliminates vtable overhead by using enum dispatch.
@@ -692,6 +751,8 @@ pub struct CircuitSolver {
     pub(crate) diag_nr_max_iter_count: u64,
     /// Diagnostics: number of times state was reset due to NaN
     pub(crate) diag_nan_reset_count: u64,
+    /// Op-amp output rail clamps (VCC/VEE), set via `set_opamp_clamps`.
+    opamp_clamps: Vec<OpampClamp>,
 }
 
 impl CircuitSolver {
@@ -796,7 +857,17 @@ impl CircuitSolver {
             diag_clamp_count: 0,
             diag_nr_max_iter_count: 0,
             diag_nan_reset_count: 0,
+            opamp_clamps: vec![],
         })
+    }
+
+    /// Set op-amp rail clamps from MNA opamp info.
+    ///
+    /// Must be called after construction for circuits with op-amps that have
+    /// finite VCC/VEE supply rails. Without this, op-amp output nodes can
+    /// swing beyond supply rails during NR iteration, causing divergence.
+    pub fn set_opamp_clamps(&mut self, mna: &crate::mna::MnaSystem) {
+        self.opamp_clamps = build_opamp_clamps(mna, self.kernel.n);
     }
 
     /// Get the input conductance (1/R_in).
@@ -1054,6 +1125,9 @@ impl CircuitSolver {
                 }
             }
         }
+
+        // Op-amp rail clamping: prevent output nodes from exceeding supply rails.
+        apply_opamp_clamps(&mut self.v_pred, &self.opamp_clamps);
 
         std::mem::swap(&mut self.v_prev, &mut self.v_pred);
         std::mem::swap(&mut self.v_nl_prev, &mut self.v_nl);
@@ -3103,6 +3177,9 @@ pub struct NodalSolver {
     /// Node indices frozen during NR (from .delay_feedback directives).
     /// These nodes use v_prev values during NR iteration, breaking feedback loops.
     delayed_node_indices: Vec<usize>,
+    /// Op-amp output rail clamps (VCC/VEE). Applied after each NR step to prevent
+    /// op-amp output voltages from exceeding supply rails during iteration.
+    opamp_clamps: Vec<OpampClamp>,
 }
 
 impl NodalSolver {
@@ -3267,6 +3344,15 @@ impl NodalSolver {
 
         let dc_block_r = 1.0 - 2.0 * std::f64::consts::PI * 5.0 / kernel.sample_rate;
 
+        // Build op-amp rail clamps from MNA opamp info
+        let opamp_clamps = build_opamp_clamps(mna, n_nodal);
+        if !opamp_clamps.is_empty() {
+            log::info!(
+                "NodalSolver: {} op-amp rail clamp(s) active",
+                opamp_clamps.len()
+            );
+        }
+
         if n_inductor_vars > 0 {
             log::info!(
                 "NodalSolver: augmented MNA with {} inductor variables (n_aug={}, n_nodal={})",
@@ -3313,6 +3399,7 @@ impl NodalSolver {
             diag_nan_reset_count: 0,
             diag_be_fallback_count: 0,
             delayed_node_indices,
+            opamp_clamps,
         })
     }
 
@@ -3608,11 +3695,11 @@ impl NodalSolver {
                 step.abs() < threshold
             });
 
-            // Apply damped Newton step, then freeze delayed nodes.
+            // Apply damped Newton step, then clamp op-amp rails, then freeze delayed nodes.
             for i in 0..n {
                 v[i] += alpha * (v_new[i] - v[i]);
             }
-            // Force delayed nodes back to v_prev (one-sample delay)
+            apply_opamp_clamps(&mut v, &self.opamp_clamps);
             for &idx in &self.delayed_node_indices {
                 v[idx] = self.v_prev[idx];
             }
@@ -3786,6 +3873,7 @@ impl NodalSolver {
                 for i in 0..n {
                     v[i] += alpha * (v_new[i] - v[i]);
                 }
+                apply_opamp_clamps(&mut v, &self.opamp_clamps);
                 for &idx in &self.delayed_node_indices {
                     v[idx] = self.v_prev[idx];
                 }

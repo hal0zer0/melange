@@ -143,21 +143,12 @@ pub struct CircuitState {
     /// Switch {{ idx }} current position (0-indexed)
     pub switch_{{ idx }}_position: usize,
 {% endfor %}
+{% endif %}
+{% if num_switches > 0 or num_pots > 0 %}
     /// Current sample rate (needed for rebuild_matrices)
     pub current_sample_rate: f64,
 {% endif %}
-{% if num_pots > 0 %}
-{% for idx in pot_indices %}
-    /// Sherman-Morrison precomputed SU vector for pot {{ idx }} (recomputed by set_sample_rate)
-    pub pot_{{ idx }}_su: [f64; N],
-    /// Sherman-Morrison USU scalar for pot {{ idx }} (recomputed by set_sample_rate)
-    pub pot_{{ idx }}_usu: f64,
-    /// Sherman-Morrison NV_SU vector for pot {{ idx }} (recomputed by set_sample_rate)
-    pub pot_{{ idx }}_nv_su: [f64; M],
-    /// Sherman-Morrison U_NI vector for pot {{ idx }} (recomputed by set_sample_rate)
-    pub pot_{{ idx }}_u_ni: [f64; M],
-{% endfor %}
-{% endif %}
+{# SM state fields removed — per-block rebuild replaces SM #}
 {% if num_device_params > 0 %}
     // --- Runtime-adjustable device parameters ---
     // These fields are initialized from the corresponding DEVICE_N_* constants.
@@ -253,15 +244,9 @@ impl Default for CircuitState {
 {% for idx in switch_indices %}
             switch_{{ idx }}_position: 0,
 {% endfor %}
-            current_sample_rate: SAMPLE_RATE,
 {% endif %}
-{% if num_pots > 0 %}
-{% for idx in pot_indices %}
-            pot_{{ idx }}_su: POT_{{ idx }}_SU,
-            pot_{{ idx }}_usu: POT_{{ idx }}_USU,
-            pot_{{ idx }}_nv_su: POT_{{ idx }}_NV_SU,
-            pot_{{ idx }}_u_ni: POT_{{ idx }}_U_NI,
-{% endfor %}
+{% if num_switches > 0 or num_pots > 0 %}
+            current_sample_rate: SAMPLE_RATE,
 {% endif %}
 {% if num_device_params > 0 %}
 {% for dev in device_params %}{% for p in dev.params %}
@@ -364,7 +349,7 @@ impl CircuitState {
         if !(sample_rate > 0.0 && sample_rate.is_finite()) {
             return; // Invalid sample rate, keep defaults
         }
-{% if num_switches > 0 %}
+{% if num_switches > 0 or num_pots > 0 %}
         self.current_sample_rate = sample_rate;
 
         // If same as codegen sample rate AND all switches at default position, reset to defaults
@@ -385,14 +370,6 @@ impl CircuitState {
 {% endif %}
 {% if num_inductors > 0 %}
                 self.ind_g_eq = [{% for ind in inductors %}IND_{{ loop.index0 }}_G_EQ{% if not loop.last %}, {% endif %}{% endfor %}];
-{% endif %}
-{% if num_pots > 0 %}
-{% for idx in pot_indices %}
-                self.pot_{{ idx }}_su = POT_{{ idx }}_SU;
-                self.pot_{{ idx }}_usu = POT_{{ idx }}_USU;
-                self.pot_{{ idx }}_nv_su = POT_{{ idx }}_NV_SU;
-                self.pot_{{ idx }}_u_ni = POT_{{ idx }}_U_NI;
-{% endfor %}
 {% endif %}
 {% if dc_block %}                self.dc_block_r = DC_BLOCK_R;
                 self.dc_block_x_prev = [0.0; NUM_OUTPUTS];
@@ -461,14 +438,6 @@ impl CircuitState {
             self.xfmr_{{ g.index }}_i_prev = [0.0; {{ g.num_windings }}];
             self.xfmr_{{ g.index }}_v_prev = [0.0; {{ g.num_windings }}];
             self.xfmr_{{ g.index }}_i_hist = [0.0; {{ g.num_windings }}];
-{% endfor %}
-{% endif %}
-{% if num_pots > 0 %}
-{% for idx in pot_indices %}
-            self.pot_{{ idx }}_su = POT_{{ idx }}_SU;
-            self.pot_{{ idx }}_usu = POT_{{ idx }}_USU;
-            self.pot_{{ idx }}_nv_su = POT_{{ idx }}_NV_SU;
-            self.pot_{{ idx }}_u_ni = POT_{{ idx }}_U_NI;
 {% endfor %}
 {% endif %}
 {% if dc_block %}            self.dc_block_r = DC_BLOCK_R;
@@ -661,44 +630,7 @@ impl CircuitState {
         self.s_ni_be = s_ni_be;
         self.a_neg_be = a_neg_be;
 {% endif %}
-{% if num_pots > 0 %}
-
-        // Recompute Sherman-Morrison vectors for pots
-{% for idx in pot_indices %}        {
-            let mut u = [0.0f64; N];
-            if POT_{{ idx }}_NODE_P > 0 { u[POT_{{ idx }}_NODE_P - 1] = 1.0; }
-            if POT_{{ idx }}_NODE_Q > 0 { u[POT_{{ idx }}_NODE_Q - 1] = -1.0; }
-
-            let mut su = [0.0f64; N];
-            for i in 0..N {
-                let mut sum = 0.0;
-                for j in 0..N { sum += self.s[i][j] * u[j]; }
-                su[i] = sum;
-            }
-
-            let mut usu = 0.0f64;
-            for i in 0..N { usu += u[i] * su[i]; }
-
-            let mut nv_su = [0.0f64; M];
-            for i in 0..M {
-                let mut sum = 0.0;
-                for j in 0..N { sum += N_V[i][j] * su[j]; }
-                nv_su[i] = sum;
-            }
-
-            let mut u_ni = [0.0f64; M];
-            for j in 0..M {
-                let mut sum = 0.0;
-                for i in 0..N { sum += su[i] * N_I[j][i]; }
-                u_ni[j] = sum;
-            }
-
-            self.pot_{{ idx }}_su = su;
-            self.pot_{{ idx }}_usu = usu;
-            self.pot_{{ idx }}_nv_su = nv_su;
-            self.pot_{{ idx }}_u_ni = u_ni;
-        }
-{% endfor %}{% endif %}
+{# SM vectors removed — per-block rebuild handles pot corrections exactly #}
 {% if oversampling_factor > 1 %}
         // Reset oversampler filter state (old state is incompatible with new rate)
         self.os_up_state = [0.0; {{ os_state_size }}];
@@ -720,7 +652,7 @@ impl CircuitState {
 {% endif %}
 {% endif %}
     }
-{% if num_switches > 0 %}
+{% if num_switches > 0 or num_pots > 0 %}
 {{ switch_methods }}
 {% endif %}
 }

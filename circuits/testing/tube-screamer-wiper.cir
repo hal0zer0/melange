@@ -1,0 +1,73 @@
+Tube Screamer TS808 (real tone + wiper volume)
+* Ibanez TS-808 overdrive — faithful clipping stage, real IC1b tone, wiper volume
+* Reference: ElectroSmash TS808 analysis, R.G. Keen "Technology of the Tube Screamer"
+*
+* This implementation: Copyright (c) 2026 Melange Contributors
+* License: MIT OR Apache-2.0
+*
+* SIGNAL PATH:
+*   Input -> Cin -> CLIPPING AMP (IC1a) -> TONE (IC1b + 20K wiper) -> VOLUME (100K wiper) -> output
+*
+* CLIPPING STAGE (IC1a): Faithful to real TS808.
+*   Non-inverting op-amp with antiparallel 1N4148 diodes in feedback.
+*   4.7K + 0.047uF ground impedance creates the famous mid-hump (~720 Hz).
+*   Gain = 1 + R_drive / Z_gnd: 12x (21 dB) to 118x (41 dB).
+*
+* TONE (IC1b): Real TS808 topology.
+*   20K wiper pot between IC1a output and IC1b input.
+*   Wiper connects through R8(220) + C6(0.22uF) to ground — frequency-dependent shunt.
+*   IC1b is a unity follower (buffer), isolating tone from volume loading.
+*   pos=1 (bright): R_cw≈0, fc = 1/(2pi*220*0.22u) ≈ 3.3 kHz
+*   pos=0 (dark):   R_cw≈20K, fc = 1/(2pi*20220*0.22u) ≈ 36 Hz
+*
+* VOLUME: 100K wiper pot as true voltage divider.
+*   CW = IC1b output, CCW = ground, wiper = output.
+*   pos=1 = full, pos=0 = silent.
+
+* --- Input coupling ---
+Cin in n1 0.047u
+R_pull n1 0 1Meg
+
+* === CLIPPING AMPLIFIER (IC1a) ===
+* V+ = n1 (audio), V- = n_inv (feedback junction), out = n_clip
+U1 n1 n_inv n_clip JRC4558
+
+* Inverting input ground impedance (mid-hump HPF)
+R4 n_inv n_gnd 4.7k
+C3 n_gnd 0 0.047u
+
+* Feedback path (all in parallel: output to inverting input)
+R_drive n_clip n_inv 551k
+D1 n_clip n_inv D1N4148
+D2 n_inv n_clip D1N4148
+C4 n_clip n_inv 51p
+
+* === TONE CONTROL (real TS808: IC1b + 20K wiper pot) ===
+* Tone pot: CW from IC1a output, wiper shunted to ground via R8+C6
+R_tone_cw n_clip n_tw 10k
+R_tone_ccw n_tw n_tone_in 10k
+* Frequency-dependent shunt from wiper to ground
+R8 n_tw n_c6 220
+C6 n_c6 0 0.22u
+* IC1b: unity follower buffer (isolates tone from volume loading)
+U2 n_tone_in n_buf n_buf JRC4558
+
+* === VOLUME CONTROL (100K wiper pot) ===
+* Voltage divider: CW = IC1b output, CCW = ground, wiper = output
+R_vol_cw n_buf n_vol 50k
+R_vol_ccw n_vol 0 50k
+
+* === OUTPUT COUPLING ===
+C_out n_vol out 10u
+R_out out 0 1Meg
+
+* --- Models ---
+.model D1N4148 D(IS=2.52e-9 RS=0.568 N=1.752)
+.model JRC4558 OA(AOL=200000 ROUT=75)
+
+* --- Controls ---
+.pot R_drive 51k 551k "Drive"
+.wiper R_tone_cw R_tone_ccw 20k 0.7 "Tone"
+.wiper R_vol_cw R_vol_ccw 100k 0.85 "Volume"
+
+.END

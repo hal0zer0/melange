@@ -56,6 +56,12 @@ pub struct CircuitIR {
     pub coupled_inductors: Vec<CoupledInductorIR>,
     pub transformer_groups: Vec<TransformerGroupIR>,
     pub pots: Vec<PotentiometerIR>,
+    /// Wiper potentiometer groups (two linked pots per group).
+    #[serde(default)]
+    pub wiper_groups: Vec<WiperGroupIR>,
+    /// Gang groups (multiple pots/wipers under one parameter).
+    #[serde(default)]
+    pub gang_groups: Vec<GangGroupIR>,
     pub switches: Vec<SwitchIR>,
     /// Op-amp output voltage saturation clamps.
     /// Only populated for op-amps with finite VSAT.
@@ -195,21 +201,24 @@ pub struct Matrices {
     pub spectral_radius_s_aneg: f64,
 }
 
-/// Op-amp output voltage saturation for code generation.
+/// Op-amp output voltage clamping for code generation.
 ///
-/// When VSAT is finite, the op-amp output node voltage is clamped to ±VSAT
-/// after each LU solve in the nodal solver. This prevents runaway voltages
-/// in open-loop or high-gain configurations.
+/// When VCC/VEE are finite, the op-amp output node voltage is clamped to
+/// [VEE, VCC] after each LU solve or after final voltage reconstruction.
+/// This prevents runaway voltages in open-loop or high-gain configurations.
+/// Supports asymmetric supply rails (e.g., VCC=9, VEE=0 for single-supply).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpampIR {
     /// Output node index (0-indexed, in the N-dimensional system)
     pub n_out_idx: usize,
     /// Boyle internal gain node index (0-indexed), if GBW is finite.
-    /// This node also needs VSAT clamping to prevent divergence.
+    /// This node also needs clamping to prevent divergence.
     #[serde(default)]
     pub n_internal_idx: Option<usize>,
-    /// Output saturation voltage (INFINITY = no saturation)
-    pub vsat: f64,
+    /// Upper voltage clamp (VCC). INFINITY = no upper clamp.
+    pub vclamp_hi: f64,
+    /// Lower voltage clamp (VEE). NEG_INFINITY = no lower clamp.
+    pub vclamp_lo: f64,
 }
 
 /// Potentiometer parameters for code generation (Sherman-Morrison precomputed data).
@@ -235,6 +244,61 @@ pub struct PotentiometerIR {
     pub max_resistance: f64,
     /// True if one terminal is grounded
     pub grounded: bool,
+}
+
+/// Wiper potentiometer group for code generation.
+///
+/// Links two `PotentiometerIR` entries as complementary legs of a 3-terminal pot.
+/// A single position parameter (0.0–1.0) controls both resistances.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WiperGroupIR {
+    /// Index into `CircuitIR::pots` for the CW (top→wiper) leg
+    pub cw_pot_index: usize,
+    /// Index into `CircuitIR::pots` for the CCW (wiper→bottom) leg
+    pub ccw_pot_index: usize,
+    /// Total resistance (R_cw + R_ccw = total)
+    pub total_resistance: f64,
+    /// Default wiper position (0.0–1.0)
+    pub default_position: f64,
+    /// Optional human-readable label
+    pub label: Option<String>,
+}
+
+/// Gang group — links multiple pots/wipers under a single 0-1 parameter.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GangGroupIR {
+    /// Human-readable label
+    pub label: String,
+    /// Pot members: pot_index, min_resistance, max_resistance, inverted
+    pub pot_members: Vec<GangPotMemberIR>,
+    /// Wiper members: wiper_group_index, total_resistance, inverted
+    pub wiper_members: Vec<GangWiperMemberIR>,
+    /// Default position (0.0–1.0)
+    pub default_position: f64,
+}
+
+/// A pot member of a gang group.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GangPotMemberIR {
+    /// Index into `CircuitIR::pots`
+    pub pot_index: usize,
+    /// Minimum resistance (ohms)
+    pub min_resistance: f64,
+    /// Maximum resistance (ohms)
+    pub max_resistance: f64,
+    /// If true, position mapping is inverted
+    pub inverted: bool,
+}
+
+/// A wiper member of a gang group.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GangWiperMemberIR {
+    /// Index into `CircuitIR::wiper_groups`
+    pub wiper_group_index: usize,
+    /// Total resistance of the wiper pot
+    pub total_resistance: f64,
+    /// If true, position mapping is inverted
+    pub inverted: bool,
 }
 
 /// Component within a switch directive for code generation.
@@ -1350,6 +1414,46 @@ impl CircuitIR {
             })
             .collect();
 
+        let wiper_groups: Vec<WiperGroupIR> = kernel
+            .wiper_groups
+            .iter()
+            .map(|wg| WiperGroupIR {
+                cw_pot_index: wg.cw_pot_index,
+                ccw_pot_index: wg.ccw_pot_index,
+                total_resistance: wg.total_resistance,
+                default_position: wg.default_position,
+                label: wg.label.clone(),
+            })
+            .collect();
+
+        let gang_groups: Vec<GangGroupIR> = kernel
+            .gang_groups
+            .iter()
+            .map(|gg| GangGroupIR {
+                label: gg.label.clone(),
+                pot_members: gg
+                    .pot_members
+                    .iter()
+                    .map(|&(pot_idx, inverted)| GangPotMemberIR {
+                        pot_index: pot_idx,
+                        min_resistance: mna.pots[pot_idx].min_resistance,
+                        max_resistance: mna.pots[pot_idx].max_resistance,
+                        inverted,
+                    })
+                    .collect(),
+                wiper_members: gg
+                    .wiper_members
+                    .iter()
+                    .map(|&(wg_idx, inverted)| GangWiperMemberIR {
+                        wiper_group_index: wg_idx,
+                        total_resistance: mna.wiper_groups[wg_idx].total_resistance,
+                        inverted,
+                    })
+                    .collect(),
+                default_position: gg.default_position,
+            })
+            .collect();
+
         // Build switches from MNA resolved info
         let switches: Vec<SwitchIR> = mna
             .switches
@@ -1472,14 +1576,14 @@ impl CircuitIR {
                 let mut dc = dc_result.v_node.clone();
                 dc.resize(kernel.n, 0.0);
                 dc.truncate(kernel.n);
-                // Clamp op-amp Boyle internal nodes to VSAT.
-                // The DC OP solver doesn't know about VSAT and can converge
-                // to voltages beyond rail limits at internal nodes.
+                // Clamp op-amp output nodes to VCC/VEE supply rails.
+                // The DC OP solver doesn't know about supply rails and can converge
+                // to voltages beyond rail limits at output/internal nodes.
                 for oa in &mna.opamps {
-                    if oa.vsat.is_finite() && oa.n_out_idx > 0 {
+                    if (oa.vcc.is_finite() || oa.vee.is_finite()) && oa.n_out_idx > 0 {
                         let o = oa.n_out_idx - 1;
                         if o < dc.len() {
-                            dc[o] = dc[o].clamp(-oa.vsat, oa.vsat);
+                            dc[o] = dc[o].clamp(oa.vee, oa.vcc);
                         }
                     }
                 }
@@ -1495,11 +1599,13 @@ impl CircuitIR {
             coupled_inductors,
             transformer_groups,
             pots,
+            wiper_groups,
+            gang_groups,
             switches,
             opamps: mna
                 .opamps
                 .iter()
-                .filter(|oa| oa.vsat.is_finite() && oa.n_out_idx > 0)
+                .filter(|oa| (oa.vcc.is_finite() || oa.vee.is_finite()) && oa.n_out_idx > 0)
                 .map(|oa| OpampIR {
                     n_out_idx: oa.n_out_idx - 1,
                     n_internal_idx: if oa.n_internal_idx > 0 {
@@ -1507,7 +1613,8 @@ impl CircuitIR {
                     } else {
                         None
                     },
-                    vsat: oa.vsat,
+                    vclamp_hi: oa.vcc,
+                    vclamp_lo: oa.vee,
                 })
                 .collect(),
             sparsity,
@@ -1803,17 +1910,17 @@ impl CircuitIR {
         // truncates internal BJT nodes (not needed in transient).
         let mut dc_operating_point = dc_result.v_node.clone();
         dc_operating_point.resize(n, 0.0);
-        // Clamp op-amp output + internal Boyle nodes to VSAT
+        // Clamp op-amp output + internal Boyle nodes to VCC/VEE supply rails
         for oa in &mna.opamps {
-            if oa.vsat.is_finite() && oa.n_out_idx > 0 {
+            if (oa.vcc.is_finite() || oa.vee.is_finite()) && oa.n_out_idx > 0 {
                 let o = oa.n_out_idx - 1;
                 if o < dc_operating_point.len() {
-                    dc_operating_point[o] = dc_operating_point[o].clamp(-oa.vsat, oa.vsat);
+                    dc_operating_point[o] = dc_operating_point[o].clamp(oa.vee, oa.vcc);
                 }
                 if oa.n_internal_idx > 0 {
                     let int = oa.n_internal_idx - 1;
                     if int < dc_operating_point.len() {
-                        dc_operating_point[int] = dc_operating_point[int].clamp(-oa.vsat, oa.vsat);
+                        dc_operating_point[int] = dc_operating_point[int].clamp(oa.vee, oa.vcc);
                     }
                 }
             }
@@ -1896,6 +2003,44 @@ impl CircuitIR {
                     min_resistance: p.min_resistance,
                     max_resistance: p.max_resistance,
                     grounded: p.grounded,
+                })
+                .collect(),
+            wiper_groups: mna
+                .wiper_groups
+                .iter()
+                .map(|wg| WiperGroupIR {
+                    cw_pot_index: wg.cw_pot_index,
+                    ccw_pot_index: wg.ccw_pot_index,
+                    total_resistance: wg.total_resistance,
+                    default_position: wg.default_position,
+                    label: wg.label.clone(),
+                })
+                .collect(),
+            gang_groups: mna
+                .gang_groups
+                .iter()
+                .map(|gg| GangGroupIR {
+                    label: gg.label.clone(),
+                    pot_members: gg
+                        .pot_members
+                        .iter()
+                        .map(|&(pot_idx, inverted)| GangPotMemberIR {
+                            pot_index: pot_idx,
+                            min_resistance: mna.pots[pot_idx].min_resistance,
+                            max_resistance: mna.pots[pot_idx].max_resistance,
+                            inverted,
+                        })
+                        .collect(),
+                    wiper_members: gg
+                        .wiper_members
+                        .iter()
+                        .map(|&(wg_idx, inverted)| GangWiperMemberIR {
+                            wiper_group_index: wg_idx,
+                            total_resistance: mna.wiper_groups[wg_idx].total_resistance,
+                            inverted,
+                        })
+                        .collect(),
+                    default_position: gg.default_position,
                 })
                 .collect(),
             switches: {
@@ -2008,7 +2153,7 @@ impl CircuitIR {
             opamps: mna
                 .opamps
                 .iter()
-                .filter(|oa| oa.vsat.is_finite() && oa.n_out_idx > 0)
+                .filter(|oa| (oa.vcc.is_finite() || oa.vee.is_finite()) && oa.n_out_idx > 0)
                 .map(|oa| OpampIR {
                     n_out_idx: oa.n_out_idx - 1,
                     n_internal_idx: if oa.n_internal_idx > 0 {
@@ -2016,7 +2161,8 @@ impl CircuitIR {
                     } else {
                         None
                     },
-                    vsat: oa.vsat,
+                    vclamp_hi: oa.vcc,
+                    vclamp_lo: oa.vee,
                 })
                 .collect(),
             sparsity,

@@ -153,6 +153,10 @@ pub struct DkKernel {
     pub transformer_groups: Vec<TransformerGroupState>,
     /// Potentiometer Sherman-Morrison precomputed data
     pub pots: Vec<SmPotData>,
+    /// Wiper potentiometer groups (passthrough from MNA for codegen)
+    pub wiper_groups: Vec<crate::mna::WiperGroupInfo>,
+    /// Gang groups (passthrough from MNA for codegen)
+    pub gang_groups: Vec<crate::mna::GangGroupInfo>,
 }
 
 /// Error type for DK reduction.
@@ -542,6 +546,8 @@ impl DkKernel {
             coupled_inductors,
             transformer_groups,
             pots,
+            wiper_groups: mna.wiper_groups.clone(),
+            gang_groups: mna.gang_groups.clone(),
         })
     }
 
@@ -821,6 +827,8 @@ impl DkKernel {
             coupled_inductors: Vec::new(), // empty
             transformer_groups: Vec::new(), // empty
             pots,
+            wiper_groups: mna.wiper_groups.clone(),
+            gang_groups: mna.gang_groups.clone(),
         })
     }
 

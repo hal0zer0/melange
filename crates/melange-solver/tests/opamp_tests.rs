@@ -377,3 +377,203 @@ U1 0 inv out oa
         error_high
     );
 }
+
+// =============================================================================
+// VCC/VEE asymmetric supply rail tests
+// =============================================================================
+
+#[test]
+fn test_opamp_vcc_vee_parsed() {
+    let spice = r#"VCC/VEE Test
+R1 in inv 10k
+R2 inv out 100k
+C1 out 0 100n
+U1 0 inv out oa
+.model oa OA(AOL=200000 VCC=9 VEE=0)
+"#;
+    let netlist = Netlist::parse(spice).unwrap();
+    let mna = MnaSystem::from_netlist(&netlist).unwrap();
+
+    assert_eq!(mna.opamps.len(), 1);
+    assert_eq!(mna.opamps[0].vcc, 9.0, "VCC should be 9.0");
+    assert_eq!(mna.opamps[0].vee, 0.0, "VEE should be 0.0");
+}
+
+#[test]
+fn test_opamp_vcc_vee_negative_rail() {
+    let spice = r#"Negative Rail Test
+R1 in inv 10k
+R2 inv out 100k
+C1 out 0 100n
+U1 0 inv out oa
+.model oa OA(AOL=200000 VCC=18 VEE=-9)
+"#;
+    let netlist = Netlist::parse(spice).unwrap();
+    let mna = MnaSystem::from_netlist(&netlist).unwrap();
+
+    assert_eq!(mna.opamps[0].vcc, 18.0, "VCC should be 18.0");
+    assert_eq!(mna.opamps[0].vee, -9.0, "VEE should be -9.0");
+}
+
+#[test]
+fn test_opamp_vsat_backward_compat() {
+    let spice = r#"VSAT Backward Compat
+R1 in inv 10k
+R2 inv out 100k
+C1 out 0 100n
+U1 0 inv out oa
+.model oa OA(AOL=200000 VSAT=13)
+"#;
+    let netlist = Netlist::parse(spice).unwrap();
+    let mna = MnaSystem::from_netlist(&netlist).unwrap();
+
+    // VSAT=13 should resolve to VCC=13, VEE=-13
+    assert_eq!(mna.opamps[0].vcc, 13.0, "VCC should be 13.0 from VSAT");
+    assert_eq!(mna.opamps[0].vee, -13.0, "VEE should be -13.0 from VSAT");
+}
+
+#[test]
+fn test_opamp_vcc_vee_overrides_vsat() {
+    let spice = r#"VCC/VEE Override
+R1 in inv 10k
+R2 inv out 100k
+C1 out 0 100n
+U1 0 inv out oa
+.model oa OA(AOL=200000 VSAT=13 VCC=9 VEE=0)
+"#;
+    let netlist = Netlist::parse(spice).unwrap();
+    let mna = MnaSystem::from_netlist(&netlist).unwrap();
+
+    // VCC/VEE should take priority over VSAT
+    assert_eq!(mna.opamps[0].vcc, 9.0, "VCC should override VSAT");
+    assert_eq!(mna.opamps[0].vee, 0.0, "VEE should override VSAT");
+}
+
+#[test]
+fn test_opamp_gbw_auto_default_preserves_symmetric() {
+    let spice = r#"GBW Auto Default
+R1 in inv 10k
+R2 inv out 100k
+C1 out 0 100n
+U1 0 inv out oa
+.model oa OA(AOL=200000 GBW=3e6)
+"#;
+    let netlist = Netlist::parse(spice).unwrap();
+    let mna = MnaSystem::from_netlist(&netlist).unwrap();
+
+    // GBW finite + no explicit rails → auto-default ±13V
+    assert_eq!(mna.opamps[0].vcc, 13.0, "VCC should auto-default to 13V");
+    assert_eq!(mna.opamps[0].vee, -13.0, "VEE should auto-default to -13V");
+}
+
+#[test]
+fn test_opamp_no_rails_no_clamping() {
+    let spice = r#"No Rails
+R1 in inv 10k
+R2 inv out 100k
+C1 out 0 100n
+U1 0 inv out oa
+.model oa OA(AOL=200000)
+"#;
+    let netlist = Netlist::parse(spice).unwrap();
+    let mna = MnaSystem::from_netlist(&netlist).unwrap();
+
+    // No VSAT, no VCC/VEE, no GBW → no clamping
+    assert!(mna.opamps[0].vcc.is_infinite(), "VCC should be infinity");
+    assert!(mna.opamps[0].vee.is_infinite(), "VEE should be -infinity");
+}
+
+#[test]
+fn test_opamp_vcc_vee_codegen_asymmetric_clamp() {
+    use melange_solver::codegen::{CodeGenerator, CodegenConfig};
+
+    // Op-amp with asymmetric rails + diode (separated by coupling R to avoid +K diagonal)
+    let spice = r#"Asymmetric Clamp Codegen
+R1 in inv 10k
+R2 inv opout 100k
+C1 opout 0 100n
+U1 0 inv opout oa
+Rcouple opout out 1k
+D1 out 0 D1N4148
+Rload out 0 10k
+C2 out 0 100n
+.model oa OA(AOL=200000 VCC=9 VEE=0)
+.model D1N4148 D(IS=2.52e-9 N=1.752)
+"#;
+    let netlist = Netlist::parse(spice).unwrap();
+    let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
+    let node_map = mna.node_map.clone();
+
+    let input_node_0 = node_map["in"] - 1;
+    let output_node_0 = node_map["out"] - 1;
+
+    mna.stamp_input_conductance(input_node_0, 1.0);
+    let kernel = DkKernel::from_mna(&mna, 44100.0).unwrap();
+
+    let config = CodegenConfig {
+        circuit_name: "vcc_vee_test".to_string(),
+        sample_rate: 44100.0,
+        input_node: input_node_0,
+        output_nodes: vec![output_node_0],
+        ..CodegenConfig::default()
+    };
+
+    let generator = CodeGenerator::new(config);
+    let result = generator.generate(&kernel, &mna, &netlist);
+    assert!(result.is_ok(), "Codegen failed: {:?}", result.err());
+
+    let generated = result.unwrap();
+    // Generated code should contain asymmetric clamp with VCC=9 and VEE=0
+    let has_clamp = generated.code.lines().any(|line| {
+        line.contains(".clamp(") && line.contains("9.0") && line.contains("0.0")
+    });
+    assert!(has_clamp, "Generated code should contain .clamp(0.0..., 9.0...) for VEE=0/VCC=9");
+}
+
+#[test]
+fn test_opamp_dk_path_has_clamping() {
+    use melange_solver::codegen::{CodeGenerator, CodegenConfig};
+
+    // Pure opamp with diode (M=1, DK Schur path) should have clamping in generated code
+    let spice = r#"DK Path Clamping
+R1 in inv 10k
+R2 inv opout 100k
+C1 opout 0 100n
+U1 0 inv opout oa
+Rcouple opout dout 1k
+D1 dout 0 D1N4148
+Rload dout 0 10k
+C2 dout 0 100n
+.model oa OA(AOL=200000 VSAT=5)
+.model D1N4148 D(IS=2.52e-9 N=1.752)
+"#;
+    let netlist = Netlist::parse(spice).unwrap();
+    let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
+    let node_map = mna.node_map.clone();
+
+    let input_node_0 = node_map["in"] - 1;
+    let output_node_0 = node_map["dout"] - 1;
+
+    mna.stamp_input_conductance(input_node_0, 1.0);
+    let kernel = DkKernel::from_mna(&mna, 44100.0).unwrap();
+
+    let config = CodegenConfig {
+        circuit_name: "dk_vsat_test".to_string(),
+        sample_rate: 44100.0,
+        input_node: input_node_0,
+        output_nodes: vec![output_node_0],
+        ..CodegenConfig::default()
+    };
+
+    let generator = CodeGenerator::new(config);
+    let result = generator.generate(&kernel, &mna, &netlist);
+    assert!(result.is_ok(), "Codegen failed: {:?}", result.err());
+
+    let generated = result.unwrap();
+    // M=1 should route to DK path, and the generated code should have VSAT clamping
+    assert_eq!(generated.m, 1, "Should have M=1 for DK path");
+    assert!(
+        generated.code.contains("Op-amp output voltage clamping"),
+        "DK path should have op-amp clamping comment"
+    );
+}

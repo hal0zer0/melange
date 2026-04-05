@@ -2,6 +2,10 @@
 
 Melange — Rust toolkit for circuit simulation to real-time audio DSP.
 
+## CRITICAL: Never simplify circuits
+
+The goal is ALWAYS to get melange to run the real circuit, NEVER to simplify a circuit to work around melange limitations. If a real hardware topology doesn't work in melange, that is a melange bug — fix melange. Do not substitute "simplified approximations" of real circuit sections.
+
 ## Build & Test
 
 ```bash
@@ -162,6 +166,11 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
   - **Runtime solver**: No pot support (codegen-only). `CircuitSolver` uses nominal kernel.
   - Plugin template auto-generates `FloatParam` knobs for each pot
   - Max 32 pots per circuit; pot value stored in `CircuitState`
+- **Gang pot linking**: `.gang "Label" member1 member2` links multiple `.pot`/`.wiper` entries to a single UI parameter
+  - Single 0-1 position controls all members; `!` prefix inverts a member's response
+  - Plugin template emits one FloatParam per gang; ganged pots/wipers excluded from individual params
+- **Op-amp VCC/VEE asymmetric supply rails**: `.model OA(VCC=9 VEE=0)` for single-supply, `VCC=18 VEE=-9` for charge pump
+  - Priority: VCC/VEE > VSAT > GBW auto-default (±13V). Clamping in all codegen paths (DK, Nodal Schur, Full LU).
 - **Plugin level params always included**: Input Level (0 dB default, ±24 dB) and Output Level (0 dB default, ±24 dB)
   - Use `--no-level-params` CLI flag to opt out
 - **Oversampling in codegen** (2x/4x): self-contained polyphase half-band IIR in generated code
@@ -219,7 +228,7 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
 - Tube Koren model: lambda parameter models finite plate resistance; no space-charge or transit-time effects
 - BJT Gummel-Poon: self-heating (Rth/Cth) and charge storage (CJE/CJC/TF) available; no substrate current or avalanche breakdown
 - All device models fixed at room temperature (27°C); no temperature coefficients (TNOM, TC1, TC2, XTI)
-- Op-amp model has ideal frequency response (no GBW pole, no slew rate limiting)
+- Op-amp model: Boyle macromodel with GBW dominant pole, VCC/VEE asymmetric supply rail clamping. No slew rate limiting.
 - Pentode support deferred (3D device exceeds current 2D NR solver; workaround: triode-connect)
 - **Runtime solver** (`DeviceEntry`) supports all device types: Diode, DiodeWithRs, Led, BJT, JFET, MOSFET, Tube
 - **NodalSolver transient NR**: Converges for all physically valid circuits including Pultec EQP-1A (4 tubes, 2 transformers, global NFB). Requires positive-definite inductance matrices (validated at MNA build time).

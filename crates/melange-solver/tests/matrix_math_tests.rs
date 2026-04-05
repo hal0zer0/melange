@@ -567,6 +567,8 @@ fn test_singular_matrix_error_path() {
         bjt_internal_nodes: vec![],
         linearized_bjts: vec![],
         pot_default_overrides: HashMap::new(),
+        wiper_groups: vec![],
+        gang_groups: vec![],
     };
 
     let result = DkKernel::from_mna(&mna, 44100.0);
