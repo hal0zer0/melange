@@ -1,5 +1,6 @@
 //! Plugin project template generation
 
+use std::hash::{Hash, Hasher};
 use std::path::Path;
 
 use anyhow::Result;
@@ -89,6 +90,12 @@ pub struct PluginOptions<'a> {
     pub wet_dry_mix: bool,
     /// Add ear-protection soft limiter on final output (default: true).
     pub ear_protection: bool,
+    /// Plugin vendor name. If `None`, defaults to "Melange".
+    pub vendor: Option<&'a str>,
+    /// Plugin URL. If `None`, defaults to "https://github.com/melange".
+    pub url: Option<&'a str>,
+    /// Plugin contact email. If `None`, defaults to "dev@melange.audio".
+    pub email: Option<&'a str>,
 }
 
 /// Generate a complete plugin project
@@ -173,8 +180,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-# Track nih-plug main branch; pin to a specific rev for reproducible builds
-nih_plug = {{ git = "https://github.com/robbert-vdh/nih-plug.git" }}
+# Pin nih-plug to a specific rev for reproducible builds
+nih_plug = {{ git = "https://github.com/robbert-vdh/nih-plug.git", rev = "31e5bb87" }}
 
 [lib]
 crate-type = ["cdylib"]
@@ -255,17 +262,30 @@ fn capitalize_word(s: &str) -> String {
 
 /// Compute a stable 16-byte VST3 ID string from a circuit name.
 ///
-/// Uses XOR folding to produce 16 bytes, then maps each to uppercase ASCII
-/// so the result is valid for a `b"..."` literal.
+/// Uses `DefaultHasher` (SipHash) for better distribution, then derives 16
+/// bytes via two hashes (name and name + salt) to fill the full ID space.
+/// Each byte is mapped to an uppercase ASCII letter for a valid `b"..."` literal.
+///
+/// Note: renaming the circuit file will change the ID and break DAW sessions.
+/// A future `--vst3-id` CLI override could allow pinning the ID explicitly.
 fn compute_vst3_id(circuit_name: &str) -> String {
-    let mut hash = [0u8; 16];
-    for (i, &b) in circuit_name.as_bytes().iter().enumerate() {
-        hash[i % 16] ^= b;
+    // First 8 bytes from hashing the name directly
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    circuit_name.hash(&mut hasher);
+    let h1 = hasher.finish().to_le_bytes();
+
+    // Second 8 bytes from hashing the name with a salt
+    let mut hasher2 = std::collections::hash_map::DefaultHasher::new();
+    "melange-vst3-salt".hash(&mut hasher2);
+    circuit_name.hash(&mut hasher2);
+    let h2 = hasher2.finish().to_le_bytes();
+
+    let mut id = [0u8; 16];
+    for i in 0..8 {
+        id[i] = b'A' + (h1[i] % 26);
+        id[i + 8] = b'A' + (h2[i] % 26);
     }
-    for h in hash.iter_mut() {
-        *h = b'A' + (*h % 26);
-    }
-    String::from_utf8(hash.to_vec()).unwrap()
+    String::from_utf8(id.to_vec()).unwrap()
 }
 
 fn generate_pot_field(pot: &PotParamInfo) -> String {
@@ -277,26 +297,31 @@ fn generate_pot_field(pot: &PotParamInfo) -> String {
 
 fn generate_pot_default(pot: &PotParamInfo) -> String {
     let name = pot.name.replace('\\', "\\\\").replace('"', "\\\"");
-    {
-        format!(
-            r#"            pot_{idx}: FloatParam::new(
+    // Normalize default resistance to 0.0-1.0 position
+    let range = pot.max_resistance - pot.min_resistance;
+    let default_pos = if range > 0.0 {
+        (pot.default_resistance - pot.min_resistance) / range
+    } else {
+        0.5
+    };
+    format!(
+        r#"            pot_{idx}: FloatParam::new(
                 "{name}",
-                {default:.1},
+                {default},
                 FloatRange::Linear {{
-                    min: {min:.1},
-                    max: {max:.1},
+                    min: 0.0,
+                    max: 1.0,
                 }},
             )
             .with_smoother(SmoothingStyle::Linear(10.0))
-            .with_unit(" \u{{2126}}"),
+            .with_unit("%")
+            .with_value_to_string(Arc::new(|v| format!("{{:.0}}", v * 100.0)))
+            .with_string_to_value(Arc::new(|s| s.trim_end_matches('%').trim().parse::<f32>().ok().map(|v| v / 100.0))),
 "#,
-            idx = pot.index,
-            name = name,
-            default = pot.default_resistance,
-            min = pot.min_resistance,
-            max = pot.max_resistance,
-        )
-    }
+        idx = pot.index,
+        name = name,
+        default = format!("{:.4}", default_pos),
+    )
 }
 
 fn generate_switch_field(sw: &SwitchParamInfo) -> String {
@@ -572,15 +597,19 @@ fn generate_process_loop(
 
     // Per-block pot reads: done once per buffer before the sample loop.
     // set_pot_N() triggers O(N³) rebuild; skips if value unchanged.
+    // Param is 0.0-1.0 position; convert to resistance: min + position * (max - min).
     let pot_pre_loop: String = if !pots.is_empty() {
         let reads: String = pots
             .iter()
             .map(|p| {
                 // Use .value() not .smoothed.next() — smoother can't advance fast enough
                 // at per-block rate. set_pot_N() skips rebuild if value unchanged.
+                // Convert 0-1 position to resistance in ohms.
                 format!(
-                    "            let pot_{i}_val = self.params.pot_{i}.value() as f64;\n",
-                    i = p.index
+                    "            let pot_{i}_val = {min:.17e}_f64 + self.params.pot_{i}.value() as f64 * {range:.17e}_f64;\n",
+                    i = p.index,
+                    min = p.min_resistance,
+                    range = p.max_resistance - p.min_resistance,
                 )
             })
             .collect();
@@ -899,6 +928,9 @@ fn generate_lib_rs(
     };
     let clap_id = format!("com.melange.{circuit_name}");
     let vst3_id_str = compute_vst3_id(circuit_name);
+    let vendor = options.vendor.unwrap_or("Melange");
+    let url = options.url.unwrap_or("https://github.com/melange");
+    let email = options.email.unwrap_or("dev@melange.audio");
     let params_struct = generate_params_struct(
         with_level_params,
         pots,
@@ -922,7 +954,7 @@ fn generate_lib_rs(
     );
 
     // Conditional sections based on num_outputs
-    let (circuit_import, plugin_struct, plugin_default, init_method, reset_method) = if num_outputs
+    let (circuit_import, plugin_struct, plugin_default, init_method, reset_method, deactivate_method) = if num_outputs
         > 1
     {
         // Multi-output: single circuit state, mono input → multi-output
@@ -958,6 +990,10 @@ fn generate_lib_rs(
                  \x20       true\n\
                  \x20   }",
                 "    fn reset(&mut self) {\n\
+                 \x20       self.circuit_state.reset();\n\
+                 \x20   }"
+                    .to_string(),
+                "    fn deactivate(&mut self) {\n\
                  \x20       self.circuit_state.reset();\n\
                  \x20   }"
                     .to_string(),
@@ -1004,6 +1040,12 @@ fn generate_lib_rs(
                  \x20       }\n\
                  \x20   }"
                     .to_string(),
+                "    fn deactivate(&mut self) {\n\
+                 \x20       for state in &mut self.circuit_states {\n\
+                 \x20           state.reset();\n\
+                 \x20       }\n\
+                 \x20   }"
+                    .to_string(),
             )
     } else {
         // Single output: per-channel state duplication (stereo from mono)
@@ -1044,6 +1086,12 @@ fn generate_lib_rs(
                  \x20       true\n\
                  \x20   }",
                 "    fn reset(&mut self) {\n\
+                 \x20       for state in &mut self.circuit_states {\n\
+                 \x20           state.reset();\n\
+                 \x20       }\n\
+                 \x20   }"
+                    .to_string(),
+                "    fn deactivate(&mut self) {\n\
                  \x20       for state in &mut self.circuit_states {\n\
                  \x20           state.reset();\n\
                  \x20       }\n\
@@ -1143,9 +1191,9 @@ mod circuit;
 
 impl Plugin for CircuitPlugin {{
     const NAME: &'static str = "{display_name}";
-    const VENDOR: &'static str = "Melange";
-    const URL: &'static str = "https://github.com/melange";
-    const EMAIL: &'static str = "dev@melange.audio";
+    const VENDOR: &'static str = "{vendor}";
+    const URL: &'static str = "{url}";
+    const EMAIL: &'static str = "{email}";
     const VERSION: &'static str = env!("CARGO_PKG_VERSION");
 
     const AUDIO_IO_LAYOUTS: &'static [AudioIOLayout] = &[
@@ -1158,7 +1206,7 @@ impl Plugin for CircuitPlugin {{
         }},
     ];
 
-    const SAMPLE_ACCURATE_AUTOMATION: bool = true;
+    const SAMPLE_ACCURATE_AUTOMATION: bool = false;
 
     type SysExMessage = ();
     type BackgroundTask = ();
@@ -1170,6 +1218,8 @@ impl Plugin for CircuitPlugin {{
 {init_method}
 
 {reset_method}
+
+{deactivate_method}
 {latency_method}
     fn process(
         &mut self,
@@ -1374,7 +1424,7 @@ mod tests {
         let lib = test_generate_lib_rs("test", false, &[]);
         assert!(lib.contains("impl Plugin for CircuitPlugin"));
         assert!(lib.contains("const VENDOR: &'static str = \"Melange\""));
-        assert!(lib.contains("const SAMPLE_ACCURATE_AUTOMATION: bool = true"));
+        assert!(lib.contains("const SAMPLE_ACCURATE_AUTOMATION: bool = false"));
     }
 
     #[test]
@@ -1506,12 +1556,13 @@ mod tests {
         assert!(lib.contains("#[id = \"pot_0\"]"));
         assert!(lib.contains("pub pot_0: FloatParam"));
         assert!(lib.contains("\"R1 (Tone)\""));
-        assert!(lib.contains("min: 100.0"));
-        assert!(lib.contains("max: 50000.0"));
+        // Pot params use normalized 0.0-1.0 range displayed as percentage
+        assert!(lib.contains("min: 0.0"));
+        assert!(lib.contains("max: 1.0"));
     }
 
     #[test]
-    fn lib_with_pot_has_ohm_unit_string() {
+    fn lib_with_pot_has_percent_unit() {
         let pots = vec![PotParamInfo {
             index: 0,
             name: "R1".to_string(),
@@ -1520,16 +1571,15 @@ mod tests {
             default_resistance: 5000.0,
         }];
         let lib = test_generate_lib_rs("test", false, &pots);
-        // The template embeds the ohm symbol escape as a literal string in the generated code
-        // (it will be interpreted by the Rust compiler when the generated code is compiled)
+        // Pot parameters display as percentage (0-100%)
         assert!(
-            lib.contains(r"\u{2126}"),
-            "Should contain ohm symbol escape in generated code"
+            lib.contains(r#".with_unit("%")"#),
+            "Should contain percent unit in generated code"
         );
     }
 
     #[test]
-    fn lib_with_pot_sets_resistance_in_process() {
+    fn lib_with_pot_converts_position_to_resistance() {
         let pots = vec![PotParamInfo {
             index: 0,
             name: "R1".to_string(),
@@ -1538,7 +1588,8 @@ mod tests {
             default_resistance: 5000.0,
         }];
         let lib = test_generate_lib_rs("test", false, &pots);
-        assert!(lib.contains("pot_0_val = self.params.pot_0.value()"));
+        // Position-to-resistance conversion: min + position * (max - min)
+        assert!(lib.contains("self.params.pot_0.value()"));
         assert!(lib.contains("set_pot_0(pot_0_val)"));
     }
 

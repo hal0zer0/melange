@@ -65,7 +65,7 @@ pub mod dc_op;
 pub mod device_types;
 pub mod dk;
 pub mod linear_solver;
-pub mod lu;
+pub(crate) mod lu;
 pub mod mna;
 pub mod parser;
 

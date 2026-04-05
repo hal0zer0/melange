@@ -888,6 +888,7 @@ pub struct Parameter {
 
 /// Parse error.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct ParseError {
     pub line: usize,
     pub message: String,
@@ -1386,6 +1387,69 @@ impl Parser {
                         });
                     }
                 }
+                // Channel-length modulation (JFET, MOSFET, tube) must be non-negative
+                "LAMBDA" => {
+                    if *value < 0.0 {
+                        return Err(ParseError {
+                            line: 0,
+                            message: format!(
+                                ".model '{}': {} must be >= 0, got {}",
+                                model.name, key, value
+                            ),
+                        });
+                    }
+                }
+                // VCA THD coefficient must be non-negative
+                "THD" => {
+                    if *value < 0.0 {
+                        return Err(ParseError {
+                            line: 0,
+                            message: format!(
+                                ".model '{}': {} must be >= 0, got {}",
+                                model.name, key, value
+                            ),
+                        });
+                    }
+                }
+                // VCA gain-law scale voltage (denominator in exp) must be positive
+                "VSCALE" => {
+                    if *value <= 0.0 {
+                        return Err(ParseError {
+                            line: 0,
+                            message: format!(
+                                ".model '{}': {} must be > 0, got {}",
+                                model.name, key, value
+                            ),
+                        });
+                    }
+                }
+                // Op-amp saturation voltage must be positive
+                "VSAT" => {
+                    if *value <= 0.0 {
+                        return Err(ParseError {
+                            line: 0,
+                            message: format!(
+                                ".model '{}': {} must be > 0, got {}",
+                                model.name, key, value
+                            ),
+                        });
+                    }
+                }
+                // Op-amp gain-bandwidth product must be positive
+                "GBW" => {
+                    if *value <= 0.0 {
+                        return Err(ParseError {
+                            line: 0,
+                            message: format!(
+                                ".model '{}': {} must be > 0, got {}",
+                                model.name, key, value
+                            ),
+                        });
+                    }
+                }
+                // Op-amp supply rails: finite check already done above;
+                // no additional single-param range constraint needed
+                "VCC" | "VEE" => {}
                 _ => {} // Unknown params: no range check (warned elsewhere)
             }
         }

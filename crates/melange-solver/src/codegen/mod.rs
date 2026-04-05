@@ -212,6 +212,7 @@ impl From<crate::mna::MnaError> for CodegenError {
 /// Generated circuit solver code.
 #[cfg(feature = "codegen")]
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct GeneratedCode {
     /// The generated Rust source code
     pub code: String,

@@ -66,30 +66,45 @@ impl BinaryCache {
             });
         }
 
+        // Use PID-unique temp paths to avoid races between concurrent processes
+        let pid = std::process::id();
+        let src_path = self.cache_dir.join(format!("{bin_name}_tmp_{pid}.rs"));
+        let tmp_bin = self.cache_dir.join(format!("{bin_name}_tmp_{pid}"));
+
         // Write source to temp file
-        let src_path = self.cache_dir.join(format!("{bin_name}.rs"));
         {
             let mut f = std::fs::File::create(&src_path)
                 .with_context(|| format!("Failed to create source file: {}", src_path.display()))?;
             f.write_all(source.as_bytes())?;
         }
 
-        // Compile with optimization
+        // Compile to temp binary with optimization
         let compile = Command::new("rustc")
             .arg(&src_path)
             .arg("-o")
-            .arg(&bin_path)
+            .arg(&tmp_bin)
             .arg("--edition=2024")
             .arg("-O")
             .output()
             .context("Failed to invoke rustc. Is the Rust toolchain installed?")?;
 
+        // Clean up source file regardless of outcome
         let _ = std::fs::remove_file(&src_path);
 
         if !compile.status.success() {
-            let _ = std::fs::remove_file(&bin_path);
+            // Clean up failed temp binary (rustc may leave a partial file)
+            let _ = std::fs::remove_file(&tmp_bin);
             let stderr = String::from_utf8_lossy(&compile.stderr);
             anyhow::bail!("Compilation failed for '{name}':\n{stderr}");
+        }
+
+        // Atomic placement — rename to final path on same filesystem
+        match std::fs::rename(&tmp_bin, &bin_path) {
+            Ok(_) => {}
+            Err(_) => {
+                // Another process won the race — use their binary, discard ours
+                let _ = std::fs::remove_file(&tmp_bin);
+            }
         }
 
         Ok(CompiledBinary {

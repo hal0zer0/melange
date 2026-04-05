@@ -1290,6 +1290,7 @@ fn compile_circuit_source(
                 mono,
                 wet_dry_mix,
                 ear_protection,
+                ..Default::default()
             };
             plugin_template::generate_plugin_project_with_oversampling(
                 &project_dir,
