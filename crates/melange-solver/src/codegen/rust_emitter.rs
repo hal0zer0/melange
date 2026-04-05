@@ -5207,6 +5207,13 @@ impl RustEmitter {
             "    let input = if input.is_finite() { input.clamp(-100.0, 100.0) } else { 0.0 };\n\n",
         );
 
+        // Flush denormals in state vectors (prevents 50-100x CPU penalty during silence)
+        code.push_str("    for v in state.v_prev.iter_mut() { *v = *v + 1e-25 - 1e-25; }\n");
+        if m > 0 {
+            code.push_str("    for v in state.i_nl_prev.iter_mut() { *v = *v + 1e-25 - 1e-25; }\n");
+        }
+        code.push_str("\n");
+
         // Step 1: Build RHS = rhs_const + A_neg * v_prev + N_i * i_nl_prev + input (sparse)
         code.push_str(
             "    // Step 1: Build RHS (sparse A_neg * v_prev + sparse N_i * i_nl_prev)\n",
@@ -6465,6 +6472,13 @@ impl RustEmitter {
             "    let input = if input.is_finite() { input.clamp(-100.0, 100.0) } else { 0.0 };\n\n",
         );
 
+        // Flush denormals in state vectors (prevents 50-100x CPU penalty during silence)
+        code.push_str("    for v in state.v_prev.iter_mut() { *v = *v + 1e-25 - 1e-25; }\n");
+        if m > 0 {
+            code.push_str("    for v in state.i_nl_prev.iter_mut() { *v = *v + 1e-25 - 1e-25; }\n");
+        }
+        code.push_str("\n");
+
         // Step 1: Build RHS = rhs_const + A_neg * v_prev + N_i * i_nl_prev + input (sparse)
         code.push_str(
             "    // Step 1: Build RHS (sparse A_neg * v_prev + sparse N_i * i_nl_prev)\n",
@@ -7168,7 +7182,20 @@ impl RustEmitter {
         if m > 0 {
             code.push_str("        state.chord_valid = false;\n");
         }
-        code.push_str("        return [0.0; NUM_OUTPUTS];\n");
+        // Return DC OP output (not zero) to minimize discontinuity on NaN recovery
+        code.push_str("        let mut nan_out = [0.0f64; NUM_OUTPUTS];\n");
+        for (oi, &node) in ir.solver_config.output_nodes.iter().enumerate() {
+            if node < ir.dc_operating_point.len() {
+                let dc_val = ir.dc_operating_point[node];
+                let scale = ir.solver_config.output_scales.get(oi).copied().unwrap_or(1.0);
+                let out_val = dc_val * scale;
+                code.push_str(&format!(
+                    "        nan_out[{oi}] = {:.17e};\n",
+                    out_val
+                ));
+            }
+        }
+        code.push_str("        return nan_out;\n");
         code.push_str("    }\n\n");
 
         // No VSAT clamping on v — clamping any subset of nodes creates physical

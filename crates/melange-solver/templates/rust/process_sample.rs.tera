@@ -21,6 +21,11 @@ pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS
     // Validate input — handle NaN, inf, and extreme values
     let input = if input.is_finite() { input.clamp(-100.0, 100.0) } else { 0.0 };
 
+    // Flush denormals in state vectors to prevent 50-100x CPU penalty during silence.
+    // (Most DAW hosts set FTZ/DAZ, but generated code should not rely on it.)
+    for v in state.v_prev.iter_mut() { *v = *v + 1e-25 - 1e-25; }
+{% if m > 0 %}    for v in state.i_nl_prev.iter_mut() { *v = *v + 1e-25 - 1e-25; }
+{% endif %}
 {% if has_be_fallback %}    // Pre-check: force BE if cooldown active from previous ringing detection.
     let force_be = state.be_cooldown > 0;
     if state.be_cooldown > 0 { state.be_cooldown -= 1; }
