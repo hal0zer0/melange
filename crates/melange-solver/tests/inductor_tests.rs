@@ -1,9 +1,9 @@
 //! Inductor companion model tests.
 //!
-//! Verifies that inductor support works correctly in both the runtime solver
-//! and code generation. Uses trapezoidal companion model: the inductor is
-//! replaced each timestep by an equivalent conductance g_eq = T/(2L) in
-//! parallel with a history current source.
+//! Verifies that inductor support works correctly in the codegen pipeline.
+//! Uses trapezoidal companion model: the inductor is replaced each timestep
+//! by an equivalent conductance g_eq = T/(2L) in parallel with a history
+//! current source.
 //!
 //! Tests cover:
 //! - RL circuit step response (exponential current ramp toward V/R)
@@ -12,12 +12,13 @@
 //! - RLC circuit basic resonance behavior
 //! - Codegen contains correct inductor constants and state fields
 
+mod support;
+
 use melange_solver::codegen::ir::CircuitIR;
 use melange_solver::codegen::{CodeGenerator, CodegenConfig};
 use melange_solver::dk::DkKernel;
 use melange_solver::mna::MnaSystem;
 use melange_solver::parser::Netlist;
-use melange_solver::solver::LinearSolver;
 use std::io::Write;
 
 // ---------------------------------------------------------------------------
@@ -27,22 +28,6 @@ use std::io::Write;
 fn build_pipeline(spice: &str) -> (Netlist, MnaSystem, DkKernel) {
     let netlist = Netlist::parse(spice).expect("failed to parse netlist");
     let mna = MnaSystem::from_netlist(&netlist).expect("failed to build MNA");
-    let kernel = DkKernel::from_mna(&mna, 44100.0).expect("failed to build DK kernel");
-    (netlist, mna, kernel)
-}
-
-/// Build pipeline with input conductance stamped into G matrix before kernel build.
-/// This models the input as a Thevenin voltage source with series resistance R_in.
-fn build_pipeline_with_input(
-    spice: &str,
-    input_node_name: &str,
-    input_resistance: f64,
-) -> (Netlist, MnaSystem, DkKernel) {
-    let netlist = Netlist::parse(spice).expect("failed to parse netlist");
-    let mut mna = MnaSystem::from_netlist(&netlist).expect("failed to build MNA");
-    // Stamp input conductance into G matrix BEFORE building DK kernel
-    let in_idx = *mna.node_map.get(input_node_name).unwrap() - 1;
-    mna.g[in_idx][in_idx] += 1.0 / input_resistance;
     let kernel = DkKernel::from_mna(&mna, 44100.0).expect("failed to build DK kernel");
     (netlist, mna, kernel)
 }
@@ -158,21 +143,13 @@ C1 out 0 100p
 fn test_rl_step_response() {
     // RL lowpass: R1=1k in series, L1=100mH shunt to ground, plus tiny C for stability.
     // tau = L/R = 0.1/1000 = 0.1ms = 4.41 samples
-    // Must stamp input conductance into G before building kernel (Thevenin model).
-    let input_resistance = 1.0; // 1 ohm Thevenin source
-    let (_, mna, kernel) = build_pipeline_with_input(RL_LOWPASS_SPICE, "in", input_resistance);
-    let in_idx = *mna.node_map.get("in").unwrap() - 1;
-    let out_idx = *mna.node_map.get("out").unwrap() - 1;
-
-    let mut solver = LinearSolver::new(kernel, in_idx, out_idx);
-    solver.set_input_conductance(1.0 / input_resistance);
+    let sample_rate = 44100.0;
+    let config = support::config_for_spice(RL_LOWPASS_SPICE, sample_rate);
+    let circuit = support::build_circuit(RL_LOWPASS_SPICE, &config, "rl_step");
 
     // Apply 1V DC step for 500 samples (many time constants)
     let num_samples = 500;
-    let mut output = vec![0.0; num_samples];
-    for i in 0..num_samples {
-        output[i] = solver.process_sample(1.0);
-    }
+    let output = support::run_step(&circuit, 1.0, num_samples, sample_rate);
 
     // The output node has: R1 from "in", L1+C1 to ground.
     // At DC steady state, L is short and C is open, so out = in through a
@@ -199,9 +176,7 @@ fn test_rl_step_response() {
     );
 
     // All outputs should be finite
-    for (i, &v) in output.iter().enumerate() {
-        assert!(v.is_finite(), "Output[{}] should be finite, got {}", i, v);
-    }
+    support::assert_finite(&output);
 
     // The general trend should be decaying (early outputs larger than late)
     let avg_first_10: f64 = output[0..10].iter().map(|v| v.abs()).sum::<f64>() / 10.0;
@@ -226,25 +201,17 @@ fn test_inductor_current_continuity() {
     //
     // Circuit: R1=1k in->out, L1=1H out->gnd, C1=1p out->gnd (tiny cap for stability)
     // tau = L/R = 1/1000 = 1ms = 44.1 samples
-    let input_resistance = 1.0;
-    let (_, mna, kernel) = build_pipeline_with_input(RL_LARGE_L_SPICE, "in", input_resistance);
-    let in_idx = *mna.node_map.get("in").unwrap() - 1;
-    let out_idx = *mna.node_map.get("out").unwrap() - 1;
+    let sample_rate = 44100.0;
+    let config = support::config_for_spice(RL_LARGE_L_SPICE, sample_rate);
+    let circuit = support::build_circuit(RL_LARGE_L_SPICE, &config, "rl_continuity");
 
-    let mut solver = LinearSolver::new(kernel, in_idx, out_idx);
-    solver.set_input_conductance(1.0 / input_resistance);
+    // Phase 1: 200 samples of 1V DC step, then Phase 2: 200 samples of 0V
+    let mut input_signal = vec![1.0; 200];
+    input_signal.extend(vec![0.0; 200]);
+    let output = support::run_signal(&circuit, &input_signal, sample_rate);
 
-    // Phase 1: Drive with DC step (200 samples) to build up inductor current
-    let mut output_phase1 = vec![0.0; 200];
-    for i in 0..200 {
-        output_phase1[i] = solver.process_sample(1.0);
-    }
-
-    // Phase 2: Remove input (200 samples) — inductor current should decay smoothly
-    let mut output_phase2 = vec![0.0; 200];
-    for i in 0..200 {
-        output_phase2[i] = solver.process_sample(0.0);
-    }
+    let output_phase1 = &output[..200];
+    let output_phase2 = &output[200..400];
 
     // After the input step-down, the inductor's stored energy means the output
     // doesn't vanish instantly. The first few samples of phase 2 should be non-zero.
@@ -268,9 +235,8 @@ fn test_inductor_current_continuity() {
     );
 
     // All outputs should be finite
-    for (i, &v) in output_phase1.iter().chain(output_phase2.iter()).enumerate() {
-        assert!(v.is_finite(), "Output[{}] should be finite, got {}", i, v);
-    }
+    support::assert_finite(output_phase1);
+    support::assert_finite(output_phase2);
 }
 
 // ---------------------------------------------------------------------------
@@ -461,22 +427,15 @@ fn test_inductor_ir() {
 
 #[test]
 fn test_rlc_circuit_behavior() {
-    // RLC circuit with input conductance stamped for proper Thevenin model.
-    let input_resistance = 1.0;
-    let (_, mna, kernel) = build_pipeline_with_input(RLC_SPICE, "in", input_resistance);
-    let in_idx = *mna.node_map.get("in").unwrap() - 1;
-    let out_idx = *mna.node_map.get("out").unwrap() - 1;
-
-    let mut solver = LinearSolver::new(kernel, in_idx, out_idx);
-    solver.set_input_conductance(1.0 / input_resistance);
+    let sample_rate = 44100.0;
+    let config = support::config_for_spice(RLC_SPICE, sample_rate);
+    let circuit = support::build_circuit(RLC_SPICE, &config, "rlc_behavior");
 
     // Apply impulse: 1 sample of 1.0 then zeros
     let num_samples = 2000;
-    let mut output = vec![0.0; num_samples];
-    for i in 0..num_samples {
-        let input = if i == 0 { 1.0 } else { 0.0 };
-        output[i] = solver.process_sample(input);
-    }
+    let mut input_signal = vec![0.0; num_samples];
+    input_signal[0] = 1.0;
+    let output = support::run_signal(&circuit, &input_signal, sample_rate);
 
     // RLC impulse response should show oscillation (not purely monotonic decay).
     // Count sign changes in the output after the initial transient.
@@ -695,20 +654,13 @@ R1 in out 1k
 L1 out 0 1
 C1 out 0 1p
 ";
-    let input_resistance = 1.0;
-    let (_, mna, kernel) = build_pipeline_with_input(spice, "in", input_resistance);
-    let in_idx = *mna.node_map.get("in").unwrap() - 1;
-    let out_idx = *mna.node_map.get("out").unwrap() - 1;
-
-    let mut solver = LinearSolver::new(kernel, in_idx, out_idx);
-    solver.set_input_conductance(1.0 / input_resistance);
+    let sample_rate = 44100.0;
+    let config = support::config_for_spice(spice, sample_rate);
+    let circuit = support::build_circuit(spice, &config, "rl_tau");
 
     // Apply 1V DC step
     let num_samples = 500;
-    let mut output = vec![0.0; num_samples];
-    for i in 0..num_samples {
-        output[i] = solver.process_sample(1.0);
-    }
+    let output = support::run_step(&circuit, 1.0, num_samples, sample_rate);
 
     // For an RL lowpass with step input, the voltage across the load (inductor)
     // rises as: v(t) = V_final * (1 - exp(-t/tau))
@@ -725,14 +677,7 @@ C1 out 0 1p
     let v_late = output[300]; // ~7 tau
 
     // The output should be finite and well-behaved throughout
-    for (i, &v) in output.iter().enumerate() {
-        assert!(
-            v.is_finite(),
-            "Output at sample {} should be finite, got {}",
-            i,
-            v
-        );
-    }
+    support::assert_finite(&output);
 
     // After many time constants, output should be settled (stable)
     let settled_range = &output[400..500];

@@ -7165,7 +7165,9 @@ impl RustEmitter {
             }
         }
         code.push_str("        state.diag_nan_reset_count += 1;\n");
-        code.push_str("        state.chord_valid = false;\n");
+        if m > 0 {
+            code.push_str("        state.chord_valid = false;\n");
+        }
         code.push_str("        return [0.0; NUM_OUTPUTS];\n");
         code.push_str("    }\n\n");
 

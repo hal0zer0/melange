@@ -19,6 +19,8 @@ pub mod emitter;
 #[cfg(feature = "codegen")]
 pub mod ir;
 #[cfg(feature = "codegen")]
+pub mod routing;
+#[cfg(feature = "codegen")]
 pub mod rust_emitter;
 
 #[cfg(feature = "codegen")]
@@ -77,6 +79,12 @@ pub struct CodegenConfig {
     /// amplifiers where trapezoidal's imaginary-axis preservation causes oscillation.
     /// Trades second-order accuracy for first-order, giving slight HF rolloff.
     pub backward_euler: bool,
+    /// Disable adaptive backward Euler fallback for the DK codegen path.
+    /// When false (default), the generated code includes pre-computed BE matrices
+    /// and can fall back to BE for individual samples where trapezoidal NR diverges.
+    /// Set to true to save memory (~1.4KB for N=8, M=4) and compile time when
+    /// the circuit is known to be well-conditioned.
+    pub disable_be_fallback: bool,
 }
 
 #[cfg(feature = "codegen")]
@@ -147,6 +155,7 @@ impl Default for CodegenConfig {
             dc_block: true,
             pot_settle_samples: 64,
             backward_euler: false,
+            disable_be_fallback: false,
         }
     }
 }

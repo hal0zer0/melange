@@ -1,6 +1,8 @@
-/// Lockstep comparison: runtime NodalSolver vs manual codegen-style NR loop.
+/// Lockstep comparison: runtime NodalSolver vs codegen NR loop.
 ///
-/// Runs BOTH paths through the same circuit (pultec-eq.cir) on silence,
+/// DISABLED: Runtime NodalSolver has been removed. This example is archived.
+///
+/// Originally ran BOTH paths through the same circuit (pultec-eq.cir) on silence,
 /// comparing v_prev and i_nl_prev after EACH sample to find the first divergence.
 ///
 /// The "codegen path" is replicated manually using the IR's matrices, matching
@@ -69,6 +71,7 @@ fn main() {
         dc_block: true,
         pot_settle_samples: 64,
         backward_euler: false,
+        disable_be_fallback: false,
     };
     let ir = CircuitIR::from_mna(&mna, &netlist, &config).expect("failed to build CircuitIR");
 

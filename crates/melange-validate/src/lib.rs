@@ -480,6 +480,9 @@ fn run_melange_solver_from_str(
     output_node_name: &str,
     input_node_name: &str,
 ) -> Result<Vec<f64>, ValidationError> {
+    use melange_solver::codegen::{CodeGenerator, CodegenConfig, routing};
+    use std::io::Write;
+
     let netlist = melange_solver::parser::Netlist::parse(netlist_str).map_err(|e| {
         ValidationError::Solver(format!("Parse error at line {}: {}", e.line, e.message))
     })?;
@@ -487,62 +490,149 @@ fn run_melange_solver_from_str(
     let mut mna = melange_solver::mna::MnaSystem::from_netlist(&netlist)
         .map_err(|e| ValidationError::Solver(format!("MNA error: {}", e)))?;
 
-    let input_node = mna
-        .node_map
-        .get(input_node_name)
-        .copied()
-        .ok_or_else(|| {
-            ValidationError::Solver(format!(
-                "Input node '{}' not found in circuit. Available: {:?}",
-                input_node_name,
-                mna.node_map.keys().collect::<Vec<_>>()
-            ))
-        })?
-        .saturating_sub(1);
-    let output_node = mna
-        .node_map
-        .get(output_node_name)
-        .copied()
-        .ok_or_else(|| {
-            ValidationError::Solver(format!(
-                "Output node '{}' not found in circuit. Available: {:?}",
-                output_node_name,
-                mna.node_map.keys().collect::<Vec<_>>()
-            ))
-        })?
-        .saturating_sub(1);
+    let input_node = mna.node_map.get(input_node_name).copied()
+        .ok_or_else(|| ValidationError::Solver(format!(
+            "Input node '{}' not found. Available: {:?}",
+            input_node_name, mna.node_map.keys().collect::<Vec<_>>()
+        )))?.saturating_sub(1);
+    let output_node = mna.node_map.get(output_node_name).copied()
+        .ok_or_else(|| ValidationError::Solver(format!(
+            "Output node '{}' not found. Available: {:?}",
+            output_node_name, mna.node_map.keys().collect::<Vec<_>>()
+        )))?.saturating_sub(1);
 
-    // Stamp input conductance into G matrix BEFORE building DK kernel
-    let input_conductance = 1.0; // 1/R_in where R_in = 1 ohm
     if input_node < mna.n {
-        mna.g[input_node][input_node] += input_conductance;
+        mna.g[input_node][input_node] += 1.0;
     }
 
-    let kernel = melange_solver::dk::DkKernel::from_mna(&mna, sample_rate)
-        .map_err(|e| ValidationError::Solver(format!("DK kernel error: {}", e)))?;
-
-    let devices = build_devices_from_netlist(&netlist, &mna)?;
-
-    let mut solver =
-        melange_solver::solver::CircuitSolver::new(kernel, devices, input_node, output_node)
-            .map_err(|e| ValidationError::Solver(format!("Solver error: {}", e)))?;
-    solver.set_input_conductance(input_conductance);
-
-    // Initialize nonlinear DC operating point (essential for BJT circuits)
-    if mna.m > 0 {
+    // Stamp junction caps
+    {
         let device_slots = build_device_slots_from_netlist(&netlist);
-        solver.initialize_dc_op(&mna, &device_slots);
+        if !device_slots.is_empty() {
+            mna.stamp_device_junction_caps(&device_slots);
+        }
     }
 
-    let mut output = Vec::with_capacity(input_signal.len());
-    for &sample in input_signal {
-        output.push(solver.process_sample(sample));
+    // Build kernel and route
+    let has_inductors = !mna.inductors.is_empty()
+        || !mna.coupled_inductors.is_empty()
+        || !mna.transformer_groups.is_empty();
+    let mut dk_failed = false;
+    let kernel = if has_inductors {
+        melange_solver::dk::DkKernel::from_mna_augmented(&mna, sample_rate)
+            .map_err(|e| ValidationError::Solver(format!("Augmented DK: {:?}", e)))?
+    } else {
+        match melange_solver::dk::DkKernel::from_mna(&mna, sample_rate) {
+            Ok(k) => k,
+            Err(_) => {
+                dk_failed = true;
+                melange_solver::dk::DkKernel::from_mna_augmented(&mna, sample_rate)
+                    .map_err(|e| ValidationError::Solver(format!("DK fallback: {:?}", e)))?
+            }
+        }
+    };
+
+    let decision = routing::auto_route(&kernel, &mna, dk_failed);
+    let use_nodal = decision.route == routing::SolverRoute::Nodal;
+
+    if use_nodal {
+        let slots = melange_solver::codegen::ir::CircuitIR::build_device_info_with_mna(
+            &netlist, Some(&mna),
+        ).unwrap_or_default();
+        if !slots.is_empty() {
+            mna.expand_bjt_internal_nodes(&slots);
+        }
     }
 
-    Ok(output)
+    let config = CodegenConfig {
+        circuit_name: "validate".to_string(),
+        sample_rate,
+        input_node,
+        output_nodes: vec![output_node],
+        input_resistance: 1.0,
+        dc_block: true,
+        ..CodegenConfig::default()
+    };
+    let generator = CodeGenerator::new(config);
+    let generated = if use_nodal {
+        generator.generate_nodal(&mna, &netlist)
+    } else {
+        generator.generate(&kernel, &mna, &netlist)
+    }.map_err(|e| ValidationError::Solver(format!("Codegen: {}", e)))?;
+
+    // Append stdin/stdout main
+    let main_code = "fn main() {\n\
+        let mut state = CircuitState::default();\n\
+        let stdin = std::io::stdin();\n\
+        let mut line = String::new();\n\
+        loop {\n\
+            line.clear();\n\
+            if stdin.read_line(&mut line).unwrap() == 0 { break; }\n\
+            if let Ok(input) = line.trim().parse::<f64>() {\n\
+                let out = process_sample(input, &mut state);\n\
+                println!(\"{:.15e}\", out[0]);\n\
+            }\n\
+        }\n\
+    }\n";
+    let full_source = format!("{}\n{}", generated.code, main_code);
+
+    // Compile
+    static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let tmp_dir = std::env::temp_dir();
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let pid = std::process::id();
+    let src = tmp_dir.join(format!("melange_val_{pid}_{id}.rs"));
+    let bin = tmp_dir.join(format!("melange_val_{pid}_{id}"));
+
+    std::fs::write(&src, &full_source)
+        .map_err(|e| ValidationError::Solver(format!("Write: {}", e)))?;
+
+    let compile = std::process::Command::new("rustc")
+        .arg(&src).arg("-o").arg(&bin)
+        .arg("--edition=2024").arg("-O")
+        .output()
+        .map_err(|e| ValidationError::Solver(format!("rustc: {}", e)))?;
+    let _ = std::fs::remove_file(&src);
+
+    if !compile.status.success() {
+        let _ = std::fs::remove_file(&bin);
+        return Err(ValidationError::Solver(format!(
+            "Compilation failed:\n{}", String::from_utf8_lossy(&compile.stderr)
+        )));
+    }
+
+    // Run: pipe input via stdin
+    let stdin_data: String = input_signal.iter().map(|s| format!("{s:.15e}\n")).collect();
+    let mut child = std::process::Command::new(&bin)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| ValidationError::Solver(format!("Spawn: {}", e)))?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(stdin_data.as_bytes())
+            .map_err(|e| ValidationError::Solver(format!("Stdin: {}", e)))?;
+    }
+
+    let result = child.wait_with_output()
+        .map_err(|e| ValidationError::Solver(format!("Wait: {}", e)))?;
+    let _ = std::fs::remove_file(&bin);
+
+    if !result.status.success() {
+        return Err(ValidationError::Solver(format!(
+            "Binary failed:\n{}", String::from_utf8_lossy(&result.stderr)
+        )));
+    }
+
+    Ok(String::from_utf8_lossy(&result.stdout)
+        .lines()
+        .filter_map(|l| l.trim().parse().ok())
+        .collect())
 }
 
 /// Build device list from parsed netlist
+#[cfg(any())]
 fn build_devices_from_netlist(
     netlist: &melange_solver::parser::Netlist,
     mna: &melange_solver::mna::MnaSystem,

@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::dc_op::{self, DcOpConfig};
 use crate::dk::{self, DkKernel};
+use crate::lu::{self, SPARSITY_THRESHOLD};
+pub use crate::lu::{LuOp, LuSparsity};
 use crate::mna::MnaSystem;
 use crate::parser::{Element, Netlist};
 
@@ -450,46 +452,8 @@ pub struct SparseInfo {
     pub lu: Option<LuSparsity>,
 }
 
-/// Compile-time sparse LU elimination schedule.
-///
-/// Computed at codegen time from the G_aug = A - N_i*J_dev*N_v sparsity pattern.
-/// The emitter generates straight-line code with one operation per `LuOp`.
-///
-/// **All indices are in the original node ordering.** The AMD fill-reducing
-/// ordering determines the ORDER of emitted operations, not the physical
-/// layout. No runtime permutation arrays are needed.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct LuSparsity {
-    /// Straight-line elimination operations (original indices, AMD emission order)
-    pub ops: Vec<LuOp>,
-    /// AMD elimination order: elim_order[step] = original column eliminated at that step
-    pub elim_order: Vec<usize>,
-    /// Row swaps applied before elimination (for zero diagonals)
-    pub row_swaps: Vec<(usize, usize)>,
-    /// L entries (row, col) in original indices, ordered for forward substitution
-    pub l_nnz: Vec<(usize, usize)>,
-    /// U entries (row, col) in original indices, ordered for backward substitution
-    pub u_nnz: Vec<(usize, usize)>,
-    /// Total FLOPs for factorization
-    pub factor_flops: usize,
-    /// Total FLOPs for forward+backward solve
-    pub solve_flops: usize,
-    /// Matrix dimension
-    pub n: usize,
-}
-
-/// A single operation in the sparse LU elimination sequence.
-/// All row/col indices are in the **original** node ordering.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum LuOp {
-    /// `a[row][col] /= a[col][col]` — compute L factor
-    DivPivot { row: usize, col: usize },
-    /// `a[row][j] -= a[row][col] * a[col][j]` — elimination
-    SubMul { row: usize, col: usize, j: usize },
-}
-
-/// Threshold below which matrix entries are treated as structural zeros.
-const SPARSITY_THRESHOLD: f64 = 1e-20;
+// LuSparsity, LuOp, and SPARSITY_THRESHOLD are defined in crate::lu
+// and re-imported at the top of this file.
 
 /// Analyze sparsity pattern of a flattened row-major matrix.
 fn analyze_matrix_sparsity(data: &[f64], rows: usize, cols: usize) -> MatrixSparsity {
@@ -513,247 +477,9 @@ fn analyze_matrix_sparsity(data: &[f64], rows: usize, cols: usize) -> MatrixSpar
     }
 }
 
-/// Compute sparsity pattern of G_aug = A - N_i * J_dev * N_v.
-///
-/// The pattern is the union of A's nonzeros and the Jacobian stamp positions.
-/// This is topology-fixed: pot/switch changes only modify values, not positions.
-fn compute_g_aug_pattern(
-    a_flat: &[f64],
-    n_i_flat: &[f64],
-    n_v_flat: &[f64],
-    n: usize,
-    m: usize,
-    device_slots: &[DeviceSlot],
-) -> Vec<Vec<usize>> {
-    // Start with A's nonzero pattern
-    let mut pattern: Vec<std::collections::BTreeSet<usize>> =
-        (0..n).map(|_| std::collections::BTreeSet::new()).collect();
-
-    for i in 0..n {
-        for j in 0..n {
-            if a_flat[i * n + j].abs() >= SPARSITY_THRESHOLD {
-                pattern[i].insert(j);
-            }
-        }
-    }
-
-    // Add Jacobian stamp positions: N_i[:,dev_i] * N_v[dev_j,:]
-    // for each device block (di, dj) within the block-diagonal J_dev
-    let mut ni_nz_by_dev = vec![Vec::new(); m];
-    for a in 0..n {
-        for &i in (0..m).collect::<Vec<_>>().iter() {
-            if n_i_flat[a * m + i].abs() >= SPARSITY_THRESHOLD {
-                ni_nz_by_dev[i].push(a);
-            }
-        }
-    }
-
-    for slot in device_slots {
-        let s = slot.start_idx;
-        let dim = slot.dimension;
-        for di in 0..dim {
-            let dev_i = s + di;
-            let ni_nodes = &ni_nz_by_dev[dev_i];
-            for dj in 0..dim {
-                let dev_j = s + dj;
-                for b in 0..n {
-                    if n_v_flat[dev_j * n + b].abs() >= SPARSITY_THRESHOLD {
-                        for &a in ni_nodes {
-                            pattern[a].insert(b);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    pattern
-        .into_iter()
-        .map(|s| s.into_iter().collect())
-        .collect()
-}
-
-/// Approximate Minimum Degree (AMD) ordering for fill-reducing LU.
-///
-/// Greedy heuristic: at each step, eliminate the node with the fewest
-/// connections in the current elimination graph. This is a simplified AMD
-/// that works well for circuit matrices (typically near-optimal for N<100).
-fn amd_ordering(pattern: &[Vec<usize>], n: usize) -> Vec<usize> {
-    // Build symmetric adjacency (LU fill depends on structural symmetry)
-    let mut adj: Vec<std::collections::BTreeSet<usize>> = (0..n)
-        .map(|i| pattern[i].iter().copied().collect())
-        .collect();
-    // Symmetrize: if (i,j) exists, add (j,i)
-    for i in 0..n {
-        let cols: Vec<usize> = adj[i].iter().copied().collect();
-        for j in cols {
-            adj[j].insert(i);
-        }
-    }
-
-    let mut perm = Vec::with_capacity(n);
-    let mut eliminated = vec![false; n];
-
-    for _ in 0..n {
-        // Find un-eliminated node with minimum degree (ties broken by index)
-        let mut best = usize::MAX;
-        let mut best_deg = usize::MAX;
-        for i in 0..n {
-            if eliminated[i] {
-                continue;
-            }
-            let deg = adj[i].iter().filter(|&&j| !eliminated[j]).count();
-            if deg < best_deg {
-                best_deg = deg;
-                best = i;
-            }
-        }
-        perm.push(best);
-        eliminated[best] = true;
-
-        // Update elimination graph: connect all neighbors of `best` to each other
-        let neighbors: Vec<usize> = adj[best]
-            .iter()
-            .copied()
-            .filter(|&j| !eliminated[j])
-            .collect();
-        for &u in &neighbors {
-            for &v in &neighbors {
-                if u != v {
-                    adj[u].insert(v);
-                }
-            }
-        }
-    }
-
-    perm
-}
-
-/// Row pre-permutation to fix zero diagonals (voltage source constraint rows).
-///
-/// After column permutation by `col_perm`, some diagonal entries may be
-/// structurally zero. This finds row swaps to place nonzeros on the diagonal.
-/// Find row swaps needed for zero diagonals in AMD elimination order.
-///
-/// For each step k in the AMD order, if the pivot position a[order[k]][order[k]]
-/// has no structural nonzero, find a later row to swap with. Returns (r1, r2) pairs.
-fn find_row_swaps(pattern: &[Vec<usize>], elim_order: &[usize], n: usize) -> Vec<(usize, usize)> {
-    let mut eliminated = vec![false; n];
-    let mut swaps = Vec::new();
-
-    for &pivot_col in elim_order {
-        // Check if pivot_col's row has a nonzero at column pivot_col
-        if !pattern[pivot_col].contains(&pivot_col) {
-            // Find an un-eliminated row that has nonzero at pivot_col
-            for r in 0..n {
-                if !eliminated[r] && r != pivot_col && pattern[r].contains(&pivot_col) {
-                    swaps.push((pivot_col, r));
-                    break;
-                }
-            }
-        }
-        eliminated[pivot_col] = true;
-    }
-
-    if !swaps.is_empty() {
-        log::info!(
-            "Sparse LU: {} row swaps needed for zero diagonals",
-            swaps.len()
-        );
-    }
-
-    swaps
-}
-
-/// Symbolic LU factorization in original index space.
-///
-/// Traces Gaussian elimination symbolically with AMD ordering to find:
-/// - Fill-in pattern and elimination operations (in original indices)
-/// - L and U nonzero patterns for forward/backward substitution
-///
-/// All indices in the output are **original node indices**. The AMD ordering
-/// determines the ORDER of operations, not the physical layout.
-fn symbolic_lu(
-    pattern: &[Vec<usize>],
-    elim_order: &[usize],
-    row_swaps: &[(usize, usize)],
-    n: usize,
-) -> LuSparsity {
-    // Build working pattern (mutable, tracks fill-in) — apply row swaps
-    let mut pat: Vec<std::collections::BTreeSet<usize>> = pattern
-        .iter()
-        .map(|row| row.iter().copied().collect())
-        .collect();
-    for &(r1, r2) in row_swaps {
-        let tmp = pat[r1].clone();
-        pat[r1] = pat[r2].clone();
-        pat[r2] = tmp;
-    }
-
-    // Track which nodes have been eliminated (by original index)
-    let mut eliminated = vec![false; n];
-
-    let mut ops = Vec::new();
-    let mut l_nnz = Vec::new();
-    let mut u_nnz = Vec::new();
-    let mut factor_flops = 0usize;
-
-    for &pivot in elim_order {
-        eliminated[pivot] = true;
-
-        // U entries: row=pivot, columns that are NOT yet eliminated (including pivot itself)
-        let u_cols: Vec<usize> = pat[pivot]
-            .iter()
-            .copied()
-            .filter(|&c| !eliminated[c] || c == pivot)
-            .collect();
-        for &c in &u_cols {
-            u_nnz.push((pivot, c));
-        }
-
-        // Find rows that have nonzero at column `pivot` and are not yet eliminated
-        let rows_to_elim: Vec<usize> = (0..n)
-            .filter(|&r| !eliminated[r] && pat[r].contains(&pivot))
-            .collect();
-
-        for &row in &rows_to_elim {
-            // L factor: a[row][pivot] /= a[pivot][pivot]
-            ops.push(LuOp::DivPivot { row, col: pivot });
-            l_nnz.push((row, pivot));
-            factor_flops += 1;
-
-            // Elimination: for each non-eliminated column in pivot row (except pivot itself)
-            let pivot_cols: Vec<usize> = pat[pivot]
-                .iter()
-                .copied()
-                .filter(|&c| !eliminated[c] && c != pivot)
-                .collect();
-            for &j in &pivot_cols {
-                ops.push(LuOp::SubMul { row, col: pivot, j });
-                factor_flops += 2; // multiply + subtract
-                pat[row].insert(j); // fill-in
-            }
-        }
-    }
-
-    let solve_flops = l_nnz.len() * 2 + u_nnz.len() * 2;
-
-    log::info!(
-        "Sparse LU: N={}, factor_flops={} (dense ~{}), L_nnz={}, U_nnz={}, solve_flops={} (dense ~{})",
-        n, factor_flops, n * n * n / 3, l_nnz.len(), u_nnz.len(), solve_flops, n * n * 2,
-    );
-
-    LuSparsity {
-        ops,
-        elim_order: elim_order.to_vec(),
-        row_swaps: row_swaps.to_vec(),
-        l_nnz,
-        u_nnz,
-        factor_flops,
-        solve_flops,
-        n,
-    }
-}
+// Sparsity analysis functions (compute_g_aug_pattern, amd_ordering,
+// find_row_swaps, symbolic_lu) are defined in crate::lu and called
+// via lu::compute_g_aug_pattern(...) etc. at the call sites below.
 
 /// Stamp mutual conductance between two 2-terminal elements into a flat row-major matrix.
 /// Node indices are 1-indexed; 0 means ground.
@@ -909,6 +635,89 @@ fn validate_positive_finite(value: f64, param_label: &str) -> Result<(), Codegen
     Ok(())
 }
 
+/// Compute backward Euler fallback matrices for the DK codegen path.
+///
+/// Returns (s_be, k_be, a_neg_be, rhs_const_be) or empty vecs if BE fallback is disabled.
+/// The BE matrices use alpha_be = 1/T (instead of trapezoidal alpha = 2/T).
+fn compute_dk_be_fallback(
+    g_matrix: &[f64],
+    c_matrix: &[f64],
+    n: usize,
+    m: usize,
+    n_nodes: usize,
+    n_v: &[f64],
+    n_i: &[f64],
+    internal_rate: f64,
+    mna: &MnaSystem,
+) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>), CodegenError> {
+    let alpha_be = internal_rate; // BE: alpha = 1/T
+
+    // Build A_be = G + alpha_be * C
+    let mut a_be = vec![0.0f64; n * n];
+    let mut a_neg_be = vec![0.0f64; n * n];
+    for i in 0..n {
+        for j in 0..n {
+            let g = g_matrix[i * n + j];
+            let c = c_matrix[i * n + j];
+            a_be[i * n + j] = g + alpha_be * c;
+            a_neg_be[i * n + j] = alpha_be * c; // BE: no -G term
+        }
+    }
+
+    // Zero VS/VCVS/ideal-transformer algebraic rows in A_neg_be
+    for vs in &mna.voltage_sources {
+        let row = n_nodes + vs.ext_idx;
+        if row < n {
+            for j in 0..n {
+                a_neg_be[row * n + j] = 0.0;
+            }
+        }
+    }
+    let num_vs = mna.voltage_sources.len();
+    for (idx, _) in mna.vcvs_sources.iter().enumerate() {
+        let row = n_nodes + num_vs + idx;
+        if row < n {
+            for j in 0..n {
+                a_neg_be[row * n + j] = 0.0;
+            }
+        }
+    }
+    let num_vcvs = mna.vcvs_sources.len();
+    for (idx, _) in mna.ideal_transformers.iter().enumerate() {
+        let row = n_nodes + num_vs + num_vcvs + idx;
+        if row < n {
+            for j in 0..n {
+                a_neg_be[row * n + j] = 0.0;
+            }
+        }
+    }
+
+    // S_be = A_be^{-1}
+    let s_be = invert_flat_matrix(&a_be, n)?;
+
+    // K_be = N_v * S_be * N_i
+    let k_be = if m > 0 {
+        compute_k_from_s(&s_be, n_v, n_i, n, m)
+    } else {
+        Vec::new()
+    };
+
+    // BE rhs_const: current sources ×1 (not ×2), VS ×1
+    let mut rhs_const_be = vec![0.0f64; n];
+    for src in &mna.current_sources {
+        crate::mna::inject_rhs_current(&mut rhs_const_be, src.n_plus_idx, src.dc_value);
+        crate::mna::inject_rhs_current(&mut rhs_const_be, src.n_minus_idx, -src.dc_value);
+    }
+    for vs in &mna.voltage_sources {
+        let k_row = n_nodes + vs.ext_idx;
+        if k_row < n {
+            rhs_const_be[k_row] = vs.dc_value;
+        }
+    }
+
+    Ok((s_be, k_be, a_neg_be, rhs_const_be))
+}
+
 impl CircuitIR {
     /// Build a `CircuitIR` from the compiled kernel, MNA system, netlist, and config.
     ///
@@ -1004,6 +813,7 @@ impl CircuitIR {
             }
             if spectral_radius > 1.002 {
                 log::info!("Auto-selecting backward Euler: spectral radius {:.4} > 1.002 (trapezoidal unstable)", spectral_radius);
+                eprintln!("  Trapezoidal unstable (spectral radius {:.4}), auto-selecting backward Euler", spectral_radius);
                 true
             } else {
                 false
@@ -1176,6 +986,17 @@ impl CircuitIR {
             // Compute K = N_v * S * N_i
             let k = compute_k_from_s(&s, &kernel.n_v, &kernel.n_i, n, m);
 
+            // Compute BE fallback matrices for adaptive per-sample fallback
+            let want_be_fallback = !config.backward_euler && !config.disable_be_fallback && m > 0;
+            let (s_be, k_be, a_neg_be, rhs_const_be) = if want_be_fallback {
+                compute_dk_be_fallback(
+                    &g_matrix, &c_matrix, n, m, n_nodes,
+                    &kernel.n_v, &kernel.n_i, internal_rate, mna,
+                )?
+            } else {
+                (Vec::new(), Vec::new(), Vec::new(), Vec::new())
+            };
+
             Matrices {
                 s,
                 a_neg: a_neg_flat,
@@ -1187,10 +1008,10 @@ impl CircuitIR {
                 c_matrix,
                 a_matrix: Vec::new(),
                 a_matrix_be: Vec::new(),
-                a_neg_be: Vec::new(),
-                rhs_const_be: Vec::new(),
-                s_be: Vec::new(),
-                k_be: Vec::new(),
+                a_neg_be,
+                rhs_const_be,
+                s_be,
+                k_be,
                 spectral_radius_s_aneg: 0.0,
             }
         } else if be {
@@ -1268,7 +1089,18 @@ impl CircuitIR {
                 spectral_radius_s_aneg: 0.0,
             }
         } else {
-            // Standard trapezoidal: use kernel matrices directly, no BE fallback.
+            // Standard trapezoidal: use kernel matrices directly.
+            // Also compute BE fallback matrices for adaptive per-sample fallback.
+            let want_be_fallback = !config.disable_be_fallback && m > 0;
+            let (s_be, k_be, a_neg_be, rhs_const_be) = if want_be_fallback {
+                compute_dk_be_fallback(
+                    &g_matrix, &c_matrix, n, m, n_nodes,
+                    &kernel.n_v, &kernel.n_i, internal_rate, mna,
+                )?
+            } else {
+                (Vec::new(), Vec::new(), Vec::new(), Vec::new())
+            };
+
             Matrices {
                 s: kernel.s.clone(),
                 a_neg: kernel.a_neg.clone(),
@@ -1280,17 +1112,17 @@ impl CircuitIR {
                 c_matrix,
                 a_matrix: Vec::new(),
                 a_matrix_be: Vec::new(),
-                a_neg_be: Vec::new(),
-                rhs_const_be: Vec::new(),
-                s_be: Vec::new(),
-                k_be: Vec::new(),
+                a_neg_be,
+                rhs_const_be,
+                s_be,
+                k_be,
                 spectral_radius_s_aneg: 0.0,
             }
         };
 
-        // Note: BE fallback matrices are only populated when be=true (auto-detected
-        // or --backward-euler flag). Normal trapezoidal circuits have empty s_be/k_be/etc.
-        // This ensures no state struct layout changes for well-conditioned circuits.
+        // BE fallback matrices are populated for nonlinear circuits (m>0) unless
+        // config.disable_be_fallback is set. Linear circuits (m=0) skip BE fallback
+        // since they don't have NR iteration that could diverge.
 
         let mut device_slots = Self::build_device_info_with_mna(netlist, Some(mna))?;
         Self::resolve_mosfet_nodes(&mut device_slots, mna);
@@ -1930,7 +1762,7 @@ impl CircuitIR {
         // Sparsity analysis (K is now computed for Schur complement NR)
         let lu_sparsity = if m > 0 {
             // Compute G_aug = A - N_i*J_dev*N_v sparsity pattern
-            let g_aug_pattern = compute_g_aug_pattern(
+            let g_aug_pattern = lu::compute_g_aug_pattern(
                 &matrices.a_matrix,
                 &matrices.n_i,
                 &matrices.n_v,
@@ -1949,10 +1781,10 @@ impl CircuitIR {
             // Only use sparse LU if matrix is sufficiently sparse (< 40% density)
             // and large enough to benefit (N >= 8)
             if density < 0.4 && n >= 8 {
-                let elim_order = amd_ordering(&g_aug_pattern, n);
-                let row_swaps = find_row_swaps(&g_aug_pattern, &elim_order, n);
-                let lu = symbolic_lu(&g_aug_pattern, &elim_order, &row_swaps, n);
-                Some(lu)
+                let elim_order = lu::amd_ordering(&g_aug_pattern, n);
+                let row_swaps = lu::find_row_swaps(&g_aug_pattern, &elim_order, n);
+                let lu_plan = lu::symbolic_lu(&g_aug_pattern, &elim_order, &row_swaps, n);
+                Some(lu_plan)
             } else {
                 log::info!(
                     "Sparse LU: skipping (density {:.1}%, N={})",

@@ -10,12 +10,13 @@
 //! - Codegen: compilation, constants, state fields, RHS injection, backward compat
 //! - Behavioral: step-up/step-down transformer voltage ratios, weak coupling, 1:1
 
+mod support;
+
 use melange_solver::codegen::ir::CircuitIR;
 use melange_solver::codegen::{CodeGenerator, CodegenConfig};
 use melange_solver::dk::DkKernel;
 use melange_solver::mna::MnaSystem;
 use melange_solver::parser::Netlist;
-use melange_solver::solver::LinearSolver;
 use std::io::Write;
 
 // ===========================================================================
@@ -25,19 +26,6 @@ use std::io::Write;
 fn build_pipeline(spice: &str) -> (Netlist, MnaSystem, DkKernel) {
     let netlist = Netlist::parse(spice).expect("failed to parse netlist");
     let mna = MnaSystem::from_netlist(&netlist).expect("failed to build MNA");
-    let kernel = DkKernel::from_mna(&mna, 44100.0).expect("failed to build DK kernel");
-    (netlist, mna, kernel)
-}
-
-fn build_pipeline_with_input(
-    spice: &str,
-    input_node_name: &str,
-    input_resistance: f64,
-) -> (Netlist, MnaSystem, DkKernel) {
-    let netlist = Netlist::parse(spice).expect("failed to parse netlist");
-    let mut mna = MnaSystem::from_netlist(&netlist).expect("failed to build MNA");
-    let in_idx = *mna.node_map.get(input_node_name).unwrap() - 1;
-    mna.g[in_idx][in_idx] += 1.0 / input_resistance;
     let kernel = DkKernel::from_mna(&mna, 44100.0).expect("failed to build DK kernel");
     (netlist, mna, kernel)
 }
@@ -951,27 +939,14 @@ fn test_step_up_transformer_voltage_ratio() {
     // L1=10mH (primary), L2=100mH (secondary), k=0.95
     // Ideal transformer: V2/V1 = sqrt(L2/L1) = sqrt(10) ~ 3.16
     // With k=0.95 and loading, actual ratio will be less than ideal.
-    let input_resistance = 1.0;
-    let (_, mna, kernel) = build_pipeline_with_input(STEP_UP_TRANSFORMER, "in", input_resistance);
-    let in_idx = *mna.node_map.get("in").unwrap() - 1;
-    let out_idx = *mna.node_map.get("out").unwrap() - 1;
-
-    let mut solver = LinearSolver::new(kernel, in_idx, out_idx);
-    solver.set_input_conductance(1.0 / input_resistance);
+    let config = support::config_for_spice(STEP_UP_TRANSFORMER, 44100.0);
+    let circuit = support::build_circuit(STEP_UP_TRANSFORMER, &config, "step_up_ratio");
 
     // Drive with 100Hz sine for 4410 samples (10 cycles at 44.1kHz)
-    let num_samples = 4410;
-    let mut output = vec![0.0; num_samples];
-    let freq = 100.0;
-    for i in 0..num_samples {
-        let input = 0.1 * (2.0 * std::f64::consts::PI * freq * i as f64 / 44100.0).sin();
-        output[i] = solver.process_sample(input);
-    }
+    let output = support::run_sine(&circuit, 100.0, 0.1, 4410, 44100.0);
 
     // All outputs should be finite
-    for (i, &v) in output.iter().enumerate() {
-        assert!(v.is_finite(), "Output[{}] = {} (not finite)", i, v);
-    }
+    support::assert_finite(&output);
 
     // Measure peak output in the last 3 cycles (settled region)
     let settled = &output[2940..4410]; // last 1470 samples = ~3 cycles at 100Hz
@@ -991,25 +966,12 @@ fn test_step_up_transformer_voltage_ratio() {
 fn test_step_down_transformer_voltage_ratio() {
     // L1=100mH (primary), L2=10mH (secondary), k=0.95
     // Ideal: V2/V1 = sqrt(L2/L1) = sqrt(0.1) ~ 0.316
-    let input_resistance = 1.0;
-    let (_, mna, kernel) = build_pipeline_with_input(STEP_DOWN_TRANSFORMER, "in", input_resistance);
-    let in_idx = *mna.node_map.get("in").unwrap() - 1;
-    let out_idx = *mna.node_map.get("out").unwrap() - 1;
+    let config = support::config_for_spice(STEP_DOWN_TRANSFORMER, 44100.0);
+    let circuit = support::build_circuit(STEP_DOWN_TRANSFORMER, &config, "step_down_ratio");
 
-    let mut solver = LinearSolver::new(kernel, in_idx, out_idx);
-    solver.set_input_conductance(1.0 / input_resistance);
+    let output = support::run_sine(&circuit, 100.0, 1.0, 4410, 44100.0);
 
-    let num_samples = 4410;
-    let mut output = vec![0.0; num_samples];
-    let freq = 100.0;
-    for i in 0..num_samples {
-        let input = 1.0 * (2.0 * std::f64::consts::PI * freq * i as f64 / 44100.0).sin();
-        output[i] = solver.process_sample(input);
-    }
-
-    for (i, &v) in output.iter().enumerate() {
-        assert!(v.is_finite(), "Output[{}] = {} (not finite)", i, v);
-    }
+    support::assert_finite(&output);
 
     let settled = &output[2940..4410];
     let peak_out = settled.iter().map(|&v| v.abs()).fold(0.0f64, f64::max);
@@ -1030,35 +992,14 @@ fn test_step_down_transformer_voltage_ratio() {
 #[test]
 fn test_weak_coupling_minimal_transfer() {
     // k=0.1: very weak coupling, minimal energy transfer
-    let input_resistance = 1.0;
-    let (_, mna, kernel) = build_pipeline_with_input(WEAK_COUPLING, "in", input_resistance);
-    let in_idx = *mna.node_map.get("in").unwrap() - 1;
-    let out_idx = *mna.node_map.get("out").unwrap() - 1;
-
-    let mut solver = LinearSolver::new(kernel, in_idx, out_idx);
-    solver.set_input_conductance(1.0 / input_resistance);
-
-    let num_samples = 4410;
-    let mut output_weak = vec![0.0; num_samples];
-    let freq = 100.0;
-    for i in 0..num_samples {
-        let input = 1.0 * (2.0 * std::f64::consts::PI * freq * i as f64 / 44100.0).sin();
-        output_weak[i] = solver.process_sample(input);
-    }
+    let config_weak = support::config_for_spice(WEAK_COUPLING, 44100.0);
+    let circuit_weak = support::build_circuit(WEAK_COUPLING, &config_weak, "weak_coupling");
+    let output_weak = support::run_sine(&circuit_weak, 100.0, 1.0, 4410, 44100.0);
 
     // Now compare with strong coupling (k=0.95, same inductances)
-    let (_, mna2, kernel2) = build_pipeline_with_input(UNITY_TRANSFORMER, "in", input_resistance);
-    let in_idx2 = *mna2.node_map.get("in").unwrap() - 1;
-    let out_idx2 = *mna2.node_map.get("out").unwrap() - 1;
-
-    let mut solver2 = LinearSolver::new(kernel2, in_idx2, out_idx2);
-    solver2.set_input_conductance(1.0 / input_resistance);
-
-    let mut output_strong = vec![0.0; num_samples];
-    for i in 0..num_samples {
-        let input = 1.0 * (2.0 * std::f64::consts::PI * freq * i as f64 / 44100.0).sin();
-        output_strong[i] = solver2.process_sample(input);
-    }
+    let config_strong = support::config_for_spice(UNITY_TRANSFORMER, 44100.0);
+    let circuit_strong = support::build_circuit(UNITY_TRANSFORMER, &config_strong, "strong_coupling");
+    let output_strong = support::run_sine(&circuit_strong, 100.0, 1.0, 4410, 44100.0);
 
     // Measure RMS of settled region for both
     let settled_weak = &output_weak[2940..4410];
@@ -1082,25 +1023,12 @@ fn test_weak_coupling_minimal_transfer() {
 #[test]
 fn test_unity_transformer_voltage_ratio() {
     // L1=L2=10mH, k=0.95: near-unity voltage ratio
-    let input_resistance = 1.0;
-    let (_, mna, kernel) = build_pipeline_with_input(UNITY_TRANSFORMER, "in", input_resistance);
-    let in_idx = *mna.node_map.get("in").unwrap() - 1;
-    let out_idx = *mna.node_map.get("out").unwrap() - 1;
+    let config = support::config_for_spice(UNITY_TRANSFORMER, 44100.0);
+    let circuit = support::build_circuit(UNITY_TRANSFORMER, &config, "unity_ratio");
 
-    let mut solver = LinearSolver::new(kernel, in_idx, out_idx);
-    solver.set_input_conductance(1.0 / input_resistance);
+    let output = support::run_sine(&circuit, 100.0, 1.0, 4410, 44100.0);
 
-    let num_samples = 4410;
-    let mut output = vec![0.0; num_samples];
-    let freq = 100.0;
-    for i in 0..num_samples {
-        let input = 1.0 * (2.0 * std::f64::consts::PI * freq * i as f64 / 44100.0).sin();
-        output[i] = solver.process_sample(input);
-    }
-
-    for (i, &v) in output.iter().enumerate() {
-        assert!(v.is_finite(), "Output[{}] = {} (not finite)", i, v);
-    }
+    support::assert_finite(&output);
 
     let settled = &output[2940..4410];
     let peak_out = settled.iter().map(|&v| v.abs()).fold(0.0f64, f64::max);
@@ -1124,49 +1052,25 @@ fn test_transformer_all_finite() {
     ];
 
     for (name, spice) in &circuits {
-        let input_resistance = 1.0;
-        let (_, mna, kernel) = build_pipeline_with_input(spice, "in", input_resistance);
-        let in_idx = *mna.node_map.get("in").unwrap() - 1;
-        let out_idx = *mna.node_map.get("out").unwrap() - 1;
-
-        let mut solver = LinearSolver::new(kernel, in_idx, out_idx);
-        solver.set_input_conductance(1.0 / input_resistance);
-
-        let num_samples = 1000;
-        for i in 0..num_samples {
-            let input = (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 44100.0).sin();
-            let out = solver.process_sample(input);
-            assert!(
-                out.is_finite(),
-                "{}: Output[{}] = {} (not finite)",
-                name,
-                i,
-                out
-            );
-        }
+        let config = support::config_for_spice(spice, 44100.0);
+        let circuit = support::build_circuit(spice, &config, name);
+        let output = support::run_sine(&circuit, 440.0, 1.0, 1000, 44100.0);
+        support::assert_finite(&output);
     }
 }
 
 // ===========================================================================
-// Runtime Solver Integration Tests
+// Codegen Integration Tests
 // ===========================================================================
 
 #[test]
-fn test_runtime_solver_step_response() {
+fn test_codegen_step_response() {
     // Step response through transformer — output should be transient (not DC)
-    let input_resistance = 1.0;
-    let (_, mna, kernel) = build_pipeline_with_input(UNITY_TRANSFORMER, "in", input_resistance);
-    let in_idx = *mna.node_map.get("in").unwrap() - 1;
-    let out_idx = *mna.node_map.get("out").unwrap() - 1;
-
-    let mut solver = LinearSolver::new(kernel, in_idx, out_idx);
-    solver.set_input_conductance(1.0 / input_resistance);
+    let config = support::config_for_spice(UNITY_TRANSFORMER, 44100.0);
+    let circuit = support::build_circuit(UNITY_TRANSFORMER, &config, "step_response");
 
     // Apply DC step
-    let mut output = vec![0.0; 500];
-    for i in 0..500 {
-        output[i] = solver.process_sample(1.0);
-    }
+    let output = support::run_step(&circuit, 1.0, 500, 44100.0);
 
     // Transformer blocks DC — after transient, output should settle near 0
     let late_avg: f64 = output[400..500].iter().map(|v| v.abs()).sum::<f64>() / 100.0;
@@ -1178,24 +1082,13 @@ fn test_runtime_solver_step_response() {
 }
 
 #[test]
-fn test_runtime_solver_ac_passes() {
+fn test_codegen_ac_passes() {
     // AC signal should pass through the transformer
-    let input_resistance = 1.0;
-    let (_, mna, kernel) = build_pipeline_with_input(UNITY_TRANSFORMER, "in", input_resistance);
-    let in_idx = *mna.node_map.get("in").unwrap() - 1;
-    let out_idx = *mna.node_map.get("out").unwrap() - 1;
-
-    let mut solver = LinearSolver::new(kernel, in_idx, out_idx);
-    solver.set_input_conductance(1.0 / input_resistance);
+    let config = support::config_for_spice(UNITY_TRANSFORMER, 44100.0);
+    let circuit = support::build_circuit(UNITY_TRANSFORMER, &config, "ac_passes");
 
     // Drive with 1kHz sine for 500 samples (~11 cycles)
-    let num_samples = 500;
-    let mut output = vec![0.0; num_samples];
-    let freq = 1000.0;
-    for i in 0..num_samples {
-        let input = (2.0 * std::f64::consts::PI * freq * i as f64 / 44100.0).sin();
-        output[i] = solver.process_sample(input);
-    }
+    let output = support::run_sine(&circuit, 1000.0, 1.0, 500, 44100.0);
 
     // Should see AC output
     let peak = output[200..500]
@@ -1321,26 +1214,13 @@ C4 d 0 1p
 
 #[test]
 fn test_floating_transformer_behavioral() {
-    let input_resistance = 1.0;
-    let (_, mna, kernel) = build_pipeline_with_input(FLOATING_TRANSFORMER, "in", input_resistance);
-    let in_idx = *mna.node_map.get("in").unwrap() - 1;
-    let out_idx = *mna.node_map.get("out").unwrap() - 1;
+    let config = support::config_for_spice(FLOATING_TRANSFORMER, 44100.0);
+    let circuit = support::build_circuit(FLOATING_TRANSFORMER, &config, "floating_behavioral");
 
-    let mut solver = LinearSolver::new(kernel, in_idx, out_idx);
-    solver.set_input_conductance(1.0 / input_resistance);
-
-    let num_samples = 4410;
-    let freq = 1000.0;
-    let mut output = vec![0.0; num_samples];
-    for i in 0..num_samples {
-        let input = (2.0 * std::f64::consts::PI * freq * i as f64 / 44100.0).sin();
-        output[i] = solver.process_sample(input);
-    }
+    let output = support::run_sine(&circuit, 1000.0, 1.0, 4410, 44100.0);
 
     // All outputs finite
-    for (i, &v) in output.iter().enumerate() {
-        assert!(v.is_finite(), "Output[{}] = {} (not finite)", i, v);
-    }
+    support::assert_finite(&output);
 
     // Should produce measurable AC output
     let peak = output[2000..4410]
@@ -1379,19 +1259,11 @@ C3 out 0 100p
     let code = generate_code(spice);
     assert_compiles(&code, "reversed_polarity");
 
-    // Should produce finite output
-    let input_resistance = 1.0;
-    let (_, mna2, kernel) = build_pipeline_with_input(spice, "in", input_resistance);
-    let in_idx = *mna2.node_map.get("in").unwrap() - 1;
-    let out_idx = *mna2.node_map.get("out").unwrap() - 1;
-    let mut solver = LinearSolver::new(kernel, in_idx, out_idx);
-    solver.set_input_conductance(1.0 / input_resistance);
-
-    for i in 0..500 {
-        let input = (2.0 * std::f64::consts::PI * 1000.0 * i as f64 / 44100.0).sin();
-        let out = solver.process_sample(input);
-        assert!(out.is_finite(), "Output[{}] = {} (not finite)", i, out);
-    }
+    // Should produce finite output via codegen
+    let config = support::config_for_spice(spice, 44100.0);
+    let circuit = support::build_circuit(spice, &config, "reversed_pol");
+    let output = support::run_sine(&circuit, 1000.0, 1.0, 500, 44100.0);
+    support::assert_finite(&output);
 }
 
 // ===========================================================================
@@ -1456,18 +1328,10 @@ C3 out 0 100p
     let code = generate_code(spice);
     assert_compiles(&code, "near_degenerate");
 
-    let input_resistance = 1.0;
-    let (_, mna2, kernel2) = build_pipeline_with_input(spice, "in", input_resistance);
-    let in_idx = *mna2.node_map.get("in").unwrap() - 1;
-    let out_idx = *mna2.node_map.get("out").unwrap() - 1;
-    let mut solver = LinearSolver::new(kernel2, in_idx, out_idx);
-    solver.set_input_conductance(1.0 / input_resistance);
-
-    for i in 0..200 {
-        let input = (2.0 * std::f64::consts::PI * 1000.0 * i as f64 / 44100.0).sin();
-        let out = solver.process_sample(input);
-        assert!(out.is_finite(), "Output[{}] = {} (not finite)", i, out);
-    }
+    let config = support::config_for_spice(spice, 44100.0);
+    let circuit = support::build_circuit(spice, &config, "near_degen");
+    let output = support::run_sine(&circuit, 1000.0, 1.0, 200, 44100.0);
+    support::assert_finite(&output);
 }
 
 // ===========================================================================

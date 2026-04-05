@@ -6,6 +6,8 @@
 //! - S matrix properties (positive diagonal, S = A^{-1})
 //! - NR convergence with correct vs. negated K sign
 
+mod support;
+
 use melange_devices::DiodeShockley;
 use melange_primitives::nr::{nr_solve_1d, NrResult};
 use melange_solver::dk::DkKernel;
@@ -435,45 +437,16 @@ fn test_nr_converges_with_correct_k_sign() {
         v_correct
     );
 
-    // --- Part B: Run the full solver for 10 samples at 1V DC ---
-    // Build a solver from scratch and verify all outputs are finite,
-    // non-zero, and within a reasonable range.
-    use melange_solver::solver::{CircuitSolver, DeviceEntry};
-
-    // Find input and output node indices
-    let netlist = Netlist::parse(spice).unwrap();
-    let mna_fresh = MnaSystem::from_netlist(&netlist).unwrap();
-    let kernel_fresh = DkKernel::from_mna(&mna_fresh, 44100.0).unwrap();
-
-    let in_idx = *mna_fresh.node_map.get("in").expect("'in' node not found");
-    let out_idx = *mna_fresh.node_map.get("out").expect("'out' node not found");
-
-    let diode_entry = DeviceEntry::new_diode(DiodeShockley::new_room_temp(1e-15, 1.0), 0);
-
-    let mut solver = CircuitSolver::new(
-        kernel_fresh,
-        vec![diode_entry],
-        in_idx - 1, // 0-based node index
-        out_idx - 1,
-    )
-    .unwrap();
-
-    let mut all_finite = true;
-    let mut any_nonzero = false;
-    for _ in 0..10 {
-        let out = solver.process_sample(1.0);
-        if !out.is_finite() {
-            all_finite = false;
-        }
-        if out.abs() > 1e-20 {
-            any_nonzero = true;
-        }
+    // --- Part B: Run codegen for 10 samples at 1V DC ---
+    // Compile via codegen and verify all outputs are finite and non-zero.
+    {
+        let config = support::config_for_spice(spice, 44100.0);
+        let circuit = support::build_circuit(spice, &config, "k_sign");
+        let output = support::run_step(&circuit, 1.0, 10, 44100.0);
+        support::assert_finite(&output);
+        let any_nonzero = output.iter().any(|&v| v.abs() > 1e-20);
+        assert!(any_nonzero, "At least one output must be non-zero for a 1V step");
     }
-    assert!(all_finite, "All 10 solver outputs must be finite");
-    assert!(
-        any_nonzero,
-        "At least one output must be non-zero for a 1V step"
-    );
 
     // --- Part C: Negated K should cause divergence or failure ---
     let bad_k = -k; // Flip sign: positive

@@ -25,7 +25,6 @@
 
 use std::path::PathBuf;
 
-use melange_devices::bjt::BjtPolarity;
 use melange_validate::{
     comparison::{compare_signals, ComparisonConfig, Signal},
     spice_runner::{is_ngspice_available, run_transient_with_thevenin_pwl},
@@ -36,6 +35,9 @@ use melange_validate::{
 
 /// Sample rate used for all validation tests (48 kHz audio standard)
 const SAMPLE_RATE: f64 = 48_000.0;
+
+/// Atomic counter for unique temp file names in codegen compilation
+static MELANGE_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 /// Get path to test data directory
 fn test_data_dir() -> PathBuf {
@@ -199,9 +201,9 @@ fn run_validation(
     let (stripped_netlist, _dc_offset) = strip_vin_source(&netlist_str, "in");
     let input_signal = resample_pwl_to_signal(&pwl_data, SAMPLE_RATE, spice_output.len());
 
-    let melange_output = run_melange_solver(&stripped_netlist, &input_signal, SAMPLE_RATE)?;
+    let melange_output = run_melange_codegen(&stripped_netlist, &input_signal, SAMPLE_RATE)?;
 
-    // Apply DC blocking to SPICE output to match melange's internal DC blocker
+    // Apply DC blocking to SPICE output to match melange (codegen dc_block=false, so match raw)
     dc_block_signal(&mut spice_output, SAMPLE_RATE);
 
     // Create signals for comparison
@@ -278,6 +280,191 @@ fn interpolate_pwl(pwl_data: &[(f64, f64)], t: f64) -> f64 {
     0.0
 }
 
+/// Run melange via codegen: parse → MNA → DK kernel → route → generate code → compile → run.
+///
+/// This replaces all runtime solver functions (`run_melange_solver`,
+/// `run_melange_nodal_solver`, `run_melange_nodal_solver_positive_k`).
+/// The generated code is compiled to a temporary binary, input is piped via stdin,
+/// and output is read from stdout.
+fn run_melange_codegen(
+    netlist_str: &str,
+    input_signal: &[f64],
+    sample_rate: f64,
+) -> Result<Vec<f64>, ValidationError> {
+    use melange_solver::codegen::routing;
+    use melange_solver::codegen::{CodeGenerator, CodegenConfig};
+    use melange_solver::dk::DkKernel;
+    use std::io::Write;
+
+    let netlist = melange_solver::parser::Netlist::parse(netlist_str)
+        .map_err(|e| ValidationError::Solver(format!("Parse: {}", e.message)))?;
+
+    let mut mna = melange_solver::mna::MnaSystem::from_netlist(&netlist)
+        .map_err(|e| ValidationError::Solver(format!("MNA: {}", e)))?;
+
+    let input_node = mna
+        .node_map
+        .get("in")
+        .copied()
+        .unwrap_or(1)
+        .saturating_sub(1);
+    let output_node = mna
+        .node_map
+        .get("out")
+        .copied()
+        .unwrap_or(2)
+        .saturating_sub(1);
+
+    if input_node < mna.n {
+        mna.g[input_node][input_node] += 1.0; // G_in = 1.0 S
+    }
+
+    // Stamp junction caps
+    {
+        let device_slots = build_device_slots_from_netlist(&netlist);
+        if !device_slots.is_empty() {
+            mna.stamp_device_junction_caps(&device_slots);
+        }
+    }
+
+    // Build kernel and route
+    let has_inductors = !mna.inductors.is_empty()
+        || !mna.coupled_inductors.is_empty()
+        || !mna.transformer_groups.is_empty();
+
+    let mut dk_failed = false;
+    let kernel = if has_inductors {
+        DkKernel::from_mna_augmented(&mna, sample_rate)
+            .map_err(|e| ValidationError::Solver(format!("Augmented DK: {:?}", e)))?
+    } else {
+        match DkKernel::from_mna(&mna, sample_rate) {
+            Ok(k) => k,
+            Err(_) => {
+                dk_failed = true;
+                DkKernel::from_mna_augmented(&mna, sample_rate)
+                    .map_err(|e| ValidationError::Solver(format!("DK fallback: {:?}", e)))?
+            }
+        }
+    };
+
+    let decision = routing::auto_route(&kernel, &mna, dk_failed);
+    let use_nodal = decision.route == routing::SolverRoute::Nodal;
+
+    if use_nodal {
+        let device_slots =
+            melange_solver::codegen::ir::CircuitIR::build_device_info_with_mna(&netlist, Some(&mna))
+                .unwrap_or_default();
+        if !device_slots.is_empty() {
+            mna.expand_bjt_internal_nodes(&device_slots);
+        }
+    }
+
+    // Generate code — dc_block: true to match runtime solver's built-in DC blocker
+    let config = CodegenConfig {
+        circuit_name: "spice_val".to_string(),
+        sample_rate,
+        input_node,
+        output_nodes: vec![output_node],
+        input_resistance: 1.0,
+        dc_block: true,
+        ..CodegenConfig::default()
+    };
+    let generator = CodeGenerator::new(config);
+    let generated = if use_nodal {
+        generator.generate_nodal(&mna, &netlist)
+    } else {
+        generator.generate(&kernel, &mna, &netlist)
+    }
+    .map_err(|e| ValidationError::Solver(format!("Codegen: {}", e)))?;
+
+    // Append a main that reads input from stdin, processes, writes output to stdout
+    let main_code = r#"
+fn main() {
+    let mut state = CircuitState::default();
+    let stdin = std::io::stdin();
+    let mut line = String::new();
+    loop {
+        line.clear();
+        if stdin.read_line(&mut line).unwrap() == 0 { break; }
+        if let Ok(input) = line.trim().parse::<f64>() {
+            let out = process_sample(input, &mut state);
+            println!("{:.15e}", out[0]);
+        }
+    }
+}
+"#;
+    let full_source = format!("{}\n{}", generated.code, main_code);
+
+    // Compile
+    let tmp_dir = std::env::temp_dir();
+    let counter = MELANGE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let pid = std::process::id();
+    let src_path = tmp_dir.join(format!("melange_spval_{pid}_{counter}.rs"));
+    let bin_path = tmp_dir.join(format!("melange_spval_{pid}_{counter}"));
+
+    std::fs::write(&src_path, &full_source)
+        .map_err(|e| ValidationError::Solver(format!("Write source: {}", e)))?;
+
+    let compile = std::process::Command::new("rustc")
+        .arg(&src_path)
+        .arg("-o")
+        .arg(&bin_path)
+        .arg("--edition=2024")
+        .arg("-O")
+        .output()
+        .map_err(|e| ValidationError::Solver(format!("rustc: {}", e)))?;
+
+    let _ = std::fs::remove_file(&src_path);
+
+    if !compile.status.success() {
+        let _ = std::fs::remove_file(&bin_path);
+        return Err(ValidationError::Solver(format!(
+            "Compilation failed:\n{}",
+            String::from_utf8_lossy(&compile.stderr)
+        )));
+    }
+
+    // Run: pipe input via stdin
+    let stdin_data: String = input_signal
+        .iter()
+        .map(|s| format!("{s:.15e}\n"))
+        .collect();
+
+    let mut child = std::process::Command::new(&bin_path)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| ValidationError::Solver(format!("Spawn: {}", e)))?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(stdin_data.as_bytes())
+            .map_err(|e| ValidationError::Solver(format!("Stdin: {}", e)))?;
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|e| ValidationError::Solver(format!("Wait: {}", e)))?;
+
+    let _ = std::fs::remove_file(&bin_path);
+
+    if !output.status.success() {
+        return Err(ValidationError::Solver(format!(
+            "Binary failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+
+    let samples: Vec<f64> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|l| l.trim().parse().ok())
+        .collect();
+
+    Ok(samples)
+}
+
+#[cfg(any())]
 /// Run melange solver on a netlist string with the given input signal
 fn run_melange_solver(
     netlist_str: &str,
@@ -357,6 +544,7 @@ fn run_melange_solver(
     Ok(output)
 }
 
+#[cfg(any())]
 /// Build device list from parsed netlist
 fn build_devices_from_netlist(
     netlist: &melange_solver::parser::Netlist,
@@ -504,6 +692,7 @@ struct BjtModelParams {
     nc: Option<f64>,
 }
 
+#[cfg(any())]
 /// Find BJT model parameters from netlist.
 ///
 /// Extracts Ebers-Moll params (IS, BF, BR, NF, NR) and Gummel-Poon params
@@ -556,6 +745,7 @@ fn find_bjt_model(netlist: &melange_solver::parser::Netlist, device_name: &str) 
     params
 }
 
+#[cfg(any())]
 /// Find BJT polarity from netlist model definition
 fn find_bjt_polarity(netlist: &melange_solver::parser::Netlist, device_name: &str) -> BjtPolarity {
     // First, find the device to get its model name
@@ -589,6 +779,7 @@ fn find_bjt_polarity(netlist: &melange_solver::parser::Netlist, device_name: &st
     BjtPolarity::Npn
 }
 
+#[cfg(any())]
 /// Find JFET device from netlist, constructing a Jfet with model params.
 fn find_jfet_device(
     netlist: &melange_solver::parser::Netlist,
@@ -651,6 +842,7 @@ fn find_jfet_device(
     jfet
 }
 
+#[cfg(any())]
 /// Find MOSFET device from netlist, constructing a Mosfet with model params.
 fn find_mosfet_device(
     netlist: &melange_solver::parser::Netlist,
@@ -707,6 +899,7 @@ fn find_mosfet_device(
     Mosfet::new(channel, vt, kp, lambda)
 }
 
+#[cfg(any())]
 /// Find tube/triode device from netlist, constructing a KorenTriode with model params.
 fn find_tube_device(
     netlist: &melange_solver::parser::Netlist,
@@ -1159,8 +1352,8 @@ fn test_bjt_common_emitter_vs_spice() {
     dc_block_signal(&mut spice_output, SAMPLE_RATE);
     let input_signal = resample_pwl_to_signal(&pwl_data, SAMPLE_RATE, spice_output.len());
     let (stripped_netlist, _) = strip_vin_source(&netlist_str, "in");
-    let melange_output = run_melange_solver(&stripped_netlist, &input_signal, SAMPLE_RATE)
-        .expect("melange solver failed");
+    let melange_output = run_melange_codegen(&stripped_netlist, &input_signal, SAMPLE_RATE)
+        .expect("melange codegen failed");
 
     let config = bjt_config();
     let spice_signal = Signal::new(spice_output.clone(), SAMPLE_RATE, "SPICE");
@@ -1420,10 +1613,10 @@ fn test_wurli_preamp_vs_spice() {
     dc_block_signal(&mut spice_output, SAMPLE_RATE);
     let input_signal = resample_pwl_to_signal(&pwl_data, SAMPLE_RATE, spice_output.len());
 
-    // --- Run melange (DK/CircuitSolver) ---
+    // --- Run melange (codegen, auto-routes DK vs nodal) ---
     let (stripped_netlist, _) = strip_vin_source(&netlist_str, "in");
-    let melange_output = run_melange_solver(&stripped_netlist, &input_signal, SAMPLE_RATE)
-        .expect("melange solver failed");
+    let melange_output = run_melange_codegen(&stripped_netlist, &input_signal, SAMPLE_RATE)
+        .expect("melange codegen failed");
 
     // --- Compare ---
     let config = bjt_config();
@@ -1498,6 +1691,7 @@ fn test_wurli_preamp_vs_spice() {
 // Neve 1073 Output Stage Validation
 // =============================================================================
 
+#[cfg(any())]
 /// Run melange NodalSolver for circuits with inductors (transformers).
 /// The standard `run_melange_solver` uses CircuitSolver (DK path) which doesn't
 /// support coupled inductors. This function uses NodalSolver with augmented MNA.
@@ -1601,10 +1795,10 @@ fn test_neve_1073_output_vs_spice() {
     dc_block_signal(&mut spice_output, SAMPLE_RATE);
     let input_signal = resample_pwl_to_signal(&pwl_data, SAMPLE_RATE, spice_output.len());
 
-    // --- Run melange (NodalSolver for inductor circuit) ---
+    // --- Run melange (codegen, auto-routes to nodal for inductor circuit) ---
     let (stripped_netlist, _) = strip_vin_source(&netlist_str, "in");
-    let melange_output = run_melange_nodal_solver(&stripped_netlist, &input_signal, SAMPLE_RATE)
-        .expect("melange nodal solver failed");
+    let melange_output = run_melange_codegen(&stripped_netlist, &input_signal, SAMPLE_RATE)
+        .expect("melange codegen failed");
 
     // --- Compare ---
     let config = bjt_config();
@@ -1695,10 +1889,10 @@ fn test_neve_1073_preamp_vs_spice() {
     dc_block_signal(&mut spice_output, SAMPLE_RATE);
     let input_signal = resample_pwl_to_signal(&pwl_data, SAMPLE_RATE, spice_output.len());
 
-    // --- Run melange (CircuitSolver / DK path) ---
+    // --- Run melange (codegen, auto-routes DK vs nodal) ---
     let (stripped_netlist, _) = strip_vin_source(&netlist_str, "in");
-    let melange_output = run_melange_solver(&stripped_netlist, &input_signal, SAMPLE_RATE)
-        .expect("melange solver failed");
+    let melange_output = run_melange_codegen(&stripped_netlist, &input_signal, SAMPLE_RATE)
+        .expect("melange codegen failed");
 
     // DC-block melange output too
     let mut melange_dc_blocked = melange_output.clone();
@@ -2093,6 +2287,7 @@ fn test_comparison_config_levels() {
 // Pot Modulation Tests (Trapezoidal backward-term correctness)
 // =============================================================================
 
+#[cfg(any())]
 /// Compute the time-varying pot resistance for the tremolo LDR.
 ///
 /// R(t) = R_center + R_depth * sin(2*pi*f_mod*t)
@@ -2101,6 +2296,7 @@ fn pot_resistance_at(t: f64, f_mod: f64, r_center: f64, r_depth: f64) -> f64 {
     r_center + r_depth * (2.0 * std::f64::consts::PI * f_mod * t).sin()
 }
 
+#[cfg(any())]
 /// Apply a pot resistance change to the DK kernel matrices.
 ///
 /// Updates S (via Sherman-Morrison), K (recomputed from S), and a_neg
@@ -2191,6 +2387,7 @@ fn apply_pot_to_kernel(
     }
 }
 
+#[cfg(any())]
 /// Run the melange DK solver with per-sample pot modulation.
 ///
 /// If `use_correct_backward_term` is true, the A_neg backward correction uses
@@ -2309,8 +2506,9 @@ fn run_melange_with_pot_modulation(
 ///
 /// Circuit: R1(1k) -> R_ldr(10k) -> C1(100n) || D1 || Rload(100k)
 /// Input: 1kHz sine at 0.1V
+#[cfg(any())]
 #[test]
-#[ignore] // requires ngspice
+#[ignore = "pending pot modulation codegen conversion"]
 fn test_pot_modulation_static_baseline() {
     assert!(is_ngspice_available(), "ngspice not found");
 
@@ -2427,8 +2625,9 @@ Rload out 0 100k
 /// The correct version achieves ~0.09% RMS vs SPICE, while the buggy
 /// version gives ~1.5% RMS — a 17x degradation clearly attributable
 /// to using current-timestep resistance in the backward term.
+#[cfg(any())]
 #[test]
-#[ignore] // requires ngspice
+#[ignore = "pending pot modulation codegen conversion"]
 fn test_pot_modulation_vs_spice() {
     assert!(is_ngspice_available(), "ngspice not found");
 
@@ -2740,6 +2939,7 @@ fn test_tube_screamer_wiper_vs_spice() {
 // Klon Centaur Validation
 // =============================================================================
 
+#[cfg(any())]
 /// Run melange NodalSolver for circuits with positive K diagonal (e.g., Klon Centaur).
 /// DK kernel build fails for shunt diodes to a voltage source. We create a dummy
 /// kernel with correct dimensions and let NodalSolver derive all matrices from MNA.
@@ -2869,11 +3069,10 @@ fn test_klon_centaur_vs_spice() {
     dc_block_signal(&mut spice_output, SAMPLE_RATE);
     let input_signal = resample_pwl_to_signal(&pwl_data, SAMPLE_RATE, spice_output.len());
 
-    // --- Run melange (NodalSolver — DK fails due to positive K from shunt diodes) ---
+    // --- Run melange (codegen, auto-routes to nodal for positive K / shunt diodes) ---
     let (stripped_netlist, _) = strip_vin_source(&netlist_str, "in");
-    let melange_output =
-        run_melange_nodal_solver_positive_k(&stripped_netlist, &input_signal, SAMPLE_RATE)
-            .expect("melange nodal solver failed");
+    let melange_output = run_melange_codegen(&stripped_netlist, &input_signal, SAMPLE_RATE)
+        .expect("melange codegen failed");
 
     // --- Compare ---
     let spice_signal = Signal::new(spice_output, SAMPLE_RATE, "SPICE");

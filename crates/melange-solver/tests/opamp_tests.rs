@@ -10,54 +10,22 @@
 //!
 //! This is purely linear -- no nonlinear dimensions (M stays 0 for pure op-amp circuits).
 
+mod support;
+
 use melange_solver::dk::DkKernel;
 use melange_solver::mna::MnaSystem;
 use melange_solver::parser::Netlist;
-use melange_solver::solver::LinearSolver;
 
-/// Helper: build a LinearSolver from a SPICE netlist string and return the output node index.
-fn build_linear_solver(spice: &str, sample_rate: f64) -> (LinearSolver, usize, usize) {
-    let netlist = Netlist::parse(spice).expect("Failed to parse netlist");
-    let mut mna = MnaSystem::from_netlist(&netlist).expect("Failed to build MNA");
-    let node_map = mna.node_map.clone();
-
-    let input_idx = *node_map.get("in").expect("Input node 'in' not found");
-    let output_idx = *node_map.get("out").expect("Output node 'out' not found");
-    assert!(input_idx > 0, "Input node cannot be ground");
-    assert!(output_idx > 0, "Output node cannot be ground");
-    let input_node_0 = input_idx - 1;
-    let output_node_0 = output_idx - 1;
-
-    // Stamp input conductance BEFORE building kernel (critical!)
-    let input_conductance = 1.0; // 1 ohm Thevenin source
-    mna.stamp_input_conductance(input_node_0, input_conductance);
-
-    let kernel = DkKernel::from_mna(&mna, sample_rate).expect("Failed to build DK kernel");
-    let solver = LinearSolver::new(kernel, input_node_0, output_node_0);
-
-    (solver, input_node_0, output_node_0)
-}
-
-/// Helper: measure DC gain by processing a step input and returning peak absolute output
-/// (preserving sign). With a DC blocker in the solver, the final sample drools toward zero,
-/// so we track the peak instead.
-fn measure_dc_gain(solver: &mut LinearSolver, input_voltage: f64, num_samples: usize) -> f64 {
+/// Measure DC gain from a step response output vector.
+/// Tracks peak (DC blocker causes droop, so peak is more reliable than final value).
+fn measure_gain_from_output(output: &[f64], input_voltage: f64) -> f64 {
     let mut peak_pos = 0.0f64;
     let mut peak_neg = 0.0f64;
-    for _ in 0..num_samples {
-        let out = solver.process_sample(input_voltage);
-        if out > peak_pos {
-            peak_pos = out;
-        }
-        if out < peak_neg {
-            peak_neg = out;
-        }
+    for &v in output {
+        if v > peak_pos { peak_pos = v; }
+        if v < peak_neg { peak_neg = v; }
     }
-    let peak = if peak_pos.abs() > peak_neg.abs() {
-        peak_pos
-    } else {
-        peak_neg
-    };
+    let peak = if peak_pos.abs() > peak_neg.abs() { peak_pos } else { peak_neg };
     peak / input_voltage
 }
 
@@ -67,42 +35,22 @@ fn measure_dc_gain(solver: &mut LinearSolver, input_voltage: f64, num_samples: u
 
 #[test]
 fn test_opamp_inverting_amplifier_gain() {
-    let spice = r#"Inverting Amplifier
-R1 in inv 10k
-R2 inv out 100k
-C1 out 0 100n
-U1 0 inv out opamp
-.model opamp OA(AOL=200000)
-"#;
-    let (mut solver, _, _) = build_linear_solver(spice, 44100.0);
-
-    let gain = measure_dc_gain(&mut solver, 0.1, 2000);
-
-    assert!(
-        (gain - (-10.0)).abs() < 0.5,
-        "Inverting amplifier gain should be ~-10, got {:.3}",
-        gain
-    );
+    let spice = "Inverting Amplifier\nR1 in inv 10k\nR2 inv out 100k\nC1 out 0 100n\nU1 0 inv out opamp\n.model opamp OA(AOL=200000)\n";
+    let config = support::config_for_spice(spice, 44100.0);
+    let circuit = support::build_circuit(spice, &config, "oa_inv10");
+    let output = support::run_step(&circuit, 0.1, 2000, 44100.0);
+    let gain = measure_gain_from_output(&output, 0.1);
+    assert!((gain - (-10.0)).abs() < 0.5, "Inverting gain should be ~-10, got {:.3}", gain);
 }
 
 #[test]
 fn test_opamp_inverting_amplifier_unity_gain() {
-    let spice = r#"Unity Inverting
-R1 in inv 10k
-R2 inv out 10k
-C1 out 0 100n
-U1 0 inv out opamp
-.model opamp OA(AOL=200000)
-"#;
-    let (mut solver, _, _) = build_linear_solver(spice, 44100.0);
-
-    let gain = measure_dc_gain(&mut solver, 0.5, 2000);
-
-    assert!(
-        (gain - (-1.0)).abs() < 0.1,
-        "Unity inverting gain should be ~-1, got {:.3}",
-        gain
-    );
+    let spice = "Unity Inverting\nR1 in inv 10k\nR2 inv out 10k\nC1 out 0 100n\nU1 0 inv out opamp\n.model opamp OA(AOL=200000)\n";
+    let config = support::config_for_spice(spice, 44100.0);
+    let circuit = support::build_circuit(spice, &config, "oa_inv1");
+    let output = support::run_step(&circuit, 0.5, 2000, 44100.0);
+    let gain = measure_gain_from_output(&output, 0.5);
+    assert!((gain - (-1.0)).abs() < 0.1, "Unity inverting gain should be ~-1, got {:.3}", gain);
 }
 
 // =============================================================================
@@ -111,22 +59,12 @@ U1 0 inv out opamp
 
 #[test]
 fn test_opamp_noninverting_amplifier_gain() {
-    let spice = r#"Non-Inverting Amplifier
-R1 inv 0 10k
-R2 inv out 100k
-C1 out 0 100n
-U1 in inv out opamp
-.model opamp OA(AOL=200000)
-"#;
-    let (mut solver, _, _) = build_linear_solver(spice, 44100.0);
-
-    let gain = measure_dc_gain(&mut solver, 0.1, 2000);
-
-    assert!(
-        (gain - 11.0).abs() < 0.5,
-        "Non-inverting amplifier gain should be ~11, got {:.3}",
-        gain
-    );
+    let spice = "Non-Inverting Amplifier\nR1 inv 0 10k\nR2 inv out 100k\nC1 out 0 100n\nU1 in inv out opamp\n.model opamp OA(AOL=200000)\n";
+    let config = support::config_for_spice(spice, 44100.0);
+    let circuit = support::build_circuit(spice, &config, "oa_ni11");
+    let output = support::run_step(&circuit, 0.1, 2000, 44100.0);
+    let gain = measure_gain_from_output(&output, 0.1);
+    assert!((gain - 11.0).abs() < 0.5, "Non-inverting gain should be ~11, got {:.3}", gain);
 }
 
 // =============================================================================
@@ -135,20 +73,12 @@ U1 in inv out opamp
 
 #[test]
 fn test_opamp_voltage_follower() {
-    let spice = r#"Voltage Follower
-C1 out 0 100n
-U1 in out out opamp
-.model opamp OA(AOL=200000)
-"#;
-    let (mut solver, _, _) = build_linear_solver(spice, 44100.0);
-
-    let gain = measure_dc_gain(&mut solver, 0.5, 2000);
-
-    assert!(
-        (gain - 1.0).abs() < 0.05,
-        "Voltage follower gain should be ~1.0, got {:.4}",
-        gain
-    );
+    let spice = "Voltage Follower\nC1 out 0 100n\nU1 in out out opamp\n.model opamp OA(AOL=200000)\n";
+    let config = support::config_for_spice(spice, 44100.0);
+    let circuit = support::build_circuit(spice, &config, "oa_foll");
+    let output = support::run_step(&circuit, 0.5, 2000, 44100.0);
+    let gain = measure_gain_from_output(&output, 0.5);
+    assert!((gain - 1.0).abs() < 0.05, "Follower gain should be ~1.0, got {:.4}", gain);
 }
 
 // =============================================================================
@@ -157,23 +87,12 @@ U1 in out out opamp
 
 #[test]
 fn test_opamp_summing_amplifier() {
-    let spice = r#"Summing Amplifier
-R1 in inv 10k
-R2 inv out 10k
-Rload out 0 100k
-C1 out 0 100n
-U1 0 inv out opamp
-.model opamp OA(AOL=200000)
-"#;
-    let (mut solver, _, _) = build_linear_solver(spice, 44100.0);
-
-    let gain = measure_dc_gain(&mut solver, 0.3, 2000);
-
-    assert!(
-        (gain - (-1.0)).abs() < 0.1,
-        "Summing amplifier gain should be ~-1, got {:.3}",
-        gain
-    );
+    let spice = "Summing Amplifier\nR1 in inv 10k\nR2 inv out 10k\nRload out 0 100k\nC1 out 0 100n\nU1 0 inv out opamp\n.model opamp OA(AOL=200000)\n";
+    let config = support::config_for_spice(spice, 44100.0);
+    let circuit = support::build_circuit(spice, &config, "oa_sum");
+    let output = support::run_step(&circuit, 0.3, 2000, 44100.0);
+    let gain = measure_gain_from_output(&output, 0.3);
+    assert!((gain - (-1.0)).abs() < 0.1, "Summing amp gain should be ~-1, got {:.3}", gain);
 }
 
 // =============================================================================
@@ -266,45 +185,25 @@ C2 out 0 100n
 
 #[test]
 fn test_opamp_inverting_ac_signal() {
-    let spice = r#"Inverting AC
-R1 in inv 10k
-R2 inv out 100k
-C1 out 0 100n
-U1 0 inv out opamp
-.model opamp OA(AOL=200000)
-"#;
-    let (mut solver, _, _) = build_linear_solver(spice, 44100.0);
+    let spice = "Inverting AC\nR1 in inv 10k\nR2 inv out 100k\nC1 out 0 100n\nU1 0 inv out opamp\n.model opamp OA(AOL=200000)\n";
+    let config = support::config_for_spice(spice, 44100.0);
+    let circuit = support::build_circuit(spice, &config, "oa_ac");
 
-    let sample_rate = 44100.0;
-    let freq = 1000.0;
-    let amplitude = 0.1;
+    // 500 warmup + 1 cycle measurement at 1kHz
+    let total_samples = 500 + (44100.0 / 1000.0) as usize;
+    let output = support::run_sine(&circuit, 1000.0, 0.1, total_samples, 44100.0);
 
-    for i in 0..500 {
-        let t = i as f64 / sample_rate;
-        let input = amplitude * (2.0 * std::f64::consts::PI * freq * t).sin();
-        solver.process_sample(input);
-    }
-
-    let samples_per_cycle = (sample_rate / freq) as usize;
-    let mut max_output = f64::NEG_INFINITY;
-    let mut min_output = f64::INFINITY;
-
-    for i in 0..samples_per_cycle {
-        let t = (500 + i) as f64 / sample_rate;
-        let input = amplitude * (2.0 * std::f64::consts::PI * freq * t).sin();
-        let output = solver.process_sample(input);
-        max_output = max_output.max(output);
-        min_output = min_output.min(output);
-    }
-
-    let output_amplitude = (max_output - min_output) / 2.0;
-    let expected_amplitude = amplitude * 10.0;
+    // Measure amplitude in last cycle (after 500 warmup samples)
+    let measure = &output[500..];
+    let max_out = measure.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let min_out = measure.iter().cloned().fold(f64::INFINITY, f64::min);
+    let output_amplitude = (max_out - min_out) / 2.0;
+    let expected_amplitude = 0.1 * 10.0; // gain = -10
 
     assert!(
         (output_amplitude - expected_amplitude).abs() / expected_amplitude < 0.15,
         "Output amplitude should be ~{:.3}V, got {:.3}V",
-        expected_amplitude,
-        output_amplitude
+        expected_amplitude, output_amplitude
     );
 }
 
@@ -350,22 +249,22 @@ U1 0 inv out myoa
 fn test_opamp_gain_improves_with_higher_aol() {
     let make_spice = |aol: f64| -> String {
         format!(
-            r#"Inverting
-R1 in inv 10k
-R2 inv out 100k
-C1 out 0 100n
-U1 0 inv out oa
-.model oa OA(AOL={})
-"#,
+            "Inverting\nR1 in inv 10k\nR2 inv out 100k\nC1 out 0 100n\nU1 0 inv out oa\n.model oa OA(AOL={})\n",
             aol
         )
     };
 
-    let (mut solver_low, _, _) = build_linear_solver(&make_spice(1000.0), 44100.0);
-    let gain_low = measure_dc_gain(&mut solver_low, 0.1, 2000);
+    let spice_low = make_spice(1000.0);
+    let config_low = support::config_for_spice(&spice_low, 44100.0);
+    let circuit_low = support::build_circuit(&spice_low, &config_low, "oa_aol_low");
+    let out_low = support::run_step(&circuit_low, 0.1, 2000, 44100.0);
+    let gain_low = measure_gain_from_output(&out_low, 0.1);
 
-    let (mut solver_high, _, _) = build_linear_solver(&make_spice(200_000.0), 44100.0);
-    let gain_high = measure_dc_gain(&mut solver_high, 0.1, 2000);
+    let spice_high = make_spice(200_000.0);
+    let config_high = support::config_for_spice(&spice_high, 44100.0);
+    let circuit_high = support::build_circuit(&spice_high, &config_high, "oa_aol_high");
+    let out_high = support::run_step(&circuit_high, 0.1, 2000, 44100.0);
+    let gain_high = measure_gain_from_output(&out_high, 0.1);
 
     let error_low = (gain_low - (-10.0)).abs();
     let error_high = (gain_high - (-10.0)).abs();
@@ -373,8 +272,7 @@ U1 0 inv out oa
     assert!(
         error_high < error_low,
         "Higher AOL should give more accurate gain: error_low={:.4}, error_high={:.4}",
-        error_low,
-        error_high
+        error_low, error_high
     );
 }
 

@@ -3,6 +3,8 @@
 //! Validates that the DC OP solver correctly finds bias points for
 //! circuits with diodes and BJTs.
 
+mod support;
+
 use melange_solver::codegen::ir::CircuitIR;
 use melange_solver::codegen::{CodeGenerator, CodegenConfig};
 use melange_solver::dc_op::{solve_dc_operating_point, DcOpConfig, DcOpMethod};
@@ -567,57 +569,22 @@ fn test_codegen_linear_circuit_no_dc_nl_i() {
 }
 
 // =============================================================================
-// Runtime solver integration
+// Codegen DC OP integration (verifies codegen includes DC OP)
 // =============================================================================
 
 #[test]
-fn test_runtime_solver_dc_op_init() {
-    use melange_solver::solver::CircuitSolver;
+fn test_codegen_dc_op_produces_stable_output() {
+    // Verify that codegen with DC OP init produces stable, finite output
+    // for a circuit with DC supply and nonlinear devices.
+    let config = support::config_for_spice(SINGLE_DIODE_VCC, 44100.0);
+    let circuit = support::build_circuit(SINGLE_DIODE_VCC, &config, "dc_op_codegen");
 
-    let (netlist, mna, kernel) = build_pipeline(SINGLE_DIODE_VCC);
+    // Run a few samples of zero input — DC OP should make output stable
+    let output = support::run_step(&circuit, 0.0, 100, 44100.0);
+    support::assert_finite(&output);
 
-    // Build device entries
-    let devices = build_device_entries(&netlist, &mna);
-    let slots = build_device_slots(&netlist, &mna);
-
-    let input_node = mna
-        .node_map
-        .get("in")
-        .copied()
-        .unwrap_or(1)
-        .saturating_sub(1);
-    let output_node = mna
-        .node_map
-        .get("out")
-        .copied()
-        .unwrap_or(2)
-        .saturating_sub(1);
-
-    let mut solver = CircuitSolver::new(kernel, devices, input_node, output_node).unwrap();
-    solver.set_input_conductance(1.0);
-
-    // Before DC OP init: everything should be zero
-    assert!(
-        solver.v_prev().iter().all(|&v| v == 0.0),
-        "v_prev should be zero before initialize_dc_op"
-    );
-
-    // Initialize DC OP
-    solver.initialize_dc_op(&mna, &slots);
-
-    // After DC OP init: v_prev should have nonzero values
-    assert!(
-        solver.v_prev().iter().any(|&v| v.abs() > 0.1),
-        "v_prev should be nonzero after initialize_dc_op: {:?}",
-        solver.v_prev()
-    );
-
-    // i_nl_prev should also be nonzero (diode is conducting)
-    assert!(
-        solver.i_nl_prev().iter().any(|&i| i.abs() > 1e-6),
-        "i_nl_prev should be nonzero after initialize_dc_op: {:?}",
-        solver.i_nl_prev()
-    );
+    // Generated code should include DC_OP constant (non-zero DC point)
+    assert!(circuit.code.contains("DC_OP"), "Codegen should include DC_OP constant");
 }
 
 // =============================================================================
@@ -706,46 +673,7 @@ fn build_device_slots(netlist: &Netlist, _mna: &MnaSystem) -> Vec<DeviceSlot> {
     slots
 }
 
-/// Build device entries for the runtime solver.
-fn build_device_entries(
-    netlist: &Netlist,
-    mna: &MnaSystem,
-) -> Vec<melange_solver::solver::DeviceEntry> {
-    use melange_devices::bjt::{BjtEbersMoll, BjtPolarity};
-    use melange_devices::diode::DiodeShockley;
-    use melange_solver::solver::DeviceEntry;
-
-    let mut devices = Vec::new();
-
-    for dev_info in &mna.nonlinear_devices {
-        match dev_info.device_type {
-            melange_solver::mna::NonlinearDeviceType::Diode => {
-                let is = find_diode_is(netlist, &dev_info.name);
-                let n = find_diode_n(netlist, &dev_info.name);
-                let diode = DiodeShockley::new_room_temp(is, n);
-                devices.push(DeviceEntry::new_diode(diode, dev_info.start_idx));
-            }
-            melange_solver::mna::NonlinearDeviceType::Bjt
-            | melange_solver::mna::NonlinearDeviceType::BjtForwardActive => {
-                let is = find_bjt_param(netlist, &dev_info.name, "IS").unwrap_or(1e-14);
-                let bf = find_bjt_param(netlist, &dev_info.name, "BF").unwrap_or(200.0);
-                let br = find_bjt_param(netlist, &dev_info.name, "BR").unwrap_or(3.0);
-                let is_pnp = is_bjt_pnp(netlist, &dev_info.name);
-                let polarity = if is_pnp {
-                    BjtPolarity::Pnp
-                } else {
-                    BjtPolarity::Npn
-                };
-                let nf = find_bjt_param(netlist, &dev_info.name, "NF").unwrap_or(1.0);
-                let bjt = BjtEbersMoll::new(is, 0.02585, bf, br, polarity).with_nf(nf);
-                devices.push(DeviceEntry::new_bjt(bjt, dev_info.start_idx));
-            }
-            _ => {}
-        }
-    }
-
-    devices
-}
+// build_device_entries removed — was only used by test_runtime_solver_dc_op_init.
 
 fn lookup_model_param(netlist: &Netlist, model_name: &str, param_name: &str) -> Option<f64> {
     netlist

@@ -1,9 +1,11 @@
 //! Codegen verification tests.
 //!
-//! Verifies that generated code produces correct results matching the runtime solver.
+//! Verifies that generated code produces correct results.
 //! The codegen module generates standalone Rust code for a specific circuit topology.
 //! These tests check that the generated source strings contain correct formulas,
 //! matrix constants, and coefficient values matching the DK kernel.
+
+mod support;
 
 use melange_solver::codegen::emitter::Emitter;
 use melange_solver::codegen::ir::CircuitIR;
@@ -1988,9 +1990,6 @@ fn test_dc_short_conductance_exists() {
 
 #[test]
 fn test_codegen_runtime_consistency_bjt() {
-    use melange_devices::bjt::{BjtEbersMoll, BjtPolarity};
-    use melange_solver::solver::{CircuitSolver, DeviceEntry};
-
     // --- Part 1: Structural verification of generated code ---
     let (code, _netlist, _mna, kernel) = generate_code(BJT_SPICE);
 
@@ -2029,8 +2028,7 @@ fn test_codegen_runtime_consistency_bjt() {
         );
     }
 
-    // --- Part 2: Functional verification of runtime solver ---
-    // Use a BJT CE circuit (same topology as existing test_solve_2d_bjt_basic)
+    // --- Part 2: Functional verification via codegen compile-and-run ---
     let biased_bjt = "\
 Common Emitter
 Q1 coll base emit 2N2222
@@ -2041,27 +2039,34 @@ Rbias vcc 0 10k
 .model 2N2222 NPN(IS=1e-15 BF=200)
 ";
     let netlist = Netlist::parse(biased_bjt).unwrap();
-    let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
+    let mna = MnaSystem::from_netlist(&netlist).unwrap();
 
     let input_node = *mna.node_map.get("base").unwrap() - 1;
     let output_node = *mna.node_map.get("coll").unwrap() - 1;
-    mna.g[input_node][input_node] += 1.0;
 
-    let kernel_rt = DkKernel::from_mna(&mna, 44100.0).unwrap();
-    assert_eq!(kernel_rt.m, 2, "Runtime BJT kernel should have M=2");
+    let config = CodegenConfig {
+        circuit_name: "bjt_consistency".to_string(),
+        sample_rate: 44100.0,
+        input_node,
+        output_nodes: vec![output_node],
+        input_resistance: 1.0,
+        ..CodegenConfig::default()
+    };
+    let (code, _, _) = support::generate_circuit_code(biased_bjt, &config);
 
-    let bjt = BjtEbersMoll::new_room_temp(1e-15, 200.0, 3.0, BjtPolarity::Npn);
-    let devices = vec![DeviceEntry::new_bjt(bjt, 0)];
-
-    let mut solver = CircuitSolver::new(kernel_rt, devices, input_node, output_node).unwrap();
-    solver.set_input_conductance(1.0);
-
-    // Feed a sine wave and verify output is finite and stable
-    let mut outputs = Vec::new();
-    for i in 0..200 {
+    // Feed a biased sine wave (0.5 + 0.3*sin) and check output
+    let main_code = r#"
+fn main() {
+    let mut state = CircuitState::default();
+    for i in 0..200u32 {
         let input = 0.5 + 0.3 * (2.0 * std::f64::consts::PI * 1000.0 * i as f64 / 44100.0).sin();
-        outputs.push(solver.process_sample(input));
+        let out = process_sample(input, &mut state);
+        println!("{:.15e}", out[0]);
     }
+}
+"#;
+    let result = support::compile_and_run(&code, main_code, "bjt_consistency");
+    let outputs = result.parse_samples();
 
     // All outputs must be finite
     assert!(

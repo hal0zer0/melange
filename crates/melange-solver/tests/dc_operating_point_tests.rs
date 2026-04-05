@@ -1007,10 +1007,9 @@ fn test_lu_decompose_floating_node_with_inductor_short() {
     assert!(v[1].abs() < 1e-10, "v[1] should be 0V, got {}", v[1]);
 }
 
-/// Test full nonlinear DC OP for the Pultec EQP-1A using the NodalSolver.
-/// This is the real test — tubes provide DC return paths for floating nodes.
-#[test]
-#[ignore = "Pultec nodal DC OP uses stale node name from pre-topology-fix circuit"]
+/// Test full nonlinear DC OP for the Pultec EQP-1A.
+/// Runtime NodalSolver removed — this test is dead code.
+#[cfg(any())]
 fn test_dc_op_pultec_nonlinear_nodal() {
     use melange_solver::codegen::ir::CircuitIR;
     use melange_solver::codegen::CodegenConfig;

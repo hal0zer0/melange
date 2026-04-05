@@ -17,8 +17,6 @@
 //!
 //! ```text
 //! SPICE Netlist → Parser → MNA System → DK Kernel → CircuitIR → Emitter → Source Code
-//!                 ↓          ↓             ↓
-//!              Netlist    MnaSystem     DkKernel → CircuitSolver (runtime)
 //! ```
 //!
 //! # Key Types
@@ -26,8 +24,7 @@
 //! - [`Netlist`](parser::Netlist) — parsed SPICE netlist (elements, models, directives)
 //! - [`MnaSystem`](mna::MnaSystem) — Modified Nodal Analysis matrices (G, C, N_v, N_i)
 //! - [`DkKernel`](dk::DkKernel) — reduced M×M kernel for fast real-time solving
-//! - [`CircuitSolver`](solver::CircuitSolver) — runtime solver using precomputed DK kernel
-//! - [`NodalSolver`](solver::NodalSolver) — runtime solver for complex circuits (inductors, feedback)
+//! - [`LinearSolver`](linear_solver::LinearSolver) — runtime linear solver (M=0 only)
 //! - [`CircuitIR`] — language-agnostic intermediate representation for code generation
 //! - [`Emitter`] — trait for generating code in different languages (Rust implemented)
 //!
@@ -53,7 +50,7 @@
 //! - [`ParseError`] — netlist syntax errors
 //! - [`MnaError`] — invalid circuit topology (floating nodes, singular matrix)
 //! - [`DkError`] — kernel build failure (M > MAX_M, singular matrix)
-//! - [`SolverError`] — runtime solver issues
+//! - [`SolverError`] — solver construction issues
 //! - [`CodegenError`] — code generation configuration errors (requires `codegen` feature)
 //!
 //! All error types are `#[non_exhaustive]` — new variants may be added in minor versions.
@@ -62,19 +59,18 @@
 //!
 //! - `codegen` (default) — enables code generation pipeline ([`CircuitIR`], [`CodeGenerator`],
 //!   [`Emitter`]). Adds `tera` template engine dependency. Disable for runtime-only usage.
-//!
-//! # Real-Time Safety
-//!
-//! [`CircuitSolver`](solver::CircuitSolver) and [`NodalSolver`](solver::NodalSolver) are
-//! designed for real-time audio: all buffers pre-allocated at construction, zero heap
-//! allocation in `process_sample()`, zero `unsafe` code.
 
 pub mod codegen;
 pub mod dc_op;
 pub mod device_types;
 pub mod dk;
+pub mod linear_solver;
+pub mod lu;
 pub mod mna;
 pub mod parser;
+
+// Keep the old solver module for backward compatibility during transition.
+// It re-exports LinearSolver and SolverError from linear_solver.
 pub mod solver;
 
 #[cfg(test)]
@@ -94,6 +90,6 @@ pub use device_types::{
     TubeParams, VcaParams,
 };
 pub use dk::{DkError, DkKernel, MAX_M};
+pub use linear_solver::{LinearSolver, SolverError};
 pub use mna::{MnaError, MnaSystem};
 pub use parser::{Netlist, ParseError};
-pub use solver::{CircuitSolver, LinearSolver, NodalSolver, SolverError};

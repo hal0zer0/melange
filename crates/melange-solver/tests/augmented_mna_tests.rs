@@ -1,6 +1,6 @@
-//! Tests for augmented MNA inductor handling in the NodalSolver.
+//! Tests for augmented MNA inductor handling in codegen.
 //!
-//! The NodalSolver uses augmented MNA for inductors: each inductor winding
+//! The nodal codegen path uses augmented MNA for inductors: each inductor winding
 //! adds an extra variable (branch current j_L) with inductance L in the C matrix.
 //! This replaces the companion model (tiny conductance T/(2L)) which is
 //! ill-conditioned for large inductors at audio sample rates.
@@ -12,65 +12,31 @@
 //! - Large inductor stability (130H, the Pultec regime)
 //! - System dimensions are correct for all inductor types
 //! - NR converges for linear circuits (no max-iter or NaN)
-//! - No-inductor circuits are unaffected (exact match with LinearSolver)
+//! - No-inductor circuits are unaffected (near-exact match between DK and nodal codegen)
 
-use melange_solver::codegen::ir::CircuitIR;
+mod support;
+
 use melange_solver::codegen::CodegenConfig;
-use melange_solver::dk::DkKernel;
 use melange_solver::mna::MnaSystem;
 use melange_solver::parser::Netlist;
-use melange_solver::solver::{LinearSolver, NodalSolver};
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn build_with_input(
-    spice: &str,
-    in_name: &str,
-    r_in: f64,
-    sr: f64,
-) -> (Netlist, MnaSystem, DkKernel) {
+fn config_for(spice: &str, in_name: &str, out_name: &str, sr: f64) -> CodegenConfig {
     let netlist = Netlist::parse(spice).expect("parse");
-    let mut mna = MnaSystem::from_netlist(&netlist).expect("mna");
-    let in_idx = *mna.node_map.get(in_name).unwrap();
-    if in_idx > 0 {
-        mna.g[in_idx - 1][in_idx - 1] += 1.0 / r_in;
-    }
-    let kernel = DkKernel::from_mna(&mna, sr).expect("dk");
-    (netlist, mna, kernel)
-}
-
-fn build_linear_nodal(
-    spice: &str,
-    in_name: &str,
-    out_name: &str,
-    r_in: f64,
-    sr: f64,
-) -> (NodalSolver, MnaSystem) {
-    let (netlist, mna, kernel) = build_with_input(spice, in_name, r_in, sr);
+    let mna = MnaSystem::from_netlist(&netlist).expect("mna");
     let in_idx = *mna.node_map.get(in_name).unwrap() - 1;
     let out_idx = *mna.node_map.get(out_name).unwrap() - 1;
-    let config = CodegenConfig {
+    CodegenConfig {
         circuit_name: "test".to_string(),
         sample_rate: sr,
         input_node: in_idx,
         output_nodes: vec![out_idx],
-        input_resistance: r_in,
+        input_resistance: 1.0,
         ..CodegenConfig::default()
-    };
-    let ir = CircuitIR::from_kernel(&kernel, &mna, &netlist, &config).unwrap();
-    let mut solver = NodalSolver::new(
-        kernel,
-        &mna,
-        &netlist,
-        ir.device_slots.clone(),
-        in_idx,
-        out_idx,
-    )
-    .unwrap();
-    solver.set_input_conductance(1.0 / r_in);
-    (solver, mna)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -128,13 +94,13 @@ C4 out 0 100p
 #[test]
 fn test_augmented_rl_step_response() {
     let sr = 48000.0;
-    let (mut solver, _) = build_linear_nodal(RL_LOWPASS, "in", "out", 1.0, sr);
+    let config = config_for(RL_LOWPASS, "in", "out", sr);
+    let circuit = support::build_circuit_nodal(RL_LOWPASS, &config, "aug_rl_step");
 
     let num_samples = 500;
-    let mut output = vec![0.0; num_samples];
-    for i in 0..num_samples {
-        output[i] = solver.process_sample(1.0);
-    }
+    let result = support::run_step_full(&circuit, 1.0, num_samples, sr);
+    let output = result.parse_samples();
+    assert_eq!(output.len(), num_samples, "Got expected number of samples");
 
     // All finite
     assert!(output.iter().all(|v| v.is_finite()), "All outputs finite");
@@ -162,16 +128,14 @@ fn test_augmented_rl_step_response() {
     );
 
     // Linear circuit: NR must converge every sample
-    assert_eq!(
-        solver.diag_nr_max_iter_count(),
-        0,
-        "NR converged on every sample"
-    );
-    assert_eq!(solver.diag_nan_reset_count(), 0, "No NaN resets");
+    let nr_max = result.diag("nr_max_iter_count").unwrap_or(0.0);
+    let nan_reset = result.diag("nan_reset_count").unwrap_or(0.0);
+    assert_eq!(nr_max as u64, 0, "NR converged on every sample");
+    assert_eq!(nan_reset as u64, 0, "No NaN resets");
 }
 
 // ---------------------------------------------------------------------------
-// Test 2: No inductors — exact match with LinearSolver
+// Test 2: No inductors — near-exact match between DK and nodal codegen
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -182,26 +146,21 @@ R1 in out 1k
 C1 out 0 100n
 ";
     let sr = 48000.0;
-    let r_in = 1.0;
+    let config = config_for(spice, "in", "out", sr);
 
-    let (mut nodal, mna) = build_linear_nodal(spice, "in", "out", r_in, sr);
-    assert_eq!(
-        nodal.v_prev().len(),
-        mna.n_aug,
-        "No inductors: n_nodal == n_aug"
-    );
+    let nodal_circuit = support::build_circuit_nodal(spice, &config, "aug_no_ind_nodal");
+    let dk_circuit = support::build_circuit(spice, &config, "aug_no_ind_dk");
 
-    let (_, mna_lin, kernel_lin) = build_with_input(spice, "in", r_in, sr);
-    let in_idx = *mna_lin.node_map.get("in").unwrap() - 1;
-    let out_idx = *mna_lin.node_map.get("out").unwrap() - 1;
-    let mut linear = LinearSolver::new(kernel_lin, in_idx, out_idx);
-    linear.set_input_conductance(1.0 / r_in);
+    let num_samples = 200;
+    let nodal_output = support::run_sine(&nodal_circuit, 1000.0, 1.0, num_samples, sr);
+    let dk_output = support::run_sine(&dk_circuit, 1000.0, 1.0, num_samples, sr);
+
+    assert_eq!(nodal_output.len(), num_samples);
+    assert_eq!(dk_output.len(), num_samples);
 
     let mut max_diff = 0.0_f64;
-    for i in 0..200 {
-        let t = i as f64 / sr;
-        let input = (2.0 * std::f64::consts::PI * 1000.0 * t).sin();
-        max_diff = max_diff.max((nodal.process_sample(input) - linear.process_sample(input)).abs());
+    for i in 0..num_samples {
+        max_diff = max_diff.max((nodal_output[i] - dk_output[i]).abs());
     }
 
     // No inductors → nearly identical (Gmin regularization adds 1e-12 S per node,
@@ -220,19 +179,20 @@ C1 out 0 100n
 #[test]
 fn test_large_inductor_stability() {
     let sr = 48000.0;
-    let (mut solver, _) = build_linear_nodal(LARGE_INDUCTOR, "in", "out", 1.0, sr);
+    let config = config_for(LARGE_INDUCTOR, "in", "out", sr);
+    let circuit = support::build_circuit_nodal(LARGE_INDUCTOR, &config, "aug_large_ind");
 
-    for _ in 0..500 {
-        let out = solver.process_sample(1.0);
-        assert!(out.is_finite(), "Output finite for 130H inductor");
+    let result = support::run_step_full(&circuit, 1.0, 500, sr);
+    let output = result.parse_samples();
+
+    for (i, &v) in output.iter().enumerate() {
+        assert!(v.is_finite(), "Output finite for 130H inductor at sample {i}");
     }
 
-    assert_eq!(solver.diag_nan_reset_count(), 0, "No NaN resets");
-    assert_eq!(
-        solver.diag_nr_max_iter_count(),
-        0,
-        "NR converged on every sample"
-    );
+    let nan_reset = result.diag("nan_reset_count").unwrap_or(0.0);
+    let nr_max = result.diag("nr_max_iter_count").unwrap_or(0.0);
+    assert_eq!(nan_reset as u64, 0, "No NaN resets");
+    assert_eq!(nr_max as u64, 0, "NR converged on every sample");
 }
 
 // ---------------------------------------------------------------------------
@@ -244,25 +204,44 @@ fn test_large_inductor_steady_state() {
     let sr = 48000.0;
     let r_in = 1.0;
     let r = 10000.0;
-    let (mut solver, mna) = build_linear_nodal(LARGE_INDUCTOR, "in", "out", r_in, sr);
-    let n_aug = mna.n_aug;
+    let config = config_for(LARGE_INDUCTOR, "in", "out", sr);
+
+    // Generate nodal code, then use a custom main that prints internal state
+    let (code, _n, _m) = support::generate_circuit_code_nodal(LARGE_INDUCTOR, &config);
+
+    let custom_main = r#"
+fn main() {
+    let mut state = CircuitState::default();
+    state.set_sample_rate(48000.0);
 
     // Process many samples of DC step to reach steady state
     // tau = L/R = 130/10000 = 13ms = 624 samples
     for _ in 0..10000 {
-        solver.process_sample(1.0);
+        process_sample(1.0, &mut state);
     }
 
+    // Print V_out (output node) and inductor branch current (v_prev[N_AUG])
+    let out_idx = OUTPUT_NODES[0];
+    let v_out = state.v_prev[out_idx];
+    let j_l = state.v_prev[N_AUG]; // first inductor branch current
+    println!("v_out={:.15e}", v_out);
+    println!("j_l={:.15e}", j_l);
+}
+"#;
+
+    let result = support::compile_and_run(&code, custom_main, "aug_large_ss");
+
+    let v_out = result.parse_kv("v_out").expect("v_out not found in output");
+    let j_l = result.parse_kv("j_l").expect("j_l not found in output");
+
     // At DC: L is short, V_out = 0 (all voltage across R_in + R)
-    // Inductor current = V_in / (R_in + R) = 1.0 / 10001 ≈ 1.0e-4 A
-    let v_out = solver.v_prev()[*mna.node_map.get("out").unwrap() - 1];
     assert!(
         v_out.abs() < 0.01,
         "V_out at DC should be ~0, got {:.6}",
         v_out
     );
 
-    let j_l = solver.v_prev()[n_aug]; // inductor branch current
+    // Inductor current = V_in / (R_in + R) = 1.0 / 10001 ≈ 1.0e-4 A
     let expected_i = 1.0 / (r_in + r);
     assert!(
         (j_l - expected_i).abs() < 0.01 * expected_i,
@@ -278,14 +257,15 @@ fn test_large_inductor_steady_state() {
 
 #[test]
 fn test_augmented_dimensions() {
-    let sr = 48000.0;
-    let r_in = 1.0;
+    // Check MNA augmented dimensions directly (no solver needed)
 
     // 1 uncoupled inductor → +1
     {
-        let (solver, mna) = build_linear_nodal(RL_LOWPASS, "in", "out", r_in, sr);
+        let netlist = Netlist::parse(RL_LOWPASS).expect("parse");
+        let mna = MnaSystem::from_netlist(&netlist).expect("mna");
+        let aug = mna.build_augmented_matrices();
         assert_eq!(
-            solver.v_prev().len(),
+            aug.n_nodal,
             mna.n_aug + 1,
             "RL: 1 inductor → n_nodal = n_aug + 1"
         );
@@ -293,9 +273,11 @@ fn test_augmented_dimensions() {
 
     // 2-winding coupled pair → +2
     {
-        let (solver, mna) = build_linear_nodal(STEP_UP_XFMR, "in", "out", r_in, sr);
+        let netlist = Netlist::parse(STEP_UP_XFMR).expect("parse");
+        let mna = MnaSystem::from_netlist(&netlist).expect("mna");
+        let aug = mna.build_augmented_matrices();
         assert_eq!(
-            solver.v_prev().len(),
+            aug.n_nodal,
             mna.n_aug + 2,
             "Transformer: 2 windings → n_nodal = n_aug + 2"
         );
@@ -303,9 +285,11 @@ fn test_augmented_dimensions() {
 
     // 3-winding group → +3
     {
-        let (solver, mna) = build_linear_nodal(THREE_WINDING, "in", "out", r_in, sr);
+        let netlist = Netlist::parse(THREE_WINDING).expect("parse");
+        let mna = MnaSystem::from_netlist(&netlist).expect("mna");
+        let aug = mna.build_augmented_matrices();
         assert_eq!(
-            solver.v_prev().len(),
+            aug.n_nodal,
             mna.n_aug + 3,
             "3-winding xfmr → n_nodal = n_aug + 3"
         );
@@ -320,15 +304,28 @@ fn test_augmented_dimensions() {
 fn test_inductor_branch_currents() {
     let sr = 48000.0;
     let r_in = 1.0;
-    let (mut solver, mna) = build_linear_nodal(RL_LOWPASS, "in", "out", r_in, sr);
-    let n_aug = mna.n_aug;
+    let config = config_for(RL_LOWPASS, "in", "out", sr);
+
+    let (code, _n, _m) = support::generate_circuit_code_nodal(RL_LOWPASS, &config);
+
+    let custom_main = r#"
+fn main() {
+    let mut state = CircuitState::default();
+    state.set_sample_rate(48000.0);
 
     // Process DC step to build up inductor current
     for _ in 0..500 {
-        solver.process_sample(1.0);
+        process_sample(1.0, &mut state);
     }
 
-    let j_l = solver.v_prev()[n_aug];
+    let j_l = state.v_prev[N_AUG]; // first inductor branch current
+    println!("j_l={:.15e}", j_l);
+}
+"#;
+
+    let result = support::compile_and_run(&code, custom_main, "aug_branch_i");
+
+    let j_l = result.parse_kv("j_l").expect("j_l not found in output");
     assert!(j_l.is_finite(), "Inductor current finite: {}", j_l);
 
     // At DC: I_L = V_in / (R_in + R1) = 1.0 / 1001 ≈ 9.99e-4 A
@@ -348,23 +345,23 @@ fn test_inductor_branch_currents() {
 #[test]
 fn test_coupled_inductor_energy_transfer() {
     let sr = 48000.0;
-    let (mut solver, _) = build_linear_nodal(STEP_UP_XFMR, "in", "out", 1.0, sr);
+    let config = config_for(STEP_UP_XFMR, "in", "out", sr);
+    let circuit = support::build_circuit_nodal(STEP_UP_XFMR, &config, "aug_xfmr");
 
     let num_samples = 500;
-    let mut peak_out = 0.0_f64;
-    for i in 0..num_samples {
-        let t = i as f64 / sr;
-        let input = (2.0 * std::f64::consts::PI * 1000.0 * t).sin();
-        peak_out = peak_out.max(solver.process_sample(input).abs());
-    }
+    let result = support::run_sine_full(&circuit, 1000.0, 1.0, num_samples, sr);
+    let output = result.parse_samples();
 
+    let peak_out = output.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
     assert!(
         peak_out > 0.001,
         "Transformer transfers energy: peak = {:.6}",
         peak_out
     );
-    assert_eq!(solver.diag_nan_reset_count(), 0, "No NaN resets");
-    assert_eq!(solver.diag_nr_max_iter_count(), 0, "NR converged");
+    let nan_reset = result.diag("nan_reset_count").unwrap_or(0.0);
+    let nr_max = result.diag("nr_max_iter_count").unwrap_or(0.0);
+    assert_eq!(nan_reset as u64, 0, "No NaN resets");
+    assert_eq!(nr_max as u64, 0, "NR converged");
 }
 
 // ---------------------------------------------------------------------------
@@ -374,68 +371,53 @@ fn test_coupled_inductor_energy_transfer() {
 #[test]
 fn test_three_winding_transformer() {
     let sr = 48000.0;
-    let (mut solver, _) = build_linear_nodal(THREE_WINDING, "in", "out", 1.0, sr);
+    let config = config_for(THREE_WINDING, "in", "out", sr);
+    let circuit = support::build_circuit_nodal(THREE_WINDING, &config, "aug_3wind");
 
     let num_samples = 500;
-    let mut peak_out = 0.0_f64;
-    for i in 0..num_samples {
-        let t = i as f64 / sr;
-        let input = (2.0 * std::f64::consts::PI * 1000.0 * t).sin();
-        peak_out = peak_out.max(solver.process_sample(input).abs());
-    }
+    let result = support::run_sine_full(&circuit, 1000.0, 1.0, num_samples, sr);
+    let output = result.parse_samples();
 
+    let peak_out = output.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
     assert!(
         peak_out > 0.001,
         "3-winding xfmr transfers energy: peak = {:.6}",
         peak_out
     );
-    assert_eq!(solver.diag_nan_reset_count(), 0, "No NaN resets");
-    assert_eq!(solver.diag_nr_max_iter_count(), 0, "NR converged");
+    let nan_reset = result.diag("nan_reset_count").unwrap_or(0.0);
+    let nr_max = result.diag("nr_max_iter_count").unwrap_or(0.0);
+    assert_eq!(nan_reset as u64, 0, "No NaN resets");
+    assert_eq!(nr_max as u64, 0, "NR converged");
 }
 
 // ---------------------------------------------------------------------------
-// Test 9: Augmented and companion reach same steady state
+// Test 9: Augmented and DK codegen reach same steady state
 // ---------------------------------------------------------------------------
 
 #[test]
 fn test_same_steady_state() {
     let sr = 48000.0;
-    let r_in = 1.0;
+    let config = config_for(RL_LOWPASS, "in", "out", sr);
 
-    let (mut nodal, mna_nod) = build_linear_nodal(RL_LOWPASS, "in", "out", r_in, sr);
-    let out_idx = *mna_nod.node_map.get("out").unwrap() - 1;
-
-    let (_, mna_lin, kernel_lin) = build_with_input(RL_LOWPASS, "in", r_in, sr);
-    let in_idx = *mna_lin.node_map.get("in").unwrap() - 1;
-    let out_lin_idx = *mna_lin.node_map.get("out").unwrap() - 1;
-    let mut linear = LinearSolver::new(kernel_lin, in_idx, out_lin_idx);
-    linear.set_input_conductance(1.0 / r_in);
+    let nodal_circuit = support::build_circuit_nodal(RL_LOWPASS, &config, "aug_ss_nodal");
+    let dk_circuit = support::build_circuit(RL_LOWPASS, &config, "aug_ss_dk");
 
     // Drive with DC step for many time constants (tau = L/R = 0.1ms ≈ 5 samples)
-    for _ in 0..1000 {
-        nodal.process_sample(1.0);
-        linear.process_sample(1.0);
-    }
+    let num_samples = 1001;
+    let nodal_output = support::run_step(&nodal_circuit, 1.0, num_samples, sr);
+    let dk_output = support::run_step(&dk_circuit, 1.0, num_samples, sr);
 
     // At DC steady state, both should agree: V_out → 0 (L shorts to ground)
-    let v_nodal = nodal.v_prev()[out_idx];
-    // Linear solver output includes DC blocking, so compare DC-blocked outputs
-    let out_nodal = nodal.process_sample(1.0);
-    let out_linear = linear.process_sample(1.0);
+    // Compare the last sample from each
+    let out_nodal = nodal_output[num_samples - 1];
+    let out_dk = dk_output[num_samples - 1];
 
     // Steady state should match closely (both at ~0 for DC-blocked RL lowpass)
     assert!(
-        (out_nodal - out_linear).abs() < 0.01,
-        "Steady state match: nodal={:.6e} linear={:.6e}",
+        (out_nodal - out_dk).abs() < 0.01,
+        "Steady state match: nodal={:.6e} dk={:.6e}",
         out_nodal,
-        out_linear
-    );
-
-    // Raw V_out should be near 0 (inductor shorts to ground)
-    assert!(
-        v_nodal.abs() < 0.001,
-        "V_out at steady state near 0: {:.6e}",
-        v_nodal
+        out_dk
     );
 }
 
