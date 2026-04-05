@@ -1,0 +1,540 @@
+(kicad_symbol_lib
+	(version 20231120)
+	(generator "melange")
+	(generator_version "1.0")
+
+	(symbol "Melange_Triode"
+		(pin_names (offset 0.254))
+		(in_bom yes)
+		(on_board no)
+		(property "Reference" "T"
+			(at 2.54 5.08 0)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Value" "Melange_Triode"
+			(at 2.54 -5.08 0)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Footprint" ""
+			(at 0 0 0)
+			(effects (font (size 1.27 1.27)) hide)
+		)
+		(property "Datasheet" ""
+			(at 0 0 0)
+			(effects (font (size 1.27 1.27)) hide)
+		)
+		(property "Sim.Device" "SPICE"
+			(at 0 0 0)
+			(effects (font (size 1.27 1.27)) hide)
+		)
+		(property "Sim.Pins" "1=grid 2=plate 3=cathode"
+			(at 0 0 0)
+			(effects (font (size 1.27 1.27)) hide)
+		)
+		(property "Melange.Model" "TRIODE(MU=100 EX=1.4 KG1=1060 KP=600 KVB=300)"
+			(at 0 0 0)
+			(effects (font (size 1.27 1.27)) hide)
+		)
+		(symbol "Melange_Triode_0_1"
+			(circle
+				(center 0 0)
+				(radius 3.81)
+				(stroke (width 0.254) (type default))
+				(fill (type none))
+			)
+			(polyline
+				(pts (xy -1.27 -1.27) (xy 1.27 -1.27))
+				(stroke (width 0.254) (type default))
+				(fill (type none))
+			)
+			(polyline
+				(pts (xy -1.27 0) (xy -0.635 0.635) (xy 0 0) (xy 0.635 0.635) (xy 1.27 0))
+				(stroke (width 0.254) (type default))
+				(fill (type none))
+			)
+			(polyline
+				(pts (xy -0.635 1.27) (xy 0.635 1.27))
+				(stroke (width 0.254) (type default))
+				(fill (type none))
+			)
+		)
+		(symbol "Melange_Triode_1_1"
+			(pin passive line
+				(at -6.35 0 0)
+				(length 2.54)
+				(name "G" (effects (font (size 1.016 1.016))))
+				(number "1" (effects (font (size 1.016 1.016))))
+			)
+			(pin passive line
+				(at 0 6.35 270)
+				(length 2.54)
+				(name "P" (effects (font (size 1.016 1.016))))
+				(number "2" (effects (font (size 1.016 1.016))))
+			)
+			(pin passive line
+				(at 0 -6.35 90)
+				(length 2.54)
+				(name "K" (effects (font (size 1.016 1.016))))
+				(number "3" (effects (font (size 1.016 1.016))))
+			)
+		)
+	)
+
+	(symbol "Melange_OpAmp"
+		(pin_names (offset 0.254))
+		(in_bom yes)
+		(on_board no)
+		(property "Reference" "U"
+			(at 3.81 3.81 0)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Value" "Melange_OpAmp"
+			(at 3.81 -3.81 0)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Footprint" ""
+			(at 0 0 0)
+			(effects (font (size 1.27 1.27)) hide)
+		)
+		(property "Datasheet" ""
+			(at 0 0 0)
+			(effects (font (size 1.27 1.27)) hide)
+		)
+		(property "Sim.Device" "SPICE"
+			(at 0 0 0)
+			(effects (font (size 1.27 1.27)) hide)
+		)
+		(property "Sim.Pins" "1=+ 2=- 3=out"
+			(at 0 0 0)
+			(effects (font (size 1.27 1.27)) hide)
+		)
+		(property "Melange.Model" "OA(AOL=200000 ROUT=75)"
+			(at 0 0 0)
+			(effects (font (size 1.27 1.27)) hide)
+		)
+		(symbol "Melange_OpAmp_0_1"
+			(polyline
+				(pts (xy -3.81 3.81) (xy -3.81 -3.81) (xy 3.81 0) (xy -3.81 3.81))
+				(stroke (width 0.254) (type default))
+				(fill (type background))
+			)
+			(text "+"
+				(at -2.54 1.524 0)
+				(effects (font (size 1.016 1.016)))
+			)
+			(text "-"
+				(at -2.54 -1.524 0)
+				(effects (font (size 1.016 1.016)))
+			)
+		)
+		(symbol "Melange_OpAmp_1_1"
+			(pin input line
+				(at -6.35 1.27 0)
+				(length 2.54)
+				(name "+" (effects (font (size 1.016 1.016))))
+				(number "1" (effects (font (size 1.016 1.016))))
+			)
+			(pin input line
+				(at -6.35 -1.27 0)
+				(length 2.54)
+				(name "-" (effects (font (size 1.016 1.016))))
+				(number "2" (effects (font (size 1.016 1.016))))
+			)
+			(pin output line
+				(at 6.35 0 180)
+				(length 2.54)
+				(name "OUT" (effects (font (size 1.016 1.016))))
+				(number "3" (effects (font (size 1.016 1.016))))
+			)
+		)
+	)
+
+	(symbol "Melange_VCA"
+		(pin_names (offset 0.254))
+		(in_bom yes)
+		(on_board no)
+		(property "Reference" "Y"
+			(at 3.81 5.08 0)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Value" "Melange_VCA"
+			(at 3.81 -5.08 0)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Footprint" ""
+			(at 0 0 0)
+			(effects (font (size 1.27 1.27)) hide)
+		)
+		(property "Datasheet" ""
+			(at 0 0 0)
+			(effects (font (size 1.27 1.27)) hide)
+		)
+		(property "Sim.Device" "SPICE"
+			(at 0 0 0)
+			(effects (font (size 1.27 1.27)) hide)
+		)
+		(property "Sim.Pins" "1=sig+ 2=sig- 3=ctrl+ 4=ctrl-"
+			(at 0 0 0)
+			(effects (font (size 1.27 1.27)) hide)
+		)
+		(property "Melange.Model" "VCA(VSCALE=0.05298 G0=1.0)"
+			(at 0 0 0)
+			(effects (font (size 1.27 1.27)) hide)
+		)
+		(symbol "Melange_VCA_0_1"
+			(polyline
+				(pts (xy 0 5.08) (xy 3.81 0) (xy 0 -5.08) (xy -3.81 0) (xy 0 5.08))
+				(stroke (width 0.254) (type default))
+				(fill (type background))
+			)
+			(text "VCA"
+				(at 0 0 0)
+				(effects (font (size 1.27 1.27)))
+			)
+		)
+		(symbol "Melange_VCA_1_1"
+			(pin input line
+				(at -6.35 2.54 0)
+				(length 2.54)
+				(name "S+" (effects (font (size 1.016 1.016))))
+				(number "1" (effects (font (size 1.016 1.016))))
+			)
+			(pin input line
+				(at -6.35 -2.54 0)
+				(length 2.54)
+				(name "S-" (effects (font (size 1.016 1.016))))
+				(number "2" (effects (font (size 1.016 1.016))))
+			)
+			(pin input line
+				(at 6.35 2.54 180)
+				(length 2.54)
+				(name "C+" (effects (font (size 1.016 1.016))))
+				(number "3" (effects (font (size 1.016 1.016))))
+			)
+			(pin input line
+				(at 6.35 -2.54 180)
+				(length 2.54)
+				(name "C-" (effects (font (size 1.016 1.016))))
+				(number "4" (effects (font (size 1.016 1.016))))
+			)
+		)
+	)
+
+	(symbol "Melange_Pot"
+		(pin_names (offset 0.254))
+		(in_bom yes)
+		(on_board no)
+		(property "Reference" "R"
+			(at 2.54 1.27 0)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Value" "Melange_Pot"
+			(at 2.54 -1.27 0)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Footprint" ""
+			(at 0 0 0)
+			(effects (font (size 1.27 1.27)) hide)
+		)
+		(property "Datasheet" ""
+			(at 0 0 0)
+			(effects (font (size 1.27 1.27)) hide)
+		)
+		(property "Sim.Device" "R"
+			(at 0 0 0)
+			(effects (font (size 1.27 1.27)) hide)
+		)
+		(property "Melange.Pot" "1k 100k"
+			(at 0 -3.81 0)
+			(effects (font (size 1.016 1.016)))
+		)
+		(property "Melange.Label" ""
+			(at 0 0 0)
+			(effects (font (size 1.27 1.27)) hide)
+		)
+		(symbol "Melange_Pot_0_1"
+			(polyline
+				(pts (xy -1.016 -2.54) (xy -1.016 2.54))
+				(stroke (width 0.254) (type default))
+				(fill (type none))
+			)
+			(polyline
+				(pts (xy 1.016 -2.54) (xy 1.016 2.54))
+				(stroke (width 0.254) (type default))
+				(fill (type none))
+			)
+			(polyline
+				(pts (xy -1.016 2.54) (xy 1.016 2.54))
+				(stroke (width 0.254) (type default))
+				(fill (type none))
+			)
+			(polyline
+				(pts (xy -1.016 -2.54) (xy 1.016 -2.54))
+				(stroke (width 0.254) (type default))
+				(fill (type none))
+			)
+			(polyline
+				(pts (xy 2.54 0) (xy 1.016 0))
+				(stroke (width 0.254) (type default))
+				(fill (type none))
+			)
+			(polyline
+				(pts (xy 1.651 0.635) (xy 2.54 0) (xy 1.651 -0.635))
+				(stroke (width 0.254) (type default))
+				(fill (type outline))
+			)
+		)
+		(symbol "Melange_Pot_1_1"
+			(pin passive line
+				(at 0 5.08 270)
+				(length 2.54)
+				(name "1" (effects (font (size 1.016 1.016))))
+				(number "1" (effects (font (size 1.016 1.016))))
+			)
+			(pin passive line
+				(at 0 -5.08 90)
+				(length 2.54)
+				(name "2" (effects (font (size 1.016 1.016))))
+				(number "2" (effects (font (size 1.016 1.016))))
+			)
+		)
+	)
+
+	(symbol "Melange_Wiper"
+		(pin_names (offset 0.254))
+		(in_bom yes)
+		(on_board no)
+		(property "Reference" "RW"
+			(at 3.81 1.27 0)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Value" "Melange_Wiper"
+			(at 3.81 -1.27 0)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Footprint" ""
+			(at 0 0 0)
+			(effects (font (size 1.27 1.27)) hide)
+		)
+		(property "Datasheet" ""
+			(at 0 0 0)
+			(effects (font (size 1.27 1.27)) hide)
+		)
+		(property "Sim.Device" "R"
+			(at 0 0 0)
+			(effects (font (size 1.27 1.27)) hide)
+		)
+		(property "Melange.Wiper" "100k 0.5"
+			(at 0 -3.81 0)
+			(effects (font (size 1.016 1.016)))
+		)
+		(property "Melange.Label" ""
+			(at 0 0 0)
+			(effects (font (size 1.27 1.27)) hide)
+		)
+		(symbol "Melange_Wiper_0_1"
+			(polyline
+				(pts (xy -1.016 -3.81) (xy -1.016 3.81))
+				(stroke (width 0.254) (type default))
+				(fill (type none))
+			)
+			(polyline
+				(pts (xy 1.016 -3.81) (xy 1.016 3.81))
+				(stroke (width 0.254) (type default))
+				(fill (type none))
+			)
+			(polyline
+				(pts (xy -1.016 3.81) (xy 1.016 3.81))
+				(stroke (width 0.254) (type default))
+				(fill (type none))
+			)
+			(polyline
+				(pts (xy -1.016 -3.81) (xy 1.016 -3.81))
+				(stroke (width 0.254) (type default))
+				(fill (type none))
+			)
+			(polyline
+				(pts (xy 2.54 0) (xy 1.016 0))
+				(stroke (width 0.254) (type default))
+				(fill (type none))
+			)
+			(polyline
+				(pts (xy 1.651 0.635) (xy 2.54 0) (xy 1.651 -0.635))
+				(stroke (width 0.254) (type default))
+				(fill (type outline))
+			)
+		)
+		(symbol "Melange_Wiper_1_1"
+			(pin passive line
+				(at 0 6.35 270)
+				(length 2.54)
+				(name "CW" (effects (font (size 1.016 1.016))))
+				(number "1" (effects (font (size 1.016 1.016))))
+			)
+			(pin passive line
+				(at 5.08 0 180)
+				(length 2.54)
+				(name "W" (effects (font (size 1.016 1.016))))
+				(number "2" (effects (font (size 1.016 1.016))))
+			)
+			(pin passive line
+				(at 0 -6.35 90)
+				(length 2.54)
+				(name "CCW" (effects (font (size 1.016 1.016))))
+				(number "3" (effects (font (size 1.016 1.016))))
+			)
+		)
+	)
+
+	(symbol "Melange_AudioInput"
+		(pin_names (offset 0))
+		(in_bom no)
+		(on_board no)
+		(property "Reference" "#AIN"
+			(at 0 3.81 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Value" "AudioInput"
+			(at 0 -3.175 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Footprint" ""
+			(at 0 0 0)
+			(effects (font (size 1.27 1.27)) hide)
+		)
+		(property "Datasheet" ""
+			(at 0 0 0)
+			(effects (font (size 1.27 1.27)) hide)
+		)
+		(property "Melange.Input" "true"
+			(at 0 0 0)
+			(effects (font (size 1.27 1.27)) hide)
+		)
+		(symbol "Melange_AudioInput_0_1"
+			(polyline
+				(pts (xy -1.27 1.27) (xy 0 2.54) (xy 1.27 1.27))
+				(stroke (width 0.254) (type default))
+				(fill (type outline))
+			)
+			(polyline
+				(pts (xy 0 0) (xy 0 1.27))
+				(stroke (width 0.254) (type default))
+				(fill (type none))
+			)
+		)
+		(symbol "Melange_AudioInput_1_1"
+			(pin power_in line
+				(at 0 0 90)
+				(length 0)
+				(name "in" (effects (font (size 1.016 1.016))))
+				(number "1" (effects (font (size 1.016 1.016))))
+			)
+		)
+	)
+
+	(symbol "Melange_AudioOutput"
+		(pin_names (offset 0))
+		(in_bom no)
+		(on_board no)
+		(property "Reference" "#AOUT"
+			(at 0 3.81 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Value" "AudioOutput"
+			(at 0 -3.175 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Footprint" ""
+			(at 0 0 0)
+			(effects (font (size 1.27 1.27)) hide)
+		)
+		(property "Datasheet" ""
+			(at 0 0 0)
+			(effects (font (size 1.27 1.27)) hide)
+		)
+		(property "Melange.Output" "true"
+			(at 0 0 0)
+			(effects (font (size 1.27 1.27)) hide)
+		)
+		(symbol "Melange_AudioOutput_0_1"
+			(polyline
+				(pts (xy -1.27 2.54) (xy 0 1.27) (xy 1.27 2.54))
+				(stroke (width 0.254) (type default))
+				(fill (type outline))
+			)
+			(polyline
+				(pts (xy 0 0) (xy 0 1.27))
+				(stroke (width 0.254) (type default))
+				(fill (type none))
+			)
+		)
+		(symbol "Melange_AudioOutput_1_1"
+			(pin power_in line
+				(at 0 0 90)
+				(length 0)
+				(name "out" (effects (font (size 1.016 1.016))))
+				(number "1" (effects (font (size 1.016 1.016))))
+			)
+		)
+	)
+
+	(symbol "Melange_VDC"
+		(pin_names (offset 0.254))
+		(in_bom yes)
+		(on_board no)
+		(property "Reference" "V"
+			(at 2.54 2.54 0)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Value" "Melange_VDC"
+			(at 2.54 -2.54 0)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Footprint" ""
+			(at 0 0 0)
+			(effects (font (size 1.27 1.27)) hide)
+		)
+		(property "Datasheet" ""
+			(at 0 0 0)
+			(effects (font (size 1.27 1.27)) hide)
+		)
+		(property "Sim.Device" "V"
+			(at 0 0 0)
+			(effects (font (size 1.27 1.27)) hide)
+		)
+		(property "Sim.Params" "dc=15"
+			(at 0 0 0)
+			(effects (font (size 1.27 1.27)) hide)
+		)
+		(symbol "Melange_VDC_0_1"
+			(circle
+				(center 0 0)
+				(radius 2.54)
+				(stroke (width 0.254) (type default))
+				(fill (type none))
+			)
+			(text "+"
+				(at 0 1.27 0)
+				(effects (font (size 1.27 1.27)))
+			)
+			(text "-"
+				(at 0 -1.524 0)
+				(effects (font (size 1.524 1.524)))
+			)
+		)
+		(symbol "Melange_VDC_1_1"
+			(pin passive line
+				(at 0 5.08 270)
+				(length 2.54)
+				(name "+" (effects (font (size 1.016 1.016))))
+				(number "1" (effects (font (size 1.016 1.016))))
+			)
+			(pin passive line
+				(at 0 -5.08 90)
+				(length 2.54)
+				(name "-" (effects (font (size 1.016 1.016))))
+				(number "2" (effects (font (size 1.016 1.016))))
+			)
+		)
+	)
+)

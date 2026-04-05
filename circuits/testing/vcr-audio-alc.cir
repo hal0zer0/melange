@@ -1,0 +1,101 @@
+VCR Linear Audio ALC — VHS Automatic Level Control
+* Feedforward compressor with voltage-mode VCA + I-V converter.
+*
+* Signal path: Input buffer → VCA → I-V converter → De-emphasis → Bandwidth LPF → Output
+* Sidechain: Input → Diode peak detector → VCA control voltage
+*
+* VCA gain = G0 * exp(-Vc/VSCALE) * Rfb_iv
+* G0 = 1/Rfb_iv → unity gain at Vc=0
+* VSCALE=0.5 models a consumer VCA gain cell (less sensitive than THAT 2180)
+*
+* Diode threshold (~0.6V) acts as compressor threshold — signals below
+* ~0.6V peak pass through uncompressed (realistic for consumer ALC).
+* Use Input Level to drive the ALC harder.
+*
+* M=3 (VCA 2D + diode 1D), N=21. DK runtime, nodal full-LU codegen (~42x RT).
+
+* --- Device Models ---
+.model OA_4558 OA(AOL=100000 ROUT=100 VSAT=13 GBW=3MEG)
+.model D1N4148 D(IS=2.52e-9 N=1.752 CJO=4e-12)
+.model VCA_ALC VCA(VSCALE=0.5 G0=6.667e-5 THD=0.001 MODE=0)
+
+* --- Power Supply ---
+Vpos  vcc  0  DC 15
+Vneg  vee  0  DC -15
+
+* ============================================================
+* INPUT BUFFER (Inverting, gain = -1)
+* ============================================================
+Cin      in       in_ac      10U
+Rbias_in in_ac    0          100K
+Rin_buf  in_ac    buf_inv    10K
+U1  0  buf_inv  buf_out  OA_4558
+Rfb_buf  buf_out  buf_inv   10K
+Cfb_buf  buf_out  buf_inv   33P
+
+* ============================================================
+* SIDECHAIN — Diode Peak Detector (feedforward)
+*
+* D1 conducts when buf_out > cv_node + Vf (~0.6V).
+* Charges Cenv through Rsc (attack time = Rsc * Cenv).
+* Discharges through Rrel (release time = Rrel * Cenv).
+*
+* With Cenv=0.47uF:
+*   Attack: Rsc=2.7K→1.3ms, 10K→4.7ms, 27K→12.7ms
+*   Release: Rrel=1M→0.47s, 2M→0.94s, 4M→1.88s
+* ============================================================
+Rsc      buf_out   sc_node   10K
+D1       sc_node   cv_node   D1N4148
+Cenv     cv_node   0         0.47U
+Rrel     cv_node   0         2MEG
+Rbias_cv cv_node   0         10MEG
+
+.switch Rsc 2700 10000 27000 "Attack"
+.switch Rrel 1000000 2000000 4000000 "Release"
+
+* ============================================================
+* AUDIO VCA + I-V CONVERTER
+*
+* VCA (voltage-mode): I_out = G(Vc) * V(vca_in)
+* I-V converter: V(iv_out) = -I_out * Rfb_iv
+* Overall gain = -G0*exp(-Vc/0.5) * 15K
+*   Vc=0:    gain = -1 (unity, inverted)
+*   Vc=0.4V: gain = -0.45 (-7 dB)
+*   Vc=1.0V: gain = -0.14 (-17 dB)
+* ============================================================
+Cvca_ac   buf_out   vca_in    10U
+Rbias_vca vca_in    0         100K
+Y1  vca_in  vca_sum  cv_node  0  VCA_ALC
+Rdecouple vca_sum  iv_inv  100
+
+U_iv  0  iv_inv  iv_out  OA_4558
+Rfb_iv   iv_out   iv_inv   15K
+Cfb_iv   iv_out   iv_inv   100P
+
+* ============================================================
+* DE-EMPHASIS + BANDWIDTH LPF (combined stage)
+*
+* De-emphasis: R_emph + C_emph form RC lowpass before LPF input.
+*   Pot max (12K): tau=120us, fc=1326Hz (correct VHS de-emphasis)
+*   Pot min (100R): tau=1us, fc=159kHz (bright — Dolby mismatch)
+*
+* LPF gain = Rfb/Rlpf_in = 22K/10K = 2.2 compensates de-emphasis loss.
+*   R_emph=12K: overall = (10K/22K)*(22K/10K) = 1.0 (unity)
+*   R_emph=100: overall = (10K/10.1K)*(22K/10K) = 2.18 (+6.8dB treble)
+*
+* Bandwidth: fc = 1/(2*pi*22K*680pF) = 10.6 kHz
+* ============================================================
+R_emph   iv_out     emph_node  12K
+C_emph   emph_node  0          10N
+.pot R_emph 100 12000 12000 "Emphasis"
+
+Rlpf_in  emph_node  lpf_inv   10K
+U3  0  lpf_inv  out  OA_4558
+Rfb_lpf  out       lpf_inv   22K
+Cfb_lpf  out       lpf_inv   680P
+
+* Output coupling
+Cout     out       out_ac    10U
+Rload    out_ac    0         100K
+
+.END

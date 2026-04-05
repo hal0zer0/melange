@@ -273,6 +273,24 @@ enum Commands {
         #[command(subcommand)]
         action: CacheAction,
     },
+
+    /// Import a KiCad netlist to Melange .cir format
+    ///
+    /// Supports KiCad XML intermediate netlist (full fidelity, preserves Melange.*
+    /// custom fields) and KiCad SPICE netlist (best-effort, standard components only).
+    /// Format is auto-detected from file content.
+    Import {
+        /// Input file (KiCad XML .xml or SPICE .cir/.spice)
+        input: PathBuf,
+
+        /// Output Melange .cir file
+        #[arg(short, long)]
+        output: PathBuf,
+
+        /// Input format override (auto-detected by default)
+        #[arg(long, value_enum, default_value = "auto")]
+        format: ImportFormat,
+    },
 }
 
 #[derive(Subcommand)]
@@ -326,6 +344,18 @@ enum OutputFormat {
     /// Generate a complete plugin project
     Plugin,
 }
+
+#[derive(ValueEnum, Clone, Debug)]
+enum ImportFormat {
+    /// Auto-detect from file content
+    Auto,
+    /// KiCad XML intermediate netlist (full fidelity)
+    Xml,
+    /// KiCad SPICE netlist (best-effort)
+    Spice,
+}
+
+mod kicad_import;
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -515,6 +545,11 @@ fn main() -> Result<()> {
         Commands::Sources { action } => handle_sources(action),
         Commands::Builtins => list_builtins(),
         Commands::Cache { action } => handle_cache(action),
+        Commands::Import {
+            input,
+            output,
+            format,
+        } => kicad_import::import_kicad(&input, &output, &format),
     }
 }
 
