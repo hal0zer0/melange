@@ -2363,18 +2363,8 @@ impl RustEmitter {
                     m.insert("out_idx", oa.n_out_idx.to_string());
                     m.insert("lo", format!("{:.17e}", oa.vclamp_lo));
                     m.insert("hi", format!("{:.17e}", oa.vclamp_hi));
-                    m.insert(
-                        "has_internal",
-                        if oa.n_internal_idx.is_some() {
-                            "true".to_string()
-                        } else {
-                            "".to_string()
-                        },
-                    );
-                    m.insert(
-                        "int_idx",
-                        oa.n_internal_idx.unwrap_or(0).to_string(),
-                    );
+                    m.insert("has_internal", "".to_string());
+                    m.insert("int_idx", "0".to_string());
                     m
                 })
                 .collect();
@@ -3955,56 +3945,72 @@ impl RustEmitter {
             fmt_f64(ir.solver_config.input_resistance)
         ));
 
-        // Boyle Schur complement elimination constants
-        let n_full = ir.topology.n_full;
-        let has_boyle_elim = n_full > 0;
-        if has_boyle_elim {
+        // IIR op-amp constants (per-op-amp with GBW dominant pole)
+        //
+        // Bilinear-transformed dominant pole (PURE EXPLICIT formulation):
+        //   y[n] = a1*y[n-1] + b0*(x[n-1] + x[n-1]) = a1*y[n-1] + 2*b0*x[n-1]
+        //   a1 = (alpha*C_dom - Go) / (alpha*C_dom + Go)
+        //   b0 = Gm / (alpha*C_dom + Go)
+        //
+        // Gm is NOT in G — it has been stripped in ir.rs. The entire VCCS current
+        // is injected in RHS using only previous-sample state (y_prev, x_prev):
+        //   y_new = a1*y_prev + 2*b0*x_prev          (computed BEFORE solve)
+        //   rhs[o] += Go*(y_new + y_prev)            (trapezoidal VCCS injection)
+        //
+        // DC gain check: y_ss*(1-a1) = 2*b0*x_ss  ⇒  y_ss = (Gm/Go)*x_ss = AOL*x_ss ✓
+        //
+        // After solve, save x_new = v[np] - v[nm] from the converged solution and
+        // advance y_prev = y_new (pre-computed value, before it was consumed by RHS).
+        let internal_rate = ir.solver_config.sample_rate
+            * ir.solver_config.oversampling_factor as f64;
+        for (idx, oa_iir) in ir.opamp_iir.iter().enumerate() {
+            let alpha_oa = 2.0 * internal_rate;
+            let denom = alpha_oa * oa_iir.c_dom + oa_iir.go;
+            let a1 = (alpha_oa * oa_iir.c_dom - oa_iir.go) / denom;
+            let b0 = oa_iir.gm / denom;
             code.push_str(&format!(
-                "/// Full system dimension before Boyle internal node elimination\npub const N_FULL: usize = {};\n\n",
-                n_full
+                "/// IIR op-amp {idx}: Gm={:.4}, Go={:.4}, C_dom={:.4e} (pure explicit)\n",
+                oa_iir.gm, oa_iir.go, oa_iir.c_dom
             ));
             code.push_str(&format!(
-                "/// Number of Boyle internal nodes eliminated\npub const N_BOYLE_ELIM: usize = {};\n\n",
-                ir.boyle_elim_nodes.len()
+                "const OA{idx}_GM: f64 = {:.17e};\n",
+                oa_iir.gm
             ));
-
-            // Emit per-node Boyle elimination parameters
-            for (idx, bn) in ir.boyle_elim_nodes.iter().enumerate() {
+            code.push_str(&format!(
+                "const OA{idx}_GO: f64 = {:.17e};\n",
+                oa_iir.go
+            ));
+            code.push_str(&format!(
+                "const OA{idx}_C_DOM: f64 = {:.17e};\n",
+                oa_iir.c_dom
+            ));
+            code.push_str(&format!(
+                "const OA{idx}_A1_DEFAULT: f64 = {:.17e};\n",
+                a1
+            ));
+            code.push_str(&format!(
+                "const OA{idx}_B0_DEFAULT: f64 = {:.17e};\n",
+                b0
+            ));
+            code.push_str(&format!(
+                "const OA{idx}_OUT: usize = {};\n",
+                oa_iir.out_idx
+            ));
+            if let Some(vhi) = Some(oa_iir.vclamp_hi).filter(|v| v.is_finite()) {
                 code.push_str(&format!(
-                    "/// Boyle node {idx}: Go={:.4}, Gm={:.4}, C_dom={:.4e}\n",
-                    bn.go, bn.gm, bn.c_dom
+                    "const OA{idx}_VCC: f64 = {:.17e};\n", vhi
                 ));
+            }
+            if let Some(vlo) = Some(oa_iir.vclamp_lo).filter(|v| v.is_finite()) {
                 code.push_str(&format!(
-                    "const BOYLE_{idx}_INT_IDX: usize = {};\n",
-                    bn.int_idx_full
-                ));
-                code.push_str(&format!(
-                    "const BOYLE_{idx}_OUT_IDX: usize = {};\n",
-                    bn.out_idx_full
+                    "const OA{idx}_VEE: f64 = {:.17e};\n", vlo
                 ));
             }
             code.push('\n');
-
-            // Emit index remap table (full → reduced, usize::MAX for eliminated)
-            let mut remap_vals = Vec::new();
-            let mut new_idx = 0usize;
-            let elim_set: std::collections::HashSet<usize> = ir.boyle_elim_nodes.iter().map(|b| b.int_idx_full).collect();
-            for old_idx in 0..n_full {
-                if elim_set.contains(&old_idx) {
-                    remap_vals.push("usize::MAX".to_string());
-                } else {
-                    remap_vals.push(new_idx.to_string());
-                    new_idx += 1;
-                }
-            }
-            code.push_str(&format!(
-                "/// Index remap: full system → reduced system (usize::MAX = eliminated)\nconst BOYLE_REMAP: [usize; N_FULL] = [{}];\n\n",
-                remap_vals.join(", ")
-            ));
         }
 
-        // G and C matrices (sample-rate independent, at reduced N dimension)
-        code.push_str("/// G matrix: conductance matrix (sample-rate independent)\nconst G: [[f64; N]; N] = [\n");
+        // G and C matrices (sample-rate independent, Gm-stripped for IIR op-amps)
+        code.push_str("/// G matrix: conductance matrix (sample-rate independent, Gm stripped for IIR op-amps)\nconst G: [[f64; N]; N] = [\n");
         for row in format_matrix_rows(n, n, |i, j| ir.g(i, j)) {
             code.push_str(&format!("    [{}],\n", row));
         }
@@ -4015,27 +4021,6 @@ impl RustEmitter {
             code.push_str(&format!("    [{}],\n", row));
         }
         code.push_str("];\n\n");
-
-        // Full-dimension G/C for rebuild_matrices (only when Boyle elimination is active)
-        if has_boyle_elim {
-            code.push_str("/// G matrix at full dimension (before Boyle elimination, for rebuild_matrices)\nconst G_FULL: [[f64; N_FULL]; N_FULL] = [\n");
-            for i in 0..n_full {
-                let row: Vec<String> = (0..n_full)
-                    .map(|j| fmt_f64(ir.matrices.g_matrix_full[i * n_full + j]))
-                    .collect();
-                code.push_str(&format!("    [{}],\n", row.join(", ")));
-            }
-            code.push_str("];\n\n");
-
-            code.push_str("/// C matrix at full dimension (before Boyle elimination, for rebuild_matrices)\nconst C_FULL: [[f64; N_FULL]; N_FULL] = [\n");
-            for i in 0..n_full {
-                let row: Vec<String> = (0..n_full)
-                    .map(|j| fmt_f64(ir.matrices.c_matrix_full[i * n_full + j]))
-                    .collect();
-                code.push_str(&format!("    [{}],\n", row.join(", ")));
-            }
-            code.push_str("];\n\n");
-        }
 
         // A = G + alpha*C (trapezoidal forward matrix)
         code.push_str("/// Default A matrix: A = G + (2/T)*C (trapezoidal, at SAMPLE_RATE)\nconst A_DEFAULT: [[f64; N]; N] = [\n");
@@ -4406,21 +4391,11 @@ impl RustEmitter {
         code.push('\n');
 
         // Mutable G and C for pot/switch re-stamping
-        let has_boyle_elim = ir.topology.n_full > 0;
         if has_pots || has_switches {
-            if has_boyle_elim {
-                // When Boyle elimination is active, g_work/c_work are at N_FULL dimension
-                // so rebuild_matrices can apply Schur complement at runtime
-                code.push_str("    /// Working G matrix at full dimension (modified by pots/switches)\n");
-                code.push_str("    pub g_work: [[f64; N_FULL]; N_FULL],\n");
-                code.push_str("    /// Working C matrix at full dimension (modified by switches)\n");
-                code.push_str("    pub c_work: [[f64; N_FULL]; N_FULL],\n");
-            } else {
-                code.push_str("    /// Working G matrix (modified by pots/switches)\n");
-                code.push_str("    pub g_work: [[f64; N]; N],\n");
-                code.push_str("    /// Working C matrix (modified by switches)\n");
-                code.push_str("    pub c_work: [[f64; N]; N],\n");
-            }
+            code.push_str("    /// Working G matrix (modified by pots/switches)\n");
+            code.push_str("    pub g_work: [[f64; N]; N],\n");
+            code.push_str("    /// Working C matrix (modified by switches)\n");
+            code.push_str("    pub c_work: [[f64; N]; N],\n");
             code.push_str("    /// Current sample rate (for rebuild_matrices)\n");
             code.push_str("    pub current_sample_rate: f64,\n\n");
         }
@@ -4448,6 +4423,20 @@ impl RustEmitter {
             ));
         }
         if has_switches {
+            code.push('\n');
+        }
+
+        // IIR op-amp state fields
+        if !ir.opamp_iir.is_empty() {
+            code.push_str("    // --- IIR op-amp dominant pole filter state ---\n");
+            for (idx, _oa_iir) in ir.opamp_iir.iter().enumerate() {
+                code.push_str(&format!(
+                    "    pub oa{idx}_y_prev: f64,\n\
+                     \x20   pub oa{idx}_x_prev: f64,\n\
+                     \x20   pub oa{idx}_a1: f64,\n\
+                     \x20   pub oa{idx}_b0: f64,\n"
+                ));
+            }
             code.push('\n');
         }
 
@@ -4583,16 +4572,40 @@ impl RustEmitter {
         }
 
         if has_pots || has_switches {
-            if has_boyle_elim {
-                code.push_str("            g_work: G_FULL,\n");
-                code.push_str("            c_work: C_FULL,\n");
-            } else {
-                code.push_str("            g_work: G,\n");
-                code.push_str("            c_work: C,\n");
-            }
+            code.push_str("            g_work: G,\n");
+            code.push_str("            c_work: C,\n");
             code.push_str(&format!(
                 "            current_sample_rate: {:.17e},\n",
                 ir.solver_config.sample_rate * ir.solver_config.oversampling_factor as f64
+            ));
+        }
+
+        // IIR op-amp state initialization: initialize to DC steady state.
+        // At DC, v+ - v- = Go/Gm * v_out ≈ 22µV (for AOL=200K), and the Boyle
+        // internal node y_ss = AOL*(v+-v-) = v_out level. This is physically correct
+        // — NOT a rounding error. Initializing to zero makes the op-amps think they
+        // have to drive a huge imbalance on startup and causes oscillation.
+        for (idx, oa_iir) in ir.opamp_iir.iter().enumerate() {
+            let np_val = match oa_iir.np_idx {
+                Some(i) if i < ir.dc_operating_point.len() => ir.dc_operating_point[i],
+                _ => 0.0,
+            };
+            let nm_val = match oa_iir.nm_idx {
+                Some(i) if i < ir.dc_operating_point.len() => ir.dc_operating_point[i],
+                _ => 0.0,
+            };
+            let x0 = np_val - nm_val;
+            let y0 = if oa_iir.go > 0.0 {
+                (oa_iir.gm / oa_iir.go) * x0
+            } else {
+                0.0
+            };
+            code.push_str(&format!(
+                "            oa{idx}_y_prev: {:.17e},\n\
+                 \x20           oa{idx}_x_prev: {:.17e},\n\
+                 \x20           oa{idx}_a1: OA{idx}_A1_DEFAULT,\n\
+                 \x20           oa{idx}_b0: OA{idx}_B0_DEFAULT,\n",
+                y0, x0
             ));
         }
 
@@ -4698,13 +4711,32 @@ impl RustEmitter {
             code.push_str("        self.s_ni_be = S_NI_BE_DEFAULT;\n");
         }
         if has_pots || has_switches {
-            if has_boyle_elim {
-                code.push_str("        self.g_work = G_FULL;\n");
-                code.push_str("        self.c_work = C_FULL;\n");
+            code.push_str("        self.g_work = G;\n");
+            code.push_str("        self.c_work = C;\n");
+        }
+        // Reset IIR op-amp state — to DC steady state (see default() comment).
+        for (idx, oa_iir) in ir.opamp_iir.iter().enumerate() {
+            let np_val = match oa_iir.np_idx {
+                Some(i) if i < ir.dc_operating_point.len() => ir.dc_operating_point[i],
+                _ => 0.0,
+            };
+            let nm_val = match oa_iir.nm_idx {
+                Some(i) if i < ir.dc_operating_point.len() => ir.dc_operating_point[i],
+                _ => 0.0,
+            };
+            let x0 = np_val - nm_val;
+            let y0 = if oa_iir.go > 0.0 {
+                (oa_iir.gm / oa_iir.go) * x0
             } else {
-                code.push_str("        self.g_work = G;\n");
-                code.push_str("        self.c_work = C;\n");
-            }
+                0.0
+            };
+            code.push_str(&format!(
+                "        self.oa{idx}_y_prev = {:.17e};\n\
+                 \x20       self.oa{idx}_x_prev = {:.17e};\n\
+                 \x20       self.oa{idx}_a1 = OA{idx}_A1_DEFAULT;\n\
+                 \x20       self.oa{idx}_b0 = OA{idx}_B0_DEFAULT;\n",
+                y0, x0
+            ));
         }
         for (idx, pot) in ir.pots.iter().enumerate() {
             let r_nom = 1.0 / pot.g_nominal;
@@ -4881,149 +4913,43 @@ impl RustEmitter {
         code.push_str("        let alpha = 2.0 * internal_rate;\n");
         code.push_str("        let alpha_be = internal_rate;\n\n");
 
-        let has_boyle_elim = ir.topology.n_full > 0;
-        // Access the original (pre-Boyle) n_nodes and n_aug for augmented row zeroing
-        // These need to be the full-system values since we build at full dimension first
-        let n_nodes_orig = if has_boyle_elim {
-            // n_nodes in the full system = n_nodes_reduced + eliminated nodes within n_nodes
-            // But Boyle internal nodes are always in n_nodes..n_aug range, so n_nodes_orig = n_nodes_reduced
-            // Actually we need the original n_nodes. It's stored as part of the MNA.
-            // We can reconstruct it: for the Boyle case, the original n_nodes = n_nodes_reduced
-            // (Boyle nodes are in the augmented range, not in the circuit node range)
-            n_nodes
-        } else {
-            n_nodes
-        };
-        let n_aug_orig = if has_boyle_elim {
-            // n_aug in the full system includes the Boyle internal nodes
-            // n_aug_reduced = n_aug_orig - n_boyle_eliminated
-            n_aug + ir.boyle_elim_nodes.len()
-        } else {
-            n_aug
-        };
+        // Build A = G + alpha*C (trapezoidal) and A_neg = alpha*C - G (trapezoidal history)
+        // No Boyle elimination — IIR op-amp model keeps Gm out of the MNA matrix.
+        code.push_str(&format!(
+            "        for i in 0..N {{\n\
+             \x20           for j in 0..N {{\n\
+             \x20               self.a[i][j] = {}[i][j] + alpha * {}[i][j];\n\
+             \x20               self.a_neg[i][j] = alpha * {}[i][j] - {}[i][j];\n\
+             \x20               self.a_be[i][j] = {}[i][j] + alpha_be * {}[i][j];\n\
+             \x20               self.a_neg_be[i][j] = alpha_be * {}[i][j];\n\
+             \x20           }}\n\
+             \x20       }}\n",
+            g_src, c_src, c_src, g_src, g_src, c_src, c_src
+        ));
 
-        if has_boyle_elim {
-            let _n_full = ir.topology.n_full;
-            // Build A at full dimension, then apply Schur complement, then reduce
-            let g_full_src = if has_pots || has_switches { "self.g_work" } else { "G_FULL" };
-            let c_full_src = if has_pots || has_switches { "self.c_work" } else { "C_FULL" };
-
-            // Build A_full = G_FULL + alpha * C_FULL
+        // Zero VS/VCVS algebraic rows in A_neg and A_neg_be (NOT inductor rows)
+        if n_nodes < n_aug {
             code.push_str(&format!(
-                "        let mut a_full = [[0.0f64; N_FULL]; N_FULL];\n\
-                 \x20       let mut a_neg_full = [[0.0f64; N_FULL]; N_FULL];\n\
-                 \x20       let mut a_be_full = [[0.0f64; N_FULL]; N_FULL];\n\
-                 \x20       let mut a_neg_be_full = [[0.0f64; N_FULL]; N_FULL];\n\
-                 \x20       for i in 0..N_FULL {{\n\
-                 \x20           for j in 0..N_FULL {{\n\
-                 \x20               a_full[i][j] = {g_full_src}[i][j] + alpha * {c_full_src}[i][j];\n\
-                 \x20               a_neg_full[i][j] = alpha * {c_full_src}[i][j] - {g_full_src}[i][j];\n\
-                 \x20               a_be_full[i][j] = {g_full_src}[i][j] + alpha_be * {c_full_src}[i][j];\n\
-                 \x20               a_neg_be_full[i][j] = alpha_be * {c_full_src}[i][j];\n\
-                 \x20           }}\n\
-                 \x20       }}\n"
-            ));
-
-            // Zero augmented rows (original n_nodes..n_aug range in full system)
-            if n_nodes_orig < n_aug_orig {
-                code.push_str(&format!(
-                    "        for i in {}..{} {{\n\
-                     \x20           for j in 0..N_FULL {{\n\
-                     \x20               a_neg_full[i][j] = 0.0;\n\
-                     \x20               a_neg_be_full[i][j] = 0.0;\n\
-                     \x20           }}\n\
-                     \x20       }}\n",
-                    n_nodes_orig, n_aug_orig
-                ));
-            }
-
-            // Apply Schur complement for each Boyle internal node
-            for (idx, bn) in ir.boyle_elim_nodes.iter().enumerate() {
-                code.push_str(&format!(
-                    "        // Schur complement: eliminate Boyle internal node {idx} (full idx={})\n\
-                     \x20       {{\n\
-                     \x20           let int = BOYLE_{idx}_INT_IDX;\n\
-                     \x20           let a_ii = a_full[int][int];\n\
-                     \x20           if a_ii.abs() > 1e-30 {{\n\
-                     \x20               for i in 0..N_FULL {{\n\
-                     \x20                   if i == int {{ continue; }}\n\
-                     \x20                   let a_i_int = a_full[i][int];\n\
-                     \x20                   if a_i_int.abs() < 1e-30 {{ continue; }}\n\
-                     \x20                   for j in 0..N_FULL {{\n\
-                     \x20                       if j == int {{ continue; }}\n\
-                     \x20                       let a_int_j = a_full[int][j];\n\
-                     \x20                       if a_int_j.abs() < 1e-30 {{ continue; }}\n\
-                     \x20                       a_full[i][j] -= a_i_int * a_int_j / a_ii;\n\
-                     \x20                   }}\n\
-                     \x20               }}\n\
-                     \x20           }}\n\
-                     \x20       }}\n",
-                    bn.int_idx_full
-                ));
-                // Same for A_be
-                code.push_str(&format!(
-                    "        {{\n\
-                     \x20           let int = BOYLE_{idx}_INT_IDX;\n\
-                     \x20           let a_ii = a_be_full[int][int];\n\
-                     \x20           if a_ii.abs() > 1e-30 {{\n\
-                     \x20               for i in 0..N_FULL {{\n\
-                     \x20                   if i == int {{ continue; }}\n\
-                     \x20                   let a_i_int = a_be_full[i][int];\n\
-                     \x20                   if a_i_int.abs() < 1e-30 {{ continue; }}\n\
-                     \x20                   for j in 0..N_FULL {{\n\
-                     \x20                       if j == int {{ continue; }}\n\
-                     \x20                       let a_int_j = a_be_full[int][j];\n\
-                     \x20                       if a_int_j.abs() < 1e-30 {{ continue; }}\n\
-                     \x20                       a_be_full[i][j] -= a_i_int * a_int_j / a_ii;\n\
-                     \x20                   }}\n\
-                     \x20               }}\n\
-                     \x20           }}\n\
-                     \x20       }}\n"
-                ));
-            }
-
-            // Copy surviving rows/cols to reduced-dimension matrices
-            code.push_str(
-                "        // Copy surviving rows/cols from full to reduced matrices\n\
-                 \x20       for old_i in 0..N_FULL {\n\
-                 \x20           let new_i = BOYLE_REMAP[old_i];\n\
-                 \x20           if new_i == usize::MAX { continue; }\n\
-                 \x20           for old_j in 0..N_FULL {\n\
-                 \x20               let new_j = BOYLE_REMAP[old_j];\n\
-                 \x20               if new_j == usize::MAX { continue; }\n\
-                 \x20               self.a[new_i][new_j] = a_full[old_i][old_j];\n\
-                 \x20               self.a_neg[new_i][new_j] = a_neg_full[old_i][old_j];\n\
-                 \x20               self.a_be[new_i][new_j] = a_be_full[old_i][old_j];\n\
-                 \x20               self.a_neg_be[new_i][new_j] = a_neg_be_full[old_i][old_j];\n\
-                 \x20           }\n\
-                 \x20       }\n"
-            );
-        } else {
-            // No Boyle elimination: build directly at reduced dimension
-            code.push_str(&format!(
-                "        for i in 0..N {{\n\
+                "        for i in {}..{} {{\n\
                  \x20           for j in 0..N {{\n\
-                 \x20               self.a[i][j] = {}[i][j] + alpha * {}[i][j];\n\
-                 \x20               self.a_neg[i][j] = alpha * {}[i][j] - {}[i][j];\n\
-                 \x20               self.a_be[i][j] = {}[i][j] + alpha_be * {}[i][j];\n\
-                 \x20               self.a_neg_be[i][j] = alpha_be * {}[i][j];\n\
+                 \x20               self.a_neg[i][j] = 0.0;\n\
+                 \x20               self.a_neg_be[i][j] = 0.0;\n\
                  \x20           }}\n\
                  \x20       }}\n",
-                g_src, c_src, c_src, g_src, g_src, c_src, c_src
+                n_nodes, n_aug
             ));
+        }
 
-            // Zero VS/VCVS algebraic rows in A_neg and A_neg_be (NOT inductor rows)
-            if n_nodes < n_aug {
-                code.push_str(&format!(
-                    "        for i in {}..{} {{\n\
-                     \x20           for j in 0..N {{\n\
-                     \x20               self.a_neg[i][j] = 0.0;\n\
-                     \x20               self.a_neg_be[i][j] = 0.0;\n\
-                     \x20           }}\n\
-                     \x20       }}\n",
-                    n_nodes, n_aug
-                ));
-            }
+        // Recompute IIR op-amp filter coefficients for the new sample rate
+        for (idx, _oa_iir) in ir.opamp_iir.iter().enumerate() {
+            code.push_str(&format!(
+                "        {{\n\
+                 \x20           let alpha_oa = 2.0 * internal_rate;\n\
+                 \x20           let denom = alpha_oa * OA{idx}_C_DOM + OA{idx}_GO;\n\
+                 \x20           self.oa{idx}_a1 = (alpha_oa * OA{idx}_C_DOM - OA{idx}_GO) / denom;\n\
+                 \x20           self.oa{idx}_b0 = OA{idx}_GM / denom;\n\
+                 \x20       }}\n"
+            ));
         }
 
         // Recompute Schur complement matrices: S = A^{-1}, K = N_v*S*N_i, S_NI = S*N_i
@@ -5147,15 +5073,8 @@ impl RustEmitter {
                 }
             };
 
-            if has_boyle_elim {
-                // When Boyle elimination is active, skip A delta stamps (nonlinear Schur
-                // relationship makes delta stamps incorrect). Just update g_work and rebuild.
-                code.push_str(
-                    "        // Update g_work (full dimension) — rebuild_matrices applies Schur\n",
-                );
-                emit_g_work_stamp(&mut code);
-            } else {
-                // No Boyle elimination: delta stamp A/A_neg/A_be directly (fast path)
+            {
+                // Delta stamp A/A_neg/A_be directly (fast path)
                 let emit_delta_stamp = |code: &mut String, matrix: &str, sign: &str| {
                     if np > 0 {
                         code.push_str(&format!(
@@ -5465,6 +5384,19 @@ impl RustEmitter {
                 }
             }
         }
+        // IIR op-amp RHS injection (PURE EXPLICIT — Gm is NOT in G):
+        //   y_new = a1*y_prev + 2*b0*x_prev    (1-sample delay)
+        //   rhs[o] += Go*(y_new + y_prev)      (full VCCS current, no matrix coupling)
+        // At DC: y_ss = (2*b0/(1-a1))*x_ss = (Gm/Go)*x_ss = AOL*x_ss ✓
+        for (idx, oa_iir) in ir.opamp_iir.iter().enumerate() {
+            code.push_str(&format!(
+                "    let oa{idx}_y_new = state.oa{idx}_a1 * state.oa{idx}_y_prev + 2.0 * state.oa{idx}_b0 * state.oa{idx}_x_prev;\n"
+            ));
+            code.push_str(&format!(
+                "    rhs[{out}] += OA{idx}_GO * (oa{idx}_y_new + state.oa{idx}_y_prev);\n",
+                out = oa_iir.out_idx
+            ));
+        }
         code.push('\n');
 
         // Input source (Thevenin, trapezoidal)
@@ -5646,12 +5578,6 @@ impl RustEmitter {
                     "    v[{idx}] = v[{idx}].clamp({lo:.17e}, {hi:.17e});\n",
                     idx = oa.n_out_idx, lo = oa.vclamp_lo, hi = oa.vclamp_hi,
                 ));
-                if let Some(int_idx) = oa.n_internal_idx {
-                    code.push_str(&format!(
-                        "    v[{idx}] = v[{idx}].clamp({lo:.17e}, {hi:.17e});\n",
-                        idx = int_idx, lo = oa.vclamp_lo, hi = oa.vclamp_hi,
-                    ));
-                }
             }
 
             code.push_str("    let converged = state.last_nr_iterations < MAX_ITER as u32;\n\n");
@@ -5856,12 +5782,6 @@ impl RustEmitter {
                     "        v[{idx}] = v[{idx}].clamp({lo:.17e}, {hi:.17e});\n",
                     idx = oa.n_out_idx, lo = oa.vclamp_lo, hi = oa.vclamp_hi,
                 ));
-                if let Some(int_idx) = oa.n_internal_idx {
-                    code.push_str(&format!(
-                        "        v[{idx}] = v[{idx}].clamp({lo:.17e}, {hi:.17e});\n",
-                        idx = int_idx, lo = oa.vclamp_lo, hi = oa.vclamp_hi,
-                    ));
-                }
             }
 
             code.push_str("    }\n\n"); // end BE fallback block
@@ -5889,6 +5809,13 @@ impl RustEmitter {
                 }
             }
         }
+        // Reset IIR op-amp state on NaN
+        for (idx, _oa_iir) in ir.opamp_iir.iter().enumerate() {
+            code.push_str(&format!(
+                "        state.oa{idx}_x_prev = 0.0;\n\
+                 \x20       state.oa{idx}_y_prev = 0.0;\n"
+            ));
+        }
         code.push_str("        state.diag_nan_reset_count += 1;\n");
         code.push_str("        return [0.0; NUM_OUTPUTS];\n");
         code.push_str("    }\n\n");
@@ -5899,6 +5826,24 @@ impl RustEmitter {
         if m > 0 {
             code.push_str("    state.i_nl_prev_prev = state.i_nl_prev;\n");
             code.push_str("    state.i_nl_prev = i_nl;\n");
+        }
+        // IIR op-amp state update (PURE EXPLICIT):
+        //   x_prev ← x_new (from converged v, for next sample's explicit injection)
+        //   y_prev ← y_new (pre-computed before solve)
+        for (idx, oa_iir) in ir.opamp_iir.iter().enumerate() {
+            let x_expr = match (oa_iir.np_idx, oa_iir.nm_idx) {
+                (Some(np), Some(nm)) => format!("v[{np}] - v[{nm}]"),
+                (Some(np), None) => format!("v[{np}]"),
+                (None, Some(nm)) => format!("-v[{nm}]"),
+                (None, None) => "0.0".to_string(),
+            };
+            code.push_str(&format!(
+                "    {{\n\
+                 \x20       let x_new = {x_expr};\n\
+                 \x20       state.oa{idx}_x_prev = x_new;\n\
+                 \x20       state.oa{idx}_y_prev = oa{idx}_y_new;\n\
+                 \x20   }}\n"
+            ));
         }
         for (idx, _pot) in ir.pots.iter().enumerate() {
             code.push_str(&format!(
@@ -6755,6 +6700,19 @@ impl RustEmitter {
                 }
             }
         }
+        // IIR op-amp RHS injection (PURE EXPLICIT — Gm is NOT in G):
+        //   y_new = a1*y_prev + 2*b0*x_prev    (1-sample delay)
+        //   rhs[o] += Go*(y_new + y_prev)      (full VCCS current, no matrix coupling)
+        // At DC: y_ss = (2*b0/(1-a1))*x_ss = (Gm/Go)*x_ss = AOL*x_ss ✓
+        for (idx, oa_iir) in ir.opamp_iir.iter().enumerate() {
+            code.push_str(&format!(
+                "    let oa{idx}_y_new = state.oa{idx}_a1 * state.oa{idx}_y_prev + 2.0 * state.oa{idx}_b0 * state.oa{idx}_x_prev;\n"
+            ));
+            code.push_str(&format!(
+                "    rhs[{out}] += OA{idx}_GO * (oa{idx}_y_new + state.oa{idx}_y_prev);\n",
+                out = oa_iir.out_idx
+            ));
+        }
         code.push('\n');
 
         // Input source (Thevenin)
@@ -7022,12 +6980,6 @@ impl RustEmitter {
                         "        v[{idx}] = v[{idx}].clamp({lo:.17e}, {hi:.17e});\n",
                         idx = oa.n_out_idx, lo = oa.vclamp_lo, hi = oa.vclamp_hi,
                     ));
-                    if let Some(int_idx) = oa.n_internal_idx {
-                        code.push_str(&format!(
-                            "        v[{idx}] = v[{idx}].clamp({lo:.17e}, {hi:.17e});\n",
-                            idx = int_idx, lo = oa.vclamp_lo, hi = oa.vclamp_hi,
-                        ));
-                    }
                 }
             }
 
@@ -7196,12 +7148,6 @@ impl RustEmitter {
                         "                    v_new_s[{idx}] = v_new_s[{idx}].clamp({lo:.17e}, {hi:.17e});\n",
                         idx = oa.n_out_idx, lo = oa.vclamp_lo, hi = oa.vclamp_hi,
                     ));
-                    if let Some(int_idx) = oa.n_internal_idx {
-                        code.push_str(&format!(
-                            "                    v_new_s[{idx}] = v_new_s[{idx}].clamp({lo:.17e}, {hi:.17e});\n",
-                            idx = int_idx, lo = oa.vclamp_lo, hi = oa.vclamp_hi,
-                        ));
-                    }
                 }
             }
             // Convergence check + update
@@ -7394,12 +7340,6 @@ impl RustEmitter {
                         "            v[{idx}] = v[{idx}].clamp({lo:.17e}, {hi:.17e});\n",
                         idx = oa.n_out_idx, lo = oa.vclamp_lo, hi = oa.vclamp_hi,
                     ));
-                    if let Some(int_idx) = oa.n_internal_idx {
-                        code.push_str(&format!(
-                            "            v[{idx}] = v[{idx}].clamp({lo:.17e}, {hi:.17e});\n",
-                            idx = int_idx, lo = oa.vclamp_lo, hi = oa.vclamp_hi,
-                        ));
-                    }
                 }
             }
 
@@ -7455,6 +7395,13 @@ impl RustEmitter {
                 }
             }
         }
+        // Reset IIR op-amp state on NaN
+        for (idx, _oa_iir) in ir.opamp_iir.iter().enumerate() {
+            code.push_str(&format!(
+                "        state.oa{idx}_x_prev = 0.0;\n\
+                 \x20       state.oa{idx}_y_prev = 0.0;\n"
+            ));
+        }
         code.push_str("        state.diag_nan_reset_count += 1;\n");
         if m > 0 {
             code.push_str("        state.chord_valid = false;\n");
@@ -7494,6 +7441,24 @@ impl RustEmitter {
             code.push_str("    state.chord_perm = chord_perm;\n");
             code.push_str("    state.chord_j_dev = chord_j_dev;\n");
             code.push_str("    state.chord_valid = chord_valid;\n");
+        }
+        // IIR op-amp state update (PURE EXPLICIT):
+        //   x_prev ← x_new (from converged v, for next sample's explicit injection)
+        //   y_prev ← y_new (pre-computed before solve)
+        for (idx, oa_iir) in ir.opamp_iir.iter().enumerate() {
+            let x_expr = match (oa_iir.np_idx, oa_iir.nm_idx) {
+                (Some(np), Some(nm)) => format!("v[{np}] - v[{nm}]"),
+                (Some(np), None) => format!("v[{np}]"),
+                (None, Some(nm)) => format!("-v[{nm}]"),
+                (None, None) => "0.0".to_string(),
+            };
+            code.push_str(&format!(
+                "    {{\n\
+                 \x20       let x_new = {x_expr};\n\
+                 \x20       state.oa{idx}_x_prev = x_new;\n\
+                 \x20       state.oa{idx}_y_prev = oa{idx}_y_new;\n\
+                 \x20   }}\n"
+            ));
         }
         for (idx, _pot) in ir.pots.iter().enumerate() {
             code.push_str(&format!(

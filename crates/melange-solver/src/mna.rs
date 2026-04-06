@@ -315,8 +315,11 @@ pub struct OpampInfo {
     /// Typical NE5534: 10e6. TL074: 3e6.
     pub gbw: f64,
     /// Boyle internal gain node index (1-indexed, 0 = none).
-    /// Set during MNA stamping when GBW is finite.
+    /// No longer used with IIR op-amp model (always 0).
     pub n_internal_idx: usize,
+    /// Dominant pole capacitance for IIR filter: C_dom = AOL / (2*pi*GBW*ROUT).
+    /// Set during MNA stamping when GBW is finite; 0.0 when GBW is infinite.
+    pub iir_c_dom: f64,
 }
 
 /// VCA (Voltage-Controlled Amplifier) info for MNA system.
@@ -2589,12 +2592,9 @@ impl MnaBuilder {
             .filter(|e| matches!(e.element_type, ElementType::Vcvs))
             .count();
         let num_ideal_xfmr = mna.ideal_transformers.len();
-        // Count op-amps with GBW (each gets an internal gain node)
-        let num_opamp_internal = mna
-            .opamps
-            .iter()
-            .filter(|oa| oa.gbw.is_finite() && oa.gbw > 0.0)
-            .count();
+        // IIR op-amp model: GBW op-amps no longer create internal nodes.
+        // The dominant pole is modeled as an external IIR filter in codegen.
+        let num_opamp_internal = 0;
         // Count current-mode VCAs (each needs an augmented row for current sensing)
         // Each current-mode VCA needs 2 augmented rows:
         // [0] internal node (sig+_int) with dummy R to ground
@@ -2792,15 +2792,9 @@ impl MnaBuilder {
         }
 
         // Stamp op-amps as VCCS into G matrix.
-        // When GBW is specified, use Boyle macromodel with internal gain node:
-        //   Gm*(V+ - V-) → [internal] --ROUT--> [output]
-        //                      |
-        //                    C_dom = AOL / (2π × GBW × ROUT)
-        //                      |
-        //                     GND
-        // The internal node keeps the dominant pole cap from loading the feedback network.
-        let opamp_int_base = n_base + num_vs + num_vcvs + num_ideal_xfmr;
-        let mut opamp_int_idx = 0;
+        // When GBW is specified, the IIR model stamps Gm at the output (same as non-GBW)
+        // for correct DC operating point. The codegen IR strips Gm before building A for
+        // transient, modeling the dominant pole as an external per-sample IIR filter.
         for oa in &mut mna.opamps {
             let gm = oa.aol / oa.r_out;
             let go = 1.0 / oa.r_out;
@@ -2816,35 +2810,30 @@ impl MnaBuilder {
             let has_gbw = oa.gbw.is_finite() && oa.gbw > 0.0;
 
             if has_gbw {
-                // Boyle macromodel: VCCS drives internal node, ROUT connects to output
-                let int = opamp_int_base + opamp_int_idx;
-                opamp_int_idx += 1;
-                oa.n_internal_idx = int + 1; // Store as 1-indexed (0 = none)
-
-                // VCCS: Gm*(V+ - V-) into internal node
+                // IIR op-amp model: stamp Gm at output (same as non-GBW) for DC OP.
+                // The GBW dominant pole is modeled as an external IIR filter in codegen,
+                // which strips Gm from G before building A for transient simulation.
+                // NO internal node is created — this avoids Boyle's Gm~4000 S conditioning disaster.
                 if np > 0 {
-                    mna.g[int][np - 1] += gm;
+                    mna.g[o][np - 1] += gm;
                 }
                 if nm > 0 {
-                    mna.g[int][nm - 1] -= gm;
+                    mna.g[o][nm - 1] -= gm;
                 }
-
-                // ROUT: resistor between internal and output
-                mna.g[int][int] += go;
-                mna.g[int][o] -= go;
-                mna.g[o][int] -= go;
                 mna.g[o][o] += go;
 
-                // Dominant pole cap at internal node
+                // Store IIR parameters for codegen
                 let c_dom = oa.aol / (2.0 * std::f64::consts::PI * oa.gbw * oa.r_out);
-                mna.c[int][int] += c_dom;
+                oa.iir_c_dom = c_dom;
+                // n_internal_idx stays 0 (no internal node)
 
                 log::debug!(
-                    "Op-amp {} (Boyle): GBW={:.0}Hz, C_dom={:.3e}F, internal node={}",
+                    "Op-amp {} (IIR): GBW={:.0}Hz, C_dom={:.3e}F, Gm={:.2}, Go={:.4}",
                     oa.name,
                     oa.gbw,
                     c_dom,
-                    int
+                    gm,
+                    go,
                 );
             } else {
                 // Simple VCCS (no GBW): direct stamp at output (original behavior)
@@ -2859,7 +2848,7 @@ impl MnaBuilder {
         }
 
         // Allocate augmented rows for current-mode VCA sensing sources
-        let vca_aug_base = opamp_int_base + num_opamp_internal;
+        let vca_aug_base = n_base + num_vs + num_vcvs + num_ideal_xfmr + num_opamp_internal;
         let mut vca_aug_idx = 0;
         for vca in &mut mna.vcas {
             if vca.current_mode {
@@ -3605,6 +3594,7 @@ impl MnaBuilder {
                     vee: f64::NEG_INFINITY,
                     gbw: f64::INFINITY,
                     n_internal_idx: 0,
+                    iir_c_dom: 0.0,
                 });
             }
             Element::Vcvs {
