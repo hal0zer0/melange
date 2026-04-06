@@ -36,7 +36,7 @@ Vbias vbias 0 DC 4.5
 * ============================================================
 R1 in buf_ac 10k
 C1 buf_ac buf_in 100n
-R2 buf_in vbias 1M
+R2 buf_in vbias 1MEG
 U1A buf_in buf_out buf_out TL072_9V
 
 * ============================================================

@@ -306,9 +306,10 @@ fn test_vcr_alc_dk_kernel_has_pot() {
 fn test_vcr_alc_nodal_codegen() {
     let code = generate_nodal_code(VCR_ALC_SPICE, 48000.0);
 
+    // N=21 before Boyle Schur elimination, N=18 after (3 GBW op-amps eliminated)
     assert!(
-        code.contains("pub const N: usize = 21"),
-        "Generated code should have N=21"
+        code.contains("pub const N: usize = 18"),
+        "Generated code should have N=18 (after Boyle Schur elimination of 3 internal nodes)"
     );
     assert!(
         code.contains("pub const M: usize = 3"),

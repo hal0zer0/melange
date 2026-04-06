@@ -3955,7 +3955,55 @@ impl RustEmitter {
             fmt_f64(ir.solver_config.input_resistance)
         ));
 
-        // G and C matrices (sample-rate independent)
+        // Boyle Schur complement elimination constants
+        let n_full = ir.topology.n_full;
+        let has_boyle_elim = n_full > 0;
+        if has_boyle_elim {
+            code.push_str(&format!(
+                "/// Full system dimension before Boyle internal node elimination\npub const N_FULL: usize = {};\n\n",
+                n_full
+            ));
+            code.push_str(&format!(
+                "/// Number of Boyle internal nodes eliminated\npub const N_BOYLE_ELIM: usize = {};\n\n",
+                ir.boyle_elim_nodes.len()
+            ));
+
+            // Emit per-node Boyle elimination parameters
+            for (idx, bn) in ir.boyle_elim_nodes.iter().enumerate() {
+                code.push_str(&format!(
+                    "/// Boyle node {idx}: Go={:.4}, Gm={:.4}, C_dom={:.4e}\n",
+                    bn.go, bn.gm, bn.c_dom
+                ));
+                code.push_str(&format!(
+                    "const BOYLE_{idx}_INT_IDX: usize = {};\n",
+                    bn.int_idx_full
+                ));
+                code.push_str(&format!(
+                    "const BOYLE_{idx}_OUT_IDX: usize = {};\n",
+                    bn.out_idx_full
+                ));
+            }
+            code.push('\n');
+
+            // Emit index remap table (full → reduced, usize::MAX for eliminated)
+            let mut remap_vals = Vec::new();
+            let mut new_idx = 0usize;
+            let elim_set: std::collections::HashSet<usize> = ir.boyle_elim_nodes.iter().map(|b| b.int_idx_full).collect();
+            for old_idx in 0..n_full {
+                if elim_set.contains(&old_idx) {
+                    remap_vals.push("usize::MAX".to_string());
+                } else {
+                    remap_vals.push(new_idx.to_string());
+                    new_idx += 1;
+                }
+            }
+            code.push_str(&format!(
+                "/// Index remap: full system → reduced system (usize::MAX = eliminated)\nconst BOYLE_REMAP: [usize; N_FULL] = [{}];\n\n",
+                remap_vals.join(", ")
+            ));
+        }
+
+        // G and C matrices (sample-rate independent, at reduced N dimension)
         code.push_str("/// G matrix: conductance matrix (sample-rate independent)\nconst G: [[f64; N]; N] = [\n");
         for row in format_matrix_rows(n, n, |i, j| ir.g(i, j)) {
             code.push_str(&format!("    [{}],\n", row));
@@ -3967,6 +4015,27 @@ impl RustEmitter {
             code.push_str(&format!("    [{}],\n", row));
         }
         code.push_str("];\n\n");
+
+        // Full-dimension G/C for rebuild_matrices (only when Boyle elimination is active)
+        if has_boyle_elim {
+            code.push_str("/// G matrix at full dimension (before Boyle elimination, for rebuild_matrices)\nconst G_FULL: [[f64; N_FULL]; N_FULL] = [\n");
+            for i in 0..n_full {
+                let row: Vec<String> = (0..n_full)
+                    .map(|j| fmt_f64(ir.matrices.g_matrix_full[i * n_full + j]))
+                    .collect();
+                code.push_str(&format!("    [{}],\n", row.join(", ")));
+            }
+            code.push_str("];\n\n");
+
+            code.push_str("/// C matrix at full dimension (before Boyle elimination, for rebuild_matrices)\nconst C_FULL: [[f64; N_FULL]; N_FULL] = [\n");
+            for i in 0..n_full {
+                let row: Vec<String> = (0..n_full)
+                    .map(|j| fmt_f64(ir.matrices.c_matrix_full[i * n_full + j]))
+                    .collect();
+                code.push_str(&format!("    [{}],\n", row.join(", ")));
+            }
+            code.push_str("];\n\n");
+        }
 
         // A = G + alpha*C (trapezoidal forward matrix)
         code.push_str("/// Default A matrix: A = G + (2/T)*C (trapezoidal, at SAMPLE_RATE)\nconst A_DEFAULT: [[f64; N]; N] = [\n");
@@ -4286,8 +4355,10 @@ impl RustEmitter {
                 "    /// LU-factored Jacobian from previous convergence (chord method)\n",
             );
             code.push_str("    pub chord_lu: [[f64; N]; N],\n");
-            code.push_str("    /// Equilibration scaling from LU factorization\n");
-            code.push_str("    pub chord_d: [f64; N],\n");
+            code.push_str("    /// Row equilibration scaling from LU factorization\n");
+            code.push_str("    pub chord_dr: [f64; N],\n");
+            code.push_str("    /// Column equilibration scaling from LU factorization\n");
+            code.push_str("    pub chord_dc: [f64; N],\n");
             code.push_str("    /// Row permutation from LU factorization\n");
             code.push_str("    pub chord_perm: [usize; N],\n");
             code.push_str("    /// Device Jacobian consistent with chord_lu (for companion RHS)\n");
@@ -4335,11 +4406,21 @@ impl RustEmitter {
         code.push('\n');
 
         // Mutable G and C for pot/switch re-stamping
+        let has_boyle_elim = ir.topology.n_full > 0;
         if has_pots || has_switches {
-            code.push_str("    /// Working G matrix (modified by pots/switches)\n");
-            code.push_str("    pub g_work: [[f64; N]; N],\n");
-            code.push_str("    /// Working C matrix (modified by switches)\n");
-            code.push_str("    pub c_work: [[f64; N]; N],\n");
+            if has_boyle_elim {
+                // When Boyle elimination is active, g_work/c_work are at N_FULL dimension
+                // so rebuild_matrices can apply Schur complement at runtime
+                code.push_str("    /// Working G matrix at full dimension (modified by pots/switches)\n");
+                code.push_str("    pub g_work: [[f64; N_FULL]; N_FULL],\n");
+                code.push_str("    /// Working C matrix at full dimension (modified by switches)\n");
+                code.push_str("    pub c_work: [[f64; N_FULL]; N_FULL],\n");
+            } else {
+                code.push_str("    /// Working G matrix (modified by pots/switches)\n");
+                code.push_str("    pub g_work: [[f64; N]; N],\n");
+                code.push_str("    /// Working C matrix (modified by switches)\n");
+                code.push_str("    pub c_work: [[f64; N]; N],\n");
+            }
             code.push_str("    /// Current sample rate (for rebuild_matrices)\n");
             code.push_str("    pub current_sample_rate: f64,\n\n");
         }
@@ -4480,7 +4561,8 @@ impl RustEmitter {
         code.push_str("            diag_refactor_count: 0,\n");
         if m > 0 {
             code.push_str("            chord_lu: [[0.0; N]; N],\n");
-            code.push_str("            chord_d: [1.0; N],\n");
+            code.push_str("            chord_dr: [1.0; N],\n");
+            code.push_str("            chord_dc: [1.0; N],\n");
             code.push_str("            chord_perm: {{ let mut p = [0usize; N]; let mut i = 0; while i < N { p[i] = i; i += 1; } p }},\n");
             code.push_str("            chord_j_dev: [0.0; M * M],\n");
             code.push_str("            chord_valid: false,\n");
@@ -4501,8 +4583,13 @@ impl RustEmitter {
         }
 
         if has_pots || has_switches {
-            code.push_str("            g_work: G,\n");
-            code.push_str("            c_work: C,\n");
+            if has_boyle_elim {
+                code.push_str("            g_work: G_FULL,\n");
+                code.push_str("            c_work: C_FULL,\n");
+            } else {
+                code.push_str("            g_work: G,\n");
+                code.push_str("            c_work: C,\n");
+            }
             code.push_str(&format!(
                 "            current_sample_rate: {:.17e},\n",
                 ir.solver_config.sample_rate * ir.solver_config.oversampling_factor as f64
@@ -4611,8 +4698,13 @@ impl RustEmitter {
             code.push_str("        self.s_ni_be = S_NI_BE_DEFAULT;\n");
         }
         if has_pots || has_switches {
-            code.push_str("        self.g_work = G;\n");
-            code.push_str("        self.c_work = C;\n");
+            if has_boyle_elim {
+                code.push_str("        self.g_work = G_FULL;\n");
+                code.push_str("        self.c_work = C_FULL;\n");
+            } else {
+                code.push_str("        self.g_work = G;\n");
+                code.push_str("        self.c_work = C;\n");
+            }
         }
         for (idx, pot) in ir.pots.iter().enumerate() {
             let r_nom = 1.0 / pot.g_nominal;
@@ -4789,29 +4881,149 @@ impl RustEmitter {
         code.push_str("        let alpha = 2.0 * internal_rate;\n");
         code.push_str("        let alpha_be = internal_rate;\n\n");
 
-        code.push_str(&format!(
-            "        for i in 0..N {{\n\
-             \x20           for j in 0..N {{\n\
-             \x20               self.a[i][j] = {}[i][j] + alpha * {}[i][j];\n\
-             \x20               self.a_neg[i][j] = alpha * {}[i][j] - {}[i][j];\n\
-             \x20               self.a_be[i][j] = {}[i][j] + alpha_be * {}[i][j];\n\
-             \x20               self.a_neg_be[i][j] = alpha_be * {}[i][j];\n\
-             \x20           }}\n\
-             \x20       }}\n",
-            g_src, c_src, c_src, g_src, g_src, c_src, c_src
-        ));
+        let has_boyle_elim = ir.topology.n_full > 0;
+        // Access the original (pre-Boyle) n_nodes and n_aug for augmented row zeroing
+        // These need to be the full-system values since we build at full dimension first
+        let n_nodes_orig = if has_boyle_elim {
+            // n_nodes in the full system = n_nodes_reduced + eliminated nodes within n_nodes
+            // But Boyle internal nodes are always in n_nodes..n_aug range, so n_nodes_orig = n_nodes_reduced
+            // Actually we need the original n_nodes. It's stored as part of the MNA.
+            // We can reconstruct it: for the Boyle case, the original n_nodes = n_nodes_reduced
+            // (Boyle nodes are in the augmented range, not in the circuit node range)
+            n_nodes
+        } else {
+            n_nodes
+        };
+        let n_aug_orig = if has_boyle_elim {
+            // n_aug in the full system includes the Boyle internal nodes
+            // n_aug_reduced = n_aug_orig - n_boyle_eliminated
+            n_aug + ir.boyle_elim_nodes.len()
+        } else {
+            n_aug
+        };
 
-        // Zero VS/VCVS algebraic rows in A_neg and A_neg_be (NOT inductor rows)
-        if n_nodes < n_aug {
+        if has_boyle_elim {
+            let _n_full = ir.topology.n_full;
+            // Build A at full dimension, then apply Schur complement, then reduce
+            let g_full_src = if has_pots || has_switches { "self.g_work" } else { "G_FULL" };
+            let c_full_src = if has_pots || has_switches { "self.c_work" } else { "C_FULL" };
+
+            // Build A_full = G_FULL + alpha * C_FULL
             code.push_str(&format!(
-                "        for i in {}..{} {{\n\
+                "        let mut a_full = [[0.0f64; N_FULL]; N_FULL];\n\
+                 \x20       let mut a_neg_full = [[0.0f64; N_FULL]; N_FULL];\n\
+                 \x20       let mut a_be_full = [[0.0f64; N_FULL]; N_FULL];\n\
+                 \x20       let mut a_neg_be_full = [[0.0f64; N_FULL]; N_FULL];\n\
+                 \x20       for i in 0..N_FULL {{\n\
+                 \x20           for j in 0..N_FULL {{\n\
+                 \x20               a_full[i][j] = {g_full_src}[i][j] + alpha * {c_full_src}[i][j];\n\
+                 \x20               a_neg_full[i][j] = alpha * {c_full_src}[i][j] - {g_full_src}[i][j];\n\
+                 \x20               a_be_full[i][j] = {g_full_src}[i][j] + alpha_be * {c_full_src}[i][j];\n\
+                 \x20               a_neg_be_full[i][j] = alpha_be * {c_full_src}[i][j];\n\
+                 \x20           }}\n\
+                 \x20       }}\n"
+            ));
+
+            // Zero augmented rows (original n_nodes..n_aug range in full system)
+            if n_nodes_orig < n_aug_orig {
+                code.push_str(&format!(
+                    "        for i in {}..{} {{\n\
+                     \x20           for j in 0..N_FULL {{\n\
+                     \x20               a_neg_full[i][j] = 0.0;\n\
+                     \x20               a_neg_be_full[i][j] = 0.0;\n\
+                     \x20           }}\n\
+                     \x20       }}\n",
+                    n_nodes_orig, n_aug_orig
+                ));
+            }
+
+            // Apply Schur complement for each Boyle internal node
+            for (idx, bn) in ir.boyle_elim_nodes.iter().enumerate() {
+                code.push_str(&format!(
+                    "        // Schur complement: eliminate Boyle internal node {idx} (full idx={})\n\
+                     \x20       {{\n\
+                     \x20           let int = BOYLE_{idx}_INT_IDX;\n\
+                     \x20           let a_ii = a_full[int][int];\n\
+                     \x20           if a_ii.abs() > 1e-30 {{\n\
+                     \x20               for i in 0..N_FULL {{\n\
+                     \x20                   if i == int {{ continue; }}\n\
+                     \x20                   let a_i_int = a_full[i][int];\n\
+                     \x20                   if a_i_int.abs() < 1e-30 {{ continue; }}\n\
+                     \x20                   for j in 0..N_FULL {{\n\
+                     \x20                       if j == int {{ continue; }}\n\
+                     \x20                       let a_int_j = a_full[int][j];\n\
+                     \x20                       if a_int_j.abs() < 1e-30 {{ continue; }}\n\
+                     \x20                       a_full[i][j] -= a_i_int * a_int_j / a_ii;\n\
+                     \x20                   }}\n\
+                     \x20               }}\n\
+                     \x20           }}\n\
+                     \x20       }}\n",
+                    bn.int_idx_full
+                ));
+                // Same for A_be
+                code.push_str(&format!(
+                    "        {{\n\
+                     \x20           let int = BOYLE_{idx}_INT_IDX;\n\
+                     \x20           let a_ii = a_be_full[int][int];\n\
+                     \x20           if a_ii.abs() > 1e-30 {{\n\
+                     \x20               for i in 0..N_FULL {{\n\
+                     \x20                   if i == int {{ continue; }}\n\
+                     \x20                   let a_i_int = a_be_full[i][int];\n\
+                     \x20                   if a_i_int.abs() < 1e-30 {{ continue; }}\n\
+                     \x20                   for j in 0..N_FULL {{\n\
+                     \x20                       if j == int {{ continue; }}\n\
+                     \x20                       let a_int_j = a_be_full[int][j];\n\
+                     \x20                       if a_int_j.abs() < 1e-30 {{ continue; }}\n\
+                     \x20                       a_be_full[i][j] -= a_i_int * a_int_j / a_ii;\n\
+                     \x20                   }}\n\
+                     \x20               }}\n\
+                     \x20           }}\n\
+                     \x20       }}\n"
+                ));
+            }
+
+            // Copy surviving rows/cols to reduced-dimension matrices
+            code.push_str(
+                "        // Copy surviving rows/cols from full to reduced matrices\n\
+                 \x20       for old_i in 0..N_FULL {\n\
+                 \x20           let new_i = BOYLE_REMAP[old_i];\n\
+                 \x20           if new_i == usize::MAX { continue; }\n\
+                 \x20           for old_j in 0..N_FULL {\n\
+                 \x20               let new_j = BOYLE_REMAP[old_j];\n\
+                 \x20               if new_j == usize::MAX { continue; }\n\
+                 \x20               self.a[new_i][new_j] = a_full[old_i][old_j];\n\
+                 \x20               self.a_neg[new_i][new_j] = a_neg_full[old_i][old_j];\n\
+                 \x20               self.a_be[new_i][new_j] = a_be_full[old_i][old_j];\n\
+                 \x20               self.a_neg_be[new_i][new_j] = a_neg_be_full[old_i][old_j];\n\
+                 \x20           }\n\
+                 \x20       }\n"
+            );
+        } else {
+            // No Boyle elimination: build directly at reduced dimension
+            code.push_str(&format!(
+                "        for i in 0..N {{\n\
                  \x20           for j in 0..N {{\n\
-                 \x20               self.a_neg[i][j] = 0.0;\n\
-                 \x20               self.a_neg_be[i][j] = 0.0;\n\
+                 \x20               self.a[i][j] = {}[i][j] + alpha * {}[i][j];\n\
+                 \x20               self.a_neg[i][j] = alpha * {}[i][j] - {}[i][j];\n\
+                 \x20               self.a_be[i][j] = {}[i][j] + alpha_be * {}[i][j];\n\
+                 \x20               self.a_neg_be[i][j] = alpha_be * {}[i][j];\n\
                  \x20           }}\n\
                  \x20       }}\n",
-                n_nodes, n_aug
+                g_src, c_src, c_src, g_src, g_src, c_src, c_src
             ));
+
+            // Zero VS/VCVS algebraic rows in A_neg and A_neg_be (NOT inductor rows)
+            if n_nodes < n_aug {
+                code.push_str(&format!(
+                    "        for i in {}..{} {{\n\
+                     \x20           for j in 0..N {{\n\
+                     \x20               self.a_neg[i][j] = 0.0;\n\
+                     \x20               self.a_neg_be[i][j] = 0.0;\n\
+                     \x20           }}\n\
+                     \x20       }}\n",
+                    n_nodes, n_aug
+                ));
+            }
         }
 
         // Recompute Schur complement matrices: S = A^{-1}, K = N_v*S*N_i, S_NI = S*N_i
@@ -4910,69 +5122,75 @@ impl RustEmitter {
                 idx, idx, idx, idx
             ));
 
-            // Helper: emit delta stamp for one matrix with sign multiplier
-            // A and A_be get +delta_g, A_neg gets -delta_g
-            let emit_delta_stamp = |code: &mut String, matrix: &str, sign: &str| {
-                if np > 0 {
-                    code.push_str(&format!(
-                        "        self.{matrix}[{}][{}] {sign}= delta_g;\n",
-                        np - 1,
-                        np - 1
-                    ));
-                }
-                if nq > 0 {
-                    code.push_str(&format!(
-                        "        self.{matrix}[{}][{}] {sign}= delta_g;\n",
-                        nq - 1,
-                        nq - 1
-                    ));
-                }
-                if np > 0 && nq > 0 {
-                    let neg_sign = if sign == "+" { "-" } else { "+" };
-                    code.push_str(&format!(
-                        "        self.{matrix}[{}][{}] {neg_sign}= delta_g;\n\
-                         \x20       self.{matrix}[{}][{}] {neg_sign}= delta_g;\n",
-                        np - 1,
-                        nq - 1,
-                        nq - 1,
-                        np - 1
-                    ));
-                }
-            };
-
-            emit_delta_stamp(&mut code, "a", "+");
-            emit_delta_stamp(&mut code, "a_neg", "-");
-            emit_delta_stamp(&mut code, "a_be", "+");
-            // A_neg_be = alpha_be * C — no G term, unchanged by pot
-
-            // Also update g_work for consistency (needed by rebuild_matrices on sample rate change)
-            if has_pots || has_switches {
-                code.push_str(
-                    "\n        // Update working G for sample rate rebuild consistency\n",
-                );
+            // Emit conductance stamp into g_work (full dimension if Boyle, reduced otherwise)
+            // Pot node indices (np, nq) are 1-indexed MNA nodes (< n_nodes), same in both systems.
+            let emit_g_work_stamp = |code: &mut String| {
                 if np > 0 {
                     code.push_str(&format!(
                         "        self.g_work[{}][{}] += delta_g;\n",
-                        np - 1,
-                        np - 1
+                        np - 1, np - 1
                     ));
                 }
                 if nq > 0 {
                     code.push_str(&format!(
                         "        self.g_work[{}][{}] += delta_g;\n",
-                        nq - 1,
-                        nq - 1
+                        nq - 1, nq - 1
                     ));
                 }
                 if np > 0 && nq > 0 {
                     code.push_str(&format!(
                         "        self.g_work[{}][{}] -= delta_g;\n\
                          \x20       self.g_work[{}][{}] -= delta_g;\n",
-                        np - 1,
-                        nq - 1,
-                        nq - 1,
-                        np - 1
+                        np - 1, nq - 1,
+                        nq - 1, np - 1
                     ));
+                }
+            };
+
+            if has_boyle_elim {
+                // When Boyle elimination is active, skip A delta stamps (nonlinear Schur
+                // relationship makes delta stamps incorrect). Just update g_work and rebuild.
+                code.push_str(
+                    "        // Update g_work (full dimension) — rebuild_matrices applies Schur\n",
+                );
+                emit_g_work_stamp(&mut code);
+            } else {
+                // No Boyle elimination: delta stamp A/A_neg/A_be directly (fast path)
+                let emit_delta_stamp = |code: &mut String, matrix: &str, sign: &str| {
+                    if np > 0 {
+                        code.push_str(&format!(
+                            "        self.{matrix}[{}][{}] {sign}= delta_g;\n",
+                            np - 1, np - 1
+                        ));
+                    }
+                    if nq > 0 {
+                        code.push_str(&format!(
+                            "        self.{matrix}[{}][{}] {sign}= delta_g;\n",
+                            nq - 1, nq - 1
+                        ));
+                    }
+                    if np > 0 && nq > 0 {
+                        let neg_sign = if sign == "+" { "-" } else { "+" };
+                        code.push_str(&format!(
+                            "        self.{matrix}[{}][{}] {neg_sign}= delta_g;\n\
+                             \x20       self.{matrix}[{}][{}] {neg_sign}= delta_g;\n",
+                            np - 1, nq - 1,
+                            nq - 1, np - 1
+                        ));
+                    }
+                };
+
+                emit_delta_stamp(&mut code, "a", "+");
+                emit_delta_stamp(&mut code, "a_neg", "-");
+                emit_delta_stamp(&mut code, "a_be", "+");
+                // A_neg_be = alpha_be * C — no G term, unchanged by pot
+
+                // Also update g_work for consistency
+                if has_pots || has_switches {
+                    code.push_str(
+                        "\n        // Update working G for sample rate rebuild consistency\n",
+                    );
+                    emit_g_work_stamp(&mut code);
                 }
             }
 
@@ -6074,18 +6292,27 @@ impl RustEmitter {
         code.push_str("    let a_orig = *a;\n");
         code.push_str("    let b_orig = *b;\n\n");
 
-        // Step 1: Equilibrate
-        code.push_str("    // Step 1: Diagonal equilibration — d[i] = 1/sqrt(|A[i][i]|)\n");
-        code.push_str("    let mut d = [1.0f64; N];\n");
+        // Step 1: Asymmetric row/column max-norm equilibration
+        code.push_str("    // Step 1: Asymmetric row/column equilibration\n");
+        code.push_str("    let mut dr = [1.0f64; N];\n");
+        code.push_str("    let mut dc = [1.0f64; N];\n");
+        code.push_str("    // Row scaling: dr[i] = 1/max_j(|A[i][j]|)\n");
         code.push_str("    for i in 0..N {\n");
-        code.push_str("        let diag = a[i][i].abs();\n");
-        code.push_str("        if diag > 1e-30 { d[i] = 1.0 / diag.sqrt(); }\n");
+        code.push_str("        let mut row_max = 0.0f64;\n");
+        code.push_str("        for j in 0..N { let v = a[i][j].abs(); if v > row_max { row_max = v; } }\n");
+        code.push_str("        if row_max > 1e-30 { dr[i] = 1.0 / row_max; }\n");
         code.push_str("    }\n");
         code.push_str("    for i in 0..N {\n");
-        code.push_str("        for j in 0..N {\n");
-        code.push_str("            a[i][j] *= d[i] * d[j];\n");
-        code.push_str("        }\n");
-        code.push_str("        b[i] *= d[i];\n");
+        code.push_str("        for j in 0..N { a[i][j] *= dr[i]; }\n");
+        code.push_str("    }\n");
+        code.push_str("    // Column scaling: dc[j] = 1/max_i(|A[i][j]|) (after row scaling)\n");
+        code.push_str("    for j in 0..N {\n");
+        code.push_str("        let mut col_max = 0.0f64;\n");
+        code.push_str("        for i in 0..N { let v = a[i][j].abs(); if v > col_max { col_max = v; } }\n");
+        code.push_str("        if col_max > 1e-30 { dc[j] = 1.0 / col_max; }\n");
+        code.push_str("    }\n");
+        code.push_str("    for i in 0..N {\n");
+        code.push_str("        for j in 0..N { a[i][j] *= dc[j]; }\n");
         code.push_str("    }\n\n");
 
         // Step 2: LU factorize with partial pivoting (stores L below diagonal, U on/above)
@@ -6117,10 +6344,10 @@ impl RustEmitter {
         code.push_str("        }\n");
         code.push_str("    }\n\n");
 
-        // Step 3: Forward/backward substitution — solve LU * x_eq = D * P * b
-        code.push_str("    // Step 3: Solve LU * x_eq = D * P * b\n");
+        // Step 3: Forward/backward substitution — solve LU * x_eq = Dr * P * b
+        code.push_str("    // Step 3: Solve LU * x_eq = Dr * P * b\n");
         code.push_str("    let mut x = [0.0f64; N];\n");
-        code.push_str("    for i in 0..N { x[i] = d[perm[i]] * b_orig[perm[i]]; }\n\n");
+        code.push_str("    for i in 0..N { x[i] = dr[perm[i]] * b_orig[perm[i]]; }\n\n");
 
         code.push_str("    // Forward substitution (L)\n");
         code.push_str("    for i in 1..N {\n");
@@ -6143,9 +6370,9 @@ impl RustEmitter {
         code.push_str("        let pi = perm[i];\n");
         code.push_str("        let mut ax_i = 0.0;\n");
         code.push_str("        for j in 0..N {\n");
-        code.push_str("            ax_i += d[pi] * a_orig[pi][j] * d[j] * x[j];\n");
+        code.push_str("            ax_i += dr[pi] * a_orig[pi][j] * dc[j] * x[j];\n");
         code.push_str("        }\n");
-        code.push_str("        r[i] = d[pi] * b_orig[pi] - ax_i;\n");
+        code.push_str("        r[i] = dr[pi] * b_orig[pi] - ax_i;\n");
         code.push_str("    }\n");
         code.push_str("    // Solve LU * dx = r\n");
         code.push_str("    for i in 1..N {\n");
@@ -6159,10 +6386,10 @@ impl RustEmitter {
         code.push_str("        r[i] = (r[i] - sum) / a[i][i];\n");
         code.push_str("    }\n\n");
 
-        // Step 5: Apply correction and undo equilibration
-        code.push_str("    // Step 5: Apply correction and undo equilibration\n");
+        // Step 5: Apply correction and undo equilibration (column scaling)
+        code.push_str("    // Step 5: Apply correction and undo equilibration (column scaling)\n");
         code.push_str("    for i in 0..N {\n");
-        code.push_str("        b[i] = d[i] * (x[i] + r[i]);\n");
+        code.push_str("        b[i] = dc[i] * (x[i] + r[i]);\n");
         code.push_str("    }\n\n");
 
         code.push_str("    true\n");
@@ -6178,25 +6405,33 @@ impl RustEmitter {
     fn emit_nodal_lu_factor(_ir: &CircuitIR) -> String {
         let mut code = String::new();
 
-        code.push_str("/// LU factorization with diagonal equilibration and partial pivoting.\n");
+        code.push_str("/// LU factorization with asymmetric row/column equilibration and partial pivoting.\n");
         code.push_str("///\n");
-        code.push_str("/// After this call, `a` contains the LU factors, `d` the equilibration\n");
+        code.push_str("/// After this call, `a` contains the LU factors, `dr`/`dc` the row/column\n");
         code.push_str(
-            "/// scaling, and `perm` the row permutation. Use `lu_back_solve` to solve.\n",
+            "/// equilibration, and `perm` the row permutation. Use `lu_back_solve` to solve.\n",
         );
         code.push_str("#[inline(always)]\n");
-        code.push_str("fn lu_factor(a: &mut [[f64; N]; N], d: &mut [f64; N], perm: &mut [usize; N]) -> bool {\n");
+        code.push_str("fn lu_factor(a: &mut [[f64; N]; N], dr: &mut [f64; N], dc: &mut [f64; N], perm: &mut [usize; N]) -> bool {\n");
 
-        // Step 1: Equilibrate
-        code.push_str("    // Diagonal equilibration: d[i] = 1/sqrt(|A[i][i]|)\n");
+        // Step 1: Asymmetric row/column equilibration
+        code.push_str("    // Row scaling: dr[i] = 1/max_j(|A[i][j]|)\n");
         code.push_str("    for i in 0..N {\n");
-        code.push_str("        let diag = a[i][i].abs();\n");
-        code.push_str("        d[i] = if diag > 1e-30 { 1.0 / diag.sqrt() } else { 1.0 };\n");
+        code.push_str("        let mut row_max = 0.0f64;\n");
+        code.push_str("        for j in 0..N { let v = a[i][j].abs(); if v > row_max { row_max = v; } }\n");
+        code.push_str("        dr[i] = if row_max > 1e-30 { 1.0 / row_max } else { 1.0 };\n");
         code.push_str("    }\n");
         code.push_str("    for i in 0..N {\n");
-        code.push_str("        for j in 0..N {\n");
-        code.push_str("            a[i][j] *= d[i] * d[j];\n");
-        code.push_str("        }\n");
+        code.push_str("        for j in 0..N { a[i][j] *= dr[i]; }\n");
+        code.push_str("    }\n");
+        code.push_str("    // Column scaling: dc[j] = 1/max_i(|A[i][j]|) (after row scaling)\n");
+        code.push_str("    for j in 0..N {\n");
+        code.push_str("        let mut col_max = 0.0f64;\n");
+        code.push_str("        for i in 0..N { let v = a[i][j].abs(); if v > col_max { col_max = v; } }\n");
+        code.push_str("        dc[j] = if col_max > 1e-30 { 1.0 / col_max } else { 1.0 };\n");
+        code.push_str("    }\n");
+        code.push_str("    for i in 0..N {\n");
+        code.push_str("        for j in 0..N { a[i][j] *= dc[j]; }\n");
         code.push_str("    }\n\n");
 
         // Step 2: LU factorize with partial pivoting
@@ -6242,15 +6477,15 @@ impl RustEmitter {
             "/// Solve using pre-factored LU: forward/backward substitution + de-equilibrate.\n",
         );
         code.push_str("///\n");
-        code.push_str("/// `a_lu` contains LU factors from `lu_factor`. `d` and `perm` are the\n");
+        code.push_str("/// `a_lu` contains LU factors from `lu_factor`. `dr`/`dc` and `perm` are the\n");
         code.push_str("/// equilibration and permutation from the same call. On return, `b`\n");
         code.push_str("/// contains the solution. O(N²) — no iterative refinement.\n");
         code.push_str("#[inline(always)]\n");
-        code.push_str("fn lu_back_solve(a_lu: &[[f64; N]; N], d: &[f64; N], perm: &[usize; N], b: &mut [f64; N]) {\n");
+        code.push_str("fn lu_back_solve(a_lu: &[[f64; N]; N], dr: &[f64; N], dc: &[f64; N], perm: &[usize; N], b: &mut [f64; N]) {\n");
 
-        // Apply permutation + equilibration scaling to RHS
+        // Apply permutation + row equilibration scaling to RHS
         code.push_str("    let mut x = [0.0f64; N];\n");
-        code.push_str("    for i in 0..N { x[i] = d[perm[i]] * b[perm[i]]; }\n\n");
+        code.push_str("    for i in 0..N { x[i] = dr[perm[i]] * b[perm[i]]; }\n\n");
 
         // Forward substitution (L)
         code.push_str("    // Forward substitution (L)\n");
@@ -6268,9 +6503,9 @@ impl RustEmitter {
         code.push_str("        x[i] = (x[i] - sum) / a_lu[i][i];\n");
         code.push_str("    }\n\n");
 
-        // De-equilibrate
-        code.push_str("    // De-equilibrate\n");
-        code.push_str("    for i in 0..N { b[i] = d[i] * x[i]; }\n");
+        // De-equilibrate (column scaling)
+        code.push_str("    // De-equilibrate (column scaling)\n");
+        code.push_str("    for i in 0..N { b[i] = dc[i] * x[i]; }\n");
         code.push_str("}\n\n");
 
         code
@@ -6304,18 +6539,26 @@ impl RustEmitter {
             "/// Returns false if a pivot is too small (fall back to dense lu_factor).\n",
         );
         code.push_str("#[inline(always)]\n");
-        code.push_str("fn sparse_lu_factor(a: &mut [[f64; N]; N], d: &mut [f64; N]) -> bool {\n");
+        code.push_str("fn sparse_lu_factor(a: &mut [[f64; N]; N], dr: &mut [f64; N], dc: &mut [f64; N]) -> bool {\n");
 
-        // Diagonal equilibration (dense — O(N²), cheap compared to factorization)
-        code.push_str("    // Diagonal equilibration\n");
+        // Asymmetric row/column equilibration (dense — O(N²), cheap compared to factorization)
+        code.push_str("    // Row scaling: dr[i] = 1/max_j(|A[i][j]|)\n");
         code.push_str("    for i in 0..N {\n");
-        code.push_str("        let diag = a[i][i].abs();\n");
-        code.push_str("        d[i] = if diag > 1e-30 { 1.0 / diag.sqrt() } else { 1.0 };\n");
+        code.push_str("        let mut row_max = 0.0f64;\n");
+        code.push_str("        for j in 0..N { let v = a[i][j].abs(); if v > row_max { row_max = v; } }\n");
+        code.push_str("        dr[i] = if row_max > 1e-30 { 1.0 / row_max } else { 1.0 };\n");
         code.push_str("    }\n");
         code.push_str("    for i in 0..N {\n");
-        code.push_str("        for j in 0..N {\n");
-        code.push_str("            a[i][j] *= d[i] * d[j];\n");
-        code.push_str("        }\n");
+        code.push_str("        for j in 0..N { a[i][j] *= dr[i]; }\n");
+        code.push_str("    }\n");
+        code.push_str("    // Column scaling: dc[j] = 1/max_i(|A[i][j]|) (after row scaling)\n");
+        code.push_str("    for j in 0..N {\n");
+        code.push_str("        let mut col_max = 0.0f64;\n");
+        code.push_str("        for i in 0..N { let v = a[i][j].abs(); if v > col_max { col_max = v; } }\n");
+        code.push_str("        dc[j] = if col_max > 1e-30 { 1.0 / col_max } else { 1.0 };\n");
+        code.push_str("    }\n");
+        code.push_str("    for i in 0..N {\n");
+        code.push_str("        for j in 0..N { a[i][j] *= dc[j]; }\n");
         code.push_str("    }\n\n");
 
         // Static row swaps (for zero diagonals, determined at codegen time)
@@ -6378,12 +6621,12 @@ impl RustEmitter {
         ));
         code.push_str("#[inline(always)]\n");
         code.push_str(
-            "fn sparse_lu_back_solve(a_lu: &[[f64; N]; N], d: &[f64; N], b: &mut [f64; N]) {\n",
+            "fn sparse_lu_back_solve(a_lu: &[[f64; N]; N], dr: &[f64; N], dc: &[f64; N], b: &mut [f64; N]) {\n",
         );
 
-        // Equilibrate RHS + apply static row swaps
+        // Equilibrate RHS (row scaling) + apply static row swaps
         code.push_str("    let mut x = [0.0f64; N];\n");
-        code.push_str("    for i in 0..N { x[i] = d[i] * b[i]; }\n");
+        code.push_str("    for i in 0..N { x[i] = dr[i] * b[i]; }\n");
         if !lu.row_swaps.is_empty() {
             code.push_str("    // Static row swaps (matching factorization)\n");
             for &(r1, r2) in &lu.row_swaps {
@@ -6423,9 +6666,9 @@ impl RustEmitter {
             }
         }
 
-        // De-equilibrate (no column permutation to undo — we're in original space)
-        code.push_str("\n    // De-equilibrate\n");
-        code.push_str("    for i in 0..N { b[i] = d[i] * x[i]; }\n");
+        // De-equilibrate (column scaling — no column permutation to undo, we're in original space)
+        code.push_str("\n    // De-equilibrate (column scaling)\n");
+        code.push_str("    for i in 0..N { b[i] = dc[i] * x[i]; }\n");
         code.push_str("}\n\n");
 
         code
@@ -6557,7 +6800,8 @@ impl RustEmitter {
                 "    // Cross-timestep chord: start from previous sample's converged LU\n",
             );
             code.push_str("    let mut chord_lu = state.chord_lu;\n");
-            code.push_str("    let mut chord_d = state.chord_d;\n");
+            code.push_str("    let mut chord_dr = state.chord_dr;\n");
+            code.push_str("    let mut chord_dc = state.chord_dc;\n");
             code.push_str("    let mut chord_perm = state.chord_perm;\n");
             code.push_str("    let mut chord_j_dev = state.chord_j_dev;\n");
             code.push_str("    let mut chord_valid = state.chord_valid;\n\n");
@@ -6599,7 +6843,7 @@ impl RustEmitter {
                 "        // 2c. Build and factor Jacobian (adaptive chord: reuse across timesteps)\n",
             );
             // Refactor when: (a) no valid LU, or (b) within-sample periodic refresh
-            code.push_str("        let need_refactor = !chord_valid || (iter > 0 && iter % CHORD_REFACTOR == 0);\n");
+            code.push_str("        let need_refactor = !chord_valid || (iter > 0 && iter % CHORD_REFACTOR == 0) || iter >= 10;\n");
             code.push_str("        if need_refactor {\n");
             code.push_str("            chord_j_dev = j_dev;\n");
             code.push_str("            chord_lu = state.a;\n");
@@ -6642,14 +6886,14 @@ impl RustEmitter {
             }
             // Factor: try sparse LU (if available), fall back to dense
             if ir.sparsity.lu.is_some() {
-                code.push_str("            if !sparse_lu_factor(&mut chord_lu, &mut chord_d) {\n");
+                code.push_str("            if !sparse_lu_factor(&mut chord_lu, &mut chord_dr, &mut chord_dc) {\n");
                 code.push_str("                // Sparse pivot too small — fall back to dense LU with partial pivoting\n");
                 code.push_str("                state.diag_nr_max_iter_count += 1;\n");
                 code.push_str("                break;\n");
                 code.push_str("            }\n");
             } else {
                 code.push_str(
-                    "            if !lu_factor(&mut chord_lu, &mut chord_d, &mut chord_perm) {\n",
+                    "            if !lu_factor(&mut chord_lu, &mut chord_dr, &mut chord_dc, &mut chord_perm) {\n",
                 );
                 code.push_str("                state.diag_nr_max_iter_count += 1;\n");
                 code.push_str("                break;\n");
@@ -6710,20 +6954,20 @@ impl RustEmitter {
             if ir.sparsity.lu.is_some() {
                 code.push_str("        // 2e. Sparse back-solve with stored LU factors\n");
                 code.push_str("        let mut v_new = rhs_work;\n");
-                code.push_str("        sparse_lu_back_solve(&chord_lu, &chord_d, &mut v_new);\n\n");
+                code.push_str("        sparse_lu_back_solve(&chord_lu, &chord_dr, &chord_dc, &mut v_new);\n\n");
             } else {
                 code.push_str(
                     "        // 2e. Solve with stored LU factors (chord: O(N²) back-solve)\n",
                 );
                 code.push_str("        let mut v_new = rhs_work;\n");
                 code.push_str(
-                    "        lu_back_solve(&chord_lu, &chord_d, &chord_perm, &mut v_new);\n\n",
+                    "        lu_back_solve(&chord_lu, &chord_dr, &chord_dc, &chord_perm, &mut v_new);\n\n",
                 );
             }
 
-            // NOTE: no VSAT clamping inside NR loop — mid-NR clamping creates
-            // discontinuities the Jacobian doesn't account for, causing oscillation.
-            // VSAT is applied post-convergence (matching runtime NodalSolver).
+            // Op-amp output clamping inside NR loop — prevents physically impossible
+            // voltages that destabilize downstream device evaluation. Applied after the
+            // damped step (same pattern as sub-step NR and ngspice MOSFET limiting).
 
             // 2f. SPICE-style voltage limiting + global node damping
             code.push_str("        // 2f. SPICE voltage limiting + node damping\n");
@@ -6770,6 +7014,23 @@ impl RustEmitter {
             code.push_str("            if step.abs() >= threshold { max_step_exceeded = true; }\n");
             code.push_str("            v[i] += step;\n");
             code.push_str("        }\n");
+
+            // Mid-NR op-amp output clamping (VCC/VEE) — prevents rail excursions
+            if !ir.opamps.is_empty() {
+                for oa in &ir.opamps {
+                    code.push_str(&format!(
+                        "        v[{idx}] = v[{idx}].clamp({lo:.17e}, {hi:.17e});\n",
+                        idx = oa.n_out_idx, lo = oa.vclamp_lo, hi = oa.vclamp_hi,
+                    ));
+                    if let Some(int_idx) = oa.n_internal_idx {
+                        code.push_str(&format!(
+                            "        v[{idx}] = v[{idx}].clamp({lo:.17e}, {hi:.17e});\n",
+                            idx = int_idx, lo = oa.vclamp_lo, hi = oa.vclamp_hi,
+                        ));
+                    }
+                }
+            }
+
             code.push_str("        let converged_check = !max_step_exceeded;\n\n");
 
             code.push_str("        if converged_check {\n");
@@ -6981,7 +7242,8 @@ impl RustEmitter {
                 "    // Backward Euler fallback: if trapezoidal NR and sub-stepping both failed\n",
             );
             code.push_str("    if !converged {\n");
-            code.push_str("        state.diag_nr_max_iter_count += 1;\n\n");
+            code.push_str("        state.diag_nr_max_iter_count += 1;\n");
+            code.push_str("        chord_valid = false;\n\n");
 
             // Rebuild RHS with BE matrices
             code.push_str("        // Rebuild RHS with backward Euler matrices\n");
@@ -7099,8 +7361,6 @@ impl RustEmitter {
             code.push_str("            let mut v_new = rhs_work;\n");
             code.push_str("            if !lu_solve(&mut g_aug, &mut v_new) { break; }\n\n");
 
-            // No VSAT clamping inside BE NR loop (same reason as trapezoidal).
-
             // Limiting and damping for BE (same structure)
             code.push_str("            let mut alpha = 1.0_f64;\n");
             Self::emit_nodal_voltage_limiting_indented(&mut code, ir, "            ");
@@ -7126,6 +7386,23 @@ impl RustEmitter {
             );
             code.push_str("                v[i] += step;\n");
             code.push_str("            }\n");
+
+            // Mid-NR op-amp clamping for BE path
+            if !ir.opamps.is_empty() {
+                for oa in &ir.opamps {
+                    code.push_str(&format!(
+                        "            v[{idx}] = v[{idx}].clamp({lo:.17e}, {hi:.17e});\n",
+                        idx = oa.n_out_idx, lo = oa.vclamp_lo, hi = oa.vclamp_hi,
+                    ));
+                    if let Some(int_idx) = oa.n_internal_idx {
+                        code.push_str(&format!(
+                            "            v[{idx}] = v[{idx}].clamp({lo:.17e}, {hi:.17e});\n",
+                            idx = int_idx, lo = oa.vclamp_lo, hi = oa.vclamp_hi,
+                        ));
+                    }
+                }
+            }
+
             code.push_str("            let be_converged = !be_step_exceeded;\n\n");
 
             code.push_str("            if be_converged {\n");
@@ -7212,7 +7489,8 @@ impl RustEmitter {
             code.push_str("    state.i_nl_prev = i_nl;\n");
             // Persist chord LU for cross-timestep reuse
             code.push_str("    state.chord_lu = chord_lu;\n");
-            code.push_str("    state.chord_d = chord_d;\n");
+            code.push_str("    state.chord_dr = chord_dr;\n");
+            code.push_str("    state.chord_dc = chord_dc;\n");
             code.push_str("    state.chord_perm = chord_perm;\n");
             code.push_str("    state.chord_j_dev = chord_j_dev;\n");
             code.push_str("    state.chord_valid = chord_valid;\n");

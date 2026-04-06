@@ -72,6 +72,10 @@ pub struct CircuitIR {
     /// Pre-analyzed sparsity patterns for compile-time matrices.
     #[serde(default)]
     pub sparsity: SparseInfo,
+    /// Boyle op-amp internal nodes eliminated via Schur complement.
+    /// Empty when no Boyle nodes were eliminated.
+    #[serde(default)]
+    pub boyle_elim_nodes: Vec<BoyleElimNode>,
 }
 
 /// Circuit metadata (name, title, generator version).
@@ -107,6 +111,12 @@ pub struct Topology {
     /// instead of companion model (history currents in state).
     #[serde(default)]
     pub augmented_inductors: bool,
+    /// System dimension before Boyle internal node elimination.
+    /// 0 means no Boyle elimination was performed (n_full == n).
+    /// When > 0, the G and C constants are emitted at this full dimension,
+    /// and `rebuild_matrices()` works at full dimension then reduces.
+    #[serde(default)]
+    pub n_full: usize,
 }
 
 /// Solver configuration baked into the generated code.
@@ -168,13 +178,21 @@ pub struct Matrices {
     pub n_i: Vec<f64>,
     /// Constant RHS contribution from DC sources, length N
     pub rhs_const: Vec<f64>,
-    /// Raw conductance matrix G, N×N row-major (sample-rate independent)
-    /// Includes input conductance but NOT inductor companion conductances
+    /// Raw conductance matrix G, N×N row-major (sample-rate independent, at reduced dimension).
+    /// Includes input conductance but NOT inductor companion conductances.
+    /// When Boyle elimination is active, this is the reduced-dimension version.
     #[serde(default)]
     pub g_matrix: Vec<f64>,
-    /// Raw capacitance matrix C, N×N row-major (sample-rate independent)
+    /// Raw capacitance matrix C, N×N row-major (sample-rate independent, at reduced dimension).
     #[serde(default)]
     pub c_matrix: Vec<f64>,
+    /// Full-dimension G matrix (N_FULL × N_FULL), only populated when Boyle elimination is active.
+    /// Used by `rebuild_matrices()` to recompute from the full system.
+    #[serde(default)]
+    pub g_matrix_full: Vec<f64>,
+    /// Full-dimension C matrix (N_FULL × N_FULL), only populated when Boyle elimination is active.
+    #[serde(default)]
+    pub c_matrix_full: Vec<f64>,
 
     // --- Nodal solver matrices (only populated when solver_mode == Nodal) ---
     /// A = G + (2/T)*C, N×N row-major (trapezoidal forward matrix)
@@ -201,6 +219,44 @@ pub struct Matrices {
     /// Values > 1 mean the Schur path is unstable. Only computed for nodal path.
     #[serde(default)]
     pub spectral_radius_s_aneg: f64,
+}
+
+/// Boyle op-amp internal node eliminated via Schur complement.
+///
+/// The Boyle macromodel stamps Gm (transconductance, often ~4000 S) at an internal
+/// gain node. The Schur complement algebraically eliminates this node, replacing
+/// Gm with Gm_eff = Go*Gm / (Go + alpha*C_dom) which is typically ~4 S — a
+/// 1000x reduction in matrix magnitude.
+///
+/// At runtime, `rebuild_matrices()` operates at full dimension (N_FULL × N_FULL),
+/// applies the Schur updates, then copies surviving rows/cols to the reduced
+/// N × N system used by the solver.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BoyleElimNode {
+    /// Output resistance conductance Go = 1/ROUT
+    pub go: f64,
+    /// Transconductance Gm = AOL/ROUT
+    pub gm: f64,
+    /// Dominant pole capacitance C_dom = AOL / (2*pi*GBW*ROUT)
+    pub c_dom: f64,
+    /// 0-indexed internal node position in the FULL (pre-elimination) system
+    pub int_idx_full: usize,
+    /// 0-indexed output node in the FULL system
+    pub out_idx_full: usize,
+    /// 0-indexed non-inverting input in the FULL system (None if grounded)
+    pub np_idx_full: Option<usize>,
+    /// 0-indexed inverting input in the FULL system (None if grounded)
+    pub nm_idx_full: Option<usize>,
+    /// 0-indexed output node in the REDUCED system
+    pub out_idx: usize,
+    /// 0-indexed non-inverting input in the REDUCED system (None if grounded)
+    pub np_idx: Option<usize>,
+    /// 0-indexed inverting input in the REDUCED system (None if grounded)
+    pub nm_idx: Option<usize>,
+    /// Upper voltage clamp (VCC)
+    pub vclamp_hi: f64,
+    /// Lower voltage clamp (VEE)
+    pub vclamp_lo: f64,
 }
 
 /// Op-amp output voltage clamping for code generation.
@@ -596,6 +652,128 @@ fn invert_flat_matrix(a: &[f64], n: usize) -> Result<Vec<f64>, CodegenError> {
     Ok(result)
 }
 
+/// Apply Schur complement elimination of Boyle internal nodes from the system.
+///
+/// For each Boyle internal node at index `int` with:
+///   A[int][int] = Go + alpha*C_dom   (the pivot)
+///   A[int][np] = +Gm, A[int][nm] = -Gm, A[int][out] = -Go
+///   A[out][int] = -Go
+///
+/// The elimination updates the output row:
+///   A[out][out] += Go²/a_ii
+///   A[out][np] -= Go*Gm/a_ii  (Gm_eff)
+///   A[out][nm] += Go*Gm/a_ii
+///
+/// Then removes the internal node's row and column.
+///
+/// `boyle_nodes`: (int_idx, go, gm, c_dom, out_idx, np_idx, nm_idx)
+/// where int_idx/out_idx are 0-indexed into the N×N system,
+/// and np_idx/nm_idx are Option<usize> (None if grounded).
+///
+/// Returns (reduced_flat, index_remap) where index_remap maps old→new (usize::MAX for removed).
+fn schur_eliminate_boyle(
+    a_flat: &mut Vec<f64>,
+    n: usize,
+    boyle_nodes: &[(usize, f64, f64, f64, usize, Option<usize>, Option<usize>)],
+    _alpha: f64,
+) -> Vec<usize> {
+    // Step 1: Apply Schur complement updates at full dimension
+    for &(int_idx, go, gm, c_dom, _out_idx, _np_idx, _nm_idx) in boyle_nodes {
+        let a_ii = a_flat[int_idx * n + int_idx];
+        if a_ii.abs() < 1e-30 {
+            log::warn!(
+                "Boyle Schur: pivot a_ii = {:.3e} too small at int_idx={}, skipping",
+                a_ii,
+                int_idx
+            );
+            continue;
+        }
+
+        // For a general Schur complement, we update every row that has a nonzero
+        // in the int_idx column, and every column that has a nonzero in the int_idx row.
+        // The full update is: A_reduced[i][j] -= A[i][int] * A[int][j] / a_ii
+        // for all i,j != int.
+        for i in 0..n {
+            if i == int_idx {
+                continue;
+            }
+            let a_i_int = a_flat[i * n + int_idx];
+            if a_i_int.abs() < 1e-30 {
+                continue;
+            }
+            for j in 0..n {
+                if j == int_idx {
+                    continue;
+                }
+                let a_int_j = a_flat[int_idx * n + j];
+                if a_int_j.abs() < 1e-30 {
+                    continue;
+                }
+                a_flat[i * n + j] -= a_i_int * a_int_j / a_ii;
+            }
+        }
+
+        log::info!(
+            "Boyle Schur: eliminated internal node {} (Go={:.2}, Gm={:.2}, C_dom={:.3e}, a_ii={:.2}, Gm_eff={:.4})",
+            int_idx,
+            go,
+            gm,
+            c_dom,
+            a_ii,
+            go * gm / a_ii
+        );
+    }
+
+    // Step 2: Collect indices to remove (sorted ascending for remap, then descending for removal)
+    let mut remove_set: Vec<usize> = boyle_nodes.iter().map(|b| b.0).collect();
+    remove_set.sort();
+    remove_set.dedup();
+
+    // Step 3: Build index remap
+    let mut remap = vec![usize::MAX; n];
+    let mut new_idx = 0;
+    for old_idx in 0..n {
+        if remove_set.contains(&old_idx) {
+            // This index is eliminated
+        } else {
+            remap[old_idx] = new_idx;
+            new_idx += 1;
+        }
+    }
+    let n_reduced = new_idx;
+
+    // Step 4: Build reduced matrix
+    let mut reduced = vec![0.0f64; n_reduced * n_reduced];
+    for old_i in 0..n {
+        if remap[old_i] == usize::MAX {
+            continue;
+        }
+        let new_i = remap[old_i];
+        for old_j in 0..n {
+            if remap[old_j] == usize::MAX {
+                continue;
+            }
+            let new_j = remap[old_j];
+            reduced[new_i * n_reduced + new_j] = a_flat[old_i * n + old_j];
+        }
+    }
+    *a_flat = reduced;
+
+    remap
+}
+
+/// Apply Schur complement elimination to a vector, removing entries at eliminated indices.
+fn schur_reduce_vec(v: &mut Vec<f64>, remap: &[usize]) {
+    let n_reduced = remap.iter().filter(|&&r| r != usize::MAX).count();
+    let mut reduced = vec![0.0f64; n_reduced];
+    for (old_idx, &new_idx) in remap.iter().enumerate() {
+        if new_idx != usize::MAX && old_idx < v.len() {
+            reduced[new_idx] = v[old_idx];
+        }
+    }
+    *v = reduced;
+}
+
 /// Compute K = N_v * S * N_i from flat row-major matrices.
 ///
 /// N_v is M×N, S is N×N, N_i is N×M (all flat row-major).
@@ -769,6 +947,7 @@ impl CircuitIR {
             num_devices: kernel.num_devices,
             n_aug: mna.n_aug,
             augmented_inductors,
+            n_full: 0, // No Boyle elimination in DK path
         };
 
         let os_factor = config.oversampling_factor;
@@ -1006,6 +1185,8 @@ impl CircuitIR {
                 rhs_const: kernel.rhs_const.clone(),
                 g_matrix,
                 c_matrix,
+                g_matrix_full: Vec::new(),
+                c_matrix_full: Vec::new(),
                 a_matrix: Vec::new(),
                 a_matrix_be: Vec::new(),
                 a_neg_be,
@@ -1080,6 +1261,8 @@ impl CircuitIR {
                 rhs_const: rhs_const_be,
                 g_matrix,
                 c_matrix,
+                g_matrix_full: Vec::new(),
+                c_matrix_full: Vec::new(),
                 a_matrix: Vec::new(),
                 a_matrix_be: Vec::new(),
                 a_neg_be: Vec::new(),
@@ -1110,6 +1293,8 @@ impl CircuitIR {
                 rhs_const: kernel.rhs_const.clone(),
                 g_matrix,
                 c_matrix,
+                g_matrix_full: Vec::new(),
+                c_matrix_full: Vec::new(),
                 a_matrix: Vec::new(),
                 a_matrix_be: Vec::new(),
                 a_neg_be,
@@ -1450,6 +1635,7 @@ impl CircuitIR {
                 })
                 .collect(),
             sparsity,
+            boyle_elim_nodes: Vec::new(), // No Boyle elimination in DK path
         })
     }
 
@@ -1493,15 +1679,6 @@ impl CircuitIR {
         };
         let alpha_be = internal_rate;
 
-        let topology = Topology {
-            n,
-            n_nodes,
-            m,
-            num_devices: mna.num_devices,
-            n_aug,
-            augmented_inductors: true,
-        };
-
         // Validate output_nodes against circuit node count
         for (i, &node) in config.output_nodes.iter().enumerate() {
             if node >= n_nodes {
@@ -1512,29 +1689,15 @@ impl CircuitIR {
             }
         }
 
-        let solver_config = SolverConfig {
-            sample_rate,
-            alpha,
-            tolerance: config.tolerance,
-            max_iterations: config.max_iterations,
-            input_node: config.input_node,
-            output_nodes: config.output_nodes.clone(),
-            input_resistance: config.input_resistance,
-            oversampling_factor: config.oversampling_factor,
-            output_scales: config.output_scales.clone(),
-            pot_settle_samples: config.pot_settle_samples,
-            backward_euler: config.backward_euler,
-        };
-
         let metadata = CircuitMetadata {
             circuit_name: config.circuit_name.clone(),
             title: netlist.title.clone(),
             generator_version: env!("CARGO_PKG_VERSION").to_string(),
         };
 
-        // Flatten G and C at n_nodal dimension
-        let g_matrix = dk::flatten_matrix(&aug.g, n, n);
-        let c_matrix = dk::flatten_matrix(&aug.c, n, n);
+        // Flatten G and C at n_nodal (full) dimension
+        let g_matrix_full = dk::flatten_matrix(&aug.g, n, n);
+        let c_matrix_full = dk::flatten_matrix(&aug.c, n, n);
 
         // Build A = G + alpha*C, A_neg = alpha*C - G (trapezoidal) or alpha*C (BE)
         let be = config.backward_euler;
@@ -1611,7 +1774,7 @@ impl CircuitIR {
         }
 
         // Build rhs_const: trapezoidal (node rows ×2, VS rows ×1) or BE (all ×1)
-        let rhs_const = if be {
+        let mut rhs_const = if be {
             // BE: current sources ×1 (not ×2), VS ×1
             let mut rc = vec![0.0f64; n];
             for src in &mna.current_sources {
@@ -1646,6 +1809,206 @@ impl CircuitIR {
                 rhs_const_be[k] = vs.dc_value;
             }
         }
+
+        // === Boyle Schur complement elimination ===
+        // Identify op-amps with GBW (Boyle internal gain nodes) and eliminate them.
+        // This reduces N by the number of Boyle nodes, replacing Gm (~4000 S) with
+        // Gm_eff (~4 S) in the output row — a ~1000x improvement in matrix conditioning.
+        let n_full = n; // Save pre-elimination dimension
+        let mut boyle_elim_nodes_ir: Vec<BoyleElimNode> = Vec::new();
+        let boyle_nodes_info: Vec<(usize, f64, f64, f64, usize, Option<usize>, Option<usize>)> = mna
+            .opamps
+            .iter()
+            .filter(|oa| oa.gbw.is_finite() && oa.gbw > 0.0 && oa.n_internal_idx > 0)
+            .map(|oa| {
+                let int_idx = oa.n_internal_idx - 1; // Convert 1-indexed to 0-indexed
+                let out_idx = oa.n_out_idx - 1;
+                let np_idx = if oa.n_plus_idx > 0 {
+                    Some(oa.n_plus_idx - 1)
+                } else {
+                    None
+                };
+                let nm_idx = if oa.n_minus_idx > 0 {
+                    Some(oa.n_minus_idx - 1)
+                } else {
+                    None
+                };
+                let go = 1.0 / oa.r_out;
+                let gm = oa.aol / oa.r_out;
+                let c_dom = oa.aol / (2.0 * std::f64::consts::PI * oa.gbw * oa.r_out);
+                (int_idx, go, gm, c_dom, out_idx, np_idx, nm_idx)
+            })
+            .collect();
+
+        let remap = if !boyle_nodes_info.is_empty() {
+            log::info!(
+                "Boyle Schur: eliminating {} internal nodes from N={} system",
+                boyle_nodes_info.len(),
+                n
+            );
+
+            // Apply to A (trapezoidal)
+            let remap = schur_eliminate_boyle(&mut a_flat, n, &boyle_nodes_info, alpha);
+            // Apply to A_neg (use same remap — just reduce, no Schur update needed
+            // because A_neg augmented rows were already zeroed for Boyle nodes)
+            {
+                let n_reduced = remap.iter().filter(|&&r| r != usize::MAX).count();
+                let mut reduced = vec![0.0f64; n_reduced * n_reduced];
+                for old_i in 0..n {
+                    if remap[old_i] == usize::MAX { continue; }
+                    let new_i = remap[old_i];
+                    for old_j in 0..n {
+                        if remap[old_j] == usize::MAX { continue; }
+                        let new_j = remap[old_j];
+                        reduced[new_i * n_reduced + new_j] = a_neg_flat[old_i * n + old_j];
+                    }
+                }
+                a_neg_flat = reduced;
+            }
+            // Apply to A_be (backward Euler)
+            {
+                let mut a_be_copy = a_be_flat.clone();
+                schur_eliminate_boyle(&mut a_be_copy, n, &boyle_nodes_info, alpha_be);
+                a_be_flat = a_be_copy;
+            }
+            // Apply to A_neg_be (just reduce, no Schur update — zeroed rows)
+            {
+                let n_reduced = remap.iter().filter(|&&r| r != usize::MAX).count();
+                let mut reduced = vec![0.0f64; n_reduced * n_reduced];
+                for old_i in 0..n {
+                    if remap[old_i] == usize::MAX { continue; }
+                    let new_i = remap[old_i];
+                    for old_j in 0..n {
+                        if remap[old_j] == usize::MAX { continue; }
+                        let new_j = remap[old_j];
+                        reduced[new_i * n_reduced + new_j] = a_neg_be_flat[old_i * n + old_j];
+                    }
+                }
+                a_neg_be_flat = reduced;
+            }
+
+            // Reduce N_v: M × n_full → M × n_reduced (remove eliminated columns)
+            let n_reduced = remap.iter().filter(|&&r| r != usize::MAX).count();
+            {
+                let mut reduced = vec![0.0f64; m * n_reduced];
+                for i in 0..m {
+                    for old_j in 0..n {
+                        if remap[old_j] == usize::MAX { continue; }
+                        let new_j = remap[old_j];
+                        reduced[i * n_reduced + new_j] = n_v_flat[i * n + old_j];
+                    }
+                }
+                n_v_flat = reduced;
+            }
+            // Reduce N_i: n_full × M → n_reduced × M (remove eliminated rows)
+            {
+                let mut reduced = vec![0.0f64; n_reduced * m];
+                for old_i in 0..n {
+                    if remap[old_i] == usize::MAX { continue; }
+                    let new_i = remap[old_i];
+                    for j in 0..m {
+                        reduced[new_i * m + j] = n_i_flat[old_i * m + j];
+                    }
+                }
+                n_i_flat = reduced;
+            }
+            // Reduce rhs vectors
+            schur_reduce_vec(&mut rhs_const, &remap);
+            schur_reduce_vec(&mut rhs_const_be, &remap);
+
+            // Build BoyleElimNode IR entries with both full and reduced indices
+            for &(int_idx, go, gm, c_dom, out_idx, np_idx, nm_idx) in &boyle_nodes_info {
+                let oa = mna
+                    .opamps
+                    .iter()
+                    .find(|oa| oa.n_internal_idx > 0 && oa.n_internal_idx - 1 == int_idx)
+                    .unwrap();
+                boyle_elim_nodes_ir.push(BoyleElimNode {
+                    go,
+                    gm,
+                    c_dom,
+                    int_idx_full: int_idx,
+                    out_idx_full: out_idx,
+                    np_idx_full: np_idx,
+                    nm_idx_full: nm_idx,
+                    out_idx: remap[out_idx],
+                    np_idx: np_idx.map(|i| remap[i]).filter(|&i| i != usize::MAX),
+                    nm_idx: nm_idx.map(|i| remap[i]).filter(|&i| i != usize::MAX),
+                    vclamp_hi: oa.vcc,
+                    vclamp_lo: oa.vee,
+                });
+            }
+
+            log::info!(
+                "Boyle Schur: reduced system from N={} to N={} ({} nodes eliminated)",
+                n,
+                n_reduced,
+                n - n_reduced
+            );
+
+            remap
+        } else {
+            // No Boyle elimination — identity remap
+            (0..n).collect()
+        };
+
+        // Update n to reduced dimension
+        let n = remap.iter().filter(|&&r| r != usize::MAX).count();
+        let has_boyle_elim = n < n_full;
+
+        // Create reduced G/C matrices for the solver, keeping full versions for rebuild_matrices
+        let (g_matrix, c_matrix) = if has_boyle_elim {
+            let mut g_red = vec![0.0f64; n * n];
+            let mut c_red = vec![0.0f64; n * n];
+            for old_i in 0..n_full {
+                if remap[old_i] == usize::MAX { continue; }
+                let new_i = remap[old_i];
+                for old_j in 0..n_full {
+                    if remap[old_j] == usize::MAX { continue; }
+                    let new_j = remap[old_j];
+                    g_red[new_i * n + new_j] = g_matrix_full[old_i * n_full + old_j];
+                    c_red[new_i * n + new_j] = c_matrix_full[old_i * n_full + old_j];
+                }
+            }
+            (g_red, c_red)
+        } else {
+            (g_matrix_full.clone(), c_matrix_full.clone())
+        };
+
+        // Remap input/output nodes and topology dimensions
+        let input_node_reduced = remap[config.input_node];
+        let output_nodes_reduced: Vec<usize> = config
+            .output_nodes
+            .iter()
+            .map(|&node| remap[node])
+            .collect();
+        // n_nodes and n_aug may decrease if Boyle nodes were within those ranges
+        let n_nodes_reduced = (0..n_nodes).filter(|&i| remap[i] != usize::MAX).count();
+        let n_aug_reduced = (0..n_aug).filter(|&i| remap[i] != usize::MAX).count();
+
+        let topology = Topology {
+            n,
+            n_nodes: n_nodes_reduced,
+            m,
+            num_devices: mna.num_devices,
+            n_aug: n_aug_reduced,
+            augmented_inductors: true,
+            n_full: if has_boyle_elim { n_full } else { 0 },
+        };
+
+        let solver_config = SolverConfig {
+            sample_rate,
+            alpha,
+            tolerance: config.tolerance,
+            max_iterations: config.max_iterations,
+            input_node: input_node_reduced,
+            output_nodes: output_nodes_reduced,
+            input_resistance: config.input_resistance,
+            oversampling_factor: config.oversampling_factor,
+            output_scales: config.output_scales.clone(),
+            pot_settle_samples: config.pot_settle_samples,
+            backward_euler: config.backward_euler,
+        };
 
         // Compute S = A^{-1} for Schur complement NR (O(M³) instead of O(N³) per iteration)
         let s_flat = invert_flat_matrix(&a_flat, n)?;
@@ -1713,6 +2076,8 @@ impl CircuitIR {
             rhs_const,
             g_matrix,
             c_matrix,
+            g_matrix_full: if has_boyle_elim { g_matrix_full } else { Vec::new() },
+            c_matrix_full: if has_boyle_elim { c_matrix_full } else { Vec::new() },
             a_matrix: a_flat,
             a_matrix_be: a_be_flat,
             a_neg_be: a_neg_be_flat,
@@ -1722,7 +2087,7 @@ impl CircuitIR {
             spectral_radius_s_aneg,
         };
 
-        // Run DC OP
+        // Run DC OP (operates on the original MNA system, before Boyle elimination)
         let dc_op_config = DcOpConfig {
             input_node: config.input_node,
             input_resistance: config.input_resistance,
@@ -1738,10 +2103,9 @@ impl CircuitIR {
         let dc_nl_currents = dc_result.i_nl.clone();
         let has_dc_sources = !mna.voltage_sources.is_empty() || !mna.current_sources.is_empty();
 
-        // Resize DC OP to n_nodal: keeps inductor branch currents from DC solver,
-        // truncates internal BJT nodes (not needed in transient).
+        // Resize DC OP to n_nodal (full dimension), then clamp and remap
         let mut dc_operating_point = dc_result.v_node.clone();
-        dc_operating_point.resize(n, 0.0);
+        dc_operating_point.resize(n_full, 0.0);
         // Clamp op-amp output + internal Boyle nodes to VCC/VEE supply rails
         for oa in &mna.opamps {
             if (oa.vcc.is_finite() || oa.vee.is_finite()) && oa.n_out_idx > 0 {
@@ -1756,6 +2120,10 @@ impl CircuitIR {
                     }
                 }
             }
+        }
+        // Remap DC OP to reduced dimension (remove eliminated Boyle node entries)
+        if has_boyle_elim {
+            schur_reduce_vec(&mut dc_operating_point, &remap);
         }
         Self::resolve_mosfet_nodes(&mut device_slots, mna);
 
@@ -1881,7 +2249,7 @@ impl CircuitIR {
                 // at row n_aug + offset (not at circuit node rows).
                 let mut inductor_aug_rows: std::collections::HashMap<String, usize> =
                     std::collections::HashMap::new();
-                let mut var_idx = n_aug;
+                let mut var_idx = n_aug; // Original n_aug in the full system
                 for ind in &mna.inductors {
                     inductor_aug_rows.insert(ind.name.to_ascii_uppercase(), var_idx);
                     var_idx += 1;
@@ -1897,6 +2265,11 @@ impl CircuitIR {
                     }
                     var_idx += group.num_windings;
                 }
+                // Note: inductor augmented row indices are NOT remapped here even when
+                // Boyle elimination is active, because:
+                // - With Boyle elim: g_work/c_work are at N_FULL dimension (full system indices)
+                // - Without Boyle elim: indices are already correct at N dimension
+                // In both cases, the original (pre-remap) indices are what we want.
 
                 mna.switches
                     .iter()
@@ -1986,18 +2359,27 @@ impl CircuitIR {
                 .opamps
                 .iter()
                 .filter(|oa| (oa.vcc.is_finite() || oa.vee.is_finite()) && oa.n_out_idx > 0)
-                .map(|oa| OpampIR {
-                    n_out_idx: oa.n_out_idx - 1,
-                    n_internal_idx: if oa.n_internal_idx > 0 {
-                        Some(oa.n_internal_idx - 1)
+                .map(|oa| {
+                    let out_0idx = oa.n_out_idx - 1;
+                    let out_remapped = remap[out_0idx];
+                    // For eliminated Boyle internal nodes, n_internal_idx becomes None
+                    let int_remapped = if oa.n_internal_idx > 0 {
+                        let int_0idx = oa.n_internal_idx - 1;
+                        let r = remap[int_0idx];
+                        if r == usize::MAX { None } else { Some(r) }
                     } else {
                         None
-                    },
-                    vclamp_hi: oa.vcc,
-                    vclamp_lo: oa.vee,
+                    };
+                    OpampIR {
+                        n_out_idx: out_remapped,
+                        n_internal_idx: int_remapped,
+                        vclamp_hi: oa.vcc,
+                        vclamp_lo: oa.vee,
+                    }
                 })
                 .collect(),
             sparsity,
+            boyle_elim_nodes: boyle_elim_nodes_ir,
         })
     }
 
