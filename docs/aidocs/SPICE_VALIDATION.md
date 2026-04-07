@@ -9,10 +9,21 @@ Verify melange solver matches ngspice output within tight tolerances.
 |--------------|-------------|-----------|-------|
 | Linear (RC, RL) | > 0.999999 (6 nines) | < 0.1% | Should match almost exactly |
 | Nonlinear (diodes) | > 0.9999 (4 nines) | < 1% | NR convergence differences |
-| BJT circuits | > 0.96 | < 40% | Model parameter variations; actual measured: 0.965 correlation, 35% RMS |
-| Op-amp (linear) | ~1.0 | ~0% | VCCS+Rout model matches ngspice exactly |
-| JFET circuits | — | — | Test exists but `#[ignore]` (no runtime DeviceEntry yet) |
-| MOSFET circuits | — | — | Test exists but `#[ignore]` (no runtime DeviceEntry yet) |
+| BJT circuits | > 0.96 | < 40% | Model parameter variations |
+| Op-amp (linear) | ~1.0 | ~0% | Boyle macromodel matches ngspice |
+| JFET circuits | > 0.999 | < 5% | Shichman-Hodges 2D |
+| MOSFET circuits | > 0.99999 | < 0.1% | Level 1 SPICE |
+
+All tests are `#[ignore]`d so they only run with
+`cargo test -p melange-validate --test spice_validation -- --include-ignored`
+(they require ngspice on `PATH`). Each test calls `run_validation()` →
+`run_melange_codegen()` in `crates/melange-validate/tests/spice_validation.rs`,
+which exercises the full codegen pipeline: parse → MnaSystem → stamp G_in →
+DkKernel → routing::auto_route → CodeGenerator::generate → write to `/tmp/`,
+compile with `rustc --edition=2024 -O`, spawn the binary, pipe samples
+through stdin/stdout, then compare against ngspice with `.OPTIONS INTERP`
+for sample-aligned output. See `docs/aidocs/STATUS.md` for the latest
+recorded correlation/RMS values.
 
 ## ngspice Setup for Sample-Accurate Comparison
 
@@ -69,21 +80,17 @@ C1 out 0 10n
 
 ### DC Operating Point for Nonlinear Circuits
 
-For circuits with nonlinear devices (diodes, BJTs), call `initialize_dc_op()` after
-constructing the solver to set the correct bias point:
+For circuits with nonlinear devices (diodes, BJTs), the codegen pipeline
+automatically embeds the DC operating point as the `DC_NL_I` constant in
+the generated state, set by `CircuitIR::from_kernel()`. Generated code
+initializes `i_nl_prev = DC_NL_I` in `Default` and on `reset()`, so the
+solver starts from the correct bias point on the first sample.
 
-```rust
-// Build device slots from netlist
-let device_slots = build_device_slots(&netlist, &mna);
+Without this, BJT circuits would start from v=0 (cutoff) while SPICE starts
+from its own DC OP solution, causing massive output differences.
 
-// Initialize DC OP
-solver.initialize_dc_op(&mna, &device_slots);
-```
-
-Without this, BJT circuits start from v=0 (cutoff) while SPICE starts from
-its own DC OP solution, causing massive output differences.
-
-See [DC_OP.md](DC_OP.md) for the solver algorithm.
+The runtime `solver.initialize_dc_op(...)` API has been removed; everything
+is automatic now. See [DC_OP.md](DC_OP.md) for the solver algorithm.
 
 ### Input Conductance Stamping
 

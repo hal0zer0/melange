@@ -387,17 +387,22 @@ the trapezoidal-based DK method because `A = G + (2/T)*C` degenerates to just `G
 DK kernel to auto-insert 10pF across each device junction. See
 [DEVICE_MODELS.md](DEVICE_MODELS.md#parasitic-cap-auto-insertion) for junction topology.
 
-## Differences: Runtime vs Generated
+## Codegen-Only Pipeline
 
-| Aspect | Runtime Solver | Generated Code |
-|--------|---------------|----------------|
-| Jacobian | Full `J = I - J_dev * K` | Block-diagonal `J = I - J_dev * K` |
-| Device Jacobian | Dense matrix from devices | Block-diagonal jdev entries |
-| Linear solve | Gaussian elimination (any size) | Explicit for M<=16 (Gauss elim for M>=3) |
-| Handles | All device types | Diodes (1D), BJTs (2D), JFETs (2D), Tubes (2D), MOSFETs (2D) |
-| DC OP init | `initialize_dc_op()` (opt-in) | `DC_NL_I` constant (automatic) |
-| Oversampling | Not available | 2x/4x polyphase half-band IIR |
-| Sparsity | Dense | Zero entries skipped in emission |
-| Sample rate | Fixed at construction | `set_sample_rate()` recomputes from G+C |
-| Multi-output | Single output | Stereo/multi-output supported (multiple output nodes) |
-| Potentiometers | `set_pot(index, resistance)` via Sherman-Morrison | SM rank-1 updates in `process_sample` |
+The runtime `CircuitSolver` / `NodalSolver` / `DeviceEntry` paths have been
+removed. All circuit processing now flows through the codegen pipeline. The
+only runtime type that survives is `LinearSolver` (M=0 linear-only fallback)
+in `crates/melange-solver/src/linear_solver.rs`.
+
+| Capability | How it's emitted |
+|------------|-----------------|
+| NR Jacobian | Block-diagonal `jdev_` entries, `J[i][j] = δ_ij - Σ_k jdev_{ik} * K[k][j]` |
+| Linear solve | M=1 direct, M=2 Cramer's, M=3..16 unrolled Gauss; full LU for nodal full-LU path |
+| Device coverage | Diode (1D), BJT (1D forward-active or 2D), JFET (2D), MOSFET (2D), Tube (2D), VCA (2D), Op-amp (linear) |
+| DC OP init | `DC_NL_I` constant automatically initializes `i_nl_prev` |
+| Oversampling | 2× / 4× cascaded polyphase half-band IIR |
+| Sparsity | Zero entries skipped in emission (per-matrix `SparseInfo`) |
+| Sample rate | `set_sample_rate()` recomputes S, A_neg, K, S_NI from emitted G+C |
+| Multi-output | Stereo / multi-output supported via multiple output nodes |
+| Potentiometers | Sherman-Morrison rank-1 updates in `process_sample` |
+| Switches | Per-position matrix rebuild on `set_switch` |

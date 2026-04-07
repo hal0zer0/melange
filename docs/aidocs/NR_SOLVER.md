@@ -24,16 +24,15 @@ correction then adds `S * N_i * i_nl` (full, not delta). The combined effect is
 
 ## Jacobian Formula
 
-### General Form (both runtime and codegen)
+### General Form (codegen)
 ```
 f(i) = i - i_dev(p + K*i)
 J[i][j] = delta_ij - sum_k J_dev[i][k] * K[k][j]
 ```
 
-**Note**: This formula is in current-space (M×M). The runtime `solve_md` uses the equivalent
-voltage-space form `K * J_dev` to compute `J[i][j] = delta_ij - sum_k K[i][k] * J_dev[k][j]`.
-Both are correct when J_dev is block-diagonal, since K*J_dev and J_dev*K produce the same
-NR Jacobian entries for the relevant device blocks.
+This formula is in current-space (M×M). The runtime `solve_md` that used to
+compute the equivalent voltage-space form has been removed; only the codegen
+path (block-diagonal `jdev_` entries) survives.
 
 where `J_dev[i][k] = di_dev_i / dv_k` is the device Jacobian, which is block-diagonal:
 - Diode at index d: `J_dev[d][d] = g_d` (1x1 block)
@@ -146,15 +145,16 @@ constants (us to ms at audio rates).
 
 ## DC Operating Point Initialization
 
-For circuits with DC bias (BJT amplifiers), `i_nl_prev` should be initialized from
+For circuits with DC bias (BJT amplifiers), `i_nl_prev` is initialized from
 the DC operating point, not zeros. See [DC_OP.md](DC_OP.md).
 
 - **Codegen**: `DC_NL_I` constant auto-generated, initializes `i_nl_prev` in `Default`
-- **Runtime**: Call `solver.initialize_dc_op(&mna, &device_slots)` after construction
+  and is restored on `reset()`.
 
-**Note**: The DC OP solver uses a different NR formulation than the time-stepping solver.
-The DC OP solves for node voltages directly (companion formulation on the N×N system),
-while the time-stepping NR solves for nonlinear currents (M-dimensional system via DK reduction).
+**Note**: The DC OP solver uses a different NR formulation than the time-stepping
+NR. The DC OP solves for node voltages directly (companion formulation on the N×N
+system), while the time-stepping NR solves for nonlinear currents (M-dimensional
+system via DK reduction).
 
 ## Common Failures
 1. **Extra K negation** -> Wrong feedback polarity, immediate divergence
@@ -164,11 +164,10 @@ while the time-stepping NR solves for nonlinear currents (M-dimensional system v
 5. **Diagonal-only Jacobian for BJT** -> Ignores cross-coupling, poor convergence
 
 ## Implementation Note
-Both the runtime solver and codegen use the same Jacobian formula:
-`J[i][j] = delta_ij - sum_k(J_dev[i][k] * K[k][j])`. The codegen generates
-the device Jacobian as block-diagonal `jdev_` entries (1x1 for diodes, 2x2 for
-BJTs), while the runtime solver computes the full device Jacobian matrix. Both
-handle coupled multi-port devices (e.g., BJTs where Ic depends on both Vbe and Vbc).
+The codegen emits the device Jacobian as block-diagonal `jdev_` entries (1×1 for
+diodes, 1×1 for forward-active BJTs, 2×2 for full BJTs/JFETs/MOSFETs/Tubes/VCAs).
+NR Jacobian: `J[i][j] = delta_ij - sum_k(jdev_{ik} * K[k][j])`, where the inner
+sum runs only over the device block that owns row `i`.
 
 ## References
 - Hack Audio Tutorial Chapter 7: Newton-Raphson Method

@@ -8,17 +8,17 @@ A_neg, and S*N_i via the Sherman-Morrison formula at O(N^2) cost.
 
 ## Source Files
 
-| Component | File | Lines |
-|-----------|------|-------|
-| `SmPotData` struct | `melange-solver/src/dk.rs` | 89-116 |
-| Precomputation | `melange-solver/src/dk.rs` | 294-340 |
-| `PotInfo` struct | `melange-solver/src/mna.rs` | 265-282 |
-| `PotDirective` struct | `melange-solver/src/parser.rs` | 33-48 |
-| `PotentiometerIR` struct | `melange-solver/src/codegen/ir.rs` | 127-150 |
-| SM scale helper (codegen) | `melange-solver/src/codegen/rust_emitter.rs` | 1320-1342 |
-| Sequential SM corrections | `melange-solver/src/codegen/rust_emitter.rs` | 1984-2094 |
-| State template | `melange-solver/templates/rust/state.rs.tera` | 101-134 |
-| Sample rate rebuild | `melange-solver/templates/rust/state.rs.tera` | 518-555 |
+| Component | File |
+|-----------|------|
+| `SmPotData` struct + DK precomputation | `crates/melange-solver/src/dk.rs` |
+| `PotInfo` struct | `crates/melange-solver/src/mna.rs` |
+| `PotDirective` parser struct | `crates/melange-solver/src/parser.rs` |
+| `PotentiometerIR` struct | `crates/melange-solver/src/codegen/ir.rs` |
+| SM scale helper + sequential corrections | `crates/melange-solver/src/codegen/rust_emitter.rs` |
+| State fields + sample-rate rebuild | `crates/melange-solver/templates/rust/state.rs.tera` |
+
+Line numbers omitted — grep the symbol name (`SmPotData`, `PotInfo`,
+`PotDirective`, `PotentiometerIR`) to locate the current definition.
 
 ## Netlist Syntax
 

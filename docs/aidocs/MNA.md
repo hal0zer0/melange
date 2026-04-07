@@ -4,7 +4,7 @@
 
 Convert circuit netlist to system of linear equations: `(G + sC) * v = i`.
 The MNA system is the foundation for everything downstream: DK kernel, DC OP,
-codegen, and runtime solver.
+and the codegen pipeline.
 
 ## References
 
@@ -69,10 +69,12 @@ not into G or C separately. History current i_hist injected into RHS each sample
 **Limitation**: For large inductors (L > ~1H at audio rates), g_eq ≈ 8e-8 S.
 This creates ill-conditioned A matrices (cond ~ 1e9+). See augmented MNA below.
 
-### Inductor (Augmented MNA — NodalSolver)
+### Inductor (Augmented MNA — Nodal Codegen Path)
 
-The NodalSolver uses augmented MNA for inductors (Ho et al. 1975): each inductor
-winding adds an extra variable (branch current j_L) with inductance L in the C matrix.
+The codegen "nodal" routing path uses augmented MNA for inductors (Ho et al.
+1975): each inductor winding adds an extra variable (branch current j_L) with
+inductance L in the C matrix. Built by `MnaSystem::build_augmented_matrices` in
+`crates/melange-solver/src/mna.rs`.
 
 ```
 For inductor between nodes i, j with inductance L, at augmented index k:
@@ -103,7 +105,8 @@ Inductor rows (n_aug..n_nodal) keep their values (they have real history).
 
 **DC OP**: The DC OP solver uses its own augmented inductor system with the same
 variable ordering. v_node from DC OP includes inductor DC branch currents at
-indices n_aug..n_dc, which map directly to the NodalSolver's v_prev[n_aug..n_nodal].
+indices n_aug..n_dc, which map directly to the nodal codegen path's
+v_prev[n_aug..n_nodal] in the generated state.
 
 ### Voltage Source (Augmented MNA)
 
@@ -133,7 +136,10 @@ rhs[n_plus - 1]  += I_dc
 rhs[n_minus - 1] -= I_dc
 ```
 
-Voltage-source-row RHS entries are multiplied by 2.0 for trapezoidal consistency.
+**Current-source node rows** in `rhs_const` are multiplied by 2.0 for trapezoidal
+consistency (see `build_rhs_const` in `crates/melange-solver/src/dk.rs`).
+**Voltage-source augmented rows are NOT** multiplied — they are algebraic KVL
+constraints, not differential equations, so `rhs[k] = V_dc` is set directly.
 
 ### Input Conductance (Thevenin Source)
 
@@ -274,6 +280,20 @@ N_i[emitter, idx]    = +1   (Ic injected into emitter)
 N_i[base, idx+1]     = -1   (Ib extracted from base)
 N_i[emitter, idx+1]  = +1   (Ib injected into emitter)
 ```
+
+**Forward-active BJT variant** (`NonlinearDeviceType::BjtForwardActive` in
+`crates/melange-solver/src/mna.rs`): when DC OP detects strong forward bias,
+the BJT is given **dimension 1** instead of 2. Only the Vbe→Ic NR row is
+kept; Ib is computed algebraically from Ic via `Ib = Ic / β_F` after the NR
+converges. The Vbc junction is not in the NR system.
+
+**Fully-linearized BJT** (`MnaSystem::linearized_bjts` field): when DC OP
+detects the BJT is in the forward-active linear region, it can be removed
+from the nonlinear system entirely. After DC OP, the small-signal `g_m`,
+`g_π`, and `r_o` are stamped into G as a four-terminal small-signal model,
+and the BJT is dropped from `nonlinear_devices`. M decreases by 2 per
+linearized BJT. Grep `linearized_bjts` and `LinearizedBjtInfo` in `mna.rs`
+for the dispatch.
 
 ### JFET (2D: Id at idx, Ig at idx+1)
 

@@ -16,7 +16,8 @@ All internal processing operates in **volts**:
 
 ## DC Blocking
 
-Every solver (`CircuitSolver`, `LinearSolver`, and generated code) applies a **5Hz 1-pole high-pass filter** after the output node extraction:
+Generated code applies a **5Hz 1-pole high-pass filter** after the output node
+extraction (disable with `--no-dc-block`):
 
 ```
 y[n] = x[n] - x[n-1] + R * y[n-1]
@@ -35,20 +36,28 @@ After DC blocking, the output is multiplied by `OUTPUT_SCALE` (default 1.0) and 
 output = (dc_blocked * OUTPUT_SCALE).clamp(-10.0, 10.0)
 ```
 
-Use `--output-scale` in the CLI to adjust for circuits with unusual voltage swing.
+`--output-scale` exists as a CLI flag for **volts → DAW-unit mapping only**
+(e.g. `--output-scale 0.1` maps a ±10V circuit output into the ±1.0 DAW
+convention). It is **not** a knob for fixing simulation errors. Per `CLAUDE.md`:
+*"Never use `--output-scale` or output attenuation as a remedy for simulation
+errors — it's a voltage→DAW-unit mapping, not a bug fix."* If a circuit produces
+a wrong amplitude, the bug is in the solver/device-models, not in the output
+scale.
 
 ## Plugin Level Controls
 
-Generated plugins always include Input Level and Output Level parameters:
+Generated plugins include Input Level and Output Level parameters by default
+(disable with `--no-level-params`):
 
 | Parameter | Default | Range | Purpose |
 |-----------|---------|-------|---------|
-| Input Level | **-12 dB** | -36 to +12 dB | Attenuates DAW signal to match circuit's expected input level |
-| Output Level | 0 dB | -60 to +12 dB | Final output gain control |
+| Input Level | **0 dB** | ±24 dB | DAW-to-circuit gain trim |
+| Output Level | **0 dB** | ±24 dB | Circuit-to-DAW gain trim |
 
-The -12 dB input default maps ±1.0 DAW signal to ±250mV, matching typical guitar pickup levels (50-200mV). This prevents dangerously loud output from amplifying circuits on first load. For line-level circuits (EQs, filters), turn input up toward 0 dB.
-
-To generate a plugin without level controls, pass `--no-level-params`.
+Both defaults are unity, matching the philosophy that the user's netlist defines
+the correct circuit levels. Adjust away from 0 dB only if your DAW signal level
+doesn't match the circuit's intended input range. Source: `LEVEL_PARAM_DEFAULTS`
+in `tools/melange-cli/src/plugin_template.rs`.
 
 The plugin clamps final output to ±1.0:
 
@@ -58,7 +67,7 @@ audio_out = (process_sample(input * input_gain) * output_gain).clamp(-1.0, 1.0)
 
 ## Diagnostics
 
-Both runtime solvers and generated code track:
+Generated code tracks diagnostic counters in `CircuitState`:
 
 | Field | Description |
 |-------|-------------|
@@ -67,7 +76,8 @@ Both runtime solvers and generated code track:
 | `diag_nr_max_iter_count` | Times Newton-Raphson hit max iterations |
 | `diag_nan_reset_count` | Times NaN triggered state reset |
 
-The CLI prints these after simulation with warnings for clipping.
+The CLI prints these after `melange simulate` with warnings for clipping or
+convergence problems.
 
 ## SPICE Validation
 

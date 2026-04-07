@@ -28,7 +28,24 @@ silicon_ideal()    IS=1e-14, n=1.0    (textbook ideal)
 
 ## BJT (Ebers-Moll)
 
-M-dimension: 2 per BJT (Vbe -> Ic, Vbc -> Ib)
+M-dimension: **2 per BJT** for the standard `Bjt` device type
+(Vbe → Ic at `start_idx`, Vbc → Ib at `start_idx+1`).
+
+### BJT Mode Variants (M-Dimension Reduction)
+
+The MNA builder can flag a BJT as **forward-active** (auto-detected at DC OP)
+or **linearized**, which changes its NR dimension:
+
+| Variant | Source | NR Dim | Behavior |
+|---------|--------|--------|----------|
+| `Bjt` (default) | netlist | 2 | Full Ebers-Moll / Gummel-Poon, both junctions in NR |
+| `BjtForwardActive` | DC OP detects strong forward bias | 1 | Only Vbe→Ic in NR; `Ib = Ic / β_F` derived from Ic |
+| `linearized_bjts` (`mna.linearized_bjts`) | DC OP detects fully-biased linear region | 0 | Removed from NR entirely; small-signal `g_m`/`g_pi`/`r_o` stamped into G after DC OP |
+
+This is why the wurli-power-amp circuit reports `M=16→9` when it compiles:
+the 8 BJTs start at 16 nominal NR dimensions, but 7 of them are detected as
+forward-active and drop to 1D each (`16 - 7 = 9`). Linearized BJTs would drop
+the count further to 0 per device.
 
 ### Collector Current
 ```

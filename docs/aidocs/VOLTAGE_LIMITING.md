@@ -8,16 +8,19 @@ oscillation or divergence. Reference: SPICE3f5 `DEVpnjlim` and `DEVfetlim`.
 
 ## Source Files
 
-| Component | File | Lines |
-|-----------|------|-------|
-| `pn_vcrit()` | `melange-primitives/src/nr.rs` | 389-396 |
-| `pnjlim()` | `melange-primitives/src/nr.rs` | 410-427 |
-| `fetlim()` | `melange-primitives/src/nr.rs` | 439-486 |
-| Runtime dispatch | `melange-solver/src/solver.rs` | 167-223 |
-| Scalar damping alpha | `melange-solver/src/solver.rs` | 1061-1087 |
-| Codegen VCRIT emission | `melange-solver/src/codegen/rust_emitter.rs` | 778-849 |
-| Codegen NR limiting | `melange-solver/src/codegen/rust_emitter.rs` | 2130-2247 |
-| Template (self-contained) | `melange-solver/templates/rust/spice_limiting.rs.tera` | 1-76 |
+| Component | File |
+|-----------|------|
+| `pn_vcrit()` | `crates/melange-primitives/src/nr.rs` |
+| `pnjlim()` | `crates/melange-primitives/src/nr.rs` |
+| `fetlim()` | `crates/melange-primitives/src/nr.rs` |
+| Codegen VCRIT emission (per device) | `crates/melange-solver/src/codegen/rust_emitter.rs` |
+| Codegen NR limiting (per-device dispatch + scalar α) | `crates/melange-solver/src/codegen/rust_emitter.rs` |
+| Self-contained template (emitted into generated code) | `crates/melange-solver/templates/rust/spice_limiting.rs.tera` |
+
+Line numbers omitted — grep the symbol names. Note that the runtime
+dispatch path that used to live in `melange-solver/src/solver.rs` has been
+removed; voltage limiting now exists exclusively in the codegen pipeline
+and the small primitive functions in `melange-primitives`.
 
 ## Critical Voltage (pn_vcrit)
 

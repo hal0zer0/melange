@@ -8,16 +8,20 @@ any GP parameter (VAF, VAR, IKF, IKR) is finite.
 
 ## Source Files
 
-| Component | File | Lines |
-|-----------|------|-------|
-| `BjtParams` struct | `melange-solver/src/codegen/ir.rs` | 257-281 |
-| `is_gummel_poon()` | `melange-solver/src/codegen/ir.rs` | 295-300 |
-| `BjtGummelPoon` runtime | `melange-devices/src/bjt.rs` | 200-332 |
-| `bjt_qb()` codegen template | `melange-solver/templates/rust/device_bjt.rs.tera` | 13-30 |
-| `bjt_ic()` codegen template | `melange-solver/templates/rust/device_bjt.rs.tera` | 32-45 |
-| `bjt_jacobian()` codegen template | `melange-solver/templates/rust/device_bjt.rs.tera` | 59-119 |
-| DC OP integration | `melange-solver/src/dc_op.rs` | 115-141 |
-| Parameter resolution | `melange-solver/src/codegen/ir.rs` | 970-1028 |
+| Component | File |
+|-----------|------|
+| `BjtParams` struct | `crates/melange-solver/src/device_types.rs` |
+| `is_gummel_poon()` method | `crates/melange-solver/src/device_types.rs` |
+| `BjtGummelPoon` device model | `crates/melange-devices/src/bjt.rs` |
+| `bjt_qb()` codegen template | `crates/melange-solver/templates/rust/device_bjt.rs.tera` |
+| `bjt_ic()` codegen template | `crates/melange-solver/templates/rust/device_bjt.rs.tera` |
+| `bjt_jacobian()` codegen template | `crates/melange-solver/templates/rust/device_bjt.rs.tera` |
+| DC OP integration (qb-aware solve) | `crates/melange-solver/src/dc_op.rs` |
+| Parameter resolution | `crates/melange-solver/src/codegen/ir.rs` |
+
+Line numbers omitted intentionally — they drift with every refactor. Grep
+the symbol name (`BjtParams`, `is_gummel_poon`, `bjt_qb`, etc.) to locate
+the current definition. Symbol names are stable; line numbers are not.
 
 ## Detection
 

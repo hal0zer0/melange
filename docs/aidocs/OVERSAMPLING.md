@@ -10,11 +10,11 @@ external dependencies, suitable for generated real-time code.
 
 | Component | File |
 |-----------|------|
-| Core filter library | `melange-primitives/src/oversampling.rs` |
-| Codegen emission | `melange-solver/src/codegen/rust_emitter.rs:1714-1918` |
-| State template | `melange-solver/templates/rust/state.rs.tera:105-115` |
-| Process sample wrapper | `melange-solver/templates/rust/process_sample.rs.tera:5-20` |
-| Constants template | `melange-solver/templates/rust/constants.rs.tera:17-22` |
+| Core filter library (`HalfBandFilter`, `AllpassSection`, `HB_*SECTION` coefficients) | `crates/melange-primitives/src/oversampling.rs` |
+| Codegen emission of allpass functions and process_sample wrapper | `crates/melange-solver/src/codegen/rust_emitter.rs` |
+| Generated state fields (`os_up_state`, `os_dn_state`, etc.) | `crates/melange-solver/templates/rust/state.rs.tera` |
+| Generated `process_sample` wrapper | `crates/melange-solver/templates/rust/process_sample.rs.tera` |
+| `OVERSAMPLING_FACTOR` and `INTERNAL_SAMPLE_RATE` constants | `crates/melange-solver/templates/rust/constants.rs.tera` |
 
 ## Configuration
 

@@ -67,18 +67,13 @@ let k_2d = mat_mul(&mna.n_v, &s_ni);
 
 ### Check Jacobian Formula
 
-**Runtime solver** (solver.rs):
+Generated code (block-diagonal sum over the device block that owns row `i`):
 ```rust
-J[i][j] = delta_ij - sum_k K[i][k] * G[k][j]
-```
-
-**Generated code** (codegen.rs):
-```rust
-// Block-diagonal: sum over k in device block that owns row i
 let j_ij = delta_ij - sum_k(jdev_{ik} * K[k][j]);
 ```
 
-Since K is naturally negative, J > 0 (convergent).
+Since K is naturally negative, J > 0 (convergent). The runtime solver that
+used a full-matrix `J = I - J_dev * K` form has been removed.
 
 ### Check Voltage Limiting
 ```rust
@@ -146,17 +141,13 @@ rhs = A_neg * v_prev;
 BJT amplifiers require a DC bias point. Without it, all transistors start in cutoff
 (v=0) and produce no output.
 
-**Runtime solver:**
-```rust
-solver.initialize_dc_op(&mna, &device_slots);
-```
-
-**Codegen:** Check that `DC_NL_I` constant is present in generated code:
+Check that `DC_NL_I` constant is present and non-zero in generated code:
 ```rust
 pub const DC_NL_I: [f64; M] = [...];  // Should be non-zero for BJT circuits
 ```
 
-If `DC_NL_I` is all zeros or missing, the DC OP solver may not have converged.
+If `DC_NL_I` is all zeros or missing, the DC OP solver did not converge — check
+the compile-time log output for `DcOpMethod::Failed`.
 
 ### Check DC OP Convergence
 
@@ -212,8 +203,8 @@ Using addition causes NR divergence. See `DC_OP.md` for the mathematical derivat
 | N_i[anode] | Current extracted | -1 |
 | N_i[cathode] | Current injected | +1 |
 | K = N_v*S*N_i | Naturally negative | Correct feedback |
-| Runtime J | `I - J_dev * K` | Positive (convergent) |
 | Codegen J | `I - J_dev * K` (block-diag) | Positive (convergent) |
+| DC OP G_aug | `G_dc - N_i*J_dev*N_v` (subtract!) | Diagonal-dominant |
 
 ## Verified Working Values
 
@@ -221,7 +212,7 @@ Using addition causes NR divergence. See `DC_OP.md` for the mathematical derivat
 |-----------|-------|-------|
 | INPUT_RESISTANCE | 1 ohm | Near-ideal voltage source |
 | Voltage limiting | SPICE pnjlim/fetlim | pnjlim for diode/BJT/tube (VCRIT per device), fetlim for JFET/MOSFET |
-| MAX_ITER | 100 | NR iteration limit (runtime & codegen) |
+| MAX_ITER | 100 | NR iteration limit (codegen) |
 | TOLERANCE | 1e-9 | NR convergence |
 | alpha | 2/T | Trapezoidal rule |
 | K | N_v*S*N_i | Naturally negative, no extra negation |

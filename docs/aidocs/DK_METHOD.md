@@ -150,25 +150,29 @@ history for stable trapezoidal integration.
 
 ## Common Integration Pitfalls
 
-### Input Handling in SPICE Validation
+### Input Handling
 
-**WRONG** - Setting solver field after MNA built:
+**WRONG** — Building the kernel before the input conductance is in G:
 ```rust
 let mna = MnaSystem::from_netlist(&netlist)?;
 let kernel = DkKernel::from_mna(&mna, sample_rate)?;  // S computed WITHOUT input
-let mut solver = CircuitSolver::new(kernel, ...);
-solver.input_conductance = 0.0001;  // TOO LATE!
+// any later attempt to "inject" input conductance into the codegen state is too late
 ```
 
-**RIGHT** - Stamp into MNA G matrix before kernel:
+**RIGHT** — Stamp into MNA G matrix *before* building the kernel:
 ```rust
 let mut mna = MnaSystem::from_netlist(&netlist)?;
 // Stamp input conductance BEFORE building kernel
 mna.g[input_node][input_node] += input_conductance;
-let kernel = DkKernel::from_mna(&mna, sample_rate)?;  // S includes input
+let kernel = DkKernel::from_mna(&mna, sample_rate)?;  // S now includes input
+let ir = CircuitIR::from_kernel(&kernel, &mna, &config)?;
+let code = CodeGenerator::new(ir).generate()?;
 ```
 
-**Why**: The DK kernel computes `S = A⁻¹` where `A = 2C/T + G`. If input conductance isn't in G, it's not part of the circuit topology, and the solver's runtime injection creates an inconsistent system.
+**Why**: The DK kernel computes `S = A⁻¹` where `A = 2C/T + G`. If input
+conductance isn't in G, it's not part of the circuit topology, and the
+generated solver's per-sample input injection creates an inconsistent system.
+This is the single most common SPICE-correlation failure for new circuits.
 
 ### Trapezoidal Rule for Time-Varying Inputs
 

@@ -3,6 +3,15 @@
 Agent research library for melange circuit simulation. Each doc is optimized for
 AI agent consumption: dense equations, code patterns, cross-references, no narrative.
 
+> **Architecture note (2026-04).** The runtime solvers (`CircuitSolver`,
+> `NodalSolver`, `DeviceEntry`, `solve_md`, `initialize_dc_op`) have been
+> removed. `crates/melange-solver/src/solver.rs` is now an 8-line stub
+> re-exporting `LinearSolver` only. **All circuit processing flows through
+> the codegen pipeline** (`Netlist → MNA → DkKernel → CircuitIR → Emitter →
+> generated Rust code`). If you find docs or examples that reference a
+> "runtime solver", treat them as historical and prefer the codegen-equivalent
+> path. The math is the same — only the entry point differs.
+
 ## When to Read Which Doc
 
 | Task | Read |
@@ -15,11 +24,12 @@ AI agent consumption: dense equations, code patterns, cross-references, no narra
 | Changing diode/BJT/JFET/MOSFET/tube equations | [DEVICE_MODELS.md](DEVICE_MODELS.md) |
 | Changing Gummel-Poon BJT or qb() function | [GUMMEL_POON.md](GUMMEL_POON.md) |
 | Changing matrix inversion or linear solves | [LINEAR_ALGEBRA.md](LINEAR_ALGEBRA.md) |
-| Changing dynamic potentiometers | [SHERMAN_MORRISON.md](SHERMAN_MORRISON.md) |
+| Changing dynamic potentiometers (math) | [SHERMAN_MORRISON.md](SHERMAN_MORRISON.md) |
+| Adding `.pot` / `.wiper` / `.gang` / `.switch` directives | [DYNAMIC_PARAMS.md](DYNAMIC_PARAMS.md) |
 | Changing oversampling or anti-alias filters | [OVERSAMPLING.md](OVERSAMPLING.md) |
 | Changing generated code structure | [CODEGEN.md](CODEGEN.md) |
 | Changing trapezoidal integration or companions | [COMPANION_MODELS.md](COMPANION_MODELS.md) |
-| Changing NodalSolver inductor handling | [MNA.md](MNA.md) (augmented MNA section) |
+| Changing augmented MNA inductor handling | [MNA.md](MNA.md) (augmented MNA section) |
 | Debugging solver output issues | [DEBUGGING.md](DEBUGGING.md) |
 | Changing signal levels or DC blocking | [SIGNAL_LEVELS.md](SIGNAL_LEVELS.md) |
 | Running SPICE validation tests | [SPICE_VALIDATION.md](SPICE_VALIDATION.md) |
@@ -53,7 +63,7 @@ rhs   = b_dc + N_i * (i_nl - J_dev * v_nl)
 v_new = G_aug^{-1} * rhs
 ```
 
-### NodalSolver Augmented MNA (Inductors)
+### Augmented MNA (Inductors, Codegen Nodal Path)
 ```
 n_nodal = n_aug + total_inductor_windings
 G_nodal = [G,      N_L   ]     C_nodal = [C,  0 ]
@@ -61,6 +71,8 @@ G_nodal = [G,      N_L   ]     C_nodal = [C,  0 ]
 A_nodal = G_nodal + (2/T)*C_nodal
 A_neg   = (2/T)*C_nodal - G_nodal   (zero VS/VCVS rows only, NOT inductor rows)
 ```
+Used by the codegen "nodal" routing path (selected automatically for circuits
+with multi-transformer groups, M ≥ 10, or K ill-conditioning).
 
 ### Sherman-Morrison (Potentiometers)
 ```
@@ -77,6 +89,8 @@ K' = K - scale * (N_v * su) * (su^T * N_i)
 | N_i[cathode] | Current injected into cathode | +1 |
 | K = N_v*S*N_i | Naturally negative | Correct negative feedback |
 | DC OP G_aug | G_dc minus N_i*J_dev*N_v | Subtraction for convergence |
+| Voltage source RHS row | `rhs[k] = V_dc` (algebraic) | NOT multiplied by 2 |
+| Current source RHS row | `rhs[node] += 2 * I_dc` | Multiplied by 2 for trapezoidal |
 
 ## Common Bug Signatures
 
@@ -92,8 +106,8 @@ K' = K - scale * (N_v * su) * (su^T * N_i)
 | DC OP diverges | Wrong Jacobian sign | Use G_aug = G_dc - N_i*J_dev*N_v |
 | NR oscillation | No pnjlim/fetlim | See VOLTAGE_LIMITING.md |
 | Pot no effect | SM vectors stale | Check set_sample_rate recomputes |
-| NaN in NodalSolver | Inductor currents not initialized | Copy v_node[n_aug..] from DC OP |
-| NodalSolver wrong output | Zeroed inductor A_neg rows | Only zero VS/VCVS rows (n_nodes..n_aug) |
+| NaN in nodal codegen | Inductor currents not initialized | Copy v_node[n_aug..] from DC OP |
+| Nodal codegen wrong output | Zeroed inductor A_neg rows | Only zero VS/VCVS rows (n_nodes..n_aug) |
 | Xfmr NR diverges exponentially | Non-PD inductance matrix (inconsistent k values) | Ensure all k on same core are similar; MNA warns on non-PD |
 | Absolute tol on HV circuit | 1μV on 290V = 3.4 ppb | RELTOL: 1e-3*max(\|v\|)+1e-6 (FIXED) |
 | Trapezoidal NR ringing | Oscillatory mode at Nyquist | BE fallback retries with L-stable method (FIXED) |
@@ -111,12 +125,14 @@ K' = K - scale * (N_v * su) * (su^T * N_i)
 | [GUMMEL_POON.md](GUMMEL_POON.md) | Comprehensive | qb(), Early effect, high injection, GP Jacobian |
 | [LINEAR_ALGEBRA.md](LINEAR_ALGEBRA.md) | Comprehensive | LU, Gauss elim, equilibrated inversion, Sherman-Morrison |
 | [SHERMAN_MORRISON.md](SHERMAN_MORRISON.md) | Comprehensive | Rank-1 updates, precomputed vectors, multi-pot |
+| [DYNAMIC_PARAMS.md](DYNAMIC_PARAMS.md) | Reference | `.pot` / `.wiper` / `.gang` / `.switch` directives, plugin param emission |
 | [OVERSAMPLING.md](OVERSAMPLING.md) | Comprehensive | Polyphase allpass half-band, 2x/4x, coefficients |
-| [CODEGEN.md](CODEGEN.md) | Comprehensive | Generated code structure, templates, runtime/codegen diffs |
+| [CODEGEN.md](CODEGEN.md) | Comprehensive | Generated code structure, templates, codegen capability matrix |
 | [COMPANION_MODELS.md](COMPANION_MODELS.md) | Reference | Trapezoidal companion for C and L |
 | [DEBUGGING.md](DEBUGGING.md) | Reference | Bug signatures, diagnostic patterns, verified values |
 | [SIGNAL_LEVELS.md](SIGNAL_LEVELS.md) | Reference | DC blocking, output scaling, plugin levels |
 | [SPICE_VALIDATION.md](SPICE_VALIDATION.md) | Reference | ngspice setup, correlation benchmarks |
+| [STATUS.md](STATUS.md) | Reference | What's implemented, validated circuits, codegen routing |
 
 ## External References
 

@@ -17,8 +17,8 @@ a DC operating point before transient analysis.
 
 `crates/melange-solver/src/dc_op.rs`
 
-Both codegen (`CircuitIR::from_kernel()`) and runtime (`CircuitSolver::initialize_dc_op()`)
-call into this module.
+Called from the codegen pipeline (`CircuitIR::from_kernel()`). The pre-removal
+runtime entry-point (`CircuitSolver::initialize_dc_op()`) no longer exists.
 
 ## References
 
@@ -223,23 +223,10 @@ self.i_nl_prev = DC_NL_I;
 
 ### Runtime Path
 
-In `CircuitSolver`:
-```rust
-pub fn initialize_dc_op(&mut self, mna: &MnaSystem, device_slots: &[DeviceSlot]) {
-    let config = DcOpConfig {
-        input_node: self.input_node,
-        input_resistance: 1.0 / self.input_conductance,
-        ..DcOpConfig::default()
-    };
-    let result = dc_op::solve_dc_operating_point(mna, device_slots, &config);
-    if result.converged {
-        self.v_prev = result.v_node;
-        self.v_nl_prev = result.v_nl;
-        self.i_nl_prev = result.i_nl;
-        // Run warm-up samples to let DK solver settle
-    }
-}
-```
+**Removed.** The runtime `CircuitSolver`/`NodalSolver`/`initialize_dc_op()` API has
+been deleted. All circuit processing now flows through the codegen pipeline above
+(`CircuitIR::from_kernel` → emitted `DC_NL_I` constant). If you find references to
+`CircuitSolver::initialize_dc_op` in older docs or examples, they are dead code.
 
 ## DK Trapezoidal Steady State
 
@@ -247,9 +234,12 @@ The DK solver uses **trapezoidal** integration for both linear and nonlinear cur
 The net nonlinear contribution is `N_i * (i_nl[n+1] + i_nl[n])`, which is a proper
 trapezoidal average matching the linear discretization.
 
-**Warm-up**: `initialize_dc_op()` runs 50 warm-up samples with zero input after
-setting the initial state, allowing the DK solver to settle from any residual
-mismatch between the DC OP solution and the DK steady state.
+**Warm-up**: The generated state's `warmup()` method runs 50 silent samples
+through `process_sample(0.0, ...)` after construction (called automatically
+from `Default` and `reset()`). This lets the DK solver settle from any residual
+mismatch between the DC OP solution and the DK steady state, and pulls
+high-gain op-amp circuits into the physically correct basin of attraction.
+Emitted from `crates/melange-solver/src/codegen/rust_emitter.rs` (grep `warmup`).
 
 ## Expected DC OP Values (Verification)
 

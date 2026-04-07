@@ -2,8 +2,16 @@
 
 ## Purpose
 
-All matrix operations used in the melange solver pipeline. Reference this when modifying
-any matrix computation in `dk.rs`, `dc_op.rs`, `solver.rs`, or generated code.
+All matrix operations used in the melange solver pipeline. Reference this when
+modifying any matrix computation in `dk.rs`, `dc_op.rs`, `lu.rs`, or the
+codegen-emitted templates.
+
+> **Note on runtime removal.** The runtime `solver.rs:gauss_solve_inplace`,
+> `solve_md`, and `CircuitSolver` paths have been deleted. Live linear-algebra
+> code now lives in `dk.rs` (DK kernel inversion), `dc_op.rs` (DC OP LU),
+> `lu.rs` (sparse + chord LU for codegen), `mna.rs` (small-matrix utilities),
+> and the `templates/rust/state.rs.tera` template (`invert_n` for runtime
+> sample-rate rebuilds).
 
 ## Constants
 
@@ -69,28 +77,26 @@ lu_solve(LU, pivot, b) -> x
 **When to use**: Each NR iteration in `solve_dc_operating_point()`. O(N^2) per solve
 vs O(N^3) per inversion. LU factored once per iteration, reused for solve.
 
-### 3. Gaussian Elimination (Flat) — `solver.rs:gauss_solve_inplace()`
+### 3. Gaussian Elimination (Codegen, Inlined) — `rust_emitter.rs:generate_gauss_elim`
 
-Runtime M-dimensional NR solver. Row-major flat array format.
+Codegen emits inline Gaussian elimination with partial pivoting for the
+M-dimensional NR Jacobian. The shape of the emitted code depends on the routing
+mode:
 
-```
-gauss_solve_inplace(a: &mut [f64], b: &mut [f64], n: usize) -> bool
+- **DK Schur path** — `generate_gauss_elim` emits a fully-unrolled M×M solver
+  (M ≤ 16). Used when the kernel has small M and the K matrix is well-conditioned.
+- **Nodal Schur path** — `generate_schur_gauss_elim` emits a slightly different
+  structure that consumes the precomputed `S = A^{-1}` and solves the M×M system
+  via the same Gaussian elimination shape.
+- **Nodal full LU path** — for K≈0, ill-conditioned K, or large M, the codegen
+  emits a per-iteration N×N LU (`lu_factor` / `lu_back_solve`) with chord-method
+  refactor cadence and AMD-ordered sparse LU. See `lu.rs` and `chord_method.md`.
 
-Index formula: A[i][j] = a[i * n + j]
+All three paths produce straight-line code with no allocations. Singular pivots
+fall through to a "best guess" return at `SINGULARITY_THRESHOLD = 1e-15`.
 
-Forward elimination with partial pivoting:
-  For k = 0..n:
-    Find pivot: argmax_{i>=k} |a[i*n + k]|
-    If pivot < SINGULARITY_THRESHOLD: return false
-    Swap rows k and pivot_row
-    Eliminate below: a[i*n+j] -= factor * a[k*n+j]
-
-Back substitution:
-  For i = n-1..0:
-    b[i] = (b[i] - sum_{j>i} a[i*n+j] * b[j]) / a[i*n+i]
-```
-
-**When to use**: Runtime NR solver for M >= 3 (`solve_md()`).
+**When to use**: not callable directly — emitted automatically by the codegen
+based on the circuit's routing decision (`--solver auto|dk|nodal`).
 
 ### 4. Gauss-Jordan Inversion — `mna.rs:invert_small_matrix()`
 
@@ -152,6 +158,30 @@ scale = delta_g / (1 + delta_g * u^T * S * u)
 su = S * u
 ```
 
+## Chord Method + Sparse LU (Nodal Full-LU Path)
+
+For circuits routed to the nodal full-LU path (K≈0, ill-conditioned K, or
+spectral radius > 0.999), the codegen emits a per-iteration N×N LU solve.
+Three optimizations stack to keep this real-time:
+
+1. **Chord method** — `lu_factor` runs only every `CHORD_REFACTOR=5` NR
+   iterations; intervening iterations use `lu_back_solve` (O(N²)) on the
+   stale factorization with the saved `chord_j_dev`. This trades a few
+   extra NR iterations for ~5× factorization savings.
+
+2. **Cross-timestep persistence** — `chord_lu`, `chord_j_dev`, `chord_valid`
+   live in `CircuitState`. Smooth audio signals reuse the previous sample's
+   factorization across many timesteps, dropping factorizations to near-zero.
+
+3. **Compile-time sparse LU** — AMD ordering and symbolic factorization run
+   at codegen time. The emitter writes `sparse_lu_factor(a, d)` /
+   `sparse_lu_back_solve(a_lu, d, b)` as straight-line code on the original
+   indices (no runtime permutation). Pultec example: 536 factor FLOPs vs
+   ~22973 dense (43× reduction). See `chord_method.md` in memory.
+
+Source: `crates/melange-solver/src/lu.rs` and the emit sites in
+`crates/melange-solver/src/codegen/rust_emitter.rs`.
+
 ## Condition Number Estimation
 
 ```
@@ -180,16 +210,17 @@ flatten_matrix(M, r, c)    2D -> 1D row-major (index = row * cols + col)
 | 1 | Direct division | Codegen template |
 | 2 | Cramer's rule | Codegen template |
 | 3-16 | Gaussian elimination (unrolled) | Codegen template |
-| Any | Gaussian elimination (flat array) | solver.rs runtime |
-| >16 | Not supported | MAX_M = 16 |
+| Any (full LU path) | Sparse LU + chord refactor | `lu.rs` + codegen-emitted straight-line code |
+| >16 | Not supported (DK/Nodal Schur paths) | MAX_M = 16 |
 
 ## Singularity Thresholds by Context
 
 | Context | Threshold | Fallback |
 |---------|-----------|----------|
-| DK kernel inversion | 1e-15 | Error |
-| DC OP LU decomposition | 1e-30 | None (try next strategy) |
-| NR Gauss elimination | 1e-15 | Return current best guess |
-| Transformer inversion | 1e-30 | Identity matrix + warning |
-| Codegen sample-rate rebuild | 1e-30 | Identity matrix + flag |
+| DK kernel inversion (`dk.rs:invert_matrix`) | 1e-15 | Error |
+| DC OP LU decomposition (`dc_op.rs:lu_decompose`) | 1e-30 | None (try next strategy) |
+| Codegen NR Gauss elimination | 1e-15 | Return current best guess |
+| Sparse LU (codegen full-LU path) | 1e-15 | NaN reset, restore from DC OP |
+| Transformer inversion (`mna.rs:invert_small_matrix`) | 1e-30 | Identity matrix + warning |
+| Codegen sample-rate rebuild (`state.rs.tera:invert_n`) | 1e-30 | Identity matrix + flag |
 | SM denominator | 1e-15 | scale = 0 (no correction) |
