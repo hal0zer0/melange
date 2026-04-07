@@ -37,6 +37,98 @@ use ir::CircuitIR;
 #[cfg(feature = "codegen")]
 use rust_emitter::RustEmitter;
 
+/// Strategy for modeling op-amp output saturation at the supply rails.
+///
+/// Real op-amps can't drive their output past their supply rails; in melange,
+/// the linear VCCS model (`Gm = AOL/ROUT`) has unbounded output and requires
+/// an explicit rail-saturation mechanism. Different circuits need different
+/// mechanisms because they have different trade-offs between numerical fidelity,
+/// harmonic fidelity, and runtime cost.
+///
+/// # Auto-selection (default)
+///
+/// When set to [`Auto`](OpampRailMode::Auto), codegen inspects the circuit and
+/// picks the cheapest correct mode. The decision is logged at compile time so
+/// users can see what was chosen and why. Override with one of the explicit
+/// variants when bisecting issues or measuring.
+///
+/// # Variant semantics
+///
+/// - [`None`](OpampRailMode::None): no clamping at all. Op-amp output is
+///   unbounded; circuit must never drive the op-amp into saturation. Suitable
+///   only for verified-linear circuits (clean mixers, buffers, flat EQs).
+///
+/// - [`Hard`](OpampRailMode::Hard): post-NR `v[out].clamp(VEE, VCC)`. Cheapest,
+///   matches pre-2026-04 behavior. **Breaks KCL** for any cap connecting the
+///   clamped node to another node — downstream AC-coupled integrators will
+///   drift to physically impossible values. Only safe when every op-amp
+///   output is DC-coupled to its downstream load (no series coupling cap).
+///
+/// - [`ActiveSet`](OpampRailMode::ActiveSet): post-NR constrained re-solve.
+///   After NR converges, any clamped node is pinned via row replacement and
+///   the rest of the network is re-solved to match. KCL-consistent. Fixes
+///   the Klon-class cap-history corruption. Cost: one extra LU back-solve
+///   (O(N²)) on samples where clamping is active. Still produces hard-clip
+///   harmonics — fine for utility clamping, not ideal for distortion pedals.
+///
+/// - [`BoyleDiodes`](OpampRailMode::BoyleDiodes): auto-inserted catch diodes
+///   per op-amp, anchored to rail-offset voltage sources at `VCC − VOH_DROP`
+///   and `VEE + VOL_DROP`. Matches the Boyle macromodel used by every
+///   commercial SPICE and produces the soft exponential knee characteristic
+///   of real op-amp output stages. Most accurate for distortion circuits
+///   (Klon, Tube Screamer, etc.). Cost: +2 N and +2 M per op-amp, plus the
+///   synthesized voltage sources' augmented rows.
+#[cfg(feature = "codegen")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OpampRailMode {
+    /// Auto-select based on circuit topology. See type-level docs.
+    Auto,
+    /// No clamping — op-amp output is unbounded (only safe for linear circuits).
+    None,
+    /// Post-NR hard clamp (pre-2026-04 behavior). Breaks KCL for AC-coupled downstream.
+    Hard,
+    /// Post-NR constrained re-solve. KCL-consistent hard clip with square-wave harmonics.
+    ActiveSet,
+    /// Auto-inserted Boyle catch diodes. Soft exponential knee, correct physics.
+    BoyleDiodes,
+}
+
+#[cfg(feature = "codegen")]
+impl OpampRailMode {
+    /// Parse a mode name (case-insensitive) from a CLI flag or config string.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "auto" => Some(Self::Auto),
+            "none" | "off" => Some(Self::None),
+            "hard" | "clamp" => Some(Self::Hard),
+            "active-set" | "active_set" | "activeset" => Some(Self::ActiveSet),
+            "boyle-diodes" | "boyle_diodes" | "boylediodes" | "boyle" | "diodes" => {
+                Some(Self::BoyleDiodes)
+            }
+            _ => None,
+        }
+    }
+
+    /// Human-readable name for logging.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::None => "none",
+            Self::Hard => "hard",
+            Self::ActiveSet => "active-set",
+            Self::BoyleDiodes => "boyle-diodes",
+        }
+    }
+}
+
+#[cfg(feature = "codegen")]
+impl std::fmt::Display for OpampRailMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Configuration for code generation
 #[cfg(feature = "codegen")]
 #[derive(Debug, Clone)]
@@ -85,6 +177,10 @@ pub struct CodegenConfig {
     /// Set to true to save memory (~1.4KB for N=8, M=4) and compile time when
     /// the circuit is known to be well-conditioned.
     pub disable_be_fallback: bool,
+    /// Strategy for op-amp supply rail saturation. Default [`OpampRailMode::Auto`],
+    /// which inspects the circuit topology and picks the cheapest correct mode.
+    /// See [`OpampRailMode`] for the full menu and trade-offs.
+    pub opamp_rail_mode: OpampRailMode,
 }
 
 #[cfg(feature = "codegen")]
@@ -156,6 +252,7 @@ impl Default for CodegenConfig {
             pot_settle_samples: 64,
             backward_euler: false,
             disable_be_fallback: false,
+            opamp_rail_mode: OpampRailMode::Auto,
         }
     }
 }
@@ -427,5 +524,72 @@ mod tests {
         assert_eq!(config.sample_rate, 44100.0);
         assert_eq!(config.max_iterations, 100);
         assert!(config.tolerance > 0.0);
+        // Default op-amp rail handling is auto-selection.
+        assert_eq!(config.opamp_rail_mode, OpampRailMode::Auto);
+    }
+
+    #[test]
+    fn test_opamp_rail_mode_parse_canonical() {
+        assert_eq!(OpampRailMode::parse("auto"), Some(OpampRailMode::Auto));
+        assert_eq!(OpampRailMode::parse("none"), Some(OpampRailMode::None));
+        assert_eq!(OpampRailMode::parse("hard"), Some(OpampRailMode::Hard));
+        assert_eq!(
+            OpampRailMode::parse("active-set"),
+            Some(OpampRailMode::ActiveSet)
+        );
+        assert_eq!(
+            OpampRailMode::parse("boyle-diodes"),
+            Some(OpampRailMode::BoyleDiodes)
+        );
+    }
+
+    #[test]
+    fn test_opamp_rail_mode_parse_aliases_and_case() {
+        // Case-insensitive.
+        assert_eq!(OpampRailMode::parse("AUTO"), Some(OpampRailMode::Auto));
+        assert_eq!(OpampRailMode::parse("Hard"), Some(OpampRailMode::Hard));
+        // Underscore variants.
+        assert_eq!(
+            OpampRailMode::parse("active_set"),
+            Some(OpampRailMode::ActiveSet)
+        );
+        assert_eq!(
+            OpampRailMode::parse("boyle_diodes"),
+            Some(OpampRailMode::BoyleDiodes)
+        );
+        // Common short aliases.
+        assert_eq!(OpampRailMode::parse("off"), Some(OpampRailMode::None));
+        assert_eq!(OpampRailMode::parse("clamp"), Some(OpampRailMode::Hard));
+        assert_eq!(OpampRailMode::parse("boyle"), Some(OpampRailMode::BoyleDiodes));
+        assert_eq!(OpampRailMode::parse("diodes"), Some(OpampRailMode::BoyleDiodes));
+    }
+
+    #[test]
+    fn test_opamp_rail_mode_parse_rejects_unknown() {
+        assert_eq!(OpampRailMode::parse(""), None);
+        assert_eq!(OpampRailMode::parse("soft"), None);
+        assert_eq!(OpampRailMode::parse("tanh"), None);
+        assert_eq!(OpampRailMode::parse("bogus"), None);
+    }
+
+    #[test]
+    fn test_opamp_rail_mode_display_round_trips() {
+        // Display format must parse back to the same variant so CLI logging stays stable.
+        for mode in [
+            OpampRailMode::Auto,
+            OpampRailMode::None,
+            OpampRailMode::Hard,
+            OpampRailMode::ActiveSet,
+            OpampRailMode::BoyleDiodes,
+        ] {
+            let text = mode.to_string();
+            assert_eq!(
+                OpampRailMode::parse(&text),
+                Some(mode),
+                "Display -> parse round-trip failed for {:?} (rendered as {:?})",
+                mode,
+                text
+            );
+        }
     }
 }

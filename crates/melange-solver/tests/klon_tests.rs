@@ -297,3 +297,192 @@ fn main() {
         assert!(val > 0.001, "Output too quiet: {:.6} V", val);
     }
 }
+
+// =============================================================================
+// ActiveSet rail-mode regression test
+// =============================================================================
+//
+// This test pins the fix for the op-amp rail-clamp / cap-history corruption
+// bug (see memory/opamp_rail_clamp_bug.md). With the Hard mode, at 100 mV
+// input the Klon's out_ac node drifts to 60 V+ (physically impossible) because
+// the post-NR hard clamp on v[tone_out] corrupts the C15 trapezoidal history.
+// With ActiveSet mode, the post-convergence constrained resolve pins clamped
+// op-amps and re-solves the network so KCL is satisfied at every node —
+// out_ac stays within ±14 V across the input sweep.
+//
+// If this test fails after a codegen change, the ActiveSet resolve is no
+// longer KCL-preserving and the Klon plugin will sound like a blown speaker
+// again. DO NOT just bump the bound — trace the cause.
+
+#[test]
+fn test_klon_active_set_keeps_out_ac_physical() {
+    use melange_solver::codegen::OpampRailMode;
+
+    let spice = load_klon_netlist();
+    let netlist = Netlist::parse(&spice).unwrap();
+    let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
+
+    let input_node = mna.node_map["in"] - 1;
+    let output_node = mna.node_map["out"] - 1;
+    // out_ac is the canary node: downstream of U2B tone_out via C15.
+    let out_ac_node = mna.node_map["out_ac"] - 1;
+    mna.g[input_node][input_node] += 1.0;
+
+    let config = CodegenConfig {
+        circuit_name: "klon_active_set".to_string(),
+        sample_rate: 48000.0,
+        input_node,
+        output_nodes: vec![output_node],
+        input_resistance: 1.0,
+        opamp_rail_mode: OpampRailMode::ActiveSet,
+        ..CodegenConfig::default()
+    };
+
+    let codegen = CodeGenerator::new(config);
+    let result = codegen.generate_nodal(&mna, &netlist).unwrap();
+
+    // The test injects three amplitudes (below, at, above the rail-clamp
+    // threshold for Klon at default pot positions) and asserts out_ac stays
+    // within ±15 V (a generous envelope around the true ±13.5 V op-amp rails
+    // that allows for the linearization slack in the active-set resolve).
+    let main_code = format!(
+        r#"
+fn main() {{
+    const OUT_AC_IDX: usize = {out_ac_idx};
+
+    for &amp in &[0.01_f64, 0.1_f64, 0.3_f64] {{
+        let mut state = CircuitState::default();
+        state.set_sample_rate(48000.0);
+        for _ in 0..5000 {{ process_sample(0.0, &mut state); }}
+
+        let mut max_out_ac = 0.0f64;
+        let mut max_output = 0.0f64;
+        let mut any_nan = false;
+
+        for i in 0..48000 {{
+            let t = i as f64 / 48000.0;
+            let input = amp * (2.0 * std::f64::consts::PI * 440.0 * t).sin();
+            let out = process_sample(input, &mut state)[0];
+            if !out.is_finite() {{ any_nan = true; }}
+            if i > 24000 {{
+                let v_out_ac = state.v_prev[OUT_AC_IDX].abs();
+                if v_out_ac > max_out_ac {{ max_out_ac = v_out_ac; }}
+                if out.abs() > max_output {{ max_output = out.abs(); }}
+            }}
+        }}
+
+        println!("amp={{:.3}} max_out_ac={{:.6}} max_output={{:.6}} nan_any={{}}", amp, max_out_ac, max_output, any_nan);
+        assert!(!any_nan, "ActiveSet produced NaN/Inf at amp={{}}", amp);
+        assert!(
+            max_out_ac < 15.0,
+            "out_ac drifted to {{:.2}} V at amp={{}} V — ActiveSet resolve no longer KCL-consistent. \
+             See memory/opamp_rail_clamp_bug.md for context.",
+            max_out_ac, amp
+        );
+    }}
+    println!("PASS");
+}}
+"#,
+        out_ac_idx = out_ac_node,
+    );
+
+    let output = compile_and_run(&result.code, &main_code, "active_set");
+    assert!(
+        output.contains("PASS"),
+        "Klon ActiveSet regression test failed:\n{}",
+        output
+    );
+    // Surface the measured values for manual inspection.
+    for line in output.lines() {
+        if line.starts_with("amp=") {
+            eprintln!("  {}", line);
+        }
+    }
+}
+
+// =============================================================================
+// Hard mode still produces the broken behavior (documents the bug)
+// =============================================================================
+//
+// We keep a separate test that pins Hard mode's broken behavior so that:
+//   (a) anyone reading the tests can see the bug is reproducible,
+//   (b) if someone accidentally "fixes" Hard to behave like ActiveSet,
+//       the tests catch it (because that would be a silent mode change).
+//
+// The threshold here is loose — we just assert out_ac goes above 20 V,
+// comfortably above the ±13.5 V op-amp rails — which is the Hard mode's
+// cap-history-corruption signature.
+
+#[test]
+fn test_klon_hard_mode_documents_cap_history_bug() {
+    use melange_solver::codegen::OpampRailMode;
+
+    let spice = load_klon_netlist();
+    let netlist = Netlist::parse(&spice).unwrap();
+    let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
+
+    let input_node = mna.node_map["in"] - 1;
+    let output_node = mna.node_map["out"] - 1;
+    let out_ac_node = mna.node_map["out_ac"] - 1;
+    mna.g[input_node][input_node] += 1.0;
+
+    let config = CodegenConfig {
+        circuit_name: "klon_hard_documenting_bug".to_string(),
+        sample_rate: 48000.0,
+        input_node,
+        output_nodes: vec![output_node],
+        input_resistance: 1.0,
+        opamp_rail_mode: OpampRailMode::Hard,
+        ..CodegenConfig::default()
+    };
+
+    let codegen = CodeGenerator::new(config);
+    let result = codegen.generate_nodal(&mna, &netlist).unwrap();
+
+    let main_code = format!(
+        r#"
+fn main() {{
+    const OUT_AC_IDX: usize = {out_ac_idx};
+    let mut state = CircuitState::default();
+    state.set_sample_rate(48000.0);
+    for _ in 0..5000 {{ process_sample(0.0, &mut state); }}
+
+    let mut max_out_ac = 0.0f64;
+    for i in 0..48000 {{
+        let t = i as f64 / 48000.0;
+        let input = 0.1 * (2.0 * std::f64::consts::PI * 440.0 * t).sin();
+        let _ = process_sample(input, &mut state);
+        if i > 24000 {{
+            let v = state.v_prev[OUT_AC_IDX].abs();
+            if v > max_out_ac {{ max_out_ac = v; }}
+        }}
+    }}
+    println!("max_out_ac={{:.3}}", max_out_ac);
+    println!("PASS");
+}}
+"#,
+        out_ac_idx = out_ac_node,
+    );
+
+    let output = compile_and_run(&result.code, &main_code, "hard_bug");
+    assert!(output.contains("PASS"));
+
+    // Hard mode MUST still exhibit the cap-history corruption (out_ac > 20 V)
+    // at 100 mV / 440 Hz. If this fails it means either Hard was silently
+    // upgraded to something else (rename the mode or flip the routing) or
+    // the underlying bug was fixed at a different layer (great — then
+    // delete this test).
+    let max = output
+        .lines()
+        .find(|l| l.starts_with("max_out_ac="))
+        .and_then(|l| l["max_out_ac=".len()..].parse::<f64>().ok())
+        .expect("did not emit max_out_ac line");
+    assert!(
+        max > 20.0,
+        "Hard mode out_ac = {:.2} V, expected >20 V (the cap-history bug). \
+         Either Hard was silently fixed (great — delete this test) or the \
+         bug-repro conditions changed. See memory/opamp_rail_clamp_bug.md.",
+        max
+    );
+    eprintln!("Klon Hard mode: out_ac reaches {:.2} V (bug repro)", max);
+}

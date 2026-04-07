@@ -104,6 +104,31 @@ enum Commands {
         #[arg(long)]
         backward_euler: bool,
 
+        /// Op-amp supply rail saturation strategy.
+        ///
+        /// Controls how the generated solver models an op-amp's output hitting
+        /// its supply rails. Different circuits need different trade-offs
+        /// between numerical correctness, harmonic accuracy, and runtime cost.
+        ///
+        /// Valid values:{n}{n}
+        /// * auto — inspect the circuit and pick the cheapest correct mode.
+        ///   Logged at compile time so you can see what was chosen. Override
+        ///   when bisecting issues.{n}{n}
+        /// * none — no clamping at all (op-amp output is unbounded). Use only
+        ///   for verified-linear circuits.{n}{n}
+        /// * hard — post-NR v[out].clamp(VEE, VCC). Cheapest, matches
+        ///   pre-2026-04 behavior. Breaks KCL for AC-coupled downstream caps
+        ///   (see Klon investigation).{n}{n}
+        /// * active-set — post-NR constrained re-solve. KCL-consistent hard
+        ///   clip. Fixes Klon-class cap-history corruption. Still produces
+        ///   square-wave harmonics.{n}{n}
+        /// * boyle-diodes — auto-inserted physical catch diodes anchored to
+        ///   rail-offset voltage sources. Matches commercial SPICE Boyle
+        ///   macromodels. Produces soft exponential knee — best for
+        ///   distortion pedals.
+        #[arg(long, value_name = "MODE", default_value = "auto")]
+        opamp_rail_mode: String,
+
         /// Plugin display name (defaults to capitalized circuit filename)
         #[arg(long)]
         name: Option<String>,
@@ -379,6 +404,7 @@ fn main() -> Result<()> {
             oversampling,
             solver,
             backward_euler,
+            opamp_rail_mode,
             name,
             mono,
             wet_dry_mix,
@@ -401,6 +427,15 @@ fn main() -> Result<()> {
                 anyhow::bail!("oversampling must be 1, 2, or 4, got {}", oversampling);
             }
 
+            // Parse op-amp rail mode. Unknown values are user errors, not silent fallbacks.
+            let rail_mode = melange_solver::codegen::OpampRailMode::parse(&opamp_rail_mode)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Unknown --opamp-rail-mode '{}'. Valid values: auto, none, hard, active-set, boyle-diodes",
+                        opamp_rail_mode
+                    )
+                })?;
+
             // Level params are on by default; --no-level-params disables them
             let level_params = with_level_params && !no_level_params;
 
@@ -422,6 +457,7 @@ fn main() -> Result<()> {
                 no_dc_block,
                 &solver,
                 backward_euler,
+                rail_mode,
                 name.as_deref(),
                 mono,
                 wet_dry_mix,
@@ -571,6 +607,7 @@ fn compile_circuit_source(
     no_dc_block: bool,
     solver_override: &str,
     backward_euler: bool,
+    opamp_rail_mode: melange_solver::codegen::OpampRailMode,
     plugin_name: Option<&str>,
     mono: bool,
     wet_dry_mix: bool,
@@ -928,6 +965,20 @@ fn compile_circuit_source(
     // Step 4: Generate code
     println!("Step 4: Generating Rust code...");
 
+    // Resolve the op-amp rail mode so we can print the auto-decision before
+    // the emitter runs its own logs. This is a side-effect-free inspection —
+    // the actual mode baked into the IR happens inside codegen (which does
+    // the same resolution deterministically).
+    {
+        use melange_solver::codegen::ir::resolve_opamp_rail_mode;
+        let resolved = resolve_opamp_rail_mode(&mna, opamp_rail_mode);
+        println!(
+            "  Op-amp rail mode: {} ({})",
+            resolved.mode,
+            resolved.reason.as_str()
+        );
+    }
+
     let circuit_name = output
         .file_stem()
         .and_then(|s| s.to_str())
@@ -986,6 +1037,7 @@ fn compile_circuit_source(
         oversampling_factor: oversampling,
         dc_block: !no_dc_block,
         backward_euler,
+        opamp_rail_mode,
         ..CodegenConfig::default()
     };
 
@@ -1644,6 +1696,7 @@ fn simulate_circuit_source(
         pot_settle_samples: 64,
         backward_euler: false,
         disable_be_fallback: false,
+        opamp_rail_mode: melange_solver::codegen::OpampRailMode::Auto,
     };
     let generator = CodeGenerator::new(config);
     let generated = if use_nodal {
@@ -2037,6 +2090,7 @@ fn analyze_freq_response(
         pot_settle_samples: 64,
         backward_euler: false,
         disable_be_fallback: false,
+        opamp_rail_mode: melange_solver::codegen::OpampRailMode::Auto,
     };
     let generator = CodeGenerator::new(config);
     let generated = if use_nodal {

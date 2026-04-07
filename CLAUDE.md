@@ -2,6 +2,22 @@
 
 Melange — Rust toolkit for circuit simulation to real-time audio DSP.
 
+## CRITICAL: Accuracy beats plugin usability 1000x
+
+Accurately modeling a circuit is **1000x more important** than quickly building a working plugin. Melange is a "build whatever circuit you throw at me" tool, NOT a "tweak the circuit to do what I want" tool.
+
+When a user reports a plugin sounds wrong (clipping, blown speaker, distorted, too hot, too quiet):
+- **The bug is in melange** (solver, codegen, device models) — assume this until proven otherwise.
+- **Never add workaround components** to user netlists (catch diodes, padding resistors, snubbers) even if the real hardware has equivalents. If the user didn't put it in the netlist, the fix belongs in melange's MNA/device layer.
+- **Never modify component values** in circuits to dodge solver edge cases — fix the solver.
+- **Never suggest "turn the knobs down"** as a fix — that's avoiding the buggy region, not fixing it.
+- **Never use `--output-scale` or output attenuation** as a remedy for simulation errors — it's a voltage→DAW-unit mapping, not a bug fix.
+- **Performance, ergonomics, and plugin polish are always secondary** to schematic fidelity. A slow accurate solver beats a fast wrong one.
+
+## CRITICAL: Use CLI flags when two circuits need conflicting behavior
+
+When fixing one circuit regresses another, don't pick the lesser evil — expose both behaviors via a CLI flag named after the mechanism (not the circuit). Existing examples: `--solver {auto|dk|nodal}`, `--backward-euler`, `--oversampling {1|2|4}`. Each circuit opts into the mode that serves it. Default to the option with the broadest safety envelope. Flags are *not* a license to ship broken modes — every selectable mode has to be correct for some class of circuits.
+
 ## CRITICAL: Never simplify circuits
 
 The goal is ALWAYS to get melange to run the real circuit, NEVER to simplify a circuit to work around melange limitations. If a real hardware topology doesn't work in melange, that is a melange bug — fix melange. Do not substitute "simplified approximations" of real circuit sections.

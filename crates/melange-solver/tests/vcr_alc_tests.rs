@@ -61,6 +61,18 @@ Rload    out_ac    0         100K
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
 fn generate_nodal_code(spice: &str, sample_rate: f64) -> String {
+    generate_nodal_code_with_rail_mode(
+        spice,
+        sample_rate,
+        melange_solver::codegen::OpampRailMode::Auto,
+    )
+}
+
+fn generate_nodal_code_with_rail_mode(
+    spice: &str,
+    sample_rate: f64,
+    opamp_rail_mode: melange_solver::codegen::OpampRailMode,
+) -> String {
     let netlist = Netlist::parse(spice).expect("parse");
     let mut mna = MnaSystem::from_netlist(&netlist).expect("mna");
     let input_node = mna.node_map["in"] - 1;
@@ -73,6 +85,7 @@ fn generate_nodal_code(spice: &str, sample_rate: f64) -> String {
         input_node,
         output_nodes: vec![output_node],
         input_resistance: 1.0,
+        opamp_rail_mode,
         ..CodegenConfig::default()
     };
     let codegen = CodeGenerator::new(config);
@@ -578,6 +591,85 @@ fn main() {
     assert!(
         peak_fast <= peak_slow,
         "Fast attack peak ({peak_fast:.4}) should be <= slow ({peak_slow:.4})"
+    );
+}
+
+/// Same attack-timing check but under explicit `OpampRailMode::ActiveSet`.
+///
+/// This test guards the Step 6 decision to let the auto-detector upgrade
+/// circuits with AC-coupled op-amp downstream to ActiveSet. VCR ALC has three
+/// such caps (Cvca_ac, Cfb_iv feedback, Cout), so it would be a candidate for
+/// auto-upgrade — but if ActiveSet changes its attack dynamics measurably,
+/// we'd rather keep it on Hard.
+///
+/// Empirically VCR ALC produces identical output under Hard and ActiveSet
+/// because the op-amps don't actually exceed their rails during the test,
+/// so the active-set constraint loop is a no-op. This test pins that
+/// invariant so any future change that makes ActiveSet diverge from Hard
+/// on this circuit gets flagged loudly.
+#[test]
+fn test_vcr_alc_active_set_matches_hard_on_attack_test() {
+    use melange_solver::codegen::OpampRailMode;
+
+    let code_hard = generate_nodal_code_with_rail_mode(VCR_ALC_SPICE, 48000.0, OpampRailMode::Hard);
+    let code_active =
+        generate_nodal_code_with_rail_mode(VCR_ALC_SPICE, 48000.0, OpampRailMode::ActiveSet);
+
+    let main_code = r#"
+fn main() {
+    let sr = 48000.0;
+    let freq = 1000.0;
+
+    for &attack_pos in &[0usize, 2] {
+        let mut state = CircuitState::default();
+        state.warmup();
+        state.set_switch_0(attack_pos);
+
+        let mut peak_early = 0.0f64;
+        for i in 0..(sr as usize / 5) {
+            let t = i as f64 / sr;
+            let input = 1.0 * (2.0 * std::f64::consts::PI * freq * t).sin();
+            let out = process_sample(input, &mut state);
+            let v = out[0].abs();
+            if i > 96 && i < 480 {
+                peak_early = peak_early.max(v);
+            }
+        }
+        println!("peak_attack_{}={:.6}", attack_pos, peak_early);
+    }
+}
+"#;
+
+    let output_hard = compile_and_run(&code_hard, main_code, "attack_hard");
+    let output_active = compile_and_run(&code_active, main_code, "attack_active");
+
+    let peak_fast_hard = parse_kv(&output_hard, "peak_attack_0");
+    let peak_slow_hard = parse_kv(&output_hard, "peak_attack_2");
+    let peak_fast_active = parse_kv(&output_active, "peak_attack_0");
+    let peak_slow_active = parse_kv(&output_active, "peak_attack_2");
+
+    // ActiveSet should produce the same fast-attack peak as Hard within a
+    // small tolerance — it only differs from Hard when a rail is actually
+    // violated, and VCR ALC's buffer op-amp stays in-range during the
+    // attack transient.
+    let fast_drift = (peak_fast_hard - peak_fast_active).abs();
+    let slow_drift = (peak_slow_hard - peak_slow_active).abs();
+    assert!(
+        fast_drift < 0.01,
+        "Fast-attack peak shifted between Hard ({peak_fast_hard:.4}) \
+         and ActiveSet ({peak_fast_active:.4}) — ActiveSet resolver changed \
+         VCR ALC's attack dynamics, which means either a rail is now being \
+         hit (previously not) or the resolver is firing when it shouldn't."
+    );
+    assert!(
+        slow_drift < 0.01,
+        "Slow-attack peak shifted between Hard ({peak_slow_hard:.4}) \
+         and ActiveSet ({peak_slow_active:.4}) — see comment on fast drift."
+    );
+    // ActiveSet must still satisfy the original "fast <= slow" invariant.
+    assert!(
+        peak_fast_active <= peak_slow_active,
+        "ActiveSet broke fast<=slow: fast={peak_fast_active:.4} slow={peak_slow_active:.4}"
     );
 }
 

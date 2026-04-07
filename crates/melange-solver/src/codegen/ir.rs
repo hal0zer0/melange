@@ -139,6 +139,209 @@ pub struct SolverConfig {
     /// Use backward Euler integration (unconditionally stable, first-order).
     #[serde(default)]
     pub backward_euler: bool,
+    /// Resolved op-amp supply rail saturation strategy.
+    ///
+    /// If the user's [`CodegenConfig::opamp_rail_mode`] was [`OpampRailMode::Auto`],
+    /// this holds the concrete mode chosen by [`resolve_opamp_rail_mode`]. If the
+    /// user specified a concrete mode, that mode is stored verbatim. The emitter
+    /// never sees [`OpampRailMode::Auto`] — it's resolved by the time the IR is
+    /// built.
+    ///
+    /// [`CodegenConfig::opamp_rail_mode`]: crate::codegen::CodegenConfig::opamp_rail_mode
+    /// [`OpampRailMode::Auto`]: crate::codegen::OpampRailMode::Auto
+    #[serde(default = "default_opamp_rail_mode")]
+    pub opamp_rail_mode: crate::codegen::OpampRailMode,
+}
+
+fn default_opamp_rail_mode() -> crate::codegen::OpampRailMode {
+    // Deserialized IRs without an explicit mode default to the pre-2026-04
+    // behavior (hard clamp). `Auto` is only valid as a user-facing input;
+    // by the time an IR is constructed, the mode is always concrete.
+    crate::codegen::OpampRailMode::Hard
+}
+
+/// Reason recorded for an auto-detection decision. Used for logging so users
+/// can see *why* a particular mode was chosen. Each variant carries enough
+/// information to be reconstructable from the MNA alone — no references to
+/// specific circuit names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OpampRailModeReason {
+    /// User explicitly specified the mode; no auto-detection ran.
+    UserRequested,
+    /// Circuit has no op-amps with finite supply rails, so no clamping is needed.
+    NoClampedOpamps,
+    /// All op-amp outputs are DC-coupled to their downstream networks. The
+    /// hard post-NR clamp is safe — no cap history to corrupt — and cheap.
+    AllDcCoupled,
+    /// At least one clamped op-amp has an output cap coupling into a downstream
+    /// non-feedback node. The post-NR hard clamp would corrupt that cap's
+    /// trapezoidal history on rail-violating samples. Auto-select `ActiveSet`
+    /// to keep KCL consistent. (When `BoyleDiodes` lands, this reason will
+    /// also be used to upgrade distortion-class circuits further.)
+    AcCoupledDownstream,
+}
+
+impl OpampRailModeReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::UserRequested => "user requested",
+            Self::NoClampedOpamps => "no op-amps with finite VCC/VEE",
+            Self::AllDcCoupled => "op-amps only DC-coupled downstream (hard clamp safe)",
+            Self::AcCoupledDownstream => "op-amp output has cap-coupled downstream (active-set keeps cap history consistent)",
+        }
+    }
+}
+
+/// Result of [`resolve_opamp_rail_mode`]: the concrete mode that should be
+/// baked into the generated code, plus the reason it was chosen.
+#[derive(Debug, Clone)]
+pub struct ResolvedOpampRailMode {
+    pub mode: crate::codegen::OpampRailMode,
+    pub reason: OpampRailModeReason,
+}
+
+/// Returns `true` if the op-amp output node `out_idx` (1-indexed) has any
+/// capacitive coupling to a non-feedback node in the MNA `C` matrix.
+///
+/// "Non-feedback" means: not the op-amp's own inverting input, not ground,
+/// and not the out node itself. Feedback caps (between `out` and the `-`
+/// input) are fine for the hard-clamp path because they're not downstream
+/// integrators — they're part of the op-amp's own closed loop. Output
+/// coupling caps (between `out` and a different stage's input) are the
+/// ones that corrupt cap history when the op-amp is post-clamped.
+///
+/// Returns `false` if the op-amp has `out_idx == 0` (grounded / invalid).
+fn opamp_has_ac_coupled_downstream(
+    mna: &crate::mna::MnaSystem,
+    opamp: &crate::mna::OpampInfo,
+) -> bool {
+    if opamp.n_out_idx == 0 {
+        return false;
+    }
+    let out = opamp.n_out_idx - 1;   // 0-indexed
+    // Optional: the op-amp's own inverting input (for skipping feedback caps).
+    // 0 means grounded in the MNA's 1-indexed convention.
+    let inverting_input: Option<usize> = if opamp.n_minus_idx > 0 {
+        Some(opamp.n_minus_idx - 1)
+    } else {
+        None
+    };
+
+    // C matrix is NxN (where N is mna.n, the current MNA dimension). A cap
+    // between nodes i and j stamps into C[i][i], C[j][j], C[i][j], C[j][i].
+    // We scan row `out` of C for non-zero off-diagonal entries.
+    let n = mna.c.len();
+    if out >= n {
+        return false;
+    }
+    let row = &mna.c[out];
+    for (other, &c) in row.iter().enumerate() {
+        if other == out {
+            continue; // self-diagonal
+        }
+        if c == 0.0 {
+            continue;
+        }
+        if let Some(nm) = inverting_input {
+            if other == nm {
+                // Feedback cap — doesn't count as downstream coupling.
+                continue;
+            }
+        }
+        // Any other non-zero entry is a coupling cap to another circuit node.
+        return true;
+    }
+    false
+}
+
+/// Resolve an [`OpampRailMode`] request into a concrete mode using the MNA
+/// as the basis for auto-detection.
+///
+/// # Decision rules (Auto mode)
+///
+/// 1. **No op-amps with finite VCC/VEE** → [`OpampRailMode::None`]. Nothing
+///    to clamp; the user modeled all op-amps as ideal VCCSs.
+///
+/// 2. **All clamped op-amp outputs are DC-coupled to their downstream**
+///    (no output coupling caps, only feedback caps) → [`OpampRailMode::Hard`].
+///    The cheap post-NR hard clamp is KCL-safe in this topology because
+///    there's no cap history to corrupt.
+///
+/// 3. **At least one clamped op-amp has a cap coupling to a non-feedback
+///    downstream node** → [`OpampRailMode::ActiveSet`]. The hard clamp
+///    would corrupt that cap's trapezoidal history on rail-violating
+///    samples; the active-set resolve keeps KCL consistent.
+///
+/// The future `OpampRailMode::BoyleDiodes` upgrade (Step 5 in the task
+/// series) will make rule 3 promote distortion-class circuits even further
+/// — to a Boyle catch-diode model that produces the soft exponential knee
+/// characteristic of real op-amp saturation. For Step 6 we stop at
+/// `ActiveSet`, which fixes the numerical bug without changing distortion
+/// character; `BoyleDiodes` will change character and lands separately.
+///
+/// # Explicit user overrides
+///
+/// Any explicit mode (anything other than [`OpampRailMode::Auto`]) is
+/// returned verbatim with [`OpampRailModeReason::UserRequested`]. The
+/// resolver NEVER silently upgrades a user's explicit choice — even
+/// `None` on a circuit that would otherwise pick `ActiveSet` is honored,
+/// because the override is how users bisect and measure.
+///
+/// [`OpampRailMode`]: crate::codegen::OpampRailMode
+/// [`OpampRailMode::None`]: crate::codegen::OpampRailMode::None
+/// [`OpampRailMode::Hard`]: crate::codegen::OpampRailMode::Hard
+/// [`OpampRailMode::ActiveSet`]: crate::codegen::OpampRailMode::ActiveSet
+/// [`OpampRailMode::BoyleDiodes`]: crate::codegen::OpampRailMode::BoyleDiodes
+pub fn resolve_opamp_rail_mode(
+    mna: &crate::mna::MnaSystem,
+    requested: crate::codegen::OpampRailMode,
+) -> ResolvedOpampRailMode {
+    use crate::codegen::OpampRailMode;
+
+    // Explicit request wins. User overrides exist to bisect and measure; the
+    // auto-detector must never silently override a user choice.
+    if requested != OpampRailMode::Auto {
+        return ResolvedOpampRailMode {
+            mode: requested,
+            reason: OpampRailModeReason::UserRequested,
+        };
+    }
+
+    // Collect op-amps that actually need clamping. Infinities (set by the
+    // MNA resolver when no rails were declared) mean the user modeled an
+    // ideal VCCS — nothing to clamp.
+    let clamped_opamps: Vec<&crate::mna::OpampInfo> = mna
+        .opamps
+        .iter()
+        .filter(|oa| oa.n_out_idx > 0 && (oa.vcc.is_finite() || oa.vee.is_finite()))
+        .collect();
+
+    if clamped_opamps.is_empty() {
+        return ResolvedOpampRailMode {
+            mode: OpampRailMode::None,
+            reason: OpampRailModeReason::NoClampedOpamps,
+        };
+    }
+
+    // Check whether ANY clamped op-amp has a non-feedback output coupling cap.
+    // A single offender is enough to force ActiveSet for the whole circuit —
+    // we can't mix modes within one generated function, and the KCL corruption
+    // only needs one cap to blow up downstream.
+    let ac_coupled = clamped_opamps
+        .iter()
+        .any(|oa| opamp_has_ac_coupled_downstream(mna, oa));
+
+    if ac_coupled {
+        ResolvedOpampRailMode {
+            mode: OpampRailMode::ActiveSet,
+            reason: OpampRailModeReason::AcCoupledDownstream,
+        }
+    } else {
+        ResolvedOpampRailMode {
+            mode: OpampRailMode::Hard,
+            reason: OpampRailModeReason::AllDcCoupled,
+        }
+    }
 }
 
 fn default_pot_settle_samples() -> usize {
@@ -868,6 +1071,13 @@ impl CircuitIR {
             }
         }
 
+        let rail_mode = resolve_opamp_rail_mode(mna, config.opamp_rail_mode);
+        log::info!(
+            "Op-amp rail mode: {} ({})",
+            rail_mode.mode,
+            rail_mode.reason.as_str()
+        );
+
         let solver_config = SolverConfig {
             sample_rate: config.sample_rate,
             alpha,
@@ -880,6 +1090,7 @@ impl CircuitIR {
             output_scales: config.output_scales.clone(),
             pot_settle_samples: config.pot_settle_samples,
             backward_euler: be,
+            opamp_rail_mode: rail_mode.mode,
         };
 
         let metadata = CircuitMetadata {
@@ -1680,7 +1891,14 @@ impl CircuitIR {
         //   conditioning — for VCR-ALC-class circuits it's tolerable at N~18.
         let has_vca = !mna.vcas.is_empty();
         let mut opamp_iir_data: Vec<OpampIirData> = Vec::new();
-        if !has_vca {
+        // IIR op-amp path is currently disabled: the explicit 1-sample-delay
+        // feedback causes main-NR divergence on circuits like the Klon Centaur
+        // (sub-step fallback runs every sample, drops us to 0.25x realtime, and
+        // itself omits the IIR RHS stamp so the op-amps don't function).
+        // Falling through to the ideal op-amp path (Gm in G) works for all
+        // currently validated circuits. Re-enable when IIR math is fixed.
+        #[allow(clippy::overly_complex_bool_expr)]
+        if !has_vca && false {
         for oa in &mna.opamps {
             if oa.gbw.is_finite() && oa.gbw > 0.0 && oa.n_out_idx > 0 {
                 let o = oa.n_out_idx - 1;
@@ -1756,6 +1974,13 @@ impl CircuitIR {
             augmented_inductors: true,
         };
 
+        let rail_mode = resolve_opamp_rail_mode(mna, config.opamp_rail_mode);
+        log::info!(
+            "Op-amp rail mode: {} ({})",
+            rail_mode.mode,
+            rail_mode.reason.as_str()
+        );
+
         let solver_config = SolverConfig {
             sample_rate,
             alpha,
@@ -1768,6 +1993,7 @@ impl CircuitIR {
             output_scales: config.output_scales.clone(),
             pot_settle_samples: config.pot_settle_samples,
             backward_euler: config.backward_euler,
+            opamp_rail_mode: rail_mode.mode,
         };
 
         // Compute S = A^{-1} for Schur complement NR (O(M³) instead of O(N³) per iteration)
@@ -3129,5 +3355,314 @@ impl CircuitIR {
     /// Access K_be matrix element K_be[i][j] (backward Euler, nodal Schur)
     pub fn k_be(&self, i: usize, j: usize) -> f64 {
         self.matrices.k_be[i * self.topology.m + j]
+    }
+}
+
+#[cfg(test)]
+mod opamp_rail_mode_tests {
+    use super::*;
+    use crate::codegen::OpampRailMode;
+    use crate::mna::{MnaSystem, OpampInfo};
+
+    /// Build a minimal MNA with `opamps` attached. We don't care about the rest of
+    /// the MNA state for resolver tests — the resolver only reads `mna.opamps`.
+    fn mna_with_opamps(opamps: Vec<OpampInfo>) -> MnaSystem {
+        let mut mna = MnaSystem::new(1, 0, 0, 0);
+        mna.opamps = opamps;
+        mna
+    }
+
+    fn opamp_with_rails(vcc: f64, vee: f64) -> OpampInfo {
+        OpampInfo {
+            name: "U_TEST".to_string(),
+            n_plus_idx: 1,
+            n_minus_idx: 2,
+            n_out_idx: 3,
+            aol: 200_000.0,
+            r_out: 50.0,
+            vsat: f64::INFINITY,
+            vcc,
+            vee,
+            gbw: f64::INFINITY,
+            n_internal_idx: 0,
+            iir_c_dom: 0.0,
+        }
+    }
+
+    #[test]
+    fn resolver_honors_explicit_user_choice_hard() {
+        let mna = mna_with_opamps(vec![opamp_with_rails(9.0, 0.0)]);
+        let r = resolve_opamp_rail_mode(&mna, OpampRailMode::Hard);
+        assert_eq!(r.mode, OpampRailMode::Hard);
+        assert_eq!(r.reason, OpampRailModeReason::UserRequested);
+    }
+
+    #[test]
+    fn resolver_honors_explicit_user_choice_active_set() {
+        let mna = mna_with_opamps(vec![opamp_with_rails(9.0, 0.0)]);
+        let r = resolve_opamp_rail_mode(&mna, OpampRailMode::ActiveSet);
+        assert_eq!(r.mode, OpampRailMode::ActiveSet);
+        assert_eq!(r.reason, OpampRailModeReason::UserRequested);
+    }
+
+    #[test]
+    fn resolver_honors_explicit_user_choice_boyle() {
+        let mna = mna_with_opamps(vec![opamp_with_rails(9.0, 0.0)]);
+        let r = resolve_opamp_rail_mode(&mna, OpampRailMode::BoyleDiodes);
+        assert_eq!(r.mode, OpampRailMode::BoyleDiodes);
+        assert_eq!(r.reason, OpampRailModeReason::UserRequested);
+    }
+
+    #[test]
+    fn resolver_honors_explicit_none_even_with_clamped_opamps() {
+        // User override must not be silently upgraded even when the circuit
+        // would benefit from clamping. The escape hatch has to be trustworthy.
+        let mna = mna_with_opamps(vec![opamp_with_rails(9.0, 0.0)]);
+        let r = resolve_opamp_rail_mode(&mna, OpampRailMode::None);
+        assert_eq!(r.mode, OpampRailMode::None);
+        assert_eq!(r.reason, OpampRailModeReason::UserRequested);
+    }
+
+    #[test]
+    fn resolver_auto_no_opamps_picks_none() {
+        let mna = mna_with_opamps(vec![]);
+        let r = resolve_opamp_rail_mode(&mna, OpampRailMode::Auto);
+        assert_eq!(r.mode, OpampRailMode::None);
+        assert_eq!(r.reason, OpampRailModeReason::NoClampedOpamps);
+    }
+
+    #[test]
+    fn resolver_auto_opamps_without_rails_picks_none() {
+        // Op-amps with infinite VCC and VEE are ideal VCCSs — no clamp needed.
+        let mna = mna_with_opamps(vec![opamp_with_rails(f64::INFINITY, f64::NEG_INFINITY)]);
+        let r = resolve_opamp_rail_mode(&mna, OpampRailMode::Auto);
+        assert_eq!(r.mode, OpampRailMode::None);
+        assert_eq!(r.reason, OpampRailModeReason::NoClampedOpamps);
+    }
+
+    // --- Cap-coupling helpers for resolver topology tests ---
+    //
+    // `mna_with_opamps` creates a 1-node MNA which isn't enough for cap
+    // stamps. This helper grows the C matrix to the requested node count
+    // and returns a ready-to-use MnaSystem with op-amps attached. Node
+    // numbering is 1-indexed (0 = ground) to match the MnaSystem convention.
+    fn mna_with_opamps_and_caps(
+        n_nodes: usize,
+        opamps: Vec<OpampInfo>,
+        caps: &[(usize, usize, f64)],
+    ) -> MnaSystem {
+        let mut mna = MnaSystem::new(n_nodes, 0, 0, 0);
+        mna.opamps = opamps;
+        for &(i, j, c) in caps {
+            // Convert 1-indexed inputs to 0-indexed matrix indices; skip
+            // ground (0) terminals as usual.
+            if i == 0 || j == 0 {
+                continue;
+            }
+            let ii = i - 1;
+            let jj = j - 1;
+            mna.c[ii][ii] += c;
+            mna.c[jj][jj] += c;
+            mna.c[ii][jj] -= c;
+            mna.c[jj][ii] -= c;
+        }
+        mna
+    }
+
+    fn opamp_at_nodes(np: usize, nm: usize, out: usize, vcc: f64, vee: f64) -> OpampInfo {
+        OpampInfo {
+            name: "U_TEST".to_string(),
+            n_plus_idx: np,
+            n_minus_idx: nm,
+            n_out_idx: out,
+            aol: 200_000.0,
+            r_out: 50.0,
+            vsat: f64::INFINITY,
+            vcc,
+            vee,
+            gbw: f64::INFINITY,
+            n_internal_idx: 0,
+            iir_c_dom: 0.0,
+        }
+    }
+
+    #[test]
+    fn resolver_auto_opamps_with_single_rail_picks_hard_when_dc_coupled() {
+        // Single finite rail, no cap coupling → Hard mode.
+        // Single-node MNA: out_idx=1, no caps at all.
+        let mna = mna_with_opamps_and_caps(
+            3,
+            vec![opamp_at_nodes(2, 1, 1, 9.0, f64::NEG_INFINITY)],
+            &[],
+        );
+        let r = resolve_opamp_rail_mode(&mna, OpampRailMode::Auto);
+        assert_eq!(r.mode, OpampRailMode::Hard);
+        assert_eq!(r.reason, OpampRailModeReason::AllDcCoupled);
+    }
+
+    #[test]
+    fn resolver_auto_opamps_with_both_rails_picks_hard_when_dc_coupled() {
+        let mna = mna_with_opamps_and_caps(
+            3,
+            vec![opamp_at_nodes(2, 1, 1, 9.0, 0.0)],
+            &[],
+        );
+        let r = resolve_opamp_rail_mode(&mna, OpampRailMode::Auto);
+        assert_eq!(r.mode, OpampRailMode::Hard);
+        assert_eq!(r.reason, OpampRailModeReason::AllDcCoupled);
+    }
+
+    #[test]
+    fn resolver_auto_feedback_cap_alone_is_dc_coupled() {
+        // Op-amp with only a feedback cap between output (node 1) and its
+        // own inverting input (node 1 here — a unity follower has nm = out).
+        // No downstream coupling → Hard is safe.
+        //
+        // Topology: unity follower where output feeds its own - input.
+        // feedback cap from output (1) to - input (1): self-loop, ignored.
+        // Add a separate coupling cap from a different node (2) to ground
+        // (doesn't touch op-amp output).
+        let opamps = vec![opamp_at_nodes(3, 1, 1, 9.0, 0.0)]; // np=3, nm=1, out=1
+        let mna = mna_with_opamps_and_caps(
+            3,
+            opamps,
+            &[(2, 0, 1e-6)], // cap from node 2 to ground, not touching op-amp
+        );
+        let r = resolve_opamp_rail_mode(&mna, OpampRailMode::Auto);
+        assert_eq!(r.mode, OpampRailMode::Hard);
+        assert_eq!(r.reason, OpampRailModeReason::AllDcCoupled);
+    }
+
+    #[test]
+    fn resolver_auto_feedback_cap_from_out_to_minus_input_stays_hard() {
+        // Inverting amp: op-amp out=3, nm=2, np=1 (vbias). A feedback cap
+        // from out (3) to nm (2) should NOT trigger ActiveSet — it's a
+        // feedback cap, not a downstream coupling cap.
+        let opamps = vec![opamp_at_nodes(1, 2, 3, 9.0, 0.0)];
+        let mna = mna_with_opamps_and_caps(
+            3,
+            opamps,
+            &[(3, 2, 820e-12)], // feedback cap between out (3) and - input (2)
+        );
+        let r = resolve_opamp_rail_mode(&mna, OpampRailMode::Auto);
+        assert_eq!(r.mode, OpampRailMode::Hard);
+        assert_eq!(r.reason, OpampRailModeReason::AllDcCoupled);
+    }
+
+    #[test]
+    fn resolver_auto_cap_from_out_to_downstream_picks_active_set() {
+        // Op-amp out=3, nm=2, np=1. Output coupling cap from node 3 to a
+        // downstream node 4 (which is not the inverting input). This is
+        // the Klon-C15 pattern — must trigger ActiveSet.
+        let opamps = vec![opamp_at_nodes(1, 2, 3, 9.0, 0.0)];
+        let mna = mna_with_opamps_and_caps(
+            4,
+            opamps,
+            &[(3, 4, 4.7e-6)], // coupling cap from out (3) to downstream (4)
+        );
+        let r = resolve_opamp_rail_mode(&mna, OpampRailMode::Auto);
+        assert_eq!(r.mode, OpampRailMode::ActiveSet);
+        assert_eq!(r.reason, OpampRailModeReason::AcCoupledDownstream);
+    }
+
+    #[test]
+    fn resolver_auto_mixed_opamps_one_ac_coupled_forces_active_set() {
+        // Two op-amps: one with only feedback cap (safe on Hard), one with
+        // downstream coupling cap (needs ActiveSet). Any offender forces
+        // ActiveSet for the whole circuit because modes are global.
+        let opamps = vec![
+            opamp_at_nodes(1, 2, 3, 9.0, 0.0), // feedback only
+            opamp_at_nodes(4, 5, 6, 9.0, 0.0), // will have downstream cap
+        ];
+        let mna = mna_with_opamps_and_caps(
+            7,
+            opamps,
+            &[
+                (3, 2, 820e-12), // feedback cap on first op-amp — OK
+                (6, 7, 4.7e-6),  // downstream coupling on second op-amp — triggers ActiveSet
+            ],
+        );
+        let r = resolve_opamp_rail_mode(&mna, OpampRailMode::Auto);
+        assert_eq!(r.mode, OpampRailMode::ActiveSet);
+        assert_eq!(r.reason, OpampRailModeReason::AcCoupledDownstream);
+    }
+
+    #[test]
+    fn resolver_auto_opamp_with_zero_out_idx_ignored() {
+        // An op-amp whose output is ground (out_idx = 0) can't be clamped;
+        // the MNA builder would have dropped it, but defensively the resolver
+        // should treat it as "not a clamp candidate".
+        let mut oa = opamp_with_rails(9.0, 0.0);
+        oa.n_out_idx = 0;
+        let mna = mna_with_opamps(vec![oa]);
+        let r = resolve_opamp_rail_mode(&mna, OpampRailMode::Auto);
+        assert_eq!(r.mode, OpampRailMode::None);
+        assert_eq!(r.reason, OpampRailModeReason::NoClampedOpamps);
+    }
+
+    // Integration tests against real circuit files. These document the
+    // auto-detection result for each circuit class — if the resolver logic
+    // changes, these catch regressions in per-circuit behavior without
+    // needing to re-run end-to-end codegen.
+
+    fn load_and_resolve(path: &str) -> ResolvedOpampRailMode {
+        let src = std::fs::read_to_string(path)
+            .unwrap_or_else(|e| panic!("failed to read {}: {}", path, e));
+        let netlist = crate::parser::Netlist::parse(&src)
+            .unwrap_or_else(|e| panic!("failed to parse {}: {}", path, e));
+        let mna = MnaSystem::from_netlist(&netlist)
+            .unwrap_or_else(|e| panic!("failed to build MNA for {}: {}", path, e));
+        resolve_opamp_rail_mode(&mna, OpampRailMode::Auto)
+    }
+
+    #[test]
+    fn klon_auto_picks_active_set() {
+        // Klon has four TL072 op-amps. Two of them (U2A sum_out, U2B tone_out)
+        // have AC-coupled downstream stages: C13 is a feedback cap on U2A
+        // (doesn't count), but C15 goes from tone_out to out_ac (downstream
+        // coupling) — that's the cap whose history gets corrupted by the
+        // hard clamp. Auto must pick ActiveSet.
+        //
+        // This test is the "Klon fix is wired in automatically" assertion.
+        // If it regresses, users would stop getting the fix on default
+        // compile invocations.
+        let r = load_and_resolve("../../circuits/testing/klon-centaur.cir");
+        assert_eq!(r.mode, OpampRailMode::ActiveSet);
+        assert_eq!(r.reason, OpampRailModeReason::AcCoupledDownstream);
+    }
+
+    #[test]
+    fn pultec_auto_picks_none() {
+        // Pultec has tubes but no op-amps — no rail clamping needed.
+        let r = load_and_resolve("../../circuits/stable/pultec-eq.cir");
+        assert_eq!(r.mode, OpampRailMode::None);
+        assert_eq!(r.reason, OpampRailModeReason::NoClampedOpamps);
+    }
+
+    #[test]
+    fn wurli_preamp_auto_picks_some_mode() {
+        // Wurli has one op-amp; whatever the resolver picks, it must be a
+        // concrete mode (never Auto). We don't pin the exact choice here so
+        // future refinement is free to upgrade it.
+        let r = load_and_resolve("../../circuits/stable/wurli-preamp.cir");
+        assert_ne!(r.mode, OpampRailMode::Auto);
+    }
+
+    #[test]
+    fn vcr_alc_auto_picks_active_set() {
+        // VCR ALC has three op-amps with VSAT=13. U1 (buffer) has Cvca_ac
+        // from buf_out to vca_in — downstream coupling. U_iv has only the
+        // Cfb_iv feedback cap. U3 has Cout from out to out_ac — downstream
+        // coupling. So Auto picks ActiveSet.
+        //
+        // The attack-timing test
+        // (`test_vcr_alc_active_set_matches_hard_on_attack_test`) pins that
+        // ActiveSet produces the same compression dynamics as Hard on
+        // VCR ALC because the VCA control loop keeps op-amps in their
+        // linear region — the active-set constraint resolve is effectively
+        // a no-op on every sample.
+        let r = load_and_resolve("../../circuits/testing/vcr-audio-alc.cir");
+        assert_eq!(r.mode, OpampRailMode::ActiveSet);
+        assert_eq!(r.reason, OpampRailModeReason::AcCoupledDownstream);
     }
 }

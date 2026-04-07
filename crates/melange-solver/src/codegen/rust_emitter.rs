@@ -3799,6 +3799,17 @@ impl RustEmitter {
         let schur_unstable = ir.matrices.spectral_radius_s_aneg > 0.999;
         let use_full_nodal =
             has_positive_k_with_current || k_diag_min < -1e12 || k_degenerate || schur_unstable;
+        // The dense `lu_solve` helper is emitted whenever any generated code
+        // path needs it. The full-LU nodal path always needs it. The Schur
+        // path also needs it when op-amp rail handling is in `ActiveSet` mode,
+        // because the post-NR constrained resolve does one dense LU solve per
+        // clamp-active sample. Without this gate the Schur path would
+        // reference an undefined function and fail to compile.
+        use crate::codegen::OpampRailMode;
+        let needs_lu_solve = use_full_nodal
+            || (matches!(ir.solver_config.opamp_rail_mode, OpampRailMode::ActiveSet)
+                && !ir.opamps.is_empty());
+
         if use_full_nodal {
             if has_positive_k_with_current {
                 log::info!(
@@ -3830,6 +3841,11 @@ impl RustEmitter {
             }
             code.push_str(&Self::emit_nodal_process_sample(ir));
         } else {
+            // Schur path doesn't emit lu_solve by default, but active-set
+            // resolve needs it. Emit it on demand.
+            if needs_lu_solve {
+                code.push_str(&Self::emit_nodal_lu_solve(ir));
+            }
             code.push_str(&Self::emit_nodal_schur_process_sample(ir)?);
         }
 
@@ -5572,12 +5588,46 @@ impl RustEmitter {
             code.push_str("        for j in 0..M { v[i] += state.s_ni[i][j] * i_nl[j]; }\n");
             code.push_str("    }\n");
 
-            // Op-amp supply rail clamping (VCC/VEE) — post-NR
-            for oa in &ir.opamps {
-                code.push_str(&format!(
-                    "    v[{idx}] = v[{idx}].clamp({lo:.17e}, {hi:.17e});\n",
-                    idx = oa.n_out_idx, lo = oa.vclamp_lo, hi = oa.vclamp_hi,
-                ));
+            // Op-amp supply rail handling.
+            //
+            // * `Hard`  — apply the post-NR `v[out].clamp(VEE, VCC)` mutation
+            //             (matches pre-2026-04 behavior). This corrupts cap
+            //             history for AC-coupled downstream stages; only use
+            //             on circuits with DC-coupled downstream.
+            // * `ActiveSet` — call `emit_nodal_active_set_resolve` which
+            //             detects rail violations and pins them via row/column
+            //             elimination, then re-solves the whole network so
+            //             KCL is satisfied at every node with the clamped
+            //             outputs. Consistent cap history, no Klon bug.
+            // * `None` / `BoyleDiodes` — emit nothing here; BoyleDiodes will
+            //             eventually wire in catch diodes at the MNA level,
+            //             and None means "user accepts unbounded output".
+            use crate::codegen::OpampRailMode;
+            match ir.solver_config.opamp_rail_mode {
+                OpampRailMode::Hard | OpampRailMode::BoyleDiodes => {
+                    for oa in &ir.opamps {
+                        code.push_str(&format!(
+                            "    v[{idx}] = v[{idx}].clamp({lo:.17e}, {hi:.17e});\n",
+                            idx = oa.n_out_idx,
+                            lo = oa.vclamp_lo,
+                            hi = oa.vclamp_hi,
+                        ));
+                    }
+                }
+                OpampRailMode::ActiveSet => {
+                    Self::emit_nodal_active_set_resolve(&mut code, ir, "    ");
+                }
+                OpampRailMode::None => {
+                    // No clamping — caller accepts unbounded op-amp output.
+                }
+                OpampRailMode::Auto => {
+                    // resolve_opamp_rail_mode() is responsible for converting
+                    // Auto to a concrete mode before reaching the emitter.
+                    unreachable!(
+                        "OpampRailMode::Auto should have been resolved in ir::from_mna; \
+                         emitter should only see concrete modes"
+                    );
+                }
             }
 
             code.push_str("    let converged = state.last_nr_iterations < MAX_ITER as u32;\n\n");
@@ -6973,12 +7023,56 @@ impl RustEmitter {
             code.push_str("            v[i] += step;\n");
             code.push_str("        }\n");
 
-            // Mid-NR op-amp output clamping (VCC/VEE) — prevents rail excursions
-            if !ir.opamps.is_empty() {
+            // Mid-NR op-amp output clamping (VCC/VEE).
+            //
+            // In `Hard` and `None` modes we either apply the clamp every
+            // iteration (Hard) or do nothing (None). In `ActiveSet` mode the
+            // in-NR clamp is SKIPPED — NR converges to whatever the linear
+            // system dictates, then a post-convergence constrained resolve
+            // pins the rail-violating nodes and re-solves the network to a
+            // KCL-consistent state (see emit_nodal_active_set_resolve).
+            //
+            // The reason we skip the mid-NR clamp for ActiveSet: the hard
+            // clamp writes `v_clamped` back into `v` but the rest of the
+            // solve is consistent with `v_unclamped`. That inconsistency
+            // corrupts the trapezoidal cap history on the next sample. The
+            // active-set resolve rebuilds the full v so KCL is satisfied at
+            // every node given the clamped value — no corruption.
+            //
+            // BoyleDiodes mode will eventually make this block unreachable
+            // (rail saturation will be modeled by nonlinear catch diodes in
+            // J_dev), but until that lands we still fall through to Hard
+            // semantics if requested.
+            //
+            // Step 4 fix: when we do apply the clamp, re-check convergence
+            // against the POST-clamp v so a silent mutation of v[out] can't
+            // be reported as "converged". The previous code computed the
+            // step magnitude against the unclamped v[out] + step — if
+            // clamping then shifted v[out] by a significant amount, NR would
+            // still report converged because `max_step_exceeded` was computed
+            // on the pre-clamp step. This check catches that case.
+            use crate::codegen::OpampRailMode;
+            let emit_in_nr_clamp = matches!(
+                ir.solver_config.opamp_rail_mode,
+                OpampRailMode::Hard | OpampRailMode::BoyleDiodes
+            );
+            if emit_in_nr_clamp && !ir.opamps.is_empty() {
                 for oa in &ir.opamps {
                     code.push_str(&format!(
-                        "        v[{idx}] = v[{idx}].clamp({lo:.17e}, {hi:.17e});\n",
-                        idx = oa.n_out_idx, lo = oa.vclamp_lo, hi = oa.vclamp_hi,
+                        "        {{\n\
+                         \x20           let v_pre_clamp = v[{idx}];\n\
+                         \x20           v[{idx}] = v[{idx}].clamp({lo:.17e}, {hi:.17e});\n\
+                         \x20           // Post-clamp convergence re-check: if the clamp mutated\n\
+                         \x20           // v[{idx}] meaningfully, the iteration hasn't really\n\
+                         \x20           // converged — the rest of the network is still consistent\n\
+                         \x20           // with the pre-clamp value.\n\
+                         \x20           let clamp_delta = (v[{idx}] - v_pre_clamp).abs();\n\
+                         \x20           let clamp_thresh = 1e-3 * v[{idx}].abs().max(v_pre_clamp.abs()) + 1e-6;\n\
+                         \x20           if clamp_delta >= clamp_thresh {{ max_step_exceeded = true; }}\n\
+                         \x20       }}\n",
+                        idx = oa.n_out_idx,
+                        lo = oa.vclamp_lo,
+                        hi = oa.vclamp_hi,
                     ));
                 }
             }
@@ -6998,6 +7092,28 @@ impl RustEmitter {
             code.push_str("                v_nl_final[i] = sum;\n");
             code.push_str("            }\n");
             Self::emit_nodal_device_evaluation_final(&mut code, ir, "            ");
+
+            // Active-set constrained resolve: if any op-amp output exceeded
+            // its rails during the unclamped NR (only reachable in ActiveSet
+            // mode, where the in-NR clamp is suppressed), pin those nodes to
+            // the rail values and re-solve the full network so KCL is
+            // satisfied at every node. This keeps the trapezoidal cap history
+            // consistent with the clamped op-amp output — no Klon-style
+            // downstream drift.
+            //
+            // Uses the `j_dev` from this final iteration for the linearized
+            // re-solve. For circuits where device voltages depend on the
+            // clamped op-amp output (e.g. diodes fed via a coupling cap from
+            // the op-amp), this is a linearization around the converged
+            // operating point; a future refinement could iterate, but for
+            // Klon-class circuits the linearization is accurate because the
+            // cap isolates the diodes from the op-amp at DC.
+            if ir.solver_config.opamp_rail_mode
+                == crate::codegen::OpampRailMode::ActiveSet
+            {
+                Self::emit_nodal_active_set_resolve(&mut code, ir, "            ");
+            }
+
             code.push_str("            break;\n");
             code.push_str("        }\n");
             code.push_str("    }\n\n"); // end trapezoidal NR loop
@@ -7543,6 +7659,194 @@ impl RustEmitter {
         let _ = (num_outputs, n_nodes);
 
         code
+    }
+
+    /// Emit the active-set constrained-resolve block for a nodal NR path.
+    ///
+    /// Called after NR has converged in the Schur or full-LU nodal paths when
+    /// `OpampRailMode::ActiveSet` is selected. At entry:
+    ///   - `v` holds the *unclamped* converged solution (possibly with op-amp
+    ///     outputs outside their supply rails).
+    ///   - `i_nl` holds the final device currents at the converged v.
+    ///
+    /// **Key observation**: at NR convergence, the nonlinear companion equation
+    /// collapses to the linear relation `A * v = rhs + N_i * i_nl`. The device
+    /// Jacobian `J_dev` contributions that appear inside the NR iteration
+    /// cancel identically at the fixed point — you can verify this by writing
+    /// out `(A − N_i·J_dev·N_v) v = rhs + N_i·(i_nl − J_dev·v_nl)` with
+    /// `v_nl = N_v·v` and expanding. That means the active-set resolve only
+    /// needs `A` (from `state.a`) and the converged `i_nl`, not the per-NR
+    /// Jacobian, so it's portable between the Schur and full-LU paths.
+    ///
+    /// The resolve does:
+    ///   1. Detect which op-amp outputs exceed their VCC/VEE rails.
+    ///   2. If none do, nothing to do — leave `v` alone.
+    ///   3. Otherwise build the linear system `A * v = rhs + N_i * i_nl` using
+    ///      `state.a` (with a small Gmin on node diagonals for conditioning).
+    ///   4. For each rail-violating node `k` with rail value `c_k`:
+    ///        - subtract `A[:,k] * c_k` from `rhs` at every row except `k`
+    ///        - zero column `k` in all non-`k` rows
+    ///        - zero row `k` and set `A[k][k] = 1, rhs[k] = c_k`
+    ///      This pins `v[k] = c_k` by row/column elimination.
+    ///   5. Solve the constrained system with the generated dense `lu_solve`.
+    ///      The result is a `v'` where every node satisfies KCL given the
+    ///      clamped outputs, so the next sample's `A_neg * v_prev` sees a
+    ///      KCL-consistent state and the cap-history corruption bug goes away.
+    ///   6. Re-evaluate `i_nl` at the new `v` so the next sample's trapezoidal
+    ///      history term (`N_i * i_nl_prev`) is also consistent with the
+    ///      constrained voltages.
+    ///
+    /// If the dense LU solve fails (shouldn't happen for well-posed circuits),
+    /// leave `v` at the unclamped solution; the downstream output clamp
+    /// (`output[idx].clamp(-10, 10)`) still prevents catastrophic output, and
+    /// the diagnostic counter `diag_nr_max_iter_count` records the failure.
+    ///
+    /// # Caller contract
+    ///
+    /// The caller must have `v` (mutable), `i_nl`, and `rhs` in scope. `rhs`
+    /// here means the trapezoidal RHS *before* any nonlinear companion
+    /// contribution — i.e., `A_neg·v_prev + rhs_const + (input+input_prev)*G_in`.
+    /// The Schur path calls this variable `rhs`; the full-LU path also calls
+    /// it `rhs`. Both match.
+    fn emit_nodal_active_set_resolve(code: &mut String, ir: &CircuitIR, indent: &str) {
+        let m = ir.topology.m;
+        let n_nodes = if ir.topology.n_nodes > 0 {
+            ir.topology.n_nodes
+        } else {
+            ir.topology.n
+        };
+
+        // Only clampable op-amps participate — ones with at least one finite rail.
+        let clampable: Vec<&crate::codegen::ir::OpampIR> = ir
+            .opamps
+            .iter()
+            .filter(|oa| oa.vclamp_hi.is_finite() || oa.vclamp_lo.is_finite())
+            .collect();
+        if clampable.is_empty() {
+            return;
+        }
+
+        code.push_str(&format!(
+            "{indent}// --- Active-set op-amp rail resolve ---\n"
+        ));
+        code.push_str(&format!(
+            "{indent}// Pin any rail-violating op-amp outputs and re-solve for\n"
+        ));
+        code.push_str(&format!(
+            "{indent}// a KCL-consistent v (see emit_nodal_active_set_resolve docs).\n"
+        ));
+        code.push_str(&format!("{indent}{{\n"));
+
+        // Step 1: detect violations. `pinned_N` carries either `Some(rail)` or
+        // `None` based on whether v[out] exceeds its range. `any_pinned` short-
+        // circuits the whole resolve when nothing needs clamping (the common case).
+        code.push_str(&format!("{indent}    let mut any_pinned = false;\n"));
+        for (idx, oa) in clampable.iter().enumerate() {
+            code.push_str(&format!(
+                "{indent}    let pinned_{idx}: Option<f64> = if v[{node}] > {hi:.17e} {{\n\
+                 {indent}        any_pinned = true;\n\
+                 {indent}        Some({hi:.17e})\n\
+                 {indent}    }} else if v[{node}] < {lo:.17e} {{\n\
+                 {indent}        any_pinned = true;\n\
+                 {indent}        Some({lo:.17e})\n\
+                 {indent}    }} else {{\n\
+                 {indent}        None\n\
+                 {indent}    }};\n",
+                idx = idx,
+                node = oa.n_out_idx,
+                hi = oa.vclamp_hi,
+                lo = oa.vclamp_lo,
+            ));
+        }
+
+        code.push_str(&format!("{indent}    if any_pinned {{\n"));
+
+        // Step 2: build the linear system `A * v = rhs + N_i * i_nl` at the
+        // converged operating point. Copy `state.a` as scratch, add Gmin on
+        // node diagonals for LU conditioning, copy `rhs` and add the nonlinear
+        // current injection via the sparse N_i pattern.
+        code.push_str(&format!(
+            "{indent}        let mut g_as = state.a;\n\
+             {indent}        for i in 0..{n_nodes} {{ g_as[i][i] += 1e-12; }}\n",
+            n_nodes = n_nodes,
+        ));
+        code.push_str(&format!("{indent}        let mut rhs_as = rhs;\n"));
+        if m > 0 {
+            let mut ni_nz_by_dev = vec![Vec::new(); m];
+            for (a, cols) in ir.sparsity.n_i.nz_by_row.iter().enumerate() {
+                for &i in cols {
+                    ni_nz_by_dev[i].push(a);
+                }
+            }
+            for i in 0..m {
+                for &a in &ni_nz_by_dev[i] {
+                    code.push_str(&format!(
+                        "{indent}        rhs_as[{a}] += N_I[{a}][{i}] * i_nl[{i}];\n",
+                        a = a,
+                        i = i,
+                    ));
+                }
+            }
+        }
+
+        // Step 3: apply active-set constraints via row/column elimination. For
+        // each pinned op-amp output k with clamp value c_k, move its
+        // contribution out of the other rows and pin the row to an identity
+        // equation `v[k] = c_k`.
+        for (idx, oa) in clampable.iter().enumerate() {
+            let node = oa.n_out_idx;
+            code.push_str(&format!(
+                "{indent}        if let Some(c_k) = pinned_{idx} {{\n\
+                 {indent}            for i in 0..N {{\n\
+                 {indent}                if i != {node} {{ rhs_as[i] -= g_as[i][{node}] * c_k; }}\n\
+                 {indent}                g_as[i][{node}] = 0.0;\n\
+                 {indent}            }}\n\
+                 {indent}            for j in 0..N {{ g_as[{node}][j] = 0.0; }}\n\
+                 {indent}            g_as[{node}][{node}] = 1.0;\n\
+                 {indent}            rhs_as[{node}] = c_k;\n\
+                 {indent}        }}\n",
+                idx = idx, node = node,
+            ));
+        }
+
+        // Step 4: dense LU solve of the constrained system.
+        code.push_str(&format!(
+            "{indent}        let mut v_as = rhs_as;\n\
+             {indent}        if lu_solve(&mut g_as, &mut v_as) {{\n\
+             {indent}            v = v_as;\n",
+        ));
+
+        // Step 5: re-evaluate i_nl at the new v so next sample's trapezoidal
+        // history is consistent. Reuses the existing
+        // `emit_nodal_device_evaluation_final` helper in a nested scope to
+        // re-bind `v_nl_final` without colliding with any outer binding.
+        if m > 0 {
+            code.push_str(&format!("{indent}            {{\n"));
+            code.push_str(&format!(
+                "{indent}                let mut v_nl_final = [0.0f64; M];\n\
+                 {indent}                for i in 0..M {{\n\
+                 {indent}                    let mut sum = 0.0;\n\
+                 {indent}                    for j in 0..N {{ sum += N_V[i][j] * v[j]; }}\n\
+                 {indent}                    v_nl_final[i] = sum;\n\
+                 {indent}                }}\n",
+            ));
+            Self::emit_nodal_device_evaluation_final(
+                code,
+                ir,
+                &format!("{indent}                "),
+            );
+            code.push_str(&format!("{indent}            }}\n"));
+        }
+
+        code.push_str(&format!(
+            "{indent}        }} else {{\n\
+             {indent}            // LU failed — keep unclamped v. The output-stage\n\
+             {indent}            // clamp and diag counters still catch pathological cases.\n\
+             {indent}            state.diag_nr_max_iter_count += 1;\n\
+             {indent}        }}\n\
+             {indent}    }}\n\
+             {indent}}}\n",
+        ));
     }
 
     /// Emit device evaluation code WITHOUT declarations (writes to existing i_nl, j_dev).
