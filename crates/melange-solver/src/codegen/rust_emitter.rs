@@ -5599,12 +5599,15 @@ impl RustEmitter {
             //             elimination, then re-solves the whole network so
             //             KCL is satisfied at every node with the clamped
             //             outputs. Consistent cap history, no Klon bug.
-            // * `None` / `BoyleDiodes` — emit nothing here; BoyleDiodes will
-            //             eventually wire in catch diodes at the MNA level,
-            //             and None means "user accepts unbounded output".
+            // * `BoyleDiodes` — physical catch diodes are already in the
+            //             MNA via `augment_netlist_with_boyle_diodes`. NR
+            //             handles saturation naturally through the diode
+            //             exponential, producing a soft knee. Emit nothing
+            //             here.
+            // * `None`  — no clamping; caller accepts unbounded output.
             use crate::codegen::OpampRailMode;
             match ir.solver_config.opamp_rail_mode {
-                OpampRailMode::Hard | OpampRailMode::BoyleDiodes => {
+                OpampRailMode::Hard => {
                     for oa in &ir.opamps {
                         code.push_str(&format!(
                             "    v[{idx}] = v[{idx}].clamp({lo:.17e}, {hi:.17e});\n",
@@ -5616,6 +5619,10 @@ impl RustEmitter {
                 }
                 OpampRailMode::ActiveSet => {
                     Self::emit_nodal_active_set_resolve(&mut code, ir, "    ");
+                }
+                OpampRailMode::BoyleDiodes => {
+                    // Catch diodes are physically in the circuit — no extra
+                    // post-NR mutation needed.
                 }
                 OpampRailMode::None => {
                     // No clamping — caller accepts unbounded op-amp output.
@@ -7052,9 +7059,15 @@ impl RustEmitter {
             // still report converged because `max_step_exceeded` was computed
             // on the pre-clamp step. This check catches that case.
             use crate::codegen::OpampRailMode;
+            // BoyleDiodes mode has already inserted physical catch diodes into
+            // the MNA; the NR solve naturally drives v[out] toward the rails
+            // via those diodes. Emitting a post-NR hard clamp on top would
+            // double-limit and re-introduce the KCL corruption we're trying
+            // to avoid. So BoyleDiodes skips the in-NR clamp entirely, same
+            // as ActiveSet.
             let emit_in_nr_clamp = matches!(
                 ir.solver_config.opamp_rail_mode,
-                OpampRailMode::Hard | OpampRailMode::BoyleDiodes
+                OpampRailMode::Hard
             );
             if emit_in_nr_clamp && !ir.opamps.is_empty() {
                 for oa in &ir.opamps {
@@ -7257,8 +7270,14 @@ impl RustEmitter {
             // LU solve
             code.push_str("                    let mut v_new_s = rhs_w;\n");
             code.push_str("                    if !lu_solve(&mut g_s, &mut v_new_s) { break; }\n");
-            // Op-amp supply rail clamping (VCC/VEE)
-            if !ir.opamps.is_empty() {
+            // Op-amp supply rail clamping (VCC/VEE). Only emitted for Hard
+            // mode — ActiveSet handles rails via post-NR resolve on the
+            // main NR path, and BoyleDiodes has physical catch diodes in
+            // the MNA so a hard clamp here would double-limit and conflict
+            // with the diode-driven convergence.
+            if matches!(ir.solver_config.opamp_rail_mode, crate::codegen::OpampRailMode::Hard)
+                && !ir.opamps.is_empty()
+            {
                 for oa in &ir.opamps {
                     code.push_str(&format!(
                         "                    v_new_s[{idx}] = v_new_s[{idx}].clamp({lo:.17e}, {hi:.17e});\n",
@@ -7449,8 +7468,13 @@ impl RustEmitter {
             code.push_str("                v[i] += step;\n");
             code.push_str("            }\n");
 
-            // Mid-NR op-amp clamping for BE path
-            if !ir.opamps.is_empty() {
+            // Mid-NR op-amp clamping for BE path. Only emit for Hard mode;
+            // ActiveSet and BoyleDiodes handle rails via their respective
+            // mechanisms (active-set resolve / physical catch diodes), and a
+            // hard clamp here would conflict with them.
+            if matches!(ir.solver_config.opamp_rail_mode, crate::codegen::OpampRailMode::Hard)
+                && !ir.opamps.is_empty()
+            {
                 for oa in &ir.opamps {
                     code.push_str(&format!(
                         "            v[{idx}] = v[{idx}].clamp({lo:.17e}, {hi:.17e});\n",

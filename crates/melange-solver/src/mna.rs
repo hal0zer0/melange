@@ -309,6 +309,17 @@ pub struct OpampInfo {
     /// When finite, output is clamped to ≥ VEE. Takes priority over VSAT.
     /// Example: VEE=0 for single-supply, VEE=-9 for charge-pump negative rail.
     pub vee: f64,
+    /// Voltage drop from VCC to the maximum output voltage the op-amp can
+    /// actually drive [V]. Models the output-stage transistor saturation
+    /// (in Boyle macromodels, the `V_upper = VCC - VOH_DROP` rail-offset
+    /// source). Default 1.5 V for TL072/NE5532-class parts. Set smaller
+    /// for rail-to-rail op-amps (e.g. `VOH_DROP=0.05` for LMV358 light load).
+    /// Only consulted when `OpampRailMode::BoyleDiodes` is active; ignored
+    /// by the `Hard` and `ActiveSet` rail-handling modes.
+    pub voh_drop: f64,
+    /// Voltage drop from VEE to the minimum output voltage the op-amp can
+    /// actually drive [V]. Symmetrical counterpart to `voh_drop`. Default 1.5 V.
+    pub vol_drop: f64,
     /// Gain-bandwidth product [Hz] (default: infinity = no dominant pole).
     /// When finite, a dominant pole capacitor C = AOL / (2π × GBW × ROUT)
     /// is stamped at an internal Boyle gain node.
@@ -1912,6 +1923,8 @@ impl MnaBuilder {
                             "VCC" => oa.vcc = *val,
                             "VEE" => oa.vee = *val,
                             "GBW" => oa.gbw = *val,
+                            "VOH_DROP" => oa.voh_drop = *val,
+                            "VOL_DROP" => oa.vol_drop = *val,
                             _ => log::warn!(
                                 ".model {}: unrecognized parameter '{}' (ignored)",
                                 m.name,
@@ -3593,6 +3606,11 @@ impl MnaBuilder {
                     vcc: f64::INFINITY,
                     vee: f64::NEG_INFINITY,
                     gbw: f64::INFINITY,
+                    // Boyle-macromodel default: TL072/NE5532-class parts can swing
+                    // to within ~1.5 V of each rail under typical load. Rail-to-rail
+                    // parts should override this in their .model OA() entry.
+                    voh_drop: 1.5,
+                    vol_drop: 1.5,
                     n_internal_idx: 0,
                     iir_c_dom: 0.0,
                 });

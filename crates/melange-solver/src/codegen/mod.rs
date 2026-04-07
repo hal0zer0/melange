@@ -401,6 +401,23 @@ impl CodeGenerator {
         netlist: &Netlist,
         dc_op: Option<crate::dc_op::DcOpResult>,
     ) -> Result<GeneratedCode, CodegenError> {
+        // BoyleDiodes mode auto-inserts catch diodes into the netlist, which
+        // grows the MNA/kernel dimensions. Rebuilding the DkKernel from the
+        // augmented netlist would also change the DK vs nodal routing decision
+        // (new N, new spectral radius, etc.), so for now BoyleDiodes is only
+        // supported on the nodal path. Explicit request on the DK path is a
+        // user error with a clear remedy.
+        let resolved = ir::resolve_opamp_rail_mode(mna, self.config.opamp_rail_mode);
+        if resolved.mode == OpampRailMode::BoyleDiodes {
+            return Err(CodegenError::UnsupportedTopology(format!(
+                "OpampRailMode::BoyleDiodes is not yet supported on the DK codegen \
+                 path. Either rerun with `--solver nodal` or use a different rail \
+                 mode (`--opamp-rail-mode {{hard|active-set}}`). The auto-detector \
+                 never picks BoyleDiodes today, so this error only triggers on an \
+                 explicit user override."
+            )));
+        }
+
         // Auto-insert parasitic caps if C matrix is all zeros and circuit has
         // nonlinear devices. The IR stores G/C for runtime sample rate recomputation,
         // so these must include the parasitic caps (matching the kernel, which also
@@ -481,6 +498,51 @@ impl CodeGenerator {
                 self.config.output_scales.len(),
                 self.config.output_nodes.len()
             )));
+        }
+
+        // BoyleDiodes mode: not yet fully working.
+        //
+        // The helper `ir::augment_netlist_with_boyle_diodes` correctly
+        // synthesizes catch diodes and rail-reference voltage sources, and
+        // the MNA rebuilds cleanly. BUT integrating the catch diodes at the
+        // op-amp *output* node creates a numerically stiff system that NR
+        // cannot reliably solve: the linear VCCS (Gm = AOL/ROUT ≈ 4000 S)
+        // pushes directly against the diode's exponential conductance (which
+        // spans 7+ orders of magnitude between reverse-bias and forward-bias
+        // operation), and the equilibrated LU factorization loses precision
+        // on matrices with that dynamic range. Empirical observation:
+        // Klon at 1 mV input produces v[rail_branch_current] ≈ -3 × 10⁶ V
+        // after a single sample with this model.
+        //
+        // The proper Boyle macromodel avoids this by inserting the catch
+        // diodes at an *internal* high-impedance gain node (downstream of
+        // the Gm VCCS, upstream of the output buffer), not at the final
+        // output. That requires refactoring the op-amp model to have an
+        // internal gain node — a bigger change than Step 5 attempted.
+        //
+        // Until that refactor lands, BoyleDiodes is reserved as an enum
+        // variant but returns an error here so users aren't silently
+        // redirected to a broken path. The plumbing (enum, CLI flag, parser
+        // VOH_DROP/VOL_DROP params, the augmentation helper, tests for
+        // all of the above) is kept because it's the foundation for the
+        // eventual proper fix.
+        let resolved = ir::resolve_opamp_rail_mode(mna, self.config.opamp_rail_mode);
+        if resolved.mode == OpampRailMode::BoyleDiodes {
+            return Err(CodegenError::UnsupportedTopology(
+                "OpampRailMode::BoyleDiodes is not yet fully implemented. The \
+                 infrastructure is in place (netlist augmentation, CLI flag, \
+                 .model OA(VOH_DROP=… VOL_DROP=…) parsing) but placing the \
+                 catch diodes at the op-amp output node creates a numerically \
+                 stiff system that the solver cannot reliably converge — the \
+                 linear VCCS Gm ≈ 4000 S fights the diode's exponential \
+                 conductance across 7+ orders of magnitude. Proper fix \
+                 requires adding an internal gain node to the op-amp model \
+                 (Boyle macromodel structure). \
+                 For now, use `--opamp-rail-mode active-set` (the default for \
+                 circuits with AC-coupled downstream) which gives KCL-consistent \
+                 hard clipping, or `--opamp-rail-mode hard` for the cheap \
+                 pre-2026-04 behavior.".to_string()
+            ));
         }
 
         // Auto-insert parasitic caps if C matrix is all zeros and circuit has

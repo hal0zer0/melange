@@ -344,6 +344,174 @@ pub fn resolve_opamp_rail_mode(
     }
 }
 
+/// Name of the synthetic catch-diode model inserted by
+/// [`augment_netlist_with_boyle_diodes`]. Standard Boyle-macromodel silicon
+/// diode parameters (`Is = 1e-15, N = 1`), matching every commercial SPICE
+/// op-amp model's output-stage clamp diodes.
+pub const BOYLE_CATCH_DIODE_MODEL: &str = "D_BOYLE_CATCH";
+
+/// Augment a parsed netlist with Boyle-style catch diodes for op-amp rail
+/// saturation, returning a fresh [`Netlist`] that contains the original
+/// elements plus the synthesized rail references and diodes.
+///
+/// # Mechanism
+///
+/// For each op-amp with at least one finite supply rail, this function adds:
+///
+/// - An internal reference node `_boyle_hi_{opamp_name}` pinned to
+///   `VCC − VOH_DROP` by a synthesized DC voltage source, and a diode from
+///   the op-amp output to that node. The diode conducts (exponentially) once
+///   `v[out] > VCC − VOH_DROP`, pulling the output back toward the rail.
+///
+/// - A symmetric lower-rail reference `_boyle_lo_{opamp_name}` pinned to
+///   `VEE + VOL_DROP` with its own diode (reversed polarity) that conducts
+///   when `v[out] < VEE + VOL_DROP`.
+///
+/// - One top-level `.model D_BOYLE_CATCH D(IS=1e-15 N=1)` definition, added
+///   only once even if there are many op-amps. These are the standard silicon
+///   diode parameters used by every commercial SPICE op-amp macromodel
+///   (Boyle/Cohn/Pederson/Solomon JSSC 1974; reproduced in TI's PSpice TL072
+///   model, ngspice's built-in op-amp, LTSpice's `UniversalOpamp2`, etc.).
+///
+/// VOH_DROP and VOL_DROP default to 1.5 V in [`mna::OpampInfo`] for
+/// TL072/NE5532-class parts and can be overridden in the user's
+/// `.model OA(VOH_DROP=… VOL_DROP=…)` for rail-to-rail op-amps.
+///
+/// # Why this specific topology
+///
+/// A linear VCCS (the pre-2026-04 op-amp model in melange) has unbounded
+/// output. Two popular ways to bound it:
+///
+/// 1. **Hard clamp `v[out] = clamp(v[out], VEE, VCC)`** — cheap but
+///    (a) breaks KCL for AC-coupled downstream caps, and (b) produces a
+///    square-law limiter's flat odd-harmonic series instead of the soft
+///    exponential knee real op-amps exhibit.
+///
+/// 2. **Piecewise linear catch sources** (the
+///    [`OpampRailMode::ActiveSet`](crate::codegen::OpampRailMode::ActiveSet)
+///    path) — KCL-consistent but still produces hard-clip harmonics.
+///
+/// 3. **Boyle catch diodes** (this function) — silicon diodes from the
+///    op-amp output to rail-offset DC sources. Produces the smooth
+///    exponential knee that matches measured TL072 saturation and
+///    reproduces the "mid drive crunch" of guitar overdrive pedals like
+///    the Klon Centaur. Cost: `+2 N` and `+2 M` per op-amp (two diodes,
+///    two voltage-source-pinned reference nodes).
+///
+/// # Contract
+///
+/// The returned netlist must compile through
+/// [`crate::mna::MnaSystem::from_netlist`] without errors. All synthesized
+/// node names are prefixed with `_boyle_` to avoid collisions with
+/// user-defined names. If a user happens to have a node named
+/// `_boyle_hi_U1A`, behavior is undefined — treat the prefix as reserved.
+///
+/// Op-amps with no finite rails (ideal VCCS) or with grounded output
+/// (`n_out_idx == 0`, which should have already been rejected earlier)
+/// are skipped silently.
+///
+/// The original `netlist` is cloned, not consumed — callers can still
+/// use the un-augmented netlist after this returns.
+pub fn augment_netlist_with_boyle_diodes(
+    netlist: &crate::parser::Netlist,
+    mna: &crate::mna::MnaSystem,
+) -> crate::parser::Netlist {
+    use crate::parser::{Element, Model};
+
+    let mut augmented = netlist.clone();
+
+    // Add the shared catch-diode model once.
+    if !augmented
+        .models
+        .iter()
+        .any(|m| m.name == BOYLE_CATCH_DIODE_MODEL)
+    {
+        augmented.models.push(Model {
+            name: BOYLE_CATCH_DIODE_MODEL.to_string(),
+            model_type: "D".to_string(),
+            params: vec![
+                ("IS".to_string(), 1e-15),
+                ("N".to_string(), 1.0),
+            ],
+        });
+    }
+
+    // Build a reverse lookup from node index (1-indexed, matching node_map)
+    // back to node name so we can emit human-readable synthesized elements.
+    // We only need names for op-amp output nodes.
+    let name_of_idx = |idx: usize| -> Option<String> {
+        mna.node_map
+            .iter()
+            .find_map(|(name, &i)| if i == idx { Some(name.clone()) } else { None })
+    };
+
+    for oa in &mna.opamps {
+        if oa.n_out_idx == 0 {
+            continue;
+        }
+        let has_upper = oa.vcc.is_finite();
+        let has_lower = oa.vee.is_finite();
+        if !has_upper && !has_lower {
+            continue;
+        }
+
+        // Look up the user's output node name so the diode element reads
+        // naturally in generated code. If the node isn't in the map something
+        // is badly wrong upstream; skip silently rather than crashing.
+        let out_name = match name_of_idx(oa.n_out_idx) {
+            Some(s) => s,
+            None => continue,
+        };
+
+        // Sanitize the op-amp name for use in synthesized identifiers:
+        // SPICE node names are typically ASCII alphanumeric plus `_`.
+        // We don't lowercase because the MNA node_map preserves case.
+        let safe_name: String = oa
+            .name
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+            .collect();
+
+        if has_upper {
+            // Upper catch: op-amp output → (VCC − VOH_DROP) reference node
+            let rail_node = format!("_boyle_hi_{}", safe_name);
+            augmented.elements.push(Element::VoltageSource {
+                name: format!("V_boyle_hi_{}", safe_name),
+                n_plus: rail_node.clone(),
+                n_minus: "0".to_string(),
+                dc: Some(oa.vcc - oa.voh_drop),
+                ac: None,
+            });
+            augmented.elements.push(Element::Diode {
+                name: format!("D_boyle_hi_{}", safe_name),
+                n_plus: out_name.clone(),
+                n_minus: rail_node,
+                model: BOYLE_CATCH_DIODE_MODEL.to_string(),
+            });
+        }
+
+        if has_lower {
+            // Lower catch: (VEE + VOL_DROP) reference node → op-amp output
+            let rail_node = format!("_boyle_lo_{}", safe_name);
+            augmented.elements.push(Element::VoltageSource {
+                name: format!("V_boyle_lo_{}", safe_name),
+                n_plus: rail_node.clone(),
+                n_minus: "0".to_string(),
+                dc: Some(oa.vee + oa.vol_drop),
+                ac: None,
+            });
+            augmented.elements.push(Element::Diode {
+                name: format!("D_boyle_lo_{}", safe_name),
+                n_plus: rail_node,
+                n_minus: out_name.clone(),
+                model: BOYLE_CATCH_DIODE_MODEL.to_string(),
+            });
+        }
+    }
+
+    augmented
+}
+
 fn default_pot_settle_samples() -> usize {
     64
 }
@@ -3384,6 +3552,8 @@ mod opamp_rail_mode_tests {
             vcc,
             vee,
             gbw: f64::INFINITY,
+            voh_drop: 1.5,
+            vol_drop: 1.5,
             n_internal_idx: 0,
             iir_c_dom: 0.0,
         }
@@ -3481,6 +3651,8 @@ mod opamp_rail_mode_tests {
             vcc,
             vee,
             gbw: f64::INFINITY,
+            voh_drop: 1.5,
+            vol_drop: 1.5,
             n_internal_idx: 0,
             iir_c_dom: 0.0,
         }
@@ -3646,6 +3818,119 @@ mod opamp_rail_mode_tests {
         // future refinement is free to upgrade it.
         let r = load_and_resolve("../../circuits/stable/wurli-preamp.cir");
         assert_ne!(r.mode, OpampRailMode::Auto);
+    }
+
+    #[test]
+    fn augment_netlist_with_boyle_diodes_on_klon_produces_valid_mna() {
+        // The Boyle catch-diode augmentation helper is infrastructure that
+        // the eventual full BoyleDiodes mode will build on. Even though the
+        // integration isn't wired up yet (the numerical stiffness from
+        // linear-VCCS × exponential diode means the generated solver can't
+        // converge reliably — see codegen/mod.rs::generate_nodal error),
+        // the augmentation itself must produce a parseable, buildable
+        // augmented netlist so the eventual internal-gain-node op-amp model
+        // refactor can drop in without redoing netlist work.
+        //
+        // Contract this test pins:
+        //   * Each op-amp with finite VCC/VEE gets exactly 2 new nodes,
+        //     2 new voltage sources, and 2 new Diode nonlinear devices.
+        //   * Original node indices (in/out/vbias) are preserved.
+        //   * The synthesized D_BOYLE_CATCH model is added exactly once.
+        //   * The augmented MNA builds without error via from_netlist.
+        use crate::codegen::OpampRailMode;
+        let src = std::fs::read_to_string("../../circuits/testing/klon-centaur.cir")
+            .expect("read klon netlist");
+        let netlist = crate::parser::Netlist::parse(&src).expect("parse");
+        let mna = MnaSystem::from_netlist(&netlist).expect("mna");
+
+        // Sanity: Klon has 4 op-amps with finite rails.
+        let clamped_opamps = mna
+            .opamps
+            .iter()
+            .filter(|oa| oa.n_out_idx > 0 && (oa.vcc.is_finite() || oa.vee.is_finite()))
+            .count();
+        assert_eq!(clamped_opamps, 4, "Klon should have 4 clamped op-amps");
+
+        let aug_netlist = augment_netlist_with_boyle_diodes(&netlist, &mna);
+
+        // Exactly one D_BOYLE_CATCH model.
+        let catch_models = aug_netlist
+            .models
+            .iter()
+            .filter(|m| m.name == BOYLE_CATCH_DIODE_MODEL)
+            .count();
+        assert_eq!(catch_models, 1);
+
+        // Diode Is/N match Boyle-standard silicon.
+        let catch_model = aug_netlist
+            .models
+            .iter()
+            .find(|m| m.name == BOYLE_CATCH_DIODE_MODEL)
+            .unwrap();
+        assert_eq!(catch_model.model_type, "D");
+        let is_val = catch_model
+            .params
+            .iter()
+            .find(|(k, _)| k == "IS")
+            .map(|(_, v)| *v)
+            .unwrap();
+        assert!((is_val - 1e-15).abs() < 1e-20, "Is should be 1e-15, got {is_val}");
+        let n_val = catch_model
+            .params
+            .iter()
+            .find(|(k, _)| k == "N")
+            .map(|(_, v)| *v)
+            .unwrap();
+        assert!((n_val - 1.0).abs() < 1e-12, "N should be 1.0, got {n_val}");
+
+        // Count the synthesized elements: 4 op-amps × 2 rails × (1 VS + 1 diode) = 16.
+        let vs_added = aug_netlist
+            .elements
+            .iter()
+            .filter(|e| {
+                matches!(e, crate::parser::Element::VoltageSource { name, .. } if name.starts_with("V_boyle_"))
+            })
+            .count();
+        let diodes_added = aug_netlist
+            .elements
+            .iter()
+            .filter(|e| {
+                matches!(e, crate::parser::Element::Diode { name, .. } if name.starts_with("D_boyle_"))
+            })
+            .count();
+        assert_eq!(vs_added, 8, "Expected 8 synthesized voltage sources (4 op-amps × 2 rails)");
+        assert_eq!(diodes_added, 8, "Expected 8 synthesized catch diodes (4 op-amps × 2 rails)");
+
+        // Rebuild MNA from the augmented netlist — this must succeed.
+        let aug_mna = MnaSystem::from_netlist(&aug_netlist).expect("augmented MNA build");
+
+        // Dimensions grow by exactly 8 nodes and 8 diodes.
+        assert_eq!(
+            aug_mna.n,
+            mna.n + 8,
+            "augmented n should grow by 2 per clamped op-amp"
+        );
+        assert_eq!(
+            aug_mna.m,
+            mna.m + 8,
+            "augmented m should grow by 2 per clamped op-amp"
+        );
+        assert_eq!(
+            aug_mna.voltage_sources.len(),
+            mna.voltage_sources.len() + 8,
+            "augmented VS count should grow by 2 per clamped op-amp"
+        );
+
+        // Original nodes keep their indices.
+        assert_eq!(mna.node_map["in"], aug_mna.node_map["in"]);
+        assert_eq!(mna.node_map["out"], aug_mna.node_map["out"]);
+        assert_eq!(mna.node_map["vbias"], aug_mna.node_map["vbias"]);
+
+        // Auto-detect is unaffected by the presence of the helper — Klon
+        // still picks ActiveSet by default (not BoyleDiodes, which isn't
+        // a valid auto choice yet).
+        let resolved = resolve_opamp_rail_mode(&mna, OpampRailMode::Auto);
+        assert_eq!(resolved.mode, OpampRailMode::ActiveSet);
     }
 
     #[test]
