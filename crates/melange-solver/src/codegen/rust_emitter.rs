@@ -392,15 +392,6 @@ fn collapse_blank_lines(code: &str) -> String {
     result
 }
 
-/// Format a slice of f64 as comma-separated full-precision values.
-fn format_f64_slice(values: &[f64]) -> String {
-    values
-        .iter()
-        .map(|v| fmt_f64(*v))
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
 /// Emit a single `const DEVICE_{n}_{suffix}: f64 = ...;` line.
 fn emit_device_const(code: &mut String, dev_num: usize, suffix: &str, value: f64) {
     code.push_str(&format!(
@@ -1818,31 +1809,6 @@ impl RustEmitter {
         code
     }
 
-    fn emit_pot_helpers(&self, ir: &CircuitIR) -> String {
-        if ir.pots.is_empty() {
-            return String::new();
-        }
-        let mut code = section_banner("POTENTIOMETER SM SCALE HELPERS");
-
-        for (idx, _pot) in ir.pots.iter().enumerate() {
-            code.push_str(&format!(
-                "/// Sherman-Morrison scale factor for pot {idx}\n\
-                 #[allow(dead_code)]\n\
-                 #[inline(always)]\n\
-                 fn sm_scale_{idx}(state: &CircuitState) -> (f64, f64) {{\n\
-                 \x20   let r = state.pot_{idx}_resistance;\n\
-                 \x20   if !r.is_finite() {{ return (0.0, 0.0); }}\n\
-                 \x20   let r = r.clamp(POT_{idx}_MIN_R, POT_{idx}_MAX_R);\n\
-                 \x20   let delta_g = 1.0 / r - POT_{idx}_G_NOM;\n\
-                 \x20   let denom = 1.0 + delta_g * state.pot_{idx}_usu;\n\
-                 \x20   let scale = if denom.abs() > 1e-15 {{ delta_g / denom }} else {{ 0.0 }};\n\
-                 \x20   (delta_g, scale)\n\
-                 }}\n\n",
-            ));
-        }
-        code
-    }
-
     /// Emit inline Gaussian elimination inversion functions for transformer groups.
     ///
     /// Each transformer group of size W gets its own `invert_xfmr_{n}` function
@@ -2802,25 +2768,6 @@ impl RustEmitter {
         }
     }
 
-    /// Emit K_eff setup: precomputed corrected K matrix incorporating all pot SM corrections.
-    /// K_eff = K - Σ_k scale_ck * nv_su_ck ⊗ u_ni_ck
-    fn emit_k_eff_setup(pots: &[PotentiometerIR], m: usize) -> String {
-        let mut code = String::new();
-        code.push_str(
-            "    // Precompute corrected K matrix: K_eff = K - Σ_k scale_ck * nv_su_ck ⊗ u_ni_ck\n",
-        );
-        code.push_str("    let mut k_eff = state.k;\n");
-        for k in 0..pots.len() {
-            for i in 0..m {
-                for j in 0..m {
-                    code.push_str(&format!(
-                        "    k_eff[{i}][{j}] -= scale_c{k} * nv_su_c{k}[{i}] * u_ni_c{k}[{j}];\n"
-                    ));
-                }
-            }
-        }
-        code
-    }
 }
 
 // ============================================================================
@@ -2849,13 +2796,7 @@ fn emit_nr_singular_fallback(code: &mut String, dim: usize, indent: &str) {
 /// damping to maintain current-space NR consistency.
 ///
 /// Assumes `delta0..delta{dim-1}` and `v_d0..v_d{dim-1}` are in scope.
-fn emit_nr_limit_and_converge(
-    code: &mut String,
-    ir: &CircuitIR,
-    dim: usize,
-    indent: &str,
-    has_pots: bool,
-) {
+fn emit_nr_limit_and_converge(code: &mut String, ir: &CircuitIR, dim: usize, indent: &str) {
     // Compute implied voltage changes: dv[i] = -sum_j K[i][j] * delta[j]
     code.push_str(&format!(
         "{indent}// Voltage-space limiting (SPICE pnjlim/fetlim through K matrix)\n"
@@ -3151,8 +3092,6 @@ impl RustEmitter {
         code.push_str("/// \n");
         code.push_str("/// Solves: i_nl - i_d(p + K*i_nl) = 0\n");
         code.push_str("/// where p = N_v * v_pred is the linear prediction\n");
-        let has_pots = !ir.pots.is_empty();
-        // Per-block rebuild keeps state.k exact — no k_eff parameter needed.
         code.push_str("#[inline(always)]\n");
         code.push_str(
             "fn solve_nonlinear(p: &[f64; M], state: &mut CircuitState) -> [f64; M] {\n",
@@ -3538,7 +3477,7 @@ impl RustEmitter {
                     code.push_str("            continue;\n");
                     code.push_str("        }\n");
                     code.push_str("        let delta0 = f0 / det;\n\n");
-                    emit_nr_limit_and_converge(code, ir, 1, "        ", has_pots);
+                    emit_nr_limit_and_converge(code, ir, 1, "        ");
                 }
                 2 => {
                     code.push_str("        // Solve 2x2 system: J * delta = f (Cramer's rule)\n");
@@ -3550,10 +3489,10 @@ impl RustEmitter {
                     code.push_str("        let inv_det = 1.0 / det;\n");
                     code.push_str("        let delta0 = inv_det * (j11 * f0 - j01 * f1);\n");
                     code.push_str("        let delta1 = inv_det * (-j10 * f0 + j00 * f1);\n\n");
-                    emit_nr_limit_and_converge(code, ir, 2, "        ", has_pots);
+                    emit_nr_limit_and_converge(code, ir, 2, "        ");
                 }
                 3..=16 => {
-                    Self::generate_gauss_elim(code, ir, m, has_pots);
+                    Self::generate_gauss_elim(code, ir, m);
                 }
                 _ => {
                     return Err(CodegenError::UnsupportedTopology(format!(
@@ -3591,7 +3530,7 @@ impl RustEmitter {
     }
 
     /// Generate inline Gaussian elimination for M=3..=16.
-    fn generate_gauss_elim(code: &mut String, ir: &CircuitIR, dim: usize, has_pots: bool) {
+    fn generate_gauss_elim(code: &mut String, ir: &CircuitIR, dim: usize) {
         code.push_str(&format!(
             "        // Solve {dim}x{dim} system via inline Gaussian elimination\n"
         ));
@@ -3655,7 +3594,7 @@ impl RustEmitter {
         for i in 0..dim {
             code.push_str(&format!("            let delta{i} = b[{i}];\n"));
         }
-        emit_nr_limit_and_converge(code, ir, dim, "            ", has_pots);
+        emit_nr_limit_and_converge(code, ir, dim, "            ");
         code.push_str("        } else {\n");
         emit_nr_singular_fallback(code, dim, "            ");
         code.push_str("        }\n");

@@ -1354,7 +1354,6 @@ fn compile_circuit_source(
                 &gang_params,
                 &switch_params,
                 output_node_indices.len(),
-                has_inductors_compile,
                 oversampling,
                 &plugin_options,
             )?;

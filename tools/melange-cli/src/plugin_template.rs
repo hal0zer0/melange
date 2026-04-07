@@ -109,7 +109,6 @@ pub fn generate_plugin_project(
     gangs: &[GangParamInfo],
     switches: &[SwitchParamInfo],
     num_outputs: usize,
-    nodal_mode: bool,
 ) -> Result<()> {
     generate_plugin_project_with_oversampling(
         output_dir,
@@ -121,7 +120,6 @@ pub fn generate_plugin_project(
         gangs,
         switches,
         num_outputs,
-        nodal_mode,
         1,
         &PluginOptions::default(),
     )
@@ -137,7 +135,6 @@ pub fn generate_plugin_project_with_oversampling(
     gangs: &[GangParamInfo],
     switches: &[SwitchParamInfo],
     num_outputs: usize,
-    nodal_mode: bool,
     oversampling_factor: usize,
     options: &PluginOptions<'_>,
 ) -> Result<()> {
@@ -157,7 +154,6 @@ pub fn generate_plugin_project_with_oversampling(
             gangs,
             switches,
             num_outputs,
-            nodal_mode,
             oversampling_factor,
             options,
         ),
@@ -245,7 +241,6 @@ pub(crate) fn test_generate_lib_rs(
         &[],
         &[],
         1,
-        false,
         1,
         &PluginOptions::default(),
     )
@@ -471,7 +466,6 @@ fn generate_process_loop(
     gangs: &[GangParamInfo],
     switches: &[SwitchParamInfo],
     num_outputs: usize,
-    nodal_mode: bool,
     mono: bool,
     wet_dry_mix: bool,
     ear_protection: bool,
@@ -913,7 +907,6 @@ fn generate_lib_rs(
     gangs: &[GangParamInfo],
     switches: &[SwitchParamInfo],
     num_outputs: usize,
-    nodal_mode: bool,
     oversampling_factor: usize,
     options: &PluginOptions<'_>,
 ) -> String {
@@ -947,7 +940,6 @@ fn generate_lib_rs(
         gangs,
         switches,
         num_outputs,
-        nodal_mode,
         options.mono,
         options.wet_dry_mix,
         options.ear_protection,
@@ -1656,7 +1648,6 @@ mod tests {
             &[],
             &[],
             1,
-            false,
         );
         assert!(
             result.is_ok(),
@@ -1679,7 +1670,7 @@ mod tests {
         let dir = std::env::temp_dir().join("melange_test_plugin_circuit");
         let _ = std::fs::remove_dir_all(&dir);
         let circuit_code = "// This is the generated circuit code\npub fn process_sample() {}";
-        let result = generate_plugin_project(&dir, circuit_code, "test", false, &[], &[], &[], &[], 1, false);
+        let result = generate_plugin_project(&dir, circuit_code, "test", false, &[], &[], &[], &[], 1);
         assert!(result.is_ok());
         let written = std::fs::read_to_string(dir.join("src/circuit.rs")).unwrap();
         assert_eq!(written, circuit_code);
@@ -1691,7 +1682,7 @@ mod tests {
         let dir = std::env::temp_dir().join("melange_test_plugin_name");
         let _ = std::fs::remove_dir_all(&dir);
         let result =
-            generate_plugin_project(&dir, "// code", "my-cool-plugin", false, &[], &[], &[], &[], 1, false);
+            generate_plugin_project(&dir, "// code", "my-cool-plugin", false, &[], &[], &[], &[], 1);
         assert!(result.is_ok());
         let toml = std::fs::read_to_string(dir.join("Cargo.toml")).unwrap();
         assert!(toml.contains("name = \"my-cool-plugin\""));
@@ -1703,7 +1694,7 @@ mod tests {
         let dir = std::env::temp_dir().join("melange_test_plugin_lib");
         let _ = std::fs::remove_dir_all(&dir);
         let result =
-            generate_plugin_project(&dir, "// code", "my-plugin", false, &[], &[], &[], &[], 1, false);
+            generate_plugin_project(&dir, "// code", "my-plugin", false, &[], &[], &[], &[], 1);
         assert!(result.is_ok());
         let lib_rs = std::fs::read_to_string(dir.join("src/lib.rs")).unwrap();
         assert!(lib_rs.contains("CircuitPlugin"));
@@ -1717,8 +1708,8 @@ mod tests {
         let dir = std::env::temp_dir().join("melange_test_plugin_idempotent");
         let _ = std::fs::remove_dir_all(&dir);
         // Generate twice, should not fail
-        let _ = generate_plugin_project(&dir, "// v1", "test", false, &[], &[], &[], &[], 1, false);
-        let result = generate_plugin_project(&dir, "// v2", "test", false, &[], &[], &[], &[], 1, false);
+        let _ = generate_plugin_project(&dir, "// v1", "test", false, &[], &[], &[], &[], 1);
+        let result = generate_plugin_project(&dir, "// v2", "test", false, &[], &[], &[], &[], 1);
         assert!(result.is_ok());
         // Second write should overwrite
         let circuit = std::fs::read_to_string(dir.join("src/circuit.rs")).unwrap();
@@ -1777,14 +1768,14 @@ mod tests {
             plugin_name: Some("My Custom Plugin"),
             ..Default::default()
         };
-        let lib = generate_lib_rs("test-circuit", false, &[], &[], &[], &[], 1, false, 1, &opts);
+        let lib = generate_lib_rs("test-circuit", false, &[], &[], &[], &[], 1, 1, &opts);
         assert!(lib.contains("const NAME: &'static str = \"My Custom Plugin\""));
     }
 
     #[test]
     fn lib_without_custom_name_uses_auto() {
         let opts = PluginOptions::default();
-        let lib = generate_lib_rs("tube-screamer", false, &[], &[], &[], &[], 1, false, 1, &opts);
+        let lib = generate_lib_rs("tube-screamer", false, &[], &[], &[], &[], 1, 1, &opts);
         assert!(lib.contains("const NAME: &'static str = \"Tube Screamer\""));
     }
 
@@ -1796,7 +1787,7 @@ mod tests {
             mono: true,
             ..Default::default()
         };
-        let lib = generate_lib_rs("test", false, &[], &[], &[], &[], 1, false, 1, &opts);
+        let lib = generate_lib_rs("test", false, &[], &[], &[], &[], 1, 1, &opts);
         assert!(lib.contains("main_input_channels: NonZeroU32::new(1)"));
         assert!(lib.contains("main_output_channels: NonZeroU32::new(1)"));
     }
@@ -1807,7 +1798,7 @@ mod tests {
             mono: true,
             ..Default::default()
         };
-        let lib = generate_lib_rs("test", false, &[], &[], &[], &[], 1, false, 1, &opts);
+        let lib = generate_lib_rs("test", false, &[], &[], &[], &[], 1, 1, &opts);
         assert!(lib.contains("ClapFeature::Mono"));
         assert!(!lib.contains("ClapFeature::Stereo"));
     }
@@ -1815,7 +1806,7 @@ mod tests {
     #[test]
     fn lib_stereo_default_has_stereo_clap_feature() {
         let opts = PluginOptions::default();
-        let lib = generate_lib_rs("test", false, &[], &[], &[], &[], 1, false, 1, &opts);
+        let lib = generate_lib_rs("test", false, &[], &[], &[], &[], 1, 1, &opts);
         assert!(lib.contains("ClapFeature::Stereo"));
         assert!(!lib.contains("ClapFeature::Mono"));
     }
@@ -1826,7 +1817,7 @@ mod tests {
             mono: true,
             ..Default::default()
         };
-        let lib = generate_lib_rs("test", false, &[], &[], &[], &[], 1, false, 1, &opts);
+        let lib = generate_lib_rs("test", false, &[], &[], &[], &[], 1, 1, &opts);
         assert!(lib.contains("circuit_states: vec![CircuitState::default(); 1]"));
     }
 
@@ -1838,7 +1829,7 @@ mod tests {
             wet_dry_mix: true,
             ..Default::default()
         };
-        let lib = generate_lib_rs("test", false, &[], &[], &[], &[], 1, false, 1, &opts);
+        let lib = generate_lib_rs("test", false, &[], &[], &[], &[], 1, 1, &opts);
         assert!(lib.contains("#[id = \"mix\"]"));
         assert!(lib.contains("pub mix: FloatParam"));
     }
@@ -1849,7 +1840,7 @@ mod tests {
             wet_dry_mix: true,
             ..Default::default()
         };
-        let lib = generate_lib_rs("test", false, &[], &[], &[], &[], 1, false, 1, &opts);
+        let lib = generate_lib_rs("test", false, &[], &[], &[], &[], 1, 1, &opts);
         assert!(lib.contains("let dry = *sample;"));
         assert!(lib.contains("mix * out + (1.0 - mix) * dry"));
     }
@@ -1857,7 +1848,7 @@ mod tests {
     #[test]
     fn lib_without_wet_dry_mix_has_no_mix_param() {
         let opts = PluginOptions::default();
-        let lib = generate_lib_rs("test", false, &[], &[], &[], &[], 1, false, 1, &opts);
+        let lib = generate_lib_rs("test", false, &[], &[], &[], &[], 1, 1, &opts);
         assert!(!lib.contains("pub mix: FloatParam"));
         assert!(!lib.contains("let dry = *sample;"));
     }
@@ -1868,7 +1859,7 @@ mod tests {
             wet_dry_mix: true,
             ..Default::default()
         };
-        let lib = generate_lib_rs("test", false, &[], &[], &[], &[], 1, false, 1, &opts);
+        let lib = generate_lib_rs("test", false, &[], &[], &[], &[], 1, 1, &opts);
         // Mix default should be 1.0 (fully wet)
         assert!(lib.contains("\"Mix\""));
         assert!(lib.contains("1.0,"));
@@ -1890,7 +1881,6 @@ mod tests {
             &[],
             &[],
             1,
-            false,
         );
         assert!(result.is_ok());
         assert!(dir.join("README.md").exists(), "Should create README.md");
@@ -1921,7 +1911,7 @@ mod tests {
             mono: true,
             ..Default::default()
         };
-        let lib = generate_lib_rs("test", true, &[], &[], &[], &[], 1, false, 1, &opts);
+        let lib = generate_lib_rs("test", true, &[], &[], &[], &[], 1, 1, &opts);
         assert!(lib.contains("main_input_channels: NonZeroU32::new(1)"));
         assert!(lib.contains("pub input_level: FloatParam"));
         assert!(lib.contains("input_gain"));
@@ -1933,7 +1923,7 @@ mod tests {
             wet_dry_mix: true,
             ..Default::default()
         };
-        let lib = generate_lib_rs("test", true, &[], &[], &[], &[], 1, false, 1, &opts);
+        let lib = generate_lib_rs("test", true, &[], &[], &[], &[], 1, 1, &opts);
         assert!(lib.contains("pub input_level: FloatParam"));
         assert!(lib.contains("pub mix: FloatParam"));
         assert!(lib.contains("let dry = *sample;"));

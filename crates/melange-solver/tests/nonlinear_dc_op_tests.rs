@@ -688,65 +688,6 @@ fn lookup_model_param(netlist: &Netlist, model_name: &str, param_name: &str) -> 
         })
 }
 
-fn find_diode_is(netlist: &Netlist, name: &str) -> f64 {
-    use melange_solver::parser::Element;
-    let model = netlist
-        .elements
-        .iter()
-        .find_map(|e| match e {
-            Element::Diode { name: n, model, .. } if n.eq_ignore_ascii_case(name) => {
-                Some(model.as_str())
-            }
-            _ => None,
-        })
-        .unwrap_or("");
-    lookup_model_param(netlist, model, "IS").unwrap_or(1e-15)
-}
-
-fn find_diode_n(netlist: &Netlist, name: &str) -> f64 {
-    use melange_solver::parser::Element;
-    let model = netlist
-        .elements
-        .iter()
-        .find_map(|e| match e {
-            Element::Diode { name: n, model, .. } if n.eq_ignore_ascii_case(name) => {
-                Some(model.as_str())
-            }
-            _ => None,
-        })
-        .unwrap_or("");
-    lookup_model_param(netlist, model, "N").unwrap_or(1.0)
-}
-
-fn find_bjt_param(netlist: &Netlist, name: &str, param: &str) -> Option<f64> {
-    use melange_solver::parser::Element;
-    let model = netlist.elements.iter().find_map(|e| match e {
-        Element::Bjt { name: n, model, .. } if n.eq_ignore_ascii_case(name) => Some(model.as_str()),
-        _ => None,
-    })?;
-    lookup_model_param(netlist, model, param)
-}
-
-fn is_bjt_pnp(netlist: &Netlist, name: &str) -> bool {
-    use melange_solver::parser::Element;
-    let model = netlist
-        .elements
-        .iter()
-        .find_map(|e| match e {
-            Element::Bjt { name: n, model, .. } if n.eq_ignore_ascii_case(name) => {
-                Some(model.as_str())
-            }
-            _ => None,
-        })
-        .unwrap_or("");
-    netlist
-        .models
-        .iter()
-        .find(|m| m.name.eq_ignore_ascii_case(model))
-        .map(|m| m.model_type.to_uppercase().starts_with("PNP"))
-        .unwrap_or(false)
-}
-
 // =============================================================================
 // Power amplifier DC OP (internal nodes for parasitic BJTs)
 // =============================================================================
