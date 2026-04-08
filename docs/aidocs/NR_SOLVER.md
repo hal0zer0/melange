@@ -175,8 +175,24 @@ system via DK reduction).
    commit `39397d1` (BoyleDiodes-gated): a residual check using
    `i_nl_fresh − i_nl_chord` (mirrors the DK Schur path's gate), plus an
    adaptive refactor trigger (>50 % relative `j_dev` change). Both work
-   for single-diode engagement but not yet for simultaneous multi-diode
-   bistability — see `DEBUGGING.md` "Op-amp BoyleDiodes Failure Signatures".
+   for single-diode engagement (light clipping) but **fail at heavy
+   clipping** because of a deeper bistability: the chord LU at any single
+   `chord_j_dev` value has its own "wrong" linear fixed point (chord with
+   tiny jdev → fixed point above knee; chord with large jdev → fixed
+   point below knee), and neither captures the true intermediate-jdev
+   equilibrium. Line search backtracking (which prevents step overshoot)
+   does not fix this because the Newton DIRECTION is wrong, not just the
+   magnitude. The right fix operates on the LU matrix itself —
+   pseudo-transient continuation (PTC, Kelley-Keyes 1998) adds `1/Δτ_k I`
+   to the chord LU diagonal before factoring, mechanically bounding
+   `‖(J + I/Δτ_k)^{-1}‖ ≤ Δτ_k` so the LU back-solve cannot produce a
+   wildly wrong fixed point. See `DEBUGGING.md` "Op-amp BoyleDiodes
+   Failure Signatures" for the open issue tracking and the
+   agent-memory note `task_12_bistable_oscillation_finding.md` for the
+   iter-by-iter trace and the cross-simulator survey
+   (Xyce/Qucs/ngspice all use refactor-every-iter and don't have this
+   problem; melange's chord persistence is the perf optimization that
+   creates it).
 
 ## Implementation Note
 The codegen emits the device Jacobian as block-diagonal `jdev_` entries (1×1 for
