@@ -209,10 +209,11 @@ fn main() {{
     let (samples, sr) = if let Some(input_path) = args.get(1) {{
         if input_path == "--tone" {{
             // Test tone mode
-            let sr = {sample_rate:.1};
-            let n = (sr * {duration_secs:.1}) as usize;
-            let amp = {amp};
-            let freq = {freq:.1};
+            let sr: f64 = {sample_rate:.6};
+            let dur_s: f64 = {duration_secs:.6};
+            let n = (sr * dur_s) as usize;
+            let amp: f64 = {amp:.17e};
+            let freq: f64 = {freq:.6};
             let samples: Vec<f64> = (0..n)
                 .map(|i| amp * (2.0 * std::f64::consts::PI * freq * (i as f64) / sr).sin())
                 .collect();

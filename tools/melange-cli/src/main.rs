@@ -227,6 +227,11 @@ enum Commands {
         /// Auto selects nodal for nonlinear circuits with inductors, dk otherwise.
         #[arg(long, default_value = "auto")]
         solver: String,
+
+        /// Op-amp rail saturation mode: auto, none, hard, active-set, active-set-be, boyle-diodes.
+        /// Default 'auto' inspects the topology and picks the cheapest correct mode.
+        #[arg(long, default_value = "auto")]
+        opamp_rail_mode: String,
     },
 
     /// Analyze circuit frequency response
@@ -509,7 +514,16 @@ fn main() -> Result<()> {
             amplitude,
             input_resistance: input_resistance_flag,
             solver,
+            opamp_rail_mode,
         } => {
+            let rail_mode = melange_solver::codegen::OpampRailMode::parse(&opamp_rail_mode)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Invalid --opamp-rail-mode '{}'. Valid: auto, none, hard, \
+                         active-set, active-set-be, boyle-diodes",
+                        opamp_rail_mode
+                    )
+                })?;
             let circuit_source = circuits::resolve(&input)?;
             println!("Resolved circuit: {}", circuit_source.name());
             simulate_circuit_source(
@@ -524,6 +538,7 @@ fn main() -> Result<()> {
                     amplitude,
                     input_resistance_flag,
                     solver: &solver,
+                    opamp_rail_mode: rail_mode,
                 },
             )
         }
@@ -1551,6 +1566,7 @@ struct SimulateOptions<'a> {
     amplitude: f64,
     input_resistance_flag: Option<f64>,
     solver: &'a str,
+    opamp_rail_mode: melange_solver::codegen::OpampRailMode,
 }
 
 fn simulate_circuit_source(
@@ -1701,7 +1717,7 @@ fn simulate_circuit_source(
         pot_settle_samples: 64,
         backward_euler: false,
         disable_be_fallback: false,
-        opamp_rail_mode: melange_solver::codegen::OpampRailMode::Auto,
+        opamp_rail_mode: opts.opamp_rail_mode,
     };
     let generator = CodeGenerator::new(config);
     let generated = if use_nodal {

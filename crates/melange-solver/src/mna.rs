@@ -331,7 +331,47 @@ pub struct OpampInfo {
     /// Dominant pole capacitance for IIR filter: C_dom = AOL / (2*pi*GBW*ROUT).
     /// Set during MNA stamping when GBW is finite; 0.0 when GBW is infinite.
     pub iir_c_dom: f64,
+    /// `BoyleDiodes`-mode internal gain node index (1-indexed, 0 = not in
+    /// BoyleDiodes mode). When non-zero, the op-amp's transconductance is
+    /// stamped at this node instead of at `n_out_idx`, with the high
+    /// impedance load `R_BOYLE_INT_LOAD` setting both Gm and Go so the
+    /// catch diodes (placed externally between `n_int_idx` and rail
+    /// references) only have to balance against ~1 µS instead of the
+    /// op-amp's nominal Gm = AOL/r_out (typically 4000 S for TL072). The
+    /// op-amp output node is then driven by an external unity-gain buffer
+    /// VCCS sourced from this node — see
+    /// [`crate::codegen::ir::augment_netlist_with_boyle_diodes`].
+    ///
+    /// Auto-detected during MNA stamping by looking up
+    /// `_oa_int_{safe_name}` in `node_map`. The augment helper synthesizes
+    /// that name (referenced from buffer/diode elements), so the field is
+    /// non-zero only when the op-amp has gone through the augmentation pass.
+    pub n_int_idx: usize,
 }
+
+/// Effective output resistance for the
+/// [`OpampRailMode::BoyleDiodes`] internal gain node (Ω).
+///
+/// Both `Gm_int = AOL / R_BOYLE_INT_LOAD` and `Go_int = 1 / R_BOYLE_INT_LOAD`
+/// are derived from this single value, so the open-loop voltage gain
+/// from V+/V- to the internal node is preserved at AOL: a `Gm * v_diff`
+/// current source feeding a `1/R` shunt sets `V_int = AOL · v_diff`
+/// regardless of the absolute value of `R`. The choice trades two
+/// constraints:
+///
+/// - **Catch-diode dominance**: at deep saturation the catch diode runs
+///   at ~1 S forward conductance, so we need `1/R_BOYLE_INT_LOAD` to be
+///   ≪ 1 S for the diode to anchor V_int. ⇒ R ≫ 1 Ω.
+/// - **MNA pivoting against the rest of the circuit**: the off-diagonal
+///   `Gm_int = AOL/R` should be in the same magnitude range as the
+///   user circuit's typical entries (1 µS to 1 mS) to keep partial
+///   pivoting numerically well-conditioned. With `AOL = 200000`,
+///   `R = 1 MΩ` gives `Gm = 0.2 S` — comfortably above the user
+///   circuit's ~1 mS ceiling so the int-node row is consistently
+///   chosen as the pivot for the V+/V- columns, and the diode load
+///   `Go = 1 µS` is well below the diode's full-on 1 S so the diode
+///   still anchors the rail.
+pub const R_BOYLE_INT_LOAD: f64 = 1.0e6;
 
 /// VCA (Voltage-Controlled Amplifier) info for MNA system.
 ///
@@ -2805,12 +2845,30 @@ impl MnaBuilder {
         }
 
         // Stamp op-amps as VCCS into G matrix.
-        // When GBW is specified, the IIR model stamps Gm at the output (same as non-GBW)
-        // for correct DC operating point. The codegen IR strips Gm before building A for
-        // transient, modeling the dominant pole as an external per-sample IIR filter.
+        //
+        // Three stamping modes, in priority order:
+        //
+        // 1. **BoyleDiodes internal gain node** — auto-detected by looking up
+        //    `_oa_int_{safe_name}` in `node_map`. The augment helper
+        //    `codegen::ir::augment_netlist_with_boyle_diodes` synthesizes
+        //    catch diodes + a unity-gain output buffer that reference this
+        //    node, so its presence in `node_map` is the signal that this
+        //    op-amp is in BoyleDiodes mode. Gm/Go are stamped at the
+        //    internal node with `R_BOYLE_INT_LOAD = 1 MΩ` as the effective
+        //    output resistance — making the catch diode's exponential
+        //    conductance only have to balance against ~1 µS instead of
+        //    ~4000 S. The original output node is left untouched (the
+        //    buffer VCCS handles it).
+        //
+        // 2. **GBW IIR model** — when `oa.gbw` is finite, stamp at the
+        //    output for DC OP. The dominant pole is stripped and re-applied
+        //    in codegen as an external IIR filter (currently disabled
+        //    behind `if !has_vca && false`, kept for future re-enable).
+        //
+        // 3. **Simple linear VCCS** — direct stamp at the output node.
+        //    Original behavior; used for all op-amps that aren't in the
+        //    BoyleDiodes augmentation path.
         for oa in &mut mna.opamps {
-            let gm = oa.aol / oa.r_out;
-            let go = 1.0 / oa.r_out;
             let out = oa.n_out_idx;
             let np = oa.n_plus_idx;
             let nm = oa.n_minus_idx;
@@ -2818,6 +2876,51 @@ impl MnaBuilder {
             if out == 0 {
                 continue;
             }
+
+            // BoyleDiodes auto-detection: look up the synthesized internal
+            // node by name. If present, switch to internal-node stamping for
+            // this op-amp and skip the rest of the dispatch.
+            let safe_name: String = oa
+                .name
+                .chars()
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() || c == '_' {
+                        c
+                    } else {
+                        '_'
+                    }
+                })
+                .collect();
+            let int_node_key = format!("_oa_int_{}", safe_name);
+            if let Some(&int_idx_one) = mna.node_map.get(&int_node_key) {
+                // 1-indexed in node_map; convert to 0-indexed matrix row.
+                let int_row = int_idx_one - 1;
+                // Effective Gm/Go derived from R_BOYLE_INT_LOAD so the
+                // catch diode (anchored externally to this node) only
+                // fights ~1 µS, not the op-amp's nominal 1/r_out.
+                let gm_int = oa.aol / R_BOYLE_INT_LOAD;
+                let go_int = 1.0 / R_BOYLE_INT_LOAD;
+                if np > 0 {
+                    mna.g[int_row][np - 1] += gm_int;
+                }
+                if nm > 0 {
+                    mna.g[int_row][nm - 1] -= gm_int;
+                }
+                mna.g[int_row][int_row] += go_int;
+
+                oa.n_int_idx = int_idx_one;
+                log::debug!(
+                    "Op-amp {} (BoyleDiodes): int_node={}, Gm_int={:.3e}, Go_int={:.3e}",
+                    oa.name,
+                    int_idx_one,
+                    gm_int,
+                    go_int,
+                );
+                continue;
+            }
+
+            let gm = oa.aol / oa.r_out;
+            let go = 1.0 / oa.r_out;
             let o = out - 1;
 
             let has_gbw = oa.gbw.is_finite() && oa.gbw > 0.0;
@@ -3613,6 +3716,7 @@ impl MnaBuilder {
                     vol_drop: 1.5,
                     n_internal_idx: 0,
                     iir_c_dom: 0.0,
+                    n_int_idx: 0,
                 });
             }
             Element::Vcvs {

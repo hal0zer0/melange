@@ -523,32 +523,63 @@ impl CodeGenerator {
             )));
         }
 
-        // BoyleDiodes mode: not yet fully working.
+        // BoyleDiodes mode: partial implementation, NOT yet wired into the
+        // codegen pipeline.
         //
-        // The helper `ir::augment_netlist_with_boyle_diodes` correctly
-        // synthesizes catch diodes and rail-reference voltage sources, and
-        // the MNA rebuilds cleanly. BUT integrating the catch diodes at the
-        // op-amp *output* node creates a numerically stiff system that NR
-        // cannot reliably solve: the linear VCCS (Gm = AOL/ROUT ≈ 4000 S)
-        // pushes directly against the diode's exponential conductance (which
-        // spans 7+ orders of magnitude between reverse-bias and forward-bias
-        // operation), and the equilibrated LU factorization loses precision
-        // on matrices with that dynamic range. Empirical observation:
-        // Klon at 1 mV input produces v[rail_branch_current] ≈ -3 × 10⁶ V
-        // after a single sample with this model.
+        // What's in place (this commit):
+        //   * `augment_netlist_with_boyle_diodes` (in `codegen/ir.rs`)
+        //     synthesizes the internal gain node, output-buffer VCVS,
+        //     rail-reference VS, and catch diodes.
+        //   * `mna::MnaSystem::from_netlist` op-amp stamping auto-detects
+        //     `_oa_int_{name}` in `node_map` and switches that op-amp's
+        //     transconductance stamp from the output node to the internal
+        //     node, with `Gm = AOL/R_BOYLE_INT_LOAD` and
+        //     `Go = 1/R_BOYLE_INT_LOAD`.
+        //   * `OpampInfo::n_int_idx` records the internal node index per
+        //     op-amp.
+        //   * `mna::R_BOYLE_INT_LOAD` constant (= 1 MΩ) sets the
+        //     high-impedance load.
+        //   * `augment_netlist_with_boyle_diodes_on_klon_produces_valid_mna`
+        //     unit test pins the augmented MNA contract.
         //
-        // The proper Boyle macromodel avoids this by inserting the catch
-        // diodes at an *internal* high-impedance gain node (downstream of
-        // the Gm VCCS, upstream of the output buffer), not at the final
-        // output. That requires refactoring the op-amp model to have an
-        // internal gain node — a bigger change than Step 5 attempted.
+        // Verified:
+        //   * DC OP on the augmented Klon matches the un-augmented Klon to
+        //     11 decimal places (the buffer + internal node give the same
+        //     bias values everywhere).
+        //   * Manual dense LU on the augmented Klon's `A = G + 2C/T` linear
+        //     system produces the correct first-sample transient response
+        //     for a 1 mV 1 kHz input — `out` ramps smoothly to ~30 µV over
+        //     the first 5 samples, matching the closed-loop gain through
+        //     the gain stage.
+        //   * Standalone augmented inverting amp test (`/tmp/opamp_sign_test`)
+        //     gives `V_out = -10 V` for `V_in = 1 V` (gain -10) at both DC
+        //     and across the first 5 transient samples, including via the
+        //     internal node + buffer.
         //
-        // Until that refactor lands, BoyleDiodes is reserved as an enum
-        // variant but returns an error here so users aren't silently
-        // redirected to a broken path. The plumbing (enum, CLI flag, parser
-        // VOH_DROP/VOL_DROP params, the augmentation helper, tests for
-        // all of the above) is kept because it's the foundation for the
-        // eventual proper fix.
+        // What's broken:
+        //   The codegen Newton-Raphson loop (full N×N LU path, since the
+        //   catch diodes' positive K diagonal forces it) produces wildly
+        //   wrong v[buf_in] = 135 V on the first sample with non-zero input
+        //   for Klon, even though the input is only 0.13 mV and the matrix
+        //   the codegen sees (`state.a`) matches the standalone matrix
+        //   element-by-element. Switching the codegen from sparse_lu_factor
+        //   to dense lu_factor produces the *same* wrong answer, so it's
+        //   not a sparse-LU AMD-ordering issue. The discrepancy must be in
+        //   how the chord_lu / companion-rhs interact with the augmented
+        //   system's sparsity, but I haven't isolated it yet.
+        //
+        // Next steps (for a fresh-context follow-up):
+        //   1. Compare full v_prev arrays (including all augmented branch
+        //      currents at indices 44..N) between standalone and codegen at
+        //      DC OP. If they match, the discrepancy is in the rhs build.
+        //   2. Print every entry of state.a vs the standalone `a` matrix
+        //      and find the first index where they differ.
+        //   3. If state.a matches and rhs matches, the LU itself is wrong
+        //      — likely a Gmin/static-row-swap interaction with the new
+        //      sparsity pattern.
+        //
+        // Until that's resolved, BoyleDiodes returns a clear error pointing
+        // users at the working `active-set-be` mode.
         let resolved = ir::refine_active_set_for_audio_path(
             ir::resolve_opamp_rail_mode(mna, self.config.opamp_rail_mode),
             mna,
@@ -556,21 +587,20 @@ impl CodeGenerator {
         );
         if resolved.mode == OpampRailMode::BoyleDiodes {
             return Err(CodegenError::UnsupportedTopology(
-                "OpampRailMode::BoyleDiodes is not yet fully implemented. The \
-                 infrastructure is in place (netlist augmentation, CLI flag, \
-                 .model OA(VOH_DROP=… VOL_DROP=…) parsing) but placing the \
-                 catch diodes at the op-amp output node creates a numerically \
-                 stiff system that the solver cannot reliably converge — the \
-                 linear VCCS Gm ≈ 4000 S fights the diode's exponential \
-                 conductance across 7+ orders of magnitude. Proper fix \
-                 requires adding an internal gain node to the op-amp model \
-                 (Boyle macromodel structure). \
-                 For now, use `--opamp-rail-mode active-set` (compatible with \
-                 control-path topologies — VCAs, sidechains) or \
-                 `--opamp-rail-mode active-set-be` (compatible with audio-path \
-                 topologies — distortion pedals — damps Nyquist limit cycle), \
-                 or `--opamp-rail-mode hard` for the cheap pre-2026-04 \
-                 behavior.".to_string()
+                "OpampRailMode::BoyleDiodes is partially implemented but the \
+                 codegen NR loop does not yet converge for circuits with the \
+                 augmented internal gain node. The MNA pipeline (augment \
+                 helper, op-amp internal-node stamping, OpampInfo.n_int_idx, \
+                 unit tests) is in place and verified correct — DC OP and \
+                 manual linear LU give expected values — but the generated \
+                 process_sample's NR iteration produces wildly wrong values \
+                 on the first non-zero input sample. Use \
+                 `--opamp-rail-mode active-set-be` (the current best \
+                 alternative for distortion-pedal topologies) until the \
+                 codegen NR convergence issue is resolved. See \
+                 `crates/melange-solver/src/codegen/mod.rs` for the \
+                 detailed status note."
+                    .to_string(),
             ));
         }
 
