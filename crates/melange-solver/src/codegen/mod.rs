@@ -523,86 +523,79 @@ impl CodeGenerator {
             )));
         }
 
-        // BoyleDiodes mode: partial implementation, NOT yet wired into the
-        // codegen pipeline.
+        // BoyleDiodes mode: augment the netlist with the internal-gain-node
+        // scaffolding (catch diodes + output buffer + rail references),
+        // rebuild MNA on the augmented netlist, then continue through the
+        // rest of the codegen pipeline.
         //
-        // What's in place (this commit):
-        //   * `augment_netlist_with_boyle_diodes` (in `codegen/ir.rs`)
-        //     synthesizes the internal gain node, output-buffer VCVS,
-        //     rail-reference VS, and catch diodes.
-        //   * `mna::MnaSystem::from_netlist` op-amp stamping auto-detects
-        //     `_oa_int_{name}` in `node_map` and switches that op-amp's
-        //     transconductance stamp from the output node to the internal
-        //     node, with `Gm = AOL/R_BOYLE_INT_LOAD` and
-        //     `Go = 1/R_BOYLE_INT_LOAD`.
-        //   * `OpampInfo::n_int_idx` records the internal node index per
-        //     op-amp.
-        //   * `mna::R_BOYLE_INT_LOAD` constant (= 1 MΩ) sets the
-        //     high-impedance load.
-        //   * `augment_netlist_with_boyle_diodes_on_klon_produces_valid_mna`
-        //     unit test pins the augmented MNA contract.
+        // CRITICAL: `MnaSystem::from_netlist` builds a fresh MNA from
+        // scratch — it does NOT preserve any in-place mutations the caller
+        // applied to the original `mna` reference. The CLI stamps the
+        // input conductance and device junction caps on the original MNA
+        // BEFORE calling `generate_nodal`, so we must re-apply both to the
+        // rebuilt augmented MNA or its input row will be near-singular and
+        // the LU produces garbage.
         //
-        // Verified:
-        //   * DC OP on the augmented Klon matches the un-augmented Klon to
-        //     11 decimal places (the buffer + internal node give the same
-        //     bias values everywhere).
-        //   * Manual dense LU on the augmented Klon's `A = G + 2C/T` linear
-        //     system produces the correct first-sample transient response
-        //     for a 1 mV 1 kHz input — `out` ramps smoothly to ~30 µV over
-        //     the first 5 samples, matching the closed-loop gain through
-        //     the gain stage.
-        //   * Standalone augmented inverting amp test (`/tmp/opamp_sign_test`)
-        //     gives `V_out = -10 V` for `V_in = 1 V` (gain -10) at both DC
-        //     and across the first 5 transient samples, including via the
-        //     internal node + buffer.
-        //
-        // What's broken:
-        //   The codegen Newton-Raphson loop (full N×N LU path, since the
-        //   catch diodes' positive K diagonal forces it) produces wildly
-        //   wrong v[buf_in] = 135 V on the first sample with non-zero input
-        //   for Klon, even though the input is only 0.13 mV and the matrix
-        //   the codegen sees (`state.a`) matches the standalone matrix
-        //   element-by-element. Switching the codegen from sparse_lu_factor
-        //   to dense lu_factor produces the *same* wrong answer, so it's
-        //   not a sparse-LU AMD-ordering issue. The discrepancy must be in
-        //   how the chord_lu / companion-rhs interact with the augmented
-        //   system's sparsity, but I haven't isolated it yet.
-        //
-        // Next steps (for a fresh-context follow-up):
-        //   1. Compare full v_prev arrays (including all augmented branch
-        //      currents at indices 44..N) between standalone and codegen at
-        //      DC OP. If they match, the discrepancy is in the rhs build.
-        //   2. Print every entry of state.a vs the standalone `a` matrix
-        //      and find the first index where they differ.
-        //   3. If state.a matches and rhs matches, the LU itself is wrong
-        //      — likely a Gmin/static-row-swap interaction with the new
-        //      sparsity pattern.
-        //
-        // Until that's resolved, BoyleDiodes returns a clear error pointing
-        // users at the working `active-set-be` mode.
+        // The MNA-layer half of the BoyleDiodes refactor (auto-detecting
+        // `_oa_int_{name}` in `node_map` and stamping Gm/Go at the high-
+        // impedance internal node via `R_BOYLE_INT_LOAD`) is in
+        // `mna::MnaSystem::from_netlist`. The augmented MNA naturally
+        // inherits that behavior.
         let resolved = ir::refine_active_set_for_audio_path(
             ir::resolve_opamp_rail_mode(mna, self.config.opamp_rail_mode),
             mna,
             netlist,
         );
-        if resolved.mode == OpampRailMode::BoyleDiodes {
-            return Err(CodegenError::UnsupportedTopology(
-                "OpampRailMode::BoyleDiodes is partially implemented but the \
-                 codegen NR loop does not yet converge for circuits with the \
-                 augmented internal gain node. The MNA pipeline (augment \
-                 helper, op-amp internal-node stamping, OpampInfo.n_int_idx, \
-                 unit tests) is in place and verified correct — DC OP and \
-                 manual linear LU give expected values — but the generated \
-                 process_sample's NR iteration produces wildly wrong values \
-                 on the first non-zero input sample. Use \
-                 `--opamp-rail-mode active-set-be` (the current best \
-                 alternative for distortion-pedal topologies) until the \
-                 codegen NR convergence issue is resolved. See \
-                 `crates/melange-solver/src/codegen/mod.rs` for the \
-                 detailed status note."
-                    .to_string(),
-            ));
-        }
+        let augmented_storage;
+        let augmented_mna_storage;
+        let (mna, netlist) = if resolved.mode == OpampRailMode::BoyleDiodes {
+            log::info!(
+                "Codegen nodal: BoyleDiodes mode active; augmenting netlist with \
+                 internal-node catch diodes for {} clamped op-amps",
+                mna.opamps
+                    .iter()
+                    .filter(|oa| oa.n_out_idx > 0 && (oa.vcc.is_finite() || oa.vee.is_finite()))
+                    .count()
+            );
+            augmented_storage = ir::augment_netlist_with_boyle_diodes(netlist, mna);
+            let mut rebuilt = MnaSystem::from_netlist(&augmented_storage).map_err(|e| {
+                CodegenError::UnsupportedTopology(format!(
+                    "BoyleDiodes augmented netlist failed to build MNA: {e}"
+                ))
+            })?;
+
+            // Re-apply caller-side MNA mutations that the rebuild dropped.
+            //
+            // 1) Input conductance: the CLI stamps `g[in][in] += 1/R_in`
+            //    into the original MNA before calling `generate_nodal`,
+            //    but `from_netlist(&augmented_storage)` returns a clean
+            //    MNA. Without this, the input node row only has the
+            //    series cap conductance (~1e-4), the LU treats it as
+            //    nearly singular, and the linear prediction blows up
+            //    on the first non-zero input sample.
+            if self.config.input_node < rebuilt.n {
+                let g_in = 1.0 / self.config.input_resistance;
+                rebuilt.g[self.config.input_node][self.config.input_node] += g_in;
+            }
+
+            // 2) Device junction caps: the CLI stamps these into the
+            //    original MNA via `stamp_device_junction_caps`. The
+            //    augmented netlist has new diodes (the catch diodes),
+            //    so we need to rebuild `device_slots` on the augmented
+            //    netlist + MNA before stamping.
+            if let Ok(device_slots) =
+                ir::CircuitIR::build_device_info_with_mna(&augmented_storage, Some(&rebuilt))
+            {
+                if !device_slots.is_empty() {
+                    rebuilt.stamp_device_junction_caps(&device_slots);
+                }
+            }
+
+            augmented_mna_storage = rebuilt;
+            (&augmented_mna_storage, &augmented_storage)
+        } else {
+            (mna, netlist)
+        };
 
         // Auto-insert parasitic caps if C matrix is all zeros and circuit has
         // nonlinear devices. Without capacitors, A = G and the trapezoidal
