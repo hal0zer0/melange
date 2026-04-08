@@ -4785,6 +4785,28 @@ impl RustEmitter {
         code.push_str("            self.a_neg = A_NEG_DEFAULT;\n");
         code.push_str("            self.a_be = A_BE_DEFAULT;\n");
         code.push_str("            self.a_neg_be = A_NEG_BE_DEFAULT;\n");
+        if matches!(
+            ir.solver_config.opamp_rail_mode,
+            crate::codegen::OpampRailMode::BoyleDiodes
+        ) {
+            code.push_str("            // BoyleDiodes-only: invalidate the cross-timestep chord LU.\n");
+            code.push_str("            // The chord_lu / chord_j_dev cache holds a *factored*\n");
+            code.push_str("            // matrix and is paired with a specific (v_prev, j_dev)\n");
+            code.push_str("            // pair from the most recent refactor. After the 50-sample\n");
+            code.push_str("            // default warmup, chord_j_dev still reflects the deeply-\n");
+            code.push_str("            // reverse-biased catch diodes (j_dev ≈ 1e-31), and the\n");
+            code.push_str("            // adaptive trigger doesn't fire on the first signal sample\n");
+            code.push_str("            // because both `j_dev` and `chord_j_dev` are still ≈ 1e-31\n");
+            code.push_str("            // — but v_prev has drifted enough during warmup that the\n");
+            code.push_str("            // back-solve against the stale factor produces a wrong\n");
+            code.push_str("            // linear prediction. Forcing a refactor here is harmless\n");
+            code.push_str("            // for non-BoyleDiodes modes (no Schottky-class circuit\n");
+            code.push_str("            // exhibits the same staleness pattern), but it shifts the\n");
+            code.push_str("            // first-iteration NR state for VCR ALC and other\n");
+            code.push_str("            // attack-timing-sensitive control circuits, so we gate\n");
+            code.push_str("            // the reset on BoyleDiodes mode only.\n");
+            code.push_str("            self.chord_valid = false;\n");
+        }
         code.push_str("            self.s = S_DEFAULT;\n");
         code.push_str("            self.s_be = S_BE_DEFAULT;\n");
         if m > 0 {
@@ -6896,8 +6918,55 @@ impl RustEmitter {
             code.push_str(
                 "        // 2c. Build and factor Jacobian (adaptive chord: reuse across timesteps)\n",
             );
-            // Refactor when: (a) no valid LU, or (b) within-sample periodic refresh
-            code.push_str("        let need_refactor = !chord_valid || (iter > 0 && iter % CHORD_REFACTOR == 0) || iter >= 10;\n");
+            // Refactor when: (a) no valid LU, (b) within-sample periodic
+            // refresh, OR (BoyleDiodes only) (c) any device's diagonal
+            // Jacobian has diverged from `chord_j_dev` by >50 % relative.
+            //
+            // The cross-timestep chord persistence holds `chord_j_dev`
+            // frozen across many samples. That's fine for smoothly-
+            // conducting devices (Schottky, BJT, JFET, MOSFET, tube), but
+            // it breaks for the Boyle catch-diode model: at the DC
+            // operating point a catch diode is deeply reverse-biased and
+            // `j_dev ≈ 1e-31`, but the moment an op-amp output reaches
+            // its rail the same diode wants `j_dev ≈ 1e1` — 32 orders of
+            // magnitude away. Even with the residual check (added
+            // separately below), NR can't find the true convergence
+            // within MAX_ITER=50 iterations because every refactor only
+            // happens at iter % 5 == 0, by which point pnjlim has
+            // damped the steps so far that the chord can't catch up.
+            //
+            // Gating the adaptive trigger on BoyleDiodes mode keeps
+            // VCR ALC's compressor attack timing tests byte-for-byte
+            // unchanged: the rectifier diodes in the sidechain don't
+            // exhibit the deep-reverse → deep-forward transition that
+            // catch diodes do, so the trigger never fires for them
+            // anyway when BoyleDiodes is off (and we don't even emit
+            // the check for non-BoyleDiodes circuits).
+            //
+            // The 50 % threshold is empirical: lower (e.g. 20 %) causes
+            // spurious refactors that trap pnjlim's step damping in a
+            // different slow-oscillation regime; higher (e.g. 80 %)
+            // misses the diode-knee transition.
+            let emit_adaptive_refactor = matches!(
+                ir.solver_config.opamp_rail_mode,
+                crate::codegen::OpampRailMode::BoyleDiodes
+            );
+            if emit_adaptive_refactor {
+                code.push_str("        let mut need_refactor = !chord_valid || (iter > 0 && iter % CHORD_REFACTOR == 0) || iter >= 10;\n");
+                code.push_str("        if !need_refactor {\n");
+                code.push_str("            for k in 0..M {\n");
+                code.push_str("                let jk = j_dev[k * M + k];\n");
+                code.push_str("                let ck = chord_j_dev[k * M + k];\n");
+                code.push_str("                let mx = jk.abs().max(ck.abs());\n");
+                code.push_str("                if mx > 1e-20 && (jk - ck).abs() / mx > 0.5 {\n");
+                code.push_str("                    need_refactor = true;\n");
+                code.push_str("                    break;\n");
+                code.push_str("                }\n");
+                code.push_str("            }\n");
+                code.push_str("        }\n");
+            } else {
+                code.push_str("        let need_refactor = !chord_valid || (iter > 0 && iter % CHORD_REFACTOR == 0) || iter >= 10;\n");
+            }
             code.push_str("        if need_refactor {\n");
             code.push_str("            chord_j_dev = j_dev;\n");
             code.push_str("            chord_lu = state.a;\n");
@@ -7127,6 +7196,79 @@ impl RustEmitter {
                         hi = oa.vclamp_hi,
                     ));
                 }
+            }
+
+            // Residual-based convergence safety net (BoyleDiodes only).
+            //
+            // The voltage-step check above (`max_step_exceeded`) declares
+            // convergence whenever the damped Newton step is small. That
+            // criterion is necessary but NOT sufficient when the chord
+            // persistence holds a stale Jacobian: the LU back-solve uses
+            // `chord_j_dev` while the actual device current at the new
+            // operating point is `i_dev(v_nl_new)`. If `chord_j_dev` is
+            // grossly out of date — which happens specifically for Boyle
+            // catch diodes whose `j_dev` spans 32 OOM between deeply-
+            // reverse-biased (≈1e-31 S at v_nl=-3 V) and forward-biased
+            // (≈1e+1 S at v_nl=+0.8 V) — the LU's "fixed point" is a
+            // non-physical state where KCL is satisfied for the LINEARISED
+            // network but not for the actual nonlinear devices. NR happily
+            // reports converged on a wildly wrong v.
+            //
+            // The DK Schur NR loop has had a residual check since
+            // melange-solver inception (see `emit_nr_limit_and_converge`,
+            // ~line 2920). This block ports the same idea to the full-LU
+            // path: after the step is applied, re-evaluate `i_nl_fresh`
+            // from the device equations at the updated v and require
+            // it to match the `i_nl` that the LU was solved against.
+            // Mismatch ⇒ NR keeps iterating, eventually triggering the
+            // periodic chord refactor (iter % 5 == 0 or iter ≥ 10), the
+            // sub-step retry, or the BE fallback — any of which has a
+            // chance to break out of the stale-chord trap.
+            //
+            // Gated to BoyleDiodes because (a) no other validated circuit
+            // exhibits the false-convergence pattern, and (b) the
+            // re-evaluation costs M device-equation calls per NR
+            // iteration. Schottky/BJT/JFET/MOSFET/tube circuits all have
+            // their `j_dev` evolve smoothly enough that the chord stays
+            // close enough to satisfy the voltage-step criterion as a
+            // sufficient convergence check on its own.
+            //
+            // Implementation note: the device-evaluation helper writes
+            // into local `v_nl`, `i_nl`, `j_dev` arrays of fixed names.
+            // We use a nested `{ }` block so Rust shadows those bindings
+            // — the throwaway `j_dev` inside the block doesn't disturb
+            // the chord-stamped `j_dev` in the outer scope.
+            // (`OpampRailMode` is already imported above.)
+            if matches!(
+                ir.solver_config.opamp_rail_mode,
+                OpampRailMode::BoyleDiodes
+            ) {
+                code.push_str("        // BoyleDiodes residual check: re-evaluate i_nl at the\n");
+                code.push_str("        // post-step v and force NR to keep iterating if the\n");
+                code.push_str("        // chord linearisation produced an inconsistent fixed point.\n");
+                code.push_str("        if !max_step_exceeded {\n");
+                code.push_str("            let i_nl_chord = i_nl;\n");
+                code.push_str("            let mut v_nl = [0.0f64; M];\n");
+                code.push_str("            for i in 0..M {\n");
+                code.push_str("                let mut sum = 0.0;\n");
+                code.push_str("                for j in 0..N { sum += N_V[i][j] * v[j]; }\n");
+                code.push_str("                v_nl[i] = sum;\n");
+                code.push_str("            }\n");
+                code.push_str("            let mut i_nl = [0.0f64; M];\n");
+                code.push_str("            let mut j_dev = [0.0f64; M * M];\n");
+                Self::emit_nodal_device_evaluation_body(&mut code, ir, "            ");
+                code.push_str("            // Tolerance matches DK Schur path: ABSTOL=1e-12, RELTOL=1e-3,\n");
+                code.push_str("            // with a 1e-9 floor on the magnitude denominator so devices\n");
+                code.push_str("            // with i_nl ≈ 0 don't have an unreachably tight tolerance.\n");
+                code.push_str("            for i in 0..M {\n");
+                code.push_str("                let r = (i_nl[i] - i_nl_chord[i]).abs();\n");
+                code.push_str("                let tol = 1e-3 * i_nl[i].abs().max(i_nl_chord[i].abs()).max(1e-9) + 1e-12;\n");
+                code.push_str("                if r > tol {\n");
+                code.push_str("                    max_step_exceeded = true;\n");
+                code.push_str("                    break;\n");
+                code.push_str("                }\n");
+                code.push_str("            }\n");
+                code.push_str("        }\n\n");
             }
 
             code.push_str("        let converged_check = !max_step_exceeded;\n\n");
@@ -7548,6 +7690,48 @@ impl RustEmitter {
                         idx = oa.n_out_idx, lo = oa.vclamp_lo, hi = oa.vclamp_hi,
                     ));
                 }
+            }
+
+            // BoyleDiodes residual check (BE fallback path).
+            //
+            // BE rebuilds `j_dev` fresh each iteration (no chord
+            // persistence), so the staleness mode that causes the
+            // trapezoidal NR loop to false-converge doesn't apply here.
+            // But the BE convergence criterion is still voltage-step
+            // only (`be_step_exceeded`), which can declare a small
+            // damped step "converged" while the actual i_nl mismatch
+            // (between the i_nl that fed the LU and i_nl re-evaluated
+            // at the post-step v) is large — exactly the same false
+            // convergence on a non-physical state. We mirror the
+            // residual check from the main NR loop here, gated on
+            // BoyleDiodes for the same reason: every other validated
+            // mode passes the voltage-step check as a sufficient
+            // criterion.
+            if matches!(
+                ir.solver_config.opamp_rail_mode,
+                crate::codegen::OpampRailMode::BoyleDiodes
+            ) {
+                code.push_str("            // BoyleDiodes residual check (BE path)\n");
+                code.push_str("            if !be_step_exceeded {\n");
+                code.push_str("                let i_nl_be_chord = i_nl;\n");
+                code.push_str("                let mut v_nl = [0.0f64; M];\n");
+                code.push_str("                for i in 0..M {\n");
+                code.push_str("                    let mut sum = 0.0;\n");
+                code.push_str("                    for j in 0..N { sum += N_V[i][j] * v[j]; }\n");
+                code.push_str("                    v_nl[i] = sum;\n");
+                code.push_str("                }\n");
+                code.push_str("                let mut i_nl = [0.0f64; M];\n");
+                code.push_str("                let mut j_dev = [0.0f64; M * M];\n");
+                Self::emit_nodal_device_evaluation_body(&mut code, ir, "                ");
+                code.push_str("                for i in 0..M {\n");
+                code.push_str("                    let r = (i_nl[i] - i_nl_be_chord[i]).abs();\n");
+                code.push_str("                    let tol = 1e-3 * i_nl[i].abs().max(i_nl_be_chord[i].abs()).max(1e-9) + 1e-12;\n");
+                code.push_str("                    if r > tol {\n");
+                code.push_str("                        be_step_exceeded = true;\n");
+                code.push_str("                        break;\n");
+                code.push_str("                    }\n");
+                code.push_str("                }\n");
+                code.push_str("            }\n\n");
             }
 
             code.push_str("            let be_converged = !be_step_exceeded;\n\n");
