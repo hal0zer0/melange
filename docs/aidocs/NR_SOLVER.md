@@ -162,6 +162,21 @@ system via DK reduction).
 3. **Cold start (i=0)** -> Slower convergence
 4. **Wrong VT temperature** -> Wrong operating point
 5. **Diagonal-only Jacobian for BJT** -> Ignores cross-coupling, poor convergence
+6. **Stale chord with abrupt-knee device (BoyleDiodes catch diodes)** -> The
+   full-LU NR loop's chord persistence keeps `chord_j_dev` frozen for
+   `CHORD_REFACTOR=5` iters. For devices whose Jacobian spans many orders
+   of magnitude across the knee (`IS=1e-15 N=1` catch diodes go from
+   `j_dev ≈ 1e-31` deeply reverse-biased to `j_dev ≈ 1e+1` forward-biased),
+   the chord can be stale by 30+ orders of magnitude. The companion-RHS
+   contribution `i_comp = i_nl − chord_j_dev · v_nl ≈ i_nl` then
+   under-compensates by the full diode current, NR oscillates between two
+   inconsistent linearisations, and the voltage-step convergence check
+   declares convergence on a non-physical state. Mitigations in
+   commit `39397d1` (BoyleDiodes-gated): a residual check using
+   `i_nl_fresh − i_nl_chord` (mirrors the DK Schur path's gate), plus an
+   adaptive refactor trigger (>50 % relative `j_dev` change). Both work
+   for single-diode engagement but not yet for simultaneous multi-diode
+   bistability — see `DEBUGGING.md` "Op-amp BoyleDiodes Failure Signatures".
 
 ## Implementation Note
 The codegen emits the device Jacobian as block-diagonal `jdev_` entries (1×1 for

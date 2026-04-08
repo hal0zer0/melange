@@ -295,6 +295,34 @@ rhs += history;
 - M=3..16: Inline Gaussian elimination with partial pivoting
 - M>16: Not supported (MAX_M=16)
 
+### Chord Persistence in Full-LU Nodal Path
+The `emit_nodal_process_sample` full-LU path keeps the chord LU factorisation
+across NR iterations and across samples. The factor is rebuilt only when:
+1. `chord_valid == false` (e.g. just after `set_sample_rate`)
+2. `iter > 0 && iter % CHORD_REFACTOR == 0` (default `CHORD_REFACTOR = 5`)
+3. `iter >= 10` (force-refactor after 10 iters)
+4. (BoyleDiodes only) Adaptive trigger: any device's diagonal `j_dev[k][k]`
+   shifted >50 % relative to `chord_j_dev[k][k]`. Catches abrupt-knee
+   transitions like Boyle catch diodes that go from `j_dev ≈ 1e-31`
+   reverse-biased to `j_dev ≈ 1e+1` forward-biased within one sample.
+
+The companion-RHS construction `i_comp = i_nl − chord_j_dev · v_nl` is exact
+only when `chord_j_dev == J_dev_at_v`. For smoothly-conducting devices (BJT,
+JFET, MOSFET, tube, Schottky diode) this stays approximately true between
+refactors. For abrupt-knee devices (Boyle catch diodes with `IS=1e-15 N=1`)
+the chord can be many orders of magnitude stale and the LU back-solve
+produces a non-physical "fixed point" that the standard voltage-step
+convergence check accepts. **Mitigations** (BoyleDiodes-gated):
+
+- **Residual safety net**: re-evaluate `i_nl_fresh` from device equations
+  at the post-step v and require `|i_nl_fresh − i_nl_chord| < tol` in
+  addition to the voltage-step check. Mirrors the DK Schur path's
+  convergence gate. Emitted in both the trapezoidal main NR loop and the
+  BE fallback NR loop.
+- **Adaptive refactor**: see #4 above.
+- See `DEBUGGING.md` "Op-amp BoyleDiodes Failure Signatures" for the
+  remaining open issue (heavy clipping → bistable Newton oscillation).
+
 ## Verification Checklist
 - [ ] INPUT_RESISTANCE matches G matrix stamping (default: 1 ohm)
 - [ ] A_NEG contains alpha*C terms

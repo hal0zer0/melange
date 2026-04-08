@@ -112,7 +112,7 @@ Promotion criteria:
 | Circuit | N | M | Solver | Performance | Notes |
 |---------|---|---|--------|-------------|-------|
 | wurli-power-amp | 20 | 9-16 | DK/Nodal | 0.4× / 0.04× | Class AB, 8 BJTs |
-| klon-centaur | — | — | DK | — | 2× TL072 + 2× Ge diodes, 3 pots (gain dual-gang). Op-amp rail mode `Auto` selects `ActiveSet` (KCL-consistent hard clip). |
+| klon-centaur | 44 | 10 | Nodal full LU (auto) | — | 4× TL072 (charge-pump rails 9V & 18V/-9V) + 2× Ge clipping diodes, 3 pots (gain dual-gang). Auto picks `ActiveSetBe` (commit `016ac6c`) for clean clipping 0.05–0.20 V; above 220 mV the trap+pin Nyquist limit cycle returns. **`BoyleDiodes`** (commits `5544c8a` + `39397d1`) works for clean clipping up to amp ≈ 0.05 V (matches ActiveSetBe within 25 mV) but **diverges at amp ≥ 0.07 V** due to bistable Newton oscillation at the catch-diode knee — see `DEBUGGING.md` "Op-amp BoyleDiodes Failure Signatures" and the agent-memory note `task_12_bistable_oscillation_finding.md`. Real fix needs Anderson acceleration / trust-region NR. |
 | tube-screamer | — | — | DK | — | TS808 clipper |
 | mordor-screamer | — | — | DK | — | TS-style variant |
 | tube-preamp | — | — | DK | — | Generic tube preamp |

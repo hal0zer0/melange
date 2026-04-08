@@ -231,6 +231,21 @@ Using addition causes NR divergence. See `DC_OP.md` for the mathematical derivat
 | Trapezoidal NR ringing | Marginally stable oscillatory mode at Nyquist | BE fallback catches these samples automatically (FIXED) |
 | Incomplete transformer coupling matrix | Missing K directive between windings on same core | Add K for ALL winding pairs; non-PD det warns |
 
+## Op-amp BoyleDiodes Failure Signatures
+
+`OpampRailMode::BoyleDiodes` synthesizes catch diodes between each clamped op-amp's
+internal gain node and rail-reference voltage sources (`VCC − VOH_DROP`,
+`VEE + VOL_DROP`). The catch diodes have very abrupt knees (`IS=1e-15 N=1`,
+Boyle-standard silicon) and exhibit failure modes that don't appear with smoother
+nonlinear devices.
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| `state.a[input_node][input_node]` near zero in augmented MNA — first non-zero input sample produces wildly wrong v[buf_in] | `MnaSystem::from_netlist(&augmented_netlist)` builds a fresh MNA that doesn't preserve the in-place input-conductance stamp the CLI applied to the original | Re-stamp `g[input][input] += 1/R_in` and `stamp_device_junction_caps` after the augmented rebuild in `generate_nodal` (FIXED, commit `5544c8a`) |
+| Trap NR "converges" with stale chord_j_dev → wildly wrong v on first signal sample | Voltage-step convergence check is necessary but not sufficient when `chord_j_dev` is many OOM stale; the LU back-solve produces a "fixed point" that satisfies the linearised system but not actual KCL | Add a residual check: re-evaluate `i_nl_fresh` from device equations at post-step v and require it to match the `i_nl` the LU was solved against, with `tol = RELTOL * max(\|new\|, \|old\|, 1e-9) + ABSTOL`. Mirrors DK Schur path's convergence criterion. BoyleDiodes-gated. (FIXED, commit `39397d1`) |
+| Catch diode `j_dev` jumps 32 OOM (1e-31 reverse → 1e+1 forward) within one NR loop, chord stays stale until iter 5 refactor | The default `iter % CHORD_REFACTOR == 0` refactor is too coarse for diodes whose Jacobian changes by orders of magnitude | Adaptive refactor trigger: at the start of each NR iteration, force refactor if any device's `\|j_dev[k][k]\| / \|chord_j_dev[k][k]\|` exceeds 50% relative change. BoyleDiodes-gated. (FIXED, commit `39397d1`) |
+| Heavy clipping (amp ≥ 0.07 V on Klon): NR oscillates between two contradictory linearisations near a catch-diode knee, never converges within MAX_ITER | **Bistable Newton at the knee.** Each chord refactor sees a dramatically different `j_dev` (1e-31 ↔ 1e-1); the LU back-solve produces a v far from the previous; NR cycles between two infeasible states. Simple under-relaxation is brittle to MAX_ITER — at higher iter limits, NR drifts to wildly wrong attractors that damping then prevents escape from. | **OPEN**. Real fix needs Anderson acceleration / trust-region NR / pseudo-transient continuation. See `task_12_bistable_oscillation_finding.md` in agent memory for the iter-by-iter trace and proposed approaches. Workaround: use `--opamp-rail-mode active-set-be` for distortion pedals. |
+
 ### Positive Definiteness Rule for Transformer Coupling
 All windings on the same core must have coupling coefficients that form a positive-definite
 inductance matrix. For a 4-winding transformer with k_ab=0.95 and k_ac=0.95, k_bc must be

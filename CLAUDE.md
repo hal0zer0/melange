@@ -140,6 +140,9 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
 | NodalSolver wrong A_neg | Inductor rows zeroed | Zero n_nodes..n_aug (all augmented), NOT n_aug..n_nodal (inductor branches) |
 | Codegen diverges ~5000 samples | Boyle A_neg trapezoidal instability | A_neg must zero ALL augmented rows (Gm ±2000 creates spectral radius > 1) |
 | Codegen stable but wrong level | K≈0, Schur NR has J=I (no damping) | Route K≈0 circuits to full N×N LU NR (device Jacobian in G_aug) |
+| BoyleDiodes augmented system: input row zero, first signal sample explodes | `MnaSystem::from_netlist(&augmented)` doesn't preserve in-place G_in stamp | Re-stamp `g[input][input] += 1/R_in` and junction caps after rebuild in `generate_nodal` (FIXED commit `5544c8a`) |
+| BoyleDiodes false convergence: trap NR declares converged with wildly wrong v[buf_in] on first signal sample | Voltage-step convergence check passes when chord_j_dev is many OOM stale; no residual gate on full-LU NR loop | Add residual check + adaptive refactor trigger (>50% j_dev change), both BoyleDiodes-gated (FIXED commit `39397d1`) |
+| BoyleDiodes heavy clipping (amp ≥ 0.07): NR oscillates, never converges | **Bistable Newton at the catch-diode knee** — chord refactors flip between j_dev≈0 and j_dev≈large linearisations, neither matches reality | **OPEN**. Simple under-relaxation is brittle to MAX_ITER. Real fix needs Anderson acceleration / trust-region NR / pseudo-transient continuation. Workaround: use `--opamp-rail-mode active-set-be`. See `task_12_bistable_oscillation_finding.md` |
 
 ## Current Status (2026-03-15)
 
