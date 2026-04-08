@@ -88,8 +88,23 @@ pub enum OpampRailMode {
     None,
     /// Post-NR hard clamp (pre-2026-04 behavior). Breaks KCL for AC-coupled downstream.
     Hard,
-    /// Post-NR constrained re-solve. KCL-consistent hard clip with square-wave harmonics.
+    /// Post-NR constrained re-solve on trapezoidal `state.a`. KCL-consistent hard
+    /// clip with square-wave harmonics. Preserves the steady DC rail value the
+    /// op-amp converged to — required for circuits where the rail-clipped value
+    /// IS the signal (e.g. control-path op-amps driving a VCA gain port).
     ActiveSet,
+    /// On rail engagement, fall through to the BE NR fallback and run the
+    /// constrained re-solve against `state.a_be` (backward Euler). Trapezoidal
+    /// + post-NR pin develops a Nyquist-rate limit cycle when the clamp is
+    /// engaged across multiple samples (the cap-history term `(2/T)·C·v_prev`
+    /// alternates sign every sample); BE damps this. Required for audio-path
+    /// op-amps whose output is cap-coupled to a downstream stage that
+    /// integrates the op-amp's transient behavior — e.g. Klon Centaur's
+    /// tone-out → C15 → output. Cost: BE NR runs every sample where the rail
+    /// is engaged (~2x NR work for those samples). Compared to ActiveSet,
+    /// produces cleaner clipped output but slightly different envelope
+    /// dynamics (BE damps cap-coupled feedback more aggressively).
+    ActiveSetBe,
     /// Auto-inserted Boyle catch diodes. Soft exponential knee, correct physics.
     BoyleDiodes,
 }
@@ -103,6 +118,9 @@ impl OpampRailMode {
             "none" | "off" => Some(Self::None),
             "hard" | "clamp" => Some(Self::Hard),
             "active-set" | "active_set" | "activeset" => Some(Self::ActiveSet),
+            "active-set-be" | "active_set_be" | "activesetbe" | "be-on-clamp" => {
+                Some(Self::ActiveSetBe)
+            }
             "boyle-diodes" | "boyle_diodes" | "boylediodes" | "boyle" | "diodes" => {
                 Some(Self::BoyleDiodes)
             }
@@ -117,6 +135,7 @@ impl OpampRailMode {
             Self::None => "none",
             Self::Hard => "hard",
             Self::ActiveSet => "active-set",
+            Self::ActiveSetBe => "active-set-be",
             Self::BoyleDiodes => "boyle-diodes",
         }
     }
@@ -407,14 +426,18 @@ impl CodeGenerator {
         // (new N, new spectral radius, etc.), so for now BoyleDiodes is only
         // supported on the nodal path. Explicit request on the DK path is a
         // user error with a clear remedy.
-        let resolved = ir::resolve_opamp_rail_mode(mna, self.config.opamp_rail_mode);
+        let resolved = ir::refine_active_set_for_audio_path(
+            ir::resolve_opamp_rail_mode(mna, self.config.opamp_rail_mode),
+            mna,
+            netlist,
+        );
         if resolved.mode == OpampRailMode::BoyleDiodes {
             return Err(CodegenError::UnsupportedTopology(format!(
                 "OpampRailMode::BoyleDiodes is not yet supported on the DK codegen \
                  path. Either rerun with `--solver nodal` or use a different rail \
-                 mode (`--opamp-rail-mode {{hard|active-set}}`). The auto-detector \
-                 never picks BoyleDiodes today, so this error only triggers on an \
-                 explicit user override."
+                 mode (`--opamp-rail-mode {{hard|active-set|active-set-be}}`). The \
+                 auto-detector never picks BoyleDiodes today, so this error only \
+                 triggers on an explicit user override."
             )));
         }
 
@@ -526,7 +549,11 @@ impl CodeGenerator {
         // VOH_DROP/VOL_DROP params, the augmentation helper, tests for
         // all of the above) is kept because it's the foundation for the
         // eventual proper fix.
-        let resolved = ir::resolve_opamp_rail_mode(mna, self.config.opamp_rail_mode);
+        let resolved = ir::refine_active_set_for_audio_path(
+            ir::resolve_opamp_rail_mode(mna, self.config.opamp_rail_mode),
+            mna,
+            netlist,
+        );
         if resolved.mode == OpampRailMode::BoyleDiodes {
             return Err(CodegenError::UnsupportedTopology(
                 "OpampRailMode::BoyleDiodes is not yet fully implemented. The \
@@ -538,10 +565,12 @@ impl CodeGenerator {
                  conductance across 7+ orders of magnitude. Proper fix \
                  requires adding an internal gain node to the op-amp model \
                  (Boyle macromodel structure). \
-                 For now, use `--opamp-rail-mode active-set` (the default for \
-                 circuits with AC-coupled downstream) which gives KCL-consistent \
-                 hard clipping, or `--opamp-rail-mode hard` for the cheap \
-                 pre-2026-04 behavior.".to_string()
+                 For now, use `--opamp-rail-mode active-set` (compatible with \
+                 control-path topologies — VCAs, sidechains) or \
+                 `--opamp-rail-mode active-set-be` (compatible with audio-path \
+                 topologies — distortion pedals — damps Nyquist limit cycle), \
+                 or `--opamp-rail-mode hard` for the cheap pre-2026-04 \
+                 behavior.".to_string()
             ));
         }
 

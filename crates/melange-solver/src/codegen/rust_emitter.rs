@@ -3746,7 +3746,10 @@ impl RustEmitter {
         // reference an undefined function and fail to compile.
         use crate::codegen::OpampRailMode;
         let needs_lu_solve = use_full_nodal
-            || (matches!(ir.solver_config.opamp_rail_mode, OpampRailMode::ActiveSet)
+            || (matches!(
+                    ir.solver_config.opamp_rail_mode,
+                    OpampRailMode::ActiveSet | OpampRailMode::ActiveSetBe
+                )
                 && !ir.opamps.is_empty());
 
         if use_full_nodal {
@@ -5533,11 +5536,31 @@ impl RustEmitter {
             //             (matches pre-2026-04 behavior). This corrupts cap
             //             history for AC-coupled downstream stages; only use
             //             on circuits with DC-coupled downstream.
-            // * `ActiveSet` — call `emit_nodal_active_set_resolve` which
-            //             detects rail violations and pins them via row/column
-            //             elimination, then re-solves the whole network so
-            //             KCL is satisfied at every node with the clamped
-            //             outputs. Consistent cap history, no Klon bug.
+            // * `ActiveSet` — call `emit_nodal_active_set_resolve` against
+            //             `state.a` (trapezoidal). Detects rail violations
+            //             and pins them via row/column elimination, then
+            //             re-solves the whole network so KCL is satisfied at
+            //             every node with the clamped outputs. Preserves the
+            //             steady DC rail value the op-amp converged to —
+            //             required for control-path op-amps where the rail
+            //             value drives a nonlinear device's operating point
+            //             (VCR ALC sidechain → VCA control). May develop a
+            //             Nyquist-rate limit cycle on audio-path op-amps
+            //             whose output is cap-coupled to a downstream stage
+            //             that integrates the rail behavior — for those use
+            //             ActiveSetBe.
+            // * `ActiveSetBe` — detect rail violations here without mutating;
+            //             if any are detected, fall through to the BE fallback
+            //             below (which re-runs NR with backward-Euler matrices
+            //             and then applies the active-set row/col elimination
+            //             using `state.a_be`). Trapezoidal + pin develops a
+            //             Nyquist-rate limit cycle when the clamp is engaged
+            //             across multiple samples on audio-path op-amps
+            //             (cap-history term `(2/T)·C·v_prev` alternates sign
+            //             every sample); BE damps this. The auto-detector
+            //             picks ActiveSetBe over ActiveSet for audio-path
+            //             topologies (no R-only path from op-amp output to a
+            //             nonlinear device terminal).
             // * `BoyleDiodes` — physical catch diodes are already in the
             //             MNA via `augment_netlist_with_boyle_diodes`. NR
             //             handles saturation naturally through the diode
@@ -5545,6 +5568,13 @@ impl RustEmitter {
             //             here.
             // * `None`  — no clamping; caller accepts unbounded output.
             use crate::codegen::OpampRailMode;
+            let active_set_be_mode = matches!(
+                ir.solver_config.opamp_rail_mode,
+                OpampRailMode::ActiveSetBe
+            );
+            if active_set_be_mode {
+                code.push_str("    let mut active_set_engaged = false;\n");
+            }
             match ir.solver_config.opamp_rail_mode {
                 OpampRailMode::Hard => {
                     for oa in &ir.opamps {
@@ -5557,7 +5587,24 @@ impl RustEmitter {
                     }
                 }
                 OpampRailMode::ActiveSet => {
-                    Self::emit_nodal_active_set_resolve(&mut code, ir, "    ");
+                    // Original trap+pin behavior — preserves steady DC rail
+                    // for control-path topologies (e.g. VCR ALC sidechain).
+                    Self::emit_nodal_active_set_resolve(
+                        &mut code,
+                        ir,
+                        "    ",
+                        "state.a",
+                        "rhs",
+                    );
+                }
+                OpampRailMode::ActiveSetBe => {
+                    // Detect-only here; resolve happens in BE fallback below.
+                    Self::emit_nodal_active_set_check(
+                        &mut code,
+                        ir,
+                        "    ",
+                        "active_set_engaged",
+                    );
                 }
                 OpampRailMode::BoyleDiodes => {
                     // Catch diodes are physically in the circuit — no extra
@@ -5576,9 +5623,22 @@ impl RustEmitter {
                 }
             }
 
-            code.push_str("    let converged = state.last_nr_iterations < MAX_ITER as u32;\n\n");
+            // Convergence check: NR must have converged AND, in ActiveSetBe
+            // mode, no op-amp output may have engaged its rail. The latter
+            // triggers the BE fallback so the cap history stays consistent.
+            if active_set_be_mode {
+                code.push_str(
+                    "    let converged = state.last_nr_iterations < MAX_ITER as u32 \
+                     && !active_set_engaged;\n\n",
+                );
+            } else {
+                code.push_str(
+                    "    let converged = state.last_nr_iterations < MAX_ITER as u32;\n\n",
+                );
+            }
 
-            // Backward Euler fallback
+            // Backward Euler fallback (also fires when active-set engaged in
+            // ActiveSetBe mode — see comment above).
             code.push_str("    // Backward Euler fallback\n");
             code.push_str("    if !converged {\n");
             code.push_str("        state.diag_nr_max_iter_count += 1;\n");
@@ -5772,12 +5832,40 @@ impl RustEmitter {
             code.push_str("            for j in 0..M { v[i] += state.s_ni_be[i][j] * i_nl[j]; }\n");
             code.push_str("        }\n");
 
-            // Op-amp supply rail clamping (VCC/VEE) — post-BE recovery
-            for oa in &ir.opamps {
-                code.push_str(&format!(
-                    "        v[{idx}] = v[{idx}].clamp({lo:.17e}, {hi:.17e});\n",
-                    idx = oa.n_out_idx, lo = oa.vclamp_lo, hi = oa.vclamp_hi,
-                ));
+            // Op-amp supply rail handling on the BE result. ActiveSetBe mode
+            // runs the constrained re-solve against `state.a_be` so the cap
+            // history (built from BE matrices) stays KCL-consistent. ActiveSet
+            // mode is not normally reachable here (its trap path doesn't trip
+            // BE on engagement), but if NR genuinely failed and substep didn't
+            // recover, fall back to ActiveSet on BE matrices too. Hard mode
+            // falls back to a plain post-recovery clamp (only safe for
+            // DC-coupled downstream stages — see opamp_rail_clamp_bug.md).
+            match ir.solver_config.opamp_rail_mode {
+                OpampRailMode::ActiveSetBe | OpampRailMode::ActiveSet => {
+                    Self::emit_nodal_active_set_resolve(
+                        &mut code,
+                        ir,
+                        "        ",
+                        "state.a_be",
+                        "rhs_be",
+                    );
+                }
+                OpampRailMode::Hard | OpampRailMode::None => {
+                    for oa in &ir.opamps {
+                        code.push_str(&format!(
+                            "        v[{idx}] = v[{idx}].clamp({lo:.17e}, {hi:.17e});\n",
+                            idx = oa.n_out_idx, lo = oa.vclamp_lo, hi = oa.vclamp_hi,
+                        ));
+                    }
+                }
+                OpampRailMode::BoyleDiodes => {
+                    // Catch diodes are physically in the circuit; no post-NR
+                    // mutation. (BE NR converged with the diodes active, so v
+                    // is already saturation-bounded.)
+                }
+                OpampRailMode::Auto => unreachable!(
+                    "OpampRailMode::Auto should have been resolved in ir::from_mna"
+                ),
             }
 
             code.push_str("    }\n\n"); // end BE fallback block
@@ -6745,7 +6833,19 @@ impl RustEmitter {
             code.push_str("    // Step 2: Newton-Raphson in full augmented voltage space\n");
             code.push_str("    let mut v = state.v_prev;\n");
             code.push_str("    let mut converged = false;\n");
-            code.push_str("    let mut i_nl = [0.0f64; M];\n\n");
+            code.push_str("    let mut i_nl = [0.0f64; M];\n");
+            // ActiveSetBe rail engagement flag — set after substep, checked
+            // before BE fallback. Only used in ActiveSetBe mode (NOT plain
+            // ActiveSet, which keeps its trap+pin behavior). See
+            // OpampRailMode::ActiveSetBe handling below.
+            let active_set_be_mode_full_lu = matches!(
+                ir.solver_config.opamp_rail_mode,
+                crate::codegen::OpampRailMode::ActiveSetBe
+            );
+            if active_set_be_mode_full_lu {
+                code.push_str("    let mut active_set_engaged = false;\n");
+            }
+            code.push('\n');
 
             // Cross-timestep chord: reuse LU factors from previous sample when valid.
             // Local aliases avoid repeated state.chord_* indirection in the hot loop.
@@ -7045,25 +7145,23 @@ impl RustEmitter {
             code.push_str("            }\n");
             Self::emit_nodal_device_evaluation_final(&mut code, ir, "            ");
 
-            // Active-set constrained resolve: if any op-amp output exceeded
-            // its rails during the unclamped NR (only reachable in ActiveSet
-            // mode, where the in-NR clamp is suppressed), pin those nodes to
-            // the rail values and re-solve the full network so KCL is
-            // satisfied at every node. This keeps the trapezoidal cap history
-            // consistent with the clamped op-amp output — no Klon-style
-            // downstream drift.
-            //
-            // Uses the `j_dev` from this final iteration for the linearized
-            // re-solve. For circuits where device voltages depend on the
-            // clamped op-amp output (e.g. diodes fed via a coupling cap from
-            // the op-amp), this is a linearization around the converged
-            // operating point; a future refinement could iterate, but for
-            // Klon-class circuits the linearization is accurate because the
-            // cap isolates the diodes from the op-amp at DC.
-            if ir.solver_config.opamp_rail_mode
-                == crate::codegen::OpampRailMode::ActiveSet
-            {
-                Self::emit_nodal_active_set_resolve(&mut code, ir, "            ");
+            // ActiveSet (plain) — pin and re-solve in trap matrices, preserving
+            // the steady DC rail value the op-amp converged to. Used by
+            // control-path topologies (VCR ALC sidechain etc.) where the
+            // rail-clamped value drives a nonlinear device's operating point.
+            // ActiveSetBe takes a different path: detect-only here, BE
+            // fallback for the actual resolve.
+            if matches!(
+                ir.solver_config.opamp_rail_mode,
+                crate::codegen::OpampRailMode::ActiveSet
+            ) {
+                Self::emit_nodal_active_set_resolve(
+                    &mut code,
+                    ir,
+                    "            ",
+                    "state.a",
+                    "rhs",
+                );
             }
 
             code.push_str("            break;\n");
@@ -7257,11 +7355,41 @@ impl RustEmitter {
             code.push_str("        }\n"); // end subdiv_power loop
             code.push_str("    }\n\n"); // end if !converged
 
-            // Backward Euler fallback
+            // ActiveSetBe rail engagement check (post-trap, post-substep).
+            // Runs on the final v from either the regular NR loop or the
+            // substep recovery, whichever produced the converged result. If
+            // any op-amp output is railed, set the flag so the BE fallback
+            // fires — trap+pin develops a Nyquist-rate limit cycle on
+            // audio-path topologies; BE+pin doesn't.
+            //
+            // Plain ActiveSet doesn't take this path — its trap+pin happens
+            // inside the NR break block above.
+            if active_set_be_mode_full_lu {
+                code.push_str("    if converged {\n");
+                Self::emit_nodal_active_set_check(
+                    &mut code,
+                    ir,
+                    "        ",
+                    "active_set_engaged",
+                );
+                code.push_str("    }\n\n");
+            }
+
+            // Backward Euler fallback. Triggered when trapezoidal NR (and
+            // sub-stepping) failed, OR when ActiveSetBe detected a rail
+            // engagement (BE doesn't ring under the row/col pin where
+            // trapezoidal does).
             code.push_str(
-                "    // Backward Euler fallback: if trapezoidal NR and sub-stepping both failed\n",
+                "    // Backward Euler fallback: if trapezoidal NR and sub-stepping both failed,\n",
             );
-            code.push_str("    if !converged {\n");
+            code.push_str(
+                "    // or if ActiveSetBe detected a rail engagement on the trap result.\n",
+            );
+            if active_set_be_mode_full_lu {
+                code.push_str("    if !converged || active_set_engaged {\n");
+            } else {
+                code.push_str("    if !converged {\n");
+            }
             code.push_str("        state.diag_nr_max_iter_count += 1;\n");
             code.push_str("        chord_valid = false;\n\n");
 
@@ -7449,6 +7577,21 @@ impl RustEmitter {
             code.push_str("            }\n");
             Self::emit_nodal_device_evaluation_final(&mut code, ir, "            ");
             code.push_str("        }\n");
+
+            // ActiveSetBe post-BE resolve: if any op-amp output is railed in
+            // the BE result, pin and re-solve against `state.a_be`. BE+pin
+            // doesn't develop the trap+pin Nyquist limit cycle, so the cap
+            // history stays consistent across the next sample.
+            if active_set_be_mode_full_lu {
+                Self::emit_nodal_active_set_resolve(
+                    &mut code,
+                    ir,
+                    "        ",
+                    "state.a_be",
+                    "rhs_be",
+                );
+            }
+
             code.push_str("    }\n\n"); // end BE fallback block
         }
 
@@ -7638,14 +7781,15 @@ impl RustEmitter {
     /// cancel identically at the fixed point — you can verify this by writing
     /// out `(A − N_i·J_dev·N_v) v = rhs + N_i·(i_nl − J_dev·v_nl)` with
     /// `v_nl = N_v·v` and expanding. That means the active-set resolve only
-    /// needs `A` (from `state.a`) and the converged `i_nl`, not the per-NR
-    /// Jacobian, so it's portable between the Schur and full-LU paths.
+    /// needs `A` (from `state.a` or `state.a_be`) and the converged `i_nl`, not
+    /// the per-NR Jacobian, so it's portable between the Schur, full-LU, and
+    /// BE-fallback code paths.
     ///
     /// The resolve does:
     ///   1. Detect which op-amp outputs exceed their VCC/VEE rails.
     ///   2. If none do, nothing to do — leave `v` alone.
     ///   3. Otherwise build the linear system `A * v = rhs + N_i * i_nl` using
-    ///      `state.a` (with a small Gmin on node diagonals for conditioning).
+    ///      `matrix_name` (with a small Gmin on node diagonals for conditioning).
     ///   4. For each rail-violating node `k` with rail value `c_k`:
     ///        - subtract `A[:,k] * c_k` from `rhs` at every row except `k`
     ///        - zero column `k` in all non-`k` rows
@@ -7666,12 +7810,22 @@ impl RustEmitter {
     ///
     /// # Caller contract
     ///
-    /// The caller must have `v` (mutable), `i_nl`, and `rhs` in scope. `rhs`
-    /// here means the trapezoidal RHS *before* any nonlinear companion
-    /// contribution — i.e., `A_neg·v_prev + rhs_const + (input+input_prev)*G_in`.
-    /// The Schur path calls this variable `rhs`; the full-LU path also calls
-    /// it `rhs`. Both match.
-    fn emit_nodal_active_set_resolve(code: &mut String, ir: &CircuitIR, indent: &str) {
+    /// The caller must have `v` (mutable), `i_nl`, and a variable named
+    /// `rhs_name` in scope. The `rhs` variable means the linear RHS *before*
+    /// any nonlinear companion contribution — i.e.,
+    /// `A_neg·v_prev + rhs_const + (input+input_prev)*G_in` (trapezoidal) or
+    /// `A_neg_be·v_prev + rhs_const_be + input*G_in` (backward Euler).
+    ///
+    /// `matrix_name` is the matrix expression to use for the constrained
+    /// resolve — `"state.a"` for trapezoidal, `"state.a_be"` for BE. Must be
+    /// consistent with the integrator that produced `rhs`.
+    fn emit_nodal_active_set_resolve(
+        code: &mut String,
+        ir: &CircuitIR,
+        indent: &str,
+        matrix_name: &str,
+        rhs_name: &str,
+    ) {
         let m = ir.topology.m;
         let n_nodes = if ir.topology.n_nodes > 0 {
             ir.topology.n_nodes
@@ -7725,15 +7879,15 @@ impl RustEmitter {
         code.push_str(&format!("{indent}    if any_pinned {{\n"));
 
         // Step 2: build the linear system `A * v = rhs + N_i * i_nl` at the
-        // converged operating point. Copy `state.a` as scratch, add Gmin on
+        // converged operating point. Copy the matrix as scratch, add Gmin on
         // node diagonals for LU conditioning, copy `rhs` and add the nonlinear
         // current injection via the sparse N_i pattern.
         code.push_str(&format!(
-            "{indent}        let mut g_as = state.a;\n\
+            "{indent}        let mut g_as = {matrix_name};\n\
              {indent}        for i in 0..{n_nodes} {{ g_as[i][i] += 1e-12; }}\n",
             n_nodes = n_nodes,
         ));
-        code.push_str(&format!("{indent}        let mut rhs_as = rhs;\n"));
+        code.push_str(&format!("{indent}        let mut rhs_as = {rhs_name};\n"));
         if m > 0 {
             let mut ni_nz_by_dev = vec![Vec::new(); m];
             for (a, cols) in ir.sparsity.n_i.nz_by_row.iter().enumerate() {
@@ -7810,6 +7964,40 @@ impl RustEmitter {
              {indent}    }}\n\
              {indent}}}\n",
         ));
+    }
+
+    /// Emit a cheap rail-violation check that sets `<flag_name> = true` if any
+    /// clampable op-amp output is outside its VCC/VEE range. Used in the
+    /// trapezoidal NR path to decide whether to fall through to the BE
+    /// fallback (where the active-set resolve runs against BE matrices, which
+    /// don't develop the Nyquist limit cycle that trap+pin does).
+    ///
+    /// The caller must have `v` (immutable read access) and the boolean flag
+    /// in scope. This emits no resolve, no LU solve, no state mutation — only
+    /// the check.
+    fn emit_nodal_active_set_check(
+        code: &mut String,
+        ir: &CircuitIR,
+        indent: &str,
+        flag_name: &str,
+    ) {
+        let clampable: Vec<&crate::codegen::ir::OpampIR> = ir
+            .opamps
+            .iter()
+            .filter(|oa| oa.vclamp_hi.is_finite() || oa.vclamp_lo.is_finite())
+            .collect();
+        if clampable.is_empty() {
+            return;
+        }
+
+        for oa in &clampable {
+            code.push_str(&format!(
+                "{indent}if v[{node}] > {hi:.17e} || v[{node}] < {lo:.17e} {{ {flag_name} = true; }}\n",
+                node = oa.n_out_idx,
+                hi = oa.vclamp_hi,
+                lo = oa.vclamp_lo,
+            ));
+        }
     }
 
     /// Emit device evaluation code WITHOUT declarations (writes to existing i_nl, j_dev).
