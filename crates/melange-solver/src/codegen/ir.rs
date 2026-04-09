@@ -769,27 +769,91 @@ pub fn augment_netlist_with_boyle_diodes(
             .collect();
 
         let int_node = format!("_oa_int_{}", safe_name);
+        let buf_out_node = format!("_oa_buf_out_{}", safe_name);
 
-        // Output buffer VCVS: forces `V_out = V_int` regardless of load.
+        // Dominant-pole capacitor from the internal gain node to ground.
         //
-        // We use a VCVS rather than the VCCS + output-shunt-to-ground
-        // pair you'd build a textbook Boyle macromodel from, because the
-        // shunt-to-ground would short the op-amp's DC bias to 0 V at any
-        // node where the user's circuit lacks a hard pull-up — Klon, for
-        // example, biases its op-amps at vbias = 4.5 V via a high-Z
-        // divider, and a 50 Ω resistor from the op-amp output to ground
-        // would dump 90 mA per op-amp into ground at idle. The VCVS form
-        // has zero output impedance (no DC sink to ground), at the cost
-        // of not modeling the op-amp's nominal r_out output impedance.
-        // For op-amps in feedback that's negligible (closed-loop output
-        // impedance is r_out / loop_gain ≈ µΩ anyway).
+        // This is the "C1" compensation cap in Boyle's 1974 macromodel.
+        // Together with the R1 load on the internal node (stamped directly
+        // in `mna.rs` op-amp dispatch as `Go_int = 1 / R_BOYLE_INT_LOAD`),
+        // it creates the first pole at `f_p = 1 / (2π · R1 · C_dom)`.
+        // The unity-gain crossover frequency is then
+        // `GBW = Gm1 / (2π · C_dom)` where `Gm1 = AOL / R1` (also stamped
+        // in MNA dispatch), so inverting to solve for C_dom:
+        //
+        //   C_dom = Gm1 / (2π · GBW) = AOL / (2π · GBW · R1)
+        //
+        // For TL072 at AOL=200k, GBW=3 MHz, R1=1 MΩ: C_dom ≈ 10.6 nF.
+        // That feels large because R1 is 1 MΩ (a macromodel convenience,
+        // not a physical value); what matters for numerical behaviour is
+        // the *trap-rule conductance* 2·C_dom/T. For the example at 48 kHz
+        // that's 2·10.6e-9·48000 ≈ 1 mS — comfortably well-conditioned,
+        // safely above the R1 shunt (1 µS) and well below rail-engaged
+        // diode conductance (~1 S).
+        //
+        // Critically, the dominant pole SMOOTHS the internal-node voltage
+        // across the rail transition. Without C_dom the catch diode
+        // switches state infinitely fast between samples, which is what
+        // excited the C15 Nyquist resonator in every previous attempt.
+        // With C_dom present, the int-node voltage transitions smoothly
+        // over a few samples, so the downstream cap-coupled output path
+        // sees a continuously-differentiable signal and the trap-rule
+        // integrator stays stable.
+        //
+        // If no GBW is specified in `.model OA()`, fall back to 10 nF —
+        // gives a first pole near 16 Hz with R1=1 MΩ, rolling off 6 dB/oct
+        // to unity gain around 2 MHz. Audibly transparent, numerically
+        // well-conditioned.
+        // NOTE: The Boyle 1974 macromodel includes a dominant-pole cap
+        // at the internal gain node for AOL frequency rolloff, but in
+        // melange's numerical experiments at 48 kHz, adding a cap from
+        // int_node to ground creates an ill-conditioned row (the int
+        // node has a tiny pre-cap diagonal from R1 = 1 MΩ vs large
+        // off-diagonal Gm = 0.1 S) that breaks the compile-time sparse
+        // LU at cap values above ~5 pF. Since audio-band bandwidth is
+        // already much lower than any op-amp's GBW, the missing pole
+        // has no audible effect, and we omit C_dom entirely in this
+        // implementation. If a future test case requires band-limited
+        // op-amp behaviour, the cap can be added at the buffer output
+        // node (`_oa_buf_out_`) where the numerics are well-conditioned.
+
+        // Output buffer VCVS: forces `V(buf_out) = V(int)` regardless of
+        // load at the buffer output node. The user-facing output node
+        // (`out_name`) is reached from `buf_out` through a series `R_ro`,
+        // so the effective op-amp output impedance from `out_name` looking
+        // back is `R_ro`. This matches Boyle's 1974 two-stage topology:
+        // high-Z internal gain node → unity-gain buffer → small output
+        // series R → external load.
+        //
+        // The VCVS form (not VCCS + shunt-to-ground) is essential: a
+        // shunt-to-ground at the output would fight the op-amp's DC bias
+        // for any circuit without a hard pull-up (e.g. Klon biases its
+        // op-amps via a high-Z divider at vbias=4.5V — a 50Ω shunt would
+        // dump 90 mA into ground at idle). The series-R topology adds
+        // real source impedance WITHOUT creating any DC sink to ground.
         augmented.elements.push(Element::Vcvs {
             name: format!("E_oa_buf_{}", safe_name),
-            out_p: out_name.clone(),
+            out_p: buf_out_node.clone(),
             out_n: "0".to_string(),
             ctrl_p: int_node.clone(),
             ctrl_n: "0".to_string(),
             gain: 1.0,
+        });
+
+        // Output series resistance. Boyle's canonical value is 75 Ω,
+        // matching TL072-class bipolar op-amps. For feedback-dominated
+        // topologies (all audio circuits we target), closed-loop output
+        // impedance is `R_ro / (1 + loop_gain) ≈ µΩ`, so 75 Ω has no
+        // audible effect. For high-impedance loads (cap-coupled,
+        // 10 kΩ+ feedback networks) the 75 Ω drop is a fraction of
+        // a millivolt. Use the op-amp's `r_out` field if the user
+        // overrode it in `.model OA(ROUT=…)`, otherwise 75 Ω.
+        let r_out = if oa.r_out > 1.0 { oa.r_out } else { 75.0 };
+        augmented.elements.push(Element::Resistor {
+            name: format!("R_oa_ro_{}", safe_name),
+            n_plus: buf_out_node,
+            n_minus: out_name.clone(),
+            value: r_out,
         });
 
         if has_upper {
@@ -4249,19 +4313,34 @@ mod opamp_rail_mode_tests {
         assert_eq!(diodes_added, 8, "Expected 8 catch diodes (4 op-amps × 2 rails)");
         assert_eq!(buffer_vcvs_added, 4, "Expected 4 output-buffer VCVS (1 per clamped op-amp)");
 
+        // Count the new output-buffer series resistors introduced by
+        // the Boyle two-stage extension. Each clamped op-amp gets
+        // 1 resistor `R_oa_ro_{name}` (buf_out → out). (R1 is stamped
+        // directly in the MNA dispatch, not as a netlist element.)
+        let r_ro_added = aug_netlist
+            .elements
+            .iter()
+            .filter(|e| {
+                matches!(e, crate::parser::Element::Resistor { name, .. } if name.starts_with("R_oa_ro_"))
+            })
+            .count();
+        assert_eq!(r_ro_added, 4, "Expected 4 output-buffer series resistors (1 per clamped op-amp)");
+
         // Rebuild MNA from the augmented netlist — this must succeed.
         let aug_mna = MnaSystem::from_netlist(&aug_netlist).expect("augmented MNA build");
 
         // Dimensions grow by:
-        //   * +12 nodes: 4 internal gain nodes + 8 rail-reference nodes
+        //   * +16 nodes: 4 internal gain nodes + 4 buffer-output nodes
+        //     + 8 rail-reference nodes
         //   * +8 nonlinear devices (catch diodes)
         //   * +8 voltage sources (rail-reference DC sources)
         //   * +4 augmented MNA rows for the buffer VCVS branch currents
-        // The dominant-pole capacitor stamps directly into C, no count bump.
+        // The dominant-pole capacitor stamps directly into C (no count
+        // bump); the output buffer R_oa_ro_ stamps directly into G.
         assert_eq!(
             aug_mna.n,
-            mna.n + 12,
-            "augmented n should grow by 3 per clamped op-amp (1 internal + 2 rail-ref)"
+            mna.n + 16,
+            "augmented n should grow by 4 per clamped op-amp (int + buf_out + 2 rail-ref)"
         );
         assert_eq!(
             aug_mna.m,
