@@ -232,6 +232,14 @@ Gate current derivatives are always zero.
 
 ## OpAmp (Linear VCCS)
 
+> **For finite-rail op-amps (`.model OA(VCC=… VEE=…)`)**, this linear VCCS path
+> is only the IDEAL fallback. Rail clamping is handled by one of 5 modes
+> (`None / Hard / ActiveSet / ActiveSetBe / BoyleDiodes`) auto-selected by
+> `codegen::ir::resolve_opamp_rail_mode`. **Read [OPAMP_RAIL_MODES.md](OPAMP_RAIL_MODES.md)
+> before touching anything related to op-amp saturation, BoyleDiodes, or rail
+> clamping** — the rail-mode landscape has multi-session investigation history
+> and several already-tested-and-rejected fix candidates.
+
 The op-amp is modeled as a linear voltage-controlled current source (VCCS).
 It does NOT add nonlinear dimensions (M stays unchanged). All behavior is
 captured by stamps in the G matrix.

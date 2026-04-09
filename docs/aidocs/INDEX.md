@@ -21,6 +21,7 @@ AI agent consumption: dense equations, code patterns, cross-references, no narra
 | Changing Newton-Raphson iteration | [NR_SOLVER.md](NR_SOLVER.md) |
 | Changing NR voltage limiting or convergence | [VOLTAGE_LIMITING.md](VOLTAGE_LIMITING.md) |
 | Changing DC operating point solver | [DC_OP.md](DC_OP.md) |
+| **Touching op-amp rail handling, Boyle macromodel, ActiveSet/ActiveSetBe** | **[OPAMP_RAIL_MODES.md](OPAMP_RAIL_MODES.md)** |
 | Changing diode/BJT/JFET/MOSFET/tube equations | [DEVICE_MODELS.md](DEVICE_MODELS.md) |
 | Changing Gummel-Poon BJT or qb() function | [GUMMEL_POON.md](GUMMEL_POON.md) |
 | Changing matrix inversion or linear solves | [LINEAR_ALGEBRA.md](LINEAR_ALGEBRA.md) |
@@ -122,6 +123,7 @@ K' = K - scale * (N_v * su) * (su^T * N_i)
 | [VOLTAGE_LIMITING.md](VOLTAGE_LIMITING.md) | Comprehensive | pnjlim, fetlim, vcrit, scalar damping alpha |
 | [DC_OP.md](DC_OP.md) | Comprehensive | Companion formulation, source/gmin stepping, device eval |
 | [DEVICE_MODELS.md](DEVICE_MODELS.md) | Comprehensive | Diode, BJT, JFET, MOSFET, tube, op-amp equations |
+| [OPAMP_RAIL_MODES.md](OPAMP_RAIL_MODES.md) | Comprehensive | All 5 rail modes, BoyleDiodes scaffolding, heavy-clip root cause + rejected fixes + next-tier escalations |
 | [GUMMEL_POON.md](GUMMEL_POON.md) | Comprehensive | qb(), Early effect, high injection, GP Jacobian |
 | [LINEAR_ALGEBRA.md](LINEAR_ALGEBRA.md) | Comprehensive | LU, Gauss elim, equilibrated inversion, Sherman-Morrison |
 | [SHERMAN_MORRISON.md](SHERMAN_MORRISON.md) | Comprehensive | Rank-1 updates, precomputed vectors, multi-pot |
