@@ -962,6 +962,17 @@ pub struct Matrices {
     /// Values > 1 mean the Schur path is unstable. Only computed for nodal path.
     #[serde(default)]
     pub spectral_radius_s_aneg: f64,
+
+    // --- Sub-step matrices (trap at 2× internal rate, for ActiveSetBe sub-stepping) ---
+    /// S_sub = (G + (4/T)*C)^{-1}, N×N row-major (trap at 2× rate)
+    #[serde(default)]
+    pub s_sub: Vec<f64>,
+    /// K_sub = N_v * S_sub * N_i, M×M row-major (sub-step kernel)
+    #[serde(default)]
+    pub k_sub: Vec<f64>,
+    /// A_neg_sub = (4/T)*C - G, N×N row-major (sub-step history)
+    #[serde(default)]
+    pub a_neg_sub: Vec<f64>,
 }
 
 /// IIR op-amp dominant pole filter data for codegen.
@@ -1812,6 +1823,9 @@ impl CircuitIR {
                 s_be,
                 k_be,
                 spectral_radius_s_aneg: 0.0,
+                s_sub: Vec::new(),
+                k_sub: Vec::new(),
+                a_neg_sub: Vec::new(),
             }
         } else if be {
             // Backward Euler: recompute S, A_neg, K from G/C with alpha = 1/T
@@ -1886,6 +1900,9 @@ impl CircuitIR {
                 s_be: Vec::new(),
                 k_be: Vec::new(),
                 spectral_radius_s_aneg: 0.0,
+                s_sub: Vec::new(),
+                k_sub: Vec::new(),
+                a_neg_sub: Vec::new(),
             }
         } else {
             // Standard trapezoidal: use kernel matrices directly.
@@ -1916,6 +1933,9 @@ impl CircuitIR {
                 s_be,
                 k_be,
                 spectral_radius_s_aneg: 0.0,
+                s_sub: Vec::new(),
+                k_sub: Vec::new(),
+                a_neg_sub: Vec::new(),
             }
         };
 
@@ -2574,6 +2594,55 @@ impl CircuitIR {
             Vec::new()
         };
 
+        // Sub-step matrices: trap at 2× the internal rate (alpha_sub = 4/T).
+        // Used by ActiveSetBe sub-stepping to damp the discrete-time Nyquist
+        // artifact from the pin-and-resolve step. Precomputed so sub-steps
+        // are O(N²) matvec, same cost as the normal Schur prediction.
+        let alpha_sub = 2.0 * internal_rate * 2.0; // trap alpha at 2x rate
+        let mut a_sub_flat = vec![0.0f64; n * n];
+        let mut a_neg_sub_flat = vec![0.0f64; n * n];
+        for i in 0..n {
+            for j in 0..n {
+                let g = g_matrix[i * n + j];
+                let c = c_matrix[i * n + j];
+                a_sub_flat[i * n + j] = g + alpha_sub * c;
+                a_neg_sub_flat[i * n + j] = alpha_sub * c - g;
+            }
+        }
+        // Zero algebraic rows in A_neg_sub (same rows as A_neg)
+        for vs in &mna.voltage_sources {
+            let row = n_nodes + vs.ext_idx;
+            if row < n {
+                for j in 0..n {
+                    a_neg_sub_flat[row * n + j] = 0.0;
+                }
+            }
+        }
+        let num_vs_sub = mna.voltage_sources.len();
+        for (idx, _) in mna.vcvs_sources.iter().enumerate() {
+            let row = n_nodes + num_vs_sub + idx;
+            if row < n {
+                for j in 0..n {
+                    a_neg_sub_flat[row * n + j] = 0.0;
+                }
+            }
+        }
+        let num_vcvs_sub = mna.vcvs_sources.len();
+        for (idx, _) in mna.ideal_transformers.iter().enumerate() {
+            let row = n_nodes + num_vs_sub + num_vcvs_sub + idx;
+            if row < n {
+                for j in 0..n {
+                    a_neg_sub_flat[row * n + j] = 0.0;
+                }
+            }
+        }
+        let s_sub_flat = invert_flat_matrix(&a_sub_flat, n)?;
+        let k_sub_flat = if m > 0 {
+            compute_k_from_s(&s_sub_flat, &n_v_flat, &n_i_flat, n, m)
+        } else {
+            Vec::new()
+        };
+
         // Compute spectral radius of S * A_neg to detect Schur instability.
         // When rho(S * A_neg) > 1, the trapezoidal feedback v_pred = S*(A_neg*v_prev + ...)
         // amplifies errors exponentially. Route to full LU NR instead.
@@ -2631,6 +2700,9 @@ impl CircuitIR {
             s_be: s_be_flat,
             k_be: k_be_flat,
             spectral_radius_s_aneg,
+            s_sub: s_sub_flat,
+            k_sub: k_sub_flat,
+            a_neg_sub: a_neg_sub_flat,
         };
 
         // Run DC OP (operates on the original MNA system — which still has Gm for correct DC point)
@@ -3917,6 +3989,21 @@ impl CircuitIR {
     /// Access K_be matrix element K_be[i][j] (backward Euler, nodal Schur)
     pub fn k_be(&self, i: usize, j: usize) -> f64 {
         self.matrices.k_be[i * self.topology.m + j]
+    }
+
+    /// Access S_sub matrix element S_sub[i][j] (trap at 2× rate, sub-stepping)
+    pub fn s_sub(&self, i: usize, j: usize) -> f64 {
+        self.matrices.s_sub[i * self.topology.n + j]
+    }
+
+    /// Access K_sub matrix element K_sub[i][j] (trap at 2× rate, sub-stepping)
+    pub fn k_sub(&self, i: usize, j: usize) -> f64 {
+        self.matrices.k_sub[i * self.topology.m + j]
+    }
+
+    /// Access A_neg_sub matrix element A_neg_sub[i][j] (trap at 2× rate history)
+    pub fn a_neg_sub(&self, i: usize, j: usize) -> f64 {
+        self.matrices.a_neg_sub[i * self.topology.n + j]
     }
 }
 
