@@ -4237,11 +4237,21 @@ impl RustEmitter {
             ));
         }
         let num_sat_ind = ir.saturating_inductors.len();
+        let has_any_saturation = !ir.saturating_inductors.is_empty()
+            || !ir.saturating_coupled.is_empty()
+            || !ir.saturating_xfmr_groups.is_empty();
         if num_sat_ind > 0 {
             code.push_str(&format!(
                 "pub const NUM_SAT_IND: usize = {};\n\n",
                 num_sat_ind
             ));
+        }
+        if has_any_saturation {
+            code.push_str(
+                "/// Saturation update interval (samples). L_eff recomputed every N samples.\n\
+                 /// Saturation follows the signal envelope (~ms timescale), not individual samples.\n\
+                 pub const SAT_UPDATE_INTERVAL: u32 = 32;\n\n",
+            );
         }
 
         // Saturating coupled inductor constants
@@ -4345,6 +4355,7 @@ impl RustEmitter {
         let has_switches = !ir.switches.is_empty();
         let has_sat_ind = !ir.saturating_inductors.is_empty();
         let has_sat_coupled = !ir.saturating_coupled.is_empty() || !ir.saturating_xfmr_groups.is_empty();
+        let has_any_saturation = has_sat_ind || has_sat_coupled;
 
         let mut code = section_banner("STATE STRUCTURE (Nodal solver)");
 
@@ -4537,6 +4548,12 @@ impl RustEmitter {
         }
         if has_switches {
             code.push('\n');
+        }
+
+        // Saturation decimation counter
+        if has_any_saturation {
+            code.push_str("    /// Decimation counter for saturation updates (counts down to 0)\n");
+            code.push_str("    pub sat_update_counter: u32,\n\n");
         }
 
         // Saturating inductor state fields
@@ -4743,6 +4760,10 @@ impl RustEmitter {
             ));
             code.push_str("            matrices_dirty: false,\n");
         }
+        // Saturation decimation counter: 0 triggers update on first sample
+        if has_any_saturation {
+            code.push_str("            sat_update_counter: 0,\n");
+        }
         // Saturating inductor state: start at nominal L
         for (idx, _) in ir.saturating_inductors.iter().enumerate() {
             code.push_str(&format!(
@@ -4920,6 +4941,10 @@ impl RustEmitter {
         if has_pots || has_switches || has_sat_ind || has_sat_coupled {
             code.push_str("        self.g_work = G;\n");
             code.push_str("        self.c_work = C;\n");
+        }
+        // Reset saturation counter
+        if has_any_saturation {
+            code.push_str("        self.sat_update_counter = 0;\n");
         }
         // Reset saturating inductor L_eff to nominal
         for (idx, _) in ir.saturating_inductors.iter().enumerate() {
@@ -5662,11 +5687,12 @@ impl RustEmitter {
         );
 
         // Lazy rebuild: process all pot/switch changes in one batch
-        let has_rebuild = has_pots
-            || !ir.switches.is_empty()
-            || !ir.saturating_inductors.is_empty()
+        let has_any_saturation = !ir.saturating_inductors.is_empty()
             || !ir.saturating_coupled.is_empty()
             || !ir.saturating_xfmr_groups.is_empty();
+        let has_rebuild = has_pots
+            || !ir.switches.is_empty()
+            || has_any_saturation;
         if has_rebuild {
             code.push_str(
                 "    // Lazy rebuild: batch all pot/switch changes into one matrix rebuild\n\
@@ -5684,11 +5710,18 @@ impl RustEmitter {
         }
         code.push('\n');
 
-        // Saturating inductor per-sample L(I) update via Sherman-Morrison rank-1
+        // Decimated saturation update: check every SAT_UPDATE_INTERVAL samples
+        if has_any_saturation {
+            code.push_str("    // Decimated saturation update (every SAT_UPDATE_INTERVAL samples)\n");
+            code.push_str("    if state.sat_update_counter == 0 {\n");
+            code.push_str("        state.sat_update_counter = SAT_UPDATE_INTERVAL;\n");
+        }
+
+        // Saturating inductor L(I) update via Sherman-Morrison rank-1
         if !ir.saturating_inductors.is_empty() {
-            code.push_str("    // Saturating inductor update: L_eff = L0 / cosh^2(I / Isat)\n");
-            code.push_str("    // Sherman-Morrison rank-1 correction to S, K, S_NI, A_neg\n");
-            code.push_str("    {\n");
+            code.push_str("        // Saturating inductor update: L_eff = L0 / cosh^2(I / Isat)\n");
+            code.push_str("        // Sherman-Morrison rank-1 correction to S, K, S_NI, A_neg\n");
+            code.push_str("        {\n");
             code.push_str("        let alpha = 2.0 * state.current_sample_rate;\n");
             for (idx, _si) in ir.saturating_inductors.iter().enumerate() {
                 code.push_str(&format!(
@@ -5698,7 +5731,7 @@ impl RustEmitter {
                      \x20           let cosh_x = x.cosh();\n\
                      \x20           let l_eff = (SAT_IND_{idx}_L0 / (cosh_x * cosh_x)).max(SAT_IND_{idx}_L0 * 0.01);\n\
                      \x20           let delta_l = l_eff - state.sat_ind_{idx}_l_eff;\n\
-                     \x20           if delta_l.abs() > 1e-15 {{\n\
+                     \x20           if delta_l.abs() > SAT_IND_{idx}_L0 * 1e-4 {{\n\
                      \x20               let k = SAT_IND_{idx}_AUG_ROW;\n\
                      \x20               let delta_a = alpha * delta_l;\n\
                      \x20               let scale = delta_a / (1.0 + delta_a * state.s[k][k]);\n\
@@ -5756,7 +5789,7 @@ impl RustEmitter {
                      \x20           let dl1 = l1_eff - state.sat_ci_{idx}_l1_eff;\n\
                      \x20           let dl2 = l2_eff - state.sat_ci_{idx}_l2_eff;\n\
                      \x20           let dm = m_eff - state.sat_ci_{idx}_m_eff;\n\
-                     \x20           if dl1.abs() > 1e-15 || dl2.abs() > 1e-15 || dm.abs() > 1e-15 {{\n\
+                     \x20           if dl1.abs() > SAT_CI_{idx}_L1_L0 * 1e-4 || dl2.abs() > SAT_CI_{idx}_L2_L0 * 1e-4 || dm.abs() > 1e-6 {{\n\
                      \x20               let k1 = SAT_CI_{idx}_K1;\n\
                      \x20               let k2 = SAT_CI_{idx}_K2;\n\
                      \x20               // 2x2 eigendecomposition of delta block\n\
@@ -5774,7 +5807,7 @@ impl RustEmitter {
                 for eig_idx in 0..2 {
                     let lam = if eig_idx == 0 { "lam1" } else { "lam2" };
                     code.push_str(&format!(
-                        "               if {lam}.abs() > 1e-18 {{\n\
+                        "               if {lam}.abs() > 1e-10 {{\n\
                          \x20                   // Eigenvector: [a12, {lam}-a11], normalize\n\
                          \x20                   let ev_a = a12;\n\
                          \x20                   let ev_b = {lam} - a11;\n\
@@ -5853,7 +5886,7 @@ impl RustEmitter {
                  \x20           let x = i_branch / SAT_XG_{idx}_ISAT[wi];\n\
                  \x20           let c = x.cosh();\n\
                  \x20           l_eff[wi] = (SAT_XG_{idx}_L0[wi] / (c * c)).max(SAT_XG_{idx}_L0[wi] * 0.01);\n\
-                 \x20           if (l_eff[wi] - state.sat_xg_{idx}_l_eff[wi]).abs() > 1e-15 {{\n\
+                 \x20           if (l_eff[wi] - state.sat_xg_{idx}_l_eff[wi]).abs() > SAT_XG_{idx}_L0[wi] * 1e-4 {{\n\
                  \x20               any_changed = true;\n\
                  \x20           }}\n\
                  \x20       }}\n\
@@ -5868,7 +5901,7 @@ impl RustEmitter {
                  \x20           // Apply W diagonal SM rank-1 updates\n\
                  \x20           for wi in 0..w {{\n\
                  \x20               let dl = m_new[wi * w + wi] - state.sat_xg_{idx}_m_eff[wi * w + wi];\n\
-                 \x20               if dl.abs() > 1e-18 {{\n\
+                 \x20               if dl.abs() > 1e-10 {{\n\
                  \x20                   let k = SAT_XG_{idx}_ROWS[wi];\n\
                  \x20                   let delta_a = alpha * dl;\n\
                  \x20                   let scale = delta_a / (1.0 + delta_a * state.s[k][k]);\n\
@@ -5908,7 +5941,7 @@ impl RustEmitter {
                  \x20               for wj in 0..w {{\n\
                  \x20                   if wi == wj {{ continue; }}\n\
                  \x20                   let dm = m_new[wi * w + wj] - state.sat_xg_{idx}_m_eff[wi * w + wj];\n\
-                 \x20                   if dm.abs() > 1e-18 {{\n\
+                 \x20                   if dm.abs() > 1e-10 {{\n\
                  \x20                       let ki = SAT_XG_{idx}_ROWS[wi];\n\
                  \x20                       let kj = SAT_XG_{idx}_ROWS[wj];\n\
                  \x20                       let delta_a = alpha * dm;\n\
@@ -5958,6 +5991,12 @@ impl RustEmitter {
                  \x20       }}\n\
                  \x20   }}\n\n",
             ));
+        }
+
+        // Close decimation block
+        if has_any_saturation {
+            code.push_str("    }\n");
+            code.push_str("    state.sat_update_counter = state.sat_update_counter.saturating_sub(1);\n\n");
         }
 
         // Step 1: Build RHS = rhs_const + A_neg * v_prev + N_i * i_nl_prev + input (sparse)
