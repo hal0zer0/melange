@@ -118,7 +118,7 @@ impl BinaryCache {
         for entry in std::fs::read_dir(&self.cache_dir)? {
             let entry = entry?;
             let path = entry.path();
-            if path.is_file() && !path.extension().is_some_and(|e| e == "rs") {
+            if path.is_file() && path.extension().is_none_or(|e| e != "rs") {
                 let _ = std::fs::remove_file(&path);
             }
         }

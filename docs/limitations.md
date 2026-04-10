@@ -57,7 +57,7 @@ Subcircuit expansion now works: `X` elements are recursively expanded with node 
 
 ### Matrix Storage [PERFORMANCE]
 
-Matrices use `Vec<Vec<f64>>` (jagged arrays) instead of flat storage. This has poor cache locality but is acceptable for typical circuits (validated up to N=13, e.g. Pultec EQP-1A).
+Matrices use `Vec<Vec<f64>>` (jagged arrays) instead of flat storage. This has poor cache locality but is acceptable for typical circuits (validated up to N=41, Pultec EQP-1A with 4 tubes and 2 transformers).
 
 ### Denormal Handling [PERFORMANCE]
 
@@ -75,21 +75,22 @@ Independent voltage sources (V elements) are implemented as Norton equivalents (
 
 ### ~~Multi-Dimensional NR~~ ✅ Full Implementation
 
-For M > 2 nonlinear elements, the solver uses full Newton-Raphson with block-diagonal Jacobian and Gaussian elimination (M=3..16). Both runtime and codegen support up to M=16.
+For M > 2 nonlinear elements, the solver uses full Newton-Raphson with block-diagonal Jacobian and Gaussian elimination (M=3..16). Codegen supports up to M=16.
 
 ### Device Models
 
-- **BJT**: Full 2D (Ic + Ib) Ebers-Moll and Gummel-Poon models in both runtime and codegen. Self-heating (Rth/Cth, SPICE3f5 IS(T)) and charge storage (CJE/CJC/TF junction + diffusion caps) available, default disabled.
-- **Op-amps**: Work via VCCS MNA stamping (linear, no NR dimensions). AOL and ROUT configurable.
-- **JFET**: Full 2D Shichman-Hodges (triode + saturation + channel-length modulation) in both runtime and codegen
-- **MOSFET**: Full 2D Level 1 SPICE (triode + saturation + channel-length modulation) in both runtime and codegen
-- **Vacuum Tube**: Koren triode + Leach grid current + lambda (finite plate resistance) in both runtime and codegen
+- **BJT**: Full 2D (Ic + Ib) Ebers-Moll and Gummel-Poon models. Self-heating (Rth/Cth, SPICE3f5 IS(T)) and charge storage (CJE/CJC/TF junction + diffusion caps) available, default disabled.
+- **Op-amps**: Boyle macromodel with GBW dominant pole, VCC/VEE asymmetric supply rail clamping. No slew rate limiting.
+- **JFET**: Full 2D Shichman-Hodges (triode + saturation + channel-length modulation)
+- **MOSFET**: Full 2D Level 1 SPICE (triode + saturation + channel-length modulation)
+- **Vacuum Tube**: Koren triode + Leach grid current + lambda (finite plate resistance)
+- **VCA**: 2D current-mode exponential gain (THAT 2180 / DBX 2150)
 
 ## Audio-Specific Missing Features
 
-### ~~Potentiometers~~ ✅ Implemented (codegen 2026-02-28, runtime 2026-03-13)
+### ~~Potentiometers~~ ✅ Implemented (codegen 2026-02-28)
 
-`.pot` directive with Sherman-Morrison rank-1 updates for real-time parameter control. Both codegen and runtime solver support via `CircuitSolver.set_pot(index, resistance)` with pre-allocated SM buffers (real-time safe).
+`.pot` directive with Sherman-Morrison rank-1 updates for real-time parameter control. Codegen emits precomputed SM vectors; plugin template auto-generates FloatParam knobs.
 
 ### ~~Switches~~ ✅ Implemented (2026-03-02)
 
@@ -105,21 +106,17 @@ No time-varying sources for tremolo/vibrato effects.
 
 ## Real-Time Constraints
 
-### Thread Safety
-
-`CircuitSolver` is NOT `Sync`. Each audio thread must have its own solver instance. The type is `Send`, so solvers can be moved between threads.
-
 ### Allocation
 
-The solver pre-allocates all buffers. No heap allocation occurs in `process_sample()`.
+Generated code pre-allocates all buffers in `CircuitState`. No heap allocation occurs in `process_sample()`.
 
 ### Worst-Case Performance
 
-Matrix inversion is O(n³) and occurs at:
-- Construction time (sample rate change)
+Matrix recomputation is O(n³) and occurs at:
+- `set_sample_rate()` calls
 - Never during audio callback
 
-For typical circuits (up to N=13 validated), this is negligible.
+For typical circuits (up to N=41 validated), this is negligible.
 
 ## Documentation Gaps
 
@@ -156,9 +153,9 @@ These are intentional trade-offs, not bugs:
 
 1. **f64 everywhere**: Double precision for all calculations. No f32 optimization.
 
-2. **Interpreted solver**: Runtime MNA assembly and matrix solve. Slower than compiled code but more flexible.
+2. **Codegen-only pipeline**: Netlist → MNA → DK/Nodal kernel → optimized Rust source code. No interpreted runtime solver.
 
-3. **Trapezoidal integration**: Fixed rule, no user choice. Good balance of accuracy and stability.
+3. **Trapezoidal default, backward Euler opt-in**: Trapezoidal for accuracy; `--backward-euler` for unconditional stability. Auto-detected when spectral radius > 1.
 
 4. **Const generic devices**: Device dimension at compile time for stack allocation. No heap in device models.
 
@@ -166,4 +163,4 @@ These are intentional trade-offs, not bugs:
 
 ---
 
-*Last updated: 2026-03-13*
+*Last updated: 2026-04-10*

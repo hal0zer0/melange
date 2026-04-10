@@ -1,6 +1,9 @@
 // Minimal WAV reader/writer — embedded in generated simulate binaries.
 // No external dependencies. Supports 16-bit int, 24-bit int, 32-bit float.
 
+const PCM_16_MAX: f64 = 32768.0;   // 2^15
+const PCM_24_MAX: f64 = 8388608.0; // 2^23
+
 fn read_wav(path: &str) -> (Vec<f64>, f64) {
     let data = std::fs::read(path).unwrap_or_else(|e| {
         eprintln!("Failed to read WAV file '{}': {}", path, e);
@@ -49,20 +52,28 @@ fn read_wav(path: &str) -> (Vec<f64>, f64) {
     let num_frames = data_size / frame_size;
     let mut samples = Vec::with_capacity(num_frames);
 
+    if num_channels > 1 {
+        // Surfaced via the DIAG: channel so melange's parent process forwards it.
+        eprintln!(
+            "DIAG:note=input has {} channels, using left channel only (mono downmix)",
+            num_channels
+        );
+    }
+
     for i in 0..num_frames {
         let offset = data_start + i * frame_size;
         // Read first channel only (mono downmix)
         let sample = match (audio_format, bits_per_sample) {
             (1, 16) => {
                 let raw = i16::from_le_bytes([data[offset], data[offset+1]]);
-                raw as f64 / 32768.0
+                raw as f64 / PCM_16_MAX
             }
             (1, 24) => {
                 let b0 = data[offset] as i32;
                 let b1 = data[offset+1] as i32;
                 let b2 = data[offset+2] as i32;
                 let raw = (b2 << 24 | b1 << 16 | b0 << 8) >> 8; // Sign-extend
-                raw as f64 / 8388608.0
+                raw as f64 / PCM_24_MAX
             }
             (3, 32) => {
                 let raw = f32::from_le_bytes([data[offset], data[offset+1], data[offset+2], data[offset+3]]);

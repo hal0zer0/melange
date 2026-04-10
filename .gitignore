@@ -11,3 +11,21 @@ __pycache__/
 test.rs
 test_output.txt
 out
+
+# Audio files
+*.wav
+
+# DAW peak cache (Reaper)
+peaks/
+
+# ngspice source distribution
+ngspice*/
+ngspice_*
+
+# Package archives
+*.tar.gz
+*.tar.xz
+*.dsc
+
+# Generated reports
+*.html

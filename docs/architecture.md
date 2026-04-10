@@ -99,33 +99,26 @@ The core. Depends on primitives and devices.
 
 **Netlist Parser:**
 - Parse a subset of SPICE sufficient for audio circuits
-- Components: R, C, L, V (DC/AC), I, D (diode), Q (BJT), J (JFET), M (MOSFET), X (subcircuit)
-- Directives: `.model`, `.subckt`, `.param`
-- Output: `Circuit` struct with nodes, components, and device assignments
+- Components: R, C, L, V (DC/AC), I, D (diode), Q (BJT), J (JFET), M (MOSFET), T (tube), U (op-amp), Y (VCA), X (subcircuit), E (VCVS), G (VCCS), K (coupled inductors)
+- Directives: `.model`, `.subckt`, `.pot`, `.wiper`, `.switch`, `.gang`, `.input_impedance`
+- Output: `Netlist` struct with elements, models, and directives
 
 **MNA Assembler:**
-- `Circuit::assemble()` → `MnaSystem { g: Mat<N>, c: Mat<N>, n_v: Mat<M,N>, n_i: Mat<N,M> }`
+- `MnaSystem::from_netlist(&netlist)` → `MnaSystem { g, c, n_v, n_i, ... }`
 - Automatic node numbering (ground = 0)
 - Automatic stamp generation for all component types
-- Validation: no floating nodes, no short-circuited voltage sources
+- Augmented MNA for inductors (branch current variables)
 
-**DK Reducer:**
-- `MnaSystem::reduce(fs)` → `DkKernel<N, M>`
-- Trapezoidal discretization of C
-- Companion model generation for all reactive elements
-- K matrix extraction
-- Sherman-Morrison projection vectors for designated time-varying elements
+**DK Kernel / Nodal Solver:**
+- `DkKernel::from_mna(&mna, sample_rate)` → DK kernel with K matrix
+- Three codegen paths: DK Schur, Nodal Schur, Nodal Full LU (auto-selected)
+- Sherman-Morrison projection vectors for `.pot`/`.wiper` elements
 
-**Code Generator:**
-- `DkKernel::emit_rust()` → String of optimized Rust code
-- Const-generic matrix sizes
-- Inlined NR loop with circuit-specific Jacobian
-- Precomputed matrices as const arrays
-- Optional: proc-macro for compile-time circuit compilation
-
-**Runtime Solver (for prototyping):**
-- `DkKernel::process_sample(input, state)` → interpreted solver
-- Slower than generated code but useful for rapid iteration
+**Code Generator (codegen-only pipeline):**
+- `CircuitIR::from_kernel(...)` → intermediate representation
+- `RustEmitter::emit(&ir)` → optimized Rust source code
+- Const-generic matrix sizes, inlined NR, precomputed matrices as `const` arrays
+- Tera templates for device-specific codegen
 
 ### melange-validate (Layer 4)
 Depends on solver. Requires ngspice installed on the system.
@@ -152,31 +145,19 @@ Depends on solver. Requires ngspice installed on the system.
 - Three-tier methodology: circuit-only, voice-model, full-plugin
 
 ### melange-plugin (Layer 5)
-Depends on solver. Optional nih-plug integration.
-
-**Voice Management:**
-- `VoicePool<V, const MAX: usize>` — fixed-size voice allocator
-- Note-on/off lifecycle, silence detection, voice stealing
-- Per-voice render buffer management
-
-**Oversampling Framework:**
-- `OversamplingDecision::for_stage(is_nonlinear, bandwidth, sample_rate)` → factor
-- Automatic bypass at high native sample rates (>= 88.2 kHz)
-
-**Parameter Mapping:**
-- `PhysicalParam` — maps a component value (resistance, capacitance) to a plugin parameter
-- Log/linear/audio taper curves
-- Unit display (kOhm, uF, Hz)
+Depends on solver. Stub for future nih-plug integration helpers.
 
 ### melange-cli
-The command-line interface for working with circuits outside of a plugin context.
+The command-line interface for working with circuits.
 
-**Planned subcommands:**
-- `melange compile <netlist>` — parse netlist, generate optimized Rust solver
-- `melange simulate <netlist>` — run interpreted solver, output WAV
+**Subcommands:**
+- `melange compile <netlist>` — parse netlist, generate optimized Rust code or plugin project
+- `melange simulate <netlist>` — compile and run circuit, output WAV
+- `melange analyze <netlist>` — AC frequency response analysis
 - `melange validate <netlist>` — compare against ngspice, report deltas
-- `melange sweep <netlist> --param R1 --range 1k,100k` — parameter sweep
-- `melange bench <netlist>` — real-time performance benchmark
+- `melange nodes <netlist>` — show circuit nodes and devices
+- `melange import <kicad_netlist>` — import KiCad netlist to .cir format
+- `melange builtins` — list built-in example circuits
 
 ## The Generality vs. Performance Problem
 
@@ -184,19 +165,19 @@ The central engineering challenge. A hand-written 8x8 DK solver (like OpenWurli'
 
 **Solution: Compile-time specialization.**
 
-The solver operates in two modes:
-1. **Interpreted mode** (prototyping): Dynamic matrix sizes, heap-allocated. Slower but flexible. Used during development and validation.
-2. **Generated mode** (production): The solver emits Rust source code with const-generic sizes. The generated code is compiled by rustc with full optimization. Zero overhead vs. hand-written.
+The codegen pipeline emits Rust source code with const-generic sizes. The generated code is compiled by rustc with full optimization — zero overhead vs. hand-written code.
 
 The workflow:
 ```
-netlist.spice → melange compile → my_circuit.rs → cargo build → production binary
+netlist.cir → melange compile → circuit.rs → cargo build → production binary
 ```
 
-The generated `my_circuit.rs` contains:
-- `const` arrays for all precomputed matrices
+The generated `circuit.rs` contains:
+- `const` arrays for all precomputed matrices (S, K, A_neg, S*N_i, DC_OP, etc.)
 - A `process_sample()` function with inlined NR iteration
-- Type aliases for the specific matrix sizes
+- `CircuitState` struct with all solver state (stack-allocated arrays)
+- Sherman-Morrison vectors for runtime pot/wiper control
+- `set_sample_rate()` for runtime matrix recomputation from G+C
 - `#[inline(always)]` on the hot path
 
-This means the same circuit description produces both a validated prototype AND optimized production code, with identical numerical behavior.
+Performance: DK codegen circuits run 100-600x realtime. Nodal full-LU with chord + sparse optimizations: ~11x realtime for the most complex validated circuit (Pultec EQP-1A, N=41, M=8).

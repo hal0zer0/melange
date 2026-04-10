@@ -63,6 +63,8 @@ dense equations, code patterns, and cross-references. The full index is at `docs
 | `docs/aidocs/GUMMEL_POON.md` | Changing Gummel-Poon BJT model, qb() function, GP Jacobian |
 | `docs/aidocs/LINEAR_ALGEBRA.md` | Changing matrix inversion, LU decomposition, Gaussian elimination |
 | `docs/aidocs/SHERMAN_MORRISON.md` | Changing dynamic potentiometers, rank-1 updates, SM vectors |
+| `docs/aidocs/DYNAMIC_PARAMS.md` | Changing .pot/.switch/.wiper directives, parameter pipeline |
+| `docs/aidocs/OPAMP_RAIL_MODES.md` | Changing op-amp rail clamping (Hard/ActiveSet/ActiveSetBe/BoyleDiodes) |
 | `docs/aidocs/OVERSAMPLING.md` | Changing oversampling, anti-alias filters, polyphase half-band IIR |
 | `docs/aidocs/CODEGEN.md` | Changing generated solver code structure or templates |
 | `docs/aidocs/COMPANION_MODELS.md` | Changing trapezoidal integration or companion circuits |
@@ -89,8 +91,8 @@ RHS input = (V_in(n+1) + V_in(n)) * G_in   (proper trapezoidal, NOT 2*V*G)
 
 - Diodes: 1D per device (single voltage/current)
 - BJTs: 2D per device (Vbe→Ic at start_idx, Vbc→Ib at start_idx+1)
-- JFETs: 2D per device (Vgs→Id at start_idx, Vds→Ig at start_idx+1)
-- MOSFETs: 2D per device (Vgs→Id at start_idx, Vds→Ig at start_idx+1)
+- JFETs: 2D per device (Vds→Id at start_idx, Vgs→Ig at start_idx+1)
+- MOSFETs: 2D per device (Vds→Id at start_idx, Vgs→Ig at start_idx+1)
 - Tubes: 2D per device (Vgk→Ip at start_idx, Vpk→Ig at start_idx+1)
 - VCAs: 2D per device (Vsig→Isig at start_idx, Vctrl→Ictrl at start_idx+1)
 - Device map built from netlist element order, mirrors MNA builder
@@ -142,9 +144,9 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
 | Codegen stable but wrong level | K≈0, Schur NR has J=I (no damping) | Route K≈0 circuits to full N×N LU NR (device Jacobian in G_aug) |
 | BoyleDiodes augmented system: input row zero, first signal sample explodes | `MnaSystem::from_netlist(&augmented)` doesn't preserve in-place G_in stamp | Re-stamp `g[input][input] += 1/R_in` and junction caps after rebuild in `generate_nodal` (FIXED commit `5544c8a`) |
 | BoyleDiodes false convergence: trap NR declares converged with wildly wrong v[buf_in] on first signal sample | Voltage-step convergence check passes when chord_j_dev is many OOM stale; no residual gate on full-LU NR loop | Add residual check + adaptive refactor trigger (>50% j_dev change), both BoyleDiodes-gated (FIXED commit `39397d1`) |
-| BoyleDiodes heavy clipping (amp ≥ 0.07): NR oscillates, never converges | **Wrong chord-LU fixed points at the catch-diode knee** — chord_jdev≈tiny → linear fixed point ABOVE knee (v≈17.3); chord_jdev≈large → linear fixed point BELOW knee (v≈7); true equilibrium at intermediate jdev (v≈17.0) is captured by neither. Line search backtracking picks midpoints between two wrong values and still gets a wrong answer (verified 2026-04-08). | **OPEN**. Right escalation is **PTC** (Kelley-Keyes 1998) — adds `1/Δτ * I` to chord LU diagonal before factoring, mechanically bounding `‖(J + I/Δτ)^{-1}‖ ≤ Δτ` so the LU back-solve can't produce wildly wrong fixed points regardless of chord_jdev. ~30 lines codegen. Workaround: `--opamp-rail-mode active-set-be`. See `task_12_bistable_oscillation_finding.md` "DEEPER DIAGNOSIS". |
+| BoyleDiodes heavy clipping (amp ≥ 0.05 on Klon): NR diverges, raw output 45–3068 V | Chord-LU Newton direction wrong (not just magnitude). Gmin/line-search can't fix wrong direction. | **Not a blocker.** Auto-routes to `active-set-be` (verified correct amp=[0.01..0.50]). BoyleDiodes opt-in only (`--opamp-rail-mode boyle-diodes`). See `docs/aidocs/DEBUGGING.md`. |
 
-## Current Status (2026-03-15)
+## Current Status (2026-04-10)
 
 ### Working
 - Linear circuit simulation (RC lowpass matches ngspice to 0.03% RMS, 8-nines correlation)
@@ -152,11 +154,11 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
 - DK kernel build with proper trapezoidal discretization
 - NR solver: 1D, 2D (two 1D devices), and M-dimensional
 - Codegen for diode, BJT, JFET, and tube/triode circuits (up to M=16, Gaussian elimination for M=3..16)
-- Codegen uses proper trapezoidal RHS with `input_prev` tracking (matches runtime solver)
+- Codegen uses proper trapezoidal RHS with `input_prev` tracking
 - Per-device `.model` params: each device gets its own IS, N, BF, BR, VT (heterogeneous models supported)
 - Nonlinear DC operating point solver (LU decomposition with partial pivoting, logarithmic junction-aware voltage limiting, source stepping and Gmin stepping fallbacks)
 - DC OP internal nodes for parasitic BJTs: basePrime/colPrime/emitPrime nodes (like ngspice) for correct convergence with RB/RC/RE
-- DC OP integrated into codegen (`DC_NL_I` constant) and runtime (`initialize_dc_op()`)
+- DC OP integrated into codegen (`DC_NL_I` constant)
 - DC operating point calculation includes input conductance
 - Plugin template generates per-channel state for stereo (no cross-channel corruption)
 - SPICE validation infrastructure with ngspice
@@ -177,14 +179,13 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
   - **BJT NF/ISE/NE**: Forward emission coefficient and base-emitter leakage current
   - **Diode BV/IBV**: Reverse breakdown (Zener) support
   - **MOSFET GAMMA/PHI**: Body effect (threshold voltage shift with source-bulk voltage)
-  - **Self-heating**: NOT IMPLEMENTED (planned future feature)
+  - **Self-heating**: BJT RTH/CTH/TAMB supported in codegen (default RTH=infinity disables)
 - **Dynamic potentiometers**: `.pot R1 min max` directive marks a resistor as runtime-variable
   - Sherman-Morrison rank-1 updates: O(N²) correction instead of O(N³) re-inversion
   - Precomputed SM vectors (SU, USU, NV_SU, U_NI) baked into generated constants
   - Corrections applied to S, K, A_neg, and S*N_i products in codegen
-  - **Runtime solver**: No pot support (codegen-only). `CircuitSolver` uses nominal kernel.
   - Plugin template auto-generates `FloatParam` knobs for each pot
-  - Max 32 pots per circuit; pot value stored in `CircuitState`
+  - Max 64 pots per circuit; pot value stored in `CircuitState`
 - **Gang pot linking**: `.gang "Label" member1 member2` links multiple `.pot`/`.wiper` entries to a single UI parameter
   - Single 0-1 position controls all members; `!` prefix inverts a member's response
   - Plugin template emits one FloatParam per gang; ganged pots/wipers excluded from individual params
@@ -198,7 +199,7 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
   - No runtime crate dependencies — filter coefficients + allpass structure emitted inline
   - 4x uses cascaded 2x: outer 2-section (~60dB) + inner 3-section (~80dB)
 - **Sparsity-aware emission**: systematic zero-skipping in A_neg, N_v, K, S*N_i multiplications
-- **Runtime sample rate**: `set_sample_rate()` recomputes all matrices from G+C at runtime
+- **Runtime sample rate**: `set_sample_rate()` recomputes all matrices from G+C in generated code
 - **JFET codegen**: 2D Shichman-Hodges model (triode + saturation regions, channel-length modulation)
   - `jfet_id(vgs, vds, idss, vp, lambda, sign)`, `jfet_ig(vgs, sign)`, `jfet_jacobian()` → [f64; 4]
   - Constants: `DEVICE_{n}_IDSS`, `DEVICE_{n}_VP`, `DEVICE_{n}_LAMBDA`, `DEVICE_{n}_SIGN`
@@ -249,11 +250,12 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
 - All device models fixed at room temperature (27°C); no temperature coefficients (TNOM, TC1, TC2, XTI)
 - Op-amp model: Boyle macromodel with GBW dominant pole, VCC/VEE asymmetric supply rail clamping. No slew rate limiting.
 - Pentode support deferred (3D device exceeds current 2D NR solver; workaround: triode-connect)
-- **Runtime solver** (`DeviceEntry`) supports all device types: Diode, DiodeWithRs, Led, BJT, JFET, MOSFET, Tube
+- **Device support** (`DeviceEntry`): Diode, DiodeWithRs, Led, BJT, JFET, MOSFET, Tube
 - **NodalSolver transient NR**: Converges for all physically valid circuits including Pultec EQP-1A (4 tubes, 2 transformers, global NFB). Requires positive-definite inductance matrices (validated at MNA build time).
 - **Coupled-inductor push-pull NFB**: Differential cathode injection with separated cathodes (820Ω between) and K=0.9999 provides 21 dB of NFB. Pultec at +1.8 dB (near unity). Ideal transformer formulation (dependent sources + explicit leakage/magnetizing L) deferred — current approach is sufficient.
-- **`melange simulate`**: auto-selects NodalSolver for nonlinear circuits with inductors, CircuitSolver (DK) otherwise. `--solver nodal|dk` override available.
+- **`melange simulate`**: auto-selects codegen path (nodal for inductors, DK otherwise). `--solver nodal|dk` override available.
 - **Performance**: DK codegen circuits run 100-600× realtime. Nodal full-LU (chord + cross-timestep + sparse LU): ~11× realtime for Pultec (41-node, 8 NL, 2 transformers).
+- **Full-LU NR + ill-conditioned A**: The full-LU chord NR can diverge when cond(A) > ~1000 (large coupling caps). Routing prefers Schur when K is well-conditioned, avoiding the issue. No known circuit needs both full-LU (pathological K) AND has ill-conditioned A. See `docs/aidocs/DEBUGGING.md` "Known Full-LU NR Limitations".
 
 ### Cross-Compilation (macOS from Linux)
 - Zig 0.13 + cargo-zigbuild + macOS SDK 13.3 + rcodesign (ad-hoc signing)
@@ -288,24 +290,35 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
   - Audio path codegen validated: -62.8 dB output matches runtime NodalSolver exactly
   - Uses nodal full-LU path (K≈0 from current-mode VCA, N=28, M=2)
 
+### Shipped (2026)
+- Wurli-preamp SPICE validation (6-nines correlation, 3.2% RMS)
+- Tube screamer / guitar pedal circuits (stable + testing)
+- Klon Centaur (ActiveSetBe auto-route, BoyleDiodes opt-in experimental)
+- SSL bus compressor (codegen validated, full-LU path)
+- VCR audio ALC compressor
+- Op-amp VCC/VEE asymmetric supply rails
+- Wiper pot support + gang pot linking
+- ActiveSetBe precomputed Schur sub-stepping
+
 ### Pending Work
 
-#### Current Priority — Release Prep
-- **Target circuits**: Guitar pedals (diode clippers, tube screamers), simple tube amps, OpenWurli
-- **SPICE validation**: tube+transformer circuits against ngspice
-- **Validate wurli-preamp**: SPICE comparison, gain at R_ldr extremes, frequency response
+#### Current Priority
+- **Neve 1073**: EQ section (Stage 3), integration (Stage 4), plugin (Stage 5)
+- **Oomox plugin roadmap**: .runtime VS, named constants, DC op accessor, warmup, runtime DC OP recompute
 - **Documentation**: User-facing docs, example circuits, getting-started guide
 
 #### Performance — Further Optimization
 - Pultec at ~11× RT (chord + cross-timestep + sparse LU). Further optimization optional:
 - Hot/cold state split: 112KB struct → ~30KB hot path (L1 cache friendly)
 - fast_powf for Koren tube model: replace libm powf (~40ns) with fast approximation (~10ns)
+- DK parasitic BJTs (power amp 0.41×, K_eff approach planned)
 
 #### Future — Multi-Language Codegen
-The `Emitter` trait + `CircuitIR` are language-agnostic by design. Once Rust output is complete, planned targets in priority order: C++ (pro plugin devs), FAUST (compiles to 30+ targets), Python/NumPy (prototyping), MATLAB/Octave (academic).
+The `Emitter` trait + `CircuitIR` are language-agnostic by design. Planned targets: C++ (pro plugin devs), FAUST (30+ targets), Python/NumPy (prototyping), MATLAB/Octave (academic).
 
 #### Deferred
-- **Ideal transformer formulation**: Dependent sources + explicit leakage/magnetizing L. Removes PD constraint from coupled inductors. May improve push-pull circuits beyond current K model capabilities. Pultec now at +1.8 dB with current approach, so no longer blocking.
+- **Ideal transformer formulation**: Dependent sources + explicit leakage/magnetizing L. Pultec at +1.8 dB with current approach, not blocking.
 - **Phase 6a/6b** (type safety): NodeIdx newtype and field visibility
 - **Phase 7** (crate split): Extract melange-parser, melange-codegen
 - **M>16**: Iterative/sparse NR for very large nonlinear systems
+- **BoyleDiodes heavy clipping**: Anderson acceleration or BoyleDiodes→ActiveSetBe hybrid (low priority)

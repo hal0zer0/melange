@@ -25,3 +25,6 @@ melange-devices = { path = "crates/melange-devices" }
 melange-solver = { path = "crates/melange-solver" }
 melange-validate = { path = "crates/melange-validate" }
 melange-plugin = { path = "crates/melange-plugin" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+log = "0.4"

@@ -145,7 +145,7 @@ fn tube_jacobian(vgk: f64, vpk: f64, mu: f64, ex: f64, kg1: f64, kp: f64, kvb: f
 - **Grid current**: Leach power-law — `Ig = ig_max * (vgk / vgk_onset)^1.5` for vgk > 0 (zero for vgk <= 0)
 - **Jacobian**: 4-element `[dIp/dVgk, dIp/dVpk, dIg/dVgk, dIg/dVpk]` — dIg/dVpk = 0. With lambda: `dIp/dVgk = dIp_koren/dVgk * (1+lambda*Vpk)`, `dIp/dVpk = dIp_koren/dVpk * (1+lambda*Vpk) + Ip_koren * lambda`
 - Constants: `DEVICE_{n}_MU`, `DEVICE_{n}_EX`, `DEVICE_{n}_KG1`, `DEVICE_{n}_KP`, `DEVICE_{n}_KVB`, `DEVICE_{n}_IG_MAX`, `DEVICE_{n}_VGK_ONSET`, `DEVICE_{n}_LAMBDA`
-- Netlist syntax: `X1 plate grid cathode modelname` with `.model modelname TRIODE(MU=100 EX=1.4 KG1=1060 KP=600 KVB=300)`
+- Netlist syntax: `T1 grid plate cathode modelname` with `.model modelname TRIODE(MU=100 EX=1.4 KG1=1060 KP=600 KVB=300)`
 - Default params: MU=100, EX=1.4, KG1=1060, KP=600, KVB=300, IG_MAX=2e-3, VGK_ONSET=0.5, LAMBDA=0.0
 - `LAMBDA` controls Early-effect multiplier: `Ip = Ip_koren * (1 + lambda * Vpk)`. Default 0.0 = no correction (backward compatible). Plate resistance rp ~ 1/(lambda*Ip).
 - Template: `device_tube.rs.tera`

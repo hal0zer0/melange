@@ -94,16 +94,18 @@ pub enum OpampRailMode {
     /// IS the signal (e.g. control-path op-amps driving a VCA gain port).
     ActiveSet,
     /// On rail engagement, fall through to the BE NR fallback and run the
-    /// constrained re-solve against `state.a_be` (backward Euler). Trapezoidal
-    /// + post-NR pin develops a Nyquist-rate limit cycle when the clamp is
-    /// engaged across multiple samples (the cap-history term `(2/T)·C·v_prev`
-    /// alternates sign every sample); BE damps this. Required for audio-path
-    /// op-amps whose output is cap-coupled to a downstream stage that
-    /// integrates the op-amp's transient behavior — e.g. Klon Centaur's
-    /// tone-out → C15 → output. Cost: BE NR runs every sample where the rail
-    /// is engaged (~2x NR work for those samples). Compared to ActiveSet,
-    /// produces cleaner clipped output but slightly different envelope
-    /// dynamics (BE damps cap-coupled feedback more aggressively).
+    /// constrained re-solve against `state.a_be` (backward Euler).
+    /// Trapezoidal with post-NR pin develops a Nyquist-rate limit cycle when
+    /// the clamp is engaged across multiple samples (the cap-history term
+    /// `(2/T)·C·v_prev` alternates sign every sample); BE damps this.
+    ///
+    /// Required for audio-path op-amps whose output is cap-coupled to a
+    /// downstream stage that integrates the op-amp's transient behavior —
+    /// e.g. Klon Centaur's tone-out -> C15 -> output. Cost: BE NR runs every
+    /// sample where the rail is engaged (~2x NR work for those samples).
+    /// Compared to ActiveSet, produces cleaner clipped output but slightly
+    /// different envelope dynamics (BE damps cap-coupled feedback more
+    /// aggressively).
     ActiveSetBe,
     /// Auto-inserted Boyle catch diodes. Soft exponential knee, correct physics.
     BoyleDiodes,
@@ -432,13 +434,13 @@ impl CodeGenerator {
             netlist,
         );
         if resolved.mode == OpampRailMode::BoyleDiodes {
-            return Err(CodegenError::UnsupportedTopology(format!(
+            return Err(CodegenError::UnsupportedTopology(
                 "OpampRailMode::BoyleDiodes is not yet supported on the DK codegen \
                  path. Either rerun with `--solver nodal` or use a different rail \
-                 mode (`--opamp-rail-mode {{hard|active-set|active-set-be}}`). The \
+                 mode (`--opamp-rail-mode {hard|active-set|active-set-be}`). The \
                  auto-detector never picks BoyleDiodes today, so this error only \
-                 triggers on an explicit user override."
-            )));
+                 triggers on an explicit user override.".to_string()
+            ));
         }
 
         // Auto-insert parasitic caps if C matrix is all zeros and circuit has

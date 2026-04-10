@@ -99,7 +99,7 @@ Each `.pot` becomes a knob and each `.switch` becomes a selector in the generate
 | `melange compile circuit.cir -f plugin -o dir` | Generate plugin project |
 | `melange compile circuit.cir -f code -o file.rs` | Generate standalone Rust code |
 | `melange simulate circuit.cir --amplitude 0.1 -o out.wav` | Process test tone |
-| `melange simulate circuit.cir --input audio.wav -o out.wav` | Process audio file |
+| `melange simulate circuit.cir --input-audio audio.wav -o out.wav` | Process audio file |
 | `melange analyze circuit.cir` | AC frequency response |
 | `melange validate circuit.cir` | Compare against ngspice |
 
@@ -147,7 +147,7 @@ Supported devices: resistors, capacitors, inductors, voltage/current sources, di
 | Problem | Likely cause | Fix |
 |---------|-------------|-----|
 | Plugin produces silence | Wrong input/output node names | Check with `melange nodes`; use `--input-node` / `--output-node` |
-| Output is very quiet | Input level too low | Increase Input Level param, or use `--output-scale` |
+| Output is very quiet | Input level too low | Increase Input Level param in the plugin UI |
 | NaN / oscillation | DC operating point failed | Check biasing network; try `--backward-euler` |
 | "M exceeds MAX_M" error | Too many nonlinear devices for DK | Use `--solver nodal` |
 | Compilation slow | Large circuit with nodal solver | Expected for N>30 circuits; runtime is still fast |

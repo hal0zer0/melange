@@ -177,7 +177,7 @@ edition = "2021"
 
 [dependencies]
 # Pin nih-plug to a specific rev for reproducible builds
-nih_plug = {{ git = "https://github.com/robbert-vdh/nih-plug.git", rev = "31e5bb87" }}
+nih_plug = {{ git = "https://github.com/robbert-vdh/nih-plug.git", rev = "28b149ec" }}
 
 [lib]
 crate-type = ["cdylib"]
@@ -302,7 +302,7 @@ fn generate_pot_default(pot: &PotParamInfo) -> String {
     format!(
         r#"            pot_{idx}: FloatParam::new(
                 "{name}",
-                {default},
+                {default:.4},
                 FloatRange::Linear {{
                     min: 0.0,
                     max: 1.0,
@@ -315,7 +315,7 @@ fn generate_pot_default(pot: &PotParamInfo) -> String {
 "#,
         idx = pot.index,
         name = name,
-        default = format!("{:.4}", default_pos),
+        default = default_pos,
     )
 }
 

@@ -135,7 +135,7 @@ fn import_xml(content: &str) -> Result<String> {
                             .file_stem()
                             .and_then(|s| s.to_str())
                             .unwrap_or("Imported Circuit");
-                        title = base.replace('_', " ").replace('-', " ");
+                        title = base.replace(['_', '-'], " ");
                     }
                     "components" => in_components = false,
                     "comp" => {
@@ -250,21 +250,21 @@ fn import_xml(content: &str) -> Result<String> {
             "D" => {
                 let anode = get_node("2"); // pin A
                 let cathode = get_node("1"); // pin K
-                collect_model(&comp, "D", &mut models);
+                collect_model(comp, "D", &mut models);
                 format!("{} {} {} {}", comp.ref_des, anode, cathode, comp.value)
             }
             "Q" => {
                 let nc = get_node("1");
                 let nb = get_node("2");
                 let ne = get_node("3");
-                collect_model(&comp, "", &mut models);
+                collect_model(comp, "", &mut models);
                 format!("{} {} {} {} {}", comp.ref_des, nc, nb, ne, comp.value)
             }
             "J" => {
                 let nd = get_node("1");
                 let ng = get_node("2");
                 let ns = get_node("3");
-                collect_model(&comp, "", &mut models);
+                collect_model(comp, "", &mut models);
                 format!("{} {} {} {} {}", comp.ref_des, nd, ng, ns, comp.value)
             }
             "M" => {
@@ -272,21 +272,21 @@ fn import_xml(content: &str) -> Result<String> {
                 let ng = get_node("2");
                 let ns = get_node("3");
                 let nb = if comp.pin_nets.contains_key("4") { get_node("4") } else { ns.clone() };
-                collect_model(&comp, "", &mut models);
+                collect_model(comp, "", &mut models);
                 format!("{} {} {} {} {} {}", comp.ref_des, nd, ng, ns, nb, comp.value)
             }
             "T" => {
                 let ng = get_node("1");
                 let np = get_node("2");
                 let nk = get_node("3");
-                collect_model(&comp, "TRIODE", &mut models);
+                collect_model(comp, "TRIODE", &mut models);
                 format!("{} {} {} {} {}", comp.ref_des, ng, np, nk, comp.value)
             }
             "U" => {
                 let nplus = get_node("1");
                 let nminus = get_node("2");
                 let nout = get_node("3");
-                collect_model(&comp, "OA", &mut models);
+                collect_model(comp, "OA", &mut models);
                 format!("{} {} {} {} {}", comp.ref_des, nplus, nminus, nout, comp.value)
             }
             "Y" => {
@@ -294,7 +294,7 @@ fn import_xml(content: &str) -> Result<String> {
                 let sn = get_node("2");
                 let cp = get_node("3");
                 let cn = get_node("4");
-                collect_model(&comp, "VCA", &mut models);
+                collect_model(comp, "VCA", &mut models);
                 format!("{} {} {} {} {} {}", comp.ref_des, sp, sn, cp, cn, comp.value)
             }
             "V" => {

@@ -1771,8 +1771,8 @@ fn simulate_circuit_source(
     // Parse diagnostics from stderr
     let stderr = String::from_utf8_lossy(&result.stderr);
     for line in stderr.lines() {
-        if line.starts_with("DIAG:") {
-            let parts: Vec<&str> = line[5..].splitn(2, '=').collect();
+        if let Some(diag) = line.strip_prefix("DIAG:") {
+            let parts: Vec<&str> = diag.splitn(2, '=').collect();
             if parts.len() == 2 {
                 println!("  {}: {}", parts[0], parts[1]);
             }
@@ -3012,26 +3012,40 @@ fn list_builtins() -> Result<()> {
 
 fn handle_cache(action: CacheAction) -> Result<()> {
     use crate::cache::{format_cache_list, Cache};
+    use crate::codegen_runner::BinaryCache;
 
     match action {
         CacheAction::List => {
             let cache = Cache::new()?;
             println!("{}", format_cache_list(&cache));
+            let bin_cache = BinaryCache::new()?;
+            let bin_stats = bin_cache.stats();
+            println!();
+            println!("Compiled binaries:");
+            println!("  {} files ({})", bin_stats.total_files, bin_stats.formatted_size());
             Ok(())
         }
         CacheAction::Clear => {
             let cache = Cache::new()?;
             cache.clear()?;
-            println!("Cache cleared.");
+            let bin_cache = BinaryCache::new()?;
+            bin_cache.clear()?;
+            println!("Cache cleared (circuits + compiled binaries).");
             Ok(())
         }
         CacheAction::Stats => {
             let cache = Cache::new()?;
             let stats = cache.stats();
-            println!("Cache statistics:");
+            println!("Circuit cache:");
             println!("  Location: {}", cache.cache_dir().display());
             println!("  Files: {}", stats.total_files);
             println!("  Size: {}", stats.formatted_size());
+            let bin_cache = BinaryCache::new()?;
+            let bin_stats = bin_cache.stats();
+            println!();
+            println!("Binary cache:");
+            println!("  Files: {}", bin_stats.total_files);
+            println!("  Size: {}", bin_stats.formatted_size());
             Ok(())
         }
     }
