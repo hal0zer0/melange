@@ -147,6 +147,8 @@ pub struct CircuitState {
 {% if num_switches > 0 or num_pots > 0 %}
     /// Current sample rate (needed for rebuild_matrices)
     pub current_sample_rate: f64,
+    /// Lazy rebuild flag: set by set_pot/set_switch, cleared by process_sample
+    pub matrices_dirty: bool,
 {% endif %}
 {# SM state fields removed — per-block rebuild replaces SM #}
 {% if num_device_params > 0 %}
@@ -247,6 +249,7 @@ impl Default for CircuitState {
 {% endif %}
 {% if num_switches > 0 or num_pots > 0 %}
             current_sample_rate: SAMPLE_RATE,
+            matrices_dirty: false,
 {% endif %}
 {% if num_device_params > 0 %}
 {% for dev in device_params %}{% for p in dev.params %}

@@ -518,7 +518,16 @@ impl RustEmitter {
     fn render(&self, name: &str, ctx: &Context) -> Result<String, CodegenError> {
         self.tera
             .render(name, ctx)
-            .map_err(|e| CodegenError::TemplateError(format!("{}: {}", name, e)))
+            .map_err(|e| {
+                use std::error::Error;
+                let mut msg = format!("{}: {}", name, e);
+                let mut source = e.source();
+                while let Some(s) = source {
+                    msg.push_str(&format!("\n  caused by: {}", s));
+                    source = s.source();
+                }
+                CodegenError::TemplateError(msg)
+            })
     }
 }
 
@@ -1309,12 +1318,12 @@ impl RustEmitter {
             code.push_str(&format!(
                 "    /// Set switch {} position (0..{}).\n\
                  \x20   ///\n\
-                 \x20   /// Triggers a full matrix rebuild. Call from UI thread, NOT audio thread.\n\
+                 \x20   /// Marks matrices dirty. Rebuild deferred to next `process_sample()`.\n\
                  \x20   pub fn set_switch_{}(&mut self, position: usize) {{\n\
                  \x20       if position >= SWITCH_{}_NUM_POSITIONS {{ return; }}\n\
                  \x20       if self.switch_{}_position == position {{ return; }}\n\
                  \x20       self.switch_{}_position = position;\n\
-                 \x20       self.rebuild_matrices();\n\
+                 \x20       self.matrices_dirty = true;\n\
                  \x20   }}\n\n",
                 sw.index,
                 sw.num_positions - 1,
@@ -1327,13 +1336,13 @@ impl RustEmitter {
             code.push_str(&format!(
                 "    /// Set potentiometer {idx} resistance (clamped to [{:.1}..{:.1}] ohms).\n\
                  \x20   ///\n\
-                 \x20   /// Triggers a full matrix rebuild. Call per-block, not per-sample.\n\
+                 \x20   /// Marks matrices dirty. Rebuild deferred to next `process_sample()`.\n\
                  \x20   pub fn set_pot_{idx}(&mut self, resistance: f64) {{\n\
                  \x20       if !resistance.is_finite() {{ return; }}\n\
                  \x20       let r = resistance.clamp(POT_{idx}_MIN_R, POT_{idx}_MAX_R);\n\
                  \x20       if (r - self.pot_{idx}_resistance).abs() < 1e-12 {{ return; }}\n\
                  \x20       self.pot_{idx}_resistance = r;\n\
-                 \x20       self.rebuild_matrices();\n\
+                 \x20       self.matrices_dirty = true;\n\
                  \x20   }}\n\n",
                 pot.min_resistance, pot.max_resistance,
             ));
@@ -2204,6 +2213,8 @@ impl RustEmitter {
 
         let num_pots = ir.pots.len();
         ctx.insert("num_pots", &num_pots);
+        let num_switches = ir.switches.len();
+        ctx.insert("num_switches", &num_switches);
         let pot_defaults: Vec<String> =
             ir.pots.iter().map(|p| fmt_f64(1.0 / p.g_nominal)).collect();
         ctx.insert("pot_defaults", &pot_defaults);
@@ -4497,7 +4508,9 @@ impl RustEmitter {
             code.push_str("    /// Working C matrix (modified by switches/saturating inductors)\n");
             code.push_str("    pub c_work: [[f64; N]; N],\n");
             code.push_str("    /// Current sample rate (for rebuild_matrices)\n");
-            code.push_str("    pub current_sample_rate: f64,\n\n");
+            code.push_str("    pub current_sample_rate: f64,\n");
+            code.push_str("    /// Lazy rebuild flag: set by set_pot/set_switch, cleared by process_sample\n");
+            code.push_str("    pub matrices_dirty: bool,\n\n");
         }
 
         // Pot state fields
@@ -4728,6 +4741,7 @@ impl RustEmitter {
                 "            current_sample_rate: {:.17e},\n",
                 ir.solver_config.sample_rate * ir.solver_config.oversampling_factor as f64
             ));
+            code.push_str("            matrices_dirty: false,\n");
         }
         // Saturating inductor state: start at nominal L
         for (idx, _) in ir.saturating_inductors.iter().enumerate() {
@@ -5417,7 +5431,7 @@ impl RustEmitter {
             }
 
             code.push_str(&format!("\n        self.pot_{}_resistance = r;\n", idx));
-            code.push_str("        self.rebuild_matrices(self.current_sample_rate);\n");
+            code.push_str("        self.matrices_dirty = true;\n");
             code.push_str("    }\n\n");
         }
 
@@ -5527,7 +5541,7 @@ impl RustEmitter {
                 "        self.switch_{}_position = position;\n",
                 idx
             ));
-            code.push_str("        self.rebuild_matrices(self.current_sample_rate);\n");
+            code.push_str("        self.matrices_dirty = true;\n");
             code.push_str("    }\n\n");
         }
 
@@ -5646,6 +5660,22 @@ impl RustEmitter {
         code.push_str(
             "    let input = if input.is_finite() { input.clamp(-100.0, 100.0) } else { 0.0 };\n\n",
         );
+
+        // Lazy rebuild: process all pot/switch changes in one batch
+        let has_rebuild = has_pots
+            || !ir.switches.is_empty()
+            || !ir.saturating_inductors.is_empty()
+            || !ir.saturating_coupled.is_empty()
+            || !ir.saturating_xfmr_groups.is_empty();
+        if has_rebuild {
+            code.push_str(
+                "    // Lazy rebuild: batch all pot/switch changes into one matrix rebuild\n\
+                 \x20   if state.matrices_dirty {\n\
+                 \x20       state.rebuild_matrices(state.current_sample_rate);\n\
+                 \x20       state.matrices_dirty = false;\n\
+                 \x20   }\n\n",
+            );
+        }
 
         // Flush denormals in state vectors (prevents 50-100x CPU penalty during silence)
         code.push_str("    for v in state.v_prev.iter_mut() { *v = *v + 1e-25 - 1e-25; }\n");
@@ -7442,6 +7472,19 @@ impl RustEmitter {
         code.push_str(
             "    let input = if input.is_finite() { input.clamp(-100.0, 100.0) } else { 0.0 };\n\n",
         );
+
+        // Lazy rebuild: batch all pot/switch changes into one matrix rebuild
+        let has_pots = !ir.pots.is_empty();
+        let has_switches = !ir.switches.is_empty();
+        if has_pots || has_switches {
+            code.push_str(
+                "    // Lazy rebuild: batch all pot/switch changes into one matrix rebuild\n\
+                 \x20   if state.matrices_dirty {\n\
+                 \x20       state.rebuild_matrices(state.current_sample_rate);\n\
+                 \x20       state.matrices_dirty = false;\n\
+                 \x20   }\n\n",
+            );
+        }
 
         // Flush denormals in state vectors (prevents 50-100x CPU penalty during silence)
         code.push_str("    for v in state.v_prev.iter_mut() { *v = *v + 1e-25 - 1e-25; }\n");

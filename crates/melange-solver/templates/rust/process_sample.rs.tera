@@ -20,6 +20,13 @@ pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS
 {% endif %}
     // Validate input — handle NaN, inf, and extreme values
     let input = if input.is_finite() { input.clamp(-100.0, 100.0) } else { 0.0 };
+{% if num_switches > 0 or num_pots > 0 %}
+    // Lazy rebuild: process all pot/switch changes in one batch
+    if state.matrices_dirty {
+        state.rebuild_matrices();
+        state.matrices_dirty = false;
+    }
+{% endif %}
 
     // Flush denormals in state vectors to prevent 50-100x CPU penalty during silence.
     // (Most DAW hosts set FTZ/DAZ, but generated code should not rely on it.)
