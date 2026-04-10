@@ -57,6 +57,12 @@ pub struct CircuitIR {
     pub inductors: Vec<InductorIR>,
     pub coupled_inductors: Vec<CoupledInductorIR>,
     pub transformer_groups: Vec<TransformerGroupIR>,
+    /// Saturating (iron-core) inductors: per-sample L(I) update via SM rank-1.
+    #[serde(default)]
+    pub saturating_inductors: Vec<SaturatingInductorIR>,
+    /// Saturating coupled inductor pairs: per-sample 2×2 eigendecomposition + 2 SM rank-1.
+    #[serde(default)]
+    pub saturating_coupled: Vec<SaturatingCoupledInductorIR>,
     pub pots: Vec<PotentiometerIR>,
     /// Wiper potentiometer groups (two linked pots per group).
     #[serde(default)]
@@ -1175,6 +1181,46 @@ pub struct InductorIR {
     pub inductance: f64,
 }
 
+/// Saturating (iron-core) inductor for per-sample L(I) update.
+///
+/// The effective inductance follows: L_eff(I) = l0 / cosh²(I / isat).
+/// At each sample, the previous branch current `v_prev[aug_row]` is used to
+/// compute L_eff, then a Sherman-Morrison rank-1 update corrects S, K, A_neg.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SaturatingInductorIR {
+    pub name: String,
+    /// Nominal inductance (henries)
+    pub l0: f64,
+    /// Saturation current (amps) — L drops to L0/4 at I = 1.32*isat
+    pub isat: f64,
+    /// Row index in the augmented system (C[aug_row][aug_row] = L)
+    pub aug_row: usize,
+    /// Index into the uncoupled/coupled/transformer inductor arrays for
+    /// identifying which inductor this is (for naming constants).
+    pub inductor_index: usize,
+}
+
+/// Saturating coupled inductor pair for per-sample L(I) update.
+///
+/// Two windings sharing a core. When either saturates, L_eff drops and
+/// M_eff = κ * sqrt(L1_eff * L2_eff) changes too. The 2×2 delta block
+/// is decomposed via eigendecomposition into 2 rank-1 SM updates to S.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SaturatingCoupledInductorIR {
+    pub name: String,
+    pub l1_name: String,
+    pub l2_name: String,
+    pub l1_l0: f64,
+    pub l2_l0: f64,
+    pub l1_isat: f64,
+    pub l2_isat: f64,
+    pub coupling: f64,
+    /// Augmented row index for winding 1
+    pub k1: usize,
+    /// Augmented row index for winding 2
+    pub k2: usize,
+}
+
 /// Coupled inductor pair parameters for code generation (transformer).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CoupledInductorIR {
@@ -1611,7 +1657,6 @@ impl CircuitIR {
             }
             if spectral_radius > 1.002 {
                 log::info!("Auto-selecting backward Euler: spectral radius {:.4} > 1.002 (trapezoidal unstable)", spectral_radius);
-                eprintln!("  Trapezoidal unstable (spectral radius {:.4}), auto-selecting backward Euler", spectral_radius);
                 true
             } else {
                 false
@@ -2249,6 +2294,8 @@ impl CircuitIR {
             inductors,
             coupled_inductors,
             transformer_groups,
+            saturating_inductors: Vec::new(), // DK path: saturation routes to nodal
+            saturating_coupled: Vec::new(),
             pots,
             wiper_groups,
             gang_groups,
@@ -2673,9 +2720,9 @@ impl CircuitIR {
                     x[i] = yi / norm;
                 }
             }
-            if rho > 0.999 {
+            if rho > 0.99 {
                 log::info!(
-                    "Nodal: spectral_radius(S*A_neg) = {:.4} (> 0.999, Schur path unstable)",
+                    "Nodal: spectral_radius(S*A_neg) = {:.4} (marginally stable; Schur used when K well-conditioned)",
                     rho
                 );
             }
@@ -2959,6 +3006,54 @@ impl CircuitIR {
                         }
                     })
                     .collect()
+            },
+            saturating_inductors: {
+                // Build list of inductors with ISAT (iron-core saturation).
+                // Reuse the same augmented row mapping as switches.
+                let mut sat_inds = Vec::new();
+                let mut sat_var_idx = n_aug;
+                for (i, ind) in mna.inductors.iter().enumerate() {
+                    if let Some(isat) = ind.isat {
+                        sat_inds.push(SaturatingInductorIR {
+                            name: ind.name.clone(),
+                            l0: ind.value,
+                            isat,
+                            aug_row: sat_var_idx,
+                            inductor_index: i,
+                        });
+                    }
+                    sat_var_idx += 1;
+                }
+                sat_inds
+            },
+            saturating_coupled: {
+                // Coupled inductor pairs with ISAT on either winding.
+                // Augmented rows: uncoupled inductors are at n_aug..n_aug+n_uncoupled,
+                // coupled pairs start at n_aug+n_uncoupled, 2 rows each.
+                let ci_base = n_aug + mna.inductors.len();
+                let mut sat_ci = Vec::new();
+                for (i, ci) in mna.coupled_inductors.iter().enumerate() {
+                    if ci.l1_isat.is_some() || ci.l2_isat.is_some() {
+                        // Both windings must have ISAT for the coupled model.
+                        // If only one has ISAT, use the other's L0 as its "isat"
+                        // (effectively infinite — no saturation on that winding).
+                        let l1_isat = ci.l1_isat.unwrap_or(1e6);
+                        let l2_isat = ci.l2_isat.unwrap_or(1e6);
+                        sat_ci.push(SaturatingCoupledInductorIR {
+                            name: ci.name.clone(),
+                            l1_name: ci.l1_name.clone(),
+                            l2_name: ci.l2_name.clone(),
+                            l1_l0: ci.l1_value,
+                            l2_l0: ci.l2_value,
+                            l1_isat,
+                            l2_isat,
+                            coupling: ci.coupling,
+                            k1: ci_base + i * 2,
+                            k2: ci_base + i * 2 + 1,
+                        });
+                    }
+                }
+                sat_ci
             },
             opamps: mna
                 .opamps

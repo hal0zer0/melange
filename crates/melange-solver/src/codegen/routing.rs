@@ -98,6 +98,11 @@ pub fn auto_route(kernel: &DkKernel, mna: &MnaSystem, dk_failed: bool) -> Routin
             "large nonlinear dimension (M={}, M×M elimination expensive)",
             m
         );
+    } else if mna.inductors.iter().any(|ind| ind.isat.is_some())
+        || mna.coupled_inductors.iter().any(|ci| ci.l1_isat.is_some() || ci.l2_isat.is_some())
+    {
+        route = SolverRoute::Nodal;
+        reason = "saturating inductors require augmented MNA (per-sample L update)".to_string();
     } else {
         route = SolverRoute::DkSchur;
         reason = format!("DK Schur (N={}, M={})", n, m);

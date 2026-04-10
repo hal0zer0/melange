@@ -335,12 +335,14 @@ pub enum Element {
         value: f64,
         ic: Option<f64>,
     },
-    /// Inductor: Lname n+ n- value
+    /// Inductor: Lname n+ n- value [ISAT=value]
     Inductor {
         name: String,
         n_plus: String,
         n_minus: String,
         value: f64,
+        /// Saturation current for iron-core model. None = linear (default).
+        isat: Option<f64>,
     },
     /// Voltage source: Vname n+ n- [DC value] [AC mag phase]
     VoltageSource {
@@ -563,11 +565,13 @@ impl Element {
                 n_plus,
                 n_minus,
                 value,
+                isat,
             } => Element::Inductor {
                 name: prefixed(name),
                 n_plus: remap(n_plus),
                 n_minus: remap(n_minus),
                 value: *value,
+                isat: *isat,
             },
             Element::VoltageSource {
                 name,
@@ -1729,8 +1733,8 @@ impl Parser {
                 resistor_name
             )));
         }
-        if netlist.pots.len() >= 32 {
-            return Err(self.error("Maximum of 32 .pot directives supported"));
+        if netlist.pots.len() >= 64 {
+            return Err(self.error("Maximum of 64 .pot directives supported"));
         }
 
         // Optional default value and/or quoted label:
@@ -1841,9 +1845,9 @@ impl Parser {
         }
 
         // Each wiper adds 2 internal pots
-        if netlist.pots.len() + (netlist.wipers.len() + 1) * 2 > 32 {
+        if netlist.pots.len() + (netlist.wipers.len() + 1) * 2 > 64 {
             return Err(self.error(
-                "Maximum of 32 combined .pot + .wiper leg entries supported",
+                "Maximum of 64 combined .pot + .wiper leg entries supported",
             ));
         }
 
@@ -1961,7 +1965,7 @@ impl Parser {
         for &part in &parts[2..] {
             // Try to parse as a float (default position) — only valid as last arg
             if let Ok(pos) = part.parse::<f64>() {
-                if pos >= 0.0 && pos <= 1.0 {
+                if (0.0..=1.0).contains(&pos) {
                     default_position = Some(pos);
                     continue;
                 }
@@ -2236,14 +2240,27 @@ impl Parser {
     }
 
     fn parse_inductor(&self, parts: &[&str]) -> Result<Element, ParseError> {
-        self.require_parts(parts, 4, "Lname n+ n- value")?;
+        self.require_parts(parts, 4, "Lname n+ n- value [ISAT=value]")?;
         self.check_self_connection(parts[1], parts[2], parts[0])?;
         let value = self.parse_positive_value(parts[3], "Inductor")?;
+        let mut isat = None;
+        for &part in &parts[4..] {
+            if let Some(stripped) = part.strip_prefix("ISAT=").or_else(|| part.strip_prefix("isat=")) {
+                let v = parse_value(stripped).map_err(|_| {
+                    self.error(&format!("Invalid ISAT value: {}", stripped))
+                })?;
+                if !(v > 0.0 && v.is_finite()) {
+                    return Err(self.error("ISAT must be positive and finite"));
+                }
+                isat = Some(v);
+            }
+        }
         Ok(Element::Inductor {
             name: parts[0].to_string(),
             n_plus: parts[1].to_string(),
             n_minus: parts[2].to_string(),
             value,
+            isat,
         })
     }
 
@@ -2819,14 +2836,14 @@ mod tests {
     #[test]
     fn test_parse_pot_max_exceeded() {
         let mut spice = String::from("Test\n");
-        for i in 1..=33 {
+        for i in 1..=65 {
             spice.push_str(&format!("R{i} {i} 0 10k\n"));
         }
-        for i in 1..=33 {
+        for i in 1..=65 {
             spice.push_str(&format!(".pot R{i} 1k 100k\n"));
         }
         let result = Netlist::parse(&spice);
-        assert!(result.is_err(), "More than 32 pots should fail");
+        assert!(result.is_err(), "More than 64 pots should fail");
     }
 
     #[test]
@@ -3344,6 +3361,48 @@ Q1 coll base emit 2N2222
     fn test_missing_value_inductor() {
         let result = Netlist::parse("Test\nL1 1 0\n");
         assert!(result.is_err(), "Inductor without value should be rejected");
+    }
+
+    #[test]
+    fn test_inductor_isat_parse() {
+        let net = Netlist::parse("Test\nL1 1 0 100m ISAT=20m\n").unwrap();
+        match &net.elements[0] {
+            Element::Inductor { value, isat, .. } => {
+                assert!((value - 0.1).abs() < 1e-10);
+                assert_eq!(*isat, Some(0.02));
+            }
+            _ => panic!("Expected Inductor"),
+        }
+    }
+
+    #[test]
+    fn test_inductor_isat_lowercase() {
+        let net = Netlist::parse("Test\nL1 1 0 5 isat=50m\n").unwrap();
+        match &net.elements[0] {
+            Element::Inductor { isat, .. } => assert_eq!(*isat, Some(0.05)),
+            _ => panic!("Expected Inductor"),
+        }
+    }
+
+    #[test]
+    fn test_inductor_no_isat() {
+        let net = Netlist::parse("Test\nL1 1 0 100m\n").unwrap();
+        match &net.elements[0] {
+            Element::Inductor { isat, .. } => assert_eq!(*isat, None),
+            _ => panic!("Expected Inductor"),
+        }
+    }
+
+    #[test]
+    fn test_inductor_isat_negative_rejected() {
+        let result = Netlist::parse("Test\nL1 1 0 100m ISAT=-10m\n");
+        assert!(result.is_err(), "Negative ISAT should be rejected");
+    }
+
+    #[test]
+    fn test_inductor_isat_zero_rejected() {
+        let result = Netlist::parse("Test\nL1 1 0 100m ISAT=0\n");
+        assert!(result.is_err(), "Zero ISAT should be rejected");
     }
 
     #[test]

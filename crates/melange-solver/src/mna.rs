@@ -145,6 +145,9 @@ pub struct InductorElement {
     pub node_i: usize,
     pub node_j: usize,
     pub value: f64,
+    /// Saturation current for iron-core model. None = linear (default).
+    /// When set, L_eff(I) = value / cosh²(I / isat).
+    pub isat: Option<f64>,
 }
 
 /// Coupled inductor pair info for transformer companion model.
@@ -164,6 +167,10 @@ pub struct CoupledInductorInfo {
     pub l1_value: f64,
     pub l2_value: f64,
     pub coupling: f64,
+    /// Saturation current for winding 1. None = linear.
+    pub l1_isat: Option<f64>,
+    /// Saturation current for winding 2. None = linear.
+    pub l2_isat: Option<f64>,
 }
 
 /// Multi-winding transformer group info.
@@ -2260,6 +2267,7 @@ impl MnaBuilder {
             node_i: usize,
             node_j: usize,
             value: f64,
+            isat: Option<f64>,
         }
         let mut inductor_refs: std::collections::HashMap<String, InductorRef> =
             std::collections::HashMap::new();
@@ -2269,7 +2277,7 @@ impl MnaBuilder {
                 if inductor_refs.contains_key(&lower) {
                     continue;
                 }
-                if let Some(Element::Inductor { name, n_plus, n_minus, value, .. }) =
+                if let Some(Element::Inductor { name, n_plus, n_minus, value, isat }) =
                     netlist.elements.iter().find(|e| {
                         matches!(e, Element::Inductor { name, .. } if name.eq_ignore_ascii_case(ind_name))
                     })
@@ -2279,6 +2287,7 @@ impl MnaBuilder {
                         node_i: self.node_map[n_plus],
                         node_j: self.node_map[n_minus],
                         value: *value,
+                        isat: *isat,
                     });
                 }
             }
@@ -2431,6 +2440,7 @@ impl MnaBuilder {
                         node_i: ind.node_i,
                         node_j: internal_p,
                         value: l_leak,
+                        isat: None,
                     });
                 }
 
@@ -2442,6 +2452,7 @@ impl MnaBuilder {
                     node_i: ref_internal_p,
                     node_j: ref_neg,
                     value: l_ref,
+                    isat: None,
                 });
 
                 // For each non-reference winding: add ideal transformer coupling
@@ -2511,6 +2522,8 @@ impl MnaBuilder {
                     l1_value: r1.value,
                     l2_value: r2.value,
                     coupling: k_val,
+                    l1_isat: r1.isat,
+                    l2_isat: r2.isat,
                 });
             } else {
                 // Multi-winding (3+): build NxN inductance matrix and invert.
@@ -3476,6 +3489,7 @@ impl MnaBuilder {
                 n_plus,
                 n_minus,
                 value,
+                isat,
             } => {
                 let node_i = self.node_map[n_plus];
                 let node_j = self.node_map[n_minus];
@@ -3491,6 +3505,7 @@ impl MnaBuilder {
                     node_i,
                     node_j,
                     value: *value,
+                    isat: *isat,
                 });
             }
             Element::VoltageSource {

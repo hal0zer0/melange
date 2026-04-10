@@ -3735,7 +3735,24 @@ impl RustEmitter {
             0.0
         };
         let k_degenerate = m > 0 && k_max_abs < 1e-6;
-        let schur_unstable = ir.matrices.spectral_radius_s_aneg > 0.999;
+        // The spectral radius of S*A_neg measures LINEAR prediction stability.
+        // When rho < 1.0, the Schur NR's nonlinear correction (S*N_i*i_nl)
+        // damps the marginal mode — the DK path uses identical matrices and
+        // works fine. When rho > 1.0, the linear prediction genuinely amplifies
+        // errors. With well-conditioned K (negative diagonal, not degenerate),
+        // the Schur NR still handles rho slightly above 1.0 (up to ~1.002,
+        // matching the DK auto-BE threshold). Only route to full-LU when K
+        // itself is pathological OR spectral radius indicates true instability
+        // that even the Schur NR can't damp.
+        let k_well_conditioned = m > 0
+            && !k_degenerate
+            && !has_positive_k_with_current
+            && k_diag_min > -1e12;
+        let schur_unstable = if k_well_conditioned {
+            ir.matrices.spectral_radius_s_aneg > 1.002
+        } else {
+            ir.matrices.spectral_radius_s_aneg > 1.0
+        };
         let use_full_nodal =
             has_positive_k_with_current || k_diag_min < -1e12 || k_degenerate || schur_unstable;
         // The dense `lu_solve` helper is emitted whenever any generated code
@@ -4193,6 +4210,54 @@ impl RustEmitter {
             ));
         }
 
+        // Saturating inductor constants
+        for (idx, si) in ir.saturating_inductors.iter().enumerate() {
+            code.push_str(&format!(
+                "/// Saturating inductor {idx}: {} (L0={:.4e} H, Isat={:.4e} A)\n\
+                 pub const SAT_IND_{idx}_L0: f64 = {l0:.17e};\n\
+                 pub const SAT_IND_{idx}_ISAT: f64 = {isat:.17e};\n\
+                 pub const SAT_IND_{idx}_AUG_ROW: usize = {row};\n\n",
+                si.name,
+                si.l0,
+                si.isat,
+                l0 = si.l0,
+                isat = si.isat,
+                row = si.aug_row,
+            ));
+        }
+        let num_sat_ind = ir.saturating_inductors.len();
+        if num_sat_ind > 0 {
+            code.push_str(&format!(
+                "pub const NUM_SAT_IND: usize = {};\n\n",
+                num_sat_ind
+            ));
+        }
+
+        // Saturating coupled inductor constants
+        for (idx, sc) in ir.saturating_coupled.iter().enumerate() {
+            code.push_str(&format!(
+                "/// Saturating coupled pair {idx}: {name} ({l1}+{l2}, κ={k:.4})\n\
+                 pub const SAT_CI_{idx}_L1_L0: f64 = {l1_l0:.17e};\n\
+                 pub const SAT_CI_{idx}_L2_L0: f64 = {l2_l0:.17e};\n\
+                 pub const SAT_CI_{idx}_L1_ISAT: f64 = {l1_isat:.17e};\n\
+                 pub const SAT_CI_{idx}_L2_ISAT: f64 = {l2_isat:.17e};\n\
+                 pub const SAT_CI_{idx}_COUPLING: f64 = {coupling:.17e};\n\
+                 pub const SAT_CI_{idx}_K1: usize = {k1};\n\
+                 pub const SAT_CI_{idx}_K2: usize = {k2};\n\n",
+                name = sc.name,
+                l1 = sc.l1_name,
+                l2 = sc.l2_name,
+                k = sc.coupling,
+                l1_l0 = sc.l1_l0,
+                l2_l0 = sc.l2_l0,
+                l1_isat = sc.l1_isat,
+                l2_isat = sc.l2_isat,
+                coupling = sc.coupling,
+                k1 = sc.k1,
+                k2 = sc.k2,
+            ));
+        }
+
         // Switch constants (position values)
         for (idx, sw) in ir.switches.iter().enumerate() {
             code.push_str(&format!(
@@ -4244,6 +4309,8 @@ impl RustEmitter {
         let num_outputs = ir.solver_config.output_nodes.len();
         let has_pots = !ir.pots.is_empty();
         let has_switches = !ir.switches.is_empty();
+        let has_sat_ind = !ir.saturating_inductors.is_empty();
+        let has_sat_coupled = !ir.saturating_coupled.is_empty();
 
         let mut code = section_banner("STATE STRUCTURE (Nodal solver)");
 
@@ -4400,11 +4467,11 @@ impl RustEmitter {
         }
         code.push('\n');
 
-        // Mutable G and C for pot/switch re-stamping
-        if has_pots || has_switches {
+        // Mutable G and C for pot/switch/saturating-inductor re-stamping
+        if has_pots || has_switches || has_sat_ind || has_sat_coupled {
             code.push_str("    /// Working G matrix (modified by pots/switches)\n");
             code.push_str("    pub g_work: [[f64; N]; N],\n");
-            code.push_str("    /// Working C matrix (modified by switches)\n");
+            code.push_str("    /// Working C matrix (modified by switches/saturating inductors)\n");
             code.push_str("    pub c_work: [[f64; N]; N],\n");
             code.push_str("    /// Current sample rate (for rebuild_matrices)\n");
             code.push_str("    pub current_sample_rate: f64,\n\n");
@@ -4433,6 +4500,32 @@ impl RustEmitter {
             ));
         }
         if has_switches {
+            code.push('\n');
+        }
+
+        // Saturating inductor state fields
+        for (idx, si) in ir.saturating_inductors.iter().enumerate() {
+            code.push_str(&format!(
+                "    /// Saturating inductor {idx} ({}): current effective inductance\n\
+                 \x20   pub sat_ind_{idx}_l_eff: f64,\n",
+                si.name,
+            ));
+        }
+        if !ir.saturating_inductors.is_empty() {
+            code.push('\n');
+        }
+
+        // Saturating coupled inductor state fields
+        for (idx, sc) in ir.saturating_coupled.iter().enumerate() {
+            code.push_str(&format!(
+                "    /// Saturating coupled pair {idx} ({name}): effective inductances and mutual\n\
+                 \x20   pub sat_ci_{idx}_l1_eff: f64,\n\
+                 \x20   pub sat_ci_{idx}_l2_eff: f64,\n\
+                 \x20   pub sat_ci_{idx}_m_eff: f64,\n",
+                name = sc.name,
+            ));
+        }
+        if !ir.saturating_coupled.is_empty() {
             code.push('\n');
         }
 
@@ -4589,12 +4682,28 @@ impl RustEmitter {
             code.push_str("            s_ni_be: S_NI_BE_DEFAULT,\n");
         }
 
-        if has_pots || has_switches {
+        if has_pots || has_switches || has_sat_ind || has_sat_coupled {
             code.push_str("            g_work: G,\n");
             code.push_str("            c_work: C,\n");
             code.push_str(&format!(
                 "            current_sample_rate: {:.17e},\n",
                 ir.solver_config.sample_rate * ir.solver_config.oversampling_factor as f64
+            ));
+        }
+        // Saturating inductor state: start at nominal L
+        for (idx, _) in ir.saturating_inductors.iter().enumerate() {
+            code.push_str(&format!(
+                "            sat_ind_{}_l_eff: SAT_IND_{}_L0,\n",
+                idx, idx
+            ));
+        }
+        // Saturating coupled inductor state: start at nominal
+        for (idx, sc) in ir.saturating_coupled.iter().enumerate() {
+            let m0 = sc.coupling * (sc.l1_l0 * sc.l2_l0).sqrt();
+            code.push_str(&format!(
+                "            sat_ci_{idx}_l1_eff: SAT_CI_{idx}_L1_L0,\n\
+                 \x20           sat_ci_{idx}_l2_eff: SAT_CI_{idx}_L2_L0,\n\
+                 \x20           sat_ci_{idx}_m_eff: {m0:.17e},\n",
             ));
         }
 
@@ -4736,9 +4845,25 @@ impl RustEmitter {
                 code.push_str("        self.s_ni_sub = S_NI_SUB_DEFAULT;\n");
             }
         }
-        if has_pots || has_switches {
+        if has_pots || has_switches || has_sat_ind || has_sat_coupled {
             code.push_str("        self.g_work = G;\n");
             code.push_str("        self.c_work = C;\n");
+        }
+        // Reset saturating inductor L_eff to nominal
+        for (idx, _) in ir.saturating_inductors.iter().enumerate() {
+            code.push_str(&format!(
+                "        self.sat_ind_{}_l_eff = SAT_IND_{}_L0;\n",
+                idx, idx
+            ));
+        }
+        // Reset saturating coupled inductor state to nominal
+        for (idx, sc) in ir.saturating_coupled.iter().enumerate() {
+            let m0 = sc.coupling * (sc.l1_l0 * sc.l2_l0).sqrt();
+            code.push_str(&format!(
+                "        self.sat_ci_{idx}_l1_eff = SAT_CI_{idx}_L1_L0;\n\
+                 \x20       self.sat_ci_{idx}_l2_eff = SAT_CI_{idx}_L2_L0;\n\
+                 \x20       self.sat_ci_{idx}_m_eff = {m0:.17e};\n",
+            ));
         }
         // Reset IIR op-amp state — to DC steady state (see default() comment).
         for (idx, oa_iir) in ir.opamp_iir.iter().enumerate() {
@@ -4963,7 +5088,7 @@ impl RustEmitter {
         if !ir.matrices.s_sub.is_empty() {
             code.push_str("        let alpha_sub = 4.0 * internal_rate; // trap at 2× rate\n");
         }
-        code.push_str("\n");
+        code.push('\n');
 
         // Build A = G + alpha*C (trapezoidal) and A_neg = alpha*C - G (trapezoidal history)
         // No Boyle elimination — IIR op-amp model keeps Gm out of the MNA matrix.
@@ -5451,7 +5576,160 @@ impl RustEmitter {
         if m > 0 {
             code.push_str("    for v in state.i_nl_prev.iter_mut() { *v = *v + 1e-25 - 1e-25; }\n");
         }
-        code.push_str("\n");
+        code.push('\n');
+
+        // Saturating inductor per-sample L(I) update via Sherman-Morrison rank-1
+        if !ir.saturating_inductors.is_empty() {
+            code.push_str("    // Saturating inductor update: L_eff = L0 / cosh^2(I / Isat)\n");
+            code.push_str("    // Sherman-Morrison rank-1 correction to S, K, S_NI, A_neg\n");
+            code.push_str("    {\n");
+            code.push_str("        let alpha = 2.0 * state.current_sample_rate;\n");
+            for (idx, _si) in ir.saturating_inductors.iter().enumerate() {
+                code.push_str(&format!(
+                    "        {{ // Saturating inductor {idx}\n\
+                     \x20           let i_branch = state.v_prev[SAT_IND_{idx}_AUG_ROW];\n\
+                     \x20           let x = i_branch / SAT_IND_{idx}_ISAT;\n\
+                     \x20           let cosh_x = x.cosh();\n\
+                     \x20           let l_eff = (SAT_IND_{idx}_L0 / (cosh_x * cosh_x)).max(SAT_IND_{idx}_L0 * 0.01);\n\
+                     \x20           let delta_l = l_eff - state.sat_ind_{idx}_l_eff;\n\
+                     \x20           if delta_l.abs() > 1e-15 {{\n\
+                     \x20               let k = SAT_IND_{idx}_AUG_ROW;\n\
+                     \x20               let delta_a = alpha * delta_l;\n\
+                     \x20               let scale = delta_a / (1.0 + delta_a * state.s[k][k]);\n\
+                     \x20               let mut s_col_k = [0.0f64; N];\n\
+                     \x20               let mut s_row_k = [0.0f64; N];\n\
+                     \x20               for i in 0..N {{ s_col_k[i] = state.s[i][k]; s_row_k[i] = state.s[k][i]; }}\n\
+                     \x20               for i in 0..N {{\n\
+                     \x20                   let sc = scale * s_col_k[i];\n\
+                     \x20                   for j in 0..N {{ state.s[i][j] -= sc * s_row_k[j]; }}\n\
+                     \x20               }}\n\
+                     \x20               state.a_neg[k][k] += alpha * delta_l;\n",
+                ));
+                if m > 0 {
+                    code.push_str(
+                        "               let mut nv_su = [0.0f64; M];\n\
+                         \x20               let mut u_ni = [0.0f64; M];\n\
+                         \x20               for i in 0..M {\n\
+                         \x20                   for p in 0..N { nv_su[i] += N_V[i][p] * s_col_k[p]; }\n\
+                         \x20                   for p in 0..N { u_ni[i] += s_row_k[p] * N_I[p][i]; }\n\
+                         \x20               }\n\
+                         \x20               for i in 0..M {\n\
+                         \x20                   let sc = scale * nv_su[i];\n\
+                         \x20                   for j in 0..M { state.k[i][j] -= sc * u_ni[j]; }\n\
+                         \x20               }\n\
+                         \x20               for i in 0..N {\n\
+                         \x20                   let sc = scale * s_col_k[i];\n\
+                         \x20                   for j in 0..M { state.s_ni[i][j] -= sc * u_ni[j]; }\n\
+                         \x20               }\n",
+                    );
+                }
+                code.push_str(&format!(
+                    "               state.sat_ind_{idx}_l_eff = l_eff;\n\
+                     \x20           }}\n\
+                     \x20       }}\n",
+                ));
+            }
+            code.push_str("    }\n\n");
+        }
+
+        // Saturating coupled inductor per-sample update: 2×2 eigendecomposition + 2 SM rank-1
+        if !ir.saturating_coupled.is_empty() {
+            code.push_str("    // Saturating coupled inductors: 2x2 eigendecomposition + 2 SM rank-1\n");
+            code.push_str("    {\n");
+            code.push_str("        let alpha = 2.0 * state.current_sample_rate;\n");
+            for (idx, _sc) in ir.saturating_coupled.iter().enumerate() {
+                code.push_str(&format!(
+                    "        {{ // Coupled pair {idx}\n\
+                     \x20           let i1 = state.v_prev[SAT_CI_{idx}_K1];\n\
+                     \x20           let i2 = state.v_prev[SAT_CI_{idx}_K2];\n\
+                     \x20           let c1 = (i1 / SAT_CI_{idx}_L1_ISAT).cosh();\n\
+                     \x20           let l1_eff = (SAT_CI_{idx}_L1_L0 / (c1 * c1)).max(SAT_CI_{idx}_L1_L0 * 0.01);\n\
+                     \x20           let c2 = (i2 / SAT_CI_{idx}_L2_ISAT).cosh();\n\
+                     \x20           let l2_eff = (SAT_CI_{idx}_L2_L0 / (c2 * c2)).max(SAT_CI_{idx}_L2_L0 * 0.01);\n\
+                     \x20           let m_eff = SAT_CI_{idx}_COUPLING * (l1_eff * l2_eff).sqrt();\n\
+                     \x20           let dl1 = l1_eff - state.sat_ci_{idx}_l1_eff;\n\
+                     \x20           let dl2 = l2_eff - state.sat_ci_{idx}_l2_eff;\n\
+                     \x20           let dm = m_eff - state.sat_ci_{idx}_m_eff;\n\
+                     \x20           if dl1.abs() > 1e-15 || dl2.abs() > 1e-15 || dm.abs() > 1e-15 {{\n\
+                     \x20               let k1 = SAT_CI_{idx}_K1;\n\
+                     \x20               let k2 = SAT_CI_{idx}_K2;\n\
+                     \x20               // 2x2 eigendecomposition of delta block\n\
+                     \x20               let a11 = alpha * dl1;\n\
+                     \x20               let a22 = alpha * dl2;\n\
+                     \x20               let a12 = alpha * dm;\n\
+                     \x20               let tr = a11 + a22;\n\
+                     \x20               let disc = ((a11 - a22) * (a11 - a22) + 4.0 * a12 * a12).sqrt();\n\
+                     \x20               let lam1 = (tr + disc) * 0.5;\n\
+                     \x20               let lam2 = (tr - disc) * 0.5;\n\
+                     \x20               // Eigenvectors: for 2x2 [[a11,a12],[a12,a22]], eigvec for lam is [a12, lam-a11]\n\
+                     \x20               // Apply SM for each eigenpair with |lam| > eps\n",
+                ));
+                // Emit the two SM rank-1 updates as a macro-like block
+                for eig_idx in 0..2 {
+                    let lam = if eig_idx == 0 { "lam1" } else { "lam2" };
+                    code.push_str(&format!(
+                        "               if {lam}.abs() > 1e-18 {{\n\
+                         \x20                   // Eigenvector: [a12, {lam}-a11], normalize\n\
+                         \x20                   let ev_a = a12;\n\
+                         \x20                   let ev_b = {lam} - a11;\n\
+                         \x20                   let norm = (ev_a * ev_a + ev_b * ev_b).sqrt();\n\
+                         \x20                   if norm > 1e-30 {{\n\
+                         \x20                       let va = ev_a / norm;\n\
+                         \x20                       let vb = ev_b / norm;\n\
+                         \x20                       // S*v = va * S[:,k1] + vb * S[:,k2]\n\
+                         \x20                       let mut sv = [0.0f64; N];\n\
+                         \x20                       let mut vts = [0.0f64; N];\n\
+                         \x20                       for i in 0..N {{\n\
+                         \x20                           sv[i] = va * state.s[i][k1] + vb * state.s[i][k2];\n\
+                         \x20                           vts[i] = va * state.s[k1][i] + vb * state.s[k2][i];\n\
+                         \x20                       }}\n\
+                         \x20                       let vtsv = va * sv[k1] + vb * sv[k2];\n\
+                         \x20                       let scale = {lam} / (1.0 + {lam} * vtsv);\n\
+                         \x20                       // SM: S -= scale * sv * vts\n\
+                         \x20                       for i in 0..N {{\n\
+                         \x20                           let sc = scale * sv[i];\n\
+                         \x20                           for j in 0..N {{ state.s[i][j] -= sc * vts[j]; }}\n\
+                         \x20                       }}\n",
+                    ));
+                    // K and S_NI correction
+                    if m > 0 {
+                        code.push_str(
+                            "                       let mut nv_sv = [0.0f64; M];\n\
+                             \x20                       let mut vts_ni = [0.0f64; M];\n\
+                             \x20                       for i in 0..M {\n\
+                             \x20                           for p in 0..N { nv_sv[i] += N_V[i][p] * sv[p]; }\n\
+                             \x20                           for p in 0..N { vts_ni[i] += vts[p] * N_I[p][i]; }\n\
+                             \x20                       }\n\
+                             \x20                       for i in 0..M {\n\
+                             \x20                           let sc = scale * nv_sv[i];\n\
+                             \x20                           for j in 0..M { state.k[i][j] -= sc * vts_ni[j]; }\n\
+                             \x20                       }\n\
+                             \x20                       for i in 0..N {\n\
+                             \x20                           let sc = scale * sv[i];\n\
+                             \x20                           for j in 0..M { state.s_ni[i][j] -= sc * vts_ni[j]; }\n\
+                             \x20                       }\n",
+                        );
+                    }
+                    code.push_str(
+                        "                   }\n\
+                         \x20               }\n",
+                    );
+                }
+                code.push_str(&format!(
+                    "               // Update A_neg\n\
+                     \x20               state.a_neg[k1][k1] += alpha * dl1;\n\
+                     \x20               state.a_neg[k2][k2] += alpha * dl2;\n\
+                     \x20               state.a_neg[k1][k2] += alpha * dm;\n\
+                     \x20               state.a_neg[k2][k1] += alpha * dm;\n\
+                     \x20               state.sat_ci_{idx}_l1_eff = l1_eff;\n\
+                     \x20               state.sat_ci_{idx}_l2_eff = l2_eff;\n\
+                     \x20               state.sat_ci_{idx}_m_eff = m_eff;\n\
+                     \x20           }}\n\
+                     \x20       }}\n",
+                ));
+            }
+            code.push_str("    }\n\n");
+        }
 
         // Step 1: Build RHS = rhs_const + A_neg * v_prev + N_i * i_nl_prev + input (sparse)
         code.push_str(
@@ -6971,7 +7249,7 @@ impl RustEmitter {
         if m > 0 {
             code.push_str("    for v in state.i_nl_prev.iter_mut() { *v = *v + 1e-25 - 1e-25; }\n");
         }
-        code.push_str("\n");
+        code.push('\n');
 
         // Step 1: Build RHS = rhs_const + A_neg * v_prev + N_i * i_nl_prev + input (sparse)
         code.push_str(
@@ -8178,6 +8456,7 @@ impl RustEmitter {
     ///        - subtract `A[:,k] * c_k` from `rhs` at every row except `k`
     ///        - zero column `k` in all non-`k` rows
     ///        - zero row `k` and set `A[k][k] = 1, rhs[k] = c_k`
+    ///
     ///      This pins `v[k] = c_k` by row/column elimination.
     ///   5. Solve the constrained system with the generated dense `lu_solve`.
     ///      The result is a `v'` where every node satisfies KCL given the
