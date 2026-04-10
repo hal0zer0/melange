@@ -100,6 +100,7 @@ pub fn auto_route(kernel: &DkKernel, mna: &MnaSystem, dk_failed: bool) -> Routin
         );
     } else if mna.inductors.iter().any(|ind| ind.isat.is_some())
         || mna.coupled_inductors.iter().any(|ci| ci.l1_isat.is_some() || ci.l2_isat.is_some())
+        || mna.transformer_groups.iter().any(|g| g.winding_isats.iter().any(|i| i.is_some()))
     {
         route = SolverRoute::Nodal;
         reason = "saturating inductors require augmented MNA (per-sample L update)".to_string();

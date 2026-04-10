@@ -194,6 +194,8 @@ pub struct TransformerGroupInfo {
     pub inductances: Vec<f64>,
     /// NxN coupling coefficient matrix (symmetric, diagonal = 1.0)
     pub coupling_matrix: Vec<Vec<f64>>,
+    /// Per-winding saturation current. None = linear.
+    pub winding_isats: Vec<Option<f64>>,
 }
 
 /// Information about a nonlinear device in the MNA system.
@@ -2551,12 +2553,14 @@ impl MnaBuilder {
                 let mut winding_node_j = Vec::with_capacity(w);
                 let mut inductances = Vec::with_capacity(w);
                 let mut winding_names = Vec::with_capacity(w);
+                let mut winding_isats = Vec::with_capacity(w);
                 for m in &members {
                     let r = &inductor_refs[m];
                     winding_node_i.push(r.node_i);
                     winding_node_j.push(r.node_j);
                     inductances.push(r.value);
                     winding_names.push(r.name.clone());
+                    winding_isats.push(r.isat);
                 }
                 // Validate: check that the inductance matrix is positive definite.
                 // A non-PD matrix means the coupling coefficients are physically
@@ -2606,6 +2610,7 @@ impl MnaBuilder {
                     winding_node_j,
                     inductances,
                     coupling_matrix,
+                    winding_isats,
                 });
             }
         }

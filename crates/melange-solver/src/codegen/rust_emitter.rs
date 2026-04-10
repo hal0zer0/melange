@@ -4258,6 +4258,29 @@ impl RustEmitter {
             ));
         }
 
+        // Saturating transformer group constants
+        for (idx, sg) in ir.saturating_xfmr_groups.iter().enumerate() {
+            let w = sg.num_windings;
+            let l0_str: Vec<String> = sg.l0s.iter().map(|v| format!("{:.17e}", v)).collect();
+            let isat_str: Vec<String> = sg.isats.iter().map(|v| format!("{:.17e}", v)).collect();
+            let row_str: Vec<String> = sg.aug_rows.iter().map(|v| format!("{}", v)).collect();
+            let kappa_str: Vec<String> = sg.coupling_flat.iter().map(|v| format!("{:.17e}", v)).collect();
+            code.push_str(&format!(
+                "/// Saturating transformer group {idx}: {} ({w} windings)\n\
+                 pub const SAT_XG_{idx}_W: usize = {w};\n\
+                 pub const SAT_XG_{idx}_L0: [f64; {w}] = [{}];\n\
+                 pub const SAT_XG_{idx}_ISAT: [f64; {w}] = [{}];\n\
+                 pub const SAT_XG_{idx}_ROWS: [usize; {w}] = [{}];\n\
+                 pub const SAT_XG_{idx}_KAPPA: [f64; {}] = [{}];\n\n",
+                sg.name,
+                l0_str.join(", "),
+                isat_str.join(", "),
+                row_str.join(", "),
+                w * w,
+                kappa_str.join(", "),
+            ));
+        }
+
         // Switch constants (position values)
         for (idx, sw) in ir.switches.iter().enumerate() {
             code.push_str(&format!(
@@ -4310,7 +4333,7 @@ impl RustEmitter {
         let has_pots = !ir.pots.is_empty();
         let has_switches = !ir.switches.is_empty();
         let has_sat_ind = !ir.saturating_inductors.is_empty();
-        let has_sat_coupled = !ir.saturating_coupled.is_empty();
+        let has_sat_coupled = !ir.saturating_coupled.is_empty() || !ir.saturating_xfmr_groups.is_empty();
 
         let mut code = section_banner("STATE STRUCTURE (Nodal solver)");
 
@@ -4529,6 +4552,22 @@ impl RustEmitter {
             code.push('\n');
         }
 
+        // Saturating transformer group state fields
+        for (idx, sg) in ir.saturating_xfmr_groups.iter().enumerate() {
+            let w = sg.num_windings;
+            code.push_str(&format!(
+                "    /// Saturating transformer group {idx} ({}): effective L per winding\n\
+                 \x20   pub sat_xg_{idx}_l_eff: [f64; {w}],\n\
+                 \x20   /// Effective mutual inductance matrix (flat W×W)\n\
+                 \x20   pub sat_xg_{idx}_m_eff: [f64; {}],\n",
+                sg.name,
+                w * w,
+            ));
+        }
+        if !ir.saturating_xfmr_groups.is_empty() {
+            code.push('\n');
+        }
+
         // IIR op-amp state fields
         if !ir.opamp_iir.is_empty() {
             code.push_str("    // --- IIR op-amp dominant pole filter state ---\n");
@@ -4706,6 +4745,25 @@ impl RustEmitter {
                  \x20           sat_ci_{idx}_m_eff: {m0:.17e},\n",
             ));
         }
+        // Saturating transformer group state: start at nominal
+        for (idx, sg) in ir.saturating_xfmr_groups.iter().enumerate() {
+            let w = sg.num_windings;
+            code.push_str(&format!(
+                "            sat_xg_{idx}_l_eff: SAT_XG_{idx}_L0,\n",
+            ));
+            // Build nominal M matrix: M[i][j] = kappa[i][j] * sqrt(L0[i] * L0[j])
+            let mut m_vals = Vec::with_capacity(w * w);
+            for i in 0..w {
+                for j in 0..w {
+                    let m = sg.coupling_flat[i * w + j] * (sg.l0s[i] * sg.l0s[j]).sqrt();
+                    m_vals.push(format!("{:.17e}", m));
+                }
+            }
+            code.push_str(&format!(
+                "            sat_xg_{idx}_m_eff: [{}],\n",
+                m_vals.join(", "),
+            ));
+        }
 
         // IIR op-amp state initialization: initialize to DC steady state.
         // At DC, v+ - v- = Go/Gm * v_out ≈ 22µV (for AOL=200K), and the Boyle
@@ -4863,6 +4921,24 @@ impl RustEmitter {
                 "        self.sat_ci_{idx}_l1_eff = SAT_CI_{idx}_L1_L0;\n\
                  \x20       self.sat_ci_{idx}_l2_eff = SAT_CI_{idx}_L2_L0;\n\
                  \x20       self.sat_ci_{idx}_m_eff = {m0:.17e};\n",
+            ));
+        }
+        // Reset saturating transformer group state to nominal
+        for (idx, sg) in ir.saturating_xfmr_groups.iter().enumerate() {
+            let w = sg.num_windings;
+            code.push_str(&format!(
+                "        self.sat_xg_{idx}_l_eff = SAT_XG_{idx}_L0;\n",
+            ));
+            let mut m_vals = Vec::with_capacity(w * w);
+            for i in 0..w {
+                for j in 0..w {
+                    let m = sg.coupling_flat[i * w + j] * (sg.l0s[i] * sg.l0s[j]).sqrt();
+                    m_vals.push(format!("{:.17e}", m));
+                }
+            }
+            code.push_str(&format!(
+                "        self.sat_xg_{idx}_m_eff = [{}];\n",
+                m_vals.join(", "),
             ));
         }
         // Reset IIR op-amp state — to DC steady state (see default() comment).
@@ -5729,6 +5805,129 @@ impl RustEmitter {
                 ));
             }
             code.push_str("    }\n\n");
+        }
+
+        // Saturating transformer groups: W² elementary SM rank-1 updates
+        for (idx, sg) in ir.saturating_xfmr_groups.iter().enumerate() {
+            let w = sg.num_windings;
+            code.push_str(&format!(
+                "    // Saturating transformer group {idx} ({name}, {w} windings)\n\
+                 \x20   {{\n\
+                 \x20       let alpha = 2.0 * state.current_sample_rate;\n\
+                 \x20       let w = SAT_XG_{idx}_W;\n\
+                 \x20       // Compute effective inductances per winding\n\
+                 \x20       let mut l_eff = [0.0f64; SAT_XG_{idx}_W];\n\
+                 \x20       let mut any_changed = false;\n\
+                 \x20       for wi in 0..w {{\n\
+                 \x20           let i_branch = state.v_prev[SAT_XG_{idx}_ROWS[wi]];\n\
+                 \x20           let x = i_branch / SAT_XG_{idx}_ISAT[wi];\n\
+                 \x20           let c = x.cosh();\n\
+                 \x20           l_eff[wi] = (SAT_XG_{idx}_L0[wi] / (c * c)).max(SAT_XG_{idx}_L0[wi] * 0.01);\n\
+                 \x20           if (l_eff[wi] - state.sat_xg_{idx}_l_eff[wi]).abs() > 1e-15 {{\n\
+                 \x20               any_changed = true;\n\
+                 \x20           }}\n\
+                 \x20       }}\n\
+                 \x20       if any_changed {{\n\
+                 \x20           // Compute new mutual inductance matrix\n\
+                 \x20           let mut m_new = [0.0f64; SAT_XG_{idx}_W * SAT_XG_{idx}_W];\n\
+                 \x20           for i in 0..w {{\n\
+                 \x20               for j in 0..w {{\n\
+                 \x20                   m_new[i * w + j] = SAT_XG_{idx}_KAPPA[i * w + j] * (l_eff[i] * l_eff[j]).sqrt();\n\
+                 \x20               }}\n\
+                 \x20           }}\n\
+                 \x20           // Apply W diagonal SM rank-1 updates\n\
+                 \x20           for wi in 0..w {{\n\
+                 \x20               let dl = m_new[wi * w + wi] - state.sat_xg_{idx}_m_eff[wi * w + wi];\n\
+                 \x20               if dl.abs() > 1e-18 {{\n\
+                 \x20                   let k = SAT_XG_{idx}_ROWS[wi];\n\
+                 \x20                   let delta_a = alpha * dl;\n\
+                 \x20                   let scale = delta_a / (1.0 + delta_a * state.s[k][k]);\n\
+                 \x20                   let mut s_col = [0.0f64; N];\n\
+                 \x20                   let mut s_row = [0.0f64; N];\n\
+                 \x20                   for p in 0..N {{ s_col[p] = state.s[p][k]; s_row[p] = state.s[k][p]; }}\n\
+                 \x20                   for p in 0..N {{\n\
+                 \x20                       let sc = scale * s_col[p];\n\
+                 \x20                       for q in 0..N {{ state.s[p][q] -= sc * s_row[q]; }}\n\
+                 \x20                   }}\n",
+                name = sg.name,
+            ));
+            // K and S_NI diagonal correction
+            if m > 0 {
+                code.push_str(&format!(
+                    "                   let mut nv_sv = [0.0f64; M];\n\
+                     \x20                   let mut vts_ni = [0.0f64; M];\n\
+                     \x20                   for mi in 0..M {{\n\
+                     \x20                       for p in 0..N {{ nv_sv[mi] += N_V[mi][p] * s_col[p]; }}\n\
+                     \x20                       for p in 0..N {{ vts_ni[mi] += s_row[p] * N_I[p][mi]; }}\n\
+                     \x20                   }}\n\
+                     \x20                   for mi in 0..M {{\n\
+                     \x20                       let sc = scale * nv_sv[mi];\n\
+                     \x20                       for mj in 0..M {{ state.k[mi][mj] -= sc * vts_ni[mj]; }}\n\
+                     \x20                   }}\n\
+                     \x20                   for p in 0..N {{\n\
+                     \x20                       let sc = scale * s_col[p];\n\
+                     \x20                       for mi in 0..M {{ state.s_ni[p][mi] -= sc * vts_ni[mi]; }}\n\
+                     \x20                   }}\n",
+                ));
+            }
+            code.push_str(&format!(
+                "               }}\n\
+                 \x20           }}\n\
+                 \x20           // Apply off-diagonal SM rank-1 updates (non-symmetric: u=e_ki, v=e_kj)\n\
+                 \x20           for wi in 0..w {{\n\
+                 \x20               for wj in 0..w {{\n\
+                 \x20                   if wi == wj {{ continue; }}\n\
+                 \x20                   let dm = m_new[wi * w + wj] - state.sat_xg_{idx}_m_eff[wi * w + wj];\n\
+                 \x20                   if dm.abs() > 1e-18 {{\n\
+                 \x20                       let ki = SAT_XG_{idx}_ROWS[wi];\n\
+                 \x20                       let kj = SAT_XG_{idx}_ROWS[wj];\n\
+                 \x20                       let delta_a = alpha * dm;\n\
+                 \x20                       // General SM: (A + delta*e_i*e_j^T)^-1 = S - delta*S*e_i*e_j^T*S / (1+delta*e_j^T*S*e_i)\n\
+                 \x20                       // = S - delta * S[:,ki] * S[kj,:] / (1 + delta * S[kj][ki])\n\
+                 \x20                       let scale = delta_a / (1.0 + delta_a * state.s[kj][ki]);\n\
+                 \x20                       let mut s_col_i = [0.0f64; N];\n\
+                 \x20                       let mut s_row_j = [0.0f64; N];\n\
+                 \x20                       for p in 0..N {{ s_col_i[p] = state.s[p][ki]; s_row_j[p] = state.s[kj][p]; }}\n\
+                 \x20                       for p in 0..N {{\n\
+                 \x20                           let sc = scale * s_col_i[p];\n\
+                 \x20                           for q in 0..N {{ state.s[p][q] -= sc * s_row_j[q]; }}\n\
+                 \x20                       }}\n",
+            ));
+            // K and S_NI off-diagonal correction
+            if m > 0 {
+                code.push_str(
+                    "                       let mut nv_sv = [0.0f64; M];\n\
+                     \x20                       let mut vts_ni = [0.0f64; M];\n\
+                     \x20                       for mi in 0..M {\n\
+                     \x20                           for p in 0..N { nv_sv[mi] += N_V[mi][p] * s_col_i[p]; }\n\
+                     \x20                           for p in 0..N { vts_ni[mi] += s_row_j[p] * N_I[p][mi]; }\n\
+                     \x20                       }\n\
+                     \x20                       for mi in 0..M {\n\
+                     \x20                           let sc = scale * nv_sv[mi];\n\
+                     \x20                           for mj in 0..M { state.k[mi][mj] -= sc * vts_ni[mj]; }\n\
+                     \x20                       }\n\
+                     \x20                       for p in 0..N {\n\
+                     \x20                           let sc = scale * s_col_i[p];\n\
+                     \x20                           for mi in 0..M { state.s_ni[p][mi] -= sc * vts_ni[mi]; }\n\
+                     \x20                       }\n",
+                );
+            }
+            code.push_str(&format!(
+                "                   }}\n\
+                 \x20               }}\n\
+                 \x20           }}\n\
+                 \x20           // Update A_neg\n\
+                 \x20           for i in 0..w {{\n\
+                 \x20               for j in 0..w {{\n\
+                 \x20                   let dm = m_new[i * w + j] - state.sat_xg_{idx}_m_eff[i * w + j];\n\
+                 \x20                   state.a_neg[SAT_XG_{idx}_ROWS[i]][SAT_XG_{idx}_ROWS[j]] += alpha * dm;\n\
+                 \x20               }}\n\
+                 \x20           }}\n\
+                 \x20           state.sat_xg_{idx}_l_eff = l_eff;\n\
+                 \x20           state.sat_xg_{idx}_m_eff = m_new;\n\
+                 \x20       }}\n\
+                 \x20   }}\n\n",
+            ));
         }
 
         // Step 1: Build RHS = rhs_const + A_neg * v_prev + N_i * i_nl_prev + input (sparse)
