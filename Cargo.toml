@@ -8,6 +8,11 @@ members = [
     "crates/melange-plugin",
     "tools/melange-cli",
 ]
+# The cargo-fuzz target is a separate nightly-only crate with its own
+# Cargo.toml; it must not be pulled into the stable workspace build.
+exclude = [
+    "crates/melange-solver/fuzz",
+]
 
 [workspace.package]
 version = "0.1.0"

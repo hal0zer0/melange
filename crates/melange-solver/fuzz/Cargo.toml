@@ -1,0 +1,36 @@
+[package]
+name = "melange-solver-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Isolate from the main workspace: cargo-fuzz requires its own workspace
+# because it pulls in libfuzzer-sys (nightly-only) and has a custom bin
+# target layout. The root Cargo.toml excludes this directory.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+melange-solver = { path = ".." }
+
+# Tell cargo to look for bin targets in fuzz_targets/ instead of src/bin/.
+# Each target must be declared explicitly so that `cargo build` here
+# doesn't require the cargo-fuzz subcommand at all — this lets CI
+# verify the fuzz harness compiles with plain stable cargo
+# (libfuzzer-sys does require nightly at link time, so *running* the
+# fuzzer still needs `cargo +nightly fuzz run`, but we can at least
+# catch build-time breakage in review).
+
+[[bin]]
+name = "parse_netlist"
+path = "fuzz_targets/parse_netlist.rs"
+test = false
+doc = false
+bench = false
+
+# Release builds, matching the cargo-fuzz defaults.
+[profile.release]
+debug = 1

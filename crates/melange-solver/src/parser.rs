@@ -6,6 +6,48 @@
 //!
 //! The parser builds an AST (Abstract Syntax Tree) representation
 //! of the circuit that can be processed by the MNA assembler.
+//!
+//! # Input size caps
+//!
+//! To prevent unbounded memory use on malicious or malformed input, the parser
+//! rejects any netlist whose raw or shape-level size exceeds the following caps.
+//! Each cap produces a specific `ParseError` before any downstream allocation.
+//!
+//! - [`MAX_NETLIST_BYTES`] — raw UTF-8 byte length of the input string
+//! - [`MAX_NODE_NAME_LEN`] — characters per node name
+//! - [`MAX_TOTAL_ELEMENTS`] — parsed elements before subcircuit expansion
+//! - [`MAX_MODELS`] — `.model` directives
+//! - [`MAX_MODEL_PARAMS`] — parameters per `.model` line
+//!
+//! These are intentionally generous — real circuits use a tiny fraction of
+//! each — but finite, so a 100 MB node name or 10 million element netlist
+//! fails fast with a clear error instead of OOMing.
+
+/// Maximum raw byte length of a netlist string accepted by [`Netlist::parse`].
+///
+/// Rejected with a specific error before any line-splitting or allocation.
+/// 10 MB is orders of magnitude above the largest real-world netlists.
+pub const MAX_NETLIST_BYTES: usize = 10_000_000;
+
+/// Maximum character length of an individual node name.
+///
+/// Applied to every node reference during element parsing. SPICE netlists
+/// typically use 1–32 character names; 256 chars is a hard upper bound.
+pub const MAX_NODE_NAME_LEN: usize = 256;
+
+/// Maximum number of parsed elements (top-level, before subcircuit expansion).
+///
+/// This is the pre-expansion ceiling; the post-expansion ceiling
+/// (`MAX_ELEMENTS = 10_000` in [`Netlist::expand_subcircuits`]) still applies.
+/// A larger pre-expansion cap lets a small netlist with many subcircuit
+/// instances expand into a legal post-expansion size.
+pub const MAX_TOTAL_ELEMENTS: usize = 50_000;
+
+/// Maximum number of `.model` directives in a netlist.
+pub const MAX_MODELS: usize = 1_000;
+
+/// Maximum number of parameters per `.model` directive.
+pub const MAX_MODEL_PARAMS: usize = 64;
 
 /// A parsed SPICE netlist.
 #[derive(Debug, Clone, PartialEq)]
@@ -160,7 +202,27 @@ impl Netlist {
     }
 
     /// Parse a netlist from a string.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ParseError`] if:
+    /// - `input.len() > MAX_NETLIST_BYTES` (checked before any allocation)
+    /// - any node name exceeds `MAX_NODE_NAME_LEN` chars
+    /// - more than `MAX_TOTAL_ELEMENTS` elements, `MAX_MODELS` models,
+    ///   or `MAX_MODEL_PARAMS` params per model are declared
+    /// - a line fails syntactic validation
     pub fn parse(input: &str) -> Result<Self, ParseError> {
+        // Defensive size cap: reject malicious/oversized input before any allocation.
+        if input.len() > MAX_NETLIST_BYTES {
+            return Err(ParseError {
+                line: 0,
+                message: format!(
+                    "netlist too large: {} bytes exceeds MAX_NETLIST_BYTES ({})",
+                    input.len(),
+                    MAX_NETLIST_BYTES
+                ),
+            });
+        }
         Parser::new(input).parse()
     }
 
@@ -983,7 +1045,18 @@ impl Parser {
                 let coupling = self.parse_coupling(&line)?;
                 netlist.couplings.push(coupling);
             } else {
+                // Pre-expansion element count cap. Subcircuit instances count
+                // as one element here; the post-expansion cap still applies
+                // in `expand_subcircuits()`.
+                if netlist.elements.len() >= MAX_TOTAL_ELEMENTS {
+                    return Err(self.error(format!(
+                        "too many elements: {} exceeds MAX_TOTAL_ELEMENTS ({})",
+                        netlist.elements.len() + 1,
+                        MAX_TOTAL_ELEMENTS
+                    )));
+                }
                 let element = self.parse_element(&line)?;
+                validate_element_node_lengths(&element).map_err(|e| self.error(e))?;
                 netlist.elements.push(element);
             }
         }
@@ -1487,6 +1560,13 @@ impl Parser {
         match parts[0].to_lowercase().as_str() {
             ".model" => {
                 self.require_parts(&parts, 3, "name and type")?;
+                if netlist.models.len() >= MAX_MODELS {
+                    return Err(self.error(format!(
+                        "too many .model directives: {} exceeds MAX_MODELS ({})",
+                        netlist.models.len() + 1,
+                        MAX_MODELS
+                    )));
+                }
                 let model = self.parse_model(&parts)?;
                 netlist.models.push(model);
             }
@@ -1515,12 +1595,20 @@ impl Parser {
                         // Nested directives inside subckt (e.g. .model)
                         let sub_parts: Vec<&str> = sub_line.split_whitespace().collect();
                         if sub_parts[0].to_lowercase() == ".model" {
+                            if netlist.models.len() >= MAX_MODELS {
+                                return Err(self.error(format!(
+                                    "too many .model directives: {} exceeds MAX_MODELS ({})",
+                                    netlist.models.len() + 1,
+                                    MAX_MODELS
+                                )));
+                            }
                             let model = self.parse_model(&sub_parts)?;
                             netlist.models.push(model);
                         }
                         continue;
                     }
                     let elem = self.parse_element(&sub_line)?;
+                    validate_element_node_lengths(&elem).map_err(|e| self.error(e))?;
                     subckt_elements.push(elem);
                 }
 
@@ -1613,6 +1701,14 @@ impl Parser {
                     continue;
                 }
                 if let Some(eq_pos) = token.find('=') {
+                    if params.len() >= MAX_MODEL_PARAMS {
+                        return Err(self.error(format!(
+                            "too many parameters on .model '{}': {} exceeds MAX_MODEL_PARAMS ({})",
+                            name,
+                            params.len() + 1,
+                            MAX_MODEL_PARAMS
+                        )));
+                    }
                     let key = token[..eq_pos].to_ascii_uppercase();
                     let value_str = &token[eq_pos + 1..];
                     let value = parse_value(value_str).map_err(|_| {
@@ -2492,6 +2588,86 @@ impl Parser {
             subckt: parts[parts.len() - 1].to_string(),
         })
     }
+}
+
+/// Enforce `MAX_NODE_NAME_LEN` on every node reference of a parsed element.
+///
+/// Returns a descriptive error string on the first over-length name. Callers
+/// wrap this in `self.error(...)` to attach a line number. Split out so that
+/// both the top-level element loop and the subcircuit-inner element loop can
+/// apply it consistently.
+fn validate_element_node_lengths(elem: &Element) -> Result<(), String> {
+    fn check(node: &str) -> Result<(), String> {
+        let len = node.chars().count();
+        if len > MAX_NODE_NAME_LEN {
+            return Err(format!(
+                "node name '{}...' length {} exceeds MAX_NODE_NAME_LEN ({})",
+                node.chars().take(16).collect::<String>(),
+                len,
+                MAX_NODE_NAME_LEN
+            ));
+        }
+        Ok(())
+    }
+
+    // Visit every node reference this element carries. Model/component names
+    // are not nodes and are not checked here (they have their own limits).
+    match elem {
+        Element::Resistor { n_plus, n_minus, .. }
+        | Element::Capacitor { n_plus, n_minus, .. }
+        | Element::Inductor { n_plus, n_minus, .. }
+        | Element::VoltageSource { n_plus, n_minus, .. }
+        | Element::CurrentSource { n_plus, n_minus, .. }
+        | Element::Diode { n_plus, n_minus, .. } => {
+            check(n_plus)?;
+            check(n_minus)?;
+        }
+        Element::Bjt { nc, nb, ne, .. } => {
+            check(nc)?;
+            check(nb)?;
+            check(ne)?;
+        }
+        Element::Jfet { nd, ng, ns, .. } => {
+            check(nd)?;
+            check(ng)?;
+            check(ns)?;
+        }
+        Element::Mosfet { nd, ng, ns, nb, .. } => {
+            check(nd)?;
+            check(ng)?;
+            check(ns)?;
+            check(nb)?;
+        }
+        Element::Opamp { n_plus, n_minus, n_out, .. } => {
+            check(n_plus)?;
+            check(n_minus)?;
+            check(n_out)?;
+        }
+        Element::Triode { n_grid, n_plate, n_cathode, .. } => {
+            check(n_grid)?;
+            check(n_plate)?;
+            check(n_cathode)?;
+        }
+        Element::Vca { n_sig_p, n_sig_n, n_ctrl_p, n_ctrl_n, .. } => {
+            check(n_sig_p)?;
+            check(n_sig_n)?;
+            check(n_ctrl_p)?;
+            check(n_ctrl_n)?;
+        }
+        Element::Vcvs { out_p, out_n, ctrl_p, ctrl_n, .. }
+        | Element::Vccs { out_p, out_n, ctrl_p, ctrl_n, .. } => {
+            check(out_p)?;
+            check(out_n)?;
+            check(ctrl_p)?;
+            check(ctrl_n)?;
+        }
+        Element::SubcktInstance { nodes, .. } => {
+            for node in nodes {
+                check(node)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Try to parse infix notation where a scale character replaces the decimal point.
@@ -3884,5 +4060,154 @@ U1 0 inv out opamp
             }
             _ => panic!("Expected VCVS"),
         }
+    }
+
+    // ======================================================================
+    // Input-size cap tests (MAX_NETLIST_BYTES, MAX_NODE_NAME_LEN,
+    // MAX_TOTAL_ELEMENTS, MAX_MODELS, MAX_MODEL_PARAMS)
+    // ======================================================================
+
+    #[test]
+    fn test_cap_netlist_bytes_rejects_oversized_input() {
+        // Construct a string just over MAX_NETLIST_BYTES by padding with
+        // comment lines so the extra bytes are not parse-meaningful.
+        let mut spice = String::with_capacity(MAX_NETLIST_BYTES + 64);
+        spice.push_str("Test\n");
+        let pad_line = "* padding padding padding padding padding padding padding\n";
+        while spice.len() <= MAX_NETLIST_BYTES {
+            spice.push_str(pad_line);
+        }
+        spice.push_str("R1 1 0 1k\n");
+        assert!(spice.len() > MAX_NETLIST_BYTES);
+        let err = Netlist::parse(&spice).unwrap_err();
+        assert!(
+            err.message.contains("MAX_NETLIST_BYTES"),
+            "expected MAX_NETLIST_BYTES error, got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn test_cap_netlist_bytes_at_limit_ok() {
+        // An input *at* the limit should still parse. Use a minimal valid
+        // netlist padded with comment chars up to (but not past) the cap.
+        let header = "Test\nR1 1 0 1k\n";
+        let mut spice = String::with_capacity(MAX_NETLIST_BYTES);
+        spice.push_str(header);
+        while spice.len() < MAX_NETLIST_BYTES {
+            spice.push('*');
+        }
+        assert_eq!(spice.len(), MAX_NETLIST_BYTES);
+        let netlist = Netlist::parse(&spice).expect("exactly-at-limit should parse");
+        assert_eq!(netlist.elements.len(), 1);
+    }
+
+    #[test]
+    fn test_cap_node_name_rejects_too_long() {
+        let long_name: String = "n".repeat(MAX_NODE_NAME_LEN + 1);
+        let spice = format!("Test\nR1 {long_name} 0 1k\n");
+        let err = Netlist::parse(&spice).unwrap_err();
+        assert!(
+            err.message.contains("MAX_NODE_NAME_LEN"),
+            "expected MAX_NODE_NAME_LEN error, got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn test_cap_node_name_at_limit_ok() {
+        let name: String = "n".repeat(MAX_NODE_NAME_LEN);
+        let spice = format!("Test\nR1 {name} 0 1k\n");
+        let netlist = Netlist::parse(&spice).expect("name at exactly the limit should parse");
+        assert_eq!(netlist.elements.len(), 1);
+    }
+
+    #[test]
+    fn test_cap_total_elements_rejects_too_many() {
+        // Build a netlist with MAX_TOTAL_ELEMENTS + 1 resistors.
+        // Each resistor uses a distinct name and a distinct n+ node,
+        // so the parser won't reject it on duplicate grounds first.
+        let mut spice = String::with_capacity((MAX_TOTAL_ELEMENTS + 2) * 16);
+        spice.push_str("Test\n");
+        for i in 0..=MAX_TOTAL_ELEMENTS {
+            spice.push_str(&format!("R{i} n{i} 0 1k\n"));
+        }
+        let err = Netlist::parse(&spice).unwrap_err();
+        assert!(
+            err.message.contains("MAX_TOTAL_ELEMENTS"),
+            "expected MAX_TOTAL_ELEMENTS error, got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn test_cap_total_elements_at_limit_ok() {
+        // Exactly MAX_TOTAL_ELEMENTS should parse.
+        let n = MAX_TOTAL_ELEMENTS;
+        let mut spice = String::with_capacity(n * 20);
+        spice.push_str("Test\n");
+        for i in 0..n {
+            spice.push_str(&format!("R{i} n{i} 0 1k\n"));
+        }
+        let netlist = Netlist::parse(&spice).expect("exactly MAX_TOTAL_ELEMENTS should parse");
+        assert_eq!(netlist.elements.len(), n);
+    }
+
+    #[test]
+    fn test_cap_models_rejects_too_many() {
+        // Build a netlist with MAX_MODELS + 1 .model directives, each with
+        // a distinct name. No devices reference them (so post-parse model
+        // validation does not fire — this test targets the count cap only).
+        let mut spice = String::new();
+        spice.push_str("Test\n");
+        for i in 0..=MAX_MODELS {
+            spice.push_str(&format!(".model M{i} D(IS=1e-15)\n"));
+        }
+        let err = Netlist::parse(&spice).unwrap_err();
+        assert!(
+            err.message.contains("MAX_MODELS"),
+            "expected MAX_MODELS error, got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn test_cap_models_at_limit_ok() {
+        let mut spice = String::new();
+        spice.push_str("Test\n");
+        for i in 0..MAX_MODELS {
+            spice.push_str(&format!(".model M{i} D(IS=1e-15)\n"));
+        }
+        let netlist = Netlist::parse(&spice).expect("exactly MAX_MODELS should parse");
+        assert_eq!(netlist.models.len(), MAX_MODELS);
+    }
+
+    #[test]
+    fn test_cap_model_params_rejects_too_many() {
+        // One .model with MAX_MODEL_PARAMS + 1 parameters.
+        let mut params = String::new();
+        for i in 0..=MAX_MODEL_PARAMS {
+            params.push_str(&format!("P{i}=1 "));
+        }
+        let spice = format!("Test\n.model M1 D({params})\n");
+        let err = Netlist::parse(&spice).unwrap_err();
+        assert!(
+            err.message.contains("MAX_MODEL_PARAMS"),
+            "expected MAX_MODEL_PARAMS error, got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn test_cap_model_params_at_limit_ok() {
+        // Exactly MAX_MODEL_PARAMS parameters. Use benign names that
+        // won't trigger the device-specific validator.
+        let mut params = String::new();
+        for i in 0..MAX_MODEL_PARAMS {
+            params.push_str(&format!("PX{i}=1 "));
+        }
+        let spice = format!("Test\n.model M1 D({params})\n");
+        let netlist = Netlist::parse(&spice).expect("exactly MAX_MODEL_PARAMS should parse");
+        assert_eq!(netlist.models[0].params.len(), MAX_MODEL_PARAMS);
     }
 }
