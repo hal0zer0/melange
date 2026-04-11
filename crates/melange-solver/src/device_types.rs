@@ -329,38 +329,60 @@ pub enum TubeKind {
 
 /// Screen-current functional form for pentode / beam tetrode math.
 ///
-/// Reefman's theory paper (<https://www.dos4ever.com/uTracer3/Theory.pdf>) gives
-/// two closely-related screen-current models:
+/// Three equation families are supported, reflecting the historical evolution
+/// of audio-pentode SPICE models:
 ///
-/// * **`Rational`** — Reefman "Derk" §4.4, Eq 23:
+/// * **`Rational`** — Reefman "Derk" §4.4 (2016), Eq 23:
 ///   `Ig2 = (Ip0/Kg2) · (1 + αs / (1 + β·Vp))`
-///   Used for true pentodes with smooth screen-current rolloff (EL84, EL34, EF86).
+///   Modern, Vp-dependent screen current. Best fit for true pentodes with
+///   smooth screen-current rolloff under clipping (EL84, EL34, EF86).
+///   Requires 9 parameters including αs/A/β.
 ///
-/// * **`Exponential`** — Reefman "DerkE" §4.5, Eq 28:
+/// * **`Exponential`** — Reefman "DerkE" §4.5 (2016), Eq 28:
 ///   `Ig2 = (Ip0/Kg2) · (1 + αs · exp(-(β·Vp)^{3/2}))`
-///   Used for beam tetrodes with sharper "critical compensation" knees that the
-///   rational form can't capture (6L6GC, 6V6GT, KT88). The 1.5-power exponent
-///   models the faster screen-current falloff characteristic of focussed-beam
-///   tube geometry.
+///   Same 9 parameters as Rational, but the `1/(1+β·Vp)` factor is replaced
+///   with `exp(-(β·Vp)^{3/2})` in both Ip and Ig2. Required for beam tetrodes
+///   with sharper "critical compensation" knees that the rational form can't
+///   capture (6L6GC, 6V6GT). The 1.5-power exponent models the faster
+///   screen-current falloff of focussed-beam tube geometry.
 ///
-/// The plate-current `F(Vp)` function uses the same rational-vs-exponential
-/// factor in the `(α/Kg1 + αs/Kg2)` term (Derk Eq 25 vs DerkE Eq 30). The
-/// `α = 1 − (Kg1/Kg2)·(1+αs)` identity (Eq 27 and Eq 32) is the same for both.
+/// * **`Classical`** — Norman Koren 1996 / Cohen-Hélie 2010, Eqs 1-3:
+///   `Ip = (E1^Ex / Kg1) · (1 + sgn(E1)) · arctan(Vp/Kvb)`,
+///   `Ig2 = (Vg2/μ + Vg1)^Ex / Kg2` (Vp-INDEPENDENT).
+///   The original "phenomenological" Koren pentode model. Uses only 6
+///   parameters (μ, Ex, Kg1, Kg2, Kp, Kvb — no αs/A/β). The E1 softplus
+///   argument uses `Vg1/Vg2` directly (NOT `Vg1/sqrt(Kvb+Vg2²)`), and Kvb
+///   plays an entirely different role: it's the arctan knee scale, NOT the
+///   softplus denominator. Screen current is Vp-independent, which is a
+///   known accuracy gap under heavy plate clipping but is still the best
+///   publicly-available fit for tubes without Reefman-style fits (KT88,
+///   6550). Used as a bootstrap / fallback; upgrade to Derk when a fitted
+///   `(αs, A, β)` triple becomes available.
 ///
-/// Default: `Rational` — preserves phase 1a behavior for all previously serialized
-/// TubeParams and for the EL84/EL34/EF86 catalog entries.
+/// The Derk and DerkE forms share the same α = 1 − (Kg1/Kg2)·(1+αs) identity
+/// (Eq 27 = Eq 32). Classical does not use α and computes Ig2 directly from
+/// the grid-plus-screen drive term.
+///
+/// Default: `Rational` — preserves phase 1a behavior for all previously
+/// serialized TubeParams and for the EL84/EL34/EF86 catalog entries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[non_exhaustive]
 pub enum ScreenForm {
-    /// Reefman "Derk" §4.4 — rational `1/(1+β·Vp)` screen scaling.
+    /// Reefman "Derk" §4.4 — rational `1/(1+β·Vp)` screen scaling (phase 1a).
     /// The default for `SharpPentode` when no form is specified.
     /// Fits true pentodes (EL84, EL34, EF86) accurately.
     #[default]
     Rational,
-    /// Reefman "DerkE" §4.5 — exponential `exp(-(β·Vp)^{3/2})` screen scaling.
-    /// Required for beam tetrodes (6L6GC, 6V6GT, KT88) whose critical-compensation
-    /// knees the rational form cannot capture.
+    /// Reefman "DerkE" §4.5 — exponential `exp(-(β·Vp)^{3/2})` screen scaling
+    /// (phase 1a.1). Required for beam tetrodes (6L6GC, 6V6GT) whose
+    /// critical-compensation knees the rational form cannot capture.
     Exponential,
+    /// Classical Norman Koren pentode (phase 1a.2) — `arctan(Vp/Kvb)` plate
+    /// knee with Vp-independent screen current. Fallback for tubes without
+    /// published Reefman Derk fits (KT88, 6550). Only 6 parameters; the
+    /// `alpha_s`/`a_factor`/`beta_factor` fields on `TubeParams` are ignored
+    /// when `screen_form == Classical`.
+    Classical,
 }
 
 /// Tube/triode/pentode model parameters (Koren triode + Reefman "Derk" pentode).
@@ -507,26 +529,32 @@ impl TubeParams {
                     self.kg2
                 ));
             }
-            // Reefman Derk §4.4: αs=0 makes Ip=0 identically (see derivation in
-            // memory/pentode_equations.md). Require αs>0 to catch garbage params.
-            if !self.alpha_s.is_finite() || self.alpha_s <= 0.0 {
-                return Err(format!(
-                    "pentode ALPHA_S (Reefman Derk αs) must be positive and finite, got {}",
-                    self.alpha_s
-                ));
-            }
-            // A and β are allowed to be zero (some fits pinpoint them at 0).
-            if !self.a_factor.is_finite() || self.a_factor < 0.0 {
-                return Err(format!(
-                    "pentode A_FACTOR (Reefman Derk A) must be non-negative and finite, got {}",
-                    self.a_factor
-                ));
-            }
-            if !self.beta_factor.is_finite() || self.beta_factor < 0.0 {
-                return Err(format!(
-                    "pentode BETA_FACTOR (Reefman Derk β) must be non-negative and finite, got {}",
-                    self.beta_factor
-                ));
+            // The Reefman Derk / DerkE variants require αs>0 because αs=0
+            // makes Ip=0 identically (see memory/pentode_equations.md). The
+            // Classical Koren variant does not use αs/A/β at all, so those
+            // fields are allowed (and expected) to be zero for Classical
+            // entries. Skip the Derk-specific invariants when Classical.
+            let uses_derk_shape = !matches!(self.screen_form, ScreenForm::Classical);
+            if uses_derk_shape {
+                if !self.alpha_s.is_finite() || self.alpha_s <= 0.0 {
+                    return Err(format!(
+                        "pentode ALPHA_S (Reefman Derk αs) must be positive and finite, got {}",
+                        self.alpha_s
+                    ));
+                }
+                // A and β are allowed to be zero (some fits pinpoint them at 0).
+                if !self.a_factor.is_finite() || self.a_factor < 0.0 {
+                    return Err(format!(
+                        "pentode A_FACTOR (Reefman Derk A) must be non-negative and finite, got {}",
+                        self.a_factor
+                    ));
+                }
+                if !self.beta_factor.is_finite() || self.beta_factor < 0.0 {
+                    return Err(format!(
+                        "pentode BETA_FACTOR (Reefman Derk β) must be non-negative and finite, got {}",
+                        self.beta_factor
+                    ));
+                }
             }
         }
         // Variable-mu §5 (Reefman two-section Koren) constraints — apply to
@@ -551,6 +579,17 @@ impl TubeParams {
                     "variable-mu tube EX_B must be positive and finite when svar>0, got {}",
                     self.ex_b
                 ));
+            }
+            // Variable-mu Classical is not implemented. Reefman §5 two-section
+            // Koren is built on top of the Derk softplus structure, not the
+            // Classical arctan knee; no known tube needs this combination.
+            // Reject at validation time so the codegen can stay single-branch.
+            if self.is_pentode() && matches!(self.screen_form, ScreenForm::Classical) {
+                return Err(
+                    "variable-mu Classical Koren pentodes are not implemented; \
+                     use ScreenForm::Rational (6K7/EF89 pattern) for variable-mu tubes"
+                        .to_string(),
+                );
             }
         }
         Ok(())
@@ -731,6 +770,35 @@ mod tube_params_tests {
             a_factor: 4.344e-4,
             beta_factor: 0.148,
             screen_form: ScreenForm::Rational,
+            mu_b: 0.0,
+            svar: 0.0,
+            ex_b: 0.0,
+        }
+    }
+
+    fn classical_pentode_kt88() -> TubeParams {
+        // Cohen-Hélie 2010 DAFx Table 2 (originally Norman Koren 1996).
+        // Classical Koren pentode — 6 parameters only, no αs/A/β.
+        // Vp-independent screen current, arctan(Vpk/Kvb) plate knee.
+        TubeParams {
+            kind: TubeKind::SharpPentode,
+            mu: 8.8,
+            ex: 1.35,
+            kg1: 730.0,
+            kp: 32.0,
+            kvb: 16.0,
+            ig_max: 10e-3,
+            vgk_onset: 0.7,
+            lambda: 0.0,
+            ccg: 0.0,
+            cgp: 0.0,
+            ccp: 0.0,
+            rgi: 0.0,
+            kg2: 4200.0,
+            alpha_s: 0.0, // unused by Classical
+            a_factor: 0.0,
+            beta_factor: 0.0,
+            screen_form: ScreenForm::Classical,
             mu_b: 0.0,
             svar: 0.0,
             ex_b: 0.0,
@@ -1026,5 +1094,83 @@ mod tube_params_tests {
         assert_eq!(back.mu_b, 3.4);
         assert_eq!(back.ex_b, 1.223);
         assert!(matches!(back.screen_form, ScreenForm::Rational));
+    }
+
+    #[test]
+    fn classical_pentode_validates_with_zero_alpha_s() {
+        // Classical Koren pentodes don't use αs/A/β — validate() must allow
+        // them to be zero, unlike the Derk/DerkE paths.
+        let t = classical_pentode_kt88();
+        t.validate()
+            .expect("KT88 Classical pentode should validate with αs=A=β=0");
+        assert!(matches!(t.screen_form, ScreenForm::Classical));
+        assert_eq!(t.alpha_s, 0.0);
+        assert_eq!(t.a_factor, 0.0);
+        assert_eq!(t.beta_factor, 0.0);
+        assert!(t.is_pentode());
+        assert!(!t.is_variable_mu());
+    }
+
+    #[test]
+    fn classical_pentode_rejects_missing_kg2() {
+        let mut bad = classical_pentode_kt88();
+        bad.kg2 = 0.0;
+        assert!(
+            bad.validate().is_err(),
+            "Classical pentode with KG2=0 must still fail validation"
+        );
+    }
+
+    #[test]
+    fn classical_pentode_rejects_variable_mu_combination() {
+        // Variable-mu §5 two-section Koren is defined on top of the Derk
+        // softplus structure, not the Classical arctan knee. The combination
+        // is not implemented and validation should reject it.
+        let mut bad = classical_pentode_kt88();
+        bad.svar = 0.1;
+        bad.mu_b = 3.0;
+        bad.ex_b = 1.2;
+        assert!(
+            bad.validate().is_err(),
+            "Variable-mu + Classical must be rejected"
+        );
+    }
+
+    #[test]
+    fn sharp_pentode_still_requires_alpha_s() {
+        // Regression guard: the Classical relaxation must NOT weaken the
+        // αs>0 requirement for Derk/DerkE pentodes (EL84, 6L6GC, etc).
+        let mut bad = pentode_el84();
+        bad.alpha_s = 0.0;
+        assert!(
+            bad.validate().is_err(),
+            "Derk/Rational pentode with αs=0 must still fail validation"
+        );
+
+        let mut bad_bt = beam_tetrode_6l6gc();
+        bad_bt.alpha_s = 0.0;
+        assert!(
+            bad_bt.validate().is_err(),
+            "DerkE/Exponential beam tetrode with αs=0 must still fail validation"
+        );
+    }
+
+    #[test]
+    fn classical_pentode_roundtrip_serde() {
+        let t = classical_pentode_kt88();
+        let json = serde_json::to_string(&t).expect("serialize");
+        let back: TubeParams = serde_json::from_str(&json).expect("deserialize");
+        assert!(matches!(back.screen_form, ScreenForm::Classical));
+        assert_eq!(back.mu, 8.8);
+        assert_eq!(back.kg2, 4200.0);
+        assert_eq!(back.alpha_s, 0.0);
+    }
+
+    #[test]
+    fn screen_form_default_is_rational_after_classical_added() {
+        // Regression: adding the Classical variant to the non_exhaustive enum
+        // must not change the Default impl.
+        let sf: ScreenForm = Default::default();
+        assert!(matches!(sf, ScreenForm::Rational));
     }
 }

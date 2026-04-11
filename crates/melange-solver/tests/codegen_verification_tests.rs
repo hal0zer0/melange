@@ -4798,6 +4798,418 @@ fn test_codegen_mixed_pentode_beam_tetrode() {
 }
 
 // ===========================================================================
+// Classical Norman Koren pentode (phase 1a.2) tests
+//
+// Phase 1a.2 adds a third pentode equation family — the original Cohen-Hélie
+// 2010 Classical Koren form with arctan(Vpk/Kvb) plate knee and Vp-independent
+// screen current. Used for tubes without published Reefman Derk fits (KT88,
+// 6550). These tests use the post-IR-mutation pattern established by the
+// beam-tetrode tests to bypass the parser (which has no SCREEN_FORM hook yet
+// — the catalog / resolver lands in a separate file we must not touch).
+//
+// Mutation approach: parse PENTODE_CC_SPICE (EL84 defaults to Rational), build
+// the IR, then flip `screen_form = Classical` and rewrite μ/Ex/Kg1/Kg2/Kp/Kvb
+// to KT88 values. The αs/A/β fields are zeroed to match real Classical catalog
+// entries (the helpers ignore them, but we want the emitted constants to be
+// zero so "Classical has no Derk shape" is visible in the output).
+// ===========================================================================
+
+/// KT88 parameter set (Cohen-Hélie §2 style Classical Koren fit).
+/// μ=8.8, Ex=1.35, Kg1=730, Kg2=4200, Kp=32, Kvb=16, ig_max=10mA, vgk_onset=0.7.
+fn force_classical_kt88(ir: &mut CircuitIR) {
+    use melange_solver::codegen::ir::{DeviceParams, ScreenForm};
+    for slot in ir.device_slots.iter_mut() {
+        if let DeviceParams::Tube(tp) = &mut slot.params {
+            if tp.is_pentode() {
+                tp.screen_form = ScreenForm::Classical;
+                tp.mu = 8.8;
+                tp.ex = 1.35;
+                tp.kg1 = 730.0;
+                tp.kg2 = 4200.0;
+                tp.kp = 32.0;
+                tp.kvb = 16.0;
+                tp.ig_max = 10e-3;
+                tp.vgk_onset = 0.7;
+                tp.alpha_s = 0.0;
+                tp.a_factor = 0.0;
+                tp.beta_factor = 0.0;
+            }
+        }
+    }
+}
+
+/// Classical Koren pentode codegen smoke test: all four helpers must be
+/// emitted when at least one slot is Classical, and the per-device constants
+/// block must still land (even for αs/A/β which are unused by Classical —
+/// they're just emitted as zero, no conditional skip-logic).
+#[test]
+fn test_codegen_classical_pentode_emits_helpers() {
+    let netlist = Netlist::parse(PENTODE_CC_SPICE).expect("parse pentode netlist");
+    let mna = MnaSystem::from_netlist(&netlist).expect("build MNA for pentode");
+    let kernel = DkKernel::from_mna(&mna, 44100.0).expect("build DK kernel for pentode");
+    let config = default_config();
+    let mut ir = CircuitIR::from_kernel(&kernel, &mna, &netlist, &config)
+        .expect("build CircuitIR for Classical pentode");
+    force_classical_kt88(&mut ir);
+
+    let emitter = RustEmitter::new().expect("create RustEmitter");
+    let code = emitter.emit(&ir).expect("emit Classical pentode code");
+
+    // Classical helpers must be emitted (any_classical_pentode == true).
+    assert!(
+        code.contains("fn tube_ip_pentode_classical("),
+        "Classical pentode codegen should emit tube_ip_pentode_classical helper"
+    );
+    assert!(
+        code.contains("fn tube_is_pentode_classical("),
+        "Classical pentode codegen should emit tube_is_pentode_classical helper"
+    );
+    assert!(
+        code.contains("fn tube_jacobian_pentode_classical("),
+        "Classical pentode codegen should emit tube_jacobian_pentode_classical helper"
+    );
+    assert!(
+        code.contains("fn tube_evaluate_pentode_classical("),
+        "Classical pentode codegen should emit tube_evaluate_pentode_classical helper"
+    );
+
+    // Per-device pentode constants (shared: emitted unconditionally for any
+    // pentode regardless of screen_form). αs/A/β land as zero for Classical
+    // — that's fine, the helpers don't read them.
+    assert!(code.contains("DEVICE_0_KG2"));
+    assert!(code.contains("DEVICE_0_ALPHA_S"));
+    assert!(code.contains("DEVICE_0_A_FACTOR"));
+    assert!(code.contains("DEVICE_0_BETA_FACTOR"));
+
+    // NR dispatch must call the Classical combined helper (DK path).
+    assert!(
+        code.contains("tube_evaluate_pentode_classical("),
+        "NR dispatch should call tube_evaluate_pentode_classical for Classical slot"
+    );
+
+    // 3D Jacobian entries (3x3 block at start_idx 0).
+    assert!(
+        code.contains("jdev_0_2"),
+        "3x3 Classical Jacobian should produce jdev_0_2 entry"
+    );
+    assert!(
+        code.contains("jdev_2_0"),
+        "3x3 Classical Jacobian should produce jdev_2_0 entry"
+    );
+}
+
+/// Classical Koren pentode codegen rustc smoke test: the generated module
+/// must parse and type-check.
+#[test]
+fn test_codegen_classical_pentode_compiles() {
+    let netlist = Netlist::parse(PENTODE_CC_SPICE).expect("parse pentode netlist");
+    let mna = MnaSystem::from_netlist(&netlist).expect("build MNA for pentode");
+    let kernel = DkKernel::from_mna(&mna, 44100.0).expect("build DK kernel for pentode");
+    let config = default_config();
+    let mut ir = CircuitIR::from_kernel(&kernel, &mna, &netlist, &config)
+        .expect("build CircuitIR for Classical pentode");
+    force_classical_kt88(&mut ir);
+
+    let emitter = RustEmitter::new().expect("create RustEmitter");
+    let code = emitter.emit(&ir).expect("emit Classical pentode code");
+
+    let tmp_dir = std::env::temp_dir();
+    let tmp_path = tmp_dir.join("melange_codegen_test_classical_pentode.rs");
+    {
+        let mut f = std::fs::File::create(&tmp_path).unwrap();
+        f.write_all(code.as_bytes()).unwrap();
+    }
+
+    let output = std::process::Command::new("rustc")
+        .args(["--edition", "2024", "--crate-type", "lib", "-o"])
+        .arg(tmp_dir.join("melange_codegen_test_classical_pentode.rlib"))
+        .arg(&tmp_path)
+        .output()
+        .expect("failed to run rustc");
+
+    let _ = std::fs::remove_file(&tmp_path);
+    let _ = std::fs::remove_file(tmp_dir.join("melange_codegen_test_classical_pentode.rlib"));
+    let _ = std::fs::remove_file(tmp_dir.join("libmelange_codegen_test_classical_pentode.rlib"));
+
+    assert!(
+        output.status.success(),
+        "Classical pentode codegen failed to compile:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Byte-identity guard: a sharp Rational pentode (EL84) circuit must NOT emit
+/// any Classical helpers or reference the `any_classical_pentode` template
+/// block. Catches accidental template leaks in the new `{% if any_classical_pentode %}`
+/// gating.
+#[test]
+fn test_codegen_sharp_pentode_omits_classical_helpers() {
+    let netlist = Netlist::parse(PENTODE_CC_SPICE).expect("parse pentode netlist");
+    let mna = MnaSystem::from_netlist(&netlist).expect("MNA pentode");
+    let kernel = DkKernel::from_mna(&mna, 44100.0).expect("DK pentode kernel");
+    let codegen = CodeGenerator::new(default_config());
+    let result = codegen
+        .generate(&kernel, &mna, &netlist)
+        .expect("pentode codegen");
+    let code = result.code;
+
+    // Rational pentode path must still emit the phase 1a helpers.
+    assert!(code.contains("fn tube_ip_pentode("));
+    assert!(code.contains("fn tube_evaluate_pentode("));
+
+    // But NOT any of the new Classical helpers.
+    assert!(
+        !code.contains("tube_ip_pentode_classical"),
+        "Rational pentode must NOT emit tube_ip_pentode_classical"
+    );
+    assert!(
+        !code.contains("tube_is_pentode_classical"),
+        "Rational pentode must NOT emit tube_is_pentode_classical"
+    );
+    assert!(
+        !code.contains("tube_jacobian_pentode_classical"),
+        "Rational pentode must NOT emit tube_jacobian_pentode_classical"
+    );
+    assert!(
+        !code.contains("tube_evaluate_pentode_classical"),
+        "Rational pentode must NOT emit tube_evaluate_pentode_classical"
+    );
+}
+
+/// Mixed circuit: one EL84 (Rational) + one KT88 (Classical). Both helper
+/// families must be emitted, and NR dispatch must route each slot to its own
+/// helper. Verifies that the `pentode_dispatch` table correctly returns both
+/// "pentode" and "pentode_classical" suffixes when two slots with different
+/// screen_form values coexist.
+#[test]
+fn test_codegen_mixed_sharp_and_classical_pentode() {
+    use melange_solver::codegen::ir::{DeviceParams, ScreenForm};
+
+    // Mixed netlist: EL84 + a second pentode (we use the EL84 model for both
+    // and then mutate the second slot to Classical/KT88 post-IR).
+    const MIXED_SPICE: &str = "\
+EL84 + KT88 Mixed Sharp/Classical
+Rin in 0 1Meg
+Cin in grid1 100n
+Rg1 grid1 0 1Meg
+P1 plate1 grid1 cathode1 screen1 EL84
+Rk1 cathode1 0 130
+Ck1 cathode1 0 100u
+Rscreen1 vcc screen1 1k
+Cscreen1 screen1 0 47u
+Rp1 vcc plate1 4.7k
+Cinter plate1 grid2 100n
+Rg2 grid2 0 470k
+P2 plate2 grid2 cathode2 screen2 EL84
+Rk2 cathode2 0 130
+Ck2 cathode2 0 100u
+Rscreen2 vcc screen2 1k
+Cscreen2 screen2 0 47u
+Rp2 vcc plate2 5k
+Cout plate2 out 1u
+Rout out 0 100k
+V1 vcc 0 DC 300
+.model EL84 VP(MU=23.36 EX=1.138 KG1=117.4 KG2=1275.0 KP=152.4 KVB=4015.8 ALPHA_S=7.66 A_FACTOR=4.344e-4 BETA_FACTOR=0.148)
+";
+
+    let netlist = Netlist::parse(MIXED_SPICE).expect("parse mixed netlist");
+    let mna = MnaSystem::from_netlist(&netlist).expect("build MNA");
+    let kernel = DkKernel::from_mna(&mna, 44100.0).expect("build DK kernel");
+    let config = default_config();
+    let mut ir = CircuitIR::from_kernel(&kernel, &mna, &netlist, &config)
+        .expect("build CircuitIR for mixed circuit");
+
+    assert_eq!(
+        ir.topology.m, 6,
+        "EL84 + second pentode should produce M=6 nonlinear dimensions"
+    );
+
+    // Flip the SECOND pentode slot to Classical/KT88; leave the first as
+    // Rational EL84. We identify the second slot by its position in the
+    // device_slots vector — both currently use the same EL84 model, so we
+    // count pentode slots and mutate the 2nd one.
+    let mut pentode_idx = 0;
+    let mut num_rational = 0;
+    let mut num_classical = 0;
+    for slot in ir.device_slots.iter_mut() {
+        if let DeviceParams::Tube(tp) = &mut slot.params {
+            if tp.is_pentode() {
+                if pentode_idx == 1 {
+                    // Second pentode → KT88 Classical
+                    tp.screen_form = ScreenForm::Classical;
+                    tp.mu = 8.8;
+                    tp.ex = 1.35;
+                    tp.kg1 = 730.0;
+                    tp.kg2 = 4200.0;
+                    tp.kp = 32.0;
+                    tp.kvb = 16.0;
+                    tp.ig_max = 10e-3;
+                    tp.vgk_onset = 0.7;
+                    tp.alpha_s = 0.0;
+                    tp.a_factor = 0.0;
+                    tp.beta_factor = 0.0;
+                    num_classical += 1;
+                } else {
+                    num_rational += 1;
+                }
+                pentode_idx += 1;
+            }
+        }
+    }
+    assert_eq!(num_rational, 1, "should leave one Rational EL84");
+    assert_eq!(num_classical, 1, "should flip one slot to Classical KT88");
+
+    let emitter = RustEmitter::new().expect("create RustEmitter");
+    let code = emitter.emit(&ir).expect("emit mixed circuit code");
+
+    // Both helper families must be emitted.
+    assert!(
+        code.contains("fn tube_evaluate_pentode("),
+        "mixed circuit must emit tube_evaluate_pentode (Rational, EL84)"
+    );
+    assert!(
+        code.contains("fn tube_evaluate_pentode_classical("),
+        "mixed circuit must emit tube_evaluate_pentode_classical (Classical, KT88)"
+    );
+    assert!(
+        code.contains("fn tube_ip_pentode("),
+        "mixed circuit must emit tube_ip_pentode"
+    );
+    assert!(
+        code.contains("fn tube_ip_pentode_classical("),
+        "mixed circuit must emit tube_ip_pentode_classical"
+    );
+    assert!(
+        code.contains("fn tube_is_pentode("),
+        "mixed circuit must emit tube_is_pentode"
+    );
+    assert!(
+        code.contains("fn tube_is_pentode_classical("),
+        "mixed circuit must emit tube_is_pentode_classical"
+    );
+
+    // NR dispatch must call BOTH helpers. Count `tube_evaluate_pentode(`
+    // carefully: that substring also matches `tube_evaluate_pentode_classical(`
+    // and `tube_evaluate_pentode_v(`, so we subtract those explicitly.
+    let all_pentode_evals = code.matches("tube_evaluate_pentode").count();
+    let classical_calls = code.matches("tube_evaluate_pentode_classical(").count();
+    let varmu_calls = code.matches("tube_evaluate_pentode_v(").count();
+    let rational_calls = all_pentode_evals - classical_calls - varmu_calls;
+    assert!(
+        rational_calls >= 2,
+        "mixed circuit must dispatch at least one NR call to tube_evaluate_pentode \
+         (found {} rational calls incl. definition; helper def + call site ≥ 2)",
+        rational_calls
+    );
+    assert!(
+        classical_calls >= 2,
+        "mixed circuit must dispatch at least one NR call to tube_evaluate_pentode_classical \
+         (found {} classical calls incl. definition; helper def + call site ≥ 2)",
+        classical_calls
+    );
+
+    // Both slots get their own device-constant block (2 pentodes → DEVICE_0 and DEVICE_1).
+    assert!(code.contains("DEVICE_0_KG2"));
+    assert!(code.contains("DEVICE_1_KG2"));
+    assert!(code.contains("DEVICE_0_ALPHA_S"));
+    assert!(code.contains("DEVICE_1_ALPHA_S"));
+
+    // 3D Jacobian columns should exist for BOTH slots.
+    assert!(code.contains("jdev_0_2"));
+    assert!(code.contains("jdev_2_0"));
+    assert!(code.contains("jdev_3_5"));
+    assert!(code.contains("jdev_5_3"));
+}
+
+/// Vp-independence guard: the `tube_is_pentode_classical` helper body must
+/// NOT read `vpk`. Inspect the generated source text and verify the argument
+/// is prefixed with `_` (Rust convention for intentionally unused) — the
+/// helper takes `vpk` only for signature uniformity with the Derk paths but
+/// ignores its value. This encodes Cohen-Hélie §2 Eq 3: Classical Koren
+/// screen current depends on Vgk and Vg2k only.
+#[test]
+fn test_codegen_classical_vp_independent_screen() {
+    let netlist = Netlist::parse(PENTODE_CC_SPICE).expect("parse pentode netlist");
+    let mna = MnaSystem::from_netlist(&netlist).expect("MNA");
+    let kernel = DkKernel::from_mna(&mna, 44100.0).expect("DK kernel");
+    let config = default_config();
+    let mut ir = CircuitIR::from_kernel(&kernel, &mna, &netlist, &config)
+        .expect("build CircuitIR");
+    force_classical_kt88(&mut ir);
+
+    let emitter = RustEmitter::new().expect("create RustEmitter");
+    let code = emitter.emit(&ir).expect("emit Classical pentode code");
+
+    // Extract the body of `tube_is_pentode_classical`. We grep for the
+    // function signature and then scan until the matching closing brace.
+    let sig_marker = "fn tube_is_pentode_classical(";
+    let sig_start = code
+        .find(sig_marker)
+        .expect("tube_is_pentode_classical signature must be present");
+
+    // The signature parameter list should use `_vpk` to mark vpk as unused.
+    let sig_line_end = code[sig_start..]
+        .find('{')
+        .expect("helper body should exist");
+    let sig = &code[sig_start..sig_start + sig_line_end];
+    assert!(
+        sig.contains("_vpk: f64"),
+        "tube_is_pentode_classical signature should bind vpk as `_vpk` \
+         (unused marker), got signature: {}",
+        sig
+    );
+
+    // Scan from the function's opening brace forward and find its matching
+    // closing brace by counting nested braces. This gives us the body text
+    // without any false-positive matches from later functions.
+    let body_start = sig_start + sig_line_end;
+    let mut depth = 0i32;
+    let mut body_end = body_start;
+    for (off, ch) in code[body_start..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    body_end = body_start + off + 1;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    assert!(
+        body_end > body_start,
+        "could not find matching closing brace for tube_is_pentode_classical"
+    );
+    let body = &code[body_start..body_end];
+
+    // The body must NOT reference a bare `vpk` identifier. The `_vpk`
+    // underscore-prefixed form is allowed; any other `vpk` occurrence would
+    // indicate a read. Check by word-boundary scanning: there should be no
+    // standalone `vpk` token outside `_vpk`.
+    //
+    // We do this by searching for `vpk` and asserting every match is
+    // preceded by `_` (so it's part of `_vpk`, not a bare read). We reject
+    // bare-identifier uses like `vpk.` or `vpk ` or `vpk,` or `(vpk`.
+    let mut cursor = 0;
+    while let Some(rel) = body[cursor..].find("vpk") {
+        let abs = cursor + rel;
+        let preceding = if abs == 0 { ' ' } else { body.as_bytes()[abs - 1] as char };
+        // Acceptable: preceding char is `_` (it's `_vpk`) or alphanumeric
+        // (it's part of a longer identifier like `vpk_safe`).
+        assert!(
+            preceding == '_' || preceding.is_alphanumeric(),
+            "tube_is_pentode_classical body must NOT read `vpk` directly (Vp-independent \
+             screen current — Cohen-Hélie Eq 3). Body excerpt starting at offset {}: {:?}",
+            abs,
+            &body[abs.saturating_sub(10)..(abs + 20).min(body.len())]
+        );
+        cursor = abs + 3;
+    }
+}
+
+// ===========================================================================
 // OUTPUT_SCALES non-default tests (H6)
 // ===========================================================================
 

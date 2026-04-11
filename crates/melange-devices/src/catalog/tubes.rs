@@ -432,6 +432,55 @@ pub const PENTODE_CATALOG: &[PentodeCatalogEntry] = &[
         ex_b: 0.978,
         source: "Reefman TubeLib.inc (2016), PenthodeVDE fit (variable-mu DerkE §5)",
     },
+    // KT88 — Classical Koren beam power tetrode.
+    // Cohen-Hélie 2010 DAFx Table 2 (originally Norman Koren 1996).
+    // Uses ScreenForm::Classical — no αs / A / β extensions, no variable-mu blend.
+    // Bare "KT88" name is unambiguous: no KT88 entry exists in the triode CATALOG,
+    // so we skip the "-P" / "-T" suffix convention used by phase 1a / 1a.1 entries.
+    PentodeCatalogEntry {
+        names: &["KT88", "KT-88"],
+        mu: 8.8,
+        ex: 1.35,
+        kg1: 730.0,
+        kg2: 4200.0,
+        kp: 32.0,
+        kvb: 16.0,
+        alpha_s: 0.0, // Classical Koren does not use αs
+        a_factor: 0.0, // Classical does not use A
+        beta_factor: 0.0, // Classical does not use β
+        ig_max: 10e-3,
+        vgk_onset: 0.7,
+        screen_form: ScreenForm::Classical,
+        mu_b: 0.0,
+        svar: 0.0,
+        ex_b: 0.0,
+        source: "Cohen-Hélie 2010 DAFx Table 2 (originally Norman Koren 1996) — Classical Koren fit",
+    },
+    // 6550 — Classical Koren beam power tetrode, US military designation.
+    // Cohen-Hélie 2010 DAFx Table 2 lists KT88 and 6550 with identical parameters
+    // (they are essentially the same tube electrically — 6550 is the US military
+    // designation and KT88 is the Genalex/Marconi civilian name). Kept as a
+    // separate entry for clarity and to let netlists pick either name.
+    // Bare "6550" name is unambiguous: no 6550 entry in the triode CATALOG.
+    PentodeCatalogEntry {
+        names: &["6550", "6550A", "6550C"],
+        mu: 8.8,
+        ex: 1.35,
+        kg1: 730.0,
+        kg2: 4200.0,
+        kp: 32.0,
+        kvb: 16.0,
+        alpha_s: 0.0,
+        a_factor: 0.0,
+        beta_factor: 0.0,
+        ig_max: 10e-3,
+        vgk_onset: 0.7,
+        screen_form: ScreenForm::Classical,
+        mu_b: 0.0,
+        svar: 0.0,
+        ex_b: 0.0,
+        source: "Cohen-Hélie 2010 DAFx Table 2 (originally Norman Koren 1996) — Classical Koren fit",
+    },
 ];
 
 /// Look up a pentode by part number (case-insensitive).
@@ -990,13 +1039,19 @@ mod tests {
             assert!(entry.mu > 0.0, "{}: mu", entry.names[0]);
             assert!(entry.kg1 > 0.0, "{}: kg1", entry.names[0]);
             assert!(entry.kg2 > 0.0, "{}: kg2", entry.names[0]);
-            assert!(entry.alpha_s > 0.0, "{}: alpha_s", entry.names[0]);
+            // Classical Koren pentodes (KT88, 6550) don't use αs / A / β at all
+            // — those are Reefman Derk §4.4 / DerkE §4.5 extensions. Only gate
+            // the αs strict-positive check on the non-Classical screen forms.
+            if !matches!(entry.screen_form, ScreenForm::Classical) {
+                assert!(entry.alpha_s > 0.0, "{}: alpha_s", entry.names[0]);
+            }
             // Sanity-check the rest while we're here
             assert!(entry.ex > 0.0, "{}: ex", entry.names[0]);
             assert!(entry.kp > 0.0, "{}: kp", entry.names[0]);
             assert!(entry.kvb > 0.0, "{}: kvb", entry.names[0]);
             // a_factor and beta_factor are allowed to be exactly 0 — some
-            // Reefman fits pinpoint them at zero (e.g. EF89 has A=0).
+            // Reefman fits pinpoint them at zero (e.g. EF89 has A=0), and
+            // Classical Koren entries have them all at zero by construction.
             // Only require non-negative.
             assert!(entry.a_factor >= 0.0, "{}: a_factor", entry.names[0]);
             assert!(entry.beta_factor >= 0.0, "{}: beta_factor", entry.names[0]);
@@ -1121,5 +1176,170 @@ mod tests {
         assert_eq!(six_l6_t.screen_form, ScreenForm::Exponential);
         assert_eq!(el84p.screen_form, ScreenForm::Rational);
         assert_ne!(six_l6_t.screen_form, el84p.screen_form);
+    }
+
+    // --- Classical Koren pentode catalog tests (phase 1a.2: KT88, 6550) ---
+
+    #[test]
+    fn test_pentode_catalog_kt88_lookup() {
+        let entry = lookup_pentode("KT88").expect("KT88 should resolve");
+        assert_eq!(entry.mu, 8.8);
+        assert_eq!(entry.kg1, 730.0);
+        assert_eq!(entry.kg2, 4200.0);
+        assert_eq!(entry.kp, 32.0);
+        assert_eq!(entry.kvb, 16.0);
+        assert_eq!(entry.ex, 1.35);
+        assert_eq!(entry.alpha_s, 0.0);
+        assert_eq!(entry.screen_form, ScreenForm::Classical);
+    }
+
+    #[test]
+    fn test_pentode_catalog_6550_lookup() {
+        let entry = lookup_pentode("6550").expect("6550 should resolve");
+        // 6550 and KT88 are the same Cohen-Hélie 2010 fit — identical params.
+        let kt88 = lookup_pentode("KT88").expect("KT88 should resolve");
+        assert_eq!(entry.mu, kt88.mu);
+        assert_eq!(entry.ex, kt88.ex);
+        assert_eq!(entry.kg1, kt88.kg1);
+        assert_eq!(entry.kg2, kt88.kg2);
+        assert_eq!(entry.kp, kt88.kp);
+        assert_eq!(entry.kvb, kt88.kvb);
+        assert_eq!(entry.alpha_s, kt88.alpha_s);
+        assert_eq!(entry.a_factor, kt88.a_factor);
+        assert_eq!(entry.beta_factor, kt88.beta_factor);
+        assert_eq!(entry.ig_max, kt88.ig_max);
+        assert_eq!(entry.vgk_onset, kt88.vgk_onset);
+        assert_eq!(entry.screen_form, kt88.screen_form);
+        assert_eq!(entry.mu_b, kt88.mu_b);
+        assert_eq!(entry.svar, kt88.svar);
+        assert_eq!(entry.ex_b, kt88.ex_b);
+    }
+
+    #[test]
+    fn test_pentode_catalog_kt88_alias_kt_dash_88() {
+        let kt88 = lookup_pentode("KT88").expect("KT88 should resolve");
+        let aliased = lookup_pentode("KT-88").expect("KT-88 alias should resolve");
+        // Same &'static slice → guaranteed same entry.
+        assert_eq!(kt88.names.as_ptr(), aliased.names.as_ptr());
+        assert_eq!(kt88.mu, aliased.mu);
+        assert_eq!(kt88.kg1, aliased.kg1);
+        assert_eq!(kt88.screen_form, aliased.screen_form);
+    }
+
+    #[test]
+    fn test_pentode_catalog_6550_aliases() {
+        let base = lookup_pentode("6550").expect("6550 should resolve");
+        let a = lookup_pentode("6550A").expect("6550A alias should resolve");
+        let c = lookup_pentode("6550C").expect("6550C alias should resolve");
+        // All three aliases resolve to the same &'static slice.
+        assert_eq!(base.names.as_ptr(), a.names.as_ptr());
+        assert_eq!(base.names.as_ptr(), c.names.as_ptr());
+        assert_eq!(base.mu, a.mu);
+        assert_eq!(base.mu, c.mu);
+        assert_eq!(base.kg1, a.kg1);
+        assert_eq!(base.kg1, c.kg1);
+        assert_eq!(base.screen_form, ScreenForm::Classical);
+        assert_eq!(a.screen_form, ScreenForm::Classical);
+        assert_eq!(c.screen_form, ScreenForm::Classical);
+    }
+
+    #[test]
+    fn test_pentode_catalog_kt88_case_insensitive() {
+        let lower = lookup_pentode("kt88").expect("lowercase kt88 should resolve");
+        let upper = lookup_pentode("KT88").expect("uppercase KT88 should resolve");
+        assert_eq!(lower.names.as_ptr(), upper.names.as_ptr());
+        assert_eq!(lower.mu, upper.mu);
+        assert_eq!(lower.kg1, upper.kg1);
+        assert_eq!(lower.screen_form, upper.screen_form);
+    }
+
+    #[test]
+    fn test_pentode_catalog_kt88_no_triode_collision() {
+        // No pre-existing KT88 / 6550 entry should live in the triode CATALOG.
+        // Unlike -P / -T suffixed phase-1a/1a.1 entries (which disambiguate from
+        // triode-connected versions), KT88 and 6550 use bare names because there
+        // is no collision to avoid.
+        assert!(
+            lookup("KT88").is_none(),
+            "KT88 must not exist in the triode CATALOG"
+        );
+        assert!(
+            lookup("KT-88").is_none(),
+            "KT-88 must not exist in the triode CATALOG"
+        );
+        assert!(
+            lookup("6550").is_none(),
+            "6550 must not exist in the triode CATALOG"
+        );
+        assert!(
+            lookup("6550A").is_none(),
+            "6550A must not exist in the triode CATALOG"
+        );
+        assert!(
+            lookup("6550C").is_none(),
+            "6550C must not exist in the triode CATALOG"
+        );
+    }
+
+    #[test]
+    fn test_pentode_catalog_classical_entries_have_zero_derk_params() {
+        // Classical Koren (Cohen-Hélie 2010) does not use any of the Reefman
+        // Derk §4.4 / DerkE §4.5 knee extensions or the §5 variable-mu blend.
+        // All of αs / A / β / svar / μ_b / ex_b must be exactly zero.
+        for name in &["KT88", "6550"] {
+            let entry = lookup_pentode(name)
+                .unwrap_or_else(|| panic!("{} should resolve", name));
+            assert_eq!(entry.screen_form, ScreenForm::Classical, "{}: screen_form", name);
+            assert_eq!(entry.alpha_s, 0.0, "{}: alpha_s", name);
+            assert_eq!(entry.a_factor, 0.0, "{}: a_factor", name);
+            assert_eq!(entry.beta_factor, 0.0, "{}: beta_factor", name);
+            assert_eq!(entry.svar, 0.0, "{}: svar", name);
+            assert_eq!(entry.mu_b, 0.0, "{}: mu_b", name);
+            assert_eq!(entry.ex_b, 0.0, "{}: ex_b", name);
+        }
+    }
+
+    #[test]
+    fn test_pentode_catalog_existing_entries_unchanged() {
+        // Byte-identity guard: adding KT88 / 6550 must not disturb any existing
+        // phase-1a (EL84-P, EL34-P, EF86), phase-1a.1 (6L6-T, 6V6GT-T), or
+        // phase-1c (6K7, EF89) entry.
+        let el84p = lookup_pentode("EL84-P").expect("EL84-P should resolve");
+        assert_eq!(el84p.mu, 23.36);
+        assert_eq!(el84p.ex, 1.138);
+        assert_eq!(el84p.kg1, 117.4);
+        assert_eq!(el84p.kg2, 1275.0);
+        assert_eq!(el84p.alpha_s, 7.66);
+        assert_eq!(el84p.screen_form, ScreenForm::Rational);
+
+        let six_l6_t = lookup_pentode("6L6-T").expect("6L6-T should resolve");
+        assert_eq!(six_l6_t.mu, 9.41);
+        assert_eq!(six_l6_t.kg1, 446.6);
+        assert_eq!(six_l6_t.kg2, 6672.5);
+        assert_eq!(six_l6_t.alpha_s, 8.10);
+        assert_eq!(six_l6_t.screen_form, ScreenForm::Exponential);
+
+        let six_k7 = lookup_pentode("6K7").expect("6K7 should resolve");
+        assert_eq!(six_k7.mu, 15.5);
+        assert_eq!(six_k7.kg1, 1407.7);
+        assert_eq!(six_k7.kg2, 8335.8);
+        assert_eq!(six_k7.alpha_s, 4.07);
+        assert_eq!(six_k7.mu_b, 3.4);
+        assert_eq!(six_k7.svar, 0.083);
+        assert_eq!(six_k7.ex_b, 1.223);
+        assert_eq!(six_k7.screen_form, ScreenForm::Rational);
+
+        let ef89 = lookup_pentode("EF89").expect("EF89 should resolve");
+        assert_eq!(ef89.mu, 25.0);
+        assert_eq!(ef89.ex, 1.418);
+        assert_eq!(ef89.kg1, 328.3);
+        assert_eq!(ef89.kg2, 1199.3);
+        assert_eq!(ef89.kvb, 1.0);
+        assert_eq!(ef89.alpha_s, 2.07);
+        assert_eq!(ef89.a_factor, 0.0);
+        assert_eq!(ef89.mu_b, 7.8);
+        assert_eq!(ef89.svar, 0.068);
+        assert_eq!(ef89.ex_b, 0.978);
+        assert_eq!(ef89.screen_form, ScreenForm::Exponential);
     }
 }

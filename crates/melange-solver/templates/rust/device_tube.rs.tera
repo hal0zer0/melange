@@ -850,3 +850,206 @@ fn tube_evaluate_beam_tetrode_v(vgk: f64, vpk: f64, vg2k: f64,
     (ip, ig2, ig1, jac)
 }
 {% endif %}
+{% if any_classical_pentode %}
+
+// =============================================================================
+// Classical Norman Koren pentode (Cohen-Hélie 2010 DAFx, Eqs 1-3, corrected for
+// the missing `/Kg2` divisor in the printed Eq 3). Used as a fallback for tubes
+// without published Reefman Derk fits (KT88, 6550). Differs structurally from
+// the Derk §4.4 Rational form in THREE places:
+//
+//   1. The softplus uses `Vgk/Vg2k` directly — NOT `Vgk/sqrt(Kvb+Vg2k²)`. Kvb is
+//      NOT the softplus denominator in Classical Koren.
+//   2. The plate knee is `arctan(Vpk/Kvb)` — Kvb is the arctan scale.
+//   3. Screen current depends on Vgk and Vg2k only — Vp-independent. This is
+//      the defining feature of Classical Koren pentodes.
+//
+// Parameter count: 6 (μ, Ex, Kg1, Kg2, Kp, Kvb). The αs / A / β fields on
+// TubeParams are ignored here — these helpers do NOT take them as arguments.
+// Grid current Ig1 reuses the existing tube_ig / tube_ig_deriv triode helpers.
+// =============================================================================
+
+/// Classical Koren pentode plate current Ip(Vgk, Vpk, Vg2k).
+///
+///   inner    = Kp · (1/μ + Vgk/Vg2k)
+///   E1       = (Vg2k/Kp) · softplus(inner)
+///   Ip       = (2 · E1^Ex / Kg1) · arctan(Vpk/Kvb)    (softplus-smoothed sgn)
+#[inline(always)]
+fn tube_ip_pentode_classical(vgk: f64, vpk: f64, vg2k: f64,
+                             mu: f64, ex: f64, kg1: f64, kg2: f64,
+                             kp: f64, kvb: f64) -> f64 {
+    let _ = kg2;                        // Vp-independent screen: not used here
+    let vpk_safe = vpk.max(0.0);        // Class A operating region
+    let vg2k_safe = vg2k.max(1e-3);     // Non-physical Vg2k≤0 guard
+    let inner = kp * (1.0 / mu + vgk / vg2k_safe);
+    let softplus = if inner > 20.0 { inner }
+                   else if inner < -20.0 { 0.0 }
+                   else { fast_ln(1.0 + fast_exp(inner)) };
+    let e1 = (vg2k_safe / kp) * softplus;
+    if e1 <= 1e-30 { return 0.0; }
+    let g = (vpk_safe / kvb).atan();
+    2.0 * e1.powf(ex) * g / kg1
+}
+
+/// Classical Koren pentode screen current Ig2(Vgk, Vg2k) — Vp-independent.
+///
+/// Takes `vpk` as an argument purely for helper-signature uniformity with the
+/// Derk paths (`_vpk`); the value is NOT read. Screen current in Classical
+/// Koren depends only on Vgk and Vg2k:
+///
+///   x   = Vg2k/μ + Vgk
+///   Ig2 = x^Ex / Kg2    when x > 0, else 0
+#[inline(always)]
+fn tube_is_pentode_classical(vgk: f64, _vpk: f64, vg2k: f64,
+                             mu: f64, ex: f64, kg1: f64, kg2: f64,
+                             kp: f64, kvb: f64) -> f64 {
+    let _ = kg1;
+    let _ = kp;
+    let _ = kvb;
+    let vg2k_safe = vg2k.max(1e-3);
+    let x = vg2k_safe / mu + vgk;
+    if x <= 0.0 { return 0.0; }
+    x.powf(ex) / kg2
+}
+
+/// Classical Koren pentode 3x3 Jacobian (analytic, Cohen-Hélie 2010).
+///
+/// State order: v = [Vgk, Vpk, Vg2k] → currents i = [Ip, Ig2, Ig1].
+/// Row-major: [dIp/dVgk,  dIp/dVpk,  dIp/dVg2k,
+///             dIg2/dVgk, dIg2/dVpk, dIg2/dVg2k,
+///             dIg1/dVgk, dIg1/dVpk, dIg1/dVg2k].
+///
+/// Sparsity (4 structural zeros):
+///   [1][1] = dIg2/dVpk  = 0  (Vp-independent screen current — defining feature)
+///   [2][1] = dIg1/dVpk  = 0  (Ig1 depends on Vgk only)
+///   [2][2] = dIg1/dVg2k = 0  (Ig1 depends on Vgk only)
+///   [0][1] is NON-zero: arctan(Vpk/Kvb) carries the only Vp dependence of Ip.
+#[inline(always)]
+fn tube_jacobian_pentode_classical(vgk: f64, vpk: f64, vg2k: f64,
+                                   mu: f64, ex: f64, kg1: f64, kg2: f64,
+                                   kp: f64, kvb: f64,
+                                   ig_max: f64, vgk_onset: f64) -> [f64; 9] {
+    let dig1_dvgk = tube_ig_deriv(vgk, ig_max, vgk_onset);
+    let vpk_safe = vpk.max(0.0);
+    let vg2k_safe = vg2k.max(1e-3);
+
+    let inner = kp * (1.0 / mu + vgk / vg2k_safe);
+    let (sigmoid, softplus) = if inner > 20.0 { (1.0, inner) }
+                              else if inner < -20.0 { (0.0, 0.0) }
+                              else {
+                                  let exp_inner = fast_exp(inner);
+                                  (exp_inner / (1.0 + exp_inner), fast_ln(1.0 + exp_inner))
+                              };
+    let e1 = (vg2k_safe / kp) * softplus;
+
+    // Screen current row: Vp-independent, depends on x = Vg2k/μ + Vgk.
+    let x = vg2k_safe / mu + vgk;
+    let (dig2_dvgk, dig2_dvg2k) = if x > 0.0 {
+        let deriv = ex * x.powf(ex - 1.0) / kg2;
+        (deriv, deriv / mu)
+    } else {
+        (0.0, 0.0)
+    };
+
+    if e1 <= 1e-30 {
+        // Ip row zeroed; screen row still has its Vgk / Vg2k contributions
+        // (they don't depend on E1, only on x = Vg2k/μ + Vgk).
+        return [0.0,       0.0, 0.0,
+                dig2_dvgk, 0.0, dig2_dvg2k,
+                dig1_dvgk, 0.0, 0.0];
+    }
+
+    // Ip chain rule.
+    //
+    //   E1 = (Vg2k/Kp) · softplus(inner),  inner = Kp · (1/μ + Vgk/Vg2k)
+    //
+    //   ∂E1/∂Vgk  = (Vg2k/Kp) · sigmoid · (Kp/Vg2k)  = sigmoid
+    //   ∂E1/∂Vg2k = softplus/Kp + (Vg2k/Kp) · sigmoid · (-Kp · Vgk/Vg2k²)
+    //             = softplus/Kp - sigmoid · Vgk / Vg2k
+    let de1_dvgk  = sigmoid;
+    let de1_dvg2k = softplus / kp - sigmoid * vgk / vg2k_safe;
+
+    // Ip0 = 2 · E1^Ex / Kg1
+    let e1_pow_ex = e1.powf(ex);
+    let ip0 = 2.0 * e1_pow_ex / kg1;
+    let dip0_de1 = 2.0 * ex * e1_pow_ex / (e1 * kg1);     // = 2·Ex·E1^(Ex-1)/Kg1
+
+    // G(Vpk) = arctan(Vpk/Kvb);  dG/dVpk = (1/Kvb) / (1 + (Vpk/Kvb)²)
+    let g = (vpk_safe / kvb).atan();
+    let u = vpk_safe / kvb;
+    let dg_dvpk = (1.0 / kvb) / (1.0 + u * u);
+
+    let dip_dvgk  = dip0_de1 * de1_dvgk  * g;
+    let dip_dvpk  = ip0 * dg_dvpk;
+    let dip_dvg2k = dip0_de1 * de1_dvg2k * g;
+
+    [dip_dvgk,  dip_dvpk,  dip_dvg2k,
+     dig2_dvgk, 0.0,       dig2_dvg2k,
+     dig1_dvgk, 0.0,       0.0]
+}
+
+/// Combined Classical Koren pentode evaluation:
+/// returns (Ip, Ig2, Ig1, [9-element row-major Jacobian]).
+///
+/// Shares E1, softplus, sigmoid, e1.powf(ex), arctan(Vpk/Kvb), and x^Ex across
+/// the three currents and the 3x3 Jacobian. Mirrors `tube_evaluate_pentode`
+/// but with the 6-parameter Classical signature.
+#[inline(always)]
+fn tube_evaluate_pentode_classical(vgk: f64, vpk: f64, vg2k: f64,
+                                   mu: f64, ex: f64, kg1: f64, kg2: f64,
+                                   kp: f64, kvb: f64,
+                                   ig_max: f64, vgk_onset: f64) -> (f64, f64, f64, [f64; 9]) {
+    let ig1 = tube_ig(vgk, ig_max, vgk_onset);
+    let dig1_dvgk = tube_ig_deriv(vgk, ig_max, vgk_onset);
+
+    let vpk_safe = vpk.max(0.0);
+    let vg2k_safe = vg2k.max(1e-3);
+
+    // Screen current: Vp-independent. Shared between Ig2 and its Jacobian row.
+    let x = vg2k_safe / mu + vgk;
+    let (ig2, dig2_dvgk, dig2_dvg2k) = if x > 0.0 {
+        let x_pow_ex = x.powf(ex);
+        let deriv = ex * x_pow_ex / (x * kg2);            // = Ex·x^(Ex-1)/Kg2
+        (x_pow_ex / kg2, deriv, deriv / mu)
+    } else {
+        (0.0, 0.0, 0.0)
+    };
+
+    let inner = kp * (1.0 / mu + vgk / vg2k_safe);
+    let (sigmoid, softplus) = if inner > 20.0 { (1.0, inner) }
+                               else if inner < -20.0 { (0.0, 0.0) }
+                               else {
+                                   let exp_inner = fast_exp(inner);
+                                   (exp_inner / (1.0 + exp_inner), fast_ln(1.0 + exp_inner))
+                               };
+    let e1 = (vg2k_safe / kp) * softplus;
+    if e1 <= 1e-30 {
+        return (0.0, ig2, ig1,
+                [0.0,       0.0, 0.0,
+                 dig2_dvgk, 0.0, dig2_dvg2k,
+                 dig1_dvgk, 0.0, 0.0]);
+    }
+
+    // Shared: E1^Ex once, derive E1^(Ex-1) as E1^Ex / E1.
+    let e1_pow_ex = e1.powf(ex);
+    let g = (vpk_safe / kvb).atan();
+    let u = vpk_safe / kvb;
+    let dg_dvpk = (1.0 / kvb) / (1.0 + u * u);
+
+    let ip0 = 2.0 * e1_pow_ex / kg1;
+    let ip = ip0 * g;
+
+    let dip0_de1 = 2.0 * ex * e1_pow_ex / (e1 * kg1);
+    let de1_dvgk  = sigmoid;
+    let de1_dvg2k = softplus / kp - sigmoid * vgk / vg2k_safe;
+
+    let dip_dvgk  = dip0_de1 * de1_dvgk  * g;
+    let dip_dvpk  = ip0 * dg_dvpk;
+    let dip_dvg2k = dip0_de1 * de1_dvg2k * g;
+
+    (ip, ig2, ig1,
+     [dip_dvgk,  dip_dvpk,  dip_dvg2k,
+      dig2_dvgk, 0.0,       dig2_dvg2k,
+      dig1_dvgk, 0.0,       0.0])
+}
+{% endif %}

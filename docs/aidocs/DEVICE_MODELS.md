@@ -348,6 +348,79 @@ backward compat.
 DerkE fit. Deferred to phase 1a.2 (Cohen-Hélie classical Koren bootstrap)
 or phase 1d (datasheet refit from RCA/Genalex manuals).
 
+### Classical Variant — Norman Koren 1996 / Cohen-Hélie 2010 §3.2
+
+Shipped in phase 1a.2 as a **third screen form** for pentodes without
+publicly-available Reefman Derk fits (KT88, 6550). Fundamentally different
+equation family from Derk §4.4 / DerkE §4.5 — NOT a parameter reduction:
+
+```
+inner  = Kp · (1/μ + Vgk / Vg2k)          // Vgk/Vg2k directly (NOT sqrt(Kvb+Vg2k²))
+E1     = (Vg2k / Kp) · softplus(inner)
+Ip     = (2 · E1^Ex / Kg1) · arctan(Vpk / Kvb)    // Kvb is the arctan knee scale
+Ig2    = (Vg2k/μ + Vgk)^Ex / Kg2                  // Vp-INDEPENDENT
+```
+
+(Cohen-Hélie 2010 Eq 3 in the published paper is missing the `/Kg2` divisor;
+the corrected form — matching Norman Koren's 1996 original — is what melange
+implements. See `memory/pentode_equations.md` for the verification.)
+
+Uses only 6 parameters: **μ, Ex, Kg1, Kg2, Kp, Kvb**. The `alpha_s/a_factor/
+beta_factor` fields on `TubeParams` are ignored when `screen_form == Classical`.
+
+**Key structural differences** from Derk/DerkE:
+
+| | Derk §4.4 (phase 1a) | DerkE §4.5 (phase 1a.1) | Classical (phase 1a.2) |
+|---|---|---|---|
+| E1 softplus denominator | `sqrt(Kvb + Vg2²)` | `sqrt(Kvb + Vg2²)` | `Vg2` (direct) |
+| Plate-voltage knee | F(Vp) rational | F(Vp) exponential | `arctan(Vpk/Kvb)` |
+| Kvb's role | softplus denom | softplus denom | **arctan knee scale** |
+| Ig2 Vp-dependence | rational `1/(1+β·Vp)` | exponential `exp(-(β·Vp)^{3/2})` | **none** (Vp-independent) |
+| Parameter count | 9 (μ,Ex,Kg1,Kg2,Kp,Kvb,αs,A,β) | 9 | 6 (μ,Ex,Kg1,Kg2,Kp,Kvb) |
+
+### Classical validation rules (phase 1a.2)
+
+- `alpha_s` must NOT be required when Classical — the Derk-specific αs>0
+  invariant is relaxed. `a_factor` and `beta_factor` are also unused.
+- `(ScreenForm::Classical, svar > 0)` is **rejected** at both the resolver
+  and validator level. Reefman §5 two-section Koren is built on the Derk
+  softplus structure; translating it to the Classical arctan-knee form is
+  not implemented (and no known tube needs this combination).
+- `.model ... VP(SCREEN_FORM=2 ...)` is the `.model`-directive escape hatch
+  for hand-rolled Classical pentodes. Catalog entries (KT88, 6550) set
+  `screen_form: Classical` automatically via `lookup_pentode`.
+
+### Classical Catalog Parameters (from Cohen-Hélie 2010 DAFx Table 2)
+
+| Tube | μ | Ex | Kg1 | Kg2 | Kp | Kvb | Source |
+|------|---|-----|-----|-----|-----|-----|--------|
+| KT88 | 8.8 | 1.35 | 730 | 4200 | 32 | 16 | Cohen-Hélie / Norman Koren 1996 |
+| 6550 | 8.8 | 1.35 | 730 | 4200 | 32 | 16 | Cohen-Hélie / Norman Koren 1996 |
+
+KT88 and 6550 share the fit per Cohen-Hélie Table 2 — electrically the same
+tube (Genalex KT88 and GE 6550 are functionally equivalent beam tetrodes).
+Catalog aliases: `KT88`/`KT-88`, `6550`/`6550A`/`6550C`.
+
+**Known calibration offset**: Cohen-Hélie's Kg1 gives roughly 2× the
+datasheet idle plate current (same issue that shows up in the 12AX7
+Kg1=1060 vs 12AX7F Kg1=3000 fits documented in `catalog/tubes.rs`). KT88 Ip
+at the canonical Class AB bias (Vgk=-20, Vpk=350, Vg2k=300) computes to
+~176 mA, vs ~60-80 mA on the real tube. Accept this as a calibration offset
+— phase 1d can refit from datasheet curves if anyone actually ships a KT88
+amp.
+
+### Known limitation of Classical
+
+**Screen current is Vp-independent**. Under hard plate clipping the real
+tube's screen current rises as Vp falls — that's part of why Reefman's
+Derk §4.4 `αs/(1+β·Vp)` term exists. Classical Koren doesn't model this.
+Under moderate clipping the audible difference is small; under hard clip
+(plate swung well below knee) the screen draws less current in the
+simulation than it would in hardware, so the simulated amp stays slightly
+cleaner on peaks than the real thing. Not catastrophic. Upgrade path is
+phase 1d: measure KT88 screen family on a uTracer and refit to Derk or
+DerkE per `ExtractModel` methodology.
+
 ### Variable-Mu Variant — Reefman §5 Two-Section Koren
 
 Remote-cutoff ("variable-mu") pentodes (6K7, 6BA6, 6SK7, EF89) and twin

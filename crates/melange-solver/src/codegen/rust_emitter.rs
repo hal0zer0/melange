@@ -402,43 +402,117 @@ fn emit_device_const(code: &mut String, dev_num: usize, suffix: &str, value: f64
     ));
 }
 
-/// Resolve the pentode-family helper name and variable-mu trailing argument
-/// list for a given tube slot.
+/// Arguments for a pentode helper call, computed once per slot and shared
+/// across the DK, nodal-Schur, and nodal-full-LU codegen paths.
 ///
-/// Returns `(helper_suffix, extra_args)` where:
+/// Every `tube_*_<suffix>(..)` helper in `device_tube.rs.tera` has a fixed
+/// parameter order for a given `screen_form`, but the parameter COUNT and
+/// CONTENT differs between families:
 ///
-/// - `helper_suffix` selects the Rust helper family emitted in
-///   `templates/rust/device_tube.rs.tera`:
-///     * `"pentode"`         → sharp Derk §4.4 (true pentodes: EL84, EL34, EF86)
-///     * `"beam_tetrode"`    → sharp DerkE §4.5 (beam tetrodes: 6L6GC, 6V6GT)
-///     * `"pentode_v"`       → §5 two-section Koren + Derk screen (6K7 class)
-///     * `"beam_tetrode_v"`  → §5 two-section Koren + DerkE screen (EF89 class)
+///   - Derk §4.4 Rational / DerkE §4.5 Exponential: 14 args
+///     (μ, Ex, Kg1, Kg2, Kp, Kvb, αs, A, β, ig_max, vgk_onset + v/v/v)
+///   - §5 variable-mu on either Derk base: +3 args (μ_b, svar, ex_b)
+///   - Classical Norman Koren: only 11 args (no αs/A/β — those fields are
+///     ignored entirely by the Classical helpers; the signature is
+///     μ, Ex, Kg1, Kg2, Kp, Kvb, ig_max, vgk_onset + v/v/v)
 ///
-/// - `extra_args` is empty for sharp slots and
-///   `", DEVICE_{n}_MU_B, DEVICE_{n}_SVAR, DEVICE_{n}_EX_B"` for variable-mu
-///   slots — the leading comma lets callers concatenate it to the end of
-///   the shared sharp-path argument list without branching.
-///
-/// Used by every pentode NR dispatch site (DK Schur, nodal Schur, full LU,
-/// nodal final-eval). The 4-way match is evaluated at codegen time — the
-/// generated Rust code has no runtime branch on `screen_form` or `svar`.
+/// Separating the `eval_args`, `ip_args`, `is_args` fields lets each call
+/// site stitch together the matching helper signature without re-deriving
+/// the `screen_form` decision. `ip_args` and `is_args` omit `ig_max`/
+/// `vgk_onset` because `tube_ip_*` / `tube_is_*` helpers take only the
+/// plate/screen parameters (grid current lives in the separate `tube_ig`).
+struct PentodeDispatch {
+    /// Helper family suffix: `pentode`, `beam_tetrode`, `pentode_v`,
+    /// `beam_tetrode_v`, or `pentode_classical`.
+    suffix: &'static str,
+    /// Full argument list (AFTER the `v_d{s}, v_d{s1}, v_d{s2}` voltage
+    /// triple) for a `tube_evaluate_{suffix}(..)` call. Includes trailing
+    /// commas for each arg; the caller supplies only the voltage prefix.
+    eval_args: String,
+    /// Full argument list for `tube_ip_{suffix}(..)` calls from the nodal
+    /// full-LU final `i_nl` stamping pass.
+    ip_args: String,
+    /// Full argument list for `tube_is_{suffix}(..)` calls from the nodal
+    /// full-LU final `i_nl` stamping pass.
+    is_args: String,
+}
+
 fn pentode_dispatch(
     tp: &crate::device_types::TubeParams,
     dev_num: usize,
-) -> (&'static str, String) {
+) -> PentodeDispatch {
     use crate::device_types::ScreenForm;
-    let helper_suffix = match (tp.screen_form, tp.is_variable_mu()) {
+    let suffix = match (tp.screen_form, tp.is_variable_mu()) {
         (ScreenForm::Rational, false) => "pentode",
         (ScreenForm::Exponential, false) => "beam_tetrode",
+        (ScreenForm::Classical, false) => "pentode_classical",
         (ScreenForm::Rational, true) => "pentode_v",
         (ScreenForm::Exponential, true) => "beam_tetrode_v",
+        (ScreenForm::Classical, true) => {
+            // Variable-mu + Classical is rejected by `TubeParams::validate()`
+            // — Reefman §5 is built on the Derk softplus structure, not the
+            // Classical arctan knee. If we reach this branch the validator
+            // is broken; fail loud rather than emit junk helper names.
+            unreachable!(
+                "variable-mu Classical Koren pentode should be rejected by TubeParams::validate()"
+            );
+        }
     };
-    let extra_args = if tp.is_variable_mu() {
+
+    // Variable-mu suffix (appended to Derk base args). Empty for sharp.
+    let vmu_suffix = if tp.is_variable_mu() {
         format!(", DEVICE_{dev_num}_MU_B, DEVICE_{dev_num}_SVAR, DEVICE_{dev_num}_EX_B")
     } else {
         String::new()
     };
-    (helper_suffix, extra_args)
+
+    let (eval_args, ip_args, is_args) = match tp.screen_form {
+        ScreenForm::Rational | ScreenForm::Exponential => {
+            // Derk / DerkE family: full 11-arg plate-model signature +
+            // ig_max/vgk_onset for the combined evaluate form.
+            let shared = format!(
+                "state.device_{dev_num}_mu, state.device_{dev_num}_ex, \
+                 state.device_{dev_num}_kg1, DEVICE_{dev_num}_KG2, \
+                 state.device_{dev_num}_kp, state.device_{dev_num}_kvb, \
+                 DEVICE_{dev_num}_ALPHA_S, DEVICE_{dev_num}_A_FACTOR, \
+                 DEVICE_{dev_num}_BETA_FACTOR"
+            );
+            let eval = format!(
+                "{shared}, state.device_{dev_num}_ig_max, \
+                 state.device_{dev_num}_vgk_onset{vmu_suffix}"
+            );
+            let ip = format!("{shared}{vmu_suffix}");
+            // tube_is_* drops the A_FACTOR but keeps the rest; mirror the
+            // helper signature by reconstructing the `is` arg list directly.
+            let is = format!(
+                "state.device_{dev_num}_mu, state.device_{dev_num}_ex, \
+                 state.device_{dev_num}_kg1, DEVICE_{dev_num}_KG2, \
+                 state.device_{dev_num}_kp, state.device_{dev_num}_kvb, \
+                 DEVICE_{dev_num}_ALPHA_S, DEVICE_{dev_num}_BETA_FACTOR{vmu_suffix}"
+            );
+            (eval, ip, is)
+        }
+        ScreenForm::Classical => {
+            // Classical Koren: 6-parameter signature (μ, Ex, Kg1, Kg2, Kp,
+            // Kvb). No αs/A/β — those fields are unused by this equation
+            // family and MUST NOT be passed to the helper functions.
+            let shared = format!(
+                "state.device_{dev_num}_mu, state.device_{dev_num}_ex, \
+                 state.device_{dev_num}_kg1, DEVICE_{dev_num}_KG2, \
+                 state.device_{dev_num}_kp, state.device_{dev_num}_kvb"
+            );
+            let eval = format!(
+                "{shared}, state.device_{dev_num}_ig_max, \
+                 state.device_{dev_num}_vgk_onset"
+            );
+            // tube_ip_pentode_classical / tube_is_pentode_classical take the
+            // same 6-parameter plate-model list (no ig_max/vgk_onset).
+            let ip_is = shared.clone();
+            (eval, ip_is.clone(), ip_is)
+        }
+    };
+
+    PentodeDispatch { suffix, eval_args, ip_args, is_args }
 }
 
 // ============================================================================
@@ -1296,16 +1370,22 @@ impl RustEmitter {
             code.push_str(&self.render("device_mosfet", &Context::new())?);
         }
         if has_tube {
-            // Four Tera guards for pentode-family tubes:
+            // Five Tera guards for pentode-family tubes:
             //   any_pentode            — sharp Rational (Derk §4.4): EL84/EL34/EF86
             //   any_beam_tetrode       — sharp Exponential (DerkE §4.5): 6L6GC/6V6GT
             //   any_variable_mu_pentode       — §5 two-section Rational: 6K7
             //   any_variable_mu_beam_tetrode  — §5 two-section Exponential: EF89
+            //   any_classical_pentode  — Classical Norman Koren (Cohen-Hélie §2): KT88/6550
             //
             // Byte-identity guarantee: a circuit containing only non-pentode tubes
-            // (pure-triode) has all four false and emits the phase-1a triode block
+            // (pure-triode) has all five false and emits the phase-1a triode block
             // unchanged. A circuit containing only sharp pentodes (svar=0) has
-            // `any_variable_mu_*` false and emits phase-1a.1 output byte-identical.
+            // `any_variable_mu_*` and `any_classical_pentode` false and emits
+            // phase-1a.1 output byte-identical. A pure-Derk (Rational/Exponential)
+            // circuit has `any_classical_pentode` false and emits phase-1c output
+            // byte-identical. Variable-mu Classical is rejected by
+            // `TubeParams::validate()`, so no `any_variable_mu_classical_pentode`
+            // flag exists.
             let any_pentode = ir.device_slots.iter().any(|slot| {
                 matches!(&slot.params, DeviceParams::Tube(tp)
                     if tp.is_pentode()
@@ -1330,6 +1410,11 @@ impl RustEmitter {
                         && matches!(tp.screen_form, crate::device_types::ScreenForm::Exponential)
                         && tp.is_variable_mu())
             });
+            let any_classical_pentode = ir.device_slots.iter().any(|slot| {
+                matches!(&slot.params, DeviceParams::Tube(tp)
+                    if tp.is_pentode()
+                        && matches!(tp.screen_form, crate::device_types::ScreenForm::Classical))
+            });
             let mut tube_ctx = Context::new();
             tube_ctx.insert("any_pentode", &any_pentode);
             tube_ctx.insert("any_beam_tetrode", &any_beam_tetrode);
@@ -1338,6 +1423,7 @@ impl RustEmitter {
                 "any_variable_mu_beam_tetrode",
                 &any_variable_mu_beam_tetrode,
             );
+            tube_ctx.insert("any_classical_pentode", &any_classical_pentode);
             code.push_str(&self.render("device_tube", &tube_ctx)?);
         }
         if has_vca {
@@ -3553,12 +3639,16 @@ impl RustEmitter {
                         if tp.is_pentode() {
                             // Pentode / beam tetrode: 3D NR block
                             // (Vgk → Ip, Vpk → Ig2, Vg2k → Ig1). See
-                            // [`pentode_dispatch`] for the 4-way helper family
-                            // selection.
+                            // [`pentode_dispatch`] for the 5-way helper family
+                            // selection (Rational / Exponential / Classical
+                            // × sharp / variable-mu, minus the rejected
+                            // Classical + variable-mu combo).
                             let s2 = s + 2;
-                            let (helper_suffix, extra_args) = pentode_dispatch(tp, d);
+                            let dispatch = pentode_dispatch(tp, d);
+                            let helper_suffix = dispatch.suffix;
+                            let eval_args = &dispatch.eval_args;
                             code.push_str(&format!(
-                                "        let (i_dev{s}, i_dev{s1}, i_dev{s2}, pentode{d}_jac) = tube_evaluate_{helper_suffix}(v_d{s}, v_d{s1}, v_d{s2}, state.device_{d}_mu, state.device_{d}_ex, state.device_{d}_kg1, DEVICE_{d}_KG2, state.device_{d}_kp, state.device_{d}_kvb, DEVICE_{d}_ALPHA_S, DEVICE_{d}_A_FACTOR, DEVICE_{d}_BETA_FACTOR, state.device_{d}_ig_max, state.device_{d}_vgk_onset{extra_args});\n"
+                                "        let (i_dev{s}, i_dev{s1}, i_dev{s2}, pentode{d}_jac) = tube_evaluate_{helper_suffix}(v_d{s}, v_d{s1}, v_d{s2}, {eval_args});\n"
                             ));
                             // Row-major 3x3 Jacobian: [dIp/dVgk, dIp/dVpk, dIp/dVg2k,
                             //                          dIg2/dVgk, dIg2/dVpk, dIg2/dVg2k,
@@ -7234,9 +7324,11 @@ impl RustEmitter {
                 let s1 = s + 1;
                 if tp.is_pentode() {
                     let s2 = s + 2;
-                    let (helper_suffix, extra_args) = pentode_dispatch(tp, d);
+                    let dispatch = pentode_dispatch(tp, d);
+                    let helper_suffix = dispatch.suffix;
+                    let eval_args = &dispatch.eval_args;
                     code.push_str(&format!(
-                        "{indent}let (i_dev{s}, i_dev{s1}, i_dev{s2}, pentode{d}_jac) = tube_evaluate_{helper_suffix}(v_d{s}, v_d{s1}, v_d{s2}, state.device_{d}_mu, state.device_{d}_ex, state.device_{d}_kg1, DEVICE_{d}_KG2, state.device_{d}_kp, state.device_{d}_kvb, DEVICE_{d}_ALPHA_S, DEVICE_{d}_A_FACTOR, DEVICE_{d}_BETA_FACTOR, state.device_{d}_ig_max, state.device_{d}_vgk_onset{extra_args});\n"
+                        "{indent}let (i_dev{s}, i_dev{s1}, i_dev{s2}, pentode{d}_jac) = tube_evaluate_{helper_suffix}(v_d{s}, v_d{s1}, v_d{s2}, {eval_args});\n"
                     ));
                     code.push_str(&format!(
                         "{indent}let jdev_{s}_{s} = pentode{d}_jac[0];\n\
@@ -9603,20 +9695,22 @@ impl RustEmitter {
                     if tp.is_pentode() {
                         // Pentode / beam tetrode 3D NR block
                         // (Vgk → Ip, Vpk → Ig2, Vg2k → Ig1). See
-                        // [`pentode_dispatch`] for the 4-way helper family.
+                        // [`pentode_dispatch`] for the 5-way helper family.
                         let s2 = s + 2;
                         let jd_02 = s * m + s2;
                         let jd_12 = s1 * m + s2;
                         let jd_20 = s2 * m + s;
                         let jd_21 = s2 * m + s1;
                         let jd_22 = s2 * m + s2;
-                        let (helper_suffix, extra_args) = pentode_dispatch(tp, dev_num);
+                        let dispatch = pentode_dispatch(tp, dev_num);
+                        let helper_suffix = dispatch.suffix;
+                        let eval_args = &dispatch.eval_args;
                         code.push_str(&format!(
                             "{indent}{{ // Pentode {dev_num}\n\
                              {indent}    let vgk = v_nl[{s}];\n\
                              {indent}    let vpk = v_nl[{s1}];\n\
                              {indent}    let vg2k = v_nl[{s2}];\n\
-                             {indent}    let (ip_t, ig2_t, ig1_t, jac) = tube_evaluate_{helper_suffix}(vgk, vpk, vg2k, state.device_{dev_num}_mu, state.device_{dev_num}_ex, state.device_{dev_num}_kg1, DEVICE_{dev_num}_KG2, state.device_{dev_num}_kp, state.device_{dev_num}_kvb, DEVICE_{dev_num}_ALPHA_S, DEVICE_{dev_num}_A_FACTOR, DEVICE_{dev_num}_BETA_FACTOR, state.device_{dev_num}_ig_max, state.device_{dev_num}_vgk_onset{extra_args});\n\
+                             {indent}    let (ip_t, ig2_t, ig1_t, jac) = tube_evaluate_{helper_suffix}(vgk, vpk, vg2k, {eval_args});\n\
                              {indent}    i_nl[{s}] = ip_t; i_nl[{s1}] = ig2_t; i_nl[{s2}] = ig1_t;\n\
                              {indent}    j_dev[{jd_ss}] = jac[0];\n\
                              {indent}    j_dev[{jd_01}] = jac[1];\n\
@@ -9763,10 +9857,13 @@ impl RustEmitter {
                     let s1 = s + 1;
                     if tp.is_pentode() {
                         let s2 = s + 2;
-                        let (helper_suffix, extra_args) = pentode_dispatch(tp, dev_num);
+                        let dispatch = pentode_dispatch(tp, dev_num);
+                        let helper_suffix = dispatch.suffix;
+                        let ip_args = &dispatch.ip_args;
+                        let is_args = &dispatch.is_args;
                         code.push_str(&format!(
-                            "{indent}i_nl[{s}] = tube_ip_{helper_suffix}(v_nl_final[{s}], v_nl_final[{s1}], v_nl_final[{s2}], state.device_{dev_num}_mu, state.device_{dev_num}_ex, state.device_{dev_num}_kg1, DEVICE_{dev_num}_KG2, state.device_{dev_num}_kp, state.device_{dev_num}_kvb, DEVICE_{dev_num}_ALPHA_S, DEVICE_{dev_num}_A_FACTOR, DEVICE_{dev_num}_BETA_FACTOR{extra_args});\n\
-                             {indent}i_nl[{s1}] = tube_is_{helper_suffix}(v_nl_final[{s}], v_nl_final[{s1}], v_nl_final[{s2}], state.device_{dev_num}_mu, state.device_{dev_num}_ex, state.device_{dev_num}_kg1, DEVICE_{dev_num}_KG2, state.device_{dev_num}_kp, state.device_{dev_num}_kvb, DEVICE_{dev_num}_ALPHA_S, DEVICE_{dev_num}_BETA_FACTOR{extra_args});\n\
+                            "{indent}i_nl[{s}] = tube_ip_{helper_suffix}(v_nl_final[{s}], v_nl_final[{s1}], v_nl_final[{s2}], {ip_args});\n\
+                             {indent}i_nl[{s1}] = tube_is_{helper_suffix}(v_nl_final[{s}], v_nl_final[{s1}], v_nl_final[{s2}], {is_args});\n\
                              {indent}i_nl[{s2}] = tube_ig(v_nl_final[{s}], state.device_{dev_num}_ig_max, state.device_{dev_num}_vgk_onset);\n"
                         ));
                     } else if tp.has_rgi() {

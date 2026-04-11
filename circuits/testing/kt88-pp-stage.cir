@@ -1,0 +1,143 @@
+* KT88 Push-Pull Output Stage (Classical Koren pentode validation)
+* Copyright (c) 2026 Melange Contributors
+* License: MIT OR Apache-2.0
+*
+* Phase 1a.2 validation target for melange's Classical Norman Koren
+* pentode math (Cohen-Hélie 2010 DAFx Eqs 1-3). Minimal KT88 push-pull
+* output stage: single 12AX7 input stage → 12AX7 cathodyne PI → 2× KT88
+* Class AB push-pull into a Hammond-style OT.
+*
+* This is a smoke-test circuit, not a clone of any specific amp. The
+* KT88 PP topology matches the output section of Marshall Major, Ampeg
+* SVT, Hiwatt DR103, Sunn Model T, and other "big amp" designs, but
+* without their full preamp chains.
+*
+* Exercises:
+*   - Parser / resolver picks up the bare `KT88` catalog alias
+*   - Catalog returns `PentodeCatalogEntry` with `screen_form: Classical`
+*   - `resolve_pentode_params` routes to the Classical codepath,
+*     skipping the Derk αs>0 requirement
+*   - MNA stamps a 3D pentode slot (same topology as sharp/var-mu)
+*   - DC-OP converges using the new `plate_current_classical` /
+*     `screen_current_classical` / `jacobian_3x3_classical` methods
+*   - Codegen emits `tube_ip_pentode_classical` helpers under the
+*     `{% if any_classical_pentode %}` Tera guard
+*   - Per-sample NR stays stable across 480 samples with zero
+*     max-iter hits and zero NaN resets
+*
+* Topology:
+*
+*     VIN → Cin → Rg → [12AX7 V1] → pa_v1
+*                                    ↓ Cc1
+*                                   pi_in → [12AX7 cathodyne] → pi_p / pi_k
+*                                              ↓ Cc_p           ↓ Cc_k
+*                                           el1_g            el2_g
+*                                              ↓                ↓
+*                                          [KT88 P_e1]      [KT88 P_e2]
+*                                              ↓                ↓
+*                                           pa_1              pa_2
+*                                              └──── OT ───────┘
+*                                                      ↓
+*                                                    8 Ω load
+*
+* Target bias points (KT88 Class AB, typical big-amp operation):
+*   V1 (12AX7):   Vgk ≈ -1.5 V, Vpk ≈ 200 V, Ip ≈ 0.9 mA
+*   12AX7 PI:     Vgk ≈ -3 V,   Vpk ≈ 260 V, Ip ≈ 0.8 mA
+*   KT88:         Vgk ≈ -40 V,  Vpk ≈ 480 V, Vg2 ≈ 400 V, Ip ≈ 60 mA per tube
+*   Shared cathode bias Rk_pp ≈ 300 Ω drops ~36 V at 120 mA idle current.
+*
+* Real KT88 amps run much higher B+ (550-650 V) than my 480 V supply
+* here. I'm using a lower-voltage bias point to stay well within the
+* NR-stable envelope for a smoke test. Realistic bias would push Ip to
+* ~100 mA per tube and need hotter cathode-biasing.
+
+* -------------- Models --------------
+* 12AX7 — existing Koren triode fit (phase 1a)
+.model 12AX7 TRIODE(MU=100 EX=1.4 KG1=3000 KP=600 KVB=300)
+
+* KT88 — references the PENTODE_CATALOG `KT88` Classical Koren entry
+* added in phase 1a.2. The catalog carries the Cohen-Hélie 2010 Table 2
+* fit (μ=8.8, Ex=1.35, Kg1=730, Kg2=4200, Kp=32, Kvb=16) and sets
+* `screen_form: ScreenForm::Classical`. Resolver auto-picks the
+* Classical codepath from the catalog.
+.model KT88 VP()
+
+* -------------- Supplies --------------
+* B+ rail (480 V typical "cool" KT88 amp — real Marshall Major uses
+* 560 V and real Ampeg SVT uses 650 V, but 480 V is a safer starting
+* point for a validation circuit)
+VCC vcc 0 DC 480
+
+* -------------- V1: 12AX7 input stage --------------
+Cin    in    v1_g  22n
+Rg_v1  v1_g  0     1Meg
+
+T_v1   v1_g  v1_p  v1_k  12AX7
+
+Ra_v1  vcc   v1_p  220k
+Rk_v1  v1_k  0     1.5k
+Ck_v1  v1_k  0     25u
+
+* -------------- Interstage coupling --------------
+Cc1    v1_p  pi_in 22n
+Rg_pi  pi_in 0     1Meg
+
+* -------------- V2: 12AX7 cathodyne phase inverter --------------
+T_pi   pi_in pi_p  pi_k  12AX7
+
+Ra_pi  vcc   pi_p  100k
+Rk_pi  pi_k  0     100k
+
+* -------------- PI → KT88 push-pull drive --------------
+Cc_p   pi_p  el1_g 22n
+Cc_k   pi_k  el2_g 22n
+
+* Grid leaks (KT88 grid return resistance per datasheet: 220k max for
+* fixed bias, 470k max for self-bias; we use 470k)
+Rg_e1  el1_g 0     470k
+Rg_e2  el2_g 0     470k
+
+* -------------- KT88 push-pull output stage --------------
+* Both KT88s share a common cathode resistor (cathode-biased Class AB).
+P_e1   pa_1  el1_g ck_pp  sc_pp  KT88
+P_e2   pa_2  el2_g ck_pp  sc_pp  KT88
+
+* Shared screen bus with 1k dropping resistor from B+
+Rg2_pp vcc    sc_pp  1k
+Cg2_pp sc_pp  0      47u
+
+* Shared cathode bias (300 Ω drops ~36 V at 120 mA idle)
+Rk_pp  ck_pp  0      300
+Ck_pp  ck_pp  0      100u
+
+* -------------- Output Transformer (Hammond-style KT88 PP) --------------
+* Zpri ≈ 4.5 kΩ plate-to-plate (classic KT88 PP load line at high B+).
+* L_pri total ≈ 80 H, split 50/50 at center tap → 20 H per half.
+* Np/Ns = sqrt(4500 / 8) ≈ 23.7.
+* L_sec = L_pri_half × (Ns/Np)² ≈ 20 × (1/23.7)² ≈ 0.0356 H ≈ 36 mH.
+* DCR: ~300 Ω per primary half (KT88 OT is beefier than EL84),
+* ~0.4 Ω secondary.
+* K = 0.9999, same Pultec precedent as AC15 / Tweed Deluxe.
+
+* Center tap to B+ — primary IS the plate load
+R_opt_ct   vcc    ot_ct   1m
+
+* Push-pull primary halves through winding DCR
+R_dcr_a    pa_1   pa_1_w  300
+R_dcr_b    pa_2   pa_2_w  300
+L_pri_a    pa_1_w ot_ct   20
+L_pri_b    ot_ct  pa_2_w  20
+
+* Secondary through winding DCR, returned to ground
+R_dcr_sec  out_w  out     0.4
+L_sec      out_w  0       36m
+
+* 8 Ω speaker load
+Rload      out    0       8
+
+* Primary halves mutually coupled + both coupled to secondary
+K_a_sec    L_pri_a L_sec   0.9999
+K_b_sec    L_pri_b L_sec   0.9999
+K_a_b      L_pri_a L_pri_b 0.9999
+
+.END

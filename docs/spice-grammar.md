@@ -462,17 +462,25 @@ P2 plate2 grid2 cath2 scr2 sup2 EF86
   remain available for backward compatibility. The catalog sets the
   right `SCREEN_FORM` automatically — a netlist that references
   `6V6GT-T` gets the DerkE math without any further directive.
+  - **Classical Koren (phase 1a.2)**: `KT88` / `KT-88`, `6550` / `6550A` /
+    `6550C`. No suffix because there's no pre-existing triode entry to
+    collide with. Uses the Norman Koren 1996 / Cohen-Hélie 2010 equation
+    family (`arctan(Vpk/Kvb)` plate knee, Vp-independent screen). Only
+    μ/Ex/Kg1/Kg2/Kp/Kvb are used — αs/A/β are ignored by the Classical
+    helpers. Fallback for tubes without published Reefman Derk fits.
 - **`SCREEN_FORM` parameter**: `.model NAME VP(... SCREEN_FORM=0)` for
-  Rational (Derk §4.4), `SCREEN_FORM=1` for Exponential (DerkE §4.5).
-  Only needed when hand-rolling a `.model` without a catalog alias;
-  the default is `0` (Rational).
+  Rational (Reefman Derk §4.4), `SCREEN_FORM=1` for Exponential (Reefman
+  DerkE §4.5), `SCREEN_FORM=2` for Classical (Norman Koren 1996 /
+  Cohen-Hélie 2010, used by KT88 and 6550). Only needed when hand-rolling
+  a `.model` without a catalog alias; the default is `0` (Rational).
+  Catalog entries carry the correct form automatically, so a bare
+  `.model KT88 VP()` gets Classical behavior via the catalog lookup.
 - **Not yet supported**:
-  - KT88 / 6550 beam tetrode — Reefman TubeLib.inc has no published fit.
-    Deferred to phase 1a.2 (Cohen-Hélie Koren bootstrap) or phase 1d
-    (datasheet refit).
+  - 6386 / 6BC8 / 6BA6 datasheet-refit entries for varimu compressor
+    targets (Fairchild 670, Sta-Level, Altec 436). Math path is ready
+    (phase 1c variable-mu §5), just waiting on the datasheet fit work.
   - Independent suppressor dynamics on true 5-element pentodes —
-    suppressor is always electrically tied to cathode in phase 1a.
-  - Variable-mu (remote-cutoff) pentodes like 6BA6 — phase 1c.
+    suppressor is always electrically tied to cathode.
 
 ---
 

@@ -449,16 +449,22 @@ struct TriodeSection {
 
 /// Screen-current functional form for [`KorenPentode`].
 ///
-/// Both true pentodes (EL84/EL34/EF86) and beam tetrodes (6L6GC/6V6GT/KT88)
-/// use the same Reefman Ip0/E1 core, but differ in how the plate voltage
-/// modulates the screen-to-plate current split:
+/// Three equation families are supported:
 ///
-/// - [`ScreenForm::Rational`] — Reefman "Derk" §4.4: `1 / (1 + β·Vp)`. Fits
-///   true pentodes with smooth plate-voltage knees.
-/// - [`ScreenForm::Exponential`] — Reefman "DerkE" §4.5:
+/// - [`ScreenForm::Rational`] — Reefman "Derk" §4.4 (phase 1a): `1 / (1 + β·Vp)`.
+///   Fits true pentodes with smooth plate-voltage knees (EL84, EL34, EF86).
+/// - [`ScreenForm::Exponential`] — Reefman "DerkE" §4.5 (phase 1a.1):
 ///   `exp(-(β·Vp)^{3/2})`. Required for beam tetrodes whose critical-distance
-///   electron-beam physics produces sharper screen-current compression than
-///   the rational form can capture.
+///   electron-beam physics produces sharper screen-current compression
+///   (6L6GC, 6V6GT).
+/// - [`ScreenForm::Classical`] — Norman Koren 1996 / Cohen-Hélie 2010 (phase 1a.2).
+///   Uses `arctan(Vpk/Kvb)` plate knee with Vp-independent screen current.
+///   Fallback for tubes without published Reefman Derk fits (KT88, 6550).
+///   Only uses μ/Ex/Kg1/Kg2/Kp/Kvb — αs/A/β are ignored.
+///
+/// The first two share the same Reefman Ip0/E1 softplus core; `Classical`
+/// has a different E1 softplus argument (uses `Vgk/Vg2` directly instead of
+/// `Vgk/sqrt(Kvb+Vg2²)`) and a fundamentally different plate-knee shape.
 ///
 /// Duplicated locally in `melange-devices`; the matching solver-side enum is
 /// [`melange_solver::device_types::ScreenForm`] and is kept in sync by the
@@ -470,8 +476,13 @@ pub enum ScreenForm {
     #[default]
     Rational,
     /// Reefman "DerkE" §4.5 — exponential `exp(-(β·Vp)^{3/2})` screen scaling.
-    /// Required for beam tetrodes (6L6GC, 6V6GT, KT88).
+    /// Required for beam tetrodes (6L6GC, 6V6GT).
     Exponential,
+    /// Classical Norman Koren pentode (1996) — `arctan(Vpk/Kvb)` plate knee,
+    /// Vp-independent screen current. Fallback for tubes without Reefman fits
+    /// (KT88, 6550). Uses only μ/Ex/Kg1/Kg2/Kp/Kvb — the αs/A/β fields on
+    /// [`KorenPentode`] are ignored when `screen_form == Classical`.
+    Classical,
 }
 
 /// Reefman pentode / beam-tetrode model (plate + screen + grid currents).
@@ -658,6 +669,35 @@ impl KorenPentode {
             ig_max: 8e-3,
             vgk_onset: 0.7,
             screen_form: ScreenForm::Exponential,
+            mu_b: 0.0,
+            svar: 0.0,
+            ex_b: 0.0,
+        }
+    }
+
+    /// KT88 / 6550 — classical Norman Koren beam-power tetrode fit from
+    /// Cohen-Hélie 2010 DAFx "Simulation of Guitar Amplifier Tube Stages"
+    /// Table 2. Uses the [`ScreenForm::Classical`] path (arctan(Vpk/Kvb)
+    /// plate knee, Vp-independent screen current). Reefman has no Derk
+    /// fit for KT88/6550, so Classical is the fallback.
+    ///
+    /// Parameters (Table 2, "KT88" row): μ=8.8, Ex=1.35, Kg1=730,
+    /// Kg2=4200, Kp=32, Kvb=16. The αs/A/β/mu_b/svar/ex_b fields are
+    /// unused by the Classical path and are set to 0.
+    pub fn kt88() -> Self {
+        Self {
+            mu: 8.8,
+            ex: 1.35,
+            kg1: 730.0,
+            kg2: 4200.0,
+            kp: 32.0,
+            kvb: 16.0,
+            alpha_s: 0.0,
+            a_factor: 0.0,
+            beta_factor: 0.0,
+            ig_max: 10e-3,
+            vgk_onset: 0.7,
+            screen_form: ScreenForm::Classical,
             mu_b: 0.0,
             svar: 0.0,
             ex_b: 0.0,
@@ -892,6 +932,21 @@ impl KorenPentode {
                     dh_dvpk,
                 }
             }
+            ScreenForm::Classical => {
+                // Classical Koren pentode uses a fundamentally different
+                // plate-knee formulation (arctan(Vpk/Kvb) factor outside
+                // the F/H split) and a different E1 softplus argument
+                // (Vgk/Vg2 instead of Vgk/sqrt(Kvb+Vg2²)). It cannot
+                // reuse `compute_f_h`; callers (`plate_current`,
+                // `screen_current`, `jacobian_3x3`) short-circuit to
+                // `plate_current_classical` etc. before reaching this
+                // point when `screen_form == Classical`. If we land
+                // here something upstream failed to short-circuit.
+                unreachable!(
+                    "compute_f_h called on Classical pentode — caller must \
+                     short-circuit to classical-specific path (task P1a2-02)"
+                );
+            }
         }
     }
 
@@ -901,6 +956,9 @@ impl KorenPentode {
     /// (Reefman §5 Eq 33) is used in place of the sharp `Ip0`, with F(Vp)
     /// unchanged between the two sections (Eq 36).
     pub fn plate_current(&self, vgk: f64, vpk: f64, vg2k: f64) -> f64 {
+        if matches!(self.screen_form, ScreenForm::Classical) {
+            return self.plate_current_classical(vgk, vpk, vg2k);
+        }
         let vg2k_safe = vg2k.max(1e-3);
         let vpk_safe = vpk.max(0.0);
 
@@ -918,6 +976,9 @@ impl KorenPentode {
     /// Uses the same variable-mu `Ip0_v` as [`plate_current`], with H(Vp)
     /// unchanged (Eq 37). Variable-mu is orthogonal to `screen_form`.
     pub fn screen_current(&self, vgk: f64, vpk: f64, vg2k: f64) -> f64 {
+        if matches!(self.screen_form, ScreenForm::Classical) {
+            return self.screen_current_classical(vgk, vpk, vg2k);
+        }
         let vg2k_safe = vg2k.max(1e-3);
         let vpk_safe = vpk.max(0.0);
 
@@ -931,13 +992,187 @@ impl KorenPentode {
     }
 
     /// Control-grid (Ig1) current using the same Leach power-law as the
-    /// triode. Returns 0 for `Vgk ≤ 0`.
+    /// triode. Returns 0 for `Vgk ≤ 0`. Shared across all three screen
+    /// forms (Rational / Exponential / Classical) — the grid current
+    /// model does not depend on screen_form.
     pub fn grid_current(&self, vgk: f64) -> f64 {
         if vgk <= 0.0 {
             return 0.0;
         }
         let x = vgk / self.vgk_onset;
         self.ig_max * x * x.sqrt() // x^1.5
+    }
+
+    // ---------------------------------------------------------------------
+    // Classical Norman Koren pentode path (phase 1a.2).
+    //
+    // Separate from the Reefman Derk / DerkE path because the softplus
+    // argument, plate-knee shape, and screen-current formula are all
+    // structurally different. The `plate_current` / `screen_current` /
+    // `jacobian_3x3` entry points short-circuit to these methods when
+    // `self.screen_form == ScreenForm::Classical`.
+    //
+    // Equations from Cohen-Hélie 2010 DAFx Eqs 1-3 (originally Norman
+    // Koren 1996):
+    //
+    //     E1   = (Vg2k/Kp) · log(1 + exp(Kp · (1/μ + Vgk/Vg2k)))
+    //     Ip   = (E1^Ex / Kg1) · (1 + sgn(E1)) · arctan(Vpk/Kvb)
+    //     Ig2  = (Vg2k/μ + Vgk)^Ex / Kg2     (Vp-INDEPENDENT)
+    //
+    // Classical uses only 6 parameters: μ, Ex, Kg1, Kg2, Kp, Kvb. The
+    // αs/A/β fields on [`KorenPentode`] are ignored for Classical
+    // entries. Kvb plays the role of the arctan knee scale, NOT the
+    // softplus denominator (where the Derk path uses sqrt(Kvb+Vg2²)).
+    // ---------------------------------------------------------------------
+
+    /// Classical Koren softplus chain. Returns `(E1, sigmoid, softplus)`
+    /// where
+    ///
+    /// ```text
+    /// inner    = Kp · (1/μ + Vgk / Vg2k_safe)
+    /// softplus = ln(1 + exp(inner))
+    /// sigmoid  = exp(inner) / (1 + exp(inner))
+    /// E1       = (Vg2k_safe / Kp) · softplus
+    /// ```
+    ///
+    /// `vg2k_safe` must already be clamped to `≥ 1e-3` by the caller.
+    /// The `inner ∈ [-20, 20]` clamp mirrors the NR-safety pattern in
+    /// the existing Derk path (`shared_e1_with`) and prevents softplus
+    /// overflow / sigmoid underflow during NR probing.
+    #[inline]
+    fn classical_e1(&self, vgk: f64, vg2k_safe: f64) -> (f64, f64, f64) {
+        let inner = self.kp * (1.0 / self.mu + vgk / vg2k_safe);
+        let (sigmoid, softplus) = if inner > 20.0 {
+            // softplus(x) → x, σ(x) → 1
+            (1.0, inner)
+        } else if inner < -20.0 {
+            // softplus(x) → 0, σ(x) → 0
+            (0.0, 0.0)
+        } else {
+            let e = inner.exp();
+            (e / (1.0 + e), (1.0 + e).ln())
+        };
+        let e1 = (vg2k_safe / self.kp) * softplus;
+        (e1, sigmoid, softplus)
+    }
+
+    /// Classical Koren plate current. Cohen-Hélie 2010 Eq 2 with the
+    /// `(1 + sgn(E1))` hard step smoothed to 2 in the `E1 > 0` regime
+    /// (softplus already provides the smoothing). Guards: `Vg2k ≥ 1e-3`
+    /// prevents the `Vgk/Vg2k` softplus argument from singularity;
+    /// `Vpk ≥ 0` prevents non-physical `arctan(Vpk/Kvb)` sign flip
+    /// during NR probing.
+    fn plate_current_classical(&self, vgk: f64, vpk: f64, vg2k: f64) -> f64 {
+        let vg2k_safe = vg2k.max(1e-3);
+        let vpk_safe = vpk.max(0.0);
+        let (e1, _sigmoid, _softplus) = self.classical_e1(vgk, vg2k_safe);
+        if e1 <= 1e-30 {
+            return 0.0;
+        }
+        let g = (vpk_safe / self.kvb).atan();
+        let ip0 = 2.0 * e1.powf(self.ex) / self.kg1;
+        ip0 * g
+    }
+
+    /// Classical Koren screen current. Cohen-Hélie 2010 Eq 3 with the
+    /// `/Kg2` divisor restored (the printed paper omits it; the
+    /// corrected form matches Norman Koren's 1996 original and makes
+    /// Kg2 from Table 2 a live parameter). Vp-independent by design —
+    /// this is the classical simplification that makes the screen
+    /// current depend only on `Vgk` and `Vg2k`.
+    fn screen_current_classical(&self, vgk: f64, _vpk: f64, vg2k: f64) -> f64 {
+        let vg2k_safe = vg2k.max(1e-3);
+        let x = vg2k_safe / self.mu + vgk;
+        if x <= 0.0 {
+            return 0.0;
+        }
+        x.powf(self.ex) / self.kg2
+    }
+
+    /// Classical Koren 3×3 analytic Jacobian. Rows: `[Ip, Ig2, Ig1]`.
+    /// Columns: `[Vgk, Vpk, Vg2k]`. Structural zeros:
+    /// - `[1][1] = 0` (Ig2 is Vp-independent)
+    /// - `[2][1] = [2][2] = 0` (Ig1 depends only on Vgk)
+    ///
+    /// Safety guards mirror [`plate_current_classical`] and
+    /// [`screen_current_classical`]: `Vg2k ≥ 1e-3`, `Vpk ≥ 0` (the
+    /// `arctan` derivative at clamped `Vpk=0` gives `1/Kvb`, the
+    /// tangent slope at the origin — consistent with the clamped
+    /// plate current at the same input).
+    fn jacobian_3x3_classical(
+        &self,
+        vgk: f64,
+        vpk: f64,
+        vg2k: f64,
+    ) -> [[f64; 3]; 3] {
+        let vg2k_safe = vg2k.max(1e-3);
+        let vpk_safe = vpk.max(0.0);
+
+        // Ig1 row (Leach power-law, shared with Derk path). Independent
+        // of Vpk / Vg2k so it's the only nonzero entry on row [2].
+        let dig1_dvgk = if vgk > 0.0 {
+            let x = vgk / self.vgk_onset;
+            self.ig_max * 1.5 * x.sqrt() / self.vgk_onset
+        } else {
+            0.0
+        };
+
+        // --- Ip row (derived from Ip = 2·E1^Ex/Kg1 · arctan(Vpk/Kvb)) ---
+        let (e1, sigmoid, softplus) = self.classical_e1(vgk, vg2k_safe);
+
+        // Deep-cutoff guard: when softplus underflowed to 0, Ip is 0
+        // and its whole row is zero. Ig2 row is handled separately
+        // below (its gate is `x > 0`, not `E1 > 0`).
+        let (dip_dvgk, dip_dvpk, dip_dvg2k) = if e1 <= 1e-30 {
+            (0.0, 0.0, 0.0)
+        } else {
+            let g = (vpk_safe / self.kvb).atan();
+            // dG/dVpk = (1/Kvb) / (1 + (Vpk/Kvb)^2)
+            let r = vpk_safe / self.kvb;
+            let dg_dvpk = (1.0 / self.kvb) / (1.0 + r * r);
+
+            // Ip0 = 2·E1^Ex / Kg1
+            let ip0 = 2.0 * e1.powf(self.ex) / self.kg1;
+            // dIp0/dE1 = 2·Ex·E1^(Ex-1) / Kg1
+            let dip0_de1 = 2.0 * self.ex * e1.powf(self.ex - 1.0) / self.kg1;
+
+            // E1 partials (chain rule through softplus):
+            //   dE1/dVgk  = sigmoid
+            //   dE1/dVg2k = softplus/Kp − sigmoid · Vgk / Vg2k_safe
+            //   dE1/dVpk  = 0
+            let de1_dvgk = sigmoid;
+            let de1_dvg2k =
+                softplus / self.kp - sigmoid * vgk / vg2k_safe;
+
+            // Chain rule with G(Vpk) = arctan(Vpk/Kvb):
+            //   dIp/dVgk  = (dIp0/dE1)·(dE1/dVgk) · G
+            //   dIp/dVpk  = Ip0 · dG/dVpk
+            //   dIp/dVg2k = (dIp0/dE1)·(dE1/dVg2k) · G
+            (
+                dip0_de1 * de1_dvgk * g,
+                ip0 * dg_dvpk,
+                dip0_de1 * de1_dvg2k * g,
+            )
+        };
+
+        // --- Ig2 row (Ig2 = x^Ex / Kg2, x = Vg2k_safe/μ + Vgk) ---
+        let x = vg2k_safe / self.mu + vgk;
+        let (dig2_dvgk, dig2_dvg2k) = if x > 0.0 {
+            let prefactor = self.ex * x.powf(self.ex - 1.0) / self.kg2;
+            // dx/dVgk  = 1
+            // dx/dVg2k = 1/μ
+            (prefactor, prefactor / self.mu)
+        } else {
+            (0.0, 0.0)
+        };
+        // Ig2 is Vp-independent → [1][1] is structurally 0.
+        let dig2_dvpk = 0.0;
+
+        [
+            [dip_dvgk, dip_dvpk, dip_dvg2k],
+            [dig2_dvgk, dig2_dvpk, dig2_dvg2k],
+            [dig1_dvgk, 0.0, 0.0],
+        ]
     }
 
     /// 3×3 analytic Jacobian.
@@ -951,6 +1186,9 @@ impl KorenPentode {
     /// weighted sum of per-section `(dIp0/dE1)·(dE1/d·)` chains. F(Vp),
     /// H(Vp), dF/dVp, dH/dVp are unchanged (orthogonal to variable-mu).
     pub fn jacobian_3x3(&self, vgk: f64, vpk: f64, vg2k: f64) -> [[f64; 3]; 3] {
+        if matches!(self.screen_form, ScreenForm::Classical) {
+            return self.jacobian_3x3_classical(vgk, vpk, vg2k);
+        }
         let vg2k_safe = vg2k.max(1e-3);
         let vpk_safe = vpk.max(0.0);
 
@@ -2020,5 +2258,229 @@ mod tests {
             ip_r0,
             rel0
         );
+    }
+
+    // -----------------------------------------------------------------
+    // Classical Norman Koren pentode (phase 1a.2) — KT88 tests.
+    //
+    // Cohen-Hélie 2010 DAFx Eqs 1-3, Table 2 KT88 parameters. Gate
+    // numerical bounds wide enough to tolerate Koren's known ~2-3× bias
+    // overestimate (acknowledged in the paper and confirmed against KT88
+    // datasheet Ia-Vak curves).
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_classical_kt88_operating_point() {
+        let tube = KorenPentode::kt88();
+        assert_eq!(tube.screen_form, ScreenForm::Classical);
+
+        // Typical Class AB bias: Vgk=-20, Vpk=350, Vg2k=300. Sanity
+        // check the math: 78 mA back-of-envelope calculation.
+        let vgk = -20.0;
+        let vpk = 350.0;
+        let vg2k = 300.0;
+        let ip = tube.plate_current(vgk, vpk, vg2k);
+        let ig2 = tube.screen_current(vgk, vpk, vg2k);
+
+        assert!(ip.is_finite() && ig2.is_finite());
+        assert!(
+            ip > 10e-3 && ip < 250e-3,
+            "KT88 Ip(Vgk=-20, Vpk=350, Vg2k=300) = {:.2} mA, expected 10-250 mA",
+            ip * 1000.0
+        );
+        assert!(
+            ig2 > 0.5e-3 && ig2 < 20e-3,
+            "KT88 Ig2(Vgk=-20, Vpk=350, Vg2k=300) = {:.2} mA, expected 0.5-20 mA",
+            ig2 * 1000.0
+        );
+        assert!(
+            ip > ig2,
+            "Plate current must exceed screen current in normal operation: Ip={:.2}mA Ig2={:.2}mA",
+            ip * 1000.0,
+            ig2 * 1000.0,
+        );
+    }
+
+    #[test]
+    fn test_classical_kt88_deep_cutoff() {
+        // KT88 has μ=8.8, Kp=32 — the Classical softplus argument
+        // `Kp·(1/μ + Vgk/Vg2k)` only becomes strongly negative when
+        // Vgk is several times larger (in magnitude) than Vg2k/μ.
+        // At Vgk=-100, Vg2k=300: inner ≈ 32·(0.114 − 0.333) ≈ −7.0
+        // → softplus ≈ 9e-4 → Ip ≈ 7 μA, Ig2 (gated on x>0) = 0.
+        let tube = KorenPentode::kt88();
+        let ip = tube.plate_current(-100.0, 350.0, 300.0);
+        let ig2 = tube.screen_current(-100.0, 350.0, 300.0);
+        assert!(
+            ip < 10e-6,
+            "KT88 deep cutoff Ip = {:.3e} A, expected < 10 μA",
+            ip
+        );
+        assert!(
+            ig2 < 10e-6,
+            "KT88 deep cutoff Ig2 = {:.3e} A, expected < 10 μA",
+            ig2
+        );
+    }
+
+    #[test]
+    fn test_classical_kt88_monotonic_in_vgk() {
+        let tube = KorenPentode::kt88();
+        let vpk = 350.0;
+        let vg2k = 300.0;
+        let mut prev = tube.plate_current(-40.0, vpk, vg2k);
+        for i in 1..=10 {
+            // -40 → -5 in 10 steps
+            let vgk = -40.0 + (35.0 * i as f64 / 10.0);
+            let ip = tube.plate_current(vgk, vpk, vg2k);
+            assert!(
+                ip > prev,
+                "Ip not monotonic in Vgk at Vgk={}: prev={:.3e} current={:.3e}",
+                vgk,
+                prev,
+                ip
+            );
+            prev = ip;
+        }
+    }
+
+    #[test]
+    fn test_classical_kt88_monotonic_in_vpk() {
+        let tube = KorenPentode::kt88();
+        let vgk = -20.0;
+        let vg2k = 300.0;
+        let mut prev = tube.plate_current(vgk, 10.0, vg2k);
+        for i in 1..=10 {
+            // 10 → 500 in 10 steps
+            let vpk = 10.0 + (490.0 * i as f64 / 10.0);
+            let ip = tube.plate_current(vgk, vpk, vg2k);
+            assert!(
+                ip > prev,
+                "Ip not monotonic in Vpk at Vpk={}: prev={:.3e} current={:.3e}",
+                vpk,
+                prev,
+                ip
+            );
+            prev = ip;
+        }
+    }
+
+    #[test]
+    fn test_classical_kt88_ig2_vp_independent() {
+        // Defining feature of the Classical Koren path: screen current
+        // depends only on Vgk / Vg2k, not Vpk. Three Vpk values must
+        // produce numerically IDENTICAL Ig2.
+        let tube = KorenPentode::kt88();
+        let vgk = -20.0;
+        let vg2k = 300.0;
+        let ig2_100 = tube.screen_current(vgk, 100.0, vg2k);
+        let ig2_250 = tube.screen_current(vgk, 250.0, vg2k);
+        let ig2_500 = tube.screen_current(vgk, 500.0, vg2k);
+        assert_eq!(
+            ig2_100, ig2_250,
+            "Ig2 must be Vp-independent: Vpk=100 → {:.6e}, Vpk=250 → {:.6e}",
+            ig2_100, ig2_250
+        );
+        assert_eq!(
+            ig2_250, ig2_500,
+            "Ig2 must be Vp-independent: Vpk=250 → {:.6e}, Vpk=500 → {:.6e}",
+            ig2_250, ig2_500
+        );
+    }
+
+    #[test]
+    fn test_classical_kt88_jacobian_fd() {
+        let tube = KorenPentode::kt88();
+        let eps = 1e-4;
+        let (vgk, vpk, vg2k) = (-15.0, 300.0, 300.0);
+
+        let jac = tube.jacobian_3x3(vgk, vpk, vg2k);
+
+        // Central differences for each of the 2 currents (Ip, Ig2)
+        // against each of the 3 voltages (Vgk, Vpk, Vg2k). Ig1 row is
+        // excluded per the Derk test convention — the Leach power-law
+        // has its own dedicated test elsewhere.
+        let ip_plus = |dgk: f64, dpk: f64, dg2k: f64| {
+            tube.plate_current(vgk + dgk, vpk + dpk, vg2k + dg2k)
+        };
+        let ig2_plus = |dgk: f64, dpk: f64, dg2k: f64| {
+            tube.screen_current(vgk + dgk, vpk + dpk, vg2k + dg2k)
+        };
+
+        let fd_ip_vgk = (ip_plus(eps, 0.0, 0.0) - ip_plus(-eps, 0.0, 0.0)) / (2.0 * eps);
+        let fd_ip_vpk = (ip_plus(0.0, eps, 0.0) - ip_plus(0.0, -eps, 0.0)) / (2.0 * eps);
+        let fd_ip_vg2k = (ip_plus(0.0, 0.0, eps) - ip_plus(0.0, 0.0, -eps)) / (2.0 * eps);
+
+        let fd_ig2_vgk = (ig2_plus(eps, 0.0, 0.0) - ig2_plus(-eps, 0.0, 0.0)) / (2.0 * eps);
+        let fd_ig2_vpk = (ig2_plus(0.0, eps, 0.0) - ig2_plus(0.0, -eps, 0.0)) / (2.0 * eps);
+        let fd_ig2_vg2k = (ig2_plus(0.0, 0.0, eps) - ig2_plus(0.0, 0.0, -eps)) / (2.0 * eps);
+
+        let check = |name: &str, analytic: f64, fd: f64| {
+            let rel_err = if fd.abs() > 1e-15 {
+                (analytic - fd).abs() / fd.abs()
+            } else {
+                analytic.abs()
+            };
+            assert!(
+                rel_err < 1e-3,
+                "{}: analytic={:.6e} fd={:.6e} rel_err={:.2e}",
+                name,
+                analytic,
+                fd,
+                rel_err
+            );
+        };
+
+        check("dIp/dVgk", jac[0][0], fd_ip_vgk);
+        check("dIp/dVpk", jac[0][1], fd_ip_vpk);
+        check("dIp/dVg2k", jac[0][2], fd_ip_vg2k);
+        check("dIg2/dVgk", jac[1][0], fd_ig2_vgk);
+        // [1][1] is structurally 0 and FD should also give 0 to machine precision.
+        assert_eq!(
+            jac[1][1], 0.0,
+            "Ig2 Vp-independence → dIg2/dVpk must be exactly 0, got {:.6e}",
+            jac[1][1]
+        );
+        assert!(
+            fd_ig2_vpk.abs() < 1e-12,
+            "FD dIg2/dVpk should vanish to machine precision, got {:.6e}",
+            fd_ig2_vpk
+        );
+        check("dIg2/dVg2k", jac[1][2], fd_ig2_vg2k);
+    }
+
+    #[test]
+    fn test_classical_kt88_safety_guards() {
+        let tube = KorenPentode::kt88();
+
+        // Case 1: Vpk < 0 AND Vg2k < 0 (NR probing pathological region).
+        let ip1 = tube.plate_current(-10.0, -5.0, -2.0);
+        let ig2_1 = tube.screen_current(-10.0, -5.0, -2.0);
+        let jac1 = tube.jacobian_3x3(-10.0, -5.0, -2.0);
+        assert!(ip1.is_finite() && !ip1.is_nan());
+        assert!(ig2_1.is_finite() && !ig2_1.is_nan());
+        for row in &jac1 {
+            for &v in row {
+                assert!(
+                    v.is_finite() && !v.is_nan(),
+                    "Classical Jacobian produced non-finite entry at pathological input"
+                );
+            }
+        }
+
+        // Case 2: very low positive Vg2k (near the 1e-3 clamp).
+        let ip2 = tube.plate_current(-30.0, 250.0, 0.5);
+        let ig2_2 = tube.screen_current(-30.0, 250.0, 0.5);
+        let jac2 = tube.jacobian_3x3(-30.0, 250.0, 0.5);
+        assert!(ip2.is_finite() && !ip2.is_nan());
+        assert!(ig2_2.is_finite() && !ig2_2.is_nan());
+        for row in &jac2 {
+            for &v in row {
+                assert!(
+                    v.is_finite() && !v.is_nan(),
+                    "Classical Jacobian produced non-finite entry at low Vg2k"
+                );
+            }
+        }
     }
 }

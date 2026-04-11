@@ -4077,41 +4077,42 @@ impl CircuitIR {
             .unwrap_or(0.7);
         let lambda = Self::lookup_model_param(netlist, model, "LAMBDA").unwrap_or(0.0);
 
-        // Reefman §5 variable-mu (remote-cutoff) parameters. Resolution order:
-        //   1. Explicit `.model VP(MU_B=... SVAR=... EX_B=...)`
-        //   2. Pentode catalog (`PentodeCatalogEntry.mu_b/svar/ex_b`) — added by
-        //      task P1c-06, running in parallel. If the catalog agent's fields
-        //      haven't landed yet this file won't compile; the `.or_else(...)`
-        //      branches below are kept behind a TODO(P1c-06) comment so we can
-        //      drop the catalog fallback in once it's available.
-        //   3. Hard-coded 0.0 default → sharp single-section Koren.
+        // Reefman §5 variable-mu (remote-cutoff) parameters. Resolution order
+        // matches every other field: explicit `.model` > catalog > default 0.0.
         let mu_b = Self::lookup_model_param(netlist, model, "MU_B")
-            // TODO(P1c-06): .or_else(|| cat.map(|c| c.mu_b))
+            .or_else(|| cat.map(|c| c.mu_b))
             .unwrap_or(0.0);
         let svar = Self::lookup_model_param(netlist, model, "SVAR")
-            // TODO(P1c-06): .or_else(|| cat.map(|c| c.svar))
+            .or_else(|| cat.map(|c| c.svar))
             .unwrap_or(0.0);
         let ex_b = Self::lookup_model_param(netlist, model, "EX_B")
-            // TODO(P1c-06): .or_else(|| cat.map(|c| c.ex_b))
+            .or_else(|| cat.map(|c| c.ex_b))
             .unwrap_or(0.0);
 
-        // Screen form: catalog value wins over the fallback; explicit
-        // `SCREEN_FORM=0|1` in the .model directive wins over the catalog.
-        // `0` = Rational (Derk §4.4), `1` = Exponential (DerkE §4.5).
+        // Screen form: catalog value wins over the default; explicit
+        // `SCREEN_FORM=0|1|2` in the .model directive wins over the catalog.
+        //   0 = Rational   (Derk §4.4)
+        //   1 = Exponential (DerkE §4.5)
+        //   2 = Classical   (Norman Koren 1996 / Cohen-Hélie 2010)
         let screen_form = {
             use crate::device_types::ScreenForm;
             let explicit = Self::lookup_model_param(netlist, model, "SCREEN_FORM");
             match explicit {
                 Some(v) if v == 0.0 => ScreenForm::Rational,
                 Some(v) if v == 1.0 => ScreenForm::Exponential,
+                Some(v) if v == 2.0 => ScreenForm::Classical,
                 Some(v) => {
                     return Err(CodegenError::InvalidConfig(format!(
-                        "pentode model SCREEN_FORM must be 0 (Rational) or 1 (Exponential), got {v}"
+                        "pentode model SCREEN_FORM must be 0 (Rational), \
+                         1 (Exponential), or 2 (Classical), got {v}"
                     )));
                 }
                 None => match cat.map(|c| c.screen_form) {
                     Some(melange_devices::tube::ScreenForm::Exponential) => {
                         ScreenForm::Exponential
+                    }
+                    Some(melange_devices::tube::ScreenForm::Classical) => {
+                        ScreenForm::Classical
                     }
                     _ => ScreenForm::Rational,
                 },
@@ -4124,19 +4125,25 @@ impl CircuitIR {
         validate_positive_finite(kg2, "pentode model KG2")?;
         validate_positive_finite(kp, "pentode model KP")?;
         validate_positive_finite(kvb, "pentode model KVB")?;
-        validate_positive_finite(alpha_s, "pentode model ALPHA_S")?;
         validate_positive_finite(ig_max, "pentode model IG_MAX")?;
         validate_positive_finite(vgk_onset, "pentode model VGK_ONSET")?;
 
-        if !a_factor.is_finite() || a_factor < 0.0 {
-            return Err(CodegenError::InvalidConfig(format!(
-                "pentode model A_FACTOR must be non-negative and finite, got {a_factor}"
-            )));
-        }
-        if !beta_factor.is_finite() || beta_factor < 0.0 {
-            return Err(CodegenError::InvalidConfig(format!(
-                "pentode model BETA_FACTOR must be non-negative and finite, got {beta_factor}"
-            )));
+        // Classical Koren does not use alpha_s / a_factor / beta_factor at
+        // all — they're ignored by the `*_pentode_classical` helpers. Skip
+        // the Derk-specific invariants when the screen form is Classical.
+        let uses_derk_shape = !matches!(screen_form, crate::device_types::ScreenForm::Classical);
+        if uses_derk_shape {
+            validate_positive_finite(alpha_s, "pentode model ALPHA_S")?;
+            if !a_factor.is_finite() || a_factor < 0.0 {
+                return Err(CodegenError::InvalidConfig(format!(
+                    "pentode model A_FACTOR must be non-negative and finite, got {a_factor}"
+                )));
+            }
+            if !beta_factor.is_finite() || beta_factor < 0.0 {
+                return Err(CodegenError::InvalidConfig(format!(
+                    "pentode model BETA_FACTOR must be non-negative and finite, got {beta_factor}"
+                )));
+            }
         }
         if !lambda.is_finite() || lambda < 0.0 {
             return Err(CodegenError::InvalidConfig(format!(
@@ -4162,6 +4169,15 @@ impl CircuitIR {
                 return Err(CodegenError::InvalidConfig(format!(
                     "variable-mu pentode EX_B must be positive and finite when SVAR>0, got {ex_b}"
                 )));
+            }
+            // Variable-mu + Classical is unsupported — Reefman §5 is built on
+            // the Derk softplus structure, not the Classical arctan knee.
+            if matches!(screen_form, crate::device_types::ScreenForm::Classical) {
+                return Err(CodegenError::InvalidConfig(
+                    "variable-mu Classical Koren pentodes are not implemented; \
+                     use SCREEN_FORM=0 (Rational) for variable-mu tubes (6K7/EF89 pattern)"
+                        .to_string(),
+                ));
             }
         }
 

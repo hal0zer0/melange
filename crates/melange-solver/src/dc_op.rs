@@ -318,6 +318,9 @@ fn evaluate_devices_inner(
                             crate::device_types::ScreenForm::Exponential => {
                                 melange_devices::tube::ScreenForm::Exponential
                             }
+                            crate::device_types::ScreenForm::Classical => {
+                                melange_devices::tube::ScreenForm::Classical
+                            }
                         },
                         // Phase 1c: variable-mu §5 fields pass through. When
                         // tp.svar == 0.0, the math reduces to sharp single-mu
