@@ -183,3 +183,174 @@ fn tube_evaluate_with_rgi(vgk: f64, vpk: f64, mu: f64, ex: f64, kg1: f64, kp: f6
     let dvgk_int_dvgk_ext = 1.0 / (1.0 + dig_dvgk_int * rgi);
     (ip, ig, [jac[0] * dvgk_int_dvgk_ext, jac[1], jac[2] * dvgk_int_dvgk_ext, jac[3]])
 }
+{% if any_pentode %}
+
+// =============================================================================
+// Pentode (Reefman "Derk" §4.4) — 3D NR block: Vgk → Ip, Vpk → Ig2, Vg2k → Ig1
+// Math reference: memory/pentode_equations.md (Derk equation set + analytic 3x3
+// Jacobian, EL84/EL34/EF86 fits from Reefman TubeLib.inc).
+// Grid current Ig1 reuses the existing tube_ig / tube_ig_deriv triode helpers.
+// =============================================================================
+
+/// Pentode plate current Ip(Vgk, Vpk, Vg2k) — Reefman Derk §4.4.
+#[inline(always)]
+fn tube_ip_pentode(vgk: f64, vpk: f64, vg2k: f64,
+                   mu: f64, ex: f64, kg1: f64, kg2: f64, kp: f64, kvb: f64,
+                   alpha_s: f64, a_factor: f64, beta_factor: f64) -> f64 {
+    let vpk = vpk.max(0.0);     // Class A operating region (1+β·Vp guard)
+    let vg2k = vg2k.max(1e-3);  // Non-physical Vg2k≤0 guard, mirrors triode Vpk
+    let s = (kvb + vg2k * vg2k).sqrt();
+    let inner = kp * (1.0 / mu + vgk / s);
+    let softplus = if inner > 20.0 { inner }
+                   else if inner < -20.0 { 0.0 }
+                   else { fast_ln(1.0 + fast_exp(inner)) };
+    let e1 = (vg2k / kp) * softplus;
+    if e1 <= 1e-30 { return 0.0; }
+    let ip0 = e1.powf(ex);
+    // α = 1 - (Kg1/Kg2) * (1 + αs) — Derk derived constant, computed inline.
+    let alpha = 1.0 - (kg1 / kg2) * (1.0 + alpha_s);
+    let denom = 1.0 + beta_factor * vpk;
+    let f_factor = 1.0 / kg1 - 1.0 / kg2
+        + a_factor * vpk / kg1
+        - (alpha / kg1 + alpha_s / kg2) / denom;
+    ip0 * f_factor
+}
+
+/// Pentode screen current Ig2(Vgk, Vpk, Vg2k) — Reefman Derk §4.4.
+#[inline(always)]
+fn tube_is_pentode(vgk: f64, vpk: f64, vg2k: f64,
+                   mu: f64, ex: f64, kg1: f64, kg2: f64, kp: f64, kvb: f64,
+                   alpha_s: f64, beta_factor: f64) -> f64 {
+    let _ = kg1;
+    let vpk = vpk.max(0.0);
+    let vg2k = vg2k.max(1e-3);
+    let s = (kvb + vg2k * vg2k).sqrt();
+    let inner = kp * (1.0 / mu + vgk / s);
+    let softplus = if inner > 20.0 { inner }
+                   else if inner < -20.0 { 0.0 }
+                   else { fast_ln(1.0 + fast_exp(inner)) };
+    let e1 = (vg2k / kp) * softplus;
+    if e1 <= 1e-30 { return 0.0; }
+    let ip0 = e1.powf(ex);
+    let denom = 1.0 + beta_factor * vpk;
+    let h_factor = (1.0 + alpha_s / denom) / kg2;
+    ip0 * h_factor
+}
+
+/// Pentode 3x3 Jacobian (analytic, Reefman Derk §4.4).
+///
+/// State order: v = [Vgk, Vpk, Vg2k] → currents i = [Ip, Ig2, Ig1].
+/// Returns flat row-major: [dIp/dVgk, dIp/dVpk, dIp/dVg2k,
+///                          dIg2/dVgk, dIg2/dVpk, dIg2/dVg2k,
+///                          dIg1/dVgk, dIg1/dVpk, dIg1/dVg2k].
+/// Bottom row: dIg1/dVgk = tube_ig_deriv (existing triode helper); dIg1/dVpk = dIg1/dVg2k = 0.
+#[inline(always)]
+fn tube_jacobian_pentode(vgk: f64, vpk: f64, vg2k: f64,
+                         mu: f64, ex: f64, kg1: f64, kg2: f64, kp: f64, kvb: f64,
+                         alpha_s: f64, a_factor: f64, beta_factor: f64,
+                         ig_max: f64, vgk_onset: f64) -> [f64; 9] {
+    let dig1_dvgk = tube_ig_deriv(vgk, ig_max, vgk_onset);
+    let vpk = vpk.max(0.0);
+    let vg2k = vg2k.max(1e-3);
+    let s = (kvb + vg2k * vg2k).sqrt();
+    let inner = kp * (1.0 / mu + vgk / s);
+    let (sigmoid, softplus) = if inner > 20.0 { (1.0, inner) }
+                              else if inner < -20.0 { (0.0, 0.0) }
+                              else {
+                                  let exp_inner = fast_exp(inner);
+                                  (exp_inner / (1.0 + exp_inner), fast_ln(1.0 + exp_inner))
+                              };
+    let e1 = (vg2k / kp) * softplus;
+    if e1 <= 1e-30 {
+        return [0.0, 0.0, 0.0,
+                0.0, 0.0, 0.0,
+                dig1_dvgk, 0.0, 0.0];
+    }
+    let e1_pow_ex = e1.powf(ex);
+    let dip0_de1 = ex * e1_pow_ex / e1;        // = Ex * E1^(Ex-1)
+    let de1_dvgk = vg2k * sigmoid / s;
+    let de1_dvg2k = softplus / kp - sigmoid * vgk * vg2k * vg2k / (s * s * s);
+    // dE1/dVpk = 0 (E1 has no Vpk dependence in Derk §4.4)
+
+    let alpha = 1.0 - (kg1 / kg2) * (1.0 + alpha_s);
+    let denom = 1.0 + beta_factor * vpk;
+    let denom2 = denom * denom;
+    let coeff = alpha / kg1 + alpha_s / kg2;
+    let f_factor = 1.0 / kg1 - 1.0 / kg2 + a_factor * vpk / kg1 - coeff / denom;
+    let df_dvpk = a_factor / kg1 + beta_factor * coeff / denom2;
+    let h_factor = (1.0 + alpha_s / denom) / kg2;
+    let dh_dvpk = -beta_factor * alpha_s / (kg2 * denom2);
+
+    let common_vgk = dip0_de1 * de1_dvgk;
+    let common_vg2k = dip0_de1 * de1_dvg2k;
+
+    let dip_dvgk = common_vgk * f_factor;
+    let dip_dvpk = e1_pow_ex * df_dvpk;
+    let dip_dvg2k = common_vg2k * f_factor;
+
+    let dig2_dvgk = common_vgk * h_factor;
+    let dig2_dvpk = e1_pow_ex * dh_dvpk;
+    let dig2_dvg2k = common_vg2k * h_factor;
+
+    [dip_dvgk, dip_dvpk, dip_dvg2k,
+     dig2_dvgk, dig2_dvpk, dig2_dvg2k,
+     dig1_dvgk, 0.0, 0.0]
+}
+
+/// Combined pentode evaluation: returns (Ip, Ig2, Ig1, [9-element row-major Jacobian]).
+///
+/// Computes E1, softplus, sigmoid, and e1.powf(ex) once and shares across the
+/// three currents and the 3x3 Jacobian. Mirrors `tube_evaluate` for triodes.
+#[inline(always)]
+fn tube_evaluate_pentode(vgk: f64, vpk: f64, vg2k: f64,
+                         mu: f64, ex: f64, kg1: f64, kg2: f64, kp: f64, kvb: f64,
+                         alpha_s: f64, a_factor: f64, beta_factor: f64,
+                         ig_max: f64, vgk_onset: f64) -> (f64, f64, f64, [f64; 9]) {
+    let ig1 = tube_ig(vgk, ig_max, vgk_onset);
+    let dig1_dvgk = tube_ig_deriv(vgk, ig_max, vgk_onset);
+
+    let vpk = vpk.max(0.0);
+    let vg2k = vg2k.max(1e-3);
+    let s = (kvb + vg2k * vg2k).sqrt();
+    let inner = kp * (1.0 / mu + vgk / s);
+    let (sigmoid, softplus) = if inner > 20.0 { (1.0, inner) }
+                               else if inner < -20.0 { (0.0, 0.0) }
+                               else {
+                                   let exp_inner = fast_exp(inner);
+                                   (exp_inner / (1.0 + exp_inner), fast_ln(1.0 + exp_inner))
+                               };
+    let e1 = (vg2k / kp) * softplus;
+    if e1 <= 1e-30 {
+        return (0.0, 0.0, ig1,
+                [0.0, 0.0, 0.0,
+                 0.0, 0.0, 0.0,
+                 dig1_dvgk, 0.0, 0.0]);
+    }
+    let e1_pow_ex = e1.powf(ex);
+
+    let alpha = 1.0 - (kg1 / kg2) * (1.0 + alpha_s);
+    let denom = 1.0 + beta_factor * vpk;
+    let denom2 = denom * denom;
+    let coeff = alpha / kg1 + alpha_s / kg2;
+    let f_factor = 1.0 / kg1 - 1.0 / kg2 + a_factor * vpk / kg1 - coeff / denom;
+    let h_factor = (1.0 + alpha_s / denom) / kg2;
+
+    let ip = e1_pow_ex * f_factor;
+    let ig2 = e1_pow_ex * h_factor;
+
+    let dip0_de1 = ex * e1_pow_ex / e1;
+    let de1_dvgk = vg2k * sigmoid / s;
+    let de1_dvg2k = softplus / kp - sigmoid * vgk * vg2k * vg2k / (s * s * s);
+
+    let df_dvpk = a_factor / kg1 + beta_factor * coeff / denom2;
+    let dh_dvpk = -beta_factor * alpha_s / (kg2 * denom2);
+
+    let common_vgk = dip0_de1 * de1_dvgk;
+    let common_vg2k = dip0_de1 * de1_dvg2k;
+
+    (ip, ig2, ig1,
+     [common_vgk * f_factor, e1_pow_ex * df_dvpk, common_vg2k * f_factor,
+      common_vgk * h_factor, e1_pow_ex * dh_dvpk, common_vg2k * h_factor,
+      dig1_dvgk, 0.0, 0.0])
+}
+{% endif %}

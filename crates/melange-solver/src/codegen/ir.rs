@@ -1295,7 +1295,7 @@ pub struct TransformerGroupIR {
 // Re-export device types from the shared module (always compiled, no tera dependency).
 pub use crate::device_types::{
     BjtParams, DeviceParams, DeviceSlot, DeviceType, DiodeParams, JfetParams, MosfetParams,
-    TubeParams, VcaParams,
+    TubeKind, TubeParams, VcaParams,
 };
 
 /// Sparsity pattern for a single matrix.
@@ -3309,6 +3309,18 @@ impl CircuitIR {
                     dim_offset += 2;
                     nl_dev_idx += 1;
                 }
+                Element::Pentode { model, .. } => {
+                    let params = Self::resolve_pentode_params(netlist, model)?;
+                    slots.push(DeviceSlot {
+                        device_type: DeviceType::Tube,
+                        start_idx: dim_offset,
+                        dimension: 3, // Ip + Ig2 + Ig1
+                        params: DeviceParams::Tube(params),
+                        has_internal_mna_nodes: false,
+                    });
+                    dim_offset += 3;
+                    nl_dev_idx += 1;
+                }
                 Element::Mosfet { model, .. } => {
                     let params = Self::resolve_mosfet_params(netlist, model)?;
                     slots.push(DeviceSlot {
@@ -3941,6 +3953,7 @@ impl CircuitIR {
         );
 
         Ok(TubeParams {
+            kind: crate::device_types::TubeKind::SharpTriode,
             mu,
             ex,
             kg1,
@@ -3953,7 +3966,141 @@ impl CircuitIR {
             cgp,
             ccp,
             rgi,
+            kg2: 0.0,
+            alpha_s: 0.0,
+            a_factor: 0.0,
+            beta_factor: 0.0,
         })
+    }
+
+    /// Resolve pentode model parameters from the netlist, with validation.
+    ///
+    /// Uses Reefman "Derk" §4.4 equations (see `pentode_equations.md` memory
+    /// file). Reads MU, EX, KG1, KG2, KP, KVB, ALPHA_S, A_FACTOR, BETA_FACTOR
+    /// plus the shared triode-compatible params (IG_MAX, VGK_ONSET, CCG/CGP/CCP,
+    /// RGI). Resolution order: explicit `.model` param → catalog → generic
+    /// default (EL84).
+    ///
+    /// Returns a `TubeParams` with `kind = SharpPentode`. Callers should
+    /// `validate()` the result; this function does explicit `Err` on missing
+    /// required pentode params (KG2, ALPHA_S).
+    fn resolve_pentode_params(netlist: &Netlist, model: &str) -> Result<TubeParams, CodegenError> {
+        // Pentode catalog lookup lands in a later task (P1a-08). For now
+        // resolve from .model parameters only; emit a generic EL84-shaped
+        // default if the .model is entirely absent.
+        let mu = Self::lookup_model_param(netlist, model, "MU").unwrap_or(23.36);
+        let ex = Self::lookup_model_param(netlist, model, "EX").unwrap_or(1.138);
+        let kg1 = Self::lookup_model_param(netlist, model, "KG1").unwrap_or(117.4);
+        let kp = Self::lookup_model_param(netlist, model, "KP").unwrap_or(152.4);
+        let kvb = Self::lookup_model_param(netlist, model, "KVB").unwrap_or(4015.8);
+        let kg2 = Self::lookup_model_param(netlist, model, "KG2").unwrap_or(1275.0);
+        let alpha_s = Self::lookup_model_param(netlist, model, "ALPHA_S").unwrap_or(7.66);
+        // `A` alone collides with other SPICE conventions (e.g. AC), so the
+        // model directive uses the more explicit name `A_FACTOR`.
+        let a_factor = Self::lookup_model_param(netlist, model, "A_FACTOR").unwrap_or(4.344e-4);
+        let beta_factor =
+            Self::lookup_model_param(netlist, model, "BETA_FACTOR").unwrap_or(0.148);
+        let ig_max = Self::lookup_model_param(netlist, model, "IG_MAX").unwrap_or(8e-3);
+        let vgk_onset = Self::lookup_model_param(netlist, model, "VGK_ONSET").unwrap_or(0.7);
+        let lambda = Self::lookup_model_param(netlist, model, "LAMBDA").unwrap_or(0.0);
+
+        validate_positive_finite(mu, "pentode model MU")?;
+        validate_positive_finite(ex, "pentode model EX")?;
+        validate_positive_finite(kg1, "pentode model KG1")?;
+        validate_positive_finite(kg2, "pentode model KG2")?;
+        validate_positive_finite(kp, "pentode model KP")?;
+        validate_positive_finite(kvb, "pentode model KVB")?;
+        validate_positive_finite(alpha_s, "pentode model ALPHA_S")?;
+        validate_positive_finite(ig_max, "pentode model IG_MAX")?;
+        validate_positive_finite(vgk_onset, "pentode model VGK_ONSET")?;
+
+        if !a_factor.is_finite() || a_factor < 0.0 {
+            return Err(CodegenError::InvalidConfig(format!(
+                "pentode model A_FACTOR must be non-negative and finite, got {a_factor}"
+            )));
+        }
+        if !beta_factor.is_finite() || beta_factor < 0.0 {
+            return Err(CodegenError::InvalidConfig(format!(
+                "pentode model BETA_FACTOR must be non-negative and finite, got {beta_factor}"
+            )));
+        }
+        if !lambda.is_finite() || lambda < 0.0 {
+            return Err(CodegenError::InvalidConfig(format!(
+                "pentode model LAMBDA must be non-negative and finite, got {lambda}"
+            )));
+        }
+
+        let ccg = Self::lookup_model_param(netlist, model, "CCG").unwrap_or(0.0);
+        if ccg < 0.0 || !ccg.is_finite() {
+            return Err(CodegenError::InvalidConfig(format!(
+                "pentode model CCG must be non-negative and finite, got {ccg}"
+            )));
+        }
+        let cgp = Self::lookup_model_param(netlist, model, "CGP").unwrap_or(0.0);
+        if cgp < 0.0 || !cgp.is_finite() {
+            return Err(CodegenError::InvalidConfig(format!(
+                "pentode model CGP must be non-negative and finite, got {cgp}"
+            )));
+        }
+        let ccp = Self::lookup_model_param(netlist, model, "CCP").unwrap_or(0.0);
+        if ccp < 0.0 || !ccp.is_finite() {
+            return Err(CodegenError::InvalidConfig(format!(
+                "pentode model CCP must be non-negative and finite, got {ccp}"
+            )));
+        }
+        let rgi = Self::lookup_model_param(netlist, model, "RGI").unwrap_or(0.0);
+        if rgi < 0.0 || !rgi.is_finite() {
+            return Err(CodegenError::InvalidConfig(format!(
+                "pentode model RGI must be non-negative and finite, got {rgi}"
+            )));
+        }
+
+        Self::warn_unrecognized_params(
+            netlist,
+            model,
+            &[
+                "MU",
+                "EX",
+                "KG1",
+                "KG2",
+                "KP",
+                "KVB",
+                "ALPHA_S",
+                "A_FACTOR",
+                "BETA_FACTOR",
+                "IG_MAX",
+                "VGK_ONSET",
+                "LAMBDA",
+                "CCG",
+                "CGP",
+                "CCP",
+                "RGI",
+            ],
+        );
+
+        let params = TubeParams {
+            kind: crate::device_types::TubeKind::SharpPentode,
+            mu,
+            ex,
+            kg1,
+            kp,
+            kvb,
+            ig_max,
+            vgk_onset,
+            lambda,
+            ccg,
+            cgp,
+            ccp,
+            rgi,
+            kg2,
+            alpha_s,
+            a_factor,
+            beta_factor,
+        };
+        params
+            .validate()
+            .map_err(CodegenError::InvalidConfig)?;
+        Ok(params)
     }
 
     /// Resolve VCA model parameters from the netlist, with validation.

@@ -300,18 +300,56 @@ impl MosfetParams {
     }
 }
 
-/// Tube/triode model parameters (Koren + improved grid current).
+/// Tube kind discriminator.
+///
+/// Distinguishes between 2D triode (Vgk → Ip, Vpk → Ig) and 3D pentode
+/// (Vgk → Ip, Vpk → Is, Vg2k → Ig — with Vpk also controlling Ip via the knee).
+/// The dimension of the NR block is 2 for `SharpTriode` and 3 for `SharpPentode`.
+///
+/// Future variants (not yet implemented): `RemoteTriode`, `RemotePentode` for
+/// variable-mu (remote-cutoff) tubes used in varimu compressors; `*GridOff`
+/// variants for the Vgk<0 → Ig≈0 dimension reduction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[non_exhaustive]
+pub enum TubeKind {
+    /// Sharp-cutoff triode (2D: Vgk → Ip, Vpk → Ig). The default.
+    #[default]
+    SharpTriode,
+    /// Sharp-cutoff pentode or beam tetrode (3D: Vgk → Ip, Vpk → Is, Vg2k → Ig).
+    /// Uses classical Cohen-Hélie/Koren pentode equations with Kg2 sensitivity.
+    /// Screen current is Vpk-independent (known limitation; Derk upgrade deferred).
+    SharpPentode,
+}
+
+/// Tube/triode/pentode model parameters (Koren triode + Reefman "Derk" pentode).
+///
+/// The `kind` field discriminates triode vs pentode geometry and selects the
+/// equation set used by MNA stamping, NR Jacobian shape, and codegen emission.
+/// Pentode-only fields (`kg2`, `alpha_s`, `a_factor`, `beta_factor`) are
+/// ignored when `kind == SharpTriode`.
+///
+/// For `kind == SharpPentode`, melange uses Reefman's "Derk" §4.4 equation set
+/// (see `/home/homeuser/.claude/projects/-home-homeuser-dev-melange/memory/pentode_equations.md`
+/// and <https://www.dos4ever.com/uTracer3/Theory.pdf>). `kg2` and `alpha_s` must
+/// both be strictly positive; `a_factor` and `beta_factor` are typically small
+/// positive values and MAY be zero (though the Derk model does not cleanly
+/// reduce to classical Koren pentode when αs=0, so fitted data with `alpha_s>0`
+/// is required — enforced by `validate()`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TubeParams {
+    /// Tube kind (triode vs pentode). Defaults to `SharpTriode` for backward
+    /// compatibility with pre-pentode serialized data.
+    #[serde(default)]
+    pub kind: TubeKind,
     /// Amplification factor (mu)
     pub mu: f64,
     /// Exponent for Koren's equation
     pub ex: f64,
-    /// Kg1 coefficient
+    /// Kg1 coefficient (plate-current sensitivity; inversely proportional)
     pub kg1: f64,
     /// Kp coefficient
     pub kp: f64,
-    /// Kvb coefficient (for knee shaping)
+    /// Kvb coefficient (triode: softplus denominator; pentode: arctan knee in Ip)
     pub kvb: f64,
     /// Maximum grid current [A]
     pub ig_max: f64,
@@ -332,12 +370,90 @@ pub struct TubeParams {
     /// Grid internal resistance [Ohms] (0.0 = disabled)
     #[serde(default)]
     pub rgi: f64,
+    /// Kg2: pentode screen-grid current sensitivity (inversely proportional).
+    /// Only meaningful when `kind == SharpPentode`. 0.0 = triode default.
+    #[serde(default)]
+    pub kg2: f64,
+    /// Reefman Derk αs: screen-current magnitude scaler in `1 + αs/(1+β·Vp)`
+    /// term. Pentode-only; 0.0 = triode default. Typical fitted values: 4–20.
+    #[serde(default)]
+    pub alpha_s: f64,
+    /// Reefman Derk A: plate-voltage linear gain in the `A·Vp/Kg1` term of the
+    /// Derk F-factor. Pentode-only; 0.0 is acceptable when fitting pinpoints
+    /// it. Typical fitted values: 1e-8 to 1e-3 (A/V).
+    #[serde(default)]
+    pub a_factor: f64,
+    /// Reefman Derk β: reciprocal plate-voltage scale in the `1/(1+β·Vp)`
+    /// denominators of both Ip and Ig2. Pentode-only; 0.0 = triode default.
+    /// Typical fitted values: 0.05–0.3 (1/V).
+    #[serde(default)]
+    pub beta_factor: f64,
 }
 
 impl TubeParams {
     /// Returns true if grid internal resistance is enabled.
     pub fn has_rgi(&self) -> bool {
         self.rgi > 0.0
+    }
+
+    /// Returns true if this tube is a pentode (3D NR block).
+    pub fn is_pentode(&self) -> bool {
+        matches!(self.kind, TubeKind::SharpPentode)
+    }
+
+    /// Returns the NR dimension contributed by this tube: 2 for triode, 3 for pentode.
+    pub fn dimension(&self) -> usize {
+        if self.is_pentode() { 3 } else { 2 }
+    }
+
+    /// Validate pentode-only invariants. Returns `Err` with a descriptive message
+    /// if the kind requires parameters that aren't set or are out of range.
+    pub fn validate(&self) -> Result<(), String> {
+        if !self.mu.is_finite() || self.mu <= 0.0 {
+            return Err(format!("tube MU must be positive and finite, got {}", self.mu));
+        }
+        if !self.ex.is_finite() || self.ex <= 0.0 {
+            return Err(format!("tube EX must be positive and finite, got {}", self.ex));
+        }
+        if !self.kg1.is_finite() || self.kg1 <= 0.0 {
+            return Err(format!("tube KG1 must be positive and finite, got {}", self.kg1));
+        }
+        if !self.kp.is_finite() || self.kp <= 0.0 {
+            return Err(format!("tube KP must be positive and finite, got {}", self.kp));
+        }
+        if !self.kvb.is_finite() || self.kvb <= 0.0 {
+            return Err(format!("tube KVB must be positive and finite, got {}", self.kvb));
+        }
+        if self.is_pentode() {
+            if !self.kg2.is_finite() || self.kg2 <= 0.0 {
+                return Err(format!(
+                    "pentode KG2 must be positive and finite, got {}",
+                    self.kg2
+                ));
+            }
+            // Reefman Derk §4.4: αs=0 makes Ip=0 identically (see derivation in
+            // memory/pentode_equations.md). Require αs>0 to catch garbage params.
+            if !self.alpha_s.is_finite() || self.alpha_s <= 0.0 {
+                return Err(format!(
+                    "pentode ALPHA_S (Reefman Derk αs) must be positive and finite, got {}",
+                    self.alpha_s
+                ));
+            }
+            // A and β are allowed to be zero (some fits pinpoint them at 0).
+            if !self.a_factor.is_finite() || self.a_factor < 0.0 {
+                return Err(format!(
+                    "pentode A_FACTOR (Reefman Derk A) must be non-negative and finite, got {}",
+                    self.a_factor
+                ));
+            }
+            if !self.beta_factor.is_finite() || self.beta_factor < 0.0 {
+                return Err(format!(
+                    "pentode BETA_FACTOR (Reefman Derk β) must be non-negative and finite, got {}",
+                    self.beta_factor
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -423,4 +539,165 @@ where
 {
     let opt: Option<f64> = Option::deserialize(deserializer)?;
     Ok(opt.unwrap_or(f64::INFINITY))
+}
+
+#[cfg(test)]
+mod tube_params_tests {
+    use super::*;
+
+    fn triode_12ax7() -> TubeParams {
+        TubeParams {
+            kind: TubeKind::SharpTriode,
+            mu: 100.0,
+            ex: 1.4,
+            kg1: 3000.0,
+            kp: 600.0,
+            kvb: 300.0,
+            ig_max: 2e-3,
+            vgk_onset: 0.5,
+            lambda: 0.0,
+            ccg: 0.0,
+            cgp: 0.0,
+            ccp: 0.0,
+            rgi: 0.0,
+            kg2: 0.0,
+            alpha_s: 0.0,
+            a_factor: 0.0,
+            beta_factor: 0.0,
+        }
+    }
+
+    fn pentode_el84() -> TubeParams {
+        // Reefman "Derk" fit from TubeLib.inc (2016-01-23):
+        // BTetrodeD EL84 — plain Derk §4.4, `1/(1+β·Vp)` screen form.
+        // `A` is reconstructed from the file's `Aokg1 = A/kg1 = 3.7e-6`, so
+        // `A = Aokg1 * kg1 = 3.7e-6 * 117.4 ≈ 4.344e-4`.
+        TubeParams {
+            kind: TubeKind::SharpPentode,
+            mu: 23.36,
+            ex: 1.138,
+            kg1: 117.4,
+            kp: 152.4,
+            kvb: 4015.8,
+            ig_max: 8e-3,
+            vgk_onset: 0.7,
+            lambda: 0.0,
+            ccg: 0.0,
+            cgp: 0.0,
+            ccp: 0.0,
+            rgi: 0.0,
+            kg2: 1275.0,
+            alpha_s: 7.66,
+            a_factor: 4.344e-4,
+            beta_factor: 0.148,
+        }
+    }
+
+    #[test]
+    fn triode_dimension_is_2() {
+        assert_eq!(triode_12ax7().dimension(), 2);
+        assert!(!triode_12ax7().is_pentode());
+    }
+
+    #[test]
+    fn pentode_dimension_is_3() {
+        assert_eq!(pentode_el84().dimension(), 3);
+        assert!(pentode_el84().is_pentode());
+    }
+
+    #[test]
+    fn triode_validates() {
+        triode_12ax7().validate().expect("12AX7 should validate");
+    }
+
+    #[test]
+    fn pentode_validates_with_kg2() {
+        pentode_el84().validate().expect("EL84 with KG2 should validate");
+    }
+
+    #[test]
+    fn pentode_rejects_missing_kg2() {
+        let mut bad = pentode_el84();
+        bad.kg2 = 0.0;
+        assert!(
+            bad.validate().is_err(),
+            "Pentode with KG2=0 must fail validation"
+        );
+    }
+
+    #[test]
+    fn pentode_rejects_zero_alpha_s() {
+        // Reefman Derk §4.4 with αs=0 produces Ip=0 identically — this is a
+        // known degeneracy, not a feature. Reject at validation time.
+        let mut bad = pentode_el84();
+        bad.alpha_s = 0.0;
+        assert!(
+            bad.validate().is_err(),
+            "Pentode with αs=0 must fail validation (Ip would be 0)"
+        );
+    }
+
+    #[test]
+    fn pentode_accepts_zero_a_and_beta() {
+        // `A` and `β` are allowed to be 0 (some fits pinpoint them there).
+        let mut ok = pentode_el84();
+        ok.a_factor = 0.0;
+        ok.beta_factor = 0.0;
+        ok.validate()
+            .expect("Pentode with A=β=0 but αs>0 should validate");
+    }
+
+    #[test]
+    fn rejects_zero_mu() {
+        let mut bad = triode_12ax7();
+        bad.mu = 0.0;
+        assert!(bad.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_nan_kg1() {
+        let mut bad = triode_12ax7();
+        bad.kg1 = f64::NAN;
+        assert!(bad.validate().is_err());
+    }
+
+    /// Pre-pentode serialized TubeParams (no `kind`, no `kg2` fields) must
+    /// deserialize cleanly with `kind = SharpTriode` and `kg2 = 0.0`.
+    #[test]
+    fn deserialize_pre_pentode_json_is_triode() {
+        let legacy_json = r#"{
+            "mu": 100.0,
+            "ex": 1.4,
+            "kg1": 3000.0,
+            "kp": 600.0,
+            "kvb": 300.0,
+            "ig_max": 0.002,
+            "vgk_onset": 0.5
+        }"#;
+        let tp: TubeParams =
+            serde_json::from_str(legacy_json).expect("legacy JSON should round-trip");
+        assert!(matches!(tp.kind, TubeKind::SharpTriode));
+        assert_eq!(tp.kg2, 0.0);
+        assert_eq!(tp.mu, 100.0);
+    }
+
+    #[test]
+    fn pentode_roundtrip_serde() {
+        let el84 = pentode_el84();
+        let json = serde_json::to_string(&el84).expect("serialize");
+        let back: TubeParams = serde_json::from_str(&json).expect("deserialize");
+        assert!(matches!(back.kind, TubeKind::SharpPentode));
+        assert_eq!(back.kg2, 1275.0);
+        assert_eq!(back.mu, 23.36);
+        assert_eq!(back.kg1, 117.4);
+        assert_eq!(back.alpha_s, 7.66);
+        assert!((back.a_factor - 4.344e-4).abs() < 1e-12);
+        assert_eq!(back.beta_factor, 0.148);
+    }
+
+    #[test]
+    fn tube_kind_default_is_sharp_triode() {
+        let k: TubeKind = Default::default();
+        assert!(matches!(k, TubeKind::SharpTriode));
+    }
 }

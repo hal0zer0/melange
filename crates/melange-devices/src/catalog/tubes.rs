@@ -217,6 +217,110 @@ pub fn lookup(name: &str) -> Option<&'static TubeCatalogEntry> {
         .find(|entry| entry.names.iter().any(|n| n.eq_ignore_ascii_case(name)))
 }
 
+/// Catalog entry for a sharp-cutoff pentode using Reefman Derk §4.4 math.
+///
+/// Parameters are fitted by Derk Reefman (Reefman TubeLib.inc, 2016) using the
+/// ExtractModel tool. The model uses αs/A/β extensions to Koren's pentode equation
+/// to capture screen-grid current and the knee region.
+///
+/// **Naming convention**: True-pentode entries use a `-P` suffix (e.g. `EL84-P`,
+/// `EL34-P`) to avoid colliding with the existing triode-connected catalog entries
+/// (`EL84`, `EL34`). Small-signal pentodes with no triode-connected counterpart
+/// (e.g. `EF86`) use the plain part number.
+#[derive(Debug, Clone, Copy)]
+pub struct PentodeCatalogEntry {
+    /// Part number aliases (e.g., ["EL84-P", "EL84P", "6BQ5-P"])
+    pub names: &'static [&'static str],
+    /// Amplification factor (mu)
+    pub mu: f64,
+    /// Exponent for Reefman/Koren pentode equation
+    pub ex: f64,
+    /// Kg1 coefficient (plate current scaling)
+    pub kg1: f64,
+    /// Kg2 coefficient (screen current scaling)
+    pub kg2: f64,
+    /// Kp coefficient
+    pub kp: f64,
+    /// Kvb coefficient (knee shaping)
+    pub kvb: f64,
+    /// αs — Reefman §4.4 secondary-emission / knee-region coefficient
+    pub alpha_s: f64,
+    /// A — Reefman §4.4 raw A factor (not Aokg1; A = Aokg1 × kg1)
+    pub a_factor: f64,
+    /// β — Reefman §4.4 beta factor
+    pub beta_factor: f64,
+    /// Maximum grid current [A]
+    pub ig_max: f64,
+    /// Grid current onset voltage [V]
+    pub vgk_onset: f64,
+    /// Source citation
+    pub source: &'static str,
+}
+
+/// The pentode catalog (Reefman Derk §4.4 fits).
+pub const PENTODE_CATALOG: &[PentodeCatalogEntry] = &[
+    // EL84 / 6BQ5 — small power pentode (true pentode mode).
+    // Reefman TubeLib.inc BTetrodeD fit (§4.4).
+    // Use "-P" suffix to disambiguate from the triode-connected EL84 in CATALOG.
+    PentodeCatalogEntry {
+        names: &["EL84-P", "EL84P", "6BQ5-P"],
+        mu: 23.36,
+        ex: 1.138,
+        kg1: 117.4,
+        kg2: 1275.0,
+        kp: 152.4,
+        kvb: 4015.8,
+        alpha_s: 7.66,
+        a_factor: 4.344e-4,
+        beta_factor: 0.148,
+        ig_max: 8e-3,
+        vgk_onset: 0.7,
+        source: "Reefman TubeLib.inc (2016), BTetrodeD fit",
+    },
+    // EL34 / 6CA7 — power pentode (true pentode mode).
+    // Reefman TubeLib.inc BTetrodeD fit (§4.4).
+    PentodeCatalogEntry {
+        names: &["EL34-P", "EL34P", "6CA7-P"],
+        mu: 12.50,
+        ex: 1.363,
+        kg1: 217.7,
+        kg2: 1950.2,
+        kp: 50.5,
+        kvb: 1282.7,
+        alpha_s: 6.09,
+        a_factor: 3.48e-4,
+        beta_factor: 0.105,
+        ig_max: 10e-3,
+        vgk_onset: 0.7,
+        source: "Reefman TubeLib.inc (2016), BTetrodeD fit",
+    },
+    // EF86 / 6267 — small-signal sharp-cutoff pentode.
+    // Reefman TubeLib.inc PenthodeD fit (§4.4).
+    // No triode-connected counterpart in CATALOG, so plain "EF86" is unambiguous.
+    PentodeCatalogEntry {
+        names: &["EF86", "6267"],
+        mu: 40.8,
+        ex: 1.327,
+        kg1: 675.8,
+        kg2: 4089.6,
+        kp: 350.7,
+        kvb: 1886.8,
+        alpha_s: 4.24,
+        a_factor: 5.95e-5,
+        beta_factor: 0.28,
+        ig_max: 4e-3,
+        vgk_onset: 0.5,
+        source: "Reefman TubeLib.inc (2016), PenthodeD fit",
+    },
+];
+
+/// Look up a pentode by part number (case-insensitive).
+pub fn lookup_pentode(name: &str) -> Option<&'static PentodeCatalogEntry> {
+    PENTODE_CATALOG
+        .iter()
+        .find(|entry| entry.names.iter().any(|n| n.eq_ignore_ascii_case(name)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -697,5 +801,114 @@ mod tests {
             "12AU7 mu={:.1} (datasheet: 17, Koren model range: 14-25)",
             measured_mu
         );
+    }
+
+    // --- Pentode catalog tests (Reefman Derk §4.4 fits) ---
+
+    #[test]
+    fn test_pentode_catalog_el84_lookup() {
+        let entry = lookup_pentode("EL84-P").expect("EL84-P should resolve");
+        assert_eq!(entry.mu, 23.36);
+        assert_eq!(entry.kg2, 1275.0);
+        assert_eq!(entry.alpha_s, 7.66);
+    }
+
+    #[test]
+    fn test_pentode_catalog_case_insensitive() {
+        let lower = lookup_pentode("el84-p").expect("lowercase should resolve");
+        let upper = lookup_pentode("EL84-P").expect("uppercase should resolve");
+        // Same entry → identical fields
+        assert_eq!(lower.mu, upper.mu);
+        assert_eq!(lower.ex, upper.ex);
+        assert_eq!(lower.kg1, upper.kg1);
+        assert_eq!(lower.kg2, upper.kg2);
+        assert_eq!(lower.kp, upper.kp);
+        assert_eq!(lower.kvb, upper.kvb);
+        assert_eq!(lower.alpha_s, upper.alpha_s);
+        assert_eq!(lower.a_factor, upper.a_factor);
+        assert_eq!(lower.beta_factor, upper.beta_factor);
+        assert_eq!(lower.names.as_ptr(), upper.names.as_ptr());
+    }
+
+    #[test]
+    fn test_pentode_catalog_ef86_no_suffix() {
+        let ef86 = lookup_pentode("EF86").expect("EF86 should resolve");
+        let alias = lookup_pentode("6267").expect("6267 alias should resolve");
+        // Same entry → identical fields and same names slice pointer
+        assert_eq!(ef86.mu, alias.mu);
+        assert_eq!(ef86.kg1, alias.kg1);
+        assert_eq!(ef86.kg2, alias.kg2);
+        assert_eq!(ef86.alpha_s, alias.alpha_s);
+        assert_eq!(ef86.names.as_ptr(), alias.names.as_ptr());
+    }
+
+    #[test]
+    fn test_pentode_catalog_no_triode_collision() {
+        // No pentode alias should collide with a triode catalog name.
+        for pentode in PENTODE_CATALOG {
+            for pname in pentode.names {
+                assert!(
+                    lookup(pname).is_none(),
+                    "Pentode alias '{}' must not resolve in the triode CATALOG",
+                    pname
+                );
+            }
+        }
+        // The original triode-connected EL84/EL34 entries still resolve via lookup().
+        let triode_el84 = lookup("EL84").expect("triode EL84 still in CATALOG");
+        assert_eq!(triode_el84.mu, 11.5);
+        let triode_el34 = lookup("EL34").expect("triode EL34 still in CATALOG");
+        assert_eq!(triode_el34.mu, 11.0);
+        // And lookup_pentode() returns None for the bare names (must use -P suffix).
+        assert!(lookup_pentode("EL84").is_none());
+        assert!(lookup_pentode("EL34").is_none());
+    }
+
+    #[test]
+    fn test_pentode_catalog_derk_params_positive() {
+        for entry in PENTODE_CATALOG {
+            assert!(entry.mu > 0.0, "{}: mu", entry.names[0]);
+            assert!(entry.kg1 > 0.0, "{}: kg1", entry.names[0]);
+            assert!(entry.kg2 > 0.0, "{}: kg2", entry.names[0]);
+            assert!(entry.alpha_s > 0.0, "{}: alpha_s", entry.names[0]);
+            // Sanity-check the rest while we're here
+            assert!(entry.ex > 0.0, "{}: ex", entry.names[0]);
+            assert!(entry.kp > 0.0, "{}: kp", entry.names[0]);
+            assert!(entry.kvb > 0.0, "{}: kvb", entry.names[0]);
+            assert!(entry.a_factor > 0.0, "{}: a_factor", entry.names[0]);
+            assert!(entry.beta_factor > 0.0, "{}: beta_factor", entry.names[0]);
+            assert!(entry.ig_max > 0.0, "{}: ig_max", entry.names[0]);
+            assert!(entry.vgk_onset > 0.0, "{}: vgk_onset", entry.names[0]);
+        }
+    }
+
+    #[test]
+    fn test_triode_catalog_unchanged() {
+        // Byte-identity guard: existing triode-connected EL84/EL34/6L6/6V6 entries
+        // must not have been modified by the pentode addition.
+        let el84 = lookup("EL84").expect("triode EL84");
+        assert_eq!(el84.mu, 11.5);
+        assert_eq!(el84.ex, 1.35);
+        assert_eq!(el84.kg1, 600.0);
+        assert_eq!(el84.kp, 200.0);
+        assert_eq!(el84.kvb, 300.0);
+
+        let el34 = lookup("EL34").expect("triode EL34");
+        assert_eq!(el34.mu, 11.0);
+        assert_eq!(el34.ex, 1.35);
+        assert_eq!(el34.kg1, 650.0);
+        assert_eq!(el34.kp, 60.0);
+        assert_eq!(el34.kvb, 24.0);
+
+        let six_l6 = lookup("6L6").expect("triode 6L6");
+        assert_eq!(six_l6.mu, 8.7);
+        assert_eq!(six_l6.kg1, 890.0);
+        assert!(lookup("6L6GC").is_some());
+        assert!(lookup("5881").is_some());
+
+        let six_v6 = lookup("6V6").expect("triode 6V6");
+        assert_eq!(six_v6.mu, 8.7);
+        assert_eq!(six_v6.kg1, 1460.0);
+        assert!(lookup("6V6GT").is_some());
     }
 }

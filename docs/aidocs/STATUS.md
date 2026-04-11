@@ -47,14 +47,15 @@ the underlying circuits stabilize.
 - **BJT extras**: NF/ISE/NE (emission/leakage), Gummel-Poon (VAF/VAR/IKF/IKR), self-heating (RTH/CTH/XTI/EG/TAMB) — disabled by default (RTH=∞)
 - **Diode**: BV/IBV (Zener breakdown)
 - **MOSFET**: GAMMA/PHI (body effect)
-- **Op-amp**: Boyle macromodel with GBW dominant pole and rail-clamping modes (`auto/none/hard/active-set/boyle-diodes`, see `--opamp-rail-mode` CLI flag)
-- **Not implemented**: pentode support, temperature coefficients on resistors (TC1/TC2), noise models
+- **Op-amp**: Boyle macromodel with GBW dominant pole, rail-clamping modes (`auto/none/hard/active-set/boyle-diodes`, see `--opamp-rail-mode` CLI flag), and optional slew-rate limiting via `.model OA(SR=13)` in V/μs (per-sample `|Δv_out| ≤ SR·dt` clamp, all 3 codegen paths, default `SR=∞` → zero code emitted)
+- **BJT Gummel-Poon**: matches ngspice `bjtload.c` line-for-line (q2 uses `cbe/IKF + cbc/IKR` with `cbe = IS*(exp(Vbe/(NF*VT))-1)`; Ib ideal forward NOT divided by qb)
+- **Pentode / beam tetrode**: Reefman "Derk" §4.4 equations (`Ip = Ip0·F(Vp)`, `Ig2 = Ip0·H(Vp)`, `Ig1 = Leach`), 9 fitted params per tube (μ, Ex, Kg1, Kg2, Kp, Kvb, αs, A, β). Catalog: EL84, EL34, EF86 (from Reefman TubeLib.inc Jan 2016). New element prefix `P` (`P n_plate n_grid n_cathode n_screen [n_suppressor] model`) and `VP` model token. Phase 1a: true pentodes only (Reefman §4.4); phase 1a.1 adds DerkE §4.5 for beam tetrodes (6L6/6V6/KT88); phase 1b adds grid-off FA reduction; phase 1c adds variable-mu for varimu compressors.
+- **Not implemented**: temperature coefficients on resistors (TC1/TC2), noise models, 6L6/6V6/KT88 pentode mode (phase 1a.1), remote-cutoff variable-mu tubes (phase 1c)
 - **Known model limitations**:
   - Diode BV: hard clamp reverse breakdown (no smooth Zener knee)
   - BJT GP Q1: singularity guard at `q1_denom <= 0` (physically near Early voltage limit)
   - Tube Koren: no space-charge, no transit-time effects
   - JFET/MOSFET subthreshold: hardcoded 2×VT slope (real devices: 60-120 mV/decade)
-  - Op-amp: no slew-rate limiting (GBW pole only)
   - VCA noise_floor field exists but unused
 
 ## Codegen Device Support
@@ -71,7 +72,8 @@ remains in the solver crate as a fallback for purely linear circuits.
 | BJT (linearized) | 0D (removed from NR) | Small-signal `g`s stamped into G after DC OP |
 | JFET | 2D | Shichman-Hodges |
 | MOSFET | 2D | Level 1 SPICE |
-| Tube | 2D (Vgk→Ip, Vpk→Ig) | Koren + Leach |
+| Tube (triode) | 2D (Vgk→Ip, Vpk→Ig) | Koren + Leach |
+| Tube (pentode) | 3D (Vgk→Ip, Vpk→Ig2, Vg2k→Ig1) | Reefman Derk §4.4 + Leach |
 | VCA | 2D (Vsig, Vctrl) | THAT 2180 exponential |
 | Op-amp | Linear (no NR dim) | Boyle VCCS + GBW pole + rail clamp |
 
@@ -104,8 +106,8 @@ Promotion criteria:
 |---------|---|---|--------|-------------|-------|
 | rc-lowpass | 2 | 0 | Linear | trivial | Linear-reference smoke test |
 | tweed-preamp | 13 | 4 | DK | fast | 2× 12AX7, 1 pot, 1 switch |
-| wurli-preamp | 11 | 3-5 | DK | fast | 2 BJTs + 1 diode, FA detection |
-| pultec-eq | 41 | 8 | Nodal full LU | ~11× | 4 tubes, 2 xfmrs, 7 pots, 3 switches. Chord + cross-timestep + sparse LU. All EQ curves verified 2026-03-23. |
+| wurli-preamp | 11 | 3-5 | DK | fast | 2 BJTs + 1 diode, FA detection. 2N5089 has no GP params (`USE_GP=false`); compile-path matrices byte-identical to 2026-03-25 baseline. |
+| pultec-eq | 41 | 8 | Nodal full LU | ~11× | 4 tubes, 2 xfmrs, 7 pots, 3 switches. Chord + cross-timestep + sparse LU. +1.83 dB @ 1 kHz. All EQ curves verified 2026-03-23. |
 
 ### In testing (compiles, not yet user-verified)
 

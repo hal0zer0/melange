@@ -1,0 +1,128 @@
+* Vox AC15 (EF86 channel, simplified)
+* Copyright (c) 2026 Melange Contributors
+* License: MIT OR Apache-2.0
+*
+* Vox AC15 TB1-based single-channel (EF86 preamp → 12AX7 cathodyne
+* phase inverter → 2× EL84 push-pull, cathode-biased Class A).
+*
+* Phase 1a validation target for melange pentode support. Exercises:
+*   - EF86 pentode preamp (SharpPentode, EF86 catalog entry)
+*   - 12AX7 cathodyne phase splitter (existing SharpTriode path)
+*   - 2× EL84 pentodes in push-pull Class A (SharpPentode, EL84-P)
+*
+* Simplifications for phase 1a (to be lifted in later phases):
+*   - Output transformer modelled as 2× plate-load resistors (Ra_1/Ra_2)
+*     tied to B+. Real OT primary is Z_pri ~ 8k plate-to-plate, which
+*     for PP cathode-biased EL84 biases each half at ~4k impedance.
+*   - Output signal is taken from pa_1 (single-ended from one plate).
+*     True PP output requires differential OT coupling — deferred until
+*     phase 1e (transformer model upgrade).
+*   - No tone stack (cut + bass + treble). Keeps DC-OP path minimal.
+*   - No NFB loop from OT secondary (AC15 TB1 has 22k NFB, small effect).
+*
+* Topology:
+*   VIN → Cin → Rg1 → [EF86] → pa_ef → Cc1 → Rg2 → [12AX7 cathodyne]
+*                                                        |    |
+*                                                     p-out  k-out
+*                                                        |    |
+*                                                     Cc_p  Cc_k
+*                                                        |    |
+*                                                      g_e1  g_e2
+*                                                        |    |
+*                                                   [EL84 #1][EL84 #2]
+*                                                        |    |
+*                                                      pa_1  pa_2  -> out (pa_1)
+*
+* Target bias points (from Vox AC15 schematic, ±20%):
+*   EF86:   Vgk ≈ -1.5V, Vpk ≈ 120V,  Ip ≈ 0.8 mA
+*   12AX7:  Vgk ≈ -2V,   Vpk ≈ 150V,  Ip ≈ 0.6 mA
+*   EL84:   Vgk ≈ -7V,   Vpk ≈ 280V,  Ip ≈ 36 mA (per tube)
+*   Cathode bias resistor Rk_pp drops ~7V at 72 mA total → ~100Ω
+*
+* Gain at 1 kHz small-signal: ~40–50 dB (EF86 Av~100 · 12AX7 Av~30 · EL84)
+
+* -------------- Models --------------
+* 12AX7 — existing Koren triode fit
+.model 12AX7 TRIODE(MU=100 EX=1.4 KG1=3000 KP=600 KVB=300)
+
+* EF86 — Reefman Derk §4.4 fit from TubeLib.inc (2016-01-23)
+.model EF86 VP(MU=40.8 EX=1.327 KG1=675.8 KG2=4089.6 KP=350.7 KVB=1886.8
++              ALPHA_S=4.24 A_FACTOR=5.95e-5 BETA_FACTOR=0.28
++              IG_MAX=4m VGK_ONSET=0.5)
+
+* EL84 — Reefman Derk §4.4 fit from TubeLib.inc (2016-01-23)
+.model EL84-P VP(MU=23.36 EX=1.138 KG1=117.4 KG2=1275 KP=152.4 KVB=4015.8
++                ALPHA_S=7.66 A_FACTOR=4.344e-4 BETA_FACTOR=0.148
++                IG_MAX=8m VGK_ONSET=0.7)
+
+* -------------- Supplies --------------
+* B+ rail (typical AC15: 310–330V after rectifier sag)
+VCC vcc 0 DC 320
+
+* -------------- EF86 preamp stage --------------
+* Input coupling + grid leak
+Cin    in    ef_g   22n
+Rg_ef  ef_g  0      1Meg
+
+* EF86 pentode (plate-grid-cathode-screen)
+P_ef   pa_ef ef_g   ck_ef  sc_ef  EF86
+
+* Plate load (220k per AC15 EF86 channel)
+Ra_ef  vcc   pa_ef  220k
+
+* Screen resistor (decoupled from plate rail)
+Rg2_ef vcc   sc_ef  1Meg
+Cg2_ef sc_ef 0      100n
+
+* Cathode bias (Rk=820 with 25uF bypass, self-bias for -1.5V Vgk)
+Rk_ef  ck_ef 0      820
+Ck_ef  ck_ef 0      25u
+
+* -------------- Interstage coupling --------------
+Cc1    pa_ef pi_in  22n
+Rg_pi  pi_in 0      1Meg
+
+* -------------- 12AX7 Cathodyne Phase Inverter --------------
+* Single triode with equal plate and cathode resistors (100k each).
+* Plate output = -Vgrid_ac * Av/2, cathode output = +Vgrid_ac * Av/2.
+* Inherently balanced (unlike long-tail pair).
+T_pi   pi_in  pi_p  pi_k  12AX7
+
+* Balanced loads: Ra = Rk = 100k
+Ra_pi  vcc   pi_p   100k
+Rk_pi  pi_k  0      100k
+
+* -------------- PI → EL84 PP drive --------------
+Cc_p   pi_p  el1_g  22n
+Cc_k   pi_k  el2_g  22n
+
+* Grid leaks
+Rg_e1  el1_g 0      470k
+Rg_e2  el2_g 0      470k
+
+* -------------- EL84 push-pull output stage --------------
+* Both EL84s share a common cathode resistor (cathode-biased PP).
+* Shared screen grid node fed from B+ via single dropping resistor.
+
+P_e1   pa_1  el1_g  ck_pp  sc_pp  EL84-P
+P_e2   pa_2  el2_g  ck_pp  sc_pp  EL84-P
+
+* Plate loads model the output transformer primary halves.
+* Each half ~4k reflected impedance (Z_pri ~ 8k plate-to-plate).
+Ra_1   vcc   pa_1   4k
+Ra_2   vcc   pa_2   4k
+
+* Shared screen bus with 1k stop resistor from B+
+Rg2_pp vcc   sc_pp  1k
+Cg2_pp sc_pp 0      47u
+
+* Shared cathode bias: ~100Ω drops 7V at 70 mA total (EL84 pair Class A)
+Rk_pp  ck_pp 0      100
+Ck_pp  ck_pp 0      100u
+
+* -------------- Output (single-ended from pa_1) --------------
+* True push-pull output requires differential OT coupling — phase 1e.
+Cout   pa_1  out    220n
+Rload  out   0      8
+
+.END

@@ -162,6 +162,137 @@ mu = 100, Kp = 600, Kvb = 300, Kg1 = 1060, ex = 1.4
 ig_max = 2e-3, vgk_onset = 0.5, lambda = 0.0
 ```
 
+## Pentode / Beam Tetrode (Reefman "Derk" §4.4)
+
+M-dimension: **3 per pentode** (Vgk → Ip, Vpk → Ig2, Vg2k → Ig1)
+
+Uses Reefman's "Derk" pentode equations from *SPICE models for vacuum tubes
+using the uTracer* (2016, §4.4). Parameter fits are carried verbatim from
+Reefman's `TubeLib.inc` where available (EL84, EL34, EF86 at phase 1a).
+
+**Controlling voltages**: Vgk (grid–cathode), Vpk (plate–cathode), Vg2k
+(screen grid g2 – cathode).
+
+**Emitted currents**: Ip (plate), Ig2 (screen grid), Ig1 (control grid,
+which reuses the triode's Leach power-law).
+
+### Plate + Screen Currents
+
+The plate and screen currents share a single "Koren current" `Ip0` built
+from the grid-cathode and screen-cathode voltages:
+
+```
+inner = Kp * (1/mu + Vgk / sqrt(Kvb + Vg2k^2))
+E1    = (Vg2k / Kp) * softplus(inner)        // softplus = ln(1 + exp(x))
+Ip0   = E1^Ex / 2 * (1 + sgn(E1))            // C^infinity via softplus
+```
+
+`Ip0` is then scaled by plate-voltage-dependent factors `F` and `H`:
+
+```
+alpha = 1 - (Kg1/Kg2) * (1 + alpha_s)        // derived, not fitted
+
+F(Vpk) = 1/Kg1 - 1/Kg2 + (A * Vpk)/Kg1
+         - (alpha/Kg1 + alpha_s/Kg2) / (1 + beta * Vpk)
+
+H(Vpk) = (1 + alpha_s / (1 + beta * Vpk)) / Kg2
+
+Ip  = Ip0 * F(Vpk)    // plate current
+Ig2 = Ip0 * H(Vpk)    // screen current
+```
+
+**Note on parameter naming**: Reefman's paper uses `alpha_s`, `A`, `beta`.
+In melange's `TubeParams` they're stored as `alpha_s`, `a_factor`,
+`beta_factor` (the `_factor` suffixes avoid collisions with SPICE AC-analysis
+syntax and the Greek letter β). The `.model VP(...)` directive accepts
+`ALPHA_S`, `A_FACTOR`, `BETA_FACTOR` as the parameter keywords.
+
+**Required**: `alpha_s > 0`. The Derk model degenerates to `Ip = 0`
+identically when `alpha_s = 0` (not a graceful Koren fallback — verified
+by symbolic expansion). `TubeParams::validate()` rejects at config time.
+
+**Allowed**: `a_factor >= 0` and `beta_factor >= 0`. Some fits pinpoint
+`a_factor` or `beta_factor` at zero; only `alpha_s` is load-bearing.
+
+### Grid Current (reuse Leach)
+
+```
+Ig1 = ig_max * (Vgk / vgk_onset)^1.5    for Vgk > 0
+Ig1 = 0                                  otherwise
+```
+
+Identical to the triode. Pentode codegen reuses `tube_ig` / `tube_ig_deriv`
+without modification.
+
+### 3×3 Analytic Jacobian
+
+Rows: `[Ip, Ig2, Ig1]`. Cols: `[Vgk, Vpk, Vg2k]`.
+
+Chain-rule prefactors (compute once per NR iteration):
+```
+s         = sqrt(Kvb + Vg2k^2)
+sigma     = sigmoid(inner)
+sp        = softplus(inner)
+dE1/dVgk  = Vg2k * sigma / s
+dE1/dVpk  = 0
+dE1/dVg2k = sp/Kp - sigma * Vgk * Vg2k^2 / s^3
+dIp0/dE1  = Ex * E1^(Ex-1) / 2 * (1 + sgn(E1))
+
+dF/dVpk   = A/Kg1 + beta * (alpha/Kg1 + alpha_s/Kg2) / (1 + beta*Vpk)^2
+dH/dVpk   = -beta * alpha_s / (Kg2 * (1 + beta*Vpk)^2)
+```
+
+Jacobian entries:
+```
+dIp/dVgk   = dIp0/dE1 * dE1/dVgk  * F(Vpk)
+dIp/dVpk   = Ip0 * dF/dVpk
+dIp/dVg2k  = dIp0/dE1 * dE1/dVg2k * F(Vpk)
+
+dIg2/dVgk  = dIp0/dE1 * dE1/dVgk  * H(Vpk)
+dIg2/dVpk  = Ip0 * dH/dVpk
+dIg2/dVg2k = dIp0/dE1 * dE1/dVg2k * H(Vpk)
+
+dIg1/dVgk  = 1.5 * ig_max * sqrt(Vgk/vgk_onset) / vgk_onset    // Vgk>0
+dIg1/dVpk  = 0
+dIg1/dVg2k = 0
+```
+
+Sparsity: the Ig1 row has a single nonzero entry; `dIg2/dVpk` is small but
+nonzero. `dIp/dVgk` / `dIp/dVg2k` share `dIp0/dE1 * dE1/d_ * F` as a
+prefactor — compute once per NR iteration and reuse.
+
+### NR-Stability Guards (same pattern as triode)
+
+```
+Vg2k <- max(Vg2k, 1e-3)       // prevent div-by-zero in E1 softplus
+Vpk  <- max(Vpk, 0.0)         // prevent 1/(1 + beta*Vpk) singularity
+inner overflow clamp: { inner if inner > 20, 0 if inner < -20, softplus otherwise }
+E1 <= 1e-30:                  // deep cutoff — return zero currents and zero Jacobian
+```
+
+### Catalog Parameters (from Reefman TubeLib.inc 2016-01-23)
+
+| Tube | μ | Ex | Kg1 | Kg2 | Kp | Kvb | αs | A | β | Source |
+|------|---|-----|-----|-----|-----|-----|-----|---|---|--------|
+| EL84 / 6BQ5 | 23.36 | 1.138 | 117.4 | 1275.0 | 152.4 | 4015.8 | 7.66 | 4.344e-4 | 0.148 | BTetrodeD |
+| EL34 / 6CA7 | 12.50 | 1.363 | 217.7 | 1950.2 | 50.5 | 1282.7 | 6.09 | 3.48e-4 | 0.105 | BTetrodeD |
+| EF86 / 6267 | 40.8 | 1.327 | 675.8 | 4089.6 | 350.7 | 1886.8 | 4.24 | 5.95e-5 | 0.28 | PenthodeD |
+
+Catalog aliases: `EL84-P`, `EL34-P`, `EF86`. The existing triode-connected
+`EL84` / `EL34` / `6L6` / `6V6` catalog entries remain available for
+backward compat.
+
+### Deferred
+
+- **Beam tetrodes** (6L6, 6V6, KT88) need the Reefman DerkE §4.5 screen
+  form `Ig2 = Ip0 * (1 + αs * exp(-β * Vpk^{3/2})) / Kg2` instead of
+  the rational `1/(1 + β·Vpk)` of §4.4. Phase 1a.1.
+- **Grid-off FA reduction**: pentode 3D → 2D when Vgk < 0 (Ig1 = 0).
+  Phase 1b, analogous to BJT forward-active dimension reduction.
+- **Remote-cutoff / variable-mu** (6BA6, 6386, 6SK7, 6BC8): two-section
+  Koren per Reefman §5. Phase 1c, for varimu compressor targets
+  (Fairchild 670, Sta-Level, Collins 26U).
+
 ## JFET (Shichman-Hodges)
 
 M-dimension: 2 per JFET (Vgs,Vds -> Id, Vgs -> Ig)

@@ -93,7 +93,8 @@ RHS input = (V_in(n+1) + V_in(n)) * G_in   (proper trapezoidal, NOT 2*V*G)
 - BJTs: 2D per device (Vbe→Ic at start_idx, Vbc→Ib at start_idx+1)
 - JFETs: 2D per device (Vds→Id at start_idx, Vgs→Ig at start_idx+1)
 - MOSFETs: 2D per device (Vds→Id at start_idx, Vgs→Ig at start_idx+1)
-- Tubes: 2D per device (Vgk→Ip at start_idx, Vpk→Ig at start_idx+1)
+- Triodes: 2D per device (Vgk→Ip at start_idx, Vpk→Ig at start_idx+1)
+- Pentodes: 3D per device (Vgk→Ip at start_idx, Vpk→Ig2 at start_idx+1, Vg2k→Ig1 at start_idx+2). Reefman Derk §4.4 math; `TubeParams.kind = SharpPentode` dispatches the 3D codepath.
 - VCAs: 2D per device (Vsig→Isig at start_idx, Vctrl→Ictrl at start_idx+1)
 - Device map built from netlist element order, mirrors MNA builder
 - Codegen uses `jdev_i_k` naming for block-diagonal Jacobian entries
@@ -148,6 +149,11 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
 | DK kernel singular at col N (transistor ladder / cap-only nodes) | Intermediate nodes connected only through BJT junctions + bridging caps have G≈Gmin (1e-12). A = G+2C/T nearly singular in left/right subspace. | Routes to nodal automatically. DK limitation for series-BJT topologies without parallel resistors. |
 | Nodal Schur flat output (+9 dB, no filtering) on BJT ladder | S = A⁻¹ has extreme entries (>1e6) at cap-only nodes → K entries span 10^11 → J = I-J_dev·K swamped. | S magnitude check: `max\|S\| > 1e6` routes to full LU NR. Invariant to FA reduction. (FIXED 2026-04-10) |
 | simulate/analyze crash "Augmented fallback failed" | DK fails, augmented DK also fails, no nodal fallback | Dummy kernel with dk_failed=true, falls through to nodal codegen (FIXED 2026-04-10) |
+| BJT diverges from ngspice at NF ≠ 1 or high injection | q2 used bare VT and omitted `-1`; Ib forward was divided by qb | q2 uses `cbe/IKF + cbc/IKR` where `cbe = IS*(exp(Vbe/(NF*VT))-1)`; Ib ideal forward NOT divided by qb. Matches `bjtload.c:571,618` (FIXED commit `d7427c4`) |
+| Parser panics on non-ASCII component value (e.g. `1ſ`) | `to_uppercase()` changes byte length; byte-slice landed mid-codepoint | `parse_value()` normalizes non-ASCII at entry (µ/μ → u; else `Err`) (FIXED commit `e96c340`) |
+| Click on every pot/switch move in generated plugin | `rebuild_matrices()` zeroed DC blocker + oversampler state on pot change | Removed filter state resets from DK Schur `rebuild_matrices` (FIXED commit `07712a0`) |
+| Zipper noise on knob automation | Pot values read once per buffer via `.value()`, smoother declared but unused | Per-sample `.smoothed.next()` read in plugin template (FIXED commit `7c0fc02`) |
+| NR max-iter-cap hits on wide-range pot jumps (preset recall, automation step) | Stale `v_prev`/`i_nl_prev` from previous (different) operating point; NR starts far from new bias | Warm DC-OP re-init in `set_pot_N`/`set_switch_N` when `|r - r_prev|/r_prev > 0.20` (FIXED commit `e8e18a7`). The earlier Sherman-Morrison removal (commit `eaee955`) was treating a symptom — SM is mathematically exact; stale DC-OP seed was the root cause. |
 
 ## Current Status (2026-04-10)
 
@@ -171,10 +177,10 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
 - Logging via `log` crate (no `eprintln!` in library code)
 - MAX_M=16 bound prevents unbounded allocation in DK kernel
 - CLI reports errors for unresolved node names (no silent defaults)
-- **BJT common-emitter amplifier**: SPICE validation passes (correlation 0.998, 12% RMS)
+- **BJT common-emitter amplifier**: SPICE-validated against ngspice
   - Trapezoidal nonlinear integration: correction uses full `S*N_i*i_nl` (not delta)
   - Combined with `N_i*i_nl_prev` in RHS, gives proper trapezoidal average
-  - **Gummel-Poon model**: `BjtParams` includes VAF, VAR, IKF, IKR; `bjt_qb()` base charge modulation
+  - **Gummel-Poon model**: matches ngspice `bjtload.c` line-for-line (q2 uses `cbe/IKF + cbc/IKR` with `cbe = IS*(exp(Vbe/(NF*VT))-1)` — NOT bare VT; Ib ideal forward is NOT divided by qb — GP modulates only the transport current). `BjtParams` includes VAF, VAR, IKF, IKR; `bjt_qb()` base charge modulation
   - Q1 Early effect guard: `q1_denom <= 0` clamps to 1.0 (prevents sign-flip near Early voltage)
   - USE_GP flag auto-detected from params; falls back to Ebers-Moll when GP params are infinite
   - **Junction capacitances**: CJE/CJC (BJT), CGS/CGD (JFET/MOSFET), CJO (diode), CCG/CGP/CCP (tube). Parsed from .model, stamped into MNA C matrix.
@@ -184,9 +190,9 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
   - **MOSFET GAMMA/PHI**: Body effect (threshold voltage shift with source-bulk voltage)
   - **Self-heating**: BJT RTH/CTH/TAMB supported in codegen (default RTH=infinity disables)
 - **Dynamic potentiometers**: `.pot R1 min max` directive marks a resistor as runtime-variable
-  - Sherman-Morrison rank-1 updates: O(N²) correction instead of O(N³) re-inversion
-  - Precomputed SM vectors (SU, USU, NV_SU, U_NI) baked into generated constants
-  - Corrections applied to S, K, A_neg, and S*N_i products in codegen
+  - **Per-block O(N³) rebuild** on pot changes (Sherman-Morrison was removed; research confirmed SM and rebuild produce identical K', and rebuild is ~25× cheaper for N≤15 DK circuits)
+  - **Per-sample smoothing via `.smoothed.next()`**: plugin template reads smoothed pot values inside the process loop (the `SmoothingStyle::Linear(10.0)` at `plugin_template.rs:437` is actually consumed per sample)
+  - **Warm DC-OP re-init on large pot jumps**: `set_pot_N` resets `v_prev`/`i_nl_prev` to `DC_OP`/`DC_NL_I` when `|r - r_prev| / r_prev > 0.20`. Fixes NR max-iter-cap hits on preset-recall step changes without clicking on smoothed sweeps.
   - Plugin template auto-generates `FloatParam` knobs for each pot
   - Max 64 pots per circuit; pot value stored in `CircuitState`
 - **Gang pot linking**: `.gang "Label" member1 member2` links multiple `.pot`/`.wiper` entries to a single UI parameter
@@ -251,8 +257,8 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
 - Tube Koren model: lambda parameter models finite plate resistance; no space-charge or transit-time effects
 - BJT Gummel-Poon: self-heating (Rth/Cth) and charge storage (CJE/CJC/TF) available; no substrate current or avalanche breakdown
 - All device models fixed at room temperature (27°C); no temperature coefficients (TNOM, TC1, TC2, XTI)
-- Op-amp model: Boyle macromodel with GBW dominant pole, VCC/VEE asymmetric supply rail clamping. No slew rate limiting.
-- Pentode support deferred (3D device exceeds current 2D NR solver; workaround: triode-connect)
+- Op-amp model: Boyle macromodel with GBW dominant pole, VCC/VEE asymmetric supply rail clamping, and optional slew-rate limiting via `SR=` in V/μs (per-sample `|Δv_out| ≤ SR·dt` clamp in all 3 codegen paths).
+- Pentodes shipped 2026-04-11 (Reefman Derk §4.4 math, 9 params per tube, 3D NR block). Catalog: EL84/EL34/EF86. Beam tetrodes (6L6/6V6/KT88) need the DerkE §4.5 screen form — phase 1a.1. Grid-off FA reduction (pentode 3D→2D when Vgk<0) — phase 1b. Remote-cutoff / variable-mu (6BA6 / 6386 for varimu compressors) — phase 1c.
 - **Device support** (`DeviceEntry`): Diode, DiodeWithRs, Led, BJT, JFET, MOSFET, Tube
 - **NodalSolver transient NR**: Converges for all physically valid circuits including Pultec EQP-1A (4 tubes, 2 transformers, global NFB). Requires positive-definite inductance matrices (validated at MNA build time).
 - **Coupled-inductor push-pull NFB**: Differential cathode injection with separated cathodes (820Ω between) and K=0.9999 provides 21 dB of NFB. Pultec at +1.8 dB (near unity). Ideal transformer formulation (dependent sources + explicit leakage/magnetizing L) deferred — current approach is sufficient.
@@ -278,7 +284,8 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
 - `circuits/stable/wurli-preamp.cir`: Wurlitzer 200A preamp (N=11, M=5→3 FA, 2 BJTs + 1 diode, 1 pot)
   - Flattened from openwurli/spice/subcircuits/preamp.cir
   - R1-Cin series input coupling via intermediate node (mid_in)
-  - 0.1V in → 9.12V peak out at R_ldr=100K nominal
+  - 2N5089 BJTs run pure Ebers-Moll (USE_GP=false, no GP params in .model)
+  - Compile-path output byte-identical to 2026-03-25 baseline (verified via md5 of DC_OP, S_DEFAULT, K_DEFAULT, N_V, N_I, A_NEG_DEFAULT)
 - `circuits/testing/wurli-power-amp.cir`: Wurlitzer 200A power amplifier (N=20, M=16→9 FA, 8 BJTs, Class AB)
   - Quasi-complementary push-pull: PNP diff pair ��� NPN VAS → Sziklai output pairs
   - DC OP: v(out)=-0.065V (ngspice: -0.063V), internal nodes for parasitic BJTs (RB up to 120Ω)
@@ -300,8 +307,13 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
 - SSL bus compressor (codegen validated, full-LU path)
 - VCR audio ALC compressor
 - Op-amp VCC/VEE asymmetric supply rails
+- Op-amp slew-rate limiting via `SR=` .model parameter (V/μs)
 - Wiper pot support + gang pot linking
 - ActiveSetBe precomputed Schur sub-stepping
+- BJT Gummel-Poon ngspice parity (q2/Ib match `bjtload.c` exactly)
+- Per-sample pot smoothing + warm DC-OP re-init on large pot jumps
+- Parser input-size caps + cargo-fuzz target
+- Plugin shipability CLI flags (`--vendor`, `--vendor-url`, `--email`, `--vst3-id`, `--clap-id`)
 
 ### Pending Work
 

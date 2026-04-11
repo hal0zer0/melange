@@ -396,8 +396,69 @@ T2 grid2 plate2 cathode2 12AU7
 
 **Notes:**
 - Uses the Koren plate current model with Leach grid current
-- Only triodes are supported; pentode support is deferred
-- Terminal order is grid-plate-cathode (not plate-grid-cathode)
+- Terminal order is **grid-plate-cathode** (unusual for SPICE but kept for
+  backward compatibility with existing circuits). Pentodes use a different
+  (plate-first) order — see `P` element below.
+
+---
+
+### P — Pentode / Beam Tetrode (Vacuum Tube)
+
+**Syntax:**
+```
+Pname n_plate n_grid n_cathode n_screen [n_suppressor] modelname
+```
+
+**Parameters:**
+| Parameter | Description |
+|-----------|-------------|
+| `n_plate` | Plate (anode) terminal node |
+| `n_grid` | Control grid (g1) terminal node |
+| `n_cathode` | Cathode terminal node |
+| `n_screen` | Screen grid (g2) terminal node |
+| `n_suppressor` | *Optional* suppressor grid (g3) node. When omitted, the suppressor is electrically strapped to the cathode (the universal case for audio beam tetrodes and strapped pentodes). Phase 1a models a provided suppressor as cathode-tied as well. |
+| `modelname` | Name of `.model` definition (type: VP) |
+
+**Examples:**
+```spice
+* EL84 with suppressor strapped to cathode (4-terminal form)
+P1 plate1 grid1 cath1 scr1 EL84-P
+
+* EF86 with explicit suppressor (5-terminal form, g3 phase-1a: tied to cath)
+P2 plate2 grid2 cath2 scr2 sup2 EF86
+
+.model EL84-P VP(MU=23.36 EX=1.138 KG1=117.4 KG2=1275 KP=152.4 KVB=4015.8
++                ALPHA_S=7.66 A_FACTOR=4.344e-4 BETA_FACTOR=0.148)
+.model EF86    VP(MU=40.8  EX=1.327 KG1=675.8 KG2=4089.6 KP=350.7 KVB=1886.8
++                ALPHA_S=4.24 A_FACTOR=5.95e-5 BETA_FACTOR=0.28)
+```
+
+**Notes:**
+- Uses the Reefman "Derk" §4.4 pentode equations:
+  `Ip0 = E1^Ex/2·(1+sgn(E1))` built from `E1 = (Vg2k/Kp)·softplus(Kp·(1/μ + Vgk/sqrt(Kvb+Vg2k²)))`,
+  then `Ip = Ip0·F(Vpk)` and `Ig2 = Ip0·H(Vpk)` with the Vp-dependent
+  F/H factors parametrized by `αs, A, β`. Grid current uses the same
+  Leach power-law as triodes.
+- Terminal order is **plate-grid-cathode-screen**, which matches the
+  LTspice / PSpice / Ayumi convention and deliberately differs from the
+  `T` element's grid-plate-cathode order. Use the order that matches
+  your tube: `T` for existing triode netlists, `P` for new pentode work.
+- 9 fitted Derk parameters per tube: μ, Ex, Kg1, Kg2, Kp, Kvb, αs, A, β
+  (plus optional `IG_MAX`, `VGK_ONSET`, `CCG`, `CGP`, `CCP`, `RGI`
+  which behave identically to the triode form).
+- **αs must be strictly positive** — Derk with αs=0 degenerates to
+  Ip=0 identically. The validator rejects `.model … VP(ALPHA_S=0)`.
+- Catalog aliases (use these instead of inline `.model VP(...)` for
+  convenience): `EL84-P` / `EL84P` / `6BQ5-P`, `EL34-P` / `EL34P` /
+  `6CA7-P`, `EF86` / `6267`. The `-P` suffix distinguishes these
+  from the legacy triode-connected `EL84` / `EL34` entries which
+  remain available for backward compatibility.
+- **Not yet supported** (phase 1a limitation):
+  - Beam tetrodes 6L6 / 6V6 / KT88 — these need Reefman's DerkE §4.5
+    `exp(-β·Vp^{3/2})` screen form (phase 1a.1).
+  - Independent suppressor dynamics on true 5-element pentodes —
+    suppressor is always electrically tied to cathode in phase 1a.
+  - Variable-mu (remote-cutoff) pentodes like 6BA6 — phase 1c.
 
 ---
 
@@ -518,7 +579,8 @@ The `.model` statement defines the parameters for semiconductor devices. Paramet
 | `PJF` | JFET | P-channel JFET |
 | `NMOS` | MOSFET | N-channel MOSFET |
 | `PMOS` | MOSFET | P-channel MOSFET |
-| `TRIODE` | Tube | Vacuum tube triode (Koren model) |
+| `TRIODE` | Tube (triode) | Vacuum tube triode (Koren model) |
+| `VP` | Tube (pentode) | Pentode / beam tetrode (Reefman Derk §4.4) |
 | `OA` | Op-Amp | Operational amplifier (Boyle VCCS) |
 | `VCA` | VCA | Voltage-controlled amplifier (THAT 2180) |
 

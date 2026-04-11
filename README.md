@@ -120,7 +120,8 @@ can also run via an in-process `LinearSolver`, but most users will only touch th
 | BJT | Ebers-Moll or Gummel-Poon (VAF/VAR/IKF/IKR); CJE/CJC; parasitic RB/RC/RE |
 | JFET | Shichman-Hodges 2D (triode + saturation + λ); CGS/CGD; parasitic RD/RS |
 | MOSFET | Level 1 SPICE 2D; body effect (GAMMA/PHI); CGS/CGD |
-| Vacuum Tube | Koren triode + Leach grid current + λ; CCG/CGP/CCP; parasitic RGI |
+| Vacuum Triode | Koren triode + Leach grid current + λ; CCG/CGP/CCP; parasitic RGI |
+| Vacuum Pentode | Reefman Derk §4.4 (Ip/Ig2/Ig1, 9 params: μ/Ex/Kg1/Kg2/Kp/Kvb/αs/A/β); junction caps |
 | Op-Amp | Boyle VCCS macromodel (AOL, ROUT, GBW pole, VCC/VEE rail clamping) |
 | VCA | THAT 2180 exponential gain (current-mode, THD) |
 | CdS LDR | VTL5C3/4, NSL-32 with asymmetric envelope (used as a dynamic resistor) |
@@ -128,8 +129,9 @@ can also run via an in-process `LinearSolver`, but most users will only touch th
 | Potentiometer | `.pot` + `.wiper` directives; Sherman-Morrison rank-1 updates |
 | Switch | `.switch` directive; ganged R/C/L component switching |
 
-Pentodes, temperature coefficients, and noise models are not yet implemented.
-See [Known Limitations](#known-limitations) and `docs/aidocs/STATUS.md` for the full list.
+Temperature coefficients, noise models, and beam tetrode / variable-mu tube
+variants are not yet implemented. See [Known Limitations](#known-limitations)
+and `docs/aidocs/STATUS.md` for the full list.
 
 ## Validated Circuit Spotlight: Pultec EQP-1A
 
@@ -410,7 +412,7 @@ When the op-amp output approaches the rails, `--opamp-rail-mode` controls the cl
 ## Known Limitations
 
 - **Fixed temperature (27°C)**: All device models simulate at 300.15K. No temperature coefficients.
-- **Triode tubes only**: Pentode tubes (EL84, 6L6, EL34) are not yet supported. 12AX7, 12AU7, and other preamp triodes work fully.
+- **True pentodes supported, beam tetrodes deferred**: EL84, EL34, EF86 work via Reefman Derk §4.4 equations (`EL84-P` / `EL34-P` / `EF86` catalog aliases, or inline `.model NAME VP(...)` with μ/Ex/Kg1/Kg2/Kp/Kvb/αs/A/β; new `P` element prefix with plate-grid-cathode-screen order). Beam tetrodes (6L6, 6V6, KT88) need the Reefman DerkE §4.5 screen-current form and land in a follow-up release. Remote-cutoff / variable-mu tubes for varimu compressors (6386, 6BA6) are also on the roadmap.
 - **Ideal transformers**: Coupled inductors assume constant coupling coefficient with no core saturation or hysteresis.
 - **Op-amps**: Boyle VCCS macromodel with optional GBW dominant pole, optional slew-rate limiting (`SR`, in V/μs per SPICE convention, e.g. `SR=13` for a TL072), symmetric (`VSAT`) or asymmetric (`VCC`/`VEE`) supply rails, and five selectable rail-clamping strategies (`--opamp-rail-mode`).
 - **No noise simulation**: Shot noise, thermal noise, and 1/f noise are not modeled.
@@ -524,6 +526,7 @@ If SPICE is "the physics of analog circuit simulation," then melange is "that ph
 - Hermann Gummel & H.C. Poon — BJT model with Early effect and high-injection (Bell Labs, 1970)
 - Jiri Shichman & David Hodges — JFET model (IEEE JSSC, 1968)
 - Norman Koren — triode vacuum tube model (1996)
+- Derk Reefman — pentode vacuum tube model (uTracer Theory §4.4, 2016)
 - Marshall Leach — grid current model for vacuum tubes
 - William Shockley — semiconductor diode equation
 

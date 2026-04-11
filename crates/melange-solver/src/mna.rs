@@ -1410,7 +1410,12 @@ impl MnaSystem {
     /// - **BJT**: base-emitter (Cje) + base-collector (Cjc)
     /// - **JFET**: gate-source (Cgs) + gate-drain (Cgd)
     /// - **MOSFET**: gate-source (Cgs) + gate-drain (Cgd)
-    /// - **Tube**: grid-cathode (Cgk) + plate-cathode (Cpk)
+    /// - **Triode** (Tube, dim=2): grid-cathode (Cgk) + plate-cathode (Cpk)
+    /// - **Pentode** (Tube, dim=3): grid-cathode (Cgk) + grid-plate (Cgp,
+    ///   Miller cap) + plate-cathode (Cpk) + screen-cathode (Csk) +
+    ///   screen-plate (Csp). Suppressor (if present) is treated as cathode-tied
+    ///   in phase 1a and contributes no extra parasitic caps. TODO(phase 1b):
+    ///   honor user-provided explicit Cgk/Cgp/Cpk/Csk/Csp from `.model`.
     ///
     /// Uses [`PARASITIC_CAP`] (10pF) and [`stamp_capacitor_raw`](Self::stamp_capacitor_raw).
     pub fn add_parasitic_caps(&mut self) {
@@ -1461,16 +1466,40 @@ impl MnaSystem {
                     junctions.push((dev.name.clone(), ng, nd));
                 }
                 NonlinearDeviceType::Tube => {
-                    // node_indices: [grid, plate, cathode]
-                    let (ng, np, nk) = (
-                        dev.node_indices[0],
-                        dev.node_indices[1],
-                        dev.node_indices[2],
-                    );
-                    // Grid-cathode (Cgk)
-                    junctions.push((dev.name.clone(), ng, nk));
-                    // Plate-cathode (Cpk)
-                    junctions.push((dev.name.clone(), np, nk));
+                    // Tube device family: triode (dim=2) or pentode/beam-tetrode
+                    // (dim=3). Node layout differs between the two — see the
+                    // `Element::Triode` / `Element::Pentode` arms in
+                    // `categorize_element`.
+                    if dev.dimension == 3 {
+                        // Pentode: nodes are [plate, grid, cathode, screen, (suppressor?)].
+                        // Suppressor is cathode-tied in phase 1a and gets no caps.
+                        // 5 junction caps: Cgk, Cgp, Cpk, Csk, Csp.
+                        let np = dev.node_indices[0];
+                        let ng = dev.node_indices[1];
+                        let nk = dev.node_indices[2];
+                        let nscr = dev.node_indices[3];
+                        // Grid-cathode (Cgk)
+                        junctions.push((dev.name.clone(), ng, nk));
+                        // Grid-plate (Cgp, Miller)
+                        junctions.push((dev.name.clone(), ng, np));
+                        // Plate-cathode (Cpk)
+                        junctions.push((dev.name.clone(), np, nk));
+                        // Screen-cathode (Csk)
+                        junctions.push((dev.name.clone(), nscr, nk));
+                        // Screen-plate (Csp)
+                        junctions.push((dev.name.clone(), nscr, np));
+                    } else {
+                        // Triode: nodes are [grid, plate, cathode].
+                        let (ng, np, nk) = (
+                            dev.node_indices[0],
+                            dev.node_indices[1],
+                            dev.node_indices[2],
+                        );
+                        // Grid-cathode (Cgk)
+                        junctions.push((dev.name.clone(), ng, nk));
+                        // Plate-cathode (Cpk)
+                        junctions.push((dev.name.clone(), np, nk));
+                    }
                 }
                 NonlinearDeviceType::Vca => {
                     // node_indices: [sig_p, sig_n, ctrl_p, ctrl_n]
@@ -3038,7 +3067,7 @@ impl MnaBuilder {
             })
             .collect();
 
-        for (dev_type, _dim, start_idx, node_indices, dev_name) in device_info {
+        for (dev_type, dim, start_idx, node_indices, dev_name) in device_info {
             match dev_type {
                 NonlinearDeviceType::Diode => {
                     if node_indices.len() >= 2 {
@@ -3269,9 +3298,83 @@ impl MnaBuilder {
                     }
                 }
                 NonlinearDeviceType::Tube => {
-                    // Triode: 2D — Ip (plate current) + Ig (grid current)
-                    // Nodes: [ng, np, nk] (grid, plate, cathode)
-                    if node_indices.len() >= 3 {
+                    // Tube device family. Two shapes:
+                    //   - Triode (dim=2): nodes are [grid, plate, cathode]
+                    //   - Pentode (dim=3): nodes are [plate, grid, cathode, screen, (suppressor?)]
+                    // The node ordering inside `node_indices` matches the layout
+                    // produced by `categorize_element`.
+                    if dim == 3 {
+                        // Pentode 3D layout (rows / columns must agree so the
+                        // 3x3 device Jacobian block stays consistent):
+                        //   row/col 0: Ip   ↔ Vgk
+                        //   row/col 1: Ig2  ↔ Vpk
+                        //   row/col 2: Ig1  ↔ Vg2k
+                        //
+                        // The codegen template (device_tube.rs.tera) and the
+                        // DC-OP solver consume this exact ordering — do NOT
+                        // reshuffle it without updating those consumers.
+                        //
+                        // Phase 1a: the optional suppressor node (node_indices[4],
+                        // when present) is treated as electrically tied to the
+                        // cathode. We do not stamp any N_v / N_i entries for it.
+                        // This is the universal case for audio power tubes
+                        // (6L6/6V6/KT88 beam tetrodes, EL84/EL34 strapped pentodes,
+                        // and EF86 whose suppressor is wired to cathode externally).
+                        // TODO(phase 1b): if a user ever wires the suppressor to
+                        // a non-cathode node we silently model it as cathode-tied.
+                        if node_indices.len() >= 4 {
+                            let p_raw = node_indices[0];
+                            let g_raw = node_indices[1];
+                            let k_raw = node_indices[2];
+                            let s_raw = node_indices[3]; // screen (g2)
+
+                            // N_v row 0 (Vgk): +1 at grid, -1 at cathode
+                            if g_raw > 0 {
+                                mna.n_v[start_idx][g_raw - 1] = 1.0;
+                            }
+                            if k_raw > 0 {
+                                mna.n_v[start_idx][k_raw - 1] = -1.0;
+                            }
+                            // N_v row 1 (Vpk): +1 at plate, -1 at cathode
+                            if p_raw > 0 {
+                                mna.n_v[start_idx + 1][p_raw - 1] = 1.0;
+                            }
+                            if k_raw > 0 {
+                                mna.n_v[start_idx + 1][k_raw - 1] = -1.0;
+                            }
+                            // N_v row 2 (Vg2k): +1 at screen, -1 at cathode
+                            if s_raw > 0 {
+                                mna.n_v[start_idx + 2][s_raw - 1] = 1.0;
+                            }
+                            if k_raw > 0 {
+                                mna.n_v[start_idx + 2][k_raw - 1] = -1.0;
+                            }
+
+                            // N_i col 0 (Ip): -1 at plate (extracted), +1 at cathode (injected)
+                            if p_raw > 0 {
+                                mna.n_i[p_raw - 1][start_idx] = -1.0;
+                            }
+                            if k_raw > 0 {
+                                mna.n_i[k_raw - 1][start_idx] = 1.0;
+                            }
+                            // N_i col 1 (Ig2): -1 at screen, +1 at cathode
+                            if s_raw > 0 {
+                                mna.n_i[s_raw - 1][start_idx + 1] = -1.0;
+                            }
+                            if k_raw > 0 {
+                                mna.n_i[k_raw - 1][start_idx + 1] = 1.0;
+                            }
+                            // N_i col 2 (Ig1): -1 at grid, +1 at cathode
+                            if g_raw > 0 {
+                                mna.n_i[g_raw - 1][start_idx + 2] = -1.0;
+                            }
+                            if k_raw > 0 {
+                                mna.n_i[k_raw - 1][start_idx + 2] = 1.0;
+                            }
+                        }
+                    } else if node_indices.len() >= 3 {
+                        // Triode 2D — Ip (plate current) + Ig (grid current)
+                        // Nodes: [ng, np, nk] (grid, plate, cathode)
                         let g_raw = node_indices[0];
                         let p_raw = node_indices[1];
                         let k_raw = node_indices[2];
@@ -3431,6 +3534,20 @@ impl MnaBuilder {
                 n_cathode,
                 ..
             } => vec![n_grid, n_plate, n_cathode],
+            Element::Pentode {
+                n_plate,
+                n_grid,
+                n_cathode,
+                n_screen,
+                n_suppressor,
+                ..
+            } => {
+                let mut nodes = vec![n_plate, n_grid, n_cathode, n_screen];
+                if let Some(ns) = n_suppressor {
+                    nodes.push(ns);
+                }
+                nodes
+            }
             Element::Opamp {
                 n_plus,
                 n_minus,
@@ -3706,6 +3823,50 @@ impl MnaBuilder {
                     dimension: 2,
                     start_idx,
                     nodes: vec![n_grid.clone(), n_plate.clone(), n_cathode.clone()],
+                    node_indices,
+                });
+            }
+            Element::Pentode {
+                name,
+                n_plate,
+                n_grid,
+                n_cathode,
+                n_screen,
+                n_suppressor,
+                ..
+            } => {
+                // 3D NR contribution: Ip (Vgk, Vpk, Vg2k), Ig2 (same voltages),
+                // Ig1 (Vgk-only). MNA stamping lives in the nonlinear device
+                // layer (task P1a-05); for now register the element so node
+                // collection, FA detection, and device-count accounting work.
+                //
+                // Node layout in `nodes` / `node_indices` is plate-grid-cathode-screen
+                // (+ optional suppressor). Downstream MNA stamping code must use
+                // this order for N_v / N_i construction.
+                let mut nodes = vec![
+                    n_plate.clone(),
+                    n_grid.clone(),
+                    n_cathode.clone(),
+                    n_screen.clone(),
+                ];
+                let mut node_indices = vec![
+                    self.node_map[n_plate],
+                    self.node_map[n_grid],
+                    self.node_map[n_cathode],
+                    self.node_map[n_screen],
+                ];
+                if let Some(ns) = n_suppressor {
+                    nodes.push(ns.clone());
+                    node_indices.push(self.node_map[ns]);
+                }
+                let start_idx = self.total_dimension;
+                self.total_dimension += 3; // 3D: Ip + Ig2 + Ig1
+                self.nonlinear_devices.push(NonlinearDeviceInfo {
+                    name: name.clone(),
+                    device_type: NonlinearDeviceType::Tube,
+                    dimension: 3,
+                    start_idx,
+                    nodes,
                     node_indices,
                 });
             }
@@ -4734,5 +4895,287 @@ Y1 sp sn cp cn vca1
         // No control current in signal nodes either (col 1)
         assert_eq!(mna.n_i[sp_idx - 1][1], 0.0, "N_i[sig+][1] should be 0");
         assert_eq!(mna.n_i[sn_idx - 1][1], 0.0, "N_i[sig-][1] should be 0");
+    }
+
+    // ===== Pentode MNA tests (phase 1a) =====
+    //
+    // Pentode 3D layout — locked in by row/col convention shared with the
+    // codegen template (device_tube.rs.tera) and the DC-OP solver:
+    //   row/col 0: Ip   ↔ Vgk
+    //   row/col 1: Ig2  ↔ Vpk
+    //   row/col 2: Ig1  ↔ Vg2k
+    // Phase 1a treats the suppressor (n_suppressor) as cathode-tied; no
+    // N_v/N_i entries are stamped for it.
+
+    /// EL84 model directive used by the pentode tests below.
+    /// Beam-tetrode-friendly Reefman params (matches parser.rs unit tests).
+    const EL84_MODEL: &str = ".model EL84 VP(MU=23.36 EX=1.138 KG1=117.4 KG2=1275 \
+                              KP=152.4 KVB=4015.8 ALPHA_S=7.66 \
+                              A_FACTOR=4.344e-4 BETA_FACTOR=0.148)";
+
+    #[test]
+    fn test_pentode_dimension_is_3() {
+        let spice = format!(
+            "Pentode dimension test\n\
+             P1 plate grid cath screen EL84\n\
+             V1 plate 0 250\n\
+             R1 grid 0 1Meg\n\
+             R2 screen 0 470k\n\
+             R3 cath 0 130\n\
+             {}\n",
+            EL84_MODEL
+        );
+        let netlist = Netlist::parse(&spice).unwrap();
+        let mna = MnaSystem::from_netlist(&netlist).unwrap();
+
+        assert_eq!(mna.m, 3, "Pentode should add M=3 (Ip + Ig2 + Ig1)");
+        assert_eq!(mna.num_devices, 1, "Should have exactly 1 nonlinear device");
+        let dev = &mna.nonlinear_devices[0];
+        assert_eq!(dev.device_type, NonlinearDeviceType::Tube);
+        assert_eq!(dev.dimension, 3);
+        assert_eq!(dev.start_idx, 0);
+    }
+
+    #[test]
+    fn test_pentode_nv_ni_stamping() {
+        // Minimal pentode test rig: V1 on plate, resistors on grid/screen/cathode.
+        let spice = format!(
+            "Pentode N_v / N_i stamping test\n\
+             P1 plate grid cath screen EL84\n\
+             V1 plate 0 250\n\
+             R1 grid 0 1Meg\n\
+             R2 screen 0 470k\n\
+             R3 cath 0 130\n\
+             {}\n",
+            EL84_MODEL
+        );
+        let netlist = Netlist::parse(&spice).unwrap();
+        let mna = MnaSystem::from_netlist(&netlist).unwrap();
+
+        let p_idx = *mna.node_map.get("plate").unwrap() - 1;
+        let g_idx = *mna.node_map.get("grid").unwrap() - 1;
+        let k_idx = *mna.node_map.get("cath").unwrap() - 1;
+        let s_idx = *mna.node_map.get("screen").unwrap() - 1;
+
+        // ----- N_v rows (controlling voltages extracted from node voltages) -----
+        // Row 0 = Vgk = V_grid - V_cathode
+        assert_eq!(mna.n_v[0][g_idx], 1.0, "N_v[0][grid] should be +1 (Vgk)");
+        assert_eq!(mna.n_v[0][k_idx], -1.0, "N_v[0][cath] should be -1 (Vgk)");
+        assert_eq!(mna.n_v[0][p_idx], 0.0, "N_v[0][plate] should be 0");
+        assert_eq!(mna.n_v[0][s_idx], 0.0, "N_v[0][screen] should be 0");
+
+        // Row 1 = Vpk = V_plate - V_cathode
+        assert_eq!(mna.n_v[1][p_idx], 1.0, "N_v[1][plate] should be +1 (Vpk)");
+        assert_eq!(mna.n_v[1][k_idx], -1.0, "N_v[1][cath] should be -1 (Vpk)");
+        assert_eq!(mna.n_v[1][g_idx], 0.0, "N_v[1][grid] should be 0");
+        assert_eq!(mna.n_v[1][s_idx], 0.0, "N_v[1][screen] should be 0");
+
+        // Row 2 = Vg2k = V_screen - V_cathode
+        assert_eq!(mna.n_v[2][s_idx], 1.0, "N_v[2][screen] should be +1 (Vg2k)");
+        assert_eq!(mna.n_v[2][k_idx], -1.0, "N_v[2][cath] should be -1 (Vg2k)");
+        assert_eq!(mna.n_v[2][p_idx], 0.0, "N_v[2][plate] should be 0");
+        assert_eq!(mna.n_v[2][g_idx], 0.0, "N_v[2][grid] should be 0");
+
+        // ----- N_i columns (currents injected into node voltages) -----
+        // Col 0 = Ip: extracted from plate, injected into cathode
+        assert_eq!(mna.n_i[p_idx][0], -1.0, "N_i[plate][0] should be -1 (Ip out)");
+        assert_eq!(mna.n_i[k_idx][0], 1.0, "N_i[cath][0] should be +1 (Ip in)");
+        assert_eq!(mna.n_i[g_idx][0], 0.0, "N_i[grid][0] should be 0");
+        assert_eq!(mna.n_i[s_idx][0], 0.0, "N_i[screen][0] should be 0");
+
+        // Col 1 = Ig2: extracted from screen, injected into cathode
+        assert_eq!(mna.n_i[s_idx][1], -1.0, "N_i[screen][1] should be -1 (Ig2 out)");
+        assert_eq!(mna.n_i[k_idx][1], 1.0, "N_i[cath][1] should be +1 (Ig2 in)");
+        assert_eq!(mna.n_i[p_idx][1], 0.0, "N_i[plate][1] should be 0");
+        assert_eq!(mna.n_i[g_idx][1], 0.0, "N_i[grid][1] should be 0");
+
+        // Col 2 = Ig1: extracted from grid, injected into cathode
+        assert_eq!(mna.n_i[g_idx][2], -1.0, "N_i[grid][2] should be -1 (Ig1 out)");
+        assert_eq!(mna.n_i[k_idx][2], 1.0, "N_i[cath][2] should be +1 (Ig1 in)");
+        assert_eq!(mna.n_i[p_idx][2], 0.0, "N_i[plate][2] should be 0");
+        assert_eq!(mna.n_i[s_idx][2], 0.0, "N_i[screen][2] should be 0");
+    }
+
+    #[test]
+    fn test_pentode_ignores_suppressor() {
+        // Build the same circuit two ways: with and without an explicit
+        // suppressor node. In phase 1a the suppressor is electrically silent,
+        // so the resulting N_v / N_i blocks must be byte-identical for the
+        // 4 "real" pentode terminals (plate / grid / cath / screen).
+        let spice4 = format!(
+            "4-node pentode\n\
+             P1 plate grid cath screen EL84\n\
+             V1 plate 0 250\n\
+             R1 grid 0 1Meg\n\
+             R2 screen 0 470k\n\
+             R3 cath 0 130\n\
+             {}\n",
+            EL84_MODEL
+        );
+        // Same circuit but with `sup` as an explicit 5th terminal.
+        // We add an R from sup to ground so it has somewhere to live in the
+        // node map; the stamping itself must NOT mention `sup`.
+        let spice5 = format!(
+            "5-node pentode (suppressor explicit)\n\
+             P1 plate grid cath screen sup EL84\n\
+             V1 plate 0 250\n\
+             R1 grid 0 1Meg\n\
+             R2 screen 0 470k\n\
+             R3 cath 0 130\n\
+             Rsup sup 0 1\n\
+             {}\n",
+            EL84_MODEL
+        );
+
+        let netlist4 = Netlist::parse(&spice4).unwrap();
+        let netlist5 = Netlist::parse(&spice5).unwrap();
+        let mna4 = MnaSystem::from_netlist(&netlist4).unwrap();
+        let mna5 = MnaSystem::from_netlist(&netlist5).unwrap();
+
+        // Both registrations share the same nonlinear dimension (3D).
+        assert_eq!(mna4.m, 3);
+        assert_eq!(mna5.m, 3);
+
+        // Look up the four "real" pentode nodes in BOTH MNAs and verify the
+        // N_v / N_i entries match exactly. The 5-node case adds an extra
+        // node (`sup`) but no additional N_v / N_i contributions.
+        let p4 = *mna4.node_map.get("plate").unwrap() - 1;
+        let g4 = *mna4.node_map.get("grid").unwrap() - 1;
+        let k4 = *mna4.node_map.get("cath").unwrap() - 1;
+        let s4 = *mna4.node_map.get("screen").unwrap() - 1;
+        let p5 = *mna5.node_map.get("plate").unwrap() - 1;
+        let g5 = *mna5.node_map.get("grid").unwrap() - 1;
+        let k5 = *mna5.node_map.get("cath").unwrap() - 1;
+        let s5 = *mna5.node_map.get("screen").unwrap() - 1;
+
+        for row in 0..3 {
+            assert_eq!(mna4.n_v[row][p4], mna5.n_v[row][p5], "N_v row {} plate", row);
+            assert_eq!(mna4.n_v[row][g4], mna5.n_v[row][g5], "N_v row {} grid", row);
+            assert_eq!(mna4.n_v[row][k4], mna5.n_v[row][k5], "N_v row {} cath", row);
+            assert_eq!(
+                mna4.n_v[row][s4], mna5.n_v[row][s5],
+                "N_v row {} screen",
+                row
+            );
+        }
+        for col in 0..3 {
+            assert_eq!(mna4.n_i[p4][col], mna5.n_i[p5][col], "N_i col {} plate", col);
+            assert_eq!(mna4.n_i[g4][col], mna5.n_i[g5][col], "N_i col {} grid", col);
+            assert_eq!(mna4.n_i[k4][col], mna5.n_i[k5][col], "N_i col {} cath", col);
+            assert_eq!(
+                mna4.n_i[s4][col], mna5.n_i[s5][col],
+                "N_i col {} screen",
+                col
+            );
+        }
+
+        // The suppressor row in the 5-node case should be electrically silent
+        // — no N_v / N_i contributions tied to it.
+        let sup5 = *mna5.node_map.get("sup").unwrap() - 1;
+        for row in 0..3 {
+            assert_eq!(
+                mna5.n_v[row][sup5], 0.0,
+                "suppressor must not appear in N_v row {}",
+                row
+            );
+        }
+        for col in 0..3 {
+            assert_eq!(
+                mna5.n_i[sup5][col], 0.0,
+                "suppressor must not appear in N_i col {}",
+                col
+            );
+        }
+    }
+
+    #[test]
+    fn test_pentode_parasitic_caps() {
+        // Purely-resistive pentode circuit (no explicit caps in the netlist)
+        // should pick up 5 auto-inserted junction caps:
+        //   Cgk, Cgp, Cpk, Csk, Csp
+        // Each junction adds 2 off-diagonal C entries (symmetric stamp), so
+        // 5 junctions => 10 off-diagonal entries.
+        let spice = format!(
+            "Pentode parasitic\n\
+             P1 plate grid cath screen EL84\n\
+             V1 plate 0 250\n\
+             R1 grid 0 1Meg\n\
+             R2 screen 0 470k\n\
+             R3 cath 0 130\n\
+             {}\n",
+            EL84_MODEL
+        );
+        let netlist = Netlist::parse(&spice).unwrap();
+        let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
+        mna.add_parasitic_caps();
+
+        let p = *mna.node_map.get("plate").unwrap() - 1;
+        let g = *mna.node_map.get("grid").unwrap() - 1;
+        let k = *mna.node_map.get("cath").unwrap() - 1;
+        let s = *mna.node_map.get("screen").unwrap() - 1;
+
+        // Each pentode terminal accumulates one diagonal cap per junction it
+        // touches. Topology recap: Cgk(g,k), Cgp(g,p), Cpk(p,k), Csk(s,k),
+        // Csp(s,p). Resulting junction counts:
+        //   plate: Cgp + Cpk + Csp = 3 caps
+        //   grid : Cgk + Cgp        = 2 caps
+        //   cath : Cgk + Cpk + Csk  = 3 caps
+        //   screen: Csk + Csp       = 2 caps
+        let approx = |actual: f64, expected_n: usize| {
+            let expected = (expected_n as f64) * PARASITIC_CAP;
+            (actual - expected).abs() < 1e-25
+        };
+
+        assert!(
+            approx(mna.c[p][p], 3),
+            "C[plate][plate] = {} (expected 3*PARASITIC_CAP)",
+            mna.c[p][p]
+        );
+        assert!(
+            approx(mna.c[g][g], 2),
+            "C[grid][grid] = {} (expected 2*PARASITIC_CAP)",
+            mna.c[g][g]
+        );
+        assert!(
+            approx(mna.c[k][k], 3),
+            "C[cath][cath] = {} (expected 3*PARASITIC_CAP)",
+            mna.c[k][k]
+        );
+        assert!(
+            approx(mna.c[s][s], 2),
+            "C[screen][screen] = {} (expected 2*PARASITIC_CAP)",
+            mna.c[s][s]
+        );
+
+        // Each junction must show up as a NEGATIVE off-diagonal entry on both
+        // sides of the symmetric stamp (the `stamp_capacitor_raw` convention).
+        let off = |a: usize, b: usize| (mna.c[a][b] + PARASITIC_CAP).abs() < 1e-25;
+        assert!(off(g, k), "C[grid][cath] = {} (Cgk)", mna.c[g][k]);
+        assert!(off(k, g), "C[cath][grid] = {} (Cgk)", mna.c[k][g]);
+        assert!(off(g, p), "C[grid][plate] = {} (Cgp)", mna.c[g][p]);
+        assert!(off(p, g), "C[plate][grid] = {} (Cgp)", mna.c[p][g]);
+        assert!(off(p, k), "C[plate][cath] = {} (Cpk)", mna.c[p][k]);
+        assert!(off(k, p), "C[cath][plate] = {} (Cpk)", mna.c[k][p]);
+        assert!(off(s, k), "C[screen][cath] = {} (Csk)", mna.c[s][k]);
+        assert!(off(k, s), "C[cath][screen] = {} (Csk)", mna.c[k][s]);
+        assert!(off(s, p), "C[screen][plate] = {} (Csp)", mna.c[s][p]);
+        assert!(off(p, s), "C[plate][screen] = {} (Csp)", mna.c[p][s]);
+
+        // Sanity: total off-diagonal nonzero count over the 4 pentode
+        // terminals should be exactly 10 (5 junctions x 2 entries each).
+        let pentode_nodes = [p, g, k, s];
+        let mut off_diag_count = 0;
+        for &i in &pentode_nodes {
+            for &j in &pentode_nodes {
+                if i != j && mna.c[i][j].abs() > 1e-25 {
+                    off_diag_count += 1;
+                }
+            }
+        }
+        assert_eq!(
+            off_diag_count, 10,
+            "Pentode should have 10 off-diagonal C entries (5 junctions), got {}",
+            off_diag_count
+        );
     }
 }

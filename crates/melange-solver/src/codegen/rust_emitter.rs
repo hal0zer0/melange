@@ -1195,6 +1195,15 @@ impl RustEmitter {
                     if tp.has_rgi() {
                         emit_device_const(&mut code, dev_num, "RGI", tp.rgi);
                     }
+                    // Pentode-only constants (Reefman Derk §4.4). Triodes leave
+                    // these unset so the emitted output is byte-identical for
+                    // pure-triode circuits.
+                    if tp.is_pentode() {
+                        emit_device_const(&mut code, dev_num, "KG2", tp.kg2);
+                        emit_device_const(&mut code, dev_num, "ALPHA_S", tp.alpha_s);
+                        emit_device_const(&mut code, dev_num, "A_FACTOR", tp.a_factor);
+                        emit_device_const(&mut code, dev_num, "BETA_FACTOR", tp.beta_factor);
+                    }
                     // Precomputed critical voltage for SPICE pnjlim (grid current onset)
                     let vt_tube = tp.vgk_onset / 3.0;
                     let vcrit = vt_tube * (vt_tube / (std::f64::consts::SQRT_2 * 1e-10)).ln();
@@ -1240,7 +1249,15 @@ impl RustEmitter {
             code.push_str(&self.render("device_mosfet", &Context::new())?);
         }
         if has_tube {
-            code.push_str(&self.render("device_tube", &Context::new())?);
+            // any_pentode guards the pentode emission block in device_tube.rs.tera.
+            // For pure-triode circuits this is false, so the emitted code is
+            // byte-identical to the pre-pentode baseline (regression guard).
+            let any_pentode = ir.device_slots.iter().any(|slot| {
+                matches!(&slot.params, DeviceParams::Tube(tp) if tp.is_pentode())
+            });
+            let mut tube_ctx = Context::new();
+            tube_ctx.insert("any_pentode", &any_pentode);
+            code.push_str(&self.render("device_tube", &tube_ctx)?);
         }
         if has_vca {
             code.push_str(&self.render("device_vca", &Context::new())?);
@@ -2946,6 +2963,14 @@ fn emit_nr_limit_and_converge(code: &mut String, ir: &CircuitIR, dim: usize, ind
                         "{indent}    let v_lim = pnjlim(v_d{i} + dv{i}, v_d{i}, state.device_{dev_num}_vgk_onset / 3.0, DEVICE_{dev_num}_VCRIT);\n"
                     ));
                 }
+                (DeviceType::Tube, 2) => {
+                    // Pentode dim 2 = Vg2k — same softplus knee behavior as Vgk;
+                    // log-junction limiting prevents large NR steps from skipping
+                    // the E1 knee. Triodes never reach dim==2 (they are 2D).
+                    code.push_str(&format!(
+                        "{indent}    let v_lim = pnjlim(v_d{i} + dv{i}, v_d{i}, state.device_{dev_num}_vgk_onset / 3.0, DEVICE_{dev_num}_VCRIT);\n"
+                    ));
+                }
                 (DeviceType::Tube, _) => {
                     code.push_str(&format!(
                         "{indent}    let v_lim = fetlim(v_d{i} + dv{i}, v_d{i}, 0.0);\n"
@@ -3444,33 +3469,54 @@ impl RustEmitter {
                             DeviceParams::Tube(tp) => tp,
                             other => return Err(CodegenError::InvalidDevice(format!("device_type=Tube but params={:?}", other))),
                         };
-                        if tp.has_rgi() {
-                            // RGI: solve for internal Vgk, evaluate at internal voltage
+                        if tp.is_pentode() {
+                            // Pentode: 3D NR block (Vgk→Ip, Vpk→Ig2, Vg2k→Ig1).
+                            // Reefman Derk §4.4 — see memory/pentode_equations.md.
+                            let s2 = s + 2;
                             code.push_str(&format!(
-                                "        let (i_dev{s}, i_dev{s1}, tube{d}_jac) = tube_evaluate_with_rgi(v_d{s}, v_d{s1}, state.device_{d}_mu, state.device_{d}_ex, state.device_{d}_kg1, state.device_{d}_kp, state.device_{d}_kvb, state.device_{d}_ig_max, state.device_{d}_vgk_onset, state.device_{d}_lambda, DEVICE_{d}_RGI);\n"
+                                "        let (i_dev{s}, i_dev{s1}, i_dev{s2}, pentode{d}_jac) = tube_evaluate_pentode(v_d{s}, v_d{s1}, v_d{s2}, state.device_{d}_mu, state.device_{d}_ex, state.device_{d}_kg1, DEVICE_{d}_KG2, state.device_{d}_kp, state.device_{d}_kvb, DEVICE_{d}_ALPHA_S, DEVICE_{d}_A_FACTOR, DEVICE_{d}_BETA_FACTOR, state.device_{d}_ig_max, state.device_{d}_vgk_onset);\n"
                             ));
+                            // Row-major 3x3 Jacobian: [dIp/dVgk, dIp/dVpk, dIp/dVg2k,
+                            //                          dIg2/dVgk, dIg2/dVpk, dIg2/dVg2k,
+                            //                          dIg1/dVgk, dIg1/dVpk, dIg1/dVg2k]
+                            code.push_str(&format!("        let jdev_{s}_{s} = pentode{d}_jac[0];\n"));
+                            code.push_str(&format!("        let jdev_{s}_{s1} = pentode{d}_jac[1];\n"));
+                            code.push_str(&format!("        let jdev_{s}_{s2} = pentode{d}_jac[2];\n"));
+                            code.push_str(&format!("        let jdev_{s1}_{s} = pentode{d}_jac[3];\n"));
+                            code.push_str(&format!("        let jdev_{s1}_{s1} = pentode{d}_jac[4];\n"));
+                            code.push_str(&format!("        let jdev_{s1}_{s2} = pentode{d}_jac[5];\n"));
+                            code.push_str(&format!("        let jdev_{s2}_{s} = pentode{d}_jac[6];\n"));
+                            code.push_str(&format!("        let jdev_{s2}_{s1} = pentode{d}_jac[7];\n"));
+                            code.push_str(&format!("        let jdev_{s2}_{s2} = pentode{d}_jac[8];\n"));
                         } else {
-                            // Standard tube (no RGI)
+                            if tp.has_rgi() {
+                                // RGI: solve for internal Vgk, evaluate at internal voltage
+                                code.push_str(&format!(
+                                    "        let (i_dev{s}, i_dev{s1}, tube{d}_jac) = tube_evaluate_with_rgi(v_d{s}, v_d{s1}, state.device_{d}_mu, state.device_{d}_ex, state.device_{d}_kg1, state.device_{d}_kp, state.device_{d}_kvb, state.device_{d}_ig_max, state.device_{d}_vgk_onset, state.device_{d}_lambda, DEVICE_{d}_RGI);\n"
+                                ));
+                            } else {
+                                // Standard tube (no RGI)
+                                code.push_str(&format!(
+                                    "        let (i_dev{s}, i_dev{s1}, tube{d}_jac) = tube_evaluate(v_d{s}, v_d{s1}, state.device_{d}_mu, state.device_{d}_ex, state.device_{d}_kg1, state.device_{d}_kp, state.device_{d}_kvb, state.device_{d}_ig_max, state.device_{d}_vgk_onset, state.device_{d}_lambda);\n"
+                                ));
+                            }
                             code.push_str(&format!(
-                                "        let (i_dev{s}, i_dev{s1}, tube{d}_jac) = tube_evaluate(v_d{s}, v_d{s1}, state.device_{d}_mu, state.device_{d}_ex, state.device_{d}_kg1, state.device_{d}_kp, state.device_{d}_kvb, state.device_{d}_ig_max, state.device_{d}_vgk_onset, state.device_{d}_lambda);\n"
+                                "        let jdev_{}_{} = tube{}_jac[0];\n",
+                                s, s, d
+                            ));
+                            code.push_str(&format!(
+                                "        let jdev_{}_{} = tube{}_jac[1];\n",
+                                s, s1, d
+                            ));
+                            code.push_str(&format!(
+                                "        let jdev_{}_{} = tube{}_jac[2];\n",
+                                s1, s, d
+                            ));
+                            code.push_str(&format!(
+                                "        let jdev_{}_{} = tube{}_jac[3];\n",
+                                s1, s1, d
                             ));
                         }
-                        code.push_str(&format!(
-                            "        let jdev_{}_{} = tube{}_jac[0];\n",
-                            s, s, d
-                        ));
-                        code.push_str(&format!(
-                            "        let jdev_{}_{} = tube{}_jac[1];\n",
-                            s, s1, d
-                        ));
-                        code.push_str(&format!(
-                            "        let jdev_{}_{} = tube{}_jac[2];\n",
-                            s1, s, d
-                        ));
-                        code.push_str(&format!(
-                            "        let jdev_{}_{} = tube{}_jac[3];\n",
-                            s1, s1, d
-                        ));
                     }
                     DeviceType::Vca => {
                         let s = slot.start_idx;
@@ -7102,21 +7148,39 @@ impl RustEmitter {
             }
             (DeviceType::Tube, DeviceParams::Tube(tp)) => {
                 let s1 = s + 1;
-                if tp.has_rgi() {
+                if tp.is_pentode() {
+                    let s2 = s + 2;
                     code.push_str(&format!(
-                        "{indent}let (i_dev{s}, i_dev{s1}, tube{d}_jac) = tube_evaluate_with_rgi(v_d{s}, v_d{s1}, state.device_{d}_mu, state.device_{d}_ex, state.device_{d}_kg1, state.device_{d}_kp, state.device_{d}_kvb, state.device_{d}_ig_max, state.device_{d}_vgk_onset, state.device_{d}_lambda, DEVICE_{d}_RGI);\n"
+                        "{indent}let (i_dev{s}, i_dev{s1}, i_dev{s2}, pentode{d}_jac) = tube_evaluate_pentode(v_d{s}, v_d{s1}, v_d{s2}, state.device_{d}_mu, state.device_{d}_ex, state.device_{d}_kg1, DEVICE_{d}_KG2, state.device_{d}_kp, state.device_{d}_kvb, DEVICE_{d}_ALPHA_S, DEVICE_{d}_A_FACTOR, DEVICE_{d}_BETA_FACTOR, state.device_{d}_ig_max, state.device_{d}_vgk_onset);\n"
+                    ));
+                    code.push_str(&format!(
+                        "{indent}let jdev_{s}_{s} = pentode{d}_jac[0];\n\
+                         {indent}let jdev_{s}_{s1} = pentode{d}_jac[1];\n\
+                         {indent}let jdev_{s}_{s2} = pentode{d}_jac[2];\n\
+                         {indent}let jdev_{s1}_{s} = pentode{d}_jac[3];\n\
+                         {indent}let jdev_{s1}_{s1} = pentode{d}_jac[4];\n\
+                         {indent}let jdev_{s1}_{s2} = pentode{d}_jac[5];\n\
+                         {indent}let jdev_{s2}_{s} = pentode{d}_jac[6];\n\
+                         {indent}let jdev_{s2}_{s1} = pentode{d}_jac[7];\n\
+                         {indent}let jdev_{s2}_{s2} = pentode{d}_jac[8];\n"
                     ));
                 } else {
+                    if tp.has_rgi() {
+                        code.push_str(&format!(
+                            "{indent}let (i_dev{s}, i_dev{s1}, tube{d}_jac) = tube_evaluate_with_rgi(v_d{s}, v_d{s1}, state.device_{d}_mu, state.device_{d}_ex, state.device_{d}_kg1, state.device_{d}_kp, state.device_{d}_kvb, state.device_{d}_ig_max, state.device_{d}_vgk_onset, state.device_{d}_lambda, DEVICE_{d}_RGI);\n"
+                        ));
+                    } else {
+                        code.push_str(&format!(
+                            "{indent}let (i_dev{s}, i_dev{s1}, tube{d}_jac) = tube_evaluate(v_d{s}, v_d{s1}, state.device_{d}_mu, state.device_{d}_ex, state.device_{d}_kg1, state.device_{d}_kp, state.device_{d}_kvb, state.device_{d}_ig_max, state.device_{d}_vgk_onset, state.device_{d}_lambda);\n"
+                        ));
+                    }
                     code.push_str(&format!(
-                        "{indent}let (i_dev{s}, i_dev{s1}, tube{d}_jac) = tube_evaluate(v_d{s}, v_d{s1}, state.device_{d}_mu, state.device_{d}_ex, state.device_{d}_kg1, state.device_{d}_kp, state.device_{d}_kvb, state.device_{d}_ig_max, state.device_{d}_vgk_onset, state.device_{d}_lambda);\n"
+                        "{indent}let jdev_{s}_{s} = tube{d}_jac[0];\n\
+                         {indent}let jdev_{s}_{s1} = tube{d}_jac[1];\n\
+                         {indent}let jdev_{s1}_{s} = tube{d}_jac[2];\n\
+                         {indent}let jdev_{s1}_{s1} = tube{d}_jac[3];\n"
                     ));
                 }
-                code.push_str(&format!(
-                    "{indent}let jdev_{s}_{s} = tube{d}_jac[0];\n\
-                     {indent}let jdev_{s}_{s1} = tube{d}_jac[1];\n\
-                     {indent}let jdev_{s1}_{s} = tube{d}_jac[2];\n\
-                     {indent}let jdev_{s1}_{s1} = tube{d}_jac[3];\n"
-                ));
             }
             (DeviceType::Vca, DeviceParams::Vca(_vp)) => {
                 let s1 = s + 1;
@@ -7186,6 +7250,12 @@ impl RustEmitter {
                         ));
                     }
                     (super::ir::DeviceType::Tube, 0) => {
+                        code.push_str(&format!(
+                            "{indent}    let v_lim = pnjlim(v_d{i} + dv{i}, v_d{i}, state.device_{dev_num}_vgk_onset / 3.0, DEVICE_{dev_num}_VCRIT);\n"
+                        ));
+                    }
+                    (super::ir::DeviceType::Tube, 2) => {
+                        // Pentode dim 2 = Vg2k — log-junction limiting (see DK NR limiter).
                         code.push_str(&format!(
                             "{indent}    let v_lim = pnjlim(v_d{i} + dv{i}, v_d{i}, state.device_{dev_num}_vgk_onset / 3.0, DEVICE_{dev_num}_VCRIT);\n"
                         ));
@@ -9445,7 +9515,34 @@ impl RustEmitter {
                     let jd_01 = s * m + s1;
                     let jd_10 = s1 * m + s;
                     let jd_11 = s1 * m + s1;
-                    if tp.has_rgi() {
+                    if tp.is_pentode() {
+                        // Pentode 3D NR block (Vgk→Ip, Vpk→Ig2, Vg2k→Ig1).
+                        // Reefman Derk §4.4 — see memory/pentode_equations.md.
+                        let s2 = s + 2;
+                        let jd_02 = s * m + s2;
+                        let jd_12 = s1 * m + s2;
+                        let jd_20 = s2 * m + s;
+                        let jd_21 = s2 * m + s1;
+                        let jd_22 = s2 * m + s2;
+                        code.push_str(&format!(
+                            "{indent}{{ // Pentode {dev_num}\n\
+                             {indent}    let vgk = v_nl[{s}];\n\
+                             {indent}    let vpk = v_nl[{s1}];\n\
+                             {indent}    let vg2k = v_nl[{s2}];\n\
+                             {indent}    let (ip_t, ig2_t, ig1_t, jac) = tube_evaluate_pentode(vgk, vpk, vg2k, state.device_{dev_num}_mu, state.device_{dev_num}_ex, state.device_{dev_num}_kg1, DEVICE_{dev_num}_KG2, state.device_{dev_num}_kp, state.device_{dev_num}_kvb, DEVICE_{dev_num}_ALPHA_S, DEVICE_{dev_num}_A_FACTOR, DEVICE_{dev_num}_BETA_FACTOR, state.device_{dev_num}_ig_max, state.device_{dev_num}_vgk_onset);\n\
+                             {indent}    i_nl[{s}] = ip_t; i_nl[{s1}] = ig2_t; i_nl[{s2}] = ig1_t;\n\
+                             {indent}    j_dev[{jd_ss}] = jac[0];\n\
+                             {indent}    j_dev[{jd_01}] = jac[1];\n\
+                             {indent}    j_dev[{jd_02}] = jac[2];\n\
+                             {indent}    j_dev[{jd_10}] = jac[3];\n\
+                             {indent}    j_dev[{jd_11}] = jac[4];\n\
+                             {indent}    j_dev[{jd_12}] = jac[5];\n\
+                             {indent}    j_dev[{jd_20}] = jac[6];\n\
+                             {indent}    j_dev[{jd_21}] = jac[7];\n\
+                             {indent}    j_dev[{jd_22}] = jac[8];\n\
+                             {indent}}}\n"
+                        ));
+                    } else if tp.has_rgi() {
                         code.push_str(&format!(
                             "{indent}{{ // Tube {dev_num} (RGI)\n\
                              {indent}    let vgk = v_nl[{s}];\n\
@@ -9577,7 +9674,14 @@ impl RustEmitter {
                 }
                 (DeviceType::Tube, DeviceParams::Tube(tp)) => {
                     let s1 = s + 1;
-                    if tp.has_rgi() {
+                    if tp.is_pentode() {
+                        let s2 = s + 2;
+                        code.push_str(&format!(
+                            "{indent}i_nl[{s}] = tube_ip_pentode(v_nl_final[{s}], v_nl_final[{s1}], v_nl_final[{s2}], state.device_{dev_num}_mu, state.device_{dev_num}_ex, state.device_{dev_num}_kg1, DEVICE_{dev_num}_KG2, state.device_{dev_num}_kp, state.device_{dev_num}_kvb, DEVICE_{dev_num}_ALPHA_S, DEVICE_{dev_num}_A_FACTOR, DEVICE_{dev_num}_BETA_FACTOR);\n\
+                             {indent}i_nl[{s1}] = tube_is_pentode(v_nl_final[{s}], v_nl_final[{s1}], v_nl_final[{s2}], state.device_{dev_num}_mu, state.device_{dev_num}_ex, state.device_{dev_num}_kg1, DEVICE_{dev_num}_KG2, state.device_{dev_num}_kp, state.device_{dev_num}_kvb, DEVICE_{dev_num}_ALPHA_S, DEVICE_{dev_num}_BETA_FACTOR);\n\
+                             {indent}i_nl[{s2}] = tube_ig(v_nl_final[{s}], state.device_{dev_num}_ig_max, state.device_{dev_num}_vgk_onset);\n"
+                        ));
+                    } else if tp.has_rgi() {
                         code.push_str(&format!(
                             "{indent}i_nl[{s}] = tube_ip_with_rgi(v_nl_final[{s}], v_nl_final[{s1}], state.device_{dev_num}_mu, state.device_{dev_num}_ex, state.device_{dev_num}_kg1, state.device_{dev_num}_kp, state.device_{dev_num}_kvb, state.device_{dev_num}_lambda, state.device_{dev_num}_ig_max, state.device_{dev_num}_vgk_onset, DEVICE_{dev_num}_RGI);\n\
                              {indent}i_nl[{s1}] = tube_ig_with_rgi(v_nl_final[{s}], state.device_{dev_num}_ig_max, state.device_{dev_num}_vgk_onset, DEVICE_{dev_num}_RGI);\n"
@@ -9662,6 +9766,12 @@ impl RustEmitter {
                         ));
                     }
                     (DeviceType::Tube, 0) => {
+                        code.push_str(&format!(
+                            "{indent}        let v_lim = pnjlim(v_nl_proposed, v_nl_current, state.device_{dev_num}_vgk_onset / 3.0, DEVICE_{dev_num}_VCRIT);\n"
+                        ));
+                    }
+                    (DeviceType::Tube, 2) => {
+                        // Pentode dim 2 = Vg2k — log-junction limiting (see DK NR limiter).
                         code.push_str(&format!(
                             "{indent}        let v_lim = pnjlim(v_nl_proposed, v_nl_current, state.device_{dev_num}_vgk_onset / 3.0, DEVICE_{dev_num}_VCRIT);\n"
                         ));

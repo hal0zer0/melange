@@ -4313,6 +4313,167 @@ fn test_codegen_two_triode_preamp_compiles_and_runs() {
     }
 }
 
+// ==========================================================================
+// Pentode codegen tests (Reefman Derk §4.4)
+// ==========================================================================
+
+/// EL84 single-stage common-cathode amplifier (4-terminal pentode: suppressor → cathode).
+/// Uses Reefman Derk §4.4 fitted parameters from TubeLib.inc (Jan 23 2016).
+const PENTODE_CC_SPICE: &str = "\
+EL84 Single-Stage Common Cathode
+Rin in 0 1Meg
+Cin in grid 100n
+Rg grid 0 1Meg
+P1 plate grid cathode screen EL84
+Rk cathode 0 130
+Ck cathode 0 100u
+Rscreen vcc screen 1k
+Cscreen screen 0 47u
+Rp vcc plate 4.7k
+Cout plate out 1u
+Rout out 0 100k
+V1 vcc 0 DC 300
+.model EL84 VP(MU=23.36 EX=1.138 KG1=117.4 KG2=1275.0 KP=152.4 KVB=4015.8 ALPHA_S=7.66 A_FACTOR=4.344e-4 BETA_FACTOR=0.148)
+";
+
+/// Pentode codegen smoke test: parses an EL84 stage, builds the kernel + IR,
+/// runs the rust emitter, and verifies that the emitted code contains the new
+/// pentode helpers and per-device pentode constants.
+///
+/// This test validates the Step-1 + Step-2 + Step-4 plumbing (template emission,
+/// per-device constants, NR dispatch). It does NOT compile-and-run the generated
+/// code — full pentode validation lands with the integration tests once the MNA
+/// and DC-OP layers ship.
+#[test]
+fn test_codegen_pentode_emits_helpers_and_constants() {
+    let netlist = Netlist::parse(PENTODE_CC_SPICE).expect("failed to parse pentode netlist");
+    let mna = MnaSystem::from_netlist(&netlist).expect("failed to build MNA for pentode");
+    assert_eq!(
+        mna.m, 3,
+        "Single pentode should contribute M=3 nonlinear dimensions (Vgk→Ip, Vpk→Ig2, Vg2k→Ig1)"
+    );
+
+    let kernel = DkKernel::from_mna(&mna, 44100.0).expect("failed to build DK kernel for pentode");
+    let codegen = CodeGenerator::new(default_config());
+    let result = codegen
+        .generate(&kernel, &mna, &netlist)
+        .expect("pentode codegen failed");
+    let code = result.code;
+
+    // Pentode helpers must be emitted (any_pentode == true).
+    assert!(
+        code.contains("fn tube_ip_pentode("),
+        "pentode codegen should emit tube_ip_pentode helper"
+    );
+    assert!(
+        code.contains("fn tube_is_pentode("),
+        "pentode codegen should emit tube_is_pentode helper"
+    );
+    assert!(
+        code.contains("fn tube_jacobian_pentode("),
+        "pentode codegen should emit tube_jacobian_pentode helper"
+    );
+    assert!(
+        code.contains("fn tube_evaluate_pentode("),
+        "pentode codegen should emit tube_evaluate_pentode helper"
+    );
+
+    // Existing triode helpers must STILL be emitted (Ig1 reuses tube_ig).
+    assert!(code.contains("fn tube_ig("));
+    assert!(code.contains("fn tube_ig_deriv("));
+
+    // Per-device pentode constants must be emitted.
+    assert!(code.contains("DEVICE_0_KG2"));
+    assert!(code.contains("DEVICE_0_ALPHA_S"));
+    assert!(code.contains("DEVICE_0_A_FACTOR"));
+    assert!(code.contains("DEVICE_0_BETA_FACTOR"));
+
+    // NR dispatch must call tube_evaluate_pentode (DK or nodal path — at least one).
+    assert!(
+        code.contains("tube_evaluate_pentode("),
+        "NR dispatch should call tube_evaluate_pentode"
+    );
+
+    // 3D Jacobian entries must be referenced (the 3x3 block needs jdev_*_2 columns).
+    // The slot is at start_idx 0, so we expect jdev_0_2, jdev_1_2, jdev_2_0, etc.
+    assert!(
+        code.contains("jdev_0_2"),
+        "3x3 pentode Jacobian should produce jdev_0_2 entry"
+    );
+    assert!(
+        code.contains("jdev_2_0"),
+        "3x3 pentode Jacobian should produce jdev_2_0 entry"
+    );
+}
+
+/// Pentode codegen rustc smoke test: generated module must parse and type-check.
+/// Catches template syntax errors and stale Jacobian indices.
+#[test]
+fn test_codegen_pentode_compiles() {
+    let netlist = Netlist::parse(PENTODE_CC_SPICE).expect("parse pentode netlist");
+    let mna = MnaSystem::from_netlist(&netlist).expect("MNA pentode");
+    let kernel = DkKernel::from_mna(&mna, 44100.0).expect("DK pentode kernel");
+    let codegen = CodeGenerator::new(default_config());
+    let result = codegen
+        .generate(&kernel, &mna, &netlist)
+        .expect("pentode codegen failed");
+
+    let tmp_dir = std::env::temp_dir();
+    let tmp_path = tmp_dir.join("melange_codegen_test_pentode.rs");
+    {
+        let mut f = std::fs::File::create(&tmp_path).unwrap();
+        f.write_all(result.code.as_bytes()).unwrap();
+    }
+
+    let output = std::process::Command::new("rustc")
+        .args(["--edition", "2024", "--crate-type", "lib", "-o"])
+        .arg(tmp_dir.join("melange_codegen_test_pentode.rlib"))
+        .arg(&tmp_path)
+        .output()
+        .expect("failed to run rustc");
+
+    let _ = std::fs::remove_file(&tmp_path);
+    let _ = std::fs::remove_file(tmp_dir.join("melange_codegen_test_pentode.rlib"));
+    let _ = std::fs::remove_file(tmp_dir.join("libmelange_codegen_test_pentode.rlib"));
+
+    assert!(
+        output.status.success(),
+        "Pentode codegen failed to compile:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Byte-identity guard: a pure-triode circuit must NOT contain any pentode helpers
+/// or constants. Catches Tera template leaks (e.g. forgotten {% if any_pentode %}).
+#[test]
+fn test_codegen_triode_omits_pentode_helpers() {
+    let (code, _, _, _) = generate_code(TRIODE_CC_SPICE);
+    assert!(
+        !code.contains("tube_ip_pentode"),
+        "triode-only circuit must NOT emit tube_ip_pentode"
+    );
+    assert!(
+        !code.contains("tube_is_pentode"),
+        "triode-only circuit must NOT emit tube_is_pentode"
+    );
+    assert!(
+        !code.contains("tube_jacobian_pentode"),
+        "triode-only circuit must NOT emit tube_jacobian_pentode"
+    );
+    assert!(
+        !code.contains("tube_evaluate_pentode"),
+        "triode-only circuit must NOT emit tube_evaluate_pentode"
+    );
+    assert!(
+        !code.contains("DEVICE_0_KG2"),
+        "triode-only circuit must NOT emit DEVICE_0_KG2"
+    );
+    assert!(
+        !code.contains("ALPHA_S"),
+        "triode-only circuit must NOT emit ALPHA_S constant"
+    );
+}
+
 // ===========================================================================
 // OUTPUT_SCALES non-default tests (H6)
 // ===========================================================================

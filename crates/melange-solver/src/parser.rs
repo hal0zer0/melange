@@ -481,6 +481,38 @@ pub enum Element {
         /// Model name (references .model with TUBE type)
         model: String,
     },
+    /// Pentode (or beam tetrode): Pname n_plate n_grid n_cathode n_screen [n_suppressor] modelname
+    ///
+    /// Node order is **plate-grid-cathode-screen** (LTspice/PSpice/Ayumi convention).
+    /// Note this differs from the existing `Triode` (`T`) element which uses
+    /// grid-plate-cathode ordering. New netlists should use the plate-first
+    /// convention for pentodes; triode netlists are unchanged.
+    ///
+    /// The suppressor grid is optional: when absent, melange models beam
+    /// tetrodes and strapped pentodes as "suppressor tied to cathode"
+    /// (the universal case in audio power tubes). EF86-class true pentodes
+    /// with an independent suppressor brought out of the envelope may pass
+    /// a 5th node; the current kernel still models the suppressor as
+    /// electrically tied to the cathode (phase 1a limitation).
+    ///
+    /// M=3 per pentode in the NR system: plate current (Ip), screen current
+    /// (Ig2), and control-grid current (Ig1). Uses Reefman Derk §4.4 math
+    /// (see `TubeKind::SharpPentode`).
+    Pentode {
+        name: String,
+        /// Plate (anode) node
+        n_plate: String,
+        /// Control grid (g1) node
+        n_grid: String,
+        /// Cathode node
+        n_cathode: String,
+        /// Screen grid (g2) node
+        n_screen: String,
+        /// Optional suppressor grid (g3) node. `None` means strapped to cathode.
+        n_suppressor: Option<String>,
+        /// Model name (references `.model` with VP/VPENTODE type)
+        model: String,
+    },
     /// VCA: Yname sig+ sig- ctrl+ ctrl- modelname
     ///
     /// M=2 per VCA: signal current (I_sig) and control current (I_ctrl=0).
@@ -553,6 +585,7 @@ impl Element {
             | Element::Mosfet { name, .. }
             | Element::Opamp { name, .. }
             | Element::Triode { name, .. }
+            | Element::Pentode { name, .. }
             | Element::Vca { name, .. }
             | Element::Vcvs { name, .. }
             | Element::Vccs { name, .. }
@@ -569,6 +602,7 @@ impl Element {
             | Element::Mosfet { model, .. }
             | Element::Opamp { model, .. }
             | Element::Triode { model, .. }
+            | Element::Pentode { model, .. }
             | Element::Vca { model, .. } => Some(model),
             _ => None,
         }
@@ -735,6 +769,23 @@ impl Element {
                 n_grid: remap(n_grid),
                 n_plate: remap(n_plate),
                 n_cathode: remap(n_cathode),
+                model: model.clone(),
+            },
+            Element::Pentode {
+                name,
+                n_plate,
+                n_grid,
+                n_cathode,
+                n_screen,
+                n_suppressor,
+                model,
+            } => Element::Pentode {
+                name: prefixed(name),
+                n_plate: remap(n_plate),
+                n_grid: remap(n_grid),
+                n_cathode: remap(n_cathode),
+                n_screen: remap(n_screen),
+                n_suppressor: n_suppressor.as_ref().map(|n| remap(n)),
                 model: model.clone(),
             },
             Element::Vca {
@@ -2306,6 +2357,7 @@ impl Parser {
             'J' => self.parse_jfet(&parts),
             'M' => self.parse_mosfet(&parts),
             'T' => self.parse_triode(&parts),
+            'P' => self.parse_pentode(&parts),
             'U' => self.parse_opamp(&parts),
             'Y' => self.parse_vca(&parts),
             'E' => self.parse_vcvs(&parts),
@@ -2533,6 +2585,46 @@ impl Parser {
         })
     }
 
+    /// Parse a pentode (or beam tetrode) element line:
+    ///
+    /// ```spice
+    /// Pname n_plate n_grid n_cathode n_screen modelname                      ; 4-terminal (suppressor → cathode)
+    /// Pname n_plate n_grid n_cathode n_screen n_suppressor modelname         ; 5-terminal (explicit suppressor)
+    /// ```
+    ///
+    /// **Node ordering is plate-first** (`P plate grid cathode screen …`),
+    /// matching LTspice/PSpice/Ayumi convention and differing from the existing
+    /// triode `T grid plate cathode …` order. This is intentional — documented
+    /// in `docs/spice-grammar.md`.
+    fn parse_pentode(&self, parts: &[&str]) -> Result<Element, ParseError> {
+        // Minimum: Pname + 4 nodes + model = 6 parts
+        match parts.len() {
+            6 => Ok(Element::Pentode {
+                name: parts[0].to_string(),
+                n_plate: parts[1].to_string(),
+                n_grid: parts[2].to_string(),
+                n_cathode: parts[3].to_string(),
+                n_screen: parts[4].to_string(),
+                n_suppressor: None,
+                model: parts[5].to_string(),
+            }),
+            7 => Ok(Element::Pentode {
+                name: parts[0].to_string(),
+                n_plate: parts[1].to_string(),
+                n_grid: parts[2].to_string(),
+                n_cathode: parts[3].to_string(),
+                n_screen: parts[4].to_string(),
+                n_suppressor: Some(parts[5].to_string()),
+                model: parts[6].to_string(),
+            }),
+            _ => Err(self.error(format!(
+                "Pentode '{}' requires 4 or 5 nodes: \
+                 Pname n_plate n_grid n_cathode n_screen [n_suppressor] modelname",
+                parts.first().copied().unwrap_or("")
+            ))),
+        }
+    }
+
     fn parse_vca(&self, parts: &[&str]) -> Result<Element, ParseError> {
         // Yname sig+ sig- ctrl+ ctrl- modelname
         self.require_parts(parts, 6, "Yname sig+ sig- ctrl+ ctrl- modelname")?;
@@ -2660,6 +2752,22 @@ fn validate_element_node_lengths(elem: &Element) -> Result<(), String> {
             check(n_grid)?;
             check(n_plate)?;
             check(n_cathode)?;
+        }
+        Element::Pentode {
+            n_plate,
+            n_grid,
+            n_cathode,
+            n_screen,
+            n_suppressor,
+            ..
+        } => {
+            check(n_plate)?;
+            check(n_grid)?;
+            check(n_cathode)?;
+            check(n_screen)?;
+            if let Some(ns) = n_suppressor {
+                check(ns)?;
+            }
         }
         Element::Vca { n_sig_p, n_sig_n, n_ctrl_p, n_ctrl_n, .. } => {
             check(n_sig_p)?;
@@ -3000,6 +3108,116 @@ mod tests {
         assert_eq!(netlist.pots[0].resistor_name, "R1");
         assert_eq!(netlist.pots[0].min_value, 1e3);
         assert_eq!(netlist.pots[0].max_value, 100e3);
+    }
+
+    #[test]
+    fn test_parse_pentode_4node() {
+        // `P1 plate grid cathode screen EL84` — beam-tetrode / strapped-pentode
+        // form where the suppressor is implicitly tied to the cathode.
+        let spice = "Test\nP1 plate grid cath screen EL84\n\
+                     .model EL84 VP(MU=23.36 EX=1.138 KG1=117.4 KG2=1275 \
+                     KP=152.4 KVB=4015.8 ALPHA_S=7.66 A_FACTOR=4.344e-4 BETA_FACTOR=0.148)\n";
+        let netlist = Netlist::parse(spice).expect("EL84 pentode netlist should parse");
+        assert_eq!(netlist.elements.len(), 1);
+        match &netlist.elements[0] {
+            Element::Pentode {
+                name,
+                n_plate,
+                n_grid,
+                n_cathode,
+                n_screen,
+                n_suppressor,
+                model,
+            } => {
+                assert_eq!(name, "P1");
+                assert_eq!(n_plate, "plate");
+                assert_eq!(n_grid, "grid");
+                assert_eq!(n_cathode, "cath");
+                assert_eq!(n_screen, "screen");
+                assert_eq!(*n_suppressor, None);
+                assert_eq!(model, "EL84");
+            }
+            _ => panic!("Expected Pentode, got {:?}", netlist.elements[0]),
+        }
+    }
+
+    #[test]
+    fn test_parse_pentode_5node_with_suppressor() {
+        // `P1 plate grid cathode screen suppressor EF86` — true pentode with
+        // explicit suppressor grid.
+        let spice = "Test\nP1 pla gr ca scr sup EF86\n\
+                     .model EF86 VP(MU=40.8 EX=1.327 KG1=675.8 KG2=4089.6 \
+                     KP=350.7 KVB=1886.8 ALPHA_S=4.24 A_FACTOR=5.95e-5 BETA_FACTOR=0.28)\n";
+        let netlist = Netlist::parse(spice).expect("EF86 pentode netlist should parse");
+        match &netlist.elements[0] {
+            Element::Pentode {
+                n_plate,
+                n_grid,
+                n_cathode,
+                n_screen,
+                n_suppressor,
+                model,
+                ..
+            } => {
+                assert_eq!(n_plate, "pla");
+                assert_eq!(n_grid, "gr");
+                assert_eq!(n_cathode, "ca");
+                assert_eq!(n_screen, "scr");
+                assert_eq!(n_suppressor.as_deref(), Some("sup"));
+                assert_eq!(model, "EF86");
+            }
+            _ => panic!("Expected Pentode"),
+        }
+    }
+
+    #[test]
+    fn test_parse_pentode_too_few_nodes() {
+        // 3 nodes (missing screen) should fail.
+        let spice = "Test\nP1 plate grid cath EL84\n";
+        let result = Netlist::parse(spice);
+        assert!(
+            result.is_err(),
+            "Pentode with only 3 nodes should be rejected"
+        );
+    }
+
+    #[test]
+    fn test_parse_pentode_too_many_nodes() {
+        // 6 nodes is invalid (max 5: plate, grid, cathode, screen, suppressor).
+        let spice = "Test\nP1 a b c d e f g EL84\n";
+        let result = Netlist::parse(spice);
+        assert!(
+            result.is_err(),
+            "Pentode with 6 nodes should be rejected"
+        );
+    }
+
+    #[test]
+    fn test_parse_pentode_model_params_stored() {
+        // Ensure `.model NAME VP(...)` params round-trip through Netlist.models.
+        let spice = "Test\nP1 a b c d EL84\n\
+                     .model EL84 VP(MU=23.36 KG2=1275 ALPHA_S=7.66)\n";
+        let netlist = Netlist::parse(spice).unwrap();
+        let m = netlist
+            .models
+            .iter()
+            .find(|m| m.name == "EL84")
+            .expect("EL84 model should be recorded");
+        assert_eq!(m.model_type, "VP");
+        let kg2 = m
+            .params
+            .iter()
+            .find(|(k, _)| k == "KG2")
+            .map(|(_, v)| *v)
+            .expect("KG2 should be stored");
+        assert_eq!(kg2, 1275.0);
+        let alpha_s = m
+            .params
+            .iter()
+            .find(|(k, _)| k == "ALPHA_S")
+            .map(|(_, v)| *v)
+            .expect("ALPHA_S should be stored");
+        assert_eq!(alpha_s, 7.66);
     }
 
     #[test]

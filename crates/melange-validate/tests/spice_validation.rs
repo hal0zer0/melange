@@ -696,6 +696,7 @@ fn build_device_slots_from_netlist(
                     start_idx: dim_offset,
                     dimension: 2,
                     params: DeviceParams::Tube(TubeParams {
+                        kind: melange_solver::device_types::TubeKind::SharpTriode,
                         mu: find_model_param(model, "MU").unwrap_or(100.0),
                         ex: find_model_param(model, "EX").unwrap_or(1.4),
                         kg1: find_model_param(model, "KG1").unwrap_or(1060.0),
@@ -708,6 +709,10 @@ fn build_device_slots_from_netlist(
                         cgp: 0.0,
                         ccp: 0.0,
                         rgi: 0.0,
+                        kg2: 0.0,
+                        alpha_s: 0.0,
+                        a_factor: 0.0,
+                        beta_factor: 0.0,
                     }),
                     has_internal_mna_nodes: false,
                 });

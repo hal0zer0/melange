@@ -2915,6 +2915,7 @@ fn build_device_slots(
                     start_idx: dev_info.start_idx,
                     dimension: 2,
                     params: DeviceParams::Tube(TubeParams {
+                        kind: melange_solver::device_types::TubeKind::SharpTriode,
                         mu,
                         ex,
                         kg1,
@@ -2927,6 +2928,10 @@ fn build_device_slots(
                         cgp: find_param(&model_name, "CGP").unwrap_or(0.0),
                         ccp: find_param(&model_name, "CCP").unwrap_or(0.0),
                         rgi: find_param(&model_name, "RGI").unwrap_or(0.0),
+                        kg2: 0.0,
+                        alpha_s: 0.0,
+                        a_factor: 0.0,
+                        beta_factor: 0.0,
                     }),
                     has_internal_mna_nodes: false,
                 });

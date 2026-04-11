@@ -314,136 +314,292 @@ impl NonlinearDevice<2> for KorenTriode {
     }
 }
 
-/// Koren pentode model.
+/// Reefman "Derk" §4.4 pentode model (plate + screen + grid currents).
 ///
-/// Uses the screen grid voltage (Vsg) in the E1 calculation for screen-limited
-/// behavior, with a plate voltage correction factor (1 - exp(-Vpk/Kx)).
+/// Implements the equation set from D. Reefman, "Spice models for vacuum tubes
+/// using the uTracer" (2016) §4.4. Three independent currents — plate `Ip`,
+/// screen `Ig2`, and control-grid `Ig1` — each as a function of three voltages
+/// `Vgk`, `Vpk`, `Vg2k`. The control-grid current reuses the same Leach
+/// power-law form as [`KorenTriode`].
 ///
-/// **Experimental**: 3D pentode -- not yet supported by solver (max device dim = 2).
-#[doc(hidden)]
+/// State variables and equations (`α = 1 − (Kg1/Kg2)·(1+αs)` is derived):
+/// ```text
+/// inner = Kp · (1/μ + Vgk / sqrt(Kvb + Vg2k²))
+/// E1    = (Vg2k / Kp) · softplus(inner)
+/// Ip0   = E1^Ex                                       (when E1 > 0)
+/// F(Vp) = 1/Kg1 − 1/Kg2 + A·Vp/Kg1
+///         − (α/Kg1 + αs/Kg2) / (1 + β·Vp)
+/// H(Vp) = (1 + αs/(1 + β·Vp)) / Kg2
+/// Ip    = Ip0 · F(Vpk)
+/// Ig2   = Ip0 · H(Vpk)
+/// Ig1   = Leach power-law (positive grid only)
+/// ```
+///
+/// The 3×3 analytic Jacobian is provided by [`jacobian_3x3`](Self::jacobian_3x3);
+/// rows are `[Ip, Ig2, Ig1]` and columns are `[Vgk, Vpk, Vg2k]`. The MNA /
+/// codegen pipeline consumes the per-current methods directly — this struct
+/// does NOT implement [`NonlinearDevice`], because that trait expects a single
+/// scalar current per device.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct KorenPentode {
-    /// Triode part (provides mu, ex, kg1, kp, kvb)
-    pub triode: KorenTriode,
-    /// Screen grid mu
-    pub mu_sg: f64,
-    /// Screen grid kg
+    /// Amplification factor (μ).
+    pub mu: f64,
+    /// Exponent on E1.
+    pub ex: f64,
+    /// Plate-current scaling (Kg1).
+    pub kg1: f64,
+    /// Screen-current scaling (Kg2).
     pub kg2: f64,
-    /// Plate voltage knee parameter (typically 10-30V)
-    pub kx: f64,
+    /// Knee softness coefficient (Kp).
+    pub kp: f64,
+    /// Triode-style knee shaping (Kvb). Plays the same role as Reefman's
+    /// triode Kvb, NOT the classical Koren pentode arctan knee.
+    pub kvb: f64,
+    /// Screen-current asymmetry coefficient (αs in the Reefman paper).
+    pub alpha_s: f64,
+    /// Linear plate-curve slope (A in the Reefman paper). Named `a_factor`
+    /// to avoid colliding with SPICE `.AC` directive parsing.
+    pub a_factor: f64,
+    /// Plate-knee curvature (β in the Reefman paper).
+    pub beta_factor: f64,
+    /// Maximum control-grid current [A] at `Vgk = vgk_onset` (Leach model).
+    pub ig_max: f64,
+    /// Control-grid current onset voltage [V] (Leach model).
+    pub vgk_onset: f64,
 }
 
 impl KorenPentode {
-    /// EL84 (6BQ5) - popular output pentode.
+    /// EL84 / 6BQ5 — popular small power pentode (BTetrodeD fit from
+    /// Reefman TubeLib.inc, Jan 23 2016).
     pub fn el84() -> Self {
         Self {
-            triode: KorenTriode::new(20.0, 1.4, 2000.0, 1000.0, 300.0),
-            mu_sg: 15.0,
-            kg2: 4000.0,
-            kx: 20.0,
+            mu: 23.36,
+            ex: 1.138,
+            kg1: 117.4,
+            kg2: 1275.0,
+            kp: 152.4,
+            kvb: 4015.8,
+            alpha_s: 7.66,
+            a_factor: 4.344e-4,
+            beta_factor: 0.148,
+            ig_max: DEFAULT_IG_MAX,
+            vgk_onset: DEFAULT_VGK_ONSET,
         }
     }
 
-    /// EL34 (6CA7) - higher power pentode.
+    /// EL34 / 6CA7 — power pentode (BTetrodeD fit from Reefman
+    /// TubeLib.inc, Jan 23 2016).
     pub fn el34() -> Self {
         Self {
-            triode: KorenTriode::new(11.0, 1.4, 1500.0, 800.0, 200.0),
-            mu_sg: 8.0,
-            kg2: 3000.0,
-            kx: 25.0,
+            mu: 12.50,
+            ex: 1.363,
+            kg1: 217.7,
+            kg2: 1950.2,
+            kp: 50.5,
+            kvb: 1282.7,
+            alpha_s: 6.09,
+            a_factor: 3.48e-4,
+            beta_factor: 0.105,
+            ig_max: DEFAULT_IG_MAX,
+            vgk_onset: DEFAULT_VGK_ONSET,
         }
     }
 
-    /// Compute E1 using screen grid voltage instead of plate voltage.
-    fn e1_from_screen(&self, vgk: f64, vsg: f64) -> f64 {
-        if vsg <= 0.0 {
+    /// EF86 / 6267 — true small-signal pentode (PenthodeD fit from
+    /// Reefman TubeLib.inc, Jan 23 2016).
+    pub fn ef86() -> Self {
+        Self {
+            mu: 40.8,
+            ex: 1.327,
+            kg1: 675.8,
+            kg2: 4089.6,
+            kp: 350.7,
+            kvb: 1886.8,
+            alpha_s: 4.24,
+            a_factor: 5.95e-5,
+            beta_factor: 0.28,
+            ig_max: DEFAULT_IG_MAX,
+            vgk_onset: DEFAULT_VGK_ONSET,
+        }
+    }
+
+    /// Derived `α = 1 − (Kg1/Kg2)·(1 + αs)`.
+    #[inline]
+    fn alpha(&self) -> f64 {
+        1.0 - (self.kg1 / self.kg2) * (1.0 + self.alpha_s)
+    }
+
+    /// Compute the shared `(E1, Ip0)` chain along with the softplus pieces
+    /// needed for both currents and Jacobian rows. Returns `None` when the
+    /// device is in the deep-cutoff guard window (`E1 ≤ 1e-30`).
+    #[inline]
+    fn shared_e1(&self, vgk: f64, vg2k_safe: f64) -> Option<SharedE1> {
+        let s = (self.kvb + vg2k_safe * vg2k_safe).sqrt();
+        let inner = self.kp * (1.0 / self.mu + vgk / s);
+
+        // Numerically stable softplus and sigmoid (mirrors KorenTriode).
+        let (sigmoid, softplus) = if inner > 20.0 {
+            (1.0, inner)
+        } else if inner < -20.0 {
+            (0.0, 0.0)
+        } else {
+            let exp_inner = inner.exp();
+            (exp_inner / (1.0 + exp_inner), (1.0 + exp_inner).ln())
+        };
+
+        let e1 = (vg2k_safe / self.kp) * softplus;
+        if e1 <= 1e-30 {
+            return None;
+        }
+
+        let ip0 = e1.powf(self.ex);
+        Some(SharedE1 {
+            s,
+            sigmoid,
+            softplus,
+            e1,
+            ip0,
+        })
+    }
+
+    /// Plate current `Ip(Vgk, Vpk, Vg2k)`.
+    pub fn plate_current(&self, vgk: f64, vpk: f64, vg2k: f64) -> f64 {
+        let vg2k_safe = vg2k.max(1e-3);
+        let vpk_safe = vpk.max(0.0);
+
+        let Some(SharedE1 { ip0, .. }) = self.shared_e1(vgk, vg2k_safe) else {
+            return 0.0;
+        };
+
+        let alpha = self.alpha();
+        let one_plus_bvp = 1.0 + self.beta_factor * vpk_safe;
+        let f = 1.0 / self.kg1 - 1.0 / self.kg2
+            + self.a_factor * vpk_safe / self.kg1
+            - (alpha / self.kg1 + self.alpha_s / self.kg2) / one_plus_bvp;
+
+        ip0 * f
+    }
+
+    /// Screen-grid current `Ig2(Vgk, Vpk, Vg2k)`.
+    pub fn screen_current(&self, vgk: f64, vpk: f64, vg2k: f64) -> f64 {
+        let vg2k_safe = vg2k.max(1e-3);
+        let vpk_safe = vpk.max(0.0);
+
+        let Some(SharedE1 { ip0, .. }) = self.shared_e1(vgk, vg2k_safe) else {
+            return 0.0;
+        };
+
+        let one_plus_bvp = 1.0 + self.beta_factor * vpk_safe;
+        let h = (1.0 + self.alpha_s / one_plus_bvp) / self.kg2;
+        ip0 * h
+    }
+
+    /// Control-grid (Ig1) current using the same Leach power-law as the
+    /// triode. Returns 0 for `Vgk ≤ 0`.
+    pub fn grid_current(&self, vgk: f64) -> f64 {
+        if vgk <= 0.0 {
             return 0.0;
         }
-        let s = (self.triode.kvb + vsg * vsg).sqrt();
-        let inner = self.triode.kp * (1.0 / self.triode.mu + vgk / s);
-        let softplus = if inner > 20.0 {
-            inner
-        } else if inner < -20.0 {
-            0.0
+        let x = vgk / self.vgk_onset;
+        self.ig_max * x * x.sqrt() // x^1.5
+    }
+
+    /// 3×3 analytic Jacobian.
+    ///
+    /// Rows: `[Ip, Ig2, Ig1]`. Columns: `[Vgk, Vpk, Vg2k]`. Returned in
+    /// row-major order. The bottom row (Ig1) is sparse: only `[2][0]` is
+    /// nonzero, since `Ig1` depends on `Vgk` alone.
+    pub fn jacobian_3x3(&self, vgk: f64, vpk: f64, vg2k: f64) -> [[f64; 3]; 3] {
+        let vg2k_safe = vg2k.max(1e-3);
+        let vpk_safe = vpk.max(0.0);
+
+        // Ig1 row is independent of Vpk / Vg2k.
+        let dig1_dvgk = if vgk > 0.0 {
+            let x = vgk / self.vgk_onset;
+            self.ig_max * 1.5 * x.sqrt() / self.vgk_onset
         } else {
-            (1.0 + inner.exp()).ln()
+            0.0
         };
-        (vsg / self.triode.kp) * softplus
+
+        let Some(shared) = self.shared_e1(vgk, vg2k_safe) else {
+            return [
+                [0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0],
+                [dig1_dvgk, 0.0, 0.0],
+            ];
+        };
+
+        let SharedE1 {
+            s,
+            sigmoid,
+            softplus,
+            e1,
+            ip0,
+        } = shared;
+
+        // dIp0/dE1 = Ex · E1^(Ex-1)
+        let dip0_de1 = self.ex * e1.powf(self.ex - 1.0);
+
+        // E1 chain rule
+        let de1_dvgk = vg2k_safe * sigmoid / s;
+        let de1_dvg2k = softplus / self.kp - sigmoid * vgk * vg2k_safe * vg2k_safe / (s * s * s);
+        // dE1/dVpk = 0 (E1 only depends on Vgk and Vg2k)
+
+        // F, H and their Vp derivatives
+        let alpha = self.alpha();
+        let one_plus_bvp = 1.0 + self.beta_factor * vpk_safe;
+        let inv_obvp = 1.0 / one_plus_bvp;
+        let inv_obvp_sq = inv_obvp * inv_obvp;
+        let coeff = alpha / self.kg1 + self.alpha_s / self.kg2;
+
+        let f = 1.0 / self.kg1 - 1.0 / self.kg2 + self.a_factor * vpk_safe / self.kg1
+            - coeff * inv_obvp;
+        let df_dvpk = self.a_factor / self.kg1 + self.beta_factor * coeff * inv_obvp_sq;
+
+        let h = (1.0 + self.alpha_s * inv_obvp) / self.kg2;
+        let dh_dvpk = -self.beta_factor * self.alpha_s * inv_obvp_sq / self.kg2;
+
+        // Shared "Ip0 chain" prefactor for the Vgk/Vg2k columns of Ip and Ig2.
+        let dip0_dvgk = dip0_de1 * de1_dvgk;
+        let dip0_dvg2k = dip0_de1 * de1_dvg2k;
+
+        // Ip row: dIp/dVgk = (dIp0/dVgk)·F, dIp/dVpk = Ip0·dF/dVpk,
+        //         dIp/dVg2k = (dIp0/dVg2k)·F
+        let dip_dvgk = dip0_dvgk * f;
+        let dip_dvpk = ip0 * df_dvpk;
+        let dip_dvg2k = dip0_dvg2k * f;
+
+        // Ig2 row: same prefactor, with H instead of F.
+        let dig2_dvgk = dip0_dvgk * h;
+        let dig2_dvpk = ip0 * dh_dvpk;
+        let dig2_dvg2k = dip0_dvg2k * h;
+
+        // If NR probed Vpk < 0, the F/H derivatives w.r.t. Vpk are computed
+        // with vpk_safe (clamped to 0), so dIp/dVpk and dIg2/dVpk reduce to
+        // the values at Vpk = 0. That mirrors what plate_current/screen_current
+        // return on the same input, keeping FD comparisons consistent.
+
+        [
+            [dip_dvgk, dip_dvpk, dip_dvg2k],
+            [dig2_dvgk, dig2_dvpk, dig2_dvg2k],
+            [dig1_dvgk, 0.0, 0.0],
+        ]
     }
 }
 
-impl NonlinearDevice<3> for KorenPentode {
-    /// Input: [Vgk, Vpk, Vsg] (grid, plate, screen)
-    fn current(&self, v: &[f64; 3]) -> f64 {
-        let vgk = v[0];
-        let vpk = v[1];
-        let vsg = v[2];
-
-        let e1 = self.e1_from_screen(vgk, vsg);
-        if e1 <= 0.0 {
-            return 0.0;
-        }
-
-        // Plate current with plate voltage correction
-        let ip_screen = e1.powf(self.triode.ex) / self.triode.kg1;
-
-        // Plate voltage correction: approaches 1 for Vpk >> Kx
-        let plate_factor = if vpk > 0.0 {
-            1.0 - (-vpk / self.kx).exp()
-        } else {
-            0.0
-        };
-
-        ip_screen * plate_factor
-    }
-
-    fn jacobian(&self, v: &[f64; 3]) -> [f64; 3] {
-        let vgk = v[0];
-        let vpk = v[1];
-        let vsg = v[2];
-
-        let e1 = self.e1_from_screen(vgk, vsg);
-        if e1 <= 1e-30 || vpk <= 0.0 || vsg <= 0.0 {
-            return [0.0, 0.0, 0.0];
-        }
-
-        let ip_screen = e1.powf(self.triode.ex) / self.triode.kg1;
-        let plate_factor = 1.0 - (-vpk / self.kx).exp();
-        let dplate_dvpk = (1.0 / self.kx) * (-vpk / self.kx).exp();
-
-        // dIp/dVpk = ip_screen * dplate_factor/dVpk
-        let dip_dvpk = ip_screen * dplate_dvpk;
-
-        // dIp/dE1 = ex * E1^(ex-1) / Kg1
-        let dip_de1 = self.triode.ex * e1.powf(self.triode.ex - 1.0) / self.triode.kg1;
-
-        // E1 derivatives w.r.t. Vgk and Vsg (computed like triode but with Vsg)
-        let s = (self.triode.kvb + vsg * vsg).sqrt();
-        let inner = self.triode.kp * (1.0 / self.triode.mu + vgk / s);
-        let sigmoid = if inner > 20.0 {
-            1.0
-        } else if inner < -20.0 {
-            0.0
-        } else {
-            let exp_inner = inner.exp();
-            exp_inner / (1.0 + exp_inner)
-        };
-        let softplus = if inner > 20.0 {
-            inner
-        } else if inner < -20.0 {
-            0.0
-        } else {
-            (1.0 + inner.exp()).ln()
-        };
-
-        let de1_dvgk = vsg * sigmoid / s;
-        let de1_dvsg = softplus / self.triode.kp - sigmoid * vgk * vsg * vsg / (s * s * s);
-
-        let dip_dvgk = dip_de1 * de1_dvgk * plate_factor;
-        let dip_dvsg = dip_de1 * de1_dvsg * plate_factor;
-
-        [dip_dvgk, dip_dvpk, dip_dvsg]
-    }
+/// Shared chain-rule pieces produced by [`KorenPentode::shared_e1`].
+#[derive(Clone, Copy)]
+struct SharedE1 {
+    /// `sqrt(Kvb + Vg2k²)`
+    s: f64,
+    /// `sigmoid(inner)`
+    sigmoid: f64,
+    /// `softplus(inner)`
+    softplus: f64,
+    /// `E1 = (Vg2k / Kp) · softplus(inner)`
+    e1: f64,
+    /// `Ip0 = E1^Ex`
+    ip0: f64,
 }
 
 #[cfg(test)]
@@ -642,50 +798,195 @@ mod tests {
     }
 
     #[test]
-    fn test_pentode_plate_current() {
+    fn test_el84_operating_point_class_a() {
+        // Typical EL84 Class A bias: Vgk=-7, Vpk=Vg2k=300V.
+        // The Reefman TubeLib.inc fit predicts Ip ≈ 67.7 mA / Ig2 ≈ 7.2 mA
+        // here. The datasheet idle is closer to ~48 mA, but Reefman fits
+        // optimize over the whole curve family rather than the bias point,
+        // so the bound is intentionally generous (10-100 mA / 1-15 mA) — it
+        // catches "wrong order of magnitude" or "negative current" bugs
+        // without locking the test to one specific fit's bias-point error.
         let pent = KorenPentode::el84();
-        let ip = pent.current(&[0.0, 250.0, 250.0]);
+        let ip = pent.plate_current(-7.0, 300.0, 300.0);
+        let ig2 = pent.screen_current(-7.0, 300.0, 300.0);
+
         assert!(
-            ip > 1e-3,
-            "EL84 Ip should be in mA range, got {:.3}mA",
+            (10e-3..=100e-3).contains(&ip),
+            "EL84 Ip(Vgk=-7, Vpk=Vg2k=300) = {:.2}mA, expected 10-100mA",
             ip * 1000.0
         );
-
-        let ip_100 = pent.current(&[0.0, 100.0, 250.0]);
-        let ip_250 = pent.current(&[0.0, 250.0, 250.0]);
-        assert!(ip_250 >= ip_100 * 0.95);
-
-        let ip_neg = pent.current(&[-5.0, 250.0, 250.0]);
-        assert!(ip_neg < ip);
+        assert!(
+            (1e-3..=15e-3).contains(&ig2),
+            "EL84 Ig2(Vgk=-7, Vpk=Vg2k=300) = {:.2}mA, expected 1-15mA",
+            ig2 * 1000.0
+        );
+        assert!(
+            ip > ig2,
+            "Pentode plate current must exceed screen current in Class A: \
+             Ip={:.3}mA, Ig2={:.3}mA",
+            ip * 1000.0,
+            ig2 * 1000.0
+        );
     }
 
     #[test]
-    fn test_pentode_jacobian_finite_difference() {
+    fn test_el84_cutoff() {
+        // Reefman EL84 has a slow cutoff: it takes Vgk ≈ -30 V before Ip
+        // drops below ~1 µA, and Vgk ≈ -40 V before nA range. Use -40 V
+        // here so the cutoff threshold is meaningful.
+        let pent = KorenPentode::el84();
+        let ip = pent.plate_current(-40.0, 300.0, 300.0);
+        let ig2 = pent.screen_current(-40.0, 300.0, 300.0);
+        assert!(
+            ip < 1e-6,
+            "EL84 Ip at deep cutoff (Vgk=-40) should be < 1uA, got {:.3e} A",
+            ip
+        );
+        assert!(
+            ig2 < 1e-6,
+            "EL84 Ig2 at deep cutoff (Vgk=-40) should be < 1uA, got {:.3e} A",
+            ig2
+        );
+    }
+
+    #[test]
+    fn test_el84_monotonic_in_vgk() {
+        let pent = KorenPentode::el84();
+        let mut prev = -1.0;
+        for k in 0..10 {
+            let vgk = -10.0 + k as f64 * 1.0; // -10..-1 in 1V steps
+            let ip = pent.plate_current(vgk, 300.0, 300.0);
+            assert!(
+                ip > prev,
+                "EL84 Ip should increase monotonically in Vgk: \
+                 Vgk={}, Ip={:.6e}, prev={:.6e}",
+                vgk,
+                ip,
+                prev
+            );
+            prev = ip;
+        }
+    }
+
+    #[test]
+    fn test_el84_jacobian_finite_difference() {
         let pent = KorenPentode::el84();
         let eps = 1e-6;
 
-        let v = [0.0, 250.0, 250.0];
-        let jac = pent.jacobian(&v);
+        // Use a moderate Class-A operating point to avoid the deep-cutoff
+        // FD step landing on the E1<=1e-30 guard.
+        let (vgk, vpk, vg2k) = (-5.0, 300.0, 300.0);
+        let jac = pent.jacobian_3x3(vgk, vpk, vg2k);
 
-        for dim in 0..3 {
-            let mut v_plus = v;
-            let mut v_minus = v;
-            v_plus[dim] += eps;
-            v_minus[dim] -= eps;
-            let fd = (pent.current(&v_plus) - pent.current(&v_minus)) / (2.0 * eps);
-            let rel_err = if fd.abs() > 1e-15 {
-                (jac[dim] - fd).abs() / fd.abs()
-            } else {
-                jac[dim].abs()
-            };
-            assert!(
-                rel_err < 1e-3,
-                "Pentode Jacobian[{}] mismatch: analytic={:.6e} fd={:.6e} err={:.2e}",
-                dim,
-                jac[dim],
-                fd,
-                rel_err
-            );
+        // Helpers to compute each current with one perturbed coordinate.
+        let plate = |a: f64, b: f64, c: f64| pent.plate_current(a, b, c);
+        let screen = |a: f64, b: f64, c: f64| pent.screen_current(a, b, c);
+
+        // (current_idx, name, fn) for the rows we want to FD-check.
+        let fd = |f: &dyn Fn(f64, f64, f64) -> f64, dim: usize| -> f64 {
+            let mut p = [vgk, vpk, vg2k];
+            let mut m = [vgk, vpk, vg2k];
+            p[dim] += eps;
+            m[dim] -= eps;
+            (f(p[0], p[1], p[2]) - f(m[0], m[1], m[2])) / (2.0 * eps)
+        };
+
+        let row_specs: [(usize, &str, &dyn Fn(f64, f64, f64) -> f64); 2] =
+            [(0, "Ip", &plate), (1, "Ig2", &screen)];
+
+        for (row, name, f) in row_specs {
+            for col in 0..3 {
+                let analytic = jac[row][col];
+                let numerical = fd(f, col);
+                let rel_err = if numerical.abs() > 1e-15 {
+                    (analytic - numerical).abs() / numerical.abs()
+                } else {
+                    analytic.abs()
+                };
+                assert!(
+                    rel_err < 1e-3,
+                    "d{}/dV[{}] mismatch at (Vgk={}, Vpk={}, Vg2k={}): \
+                     analytic={:.6e} fd={:.6e} rel_err={:.2e}",
+                    name,
+                    col,
+                    vgk,
+                    vpk,
+                    vg2k,
+                    analytic,
+                    numerical,
+                    rel_err
+                );
+            }
+        }
+
+        // Ig1 row[2] checks: at Vgk=-5 the grid is reverse-biased, so the
+        // entire row is hardcoded zero. Verify that and skip Vpk/Vg2k cols.
+        assert_eq!(jac[2][0], 0.0, "Ig1 row should be zero at Vgk=-5");
+        assert_eq!(jac[2][1], 0.0, "dIg1/dVpk is structurally zero");
+        assert_eq!(jac[2][2], 0.0, "dIg1/dVg2k is structurally zero");
+
+        // And finally a positive-grid sanity check for the Ig1 dVgk entry.
+        let vgk_pos = 0.5;
+        let jac_pos = pent.jacobian_3x3(vgk_pos, vpk, vg2k);
+        let fd_ig1 = (pent.grid_current(vgk_pos + eps) - pent.grid_current(vgk_pos - eps))
+            / (2.0 * eps);
+        let rel_err = (jac_pos[2][0] - fd_ig1).abs() / fd_ig1.abs();
+        assert!(
+            rel_err < 1e-3,
+            "dIg1/dVgk mismatch at Vgk={}: analytic={:.6e} fd={:.6e}",
+            vgk_pos,
+            jac_pos[2][0],
+            fd_ig1
+        );
+    }
+
+    #[test]
+    fn test_pentode_negative_vg2k_safe() {
+        let pent = KorenPentode::el84();
+        let ip = pent.plate_current(-5.0, 300.0, -0.5);
+        let ig2 = pent.screen_current(-5.0, 300.0, -0.5);
+        let jac = pent.jacobian_3x3(-5.0, 300.0, -0.5);
+        assert!(ip.is_finite() && !ip.is_nan(), "Ip must be finite: {}", ip);
+        assert!(
+            ig2.is_finite() && !ig2.is_nan(),
+            "Ig2 must be finite: {}",
+            ig2
+        );
+        for row in 0..3 {
+            for col in 0..3 {
+                assert!(
+                    jac[row][col].is_finite() && !jac[row][col].is_nan(),
+                    "jacobian_3x3[{}][{}] must be finite: {}",
+                    row,
+                    col,
+                    jac[row][col]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_pentode_negative_vpk_safe() {
+        let pent = KorenPentode::el84();
+        let ip = pent.plate_current(-5.0, -10.0, 300.0);
+        let ig2 = pent.screen_current(-5.0, -10.0, 300.0);
+        let jac = pent.jacobian_3x3(-5.0, -10.0, 300.0);
+        assert!(ip.is_finite() && !ip.is_nan(), "Ip must be finite: {}", ip);
+        assert!(
+            ig2.is_finite() && !ig2.is_nan(),
+            "Ig2 must be finite: {}",
+            ig2
+        );
+        for row in 0..3 {
+            for col in 0..3 {
+                assert!(
+                    jac[row][col].is_finite() && !jac[row][col].is_nan(),
+                    "jacobian_3x3[{}][{}] must be finite: {}",
+                    row,
+                    col,
+                    jac[row][col]
+                );
+            }
         }
     }
 

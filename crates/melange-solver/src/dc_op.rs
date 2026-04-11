@@ -9,11 +9,11 @@
 //! Both `CircuitIR::from_kernel()` (codegen) and `CircuitSolver` (runtime)
 //! call into this module.
 
-use crate::device_types::{DeviceParams, DeviceSlot, DeviceType};
+use crate::device_types::{DeviceParams, DeviceSlot, DeviceType, TubeKind};
 use crate::mna::{inject_rhs_current, MnaSystem};
 use melange_devices::bjt::{BjtEbersMoll, BjtGummelPoon, BjtPolarity};
 use melange_devices::diode::DiodeShockley;
-use melange_devices::tube::KorenTriode;
+use melange_devices::tube::{KorenPentode, KorenTriode};
 use melange_primitives::nr::{pn_vcrit, pnjlim};
 
 /// Configuration for the DC operating point solver.
@@ -237,34 +237,100 @@ fn evaluate_devices_inner(
                 j_dev[(s + 1) * m + s] = 0.0; // dIg/dVds = 0
                 j_dev[(s + 1) * m + (s + 1)] = 0.0; // dIg/dVgs = 0
             }
-            (DeviceType::Tube, DeviceParams::Tube(tp)) => {
-                // Use canonical KorenTriode from melange-devices.
-                // 2D: Vgk at start_idx, Vpk at start_idx+1.
-                let tube = KorenTriode::with_all_params(
-                    tp.mu,
-                    tp.ex,
-                    tp.kg1,
-                    tp.kp,
-                    tp.kvb,
-                    tp.ig_max,
-                    tp.vgk_onset,
-                    tp.lambda,
-                );
-                let vgk = v_nl[s];
-                let vpk = v_nl[s + 1];
+            (DeviceType::Tube, DeviceParams::Tube(tp)) => match tp.kind {
+                TubeKind::SharpTriode => {
+                    // Use canonical KorenTriode from melange-devices.
+                    // 2D: Vgk at start_idx, Vpk at start_idx+1.
+                    if s + 1 >= v_nl.len() {
+                        log::warn!(
+                            "DC OP: Triode at start_idx={} needs 2 dims but v_nl.len()={}",
+                            s,
+                            v_nl.len()
+                        );
+                        continue;
+                    }
+                    let tube = KorenTriode::with_all_params(
+                        tp.mu,
+                        tp.ex,
+                        tp.kg1,
+                        tp.kp,
+                        tp.kvb,
+                        tp.ig_max,
+                        tp.vgk_onset,
+                        tp.lambda,
+                    );
+                    let vgk = v_nl[s];
+                    let vpk = v_nl[s + 1];
 
-                // Plate current (dimension 0) and grid current (dimension 1)
-                i_nl[s] = tube.plate_current(vgk, vpk);
-                i_nl[s + 1] = tube.grid_current(vgk);
+                    // Plate current (dimension 0) and grid current (dimension 1)
+                    i_nl[s] = tube.plate_current(vgk, vpk);
+                    i_nl[s + 1] = tube.grid_current(vgk);
 
-                // Jacobian: [[dIp/dVgk, dIp/dVpk], [dIg/dVgk, 0]]
-                use melange_devices::NonlinearDevice;
-                let plate_jac = tube.jacobian(&[vgk, vpk]);
-                j_dev[s * m + s] = plate_jac[0]; // dIp/dVgk
-                j_dev[s * m + (s + 1)] = plate_jac[1]; // dIp/dVpk
-                j_dev[(s + 1) * m + s] = tube.grid_current_jacobian(vgk); // dIg/dVgk
-                j_dev[(s + 1) * m + (s + 1)] = 0.0; // dIg/dVpk = 0
-            }
+                    // Jacobian: [[dIp/dVgk, dIp/dVpk], [dIg/dVgk, 0]]
+                    use melange_devices::NonlinearDevice;
+                    let plate_jac = tube.jacobian(&[vgk, vpk]);
+                    j_dev[s * m + s] = plate_jac[0]; // dIp/dVgk
+                    j_dev[s * m + (s + 1)] = plate_jac[1]; // dIp/dVpk
+                    j_dev[(s + 1) * m + s] = tube.grid_current_jacobian(vgk); // dIg/dVgk
+                    j_dev[(s + 1) * m + (s + 1)] = 0.0; // dIg/dVpk = 0
+                }
+                TubeKind::SharpPentode => {
+                    // Reefman "Derk" §4.4 pentode (3D NR block).
+                    // MNA layout (matches mna.rs Pentode stamping):
+                    //   v_nl[s    ] = Vgk   →  i_nl[s    ] = Ip   (plate current)
+                    //   v_nl[s + 1] = Vpk   →  i_nl[s + 1] = Ig2  (screen current)
+                    //   v_nl[s + 2] = Vg2k  →  i_nl[s + 2] = Ig1  (control-grid current)
+                    //
+                    // The KorenPentode device in melange-devices implements the
+                    // canonical Reefman equations (see pentode_equations.md memory
+                    // ref). We delegate plate/screen/grid currents and the 3×3
+                    // Jacobian to it so this dispatch arm stays declarative and
+                    // line-for-line matches the reference math.
+                    if s + 2 >= v_nl.len() {
+                        log::warn!(
+                            "DC OP: Pentode at start_idx={} needs 3 dims but v_nl.len()={}",
+                            s,
+                            v_nl.len()
+                        );
+                        continue;
+                    }
+                    let pentode = KorenPentode {
+                        mu: tp.mu,
+                        ex: tp.ex,
+                        kg1: tp.kg1,
+                        kg2: tp.kg2,
+                        kp: tp.kp,
+                        kvb: tp.kvb,
+                        alpha_s: tp.alpha_s,
+                        a_factor: tp.a_factor,
+                        beta_factor: tp.beta_factor,
+                        ig_max: tp.ig_max,
+                        vgk_onset: tp.vgk_onset,
+                    };
+                    let vgk = v_nl[s];
+                    let vpk = v_nl[s + 1];
+                    let vg2k = v_nl[s + 2];
+
+                    // Currents (rows 0..3)
+                    i_nl[s] = pentode.plate_current(vgk, vpk, vg2k);
+                    i_nl[s + 1] = pentode.screen_current(vgk, vpk, vg2k);
+                    i_nl[s + 2] = pentode.grid_current(vgk);
+
+                    // 3×3 analytic Jacobian (rows = [Ip, Ig2, Ig1],
+                    // cols = [Vgk, Vpk, Vg2k]). KorenPentode hands it back in
+                    // the same row/col order our MNA expects.
+                    let jac = pentode.jacobian_3x3(vgk, vpk, vg2k);
+                    j_dev[s * m + s] = jac[0][0]; // dIp/dVgk
+                    j_dev[s * m + (s + 1)] = jac[0][1]; // dIp/dVpk
+                    j_dev[s * m + (s + 2)] = jac[0][2]; // dIp/dVg2k
+                    j_dev[(s + 1) * m + s] = jac[1][0]; // dIg2/dVgk
+                    j_dev[(s + 1) * m + (s + 1)] = jac[1][1]; // dIg2/dVpk
+                    j_dev[(s + 1) * m + (s + 2)] = jac[1][2]; // dIg2/dVg2k
+                    j_dev[(s + 2) * m + s] = jac[2][0]; // dIg1/dVgk
+                    j_dev[(s + 2) * m + (s + 1)] = 0.0; // dIg1/dVpk = 0
+                    j_dev[(s + 2) * m + (s + 2)] = 0.0; // dIg1/dVg2k = 0
+                }
+            },
             (DeviceType::Vca, DeviceParams::Vca(vp)) => {
                 // 2D VCA: dim 0 = V_signal (at start_idx), dim 1 = V_control (at start_idx+1)
                 let v_sig = v_nl[s];
@@ -706,7 +772,11 @@ pub fn solve_linear(g_aug: &[Vec<f64>], rhs: &[f64]) -> Option<Vec<f64>> {
 ///
 /// This function detects junctions with |V_nl| > V_CLAMP and adjusts the
 /// appropriate node voltages to bring controlling voltages within range.
-/// Only PN junction devices (diodes, BJTs) are clamped; FETs and tubes are left alone.
+/// Diodes and BJTs get full PN junction pre-bias. Sharp pentodes get a Class A
+/// power-stage seed (Vg2k clamped to ≤250V, Vgk clamped to ≈-2V) so the Reefman
+/// Derk equations start near a real bias point — without it the linear solve
+/// puts both grids at 0V where Ip is enormous and NR diverges.
+/// Other tubes (sharp triodes) and FETs are left alone.
 fn clamp_junction_voltages(
     mna: &MnaSystem,
     device_slots: &[DeviceSlot],
@@ -813,6 +883,107 @@ fn clamp_junction_voltages(
                                 v[c] = v[b] + (v_supply - v[b]) * 0.3;
                             }
                         }
+                    }
+                }
+            }
+            DeviceType::Tube => {
+                // Pentodes only — sharp triodes are well-conditioned from the
+                // linear solve (Vgk ≈ 0 → Ip in mA, NR converges fine).
+                // Sharp pentodes need a Class A bias seed because:
+                //   * The Reefman Derk Ip0 = E1^Ex term explodes when Vgk ≈ 0
+                //     and Vg2k is at the supply rail (100s of volts), pushing
+                //     `inner` past the softplus knee.
+                //   * Linear solve places the cathode at GND and screen at B+,
+                //     so Vg2k = full supply (e.g. 300V on EL84) before NR even
+                //     starts. We need to clamp Vg2k to a sane operating point
+                //     and force Vgk negative.
+                let (is_pentode, _kg2_present) = match &slot.params {
+                    DeviceParams::Tube(tp) => (
+                        matches!(tp.kind, TubeKind::SharpPentode),
+                        tp.kg2 > 0.0,
+                    ),
+                    _ => (false, false),
+                };
+                if !is_pentode || slot.dimension < 3 {
+                    continue;
+                }
+                let vgk_idx = slot.start_idx;
+                let vpk_idx = slot.start_idx + 1;
+                let vg2k_idx = slot.start_idx + 2;
+                if vg2k_idx >= m {
+                    continue;
+                }
+
+                // Locate the four pentode terminal nodes via the N_v rows that
+                // mna.rs populated for this device:
+                //   row vgk_idx : +1 grid, -1 cathode
+                //   row vpk_idx : +1 plate, -1 cathode
+                //   row vg2k_idx: +1 screen, -1 cathode
+                let (mut grid_node, mut cathode_node, mut plate_node, mut screen_node) =
+                    (None, None, None, None);
+                let nv_vgk = &mna.n_v[vgk_idx];
+                let nv_vpk = &mna.n_v[vpk_idx];
+                let nv_vg2k = &mna.n_v[vg2k_idx];
+                for j in 0..n_aug {
+                    if nv_vgk[j] > 0.5 {
+                        grid_node = Some(j);
+                    }
+                    if nv_vgk[j] < -0.5 {
+                        cathode_node = Some(j);
+                    }
+                    if nv_vpk[j] > 0.5 {
+                        plate_node = Some(j);
+                    }
+                    if nv_vg2k[j] > 0.5 {
+                        screen_node = Some(j);
+                    }
+                }
+
+                // Estimate B+ from the highest circuit-node voltage in the
+                // linear solve. (Augmented variables — VS branch currents,
+                // inductor branch currents — live at indices ≥ mna.n and must
+                // not be sampled here.)
+                let v_supply = v.iter().take(mna.n).cloned().fold(0.0_f64, f64::max);
+
+                // Cathode reference (default to ground if cathode_node is None
+                // or grounded). For typical class A power stages this is 0V on
+                // the linear solve because Rk is fixed and Ip is zero.
+                let v_cath = cathode_node.map(|c| v[c]).unwrap_or(0.0);
+
+                // Vgk: drive the grid roughly 2V below the cathode. The grid
+                // is usually a high-impedance node biased through a grid-leak
+                // resistor to ground, so the linear solve leaves it at the
+                // cathode potential. Pulling it 2V down gives the Reefman
+                // softplus a finite, conducting starting point.
+                if let Some(g) = grid_node {
+                    let target_vg = v_cath - 2.0;
+                    if (v[g] - target_vg).abs() > 0.05 {
+                        v[g] = target_vg;
+                    }
+                }
+
+                // Vg2k: clamp the screen to a sane Class A operating value.
+                // Real audio amps run the screen at ~250V (EL84/EL34) or
+                // wherever the screen-dropping resistor lands; if the supply
+                // is below 250V (e.g. small signal bias network) we use
+                // supply - 50V to leave headroom for the screen-grid drop.
+                if let Some(s_node) = screen_node {
+                    let target_vg2 = v_cath + (v_supply - v_cath - 50.0).min(250.0).max(20.0);
+                    let v_g2 = v[s_node];
+                    if v_g2 - v_cath > 260.0 || v_g2 - v_cath < 10.0 {
+                        v[s_node] = target_vg2;
+                    }
+                }
+
+                // Vpk: clamp plate near the screen voltage as a starting
+                // guess (real Class A plates sit at supply minus IR_load).
+                // Only adjust if the linear plate is far above the screen,
+                // which happens when the plate-load resistor is large and Ip
+                // was zero in the linear solve.
+                if let (Some(p), Some(s_node)) = (plate_node, screen_node) {
+                    let v_g2 = v[s_node];
+                    if v[p] - v_g2 > 50.0 {
+                        v[p] = v_g2;
                     }
                 }
             }
