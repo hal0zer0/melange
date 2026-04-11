@@ -31,11 +31,28 @@ R1 node_a node_b 10k         ; declared resistor
 ### Semantics
 The named resistor becomes a runtime variable. The MNA system stamps the
 nominal conductance (`1/R_nominal` from the netlist value, or the explicit
-default if given). At runtime, changing `pot_resistance` triggers a
-Sherman-Morrison rank-1 update of S, K, A_neg, and the S·N_i product —
-all in O(N²) instead of O(N³) re-inversion.
+default if given). At runtime, changing `pot_resistance` triggers a full
+per-block rebuild of S, K, A_neg, and the S·N_i product via dense
+`invert_n`. The plugin template reads `.smoothed.next()` per sample
+inside the process loop, so rebuilds fire at the smoother's staircase
+rate (bounded by the 10 ms smoother time constant), not per audio sample.
 
-See [SHERMAN_MORRISON.md](SHERMAN_MORRISON.md) for the rank-1 math.
+After a large pot jump (`|r - r_prev| / r_prev > 0.20`), `set_pot_N`
+also resets `v_prev` to `DC_OP` and `i_nl_prev` to `DC_NL_I` so the NR
+loop starts the next sample from a bias-consistent seed instead of the
+stale previous-sample state. This is gated on delta magnitude so that
+smoothed knob sweeps (per-sample deltas ≪ 0.2%) do not trigger
+mid-signal state resets. See `set_pot_N` emission in
+`rust_emitter.rs` (DK Schur + nodal paths).
+
+Sherman-Morrison rank-1 updates were removed in 2026-04-04 (commit
+`eaee955`). The removal was originally motivated by NR max-iter-cap
+hits on wide-range pot jumps, but subsequent research showed that SM
+is mathematically exact (same K' as full rebuild, to 1e-9 float noise)
+— the real root cause was DC-OP seed staleness, fixed by the warm
+re-init described above. `SHERMAN_MORRISON.md` remains as math
+reference; the SM precomputation (`su`, `usu`, `nv_su`, `u_ni`) still
+runs at codegen time but is currently unused by the Tera templates.
 
 ### Constraints
 - Maximum 32 combined `.pot` + `.wiper` legs per circuit (each `.wiper`
@@ -165,8 +182,15 @@ entries are restamped and downstream matrices recomputed).
 | `.switch` | `IntParam` | `0..num_positions-1` | integer |
 
 Pot/wiper/gang positions are smoothed via `SmoothingStyle::Linear(10ms)`
-to avoid zipper noise. Switches are not smoothed — flipping a switch is
-expected to be a discrete event.
+and read **per sample** via `.smoothed.next()` inside the generated
+`process()` loop. The `set_pot_N` / `set_wiper_N` / gang setter skip
+guard (`(r - prev).abs() < 1e-12`) means steady-state samples pay only
+a float subtract + abs + compare; actual matrix rebuilds fire only
+when the smoothed value crosses that threshold.
+
+Switches are not smoothed — flipping a switch is expected to be a
+discrete event. `set_switch_N` also applies an unconditional DC-OP
+re-init (no gate, since every switch change is a step).
 
 ## Common Pitfalls
 
