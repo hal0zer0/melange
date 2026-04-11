@@ -1026,3 +1026,67 @@ fn test_codegen_no_sm_s_correction() {
         "Should have rebuild_matrices method"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Batch D Phase 2: warm DC-OP re-init in set_pot_N
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_codegen_set_pot_has_warm_dc_reinit_gate() {
+    // A pot circuit with a nonlinear device (diode) will have DC_OP and DC_NL_I.
+    // Verify that set_pot_N contains the 20%-relative-delta gate and re-init logic.
+    let code = generate_code(DIODE_POT_SPICE);
+
+    let set_pot_idx = code
+        .find("pub fn set_pot_0(")
+        .expect("Missing set_pot_0 method");
+    let set_pot_end = code[set_pot_idx..]
+        .find("\n    }\n")
+        .map(|i| set_pot_idx + i)
+        .expect("Missing end of set_pot_0");
+    let set_pot_body = &code[set_pot_idx..set_pot_end];
+
+    assert!(
+        set_pot_body.contains("rel_delta"),
+        "set_pot_0 should contain rel_delta gate (Batch D Phase 2)"
+    );
+    assert!(
+        set_pot_body.contains("> 0.20"),
+        "set_pot_0 should gate on 20% relative delta"
+    );
+    assert!(
+        set_pot_body.contains("v_prev"),
+        "set_pot_0 should reset v_prev on large jumps"
+    );
+}
+
+#[test]
+fn test_codegen_set_pot_linear_circuit_has_gate_no_dc_nl() {
+    // A pure linear pot circuit (no nonlinear devices) still gets the gate,
+    // but resets v_prev to [0.0; N] (no DC_OP) and does not touch i_nl_prev.
+    let code = generate_code(RC_POT_SPICE);
+
+    let set_pot_idx = code
+        .find("pub fn set_pot_0(")
+        .expect("Missing set_pot_0 method");
+    let set_pot_end = code[set_pot_idx..]
+        .find("\n    }\n")
+        .map(|i| set_pot_idx + i)
+        .expect("Missing end of set_pot_0");
+    let set_pot_body = &code[set_pot_idx..set_pot_end];
+
+    assert!(
+        set_pot_body.contains("rel_delta"),
+        "set_pot_0 should contain rel_delta gate even for linear circuits"
+    );
+    // Linear circuit: no DC_OP constant, resets to zero
+    assert!(
+        set_pot_body.contains("[0.0; N]"),
+        "Linear circuit set_pot_0 should reset v_prev to [0.0; N]"
+    );
+    // No i_nl_prev reset in purely linear circuit
+    assert!(
+        !set_pot_body.contains("i_nl_prev"),
+        "Linear circuit set_pot_0 should not touch i_nl_prev (no nonlinear devices)"
+    );
+}

@@ -1333,8 +1333,22 @@ impl RustEmitter {
         };
         let mut code = String::new();
 
-        // Emit set_switch_N() for each switch
+        // Emit set_switch_N() for each switch (DK path)
+        let dk_has_dc_op = ir.has_dc_op;
+        let dk_has_dc_nl = ir.topology.m > 0
+            && !ir.dc_nl_currents.is_empty()
+            && ir.dc_nl_currents.iter().any(|&v| v.abs() > 1e-30);
         for sw in &ir.switches {
+            let dc_op_reset = if dk_has_dc_op {
+                "        self.v_prev = DC_OP;\n".to_string()
+            } else {
+                "        self.v_prev = [0.0; N];\n".to_string()
+            };
+            let dc_nl_reset = if dk_has_dc_nl {
+                "        self.i_nl_prev = DC_NL_I;\n".to_string()
+            } else {
+                String::new()
+            };
             code.push_str(&format!(
                 "    /// Set switch {} position (0..{}).\n\
                  \x20   ///\n\
@@ -1344,6 +1358,10 @@ impl RustEmitter {
                  \x20       if self.switch_{}_position == position {{ return; }}\n\
                  \x20       self.switch_{}_position = position;\n\
                  \x20       self.matrices_dirty = true;\n\
+                 \x20       // Warm DC-OP re-init on switch change: reset NR seed to DC bias.\n\
+                 \x20       // Switches have no smoother so any change is a step. See Batch D Phase 2.\n\
+{dc_op_reset}\
+{dc_nl_reset}\
                  \x20   }}\n\n",
                 sw.index,
                 sw.num_positions - 1,
@@ -1353,6 +1371,16 @@ impl RustEmitter {
 
         // Emit set_pot_N() methods for DK path
         for (idx, pot) in ir.pots.iter().enumerate() {
+            let dc_op_reset = if dk_has_dc_op {
+                "            self.v_prev = DC_OP;\n".to_string()
+            } else {
+                "            self.v_prev = [0.0; N];\n".to_string()
+            };
+            let dc_nl_reset = if dk_has_dc_nl {
+                "            self.i_nl_prev = DC_NL_I;\n".to_string()
+            } else {
+                String::new()
+            };
             code.push_str(&format!(
                 "    /// Set potentiometer {idx} resistance (clamped to [{:.1}..{:.1}] ohms).\n\
                  \x20   ///\n\
@@ -1361,8 +1389,17 @@ impl RustEmitter {
                  \x20       if !resistance.is_finite() {{ return; }}\n\
                  \x20       let r = resistance.clamp(POT_{idx}_MIN_R, POT_{idx}_MAX_R);\n\
                  \x20       if (r - self.pot_{idx}_resistance).abs() < 1e-12 {{ return; }}\n\
+                 \x20       let r_prev = self.pot_{idx}_resistance;\n\
                  \x20       self.pot_{idx}_resistance = r;\n\
                  \x20       self.matrices_dirty = true;\n\
+                 \x20       // Warm DC-OP re-init: on large pot jumps, reset NR seed to DC bias.\n\
+                 \x20       // Gated at 20% relative delta so smoothed per-sample sweeps do not\n\
+                 \x20       // snap v_prev mid-signal and cause audible clicks. See Batch D Phase 2.\n\
+                 \x20       let rel_delta = (r - r_prev).abs() / r_prev.max(1e-12);\n\
+                 \x20       if rel_delta > 0.20 {{\n\
+{dc_op_reset}\
+{dc_nl_reset}\
+                 \x20       }}\n\
                  \x20   }}\n\n",
                 pot.min_resistance, pot.max_resistance,
             ));
@@ -5561,8 +5598,33 @@ impl RustEmitter {
                 }
             }
 
-            code.push_str(&format!("\n        self.pot_{}_resistance = r;\n", idx));
+            // Capture old resistance for warm DC-OP re-init gate before updating
+            code.push_str(&format!("\n        let r_prev_{} = self.pot_{}_resistance;\n", idx, idx));
+            code.push_str(&format!("        self.pot_{}_resistance = r;\n", idx));
             code.push_str("        self.matrices_dirty = true;\n");
+
+            // Warm DC-OP re-init: on large pot jumps, reset NR seed state to the baked DC
+            // operating point. This prevents NR max-iter-cap hits when v_prev is stale from
+            // the old operating point. Gated at 20% relative delta so per-sample smoothed
+            // sweeps do not snap v_prev mid-signal and cause clicks. See Batch D Phase 2.
+            let has_dc_op_nodal = ir.has_dc_op;
+            let has_dc_nl_nodal = ir.topology.m > 0
+                && !ir.dc_nl_currents.is_empty()
+                && ir.dc_nl_currents.iter().any(|&v| v.abs() > 1e-30);
+            code.push_str(&format!(
+                "        let rel_delta_{idx} = (r - r_prev_{idx}).abs() / r_prev_{idx}.max(1e-12);\n\
+                 \x20       if rel_delta_{idx} > 0.20 {{\n",
+            ));
+            if has_dc_op_nodal {
+                code.push_str("            self.v_prev = DC_OP;\n");
+            } else {
+                code.push_str("            self.v_prev = [0.0; N];\n");
+            }
+            if has_dc_nl_nodal {
+                code.push_str("            self.i_nl_prev = DC_NL_I;\n");
+            }
+            code.push_str("        }\n");
+
             code.push_str("    }\n\n");
         }
 
@@ -5673,6 +5735,23 @@ impl RustEmitter {
                 idx
             ));
             code.push_str("        self.matrices_dirty = true;\n");
+
+            // Warm DC-OP re-init on switch change: reset NR seed to DC bias.
+            // Switches have no smoother so any change is a step; always re-init.
+            // See Batch D Phase 2.
+            let has_dc_op_sw = ir.has_dc_op;
+            let has_dc_nl_sw = ir.topology.m > 0
+                && !ir.dc_nl_currents.is_empty()
+                && ir.dc_nl_currents.iter().any(|&v| v.abs() > 1e-30);
+            if has_dc_op_sw {
+                code.push_str("        self.v_prev = DC_OP;\n");
+            } else {
+                code.push_str("        self.v_prev = [0.0; N];\n");
+            }
+            if has_dc_nl_sw {
+                code.push_str("        self.i_nl_prev = DC_NL_I;\n");
+            }
+
             code.push_str("    }\n\n");
         }
 
