@@ -48,17 +48,29 @@ Resolution chain: netlist `.model` -> SPICE alias -> catalog -> infinity.
 
 ## Base Charge Function (qb)
 
-The core of Gummel-Poon. Modulates the transport current Icc by a normalized
-base charge factor that accounts for Early effect and high-injection.
+The core of Gummel-Poon. Modulates the transport (collector) current Icc by a
+normalized base charge factor that accounts for Early effect and high-injection.
+
+This implementation follows ngspice `bjtload.c` (SPICE3f5 descendant) line by
+line. The two details below are the ones most people get wrong:
 
 ```
-q1 = 1 / (1 - Vbe/VAR - Vbc/VAF)       [Early effect]
+q1 = 1 / (1 - Vbe/VAR - Vbc/VAF)             [Early effect]
 
-q2 = IS*exp(Vbe/VT)/IKF + IS*exp(Vbc/VT)/IKR   [High-injection]
-     Note: q2 uses bare VT, not NF*VT or NR*VT.
+cbe = IS * (exp(Vbe/(NF*Vt)) - 1)            [forward junction current]
+cbc = IS * (exp(Vbc/(NR*Vt)) - 1)            [reverse junction current]
+
+q2 = cbe / IKF + cbc / IKR                   [high-level injection, ngspice bjtload.c:571]
 
 qb = q1 * (1 + sqrt(1 + 4*q2)) / 2
 ```
+
+**Critical:** q2 inherits the NF / NR emission coefficients via cbe / cbc, and
+each exponential has the `-1` term. Melange historically computed `q2 =
+IS*exp(Vbe/Vt)/IKF + IS*exp(Vbc/Vt)/IKR` using bare VT and no `-1`; that was
+wrong and has been fixed. Any BJT `.model` card with `NF != 1` (e.g. BC547 at
+NF = 1.008, or vintage Neve cards at NF ≈ 1.02) would otherwise silently
+diverge from ngspice by several percent at forward bias above the IKF knee.
 
 Singularity guards:
 - `q1_denom <= 0.0 || |q1_denom| < 1e-30` -> qb = 1.0 (prevents sign-flip near Early voltage)
@@ -70,9 +82,16 @@ When GP is disabled (all params infinite): `qb = 1.0` (Ebers-Moll identity).
 ## Collector Current
 
 ```
-Icc = IS * (exp(Vbe/Vt) - exp(Vbc/Vt))    [transport current]
+cex = cbe = IS * (exp(Vbe/(NF*Vt)) - 1)            [forward, no excess phase]
+cbc = IS * (exp(Vbc/(NR*Vt)) - 1)                  [reverse]
 
-Ic = sign * (Icc / qb - IS/beta_R * (exp(Vbc/Vt) - 1))
+Ic = sign * ((cex - cbc) / qb - cbc / beta_R)      [ngspice bjtload.c:617]
+```
+
+Equivalently, using `Icc = IS*(exp_be - exp_bc) = cbe - cbc`:
+
+```
+Ic = sign * (Icc / qb - IS/beta_R * (exp(Vbc/(NR*Vt)) - 1))
 ```
 
 - `sign` = +1.0 (NPN) or -1.0 (PNP)
@@ -81,15 +100,21 @@ Ic = sign * (Icc / qb - IS/beta_R * (exp(Vbc/Vt) - 1))
 
 ## Base Current
 
-Forward ideal component `IS/BF * (exp(Vbe/(NF*VT)) - 1)` is divided by qb when GP
-is active. Reverse component and ISE/ISC leakage are not modified.
+```
+Ib = sign * (IS/beta_F * (exp(Vbe/(NF*Vt)) - 1)      [ideal forward, ngspice bjtload.c:618]
+           + IS/beta_R * (exp(Vbc/(NR*Vt)) - 1)      [ideal reverse]
+           + ISE * (exp(Vbe/(NE*Vt)) - 1)            [B-E leakage]
+           + ISC * (exp(Vbc/(NC*Vt)) - 1))           [B-C leakage]
+```
 
-```
-Ib = sign * (IS/beta_F * (exp(Vbe/(NF*Vt)) - 1) / qb
-           + IS/beta_R * (exp(Vbc/(NR*Vt)) - 1)
-           + ISE * (exp(Vbe/(NE*Vt)) - 1)
-           + ISC * (exp(Vbc/(NC*Vt)) - 1))
-```
+**The base current is NOT divided by qb in Gummel-Poon.** ngspice at line 618
+computes `cb = cbe/betaF + cben + cbc/betaR + cbcn` — the qb modulation is on
+transport (collector) current only, via the `cc` assignment at line 617.
+
+Melange previously divided the forward ideal component `IS/beta_F * (...)` by
+qb in GP mode, which is a different (BSIM-flavored) GP variant and will not
+agree with ngspice at high injection. That has been fixed; the runtime
+library and the codegen template both now match ngspice exactly.
 
 ## Jacobian (2x2 Block)
 
@@ -101,8 +126,8 @@ The GP Jacobian requires the quotient rule through qb:
 dq1/dVbe = q1^2 / VAR
 dq1/dVbc = q1^2 / VAF
 
-dq2/dVbe = IS / (VT * IKF) * exp(Vbe/VT)      [plain VT, not NF*VT]
-dq2/dVbc = IS / (VT * IKR) * exp(Vbc/VT)      [plain VT, not NR*VT]
+dq2/dVbe = IS / (NF*VT * IKF) * exp(Vbe/(NF*Vt))     [via cbe/IKF]
+dq2/dVbc = IS / (NR*VT * IKR) * exp(Vbc/(NR*Vt))     [via cbc/IKR]
 
 D = sqrt(1 + 4*q2)
 dD/dVbe = 2 * dq2/dVbe / D       (if D > 1e-15, else 0)
@@ -115,8 +140,8 @@ dqb/dVbc = dq1/dVbc * (1 + D) / 2 + q1 * dD/dVbc / 2
 ### Quotient Rule for Icc/qb
 
 ```
-dIcc/dVbe = IS/Vt * exp(Vbe/Vt)
-dIcc/dVbc = -IS/Vt * exp(Vbc/Vt)
+dIcc/dVbe = IS/(NF*Vt) * exp(Vbe/(NF*Vt))
+dIcc/dVbc = -IS/(NR*Vt) * exp(Vbc/(NR*Vt))
 
 qb2_safe = max(qb^2, 1e-30)
 
@@ -127,20 +152,19 @@ d(Icc/qb)/dVbc = (dIcc/dVbc * qb - Icc * dqb/dVbc) / qb2_safe
 ### Final Jacobian
 
 ```
-dIc/dVbe = d(Icc/qb)/dVbe                              [no beta_R term]
+dIc/dVbe = d(Icc/qb)/dVbe                              [no beta_R term here]
 dIc/dVbc = d(Icc/qb)/dVbc - IS/(beta_R * NR*Vt) * exp(Vbc/(NR*Vt))
 
-ib_fwd = IS/beta_F * (exp(Vbe/(NF*Vt)) - 1)
-dib_fwd/dVbe = IS/(beta_F * NF*Vt) * exp(Vbe/(NF*Vt))
-
-d(ib_fwd/qb)/dVbe = (dib_fwd/dVbe * qb - ib_fwd * dqb/dVbe) / qb^2
-                                                        [quotient rule]
-
-dIb/dVbe = d(ib_fwd/qb)/dVbe                           [GP: forward divided by qb]
-dIb/dVbc = IS/(beta_R * NR*Vt) * exp(Vbc/(NR*Vt))      [reverse unchanged]
+dIb/dVbe = IS/(beta_F * NF*Vt) * exp(Vbe/(NF*Vt))      [Ebers-Moll; NOT divided by qb]
+dIb/dVbc = IS/(beta_R * NR*Vt) * exp(Vbc/(NR*Vt))      [Ebers-Moll; NOT divided by qb]
 
 bjt_jacobian returns [dIc/dVbe, dIc/dVbc, dIb/dVbe, dIb/dVbc]
 ```
+
+The dIb/dV entries are identical to Ebers-Moll because `Ib = ib_fwd + ib_rev +
+leakage` is not qb-modulated (ngspice bjtload.c:627 — `gpi = gbe/betaF + gben`,
+`gmu = gbc/betaR + gbcn`, neither divided by qb). GP's base-charge correction
+is exclusively applied to the transport (collector) current.
 
 ## DC OP Integration
 

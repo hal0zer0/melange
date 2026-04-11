@@ -7,10 +7,13 @@ fn safe_exp(x: f64) -> f64 { fast_exp(x) }
 
 /// Gummel-Poon base charge factor qb.
 ///
-/// Accounts for Early effect (VAF/VAR) and high-level injection (IKF).
+/// Accounts for Early effect (VAF/VAR) and high-level injection (IKF/IKR).
 /// When use_gp=false or all GP params are infinite, returns 1.0 (Ebers-Moll).
-/// nf: forward emission coefficient (uses NF*VT for forward exponential).
-/// nr: reverse emission coefficient (uses NR*VT for reverse exponential).
+///
+/// Matches ngspice bjtload.c:571 exactly:
+///     q2 = cbe / IKF + cbc / IKR
+///     where cbe = IS*(exp(Vbe/(NF*VT)) - 1), cbc = IS*(exp(Vbc/(NR*VT)) - 1)
+/// q2 inherits NF/NR emission coefficients via cbe/cbc — it does NOT use bare VT.
 #[inline(always)]
 fn bjt_qb(vbe: f64, vbc: f64, is: f64, vt: f64, nf: f64, nr: f64, sign: f64,
            use_gp: bool, vaf: f64, var: f64, ikf: f64, ikr: f64) -> f64 {
@@ -23,11 +26,13 @@ fn bjt_qb(vbe: f64, vbc: f64, is: f64, vt: f64, nf: f64, nr: f64, sign: f64,
     if q1_denom <= 0.0 || q1_denom.abs() < 1e-30 { return 1.0; }
     let q1 = 1.0 / q1_denom;
 
-    // High-level injection: q2 = Is*exp(Vbe/Vt)/IKF + Is*exp(Vbc/Vt)/IKR
-    // SPICE3f5: q2 uses ideality factor 1.0 (plain Vt), not NF/NR
-    let exp_be = safe_exp(vbe_eff / vt);
-    let exp_bc = safe_exp(vbc_eff / vt);
-    let q2 = is * exp_be / ikf + is * exp_bc / ikr;
+    // High-level injection via cbe/cbc with NF*VT / NR*VT and the -1 term
+    // (matches ngspice bjtload.c:571).
+    let exp_be = safe_exp(vbe_eff / (nf * vt));
+    let exp_bc = safe_exp(vbc_eff / (nr * vt));
+    let cbe = is * (exp_be - 1.0);
+    let cbc = is * (exp_bc - 1.0);
+    let q2 = cbe / ikf + cbc / ikr;
 
     q1 * (1.0 + (1.0 + 4.0 * q2).max(0.0).sqrt()) / 2.0
 }
@@ -57,36 +62,38 @@ fn bjt_ic(vbe: f64, vbc: f64, is: f64, vt: f64, nf: f64, nr: f64, beta_r: f64, s
 /// nr: reverse emission coefficient for reverse base current.
 /// ise, ne: B-E leakage saturation current and emission coefficient.
 /// isc, nc: B-C leakage saturation current and emission coefficient.
-/// When use_gp=true, forward ideal component (Is/BF) is divided by qb.
-/// Reverse component and ISE/ISC leakage are unchanged.
+///
+/// Matches ngspice bjtload.c:618:
+///     cb = cbe/betaF + cben + cbc/betaR + cbcn
+/// The ideal forward base current is NOT divided by qb — that is the collector
+/// (transport) current's exclusive modification. GP base-current modulation is
+/// limited to what the EM forward / reverse / leakage terms already express.
+/// The use_gp / GP-param arguments are retained in the signature for call-site
+/// stability but are unused in this function.
 #[inline(always)]
+#[allow(clippy::too_many_arguments)]
 fn bjt_ib(vbe: f64, vbc: f64, is: f64, vt: f64, nf: f64, nr: f64,
           beta_f: f64, beta_r: f64, sign: f64,
           ise: f64, ne: f64,
           isc: f64, nc: f64,
-          use_gp: bool, vaf: f64, var: f64, ikf: f64, ikr: f64) -> f64 {
+          _use_gp: bool, _vaf: f64, _var: f64, _ikf: f64, _ikr: f64) -> f64 {
     let vbe_eff = sign * vbe;
     let vbc_eff = sign * vbc;
     let nf_vt = nf * vt;
     let nr_vt = nr * vt;
     let exp_be = safe_exp(vbe_eff / nf_vt);
     let exp_bc = safe_exp(vbc_eff / nr_vt);
-    // Forward ideal component: Is/BF * (exp(Vbe/(NF*VT)) - 1)
+    // Ideal forward + reverse base current (ngspice: cbe/betaF + cbc/betaR, unmodified by qb)
     let ib_fwd = is / beta_f * (exp_be - 1.0);
     let ib_rev = is / beta_r * (exp_bc - 1.0);
-    let mut ib = if use_gp {
-        let qb = bjt_qb(vbe, vbc, is, vt, nf, nr, sign, true, vaf, var, ikf, ikr);
-        ib_fwd / qb + ib_rev
-    } else {
-        ib_fwd + ib_rev
-    };
-    // B-E leakage current: ISE * (exp(Vbe/(NE*VT)) - 1) (unaffected by GP)
+    let mut ib = ib_fwd + ib_rev;
+    // B-E leakage current: ISE * (exp(Vbe/(NE*VT)) - 1)
     if ise > 0.0 {
         let ne_vt = ne * vt;
         let exp_be_leak = safe_exp(vbe_eff / ne_vt);
         ib += ise * (exp_be_leak - 1.0);
     }
-    // B-C leakage current: ISC * (exp(Vbc/(NC*VT)) - 1) (unaffected by GP)
+    // B-C leakage current: ISC * (exp(Vbc/(NC*VT)) - 1)
     if isc > 0.0 {
         let nc_vt = nc * vt;
         let exp_bc_leak = safe_exp(vbc_eff / nc_vt);
@@ -139,6 +146,7 @@ fn bjt_jacobian(vbe: f64, vbc: f64, is: f64, vt: f64, nf: f64, nr: f64,
     }
 
     // Gummel-Poon: quotient rule for d(Icc/qb)/dV
+    // Icc = is*(exp_be - exp_bc) = cbe - cbc (the -1 terms cancel in the difference)
     let icc = is * (exp_be - exp_bc);
     let dicc_dvbe = is / nf_vt * exp_be;
     let dicc_dvbc = -is / nr_vt * exp_bc;
@@ -152,13 +160,16 @@ fn bjt_jacobian(vbe: f64, vbc: f64, is: f64, vt: f64, nf: f64, nr: f64,
         (q1, q1 * q1 / var, q1 * q1 / vaf)
     };
 
-    // q2 and derivatives: q2 = Is*exp(Vbe/Vt)/IKF + Is*exp(Vbc/Vt)/IKR
-    // SPICE3f5: q2 uses ideality factor 1.0 (plain Vt), not NF/NR
-    let exp_be_q2 = safe_exp(vbe_eff / vt);
-    let exp_bc_q2 = safe_exp(vbc_eff / vt);
-    let q2 = is * exp_be_q2 / ikf + is * exp_bc_q2 / ikr;
-    let dq2_dvbe = is / (vt * ikf) * exp_be_q2;
-    let dq2_dvbc = is / (vt * ikr) * exp_bc_q2;
+    // q2 and derivatives match ngspice bjtload.c:571:
+    //     q2 = cbe/IKF + cbc/IKR
+    //     cbe = IS*(exp(Vbe/(NF*VT)) - 1), cbc = IS*(exp(Vbc/(NR*VT)) - 1)
+    // Reuse exp_be/exp_bc computed above with nf_vt/nr_vt; the -1 constants
+    // drop out of the derivatives but matter for q2's value.
+    let cbe = is * (exp_be - 1.0);
+    let cbc = is * (exp_bc - 1.0);
+    let q2 = cbe / ikf + cbc / ikr;
+    let dq2_dvbe = (is / (nf_vt * ikf)) * exp_be;
+    let dq2_dvbc = (is / (nr_vt * ikr)) * exp_bc;
 
     // Discriminant D = sqrt(1 + 4*q2)
     let disc = (1.0 + 4.0 * q2).max(0.0);
@@ -178,13 +189,10 @@ fn bjt_jacobian(vbe: f64, vbc: f64, is: f64, vt: f64, nf: f64, nr: f64,
 
     let d_bc_term_dvbc = is / (beta_r * nr_vt) * exp_bc;
 
-    // GP base current Jacobian: forward ideal component (Is/BF*(exp_be-1)) / qb
-    let ib_fwd = is / beta_f * (exp_be - 1.0);
-    let dib_fwd_gp_dvbe = (dib_fwd_dvbe * qb - ib_fwd * dqb_dvbe) / qb2;
-    let dib_fwd_gp_dvbc = -ib_fwd * dqb_dvbc / qb2;
-
+    // GP base current Jacobian = Ebers-Moll Jacobian (no qb modulation per
+    // ngspice bjtload.c:627: gpi = gbe/betaF + gben, gmu = gbc/betaR + gbcn).
     [quotient_dvbe, quotient_dvbc - d_bc_term_dvbc,
-     dib_fwd_gp_dvbe + dib_leak_dvbe, dib_fwd_gp_dvbc + dib_rev_dvbc + dib_leak_dvbc]
+     dib_fwd_dvbe + dib_leak_dvbe, dib_rev_dvbc + dib_leak_dvbc]
 }
 
 /// Combined BJT evaluation: returns (Ic, Ib, [dIc/dVbe, dIc/dVbc, dIb/dVbe, dIb/dVbc]).
@@ -252,7 +260,7 @@ fn bjt_evaluate(vbe: f64, vbc: f64, is: f64, vt: f64, nf: f64, nr: f64,
         return (ic, ib, [dic_dvbe, dic_dvbc, dib_fwd_dvbe + dib_leak_dvbe, dib_rev_dvbc + dib_leak_dvbc]);
     }
 
-    // Gummel-Poon
+    // Gummel-Poon — matches ngspice bjtload.c:565-630
     // q1 and derivatives
     let q1_denom = 1.0 - vbe_eff / var - vbc_eff / vaf;
     let (q1, dq1_dvbe, dq1_dvbc) = if q1_denom <= 0.0 || q1_denom.abs() < 1e-30 {
@@ -262,12 +270,14 @@ fn bjt_evaluate(vbe: f64, vbc: f64, is: f64, vt: f64, nf: f64, nr: f64,
         (q1, q1 * q1 / var, q1 * q1 / vaf)
     };
 
-    // q2 and derivatives: q2 uses ideality factor 1.0 (plain Vt), not NF/NR (SPICE3f5)
-    let exp_be_q2 = safe_exp(vbe_eff / vt);
-    let exp_bc_q2 = safe_exp(vbc_eff / vt);
-    let q2 = is * exp_be_q2 / ikf + is * exp_bc_q2 / ikr;
-    let dq2_dvbe = is / (vt * ikf) * exp_be_q2;
-    let dq2_dvbc = is / (vt * ikr) * exp_bc_q2;
+    // q2 = cbe/IKF + cbc/IKR with cbe = is*(exp_be - 1), cbc = is*(exp_bc - 1)
+    // where exp_be/exp_bc already use NF*VT / NR*VT (shared with current calc above).
+    // Matches ngspice bjtload.c:571.
+    let cbe = is * (exp_be - 1.0);
+    let cbc = is * (exp_bc - 1.0);
+    let q2 = cbe / ikf + cbc / ikr;
+    let dq2_dvbe = (is / (nf_vt * ikf)) * exp_be;
+    let dq2_dvbc = (is / (nr_vt * ikr)) * exp_bc;
 
     // Discriminant D = sqrt(1 + 4*q2)
     let disc = (1.0 + 4.0 * q2).max(0.0);
@@ -280,11 +290,12 @@ fn bjt_evaluate(vbe: f64, vbc: f64, is: f64, vt: f64, nf: f64, nr: f64,
     let dqb_dvbe = dq1_dvbe * (1.0 + d) / 2.0 + q1 * dd_dvbe / 2.0;
     let dqb_dvbc = dq1_dvbc * (1.0 + d) / 2.0 + q1 * dd_dvbc / 2.0;
 
+    // Ic: transport current modulated by qb (ngspice bjtload.c:617)
     let ic = sign * (i_cc / qb - is / beta_r * (exp_bc - 1.0));
-    // GP: forward ideal component divided by qb
-    let ib = sign * (ib_fwd / qb + ib_rev + ib_leak_be + ib_leak_bc);
+    // Ib: ideal forward + reverse, NOT divided by qb (ngspice bjtload.c:618)
+    let ib = sign * (ib_fwd + ib_rev + ib_leak_be + ib_leak_bc);
 
-    // Quotient rule: d(Icc/qb)/dV = (dIcc/dV * qb - Icc * dqb/dV) / qb^2
+    // Quotient rule for dIc: d(Icc/qb)/dV = (dIcc/dV * qb - Icc * dqb/dV) / qb^2
     let dicc_dvbe = is / nf_vt * exp_be;
     let dicc_dvbc = -is / nr_vt * exp_bc;
     let qb2 = (qb * qb).max(1e-30);
@@ -292,12 +303,10 @@ fn bjt_evaluate(vbe: f64, vbc: f64, is: f64, vt: f64, nf: f64, nr: f64,
     let quotient_dvbc = (dicc_dvbc * qb - i_cc * dqb_dvbc) / qb2;
     let d_bc_term_dvbc = is / (beta_r * nr_vt) * exp_bc;
 
-    // GP base current Jacobian: forward ideal component / qb
-    let dib_fwd_gp_dvbe = (dib_fwd_dvbe * qb - ib_fwd * dqb_dvbe) / qb2;
-    let dib_fwd_gp_dvbc = -ib_fwd * dqb_dvbc / qb2;
-
+    // dIb Jacobian = pure Ebers-Moll (ngspice bjtload.c:627-628: gpi/gmu are
+    // not modulated by qb — GP's modulation affects transport current only).
     (ic, ib, [quotient_dvbe, quotient_dvbc - d_bc_term_dvbc,
-              dib_fwd_gp_dvbe + dib_leak_dvbe, dib_fwd_gp_dvbc + dib_rev_dvbc + dib_leak_dvbc])
+              dib_fwd_dvbe + dib_leak_dvbe, dib_rev_dvbc + dib_leak_dvbc])
 }
 
 /// BJT with parasitic resistances (RB, RC, RE).

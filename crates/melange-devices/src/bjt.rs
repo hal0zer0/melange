@@ -333,10 +333,15 @@ impl BjtGummelPoon {
         )
     }
 
-    /// Base charge factor qb (accounts for Early effect and high injection).
+    /// Base charge factor qb (Early effect + high-level injection).
+    ///
+    /// Matches ngspice bjtload.c:571 — q2 uses NF*VT / NR*VT (via cbe/cbc)
+    /// and includes the `-1` term on each exponential.
     fn qb(&self, vbe: f64, vbc: f64) -> f64 {
         let s = self.base.sign();
         let vt = self.base.vt;
+        let nf_vt = self.base.nf * vt;
+        let nr_vt = self.base.nr * vt;
         let vbe_eff = s * vbe;
         let vbc_eff = s * vbc;
 
@@ -347,49 +352,28 @@ impl BjtGummelPoon {
         }
         let q1 = 1.0 / q1_denom;
 
-        // High-level injection (uses plain VT, not NF*VT or NR*VT)
-        let exp_be = safeguards::safe_exp(vbe_eff / vt);
-        let exp_bc = safeguards::safe_exp(vbc_eff / vt);
-        let q2 = self.base.is * exp_be / self.ikf + self.base.is * exp_bc / self.ikr;
+        // High-level injection: q2 = cbe/IKF + cbc/IKR
+        //     cbe = IS*(exp(Vbe/(NF*VT)) - 1), cbc = IS*(exp(Vbc/(NR*VT)) - 1)
+        let exp_be = safeguards::safe_exp(vbe_eff / nf_vt);
+        let exp_bc = safeguards::safe_exp(vbc_eff / nr_vt);
+        let cbe = self.base.is * (exp_be - 1.0);
+        let cbc = self.base.is * (exp_bc - 1.0);
+        let q2 = cbe / self.ikf + cbc / self.ikr;
 
         q1 * (1.0 + (1.0 + 4.0 * q2).max(0.0).sqrt()) / 2.0
     }
 
-    /// Base current with GP modification: forward ideal component divided by qb.
+    /// Base current — ngspice bjtload.c:618 exactly.
     ///
-    /// `Ib = Is/BF * (exp(Vbe/(NF*VT)) - 1) / qb + Is/BR * (exp(Vbc/(NR*VT)) - 1)`
+    /// `Ib = Is/BF * (exp(Vbe/(NF*VT)) - 1) + Is/BR * (exp(Vbc/(NR*VT)) - 1)`
     /// `   + ISE * (exp(Vbe/(NE*VT)) - 1) + ISC * (exp(Vbc/(NC*VT)) - 1)`
     ///
-    /// The forward ideal component (Is/BF term) is divided by qb to account
-    /// for Early effect and high-level injection. Reverse component and
-    /// leakage terms are unchanged (not affected by qb).
+    /// The ideal forward component is NOT divided by qb. GP's base-charge
+    /// modulation applies to the collector (transport) current only; the
+    /// base current matches pure Ebers-Moll.
     pub fn base_current(&self, vbe: f64, vbc: f64) -> f64 {
-        let s = self.base.sign();
-        let nf_vt = self.base.nf * self.base.vt;
-        let nr_vt = self.base.nr * self.base.vt;
-        let vbe_eff = s * vbe;
-        let vbc_eff = s * vbc;
-
-        let exp_be = safeguards::safe_exp(vbe_eff / nf_vt);
-        let exp_bc = safeguards::safe_exp(vbc_eff / nr_vt);
-
-        let qb = self.qb(vbe, vbc);
-        let ib_fwd = self.base.is * self.base.inv_beta_f * (exp_be - 1.0) / qb;
-        let ib_rev = self.base.is * self.base.inv_beta_r * (exp_bc - 1.0);
-
-        // Leakage terms (same as Ebers-Moll, not affected by qb)
-        let ib_leak_be = if self.base.ise > 0.0 {
-            self.base.ise * (safeguards::safe_exp(vbe_eff / (self.base.ne * self.base.vt)) - 1.0)
-        } else {
-            0.0
-        };
-        let ib_leak_bc = if self.base.isc > 0.0 {
-            self.base.isc * (safeguards::safe_exp(vbc_eff / (self.base.nc * self.base.vt)) - 1.0)
-        } else {
-            0.0
-        };
-
-        s * (ib_fwd + ib_rev + ib_leak_be + ib_leak_bc)
+        // Identical to Ebers-Moll: no qb modulation on Ib.
+        self.base.base_current(vbe, vbc)
     }
 
     /// Collector current with Early effect and high injection.
@@ -443,12 +427,15 @@ impl NonlinearDevice<2> for BjtGummelPoon {
             (q1, q1 * q1 / self.var, q1 * q1 / self.vaf)
         };
 
-        // High injection q2 uses plain VT (not NF*VT or NR*VT)
-        let exp_be_vt = safeguards::safe_exp(vbe_eff / vt);
-        let exp_bc_vt = safeguards::safe_exp(vbc_eff / vt);
-        let q2 = is * exp_be_vt / self.ikf + is * exp_bc_vt / self.ikr;
-        let dq2_dvbe = is / (vt * self.ikf) * exp_be_vt;
-        let dq2_dvbc = is / (vt * self.ikr) * exp_bc_vt;
+        // High injection q2 matches ngspice bjtload.c:571:
+        //     q2 = cbe/IKF + cbc/IKR
+        //     cbe = IS*(exp(Vbe/(NF*VT)) - 1), cbc = IS*(exp(Vbc/(NR*VT)) - 1)
+        // Reuse the NF*VT / NR*VT exponentials already computed above.
+        let cbe = is * (exp_be - 1.0);
+        let cbc = is * (exp_bc - 1.0);
+        let q2 = cbe / self.ikf + cbc / self.ikr;
+        let dq2_dvbe = (is / (nf_vt * self.ikf)) * exp_be;
+        let dq2_dvbc = (is / (nr_vt * self.ikr)) * exp_bc;
 
         // Discriminant D = sqrt(1 + 4*q2)
         let disc = (1.0 + 4.0 * q2).max(0.0);
