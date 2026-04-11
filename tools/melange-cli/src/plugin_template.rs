@@ -663,10 +663,30 @@ fn generate_process_loop(
         ""
     };
 
-    // Pot and wiper reads: always per-block (set_pot triggers O(N³) rebuild).
-    // Per-sample SM was removed — per-block rebuild is exact and fast enough.
-    let pot_reads = String::new();
-    let wiper_reads = String::new();
+    // Per-sample pot reads: smoother advances once per sample (outside per-channel loop),
+    // set_pot_N called per channel via pot_assignments. The skip-if-unchanged guard inside
+    // set_pot_N means the O(N^3) rebuild only fires when the smoothed value actually changes.
+    let pot_reads: String = pots
+        .iter()
+        .map(|p| {
+            format!(
+                "            let pot_{i}_val = {min:.17e}_f64 + self.params.pot_{i}.smoothed.next() as f64 * {range:.17e}_f64;\n",
+                i = p.index,
+                min = p.min_resistance,
+                range = p.max_resistance - p.min_resistance,
+            )
+        })
+        .collect();
+    // Per-sample wiper reads: same pattern — smoother advances once per sample.
+    let wiper_reads: String = wipers
+        .iter()
+        .map(|w| {
+            format!(
+                "            let wiper_{i}_pos = self.params.wiper_{i}.smoothed.next() as f64;\n",
+                i = w.wiper_index
+            )
+        })
+        .collect();
 
     // Switch reads + assignments: done once per buffer before the sample loop
     // (no smoother, and set_switch triggers O(N³) matrix rebuild)
@@ -706,100 +726,47 @@ fn generate_process_loop(
         })
         .collect();
 
-    // Pot and wiper assignments: always per-block (moved to pre-loop).
-    let pot_assignments = String::new();
-    let wiper_assignments = String::new();
+    // Per-sample pot assignments: call set_pot_N per channel using value from pot_reads.
+    // set_pot_N has a (r - prev).abs() < 1e-12 skip guard, so the O(N^3) rebuild
+    // only fires when the smoothed value actually changes.
+    let pot_assignments: String = pots
+        .iter()
+        .map(|p| {
+            format!(
+                "                state.set_pot_{i}(pot_{i}_val);\n",
+                i = p.index
+            )
+        })
+        .collect();
+    // Per-sample wiper assignments: call set_pot for both halves per channel.
+    let wiper_assignments: String = wipers
+        .iter()
+        .map(|w| {
+            format!(
+                "                state.set_pot_{cw}((1.0 - wiper_{i}_pos) * {range:.17e} + 10.0);\n\
+                 \x20               state.set_pot_{ccw}(wiper_{i}_pos * {range:.17e} + 10.0);\n",
+                i = w.wiper_index,
+                cw = w.cw_pot_index,
+                ccw = w.ccw_pot_index,
+                range = w.total_resistance - 20.0,
+            )
+        })
+        .collect();
 
     // Gang reads: per-sample for DK, per-block for nodal
     // Gang reads/assignments: always per-block (moved to pre-loop).
     let gang_reads = String::new();
     let gang_assignments = String::new();
 
-    // Per-block pot reads: done once per buffer before the sample loop.
-    // set_pot_N() triggers O(N³) rebuild; skips if value unchanged.
-    // Param is 0.0-1.0 position; convert to resistance: min + position * (max - min).
-    let pot_pre_loop: String = if !pots.is_empty() {
-        let reads: String = pots
-            .iter()
-            .map(|p| {
-                // Use .value() not .smoothed.next() — smoother can't advance fast enough
-                // at per-block rate. set_pot_N() skips rebuild if value unchanged.
-                // Convert 0-1 position to resistance in ohms.
-                format!(
-                    "            let pot_{i}_val = {min:.17e}_f64 + self.params.pot_{i}.value() as f64 * {range:.17e}_f64;\n",
-                    i = p.index,
-                    min = p.min_resistance,
-                    range = p.max_resistance - p.min_resistance,
-                )
-            })
-            .collect();
-        let assigns: String = if num_outputs > 1 {
-            // Single state for multi-output
-            pots.iter()
-                .map(|p| {
-                    format!(
-                        "            self.circuit_state.set_pot_{i}(pot_{i}_val);\n",
-                        i = p.index
-                    )
-                })
-                .collect()
-        } else {
-            // Per-channel states
-            pots.iter().map(|p| {
-                format!(
-                    "            for state in self.circuit_states.iter_mut() {{ state.set_pot_{i}(pot_{i}_val); }}\n",
-                    i = p.index
-                )
-            }).collect()
-        };
-        format!("        {{ // Per-block pot updates (O(N³) rebuild on change)\n{reads}{assigns}        }}\n")
-    } else {
-        String::new()
-    };
+    // Per-sample pot updates: reads smoothed pot values, triggers rebuild_matrices only on changes.
+    // Smoother advances in pot_reads (once per sample, outside per-channel loop);
+    // set_pot_N() called in pot_assignments (per channel). set_pot_N() has a
+    // (r - prev).abs() < 1e-12 skip guard so the O(N^3) rebuild only fires on actual changes.
+    let pot_pre_loop = String::new();
 
-    // Per-block wiper reads: done once per buffer before the sample loop.
-    let wiper_pre_loop: String = if !wipers.is_empty() {
-        let reads: String = wipers
-            .iter()
-            .map(|w| {
-                format!(
-                    "            let wiper_{i}_pos = self.params.wiper_{i}.value() as f64;\n",
-                    i = w.wiper_index
-                )
-            })
-            .collect();
-        let assigns: String = if num_outputs > 1 {
-            wipers
-                .iter()
-                .map(|w| {
-                    format!(
-                        "            self.circuit_state.set_pot_{cw}((1.0 - wiper_{i}_pos) * {range:.17e} + 10.0);\n\
-                         \x20           self.circuit_state.set_pot_{ccw}(wiper_{i}_pos * {range:.17e} + 10.0);\n",
-                        i = w.wiper_index,
-                        cw = w.cw_pot_index,
-                        ccw = w.ccw_pot_index,
-                        range = w.total_resistance - 20.0,
-                    )
-                })
-                .collect()
-        } else {
-            wipers.iter().map(|w| {
-                format!(
-                    "            for state in self.circuit_states.iter_mut() {{\n\
-                     \x20               state.set_pot_{cw}((1.0 - wiper_{i}_pos) * {range:.17e} + 10.0);\n\
-                     \x20               state.set_pot_{ccw}(wiper_{i}_pos * {range:.17e} + 10.0);\n\
-                     \x20           }}\n",
-                    i = w.wiper_index,
-                    cw = w.cw_pot_index,
-                    ccw = w.ccw_pot_index,
-                    range = w.total_resistance - 20.0,
-                )
-            }).collect()
-        };
-        format!("        {{ // Per-block wiper updates (O(N³) rebuild on change)\n{reads}{assigns}        }}\n")
-    } else {
-        String::new()
-    };
+    // Per-sample wiper updates: wiper smoother advances in wiper_reads (once per sample);
+    // set_pot calls in wiper_assignments (per channel). Same skip guard applies.
+    let wiper_pre_loop = String::new();
 
     // Per-block gang reads: done once per buffer before the sample loop.
     let gang_pre_loop: String = if !gangs.is_empty() {
@@ -1719,8 +1686,9 @@ mod tests {
             default_resistance: 5000.0,
         }];
         let lib = test_generate_lib_rs("test", false, &pots);
-        // Position-to-resistance conversion: min + position * (max - min)
-        assert!(lib.contains("self.params.pot_0.value()"));
+        // Position-to-resistance conversion: min + position * (max - min), per-sample smoothed
+        assert!(lib.contains("self.params.pot_0.smoothed.next()"), "should use smoothed.next() for per-sample pot update");
+        assert!(!lib.contains("self.params.pot_0.value()"), "should not use raw .value() for pot (use .smoothed.next())");
         assert!(lib.contains("set_pot_0(pot_0_val)"));
     }
 
