@@ -11,10 +11,13 @@
 * codepath end-to-end: EL84-style pentode math with the `exp(-(β·Vp)^{3/2})`
 * screen scaling specific to beam tetrodes like 6V6GT.
 *
-* Simplifications for phase 1a.1 (lifted in later phases):
-*   - Output transformer modelled as 2× plate-load resistors (Ra_1/Ra_2).
-*     Real 5E3 OT primary ~6.6k plate-to-plate → ~3.3k per half.
-*   - Output taken single-ended from pa_1 (OT differential coupling → phase 1e).
+* Simplifications for phase 1e (to be lifted in later phases):
+*   - Output transformer modelled with Pultec-style coupled-inductor
+*     topology: L_pri_a + L_pri_b + L_sec, all three K couplings at
+*     0.9999, plus explicit R_dcr_* winding resistance and R_opt_ct
+*     center-tap-to-B+ link. Schumacher 5E3-style values: 40 H primary
+*     (10 H per half), 12 mH secondary for 8 Ω tap (Np/Ns ≈ 28.7).
+*   - Output taken across the secondary 8 Ω load (realistic amp levels).
 *   - No tone stack (original 5E3 uses volume-dependent passive tone).
 *   - No NFB loop (real 5E3 has a 22k NFB from 8Ω secondary to PI cathode).
 *
@@ -82,10 +85,6 @@ Rg_e2  el2_g  0      220k
 P_e1   pa_1   el1_g  ck_pp  sc_pp  6V6GT-T
 P_e2   pa_2   el2_g  ck_pp  sc_pp  6V6GT-T
 
-* OT primary halves (~3.3k each for 5E3's 6.6k plate-to-plate)
-Ra_1   vcc    pa_1   3.3k
-Ra_2   vcc    pa_2   3.3k
-
 * Shared screen bus with 1k stop resistor from B+
 Rg2_pp vcc    sc_pp  1k
 Cg2_pp sc_pp  0      47u
@@ -94,9 +93,34 @@ Cg2_pp sc_pp  0      47u
 Rk_pp  ck_pp  0      250
 Ck_pp  ck_pp  0      100u
 
-* -------------- Output (single-ended from pa_1) --------------
-* True PP differential output requires OT differential coupling — phase 1e.
-Cout   pa_1   out    220n
-Rload  out    0      8
+* -------------- Output Transformer (Schumacher-style 5E3) --------------
+* Fender 5E3 Tweed Deluxe OT: push-pull 6V6GT → 8 Ω speaker tap.
+* Zpri ≈ 6.6 kΩ plate-to-plate (classic 6V6 PP load line).
+* L_pri total ≈ 40 H, split 50/50 at center tap → 10 H per half.
+* Np/Ns = sqrt(Zpri / Zsec) = sqrt(6600 / 8) ≈ 28.7.
+* L_sec = L_pri_half × (Ns/Np)² = 10 × (1/28.7)² ≈ 0.012 H (12 mH).
+* DCR: ~200 Ω per primary half (5E3 OT is beefier than AC15), 0.3 Ω secondary.
+* K = 0.9999 (Pultec precedent for high-quality OTs).
+
+* Center tap to B+ — primary IS the plate load
+R_opt_ct   vcc    ot_ct   1m
+
+* Push-pull primary halves through winding DCR
+R_dcr_a    pa_1   pa_1_w  200
+R_dcr_b    pa_2   pa_2_w  200
+L_pri_a    pa_1_w ot_ct   10
+L_pri_b    ot_ct  pa_2_w  10
+
+* Secondary through winding DCR, returned to ground
+R_dcr_sec  out_w  out     0.3
+L_sec      out_w  0       12m
+
+* 8 Ω speaker load
+Rload      out    0       8
+
+* Primary halves mutually coupled + both coupled to secondary
+K_a_sec    L_pri_a L_sec   0.9999
+K_b_sec    L_pri_b L_sec   0.9999
+K_a_b      L_pri_a L_pri_b 0.9999
 
 .END
