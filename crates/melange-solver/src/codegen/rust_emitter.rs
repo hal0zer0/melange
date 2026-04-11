@@ -402,6 +402,45 @@ fn emit_device_const(code: &mut String, dev_num: usize, suffix: &str, value: f64
     ));
 }
 
+/// Resolve the pentode-family helper name and variable-mu trailing argument
+/// list for a given tube slot.
+///
+/// Returns `(helper_suffix, extra_args)` where:
+///
+/// - `helper_suffix` selects the Rust helper family emitted in
+///   `templates/rust/device_tube.rs.tera`:
+///     * `"pentode"`         → sharp Derk §4.4 (true pentodes: EL84, EL34, EF86)
+///     * `"beam_tetrode"`    → sharp DerkE §4.5 (beam tetrodes: 6L6GC, 6V6GT)
+///     * `"pentode_v"`       → §5 two-section Koren + Derk screen (6K7 class)
+///     * `"beam_tetrode_v"`  → §5 two-section Koren + DerkE screen (EF89 class)
+///
+/// - `extra_args` is empty for sharp slots and
+///   `", DEVICE_{n}_MU_B, DEVICE_{n}_SVAR, DEVICE_{n}_EX_B"` for variable-mu
+///   slots — the leading comma lets callers concatenate it to the end of
+///   the shared sharp-path argument list without branching.
+///
+/// Used by every pentode NR dispatch site (DK Schur, nodal Schur, full LU,
+/// nodal final-eval). The 4-way match is evaluated at codegen time — the
+/// generated Rust code has no runtime branch on `screen_form` or `svar`.
+fn pentode_dispatch(
+    tp: &crate::device_types::TubeParams,
+    dev_num: usize,
+) -> (&'static str, String) {
+    use crate::device_types::ScreenForm;
+    let helper_suffix = match (tp.screen_form, tp.is_variable_mu()) {
+        (ScreenForm::Rational, false) => "pentode",
+        (ScreenForm::Exponential, false) => "beam_tetrode",
+        (ScreenForm::Rational, true) => "pentode_v",
+        (ScreenForm::Exponential, true) => "beam_tetrode_v",
+    };
+    let extra_args = if tp.is_variable_mu() {
+        format!(", DEVICE_{dev_num}_MU_B, DEVICE_{dev_num}_SVAR, DEVICE_{dev_num}_EX_B")
+    } else {
+        String::new()
+    };
+    (helper_suffix, extra_args)
+}
+
 // ============================================================================
 // Oversampling configuration
 // ============================================================================
@@ -3512,23 +3551,12 @@ impl RustEmitter {
                             other => return Err(CodegenError::InvalidDevice(format!("device_type=Tube but params={:?}", other))),
                         };
                         if tp.is_pentode() {
-                            // Pentode / beam tetrode: 3D NR block (Vgk→Ip, Vpk→Ig2, Vg2k→Ig1).
-                            // Reefman Derk §4.4 (Rational) or DerkE §4.5 (Exponential),
-                            // optionally blended via §5 two-section when svar > 0
-                            // (variable-mu). Helper family selected per-slot by
-                            // (screen_form, is_variable_mu) — zero runtime branches.
+                            // Pentode / beam tetrode: 3D NR block
+                            // (Vgk → Ip, Vpk → Ig2, Vg2k → Ig1). See
+                            // [`pentode_dispatch`] for the 4-way helper family
+                            // selection.
                             let s2 = s + 2;
-                            let helper_suffix = match (tp.screen_form, tp.is_variable_mu()) {
-                                (crate::device_types::ScreenForm::Rational, false) => "pentode",
-                                (crate::device_types::ScreenForm::Exponential, false) => "beam_tetrode",
-                                (crate::device_types::ScreenForm::Rational, true) => "pentode_v",
-                                (crate::device_types::ScreenForm::Exponential, true) => "beam_tetrode_v",
-                            };
-                            let extra_args = if tp.is_variable_mu() {
-                                format!(", DEVICE_{d}_MU_B, DEVICE_{d}_SVAR, DEVICE_{d}_EX_B")
-                            } else {
-                                String::new()
-                            };
+                            let (helper_suffix, extra_args) = pentode_dispatch(tp, d);
                             code.push_str(&format!(
                                 "        let (i_dev{s}, i_dev{s1}, i_dev{s2}, pentode{d}_jac) = tube_evaluate_{helper_suffix}(v_d{s}, v_d{s1}, v_d{s2}, state.device_{d}_mu, state.device_{d}_ex, state.device_{d}_kg1, DEVICE_{d}_KG2, state.device_{d}_kp, state.device_{d}_kvb, DEVICE_{d}_ALPHA_S, DEVICE_{d}_A_FACTOR, DEVICE_{d}_BETA_FACTOR, state.device_{d}_ig_max, state.device_{d}_vgk_onset{extra_args});\n"
                             ));
@@ -7206,17 +7234,7 @@ impl RustEmitter {
                 let s1 = s + 1;
                 if tp.is_pentode() {
                     let s2 = s + 2;
-                    let helper_suffix = match (tp.screen_form, tp.is_variable_mu()) {
-                        (crate::device_types::ScreenForm::Rational, false) => "pentode",
-                        (crate::device_types::ScreenForm::Exponential, false) => "beam_tetrode",
-                        (crate::device_types::ScreenForm::Rational, true) => "pentode_v",
-                        (crate::device_types::ScreenForm::Exponential, true) => "beam_tetrode_v",
-                    };
-                    let extra_args = if tp.is_variable_mu() {
-                        format!(", DEVICE_{d}_MU_B, DEVICE_{d}_SVAR, DEVICE_{d}_EX_B")
-                    } else {
-                        String::new()
-                    };
+                    let (helper_suffix, extra_args) = pentode_dispatch(tp, d);
                     code.push_str(&format!(
                         "{indent}let (i_dev{s}, i_dev{s1}, i_dev{s2}, pentode{d}_jac) = tube_evaluate_{helper_suffix}(v_d{s}, v_d{s1}, v_d{s2}, state.device_{d}_mu, state.device_{d}_ex, state.device_{d}_kg1, DEVICE_{d}_KG2, state.device_{d}_kp, state.device_{d}_kvb, DEVICE_{d}_ALPHA_S, DEVICE_{d}_A_FACTOR, DEVICE_{d}_BETA_FACTOR, state.device_{d}_ig_max, state.device_{d}_vgk_onset{extra_args});\n"
                     ));
@@ -9583,26 +9601,16 @@ impl RustEmitter {
                     let jd_10 = s1 * m + s;
                     let jd_11 = s1 * m + s1;
                     if tp.is_pentode() {
-                        // Pentode / beam tetrode 3D NR block (Vgk→Ip, Vpk→Ig2, Vg2k→Ig1).
-                        // Reefman Derk §4.4 (Rational) or DerkE §4.5 (Exponential),
-                        // per-slot via `screen_form`.
+                        // Pentode / beam tetrode 3D NR block
+                        // (Vgk → Ip, Vpk → Ig2, Vg2k → Ig1). See
+                        // [`pentode_dispatch`] for the 4-way helper family.
                         let s2 = s + 2;
                         let jd_02 = s * m + s2;
                         let jd_12 = s1 * m + s2;
                         let jd_20 = s2 * m + s;
                         let jd_21 = s2 * m + s1;
                         let jd_22 = s2 * m + s2;
-                        let helper_suffix = match (tp.screen_form, tp.is_variable_mu()) {
-                            (crate::device_types::ScreenForm::Rational, false) => "pentode",
-                            (crate::device_types::ScreenForm::Exponential, false) => "beam_tetrode",
-                            (crate::device_types::ScreenForm::Rational, true) => "pentode_v",
-                            (crate::device_types::ScreenForm::Exponential, true) => "beam_tetrode_v",
-                        };
-                        let extra_args = if tp.is_variable_mu() {
-                            format!(", DEVICE_{dev_num}_MU_B, DEVICE_{dev_num}_SVAR, DEVICE_{dev_num}_EX_B")
-                        } else {
-                            String::new()
-                        };
+                        let (helper_suffix, extra_args) = pentode_dispatch(tp, dev_num);
                         code.push_str(&format!(
                             "{indent}{{ // Pentode {dev_num}\n\
                              {indent}    let vgk = v_nl[{s}];\n\
@@ -9755,17 +9763,7 @@ impl RustEmitter {
                     let s1 = s + 1;
                     if tp.is_pentode() {
                         let s2 = s + 2;
-                        let helper_suffix = match (tp.screen_form, tp.is_variable_mu()) {
-                            (crate::device_types::ScreenForm::Rational, false) => "pentode",
-                            (crate::device_types::ScreenForm::Exponential, false) => "beam_tetrode",
-                            (crate::device_types::ScreenForm::Rational, true) => "pentode_v",
-                            (crate::device_types::ScreenForm::Exponential, true) => "beam_tetrode_v",
-                        };
-                        let extra_args = if tp.is_variable_mu() {
-                            format!(", DEVICE_{dev_num}_MU_B, DEVICE_{dev_num}_SVAR, DEVICE_{dev_num}_EX_B")
-                        } else {
-                            String::new()
-                        };
+                        let (helper_suffix, extra_args) = pentode_dispatch(tp, dev_num);
                         code.push_str(&format!(
                             "{indent}i_nl[{s}] = tube_ip_{helper_suffix}(v_nl_final[{s}], v_nl_final[{s1}], v_nl_final[{s2}], state.device_{dev_num}_mu, state.device_{dev_num}_ex, state.device_{dev_num}_kg1, DEVICE_{dev_num}_KG2, state.device_{dev_num}_kp, state.device_{dev_num}_kvb, DEVICE_{dev_num}_ALPHA_S, DEVICE_{dev_num}_A_FACTOR, DEVICE_{dev_num}_BETA_FACTOR{extra_args});\n\
                              {indent}i_nl[{s1}] = tube_is_{helper_suffix}(v_nl_final[{s}], v_nl_final[{s1}], v_nl_final[{s2}], state.device_{dev_num}_mu, state.device_{dev_num}_ex, state.device_{dev_num}_kg1, DEVICE_{dev_num}_KG2, state.device_{dev_num}_kp, state.device_{dev_num}_kvb, DEVICE_{dev_num}_ALPHA_S, DEVICE_{dev_num}_BETA_FACTOR{extra_args});\n\
