@@ -146,6 +146,34 @@ enum Commands {
         /// On by default — use this flag only for measurement or testing.
         #[arg(long)]
         no_ear_protection: bool,
+
+        /// Plugin vendor name shown to the DAW (e.g., "Acme Audio").
+        /// Defaults to "Melange" when omitted. Applies to `--format plugin`.
+        #[arg(long, value_name = "STR")]
+        vendor: Option<String>,
+
+        /// Plugin vendor homepage URL (must start with http:// or https://).
+        /// Defaults to "https://github.com/melange". Applies to `--format plugin`.
+        #[arg(long, value_name = "URL")]
+        vendor_url: Option<String>,
+
+        /// Plugin vendor contact email (e.g., "support@acme.example").
+        /// Defaults to "dev@melange.audio". Applies to `--format plugin`.
+        #[arg(long, value_name = "ADDR")]
+        email: Option<String>,
+
+        /// Override the VST3 class ID with exactly 16 printable ASCII bytes.
+        /// Without this flag the ID is derived from the circuit filename, so
+        /// renaming the .cir file breaks DAW sessions. Pin an explicit value
+        /// for stable releases. Applies to `--format plugin`.
+        #[arg(long, value_name = "16-CHAR")]
+        vst3_id: Option<String>,
+
+        /// Override the CLAP plugin ID (reverse-DNS style, e.g.,
+        /// "com.acme.wurli"). Defaults to "com.melange.<circuit>" when omitted.
+        /// Applies to `--format plugin`.
+        #[arg(long, value_name = "STR")]
+        clap_id: Option<String>,
     },
 
     /// Validate circuit against ngspice reference simulation
@@ -414,6 +442,11 @@ fn main() -> Result<()> {
             mono,
             wet_dry_mix,
             no_ear_protection,
+            vendor,
+            vendor_url,
+            email,
+            vst3_id,
+            clap_id,
         } => {
             // Validate numeric CLI parameters
             if sample_rate <= 0.0 || !sample_rate.is_finite() {
@@ -444,6 +477,25 @@ fn main() -> Result<()> {
             // Level params are on by default; --no-level-params disables them
             let level_params = with_level_params && !no_level_params;
 
+            // Validate shipability flags (plugin branding).
+            if let Some(url) = vendor_url.as_deref() {
+                // Simple scheme check — we don't pull in a URL-parsing crate for this.
+                if !(url.starts_with("http://") || url.starts_with("https://")) {
+                    anyhow::bail!(
+                        "--vendor-url '{}' must start with http:// or https://",
+                        url
+                    );
+                }
+            }
+            if let Some(id) = vst3_id.as_deref() {
+                plugin_template::validate_vst3_id(id)?;
+            }
+            if let Some(id) = clap_id.as_deref() {
+                if id.is_empty() {
+                    anyhow::bail!("--clap-id cannot be empty");
+                }
+            }
+
             let circuit_source = circuits::resolve(&input)?;
             println!("Resolved circuit: {}", circuit_source.name());
             compile_circuit_source(
@@ -467,6 +519,11 @@ fn main() -> Result<()> {
                 mono,
                 wet_dry_mix,
                 !no_ear_protection,
+                vendor.as_deref(),
+                vendor_url.as_deref(),
+                email.as_deref(),
+                vst3_id.as_deref(),
+                clap_id.as_deref(),
             )
         }
         Commands::Validate {
@@ -627,6 +684,11 @@ fn compile_circuit_source(
     mono: bool,
     wet_dry_mix: bool,
     ear_protection: bool,
+    vendor: Option<&str>,
+    vendor_url: Option<&str>,
+    email: Option<&str>,
+    vst3_id_override: Option<&str>,
+    clap_id_override: Option<&str>,
 ) -> Result<()> {
     use melange_solver::{
         codegen::{CodeGenerator, CodegenConfig},
@@ -1363,7 +1425,11 @@ fn compile_circuit_source(
                 mono,
                 wet_dry_mix,
                 ear_protection,
-                ..Default::default()
+                vendor,
+                url: vendor_url,
+                email,
+                vst3_id: vst3_id_override,
+                clap_id: clap_id_override,
             };
             plugin_template::generate_plugin_project_with_oversampling(
                 &project_dir,

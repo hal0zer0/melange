@@ -105,6 +105,48 @@ pub struct PluginOptions<'a> {
     pub url: Option<&'a str>,
     /// Plugin contact email. If `None`, defaults to "dev@melange.audio".
     pub email: Option<&'a str>,
+    /// Override VST3 class ID. Must be exactly 16 printable ASCII bytes.
+    /// If `None`, a deterministic ID is derived from the circuit name.
+    /// Callers should validate with [`validate_vst3_id`] before setting this.
+    pub vst3_id: Option<&'a str>,
+    /// Override CLAP plugin ID (reverse-DNS style like "com.vendor.product").
+    /// If `None`, defaults to "com.melange.<circuit_name>".
+    pub clap_id: Option<&'a str>,
+}
+
+/// Validate a user-provided VST3 class ID override.
+///
+/// VST3 class IDs must be exactly 16 bytes. We require printable ASCII (0x20-0x7E)
+/// so the value can be emitted as a Rust `b"..."` byte string literal without
+/// escaping, and so DAW session files (which may log the ID as a string) stay
+/// human-readable.
+pub fn validate_vst3_id(id: &str) -> Result<()> {
+    if id.len() != 16 {
+        anyhow::bail!(
+            "--vst3-id must be exactly 16 bytes, got {} bytes ({:?})",
+            id.len(),
+            id
+        );
+    }
+    for (i, b) in id.bytes().enumerate() {
+        if !(0x20..=0x7E).contains(&b) {
+            anyhow::bail!(
+                "--vst3-id byte {} (0x{:02x}) is not printable ASCII. \
+                 Use only characters in the range 0x20..=0x7E.",
+                i,
+                b
+            );
+        }
+        // Backslash and double-quote would break the emitted `b"..."` literal
+        // in the generated lib.rs. Reject them rather than silently escaping.
+        if b == b'\\' || b == b'"' {
+            anyhow::bail!(
+                "--vst3-id contains '{}' which cannot appear in a Rust byte string literal",
+                b as char
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Generate a complete plugin project
@@ -1003,8 +1045,21 @@ fn generate_lib_rs(
             .collect::<Vec<_>>()
             .join(" ")
     };
-    let clap_id = format!("com.melange.{circuit_name}");
-    let vst3_id_str = compute_vst3_id(circuit_name);
+    let clap_id = options
+        .clap_id
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| format!("com.melange.{circuit_name}"));
+    // VST3 override has already been validated upstream (see validate_vst3_id).
+    // We still assert in debug builds so template-level misuse surfaces loudly.
+    let vst3_id_str = if let Some(id) = options.vst3_id {
+        debug_assert!(
+            validate_vst3_id(id).is_ok(),
+            "PluginOptions.vst3_id must pass validate_vst3_id()"
+        );
+        id.to_string()
+    } else {
+        compute_vst3_id(circuit_name)
+    };
     let vendor = options.vendor.unwrap_or("Melange");
     let url = options.url.unwrap_or("https://github.com/melange");
     let email = options.email.unwrap_or("dev@melange.audio");
@@ -2021,5 +2076,146 @@ mod tests {
         assert!(lib.contains("pub mix: FloatParam"));
         assert!(lib.contains("let dry = *sample;"));
         assert!(lib.contains("mix * out + (1.0 - mix) * dry"));
+    }
+
+    // === Shipability flag tests (--vendor/--vendor-url/--email/--vst3-id/--clap-id) ===
+
+    #[test]
+    fn lib_default_uses_melange_vendor() {
+        let opts = PluginOptions::default();
+        let lib = generate_lib_rs("test", false, &[], &[], &[], &[], 1, 1, &opts);
+        assert!(lib.contains("const VENDOR: &'static str = \"Melange\""));
+        assert!(lib.contains("const URL: &'static str = \"https://github.com/melange\""));
+        assert!(lib.contains("const EMAIL: &'static str = \"dev@melange.audio\""));
+    }
+
+    #[test]
+    fn lib_with_custom_vendor_branding() {
+        let opts = PluginOptions {
+            vendor: Some("Acme Audio"),
+            url: Some("https://acme.example"),
+            email: Some("support@acme.example"),
+            ..Default::default()
+        };
+        let lib = generate_lib_rs("test", false, &[], &[], &[], &[], 1, 1, &opts);
+        assert!(lib.contains("const VENDOR: &'static str = \"Acme Audio\""));
+        assert!(lib.contains("const URL: &'static str = \"https://acme.example\""));
+        assert!(lib.contains("const EMAIL: &'static str = \"support@acme.example\""));
+    }
+
+    #[test]
+    fn lib_with_clap_id_override() {
+        let opts = PluginOptions {
+            clap_id: Some("com.acme.wurli"),
+            ..Default::default()
+        };
+        let lib = generate_lib_rs("wurli-preamp", false, &[], &[], &[], &[], 1, 1, &opts);
+        assert!(lib.contains("const CLAP_ID: &'static str = \"com.acme.wurli\""));
+        // Default "com.melange.<name>" should NOT appear.
+        assert!(!lib.contains("com.melange.wurli-preamp"));
+    }
+
+    #[test]
+    fn lib_without_clap_id_override_uses_auto() {
+        let opts = PluginOptions::default();
+        let lib = generate_lib_rs("wurli-preamp", false, &[], &[], &[], &[], 1, 1, &opts);
+        assert!(lib.contains("const CLAP_ID: &'static str = \"com.melange.wurli-preamp\""));
+    }
+
+    #[test]
+    fn lib_with_vst3_id_override() {
+        // Exactly 16 bytes, printable ASCII, no quote/backslash.
+        let custom = "AcmeWurliPreamp1";
+        assert_eq!(custom.len(), 16);
+        let opts = PluginOptions {
+            vst3_id: Some(custom),
+            ..Default::default()
+        };
+        let lib = generate_lib_rs("something-else", false, &[], &[], &[], &[], 1, 1, &opts);
+        assert!(lib.contains("const VST3_CLASS_ID: [u8; 16] = *b\"AcmeWurliPreamp1\""));
+    }
+
+    #[test]
+    fn lib_without_vst3_id_override_uses_auto() {
+        // With no override, the auto-derived (hash-based) ID should appear
+        // and it should NOT match our explicit override string.
+        let opts = PluginOptions::default();
+        let lib = generate_lib_rs("something-else", false, &[], &[], &[], &[], 1, 1, &opts);
+        assert!(!lib.contains("AcmeWurliPreamp1"));
+        // Sanity: VST3_CLASS_ID line still exists, still 16 bytes.
+        let line = lib
+            .lines()
+            .find(|l| l.contains("VST3_CLASS_ID"))
+            .expect("VST3_CLASS_ID line missing");
+        let start = line.find("*b\"").unwrap() + 3;
+        let end = line[start..].find('"').unwrap() + start;
+        assert_eq!(end - start, 16);
+    }
+
+    #[test]
+    fn validate_vst3_id_accepts_16_ascii() {
+        assert!(validate_vst3_id("AcmeWurliPreamp1").is_ok());
+        assert!(validate_vst3_id("0123456789ABCDEF").is_ok());
+        // Punctuation in the printable ASCII range is fine.
+        assert!(validate_vst3_id("foo-bar.baz_quux").is_ok());
+    }
+
+    #[test]
+    fn validate_vst3_id_rejects_short() {
+        let err = validate_vst3_id("tooshort").unwrap_err().to_string();
+        assert!(err.contains("16 bytes"), "error should mention length: {err}");
+    }
+
+    #[test]
+    fn validate_vst3_id_rejects_long() {
+        let err = validate_vst3_id("this_is_way_too_long_for_vst3")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("16 bytes"), "error should mention length: {err}");
+    }
+
+    #[test]
+    fn validate_vst3_id_rejects_non_ascii() {
+        // Tab (0x09) is ASCII but not printable per our 0x20..=0x7E rule —
+        // the length check passes so we exercise the byte-range check.
+        let s = "AcmeWurliPreamp\t";
+        assert_eq!(s.len(), 16);
+        let err = validate_vst3_id(s).unwrap_err().to_string();
+        assert!(
+            err.contains("printable ASCII"),
+            "error should mention printable ASCII: {err}"
+        );
+
+        // DEL (0x7F) is above our printable range and should also be rejected.
+        let s = "AcmeWurliPreamp\x7F";
+        assert_eq!(s.len(), 16);
+        assert!(validate_vst3_id(s).is_err());
+    }
+
+    #[test]
+    fn validate_vst3_id_rejects_quote_and_backslash() {
+        // These would break the generated `b"..."` byte string literal.
+        let s = "AcmeWurliPreamp\"";
+        assert_eq!(s.len(), 16);
+        assert!(validate_vst3_id(s).is_err());
+
+        let s = "AcmeWurliPreamp\\";
+        assert_eq!(s.len(), 16);
+        assert!(validate_vst3_id(s).is_err());
+    }
+
+    #[test]
+    fn validate_vst3_id_rejects_multibyte_utf8() {
+        // "é" is 2 bytes. A string containing it can't be 16 bytes long
+        // AND 16 chars long; the byte-length check catches this.
+        let s = "AcmeWurliPrëamp"; // mixed multi-byte
+        // Ensure byte length != 16 OR char length != 16; either way rejected.
+        if s.len() != 16 {
+            assert!(validate_vst3_id(s).is_err());
+        } else {
+            // if by coincidence byte length is 16 (it isn't here, but be defensive),
+            // the byte-range check should still catch the non-ASCII bytes.
+            assert!(validate_vst3_id(s).is_err());
+        }
     }
 }
