@@ -334,6 +334,19 @@ pub struct OpampInfo {
     /// is stamped at an internal Boyle gain node.
     /// Typical NE5534: 10e6. TL074: 3e6.
     pub gbw: f64,
+    /// Slew rate [V/s] (default: infinity = no slew limiting).
+    ///
+    /// Models the large-signal output voltage-rate limit of real op-amps.
+    /// Parsed from the `.model` card in V/μs (SPICE convention) and converted
+    /// to V/s internally. Examples: TL072 = 13 V/μs → `sr = 13e6`; NE5532 =
+    /// 9 V/μs → `sr = 9e6`; LM358 = 0.3 V/μs → `sr = 0.3e6`.
+    ///
+    /// Emitted as a per-sample voltage-delta clamp on the op-amp output node
+    /// (equivalent to clamping the Boyle dominant-pole integrator input current
+    /// to ±`SR * C_dom`). When `sr` is infinite no clamp is emitted, so circuits
+    /// without `SR=` in their .model get byte-identical generated code to the
+    /// pre-slew-rate behaviour.
+    pub sr: f64,
     /// Boyle internal gain node index (1-indexed, 0 = none).
     /// No longer used with IIR op-amp model (always 0).
     pub n_internal_idx: usize,
@@ -1972,6 +1985,9 @@ impl MnaBuilder {
                             "VCC" => oa.vcc = *val,
                             "VEE" => oa.vee = *val,
                             "GBW" => oa.gbw = *val,
+                            // SR is specified in V/μs (SPICE convention) and
+                            // stored in V/s internally — multiply by 1e6.
+                            "SR" => oa.sr = *val * 1.0e6,
                             "VOH_DROP" => oa.voh_drop = *val,
                             "VOL_DROP" => oa.vol_drop = *val,
                             _ => log::warn!(
@@ -3729,6 +3745,7 @@ impl MnaBuilder {
                     vcc: f64::INFINITY,
                     vee: f64::NEG_INFINITY,
                     gbw: f64::INFINITY,
+                    sr: f64::INFINITY,
                     // Boyle-macromodel default: TL072/NE5532-class parts can swing
                     // to within ~1.5 V of each rail under typical load. Rail-to-rail
                     // parts should override this in their .model OA() entry.

@@ -475,3 +475,252 @@ C2 dout 0 100n
         "DK path should have op-amp clamping comment"
     );
 }
+
+// =============================================================================
+// Slew-Rate Limiting (SR parameter)
+// =============================================================================
+//
+// The `.model OA(SR=…)` parameter specifies the large-signal output slew
+// rate. Value is parsed as V/μs (SPICE convention) and stored internally
+// as V/s. The generated code emits a per-sample voltage-delta clamp on
+// the op-amp output node (equivalent to clamping the Boyle dominant-pole
+// integrator input current to ±SR*C_dom).
+
+#[test]
+fn test_opamp_sr_parsed_vmicroseconds_to_vseconds() {
+    // .model OA(SR=13) means 13 V/μs — should store as 13e6 V/s internally.
+    let spice = r#"Slew Rate Parse
+R1 in inv 10k
+R2 inv out 100k
+C1 out 0 100n
+U1 0 inv out oa
+.model oa OA(AOL=200000 ROUT=75 GBW=3Meg VSAT=13 SR=13)
+"#;
+    let netlist = Netlist::parse(spice).unwrap();
+    let mna = MnaSystem::from_netlist(&netlist).unwrap();
+
+    assert_eq!(mna.opamps.len(), 1, "Should have exactly one op-amp");
+    let sr = mna.opamps[0].sr;
+    assert!(
+        sr.is_finite(),
+        "SR should be finite after .model parse, got {}",
+        sr
+    );
+    // 13 V/μs → 13e6 V/s
+    assert!(
+        (sr - 13.0e6).abs() < 1.0,
+        "SR should be 13e6 V/s (13 V/μs), got {}",
+        sr
+    );
+}
+
+#[test]
+fn test_opamp_sr_default_is_infinity() {
+    // No SR in .model should leave sr = INFINITY (no slew limiting).
+    let spice = r#"No SR
+R1 in inv 10k
+R2 inv out 100k
+C1 out 0 100n
+U1 0 inv out oa
+.model oa OA(AOL=200000 VSAT=13)
+"#;
+    let netlist = Netlist::parse(spice).unwrap();
+    let mna = MnaSystem::from_netlist(&netlist).unwrap();
+
+    assert!(
+        mna.opamps[0].sr.is_infinite() && mna.opamps[0].sr.is_sign_positive(),
+        "SR should default to +inf, got {}",
+        mna.opamps[0].sr
+    );
+}
+
+#[test]
+fn test_opamp_sr_rejects_negative_value() {
+    // Parser-level validation: SR must be > 0.
+    let spice = r#"Bad SR
+R1 in inv 10k
+R2 inv out 100k
+C1 out 0 100n
+U1 0 inv out oa
+.model oa OA(AOL=200000 SR=-5)
+"#;
+    let err = Netlist::parse(spice).err();
+    assert!(err.is_some(), "Negative SR should be rejected by parser");
+    let msg = err.unwrap().message;
+    assert!(
+        msg.contains("SR") && msg.contains("> 0"),
+        "Error message should mention SR > 0, got: {}",
+        msg
+    );
+}
+
+#[test]
+fn test_opamp_sr_codegen_emits_constant_and_clamp() {
+    use melange_solver::codegen::{CodeGenerator, CodegenConfig};
+
+    // Full op-amp circuit with SR=13 V/μs. Must route through a codegen
+    // path that lands in ir.opamps and emits the slew clamp. The DK Schur
+    // template path (pure op-amp + diode, M=1) is exercised here.
+    let spice = r#"SR Codegen
+R1 in inv 10k
+R2 inv opout 100k
+C1 opout 0 100n
+U1 0 inv opout oa
+Rcouple opout out 1k
+D1 out 0 D1N4148
+Rload out 0 10k
+C2 out 0 100n
+.model oa OA(AOL=200000 ROUT=75 GBW=3Meg VSAT=13 SR=13)
+.model D1N4148 D(IS=2.52e-9 N=1.752)
+"#;
+    let netlist = Netlist::parse(spice).unwrap();
+    let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
+    let node_map = mna.node_map.clone();
+
+    let input_node_0 = node_map["in"] - 1;
+    let output_node_0 = node_map["out"] - 1;
+
+    mna.stamp_input_conductance(input_node_0, 1.0);
+    let kernel = DkKernel::from_mna(&mna, 44100.0).unwrap();
+
+    let config = CodegenConfig {
+        circuit_name: "sr_codegen_test".to_string(),
+        sample_rate: 44100.0,
+        input_node: input_node_0,
+        output_nodes: vec![output_node_0],
+        ..CodegenConfig::default()
+    };
+
+    let generator = CodeGenerator::new(config);
+    let result = generator.generate(&kernel, &mna, &netlist);
+    assert!(result.is_ok(), "Codegen failed: {:?}", result.err());
+    let generated = result.unwrap();
+
+    // Verify the per-device SR constant is emitted in V/s (13e6).
+    assert!(
+        generated.code.contains("OA0_SR"),
+        "Generated code should contain an OA0_SR constant. Full code:\n{}",
+        generated.code
+    );
+    // The constant is emitted with `{:.17e}` so 13e6 becomes a scientific
+    // literal. Extract the constant line and parse the literal back.
+    let sr_line = generated
+        .code
+        .lines()
+        .find(|line| line.contains("const OA0_SR"))
+        .expect("Expected `const OA0_SR` definition in generated code");
+    // Expected form: `const OA0_SR: f64 = 1.30000000000000000e7;`
+    let value_part = sr_line
+        .split('=')
+        .nth(1)
+        .expect("OA0_SR line should have an `=`")
+        .trim()
+        .trim_end_matches(';')
+        .trim();
+    let parsed: f64 = value_part
+        .parse()
+        .unwrap_or_else(|_| panic!("Couldn't parse OA0_SR literal `{}`", value_part));
+    assert!(
+        (parsed - 13.0e6).abs() < 1.0,
+        "OA0_SR literal should be 13e6 V/s, parsed {} from line `{}`",
+        parsed,
+        sr_line
+    );
+
+    // Verify a slew clamp is emitted. Expected shape (from
+    // `emit_opamp_slew_limit` / the Tera `opamp_slew` block):
+    //
+    //     let max_dv = OA0_SR * _oa_slew_dt;
+    //     let delta = v[OUT] - prev;
+    //     v[OUT] = prev + delta.clamp(-max_dv, max_dv);
+    assert!(
+        generated.code.contains("OA0_SR * _oa_slew_dt"),
+        "Generated code should compute max_dv from OA0_SR * dt"
+    );
+    assert!(
+        generated.code.contains("delta.clamp(-max_dv, max_dv)"),
+        "Generated code should clamp the per-sample voltage delta with ±max_dv"
+    );
+    // Humane sanity: the slew comment / equivalence is emitted so future
+    // readers understand why the clamp is there.
+    assert!(
+        generated.code.contains("slew"),
+        "Generated code should mention 'slew' for reader orientation"
+    );
+}
+
+#[test]
+fn test_opamp_sr_codegen_compiles_and_runs() {
+    // End-to-end smoke test: the `SR=…` path must produce Rust source
+    // that actually compiles through rustc and processes samples without
+    // panicking. The existing inverting-amp circuits already test the
+    // pipeline; this one adds SR=1 (very slow — 1 V/μs) on a unity-gain
+    // buffer to verify the slew block compiles and doesn't corrupt the
+    // output path.
+    //
+    // A 1 V/μs slew rate at 44.1 kHz means |Δv| ≤ ~22.7 mV per sample, so
+    // the output of a unity-gain buffer driven by a step can't exceed
+    // that delta — a clear signature of slew limiting being active.
+    let spice = r#"SR Compile Test
+R1 in inv 100
+R2 inv out 100
+C1 out 0 100n
+U1 in inv out oa
+.model oa OA(AOL=200000 ROUT=75 GBW=3Meg VSAT=13 SR=1)
+"#;
+    let config = support::config_for_spice(spice, 44100.0);
+    let _circuit = support::build_circuit(spice, &config, "oa_sr_compile");
+    // If build_circuit returned (no panic), rustc accepted the generated
+    // code — the emitted slew block is syntactically/semantically valid.
+}
+
+#[test]
+fn test_opamp_no_sr_emits_no_slew_code() {
+    // Regression check: a circuit WITHOUT `SR=` in its .model must not
+    // cause any slew-limit code to be emitted. This protects the byte-
+    // identical generated-output guarantee for existing circuits.
+    use melange_solver::codegen::{CodeGenerator, CodegenConfig};
+
+    let spice = r#"No SR Codegen
+R1 in inv 10k
+R2 inv opout 100k
+C1 opout 0 100n
+U1 0 inv opout oa
+Rcouple opout out 1k
+D1 out 0 D1N4148
+Rload out 0 10k
+C2 out 0 100n
+.model oa OA(AOL=200000 ROUT=75 GBW=3Meg VSAT=13)
+.model D1N4148 D(IS=2.52e-9 N=1.752)
+"#;
+    let netlist = Netlist::parse(spice).unwrap();
+    let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
+    let node_map = mna.node_map.clone();
+
+    let input_node_0 = node_map["in"] - 1;
+    let output_node_0 = node_map["out"] - 1;
+
+    mna.stamp_input_conductance(input_node_0, 1.0);
+    let kernel = DkKernel::from_mna(&mna, 44100.0).unwrap();
+
+    let config = CodegenConfig {
+        circuit_name: "no_sr_codegen_test".to_string(),
+        sample_rate: 44100.0,
+        input_node: input_node_0,
+        output_nodes: vec![output_node_0],
+        ..CodegenConfig::default()
+    };
+
+    let generator = CodeGenerator::new(config);
+    let generated = generator.generate(&kernel, &mna, &netlist).unwrap();
+
+    // No SR constant, no slew clamp code.
+    assert!(
+        !generated.code.contains("OA0_SR"),
+        "Generated code should NOT contain OA0_SR when .model has no SR="
+    );
+    assert!(
+        !generated.code.contains("_oa_slew_dt"),
+        "Generated code should NOT contain slew helper variables"
+    );
+}

@@ -1020,6 +1020,15 @@ pub struct OpampIirData {
 /// [VEE, VCC] after each LU solve or after final voltage reconstruction.
 /// This prevents runaway voltages in open-loop or high-gain configurations.
 /// Supports asymmetric supply rails (e.g., VCC=9, VEE=0 for single-supply).
+///
+/// When `sr` is finite the generated code also applies a per-sample
+/// voltage-delta clamp on the op-amp output node (slew-rate limiting). The
+/// clamp is mathematically equivalent to limiting the Boyle dominant-pole
+/// integrator input current to ±`SR * C_dom`, but expressed directly in
+/// voltage space as `|Δv_out| ≤ SR * dt`. This is gated at codegen time:
+/// when `sr` is infinite, no slew code is emitted at all, so op-amps
+/// without `SR=` in their .model produce byte-identical generated code to
+/// the pre-slew-rate behaviour.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpampIR {
     /// Output node index (0-indexed, in the N-dimensional system)
@@ -1028,6 +1037,9 @@ pub struct OpampIR {
     pub vclamp_hi: f64,
     /// Lower voltage clamp (VEE). NEG_INFINITY = no lower clamp.
     pub vclamp_lo: f64,
+    /// Slew rate [V/s]. INFINITY = no slew limiting (no code emitted).
+    /// Parsed from `.model OA(SR=…)` as V/μs, converted to V/s in MNA.
+    pub sr: f64,
 }
 
 /// Potentiometer parameters for code generation (Sherman-Morrison precomputed data).
@@ -2327,11 +2339,21 @@ impl CircuitIR {
             opamps: mna
                 .opamps
                 .iter()
-                .filter(|oa| (oa.vcc.is_finite() || oa.vee.is_finite()) && oa.n_out_idx > 0)
+                .filter(|oa| {
+                    // Include op-amps that need any codegen-emitted post-NR
+                    // processing: rail clamping (finite VCC/VEE) OR slew-rate
+                    // limiting (finite SR). Pure ideal op-amps with all three
+                    // infinite are skipped — the emitter produces no op-amp
+                    // code for them, preserving byte-identical output for
+                    // existing circuits.
+                    (oa.vcc.is_finite() || oa.vee.is_finite() || oa.sr.is_finite())
+                        && oa.n_out_idx > 0
+                })
                 .map(|oa| OpampIR {
                     n_out_idx: oa.n_out_idx - 1,
                     vclamp_hi: oa.vcc,
                     vclamp_lo: oa.vee,
+                    sr: oa.sr,
                 })
                 .collect(),
             sparsity,
@@ -3113,11 +3135,15 @@ impl CircuitIR {
             opamps: mna
                 .opamps
                 .iter()
-                .filter(|oa| (oa.vcc.is_finite() || oa.vee.is_finite()) && oa.n_out_idx > 0)
+                .filter(|oa| {
+                    (oa.vcc.is_finite() || oa.vee.is_finite() || oa.sr.is_finite())
+                        && oa.n_out_idx > 0
+                })
                 .map(|oa| OpampIR {
                     n_out_idx: oa.n_out_idx - 1,
                     vclamp_hi: oa.vcc,
                     vclamp_lo: oa.vee,
+                    sr: oa.sr,
                 })
                 .collect(),
             sparsity,
@@ -4183,6 +4209,7 @@ mod opamp_rail_mode_tests {
             vcc,
             vee,
             gbw: f64::INFINITY,
+            sr: f64::INFINITY,
             voh_drop: 1.5,
             vol_drop: 1.5,
             n_internal_idx: 0,
@@ -4283,6 +4310,7 @@ mod opamp_rail_mode_tests {
             vcc,
             vee,
             gbw: f64::INFINITY,
+            sr: f64::INFINITY,
             voh_drop: 1.5,
             vol_drop: 1.5,
             n_internal_idx: 0,

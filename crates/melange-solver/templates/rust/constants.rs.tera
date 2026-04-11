@@ -176,3 +176,16 @@ pub const OUTPUT_SCALES: [f64; NUM_OUTPUTS] = [{{ output_scales_values }}];
 /// Whether the nonlinear DC OP solver converged at codegen time
 pub const DC_OP_CONVERGED: bool = {{ dc_op_converged }};
 
+{% if opamp_slew is defined and opamp_slew | length > 0 %}// =============================================================================
+// OP-AMP SLEW-RATE CONSTANTS
+// =============================================================================
+//
+// One entry per op-amp whose .model card set `SR=…` (V/μs). Values are
+// stored in V/s so the generated slew-limit code can multiply directly by
+// `dt = 1.0 / internal_sample_rate`. Equivalent to clamping the Boyle
+// dominant-pole integrator input current at ±I_slew = ±SR*C_dom.
+{% for s in opamp_slew %}/// Op-amp {{ s.idx }} slew rate (V/s) — clamps |Δv[{{ s.out_idx }}]| ≤ SR*dt per sample.
+const OA{{ s.idx }}_SR: f64 = {{ s.sr }};
+{% endfor %}
+{% endif %}
+

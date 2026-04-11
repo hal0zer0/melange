@@ -4,6 +4,23 @@ The op-amp macromodel in melange has FIVE rail-handling modes for circuits where
 
 > **Read first**: this doc summarizes ~5 sessions of investigation. The full session-by-session history is in agent memory at `task_12_bistable_oscillation_finding.md`. Before making any change to op-amp rail handling, read that file in full — it contains empirical sweep data and rejected fix candidates that are easy to re-discover otherwise.
 
+## Slew-rate limiting is orthogonal to rail mode
+
+The `.model OA(SR=…)` slew-rate parameter is a **separate** mechanism from
+the rail-clamping modes documented below. Rail modes handle what happens
+when the op-amp output hits VCC/VEE; SR handles the large-signal dV/dt
+limit that applies *below* the rails (when the input stage's tail current
+can't drive enough charge into the dominant-pole cap).
+
+The slew clamp is applied per-sample on the op-amp output node, AFTER the
+rail clamp in the codegen pipeline order. Implementation lives in
+`rust_emitter::CodeGenerator::emit_opamp_slew_limit` for the two nodal
+codegen paths, plus an `opamp_slew` section in `process_sample.rs.tera`
+for the DK Schur path. See `docs/aidocs/DEVICE_MODELS.md` for the physical
+justification and emitted-code shape. The clamp is compatible with every
+rail mode including `BoyleDiodes`; it does not address the BoyleDiodes
+heavy-clip convergence bug documented below.
+
 ## TL;DR for production
 
 | Circuit | Auto-detect picks | Why |

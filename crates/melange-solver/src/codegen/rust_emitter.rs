@@ -839,6 +839,27 @@ impl RustEmitter {
         ctx.insert("dc_block", &ir.dc_block);
         ctx.insert("dc_op_converged", &ir.dc_op_converged);
 
+        // Op-amp slew-rate constants. One entry per op-amp whose .model
+        // card set a finite SR (V/μs, converted to V/s in MNA). Emitted by
+        // constants.rs.tera as `const OA{idx}_SR: f64 = …;`. Consumed by
+        // process_sample.rs.tera in the slew-limit block.
+        let opamp_slew: Vec<std::collections::HashMap<&str, String>> = ir
+            .opamps
+            .iter()
+            .enumerate()
+            .filter(|(_, oa)| oa.sr.is_finite())
+            .map(|(idx, oa)| {
+                let mut m = std::collections::HashMap::new();
+                m.insert("idx", idx.to_string());
+                m.insert("out_idx", oa.n_out_idx.to_string());
+                m.insert("sr", format!("{:.17e}", oa.sr));
+                m
+            })
+            .collect();
+        if !opamp_slew.is_empty() {
+            ctx.insert("opamp_slew", &opamp_slew);
+        }
+
         self.render("constants", &ctx)
     }
 
@@ -2310,11 +2331,15 @@ impl RustEmitter {
 
         ctx.insert("dc_block", &ir.dc_block);
 
-        // Op-amp supply rail clamping data for DK template
+        // Op-amp supply rail clamping data for DK template. Skip op-amps
+        // whose VCC/VEE are both infinite — those entries exist in
+        // `ir.opamps` only because `sr` is finite (slew limiting is handled
+        // via a separate `opamp_slew` context block below).
         if !ir.opamps.is_empty() {
             let opamp_clamps: Vec<std::collections::HashMap<&str, String>> = ir
                 .opamps
                 .iter()
+                .filter(|oa| oa.vclamp_lo.is_finite() || oa.vclamp_hi.is_finite())
                 .map(|oa| {
                     let mut m = std::collections::HashMap::new();
                     m.insert("out_idx", oa.n_out_idx.to_string());
@@ -2325,7 +2350,34 @@ impl RustEmitter {
                     m
                 })
                 .collect();
-            ctx.insert("opamp_clamps", &opamp_clamps);
+            if !opamp_clamps.is_empty() {
+                ctx.insert("opamp_clamps", &opamp_clamps);
+            }
+        }
+
+        // Op-amp slew-rate limiting data for DK template. Entries are
+        // emitted as a per-sample voltage-delta clamp on the output node,
+        // applied before the state update. Only op-amps with finite `sr`
+        // contribute; when all op-amps have infinite SR the Tera template
+        // emits no slew code at all, keeping generated output byte-
+        // identical to the pre-slew behaviour.
+        if !ir.opamps.is_empty() {
+            let opamp_slew: Vec<std::collections::HashMap<&str, String>> = ir
+                .opamps
+                .iter()
+                .enumerate()
+                .filter(|(_, oa)| oa.sr.is_finite())
+                .map(|(idx, oa)| {
+                    let mut m = std::collections::HashMap::new();
+                    m.insert("idx", idx.to_string());
+                    m.insert("out_idx", oa.n_out_idx.to_string());
+                    m.insert("sr", format!("{:.17e}", oa.sr));
+                    m
+                })
+                .collect();
+            if !opamp_slew.is_empty() {
+                ctx.insert("opamp_slew", &opamp_slew);
+            }
         }
 
         self.render("process_sample", &ctx)
@@ -3973,6 +4025,23 @@ impl RustEmitter {
                 ));
             }
             code.push('\n');
+        }
+
+        // Op-amp slew-rate constants (V/s). Emitted for every op-amp in
+        // `ir.opamps` whose `.model OA(SR=…)` was finite. The SR constant
+        // is consumed by `emit_opamp_slew_limit` (called from the main
+        // process_sample path right before state.v_prev = v).
+        // Index matches the enumerate index over `ir.opamps` — NOT the
+        // filtered slice — so the `OA{idx}_SR` name aligns with the
+        // `emit_opamp_slew_limit` helper's indexing.
+        for (idx, oa) in ir.opamps.iter().enumerate() {
+            if oa.sr.is_finite() {
+                code.push_str(&format!(
+                    "/// Op-amp {idx} slew rate (V/s). Parsed from .model OA(SR=…) in V/μs.\n\
+                     const OA{idx}_SR: f64 = {:.17e};\n\n",
+                    oa.sr
+                ));
+            }
         }
 
         // G and C matrices (sample-rate independent, Gm-stripped for IIR op-amps)
@@ -6268,6 +6337,11 @@ impl RustEmitter {
             match ir.solver_config.opamp_rail_mode {
                 OpampRailMode::Hard => {
                     for oa in &ir.opamps {
+                        // Skip op-amps that only appear in OpampIR for
+                        // slew-rate limiting (VCC/VEE both infinite).
+                        if !oa.vclamp_lo.is_finite() && !oa.vclamp_hi.is_finite() {
+                            continue;
+                        }
                         code.push_str(&format!(
                             "    v[{idx}] = v[{idx}].clamp({lo:.17e}, {hi:.17e});\n",
                             idx = oa.n_out_idx,
@@ -6392,6 +6466,9 @@ impl RustEmitter {
                 // reintroduction from S_sub column propagation); the elevated
                 // downstream voltages are handled by output scaling.
                 for oa in &ir.opamps {
+                    if !oa.vclamp_lo.is_finite() && !oa.vclamp_hi.is_finite() {
+                        continue;
+                    }
                     code.push_str(&format!(
                         "            v_sub[{idx}] = v_sub[{idx}].clamp({lo:.17e}, {hi:.17e});\n",
                         idx = oa.n_out_idx, lo = oa.vclamp_lo, hi = oa.vclamp_hi,
@@ -6620,6 +6697,9 @@ impl RustEmitter {
                 }
                 OpampRailMode::Hard | OpampRailMode::None => {
                     for oa in &ir.opamps {
+                        if !oa.vclamp_lo.is_finite() && !oa.vclamp_hi.is_finite() {
+                            continue;
+                        }
                         code.push_str(&format!(
                             "        v[{idx}] = v[{idx}].clamp({lo:.17e}, {hi:.17e});\n",
                             idx = oa.n_out_idx, lo = oa.vclamp_lo, hi = oa.vclamp_hi,
@@ -6671,6 +6751,16 @@ impl RustEmitter {
         code.push_str("        state.diag_nan_reset_count += 1;\n");
         code.push_str("        return [0.0; NUM_OUTPUTS];\n");
         code.push_str("    }\n\n");
+
+        // Op-amp slew-rate limiting (nodal Schur path). Clamp the per-sample
+        // voltage delta at each op-amp output node to ±SR*dt. This is
+        // mathematically equivalent to clamping the Boyle dominant-pole
+        // integrator input current to ±I_slew = ±SR*C_dom: the per-sample
+        // voltage step of an integrator with current `i_in` through cap
+        // `C_dom` is `Δv = (i_in*dt)/C_dom`, so capping `|Δv| ≤ SR*dt`
+        // caps `|i_in| ≤ SR*C_dom`. Emitted only for op-amps with finite
+        // SR; circuits without `SR=` in the .model generate identical code.
+        Self::emit_opamp_slew_limit(&mut code, ir, "    ", "v");
 
         // State update
         code.push_str("    // State update\n");
@@ -7938,6 +8028,9 @@ impl RustEmitter {
             );
             if emit_in_nr_clamp && !ir.opamps.is_empty() {
                 for oa in &ir.opamps {
+                    if !oa.vclamp_lo.is_finite() && !oa.vclamp_hi.is_finite() {
+                        continue;
+                    }
                     code.push_str(&format!(
                         "        {{\n\
                          \x20           let v_pre_clamp = v[{idx}];\n\
@@ -8217,6 +8310,9 @@ impl RustEmitter {
                 && !ir.opamps.is_empty()
             {
                 for oa in &ir.opamps {
+                    if !oa.vclamp_lo.is_finite() && !oa.vclamp_hi.is_finite() {
+                        continue;
+                    }
                     code.push_str(&format!(
                         "                    v_new_s[{idx}] = v_new_s[{idx}].clamp({lo:.17e}, {hi:.17e});\n",
                         idx = oa.n_out_idx, lo = oa.vclamp_lo, hi = oa.vclamp_hi,
@@ -8444,6 +8540,9 @@ impl RustEmitter {
                 && !ir.opamps.is_empty()
             {
                 for oa in &ir.opamps {
+                    if !oa.vclamp_lo.is_finite() && !oa.vclamp_hi.is_finite() {
+                        continue;
+                    }
                     code.push_str(&format!(
                         "            v[{idx}] = v[{idx}].clamp({lo:.17e}, {hi:.17e});\n",
                         idx = oa.n_out_idx, lo = oa.vclamp_lo, hi = oa.vclamp_hi,
@@ -8592,6 +8691,13 @@ impl RustEmitter {
         // clamped node at 13V and unclamped node at 240V), corrupting the
         // trapezoidal history (a_neg * v_prev). Matches runtime NodalSolver.
         // Output is clamped downstream by DC block (±10V) or ear protection.
+
+        // Op-amp slew-rate limiting (nodal full-LU path). Clamp
+        // `|v[out] - v_prev[out]|` to `SR*dt` for each op-amp with finite
+        // SR. Equivalent to clamping the Boyle dominant-pole integrator
+        // input current at ±SR*C_dom. Zero code is emitted when all
+        // op-amps have infinite SR.
+        Self::emit_opamp_slew_limit(&mut code, ir, "    ", "v");
 
         // Step 3: Update state
         code.push_str("    // Step 3: Update state\n");
@@ -8908,6 +9014,88 @@ impl RustEmitter {
              {indent}    }}\n\
              {indent}}}\n",
         ));
+    }
+
+    /// Emit per-op-amp slew-rate limiting on the converged node voltages.
+    ///
+    /// For each op-amp whose `.model OA(SR=…)` sets a finite slew rate, this
+    /// emits a per-sample voltage-delta clamp of the form
+    ///
+    /// ```ignore
+    /// {
+    ///     let prev = state.v_prev[OUT];
+    ///     let max_dv = OA{idx}_SR * (1.0 / state.current_sample_rate);
+    ///     let delta  = v_name[OUT] - prev;
+    ///     v_name[OUT] = prev + delta.clamp(-max_dv, max_dv);
+    /// }
+    /// ```
+    ///
+    /// where `OA{idx}_SR` is a per-device constant in V/s and
+    /// `state.current_sample_rate` is the internal (post-oversampling)
+    /// sample rate.
+    ///
+    /// ## Physical justification
+    ///
+    /// In the Boyle macromodel the dominant pole is a cap `C_dom` integrating
+    /// the `Gm*(v+ - v-)` current at an internal gain node. Real op-amps
+    /// slew-limit because their input stage can't source more than `I_tail`
+    /// into `C_dom`, capping `|dV/dt| = I_tail / C_dom ≡ SR`. The equivalent
+    /// integrator current limit is `I_slew = SR * C_dom`. melange currently
+    /// stamps the op-amp as an ideal VCCS (no explicit integrator), so the
+    /// same limit is applied directly in voltage space as
+    /// `|Δv_out| ≤ SR*dt`. This is numerically identical to
+    /// `|i_in_integrator| ≤ I_slew`, because
+    /// `Δv_integrator = (i_in*dt)/C_dom`.
+    ///
+    /// ## Rail-mode interaction
+    ///
+    /// The slew limit is applied AFTER the rail clamp so slew-limited
+    /// transients can't overshoot the rails, and BEFORE `state.v_prev = v`
+    /// so the cap history `(2/T)·C·v_prev` term on the next sample reflects
+    /// the slew-limited voltage (preserving KCL). The limit is compatible
+    /// with `None`, `Hard`, `ActiveSet`, and `ActiveSetBe` rail modes.
+    /// `BoyleDiodes` mode is supported but note that the existing
+    /// BoyleDiodes heavy-clip convergence issues (see
+    /// `docs/aidocs/OPAMP_RAIL_MODES.md`) are independent of slew limiting.
+    ///
+    /// No code is emitted when all op-amps have `sr = INFINITY`, so
+    /// circuits without `SR=` in their .model card produce byte-identical
+    /// generated code to the pre-slew-rate behaviour.
+    fn emit_opamp_slew_limit(
+        code: &mut String,
+        ir: &CircuitIR,
+        indent: &str,
+        v_name: &str,
+    ) {
+        let slew_opamps: Vec<(usize, &crate::codegen::ir::OpampIR)> = ir
+            .opamps
+            .iter()
+            .enumerate()
+            .filter(|(_, oa)| oa.sr.is_finite())
+            .collect();
+        if slew_opamps.is_empty() {
+            return;
+        }
+        code.push_str(&format!(
+            "{indent}// Op-amp slew-rate limiting: clamp |Δv_out| ≤ SR*dt\n"
+        ));
+        code.push_str(&format!(
+            "{indent}// (equivalent to clamping Boyle C_dom integrator input to ±SR*C_dom)\n"
+        ));
+        code.push_str(&format!(
+            "{indent}let _oa_slew_dt = 1.0 / state.current_sample_rate;\n"
+        ));
+        for (idx, oa) in &slew_opamps {
+            code.push_str(&format!(
+                "{indent}{{\n\
+                 {indent}    let prev = state.v_prev[{node}];\n\
+                 {indent}    let max_dv = OA{idx}_SR * _oa_slew_dt;\n\
+                 {indent}    let delta = {v_name}[{node}] - prev;\n\
+                 {indent}    {v_name}[{node}] = prev + delta.clamp(-max_dv, max_dv);\n\
+                 {indent}}}\n",
+                node = oa.n_out_idx,
+            ));
+        }
     }
 
     /// Emit a cheap rail-violation check that sets `<flag_name> = true` if any

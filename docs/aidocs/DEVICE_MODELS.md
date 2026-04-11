@@ -260,6 +260,45 @@ AOL = 200000  (open-loop gain)
 ROUT = 1 ohm  (output resistance)
 ```
 
+### Slew-Rate Limiting (`SR` parameter)
+
+Real op-amps cannot change output voltage faster than their input-stage
+tail current allows through the dominant-pole compensation cap. melange
+models this large-signal distortion via the `SR` parameter in the `.model`
+card:
+
+```
+.model OA_TL072 OA(AOL=200000 ROUT=75 GBW=3Meg VSAT=13 SR=13)
+```
+
+- **Unit**: `SR` is specified in V/μs (SPICE convention), converted to V/s
+  internally (`SR = sr_v_per_us * 1e6`). Examples: TL072 = 13 V/μs → 13e6;
+  NE5532 = 9 V/μs → 9e6; LM358 = 0.3 V/μs → 0.3e6.
+- **Default**: `f64::INFINITY` (no slew limiting, byte-identical generated
+  code to circuits without `SR=`).
+- **Emission**: a per-sample voltage-delta clamp on the op-amp output node:
+  ```rust
+  let prev = state.v_prev[OUT];
+  let max_dv = OA{idx}_SR * (1.0 / state.current_sample_rate);
+  let delta = v[OUT] - prev;
+  v[OUT] = prev + delta.clamp(-max_dv, max_dv);
+  ```
+  Mathematically equivalent to clamping the Boyle dominant-pole integrator
+  input current at `±I_slew = ±SR * C_dom`, since the integrator's
+  per-sample voltage step is `Δv = (i_in * dt) / C_dom`, so capping
+  `|Δv| ≤ SR * dt` caps `|i_in| ≤ SR * C_dom`.
+- **Emitted in all three codegen paths**: DK Schur (via the Tera
+  `process_sample.rs.tera` template), nodal Schur, and nodal full-LU.
+  Applied AFTER rail clamping and the damping safety net, BEFORE
+  `state.v_prev = v` so the next sample's cap history reflects the
+  slew-limited voltage.
+- **Rail-mode interaction**: compatible with `None`, `Hard`, `ActiveSet`,
+  `ActiveSetBe`, and `BoyleDiodes`. BoyleDiodes heavy-clip convergence
+  issues (see [`OPAMP_RAIL_MODES.md`](OPAMP_RAIL_MODES.md)) are unrelated
+  to slew rate — SR neither helps nor hurts BoyleDiodes at heavy clip.
+- **Parser validation**: `SR <= 0` is rejected at parse time with a
+  `ParseError`.
+
 ## VCA (Voltage-Controlled Amplifier)
 
 ### Blackmer Model (THAT 2180 / DBX 2150)

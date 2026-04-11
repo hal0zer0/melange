@@ -128,7 +128,7 @@ can also run via an in-process `LinearSolver`, but most users will only touch th
 | Potentiometer | `.pot` + `.wiper` directives; Sherman-Morrison rank-1 updates |
 | Switch | `.switch` directive; ganged R/C/L component switching |
 
-Pentodes, temperature coefficients, slew-rate limiting, and noise models are not yet implemented.
+Pentodes, temperature coefficients, and noise models are not yet implemented.
 See [Known Limitations](#known-limitations) and `docs/aidocs/STATUS.md` for the full list.
 
 ## Validated Circuit Spotlight: Pultec EQP-1A
@@ -412,7 +412,7 @@ When the op-amp output approaches the rails, `--opamp-rail-mode` controls the cl
 - **Fixed temperature (27°C)**: All device models simulate at 300.15K. No temperature coefficients.
 - **Triode tubes only**: Pentode tubes (EL84, 6L6, EL34) are not yet supported. 12AX7, 12AU7, and other preamp triodes work fully.
 - **Ideal transformers**: Coupled inductors assume constant coupling coefficient with no core saturation or hysteresis.
-- **Op-amps**: Boyle VCCS macromodel with optional GBW dominant pole, symmetric (`VSAT`) or asymmetric (`VCC`/`VEE`) supply rails, and five selectable rail-clamping strategies (`--opamp-rail-mode`). No slew-rate limiting.
+- **Op-amps**: Boyle VCCS macromodel with optional GBW dominant pole, optional slew-rate limiting (`SR`, in V/μs per SPICE convention, e.g. `SR=13` for a TL072), symmetric (`VSAT`) or asymmetric (`VCC`/`VEE`) supply rails, and five selectable rail-clamping strategies (`--opamp-rail-mode`).
 - **No noise simulation**: Shot noise, thermal noise, and 1/f noise are not modeled.
 
 ## Resource Limits

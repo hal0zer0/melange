@@ -1524,6 +1524,19 @@ impl Parser {
                         });
                     }
                 }
+                // Op-amp slew rate must be positive (V/μs in .model card,
+                // converted to V/s internally during MNA stamping).
+                "SR" => {
+                    if *value <= 0.0 {
+                        return Err(ParseError {
+                            line: 0,
+                            message: format!(
+                                ".model '{}': {} must be > 0, got {}",
+                                model.name, key, value
+                            ),
+                        });
+                    }
+                }
                 // Op-amp supply rails: finite check already done above;
                 // no additional single-param range constraint needed
                 "VCC" | "VEE" => {}

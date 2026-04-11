@@ -163,6 +163,27 @@ pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS
         }
     };
 
+{% if opamp_slew is defined and opamp_slew | length > 0 %}
+    // Step 6d: Op-amp slew-rate limiting.
+    // For each op-amp with a finite `.model OA(SR=…)`, clamp the per-sample
+    // voltage delta at the output node to ±SR*dt. Equivalent to clamping
+    // the Boyle dominant-pole integrator input current to ±SR*C_dom (the
+    // physical `I_slew = SR*C_dom` tail-current limit of a real op-amp).
+    //
+    // Applied AFTER rail clamping and the damping safety net so slew-limited
+    // transients can't exceed the rails, and BEFORE state.v_prev = v so the
+    // next sample's cap history reflects the slew-limited voltage
+    // (preserves KCL across the sample boundary).
+    let mut v = v;
+    let _oa_slew_dt = 1.0 / (SAMPLE_RATE * OVERSAMPLING_FACTOR as f64);
+{% for s in opamp_slew %}    {
+        let prev = state.v_prev[{{ s.out_idx }}];
+        let max_dv = OA{{ s.idx }}_SR * _oa_slew_dt;
+        let delta = v[{{ s.out_idx }}] - prev;
+        v[{{ s.out_idx }}] = prev + delta.clamp(-max_dv, max_dv);
+    }
+{% endfor %}{% endif %}
+
     // Step 7: Check for NaN/inf BEFORE updating state (prevents corruption of v_prev/i_nl_prev)
     if !v.iter().all(|x| x.is_finite()) {
         state.v_prev = state.dc_operating_point;
