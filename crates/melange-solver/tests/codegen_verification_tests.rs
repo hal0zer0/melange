@@ -4474,6 +4474,329 @@ fn test_codegen_triode_omits_pentode_helpers() {
     );
 }
 
+// ==========================================================================
+// Beam tetrode codegen tests (Reefman DerkE §4.5)
+// ==========================================================================
+
+/// 6V6GT single-stage common-cathode amplifier built from TubeLib.inc parameters.
+/// Same topology as the EL84 test but uses a beam tetrode model. The parser
+/// defaults this to `ScreenForm::Rational`; tests flip the constructed IR's
+/// `screen_form` to `Exponential` (DerkE §4.5) before emitting, which exercises
+/// the per-slot NR dispatch.
+const BEAM_TETRODE_CC_SPICE: &str = "\
+6V6GT Single-Stage Common Cathode
+Rin in 0 1Meg
+Cin in grid 100n
+Rg grid 0 1Meg
+P1 plate grid cathode screen 6V6GT
+Rk cathode 0 250
+Ck cathode 0 100u
+Rscreen vcc screen 1k
+Cscreen screen 0 47u
+Rp vcc plate 5k
+Cout plate out 1u
+Rout out 0 100k
+V1 vcc 0 DC 285
+.model 6V6GT VP(MU=10.56 EX=1.306 KG1=609.8 KG2=17267.3 KP=47.9 KVB=2171.5 ALPHA_S=18.72 A_FACTOR=3.48e-4 BETA_FACTOR=0.068)
+";
+
+/// Two-stage circuit with ONE Rational pentode (EL84) and ONE Exponential
+/// beam tetrode (6V6GT), each in its own common-cathode slot. Used to verify
+/// that both helper families coexist and NR dispatch routes each slot
+/// independently.
+const MIXED_PENTODE_BEAM_TETRODE_SPICE: &str = "\
+EL84 + 6V6GT Mixed Pentode/Beam Tetrode
+Rin in 0 1Meg
+Cin in grid1 100n
+Rg1 grid1 0 1Meg
+P1 plate1 grid1 cathode1 screen1 EL84
+Rk1 cathode1 0 130
+Ck1 cathode1 0 100u
+Rscreen1 vcc screen1 1k
+Cscreen1 screen1 0 47u
+Rp1 vcc plate1 4.7k
+Cinter plate1 grid2 100n
+Rg2 grid2 0 470k
+P2 plate2 grid2 cathode2 screen2 6V6GT
+Rk2 cathode2 0 250
+Ck2 cathode2 0 100u
+Rscreen2 vcc screen2 1k
+Cscreen2 screen2 0 47u
+Rp2 vcc plate2 5k
+Cout plate2 out 1u
+Rout out 0 100k
+V1 vcc 0 DC 300
+.model EL84 VP(MU=23.36 EX=1.138 KG1=117.4 KG2=1275.0 KP=152.4 KVB=4015.8 ALPHA_S=7.66 A_FACTOR=4.344e-4 BETA_FACTOR=0.148)
+.model 6V6GT VP(MU=10.56 EX=1.306 KG1=609.8 KG2=17267.3 KP=47.9 KVB=2171.5 ALPHA_S=18.72 A_FACTOR=3.48e-4 BETA_FACTOR=0.068)
+";
+
+/// Build a CircuitIR from a SPICE string, then flip every pentode slot's
+/// `screen_form` to `Exponential`. Lets tests exercise the beam-tetrode
+/// codepath without needing a SCREEN_FORM parser hook (which lands with the
+/// P1a1-03 catalog/resolver task in a separate file we must not touch).
+fn build_ir_force_exponential(spice: &str) -> (String, CircuitIR) {
+    use melange_solver::codegen::ir::{DeviceParams, ScreenForm};
+
+    let netlist = Netlist::parse(spice).expect("parse beam tetrode netlist");
+    let mna = MnaSystem::from_netlist(&netlist).expect("build MNA for beam tetrode");
+    let kernel = DkKernel::from_mna(&mna, 44100.0).expect("build DK kernel for beam tetrode");
+    let config = default_config();
+    let mut ir = CircuitIR::from_kernel(&kernel, &mna, &netlist, &config)
+        .expect("build CircuitIR for beam tetrode");
+
+    for slot in ir.device_slots.iter_mut() {
+        if let DeviceParams::Tube(tp) = &mut slot.params {
+            if tp.is_pentode() {
+                tp.screen_form = ScreenForm::Exponential;
+            }
+        }
+    }
+
+    let emitter = RustEmitter::new().expect("create RustEmitter");
+    let code = emitter.emit(&ir).expect("emit beam tetrode code");
+    (code, ir)
+}
+
+/// Beam tetrode codegen smoke test: a 6V6GT stage must emit all four new
+/// beam-tetrode helpers AND the per-device pentode constants (KG2/ALPHA_S/
+/// A_FACTOR/BETA_FACTOR) that flow through both Rational and Exponential
+/// forms unchanged.
+#[test]
+fn test_codegen_beam_tetrode_emits_helpers() {
+    let (code, ir) = build_ir_force_exponential(BEAM_TETRODE_CC_SPICE);
+
+    assert_eq!(
+        ir.topology.m, 3,
+        "Single beam tetrode should contribute M=3 nonlinear dimensions"
+    );
+
+    // Beam tetrode helpers must be emitted (any_beam_tetrode == true).
+    assert!(
+        code.contains("fn tube_ip_beam_tetrode("),
+        "beam tetrode codegen should emit tube_ip_beam_tetrode helper"
+    );
+    assert!(
+        code.contains("fn tube_is_beam_tetrode("),
+        "beam tetrode codegen should emit tube_is_beam_tetrode helper"
+    );
+    assert!(
+        code.contains("fn tube_jacobian_beam_tetrode("),
+        "beam tetrode codegen should emit tube_jacobian_beam_tetrode helper"
+    );
+    assert!(
+        code.contains("fn tube_evaluate_beam_tetrode("),
+        "beam tetrode codegen should emit tube_evaluate_beam_tetrode helper"
+    );
+
+    // Pentode constants (shared between Rational and Exponential) must be
+    // emitted exactly once per device with the same names.
+    assert!(code.contains("DEVICE_0_KG2"));
+    assert!(code.contains("DEVICE_0_ALPHA_S"));
+    assert!(code.contains("DEVICE_0_A_FACTOR"));
+    assert!(code.contains("DEVICE_0_BETA_FACTOR"));
+
+    // NR dispatch must call the beam-tetrode combined helper (DK or nodal —
+    // at least one path must route the 6V6GT slot through it).
+    assert!(
+        code.contains("tube_evaluate_beam_tetrode("),
+        "NR dispatch should call tube_evaluate_beam_tetrode for Exponential slot"
+    );
+
+    // 3D Jacobian entries must be referenced (3x3 block needs jdev_*_2 columns
+    // at start_idx 0: jdev_0_2, jdev_2_0, etc.).
+    assert!(
+        code.contains("jdev_0_2"),
+        "3x3 beam-tetrode Jacobian should produce jdev_0_2 entry"
+    );
+    assert!(
+        code.contains("jdev_2_0"),
+        "3x3 beam-tetrode Jacobian should produce jdev_2_0 entry"
+    );
+}
+
+/// Beam tetrode codegen rustc smoke test: the generated module must parse and
+/// type-check. Catches template syntax errors and stale Jacobian indices.
+#[test]
+fn test_codegen_beam_tetrode_compiles() {
+    let (code, _ir) = build_ir_force_exponential(BEAM_TETRODE_CC_SPICE);
+
+    let tmp_dir = std::env::temp_dir();
+    let tmp_path = tmp_dir.join("melange_codegen_test_beam_tetrode.rs");
+    {
+        let mut f = std::fs::File::create(&tmp_path).unwrap();
+        f.write_all(code.as_bytes()).unwrap();
+    }
+
+    let output = std::process::Command::new("rustc")
+        .args(["--edition", "2024", "--crate-type", "lib", "-o"])
+        .arg(tmp_dir.join("melange_codegen_test_beam_tetrode.rlib"))
+        .arg(&tmp_path)
+        .output()
+        .expect("failed to run rustc");
+
+    let _ = std::fs::remove_file(&tmp_path);
+    let _ = std::fs::remove_file(tmp_dir.join("melange_codegen_test_beam_tetrode.rlib"));
+    let _ = std::fs::remove_file(tmp_dir.join("libmelange_codegen_test_beam_tetrode.rlib"));
+
+    assert!(
+        output.status.success(),
+        "Beam tetrode codegen failed to compile:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Byte-identity guard: an EL84 (Rational) circuit must NOT emit any beam
+/// tetrode helpers or reference the `any_beam_tetrode` template block.
+/// Catches accidental template leaks in the new `{% if any_beam_tetrode %}`
+/// gating.
+#[test]
+fn test_codegen_pentode_omits_beam_tetrode_helpers() {
+    let netlist = Netlist::parse(PENTODE_CC_SPICE).expect("parse pentode netlist");
+    let mna = MnaSystem::from_netlist(&netlist).expect("MNA pentode");
+    let kernel = DkKernel::from_mna(&mna, 44100.0).expect("DK pentode kernel");
+    let codegen = CodeGenerator::new(default_config());
+    let result = codegen
+        .generate(&kernel, &mna, &netlist)
+        .expect("pentode codegen");
+    let code = result.code;
+
+    // Rational pentode path must still emit the phase 1a helpers.
+    assert!(code.contains("fn tube_ip_pentode("));
+    assert!(code.contains("fn tube_evaluate_pentode("));
+
+    // But NOT any of the new beam-tetrode helpers.
+    assert!(
+        !code.contains("tube_ip_beam_tetrode"),
+        "Rational pentode must NOT emit tube_ip_beam_tetrode"
+    );
+    assert!(
+        !code.contains("tube_is_beam_tetrode"),
+        "Rational pentode must NOT emit tube_is_beam_tetrode"
+    );
+    assert!(
+        !code.contains("tube_jacobian_beam_tetrode"),
+        "Rational pentode must NOT emit tube_jacobian_beam_tetrode"
+    );
+    assert!(
+        !code.contains("tube_evaluate_beam_tetrode"),
+        "Rational pentode must NOT emit tube_evaluate_beam_tetrode"
+    );
+}
+
+/// Mixed circuit: one EL84 (Rational) + one 6V6GT (Exponential). Both helper
+/// families must be emitted, and NR dispatch must route each slot to its own
+/// helper. The dispatch inspection verifies that the generated evaluate loop
+/// calls BOTH `tube_evaluate_pentode` AND `tube_evaluate_beam_tetrode`.
+#[test]
+fn test_codegen_mixed_pentode_beam_tetrode() {
+    use melange_solver::codegen::ir::{DeviceParams, ScreenForm};
+
+    // Parse the mixed netlist (both devices default to Rational).
+    let netlist =
+        Netlist::parse(MIXED_PENTODE_BEAM_TETRODE_SPICE).expect("parse mixed netlist");
+    let mna = MnaSystem::from_netlist(&netlist).expect("build MNA for mixed circuit");
+    let kernel = DkKernel::from_mna(&mna, 44100.0).expect("build DK kernel for mixed circuit");
+    let config = default_config();
+    let mut ir = CircuitIR::from_kernel(&kernel, &mna, &netlist, &config)
+        .expect("build CircuitIR for mixed circuit");
+
+    // Each pentode contributes 3 NR dimensions → M=6 total.
+    assert_eq!(
+        ir.topology.m, 6,
+        "EL84 + 6V6GT should produce M=6 nonlinear dimensions (3 per pentode)"
+    );
+
+    // Force the 6V6GT slot to Exponential while leaving EL84 as Rational.
+    // We identify the 6V6GT by matching its KG1 parameter (EL84 has kg1=117.4,
+    // 6V6GT has kg1=609.8). This avoids relying on netlist slot order.
+    let mut num_exponential = 0;
+    let mut num_rational_pentodes = 0;
+    for slot in ir.device_slots.iter_mut() {
+        if let DeviceParams::Tube(tp) = &mut slot.params {
+            if tp.is_pentode() {
+                if tp.kg1 > 500.0 {
+                    // 6V6GT
+                    tp.screen_form = ScreenForm::Exponential;
+                    num_exponential += 1;
+                } else {
+                    // EL84 stays Rational.
+                    num_rational_pentodes += 1;
+                }
+            }
+        }
+    }
+    assert_eq!(
+        num_rational_pentodes, 1,
+        "mixed circuit should leave one Rational pentode (EL84)"
+    );
+    assert_eq!(
+        num_exponential, 1,
+        "mixed circuit should mark one Exponential beam tetrode (6V6GT)"
+    );
+
+    let emitter = RustEmitter::new().expect("create RustEmitter");
+    let code = emitter.emit(&ir).expect("emit mixed circuit code");
+
+    // Both helper families must be emitted.
+    assert!(
+        code.contains("fn tube_evaluate_pentode("),
+        "mixed circuit must emit tube_evaluate_pentode (Rational, EL84)"
+    );
+    assert!(
+        code.contains("fn tube_evaluate_beam_tetrode("),
+        "mixed circuit must emit tube_evaluate_beam_tetrode (Exponential, 6V6GT)"
+    );
+    assert!(
+        code.contains("fn tube_ip_pentode("),
+        "mixed circuit must emit tube_ip_pentode"
+    );
+    assert!(
+        code.contains("fn tube_ip_beam_tetrode("),
+        "mixed circuit must emit tube_ip_beam_tetrode"
+    );
+    assert!(
+        code.contains("fn tube_is_pentode("),
+        "mixed circuit must emit tube_is_pentode"
+    );
+    assert!(
+        code.contains("fn tube_is_beam_tetrode("),
+        "mixed circuit must emit tube_is_beam_tetrode"
+    );
+
+    // NR dispatch must call BOTH helpers. The generated code has at least
+    // one call site per family (DK Schur path).
+    let pentode_calls = code.matches("tube_evaluate_pentode(").count();
+    let beam_calls = code.matches("tube_evaluate_beam_tetrode(").count();
+    assert!(
+        pentode_calls >= 1,
+        "mixed circuit must dispatch at least one NR call to tube_evaluate_pentode \
+         (found {} calls)",
+        pentode_calls
+    );
+    assert!(
+        beam_calls >= 1,
+        "mixed circuit must dispatch at least one NR call to tube_evaluate_beam_tetrode \
+         (found {} calls)",
+        beam_calls
+    );
+
+    // Both slots get their own device-constant block (2 pentodes → DEVICE_0 and DEVICE_1).
+    assert!(code.contains("DEVICE_0_KG2"));
+    assert!(code.contains("DEVICE_1_KG2"));
+    assert!(code.contains("DEVICE_0_ALPHA_S"));
+    assert!(code.contains("DEVICE_1_ALPHA_S"));
+    assert!(code.contains("DEVICE_0_BETA_FACTOR"));
+    assert!(code.contains("DEVICE_1_BETA_FACTOR"));
+
+    // 3D Jacobian columns should exist for BOTH slots.
+    // EL84 at start_idx 0 → jdev_0_2, jdev_2_0.
+    // 6V6GT at start_idx 3 → jdev_3_5, jdev_5_3.
+    assert!(code.contains("jdev_0_2"));
+    assert!(code.contains("jdev_2_0"));
+    assert!(code.contains("jdev_3_5"));
+    assert!(code.contains("jdev_5_3"));
+}
+
 // ===========================================================================
 // OUTPUT_SCALES non-default tests (H6)
 // ===========================================================================

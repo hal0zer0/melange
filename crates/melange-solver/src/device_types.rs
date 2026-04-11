@@ -302,9 +302,14 @@ impl MosfetParams {
 
 /// Tube kind discriminator.
 ///
-/// Distinguishes between 2D triode (Vgk → Ip, Vpk → Ig) and 3D pentode
-/// (Vgk → Ip, Vpk → Is, Vg2k → Ig — with Vpk also controlling Ip via the knee).
-/// The dimension of the NR block is 2 for `SharpTriode` and 3 for `SharpPentode`.
+/// Distinguishes between 2D triode (Vgk → Ip, Vpk → Ig) and 3D pentode-family
+/// tubes (Vgk → Ip, Vpk → Ig2, Vg2k → Ig1). The dimension of the NR block is
+/// 2 for `SharpTriode` and 3 for `SharpPentode`.
+///
+/// Both true pentodes (EL84/EL34/EF86) and beam tetrodes (6L6/6V6/KT88) share
+/// the `SharpPentode` kind — they differ only in the screen-current functional
+/// form, which is selected by the separate `ScreenForm` discriminator on
+/// `TubeParams`. See [`ScreenForm`] for details.
 ///
 /// Future variants (not yet implemented): `RemoteTriode`, `RemotePentode` for
 /// variable-mu (remote-cutoff) tubes used in varimu compressors; `*GridOff`
@@ -315,10 +320,47 @@ pub enum TubeKind {
     /// Sharp-cutoff triode (2D: Vgk → Ip, Vpk → Ig). The default.
     #[default]
     SharpTriode,
-    /// Sharp-cutoff pentode or beam tetrode (3D: Vgk → Ip, Vpk → Is, Vg2k → Ig).
-    /// Uses classical Cohen-Hélie/Koren pentode equations with Kg2 sensitivity.
-    /// Screen current is Vpk-independent (known limitation; Derk upgrade deferred).
+    /// Sharp-cutoff pentode or beam tetrode (3D: Vgk → Ip, Vpk → Ig2, Vg2k → Ig1).
+    /// Uses Reefman's "Derk" §4.4 or "DerkE" §4.5 equations depending on
+    /// `TubeParams.screen_form`. Includes true pentodes (EL84, EL34, EF86) and
+    /// beam tetrodes (6L6, 6V6, KT88).
     SharpPentode,
+}
+
+/// Screen-current functional form for pentode / beam tetrode math.
+///
+/// Reefman's theory paper (<https://www.dos4ever.com/uTracer3/Theory.pdf>) gives
+/// two closely-related screen-current models:
+///
+/// * **`Rational`** — Reefman "Derk" §4.4, Eq 23:
+///   `Ig2 = (Ip0/Kg2) · (1 + αs / (1 + β·Vp))`
+///   Used for true pentodes with smooth screen-current rolloff (EL84, EL34, EF86).
+///
+/// * **`Exponential`** — Reefman "DerkE" §4.5, Eq 28:
+///   `Ig2 = (Ip0/Kg2) · (1 + αs · exp(-(β·Vp)^{3/2}))`
+///   Used for beam tetrodes with sharper "critical compensation" knees that the
+///   rational form can't capture (6L6GC, 6V6GT, KT88). The 1.5-power exponent
+///   models the faster screen-current falloff characteristic of focussed-beam
+///   tube geometry.
+///
+/// The plate-current `F(Vp)` function uses the same rational-vs-exponential
+/// factor in the `(α/Kg1 + αs/Kg2)` term (Derk Eq 25 vs DerkE Eq 30). The
+/// `α = 1 − (Kg1/Kg2)·(1+αs)` identity (Eq 27 and Eq 32) is the same for both.
+///
+/// Default: `Rational` — preserves phase 1a behavior for all previously serialized
+/// TubeParams and for the EL84/EL34/EF86 catalog entries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[non_exhaustive]
+pub enum ScreenForm {
+    /// Reefman "Derk" §4.4 — rational `1/(1+β·Vp)` screen scaling.
+    /// The default for `SharpPentode` when no form is specified.
+    /// Fits true pentodes (EL84, EL34, EF86) accurately.
+    #[default]
+    Rational,
+    /// Reefman "DerkE" §4.5 — exponential `exp(-(β·Vp)^{3/2})` screen scaling.
+    /// Required for beam tetrodes (6L6GC, 6V6GT, KT88) whose critical-compensation
+    /// knees the rational form cannot capture.
+    Exponential,
 }
 
 /// Tube/triode/pentode model parameters (Koren triode + Reefman "Derk" pentode).
@@ -383,11 +425,19 @@ pub struct TubeParams {
     /// it. Typical fitted values: 1e-8 to 1e-3 (A/V).
     #[serde(default)]
     pub a_factor: f64,
-    /// Reefman Derk β: reciprocal plate-voltage scale in the `1/(1+β·Vp)`
-    /// denominators of both Ip and Ig2. Pentode-only; 0.0 = triode default.
-    /// Typical fitted values: 0.05–0.3 (1/V).
+    /// Reefman Derk β: reciprocal plate-voltage scale. For `Rational` screen
+    /// form (Derk §4.4) this appears in `1/(1+β·Vp)`; for `Exponential`
+    /// (DerkE §4.5) it appears in `exp(-(β·Vp)^{3/2})`. Pentode-only;
+    /// 0.0 = triode default. Typical fitted values: 0.05–0.3 (1/V) for
+    /// Rational, 0.05–0.1 (1/V) for Exponential.
     #[serde(default)]
     pub beta_factor: f64,
+    /// Screen-current functional form (`Rational` for true pentodes / Derk §4.4,
+    /// `Exponential` for beam tetrodes / DerkE §4.5). Defaults to `Rational`
+    /// to preserve pre-phase-1a.1 behavior for all existing pentode catalog
+    /// entries and serialized data.
+    #[serde(default)]
+    pub screen_form: ScreenForm,
 }
 
 impl TubeParams {
@@ -564,6 +614,7 @@ mod tube_params_tests {
             alpha_s: 0.0,
             a_factor: 0.0,
             beta_factor: 0.0,
+            screen_form: ScreenForm::Rational,
         }
     }
 
@@ -590,6 +641,32 @@ mod tube_params_tests {
             alpha_s: 7.66,
             a_factor: 4.344e-4,
             beta_factor: 0.148,
+            screen_form: ScreenForm::Rational,
+        }
+    }
+
+    fn beam_tetrode_6l6gc() -> TubeParams {
+        // Reefman "DerkE" fit from TubeLib.inc (2016-01-23):
+        // BTetrodeDE 6L6GC — DerkE §4.5, `exp(-(β·Vp)^{3/2})` screen form.
+        TubeParams {
+            kind: TubeKind::SharpPentode,
+            mu: 9.41,
+            ex: 1.306,
+            kg1: 446.6,
+            kp: 45.2,
+            kvb: 3205.1,
+            ig_max: 10e-3,
+            vgk_onset: 0.7,
+            lambda: 0.0,
+            ccg: 0.0,
+            cgp: 0.0,
+            ccp: 0.0,
+            rgi: 0.0,
+            kg2: 6672.5,
+            alpha_s: 8.10,
+            a_factor: 4.91e-4,
+            beta_factor: 0.069,
+            screen_form: ScreenForm::Exponential,
         }
     }
 
@@ -699,5 +776,65 @@ mod tube_params_tests {
     fn tube_kind_default_is_sharp_triode() {
         let k: TubeKind = Default::default();
         assert!(matches!(k, TubeKind::SharpTriode));
+    }
+
+    #[test]
+    fn screen_form_default_is_rational() {
+        let sf: ScreenForm = Default::default();
+        assert!(matches!(sf, ScreenForm::Rational));
+    }
+
+    #[test]
+    fn beam_tetrode_validates() {
+        let t = beam_tetrode_6l6gc();
+        t.validate().expect("6L6GC DerkE fit should validate");
+        assert!(matches!(t.screen_form, ScreenForm::Exponential));
+        assert!(t.is_pentode());
+        assert_eq!(t.dimension(), 3);
+    }
+
+    #[test]
+    fn beam_tetrode_rejects_zero_alpha_s() {
+        let mut bad = beam_tetrode_6l6gc();
+        bad.alpha_s = 0.0;
+        assert!(
+            bad.validate().is_err(),
+            "Beam tetrode with αs=0 must fail validation (same constraint as Derk)"
+        );
+    }
+
+    #[test]
+    fn legacy_pentode_json_without_screen_form_is_rational() {
+        // Pre-phase-1a.1 serialized pentode TubeParams (no `screen_form` field).
+        // Must deserialize as Rational (backward compat).
+        let legacy_json = r#"{
+            "kind": "SharpPentode",
+            "mu": 23.36,
+            "ex": 1.138,
+            "kg1": 117.4,
+            "kp": 152.4,
+            "kvb": 4015.8,
+            "ig_max": 0.008,
+            "vgk_onset": 0.7,
+            "kg2": 1275.0,
+            "alpha_s": 7.66,
+            "a_factor": 4.344e-4,
+            "beta_factor": 0.148
+        }"#;
+        let tp: TubeParams =
+            serde_json::from_str(legacy_json).expect("legacy pentode JSON should round-trip");
+        assert!(matches!(tp.screen_form, ScreenForm::Rational));
+        assert!(tp.is_pentode());
+    }
+
+    #[test]
+    fn beam_tetrode_roundtrip_serde() {
+        let t = beam_tetrode_6l6gc();
+        let json = serde_json::to_string(&t).expect("serialize");
+        let back: TubeParams = serde_json::from_str(&json).expect("deserialize");
+        assert!(matches!(back.screen_form, ScreenForm::Exponential));
+        assert_eq!(back.mu, 9.41);
+        assert_eq!(back.kg2, 6672.5);
+        assert_eq!(back.alpha_s, 8.10);
     }
 }

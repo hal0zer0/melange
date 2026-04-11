@@ -3,6 +3,8 @@
 //! All parameters are for triode-mode operation (pentodes are triode-connected).
 //! Sources are cited per entry for traceability.
 
+use crate::tube::ScreenForm;
+
 /// A catalog entry for a vacuum tube (triode-mode Koren parameters).
 #[derive(Debug, Clone, Copy)]
 pub struct TubeCatalogEntry {
@@ -253,11 +255,15 @@ pub struct PentodeCatalogEntry {
     pub ig_max: f64,
     /// Grid current onset voltage [V]
     pub vgk_onset: f64,
+    /// Screen-current functional form:
+    /// - [`ScreenForm::Rational`] — Reefman §4.4 (`1/(1+β·Vp)`), true pentodes.
+    /// - [`ScreenForm::Exponential`] — Reefman §4.5 (`exp(-(β·Vp)^{3/2})`), beam tetrodes.
+    pub screen_form: ScreenForm,
     /// Source citation
     pub source: &'static str,
 }
 
-/// The pentode catalog (Reefman Derk §4.4 fits).
+/// The pentode / beam-tetrode catalog (Reefman Derk §4.4 and DerkE §4.5 fits).
 pub const PENTODE_CATALOG: &[PentodeCatalogEntry] = &[
     // EL84 / 6BQ5 — small power pentode (true pentode mode).
     // Reefman TubeLib.inc BTetrodeD fit (§4.4).
@@ -275,6 +281,7 @@ pub const PENTODE_CATALOG: &[PentodeCatalogEntry] = &[
         beta_factor: 0.148,
         ig_max: 8e-3,
         vgk_onset: 0.7,
+        screen_form: ScreenForm::Rational,
         source: "Reefman TubeLib.inc (2016), BTetrodeD fit",
     },
     // EL34 / 6CA7 — power pentode (true pentode mode).
@@ -292,6 +299,7 @@ pub const PENTODE_CATALOG: &[PentodeCatalogEntry] = &[
         beta_factor: 0.105,
         ig_max: 10e-3,
         vgk_onset: 0.7,
+        screen_form: ScreenForm::Rational,
         source: "Reefman TubeLib.inc (2016), BTetrodeD fit",
     },
     // EF86 / 6267 — small-signal sharp-cutoff pentode.
@@ -310,7 +318,48 @@ pub const PENTODE_CATALOG: &[PentodeCatalogEntry] = &[
         beta_factor: 0.28,
         ig_max: 4e-3,
         vgk_onset: 0.5,
+        screen_form: ScreenForm::Rational,
         source: "Reefman TubeLib.inc (2016), PenthodeD fit",
+    },
+    // 6L6GC / 5881 — beam power tube (beam-tetrode mode).
+    // Reefman TubeLib.inc BTetrodeDE fit (§4.5 exponential screen form).
+    // Uses a "-T" (for "tetrode") suffix on every alias to avoid colliding with
+    // the triode-connected 6L6 / 6L6GC / 5881 entries in CATALOG.
+    PentodeCatalogEntry {
+        names: &["6L6-T", "6L6GC-T", "6L6GCT", "5881-T"],
+        mu: 9.41,
+        ex: 1.306,
+        kg1: 446.6,
+        kg2: 6672.5,
+        kp: 45.2,
+        kvb: 3205.1,
+        alpha_s: 8.10,
+        a_factor: 4.91e-4,
+        beta_factor: 0.069,
+        ig_max: 10e-3,
+        vgk_onset: 0.7,
+        screen_form: ScreenForm::Exponential,
+        source: "Reefman TubeLib.inc (2016), BTetrodeDE fit",
+    },
+    // 6V6 / 6V6GT — beam power tube (beam-tetrode mode).
+    // Reefman TubeLib.inc BTetrodeDE fit (§4.5 exponential screen form).
+    // "-T" suffix on every alias to avoid colliding with the triode-connected
+    // 6V6 / 6V6GT entries in CATALOG.
+    PentodeCatalogEntry {
+        names: &["6V6-T", "6V6GT-T", "6V6GTT"],
+        mu: 10.56,
+        ex: 1.306,
+        kg1: 609.8,
+        kg2: 17267.3,
+        kp: 47.9,
+        kvb: 2171.5,
+        alpha_s: 18.72,
+        a_factor: 3.48e-4,
+        beta_factor: 0.068,
+        ig_max: 6e-3,
+        vgk_onset: 0.7,
+        screen_form: ScreenForm::Exponential,
+        source: "Reefman TubeLib.inc (2016), BTetrodeDE fit",
     },
 ];
 
@@ -910,5 +959,93 @@ mod tests {
         assert_eq!(six_v6.mu, 8.7);
         assert_eq!(six_v6.kg1, 1460.0);
         assert!(lookup("6V6GT").is_some());
+    }
+
+    // --- Beam tetrode catalog tests (Reefman DerkE §4.5 fits) ---
+
+    #[test]
+    fn test_pentode_catalog_6l6gc_lookup() {
+        let entry = lookup_pentode("6L6-T").expect("6L6-T should resolve");
+        assert_eq!(entry.mu, 9.41);
+        assert_eq!(entry.kg2, 6672.5);
+        assert_eq!(entry.alpha_s, 8.10);
+        assert_eq!(entry.screen_form, ScreenForm::Exponential);
+
+        // The 6L6GC-T alias must resolve to the same entry.
+        let alias = lookup_pentode("6L6GC-T").expect("6L6GC-T alias");
+        assert_eq!(alias.mu, 9.41);
+        assert_eq!(alias.kg2, 6672.5);
+        assert_eq!(alias.alpha_s, 8.10);
+        assert_eq!(alias.screen_form, ScreenForm::Exponential);
+        assert_eq!(entry.names.as_ptr(), alias.names.as_ptr());
+    }
+
+    #[test]
+    fn test_pentode_catalog_6v6gt_lookup() {
+        let entry = lookup_pentode("6V6-T").expect("6V6-T should resolve");
+        assert_eq!(entry.mu, 10.56);
+        assert_eq!(entry.kg2, 17267.3);
+        assert_eq!(entry.alpha_s, 18.72);
+        assert_eq!(entry.screen_form, ScreenForm::Exponential);
+    }
+
+    #[test]
+    fn test_pentode_catalog_el84_still_rational() {
+        // Phase 1a EL84-P entry must remain the Rational §4.4 fit.
+        let el84p = lookup_pentode("EL84-P").expect("EL84-P should resolve");
+        assert_eq!(el84p.screen_form, ScreenForm::Rational);
+        // And so should the other phase-1a pentodes.
+        let el34p = lookup_pentode("EL34-P").expect("EL34-P should resolve");
+        assert_eq!(el34p.screen_form, ScreenForm::Rational);
+        let ef86 = lookup_pentode("EF86").expect("EF86 should resolve");
+        assert_eq!(ef86.screen_form, ScreenForm::Rational);
+    }
+
+    #[test]
+    fn test_pentode_catalog_case_insensitive_beam_tetrode() {
+        let lower = lookup_pentode("6l6-t").expect("lowercase 6l6-t");
+        let upper = lookup_pentode("6L6-T").expect("uppercase 6L6-T");
+        assert_eq!(lower.mu, upper.mu);
+        assert_eq!(lower.kg2, upper.kg2);
+        assert_eq!(lower.alpha_s, upper.alpha_s);
+        assert_eq!(lower.screen_form, upper.screen_form);
+        // Exact same &'static slice → same entry.
+        assert_eq!(lower.names.as_ptr(), upper.names.as_ptr());
+    }
+
+    #[test]
+    fn test_triode_catalog_6l6_unchanged() {
+        // Byte-identity guard: phase-1a triode-connected 6L6 entry unmodified.
+        let six_l6 = lookup("6L6").expect("triode 6L6");
+        assert_eq!(six_l6.mu, 8.7);
+        assert_eq!(six_l6.kg1, 890.0);
+        // Aliases still resolve through CATALOG (not PENTODE_CATALOG).
+        assert!(lookup("6L6GC").is_some());
+        assert!(lookup("5881").is_some());
+        // And lookup_pentode() must NOT resolve the bare triode name.
+        assert!(lookup_pentode("6L6").is_none());
+        assert!(lookup_pentode("6L6GC").is_none());
+        assert!(lookup_pentode("5881").is_none());
+    }
+
+    #[test]
+    fn test_triode_catalog_6v6_unchanged() {
+        // Byte-identity guard: phase-1a triode-connected 6V6 entry unmodified.
+        let six_v6 = lookup("6V6").expect("triode 6V6");
+        assert_eq!(six_v6.mu, 8.7);
+        assert_eq!(six_v6.kg1, 1460.0);
+        assert!(lookup("6V6GT").is_some());
+        // lookup_pentode() must NOT resolve the bare triode name.
+        assert!(lookup_pentode("6V6").is_none());
+        assert!(lookup_pentode("6V6GT").is_none());
+    }
+
+    #[test]
+    fn test_pentode_catalog_beam_tetrode_distinct_from_pentode() {
+        let six_l6_t = lookup_pentode("6L6-T").expect("6L6-T should resolve");
+        let el84p = lookup_pentode("EL84-P").expect("EL84-P should resolve");
+        assert_eq!(six_l6_t.screen_form, ScreenForm::Exponential);
+        assert_eq!(el84p.screen_form, ScreenForm::Rational);
+        assert_ne!(six_l6_t.screen_form, el84p.screen_form);
     }
 }

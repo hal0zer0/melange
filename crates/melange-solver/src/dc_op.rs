@@ -306,6 +306,19 @@ fn evaluate_devices_inner(
                         beta_factor: tp.beta_factor,
                         ig_max: tp.ig_max,
                         vgk_onset: tp.vgk_onset,
+                        // Cross-crate enum conversion: melange-devices owns the
+                        // runtime `KorenPentode::ScreenForm`; melange-solver
+                        // owns the serialized `TubeParams::ScreenForm`. Two
+                        // identical-shape enums in different crates (devices
+                        // can't depend on solver); map 1:1 here.
+                        screen_form: match tp.screen_form {
+                            crate::device_types::ScreenForm::Rational => {
+                                melange_devices::tube::ScreenForm::Rational
+                            }
+                            crate::device_types::ScreenForm::Exponential => {
+                                melange_devices::tube::ScreenForm::Exponential
+                            }
+                        },
                     };
                     let vgk = v_nl[s];
                     let vpk = v_nl[s + 1];

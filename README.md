@@ -121,7 +121,7 @@ can also run via an in-process `LinearSolver`, but most users will only touch th
 | JFET | Shichman-Hodges 2D (triode + saturation + λ); CGS/CGD; parasitic RD/RS |
 | MOSFET | Level 1 SPICE 2D; body effect (GAMMA/PHI); CGS/CGD |
 | Vacuum Triode | Koren triode + Leach grid current + λ; CCG/CGP/CCP; parasitic RGI |
-| Vacuum Pentode | Reefman Derk §4.4 (Ip/Ig2/Ig1, 9 params: μ/Ex/Kg1/Kg2/Kp/Kvb/αs/A/β); junction caps |
+| Vacuum Pentode / Beam Tetrode | Reefman Derk §4.4 / DerkE §4.5 (Ip/Ig2/Ig1, 9 params: μ/Ex/Kg1/Kg2/Kp/Kvb/αs/A/β, plus Rational/Exponential screen-form discriminator); junction caps |
 | Op-Amp | Boyle VCCS macromodel (AOL, ROUT, GBW pole, VCC/VEE rail clamping) |
 | VCA | THAT 2180 exponential gain (current-mode, THD) |
 | CdS LDR | VTL5C3/4, NSL-32 with asymmetric envelope (used as a dynamic resistor) |
@@ -412,7 +412,7 @@ When the op-amp output approaches the rails, `--opamp-rail-mode` controls the cl
 ## Known Limitations
 
 - **Fixed temperature (27°C)**: All device models simulate at 300.15K. No temperature coefficients.
-- **True pentodes supported, beam tetrodes deferred**: EL84, EL34, EF86 work via Reefman Derk §4.4 equations (`EL84-P` / `EL34-P` / `EF86` catalog aliases, or inline `.model NAME VP(...)` with μ/Ex/Kg1/Kg2/Kp/Kvb/αs/A/β; new `P` element prefix with plate-grid-cathode-screen order). Beam tetrodes (6L6, 6V6, KT88) need the Reefman DerkE §4.5 screen-current form and land in a follow-up release. Remote-cutoff / variable-mu tubes for varimu compressors (6386, 6BA6) are also on the roadmap.
+- **True pentodes and beam tetrodes supported**: EL84, EL34, EF86 (true pentodes, Reefman Derk §4.4) and 6L6GC, 5881, 6V6GT (beam tetrodes, Reefman DerkE §4.5) all work via the new `P` element prefix (plate-grid-cathode-screen order) and `VP` model directive. Catalog aliases `EL84-P` / `EL34-P` / `EF86` / `6L6-T` / `6V6-T` pick the right screen-current form automatically. KT88 / 6550 is deferred pending a published fit; remote-cutoff / variable-mu tubes for varimu compressors (6386, 6BA6) are on the roadmap.
 - **Ideal transformers**: Coupled inductors assume constant coupling coefficient with no core saturation or hysteresis.
 - **Op-amps**: Boyle VCCS macromodel with optional GBW dominant pole, optional slew-rate limiting (`SR`, in V/μs per SPICE convention, e.g. `SR=13` for a TL072), symmetric (`VSAT`) or asymmetric (`VCC`/`VEE`) supply rails, and five selectable rail-clamping strategies (`--opamp-rail-mode`).
 - **No noise simulation**: Shot noise, thermal noise, and 1/f noise are not modeled.

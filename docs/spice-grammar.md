@@ -449,13 +449,27 @@ P2 plate2 grid2 cath2 scr2 sup2 EF86
 - **αs must be strictly positive** — Derk with αs=0 degenerates to
   Ip=0 identically. The validator rejects `.model … VP(ALPHA_S=0)`.
 - Catalog aliases (use these instead of inline `.model VP(...)` for
-  convenience): `EL84-P` / `EL84P` / `6BQ5-P`, `EL34-P` / `EL34P` /
-  `6CA7-P`, `EF86` / `6267`. The `-P` suffix distinguishes these
-  from the legacy triode-connected `EL84` / `EL34` entries which
-  remain available for backward compatibility.
-- **Not yet supported** (phase 1a limitation):
-  - Beam tetrodes 6L6 / 6V6 / KT88 — these need Reefman's DerkE §4.5
-    `exp(-β·Vp^{3/2})` screen form (phase 1a.1).
+  convenience):
+  - **True pentodes** (Reefman Derk §4.4, `Rational` screen form):
+    `EL84-P` / `EL84P` / `6BQ5-P`, `EL34-P` / `EL34P` / `6CA7-P`,
+    `EF86` / `6267`.
+  - **Beam tetrodes** (Reefman DerkE §4.5, `Exponential` screen form):
+    `6L6-T` / `6L6GC-T` / `6L6GCT` / `5881-T`, `6V6-T` / `6V6GT-T` /
+    `6V6GTT`.
+
+  The `-P` and `-T` suffixes distinguish these from the legacy
+  triode-connected `EL84` / `EL34` / `6L6` / `6V6` catalog entries which
+  remain available for backward compatibility. The catalog sets the
+  right `SCREEN_FORM` automatically — a netlist that references
+  `6V6GT-T` gets the DerkE math without any further directive.
+- **`SCREEN_FORM` parameter**: `.model NAME VP(... SCREEN_FORM=0)` for
+  Rational (Derk §4.4), `SCREEN_FORM=1` for Exponential (DerkE §4.5).
+  Only needed when hand-rolling a `.model` without a catalog alias;
+  the default is `0` (Rational).
+- **Not yet supported**:
+  - KT88 / 6550 beam tetrode — Reefman TubeLib.inc has no published fit.
+    Deferred to phase 1a.2 (Cohen-Hélie Koren bootstrap) or phase 1d
+    (datasheet refit).
   - Independent suppressor dynamics on true 5-element pentodes —
     suppressor is always electrically tied to cathode in phase 1a.
   - Variable-mu (remote-cutoff) pentodes like 6BA6 — phase 1c.

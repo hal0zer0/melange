@@ -1,0 +1,102 @@
+* Fender Tweed Deluxe 5E3 (simplified)
+* Copyright (c) 2026 Melange Contributors
+* License: MIT OR Apache-2.0
+*
+* Phase 1a.1 validation target for melange beam-tetrode support.
+* Based on the Fender 5E3 Deluxe schematic — two-stage 12AX7 preamp,
+* 12AX7 cathodyne phase inverter, 2× 6V6GT push-pull Class AB power
+* with cathode bias.
+*
+* Exercises the Reefman DerkE §4.5 (`Exponential` screen-current form)
+* codepath end-to-end: EL84-style pentode math with the `exp(-(β·Vp)^{3/2})`
+* screen scaling specific to beam tetrodes like 6V6GT.
+*
+* Simplifications for phase 1a.1 (lifted in later phases):
+*   - Output transformer modelled as 2× plate-load resistors (Ra_1/Ra_2).
+*     Real 5E3 OT primary ~6.6k plate-to-plate → ~3.3k per half.
+*   - Output taken single-ended from pa_1 (OT differential coupling → phase 1e).
+*   - No tone stack (original 5E3 uses volume-dependent passive tone).
+*   - No NFB loop (real 5E3 has a 22k NFB from 8Ω secondary to PI cathode).
+*
+* Topology:
+*   VIN → Cin → Rg1 → [12AX7 V1a] → pa_v1a
+*                                     ↓ Cc1
+*                                    pi_in → [12AX7 cathodyne] → pi_p / pi_k
+*                                              ↓ Cc_p           ↓ Cc_k
+*                                           el1_g            el2_g
+*                                              ↓                ↓
+*                                        [6V6GT P_e1]    [6V6GT P_e2]
+*                                              ↓               ↓
+*                                            pa_1             pa_2  → out (pa_1)
+*
+* Target bias points (from 5E3 schematic, ±20%):
+*   V1:      Vgk ≈ -1.5V, Vpk ≈ 180V,  Ip ≈ 1.0 mA (single triode stage)
+*   12AX7 PI: Vgk ≈ -3V,   Vpk ≈ 230V, Ip ≈ 0.8 mA (cathodyne with 56k loads)
+*   6V6GT:   Vgk ≈ -15V,  Vpk ≈ 280V, Vg2 ≈ 270V, Ip ≈ 35 mA per tube
+*   Shared cathode bias Rk_pp ≈ 250Ω, drops ~17V at ~70 mA total
+
+* -------------- Models --------------
+* 12AX7 — existing Koren triode fit (phase 1a, unchanged).
+.model 12AX7 TRIODE(MU=100 EX=1.4 KG1=3000 KP=600 KVB=300)
+
+* 6V6GT — Reefman DerkE §4.5 fit from TubeLib.inc (2016-01-23).
+* References the PENTODE_CATALOG entry `6V6GT-T` (alias for `6V6-T`),
+* which carries the DerkE params and `screen_form: Exponential`
+* automatically. Resolver auto-picks the beam-tetrode codepath.
+.model 6V6GT-T VP()
+
+* -------------- Supplies --------------
+* B+ rail (typical 5E3: ~330V after rectifier sag, we use 320V nominal)
+VCC vcc 0 DC 320
+
+* -------------- V1: 12AX7 first preamp stage --------------
+Cin    in     v1_g   22n
+Rg_v1  v1_g   0      1Meg
+
+T_v1   v1_g   v1_p   v1_k   12AX7
+
+Ra_v1  vcc    v1_p   100k
+Rk_v1  v1_k   0      820
+Ck_v1  v1_k   0      25u
+
+* -------------- Interstage coupling + volume --------------
+Cc1    v1_p   pi_in  22n
+Rg_pi  pi_in  0      1Meg
+
+* -------------- V2A: 12AX7 cathodyne phase inverter --------------
+* Single triode with equal plate and cathode load (56k each in real 5E3).
+* Plate output = -Vgrid_ac · Av/2; cathode output = +Vgrid_ac · Av/2.
+T_pi   pi_in  pi_p   pi_k   12AX7
+
+Ra_pi  vcc    pi_p   56k
+Rk_pi  pi_k   0      56k
+
+* -------------- PI → 6V6GT push-pull drive --------------
+Cc_p   pi_p   el1_g  22n
+Cc_k   pi_k   el2_g  22n
+
+Rg_e1  el1_g  0      220k
+Rg_e2  el2_g  0      220k
+
+* -------------- 6V6GT push-pull output stage --------------
+P_e1   pa_1   el1_g  ck_pp  sc_pp  6V6GT-T
+P_e2   pa_2   el2_g  ck_pp  sc_pp  6V6GT-T
+
+* OT primary halves (~3.3k each for 5E3's 6.6k plate-to-plate)
+Ra_1   vcc    pa_1   3.3k
+Ra_2   vcc    pa_2   3.3k
+
+* Shared screen bus with 1k stop resistor from B+
+Rg2_pp vcc    sc_pp  1k
+Cg2_pp sc_pp  0      47u
+
+* Shared cathode bias (250Ω drops ~17V at 70mA total)
+Rk_pp  ck_pp  0      250
+Ck_pp  ck_pp  0      100u
+
+* -------------- Output (single-ended from pa_1) --------------
+* True PP differential output requires OT differential coupling — phase 1e.
+Cout   pa_1   out    220n
+Rload  out    0      8
+
+.END

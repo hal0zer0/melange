@@ -314,22 +314,60 @@ impl NonlinearDevice<2> for KorenTriode {
     }
 }
 
-/// Reefman "Derk" §4.4 pentode model (plate + screen + grid currents).
+/// Screen-current functional form for [`KorenPentode`].
 ///
-/// Implements the equation set from D. Reefman, "Spice models for vacuum tubes
-/// using the uTracer" (2016) §4.4. Three independent currents — plate `Ip`,
-/// screen `Ig2`, and control-grid `Ig1` — each as a function of three voltages
-/// `Vgk`, `Vpk`, `Vg2k`. The control-grid current reuses the same Leach
-/// power-law form as [`KorenTriode`].
+/// Both true pentodes (EL84/EL34/EF86) and beam tetrodes (6L6GC/6V6GT/KT88)
+/// use the same Reefman Ip0/E1 core, but differ in how the plate voltage
+/// modulates the screen-to-plate current split:
 ///
-/// State variables and equations (`α = 1 − (Kg1/Kg2)·(1+αs)` is derived):
+/// - [`ScreenForm::Rational`] — Reefman "Derk" §4.4: `1 / (1 + β·Vp)`. Fits
+///   true pentodes with smooth plate-voltage knees.
+/// - [`ScreenForm::Exponential`] — Reefman "DerkE" §4.5:
+///   `exp(-(β·Vp)^{3/2})`. Required for beam tetrodes whose critical-distance
+///   electron-beam physics produces sharper screen-current compression than
+///   the rational form can capture.
+///
+/// Duplicated locally in `melange-devices`; the matching solver-side enum is
+/// [`melange_solver::device_types::ScreenForm`] and is kept in sync by the
+/// codegen path that builds `KorenPentode` from `TubeParams`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ScreenForm {
+    /// Reefman "Derk" §4.4 — rational `1/(1+β·Vp)` screen scaling.
+    /// Default for pentode models (EL84, EL34, EF86).
+    #[default]
+    Rational,
+    /// Reefman "DerkE" §4.5 — exponential `exp(-(β·Vp)^{3/2})` screen scaling.
+    /// Required for beam tetrodes (6L6GC, 6V6GT, KT88).
+    Exponential,
+}
+
+/// Reefman pentode / beam-tetrode model (plate + screen + grid currents).
+///
+/// Implements both Reefman D., "Spice models for vacuum tubes using the
+/// uTracer" (2016) §4.4 ("Derk", true pentodes) and §4.5 ("DerkE", beam
+/// tetrodes). Three independent currents — plate `Ip`, screen `Ig2`, and
+/// control-grid `Ig1` — each as a function of three voltages `Vgk`, `Vpk`,
+/// `Vg2k`. The control-grid current reuses the same Leach power-law form as
+/// [`KorenTriode`]. The `screen_form` field selects §4.4 vs §4.5.
+///
+/// State variables and equations (`α = 1 − (Kg1/Kg2)·(1+αs)` is derived,
+/// identical in both forms):
+///
 /// ```text
 /// inner = Kp · (1/μ + Vgk / sqrt(Kvb + Vg2k²))
 /// E1    = (Vg2k / Kp) · softplus(inner)
 /// Ip0   = E1^Ex                                       (when E1 > 0)
+///
+/// // §4.4 Rational (Derk)
 /// F(Vp) = 1/Kg1 − 1/Kg2 + A·Vp/Kg1
 ///         − (α/Kg1 + αs/Kg2) / (1 + β·Vp)
 /// H(Vp) = (1 + αs/(1 + β·Vp)) / Kg2
+///
+/// // §4.5 Exponential (DerkE)
+/// F(Vp) = 1/Kg1 − 1/Kg2 + A·Vp/Kg1
+///         − exp(-(β·Vp)^{3/2}) · (α/Kg1 + αs/Kg2)
+/// H(Vp) = (1 + αs · exp(-(β·Vp)^{3/2})) / Kg2
+///
 /// Ip    = Ip0 · F(Vpk)
 /// Ig2   = Ip0 · H(Vpk)
 /// Ig1   = Leach power-law (positive grid only)
@@ -366,11 +404,13 @@ pub struct KorenPentode {
     pub ig_max: f64,
     /// Control-grid current onset voltage [V] (Leach model).
     pub vgk_onset: f64,
+    /// Screen-current functional form: Rational (§4.4) or Exponential (§4.5).
+    pub screen_form: ScreenForm,
 }
 
 impl KorenPentode {
     /// EL84 / 6BQ5 — popular small power pentode (BTetrodeD fit from
-    /// Reefman TubeLib.inc, Jan 23 2016).
+    /// Reefman TubeLib.inc, Jan 23 2016). Uses the §4.4 rational screen form.
     pub fn el84() -> Self {
         Self {
             mu: 23.36,
@@ -384,11 +424,12 @@ impl KorenPentode {
             beta_factor: 0.148,
             ig_max: DEFAULT_IG_MAX,
             vgk_onset: DEFAULT_VGK_ONSET,
+            screen_form: ScreenForm::Rational,
         }
     }
 
     /// EL34 / 6CA7 — power pentode (BTetrodeD fit from Reefman
-    /// TubeLib.inc, Jan 23 2016).
+    /// TubeLib.inc, Jan 23 2016). Uses the §4.4 rational screen form.
     pub fn el34() -> Self {
         Self {
             mu: 12.50,
@@ -402,11 +443,12 @@ impl KorenPentode {
             beta_factor: 0.105,
             ig_max: DEFAULT_IG_MAX,
             vgk_onset: DEFAULT_VGK_ONSET,
+            screen_form: ScreenForm::Rational,
         }
     }
 
     /// EF86 / 6267 — true small-signal pentode (PenthodeD fit from
-    /// Reefman TubeLib.inc, Jan 23 2016).
+    /// Reefman TubeLib.inc, Jan 23 2016). Uses the §4.4 rational screen form.
     pub fn ef86() -> Self {
         Self {
             mu: 40.8,
@@ -420,6 +462,47 @@ impl KorenPentode {
             beta_factor: 0.28,
             ig_max: DEFAULT_IG_MAX,
             vgk_onset: DEFAULT_VGK_ONSET,
+            screen_form: ScreenForm::Rational,
+        }
+    }
+
+    /// 6L6GC beam tetrode — Reefman TubeLib.inc (2016) BTetrodeDE fit.
+    /// Uses the §4.5 exponential screen form (beam-tetrode critical-distance
+    /// screen compression).
+    pub fn tetrode_6l6gc() -> Self {
+        Self {
+            mu: 9.41,
+            ex: 1.306,
+            kg1: 446.6,
+            kg2: 6672.5,
+            kp: 45.2,
+            kvb: 3205.1,
+            alpha_s: 8.10,
+            a_factor: 4.91e-4,
+            beta_factor: 0.069,
+            ig_max: 10e-3,
+            vgk_onset: 0.7,
+            screen_form: ScreenForm::Exponential,
+        }
+    }
+
+    /// 6V6GT beam tetrode — Reefman TubeLib.inc (2016) BTetrodeDE fit.
+    /// Uses the §4.5 exponential screen form (beam-tetrode critical-distance
+    /// screen compression).
+    pub fn tetrode_6v6gt() -> Self {
+        Self {
+            mu: 10.56,
+            ex: 1.306,
+            kg1: 609.8,
+            kg2: 17267.3,
+            kp: 47.9,
+            kvb: 2171.5,
+            alpha_s: 18.72,
+            a_factor: 3.48e-4,
+            beta_factor: 0.068,
+            ig_max: 8e-3,
+            vgk_onset: 0.7,
+            screen_form: ScreenForm::Exponential,
         }
     }
 
@@ -462,6 +545,70 @@ impl KorenPentode {
         })
     }
 
+    /// Compute the shape functions `F(Vp)`, `H(Vp)` and their Vp-derivatives
+    /// for the active `screen_form`. `vpk_safe` must already be clamped to
+    /// `>= 0` by the caller.
+    #[inline]
+    fn compute_f_h(&self, vpk_safe: f64) -> FHShape {
+        let alpha = self.alpha();
+        let coeff = alpha / self.kg1 + self.alpha_s / self.kg2;
+        let one_over_kg1_minus_kg2 = 1.0 / self.kg1 - 1.0 / self.kg2;
+        let linear_term = self.a_factor * vpk_safe / self.kg1;
+
+        match self.screen_form {
+            ScreenForm::Rational => {
+                // §4.4: scale = 1 / (1 + β·Vp)
+                let one_plus_bvp = 1.0 + self.beta_factor * vpk_safe;
+                let inv_obvp = 1.0 / one_plus_bvp;
+                let inv_obvp_sq = inv_obvp * inv_obvp;
+
+                let f = one_over_kg1_minus_kg2 + linear_term - coeff * inv_obvp;
+                let h = (1.0 + self.alpha_s * inv_obvp) / self.kg2;
+
+                // d(1/(1+βVp))/dVp = -β / (1+βVp)^2
+                // dF/dVp = A/Kg1 + β·coeff / (1+βVp)^2
+                let df_dvpk = self.a_factor / self.kg1 + self.beta_factor * coeff * inv_obvp_sq;
+                // dH/dVp = -β·αs / (Kg2·(1+βVp)^2)
+                let dh_dvpk = -self.beta_factor * self.alpha_s * inv_obvp_sq / self.kg2;
+
+                FHShape {
+                    f,
+                    h,
+                    df_dvpk,
+                    dh_dvpk,
+                }
+            }
+            ScreenForm::Exponential => {
+                // §4.5: scale = exp(-(β·Vp)^{3/2})
+                // u = β·Vp clamped >= 0 (vpk_safe already >= 0, β > 0)
+                let u = (self.beta_factor * vpk_safe).max(0.0);
+                // u^{3/2}. When u == 0, both u^{3/2} = 0 AND sqrt(u) = 0 so
+                // derivatives remain finite (no (-)^{1.5} NaN exposure).
+                let u_32 = u * u.sqrt(); // = u^{3/2}
+                let ex_factor = (-u_32).exp();
+                let sqrt_u = u.sqrt();
+
+                let f = one_over_kg1_minus_kg2 + linear_term - ex_factor * coeff;
+                let h = (1.0 + self.alpha_s * ex_factor) / self.kg2;
+
+                // d(u^{3/2})/dVp = 1.5 · β · sqrt(u)   (u in Vp units → β factor)
+                // d(exp(-u^{3/2}))/dVp = -1.5 · β · sqrt(u) · ex_factor
+                // dF/dVp = A/Kg1 + 1.5·β·sqrt(u)·ex_factor · coeff
+                let deriv_prefactor = 1.5 * self.beta_factor * sqrt_u * ex_factor;
+                let df_dvpk = self.a_factor / self.kg1 + deriv_prefactor * coeff;
+                // dH/dVp = -1.5·β·sqrt(u)·ex_factor·αs / Kg2
+                let dh_dvpk = -deriv_prefactor * self.alpha_s / self.kg2;
+
+                FHShape {
+                    f,
+                    h,
+                    df_dvpk,
+                    dh_dvpk,
+                }
+            }
+        }
+    }
+
     /// Plate current `Ip(Vgk, Vpk, Vg2k)`.
     pub fn plate_current(&self, vgk: f64, vpk: f64, vg2k: f64) -> f64 {
         let vg2k_safe = vg2k.max(1e-3);
@@ -471,12 +618,7 @@ impl KorenPentode {
             return 0.0;
         };
 
-        let alpha = self.alpha();
-        let one_plus_bvp = 1.0 + self.beta_factor * vpk_safe;
-        let f = 1.0 / self.kg1 - 1.0 / self.kg2
-            + self.a_factor * vpk_safe / self.kg1
-            - (alpha / self.kg1 + self.alpha_s / self.kg2) / one_plus_bvp;
-
+        let FHShape { f, .. } = self.compute_f_h(vpk_safe);
         ip0 * f
     }
 
@@ -489,8 +631,7 @@ impl KorenPentode {
             return 0.0;
         };
 
-        let one_plus_bvp = 1.0 + self.beta_factor * vpk_safe;
-        let h = (1.0 + self.alpha_s / one_plus_bvp) / self.kg2;
+        let FHShape { h, .. } = self.compute_f_h(vpk_safe);
         ip0 * h
     }
 
@@ -545,19 +686,13 @@ impl KorenPentode {
         let de1_dvg2k = softplus / self.kp - sigmoid * vgk * vg2k_safe * vg2k_safe / (s * s * s);
         // dE1/dVpk = 0 (E1 only depends on Vgk and Vg2k)
 
-        // F, H and their Vp derivatives
-        let alpha = self.alpha();
-        let one_plus_bvp = 1.0 + self.beta_factor * vpk_safe;
-        let inv_obvp = 1.0 / one_plus_bvp;
-        let inv_obvp_sq = inv_obvp * inv_obvp;
-        let coeff = alpha / self.kg1 + self.alpha_s / self.kg2;
-
-        let f = 1.0 / self.kg1 - 1.0 / self.kg2 + self.a_factor * vpk_safe / self.kg1
-            - coeff * inv_obvp;
-        let df_dvpk = self.a_factor / self.kg1 + self.beta_factor * coeff * inv_obvp_sq;
-
-        let h = (1.0 + self.alpha_s * inv_obvp) / self.kg2;
-        let dh_dvpk = -self.beta_factor * self.alpha_s * inv_obvp_sq / self.kg2;
+        // F, H and their Vp derivatives — branches on screen_form (§4.4 vs §4.5)
+        let FHShape {
+            f,
+            h,
+            df_dvpk,
+            dh_dvpk,
+        } = self.compute_f_h(vpk_safe);
 
         // Shared "Ip0 chain" prefactor for the Vgk/Vg2k columns of Ip and Ig2.
         let dip0_dvgk = dip0_de1 * de1_dvgk;
@@ -600,6 +735,20 @@ struct SharedE1 {
     e1: f64,
     /// `Ip0 = E1^Ex`
     ip0: f64,
+}
+
+/// Shape-function values and Vp-derivatives returned by
+/// [`KorenPentode::compute_f_h`]. Branches internally on `ScreenForm`.
+#[derive(Clone, Copy)]
+struct FHShape {
+    /// `F(Vpk)` — plate-current shape factor.
+    f: f64,
+    /// `H(Vpk)` — screen-current shape factor.
+    h: f64,
+    /// `dF/dVpk`.
+    df_dvpk: f64,
+    /// `dH/dVpk`.
+    dh_dvpk: f64,
 }
 
 #[cfg(test)]
@@ -1349,5 +1498,214 @@ mod tests {
                 rel_err_pk
             );
         }
+    }
+
+    // ---------------------------------------------------------------
+    // Reefman §4.5 DerkE (Exponential screen form) — beam tetrodes
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_6l6gc_operating_point() {
+        // Class-A bias for a 6L6GC: Vgk=-20, Vpk=300, Vg2k=250.
+        let tet = KorenPentode::tetrode_6l6gc();
+        assert_eq!(tet.screen_form, ScreenForm::Exponential);
+
+        let ip = tet.plate_current(-20.0, 300.0, 250.0);
+        let ig2 = tet.screen_current(-20.0, 300.0, 250.0);
+
+        assert!(ip.is_finite() && !ip.is_nan(), "6L6GC Ip must be finite: {}", ip);
+        assert!(
+            ig2.is_finite() && !ig2.is_nan(),
+            "6L6GC Ig2 must be finite: {}",
+            ig2
+        );
+        assert!(ip > 0.0, "6L6GC Ip must be positive at Class A: {:.6e}", ip);
+        assert!(
+            ig2 > 0.0,
+            "6L6GC Ig2 must be positive at Class A: {:.6e}",
+            ig2
+        );
+        assert!(
+            ip > ig2,
+            "Beam tetrode Ip must exceed Ig2 in Class A: Ip={:.3e}, Ig2={:.3e}",
+            ip,
+            ig2
+        );
+    }
+
+    #[test]
+    fn test_6v6gt_operating_point() {
+        // Class-A bias for a 6V6GT: Vgk=-12, Vpk=300, Vg2k=250.
+        let tet = KorenPentode::tetrode_6v6gt();
+        assert_eq!(tet.screen_form, ScreenForm::Exponential);
+
+        let ip = tet.plate_current(-12.0, 300.0, 250.0);
+        let ig2 = tet.screen_current(-12.0, 300.0, 250.0);
+
+        assert!(ip.is_finite() && !ip.is_nan(), "6V6GT Ip must be finite: {}", ip);
+        assert!(
+            ig2.is_finite() && !ig2.is_nan(),
+            "6V6GT Ig2 must be finite: {}",
+            ig2
+        );
+        assert!(ip > 0.0, "6V6GT Ip must be positive at Class A: {:.6e}", ip);
+        assert!(
+            ig2 > 0.0,
+            "6V6GT Ig2 must be positive at Class A: {:.6e}",
+            ig2
+        );
+        assert!(
+            ip > ig2,
+            "Beam tetrode Ip must exceed Ig2 in Class A: Ip={:.3e}, Ig2={:.3e}",
+            ip,
+            ig2
+        );
+    }
+
+    #[test]
+    fn test_6l6gc_jacobian_fd() {
+        // Finite-difference check of analytic 3x3 for DerkE form at a
+        // moderate Class-A point that's well away from the E1 guard.
+        let tet = KorenPentode::tetrode_6l6gc();
+        let eps = 1e-6;
+
+        let (vgk, vpk, vg2k) = (-15.0, 300.0, 250.0);
+        let jac = tet.jacobian_3x3(vgk, vpk, vg2k);
+
+        let plate = |a: f64, b: f64, c: f64| tet.plate_current(a, b, c);
+        let screen = |a: f64, b: f64, c: f64| tet.screen_current(a, b, c);
+
+        let fd = |f: &dyn Fn(f64, f64, f64) -> f64, dim: usize| -> f64 {
+            let mut p = [vgk, vpk, vg2k];
+            let mut m = [vgk, vpk, vg2k];
+            p[dim] += eps;
+            m[dim] -= eps;
+            (f(p[0], p[1], p[2]) - f(m[0], m[1], m[2])) / (2.0 * eps)
+        };
+
+        let row_specs: [(usize, &str, &dyn Fn(f64, f64, f64) -> f64); 2] =
+            [(0, "Ip", &plate), (1, "Ig2", &screen)];
+
+        for (row, name, f) in row_specs {
+            for col in 0..3 {
+                let analytic = jac[row][col];
+                let numerical = fd(f, col);
+                let rel_err = if numerical.abs() > 1e-15 {
+                    (analytic - numerical).abs() / numerical.abs()
+                } else {
+                    analytic.abs()
+                };
+                assert!(
+                    rel_err < 1e-3,
+                    "6L6GC d{}/dV[{}] mismatch at (Vgk={}, Vpk={}, Vg2k={}): \
+                     analytic={:.6e} fd={:.6e} rel_err={:.2e}",
+                    name,
+                    col,
+                    vgk,
+                    vpk,
+                    vg2k,
+                    analytic,
+                    numerical,
+                    rel_err
+                );
+            }
+        }
+
+        // Ig1 row: Vgk=-15 is reverse-biased, so the full row should be zero.
+        assert_eq!(jac[2][0], 0.0);
+        assert_eq!(jac[2][1], 0.0);
+        assert_eq!(jac[2][2], 0.0);
+    }
+
+    #[test]
+    fn test_derke_cutoff_smoothness() {
+        // Near Vpk=0 the (β·Vp)^{3/2} term and its sqrt(β·Vp) derivative
+        // must remain finite for DerkE. This is the main risk point of
+        // the §4.5 form.
+        let tet = KorenPentode::tetrode_6l6gc();
+
+        // Sweep Vpk through the small-Vp region including exactly zero
+        // and a slightly-negative probe (which gets clamped to 0 internally).
+        for &vpk in &[-0.5_f64, 0.0, 0.5, 1e-9, 1e-6, 1.0] {
+            let ip = tet.plate_current(-15.0, vpk, 250.0);
+            let ig2 = tet.screen_current(-15.0, vpk, 250.0);
+            let jac = tet.jacobian_3x3(-15.0, vpk, 250.0);
+
+            assert!(
+                ip.is_finite() && !ip.is_nan(),
+                "DerkE Ip must be finite at Vpk={}: {}",
+                vpk,
+                ip
+            );
+            assert!(
+                ig2.is_finite() && !ig2.is_nan(),
+                "DerkE Ig2 must be finite at Vpk={}: {}",
+                vpk,
+                ig2
+            );
+            for row in 0..3 {
+                for col in 0..3 {
+                    assert!(
+                        jac[row][col].is_finite() && !jac[row][col].is_nan(),
+                        "DerkE jacobian_3x3[{}][{}] must be finite at Vpk={}: {}",
+                        row,
+                        col,
+                        vpk,
+                        jac[row][col]
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_derke_rational_distinct() {
+        // Build two pentodes with IDENTICAL Koren parameters that differ
+        // only in screen_form. At a non-zero Vpk the two shape functions
+        // must diverge, confirming the branch is actually taken.
+        let base = KorenPentode::tetrode_6l6gc();
+        let mut rational_clone = base;
+        rational_clone.screen_form = ScreenForm::Rational;
+
+        let (vgk, vpk, vg2k) = (-15.0, 250.0, 250.0);
+        let ip_e = base.plate_current(vgk, vpk, vg2k);
+        let ig2_e = base.screen_current(vgk, vpk, vg2k);
+        let ip_r = rational_clone.plate_current(vgk, vpk, vg2k);
+        let ig2_r = rational_clone.screen_current(vgk, vpk, vg2k);
+
+        assert!(ip_e.is_finite() && ip_r.is_finite());
+        assert!(ig2_e.is_finite() && ig2_r.is_finite());
+
+        let ip_rel = (ip_e - ip_r).abs() / ip_e.abs().max(ip_r.abs()).max(1e-20);
+        let ig2_rel = (ig2_e - ig2_r).abs() / ig2_e.abs().max(ig2_r.abs()).max(1e-20);
+
+        assert!(
+            ip_rel > 1e-3,
+            "DerkE and Rational Ip should differ at Vpk={}: Ip_e={:.6e} Ip_r={:.6e} rel={:.2e}",
+            vpk,
+            ip_e,
+            ip_r,
+            ip_rel
+        );
+        assert!(
+            ig2_rel > 1e-3,
+            "DerkE and Rational Ig2 should differ at Vpk={}: Ig2_e={:.6e} Ig2_r={:.6e} rel={:.2e}",
+            vpk,
+            ig2_e,
+            ig2_r,
+            ig2_rel
+        );
+
+        // And at Vpk=0, the two forms should agree (both scale factors → 1).
+        let ip_e0 = base.plate_current(vgk, 0.0, vg2k);
+        let ip_r0 = rational_clone.plate_current(vgk, 0.0, vg2k);
+        let rel0 = (ip_e0 - ip_r0).abs() / ip_e0.abs().max(1e-20);
+        assert!(
+            rel0 < 1e-12,
+            "At Vpk=0 both forms should agree (scale=1): Ip_e={:.6e} Ip_r={:.6e} rel={:.2e}",
+            ip_e0,
+            ip_r0,
+            rel0
+        );
     }
 }

@@ -1295,7 +1295,7 @@ pub struct TransformerGroupIR {
 // Re-export device types from the shared module (always compiled, no tera dependency).
 pub use crate::device_types::{
     BjtParams, DeviceParams, DeviceSlot, DeviceType, DiodeParams, JfetParams, MosfetParams,
-    TubeKind, TubeParams, VcaParams,
+    ScreenForm, TubeKind, TubeParams, VcaParams,
 };
 
 /// Sparsity pattern for a single matrix.
@@ -3970,39 +3970,98 @@ impl CircuitIR {
             alpha_s: 0.0,
             a_factor: 0.0,
             beta_factor: 0.0,
+            screen_form: crate::device_types::ScreenForm::Rational,
         })
     }
 
     /// Resolve pentode model parameters from the netlist, with validation.
     ///
-    /// Uses Reefman "Derk" §4.4 equations (see `pentode_equations.md` memory
-    /// file). Reads MU, EX, KG1, KG2, KP, KVB, ALPHA_S, A_FACTOR, BETA_FACTOR
-    /// plus the shared triode-compatible params (IG_MAX, VGK_ONSET, CCG/CGP/CCP,
-    /// RGI). Resolution order: explicit `.model` param → catalog → generic
-    /// default (EL84).
+    /// Uses Reefman's pentode equations (see `pentode_equations.md` memory
+    /// file). Reads MU, EX, KG1, KG2, KP, KVB, ALPHA_S, A_FACTOR, BETA_FACTOR,
+    /// SCREEN_FORM plus the shared triode-compatible params (IG_MAX, VGK_ONSET,
+    /// CCG/CGP/CCP, RGI).
+    ///
+    /// Resolution order (each parameter independently):
+    ///   1. Explicit `.model NAME VP(PARAM=value)` in the netlist
+    ///   2. `PENTODE_CATALOG` entry keyed by the model name (e.g. `EL84-P`,
+    ///      `6L6GC-T`)
+    ///   3. Generic EL84-shaped fallback default (lets a bare `.model FOO VP()`
+    ///      still produce a working — if wrong — pentode so codegen doesn't
+    ///      crash on unfitted circuits)
+    ///
+    /// The screen-current form (`Rational` / `Exponential`) resolves the same
+    /// way: explicit `SCREEN_FORM=0|1` param overrides catalog, catalog
+    /// provides the right default for fitted tubes (EL84/EL34/EF86 →
+    /// Rational, 6L6GC/6V6GT → Exponential), and the fallback is `Rational`.
     ///
     /// Returns a `TubeParams` with `kind = SharpPentode`. Callers should
     /// `validate()` the result; this function does explicit `Err` on missing
     /// required pentode params (KG2, ALPHA_S).
     fn resolve_pentode_params(netlist: &Netlist, model: &str) -> Result<TubeParams, CodegenError> {
-        // Pentode catalog lookup lands in a later task (P1a-08). For now
-        // resolve from .model parameters only; emit a generic EL84-shaped
-        // default if the .model is entirely absent.
-        let mu = Self::lookup_model_param(netlist, model, "MU").unwrap_or(23.36);
-        let ex = Self::lookup_model_param(netlist, model, "EX").unwrap_or(1.138);
-        let kg1 = Self::lookup_model_param(netlist, model, "KG1").unwrap_or(117.4);
-        let kp = Self::lookup_model_param(netlist, model, "KP").unwrap_or(152.4);
-        let kvb = Self::lookup_model_param(netlist, model, "KVB").unwrap_or(4015.8);
-        let kg2 = Self::lookup_model_param(netlist, model, "KG2").unwrap_or(1275.0);
-        let alpha_s = Self::lookup_model_param(netlist, model, "ALPHA_S").unwrap_or(7.66);
+        // Catalog lookup first — if the model name matches a PentodeCatalogEntry,
+        // we use those fitted params as the fallback. Explicit `.model VP(...)`
+        // parameters override on a per-field basis (user can replace any subset).
+        let cat = melange_devices::catalog::tubes::lookup_pentode(model);
+
+        let mu = Self::lookup_model_param(netlist, model, "MU")
+            .or_else(|| cat.map(|c| c.mu))
+            .unwrap_or(23.36);
+        let ex = Self::lookup_model_param(netlist, model, "EX")
+            .or_else(|| cat.map(|c| c.ex))
+            .unwrap_or(1.138);
+        let kg1 = Self::lookup_model_param(netlist, model, "KG1")
+            .or_else(|| cat.map(|c| c.kg1))
+            .unwrap_or(117.4);
+        let kp = Self::lookup_model_param(netlist, model, "KP")
+            .or_else(|| cat.map(|c| c.kp))
+            .unwrap_or(152.4);
+        let kvb = Self::lookup_model_param(netlist, model, "KVB")
+            .or_else(|| cat.map(|c| c.kvb))
+            .unwrap_or(4015.8);
+        let kg2 = Self::lookup_model_param(netlist, model, "KG2")
+            .or_else(|| cat.map(|c| c.kg2))
+            .unwrap_or(1275.0);
+        let alpha_s = Self::lookup_model_param(netlist, model, "ALPHA_S")
+            .or_else(|| cat.map(|c| c.alpha_s))
+            .unwrap_or(7.66);
         // `A` alone collides with other SPICE conventions (e.g. AC), so the
         // model directive uses the more explicit name `A_FACTOR`.
-        let a_factor = Self::lookup_model_param(netlist, model, "A_FACTOR").unwrap_or(4.344e-4);
-        let beta_factor =
-            Self::lookup_model_param(netlist, model, "BETA_FACTOR").unwrap_or(0.148);
-        let ig_max = Self::lookup_model_param(netlist, model, "IG_MAX").unwrap_or(8e-3);
-        let vgk_onset = Self::lookup_model_param(netlist, model, "VGK_ONSET").unwrap_or(0.7);
+        let a_factor = Self::lookup_model_param(netlist, model, "A_FACTOR")
+            .or_else(|| cat.map(|c| c.a_factor))
+            .unwrap_or(4.344e-4);
+        let beta_factor = Self::lookup_model_param(netlist, model, "BETA_FACTOR")
+            .or_else(|| cat.map(|c| c.beta_factor))
+            .unwrap_or(0.148);
+        let ig_max = Self::lookup_model_param(netlist, model, "IG_MAX")
+            .or_else(|| cat.map(|c| c.ig_max))
+            .unwrap_or(8e-3);
+        let vgk_onset = Self::lookup_model_param(netlist, model, "VGK_ONSET")
+            .or_else(|| cat.map(|c| c.vgk_onset))
+            .unwrap_or(0.7);
         let lambda = Self::lookup_model_param(netlist, model, "LAMBDA").unwrap_or(0.0);
+
+        // Screen form: catalog value wins over the fallback; explicit
+        // `SCREEN_FORM=0|1` in the .model directive wins over the catalog.
+        // `0` = Rational (Derk §4.4), `1` = Exponential (DerkE §4.5).
+        let screen_form = {
+            use crate::device_types::ScreenForm;
+            let explicit = Self::lookup_model_param(netlist, model, "SCREEN_FORM");
+            match explicit {
+                Some(v) if v == 0.0 => ScreenForm::Rational,
+                Some(v) if v == 1.0 => ScreenForm::Exponential,
+                Some(v) => {
+                    return Err(CodegenError::InvalidConfig(format!(
+                        "pentode model SCREEN_FORM must be 0 (Rational) or 1 (Exponential), got {v}"
+                    )));
+                }
+                None => match cat.map(|c| c.screen_form) {
+                    Some(melange_devices::tube::ScreenForm::Exponential) => {
+                        ScreenForm::Exponential
+                    }
+                    _ => ScreenForm::Rational,
+                },
+            }
+        };
 
         validate_positive_finite(mu, "pentode model MU")?;
         validate_positive_finite(ex, "pentode model EX")?;
@@ -4068,6 +4127,7 @@ impl CircuitIR {
                 "ALPHA_S",
                 "A_FACTOR",
                 "BETA_FACTOR",
+                "SCREEN_FORM",
                 "IG_MAX",
                 "VGK_ONSET",
                 "LAMBDA",
@@ -4096,6 +4156,7 @@ impl CircuitIR {
             alpha_s,
             a_factor,
             beta_factor,
+            screen_form,
         };
         params
             .validate()

@@ -282,16 +282,85 @@ Catalog aliases: `EL84-P`, `EL34-P`, `EF86`. The existing triode-connected
 `EL84` / `EL34` / `6L6` / `6V6` catalog entries remain available for
 backward compat.
 
-### Deferred
+### Beam Tetrode Variant — Reefman "DerkE" §4.5
 
-- **Beam tetrodes** (6L6, 6V6, KT88) need the Reefman DerkE §4.5 screen
-  form `Ig2 = Ip0 * (1 + αs * exp(-β * Vpk^{3/2})) / Kg2` instead of
-  the rational `1/(1 + β·Vpk)` of §4.4. Phase 1a.1.
+Beam tetrodes (6L6GC, 6V6GT, KT88) exhibit sharper screen-current knees than
+true pentodes (the "critical compensation" phenomenon — see Reefman §4.5).
+The rational `1/(1+β·Vp)` factor of Derk §4.4 cannot capture the knee
+accurately, so melange uses a **second screen-current form**:
+
+```
+// "Exponential" screen form (DerkE §4.5)
+u          = max(0, β·Vpk)                    // guard against Vpk<0 probes
+ex_factor  = exp(-u^{3/2})                    // = exp(-(β·Vpk)^{3/2})
+F(Vpk)     = 1/Kg1 − 1/Kg2 + (A·Vpk)/Kg1 − ex_factor · (α/Kg1 + αs/Kg2)
+H(Vpk)     = (1 + αs · ex_factor) / Kg2
+```
+
+Everything else (Ip0, E1, α derivation, Leach grid current, 3×3 Jacobian
+shape) is identical to the Rational form.
+
+**Compute `u^{3/2}` as `u * sqrt(u)`**, not `u.powf(1.5)` — the former is
+faster and cleanly returns 0 at u=0, the latter can produce NaN for any
+negative input that slips through the `max(0, …)` guard.
+
+Jacobian Vp-derivatives differ from the Rational form:
+```
+d(ex_factor)/dVpk = -1.5 · β · sqrt(u) · ex_factor
+dF/dVpk           = A/Kg1 + 1.5 · β · sqrt(u) · ex_factor · (α/Kg1 + αs/Kg2)
+dH/dVpk           = -1.5 · β · sqrt(u) · ex_factor · αs / Kg2
+```
+
+At `Vpk = 0`: `sqrt(u) = 0`, so both derivatives are finite and the chain
+rule has no singularity.
+
+### Screen-Form Discriminator
+
+`TubeParams.screen_form: ScreenForm` selects the variant:
+- `ScreenForm::Rational` (default) — Reefman Derk §4.4. True pentodes.
+- `ScreenForm::Exponential` — Reefman DerkE §4.5. Beam tetrodes.
+
+The `.model NAME VP(...)` directive accepts `SCREEN_FORM=0` (Rational) or
+`SCREEN_FORM=1` (Exponential) as an explicit override. The PENTODE_CATALOG
+entries carry the right form per-tube and the resolver auto-selects based
+on the catalog.
+
+Melange uses **two separate `ScreenForm` enum declarations** — one in
+`melange-devices::tube` (drives `KorenPentode` runtime math) and one in
+`melange-solver::device_types` (drives serialized `TubeParams` and codegen).
+They're intentionally duplicated because `melange-devices` is upstream of
+`melange-solver` and cannot depend on it. Conversion happens at the `dc_op.rs`
+`KorenPentode` construction site with an inline match.
+
+### Beam Tetrode Catalog Parameters (from Reefman TubeLib.inc 2016-01-23)
+
+| Tube | μ | Ex | Kg1 | Kg2 | Kp | Kvb | αs | A | β | Source |
+|------|---|-----|-----|-----|-----|-----|-----|---|---|--------|
+| 6L6GC / 5881 / 6L6 | 9.41 | 1.306 | 446.6 | 6672.5 | 45.2 | 3205.1 | 8.10 | 4.91e-4 | 0.069 | BTetrodeDE |
+| 6V6GT / 6V6 | 10.56 | 1.306 | 609.8 | 17267.3 | 47.9 | 2171.5 | 18.72 | 3.48e-4 | 0.068 | BTetrodeDE |
+
+Catalog aliases: `6L6-T`, `6L6GC-T`, `5881-T`, `6V6-T`, `6V6GT-T`. The `-T`
+suffix ("tetrode") distinguishes these from the legacy triode-connected
+`6L6` / `6V6` catalog entries which are preserved byte-identical for
+backward compat.
+
+**KT88/6550** is not in Reefman's TubeLib.inc and has no published Derk or
+DerkE fit. Deferred to phase 1a.2 (Cohen-Hélie classical Koren bootstrap)
+or phase 1d (datasheet refit from RCA/Genalex manuals).
+
+### Still Deferred
+
 - **Grid-off FA reduction**: pentode 3D → 2D when Vgk < 0 (Ig1 = 0).
-  Phase 1b, analogous to BJT forward-active dimension reduction.
+  Phase 1b, analogous to BJT forward-active dimension reduction. Load-bearing
+  for Plexi-class amps (4×EL34 + 3×12AX7 = 18 dims without reduction, blows
+  past the M=16 DK cap).
 - **Remote-cutoff / variable-mu** (6BA6, 6386, 6SK7, 6BC8): two-section
   Koren per Reefman §5. Phase 1c, for varimu compressor targets
   (Fairchild 670, Sta-Level, Collins 26U).
+- **Ideal OT model**: current test circuits (AC15, Tweed Deluxe) use
+  resistive plate loads and single-plate output coupling, which masks the
+  real amp gain. Phase 1e adds a proper ideal-transformer model for
+  differential push-pull output.
 
 ## JFET (Shichman-Hodges)
 

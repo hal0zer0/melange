@@ -87,7 +87,7 @@ pub use codegen::CodegenError;
 pub use codegen::{CodeGenerator, CodegenConfig, GeneratedCode};
 pub use device_types::{
     BjtParams, DeviceParams, DeviceSlot, DeviceType, DiodeParams, JfetParams, MosfetParams,
-    TubeKind, TubeParams, VcaParams,
+    ScreenForm, TubeKind, TubeParams, VcaParams,
 };
 pub use dk::{DkError, DkKernel, MAX_M};
 pub use linear_solver::{LinearSolver, SolverError};

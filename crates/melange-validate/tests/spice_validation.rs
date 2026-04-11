@@ -713,6 +713,7 @@ fn build_device_slots_from_netlist(
                         alpha_s: 0.0,
                         a_factor: 0.0,
                         beta_factor: 0.0,
+                        screen_form: melange_solver::device_types::ScreenForm::Rational,
                     }),
                     has_internal_mna_nodes: false,
                 });
