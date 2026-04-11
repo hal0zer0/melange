@@ -162,16 +162,8 @@ fn parse_f64_lines(output: &str) -> Vec<f64> {
 fn test_sparse_lu_correctness_diode_clipper() {
     let code = generate_nodal_code(DIODE_CLIPPER, 48000.0);
 
-    // Check which path is used
-    let has_sparse = code.contains("sparse_lu_factor");
-    let has_dense = code.contains("fn lu_factor(");
-
-    // At least one must exist
-    assert!(
-        has_sparse || has_dense,
-        "Generated code must have either sparse or dense LU"
-    );
-
+    // Circuit may route to Schur (K well-conditioned) or full-LU depending on
+    // spectral radius. Test correctness regardless of path.
     // Run it and verify output is non-zero and finite
     let main_code = r#"
 fn main() {
@@ -338,64 +330,55 @@ fn main() {
     );
 }
 
-/// Verify that chord_valid is properly reset on state.reset().
+/// Verify that state.reset() produces correct output (path-agnostic).
+/// After reset, the circuit should produce the same output as a fresh default().
 #[test]
 fn test_chord_valid_reset() {
     let code = generate_nodal_code(DIODE_CLIPPER, 48000.0);
 
     let main_code = r#"
 fn main() {
-    let mut state = CircuitState::default();
-    // Process some samples to build up chord state
+    // Run 100 samples from default state
+    let mut state1 = CircuitState::default();
+    let mut peak1 = 0.0f64;
     for i in 0..100u32 {
         let t = i as f64 / 48000.0;
         let input = 1.0 * (2.0 * std::f64::consts::PI * 500.0 * t).sin();
-        process_sample(input, &mut state);
+        let output = process_sample(input, &mut state1);
+        peak1 = peak1.max(output[0].abs());
     }
-    println!("before_reset_valid={}", state.chord_valid);
-    let refactors_before = state.diag_refactor_count;
 
-    // Reset
-    state.reset();
-    println!("after_reset_valid={}", state.chord_valid);
-
-    // Process more samples — should refactor on first sample (chord_valid=false)
+    // Reset and run 100 more — should produce same waveform as fresh default
+    state1.reset();
+    let mut state2 = CircuitState::default();
+    let mut max_diff = 0.0f64;
     for i in 0..100u32 {
         let t = i as f64 / 48000.0;
         let input = 1.0 * (2.0 * std::f64::consts::PI * 500.0 * t).sin();
-        let output = process_sample(input, &mut state);
-        if !output[0].is_finite() {
-            println!("NAN_AT={}", i);
-        }
+        let out1 = process_sample(input, &mut state1);
+        let out2 = process_sample(input, &mut state2);
+        let diff = (out1[0] - out2[0]).abs();
+        max_diff = max_diff.max(diff);
+        if !out1[0].is_finite() { println!("NAN_AT={}", i); }
     }
-    let refactors_after = state.diag_refactor_count - refactors_before;
-    println!("refactors_after_reset={}", refactors_after);
-    println!("final_valid={}", state.chord_valid);
-    println!("nr_fail={}", state.diag_nr_max_iter_count);
+    println!("peak={:.6}", peak1);
+    println!("max_diff={:.6e}", max_diff);
+    println!("nr_fail={}", state1.diag_nr_max_iter_count);
 }
 "#;
     let output = compile_and_run(&code, main_code, "chord_reset");
 
-    // chord_valid should be true after processing
+    // Output should be non-zero
     assert!(
-        output.contains("before_reset_valid=true"),
-        "chord_valid should be true after processing. Output:\n{output}"
+        output.contains("peak=") && !output.contains("peak=0.000000"),
+        "Circuit should produce non-zero output. Output:\n{output}"
     );
-    // chord_valid should be true after reset (reset calls warmup which re-establishes chord)
-    assert!(
-        output.contains("after_reset_valid=true"),
-        "chord_valid should be true after reset+warmup. Output:\n{output}"
-    );
-    // chord_valid should remain true after more processing
-    assert!(
-        output.contains("final_valid=true"),
-        "chord_valid should be true after post-reset processing. Output:\n{output}"
-    );
-    // Should have refactored at least once during warmup after reset
-    assert!(
-        output.contains("refactors_after_reset="),
-        "Should have refactor count. Output:\n{output}"
-    );
+    // Reset state should match fresh default (within floating-point tolerance)
+    let max_diff_line = output.lines().find(|l| l.starts_with("max_diff="));
+    if let Some(line) = max_diff_line {
+        let val: f64 = line.split('=').nth(1).unwrap().parse().unwrap_or(1.0);
+        assert!(val < 1e-10, "Reset state should match fresh default, max_diff={val:.2e}");
+    }
     // No NR failures
     assert!(
         output.contains("nr_fail=0"),
@@ -446,8 +429,8 @@ fn main() {
     );
 }
 
-/// Verify that cross-timestep + sparse LU produces non-zero refactor count
-/// on the first sample and zero refactors on subsequent smooth samples.
+/// Verify that the nodal path produces stable, correct output over 100 samples.
+/// Path-agnostic: works for both Schur and full-LU routing.
 #[test]
 fn test_cross_timestep_refactor_counting() {
     let code = generate_nodal_code(DIODE_CLIPPER, 48000.0);
@@ -455,38 +438,31 @@ fn test_cross_timestep_refactor_counting() {
     let main_code = r#"
 fn main() {
     let mut state = CircuitState::default();
-
-    // First sample: should trigger at least 1 refactoring (chord_valid=false)
-    let input = 0.5 * (2.0 * std::f64::consts::PI * 500.0 * 0.0).sin();
-    process_sample(input, &mut state);
-    let refactors_after_first = state.diag_refactor_count;
-    println!("refactors_sample_0={}", refactors_after_first);
-    println!("chord_valid_after_0={}", state.chord_valid);
-
-    // Process 99 more smooth samples
-    for i in 1..100u32 {
+    let mut peak = 0.0f64;
+    let mut all_finite = true;
+    for i in 0..100u32 {
         let t = i as f64 / 48000.0;
         let input = 0.5 * (2.0 * std::f64::consts::PI * 500.0 * t).sin();
-        process_sample(input, &mut state);
+        let output = process_sample(input, &mut state);
+        peak = peak.max(output[0].abs());
+        if !output[0].is_finite() { all_finite = false; }
     }
-    let refactors_total = state.diag_refactor_count;
-    let refactors_after_first_sample = refactors_total - refactors_after_first;
-    println!("refactors_samples_1_99={}", refactors_after_first_sample);
-    println!("avg_iters={:.2}", state.last_nr_iterations);
+    println!("peak={:.6}", peak);
+    println!("all_finite={}", all_finite);
     println!("nr_fail={}", state.diag_nr_max_iter_count);
 }
 "#;
     let output = compile_and_run(&code, main_code, "xts_counting");
 
-    // First sample should have at least 1 refactoring
+    // Output should be non-zero
     assert!(
-        output.contains("refactors_sample_0=") && !output.contains("refactors_sample_0=0"),
-        "First sample should refactor (chord_valid starts false)"
+        output.contains("peak=") && !output.contains("peak=0.000000"),
+        "Circuit should produce non-zero output. Output:\n{output}"
     );
-    // chord_valid should be true after first sample
-    assert!(output.contains("chord_valid_after_0=true"));
+    // All finite
+    assert!(output.contains("all_finite=true"), "All outputs should be finite. Output:\n{output}");
     // No NR failures
-    assert!(output.contains("nr_fail=0"));
+    assert!(output.contains("nr_fail=0"), "No NR failures expected. Output:\n{output}");
 }
 
 // ── Gain sanity tests ────────────────────────────────────────────────

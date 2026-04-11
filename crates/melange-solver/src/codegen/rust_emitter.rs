@@ -3787,17 +3787,44 @@ impl RustEmitter {
         // matching the DK auto-BE threshold). Only route to full-LU when K
         // itself is pathological OR spectral radius indicates true instability
         // that even the Schur NR can't damp.
+        //
+        // K magnitude check: circuits where nonlinear devices are the sole
+        // current path between nodes (no parallel resistors) produce K entries
+        // spanning many orders of magnitude (e.g. 5×10^11 for a transistor
+        // ladder filter). The Schur NR forms J = I - J_dev*K; when |K| is
+        // extreme, J_dev*K >> I and the 16×16 Gauss elimination is hopelessly
+        // ill-conditioned. The full LU NR avoids K entirely by stamping device
+        // Jacobians into G_aug directly.
+        let k_ill_conditioned = m > 0 && k_max_abs > 1e8;
+        // S matrix check: nodes connected only through caps and device junctions
+        // (no resistive path) produce extreme S = A^{-1} entries. This is
+        // invariant to FA reduction — FA changes N_V/N_I/K but not A/S. When
+        // S has entries > 1e6, the Schur prediction v = S*rhs amplifies roundoff
+        // into the nonlinear solver, producing garbage regardless of K magnitude.
+        let n = ir.topology.n;
+        let s_max_abs = if n > 0 && !ir.matrices.s.is_empty() {
+            ir.matrices.s.iter().map(|v| v.abs()).fold(0.0_f64, f64::max)
+        } else {
+            0.0
+        };
+        let s_ill_conditioned = s_max_abs > 1e6;
         let k_well_conditioned = m > 0
             && !k_degenerate
             && !has_positive_k_with_current
+            && !k_ill_conditioned
+            && !s_ill_conditioned
             && k_diag_min > -1e12;
         let schur_unstable = if k_well_conditioned {
             ir.matrices.spectral_radius_s_aneg > 1.002
         } else {
             ir.matrices.spectral_radius_s_aneg > 1.0
         };
-        let use_full_nodal =
-            has_positive_k_with_current || k_diag_min < -1e12 || k_degenerate || schur_unstable;
+        let use_full_nodal = has_positive_k_with_current
+            || k_diag_min < -1e12
+            || k_degenerate
+            || k_ill_conditioned
+            || s_ill_conditioned
+            || schur_unstable;
         // The dense `lu_solve` helper is emitted whenever any generated code
         // path needs it. The full-LU nodal path always needs it. The Schur
         // path also needs it when op-amp rail handling is in `ActiveSet` mode,
@@ -3821,6 +3848,16 @@ impl RustEmitter {
                 log::info!(
                     "Nodal: using full N×N LU NR (K degenerate, max|K|={:.2e} — device Jacobian provides essential damping)",
                     k_max_abs
+                );
+            } else if k_ill_conditioned {
+                log::info!(
+                    "Nodal: using full N×N LU NR (max|K|={:.2e}, extreme K magnitude — device nodes lack resistive paths)",
+                    k_max_abs
+                );
+            } else if s_ill_conditioned {
+                log::info!(
+                    "Nodal: using full N×N LU NR (max|S|={:.2e}, cap-only nodes lack resistive paths — Schur prediction unreliable)",
+                    s_max_abs
                 );
             } else if schur_unstable {
                 log::info!(

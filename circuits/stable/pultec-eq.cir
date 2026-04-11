@@ -53,9 +53,12 @@
 
 * 12AX7 params fitted to Sylvania datasheet operating points:
 *   Vp=250V Vg=-2V → Ip=1.2mA, Vp=250V Vg=-4V → Ip=0.3mA,
-*   Vp=100V Vg=-1V → Ip=0.55mA (all within 1.1%)
+*   Vp=100V Vg=-1V → Ip=0.55mA
+* Koren fit (2026-04-09): MU=100 fixed, KP/KVB/KG1/EX optimized via
+* differential evolution with OP constraint (Vpk~140V @ Vgk=-1.3V, 200K/287V).
+* Errors: +11%/-3%/-6% at datasheet points. OP: Vpk=143V (schematic: 140V).
 *
-.model 12AX7 TRIODE(MU=99.25 EX=1.029 KG1=674.9 KP=1500 KVB=3000 CCG=1.6p CGP=1.7p CCP=0.46p)
+.model 12AX7 TRIODE(MU=100 EX=1.100 KG1=815.8 KP=245 KVB=10000 CCG=1.6p CGP=1.7p CCP=0.46p)
 * 12AU7 params fitted to Sylvania datasheet operating points:
 *   Vp=250V Vg=-8.5V → Ip=10.5mA, Vp=250V Vg=-9.0V → Ip=8.5mA,
 *   Vp=100V Vg=-4.0V → Ip=3.8mA (all within 0.2%)

@@ -175,24 +175,32 @@ system via DK reduction).
    commit `39397d1` (BoyleDiodes-gated): a residual check using
    `i_nl_fresh − i_nl_chord` (mirrors the DK Schur path's gate), plus an
    adaptive refactor trigger (>50 % relative `j_dev` change). Both work
-   for single-diode engagement (light clipping) but **fail at heavy
-   clipping** because of a deeper bistability: the chord LU at any single
-   `chord_j_dev` value has its own "wrong" linear fixed point (chord with
-   tiny jdev → fixed point above knee; chord with large jdev → fixed
-   point below knee), and neither captures the true intermediate-jdev
-   equilibrium. Line search backtracking (which prevents step overshoot)
-   does not fix this because the Newton DIRECTION is wrong, not just the
-   magnitude. The right fix operates on the LU matrix itself —
-   pseudo-transient continuation (PTC, Kelley-Keyes 1998) adds `1/Δτ_k I`
-   to the chord LU diagonal before factoring, mechanically bounding
-   `‖(J + I/Δτ_k)^{-1}‖ ≤ Δτ_k` so the LU back-solve cannot produce a
-   wildly wrong fixed point. See `DEBUGGING.md` "Op-amp BoyleDiodes
-   Failure Signatures" for the open issue tracking and the
-   agent-memory note `task_12_bistable_oscillation_finding.md` for the
-   iter-by-iter trace and the cross-simulator survey
-   (Xyce/Qucs/ngspice all use refactor-every-iter and don't have this
-   problem; melange's chord persistence is the perf optimization that
-   creates it).
+   for single-diode engagement (**light clipping**, amp ≤ 0.03 V on
+   Klon) but **fail at heavy clipping**. The prior "bistable chord-LU
+   fixed points" and "PTC empirically fails because of static sparse
+   pivots" diagnoses have both been **retracted** (verified 2026-04-08
+   fourth session by three parallel verification agents). Three fix
+   candidates were then empirically tested against Klon BoyleDiodes at
+   amp = [0.01, 0.03, 0.05, 0.07, 0.10, 0.15, 0.20, 0.30, 0.50] V,
+   measuring `state.v_prev[OUTPUT_NODES[0]]` (raw output node,
+   pre-clamp) to avoid the `output[i].clamp(-10.0, 10.0)` safety rail
+   hiding the solver state. Results: targeted Gmin bump on
+   `_oa_int_*` rows destroys linear-regime op-amp gain;
+   refactor-every-iter preserves linear but doesn't fix heavy clip;
+   disabling `damp_thresh` preserves linear but doesn't fix heavy
+   clip. All three rejected. See `task_12_bistable_oscillation_finding.md`
+   fourth-session sweep table for raw data. **Klon ships under
+   `active-set-be` auto-detect** (CLI logs
+   `Op-amp rail mode: active-set-be (audio path — BE-on-clamp damps
+   Nyquist limit cycle)` for distortion pedals). Empirically verified:
+   ActiveSetBe raw peak bounded 10.70–10.76 V at every tested
+   amplitude; trap NR fails frequently at heavy clip but the BE
+   fallback converges every time. BoyleDiodes remains opt-in (flag
+   `--opamp-rail-mode boyle-diodes`) and correct for light clip and
+   control-path topologies. See `DEBUGGING.md` "Op-amp BoyleDiodes
+   Failure Signatures" for the full heavy-clip failure signature and
+   next-tier escalation candidates (Anderson, trust-region,
+   BoyleDiodes→ActiveSetBe failure hybrid).
 
 ## Implementation Note
 The codegen emits the device Jacobian as block-diagonal `jdev_` entries (1×1 for

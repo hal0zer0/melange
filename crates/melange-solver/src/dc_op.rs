@@ -1553,3 +1553,404 @@ pub fn solve_dc_operating_point(
         iterations: total_iters,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::device_types::{BjtParams, DiodeParams};
+
+    // ── LU decomposition unit tests ──────────────────────────────────
+
+    #[test]
+    fn test_lu_decompose_identity() {
+        let a = vec![
+            vec![1.0, 0.0, 0.0],
+            vec![0.0, 1.0, 0.0],
+            vec![0.0, 0.0, 1.0],
+        ];
+        let (lu, pivot) = lu_decompose(&a).unwrap();
+        // U should be identity (L is identity with 1s on diagonal)
+        for i in 0..3 {
+            assert_eq!(pivot[i], i, "pivot should be identity permutation");
+            for j in 0..3 {
+                let expected = if i == j { 1.0 } else { 0.0 };
+                assert!(
+                    (lu[i][j] - expected).abs() < 1e-15,
+                    "LU[{i}][{j}] = {}, expected {expected}",
+                    lu[i][j]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_lu_decompose_known_3x3() {
+        // A = [[2, 1, 1], [4, 3, 3], [8, 7, 9]]
+        // Hand-computed: P*A = L*U where
+        //   P swaps row 0 and row 2 (pivot on 8)
+        //   After elimination: well-defined L and U
+        let a = vec![
+            vec![2.0, 1.0, 1.0],
+            vec![4.0, 3.0, 3.0],
+            vec![8.0, 7.0, 9.0],
+        ];
+        let (lu, pivot) = lu_decompose(&a).unwrap();
+
+        // Verify PA = LU by reconstructing and solving
+        let b = vec![1.0, 2.0, 3.0];
+        let x = lu_solve(&lu, &pivot, &b);
+        // Verify Ax = b
+        for i in 0..3 {
+            let row_sum: f64 = (0..3).map(|j| a[i][j] * x[j]).sum();
+            assert!(
+                (row_sum - b[i]).abs() < 1e-12,
+                "row {i}: Ax={row_sum}, b={}",
+                b[i]
+            );
+        }
+    }
+
+    #[test]
+    fn test_lu_solve_known_system() {
+        // 3x3 system with known solution: x = [1, 2, 3]
+        // A = [[1, 2, 3], [0, 1, 4], [5, 6, 0]]
+        // b = A * [1, 2, 3] = [1+4+9, 0+2+12, 5+12+0] = [14, 14, 17]
+        let a = vec![
+            vec![1.0, 2.0, 3.0],
+            vec![0.0, 1.0, 4.0],
+            vec![5.0, 6.0, 0.0],
+        ];
+        let x_expected = vec![1.0, 2.0, 3.0];
+        let b: Vec<f64> = (0..3)
+            .map(|i| (0..3).map(|j| a[i][j] * x_expected[j]).sum())
+            .collect();
+
+        let x = solve_linear(&a, &b).unwrap();
+        for i in 0..3 {
+            assert!(
+                (x[i] - x_expected[i]).abs() < 1e-12,
+                "x[{i}] = {}, expected {}",
+                x[i],
+                x_expected[i]
+            );
+        }
+    }
+
+    #[test]
+    fn test_lu_solve_roundtrip_sizes() {
+        // Test roundtrip for 2x2, 4x4, 6x6 matrices
+        for n in [2, 4, 6] {
+            // Diagonally dominant matrix (guaranteed nonsingular)
+            let mut a = vec![vec![0.0; n]; n];
+            for i in 0..n {
+                a[i][i] = (n as f64) * 10.0;
+                for j in 0..n {
+                    if i != j {
+                        a[i][j] = ((i + j) as f64) * 0.1;
+                    }
+                }
+            }
+            // Known solution
+            let x_known: Vec<f64> = (0..n).map(|i| (i + 1) as f64).collect();
+            let b: Vec<f64> = (0..n)
+                .map(|i| (0..n).map(|j| a[i][j] * x_known[j]).sum())
+                .collect();
+
+            let x = solve_linear(&a, &b).unwrap();
+            for i in 0..n {
+                assert!(
+                    (x[i] - x_known[i]).abs() < 1e-10,
+                    "n={n}, x[{i}] = {}, expected {}",
+                    x[i],
+                    x_known[i]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_lu_decompose_pivoting() {
+        // Zero on diagonal — requires pivoting
+        let a = vec![vec![0.0, 1.0], vec![1.0, 0.0]];
+        let (lu, pivot) = lu_decompose(&a).unwrap();
+        // Should swap rows
+        assert_ne!(pivot[0], 0, "pivoting should have occurred");
+
+        // Verify solve works
+        let b = vec![3.0, 5.0];
+        let x = lu_solve(&lu, &pivot, &b);
+        // A * x = b: 0*x0 + 1*x1 = 3, 1*x0 + 0*x1 = 5 => x = [5, 3]
+        assert!((x[0] - 5.0).abs() < 1e-14);
+        assert!((x[1] - 3.0).abs() < 1e-14);
+    }
+
+    #[test]
+    fn test_lu_decompose_singular_returns_none() {
+        let a = vec![vec![1.0, 2.0], vec![2.0, 4.0]]; // rank 1
+        assert!(
+            lu_decompose(&a).is_none(),
+            "singular matrix should return None"
+        );
+    }
+
+    #[test]
+    fn test_lu_decompose_near_singular() {
+        // Condition number ~ 1e8 but NOT singular
+        let eps = 1e-8;
+        let a = vec![vec![1.0, 1.0], vec![1.0, 1.0 + eps]];
+        let result = lu_decompose(&a);
+        assert!(result.is_some(), "near-singular but not singular");
+
+        let b = vec![2.0, 2.0 + eps];
+        let x = solve_linear(&a, &b).unwrap();
+        // Exact solution: x = [1, 1]
+        // With condition number ~1e8, accuracy degrades but shouldn't NaN
+        assert!(x[0].is_finite(), "solution should be finite");
+        assert!(x[1].is_finite(), "solution should be finite");
+    }
+
+    #[test]
+    fn test_lu_solve_preserves_rhs() {
+        // Verify the function doesn't have aliasing bugs with b
+        let a = vec![
+            vec![4.0, -1.0, 0.0],
+            vec![-1.0, 4.0, -1.0],
+            vec![0.0, -1.0, 4.0],
+        ];
+        let b = vec![1.0, 5.0, 3.0];
+        let b_copy = b.clone();
+        let _x = solve_linear(&a, &b).unwrap();
+        assert_eq!(b, b_copy, "b should not be modified");
+    }
+
+    // ── evaluate_devices unit tests ──────────────────────────────────
+
+    #[test]
+    fn test_evaluate_devices_diode_isolated() {
+        let vt = 0.025851991;
+        let is = 2.52e-9;
+        let n = 1.752;
+        let n_vt = n * vt;
+
+        let slot = DeviceSlot {
+            device_type: DeviceType::Diode,
+            start_idx: 0,
+            dimension: 1,
+            params: DeviceParams::Diode(DiodeParams {
+                is,
+                n_vt,
+                cjo: 0.0,
+                rs: 0.0,
+                bv: f64::INFINITY,
+                ibv: 1e-10,
+            }),
+            has_internal_mna_nodes: false,
+        };
+
+        let m = 1;
+        let v_nl = vec![0.6]; // Forward biased
+        let mut i_nl = vec![0.0];
+        let mut j_dev = vec![0.0];
+
+        evaluate_devices(&v_nl, &[slot], &mut i_nl, &mut j_dev, m);
+
+        // Compare against DiodeShockley directly
+        let diode = DiodeShockley::new(is, 1.0, n_vt);
+        let expected_i = diode.current_at(0.6);
+        let expected_g = diode.conductance_at(0.6);
+
+        assert!(
+            (i_nl[0] - expected_i).abs() < 1e-15,
+            "current mismatch: {} vs {}",
+            i_nl[0],
+            expected_i
+        );
+        assert!(
+            (j_dev[0] - expected_g).abs() < 1e-15,
+            "conductance mismatch: {} vs {}",
+            j_dev[0],
+            expected_g
+        );
+    }
+
+    #[test]
+    fn test_evaluate_devices_bjt_isolated() {
+        let is = 1e-14;
+        let vt = 0.025851991;
+
+        let slot = DeviceSlot {
+            device_type: DeviceType::Bjt,
+            start_idx: 0,
+            dimension: 2,
+            params: DeviceParams::Bjt(BjtParams {
+                is,
+                vt,
+                beta_f: 200.0,
+                beta_r: 3.0,
+                is_pnp: false,
+                vaf: f64::INFINITY,
+                var: f64::INFINITY,
+                ikf: f64::INFINITY,
+                ikr: f64::INFINITY,
+                cje: 0.0,
+                cjc: 0.0,
+                nf: 1.0,
+                ise: 0.0,
+                ne: 1.5,
+                nr: 1.0,
+                isc: 0.0,
+                nc: 2.0,
+                rb: 0.0,
+                rc: 0.0,
+                re: 0.0,
+                rth: f64::INFINITY,
+                cth: 1e-3,
+                xti: 3.0,
+                eg: 1.11,
+                tamb: 300.15,
+            }),
+            has_internal_mna_nodes: false,
+        };
+
+        let m = 2;
+        let v_nl = vec![0.65, -5.0]; // Forward active: Vbe=0.65V, Vbc=-5V
+        let mut i_nl = vec![0.0; 2];
+        let mut j_dev = vec![0.0; 4];
+
+        evaluate_devices(&v_nl, &[slot], &mut i_nl, &mut j_dev, m);
+
+        // Compare against BjtEbersMoll directly
+        let em = BjtEbersMoll::new(is, vt, 200.0, 3.0, BjtPolarity::Npn);
+        let expected_ic = em.collector_current(0.65, -5.0);
+        let expected_ib = em.base_current(0.65, -5.0);
+
+        assert!(
+            (i_nl[0] - expected_ic).abs() / expected_ic.abs().max(1e-20) < 1e-10,
+            "Ic mismatch: {} vs {}",
+            i_nl[0],
+            expected_ic
+        );
+        assert!(
+            (i_nl[1] - expected_ib).abs() / expected_ib.abs().max(1e-20) < 1e-10,
+            "Ib mismatch: {} vs {}",
+            i_nl[1],
+            expected_ib
+        );
+        // Jacobian should be populated (4 entries for 2x2)
+        assert!(j_dev[0].abs() > 0.0, "dIc/dVbe should be nonzero");
+    }
+
+    #[test]
+    fn test_evaluate_devices_zero_voltage() {
+        // At v_nl = 0 for all devices, currents should be near zero
+        let diode_slot = DeviceSlot {
+            device_type: DeviceType::Diode,
+            start_idx: 0,
+            dimension: 1,
+            params: DeviceParams::Diode(DiodeParams {
+                is: 1e-14,
+                n_vt: 0.025851991,
+                cjo: 0.0,
+                rs: 0.0,
+                bv: f64::INFINITY,
+                ibv: 1e-10,
+            }),
+            has_internal_mna_nodes: false,
+        };
+
+        let m = 1;
+        let v_nl = vec![0.0];
+        let mut i_nl = vec![0.0];
+        let mut j_dev = vec![0.0];
+
+        evaluate_devices(&v_nl, &[diode_slot], &mut i_nl, &mut j_dev, m);
+
+        // At V=0, I = Is*(exp(0) - 1) = 0
+        assert!(
+            i_nl[0].abs() < 1e-20,
+            "diode current at 0V should be ~0, got {}",
+            i_nl[0]
+        );
+        // Conductance should be Is/nVt (small but nonzero)
+        assert!(j_dev[0] > 0.0, "conductance at 0V should be positive");
+    }
+
+    #[test]
+    fn test_evaluate_devices_multiple_no_crosstalk() {
+        let m = 3; // 2 diodes (1D each) + 1 more (but we'll just use 3 diodes)
+        let slots = vec![
+            DeviceSlot {
+                device_type: DeviceType::Diode,
+                start_idx: 0,
+                dimension: 1,
+                params: DeviceParams::Diode(DiodeParams {
+                    is: 1e-14,
+                    n_vt: 0.025851991,
+                    cjo: 0.0,
+                    rs: 0.0,
+                    bv: f64::INFINITY,
+                    ibv: 1e-10,
+                }),
+                has_internal_mna_nodes: false,
+            },
+            DeviceSlot {
+                device_type: DeviceType::Diode,
+                start_idx: 1,
+                dimension: 1,
+                params: DeviceParams::Diode(DiodeParams {
+                    is: 1e-12, // Different IS
+                    n_vt: 0.045,
+                    cjo: 0.0,
+                    rs: 0.0,
+                    bv: f64::INFINITY,
+                    ibv: 1e-10,
+                }),
+                has_internal_mna_nodes: false,
+            },
+            DeviceSlot {
+                device_type: DeviceType::Diode,
+                start_idx: 2,
+                dimension: 1,
+                params: DeviceParams::Diode(DiodeParams {
+                    is: 5e-9,
+                    n_vt: 0.025851991 * 1.752,
+                    cjo: 0.0,
+                    rs: 0.0,
+                    bv: f64::INFINITY,
+                    ibv: 1e-10,
+                }),
+                has_internal_mna_nodes: false,
+            },
+        ];
+
+        let v_nl = vec![0.6, 0.3, 0.5];
+        let mut i_nl = vec![0.0; 3];
+        let mut j_dev = vec![0.0; 9]; // 3x3
+
+        evaluate_devices(&v_nl, &slots, &mut i_nl, &mut j_dev, m);
+
+        // Check that off-diagonal Jacobian entries are zero (no crosstalk)
+        for i in 0..3 {
+            for j in 0..3 {
+                if i != j {
+                    assert!(
+                        j_dev[i * m + j].abs() < 1e-30,
+                        "j_dev[{i}][{j}] should be 0 (no crosstalk), got {}",
+                        j_dev[i * m + j]
+                    );
+                }
+            }
+        }
+
+        // Each device's current should match independent evaluation
+        for (idx, slot) in slots.iter().enumerate() {
+            let mut i_single = vec![0.0; m];
+            let mut j_single = vec![0.0; m * m];
+            evaluate_devices(&v_nl, &[slot.clone()], &mut i_single, &mut j_single, m);
+            assert!(
+                (i_nl[idx] - i_single[idx]).abs() < 1e-20,
+                "device {idx}: current differs when evaluated together vs alone"
+            );
+        }
+    }
+}

@@ -145,6 +145,9 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
 | BoyleDiodes augmented system: input row zero, first signal sample explodes | `MnaSystem::from_netlist(&augmented)` doesn't preserve in-place G_in stamp | Re-stamp `g[input][input] += 1/R_in` and junction caps after rebuild in `generate_nodal` (FIXED commit `5544c8a`) |
 | BoyleDiodes false convergence: trap NR declares converged with wildly wrong v[buf_in] on first signal sample | Voltage-step convergence check passes when chord_j_dev is many OOM stale; no residual gate on full-LU NR loop | Add residual check + adaptive refactor trigger (>50% j_dev change), both BoyleDiodes-gated (FIXED commit `39397d1`) |
 | BoyleDiodes heavy clipping (amp ≥ 0.05 on Klon): NR diverges, raw output 45–3068 V | Chord-LU Newton direction wrong (not just magnitude). Gmin/line-search can't fix wrong direction. | **Not a blocker.** Auto-routes to `active-set-be` (verified correct amp=[0.01..0.50]). BoyleDiodes opt-in only (`--opamp-rail-mode boyle-diodes`). See `docs/aidocs/DEBUGGING.md`. |
+| DK kernel singular at col N (transistor ladder / cap-only nodes) | Intermediate nodes connected only through BJT junctions + bridging caps have G≈Gmin (1e-12). A = G+2C/T nearly singular in left/right subspace. | Routes to nodal automatically. DK limitation for series-BJT topologies without parallel resistors. |
+| Nodal Schur flat output (+9 dB, no filtering) on BJT ladder | S = A⁻¹ has extreme entries (>1e6) at cap-only nodes → K entries span 10^11 → J = I-J_dev·K swamped. | S magnitude check: `max\|S\| > 1e6` routes to full LU NR. Invariant to FA reduction. (FIXED 2026-04-10) |
+| simulate/analyze crash "Augmented fallback failed" | DK fails, augmented DK also fails, no nodal fallback | Dummy kernel with dk_failed=true, falls through to nodal codegen (FIXED 2026-04-10) |
 
 ## Current Status (2026-04-10)
 
@@ -234,7 +237,7 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
 - **DK codegen with augmented MNA**: Single-transformer inductor circuits use the fast DK path (M×M NR). Simple inductor+diode: 581× realtime. Auto-selected when ≤1 transformer group.
 - **NodalSolver codegen** (fallback for multi-transformer and K≈0): Two paths:
   - **Schur** (O(N²+M³)): Precomputed S = A^{-1}, M-dim NR. Used when K is well-conditioned.
-  - **Full LU** (O(N³) per iter): Builds G_aug = A - N_I*J_dev*N_V each iteration. Auto-selected for K≈0 (current-mode VCA), positive K diagonal, or K ill-conditioned. Matches runtime NodalSolver exactly.
+  - **Full LU** (O(N³) per iter): Builds G_aug = A - N_I*J_dev*N_V each iteration. Auto-selected for K≈0 (current-mode VCA), positive K diagonal, K ill-conditioned (max|K|>1e8), or S ill-conditioned (max|S|>1e6, cap-only nodes). Matches runtime NodalSolver exactly.
   - **Full LU optimizations** (3 stacked):
     1. **Chord method**: `lu_factor` every CHORD_REFACTOR=5 iters (must be odd), `lu_back_solve` (O(N²)) between. RHS uses saved `chord_j_dev` (NOT current `j_dev`).
     2. **Cross-timestep Jacobian persistence**: `chord_lu`/`chord_d`/`chord_j_dev`/`chord_valid` in CircuitState. Most samples need zero factorizations for smooth signals.

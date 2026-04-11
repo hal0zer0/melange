@@ -3157,7 +3157,7 @@ impl CircuitIR {
     /// Returns `CodegenError::InvalidConfig` if any device model parameter is non-positive or non-finite.
     /// Detect BJTs that are forward-active at the DC operating point.
     ///
-    /// Returns the names (uppercased) of BJTs with Vbc < -1.0V that can be
+    /// Returns the names (uppercased) of BJTs with Vbc < -0.5V that can be
     /// modeled as 1D (Vbe→Ic only), reducing M by 1 each.
     ///
     /// Call this BEFORE building the final MNA/kernel. If non-empty, rebuild
@@ -3210,7 +3210,9 @@ impl CircuitIR {
                 // Forward-active: allow parasitics and GP models.
                 // 1D FA ignores parasitics (small for forward-active: Ib*RB << Vbe).
                 // GP qb(Vbc) is ~constant when Vbc is deeply reverse-biased.
-                if vbc_eff < -1.0 {
+                // Threshold -0.5V provides adequate margin for audio-level signals
+                // (typical stage Vce margin is 0.85V in cascaded topologies).
+                if vbc_eff < -0.5 {
                     let name = dev.name.to_ascii_uppercase();
                     log::info!(
                         "BJT '{}' forward-active (Vbc={:.3}V). Using 1D model.",

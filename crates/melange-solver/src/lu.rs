@@ -289,3 +289,271 @@ pub fn symbolic_lu(
         n,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::device_types::{DeviceParams, DeviceType, DiodeParams};
+
+    // ── compute_g_aug_pattern tests ──────────────────────────────────
+
+    #[test]
+    fn test_pattern_diagonal_a_no_devices() {
+        // 3x3 diagonal A, no devices → pattern is diagonal only
+        let n = 3;
+        let m = 0;
+        let a_flat = vec![
+            1.0, 0.0, 0.0, // row 0
+            0.0, 2.0, 0.0, // row 1
+            0.0, 0.0, 3.0, // row 2
+        ];
+        let pattern = compute_g_aug_pattern(&a_flat, &[], &[], n, m, &[]);
+        assert_eq!(pattern.len(), 3);
+        assert_eq!(pattern[0], vec![0]);
+        assert_eq!(pattern[1], vec![1]);
+        assert_eq!(pattern[2], vec![2]);
+    }
+
+    #[test]
+    fn test_pattern_with_device_stamps() {
+        // 3x3 A with one 1D device. N_i stamps at nodes 0,1; N_v reads from nodes 0,1.
+        // This should add fill-in at (0,0), (0,1), (1,0), (1,1).
+        let n = 3;
+        let m = 1;
+        // Tridiagonal A
+        let a_flat = vec![
+            1.0, 0.5, 0.0, // row 0
+            0.5, 1.0, 0.5, // row 1
+            0.0, 0.5, 1.0, // row 2
+        ];
+        // N_i: 3x1, device injects at node 0 (-1) and node 1 (+1)
+        let n_i_flat = vec![-1.0, 1.0, 0.0]; // [n0, n1, n2] for device 0
+        // N_v: 1x3, device reads v[0] - v[1]
+        let n_v_flat = vec![1.0, -1.0, 0.0]; // device 0 reads from nodes 0,1
+
+        let slots = vec![DeviceSlot {
+            device_type: DeviceType::Diode,
+            start_idx: 0,
+            dimension: 1,
+            params: DeviceParams::Diode(DiodeParams {
+                is: 1e-14,
+                n_vt: 0.026,
+                cjo: 0.0,
+                rs: 0.0,
+                bv: f64::INFINITY,
+                ibv: 1e-10,
+            }),
+            has_internal_mna_nodes: false,
+        }];
+
+        let pattern = compute_g_aug_pattern(&a_flat, &n_i_flat, &n_v_flat, n, m, &slots);
+
+        // Node 0 and 1 should connect to each other (from A tridiagonal + device stamps)
+        assert!(pattern[0].contains(&0));
+        assert!(pattern[0].contains(&1));
+        assert!(pattern[1].contains(&0));
+        assert!(pattern[1].contains(&1));
+        // Node 2 should only have self (from A) and connection to node 1 (from A)
+        assert!(pattern[2].contains(&1));
+        assert!(pattern[2].contains(&2));
+        // Node 2 should NOT connect to node 0 (no device path)
+        assert!(!pattern[2].contains(&0));
+    }
+
+    // ── amd_ordering tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_amd_ordering_all_nodes_present() {
+        // Dense 4x4 pattern
+        let pattern: Vec<Vec<usize>> = vec![
+            vec![0, 1, 2, 3],
+            vec![0, 1, 2, 3],
+            vec![0, 1, 2, 3],
+            vec![0, 1, 2, 3],
+        ];
+        let perm = amd_ordering(&pattern, 4);
+        assert_eq!(perm.len(), 4);
+        let mut sorted = perm.clone();
+        sorted.sort();
+        assert_eq!(sorted, vec![0, 1, 2, 3], "all nodes must appear exactly once");
+    }
+
+    #[test]
+    fn test_amd_ordering_star_graph() {
+        // Star: node 0 connects to all, others only connect to 0
+        let pattern = vec![
+            vec![0, 1, 2, 3], // node 0: hub
+            vec![0, 1],       // node 1: leaf
+            vec![0, 2],       // node 2: leaf
+            vec![0, 3],       // node 3: leaf
+        ];
+        let perm = amd_ordering(&pattern, 4);
+        // After symmetrization, hub has degree 4, leaves have degree 2
+        // Minimum degree heuristic should eliminate lower-degree nodes first
+        // Hub (node 0) should NOT be first (it has highest degree)
+        // After symmetrization all nodes connect to node 0, and after
+        // eliminating the first leaf all remaining leaves connect to each other
+        // through fill-in, so the degree ordering is non-trivial. The key
+        // property: all nodes appear exactly once and the ordering is valid.
+        let mut sorted = perm.clone();
+        sorted.sort();
+        assert_eq!(sorted, vec![0, 1, 2, 3], "all nodes must appear exactly once");
+    }
+
+    #[test]
+    fn test_amd_ordering_diagonal() {
+        // Diagonal: each node connects only to itself
+        let pattern = vec![vec![0], vec![1], vec![2]];
+        let perm = amd_ordering(&pattern, 3);
+        assert_eq!(perm.len(), 3);
+        // All have degree 1, so order should be sequential (ties broken by index)
+        assert_eq!(perm, vec![0, 1, 2]);
+    }
+
+    // ── find_row_swaps tests ────────────────────────────────────────
+
+    #[test]
+    fn test_find_row_swaps_none_needed() {
+        let pattern = vec![vec![0, 1], vec![0, 1], vec![2]];
+        let elim_order = vec![0, 1, 2];
+        let swaps = find_row_swaps(&pattern, &elim_order, 3);
+        assert!(swaps.is_empty(), "no swaps needed when all diagonals present");
+    }
+
+    #[test]
+    fn test_find_row_swaps_one_needed() {
+        // Node 0 has no self-connection, but node 1 does and connects to col 0
+        let pattern = vec![
+            vec![1],    // row 0: no diagonal entry
+            vec![0, 1], // row 1: has entries at col 0 and 1
+        ];
+        let elim_order = vec![0, 1];
+        let swaps = find_row_swaps(&pattern, &elim_order, 2);
+        assert_eq!(swaps.len(), 1);
+        assert_eq!(swaps[0], (0, 1), "should swap row 0 with row 1");
+    }
+
+    // ── symbolic_lu tests ───────────────────────────────────────────
+
+    #[test]
+    fn test_symbolic_lu_roundtrip_3x3() {
+        // 3x3 dense matrix — symbolic schedule should produce same result as dense LU
+        let pattern = vec![vec![0, 1, 2], vec![0, 1, 2], vec![0, 1, 2]];
+        let elim_order = amd_ordering(&pattern, 3);
+        let swaps = find_row_swaps(&pattern, &elim_order, 3);
+        let sparsity = symbolic_lu(&pattern, &elim_order, &swaps, 3);
+
+        // Execute the symbolic schedule on actual values
+        let mut a = vec![
+            vec![2.0, 1.0, 1.0],
+            vec![4.0, 3.0, 3.0],
+            vec![8.0, 7.0, 9.0],
+        ];
+        // Apply row swaps
+        for &(r1, r2) in &sparsity.row_swaps {
+            a.swap(r1, r2);
+        }
+        // Execute ops
+        for op in &sparsity.ops {
+            match op {
+                LuOp::DivPivot { row, col } => {
+                    a[*row][*col] /= a[*col][*col];
+                }
+                LuOp::SubMul { row, col, j } => {
+                    a[*row][*j] -= a[*row][*col] * a[*col][*j];
+                }
+            }
+        }
+
+        // Now use the factored matrix to solve Ax=b
+        let b_orig = vec![1.0, 2.0, 3.0];
+        let mut b = b_orig.clone();
+        // Apply same row swaps to b
+        for &(r1, r2) in &sparsity.row_swaps {
+            b.swap(r1, r2);
+        }
+        // Forward substitution (L)
+        for &(row, col) in &sparsity.l_nnz {
+            b[row] -= a[row][col] * b[col];
+        }
+        // Backward substitution (U)
+        for &(row, col) in sparsity.u_nnz.iter().rev() {
+            if row == col {
+                b[row] /= a[row][col];
+            } else {
+                b[row] -= a[row][col] * b[col];
+            }
+        }
+
+        // Compare against dense LU
+        let a_orig = vec![
+            vec![2.0, 1.0, 1.0],
+            vec![4.0, 3.0, 3.0],
+            vec![8.0, 7.0, 9.0],
+        ];
+        let x_dense = crate::dc_op::solve_linear(&a_orig, &b_orig).unwrap();
+
+        for i in 0..3 {
+            assert!(
+                (b[i] - x_dense[i]).abs() < 1e-10,
+                "sparse LU x[{i}]={} vs dense x[{i}]={}",
+                b[i],
+                x_dense[i]
+            );
+        }
+    }
+
+    #[test]
+    fn test_symbolic_lu_flop_counts() {
+        // Dense 3x3: factor_flops should be 2*(n-1) + 2*(n-2) + ... for dense
+        // For n=3 dense: step 0 eliminates 2 rows with 2 cols each = 2*(1+2) = 6
+        // step 1 eliminates 1 row with 1 col = 1+2 = 3
+        // Total: ~8 (varies with AMD ordering)
+        let pattern = vec![vec![0, 1, 2], vec![0, 1, 2], vec![0, 1, 2]];
+        let elim_order = amd_ordering(&pattern, 3);
+        let swaps = find_row_swaps(&pattern, &elim_order, 3);
+        let sparsity = symbolic_lu(&pattern, &elim_order, &swaps, 3);
+
+        assert!(
+            sparsity.factor_flops > 0,
+            "dense 3x3 should have nonzero factor flops"
+        );
+        assert!(
+            sparsity.solve_flops > 0,
+            "dense 3x3 should have nonzero solve flops"
+        );
+        assert_eq!(sparsity.n, 3);
+    }
+
+    #[test]
+    fn test_symbolic_lu_sparse_fewer_flops() {
+        // Tridiagonal 4x4 should have fewer flops than dense 4x4
+        let dense_pattern = vec![
+            vec![0, 1, 2, 3],
+            vec![0, 1, 2, 3],
+            vec![0, 1, 2, 3],
+            vec![0, 1, 2, 3],
+        ];
+        let sparse_pattern = vec![
+            vec![0, 1],
+            vec![0, 1, 2],
+            vec![1, 2, 3],
+            vec![2, 3],
+        ];
+
+        let eo_d = amd_ordering(&dense_pattern, 4);
+        let sw_d = find_row_swaps(&dense_pattern, &eo_d, 4);
+        let sp_d = symbolic_lu(&dense_pattern, &eo_d, &sw_d, 4);
+
+        let eo_s = amd_ordering(&sparse_pattern, 4);
+        let sw_s = find_row_swaps(&sparse_pattern, &eo_s, 4);
+        let sp_s = symbolic_lu(&sparse_pattern, &eo_s, &sw_s, 4);
+
+        assert!(
+            sp_s.factor_flops < sp_d.factor_flops,
+            "sparse ({}) should have fewer factor flops than dense ({})",
+            sp_s.factor_flops,
+            sp_d.factor_flops
+        );
+    }
+}

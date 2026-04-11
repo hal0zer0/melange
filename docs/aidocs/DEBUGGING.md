@@ -244,13 +244,65 @@ nonlinear devices.
 | `state.a[input_node][input_node]` near zero in augmented MNA — first non-zero input sample produces wildly wrong v[buf_in] | `MnaSystem::from_netlist(&augmented_netlist)` builds a fresh MNA that doesn't preserve the in-place input-conductance stamp the CLI applied to the original | Re-stamp `g[input][input] += 1/R_in` and `stamp_device_junction_caps` after the augmented rebuild in `generate_nodal` (FIXED, commit `5544c8a`) |
 | Trap NR "converges" with stale chord_j_dev → wildly wrong v on first signal sample | Voltage-step convergence check is necessary but not sufficient when `chord_j_dev` is many OOM stale; the LU back-solve produces a "fixed point" that satisfies the linearised system but not actual KCL | Add a residual check: re-evaluate `i_nl_fresh` from device equations at post-step v and require it to match the `i_nl` the LU was solved against, with `tol = RELTOL * max(\|new\|, \|old\|, 1e-9) + ABSTOL`. Mirrors DK Schur path's convergence criterion. BoyleDiodes-gated. (FIXED, commit `39397d1`) |
 | Catch diode `j_dev` jumps 32 OOM (1e-31 reverse → 1e+1 forward) within one NR loop, chord stays stale until iter 5 refactor | The default `iter % CHORD_REFACTOR == 0` refactor is too coarse for diodes whose Jacobian changes by orders of magnitude | Adaptive refactor trigger: at the start of each NR iteration, force refactor if any device's `\|j_dev[k][k]\| / \|chord_j_dev[k][k]\|` exceeds 50% relative change. BoyleDiodes-gated. (FIXED, commit `39397d1`) |
-| Heavy clipping (amp ≥ 0.07 V on Klon): NR oscillates between two contradictory linearisations near a catch-diode knee, never converges within MAX_ITER | **Wrong chord-LU fixed points at the knee.** chord_jdev≈tiny (catch diode reverse-biased) gives a linear LU whose fixed point sits ABOVE the knee at v ≈ 17.3 V. chord_jdev≈large (catch diode forward-biased) gives a linear LU whose fixed point sits BELOW the knee at v ≈ 7 V. The TRUE equilibrium has intermediate jdev ≈ 1e-2 with v ≈ 17.0 V. Neither chord captures it. Each refactor flips between the two wrong attractors. Simple under-relaxation is brittle to MAX_ITER — at higher iter limits NR has time to drift between wrong attractors and damping locks it in. **Line search backtracking does NOT fix this** (verified by implementing Xyce-pattern single-trial backtrack on 2026-04-08): line search picks midpoints between two wrong v values along a wrong Newton direction, which still gets a wrong answer. Line search assumes the Newton DIRECTION is correct and only the magnitude is wrong; melange's chord-LU bistability has the direction wrong. | **OPEN**. Real fix needs to operate on the LU MATRIX itself, not just step length. **Pseudo-transient continuation (PTC, Kelley-Keyes 1998)** is the recommended next attempt: add `1/Δτ_k * I` to chord LU diagonal before factoring; the regularizer mechanically bounds `‖(J + I/Δτ)^{-1}‖ ≤ Δτ_k` so no matter how wrong chord_jdev is, the LU back-solve cannot produce a step ≥ Δτ_k * ‖F‖. As ‖F‖ decreases, SER schedule grows Δτ_k and recovers full Newton convergence. Reference: PETSc `src/ts/impls/pseudo/posindep.c` lines 245, 350, 699. See `task_12_bistable_oscillation_finding.md` "DEEPER DIAGNOSIS" section in agent memory. Workaround: use `--opamp-rail-mode active-set-be` for distortion pedals. |
+| Heavy clipping (amp ≥ 0.05 V on Klon) under `--opamp-rail-mode boyle-diodes`: raw output node `state.v_prev[OUTPUT_NODES[0]]` diverges to 45–3068 V, NR fails every sample. The generated `output[i].clamp(-10.0, 10.0)` safety rail masks this to a visible 10 V, so superficial inspection shows "output=10 V" while the actual solver state is ±3000 V. Always measure raw node voltage when debugging BoyleDiodes convergence. | Three fix candidates empirically tested 2026-04-08 fourth session with a disciplined amp sweep [0.01, 0.03, 0.05, 0.07, 0.10, 0.15, 0.20, 0.30, 0.50]: (a) targeted Gmin bump on `_oa_int_*` rows — destroys linear-regime op-amp gain; (b) force `need_refactor = true` in BoyleDiodes (ngspice-style refactor-every-iter) — preserves linear, doesn't fix heavy clip; (c) disable global `damp_thresh` step cap — preserves linear, doesn't fix heavy clip. None satisfied the confirmation criteria (zero NR failures at all amps, peak in [10.0, 11.0] V). The chord-LU Newton direction appears to be wrong at the catch-diode knee, not just the magnitude, so no form of step damping or single-row regularization fixes the underlying issue. Prior "bistable chord-LU fixed points" and "PTC doesn't work because of static pivots" diagnoses were both retracted; see `task_12_bistable_oscillation_finding.md` "FOURTH SESSION" for the full audit and sweep data. | **Not blocking for Klon release.** Klon auto-detect routes to `active-set-be`, which was empirically verified in the same sweep: raw peak bounded 10.70–10.76 V at every tested amplitude, trap NR falls through to BE fallback at heavy clip and BE converges every time. BoyleDiodes mode remains opt-in (`--opamp-rail-mode boyle-diodes`) and is a known limitation at heavy clip; it works correctly for light clip (amp ≤ 0.03 V on Klon) and for control-path topologies. If heavy-clip BoyleDiodes convergence becomes a priority later, the next tier of escalation candidates are: Anderson acceleration (m=3, Walker-Ni + Zhang-Peng-Ouyang safeguards), trust-region Newton with actual-vs-predicted ratio, or a BoyleDiodes → ActiveSetBe failure-hybrid that tries BoyleDiodes trap and falls through to ActiveSetBe on divergence. |
 
 ### Positive Definiteness Rule for Transformer Coupling
 All windings on the same core must have coupling coefficients that form a positive-definite
 inductance matrix. For a 4-winding transformer with k_ab=0.95 and k_ac=0.95, k_bc must be
 ≥~0.88 for the matrix to be PD. A k_bc of 0.50 gives det<0 (physically impossible) and
 causes NR divergence. The MNA builder validates this and emits `log::warn`.
+
+## Cap-Only Nodes and Schur NR Failure (Transistor Ladders)
+
+Circuits where intermediate nodes connect ONLY through BJT junctions and bridging
+capacitors (no resistors) produce ill-conditioned A = G + 2C/T matrices. These nodes
+have G ≈ Gmin (1e-12), so S = A^{-1} has extreme entries (>1e6). This causes:
+
+1. **DK kernel failure**: A is near-singular, `from_mna()` returns error at the
+   problematic column. Routes to nodal automatically.
+2. **Nodal Schur failure**: K = N_V·S·N_I has entries spanning 10+ orders of magnitude.
+   The Schur NR Jacobian J = I - J_dev·K is swamped (J_dev·K >> I), producing
+   numerically garbage solutions (flat output, wrong gain).
+
+**Detection**: `max|S| > 1e6` routes to full LU NR. This check is invariant to FA
+reduction — FA changes N_V/N_I/K dimensions but NOT A/S conditioning, since the
+problematic nodes still lack resistive paths.
+
+**Example**: Moog-style 8-BJT transistor ladder filter (moonladder). Bridging caps
+between left/right columns at each stage. Nodes eL2-eR4 have only Gmin + cap.
+S entries ~1e8, K entries ~5e11 at M=16 (pre-FA), ~1e4 at M=8 (post-FA), but
+S remains extreme in both cases.
+
+**FA detection threshold**: Lowered from -1.0V to -0.5V (2026-04-10). Common-base
+BJTs in cascade topologies have Vbc ≈ -0.85V — clearly forward-active but missed
+the old -1.0V threshold. The -0.5V threshold catches all common-base stages while
+still excluding saturated BJTs (Vbc > -0.5V).
+
+**FA undo removed**: The blanket "undo FA for nodal path" policy was removed.
+If the DC OP confirms Vbc < -0.5V, the BJT has adequate margin for audio-level
+transients. FA reduction is preserved on all codegen paths.
+
+## Known Full-LU NR Limitations
+
+The full-LU nodal NR path (used when K is degenerate, has positive diagonal, or is ill-conditioned)
+has a known vulnerability with **ill-conditioned A matrices** (cond(A) > ~1000):
+
+- Large coupling caps (e.g., 10µF Cout between drain and output) create near-unity off-diagonal
+  ratios in A, making S = A^{-1} entries ~1000. The chord method amplifies stale-Jacobian errors
+  by this factor, and the relative convergence check can't detect the resulting false convergence.
+- Both trapezoidal and backward Euler are affected — the ill-conditioning is in the circuit
+  topology (cap conductance >> resistive conductance), not the integration method.
+- The Schur path handles these circuits correctly because the M-dim NR operates on the
+  well-conditioned K matrix, isolating the solver from S's ill-conditioning.
+
+**Current mitigation**: Routing prefers Schur when K is well-conditioned, even with marginal
+spectral radius (up to 1.002). Only circuits with pathological K AND ill-conditioned A would
+hit this — no known circuit triggers both conditions simultaneously.
+
+**Future hardening** (if a circuit is found that needs both):
+- Unconditional residual check in full-LU NR (currently BoyleDiodes-only)
+- Iterative refinement in the chord back-solve (one extra O(N²) pass)
+- Schur-complement-within-full-LU hybrid (M-dim correction inside N-dim NR)
 
 ## References
 - TU Delft Analog Electronics Webbook: MNA stamps

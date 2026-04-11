@@ -1193,22 +1193,11 @@ fn compile_circuit_source(
         }
     };
 
-    // When auto-routing to nodal (not user-requested), undo FA reduction.
-    // FA assumes permanently forward-active BJTs, but circuits that need nodal
-    // (oscillators, high-gain feedback) have BJTs that swing between regions.
-    if use_nodal_codegen && solver_override != "nodal" && !forward_active.is_empty() {
-        println!("  Undoing FA reduction for nodal path (BJTs may leave forward-active during transient)");
-        mna = MnaSystem::from_netlist(&netlist)
-            .with_context(|| "Failed to rebuild MNA without FA")?;
-        if input_node_idx < mna.n {
-            mna.g[input_node_idx][input_node_idx] += input_conductance;
-        }
-        let device_slots =
-            melange_solver::codegen::ir::CircuitIR::build_device_info(&netlist).unwrap_or_default();
-        if !device_slots.is_empty() {
-            mna.stamp_device_junction_caps(&device_slots);
-        }
-    }
+    // FA reduction is kept for nodal path when the DC OP confirms deeply
+    // reverse-biased B-C junctions (Vbc < -0.5V). The FA detection threshold
+    // is conservative enough that BJTs passing it have adequate margin for
+    // audio-level transients. Previously this blanket-undid all FA for nodal,
+    // but that forces M=16 for ladder filters where all BJTs are clearly FA.
 
     let generated = if use_nodal_codegen {
         println!("  Using nodal solver codegen");
@@ -1735,6 +1724,40 @@ fn simulate_circuit_source(
         }
     }
 
+    // Detect forward-active BJTs (runs DC OP, checks Vbc < -0.5V)
+    let config_for_fa = CodegenConfig {
+        circuit_name: "fa_detect".to_string(),
+        sample_rate: opts.sample_rate,
+        input_resistance,
+        input_node: input_node_idx,
+        output_nodes: vec![output_node_idx],
+        ..CodegenConfig::default()
+    };
+    let forward_active = if opts.solver == "nodal" {
+        std::collections::HashSet::new()
+    } else {
+        melange_solver::codegen::ir::CircuitIR::detect_forward_active_bjts(
+            &mna, &netlist, &config_for_fa,
+        )
+    };
+    if !forward_active.is_empty() {
+        println!(
+            "  Forward-active BJTs: {:?} (M reduces by {})",
+            forward_active,
+            forward_active.len()
+        );
+        mna = MnaSystem::from_netlist_forward_active(&netlist, &forward_active)
+            .with_context(|| "Failed to rebuild MNA for forward-active BJTs")?;
+        if input_node_idx < mna.n {
+            mna.g[input_node_idx][input_node_idx] += input_conductance;
+        }
+        let device_slots =
+            melange_solver::codegen::ir::CircuitIR::build_device_info(&netlist).unwrap_or_default();
+        if !device_slots.is_empty() {
+            mna.stamp_device_junction_caps(&device_slots);
+        }
+    }
+
     // Step 4: Build DK kernel and route
     let has_inductors = !mna.inductors.is_empty()
         || !mna.coupled_inductors.is_empty()
@@ -1743,8 +1766,26 @@ fn simulate_circuit_source(
     println!("Step 3: Building DK kernel...");
     let mut dk_failed = false;
     let kernel = if has_inductors && opts.solver != "dk" {
-        DkKernel::from_mna_augmented(&mna, opts.sample_rate)
-            .with_context(|| "Failed to create augmented DK kernel")?
+        match DkKernel::from_mna_augmented(&mna, opts.sample_rate) {
+            Ok(k) => k,
+            Err(e) => {
+                if opts.solver == "dk" { anyhow::bail!("DK kernel failed: {e}"); }
+                println!("  Augmented DK kernel failed: {e}, auto-selecting nodal");
+                dk_failed = true;
+                let m = mna.m;
+                let n = mna.n_aug;
+                DkKernel {
+                    n, m, n_nodes: mna.n, num_devices: mna.num_devices,
+                    sample_rate: opts.sample_rate,
+                    s: vec![0.0; n * n], a_neg: vec![0.0; n * n],
+                    k: vec![0.0; m * m], n_v: vec![0.0; m * n],
+                    n_i: vec![0.0; n * m], rhs_const: vec![0.0; n],
+                    inductors: vec![], coupled_inductors: vec![],
+                    transformer_groups: vec![], pots: vec![],
+                    wiper_groups: vec![], gang_groups: vec![],
+                }
+            }
+        }
     } else {
         match DkKernel::from_mna(&mna, opts.sample_rate) {
             Ok(k) => k,
@@ -1752,8 +1793,24 @@ fn simulate_circuit_source(
                 if opts.solver == "dk" { anyhow::bail!("DK kernel failed: {e}"); }
                 println!("  DK kernel failed: {e}, auto-selecting nodal");
                 dk_failed = true;
-                DkKernel::from_mna_augmented(&mna, opts.sample_rate)
-                    .with_context(|| "Augmented fallback failed")?
+                // Try augmented; if that also fails, build dummy kernel
+                match DkKernel::from_mna_augmented(&mna, opts.sample_rate) {
+                    Ok(k) => k,
+                    Err(_) => {
+                        let m = mna.m;
+                        let n = mna.n_aug;
+                        DkKernel {
+                            n, m, n_nodes: mna.n, num_devices: mna.num_devices,
+                            sample_rate: opts.sample_rate,
+                            s: vec![0.0; n * n], a_neg: vec![0.0; n * n],
+                            k: vec![0.0; m * m], n_v: vec![0.0; m * n],
+                            n_i: vec![0.0; n * m], rhs_const: vec![0.0; n],
+                            inductors: vec![], coupled_inductors: vec![],
+                            transformer_groups: vec![], pots: vec![],
+                            wiper_groups: vec![], gang_groups: vec![],
+                        }
+                    }
+                }
             }
         }
     };
@@ -2139,6 +2196,37 @@ fn analyze_freq_response(
         }
     }
 
+    // Detect forward-active BJTs
+    let config_for_fa = CodegenConfig {
+        circuit_name: "fa_detect".to_string(),
+        sample_rate,
+        input_resistance,
+        input_node: input_node_idx,
+        output_nodes: vec![output_node_idx],
+        ..CodegenConfig::default()
+    };
+    let forward_active =
+        melange_solver::codegen::ir::CircuitIR::detect_forward_active_bjts(
+            &mna, &netlist, &config_for_fa,
+        );
+    if !forward_active.is_empty() {
+        eprintln!(
+            "  Forward-active BJTs: {:?} (M reduces by {})",
+            forward_active,
+            forward_active.len()
+        );
+        mna = MnaSystem::from_netlist_forward_active(&netlist, &forward_active)
+            .with_context(|| "Failed to rebuild MNA for forward-active BJTs")?;
+        if input_node_idx < mna.n {
+            mna.g[input_node_idx][input_node_idx] += input_conductance;
+        }
+        let device_slots =
+            melange_solver::codegen::ir::CircuitIR::build_device_info(&netlist).unwrap_or_default();
+        if !device_slots.is_empty() {
+            mna.stamp_device_junction_caps(&device_slots);
+        }
+    }
+
     // Build DK kernel and route
     let has_inductors = !mna.inductors.is_empty()
         || !mna.coupled_inductors.is_empty()
@@ -2146,16 +2234,48 @@ fn analyze_freq_response(
 
     let mut dk_failed = false;
     let kernel = if has_inductors {
-        DkKernel::from_mna_augmented(&mna, sample_rate)
-            .with_context(|| "Failed to create augmented DK kernel")?
+        match DkKernel::from_mna_augmented(&mna, sample_rate) {
+            Ok(k) => k,
+            Err(e) => {
+                eprintln!("  Augmented DK kernel failed: {e}, auto-selecting nodal");
+                dk_failed = true;
+                let m = mna.m;
+                let n = mna.n_aug;
+                DkKernel {
+                    n, m, n_nodes: mna.n, num_devices: mna.num_devices,
+                    sample_rate,
+                    s: vec![0.0; n * n], a_neg: vec![0.0; n * n],
+                    k: vec![0.0; m * m], n_v: vec![0.0; m * n],
+                    n_i: vec![0.0; n * m], rhs_const: vec![0.0; n],
+                    inductors: vec![], coupled_inductors: vec![],
+                    transformer_groups: vec![], pots: vec![],
+                    wiper_groups: vec![], gang_groups: vec![],
+                }
+            }
+        }
     } else {
         match DkKernel::from_mna(&mna, sample_rate) {
             Ok(k) => k,
             Err(e) => {
                 eprintln!("  DK kernel failed: {e}, using nodal");
                 dk_failed = true;
-                DkKernel::from_mna_augmented(&mna, sample_rate)
-                    .with_context(|| "Augmented fallback failed")?
+                match DkKernel::from_mna_augmented(&mna, sample_rate) {
+                    Ok(k) => k,
+                    Err(_) => {
+                        let m = mna.m;
+                        let n = mna.n_aug;
+                        DkKernel {
+                            n, m, n_nodes: mna.n, num_devices: mna.num_devices,
+                            sample_rate,
+                            s: vec![0.0; n * n], a_neg: vec![0.0; n * n],
+                            k: vec![0.0; m * m], n_v: vec![0.0; m * n],
+                            n_i: vec![0.0; n * m], rhs_const: vec![0.0; n],
+                            inductors: vec![], coupled_inductors: vec![],
+                            transformer_groups: vec![], pots: vec![],
+                            wiper_groups: vec![], gang_groups: vec![],
+                        }
+                    }
+                }
             }
         }
     };

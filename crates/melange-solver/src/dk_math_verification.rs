@@ -479,4 +479,234 @@ C1 out 0 1u
 
         println!("A - A_neg = 2G relationship test PASSED");
     }
+
+    // ── Multi-circuit identity tests ─────────────────────────────────
+    // Extend RC-only tests to diode clipper, BJT CE, and inductor circuits
+
+    #[test]
+    fn test_a_plus_a_neg_equals_4c_over_t_diode_clipper() {
+        let spice = r#"Diode Clipper
+R1 in out 1k
+D1 out 0 DMOD
+D2 0 out DMOD
+C1 out 0 1u
+.model DMOD D(IS=2.52e-9 N=1.752)
+"#;
+        let netlist = Netlist::parse(spice).unwrap();
+        let mna = MnaSystem::from_netlist(&netlist).unwrap();
+        let sample_rate = 48000.0;
+        let t = 1.0 / sample_rate;
+
+        let a = mna.get_a_matrix(sample_rate).unwrap();
+        let a_neg = mna.get_a_neg_matrix(sample_rate).unwrap();
+
+        let n = mna.n;
+        for i in 0..n {
+            for j in 0..n {
+                let sum = a[i][j] + a_neg[i][j];
+                let expected = (4.0 / t) * mna.c[i][j];
+                assert!(
+                    (sum - expected).abs() < 1e-6,
+                    "diode clipper: A+A_neg [{i}][{j}] = {sum}, expected 4C/T = {expected}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_a_minus_a_neg_equals_2g_diode_clipper() {
+        let spice = r#"Diode Clipper
+R1 in out 1k
+D1 out 0 DMOD
+D2 0 out DMOD
+C1 out 0 1u
+.model DMOD D(IS=2.52e-9 N=1.752)
+"#;
+        let netlist = Netlist::parse(spice).unwrap();
+        let mna = MnaSystem::from_netlist(&netlist).unwrap();
+        let sample_rate = 48000.0;
+
+        let a = mna.get_a_matrix(sample_rate).unwrap();
+        let a_neg = mna.get_a_neg_matrix(sample_rate).unwrap();
+
+        let n = mna.n;
+        for i in 0..n {
+            for j in 0..n {
+                let diff = a[i][j] - a_neg[i][j];
+                let expected = 2.0 * mna.g[i][j];
+                assert!(
+                    (diff - expected).abs() < 1e-10,
+                    "diode clipper: A-A_neg [{i}][{j}] = {diff}, expected 2G = {expected}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_a_plus_a_neg_equals_4c_over_t_bjt_ce() {
+        let spice = r#"BJT Common Emitter
+Cin in base 10u
+R1 vcc base 100k
+R2 base 0 22k
+Q1 coll base emit MYBJTCE
+Rc vcc coll 4.7k
+Re emit 0 1k
+Ce emit 0 100u
+Cout coll out 10u
+Rload out 0 100k
+Vcc vcc 0 DC 12
+.model MYBJTCE NPN(IS=1e-14 BF=200 BR=3)
+"#;
+        let netlist = Netlist::parse(spice).unwrap();
+        let mna = MnaSystem::from_netlist(&netlist).unwrap();
+        let sample_rate = 44100.0;
+        let t = 1.0 / sample_rate;
+
+        let a = mna.get_a_matrix(sample_rate).unwrap();
+        let a_neg = mna.get_a_neg_matrix(sample_rate).unwrap();
+
+        // For augmented rows (voltage source), C should be zero
+        let n = a.len();
+        for i in 0..n {
+            for j in 0..n {
+                let sum = a[i][j] + a_neg[i][j];
+                // For non-augmented rows: A+A_neg = 4C/T
+                // For augmented rows (VS): both G and C contributions are zero (algebraic)
+                if i < mna.n && j < mna.n {
+                    let expected = (4.0 / t) * mna.c[i][j];
+                    assert!(
+                        (sum - expected).abs() < 1e-4,
+                        "BJT CE: A+A_neg [{i}][{j}] = {sum}, expected 4C/T = {expected}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_s_inverse_identity_bjt() {
+        let spice = r#"BJT CE
+Cin in base 10u
+R1 vcc base 100k
+R2 base 0 22k
+Q1 coll base emit MYBJTCE
+Rc vcc coll 4.7k
+Re emit 0 1k
+Ce emit 0 100u
+Cout coll out 10u
+Rload out 0 100k
+Vcc vcc 0 DC 12
+.model MYBJTCE NPN(IS=1e-14 BF=200 BR=3)
+"#;
+        let netlist = Netlist::parse(spice).unwrap();
+        let mna = MnaSystem::from_netlist(&netlist).unwrap();
+        let sample_rate = 44100.0;
+
+        let a = mna.get_a_matrix(sample_rate).unwrap();
+        let s = invert_matrix(&a).unwrap();
+
+        // S * A should equal identity
+        let product = mat_mul(&s, &a);
+        let n = a.len();
+        for i in 0..n {
+            for j in 0..n {
+                let expected = if i == j { 1.0 } else { 0.0 };
+                assert!(
+                    (product[i][j] - expected).abs() < 1e-6,
+                    "BJT CE: (S*A)[{i}][{j}] = {}, expected {expected}",
+                    product[i][j]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_k_equals_nv_s_ni_bjt() {
+        let spice = r#"BJT CE
+Cin in base 10u
+R1 vcc base 100k
+R2 base 0 22k
+Q1 coll base emit MYBJTCE
+Rc vcc coll 4.7k
+Re emit 0 1k
+Ce emit 0 100u
+Cout coll out 10u
+Rload out 0 100k
+Vcc vcc 0 DC 12
+.model MYBJTCE NPN(IS=1e-14 BF=200 BR=3)
+"#;
+        let netlist = Netlist::parse(spice).unwrap();
+        let mna = MnaSystem::from_netlist(&netlist).unwrap();
+        assert!(mna.m >= 2, "BJT should have at least M=2");
+
+        let sample_rate = 44100.0;
+        let dk = DkKernel::from_mna(&mna, sample_rate).unwrap();
+
+        // Manually compute K = N_v * S * N_i
+        let s_2d: Vec<Vec<f64>> = (0..dk.n)
+            .map(|i| (0..dk.n).map(|j| dk.s(i, j)).collect())
+            .collect();
+        let temp = mat_mul(&s_2d, &mna.n_i);
+        let k_expected = mat_mul(&mna.n_v, &temp);
+
+        for i in 0..dk.m {
+            for j in 0..dk.m {
+                assert!(
+                    (dk.k(i, j) - k_expected[i][j]).abs() < 1e-10,
+                    "BJT CE: K[{i}][{j}] = {}, expected {}",
+                    dk.k(i, j),
+                    k_expected[i][j]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_k_diagonal_negative_jfet() {
+        let spice = r#"JFET CS
+Rg in 0 1Meg
+J1 drain in source J2N5457
+Rd vdd drain 2.2k
+Rs source 0 1k
+Cs source 0 100u
+Vdd vdd 0 DC 12
+.model J2N5457 NJ(VTO=-2.0 IDSS=5e-3 LAMBDA=0.001)
+"#;
+        let netlist = Netlist::parse(spice).unwrap();
+        let mna = MnaSystem::from_netlist(&netlist).unwrap();
+        let dk = DkKernel::from_mna(&mna, 44100.0).unwrap();
+
+        for i in 0..dk.m {
+            assert!(
+                dk.k(i, i) <= 0.0,
+                "JFET: K[{i}][{i}] = {} should be <= 0 (negative feedback)",
+                dk.k(i, i)
+            );
+        }
+    }
+
+    #[test]
+    fn test_k_diagonal_negative_triode() {
+        let spice = r#"Triode CC
+Cin in grid 100n
+Rg grid 0 1Meg
+T1 grid plate cathode 12AX7
+Rk cathode 0 1.5k
+Ck cathode 0 25u
+Rp vcc plate 100k
+Vcc vcc 0 DC 250
+.model 12AX7 TUBE(MU=100 EX=1.4 KG1=1060 KP=600 KVB=300)
+"#;
+        let netlist = Netlist::parse(spice).unwrap();
+        let mna = MnaSystem::from_netlist(&netlist).unwrap();
+        let dk = DkKernel::from_mna(&mna, 44100.0).unwrap();
+
+        for i in 0..dk.m {
+            assert!(
+                dk.k(i, i) <= 0.0,
+                "Triode: K[{i}][{i}] = {} should be <= 0 (negative feedback)",
+                dk.k(i, i)
+            );
+        }
+    }
 }
