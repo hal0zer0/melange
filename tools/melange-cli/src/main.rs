@@ -1391,10 +1391,15 @@ fn compile_circuit_source(
                     .and_then(|n| n.to_str())
                     .unwrap_or("<project-dir>")
             );
-            println!("  cargo nih-plug bundle {} --release", circuit_name);
+            println!("  bash build.sh");
+            println!();
+            println!("One-time setup (clone nih-plug if you haven't):");
+            println!("  git clone https://github.com/robbert-vdh/nih-plug.git ~/src/nih-plug");
             println!();
             println!("The compiled plugin (CLAP + VST3) will be in:");
             println!("  target/bundled/");
+            println!();
+            println!("See the generated README.md for full details.");
         }
     }
 
@@ -1443,37 +1448,50 @@ fn validate_circuit_source(
 
     // Step 2: Get circuit netlist as a file path
     // validate_circuit needs a file path. For local files, use directly.
-    // For builtins/URLs, write to a temp file.
+    // For builtins/URLs, write to a secure temp file (random name, auto-cleanup on drop).
+    // Uses tempfile::NamedTempFile to avoid TOCTOU/symlink clobber attacks from
+    // predictable PID-based paths on shared hosts.
     println!("Step 2: Loading circuit...");
-    let (netlist_path, _temp_file) = match circuit_source {
-        circuits::CircuitSource::Local { path } => {
-            // Verify the file exists
-            if !path.exists() {
-                anyhow::bail!("Circuit file not found: {}", path.display());
+    use std::io::Write as _;
+    let (netlist_path, _temp_file): (std::path::PathBuf, Option<tempfile::NamedTempFile>) =
+        match circuit_source {
+            circuits::CircuitSource::Local { path } => {
+                // Verify the file exists
+                if !path.exists() {
+                    anyhow::bail!("Circuit file not found: {}", path.display());
+                }
+                (path.clone(), None)
             }
-            (path.clone(), None)
-        }
-        circuits::CircuitSource::Builtin { content, name } => {
-            println!("  Using builtin circuit: {}", name);
-            let temp_dir = std::env::temp_dir();
-            let temp_path = temp_dir.join(format!("melange_validate_{}.cir", std::process::id()));
-            std::fs::write(&temp_path, content).with_context(|| {
-                format!("Failed to write temp netlist to {}", temp_path.display())
-            })?;
-            (temp_path.clone(), Some(temp_path))
-        }
-        circuits::CircuitSource::Url { url } | circuits::CircuitSource::Friendly { url, .. } => {
-            println!("  Fetching from URL: {}", url);
-            let cache = cache::Cache::new()?;
-            let content = cache.get_sync(url, false)?;
-            let temp_dir = std::env::temp_dir();
-            let temp_path = temp_dir.join(format!("melange_validate_{}.cir", std::process::id()));
-            std::fs::write(&temp_path, &content).with_context(|| {
-                format!("Failed to write temp netlist to {}", temp_path.display())
-            })?;
-            (temp_path.clone(), Some(temp_path))
-        }
-    };
+            circuits::CircuitSource::Builtin { content, name } => {
+                println!("  Using builtin circuit: {}", name);
+                let mut tmp = tempfile::Builder::new()
+                    .prefix("melange_validate_")
+                    .suffix(".cir")
+                    .tempfile()
+                    .context("Failed to create temp netlist file")?;
+                tmp.write_all(content.as_bytes())
+                    .context("Failed to write temp netlist")?;
+                tmp.flush().context("Failed to flush temp netlist")?;
+                let path = tmp.path().to_path_buf();
+                (path, Some(tmp))
+            }
+            circuits::CircuitSource::Url { url }
+            | circuits::CircuitSource::Friendly { url, .. } => {
+                println!("  Fetching from URL: {}", url);
+                let cache = cache::Cache::new()?;
+                let content = cache.get_sync(url, false)?;
+                let mut tmp = tempfile::Builder::new()
+                    .prefix("melange_validate_")
+                    .suffix(".cir")
+                    .tempfile()
+                    .context("Failed to create temp netlist file")?;
+                tmp.write_all(content.as_bytes())
+                    .context("Failed to write temp netlist")?;
+                tmp.flush().context("Failed to flush temp netlist")?;
+                let path = tmp.path().to_path_buf();
+                (path, Some(tmp))
+            }
+        };
 
     // Step 3: Generate test input signal (1kHz sine)
     println!(
@@ -1514,11 +1532,7 @@ fn validate_circuit_source(
         &options,
     );
 
-    // Clean up temp file if we created one
-    if let Some(ref temp) = _temp_file {
-        let _ = std::fs::remove_file(temp);
-    }
-
+    // _temp_file drops here, auto-cleaning the NamedTempFile on function exit.
     let result = result.with_context(|| "Validation failed")?;
 
     // Step 6: Print report

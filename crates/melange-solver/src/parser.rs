@@ -2567,6 +2567,29 @@ pub fn parse_value(s: &str) -> Result<f64, ParseFloatError> {
         return Err(ParseFloatError);
     }
 
+    // Normalize non-ASCII characters. SPICE component values are ASCII by convention,
+    // with the sole exception of the micro sign (µ, U+00B5) and Greek small mu (μ, U+03BC)
+    // which we accept as an alias for 'u'. Rejecting other non-ASCII up front means the
+    // byte-level slicing below is safe (prevents panics on inputs like "1ſ" where
+    // to_uppercase() changes byte length and byte indices land mid-codepoint).
+    let normalized_owned: String;
+    let s: &str = if s.is_ascii() {
+        s
+    } else {
+        let mut out = String::with_capacity(s.len());
+        for c in s.chars() {
+            if c.is_ascii() {
+                out.push(c);
+            } else if c == '\u{00B5}' || c == '\u{03BC}' {
+                out.push('u');
+            } else {
+                return Err(ParseFloatError);
+            }
+        }
+        normalized_owned = out;
+        normalized_owned.as_str()
+    };
+
     // Try infix notation first (e.g. "6n8" → 6.8e-9)
     if let Some(val) = try_parse_infix(s) {
         return Ok(val);
@@ -3547,6 +3570,34 @@ Q1 coll base emit 2N2222
             result.is_err(),
             "Bare 'MEG' with no number should be rejected"
         );
+    }
+
+    // Regression: non-ASCII suffix must not panic.
+    // 'ſ' (U+017F, LATIN SMALL LETTER LONG S) uppercases to "S", so the original
+    // suffix-stripping loop computed char count from the uppercased string and then
+    // byte-sliced the original, landing mid-codepoint. Must return Err, not panic.
+    #[test]
+    fn test_parse_value_non_ascii_suffix_no_panic() {
+        assert!(parse_value("1ſ").is_err());
+        assert!(parse_value("1ß").is_err());
+        assert!(parse_value("10kß").is_err());
+        assert!(parse_value("\u{FEFF}").is_err());
+        // Random non-ASCII noise should never panic, always Err.
+        for test in &["αβγ", "한국", "👍", "1👍", "k👍"] {
+            let _ = parse_value(test);
+        }
+    }
+
+    // Micro sign (U+00B5) and Greek small mu (U+03BC) are the only non-ASCII
+    // suffixes we accept; both normalize to 'u' (micro, 1e-6).
+    #[test]
+    fn test_parse_value_micro_sign() {
+        let a = parse_value("4.7µ").expect("µ should parse");
+        let b = parse_value("4.7μ").expect("μ should parse");
+        let c = parse_value("4.7u").expect("u should parse");
+        assert!((a - 4.7e-6).abs() < 1e-18);
+        assert!((b - 4.7e-6).abs() < 1e-18);
+        assert!((c - 4.7e-6).abs() < 1e-18);
     }
 
     // 13. Model parsing edge cases

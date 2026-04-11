@@ -22,6 +22,7 @@ toml = "0.8"
 dirs = "5.0"
 ureq = "2.9"
 quick-xml = "0.37"
+tempfile = "3.10"
 
 [features]
 default = []
