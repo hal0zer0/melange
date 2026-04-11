@@ -677,7 +677,11 @@ impl KorenPentode {
     /// This is the legacy single-section entry point used by the sharp
     /// (`svar == 0`) path. It delegates to [`shared_e1_with`], passing the
     /// struct's top-level `μ` (a.k.a. `μ_a`) and `ex` (a.k.a. `x_a`).
+    /// Currently unused in the hot path (sharp and variable-mu both call
+    /// `shared_e1_with` directly); kept as documentation of the sharp-path
+    /// semantics for readers.
     #[inline]
+    #[allow(dead_code)]
     fn shared_e1(&self, vgk: f64, vg2k_safe: f64) -> Option<SharedE1> {
         self.shared_e1_with(vgk, vg2k_safe, self.mu, self.ex)
     }
