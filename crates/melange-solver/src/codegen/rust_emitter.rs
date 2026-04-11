@@ -1310,7 +1310,6 @@ impl RustEmitter {
         } else {
             ir.inductors.len()
         };
-        let os_factor = ir.solver_config.oversampling_factor;
         let mut code = String::new();
 
         // Emit set_switch_N() for each switch
@@ -1757,34 +1756,15 @@ impl RustEmitter {
 
         // SM pot recomputation removed — per-block rebuild handles pots exactly
 
-        // Reset oversampler state
-        if os_factor > 1 {
-            let os_info = oversampling_info(os_factor);
-            code.push_str(&format!(
-                "\n        self.os_up_state = [0.0; {}];\n\
-                 \x20       self.os_dn_state = [[0.0; {}]; NUM_OUTPUTS];\n",
-                os_info.state_size, os_info.state_size,
-            ));
-            if os_factor == 4 {
-                code.push_str(&format!(
-                    "        self.os_up_state_outer = [0.0; {}];\n\
-                     \x20       self.os_dn_state_outer = [[0.0; {}]; NUM_OUTPUTS];\n",
-                    os_info.state_size_outer, os_info.state_size_outer,
-                ));
-            }
-        }
-
-        // DC block recomputation
-        if ir.dc_block {
-            code.push_str(&format!(
-                "\n        // Recompute DC blocking coefficient\n\
-                 \x20       let internal_rate = self.current_sample_rate * {}.0;\n\
-                 \x20       self.dc_block_r = 1.0 - 2.0 * std::f64::consts::PI * 5.0 / internal_rate;\n\
-                 \x20       self.dc_block_x_prev = [0.0; NUM_OUTPUTS];\n\
-                 \x20       self.dc_block_y_prev = [0.0; NUM_OUTPUTS];\n",
-                os_factor,
-            ));
-        }
+        // Intentionally do NOT reset oversampler state or DC blocker state here.
+        // rebuild_matrices() is called on every pot/switch change, but pot/switch
+        // changes do not invalidate filter history. Zeroing os_up_state/os_dn_state
+        // on every knob move causes an audible click from the half-band filter
+        // ringing through; zeroing dc_block_x_prev/y_prev produces an instant DC
+        // step and multi-second HPF re-settle. The `dc_block_r` coefficient depends
+        // only on the sample rate (handled by set_sample_rate), not on pots/switches,
+        // so it does not need recomputing here either. (Legitimate filter resets still
+        // happen in reset() and set_sample_rate().)
 
         code.push_str("    }\n");
         code
@@ -4413,7 +4393,16 @@ impl RustEmitter {
         code.push_str("    pub dc_operating_point: [f64; N],\n\n");
         code.push_str("    /// Previous input sample for trapezoidal integration\n");
         code.push_str("    pub input_prev: f64,\n\n");
-        code.push_str("    /// Iteration count from last solve (for diagnostics)\n");
+        code.push_str("    /// NR convergence diagnostic from the last sample's solve.\n");
+        code.push_str("    ///\n");
+        code.push_str("    /// Semantics:\n");
+        code.push_str("    /// - 0..MAX_ITER-1: 0-indexed iteration at which convergence was detected\n");
+        code.push_str("    ///   (i.e. `last_nr_iterations + 1` iterations actually ran)\n");
+        code.push_str("    /// - MAX_ITER: loop exhausted without convergence → NR failed\n");
+        code.push_str("    ///\n");
+        code.push_str("    /// The check `last_nr_iterations >= MAX_ITER` is the BE-fallback trigger;\n");
+        code.push_str("    /// storing `iter` (not `iter + 1`) is intentional so that convergence at\n");
+        code.push_str("    /// the final permitted iteration (iter == MAX_ITER - 1) does not false-trigger.\n");
         code.push_str("    pub last_nr_iterations: u32,\n\n");
         if ir.dc_block {
             code.push_str("    /// DC blocking filter: previous input samples (one per output)\n");
@@ -4438,7 +4427,14 @@ impl RustEmitter {
         code.push_str("    /// Diagnostic: number of samples that needed adaptive sub-stepping\n");
         code.push_str("    pub diag_substep_count: u64,\n");
         code.push_str("    /// Diagnostic: number of LU refactorizations performed\n");
-        code.push_str("    pub diag_refactor_count: u64,\n\n");
+        code.push_str("    pub diag_refactor_count: u64,\n");
+        code.push_str("    /// Diagnostic: number of samples hit by the global voltage-damping\n");
+        code.push_str("    /// safety net. This is a legacy safeguard that scales v_new toward\n");
+        code.push_str("    /// v_prev when any node moves more than ~2V (or 5% of max DC OP) in\n");
+        code.push_str("    /// one sample. Per CLAUDE.md, output limiting must never mask solver\n");
+        code.push_str("    /// bugs — treat a nonzero count here as a signal that the solver needs\n");
+        code.push_str("    /// investigation, not as an acceptable steady-state.\n");
+        code.push_str("    pub diag_voltage_damp_count: u64,\n\n");
 
         // Cross-timestep chord state (persisted LU for full LU path)
         if m > 0 {
@@ -4720,6 +4716,7 @@ impl RustEmitter {
         code.push_str("            diag_nan_reset_count: 0,\n");
         code.push_str("            diag_substep_count: 0,\n");
         code.push_str("            diag_refactor_count: 0,\n");
+        code.push_str("            diag_voltage_damp_count: 0,\n");
         if m > 0 {
             code.push_str("            chord_lu: [[0.0; N]; N],\n");
             code.push_str("            chord_dr: [1.0; N],\n");
@@ -4919,6 +4916,9 @@ impl RustEmitter {
         code.push_str("        self.diag_nr_max_iter_count = 0;\n");
         code.push_str("        self.diag_be_fallback_count = 0;\n");
         code.push_str("        self.diag_nan_reset_count = 0;\n");
+        code.push_str("        self.diag_voltage_damp_count = 0;\n");
+        code.push_str("        self.diag_substep_count = 0;\n");
+        code.push_str("        self.diag_refactor_count = 0;\n");
         // Reset Schur complement matrices to defaults
         code.push_str("        self.s = S_DEFAULT;\n");
         if m > 0 {

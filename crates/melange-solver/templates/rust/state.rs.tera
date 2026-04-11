@@ -50,6 +50,11 @@ pub struct CircuitState {
     pub diag_nan_reset_count: u64,
     /// Diagnostic: number of times matrix inversion detected a singular matrix
     pub diag_singular_matrix_count: u64,
+    /// Diagnostic: number of samples hit by the global voltage-damping safety
+    /// net. Per CLAUDE.md ("never use output attenuation to mask simulation
+    /// errors"), any nonzero value here is a symptom to investigate, not an
+    /// acceptable steady-state.
+    pub diag_voltage_damp_count: u64,
 
     /// S = A^{-1} matrix, recomputed by set_sample_rate
     pub s: [[f64; N]; N],
@@ -194,6 +199,7 @@ impl Default for CircuitState {
             diag_nr_max_iter_count: 0,
             diag_nan_reset_count: 0,
             diag_singular_matrix_count: 0,
+            diag_voltage_damp_count: 0,
             s: S_DEFAULT,
             a_neg: A_NEG_DEFAULT,
             k: K_DEFAULT,
@@ -282,6 +288,7 @@ impl CircuitState {
         self.diag_nr_max_iter_count = 0;
         self.diag_nan_reset_count = 0;
         self.diag_singular_matrix_count = 0;
+        self.diag_voltage_damp_count = 0;
 {% if has_be_fallback %}
         self.diag_be_fallback_count = 0;
         self.be_cooldown = 0;

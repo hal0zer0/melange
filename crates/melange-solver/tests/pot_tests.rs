@@ -317,6 +317,56 @@ fn test_codegen_pot_process_sample_corrections() {
     );
 }
 
+/// rebuild_matrices() must NOT zero DC blocker or oversampler state.
+/// It is called on every pot/switch change; zeroing filter history there
+/// produces an audible click on every knob move. The legitimate filter
+/// resets live in reset() and set_sample_rate() only.
+#[test]
+fn test_rebuild_matrices_preserves_filter_state() {
+    let code = generate_code(RC_POT_SPICE);
+
+    // Isolate the rebuild_matrices function body.
+    let start = code
+        .find("fn rebuild_matrices")
+        .expect("rebuild_matrices should exist");
+    // Find the end by matching brace depth from the function opening brace.
+    let body = &code[start..];
+    let open_brace = body.find('{').expect("function should have an opening brace");
+    let mut depth = 0i32;
+    let mut end = open_brace;
+    for (i, c) in body[open_brace..].char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = open_brace + i + 1;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let rebuild_body = &body[..end];
+
+    assert!(
+        !rebuild_body.contains("dc_block_x_prev"),
+        "rebuild_matrices must not zero dc_block_x_prev (click on pot change)"
+    );
+    assert!(
+        !rebuild_body.contains("dc_block_y_prev"),
+        "rebuild_matrices must not zero dc_block_y_prev (click on pot change)"
+    );
+    assert!(
+        !rebuild_body.contains("os_up_state"),
+        "rebuild_matrices must not zero os_up_state (filter ringing glitch)"
+    );
+    assert!(
+        !rebuild_body.contains("os_dn_state"),
+        "rebuild_matrices must not zero os_dn_state (filter ringing glitch)"
+    );
+}
+
 #[test]
 fn test_codegen_pot_nr_k_correction() {
     let code = generate_code(DIODE_POT_SPICE);

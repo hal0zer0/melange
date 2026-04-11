@@ -142,6 +142,12 @@ pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS
         }
         let damp_thresh = max_dc.mul_add(0.05, 2.0);
         if max_delta > damp_thresh {
+            // This is a last-ditch safety net that should only fire when the
+            // solver has produced a pathological step. A nonzero value here is
+            // a symptom that needs investigation, not an acceptable steady-state
+            // (per CLAUDE.md: "never use output attenuation to mask simulation
+            // errors"). Surfaced via state.diag_voltage_damp_count.
+            state.diag_voltage_damp_count = state.diag_voltage_damp_count.saturating_add(1);
             let damp = (damp_thresh / max_delta).max(0.01);
             let mut v_d = v;
             for i in 0..N {
