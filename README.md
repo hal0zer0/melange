@@ -499,26 +499,41 @@ Melange includes code derived from the [OpenWurli](https://github.com/openwurli/
 
 ## Acknowledgments
 
-Melange builds on decades of research in circuit simulation and audio DSP:
+### A huge debt to SPICE and ngspice
 
-**Core methods:**
+Melange is, in a very real sense, SPICE with a different front end and a different back end. Almost every piece of numerical behavior that makes the generated code produce the right answer traces back to 50+ years of work on SPICE and, more recently, to the open-source ngspice project.
+
+- **The device model equations are SPICE's.** The Gummel-Poon BJT (`qb`, `q1`, `q2`, high-injection knee), the Shichman-Hodges JFET, the SPICE Level 1 MOSFET, the Shockley diode with series resistance and reverse breakdown, the junction-capacitance depletion formulas (`CJ0 / (1 - Vj/VJ)^MJ`), the Boyle op-amp macromodel — these are all re-implementations of the math written down decades ago in the SPICE2/SPICE3 literature and source code. The parameter names you use in `.model` lines (`IS`, `BF`, `VAF`, `IKF`, `NF`, `LAMBDA`, `KP`, `VTO`, `CGS`, `CJE`, …) are SPICE parameter names because there is no better convention and no reason to invent one.
+- **The convergence machinery is SPICE's.** `pnjlim` voltage limiting for pn junctions, `fetlim` for FETs, the source-stepping and Gmin-stepping fallback chain for DC operating point, the RELTOL/VNTOL/ABSTOL tolerance philosophy, the singular-matrix and off-diagonal-pivot checks in the LU factorization — all of this is taken from SPICE3f5 and ngspice's `bjtload.c` / `dioload.c` / `cktop.c`. Where we were unsure what the right thing was, we read ngspice's source and followed it line by line.
+- **ngspice is the reference oracle.** Every circuit that ships in `circuits/stable/` passes a correlation + RMS error test against an ngspice run of the same netlist. The `melange-validate` crate shells out to `ngspice` as a subprocess, parses its `.OPTIONS INTERP` output, and compares sample-for-sample. When melange and ngspice disagree, the bug is in melange until proven otherwise. We cannot overstate how much confidence it gives to have a mature, open-source SPICE engine on the other side of every regression test.
+- **The MNA stamping rules are SPICE's.** How conductance stamps contribute to G, how companion models for caps/inductors contribute to G and rhs, how VCCS / VCVS / op-amps stamp into the augmented matrix, the sign conventions for current flow — all of this follows the SPICE2 / Nagel (1975) formulation.
+
+If SPICE is "the physics of analog circuit simulation," then melange is "that physics, compiled ahead-of-time into a branchless inner loop you can run on the audio thread." We are standing on Larry Nagel, Tom Quarles, Hermann Gummel, Norman Koren, and the dozens of ngspice maintainers whose names appear in `ngspice-42/src/spicelib/devices/*/load.c`.
+
+**Please donate to or contribute to [ngspice](https://ngspice.sourceforge.io/) if you find melange useful.** Their work is the foundation we build on.
+
+### Core methods
+
 - David Yeh — Discrete K-method for audio circuit simulation (PhD thesis, Stanford, 2009)
-- Larry Nagel — SPICE (UC Berkeley); SPICE3f5 source for pnjlim/fetlim voltage limiting
+- Larry Nagel, Tom Quarles, and the ngspice maintainers — SPICE (UC Berkeley), SPICE3f5, and [ngspice](https://ngspice.sourceforge.io/); source of every device model, convergence heuristic, and validation reference in this project. See note above.
 - Ho, Ruehli, Brennan — Modified Nodal Analysis (IEEE Trans. CAS, 1975)
 - Sherman & Morrison — rank-1 matrix update formula (used for dynamic potentiometers)
 
-**Device models:**
+### Device models
+
 - Hermann Gummel & H.C. Poon — BJT model with Early effect and high-injection (Bell Labs, 1970)
 - Jiri Shichman & David Hodges — JFET model (IEEE JSSC, 1968)
 - Norman Koren — triode vacuum tube model (1996)
 - Marshall Leach — grid current model for vacuum tubes
 - William Shockley — semiconductor diode equation
 
-**DSP & filters:**
+### DSP & filters
+
 - Olli Niemitalo — polyphase allpass half-band IIR filters for oversampling
 - Vadim Zavalishin — topology-preserving transform (TPT) filters
 
-**References:**
+### References
+
 - Pillage, Rohrer, Visweswariah — *Electronic Circuit and System Simulation Methods* (McGraw-Hill, 1995)
 - [Hack Audio circuit modeling tutorial](https://hackaudio.com/tutorial-courses/audio-circuit-modeling-tutorial/)
 - [TU Delft analog electronics webbook](https://analog-electronics.ewi.tudelft.nl/webbook/SED/)
