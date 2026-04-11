@@ -544,3 +544,309 @@ fn tube_evaluate_beam_tetrode(vgk: f64, vpk: f64, vg2k: f64,
       dig1_dvgk, 0.0, 0.0])
 }
 {% endif %}
+{% if any_variable_mu_pentode %}
+
+// =============================================================================
+// Variable-mu pentode (Reefman §5 two-section Koren, Rational screen form).
+// Math reference: Reefman Theory §5.1 Eqs 33-40. Plate and screen currents
+// are computed from a fixed-weight blend of TWO Koren currents — section A
+// (uses `mu`, `ex`) and section B (uses `mu_b`, `ex_b`). The blended Ip0
+// plugs into the same §4.4 Rational F(Vp)/H(Vp) factors as the sharp pentode
+// above. Used for remote-cutoff tubes (6K7, 6BA6) in varimu compressors.
+//
+// Degenerate: when svar == 0 section B is still computed (wasted work) but
+// the blend reduces to `ip0_v = ip0_a`. Runtime dispatch only routes here
+// when `tp.svar > 0.0`, so wasted work is avoided at the call-site level.
+// =============================================================================
+
+#[inline(always)]
+fn tube_ip_pentode_v(vgk: f64, vpk: f64, vg2k: f64,
+                     mu: f64, ex: f64, kg1: f64, kg2: f64, kp: f64, kvb: f64,
+                     alpha_s: f64, a_factor: f64, beta_factor: f64,
+                     mu_b: f64, svar: f64, ex_b: f64) -> f64 {
+    let vpk = vpk.max(0.0);
+    let vg2k = vg2k.max(1e-3);
+    let s = (kvb + vg2k * vg2k).sqrt();
+    let inner_a = kp * (1.0 / mu + vgk / s);
+    let sp_a = if inner_a > 20.0 { inner_a }
+               else if inner_a < -20.0 { 0.0 }
+               else { fast_ln(1.0 + fast_exp(inner_a)) };
+    let e1_a = (vg2k / kp) * sp_a;
+    let ip0_a = if e1_a > 1e-30 { e1_a.powf(ex) } else { 0.0 };
+    let inner_b = kp * (1.0 / mu_b + vgk / s);
+    let sp_b = if inner_b > 20.0 { inner_b }
+               else if inner_b < -20.0 { 0.0 }
+               else { fast_ln(1.0 + fast_exp(inner_b)) };
+    let e1_b = (vg2k / kp) * sp_b;
+    let ip0_b = if e1_b > 1e-30 { e1_b.powf(ex_b) } else { 0.0 };
+    let ip0_v = (1.0 - svar) * ip0_a + svar * ip0_b;
+    if ip0_v <= 1e-30 { return 0.0; }
+    let alpha = 1.0 - (kg1 / kg2) * (1.0 + alpha_s);
+    let denom = 1.0 + beta_factor * vpk;
+    let f_factor = 1.0 / kg1 - 1.0 / kg2
+        + a_factor * vpk / kg1
+        - (alpha / kg1 + alpha_s / kg2) / denom;
+    ip0_v * f_factor
+}
+
+#[inline(always)]
+fn tube_is_pentode_v(vgk: f64, vpk: f64, vg2k: f64,
+                     mu: f64, ex: f64, kg1: f64, kg2: f64, kp: f64, kvb: f64,
+                     alpha_s: f64, beta_factor: f64,
+                     mu_b: f64, svar: f64, ex_b: f64) -> f64 {
+    let _ = kg1;
+    let vpk = vpk.max(0.0);
+    let vg2k = vg2k.max(1e-3);
+    let s = (kvb + vg2k * vg2k).sqrt();
+    let inner_a = kp * (1.0 / mu + vgk / s);
+    let sp_a = if inner_a > 20.0 { inner_a }
+               else if inner_a < -20.0 { 0.0 }
+               else { fast_ln(1.0 + fast_exp(inner_a)) };
+    let e1_a = (vg2k / kp) * sp_a;
+    let ip0_a = if e1_a > 1e-30 { e1_a.powf(ex) } else { 0.0 };
+    let inner_b = kp * (1.0 / mu_b + vgk / s);
+    let sp_b = if inner_b > 20.0 { inner_b }
+               else if inner_b < -20.0 { 0.0 }
+               else { fast_ln(1.0 + fast_exp(inner_b)) };
+    let e1_b = (vg2k / kp) * sp_b;
+    let ip0_b = if e1_b > 1e-30 { e1_b.powf(ex_b) } else { 0.0 };
+    let ip0_v = (1.0 - svar) * ip0_a + svar * ip0_b;
+    if ip0_v <= 1e-30 { return 0.0; }
+    let denom = 1.0 + beta_factor * vpk;
+    let h_factor = (1.0 + alpha_s / denom) / kg2;
+    ip0_v * h_factor
+}
+
+#[inline(always)]
+fn tube_jacobian_pentode_v(vgk: f64, vpk: f64, vg2k: f64,
+                           mu: f64, ex: f64, kg1: f64, kg2: f64, kp: f64, kvb: f64,
+                           alpha_s: f64, a_factor: f64, beta_factor: f64,
+                           ig_max: f64, vgk_onset: f64,
+                           mu_b: f64, svar: f64, ex_b: f64) -> [f64; 9] {
+    let dig1_dvgk = tube_ig_deriv(vgk, ig_max, vgk_onset);
+    let vpk = vpk.max(0.0);
+    let vg2k = vg2k.max(1e-3);
+    let s = (kvb + vg2k * vg2k).sqrt();
+    // Section A chain rule
+    let inner_a = kp * (1.0 / mu + vgk / s);
+    let (sigmoid_a, sp_a) = if inner_a > 20.0 { (1.0, inner_a) }
+                             else if inner_a < -20.0 { (0.0, 0.0) }
+                             else {
+                                 let exp_inner = fast_exp(inner_a);
+                                 (exp_inner / (1.0 + exp_inner), fast_ln(1.0 + exp_inner))
+                             };
+    let e1_a = (vg2k / kp) * sp_a;
+    let (ip0_a, dip0a_dvgk, dip0a_dvg2k) = if e1_a > 1e-30 {
+        let e1a_pow = e1_a.powf(ex);
+        let dip0a_de1a = ex * e1a_pow / e1_a;
+        let de1a_dvgk = vg2k * sigmoid_a / s;
+        let de1a_dvg2k = sp_a / kp - sigmoid_a * vgk * vg2k * vg2k / (s * s * s);
+        (e1a_pow, dip0a_de1a * de1a_dvgk, dip0a_de1a * de1a_dvg2k)
+    } else { (0.0, 0.0, 0.0) };
+    // Section B chain rule
+    let inner_b = kp * (1.0 / mu_b + vgk / s);
+    let (sigmoid_b, sp_b) = if inner_b > 20.0 { (1.0, inner_b) }
+                             else if inner_b < -20.0 { (0.0, 0.0) }
+                             else {
+                                 let exp_inner = fast_exp(inner_b);
+                                 (exp_inner / (1.0 + exp_inner), fast_ln(1.0 + exp_inner))
+                             };
+    let e1_b = (vg2k / kp) * sp_b;
+    let (ip0_b, dip0b_dvgk, dip0b_dvg2k) = if e1_b > 1e-30 {
+        let e1b_pow = e1_b.powf(ex_b);
+        let dip0b_de1b = ex_b * e1b_pow / e1_b;
+        let de1b_dvgk = vg2k * sigmoid_b / s;
+        let de1b_dvg2k = sp_b / kp - sigmoid_b * vgk * vg2k * vg2k / (s * s * s);
+        (e1b_pow, dip0b_de1b * de1b_dvgk, dip0b_de1b * de1b_dvg2k)
+    } else { (0.0, 0.0, 0.0) };
+    let ip0_v = (1.0 - svar) * ip0_a + svar * ip0_b;
+    if ip0_v <= 1e-30 {
+        return [0.0, 0.0, 0.0,
+                0.0, 0.0, 0.0,
+                dig1_dvgk, 0.0, 0.0];
+    }
+    let dip0v_dvgk = (1.0 - svar) * dip0a_dvgk + svar * dip0b_dvgk;
+    let dip0v_dvg2k = (1.0 - svar) * dip0a_dvg2k + svar * dip0b_dvg2k;
+    let alpha = 1.0 - (kg1 / kg2) * (1.0 + alpha_s);
+    let denom = 1.0 + beta_factor * vpk;
+    let denom2 = denom * denom;
+    let coeff = alpha / kg1 + alpha_s / kg2;
+    let f_factor = 1.0 / kg1 - 1.0 / kg2 + a_factor * vpk / kg1 - coeff / denom;
+    let df_dvpk = a_factor / kg1 + beta_factor * coeff / denom2;
+    let h_factor = (1.0 + alpha_s / denom) / kg2;
+    let dh_dvpk = -beta_factor * alpha_s / (kg2 * denom2);
+
+    [dip0v_dvgk * f_factor, ip0_v * df_dvpk, dip0v_dvg2k * f_factor,
+     dip0v_dvgk * h_factor, ip0_v * dh_dvpk, dip0v_dvg2k * h_factor,
+     dig1_dvgk, 0.0, 0.0]
+}
+
+#[inline(always)]
+fn tube_evaluate_pentode_v(vgk: f64, vpk: f64, vg2k: f64,
+                           mu: f64, ex: f64, kg1: f64, kg2: f64, kp: f64, kvb: f64,
+                           alpha_s: f64, a_factor: f64, beta_factor: f64,
+                           ig_max: f64, vgk_onset: f64,
+                           mu_b: f64, svar: f64, ex_b: f64) -> (f64, f64, f64, [f64; 9]) {
+    let ig1 = tube_ig(vgk, ig_max, vgk_onset);
+    let jac = tube_jacobian_pentode_v(vgk, vpk, vg2k, mu, ex, kg1, kg2, kp, kvb,
+                                       alpha_s, a_factor, beta_factor, ig_max, vgk_onset,
+                                       mu_b, svar, ex_b);
+    let ip = tube_ip_pentode_v(vgk, vpk, vg2k, mu, ex, kg1, kg2, kp, kvb,
+                                alpha_s, a_factor, beta_factor, mu_b, svar, ex_b);
+    let ig2 = tube_is_pentode_v(vgk, vpk, vg2k, mu, ex, kg1, kg2, kp, kvb,
+                                 alpha_s, beta_factor, mu_b, svar, ex_b);
+    (ip, ig2, ig1, jac)
+}
+{% endif %}
+{% if any_variable_mu_beam_tetrode %}
+
+// =============================================================================
+// Variable-mu beam tetrode (Reefman §5 two-section Koren, DerkE §4.5 screen).
+// Used for remote-cutoff beam tetrodes / IF pentodes like EF89 (PenthodeVDE
+// in TubeLib.inc). Same two-section Ip0 blend as the Rational variant above,
+// with the exp(-(β·Vp)^{3/2}) screen form of §4.5.
+// =============================================================================
+
+#[inline(always)]
+fn tube_ip_beam_tetrode_v(vgk: f64, vpk: f64, vg2k: f64,
+                          mu: f64, ex: f64, kg1: f64, kg2: f64, kp: f64, kvb: f64,
+                          alpha_s: f64, a_factor: f64, beta_factor: f64,
+                          mu_b: f64, svar: f64, ex_b: f64) -> f64 {
+    let vpk = vpk.max(0.0);
+    let vg2k = vg2k.max(1e-3);
+    let s = (kvb + vg2k * vg2k).sqrt();
+    let inner_a = kp * (1.0 / mu + vgk / s);
+    let sp_a = if inner_a > 20.0 { inner_a }
+               else if inner_a < -20.0 { 0.0 }
+               else { fast_ln(1.0 + fast_exp(inner_a)) };
+    let e1_a = (vg2k / kp) * sp_a;
+    let ip0_a = if e1_a > 1e-30 { e1_a.powf(ex) } else { 0.0 };
+    let inner_b = kp * (1.0 / mu_b + vgk / s);
+    let sp_b = if inner_b > 20.0 { inner_b }
+               else if inner_b < -20.0 { 0.0 }
+               else { fast_ln(1.0 + fast_exp(inner_b)) };
+    let e1_b = (vg2k / kp) * sp_b;
+    let ip0_b = if e1_b > 1e-30 { e1_b.powf(ex_b) } else { 0.0 };
+    let ip0_v = (1.0 - svar) * ip0_a + svar * ip0_b;
+    if ip0_v <= 1e-30 { return 0.0; }
+    let alpha = 1.0 - (kg1 / kg2) * (1.0 + alpha_s);
+    let u = (beta_factor * vpk).max(0.0);
+    let u_sqrt = u.sqrt();
+    let ex_factor = (-(u * u_sqrt)).exp();
+    let f_factor = 1.0 / kg1 - 1.0 / kg2
+        + a_factor * vpk / kg1
+        - ex_factor * (alpha / kg1 + alpha_s / kg2);
+    ip0_v * f_factor
+}
+
+#[inline(always)]
+fn tube_is_beam_tetrode_v(vgk: f64, vpk: f64, vg2k: f64,
+                          mu: f64, ex: f64, kg1: f64, kg2: f64, kp: f64, kvb: f64,
+                          alpha_s: f64, beta_factor: f64,
+                          mu_b: f64, svar: f64, ex_b: f64) -> f64 {
+    let _ = kg1;
+    let vpk = vpk.max(0.0);
+    let vg2k = vg2k.max(1e-3);
+    let s = (kvb + vg2k * vg2k).sqrt();
+    let inner_a = kp * (1.0 / mu + vgk / s);
+    let sp_a = if inner_a > 20.0 { inner_a }
+               else if inner_a < -20.0 { 0.0 }
+               else { fast_ln(1.0 + fast_exp(inner_a)) };
+    let e1_a = (vg2k / kp) * sp_a;
+    let ip0_a = if e1_a > 1e-30 { e1_a.powf(ex) } else { 0.0 };
+    let inner_b = kp * (1.0 / mu_b + vgk / s);
+    let sp_b = if inner_b > 20.0 { inner_b }
+               else if inner_b < -20.0 { 0.0 }
+               else { fast_ln(1.0 + fast_exp(inner_b)) };
+    let e1_b = (vg2k / kp) * sp_b;
+    let ip0_b = if e1_b > 1e-30 { e1_b.powf(ex_b) } else { 0.0 };
+    let ip0_v = (1.0 - svar) * ip0_a + svar * ip0_b;
+    if ip0_v <= 1e-30 { return 0.0; }
+    let u = (beta_factor * vpk).max(0.0);
+    let u_sqrt = u.sqrt();
+    let ex_factor = (-(u * u_sqrt)).exp();
+    let h_factor = (1.0 + alpha_s * ex_factor) / kg2;
+    ip0_v * h_factor
+}
+
+#[inline(always)]
+fn tube_jacobian_beam_tetrode_v(vgk: f64, vpk: f64, vg2k: f64,
+                                mu: f64, ex: f64, kg1: f64, kg2: f64, kp: f64, kvb: f64,
+                                alpha_s: f64, a_factor: f64, beta_factor: f64,
+                                ig_max: f64, vgk_onset: f64,
+                                mu_b: f64, svar: f64, ex_b: f64) -> [f64; 9] {
+    let dig1_dvgk = tube_ig_deriv(vgk, ig_max, vgk_onset);
+    let vpk = vpk.max(0.0);
+    let vg2k = vg2k.max(1e-3);
+    let s = (kvb + vg2k * vg2k).sqrt();
+    let inner_a = kp * (1.0 / mu + vgk / s);
+    let (sigmoid_a, sp_a) = if inner_a > 20.0 { (1.0, inner_a) }
+                             else if inner_a < -20.0 { (0.0, 0.0) }
+                             else {
+                                 let exp_inner = fast_exp(inner_a);
+                                 (exp_inner / (1.0 + exp_inner), fast_ln(1.0 + exp_inner))
+                             };
+    let e1_a = (vg2k / kp) * sp_a;
+    let (ip0_a, dip0a_dvgk, dip0a_dvg2k) = if e1_a > 1e-30 {
+        let e1a_pow = e1_a.powf(ex);
+        let dip0a_de1a = ex * e1a_pow / e1_a;
+        let de1a_dvgk = vg2k * sigmoid_a / s;
+        let de1a_dvg2k = sp_a / kp - sigmoid_a * vgk * vg2k * vg2k / (s * s * s);
+        (e1a_pow, dip0a_de1a * de1a_dvgk, dip0a_de1a * de1a_dvg2k)
+    } else { (0.0, 0.0, 0.0) };
+    let inner_b = kp * (1.0 / mu_b + vgk / s);
+    let (sigmoid_b, sp_b) = if inner_b > 20.0 { (1.0, inner_b) }
+                             else if inner_b < -20.0 { (0.0, 0.0) }
+                             else {
+                                 let exp_inner = fast_exp(inner_b);
+                                 (exp_inner / (1.0 + exp_inner), fast_ln(1.0 + exp_inner))
+                             };
+    let e1_b = (vg2k / kp) * sp_b;
+    let (ip0_b, dip0b_dvgk, dip0b_dvg2k) = if e1_b > 1e-30 {
+        let e1b_pow = e1_b.powf(ex_b);
+        let dip0b_de1b = ex_b * e1b_pow / e1_b;
+        let de1b_dvgk = vg2k * sigmoid_b / s;
+        let de1b_dvg2k = sp_b / kp - sigmoid_b * vgk * vg2k * vg2k / (s * s * s);
+        (e1b_pow, dip0b_de1b * de1b_dvgk, dip0b_de1b * de1b_dvg2k)
+    } else { (0.0, 0.0, 0.0) };
+    let ip0_v = (1.0 - svar) * ip0_a + svar * ip0_b;
+    if ip0_v <= 1e-30 {
+        return [0.0, 0.0, 0.0,
+                0.0, 0.0, 0.0,
+                dig1_dvgk, 0.0, 0.0];
+    }
+    let dip0v_dvgk = (1.0 - svar) * dip0a_dvgk + svar * dip0b_dvgk;
+    let dip0v_dvg2k = (1.0 - svar) * dip0a_dvg2k + svar * dip0b_dvg2k;
+    let alpha = 1.0 - (kg1 / kg2) * (1.0 + alpha_s);
+    let u = (beta_factor * vpk).max(0.0);
+    let u_sqrt = u.sqrt();
+    let ex_factor = (-(u * u_sqrt)).exp();
+    let dex_dvpk = -1.5 * beta_factor * u_sqrt * ex_factor;
+    let coeff = alpha / kg1 + alpha_s / kg2;
+    let f_factor = 1.0 / kg1 - 1.0 / kg2 + a_factor * vpk / kg1 - ex_factor * coeff;
+    let df_dvpk = a_factor / kg1 - dex_dvpk * coeff;
+    let h_factor = (1.0 + alpha_s * ex_factor) / kg2;
+    let dh_dvpk = alpha_s * dex_dvpk / kg2;
+
+    [dip0v_dvgk * f_factor, ip0_v * df_dvpk, dip0v_dvg2k * f_factor,
+     dip0v_dvgk * h_factor, ip0_v * dh_dvpk, dip0v_dvg2k * h_factor,
+     dig1_dvgk, 0.0, 0.0]
+}
+
+#[inline(always)]
+fn tube_evaluate_beam_tetrode_v(vgk: f64, vpk: f64, vg2k: f64,
+                                mu: f64, ex: f64, kg1: f64, kg2: f64, kp: f64, kvb: f64,
+                                alpha_s: f64, a_factor: f64, beta_factor: f64,
+                                ig_max: f64, vgk_onset: f64,
+                                mu_b: f64, svar: f64, ex_b: f64) -> (f64, f64, f64, [f64; 9]) {
+    let ig1 = tube_ig(vgk, ig_max, vgk_onset);
+    let jac = tube_jacobian_beam_tetrode_v(vgk, vpk, vg2k, mu, ex, kg1, kg2, kp, kvb,
+                                            alpha_s, a_factor, beta_factor, ig_max, vgk_onset,
+                                            mu_b, svar, ex_b);
+    let ip = tube_ip_beam_tetrode_v(vgk, vpk, vg2k, mu, ex, kg1, kg2, kp, kvb,
+                                     alpha_s, a_factor, beta_factor, mu_b, svar, ex_b);
+    let ig2 = tube_is_beam_tetrode_v(vgk, vpk, vg2k, mu, ex, kg1, kg2, kp, kvb,
+                                      alpha_s, beta_factor, mu_b, svar, ex_b);
+    (ip, ig2, ig1, jac)
+}
+{% endif %}

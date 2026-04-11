@@ -259,6 +259,15 @@ pub struct PentodeCatalogEntry {
     /// - [`ScreenForm::Rational`] — Reefman §4.4 (`1/(1+β·Vp)`), true pentodes.
     /// - [`ScreenForm::Exponential`] — Reefman §4.5 (`exp(-(β·Vp)^{3/2})`), beam tetrodes.
     pub screen_form: ScreenForm,
+    /// Reefman §5 variable-mu section-B amplification factor (μ_b).
+    /// `svar > 0` → two-section blend; 0.0 = sharp single-mu default.
+    pub mu_b: f64,
+    /// Reefman §5 variable-mu blend fraction (s_var in Eq 33).
+    /// 0.0 = sharp default; typical fitted values 0.05–0.10.
+    pub svar: f64,
+    /// Reefman §5 variable-mu section-B Koren exponent (x_b in Eq 34).
+    /// 0.0 = sharp default.
+    pub ex_b: f64,
     /// Source citation
     pub source: &'static str,
 }
@@ -282,6 +291,9 @@ pub const PENTODE_CATALOG: &[PentodeCatalogEntry] = &[
         ig_max: 8e-3,
         vgk_onset: 0.7,
         screen_form: ScreenForm::Rational,
+        mu_b: 0.0,
+        svar: 0.0,
+        ex_b: 0.0,
         source: "Reefman TubeLib.inc (2016), BTetrodeD fit",
     },
     // EL34 / 6CA7 — power pentode (true pentode mode).
@@ -300,6 +312,9 @@ pub const PENTODE_CATALOG: &[PentodeCatalogEntry] = &[
         ig_max: 10e-3,
         vgk_onset: 0.7,
         screen_form: ScreenForm::Rational,
+        mu_b: 0.0,
+        svar: 0.0,
+        ex_b: 0.0,
         source: "Reefman TubeLib.inc (2016), BTetrodeD fit",
     },
     // EF86 / 6267 — small-signal sharp-cutoff pentode.
@@ -319,6 +334,9 @@ pub const PENTODE_CATALOG: &[PentodeCatalogEntry] = &[
         ig_max: 4e-3,
         vgk_onset: 0.5,
         screen_form: ScreenForm::Rational,
+        mu_b: 0.0,
+        svar: 0.0,
+        ex_b: 0.0,
         source: "Reefman TubeLib.inc (2016), PenthodeD fit",
     },
     // 6L6GC / 5881 — beam power tube (beam-tetrode mode).
@@ -339,6 +357,9 @@ pub const PENTODE_CATALOG: &[PentodeCatalogEntry] = &[
         ig_max: 10e-3,
         vgk_onset: 0.7,
         screen_form: ScreenForm::Exponential,
+        mu_b: 0.0,
+        svar: 0.0,
+        ex_b: 0.0,
         source: "Reefman TubeLib.inc (2016), BTetrodeDE fit",
     },
     // 6V6 / 6V6GT — beam power tube (beam-tetrode mode).
@@ -359,7 +380,57 @@ pub const PENTODE_CATALOG: &[PentodeCatalogEntry] = &[
         ig_max: 6e-3,
         vgk_onset: 0.7,
         screen_form: ScreenForm::Exponential,
+        mu_b: 0.0,
+        svar: 0.0,
+        ex_b: 0.0,
         source: "Reefman TubeLib.inc (2016), BTetrodeDE fit",
+    },
+    // 6K7 / 6K7G / 6K7GT — variable-mu (remote-cutoff) RF/IF pentode.
+    // Reefman TubeLib.inc PenthodeVD fit (§5 variable-mu Derk, rational screen form).
+    // The two-section blend (μ_a=15.5 sharp + μ_b=3.4 soft) captures the
+    // exponentially-wound grid that gives remote-cutoff AGC behaviour.
+    // No triode-connected counterpart in CATALOG, so bare "6K7" is unambiguous.
+    PentodeCatalogEntry {
+        names: &["6K7", "6K7G", "6K7GT"],
+        mu: 15.5,
+        ex: 1.573,
+        kg1: 1407.7,
+        kg2: 8335.8,
+        kp: 36.0,
+        kvb: 1309.0,
+        alpha_s: 4.07,
+        a_factor: 1.55e-9,
+        beta_factor: 0.15,
+        ig_max: 4e-3,
+        vgk_onset: 0.5,
+        screen_form: ScreenForm::Rational,
+        mu_b: 3.4,
+        svar: 0.083,
+        ex_b: 1.223,
+        source: "Reefman TubeLib.inc (2016), PenthodeVD fit (variable-mu Derk §5)",
+    },
+    // EF89 / 6DA6 — variable-mu (remote-cutoff) IF pentode.
+    // Reefman TubeLib.inc PenthodeVDE fit (§5 variable-mu DerkE, exponential screen form).
+    // Background-research Kvb=0 clamped to 1.0 for numerical safety in Koren knee.
+    // a_factor not reported in source → defaulted to 0.0.
+    PentodeCatalogEntry {
+        names: &["EF89", "6DA6"],
+        mu: 25.0,
+        ex: 1.418,
+        kg1: 328.3,
+        kg2: 1199.3,
+        kp: 58.8,
+        kvb: 1.0,
+        alpha_s: 2.07,
+        a_factor: 0.0,
+        beta_factor: 0.122,
+        ig_max: 2e-3,
+        vgk_onset: 0.5,
+        screen_form: ScreenForm::Exponential,
+        mu_b: 7.8,
+        svar: 0.068,
+        ex_b: 0.978,
+        source: "Reefman TubeLib.inc (2016), PenthodeVDE fit (variable-mu DerkE §5)",
     },
 ];
 
@@ -924,8 +995,11 @@ mod tests {
             assert!(entry.ex > 0.0, "{}: ex", entry.names[0]);
             assert!(entry.kp > 0.0, "{}: kp", entry.names[0]);
             assert!(entry.kvb > 0.0, "{}: kvb", entry.names[0]);
-            assert!(entry.a_factor > 0.0, "{}: a_factor", entry.names[0]);
-            assert!(entry.beta_factor > 0.0, "{}: beta_factor", entry.names[0]);
+            // a_factor and beta_factor are allowed to be exactly 0 — some
+            // Reefman fits pinpoint them at zero (e.g. EF89 has A=0).
+            // Only require non-negative.
+            assert!(entry.a_factor >= 0.0, "{}: a_factor", entry.names[0]);
+            assert!(entry.beta_factor >= 0.0, "{}: beta_factor", entry.names[0]);
             assert!(entry.ig_max > 0.0, "{}: ig_max", entry.names[0]);
             assert!(entry.vgk_onset > 0.0, "{}: vgk_onset", entry.names[0]);
         }

@@ -1204,6 +1204,14 @@ impl RustEmitter {
                         emit_device_const(&mut code, dev_num, "A_FACTOR", tp.a_factor);
                         emit_device_const(&mut code, dev_num, "BETA_FACTOR", tp.beta_factor);
                     }
+                    // Variable-mu §5 constants. Emitted only when `svar > 0`
+                    // to preserve byte-identity for sharp (phase 1a/1a.1)
+                    // circuits. Applies to BOTH triodes and pentodes.
+                    if tp.is_variable_mu() {
+                        emit_device_const(&mut code, dev_num, "MU_B", tp.mu_b);
+                        emit_device_const(&mut code, dev_num, "SVAR", tp.svar);
+                        emit_device_const(&mut code, dev_num, "EX_B", tp.ex_b);
+                    }
                     // Precomputed critical voltage for SPICE pnjlim (grid current onset)
                     let vt_tube = tp.vgk_onset / 3.0;
                     let vcrit = vt_tube * (vt_tube / (std::f64::consts::SQRT_2 * 1e-10)).ln();
@@ -1249,24 +1257,48 @@ impl RustEmitter {
             code.push_str(&self.render("device_mosfet", &Context::new())?);
         }
         if has_tube {
-            // any_pentode guards the Rational (Derk §4.4) pentode emission block.
-            // any_beam_tetrode guards the Exponential (DerkE §4.5) beam tetrode
-            // block. For pure-triode circuits both are false, so the emitted code
-            // is byte-identical to the pre-pentode baseline. A circuit with only
-            // Rational pentodes (EL84/EL34/EF86) is byte-identical to phase 1a.
+            // Four Tera guards for pentode-family tubes:
+            //   any_pentode            — sharp Rational (Derk §4.4): EL84/EL34/EF86
+            //   any_beam_tetrode       — sharp Exponential (DerkE §4.5): 6L6GC/6V6GT
+            //   any_variable_mu_pentode       — §5 two-section Rational: 6K7
+            //   any_variable_mu_beam_tetrode  — §5 two-section Exponential: EF89
+            //
+            // Byte-identity guarantee: a circuit containing only non-pentode tubes
+            // (pure-triode) has all four false and emits the phase-1a triode block
+            // unchanged. A circuit containing only sharp pentodes (svar=0) has
+            // `any_variable_mu_*` false and emits phase-1a.1 output byte-identical.
             let any_pentode = ir.device_slots.iter().any(|slot| {
                 matches!(&slot.params, DeviceParams::Tube(tp)
                     if tp.is_pentode()
-                        && matches!(tp.screen_form, crate::device_types::ScreenForm::Rational))
+                        && matches!(tp.screen_form, crate::device_types::ScreenForm::Rational)
+                        && !tp.is_variable_mu())
             });
             let any_beam_tetrode = ir.device_slots.iter().any(|slot| {
                 matches!(&slot.params, DeviceParams::Tube(tp)
                     if tp.is_pentode()
-                        && matches!(tp.screen_form, crate::device_types::ScreenForm::Exponential))
+                        && matches!(tp.screen_form, crate::device_types::ScreenForm::Exponential)
+                        && !tp.is_variable_mu())
+            });
+            let any_variable_mu_pentode = ir.device_slots.iter().any(|slot| {
+                matches!(&slot.params, DeviceParams::Tube(tp)
+                    if tp.is_pentode()
+                        && matches!(tp.screen_form, crate::device_types::ScreenForm::Rational)
+                        && tp.is_variable_mu())
+            });
+            let any_variable_mu_beam_tetrode = ir.device_slots.iter().any(|slot| {
+                matches!(&slot.params, DeviceParams::Tube(tp)
+                    if tp.is_pentode()
+                        && matches!(tp.screen_form, crate::device_types::ScreenForm::Exponential)
+                        && tp.is_variable_mu())
             });
             let mut tube_ctx = Context::new();
             tube_ctx.insert("any_pentode", &any_pentode);
             tube_ctx.insert("any_beam_tetrode", &any_beam_tetrode);
+            tube_ctx.insert("any_variable_mu_pentode", &any_variable_mu_pentode);
+            tube_ctx.insert(
+                "any_variable_mu_beam_tetrode",
+                &any_variable_mu_beam_tetrode,
+            );
             code.push_str(&self.render("device_tube", &tube_ctx)?);
         }
         if has_vca {
@@ -3481,15 +3513,24 @@ impl RustEmitter {
                         };
                         if tp.is_pentode() {
                             // Pentode / beam tetrode: 3D NR block (Vgk→Ip, Vpk→Ig2, Vg2k→Ig1).
-                            // Reefman Derk §4.4 (Rational) or DerkE §4.5 (Exponential).
-                            // The helper family is selected per-slot by `screen_form`.
+                            // Reefman Derk §4.4 (Rational) or DerkE §4.5 (Exponential),
+                            // optionally blended via §5 two-section when svar > 0
+                            // (variable-mu). Helper family selected per-slot by
+                            // (screen_form, is_variable_mu) — zero runtime branches.
                             let s2 = s + 2;
-                            let helper_suffix = match tp.screen_form {
-                                crate::device_types::ScreenForm::Rational => "pentode",
-                                crate::device_types::ScreenForm::Exponential => "beam_tetrode",
+                            let helper_suffix = match (tp.screen_form, tp.is_variable_mu()) {
+                                (crate::device_types::ScreenForm::Rational, false) => "pentode",
+                                (crate::device_types::ScreenForm::Exponential, false) => "beam_tetrode",
+                                (crate::device_types::ScreenForm::Rational, true) => "pentode_v",
+                                (crate::device_types::ScreenForm::Exponential, true) => "beam_tetrode_v",
+                            };
+                            let extra_args = if tp.is_variable_mu() {
+                                format!(", DEVICE_{d}_MU_B, DEVICE_{d}_SVAR, DEVICE_{d}_EX_B")
+                            } else {
+                                String::new()
                             };
                             code.push_str(&format!(
-                                "        let (i_dev{s}, i_dev{s1}, i_dev{s2}, pentode{d}_jac) = tube_evaluate_{helper_suffix}(v_d{s}, v_d{s1}, v_d{s2}, state.device_{d}_mu, state.device_{d}_ex, state.device_{d}_kg1, DEVICE_{d}_KG2, state.device_{d}_kp, state.device_{d}_kvb, DEVICE_{d}_ALPHA_S, DEVICE_{d}_A_FACTOR, DEVICE_{d}_BETA_FACTOR, state.device_{d}_ig_max, state.device_{d}_vgk_onset);\n"
+                                "        let (i_dev{s}, i_dev{s1}, i_dev{s2}, pentode{d}_jac) = tube_evaluate_{helper_suffix}(v_d{s}, v_d{s1}, v_d{s2}, state.device_{d}_mu, state.device_{d}_ex, state.device_{d}_kg1, DEVICE_{d}_KG2, state.device_{d}_kp, state.device_{d}_kvb, DEVICE_{d}_ALPHA_S, DEVICE_{d}_A_FACTOR, DEVICE_{d}_BETA_FACTOR, state.device_{d}_ig_max, state.device_{d}_vgk_onset{extra_args});\n"
                             ));
                             // Row-major 3x3 Jacobian: [dIp/dVgk, dIp/dVpk, dIp/dVg2k,
                             //                          dIg2/dVgk, dIg2/dVpk, dIg2/dVg2k,
@@ -7165,12 +7206,19 @@ impl RustEmitter {
                 let s1 = s + 1;
                 if tp.is_pentode() {
                     let s2 = s + 2;
-                    let helper_suffix = match tp.screen_form {
-                        crate::device_types::ScreenForm::Rational => "pentode",
-                        crate::device_types::ScreenForm::Exponential => "beam_tetrode",
+                    let helper_suffix = match (tp.screen_form, tp.is_variable_mu()) {
+                        (crate::device_types::ScreenForm::Rational, false) => "pentode",
+                        (crate::device_types::ScreenForm::Exponential, false) => "beam_tetrode",
+                        (crate::device_types::ScreenForm::Rational, true) => "pentode_v",
+                        (crate::device_types::ScreenForm::Exponential, true) => "beam_tetrode_v",
+                    };
+                    let extra_args = if tp.is_variable_mu() {
+                        format!(", DEVICE_{d}_MU_B, DEVICE_{d}_SVAR, DEVICE_{d}_EX_B")
+                    } else {
+                        String::new()
                     };
                     code.push_str(&format!(
-                        "{indent}let (i_dev{s}, i_dev{s1}, i_dev{s2}, pentode{d}_jac) = tube_evaluate_{helper_suffix}(v_d{s}, v_d{s1}, v_d{s2}, state.device_{d}_mu, state.device_{d}_ex, state.device_{d}_kg1, DEVICE_{d}_KG2, state.device_{d}_kp, state.device_{d}_kvb, DEVICE_{d}_ALPHA_S, DEVICE_{d}_A_FACTOR, DEVICE_{d}_BETA_FACTOR, state.device_{d}_ig_max, state.device_{d}_vgk_onset);\n"
+                        "{indent}let (i_dev{s}, i_dev{s1}, i_dev{s2}, pentode{d}_jac) = tube_evaluate_{helper_suffix}(v_d{s}, v_d{s1}, v_d{s2}, state.device_{d}_mu, state.device_{d}_ex, state.device_{d}_kg1, DEVICE_{d}_KG2, state.device_{d}_kp, state.device_{d}_kvb, DEVICE_{d}_ALPHA_S, DEVICE_{d}_A_FACTOR, DEVICE_{d}_BETA_FACTOR, state.device_{d}_ig_max, state.device_{d}_vgk_onset{extra_args});\n"
                     ));
                     code.push_str(&format!(
                         "{indent}let jdev_{s}_{s} = pentode{d}_jac[0];\n\
@@ -9544,16 +9592,23 @@ impl RustEmitter {
                         let jd_20 = s2 * m + s;
                         let jd_21 = s2 * m + s1;
                         let jd_22 = s2 * m + s2;
-                        let helper_suffix = match tp.screen_form {
-                            crate::device_types::ScreenForm::Rational => "pentode",
-                            crate::device_types::ScreenForm::Exponential => "beam_tetrode",
+                        let helper_suffix = match (tp.screen_form, tp.is_variable_mu()) {
+                            (crate::device_types::ScreenForm::Rational, false) => "pentode",
+                            (crate::device_types::ScreenForm::Exponential, false) => "beam_tetrode",
+                            (crate::device_types::ScreenForm::Rational, true) => "pentode_v",
+                            (crate::device_types::ScreenForm::Exponential, true) => "beam_tetrode_v",
+                        };
+                        let extra_args = if tp.is_variable_mu() {
+                            format!(", DEVICE_{dev_num}_MU_B, DEVICE_{dev_num}_SVAR, DEVICE_{dev_num}_EX_B")
+                        } else {
+                            String::new()
                         };
                         code.push_str(&format!(
                             "{indent}{{ // Pentode {dev_num}\n\
                              {indent}    let vgk = v_nl[{s}];\n\
                              {indent}    let vpk = v_nl[{s1}];\n\
                              {indent}    let vg2k = v_nl[{s2}];\n\
-                             {indent}    let (ip_t, ig2_t, ig1_t, jac) = tube_evaluate_{helper_suffix}(vgk, vpk, vg2k, state.device_{dev_num}_mu, state.device_{dev_num}_ex, state.device_{dev_num}_kg1, DEVICE_{dev_num}_KG2, state.device_{dev_num}_kp, state.device_{dev_num}_kvb, DEVICE_{dev_num}_ALPHA_S, DEVICE_{dev_num}_A_FACTOR, DEVICE_{dev_num}_BETA_FACTOR, state.device_{dev_num}_ig_max, state.device_{dev_num}_vgk_onset);\n\
+                             {indent}    let (ip_t, ig2_t, ig1_t, jac) = tube_evaluate_{helper_suffix}(vgk, vpk, vg2k, state.device_{dev_num}_mu, state.device_{dev_num}_ex, state.device_{dev_num}_kg1, DEVICE_{dev_num}_KG2, state.device_{dev_num}_kp, state.device_{dev_num}_kvb, DEVICE_{dev_num}_ALPHA_S, DEVICE_{dev_num}_A_FACTOR, DEVICE_{dev_num}_BETA_FACTOR, state.device_{dev_num}_ig_max, state.device_{dev_num}_vgk_onset{extra_args});\n\
                              {indent}    i_nl[{s}] = ip_t; i_nl[{s1}] = ig2_t; i_nl[{s2}] = ig1_t;\n\
                              {indent}    j_dev[{jd_ss}] = jac[0];\n\
                              {indent}    j_dev[{jd_01}] = jac[1];\n\
@@ -9700,13 +9755,20 @@ impl RustEmitter {
                     let s1 = s + 1;
                     if tp.is_pentode() {
                         let s2 = s + 2;
-                        let helper_suffix = match tp.screen_form {
-                            crate::device_types::ScreenForm::Rational => "pentode",
-                            crate::device_types::ScreenForm::Exponential => "beam_tetrode",
+                        let helper_suffix = match (tp.screen_form, tp.is_variable_mu()) {
+                            (crate::device_types::ScreenForm::Rational, false) => "pentode",
+                            (crate::device_types::ScreenForm::Exponential, false) => "beam_tetrode",
+                            (crate::device_types::ScreenForm::Rational, true) => "pentode_v",
+                            (crate::device_types::ScreenForm::Exponential, true) => "beam_tetrode_v",
+                        };
+                        let extra_args = if tp.is_variable_mu() {
+                            format!(", DEVICE_{dev_num}_MU_B, DEVICE_{dev_num}_SVAR, DEVICE_{dev_num}_EX_B")
+                        } else {
+                            String::new()
                         };
                         code.push_str(&format!(
-                            "{indent}i_nl[{s}] = tube_ip_{helper_suffix}(v_nl_final[{s}], v_nl_final[{s1}], v_nl_final[{s2}], state.device_{dev_num}_mu, state.device_{dev_num}_ex, state.device_{dev_num}_kg1, DEVICE_{dev_num}_KG2, state.device_{dev_num}_kp, state.device_{dev_num}_kvb, DEVICE_{dev_num}_ALPHA_S, DEVICE_{dev_num}_A_FACTOR, DEVICE_{dev_num}_BETA_FACTOR);\n\
-                             {indent}i_nl[{s1}] = tube_is_{helper_suffix}(v_nl_final[{s}], v_nl_final[{s1}], v_nl_final[{s2}], state.device_{dev_num}_mu, state.device_{dev_num}_ex, state.device_{dev_num}_kg1, DEVICE_{dev_num}_KG2, state.device_{dev_num}_kp, state.device_{dev_num}_kvb, DEVICE_{dev_num}_ALPHA_S, DEVICE_{dev_num}_BETA_FACTOR);\n\
+                            "{indent}i_nl[{s}] = tube_ip_{helper_suffix}(v_nl_final[{s}], v_nl_final[{s1}], v_nl_final[{s2}], state.device_{dev_num}_mu, state.device_{dev_num}_ex, state.device_{dev_num}_kg1, DEVICE_{dev_num}_KG2, state.device_{dev_num}_kp, state.device_{dev_num}_kvb, DEVICE_{dev_num}_ALPHA_S, DEVICE_{dev_num}_A_FACTOR, DEVICE_{dev_num}_BETA_FACTOR{extra_args});\n\
+                             {indent}i_nl[{s1}] = tube_is_{helper_suffix}(v_nl_final[{s}], v_nl_final[{s1}], v_nl_final[{s2}], state.device_{dev_num}_mu, state.device_{dev_num}_ex, state.device_{dev_num}_kg1, DEVICE_{dev_num}_KG2, state.device_{dev_num}_kp, state.device_{dev_num}_kvb, DEVICE_{dev_num}_ALPHA_S, DEVICE_{dev_num}_BETA_FACTOR{extra_args});\n\
                              {indent}i_nl[{s2}] = tube_ig(v_nl_final[{s}], state.device_{dev_num}_ig_max, state.device_{dev_num}_vgk_onset);\n"
                         ));
                     } else if tp.has_rgi() {

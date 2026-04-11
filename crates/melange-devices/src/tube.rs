@@ -19,9 +19,11 @@ use crate::NonlinearDevice;
 ///   Default `0.0` (no correction, backward compatible).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct KorenTriode {
-    /// Amplification factor (mu)
+    /// Amplification factor (mu). When `svar > 0` this is `μ_a`, the
+    /// high-mu section of a Reefman §5 variable-mu triode.
     pub mu: f64,
-    /// Exponent for Koren's equation
+    /// Exponent for Koren's equation. When `svar > 0` this is `x_a`, the
+    /// exponent of the high-mu section.
     pub ex: f64,
     /// Kg1 coefficient
     pub kg1: f64,
@@ -37,6 +39,16 @@ pub struct KorenTriode {
     /// Ip_final = Ip_koren * (1 + lambda * Vpk).
     /// Gives plate resistance rp approximately 1/(lambda * Ip) at the operating point.
     pub lambda: f64,
+    /// Reefman §5 variable-mu section-B amplification factor (μ_b).
+    /// `svar > 0` → two-section blend; `svar == 0` → ignored (sharp single-mu).
+    /// 0.0 = sharp default.
+    pub mu_b: f64,
+    /// Reefman §5 variable-mu blend fraction (s_var in Eq 33).
+    /// `Ip0_v = (1 − s_var)·Ip0_a + s_var·Ip0_b`. 0.0 = sharp default.
+    pub svar: f64,
+    /// Reefman §5 variable-mu section-B Koren exponent (x_b in Eq 34).
+    /// Used only when `svar > 0`. 0.0 = sharp default.
+    pub ex_b: f64,
 }
 
 /// Default grid current maximum [A].
@@ -46,6 +58,8 @@ const DEFAULT_VGK_ONSET: f64 = 0.5;
 
 impl KorenTriode {
     /// Create a new triode model with default grid current parameters.
+    /// Produces a sharp-cutoff triode (`svar = 0`); variable-mu presets
+    /// must use a custom constructor that sets `mu_b`/`svar`/`ex_b`.
     pub fn new(mu: f64, ex: f64, kg1: f64, kp: f64, kvb: f64) -> Self {
         Self {
             mu,
@@ -56,6 +70,9 @@ impl KorenTriode {
             ig_max: DEFAULT_IG_MAX,
             vgk_onset: DEFAULT_VGK_ONSET,
             lambda: 0.0,
+            mu_b: 0.0,
+            svar: 0.0,
+            ex_b: 0.0,
         }
     }
 
@@ -78,6 +95,9 @@ impl KorenTriode {
             ig_max,
             vgk_onset,
             lambda: 0.0,
+            mu_b: 0.0,
+            svar: 0.0,
+            ex_b: 0.0,
         }
     }
 
@@ -102,6 +122,9 @@ impl KorenTriode {
             ig_max,
             vgk_onset,
             lambda,
+            mu_b: 0.0,
+            svar: 0.0,
+            ex_b: 0.0,
         }
     }
 
@@ -188,6 +211,44 @@ impl KorenTriode {
         )
     }
 
+    /// Evaluate one Koren section for a given `(μ, ex)` pair. Returns
+    /// `Some((e1, sigmoid, softplus, s, ip_koren))` when the section is
+    /// above the deep-cutoff guard (`e1 > 0`), `None` otherwise.
+    ///
+    /// Shared helper for the sharp (`svar == 0`) legacy path and the
+    /// Reefman §5 variable-mu blend. `s = sqrt(Kvb + Vpk²)` is used both
+    /// as the softplus denominator and as the chain-rule pivot in the
+    /// Jacobian, so it's returned alongside the current.
+    #[inline]
+    fn koren_section(&self, vgk: f64, vpk_safe: f64, mu: f64, ex: f64) -> Option<TriodeSection> {
+        let s = (self.kvb + vpk_safe * vpk_safe).sqrt();
+        let inner = self.kp * (1.0 / mu + vgk / s);
+
+        // Numerically stable softplus + sigmoid.
+        let (sigmoid, softplus) = if inner > 20.0 {
+            (1.0, inner)
+        } else if inner < -20.0 {
+            (0.0, 0.0)
+        } else {
+            let exp_inner = inner.exp();
+            (exp_inner / (1.0 + exp_inner), (1.0 + exp_inner).ln())
+        };
+
+        let e1 = (vpk_safe / self.kp) * softplus;
+        if e1 <= 0.0 {
+            return None;
+        }
+
+        let ip_koren = e1.powf(ex) / self.kg1;
+        Some(TriodeSection {
+            e1,
+            sigmoid,
+            softplus,
+            s,
+            ip_koren,
+        })
+    }
+
     /// Calculate plate current given Vgk and Vpk.
     ///
     /// Vgk = grid-cathode voltage
@@ -198,27 +259,33 @@ impl KorenTriode {
     ///   E1 = (Vpk / Kp) * ln(1 + exp(inner))
     ///   Ip_koren = E1^ex / Kg1   (if E1 > 0)
     ///   Ip = Ip_koren * (1 + lambda * Vpk)
+    ///
+    /// When `svar > 0`, the plate current is the Reefman §5 variable-mu blend
+    /// of two sections sharing `Kp`/`Kvb` but with independent `(μ, ex)`:
+    ///   Ip_koren_v = (1 − svar) · Ip_koren_a + svar · Ip_koren_b
+    /// The `(1 + lambda·Vpk)` Early-effect multiplier is applied after the
+    /// blend, unchanged.
     pub fn plate_current(&self, vgk: f64, vpk: f64) -> f64 {
         let vpk = vpk.max(1e-3); // Soft floor: prevents hard zero discontinuity
 
-        let s = (self.kvb + vpk * vpk).sqrt();
-        let inner = self.kp * (1.0 / self.mu + vgk / s);
-
-        // Numerically stable softplus: ln(1 + exp(x))
-        let softplus = if inner > 20.0 {
-            inner // ln(1+exp(x)) approx x for large x
-        } else if inner < -20.0 {
-            0.0 // ln(1+exp(x)) approx 0 for very negative x
+        let ip_koren = if self.svar == 0.0 {
+            // Sharp single-mu path: byte-identical to the pre-P1c solver.
+            match self.koren_section(vgk, vpk, self.mu, self.ex) {
+                Some(sec) => sec.ip_koren,
+                None => 0.0,
+            }
         } else {
-            (1.0 + inner.exp()).ln()
-        };
-
-        let e1 = (vpk / self.kp) * softplus;
-
-        let ip_koren = if e1 <= 0.0 {
-            0.0
-        } else {
-            e1.powf(self.ex) / self.kg1
+            let w_a = 1.0 - self.svar;
+            let w_b = self.svar;
+            let ip_a = self
+                .koren_section(vgk, vpk, self.mu, self.ex)
+                .map(|s| s.ip_koren)
+                .unwrap_or(0.0);
+            let ip_b = self
+                .koren_section(vgk, vpk, self.mu_b, self.ex_b)
+                .map(|s| s.ip_koren)
+                .unwrap_or(0.0);
+            w_a * ip_a + w_b * ip_b
         };
 
         // Early-effect multiplier (channel-length modulation)
@@ -251,6 +318,50 @@ impl KorenTriode {
     }
 }
 
+impl KorenTriode {
+    /// Contribution of one Koren section to `(Ip_koren, dIp_koren/dVgk,
+    /// dIp_koren/dVpk)`. Returns `None` below the deep-cutoff guard
+    /// (`e1 ≤ 1e-10`), in which case the section contributes zero to
+    /// both the current and both Jacobian columns.
+    ///
+    /// The `ex`-parameter enters both `dip_de1 = ex · E1^(ex−1) / Kg1` and
+    /// the `E1` / `Ip_koren` values themselves, so it must match the section
+    /// being evaluated.
+    #[inline]
+    fn section_chain(
+        &self,
+        vgk: f64,
+        vpk_safe: f64,
+        mu: f64,
+        ex: f64,
+    ) -> Option<(f64, f64, f64)> {
+        let sec = self.koren_section(vgk, vpk_safe, mu, ex)?;
+        // Extra guard matching the legacy Jacobian path: below 1e-10 the
+        // E1^(ex-1) term blows up numerically for fractional exponents.
+        if sec.e1 <= 1e-10 {
+            return None;
+        }
+        let TriodeSection {
+            e1,
+            sigmoid,
+            softplus,
+            s,
+            ip_koren,
+        } = sec;
+
+        // dIp_koren/dE1 = ex · E1^(ex − 1) / Kg1
+        let dip_de1 = ex * e1.powf(ex - 1.0) / self.kg1;
+        // dE1/dVgk = Vpk · σ(inner) / s
+        let de1_dvgk = vpk_safe * sigmoid / s;
+        // dE1/dVpk = softplus/Kp − σ·Vgk·Vpk² / s³
+        let de1_dvpk = softplus / self.kp - sigmoid * vgk * vpk_safe * vpk_safe / (s * s * s);
+
+        let dip_koren_dvgk = dip_de1 * de1_dvgk;
+        let dip_koren_dvpk = dip_de1 * de1_dvpk;
+        Some((ip_koren, dip_koren_dvgk, dip_koren_dvpk))
+    }
+}
+
 impl NonlinearDevice<2> for KorenTriode {
     /// Input: [Vgk, Vpk]
     /// Output: Plate current (Ip)
@@ -265,44 +376,49 @@ impl NonlinearDevice<2> for KorenTriode {
     ///   Ip = Ip_koren * (1 + lambda * Vpk)
     ///   dIp/dVgk = dIp_koren/dVgk * (1 + lambda * Vpk)
     ///   dIp/dVpk = dIp_koren/dVpk * (1 + lambda * Vpk) + Ip_koren * lambda
+    ///
+    /// When `svar > 0`, both `Ip_koren` and its gradient are weighted sums
+    /// over the two Reefman §5 sections:
+    ///   Ip_koren_v      = (1 − svar) · Ip_a      + svar · Ip_b
+    ///   dIp_koren_v/d·  = (1 − svar) · dIp_a/d·  + svar · dIp_b/d·
+    /// The `lambda`-Early multiplier is applied once to the blended values.
     fn jacobian(&self, v: &[f64; 2]) -> [f64; 2] {
         let vgk = v[0];
         let vpk = v[1].max(1e-3); // Soft floor: matches plate_current
 
-        let s = (self.kvb + vpk * vpk).sqrt();
-        let inner = self.kp * (1.0 / self.mu + vgk / s);
-
-        // Numerically stable sigmoid and softplus
-        let (sigmoid, softplus) = if inner > 20.0 {
-            (1.0, inner)
-        } else if inner < -20.0 {
-            (0.0, 0.0)
+        let (ip_koren, dip_koren_dvgk, dip_koren_dvpk) = if self.svar == 0.0 {
+            // Sharp single-mu path: byte-identical to the pre-P1c solver.
+            match self.section_chain(vgk, vpk, self.mu, self.ex) {
+                Some(triple) => triple,
+                None => return [0.0, 0.0],
+            }
         } else {
-            let exp_inner = inner.exp();
-            (exp_inner / (1.0 + exp_inner), (1.0 + exp_inner).ln())
+            let w_a = 1.0 - self.svar;
+            let w_b = self.svar;
+            let sec_a = self.section_chain(vgk, vpk, self.mu, self.ex);
+            let sec_b = self.section_chain(vgk, vpk, self.mu_b, self.ex_b);
+
+            if sec_a.is_none() && sec_b.is_none() {
+                return [0.0, 0.0];
+            }
+
+            let mut ip_k = 0.0;
+            let mut dip_dvgk = 0.0;
+            let mut dip_dvpk = 0.0;
+            if let Some((ip, dgk, dpk)) = sec_a {
+                ip_k += w_a * ip;
+                dip_dvgk += w_a * dgk;
+                dip_dvpk += w_a * dpk;
+            }
+            if let Some((ip, dgk, dpk)) = sec_b {
+                ip_k += w_b * ip;
+                dip_dvgk += w_b * dgk;
+                dip_dvpk += w_b * dpk;
+            }
+            (ip_k, dip_dvgk, dip_dvpk)
         };
 
-        let e1 = (vpk / self.kp) * softplus;
-
-        if e1 <= 1e-10 {
-            return [0.0, 0.0];
-        }
-
-        let ip_koren = e1.powf(self.ex) / self.kg1;
         let lambda_factor = 1.0 + self.lambda * vpk;
-
-        // dIp_koren/dE1 = ex * E1^(ex-1) / Kg1
-        let dip_de1 = self.ex * e1.powf(self.ex - 1.0) / self.kg1;
-
-        // dE1/dVgk = Vpk * sigmoid(inner) / s
-        let de1_dvgk = vpk * sigmoid / s;
-
-        // dE1/dVpk = softplus/Kp - sigmoid * Vgk * Vpk^2 / s^3
-        let de1_dvpk = softplus / self.kp - sigmoid * vgk * vpk * vpk / (s * s * s);
-
-        // dIp_koren/dVgk and dIp_koren/dVpk
-        let dip_koren_dvgk = dip_de1 * de1_dvgk;
-        let dip_koren_dvpk = dip_de1 * de1_dvpk;
 
         // Chain rule with Early-effect multiplier:
         // dIp/dVgk = dIp_koren/dVgk * (1 + lambda*Vpk)
@@ -312,6 +428,23 @@ impl NonlinearDevice<2> for KorenTriode {
             dip_koren_dvpk * lambda_factor + ip_koren * self.lambda,
         ]
     }
+}
+
+/// Chain-rule pieces for one triode Koren section. Returned by
+/// [`KorenTriode::koren_section`] so the shared values (`e1`, `sigmoid`,
+/// `softplus`, `s`) can be reused between `plate_current` and `jacobian`.
+#[derive(Clone, Copy)]
+struct TriodeSection {
+    /// `E1 = (Vpk / Kp) · softplus(inner)`
+    e1: f64,
+    /// `σ(inner)` — sigmoid of the softplus argument.
+    sigmoid: f64,
+    /// `softplus(inner) = ln(1 + exp(inner))`
+    softplus: f64,
+    /// `s = sqrt(Kvb + Vpk²)`
+    s: f64,
+    /// `Ip_koren = E1^ex / Kg1`
+    ip_koren: f64,
 }
 
 /// Screen-current functional form for [`KorenPentode`].
@@ -406,6 +539,16 @@ pub struct KorenPentode {
     pub vgk_onset: f64,
     /// Screen-current functional form: Rational (§4.4) or Exponential (§4.5).
     pub screen_form: ScreenForm,
+    /// Reefman §5 variable-mu section-B amplification factor (μ_b).
+    /// `svar > 0` → two-section blend (PenthodeVD/VDE in TubeLib.inc);
+    /// `svar == 0` → ignored, sharp single-mu pentode. 0.0 = sharp default.
+    pub mu_b: f64,
+    /// Reefman §5 variable-mu blend fraction (s_var in Eq 33).
+    /// `Ip0_v = (1 − s_var)·Ip0_a + s_var·Ip0_b`. 0.0 = sharp default.
+    pub svar: f64,
+    /// Reefman §5 variable-mu section-B Koren exponent (x_b in Eq 34).
+    /// Used only when `svar > 0`. 0.0 = sharp default.
+    pub ex_b: f64,
 }
 
 impl KorenPentode {
@@ -425,6 +568,9 @@ impl KorenPentode {
             ig_max: DEFAULT_IG_MAX,
             vgk_onset: DEFAULT_VGK_ONSET,
             screen_form: ScreenForm::Rational,
+            mu_b: 0.0,
+            svar: 0.0,
+            ex_b: 0.0,
         }
     }
 
@@ -444,6 +590,9 @@ impl KorenPentode {
             ig_max: DEFAULT_IG_MAX,
             vgk_onset: DEFAULT_VGK_ONSET,
             screen_form: ScreenForm::Rational,
+            mu_b: 0.0,
+            svar: 0.0,
+            ex_b: 0.0,
         }
     }
 
@@ -463,6 +612,9 @@ impl KorenPentode {
             ig_max: DEFAULT_IG_MAX,
             vgk_onset: DEFAULT_VGK_ONSET,
             screen_form: ScreenForm::Rational,
+            mu_b: 0.0,
+            svar: 0.0,
+            ex_b: 0.0,
         }
     }
 
@@ -483,6 +635,9 @@ impl KorenPentode {
             ig_max: 10e-3,
             vgk_onset: 0.7,
             screen_form: ScreenForm::Exponential,
+            mu_b: 0.0,
+            svar: 0.0,
+            ex_b: 0.0,
         }
     }
 
@@ -503,6 +658,9 @@ impl KorenPentode {
             ig_max: 8e-3,
             vgk_onset: 0.7,
             screen_form: ScreenForm::Exponential,
+            mu_b: 0.0,
+            svar: 0.0,
+            ex_b: 0.0,
         }
     }
 
@@ -515,10 +673,31 @@ impl KorenPentode {
     /// Compute the shared `(E1, Ip0)` chain along with the softplus pieces
     /// needed for both currents and Jacobian rows. Returns `None` when the
     /// device is in the deep-cutoff guard window (`E1 ≤ 1e-30`).
+    ///
+    /// This is the legacy single-section entry point used by the sharp
+    /// (`svar == 0`) path. It delegates to [`shared_e1_with`], passing the
+    /// struct's top-level `μ` (a.k.a. `μ_a`) and `ex` (a.k.a. `x_a`).
     #[inline]
     fn shared_e1(&self, vgk: f64, vg2k_safe: f64) -> Option<SharedE1> {
+        self.shared_e1_with(vgk, vg2k_safe, self.mu, self.ex)
+    }
+
+    /// Compute the `(E1, Ip0)` chain for an arbitrary `(μ, ex)` pair. This is
+    /// the primitive used by the Reefman §5 variable-mu blend, where the two
+    /// sections share `Kp` and `Kvb` (hence `s`) but have distinct
+    /// amplification factors and exponents.
+    ///
+    /// Returns `None` when `E1 ≤ 1e-30` (deep-cutoff guard, per-section).
+    #[inline]
+    fn shared_e1_with(
+        &self,
+        vgk: f64,
+        vg2k_safe: f64,
+        mu: f64,
+        ex: f64,
+    ) -> Option<SharedE1> {
         let s = (self.kvb + vg2k_safe * vg2k_safe).sqrt();
-        let inner = self.kp * (1.0 / self.mu + vgk / s);
+        let inner = self.kp * (1.0 / mu + vgk / s);
 
         // Numerically stable softplus and sigmoid (mirrors KorenTriode).
         let (sigmoid, softplus) = if inner > 20.0 {
@@ -535,7 +714,7 @@ impl KorenPentode {
             return None;
         }
 
-        let ip0 = e1.powf(self.ex);
+        let ip0 = e1.powf(ex);
         Some(SharedE1 {
             s,
             sigmoid,
@@ -543,6 +722,109 @@ impl KorenPentode {
             e1,
             ip0,
         })
+    }
+
+    /// Reefman §5 variable-mu `Ip0_v` and its `(Vgk, Vg2k)` gradient.
+    ///
+    /// Returns `(ip0_v, dip0_dvgk, dip0_dvg2k)` where
+    /// `ip0_v = (1 − svar)·ip0_a + svar·ip0_b` and the gradient is the
+    /// corresponding weighted sum of the per-section `dip0_de1 · dE1/d*`
+    /// chains. The two sections share `Kp`, `Kvb`, and therefore `s`, but
+    /// have independent `μ`, `ex`, inner / softplus / sigmoid / E1 / Ip0.
+    ///
+    /// When `svar == 0.0` this bypasses section B entirely (which would be
+    /// undefined for `μ_b == 0`) and reduces byte-identically to the legacy
+    /// sharp single-mu path. When both sections are in deep cutoff the
+    /// function returns `(0.0, 0.0, 0.0)` — the caller still has to route
+    /// through `compute_f_h` to produce a result; passing `ip0=0` there
+    /// propagates the zero correctly through the Ip / Ig2 rows.
+    #[inline]
+    fn compute_ip0_v(&self, vgk: f64, vg2k_safe: f64) -> Ip0VResult {
+        if self.svar == 0.0 {
+            // Sharp single-mu path: byte-identical to the pre-P1c solver.
+            // Section B is NOT computed (it would be undefined for μ_b = 0).
+            let Some(shared_a) = self.shared_e1_with(vgk, vg2k_safe, self.mu, self.ex) else {
+                return Ip0VResult::zero();
+            };
+            let SharedE1 {
+                s,
+                sigmoid,
+                softplus,
+                e1,
+                ip0,
+            } = shared_a;
+            // dIp0_a / dE1_a = ex_a · E1_a^(ex_a − 1)
+            let dip0_de1 = self.ex * e1.powf(self.ex - 1.0);
+            let de1_dvgk = vg2k_safe * sigmoid / s;
+            let de1_dvg2k =
+                softplus / self.kp - sigmoid * vgk * vg2k_safe * vg2k_safe / (s * s * s);
+            return Ip0VResult {
+                ip0_v: ip0,
+                dip0_dvgk: dip0_de1 * de1_dvgk,
+                dip0_dvg2k: dip0_de1 * de1_dvg2k,
+            };
+        }
+
+        // Variable-mu path: two independent (μ, ex) sections blended per Eq 33.
+        // s is shared between sections (same Kp, Kvb), so each call re-derives
+        // the same `s` — the cost is negligible compared to the two softplus
+        // evaluations that drive the branch.
+        let w_a = 1.0 - self.svar;
+        let w_b = self.svar;
+
+        let section_a = self.shared_e1_with(vgk, vg2k_safe, self.mu, self.ex);
+        let section_b = self.shared_e1_with(vgk, vg2k_safe, self.mu_b, self.ex_b);
+
+        // Both sections in deep cutoff → zero device current and gradient.
+        if section_a.is_none() && section_b.is_none() {
+            return Ip0VResult::zero();
+        }
+
+        let mut ip0_v = 0.0;
+        let mut dip0_dvgk = 0.0;
+        let mut dip0_dvg2k = 0.0;
+
+        if let Some(SharedE1 {
+            s,
+            sigmoid,
+            softplus,
+            e1,
+            ip0,
+        }) = section_a
+        {
+            // dIp0_a/dE1_a = x_a · E1_a^(x_a − 1)
+            let dip0_de1 = self.ex * e1.powf(self.ex - 1.0);
+            let de1_dvgk = vg2k_safe * sigmoid / s;
+            let de1_dvg2k =
+                softplus / self.kp - sigmoid * vgk * vg2k_safe * vg2k_safe / (s * s * s);
+            ip0_v += w_a * ip0;
+            dip0_dvgk += w_a * dip0_de1 * de1_dvgk;
+            dip0_dvg2k += w_a * dip0_de1 * de1_dvg2k;
+        }
+
+        if let Some(SharedE1 {
+            s,
+            sigmoid,
+            softplus,
+            e1,
+            ip0,
+        }) = section_b
+        {
+            // dIp0_b/dE1_b = x_b · E1_b^(x_b − 1)
+            let dip0_de1 = self.ex_b * e1.powf(self.ex_b - 1.0);
+            let de1_dvgk = vg2k_safe * sigmoid / s;
+            let de1_dvg2k =
+                softplus / self.kp - sigmoid * vgk * vg2k_safe * vg2k_safe / (s * s * s);
+            ip0_v += w_b * ip0;
+            dip0_dvgk += w_b * dip0_de1 * de1_dvgk;
+            dip0_dvg2k += w_b * dip0_de1 * de1_dvg2k;
+        }
+
+        Ip0VResult {
+            ip0_v,
+            dip0_dvgk,
+            dip0_dvg2k,
+        }
     }
 
     /// Compute the shape functions `F(Vp)`, `H(Vp)` and their Vp-derivatives
@@ -610,29 +892,38 @@ impl KorenPentode {
     }
 
     /// Plate current `Ip(Vgk, Vpk, Vg2k)`.
+    ///
+    /// When `svar > 0`, the variable-mu `Ip0_v = (1 − svar)·Ip0_a + svar·Ip0_b`
+    /// (Reefman §5 Eq 33) is used in place of the sharp `Ip0`, with F(Vp)
+    /// unchanged between the two sections (Eq 36).
     pub fn plate_current(&self, vgk: f64, vpk: f64, vg2k: f64) -> f64 {
         let vg2k_safe = vg2k.max(1e-3);
         let vpk_safe = vpk.max(0.0);
 
-        let Some(SharedE1 { ip0, .. }) = self.shared_e1(vgk, vg2k_safe) else {
+        let Ip0VResult { ip0_v, .. } = self.compute_ip0_v(vgk, vg2k_safe);
+        if ip0_v == 0.0 {
             return 0.0;
-        };
+        }
 
         let FHShape { f, .. } = self.compute_f_h(vpk_safe);
-        ip0 * f
+        ip0_v * f
     }
 
     /// Screen-grid current `Ig2(Vgk, Vpk, Vg2k)`.
+    ///
+    /// Uses the same variable-mu `Ip0_v` as [`plate_current`], with H(Vp)
+    /// unchanged (Eq 37). Variable-mu is orthogonal to `screen_form`.
     pub fn screen_current(&self, vgk: f64, vpk: f64, vg2k: f64) -> f64 {
         let vg2k_safe = vg2k.max(1e-3);
         let vpk_safe = vpk.max(0.0);
 
-        let Some(SharedE1 { ip0, .. }) = self.shared_e1(vgk, vg2k_safe) else {
+        let Ip0VResult { ip0_v, .. } = self.compute_ip0_v(vgk, vg2k_safe);
+        if ip0_v == 0.0 {
             return 0.0;
-        };
+        }
 
         let FHShape { h, .. } = self.compute_f_h(vpk_safe);
-        ip0 * h
+        ip0_v * h
     }
 
     /// Control-grid (Ig1) current using the same Leach power-law as the
@@ -650,6 +941,11 @@ impl KorenPentode {
     /// Rows: `[Ip, Ig2, Ig1]`. Columns: `[Vgk, Vpk, Vg2k]`. Returned in
     /// row-major order. The bottom row (Ig1) is sparse: only `[2][0]` is
     /// nonzero, since `Ig1` depends on `Vgk` alone.
+    ///
+    /// When `svar > 0`, the `Ip0` row-prefactor becomes the Reefman §5 blend
+    /// `Ip0_v = (1 − svar)·Ip0_a + svar·Ip0_b` and its gradient is the
+    /// weighted sum of per-section `(dIp0/dE1)·(dE1/d·)` chains. F(Vp),
+    /// H(Vp), dF/dVp, dH/dVp are unchanged (orthogonal to variable-mu).
     pub fn jacobian_3x3(&self, vgk: f64, vpk: f64, vg2k: f64) -> [[f64; 3]; 3] {
         let vg2k_safe = vg2k.max(1e-3);
         let vpk_safe = vpk.max(0.0);
@@ -662,31 +958,24 @@ impl KorenPentode {
             0.0
         };
 
-        let Some(shared) = self.shared_e1(vgk, vg2k_safe) else {
+        let Ip0VResult {
+            ip0_v,
+            dip0_dvgk,
+            dip0_dvg2k,
+        } = self.compute_ip0_v(vgk, vg2k_safe);
+
+        // Both sections in deep cutoff → Ip / Ig2 rows are identically zero.
+        if ip0_v == 0.0 {
             return [
                 [0.0, 0.0, 0.0],
                 [0.0, 0.0, 0.0],
                 [dig1_dvgk, 0.0, 0.0],
             ];
-        };
+        }
 
-        let SharedE1 {
-            s,
-            sigmoid,
-            softplus,
-            e1,
-            ip0,
-        } = shared;
-
-        // dIp0/dE1 = Ex · E1^(Ex-1)
-        let dip0_de1 = self.ex * e1.powf(self.ex - 1.0);
-
-        // E1 chain rule
-        let de1_dvgk = vg2k_safe * sigmoid / s;
-        let de1_dvg2k = softplus / self.kp - sigmoid * vgk * vg2k_safe * vg2k_safe / (s * s * s);
-        // dE1/dVpk = 0 (E1 only depends on Vgk and Vg2k)
-
-        // F, H and their Vp derivatives — branches on screen_form (§4.4 vs §4.5)
+        // F, H and their Vp derivatives — branches on screen_form (§4.4 vs §4.5).
+        // These are shared between A/B sections (Reefman §5 makes variable-mu
+        // orthogonal to screen_form), so they're computed once here.
         let FHShape {
             f,
             h,
@@ -694,19 +983,15 @@ impl KorenPentode {
             dh_dvpk,
         } = self.compute_f_h(vpk_safe);
 
-        // Shared "Ip0 chain" prefactor for the Vgk/Vg2k columns of Ip and Ig2.
-        let dip0_dvgk = dip0_de1 * de1_dvgk;
-        let dip0_dvg2k = dip0_de1 * de1_dvg2k;
-
-        // Ip row: dIp/dVgk = (dIp0/dVgk)·F, dIp/dVpk = Ip0·dF/dVpk,
-        //         dIp/dVg2k = (dIp0/dVg2k)·F
+        // Ip row: dIp/dVgk = (dIp0_v/dVgk)·F, dIp/dVpk = Ip0_v·dF/dVpk,
+        //         dIp/dVg2k = (dIp0_v/dVg2k)·F
         let dip_dvgk = dip0_dvgk * f;
-        let dip_dvpk = ip0 * df_dvpk;
+        let dip_dvpk = ip0_v * df_dvpk;
         let dip_dvg2k = dip0_dvg2k * f;
 
         // Ig2 row: same prefactor, with H instead of F.
         let dig2_dvgk = dip0_dvgk * h;
-        let dig2_dvpk = ip0 * dh_dvpk;
+        let dig2_dvpk = ip0_v * dh_dvpk;
         let dig2_dvg2k = dip0_dvg2k * h;
 
         // If NR probed Vpk < 0, the F/H derivatives w.r.t. Vpk are computed
@@ -719,6 +1004,30 @@ impl KorenPentode {
             [dig2_dvgk, dig2_dvpk, dig2_dvg2k],
             [dig1_dvgk, 0.0, 0.0],
         ]
+    }
+}
+
+/// Result of [`KorenPentode::compute_ip0_v`] — variable-mu `Ip0_v` with its
+/// `(Vgk, Vg2k)` gradient. Reduces to the sharp single-section
+/// `(Ip0, dIp0/dVgk, dIp0/dVg2k)` when `svar == 0`.
+#[derive(Clone, Copy)]
+struct Ip0VResult {
+    /// `Ip0_v = (1 − svar)·Ip0_a + svar·Ip0_b`.
+    ip0_v: f64,
+    /// Weighted sum of `dIp0_{a,b}/dVgk`.
+    dip0_dvgk: f64,
+    /// Weighted sum of `dIp0_{a,b}/dVg2k`.
+    dip0_dvg2k: f64,
+}
+
+impl Ip0VResult {
+    #[inline]
+    fn zero() -> Self {
+        Self {
+            ip0_v: 0.0,
+            dip0_dvgk: 0.0,
+            dip0_dvg2k: 0.0,
+        }
     }
 }
 

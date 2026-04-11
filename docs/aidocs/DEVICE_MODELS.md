@@ -348,15 +348,90 @@ backward compat.
 DerkE fit. Deferred to phase 1a.2 (Cohen-Hélie classical Koren bootstrap)
 or phase 1d (datasheet refit from RCA/Genalex manuals).
 
+### Variable-Mu Variant — Reefman §5 Two-Section Koren
+
+Remote-cutoff ("variable-mu") pentodes (6K7, 6BA6, 6SK7, EF89) and twin
+triodes (6386, 6BC8) have non-uniform grid-wire pitch that produces a
+gm(Vgk) rolloff which is **gradual** as bias goes negative instead of the
+sharp cutoff of ordinary tubes. This is the essential behavior exploited
+by variable-mu compressors (Fairchild 670, Gates Sta-Level, Collins 26U).
+
+Reefman §5 models the variable-mu behavior as **two Koren currents
+blended with a fixed weight**:
+
+```
+I_P,Koren_v = (1 − s_var) · I_P,Koren_a + s_var · I_P,Koren_b      (Eq 33)
+```
+
+Each section has its own `(μ, x)` pair: section A uses `(mu, ex)` (the
+high-mu primary), section B uses `(mu_b, ex_b)` (the low-mu secondary
+that dominates at deep cutoff). **The other Koren params — Kp, Kvb, Kg1,
+Kg2, αs, A, β — are shared between sections**. Reefman: "these factors
+are largely determined by geometry, which very likely will be rather
+identical for both parallel pentodes".
+
+The blended Koren current `Ip0_v` plugs into the existing §4.4 Derk
+`F(Vp)`/`H(Vp)` (or §4.5 DerkE) scaling factors unchanged, so variable-mu
+is **orthogonal to screen form**:
+
+- `(svar=0, Rational)` — sharp true pentode (EL84, EL34, EF86)
+- `(svar=0, Exponential)` — sharp beam tetrode (6L6GC, 6V6GT)
+- `(svar>0, Rational)` — variable-mu pentode (6K7, 6BA6 — Reefman PenthodeVD)
+- `(svar>0, Exponential)` — variable-mu beam/pentode (EF89 — Reefman PenthodeVDE)
+
+### Variable-Mu Discriminator
+
+`TubeParams` has three phase-1c fields:
+- `mu_b: f64` — section-B amplification factor (μ_b)
+- `svar: f64` — blend fraction ∈ [0, 1]; 0.0 = sharp default
+- `ex_b: f64` — section-B Koren exponent (x_b)
+
+When `svar == 0.0`, the device is sharp-cutoff and `mu_b`/`ex_b` are
+unused. The math `compute_ip0_v` branch falls through to the existing
+single-section path with byte-identical output. When `svar > 0.0`, both
+sections are computed and blended.
+
+`TubeParams::is_variable_mu()` returns `svar > 0.0`. Validation requires
+`svar ∈ [0, 1]`, and when `svar > 0`: `mu_b > 0`, `ex_b > 0`.
+
+The `.model NAME VP(...)` directive accepts `MU_B`, `SVAR`, `EX_B` as
+explicit keywords. The `PENTODE_CATALOG` entries for 6K7 and EF89 carry
+the right values per-tube and the resolver auto-picks them.
+
+### Variable-Mu Catalog Parameters (from Reefman TubeLib.inc 2016)
+
+| Tube | μ_a | ex_a | Kg1 | Kg2 | Kp | Kvb | αs | A | β | μ_b | svar | ex_b | ScreenForm |
+|------|-----|------|-----|-----|-----|-----|-----|---|---|-----|------|------|------------|
+| 6K7 / 6K7G | 15.5 | 1.573 | 1407.7 | 8335.8 | 36.0 | 1309.0 | 4.07 | 1.55e-9 | 0.15 | 3.4 | 0.083 | 1.223 | Rational (PenthodeVD) |
+| EF89 / 6DA6 | 25.0 | 1.418 | 328.3 | 1199.3 | 58.8 | 1.0 | 2.07 | 0.0 | 0.122 | 7.8 | 0.068 | 0.978 | Exponential (PenthodeVDE) |
+
+Ratio `mu_a / mu_b ≈ 4.5` for both (confirming Reefman's observation
+that this ratio is "rather typical for the [limited] set of variable-mu
+pentodes fitted so far"). The `svar ≈ 0.07–0.08` is consistent with
+section B carrying ~7–8% of the total conduction current.
+
+### What's Needed for 6BA6, 6386, 6BC8, 6SK7
+
+These canonical varimu compressor tubes have **no public Reefman fit**.
+Phase 1c ships the math path; validating against a real Fairchild 670
+or Sta-Level schematic requires either:
+- A datasheet refit pass (published gm(Vgk) curves → least-squares fit
+  for (mu_a, mu_b, ex_a, ex_b, svar, Kg1, Kg2, Kp, Kvb, αs, A, β))
+- Adoption of Adrian Immler's i5/i6 models — different equation topology
+  from Reefman, would need a parallel codepath
+- An author contribution (Reefman accepts pull-model fits via
+  ExtractModel — see his uTracer website)
+
 ### Still Deferred
 
 - **Grid-off FA reduction**: pentode 3D → 2D when Vgk < 0 (Ig1 = 0).
   Phase 1b, analogous to BJT forward-active dimension reduction. Load-bearing
-  for Plexi-class amps (4×EL34 + 3×12AX7 = 18 dims without reduction, blows
-  past the M=16 DK cap).
-- **Remote-cutoff / variable-mu** (6BA6, 6386, 6SK7, 6BC8): two-section
-  Koren per Reefman §5. Phase 1c, for varimu compressor targets
-  (Fairchild 670, Sta-Level, Collins 26U).
+  for Plexi-class amps to stay on the fast DK path (4×EL34 + 3×12AX7 = 18
+  dims without reduction, blows past the M=16 DK cap). **Architecturally
+  non-trivial** because unlike BJT Vbc, all three pentode voltages
+  (Vgk, Vpk, Vg2k) appear in both Ip and Ig2 — no clean voltage drop.
+- **KT88 / 6550 bootstrap**: phase 1a.2, classical Koren pentode fallback
+  for tubes without Reefman fits.
 - **Ideal OT model**: current test circuits (AC15, Tweed Deluxe) use
   resistive plate loads and single-plate output coupling, which masks the
   real amp gain. Phase 1e adds a proper ideal-transformer model for

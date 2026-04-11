@@ -319,6 +319,12 @@ fn evaluate_devices_inner(
                                 melange_devices::tube::ScreenForm::Exponential
                             }
                         },
+                        // Phase 1c: variable-mu §5 fields pass through. When
+                        // tp.svar == 0.0, the math reduces to sharp single-mu
+                        // (byte-identical to phase 1a/1a.1 behavior).
+                        mu_b: tp.mu_b,
+                        svar: tp.svar,
+                        ex_b: tp.ex_b,
                     };
                     let vgk = v_nl[s];
                     let vpk = v_nl[s + 1];

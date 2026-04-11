@@ -438,6 +438,32 @@ pub struct TubeParams {
     /// entries and serialized data.
     #[serde(default)]
     pub screen_form: ScreenForm,
+    /// Reefman §5 variable-mu section-B amplification factor (μ_b).
+    /// When `svar > 0`, the device blends two Koren currents with two different
+    /// amplification factors: section A uses the shared `mu` field (as μ_a),
+    /// section B uses this `mu_b`. Section A is the high-mu "normal" section
+    /// and section B is the low-mu section that dominates at deep cutoff.
+    /// Typical values: `μ_a / μ_b ≈ 3–5` for variable-mu pentodes (6K7, 6BA6,
+    /// EF89). When `svar == 0` this field is ignored and the math reduces to
+    /// the sharp single-section Koren. 0.0 = sharp default.
+    #[serde(default)]
+    pub mu_b: f64,
+    /// Reefman §5 variable-mu blend fraction `s_var ∈ [0, 1]`.
+    /// `I_P,Koren_v = (1 − s_var)·I_P,Koren_a + s_var·I_P,Koren_b` (Eq 33).
+    /// When `svar == 0` (default) the device is sharp-cutoff and `mu_b`/`ex_b`
+    /// are unused. Typical fitted values: `s_var ≈ 0.05–0.1` for variable-mu
+    /// pentodes — the smaller section B carries a minority of the total
+    /// current but its flatter gm(Vgk) curve dominates under deep bias.
+    /// Values outside [0, 1] are rejected by `validate()`.
+    #[serde(default)]
+    pub svar: f64,
+    /// Reefman §5 variable-mu section-B Koren exponent (`x_b` in Eq 34).
+    /// Each section of a variable-mu tube has its own exponent — section A
+    /// uses the shared `ex` field (as x_a), section B uses `ex_b`. The two
+    /// may differ slightly due to per-section geometry. When `svar == 0`
+    /// this field is ignored. 0.0 = sharp default.
+    #[serde(default)]
+    pub ex_b: f64,
 }
 
 impl TubeParams {
@@ -503,7 +529,37 @@ impl TubeParams {
                 ));
             }
         }
+        // Variable-mu §5 (Reefman two-section Koren) constraints — apply to
+        // BOTH triodes and pentodes. `svar == 0` means sharp single-section
+        // (the default), no further checks. `svar > 0` activates the blend
+        // and requires both section-B parameters to be present.
+        if !self.svar.is_finite() || self.svar < 0.0 || self.svar > 1.0 {
+            return Err(format!(
+                "tube SVAR must be in [0, 1] and finite, got {}",
+                self.svar
+            ));
+        }
+        if self.svar > 0.0 {
+            if !self.mu_b.is_finite() || self.mu_b <= 0.0 {
+                return Err(format!(
+                    "variable-mu tube MU_B must be positive and finite when svar>0, got {}",
+                    self.mu_b
+                ));
+            }
+            if !self.ex_b.is_finite() || self.ex_b <= 0.0 {
+                return Err(format!(
+                    "variable-mu tube EX_B must be positive and finite when svar>0, got {}",
+                    self.ex_b
+                ));
+            }
+        }
         Ok(())
+    }
+
+    /// Returns true when the tube is a Reefman §5 variable-mu (remote-cutoff)
+    /// type, i.e. `svar > 0`. Applies to both triodes and pentodes.
+    pub fn is_variable_mu(&self) -> bool {
+        self.svar > 0.0
     }
 }
 
@@ -615,6 +671,39 @@ mod tube_params_tests {
             a_factor: 0.0,
             beta_factor: 0.0,
             screen_form: ScreenForm::Rational,
+            mu_b: 0.0,
+            svar: 0.0,
+            ex_b: 0.0,
+        }
+    }
+
+    fn variable_mu_pentode_6k7() -> TubeParams {
+        // Reefman "PenthodeVD" fit from TubeLib.inc — variable-mu pentode
+        // with Rational (Derk §4.4) screen form. Same 9 Derk params plus
+        // the §5 variable-mu trio (mu_b, svar, ex_b).
+        // Values from the background parameter-survey report (2026-04-11).
+        TubeParams {
+            kind: TubeKind::SharpPentode,
+            mu: 15.5,       // μ_a (section A — high-mu region)
+            ex: 1.573,      // ex_a (section A exponent)
+            kg1: 1407.7,
+            kp: 36.0,
+            kvb: 1309.0,
+            ig_max: 6e-3,
+            vgk_onset: 0.5,
+            lambda: 0.0,
+            ccg: 0.0,
+            cgp: 0.0,
+            ccp: 0.0,
+            rgi: 0.0,
+            kg2: 8335.8,
+            alpha_s: 4.07,
+            a_factor: 1.55e-9, // effectively zero per Reefman fit
+            beta_factor: 0.15,
+            screen_form: ScreenForm::Rational,
+            mu_b: 3.4,
+            svar: 0.083,
+            ex_b: 1.223,
         }
     }
 
@@ -642,6 +731,9 @@ mod tube_params_tests {
             a_factor: 4.344e-4,
             beta_factor: 0.148,
             screen_form: ScreenForm::Rational,
+            mu_b: 0.0,
+            svar: 0.0,
+            ex_b: 0.0,
         }
     }
 
@@ -667,6 +759,9 @@ mod tube_params_tests {
             a_factor: 4.91e-4,
             beta_factor: 0.069,
             screen_form: ScreenForm::Exponential,
+            mu_b: 0.0,
+            svar: 0.0,
+            ex_b: 0.0,
         }
     }
 
@@ -836,5 +931,100 @@ mod tube_params_tests {
         assert_eq!(back.mu, 9.41);
         assert_eq!(back.kg2, 6672.5);
         assert_eq!(back.alpha_s, 8.10);
+    }
+
+    #[test]
+    fn variable_mu_pentode_validates() {
+        let t = variable_mu_pentode_6k7();
+        t.validate().expect("6K7 variable-mu pentode should validate");
+        assert!(t.is_variable_mu());
+        assert_eq!(t.svar, 0.083);
+        assert_eq!(t.mu_b, 3.4);
+        assert_eq!(t.ex_b, 1.223);
+    }
+
+    #[test]
+    fn sharp_pentode_is_not_variable_mu() {
+        assert!(!pentode_el84().is_variable_mu());
+        assert!(!beam_tetrode_6l6gc().is_variable_mu());
+    }
+
+    #[test]
+    fn variable_mu_rejects_out_of_range_svar() {
+        let mut bad = variable_mu_pentode_6k7();
+        bad.svar = 1.5;
+        assert!(bad.validate().is_err(), "SVAR > 1 must fail");
+        bad.svar = -0.1;
+        assert!(bad.validate().is_err(), "SVAR < 0 must fail");
+    }
+
+    #[test]
+    fn variable_mu_rejects_missing_mu_b() {
+        let mut bad = variable_mu_pentode_6k7();
+        bad.mu_b = 0.0;
+        assert!(
+            bad.validate().is_err(),
+            "svar>0 with mu_b=0 must fail validation"
+        );
+    }
+
+    #[test]
+    fn variable_mu_rejects_missing_ex_b() {
+        let mut bad = variable_mu_pentode_6k7();
+        bad.ex_b = 0.0;
+        assert!(
+            bad.validate().is_err(),
+            "svar>0 with ex_b=0 must fail validation"
+        );
+    }
+
+    #[test]
+    fn sharp_pentode_allows_zero_mu_b_ex_b() {
+        // With svar=0, mu_b and ex_b must be allowed at 0 (the existing
+        // sharp pentode case).
+        let t = pentode_el84();
+        assert_eq!(t.svar, 0.0);
+        assert_eq!(t.mu_b, 0.0);
+        assert_eq!(t.ex_b, 0.0);
+        t.validate().expect("sharp pentode with mu_b=ex_b=0 must validate");
+    }
+
+    #[test]
+    fn legacy_pentode_json_without_variable_mu_is_sharp() {
+        // Pre-phase-1c serialized pentode TubeParams (no `mu_b`/`svar`/`ex_b`
+        // fields). Must deserialize as sharp (svar=0, mu_b=0, ex_b=0).
+        let legacy_json = r#"{
+            "kind": "SharpPentode",
+            "mu": 23.36,
+            "ex": 1.138,
+            "kg1": 117.4,
+            "kp": 152.4,
+            "kvb": 4015.8,
+            "ig_max": 0.008,
+            "vgk_onset": 0.7,
+            "kg2": 1275.0,
+            "alpha_s": 7.66,
+            "a_factor": 4.344e-4,
+            "beta_factor": 0.148,
+            "screen_form": "Rational"
+        }"#;
+        let tp: TubeParams = serde_json::from_str(legacy_json)
+            .expect("legacy pentode JSON (no variable-mu fields) should round-trip");
+        assert!(!tp.is_variable_mu());
+        assert_eq!(tp.svar, 0.0);
+        assert_eq!(tp.mu_b, 0.0);
+        assert_eq!(tp.ex_b, 0.0);
+    }
+
+    #[test]
+    fn variable_mu_pentode_roundtrip_serde() {
+        let t = variable_mu_pentode_6k7();
+        let json = serde_json::to_string(&t).expect("serialize");
+        let back: TubeParams = serde_json::from_str(&json).expect("deserialize");
+        assert!(back.is_variable_mu());
+        assert_eq!(back.svar, 0.083);
+        assert_eq!(back.mu_b, 3.4);
+        assert_eq!(back.ex_b, 1.223);
+        assert!(matches!(back.screen_form, ScreenForm::Rational));
     }
 }

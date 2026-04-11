@@ -1,0 +1,89 @@
+* 6K7 Variable-Mu Gain-Reduction Stage
+* Copyright (c) 2026 Melange Contributors
+* License: MIT OR Apache-2.0
+*
+* Phase 1c validation target for melange variable-mu (Reefman §5)
+* pentode support. Single 6K7 remote-cutoff pentode in common-cathode
+* with user-adjustable grid bias via a .pot on the cathode bias resistor.
+*
+* This is the heart of a varimu compressor: a tube whose gm rolls off
+* gradually as the grid bias goes more negative. In compressors like the
+* Fairchild 670, Gates Sta-Level, and Collins 26U, a sidechain envelope
+* follower drives the bias point down (more negative Vgk) proportional
+* to program level, smoothly reducing the gain of this stage.
+*
+* Exercises the Reefman §5 two-section Koren math end-to-end:
+*   - Parser picks up `6K7` catalog alias
+*   - Resolver reads `MU_B=3.4 SVAR=0.083 EX_B=1.223` from the catalog
+*   - MNA stamps a 3D pentode slot
+*   - DC-OP converges using variable-mu KorenPentode
+*   - Codegen emits `tube_ip_pentode_v` helpers (Tera `any_variable_mu_pentode`)
+*   - Per-sample NR stays stable with no max-iter hits
+*
+* Topology:
+*   VIN → Cin → Rg → [6K7] → pa → Cout → out
+*                     |      |
+*                     cath   Ra → B+
+*                     |
+*                    Rk (variable) → 0
+*                     |
+*                    Ck (100 uF bypass — slow AGC envelope)
+*
+*   Rk is .pot-wired so the user can sweep bias from quiet (unity gain,
+*   Rk ≈ 150) to hard-clamped (deep cutoff, Rk ≈ 5k). In a real varimu
+*   compressor this resistor would be replaced by a current source driven
+*   from a sidechain envelope follower and a DC control voltage.
+*
+* Target bias points (from 6K7 datasheet, ±20%):
+*   Rk=150:   Vgk ≈ -1V,   Vpk ≈ 180V, Vg2k ≈ 100V, Ip ≈ 5 mA  (quiet, max gain)
+*   Rk=1.5k:  Vgk ≈ -7V,   Vpk ≈ 220V, Vg2k ≈ 100V, Ip ≈ 2 mA  (-6 dB gain red.)
+*   Rk=5k:    Vgk ≈ -15V,  Vpk ≈ 240V, Vg2k ≈ 100V, Ip ≈ 0.3 mA (-18 dB)
+*
+* Small-signal gain at Rk=150 (Vgk≈-1): ~gm·Ra ≈ 4 mA/V · 100k = 400x (+52 dB)
+* Gain rolls off SMOOTHLY as bias increases — the variable-mu signature.
+*
+* If the compile-and-run shows a clean output and DC OP converges, the
+* variable-mu path works. A follow-up test could sweep Rk via the plugin
+* UI and record the gm(Vgk) curve to verify the gradual rolloff.
+
+* -------------- Models --------------
+* 6K7 — Reefman §5 variable-mu Derk fit from TubeLib.inc (2016-01-23).
+* References the PENTODE_CATALOG entry `6K7` which carries the full
+* 12-parameter variable-mu fit (mu_a, mu_b, svar, ex_a, ex_b, Kg1, Kg2,
+* Kp, Kvb, alpha_s, A, β) with `screen_form: Rational`.
+.model 6K7 VP()
+
+* -------------- Supplies --------------
+* B+ plate/screen supply (250V typical for 6K7 AGC pentode)
+VCC vcc 0 DC 250
+
+* -------------- Input coupling --------------
+* f_low = 1/(2π · 470k · 22n) ≈ 15 Hz
+Cin    in    grid  22n
+Rg     grid  0     470k
+
+* -------------- 6K7 pentode (plate-grid-cathode-screen) --------------
+P1     plate grid  cath  screen  6K7
+
+* Plate load (100k — typical for small-signal pentode stage)
+Ra     vcc   plate 100k
+
+* Screen resistor decoupled by 47 nF bypass cap
+Rg2    vcc   screen 470k
+Cg2    screen 0     47n
+
+* Cathode bias — dynamic pot for bias sweep
+* At Rk=150: Class A bias, max gain
+* At Rk=5k: deep cutoff, gm ≈ 0 (heavy gain reduction)
+Rk     cath  0     150
+Ck     cath  0     100u
+
+* Dynamic pot: exposes bias adjustment as a plugin knob
+.pot Rk 150 5k "Gain Reduction"
+
+* -------------- Output --------------
+* DC-blocking coupling cap (f_low = 1/(2π · 100k · 100n) ≈ 16 Hz)
+Cout   plate out   100n
+Rload  out   0     100k
+
+.END

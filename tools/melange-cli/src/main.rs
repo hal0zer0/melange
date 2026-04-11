@@ -2933,6 +2933,9 @@ fn build_device_slots(
                         a_factor: 0.0,
                         beta_factor: 0.0,
                         screen_form: melange_solver::device_types::ScreenForm::Rational,
+                        mu_b: 0.0,
+                        svar: 0.0,
+                        ex_b: 0.0,
                     }),
                     has_internal_mna_nodes: false,
                 });

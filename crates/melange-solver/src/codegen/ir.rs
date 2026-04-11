@@ -3890,6 +3890,15 @@ impl CircuitIR {
             .or_else(|| cat.map(|c| c.lambda))
             .unwrap_or(0.0);
 
+        // Reefman §5 variable-mu (remote-cutoff) parameters. Optional — default
+        // 0.0 means sharp single-section Koren. The triode catalog
+        // (`TubeCatalogEntry`) does NOT carry these fields in phase 1c, so the
+        // only source is the `.model` directive; callers who want a variable-mu
+        // triode must spell `MU_B`/`SVAR`/`EX_B` explicitly.
+        let mu_b = Self::lookup_model_param(netlist, model, "MU_B").unwrap_or(0.0);
+        let svar = Self::lookup_model_param(netlist, model, "SVAR").unwrap_or(0.0);
+        let ex_b = Self::lookup_model_param(netlist, model, "EX_B").unwrap_or(0.0);
+
         validate_positive_finite(mu, "tube model MU")?;
         validate_positive_finite(ex, "tube model EX")?;
         validate_positive_finite(kg1, "tube model KG1")?;
@@ -3903,6 +3912,28 @@ impl CircuitIR {
             return Err(CodegenError::InvalidConfig(format!(
                 "tube model LAMBDA must be non-negative and finite, got {lambda}"
             )));
+        }
+
+        // Reefman §5 variable-mu constraints (mirrors `TubeParams::validate()`).
+        // Surfacing them at the resolver level gives a clearer error site than
+        // the downstream `params.validate()` call, and lets us mention the
+        // `.model` directive name in the diagnostic.
+        if !svar.is_finite() || !(0.0..=1.0).contains(&svar) {
+            return Err(CodegenError::InvalidConfig(format!(
+                "tube model SVAR must be in [0, 1] and finite, got {svar}"
+            )));
+        }
+        if svar > 0.0 {
+            if !mu_b.is_finite() || mu_b <= 0.0 {
+                return Err(CodegenError::InvalidConfig(format!(
+                    "variable-mu tube MU_B must be positive and finite when SVAR>0, got {mu_b}"
+                )));
+            }
+            if !ex_b.is_finite() || ex_b <= 0.0 {
+                return Err(CodegenError::InvalidConfig(format!(
+                    "variable-mu tube EX_B must be positive and finite when SVAR>0, got {ex_b}"
+                )));
+            }
         }
 
         // Inter-electrode capacitances (optional, default 0.0)
@@ -3949,6 +3980,9 @@ impl CircuitIR {
                 "CGP",
                 "CCP",
                 "RGI",
+                "MU_B",
+                "SVAR",
+                "EX_B",
             ],
         );
 
@@ -3971,6 +4005,9 @@ impl CircuitIR {
             a_factor: 0.0,
             beta_factor: 0.0,
             screen_form: crate::device_types::ScreenForm::Rational,
+            mu_b,
+            svar,
+            ex_b,
         })
     }
 
@@ -4040,6 +4077,24 @@ impl CircuitIR {
             .unwrap_or(0.7);
         let lambda = Self::lookup_model_param(netlist, model, "LAMBDA").unwrap_or(0.0);
 
+        // Reefman §5 variable-mu (remote-cutoff) parameters. Resolution order:
+        //   1. Explicit `.model VP(MU_B=... SVAR=... EX_B=...)`
+        //   2. Pentode catalog (`PentodeCatalogEntry.mu_b/svar/ex_b`) — added by
+        //      task P1c-06, running in parallel. If the catalog agent's fields
+        //      haven't landed yet this file won't compile; the `.or_else(...)`
+        //      branches below are kept behind a TODO(P1c-06) comment so we can
+        //      drop the catalog fallback in once it's available.
+        //   3. Hard-coded 0.0 default → sharp single-section Koren.
+        let mu_b = Self::lookup_model_param(netlist, model, "MU_B")
+            // TODO(P1c-06): .or_else(|| cat.map(|c| c.mu_b))
+            .unwrap_or(0.0);
+        let svar = Self::lookup_model_param(netlist, model, "SVAR")
+            // TODO(P1c-06): .or_else(|| cat.map(|c| c.svar))
+            .unwrap_or(0.0);
+        let ex_b = Self::lookup_model_param(netlist, model, "EX_B")
+            // TODO(P1c-06): .or_else(|| cat.map(|c| c.ex_b))
+            .unwrap_or(0.0);
+
         // Screen form: catalog value wins over the fallback; explicit
         // `SCREEN_FORM=0|1` in the .model directive wins over the catalog.
         // `0` = Rational (Derk §4.4), `1` = Exponential (DerkE §4.5).
@@ -4089,6 +4144,27 @@ impl CircuitIR {
             )));
         }
 
+        // Reefman §5 variable-mu constraints (mirrors `TubeParams::validate()`).
+        // Surfacing them at the resolver level gives a clearer error site than
+        // the downstream `params.validate()` call.
+        if !svar.is_finite() || !(0.0..=1.0).contains(&svar) {
+            return Err(CodegenError::InvalidConfig(format!(
+                "pentode model SVAR must be in [0, 1] and finite, got {svar}"
+            )));
+        }
+        if svar > 0.0 {
+            if !mu_b.is_finite() || mu_b <= 0.0 {
+                return Err(CodegenError::InvalidConfig(format!(
+                    "variable-mu pentode MU_B must be positive and finite when SVAR>0, got {mu_b}"
+                )));
+            }
+            if !ex_b.is_finite() || ex_b <= 0.0 {
+                return Err(CodegenError::InvalidConfig(format!(
+                    "variable-mu pentode EX_B must be positive and finite when SVAR>0, got {ex_b}"
+                )));
+            }
+        }
+
         let ccg = Self::lookup_model_param(netlist, model, "CCG").unwrap_or(0.0);
         if ccg < 0.0 || !ccg.is_finite() {
             return Err(CodegenError::InvalidConfig(format!(
@@ -4135,6 +4211,9 @@ impl CircuitIR {
                 "CGP",
                 "CCP",
                 "RGI",
+                "MU_B",
+                "SVAR",
+                "EX_B",
             ],
         );
 
@@ -4157,6 +4236,12 @@ impl CircuitIR {
             a_factor,
             beta_factor,
             screen_form,
+            // Phase 1c: variable-mu §5 params. Defaults to sharp (svar=0).
+            // Resolved by a follow-up (task P1c-03) which reads MU_B / SVAR /
+            // EX_B from the .model directive with catalog fallback.
+            mu_b: 0.0,
+            svar: 0.0,
+            ex_b: 0.0,
         };
         params
             .validate()
