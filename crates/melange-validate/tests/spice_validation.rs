@@ -578,6 +578,7 @@ fn build_device_slots_from_netlist(
                         ibv: 1e-10,
                     }),
                     has_internal_mna_nodes: false,
+            vg2k_frozen: 0.0,
                 });
                 dim_offset += 1;
             }
@@ -624,6 +625,7 @@ fn build_device_slots_from_netlist(
                         tamb: 300.15,
                     }),
                     has_internal_mna_nodes: false,
+            vg2k_frozen: 0.0,
                 });
                 dim_offset += 2;
             }
@@ -657,6 +659,7 @@ fn build_device_slots_from_netlist(
                         rs: 0.0,
                     }),
                     has_internal_mna_nodes: false,
+            vg2k_frozen: 0.0,
                 });
                 dim_offset += 2;
             }
@@ -687,6 +690,7 @@ fn build_device_slots_from_netlist(
                         bulk_node: 0,
                     }),
                     has_internal_mna_nodes: false,
+            vg2k_frozen: 0.0,
                 });
                 dim_offset += 2;
             }
@@ -719,6 +723,7 @@ fn build_device_slots_from_netlist(
                         ex_b: 0.0,
                     }),
                     has_internal_mna_nodes: false,
+            vg2k_frozen: 0.0,
                 });
                 dim_offset += 2;
             }

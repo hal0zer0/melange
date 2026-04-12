@@ -73,7 +73,8 @@ remains in the solver crate as a fallback for purely linear circuits.
 | JFET | 2D | Shichman-Hodges |
 | MOSFET | 2D | Level 1 SPICE |
 | Tube (triode) | 2D (Vgk→Ip, Vpk→Ig) | Koren + Leach |
-| Tube (pentode) | 3D (Vgk→Ip, Vpk→Ig2, Vg2k→Ig1) | Reefman Derk §4.4 + Leach |
+| Tube (pentode) | 3D (Vgk→Ip, Vpk→Ig2, Vg2k→Ig1) | Reefman Derk §4.4 / DerkE §4.5 / Classical + Leach |
+| Tube (pentode, grid-off) | 2D (Vgk→Ip, Vpk→Ig2, Vg2k frozen) | Auto-detected at DC-OP when Vgk<cutoff; `--tube-grid-fa` override |
 | VCA | 2D (Vsig, Vctrl) | THAT 2180 exponential |
 | Op-amp | Linear (no NR dim) | Boyle VCCS + GBW pole + rail clamp |
 

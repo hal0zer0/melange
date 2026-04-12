@@ -495,20 +495,80 @@ or Sta-Level schematic requires either:
 - An author contribution (Reefman accepts pull-model fits via
   ExtractModel — see his uTracer website)
 
+### Grid-Off Reduction (Phase 1b)
+
+Load-bearing for Plexi-class amps: without reduction, 4×EL34 + 3×12AX7 =
+18 nonlinear dimensions, which exceeds the M=16 DK Schur cap and forces
+the circuit onto the slower nodal full-LU path. Grid-off reduction
+brings this to 14 dimensions, back under the cap and onto DK Schur
+(Gaussian elimination branch).
+
+When DC-OP confirms a pentode is biased in grid-cutoff (`Vgk < -0.5 −
+vgk_onset`), two things are true: (1) Ig1 is identically zero (Leach
+power-law below onset), and (2) Vg2k is approximately constant in any
+amp with a well-bypassed screen (47 µF + 1 kΩ screen-stop is universal).
+Melange drops the Ig1 dimension entirely AND freezes Vg2k at the
+DC-OP-converged value, reducing the pentode from 3D to 2D (Vgk/Vpk →
+Ip/Ig2). The frozen Vg2k is stored as a per-slot constant on
+`DeviceSlot.vg2k_frozen`.
+
+This is the BJT-FA analog for pentodes with one important difference:
+BJT forward-active reduction is an **exact** physics simplification (Vbc
+really doesn't drive Ic in FA mode), while pentode grid-off is an
+**approximation** — Vg2k really does drive Ip/Ig2 but varies by <1%
+under signal with a properly bypassed screen.
+
+**Triode grid-off is structurally impossible**: Koren `Ip(Vgk, Vpk)`
+needs both voltages, and dropping Vpk would destroy the plate-swing
+signal. Triodes stay 2D regardless of bias. Only pentodes reduce.
+
+### Auto-detection and CLI flag
+
+Auto-detection runs after the first DC-OP converges. For every pentode
+slot, compute Vgk from node voltages; if below cutoff + margin, mark for
+grid-off. Then rebuild MNA via `from_netlist_with_grid_off` and re-run
+DC-OP on the reduced system (converges trivially since the dropped
+dimension was already at its correct value). Warm DC-OP re-init on
+pot/switch changes (commit `e8e18a7`) triggers re-detection.
+
+CLI flag `--tube-grid-fa` matches the existing BJT FA pattern:
+- `auto` (default) — detect at DC-OP, reduce when applicable
+- `on` — force grid-off for every pentode regardless of bias (testing)
+- `off` — never reduce, full 3D path (pre-phase-1b parity)
+
+### Known limitation
+
+Under hard plate clipping the real tube's screen current rises as Vp
+falls and Vg2k sags slightly; the frozen model misses that motion.
+Audible error is 0.5–2 dB in the affected harmonics, similar in
+character to Classical Koren's Vp-independent screen limitation. For
+users who care about this fidelity, `--tube-grid-fa off` forces the full
+3D path with 5-10× slowdown on Plexi-class circuits.
+
+### Compatibility matrix
+
+Grid-off is orthogonal to screen-form:
+
+| Screen form | Variable-mu | Grid-off supported? |
+|---|---|---|
+| Rational (Derk §4.4) | No | ✅ (EL84, EL34, EF86) |
+| Exponential (DerkE §4.5) | No | ✅ (6L6GC, 6V6GT) |
+| Classical (Koren 1996) | No | ✅ (KT88, 6550) |
+| Rational | Yes (§5 6K7/EF89) | ⛔ rejected at validation |
+| Exponential | Yes (§5 EF89) | ⛔ rejected at validation |
+| Classical | Yes (§5) | ⛔ already rejected in phase 1a.2 |
+
+Variable-mu + grid-off is rejected because variable-mu tubes exist
+specifically for AGC where the bias changes continuously under sidechain
+control — freezing the screen at a single DC-OP value contradicts that
+usage pattern.
+
 ### Still Deferred
 
-- **Grid-off FA reduction**: pentode 3D → 2D when Vgk < 0 (Ig1 = 0).
-  Phase 1b, analogous to BJT forward-active dimension reduction. Load-bearing
-  for Plexi-class amps to stay on the fast DK path (4×EL34 + 3×12AX7 = 18
-  dims without reduction, blows past the M=16 DK cap). **Architecturally
-  non-trivial** because unlike BJT Vbc, all three pentode voltages
-  (Vgk, Vpk, Vg2k) appear in both Ip and Ig2 — no clean voltage drop.
-- **KT88 / 6550 bootstrap**: phase 1a.2, classical Koren pentode fallback
-  for tubes without Reefman fits.
-- **Ideal OT model**: current test circuits (AC15, Tweed Deluxe) use
-  resistive plate loads and single-plate output coupling, which masks the
-  real amp gain. Phase 1e adds a proper ideal-transformer model for
-  differential push-pull output.
+- **6386 / 6BA6 / 6BC8 datasheet refits** for Fairchild 670 / Sta-Level
+  / Altec 436 varimu compressor validation. The math path (phase 1c
+  variable-mu §5) is ready; just needs the fit work. User explicitly
+  flagged as "big project, not today".
 
 ## JFET (Shichman-Hodges)
 

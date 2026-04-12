@@ -1247,6 +1247,108 @@ impl KorenPentode {
             [dig1_dvgk, 0.0, 0.0],
         ]
     }
+
+    // ------------------------------------------------------------------
+    // Grid-off (2D reduced) dispatch — phase 1b
+    // ------------------------------------------------------------------
+    //
+    // In grid-cutoff operation (`Vgk < 0` with margin), the control-grid
+    // current `Ig1` is identically zero, so the grid-current row of the
+    // full 3×3 is irrelevant to the NR block. Furthermore, the screen
+    // voltage `Vg2k` in real amps is held approximately constant by the
+    // external screen bypass capacitor (47 µF + 1 kΩ screen-stop is
+    // standard), so freezing `Vg2k` at its DC-OP value is a reasonable
+    // physics approximation — similar in character to Classical Koren's
+    // Vp-independent screen.
+    //
+    // With `Vg2k` frozen, the 2D NR block tracks only `(Vgk, Vpk)`; the
+    // third column of the Jacobian (d/dVg2k) has no corresponding unknown
+    // and drops out. The wrappers below route to the existing 3D entry
+    // points with `vg2k_frozen` passed in the third slot.
+    //
+    // These three methods are thin wrappers, intentional for phase 1b:
+    // the performance win of the grid-off reduction comes from the M-cap
+    // reduction letting large circuits (4+ pentodes) route onto DK Schur
+    // codegen, NOT from micro-optimizing the per-pentode Jacobian. A
+    // future optimization can implement a standalone 2D Jacobian that
+    // skips the Vg2k chain-rule pieces entirely; see TODO in
+    // `jacobian_2x2_grid_off`.
+
+    /// Grid-off reduced plate current: 2D dispatch `(Vgk, Vpk)` with
+    /// `Vg2k` frozen at the DC-OP-converged value.
+    ///
+    /// Numerically identical to `plate_current(vgk, vpk, vg2k_frozen)` —
+    /// provided as a distinct entry point for clarity at codegen call
+    /// sites and for future-proofing if the grid-off physics
+    /// approximation ever needs a different guard structure.
+    ///
+    /// Works across all screen-form / variable-mu combinations because
+    /// the dispatch happens inside [`plate_current`](Self::plate_current).
+    ///
+    /// See also: [`jacobian_2x2_grid_off`](Self::jacobian_2x2_grid_off)
+    /// for the matching reduced Jacobian.
+    pub fn plate_current_grid_off(
+        &self,
+        vgk: f64,
+        vpk: f64,
+        vg2k_frozen: f64,
+    ) -> f64 {
+        self.plate_current(vgk, vpk, vg2k_frozen)
+    }
+
+    /// Grid-off reduced screen current: 2D dispatch `(Vgk, Vpk)` with
+    /// `Vg2k` frozen at the DC-OP-converged value.
+    ///
+    /// Numerically identical to `screen_current(vgk, vpk, vg2k_frozen)`.
+    /// Works across all screen-form / variable-mu combinations because
+    /// the dispatch happens inside
+    /// [`screen_current`](Self::screen_current).
+    pub fn screen_current_grid_off(
+        &self,
+        vgk: f64,
+        vpk: f64,
+        vg2k_frozen: f64,
+    ) -> f64 {
+        self.screen_current(vgk, vpk, vg2k_frozen)
+    }
+
+    /// Grid-off reduced 2×2 Jacobian.
+    ///
+    /// Rows: `[Ip, Ig2]`. Columns: `[Vgk, Vpk]`. Row-major `[[f64; 2]; 2]`.
+    ///
+    /// The third row (`Ig1`) and third column (d/dVg2k partials) of the
+    /// full 3×3 are DROPPED: `Ig1` is identically zero in grid-cutoff,
+    /// and `Vg2k` is a held constant in the 2D reduced NR system, so
+    /// there are no d/dVg2k unknowns. This is exactly the upper-left 2×2
+    /// submatrix of [`jacobian_3x3`](Self::jacobian_3x3).
+    ///
+    /// Mathematically equivalent to extracting
+    /// `[[jac[0][0], jac[0][1]], [jac[1][0], jac[1][1]]]` from
+    /// `jacobian_3x3(vgk, vpk, vg2k_frozen)`. Provided as a distinct
+    /// method so codegen can emit the smaller 2×2 stamp at the call
+    /// site without visibly computing then discarding the full 3×3.
+    ///
+    /// Works across all screen-form / variable-mu combinations because
+    /// the dispatch happens inside `jacobian_3x3`.
+    ///
+    // TODO(phase 1b+): replace the thin wrapper with a standalone 2D
+    // Jacobian that skips the Vg2k chain-rule pieces entirely. For 4
+    // pentodes × 5 wasted 3×3 entries per NR iteration, this is ~20
+    // discarded multiplies per sample — not a bottleneck at phase 1b
+    // (M-cap reduction is the primary win) but worth revisiting once
+    // grid-off lands in production codegen.
+    pub fn jacobian_2x2_grid_off(
+        &self,
+        vgk: f64,
+        vpk: f64,
+        vg2k_frozen: f64,
+    ) -> [[f64; 2]; 2] {
+        let full = self.jacobian_3x3(vgk, vpk, vg2k_frozen);
+        [
+            [full[0][0], full[0][1]],
+            [full[1][0], full[1][1]],
+        ]
+    }
 }
 
 /// Result of [`KorenPentode::compute_ip0_v`] — variable-mu `Ip0_v` with its
@@ -2482,5 +2584,209 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ----------------------------------------------------------------
+    // Grid-off (2D reduced) dispatch — phase 1b
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn test_grid_off_matches_full_3d_el84() {
+        let pentode = KorenPentode::el84();
+        // Class-A-like bias point: Vgk=-7, Vpk=300, Vg2k=300.
+        let (vgk, vpk, vg2k) = (-7.0, 300.0, 300.0);
+
+        let ip_full = pentode.plate_current(vgk, vpk, vg2k);
+        let ip_go = pentode.plate_current_grid_off(vgk, vpk, vg2k);
+        assert_eq!(
+            ip_full, ip_go,
+            "plate_current_grid_off must exactly match plate_current"
+        );
+
+        let ig2_full = pentode.screen_current(vgk, vpk, vg2k);
+        let ig2_go = pentode.screen_current_grid_off(vgk, vpk, vg2k);
+        assert_eq!(
+            ig2_full, ig2_go,
+            "screen_current_grid_off must exactly match screen_current"
+        );
+
+        // Sanity: the physical current should be non-trivial at this bias.
+        assert!(ip_full > 1e-5, "EL84 should draw >10 µA at (-7, 300, 300)");
+        assert!(
+            ig2_full > 1e-6,
+            "EL84 should draw >1 µA of screen at (-7, 300, 300)"
+        );
+    }
+
+    #[test]
+    fn test_grid_off_jacobian_matches_3x3_upper_left() {
+        let pentode = KorenPentode::el84();
+        let (vgk, vpk, vg2k) = (-7.0, 300.0, 300.0);
+
+        let jac3 = pentode.jacobian_3x3(vgk, vpk, vg2k);
+        let jac2 = pentode.jacobian_2x2_grid_off(vgk, vpk, vg2k);
+
+        assert_eq!(jac2[0][0], jac3[0][0], "dIp/dVgk mismatch");
+        assert_eq!(jac2[0][1], jac3[0][1], "dIp/dVpk mismatch");
+        assert_eq!(jac2[1][0], jac3[1][0], "dIg2/dVgk mismatch");
+        assert_eq!(jac2[1][1], jac3[1][1], "dIg2/dVpk mismatch");
+    }
+
+    #[test]
+    fn test_grid_off_works_for_el34_classical_kt88() {
+        // Three screen-form families × three tube presets × three op
+        // points. Each preset-op-point combination must have the
+        // grid-off wrappers identically equal to the full 3D calls,
+        // and the 2×2 Jacobian equal to the 3×3 upper-left.
+        //
+        // Presets:
+        //   - el84()         → ScreenForm::Rational    (Derk)
+        //   - tetrode_6l6gc() → ScreenForm::Exponential (DerkE)
+        //   - kt88()         → ScreenForm::Classical
+        let presets: [(&str, KorenPentode); 3] = [
+            ("el84-Rational", KorenPentode::el84()),
+            ("6l6gc-Exponential", KorenPentode::tetrode_6l6gc()),
+            ("kt88-Classical", KorenPentode::kt88()),
+        ];
+        // Three operating points: cutoff, class-A, heavy drive.
+        let op_points: [(f64, f64, f64); 3] = [
+            (-30.0, 400.0, 300.0),
+            (-10.0, 300.0, 300.0),
+            (-2.0, 150.0, 300.0),
+        ];
+
+        for (name, pentode) in &presets {
+            for &(vgk, vpk, vg2k) in &op_points {
+                let ip_full = pentode.plate_current(vgk, vpk, vg2k);
+                let ip_go = pentode.plate_current_grid_off(vgk, vpk, vg2k);
+                assert_eq!(
+                    ip_full, ip_go,
+                    "{name}: plate_current_grid_off mismatch at ({vgk}, {vpk}, {vg2k})"
+                );
+
+                let ig2_full = pentode.screen_current(vgk, vpk, vg2k);
+                let ig2_go = pentode.screen_current_grid_off(vgk, vpk, vg2k);
+                assert_eq!(
+                    ig2_full, ig2_go,
+                    "{name}: screen_current_grid_off mismatch at ({vgk}, {vpk}, {vg2k})"
+                );
+
+                let jac3 = pentode.jacobian_3x3(vgk, vpk, vg2k);
+                let jac2 = pentode.jacobian_2x2_grid_off(vgk, vpk, vg2k);
+                assert_eq!(
+                    jac2[0][0], jac3[0][0],
+                    "{name}: jac[0][0] mismatch at ({vgk}, {vpk}, {vg2k})"
+                );
+                assert_eq!(
+                    jac2[0][1], jac3[0][1],
+                    "{name}: jac[0][1] mismatch at ({vgk}, {vpk}, {vg2k})"
+                );
+                assert_eq!(
+                    jac2[1][0], jac3[1][0],
+                    "{name}: jac[1][0] mismatch at ({vgk}, {vpk}, {vg2k})"
+                );
+                assert_eq!(
+                    jac2[1][1], jac3[1][1],
+                    "{name}: jac[1][1] mismatch at ({vgk}, {vpk}, {vg2k})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_grid_off_var_mu_6k7_sanity() {
+        // Hand-built variable-mu 6K7 pentode (no factory exists yet).
+        // Parameters from Reefman §5 PenthodeVD / remote-cutoff 6K7
+        // fits (same family as the var-mu triode section-B coefficients).
+        // Key property: svar > 0 and mu_b != mu, so the variable-mu
+        // blend is active. This test confirms that the grid-off wrapper
+        // is orthogonal to variable-mu (as expected — the wrapper only
+        // routes to the existing 3D entry points, which already handle
+        // the Reefman §5 blend internally).
+        let pentode = KorenPentode {
+            mu: 15.5,
+            ex: 1.573,
+            kg1: 1407.7,
+            kg2: 8335.8,
+            kp: 36.0,
+            kvb: 1309.0,
+            alpha_s: 4.07,
+            a_factor: 1.55e-9,
+            beta_factor: 0.15,
+            ig_max: DEFAULT_IG_MAX,
+            vgk_onset: DEFAULT_VGK_ONSET,
+            screen_form: ScreenForm::Rational,
+            mu_b: 3.4,
+            svar: 0.083,
+            ex_b: 1.223,
+        };
+
+        let (vgk, vpk, vg2k) = (-3.0, 250.0, 100.0);
+
+        let ip_full = pentode.plate_current(vgk, vpk, vg2k);
+        let ip_go = pentode.plate_current_grid_off(vgk, vpk, vg2k);
+        assert_eq!(
+            ip_full, ip_go,
+            "var-mu 6K7: plate_current_grid_off must match plate_current"
+        );
+
+        let ig2_full = pentode.screen_current(vgk, vpk, vg2k);
+        let ig2_go = pentode.screen_current_grid_off(vgk, vpk, vg2k);
+        assert_eq!(
+            ig2_full, ig2_go,
+            "var-mu 6K7: screen_current_grid_off must match screen_current"
+        );
+
+        let jac3 = pentode.jacobian_3x3(vgk, vpk, vg2k);
+        let jac2 = pentode.jacobian_2x2_grid_off(vgk, vpk, vg2k);
+        assert_eq!(jac2[0][0], jac3[0][0]);
+        assert_eq!(jac2[0][1], jac3[0][1]);
+        assert_eq!(jac2[1][0], jac3[1][0]);
+        assert_eq!(jac2[1][1], jac3[1][1]);
+
+        // Make sure we're actually in a conducting region (not trivially
+        // matching because both are zero).
+        assert!(
+            ip_full.abs() > 0.0,
+            "var-mu 6K7 should conduct at (-3, 250, 100)"
+        );
+    }
+
+    #[test]
+    fn test_grid_off_freeze_ignores_third_arg_change() {
+        // Sanity check on the wrapper plumbing: the "frozen" value IS
+        // actually read by the wrapper. If a refactor ever accidentally
+        // dropped vg2k_frozen and hard-coded something, this test would
+        // fail. Different Vg2k values at the same (Vgk, Vpk) must
+        // produce different plate currents for any non-degenerate bias.
+        let pentode = KorenPentode::el84();
+        let vgk = -7.0;
+        let vpk = 300.0;
+
+        let ip_a = pentode.plate_current_grid_off(vgk, vpk, 250.0);
+        let ip_b = pentode.plate_current_grid_off(vgk, vpk, 350.0);
+        assert_ne!(
+            ip_a, ip_b,
+            "plate_current_grid_off must actually read vg2k_frozen"
+        );
+
+        let ig2_a = pentode.screen_current_grid_off(vgk, vpk, 250.0);
+        let ig2_b = pentode.screen_current_grid_off(vgk, vpk, 350.0);
+        assert_ne!(
+            ig2_a, ig2_b,
+            "screen_current_grid_off must actually read vg2k_frozen"
+        );
+
+        let jac_a = pentode.jacobian_2x2_grid_off(vgk, vpk, 250.0);
+        let jac_b = pentode.jacobian_2x2_grid_off(vgk, vpk, 350.0);
+        // At least one entry must differ.
+        let any_diff = jac_a[0][0] != jac_b[0][0]
+            || jac_a[0][1] != jac_b[0][1]
+            || jac_a[1][0] != jac_b[1][0]
+            || jac_a[1][1] != jac_b[1][1];
+        assert!(
+            any_diff,
+            "jacobian_2x2_grid_off must actually read vg2k_frozen"
+        );
     }
 }

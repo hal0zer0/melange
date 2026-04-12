@@ -3226,6 +3226,130 @@ impl CircuitIR {
         forward_active
     }
 
+    /// Phase 1b grid-off pentode detection.
+    ///
+    /// Runs DC-OP on the provided MNA system and inspects each pentode's
+    /// converged `Vgk` and `Vg2k`. Pentodes with `Vgk < -(vgk_onset + 0.5)`
+    /// across the operating point (i.e. well below grid cutoff) qualify
+    /// for grid-off reduction: `Ig1` is identically zero and `Vg2k` is
+    /// approximately held constant by external bypass caps, so the NR
+    /// block can drop from 3D to 2D.
+    ///
+    /// Returns a `HashMap<String, f64>` mapping pentode name (uppercased)
+    /// to the DC-OP-converged `Vg2k` value that should be frozen in the
+    /// reduced device. The caller uses the map to:
+    ///
+    /// 1. Collect the set of names and pass them to
+    ///    [`MnaSystem::from_netlist_with_grid_off`] to rebuild MNA with
+    ///    `dimension: 2` pentode slots
+    /// 2. Build `device_slots` via [`build_device_info_with_mna`] — that
+    ///    function will detect the MNA's reduced dimension and set
+    ///    `TubeParams.kind = SharpPentodeGridOff` automatically
+    /// 3. Iterate the returned slots and write the per-slot
+    ///    `vg2k_frozen` value from this map
+    ///
+    /// Mirrors [`detect_forward_active_bjts`] for the BJT case.
+    ///
+    /// **Auto-detection only.** The `--tube-grid-fa on/off` CLI overrides
+    /// bypass this detection (force-on creates a map with every pentode,
+    /// force-off returns an empty map regardless of bias).
+    /// Detect pentodes eligible for grid-off dimension reduction.
+    ///
+    /// When `force_all` is true, every non-variable-mu pentode is marked as
+    /// grid-off (the `--tube-grid-fa on` escape hatch), bypassing the normal
+    /// `Vgk < cutoff_threshold` check.  The DC-OP Vg2k value is still read
+    /// and used as the frozen screen voltage.
+    pub fn detect_grid_off_pentodes(
+        mna: &crate::mna::MnaSystem,
+        netlist: &Netlist,
+        config: &CodegenConfig,
+        force_all: bool,
+    ) -> std::collections::HashMap<String, f64> {
+        use crate::dc_op::{self, DcOpConfig};
+
+        let device_slots = Self::build_device_info(netlist).unwrap_or_default();
+        if device_slots.is_empty() {
+            return std::collections::HashMap::new();
+        }
+
+        let dc_op_config = DcOpConfig {
+            tolerance: config.dc_op_tolerance,
+            max_iterations: config.dc_op_max_iterations,
+            input_node: config.input_node,
+            input_resistance: config.input_resistance,
+            ..DcOpConfig::default()
+        };
+        let dc_result = dc_op::solve_dc_operating_point(mna, &device_slots, &dc_op_config);
+
+        let mut grid_off = std::collections::HashMap::new();
+        for (slot_idx, slot) in device_slots.iter().enumerate() {
+            // Grid-off only applies to pentodes in the full-3D state;
+            // skip non-tubes and slots already reduced to 2D.
+            if slot.device_type != DeviceType::Tube || slot.dimension != 3 {
+                continue;
+            }
+            let tp = match &slot.params {
+                DeviceParams::Tube(tp) if tp.is_pentode() => tp,
+                _ => continue,
+            };
+            // Variable-mu pentodes (6K7, EF89) are excluded from grid-off —
+            // they're designed specifically for continuous bias changes
+            // under sidechain control, and freezing Vg2k contradicts that
+            // usage pattern. Schema `validate()` also rejects this combo.
+            if tp.is_variable_mu() {
+                continue;
+            }
+            if slot_idx >= mna.nonlinear_devices.len() {
+                continue;
+            }
+            let dev = &mna.nonlinear_devices[slot_idx];
+            // Pentode node order (from `categorize_element` in mna.rs):
+            // [plate, grid, cathode, screen] with optional [, suppressor].
+            if dev.node_indices.len() < 4 {
+                continue;
+            }
+            let n_plate = dev.node_indices[0];
+            let n_grid = dev.node_indices[1];
+            let n_cathode = dev.node_indices[2];
+            let n_screen = dev.node_indices[3];
+            let v_at = |n: usize| -> f64 {
+                if n > 0 && n - 1 < dc_result.v_node.len() {
+                    dc_result.v_node[n - 1]
+                } else {
+                    0.0
+                }
+            };
+            let v_grid = v_at(n_grid);
+            let v_cathode = v_at(n_cathode);
+            let v_screen = v_at(n_screen);
+            let vgk = v_grid - v_cathode;
+            let vg2k = v_screen - v_cathode;
+            // Grid-off threshold: Vgk must be below -(vgk_onset + 0.5) so
+            // there's a safety margin around the Leach grid-current onset.
+            // `vgk_onset` is the positive voltage at which grid conduction
+            // begins; grid-off requires Vgk to be well-negative.
+            let cutoff_threshold = -(tp.vgk_onset + 0.5);
+            // Additionally require a plausible positive Vg2k — a frozen
+            // value near zero would suggest DC-OP didn't actually solve
+            // for the screen supply.
+            let plate = v_at(n_plate);
+            let passes_threshold = force_all || (vgk < cutoff_threshold && vg2k > 1.0);
+            if passes_threshold {
+                let name = dev.name.to_ascii_uppercase();
+                log::info!(
+                    "Pentode '{}' grid-off{}(Vgk={:.3}V, Vg2k={:.3}V, Vpk={:.3}V). Using 2D model.",
+                    name,
+                    if force_all { " (forced) " } else { " " },
+                    vgk,
+                    vg2k,
+                    plate - v_cathode
+                );
+                grid_off.insert(name, vg2k);
+            }
+        }
+        grid_off
+    }
+
     pub fn build_device_info(netlist: &Netlist) -> Result<Vec<DeviceSlot>, CodegenError> {
         Self::build_device_info_with_mna(netlist, None)
     }
@@ -3249,6 +3373,7 @@ impl CircuitIR {
                         dimension: 1,
                         params: DeviceParams::Diode(params),
                         has_internal_mna_nodes: false,
+                        vg2k_frozen: 0.0,
                     });
                     dim_offset += 1;
                     nl_dev_idx += 1;
@@ -3281,6 +3406,7 @@ impl CircuitIR {
                         dimension: dim,
                         params: DeviceParams::Bjt(params),
                         has_internal_mna_nodes: false,
+                        vg2k_frozen: 0.0,
                     });
                     dim_offset += dim;
                     nl_dev_idx += 1;
@@ -3293,6 +3419,7 @@ impl CircuitIR {
                         dimension: 2,
                         params: DeviceParams::Jfet(params),
                         has_internal_mna_nodes: false,
+                        vg2k_frozen: 0.0,
                     });
                     dim_offset += 2;
                     nl_dev_idx += 1;
@@ -3305,20 +3432,41 @@ impl CircuitIR {
                         dimension: 2,
                         params: DeviceParams::Tube(params),
                         has_internal_mna_nodes: false,
+                        vg2k_frozen: 0.0,
                     });
                     dim_offset += 2;
                     nl_dev_idx += 1;
                 }
                 Element::Pentode { model, .. } => {
-                    let params = Self::resolve_pentode_params(netlist, model)?;
+                    let mut params = Self::resolve_pentode_params(netlist, model)?;
+                    // Check if MNA has this pentode as grid-off (2D reduced).
+                    // Phase 1b: after DC-OP detects Vgk < cutoff, the MNA is
+                    // rebuilt via `from_netlist_with_grid_off` which stamps
+                    // dimension=2 for the named pentodes. Here we reflect that
+                    // back into `TubeParams.kind` so codegen dispatches to
+                    // `*_pentode_grid_off` helpers.
+                    let is_grid_off = mna.is_some_and(|m| {
+                        nl_dev_idx < m.nonlinear_devices.len()
+                            && m.nonlinear_devices[nl_dev_idx].device_type
+                                == crate::mna::NonlinearDeviceType::Tube
+                            && m.nonlinear_devices[nl_dev_idx].dimension == 2
+                            && m.nonlinear_devices[nl_dev_idx].nodes.len() >= 4
+                    });
+                    let dim = if is_grid_off { 2 } else { 3 };
+                    if is_grid_off {
+                        params.kind = crate::device_types::TubeKind::SharpPentodeGridOff;
+                    }
                     slots.push(DeviceSlot {
                         device_type: DeviceType::Tube,
                         start_idx: dim_offset,
-                        dimension: 3, // Ip + Ig2 + Ig1
+                        dimension: dim,
                         params: DeviceParams::Tube(params),
                         has_internal_mna_nodes: false,
+                        // vg2k_frozen is populated by detect_grid_off_pentodes
+                        // after the MNA rebuild via a post-processing pass.
+                        vg2k_frozen: 0.0,
                     });
-                    dim_offset += 3;
+                    dim_offset += dim;
                     nl_dev_idx += 1;
                 }
                 Element::Mosfet { model, .. } => {
@@ -3329,6 +3477,7 @@ impl CircuitIR {
                         dimension: 2,
                         params: DeviceParams::Mosfet(params),
                         has_internal_mna_nodes: false,
+                        vg2k_frozen: 0.0,
                     });
                     dim_offset += 2;
                     nl_dev_idx += 1;
@@ -3341,6 +3490,7 @@ impl CircuitIR {
                         dimension: 2,
                         params: DeviceParams::Vca(params),
                         has_internal_mna_nodes: false,
+                        vg2k_frozen: 0.0,
                     });
                     dim_offset += 2;
                     nl_dev_idx += 1;

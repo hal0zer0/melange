@@ -352,6 +352,67 @@ fn evaluate_devices_inner(
                     j_dev[(s + 2) * m + (s + 1)] = 0.0; // dIg1/dVpk = 0
                     j_dev[(s + 2) * m + (s + 2)] = 0.0; // dIg1/dVg2k = 0
                 }
+                TubeKind::SharpPentodeGridOff => {
+                    // Phase 1b reduced pentode: 2D NR block (Vgk → Ip, Vpk → Ig2).
+                    // Vg2k is frozen at the DC-OP-converged value stored in
+                    // `slot.vg2k_frozen`; Ig1 is dropped entirely (identically 0
+                    // in grid-cutoff). The 2×2 Jacobian is the upper-left 2×2
+                    // submatrix of the full 3×3, since d/dVg2k rows/cols are
+                    // absent when Vg2k is not an NR unknown.
+                    if s + 1 >= v_nl.len() {
+                        log::warn!(
+                            "DC OP: Grid-off pentode at start_idx={} needs 2 dims but v_nl.len()={}",
+                            s,
+                            v_nl.len()
+                        );
+                        continue;
+                    }
+                    let pentode = KorenPentode {
+                        mu: tp.mu,
+                        ex: tp.ex,
+                        kg1: tp.kg1,
+                        kg2: tp.kg2,
+                        kp: tp.kp,
+                        kvb: tp.kvb,
+                        alpha_s: tp.alpha_s,
+                        a_factor: tp.a_factor,
+                        beta_factor: tp.beta_factor,
+                        ig_max: tp.ig_max,
+                        vgk_onset: tp.vgk_onset,
+                        screen_form: match tp.screen_form {
+                            crate::device_types::ScreenForm::Rational => {
+                                melange_devices::tube::ScreenForm::Rational
+                            }
+                            crate::device_types::ScreenForm::Exponential => {
+                                melange_devices::tube::ScreenForm::Exponential
+                            }
+                            crate::device_types::ScreenForm::Classical => {
+                                melange_devices::tube::ScreenForm::Classical
+                            }
+                        },
+                        mu_b: tp.mu_b,
+                        svar: tp.svar,
+                        ex_b: tp.ex_b,
+                    };
+                    let vgk = v_nl[s];
+                    let vpk = v_nl[s + 1];
+                    let vg2k = slot.vg2k_frozen;
+
+                    // Currents: Ip and Ig2 only (Ig1 dropped).
+                    i_nl[s] = pentode.plate_current(vgk, vpk, vg2k);
+                    i_nl[s + 1] = pentode.screen_current(vgk, vpk, vg2k);
+
+                    // 2×2 Jacobian: upper-left submatrix of the full 3×3.
+                    // d/dVg2k entries are dropped along with the Vg2k NR dim.
+                    // The math agent (task P1b-02) will add explicit
+                    // `jacobian_2x2_grid_off` wrappers; for now the DC-OP path
+                    // just reuses `jacobian_3x3` and discards the third row/col.
+                    let jac = pentode.jacobian_3x3(vgk, vpk, vg2k);
+                    j_dev[s * m + s] = jac[0][0]; // dIp/dVgk
+                    j_dev[s * m + (s + 1)] = jac[0][1]; // dIp/dVpk
+                    j_dev[(s + 1) * m + s] = jac[1][0]; // dIg2/dVgk
+                    j_dev[(s + 1) * m + (s + 1)] = jac[1][1]; // dIg2/dVpk
+                }
             },
             (DeviceType::Vca, DeviceParams::Vca(vp)) => {
                 // 2D VCA: dim 0 = V_signal (at start_idx), dim 1 = V_control (at start_idx+1)
@@ -1938,6 +1999,7 @@ mod tests {
                 ibv: 1e-10,
             }),
             has_internal_mna_nodes: false,
+            vg2k_frozen: 0.0,
         };
 
         let m = 1;
@@ -2003,6 +2065,7 @@ mod tests {
                 tamb: 300.15,
             }),
             has_internal_mna_nodes: false,
+            vg2k_frozen: 0.0,
         };
 
         let m = 2;
@@ -2049,6 +2112,7 @@ mod tests {
                 ibv: 1e-10,
             }),
             has_internal_mna_nodes: false,
+            vg2k_frozen: 0.0,
         };
 
         let m = 1;
@@ -2085,6 +2149,7 @@ mod tests {
                     ibv: 1e-10,
                 }),
                 has_internal_mna_nodes: false,
+            vg2k_frozen: 0.0,
             },
             DeviceSlot {
                 device_type: DeviceType::Diode,
@@ -2099,6 +2164,7 @@ mod tests {
                     ibv: 1e-10,
                 }),
                 has_internal_mna_nodes: false,
+            vg2k_frozen: 0.0,
             },
             DeviceSlot {
                 device_type: DeviceType::Diode,
@@ -2113,6 +2179,7 @@ mod tests {
                     ibv: 1e-10,
                 }),
                 has_internal_mna_nodes: false,
+            vg2k_frozen: 0.0,
             },
         ];
 

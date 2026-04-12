@@ -5121,6 +5121,392 @@ V1 vcc 0 DC 300
     assert!(code.contains("jdev_5_3"));
 }
 
+// ==========================================================================
+// Grid-off pentode codegen tests (Phase 1b: 3D → 2D NR reduction)
+// ==========================================================================
+//
+// Build approach: call `MnaSystem::from_netlist_with_grid_off` with the
+// target pentode names in a HashSet so the MNA is built with the 2D
+// reduction (dimension=2 per grid-off slot, total_dimension reduced by one
+// per grid-off slot). The downstream pipeline — kernel.m, topology.m,
+// ir.device_slots[*].dimension, and `TubeParams.kind = SharpPentodeGridOff`
+// — all get set correctly by `CircuitIR::from_kernel`'s existing grid-off
+// detection logic.  Only `vg2k_frozen` is populated post-build, because the
+// DC-OP bias-capture pass lives in the parallel P1b-04 task.
+// ==========================================================================
+
+/// Build a grid-off CircuitIR + emitted code by rebuilding MNA with the
+/// given pentode names marked grid-off, then stamping `vg2k_frozen` into
+/// each grid-off slot. Returns the emitted code as a String.
+fn emit_grid_off_code(
+    spice: &str,
+    grid_off_names: &[&str],
+    vg2k: f64,
+) -> (String, CircuitIR) {
+    use melange_solver::codegen::ir::DeviceParams;
+
+    let netlist = Netlist::parse(spice).expect("parse grid-off netlist");
+    // The MNA agent's in-progress API takes a per-pentode `HashMap<String,
+    // f64>` where the value is the DC-OP-converged `Vg2k` to freeze. For
+    // these codegen tests we don't exercise the DC-OP path, so we just
+    // populate the map with the same `vg2k` value for every name and then
+    // re-stamp `DeviceSlot.vg2k_frozen` after IR build (for belt-and-braces
+    // robustness against upstream field-propagation changes).
+    let grid_off: std::collections::HashMap<String, f64> =
+        grid_off_names.iter().map(|s| (s.to_string(), vg2k)).collect();
+    let mna = MnaSystem::from_netlist_with_grid_off(&netlist, &grid_off)
+        .expect("build MNA with grid-off");
+    let kernel = DkKernel::from_mna(&mna, 44100.0).expect("build DK kernel");
+    let config = default_config();
+    let mut ir = CircuitIR::from_kernel(&kernel, &mna, &netlist, &config)
+        .expect("build CircuitIR");
+
+    // Stamp vg2k_frozen on every grid-off pentode slot. In production this
+    // is written by the DC-OP bias-detection pass (P1b-04); here we use a
+    // constant test value.
+    for slot in ir.device_slots.iter_mut() {
+        if let DeviceParams::Tube(tp) = &slot.params {
+            if tp.is_grid_off_pentode() {
+                slot.vg2k_frozen = vg2k;
+            }
+        }
+    }
+
+    let emitter = RustEmitter::new().expect("create RustEmitter");
+    let code = emitter.emit(&ir).expect("emit grid-off code");
+    (code, ir)
+}
+
+/// Grid-off pentode codegen smoke test: flipping an EL84 slot to grid-off
+/// must emit the 2D wrapper helper family, the per-device VG2K_FROZEN
+/// constant, and dispatch call sites that pass DEVICE_0_VG2K_FROZEN as
+/// the third voltage argument.
+#[test]
+fn test_codegen_grid_off_pentode_emits_helpers() {
+    let (code, ir) = emit_grid_off_code(PENTODE_CC_SPICE, &["P1"], 280.0);
+
+    assert_eq!(
+        ir.topology.m, 2,
+        "single grid-off EL84 should produce M=2 (was 3, dropped by 1)"
+    );
+    assert_eq!(
+        ir.device_slots[0].dimension, 2,
+        "grid-off slot should have dimension=2"
+    );
+    assert_eq!(
+        ir.device_slots[0].vg2k_frozen, 280.0,
+        "vg2k_frozen should be 280.0 V"
+    );
+
+    // Grid-off wrapper helpers must be emitted (Rational screen form).
+    assert!(
+        code.contains("fn tube_ip_pentode_grid_off("),
+        "grid-off codegen should emit tube_ip_pentode_grid_off helper"
+    );
+    assert!(
+        code.contains("fn tube_is_pentode_grid_off("),
+        "grid-off codegen should emit tube_is_pentode_grid_off helper"
+    );
+    assert!(
+        code.contains("fn tube_jacobian_pentode_grid_off("),
+        "grid-off codegen should emit tube_jacobian_pentode_grid_off helper"
+    );
+    assert!(
+        code.contains("fn tube_evaluate_pentode_grid_off("),
+        "grid-off codegen should emit tube_evaluate_pentode_grid_off helper"
+    );
+
+    // The 3D helper that the wrapper delegates to MUST also be present —
+    // the wrapper calls `tube_evaluate_pentode(..)` internally.
+    assert!(
+        code.contains("fn tube_evaluate_pentode("),
+        "grid-off wrapper delegates to tube_evaluate_pentode — the 3D helper must still be emitted"
+    );
+
+    // Per-device VG2K_FROZEN constant must be emitted. The fmt_f64 emitter
+    // uses scientific notation (`2.80000000000000000e2`), so the assertion
+    // searches for the "280" substring in a context-aware way by grepping
+    // the DEVICE_0_VG2K_FROZEN line directly.
+    let vg2k_line = code
+        .lines()
+        .find(|l| l.contains("DEVICE_0_VG2K_FROZEN"))
+        .expect("grid-off codegen should emit DEVICE_0_VG2K_FROZEN constant");
+    assert!(
+        vg2k_line.contains("2.8"),
+        "DEVICE_0_VG2K_FROZEN line should contain the 280.0 V bias value (got: {})",
+        vg2k_line
+    );
+
+    // Dispatch must call the grid-off wrapper and pass DEVICE_0_VG2K_FROZEN
+    // as the vg2k argument (the third voltage slot). Count is at least 2:
+    // helper definition + at least one call site.
+    let grid_off_call_count = code.matches("tube_evaluate_pentode_grid_off(").count();
+    assert!(
+        grid_off_call_count >= 2,
+        "NR dispatch should call tube_evaluate_pentode_grid_off at least once \
+         (found {} occurrences incl. definition)",
+        grid_off_call_count
+    );
+    assert!(
+        code.contains("DEVICE_0_VG2K_FROZEN,"),
+        "dispatch must pass DEVICE_0_VG2K_FROZEN as the vg2k argument at call sites"
+    );
+}
+
+/// Grid-off pentode rustc smoke test: generated module must compile.
+#[test]
+fn test_codegen_grid_off_pentode_compiles() {
+    let (code, _) = emit_grid_off_code(PENTODE_CC_SPICE, &["P1"], 280.0);
+
+    let tmp_dir = std::env::temp_dir();
+    let tmp_path = tmp_dir.join("melange_codegen_test_grid_off_pentode.rs");
+    {
+        let mut f = std::fs::File::create(&tmp_path).unwrap();
+        f.write_all(code.as_bytes()).unwrap();
+    }
+
+    let output = std::process::Command::new("rustc")
+        .args(["--edition", "2024", "--crate-type", "lib", "-o"])
+        .arg(tmp_dir.join("melange_codegen_test_grid_off_pentode.rlib"))
+        .arg(&tmp_path)
+        .output()
+        .expect("failed to run rustc");
+
+    let _ = std::fs::remove_file(&tmp_path);
+    let _ = std::fs::remove_file(tmp_dir.join("melange_codegen_test_grid_off_pentode.rlib"));
+    let _ = std::fs::remove_file(tmp_dir.join("libmelange_codegen_test_grid_off_pentode.rlib"));
+
+    assert!(
+        output.status.success(),
+        "Grid-off pentode codegen failed to compile:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Byte-identity guard: a sharp EL84 circuit (no grid-off slots) must NOT
+/// contain any grid-off helper definitions or VG2K_FROZEN constants. This
+/// catches Tera template leaks where the `{% if any_grid_off_pentode %}`
+/// guard is forgotten.
+#[test]
+fn test_codegen_sharp_pentode_omits_grid_off_helpers() {
+    let netlist = Netlist::parse(PENTODE_CC_SPICE).expect("parse pentode netlist");
+    let mna = MnaSystem::from_netlist(&netlist).expect("MNA");
+    let kernel = DkKernel::from_mna(&mna, 44100.0).expect("DK kernel");
+    let codegen = CodeGenerator::new(default_config());
+    let result = codegen
+        .generate(&kernel, &mna, &netlist)
+        .expect("sharp pentode codegen failed");
+    let code = result.code;
+
+    // Sharp EL84 must still emit the 3D helper family.
+    assert!(code.contains("fn tube_evaluate_pentode("));
+    // But NOT the grid-off wrappers of ANY screen form.
+    assert!(
+        !code.contains("tube_ip_pentode_grid_off"),
+        "sharp pentode must NOT emit tube_ip_pentode_grid_off"
+    );
+    assert!(
+        !code.contains("tube_is_pentode_grid_off"),
+        "sharp pentode must NOT emit tube_is_pentode_grid_off"
+    );
+    assert!(
+        !code.contains("tube_jacobian_pentode_grid_off"),
+        "sharp pentode must NOT emit tube_jacobian_pentode_grid_off"
+    );
+    assert!(
+        !code.contains("tube_evaluate_pentode_grid_off"),
+        "sharp pentode must NOT emit tube_evaluate_pentode_grid_off"
+    );
+    assert!(
+        !code.contains("beam_tetrode_grid_off"),
+        "sharp pentode must NOT emit beam_tetrode_grid_off helpers"
+    );
+    assert!(
+        !code.contains("pentode_classical_grid_off"),
+        "sharp pentode must NOT emit pentode_classical_grid_off helpers"
+    );
+    // No per-device VG2K_FROZEN constant.
+    assert!(
+        !code.contains("VG2K_FROZEN"),
+        "sharp pentode must NOT emit any VG2K_FROZEN constant"
+    );
+}
+
+/// Mixed sharp + grid-off circuit: EL84 + second pentode marked grid-off.
+/// Both helper families (sharp 3D and grid-off 2D wrapper) must coexist and
+/// NR dispatch must route each slot independently.
+#[test]
+fn test_codegen_mixed_sharp_and_grid_off_pentode() {
+    // Two-pentode netlist: both EL84, with the second marked grid-off at
+    // MNA build time via `from_netlist_with_grid_off({"P2"})`.
+    const MIXED_SPICE: &str = "\
+EL84 Sharp + EL84 Grid-Off
+Rin in 0 1Meg
+Cin in grid1 100n
+Rg1 grid1 0 1Meg
+P1 plate1 grid1 cathode1 screen1 EL84
+Rk1 cathode1 0 130
+Ck1 cathode1 0 100u
+Rscreen1 vcc screen1 1k
+Cscreen1 screen1 0 47u
+Rp1 vcc plate1 4.7k
+Cinter plate1 grid2 100n
+Rg2 grid2 0 470k
+P2 plate2 grid2 cathode2 screen2 EL84
+Rk2 cathode2 0 130
+Ck2 cathode2 0 100u
+Rscreen2 vcc screen2 1k
+Cscreen2 screen2 0 47u
+Rp2 vcc plate2 4.7k
+Cout plate2 out 1u
+Rout out 0 100k
+V1 vcc 0 DC 300
+.model EL84 VP(MU=23.36 EX=1.138 KG1=117.4 KG2=1275.0 KP=152.4 KVB=4015.8 ALPHA_S=7.66 A_FACTOR=4.344e-4 BETA_FACTOR=0.148)
+";
+    let (code, ir) = emit_grid_off_code(MIXED_SPICE, &["P2"], 270.0);
+
+    assert_eq!(
+        ir.topology.m, 5,
+        "mixed circuit: sharp slot 0 (3D) + grid-off slot 1 (2D) → M=5"
+    );
+    assert_eq!(ir.device_slots[0].dimension, 3, "slot 0 stays 3D");
+    assert_eq!(ir.device_slots[1].dimension, 2, "slot 1 is grid-off 2D");
+    assert_eq!(ir.device_slots[1].vg2k_frozen, 270.0);
+
+    // Both helper families must be emitted.
+    assert!(
+        code.contains("fn tube_evaluate_pentode("),
+        "mixed circuit must emit tube_evaluate_pentode (sharp EL84 slot 0)"
+    );
+    assert!(
+        code.contains("fn tube_evaluate_pentode_grid_off("),
+        "mixed circuit must emit tube_evaluate_pentode_grid_off (grid-off slot 1)"
+    );
+    assert!(
+        code.contains("fn tube_ip_pentode_grid_off("),
+        "mixed circuit must emit tube_ip_pentode_grid_off"
+    );
+    assert!(
+        code.contains("fn tube_is_pentode_grid_off("),
+        "mixed circuit must emit tube_is_pentode_grid_off"
+    );
+
+    // Only the second slot has VG2K_FROZEN (slot 0 is sharp).
+    assert!(
+        !code.contains("DEVICE_0_VG2K_FROZEN"),
+        "sharp slot 0 must NOT emit DEVICE_0_VG2K_FROZEN"
+    );
+    assert!(
+        code.contains("DEVICE_1_VG2K_FROZEN"),
+        "grid-off slot 1 must emit DEVICE_1_VG2K_FROZEN"
+    );
+
+    // Dispatch correctness: the grid-off slot 1 dispatch must pass
+    // DEVICE_1_VG2K_FROZEN as the vg2k argument to the grid-off wrapper.
+    // Grep for the specific dispatch-site substring.
+    assert!(
+        code.contains("tube_evaluate_pentode_grid_off(v_d3, v_d4, DEVICE_1_VG2K_FROZEN")
+            || code.contains("tube_evaluate_pentode_grid_off(vgk, vpk, DEVICE_1_VG2K_FROZEN"),
+        "grid-off slot 1 dispatch must pass DEVICE_1_VG2K_FROZEN as vg2k"
+    );
+
+    // NR dispatch must call BOTH helpers. Count `tube_evaluate_pentode(`
+    // vs `tube_evaluate_pentode_grid_off(` separately so the substring
+    // overlap doesn't fool us (the classical / var-mu variants are
+    // absent in this test but we subtract them anyway for safety).
+    let all_pentode_evals = code.matches("tube_evaluate_pentode").count();
+    let grid_off_calls = code.matches("tube_evaluate_pentode_grid_off(").count();
+    let classical_calls = code.matches("tube_evaluate_pentode_classical(").count();
+    let varmu_calls = code.matches("tube_evaluate_pentode_v(").count();
+    let sharp_rational_calls = all_pentode_evals - grid_off_calls - classical_calls - varmu_calls;
+    assert!(
+        sharp_rational_calls >= 2,
+        "mixed circuit must dispatch at least one sharp call to tube_evaluate_pentode \
+         (found {} sharp rational calls)",
+        sharp_rational_calls
+    );
+    assert!(
+        grid_off_calls >= 2,
+        "mixed circuit must dispatch at least one grid-off call to tube_evaluate_pentode_grid_off \
+         (found {} calls incl. helper def)",
+        grid_off_calls
+    );
+
+    // Jacobian stamps: sharp slot 0 has 3×3 (jdev_0_2, jdev_2_0 present);
+    // grid-off slot 1 has 2×2 starting at start_idx=3 (after shift), so
+    // jdev_3_3, jdev_3_4, jdev_4_3, jdev_4_4 — no jdev_*_5 / jdev_5_* for it.
+    assert!(code.contains("jdev_0_2"), "sharp slot 0 must have 3×3 Jacobian entry jdev_0_2");
+    assert!(code.contains("jdev_2_0"), "sharp slot 0 must have 3×3 Jacobian entry jdev_2_0");
+    // Grid-off slot 1: 2×2 at s=3, s1=4.
+    assert!(code.contains("jdev_3_3"), "grid-off slot 1 must have jdev_3_3");
+    assert!(code.contains("jdev_4_4"), "grid-off slot 1 must have jdev_4_4");
+    // The grid-off slot MUST NOT have a Vg2k-column jdev entry at its own
+    // block. The dropped Ig1 dimension means there's no jdev_3_5 / jdev_5_3.
+    // (Note: there's also no slot 5 in the reduced M=5 NR system at all.)
+    assert!(
+        !code.contains("jdev_3_5"),
+        "grid-off slot 1 must NOT stamp jdev_3_5 (Vg2k column dropped)"
+    );
+    assert!(
+        !code.contains("jdev_5_3"),
+        "grid-off slot 1 must NOT stamp jdev_5_3 (Ig1 row dropped)"
+    );
+}
+
+/// 2×2 Jacobian stamping verification: a single grid-off slot at start_idx=0
+/// must produce exactly 4 Jacobian entries at positions [0,0], [0,1], [1,0],
+/// [1,1] — and no entries at [_, 2] or [2, _] because there's no s+2 dimension.
+#[test]
+fn test_codegen_grid_off_2d_jacobian_stamps() {
+    let (code, ir) = emit_grid_off_code(PENTODE_CC_SPICE, &["P1"], 280.0);
+
+    assert_eq!(
+        ir.topology.m, 2,
+        "single grid-off pentode should have M=2 (was 3, dropped by 1)"
+    );
+
+    // Expected 2×2 entries — at least one dispatch site must stamp each.
+    assert!(code.contains("jdev_0_0"), "grid-off slot must stamp jdev_0_0");
+    assert!(code.contains("jdev_0_1"), "grid-off slot must stamp jdev_0_1");
+    assert!(code.contains("jdev_1_0"), "grid-off slot must stamp jdev_1_0");
+    assert!(code.contains("jdev_1_1"), "grid-off slot must stamp jdev_1_1");
+
+    // Forbidden 3D stamps: the slot MUST NOT have entries involving s+2=2
+    // in its pentode block. Specifically, no `pentode0_jac[4]` through
+    // `pentode0_jac[8]` — those are the entries a 3D helper would emit.
+    // We also guard against the literal Jacobian indices [_,2] and [2,_]
+    // since M=2 means there's no slot 2 in the NR system at all.
+    assert!(
+        !code.contains("jdev_0_2"),
+        "grid-off 2D slot must NOT stamp jdev_0_2 (Vg2k column dropped)"
+    );
+    assert!(
+        !code.contains("jdev_2_0"),
+        "grid-off 2D slot must NOT stamp jdev_2_0 (Ig1 row dropped)"
+    );
+    assert!(
+        !code.contains("jdev_1_2"),
+        "grid-off 2D slot must NOT stamp jdev_1_2"
+    );
+    assert!(
+        !code.contains("jdev_2_1"),
+        "grid-off 2D slot must NOT stamp jdev_2_1"
+    );
+    assert!(
+        !code.contains("jdev_2_2"),
+        "grid-off 2D slot must NOT stamp jdev_2_2"
+    );
+    // And no references to pentode0_jac[4..=8] — those are the 3D indices.
+    assert!(
+        !code.contains("pentode0_jac[4]"),
+        "grid-off slot must only reference pentode0_jac[0..=3] (2×2 upper-left)"
+    );
+    assert!(
+        !code.contains("pentode0_jac[8]"),
+        "grid-off slot must only reference pentode0_jac[0..=3] (2×2 upper-left)"
+    );
+}
+
 /// Vp-independence guard: the `tube_is_pentode_classical` helper body must
 /// NOT read `vpk`. Inspect the generated source text and verify the argument
 /// is prefixed with `_` (Rust convention for intentionally unused) — the
@@ -6708,4 +7094,418 @@ fn test_vca_codegen_compiles_and_runs() {
             String::from_utf8_lossy(&run.stderr)
         );
     }
+}
+
+// ==========================================================================
+// Pentode validation circuit end-to-end tests
+//
+// These tests exercise the full pipeline from .cir file through codegen
+// to compiled Rust code for the pentode validation circuits in
+// circuits/testing/. They verify that:
+//   1. The generated code compiles without errors
+//   2. For simpler circuits: the code runs, produces finite output,
+//      and the output amplitude is in a reasonable range
+// ==========================================================================
+
+/// Resolve a circuit path relative to the workspace root.
+///
+/// Test CWD is the crate directory (`crates/melange-solver/`), so we go up
+/// two levels from `CARGO_MANIFEST_DIR` to reach the workspace root.
+fn workspace_path(relative: &str) -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(relative)
+}
+
+/// Helper: build the full codegen pipeline for a pentode circuit .cir file.
+///
+/// Handles grid-off detection, MNA rebuild, input conductance stamping,
+/// and DK kernel build. Returns the generated code string and dimensions.
+///
+/// For circuits where the DK kernel fails (e.g. multi-transformer), this
+/// returns `Err(())` — the caller should use the nodal path instead.
+fn build_pentode_circuit_dk(
+    cir_path: &str,
+    input_node_name: &str,
+    output_node_name: &str,
+) -> Result<(String, usize, usize), ()> {
+    let full_path = workspace_path(cir_path);
+    let spice = std::fs::read_to_string(&full_path)
+        .unwrap_or_else(|e| panic!("Failed to read {}: {}", full_path.display(), e));
+    let netlist = Netlist::parse(&spice).expect("failed to parse netlist");
+    let mut mna = MnaSystem::from_netlist(&netlist).expect("failed to build MNA");
+
+    let input_raw = *mna.node_map.get(input_node_name).unwrap_or_else(|| {
+        panic!(
+            "Input node '{}' not found. Available: {:?}",
+            input_node_name,
+            mna.node_map.keys().collect::<Vec<_>>()
+        )
+    });
+    let output_raw = *mna.node_map.get(output_node_name).unwrap_or_else(|| {
+        panic!(
+            "Output node '{}' not found. Available: {:?}",
+            output_node_name,
+            mna.node_map.keys().collect::<Vec<_>>()
+        )
+    });
+    let input_node_idx = input_raw - 1;
+    let output_node_idx = output_raw - 1;
+    let input_resistance = 1.0;
+
+    let config = CodegenConfig {
+        circuit_name: "pentode_test".to_string(),
+        sample_rate: 44100.0,
+        input_node: input_node_idx,
+        output_nodes: vec![output_node_idx],
+        input_resistance,
+        ..CodegenConfig::default()
+    };
+
+    // Detect grid-off pentodes
+    let grid_off_pentodes =
+        CircuitIR::detect_grid_off_pentodes(&mna, &netlist, &config, false);
+
+    if !grid_off_pentodes.is_empty() {
+        mna = MnaSystem::from_netlist_with_grid_off(&netlist, &grid_off_pentodes)
+            .expect("failed to rebuild MNA with grid-off pentodes");
+    }
+
+    // Stamp input conductance
+    let input_conductance = 1.0 / input_resistance;
+    if input_node_idx < mna.n {
+        mna.g[input_node_idx][input_node_idx] += input_conductance;
+    }
+
+    // Stamp device junction caps
+    let device_slots = CircuitIR::build_device_info(&netlist).unwrap_or_default();
+    if !device_slots.is_empty() {
+        mna.stamp_device_junction_caps(&device_slots);
+    }
+
+    // Try DK kernel
+    let kernel = DkKernel::from_mna(&mna, 44100.0).map_err(|_| ())?;
+
+    let codegen = CodeGenerator::new(config);
+    let result = codegen
+        .generate(&kernel, &mna, &netlist)
+        .expect("codegen failed");
+
+    Ok((result.code, result.n, result.m))
+}
+
+/// Helper: build the full nodal codegen pipeline for a pentode circuit .cir file.
+///
+/// Used for circuits with transformers/inductors where DK fails.
+/// Handles grid-off detection, MNA rebuild, input conductance stamping.
+fn build_pentode_circuit_nodal(
+    cir_path: &str,
+    input_node_name: &str,
+    output_node_name: &str,
+) -> (String, usize, usize) {
+    let full_path = workspace_path(cir_path);
+    let spice = std::fs::read_to_string(&full_path)
+        .unwrap_or_else(|e| panic!("Failed to read {}: {}", full_path.display(), e));
+    let netlist = Netlist::parse(&spice).expect("failed to parse netlist");
+    let mut mna = MnaSystem::from_netlist(&netlist).expect("failed to build MNA");
+
+    let input_raw = *mna.node_map.get(input_node_name).unwrap_or_else(|| {
+        panic!(
+            "Input node '{}' not found. Available: {:?}",
+            input_node_name,
+            mna.node_map.keys().collect::<Vec<_>>()
+        )
+    });
+    let output_raw = *mna.node_map.get(output_node_name).unwrap_or_else(|| {
+        panic!(
+            "Output node '{}' not found. Available: {:?}",
+            output_node_name,
+            mna.node_map.keys().collect::<Vec<_>>()
+        )
+    });
+    let input_node_idx = input_raw - 1;
+    let output_node_idx = output_raw - 1;
+    let input_resistance = 1.0;
+
+    let config = CodegenConfig {
+        circuit_name: "pentode_test".to_string(),
+        sample_rate: 44100.0,
+        input_node: input_node_idx,
+        output_nodes: vec![output_node_idx],
+        input_resistance,
+        ..CodegenConfig::default()
+    };
+
+    // Detect grid-off pentodes
+    let grid_off_pentodes =
+        CircuitIR::detect_grid_off_pentodes(&mna, &netlist, &config, false);
+
+    if !grid_off_pentodes.is_empty() {
+        mna = MnaSystem::from_netlist_with_grid_off(&netlist, &grid_off_pentodes)
+            .expect("failed to rebuild MNA with grid-off pentodes");
+    }
+
+    // Stamp input conductance
+    let input_conductance = 1.0 / input_resistance;
+    if input_node_idx < mna.n {
+        mna.g[input_node_idx][input_node_idx] += input_conductance;
+    }
+
+    // Stamp device junction caps
+    let device_slots = CircuitIR::build_device_info(&netlist).unwrap_or_default();
+    if !device_slots.is_empty() {
+        mna.stamp_device_junction_caps(&device_slots);
+    }
+
+    let codegen = CodeGenerator::new(config);
+    let result = codegen
+        .generate_nodal(&mna, &netlist)
+        .expect("nodal codegen failed");
+
+    (result.code, result.n, result.m)
+}
+
+/// Helper: compile generated code as a library crate (syntax + type check only).
+fn compile_lib(code: &str, name: &str) {
+    let tmp_dir = std::env::temp_dir();
+    let tmp_path = tmp_dir.join(format!("melange_pentode_test_{}.rs", name));
+    {
+        let mut f = std::fs::File::create(&tmp_path).unwrap();
+        f.write_all(code.as_bytes()).unwrap();
+    }
+
+    let output = std::process::Command::new("rustc")
+        .args(["--edition", "2024", "--crate-type", "lib", "-o"])
+        .arg(tmp_dir.join(format!("melange_pentode_test_{}.rlib", name)))
+        .arg(&tmp_path)
+        .output()
+        .expect("failed to run rustc");
+
+    let _ = std::fs::remove_file(&tmp_path);
+    let _ = std::fs::remove_file(tmp_dir.join(format!("melange_pentode_test_{}.rlib", name)));
+    let _ = std::fs::remove_file(tmp_dir.join(format!("libmelange_pentode_test_{}.rlib", name)));
+
+    assert!(
+        output.status.success(),
+        "Pentode circuit '{}' codegen failed to compile:\n{}",
+        name,
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Helper: compile-and-run generated code with a test harness that feeds
+/// a sine wave and checks output validity.
+fn compile_and_run_pentode(code: &str, name: &str, warmup_samples: usize, signal_samples: usize) {
+    let test_harness = format!(
+        "{}\n\
+         fn main() {{\n\
+             let mut state = CircuitState::default();\n\
+             \n\
+             // Warm up with silent samples to let DC OP settle\n\
+             for i in 0..{warmup} {{\n\
+                 let out = process_sample(0.0, &mut state)[0];\n\
+                 assert!(\n\
+                     out.is_finite(),\n\
+                     \"Warmup output at sample {{}} must be finite, got {{}}\", i, out\n\
+                 );\n\
+             }}\n\
+             \n\
+             // Feed a 1kHz sine wave (50mV amplitude) and collect output\n\
+             let mut max_abs_out = 0.0f64;\n\
+             let mut any_nonzero = false;\n\
+             for i in 0..{signal} {{\n\
+                 let t = i as f64 / 44100.0;\n\
+                 let input = 0.05 * (2.0 * std::f64::consts::PI * 1000.0 * t).sin();\n\
+                 let out = process_sample(input, &mut state)[0];\n\
+                 assert!(\n\
+                     out.is_finite(),\n\
+                     \"Output at sample {{}} must be finite, got {{}}\", i, out\n\
+                 );\n\
+                 if out.abs() > 1e-6 {{ any_nonzero = true; }}\n\
+                 if out.abs() > max_abs_out {{ max_abs_out = out.abs(); }}\n\
+             }}\n\
+             \n\
+             // Circuit should produce some non-zero output\n\
+             assert!(any_nonzero, \"{name} output should not be all zeros\");\n\
+             // Output should be in a reasonable range (not diverged)\n\
+             assert!(\n\
+                 max_abs_out < 1000.0,\n\
+                 \"{name} output diverged: max_abs_out={{}}\", max_abs_out\n\
+             );\n\
+             eprintln!(\"{name} test passed! max_abs_out={{}}\", max_abs_out);\n\
+         }}\n",
+        code,
+        warmup = warmup_samples,
+        signal = signal_samples,
+        name = name,
+    );
+
+    let tmp_dir = std::env::temp_dir();
+    let src_path = tmp_dir.join(format!("melange_{}_run_test.rs", name));
+    let bin_path = tmp_dir.join(format!("melange_{}_run_test", name));
+    {
+        let mut f = std::fs::File::create(&src_path).expect("create temp file");
+        f.write_all(test_harness.as_bytes())
+            .expect("write temp file");
+    }
+
+    let compile = std::process::Command::new("rustc")
+        .args([
+            src_path.to_str().unwrap(),
+            "-o",
+            bin_path.to_str().unwrap(),
+            "--edition",
+            "2021",
+        ])
+        .output()
+        .expect("run rustc");
+
+    if !compile.status.success() {
+        let _ = std::fs::remove_file(&src_path);
+        panic!(
+            "{} compile-and-run test failed to compile:\n{}",
+            name,
+            String::from_utf8_lossy(&compile.stderr)
+        );
+    }
+
+    let run = std::process::Command::new(&bin_path)
+        .output()
+        .expect("run test binary");
+    let _ = std::fs::remove_file(&src_path);
+    let _ = std::fs::remove_file(&bin_path);
+
+    if !run.status.success() {
+        panic!(
+            "{} compile-and-run test failed:\nstdout: {}\nstderr: {}",
+            name,
+            String::from_utf8_lossy(&run.stdout),
+            String::from_utf8_lossy(&run.stderr)
+        );
+    }
+
+    // Print stderr for diagnostic info
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    if !stderr.is_empty() {
+        eprintln!("[{}] {}", name, stderr.trim());
+    }
+}
+
+// --------------------------------------------------------------------------
+// Test: EL84 single-stage pentode compiles and runs (DK Schur path)
+// --------------------------------------------------------------------------
+
+/// End-to-end test for el84-single-stage.cir.
+///
+/// Single EL84 pentode in common-cathode. Grid-off detection should reduce
+/// M=3 to M=2 (grid stays negative at Class A bias). The DK Schur codegen
+/// path is used (no inductors/transformers).
+///
+/// Verifies:
+///   - Grid-off detection fires (M reduces from 3 to 2)
+///   - Generated code compiles with rustc
+///   - Running 500 samples of 50mV 1kHz sine produces finite, non-zero,
+///     non-diverged output
+#[test]
+fn test_el84_single_stage_compiles_and_runs() {
+    let (code, _n, m) = build_pentode_circuit_dk(
+        "circuits/testing/el84-single-stage.cir",
+        "in",
+        "out",
+    )
+    .expect("DK kernel should succeed for el84-single-stage (no transformers)");
+
+    // Grid-off should reduce M=3 to M=2
+    assert!(
+        m <= 2,
+        "EL84 single-stage grid-off should reduce M to 2, got M={}",
+        m
+    );
+
+    compile_and_run_pentode(&code, "el84_single_stage", 500, 500);
+}
+
+// --------------------------------------------------------------------------
+// Test: AC15 full amplifier compiles (nodal path)
+// --------------------------------------------------------------------------
+
+/// End-to-end test for ac15.cir.
+///
+/// Vox AC15-class amplifier: EF86 preamp + 12AX7 cathodyne phase inverter
+/// + 2x EL84 push-pull + output transformer. The transformer forces the
+/// nodal codegen path (multi-transformer group with 3 coupled inductors).
+///
+/// This test only verifies compilation — running the full amp simulation
+/// is expensive and the output level depends on transformer modeling
+/// fidelity which is still evolving.
+#[test]
+fn test_ac15_full_amp_compiles() {
+    let (code, _n, _m) = build_pentode_circuit_nodal(
+        "circuits/testing/ac15.cir",
+        "in",
+        "out",
+    );
+
+    compile_lib(&code, "ac15_full_amp");
+}
+
+// --------------------------------------------------------------------------
+// Test: Tweed Deluxe compiles (nodal path)
+// --------------------------------------------------------------------------
+
+/// End-to-end test for tweed-deluxe.cir.
+///
+/// Fender 5E3-class amplifier: 12AX7 preamp + 12AX7 cathodyne PI +
+/// 2x 6V6GT (beam tetrode, DerkE Exponential screen form) push-pull +
+/// output transformer. The transformer forces the nodal codegen path.
+///
+/// Exercises the Reefman DerkE beam-tetrode codepath with real circuit
+/// topology (not just a synthetic test circuit). Only verifies compilation.
+#[test]
+fn test_tweed_deluxe_compiles() {
+    let (code, _n, _m) = build_pentode_circuit_nodal(
+        "circuits/testing/tweed-deluxe.cir",
+        "in",
+        "out",
+    );
+
+    compile_lib(&code, "tweed_deluxe");
+}
+
+// --------------------------------------------------------------------------
+// Test: 6K7 variable-mu stage compiles and runs (DK Schur path)
+// --------------------------------------------------------------------------
+
+/// End-to-end test for 6k7-varimu-stage.cir.
+///
+/// Single 6K7 remote-cutoff pentode with variable cathode bias (.pot).
+/// Variable-mu pentodes are excluded from grid-off detection (their gain
+/// changes continuously with bias), so M stays at 3. DK Schur path is
+/// used (no inductors/transformers).
+///
+/// Exercises the Reefman section 5 two-section Koren math end-to-end.
+///
+/// Verifies:
+///   - M=3 (no grid-off reduction for variable-mu)
+///   - Generated code compiles with rustc
+///   - Running 500 samples of 50mV 1kHz sine produces finite, non-zero,
+///     non-diverged output
+#[test]
+fn test_6k7_varimu_stage_compiles_and_runs() {
+    let (code, _n, m) = build_pentode_circuit_dk(
+        "circuits/testing/6k7-varimu-stage.cir",
+        "in",
+        "out",
+    )
+    .expect("DK kernel should succeed for 6k7-varimu-stage (no transformers)");
+
+    // Variable-mu pentodes are NOT reduced by grid-off detection,
+    // so M should stay at 3 (full 3D pentode NR)
+    assert_eq!(
+        m, 3,
+        "6K7 variable-mu should have M=3 (no grid-off reduction), got M={}",
+        m
+    );
+
+    compile_and_run_pentode(&code, "6k7_varimu_stage", 500, 500);
 }

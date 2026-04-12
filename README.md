@@ -99,7 +99,7 @@ rcodesign sign target/universal2-apple-darwin/release/libmy_plugin.dylib
 
 - **SPICE Netlist Parser**: Industry-standard SPICE netlists with `.model` and `.subckt` support
 - **MNA/DK Solver**: Modified Nodal Analysis with Discrete K-method (Yeh 2009)
-- **Device Models**: Diode, BJT (Ebers-Moll/Gummel-Poon), JFET, MOSFET, vacuum tube (Koren), op-amp, VCA, CdS LDR
+- **Device Models**: Diode, BJT (Ebers-Moll/Gummel-Poon), JFET, MOSFET, vacuum tube (triode/pentode/beam tetrode), op-amp, VCA, CdS LDR
 - **Dynamic Controls**: `.pot` (linear potentiometer), `.wiper` (tapered wiper across two resistors), `.switch` (ganged R/C/L switching), and `.gang` (link multiple pots/wipers to a single UI knob) directives
 - **Real-Time Safe**: Zero heap allocation in audio callback, no `unsafe` code, f64 precision
 - **Code Generation**: Optimized Rust with compile-time constants, sparse matrices, unrolled loops
@@ -121,17 +121,40 @@ can also run via an in-process `LinearSolver`, but most users will only touch th
 | JFET | Shichman-Hodges 2D (triode + saturation + λ); CGS/CGD; parasitic RD/RS |
 | MOSFET | Level 1 SPICE 2D; body effect (GAMMA/PHI); CGS/CGD |
 | Vacuum Triode | Koren triode + Leach grid current + λ; CCG/CGP/CCP; parasitic RGI |
-| Vacuum Pentode / Beam Tetrode | Reefman Derk §4.4 / DerkE §4.5 (Ip/Ig2/Ig1, 9 params: μ/Ex/Kg1/Kg2/Kp/Kvb/αs/A/β, plus Rational/Exponential screen-form discriminator); junction caps |
+| Vacuum Pentode / Beam Tetrode | 4 equation families: Reefman Derk §4.4 rational (true pentodes), DerkE §4.5 exponential (beam tetrodes), Classical Koren (power beam tetrodes), Reefman §5 variable-mu (remote-cutoff); 3D NR with grid-off auto-reduction to 2D |
 | Op-Amp | Boyle VCCS macromodel (AOL, ROUT, GBW pole, VCC/VEE rail clamping) |
 | VCA | THAT 2180 exponential gain (current-mode, THD) |
 | CdS LDR | VTL5C3/4, NSL-32 with asymmetric envelope (used as a dynamic resistor) |
 | Voltage Source | DC (Norton equivalent) |
-| Potentiometer | `.pot` + `.wiper` directives; Sherman-Morrison rank-1 updates |
+| Potentiometer | `.pot` + `.wiper` directives; per-block matrix rebuild with per-sample smoothing |
 | Switch | `.switch` directive; ganged R/C/L component switching |
 
-Temperature coefficients, noise models, and beam tetrode / variable-mu tube
-variants are not yet implemented. See [Known Limitations](#known-limitations)
-and `docs/aidocs/STATUS.md` for the full list.
+Temperature coefficients and noise models are not yet implemented.
+See [Known Limitations](#known-limitations) and `docs/aidocs/STATUS.md` for the full list.
+
+### Tube Catalog
+
+Melange ships 29 pentode/beam tetrode models from Reefman TubeLib.inc (2016) alongside the existing triode catalog. Each model selects the correct equation family automatically via the `.model` directive.
+
+| Family | Equation | Key Tubes |
+|--------|----------|-----------|
+| Triode (Koren) | Koren plate current + Leach grid | 12AX7, 12AU7, 12AT7, 6SN7, 6SL7, 6V6 triode section |
+| True pentode (Reefman Derk §4.4) | Rational screen `1/(1+beta*Vp)` | EL84/6BQ5, EL34/6CA7, EF86/6267 |
+| Beam tetrode (Reefman DerkE §4.5) | Exponential screen `exp(-(beta*Vp)^{3/2})` | 6L6GC, 5881, 6V6GT |
+| Power beam tetrode (Classical Koren) | `arctan(Vpk/Kvb)` plate knee | KT88, 6550 |
+| Variable-mu (Reefman §5) | Two-section Koren blend | 6K7, 6K7G, 6K7GT, EF89 |
+
+Pentodes use the `P` element prefix with plate-grid-cathode-screen pin order. Pentodes in cutoff auto-reduce from 3D to 2D Newton-Raphson (grid-off optimization), keeping large amp circuits within the DK Schur fast path.
+
+New validation circuits in `circuits/testing/`:
+
+| Circuit | Description |
+|---------|-------------|
+| `el84-single-stage.cir` | Single EL84 pentode gain stage |
+| `ac15.cir` | Vox AC15-class amp (EF86 + 2x EL84 push-pull + OT) |
+| `tweed-deluxe.cir` | Fender Tweed Deluxe-class (2x 6V6GT push-pull + OT) |
+| `plexi-mockup.cir` | Marshall Plexi 100W-class (4x EL34 + 3x 12AX7 + OT) |
+| `6k7-varimu-stage.cir` | Variable-mu gain cell (6K7 remote-cutoff pentode) |
 
 ## Validated Circuit Spotlight: Pultec EQP-1A
 
@@ -182,7 +205,7 @@ Melange auto-selects the best solver backend for each circuit:
 
 | Solver | When Selected | Performance | Pot Updates |
 |--------|--------------|-------------|-------------|
-| **DK** | M < 10, ≤ 1 transformer group | 100-600x realtime | Per-sample (Sherman-Morrison O(N^2)) |
+| **DK** | M < 10, ≤ 1 transformer group | 100-600x realtime | Per-block (matrix rebuild) |
 | **Nodal Schur** | M ≥ 10 or 2+ transformer groups | 10-50x realtime | Per-block (matrix rebuild) |
 | **Nodal Full LU** | K matrix ill-conditioned, VCA circuits, or complex feedback | 5-15x realtime | Per-block (matrix rebuild) |
 
@@ -346,7 +369,7 @@ The generated code is completely standalone — zero runtime dependencies on mel
 - Pre-inverted DK matrices with sparsity-aware emission (only non-zero entries)
 - Newton-Raphson solver (M=1 direct, M=2 Cramer's, M=3-16 Gaussian elimination)
 - DC operating point initialization for correct bias
-- Sherman-Morrison rank-1 updates for dynamic potentiometers (O(N^2) not O(N^3))
+- Per-block matrix rebuild for dynamic potentiometers with per-sample value smoothing
 - Matrix rebuild for runtime sample rate changes
 - DC blocking filter (5 Hz HPF)
 - Input/Output Level parameters (both default to 0 dB)
@@ -412,7 +435,7 @@ When the op-amp output approaches the rails, `--opamp-rail-mode` controls the cl
 ## Known Limitations
 
 - **Fixed temperature (27°C)**: All device models simulate at 300.15K. No temperature coefficients.
-- **True pentodes and beam tetrodes supported**: EL84, EL34, EF86 (true pentodes, Reefman Derk §4.4) and 6L6GC, 5881, 6V6GT (beam tetrodes, Reefman DerkE §4.5) all work via the new `P` element prefix (plate-grid-cathode-screen order) and `VP` model directive. Catalog aliases `EL84-P` / `EL34-P` / `EF86` / `6L6-T` / `6V6-T` pick the right screen-current form automatically. KT88 / 6550 is deferred pending a published fit; remote-cutoff / variable-mu tubes for varimu compressors (6386, 6BA6) are on the roadmap.
+- **Tube models**: No space-charge or transit-time effects. Varimu compressor tubes (6386, 6BA6, 6BC8) need datasheet refits not yet available.
 - **Ideal transformers**: Coupled inductors assume constant coupling coefficient with no core saturation or hysteresis.
 - **Op-amps**: Boyle VCCS macromodel with optional GBW dominant pole, optional slew-rate limiting (`SR`, in V/μs per SPICE convention, e.g. `SR=13` for a TL072), symmetric (`VSAT`) or asymmetric (`VCC`/`VEE`) supply rails, and five selectable rail-clamping strategies (`--opamp-rail-mode`).
 - **No noise simulation**: Shot noise, thermal noise, and 1/f noise are not modeled.
@@ -428,7 +451,7 @@ When the op-amp output approaches the rails, `--opamp-rail-mode` controls the cl
 | Pots per circuit | 32 max | Rejected with error |
 | Switches per circuit | 16 max | Rejected with error |
 
-M counts nonlinear *dimensions*, not devices: each diode adds 1, each BJT/JFET/MOSFET/tube/VCA adds 2.
+M counts nonlinear *dimensions*, not devices: each diode adds 1, each BJT/JFET/MOSFET/triode/VCA adds 2, each pentode adds 3 (auto-reduced to 2 in grid-off cutoff).
 
 ## Audio Safety Features
 
@@ -519,14 +542,14 @@ If SPICE is "the physics of analog circuit simulation," then melange is "that ph
 - David Yeh — Discrete K-method for audio circuit simulation (PhD thesis, Stanford, 2009)
 - Larry Nagel, Tom Quarles, and the ngspice maintainers — SPICE (UC Berkeley), SPICE3f5, and [ngspice](https://ngspice.sourceforge.io/); source of every device model, convergence heuristic, and validation reference in this project. See note above.
 - Ho, Ruehli, Brennan — Modified Nodal Analysis (IEEE Trans. CAS, 1975)
-- Sherman & Morrison — rank-1 matrix update formula (used for dynamic potentiometers)
+- Sherman & Morrison — rank-1 matrix update formula
 
 ### Device models
 
 - Hermann Gummel & H.C. Poon — BJT model with Early effect and high-injection (Bell Labs, 1970)
 - Jiri Shichman & David Hodges — JFET model (IEEE JSSC, 1968)
-- Norman Koren — triode vacuum tube model (1996)
-- Derk Reefman — pentode vacuum tube model (uTracer Theory §4.4, 2016)
+- Norman Koren — triode and classical pentode vacuum tube models (1996)
+- Derk Reefman — pentode and beam tetrode vacuum tube models, variable-mu two-section blend (uTracer Theory §4.4/§4.5/§5, TubeLib.inc 2016)
 - Marshall Leach — grid current model for vacuum tubes
 - William Shockley — semiconductor diode equation
 

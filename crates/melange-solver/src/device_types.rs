@@ -210,6 +210,18 @@ pub struct DeviceSlot {
     /// When true, codegen emits direct bjt_evaluate() instead of bjt_with_parasitics().
     #[serde(default)]
     pub has_internal_mna_nodes: bool,
+    /// Frozen screen-grid voltage for grid-off pentode reduction (phase 1b).
+    ///
+    /// When `params` is a `TubeParams` with `kind == SharpPentodeGridOff`,
+    /// this field holds the DC-OP-converged value of `Vg2k = V[screen] −
+    /// V[cathode]`, which the reduced 2D math uses as a constant in place
+    /// of the third NR dimension. Written by the DC-OP grid-off detection
+    /// pass; re-computed on warm DC-OP re-init after large pot/switch jumps.
+    ///
+    /// For all other device types (and for sharp `SharpPentode` slots) this
+    /// field is unused and stays at its default of 0.0.
+    #[serde(default)]
+    pub vg2k_frozen: f64,
 }
 
 /// JFET model parameters (resolved from `.model` directive or defaults).
@@ -322,9 +334,45 @@ pub enum TubeKind {
     SharpTriode,
     /// Sharp-cutoff pentode or beam tetrode (3D: Vgk → Ip, Vpk → Ig2, Vg2k → Ig1).
     /// Uses Reefman's "Derk" §4.4 or "DerkE" §4.5 equations depending on
-    /// `TubeParams.screen_form`. Includes true pentodes (EL84, EL34, EF86) and
-    /// beam tetrodes (6L6, 6V6, KT88).
+    /// `TubeParams.screen_form`. Includes true pentodes (EL84, EL34, EF86),
+    /// beam tetrodes (6L6, 6V6), Classical entries (KT88, 6550), and
+    /// variable-mu tubes (6K7, EF89).
     SharpPentode,
+    /// Grid-off reduced pentode (2D: Vgk → Ip, Vpk → Ig2).
+    ///
+    /// Phase 1b reduction: when DC-OP confirms `Vgk < -vgk_onset - margin`
+    /// (i.e. well below grid cutoff) across the operating point, the
+    /// control-grid current `Ig1 ≡ 0` and the screen voltage `Vg2k` is
+    /// approximately held constant by the external screen bypass cap.
+    /// Melange takes advantage of this by:
+    ///
+    /// 1. Dropping the `Ig1` current output entirely (it's identically zero)
+    /// 2. Freezing `Vg2k` at the DC-OP-converged value (stored on the
+    ///    `DeviceSlot` as runtime state, not in `TubeParams`)
+    /// 3. Reducing the NR block from 3D (Vgk/Vpk/Vg2k → Ip/Ig2/Ig1) to
+    ///    2D (Vgk/Vpk → Ip/Ig2), with Vg2k passed as a per-slot constant
+    ///
+    /// This is the BJT-FA analog for pentodes. Unlike BJT FA (which drops
+    /// Vbc because Ic really doesn't depend on Vbc in forward-active),
+    /// pentode grid-off is a **physics approximation**: the screen voltage
+    /// is not truly constant, it just sags by <1% in amps with heavily
+    /// bypassed screens (47 µF + 1 kΩ screen-stop is standard). Under
+    /// hard plate clipping the real tube's screen current rises as Vp
+    /// falls and Vg2k sags slightly; the frozen model misses that motion.
+    /// The error is similar in character to Classical Koren's Vp-independent
+    /// screen — audible under heavy clipping but not catastrophic.
+    ///
+    /// **Triode grid-off is NOT a variant of this**. Unlike pentodes where
+    /// the screen-grid voltage can be frozen as an approximation, Koren
+    /// triode `Ip` genuinely requires both `Vgk` and `Vpk`, and neither
+    /// can be frozen (freezing Vpk would destroy the plate-swing signal
+    /// we're trying to track). Triodes stay 2D regardless of bias.
+    ///
+    /// Activated by `--tube-grid-fa auto` (default) when DC-OP detects
+    /// a stable grid-cutoff bias. Override with `--tube-grid-fa off` to
+    /// force the full 3D path or `--tube-grid-fa on` to force grid-off
+    /// on every pentode regardless of bias (for testing).
+    SharpPentodeGridOff,
 }
 
 /// Screen-current functional form for pentode / beam tetrode math.
@@ -494,14 +542,33 @@ impl TubeParams {
         self.rgi > 0.0
     }
 
-    /// Returns true if this tube is a pentode (3D NR block).
+    /// Returns true if this tube is a pentode (in any form — sharp or
+    /// grid-off reduced). Both kinds share the same underlying Koren
+    /// pentode math, just at different NR dimensionality.
     pub fn is_pentode(&self) -> bool {
-        matches!(self.kind, TubeKind::SharpPentode)
+        matches!(
+            self.kind,
+            TubeKind::SharpPentode | TubeKind::SharpPentodeGridOff
+        )
     }
 
-    /// Returns the NR dimension contributed by this tube: 2 for triode, 3 for pentode.
+    /// Returns true if this tube is specifically a grid-off (reduced)
+    /// pentode. Phase 1b optimization: Ig1 dropped, Vg2k frozen at DC-OP
+    /// value, NR dimension 3 → 2.
+    pub fn is_grid_off_pentode(&self) -> bool {
+        matches!(self.kind, TubeKind::SharpPentodeGridOff)
+    }
+
+    /// Returns the NR dimension contributed by this tube:
+    /// - 2 for triodes (Vgk, Vpk)
+    /// - 3 for sharp pentodes (Vgk, Vpk, Vg2k)
+    /// - 2 for grid-off pentodes (Vgk, Vpk — Vg2k frozen)
     pub fn dimension(&self) -> usize {
-        if self.is_pentode() { 3 } else { 2 }
+        match self.kind {
+            TubeKind::SharpTriode => 2,
+            TubeKind::SharpPentode => 3,
+            TubeKind::SharpPentodeGridOff => 2,
+        }
     }
 
     /// Validate pentode-only invariants. Returns `Err` with a descriptive message

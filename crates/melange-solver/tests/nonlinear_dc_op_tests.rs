@@ -617,6 +617,7 @@ fn build_device_slots(netlist: &Netlist, _mna: &MnaSystem) -> Vec<DeviceSlot> {
                         ibv: 1e-10,
                     }),
                     has_internal_mna_nodes: false,
+            vg2k_frozen: 0.0,
                 });
                 dim_offset += 1;
             }
@@ -663,6 +664,7 @@ fn build_device_slots(netlist: &Netlist, _mna: &MnaSystem) -> Vec<DeviceSlot> {
                         tamb: 300.15,
                     }),
                     has_internal_mna_nodes: false,
+            vg2k_frozen: 0.0,
                 });
                 dim_offset += 2;
             }
@@ -1048,4 +1050,527 @@ fn test_pentode_jacobian_matches_fd() {
             );
         }
     }
+}
+
+// =============================================================================
+// Pentode DC operating point — circuit file validation
+// =============================================================================
+//
+// These tests load real .cir files from circuits/testing/ and verify that the
+// DC-OP solver converges to physically reasonable bias points for pentode
+// circuits. Tolerances are deliberately wide (±20%) because the Reefman tube
+// fits are calibrated to uTracer curves, not necessarily to canonical
+// datasheet values, and load-line interaction with specific component values
+// shifts the operating point.
+
+/// Helper: parse a .cir file, build MNA + device slots, stamp junction caps
+/// and input conductance, return everything needed for DC-OP.
+fn build_pentode_circuit_pipeline(
+    path: &str,
+) -> (MnaSystem, Vec<DeviceSlot>, usize, Netlist) {
+    let src = std::fs::read_to_string(path)
+        .unwrap_or_else(|e| panic!("Failed to read {}: {}", path, e));
+    let netlist = Netlist::parse(&src).expect("parse failed");
+    let mut mna = MnaSystem::from_netlist(&netlist).expect("MNA failed");
+
+    // Build device slots
+    let device_slots = CircuitIR::build_device_info(&netlist).expect("device info");
+
+    // Stamp junction capacitances
+    if !device_slots.is_empty() {
+        mna.stamp_device_junction_caps(&device_slots);
+    }
+
+    // Stamp input conductance (1 ohm)
+    let input_node = mna
+        .node_map
+        .get("in")
+        .copied()
+        .unwrap_or(1)
+        .saturating_sub(1);
+    if input_node < mna.n {
+        mna.g[input_node][input_node] += 1.0;
+    }
+
+    (mna, device_slots, input_node, netlist)
+}
+
+/// Helper: get a node index from the MNA node map (1-based -> 0-based).
+fn node_idx(mna: &MnaSystem, name: &str) -> usize {
+    mna.node_map
+        .get(name)
+        .copied()
+        .unwrap_or_else(|| panic!("node '{}' not found in MNA", name))
+        .saturating_sub(1)
+}
+
+// -----------------------------------------------------------------------------
+// EL84 single-stage (el84-single-stage.cir)
+// -----------------------------------------------------------------------------
+//
+// Single EL84 pentode Class A power stage. B+ = 300V.
+// Expected: Vpk ~ 200-260V, Vg2k ~ 280-300V, Vgk ~ -5 to -12V, Ip ~ 20-50mA.
+
+#[test]
+fn test_pentode_dc_op_el84_single_stage_circuit() {
+    let (mna, slots, input_node, _netlist) =
+        build_pentode_circuit_pipeline("../../circuits/testing/el84-single-stage.cir");
+
+    // Should have exactly 1 pentode device (dimension 3)
+    let pentode_slots: Vec<_> = slots.iter().filter(|s| s.dimension == 3).collect();
+    assert_eq!(
+        pentode_slots.len(),
+        1,
+        "el84-single-stage should have 1 pentode, found {}",
+        pentode_slots.len()
+    );
+
+    let config = DcOpConfig {
+        input_node,
+        input_resistance: 1.0,
+        ..DcOpConfig::default()
+    };
+    let result = solve_dc_operating_point(&mna, &slots, &config);
+
+    assert!(
+        result.converged,
+        "EL84 single-stage DC OP should converge (method: {:?}, iters: {})",
+        result.method, result.iterations
+    );
+    assert_ne!(result.method, DcOpMethod::Failed);
+
+    // All values must be finite
+    for (i, &v) in result.v_node.iter().enumerate() {
+        assert!(v.is_finite(), "v_node[{}] = {} not finite", i, v);
+    }
+
+    // Check key node voltages
+    let plate_idx = node_idx(&mna, "plate");
+    let grid_idx = node_idx(&mna, "grid");
+    let cath_idx = node_idx(&mna, "cath");
+    let screen_idx = node_idx(&mna, "screen");
+
+    let v_plate = result.v_node[plate_idx];
+    let v_grid = result.v_node[grid_idx];
+    let v_cath = result.v_node[cath_idx];
+    let v_screen = result.v_node[screen_idx];
+
+    let vpk = v_plate - v_cath;
+    let vgk = v_grid - v_cath;
+    let vg2k = v_screen - v_cath;
+
+    eprintln!(
+        "EL84 single-stage DC OP: Vpk={:.1}V  Vg2k={:.1}V  Vgk={:.2}V  V_plate={:.1}V  V_cath={:.2}V",
+        vpk, vg2k, vgk, v_plate, v_cath
+    );
+
+    // Plate-cathode: should be well above 0, below B+ (300V).
+    // With Ra=5.6k and ~40mA plate current, Vpk ≈ 300 - 40e-3*5600 - Vk ≈ 70-260V
+    assert!(
+        vpk > 10.0 && vpk < 300.0,
+        "Vpk should be in 10-300V range, got {:.1}V",
+        vpk
+    );
+
+    // Screen-cathode: screen supply 300V through 1k resistor, so Vg2k ≈ 280-300V
+    assert!(
+        vg2k > 200.0 && vg2k < 310.0,
+        "Vg2k should be in 200-310V range, got {:.1}V",
+        vg2k
+    );
+
+    // Grid-cathode: should be negative (cathode bias from Rk=130)
+    assert!(
+        vgk < 0.0 && vgk > -20.0,
+        "Vgk should be negative (Class A bias), got {:.2}V",
+        vgk
+    );
+
+    // NL currents: pentode Ip should be non-negligible
+    let slot = &pentode_slots[0];
+    let ip = result.i_nl[slot.start_idx];
+    let ip_ma = ip * 1000.0;
+    eprintln!("  Ip = {:.2} mA", ip_ma);
+    assert!(
+        ip_ma > 1.0 && ip_ma < 80.0,
+        "Ip should be in 1-80 mA range for EL84 Class A, got {:.2} mA",
+        ip_ma
+    );
+}
+
+// -----------------------------------------------------------------------------
+// AC15 (ac15.cir)
+// -----------------------------------------------------------------------------
+//
+// Vox AC15: EF86 pentode preamp + 12AX7 cathodyne PI + 2x EL84 push-pull.
+// This is a complex multi-tube circuit with coupled inductors (output
+// transformer). We primarily verify convergence and that plate voltages
+// are in a physically reasonable range (100-320V).
+
+#[test]
+fn test_pentode_dc_op_ac15_convergence() {
+    let (mna, slots, input_node, _netlist) =
+        build_pentode_circuit_pipeline("../../circuits/testing/ac15.cir");
+
+    // Should have 3 pentode/triode devices total:
+    //   EF86 pentode (dim 3), 12AX7 triode (dim 2), 2x EL84 pentode (dim 3 each)
+    // Total NL devices: 4 (1 triode + 3 pentodes)
+    let pentode_count = slots.iter().filter(|s| s.dimension == 3).count();
+    let triode_count = slots.iter().filter(|s| s.dimension == 2).count();
+    assert!(
+        pentode_count >= 2,
+        "AC15 should have at least 2 pentodes (EF86 + 2x EL84), found {}",
+        pentode_count
+    );
+    assert!(
+        triode_count >= 1,
+        "AC15 should have at least 1 triode (12AX7 PI), found {}",
+        triode_count
+    );
+
+    let config = DcOpConfig {
+        input_node,
+        input_resistance: 1.0,
+        ..DcOpConfig::default()
+    };
+    let result = solve_dc_operating_point(&mna, &slots, &config);
+
+    assert!(
+        result.converged,
+        "AC15 DC OP should converge (method: {:?}, iters: {})",
+        result.method, result.iterations
+    );
+    assert_ne!(result.method, DcOpMethod::Failed);
+
+    // All values must be finite
+    for (i, &v) in result.v_node.iter().enumerate() {
+        assert!(v.is_finite(), "v_node[{}] = {} not finite", i, v);
+    }
+    for (i, &v) in result.i_nl.iter().enumerate() {
+        assert!(v.is_finite(), "i_nl[{}] = {} not finite", i, v);
+    }
+
+    // B+ rail should be near 320V
+    let vcc_idx = node_idx(&mna, "vcc");
+    let v_vcc = result.v_node[vcc_idx];
+    assert!(
+        (v_vcc - 320.0).abs() < 1.0,
+        "VCC should be ~320V, got {:.1}V",
+        v_vcc
+    );
+
+    // EF86 plate: should be well above 0 and below VCC
+    let pa_ef_idx = node_idx(&mna, "pa_ef");
+    let v_pa_ef = result.v_node[pa_ef_idx];
+    eprintln!("AC15 DC OP: V(pa_ef) = {:.1}V", v_pa_ef);
+    assert!(
+        v_pa_ef > 50.0 && v_pa_ef < 320.0,
+        "EF86 plate voltage should be in 50-320V range, got {:.1}V",
+        v_pa_ef
+    );
+
+    // PI plate and cathode: both should be positive, below VCC
+    let pi_p_idx = node_idx(&mna, "pi_p");
+    let pi_k_idx = node_idx(&mna, "pi_k");
+    let v_pi_p = result.v_node[pi_p_idx];
+    let v_pi_k = result.v_node[pi_k_idx];
+    eprintln!(
+        "AC15 DC OP: V(pi_p) = {:.1}V  V(pi_k) = {:.1}V",
+        v_pi_p, v_pi_k
+    );
+    assert!(
+        v_pi_p > 50.0 && v_pi_p < 320.0,
+        "PI plate voltage should be in 50-320V range, got {:.1}V",
+        v_pi_p
+    );
+    assert!(
+        v_pi_k > 0.0 && v_pi_k < 250.0,
+        "PI cathode voltage should be in 0-250V range, got {:.1}V",
+        v_pi_k
+    );
+
+    // EL84 push-pull plates: should be positive and in 100-320V range
+    let pa_1_idx = node_idx(&mna, "pa_1");
+    let pa_2_idx = node_idx(&mna, "pa_2");
+    let v_pa_1 = result.v_node[pa_1_idx];
+    let v_pa_2 = result.v_node[pa_2_idx];
+    eprintln!(
+        "AC15 DC OP: V(pa_1) = {:.1}V  V(pa_2) = {:.1}V",
+        v_pa_1, v_pa_2
+    );
+    assert!(
+        v_pa_1 > 50.0 && v_pa_1 < 320.0,
+        "EL84 #1 plate voltage should be in 50-320V range, got {:.1}V",
+        v_pa_1
+    );
+    assert!(
+        v_pa_2 > 50.0 && v_pa_2 < 320.0,
+        "EL84 #2 plate voltage should be in 50-320V range, got {:.1}V",
+        v_pa_2
+    );
+
+    // Push-pull plates should be roughly symmetric (within 30V of each other)
+    assert!(
+        (v_pa_1 - v_pa_2).abs() < 30.0,
+        "Push-pull plate voltages should be roughly symmetric, got {:.1}V vs {:.1}V (diff={:.1}V)",
+        v_pa_1,
+        v_pa_2,
+        (v_pa_1 - v_pa_2).abs()
+    );
+
+    // At least some devices should be conducting
+    let max_i = result.i_nl.iter().map(|x| x.abs()).fold(0.0_f64, f64::max);
+    assert!(
+        max_i > 1e-6,
+        "At least one tube should be conducting at DC OP, max |i_nl| = {:.2e}",
+        max_i
+    );
+}
+
+// -----------------------------------------------------------------------------
+// Tweed Deluxe (tweed-deluxe.cir)
+// -----------------------------------------------------------------------------
+//
+// Fender 5E3 Tweed Deluxe: 12AX7 preamp + 12AX7 cathodyne PI + 2x 6V6GT
+// beam tetrode push-pull (DerkE §4.5 exponential screen form).
+// Coupled inductors (OT). Primarily verify convergence + reasonable voltages.
+
+#[test]
+fn test_pentode_dc_op_tweed_deluxe_convergence() {
+    let (mna, slots, input_node, _netlist) =
+        build_pentode_circuit_pipeline("../../circuits/testing/tweed-deluxe.cir");
+
+    // Should have 2 pentodes (6V6GT) and 2 triodes (12AX7 preamp + PI)
+    let pentode_count = slots.iter().filter(|s| s.dimension == 3).count();
+    let triode_count = slots.iter().filter(|s| s.dimension == 2).count();
+    assert!(
+        pentode_count >= 2,
+        "Tweed Deluxe should have at least 2 pentodes (6V6GT pair), found {}",
+        pentode_count
+    );
+    assert!(
+        triode_count >= 2,
+        "Tweed Deluxe should have at least 2 triodes (12AX7 preamp + PI), found {}",
+        triode_count
+    );
+
+    let config = DcOpConfig {
+        input_node,
+        input_resistance: 1.0,
+        ..DcOpConfig::default()
+    };
+    let result = solve_dc_operating_point(&mna, &slots, &config);
+
+    assert!(
+        result.converged,
+        "Tweed Deluxe DC OP should converge (method: {:?}, iters: {})",
+        result.method, result.iterations
+    );
+    assert_ne!(result.method, DcOpMethod::Failed);
+
+    // All values must be finite
+    for (i, &v) in result.v_node.iter().enumerate() {
+        assert!(v.is_finite(), "v_node[{}] = {} not finite", i, v);
+    }
+    for (i, &v) in result.i_nl.iter().enumerate() {
+        assert!(v.is_finite(), "i_nl[{}] = {} not finite", i, v);
+    }
+
+    // B+ rail should be near 320V
+    let vcc_idx = node_idx(&mna, "vcc");
+    let v_vcc = result.v_node[vcc_idx];
+    assert!(
+        (v_vcc - 320.0).abs() < 1.0,
+        "VCC should be ~320V, got {:.1}V",
+        v_vcc
+    );
+
+    // 12AX7 preamp plate: should be in active region
+    let v1_p_idx = node_idx(&mna, "v1_p");
+    let v_v1_p = result.v_node[v1_p_idx];
+    eprintln!("Tweed Deluxe DC OP: V(v1_p) = {:.1}V", v_v1_p);
+    assert!(
+        v_v1_p > 50.0 && v_v1_p < 320.0,
+        "12AX7 preamp plate should be in 50-320V range, got {:.1}V",
+        v_v1_p
+    );
+
+    // PI plate and cathode: cathodyne with 56k loads
+    let pi_p_idx = node_idx(&mna, "pi_p");
+    let pi_k_idx = node_idx(&mna, "pi_k");
+    let v_pi_p = result.v_node[pi_p_idx];
+    let v_pi_k = result.v_node[pi_k_idx];
+    eprintln!(
+        "Tweed Deluxe DC OP: V(pi_p) = {:.1}V  V(pi_k) = {:.1}V",
+        v_pi_p, v_pi_k
+    );
+    assert!(
+        v_pi_p > 50.0 && v_pi_p < 320.0,
+        "PI plate voltage should be in 50-320V range, got {:.1}V",
+        v_pi_p
+    );
+    assert!(
+        v_pi_k > 0.0 && v_pi_k < 250.0,
+        "PI cathode voltage should be in 0-250V range, got {:.1}V",
+        v_pi_k
+    );
+
+    // 6V6GT push-pull plates: should be in 100-320V range
+    let pa_1_idx = node_idx(&mna, "pa_1");
+    let pa_2_idx = node_idx(&mna, "pa_2");
+    let v_pa_1 = result.v_node[pa_1_idx];
+    let v_pa_2 = result.v_node[pa_2_idx];
+    eprintln!(
+        "Tweed Deluxe DC OP: V(pa_1) = {:.1}V  V(pa_2) = {:.1}V",
+        v_pa_1, v_pa_2
+    );
+    assert!(
+        v_pa_1 > 50.0 && v_pa_1 < 320.0,
+        "6V6GT #1 plate voltage should be in 50-320V range, got {:.1}V",
+        v_pa_1
+    );
+    assert!(
+        v_pa_2 > 50.0 && v_pa_2 < 320.0,
+        "6V6GT #2 plate voltage should be in 50-320V range, got {:.1}V",
+        v_pa_2
+    );
+
+    // Push-pull symmetry check
+    assert!(
+        (v_pa_1 - v_pa_2).abs() < 30.0,
+        "Push-pull plate voltages should be roughly symmetric, got {:.1}V vs {:.1}V (diff={:.1}V)",
+        v_pa_1,
+        v_pa_2,
+        (v_pa_1 - v_pa_2).abs()
+    );
+
+    // Shared cathode bias node: should be a few volts above ground
+    let ck_pp_idx = node_idx(&mna, "ck_pp");
+    let v_ck = result.v_node[ck_pp_idx];
+    eprintln!("Tweed Deluxe DC OP: V(ck_pp) = {:.1}V", v_ck);
+    assert!(
+        v_ck > 0.5 && v_ck < 50.0,
+        "Shared cathode bias should be a few volts above ground, got {:.1}V",
+        v_ck
+    );
+
+    // At least some devices should be conducting
+    let max_i = result.i_nl.iter().map(|x| x.abs()).fold(0.0_f64, f64::max);
+    assert!(
+        max_i > 1e-6,
+        "At least one tube should be conducting at DC OP, max |i_nl| = {:.2e}",
+        max_i
+    );
+}
+
+// -----------------------------------------------------------------------------
+// 6K7 variable-mu stage (6k7-varimu-stage.cir)
+// -----------------------------------------------------------------------------
+//
+// Single 6K7 remote-cutoff pentode (Reefman §5 two-section Koren). B+ = 250V.
+// Default Rk = 150 (max gain). Screen fed through 470k from B+.
+// Expected: Vpk ~ 100-230V, Vg2k ~ 50-110V, Vgk ~ -0.5 to -3V, Ip ~ 1-8mA.
+
+#[test]
+fn test_pentode_dc_op_6k7_varimu_stage() {
+    let (mna, slots, input_node, _netlist) =
+        build_pentode_circuit_pipeline("../../circuits/testing/6k7-varimu-stage.cir");
+
+    // Should have exactly 1 pentode device (dimension 3)
+    let pentode_slots: Vec<_> = slots.iter().filter(|s| s.dimension == 3).collect();
+    assert_eq!(
+        pentode_slots.len(),
+        1,
+        "6k7-varimu-stage should have 1 pentode, found {}",
+        pentode_slots.len()
+    );
+
+    let config = DcOpConfig {
+        input_node,
+        input_resistance: 1.0,
+        ..DcOpConfig::default()
+    };
+    let result = solve_dc_operating_point(&mna, &slots, &config);
+
+    assert!(
+        result.converged,
+        "6K7 varimu DC OP should converge (method: {:?}, iters: {})",
+        result.method, result.iterations
+    );
+    assert_ne!(result.method, DcOpMethod::Failed);
+
+    // All values must be finite
+    for (i, &v) in result.v_node.iter().enumerate() {
+        assert!(v.is_finite(), "v_node[{}] = {} not finite", i, v);
+    }
+
+    // Check key node voltages
+    let plate_idx = node_idx(&mna, "plate");
+    let grid_idx = node_idx(&mna, "grid");
+    let cath_idx = node_idx(&mna, "cath");
+    let screen_idx = node_idx(&mna, "screen");
+
+    let v_plate = result.v_node[plate_idx];
+    let v_grid = result.v_node[grid_idx];
+    let v_cath = result.v_node[cath_idx];
+    let v_screen = result.v_node[screen_idx];
+
+    let vpk = v_plate - v_cath;
+    let vgk = v_grid - v_cath;
+    let vg2k = v_screen - v_cath;
+
+    eprintln!(
+        "6K7 varimu DC OP: Vpk={:.1}V  Vg2k={:.1}V  Vgk={:.2}V  V_plate={:.1}V  V_screen={:.1}V  V_cath={:.2}V",
+        vpk, vg2k, vgk, v_plate, v_screen, v_cath
+    );
+
+    // Plate-cathode: should be positive, below B+ (250V)
+    // With Ra=100k and small Ip, most of B+ appears at the plate
+    assert!(
+        vpk > 50.0 && vpk < 250.0,
+        "Vpk should be in 50-250V range, got {:.1}V",
+        vpk
+    );
+
+    // Screen-cathode: screen fed through 470k from 250V B+, with 47nF bypass.
+    // At small screen currents, drop across 470k is moderate.
+    // Wide tolerance since screen current + 470k can create significant drop.
+    assert!(
+        vg2k > 10.0 && vg2k < 255.0,
+        "Vg2k should be in 10-255V range, got {:.1}V",
+        vg2k
+    );
+
+    // Grid-cathode: should be negative (cathode bias, Rk=150, small Ip)
+    assert!(
+        vgk < 0.0 && vgk > -20.0,
+        "Vgk should be negative (cathode bias), got {:.2}V",
+        vgk
+    );
+
+    // Cathode voltage: Rk=150 with a few mA gives a small positive voltage
+    assert!(
+        v_cath > 0.0 && v_cath < 10.0,
+        "Cathode voltage should be a small positive value, got {:.2}V",
+        v_cath
+    );
+
+    // NL currents: pentode Ip should be non-negligible
+    let slot = &pentode_slots[0];
+    let ip = result.i_nl[slot.start_idx];
+    let ip_ma = ip * 1000.0;
+    eprintln!("  Ip = {:.3} mA", ip_ma);
+    assert!(
+        ip_ma > 0.1 && ip_ma < 20.0,
+        "Ip should be in 0.1-20 mA range for 6K7 at default bias, got {:.3} mA",
+        ip_ma
+    );
+
+    // Ig1 (control grid) should be ~0 — Vgk is negative
+    let ig1 = result.i_nl[slot.start_idx + 2];
+    assert!(
+        ig1.abs() < 1e-9,
+        "Ig1 should be near zero with negative Vgk, got {:.3e}A",
+        ig1
+    );
 }

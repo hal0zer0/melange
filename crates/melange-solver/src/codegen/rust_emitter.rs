@@ -423,11 +423,16 @@ fn emit_device_const(code: &mut String, dev_num: usize, suffix: &str, value: f64
 /// plate/screen parameters (grid current lives in the separate `tube_ig`).
 struct PentodeDispatch {
     /// Helper family suffix: `pentode`, `beam_tetrode`, `pentode_v`,
-    /// `beam_tetrode_v`, or `pentode_classical`.
+    /// `beam_tetrode_v`, `pentode_classical`, `pentode_grid_off`,
+    /// `beam_tetrode_grid_off`, or `pentode_classical_grid_off`.
     suffix: &'static str,
-    /// Full argument list (AFTER the `v_d{s}, v_d{s1}, v_d{s2}` voltage
-    /// triple) for a `tube_evaluate_{suffix}(..)` call. Includes trailing
-    /// commas for each arg; the caller supplies only the voltage prefix.
+    /// Full argument list (AFTER the voltage prefix) for a
+    /// `tube_evaluate_{suffix}(..)` call. For 3D helpers the voltage prefix is
+    /// `v_d{s}, v_d{s1}, v_d{s2}`; for grid-off (2D) helpers it's the same
+    /// three-voltage signature but the third argument is always
+    /// `DEVICE_{d}_VG2K_FROZEN` (emitted at the call site) rather than a
+    /// live NR state — see [`PentodeDispatch::dim_count`] for how dispatch
+    /// sites decide how many NR dimensions to stamp.
     eval_args: String,
     /// Full argument list for `tube_ip_{suffix}(..)` calls from the nodal
     /// full-LU final `i_nl` stamping pass.
@@ -435,6 +440,21 @@ struct PentodeDispatch {
     /// Full argument list for `tube_is_{suffix}(..)` calls from the nodal
     /// full-LU final `i_nl` stamping pass.
     is_args: String,
+    /// Number of NR dimensions this slot contributes: 3 for sharp pentodes
+    /// (Vgk→Ip, Vpk→Ig2, Vg2k→Ig1), 2 for grid-off reduced pentodes
+    /// (Vgk→Ip, Vpk→Ig2; Ig1 dropped, Vg2k frozen). Dispatch sites use
+    /// [`PentodeDispatch::is_grid_off`] directly for the two-way branch;
+    /// this field is kept alongside for call sites that need the numeric
+    /// dimension count (e.g. generic jdev-loop emission paths).
+    #[allow(dead_code)]
+    dim_count: usize,
+    /// True if this is a grid-off reduced pentode (`TubeKind::
+    /// SharpPentodeGridOff`). Signals dispatch sites to:
+    ///   - use `DEVICE_{d}_VG2K_FROZEN` as the third voltage argument in
+    ///     helper calls (instead of `v_d{s+2}`),
+    ///   - emit only 2×2 Jacobian stamps (upper-left of the returned `[f64;4]`),
+    ///   - skip Ig1 output entirely (the helper returns `(ip, ig2, jac4)`).
+    is_grid_off: bool,
 }
 
 fn pentode_dispatch(
@@ -442,13 +462,28 @@ fn pentode_dispatch(
     dev_num: usize,
 ) -> PentodeDispatch {
     use crate::device_types::ScreenForm;
-    let suffix = match (tp.screen_form, tp.is_variable_mu()) {
-        (ScreenForm::Rational, false) => "pentode",
-        (ScreenForm::Exponential, false) => "beam_tetrode",
-        (ScreenForm::Classical, false) => "pentode_classical",
-        (ScreenForm::Rational, true) => "pentode_v",
-        (ScreenForm::Exponential, true) => "beam_tetrode_v",
-        (ScreenForm::Classical, true) => {
+    // Grid-off reduction is orthogonal to screen_form and variable-mu in the
+    // math, but phase 1b only supports sharp (non-variable-mu) grid-off. The
+    // variable-mu + grid-off combo is rejected here: variable-mu tubes exist
+    // specifically to model dynamic bias (AGC sidechain), which is the exact
+    // opposite of the static-cutoff assumption grid-off reduction makes.
+    let is_grid_off = tp.is_grid_off_pentode();
+    if is_grid_off && tp.is_variable_mu() {
+        unreachable!(
+            "variable-mu grid-off pentode is not a supported reduction \
+             (variable-mu needs dynamic bias, grid-off assumes static cutoff)"
+        );
+    }
+    let suffix = match (tp.screen_form, tp.is_variable_mu(), is_grid_off) {
+        (ScreenForm::Rational, false, false) => "pentode",
+        (ScreenForm::Exponential, false, false) => "beam_tetrode",
+        (ScreenForm::Classical, false, false) => "pentode_classical",
+        (ScreenForm::Rational, true, false) => "pentode_v",
+        (ScreenForm::Exponential, true, false) => "beam_tetrode_v",
+        (ScreenForm::Rational, false, true) => "pentode_grid_off",
+        (ScreenForm::Exponential, false, true) => "beam_tetrode_grid_off",
+        (ScreenForm::Classical, false, true) => "pentode_classical_grid_off",
+        (ScreenForm::Classical, true, _) => {
             // Variable-mu + Classical is rejected by `TubeParams::validate()`
             // — Reefman §5 is built on the Derk softplus structure, not the
             // Classical arctan knee. If we reach this branch the validator
@@ -456,6 +491,11 @@ fn pentode_dispatch(
             unreachable!(
                 "variable-mu Classical Koren pentode should be rejected by TubeParams::validate()"
             );
+        }
+        (_, true, true) => {
+            // Already rejected above by the `is_grid_off && is_variable_mu`
+            // guard; this arm exists only to satisfy exhaustiveness.
+            unreachable!("variable-mu grid-off already rejected above");
         }
     };
 
@@ -512,7 +552,76 @@ fn pentode_dispatch(
         }
     };
 
-    PentodeDispatch { suffix, eval_args, ip_args, is_args }
+    let dim_count = if is_grid_off { 2 } else { 3 };
+    PentodeDispatch {
+        suffix,
+        eval_args,
+        ip_args,
+        is_args,
+        dim_count,
+        is_grid_off,
+    }
+}
+
+/// Emit one pentode / beam-tetrode NR block for the DK Schur dispatch family
+/// (both the primary `generate_solve_nonlinear` path and the BE fallback
+/// `emit_dk_device_eval_for_nodal_schur_indented` path).
+///
+/// Emits a single `tube_evaluate_{suffix}(..)` call bound to
+/// `(i_dev{s}, i_dev{s1}[, i_dev{s2}], pentode{d}_jac)`, followed by the
+/// `jdev_{r}_{c}` Jacobian let-bindings (2×2 for grid-off slots where Vg2k
+/// is frozen, 3×3 for sharp / variable-mu / Classical). All arguments are
+/// threaded through [`pentode_dispatch`] so the helper family and argument
+/// list are derived once from `tp`.
+///
+/// The nodal full-LU sites ([`emit_nodal_device_evaluation_body`] /
+/// [`emit_nodal_device_evaluation_final`]) use a different stamping scheme
+/// (`j_dev[r*m+c]` flat array + `vgk`/`vpk`/`vg2k` local names + wrapped
+/// `{{ // Pentode N }}` block) and are not shared with this helper.
+fn emit_pentode_nr_dk_stamp(
+    code: &mut String,
+    tp: &crate::device_types::TubeParams,
+    dev_num: usize,
+    s: usize,
+    indent: &str,
+) {
+    let d = dev_num;
+    let s1 = s + 1;
+    let dispatch = pentode_dispatch(tp, d);
+    let suffix = dispatch.suffix;
+    let eval_args = &dispatch.eval_args;
+    if dispatch.is_grid_off {
+        // Grid-off 2D reduction: Vg2k is DEVICE_{d}_VG2K_FROZEN, Ig1 dropped.
+        // Wrapper helper returns (ip, ig2, [f64;4]) — 2×2 stamps only.
+        code.push_str(&format!(
+            "{indent}let (i_dev{s}, i_dev{s1}, pentode{d}_jac) = tube_evaluate_{suffix}(v_d{s}, v_d{s1}, DEVICE_{d}_VG2K_FROZEN, {eval_args});\n"
+        ));
+        code.push_str(&format!(
+            "{indent}let jdev_{s}_{s} = pentode{d}_jac[0];\n\
+             {indent}let jdev_{s}_{s1} = pentode{d}_jac[1];\n\
+             {indent}let jdev_{s1}_{s} = pentode{d}_jac[2];\n\
+             {indent}let jdev_{s1}_{s1} = pentode{d}_jac[3];\n"
+        ));
+    } else {
+        let s2 = s + 2;
+        code.push_str(&format!(
+            "{indent}let (i_dev{s}, i_dev{s1}, i_dev{s2}, pentode{d}_jac) = tube_evaluate_{suffix}(v_d{s}, v_d{s1}, v_d{s2}, {eval_args});\n"
+        ));
+        // Row-major 3×3 Jacobian: [dIp/dVgk, dIp/dVpk, dIp/dVg2k,
+        //                          dIg2/dVgk, dIg2/dVpk, dIg2/dVg2k,
+        //                          dIg1/dVgk, dIg1/dVpk, dIg1/dVg2k]
+        code.push_str(&format!(
+            "{indent}let jdev_{s}_{s} = pentode{d}_jac[0];\n\
+             {indent}let jdev_{s}_{s1} = pentode{d}_jac[1];\n\
+             {indent}let jdev_{s}_{s2} = pentode{d}_jac[2];\n\
+             {indent}let jdev_{s1}_{s} = pentode{d}_jac[3];\n\
+             {indent}let jdev_{s1}_{s1} = pentode{d}_jac[4];\n\
+             {indent}let jdev_{s1}_{s2} = pentode{d}_jac[5];\n\
+             {indent}let jdev_{s2}_{s} = pentode{d}_jac[6];\n\
+             {indent}let jdev_{s2}_{s1} = pentode{d}_jac[7];\n\
+             {indent}let jdev_{s2}_{s2} = pentode{d}_jac[8];\n"
+        ));
+    }
 }
 
 // ============================================================================
@@ -1317,6 +1426,14 @@ impl RustEmitter {
                         emit_device_const(&mut code, dev_num, "A_FACTOR", tp.a_factor);
                         emit_device_const(&mut code, dev_num, "BETA_FACTOR", tp.beta_factor);
                     }
+                    // Grid-off reduced pentode constant: the DC-OP-converged
+                    // screen voltage Vg2k that the 2D reduced NR block uses in
+                    // place of the dropped NR dimension. Read from the
+                    // `DeviceSlot`, not `TubeParams` — it's runtime state
+                    // captured by the DC-OP grid-off detection pass.
+                    if tp.is_grid_off_pentode() {
+                        emit_device_const(&mut code, dev_num, "VG2K_FROZEN", slot.vg2k_frozen);
+                    }
                     // Variable-mu §5 constants. Emitted only when `svar > 0`
                     // to preserve byte-identity for sharp (phase 1a/1a.1)
                     // circuits. Applies to BOTH triodes and pentodes.
@@ -1386,35 +1503,75 @@ impl RustEmitter {
             // byte-identical. Variable-mu Classical is rejected by
             // `TubeParams::validate()`, so no `any_variable_mu_classical_pentode`
             // flag exists.
+            // Grid-off pentode guard: excluded from the sharp flags below so
+            // the existing sharp / variable-mu / Classical helper families
+            // stay byte-identical for circuits with zero grid-off slots.
+            // `any_grid_off_pentode` gates a fresh block of thin 2D wrapper
+            // helpers that delegate back to the sharp 3D helpers with
+            // `vg2k_frozen` substituted for the live Vg2k dimension.
             let any_pentode = ir.device_slots.iter().any(|slot| {
                 matches!(&slot.params, DeviceParams::Tube(tp)
                     if tp.is_pentode()
                         && matches!(tp.screen_form, crate::device_types::ScreenForm::Rational)
-                        && !tp.is_variable_mu())
+                        && !tp.is_variable_mu()
+                        && !tp.is_grid_off_pentode())
             });
             let any_beam_tetrode = ir.device_slots.iter().any(|slot| {
                 matches!(&slot.params, DeviceParams::Tube(tp)
                     if tp.is_pentode()
                         && matches!(tp.screen_form, crate::device_types::ScreenForm::Exponential)
-                        && !tp.is_variable_mu())
+                        && !tp.is_variable_mu()
+                        && !tp.is_grid_off_pentode())
             });
             let any_variable_mu_pentode = ir.device_slots.iter().any(|slot| {
                 matches!(&slot.params, DeviceParams::Tube(tp)
                     if tp.is_pentode()
                         && matches!(tp.screen_form, crate::device_types::ScreenForm::Rational)
-                        && tp.is_variable_mu())
+                        && tp.is_variable_mu()
+                        && !tp.is_grid_off_pentode())
             });
             let any_variable_mu_beam_tetrode = ir.device_slots.iter().any(|slot| {
                 matches!(&slot.params, DeviceParams::Tube(tp)
                     if tp.is_pentode()
                         && matches!(tp.screen_form, crate::device_types::ScreenForm::Exponential)
-                        && tp.is_variable_mu())
+                        && tp.is_variable_mu()
+                        && !tp.is_grid_off_pentode())
             });
             let any_classical_pentode = ir.device_slots.iter().any(|slot| {
                 matches!(&slot.params, DeviceParams::Tube(tp)
                     if tp.is_pentode()
+                        && matches!(tp.screen_form, crate::device_types::ScreenForm::Classical)
+                        && !tp.is_grid_off_pentode())
+            });
+            let any_grid_off_pentode = ir.device_slots.iter().any(|slot| {
+                matches!(&slot.params, DeviceParams::Tube(tp) if tp.is_grid_off_pentode())
+            });
+            // Grid-off wrapper helpers delegate to the sharp 3D helpers of
+            // the matching screen form, so whichever sharp family a grid-off
+            // slot uses MUST have its own helper emitted too. Force the
+            // matching sharp flag on whenever a grid-off slot exists of that
+            // screen form. This keeps the template simple (a single
+            // `{% if any_grid_off_pentode %}` block can reference both the
+            // wrapper and the 3D helper it delegates to) without leaking
+            // sharp helpers into circuits that have neither.
+            let any_grid_off_rational = ir.device_slots.iter().any(|slot| {
+                matches!(&slot.params, DeviceParams::Tube(tp)
+                    if tp.is_grid_off_pentode()
+                        && matches!(tp.screen_form, crate::device_types::ScreenForm::Rational))
+            });
+            let any_grid_off_exponential = ir.device_slots.iter().any(|slot| {
+                matches!(&slot.params, DeviceParams::Tube(tp)
+                    if tp.is_grid_off_pentode()
+                        && matches!(tp.screen_form, crate::device_types::ScreenForm::Exponential))
+            });
+            let any_grid_off_classical = ir.device_slots.iter().any(|slot| {
+                matches!(&slot.params, DeviceParams::Tube(tp)
+                    if tp.is_grid_off_pentode()
                         && matches!(tp.screen_form, crate::device_types::ScreenForm::Classical))
             });
+            let any_pentode = any_pentode || any_grid_off_rational;
+            let any_beam_tetrode = any_beam_tetrode || any_grid_off_exponential;
+            let any_classical_pentode = any_classical_pentode || any_grid_off_classical;
             let mut tube_ctx = Context::new();
             tube_ctx.insert("any_pentode", &any_pentode);
             tube_ctx.insert("any_beam_tetrode", &any_beam_tetrode);
@@ -1424,6 +1581,10 @@ impl RustEmitter {
                 &any_variable_mu_beam_tetrode,
             );
             tube_ctx.insert("any_classical_pentode", &any_classical_pentode);
+            tube_ctx.insert("any_grid_off_pentode", &any_grid_off_pentode);
+            tube_ctx.insert("any_grid_off_rational", &any_grid_off_rational);
+            tube_ctx.insert("any_grid_off_exponential", &any_grid_off_exponential);
+            tube_ctx.insert("any_grid_off_classical", &any_grid_off_classical);
             code.push_str(&self.render("device_tube", &tube_ctx)?);
         }
         if has_vca {
@@ -3637,31 +3798,12 @@ impl RustEmitter {
                             other => return Err(CodegenError::InvalidDevice(format!("device_type=Tube but params={:?}", other))),
                         };
                         if tp.is_pentode() {
-                            // Pentode / beam tetrode: 3D NR block
-                            // (Vgk → Ip, Vpk → Ig2, Vg2k → Ig1). See
-                            // [`pentode_dispatch`] for the 5-way helper family
-                            // selection (Rational / Exponential / Classical
-                            // × sharp / variable-mu, minus the rejected
-                            // Classical + variable-mu combo).
-                            let s2 = s + 2;
-                            let dispatch = pentode_dispatch(tp, d);
-                            let helper_suffix = dispatch.suffix;
-                            let eval_args = &dispatch.eval_args;
-                            code.push_str(&format!(
-                                "        let (i_dev{s}, i_dev{s1}, i_dev{s2}, pentode{d}_jac) = tube_evaluate_{helper_suffix}(v_d{s}, v_d{s1}, v_d{s2}, {eval_args});\n"
-                            ));
-                            // Row-major 3x3 Jacobian: [dIp/dVgk, dIp/dVpk, dIp/dVg2k,
-                            //                          dIg2/dVgk, dIg2/dVpk, dIg2/dVg2k,
-                            //                          dIg1/dVgk, dIg1/dVpk, dIg1/dVg2k]
-                            code.push_str(&format!("        let jdev_{s}_{s} = pentode{d}_jac[0];\n"));
-                            code.push_str(&format!("        let jdev_{s}_{s1} = pentode{d}_jac[1];\n"));
-                            code.push_str(&format!("        let jdev_{s}_{s2} = pentode{d}_jac[2];\n"));
-                            code.push_str(&format!("        let jdev_{s1}_{s} = pentode{d}_jac[3];\n"));
-                            code.push_str(&format!("        let jdev_{s1}_{s1} = pentode{d}_jac[4];\n"));
-                            code.push_str(&format!("        let jdev_{s1}_{s2} = pentode{d}_jac[5];\n"));
-                            code.push_str(&format!("        let jdev_{s2}_{s} = pentode{d}_jac[6];\n"));
-                            code.push_str(&format!("        let jdev_{s2}_{s1} = pentode{d}_jac[7];\n"));
-                            code.push_str(&format!("        let jdev_{s2}_{s2} = pentode{d}_jac[8];\n"));
+                            // Pentode / beam tetrode NR block. 3D (Vgk→Ip,
+                            // Vpk→Ig2, Vg2k→Ig1) for sharp / variable-mu /
+                            // Classical; 2D for grid-off (Vg2k frozen, Ig1
+                            // dropped). See [`pentode_dispatch`] for the
+                            // 8-way helper family selection.
+                            emit_pentode_nr_dk_stamp(code, tp, d, s, "        ");
                         } else {
                             if tp.has_rgi() {
                                 // RGI: solve for internal Vgk, evaluate at internal voltage
@@ -7323,24 +7465,11 @@ impl RustEmitter {
             (DeviceType::Tube, DeviceParams::Tube(tp)) => {
                 let s1 = s + 1;
                 if tp.is_pentode() {
-                    let s2 = s + 2;
-                    let dispatch = pentode_dispatch(tp, d);
-                    let helper_suffix = dispatch.suffix;
-                    let eval_args = &dispatch.eval_args;
-                    code.push_str(&format!(
-                        "{indent}let (i_dev{s}, i_dev{s1}, i_dev{s2}, pentode{d}_jac) = tube_evaluate_{helper_suffix}(v_d{s}, v_d{s1}, v_d{s2}, {eval_args});\n"
-                    ));
-                    code.push_str(&format!(
-                        "{indent}let jdev_{s}_{s} = pentode{d}_jac[0];\n\
-                         {indent}let jdev_{s}_{s1} = pentode{d}_jac[1];\n\
-                         {indent}let jdev_{s}_{s2} = pentode{d}_jac[2];\n\
-                         {indent}let jdev_{s1}_{s} = pentode{d}_jac[3];\n\
-                         {indent}let jdev_{s1}_{s1} = pentode{d}_jac[4];\n\
-                         {indent}let jdev_{s1}_{s2} = pentode{d}_jac[5];\n\
-                         {indent}let jdev_{s2}_{s} = pentode{d}_jac[6];\n\
-                         {indent}let jdev_{s2}_{s1} = pentode{d}_jac[7];\n\
-                         {indent}let jdev_{s2}_{s2} = pentode{d}_jac[8];\n"
-                    ));
+                    // Pentode / beam tetrode NR block. See
+                    // [`pentode_dispatch`] for the 8-way helper family
+                    // selection and [`emit_pentode_nr_dk_stamp`] for the
+                    // shared (primary + BE fallback) DK Schur emitter.
+                    emit_pentode_nr_dk_stamp(code, tp, d, s, indent);
                 } else {
                     if tp.has_rgi() {
                         code.push_str(&format!(
@@ -9693,36 +9822,54 @@ impl RustEmitter {
                     let jd_10 = s1 * m + s;
                     let jd_11 = s1 * m + s1;
                     if tp.is_pentode() {
-                        // Pentode / beam tetrode 3D NR block
-                        // (Vgk → Ip, Vpk → Ig2, Vg2k → Ig1). See
-                        // [`pentode_dispatch`] for the 5-way helper family.
-                        let s2 = s + 2;
-                        let jd_02 = s * m + s2;
-                        let jd_12 = s1 * m + s2;
-                        let jd_20 = s2 * m + s;
-                        let jd_21 = s2 * m + s1;
-                        let jd_22 = s2 * m + s2;
+                        // Pentode / beam tetrode NR block. See
+                        // [`pentode_dispatch`] for the 8-way helper family
+                        // selection (5 sharp/var-mu × 3 grid-off wrappers).
                         let dispatch = pentode_dispatch(tp, dev_num);
                         let helper_suffix = dispatch.suffix;
                         let eval_args = &dispatch.eval_args;
-                        code.push_str(&format!(
-                            "{indent}{{ // Pentode {dev_num}\n\
-                             {indent}    let vgk = v_nl[{s}];\n\
-                             {indent}    let vpk = v_nl[{s1}];\n\
-                             {indent}    let vg2k = v_nl[{s2}];\n\
-                             {indent}    let (ip_t, ig2_t, ig1_t, jac) = tube_evaluate_{helper_suffix}(vgk, vpk, vg2k, {eval_args});\n\
-                             {indent}    i_nl[{s}] = ip_t; i_nl[{s1}] = ig2_t; i_nl[{s2}] = ig1_t;\n\
-                             {indent}    j_dev[{jd_ss}] = jac[0];\n\
-                             {indent}    j_dev[{jd_01}] = jac[1];\n\
-                             {indent}    j_dev[{jd_02}] = jac[2];\n\
-                             {indent}    j_dev[{jd_10}] = jac[3];\n\
-                             {indent}    j_dev[{jd_11}] = jac[4];\n\
-                             {indent}    j_dev[{jd_12}] = jac[5];\n\
-                             {indent}    j_dev[{jd_20}] = jac[6];\n\
-                             {indent}    j_dev[{jd_21}] = jac[7];\n\
-                             {indent}    j_dev[{jd_22}] = jac[8];\n\
-                             {indent}}}\n"
-                        ));
+                        if dispatch.is_grid_off {
+                            // Grid-off 2D reduction: Ig1 dropped, Vg2k frozen.
+                            // Wrapper returns (ip, ig2, [f64;4]) — only 2×2
+                            // stamps go into j_dev.
+                            code.push_str(&format!(
+                                "{indent}{{ // Pentode {dev_num} (grid-off)\n\
+                                 {indent}    let vgk = v_nl[{s}];\n\
+                                 {indent}    let vpk = v_nl[{s1}];\n\
+                                 {indent}    let (ip_t, ig2_t, jac) = tube_evaluate_{helper_suffix}(vgk, vpk, DEVICE_{dev_num}_VG2K_FROZEN, {eval_args});\n\
+                                 {indent}    i_nl[{s}] = ip_t; i_nl[{s1}] = ig2_t;\n\
+                                 {indent}    j_dev[{jd_ss}] = jac[0];\n\
+                                 {indent}    j_dev[{jd_01}] = jac[1];\n\
+                                 {indent}    j_dev[{jd_10}] = jac[2];\n\
+                                 {indent}    j_dev[{jd_11}] = jac[3];\n\
+                                 {indent}}}\n"
+                            ));
+                        } else {
+                            let s2 = s + 2;
+                            let jd_02 = s * m + s2;
+                            let jd_12 = s1 * m + s2;
+                            let jd_20 = s2 * m + s;
+                            let jd_21 = s2 * m + s1;
+                            let jd_22 = s2 * m + s2;
+                            code.push_str(&format!(
+                                "{indent}{{ // Pentode {dev_num}\n\
+                                 {indent}    let vgk = v_nl[{s}];\n\
+                                 {indent}    let vpk = v_nl[{s1}];\n\
+                                 {indent}    let vg2k = v_nl[{s2}];\n\
+                                 {indent}    let (ip_t, ig2_t, ig1_t, jac) = tube_evaluate_{helper_suffix}(vgk, vpk, vg2k, {eval_args});\n\
+                                 {indent}    i_nl[{s}] = ip_t; i_nl[{s1}] = ig2_t; i_nl[{s2}] = ig1_t;\n\
+                                 {indent}    j_dev[{jd_ss}] = jac[0];\n\
+                                 {indent}    j_dev[{jd_01}] = jac[1];\n\
+                                 {indent}    j_dev[{jd_02}] = jac[2];\n\
+                                 {indent}    j_dev[{jd_10}] = jac[3];\n\
+                                 {indent}    j_dev[{jd_11}] = jac[4];\n\
+                                 {indent}    j_dev[{jd_12}] = jac[5];\n\
+                                 {indent}    j_dev[{jd_20}] = jac[6];\n\
+                                 {indent}    j_dev[{jd_21}] = jac[7];\n\
+                                 {indent}    j_dev[{jd_22}] = jac[8];\n\
+                                 {indent}}}\n"
+                            ));
+                        }
                     } else if tp.has_rgi() {
                         code.push_str(&format!(
                             "{indent}{{ // Tube {dev_num} (RGI)\n\
@@ -9856,16 +10003,26 @@ impl RustEmitter {
                 (DeviceType::Tube, DeviceParams::Tube(tp)) => {
                     let s1 = s + 1;
                     if tp.is_pentode() {
-                        let s2 = s + 2;
                         let dispatch = pentode_dispatch(tp, dev_num);
                         let helper_suffix = dispatch.suffix;
                         let ip_args = &dispatch.ip_args;
                         let is_args = &dispatch.is_args;
-                        code.push_str(&format!(
-                            "{indent}i_nl[{s}] = tube_ip_{helper_suffix}(v_nl_final[{s}], v_nl_final[{s1}], v_nl_final[{s2}], {ip_args});\n\
-                             {indent}i_nl[{s1}] = tube_is_{helper_suffix}(v_nl_final[{s}], v_nl_final[{s1}], v_nl_final[{s2}], {is_args});\n\
-                             {indent}i_nl[{s2}] = tube_ig(v_nl_final[{s}], state.device_{dev_num}_ig_max, state.device_{dev_num}_vgk_onset);\n"
-                        ));
+                        if dispatch.is_grid_off {
+                            // Grid-off 2D: read Vg2k from the frozen constant,
+                            // stamp only Ip and Ig2. Ig1 is identically zero
+                            // and the slot contributes no s+2 dimension.
+                            code.push_str(&format!(
+                                "{indent}i_nl[{s}] = tube_ip_{helper_suffix}(v_nl_final[{s}], v_nl_final[{s1}], DEVICE_{dev_num}_VG2K_FROZEN, {ip_args});\n\
+                                 {indent}i_nl[{s1}] = tube_is_{helper_suffix}(v_nl_final[{s}], v_nl_final[{s1}], DEVICE_{dev_num}_VG2K_FROZEN, {is_args});\n"
+                            ));
+                        } else {
+                            let s2 = s + 2;
+                            code.push_str(&format!(
+                                "{indent}i_nl[{s}] = tube_ip_{helper_suffix}(v_nl_final[{s}], v_nl_final[{s1}], v_nl_final[{s2}], {ip_args});\n\
+                                 {indent}i_nl[{s1}] = tube_is_{helper_suffix}(v_nl_final[{s}], v_nl_final[{s1}], v_nl_final[{s2}], {is_args});\n\
+                                 {indent}i_nl[{s2}] = tube_ig(v_nl_final[{s}], state.device_{dev_num}_ig_max, state.device_{dev_num}_vgk_onset);\n"
+                            ));
+                        }
                     } else if tp.has_rgi() {
                         code.push_str(&format!(
                             "{indent}i_nl[{s}] = tube_ip_with_rgi(v_nl_final[{s}], v_nl_final[{s1}], state.device_{dev_num}_mu, state.device_{dev_num}_ex, state.device_{dev_num}_kg1, state.device_{dev_num}_kp, state.device_{dev_num}_kvb, state.device_{dev_num}_lambda, state.device_{dev_num}_ig_max, state.device_{dev_num}_vgk_onset, DEVICE_{dev_num}_RGI);\n\

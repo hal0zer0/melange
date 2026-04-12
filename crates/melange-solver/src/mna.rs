@@ -209,6 +209,11 @@ pub struct NonlinearDeviceInfo {
     pub start_idx: usize,
     pub nodes: Vec<String>,
     pub node_indices: Vec<usize>,
+    /// Phase 1b grid-off reduction: per-slot frozen Vg2k for grid-off
+    /// pentodes. Populated by `from_netlist_with_grid_off` from the
+    /// detection map. Zero for non-grid-off devices and for pentodes
+    /// running the full 3D path.
+    pub vg2k_frozen: f64,
 }
 
 /// Types of nonlinear devices supported.
@@ -590,6 +595,41 @@ impl MnaSystem {
         let mut builder = MnaBuilder::new();
         builder.forward_active_bjts = forward_active.clone();
         builder.linearized_bjts = linearized.clone();
+        builder.build(netlist)
+    }
+
+    /// Build MNA system with specified pentodes using grid-off (2D) reduction.
+    ///
+    /// Pentodes whose names appear as keys in `grid_off` are modeled as 2D
+    /// (Vgk → Ip, Vpk → Ig2, Ig1 dropped, Vg2k frozen at the map value),
+    /// reducing M by 1 per grid-off pentode. Used after DC-OP analysis
+    /// confirms Vgk is below cutoff across the operating point — the
+    /// per-pentode map value is the DC-OP-converged Vg2k to freeze.
+    ///
+    /// Mirrors `from_netlist_forward_active` for BJTs, but with a map
+    /// rather than a set so the per-slot `vg2k_frozen` field on
+    /// [`NonlinearDeviceInfo`] can be populated in one pass.
+    pub fn from_netlist_with_grid_off(
+        netlist: &Netlist,
+        grid_off: &std::collections::HashMap<String, f64>,
+    ) -> Result<Self, MnaError> {
+        let mut builder = MnaBuilder::new();
+        builder.grid_off_pentodes = grid_off.clone();
+        builder.build(netlist)
+    }
+
+    /// Build MNA system with both BJT forward-active and pentode grid-off reductions.
+    ///
+    /// Used by circuits (e.g. Plexi-class amps) that simultaneously benefit
+    /// from FA-reduced biasing BJTs and grid-off-reduced power pentodes.
+    pub fn from_netlist_with_grid_off_and_fa(
+        netlist: &Netlist,
+        forward_active: &std::collections::HashSet<String>,
+        grid_off: &std::collections::HashMap<String, f64>,
+    ) -> Result<Self, MnaError> {
+        let mut builder = MnaBuilder::new();
+        builder.forward_active_bjts = forward_active.clone();
+        builder.grid_off_pentodes = grid_off.clone();
         builder.build(netlist)
     }
 
@@ -1212,6 +1252,51 @@ impl MnaSystem {
         self.n_i[nk][start_idx + 1] = 1.0; // Ig exits cathode
     }
 
+    /// Stamp grid-off reduced pentode nonlinear matrices (2D).
+    ///
+    /// Phase 1b reduction: when DC-OP confirms the pentode is biased in
+    /// grid-cutoff (`Vgk < 0` with margin), the control-grid current `Ig1`
+    /// is identically zero and the screen voltage `Vg2k` is approximately
+    /// held constant by external bypass caps. Drop the `Ig1` NR dimension
+    /// entirely; the screen voltage is passed into the device math as a
+    /// per-slot constant stored in `DeviceSlot.vg2k_frozen` (written by
+    /// DC-OP detection).
+    ///
+    /// N_v: two rows
+    ///   - Row start_idx:     Vgk  = V[grid]  − V[cathode]
+    ///   - Row start_idx + 1: Vpk  = V[plate] − V[cathode]
+    /// N_i: two columns
+    ///   - Col start_idx:     Ip  enters plate, exits cathode
+    ///   - Col start_idx + 1: Ig2 enters screen, exits cathode
+    ///
+    /// Note that Ig1 is dropped (grid-cutoff) and the Vg2k probe is ALSO
+    /// dropped — the device math reads Vg2k from the frozen constant, not
+    /// from an N_v row.
+    pub fn stamp_pentode_grid_off(
+        &mut self,
+        start_idx: usize,
+        n_plate: usize,
+        n_grid: usize,
+        n_cathode: usize,
+        n_screen: usize,
+    ) {
+        // Row start_idx: Vgk
+        self.n_v[start_idx][n_grid] = 1.0;
+        self.n_v[start_idx][n_cathode] = -1.0;
+
+        // Row start_idx + 1: Vpk
+        self.n_v[start_idx + 1][n_plate] = 1.0;
+        self.n_v[start_idx + 1][n_cathode] = -1.0;
+
+        // Col start_idx: Ip (plate current — flows plate → cathode through the device)
+        self.n_i[n_plate][start_idx] = -1.0;
+        self.n_i[n_cathode][start_idx] = 1.0;
+
+        // Col start_idx + 1: Ig2 (screen current — flows screen → cathode through the device)
+        self.n_i[n_screen][start_idx + 1] = -1.0;
+        self.n_i[n_cathode][start_idx + 1] = 1.0;
+    }
+
     /// Build a discretized system matrix from G and C with inductor companion models.
     ///
     /// Computes `result[i][j] = g_sign * G[i][j] + alpha * C[i][j]` for each element,
@@ -1466,14 +1551,17 @@ impl MnaSystem {
                     junctions.push((dev.name.clone(), ng, nd));
                 }
                 NonlinearDeviceType::Tube => {
-                    // Tube device family: triode (dim=2) or pentode/beam-tetrode
-                    // (dim=3). Node layout differs between the two — see the
-                    // `Element::Triode` / `Element::Pentode` arms in
-                    // `categorize_element`.
-                    if dev.dimension == 3 {
-                        // Pentode: nodes are [plate, grid, cathode, screen, (suppressor?)].
-                        // Suppressor is cathode-tied in phase 1a and gets no caps.
-                        // 5 junction caps: Cgk, Cgp, Cpk, Csk, Csp.
+                    // Tube device family. Three shapes:
+                    //   - Triode (dim=2, 3 nodes): [grid, plate, cathode]
+                    //   - Pentode (dim=3, 4-5 nodes): [plate, grid, cathode, screen, (suppressor?)]
+                    //   - Grid-off pentode (dim=2, 4-5 nodes): [plate, grid, cathode, screen, (suppressor?)]
+                    // Node layout differs — see the `Element::Triode` /
+                    // `Element::Pentode` arms in `categorize_element`.
+                    // Suppressor is cathode-tied in phase 1a and gets no caps.
+                    let is_pentode_shape = dev.node_indices.len() >= 4;
+                    if dev.dimension == 3 && is_pentode_shape {
+                        // Sharp-cutoff pentode: 5 junction caps.
+                        // Cgk, Cgp, Cpk, Csk, Csp.
                         let np = dev.node_indices[0];
                         let ng = dev.node_indices[1];
                         let nk = dev.node_indices[2];
@@ -1488,6 +1576,19 @@ impl MnaSystem {
                         junctions.push((dev.name.clone(), nscr, nk));
                         // Screen-plate (Csp)
                         junctions.push((dev.name.clone(), nscr, np));
+                    } else if dev.dimension == 2 && is_pentode_shape {
+                        // Grid-off pentode: screen is an input, not an NR
+                        // unknown, so only 3 junction caps are meaningful.
+                        // Drop CSK/CSP; keep CGK (input), CGP (Miller), CPK.
+                        let np = dev.node_indices[0];
+                        let ng = dev.node_indices[1];
+                        let nk = dev.node_indices[2];
+                        // Grid-cathode (Cgk)
+                        junctions.push((dev.name.clone(), ng, nk));
+                        // Grid-plate (Cgp, Miller)
+                        junctions.push((dev.name.clone(), ng, np));
+                        // Plate-cathode (Cpk)
+                        junctions.push((dev.name.clone(), np, nk));
                     } else {
                         // Triode: nodes are [grid, plate, cathode].
                         let (ng, np, nk) = (
@@ -1936,6 +2037,16 @@ struct MnaBuilder {
     forward_active_bjts: std::collections::HashSet<String>,
     /// BJT names to linearize at DC OP (removed from nonlinear system entirely)
     linearized_bjts: std::collections::HashSet<String>,
+    /// Pentode names to model with grid-off reduction (2D instead of 3D).
+    /// Phase 1b: when DC-OP confirms Vgk is below cutoff, drop the Ig1 NR
+    /// dimension and freeze Vg2k at its DC-OP value (stored per-slot in
+    /// `DeviceSlot.vg2k_frozen`).
+    /// Phase 1b grid-off pentode map: name → frozen Vg2k value.
+    /// The key set acts as the "is this pentode grid-off?" discriminator
+    /// during `categorize_element`; the per-entry value is written into
+    /// the resulting `NonlinearDeviceInfo.vg2k_frozen` so downstream
+    /// codegen can emit it as a per-slot constant.
+    grid_off_pentodes: std::collections::HashMap<String, f64>,
 }
 
 struct ElementInfo {
@@ -1973,6 +2084,7 @@ impl MnaBuilder {
             total_dimension: 0,
             forward_active_bjts: std::collections::HashSet::new(),
             linearized_bjts: std::collections::HashSet::new(),
+            grid_off_pentodes: std::collections::HashMap::new(),
         }
     }
 
@@ -3298,12 +3410,53 @@ impl MnaBuilder {
                     }
                 }
                 NonlinearDeviceType::Tube => {
-                    // Tube device family. Two shapes:
-                    //   - Triode (dim=2): nodes are [grid, plate, cathode]
-                    //   - Pentode (dim=3): nodes are [plate, grid, cathode, screen, (suppressor?)]
+                    // Tube device family. Three shapes:
+                    //   - Triode (dim=2, 3 nodes): [grid, plate, cathode]
+                    //   - Pentode (dim=3, 4-5 nodes): [plate, grid, cathode, screen, (suppressor?)]
+                    //   - Grid-off pentode (dim=2, 4-5 nodes): [plate, grid, cathode, screen, (suppressor?)]
                     // The node ordering inside `node_indices` matches the layout
-                    // produced by `categorize_element`.
-                    if dim == 3 {
+                    // produced by `categorize_element`. Triode vs grid-off pentode
+                    // are distinguished by node_indices.len() (3 vs 4+).
+                    let is_pentode_shape = node_indices.len() >= 4;
+                    if dim == 2 && is_pentode_shape {
+                        // Grid-off pentode: 2D NR (Vgk→Ip, Vpk→Ig2). Ig1 is
+                        // dropped (grid-cutoff); Vg2k is frozen in the device
+                        // math, not stamped as an N_v row.
+                        let p_raw = node_indices[0];
+                        let g_raw = node_indices[1];
+                        let k_raw = node_indices[2];
+                        let s_raw = node_indices[3]; // screen (g2)
+
+                        // N_v row 0 (Vgk): +1 at grid, -1 at cathode
+                        if g_raw > 0 {
+                            mna.n_v[start_idx][g_raw - 1] = 1.0;
+                        }
+                        if k_raw > 0 {
+                            mna.n_v[start_idx][k_raw - 1] = -1.0;
+                        }
+                        // N_v row 1 (Vpk): +1 at plate, -1 at cathode
+                        if p_raw > 0 {
+                            mna.n_v[start_idx + 1][p_raw - 1] = 1.0;
+                        }
+                        if k_raw > 0 {
+                            mna.n_v[start_idx + 1][k_raw - 1] = -1.0;
+                        }
+
+                        // N_i col 0 (Ip): -1 at plate, +1 at cathode
+                        if p_raw > 0 {
+                            mna.n_i[p_raw - 1][start_idx] = -1.0;
+                        }
+                        if k_raw > 0 {
+                            mna.n_i[k_raw - 1][start_idx] = 1.0;
+                        }
+                        // N_i col 1 (Ig2): -1 at screen, +1 at cathode
+                        if s_raw > 0 {
+                            mna.n_i[s_raw - 1][start_idx + 1] = -1.0;
+                        }
+                        if k_raw > 0 {
+                            mna.n_i[k_raw - 1][start_idx + 1] = 1.0;
+                        }
+                    } else if dim == 3 {
                         // Pentode 3D layout (rows / columns must agree so the
                         // 3x3 device Jacobian block stays consistent):
                         //   row/col 0: Ip   ↔ Vgk
@@ -3708,6 +3861,7 @@ impl MnaBuilder {
                     start_idx,
                     nodes: vec![n_plus.clone(), n_minus.clone()],
                     node_indices,
+                    vg2k_frozen: 0.0,
                 });
             }
             Element::Bjt {
@@ -3747,6 +3901,7 @@ impl MnaBuilder {
                         start_idx,
                         nodes: vec![nc.clone(), nb.clone(), ne.clone()],
                         node_indices,
+                    vg2k_frozen: 0.0,
                     });
                 }
             }
@@ -3769,6 +3924,7 @@ impl MnaBuilder {
                     start_idx,
                     nodes: vec![nd.clone(), ng.clone(), ns.clone()],
                     node_indices,
+                    vg2k_frozen: 0.0,
                 });
             }
             Element::Mosfet {
@@ -3801,6 +3957,7 @@ impl MnaBuilder {
                     start_idx,
                     nodes: vec![nd.clone(), ng.clone(), ns.clone(), nb.clone()],
                     node_indices,
+                    vg2k_frozen: 0.0,
                 });
             }
             Element::Triode {
@@ -3824,6 +3981,7 @@ impl MnaBuilder {
                     start_idx,
                     nodes: vec![n_grid.clone(), n_plate.clone(), n_cathode.clone()],
                     node_indices,
+                    vg2k_frozen: 0.0,
                 });
             }
             Element::Pentode {
@@ -3835,14 +3993,17 @@ impl MnaBuilder {
                 n_suppressor,
                 ..
             } => {
-                // 3D NR contribution: Ip (Vgk, Vpk, Vg2k), Ig2 (same voltages),
-                // Ig1 (Vgk-only). MNA stamping lives in the nonlinear device
-                // layer (task P1a-05); for now register the element so node
-                // collection, FA detection, and device-count accounting work.
+                // 3D (sharp-cutoff) contribution: Ip (Vgk, Vpk, Vg2k),
+                // Ig2 (same voltages), Ig1 (Vgk-only). Phase 1b adds an
+                // optional 2D grid-off reduction when DC-OP confirms Vgk
+                // is below cutoff — Ig1 drops out entirely and Vg2k is
+                // frozen at its DC-OP value (stored per-slot in
+                // `DeviceSlot.vg2k_frozen`).
                 //
                 // Node layout in `nodes` / `node_indices` is plate-grid-cathode-screen
                 // (+ optional suppressor). Downstream MNA stamping code must use
-                // this order for N_v / N_i construction.
+                // this order for N_v / N_i construction in BOTH the 3D and 2D
+                // grid-off paths.
                 let mut nodes = vec![
                     n_plate.clone(),
                     n_grid.clone(),
@@ -3859,16 +4020,31 @@ impl MnaBuilder {
                     nodes.push(ns.clone());
                     node_indices.push(self.node_map[ns]);
                 }
+                let name_upper = name.to_ascii_uppercase();
+                let grid_off_entry = self.grid_off_pentodes.get(&name_upper).copied();
+                let is_grid_off = grid_off_entry.is_some();
+                // Grid-off pentode: 2D NR block (Vgk→Ip, Vpk→Ig2). The
+                // device type stays `Tube` — the `TubeKind::SharpPentodeGridOff`
+                // discriminator lives on `TubeParams.kind` at the codegen
+                // layer, not on `NonlinearDeviceType`.
+                let dimension = if is_grid_off { 2 } else { 3 };
                 let start_idx = self.total_dimension;
-                self.total_dimension += 3; // 3D: Ip + Ig2 + Ig1
+                self.total_dimension += dimension;
                 self.nonlinear_devices.push(NonlinearDeviceInfo {
                     name: name.clone(),
                     device_type: NonlinearDeviceType::Tube,
-                    dimension: 3,
+                    dimension,
                     start_idx,
                     nodes,
                     node_indices,
+                    vg2k_frozen: grid_off_entry.unwrap_or(0.0),
                 });
+                log::info!(
+                    "Pentode '{}' using {} NR block (grid-off = {})",
+                    name,
+                    if is_grid_off { "2D" } else { "3D" },
+                    is_grid_off
+                );
             }
             Element::Opamp {
                 name,
@@ -3998,6 +4174,7 @@ impl MnaBuilder {
                         n_ctrl_n.clone(),
                     ],
                     node_indices,
+                    vg2k_frozen: 0.0,
                 });
 
                 self.vcas.push(VcaInfo {
@@ -5175,6 +5352,258 @@ Y1 sp sn cp cn vca1
         assert_eq!(
             off_diag_count, 10,
             "Pentode should have 10 off-diagonal C entries (5 junctions), got {}",
+            off_diag_count
+        );
+    }
+
+    // ===== Grid-off pentode (phase 1b) tests =====
+    //
+    // Grid-off reduction drops the Ig1 NR dimension (row/col 2) when DC-OP
+    // confirms Vgk is below cutoff, and freezes Vg2k at its DC-OP value.
+    // Remaining NR shape:
+    //   row/col 0: Ip  ↔ Vgk
+    //   row/col 1: Ig2 ↔ Vpk
+    // The resulting N_v has 4 nonzero entries; N_i has 4 nonzero entries.
+
+    #[test]
+    fn test_stamp_pentode_grid_off_shape() {
+        // Build an empty-ish MnaSystem with 4 real nodes (+ ground) and 2
+        // NR dimensions, then stamp a grid-off pentode directly. The test
+        // verifies ONLY the N_v / N_i shape — no device math, no netlist.
+        //
+        // We use `from_netlist` to get a consistent allocation; the circuit
+        // has 4 resistors so the node map has 4 real indices (1..=4).
+        let spice = "grid-off shape rig\n\
+                     R1 plate 0 1\n\
+                     R2 grid 0 1\n\
+                     R3 cath 0 1\n\
+                     R4 screen 0 1\n";
+        let netlist = Netlist::parse(spice).unwrap();
+        let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
+
+        // Re-size the nonlinear matrices to have M=2 (grid-off block).
+        mna.m = 2;
+        mna.n_v = vec![vec![0.0; mna.n]; 2];
+        mna.n_i = vec![vec![0.0; 2]; mna.n];
+
+        let p = *mna.node_map.get("plate").unwrap() - 1;
+        let g = *mna.node_map.get("grid").unwrap() - 1;
+        let k = *mna.node_map.get("cath").unwrap() - 1;
+        let s = *mna.node_map.get("screen").unwrap() - 1;
+
+        mna.stamp_pentode_grid_off(0, p, g, k, s);
+
+        // ----- N_v rows -----
+        // Row 0 = Vgk
+        assert_eq!(mna.n_v[0][g], 1.0, "N_v[0][grid] = +1 (Vgk)");
+        assert_eq!(mna.n_v[0][k], -1.0, "N_v[0][cath] = -1 (Vgk)");
+        assert_eq!(mna.n_v[0][p], 0.0, "N_v[0][plate] = 0");
+        assert_eq!(mna.n_v[0][s], 0.0, "N_v[0][screen] = 0 (Vg2k dropped)");
+
+        // Row 1 = Vpk
+        assert_eq!(mna.n_v[1][p], 1.0, "N_v[1][plate] = +1 (Vpk)");
+        assert_eq!(mna.n_v[1][k], -1.0, "N_v[1][cath] = -1 (Vpk)");
+        assert_eq!(mna.n_v[1][g], 0.0, "N_v[1][grid] = 0");
+        assert_eq!(mna.n_v[1][s], 0.0, "N_v[1][screen] = 0");
+
+        // Count nonzero entries — must be exactly 4.
+        let nv_nz: usize = mna
+            .n_v
+            .iter()
+            .map(|row| row.iter().filter(|&&v| v != 0.0).count())
+            .sum();
+        assert_eq!(nv_nz, 4, "grid-off N_v must have exactly 4 nonzero entries");
+
+        // ----- N_i columns -----
+        // Col 0 = Ip
+        assert_eq!(mna.n_i[p][0], -1.0, "N_i[plate][0] = -1 (Ip out)");
+        assert_eq!(mna.n_i[k][0], 1.0, "N_i[cath][0] = +1 (Ip in)");
+        assert_eq!(mna.n_i[g][0], 0.0, "N_i[grid][0] = 0 (Ig1 dropped)");
+        assert_eq!(mna.n_i[s][0], 0.0, "N_i[screen][0] = 0");
+
+        // Col 1 = Ig2
+        assert_eq!(mna.n_i[s][1], -1.0, "N_i[screen][1] = -1 (Ig2 out)");
+        assert_eq!(mna.n_i[k][1], 1.0, "N_i[cath][1] = +1 (Ig2 in)");
+        assert_eq!(mna.n_i[p][1], 0.0, "N_i[plate][1] = 0");
+        assert_eq!(mna.n_i[g][1], 0.0, "N_i[grid][1] = 0");
+
+        let ni_nz: usize = mna
+            .n_i
+            .iter()
+            .map(|row| row.iter().filter(|&&v| v != 0.0).count())
+            .sum();
+        assert_eq!(ni_nz, 4, "grid-off N_i must have exactly 4 nonzero entries");
+    }
+
+    #[test]
+    fn test_from_netlist_with_grid_off_reduces_dimension() {
+        let spice = format!(
+            "grid-off dimension reduction\n\
+             P1 plate grid cath screen EL84\n\
+             V1 plate 0 250\n\
+             R1 grid 0 1Meg\n\
+             R2 screen 0 470k\n\
+             R3 cath 0 130\n\
+             {}\n",
+            EL84_MODEL
+        );
+        let netlist = Netlist::parse(&spice).unwrap();
+
+        let mna_full = MnaSystem::from_netlist(&netlist).unwrap();
+        assert_eq!(mna_full.m, 3, "sharp-cutoff pentode should have M=3");
+
+        // vg2k_frozen value is a structural test — 250.0 V is a typical
+        // EL84 screen bias, but the math isn't exercised here; only the
+        // MNA dimension reduction is checked.
+        let mut grid_off = std::collections::HashMap::new();
+        grid_off.insert("P1".to_string(), 250.0);
+        let mna_reduced = MnaSystem::from_netlist_with_grid_off(&netlist, &grid_off).unwrap();
+
+        assert_eq!(
+            mna_reduced.m,
+            mna_full.m - 1,
+            "grid-off pentode should reduce M by exactly 1"
+        );
+        assert_eq!(mna_reduced.m, 2, "grid-off pentode should have M=2");
+        assert_eq!(mna_reduced.num_devices, 1);
+        assert_eq!(mna_reduced.nonlinear_devices[0].dimension, 2);
+    }
+
+    #[test]
+    fn test_grid_off_pentode_stays_tube_device_type() {
+        // The TubeKind::SharpPentodeGridOff discriminator lives on
+        // TubeParams.kind at the codegen layer, not on NonlinearDeviceType.
+        // The MNA layer must keep reporting `NonlinearDeviceType::Tube`
+        // so that the same device-type switches in codegen / DK / NR
+        // continue to dispatch correctly.
+        let spice = format!(
+            "grid-off device type\n\
+             P1 plate grid cath screen EL84\n\
+             V1 plate 0 250\n\
+             R1 grid 0 1Meg\n\
+             R2 screen 0 470k\n\
+             R3 cath 0 130\n\
+             {}\n",
+            EL84_MODEL
+        );
+        let netlist = Netlist::parse(&spice).unwrap();
+        let mut grid_off = std::collections::HashMap::new();
+        grid_off.insert("P1".to_string(), 250.0);
+        let mna = MnaSystem::from_netlist_with_grid_off(&netlist, &grid_off).unwrap();
+
+        let dev = &mna.nonlinear_devices[0];
+        assert_eq!(
+            dev.device_type,
+            NonlinearDeviceType::Tube,
+            "grid-off pentode must still report NonlinearDeviceType::Tube"
+        );
+        assert_eq!(dev.dimension, 2);
+        assert_eq!(dev.nodes.len(), 4, "nodes vector must still be plate/grid/cath/screen");
+    }
+
+    #[test]
+    fn test_from_netlist_without_grid_off_unchanged() {
+        // Byte-identity guard: passing an empty grid-off set must produce
+        // a structurally identical MNA system to the default constructor.
+        let spice = format!(
+            "grid-off empty set identity\n\
+             P1 plate grid cath screen EL84\n\
+             V1 plate 0 250\n\
+             R1 grid 0 1Meg\n\
+             R2 screen 0 470k\n\
+             R3 cath 0 130\n\
+             {}\n",
+            EL84_MODEL
+        );
+        let netlist = Netlist::parse(&spice).unwrap();
+        let mna_default = MnaSystem::from_netlist(&netlist).unwrap();
+        let empty: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+        let mna_empty = MnaSystem::from_netlist_with_grid_off(&netlist, &empty).unwrap();
+
+        assert_eq!(mna_default.n, mna_empty.n);
+        assert_eq!(mna_default.m, mna_empty.m);
+        assert_eq!(mna_default.g, mna_empty.g);
+        assert_eq!(mna_default.c, mna_empty.c);
+        assert_eq!(mna_default.n_v, mna_empty.n_v);
+        assert_eq!(mna_default.n_i, mna_empty.n_i);
+        assert_eq!(mna_default.num_devices, mna_empty.num_devices);
+        assert_eq!(
+            mna_default.nonlinear_devices[0].dimension,
+            mna_empty.nonlinear_devices[0].dimension,
+        );
+        assert_eq!(
+            mna_default.nonlinear_devices[0].device_type,
+            mna_empty.nonlinear_devices[0].device_type,
+        );
+    }
+
+    #[test]
+    fn test_grid_off_pentode_parasitic_caps_three_junctions() {
+        // Grid-off pentodes should emit 3 junction caps (Cgk, Cgp, Cpk),
+        // NOT the 5 of the sharp-cutoff case. CSK and CSP are dropped
+        // because the screen is effectively an input (Vg2k is frozen),
+        // not an NR unknown.
+        let spice = format!(
+            "grid-off parasitic caps\n\
+             P1 plate grid cath screen EL84\n\
+             V1 plate 0 250\n\
+             R1 grid 0 1Meg\n\
+             R2 screen 0 470k\n\
+             R3 cath 0 130\n\
+             {}\n",
+            EL84_MODEL
+        );
+        let netlist = Netlist::parse(&spice).unwrap();
+        let mut grid_off = std::collections::HashMap::new();
+        grid_off.insert("P1".to_string(), 250.0);
+        let mut mna = MnaSystem::from_netlist_with_grid_off(&netlist, &grid_off).unwrap();
+        mna.add_parasitic_caps();
+
+        let p = *mna.node_map.get("plate").unwrap() - 1;
+        let g = *mna.node_map.get("grid").unwrap() - 1;
+        let k = *mna.node_map.get("cath").unwrap() - 1;
+        let s = *mna.node_map.get("screen").unwrap() - 1;
+
+        // Screen must not have any parasitic cap entries (CSK and CSP dropped).
+        assert!(
+            mna.c[s][k].abs() < 1e-25,
+            "CSK must be absent for grid-off pentode, got {}",
+            mna.c[s][k]
+        );
+        assert!(
+            mna.c[k][s].abs() < 1e-25,
+            "CSK (transpose) must be absent for grid-off pentode"
+        );
+        assert!(
+            mna.c[s][p].abs() < 1e-25,
+            "CSP must be absent for grid-off pentode, got {}",
+            mna.c[s][p]
+        );
+        assert!(
+            mna.c[p][s].abs() < 1e-25,
+            "CSP (transpose) must be absent for grid-off pentode"
+        );
+
+        // Remaining junctions (Cgk, Cgp, Cpk) must still be present.
+        let off = |a: usize, b: usize| (mna.c[a][b] + PARASITIC_CAP).abs() < 1e-25;
+        assert!(off(g, k), "Cgk must still be present");
+        assert!(off(g, p), "Cgp must still be present");
+        assert!(off(p, k), "Cpk must still be present");
+
+        // Off-diagonal count across the 4 pentode terminals should be 6
+        // (3 junctions x 2 entries each).
+        let pentode_nodes = [p, g, k, s];
+        let mut off_diag_count = 0;
+        for &i in &pentode_nodes {
+            for &j in &pentode_nodes {
+                if i != j && mna.c[i][j].abs() > 1e-25 {
+                    off_diag_count += 1;
+                }
+            }
+        }
+        assert_eq!(
+            off_diag_count, 6,
+            "grid-off pentode should have 6 off-diagonal C entries (3 junctions), got {}",
             off_diag_count
         );
     }

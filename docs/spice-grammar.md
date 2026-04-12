@@ -475,6 +475,24 @@ P2 plate2 grid2 cath2 scr2 sup2 EF86
   a `.model` without a catalog alias; the default is `0` (Rational).
   Catalog entries carry the correct form automatically, so a bare
   `.model KT88 VP()` gets Classical behavior via the catalog lookup.
+- **Grid-off reduction (phase 1b)**: the solver auto-detects when a
+  pentode is biased in grid-cutoff (`Vgk < −(vgk_onset + 0.5)`) and
+  reduces its NR dimension from 3 to 2 — drops the `Ig1` dimension
+  entirely and freezes `Vg2k` at the DC-OP-converged value. Controlled
+  by `--tube-grid-fa {auto,on,off}` on `melange simulate` and
+  `melange compile`:
+  - `auto` (default): detect and reduce where Vgk is in cutoff
+  - `on`: force grid-off on every pentode regardless of bias (testing)
+  - `off`: never reduce, always full 3D NR block (pre-phase-1b parity)
+
+  Grid-off is a physics approximation — the screen voltage is held
+  constant, so under hard plate clipping the real tube's screen-current
+  rise isn't tracked. Audible error is 0.5–2 dB on affected harmonics,
+  similar in character to Classical Koren's Vp-independent screen.
+  For users who care, `--tube-grid-fa off` restores full fidelity at
+  5–10× slowdown on Plexi-class amps. Triode grid-off is structurally
+  impossible (both Vgk and Vpk drive Ip) — only pentodes reduce.
+
 - **Not yet supported**:
   - 6386 / 6BC8 / 6BA6 datasheet-refit entries for varimu compressor
     targets (Fairchild 670, Sta-Level, Altec 436). Math path is ready

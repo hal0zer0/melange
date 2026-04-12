@@ -104,6 +104,22 @@ enum Commands {
         #[arg(long)]
         backward_euler: bool,
 
+        /// Pentode grid-off dimension reduction mode.
+        ///
+        /// When a pentode's grid is biased well below cutoff at DC-OP, the
+        /// Ig1 NR dimension can be dropped and Vg2k frozen, reducing M by 1
+        /// per grid-off tube. This enables DK Schur for circuits that would
+        /// otherwise exceed the M=16 cap (e.g. 4×EL34 Plexi: M=18 → M=14).
+        ///
+        /// Valid values:{n}{n}
+        /// * auto — inspect DC-OP bias and reduce where Vgk < cutoff (default){n}{n}
+        /// * on — force grid-off on every non-variable-mu pentode regardless of
+        ///   bias. For testing / debugging only.{n}{n}
+        /// * off — never reduce; all pentodes keep their full 3D NR block.
+        ///   Use for regression parity with pre-1b codegen.
+        #[arg(long, default_value = "auto")]
+        tube_grid_fa: String,
+
         /// Op-amp supply rail saturation strategy.
         ///
         /// Controls how the generated solver models an op-amp's output hitting
@@ -437,6 +453,7 @@ fn main() -> Result<()> {
             oversampling,
             solver,
             backward_euler,
+            tube_grid_fa,
             opamp_rail_mode,
             name,
             mono,
@@ -498,6 +515,14 @@ fn main() -> Result<()> {
 
             let circuit_source = circuits::resolve(&input)?;
             println!("Resolved circuit: {}", circuit_source.name());
+            // Validate tube-grid-fa mode.
+            if !matches!(tube_grid_fa.as_str(), "auto" | "on" | "off") {
+                anyhow::bail!(
+                    "Unknown --tube-grid-fa '{}'. Valid values: auto, on, off",
+                    tube_grid_fa
+                );
+            }
+
             compile_circuit_source(
                 &circuit_source,
                 &output,
@@ -514,6 +539,7 @@ fn main() -> Result<()> {
                 no_dc_block,
                 &solver,
                 backward_euler,
+                &tube_grid_fa,
                 rail_mode,
                 name.as_deref(),
                 mono,
@@ -679,6 +705,7 @@ fn compile_circuit_source(
     no_dc_block: bool,
     solver_override: &str,
     backward_euler: bool,
+    tube_grid_fa: &str,
     opamp_rail_mode: melange_solver::codegen::OpampRailMode,
     plugin_name: Option<&str>,
     mono: bool,
@@ -868,6 +895,60 @@ fn compile_circuit_source(
                 Some(&mna),
             )
             .unwrap_or_default();
+            if !device_slots.is_empty() {
+                mna.stamp_device_junction_caps(&device_slots);
+            }
+        }
+    }
+
+    // Phase 1b: detect grid-off pentodes (Vgk < -(vgk_onset + 0.5) →
+    // pentode drops to 2D NR block with Vg2k frozen). Rebuilds MNA with
+    // the reduced dimension. Only runs on DK solver — nodal doesn't
+    // benefit from M-reduction at the solver level.
+    // `--tube-grid-fa off` skips entirely; `on` forces all pentodes.
+    let grid_off_pentodes = if tube_grid_fa == "off" || solver_override == "nodal" {
+        std::collections::HashMap::new()
+    } else {
+        let force_all = tube_grid_fa == "on";
+        melange_solver::codegen::ir::CircuitIR::detect_grid_off_pentodes(
+            &mna, &netlist, &fa_config, force_all,
+        )
+    };
+    if !grid_off_pentodes.is_empty() {
+        // Sorted pretty-print: names + frozen Vg2k per slot. Useful when
+        // diagnosing plexi-class circuits where the screen bias tells you
+        // which tube dropped into cutoff and by how much.
+        let mut pretty: Vec<(String, f64)> = grid_off_pentodes
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect();
+        pretty.sort_by(|a, b| a.0.cmp(&b.0));
+        let pretty_str: String = pretty
+            .iter()
+            .map(|(n, v)| format!("{n}(Vg2k={v:.1}V)"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!(
+            "  Grid-off pentodes: [{}] (M reduces by {})",
+            pretty_str,
+            grid_off_pentodes.len()
+        );
+        // Rebuild MNA with reduced-dimension pentodes
+        mna = MnaSystem::from_netlist_with_grid_off(&netlist, &grid_off_pentodes)
+            .with_context(|| "Failed to rebuild MNA for grid-off pentodes")?;
+        // Re-stamp input conductance (primary always grounded, but the rebuild
+        // zeroes it out so we re-apply like the FA path does)
+        if input_node_idx < mna.n {
+            mna.g[input_node_idx][input_node_idx] += input_conductance;
+        }
+        // Re-stamp junction capacitances
+        {
+            let device_slots =
+                melange_solver::codegen::ir::CircuitIR::build_device_info_with_mna(
+                    &netlist,
+                    Some(&mna),
+                )
+                .unwrap_or_default();
             if !device_slots.is_empty() {
                 mna.stamp_device_junction_caps(&device_slots);
             }
@@ -2731,6 +2812,7 @@ fn build_device_slots(
                         ibv: find_param(&model_name, "IBV").unwrap_or(1e-10),
                     }),
                     has_internal_mna_nodes: false,
+            vg2k_frozen: 0.0,
                 });
             }
             melange_solver::mna::NonlinearDeviceType::Bjt => {
@@ -2790,6 +2872,7 @@ fn build_device_slots(
                         tamb: 300.15,
                     }),
                     has_internal_mna_nodes: false,
+            vg2k_frozen: 0.0,
                 });
             }
             melange_solver::mna::NonlinearDeviceType::Jfet => {
@@ -2837,6 +2920,7 @@ fn build_device_slots(
                         rs: find_param(&model_name, "RS").unwrap_or(0.0),
                     }),
                     has_internal_mna_nodes: false,
+            vg2k_frozen: 0.0,
                 });
             }
             melange_solver::mna::NonlinearDeviceType::Mosfet => {
@@ -2884,6 +2968,7 @@ fn build_device_slots(
                         bulk_node: 0,
                     }),
                     has_internal_mna_nodes: false,
+            vg2k_frozen: 0.0,
                 });
             }
             melange_solver::mna::NonlinearDeviceType::Tube => {
@@ -2938,6 +3023,7 @@ fn build_device_slots(
                         ex_b: 0.0,
                     }),
                     has_internal_mna_nodes: false,
+            vg2k_frozen: 0.0,
                 });
             }
             melange_solver::mna::NonlinearDeviceType::Vca => {
@@ -2969,6 +3055,7 @@ fn build_device_slots(
                         thd,
                     }),
                     has_internal_mna_nodes: false,
+            vg2k_frozen: 0.0,
                 });
             }
             melange_solver::mna::NonlinearDeviceType::BjtForwardActive => {
@@ -3028,6 +3115,7 @@ fn build_device_slots(
                         tamb: 300.15,
                     }),
                     has_internal_mna_nodes: false,
+            vg2k_frozen: 0.0,
                 });
             }
         }

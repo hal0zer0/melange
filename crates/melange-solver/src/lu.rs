@@ -344,6 +344,7 @@ mod tests {
                 ibv: 1e-10,
             }),
             has_internal_mna_nodes: false,
+            vg2k_frozen: 0.0,
         }];
 
         let pattern = compute_g_aug_pattern(&a_flat, &n_i_flat, &n_v_flat, n, m, &slots);

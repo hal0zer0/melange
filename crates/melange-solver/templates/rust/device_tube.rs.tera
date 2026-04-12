@@ -1053,3 +1053,179 @@ fn tube_evaluate_pentode_classical(vgk: f64, vpk: f64, vg2k: f64,
       dig1_dvgk, 0.0,       0.0])
 }
 {% endif %}
+{% if any_grid_off_pentode %}
+
+// =============================================================================
+// Grid-off reduced pentodes — Phase 1b 2D NR block (Vgk → Ip, Vpk → Ig2).
+//
+// When DC-OP confirms the pentode is biased in grid-cutoff (Vgk < 0 with a
+// margin), the control-grid current Ig1 ≡ 0 and the screen voltage Vg2k is
+// approximately held constant by external screen-bypass caps. Phase 1b takes
+// advantage of this by dropping the Ig1 NR dimension entirely and freezing
+// Vg2k at the DC-OP-converged value (stored per-slot as DEVICE_{n}_VG2K_FROZEN).
+//
+// These helpers are **thin wrappers** around the sharp 3D helpers of the same
+// screen form. The 3D helpers run unchanged with `vg2k_frozen` substituted for
+// the live NR state; the wrappers then return only the (ip, ig2) currents and
+// the 2×2 upper-left block of the 3×3 Jacobian — the (jac[0], jac[1], jac[3],
+// jac[4]) entries. The emitted code calls these wrappers at the dispatch site
+// so the NR block sees a 2D slot with no s+2 Ig1 row.
+//
+// Variable-mu grid-off is NOT supported: variable-mu tubes model dynamic bias
+// (AGC sidechain), which is the exact opposite of the static-cutoff assumption
+// grid-off reduction makes. `pentode_dispatch` rejects that combination.
+// =============================================================================
+
+{% if any_grid_off_rational %}
+/// Grid-off Derk §4.4 Rational plate current Ip(Vgk, Vpk, vg2k_frozen).
+///
+/// Delegates to `tube_ip_pentode` with `vg2k = vg2k_frozen`. The signature
+/// is 3 voltages for call-site uniformity — the "2D-ness" is about the NR
+/// Jacobian shape and the dropped Ig1 output, not the helper arg count.
+#[inline(always)]
+fn tube_ip_pentode_grid_off(vgk: f64, vpk: f64, vg2k_frozen: f64,
+                            mu: f64, ex: f64, kg1: f64, kg2: f64, kp: f64, kvb: f64,
+                            alpha_s: f64, a_factor: f64, beta_factor: f64) -> f64 {
+    tube_ip_pentode(vgk, vpk, vg2k_frozen, mu, ex, kg1, kg2, kp, kvb,
+                    alpha_s, a_factor, beta_factor)
+}
+
+/// Grid-off Derk §4.4 Rational screen current Ig2(Vgk, Vpk, vg2k_frozen).
+#[inline(always)]
+fn tube_is_pentode_grid_off(vgk: f64, vpk: f64, vg2k_frozen: f64,
+                            mu: f64, ex: f64, kg1: f64, kg2: f64, kp: f64, kvb: f64,
+                            alpha_s: f64, beta_factor: f64) -> f64 {
+    tube_is_pentode(vgk, vpk, vg2k_frozen, mu, ex, kg1, kg2, kp, kvb,
+                    alpha_s, beta_factor)
+}
+
+/// Grid-off Derk §4.4 Rational 2×2 Jacobian.
+///
+/// State order: v = [Vgk, Vpk] → currents i = [Ip, Ig2]. Returns the
+/// upper-left 2×2 block of the sharp 3×3 Jacobian (in row-major [f64; 4]):
+/// [dIp/dVgk, dIp/dVpk, dIg2/dVgk, dIg2/dVpk]. The Vg2k column and Ig1 row
+/// of the full 3×3 are discarded — Vg2k is frozen (no NR dimension) and
+/// Ig1 is identically zero (dropped output).
+#[inline(always)]
+fn tube_jacobian_pentode_grid_off(vgk: f64, vpk: f64, vg2k_frozen: f64,
+                                  mu: f64, ex: f64, kg1: f64, kg2: f64, kp: f64, kvb: f64,
+                                  alpha_s: f64, a_factor: f64, beta_factor: f64,
+                                  ig_max: f64, vgk_onset: f64) -> [f64; 4] {
+    let jac9 = tube_jacobian_pentode(vgk, vpk, vg2k_frozen, mu, ex, kg1, kg2, kp, kvb,
+                                     alpha_s, a_factor, beta_factor, ig_max, vgk_onset);
+    // Upper-left 2×2 of the 3×3: [dIp/dVgk, dIp/dVpk, dIg2/dVgk, dIg2/dVpk].
+    [jac9[0], jac9[1], jac9[3], jac9[4]]
+}
+
+/// Grid-off Derk §4.4 Rational combined evaluation: returns (Ip, Ig2, [f64; 4]).
+///
+/// Thin wrapper: calls `tube_evaluate_pentode` with `vg2k = vg2k_frozen`
+/// (which shares the softplus / sigmoid / e1^ex work across Ip, Ig2 AND Ig1),
+/// then discards the Ig1 current and the [_, _, *] / [*, _, _] rows of the
+/// 3×3 Jacobian. The inliner folds the discarded work into dead-code
+/// elimination, so there's no runtime cost relative to a purpose-built 2D
+/// helper body.
+#[inline(always)]
+fn tube_evaluate_pentode_grid_off(vgk: f64, vpk: f64, vg2k_frozen: f64,
+                                  mu: f64, ex: f64, kg1: f64, kg2: f64, kp: f64, kvb: f64,
+                                  alpha_s: f64, a_factor: f64, beta_factor: f64,
+                                  ig_max: f64, vgk_onset: f64) -> (f64, f64, [f64; 4]) {
+    let (ip, ig2, _ig1, jac9) = tube_evaluate_pentode(vgk, vpk, vg2k_frozen,
+                                                      mu, ex, kg1, kg2, kp, kvb,
+                                                      alpha_s, a_factor, beta_factor,
+                                                      ig_max, vgk_onset);
+    (ip, ig2, [jac9[0], jac9[1], jac9[3], jac9[4]])
+}
+{% endif %}
+
+{% if any_grid_off_exponential %}
+/// Grid-off DerkE §4.5 Exponential plate current Ip(Vgk, Vpk, vg2k_frozen).
+#[inline(always)]
+fn tube_ip_beam_tetrode_grid_off(vgk: f64, vpk: f64, vg2k_frozen: f64,
+                                 mu: f64, ex: f64, kg1: f64, kg2: f64, kp: f64, kvb: f64,
+                                 alpha_s: f64, a_factor: f64, beta_factor: f64) -> f64 {
+    tube_ip_beam_tetrode(vgk, vpk, vg2k_frozen, mu, ex, kg1, kg2, kp, kvb,
+                         alpha_s, a_factor, beta_factor)
+}
+
+/// Grid-off DerkE §4.5 Exponential screen current Ig2(Vgk, Vpk, vg2k_frozen).
+#[inline(always)]
+fn tube_is_beam_tetrode_grid_off(vgk: f64, vpk: f64, vg2k_frozen: f64,
+                                 mu: f64, ex: f64, kg1: f64, kg2: f64, kp: f64, kvb: f64,
+                                 alpha_s: f64, beta_factor: f64) -> f64 {
+    tube_is_beam_tetrode(vgk, vpk, vg2k_frozen, mu, ex, kg1, kg2, kp, kvb,
+                         alpha_s, beta_factor)
+}
+
+/// Grid-off DerkE §4.5 Exponential 2×2 Jacobian.
+#[inline(always)]
+fn tube_jacobian_beam_tetrode_grid_off(vgk: f64, vpk: f64, vg2k_frozen: f64,
+                                       mu: f64, ex: f64, kg1: f64, kg2: f64, kp: f64, kvb: f64,
+                                       alpha_s: f64, a_factor: f64, beta_factor: f64,
+                                       ig_max: f64, vgk_onset: f64) -> [f64; 4] {
+    let jac9 = tube_jacobian_beam_tetrode(vgk, vpk, vg2k_frozen, mu, ex, kg1, kg2, kp, kvb,
+                                          alpha_s, a_factor, beta_factor, ig_max, vgk_onset);
+    [jac9[0], jac9[1], jac9[3], jac9[4]]
+}
+
+/// Grid-off DerkE §4.5 Exponential combined evaluation.
+#[inline(always)]
+fn tube_evaluate_beam_tetrode_grid_off(vgk: f64, vpk: f64, vg2k_frozen: f64,
+                                       mu: f64, ex: f64, kg1: f64, kg2: f64, kp: f64, kvb: f64,
+                                       alpha_s: f64, a_factor: f64, beta_factor: f64,
+                                       ig_max: f64, vgk_onset: f64) -> (f64, f64, [f64; 4]) {
+    let (ip, ig2, _ig1, jac9) = tube_evaluate_beam_tetrode(vgk, vpk, vg2k_frozen,
+                                                           mu, ex, kg1, kg2, kp, kvb,
+                                                           alpha_s, a_factor, beta_factor,
+                                                           ig_max, vgk_onset);
+    (ip, ig2, [jac9[0], jac9[1], jac9[3], jac9[4]])
+}
+{% endif %}
+
+{% if any_grid_off_classical %}
+/// Grid-off Classical Koren plate current Ip(Vgk, Vpk, vg2k_frozen).
+///
+/// The Classical helper takes 6 plate-model params (no αs/A/β).
+#[inline(always)]
+fn tube_ip_pentode_classical_grid_off(vgk: f64, vpk: f64, vg2k_frozen: f64,
+                                      mu: f64, ex: f64, kg1: f64, kg2: f64,
+                                      kp: f64, kvb: f64) -> f64 {
+    tube_ip_pentode_classical(vgk, vpk, vg2k_frozen, mu, ex, kg1, kg2, kp, kvb)
+}
+
+/// Grid-off Classical Koren screen current Ig2(Vgk, Vpk, vg2k_frozen).
+///
+/// Note: Classical Koren screen current is Vp-independent, but we still keep
+/// the Vpk argument for signature uniformity with the Derk paths. The
+/// underlying `tube_is_pentode_classical` ignores it via `_vpk`.
+#[inline(always)]
+fn tube_is_pentode_classical_grid_off(vgk: f64, vpk: f64, vg2k_frozen: f64,
+                                      mu: f64, ex: f64, kg1: f64, kg2: f64,
+                                      kp: f64, kvb: f64) -> f64 {
+    tube_is_pentode_classical(vgk, vpk, vg2k_frozen, mu, ex, kg1, kg2, kp, kvb)
+}
+
+/// Grid-off Classical Koren 2×2 Jacobian.
+#[inline(always)]
+fn tube_jacobian_pentode_classical_grid_off(vgk: f64, vpk: f64, vg2k_frozen: f64,
+                                            mu: f64, ex: f64, kg1: f64, kg2: f64,
+                                            kp: f64, kvb: f64,
+                                            ig_max: f64, vgk_onset: f64) -> [f64; 4] {
+    let jac9 = tube_jacobian_pentode_classical(vgk, vpk, vg2k_frozen, mu, ex, kg1, kg2,
+                                               kp, kvb, ig_max, vgk_onset);
+    [jac9[0], jac9[1], jac9[3], jac9[4]]
+}
+
+/// Grid-off Classical Koren combined evaluation.
+#[inline(always)]
+fn tube_evaluate_pentode_classical_grid_off(vgk: f64, vpk: f64, vg2k_frozen: f64,
+                                            mu: f64, ex: f64, kg1: f64, kg2: f64,
+                                            kp: f64, kvb: f64,
+                                            ig_max: f64, vgk_onset: f64) -> (f64, f64, [f64; 4]) {
+    let (ip, ig2, _ig1, jac9) = tube_evaluate_pentode_classical(vgk, vpk, vg2k_frozen,
+                                                                mu, ex, kg1, kg2, kp, kvb,
+                                                                ig_max, vgk_onset);
+    (ip, ig2, [jac9[0], jac9[1], jac9[3], jac9[4]])
+}
+{% endif %}
+{% endif %}

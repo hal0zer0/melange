@@ -16,7 +16,7 @@ When a user reports a plugin sounds wrong (clipping, blown speaker, distorted, t
 
 ## CRITICAL: Use CLI flags when two circuits need conflicting behavior
 
-When fixing one circuit regresses another, don't pick the lesser evil — expose both behaviors via a CLI flag named after the mechanism (not the circuit). Existing examples: `--solver {auto|dk|nodal}`, `--backward-euler`, `--oversampling {1|2|4}`. Each circuit opts into the mode that serves it. Default to the option with the broadest safety envelope. Flags are *not* a license to ship broken modes — every selectable mode has to be correct for some class of circuits.
+When fixing one circuit regresses another, don't pick the lesser evil — expose both behaviors via a CLI flag named after the mechanism (not the circuit). Existing examples: `--solver {auto|dk|nodal}`, `--backward-euler`, `--oversampling {1|2|4}`, `--tube-grid-fa {auto|on|off}`. Each circuit opts into the mode that serves it. Default to the option with the broadest safety envelope. Flags are *not* a license to ship broken modes — every selectable mode has to be correct for some class of circuits.
 
 ## CRITICAL: Never simplify circuits
 
@@ -94,7 +94,8 @@ RHS input = (V_in(n+1) + V_in(n)) * G_in   (proper trapezoidal, NOT 2*V*G)
 - JFETs: 2D per device (Vds→Id at start_idx, Vgs→Ig at start_idx+1)
 - MOSFETs: 2D per device (Vds→Id at start_idx, Vgs→Ig at start_idx+1)
 - Triodes: 2D per device (Vgk→Ip at start_idx, Vpk→Ig at start_idx+1)
-- Pentodes: 3D per device (Vgk→Ip at start_idx, Vpk→Ig2 at start_idx+1, Vg2k→Ig1 at start_idx+2). Reefman Derk §4.4 math; `TubeParams.kind = SharpPentode` dispatches the 3D codepath.
+- Pentodes: 3D per device (Vgk→Ip at start_idx, Vpk→Ig2 at start_idx+1, Vg2k→Ig1 at start_idx+2). Reefman Derk §4.4 / DerkE §4.5 / Classical Koren math (per `ScreenForm`); `TubeParams.kind = SharpPentode` dispatches the 3D codepath.
+- Pentodes (grid-off, phase 1b): 2D per device (Vgk→Ip, Vpk→Ig2, Ig1 dropped, Vg2k frozen at DC-OP value). Auto-detected when Vgk<cutoff. `TubeParams.kind = SharpPentodeGridOff` dispatches the 2D codepath. `DeviceSlot.vg2k_frozen` holds the DC-OP screen voltage. `--tube-grid-fa {auto,on,off}` CLI override.
 - VCAs: 2D per device (Vsig→Isig at start_idx, Vctrl→Ictrl at start_idx+1)
 - Device map built from netlist element order, mirrors MNA builder
 - Codegen uses `jdev_i_k` naming for block-diagonal Jacobian entries
@@ -155,7 +156,7 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
 | Zipper noise on knob automation | Pot values read once per buffer via `.value()`, smoother declared but unused | Per-sample `.smoothed.next()` read in plugin template (FIXED commit `7c0fc02`) |
 | NR max-iter-cap hits on wide-range pot jumps (preset recall, automation step) | Stale `v_prev`/`i_nl_prev` from previous (different) operating point; NR starts far from new bias | Warm DC-OP re-init in `set_pot_N`/`set_switch_N` when `|r - r_prev|/r_prev > 0.20` (FIXED commit `e8e18a7`). The earlier Sherman-Morrison removal (commit `eaee955`) was treating a symptom — SM is mathematically exact; stale DC-OP seed was the root cause. |
 
-## Current Status (2026-04-10)
+## Current Status (2026-04-11)
 
 ### Working
 - Linear circuit simulation (RC lowpass matches ngspice to 0.03% RMS, 8-nines correlation)
@@ -258,7 +259,7 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
 - BJT Gummel-Poon: self-heating (Rth/Cth) and charge storage (CJE/CJC/TF) available; no substrate current or avalanche breakdown
 - All device models fixed at room temperature (27°C); no temperature coefficients (TNOM, TC1, TC2, XTI)
 - Op-amp model: Boyle macromodel with GBW dominant pole, VCC/VEE asymmetric supply rail clamping, and optional slew-rate limiting via `SR=` in V/μs (per-sample `|Δv_out| ≤ SR·dt` clamp in all 3 codegen paths).
-- Pentodes shipped 2026-04-11 (Reefman Derk §4.4 math, 9 params per tube, 3D NR block). Catalog: EL84/EL34/EF86. Beam tetrodes (6L6/6V6/KT88) need the DerkE §4.5 screen form — phase 1a.1. Grid-off FA reduction (pentode 3D→2D when Vgk<0) — phase 1b. Remote-cutoff / variable-mu (6BA6 / 6386 for varimu compressors) — phase 1c.
+- Pentodes: all 6 phases shipped 2026-04-11 (1a Sharp Rational, 1a.1 Beam Tetrode, 1a.2 Classical Koren, 1b Grid-off FA reduction, 1c Variable-mu, 1e Catalog expansion). 29 catalog entries across 5 equation families. Grid-off (`--tube-grid-fa {auto,on,off}`) reduces pentode 3D→2D when Vgk<cutoff, enabling DK Schur for large amps (e.g., 4xEL34 Plexi: M=18→14).
 - **Device support** (`DeviceEntry`): Diode, DiodeWithRs, Led, BJT, JFET, MOSFET, Tube
 - **NodalSolver transient NR**: Converges for all physically valid circuits including Pultec EQP-1A (4 tubes, 2 transformers, global NFB). Requires positive-definite inductance matrices (validated at MNA build time).
 - **Coupled-inductor push-pull NFB**: Differential cathode injection with separated cathodes (820Ω between) and K=0.9999 provides 21 dB of NFB. Pultec at +1.8 dB (near unity). Ideal transformer formulation (dependent sources + explicit leakage/magnetizing L) deferred — current approach is sufficient.
@@ -299,6 +300,16 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
 - `circuits/unstable/ssl-bus-compressor.cir`: SSL 4000E bus compressor (4 op-amps, 1 VCA, 2 diodes, 2 pots, 2 switches)
   - Audio path codegen validated: -62.8 dB output matches runtime NodalSolver exactly
   - Uses nodal full-LU path (K≈0 from current-mode VCA, N=28, M=2)
+- `circuits/testing/el84-single-stage.cir`: Single EL84 pentode stage (Reefman Derk §4.4 rational screen form)
+  - DC-OP validated, end-to-end compile-and-run verified
+- `circuits/testing/ac15.cir`: Vox AC15-style amp (EF86 preamp + EL84 power pentodes)
+  - DC-OP validated, end-to-end compile-and-run verified
+- `circuits/testing/tweed-deluxe.cir`: Fender Tweed Deluxe-style amp (6V6GT beam tetrode power stage, DerkE §4.5 exponential screen)
+  - DC-OP validated, end-to-end compile-and-run verified
+- `circuits/testing/6k7-varimu-stage.cir`: 6K7 variable-mu pentode stage (Reefman §5 two-section Koren)
+  - DC-OP validated, end-to-end compile-and-run verified
+- `circuits/testing/plexi-mockup.cir`: Marshall Plexi-style amp (4×EL34 power stage, grid-off FA reduction M=18→14)
+  - DC-OP validated, end-to-end compile-and-run verified, DK Schur enabled via grid-off
 
 ### Shipped (2026)
 - Wurli-preamp SPICE validation (6-nines correlation, 3.2% RMS)
@@ -314,6 +325,7 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
 - Per-sample pot smoothing + warm DC-OP re-init on large pot jumps
 - Parser input-size caps + cargo-fuzz target
 - Plugin shipability CLI flags (`--vendor`, `--vendor-url`, `--email`, `--vst3-id`, `--clap-id`)
+- Pentode support: all 6 phases (1a Sharp Rational, 1a.1 Beam Tetrode, 1a.2 Classical Koren, 1b Grid-off FA, 1c Variable-mu, 1e Catalog expansion). 29 tube models, 5 equation families, `--tube-grid-fa {auto,on,off}` CLI flag
 
 ### Pending Work
 
