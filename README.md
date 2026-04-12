@@ -5,475 +5,260 @@
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-2021%20edition-orange.svg)](https://www.rust-lang.org)
 
-An open-source Rust toolkit that compiles SPICE netlists into optimized real-time audio DSP code — the step that every circuit modeler currently does by hand. Point it at a netlist and it emits a standalone Rust solver or a ready-to-build CLAP/VST3 plugin.
+Melange is a circuit compiler. Give it a SPICE netlist — or a KiCad schematic — and it emits optimized, real-time-safe DSP code. It handles the math so you can focus on your product.
 
-> **Project status: early alpha.** Current development focus has been on supporting the hardware needed for the [OpenWurli](https://github.com/openwurli/openwurli) project, plus a handful of validated vintage studio circuits (Pultec EQP-1A, tweed preamp, Wurlitzer 200A preamp). Most of the built-in circuits are still under investigation — see the [Built-in Circuits](#built-in-circuits) table for per-circuit status. Additional circuit tests are in the works.
+Melange is **not** a plugin framework. It doesn't generate GUIs, manage presets, or decide what your plugin looks like. It produces a DSP engine with exposed parameters. You bring everything else — that's the point.
 
-> **IMPORTANT: Always use caution when listening to Melange output.** Generated plugins include a default-on ear-protection soft limiter that prevents output from exceeding 0 dBFS, but circuits can still produce unexpected gain levels or unstable behavior. Always start with your monitor level at zero and increase gradually. The limiter can be toggled off at runtime or disabled entirely with `--no-ear-protection`.
+> **Status: early alpha.** Several classic circuits are validated and working (Pultec EQP-1A, Wurlitzer 200A, tweed preamp, Vox AC15, Tube Screamer). Others are under active development. See the [circuits table](#circuits) for per-circuit status.
+
+> **Ear safety.** Generated plugins include a default-on soft limiter. Start with your monitor level at zero and increase gradually. Disable with `--no-ear-protection` for measurement.
 
 ## The Problem
 
-There is no open-source tool that takes a circuit netlist and produces optimized real-time DSP code. Every audio developer who wants to model a real circuit (guitar amp, pedal, preamp, compressor) currently:
+There is no open-source tool that takes a circuit schematic and produces optimized real-time DSP code. Every audio developer who wants to model a real circuit currently derives MNA matrices by hand, implements a solver by hand, validates against SPICE by hand, and optimizes for real-time by hand.
 
-1. Reads a schematic by hand
-2. Derives MNA matrices by hand
-3. Implements a solver by hand
-4. Validates against SPICE by hand
-5. Optimizes for real-time by hand
+**Melange automates all of that.**
 
-**Melange automates steps 2-5.**
+## Three Ways In
 
-## One Command, Done
+### 1. From a KiCad schematic
 
-### SPICE netlist to audio plugin
+Draw your circuit in KiCad, export, compile. Melange ships a [KiCad symbol library and netlist exporter](kicad/README.md) for triodes, pentodes, op-amps, VCAs, pots, wipers, and audio I/O markers.
+
+```
+┌──────────┐     Export      ┌──────────┐    melange     ┌──────────┐
+│  KiCad   │ ──────────────► │  .cir    │ ─────────────► │  Plugin  │
+│ Schematic│   (one click)   │ netlist  │    compile     │ Project  │
+└──────────┘                 └──────────┘                └──────────┘
+```
+
+```bash
+# Export from KiCad (or use File → Export Netlist → Melange in the GUI)
+kicad-cli sch export python-bom -o circuit.xml my-circuit.kicad_sch
+melange import circuit.xml -o circuit.cir
+
+# Compile to plugin
+melange compile circuit.cir --format plugin -o my-plugin
+cd my-plugin && cargo build --release
+# → VST3/CLAP plugin ready to load in your DAW
+```
+
+Standard parts (R, C, L, D, BJT, JFET, MOSFET) use KiCad's built-in `Simulation_SPICE` symbols. Melange-specific parts (triodes, pentodes, VCAs, pots, wipers, I/O markers) use the included `melange.kicad_sym` library. See the [KiCad integration guide](kicad/README.md) for setup.
+
+### 2. From a SPICE netlist
+
+Write a netlist by hand or grab one from a circuit repository:
+
+```bash
+melange compile my-circuit.cir --format plugin -o my-plugin
+cd my-plugin && cargo build --release
+```
+
+### 3. From a built-in circuit
+
+Melange embeds a handful of classic circuits you can compile by name:
 
 ```bash
 melange compile tube-screamer --format plugin -o my-ts
 cd my-ts && cargo build --release
-# You now have a VST3/CLAP plugin.
 ```
 
-That's it. One command turns a circuit into a buildable nih-plug project with all the DSP, parameters, and real-time-safe code generated for you.
-
-### Simulate a circuit to WAV
+You can also add git repos as named circuit sources:
 
 ```bash
-# Push a guitar recording through a Tube Screamer
-melange simulate tube-screamer --input-audio guitar.wav -o output.wav
-
-# Quick test tone through the same circuit
-melange simulate tube-screamer --amplitude 0.1 -o drive.wav
-```
-
-No code, no compilation — just circuit + audio in, audio out.
-
-### Fetch circuits from anywhere
-
-```bash
-# Built-in circuits — just use the name
-melange compile tube-screamer --format plugin -o ts9
-
-# Local SPICE netlist
-melange compile my-circuit.cir --format plugin -o my-plugin
-
-# Add a git repo as a circuit source
 melange sources add pedalboards https://github.com/someone/spice-pedals
 melange compile pedalboards:rat-distortion --format plugin -o rat
 ```
 
-Sources are cached locally. Share circuit libraries via git, pull them by name.
+## Simulate Without Compiling
 
-### Inspect any circuit
-
-```bash
-melange nodes tube-screamer
-# Nodes in circuit:
-#   (0) GND - Ground reference
-#   (1) in
-#   (2) v_plus
-#   (3) v_minus
-#   ...
-# Nonlinear devices:
-#   U1: OpAmp (dimension: 0, linear VCCS)
-#   D1: Diode (dimension: 1)
-#   D2: Diode (dimension: 1)
-```
-
-### Cross-compile for macOS from Linux
+Don't want a plugin yet? Push audio through a circuit directly:
 
 ```bash
-cargo zigbuild --release --target universal2-apple-darwin
-rcodesign sign target/universal2-apple-darwin/release/libmy_plugin.dylib
-# Universal Mac binary, ad-hoc signed. Ship it.
+# Process a WAV file through the circuit
+melange simulate tube-screamer --input-audio guitar.wav -o output.wav
+
+# Quick test tone
+melange simulate tube-screamer --amplitude 0.1 -o drive.wav
+
+# Frequency response sweep
+melange analyze tube-screamer --pot "Drive=100k" --switch "Mode=2"
 ```
 
-## Documentation
+## What You Get
 
-- **[Getting Started](docs/GETTING_STARTED.md)** — from zero to working plugin in 5 minutes
-- **[Netlist Writing Guide](docs/NETLIST_GUIDE.md)** — how to write SPICE netlists from schematics
-- **[Plugin Development Guide](docs/PLUGIN_GUIDE.md)** — customizing generated plugins
-- **[SPICE Grammar Reference](docs/spice-grammar.md)** — complete syntax for all elements and directives
-- **[Math & Internals (`docs/aidocs/`)](docs/aidocs/INDEX.md)** — MNA, DK-method, Newton-Raphson, Gummel-Poon, Sherman-Morrison, oversampling, codegen, and validation reference docs. Dense and equation-heavy — start here if you want to understand or modify the solver core.
+The generated plugin project has two files:
 
-## Features
+| File | You edit it? | Contains |
+|------|-------------|----------|
+| `src/circuit.rs` | **No** — regenerate it | All DSP: matrices, NR solver, device equations, DC operating point, sample-rate recomputation |
+| `src/lib.rs` | **Yes** — it's yours | Plugin wrapper: parameters, GUI, presets, pre/post processing |
 
-- **SPICE Netlist Parser**: Industry-standard SPICE netlists with `.model` and `.subckt` support
-- **MNA/DK Solver**: Modified Nodal Analysis with Discrete K-method (Yeh 2009)
-- **Device Models**: Diode, BJT (Ebers-Moll/Gummel-Poon), JFET, MOSFET, vacuum tube (triode/pentode/beam tetrode), op-amp, VCA, CdS LDR
-- **Dynamic Controls**: `.pot` (linear potentiometer), `.wiper` (tapered wiper across two resistors), `.switch` (ganged R/C/L switching), and `.gang` (link multiple pots/wipers to a single UI knob) directives
-- **Real-Time Safe**: Zero heap allocation in audio callback, no `unsafe` code, f64 precision
-- **Code Generation**: Optimized Rust with compile-time constants, sparse matrices, unrolled loops
-- **Plugin Generation**: One-step CLAP/VST3 plugin projects via nih-plug
-- **SPICE Validation**: Automated comparison against ngspice reference simulations
-- **Cross-Compilation**: Build macOS plugins from Linux via cargo-zigbuild
-
-## Supported Components
-
-All nonlinear devices are handled in the **codegen pipeline** — `melange compile` emits
-straight-line Rust code with the device equations baked in. Purely linear circuits (M=0)
-can also run via an in-process `LinearSolver`, but most users will only touch the codegen path.
-
-| Component | Model |
-|-----------|-------|
-| Resistor / Capacitor / Inductor | Trapezoidal companion models; inductors via augmented MNA |
-| Diode | Shockley + series resistance + Zener breakdown (BV/IBV); LED variant |
-| BJT | Ebers-Moll or Gummel-Poon (VAF/VAR/IKF/IKR); CJE/CJC; parasitic RB/RC/RE |
-| JFET | Shichman-Hodges 2D (triode + saturation + λ); CGS/CGD; parasitic RD/RS |
-| MOSFET | Level 1 SPICE 2D; body effect (GAMMA/PHI); CGS/CGD |
-| Vacuum Triode | Koren triode + Leach grid current + λ; CCG/CGP/CCP; parasitic RGI |
-| Vacuum Pentode / Beam Tetrode | 4 equation families: Reefman Derk §4.4 rational (true pentodes), DerkE §4.5 exponential (beam tetrodes), Classical Koren (power beam tetrodes), Reefman §5 variable-mu (remote-cutoff); 3D NR with grid-off auto-reduction to 2D |
-| Op-Amp | Boyle VCCS macromodel (AOL, ROUT, GBW pole, VCC/VEE rail clamping) |
-| VCA | THAT 2180 exponential gain (current-mode, THD) |
-| CdS LDR | VTL5C3/4, NSL-32 with asymmetric envelope (used as a dynamic resistor) |
-| Voltage Source | DC (Norton equivalent) |
-| Potentiometer | `.pot` + `.wiper` directives; per-block matrix rebuild with per-sample smoothing |
-| Switch | `.switch` directive; ganged R/C/L component switching |
-
-Temperature coefficients and noise models are not yet implemented.
-See [Known Limitations](#known-limitations) and `docs/aidocs/STATUS.md` for the full list.
-
-### Tube Catalog
-
-Melange ships 29 pentode/beam tetrode models from Reefman TubeLib.inc (2016) alongside the existing triode catalog. Each model selects the correct equation family automatically via the `.model` directive.
-
-| Family | Equation | Key Tubes |
-|--------|----------|-----------|
-| Triode (Koren) | Koren plate current + Leach grid | 12AX7, 12AU7, 12AT7, 6SN7, 6SL7, 6V6 triode section |
-| True pentode (Reefman Derk §4.4) | Rational screen `1/(1+beta*Vp)` | EL84/6BQ5, EL34/6CA7, EF86/6267 |
-| Beam tetrode (Reefman DerkE §4.5) | Exponential screen `exp(-(beta*Vp)^{3/2})` | 6L6GC, 5881, 6V6GT |
-| Power beam tetrode (Classical Koren) | `arctan(Vpk/Kvb)` plate knee | KT88, 6550 |
-| Variable-mu (Reefman §5) | Two-section Koren blend | 6K7, 6K7G, 6K7GT, EF89 |
-
-Pentodes use the `P` element prefix with plate-grid-cathode-screen pin order. Pentodes in cutoff auto-reduce from 3D to 2D Newton-Raphson (grid-off optimization), keeping large amp circuits within the DK Schur fast path.
-
-New validation circuits in `circuits/testing/`:
-
-| Circuit | Description |
-|---------|-------------|
-| `el84-single-stage.cir` | Single EL84 pentode gain stage |
-| `ac15.cir` | Vox AC15-class amp (EF86 + 2x EL84 push-pull + OT) |
-| `tweed-deluxe.cir` | Fender Tweed Deluxe-class (2x 6V6GT push-pull + OT) |
-| `plexi-mockup.cir` | Marshall Plexi 100W-class (4x EL34 + 3x 12AX7 + OT) |
-| `6k7-varimu-stage.cir` | Variable-mu gain cell (6K7 remote-cutoff pentode) |
-
-## Validated Circuit Spotlight: Pultec EQP-1A
-
-The Pultec EQP-1A passive EQ is the hardest circuit melange currently simulates
-end-to-end, and the clearest evidence it handles real-world vintage gear:
-
-- **4 vacuum tubes** (2× 12AX7, 2× 12AU7 Koren models)
-- **2 transformers** (HS-29 input, S-217-D output with tertiary feedback winding), verified against Sowter DWG E-72,658-2
-- **21 dB of global negative feedback** via differential cathode injection through the S-217-D tertiary
-- **7 pots + 3 switches** (LF Boost / LF Atten / HF Boost / HF Cut / Bandwidth, LF Freq / HF Freq / HF Cut Freq)
-- **N=41 nodes, M=8 nonlinear dimensions**, routed to the nodal full-LU path
-- **Gain: +1.8 dB at 1 kHz** (near unity, spec is 0 dB), flat ±1 dB from 20 Hz to 15 kHz
-- **All 7 EQ curves verified** against the schematic, including the famous Pultec Trick
-- **Runs ~11× realtime** with chord method + cross-timestep Jacobian persistence + compile-time sparse LU
-- **Zero NR failures** at 1 V input
-
-Every feature in this README that isn't a smoke test was built to make this circuit work.
-If you want to see what the numerical stack looks like in one circuit, start here:
-
-```bash
-melange compile circuits/stable/pultec-eq.cir --format plugin -o pultec-plugin
-melange analyze circuits/stable/pultec-eq.cir --pot "LF Boost=10" --switch "LF Freq=1"
-```
-
-## Architecture
-
-```
-crates/
-  Layer 5: melange-plugin     — nih-plug integration (voice mgmt, oversampling, params)
-  Layer 4: melange-validate   — SPICE-to-Rust validation pipeline
-  Layer 3: melange-solver     — MNA/DK-method engine + code generation (THE CORE)
-  Layer 2: melange-devices    — Component models (BJT, tube, diode, LDR, opamp)
-  Layer 1: melange-primitives — DSP building blocks (filters, oversampling, NR helpers)
-
-tools/
-  melange-cli                 — command-line front-end (consumes Layers 3 + 4)
-```
-
-Each crate is useful independently. The pipeline:
-
-```
-SPICE Netlist → Parser → MNA System → DK Kernel → CircuitIR → Rust Emitter → Source Code
-```
-
-## Solver Routing
-
-Melange auto-selects the best solver backend for each circuit:
-
-| Solver | When Selected | Performance | Pot Updates |
-|--------|--------------|-------------|-------------|
-| **DK** | M < 10, ≤ 1 transformer group | 100-600x realtime | Per-block (matrix rebuild) |
-| **Nodal Schur** | M ≥ 10 or 2+ transformer groups | 10-50x realtime | Per-block (matrix rebuild) |
-| **Nodal Full LU** | K matrix ill-conditioned, VCA circuits, or complex feedback | 5-15x realtime | Per-block (matrix rebuild) |
-
-Example circuits from `circuits/stable/` (48kHz, release build):
-
-| Circuit | N | M | Solver | Performance |
-|---------|---|---|--------|-------------|
-| RC lowpass | 2 | 0 | Linear | trivial (linear reference) |
-| Wurli preamp (2× 2N5089 + diode) | 11 | 3–5 | DK | fast (DK range: 100–600× realtime) |
-| Tweed preamp (2× 12AX7) | 13 | 4 | DK | fast (DK range: 100–600× realtime) |
-| Pultec EQP-1A (4 tubes, 2 transformers) | 41 | 8 | Nodal full LU | ~11× (chord + cross-timestep + sparse LU) |
-
-Override with `--solver dk` or `--solver nodal` if auto-selection doesn't suit your needs.
-See `docs/aidocs/STATUS.md` for the full validated-circuits table, including circuits
-in `testing/` and `unstable/` that are not yet user-verified.
-
-## Built-in Circuits
-
-Melange embeds a handful of classic circuits you can compile by name (`melange compile <name>`).
-Most are under active development — only `rc-lowpass` has passed full user sign-off.
-Promotion to `stable/` requires a DAW listening test, not just SPICE correlation.
-
-| Circuit | Status | Description |
-|---------|--------|-------------|
-| `rc-lowpass` | stable | Simple RC lowpass filter (linear reference / smoke test) |
-| `tube-screamer` | testing | Op-amp overdrive with diode feedback clipping (TS808 style) |
-| `tube-preamp` | testing | Common-cathode 12AX7 triode gain stage with tone control |
-| `mordor-screamer` | testing | High-gain distortion forged in Mount Doom |
-| `fuzz-face` | unstable | 2-transistor fuzz (Fuzz Face style) — under investigation |
-| `big-muff` | unstable | 4-transistor fuzz with dual clipping — under investigation |
-| `ssl-bus-compressor` | unstable | SSL 4000E bus compressor — audio path works, full plugin not stable |
-
-The repository's `circuits/stable/` directory also contains user-verified circuits that
-aren't embedded as built-ins. Clone the repo and compile by path:
-
-| Circuit | Description |
-|---------|-------------|
-| `circuits/stable/wurli-preamp.cir` | Wurlitzer 200A preamp (2 BJTs + diode, LDR tremolo) |
-| `circuits/stable/tweed-preamp.cir` | Fender-style 2× 12AX7 guitar preamp (volume pot, bright switch) |
-| `circuits/stable/pultec-eq.cir` | **Pultec EQP-1A** — 4 tubes, 2 transformers, 7 pots, 3 switches, 21 dB global NFB (see [spotlight](#validated-circuit-spotlight-pultec-eqp-1a) above) |
-
-See `docs/aidocs/STATUS.md` for the full promotion criteria and the list of circuits currently in `testing/` and `unstable/`.
-
-## Quick Start (Library)
-
-```rust
-use melange_solver::parser::Netlist;
-use melange_solver::mna::MnaSystem;
-use melange_solver::dk::DkKernel;
-
-// Parse a SPICE netlist
-let spice = r#"RC Circuit
-R1 in out 1k
-C1 out 0 1u
-"#;
-let netlist = Netlist::parse(spice)?;
-
-// Build MNA system
-let mna = MnaSystem::from_netlist(&netlist)?;
-
-// Create DK kernel at sample rate
-let kernel = DkKernel::from_mna(&mna, 44100.0)?;
-```
-
-## CLI Reference
-
-```
-melange compile <circuit> -o <output>      Compile circuit to Rust code or plugin project
-melange simulate <circuit> -o <output>     Simulate circuit, write WAV output
-melange analyze <circuit>                  Analyze circuit frequency response
-melange validate <circuit>                 Compare against ngspice reference
-melange nodes <circuit>                    List nodes and devices in a circuit
-melange import <file.xml> -o <file.cir>    Import a KiCad XML or SPICE netlist to Melange format
-melange builtins                           List built-in circuits
-melange sources add <name> <url>           Add a git repo as a circuit source
-melange sources list|show|remove           Manage configured sources
-melange cache list|clear|stats             Manage cached circuits
-```
-
-Every subcommand supports `--help` for the full flag list. Highlights below.
-
-### `compile` — SPICE netlist to Rust code or nih-plug plugin
-
-```
--f, --format <code|plugin>      Output format (default: code)
-    --name <str>                Plugin display name (defaults to capitalized circuit filename)
-    --mono                      Generate mono plugin (default: stereo)
-    --wet-dry-mix               Add a wet/dry mix parameter to the generated plugin
--s, --sample-rate <Hz>          Target sample rate (default: 48000)
--I, --input-node <name>         Input node name (default: "in")
--n, --output-node <name>        Output node name(s), comma-separated for multi-output
-    --input-resistance <Ω>      Override Thevenin source impedance (default: 1Ω or .input_impedance directive)
-    --solver <auto|dk|nodal>    Solver backend (default: auto)
-    --oversampling <1|2|4>      Oversampling factor (default: 1)
-    --backward-euler            Backward Euler integration instead of trapezoidal (fixes high-gain feedback divergence)
-    --opamp-rail-mode <MODE>    Op-amp rail saturation strategy: auto | none | hard | active-set | boyle-diodes (default: auto)
-    --max-iter <N>              Maximum NR iterations (default: 50)
-    --tolerance <f64>           NR convergence tolerance (default: 1e-9)
-    --output-scale <f64>        Circuit-volts → DAW-units mapping (default: 1.0). Not a bug-fix knob.
-    --no-level-params           Omit Input/Output Level parameters from plugin
-    --no-dc-block               Disable the 5 Hz DC blocking filter
-    --no-ear-protection         Disable the default soft limiter (measurement / testing only)
-```
-
-### `simulate` — run a circuit against a WAV file or test tone
-
-```
--a, --input-audio <file>        Input WAV file (omit to generate a test tone)
--o, --output <file>             Output WAV file
--s, --sample-rate <Hz>          Sample rate (used when no input audio) (default: 48000)
--d, --duration <s>              Duration in seconds for generated test tone (default: 1.0)
-    --amplitude <0..1>          Test-tone amplitude (default: 0.5)
--I, --input-node <name>         Input node name (default: "in")
--n, --output-node <name>        Output node name (default: "out")
-    --input-resistance <Ω>      Override Thevenin source impedance
-    --solver <auto|dk|nodal>    Solver backend (default: auto)
-    --opamp-rail-mode <MODE>    auto | none | hard | active-set | active-set-be | boyle-diodes
-```
-
-### `analyze` — frequency-response sweep
-
-```
-    --start-freq <Hz>           Start frequency (default: 20)
-    --end-freq <Hz>             End frequency (default: 20000)
-    --points-per-decade <N>     Frequency resolution (default: 10)
-    --amplitude <V>             Input amplitude (default: 0.1)
--s, --sample-rate <Hz>          Internal sample rate (default: 96000)
--I, --input-node <name>         Input node name (default: "in")
--n, --output-node <name>        Output node name (default: "out")
-    --input-resistance <Ω>      Override Thevenin source impedance
-    --pot <NAME=VALUE>          Set pot value (e.g. `--pot "LF Boost=10k"`). Repeatable.
-    --switch <NAME=POS>         Set switch position (e.g. `--switch "LF Freq=3"`). Repeatable.
--o, --output <file>             Write CSV to file (default: stdout)
-```
-
-`--pot` / `--switch` are the whole point of running `analyze` on circuits like the Pultec —
-they let you sweep EQ curves by setting each control to a specific value per run.
-
-### `validate` — compare melange output against ngspice
-
-```
--n, --output-node <name>        Output node name (default: "out")
--s, --sample-rate <Hz>          Sample rate (default: 48000)
-    --duration <s>              Test signal duration (default: 1.0)
-    --amplitude <V>             Test signal amplitude (default: 0.1)
-    --csv <file>                Write per-sample comparison to CSV
-    --relaxed                   Use relaxed tolerances (1% RMS, 0.999 correlation)
-```
-
-Requires `ngspice` on `PATH`.
-
-Circuits can be referenced as:
-- **Built-in name**: `tube-screamer`, `fuzz-face`, `big-muff`, ...
-- **Local file**: `path/to/circuit.cir`
-- **Source reference**: `sourcename:circuitname`
-
-## What Gets Generated
-
-The generated code is completely standalone — zero runtime dependencies on melange. It includes:
-
-- Pre-inverted DK matrices with sparsity-aware emission (only non-zero entries)
-- Newton-Raphson solver (M=1 direct, M=2 Cramer's, M=3-16 Gaussian elimination)
-- DC operating point initialization for correct bias
-- Per-block matrix rebuild for dynamic potentiometers with per-sample value smoothing
-- Matrix rebuild for runtime sample rate changes
-- DC blocking filter (5 Hz HPF)
-- Input/Output Level parameters (both default to 0 dB)
-- Optional 2x/4x oversampling (self-contained polyphase half-band IIR)
-- All buffers pre-allocated — zero heap allocation in the audio path
-
-## Customizing Generated Plugins
-
-Generated plugins use a two-file architecture:
-
-- **`src/circuit.rs`** — Generated DSP code (matrices, NR solver, state). Don't edit by hand.
-- **`src/lib.rs`** — Plugin wrapper (params, GUI, presets). Customize freely.
-
-To iterate on component values without losing your `lib.rs` customizations, regenerate just the circuit:
+To iterate on component values without losing your `lib.rs` work:
 
 ```bash
 melange compile my-circuit.cir --format code -o my-plugin/src/circuit.rs
 ```
 
-### Parameter Labels
+The generated DSP code is completely standalone — zero runtime dependencies on melange. It includes pre-inverted matrices with sparsity-aware emission, Newton-Raphson iteration, DC bias initialization, per-sample pot smoothing, optional oversampling, DC blocking, and ear protection. All buffers are pre-allocated. Zero heap allocation in the audio path. No `unsafe`.
 
-Add human-readable labels to `.pot`, `.wiper`, and `.switch` directives in your netlist:
+### What's yours to customize
 
-```spice
-.pot R_vol 500 500k "Volume"
-.wiper R_cw R_ccw 100k 0.5 "Fuzz"
-.switch C_bright 1p 120p 470p "Bright"
-.gang "Gain" R_gain_a R_gain_b    # link two pots to one knob
-```
-
-Without labels, params fall back to the component name (e.g. `R_vol`, `Switch 0 (C_bright)`).
-
-### Op-Amp Supply Rails
-
-Op-amps in melange use the Boyle VCCS macromodel. Specify supply rails on the `.model`
-line — symmetric rails via `VSAT`, or asymmetric via explicit `VCC` / `VEE`:
-
-```spice
-U1 vin- vin+ vout OA_TL072
-.model OA_TL072 OA(AOL=200000 ROUT=75 GBW=3Meg VSAT=13)    ; ±13 V
-.model OA_SINGLE OA(AOL=100000 ROUT=75 GBW=1Meg VCC=9 VEE=0)   ; 0..9 V single-supply
-.model OA_CHARGE OA(AOL=200000 ROUT=75 GBW=3Meg VCC=18 VEE=-9) ; asymmetric charge pump
-```
-
-When the op-amp output approaches the rails, `--opamp-rail-mode` controls the clamping strategy:
-
-| Mode | Behavior | Use when |
-|------|----------|----------|
-| `auto` (default) | Inspect the circuit and pick the cheapest correct mode; logged at compile time | Always start here |
-| `none` | No clamping (unbounded output) | Verified-linear circuits only |
-| `hard` | Post-NR `v.clamp(VEE, VCC)` — cheap, breaks KCL for AC-coupled downstream caps | Legacy / debugging |
-| `active-set` | Post-NR constrained re-solve (KCL-consistent hard clip) | Klon-class circuits with cap coupling |
-| `boyle-diodes` | Auto-inserted physical catch diodes to rail-offset sources (soft exponential knee) | Distortion pedals where the clip shape matters |
-
-### What's Safe to Customize in lib.rs
-
-- Parameter names, ranges, units, and smoothing
-- Plugin metadata (name, vendor, description)
 - GUI (nih-plug supports [VIZIA](https://github.com/vizia/vizia) and [iced](https://github.com/iced-rs/iced))
-- Pre/post processing (wet/dry mix, oversampling control)
+- Parameter names, ranges, units, smoothing curves
+- Plugin metadata (name, vendor, VST3/CLAP IDs)
 - Presets and state persistence
+- Pre/post processing (wet/dry mix, oversampling control, sidechain)
 
-## Known Limitations
+See the [Plugin Development Guide](docs/PLUGIN_GUIDE.md) for details.
 
-- **Fixed temperature (27°C)**: All device models simulate at 300.15K. No temperature coefficients.
-- **Tube models**: No space-charge or transit-time effects. Varimu compressor tubes (6386, 6BA6, 6BC8) need datasheet refits not yet available.
-- **Ideal transformers**: Coupled inductors assume constant coupling coefficient with no core saturation or hysteresis.
-- **Op-amps**: Boyle VCCS macromodel with optional GBW dominant pole, optional slew-rate limiting (`SR`, in V/μs per SPICE convention, e.g. `SR=13` for a TL072), symmetric (`VSAT`) or asymmetric (`VCC`/`VEE`) supply rails, and five selectable rail-clamping strategies (`--opamp-rail-mode`).
-- **No noise simulation**: Shot noise, thermal noise, and 1/f noise are not modeled.
+## Supported Devices
 
-## Resource Limits
+| Component | Model | Notes |
+|-----------|-------|-------|
+| R / C / L | Trapezoidal companion; inductors via augmented MNA | Coupled inductors and transformers supported |
+| Diode | Shockley + series resistance + Zener breakdown | LED variant included |
+| BJT | Ebers-Moll or Gummel-Poon | Junction caps, parasitic R, Early effect, high-injection knee. Matches ngspice `bjtload.c` line-for-line |
+| JFET | Shichman-Hodges (triode + saturation) | N-channel and P-channel |
+| MOSFET | SPICE Level 1 | Body effect, channel-length modulation |
+| Vacuum Triode | Norman Koren + Leach grid current | 12AX7, 12AU7, 12AT7, 6SN7, 6SL7, and more |
+| Vacuum Pentode | 5 equation families, 29 models | EL84, EL34, EF86, 6L6, 6V6, KT88, 6550, and 22 more. Auto grid-off optimization for cutoff |
+| Op-Amp | Boyle VCCS macromodel | GBW pole, slew-rate limiting, asymmetric VCC/VEE rails, 4 clamping strategies |
+| VCA | THAT 2180 exponential | Current-mode with gain-dependent THD |
+| CdS LDR | VTL5C3/4, NSL-32 | Asymmetric attack/release envelope |
+| Potentiometer | `.pot` / `.wiper` / `.gang` directives | Per-sample smoothing, warm DC-OP re-init on large jumps |
+| Switch | `.switch` directive | Ganged R/C/L component switching |
 
-| Limit | Value | What Happens |
-|-------|-------|-------------|
-| Nonlinear dimensions (M) | 16 max on DK path | Auto-routes to nodal solver |
-| Circuit nodes (N) | 256 max | Rejected with error |
-| Elements after expansion | 10,000 max | Rejected with error |
-| Subcircuit nesting | 8 levels max | Rejected with error |
-| Pots per circuit | 32 max | Rejected with error |
-| Switches per circuit | 16 max | Rejected with error |
+All device parameters use standard SPICE `.model` syntax. Temperature is fixed at 27°C; no noise simulation.
 
-M counts nonlinear *dimensions*, not devices: each diode adds 1, each BJT/JFET/MOSFET/triode/VCA adds 2, each pentode adds 3 (auto-reduced to 2 in grid-off cutoff).
+## Circuits
 
-## Audio Safety Features
+Melange auto-selects the optimal solver for each circuit (DK, Nodal Schur, or Nodal Full LU). Override with `--solver dk` or `--solver nodal` if needed.
 
-Three features protect your ears and speakers (all default-on, all optional):
+### Stable (validated + listening-tested)
 
-- **Ear protection** — soft limiter that engages near 0 dBFS. Toggle at runtime or disable with `--no-ear-protection`.
-- **DC blocking** — 5 Hz high-pass filter removes DC offset from circuit output. Settles in ~200ms. Disable with `--no-dc-block` if the circuit has its own output coupling capacitor.
-- **Oversampling** (opt-in) — 2x or 4x polyphase half-band IIR reduces aliasing from nonlinear devices. Enable with `--oversampling 2` or `--oversampling 4`. CPU cost scales linearly.
+| Circuit | What it is | Devices | Performance |
+|---------|-----------|---------|-------------|
+| `circuits/stable/pultec-eq.cir` | **Pultec EQP-1A** — 7 pots, 3 switches, global NFB | 4 tubes, 2 transformers | ~11× RT |
+| `circuits/stable/wurli-preamp.cir` | Wurlitzer 200A preamp with LDR tremolo | 2 BJTs + 1 diode | ~500× RT |
+| `circuits/stable/tweed-preamp.cir` | Fender-style 2× 12AX7 with volume pot + bright switch | 2 triodes | ~400× RT |
+| `rc-lowpass` (built-in) | RC lowpass — linear reference / smoke test | None | trivial |
 
-## Troubleshooting
+### Testing (compiles and runs, not yet ear-verified)
 
-| Symptom | Likely Cause | Fix |
-|---------|-------------|-----|
-| Plugin produces silence | Wrong input/output node names | Check `melange nodes circuit.cir`; use `--input-node` / `--output-node` |
-| NaN, oscillation, or blown-up output | DC operating point failed to converge, or feedback loop is running away | Check biasing and supply voltages; try `--backward-euler` for high-gain feedback circuits; for op-amp circuits try `--opamp-rail-mode boyle-diodes` |
-| Output is in millivolts when you expected volts | Real circuit output level is low (e.g. a guitar-level stage into another stage) | Use `--output-scale` only as a **unit mapping** to match the downstream stage's expected range. Do **not** use it to cover up a solver bug — if the circuit should output volts and it doesn't, that's a modeling/solver issue, not a gain issue. File a report. |
-| "M exceeds MAX_M" error | Too many nonlinear dimensions for DK solver | Use `--solver nodal` |
-| Clicks on parameter changes | Pot smoothing too short | Increase smoother duration in `lib.rs` |
-| ~3% error vs ngspice | Using wrong RHS formulation | Ensure trapezoidal (default); check `.OPTIONS INTERP` in SPICE netlist |
-| Output all zeros | VIN source in no-vin netlist | Check that the circuit file doesn't include VIN (melange provides input via conductance) |
+| Circuit | What it is | Devices |
+|---------|-----------|---------|
+| `tube-screamer` (built-in) | TS808-style op-amp overdrive | 1 op-amp + 2 diodes |
+| `circuits/testing/ac15.cir` | Vox AC15-class amp | EF86 + 2× EL84 push-pull + OT |
+| `circuits/testing/tweed-deluxe.cir` | Fender Tweed Deluxe-class | 2× 6V6GT push-pull + OT |
+| `circuits/testing/plexi-mockup.cir` | Marshall Plexi 100W-class | 4× EL34 + 3× 12AX7 + OT |
+| `circuits/testing/el84-single-stage.cir` | Single EL84 pentode gain stage | 1 pentode |
+| `circuits/testing/6k7-varimu-stage.cir` | Variable-mu gain cell | 1× 6K7 remote-cutoff pentode |
+| `circuits/testing/wurli-power-amp.cir` | Wurlitzer 200A power amp (Class AB) | 8 BJTs |
 
-See [docs/PLUGIN_GUIDE.md](docs/PLUGIN_GUIDE.md) for plugin-specific troubleshooting.
+### Unstable (under investigation)
+
+| Circuit | What it is | Status |
+|---------|-----------|--------|
+| `fuzz-face` (built-in) | Fuzz Face 2-transistor fuzz | Convergence issues |
+| `big-muff` (built-in) | Big Muff 4-transistor fuzz | Convergence issues |
+| `ssl-bus-compressor` (built-in) | SSL 4000E bus compressor | Audio path works; full plugin unstable |
+
+Promotion to `stable/` requires a DAW listening test, not just SPICE correlation numbers.
+
+## Spotlight: Pultec EQP-1A
+
+The hardest circuit melange runs end-to-end, and the clearest proof it handles real vintage gear:
+
+- **4 vacuum tubes** (2× 12AX7, 2× 12AU7), **2 transformers** (HS-29 input, S-217-D output with tertiary feedback winding), verified against Sowter engineering drawings
+- **21 dB of global negative feedback** via differential cathode injection
+- **41 circuit nodes, 8 nonlinear dimensions** — every component from the original schematic
+- **All 7 EQ curves verified**, including the Pultec Trick (simultaneous boost + cut at same frequency)
+- **Zero NR failures** at 1V input, ~11× realtime
+
+```bash
+melange compile circuits/stable/pultec-eq.cir --format plugin -o pultec
+melange analyze circuits/stable/pultec-eq.cir --pot "LF Boost=10" --switch "LF Freq=1"
+```
+
+## SPICE Validation
+
+Every stable circuit is validated sample-by-sample against ngspice. This isn't "sounds close" — it's correlation coefficients and RMS error against a reference SPICE simulator used in IC design.
+
+| Circuit | Correlation | RMS Error |
+|---------|------------|-----------|
+| RC lowpass (linear reference) | 0.99999999 (8 nines) | 0.03% |
+| Wurlitzer 200A preamp | 0.99999998 (6 nines) | 0.014% |
+| BJT common-emitter | 0.9997 (4 nines) | 5.6% |
+
+Run your own validation (requires `ngspice` on PATH):
+
+```bash
+melange validate my-circuit.cir --output-node out
+```
+
+## CLI Reference
+
+```
+melange compile <circuit> -o <dir>        Compile to Rust code or plugin project
+melange simulate <circuit> -o <file.wav>  Process audio through a circuit
+melange analyze <circuit>                 Frequency response sweep
+melange validate <circuit>                Compare against ngspice
+melange nodes <circuit>                   List nodes and devices
+melange import <file.xml> -o <file.cir>   Import KiCad XML to Melange format
+melange builtins                          List built-in circuits
+melange sources add|list|remove           Manage circuit source repos
+```
+
+Every subcommand has `--help`. Key flags:
+
+| Flag | On | Does |
+|------|----|------|
+| `--format plugin` | compile | Emit a full nih-plug project (default: raw code) |
+| `--solver auto\|dk\|nodal` | compile/simulate | Override solver selection |
+| `--oversampling 2\|4` | compile | 2× or 4× polyphase half-band IIR antialiasing |
+| `--backward-euler` | compile | L-stable integration for high-gain feedback circuits |
+| `--pot "Name=Value"` | analyze | Set pot value for frequency sweep |
+| `--switch "Name=Pos"` | analyze | Set switch position for frequency sweep |
+| `--input-audio file.wav` | simulate | Use a WAV file instead of a test tone |
+| `--no-ear-protection` | compile | Disable soft limiter (measurement only) |
+
+Full flag documentation: [`compile --help`](docs/PLUGIN_GUIDE.md), [`simulate --help`](docs/GETTING_STARTED.md), [`analyze --help`](docs/GETTING_STARTED.md).
+
+## Architecture
+
+```
+SPICE Netlist ─┐
+               ├──► Parser ──► MNA System ──► DK Kernel ──► CircuitIR ──► Emitter ──► Code
+KiCad XML ─────┘
+```
+
+The `CircuitIR` intermediate representation is language-agnostic and serializable. The current emitter targets Rust; C++ and FAUST are planned. The `Emitter` trait is public — write your own backend if you need a different target.
+
+```
+crates/
+  melange-primitives/   DSP building blocks (filters, oversampling, NR helpers)
+  melange-devices/      Component models (diode, BJT, JFET, MOSFET, tube, opamp, VCA, LDR)
+  melange-solver/       MNA/DK engine + codegen — the core
+  melange-validate/     SPICE validation pipeline (ngspice comparison)
+  melange-plugin/       nih-plug integration
+
+tools/
+  melange-cli/          Command-line front-end
+```
+
+For the math internals (MNA stamping, DK method, Newton-Raphson, Gummel-Poon BJT, tube models, convergence strategies, codegen templates), see [`docs/aidocs/INDEX.md`](docs/aidocs/INDEX.md).
+
+## Cross-Compilation
+
+Build macOS plugins from Linux:
+
+```bash
+cargo zigbuild --release --target universal2-apple-darwin
+rcodesign sign target/universal2-apple-darwin/release/libmy_plugin.dylib
+```
+
+Requires zig 0.13+ and cargo-zigbuild. See [docs](docs/PLUGIN_GUIDE.md) for details.
 
 ## Requirements
 
@@ -481,46 +266,37 @@ See [docs/PLUGIN_GUIDE.md](docs/PLUGIN_GUIDE.md) for plugin-specific troubleshoo
 - No external dependencies for core library or generated code
 - Optional: ngspice for SPICE validation
 - Optional: zig + cargo-zigbuild for macOS cross-compilation
-
-## Building
+- Optional: KiCad 8+ for schematic-based workflow
 
 ```bash
-# Install the melange CLI
+# Install the CLI
 cargo install --path tools/melange-cli
 
-# Now use it directly
-melange builtins
-melange compile tube-screamer --format plugin -o my-plugin
+# Or build from repo
+cargo build --workspace
+cargo test --workspace        # ~1100 tests
 ```
 
-Or build and run from the repo without installing:
+## Known Limitations
 
-```bash
-cargo build --workspace       # Build everything
-cargo test --workspace        # Run all tests (~1100 tests)
-cargo run -p melange-cli -- compile tube-screamer --format plugin -o my-plugin
-```
-
-## Roadmap
-
-Melange currently generates self-contained Rust code. Multi-language codegen is coming soon — the internal intermediate representation (`CircuitIR`) and `Emitter` trait are already language-agnostic by design. C++ will be the first additional target, with other languages to follow based on community interest. The goal is to let you compile a SPICE netlist directly to native code in whatever language your plugin framework or audio engine uses.
+- Fixed temperature (27°C) — no temperature coefficients
+- Transformers assume constant coupling (no core saturation or hysteresis)
+- No noise simulation (shot, thermal, 1/f)
+- Tube models: no space-charge or transit-time effects
+- Op-amps: Boyle macromodel (adequate for audio, not a full transistor-level sim)
+- See [`docs/aidocs/STATUS.md`](docs/aidocs/STATUS.md) for the complete list
 
 ## Origin
 
-Melange was extracted from the [OpenWurli](https://github.com/openwurli/openwurli) project, a Wurlitzer 200A virtual instrument. The DK solver, device models, and validation pipeline were generalized into this standalone toolkit.
+Melange was extracted from the [OpenWurli](https://github.com/openwurli/openwurli) project, a Wurlitzer 200A virtual instrument.
 
 ## License
 
-This project is licensed under the [GNU General Public License v3.0 or later](LICENSE) (GPL-3.0-or-later).
+[GNU General Public License v3.0 or later](LICENSE) (GPL-3.0-or-later).
 
-**Generated code is also GPL-licensed.** Code produced by `melange compile` is derived from
-GPL-licensed templates and device models within this project, and is therefore subject to the
-same GPL-3.0-or-later license. If you distribute plugins or binaries built from Melange-generated
-code, you must comply with the GPL (including providing source code to recipients).
+**Generated code is also GPL-licensed.** Code produced by `melange compile` is derived from GPL-licensed templates and device models, and is subject to the same license. If you distribute plugins built from melange-generated code, you must comply with the GPL (including providing source code to recipients).
 
-Melange includes code derived from the [OpenWurli](https://github.com/openwurli/openwurli) project, which is licensed under GPL-3.0.
-
-> **Melange needs additional maintainers!** The current maintainer is a SWE but does not have the necessary electrical engineering or Rust expertise to maintain a project of this complexity long-term. If you've got the skills to help, please get in touch.
+> **Melange needs additional maintainers.** The current maintainer lacks deep EE and Rust expertise for a project of this complexity. If you can help, please get in touch.
 
 ## Acknowledgments
 
@@ -528,38 +304,33 @@ Melange includes code derived from the [OpenWurli](https://github.com/openwurli/
 
 Melange is, in a very real sense, SPICE with a different front end and a different back end. Almost every piece of numerical behavior that makes the generated code produce the right answer traces back to 50+ years of work on SPICE and, more recently, to the open-source ngspice project.
 
-- **The device model equations are SPICE's.** The Gummel-Poon BJT (`qb`, `q1`, `q2`, high-injection knee), the Shichman-Hodges JFET, the SPICE Level 1 MOSFET, the Shockley diode with series resistance and reverse breakdown, the junction-capacitance depletion formulas (`CJ0 / (1 - Vj/VJ)^MJ`), the Boyle op-amp macromodel — these are all re-implementations of the math written down decades ago in the SPICE2/SPICE3 literature and source code. The parameter names you use in `.model` lines (`IS`, `BF`, `VAF`, `IKF`, `NF`, `LAMBDA`, `KP`, `VTO`, `CGS`, `CJE`, …) are SPICE parameter names because there is no better convention and no reason to invent one.
-- **The convergence machinery is SPICE's.** `pnjlim` voltage limiting for pn junctions, `fetlim` for FETs, the source-stepping and Gmin-stepping fallback chain for DC operating point, the RELTOL/VNTOL/ABSTOL tolerance philosophy, the singular-matrix and off-diagonal-pivot checks in the LU factorization — all of this is taken from SPICE3f5 and ngspice's `bjtload.c` / `dioload.c` / `cktop.c`. Where we were unsure what the right thing was, we read ngspice's source and followed it line by line.
-- **ngspice is the reference oracle.** Every circuit that ships in `circuits/stable/` passes a correlation + RMS error test against an ngspice run of the same netlist. The `melange-validate` crate shells out to `ngspice` as a subprocess, parses its `.OPTIONS INTERP` output, and compares sample-for-sample. When melange and ngspice disagree, the bug is in melange until proven otherwise. We cannot overstate how much confidence it gives to have a mature, open-source SPICE engine on the other side of every regression test.
-- **The MNA stamping rules are SPICE's.** How conductance stamps contribute to G, how companion models for caps/inductors contribute to G and rhs, how VCCS / VCVS / op-amps stamp into the augmented matrix, the sign conventions for current flow — all of this follows the SPICE2 / Nagel (1975) formulation.
+The device model equations are SPICE's. The convergence machinery (pnjlim, fetlim, source-stepping, Gmin-stepping) is SPICE's. The MNA stamping rules are SPICE's. The parameter names in `.model` lines (`IS`, `BF`, `VAF`, `IKF`, `LAMBDA`, `KP`, `VTO`, `CJE`, ...) are SPICE parameter names. Every circuit in `circuits/stable/` passes a correlation + RMS error test against ngspice. When melange and ngspice disagree, the bug is in melange until proven otherwise.
 
-If SPICE is "the physics of analog circuit simulation," then melange is "that physics, compiled ahead-of-time into a branchless inner loop you can run on the audio thread." We are standing on Larry Nagel, Tom Quarles, Hermann Gummel, Norman Koren, and the dozens of ngspice maintainers whose names appear in `ngspice-42/src/spicelib/devices/*/load.c`.
+If SPICE is "the physics of analog circuit simulation," then melange is "that physics, compiled ahead-of-time into a branchless inner loop you can run on the audio thread."
 
 **Please donate to or contribute to [ngspice](https://ngspice.sourceforge.io/) if you find melange useful.** Their work is the foundation we build on.
 
 ### Core methods
 
 - David Yeh — Discrete K-method for audio circuit simulation (PhD thesis, Stanford, 2009)
-- Larry Nagel, Tom Quarles, and the ngspice maintainers — SPICE (UC Berkeley), SPICE3f5, and [ngspice](https://ngspice.sourceforge.io/); source of every device model, convergence heuristic, and validation reference in this project. See note above.
+- Larry Nagel, Tom Quarles, and the ngspice maintainers — SPICE, SPICE3f5, and [ngspice](https://ngspice.sourceforge.io/)
 - Ho, Ruehli, Brennan — Modified Nodal Analysis (IEEE Trans. CAS, 1975)
-- Sherman & Morrison — rank-1 matrix update formula
 
 ### Device models
 
-- Hermann Gummel & H.C. Poon — BJT model with Early effect and high-injection (Bell Labs, 1970)
+- Hermann Gummel & H.C. Poon — BJT model (Bell Labs, 1970)
 - Jiri Shichman & David Hodges — JFET model (IEEE JSSC, 1968)
-- Norman Koren — triode and classical pentode vacuum tube models (1996)
-- Derk Reefman — pentode and beam tetrode vacuum tube models, variable-mu two-section blend (uTracer Theory §4.4/§4.5/§5, TubeLib.inc 2016)
-- Marshall Leach — grid current model for vacuum tubes
+- Norman Koren — vacuum tube models (1996)
+- Derk Reefman — pentode/beam tetrode models and variable-mu blend (uTracer, TubeLib.inc 2016)
+- Marshall Leach — tube grid current model
 - William Shockley — semiconductor diode equation
 
-### DSP & filters
+### DSP
 
-- Olli Niemitalo — polyphase allpass half-band IIR filters for oversampling
-- Vadim Zavalishin — topology-preserving transform (TPT) filters
+- Olli Niemitalo — polyphase allpass half-band IIR for oversampling
+- Vadim Zavalishin — topology-preserving transform filters
 
 ### References
 
 - Pillage, Rohrer, Visweswariah — *Electronic Circuit and System Simulation Methods* (McGraw-Hill, 1995)
 - [Hack Audio circuit modeling tutorial](https://hackaudio.com/tutorial-courses/audio-circuit-modeling-tutorial/)
-- [TU Delft analog electronics webbook](https://analog-electronics.ewi.tudelft.nl/webbook/SED/)
