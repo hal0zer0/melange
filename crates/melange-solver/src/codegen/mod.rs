@@ -338,6 +338,39 @@ pub struct GeneratedCode {
     pub n: usize,
     /// Total nonlinear dimension (sum of device dimensions)
     pub m: usize,
+    /// Metadata about auto-detected decisions made during codegen.
+    pub meta: CodegenMeta,
+}
+
+/// Metadata about decisions made during code generation.
+///
+/// Populated by the codegen pipeline so the CLI can report what happened
+/// without the user needing `RUST_LOG=info`.
+#[cfg(feature = "codegen")]
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct CodegenMeta {
+    /// Whether backward Euler was auto-selected (spectral radius > threshold).
+    /// `false` if the user explicitly requested it via `--backward-euler`.
+    pub backward_euler_auto: bool,
+    /// Spectral radius that triggered auto-BE (0.0 if not applicable).
+    pub backward_euler_spectral_radius: f64,
+    /// DC operating point convergence method (e.g. "Direct NR", "Source Stepping").
+    pub dc_op_method: String,
+    /// DC operating point iteration count.
+    pub dc_op_iterations: usize,
+    /// Whether DC operating point converged.
+    pub dc_op_converged: bool,
+    /// Nodal sub-path: "schur" or "full-lu" (empty for DK path).
+    pub nodal_subpath: String,
+    /// Nodal full-LU reason (empty if Schur or DK).
+    pub nodal_full_lu_reason: String,
+    /// Whether sparse LU is used (nodal full-LU path only).
+    pub sparse_lu_enabled: bool,
+    /// Sparse LU density percentage (0.0 if not applicable).
+    pub sparse_lu_density: f64,
+    /// Whether parasitic caps were auto-inserted.
+    pub parasitic_caps_inserted: bool,
 }
 
 /// Code generator for circuit solvers
@@ -448,7 +481,8 @@ impl CodeGenerator {
         // so these must include the parasitic caps (matching the kernel, which also
         // auto-inserts them in from_mna/from_mna_augmented).
         let patched_mna;
-        let mna = if mna.m > 0 && !mna.c.iter().any(|row| row.iter().any(|&v| v != 0.0)) {
+        let parasitic_caps_inserted = mna.m > 0 && !mna.c.iter().any(|row| row.iter().any(|&v| v != 0.0));
+        let mna = if parasitic_caps_inserted {
             log::info!(
                 "Codegen: C matrix is all zeros with M={} nonlinear devices; \
                  auto-inserting parasitic caps for IR",
@@ -471,6 +505,14 @@ impl CodeGenerator {
             code,
             n: ir.topology.n,
             m: ir.topology.m,
+            meta: CodegenMeta {
+                backward_euler_auto: ir.solver_config.backward_euler && !self.config.backward_euler,
+                dc_op_method: ir.dc_op_method.clone(),
+                dc_op_iterations: ir.dc_op_iterations,
+                dc_op_converged: ir.dc_op_converged,
+                parasitic_caps_inserted,
+                ..CodegenMeta::default()
+            },
         })
     }
 
@@ -603,7 +645,8 @@ impl CodeGenerator {
         // nonlinear devices. Without capacitors, A = G and the trapezoidal
         // integrator degenerates (no energy storage → no dynamics).
         let patched_mna;
-        let mna = if mna.m > 0 && !mna.c.iter().any(|row| row.iter().any(|&v| v != 0.0)) {
+        let parasitic_caps_inserted = mna.m > 0 && !mna.c.iter().any(|row| row.iter().any(|&v| v != 0.0));
+        let mna = if parasitic_caps_inserted {
             log::info!(
                 "Codegen nodal: C matrix is all zeros with M={} nonlinear devices; \
                  auto-inserting parasitic caps",
@@ -626,6 +669,13 @@ impl CodeGenerator {
             code,
             n: ir.topology.n,
             m: ir.topology.m,
+            meta: CodegenMeta {
+                dc_op_method: ir.dc_op_method.clone(),
+                dc_op_iterations: ir.dc_op_iterations,
+                dc_op_converged: ir.dc_op_converged,
+                parasitic_caps_inserted,
+                ..CodegenMeta::default()
+            },
         })
     }
 }

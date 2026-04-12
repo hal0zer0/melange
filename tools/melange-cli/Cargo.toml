@@ -16,6 +16,8 @@ melange-solver = { workspace = true, features = ["codegen"] }
 melange-validate = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 anyhow = "1.0"
+env_logger = "0.11"
+log = { workspace = true }
 hound = "3.5"
 serde = { workspace = true }
 toml = "0.8"

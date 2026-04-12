@@ -52,6 +52,12 @@ pub struct CircuitIR {
     /// Whether the nonlinear DC OP solver converged
     #[serde(default)]
     pub dc_op_converged: bool,
+    /// DC OP convergence method name (e.g. "DirectNR", "SourceStepping").
+    #[serde(default)]
+    pub dc_op_method: String,
+    /// DC OP total NR iterations used.
+    #[serde(default)]
+    pub dc_op_iterations: usize,
     /// Whether to include DC blocking filter on outputs.
     pub dc_block: bool,
     pub inductors: Vec<InductorIR>,
@@ -2269,6 +2275,8 @@ impl CircuitIR {
         let dc_op_truncated = &dc_result.v_node[..kernel.n.min(dc_op_len)];
         let has_dc_op = dc_op_truncated.iter().any(|&v| v.abs() > 1e-15);
         let dc_op_converged = dc_result.converged;
+        let dc_op_method = format!("{:?}", dc_result.method);
+        let dc_op_iterations = dc_result.iterations;
         let dc_nl_currents = dc_result.i_nl.clone();
 
         if !dc_result.converged && m > 0 {
@@ -2325,6 +2333,8 @@ impl CircuitIR {
             has_dc_op,
             dc_nl_currents,
             dc_op_converged,
+            dc_op_method,
+            dc_op_iterations,
             dc_block: config.dc_block,
             inductors,
             coupled_inductors,
@@ -2813,6 +2823,8 @@ impl CircuitIR {
         let dc_op_truncated = &dc_result.v_node[..n_aug.min(dc_result.v_node.len())];
         let has_dc_op = dc_op_truncated.iter().any(|&v| v.abs() > 1e-15);
         let dc_op_converged = dc_result.converged;
+        let dc_op_method = format!("{:?}", dc_result.method);
+        let dc_op_iterations = dc_result.iterations;
         let dc_nl_currents = dc_result.i_nl.clone();
         let has_dc_sources = !mna.voltage_sources.is_empty() || !mna.current_sources.is_empty();
 
@@ -2887,6 +2899,8 @@ impl CircuitIR {
             has_dc_op,
             dc_nl_currents,
             dc_op_converged,
+            dc_op_method,
+            dc_op_iterations,
             dc_block: config.dc_block,
             inductors: Vec::new(), // no companion model
             coupled_inductors: Vec::new(),

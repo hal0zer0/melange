@@ -352,10 +352,10 @@ enum Commands {
     /// Import a KiCad netlist to Melange .cir format
     ///
     /// Supports KiCad XML intermediate netlist (full fidelity, preserves Melange.*
-    /// custom fields) and KiCad SPICE netlist (best-effort, standard components only).
-    /// Format is auto-detected from file content.
+    /// custom fields), KiCad SPICE netlist (best-effort, standard components only),
+    /// and .kicad_sch schematics (requires kicad-cli). Format is auto-detected.
     Import {
-        /// Input file (KiCad XML .xml or SPICE .cir/.spice)
+        /// Input file (KiCad XML .xml, SPICE .cir/.spice, or .kicad_sch schematic)
         input: PathBuf,
 
         /// Output Melange .cir file
@@ -365,6 +365,10 @@ enum Commands {
         /// Input format override (auto-detected by default)
         #[arg(long, value_enum, default_value = "auto")]
         format: ImportFormat,
+
+        /// Input is a .kicad_sch schematic file (shells out to kicad-cli)
+        #[arg(long)]
+        from_schematic: bool,
     },
 }
 
@@ -412,7 +416,7 @@ enum CacheAction {
     Stats,
 }
 
-#[derive(ValueEnum, Clone, Debug)]
+#[derive(ValueEnum, Clone, Debug, PartialEq)]
 enum OutputFormat {
     /// Generate only the circuit code (default)
     Code,
@@ -433,6 +437,13 @@ enum ImportFormat {
 mod kicad_import;
 
 fn main() -> Result<()> {
+    // Initialize logger so log::info!/warn! from melange-solver are visible.
+    // Default: only warnings. RUST_LOG=info or RUST_LOG=melange_solver=debug for more.
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
+        .format_timestamp(None)
+        .format_target(false)
+        .init();
+
     let cli = Cli::parse();
 
     match cli.command {
@@ -684,11 +695,79 @@ fn main() -> Result<()> {
             input,
             output,
             format,
-        } => kicad_import::import_kicad(&input, &output, &format),
+            from_schematic,
+        } => kicad_import::import_kicad(&input, &output, &format, from_schematic),
     }
 }
 
+/// Check if a capacitor is directly connected to the given output node.
+/// Returns true if the circuit already has an output coupling cap, meaning
+/// melange's built-in DC blocker is redundant.
+fn has_output_coupling_cap(
+    netlist: &melange_solver::parser::Netlist,
+    output_node_name: &str,
+) -> bool {
+    use melange_solver::parser::Element;
+    netlist.elements.iter().any(|elem| {
+        matches!(elem, Element::Capacitor { n_plus, n_minus, .. }
+            if n_plus == output_node_name || n_minus == output_node_name)
+    })
+}
+
+/// Count nonlinear devices by type. Used to suggest oversampling.
+fn count_nonlinear_devices(netlist: &melange_solver::parser::Netlist) -> (usize, usize, usize) {
+    use melange_solver::parser::Element;
+    let mut diodes = 0usize;
+    let mut opamps = 0usize;
+    let mut tubes = 0usize;
+    for elem in &netlist.elements {
+        match elem {
+            Element::Diode { .. } => diodes += 1,
+            Element::Opamp { .. } => opamps += 1,
+            Element::Triode { .. } | Element::Pentode { .. } => tubes += 1,
+            _ => {}
+        }
+    }
+    (diodes, opamps, tubes)
+}
+
 #[allow(clippy::too_many_arguments)]
+/// Suggest similar node names when a lookup fails.
+/// Returns names that share a common prefix or contain the query as a substring.
+fn suggest_node_names<'a>(query: &str, available: impl Iterator<Item = &'a String>) -> Vec<String> {
+    let q = query.to_ascii_lowercase();
+    let mut suggestions: Vec<(usize, String)> = Vec::new();
+    for name in available {
+        let n = name.to_ascii_lowercase();
+        // Exact case-insensitive match
+        if n == q {
+            suggestions.push((0, name.clone()));
+        }
+        // One is a prefix of the other
+        else if n.starts_with(&q) || q.starts_with(&n) {
+            suggestions.push((1, name.clone()));
+        }
+        // Substring match
+        else if n.contains(&q) || q.contains(&n) {
+            suggestions.push((2, name.clone()));
+        }
+        // Common audio I/O aliases
+        else {
+            let input_aliases = ["in", "input", "vin", "audio_in", "sig_in", "mid_in"];
+            let output_aliases = ["out", "output", "vout", "audio_out", "sig_out"];
+            let q_is_input = input_aliases.contains(&q.as_str());
+            let n_is_input = input_aliases.contains(&n.as_str());
+            let q_is_output = output_aliases.contains(&q.as_str());
+            let n_is_output = output_aliases.contains(&n.as_str());
+            if (q_is_input && n_is_input) || (q_is_output && n_is_output) {
+                suggestions.push((1, name.clone()));
+            }
+        }
+    }
+    suggestions.sort_by_key(|(score, _)| *score);
+    suggestions.into_iter().map(|(_, name)| name).collect()
+}
+
 fn compile_circuit_source(
     circuit_source: &circuits::CircuitSource,
     output: &PathBuf,
@@ -775,10 +854,14 @@ fn compile_circuit_source(
     // Get input node index and add input conductance to G matrix
     // This models the source impedance of the input voltage source
     let input_node_raw = mna.node_map.get(input_node).copied().ok_or_else(|| {
+        let suggestions = suggest_node_names(input_node, mna.node_map.keys());
+        let hint = if suggestions.is_empty() {
+            format!("Available: {:?}", mna.node_map.keys().collect::<Vec<_>>())
+        } else {
+            format!("Did you mean: {}?", suggestions.join(", "))
+        };
         anyhow::anyhow!(
-            "Input node '{}' not found in circuit. Available: {:?}",
-            input_node,
-            mna.node_map.keys().collect::<Vec<_>>()
+            "Input node '{}' not found in circuit. {}", input_node, hint
         )
     })?;
     if input_node_raw == 0 {
@@ -1170,10 +1253,14 @@ fn compile_circuit_source(
     let mut output_node_indices = Vec::new();
     for name in &output_node_names {
         let raw = mna.node_map.get(*name).copied().ok_or_else(|| {
+            let suggestions = suggest_node_names(name, mna.node_map.keys());
+            let hint = if suggestions.is_empty() {
+                format!("Available: {:?}", mna.node_map.keys().collect::<Vec<_>>())
+            } else {
+                format!("Did you mean: {}?", suggestions.join(", "))
+            };
             anyhow::anyhow!(
-                "Output node '{}' not found in circuit. Available: {:?}",
-                name,
-                mna.node_map.keys().collect::<Vec<_>>()
+                "Output node '{}' not found in circuit. {}", name, hint
             )
         })?;
         if raw == 0 {
@@ -1183,6 +1270,39 @@ fn compile_circuit_source(
             );
         }
         output_node_indices.push(raw - 1);
+    }
+
+    // Auto-mono: single output node with single-channel circuit → default to mono.
+    // Stereo duplicates the same mono circuit per channel, which is correct but
+    // doubles CPU for no benefit unless the user has a stereo reason (e.g. wet/dry).
+    let mono = if !mono && output_node_indices.len() == 1 && format == OutputFormat::Plugin {
+        println!("  Auto-selecting mono (single output node). Use two output nodes for stereo.");
+        true
+    } else {
+        mono
+    };
+
+    // DC-block auto-detection: if the circuit already has a coupling cap on the
+    // output node, the built-in 5 Hz DC blocker is redundant (double-filtering
+    // and adds 200ms settle time). Suggest --no-dc-block.
+    let dc_block_auto_skip = !no_dc_block
+        && output_node_names.iter().all(|name| has_output_coupling_cap(&netlist, name));
+    if dc_block_auto_skip {
+        println!(
+            "  Output coupling cap detected on \"{}\". Consider --no-dc-block to avoid double filtering.",
+            output_node_names.join(", ")
+        );
+    }
+
+    // Oversampling suggestion: hard clippers (diodes) benefit most from oversampling.
+    // Tubes and op-amps produce softer harmonics and alias less at 1×.
+    if oversampling == 1 {
+        let (diodes, _opamps, _tubes) = count_nonlinear_devices(&netlist);
+        if diodes >= 4 {
+            println!("  Hint: {} diodes detected. Consider --oversampling 4 to reduce aliasing.", diodes);
+        } else if diodes >= 2 {
+            println!("  Hint: {} diodes detected. Consider --oversampling 2 to reduce aliasing.", diodes);
+        }
     }
 
     // Broadcast single output_scale to all outputs
@@ -1206,72 +1326,18 @@ fn compile_circuit_source(
     };
 
     let generator = CodeGenerator::new(config);
-    // DK codegen handles standard and augmented (single-transformer) circuits.
-    // For circuits with multiple transformer groups (e.g., Pultec with HS-29 + S-217-D),
-    // the DK K matrix can have stability issues from inter-transformer coupling.
-    // Fall back to nodal codegen for those circuits.
-    let n_xfmr_groups = mna.transformer_groups.len()
-        + if !mna.coupled_inductors.is_empty() {
-            1
-        } else {
-            0
-        };
-    // Check trapezoidal stability: spectral radius of S*A_neg > 1.001 means
-    // the trapezoidal method will ring. Route to nodal (not DK+BE) since nodal
-    // handles stiff circuits correctly via voltage-space NR.
-    let dk_unstable = if !dk_failed && kernel.m > 0 {
-        let n_k = kernel.n;
-        let mut x = vec![1.0 / (n_k as f64).sqrt(); n_k];
-        let mut y = vec![0.0; n_k];
-        let mut rho = 0.0;
-        for _ in 0..20 {
-            let mut ax = vec![0.0; n_k];
-            for (i, ax_i) in ax.iter_mut().enumerate() {
-                for (j, x_j) in x.iter().enumerate() {
-                    *ax_i += kernel.a_neg[i * n_k + j] * x_j;
-                }
-            }
-            for (i, y_i) in y.iter_mut().enumerate() {
-                *y_i = 0.0;
-                for (j, ax_j) in ax.iter().enumerate() {
-                    *y_i += kernel.s[i * n_k + j] * ax_j;
-                }
-            }
-            let norm: f64 = y.iter().map(|v| v * v).sum::<f64>().sqrt();
-            if norm < 1e-30 {
-                break;
-            }
-            rho = norm / x.iter().map(|v| v * v).sum::<f64>().sqrt();
-            for i in 0..n_k {
-                x[i] = y[i] / norm;
-            }
-        }
-        if rho > 1.002 {
-            println!(
-                "  Trapezoidal unstable (spectral radius {:.4}), routing to nodal",
-                rho
-            );
-            true
-        } else {
-            false
-        }
-    } else {
-        false
-    };
-
+    // Route solver: use library auto_route() for consistent logic, or honor --solver override.
+    let routing = melange_solver::codegen::routing::auto_route(&kernel, &mna, dk_failed);
     let use_nodal_codegen = match solver_override {
         "nodal" => true,
         "dk" => false,
-        _ => {
-            // Auto-select nodal when:
-            // 1. DK kernel failed (positive feedback / oscillator circuits)
-            // 2. DK trapezoidal unstable (spectral radius > 1.001, stiff circuits)
-            // 3. Multi-transformer circuits (DK K matrix unstable for inter-transformer coupling)
-            // 4. Large M (≥10): M×M Gauss elimination is expensive and NR can diverge.
-            let multi_xfmr = has_inductors_compile && n_xfmr_groups > 1;
-            let large_m = kernel.m >= 10;
-            dk_failed || dk_unstable || multi_xfmr || large_m
-        }
+        _ => routing.route == melange_solver::codegen::routing::SolverRoute::Nodal,
+    };
+    let solver_label = if use_nodal_codegen { "nodal" } else { "DK" };
+    let solver_reason = if solver_override == "nodal" || solver_override == "dk" {
+        format!("--solver {} (user override)", solver_override)
+    } else {
+        routing.reason.clone()
     };
 
     // FA reduction is kept for nodal path when the DC OP confirms deeply
@@ -1321,10 +1387,52 @@ fn compile_circuit_source(
             .with_context(|| "Code generation failed")?
     };
 
+    let line_count = generated.code.lines().count();
+    println!("  ✓ Generated {} lines of Rust code", line_count);
+
+    // Compilation summary: report all auto-detected decisions in one place.
+    println!();
+    println!("  Summary:");
+    println!("    Circuit: {} nodes, {} nonlinear dimensions", generated.n, generated.m);
+    println!("    Solver: {} ({})", solver_label, solver_reason);
+    if routing.spectral_radius > 0.0 {
+        println!("    Spectral radius: {:.4}", routing.spectral_radius);
+    }
+    println!("    Integration: {}", if backward_euler { "Backward Euler" } else { "Trapezoidal" });
+    println!("    Oversampling: {}×", oversampling);
+    println!("    Input: node \"{}\", resistance {}Ω ({})", input_node, input_resistance, ir_source);
     println!(
-        "  ✓ Generated {} lines of Rust code",
-        generated.code.lines().count()
+        "    Output: node \"{}\", scale {}",
+        output_node_names.join(", "),
+        output_scale
     );
+    println!("    DC block: {}", if !no_dc_block { "enabled (5 Hz HPF)" } else { "disabled" });
+    // DC operating point
+    if generated.m > 0 {
+        let meta = &generated.meta;
+        if meta.dc_op_converged {
+            println!("    DC operating point: converged ({}, {} iterations)", meta.dc_op_method, meta.dc_op_iterations);
+        } else {
+            println!("    DC operating point: *** DID NOT CONVERGE *** ({}, {} iterations)", meta.dc_op_method, meta.dc_op_iterations);
+        }
+        if meta.backward_euler_auto {
+            println!("    Integration: Backward Euler (auto-selected, spectral radius > 1.002)");
+        }
+        if meta.parasitic_caps_inserted {
+            println!("    Parasitic caps: auto-inserted (no capacitors in circuit)");
+        }
+    }
+    if !forward_active.is_empty() {
+        println!("    Forward-active reduction: {} BJTs linearized to 1D", forward_active.len());
+    }
+    if !grid_off_pentodes.is_empty() {
+        println!("    Grid-off reduction: {} pentodes reduced to 2D", grid_off_pentodes.len());
+    }
+    if !linearized.is_empty() {
+        println!("    Linearized BJTs: {} (fully linear, M reduced by {})", linearized.len(), linearized.len() * 2);
+    }
+    println!("    Generated: {} lines of Rust", line_count);
+    println!();
 
     // Step 5: Write output
     println!("Step 5: Writing output...");
