@@ -29,3 +29,7 @@ ngspice_*
 
 # Generated reports
 *.html
+
+# Archived/disabled files (git history preserves them)
+*.archived
+*.disabled

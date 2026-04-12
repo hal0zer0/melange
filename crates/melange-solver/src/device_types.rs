@@ -441,8 +441,8 @@ pub enum ScreenForm {
 /// ignored when `kind == SharpTriode`.
 ///
 /// For `kind == SharpPentode`, melange uses Reefman's "Derk" §4.4 equation set
-/// (see `/home/homeuser/.claude/projects/-home-homeuser-dev-melange/memory/pentode_equations.md`
-/// and <https://www.dos4ever.com/uTracer3/Theory.pdf>). `kg2` and `alpha_s` must
+/// (see `docs/aidocs/DEVICE_MODELS.md` and
+/// <https://www.dos4ever.com/uTracer3/Theory.pdf>). `kg2` and `alpha_s` must
 /// both be strictly positive; `a_factor` and `beta_factor` are typically small
 /// positive values and MAY be zero (though the Derk model does not cleanly
 /// reduce to classical Koren pentode when αs=0, so fitted data with `alpha_s>0`

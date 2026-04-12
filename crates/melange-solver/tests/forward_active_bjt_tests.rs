@@ -796,8 +796,9 @@ fn test_codegen_forward_active_produces_output() {
 
 /// Read the wurli-preamp circuit file.
 fn load_wurli_preamp() -> String {
-    std::fs::read_to_string("/home/homeuser/dev/melange/circuits/stable/wurli-preamp.cir")
-        .expect("Could not read wurli-preamp.cir")
+    std::fs::read_to_string("circuits/stable/wurli-preamp.cir")
+        .or_else(|_| std::fs::read_to_string("../../circuits/stable/wurli-preamp.cir"))
+        .expect("Could not read wurli-preamp.cir (run from workspace root or crate dir)")
 }
 
 /// Cross-validate wurli-preamp with and without forward-active optimization.
