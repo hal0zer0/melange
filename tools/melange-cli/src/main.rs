@@ -931,6 +931,42 @@ fn compile_circuit_source(
         }
     }
 
+    // Tier 3c: Input impedance suggestion based on topology.
+    // When using the 1Ω default (no --input-resistance, no .input_impedance directive),
+    // check what devices connect to the input node and suggest a realistic impedance.
+    if ir_source == "default" && input_resistance < 10.0 {
+        use melange_solver::parser::Element;
+        let input_name = input_node;
+        let has_tube_input = netlist.elements.iter().any(|e| matches!(e,
+            Element::Triode { n_grid, .. } | Element::Pentode { n_grid, .. } if n_grid == input_name
+        ));
+        let has_jfet_input = netlist.elements.iter().any(|e| matches!(e,
+            Element::Jfet { ng, .. } if ng == input_name
+        ));
+        let has_mosfet_input = netlist.elements.iter().any(|e| matches!(e,
+            Element::Mosfet { ng, .. } if ng == input_name
+        ));
+        // Check if input connects through a large resistor (>10k) suggesting high-Z input
+        let has_large_input_r = netlist.elements.iter().any(|e| {
+            if let Element::Resistor { n_plus, n_minus, value, .. } = e {
+                (n_plus == input_name || n_minus == input_name) && *value > 10_000.0
+            } else {
+                false
+            }
+        });
+        if has_tube_input || has_jfet_input || has_mosfet_input {
+            let device = if has_tube_input { "tube grid" } else if has_jfet_input { "JFET gate" } else { "MOSFET gate" };
+            println!(
+                "  Hint: Input connects to {} (high impedance). Consider --input-resistance 1M or .input_impedance 1M",
+                device
+            );
+        } else if has_large_input_r {
+            println!(
+                "  Hint: Large resistor on input node. Consider --input-resistance 10k or .input_impedance 10k"
+            );
+        }
+    }
+
     // Stamp junction capacitances BEFORE FA detection (caps affect DC OP).
     // Internal node expansion happens AFTER FA detection to avoid disrupting it.
     {
@@ -1305,6 +1341,26 @@ fn compile_circuit_source(
         }
     }
 
+    // Route solver first — routing info feeds into config auto-tuning.
+    let routing = melange_solver::codegen::routing::auto_route(&kernel, &mna, dk_failed);
+
+    // Tier 3b: Auto-tune max_iter based on M and solver path.
+    // Only adjust if the user didn't explicitly set --max-iter (detect via default value).
+    let max_iter = if max_iter == 50 && kernel.m > 0 {
+        // Nodal full-LU is O(N³) per iteration — each iter is expensive but
+        // converges more reliably. DK Schur is O(M³) — cheap iters, may need more.
+        let base = if routing.route == melange_solver::codegen::routing::SolverRoute::Nodal {
+            50
+        } else {
+            50 + kernel.m * 5 // DK: scale with M (M=8 → 90 iters)
+        };
+        // High spectral radius → stiffer system → may need more iterations
+        let stiffness_bonus = if routing.spectral_radius > 0.95 { 20 } else { 0 };
+        base + stiffness_bonus
+    } else {
+        max_iter
+    };
+
     // Broadcast single output_scale to all outputs
     let output_scales = vec![output_scale; output_node_indices.len()];
 
@@ -1326,8 +1382,6 @@ fn compile_circuit_source(
     };
 
     let generator = CodeGenerator::new(config);
-    // Route solver: use library auto_route() for consistent logic, or honor --solver override.
-    let routing = melange_solver::codegen::routing::auto_route(&kernel, &mna, dk_failed);
     let use_nodal_codegen = match solver_override {
         "nodal" => true,
         "dk" => false,
@@ -1399,6 +1453,15 @@ fn compile_circuit_source(
         println!("    Spectral radius: {:.4}", routing.spectral_radius);
     }
     println!("    Integration: {}", if backward_euler { "Backward Euler" } else { "Trapezoidal" });
+    if max_iter != 50 {
+        println!("    Max NR iterations: {} (auto-tuned from M={}, ρ={:.2})", max_iter, kernel.m, routing.spectral_radius);
+    }
+    if routing.k_ill_conditioned {
+        println!("    K matrix: ill-conditioned (max|K| > 1e8, routed to nodal)");
+    }
+    if routing.s_ill_conditioned {
+        println!("    S matrix: ill-conditioned (max|S| > 1e6, cap-only nodes)");
+    }
     println!("    Oversampling: {}×", oversampling);
     println!("    Input: node \"{}\", resistance {}Ω ({})", input_node, input_resistance, ir_source);
     println!(

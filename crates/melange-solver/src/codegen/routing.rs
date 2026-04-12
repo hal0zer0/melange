@@ -37,6 +37,10 @@ pub struct RoutingDecision {
     pub multi_transformer: bool,
     /// Whether M >= 10 (large nonlinear dimension).
     pub large_m: bool,
+    /// Whether K matrix is ill-conditioned (max|K| > 1e8).
+    pub k_ill_conditioned: bool,
+    /// Whether S matrix is ill-conditioned (max|S| > 1e6).
+    pub s_ill_conditioned: bool,
     /// Human-readable reason for the routing decision.
     pub reason: String,
 }
@@ -74,7 +78,29 @@ pub fn auto_route(kernel: &DkKernel, mna: &MnaSystem, dk_failed: bool) -> Routin
         (false, 0.0)
     };
 
-    // Routing decision
+    // Check K matrix conditioning: max|K| > 1e8 means the DK Schur NR
+    // operates in a numerically hostile space. Nodal full-LU avoids K entirely.
+    let k_ill_conditioned = if !dk_failed && m > 0 {
+        let k_max_abs = (0..m * m)
+            .map(|i| kernel.k[i].abs())
+            .fold(0.0_f64, f64::max);
+        k_max_abs > 1e8
+    } else {
+        false
+    };
+
+    // Check S matrix conditioning: max|S| > 1e6 means cap-only nodes
+    // lack resistive paths — Schur prediction is unreliable.
+    let s_ill_conditioned = if !dk_failed && n > 0 {
+        let s_max_abs = (0..n * n)
+            .map(|i| kernel.s[i].abs())
+            .fold(0.0_f64, f64::max);
+        s_max_abs > 1e6
+    } else {
+        false
+    };
+
+    // Routing decision (first match wins)
     let route;
     let reason;
     if dk_failed {
@@ -98,6 +124,16 @@ pub fn auto_route(kernel: &DkKernel, mna: &MnaSystem, dk_failed: bool) -> Routin
             "large nonlinear dimension (M={}, M×M elimination expensive)",
             m
         );
+    } else if k_ill_conditioned {
+        route = SolverRoute::Nodal;
+        reason = format!(
+            "K matrix ill-conditioned (max|K| > 1e8, nodal full-LU avoids K)"
+        );
+    } else if s_ill_conditioned {
+        route = SolverRoute::Nodal;
+        reason = format!(
+            "S matrix ill-conditioned (max|S| > 1e6, cap-only nodes lack resistive paths)"
+        );
     } else if mna.inductors.iter().any(|ind| ind.isat.is_some())
         || mna.coupled_inductors.iter().any(|ci| ci.l1_isat.is_some() || ci.l2_isat.is_some())
         || mna.transformer_groups.iter().any(|g| g.winding_isats.iter().any(|i| i.is_some()))
@@ -116,6 +152,8 @@ pub fn auto_route(kernel: &DkKernel, mna: &MnaSystem, dk_failed: bool) -> Routin
         spectral_radius,
         multi_transformer,
         large_m,
+        k_ill_conditioned,
+        s_ill_conditioned,
         reason,
     }
 }
