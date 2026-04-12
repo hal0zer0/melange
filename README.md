@@ -54,16 +54,16 @@ melange compile my-circuit.cir --format plugin -o my-plugin
 cd my-plugin && cargo build --release
 ```
 
-### 3. From a built-in circuit
+### 3. From a circuit library
 
-Melange embeds a handful of classic circuits you can compile by name:
+Circuits live in separate repos. The official library is [melange-audio/circuits](https://github.com/melange-audio/circuits):
 
 ```bash
-melange compile tube-screamer --format plugin -o my-ts
-cd my-ts && cargo build --release
+melange compile melange:stable/filters/passive-eq1a --format plugin -o my-eq
+cd my-eq && cargo build --release
 ```
 
-You can also add git repos as named circuit sources:
+You can add any git repo as a named circuit source:
 
 ```bash
 melange sources add pedalboards https://github.com/someone/spice-pedals
@@ -76,13 +76,13 @@ Don't want a plugin yet? Push audio through a circuit directly:
 
 ```bash
 # Process a WAV file through the circuit
-melange simulate tube-screamer --input-audio guitar.wav -o output.wav
+melange simulate my-circuit.cir --input-audio guitar.wav -o output.wav
 
 # Quick test tone
-melange simulate tube-screamer --amplitude 0.1 -o drive.wav
+melange simulate my-circuit.cir --amplitude 0.1 -o drive.wav
 
 # Frequency response sweep
-melange analyze tube-screamer --pot "Drive=100k" --switch "Mode=2"
+melange analyze my-circuit.cir --pot "Drive=100k" --switch "Mode=2"
 ```
 
 ## What You Get
@@ -133,52 +133,36 @@ All device parameters use standard SPICE `.model` syntax. Temperature is fixed a
 
 ## Circuits
 
+Circuit netlists live in the [melange-audio/circuits](https://github.com/melange-audio/circuits) repo, organized into `stable/`, `testing/`, and `unstable/` tiers. Promotion requires a DAW listening test, not just SPICE correlation numbers.
+
 Melange auto-selects the optimal solver for each circuit (DK, Nodal Schur, or Nodal Full LU). Override with `--solver dk` or `--solver nodal` if needed.
 
-### Stable (validated + listening-tested)
+Here's a sample of what melange handles:
 
 | Circuit | What it is | Devices | Performance |
 |---------|-----------|---------|-------------|
-| `circuits/stable/pultec-eq.cir` | **Pultec EQP-1A** — 7 pots, 3 switches, global NFB | 4 tubes, 2 transformers | ~11× RT |
-| `circuits/stable/wurli-preamp.cir` | Wurlitzer 200A preamp with LDR tremolo | 2 BJTs + 1 diode | ~500× RT |
-| `circuits/stable/tweed-preamp.cir` | Fender-style 2× 12AX7 with volume pot + bright switch | 2 triodes | ~400× RT |
-| `rc-lowpass` (built-in) | RC lowpass — linear reference / smoke test | None | trivial |
+| Passive tube EQ (Pultec-class) | 7 pots, 3 switches, global NFB | 4 tubes, 2 transformers | ~11× RT |
+| Wurlitzer 200A preamp | LDR tremolo, 2-stage BJT | 2 BJTs + 1 diode | ~500× RT |
+| Tweed preamp (Fender-class) | 2× 12AX7 with volume pot + bright switch | 2 triodes | ~400× RT |
+| Full power amps (AC15/Tweed Deluxe/Plexi-class) | Push-pull pentode output stages + OT | 3-7 tubes | varies |
+| Pedal circuits (overdrive, fuzz, distortion) | Op-amp and transistor-based clipping | 1-4 NL devices | ~400× RT |
+| Bus compressor (SSL-class) | VCA + op-amp sidechain | 4 op-amps + 1 VCA | ~42× RT |
 
-### Testing (compiles and runs, not yet ear-verified)
+See the [circuits repo](https://github.com/melange-audio/circuits) for the full catalog with per-circuit status.
 
-| Circuit | What it is | Devices |
-|---------|-----------|---------|
-| `tube-screamer` (built-in) | TS808-style op-amp overdrive | 1 op-amp + 2 diodes |
-| `circuits/testing/ac15.cir` | Vox AC15-class amp | EF86 + 2× EL84 push-pull + OT |
-| `circuits/testing/tweed-deluxe.cir` | Fender Tweed Deluxe-class | 2× 6V6GT push-pull + OT |
-| `circuits/testing/plexi-mockup.cir` | Marshall Plexi 100W-class | 4× EL34 + 3× 12AX7 + OT |
-| `circuits/testing/el84-single-stage.cir` | Single EL84 pentode gain stage | 1 pentode |
-| `circuits/testing/6k7-varimu-stage.cir` | Variable-mu gain cell | 1× 6K7 remote-cutoff pentode |
-| `circuits/testing/wurli-power-amp.cir` | Wurlitzer 200A power amp (Class AB) | 8 BJTs |
-
-### Unstable (under investigation)
-
-| Circuit | What it is | Status |
-|---------|-----------|--------|
-| `fuzz-face` (built-in) | Fuzz Face 2-transistor fuzz | Convergence issues |
-| `big-muff` (built-in) | Big Muff 4-transistor fuzz | Convergence issues |
-| `ssl-bus-compressor` (built-in) | SSL 4000E bus compressor | Audio path works; full plugin unstable |
-
-Promotion to `stable/` requires a DAW listening test, not just SPICE correlation numbers.
-
-## Spotlight: Pultec EQP-1A
+## Spotlight: Passive Tube EQ
 
 The hardest circuit melange runs end-to-end, and the clearest proof it handles real vintage gear:
 
-- **4 vacuum tubes** (2× 12AX7, 2× 12AU7), **2 transformers** (HS-29 input, S-217-D output with tertiary feedback winding), verified against Sowter engineering drawings
+- **4 vacuum tubes** (2× 12AX7, 2× 12AU7), **2 transformers** (input step-up, output with tertiary feedback winding)
 - **21 dB of global negative feedback** via differential cathode injection
 - **41 circuit nodes, 8 nonlinear dimensions** — every component from the original schematic
-- **All 7 EQ curves verified**, including the Pultec Trick (simultaneous boost + cut at same frequency)
+- **All 7 EQ curves verified**, including the simultaneous boost + cut trick
 - **Zero NR failures** at 1V input, ~11× realtime
 
 ```bash
-melange compile circuits/stable/pultec-eq.cir --format plugin -o pultec
-melange analyze circuits/stable/pultec-eq.cir --pot "LF Boost=10" --switch "LF Freq=1"
+melange compile melange:stable/filters/passive-eq1a --format plugin -o my-eq
+melange analyze melange:stable/filters/passive-eq1a --pot "LF Boost=10" --switch "LF Freq=1"
 ```
 
 ## SPICE Validation
@@ -206,7 +190,7 @@ melange analyze <circuit>                 Frequency response sweep
 melange validate <circuit>                Compare against ngspice
 melange nodes <circuit>                   List nodes and devices
 melange import <file.xml> -o <file.cir>   Import KiCad XML to Melange format
-melange builtins                          List built-in circuits
+melange builtins                          List embedded circuits (deprecated — use sources)
 melange sources add|list|remove           Manage circuit source repos
 ```
 
@@ -304,7 +288,7 @@ Melange was extracted from the [OpenWurli](https://github.com/openwurli/openwurl
 
 Melange is, in a very real sense, SPICE with a different front end and a different back end. Almost every piece of numerical behavior that makes the generated code produce the right answer traces back to 50+ years of work on SPICE and, more recently, to the open-source ngspice project.
 
-The device model equations are SPICE's. The convergence machinery (pnjlim, fetlim, source-stepping, Gmin-stepping) is SPICE's. The MNA stamping rules are SPICE's. The parameter names in `.model` lines (`IS`, `BF`, `VAF`, `IKF`, `LAMBDA`, `KP`, `VTO`, `CJE`, ...) are SPICE parameter names. Every circuit in `circuits/stable/` passes a correlation + RMS error test against ngspice. When melange and ngspice disagree, the bug is in melange until proven otherwise.
+The device model equations are SPICE's. The convergence machinery (pnjlim, fetlim, source-stepping, Gmin-stepping) is SPICE's. The MNA stamping rules are SPICE's. The parameter names in `.model` lines (`IS`, `BF`, `VAF`, `IKF`, `LAMBDA`, `KP`, `VTO`, `CJE`, ...) are SPICE parameter names. Validated circuits pass a correlation + RMS error test against ngspice. When melange and ngspice disagree, the bug is in melange until proven otherwise.
 
 If SPICE is "the physics of analog circuit simulation," then melange is "that physics, compiled ahead-of-time into a branchless inner loop you can run on the audio thread."
 

@@ -154,6 +154,7 @@ fn main() {{
 /// All pots at their default ("zero") values should give near-unity gain
 /// across the audio band. This verifies the defaults are correct.
 #[test]
+#[ignore] // circuit migrated to melange-audio/circuits repo — test moves with it
 fn test_pultec_flat_response() {
     let (code, _) = load_pultec();
     let freqs = [100.0, 1000.0, 5000.0, 10000.0];
@@ -188,6 +189,7 @@ fn test_pultec_flat_response() {
 
 /// Pultec: LF Boost increases low-frequency output.
 #[test]
+#[ignore] // circuit migrated to melange-audio/circuits repo — test moves with it
 fn test_pultec_lf_boost() {
     let (code, _) = load_pultec();
 
@@ -228,6 +230,7 @@ fn test_pultec_lf_boost() {
 
 /// Pultec: HF Boost increases high-frequency output.
 #[test]
+#[ignore] // circuit migrated to melange-audio/circuits repo — test moves with it
 fn test_pultec_hf_boost() {
     let (code, _) = load_pultec();
 
@@ -271,6 +274,7 @@ fn test_pultec_hf_boost() {
 /// Pultec: HF Cut reduces high-frequency output.
 ///
 #[test]
+#[ignore] // circuit migrated to melange-audio/circuits repo — test moves with it
 fn test_pultec_hf_cut() {
     let (code, _) = load_pultec();
 
@@ -306,6 +310,7 @@ fn test_pultec_hf_cut() {
 
 /// Pultec: LF Atten reduces low-frequency output.
 #[test]
+#[ignore] // circuit migrated to melange-audio/circuits repo — test moves with it
 fn test_pultec_lf_atten() {
     let (code, _) = load_pultec();
 
@@ -343,6 +348,7 @@ fn test_pultec_lf_atten() {
 /// The result should have MORE boost at the resonant frequency than LF boost alone,
 /// and attenuation below the boost frequency.
 #[test]
+#[ignore] // circuit migrated to melange-audio/circuits repo — test moves with it
 fn test_pultec_trick() {
     let (code, _) = load_pultec();
 

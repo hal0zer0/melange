@@ -721,6 +721,7 @@ K1 L1 L2 0.95\n";
 /// Verifies that augmented MNA correctly establishes DC bias voltages
 /// through the transformer network.
 #[test]
+#[ignore] // circuit migrated to melange-audio/circuits repo — test moves with it
 fn test_dc_op_pultec_linear() {
     use melange_solver::dc_op;
     use melange_solver::mna::MnaSystem;

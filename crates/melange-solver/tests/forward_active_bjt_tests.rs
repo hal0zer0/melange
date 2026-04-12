@@ -1035,3 +1035,103 @@ fn test_device_slots_forward_active_type() {
         _ => panic!("Expected BJT params for forward-active slot"),
     }
 }
+
+// ============================================================================
+// Regression test: detect_grid_off_pentodes with FA-reduced MNA
+// ============================================================================
+//
+// Regression for: OOB panic in detect_grid_off_pentodes when called with an
+// FA-reduced MNA (after Q1 goes 2D->1D) but device_slots built without MNA
+// (using unreduced dimensions). The panic manifested as:
+//   "index out of bounds: the len is 4 but the index is 4"
+// because D1 at start_idx=4 (unreduced) overshot v_nl.len()=4 (FA-reduced M).
+//
+// Fix: detect_grid_off_pentodes now uses build_device_info_with_mna(mna) so
+// FA-reduced device dims are reflected in start_idx values.
+
+/// Circuit with one FA BJT followed by another BJT and a diode.
+/// Mirrors the failing wurli-preamp topology: Q1 FA (1D) + Q2 (2D) + D1 (1D) = M=4.
+/// detect_grid_off_pentodes must not panic on this FA-reduced MNA.
+const TWO_BJT_DIODE_FA: &str = "\
+Two BJT plus Diode (FA regression)
+.model NPN1 NPN(IS=2.66e-15 BF=500 NF=1.0 VAF=100 IKF=0.03)
+.model D1N4148 D(IS=2.52e-9 N=1.752)
+R1 in mid_in 10k
+C1 mid_in base1 1u
+R2 base1 0 100k
+R3 base1 coll1 100k
+V1 coll1 0 DC 9
+R4 emit1 0 2.2k
+C2 emit1 0 25u
+Q1 coll1 base1 emit1 NPN1
+R5 coll1 base2 10k
+C3 base2 0 100n
+R6 base2 coll2 47k
+R7 emit2 0 1k
+Q2 coll2 base2 emit2 NPN1
+D1 coll2 out D1N4148
+R8 out 0 100k
+";
+
+#[test]
+fn test_detect_grid_off_no_panic_after_fa_reduction() {
+    // Step 1: build initial MNA (all BJTs 2D, M=5)
+    let netlist = Netlist::parse(TWO_BJT_DIODE_FA).expect("parse");
+    let mut mna = MnaSystem::from_netlist(&netlist).expect("MNA build");
+
+    // Stamp input conductance
+    if let Some(&raw) = mna.node_map.get("in") {
+        if raw > 0 {
+            mna.g[raw - 1][raw - 1] += 1.0;
+        }
+    }
+
+    // Step 2: detect which BJTs are forward-active using the original unreduced MNA
+    let config = make_config(0, 0);
+    let fa_set = CircuitIR::detect_forward_active_bjts(&mna, &netlist, &config);
+    assert!(
+        !fa_set.is_empty(),
+        "Q1 should be detected as forward-active"
+    );
+
+    // Step 3: rebuild MNA with FA-reduced dimensions (M goes from 5 to 4)
+    mna = MnaSystem::from_netlist_forward_active(&netlist, &fa_set).expect("FA MNA rebuild");
+    // Re-stamp input conductance on rebuilt MNA
+    if let Some(&raw) = mna.node_map.get("in") {
+        if raw > 0 {
+            mna.g[raw - 1][raw - 1] += 1.0;
+        }
+    }
+
+    // Verify the FA reduction happened
+    assert_eq!(mna.m, 4, "FA-reduced MNA should have M=4 (1+2+1)");
+
+    // Step 4: call detect_grid_off_pentodes with the FA-reduced MNA.
+    // Before the fix, this panicked with "index out of bounds: the len is 4 but
+    // the index is 4" because device_slots were built without MNA (unreduced dims),
+    // making D1.start_idx=4 while v_nl.len()=4.
+    // After the fix, device_slots use FA-reduced dims so D1.start_idx=3.
+    let grid_off = CircuitIR::detect_grid_off_pentodes(&mna, &netlist, &config, false);
+
+    // No pentodes in this circuit, so the map should be empty — but crucially
+    // the call must complete without panicking.
+    assert!(
+        grid_off.is_empty(),
+        "No pentodes in circuit, grid_off map should be empty"
+    );
+
+    // Verify device_slots built WITH the FA-reduced MNA have correct start_idx.
+    // D1 should be at start_idx=3, not start_idx=4 (the unreduced position).
+    let slots = CircuitIR::build_device_info_with_mna(&netlist, Some(&mna))
+        .expect("build_device_info_with_mna");
+
+    // Find the diode slot
+    let diode_slot = slots
+        .iter()
+        .find(|s| s.device_type == DeviceType::Diode)
+        .expect("Diode D1 slot should exist");
+    assert_eq!(
+        diode_slot.start_idx, 3,
+        "D1 start_idx should be 3 after Q1 FA reduction (1+2=3), not 4 (pre-FA)"
+    );
+}

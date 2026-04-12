@@ -695,6 +695,7 @@ fn lookup_model_param(netlist: &Netlist, model_name: &str, param_name: &str) -> 
 // =============================================================================
 
 #[test]
+#[ignore] // circuit migrated to melange-audio/circuits repo — test moves with it
 fn test_power_amp_dc_op_converges() {
     // Wurlitzer 200A power amplifier: 8 BJTs, Class AB push-pull.
     // Q2N5087 has RB=120Ω — the old 3-iteration inner loop failed to converge.
@@ -1112,6 +1113,7 @@ fn node_idx(mna: &MnaSystem, name: &str) -> usize {
 // Expected: Vpk ~ 200-260V, Vg2k ~ 280-300V, Vgk ~ -5 to -12V, Ip ~ 20-50mA.
 
 #[test]
+#[ignore] // circuit migrated to melange-audio/circuits repo — test moves with it
 fn test_pentode_dc_op_el84_single_stage_circuit() {
     let (mna, slots, input_node, _netlist) =
         build_pentode_circuit_pipeline("../../circuits/testing/el84-single-stage.cir");
@@ -1208,6 +1210,7 @@ fn test_pentode_dc_op_el84_single_stage_circuit() {
 // are in a physically reasonable range (100-320V).
 
 #[test]
+#[ignore] // circuit migrated to melange-audio/circuits repo — test moves with it
 fn test_pentode_dc_op_ac15_convergence() {
     let (mna, slots, input_node, _netlist) =
         build_pentode_circuit_pipeline("../../circuits/testing/ac15.cir");
@@ -1336,6 +1339,7 @@ fn test_pentode_dc_op_ac15_convergence() {
 // Coupled inductors (OT). Primarily verify convergence + reasonable voltages.
 
 #[test]
+#[ignore] // circuit migrated to melange-audio/circuits repo — test moves with it
 fn test_pentode_dc_op_tweed_deluxe_convergence() {
     let (mna, slots, input_node, _netlist) =
         build_pentode_circuit_pipeline("../../circuits/testing/tweed-deluxe.cir");
@@ -1472,6 +1476,7 @@ fn test_pentode_dc_op_tweed_deluxe_convergence() {
 // Expected: Vpk ~ 100-230V, Vg2k ~ 50-110V, Vgk ~ -0.5 to -3V, Ip ~ 1-8mA.
 
 #[test]
+#[ignore] // circuit migrated to melange-audio/circuits repo — test moves with it
 fn test_pentode_dc_op_6k7_varimu_stage() {
     let (mna, slots, input_node, _netlist) =
         build_pentode_circuit_pipeline("../../circuits/testing/6k7-varimu-stage.cir");

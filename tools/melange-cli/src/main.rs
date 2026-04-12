@@ -328,6 +328,24 @@ enum Commands {
         switch_overrides: Vec<String>,
     },
 
+    /// Compute DC operating point and print node voltages
+    DcOp {
+        /// Input SPICE netlist file or circuit reference
+        input: String,
+
+        /// Input node name
+        #[arg(short, long, default_value = "in")]
+        input_node: String,
+
+        /// Input resistance in ohms
+        #[arg(long, default_value = "1.0")]
+        input_resistance: f64,
+
+        /// Output format: "human" (default) or "json"
+        #[arg(short = 'f', long, default_value = "human")]
+        format: String,
+    },
+
     /// List available nodes in a netlist
     Nodes {
         /// Input SPICE netlist file or circuit reference
@@ -682,6 +700,16 @@ fn main() -> Result<()> {
                 &pot_overrides,
                 &switch_overrides,
             )
+        }
+        Commands::DcOp {
+            input,
+            input_node,
+            input_resistance,
+            format,
+        } => {
+            let circuit_source = circuits::resolve(&input)?;
+            eprintln!("Resolved circuit: {}", circuit_source.name());
+            run_dc_op(&circuit_source, &input_node, input_resistance, &format)
         }
         Commands::Nodes { input } => {
             let circuit_source = circuits::resolve(&input)?;
@@ -2003,8 +2031,14 @@ fn simulate_circuit_source(
         if input_node_idx < mna.n {
             mna.g[input_node_idx][input_node_idx] += input_conductance;
         }
+        // Use build_device_info_with_mna so FA-reduced BJT dims are reflected,
+        // giving correct start_idx for junction cap stamping.
         let device_slots =
-            melange_solver::codegen::ir::CircuitIR::build_device_info(&netlist).unwrap_or_default();
+            melange_solver::codegen::ir::CircuitIR::build_device_info_with_mna(
+                &netlist,
+                Some(&mna),
+            )
+            .unwrap_or_default();
         if !device_slots.is_empty() {
             mna.stamp_device_junction_caps(&device_slots);
         }
@@ -2472,8 +2506,14 @@ fn analyze_freq_response(
         if input_node_idx < mna.n {
             mna.g[input_node_idx][input_node_idx] += input_conductance;
         }
+        // Use build_device_info_with_mna so FA-reduced BJT dims are reflected,
+        // giving correct start_idx for junction cap stamping.
         let device_slots =
-            melange_solver::codegen::ir::CircuitIR::build_device_info(&netlist).unwrap_or_default();
+            melange_solver::codegen::ir::CircuitIR::build_device_info_with_mna(
+                &netlist,
+                Some(&mna),
+            )
+            .unwrap_or_default();
         if !device_slots.is_empty() {
             mna.stamp_device_junction_caps(&device_slots);
         }
@@ -3383,6 +3423,203 @@ fn list_nodes_source(circuit_source: &circuits::CircuitSource) -> Result<()> {
                 "  {}: {:?} (dimension: {})",
                 dev.name, dev.device_type, dev.dimension
             );
+        }
+    }
+
+    Ok(())
+}
+
+fn run_dc_op(
+    circuit_source: &circuits::CircuitSource,
+    input_node_name: &str,
+    input_resistance: f64,
+    format: &str,
+) -> Result<()> {
+    use melange_solver::codegen::ir::CircuitIR;
+    use melange_solver::dc_op::{solve_dc_operating_point, DcOpConfig};
+    use melange_solver::mna::MnaSystem;
+    use melange_solver::parser::Netlist;
+
+    // Get circuit content
+    let netlist_str = match circuit_source {
+        circuits::CircuitSource::Builtin { content, .. } => content.clone(),
+        circuits::CircuitSource::Local { path } => std::fs::read_to_string(path)
+            .with_context(|| format!("Failed to read local file: {}", path.display()))?,
+        circuits::CircuitSource::Url { url } | circuits::CircuitSource::Friendly { url, .. } => {
+            let cache = cache::Cache::new()?;
+            cache.get_sync(url, false)?
+        }
+    };
+
+    let mut netlist =
+        Netlist::parse(&netlist_str).with_context(|| "Failed to parse SPICE netlist")?;
+
+    if !netlist.subcircuits.is_empty() {
+        netlist
+            .expand_subcircuits()
+            .with_context(|| "Failed to expand subcircuits")?;
+    }
+
+    // Check for .input_impedance directive
+    let mut r_in = input_resistance;
+    if let Some(r) = netlist.input_impedance {
+        r_in = r;
+    }
+
+    // Build MNA (no FA detection — DC OP wants full device dimensions)
+    let mut mna =
+        MnaSystem::from_netlist(&netlist).with_context(|| "Failed to build MNA system")?;
+
+    let input_node_idx = mna
+        .node_map
+        .get(input_node_name)
+        .copied()
+        .map(|idx| idx - 1)
+        .with_context(|| {
+            let available: Vec<_> = mna.node_map.keys().collect();
+            format!(
+                "Input node '{}' not found. Available: {:?}",
+                input_node_name, available
+            )
+        })?;
+
+    // Stamp input conductance
+    let input_conductance = 1.0 / r_in;
+    if input_node_idx < mna.n {
+        mna.g[input_node_idx][input_node_idx] += input_conductance;
+    }
+
+    // Build device slots and stamp junction caps
+    let device_slots =
+        CircuitIR::build_device_info_with_mna(&netlist, Some(&mna)).unwrap_or_default();
+    if !device_slots.is_empty() {
+        mna.stamp_device_junction_caps(&device_slots);
+    }
+
+    let dc_config = DcOpConfig {
+        input_node: input_node_idx,
+        input_resistance: r_in,
+        ..DcOpConfig::default()
+    };
+
+    let result = solve_dc_operating_point(&mna, &device_slots, &dc_config);
+
+    // Build reverse node map (index → name)
+    let mut idx_to_name: Vec<String> = vec!["0".to_string(); mna.n + 1];
+    for (name, &idx) in &mna.node_map {
+        if idx <= mna.n {
+            idx_to_name[idx] = name.clone();
+        }
+    }
+
+    if format == "json" {
+        // JSON output for machine consumption
+        print!("{{");
+        print!("\"converged\":{},", result.converged);
+        print!("\"method\":\"{:?}\",", result.method);
+        print!("\"iterations\":{},", result.iterations);
+        print!("\"n\":{},\"m\":{},", mna.n, mna.m);
+
+        // Node voltages
+        print!("\"nodes\":{{");
+        let mut nodes: Vec<_> = mna.node_map.iter().collect();
+        nodes.sort_by(|a, b| a.1.cmp(b.1));
+        let mut first = true;
+        for (name, &idx) in &nodes {
+            if idx > 0 && idx <= result.v_node.len() {
+                if !first {
+                    print!(",");
+                }
+                first = false;
+                print!("\"{}\":{:.6e}", name, result.v_node[idx - 1]);
+            }
+        }
+        print!("}}");
+
+        // Nonlinear device currents
+        if !result.i_nl.is_empty() {
+            print!(",\"devices\":{{");
+            let mut first = true;
+            for (i, slot) in device_slots.iter().enumerate() {
+                let s = slot.start_idx;
+                let dev_name = mna
+                    .nonlinear_devices
+                    .get(i)
+                    .map(|d| d.name.as_str())
+                    .unwrap_or("?");
+                for d in 0..slot.dimension {
+                    if s + d < result.i_nl.len() {
+                        if !first {
+                            print!(",");
+                        }
+                        first = false;
+                        print!(
+                            "\"{}[{}]\":{{\"v_nl\":{:.6e},\"i_nl\":{:.6e}}}",
+                            dev_name,
+                            d,
+                            result.v_nl[s + d],
+                            result.i_nl[s + d]
+                        );
+                    }
+                }
+            }
+            print!("}}");
+        }
+
+        println!("}}");
+    } else {
+        // Human-readable output
+        eprintln!("melange dc-op");
+        eprintln!("  N={}, M={}", mna.n, mna.m);
+        eprintln!(
+            "  Converged: {} ({:?}, {} iterations)",
+            result.converged, result.method, result.iterations
+        );
+        eprintln!();
+
+        // Node voltages
+        println!("Node voltages:");
+        let mut nodes: Vec<_> = mna.node_map.iter().collect();
+        nodes.sort_by(|a, b| a.1.cmp(b.1));
+        for (name, &idx) in &nodes {
+            if idx > 0 && idx <= result.v_node.len() {
+                let v = result.v_node[idx - 1];
+                if v.abs() > 0.1 {
+                    println!("  v({}) = {:.4} V", name, v);
+                } else if v.abs() > 1e-6 {
+                    println!("  v({}) = {:.4} mV", name, v * 1e3);
+                } else {
+                    println!("  v({}) = {:.4e} V", name, v);
+                }
+            }
+        }
+
+        // Nonlinear device operating points
+        if !result.i_nl.is_empty() {
+            println!();
+            println!("Device operating points:");
+            for (i, slot) in device_slots.iter().enumerate() {
+                let s = slot.start_idx;
+                let dev_name = mna
+                    .nonlinear_devices
+                    .get(i)
+                    .map(|d| d.name.as_str())
+                    .unwrap_or("?");
+                println!("  {} ({:?}):", dev_name, slot.device_type);
+                for d in 0..slot.dimension {
+                    if s + d < result.i_nl.len() {
+                        let v = result.v_nl[s + d];
+                        let i = result.i_nl[s + d];
+                        if i.abs() > 1e-3 {
+                            println!("    [{}] v_nl={:.4} V, i_nl={:.4} mA", d, v, i * 1e3);
+                        } else if i.abs() > 1e-6 {
+                            println!("    [{}] v_nl={:.4} V, i_nl={:.4} uA", d, v, i * 1e6);
+                        } else {
+                            println!("    [{}] v_nl={:.4} V, i_nl={:.4e} A", d, v, i);
+                        }
+                    }
+                }
+            }
         }
     }
 

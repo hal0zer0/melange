@@ -1,10 +1,34 @@
 //! CLI integration tests — invoke the melange binary and verify behavior.
 //!
-//! These tests build and run the CLI binary against real circuit files,
-//! verifying end-to-end pipeline correctness.
+//! These tests use inline synthetic circuits to test CLI commands
+//! without depending on external circuit files.
 
 use std::path::PathBuf;
 use std::process::Command;
+
+/// Minimal RC lowpass for testing CLI commands (linear, no nonlinear devices).
+const TEST_RC_LOWPASS: &str = "\
+RC Lowpass Test Fixture
+R1 in out 10k
+C1 out 0 10n
+";
+
+/// Minimal diode clipper for testing nonlinear CLI paths.
+const TEST_DIODE_CLIPPER: &str = "\
+Diode Clipper Test Fixture
+R1 in out 4.7k
+D1 out 0 1N4148
+D2 0 out 1N4148
+C1 out 0 100n
+.model 1N4148 D(IS=2.52e-9 N=1.752 BV=100 IBV=100u)
+";
+
+/// Write a test circuit to a temp file and return the path.
+fn write_test_circuit(content: &str, name: &str) -> PathBuf {
+    let path = std::env::temp_dir().join(format!("melange_cli_test_{}.cir", name));
+    std::fs::write(&path, content).expect("write test circuit");
+    path
+}
 
 /// Get the path to the built melange binary.
 fn melange_bin() -> PathBuf {
@@ -74,13 +98,10 @@ fn run_melange_fail(args: &[&str]) -> String {
 #[test]
 fn test_builtins_lists_circuits() {
     let stdout = run_melange(&["builtins"]);
+    // Builtins migrated to melange-audio/circuits repo — list is now empty
     assert!(
-        stdout.contains("rc-lowpass"),
-        "Should list rc-lowpass builtin"
-    );
-    assert!(
-        stdout.contains("Available builtin circuits"),
-        "Should have header"
+        stdout.contains("Available builtin circuits") || stdout.contains("No builtin"),
+        "Should have header or empty message"
     );
 }
 
@@ -90,13 +111,14 @@ fn test_builtins_lists_circuits() {
 
 #[test]
 fn test_nodes_circuit_file() {
-    let stdout = run_melange(&["nodes", "circuits/stable/wurli-preamp.cir"]);
-    // Should list node names from the circuit
+    let cir = write_test_circuit(TEST_RC_LOWPASS, "nodes");
+    let stdout = run_melange(&["nodes", cir.to_str().unwrap()]);
     assert!(
-        stdout.contains("out") || stdout.contains("base") || stdout.contains("coll"),
+        stdout.contains("in") || stdout.contains("out"),
         "Should list circuit nodes, got: {}",
         stdout
     );
+    let _ = std::fs::remove_file(&cir);
 }
 
 // ============================================================================
@@ -105,16 +127,17 @@ fn test_nodes_circuit_file() {
 
 #[test]
 fn test_compile_circuit_file() {
+    let cir = write_test_circuit(TEST_DIODE_CLIPPER, "compile");
     let tmp = std::env::temp_dir().join("melange_cli_test_compile.rs");
     let tmp_str = tmp.to_str().unwrap();
 
     let stdout = run_melange(&[
         "compile",
-        "circuits/stable/wurli-preamp.cir",
+        cir.to_str().unwrap(),
         "--output",
         tmp_str,
         "--input-node",
-        "mid_in",
+        "in",
         "--output-node",
         "out",
     ]);
@@ -137,16 +160,18 @@ fn test_compile_circuit_file() {
     );
 
     let _ = std::fs::remove_file(&tmp);
+    let _ = std::fs::remove_file(&cir);
 }
 
 #[test]
 fn test_compile_produces_compilable_rust() {
+    let cir = write_test_circuit(TEST_DIODE_CLIPPER, "compiles");
     let tmp_rs = std::env::temp_dir().join("melange_cli_test_compiles.rs");
     let tmp_rlib = std::env::temp_dir().join("melange_cli_test_compiles.rlib");
 
     run_melange(&[
         "compile",
-        "circuits/stable/tweed-preamp.cir",
+        cir.to_str().unwrap(),
         "--output",
         tmp_rs.to_str().unwrap(),
         "--input-node",
@@ -167,6 +192,7 @@ fn test_compile_produces_compilable_rust() {
 
     let _ = std::fs::remove_file(&tmp_rs);
     let _ = std::fs::remove_file(&tmp_rlib);
+    let _ = std::fs::remove_file(&cir);
 
     assert!(
         compile.status.success(),
@@ -181,13 +207,14 @@ fn test_compile_produces_compilable_rust() {
 
 #[test]
 fn test_simulate_sine_tone() {
+    let cir = write_test_circuit(TEST_RC_LOWPASS, "sim");
     let tmp_wav = std::env::temp_dir().join("melange_cli_test_sim.wav");
 
     run_melange(&[
         "simulate",
-        "circuits/stable/wurli-preamp.cir",
+        cir.to_str().unwrap(),
         "--input-node",
-        "mid_in",
+        "in",
         "--output-node",
         "out",
         "--amplitude",
@@ -207,6 +234,7 @@ fn test_simulate_sine_tone() {
     );
 
     let _ = std::fs::remove_file(&tmp_wav);
+    let _ = std::fs::remove_file(&cir);
 }
 
 // ============================================================================
@@ -237,9 +265,10 @@ fn test_compile_missing_file() {
 
 #[test]
 fn test_compile_missing_node() {
+    let cir = write_test_circuit(TEST_RC_LOWPASS, "missing_node");
     let stderr = run_melange_fail(&[
         "compile",
-        "circuits/stable/wurli-preamp.cir",
+        cir.to_str().unwrap(),
         "--output",
         "/tmp/melange_cli_fail.rs",
         "--input-node",
@@ -247,6 +276,7 @@ fn test_compile_missing_node() {
         "--output-node",
         "out",
     ]);
+    let _ = std::fs::remove_file(&cir);
     assert!(
         stderr.contains("node")
             || stderr.contains("Node")

@@ -479,6 +479,7 @@ fn test_neve_1073_coupled_switch_positions_differ() {
 /// Full 1073 EQ circuit (HPF + B205 bridge + BA284 §2 amp) compiles and runs.
 /// Loaded from the actual circuit file.
 #[test]
+#[ignore] // circuit migrated to melange-audio/circuits repo — test moves with it
 fn test_neve_1073_full_eq_codegen_compiles_and_runs() {
     let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()

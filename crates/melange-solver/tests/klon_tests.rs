@@ -73,6 +73,7 @@ fn compile_and_run(code: &str, main_code: &str, tag: &str) -> String {
 // =============================================================================
 
 #[test]
+#[ignore] // circuit migrated to melange-audio/circuits repo — test moves with it
 fn test_klon_parse() {
     let spice = load_klon_netlist();
     let netlist = Netlist::parse(&spice).expect("Failed to parse Klon netlist");
@@ -136,6 +137,7 @@ fn test_klon_parse() {
 // =============================================================================
 
 #[test]
+#[ignore] // circuit migrated to melange-audio/circuits repo — test moves with it
 fn test_klon_mna_build() {
     let spice = load_klon_netlist();
     let netlist = Netlist::parse(&spice).unwrap();
@@ -166,6 +168,7 @@ fn test_klon_mna_build() {
 // =============================================================================
 
 #[test]
+#[ignore] // circuit migrated to melange-audio/circuits repo — test moves with it
 fn test_klon_dk_kernel_builds() {
     // With the IIR op-amp model (no Boyle internal nodes), the Klon's DK kernel
     // now builds successfully. Previously the Boyle Gm~4000 S stamps caused ill-
@@ -189,6 +192,7 @@ fn test_klon_dk_kernel_builds() {
 // =============================================================================
 
 #[test]
+#[ignore] // circuit migrated to melange-audio/circuits repo — test moves with it
 fn test_klon_nodal_codegen() {
     let spice = load_klon_netlist();
     let netlist = Netlist::parse(&spice).unwrap();
@@ -227,6 +231,7 @@ fn test_klon_nodal_codegen() {
 // =============================================================================
 
 #[test]
+#[ignore] // circuit migrated to melange-audio/circuits repo — test moves with it
 fn test_klon_codegen_compiles_and_runs() {
     let spice = load_klon_netlist();
     let netlist = Netlist::parse(&spice).unwrap();
@@ -315,6 +320,7 @@ fn main() {
 // again. DO NOT just bump the bound — trace the cause.
 
 #[test]
+#[ignore] // circuit migrated to melange-audio/circuits repo — test moves with it
 fn test_klon_active_set_keeps_out_ac_physical() {
     use melange_solver::codegen::OpampRailMode;
 
@@ -414,6 +420,7 @@ fn main() {{
 // cap-history-corruption signature.
 
 #[test]
+#[ignore] // circuit migrated to melange-audio/circuits repo — test moves with it
 fn test_klon_hard_mode_documents_cap_history_bug() {
     use melange_solver::codegen::OpampRailMode;
 

@@ -274,7 +274,11 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
 - melange-cli does NOT cross-compile (ureq/dirs need CoreFoundation), but generated plugins do
 
 ### Validated Circuits
-- `circuits/stable/pultec-eq.cir`: Pultec EQP-1A (4 tubes: 2×12AX7 + 2×12AU7, 2 transformers, 3 switches, 7 pots, global NFB)
+Circuits have been migrated to the melange-audio/circuits repo (2026-04-12).
+Circuit-specific tests are being migrated as `.test.toml` sidecars.
+Historical validation data preserved below for reference.
+
+- Passive tube EQ (passive-eq1a): 4 tubes, 2 transformers, 7 pots, 3 switches, global NFB
   - Verified against Sowter DWG E-72,658-2 schematic + Peerless/Triad winding data (2026-03-18)
   - HS-29: 1:2 step-up, 37H, true push-pull grid drive (both grids from CT secondary)
   - S-217-D: 220H primary (30Hz), 71-turn tertiary feedback, 220pF 12AU7 grid stabilization
@@ -282,33 +286,33 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
   - Gain: +1.8 dB at 1kHz (near unity), flat ±1 dB 20Hz-15kHz, 21 dB differential NFB working
   - All 7 pots + 3 switches produce correct EQ curves (LF Boost/Atten, HF Boost/Cut, Pultec trick)
   - ~11× realtime on full LU with chord + cross-timestep + sparse LU, zero NR failures at 1V
-- `circuits/stable/wurli-preamp.cir`: Wurlitzer 200A preamp (N=11, M=5→3 FA, 2 BJTs + 1 diode, 1 pot)
+- Wurlitzer 200A preamp (wurli-preamp): N=11, M=5→3 FA, 2 BJTs + 1 diode, 1 pot
   - Flattened from openwurli/spice/subcircuits/preamp.cir
   - R1-Cin series input coupling via intermediate node (mid_in)
   - 2N5089 BJTs run pure Ebers-Moll (USE_GP=false, no GP params in .model)
   - Compile-path output byte-identical to 2026-03-25 baseline (verified via md5 of DC_OP, S_DEFAULT, K_DEFAULT, N_V, N_I, A_NEG_DEFAULT)
-- `circuits/testing/wurli-power-amp.cir`: Wurlitzer 200A power amplifier (N=20, M=16→9 FA, 8 BJTs, Class AB)
+- Wurlitzer 200A power amplifier (wurli-power-amp): N=20, M=16→9 FA, 8 BJTs, Class AB
   - Quasi-complementary push-pull: PNP diff pair ��� NPN VAS → Sziklai output pairs
   - DC OP: v(out)=-0.065V (ngspice: -0.063V), internal nodes for parasitic BJTs (RB up to 120Ω)
   - FA detection: 7/8 BJTs forward-active (Q9 Vbe multiplier excluded — near saturation)
   - DK codegen M=9: stable, 0.4× realtime (optimized). Nodal codegen: stable, 0.04× realtime.
-- `circuits/stable/tweed-preamp.cir`: Fender-style 2-stage 12AX7 guitar amp (N=13, M=4, 1 pot, 1 switch)
+- Tweed-style 2-stage 12AX7 preamp (twas-preamp): N=13, M=4, 1 pot, 1 switch
   - Two 12AX7 triode stages, interstage volume pot (shunt, 500Ω-500kΩ), bright switch (3-pos)
   - Stage 1: fully bypassed cathode (25µF, max gain); Stage 2: partial bypass (0.68µF, ~156Hz)
   - Output pad (390k/6.8k, -35dB) models output transformer attenuation
   - 50mV in → 549mV out (11x / 20.8dB gain), zero NR divergence
-- `circuits/unstable/ssl-bus-compressor.cir`: SSL 4000E bus compressor (4 op-amps, 1 VCA, 2 diodes, 2 pots, 2 switches)
+- Bus compressor (4kbuscomp): 4 op-amps, 1 VCA, 2 diodes, 2 pots, 2 switches
   - Audio path codegen validated: -62.8 dB output matches runtime NodalSolver exactly
   - Uses nodal full-LU path (K≈0 from current-mode VCA, N=28, M=2)
-- `circuits/testing/el84-single-stage.cir`: Single EL84 pentode stage (Reefman Derk §4.4 rational screen form)
+- EL84 single stage (el84-single-stage): Reefman Derk §4.4 rational screen form
   - DC-OP validated, end-to-end compile-and-run verified
-- `circuits/testing/ac15.cir`: Vox AC15-style amp (EF86 preamp + EL84 power pentodes)
+- AC15-class amp (axe-15): EF86 preamp + EL84 power pentodes
   - DC-OP validated, end-to-end compile-and-run verified
-- `circuits/testing/tweed-deluxe.cir`: Fender Tweed Deluxe-style amp (6V6GT beam tetrode power stage, DerkE §4.5 exponential screen)
+- Tweed Deluxe-class amp (twill-deluxe): 6V6GT beam tetrode power stage, DerkE §4.5 exponential screen
   - DC-OP validated, end-to-end compile-and-run verified
-- `circuits/testing/6k7-varimu-stage.cir`: 6K7 variable-mu pentode stage (Reefman §5 two-section Koren)
+- 6K7 variable-mu stage (6k7-varimu-stage): Reefman §5 two-section Koren
   - DC-OP validated, end-to-end compile-and-run verified
-- `circuits/testing/plexi-mockup.cir`: Marshall Plexi-style amp (4×EL34 power stage, grid-off FA reduction M=18→14)
+- Plexi-class amp (rexi-mockup): 4×EL34 power stage, grid-off FA reduction M=18→14
   - DC-OP validated, end-to-end compile-and-run verified, DK Schur enabled via grid-off
 
 ### Shipped (2026)

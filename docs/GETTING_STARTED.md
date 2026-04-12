@@ -14,18 +14,14 @@ Optional:
 - **ngspice** — for validation against SPICE reference (`apt install ngspice` / `brew install ngspice`)
 - **zig + cargo-zigbuild** — for macOS cross-compilation from Linux
 
-## Quick Start: Built-in Circuit to Plugin
+## Quick Start: Circuit to Plugin
 
-Melange ships with classic circuits ready to go. List them:
-
-```bash
-melange builtins
-```
-
-Compile one to a plugin project:
+Compile a circuit from the [melange-audio/circuits](https://github.com/melange-audio/circuits) library, or use a local `.cir` file:
 
 ```bash
-melange compile fuzz-face --format plugin -o my-fuzz
+melange compile melange:unstable/pedals/peaches --format plugin -o my-fuzz
+# or from a local file:
+melange compile my-circuit.cir --format plugin -o my-fuzz
 ```
 
 This generates a complete nih-plug project in `my-fuzz/` with:
@@ -94,7 +90,7 @@ Each `.pot` becomes a knob and each `.switch` becomes a selector in the generate
 
 | Command | What it does |
 |---------|-------------|
-| `melange builtins` | List built-in circuits |
+| `melange sources list` | List configured circuit sources |
 | `melange nodes circuit.cir` | Show nodes and devices |
 | `melange compile circuit.cir -f plugin -o dir` | Generate plugin project |
 | `melange compile circuit.cir -f code -o file.rs` | Generate standalone Rust code |

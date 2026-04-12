@@ -92,47 +92,28 @@ K≈0 detection: max|K| < 1e-6 with M > 0.
 
 ## Circuit Library Status
 
-Promotion criteria:
-- **`circuits/stable/`** — passes SPICE validation AND user has manually
-  verified the audio output sounds right in a DAW. Promotion requires
-  user sign-off, not just numerical correlation.
-- **`circuits/testing/`** — compiles, runs, may pass SPICE validation, but
-  not yet user-verified for audio quality. Use at your own risk.
-- **`circuits/unstable/`** — known issues; works in some configurations
-  only, or under active investigation. Do not ship.
+Circuits have been migrated to the [melange-audio/circuits](https://github.com/melange-audio/circuits) repo.
+All circuits are in `unstable/` until the user manually tests and approves promotion.
 
-### Stable circuits (user-verified)
+The compiler validation status of circuits known to exercise specific solver paths:
 
-| Circuit | N | M | Solver | Performance | Notes |
-|---------|---|---|--------|-------------|-------|
-| rc-lowpass | 2 | 0 | Linear | trivial | Linear-reference smoke test |
-| tweed-preamp | 13 | 4 | DK | fast | 2× 12AX7, 1 pot, 1 switch |
-| wurli-preamp | 11 | 3-5 | DK | fast | 2 BJTs + 1 diode, FA detection. 2N5089 has no GP params (`USE_GP=false`); compile-path matrices byte-identical to 2026-03-25 baseline. |
-| pultec-eq | 41 | 8 | Nodal full LU | ~11× | 4 tubes, 2 xfmrs, 7 pots, 3 switches. Chord + cross-timestep + sparse LU. +1.83 dB @ 1 kHz. All EQ curves verified 2026-03-23. |
+| Topology class | N | M | Solver | Performance | Notes |
+|----------------|---|---|--------|-------------|-------|
+| Linear RC | 2 | 0 | Linear | trivial | Smoke test |
+| 2-stage BJT preamp | 11 | 3-5 | DK | fast | FA detection, 2N5089 Ebers-Moll |
+| 2-stage triode preamp | 13 | 4 | DK | fast | 2× 12AX7, pot + switch |
+| 4-tube passive EQ + 2 xfmrs | 41 | 8 | Nodal full LU | ~11× | Chord + cross-timestep + sparse LU |
+| 8-BJT Class AB power amp | 20 | 9-16 | DK/Nodal | 0.4× / 0.04× | Parasitic R, FA detection |
+| 4-opamp + diode clipper | 44 | 10 | Nodal full LU (auto) | — | ActiveSetBe auto for clean clipping; BoyleDiodes diverges at heavy clip |
+| Op-amp overdrive + diodes | — | — | DK | — | TS808-class clipping |
+| VCA compressor + sidechain | 21 | 3 | Nodal full LU | ~42× | Current-mode VCA, K≈0 |
+| Pentode single stage | — | 2-3 | DK | fast | Grid-off reduces M=3→2 |
+| Push-pull pentode amp + OT | — | — | Nodal | — | Transformer forces nodal path |
+| Variable-mu pentode | — | 3 | DK | fast | M=3, no grid-off reduction |
 
-### In testing (compiles, not yet user-verified)
-
-| Circuit | N | M | Solver | Performance | Notes |
-|---------|---|---|--------|-------------|-------|
-| wurli-power-amp | 20 | 9-16 | DK/Nodal | 0.4× / 0.04× | Class AB, 8 BJTs |
-| klon-centaur | 44 | 10 | Nodal full LU (auto) | — | 4× TL072 (charge-pump rails 9V & 18V/-9V) + 2× Ge clipping diodes, 3 pots (gain dual-gang). Auto picks `ActiveSetBe` (commit `016ac6c`) for clean clipping 0.05–0.20 V; above 220 mV the trap+pin Nyquist limit cycle returns. **`BoyleDiodes`** (commits `5544c8a` + `39397d1`) works for clean clipping up to amp ≈ 0.05 V (matches ActiveSetBe within 25 mV) but **diverges at amp ≥ 0.07 V** due to bistable Newton oscillation at the catch-diode knee — see `DEBUGGING.md` "Op-amp BoyleDiodes Failure Signatures" and the agent-memory note `task_12_bistable_oscillation_finding.md`. Real fix needs Anderson acceleration / trust-region NR. |
-| tube-screamer | — | — | DK | — | TS808 clipper |
-| mordor-screamer | — | — | DK | — | TS-style variant |
-| tube-preamp | — | — | DK | — | Generic tube preamp |
-| vcr-audio-alc | 21 | 3 | Nodal full LU | ~42× | VHS audio ALC compressor (feedforward VCA + sidechain) |
-| wurli-tremolo | — | — | — | — | LDR tremolo stage |
-
-### Unstable (known issues, under investigation)
-
-| Circuit | N | M | Solver | Performance | Notes |
-|---------|---|---|--------|-------------|-------|
-| ssl-bus-compressor | 28 | 2 | Nodal full LU | — | 4 op-amps, 1 VCA, 2 diodes. Audio path codegen matches runtime, full plugin not stable. |
-| neve-1073-preamp | — | — | — | — | BA283 AV stage |
-| neve-1073-output | — | — | — | — | BA283 AM stage |
-| neve-1073-eq | — | — | — | — | EQ section in progress |
-| neve-1073-presence | — | — | — | — | Presence stage |
-| big-muff | — | — | DK | — | EHX classic, fuzz topology |
-| fuzz-face | — | — | DK | — | Arbiter Fuzz Face Ge transistor pair |
+Only circuits using standard SPICE models (D, NPN/PNP, NJF/PJF, NM/PM) can be validated
+against ngspice. Circuits with melange-extended models (OA, VCA, VP, triode) use
+`melange compile`/`analyze`/`simulate` for validation, not ngspice.
 
 Promotion to `stable/` requires user sign-off after a DAW listening test.
 SPICE correlation and successful compilation are necessary but not sufficient.

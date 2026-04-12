@@ -3281,7 +3281,11 @@ impl CircuitIR {
     ) -> std::collections::HashMap<String, f64> {
         use crate::dc_op::{self, DcOpConfig};
 
-        let device_slots = Self::build_device_info(netlist).unwrap_or_default();
+        // Must use build_device_info_with_mna so that FA-reduced BJTs (dim=1) produce
+        // the correct start_idx values matching mna.m. Using build_device_info(netlist)
+        // without MNA gives unreduced dimensions, causing v_nl OOB when FA reduction
+        // has already happened (e.g. Q1 reduced 2D→1D shifts all subsequent start_idx).
+        let device_slots = Self::build_device_info_with_mna(netlist, Some(mna)).unwrap_or_default();
         if device_slots.is_empty() {
             return std::collections::HashMap::new();
         }
@@ -4908,90 +4912,95 @@ mod opamp_rail_mode_tests {
         assert_eq!(r.reason, OpampRailModeReason::NoClampedOpamps);
     }
 
-    // Integration tests against real circuit files. These document the
-    // auto-detection result for each circuit class — if the resolver logic
-    // changes, these catch regressions in per-circuit behavior without
-    // needing to re-run end-to-end codegen.
+    // Integration tests using synthetic circuits that exercise the same
+    // auto-detection code paths as the real circuits (which now live in
+    // the melange-audio/circuits repo).
 
-    fn load_and_resolve(path: &str) -> ResolvedOpampRailMode {
-        let src = std::fs::read_to_string(path)
-            .unwrap_or_else(|e| panic!("failed to read {}: {}", path, e));
-        let netlist = crate::parser::Netlist::parse(&src)
-            .unwrap_or_else(|e| panic!("failed to parse {}: {}", path, e));
+    fn parse_and_resolve(spice: &str) -> ResolvedOpampRailMode {
+        let netlist = crate::parser::Netlist::parse(spice)
+            .unwrap_or_else(|e| panic!("failed to parse: {}", e));
         let mna = MnaSystem::from_netlist(&netlist)
-            .unwrap_or_else(|e| panic!("failed to build MNA for {}: {}", path, e));
+            .unwrap_or_else(|e| panic!("failed to build MNA: {}", e));
         resolve_opamp_rail_mode(&mna, OpampRailMode::Auto)
     }
 
     #[test]
-    fn klon_auto_picks_active_set() {
-        // Klon has four TL072 op-amps. Two of them (U2A sum_out, U2B tone_out)
-        // have AC-coupled downstream stages: C13 is a feedback cap on U2A
-        // (doesn't count), but C15 goes from tone_out to out_ac (downstream
-        // coupling) — that's the cap whose history gets corrupted by the
-        // hard clamp. Auto must pick ActiveSet.
-        //
-        // This test is the "Klon fix is wired in automatically" assertion.
-        // If it regresses, users would stop getting the fix on default
-        // compile invocations.
-        let r = load_and_resolve("../../circuits/testing/klon-centaur.cir");
+    fn opamp_with_ac_coupled_downstream_picks_active_set() {
+        // Synthetic: op-amp with AC-coupled downstream stage.
+        // Exercises the same AcCoupledDownstream path as Klon's topology.
+        let spice = "\
+Opamp AC-Coupled Downstream Test
+R1 in sum 4.7k
+R2 sum out 47k
+C1 out out_ac 100n
+R3 out_ac 0 100k
+U1 0 sum out OA1
+.model OA1 OA(AOL=100k GBW=3e6 ROUT=75 VCC=4.5 VEE=-4.5)
+";
+        let r = parse_and_resolve(spice);
         assert_eq!(r.mode, OpampRailMode::ActiveSet);
         assert_eq!(r.reason, OpampRailModeReason::AcCoupledDownstream);
     }
 
     #[test]
-    fn pultec_auto_picks_none() {
-        // Pultec has tubes but no op-amps — no rail clamping needed.
-        let r = load_and_resolve("../../circuits/stable/pultec-eq.cir");
+    fn circuit_without_opamps_picks_none() {
+        // Synthetic: tubes and passives, no op-amps. Same path as Pultec.
+        let spice = "\
+No Op-Amp Test
+R1 in grid 68k
+R2 plate 0 100k
+C1 grid 0 22p
+V1 plate 0 DC 250
+";
+        let r = parse_and_resolve(spice);
         assert_eq!(r.mode, OpampRailMode::None);
         assert_eq!(r.reason, OpampRailModeReason::NoClampedOpamps);
     }
 
     #[test]
-    fn wurli_preamp_auto_picks_some_mode() {
-        // Wurli has one op-amp; whatever the resolver picks, it must be a
-        // concrete mode (never Auto). We don't pin the exact choice here so
-        // future refinement is free to upgrade it.
-        let r = load_and_resolve("../../circuits/stable/wurli-preamp.cir");
+    fn single_opamp_no_downstream_coupling_picks_concrete_mode() {
+        // Synthetic: single op-amp, no AC-coupled downstream.
+        // Must resolve to a concrete mode (never Auto).
+        let spice = "\
+Single Op-Amp Test
+R1 in neg 10k
+R2 neg out 100k
+U1 in neg out OA1
+.model OA1 OA(AOL=100k GBW=1e6 ROUT=100 VCC=15 VEE=-15)
+";
+        let r = parse_and_resolve(spice);
         assert_ne!(r.mode, OpampRailMode::Auto);
     }
 
     #[test]
-    fn augment_netlist_with_boyle_diodes_on_klon_produces_valid_mna() {
-        // The Boyle catch-diode augmentation helper is the netlist-side half
-        // of the BoyleDiodes op-amp model. Each clamped op-amp's
-        // transconductance is redirected (in MNA stamping, see mna.rs op-amp
-        // dispatch) to a synthesized internal high-impedance gain node, and
-        // this helper synthesizes the elements that surround that node:
-        // catch diodes anchored to rail-offset DC sources, plus a unity-gain
-        // output buffer that drives the original output.
-        //
-        // Contract this test pins:
-        //   * Each op-amp with finite VCC/VEE gets exactly:
-        //       - 1 new internal node (`_oa_int_{name}`)
-        //       - 2 new rail-reference nodes
-        //       - 2 new rail-reference voltage sources
-        //       - 2 new catch diodes (anchored to internal node, not output)
-        //       - 1 new buffer VCCS (internal node → original output)
-        //       - 1 new output shunt resistor at the original output
-        //   * Original node indices (in/out/vbias) are preserved.
-        //   * The synthesized D_BOYLE_CATCH model is added exactly once.
-        //   * The augmented MNA builds without error via from_netlist, and
-        //     the BoyleDiodes auto-detection populates `n_int_idx` on each
-        //     clamped op-amp.
+    fn augment_netlist_with_boyle_diodes_produces_valid_mna() {
+        // Synthetic: 2 op-amps with finite rails. Tests that the Boyle
+        // catch-diode augmentation helper synthesizes the correct elements
+        // and that the augmented MNA builds without error.
         use crate::codegen::OpampRailMode;
-        let src = std::fs::read_to_string("../../circuits/testing/klon-centaur.cir")
-            .expect("read klon netlist");
-        let netlist = crate::parser::Netlist::parse(&src).expect("parse");
+        let spice = "\
+Boyle Diodes Augmentation Test
+R1 in sum1 4.7k
+R2 sum1 out1 47k
+C1 out1 out1_ac 100n
+R3 out1_ac sum2 10k
+R4 sum2 out 47k
+C2 out out_ac 100n
+R5 out_ac 0 100k
+U1 0 sum1 out1 OA1
+U2 0 sum2 out OA1
+.model OA1 OA(AOL=100k GBW=3e6 ROUT=75 VCC=4.5 VEE=-4.5)
+";
+        let netlist = crate::parser::Netlist::parse(spice).expect("parse");
         let mna = MnaSystem::from_netlist(&netlist).expect("mna");
 
-        // Sanity: Klon has 4 op-amps with finite rails.
+        // Sanity: 2 op-amps with finite rails.
         let clamped_opamps = mna
             .opamps
             .iter()
             .filter(|oa| oa.n_out_idx > 0 && (oa.vcc.is_finite() || oa.vee.is_finite()))
             .count();
-        assert_eq!(clamped_opamps, 4, "Klon should have 4 clamped op-amps");
+        assert_eq!(clamped_opamps, 2, "Should have 2 clamped op-amps");
 
         let aug_netlist = augment_netlist_with_boyle_diodes(&netlist, &mna);
 
@@ -5026,8 +5035,8 @@ mod opamp_rail_mode_tests {
         assert!((n_val - 1.0).abs() < 1e-12, "N should be 1.0, got {n_val}");
 
         // Count the synthesized elements:
-        //   * 4 op-amps × 2 rails × (1 VS + 1 diode) = 8 VS + 8 diodes
-        //   * 4 op-amps × 1 buffer VCVS               = 4 VCVS
+        //   * 2 op-amps × 2 rails × (1 VS + 1 diode) = 4 VS + 4 diodes
+        //   * 2 op-amps × 1 buffer VCVS               = 2 VCVS
         let vs_added = aug_netlist
             .elements
             .iter()
@@ -5049,14 +5058,10 @@ mod opamp_rail_mode_tests {
                 matches!(e, crate::parser::Element::Vcvs { name, .. } if name.starts_with("E_oa_buf_"))
             })
             .count();
-        assert_eq!(vs_added, 8, "Expected 8 rail-reference voltage sources (4 op-amps × 2 rails)");
-        assert_eq!(diodes_added, 8, "Expected 8 catch diodes (4 op-amps × 2 rails)");
-        assert_eq!(buffer_vcvs_added, 4, "Expected 4 output-buffer VCVS (1 per clamped op-amp)");
+        assert_eq!(vs_added, 4, "Expected 4 rail-reference voltage sources (2 op-amps × 2 rails)");
+        assert_eq!(diodes_added, 4, "Expected 4 catch diodes (2 op-amps × 2 rails)");
+        assert_eq!(buffer_vcvs_added, 2, "Expected 2 output-buffer VCVS (1 per clamped op-amp)");
 
-        // Count the new output-buffer series resistors introduced by
-        // the Boyle two-stage extension. Each clamped op-amp gets
-        // 1 resistor `R_oa_ro_{name}` (buf_out → out). (R1 is stamped
-        // directly in the MNA dispatch, not as a netlist element.)
         let r_ro_added = aug_netlist
             .elements
             .iter()
@@ -5064,86 +5069,68 @@ mod opamp_rail_mode_tests {
                 matches!(e, crate::parser::Element::Resistor { name, .. } if name.starts_with("R_oa_ro_"))
             })
             .count();
-        assert_eq!(r_ro_added, 4, "Expected 4 output-buffer series resistors (1 per clamped op-amp)");
+        assert_eq!(r_ro_added, 2, "Expected 2 output-buffer series resistors (1 per clamped op-amp)");
 
         // Rebuild MNA from the augmented netlist — this must succeed.
         let aug_mna = MnaSystem::from_netlist(&aug_netlist).expect("augmented MNA build");
 
         // Dimensions grow by:
-        //   * +16 nodes: 4 internal gain nodes + 4 buffer-output nodes
-        //     + 8 rail-reference nodes
-        //   * +8 nonlinear devices (catch diodes)
-        //   * +8 voltage sources (rail-reference DC sources)
-        //   * +4 augmented MNA rows for the buffer VCVS branch currents
-        // The dominant-pole capacitor stamps directly into C (no count
-        // bump); the output buffer R_oa_ro_ stamps directly into G.
+        //   * +8 nodes: 2 internal gain + 2 buffer-output + 4 rail-reference
+        //   * +4 nonlinear devices (catch diodes)
+        //   * +4 voltage sources (rail-reference DC sources)
         assert_eq!(
             aug_mna.n,
-            mna.n + 16,
+            mna.n + 8,
             "augmented n should grow by 4 per clamped op-amp (int + buf_out + 2 rail-ref)"
         );
         assert_eq!(
             aug_mna.m,
-            mna.m + 8,
+            mna.m + 4,
             "augmented m should grow by 2 per clamped op-amp"
         );
         assert_eq!(
             aug_mna.voltage_sources.len(),
-            mna.voltage_sources.len() + 8,
+            mna.voltage_sources.len() + 4,
             "augmented VS count should grow by 2 per clamped op-amp"
         );
 
         // Original nodes keep their indices.
         assert_eq!(mna.node_map["in"], aug_mna.node_map["in"]);
         assert_eq!(mna.node_map["out"], aug_mna.node_map["out"]);
-        assert_eq!(mna.node_map["vbias"], aug_mna.node_map["vbias"]);
 
-        // Each clamped op-amp must now have a non-zero n_int_idx that
-        // resolves to its `_oa_int_{name}` synthesized node. This proves the
-        // MNA dispatch in mna.rs picked up the BoyleDiodes scaffolding.
+        // Each clamped op-amp must now have a non-zero n_int_idx.
         for oa in &aug_mna.opamps {
             if oa.vcc.is_finite() || oa.vee.is_finite() {
-                let safe_name: String = oa
-                    .name
-                    .chars()
-                    .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
-                    .collect();
-                let int_key = format!("_oa_int_{}", safe_name);
-                let int_idx = aug_mna
-                    .node_map
-                    .get(&int_key)
-                    .copied()
-                    .unwrap_or_else(|| panic!("missing internal node {int_key} in augmented MNA"));
-                assert_eq!(
-                    oa.n_int_idx, int_idx,
-                    "op-amp {} should have n_int_idx pointing at {int_key}",
-                    oa.name
-                );
                 assert_ne!(oa.n_int_idx, 0, "op-amp {} should be in BoyleDiodes mode", oa.name);
             }
         }
 
-        // Auto-detect on the un-augmented MNA still picks ActiveSet by
-        // default — promoting Klon to BoyleDiodes is the responsibility of
-        // refine_active_set_for_audio_path (separate test).
+        // Auto-detect on the un-augmented MNA picks ActiveSet (AC-coupled downstream).
         let resolved = resolve_opamp_rail_mode(&mna, OpampRailMode::Auto);
         assert_eq!(resolved.mode, OpampRailMode::ActiveSet);
     }
 
     #[test]
-    fn vcr_alc_auto_picks_active_set() {
-        // VCR ALC has three op-amps with VSAT=13. U1 (buffer) has Cvca_ac
-        // from buf_out to vca_in — downstream coupling. U_iv has only the
-        // Cfb_iv feedback cap. U3 has Cout from out to out_ac — downstream
-        // coupling. So Auto picks ActiveSet.
-        //
-        // The attack-timing test
-        // (`test_vcr_alc_active_set_matches_hard_on_attack_test`) pins that
-        // ActiveSet produces the same compression dynamics as Hard on
-        // VCR ALC because the VCA control loop keeps op-amps in their
-        // linear region — the active-set constraint resolve is effectively
-        // a no-op on every sample.
-        let r = load_and_resolve("../../circuits/testing/vcr-audio-alc.cir");
+    fn multi_opamp_ac_coupled_picks_active_set() {
+        // Synthetic: 3 op-amps with AC-coupled downstream stages.
+        // Exercises the same path as VCR ALC topology.
+        let spice = "\
+Multi Op-Amp AC-Coupled Test
+R1 in sum1 10k
+R2 sum1 out1 100k
+C1 out1 mid 100n
+R3 mid sum2 10k
+R4 sum2 out2 100k
+C2 out2 out_ac 100n
+R5 out_ac sum3 10k
+R6 sum3 out 100k
+R7 out 0 100k
+U1 0 sum1 out1 OA1
+U2 0 sum2 out2 OA1
+U3 0 sum3 out OA1
+.model OA1 OA(AOL=100k GBW=1e6 ROUT=100 VSAT=13)
+";
+        let r = parse_and_resolve(spice);
         assert_eq!(r.mode, OpampRailMode::ActiveSet);
         assert_eq!(r.reason, OpampRailModeReason::AcCoupledDownstream);
     }

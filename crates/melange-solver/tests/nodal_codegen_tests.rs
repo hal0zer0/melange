@@ -325,6 +325,7 @@ fn test_nodal_codegen_be_fallback() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[ignore] // circuit migrated to melange-audio/circuits repo — test moves with it
 fn test_nodal_codegen_pultec() {
     let src = std::fs::read_to_string("../../circuits/stable/pultec-eq.cir").unwrap();
     let netlist = Netlist::parse(&src).unwrap();

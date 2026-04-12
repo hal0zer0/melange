@@ -68,6 +68,7 @@ fn run_pultec_dc_op() -> (MnaSystem, melange_solver::dc_op::DcOpResult) {
 // =============================================================================
 
 #[test]
+#[ignore] // circuit migrated to melange-audio/circuits repo — test moves with it
 fn pultec_dc_op_converges() {
     let (_mna, result) = run_pultec_dc_op();
     assert!(
@@ -78,6 +79,7 @@ fn pultec_dc_op_converges() {
 }
 
 #[test]
+#[ignore] // circuit migrated to melange-audio/circuits repo — test moves with it
 fn pultec_dc_op_has_nonzero_tube_currents() {
     let (_mna, result) = run_pultec_dc_op();
     assert!(result.converged, "DC OP must converge first");
@@ -92,6 +94,7 @@ fn pultec_dc_op_has_nonzero_tube_currents() {
 }
 
 #[test]
+#[ignore] // circuit migrated to melange-audio/circuits repo — test moves with it
 fn pultec_dc_op_vcc_exact() {
     let (mna, result) = run_pultec_dc_op();
     assert!(result.converged, "DC OP must converge first");
@@ -105,6 +108,7 @@ fn pultec_dc_op_vcc_exact() {
 }
 
 #[test]
+#[ignore] // circuit migrated to melange-audio/circuits repo — test moves with it
 fn pultec_dc_op_node_g() {
     let (mna, result) = run_pultec_dc_op();
     assert!(result.converged, "DC OP must converge first");
@@ -122,6 +126,7 @@ fn pultec_dc_op_node_g() {
 }
 
 #[test]
+#[ignore] // circuit migrated to melange-audio/circuits repo — test moves with it
 fn pultec_dc_op_v250_rail() {
     let (mna, result) = run_pultec_dc_op();
     assert!(result.converged, "DC OP must converge first");
@@ -139,6 +144,7 @@ fn pultec_dc_op_v250_rail() {
 }
 
 #[test]
+#[ignore] // circuit migrated to melange-audio/circuits repo — test moves with it
 fn pultec_dc_op_plate_voltages() {
     let (mna, result) = run_pultec_dc_op();
     assert!(result.converged, "DC OP must converge first");
@@ -178,6 +184,7 @@ fn pultec_dc_op_plate_voltages() {
 }
 
 #[test]
+#[ignore] // circuit migrated to melange-audio/circuits repo — test moves with it
 fn pultec_dc_op_12ax7_cathode() {
     let (mna, result) = run_pultec_dc_op();
     assert!(result.converged, "DC OP must converge first");
@@ -204,6 +211,7 @@ fn pultec_dc_op_12ax7_cathode() {
 }
 
 #[test]
+#[ignore] // circuit migrated to melange-audio/circuits repo — test moves with it
 fn pultec_dc_op_12au7_cathode() {
     let (mna, result) = run_pultec_dc_op();
     assert!(result.converged, "DC OP must converge first");
@@ -221,6 +229,7 @@ fn pultec_dc_op_12au7_cathode() {
 }
 
 #[test]
+#[ignore] // circuit migrated to melange-audio/circuits repo — test moves with it
 fn pultec_dc_op_grid_bias() {
     let (mna, result) = run_pultec_dc_op();
     assert!(result.converged, "DC OP must converge first");
@@ -242,6 +251,7 @@ fn pultec_dc_op_grid_bias() {
 // =============================================================================
 
 #[test]
+#[ignore] // circuit migrated to melange-audio/circuits repo — test moves with it
 fn pultec_dc_op_voltage_report() {
     let (mna, result) = run_pultec_dc_op();
 

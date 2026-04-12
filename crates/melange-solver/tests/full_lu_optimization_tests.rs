@@ -573,6 +573,7 @@ fn test_gain_sanity_two_tube() {
 /// The tube makeup amp compensates for the passive EQ insertion loss.
 /// The differential NFB via the S-217-D tertiary provides ~21 dB of loop gain.
 #[test]
+#[ignore] // circuit migrated to melange-audio/circuits repo — test moves with it
 fn test_gain_sanity_pultec() {
     // Find circuits/ relative to the workspace root (test CWD varies)
     let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

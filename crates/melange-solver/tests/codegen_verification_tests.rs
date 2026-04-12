@@ -7407,6 +7407,7 @@ fn compile_and_run_pentode(code: &str, name: &str, warmup_samples: usize, signal
 ///   - Running 500 samples of 50mV 1kHz sine produces finite, non-zero,
 ///     non-diverged output
 #[test]
+#[ignore] // circuit migrated to melange-audio/circuits repo — test moves with it
 fn test_el84_single_stage_compiles_and_runs() {
     let (code, _n, m) = build_pentode_circuit_dk(
         "circuits/testing/el84-single-stage.cir",
@@ -7439,6 +7440,7 @@ fn test_el84_single_stage_compiles_and_runs() {
 /// is expensive and the output level depends on transformer modeling
 /// fidelity which is still evolving.
 #[test]
+#[ignore] // circuit migrated to melange-audio/circuits repo — test moves with it
 fn test_ac15_full_amp_compiles() {
     let (code, _n, _m) = build_pentode_circuit_nodal(
         "circuits/testing/ac15.cir",
@@ -7462,6 +7464,7 @@ fn test_ac15_full_amp_compiles() {
 /// Exercises the Reefman DerkE beam-tetrode codepath with real circuit
 /// topology (not just a synthetic test circuit). Only verifies compilation.
 #[test]
+#[ignore] // circuit migrated to melange-audio/circuits repo — test moves with it
 fn test_tweed_deluxe_compiles() {
     let (code, _n, _m) = build_pentode_circuit_nodal(
         "circuits/testing/tweed-deluxe.cir",
@@ -7491,6 +7494,7 @@ fn test_tweed_deluxe_compiles() {
 ///   - Running 500 samples of 50mV 1kHz sine produces finite, non-zero,
 ///     non-diverged output
 #[test]
+#[ignore] // circuit migrated to melange-audio/circuits repo — test moves with it
 fn test_6k7_varimu_stage_compiles_and_runs() {
     let (code, _n, m) = build_pentode_circuit_dk(
         "circuits/testing/6k7-varimu-stage.cir",

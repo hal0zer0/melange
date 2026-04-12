@@ -140,19 +140,11 @@ pub fn resolve(circuit_ref: &str) -> Result<CircuitSource> {
 }
 
 /// Get builtin circuit content
-fn get_builtin(name: &str) -> Option<String> {
-    match name {
-        "tube-screamer" => Some(include_str!("../../../circuits/testing/tube-screamer.cir").to_string()),
-        "fuzz-face" => Some(include_str!("../../../circuits/unstable/fuzz-face.cir").to_string()),
-        "big-muff" => Some(include_str!("../../../circuits/unstable/big-muff.cir").to_string()),
-        "rc-lowpass" => Some(include_str!("../../../circuits/stable/rc-lowpass.cir").to_string()),
-        "mordor-screamer" => Some(include_str!("../../../circuits/testing/mordor-screamer.cir").to_string()),
-        "tube-preamp" => Some(include_str!("../../../circuits/testing/tube-preamp.cir").to_string()),
-        "ssl-bus-compressor" | "ssl-4000" => {
-            Some(include_str!("../../../circuits/unstable/ssl-bus-compressor.cir").to_string())
-        }
-        _ => None,
-    }
+///
+/// Builtins have been migrated to the melange-audio/circuits repo.
+/// Use friendly source syntax instead: `melange:pipe-shouter`, `melange:rc-lowpass`, etc.
+fn get_builtin(_name: &str) -> Option<String> {
+    None
 }
 
 /// Parse friendly source reference (source:circuit or circuit@source)
@@ -176,31 +168,11 @@ fn parse_friendly_ref(circuit_ref: &str) -> Option<(String, String)> {
 }
 
 /// List all available builtin circuits
+///
+/// Builtins have been migrated to the melange-audio/circuits repo.
+/// Use `melange sources list` to browse available circuits.
 pub fn list_builtins() -> Vec<(&'static str, &'static str)> {
-    vec![
-        (
-            "tube-screamer",
-            "Op-amp overdrive with diode feedback clipping (TS808 style)",
-        ),
-        ("fuzz-face", "2-transistor fuzz (Fuzz Face style)"),
-        (
-            "big-muff",
-            "4-transistor fuzz with dual clipping (Big Muff style)",
-        ),
-        (
-            "tube-preamp",
-            "Common-cathode 12AX7 triode gain stage with tone control",
-        ),
-        ("rc-lowpass", "Simple RC lowpass filter for testing"),
-        (
-            "mordor-screamer",
-            "High-gain distortion forged in Mount Doom",
-        ),
-        (
-            "ssl-bus-compressor",
-            "SSL 4000E bus compressor (VCA + sidechain)",
-        ),
-    ]
+    vec![]
 }
 
 /// Fetch circuit content synchronously using blocking HTTP client
@@ -260,15 +232,14 @@ mod tests {
 
     #[test]
     fn test_get_builtin() {
-        assert!(get_builtin("tube-screamer").is_some());
-        assert!(get_builtin("rc-lowpass").is_some());
+        // Builtins migrated to melange-audio/circuits repo
+        assert!(get_builtin("tube-screamer").is_none());
         assert!(get_builtin("nonexistent").is_none());
     }
 
     #[test]
     fn test_list_builtins() {
         let builtins = list_builtins();
-        assert!(!builtins.is_empty());
-        assert!(builtins.iter().any(|(name, _)| *name == "tube-screamer"));
+        assert!(builtins.is_empty());
     }
 }
