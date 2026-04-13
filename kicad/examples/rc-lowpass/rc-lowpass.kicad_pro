@@ -1,0 +1,30 @@
+{
+  "board": {
+    "3dviewports": [],
+    "design_settings": {},
+    "ipc2581": {},
+    "layer_presets": [],
+    "layers": {}
+  },
+  "libraries": {
+    "pinned_footprint_libs": [],
+    "pinned_symbol_libs": []
+  },
+  "meta": {
+    "filename": "rc-lowpass.kicad_pro",
+    "version": 1
+  },
+  "net_settings": {
+    "classes": []
+  },
+  "pcbnew": {
+    "last_paths": {}
+  },
+  "schematic": {
+    "drawing": {},
+    "meta": {
+      "version": 1
+    }
+  },
+  "sheets": []
+}

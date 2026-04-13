@@ -80,6 +80,130 @@
 		)
 	)
 
+	(symbol "Melange_Pentode"
+		(pin_names (offset 0.254))
+		(in_bom yes)
+		(on_board no)
+		(property "Reference" "P"
+			(at 2.54 6.35 0)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Value" "Melange_Pentode"
+			(at 2.54 -6.35 0)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Footprint" ""
+			(at 0 0 0)
+			(effects (font (size 1.27 1.27)) hide)
+		)
+		(property "Datasheet" ""
+			(at 0 0 0)
+			(effects (font (size 1.27 1.27)) hide)
+		)
+		(property "Sim.Device" "SPICE"
+			(at 0 0 0)
+			(effects (font (size 1.27 1.27)) hide)
+		)
+		(property "Sim.Pins" "1=grid 2=plate 3=cathode 4=screen 5=suppressor"
+			(at 0 0 0)
+			(effects (font (size 1.27 1.27)) hide)
+		)
+		(property "Melange.Model" "VP(MU=23.36 EX=1.138 KG1=117.4 KG2=1275 KP=152.4 KVB=4015.8)"
+			(at 0 0 0)
+			(effects (font (size 1.27 1.27)) hide)
+		)
+		(symbol "Melange_Pentode_0_1"
+			(circle
+				(center 0 0)
+				(radius 3.81)
+				(stroke (width 0.254) (type default))
+				(fill (type none))
+			)
+			; Plate line
+			(polyline
+				(pts (xy -0.635 2.54) (xy 0.635 2.54))
+				(stroke (width 0.254) (type default))
+				(fill (type none))
+			)
+			; Screen grid (G2) — dashed line (short segments)
+			(polyline
+				(pts (xy -1.27 1.27) (xy -0.635 1.27))
+				(stroke (width 0.254) (type default))
+				(fill (type none))
+			)
+			(polyline
+				(pts (xy -0.254 1.27) (xy 0.254 1.27))
+				(stroke (width 0.254) (type default))
+				(fill (type none))
+			)
+			(polyline
+				(pts (xy 0.635 1.27) (xy 1.27 1.27))
+				(stroke (width 0.254) (type default))
+				(fill (type none))
+			)
+			; Control grid (G1) — zigzag
+			(polyline
+				(pts (xy -1.27 0) (xy -0.635 0.635) (xy 0 0) (xy 0.635 0.635) (xy 1.27 0))
+				(stroke (width 0.254) (type default))
+				(fill (type none))
+			)
+			; Suppressor grid (G3) — dashed line
+			(polyline
+				(pts (xy -1.27 -1.27) (xy -0.635 -1.27))
+				(stroke (width 0.254) (type default))
+				(fill (type none))
+			)
+			(polyline
+				(pts (xy -0.254 -1.27) (xy 0.254 -1.27))
+				(stroke (width 0.254) (type default))
+				(fill (type none))
+			)
+			(polyline
+				(pts (xy 0.635 -1.27) (xy 1.27 -1.27))
+				(stroke (width 0.254) (type default))
+				(fill (type none))
+			)
+			; Cathode line
+			(polyline
+				(pts (xy -1.27 -2.54) (xy 1.27 -2.54))
+				(stroke (width 0.254) (type default))
+				(fill (type none))
+			)
+		)
+		(symbol "Melange_Pentode_1_1"
+			(pin passive line
+				(at -6.35 0 0)
+				(length 2.54)
+				(name "G" (effects (font (size 1.016 1.016))))
+				(number "1" (effects (font (size 1.016 1.016))))
+			)
+			(pin passive line
+				(at 0 6.35 270)
+				(length 2.54)
+				(name "P" (effects (font (size 1.016 1.016))))
+				(number "2" (effects (font (size 1.016 1.016))))
+			)
+			(pin passive line
+				(at 0 -6.35 90)
+				(length 2.54)
+				(name "K" (effects (font (size 1.016 1.016))))
+				(number "3" (effects (font (size 1.016 1.016))))
+			)
+			(pin passive line
+				(at 6.35 1.27 180)
+				(length 2.54)
+				(name "G2" (effects (font (size 1.016 1.016))))
+				(number "4" (effects (font (size 1.016 1.016))))
+			)
+			(pin passive line
+				(at 6.35 -1.27 180)
+				(length 2.54)
+				(name "G3" (effects (font (size 1.016 1.016))))
+				(number "5" (effects (font (size 1.016 1.016))))
+			)
+		)
+	)
+
 	(symbol "Melange_OpAmp"
 		(pin_names (offset 0.254))
 		(in_bom yes)

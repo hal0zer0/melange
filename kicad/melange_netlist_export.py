@@ -35,6 +35,22 @@ def format_value(value_str):
     return s if s else value_str.strip()
 
 
+SPICE_MULTIPLIERS = {
+    'T': 1e12, 'G': 1e9, 'MEG': 1e6, 'K': 1e3,
+    'M': 1e-3, 'U': 1e-6, 'N': 1e-9, 'P': 1e-12, 'F': 1e-15,
+}
+
+def parse_spice_value(s):
+    """Parse a SPICE value string like '100k' or '4.7u' to float."""
+    s = s.strip().upper()
+    for suffix, mult in sorted(SPICE_MULTIPLIERS.items(), key=lambda x: -len(x[0])):
+        if s.endswith(suffix):
+            num = s[:-len(suffix)]
+            if num:
+                return float(num) * mult
+    return float(s)
+
+
 def sanitize_node(name):
     """Convert a KiCad net name to a melange-compatible node name."""
     if not name:
@@ -66,6 +82,7 @@ REF_PREFIX_MAP = {
     'J': 'jfet',
     'M': 'mosfet',
     'T': 'triode',
+    'P': 'pentode',
     'U': 'opamp',
     'V': 'vsource',
     'I': 'isource',
@@ -315,6 +332,25 @@ class MelangeExporter:
             line = f"{ref} {ng} {np_} {nk} {model}"
             model_line = self._make_model(comp, "TRIODE")
 
+        elif comp_type == 'pentode':
+            # Melange: P name plate grid cathode screen [suppressor] model
+            # KiCad pins: 1=G, 2=P, 3=K, 4=G2, 5=G3
+            ng = self._get_node(comp, "1")
+            np_ = self._get_node(comp, "2")
+            nk = self._get_node(comp, "3")
+            nscr = self._get_node(comp, "4")
+            model = comp.value
+            # Suppressor is optional — include if pin 5 is connected and not ground
+            if "5" in comp.pin_nets:
+                nsup = self._get_node(comp, "5")
+                if nsup and nsup != "0":
+                    line = f"{ref} {np_} {ng} {nk} {nscr} {nsup} {model}"
+                else:
+                    line = f"{ref} {np_} {ng} {nk} {nscr} {model}"
+            else:
+                line = f"{ref} {np_} {ng} {nk} {nscr} {model}"
+            model_line = self._make_model(comp, "VP")
+
         elif comp_type == 'opamp':
             # Melange: U name n+ n- out model
             nplus = self._get_node(comp, "1")
@@ -404,7 +440,7 @@ class MelangeExporter:
         component_lines = []
 
         # Process wiper components first to pair them
-        wiper_pairs = {}  # label -> (cw_ref, ccw_ref, total_r, default_pos)
+        wiper_pairs = {}  # ref -> (total_r, default_pos, label)
         for comp in self.components.values():
             wiper_field = comp.fields.get("Melange.Wiper", "")
             if wiper_field:
@@ -412,10 +448,27 @@ class MelangeExporter:
                 parts = wiper_field.split()
                 total_r = parts[0] if parts else "100k"
                 default_pos = parts[1] if len(parts) > 1 else "0.5"
-                # Determine CW vs CCW from pin connectivity
-                # Convention: this component IS the wiper (both legs)
-                # The component ref is used as both R_cw and R_ccw with _cw/_ccw suffixes
                 wiper_pairs[comp.ref] = (total_r, default_pos, label)
+
+                # Emit two resistor elements for the wiper legs
+                cw_node = self._get_node(comp, "1")   # CW pin
+                w_node = self._get_node(comp, "2")     # Wiper pin
+                ccw_node = self._get_node(comp, "3")   # CCW pin
+                try:
+                    half_r = parse_spice_value(total_r) / 2.0
+                    half_r_str = f"{half_r:g}"
+                except (ValueError, ZeroDivisionError):
+                    half_r_str = total_r
+                cw_ref = f"{comp.ref}_cw"
+                ccw_ref = f"{comp.ref}_ccw"
+                component_lines.append(f"{cw_ref} {cw_node} {w_node} {half_r_str}")
+                component_lines.append(f"{ccw_ref} {w_node} {ccw_node} {half_r_str}")
+
+                # Check for gang
+                gang_label = comp.fields.get("Melange.Gang", "")
+                if gang_label:
+                    inverted = comp.fields.get("Melange.GangInvert", "").lower() == "true"
+                    self.gang_directives.append((gang_label, cw_ref, inverted))
 
         for comp in self.components.values():
             # Skip audio I/O markers (not circuit elements)
