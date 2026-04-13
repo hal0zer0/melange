@@ -7,7 +7,15 @@ use std::path::Path;
 use crate::ImportFormat;
 
 /// Entry point for `melange import`.
-pub fn import_kicad(input: &Path, output: &Path, format: &ImportFormat) -> Result<()> {
+pub fn import_kicad(input: &Path, output: &Path, format: &ImportFormat, from_schematic: bool) -> Result<()> {
+    // Auto-detect .kicad_sch files
+    let is_schematic = from_schematic
+        || input.extension().map(|e| e == "kicad_sch").unwrap_or(false);
+
+    if is_schematic {
+        return import_from_schematic(input, output, format);
+    }
+
     let content = std::fs::read_to_string(input)
         .with_context(|| format!("Failed to read {}", input.display()))?;
 
@@ -26,6 +34,60 @@ pub fn import_kicad(input: &Path, output: &Path, format: &ImportFormat) -> Resul
         println!("  Source: {}", input.display());
         import_spice(&content)?
     };
+
+    std::fs::write(output, &result)
+        .with_context(|| format!("Failed to write {}", output.display()))?;
+
+    println!("  Output: {}", output.display());
+    Ok(())
+}
+
+/// Import directly from a .kicad_sch schematic file via kicad-cli.
+fn import_from_schematic(input: &Path, output: &Path, _format: &ImportFormat) -> Result<()> {
+    // Check if kicad-cli is available
+    let version_check = std::process::Command::new("kicad-cli")
+        .arg("--version")
+        .output();
+
+    match version_check {
+        Ok(out) if out.status.success() => {
+            let ver = String::from_utf8_lossy(&out.stdout);
+            println!("melange import (KiCad schematic → XML → Melange .cir)");
+            println!("  kicad-cli: {}", ver.trim());
+        }
+        _ => {
+            bail!(
+                "kicad-cli not found. Install KiCad 8+ to import .kicad_sch files directly.\n\
+                 Alternatively, export XML manually:\n  \
+                 kicad-cli sch export python-bom -o circuit.xml circuit.kicad_sch\n  \
+                 melange import circuit.xml -o circuit.cir"
+            );
+        }
+    }
+
+    println!("  Source: {}", input.display());
+
+    // Export XML to a temp file
+    let tmp = tempfile::NamedTempFile::with_suffix(".xml")
+        .context("Failed to create temp file for XML export")?;
+    let tmp_path = tmp.path().to_path_buf();
+
+    let export = std::process::Command::new("kicad-cli")
+        .args(["sch", "export", "python-bom", "-o"])
+        .arg(&tmp_path)
+        .arg(input)
+        .output()
+        .context("Failed to run kicad-cli")?;
+
+    if !export.status.success() {
+        let stderr = String::from_utf8_lossy(&export.stderr);
+        bail!("kicad-cli export failed:\n{stderr}");
+    }
+
+    let xml_content = std::fs::read_to_string(&tmp_path)
+        .context("Failed to read kicad-cli XML output")?;
+
+    let result = import_xml(&xml_content)?;
 
     std::fs::write(output, &result)
         .with_context(|| format!("Failed to write {}", output.display()))?;
@@ -190,6 +252,7 @@ fn import_xml(content: &str) -> Result<String> {
     let mut models: BTreeMap<String, String> = BTreeMap::new();
     let mut comp_lines = Vec::new();
     let mut pot_directives = Vec::new();
+    let mut wiper_directives = Vec::new();
     let mut switch_directives = Vec::new();
     let mut gang_entries: Vec<(String, String, bool)> = Vec::new(); // (label, ref, inverted)
     let mut comp_count = 0u32;
@@ -212,6 +275,46 @@ fn import_xml(content: &str) -> Result<String> {
         };
 
         let line = match prefix.as_str() {
+            "RW" => {
+                // Wiper pot: 3 pins (CW, W, CCW) → two resistor legs + .wiper directive
+                let cw_node = get_node("1");
+                let w_node = get_node("2");
+                let ccw_node = get_node("3");
+                let wiper_field = comp.fields.get("Melange.Wiper").cloned().unwrap_or_default();
+                let parts: Vec<&str> = wiper_field.split_whitespace().collect();
+                let total_r = parts.first().copied().unwrap_or("100k");
+                let default_pos = parts.get(1).copied().unwrap_or("0.5");
+                let label = comp.fields.get("Melange.Label").cloned().unwrap_or_default();
+
+                // Parse total resistance to compute half for nominal values
+                let half_r = melange_solver::parser::parse_value(total_r)
+                    .map(|v| format!("{}", v / 2.0))
+                    .unwrap_or_else(|_| total_r.to_string());
+
+                let cw_ref = format!("{}_cw", comp.ref_des);
+                let ccw_ref = format!("{}_ccw", comp.ref_des);
+
+                // Emit two resistor elements
+                comp_lines.push(format!("{cw_ref} {cw_node} {w_node} {half_r}"));
+                comp_lines.push(format!("{ccw_ref} {w_node} {ccw_node} {half_r}"));
+                comp_count += 2;
+
+                // Emit .wiper directive
+                let mut w_str = format!(".wiper {cw_ref} {ccw_ref} {total_r} {default_pos}");
+                if !label.is_empty() {
+                    w_str.push_str(&format!(" \"{label}\""));
+                }
+                wiper_directives.push(w_str);
+
+                // Check for gang
+                if let Some(gang_label) = comp.fields.get("Melange.Gang") {
+                    let inverted = comp.fields.get("Melange.GangInvert")
+                        .map(|v| v.to_lowercase() == "true").unwrap_or(false);
+                    gang_entries.push((gang_label.clone(), cw_ref.clone(), inverted));
+                }
+
+                continue; // already pushed to comp_lines
+            }
             "R" | "C" | "L" => {
                 let n1 = get_node("1");
                 let n2 = get_node("2");
@@ -281,6 +384,25 @@ fn import_xml(content: &str) -> Result<String> {
                 let nk = get_node("3");
                 collect_model(comp, "TRIODE", &mut models);
                 format!("{} {} {} {} {}", comp.ref_des, ng, np, nk, comp.value)
+            }
+            "P" => {
+                // Pentode: reorder KiCad pins (G,P,K,G2,G3) to SPICE order (P,G,K,G2,[G3])
+                let ng = get_node("1");
+                let np = get_node("2");
+                let nk = get_node("3");
+                let nscr = get_node("4");
+                collect_model(comp, "VP", &mut models);
+                // Suppressor is optional — include if pin 5 is connected to a non-ground net
+                if comp.pin_nets.contains_key("5") {
+                    let nsup = get_node("5");
+                    if nsup != "0" {
+                        format!("{} {} {} {} {} {} {}", comp.ref_des, np, ng, nk, nscr, nsup, comp.value)
+                    } else {
+                        format!("{} {} {} {} {} {}", comp.ref_des, np, ng, nk, nscr, comp.value)
+                    }
+                } else {
+                    format!("{} {} {} {} {} {}", comp.ref_des, np, ng, nk, nscr, comp.value)
+                }
             }
             "U" => {
                 let nplus = get_node("1");
@@ -353,6 +475,7 @@ fn import_xml(content: &str) -> Result<String> {
     // Write directives
     let mut directives = Vec::new();
     directives.extend(pot_directives.clone());
+    directives.extend(wiper_directives.clone());
     directives.extend(switch_directives.clone());
 
     // Gang groups
@@ -386,10 +509,29 @@ fn import_xml(content: &str) -> Result<String> {
     println!("  Components: {comp_count}");
     println!("  Models: {}", models.len());
     println!("  Pots: {}", pot_directives.len());
+    println!("  Wipers: {}", wiper_directives.len());
     println!("  Switches: {}", switch_directives.len());
     println!("  Gangs: {}", gang_groups.len());
 
-    Ok(lines.join("\n"))
+    let cir_content = lines.join("\n");
+
+    // Validate the generated netlist by parsing it through melange's parser
+    validate_generated_netlist(&cir_content);
+
+    Ok(cir_content)
+}
+
+fn validate_generated_netlist(content: &str) {
+    match melange_solver::parser::Netlist::parse(content) {
+        Ok(_netlist) => {
+            println!("  Validation: OK (netlist parses cleanly)");
+        }
+        Err(e) => {
+            eprintln!("  Warning: Generated netlist has parse errors:");
+            eprintln!("    {e}");
+            eprintln!("    The output file was still written. Fix manually or re-import.");
+        }
+    }
 }
 
 fn collect_model(comp: &XmlComponent, default_type: &str, models: &mut BTreeMap<String, String>) {
@@ -492,7 +634,10 @@ fn import_spice(content: &str) -> Result<String> {
     println!("  Skipped directives: {skipped}");
     println!("  Note: SPICE import is best-effort. Add .pot/.switch/.gang directives manually.");
 
-    Ok(lines.join("\n"))
+    let cir_content = lines.join("\n");
+    validate_generated_netlist(&cir_content);
+
+    Ok(cir_content)
 }
 
 fn sanitize_component_nodes(line: &str) -> String {

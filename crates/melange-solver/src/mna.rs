@@ -85,6 +85,9 @@ pub struct MnaSystem {
     /// Linearized BJTs: small-signal conductances stamped into G.
     /// These BJTs are NOT in the nonlinear device list (M reduced by 2 each).
     pub linearized_bjts: Vec<LinearizedBjtInfo>,
+    /// Linearized triodes: small-signal gm + 1/rp stamped into G.
+    /// These triodes are NOT in the nonlinear device list (M reduced by 2 each).
+    pub linearized_triodes: Vec<LinearizedTriodeInfo>,
     /// Pot default overrides: resistor name (uppercase) → default resistance.
     /// When a .pot has a default value, the G matrix is stamped at this value
     /// (not the component declaration value). Empty for circuits without .pot defaults.
@@ -269,6 +272,29 @@ pub struct LinearizedBjtInfo {
     /// DC bias currents
     pub ic_dc: f64,
     pub ib_dc: f64,
+}
+
+/// Linearized triode info: small-signal conductances stamped into G at DC OP.
+///
+/// The triode is removed from the nonlinear system (M reduced by 2) and its
+/// behavior captured by gm (transconductance) and gp (plate conductance = 1/rp)
+/// plus DC bias currents. Only valid when the triode operates in its linear
+/// region (grid well below conduction onset, no grid current).
+#[derive(Debug, Clone)]
+pub struct LinearizedTriodeInfo {
+    pub name: String,
+    /// 1-indexed node indices (0 = ground)
+    pub ng: usize, // grid
+    pub np: usize, // plate
+    pub nk: usize, // cathode
+    /// Transconductance dIp/dVgk (VCCS: plate current controlled by grid-cathode voltage)
+    pub gm: f64,
+    /// Plate conductance dIp/dVpk = 1/rp (shunt between plate and cathode)
+    pub gp: f64,
+    /// DC plate current at operating point
+    pub ip_dc: f64,
+    /// DC grid current at operating point (should be ~0 for valid linearization)
+    pub ig_dc: f64,
 }
 
 /// Voltage source information for extended MNA.
@@ -556,6 +582,7 @@ impl MnaSystem {
             vcas: Vec::new(),
             bjt_internal_nodes: Vec::new(),
             linearized_bjts: Vec::new(),
+            linearized_triodes: Vec::new(),
             pot_default_overrides: HashMap::new(),
             wiper_groups: Vec::new(),
             gang_groups: Vec::new(),
@@ -629,6 +656,27 @@ impl MnaSystem {
     ) -> Result<Self, MnaError> {
         let mut builder = MnaBuilder::new();
         builder.forward_active_bjts = forward_active.clone();
+        builder.grid_off_pentodes = grid_off.clone();
+        builder.build(netlist)
+    }
+
+    /// Build MNA system with all device reductions applied simultaneously.
+    ///
+    /// Combines forward-active BJTs, linearized BJTs, linearized triodes,
+    /// and grid-off pentodes in a single rebuild. Use this when a circuit
+    /// benefits from multiple reduction types (e.g. triode cascade with
+    /// FA-reduced biasing BJTs and linearized clean stages).
+    pub fn from_netlist_with_all_reductions(
+        netlist: &Netlist,
+        forward_active: &std::collections::HashSet<String>,
+        linearized_bjts: &std::collections::HashSet<String>,
+        linearized_triodes: &std::collections::HashSet<String>,
+        grid_off: &std::collections::HashMap<String, f64>,
+    ) -> Result<Self, MnaError> {
+        let mut builder = MnaBuilder::new();
+        builder.forward_active_bjts = forward_active.clone();
+        builder.linearized_bjts = linearized_bjts.clone();
+        builder.linearized_triodes = linearized_triodes.clone();
         builder.grid_off_pentodes = grid_off.clone();
         builder.build(netlist)
     }
@@ -733,6 +781,85 @@ impl MnaSystem {
                     n_plus_idx: ne,
                     n_minus_idx: 0,
                     dc_value: bjt.ic_dc + bjt.ib_dc,
+                });
+            }
+        }
+    }
+
+    /// Stamp linearized triode small-signal conductances into G matrix.
+    ///
+    /// Must be called AFTER DC OP computation provides the g-parameters.
+    /// Each linearized triode gets:
+    /// - gm (VCCS): Ip = gm * Vgk, current flows P→K controlled by G-K voltage
+    /// - gp (conductance): 1/rp between plate and cathode
+    /// - DC bias currents as current source injections
+    pub fn stamp_linearized_triodes(&mut self) {
+        for tube in &self.linearized_triodes.clone() {
+            let ng = tube.ng; // 1-indexed (0 = ground)
+            let np = tube.np;
+            let nk = tube.nk;
+
+            // gm: VCCS — Ip = gm * Vgk, current from plate to cathode, controlled by G-K
+            // Stamp: G[p][g] += gm, G[p][k] -= gm, G[k][g] -= gm, G[k][k] += gm
+            if tube.gm.abs() > 1e-30 {
+                if np > 0 && ng > 0 {
+                    self.g[np - 1][ng - 1] += tube.gm;
+                }
+                if np > 0 && nk > 0 {
+                    self.g[np - 1][nk - 1] -= tube.gm;
+                }
+                if nk > 0 && ng > 0 {
+                    self.g[nk - 1][ng - 1] -= tube.gm;
+                }
+                if nk > 0 {
+                    self.g[nk - 1][nk - 1] += tube.gm;
+                }
+            }
+
+            // gp = 1/rp: plate conductance between plate and cathode
+            // Stamp: G[p][p] += gp, G[k][k] += gp, G[p][k] -= gp, G[k][p] -= gp
+            if tube.gp.abs() > 1e-30 {
+                if np > 0 && nk > 0 {
+                    let p = np - 1;
+                    let k = nk - 1;
+                    self.g[p][p] += tube.gp;
+                    self.g[k][k] += tube.gp;
+                    self.g[p][k] -= tube.gp;
+                    self.g[k][p] -= tube.gp;
+                } else if np > 0 {
+                    self.g[np - 1][np - 1] += tube.gp;
+                } else if nk > 0 {
+                    self.g[nk - 1][nk - 1] += tube.gp;
+                }
+            }
+
+            // DC bias currents
+            // Ip flows into plate (from cathode through tube)
+            if np > 0 {
+                self.current_sources.push(CurrentSourceInfo {
+                    name: format!("{}_Ip_dc", tube.name),
+                    n_plus_idx: 0,
+                    n_minus_idx: np,
+                    dc_value: tube.ip_dc,
+                });
+            }
+            // Ig flows into grid (only non-negligible when tube is near grid conduction)
+            if ng > 0 && tube.ig_dc.abs() > 1e-15 {
+                self.current_sources.push(CurrentSourceInfo {
+                    name: format!("{}_Ig_dc", tube.name),
+                    n_plus_idx: 0,
+                    n_minus_idx: ng,
+                    dc_value: tube.ig_dc,
+                });
+            }
+            // Ik = Ip + Ig flows out of cathode
+            if nk > 0 {
+                let ik = tube.ip_dc + tube.ig_dc;
+                self.current_sources.push(CurrentSourceInfo {
+                    name: format!("{}_Ik_dc", tube.name),
+                    n_plus_idx: nk,
+                    n_minus_idx: 0,
+                    dc_value: ik,
                 });
             }
         }
@@ -2037,6 +2164,8 @@ struct MnaBuilder {
     forward_active_bjts: std::collections::HashSet<String>,
     /// BJT names to linearize at DC OP (removed from nonlinear system entirely)
     linearized_bjts: std::collections::HashSet<String>,
+    /// Triode names to linearize at DC OP (removed from nonlinear system entirely, M-2 each)
+    linearized_triodes: std::collections::HashSet<String>,
     /// Pentode names to model with grid-off reduction (2D instead of 3D).
     /// Phase 1b: when DC-OP confirms Vgk is below cutoff, drop the Ig1 NR
     /// dimension and freeze Vg2k at its DC-OP value (stored per-slot in
@@ -2084,6 +2213,7 @@ impl MnaBuilder {
             total_dimension: 0,
             forward_active_bjts: std::collections::HashSet::new(),
             linearized_bjts: std::collections::HashSet::new(),
+            linearized_triodes: std::collections::HashSet::new(),
             grid_off_pentodes: std::collections::HashMap::new(),
         }
     }
@@ -3972,17 +4102,28 @@ impl MnaBuilder {
                     self.node_map[n_plate],
                     self.node_map[n_cathode],
                 ];
-                let start_idx = self.total_dimension;
-                self.total_dimension += 2; // 2D: plate current + grid current
-                self.nonlinear_devices.push(NonlinearDeviceInfo {
-                    name: name.clone(),
-                    device_type: NonlinearDeviceType::Tube,
-                    dimension: 2,
-                    start_idx,
-                    nodes: vec![n_grid.clone(), n_plate.clone(), n_cathode.clone()],
-                    node_indices,
-                    vg2k_frozen: 0.0,
-                });
+                let is_linearized =
+                    self.linearized_triodes.contains(&name.to_ascii_uppercase());
+                if is_linearized {
+                    // Linearized triodes are removed from the nonlinear system entirely.
+                    // Their small-signal gm + 1/rp are stamped into G after DC OP.
+                    log::info!(
+                        "Triode '{}' linearized at DC OP (removed from NR, M reduced by 2)",
+                        name
+                    );
+                } else {
+                    let start_idx = self.total_dimension;
+                    self.total_dimension += 2; // 2D: plate current + grid current
+                    self.nonlinear_devices.push(NonlinearDeviceInfo {
+                        name: name.clone(),
+                        device_type: NonlinearDeviceType::Tube,
+                        dimension: 2,
+                        start_idx,
+                        nodes: vec![n_grid.clone(), n_plate.clone(), n_cathode.clone()],
+                        node_indices,
+                        vg2k_frozen: 0.0,
+                    });
+                }
             }
             Element::Pentode {
                 name,
@@ -5606,5 +5747,236 @@ Y1 sp sn cp cn vca1
             "grid-off pentode should have 6 off-diagonal C entries (3 junctions), got {}",
             off_diag_count
         );
+    }
+
+    // ── Triode linearization tests ──────────────────────────────────────
+
+    const TRIODE_12AX7_MODEL: &str = ".model 12AX7 VT(MU=100 EX=1.4 KG1=1060 KP=600 KVB=300)";
+
+    #[test]
+    fn test_linearized_triode_reduces_m_by_2() {
+        let spice = format!(
+            "triode linearization M reduction\n\
+             V1 plate1 0 250\n\
+             R1 grid1 0 1Meg\n\
+             R2 cath1 0 1.5k\n\
+             V2 plate2 0 250\n\
+             R3 grid2 0 1Meg\n\
+             R4 cath2 0 1.5k\n\
+             T1 grid1 plate1 cath1 12AX7\n\
+             T2 grid2 plate2 cath2 12AX7\n\
+             {}\n",
+            TRIODE_12AX7_MODEL
+        );
+        let netlist = crate::parser::Netlist::parse(&spice).unwrap();
+
+        // Full MNA: both triodes as nonlinear → M=4
+        let mna_full = MnaSystem::from_netlist(&netlist).unwrap();
+        assert_eq!(mna_full.m, 4, "2 triodes should give M=4");
+
+        // Linearize T1 → M should reduce by 2
+        let mut lin_set = std::collections::HashSet::new();
+        lin_set.insert("T1".to_string());
+        let mna_lin1 = MnaSystem::from_netlist_with_all_reductions(
+            &netlist,
+            &std::collections::HashSet::new(),
+            &std::collections::HashSet::new(),
+            &lin_set,
+            &std::collections::HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(mna_lin1.m, 2, "linearizing T1 should give M=2");
+        assert_eq!(mna_lin1.num_devices, 1, "only T2 should remain as nonlinear");
+
+        // Linearize both → M=0
+        lin_set.insert("T2".to_string());
+        let mna_lin2 = MnaSystem::from_netlist_with_all_reductions(
+            &netlist,
+            &std::collections::HashSet::new(),
+            &std::collections::HashSet::new(),
+            &lin_set,
+            &std::collections::HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(mna_lin2.m, 0, "linearizing both triodes should give M=0");
+        assert_eq!(mna_lin2.num_devices, 0);
+    }
+
+    #[test]
+    fn test_stamp_linearized_triodes_gm() {
+        // Verify gm VCCS stamping: G[p][g] += gm, G[p][k] -= gm,
+        //                           G[k][g] -= gm, G[k][k] += gm
+        let spice = format!(
+            "triode gm stamp\n\
+             R1 grid 0 1Meg\n\
+             R2 plate 0 100k\n\
+             R3 cath 0 1.5k\n\
+             T1 grid plate cath 12AX7\n\
+             {}\n",
+            TRIODE_12AX7_MODEL
+        );
+        let netlist = crate::parser::Netlist::parse(&spice).unwrap();
+
+        // Build linearized MNA (triode removed from NR)
+        let mut lin_set = std::collections::HashSet::new();
+        lin_set.insert("T1".to_string());
+        let mut mna = MnaSystem::from_netlist_with_all_reductions(
+            &netlist,
+            &std::collections::HashSet::new(),
+            &std::collections::HashSet::new(),
+            &lin_set,
+            &std::collections::HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(mna.m, 0, "linearized triode should have M=0");
+
+        // Save G matrix before stamping
+        let g_before: Vec<Vec<f64>> = mna.g.clone();
+
+        let g = *mna.node_map.get("grid").unwrap();
+        let p = *mna.node_map.get("plate").unwrap();
+        let k = *mna.node_map.get("cath").unwrap();
+
+        // Stamp with known gm and gp values
+        let gm = 1.5e-3; // typical 12AX7 gm
+        let gp = 6.25e-5; // rp = 16k → 1/rp
+        mna.linearized_triodes = vec![LinearizedTriodeInfo {
+            name: "T1".to_string(),
+            ng: g,
+            np: p,
+            nk: k,
+            gm,
+            gp,
+            ip_dc: 1.2e-3,
+            ig_dc: 0.0,
+        }];
+        mna.stamp_linearized_triodes();
+
+        // Check combined gm + gp stamps (0-indexed)
+        let gi = g - 1;
+        let pi = p - 1;
+        let ki = k - 1;
+        let eps = 1e-12;
+
+        // Expected deltas from gm VCCS + gp plate conductance:
+        //   G[p][g] += gm
+        //   G[p][k] -= gm - gp   (both gm VCCS and gp shunt contribute)
+        //   G[p][p] += gp
+        //   G[k][g] -= gm
+        //   G[k][k] += gm + gp   (both contribute)
+        //   G[k][p] -= gp
+        assert!((mna.g[pi][gi] - g_before[pi][gi] - gm).abs() < eps, "G[p][g] += gm");
+        assert!(
+            (mna.g[pi][ki] - g_before[pi][ki] + gm + gp).abs() < eps,
+            "G[p][k] -= (gm + gp)"
+        );
+        assert!((mna.g[pi][pi] - g_before[pi][pi] - gp).abs() < eps, "G[p][p] += gp");
+        assert!((mna.g[ki][gi] - g_before[ki][gi] + gm).abs() < eps, "G[k][g] -= gm");
+        assert!(
+            (mna.g[ki][ki] - g_before[ki][ki] - gm - gp).abs() < eps,
+            "G[k][k] += (gm + gp)"
+        );
+        assert!((mna.g[ki][pi] - g_before[ki][pi] + gp).abs() < eps, "G[k][p] -= gp");
+    }
+
+    #[test]
+    fn test_stamp_linearized_triode_dc_bias_currents() {
+        let spice = format!(
+            "triode dc bias\n\
+             R1 grid 0 1Meg\n\
+             R2 plate 0 100k\n\
+             R3 cath 0 1.5k\n\
+             T1 grid plate cath 12AX7\n\
+             {}\n",
+            TRIODE_12AX7_MODEL
+        );
+        let netlist = crate::parser::Netlist::parse(&spice).unwrap();
+
+        let mut lin_set = std::collections::HashSet::new();
+        lin_set.insert("T1".to_string());
+        let mut mna = MnaSystem::from_netlist_with_all_reductions(
+            &netlist,
+            &std::collections::HashSet::new(),
+            &std::collections::HashSet::new(),
+            &lin_set,
+            &std::collections::HashMap::new(),
+        )
+        .unwrap();
+
+        let cs_count_before = mna.current_sources.len();
+        let ip_dc = 1.2e-3;
+        let ig_dc = 0.0; // no grid current (valid linearization)
+
+        let g = *mna.node_map.get("grid").unwrap();
+        let p = *mna.node_map.get("plate").unwrap();
+        let k = *mna.node_map.get("cath").unwrap();
+
+        mna.linearized_triodes = vec![LinearizedTriodeInfo {
+            name: "T1".to_string(),
+            ng: g,
+            np: p,
+            nk: k,
+            gm: 1.5e-3,
+            gp: 6.25e-5,
+            ip_dc,
+            ig_dc,
+        }];
+        mna.stamp_linearized_triodes();
+
+        // Should add Ip_dc and Ik_dc current sources (Ig_dc skipped since ~0)
+        assert_eq!(
+            mna.current_sources.len(),
+            cs_count_before + 2,
+            "should add Ip_dc + Ik_dc (Ig_dc skipped when ~0)"
+        );
+
+        // Ip_dc: ground→plate
+        let ip_src = mna.current_sources.iter().find(|cs| cs.name.contains("Ip_dc"));
+        assert!(ip_src.is_some(), "should have Ip_dc current source");
+        let ip_src = ip_src.unwrap();
+        assert_eq!(ip_src.n_plus_idx, 0);
+        assert_eq!(ip_src.n_minus_idx, p);
+        assert!((ip_src.dc_value - ip_dc).abs() < 1e-15);
+
+        // Ik_dc: cathode→ground (Ip + Ig)
+        let ik_src = mna.current_sources.iter().find(|cs| cs.name.contains("Ik_dc"));
+        assert!(ik_src.is_some(), "should have Ik_dc current source");
+        let ik_src = ik_src.unwrap();
+        assert_eq!(ik_src.n_plus_idx, k);
+        assert_eq!(ik_src.n_minus_idx, 0);
+        assert!((ik_src.dc_value - ip_dc).abs() < 1e-15);
+    }
+
+    #[test]
+    fn test_linearized_triode_empty_set_identity() {
+        // Empty linearized_triodes set should produce identical MNA to default
+        let spice = format!(
+            "triode empty set identity\n\
+             V1 plate 0 250\n\
+             R1 grid 0 1Meg\n\
+             R2 cath 0 1.5k\n\
+             T1 grid plate cath 12AX7\n\
+             {}\n",
+            TRIODE_12AX7_MODEL
+        );
+        let netlist = crate::parser::Netlist::parse(&spice).unwrap();
+
+        let mna_default = MnaSystem::from_netlist(&netlist).unwrap();
+        let mna_empty = MnaSystem::from_netlist_with_all_reductions(
+            &netlist,
+            &std::collections::HashSet::new(),
+            &std::collections::HashSet::new(),
+            &std::collections::HashSet::new(),
+            &std::collections::HashMap::new(),
+        )
+        .unwrap();
+
+        assert_eq!(mna_default.n, mna_empty.n);
+        assert_eq!(mna_default.m, mna_empty.m);
+        assert_eq!(mna_default.g, mna_empty.g);
+        assert_eq!(mna_default.c, mna_empty.c);
+        assert_eq!(mna_default.n_v, mna_empty.n_v);
+        assert_eq!(mna_default.n_i, mna_empty.n_i);
+        assert_eq!(mna_default.num_devices, mna_empty.num_devices);
     }
 }

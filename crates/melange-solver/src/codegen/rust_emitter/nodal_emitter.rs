@@ -18,6 +18,62 @@ use super::nr_helpers::{
 };
 
 // ============================================================================
+// Sparse N_V / N_I helpers
+// ============================================================================
+
+/// Emit a sparse `result = N_V[row] * vec` product.
+///
+/// Instead of `for j in 0..N { result += N_V[row][j] * vec[j]; }`,
+/// emits only the nonzero terms: `N_V[row][c1] * vec[c1] + N_V[row][c2] * vec[c2]`.
+/// N_V typically has 2 nonzeros per row (±1 at device nodes), so this is ~28x faster at N=57.
+fn emit_sparse_nv_dot(ir: &CircuitIR, row: usize, result_var: &str, vec_var: &str, indent: &str) -> String {
+    let nz = &ir.sparsity.n_v.nz_by_row;
+    if row < nz.len() && !nz[row].is_empty() {
+        let terms: Vec<String> = nz[row]
+            .iter()
+            .map(|&col| format!("N_V[{}][{}] * {}[{}]", row, col, vec_var, col))
+            .collect();
+        format!("{indent}let {result_var} = {};\n", terms.join(" + "))
+    } else {
+        format!("{indent}let {result_var} = 0.0;\n")
+    }
+}
+
+/// Emit sparse `v_nl[i] = sum_j N_V[i][j] * vec[j]` for all M rows.
+fn emit_sparse_nv_matvec(ir: &CircuitIR, result_arr: &str, vec_var: &str, indent: &str) -> String {
+    let m = ir.topology.m;
+    let mut code = String::new();
+    for i in 0..m {
+        let nz = &ir.sparsity.n_v.nz_by_row;
+        if i < nz.len() && !nz[i].is_empty() {
+            let terms: Vec<String> = nz[i]
+                .iter()
+                .map(|&col| format!("N_V[{}][{}] * {}[{}]", i, col, vec_var, col))
+                .collect();
+            code.push_str(&format!("{indent}{result_arr}[{i}] = {};\n", terms.join(" + ")));
+        }
+    }
+    code
+}
+
+/// Emit sparse `rhs[i] += sum_j N_I[i][j] * vec[j]` for all N rows.
+fn emit_sparse_ni_matvec_add(ir: &CircuitIR, result_arr: &str, vec_var: &str, indent: &str) -> String {
+    let n = ir.topology.n;
+    let mut code = String::new();
+    let nz = &ir.sparsity.n_i.nz_by_row;
+    for i in 0..n {
+        if i < nz.len() && !nz[i].is_empty() {
+            let terms: Vec<String> = nz[i]
+                .iter()
+                .map(|&col| format!("N_I[{}][{}] * {}[{}]", i, col, vec_var, col))
+                .collect();
+            code.push_str(&format!("{indent}{result_arr}[{i}] += {};\n", terms.join(" + ")));
+        }
+    }
+    code
+}
+
+// ============================================================================
 // Nodal solver emission (full N×N NR per sample, LU solve per iteration)
 // ============================================================================
 
@@ -33,25 +89,7 @@ impl RustEmitter {
     pub(super) fn emit_nodal(&self, ir: &CircuitIR) -> Result<String, CodegenError> {
         let mut code = String::new();
 
-        // Shared: header
-        code.push_str(&self.emit_header(ir)?);
-
-        // Nodal-specific: constants
-        code.push_str(&self.emit_nodal_constants(ir));
-
-        // Shared: device model constants + functions
-        code.push_str(&self.emit_device_models(ir)?);
-
-        // Nodal-specific: state struct, Default, set_sample_rate, reset
-        code.push_str(&self.emit_nodal_state(ir));
-
-        // Nodal-specific: invert_n function (for rebuild_matrices at runtime)
-        code.push_str(&Self::emit_nodal_invert_n(ir));
-
-        // Nodal process_sample: use Schur (M-dim NR) unless K has issues.
-        // Schur NR assumes K is naturally negative (J = I - J_dev*K has positive diagonal).
-        // With positive K diagonal + current injection, J diagonal flips negative → divergence.
-        // Route to full N×N LU NR (like ngspice) which builds G_aug per iteration directly.
+        // Compute use_full_nodal flag FIRST — needed by emit_nodal_state for hot/cold split.
         let m = ir.topology.m;
         let has_positive_k_with_current = if m > 0 {
             (0..m).any(|i| {
@@ -116,23 +154,67 @@ impl RustEmitter {
             0.0
         };
         let s_ill_conditioned = s_max_abs > 1e6;
+
+        // Linearized device bypass: when triodes/BJTs are linearized at DC OP,
+        // their small-signal conductances (gm, 1/rp) stamp into G, creating
+        // high-gain coupling chains. These inflate S = A^{-1}, K = N_V*S*N_I,
+        // and K diagonals (both negative and positive) — but the values
+        // represent correct high-gain transfer functions, not numerical
+        // instability. The Schur NR iterates in M-space using K directly and
+        // converges in ~4 iterations regardless of chain length. The full-LU
+        // NR redundantly re-solves the constant linear partition every
+        // iteration, degrading to ~39 iterations for long chains.
+        //
+        // When linearized devices are present, suppress ALL magnitude-based
+        // guards (positive K, extreme K diagonal, K ill-conditioned, S
+        // ill-conditioned) and rely solely on:
+        //   1. k_degenerate (K ≈ 0 makes Schur trivial: J = I, no damping)
+        //   2. spectral radius (rho > 1.0 means linear prediction unstable)
+        let has_linearized = ir.topology.num_linearized_devices > 0;
+        let linearized_bypass = has_linearized && !k_degenerate;
+        if linearized_bypass {
+            log::warn!(
+                "Nodal: {} linearized devices — suppressing magnitude guards \
+                 (max|K|={:.2e}, max|S|={:.2e}, K_diag_min={:.2e}, \
+                 pos_K_with_I={}). Spectral radius = {:.4}.",
+                ir.topology.num_linearized_devices, k_max_abs, s_max_abs,
+                k_diag_min, has_positive_k_with_current,
+                ir.matrices.spectral_radius_s_aneg
+            );
+        }
+
         let k_well_conditioned = m > 0
             && !k_degenerate
             && !has_positive_k_with_current
             && !k_ill_conditioned
             && !s_ill_conditioned
             && k_diag_min > -1e12;
+        // Spectral radius thresholds:
+        // - k_well_conditioned: 1.002 (DK auto-BE threshold, tight)
+        // - linearized_bypass: 1.05 (relaxed — the Schur NR corrects the
+        //   linear prediction every sample via M-dim NR, and the runtime
+        //   BE fallback catches any sample where trapezoidal diverges.
+        //   At rho=1.01, the prediction error is ~1%/sample — trivially
+        //   corrected by the first NR iteration)
+        // - pathological K (no bypass): 1.0 (strict — unknown K structure)
         let schur_unstable = if k_well_conditioned {
             ir.matrices.spectral_radius_s_aneg > 1.002
+        } else if linearized_bypass {
+            ir.matrices.spectral_radius_s_aneg > 1.05
         } else {
             ir.matrices.spectral_radius_s_aneg > 1.0
         };
-        let use_full_nodal = has_positive_k_with_current
-            || k_diag_min < -1e12
-            || k_degenerate
-            || k_ill_conditioned
-            || s_ill_conditioned
-            || schur_unstable;
+        let use_full_nodal = if linearized_bypass {
+            // Only k_degenerate and spectral radius can block Schur
+            k_degenerate || schur_unstable
+        } else {
+            has_positive_k_with_current
+                || k_diag_min < -1e12
+                || k_degenerate
+                || k_ill_conditioned
+                || s_ill_conditioned
+                || schur_unstable
+        };
         // The dense `lu_solve` helper is emitted whenever any generated code
         // path needs it. The full-LU nodal path always needs it. The Schur
         // path also needs it when op-amp rail handling is in `ActiveSet` mode,
@@ -147,33 +229,40 @@ impl RustEmitter {
                 )
                 && !ir.opamps.is_empty());
 
+        // Now emit header, constants, device models, state (needs use_full_nodal)
+        code.push_str(&self.emit_header(ir)?);
+        code.push_str(&self.emit_nodal_constants(ir));
+        code.push_str(&self.emit_device_models(ir)?);
+        code.push_str(&self.emit_nodal_state(ir, use_full_nodal));
+        code.push_str(&Self::emit_nodal_invert_n(ir));
+
         if use_full_nodal {
             if has_positive_k_with_current {
-                log::info!(
+                log::warn!(
                     "Nodal: using full N×N LU NR (positive K diagonal with current injection)"
                 );
             } else if k_degenerate {
-                log::info!(
+                log::warn!(
                     "Nodal: using full N×N LU NR (K degenerate, max|K|={:.2e} — device Jacobian provides essential damping)",
                     k_max_abs
                 );
             } else if k_ill_conditioned {
-                log::info!(
+                log::warn!(
                     "Nodal: using full N×N LU NR (max|K|={:.2e}, extreme K magnitude — device nodes lack resistive paths)",
                     k_max_abs
                 );
             } else if s_ill_conditioned {
-                log::info!(
+                log::warn!(
                     "Nodal: using full N×N LU NR (max|S|={:.2e}, cap-only nodes lack resistive paths — Schur prediction unreliable)",
                     s_max_abs
                 );
             } else if schur_unstable {
-                log::info!(
+                log::warn!(
                     "Nodal: using full N×N LU NR (spectral_radius(S*A_neg) = {:.4}, Schur feedback unstable)",
                     ir.matrices.spectral_radius_s_aneg
                 );
             } else {
-                log::info!(
+                log::warn!(
                     "Nodal: using full N×N LU NR (K_diag_min={:.1}, ill-conditioned)",
                     k_diag_min
                 );
@@ -188,6 +277,13 @@ impl RustEmitter {
             }
             code.push_str(&Self::emit_nodal_process_sample(ir));
         } else {
+            if linearized_bypass {
+                log::warn!(
+                    "Nodal: using Schur NR (M={}, {} linearized devices, rho={:.4})",
+                    m, ir.topology.num_linearized_devices,
+                    ir.matrices.spectral_radius_s_aneg
+                );
+            }
             // Schur path doesn't emit lu_solve by default, but active-set
             // resolve needs it. Emit it on demand.
             if needs_lu_solve {
@@ -735,7 +831,7 @@ impl RustEmitter {
     }
 
     /// Emit state struct, Default impl, set_sample_rate, and reset for nodal solver.
-    pub(super) fn emit_nodal_state(&self, ir: &CircuitIR) -> String {
+    pub(super) fn emit_nodal_state(&self, ir: &CircuitIR, use_full_nodal: bool) -> String {
         let n = ir.topology.n;
         let m = ir.topology.m;
         let n_nodes = if ir.topology.n_nodes > 0 {
@@ -793,6 +889,40 @@ impl RustEmitter {
             "/// Call [`set_sample_rate`](CircuitState::set_sample_rate) before processing\n",
         );
         code.push_str("/// if the host sample rate differs from [`SAMPLE_RATE`].\n");
+        // When using full-LU nodal path, emit a separate cold struct for
+        // Schur complement + work matrices. These are only accessed on
+        // pot/switch/sample-rate changes, not per sample. Keeping them
+        // heap-allocated via Box prevents them from polluting L2 cache.
+        if use_full_nodal {
+            code.push_str("/// Cold state: matrices only accessed on pot/switch/sample-rate changes.\n");
+            code.push_str("/// Heap-allocated to keep the per-sample hot path in L2 cache.\n");
+            code.push_str("#[derive(Clone, Debug)]\n");
+            code.push_str("pub struct CircuitStateCold {\n");
+            code.push_str("    pub s: [[f64; N]; N],\n");
+            if m > 0 {
+                code.push_str("    pub k: [[f64; M]; M],\n");
+                code.push_str("    pub s_ni: [[f64; M]; N],\n");
+            }
+            code.push_str("    pub s_be: [[f64; N]; N],\n");
+            if m > 0 {
+                code.push_str("    pub k_be: [[f64; M]; M],\n");
+                code.push_str("    pub s_ni_be: [[f64; M]; N],\n");
+            }
+            if !ir.matrices.s_sub.is_empty() {
+                code.push_str("    pub s_sub: [[f64; N]; N],\n");
+                code.push_str("    pub a_neg_sub: [[f64; N]; N],\n");
+                if m > 0 {
+                    code.push_str("    pub k_sub: [[f64; M]; M],\n");
+                    code.push_str("    pub s_ni_sub: [[f64; M]; N],\n");
+                }
+            }
+            if has_pots || has_switches || has_sat_ind || has_sat_coupled {
+                code.push_str("    pub g_work: [[f64; N]; N],\n");
+                code.push_str("    pub c_work: [[f64; N]; N],\n");
+            }
+            code.push_str("}\n\n");
+        }
+
         code.push_str("#[derive(Clone, Debug)]\n");
         code.push_str("pub struct CircuitState {\n");
         code.push_str("    /// Previous node voltages v[n-1]\n");
@@ -886,52 +1016,69 @@ impl RustEmitter {
         code.push_str("    /// A_neg_be matrix: (1/T)*C (backward Euler history), recomputed by set_sample_rate\n");
         code.push_str("    pub a_neg_be: [[f64; N]; N],\n");
 
-        // Schur complement matrices (precomputed S = A^{-1}, K = N_v*S*N_i, S_NI = S*N_i)
-        code.push_str("    /// S matrix: A^{-1} (trapezoidal), recomputed by set_sample_rate\n");
-        code.push_str("    pub s: [[f64; N]; N],\n");
-        if m > 0 {
-            code.push_str("    /// K matrix: N_v * S * N_i (nonlinear kernel), recomputed by set_sample_rate\n");
-            code.push_str("    pub k: [[f64; M]; M],\n");
-            code.push_str(
-                "    /// S_NI matrix: S * N_i (voltage recovery), recomputed by set_sample_rate\n",
-            );
-            code.push_str("    pub s_ni: [[f64; M]; N],\n");
-        }
-        code.push_str(
-            "    /// S_be matrix: A_be^{-1} (backward Euler), recomputed by set_sample_rate\n",
-        );
-        code.push_str("    pub s_be: [[f64; N]; N],\n");
-        if m > 0 {
-            code.push_str("    /// K_be matrix: N_v * S_be * N_i (BE kernel), recomputed by set_sample_rate\n");
-            code.push_str("    pub k_be: [[f64; M]; M],\n");
-            code.push_str("    /// S_NI_be matrix: S_be * N_i (BE voltage recovery), recomputed by set_sample_rate\n");
-            code.push_str("    pub s_ni_be: [[f64; M]; N],\n");
-        }
-        // Sub-step matrices (trap at 2× rate)
-        if !ir.matrices.s_sub.is_empty() {
-            code.push_str("    /// S_sub matrix: (G+4C/T)^{-1} (trap at 2× rate), recomputed by set_sample_rate\n");
-            code.push_str("    pub s_sub: [[f64; N]; N],\n");
-            code.push_str("    /// A_neg_sub matrix: 4C/T-G (trap at 2× rate history), recomputed by set_sample_rate\n");
-            code.push_str("    pub a_neg_sub: [[f64; N]; N],\n");
+        // Schur complement matrices + work matrices.
+        // When use_full_nodal, these are in a heap-allocated CircuitStateCold
+        // to keep the hot per-sample working set in L2 cache.
+        if use_full_nodal {
+            code.push_str("    /// Cold state: Schur complement + work matrices (heap-allocated,\n");
+            code.push_str("    /// only accessed on pot/switch changes and sample rate changes).\n");
+            code.push_str("    pub cold: Box<CircuitStateCold>,\n");
+        } else {
+            // Schur path: all matrices inline (small N, no cache pressure)
+            code.push_str("    /// S matrix: A^{-1} (trapezoidal), recomputed by set_sample_rate\n");
+            code.push_str("    pub s: [[f64; N]; N],\n");
             if m > 0 {
-                code.push_str("    /// K_sub matrix: N_v*S_sub*N_i (sub-step kernel)\n");
-                code.push_str("    pub k_sub: [[f64; M]; M],\n");
-                code.push_str("    /// S_NI_sub matrix: S_sub*N_i (sub-step voltage recovery)\n");
-                code.push_str("    pub s_ni_sub: [[f64; M]; N],\n");
+                code.push_str("    /// K matrix: N_v * S * N_i (nonlinear kernel), recomputed by set_sample_rate\n");
+                code.push_str("    pub k: [[f64; M]; M],\n");
+                code.push_str(
+                    "    /// S_NI matrix: S * N_i (voltage recovery), recomputed by set_sample_rate\n",
+                );
+                code.push_str("    pub s_ni: [[f64; M]; N],\n");
+            }
+            code.push_str(
+                "    /// S_be matrix: A_be^{-1} (backward Euler), recomputed by set_sample_rate\n",
+            );
+            code.push_str("    pub s_be: [[f64; N]; N],\n");
+            if m > 0 {
+                code.push_str("    /// K_be matrix: N_v * S_be * N_i (BE kernel), recomputed by set_sample_rate\n");
+                code.push_str("    pub k_be: [[f64; M]; M],\n");
+                code.push_str("    /// S_NI_be matrix: S_be * N_i (BE voltage recovery), recomputed by set_sample_rate\n");
+                code.push_str("    pub s_ni_be: [[f64; M]; N],\n");
+            }
+            if !ir.matrices.s_sub.is_empty() {
+                code.push_str("    /// S_sub matrix: (G+4C/T)^{-1} (trap at 2× rate), recomputed by set_sample_rate\n");
+                code.push_str("    pub s_sub: [[f64; N]; N],\n");
+                code.push_str("    /// A_neg_sub matrix: 4C/T-G (trap at 2× rate history), recomputed by set_sample_rate\n");
+                code.push_str("    pub a_neg_sub: [[f64; N]; N],\n");
+                if m > 0 {
+                    code.push_str("    /// K_sub matrix: N_v*S_sub*N_i (sub-step kernel)\n");
+                    code.push_str("    pub k_sub: [[f64; M]; M],\n");
+                    code.push_str("    /// S_NI_sub matrix: S_sub*N_i (sub-step voltage recovery)\n");
+                    code.push_str("    pub s_ni_sub: [[f64; M]; N],\n");
+                }
             }
         }
         code.push('\n');
 
         // Mutable G and C for pot/switch/saturating-inductor re-stamping
         if has_pots || has_switches || has_sat_ind || has_sat_coupled {
-            code.push_str("    /// Working G matrix (modified by pots/switches)\n");
-            code.push_str("    pub g_work: [[f64; N]; N],\n");
-            code.push_str("    /// Working C matrix (modified by switches/saturating inductors)\n");
-            code.push_str("    pub c_work: [[f64; N]; N],\n");
-            code.push_str("    /// Current sample rate (for rebuild_matrices)\n");
-            code.push_str("    pub current_sample_rate: f64,\n");
-            code.push_str("    /// Lazy rebuild flag: set by set_pot/set_switch, cleared by process_sample\n");
-            code.push_str("    pub matrices_dirty: bool,\n\n");
+            if use_full_nodal {
+                // g_work/c_work are cold (only used in rebuild_matrices, not per-sample).
+                // current_sample_rate and matrices_dirty are tiny scalars, stay hot.
+                code.push_str("    /// Current sample rate (for rebuild_matrices)\n");
+                code.push_str("    pub current_sample_rate: f64,\n");
+                code.push_str("    /// Lazy rebuild flag: set by set_pot/set_switch, cleared by process_sample\n");
+                code.push_str("    pub matrices_dirty: bool,\n\n");
+            } else {
+                code.push_str("    /// Working G matrix (modified by pots/switches)\n");
+                code.push_str("    pub g_work: [[f64; N]; N],\n");
+                code.push_str("    /// Working C matrix (modified by switches/saturating inductors)\n");
+                code.push_str("    pub c_work: [[f64; N]; N],\n");
+                code.push_str("    /// Current sample rate (for rebuild_matrices)\n");
+                code.push_str("    pub current_sample_rate: f64,\n");
+                code.push_str("    /// Lazy rebuild flag: set by set_pot/set_switch, cleared by process_sample\n");
+                code.push_str("    pub matrices_dirty: bool,\n\n");
+            }
         }
 
         // Pot state fields
@@ -1143,33 +1290,70 @@ impl RustEmitter {
         code.push_str("            a_neg: A_NEG_DEFAULT,\n");
         code.push_str("            a_be: A_BE_DEFAULT,\n");
         code.push_str("            a_neg_be: A_NEG_BE_DEFAULT,\n");
-        code.push_str("            s: S_DEFAULT,\n");
-        if m > 0 {
-            code.push_str("            k: K_DEFAULT,\n");
-            code.push_str("            s_ni: S_NI_DEFAULT,\n");
-        }
-        code.push_str("            s_be: S_BE_DEFAULT,\n");
-        if !ir.matrices.s_sub.is_empty() {
-            code.push_str("            s_sub: S_SUB_DEFAULT,\n");
-            code.push_str("            a_neg_sub: A_NEG_SUB_DEFAULT,\n");
+        if use_full_nodal {
+            // Cold fields go into Box<CircuitStateCold>
+            code.push_str("            cold: Box::new(CircuitStateCold {\n");
+            code.push_str("                s: S_DEFAULT,\n");
             if m > 0 {
-                code.push_str("            k_sub: K_SUB_DEFAULT,\n");
-                code.push_str("            s_ni_sub: S_NI_SUB_DEFAULT,\n");
+                code.push_str("                k: K_DEFAULT,\n");
+                code.push_str("                s_ni: S_NI_DEFAULT,\n");
             }
-        }
-        if m > 0 {
-            code.push_str("            k_be: K_BE_DEFAULT,\n");
-            code.push_str("            s_ni_be: S_NI_BE_DEFAULT,\n");
+            code.push_str("                s_be: S_BE_DEFAULT,\n");
+            if m > 0 {
+                code.push_str("                k_be: K_BE_DEFAULT,\n");
+                code.push_str("                s_ni_be: S_NI_BE_DEFAULT,\n");
+            }
+            if !ir.matrices.s_sub.is_empty() {
+                code.push_str("                s_sub: S_SUB_DEFAULT,\n");
+                code.push_str("                a_neg_sub: A_NEG_SUB_DEFAULT,\n");
+                if m > 0 {
+                    code.push_str("                k_sub: K_SUB_DEFAULT,\n");
+                    code.push_str("                s_ni_sub: S_NI_SUB_DEFAULT,\n");
+                }
+            }
+            if has_pots || has_switches || has_sat_ind || has_sat_coupled {
+                code.push_str("                g_work: G,\n");
+                code.push_str("                c_work: C,\n");
+            }
+            code.push_str("            }),\n");
+        } else {
+            code.push_str("            s: S_DEFAULT,\n");
+            if m > 0 {
+                code.push_str("            k: K_DEFAULT,\n");
+                code.push_str("            s_ni: S_NI_DEFAULT,\n");
+            }
+            code.push_str("            s_be: S_BE_DEFAULT,\n");
+            if !ir.matrices.s_sub.is_empty() {
+                code.push_str("            s_sub: S_SUB_DEFAULT,\n");
+                code.push_str("            a_neg_sub: A_NEG_SUB_DEFAULT,\n");
+                if m > 0 {
+                    code.push_str("            k_sub: K_SUB_DEFAULT,\n");
+                    code.push_str("            s_ni_sub: S_NI_SUB_DEFAULT,\n");
+                }
+            }
+            if m > 0 {
+                code.push_str("            k_be: K_BE_DEFAULT,\n");
+                code.push_str("            s_ni_be: S_NI_BE_DEFAULT,\n");
+            }
         }
 
         if has_pots || has_switches || has_sat_ind || has_sat_coupled {
-            code.push_str("            g_work: G,\n");
-            code.push_str("            c_work: C,\n");
-            code.push_str(&format!(
-                "            current_sample_rate: {:.17e},\n",
-                ir.solver_config.sample_rate * ir.solver_config.oversampling_factor as f64
-            ));
-            code.push_str("            matrices_dirty: false,\n");
+            if use_full_nodal {
+                // g_work/c_work are in cold; only emit the scalars here
+                code.push_str(&format!(
+                    "            current_sample_rate: {:.17e},\n",
+                    ir.solver_config.sample_rate * ir.solver_config.oversampling_factor as f64
+                ));
+                code.push_str("            matrices_dirty: false,\n");
+            } else {
+                code.push_str("            g_work: G,\n");
+                code.push_str("            c_work: C,\n");
+                code.push_str(&format!(
+                    "            current_sample_rate: {:.17e},\n",
+                    ir.solver_config.sample_rate * ir.solver_config.oversampling_factor as f64
+                ));
+                code.push_str("            matrices_dirty: false,\n");
+            }
         }
         // Saturation decimation counter: 0 triggers update on first sample
         if has_any_saturation {
@@ -1334,27 +1518,28 @@ impl RustEmitter {
         code.push_str("        self.diag_substep_count = 0;\n");
         code.push_str("        self.diag_refactor_count = 0;\n");
         // Reset Schur complement matrices to defaults
-        code.push_str("        self.s = S_DEFAULT;\n");
+        let cp = if use_full_nodal { "self.cold." } else { "self." };
+        code.push_str(&format!("        {}s = S_DEFAULT;\n", cp));
         if m > 0 {
-            code.push_str("        self.k = K_DEFAULT;\n");
-            code.push_str("        self.s_ni = S_NI_DEFAULT;\n");
+            code.push_str(&format!("        {}k = K_DEFAULT;\n", cp));
+            code.push_str(&format!("        {}s_ni = S_NI_DEFAULT;\n", cp));
         }
-        code.push_str("        self.s_be = S_BE_DEFAULT;\n");
+        code.push_str(&format!("        {}s_be = S_BE_DEFAULT;\n", cp));
         if m > 0 {
-            code.push_str("        self.k_be = K_BE_DEFAULT;\n");
-            code.push_str("        self.s_ni_be = S_NI_BE_DEFAULT;\n");
+            code.push_str(&format!("        {}k_be = K_BE_DEFAULT;\n", cp));
+            code.push_str(&format!("        {}s_ni_be = S_NI_BE_DEFAULT;\n", cp));
         }
         if !ir.matrices.s_sub.is_empty() {
-            code.push_str("        self.s_sub = S_SUB_DEFAULT;\n");
-            code.push_str("        self.a_neg_sub = A_NEG_SUB_DEFAULT;\n");
+            code.push_str(&format!("        {}s_sub = S_SUB_DEFAULT;\n", cp));
+            code.push_str(&format!("        {}a_neg_sub = A_NEG_SUB_DEFAULT;\n", cp));
             if m > 0 {
-                code.push_str("        self.k_sub = K_SUB_DEFAULT;\n");
-                code.push_str("        self.s_ni_sub = S_NI_SUB_DEFAULT;\n");
+                code.push_str(&format!("        {}k_sub = K_SUB_DEFAULT;\n", cp));
+                code.push_str(&format!("        {}s_ni_sub = S_NI_SUB_DEFAULT;\n", cp));
             }
         }
         if has_pots || has_switches || has_sat_ind || has_sat_coupled {
-            code.push_str("        self.g_work = G;\n");
-            code.push_str("        self.c_work = C;\n");
+            code.push_str(&format!("        {}g_work = G;\n", cp));
+            code.push_str(&format!("        {}c_work = C;\n", cp));
         }
         // Reset saturation counter
         if has_any_saturation {
@@ -1529,13 +1714,13 @@ impl RustEmitter {
             code.push_str("            // the reset on BoyleDiodes mode only.\n");
             code.push_str("            self.chord_valid = false;\n");
         }
-        code.push_str("            self.s = S_DEFAULT;\n");
-        code.push_str("            self.s_be = S_BE_DEFAULT;\n");
+        code.push_str(&format!("            {}s = S_DEFAULT;\n", cp));
+        code.push_str(&format!("            {}s_be = S_BE_DEFAULT;\n", cp));
         if m > 0 {
-            code.push_str("            self.k = K_DEFAULT;\n");
-            code.push_str("            self.s_ni = S_NI_DEFAULT;\n");
-            code.push_str("            self.k_be = K_BE_DEFAULT;\n");
-            code.push_str("            self.s_ni_be = S_NI_BE_DEFAULT;\n");
+            code.push_str(&format!("            {}k = K_DEFAULT;\n", cp));
+            code.push_str(&format!("            {}s_ni = S_NI_DEFAULT;\n", cp));
+            code.push_str(&format!("            {}k_be = K_BE_DEFAULT;\n", cp));
+            code.push_str(&format!("            {}s_ni_be = S_NI_BE_DEFAULT;\n", cp));
         }
         if ir.dc_block {
             code.push_str("            self.dc_block_r = DC_BLOCK_R;\n");
@@ -1597,12 +1782,12 @@ impl RustEmitter {
 
         // rebuild_matrices: recompute A/A_neg/A_be/A_neg_be from G+C
         let g_src = if has_pots || has_switches {
-            "self.g_work"
+            if use_full_nodal { "self.cold.g_work" } else { "self.g_work" }
         } else {
             "G"
         };
         let c_src = if has_pots || has_switches {
-            "self.c_work"
+            if use_full_nodal { "self.cold.c_work" } else { "self.c_work" }
         } else {
             "C"
         };
@@ -1637,10 +1822,10 @@ impl RustEmitter {
             code.push_str(&format!(
                 "        for i in 0..N {{\n\
                  \x20           for j in 0..N {{\n\
-                 \x20               self.a_neg_sub[i][j] = alpha_sub * {c}[i][j] - {g}[i][j];\n\
+                 \x20               {cp}a_neg_sub[i][j] = alpha_sub * {c}[i][j] - {g}[i][j];\n\
                  \x20           }}\n\
                  \x20       }}\n",
-                c = c_src, g = g_src
+                cp = cp, c = c_src, g = g_src
             ));
         }
 
@@ -1657,8 +1842,8 @@ impl RustEmitter {
             ));
             if !ir.matrices.s_sub.is_empty() {
                 code.push_str(&format!(
-                    "        for i in {}..{} {{ for j in 0..N {{ self.a_neg_sub[i][j] = 0.0; }} }}\n",
-                    n_nodes, n_aug
+                    "        for i in {}..{} {{ for j in 0..N {{ {}a_neg_sub[i][j] = 0.0; }} }}\n",
+                    n_nodes, n_aug, cp
                 ));
             }
         }
@@ -1678,32 +1863,30 @@ impl RustEmitter {
         // Recompute Schur complement matrices: S = A^{-1}, K = N_v*S*N_i, S_NI = S*N_i
         code.push_str("\n        // Recompute S = A^{-1} (trapezoidal)\n");
         code.push_str("        if let Some(inv) = invert_n(&self.a) {\n");
-        code.push_str("            self.s = inv;\n");
+        code.push_str(&format!("            {}s = inv;\n", cp));
         if m > 0 {
-            // Compute K = N_v * S * N_i
             code.push_str("            // K = N_v * S * N_i\n");
             code.push_str("            for i in 0..M {\n");
             code.push_str("                for j in 0..M {\n");
             code.push_str("                    let mut sum = 0.0;\n");
             code.push_str("                    for a in 0..N {\n");
             code.push_str("                        let mut s_ni_aj = 0.0;\n");
-            code.push_str(
-                "                        for b in 0..N { s_ni_aj += self.s[a][b] * N_I[b][j]; }\n",
-            );
+            code.push_str(&format!(
+                "                        for b in 0..N {{ s_ni_aj += {}s[a][b] * N_I[b][j]; }}\n", cp
+            ));
             code.push_str("                        sum += N_V[i][a] * s_ni_aj;\n");
             code.push_str("                    }\n");
-            code.push_str("                    self.k[i][j] = sum;\n");
+            code.push_str(&format!("                    {}k[i][j] = sum;\n", cp));
             code.push_str("                }\n");
             code.push_str("            }\n");
-            // Compute S_NI = S * N_i
             code.push_str("            // S_NI = S * N_i\n");
             code.push_str("            for i in 0..N {\n");
             code.push_str("                for j in 0..M {\n");
             code.push_str("                    let mut sum = 0.0;\n");
-            code.push_str(
-                "                    for a in 0..N { sum += self.s[i][a] * N_I[a][j]; }\n",
-            );
-            code.push_str("                    self.s_ni[i][j] = sum;\n");
+            code.push_str(&format!(
+                "                    for a in 0..N {{ sum += {}s[i][a] * N_I[a][j]; }}\n", cp
+            ));
+            code.push_str(&format!("                    {}s_ni[i][j] = sum;\n", cp));
             code.push_str("                }\n");
             code.push_str("            }\n");
         }
@@ -1712,26 +1895,28 @@ impl RustEmitter {
         // Recompute S_be = A_be^{-1}
         code.push_str("        // Recompute S_be = A_be^{-1} (backward Euler)\n");
         code.push_str("        if let Some(inv) = invert_n(&self.a_be) {\n");
-        code.push_str("            self.s_be = inv;\n");
+        code.push_str(&format!("            {}s_be = inv;\n", cp));
         if m > 0 {
             code.push_str("            for i in 0..M {\n");
             code.push_str("                for j in 0..M {\n");
             code.push_str("                    let mut sum = 0.0;\n");
             code.push_str("                    for a in 0..N {\n");
             code.push_str("                        let mut s_ni_aj = 0.0;\n");
-            code.push_str("                        for b in 0..N { s_ni_aj += self.s_be[a][b] * N_I[b][j]; }\n");
+            code.push_str(&format!(
+                "                        for b in 0..N {{ s_ni_aj += {}s_be[a][b] * N_I[b][j]; }}\n", cp
+            ));
             code.push_str("                        sum += N_V[i][a] * s_ni_aj;\n");
             code.push_str("                    }\n");
-            code.push_str("                    self.k_be[i][j] = sum;\n");
+            code.push_str(&format!("                    {}k_be[i][j] = sum;\n", cp));
             code.push_str("                }\n");
             code.push_str("            }\n");
             code.push_str("            for i in 0..N {\n");
             code.push_str("                for j in 0..M {\n");
             code.push_str("                    let mut sum = 0.0;\n");
-            code.push_str(
-                "                    for a in 0..N { sum += self.s_be[i][a] * N_I[a][j]; }\n",
-            );
-            code.push_str("                    self.s_ni_be[i][j] = sum;\n");
+            code.push_str(&format!(
+                "                    for a in 0..N {{ sum += {}s_be[i][a] * N_I[a][j]; }}\n", cp
+            ));
+            code.push_str(&format!("                    {}s_ni_be[i][j] = sum;\n", cp));
             code.push_str("                }\n");
             code.push_str("            }\n");
         }
@@ -1746,24 +1931,28 @@ impl RustEmitter {
                 g = g_src, c = c_src
             ));
             code.push_str("        if let Some(inv) = invert_n(&a_sub) {\n");
-            code.push_str("            self.s_sub = inv;\n");
+            code.push_str(&format!("            {}s_sub = inv;\n", cp));
             if m > 0 {
                 code.push_str("            for i in 0..M {\n");
                 code.push_str("                for j in 0..M {\n");
                 code.push_str("                    let mut sum = 0.0;\n");
                 code.push_str("                    for a in 0..N {\n");
                 code.push_str("                        let mut s_ni_aj = 0.0;\n");
-                code.push_str("                        for b in 0..N { s_ni_aj += self.s_sub[a][b] * N_I[b][j]; }\n");
+                code.push_str(&format!(
+                    "                        for b in 0..N {{ s_ni_aj += {}s_sub[a][b] * N_I[b][j]; }}\n", cp
+                ));
                 code.push_str("                        sum += N_V[i][a] * s_ni_aj;\n");
                 code.push_str("                    }\n");
-                code.push_str("                    self.k_sub[i][j] = sum;\n");
+                code.push_str(&format!("                    {}k_sub[i][j] = sum;\n", cp));
                 code.push_str("                }\n");
                 code.push_str("            }\n");
                 code.push_str("            for i in 0..N {\n");
                 code.push_str("                for j in 0..M {\n");
                 code.push_str("                    let mut sum = 0.0;\n");
-                code.push_str("                    for a in 0..N { sum += self.s_sub[i][a] * N_I[a][j]; }\n");
-                code.push_str("                    self.s_ni_sub[i][j] = sum;\n");
+                code.push_str(&format!(
+                    "                    for a in 0..N {{ sum += {}s_sub[i][a] * N_I[a][j]; }}\n", cp
+                ));
+                code.push_str(&format!("                    {}s_ni_sub[i][j] = sum;\n", cp));
                 code.push_str("                }\n");
                 code.push_str("            }\n");
             }
@@ -1806,25 +1995,26 @@ impl RustEmitter {
 
             // Emit conductance stamp into g_work (full dimension if Boyle, reduced otherwise)
             // Pot node indices (np, nq) are 1-indexed MNA nodes (< n_nodes), same in both systems.
+            let gw = if use_full_nodal { "self.cold.g_work" } else { "self.g_work" };
             let emit_g_work_stamp = |code: &mut String| {
                 if np > 0 {
                     code.push_str(&format!(
-                        "        self.g_work[{}][{}] += delta_g;\n",
-                        np - 1, np - 1
+                        "        {}[{}][{}] += delta_g;\n",
+                        gw, np - 1, np - 1
                     ));
                 }
                 if nq > 0 {
                     code.push_str(&format!(
-                        "        self.g_work[{}][{}] += delta_g;\n",
-                        nq - 1, nq - 1
+                        "        {}[{}][{}] += delta_g;\n",
+                        gw, nq - 1, nq - 1
                     ));
                 }
                 if np > 0 && nq > 0 {
                     code.push_str(&format!(
-                        "        self.g_work[{}][{}] -= delta_g;\n\
-                         \x20       self.g_work[{}][{}] -= delta_g;\n",
-                        np - 1, nq - 1,
-                        nq - 1, np - 1
+                        "        {}[{}][{}] -= delta_g;\n\
+                         \x20       {}[{}][{}] -= delta_g;\n",
+                        gw, np - 1, nq - 1,
+                        gw, nq - 1, np - 1
                     ));
                 }
             };
@@ -1916,9 +2106,9 @@ impl RustEmitter {
                 let np = comp.node_p;
                 let nq = comp.node_q;
                 let matrix = if comp.component_type == 'R' {
-                    "g_work"
+                    if use_full_nodal { "cold.g_work" } else { "g_work" }
                 } else {
-                    "c_work"
+                    if use_full_nodal { "cold.c_work" } else { "c_work" }
                 };
 
                 code.push_str(&format!(
@@ -1948,8 +2138,9 @@ impl RustEmitter {
                 // Stamp delta into g_work or c_work
                 if let Some(aug_row) = comp.augmented_row.filter(|_| comp.component_type == 'L') {
                     // Augmented MNA: L value on diagonal of branch variable row
+                    let cw = if use_full_nodal { "self.cold.c_work" } else { "self.c_work" };
                     code.push_str(&format!(
-                        "        self.c_work[{aug_row}][{aug_row}] += delta_{ci};\n"
+                        "        {cw}[{aug_row}][{aug_row}] += delta_{ci};\n"
                     ));
                 } else {
                     // R or C: conductance stamp at circuit nodes
@@ -1984,12 +2175,13 @@ impl RustEmitter {
             // Recompute off-diagonal mutual inductance entries
             if !sw.mutual_entries.is_empty() {
                 code.push_str("        // Update mutual inductance off-diagonal entries\n");
+                let cw_m = if use_full_nodal { "self.cold.c_work" } else { "self.c_work" };
                 for me in &sw.mutual_entries {
                     code.push_str(&format!(
                         "        {{\n\
-                         \x20           let m = {:.17e}_f64 * (self.c_work[{}][{}] * self.c_work[{}][{}]).sqrt();\n\
-                         \x20           self.c_work[{}][{}] = m;\n\
-                         \x20           self.c_work[{}][{}] = m;\n\
+                         \x20           let m = {:.17e}_f64 * ({cw_m}[{}][{}] * {cw_m}[{}][{}]).sqrt();\n\
+                         \x20           {cw_m}[{}][{}] = m;\n\
+                         \x20           {cw_m}[{}][{}] = m;\n\
                          \x20       }}\n",
                         me.coupling,
                         me.row_a, me.row_a,
@@ -2823,7 +3015,7 @@ impl RustEmitter {
                     code.push_str("            for i in 0..N { rhs_s[i] = RHS_CONST[i]; }\n");
                 }
                 code.push_str("            for i in 0..N { for j in 0..N { rhs_s[i] += state.a_neg_sub[i][j] * v_sub[j]; } }\n");
-                code.push_str("            for i in 0..N { for j in 0..M { rhs_s[i] += N_I[i][j] * i_nl_sub[j]; } }\n");
+                code.push_str(&emit_sparse_ni_matvec_add(ir, "rhs_s", "i_nl_sub", "            "));
                 code.push_str("            rhs_s[INPUT_NODE] += (inp_s + inp_prev_s) * input_conductance;\n");
                 // Linear prediction: v_pred_s = S_sub * rhs_s (O(N²))
                 code.push_str("            let mut v_pred_s = [0.0f64; N];\n");
@@ -4377,16 +4569,26 @@ impl RustEmitter {
             // Apply damped Newton step and check convergence
             // Compute step BEFORE updating v, so convergence check sees the actual delta
             // Skip convergence check on iter 0 — need at least one full NR update
+            // Convergence check on nonlinear device nodes only (N_V nonzero columns).
+            // Linearized stages respond linearly and converge passively — checking
+            // all N nodes causes spurious chord refactors when linear coupling
+            // ripple from nonlinear stages hasn't settled to sub-µV precision.
             code.push_str("        // Compute damped step, check convergence, then apply\n");
             code.push_str("        let mut max_step_exceeded = false;\n");
-            code.push_str("        for i in 0..N {\n");
-            code.push_str("            let step = alpha * (v_new[i] - v[i]);\n");
-            code.push_str(
-                "            let threshold = 1e-3 * v[i].abs().max((v[i] + step).abs()) + 1e-6;\n",
-            );
-            code.push_str("            if step.abs() >= threshold { max_step_exceeded = true; }\n");
-            code.push_str("            v[i] += step;\n");
-            code.push_str("        }\n");
+            {
+                let mut device_nodes: Vec<usize> = ir.sparsity.n_v.nz_by_row
+                    .iter()
+                    .flat_map(|row| row.iter().copied())
+                    .collect();
+                device_nodes.sort();
+                device_nodes.dedup();
+                for &node in &device_nodes {
+                    code.push_str(&format!(
+                        "        {{ let step = alpha * (v_new[{node}] - v[{node}]); let threshold = 1e-3 * v[{node}].abs().max((v[{node}] + step).abs()) + 1e-6; if step.abs() >= threshold {{ max_step_exceeded = true; }} }}\n"
+                    ));
+                }
+            }
+            code.push_str("        for i in 0..N { v[i] += alpha * (v_new[i] - v[i]); }\n");
 
             // Mid-NR op-amp output clamping (VCC/VEE).
             //
@@ -4502,11 +4704,7 @@ impl RustEmitter {
                 code.push_str("        if !max_step_exceeded {\n");
                 code.push_str("            let i_nl_chord = i_nl;\n");
                 code.push_str("            let mut v_nl = [0.0f64; M];\n");
-                code.push_str("            for i in 0..M {\n");
-                code.push_str("                let mut sum = 0.0;\n");
-                code.push_str("                for j in 0..N { sum += N_V[i][j] * v[j]; }\n");
-                code.push_str("                v_nl[i] = sum;\n");
-                code.push_str("            }\n");
+                code.push_str(&emit_sparse_nv_matvec(ir, "v_nl", "v", "            "));
                 code.push_str("            let mut i_nl = [0.0f64; M];\n");
                 code.push_str("            let mut j_dev = [0.0f64; M * M];\n");
                 Self::emit_nodal_device_evaluation_body(&mut code, ir, "            ");
@@ -4533,11 +4731,7 @@ impl RustEmitter {
             // Final device evaluation at converged point
             code.push_str("            // Final device evaluation at converged point\n");
             code.push_str("            let mut v_nl_final = [0.0f64; M];\n");
-            code.push_str("            for i in 0..M {\n");
-            code.push_str("                let mut sum = 0.0;\n");
-            code.push_str("                for j in 0..N { sum += N_V[i][j] * v[j]; }\n");
-            code.push_str("                v_nl_final[i] = sum;\n");
-            code.push_str("            }\n");
+            code.push_str(&emit_sparse_nv_matvec(ir, "v_nl_final", "v", "            "));
             Self::emit_nodal_device_evaluation_final(&mut code, ir, "            ");
 
             // ActiveSet (plain) — pin and re-solve in trap matrices, preserving
@@ -4616,14 +4810,14 @@ impl RustEmitter {
             }
             code.push_str("                for i in 0..N { for j in 0..N { rhs_s[i] += a_neg_sub[i][j] * v_sub[j]; } }\n");
             if m > 0 {
-                code.push_str("                for i in 0..N { for j in 0..M { rhs_s[i] += N_I[i][j] * i_nl_sub[j]; } }\n");
+                code.push_str(&emit_sparse_ni_matvec_add(ir, "rhs_s", "i_nl_sub", "                "));
             }
             code.push_str("                rhs_s[INPUT_NODE] += (inp_s + inp_prev_s) * (1.0 / INPUT_RESISTANCE);\n");
             // Sub-step NR loop
             code.push_str("                let mut sub_converged = false;\n");
             code.push_str("                for _iter in 0..MAX_ITER {\n");
             code.push_str("                    let mut v_nl = [0.0f64; M];\n");
-            code.push_str("                    for i in 0..M { for j in 0..N { v_nl[i] += N_V[i][j] * v_sub[j]; } }\n");
+            code.push_str(&emit_sparse_nv_matvec(ir, "v_nl", "v_sub", "                    "));
             code.push_str("                    let mut i_nl = [0.0f64; M];\n");
             code.push_str("                    let mut j_dev = [0.0f64; M * M];\n");
             // Device evaluation
@@ -4731,7 +4925,7 @@ impl RustEmitter {
             code.push_str("                    v_sub = v_new_s;\n");
             code.push_str("                    // Re-extract i_nl at converged v\n");
             code.push_str("                    let mut v_nl_f = [0.0f64; M];\n");
-            code.push_str("                    for i in 0..M { for j in 0..N { v_nl_f[i] += N_V[i][j] * v_sub[j]; } }\n");
+            code.push_str(&emit_sparse_nv_matvec(ir, "v_nl_f", "v_sub", "                    "));
             code.push_str("                    i_nl_sub = [0.0f64; M];\n");
             Self::emit_nodal_device_evaluation_body(&mut code, ir, "                    ");
             code.push_str("                    if max_step < TOL + 1e-3 {\n");
@@ -4817,13 +5011,10 @@ impl RustEmitter {
             // BE NR loop
             code.push_str("        for _iter in 0..MAX_ITER {\n");
 
-            // Extract v_nl
+            // Extract v_nl (sparse N_V)
             code.push_str("            let mut v_nl = [0.0f64; M];\n");
-            code.push_str("            for i in 0..M {\n");
-            code.push_str("                let mut sum = 0.0;\n");
-            code.push_str("                for j in 0..N { sum += N_V[i][j] * v[j]; }\n");
-            code.push_str("                v_nl[i] = sum;\n");
-            code.push_str("            }\n\n");
+            code.push_str(&emit_sparse_nv_matvec(ir, "v_nl", "v", "            "));
+            code.push_str("\n");
 
             // Evaluate devices (write to outer i_nl, declare local j_dev)
             code.push_str("            // Evaluate devices\n");
@@ -4974,11 +5165,7 @@ impl RustEmitter {
                 code.push_str("            if !be_step_exceeded {\n");
                 code.push_str("                let i_nl_be_chord = i_nl;\n");
                 code.push_str("                let mut v_nl = [0.0f64; M];\n");
-                code.push_str("                for i in 0..M {\n");
-                code.push_str("                    let mut sum = 0.0;\n");
-                code.push_str("                    for j in 0..N { sum += N_V[i][j] * v[j]; }\n");
-                code.push_str("                    v_nl[i] = sum;\n");
-                code.push_str("                }\n");
+                code.push_str(&emit_sparse_nv_matvec(ir, "v_nl", "v", "                "));
                 code.push_str("                let mut i_nl = [0.0f64; M];\n");
                 code.push_str("                let mut j_dev = [0.0f64; M * M];\n");
                 Self::emit_nodal_device_evaluation_body(&mut code, ir, "                ");
@@ -4999,11 +5186,7 @@ impl RustEmitter {
             code.push_str("                converged = true;\n");
             code.push_str("                state.diag_be_fallback_count += 1;\n");
             code.push_str("                let mut v_nl_final = [0.0f64; M];\n");
-            code.push_str("                for i in 0..M {\n");
-            code.push_str("                    let mut sum = 0.0;\n");
-            code.push_str("                    for j in 0..N { sum += N_V[i][j] * v[j]; }\n");
-            code.push_str("                    v_nl_final[i] = sum;\n");
-            code.push_str("                }\n");
+            code.push_str(&emit_sparse_nv_matvec(ir, "v_nl_final", "v", "                "));
             Self::emit_nodal_device_evaluation_final(&mut code, ir, "                ");
             code.push_str("                break;\n");
             code.push_str("            }\n");
@@ -5013,11 +5196,7 @@ impl RustEmitter {
             code.push_str("        // If still not converged, ensure i_nl is consistent with v\n");
             code.push_str("        if !converged {\n");
             code.push_str("            let mut v_nl_final = [0.0f64; M];\n");
-            code.push_str("            for i in 0..M {\n");
-            code.push_str("                let mut sum = 0.0;\n");
-            code.push_str("                for j in 0..N { sum += N_V[i][j] * v[j]; }\n");
-            code.push_str("                v_nl_final[i] = sum;\n");
-            code.push_str("            }\n");
+            code.push_str(&emit_sparse_nv_matvec(ir, "v_nl_final", "v", "            "));
             Self::emit_nodal_device_evaluation_final(&mut code, ir, "            ");
             code.push_str("        }\n");
 
@@ -5974,10 +6153,7 @@ impl RustEmitter {
 
                 // Compute proposed device voltage from v_new via N_v
                 code.push_str(&format!("{indent}{{ // Device {dev_num} dim {d}\n"));
-                code.push_str(&format!("{indent}    let mut v_nl_proposed = 0.0;\n"));
-                code.push_str(&format!(
-                    "{indent}    for j in 0..N {{ v_nl_proposed += N_V[{i}][j] * v_new[j]; }}\n"
-                ));
+                code.push_str(&emit_sparse_nv_dot(ir, i, "v_nl_proposed", "v_new", &format!("{indent}    ")));
                 code.push_str(&format!("{indent}    let v_nl_current = v_nl[{i}];\n"));
                 code.push_str(&format!(
                     "{indent}    let dv = v_nl_proposed - v_nl_current;\n"

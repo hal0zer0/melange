@@ -1102,11 +1102,45 @@ fn compile_circuit_source(
         }
     }
 
-    // Linearize BJTs specified by .linearize directives
-    let linearized: std::collections::HashSet<String> =
+    // Linearize devices specified by .linearize directives (BJTs and triodes)
+    let linearize_names: std::collections::HashSet<String> =
         netlist.linearize_devices.iter().cloned().collect();
-    if !linearized.is_empty() {
-        // Compute DC OP on current MNA to get g-parameters for linearized BJTs
+    // Partition into BJT and triode sets based on element type
+    let mut linearized_bjts_set: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+    let mut linearized_triodes_set: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+    if !linearize_names.is_empty() {
+        use melange_solver::parser::Element;
+        for elem in &netlist.elements {
+            match elem {
+                Element::Bjt { name, .. }
+                    if linearize_names.contains(&name.to_ascii_uppercase()) =>
+                {
+                    linearized_bjts_set.insert(name.to_ascii_uppercase());
+                }
+                Element::Triode { name, .. }
+                    if linearize_names.contains(&name.to_ascii_uppercase()) =>
+                {
+                    linearized_triodes_set.insert(name.to_ascii_uppercase());
+                }
+                _ => {}
+            }
+        }
+        // Warn about unrecognized .linearize names (not a BJT or triode)
+        for name in &linearize_names {
+            let upper = name.to_ascii_uppercase();
+            if !linearized_bjts_set.contains(&upper) && !linearized_triodes_set.contains(&upper) {
+                println!(
+                    "  Warning: .linearize device '{}' is not a BJT or triode (ignored)",
+                    name
+                );
+            }
+        }
+    }
+    let has_linearized = !linearized_bjts_set.is_empty() || !linearized_triodes_set.is_empty();
+    if has_linearized {
+        // Compute DC OP on current MNA to get g-parameters for linearized devices
         let device_slots = melange_solver::codegen::ir::CircuitIR::build_device_info_with_mna(
             &netlist,
             Some(&mna),
@@ -1121,24 +1155,21 @@ fn compile_circuit_source(
             melange_solver::dc_op::solve_dc_operating_point(&mna, &device_slots, &dc_op_config);
 
         // Extract g-parameters from DC OP Jacobian for each linearized BJT
-        let mut lin_infos = Vec::new();
+        let mut bjt_lin_infos = Vec::new();
         for slot in &device_slots {
             if let melange_solver::codegen::ir::DeviceParams::Bjt(bp) = &slot.params {
-                // Find the device name from MNA nonlinear_devices
                 let dev = mna
                     .nonlinear_devices
                     .iter()
                     .find(|d| d.start_idx == slot.start_idx);
                 if let Some(dev) = dev {
-                    if linearized.contains(&dev.name.to_ascii_uppercase()) {
+                    if linearized_bjts_set.contains(&dev.name.to_ascii_uppercase()) {
                         let s = slot.start_idx;
-                        // Extract v_nl at DC OP
                         let vbe = dc_result.v_nl.get(s).copied().unwrap_or(0.0);
                         let vbc = dc_result.v_nl.get(s + 1).copied().unwrap_or(0.0);
                         let ic = dc_result.i_nl.get(s).copied().unwrap_or(0.0);
                         let ib = dc_result.i_nl.get(s + 1).copied().unwrap_or(0.0);
 
-                        // Compute Jacobian at DC OP
                         let sign = if bp.is_pnp { -1.0 } else { 1.0 };
                         let vbe_eff = sign * vbe;
                         let vbc_eff = sign * vbc;
@@ -1146,14 +1177,10 @@ fn compile_circuit_source(
                         let exp_be = (vbe_eff / nf_vt).clamp(-40.0, 40.0).exp();
                         let exp_bc = (vbc_eff / bp.vt).clamp(-40.0, 40.0).exp();
 
-                        // dIc/dVbe (transconductance)
                         let gm = bp.is / nf_vt * exp_be;
-                        // dIc/dVbc
                         let gmu =
                             (bp.is / bp.vt * exp_bc + bp.is / (bp.beta_r * bp.vt) * exp_bc).abs();
-                        // dIb/dVbe
                         let gpi = bp.is / (bp.beta_f * nf_vt) * exp_be;
-                        // dIb/dVbc
                         let go = bp.is / (bp.beta_r * bp.vt) * exp_bc;
 
                         let (nc, nb, ne) = (
@@ -1165,7 +1192,7 @@ fn compile_circuit_source(
                             "  Linearized {}: gm={:.4e} gpi={:.4e} gmu={:.4e} Ic_dc={:.4e} Ib_dc={:.4e}",
                             dev.name, gm, gpi, gmu, ic, ib
                         );
-                        lin_infos.push(melange_solver::mna::LinearizedBjtInfo {
+                        bjt_lin_infos.push(melange_solver::mna::LinearizedBjtInfo {
                             name: dev.name.clone(),
                             nc,
                             nb,
@@ -1182,13 +1209,123 @@ fn compile_circuit_source(
             }
         }
 
-        // Rebuild MNA with forward-active + linearized
-        mna = MnaSystem::from_netlist_with_linearized(&netlist, &forward_active, &linearized)
-            .with_context(|| "Failed to rebuild MNA with linearized BJTs")?;
+        // Extract g-parameters from DC OP Jacobian for each linearized triode
+        let mut triode_lin_infos = Vec::new();
+        for slot in &device_slots {
+            if let melange_solver::codegen::ir::DeviceParams::Tube(tp) = &slot.params {
+                // Only linearize triodes, not pentodes
+                if tp.is_pentode() {
+                    continue;
+                }
+                let dev = mna
+                    .nonlinear_devices
+                    .iter()
+                    .find(|d| d.start_idx == slot.start_idx);
+                if let Some(dev) = dev {
+                    if linearized_triodes_set.contains(&dev.name.to_ascii_uppercase()) {
+                        let s = slot.start_idx;
+                        let vgk = dc_result.v_nl.get(s).copied().unwrap_or(0.0);
+                        let vpk = dc_result.v_nl.get(s + 1).copied().unwrap_or(0.0);
+                        let ip_dc = dc_result.i_nl.get(s).copied().unwrap_or(0.0);
+                        let ig_dc = dc_result.i_nl.get(s + 1).copied().unwrap_or(0.0);
+
+                        // Validate: only linearize when grid is not conducting
+                        if ig_dc.abs() > 1e-9 {
+                            println!(
+                                "  Warning: triode '{}' has Ig={:.4e} at DC OP (grid conducting), skipping linearization",
+                                dev.name, ig_dc
+                            );
+                            linearized_triodes_set.remove(&dev.name.to_ascii_uppercase());
+                            continue;
+                        }
+                        if vgk > -(tp.vgk_onset + 0.5) {
+                            println!(
+                                "  Warning: triode '{}' has Vgk={:.2}V (near grid conduction onset {:.2}V), skipping linearization",
+                                dev.name, vgk, tp.vgk_onset
+                            );
+                            linearized_triodes_set.remove(&dev.name.to_ascii_uppercase());
+                            continue;
+                        }
+
+                        // Construct KorenTriode to compute Jacobian at DC OP
+                        use melange_devices::NonlinearDevice;
+                        let triode = melange_devices::KorenTriode {
+                            mu: tp.mu,
+                            ex: tp.ex,
+                            kg1: tp.kg1,
+                            kp: tp.kp,
+                            kvb: tp.kvb,
+                            ig_max: tp.ig_max,
+                            vgk_onset: tp.vgk_onset,
+                            lambda: tp.lambda,
+                            mu_b: tp.mu_b,
+                            svar: tp.svar,
+                            ex_b: tp.ex_b,
+                        };
+                        let jac = triode.jacobian(&[vgk, vpk]);
+                        let gm = jac[0]; // dIp/dVgk
+                        let gp = jac[1]; // dIp/dVpk = 1/rp
+
+                        let (ng, np, nk) = (
+                            dev.node_indices[0], // grid
+                            dev.node_indices[1], // plate
+                            dev.node_indices[2], // cathode
+                        );
+                        let rp = if gp.abs() > 1e-30 { 1.0 / gp } else { f64::INFINITY };
+                        println!(
+                            "  Linearized {}: gm={:.4e} rp={:.0} Ip_dc={:.4e} Vgk={:.2}V Vpk={:.1}V",
+                            dev.name, gm, rp, ip_dc, vgk, vpk
+                        );
+                        triode_lin_infos.push(melange_solver::mna::LinearizedTriodeInfo {
+                            name: dev.name.clone(),
+                            ng,
+                            np,
+                            nk,
+                            gm,
+                            gp,
+                            ip_dc,
+                            ig_dc,
+                        });
+                    }
+                }
+            }
+        }
+
+        // Rebuild MNA with all reductions (FA + linearized BJTs + linearized triodes + grid-off)
+        mna = MnaSystem::from_netlist_with_all_reductions(
+            &netlist,
+            &forward_active,
+            &linearized_bjts_set,
+            &linearized_triodes_set,
+            &grid_off_pentodes,
+        )
+        .with_context(|| "Failed to rebuild MNA with linearized devices")?;
         if input_node_idx < mna.n {
             mna.g[input_node_idx][input_node_idx] += input_conductance;
         }
-        // Re-stamp junction caps
+        // Stamp linearized g-parameters into G.
+        // Must happen BEFORE junction cap re-stamp so that
+        // build_device_info_with_mna can skip linearized devices
+        // (it checks mna.linearized_bjts / mna.linearized_triodes).
+        if !bjt_lin_infos.is_empty() {
+            mna.linearized_bjts = bjt_lin_infos;
+            mna.stamp_linearized_bjts();
+            println!(
+                "  Linearized {} BJTs (M reduced by {})",
+                linearized_bjts_set.len(),
+                linearized_bjts_set.len() * 2
+            );
+        }
+        if !triode_lin_infos.is_empty() {
+            mna.linearized_triodes = triode_lin_infos;
+            mna.stamp_linearized_triodes();
+            println!(
+                "  Linearized {} triodes (M reduced by {})",
+                linearized_triodes_set.len(),
+                linearized_triodes_set.len() * 2
+            );
+        }
+        // Re-stamp junction caps (after linearized fields are set)
         {
             let ds = melange_solver::codegen::ir::CircuitIR::build_device_info_with_mna(
                 &netlist,
@@ -1199,14 +1336,6 @@ fn compile_circuit_source(
                 mna.stamp_device_junction_caps(&ds);
             }
         }
-        // Stamp linearized g-parameters into G
-        mna.linearized_bjts = lin_infos;
-        mna.stamp_linearized_bjts();
-        println!(
-            "  Linearized {} BJTs (M reduced by {})",
-            linearized.len(),
-            linearized.len() * 2
-        );
     }
 
     // NOTE: Internal node expansion for parasitic BJTs is deferred until after
@@ -1490,6 +1619,12 @@ fn compile_circuit_source(
     if routing.s_ill_conditioned {
         println!("    S matrix: ill-conditioned (max|S| > 1e6, cap-only nodes)");
     }
+    {
+        let n_lin = mna.linearized_triodes.len() + mna.linearized_bjts.len();
+        if n_lin > 0 {
+            println!("    Linearized devices: {} (K/S magnitude guards bypassed)", n_lin);
+        }
+    }
     println!("    Oversampling: {}×", oversampling);
     println!("    Input: node \"{}\", resistance {}Ω ({})", input_node, input_resistance, ir_source);
     println!(
@@ -1519,8 +1654,11 @@ fn compile_circuit_source(
     if !grid_off_pentodes.is_empty() {
         println!("    Grid-off reduction: {} pentodes reduced to 2D", grid_off_pentodes.len());
     }
-    if !linearized.is_empty() {
-        println!("    Linearized BJTs: {} (fully linear, M reduced by {})", linearized.len(), linearized.len() * 2);
+    if !linearized_bjts_set.is_empty() {
+        println!("    Linearized BJTs: {} (fully linear, M reduced by {})", linearized_bjts_set.len(), linearized_bjts_set.len() * 2);
+    }
+    if !linearized_triodes_set.is_empty() {
+        println!("    Linearized triodes: {} (fully linear, M reduced by {})", linearized_triodes_set.len(), linearized_triodes_set.len() * 2);
     }
     println!("    Generated: {} lines of Rust", line_count);
     println!();

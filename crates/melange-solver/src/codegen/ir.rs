@@ -126,6 +126,12 @@ pub struct Topology {
     /// instead of companion model (history currents in state).
     #[serde(default)]
     pub augmented_inductors: bool,
+    /// Number of devices linearized at DC OP (triodes + BJTs).
+    /// Linearized devices are stamped as small-signal conductances in G,
+    /// creating high-gain coupling chains that inflate S = A^{-1} entries
+    /// without making K = N_V * S * N_I ill-conditioned.
+    #[serde(default)]
+    pub num_linearized_devices: usize,
 }
 
 /// Solver configuration baked into the generated code.
@@ -1654,6 +1660,8 @@ impl CircuitIR {
             num_devices: kernel.num_devices,
             n_aug: mna.n_aug,
             augmented_inductors,
+            num_linearized_devices: mna.linearized_triodes.len()
+                + mna.linearized_bjts.len(),
         };
 
         let os_factor = config.oversampling_factor;
@@ -2653,6 +2661,8 @@ impl CircuitIR {
             num_devices: mna.num_devices,
             n_aug,
             augmented_inductors: true,
+            num_linearized_devices: mna.linearized_triodes.len()
+                + mna.linearized_bjts.len(),
         };
 
         let rail_mode = refine_active_set_for_audio_path(
@@ -3442,7 +3452,16 @@ impl CircuitIR {
                     dim_offset += 2;
                     nl_dev_idx += 1;
                 }
-                Element::Triode { model, .. } => {
+                Element::Triode { name, model, .. } => {
+                    // Skip linearized triodes — they're not in the nonlinear system
+                    let is_linearized = mna.is_some_and(|m| {
+                        m.linearized_triodes
+                            .iter()
+                            .any(|l| l.name.eq_ignore_ascii_case(name))
+                    });
+                    if is_linearized {
+                        continue; // Don't create a DeviceSlot, don't increment nl_dev_idx
+                    }
                     let params = Self::resolve_tube_params(netlist, model)?;
                     slots.push(DeviceSlot {
                         device_type: DeviceType::Tube,
