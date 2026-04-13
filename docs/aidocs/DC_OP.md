@@ -239,7 +239,7 @@ through `process_sample(0.0, ...)` after construction (called automatically
 from `Default` and `reset()`). This lets the DK solver settle from any residual
 mismatch between the DC OP solution and the DK steady state, and pulls
 high-gain op-amp circuits into the physically correct basin of attraction.
-Emitted from `crates/melange-solver/src/codegen/rust_emitter.rs` (grep `warmup`).
+Emitted from `crates/melange-solver/src/codegen/rust_emitter/dk_emitter.rs` (grep `warmup`).
 
 ## Expected DC OP Values (Verification)
 

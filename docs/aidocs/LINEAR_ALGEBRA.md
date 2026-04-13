@@ -77,7 +77,7 @@ lu_solve(LU, pivot, b) -> x
 **When to use**: Each NR iteration in `solve_dc_operating_point()`. O(N^2) per solve
 vs O(N^3) per inversion. LU factored once per iteration, reused for solve.
 
-### 3. Gaussian Elimination (Codegen, Inlined) — `rust_emitter.rs:generate_gauss_elim`
+### 3. Gaussian Elimination (Codegen, Inlined) — `rust_emitter/dk_solver.rs:generate_gauss_elim`
 
 Codegen emits inline Gaussian elimination with partial pivoting for the
 M-dimensional NR Jacobian. The shape of the emitted code depends on the routing
@@ -180,7 +180,7 @@ Three optimizations stack to keep this real-time:
    ~22973 dense (43× reduction). See `chord_method.md` in memory.
 
 Source: `crates/melange-solver/src/lu.rs` and the emit sites in
-`crates/melange-solver/src/codegen/rust_emitter.rs`.
+`crates/melange-solver/src/codegen/rust_emitter/nodal_emitter.rs`.
 
 ## Condition Number Estimation
 

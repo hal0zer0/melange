@@ -13,8 +13,8 @@ oscillation or divergence. Reference: SPICE3f5 `DEVpnjlim` and `DEVfetlim`.
 | `pn_vcrit()` | `crates/melange-primitives/src/nr.rs` |
 | `pnjlim()` | `crates/melange-primitives/src/nr.rs` |
 | `fetlim()` | `crates/melange-primitives/src/nr.rs` |
-| Codegen VCRIT emission (per device) | `crates/melange-solver/src/codegen/rust_emitter.rs` |
-| Codegen NR limiting (per-device dispatch + scalar α) | `crates/melange-solver/src/codegen/rust_emitter.rs` |
+| Codegen VCRIT emission (per device) | `crates/melange-solver/src/codegen/rust_emitter/dk_emitter.rs` |
+| Codegen NR limiting (per-device dispatch + scalar α) | `crates/melange-solver/src/codegen/rust_emitter/nr_helpers.rs` |
 | Self-contained template (emitted into generated code) | `crates/melange-solver/templates/rust/spice_limiting.rs.tera` |
 
 Line numbers omitted — grep the symbol names. Note that the runtime

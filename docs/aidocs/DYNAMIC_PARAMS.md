@@ -43,7 +43,7 @@ loop starts the next sample from a bias-consistent seed instead of the
 stale previous-sample state. This is gated on delta magnitude so that
 smoothed knob sweeps (per-sample deltas ≪ 0.2%) do not trigger
 mid-signal state resets. See `set_pot_N` emission in
-`rust_emitter.rs` (DK Schur + nodal paths).
+`rust_emitter/dk_emitter.rs` (DK Schur) and `rust_emitter/nodal_emitter.rs` (nodal paths).
 
 Sherman-Morrison rank-1 updates were removed in 2026-04-04 (commit
 `eaee955`). The removal was originally motivated by NR max-iter-cap
@@ -77,8 +77,8 @@ single 100k pot with a wiper that splits the resistance into two legs
 that always sum to the total. A single UI parameter (position 0.0–1.0)
 controls both legs simultaneously:
 ```
-R_cw  = pos       * (total - 2) + 1
-R_ccw = (1 - pos) * (total - 2) + 1
+R_cw  = (1 - pos) * (total - 2) + 1
+R_ccw = pos       * (total - 2) + 1
 ```
 The `+1`/`-2` keep both legs > 0 even at the extremes (avoids singular
 matrices when pos = 0 or 1). At runtime, two sequential Sherman-Morrison

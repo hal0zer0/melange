@@ -165,6 +165,14 @@ melange compile melange:stable/filters/passive-eq1a --format plugin -o my-eq
 melange analyze melange:stable/filters/passive-eq1a --pot "LF Boost=10" --switch "LF Freq=1"
 ```
 
+## Impossible Circuits
+
+A germanium transistor is just a BJT with different `.model` parameters -- higher leakage current, lower forward voltage (~0.2V vs 0.6V), lower gain. Melange doesn't care. Change `IS`, `BF`, and `NF` in your netlist and you have a germanium device. No special codepath, no approximation.
+
+This matters because NOS germanium transistors are a dwindling supply. Nobody manufactures them anymore. The stockpiles from the 1960s are finite, and matched pairs command collector prices. Building a single Fuzz Face or Tone Bender with hand-selected germanium transistors is hard enough. Building a 16-stage germanium cascade -- which melange runs at 3.4x realtime -- is not practically possible in hardware. You would need 16+ matched devices from a pool that no longer exists, and germanium's temperature drift would compound across stages into thermal instability that no amount of bias trimming can tame.
+
+In simulation, none of that applies. Every device holds its parameters permanently. You can sweep `IS` from silicon to germanium to see exactly where the character changes, lock in the values you like, and ship a plugin built on transistors that left the factory sixty years ago. The same principle extends to every device melange supports: vintage tube types with known-good plate curves, op-amps at specific supply rails, transformers with exact winding ratios. If you can write the `.model` line, you can build the circuit.
+
 ## SPICE Validation
 
 Every stable circuit is validated sample-by-sample against ngspice. This isn't "sounds close" — it's correlation coefficients and RMS error against a reference SPICE simulator used in IC design.

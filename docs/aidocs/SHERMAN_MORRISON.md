@@ -14,7 +14,7 @@ A_neg, and S*N_i via the Sherman-Morrison formula at O(N^2) cost.
 | `PotInfo` struct | `crates/melange-solver/src/mna.rs` |
 | `PotDirective` parser struct | `crates/melange-solver/src/parser.rs` |
 | `PotentiometerIR` struct | `crates/melange-solver/src/codegen/ir.rs` |
-| SM scale helper + sequential corrections | `crates/melange-solver/src/codegen/rust_emitter.rs` |
+| SM scale helper + sequential corrections | `crates/melange-solver/src/codegen/rust_emitter/dk_emitter.rs` |
 | State fields + sample-rate rebuild | `crates/melange-solver/templates/rust/state.rs.tera` |
 
 Line numbers omitted — grep the symbol name (`SmPotData`, `PotInfo`,

@@ -14,7 +14,7 @@ can't drive enough charge into the dominant-pole cap).
 
 The slew clamp is applied per-sample on the op-amp output node, AFTER the
 rail clamp in the codegen pipeline order. Implementation lives in
-`rust_emitter::CodeGenerator::emit_opamp_slew_limit` for the two nodal
+`rust_emitter::nodal_emitter::emit_opamp_slew_limit` for the two nodal
 codegen paths, plus an `opamp_slew` section in `process_sample.rs.tera`
 for the DK Schur path. See `docs/aidocs/DEVICE_MODELS.md` for the physical
 justification and emitted-code shape. The clamp is compatible with every
@@ -86,7 +86,7 @@ At heavy clip, `v_diff = v[vbias] - v[sum_out] ≈ -12 V`, so the VCCS sources `
 v[41] ≈ 2.4 A / 1e-6 S = 2.4 × 10⁶ V
 ```
 
-The chord LU produces a step of ~2.4 million volts, the global `damp_thresh = 10.0 V` step cap (`rust_emitter.rs:7121`) clips it to ±10 V from the previous iterate, and the clipped step lands in a regime where the diode either far-forward-biases or stays off — producing the **apparent** "bistable" 7 V ↔ 17 V cycle that earlier sessions misdiagnosed as two chord-LU fixed points. There is one chord LU; its predicted step is wrong by 6 OOM; the damping cap masks the magnitude error as a 2-cycle.
+The chord LU produces a step of ~2.4 million volts, the global `damp_thresh = 10.0 V` step cap (`nodal_emitter.rs`, grep `damp_thresh`) clips it to ±10 V from the previous iterate, and the clipped step lands in a regime where the diode either far-forward-biases or stays off — producing the **apparent** "bistable" 7 V ↔ 17 V cycle that earlier sessions misdiagnosed as two chord-LU fixed points. There is one chord LU; its predicted step is wrong by 6 OOM; the damping cap masks the magnitude error as a 2-cycle.
 
 The fundamental problem: row 41's diagonal (`Go_int = 1e-6`) is too small relative to its off-diagonal sources (`Gm = 0.2 S`) for any chord LU to produce a sensible step when the catch diode is in the wrong linearization regime.
 
@@ -129,7 +129,7 @@ ActiveSetBe runs the trap NR loop normally, but at the end of each sample's NR c
 
 The crucial difference from plain ActiveSet is that the BE re-solve damps any high-frequency content in the cap-coupled output path that the trap rule would otherwise amplify into a Nyquist limit cycle. Klon's C15 (4.7 µF, tone_out → out_ac) plus the surrounding R network forms a discrete-time LC resonator at exactly Nyquist when discretized with the trap rule; the BE re-solve sidesteps this by using a different discretization for the rail-engaged sample.
 
-Code: search `rust_emitter.rs` for `emit_nodal_active_set_resolve`.
+Code: search `rust_emitter/nodal_emitter.rs` for `emit_nodal_active_set_resolve`.
 
 ## How `ActiveSet` differs from `ActiveSetBe`
 
@@ -154,11 +154,11 @@ See `opamp_rail_clamp_bug.md` for the full history. This mode is kept in the enu
 | `crates/melange-solver/src/codegen/ir.rs` | 708-835 | `augment_netlist_with_boyle_diodes` (BoyleDiodes scaffolding) |
 | `crates/melange-solver/src/mna.rs` | 374 | `R_BOYLE_INT_LOAD = 1e6` (the R1 value) |
 | `crates/melange-solver/src/mna.rs` | 2847-2964 | Op-amp stamping dispatch (BoyleDiodes detection + non-Boyle linear path) |
-| `crates/melange-solver/src/codegen/rust_emitter.rs` | 5697-5749 | Trap-path mode dispatch (post-NR rail handling) |
-| `crates/melange-solver/src/codegen/rust_emitter.rs` | 5968-5997 | BE-fallback mode dispatch |
-| `crates/melange-solver/src/codegen/rust_emitter.rs` | 7376, 7843 | Residual check (BoyleDiodes-gated) |
-| `crates/melange-solver/src/codegen/rust_emitter.rs` | 6950-6968 | Adaptive refactor trigger (BoyleDiodes-gated) |
-| `crates/melange-solver/src/codegen/rust_emitter.rs` | 7121 | `damp_thresh = 10.0_f64.max(max_v * 0.05)` (the global step cap that masks BoyleDiodes overshoot) |
+| `crates/melange-solver/src/codegen/rust_emitter/nodal_emitter.rs` | grep `trap_rail` | Trap-path mode dispatch (post-NR rail handling) |
+| `crates/melange-solver/src/codegen/rust_emitter/nodal_emitter.rs` | grep `be_rail` | BE-fallback mode dispatch |
+| `crates/melange-solver/src/codegen/rust_emitter/nodal_emitter.rs` | grep `residual_check` | Residual check (BoyleDiodes-gated) |
+| `crates/melange-solver/src/codegen/rust_emitter/nodal_emitter.rs` | grep `adaptive_refactor` | Adaptive refactor trigger (BoyleDiodes-gated) |
+| `crates/melange-solver/src/codegen/rust_emitter/nodal_emitter.rs` | grep `damp_thresh` | `damp_thresh = 10.0_f64.max(max_v * 0.05)` (the global step cap that masks BoyleDiodes overshoot) |
 
 ## Memory cross-references
 
