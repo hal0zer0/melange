@@ -740,7 +740,10 @@ impl RustEmitter {
             code.push_str(
                 "/// Saturation update interval (samples). L_eff recomputed every N samples.\n\
                  /// Saturation follows the signal envelope (~ms timescale), not individual samples.\n\
-                 pub const SAT_UPDATE_INTERVAL: u32 = 32;\n\n",
+                 pub const SAT_UPDATE_INTERVAL: u32 = 32;\n\
+                 /// Full matrix rebuild every N SM updates to eliminate accumulated drift.\n\
+                 /// O(N²) SM between resyncs, O(N³) rebuild at resync. 16 keeps drift negligible.\n\
+                 pub const SAT_RESYNC_INTERVAL: u32 = 16;\n\n",
             );
         }
 
@@ -1110,7 +1113,9 @@ impl RustEmitter {
         // Saturation decimation counter
         if has_any_saturation {
             code.push_str("    /// Decimation counter for saturation updates (counts down to 0)\n");
-            code.push_str("    pub sat_update_counter: u32,\n\n");
+            code.push_str("    pub sat_update_counter: u32,\n");
+            code.push_str("    /// SM update counter; triggers full rebuild at SAT_RESYNC_INTERVAL\n");
+            code.push_str("    pub sat_resync_counter: u32,\n\n");
         }
 
         // Saturating inductor state fields
@@ -1358,6 +1363,7 @@ impl RustEmitter {
         // Saturation decimation counter: 0 triggers update on first sample
         if has_any_saturation {
             code.push_str("            sat_update_counter: 0,\n");
+            code.push_str("            sat_resync_counter: 0,\n");
         }
         // Saturating inductor state: start at nominal L
         for (idx, _) in ir.saturating_inductors.iter().enumerate() {
@@ -1544,6 +1550,7 @@ impl RustEmitter {
         // Reset saturation counter
         if has_any_saturation {
             code.push_str("        self.sat_update_counter = 0;\n");
+            code.push_str("        self.sat_resync_counter = 0;\n");
         }
         // Reset saturating inductor L_eff to nominal
         for (idx, _) in ir.saturating_inductors.iter().enumerate() {
@@ -2365,12 +2372,10 @@ impl RustEmitter {
             code.push_str("        state.sat_update_counter = SAT_UPDATE_INTERVAL;\n");
         }
 
-        // Saturating inductor L(I) update via Sherman-Morrison rank-1
+        // Saturating inductor L(I) update: compute L_eff, patch c_work, rebuild
         if !ir.saturating_inductors.is_empty() {
-            code.push_str("        // Saturating inductor update: L_eff = L0 / cosh^2(I / Isat)\n");
-            code.push_str("        // Sherman-Morrison rank-1 correction to S, K, S_NI, A_neg\n");
-            code.push_str("        {\n");
-            code.push_str("        let alpha = 2.0 * state.current_sample_rate;\n");
+            code.push_str("        // Saturating inductors: L_eff = L0 / cosh^2(I / Isat)\n");
+            code.push_str("        let mut sat_changed = false;\n");
             for (idx, _si) in ir.saturating_inductors.iter().enumerate() {
                 code.push_str(&format!(
                     "        {{ // Saturating inductor {idx}\n\
@@ -2378,52 +2383,21 @@ impl RustEmitter {
                      \x20           let x = i_branch / SAT_IND_{idx}_ISAT;\n\
                      \x20           let cosh_x = x.cosh();\n\
                      \x20           let l_eff = (SAT_IND_{idx}_L0 / (cosh_x * cosh_x)).max(SAT_IND_{idx}_L0 * 0.01);\n\
-                     \x20           let delta_l = l_eff - state.sat_ind_{idx}_l_eff;\n\
-                     \x20           if delta_l.abs() > SAT_IND_{idx}_L0 * 1e-4 {{\n\
-                     \x20               let k = SAT_IND_{idx}_AUG_ROW;\n\
-                     \x20               let delta_a = alpha * delta_l;\n\
-                     \x20               let scale = delta_a / (1.0 + delta_a * state.s[k][k]);\n\
-                     \x20               let mut s_col_k = [0.0f64; N];\n\
-                     \x20               let mut s_row_k = [0.0f64; N];\n\
-                     \x20               for i in 0..N {{ s_col_k[i] = state.s[i][k]; s_row_k[i] = state.s[k][i]; }}\n\
-                     \x20               for i in 0..N {{\n\
-                     \x20                   let sc = scale * s_col_k[i];\n\
-                     \x20                   for j in 0..N {{ state.s[i][j] -= sc * s_row_k[j]; }}\n\
-                     \x20               }}\n\
-                     \x20               state.a_neg[k][k] += alpha * delta_l;\n",
-                ));
-                if m > 0 {
-                    code.push_str(
-                        "               let mut nv_su = [0.0f64; M];\n\
-                         \x20               let mut u_ni = [0.0f64; M];\n\
-                         \x20               for i in 0..M {\n\
-                         \x20                   for p in 0..N { nv_su[i] += N_V[i][p] * s_col_k[p]; }\n\
-                         \x20                   for p in 0..N { u_ni[i] += s_row_k[p] * N_I[p][i]; }\n\
-                         \x20               }\n\
-                         \x20               for i in 0..M {\n\
-                         \x20                   let sc = scale * nv_su[i];\n\
-                         \x20                   for j in 0..M { state.k[i][j] -= sc * u_ni[j]; }\n\
-                         \x20               }\n\
-                         \x20               for i in 0..N {\n\
-                         \x20                   let sc = scale * s_col_k[i];\n\
-                         \x20                   for j in 0..M { state.s_ni[i][j] -= sc * u_ni[j]; }\n\
-                         \x20               }\n",
-                    );
-                }
-                code.push_str(&format!(
-                    "               state.sat_ind_{idx}_l_eff = l_eff;\n\
+                     \x20           if (l_eff - state.sat_ind_{idx}_l_eff).abs() > SAT_IND_{idx}_L0 * 1e-4 {{\n\
+                     \x20               state.c_work[SAT_IND_{idx}_AUG_ROW][SAT_IND_{idx}_AUG_ROW] = l_eff;\n\
+                     \x20               state.sat_ind_{idx}_l_eff = l_eff;\n\
+                     \x20               sat_changed = true;\n\
                      \x20           }}\n\
                      \x20       }}\n",
                 ));
             }
-            code.push_str("    }\n\n");
         }
 
-        // Saturating coupled inductor per-sample update: 2×2 eigendecomposition + 2 SM rank-1
+        // Saturating coupled inductors: compute L_eff per winding, patch c_work
         if !ir.saturating_coupled.is_empty() {
-            code.push_str("    // Saturating coupled inductors: 2x2 eigendecomposition + 2 SM rank-1\n");
-            code.push_str("    {\n");
-            code.push_str("        let alpha = 2.0 * state.current_sample_rate;\n");
+            if ir.saturating_inductors.is_empty() {
+                code.push_str("        let mut sat_changed = false;\n");
+            }
             for (idx, _sc) in ir.saturating_coupled.iter().enumerate() {
                 code.push_str(&format!(
                     "        {{ // Coupled pair {idx}\n\
@@ -2434,211 +2408,142 @@ impl RustEmitter {
                      \x20           let c2 = (i2 / SAT_CI_{idx}_L2_ISAT).cosh();\n\
                      \x20           let l2_eff = (SAT_CI_{idx}_L2_L0 / (c2 * c2)).max(SAT_CI_{idx}_L2_L0 * 0.01);\n\
                      \x20           let m_eff = SAT_CI_{idx}_COUPLING * (l1_eff * l2_eff).sqrt();\n\
-                     \x20           let dl1 = l1_eff - state.sat_ci_{idx}_l1_eff;\n\
-                     \x20           let dl2 = l2_eff - state.sat_ci_{idx}_l2_eff;\n\
-                     \x20           let dm = m_eff - state.sat_ci_{idx}_m_eff;\n\
-                     \x20           if dl1.abs() > SAT_CI_{idx}_L1_L0 * 1e-4 || dl2.abs() > SAT_CI_{idx}_L2_L0 * 1e-4 || dm.abs() > 1e-6 {{\n\
-                     \x20               let k1 = SAT_CI_{idx}_K1;\n\
-                     \x20               let k2 = SAT_CI_{idx}_K2;\n\
-                     \x20               // 2x2 eigendecomposition of delta block\n\
-                     \x20               let a11 = alpha * dl1;\n\
-                     \x20               let a22 = alpha * dl2;\n\
-                     \x20               let a12 = alpha * dm;\n\
-                     \x20               let tr = a11 + a22;\n\
-                     \x20               let disc = ((a11 - a22) * (a11 - a22) + 4.0 * a12 * a12).sqrt();\n\
-                     \x20               let lam1 = (tr + disc) * 0.5;\n\
-                     \x20               let lam2 = (tr - disc) * 0.5;\n\
-                     \x20               // Eigenvectors: for 2x2 [[a11,a12],[a12,a22]], eigvec for lam is [a12, lam-a11]\n\
-                     \x20               // Apply SM for each eigenpair with |lam| > eps\n",
-                ));
-                // Emit the two SM rank-1 updates as a macro-like block
-                for eig_idx in 0..2 {
-                    let lam = if eig_idx == 0 { "lam1" } else { "lam2" };
-                    code.push_str(&format!(
-                        "               if {lam}.abs() > 1e-10 {{\n\
-                         \x20                   // Eigenvector: [a12, {lam}-a11], normalize\n\
-                         \x20                   let ev_a = a12;\n\
-                         \x20                   let ev_b = {lam} - a11;\n\
-                         \x20                   let norm = (ev_a * ev_a + ev_b * ev_b).sqrt();\n\
-                         \x20                   if norm > 1e-30 {{\n\
-                         \x20                       let va = ev_a / norm;\n\
-                         \x20                       let vb = ev_b / norm;\n\
-                         \x20                       // S*v = va * S[:,k1] + vb * S[:,k2]\n\
-                         \x20                       let mut sv = [0.0f64; N];\n\
-                         \x20                       let mut vts = [0.0f64; N];\n\
-                         \x20                       for i in 0..N {{\n\
-                         \x20                           sv[i] = va * state.s[i][k1] + vb * state.s[i][k2];\n\
-                         \x20                           vts[i] = va * state.s[k1][i] + vb * state.s[k2][i];\n\
-                         \x20                       }}\n\
-                         \x20                       let vtsv = va * sv[k1] + vb * sv[k2];\n\
-                         \x20                       let scale = {lam} / (1.0 + {lam} * vtsv);\n\
-                         \x20                       // SM: S -= scale * sv * vts\n\
-                         \x20                       for i in 0..N {{\n\
-                         \x20                           let sc = scale * sv[i];\n\
-                         \x20                           for j in 0..N {{ state.s[i][j] -= sc * vts[j]; }}\n\
-                         \x20                       }}\n",
-                    ));
-                    // K and S_NI correction
-                    if m > 0 {
-                        code.push_str(
-                            "                       let mut nv_sv = [0.0f64; M];\n\
-                             \x20                       let mut vts_ni = [0.0f64; M];\n\
-                             \x20                       for i in 0..M {\n\
-                             \x20                           for p in 0..N { nv_sv[i] += N_V[i][p] * sv[p]; }\n\
-                             \x20                           for p in 0..N { vts_ni[i] += vts[p] * N_I[p][i]; }\n\
-                             \x20                       }\n\
-                             \x20                       for i in 0..M {\n\
-                             \x20                           let sc = scale * nv_sv[i];\n\
-                             \x20                           for j in 0..M { state.k[i][j] -= sc * vts_ni[j]; }\n\
-                             \x20                       }\n\
-                             \x20                       for i in 0..N {\n\
-                             \x20                           let sc = scale * sv[i];\n\
-                             \x20                           for j in 0..M { state.s_ni[i][j] -= sc * vts_ni[j]; }\n\
-                             \x20                       }\n",
-                        );
-                    }
-                    code.push_str(
-                        "                   }\n\
-                         \x20               }\n",
-                    );
-                }
-                code.push_str(&format!(
-                    "               // Update A_neg\n\
-                     \x20               state.a_neg[k1][k1] += alpha * dl1;\n\
-                     \x20               state.a_neg[k2][k2] += alpha * dl2;\n\
-                     \x20               state.a_neg[k1][k2] += alpha * dm;\n\
-                     \x20               state.a_neg[k2][k1] += alpha * dm;\n\
+                     \x20           if (l1_eff - state.sat_ci_{idx}_l1_eff).abs() > SAT_CI_{idx}_L1_L0 * 1e-4 || (l2_eff - state.sat_ci_{idx}_l2_eff).abs() > SAT_CI_{idx}_L2_L0 * 1e-4 || (m_eff - state.sat_ci_{idx}_m_eff).abs() > 1e-6 {{\n\
+                     \x20               state.c_work[SAT_CI_{idx}_K1][SAT_CI_{idx}_K1] = l1_eff;\n\
+                     \x20               state.c_work[SAT_CI_{idx}_K2][SAT_CI_{idx}_K2] = l2_eff;\n\
+                     \x20               state.c_work[SAT_CI_{idx}_K1][SAT_CI_{idx}_K2] = m_eff;\n\
+                     \x20               state.c_work[SAT_CI_{idx}_K2][SAT_CI_{idx}_K1] = m_eff;\n\
                      \x20               state.sat_ci_{idx}_l1_eff = l1_eff;\n\
                      \x20               state.sat_ci_{idx}_l2_eff = l2_eff;\n\
                      \x20               state.sat_ci_{idx}_m_eff = m_eff;\n\
+                     \x20               sat_changed = true;\n\
                      \x20           }}\n\
                      \x20       }}\n",
                 ));
             }
-            code.push_str("    }\n\n");
         }
 
-        // Saturating transformer groups: W² elementary SM rank-1 updates
+        // Saturating transformer groups: compute L_eff per winding, patch c_work
         for (idx, sg) in ir.saturating_xfmr_groups.iter().enumerate() {
             let w = sg.num_windings;
-            code.push_str(&format!(
-                "    // Saturating transformer group {idx} ({name}, {w} windings)\n\
-                 \x20   {{\n\
-                 \x20       let alpha = 2.0 * state.current_sample_rate;\n\
-                 \x20       let w = SAT_XG_{idx}_W;\n\
-                 \x20       // Compute effective inductances per winding\n\
-                 \x20       let mut l_eff = [0.0f64; SAT_XG_{idx}_W];\n\
-                 \x20       let mut any_changed = false;\n\
-                 \x20       for wi in 0..w {{\n\
-                 \x20           let i_branch = state.v_prev[SAT_XG_{idx}_ROWS[wi]];\n\
-                 \x20           let x = i_branch / SAT_XG_{idx}_ISAT[wi];\n\
-                 \x20           let c = x.cosh();\n\
-                 \x20           l_eff[wi] = (SAT_XG_{idx}_L0[wi] / (c * c)).max(SAT_XG_{idx}_L0[wi] * 0.01);\n\
-                 \x20           if (l_eff[wi] - state.sat_xg_{idx}_l_eff[wi]).abs() > SAT_XG_{idx}_L0[wi] * 1e-4 {{\n\
-                 \x20               any_changed = true;\n\
-                 \x20           }}\n\
-                 \x20       }}\n\
-                 \x20       if any_changed {{\n\
-                 \x20           // Compute new mutual inductance matrix\n\
-                 \x20           let mut m_new = [0.0f64; SAT_XG_{idx}_W * SAT_XG_{idx}_W];\n\
-                 \x20           for i in 0..w {{\n\
-                 \x20               for j in 0..w {{\n\
-                 \x20                   m_new[i * w + j] = SAT_XG_{idx}_KAPPA[i * w + j] * (l_eff[i] * l_eff[j]).sqrt();\n\
-                 \x20               }}\n\
-                 \x20           }}\n\
-                 \x20           // Apply W diagonal SM rank-1 updates\n\
-                 \x20           for wi in 0..w {{\n\
-                 \x20               let dl = m_new[wi * w + wi] - state.sat_xg_{idx}_m_eff[wi * w + wi];\n\
-                 \x20               if dl.abs() > 1e-10 {{\n\
-                 \x20                   let k = SAT_XG_{idx}_ROWS[wi];\n\
-                 \x20                   let delta_a = alpha * dl;\n\
-                 \x20                   let scale = delta_a / (1.0 + delta_a * state.s[k][k]);\n\
-                 \x20                   let mut s_col = [0.0f64; N];\n\
-                 \x20                   let mut s_row = [0.0f64; N];\n\
-                 \x20                   for p in 0..N {{ s_col[p] = state.s[p][k]; s_row[p] = state.s[k][p]; }}\n\
-                 \x20                   for p in 0..N {{\n\
-                 \x20                       let sc = scale * s_col[p];\n\
-                 \x20                       for q in 0..N {{ state.s[p][q] -= sc * s_row[q]; }}\n\
-                 \x20                   }}\n",
-                name = sg.name,
-            ));
-            // K and S_NI diagonal correction
-            if m > 0 {
-                code.push_str(&format!(
-                    "                   let mut nv_sv = [0.0f64; M];\n\
-                     \x20                   let mut vts_ni = [0.0f64; M];\n\
-                     \x20                   for mi in 0..M {{\n\
-                     \x20                       for p in 0..N {{ nv_sv[mi] += N_V[mi][p] * s_col[p]; }}\n\
-                     \x20                       for p in 0..N {{ vts_ni[mi] += s_row[p] * N_I[p][mi]; }}\n\
-                     \x20                   }}\n\
-                     \x20                   for mi in 0..M {{\n\
-                     \x20                       let sc = scale * nv_sv[mi];\n\
-                     \x20                       for mj in 0..M {{ state.k[mi][mj] -= sc * vts_ni[mj]; }}\n\
-                     \x20                   }}\n\
-                     \x20                   for p in 0..N {{\n\
-                     \x20                       let sc = scale * s_col[p];\n\
-                     \x20                       for mi in 0..M {{ state.s_ni[p][mi] -= sc * vts_ni[mi]; }}\n\
-                     \x20                   }}\n",
-                ));
+            if ir.saturating_inductors.is_empty() && ir.saturating_coupled.is_empty() && idx == 0 {
+                code.push_str("        let mut sat_changed = false;\n");
             }
             code.push_str(&format!(
-                "               }}\n\
-                 \x20           }}\n\
-                 \x20           // Apply off-diagonal SM rank-1 updates (non-symmetric: u=e_ki, v=e_kj)\n\
+                "        {{ // Transformer group {idx} ({name}, {w} windings)\n\
+                 \x20           let w = SAT_XG_{idx}_W;\n\
+                 \x20           let mut l_eff = [0.0f64; SAT_XG_{idx}_W];\n\
+                 \x20           let mut any_changed = false;\n\
                  \x20           for wi in 0..w {{\n\
-                 \x20               for wj in 0..w {{\n\
-                 \x20                   if wi == wj {{ continue; }}\n\
-                 \x20                   let dm = m_new[wi * w + wj] - state.sat_xg_{idx}_m_eff[wi * w + wj];\n\
-                 \x20                   if dm.abs() > 1e-10 {{\n\
-                 \x20                       let ki = SAT_XG_{idx}_ROWS[wi];\n\
-                 \x20                       let kj = SAT_XG_{idx}_ROWS[wj];\n\
-                 \x20                       let delta_a = alpha * dm;\n\
-                 \x20                       // General SM: (A + delta*e_i*e_j^T)^-1 = S - delta*S*e_i*e_j^T*S / (1+delta*e_j^T*S*e_i)\n\
-                 \x20                       // = S - delta * S[:,ki] * S[kj,:] / (1 + delta * S[kj][ki])\n\
-                 \x20                       let scale = delta_a / (1.0 + delta_a * state.s[kj][ki]);\n\
-                 \x20                       let mut s_col_i = [0.0f64; N];\n\
-                 \x20                       let mut s_row_j = [0.0f64; N];\n\
-                 \x20                       for p in 0..N {{ s_col_i[p] = state.s[p][ki]; s_row_j[p] = state.s[kj][p]; }}\n\
-                 \x20                       for p in 0..N {{\n\
-                 \x20                           let sc = scale * s_col_i[p];\n\
-                 \x20                           for q in 0..N {{ state.s[p][q] -= sc * s_row_j[q]; }}\n\
-                 \x20                       }}\n",
+                 \x20               let i_branch = state.v_prev[SAT_XG_{idx}_ROWS[wi]];\n\
+                 \x20               let x = i_branch / SAT_XG_{idx}_ISAT[wi];\n\
+                 \x20               let c = x.cosh();\n\
+                 \x20               l_eff[wi] = (SAT_XG_{idx}_L0[wi] / (c * c)).max(SAT_XG_{idx}_L0[wi] * 0.01);\n\
+                 \x20               if (l_eff[wi] - state.sat_xg_{idx}_l_eff[wi]).abs() > SAT_XG_{idx}_L0[wi] * 1e-4 {{\n\
+                 \x20                   any_changed = true;\n\
+                 \x20               }}\n\
+                 \x20           }}\n\
+                 \x20           if any_changed {{\n\
+                 \x20               let mut m_new = [0.0f64; SAT_XG_{idx}_W * SAT_XG_{idx}_W];\n\
+                 \x20               for i in 0..w {{\n\
+                 \x20                   for j in 0..w {{\n\
+                 \x20                       m_new[i * w + j] = SAT_XG_{idx}_KAPPA[i * w + j] * (l_eff[i] * l_eff[j]).sqrt();\n\
+                 \x20                   }}\n\
+                 \x20               }}\n\
+                 \x20               for i in 0..w {{\n\
+                 \x20                   for j in 0..w {{\n\
+                 \x20                       state.c_work[SAT_XG_{idx}_ROWS[i]][SAT_XG_{idx}_ROWS[j]] = m_new[i * w + j];\n\
+                 \x20                   }}\n\
+                 \x20               }}\n\
+                 \x20               state.sat_xg_{idx}_l_eff = l_eff;\n\
+                 \x20               state.sat_xg_{idx}_m_eff = m_new;\n\
+                 \x20               sat_changed = true;\n\
+                 \x20           }}\n\
+                 \x20       }}\n",
+                name = sg.name,
             ));
-            // K and S_NI off-diagonal correction
+        }
+
+        // SM rank-1 update for each changed uncoupled inductor (O(N²) per inductor)
+        // c_work already patched above; SM updates S, K, S_NI, A_neg in-place.
+        // Every SAT_RESYNC_INTERVAL SM updates, do a full O(N³) rebuild from c_work.
+        if has_any_saturation {
+            code.push_str("        if sat_changed {\n");
+            code.push_str("            state.sat_resync_counter += 1;\n");
+            code.push_str("            if state.sat_resync_counter >= SAT_RESYNC_INTERVAL {\n");
+            code.push_str("                state.sat_resync_counter = 0;\n");
+            code.push_str("                state.rebuild_matrices(state.current_sample_rate);\n");
+            code.push_str("            } else {\n");
+            code.push_str("                // SM rank-1 update: O(N²) per changed diagonal entry\n");
+            code.push_str("                let alpha = 2.0 * state.current_sample_rate;\n");
+        }
+
+        // Emit SM for each uncoupled saturating inductor
+        for (idx, _si) in ir.saturating_inductors.iter().enumerate() {
+            code.push_str(&format!(
+                "                {{ // SM for inductor {idx}\n\
+                 \x20                   let k = SAT_IND_{idx}_AUG_ROW;\n\
+                 \x20                   let old_l = state.sat_ind_{idx}_l_eff; // already updated above\n\
+                 \x20                   // delta_a is how much A[k][k] changed\n\
+                 \x20                   // We need the delta from what the matrices currently think to what l_eff is now.\n\
+                 \x20                   // Since c_work was just patched, but matrices haven't been rebuilt,\n\
+                 \x20                   // the delta is alpha * (new_l - old_l_that_matrices_know).\n\
+                 \x20                   // The matrices' last known l is c_work BEFORE we patched it,\n\
+                 \x20                   // but we already patched c_work. Use the tracking: old value is\n\
+                 \x20                   // what sat_ind_N_l_eff WAS before the update, but we already updated it.\n\
+                 \x20                   // We need to track the pre-update value. Recompute delta from A_neg.\n\
+                 \x20                   // A_neg[k][k] = alpha * C[k][k] - G[k][k], so current matrix has\n\
+                 \x20                   // A[k][k] = G[k][k] + alpha * old_C, new A[k][k] = G[k][k] + alpha * new_C\n\
+                 \x20                   // delta_a = alpha * (new_C - old_C) = alpha * (l_eff - l_eff_before_patch)\n\
+                 \x20                   // But we already updated sat_ind_N_l_eff. We know c_work was patched.\n\
+                 \x20                   // Simple: reconstruct delta from a_neg.\n\
+                 \x20                   // Actually: the simplest approach is to compute delta_a from\n\
+                 \x20                   // the difference between new A[k][k] and current A[k][k]:\n\
+                 \x20                   let new_a_kk = state.g_work[k][k] + alpha * state.c_work[k][k];\n\
+                 \x20                   let delta_a = new_a_kk - state.a[k][k];\n\
+                 \x20                   if delta_a.abs() > 1e-15 {{\n\
+                 \x20                       let scale = delta_a / (1.0 + delta_a * state.s[k][k]);\n\
+                 \x20                       let mut s_col = [0.0f64; N];\n\
+                 \x20                       let mut s_row = [0.0f64; N];\n\
+                 \x20                       for i in 0..N {{ s_col[i] = state.s[i][k]; s_row[i] = state.s[k][i]; }}\n\
+                 \x20                       for i in 0..N {{\n\
+                 \x20                           let sc = scale * s_col[i];\n\
+                 \x20                           for j in 0..N {{ state.s[i][j] -= sc * s_row[j]; }}\n\
+                 \x20                       }}\n\
+                 \x20                       state.a[k][k] = new_a_kk;\n\
+                 \x20                       state.a_neg[k][k] = alpha * state.c_work[k][k] - state.g_work[k][k];\n",
+            ));
             if m > 0 {
                 code.push_str(
-                    "                       let mut nv_sv = [0.0f64; M];\n\
-                     \x20                       let mut vts_ni = [0.0f64; M];\n\
-                     \x20                       for mi in 0..M {\n\
-                     \x20                           for p in 0..N { nv_sv[mi] += N_V[mi][p] * s_col_i[p]; }\n\
-                     \x20                           for p in 0..N { vts_ni[mi] += s_row_j[p] * N_I[p][mi]; }\n\
+                    "                       let mut nv_su = [0.0f64; M];\n\
+                     \x20                       let mut u_ni = [0.0f64; M];\n\
+                     \x20                       for i in 0..M {\n\
+                     \x20                           for p in 0..N { nv_su[i] += N_V[i][p] * s_col[p]; }\n\
+                     \x20                           for p in 0..N { u_ni[i] += s_row[p] * N_I[p][i]; }\n\
                      \x20                       }\n\
-                     \x20                       for mi in 0..M {\n\
-                     \x20                           let sc = scale * nv_sv[mi];\n\
-                     \x20                           for mj in 0..M { state.k[mi][mj] -= sc * vts_ni[mj]; }\n\
+                     \x20                       for i in 0..M {\n\
+                     \x20                           let sc = scale * nv_su[i];\n\
+                     \x20                           for j in 0..M { state.k[i][j] -= sc * u_ni[j]; }\n\
                      \x20                       }\n\
-                     \x20                       for p in 0..N {\n\
-                     \x20                           let sc = scale * s_col_i[p];\n\
-                     \x20                           for mi in 0..M { state.s_ni[p][mi] -= sc * vts_ni[mi]; }\n\
+                     \x20                       for i in 0..N {\n\
+                     \x20                           let sc = scale * s_col[i];\n\
+                     \x20                           for j in 0..M { state.s_ni[i][j] -= sc * u_ni[j]; }\n\
                      \x20                       }\n",
                 );
             }
-            code.push_str(&format!(
-                "                   }}\n\
-                 \x20               }}\n\
-                 \x20           }}\n\
-                 \x20           // Update A_neg\n\
-                 \x20           for i in 0..w {{\n\
-                 \x20               for j in 0..w {{\n\
-                 \x20                   let dm = m_new[i * w + j] - state.sat_xg_{idx}_m_eff[i * w + j];\n\
-                 \x20                   state.a_neg[SAT_XG_{idx}_ROWS[i]][SAT_XG_{idx}_ROWS[j]] += alpha * dm;\n\
-                 \x20               }}\n\
-                 \x20           }}\n\
-                 \x20           state.sat_xg_{idx}_l_eff = l_eff;\n\
-                 \x20           state.sat_xg_{idx}_m_eff = m_new;\n\
-                 \x20       }}\n\
-                 \x20   }}\n\n",
-            ));
+            code.push_str("                   }\n                }\n");
+        }
+
+        // TODO: SM for coupled inductors and transformer groups would go here.
+        // For now, those types trigger a full rebuild (they're rarer and more complex).
+        if !ir.saturating_coupled.is_empty() || !ir.saturating_xfmr_groups.is_empty() {
+            code.push_str("                // Coupled/transformer: full rebuild (complex multi-entry update)\n");
+            code.push_str("                state.rebuild_matrices(state.current_sample_rate);\n");
+        }
+
+        if has_any_saturation {
+            code.push_str("            }\n"); // close else branch
+            code.push_str("        }\n"); // close if sat_changed
         }
 
         // Close decimation block
@@ -2646,7 +2551,6 @@ impl RustEmitter {
             code.push_str("    }\n");
             code.push_str("    state.sat_update_counter = state.sat_update_counter.saturating_sub(1);\n\n");
         }
-
         // Step 1: Build RHS = rhs_const + A_neg * v_prev + N_i * i_nl_prev + input (sparse)
         code.push_str(
             "    // Step 1: Build RHS (sparse A_neg * v_prev + sparse N_i * i_nl_prev)\n",

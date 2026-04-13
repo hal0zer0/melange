@@ -3493,15 +3493,26 @@ impl CircuitIR {
                     if is_grid_off {
                         params.kind = crate::device_types::TubeKind::SharpPentodeGridOff;
                     }
+                    let vg2k_frozen = if is_grid_off {
+                        mna.and_then(|m| {
+                            if nl_dev_idx < m.nonlinear_devices.len() {
+                                let v = m.nonlinear_devices[nl_dev_idx].vg2k_frozen;
+                                if v.abs() > 1e-15 { Some(v) } else { None }
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap_or(0.0)
+                    } else {
+                        0.0
+                    };
                     slots.push(DeviceSlot {
                         device_type: DeviceType::Tube,
                         start_idx: dim_offset,
                         dimension: dim,
                         params: DeviceParams::Tube(params),
                         has_internal_mna_nodes: false,
-                        // vg2k_frozen is populated by detect_grid_off_pentodes
-                        // after the MNA rebuild via a post-processing pass.
-                        vg2k_frozen: 0.0,
+                        vg2k_frozen,
                     });
                     dim_offset += dim;
                     nl_dev_idx += 1;
