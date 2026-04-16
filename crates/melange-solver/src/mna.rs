@@ -378,6 +378,14 @@ pub struct OpampInfo {
     /// without `SR=` in their .model get byte-identical generated code to the
     /// pre-slew-rate behaviour.
     pub sr: f64,
+    /// User override for the transient-NR AOL cap.
+    /// `INFINITY` (default) defers to the auto-detect heuristic in
+    /// `crates/melange-solver/src/codegen/ir.rs::effective_aol_cap`. Set finite
+    /// to force a specific cap; set to `oa.aol` (or larger) to fully disable
+    /// the cap on this op-amp; set to a small value (e.g. 1000) to force the
+    /// cap on a circuit the auto-detect missed. Only consulted in the codegen
+    /// path; runtime DC OP uses its own `AOL_DC_MAX = 1000` cap.
+    pub aol_transient_cap: f64,
     /// Boyle internal gain node index (1-indexed, 0 = none).
     /// No longer used with IIR op-amp model (always 0).
     pub n_internal_idx: usize,
@@ -2261,6 +2269,7 @@ impl MnaBuilder {
                             "SR" => oa.sr = *val * 1.0e6,
                             "VOH_DROP" => oa.voh_drop = *val,
                             "VOL_DROP" => oa.vol_drop = *val,
+                            "AOL_TRANSIENT_CAP" => oa.aol_transient_cap = *val,
                             _ => log::warn!(
                                 ".model {}: unrecognized parameter '{}' (ignored)",
                                 m.name,
@@ -4229,6 +4238,7 @@ impl MnaBuilder {
                     // parts should override this in their .model OA() entry.
                     voh_drop: 1.5,
                     vol_drop: 1.5,
+                    aol_transient_cap: f64::INFINITY,
                     n_internal_idx: 0,
                     iir_c_dom: 0.0,
                     n_int_idx: 0,

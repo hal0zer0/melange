@@ -60,7 +60,7 @@ the underlying circuits stabilize.
   - Tube Koren: no space-charge, no transit-time effects
   - JFET/MOSFET subthreshold: hardcoded 2×VT slope (real devices: 60-120 mV/decade)
   - VCA noise_floor field exists but unused
-  - Precision rectifier transient: main trap NR converges on device nodes but VCCS back-substitution contaminates linear neighbor nodes (max 1.18 billion V at cv_to_vcas). Sub-step never reached (substep_count=0). ActiveSet re-solve LU fails with 12 pinned columns. Contamination doesn't affect audio output (peak unchanged) but internal state is non-physical. G-level Gm cap eliminates contamination but kills audio-path op-amp gain. Selective cap or post-LU neighbor correction needed. Peak too hot at amp≥1.0 (sidechain tracking, separate issue). (INVESTIGATED 2026-04-16)
+  - Precision rectifier transient: VCCS back-substitution contamination at cap-only nodes downstream of high-AOL op-amps. Fixed via selective Gm cap on op-amps matching Rule D' (n_plus on non-zero DC rail AND diode connects output→inverting input through R-only path). 4kbuscomp `max_abs_v_prev`: 1.18B → 15V. User override via `.model OA(AOL_TRANSIENT_CAP=N)`. Klon and other working circuits unaffected (Rule D' correctly excludes them). (FIXED 2026-04-16)
 
 ## Codegen Device Support
 

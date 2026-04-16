@@ -707,6 +707,44 @@ card:
 - **Parser validation**: `SR <= 0` is rejected at parse time with a
   `ParseError`.
 
+### Selective AOL Cap for Transient NR (`AOL_TRANSIENT_CAP`)
+
+High-AOL op-amps in precision-rectifier topologies cause LU back-substitution
+to compute extreme intermediate voltages (400 kV+) at the op-amp output row
+before the post-solve rail clamp can fire. These extreme values propagate to
+neighboring linear nodes via fill-in, contaminating `v_prev` and accumulating
+across samples (4kbuscomp originally hit 1.18 BILLION volts at `cv_to_vcas`).
+
+melange auto-detects this topology (Rule D' in `crates/melange-solver/src/codegen/ir.rs::opamp_is_sidechain_rectifier`)
+and caps the effective AOL to 1000 in the constant G matrix for matching op-amps.
+The cap is baked into the emitted G/A/A_neg constants — zero runtime cost.
+
+**Auto-detect rule** (both must hold):
+1. `n_plus` is connected to a non-zero DC voltage source (ground does not count;
+   a `vbias`-style mid-rail does, but soft-clipper topologies that bias `n_plus`
+   to ground are correctly excluded).
+2. A diode connects the op-amp output to the inverting input, optionally through
+   a pure-resistor path (handles full-wave summing rectifiers).
+
+**User override**: `.model OA_TL074 OA(... AOL_TRANSIENT_CAP=1000)` forces a
+specific cap on the model's op-amps regardless of Rule D'. Set to a value `≥ AOL`
+to disable the cap on a false positive.
+
+```
+.model OA_TL074 OA(AOL=200000 ROUT=75 VCC=12 VEE=-12 AOL_TRANSIENT_CAP=1000)
+```
+
+- **Default**: `f64::INFINITY` (defer to auto-detect; auto-detect itself defaults
+  to no cap unless Rule D' fires).
+- **Effect**: subtracts `delta_Gm = (AOL - AOL_cap) / r_out` from the VCCS stamp,
+  reducing the effective op-amp transconductance from ~Gm = AOL/r_out down to
+  Gm_cap = AOL_cap/r_out. Closed-loop gain at frequencies well below GBW is set
+  by the feedback network and is largely unaffected; precision-rectifier behavior
+  (output saturates to a rail when input crosses the comparator threshold) still
+  works because saturation is set by the ±VCC/VEE clamp, not by AOL.
+- **Diagnostic**: when the cap fires at codegen time, an `INFO` log line is emitted:
+  `"Selective Gm cap on op-amp U8: AOL 200000 → 1000 (delta_Gm=1990.0 S)"`.
+
 ## VCA (Voltage-Controlled Amplifier)
 
 ### Blackmer Model (THAT 2180 / DBX 2150)

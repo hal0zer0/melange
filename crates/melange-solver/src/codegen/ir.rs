@@ -1070,18 +1070,147 @@ pub struct OpampIR {
 /// keeps the LU back-solve from producing extreme voltages (400kV+) at
 /// op-amp outputs that contaminate neighboring nodes via back-substitution
 /// before the post-solve rail clamp fires.
-const AOL_SUB_MAX: f64 = 1000.0;
+pub(crate) const AOL_SUB_MAX: f64 = 1000.0;
+
+/// Returns `true` when the op-amp's non-inverting input sits on a non-zero
+/// DC voltage source (a "DC rail"). Ground is intentionally excluded so
+/// soft-clipper topologies (e.g. Klon Centaur, where the clipping op-amp's
+/// `n_plus` is ground) are NOT classified as sidechain rectifiers — the
+/// `vbias`/`vcc`/`vee`-style supply rails used by precision rectifiers in
+/// 4kbuscomp (`U8`/`U9` on `vee12`) qualify.
+fn opamp_n_plus_on_dc_rail(oa: &crate::mna::OpampInfo, mna: &crate::mna::MnaSystem) -> bool {
+    if oa.n_plus_idx == 0 {
+        return false;
+    }
+    mna.voltage_sources.iter().any(|vs| {
+        vs.dc_value != 0.0
+            && (vs.n_plus_idx == oa.n_plus_idx || vs.n_minus_idx == oa.n_plus_idx)
+    })
+}
+
+/// BFS from `start` to `goal` over resistor edges in the netlist. Returns
+/// `true` iff a path exists that traverses only resistors. Caps, inductors,
+/// devices, and sources do NOT count as edges (they don't form a DC short
+/// for the purpose of "diode in feedback" detection — the feedback resistor
+/// network is what forms the virtual-ground summing junction).
+fn r_only_path_exists(
+    start: usize,
+    goal: usize,
+    netlist: &crate::parser::Netlist,
+    mna: &crate::mna::MnaSystem,
+) -> bool {
+    if start == 0 || goal == 0 {
+        return false;
+    }
+    if start == goal {
+        return true;
+    }
+    let mut visited = vec![false; mna.n + 1];
+    let mut queue = vec![start];
+    visited[start] = true;
+    while let Some(node) = queue.pop() {
+        for el in &netlist.elements {
+            if let crate::parser::Element::Resistor { n_plus, n_minus, .. } = el {
+                let p = mna.node_map.get(n_plus).copied().unwrap_or(0);
+                let m = mna.node_map.get(n_minus).copied().unwrap_or(0);
+                let neighbor = if p == node {
+                    Some(m)
+                } else if m == node {
+                    Some(p)
+                } else {
+                    None
+                };
+                if let Some(nb) = neighbor {
+                    if nb == goal {
+                        return true;
+                    }
+                    if nb != 0 && nb < visited.len() && !visited[nb] {
+                        visited[nb] = true;
+                        queue.push(nb);
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Rule D' classifier: returns `true` when the op-amp matches the precision-
+/// rectifier / comparator topology where capping AOL in the transient solver
+/// is safe (the op-amp is "designed to rail" — its loop is open in normal
+/// operation, only closed by a diode at the swing extreme).
+///
+/// Two conditions must both hold:
+/// 1. `n_plus` is on a non-zero DC rail (auto-detected via VS connectivity).
+///    Ground does not count, so soft-clipper topologies that bias `n_plus`
+///    to ground (Klon) are excluded.
+/// 2. At least one diode connects the op-amp output to the inverting input,
+///    optionally through a pure-resistor path (covers full-wave summing
+///    rectifiers like `U9`, where the diode goes through the summing R).
+fn opamp_is_sidechain_rectifier(
+    oa: &crate::mna::OpampInfo,
+    netlist: &crate::parser::Netlist,
+    mna: &crate::mna::MnaSystem,
+) -> bool {
+    if !opamp_n_plus_on_dc_rail(oa, mna) {
+        return false;
+    }
+    if oa.n_minus_idx == 0 || oa.n_out_idx == 0 {
+        return false;
+    }
+    for dev in &mna.nonlinear_devices {
+        if dev.device_type != crate::mna::NonlinearDeviceType::Diode {
+            continue;
+        }
+        if dev.node_indices.len() < 2 {
+            continue;
+        }
+        let (a, k) = (dev.node_indices[0], dev.node_indices[1]);
+        let touches_out = a == oa.n_out_idx || k == oa.n_out_idx;
+        if !touches_out {
+            continue;
+        }
+        let other = if a == oa.n_out_idx { k } else { a };
+        if other == oa.n_minus_idx {
+            return true;
+        }
+        if r_only_path_exists(other, oa.n_minus_idx, netlist, mna) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Effective AOL cap for an op-amp. Priority:
+/// 1. User override via `.model OA(AOL_TRANSIENT_CAP=N)` (any finite value).
+/// 2. Auto-detect via Rule D' → `AOL_SUB_MAX` for sidechain rectifiers.
+/// 3. No cap (`f64::INFINITY`) for everything else.
+fn effective_aol_cap(
+    oa: &crate::mna::OpampInfo,
+    netlist: &crate::parser::Netlist,
+    mna: &crate::mna::MnaSystem,
+) -> f64 {
+    if oa.aol_transient_cap.is_finite() {
+        return oa.aol_transient_cap;
+    }
+    if opamp_is_sidechain_rectifier(oa, netlist, mna) {
+        return AOL_SUB_MAX;
+    }
+    f64::INFINITY
+}
 
 /// Build an `OpampIR` from the MNA `OpampInfo`, computing the Gm delta
 /// for sub-step matrix corrections.
-fn opamp_ir_from_info(oa: &crate::mna::OpampInfo) -> OpampIR {
+fn opamp_ir_from_info(
+    oa: &crate::mna::OpampInfo,
+    netlist: &crate::parser::Netlist,
+    mna: &crate::mna::MnaSystem,
+) -> OpampIR {
+    let aol_cap = effective_aol_cap(oa, netlist, mna);
+    let aol_eff = oa.aol.min(aol_cap);
     let gm_full = oa.aol / oa.r_out;
-    let gm_capped = AOL_SUB_MAX / oa.r_out;
-    let gm_delta = if gm_full > gm_capped {
-        gm_full - gm_capped
-    } else {
-        0.0
-    };
+    let gm_capped = aol_eff / oa.r_out;
+    let gm_delta = (gm_full - gm_capped).max(0.0);
     OpampIR {
         n_out_idx: oa.n_out_idx - 1,
         n_plus_idx: if oa.n_plus_idx > 0 { Some(oa.n_plus_idx - 1) } else { None },
@@ -2406,7 +2535,7 @@ impl CircuitIR {
                     (oa.vcc.is_finite() || oa.vee.is_finite() || oa.sr.is_finite())
                         && oa.n_out_idx > 0
                 })
-                .map(|oa| opamp_ir_from_info(oa))
+                .map(|oa| opamp_ir_from_info(oa, netlist, mna))
                 .collect(),
             sparsity,
             opamp_iir: Vec::new(), // IIR op-amp handled in nodal path only
@@ -2660,6 +2789,53 @@ impl CircuitIR {
             }
         }
         } // end if !has_vca
+
+        // Selective op-amp VCCS Gm cap.
+        //
+        // High-AOL op-amps (Gm ≈ AOL/r_out, often 200,000 S) make the LU back-
+        // substitution produce 400 kV+ values at the op-amp output row, which
+        // contaminate neighboring nodes via fill-in BEFORE the post-solve rail
+        // clamp fires. Capping Gm to AOL_SUB_MAK / r_out at G-matrix build time
+        // bounds the back-sub voltage and eliminates the contamination at zero
+        // runtime cost (the cap is baked into the constant G/A/A_neg matrices).
+        //
+        // The cap is applied selectively — only to op-amps that match Rule D'
+        // (precision rectifier / comparator topology: n_plus on a non-zero DC
+        // rail AND a diode connects output to inverting input, optionally
+        // through a pure-resistor path). Audio-path op-amps keep full AOL so
+        // their virtual-ground feedback loops have correct gain.
+        //
+        // See:
+        //   - `opamp_is_sidechain_rectifier` for the classification rule
+        //   - `docs/aidocs/DEBUGGING.md` "Precision Rectifier Transient NR"
+        //
+        // User override: `.model OA(AOL_TRANSIENT_CAP=N)` forces a specific cap.
+        for oa in &mna.opamps {
+            if oa.n_out_idx == 0 {
+                continue;
+            }
+            let aol_cap = effective_aol_cap(oa, netlist, mna);
+            if !aol_cap.is_finite() || oa.aol <= aol_cap {
+                continue;
+            }
+            let gm_full = oa.aol / oa.r_out;
+            let gm_capped = aol_cap / oa.r_out;
+            let delta = gm_full - gm_capped;
+            let o = oa.n_out_idx - 1;
+            if o >= n {
+                continue;
+            }
+            if oa.n_plus_idx > 0 && oa.n_plus_idx - 1 < n {
+                aug.g[o][oa.n_plus_idx - 1] -= delta;
+            }
+            if oa.n_minus_idx > 0 && oa.n_minus_idx - 1 < n {
+                aug.g[o][oa.n_minus_idx - 1] += delta;
+            }
+            log::info!(
+                "Selective Gm cap on op-amp {}: AOL {:.0} → {:.0} (delta_Gm={:.1} S)",
+                oa.name, oa.aol, aol_cap, delta,
+            );
+        }
 
         // Now rebuild A/A_neg from the (possibly modified) G matrix
         for i in 0..n {
@@ -3197,7 +3373,7 @@ impl CircuitIR {
                     (oa.vcc.is_finite() || oa.vee.is_finite() || oa.sr.is_finite())
                         && oa.n_out_idx > 0
                 })
-                .map(|oa| opamp_ir_from_info(oa))
+                .map(|oa| opamp_ir_from_info(oa, netlist, mna))
                 .collect(),
             sparsity,
             opamp_iir: opamp_iir_data,
@@ -4750,6 +4926,7 @@ mod opamp_rail_mode_tests {
             sr: f64::INFINITY,
             voh_drop: 1.5,
             vol_drop: 1.5,
+            aol_transient_cap: f64::INFINITY,
             n_internal_idx: 0,
             iir_c_dom: 0.0,
             n_int_idx: 0,
@@ -4851,6 +5028,7 @@ mod opamp_rail_mode_tests {
             sr: f64::INFINITY,
             voh_drop: 1.5,
             vol_drop: 1.5,
+            aol_transient_cap: f64::INFINITY,
             n_internal_idx: 0,
             iir_c_dom: 0.0,
             n_int_idx: 0,

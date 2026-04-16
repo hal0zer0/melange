@@ -328,61 +328,55 @@ for subsequent `reset()` calls — the expensive low-rate phase runs only once.
 **Result**: 4kbuscomp BE fallback reduced from ~100% of samples to <1% (3-34 out of 4800+).
 Sub-step NR handles the rest. Circuit stable at all amplitudes (0.001–1.0V).
 
-## Precision Rectifier Transient NR
+## Precision Rectifier Transient NR — VCCS Back-Sub Contamination (FIXED 2026-04-16)
 
-With the DC warmup fix, the 4kbuscomp runs on the main trap NR path (chord method with
-ActiveSet resolve). The convergence check only monitors device-dimension nodes (N_V nonzero
-columns), so the NR "converges" even when linear nodes are contaminated.
-
-**Status**: 4kbuscomp stable at all amplitudes. Peak still too hot at amp=1.0 (31V vs
-expected ~10V gain-reduced — sidechain tracking issue, separate from contamination).
-
-**UNSOLVED: VCCS back-substitution contamination (1.18 billion V)**
-
-The full-LU NR path has a structural problem with high-gain VCCS op-amps:
+The full-LU NR path had a structural problem with high-gain VCCS op-amps:
 
 1. The NR Jacobian `g_aug = A - N_I*J_dev*N_V` inherits Gm ≈ 2000 S from A = G + alpha*C
 2. LU back-substitution computes v_new at op-amp outputs (400kV+ before clamp)
 3. Neighboring nodes are computed FROM the unclamped op-amp output during back-sub
 4. Post-solve rail clamp fixes v_new[op_out] → 11V, but v_new[neighbor] is already 8000V+
 5. NR convergence check only monitors device nodes, not linear neighbors — declares converged
-6. ActiveSet re-solve detects railed op-amps, tries to pin+re-solve, but LU fails (near-singular
-   with 12 pinned columns). Falls back to keeping the contaminated v.
-7. Contaminated v_prev propagates: `state.v_prev = v`, next sample's `A_neg * v_prev` feeds
-   the extreme values back into the RHS. Accumulates to 1.18 billion V at cv_to_vcas.
+6. Contaminated v_prev propagates: `state.v_prev = v`, next sample's `A_neg * v_prev` feeds
+   the extreme values back into the RHS. Accumulated to 1.18 BILLION volts at `cv_to_vcas`
+   in 4kbuscomp.
 
-**Key insight**: The sub-step path is NEVER reached (`substep_count=0`). The main NR
-converges (on device nodes) every sample. The `nr_max_iter_count` comes from the ActiveSet
-re-solve LU failure, which increments the counter but doesn't reset `converged`.
+**Fix: Selective op-amp VCCS Gm cap.** A blanket cap (AOL 200k → 1k on all op-amps)
+eliminates the contamination but kills audio-path gain. Selectively capping only op-amps
+that match the precision-rectifier / comparator topology preserves audio-path gain while
+bounding the LU back-sub voltage at the offending sites.
 
-**Approaches tried (2026-04-16)**:
+**Rule D' classifier** (`opamp_is_sidechain_rectifier` in `crates/melange-solver/src/codegen/ir.rs`):
 
-| Approach | Result |
-|----------|--------|
-| Cap Gm in A_neg only (history term) | No effect — contamination is in the forward LU solve, not the history |
-| Cap Gm in G (both A and A_neg) | **Eliminates contamination** (max_v: 1.18B → 15V) but **kills audio** (peak: 31V → 0V). AOL 200k→1k too aggressive for audio-path op-amps |
-| Cap Gm in sub-step a_sub | No effect — sub-step path never reached |
-| 5 earlier approaches (session 1) | See memory: global clamp, matrix pinning, input-aware pinning, post-convergence resolve, trial re-solve |
+1. **`n_plus` is on a non-zero DC rail.** Detected by walking `mna.voltage_sources`
+   and matching either terminal of any source with `dc_value != 0`. Ground is
+   intentionally excluded — soft-clipper topologies (e.g. Klon Centaur, where the
+   clipping op-amp's `n_plus` is ground) MUST NOT be classified as sidechain
+   rectifiers.
+2. **A diode connects the op-amp output to the inverting input,** optionally through a
+   pure-resistor path (covers full-wave summing rectifiers like 4kbuscomp `U9`, where
+   the diode goes through the summing R network). The R-only BFS in
+   `r_only_path_exists` traverses only `Element::Resistor` edges.
 
-**Why G-level cap kills audio**: The 4kbuscomp has 12 op-amps. Some are sidechain
-(rectifiers, comparators — normally railed) and some are audio-path (mix amp, output
-buffer — must amplify signal). Capping ALL op-amps' Gm to AOL=1000 reduces audio-path
-gain below usable levels. A selective cap (sidechain only) would require compile-time
-knowledge of which op-amps rail, which depends on signal level.
+When both conditions hold, `effective_aol_cap` returns `AOL_SUB_MAX = 1000`. The cap is
+applied at G-matrix build time (constant cost, baked into the emitted G/A/A_neg) and
+propagates automatically to A, A_neg, A_be, A_neg_be, the sub-step `a_sub`, and the
+runtime `rebuild_matrices` path.
 
-**Viable next approaches** (not yet tried):
-- **Selective G cap per op-amp**: Use topology analysis to identify sidechain vs audio-path
-  op-amps. Cap only those whose outputs feed into rail-clamp territory (output between
-  VCA control nodes and diode rectifiers, not in the audio signal chain).
-- **Post-LU neighbor correction**: After clamping op-amp outputs, re-compute only the
-  directly-coupled neighbor nodes from the clamped values. Cheaper than full re-solve,
-  avoids the singular-matrix problem the ActiveSet has with 12 pinned columns.
-- **IIR op-amp model**: Strip Gm from G entirely, model the VCCS as an explicit IIR filter
-  per op-amp. Eliminates extreme A entries. Currently disabled (`false` guard in ir.rs)
-  because the sub-step path omits the IIR RHS stamp.
-- **Convergence check on all N nodes**: Monitor all 80 nodes, not just device nodes.
-  Would catch the contamination early and route to BE/sub-step. Risk: may cause excessive
-  BE fallback if non-device nodes are legitimately slow to converge.
+**User override**: `.model OA(AOL_TRANSIENT_CAP=N)` forces a specific cap on a single
+op-amp model regardless of Rule D'. Use this when:
+- A circuit has a precision rectifier that the auto-detect misses (e.g. `n_plus` is
+  ground because the part runs on a virtual-ground bias not represented as a DC source
+  in the netlist) — set `AOL_TRANSIENT_CAP=1000`.
+- A circuit hits a false positive — set `AOL_TRANSIENT_CAP=200000` (i.e. ≥ AOL) to
+  fully disable the cap on that op-amp.
+
+**Verification on 4kbuscomp**: `max_abs_v_prev` drops from 1.18 billion → 15.0 V.
+Rule D' correctly fires only on `U8` and `U9` (the two sidechain rectifiers, both with
+`n_plus = vee12`), not on the 10 audio-path / virtual-ground op-amps (all with
+`n_plus = 0`). Klon (horseface) output is byte-identical before/after the change —
+Rule D' correctly excludes its op-amps despite `vbias = 4.5 V` on `n_plus` (Condition 1
+passes but Condition 2 fails because Klon's diodes are not in the op-amp feedback path).
 
 ## Known Full-LU NR Limitations
 
