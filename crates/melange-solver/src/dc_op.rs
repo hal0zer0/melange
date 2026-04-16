@@ -130,6 +130,22 @@ fn evaluate_devices_inner(
                 let v = v_nl[s];
                 i_nl[s] = diode.current_at(v);
                 j_dev[s * m + s] = diode.conductance_at(v);
+                // Reverse breakdown: I_bv = -IBV * exp(-(v + BV) / n_vt)
+                // Matches codegen template (device_diode.rs.tera:57-70)
+                if dp.has_bv() {
+                    let x = (-(v + dp.bv) / dp.n_vt).clamp(-40.0, 40.0);
+                    let exp_x = x.exp();
+                    i_nl[s] += -dp.ibv * exp_x;
+                    j_dev[s * m + s] += dp.ibv / dp.n_vt * exp_x;
+                }
+                // Device-level Gmin: minimum junction conductance (1 TΩ).
+                // Standard SPICE practice (ngspice GMIN default = 1e-12 S).
+                // Without this, reverse-biased diode conductance ≈ 1e-25 S
+                // and NR Jacobian entries are effectively zero, preventing
+                // convergence in precision rectifier circuits.
+                const DIODE_GMIN: f64 = 1e-12;
+                i_nl[s] += DIODE_GMIN * v;
+                j_dev[s * m + s] += DIODE_GMIN;
             }
             (DeviceType::BjtForwardActive, DeviceParams::Bjt(bp)) => {
                 // 1D forward-active BJT: only Vbe→Ic, Ib=Ic/BF folded into N_i
@@ -512,6 +528,37 @@ fn build_dc_system(
     for i in 0..n_aug {
         for j in 0..n_aug {
             g_dc[i][j] = mna.g[i][j];
+        }
+    }
+
+    // Cap op-amp VCCS gain in the DC system to prevent NR instability.
+    // Precision rectifiers create multi-equilibrium landscapes where
+    // AOL=200,000 makes the NR overshoot from one rail to the other
+    // in a single iteration. Capping at AOL_DC=1000 keeps the NR stable
+    // while maintaining accurate virtual grounds (0.1% error).
+    // The full AOL is used in the transient codegen path where the
+    // active-set rail resolver handles convergence.
+    const AOL_DC_MAX: f64 = 1000.0;
+    for oa in &mna.opamps {
+        let out = oa.n_out_idx;
+        if out == 0 || oa.aol <= AOL_DC_MAX {
+            continue;
+        }
+        let o = out - 1;
+        if o >= n_aug {
+            continue;
+        }
+        let np = oa.n_plus_idx;
+        let nm = oa.n_minus_idx;
+        let gm_full = oa.aol / oa.r_out;
+        let gm_capped = AOL_DC_MAX / oa.r_out;
+        let delta_gm = gm_full - gm_capped;
+        // Undo the excess Gm from the MNA stamps
+        if np > 0 && np - 1 < n_aug {
+            g_dc[o][np - 1] -= delta_gm;
+        }
+        if nm > 0 && nm - 1 < n_aug {
+            g_dc[o][nm - 1] += delta_gm; // was stamped as -gm, so undo with +
         }
     }
 
@@ -1375,6 +1422,26 @@ fn nr_dc_solve(
             v[i] += limited;
             final_max_delta = final_max_delta.max(limited.abs());
         }
+
+        // Clamp op-amp output voltages to rail limits.
+        // Without this, the linear op-amp model drives outputs to
+        // unphysical voltages during DC solve, preventing convergence
+        // in precision rectifier circuits (e.g. SSL bus compressor).
+        for oa in &mna.opamps {
+            let out = oa.n_out_idx; // 1-indexed
+            if out > 0 {
+                let o = out - 1; // 0-indexed
+                if o < n {
+                    if oa.vcc.is_finite() && v[o] > oa.vcc {
+                        v[o] = oa.vcc;
+                    }
+                    if oa.vee.is_finite() && v[o] < oa.vee {
+                        v[o] = oa.vee;
+                    }
+                }
+            }
+        }
+
         let max_delta = final_max_delta;
 
         if max_delta < config.tolerance {
@@ -1396,6 +1463,36 @@ fn nr_dc_solve(
         internal_junctions,
     );
     (false, config.max_iterations)
+}
+
+/// Seed op-amp outputs from (V+ - V-) sign to select the correct equilibrium.
+/// Precision rectifiers have two self-consistent DC operating points (one at
+/// each rail). Without this, the NR may converge to the wrong one.
+fn seed_opamp_outputs(v: &mut [f64], mna: &MnaSystem) {
+    for oa in &mna.opamps {
+        let out = oa.n_out_idx;
+        if out == 0 {
+            continue;
+        }
+        let o = out - 1;
+        if o >= v.len() {
+            continue;
+        }
+        let vp = if oa.n_plus_idx > 0 && oa.n_plus_idx - 1 < v.len() {
+            v[oa.n_plus_idx - 1]
+        } else {
+            0.0
+        };
+        let vm = if oa.n_minus_idx > 0 && oa.n_minus_idx - 1 < v.len() {
+            v[oa.n_minus_idx - 1]
+        } else {
+            0.0
+        };
+        let diff = vp - vm;
+        if oa.vcc.is_finite() && oa.vee.is_finite() && diff.abs() > 0.1 {
+            v[o] = if diff > 0.0 { oa.vcc } else { oa.vee };
+        }
+    }
 }
 
 /// Compute the DC operating point for a circuit with nonlinear devices.
@@ -1478,6 +1575,8 @@ pub fn solve_dc_operating_point(
     let mut v_clamped = clamp_junction_voltages(mna, device_slots, &v_linear);
     // Extend to n_dc if internal nodes were added
     v_clamped.resize(n_dc, 0.0);
+
+    seed_opamp_outputs(&mut v_clamped, mna);
     // Initialize internal node voltages from clamped external nodes
     for bjt in &dc_sys.bjt_internal {
         if let Some(slot) = device_slots.iter().find(|s| s.start_idx == bjt.start_idx) {
@@ -1608,8 +1707,10 @@ pub fn solve_dc_operating_point(
     // For feedback amplifiers, starting from v=0 often converges to the degenerate
     // "all off" solution because the feedback loop is open. Starting from the clamped
     // guess pre-biases junctions so the NR maintains active operation as sources ramp.
+    let mut ss_zero = vec![0.0; n_dc];
+    seed_opamp_outputs(&mut ss_zero, mna);
     let ss_starts: [Vec<f64>; 2] = [
-        vec![0.0; n_dc],   // Classic source stepping from zero
+        ss_zero,           // Source stepping from zero with op-amp seeds
         v_clamped.clone(), // Source stepping from clamped guess
     ];
 
@@ -1689,6 +1790,7 @@ pub fn solve_dc_operating_point(
     // voltages are pre-set to reasonable values.
     let mut v = clamp_junction_voltages(mna, device_slots, &v_linear);
     v.resize(n_dc, 0.0);
+    seed_opamp_outputs(&mut v, mna);
     // Initialize internal nodes for Gmin stepping too
     for bjt in &dc_sys.bjt_internal {
         if let Some(slot) = device_slots.iter().find(|s| s.start_idx == bjt.start_idx) {
@@ -1797,11 +1899,20 @@ pub fn solve_dc_operating_point(
         }
     }
 
-    // All strategies failed — return linear fallback
+    // All strategies failed — return linear fallback with op-amp rail clamping.
+    // The linear solution doesn't account for nonlinear devices, but seeding
+    // op-amp outputs to the correct rail prevents precision rectifier circuits
+    // from starting at the wrong equilibrium.
+    let mut v_fallback = v_linear;
+    seed_opamp_outputs(&mut v_fallback, mna);
+    let mut v_nl_fb = vec![0.0; m];
+    let mut i_nl_fb = vec![0.0; m];
+    extract_nl_voltages_with(m, &dc_sys.dc_n_v, &v_fallback, &mut v_nl_fb);
+    evaluate_devices_inner(&v_nl_fb, device_slots, &mut i_nl_fb, &mut vec![0.0; m * m], m, has_internal_nodes);
     DcOpResult {
-        v_node: v_linear,
-        v_nl: vec![0.0; m],
-        i_nl: vec![0.0; m],
+        v_node: v_fallback,
+        v_nl: v_nl_fb,
+        i_nl: i_nl_fb,
         converged: false,
         method: DcOpMethod::Failed,
         iterations: total_iters,
@@ -2009,10 +2120,12 @@ mod tests {
 
         evaluate_devices(&v_nl, &[slot], &mut i_nl, &mut j_dev, m);
 
-        // Compare against DiodeShockley directly
+        // Compare against DiodeShockley + device Gmin (1e-12 S)
         let diode = DiodeShockley::new(is, 1.0, n_vt);
-        let expected_i = diode.current_at(0.6);
-        let expected_g = diode.conductance_at(0.6);
+        let gmin = 1e-12;
+        let v = 0.6;
+        let expected_i = diode.current_at(v) + gmin * v;
+        let expected_g = diode.conductance_at(v) + gmin;
 
         assert!(
             (i_nl[0] - expected_i).abs() < 1e-15,

@@ -52,11 +52,14 @@ the underlying circuits stabilize.
 - **Pentode / beam tetrode**: Three screen-current equation families selected per-slot by a `ScreenForm` discriminator on `TubeParams`. **Rational** (Reefman Derk §4.4, `1/(1+β·Vp)`, 9 params) for true pentodes; **Exponential** (Reefman DerkE §4.5, `exp(-(β·Vp)^{3/2})`, 9 params) for beam tetrodes with critical-compensation knees; **Classical** (Norman Koren 1996 / Cohen-Hélie 2010, `arctan(Vpk/Kvb)` + Vp-independent screen, 6 params) as a fallback for tubes without Reefman fits. Optionally blended via Reefman §5 two-section Koren (variable-mu) for remote-cutoff tubes. Catalog: EL84/6BQ5, EL34/6CA7, EF86/6267 (Rational, `-P` suffix); 6L6GC/5881, 6V6GT (Exponential, `-T` suffix); KT88, 6550 (Classical, no suffix); 6K7, EF89 (variable-mu Rational/Exponential). New element prefix `P` (`P n_plate n_grid n_cathode n_screen [n_suppressor] model`) and `VP` model token. Phase 1b adds grid-off FA reduction; phase 1d adds datasheet-refit entries for 6386/6BA6/6BC8 (varimu compressor tubes).
 - **Not implemented**: temperature coefficients on resistors (TC1/TC2), noise models, 6386/6BA6/6BC8 datasheet fits for varimu compressors (phase 1d deferred)
 - **Known model limitations**:
-  - Diode BV: hard clamp reverse breakdown (no smooth Zener knee)
+  - Diode BV: exponential reverse breakdown (matches codegen template), evaluated in both codegen and DC OP solver (FIXED 2026-04-15)
+  - DC OP diode Gmin: 1e-12 S minimum junction conductance added to prevent zero Jacobian entries at reverse bias (FIXED 2026-04-15)
+  - DC OP op-amp AOL capped at 1000 to prevent multi-equilibrium NR instability in precision rectifier circuits (FIXED 2026-04-15)
   - BJT GP Q1: singularity guard at `q1_denom <= 0` (physically near Early voltage limit)
   - Tube Koren: no space-charge, no transit-time effects
   - JFET/MOSFET subthreshold: hardcoded 2×VT slope (real devices: 60-120 mV/decade)
   - VCA noise_floor field exists but unused
+  - Precision rectifier transient: diverges at signal levels causing diode switching (chord-LU NR direction wrong on state change). Same class as Klon BoyleDiodes heavy-clip.
 
 ## Codegen Device Support
 

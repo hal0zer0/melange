@@ -320,3 +320,94 @@ fn test_nodal_codegen_be_fallback() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Test 11: rebuild_matrices uses correct alpha for --backward-euler circuits
+//
+// Regression test for the bug where rebuild_matrices always emitted
+// `let alpha = 2.0 * internal_rate` (trapezoidal) even for BE-compiled
+// circuits, and used `alpha*C - G` for a_neg instead of `alpha*C`.
+//
+// A pot change triggers rebuild_matrices. If rebuild uses trap alpha when
+// BE was compiled, the resulting S/K are wrong and NR diverges on every
+// sample after the first pot movement.
+// ---------------------------------------------------------------------------
+
+// Circuit that forces the nodal Schur path (multi-transformer, M >= 2) and has a pot.
+// Used to verify rebuild_matrices uses the correct alpha and a_neg formula for BE.
+const TUBE_TRANSFORMER_WITH_POT: &str = "\
+Tube + Transformer + NFB + Pot
+.model 12AX7 TRIODE(MU=100 EX=1.4 KG1=1060 KP=600 KVB=300)
+Vcc vcc 0 DC 250
+Cin in grid 100n
+Rg grid 0 1Meg
+T1 grid plate cathode 12AX7
+Ra vcc plate 100k
+Rk cathode 0 1.5k
+L_pri plate xfmr_ct 1
+L_sec out 0 0.2
+L_tert fb_n fb_p 0.1
+K1 L_pri L_sec 0.95
+K2 L_pri L_tert 0.95
+K3 L_sec L_tert 0.95
+Rct xfmr_ct 0 10
+Rfb fb_p cathode 1k
+Rfb_gnd fb_n 0 100
+Rload out 0 10k
+C1 plate 0 100p
+C2 out 0 100p
+Rvol out vol_w 5k
+Rvol2 vol_w 0 5k
+.pot Rvol 100 10000
+";
+
+fn generate_nodal_be(spice: &str, in_name: &str, out_name: &str) -> String {
+    let (netlist, mna) = build_mna_with_input(spice, in_name, 1.0);
+    let in_idx = *mna.node_map.get(in_name).unwrap() - 1;
+    let out_idx = *mna.node_map.get(out_name).unwrap() - 1;
+    let config = CodegenConfig {
+        circuit_name: "test_be".to_string(),
+        sample_rate: 48000.0,
+        input_node: in_idx,
+        output_nodes: vec![out_idx],
+        input_resistance: 1.0,
+        backward_euler: true,
+        ..CodegenConfig::default()
+    };
+    let generator = CodeGenerator::new(config);
+    generator
+        .generate_nodal(&mna, &netlist)
+        .expect("nodal BE codegen")
+        .code
+}
+
+#[test]
+fn test_rebuild_matrices_be_uses_correct_alpha() {
+    let code = generate_nodal_be(TUBE_TRANSFORMER_WITH_POT, "in", "out");
+
+    // The fix: rebuild_matrices must use alpha = internal_rate (BE), not 2.0 * internal_rate
+    assert!(
+        code.contains("let alpha = internal_rate; // backward Euler"),
+        "rebuild_matrices must use alpha = internal_rate for BE circuits, not 2.0 * internal_rate"
+    );
+    assert!(
+        !code.contains("let alpha = 2.0 * internal_rate; // trapezoidal\n        let alpha_be = internal_rate;"),
+        "rebuild_matrices must not use trapezoidal alpha for BE circuits"
+    );
+}
+
+#[test]
+fn test_rebuild_matrices_be_a_neg_no_g_subtraction() {
+    let code = generate_nodal_be(TUBE_TRANSFORMER_WITH_POT, "in", "out");
+
+    // For BE, a_neg = alpha*C (no G subtraction).
+    // The rebuild_matrices loop must NOT contain "- self.g_work[i][j]" for a_neg.
+    assert!(
+        code.contains("self.a_neg[i][j] = alpha * self.c_work[i][j];"),
+        "rebuild_matrices BE: a_neg must be alpha*C only (no G subtraction)"
+    );
+    assert!(
+        !code.contains("self.a_neg[i][j] = alpha * self.c_work[i][j] - self.g_work[i][j];"),
+        "rebuild_matrices BE: a_neg must not subtract G (that is the trapezoidal formula)"
+    );
+}
+

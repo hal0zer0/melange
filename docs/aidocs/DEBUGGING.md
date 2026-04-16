@@ -282,6 +282,56 @@ still excluding saturated BJTs (Vbc > -0.5V).
 If the DC OP confirms Vbc < -0.5V, the BJT has adequate margin for audio-level
 transients. FA reduction is preserved on all codegen paths.
 
+## Precision Rectifier DC OP Convergence
+
+Circuits with precision rectifiers (op-amp + diode feedback, e.g., SSL bus compressor
+sidechain) have **two self-consistent DC equilibria** — one at each op-amp rail. The
+NR may converge to the wrong one.
+
+**Root cause**: The VCCS model with AOL=200,000 overshoots from one rail to the other
+in a single NR iteration, overwhelming diode feedback. The correct equilibrium has the
+op-amp at one rail with one diode conducting; the wrong one has the opposite rail with
+a different diode conducting.
+
+**Fixes applied (2026-04-15)**:
+- **AOL capping**: `build_dc_system()` caps op-amp AOL at 1000 in the DC G matrix.
+  1000 gives 60 dB open-loop gain — accurate to 0.1% for virtual grounds, but low
+  enough for NR convergence.
+- **Output seeding**: `seed_opamp_outputs()` initializes op-amp outputs to the rail
+  matching sign(V+ - V-) at all init points (direct NR, source stepping, Gmin stepping).
+- **Per-iteration rail clamp**: Op-amp outputs clamped to VCC/VEE after each NR solve
+  step in dc_op.rs.
+- **Seeded linear fallback**: When all strategies fail, the linear fallback applies
+  op-amp seeding before returning.
+
+**Status**: DC OP for the 4kbuscomp now produces correct polarity (-11V at sidechain
+TL074 outputs instead of +11V). DC_OP_CONVERGED=false (formal convergence not achieved),
+but the values are physically correct.
+
+## Precision Rectifier Transient Divergence
+
+Even with correct DC OP, precision rectifier circuits diverge in transient simulation
+when signal levels cause diode switching (e.g., 4kbuscomp at amplitude > 0.01).
+
+**Root cause**: Same class as Klon BoyleDiodes heavy-clipping — the chord-LU NR
+direction becomes wrong when device state changes abruptly (diode on→off or off→on).
+The chord Jacobian captures one state; the actual circuit is in another.
+
+**Mitigation applied (2026-04-15)**:
+- **Per-iteration op-amp rail clamp in codegen**: Emitted in both trapezoidal NR
+  and BE fallback NR loops (`nodal_emitter.rs`). Prevents op-amp output node voltages
+  from exceeding VCC/VEE during NR iteration. This stabilizes idle and low-level
+  operation but doesn't solve the diode switching convergence problem.
+
+**Status**: 4kbuscomp stable at idle and amp≤0.01. Diverges at amp>0.02 when sidechain
+diodes start switching. The audio-path-only extract (4kbuscomp-audiopath.cir, M=2,
+0 diodes) works cleanly at all levels.
+
+**Future fix candidates** (same as BoyleDiodes, see above):
+- True Newton (refactor every iteration during diode transitions)
+- Adaptive chord refactoring triggered by device-state change detection
+- Anderson acceleration or trust-region Newton
+
 ## Known Full-LU NR Limitations
 
 The full-LU nodal NR path (used when K is degenerate, has positive diagonal, or is ill-conditioned)

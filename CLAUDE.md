@@ -2,6 +2,30 @@
 
 Melange — Rust toolkit for circuit simulation to real-time audio DSP.
 
+## Oomox Ecosystem — Division of Labor
+
+Four repos, one pipeline. Each project owns exactly one stage.
+
+```
+Real hardware → SCHEMER → MELANGE-CIRCUITS → MELANGE → OOMOX → Product plugin
+  (schematics)   (netlists)    (.cir files)     (Rust code)  (binary VST/CLAP)
+```
+
+**SCHEMER** (`~/dev/schemer`) — Local-only toolkit. Reads real-world hardware schematics (raster images, PDFs, service manuals) and assists with extracting netlists. Not a product. Not public.
+
+**MELANGE-CIRCUITS** (`~/dev/melange-circuits`) — All non-test circuit netlists for melange and Oomox. Not currently on a public git host. Agent is expert at designing and drafting circuits specifically for melange.
+
+**MELANGE** (`~/dev/melange`) — **This repo.** Core product. GPL-3.0, publicly released. Compiles SPICE circuit netlists to optimized Rust DSP code. The entire circuit-to-code pipeline: parser, MNA, solvers, codegen. Exposes parameters in a thin VST wrapper (`--format plugin`). Generated code is GPL.
+
+**OOMOX** (`~/dev/oomox`) — Non-product software for building binary product plugins. Handles ALL DSP and UX beyond the generated circuit file: pot curve shaping, parameter smoothing, warmup, output scaling, UI toolkit, editor layout, presets.
+
+### Boundary Rules
+
+- **Circuit sounds wrong** → fix in MELANGE (solver/models) or MELANGE-CIRCUITS (component values). Never add workarounds in OOMOX.
+- **Plugin behavior wrong** (clicks, CPU, knob feel, UI) → fix in OOMOX. Never change the `.cir` to work around a plugin issue.
+- **Need a new circuit** → draft in MELANGE-CIRCUITS. Use SCHEMER if starting from real hardware.
+- **Pot mapping / indices** → defined by the `.cir` (MELANGE-CIRCUITS), assigned by the compiler (MELANGE), wired by the plugin (OOMOX). All three must agree.
+
 ## CRITICAL: Accuracy beats plugin usability 1000x
 
 Accurately modeling a circuit is **1000x more important** than quickly building a working plugin. Melange is a "build whatever circuit you throw at me" tool, NOT a "tweak the circuit to do what I want" tool.
@@ -72,6 +96,7 @@ dense equations, code patterns, and cross-references. The full index is at `docs
 | `docs/aidocs/DEBUGGING.md` | Diagnosing solver output issues, known failure signatures |
 | `docs/aidocs/SPICE_VALIDATION.md` | Running or modifying SPICE validation tests |
 | `docs/aidocs/STATUS.md` | Checking validation results, device support, solver routing, circuit status |
+| `docs/aidocs/TUNGSTEN_MATERIAL.md` | Modeling tungsten-based components (Schottky diodes, cat's whisker, WSe2/WS2 devices) |
 
 ### Critical Sign Conventions
 
@@ -155,6 +180,9 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
 | Click on every pot/switch move in generated plugin | `rebuild_matrices()` zeroed DC blocker + oversampler state on pot change | Removed filter state resets from DK Schur `rebuild_matrices` (FIXED commit `07712a0`) |
 | Zipper noise on knob automation | Pot values read once per buffer via `.value()`, smoother declared but unused | Per-sample `.smoothed.next()` read in plugin template (FIXED commit `7c0fc02`) |
 | NR max-iter-cap hits on wide-range pot jumps (preset recall, automation step) | Stale `v_prev`/`i_nl_prev` from previous (different) operating point; NR starts far from new bias | Warm DC-OP re-init in `set_pot_N`/`set_switch_N` when `|r - r_prev|/r_prev > 0.20` (FIXED commit `e8e18a7`). The earlier Sherman-Morrison removal (commit `eaee955`) was treating a symptom — SM is mathematically exact; stale DC-OP seed was the root cause. |
+| DC OP wrong polarity for precision rectifier op-amps (e.g., 4kbuscomp sidechain TL074 at +11V instead of -11V) | Multi-equilibrium: AOL=200K overshoots NR from one rail to the other in one iteration. Linear initial guess finds wrong self-consistent equilibrium. | AOL capped at 1000 in DC G matrix (`build_dc_system`), op-amp output seeding (`seed_opamp_outputs`), per-iteration rail clamp in DC OP NR. (FIXED 2026-04-15) |
+| DC OP diode reverse bias: nodes float to non-physical voltages (91kV) when diodes off | DC OP `evaluate_devices_inner()` ignored BV/IBV and had zero reverse-bias conductance | BV/IBV breakdown added to DC OP diode evaluation; device-level Gmin (1e-12 S) added as minimum junction conductance. (FIXED 2026-04-15) |
+| Precision rectifier transient divergence at signal levels causing diode switching | Chord-LU NR direction wrong when device state changes (diode on→off). Same class as Klon BoyleDiodes heavy-clip. | Per-iteration op-amp rail clamp in both trapezoidal and BE NR loops. Stabilizes idle + low-level (amp≤0.01). Diode-switching levels (amp>0.02) still diverge. (PARTIAL 2026-04-15) |
 
 ## Current Status (2026-04-11)
 
@@ -263,7 +291,7 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
 - **Device support** (`DeviceEntry`): Diode, DiodeWithRs, Led, BJT, JFET, MOSFET, Tube
 - **NodalSolver transient NR**: Converges for all physically valid circuits including Pultec EQP-1A (4 tubes, 2 transformers, global NFB). Requires positive-definite inductance matrices (validated at MNA build time).
 - **Coupled-inductor push-pull NFB**: Differential cathode injection with separated cathodes (820Ω between) and K=0.9999 provides 21 dB of NFB. Pultec at +1.8 dB (near unity). Ideal transformer formulation (dependent sources + explicit leakage/magnetizing L) deferred — current approach is sufficient.
-- **`melange simulate`**: auto-selects codegen path (nodal for inductors, DK otherwise). `--solver nodal|dk` override available.
+- **`melange simulate`**: auto-selects codegen path (nodal for inductors, DK otherwise). `--solver nodal|dk` override available. `--oversampling {1,2,4}` for anti-aliasing.
 - **Performance**: DK codegen circuits run 100-600× realtime. Nodal full-LU (chord + cross-timestep + sparse LU): ~11× realtime for Pultec (41-node, 8 NL, 2 transformers).
 - **Full-LU NR + ill-conditioned A**: The full-LU chord NR can diverge when cond(A) > ~1000 (large coupling caps). Routing prefers Schur when K is well-conditioned, avoiding the issue. No known circuit needs both full-LU (pathological K) AND has ill-conditioned A. See `docs/aidocs/DEBUGGING.md` "Known Full-LU NR Limitations".
 
@@ -301,9 +329,11 @@ Historical validation data preserved below for reference.
   - Stage 1: fully bypassed cathode (25µF, max gain); Stage 2: partial bypass (0.68µF, ~156Hz)
   - Output pad (390k/6.8k, -35dB) models output transformer attenuation
   - 50mV in → 549mV out (11x / 20.8dB gain), zero NR divergence
-- Bus compressor (4kbuscomp): 4 op-amps, 1 VCA, 2 diodes, 2 pots, 2 switches
-  - Audio path codegen validated: -62.8 dB output matches runtime NodalSolver exactly
-  - Uses nodal full-LU path (K≈0 from current-mode VCA, N=28, M=2)
+- Bus compressor (4kbuscomp): 12 op-amps, 2 VCAs, 6 diodes, 2 pots, 2 switches
+  - Audio path extract (4kbuscomp-audiopath.cir, M=2): stable, peak=0.001439
+  - Full circuit (N=80, M=10): DC OP correct (2026-04-15 BV/IBV + AOL cap + seeding fixes), stable at idle + amp≤0.01
+  - Transient diverges at amp>0.02 (sidechain diode switching NR, same class as Klon BoyleDiodes)
+  - Uses nodal full-LU path (K≈0 from current-mode VCA)
 - EL84 single stage (el84-single-stage): Reefman Derk §4.4 rational screen form
   - DC-OP validated, end-to-end compile-and-run verified
 - AC15-class amp (axe-15): EF86 preamp + EL84 power pentodes

@@ -276,6 +276,11 @@ enum Commands {
         /// Default 'auto' inspects the topology and picks the cheapest correct mode.
         #[arg(long, default_value = "auto")]
         opamp_rail_mode: String,
+
+        /// Oversampling factor (1=none, 2=2x, 4=4x). Higher reduces aliasing
+        /// and improves NR stability for circuits with diode switching.
+        #[arg(long, default_value = "1")]
+        oversampling: usize,
     },
 
     /// Analyze circuit frequency response
@@ -627,7 +632,11 @@ fn main() -> Result<()> {
             input_resistance: input_resistance_flag,
             solver,
             opamp_rail_mode,
+            oversampling,
         } => {
+            if oversampling != 1 && oversampling != 2 && oversampling != 4 {
+                anyhow::bail!("oversampling must be 1, 2, or 4, got {}", oversampling);
+            }
             let rail_mode = melange_solver::codegen::OpampRailMode::parse(&opamp_rail_mode)
                 .ok_or_else(|| {
                     anyhow::anyhow!(
@@ -651,6 +660,7 @@ fn main() -> Result<()> {
                     input_resistance_flag,
                     solver: &solver,
                     opamp_rail_mode: rail_mode,
+                    oversampling,
                 },
             )
         }
@@ -2054,6 +2064,7 @@ struct SimulateOptions<'a> {
     input_resistance_flag: Option<f64>,
     solver: &'a str,
     opamp_rail_mode: melange_solver::codegen::OpampRailMode,
+    oversampling: usize,
 }
 
 fn simulate_circuit_source(
@@ -2497,7 +2508,7 @@ fn simulate_circuit_source(
         input_resistance,
         input_node: input_node_idx,
         output_nodes: vec![output_node_idx],
-        oversampling_factor: 1,
+        oversampling_factor: opts.oversampling,
         output_scales: vec![1.0],
         include_dc_op: true,
         dc_op_max_iterations: 200,

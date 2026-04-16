@@ -1804,25 +1804,36 @@ impl RustEmitter {
         code.push_str("    /// Called by set_sample_rate, set_pot, and set_switch.\n");
         code.push_str("    /// Includes O(N^3) matrix inversion for Schur complement NR.\n");
         code.push_str("    pub fn rebuild_matrices(&mut self, internal_rate: f64) {\n");
-        code.push_str("        let alpha = 2.0 * internal_rate;\n");
+        if ir.solver_config.backward_euler {
+            code.push_str("        let alpha = internal_rate; // backward Euler: alpha = 1/T\n");
+        } else {
+            code.push_str("        let alpha = 2.0 * internal_rate; // trapezoidal: alpha = 2/T\n");
+        }
         code.push_str("        let alpha_be = internal_rate;\n");
         if !ir.matrices.s_sub.is_empty() {
             code.push_str("        let alpha_sub = 4.0 * internal_rate; // trap at 2× rate\n");
         }
         code.push('\n');
 
-        // Build A = G + alpha*C (trapezoidal) and A_neg = alpha*C - G (trapezoidal history)
+        // Build A = G + alpha*C and A_neg:
+        //   trapezoidal: A_neg = alpha*C - G
+        //   backward Euler: A_neg = alpha*C  (no G term — history has only capacitor)
         // No Boyle elimination — IIR op-amp model keeps Gm out of the MNA matrix.
+        let a_neg_formula = if ir.solver_config.backward_euler {
+            format!("alpha * {}[i][j]", c_src)
+        } else {
+            format!("alpha * {}[i][j] - {}[i][j]", c_src, g_src)
+        };
         code.push_str(&format!(
             "        for i in 0..N {{\n\
              \x20           for j in 0..N {{\n\
              \x20               self.a[i][j] = {}[i][j] + alpha * {}[i][j];\n\
-             \x20               self.a_neg[i][j] = alpha * {}[i][j] - {}[i][j];\n\
+             \x20               self.a_neg[i][j] = {};\n\
              \x20               self.a_be[i][j] = {}[i][j] + alpha_be * {}[i][j];\n\
              \x20               self.a_neg_be[i][j] = alpha_be * {}[i][j];\n\
              \x20           }}\n\
              \x20       }}\n",
-            g_src, c_src, c_src, g_src, g_src, c_src, c_src
+            g_src, c_src, a_neg_formula, g_src, c_src, c_src
         ));
 
         if !ir.matrices.s_sub.is_empty() {
@@ -2475,7 +2486,11 @@ impl RustEmitter {
             code.push_str("                state.rebuild_matrices(state.current_sample_rate);\n");
             code.push_str("            } else {\n");
             code.push_str("                // SM rank-1 update: O(N²) per changed diagonal entry\n");
-            code.push_str("                let alpha = 2.0 * state.current_sample_rate;\n");
+            if ir.solver_config.backward_euler {
+                code.push_str("                let alpha = state.current_sample_rate; // backward Euler\n");
+            } else {
+                code.push_str("                let alpha = 2.0 * state.current_sample_rate; // trapezoidal\n");
+            }
         }
 
         // Emit SM for each uncoupled saturating inductor
@@ -4436,7 +4451,37 @@ impl RustEmitter {
 
             // Op-amp output clamping inside NR loop — prevents physically impossible
             // voltages that destabilize downstream device evaluation. Applied after the
-            // damped step (same pattern as sub-step NR and ngspice MOSFET limiting).
+            // back-solve, before device voltage limiting.
+            {
+                let clampable: Vec<&crate::codegen::ir::OpampIR> = ir
+                    .opamps
+                    .iter()
+                    .filter(|oa| oa.vclamp_hi.is_finite() || oa.vclamp_lo.is_finite())
+                    .collect();
+                if !clampable.is_empty() {
+                    code.push_str(
+                        "        // Per-iteration op-amp output rail clamp\n",
+                    );
+                    for oa in &clampable {
+                        let o = oa.n_out_idx;
+                        if oa.vclamp_hi.is_finite() {
+                            code.push_str(&format!(
+                                "        if v_new[{o}] > {hi:.17e} {{ v_new[{o}] = {hi:.17e}; }}\n",
+                                o = o,
+                                hi = oa.vclamp_hi,
+                            ));
+                        }
+                        if oa.vclamp_lo.is_finite() {
+                            code.push_str(&format!(
+                                "        if v_new[{o}] < {lo:.17e} {{ v_new[{o}] = {lo:.17e}; }}\n",
+                                o = o,
+                                lo = oa.vclamp_lo,
+                            ));
+                        }
+                    }
+                    code.push('\n');
+                }
+            }
 
             // 2f. SPICE-style voltage limiting + global node damping
             code.push_str("        // 2f. SPICE voltage limiting + node damping\n");
@@ -4800,22 +4845,33 @@ impl RustEmitter {
             // LU solve
             code.push_str("                    let mut v_new_s = rhs_w;\n");
             code.push_str("                    if !lu_solve(&mut g_s, &mut v_new_s) { break; }\n");
-            // Op-amp supply rail clamping (VCC/VEE). Only emitted for Hard
-            // mode — ActiveSet handles rails via post-NR resolve on the
-            // main NR path, and BoyleDiodes has physical catch diodes in
-            // the MNA so a hard clamp here would double-limit and conflict
-            // with the diode-driven convergence.
-            if matches!(ir.solver_config.opamp_rail_mode, crate::codegen::OpampRailMode::Hard)
-                && !ir.opamps.is_empty()
+            // Op-amp supply rail clamping (VCC/VEE) in sub-step. Applied for all
+            // modes that have clampable op-amps — prevents physically impossible
+            // voltages that destabilize downstream device evaluation.
             {
-                for oa in &ir.opamps {
-                    if !oa.vclamp_lo.is_finite() && !oa.vclamp_hi.is_finite() {
-                        continue;
+                let clampable: Vec<&crate::codegen::ir::OpampIR> = ir
+                    .opamps
+                    .iter()
+                    .filter(|oa| oa.vclamp_hi.is_finite() || oa.vclamp_lo.is_finite())
+                    .collect();
+                if !clampable.is_empty() {
+                    for oa in &clampable {
+                        let o = oa.n_out_idx;
+                        if oa.vclamp_hi.is_finite() {
+                            code.push_str(&format!(
+                                "                    if v_new_s[{o}] > {hi:.17e} {{ v_new_s[{o}] = {hi:.17e}; }}\n",
+                                o = o,
+                                hi = oa.vclamp_hi,
+                            ));
+                        }
+                        if oa.vclamp_lo.is_finite() {
+                            code.push_str(&format!(
+                                "                    if v_new_s[{o}] < {lo:.17e} {{ v_new_s[{o}] = {lo:.17e}; }}\n",
+                                o = o,
+                                lo = oa.vclamp_lo,
+                            ));
+                        }
                     }
-                    code.push_str(&format!(
-                        "                    v_new_s[{idx}] = v_new_s[{idx}].clamp({lo:.17e}, {hi:.17e});\n",
-                        idx = oa.n_out_idx, lo = oa.vclamp_lo, hi = oa.vclamp_hi,
-                    ));
                 }
             }
             // Convergence check + update
@@ -5002,6 +5058,36 @@ impl RustEmitter {
             code.push_str("            let mut v_new = rhs_work;\n");
             code.push_str("            if !lu_solve(&mut g_aug, &mut v_new) { break; }\n\n");
 
+            // Per-iteration op-amp output rail clamp for BE path
+            {
+                let clampable: Vec<&crate::codegen::ir::OpampIR> = ir
+                    .opamps
+                    .iter()
+                    .filter(|oa| oa.vclamp_hi.is_finite() || oa.vclamp_lo.is_finite())
+                    .collect();
+                if !clampable.is_empty() {
+                    code.push_str(
+                        "            // Per-iteration op-amp output rail clamp (BE)\n",
+                    );
+                    for oa in &clampable {
+                        let o = oa.n_out_idx;
+                        if oa.vclamp_hi.is_finite() {
+                            code.push_str(&format!(
+                                "            if v_new[{o}] > {hi:.17e} {{ v_new[{o}] = {hi:.17e}; }}\n",
+                                o = o, hi = oa.vclamp_hi,
+                            ));
+                        }
+                        if oa.vclamp_lo.is_finite() {
+                            code.push_str(&format!(
+                                "            if v_new[{o}] < {lo:.17e} {{ v_new[{o}] = {lo:.17e}; }}\n",
+                                o = o, lo = oa.vclamp_lo,
+                            ));
+                        }
+                    }
+                    code.push('\n');
+                }
+            }
+
             // Limiting and damping for BE (same structure)
             code.push_str("            let mut alpha = 1.0_f64;\n");
             Self::emit_nodal_voltage_limiting_indented(&mut code, ir, "            ");
@@ -5017,16 +5103,26 @@ impl RustEmitter {
             code.push_str("                if max_node_dv > 10.0 { alpha *= (10.0 / max_node_dv).max(0.01); }\n");
             code.push_str("            }\n\n");
 
-            // Apply damped step and check convergence (compute delta before updating)
+            // Apply damped step and check convergence (compute delta before updating).
+            // Convergence check on nonlinear device nodes only (N_V nonzero columns),
+            // matching the trapezoidal NR path. Checking all N nodes includes VCCS rows
+            // for op-amps which may never satisfy the step criterion when op-amp outputs
+            // are railed — causing BE to loop to MAX_ITER perpetually.
             code.push_str("            let mut be_step_exceeded = false;\n");
-            code.push_str("            for i in 0..N {\n");
-            code.push_str("                let step = alpha * (v_new[i] - v[i]);\n");
-            code.push_str("                let threshold = 1e-3 * v[i].abs().max((v[i] + step).abs()) + 1e-6;\n");
-            code.push_str(
-                "                if step.abs() >= threshold { be_step_exceeded = true; }\n",
-            );
-            code.push_str("                v[i] += step;\n");
-            code.push_str("            }\n");
+            {
+                let mut device_nodes: Vec<usize> = ir.sparsity.n_v.nz_by_row
+                    .iter()
+                    .flat_map(|row| row.iter().copied())
+                    .collect();
+                device_nodes.sort();
+                device_nodes.dedup();
+                for &node in &device_nodes {
+                    code.push_str(&format!(
+                        "            {{ let step = alpha * (v_new[{node}] - v[{node}]); let threshold = 1e-3 * v[{node}].abs().max((v[{node}] + step).abs()) + 1e-6; if step.abs() >= threshold {{ be_step_exceeded = true; }} }}\n"
+                    ));
+                }
+            }
+            code.push_str("            for i in 0..N { v[i] += alpha * (v_new[i] - v[i]); }\n");
 
             // Mid-NR op-amp clamping for BE path. Only emit for Hard mode;
             // ActiveSet and BoyleDiodes handle rails via their respective
@@ -5061,6 +5157,9 @@ impl RustEmitter {
             // BoyleDiodes for the same reason: every other validated
             // mode passes the voltage-step check as a sufficient
             // criterion.
+            // BE does true Newton (fresh LU each iteration), so the residual
+            // check is less critical here than in the chord-based trap path.
+            // Only emit for BoyleDiodes where catch diodes have extreme knees.
             if matches!(
                 ir.solver_config.opamp_rail_mode,
                 crate::codegen::OpampRailMode::BoyleDiodes
@@ -5182,6 +5281,21 @@ impl RustEmitter {
         // input current at ±SR*C_dom. Zero code is emitted when all
         // op-amps have infinite SR.
         Self::emit_opamp_slew_limit(&mut code, ir, "    ", "v");
+
+        // Death spiral protection: when ALL NR paths fail (trap + substep + BE),
+        // do NOT store the bad partial iterate into v_prev/i_nl_prev. Each failed
+        // sample would hand a progressively worse initial condition to the next,
+        // creating a cascade. Instead, keep the previous (presumably converged)
+        // state so the next sample starts from a reasonable point. The chord LU
+        // is invalidated to force a fresh factorization.
+        if m > 0 {
+            code.push_str("    if !converged {\n");
+            code.push_str("        // NR failed on all paths — keep previous state, invalidate chord\n");
+            code.push_str("        v = state.v_prev;\n");
+            code.push_str("        i_nl = state.i_nl_prev;\n");
+            code.push_str("        chord_valid = false;\n");
+            code.push_str("    }\n\n");
+        }
 
         // Step 3: Update state
         code.push_str("    // Step 3: Update state\n");

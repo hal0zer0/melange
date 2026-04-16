@@ -980,9 +980,17 @@ impl RustEmitter {
              \x20   /// Applies switch/pot deltas to G/C, then rebuilds A, S, K, S*N_i.\n\
              \x20   /// Called by `set_switch_N()`, `set_pot_N()`, and `set_sample_rate()`.\n\
              \x20   fn rebuild_matrices(&mut self) {\n\
-             \x20       let internal_rate = self.current_sample_rate * OVERSAMPLING_FACTOR as f64;\n\
-             \x20       let alpha = 2.0 * internal_rate;\n",
+             \x20       let internal_rate = self.current_sample_rate * OVERSAMPLING_FACTOR as f64;\n",
         );
+        if ir.solver_config.backward_euler {
+            code.push_str(
+                "        let alpha = internal_rate; // backward Euler: alpha = 1/T\n",
+            );
+        } else {
+            code.push_str(
+                "        let alpha = 2.0 * internal_rate; // trapezoidal: alpha = 2/T\n",
+            );
+        }
         if num_inductors > 0 {
             code.push_str("        let t = 1.0 / internal_rate;\n");
         }
@@ -1099,16 +1107,25 @@ impl RustEmitter {
              \x20           for j in 0..N {\n\
              \x20               a[i][j] = g_eff[i][j] + alpha * c_eff[i][j];\n\
              \x20           }\n\
-             \x20       }\n\n\
-             \x20       // Build A_neg = alpha * C_eff - G_eff\n\
-             \x20       let mut a_neg = [[0.0f64; N]; N];\n\
-             \x20       for i in 0..N {\n\
-             \x20           for j in 0..N {\n\
-             \x20               a_neg[i][j] = alpha * c_eff[i][j] - g_eff[i][j];\n\
-             \x20           }\n\
-             \x20       }\n",
+             \x20       }\n\n",
         );
-
+        // A_neg formula: trapezoidal = alpha*C - G; backward Euler = alpha*C (no G term)
+        let a_neg_formula = if ir.solver_config.backward_euler {
+            "alpha * c_eff[i][j]"
+        } else {
+            "alpha * c_eff[i][j] - g_eff[i][j]"
+        };
+        code.push_str(&format!(
+            "        // Build A_neg: {}\n\
+             \x20       let mut a_neg = [[0.0f64; N]; N];\n\
+             \x20       for i in 0..N {{\n\
+             \x20           for j in 0..N {{\n\
+             \x20               a_neg[i][j] = {};\n\
+             \x20           }}\n\
+             \x20       }}\n",
+            if ir.solver_config.backward_euler { "alpha*C (backward Euler, no G)" } else { "alpha*C - G (trapezoidal)" },
+            a_neg_formula
+        ));
         // Zero augmented rows in A_neg (algebraic constraints for VS/VCVS)
         // When augmented_inductors, only zero n_nodes..n_aug (not inductor rows)
         let n_aug = ir.topology.n_aug;
