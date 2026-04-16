@@ -55,11 +55,12 @@ the underlying circuits stabilize.
   - Diode BV: exponential reverse breakdown (matches codegen template), evaluated in both codegen and DC OP solver (FIXED 2026-04-15)
   - DC OP diode Gmin: 1e-12 S minimum junction conductance added to prevent zero Jacobian entries at reverse bias (FIXED 2026-04-15)
   - DC OP op-amp AOL capped at 1000 to prevent multi-equilibrium NR instability in precision rectifier circuits (FIXED 2026-04-15)
+  - DC OP failed convergence: low-rate warmup (200 Hz × 1000 samples = 5s circuit time) charges coupling caps before transient NR. Settled state cached for `reset()`. 4kbuscomp: BE fallback <1%, stable at all amplitudes. (ADDED 2026-04-16)
   - BJT GP Q1: singularity guard at `q1_denom <= 0` (physically near Early voltage limit)
   - Tube Koren: no space-charge, no transit-time effects
   - JFET/MOSFET subthreshold: hardcoded 2×VT slope (real devices: 60-120 mV/decade)
   - VCA noise_floor field exists but unused
-  - Precision rectifier transient: diverges at signal levels causing diode switching (chord-LU NR direction wrong on state change). Same class as Klon BoyleDiodes heavy-clip.
+  - Precision rectifier transient: main trap NR converges on device nodes but VCCS back-substitution contaminates linear neighbor nodes (max 1.18 billion V at cv_to_vcas). Sub-step never reached (substep_count=0). ActiveSet re-solve LU fails with 12 pinned columns. Contamination doesn't affect audio output (peak unchanged) but internal state is non-physical. G-level Gm cap eliminates contamination but kills audio-path op-amp gain. Selective cap or post-LU neighbor correction needed. Peak too hot at amp≥1.0 (sidechain tracking, separate issue). (INVESTIGATED 2026-04-16)
 
 ## Codegen Device Support
 

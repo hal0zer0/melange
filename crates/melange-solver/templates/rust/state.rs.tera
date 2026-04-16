@@ -80,12 +80,12 @@ pub struct CircuitState {
     /// A_neg_be = (1/T)*C (backward Euler history), recomputed by set_sample_rate
     pub a_neg_be: [[f64; N]; N],
 
-    /// Diagnostic: number of backward Euler fallback activations
-    pub diag_be_fallback_count: u64,
     /// BE cooldown: remaining samples to force backward Euler after ringing detected.
     /// Decays to 0, then trapezoidal resumes. Prevents trap→BE→trap oscillation.
     pub be_cooldown: u32,
 {% endif %}
+    /// Diagnostic: number of backward Euler fallback activations
+    pub diag_be_fallback_count: u64,
 {% if num_inductors > 0 %}
     /// Inductor previous currents
     pub ind_i_prev: [f64; {{ num_inductors }}],
@@ -209,9 +209,9 @@ impl Default for CircuitState {
             k_be: K_BE_DEFAULT,
             s_ni_be: S_NI_BE_DEFAULT,
             a_neg_be: A_NEG_BE_DEFAULT,
-            diag_be_fallback_count: 0,
             be_cooldown: 0,
 {% endif %}
+            diag_be_fallback_count: 0,
 {% if num_inductors > 0 %}
             ind_i_prev: [0.0; {{ num_inductors }}],
             ind_v_prev: [0.0; {{ num_inductors }}],
@@ -289,8 +289,8 @@ impl CircuitState {
         self.diag_nan_reset_count = 0;
         self.diag_singular_matrix_count = 0;
         self.diag_voltage_damp_count = 0;
-{% if has_be_fallback %}
         self.diag_be_fallback_count = 0;
+{% if has_be_fallback %}
         self.be_cooldown = 0;
 {% endif %}
 {% if num_inductors > 0 %}

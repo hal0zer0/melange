@@ -234,12 +234,24 @@ The DK solver uses **trapezoidal** integration for both linear and nonlinear cur
 The net nonlinear contribution is `N_i * (i_nl[n+1] + i_nl[n])`, which is a proper
 trapezoidal average matching the linear discretization.
 
-**Warm-up**: The generated state's `warmup()` method runs 50 silent samples
-through `process_sample(0.0, ...)` after construction (called automatically
-from `Default` and `reset()`). This lets the DK solver settle from any residual
-mismatch between the DC OP solution and the DK steady state, and pulls
-high-gain op-amp circuits into the physically correct basin of attraction.
-Emitted from `crates/melange-solver/src/codegen/rust_emitter/dk_emitter.rs` (grep `warmup`).
+**Warm-up**: The generated `warmup()` method runs after construction and `reset()`.
+Two phases:
+
+1. **Low-rate DC settling** (nodal path only, when `DC_OP_CONVERGED = false`):
+   `rebuild_matrices(200.0)` → 1000 silent samples (5 seconds circuit time) →
+   `rebuild_matrices(target_rate)`. This charges coupling caps (e.g. 22µF × 27K =
+   0.6s RC) that the failed DC OP left uncharged. The DC steady state is rate-
+   independent (`A - A_neg = 2G`, no rate terms), so values found at 200 Hz are
+   exact at any target rate. The settled state is cached in `dc_operating_point`
+   and `settled_i_nl` — the expensive phase runs only once; subsequent `reset()`
+   calls reuse the cached values.
+
+2. **Standard warmup**: 50 silent samples at the target rate. Settles the DK/nodal
+   solver from any residual mismatch and pulls high-gain op-amp circuits into the
+   physically correct basin of attraction.
+
+Emitted from `nodal_emitter.rs` (grep `warmup`). The DK path (`dk_emitter.rs`)
+only emits the standard 50-sample warmup (DK circuits have well-conditioned DC OP).
 
 ## Expected DC OP Values (Verification)
 

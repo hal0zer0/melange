@@ -1045,6 +1045,10 @@ pub struct OpampIirData {
 pub struct OpampIR {
     /// Output node index (0-indexed, in the N-dimensional system)
     pub n_out_idx: usize,
+    /// Non-inverting input node index (0-indexed, `None` if grounded)
+    pub n_plus_idx: Option<usize>,
+    /// Inverting input node index (0-indexed, `None` if grounded)
+    pub n_minus_idx: Option<usize>,
     /// Upper voltage clamp (VCC). INFINITY = no upper clamp.
     pub vclamp_hi: f64,
     /// Lower voltage clamp (VEE). NEG_INFINITY = no lower clamp.
@@ -1052,6 +1056,41 @@ pub struct OpampIR {
     /// Slew rate [V/s]. INFINITY = no slew limiting (no code emitted).
     /// Parsed from `.model OA(SR=…)` as V/μs, converted to V/s in MNA.
     pub sr: f64,
+    /// Excess VCCS transconductance to subtract from the G matrix in sub-step
+    /// and main NR `a_sub`/`g_aug` builds. `gm_delta = gm_full - gm_capped`
+    /// where `gm_capped = AOL_SUB_MAX / r_out`. Zero when AOL is already low
+    /// enough. Prevents the LU back-solve from producing extreme voltages at
+    /// op-amp outputs that contaminate neighboring nodes before the post-solve
+    /// rail clamp fires.
+    pub gm_delta: f64,
+}
+
+/// Cap on effective AOL used when building sub-step / main NR matrices.
+/// Matches the DC OP `AOL_DC_MAX` constant in `dc_op.rs`. A capped Gm
+/// keeps the LU back-solve from producing extreme voltages (400kV+) at
+/// op-amp outputs that contaminate neighboring nodes via back-substitution
+/// before the post-solve rail clamp fires.
+const AOL_SUB_MAX: f64 = 1000.0;
+
+/// Build an `OpampIR` from the MNA `OpampInfo`, computing the Gm delta
+/// for sub-step matrix corrections.
+fn opamp_ir_from_info(oa: &crate::mna::OpampInfo) -> OpampIR {
+    let gm_full = oa.aol / oa.r_out;
+    let gm_capped = AOL_SUB_MAX / oa.r_out;
+    let gm_delta = if gm_full > gm_capped {
+        gm_full - gm_capped
+    } else {
+        0.0
+    };
+    OpampIR {
+        n_out_idx: oa.n_out_idx - 1,
+        n_plus_idx: if oa.n_plus_idx > 0 { Some(oa.n_plus_idx - 1) } else { None },
+        n_minus_idx: if oa.n_minus_idx > 0 { Some(oa.n_minus_idx - 1) } else { None },
+        vclamp_hi: oa.vcc,
+        vclamp_lo: oa.vee,
+        sr: oa.sr,
+        gm_delta,
+    }
 }
 
 /// Potentiometer parameters for code generation (Sherman-Morrison precomputed data).
@@ -2367,12 +2406,7 @@ impl CircuitIR {
                     (oa.vcc.is_finite() || oa.vee.is_finite() || oa.sr.is_finite())
                         && oa.n_out_idx > 0
                 })
-                .map(|oa| OpampIR {
-                    n_out_idx: oa.n_out_idx - 1,
-                    vclamp_hi: oa.vcc,
-                    vclamp_lo: oa.vee,
-                    sr: oa.sr,
-                })
+                .map(|oa| opamp_ir_from_info(oa))
                 .collect(),
             sparsity,
             opamp_iir: Vec::new(), // IIR op-amp handled in nodal path only
@@ -3163,12 +3197,7 @@ impl CircuitIR {
                     (oa.vcc.is_finite() || oa.vee.is_finite() || oa.sr.is_finite())
                         && oa.n_out_idx > 0
                 })
-                .map(|oa| OpampIR {
-                    n_out_idx: oa.n_out_idx - 1,
-                    vclamp_hi: oa.vcc,
-                    vclamp_lo: oa.vee,
-                    sr: oa.sr,
-                })
+                .map(|oa| opamp_ir_from_info(oa))
                 .collect(),
             sparsity,
             opamp_iir: opamp_iir_data,

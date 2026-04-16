@@ -983,6 +983,18 @@ impl RustEmitter {
         code.push_str("    /// investigation, not as an acceptable steady-state.\n");
         code.push_str("    pub diag_voltage_damp_count: u64,\n\n");
 
+        // DC settling state: when DC OP didn't converge at codegen time, the warmup
+        // fast-forwards at low sample rate to charge coupling caps. The settled state
+        // is cached for subsequent resets to avoid repeating the expensive warmup.
+        if !ir.dc_op_converged && m > 0 {
+            code.push_str("    /// Whether low-rate DC warmup has been completed\n");
+            code.push_str("    pub dc_settled: bool,\n");
+            code.push_str(
+                "    /// Settled nonlinear currents from low-rate warmup (replaces DC_NL_I on reset)\n",
+            );
+            code.push_str("    pub settled_i_nl: [f64; M],\n\n");
+        }
+
         // Cross-timestep chord state (persisted LU for full LU path)
         if m > 0 {
             code.push_str(
@@ -1252,6 +1264,14 @@ impl RustEmitter {
         }
         code.push_str("            input_prev: 0.0,\n");
         code.push_str("            last_nr_iterations: 0,\n");
+        if !ir.dc_op_converged && m > 0 {
+            code.push_str("            dc_settled: false,\n");
+            if has_dc_nl {
+                code.push_str("            settled_i_nl: DC_NL_I,\n");
+            } else {
+                code.push_str("            settled_i_nl: [0.0; M],\n");
+            }
+        }
         // Initialize DC blocking filter from DC OP so first sample sees zero delta
         if ir.dc_block {
             let output_nodes = &ir.solver_config.output_nodes;
@@ -1488,7 +1508,20 @@ impl RustEmitter {
         code.push_str("    /// Reset to DC operating point\n");
         code.push_str("    pub fn reset(&mut self) {\n");
         code.push_str("        self.v_prev = self.dc_operating_point;\n");
-        if has_dc_nl {
+        if !ir.dc_op_converged && m > 0 {
+            code.push_str("        if self.dc_settled {\n");
+            code.push_str("            self.i_nl_prev = self.settled_i_nl;\n");
+            code.push_str("            self.i_nl_prev_prev = self.settled_i_nl;\n");
+            code.push_str("        } else {\n");
+            if has_dc_nl {
+                code.push_str("            self.i_nl_prev = DC_NL_I;\n");
+                code.push_str("            self.i_nl_prev_prev = DC_NL_I;\n");
+            } else {
+                code.push_str("            self.i_nl_prev = [0.0; M];\n");
+                code.push_str("            self.i_nl_prev_prev = [0.0; M];\n");
+            }
+            code.push_str("        }\n");
+        } else if has_dc_nl {
             code.push_str("        self.i_nl_prev = DC_NL_I;\n");
             code.push_str("        self.i_nl_prev_prev = DC_NL_I;\n");
         } else {
@@ -1668,6 +1701,35 @@ impl RustEmitter {
         code.push_str("    ///\n");
         code.push_str("    /// The default `CircuitState::default()` calls this automatically.\n");
         code.push_str("    pub fn warmup(&mut self) {\n");
+        if !ir.dc_op_converged && m > 0 {
+            let target_rate =
+                ir.solver_config.sample_rate * ir.solver_config.oversampling_factor as f64;
+            code.push_str("        if !self.dc_settled {\n");
+            code.push_str(
+                "            // DC OP didn't converge — fast-forward to DC steady state.\n",
+            );
+            code.push_str(
+                "            // 1000 samples at 200Hz = 5 seconds of circuit time,\n",
+            );
+            code.push_str(
+                "            // enough for coupling caps up to RC ~1s to fully charge.\n",
+            );
+            code.push_str("            self.rebuild_matrices(200.0);\n");
+            code.push_str("            for _ in 0..1000 {\n");
+            code.push_str("                process_sample(0.0, self);\n");
+            code.push_str("            }\n");
+            code.push_str(&format!(
+                "            self.rebuild_matrices({:.17e});\n",
+                target_rate,
+            ));
+            code.push_str(
+                "            // Cache settled state for future resets\n",
+            );
+            code.push_str("            self.dc_operating_point = self.v_prev;\n");
+            code.push_str("            self.settled_i_nl = self.i_nl_prev;\n");
+            code.push_str("            self.dc_settled = true;\n");
+            code.push_str("        }\n");
+        }
         code.push_str("        for _ in 0..50 {\n");
         code.push_str("            process_sample(0.0, self);\n");
         code.push_str("        }\n");
@@ -4883,11 +4945,13 @@ impl RustEmitter {
             );
             code.push_str("                    }\n");
             code.push_str("                    v_sub = v_new_s;\n");
+            // Re-evaluate devices at the converged v_sub so i_nl_sub is consistent.
+            // Uses `_final` variant: reads v_nl_final, writes i_nl (no j_dev update).
             code.push_str("                    // Re-extract i_nl at converged v\n");
-            code.push_str("                    let mut v_nl_f = [0.0f64; M];\n");
-            code.push_str(&emit_sparse_nv_matvec(ir, "v_nl_f", "v_sub", "                    "));
-            code.push_str("                    i_nl_sub = [0.0f64; M];\n");
-            Self::emit_nodal_device_evaluation_body(&mut code, ir, "                    ");
+            code.push_str("                    let mut v_nl_final = [0.0f64; M];\n");
+            code.push_str(&emit_sparse_nv_matvec(ir, "v_nl_final", "v_sub", "                    "));
+            Self::emit_nodal_device_evaluation_final(&mut code, ir, "                    ");
+            code.push_str("                    i_nl_sub = i_nl;\n");
             code.push_str("                    if max_step < TOL + 1e-3 {\n");
             code.push_str("                        sub_converged = true;\n");
             code.push_str("                        break;\n");

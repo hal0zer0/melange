@@ -308,29 +308,81 @@ a different diode conducting.
 TL074 outputs instead of +11V). DC_OP_CONVERGED=false (formal convergence not achieved),
 but the values are physically correct.
 
-## Precision Rectifier Transient Divergence
+## Low-Rate DC Warmup (for Failed DC OP)
 
-Even with correct DC OP, precision rectifier circuits diverge in transient simulation
-when signal levels cause diode switching (e.g., 4kbuscomp at amplitude > 0.01).
+When DC OP doesn't converge (`DC_OP_CONVERGED = false`), the generated code's `warmup()`
+method fast-forwards to the DC steady state at a low sample rate (200 Hz) before running
+the normal 50-sample warmup at the target rate.
 
-**Root cause**: Same class as Klon BoyleDiodes heavy-clipping — the chord-LU NR
-direction becomes wrong when device state changes abruptly (diode on→off or off→on).
-The chord Jacobian captures one state; the actual circuit is in another.
+**Why**: Coupling caps (e.g. 22µF × 27K = 0.6s RC) take ~3 seconds to charge. At 48kHz,
+that's ~143,000 samples — far too many for init. The 50-sample default warmup only covers
+~1ms, leaving the circuit deeply in its charging transient. With garbage `DC_NL_I` values
+(e.g. 1.21e11 A from the failed DC OP), the NR never recovers.
 
-**Mitigation applied (2026-04-15)**:
-- **Per-iteration op-amp rail clamp in codegen**: Emitted in both trapezoidal NR
-  and BE fallback NR loops (`nodal_emitter.rs`). Prevents op-amp output node voltages
-  from exceeding VCC/VEE during NR iteration. This stabilizes idle and low-level
-  operation but doesn't solve the diode switching convergence problem.
+**How**: `warmup()` calls `rebuild_matrices(200.0)`, runs 1000 silent samples (= 5 seconds
+of circuit time), then restores `rebuild_matrices(target_rate)`. The DC steady state is
+rate-independent (`A - A_neg = 2G`, no rate terms), so values found at 200 Hz are valid at
+any target rate. The settled state is cached in `dc_operating_point` and `settled_i_nl`
+for subsequent `reset()` calls — the expensive low-rate phase runs only once.
 
-**Status**: 4kbuscomp stable at idle and amp≤0.01. Diverges at amp>0.02 when sidechain
-diodes start switching. The audio-path-only extract (4kbuscomp-audiopath.cir, M=2,
-0 diodes) works cleanly at all levels.
+**Result**: 4kbuscomp BE fallback reduced from ~100% of samples to <1% (3-34 out of 4800+).
+Sub-step NR handles the rest. Circuit stable at all amplitudes (0.001–1.0V).
 
-**Future fix candidates** (same as BoyleDiodes, see above):
-- True Newton (refactor every iteration during diode transitions)
-- Adaptive chord refactoring triggered by device-state change detection
-- Anderson acceleration or trust-region Newton
+## Precision Rectifier Transient NR
+
+With the DC warmup fix, the 4kbuscomp runs on the main trap NR path (chord method with
+ActiveSet resolve). The convergence check only monitors device-dimension nodes (N_V nonzero
+columns), so the NR "converges" even when linear nodes are contaminated.
+
+**Status**: 4kbuscomp stable at all amplitudes. Peak still too hot at amp=1.0 (31V vs
+expected ~10V gain-reduced — sidechain tracking issue, separate from contamination).
+
+**UNSOLVED: VCCS back-substitution contamination (1.18 billion V)**
+
+The full-LU NR path has a structural problem with high-gain VCCS op-amps:
+
+1. The NR Jacobian `g_aug = A - N_I*J_dev*N_V` inherits Gm ≈ 2000 S from A = G + alpha*C
+2. LU back-substitution computes v_new at op-amp outputs (400kV+ before clamp)
+3. Neighboring nodes are computed FROM the unclamped op-amp output during back-sub
+4. Post-solve rail clamp fixes v_new[op_out] → 11V, but v_new[neighbor] is already 8000V+
+5. NR convergence check only monitors device nodes, not linear neighbors — declares converged
+6. ActiveSet re-solve detects railed op-amps, tries to pin+re-solve, but LU fails (near-singular
+   with 12 pinned columns). Falls back to keeping the contaminated v.
+7. Contaminated v_prev propagates: `state.v_prev = v`, next sample's `A_neg * v_prev` feeds
+   the extreme values back into the RHS. Accumulates to 1.18 billion V at cv_to_vcas.
+
+**Key insight**: The sub-step path is NEVER reached (`substep_count=0`). The main NR
+converges (on device nodes) every sample. The `nr_max_iter_count` comes from the ActiveSet
+re-solve LU failure, which increments the counter but doesn't reset `converged`.
+
+**Approaches tried (2026-04-16)**:
+
+| Approach | Result |
+|----------|--------|
+| Cap Gm in A_neg only (history term) | No effect — contamination is in the forward LU solve, not the history |
+| Cap Gm in G (both A and A_neg) | **Eliminates contamination** (max_v: 1.18B → 15V) but **kills audio** (peak: 31V → 0V). AOL 200k→1k too aggressive for audio-path op-amps |
+| Cap Gm in sub-step a_sub | No effect — sub-step path never reached |
+| 5 earlier approaches (session 1) | See memory: global clamp, matrix pinning, input-aware pinning, post-convergence resolve, trial re-solve |
+
+**Why G-level cap kills audio**: The 4kbuscomp has 12 op-amps. Some are sidechain
+(rectifiers, comparators — normally railed) and some are audio-path (mix amp, output
+buffer — must amplify signal). Capping ALL op-amps' Gm to AOL=1000 reduces audio-path
+gain below usable levels. A selective cap (sidechain only) would require compile-time
+knowledge of which op-amps rail, which depends on signal level.
+
+**Viable next approaches** (not yet tried):
+- **Selective G cap per op-amp**: Use topology analysis to identify sidechain vs audio-path
+  op-amps. Cap only those whose outputs feed into rail-clamp territory (output between
+  VCA control nodes and diode rectifiers, not in the audio signal chain).
+- **Post-LU neighbor correction**: After clamping op-amp outputs, re-compute only the
+  directly-coupled neighbor nodes from the clamped values. Cheaper than full re-solve,
+  avoids the singular-matrix problem the ActiveSet has with 12 pinned columns.
+- **IIR op-amp model**: Strip Gm from G entirely, model the VCCS as an explicit IIR filter
+  per op-amp. Eliminates extreme A entries. Currently disabled (`false` guard in ir.rs)
+  because the sub-step path omits the IIR RHS stamp.
+- **Convergence check on all N nodes**: Monitor all 80 nodes, not just device nodes.
+  Would catch the contamination early and route to BE/sub-step. Risk: may cause excessive
+  BE fallback if non-device nodes are legitimately slow to converge.
 
 ## Known Full-LU NR Limitations
 

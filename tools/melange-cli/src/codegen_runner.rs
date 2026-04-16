@@ -231,9 +231,13 @@ fn main() {{
     let output_path = args.get(2).map(|s| s.as_str()).unwrap_or("output.wav");
 
     let mut output = Vec::with_capacity(samples.len());
+    let mut max_abs_v_prev = 0.0f64;
     for &s in &samples {{
         let out = process_sample(s, &mut state);
         output.push(out[0]);
+        for &v in &state.v_prev {{
+            if v.abs() > max_abs_v_prev {{ max_abs_v_prev = v.abs(); }}
+        }}
     }}
 
     write_wav(output_path, sr as u32, &output);
@@ -243,7 +247,9 @@ fn main() {{
     eprintln!("DIAG:samples={{}}", output.len());
     eprintln!("DIAG:peak={{:.6}}", peak);
     eprintln!("DIAG:nr_max_iter_count={{}}", state.diag_nr_max_iter_count);
+    eprintln!("DIAG:substep_count={{}}", state.diag_substep_count);
     eprintln!("DIAG:nan_reset_count={{}}", state.diag_nan_reset_count);
+    eprintln!("DIAG:max_abs_v_prev={{:.6}}", max_abs_v_prev);
 }}
 "#,
         amp = amplitude.unwrap_or(0.5),

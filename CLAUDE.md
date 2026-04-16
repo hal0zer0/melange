@@ -182,7 +182,8 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
 | NR max-iter-cap hits on wide-range pot jumps (preset recall, automation step) | Stale `v_prev`/`i_nl_prev` from previous (different) operating point; NR starts far from new bias | Warm DC-OP re-init in `set_pot_N`/`set_switch_N` when `|r - r_prev|/r_prev > 0.20` (FIXED commit `e8e18a7`). The earlier Sherman-Morrison removal (commit `eaee955`) was treating a symptom — SM is mathematically exact; stale DC-OP seed was the root cause. |
 | DC OP wrong polarity for precision rectifier op-amps (e.g., 4kbuscomp sidechain TL074 at +11V instead of -11V) | Multi-equilibrium: AOL=200K overshoots NR from one rail to the other in one iteration. Linear initial guess finds wrong self-consistent equilibrium. | AOL capped at 1000 in DC G matrix (`build_dc_system`), op-amp output seeding (`seed_opamp_outputs`), per-iteration rail clamp in DC OP NR. (FIXED 2026-04-15) |
 | DC OP diode reverse bias: nodes float to non-physical voltages (91kV) when diodes off | DC OP `evaluate_devices_inner()` ignored BV/IBV and had zero reverse-bias conductance | BV/IBV breakdown added to DC OP diode evaluation; device-level Gmin (1e-12 S) added as minimum junction conductance. (FIXED 2026-04-15) |
-| Precision rectifier transient divergence at signal levels causing diode switching | Chord-LU NR direction wrong when device state changes (diode on→off). Same class as Klon BoyleDiodes heavy-clip. | Per-iteration op-amp rail clamp in both trapezoidal and BE NR loops. Stabilizes idle + low-level (amp≤0.01). Diode-switching levels (amp>0.02) still diverge. (PARTIAL 2026-04-15) |
+| Precision rectifier transient: trap NR never converges, every sample falls to BE | DC OP fails → DC_NL_I garbage (1.21e11 A) → coupling caps uncharged after 50-sample warmup (RC > 0.5s needs ~143K samples at 48kHz) | Low-rate DC warmup: 200 Hz × 1000 samples (5s circuit time) charges caps before transient NR. Settled state cached. BE fallback <1%, sub-step handles >99%. (FIXED 2026-04-16) |
+| Full-LU NR: VCCS back-sub contamination (1.18B V at linear neighbor nodes) | Op-amp VCCS Gm ≈ 2000 in A. LU back-sub computes v_new[op_out]=400kV, uses it for neighbors before post-solve clamp. NR convergence checks device nodes only (N_V cols), misses linear neighbors. v_prev feeds back via A_neg, accumulates. | **UNSOLVED.** G-level Gm cap (AOL 200k→1k) eliminates contamination (15V) but kills audio-path op-amp gain (peak→0). Selective cap or post-LU neighbor correction needed. See `docs/aidocs/DEBUGGING.md`. |
 
 ## Current Status (2026-04-11)
 
@@ -331,8 +332,10 @@ Historical validation data preserved below for reference.
   - 50mV in → 549mV out (11x / 20.8dB gain), zero NR divergence
 - Bus compressor (4kbuscomp): 12 op-amps, 2 VCAs, 6 diodes, 2 pots, 2 switches
   - Audio path extract (4kbuscomp-audiopath.cir, M=2): stable, peak=0.001439
-  - Full circuit (N=80, M=10): DC OP correct (2026-04-15 BV/IBV + AOL cap + seeding fixes), stable at idle + amp≤0.01
-  - Transient diverges at amp>0.02 (sidechain diode switching NR, same class as Klon BoyleDiodes)
+  - Full circuit (N=80, M=10): stable at all amplitudes (0.001–1.0V), BE fallback <1% of samples
+  - Low-rate DC warmup (200Hz × 1000 samples) charges coupling caps when DC OP fails to converge
+  - Sub-step NR handles >99% of samples; trap NR never converges (12 high-gain op-amps)
+  - Peak still too hot at amp=1.0 (31V — sidechain gain reduction not fully tracking)
   - Uses nodal full-LU path (K≈0 from current-mode VCA)
 - EL84 single stage (el84-single-stage): Reefman Derk §4.4 rational screen form
   - DC-OP validated, end-to-end compile-and-run verified
