@@ -3288,14 +3288,28 @@ impl MnaBuilder {
                 vca.n_internal_idx = int_node + 1; // 1-indexed
                 vca.n_sense_idx = sense_row + 1; // 1-indexed
 
-                // Stamp dummy resistor from sig+_int to ground (1 megaohm)
-                // This terminates the internal node so KCL is satisfied
-                // without creating a current path to sig-
-                let g_dummy = 1e-6; // 1/1MEG
+                // Stamp virtual-ground terminator from sig+_int to ground.
+                //
+                // A real current-mode VCA (THAT 2180 / DBX 2150) holds sig+
+                // at virtual ground via the log-antilog feedback loop. The
+                // sense source between sig+ and sig+_int copies that
+                // potential to sig+_int; the terminator here forces sig+_int
+                // toward 0 V so sig+ sits near ground. Rdummy must be
+                // substantially smaller than any realistic series drive
+                // resistor, otherwise the drive resistor and Rdummy form a
+                // current divider that attenuates the sensed input current
+                // by Rdummy / (Rdrive + Rdummy).
+                //
+                // The original Rdummy=1 MΩ caused a ~32 dB passband loss on
+                // circuits like 4kbuscomp-audiopath (Rdrive=27 kΩ): measured
+                // −36.77 dB instead of the expected −5.1 dB (15K/27K
+                // transimpedance ratio). At Rdummy=1 Ω the divider error is
+                // <0.001 dB for any drive resistor ≥1 Ω.
+                let g_dummy = 1.0; // 1 ohm
                 mna.g[int_node][int_node] += g_dummy;
 
                 log::debug!(
-                    "VCA {} (current mode): internal={}, sense={}, Rdummy=1MEG",
+                    "VCA {} (current mode): internal={}, sense={}, Rdummy=1 ohm",
                     vca.name,
                     int_node,
                     sense_row
