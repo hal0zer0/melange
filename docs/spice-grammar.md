@@ -57,7 +57,7 @@ Cc emit 0 100p
 
 **Syntax:**
 ```
-Lname n+ n- value [IC=initial_current]
+Lname n+ n- value [IC=initial_current] [ISAT=saturation_current]
 ```
 
 **Parameters:**
@@ -67,12 +67,20 @@ Lname n+ n- value [IC=initial_current]
 | `n-` | Negative terminal node |
 | `value` | Inductance in henries (H) |
 | `IC` | (Optional) Initial current at t=0 |
+| `ISAT` | (Optional) Core saturation current in amps. When present, inductance follows a tanh model: `L(I) = L0 * (1 - tanh(I/ISAT)^2)`. Must be positive. |
 
 **Examples:**
 ```spice
 L1 in out 10m
 Lchoke vcc coll 100u
+Lcore a b 100m ISAT=20m          ; saturating inductor
 ```
+
+**Notes on saturating inductors:**
+- Uses Sherman-Morrison rank-1 per-sample update with drift resync every 16 updates
+- Currently uncoupled only (cannot combine with `K` coupling statements)
+- L(I) computation is lagged by one sample (uses previous-sample current)
+- No ngspice validation available for saturation behavior
 
 ---
 
@@ -932,7 +940,7 @@ Marks a resistor as runtime-variable. In generated plugins, each `.pot` becomes 
 | `default_value` | (Optional) Default resistance; must be between min and max. If omitted, uses the resistor's netlist nominal value. |
 | `"Label"` | (Optional) Quoted parameter label for plugin UI |
 
-**Constraints:** min < max (strictly). Maximum 32 `.pot` directives per circuit.
+**Constraints:** min < max (strictly). Maximum 64 combined `.pot` + `.wiper` leg entries per circuit.
 
 **Examples:**
 ```spice
@@ -944,8 +952,77 @@ R_tone mid out 10k
 ```
 
 **Notes:**
-- DK codegen uses Sherman-Morrison rank-1 updates (O(N²) per pot change, per sample)
-- Nodal codegen rebuilds matrices on change (per block, not per sample)
+- All codegen paths use per-block O(N^3) matrix rebuild on value change
+- Per-sample smoothing via `.smoothed.next()` interpolates between rebuilds
+- Warm DC-OP re-init on large jumps (>20% relative change) prevents NR divergence
+
+---
+
+### .wiper — Three-Terminal Wiper Potentiometer
+
+Models a 3-terminal pot (top, wiper, bottom) as two resistors sharing a wiper node. A single UI parameter (position 0.0-1.0) controls both resistor values inversely.
+
+**Syntax:**
+```
+.wiper R_cw R_ccw total_R [default_pos] ["Label"]
+```
+
+| Field | Description |
+|-------|-------------|
+| `R_cw` | Name of the clockwise (top-to-wiper) leg resistor |
+| `R_ccw` | Name of the counter-clockwise (wiper-to-bottom) leg resistor |
+| `total_R` | Total pot resistance in ohms |
+| `default_pos` | (Optional) Default wiper position, 0.0-1.0. Default: 0.5 |
+| `"Label"` | (Optional) Quoted parameter label for plugin UI |
+
+**Example:**
+```spice
+R_cw top wiper 50k
+R_ccw wiper bottom 50k
+.wiper R_cw R_ccw 100k 0.5 "Volume"
+```
+
+**Notes:**
+- Both resistors must share exactly one node (the wiper node)
+- Total resistance must be > 20 ohms
+- At position 0.0: R_cw = total_R, R_ccw = minimum. At position 1.0: R_cw = minimum, R_ccw = total_R
+- Minimum leg resistance is 10 ohms (models wiper contact resistance)
+- Internally expands to two `.pot` entries; both count toward the 64-pot limit
+- Wiper pots participate in `.gang` directives the same way as `.pot` entries
+
+---
+
+### .gang — Link Multiple Pots/Wipers to One Parameter
+
+Links multiple `.pot` and/or `.wiper` entries to a single UI parameter. The gang position (0.0-1.0) controls all members simultaneously.
+
+**Syntax:**
+```
+.gang "Label" member1 [!]member2 [...] [default]
+```
+
+| Field | Description |
+|-------|-------------|
+| `"Label"` | Quoted parameter label for the single UI knob |
+| `memberN` | Component name from a `.pot` or `.wiper` directive |
+| `!memberN` | Prefix `!` inverts the member's response (1.0 - position) |
+| `default` | (Optional) Default position, 0.0-1.0 |
+
+**Example:**
+```spice
+.pot R_treble 1k 250k "Treble"
+.pot R_bass 1k 500k "Bass"
+.gang "Tone" R_treble !R_bass 0.5
+```
+
+In this example, turning the "Tone" knob up increases R_treble and decreases R_bass.
+
+**Notes:**
+- Requires at least 2 members
+- Ganged members are excluded from individual parameter generation in the plugin template
+- One FloatParam is emitted per gang; the gang label becomes the parameter name
+- Members can be from `.pot` or `.wiper` directives (or a mix)
+- A resistor can only belong to one gang
 
 ---
 
@@ -1011,18 +1088,24 @@ Removes a nonlinear device from the Newton-Raphson system and replaces it with s
 
 **Syntax:**
 ```
-.linearize device_name
+.linearize device_name [device_name ...]
 ```
 
-**Example:**
+**Supported devices:** BJTs (Q prefix) and triodes (T prefix).
+
+**Examples:**
 ```spice
-.linearize Q9
+.linearize Q9         ; Linearize a Vbe-multiplier BJT
+.linearize V1         ; Linearize a triode (reduces M by 2)
+.linearize Q3 Q4 V2   ; Multiple devices on one line
 ```
 
 **Notes:**
-- Useful when a device is always in the same operating region (e.g., a Vbe multiplier)
-- Reduces computational cost by lowering M
+- Useful when a device is always in the same operating region (e.g., a Vbe multiplier BJT, or a clean gain stage triode)
+- BJTs: reduces M by 2 per device (stamps g_m, g_pi, r_o into G)
+- Triodes: reduces M by 2 per device (stamps g_m, 1/r_p into G)
 - The device still affects the circuit via its linearized conductances
+- The linearization is computed from the DC operating point, so it is only accurate for small signals around that point
 
 ---
 
@@ -1117,8 +1200,9 @@ The following SPICE features are **not supported** by melange-solver:
 
 ### Nonlinear Reactive Components
 - Nonlinear capacitors (`C` with nonlinear expression)
-- Nonlinear inductors (`L` with nonlinear expression)
-- Nonlinear magnetic core models
+- Nonlinear inductors with arbitrary expressions (note: `ISAT=` tanh saturation IS supported for uncoupled inductors)
+- Nonlinear magnetic core models (SPICE `.model CORE` syntax)
+- Coupled saturating inductors (saturation only works on uncoupled inductors)
 
 ### Transmission Lines
 - Lossless transmission lines

@@ -29,7 +29,7 @@ The solver generates Rust code with:
 - Const-generic matrix sizes (`[f64; N]`, not `Vec<f64>`)
 - Inlined NR iteration with the specific Jacobian structure
 - Precomputed constant matrices as `const` arrays
-- Sherman-Morrison projections for time-varying elements
+- Per-block matrix rebuild for time-varying elements (pots, switches)
 - Companion model update functions
 
 The generated code should be indistinguishable in performance from hand-written code.
@@ -71,23 +71,27 @@ Zero dependencies. `no_std`. The foundation everything else builds on.
 Depends on melange-primitives. Provides the `NonlinearDevice` trait and implementations.
 
 ```rust
-/// A nonlinear circuit element for use in MNA/DK solvers.
-pub trait NonlinearDevice {
-    /// Current as a function of voltage: i(v)
-    fn current(&self, v: f64) -> f64;
-    /// Derivative of current: di/dv (for Newton-Raphson Jacobian)
-    fn transconductance(&self, v: f64) -> f64;
+/// A nonlinear circuit element. N = number of controlling voltages.
+pub trait NonlinearDevice<const N: usize> {
+    /// Current as a function of terminal voltages.
+    fn current(&self, v: &[f64; N]) -> f64;
+    /// Partial derivatives of current: di/dv_k (for NR Jacobian).
+    fn jacobian(&self, v: &[f64; N]) -> [f64; N];
 }
 ```
 
 **Implementations:**
-- `BjtEbersMoll { is: f64, vt: f64, beta_f: f64, beta_r: f64 }` — NPN/PNP BJT
-- `BjtGummelPoon { ... }` — extended BJT model (Early effect, high injection)
-- `DiodeShockley { is: f64, n: f64, vt: f64 }` — junction diode
-- `KorenTriode { mu: f64, ex: f64, kg1: f64, kp: f64, kvb: f64 }` — vacuum tube
-- `KorenPentode { ... }` — vacuum tube pentode
-- `CdsLdr { r_min, r_max, gamma, attack_tau, release_tau }` — photoresistor
-- `IdealOpamp` / `BoyleOpamp` — operational amplifier models
+- `DiodeShockley { is, n, vt }` — junction diode (N=1)
+- `DiodeWithRs` — diode with series resistance (inner NR)
+- `BjtEbersMoll { is, vt, beta_f, beta_r }` — NPN/PNP BJT (N=2)
+- `BjtGummelPoon { ... }` — extended BJT model (Early effect, high injection, N=2)
+- `Jfet { idss, vp, lambda }` — N/P-channel JFET (N=2)
+- `Mosfet { kp, vt, lambda }` — Level 1 MOSFET (N=2)
+- `KorenTriode { mu, ex, kg1, kp, kvb }` — vacuum triode (N=2)
+- `KorenPentode { ... }` — vacuum pentode / beam tetrode (N=3)
+- `Vca { g0, vscale, thd }` — VCA (THAT 2180 style, N=2)
+- `CdsLdr { r_min, r_max, gamma, attack_tau, release_tau }` — photoresistor (N=1, device model only, not in codegen pipeline)
+- `BoyleOpamp` / `SimpleOpamp` — operational amplifier models (linear, no NR dimension)
 
 **SPICE Model Card Import:**
 - Parse `.model` statements from SPICE netlists
@@ -99,8 +103,8 @@ The core. Depends on primitives and devices.
 
 **Netlist Parser:**
 - Parse a subset of SPICE sufficient for audio circuits
-- Components: R, C, L, V (DC/AC), I, D (diode), Q (BJT), J (JFET), M (MOSFET), T (tube), U (op-amp), Y (VCA), X (subcircuit), E (VCVS), G (VCCS), K (coupled inductors)
-- Directives: `.model`, `.subckt`, `.pot`, `.wiper`, `.switch`, `.gang`, `.input_impedance`
+- Components: R, C, L (including ISAT= saturation), V (DC), I, D (diode), Q (BJT), J (JFET), M (MOSFET), T (triode), P (pentode), U (op-amp), Y (VCA), X (subcircuit), E (VCVS), G (VCCS), K (coupled inductors)
+- Directives: `.model`, `.subckt`, `.pot`, `.wiper`, `.switch`, `.gang`, `.linearize`, `.input_impedance`
 - Output: `Netlist` struct with elements, models, and directives
 
 **MNA Assembler:**
@@ -112,7 +116,7 @@ The core. Depends on primitives and devices.
 **DK Kernel / Nodal Solver:**
 - `DkKernel::from_mna(&mna, sample_rate)` → DK kernel with K matrix
 - Three codegen paths: DK Schur, Nodal Schur, Nodal Full LU (auto-selected)
-- Sherman-Morrison projection vectors for `.pot`/`.wiper` elements
+- Per-block matrix rebuild for `.pot`/`.wiper` elements on value change
 
 **Code Generator (codegen-only pipeline):**
 - `CircuitIR::from_kernel(...)` → intermediate representation
@@ -156,6 +160,7 @@ The command-line interface for working with circuits.
 - `melange analyze <netlist>` — AC frequency response analysis
 - `melange validate <netlist>` — compare against ngspice, report deltas
 - `melange nodes <netlist>` — show circuit nodes and devices
+- `melange sources list|add|remove|update` — manage circuit source repositories
 - `melange import <kicad_netlist>` — import KiCad netlist to .cir format
 - `melange builtins` — list built-in example circuits
 
@@ -176,7 +181,7 @@ The generated `circuit.rs` contains:
 - `const` arrays for all precomputed matrices (S, K, A_neg, S*N_i, DC_OP, etc.)
 - A `process_sample()` function with inlined NR iteration
 - `CircuitState` struct with all solver state (stack-allocated arrays)
-- Sherman-Morrison vectors for runtime pot/wiper control
+- Per-block O(N^3) matrix rebuild for runtime pot/wiper control
 - `set_sample_rate()` for runtime matrix recomputation from G+C
 - `#[inline(always)]` on the hot path
 

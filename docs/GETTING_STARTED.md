@@ -117,6 +117,11 @@ Key flags for `melange compile`:
 | `--wet-dry-mix` | off | Add wet/dry mix parameter |
 | `--mono` | off | Generate mono instead of stereo |
 | `--backward-euler` | off | Use backward Euler (unconditionally stable) |
+| `--tube-grid-fa auto\|on\|off` | `auto` | Pentode grid-off dimension reduction |
+| `--opamp-rail-mode` | `auto` | Op-amp rail saturation strategy |
+| `--vendor` | `"Melange"` | Plugin vendor name (plugin format only) |
+| `--vst3-id` | derived | Stable VST3 class ID (16 ASCII chars) |
+| `--clap-id` | derived | CLAP plugin ID (reverse-DNS) |
 
 ## Customizing the Generated Plugin
 
@@ -136,7 +141,7 @@ After `melange compile --format plugin`:
 
 Melange uses a dialect of SPICE — standard SPICE syntax for components and models, plus audio-specific extensions (`.pot`, `.switch`, `.input_impedance`). See [spice-grammar.md](spice-grammar.md) for the full reference.
 
-Supported devices: resistors, capacitors, inductors, voltage/current sources, diodes, BJTs, JFETs, MOSFETs, triode tubes, op-amps, VCAs, coupled inductors/transformers, VCVS, VCCS, subcircuits.
+Supported devices: resistors, capacitors, inductors (including saturating with `ISAT=`), voltage/current sources, diodes (including Zener with BV/IBV), BJTs (Ebers-Moll and Gummel-Poon), JFETs (N/P channel), MOSFETs (Level 1, N/P with body effect), triode tubes (Koren model), pentode/beam tetrode tubes (5 equation families, 29 catalog models), op-amps (Boyle macromodel with GBW, rail clamping, slew rate), VCAs (THAT 2180-style), coupled inductors/transformers, VCVS, VCCS, subcircuits.
 
 ## Troubleshooting
 

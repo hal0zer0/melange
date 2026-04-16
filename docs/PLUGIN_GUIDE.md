@@ -70,8 +70,8 @@ Each `.pot` directive in the netlist becomes a `FloatParam` with:
 - Smoothing: 10ms linear ramp
 
 **Update timing:**
-- **DK solver**: per-sample (Sherman-Morrison O(N^2) correction — fast)
-- **Nodal solver**: per-block (matrix rebuild O(N^3) on value change)
+- **All solvers**: per-block (matrix rebuild O(N^3) on value change)
+- Per-sample smoothing via `.smoothed.next()` interpolates between rebuilds
 
 ### Switch Parameters (from `.switch` directives)
 
@@ -105,12 +105,12 @@ The generated `process()` method follows this flow:
 ```
 Per block:
   Read switch positions → rebuild matrices if changed
-  Read pot values (nodal only) → rebuild if changed
+  Read pot values → rebuild matrices if changed (O(N^3))
 
 Per sample:
   Read smoothed input_level → compute input_gain
   Read smoothed output_level → compute output_gain
-  Read smoothed pot values (DK only)
+  Read smoothed pot values (interpolated between rebuilds)
 
   For each channel (stereo: L and R independently):
     input *= input_gain                          (if level params)
@@ -265,7 +265,7 @@ Requires zig 0.13, cargo-zigbuild, macOS SDK 13.3, and rcodesign.
 | Problem | Cause | Fix |
 |---------|-------|-----|
 | No output / silence | Wrong input/output node names | Check `melange nodes circuit.cir` |
-| Very quiet output | Level params at default (0 dB) but circuit expects hot input | Increase Input Level, or use `--output-scale` |
+| Very quiet output | Level params at default (0 dB) but circuit expects hot input | Increase Input Level in the plugin UI |
 | Clicks on parameter changes | Smoothing too short | Increase `.with_smoother(SmoothingStyle::Linear(50.0))` |
 | Clicks on preset/DAW load | State not reset | Check that `reset()` calls `state.reset()` |
 | High CPU usage | Nodal solver with many pots | Expected — pots trigger O(N^3) rebuild. Reduce pot count or use DK-compatible circuit |

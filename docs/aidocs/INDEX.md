@@ -35,6 +35,7 @@ AI agent consumption: dense equations, code patterns, cross-references, no narra
 | Changing signal levels or DC blocking | [SIGNAL_LEVELS.md](SIGNAL_LEVELS.md) |
 | Running SPICE validation tests | [SPICE_VALIDATION.md](SPICE_VALIDATION.md) |
 | Checking project status, validation results, routing | [STATUS.md](STATUS.md) |
+| Modeling tungsten-based components (Schottky, cat's whisker, WSe2) | [TUNGSTEN_MATERIAL.md](TUNGSTEN_MATERIAL.md) |
 
 ## Critical Equations (Verified)
 
@@ -106,7 +107,7 @@ K' = K - scale * (N_v * su) * (su^T * N_i)
 | BJT no output | No DC OP init | Call initialize_dc_op() or use DC_NL_I |
 | DC OP diverges | Wrong Jacobian sign | Use G_aug = G_dc - N_i*J_dev*N_v |
 | NR oscillation | No pnjlim/fetlim | See VOLTAGE_LIMITING.md |
-| Pot no effect | SM vectors stale | Check set_sample_rate recomputes |
+| Pot no effect | Rebuild not triggered | Check set_pot_N() calls rebuild_matrices() |
 | NaN in nodal codegen | Inductor currents not initialized | Copy v_node[n_aug..] from DC OP |
 | Nodal codegen wrong output | Zeroed inductor A_neg rows | Only zero VS/VCVS rows (n_nodes..n_aug) |
 | Xfmr NR diverges exponentially | Non-PD inductance matrix (inconsistent k values) | Ensure all k on same core are similar; MNA warns on non-PD |
@@ -135,6 +136,7 @@ K' = K - scale * (N_v * su) * (su^T * N_i)
 | [SIGNAL_LEVELS.md](SIGNAL_LEVELS.md) | Reference | DC blocking, output scaling, plugin levels |
 | [SPICE_VALIDATION.md](SPICE_VALIDATION.md) | Reference | ngspice setup, correlation benchmarks |
 | [STATUS.md](STATUS.md) | Reference | What's implemented, validated circuits, codegen routing |
+| [TUNGSTEN_MATERIAL.md](TUNGSTEN_MATERIAL.md) | Reference | Tungsten metal/compound properties, Schottky barriers, cat's whisker diodes, WSe2/WS2 semiconductors |
 
 ## External References
 

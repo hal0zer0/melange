@@ -80,6 +80,22 @@ Mark variable resistors as pots and switchable components as switches:
 .switch C_tone 100n 220n 470n "Tone"
 ```
 
+For 3-terminal wiper pots (top, wiper, bottom), use two resistors and `.wiper`:
+
+```spice
+R_cw top wiper 50k
+R_ccw wiper bottom 50k
+.wiper R_cw R_ccw 100k "Volume"
+```
+
+Link multiple pots or wipers to a single knob with `.gang`:
+
+```spice
+.gang "Tone" R_treble R_bass
+```
+
+See [spice-grammar.md](spice-grammar.md#5-melange-extensions) for full syntax.
+
 ## Component Reference
 
 ### Passive Components
@@ -88,6 +104,7 @@ Mark variable resistors as pots and switchable components as switches:
 R1 node1 node2 10k          ; Resistor (ohms)
 C1 node1 node2 100n         ; Capacitor (farads)
 L1 node1 node2 10m          ; Inductor (henries)
+L2 node1 node2 100m ISAT=20m ; Saturating inductor (tanh model)
 C2 node1 node2 10u IC=5     ; Capacitor with initial voltage
 ```
 
@@ -107,6 +124,7 @@ Q1 collector base emitter 2N2222     ; BJT: C, B, E, model
 J1 drain gate source J2N5457         ; JFET: D, G, S, model
 M1 drain gate source bulk NMOS1      ; MOSFET: D, G, S, B, model
 T1 grid plate cathode 12AX7         ; Triode tube: G, P, K, model
+P1 plate grid cathode screen EL84_P  ; Pentode: P, G, K, Screen, model
 ```
 
 ### Active Devices
@@ -225,12 +243,13 @@ Each device type has a specific terminal order. Getting it wrong flips the devic
 | JFET | drain, gate, source | DGS |
 | MOSFET | drain, gate, source, bulk | DGSB |
 | Triode | grid, plate, cathode | GPC |
+| Pentode | plate, grid, cathode, screen | PGKS (optional suppressor after screen) |
 | Op-amp | +in, -in, out | plus, minus, out |
 | VCA | sig+, sig-, ctrl+, ctrl- | signal then control |
 
 ### 3. Missing .model card
 
-Every D, Q, J, M, T, U, and Y element references a model by name. That model must be defined:
+Every D, Q, J, M, T, P, U, and Y element references a model by name. That model must be defined:
 
 ```spice
 D1 in out MyDiode
