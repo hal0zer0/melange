@@ -145,6 +145,18 @@ enum Commands {
         #[arg(long, value_name = "MODE", default_value = "auto")]
         opamp_rail_mode: String,
 
+        /// Authentic circuit noise mode: off (default), thermal, shot, full.
+        /// `thermal` emits Johnson-Nyquist noise on every fixed resistor;
+        /// `shot`/`full` add junction and 1/f sources (phases 2-5, currently no-op).
+        /// See docs/aidocs/NOISE.md. Runtime toggle via `set_noise_enabled(bool)`.
+        #[arg(long, value_name = "MODE", default_value = "off")]
+        noise: String,
+
+        /// Master noise seed (u64). `0` → entropy from system clock at plugin
+        /// init. Nonzero → deterministic noise (same seed → bit-identical output).
+        #[arg(long, value_name = "SEED", default_value = "0")]
+        noise_seed: u64,
+
         /// Plugin display name (defaults to capitalized circuit filename)
         #[arg(long)]
         name: Option<String>,
@@ -281,6 +293,14 @@ enum Commands {
         /// and improves NR stability for circuits with diode switching.
         #[arg(long, default_value = "1")]
         oversampling: usize,
+
+        /// Authentic circuit noise mode: off (default), thermal, shot, full.
+        #[arg(long, value_name = "MODE", default_value = "off")]
+        noise: String,
+
+        /// Master noise seed (u64). `0` → entropy from system clock; nonzero → deterministic.
+        #[arg(long, value_name = "SEED", default_value = "0")]
+        noise_seed: u64,
     },
 
     /// Analyze circuit frequency response
@@ -489,6 +509,8 @@ fn main() -> Result<()> {
             backward_euler,
             tube_grid_fa,
             opamp_rail_mode,
+            noise,
+            noise_seed,
             name,
             mono,
             wet_dry_mix,
@@ -522,6 +544,14 @@ fn main() -> Result<()> {
                     anyhow::anyhow!(
                         "Unknown --opamp-rail-mode '{}'. Valid values: auto, none, hard, active-set, boyle-diodes",
                         opamp_rail_mode
+                    )
+                })?;
+
+            let noise_mode = melange_solver::codegen::NoiseMode::parse(&noise)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Unknown --noise '{}'. Valid values: off, thermal, shot, full",
+                        noise
                     )
                 })?;
 
@@ -575,6 +605,8 @@ fn main() -> Result<()> {
                 backward_euler,
                 &tube_grid_fa,
                 rail_mode,
+                noise_mode,
+                noise_seed,
                 name.as_deref(),
                 mono,
                 wet_dry_mix,
@@ -633,6 +665,8 @@ fn main() -> Result<()> {
             solver,
             opamp_rail_mode,
             oversampling,
+            noise,
+            noise_seed,
         } => {
             if oversampling != 1 && oversampling != 2 && oversampling != 4 {
                 anyhow::bail!("oversampling must be 1, 2, or 4, got {}", oversampling);
@@ -643,6 +677,13 @@ fn main() -> Result<()> {
                         "Invalid --opamp-rail-mode '{}'. Valid: auto, none, hard, \
                          active-set, active-set-be, boyle-diodes",
                         opamp_rail_mode
+                    )
+                })?;
+            let noise_mode = melange_solver::codegen::NoiseMode::parse(&noise)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Invalid --noise '{}'. Valid: off, thermal, shot, full",
+                        noise
                     )
                 })?;
             let circuit_source = circuits::resolve(&input)?;
@@ -661,6 +702,8 @@ fn main() -> Result<()> {
                     solver: &solver,
                     opamp_rail_mode: rail_mode,
                     oversampling,
+                    noise_mode,
+                    noise_seed,
                 },
             )
         }
@@ -824,6 +867,8 @@ fn compile_circuit_source(
     backward_euler: bool,
     tube_grid_fa: &str,
     opamp_rail_mode: melange_solver::codegen::OpampRailMode,
+    noise_mode: melange_solver::codegen::NoiseMode,
+    noise_seed: u64,
     plugin_name: Option<&str>,
     mono: bool,
     wet_dry_mix: bool,
@@ -1545,6 +1590,8 @@ fn compile_circuit_source(
         dc_block: !no_dc_block,
         backward_euler,
         opamp_rail_mode,
+        noise_mode,
+        noise_master_seed: noise_seed,
         ..CodegenConfig::default()
     };
 
@@ -2065,6 +2112,8 @@ struct SimulateOptions<'a> {
     solver: &'a str,
     opamp_rail_mode: melange_solver::codegen::OpampRailMode,
     oversampling: usize,
+    noise_mode: melange_solver::codegen::NoiseMode,
+    noise_seed: u64,
 }
 
 fn simulate_circuit_source(
@@ -2518,6 +2567,8 @@ fn simulate_circuit_source(
         backward_euler: false,
         disable_be_fallback: false,
         opamp_rail_mode: opts.opamp_rail_mode,
+        noise_mode: opts.noise_mode,
+        noise_master_seed: opts.noise_seed,
     };
     let generator = CodeGenerator::new(config);
     let generated = if use_nodal {
@@ -2981,6 +3032,8 @@ fn analyze_freq_response(
         backward_euler: false,
         disable_be_fallback: false,
         opamp_rail_mode: melange_solver::codegen::OpampRailMode::Auto,
+        noise_mode: melange_solver::codegen::NoiseMode::Off,
+        noise_master_seed: 0,
     };
     let generator = CodeGenerator::new(config);
     let generated = if use_nodal {

@@ -8,7 +8,7 @@
 use tera::Context;
 
 use crate::codegen::ir::{CircuitIR, DeviceParams, PotentiometerIR};
-use crate::codegen::CodegenError;
+use crate::codegen::{CodegenError, NoiseMode};
 use super::RustEmitter;
 use super::helpers::{
     self_heating_device_data, device_param_template_data, fmt_f64, format_matrix_rows,
@@ -21,15 +21,19 @@ impl RustEmitter {
     /// Emit DK-method generated code (original path).
     pub(super) fn emit_dk(&self, ir: &CircuitIR) -> Result<String, CodegenError> {
         let mut code = String::new();
+        let noise = self.build_noise_emission(ir);
 
         code.push_str(&self.emit_header(ir)?);
         code.push_str(&self.emit_constants(ir)?);
         code.push_str(&self.emit_pot_constants(ir));
-        code.push_str(&self.emit_state(ir)?);
+        if noise.enabled {
+            code.push_str(&noise.top_level);
+        }
+        code.push_str(&self.emit_state(ir, &noise)?);
         code.push_str(&Self::emit_transformer_group_helpers(ir));
         code.push_str(&self.emit_device_models(ir)?);
         // SM pot helpers (sm_scale_N) removed — per-block rebuild replaces SM
-        code.push_str(&self.emit_build_rhs(ir)?);
+        code.push_str(&self.emit_build_rhs(ir, &noise)?);
         code.push_str(&self.emit_mat_vec_mul_s(ir)?);
         code.push_str(&self.emit_extract_voltages(ir)?);
         self.generate_solve_nonlinear(&mut code, ir)?;
@@ -308,8 +312,16 @@ impl RustEmitter {
         self.render("constants", &ctx)
     }
 
-    fn emit_state(&self, ir: &CircuitIR) -> Result<String, CodegenError> {
+    fn emit_state(&self, ir: &CircuitIR, noise: &NoiseEmission) -> Result<String, CodegenError> {
         let mut ctx = Context::new();
+        // Noise fragments (empty strings when noise is off → template blocks become no-ops)
+        ctx.insert("noise_enabled_emit", &noise.enabled);
+        ctx.insert("noise_state_fields", &noise.state_fields);
+        ctx.insert("noise_default_stmts", &noise.default_stmts);
+        ctx.insert("noise_default_fields", &noise.default_fields);
+        ctx.insert("noise_reset_body", &noise.reset_body);
+        ctx.insert("noise_set_sample_rate_body", &noise.set_sample_rate_body);
+        ctx.insert("noise_methods", &noise.methods);
         ctx.insert("has_dc_op", &ir.has_dc_op);
         ctx.insert("augmented_inductors", &ir.topology.augmented_inductors);
         ctx.insert("n_aug", &ir.topology.n_aug);
@@ -1526,7 +1538,7 @@ impl RustEmitter {
         code
     }
 
-    fn emit_build_rhs(&self, ir: &CircuitIR) -> Result<String, CodegenError> {
+    fn emit_build_rhs(&self, ir: &CircuitIR, _noise: &NoiseEmission) -> Result<String, CodegenError> {
         let n = ir.topology.n;
         let m = ir.topology.m;
         let mut ctx = Context::new();
@@ -1688,7 +1700,12 @@ impl RustEmitter {
     }
 
     fn emit_process_sample(&self, ir: &CircuitIR) -> Result<String, CodegenError> {
+        // Rebuild noise fragment — caller (emit_dk) already built one, but
+        // re-deriving is free and keeps this method's signature stable.
+        let noise = self.build_noise_emission(ir);
         let mut ctx = Context::new();
+        ctx.insert("noise_enabled_emit", &noise.enabled);
+        ctx.insert("noise_rhs_stamp", &noise.rhs_stamp);
         ctx.insert("augmented_inductors", &ir.topology.augmented_inductors);
         let n_nodes = if ir.topology.n_nodes > 0 {
             ir.topology.n_nodes
@@ -2433,4 +2450,307 @@ impl RustEmitter {
         }
     }
 
+}
+
+// ============================================================================
+// Noise emission (Phase 1: Johnson-Nyquist thermal)
+// ============================================================================
+
+/// All code fragments produced for authentic circuit noise.
+///
+/// When the IR's noise mode is `Off` or no eligible sources are present,
+/// every field is the empty string and no emitted Rust token differs from a
+/// noiseless build. Fragments are injected at specific points in the
+/// emitted file by the DK and nodal paths.
+#[derive(Debug, Default)]
+pub(super) struct NoiseEmission {
+    /// Self-contained block: constants (K_B, T_ROOM_K, NOISE_THERMAL_N, …),
+    /// RNG struct, SplitMix64, Marsaglia polar Gaussian helper. Emitted once
+    /// between `emit_constants` and `emit_state`.
+    pub top_level: String,
+    /// Struct-field declarations for `CircuitState` (inside the struct body).
+    pub state_fields: String,
+    /// Initialiser expressions for `Default::default()` (the statements come
+    /// first, the `self` fields come as trailing `field: value,` assignments).
+    pub default_stmts: String,
+    pub default_fields: String,
+    /// Per-sample stamp into `build_rhs` (after existing RHS construction,
+    /// before return). Empty when no sources.
+    pub rhs_stamp: String,
+    /// Body of `reset()` (re-seed RNG, clear gaussian cache).
+    pub reset_body: String,
+    /// Body to append inside `set_sample_rate` — recomputes `thermal_scale`.
+    pub set_sample_rate_body: String,
+    /// `impl CircuitState` methods: set_noise_enabled, set_noise_gain, …
+    pub methods: String,
+    /// `true` when any code is emitted (for template `{% if noise_enabled %}`).
+    pub enabled: bool,
+    /// Count of thermal sources. Kept for debug logging.
+    #[allow(dead_code)]
+    pub thermal_n: usize,
+}
+
+impl RustEmitter {
+    /// Produce all code fragments for Phase 1 thermal-noise emission.
+    ///
+    /// Returns all-empty `NoiseEmission` (enabled=false) when
+    /// `ir.noise.mode == NoiseMode::Off` or `ir.noise.thermal_sources` is
+    /// empty. All other phases (shot/flicker/op-amp) are deferred — their
+    /// source lists are not populated by the IR builder yet.
+    pub(super) fn build_noise_emission(&self, ir: &CircuitIR) -> NoiseEmission {
+        let thermal_n = ir.noise.thermal_sources.len();
+        if ir.noise.mode == NoiseMode::Off || thermal_n == 0 {
+            return NoiseEmission::default();
+        }
+
+        let mut top = String::new();
+        top.push_str("// ----------------------------------------------------------------------\n");
+        top.push_str("// Authentic circuit noise — Phase 1 (Johnson-Nyquist thermal)\n");
+        top.push_str("// Generated when --noise {thermal|shot|full}. See docs/aidocs/NOISE.md\n");
+        top.push_str("// ----------------------------------------------------------------------\n\n");
+
+        top.push_str("/// Boltzmann constant [J/K] (exact SI 2019).\n");
+        top.push_str("pub const K_B: f64 = 1.380649e-23;\n");
+        top.push_str("/// Standard lab noise temperature [K] (16.85 °C, the \"kT\" reference).\n");
+        top.push_str("pub const T_ROOM_K: f64 = 290.0;\n");
+        top.push_str(&format!("/// Default master seed baked in by codegen. `0` → entropy-seeded at Default.\n"));
+        top.push_str(&format!(
+            "pub const NOISE_MASTER_SEED_DEFAULT: u64 = {};\n\n",
+            ir.noise.master_seed
+        ));
+
+        top.push_str(&format!("pub const NOISE_THERMAL_N: usize = {};\n", thermal_n));
+        // Emit 1-indexed node arrays; 0 = ground (matches MNA convention)
+        let fmt_usize_arr = |items: &[usize]| -> String {
+            items
+                .iter()
+                .map(|v| v.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let node_i: Vec<usize> = ir.noise.thermal_sources.iter().map(|s| s.node_i).collect();
+        let node_j: Vec<usize> = ir.noise.thermal_sources.iter().map(|s| s.node_j).collect();
+        top.push_str(&format!(
+            "pub(crate) const NOISE_THERMAL_NODE_I: [usize; NOISE_THERMAL_N] = [{}];\n",
+            fmt_usize_arr(&node_i)
+        ));
+        top.push_str(&format!(
+            "pub(crate) const NOISE_THERMAL_NODE_J: [usize; NOISE_THERMAL_N] = [{}];\n",
+            fmt_usize_arr(&node_j)
+        ));
+        // Precomputed sqrt(1/R) — the R-dependent part of the noise coefficient,
+        // baked at codegen time since fixed-resistor R is constant.
+        let sqrt_inv_r: Vec<String> = ir
+            .noise
+            .thermal_sources
+            .iter()
+            .map(|s| fmt_f64((1.0 / s.resistance).sqrt()))
+            .collect();
+        top.push_str(&format!(
+            "pub(crate) const NOISE_THERMAL_SQRT_INV_R: [f64; NOISE_THERMAL_N] = [{}];\n\n",
+            sqrt_inv_r.join(", ")
+        ));
+
+        // xoshiro256++ RNG: fast, high-quality, 256-bit state per stream.
+        top.push_str("#[derive(Clone, Copy, Debug)]\n");
+        top.push_str("pub struct Xoshiro256pp { pub s: [u64; 4] }\n\n");
+        top.push_str("impl Xoshiro256pp {\n");
+        top.push_str("    #[inline(always)]\n");
+        top.push_str("    pub fn next_u64(&mut self) -> u64 {\n");
+        top.push_str("        let result = self.s[0].wrapping_add(self.s[3]).rotate_left(23).wrapping_add(self.s[0]);\n");
+        top.push_str("        let t = self.s[1] << 17;\n");
+        top.push_str("        self.s[2] ^= self.s[0];\n");
+        top.push_str("        self.s[3] ^= self.s[1];\n");
+        top.push_str("        self.s[1] ^= self.s[2];\n");
+        top.push_str("        self.s[0] ^= self.s[3];\n");
+        top.push_str("        self.s[2] ^= t;\n");
+        top.push_str("        self.s[3] = self.s[3].rotate_left(45);\n");
+        top.push_str("        result\n");
+        top.push_str("    }\n");
+        top.push_str("    /// Uniform f64 in [0, 1). Upper 53 bits of the u64.\n");
+        top.push_str("    #[inline(always)]\n");
+        top.push_str("    pub fn next_f64(&mut self) -> f64 {\n");
+        top.push_str("        (self.next_u64() >> 11) as f64 * (1.0 / (1u64 << 53) as f64)\n");
+        top.push_str("    }\n");
+        top.push_str("}\n\n");
+
+        // SplitMix64: derives per-stream seeds from one master seed.
+        top.push_str("#[inline(always)]\n");
+        top.push_str("fn splitmix64(state: &mut u64) -> u64 {\n");
+        top.push_str("    *state = state.wrapping_add(0x9E3779B97F4A7C15);\n");
+        top.push_str("    let mut z = *state;\n");
+        top.push_str("    z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);\n");
+        top.push_str("    z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);\n");
+        top.push_str("    z ^ (z >> 31)\n");
+        top.push_str("}\n\n");
+
+        top.push_str("/// Seed an array of Xoshiro256pp streams from one master seed via SplitMix64.\n");
+        top.push_str("/// Every stream gets statistically independent state — no cross-source correlation.\n");
+        top.push_str("fn seed_noise_rngs<const N: usize>(master: u64) -> [Xoshiro256pp; N] {\n");
+        top.push_str("    let mut sm = if master == 0 {\n");
+        top.push_str("        // master=0 → entropy from system clock. Plugin hosts wanting\n");
+        top.push_str("        // determinism should call set_seed(nonzero) before processing.\n");
+        top.push_str("        std::time::SystemTime::now()\n");
+        top.push_str("            .duration_since(std::time::UNIX_EPOCH)\n");
+        top.push_str("            .map(|d| d.as_nanos() as u64)\n");
+        top.push_str("            .unwrap_or(0x0123456789ABCDEF)\n");
+        top.push_str("    } else { master };\n");
+        top.push_str("    // First mix to avoid weak seeds\n");
+        top.push_str("    let _ = splitmix64(&mut sm);\n");
+        top.push_str("    let mut out = [Xoshiro256pp { s: [0; 4] }; N];\n");
+        top.push_str("    for k in 0..N {\n");
+        top.push_str("        out[k].s[0] = splitmix64(&mut sm);\n");
+        top.push_str("        out[k].s[1] = splitmix64(&mut sm);\n");
+        top.push_str("        out[k].s[2] = splitmix64(&mut sm);\n");
+        top.push_str("        out[k].s[3] = splitmix64(&mut sm);\n");
+        top.push_str("        // xoshiro requires at least one nonzero state word.\n");
+        top.push_str("        if out[k].s == [0; 4] { out[k].s[0] = 1; }\n");
+        top.push_str("    }\n");
+        top.push_str("    out\n");
+        top.push_str("}\n\n");
+
+        // Gaussian via Marsaglia polar method.
+        top.push_str("/// Standard-normal (µ=0, σ=1) sample via Marsaglia polar method.\n");
+        top.push_str("/// One RNG pair yields two Gaussians; the second is cached for the next call.\n");
+        top.push_str("#[inline(always)]\n");
+        top.push_str("fn gaussian(rng: &mut Xoshiro256pp, cache: &mut Option<f64>) -> f64 {\n");
+        top.push_str("    if let Some(z) = cache.take() { return z; }\n");
+        top.push_str("    loop {\n");
+        top.push_str("        let u = 2.0 * rng.next_f64() - 1.0;\n");
+        top.push_str("        let v = 2.0 * rng.next_f64() - 1.0;\n");
+        top.push_str("        let s = u * u + v * v;\n");
+        top.push_str("        if s > 0.0 && s < 1.0 {\n");
+        top.push_str("            let factor = (-2.0 * s.ln() / s).sqrt();\n");
+        top.push_str("            *cache = Some(v * factor);\n");
+        top.push_str("            return u * factor;\n");
+        top.push_str("        }\n");
+        top.push_str("    }\n");
+        top.push_str("}\n\n");
+
+        // State fields — injected inside CircuitState struct body
+        let mut state_fields = String::new();
+        state_fields.push_str(&format!(
+            "    /// Per-source xoshiro256++ state — independent streams, no cross-correlation.\n"
+        ));
+        state_fields.push_str(&format!(
+            "    pub noise_rng: [Xoshiro256pp; NOISE_THERMAL_N],\n"
+        ));
+        state_fields.push_str(&format!(
+            "    /// Cached second Gaussian from Marsaglia polar pair.\n"
+        ));
+        state_fields.push_str(&format!(
+            "    pub noise_gaussian_cache: [Option<f64>; NOISE_THERMAL_N],\n"
+        ));
+        state_fields.push_str("    /// Master noise switch — runtime. Default false (opt-in).\n");
+        state_fields.push_str("    pub noise_enabled: bool,\n");
+        state_fields.push_str("    /// Master scalar applied to every noise source.\n");
+        state_fields.push_str("    pub noise_gain: f64,\n");
+        state_fields.push_str("    /// Scalar applied only to Johnson-Nyquist thermal sources.\n");
+        state_fields.push_str("    pub thermal_gain: f64,\n");
+        state_fields.push_str("    /// Circuit temperature [K]. Runtime-settable.\n");
+        state_fields.push_str("    pub temperature_k: f64,\n");
+        state_fields.push_str("    /// Master seed recorded for reset() re-derivation.\n");
+        state_fields.push_str("    pub noise_master_seed: u64,\n");
+        state_fields.push_str("    /// Precomputed sqrt(8·K_B·T·fs_internal). Per-source coefficient is this × sqrt(1/R). See kTC-theorem note at codegen site.\n");
+        state_fields.push_str("    pub noise_thermal_scale: f64,\n");
+        state_fields.push_str("    /// Effective internal sample rate (host_rate × OVERSAMPLING_FACTOR).\n");
+        state_fields.push_str("    /// Tracked so `set_temperature_k` can recompute `noise_thermal_scale`.\n");
+        state_fields.push_str("    pub noise_fs: f64,\n");
+
+        // Default impl: compute thermal_scale and seed RNGs
+        let mut default_stmts = String::new();
+        default_stmts.push_str("        // Noise state (thermal only in Phase 1)\n");
+        default_stmts.push_str("        let fs_internal = SAMPLE_RATE * OVERSAMPLING_FACTOR as f64;\n");
+        // Per-sample Norton-current variance:  σ² = 8·k_B·T·fs / R
+        // (The physically correct one-sided PSD  S_i = 4·k_B·T/R  over [0, fs/2]
+        //  would naively give σ² = 2·k_B·T·fs/R, but melange's DK-trap
+        //  formulation satisfies  (A - A_neg)·v_ss = stamp,  so a steady
+        //  current source gets half the continuous-time DC gain. The input
+        //  stamp compensates via (V_new + V_prev)·G_in; here we compensate
+        //  by doubling the per-sample variance instead of caching a second
+        //  RNG draw. Net: output V²_rms = kT/C across every RC lowpass,
+        //  matching the Nyquist kTC equilibrium. Validated by the kTC
+        //  theorem test in tests/noise_psd_validation.rs.)
+        default_stmts.push_str("        let noise_thermal_scale = (8.0 * K_B * T_ROOM_K * fs_internal).sqrt();\n");
+        default_stmts.push_str("        let noise_rng = seed_noise_rngs::<NOISE_THERMAL_N>(NOISE_MASTER_SEED_DEFAULT);\n");
+
+        let mut default_fields = String::new();
+        default_fields.push_str("            noise_rng,\n");
+        default_fields.push_str("            noise_gaussian_cache: [None; NOISE_THERMAL_N],\n");
+        default_fields.push_str("            noise_enabled: false,\n");
+        default_fields.push_str("            noise_gain: 1.0,\n");
+        default_fields.push_str("            thermal_gain: 1.0,\n");
+        default_fields.push_str("            temperature_k: T_ROOM_K,\n");
+        default_fields.push_str("            noise_master_seed: NOISE_MASTER_SEED_DEFAULT,\n");
+        default_fields.push_str("            noise_thermal_scale,\n");
+        default_fields.push_str("            noise_fs: fs_internal,\n");
+
+        // reset() — reseed RNG and clear gaussian cache; keep user settings.
+        let mut reset_body = String::new();
+        reset_body.push_str("        // Re-seed noise RNGs (keeps noise_enabled, gains, temperature untouched).\n");
+        reset_body.push_str("        self.noise_rng = seed_noise_rngs::<NOISE_THERMAL_N>(self.noise_master_seed);\n");
+        reset_body.push_str("        self.noise_gaussian_cache = [None; NOISE_THERMAL_N];\n");
+
+        // set_sample_rate tail: recompute thermal_scale at the new rate
+        let mut ssr_body = String::new();
+        ssr_body.push_str("        // Noise: recompute sqrt(4·K_B·T·fs_internal) for the new rate.\n");
+        ssr_body.push_str("        self.noise_fs = sample_rate * OVERSAMPLING_FACTOR as f64;\n");
+        ssr_body.push_str("        self.noise_thermal_scale = (8.0 * K_B * self.temperature_k * self.noise_fs).sqrt();\n");
+
+        // Public API
+        let mut methods = String::new();
+        methods.push_str("\n    // --- Noise controls (Phase 1) ---\n\n");
+        methods.push_str("    /// Turn circuit noise on or off. When off, all per-sample RNG calls are skipped.\n");
+        methods.push_str("    pub fn set_noise_enabled(&mut self, on: bool) { self.noise_enabled = on; }\n\n");
+        methods.push_str("    /// Master scalar applied to every noise source (post-per-category).\n");
+        methods.push_str("    pub fn set_noise_gain(&mut self, gain: f64) { self.noise_gain = gain; }\n\n");
+        methods.push_str("    /// Scalar applied only to Johnson-Nyquist thermal sources.\n");
+        methods.push_str("    pub fn set_thermal_gain(&mut self, gain: f64) { self.thermal_gain = gain; }\n\n");
+        methods.push_str("    /// Circuit temperature in Kelvin. 290 K is standard (~16.85 °C).\n");
+        methods.push_str("    /// Cold gear is quieter: 77 K (liquid N2) ≈ −5.76 dB, 3 K ≈ −19.9 dB.\n");
+        methods.push_str("    pub fn set_temperature_k(&mut self, kelvin: f64) {\n");
+        methods.push_str("        if !(kelvin.is_finite() && kelvin > 0.0) { return; }\n");
+        methods.push_str("        self.temperature_k = kelvin;\n");
+        methods.push_str("        // Recompute thermal_scale at the currently-set sample rate.\n");
+        methods.push_str("        self.noise_thermal_scale = (8.0 * K_B * kelvin * self.noise_fs).sqrt();\n");
+        methods.push_str("    }\n\n");
+        methods.push_str("    /// Set the master seed. `0` → entropy-seeded from system clock.\n");
+        methods.push_str("    /// Any nonzero value → deterministic (same seed → bit-identical noise).\n");
+        methods.push_str("    pub fn set_seed(&mut self, master: u64) {\n");
+        methods.push_str("        self.noise_master_seed = master;\n");
+        methods.push_str("        self.noise_rng = seed_noise_rngs::<NOISE_THERMAL_N>(master);\n");
+        methods.push_str("        self.noise_gaussian_cache = [None; NOISE_THERMAL_N];\n");
+        methods.push_str("    }\n");
+
+        // build_rhs stamp
+        let mut rhs_stamp = String::new();
+        rhs_stamp.push_str("\n    // Authentic circuit noise — Phase 1 (Johnson-Nyquist thermal).\n");
+        rhs_stamp.push_str("    // Skipped entirely (zero RNG calls) when noise_enabled is false.\n");
+        rhs_stamp.push_str("    if state.noise_enabled {\n");
+        rhs_stamp.push_str("        let scale = state.noise_thermal_scale * state.noise_gain * state.thermal_gain;\n");
+        rhs_stamp.push_str("        if scale != 0.0 {\n");
+        rhs_stamp.push_str("            for k in 0..NOISE_THERMAL_N {\n");
+        rhs_stamp.push_str("                let g = gaussian(&mut state.noise_rng[k], &mut state.noise_gaussian_cache[k]);\n");
+        rhs_stamp.push_str("                let i_n = scale * NOISE_THERMAL_SQRT_INV_R[k] * g;\n");
+        rhs_stamp.push_str("                let ni = NOISE_THERMAL_NODE_I[k];\n");
+        rhs_stamp.push_str("                let nj = NOISE_THERMAL_NODE_J[k];\n");
+        rhs_stamp.push_str("                if ni > 0 { rhs[ni - 1] += i_n; }\n");
+        rhs_stamp.push_str("                if nj > 0 { rhs[nj - 1] -= i_n; }\n");
+        rhs_stamp.push_str("            }\n");
+        rhs_stamp.push_str("        }\n");
+        rhs_stamp.push_str("    }\n");
+
+        NoiseEmission {
+            top_level: top,
+            state_fields,
+            default_stmts,
+            default_fields,
+            rhs_stamp,
+            reset_body,
+            set_sample_rate_body: ssr_body,
+            methods,
+            enabled: true,
+            thermal_n,
+        }
+    }
 }

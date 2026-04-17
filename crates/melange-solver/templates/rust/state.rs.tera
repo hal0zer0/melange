@@ -175,11 +175,14 @@ pub struct CircuitState {
     pub device_{{ td.dev_num }}_tj: f64,
 {% endfor %}
 {% endif %}
+{% if noise_enabled_emit %}
+    // --- Authentic circuit noise (Phase 1: thermal) ---
+{{ noise_state_fields }}{% endif %}
 }
 
 impl Default for CircuitState {
     fn default() -> Self {
-        Self {
+{% if noise_enabled_emit %}{{ noise_default_stmts }}{% endif %}        Self {
 {% if has_dc_op %}            v_prev: DC_OP,
 {% if has_dc_nl %}            i_nl_prev: DC_NL_I,
             i_nl_prev_prev: DC_NL_I,
@@ -271,7 +274,7 @@ impl Default for CircuitState {
             device_{{ td.dev_num }}_tj: DEVICE_{{ td.dev_num }}_TAMB,
 {% endfor %}
 {% endif %}
-        }
+{% if noise_enabled_emit %}{{ noise_default_fields }}{% endif %}        }
     }
 }
 
@@ -344,6 +347,7 @@ impl CircuitState {
         self.device_{{ td.dev_num }}_tj = DEVICE_{{ td.dev_num }}_TAMB;
 {% endfor %}
 {% endif %}
+{% if noise_enabled_emit %}{{ noise_reset_body }}{% endif %}
     }
 
     /// Set DC operating point (call after DC analysis)
@@ -364,6 +368,7 @@ impl CircuitState {
         if !(sample_rate > 0.0 && sample_rate.is_finite()) {
             return; // Invalid sample rate, keep defaults
         }
+{% if noise_enabled_emit %}{{ noise_set_sample_rate_body }}{% endif %}
 {% if num_switches > 0 or num_pots > 0 %}
         self.current_sample_rate = sample_rate;
 
@@ -669,6 +674,8 @@ impl CircuitState {
     }
 {% if num_switches > 0 or num_pots > 0 %}
 {{ switch_methods }}
+{% endif %}
+{% if noise_enabled_emit %}{{ noise_methods }}
 {% endif %}
 }
 

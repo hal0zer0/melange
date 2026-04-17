@@ -150,6 +150,76 @@ impl std::fmt::Display for OpampRailMode {
     }
 }
 
+/// Circuit-noise injection mode.
+///
+/// Noise is stamped as Norton current sources into the MNA RHS, so the solver's
+/// Jacobian shapes it through the full circuit transfer function automatically.
+/// Runtime `set_noise_enabled(false)` branches around all RNG calls — zero CPU
+/// cost when disabled. See `docs/aidocs/NOISE.md`.
+#[cfg(feature = "codegen")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum NoiseMode {
+    /// No noise code emitted. Byte-identical to pre-noise codegen.
+    #[default]
+    Off,
+    /// Johnson-Nyquist thermal noise on every fixed resistor. Phase 1.
+    Thermal,
+    /// Thermal + shot noise on diode/BJT/JFET/MOSFET/tube junctions. Phase 2.
+    Shot,
+    /// Thermal + shot + 1/f (flicker) + op-amp en/in + pentode partition. Phases 3-5.
+    Full,
+}
+
+#[cfg(feature = "codegen")]
+impl NoiseMode {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "off" | "none" | "0" => Some(Self::Off),
+            "thermal" | "johnson" | "johnson-nyquist" => Some(Self::Thermal),
+            "shot" => Some(Self::Shot),
+            "full" | "all" => Some(Self::Full),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Thermal => "thermal",
+            Self::Shot => "shot",
+            Self::Full => "full",
+        }
+    }
+
+    /// True when any noise code should be emitted.
+    pub fn is_enabled(&self) -> bool {
+        !matches!(self, Self::Off)
+    }
+
+    /// True when thermal-noise code should be emitted.
+    pub fn includes_thermal(&self) -> bool {
+        matches!(self, Self::Thermal | Self::Shot | Self::Full)
+    }
+
+    /// True when shot-noise code should be emitted.
+    pub fn includes_shot(&self) -> bool {
+        matches!(self, Self::Shot | Self::Full)
+    }
+
+    /// True when flicker / op-amp / partition code should be emitted.
+    pub fn includes_full(&self) -> bool {
+        matches!(self, Self::Full)
+    }
+}
+
+#[cfg(feature = "codegen")]
+impl std::fmt::Display for NoiseMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Configuration for code generation
 #[cfg(feature = "codegen")]
 #[derive(Debug, Clone)]
@@ -202,6 +272,14 @@ pub struct CodegenConfig {
     /// which inspects the circuit topology and picks the cheapest correct mode.
     /// See [`OpampRailMode`] for the full menu and trade-offs.
     pub opamp_rail_mode: OpampRailMode,
+    /// Authentic circuit-noise mode. Default [`NoiseMode::Off`] — zero cost,
+    /// byte-identical codegen. See [`NoiseMode`] and `docs/aidocs/NOISE.md`.
+    pub noise_mode: NoiseMode,
+    /// Master seed for deterministic noise. `0` (default) → seeded from system
+    /// entropy at `CircuitState::default()`. Nonzero → every stream derived from
+    /// this via SplitMix64, reproducible across runs. Ignored when
+    /// `noise_mode == NoiseMode::Off`.
+    pub noise_master_seed: u64,
 }
 
 #[cfg(feature = "codegen")]
@@ -274,6 +352,8 @@ impl Default for CodegenConfig {
             backward_euler: false,
             disable_be_fallback: false,
             opamp_rail_mode: OpampRailMode::Auto,
+            noise_mode: NoiseMode::Off,
+            noise_master_seed: 0,
         }
     }
 }

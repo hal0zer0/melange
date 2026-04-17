@@ -91,6 +91,9 @@ pub struct CircuitIR {
     /// Populated for each op-amp with finite GBW > 0.
     #[serde(default)]
     pub opamp_iir: Vec<OpampIirData>,
+    /// Authentic circuit noise configuration + source lists. See `NoiseIR`.
+    #[serde(default)]
+    pub noise: NoiseIR,
 }
 
 /// Circuit metadata (name, title, generator version).
@@ -1493,6 +1496,102 @@ pub struct MatrixSparsity {
     pub nz_by_row: Vec<Vec<usize>>,
 }
 
+/// Johnson-Nyquist (thermal) noise source stamped at one fixed resistor.
+///
+/// Emitted as a Norton current source in the MNA RHS: for sample rate `fs`
+/// and temperature `T`, the per-sample current is
+/// `sqrt(4·k_B·T·fs / resistance) · N(0,1)` injected at `node_i` and
+/// extracted at `node_j`. See `docs/aidocs/NOISE.md`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThermalNoiseSource {
+    /// Resistor component name (for debug / future per-source overrides).
+    pub name: String,
+    /// 1-indexed positive node (0 = ground).
+    pub node_i: usize,
+    /// 1-indexed negative node (0 = ground).
+    pub node_j: usize,
+    /// Resistance in ohms at the default operating point.
+    pub resistance: f64,
+}
+
+/// Noise configuration baked into the generated code.
+///
+/// Built from [`crate::codegen::NoiseMode`] + a scan of `netlist.elements`.
+/// Emitters gate all noise-related emission on `mode != NoiseMode::Off` and
+/// iterate the per-phase source vectors.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct NoiseIR {
+    /// Compile-time mode. `NoiseMode::Off` → zero emission, zero runtime cost.
+    #[serde(default)]
+    pub mode: crate::codegen::NoiseMode,
+    /// Master seed for deterministic noise. `0` → system entropy at `default()`.
+    #[serde(default)]
+    pub master_seed: u64,
+    /// Johnson-Nyquist noise sources (Phase 1).
+    #[serde(default)]
+    pub thermal_sources: Vec<ThermalNoiseSource>,
+}
+
+/// Collect Johnson-Nyquist thermal noise sources from the netlist.
+///
+/// Includes every `Element::Resistor` whose name is *not* marked as runtime-
+/// variable by a `.pot`, `.wiper`, or `.switch` directive. Phase 1 keeps the
+/// per-source noise coefficient baked at codegen time; dynamic resistors are
+/// deferred to Phase 1.5 which will recompute on pot/switch changes.
+///
+/// Node indices are MNA 1-indexed (0 = ground) via `mna.node_map`. Resistors
+/// whose terminals fail to resolve (would collapse to ground–ground) are
+/// filtered out — they inject nothing useful.
+pub fn collect_thermal_noise_sources(
+    netlist: &Netlist,
+    mna: &MnaSystem,
+) -> Vec<ThermalNoiseSource> {
+    use std::collections::HashSet;
+
+    let mut dynamic: HashSet<String> = HashSet::new();
+    for p in &mna.pots {
+        dynamic.insert(p.name.to_ascii_uppercase());
+    }
+    for sw in &mna.switches {
+        for c in &sw.components {
+            if c.component_type == 'R' {
+                dynamic.insert(c.name.to_ascii_uppercase());
+            }
+        }
+    }
+
+    let mut sources = Vec::new();
+    for el in &netlist.elements {
+        if let Element::Resistor {
+            name,
+            n_plus,
+            n_minus,
+            value,
+        } = el
+        {
+            let upper = name.to_ascii_uppercase();
+            if dynamic.contains(&upper) {
+                continue;
+            }
+            if !value.is_finite() || *value <= 0.0 {
+                continue;
+            }
+            let node_i = mna.node_map.get(n_plus).copied().unwrap_or(0);
+            let node_j = mna.node_map.get(n_minus).copied().unwrap_or(0);
+            if node_i == 0 && node_j == 0 {
+                continue;
+            }
+            sources.push(ThermalNoiseSource {
+                name: name.clone(),
+                node_i,
+                node_j,
+                resistance: *value,
+            });
+        }
+    }
+    sources
+}
+
 /// Pre-analyzed sparsity information for all compile-time matrices.
 ///
 /// Populated by `analyze_sparsity()` at the end of `from_kernel()`.
@@ -2539,6 +2638,15 @@ impl CircuitIR {
                 .collect(),
             sparsity,
             opamp_iir: Vec::new(), // IIR op-amp handled in nodal path only
+            noise: NoiseIR {
+                mode: config.noise_mode,
+                master_seed: config.noise_master_seed,
+                thermal_sources: if config.noise_mode.includes_thermal() {
+                    collect_thermal_noise_sources(netlist, mna)
+                } else {
+                    Vec::new()
+                },
+            },
         })
     }
 
@@ -3377,6 +3485,15 @@ impl CircuitIR {
                 .collect(),
             sparsity,
             opamp_iir: opamp_iir_data,
+            noise: NoiseIR {
+                mode: config.noise_mode,
+                master_seed: config.noise_master_seed,
+                thermal_sources: if config.noise_mode.includes_thermal() {
+                    collect_thermal_noise_sources(netlist, mna)
+                } else {
+                    Vec::new()
+                },
+            },
         })
     }
 

@@ -7095,3 +7095,138 @@ fn test_vca_codegen_compiles_and_runs() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Phase 1 circuit-noise emission tests
+// ---------------------------------------------------------------------------
+
+fn generate_code_with_config(spice: &str, config: CodegenConfig) -> String {
+    let (netlist, mna, kernel) = build_pipeline(spice);
+    let codegen = CodeGenerator::new(config);
+    codegen
+        .generate(&kernel, &mna, &netlist)
+        .expect("code generation failed")
+        .code
+}
+
+#[test]
+fn noise_off_is_byte_identical_to_baseline() {
+    // Default config (NoiseMode::Off) must emit exactly the same code as
+    // explicitly passing NoiseMode::Off — and must NOT contain any noise tokens.
+    let default_code = generate_code_with_config(RC_CIRCUIT_SPICE, default_config());
+
+    let explicit_off = CodegenConfig {
+        noise_mode: melange_solver::codegen::NoiseMode::Off,
+        ..default_config()
+    };
+    let off_code = generate_code_with_config(RC_CIRCUIT_SPICE, explicit_off);
+
+    assert_eq!(
+        default_code, off_code,
+        "explicit NoiseMode::Off must produce byte-identical output to default"
+    );
+
+    for tok in [
+        "K_B",
+        "T_ROOM_K",
+        "NOISE_THERMAL_N",
+        "Xoshiro256pp",
+        "gaussian",
+        "noise_enabled",
+        "set_noise_enabled",
+    ] {
+        assert!(
+            !default_code.contains(tok),
+            "noise-off codegen leaked token `{}` into generated code",
+            tok
+        );
+    }
+}
+
+#[test]
+fn noise_thermal_emits_expected_tokens_and_source_count() {
+    let config = CodegenConfig {
+        noise_mode: melange_solver::codegen::NoiseMode::Thermal,
+        noise_master_seed: 42,
+        ..default_config()
+    };
+    let code = generate_code_with_config(RC_CIRCUIT_SPICE, config);
+
+    // RC_CIRCUIT_SPICE has 2 resistors (R1 in-out, plus the auto input
+    // conductance which is stamped in G but not an Element::Resistor — so the
+    // source count should be 1, reflecting only the explicit netlist resistor.
+    // Actually R1 is "in out" (non-ground both sides), so one ThermalNoiseSource.
+    assert!(
+        code.contains("pub const NOISE_THERMAL_N: usize = 1;"),
+        "expected NOISE_THERMAL_N=1 for RC_CIRCUIT_SPICE, got:\n{}",
+        code.lines()
+            .filter(|l| l.contains("NOISE_THERMAL_N"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+
+    // Master seed is baked into the constant
+    assert!(
+        code.contains("pub const NOISE_MASTER_SEED_DEFAULT: u64 = 42;"),
+        "master seed not baked into generated constant"
+    );
+
+    // Physical constants, RNG, and helpers all emitted.
+    for tok in [
+        "pub const K_B: f64 = 1.380649e-23",
+        "pub const T_ROOM_K: f64 = 290.0",
+        "pub struct Xoshiro256pp",
+        "fn splitmix64",
+        "fn seed_noise_rngs",
+        "fn gaussian",
+        "NOISE_THERMAL_NODE_I",
+        "NOISE_THERMAL_NODE_J",
+        "NOISE_THERMAL_SQRT_INV_R",
+        "noise_enabled: bool",
+        "noise_gain: f64",
+        "thermal_gain: f64",
+        "temperature_k: f64",
+        "pub fn set_noise_enabled",
+        "pub fn set_noise_gain",
+        "pub fn set_thermal_gain",
+        "pub fn set_temperature_k",
+        "pub fn set_seed",
+    ] {
+        assert!(
+            code.contains(tok),
+            "thermal-noise codegen missing expected token `{}`",
+            tok
+        );
+    }
+
+    // Per-sample stamp is gated on state.noise_enabled.
+    assert!(
+        code.contains("if state.noise_enabled"),
+        "noise stamp must be runtime-gated on state.noise_enabled"
+    );
+}
+
+#[test]
+fn noise_thermal_skips_pot_resistors() {
+    // Verify that resistors marked .pot are excluded from thermal noise sources
+    // (Phase 1 limitation — runtime-variable R requires coefficient recompute on
+    // pot change; to be handled in Phase 1.5).
+    let spice_with_pot = "\
+RC With Pot
+R1 in mid 10k
+R2 mid out 10k
+C1 out 0 1u
+.pot R2 1k 100k
+";
+    let config = CodegenConfig {
+        noise_mode: melange_solver::codegen::NoiseMode::Thermal,
+        ..default_config()
+    };
+    let code = generate_code_with_config(spice_with_pot, config);
+
+    // Only R1 should contribute a thermal source (R2 is under .pot)
+    assert!(
+        code.contains("pub const NOISE_THERMAL_N: usize = 1;"),
+        "pot-marked R2 must be excluded from thermal sources"
+    );
+}

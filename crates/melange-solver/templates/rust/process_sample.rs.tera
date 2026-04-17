@@ -38,8 +38,8 @@ pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS
     if state.be_cooldown > 0 { state.be_cooldown -= 1; }
 {% endif %}
     // Step 1: Build RHS vector from history and input
-    let rhs = build_rhs(input, state.input_prev, state);
-
+    let {% if noise_enabled_emit %}mut {% endif %}rhs = build_rhs(input, state.input_prev, state);
+{% if noise_enabled_emit %}{{ noise_rhs_stamp }}{% endif %}
     // Step 2: Linear prediction: v_pred = S * rhs
     let v_pred = mat_vec_mul_s(&rhs, state);
 
