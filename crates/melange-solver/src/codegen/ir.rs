@@ -3156,17 +3156,17 @@ impl CircuitIR {
         let dc_nl_currents = dc_result.i_nl.clone();
         let has_dc_sources = !mna.voltage_sources.is_empty() || !mna.current_sources.is_empty();
 
-        // Resize DC OP to n_nodal dimension, then clamp to supply rails
+        // Resize DC OP to n_nodal dimension. Do NOT clamp op-amp outputs
+        // to supply rails here — the emitted per-sample active-set resolve
+        // already handles rail violations at runtime, and pre-clamping the
+        // stored DC_OP creates a v_prev / i_nl_prev inconsistency (v_out
+        // clamped but `dc_nl_currents` comes from the unclamped solve, so
+        // the downstream diode states encoded in `i_nl` don't match the
+        // clamped nodes) that slowly drifts the state over thousands of
+        // samples before NR blows up (observed 4kbuscomp failure: ~2300
+        // stable samples then 1e27 V explosion).
         let mut dc_operating_point = dc_result.v_node.clone();
         dc_operating_point.resize(n, 0.0);
-        for oa in &mna.opamps {
-            if (oa.vcc.is_finite() || oa.vee.is_finite()) && oa.n_out_idx > 0 {
-                let o = oa.n_out_idx - 1;
-                if o < dc_operating_point.len() {
-                    dc_operating_point[o] = dc_operating_point[o].clamp(oa.vee, oa.vcc);
-                }
-            }
-        }
         Self::resolve_mosfet_nodes(&mut device_slots, mna);
 
         // Sparsity analysis (K is now computed for Schur complement NR)
