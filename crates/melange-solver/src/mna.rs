@@ -378,6 +378,40 @@ pub struct OpampInfo {
     /// without `SR=` in their .model get byte-identical generated code to the
     /// pre-slew-rate behaviour.
     pub sr: f64,
+    /// Input bias current [A] (default 0 = ideal, no bias).
+    ///
+    /// Models the small DC current that flows into (or out of) each op-amp
+    /// input pin on real hardware. Parsed from `.model OA(IB=...)`; typical
+    /// values: TL074 = 30e-12 (30 pA JFET input), LM358 = 45e-9 (45 nA
+    /// bipolar), NE5532 = 200e-9, OPA134 = 100e-15.
+    ///
+    /// Stamped as a symmetric DC current source pushing `IB` into both
+    /// `n_plus` and `n_minus` from the external circuit's perspective (sign
+    /// convention: positive IB = current flows out of the op-amp input pin
+    /// into the external node — appropriate for PNP-input bipolar op-amps and
+    /// JFET-input parts where gate leakage is outgoing). For NPN-input op-amps
+    /// specify `IB=-45n` etc.
+    ///
+    /// Physical significance beyond DC offset: at integrator nodes the real-
+    /// hardware bias current + finite input resistance (modeled via `RIN`)
+    /// together drain accumulated charge off the feedback cap, bounding
+    /// integrator wind-up on any residual DC offset at the input. A purely
+    /// ideal op-amp with no IB and infinite input impedance winds up
+    /// unbounded when the upstream network imposes a DC offset — a known
+    /// failure mode of melange-emitted transient NR on circuits like the
+    /// SSL 4kbuscomp sidechain integrator.
+    pub ib: f64,
+    /// Input resistance [Ω] from each input pin to ground (default +∞ = no
+    /// leakage path, ideal). Typical values: TL074 (JFET) = 1e12, LM358
+    /// (bipolar) = 1e6 to 1e7, NE5532 = 3e5.
+    ///
+    /// Stamped as a shunt conductance `1/RIN` at each input node. Provides
+    /// a DC leakage path that bounds integrator wind-up: a 33-µs integrator
+    /// with 1 TΩ input resistance will have a 10-second wind-up decay
+    /// envelope. Finite RIN is what makes real integrator circuits stable
+    /// under DC offsets that would otherwise cause ideal-op-amp models to
+    /// drift without bound.
+    pub rin: f64,
     /// User override for the transient-NR AOL cap.
     /// `INFINITY` (default) defers to the auto-detect heuristic in
     /// `crates/melange-solver/src/codegen/ir.rs::effective_aol_cap`. Set finite
@@ -2270,6 +2304,8 @@ impl MnaBuilder {
                             "VOH_DROP" => oa.voh_drop = *val,
                             "VOL_DROP" => oa.vol_drop = *val,
                             "AOL_TRANSIENT_CAP" => oa.aol_transient_cap = *val,
+                            "IB" => oa.ib = *val,
+                            "RIN" => oa.rin = *val,
                             _ => log::warn!(
                                 ".model {}: unrecognized parameter '{}' (ignored)",
                                 m.name,
@@ -3275,6 +3311,52 @@ impl MnaBuilder {
                 }
                 mna.g[o][o] += go;
             }
+
+            // Input-stage parasitics (IB + RIN): tiny effects that matter for
+            // circuits where the op-amp input node is a high-impedance
+            // integrator (e.g. SSL 4kbuscomp sidechain U10 where a 3.3 MΩ /
+            // 10 pF integrator winds up unboundedly under any DC offset
+            // without a bleed path to ground). Default IB=0 / RIN=+∞
+            // preserves ideal-op-amp behavior byte-identically.
+            //
+            // IB sign convention: positive IB injects `+IB` at both input
+            // nodes (current flowing out of the op-amp pin into the external
+            // circuit — PNP-input/JFET default). For NPN-input parts specify
+            // negative IB in the .model card.
+            if oa.ib != 0.0 {
+                if np > 0 {
+                    mna.current_sources.push(CurrentSourceInfo {
+                        name: format!("_{}_IB_plus", oa.name),
+                        n_plus_idx: np,
+                        n_minus_idx: 0,
+                        dc_value: oa.ib,
+                    });
+                }
+                if nm > 0 {
+                    mna.current_sources.push(CurrentSourceInfo {
+                        name: format!("_{}_IB_minus", oa.name),
+                        n_plus_idx: nm,
+                        n_minus_idx: 0,
+                        dc_value: oa.ib,
+                    });
+                }
+            }
+            // RIN: shunt conductance 1/RIN from each input pin to ground.
+            // Physical significance: bounds integrator wind-up via a DC
+            // leakage path (τ_leak = RIN · C_integ). For TL074 JFET input
+            // RIN=1e12 gives g_in=1pS, effectively zero but finite — enough
+            // to pull any accumulated offset to ground over ~seconds of
+            // circuit time, preventing unbounded growth that the infinite-
+            // input-Z ideal model produces.
+            if oa.rin.is_finite() && oa.rin > 0.0 {
+                let g_in = 1.0 / oa.rin;
+                if np > 0 {
+                    mna.g[np - 1][np - 1] += g_in;
+                }
+                if nm > 0 {
+                    mna.g[nm - 1][nm - 1] += g_in;
+                }
+            }
         }
 
         // Allocate augmented rows for current-mode VCA sensing sources
@@ -4247,6 +4329,8 @@ impl MnaBuilder {
                     vee: f64::NEG_INFINITY,
                     gbw: f64::INFINITY,
                     sr: f64::INFINITY,
+                    ib: 0.0,
+                    rin: f64::INFINITY,
                     // Boyle-macromodel default: TL072/NE5532-class parts can swing
                     // to within ~1.5 V of each rail under typical load. Rail-to-rail
                     // parts should override this in their .model OA() entry.

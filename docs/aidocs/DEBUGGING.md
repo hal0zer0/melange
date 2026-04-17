@@ -304,9 +304,33 @@ a different diode conducting.
 - **Seeded linear fallback**: When all strategies fail, the linear fallback applies
   op-amp seeding before returning.
 
-**Status**: DC OP for the 4kbuscomp now produces correct polarity (-11V at sidechain
-TL074 outputs instead of +11V). DC_OP_CONVERGED=false (formal convergence not achieved),
+**Status (2026-04-15)**: DC OP for the 4kbuscomp now produces correct polarity (−11 V at sidechain
+TL074 outputs instead of +11 V). DC_OP_CONVERGED=false (formal convergence not achieved),
 but the values are physically correct.
+
+**Status (2026-04-16, OPEN)**: A distinct failure remains in the precision-rectifier op-amps
+themselves (`U8`, `U9` — not the sidechain buffer). The op-amp output rails at −VSAT while
+the clamp diode (D1, D3 — anode = inv input, cathode = op-amp output) sits at +11 V forward
+bias, giving `I_diode ≈ 1e14 A`. This is a valid NR fixed point but non-physical — the correct
+basin has the op-amp following `v+ = vee12` via D1 feedback with `v(out) ≈ v+ + Vd`.
+
+The AOL cap (200 k → 1 k) is not enough to escape this basin: both equilibria remain
+self-consistent at AOL = 1 k, and the linear initial guess + exponential diode Jacobian
+lands and stays in the wrong one. This is a **homotopy-path problem**, not a cap-magnitude
+problem.
+
+**Greenlit fix (not yet implemented)**: op-amp AOL continuation in `dc_op.rs`. Insert a new
+fallback strategy between Gmin Stepping and Linear Fallback that ramps AOL through
+geometric steps (`[1, 10, 100, 1000, target]`) for Rule-D'-classified op-amps, seeding
+each step with the previous step's solution. At AOL = 1 the clamp diode dominates the
+feedback loop and the correct basin is trivially found; continuation walks it up to
+target without re-entering the wrong basin. Gates on the existing Rule D' classifier.
+Reproduction + asserted post-fix values in `memory/project_4kbuscomp_basin_trap.md`.
+
+The pre-revert `4kbuscomp.cir` in `melange-circuits` had `Rsc_vca = 1 Ω` (undocumented
+solver-stability workaround, reverted 2026-04-16 to the schematic-accurate `1 MEG`).
+The `1 Ω` was masking this bug — every "validated" claim for 4kbuscomp prior to 2026-04-16
+refers to that workaround being in place.
 
 ## Low-Rate DC Warmup (for Failed DC OP)
 

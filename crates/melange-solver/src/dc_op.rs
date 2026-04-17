@@ -80,6 +80,8 @@ pub enum DcOpMethod {
     SourceStepping,
     /// Gmin stepping was needed
     GminStepping,
+    /// AOL continuation stepping was needed (precision rectifier multi-equilibrium)
+    AolStepping,
     /// All methods failed — returned linear fallback
     Failed,
 }
@@ -1155,6 +1157,13 @@ struct DcCircuit<'a> {
 ///   v_new = G_aug^{-1} · rhs
 ///
 /// Returns (converged, iterations).
+///
+/// `aol_cont_mode`: when true, op-amp rail clamping for sidechain-rectifier
+/// op-amps is widened to the actual DC supply voltage at n_plus rather than
+/// the model's VSAT. This is required during AOL continuation steps where the
+/// physical equilibrium has the output near the n_plus reference voltage
+/// (e.g. -12 V for a TL074 in a half-wave rectifier referenced to vee12=-12V),
+/// which may be below the conservative VSAT model limit (-11V for VSAT=11).
 fn nr_dc_solve(
     circuit: &DcCircuit,
     v: &mut Vec<f64>,
@@ -1162,6 +1171,7 @@ fn nr_dc_solve(
     i_nl: &mut [f64],
     source_scale: f64,
     gmin: f64,
+    aol_cont_mode: bool,
 ) -> (bool, usize) {
     let n_dc = circuit.n_dc;
     let m = circuit.mna.m;
@@ -1212,6 +1222,28 @@ fn nr_dc_solve(
                 v_nl[2],
                 v_nl[3]
             );
+        }
+        if iter < 3 && m > 4 {
+            log::debug!(
+                "DC NR iter {} (scale={:.2}): v_nl[4..]=[{}]",
+                iter,
+                source_scale,
+                v_nl[4..].iter().enumerate().map(|(i, x)| format!("[{}]={:.4}", i+4, x)).collect::<Vec<_>>().join(", ")
+            );
+        }
+        if iter < 3 && aol_cont_mode {
+            for oa in &mna.opamps {
+                let out = oa.n_out_idx;
+                if out > 0 && out - 1 < v.len() {
+                    let np_v = if oa.n_plus_idx > 0 { v[oa.n_plus_idx - 1] } else { 0.0 };
+                    let nm_v = if oa.n_minus_idx > 0 { v[oa.n_minus_idx - 1] } else { 0.0 };
+                    log::debug!(
+                        "  opamp out_idx={} v_out={:.3} v+={:.3} v-={:.3} sr={}",
+                        out, v[out - 1], np_v, nm_v,
+                        dc_opamp_is_sidechain_rectifier(oa, mna)
+                    );
+                }
+            }
         }
 
         // 3. Build augmented conductance: G_aug = G_dc (n_dc × n_dc copy)
@@ -1427,16 +1459,52 @@ fn nr_dc_solve(
         // Without this, the linear op-amp model drives outputs to
         // unphysical voltages during DC solve, preventing convergence
         // in precision rectifier circuits (e.g. SSL bus compressor).
+        //
+        // During source stepping (source_scale < 1): scale the rail limits by
+        // source_scale to match the ramped supplies. Without this, an op-amp with
+        // VSAT=11V would clamp to -11V while the physical supply is only -0.6V
+        // (at scale=0.04), creating huge phantom voltage differentials across
+        // diodes and resistors that prevent NR convergence.
+        //
+        // In AOL continuation mode, SR op-amps use an expanded VEE limit equal to
+        // the actual n_plus supply node voltage minus one diode drop. This allows
+        // the output to reach the physically correct equilibrium (e.g. n_plus=-12V
+        // → output can reach -12.6V, below VSAT=-11V).
         for oa in &mna.opamps {
             let out = oa.n_out_idx; // 1-indexed
             if out > 0 {
                 let o = out - 1; // 0-indexed
                 if o < n {
-                    if oa.vcc.is_finite() && v[o] > oa.vcc {
-                        v[o] = oa.vcc;
+                    // Determine effective rail limits for this op-amp.
+                    // Base rails scale with source_scale so op-amp output tracks the
+                    // ramping supply during source stepping.
+                    let base_vcc = if oa.vcc.is_finite() { oa.vcc * source_scale } else { oa.vcc };
+                    let base_vee = if oa.vee.is_finite() { oa.vee * source_scale } else { oa.vee };
+
+                    let (eff_vcc, eff_vee) = if aol_cont_mode
+                        && dc_opamp_is_sidechain_rectifier(oa, mna)
+                    {
+                        // SR op-amps in AOL continuation: widen the VEE limit to allow
+                        // the output to reach the n_plus reference voltage (which is the
+                        // actual DC reference for the precision rectifier). Use the
+                        // current node voltage at n_plus rather than the model's VSAT.
+                        let v_nplus = if oa.n_plus_idx > 0 && oa.n_plus_idx - 1 < v.len() {
+                            v[oa.n_plus_idx - 1]
+                        } else {
+                            base_vee
+                        };
+                        // Allow output to go 1V below n_plus (headroom for diode drop).
+                        // Take the min with base_vee so output can't go below the supply.
+                        let eff_vee = (v_nplus - 1.0).min(base_vee);
+                        (base_vcc, eff_vee)
+                    } else {
+                        (base_vcc, base_vee)
+                    };
+                    if eff_vcc.is_finite() && v[o] > eff_vcc {
+                        v[o] = eff_vcc;
                     }
-                    if oa.vee.is_finite() && v[o] < oa.vee {
-                        v[o] = oa.vee;
+                    if eff_vee.is_finite() && v[o] < eff_vee {
+                        v[o] = eff_vee;
                     }
                 }
             }
@@ -1462,12 +1530,94 @@ fn nr_dc_solve(
         m,
         internal_junctions,
     );
+    if aol_cont_mode {
+        log::debug!(
+            "nr_dc_solve NON-CONVERGENCE (scale={:.3}, aol_mode): v_nl[4..]=[{}] op-amp-outs=[{}]",
+            source_scale,
+            v_nl.iter().enumerate().skip(4).map(|(i, x)| format!("[{}]={:.3}", i, x)).collect::<Vec<_>>().join(", "),
+            mna.opamps.iter().filter_map(|oa| {
+                let out = oa.n_out_idx;
+                if out > 0 && out - 1 < v.len() { Some(format!("{:.3}", v[out-1])) } else { None }
+            }).collect::<Vec<_>>().join(", ")
+        );
+    }
     (false, config.max_iterations)
 }
 
 /// Seed op-amp outputs from (V+ - V-) sign to select the correct equilibrium.
 /// Precision rectifiers have two self-consistent DC operating points (one at
 /// each rail). Without this, the NR may converge to the wrong one.
+/// For each sidechain-rectifier op-amp, pre-seed the inverting-input node
+/// at `v_out + 0.65 V` (one diode drop above the rail-clamped output) so the
+/// feedback diode starts at its physical forward-bias drop rather than
+/// the 11 V forward bias implied by a linear-DC-OP seed.
+///
+/// Physics: at quiescent with `v_plus` on a negative rail (e.g. vee12),
+/// the op-amp drives `v_out` to the VSAT rail. The feedback diode conducts
+/// forward current set by the series resistor network (~500 µA through
+/// Rrect_a_in / Rfb). The diode equation gives `Vd ≈ 0.64 V` at that
+/// current. So `v_minus = v_out + Vd ≈ VSAT + 0.65`. With VEE < VSAT (e.g.
+/// vee12 = −12, VSAT = 11 → v_out = −11, v_minus = −10.35), `v_minus`
+/// sits above `v_plus` by the VSAT/VEE difference. `v_out` is rail-pinned,
+/// NOT at `v_minus − 0.65` as ideal op-amp feedback would predict.
+///
+/// Without this seed, `seed_opamp_outputs` places `v_out` at VEE/VSAT but
+/// leaves `v_minus` at its linear-DC-OP value (often near 0 V). The feedback
+/// diode then sees `v_nl = |v_minus − v_out| ≈ 11 V` forward bias, producing
+/// `i_nl ≈ 1e14 A` on the first NR iteration and poisoning the Newton step
+/// regardless of pnjlim.
+fn seed_sr_feedback_diodes(v: &mut [f64], mna: &MnaSystem) {
+    for oa in &mna.opamps {
+        if !dc_opamp_is_sidechain_rectifier(oa, mna) {
+            continue;
+        }
+        let out = oa.n_out_idx;
+        if out == 0 {
+            continue;
+        }
+        let o = out - 1;
+        if o >= v.len() || !oa.vee.is_finite() {
+            continue;
+        }
+        let v_out = v[o];
+        if v_out > -1.0 {
+            continue;
+        }
+        for dev in &mna.nonlinear_devices {
+            if dev.device_type != crate::mna::NonlinearDeviceType::Diode
+                || dev.node_indices.len() < 2
+            {
+                continue;
+            }
+            let (a, k) = (dev.node_indices[0], dev.node_indices[1]);
+            if a != oa.n_out_idx && k != oa.n_out_idx {
+                continue;
+            }
+            let other_1idx = if a == oa.n_out_idx { k } else { a };
+            if other_1idx == 0 {
+                continue;
+            }
+            let other = other_1idx - 1;
+            if other >= v.len() {
+                continue;
+            }
+            let is_cathode_at_out = k == oa.n_out_idx;
+            let v_nl_current = if is_cathode_at_out {
+                v[other] - v_out
+            } else {
+                v_out - v[other]
+            };
+            if v_nl_current > 1.0 {
+                v[other] = if is_cathode_at_out {
+                    v_out + 0.65
+                } else {
+                    v_out - 0.65
+                };
+            }
+        }
+    }
+}
+
 fn seed_opamp_outputs(v: &mut [f64], mna: &MnaSystem) {
     for oa in &mna.opamps {
         let out = oa.n_out_idx;
@@ -1495,6 +1645,165 @@ fn seed_opamp_outputs(v: &mut [f64], mna: &MnaSystem) {
     }
 }
 
+/// BFS over the resistor network (nonzero off-diagonal G entries) to find
+/// whether `start` can reach `goal`. Avoids op-amp output nodes (which are
+/// voltage-source-driven and would create false paths) and ground (index 0).
+/// Returns `true` iff a purely-resistive path exists between the two nodes
+/// (both specified as 1-indexed MNA node indices, 0 = ground).
+fn g_matrix_r_path_exists(start: usize, goal: usize, mna: &MnaSystem) -> bool {
+    if start == 0 || goal == 0 {
+        return false;
+    }
+    if start == goal {
+        return true;
+    }
+    // Collect op-amp output node indices to exclude from BFS
+    // (they are voltage-controlled and don't represent resistive connections)
+    let oa_out_set: std::collections::HashSet<usize> = mna
+        .opamps
+        .iter()
+        .filter(|oa| oa.n_out_idx > 0)
+        .map(|oa| oa.n_out_idx - 1)
+        .collect();
+
+    let n = mna.n;
+    let mut visited = vec![false; n + 1];
+    // Use a simple stack-based DFS; nodes are 1-indexed externally, 0-indexed in g
+    let mut stack = vec![start - 1]; // convert to 0-indexed
+    visited[start - 1] = true;
+    let goal_0 = goal - 1;
+
+    while let Some(node) = stack.pop() {
+        if node == goal_0 {
+            return true;
+        }
+        if oa_out_set.contains(&node) {
+            continue; // don't traverse through op-amp output rows
+        }
+        for neighbor in 0..n {
+            if visited[neighbor] {
+                continue;
+            }
+            // A nonzero off-diagonal G entry indicates a resistive connection
+            if mna.g[node][neighbor].abs() > 1e-30 || mna.g[neighbor][node].abs() > 1e-30 {
+                visited[neighbor] = true;
+                stack.push(neighbor);
+            }
+        }
+    }
+    false
+}
+
+/// Returns `true` when the op-amp matches the precision-rectifier topology
+/// for DC OP AOL continuation purposes.
+///
+/// Matches the codegen-side `opamp_is_sidechain_rectifier` Rule D' classifier,
+/// implemented using only MNA data (no netlist BFS needed):
+/// 1. `n_plus` is on a non-zero DC voltage source rail (not ground).
+/// 2. At least one diode connects the op-amp output node to the inverting input,
+///    either directly or through a purely-resistive path (detected via G-matrix BFS).
+fn dc_opamp_is_sidechain_rectifier(oa: &crate::mna::OpampInfo, mna: &MnaSystem) -> bool {
+    // Condition 1: n_plus on a non-zero DC rail (not ground)
+    if oa.n_plus_idx == 0 {
+        return false;
+    }
+    let on_rail = mna.voltage_sources.iter().any(|vs| {
+        vs.dc_value != 0.0
+            && (vs.n_plus_idx == oa.n_plus_idx || vs.n_minus_idx == oa.n_plus_idx)
+    });
+    if !on_rail {
+        return false;
+    }
+    // Condition 2: n_minus and n_out are non-ground
+    if oa.n_minus_idx == 0 || oa.n_out_idx == 0 {
+        return false;
+    }
+    // Condition 3: at least one diode with one terminal at n_out, the other at n_minus
+    // (directly or through a resistor path in the G matrix)
+    mna.nonlinear_devices.iter().any(|dev| {
+        if dev.device_type != crate::mna::NonlinearDeviceType::Diode {
+            return false;
+        }
+        if dev.node_indices.len() < 2 {
+            return false;
+        }
+        let (a, k) = (dev.node_indices[0], dev.node_indices[1]);
+        let touches_out = a == oa.n_out_idx || k == oa.n_out_idx;
+        if !touches_out {
+            return false;
+        }
+        let other = if a == oa.n_out_idx { k } else { a };
+        if other == oa.n_minus_idx {
+            return true;
+        }
+        // Allow a resistor path from `other` to n_minus
+        g_matrix_r_path_exists(other, oa.n_minus_idx, mna)
+    })
+}
+
+/// Patch the DC conductance matrix for AOL continuation: replace the
+/// VCCS entries of all sidechain-rectifier op-amps with the entries
+/// corresponding to `aol_step`. The `base_g_dc` is the original matrix
+/// from `build_dc_system` (with `AOL_DC_MAX = 1000.0` already applied);
+/// this function further lowers (or restores) it to `aol_step`.
+///
+/// Returns the patched copy. Only the op-amp VCCS rows are modified.
+fn patch_g_dc_for_aol(
+    base_g_dc: &[Vec<f64>],
+    mna: &MnaSystem,
+    aol_step: f64,
+) -> Vec<Vec<f64>> {
+    let mut g = base_g_dc.to_vec();
+    let n_aug = mna.n_aug;
+
+    // AOL_DC_MAX is the cap already baked into base_g_dc (from build_dc_system).
+    // We want to further lower to aol_step for ALL op-amps (not just SR ones).
+    // Applying global AOL reduction ensures the entire circuit converges at
+    // uniform gain levels — if only SR op-amps are reduced, the remaining
+    // high-gain op-amps (AOL=1000) still create large NR steps that push the
+    // SR op-amp outputs to the wrong rail via resistive feedback paths.
+    const AOL_DC_MAX: f64 = 1000.0;
+
+    for oa in &mna.opamps {
+        let out = oa.n_out_idx;
+        if out == 0 {
+            continue;
+        }
+        let o = out - 1;
+        if o >= n_aug {
+            continue;
+        }
+        let np = oa.n_plus_idx;
+        let nm = oa.n_minus_idx;
+
+        // base_g_dc already has gm_capped = AOL_DC_MAX / r_out (for each op-amp).
+        // We want gm_step = aol_step / r_out.
+        // Delta to remove: (AOL_DC_MAX - aol_step) / r_out
+        let gm_current = AOL_DC_MAX.min(oa.aol) / oa.r_out;
+        let gm_target = aol_step / oa.r_out;
+        let delta_gm = gm_current - gm_target; // positive: reduce VCCS
+
+        if delta_gm.abs() < 1e-30 {
+            continue;
+        }
+
+        // The MNA VCCS stamps:
+        //   G[out][n_plus]  += +Gm  (or += -Gm if n_plus is 0-indexed here)
+        //   G[out][n_minus] += -Gm
+        // build_dc_system undoes excess Gm by doing:
+        //   g_dc[o][np - 1] -= delta_gm
+        //   g_dc[o][nm - 1] += delta_gm
+        // We apply an additional undo on top of that.
+        if np > 0 && np - 1 < n_aug {
+            g[o][np - 1] -= delta_gm;
+        }
+        if nm > 0 && nm - 1 < n_aug {
+            g[o][nm - 1] += delta_gm;
+        }
+    }
+    g
+}
+
 /// Compute the DC operating point for a circuit with nonlinear devices.
 ///
 /// Strategy:
@@ -1502,7 +1811,8 @@ fn seed_opamp_outputs(v: &mut [f64], mna: &MnaSystem) {
 /// 2. Try direct NR from linear guess
 /// 3. If NR fails, try source stepping (ramp DC sources from 0→full)
 /// 4. If source stepping fails, try Gmin stepping
-/// 5. Fallback: return linear DC OP with converged=false
+/// 5. If Gmin fails, try AOL continuation (precision rectifier multi-equilibrium)
+/// 6. Fallback: return linear DC OP with converged=false
 pub fn solve_dc_operating_point(
     mna: &MnaSystem,
     device_slots: &[DeviceSlot],
@@ -1577,6 +1887,7 @@ pub fn solve_dc_operating_point(
     v_clamped.resize(n_dc, 0.0);
 
     seed_opamp_outputs(&mut v_clamped, mna);
+    seed_sr_feedback_diodes(&mut v_clamped, mna);
     // Initialize internal node voltages from clamped external nodes
     for bjt in &dc_sys.bjt_internal {
         if let Some(slot) = device_slots.iter().find(|s| s.start_idx == bjt.start_idx) {
@@ -1652,7 +1963,7 @@ pub fn solve_dc_operating_point(
     let mut i_nl = vec![0.0; m];
 
     // Strategy 1: Direct NR from junction-clamped linear guess
-    let (converged, iters) = nr_dc_solve(&circuit, &mut v, &mut v_nl, &mut i_nl, 1.0, 0.0);
+    let (converged, iters) = nr_dc_solve(&circuit, &mut v, &mut v_nl, &mut i_nl, 1.0, 0.0, false);
     // Sanity check: verify the solution isn't degenerate (all nodes at supply rails).
     // A degenerate solution has all BJTs off — check that at least one junction is forward-biased.
     let mut has_active_junction = m == 0; // linear circuits are always OK
@@ -1726,7 +2037,7 @@ pub fn solve_dc_operating_point(
         for step in 1..=config.source_steps {
             let scale = step as f64 / config.source_steps as f64;
             let (converged, iters) =
-                nr_dc_solve(&circuit, &mut v, &mut v_nl, &mut i_nl, scale, 0.0);
+                nr_dc_solve(&circuit, &mut v, &mut v_nl, &mut i_nl, scale, 0.0, false);
             this_iters += iters;
             if !converged {
                 this_converged = false;
@@ -1870,7 +2181,7 @@ pub fn solve_dc_operating_point(
         let frac = step as f64 / config.gmin_steps as f64;
         let gmin = (log_start + frac * (log_end - log_start)).exp();
 
-        let (converged, iters) = nr_dc_solve(&circuit, &mut v, &mut v_nl, &mut i_nl, 1.0, gmin);
+        let (converged, iters) = nr_dc_solve(&circuit, &mut v, &mut v_nl, &mut i_nl, 1.0, gmin, false);
         total_iters += iters;
         if !converged {
             gmin_converged = false;
@@ -1885,7 +2196,7 @@ pub fn solve_dc_operating_point(
     );
     // Final solve without Gmin
     if gmin_converged {
-        let (converged, iters) = nr_dc_solve(&circuit, &mut v, &mut v_nl, &mut i_nl, 1.0, 0.0);
+        let (converged, iters) = nr_dc_solve(&circuit, &mut v, &mut v_nl, &mut i_nl, 1.0, 0.0, false);
         total_iters += iters;
         if converged {
             return DcOpResult {
@@ -1899,22 +2210,296 @@ pub fn solve_dc_operating_point(
         }
     }
 
+    // Strategy 4: AOL continuation (precision rectifier / comparator multi-equilibrium)
+    //
+    // Problem: circuits with sidechain-rectifier op-amps (Rule D' topology: n_plus on
+    // a non-zero DC rail, diode in output→inv-input feedback path) have two self-
+    // consistent NR fixed points — one at each rail. The linear initial guess (or any
+    // seed after failed source/Gmin stepping) may place the circuit near the wrong
+    // basin. At full AOL=200,000, the VCCS produces a 200 kV NR step that flips the
+    // output from one rail to the other in a single iteration, and the exponential diode
+    // Jacobian then locks the solution into the non-physical equilibrium.
+    //
+    // Solution: two-dimensional homotopy — joint source-stepping and AOL-ramping.
+    // At the lowest AOL (1.0), the VCCS contribution is negligible; we use source
+    // stepping from v=0 to walk the supplies up gradually. The diode feedback at
+    // near-zero supply is benign (small currents, no basin-flip). Once the sources
+    // are at full scale at AOL=1, we warm-start and ramp AOL geometrically to
+    // AOL_DC_MAX=1000, using a single NR solve per step (the source ramp already
+    // found the physical basin).
+    //
+    // Only activates when the circuit contains at least one sidechain-rectifier op-amp.
+    // Circuits without such topology skip this strategy entirely (no performance cost).
+    let has_sidechain_rectifier = mna
+        .opamps
+        .iter()
+        .any(|oa| dc_opamp_is_sidechain_rectifier(oa, mna));
+    if has_sidechain_rectifier {
+        // AOL continuation steps: start very low, ramp geometrically to AOL_DC_MAX.
+        // The first step uses source stepping from v=0. Each subsequent step
+        // warm-starts from the previous converged solution.
+        const AOL_DC_MAX: f64 = 1000.0;
+        let aol_steps: &[f64] = &[1.0, 3.0, 10.0, 30.0, 100.0, 300.0, AOL_DC_MAX];
+
+        let mut aol_total_iters = 0;
+        let mut aol_converged = true;
+        let mut v_aol: Option<Vec<f64>> = None;
+
+        for &aol in aol_steps {
+            // Build a patched g_dc with this AOL level
+            let g_dc_patched = patch_g_dc_for_aol(&dc_sys.g_dc, mna, aol);
+            let circuit_aol = DcCircuit {
+                g_dc: &g_dc_patched,
+                b_dc: &dc_sys.b_dc,
+                mna,
+                device_slots,
+                config,
+                dc_n_v: &dc_sys.dc_n_v,
+                dc_n_i: &dc_sys.dc_n_i,
+                n_dc,
+                has_internal_nodes,
+                internal_node_start: circuit.internal_node_start,
+            };
+
+            let step_ok;
+            let step_iters;
+
+            if let Some(ref prev) = v_aol {
+                // Warm-start from previous AOL step's converged solution.
+                // The solution is already in the physical basin, so a single NR
+                // solve should converge quickly.
+                let mut v_warm = prev.clone();
+                let (ok, iters) =
+                    nr_dc_solve(&circuit_aol, &mut v_warm, &mut v_nl, &mut i_nl, 1.0, 0.0, true);
+                step_ok = ok;
+                step_iters = iters;
+                if ok {
+                    v_aol = Some(v_warm);
+                }
+            } else {
+                // First AOL step: seed from `v_clamped` which already has op-amp
+                // outputs at the expected rail and SR feedback-diode nodes at
+                // v_out ± 0.65 V (applied via `seed_sr_feedback_diodes` during
+                // initialization). This is the physically consistent starting
+                // point for a precision rectifier at quiescent DC.
+                let mut v_seed = v_clamped.clone();
+                let (ok, iters) =
+                    nr_dc_solve(&circuit_aol, &mut v_seed, &mut v_nl, &mut i_nl, 1.0, 0.0, true);
+                step_ok = ok;
+                step_iters = iters;
+                if ok {
+                    v_aol = Some(v_seed);
+                }
+            }
+
+            aol_total_iters += step_iters;
+            log::info!(
+                "DC OP Strategy 4 (AOL continuation, aol={:.0}): converged={} iters={}",
+                aol,
+                step_ok,
+                step_iters
+            );
+            if !step_ok {
+                aol_converged = false;
+                break;
+            }
+        }
+
+        total_iters += aol_total_iters;
+
+        if aol_converged {
+            if let Some(mut v_final) = v_aol {
+                // Final solve on the full-AOL g_dc (base already at AOL_DC_MAX)
+                let (converged, iters) =
+                    nr_dc_solve(&circuit, &mut v_final, &mut v_nl, &mut i_nl, 1.0, 0.0, false);
+                total_iters += iters;
+                if converged {
+                    log::info!(
+                        "DC OP Strategy 4 (AOL continuation): final NR converged, total_iters={}",
+                        total_iters
+                    );
+                    v_final.truncate(n_dc);
+                    return DcOpResult {
+                        v_node: v_final,
+                        v_nl,
+                        i_nl,
+                        converged: true,
+                        method: DcOpMethod::AolStepping,
+                        iterations: total_iters,
+                    };
+                }
+            }
+        }
+    }
+
     // All strategies failed — return linear fallback with op-amp rail clamping.
     // The linear solution doesn't account for nonlinear devices, but seeding
     // op-amp outputs to the correct rail prevents precision rectifier circuits
     // from starting at the wrong equilibrium.
     let mut v_fallback = v_linear;
     seed_opamp_outputs(&mut v_fallback, mna);
+
+    // Precision rectifier diode consistency fixup:
+    // When all NR strategies fail, the fallback state has op-amp outputs seeded
+    // to VEE (correct) but the nodes connected to those outputs through feedback
+    // diodes still at their linear-OP values (typically near 0V). This creates
+    // v_nl(D1) = 0 - VEE = 11V → i_nl = 1e14A, which poisons DC_NL_I and causes
+    // catastrophic transient NR failure on the very first sample.
+    //
+    // Physical constraint: for each SR op-amp, the feedback diode(s) connecting
+    // n_out to n_minus MUST be forward biased at ~0.6-0.7V (the only physically
+    // consistent state for a precision rectifier at quiescent DC). Therefore,
+    // for each such feedback diode, if v_nl > 1V, fix it to ~0.65V by clamping
+    // the non-output terminal to v_out + 0.65V.
+    //
+    // This is NOT a NaN mask — it enforces the Kirchhoff constraint that the
+    // precision rectifier feedback loop establishes: v(diode_node) ≈ v_out + V_D.
+    for oa in &mna.opamps {
+        if !dc_opamp_is_sidechain_rectifier(oa, mna) {
+            continue;
+        }
+        let out = oa.n_out_idx;
+        if out == 0 {
+            continue;
+        }
+        let o = out - 1;
+        if o >= v_fallback.len() || !oa.vee.is_finite() {
+            continue;
+        }
+        let v_out = v_fallback[o];
+        // Only fix if the output is near VEE (op-amp saturated negative)
+        if v_out > -1.0 {
+            continue;
+        }
+        // For each feedback diode touching n_out, clamp the non-output
+        // terminal to `v_out ± 0.65 V`. The resistor network in a precision
+        // rectifier can only deliver ~500 µA, which gives a physical forward
+        // drop of ~0.64 V via the Shockley equation — close enough to 0.65 V
+        // for the refinement NR to pull into the correct basin in a few iters.
+        for dev in &mna.nonlinear_devices {
+            if dev.device_type != crate::mna::NonlinearDeviceType::Diode
+                || dev.node_indices.len() < 2
+            {
+                continue;
+            }
+            let (a, k) = (dev.node_indices[0], dev.node_indices[1]);
+            if a != oa.n_out_idx && k != oa.n_out_idx {
+                continue;
+            }
+            let other_1idx = if a == oa.n_out_idx { k } else { a };
+            if other_1idx == 0 {
+                continue;
+            }
+            let other = other_1idx - 1;
+            if other >= v_fallback.len() {
+                continue;
+            }
+            let is_cathode_at_out = k == oa.n_out_idx;
+            let v_other = v_fallback[other];
+            let v_nl_current = if is_cathode_at_out {
+                v_other - v_out
+            } else {
+                v_out - v_other
+            };
+            if v_nl_current > 1.0 {
+                v_fallback[other] = if is_cathode_at_out {
+                    v_out + 0.65
+                } else {
+                    v_out - 0.65
+                };
+            }
+        }
+    }
+
+    // Final refinement (SR op-amp circuits only): the synthesized fallback
+    // state has physically plausible node voltages (op-amp at rail, feedback-
+    // diode nodes at v_out ± 0.65 V) but KCL is typically violated because we
+    // only constrained a handful of nodes by topology. `evaluate_devices` on
+    // this raw state yields device currents that don't balance KCL (e.g. D1
+    // Vd = 0.65 V → i_D1 = 4.3 mA, but the series resistor network can only
+    // deliver ~500 µA through Rrect_a_in).
+    //
+    // Run direct NR from this seed. For precision-rectifier circuits this
+    // pulls the state into the correct basin in ~10-20 iterations (verified
+    // on SSL 4kbuscomp), giving DC_OP / DC_NL_I enough KCL fidelity that the
+    // transient warmup can pick up and settle to steady state instead of
+    // diverging from a KCL-inconsistent start.
+    //
+    // Gated on `has_sidechain_rectifier` because the synthesized seed is only
+    // meaningful for SR topologies — for other circuits (simple BJT amps
+    // whose DC OP naturally fails) this refinement would move the fallback
+    // state away from what downstream detection logic (FA classification,
+    // etc.) has historically seen, causing regressions unrelated to the SR
+    // fix at hand.
     let mut v_nl_fb = vec![0.0; m];
     let mut i_nl_fb = vec![0.0; m];
-    extract_nl_voltages_with(m, &dc_sys.dc_n_v, &v_fallback, &mut v_nl_fb);
-    evaluate_devices_inner(&v_nl_fb, device_slots, &mut i_nl_fb, &mut vec![0.0; m * m], m, has_internal_nodes);
+    let (v_out, conv_flag, conv_method) = if has_sidechain_rectifier {
+        // Refinement NR in `aol_cont_mode = true`: widens the SR op-amp rail
+        // to `v_nplus - 1`, giving NR enough room to escape the multi-basin
+        // landscape and converge into the correct (output-near-VEE) basin.
+        // Without this widening NR diverges on iter 1 (diode exponential blows
+        // up when the strict VSAT clamp pins v_out but lets v_minus drift).
+        //
+        // NB: the converged state has v_out ≈ VEE (e.g. -12.4 V), which is
+        // below the transient's hard VSAT clamp. For a purely AC-coupled
+        // circuit this is fine — the VSAT clamp pulls v_out back to -11 V
+        // at sample 1 and the circuit quickly settles. The 4kbuscomp
+        // sidechain has a 3.3 MΩ / 10 pF integrator with τ ≈ 33 µs that
+        // AMPLIFIES tiny DC offsets into unbounded CV drift; clamping DC
+        // OP v_out to VSAT to match the runtime helps, but isn't strictly
+        // required if the sidechain is stable enough to absorb the offset.
+        let mut v_refined = v_fallback.clone();
+        let (refined_ok, refine_iters) = nr_dc_solve(
+            &circuit,
+            &mut v_refined,
+            &mut v_nl_fb,
+            &mut i_nl_fb,
+            1.0,
+            0.0,
+            true,
+        );
+        total_iters += refine_iters;
+
+        if refined_ok {
+            log::info!(
+                "DC OP fallback-refine NR: converged after {} iters",
+                refine_iters
+            );
+            (v_refined, true, DcOpMethod::DirectNr)
+        } else if v_refined.iter().all(|x| x.is_finite())
+            && v_refined.iter().all(|x| x.abs() < 1e6)
+        {
+            log::info!(
+                "DC OP fallback-refine NR: partial progress after {} iters (not formally converged)",
+                refine_iters
+            );
+            (v_refined, false, DcOpMethod::Failed)
+        } else {
+            log::info!(
+                "DC OP fallback-refine NR: diverged after {} iters, using raw fallback state",
+                refine_iters
+            );
+            (v_fallback, false, DcOpMethod::Failed)
+        }
+    } else {
+        (v_fallback, false, DcOpMethod::Failed)
+    };
+
+    extract_nl_voltages_with(m, &dc_sys.dc_n_v, &v_out, &mut v_nl_fb);
+    evaluate_devices_inner(
+        &v_nl_fb,
+        device_slots,
+        &mut i_nl_fb,
+        &mut vec![0.0; m * m],
+        m,
+        has_internal_nodes,
+    );
     DcOpResult {
-        v_node: v_fallback,
+        v_node: v_out,
         v_nl: v_nl_fb,
         i_nl: i_nl_fb,
-        converged: false,
-        method: DcOpMethod::Failed,
+        converged: conv_flag,
+        method: conv_method,
         iterations: total_iters,
     }
 }

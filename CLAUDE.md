@@ -184,6 +184,7 @@ Tests compare melange output against ngspice. Infrastructure in `crates/melange-
 | DC OP diode reverse bias: nodes float to non-physical voltages (91kV) when diodes off | DC OP `evaluate_devices_inner()` ignored BV/IBV and had zero reverse-bias conductance | BV/IBV breakdown added to DC OP diode evaluation; device-level Gmin (1e-12 S) added as minimum junction conductance. (FIXED 2026-04-15) |
 | Precision rectifier transient: trap NR never converges, every sample falls to BE | DC OP fails → DC_NL_I garbage (1.21e11 A) → coupling caps uncharged after 50-sample warmup (RC > 0.5s needs ~143K samples at 48kHz) | Low-rate DC warmup: 200 Hz × 1000 samples (5s circuit time) charges caps before transient NR. Settled state cached. BE fallback <1%, sub-step handles >99%. (FIXED 2026-04-16) |
 | Full-LU NR: VCCS back-sub contamination (1.18B V at linear neighbor nodes) | Op-amp VCCS Gm ≈ 2000 in A. LU back-sub computes v_new[op_out]=400kV, uses it for neighbors before post-solve clamp. NR convergence checks device nodes only (N_V cols), misses linear neighbors. v_prev feeds back via A_neg, accumulates. | Selective op-amp Gm cap based on Rule D' topology classifier (n_plus on non-zero DC rail AND diode connects output→inv-input through R-only path). Cap baked into G constant at codegen time, AOL→1000 only on sidechain-rectifier op-amps. User override via `.model OA(AOL_TRANSIENT_CAP=N)`. 4kbuscomp `max_abs_v_prev`: 1.18B → 15V; Klon byte-identical (FIXED 2026-04-16) |
+| DC OP basin trap: precision-rectifier op-amp railed at −VSAT with clamp diode at 11 V forward bias (I ≈ 1e14 A) even after AOL cap. 4kbuscomp U8/U9 with `Rsc_vca=1MEG`. | Multi-equilibrium: the correct basin (op-amp follows v+ through D1 feedback, output ≈ v+ + Vd) and the pathological basin (railed op-amp + diode at 11 V) are both self-consistent NR fixed points. AOL=1k cap narrowed one issue but linear initial guess + exponential diode Jacobian still lands and stays in wrong basin. Homotopy path is the problem, not the cap magnitude. | OPEN (2026-04-16). Greenlit fix: op-amp AOL continuation in `dc_op.rs` — ramp AOL through `[1, 10, 100, 1000, target]`, seeding each step with previous solution. At AOL=1 the clamp diode dominates, correct basin trivially found; continuation walks it up to target. Gates on existing Rule D' classifier. See `memory/project_4kbuscomp_basin_trap.md`. |
 
 ## Current Status (2026-04-11)
 
@@ -332,10 +333,8 @@ Historical validation data preserved below for reference.
   - 50mV in → 549mV out (11x / 20.8dB gain), zero NR divergence
 - Bus compressor (4kbuscomp): 12 op-amps, 2 VCAs, 6 diodes, 2 pots, 2 switches
   - Audio path extract (4kbuscomp-audiopath.cir, M=2): stable, peak=0.001439
-  - Full circuit (N=80, M=10): stable at all amplitudes (0.001–1.0V), BE fallback <1% of samples
-  - Low-rate DC warmup (200Hz × 1000 samples) charges coupling caps when DC OP fails to converge
-  - Sub-step NR handles >99% of samples; trap NR never converges (12 high-gain op-amps)
-  - Peak still too hot at amp=1.0 (31V — sidechain gain reduction not fully tracking)
+  - **Full circuit DC OP currently fails** (2026-04-16). The wrong-rail bug (commit b5c5011) is fixed, but a distinct multi-equilibrium basin trap in the precision-rectifier op-amps (U8, U9) still leaves NR in a non-physical state (op-amp railed + D1/D3 at 11 V forward bias, I ≈ 1e14 A). Greenlit fix: op-amp AOL continuation (gain-stepping homotopy 1 → 10 → 100 → 1000) as a new fallback in `dc_op.rs`. Not yet implemented. See `memory/project_4kbuscomp_basin_trap.md`.
+  - "Stable at all amplitudes" claim in earlier CLAUDE.md referred to a pre-revert `.cir` file (`Rsc_vca = 1 Ω`, an undocumented solver-stability workaround) that has since been corrected to `1 MEG` in `melange-circuits` — the workaround was masking this bug.
   - Uses nodal full-LU path (K≈0 from current-mode VCA)
 - EL84 single stage (el84-single-stage): Reefman Derk §4.4 rational screen form
   - DC-OP validated, end-to-end compile-and-run verified
@@ -352,7 +351,7 @@ Historical validation data preserved below for reference.
 - Wurli-preamp SPICE validation (6-nines correlation, 3.2% RMS)
 - Tube screamer / guitar pedal circuits (stable + testing)
 - Klon Centaur (ActiveSetBe auto-route, BoyleDiodes opt-in experimental)
-- SSL bus compressor (codegen validated, full-LU path)
+- SSL bus compressor (codegen validated, full-LU path — **DC OP basin-trap unresolved**, see 4kbuscomp entry above)
 - VCR audio ALC compressor
 - Op-amp VCC/VEE asymmetric supply rails
 - Op-amp slew-rate limiting via `SR=` .model parameter (V/μs)

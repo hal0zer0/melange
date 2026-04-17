@@ -1591,6 +1591,23 @@ impl Parser {
                 // Op-amp supply rails: finite check already done above;
                 // no additional single-param range constraint needed
                 "VCC" | "VEE" => {}
+                // Op-amp input bias current (IB) is signed — positive for
+                // JFET/PNP-input parts, negative for NPN-input. No range check.
+                "IB" => {}
+                // Op-amp input resistance must be positive. Values larger than
+                // 1 PΩ are accepted but effectively mean "infinite" (the shunt
+                // conductance 1/RIN rounds to 0 in any realistic MNA context).
+                "RIN" => {
+                    if *value <= 0.0 {
+                        return Err(ParseError {
+                            line: 0,
+                            message: format!(
+                                ".model '{}': {} must be > 0, got {}",
+                                model.name, key, value
+                            ),
+                        });
+                    }
+                }
                 _ => {} // Unknown params: no range check (warned elsewhere)
             }
         }
