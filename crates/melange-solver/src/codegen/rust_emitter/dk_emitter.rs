@@ -563,6 +563,10 @@ impl RustEmitter {
         if emit_dc_op_recompute {
             let body = super::dc_op_emitter::emit_recompute_dc_op_body_dk(ir)?;
             ctx.insert("recompute_dc_op_body", &body);
+            ctx.insert(
+                "settle_dc_op_body",
+                &super::dc_op_emitter::emit_settle_dc_op_body(),
+            );
         }
 
         self.render("state", &ctx)

@@ -1866,6 +1866,34 @@ impl RustEmitter {
             );
             code.push_str(&body);
             code.push_str("    }\n\n");
+
+            // settle_dc_op() — the "recompute + warmup fallback" wrapper.
+            // Identical body to the DK path; the path-specific behavior
+            // lives in `recompute_dc_op`. On the nodal path the stub
+            // always ticks the counter, so this always falls through to
+            // the warmup loop — that's the intended contract.
+            code.push_str(
+                "    /// Settle to the DC operating point at current pot / switch / device\n\
+                 \x20   /// values — the \"recompute with warmup fallback\" convenience wrapper.\n\
+                 \x20   ///\n\
+                 \x20   /// Calls [`recompute_dc_op`](CircuitState::recompute_dc_op) first;\n\
+                 \x20   /// if the NR failed to update state (detected via\n\
+                 \x20   /// `diag_nr_max_iter_count` advancing), falls back to\n\
+                 \x20   /// `WARMUP_SAMPLES_RECOMMENDED` iterations of `process_sample(0.0, self)`.\n\
+                 \x20   /// Always leaves the circuit at a valid equilibrium — either the exact\n\
+                 \x20   /// NR solution or the warmup-loop-converged steady state.\n\
+                 \x20   ///\n\
+                 \x20   /// On this (nodal full-LU) path the runtime NR is a permanent stub,\n\
+                 \x20   /// so this method always falls through to the warmup loop today.\n\
+                 \x20   /// Plugin code doesn't need to branch on path — the contract is\n\
+                 \x20   /// uniform and the wrapper handles the routing.\n\
+                 \x20   ///\n\
+                 \x20   /// **Not audio-thread safe.** Call from plugin initialization or\n\
+                 \x20   /// parameter-change callbacks.\n\
+                 \x20   pub fn settle_dc_op(&mut self) {\n",
+            );
+            code.push_str(&super::dc_op_emitter::emit_settle_dc_op_body());
+            code.push_str("    }\n\n");
         }
 
         // dc_op_dump() — pretty printer using NODE_<NAME> constants from P3.

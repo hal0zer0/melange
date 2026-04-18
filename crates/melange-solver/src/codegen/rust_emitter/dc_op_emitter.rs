@@ -753,3 +753,51 @@ pub(super) fn emit_recompute_dc_op_body_nodal(_ir: &CircuitIR) -> Result<String,
         \x20       self.diag_nr_max_iter_count += 1;\n"
         .to_string())
 }
+
+/// Emit the body of `CircuitState::settle_dc_op()` — the
+/// recompute-then-fallback-on-failure wrapper both DK and nodal paths
+/// share.
+///
+/// Pattern:
+///
+/// 1. Snapshot `diag_nr_max_iter_count`.
+/// 2. Call `recompute_dc_op()`.
+/// 3. If the counter advanced (DK NR divergence / singular matrix / NaN
+///    reset / max-iter exhaustion, OR nodal permanent stub), fall back to
+///    `WARMUP_SAMPLES_RECOMMENDED` iterations of `process_sample(0.0, self)`.
+///
+/// Why check only `diag_nr_max_iter_count`: damping and substep counters
+/// can fire during successful DK NR convergence. Singular-matrix and
+/// NaN-reset paths break out of the NR loop without setting
+/// `nr_converged`, which routes the return through the max-iter-exhaustion
+/// branch that increments this specific counter. The nodal stub also
+/// bumps exactly this counter. So this one field is the unambiguous
+/// "did recompute_dc_op fail to update state?" signal.
+///
+/// The body is identical for DK and nodal paths — the path-specific
+/// behavior lives entirely in `recompute_dc_op` itself.
+///
+/// Emitted as a `pub fn settle_dc_op(&mut self)` on `CircuitState`, gated
+/// behind the same `emit_dc_op_recompute` flag as `recompute_dc_op`.
+pub(super) fn emit_settle_dc_op_body() -> String {
+    "        // Settle to the DC operating point at the current pot / switch /\n\
+     \x20       // device values. Tries the fast runtime NR first; on failure\n\
+     \x20       // (DK-path NR divergence or nodal-path permanent stub) runs the\n\
+     \x20       // `WARMUP_SAMPLES_RECOMMENDED` silence loop as fallback.\n\
+     \x20       //\n\
+     \x20       // The counter-check uses `diag_nr_max_iter_count` exclusively —\n\
+     \x20       // damping and substep counters can fire during successful\n\
+     \x20       // convergence, so they're not failure signals. The NR path\n\
+     \x20       // increments this counter on iter exhaustion, singular LU, and\n\
+     \x20       // NaN resets (all \"state not updated\" outcomes), and the\n\
+     \x20       // nodal stub increments it unconditionally — so this single\n\
+     \x20       // field cleanly distinguishes \"ready\" from \"fall back\".\n\
+     \x20       let before = self.diag_nr_max_iter_count;\n\
+     \x20       self.recompute_dc_op();\n\
+     \x20       if self.diag_nr_max_iter_count > before {\n\
+     \x20           for _ in 0..WARMUP_SAMPLES_RECOMMENDED {\n\
+     \x20               let _ = process_sample(0.0, self);\n\
+     \x20           }\n\
+     \x20       }\n"
+        .to_string()
+}

@@ -181,6 +181,13 @@ converges to the physically correct DC OP. See
 `docs/aidocs/DC_OP.md` and the `phase_e_handoff_runtime_dc_op` memory
 for the reviver's plan if priorities change.
 
+**`settle_dc_op()` wrapper**: also emitted behind the flag. Calls
+`recompute_dc_op` first; on NR failure or nodal stub tick, falls back
+to `WARMUP_SAMPLES_RECOMMENDED` iterations of `process_sample(0.0, self)`.
+Uniform API across DK and nodal — plugin code doesn't need a
+solver-path branch. Preferred over writing the recompute+fallback
+pattern by hand on the host side.
+
 State touched by the DK-path method (mirror of `reset()` but preserving
 noise RNG, pot/switch values, device runtime params, and diag counters):
 `dc_operating_point`, `v_prev`, `input_prev`, `i_nl_prev`/`i_nl_prev_prev`,

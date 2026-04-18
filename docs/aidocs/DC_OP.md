@@ -380,3 +380,37 @@ device evaluation, potentially hundreds of iterations). Expected cost
 is tens to hundreds of microseconds — hundreds of times an audio
 sample period. Call it from plugin initialization or
 parameter-change callbacks, never from `process_sample`.
+
+### `settle_dc_op()` — convenience wrapper
+
+Also emitted behind the same flag. Standard "recompute, fall back to
+warmup on failure" wrapper that plugin hosts would otherwise have to
+write themselves:
+
+```rust
+pub fn settle_dc_op(&mut self) {
+    let before = self.diag_nr_max_iter_count;
+    self.recompute_dc_op();
+    if self.diag_nr_max_iter_count > before {
+        for _ in 0..WARMUP_SAMPLES_RECOMMENDED {
+            let _ = process_sample(0.0, self);
+        }
+    }
+}
+```
+
+Identical body on DK and nodal paths — the path-specific behavior
+lives entirely in `recompute_dc_op`. On the DK path, a successful NR
+makes `settle_dc_op` equivalent to a bare `recompute_dc_op` call. On
+the nodal path, the permanent stub ticks the counter and
+`settle_dc_op` always falls through to the warmup loop. Plugin code
+calling `settle_dc_op` doesn't need to branch on the circuit's
+routing — the wrapper handles it.
+
+The counter check uses `diag_nr_max_iter_count` exclusively because
+damping and substep counters can increment during *successful* DK
+convergence. The NR path increments this specific counter on
+iter-exhaustion, singular LU, and NaN resets — all "state was not
+updated" outcomes — and the nodal stub increments it unconditionally.
+So this single field cleanly distinguishes "ready to process" from
+"fall back to warmup".

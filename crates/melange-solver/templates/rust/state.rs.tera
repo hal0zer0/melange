@@ -404,6 +404,27 @@ impl CircuitState {
     /// surface and semantic contract.
     pub fn recompute_dc_op(&mut self) {
 {{ recompute_dc_op_body }}    }
+
+    /// Settle to the DC operating point at current pot / switch / device
+    /// values — the "recompute with warmup fallback" convenience wrapper.
+    ///
+    /// Calls [`recompute_dc_op`](CircuitState::recompute_dc_op) first;
+    /// if the NR failed to update state (detected via
+    /// `diag_nr_max_iter_count` advancing), falls back to
+    /// `WARMUP_SAMPLES_RECOMMENDED` iterations of `process_sample(0.0, self)`.
+    /// Always leaves the circuit at a valid equilibrium — either the exact
+    /// NR solution or the warmup-loop-converged steady state.
+    ///
+    /// Plugin hosts should prefer this over calling `recompute_dc_op` and
+    /// the warmup loop separately — the wrapper tracks the DK/nodal path
+    /// distinction automatically (DK path normally succeeds; nodal path
+    /// always falls back today because the runtime NR is deferred — see
+    /// `recompute_dc_op` docs).
+    ///
+    /// **Not audio-thread safe.** Both stages are blocking. Call from
+    /// plugin initialization or parameter-change callbacks.
+    pub fn settle_dc_op(&mut self) {
+{{ settle_dc_op_body }}    }
 {% endif %}
 {% if named_nodes | length > 0 %}
     /// Pretty-print the DC operating point with user-assigned node names.
