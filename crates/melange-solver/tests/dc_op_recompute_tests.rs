@@ -389,3 +389,265 @@ fn flag_on_switch_compiles_and_runs_at_each_position() {
         String::from_utf8_lossy(&run.stdout)
     );
 }
+
+// -----------------------------------------------------------------------------
+// Phase E.4: per-device i_nl + dense Jacobian evaluation inside recompute_dc_op
+//
+// These tests guard that the new evaluator block is emitted when the circuit
+// has at least one nonlinear device, mirrors the transient solver's device
+// dispatch, packs locals into `i_nl` + `j_dev`, and still compiles. The NR
+// loop itself is E.5 — here the outputs are discarded with `let _ = ...;`
+// and `recompute_dc_op` remains a no-op semantically.
+// -----------------------------------------------------------------------------
+
+const DIODE_NETLIST: &str = "\
+Phase E.4 diode circuit — one diode clamped to ground
+R1 in mid 10k
+D1 mid 0 DMOD
+R2 mid out 10k
+C1 out 0 100n
+R3 out 0 100k
+.model DMOD D(IS=2.5e-9 N=1.8)
+";
+
+// JFET stays on the DK path and exercises the 2D-slot packing in E.4.
+// (A BJT at this dimensionality would route to nodal full-LU via the
+// `K≈0 / positive K diagonal` heuristic, so `generate_dk` — which force-
+// constructs a DkKernel — rejects it.)
+const JFET_NETLIST: &str = "\
+Phase E.4 JFET circuit — common-source JFET stage (2D NR block)
+R1 in g 1meg
+J1 d g 0 JMOD
+R2 d out 10k
+R3 out 0 100k
+C1 out 0 100n
+.model JMOD NJF(VTO=-3.5 BETA=1e-3 LAMBDA=0.01)
+";
+
+/// Diode flag-on: recompute_dc_op body contains the v_nl extraction reading
+/// `v_node`, the shared diode evaluator call, and the `j_dev[...]` pack.
+#[test]
+fn e4_diode_flag_on_emits_device_eval() {
+    let code = generate_dk(DIODE_NETLIST, true);
+
+    let body_start = code
+        .find("pub fn recompute_dc_op")
+        .expect("recompute_dc_op must be emitted with flag ON");
+    let window_end = (body_start + 8_000).min(code.len());
+    let body = &code[body_start..window_end];
+
+    assert!(
+        body.contains("let state: &CircuitState = &*self;")
+            && body.contains("let v_node: [f64; N] = state.v_prev;"),
+        "E.4: body must alias self as state then warm-start v_node.\n\
+         body preview (first 1200 chars):\n{}",
+        &body[..body.len().min(1200)]
+    );
+    assert!(
+        body.contains("let v_d0 = ") && body.contains("v_node["),
+        "E.4: body must emit `let v_d{{i}} = … v_node[…]` extraction"
+    );
+    assert!(
+        body.contains("let i_dev0 = diode_current("),
+        "E.4: diode slot must produce `let i_dev0 = diode_current(…)`"
+    );
+    assert!(
+        body.contains("let jdev_0_0 = diode_conductance("),
+        "E.4: diode slot must produce `let jdev_0_0 = diode_conductance(…)`"
+    );
+    assert!(
+        body.contains("let mut i_nl: [f64; M] = [0.0; M];")
+            && body.contains("i_nl[0] = i_dev0;"),
+        "E.4: must pack i_dev{{i}} into i_nl array"
+    );
+    assert!(
+        body.contains("let mut j_dev: [[f64; M]; M] = [[0.0; M]; M];")
+            && body.contains("j_dev[0][0] = jdev_0_0;"),
+        "E.4: must pack jdev_{{r}}_{{c}} into dense j_dev matrix"
+    );
+    assert!(
+        body.contains("let _ = (v_node, i_nl, j_dev);"),
+        "E.4: must discard v_node/i_nl/j_dev pending E.5 NR loop"
+    );
+}
+
+/// JFET flag-on: recompute_dc_op delegates to the shared `jfet_id` /
+/// `jfet_jacobian` helpers (2D block) and produces a full 2×2 Jacobian
+/// pack into j_dev.
+#[test]
+fn e4_jfet_flag_on_emits_jfet_evaluate() {
+    let code = generate_dk(JFET_NETLIST, true);
+
+    let body_start = code
+        .find("pub fn recompute_dc_op")
+        .expect("recompute_dc_op must be emitted with flag ON");
+    let window_end = (body_start + 8_000).min(code.len());
+    let body = &code[body_start..window_end];
+
+    assert!(
+        body.contains("jfet_id(v_d1, v_d0, state.device_0_idss"),
+        "E.4: JFET slot must reuse the shared jfet_id helper \
+         (args are (vgs=v_d1, vds=v_d0, ...)).\n\
+         body preview (first 1500 chars):\n{}",
+        &body[..body.len().min(1500)]
+    );
+    assert!(
+        body.contains("let jfet0_jac = jfet_jacobian(v_d1, v_d0"),
+        "E.4: JFET slot must compute the 2x2 jfet_jacobian"
+    );
+    for (r, c) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
+        assert!(
+            body.contains(&format!("j_dev[{r}][{c}] = jdev_{r}_{c};")),
+            "E.4: missing j_dev[{r}][{c}] pack for JFET 2×2 block"
+        );
+    }
+    assert!(
+        body.contains("i_nl[0] = i_dev0;") && body.contains("i_nl[1] = i_dev1;"),
+        "E.4: JFET 2D block must pack both i_dev0 and i_dev1"
+    );
+}
+
+/// Linear-only circuit with the flag ON: no device eval block should be
+/// emitted (the `if ir.topology.m > 0 && !ir.device_slots.is_empty()` guard
+/// short-circuits). recompute_dc_op stays compilable and callable.
+#[test]
+fn e4_linear_m0_flag_on_skips_device_eval() {
+    let code = generate_dk(REGRESSION_NETLIST, true);
+    let body_start = code
+        .find("pub fn recompute_dc_op")
+        .expect("recompute_dc_op must be emitted with flag ON");
+    let window_end = (body_start + 4_000).min(code.len());
+    let body = &code[body_start..window_end];
+
+    assert!(
+        !body.contains("Phase E.4: evaluate device currents"),
+        "E.4: linear-only circuit must NOT emit the device eval block"
+    );
+    assert!(
+        !body.contains("let v_node: [f64; N] = state.v_prev;"),
+        "E.4: linear-only circuit must NOT warm-start v_node (no devices to eval)"
+    );
+    assert!(
+        !body.contains("let mut i_nl: [f64; M] = [0.0; M];"),
+        "E.4: linear-only circuit must NOT pack i_nl (M=0)"
+    );
+    assert!(
+        body.contains("let mut g_aug: [[f64; N]; N] = G;"),
+        "E.4: linear-only circuit still emits E.3 G_aug build"
+    );
+}
+
+/// End-to-end: diode circuit with the flag ON compiles under rustc, and
+/// `recompute_dc_op` runs to completion without panic or UB. Catches any
+/// type / scoping / naming bug in the E.4 emission.
+#[test]
+fn e4_diode_flag_on_compiles_and_runs() {
+    use std::io::Write;
+
+    let code = generate_dk(DIODE_NETLIST, true);
+
+    let main = "\n\nfn main() {\n\
+        let mut state = CircuitState::default();\n\
+        for _ in 0..4 { state.recompute_dc_op(); }\n\
+        let dc = state.dc_op();\n\
+        assert_eq!(dc.len(), N);\n\
+        println!(\"ok\");\n\
+    }\n";
+    let full = format!("{}{}", code, main);
+
+    let tmp = std::env::temp_dir();
+    let src = tmp.join("melange_dc_op_recompute_e4_diode.rs");
+    let bin = tmp.join("melange_dc_op_recompute_e4_diode");
+    std::fs::File::create(&src)
+        .unwrap()
+        .write_all(full.as_bytes())
+        .unwrap();
+    let compile = std::process::Command::new("rustc")
+        .args([
+            src.to_str().unwrap(),
+            "-o",
+            bin.to_str().unwrap(),
+            "--edition",
+            "2021",
+        ])
+        .output()
+        .expect("rustc");
+    let _ = std::fs::remove_file(&src);
+    if !compile.status.success() {
+        let _ = std::fs::remove_file(&bin);
+        panic!(
+            "compile failed:\n{}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+    }
+    let run = std::process::Command::new(&bin).output().expect("run");
+    let _ = std::fs::remove_file(&bin);
+    assert!(
+        run.status.success(),
+        "binary failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&run.stdout).contains("ok"),
+        "unexpected output: {}",
+        String::from_utf8_lossy(&run.stdout)
+    );
+}
+
+/// End-to-end: JFET circuit with the flag ON compiles. JFET slot is 2D so
+/// this exercises packing of a 2×2 Jacobian block and two i_dev locals.
+#[test]
+fn e4_jfet_flag_on_compiles_and_runs() {
+    use std::io::Write;
+
+    let code = generate_dk(JFET_NETLIST, true);
+
+    let main = "\n\nfn main() {\n\
+        let mut state = CircuitState::default();\n\
+        for _ in 0..4 { state.recompute_dc_op(); }\n\
+        let dc = state.dc_op();\n\
+        assert_eq!(dc.len(), N);\n\
+        println!(\"ok\");\n\
+    }\n";
+    let full = format!("{}{}", code, main);
+
+    let tmp = std::env::temp_dir();
+    let src = tmp.join("melange_dc_op_recompute_e4_jfet.rs");
+    let bin = tmp.join("melange_dc_op_recompute_e4_jfet");
+    std::fs::File::create(&src)
+        .unwrap()
+        .write_all(full.as_bytes())
+        .unwrap();
+    let compile = std::process::Command::new("rustc")
+        .args([
+            src.to_str().unwrap(),
+            "-o",
+            bin.to_str().unwrap(),
+            "--edition",
+            "2021",
+        ])
+        .output()
+        .expect("rustc");
+    let _ = std::fs::remove_file(&src);
+    if !compile.status.success() {
+        let _ = std::fs::remove_file(&bin);
+        panic!(
+            "compile failed:\n{}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+    }
+    let run = std::process::Command::new(&bin).output().expect("run");
+    let _ = std::fs::remove_file(&bin);
+    assert!(
+        run.status.success(),
+        "binary failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&run.stdout).contains("ok"),
+        "unexpected output: {}",
+        String::from_utf8_lossy(&run.stdout)
+    );
+}

@@ -20,36 +20,44 @@
 //! 1. `emit_recompute_dc_op_body_dk` — top-level no-op stub (E.2).
 //! 2. `emit_dc_op_build_g_aug_dk` — G_aug construction from live pot/switch
 //!    state (E.3, this file).
-//! 3. `emit_dc_op_evaluate_devices` — per-device i_nl + Jacobian (E.4).
+//! 3. `emit_dc_op_evaluate_devices_dk` — per-device i_nl + Jacobian (E.4).
 //! 4. `emit_dc_op_solve` — NR loop, limiting, dense LU (E.5).
 //! 5. Compose + state resets (E.6).
 //! 6. Nodal mirror (E.8).
 //!
 //! The skeleton body below builds `g_aug` from the current pot/switch fields
-//! but does not yet consume it. Subsequent phases iterate the NR loop over
-//! this matrix. See the Phase E handoff memory file for the full definition
-//! of done.
+//! and emits the per-device current + Jacobian evaluator, but does not yet
+//! wrap them in an NR loop. Subsequent phases close that loop. See the
+//! Phase E handoff memory file for the full definition of done.
 
 use crate::codegen::ir::CircuitIR;
+use crate::codegen::CodegenError;
+
+use super::helpers::fmt_f64;
+use super::nr_helpers::emit_dk_device_evaluation;
 
 /// Emit the body of `CircuitState::recompute_dc_op()` for a DK-path circuit.
 ///
-/// **Current state (Phase E.3)**: builds a local `g_aug` matrix from the
-/// const `G`, the live `self.pot_*_resistance` values, and the live
-/// `self.switch_*_position` values. The NR loop that consumes `g_aug` lands
-/// in subsequent phases; until then the matrix is discarded with a
-/// `let _ = g_aug;` so the emitted method stays compilable and callable.
-pub(super) fn emit_recompute_dc_op_body_dk(ir: &CircuitIR) -> String {
+/// **Current state (Phase E.4)**: builds a local `g_aug` matrix and a local
+/// `v_node` warm-started from `self.v_prev`, extracts `v_nl = N_v · v_node`,
+/// and evaluates the per-device current + dense Jacobian. Nothing consumes
+/// those values yet — the NR loop (E.5) will iterate `g_aug`, `i_nl`, and
+/// `j_dev` to convergence, then write back to `self.dc_operating_point`,
+/// `self.v_prev`, and `self.i_nl_prev`. Until E.5 lands, everything is
+/// discarded with `let _ = (...);` so the emitted method stays compilable
+/// and callable (as a no-op semantically).
+pub(super) fn emit_recompute_dc_op_body_dk(ir: &CircuitIR) -> Result<String, CodegenError> {
     let mut body = String::new();
     body.push_str(
         "        // Phase E MVP (Oomox P6) — Direct Newton-Raphson DC OP recompute.\n\
          \x20       //\n\
-         \x20       // Phases E.3+ build `g_aug` below from the live pot/switch state,\n\
-         \x20       // run NR over it, and write back to `self.dc_operating_point`,\n\
-         \x20       // `self.v_prev`, and `self.i_nl_prev`. Until all phases land the\n\
-         \x20       // matrix is built but unused — calling this is still a no-op,\n\
-         \x20       // so plugin code that needs jittered-pot convergence must keep\n\
-         \x20       // using the `WARMUP_SAMPLES_RECOMMENDED` silence loop.\n\
+         \x20       // Phases E.3+E.4 build `g_aug` and evaluate per-device currents +\n\
+         \x20       // Jacobians from the live pot/switch state and a warm-started\n\
+         \x20       // `v_node`. Phase E.5 wraps them in the NR loop and writes back\n\
+         \x20       // to `self.dc_operating_point`, `self.v_prev`, and\n\
+         \x20       // `self.i_nl_prev`. Until all phases land, calling this is a\n\
+         \x20       // no-op — plugin code that needs jittered-pot convergence must\n\
+         \x20       // keep using the `WARMUP_SAMPLES_RECOMMENDED` silence loop.\n\
          \x20       //\n\
          \x20       // Scope notes for the MVP (subject to revision before E.6):\n\
          \x20       //   * Parasitic-BJT internal nodes (RB/RC/RE > 0) are NOT\n\
@@ -62,12 +70,25 @@ pub(super) fn emit_recompute_dc_op_body_dk(ir: &CircuitIR) -> String {
          \x20       //     For inductor-free circuits these agree bitwise.\n",
     );
     body.push_str(&emit_dc_op_build_g_aug_dk(ir));
+
+    // E.4: per-device i_nl + dense Jacobian from a warm-started v_node.
+    // Wrapped in a scoped block so the transient `v_d{i}` / `i_dev{i}` /
+    // `jdev_{r}_{c}` locals shared with `solve_nonlinear` don't leak into
+    // the outer function body.
+    if ir.topology.m > 0 && !ir.device_slots.is_empty() {
+        body.push_str(&emit_dc_op_evaluate_devices_dk(ir, "        ")?);
+    }
+
+    // Phase E.5 will iterate the NR loop. Until then discard everything so
+    // the unused-variable lint stays quiet. The discard list grows as
+    // subsequent phases add more locals (v_node / i_nl / j_dev).
     body.push_str(
-        "\n        // Phase E.4+ will iterate `g_aug` through the NR loop. Until\n\
-         \x20       // then, discard it so the unused-variable lint stays quiet.\n\
+        "\n        // Phase E.5 will iterate the NR loop over `g_aug`, `i_nl`,\n\
+         \x20       // and `j_dev`. Until then, discard so the unused-variable\n\
+         \x20       // lint stays quiet.\n\
          \x20       let _ = g_aug;\n",
     );
-    body
+    Ok(body)
 }
 
 /// Emit Rust that constructs a local `g_aug: [[f64; N]; N]` from:
@@ -177,4 +198,146 @@ fn emit_dc_op_build_g_aug_dk(ir: &CircuitIR) -> String {
     // `WARMUP_SAMPLES_RECOMMENDED` silence loop.
 
     body
+}
+
+/// Emit `let v_d{i} = <N_v row i> · v_node;` bindings — one per nonlinear
+/// dimension.
+///
+/// Structurally identical to `dk_emitter::emit_extract_voltages` except
+/// * source is `v_node` (not `v_pred` — the DC-OP NR iterates over node
+///   voltages, not the Schur-decomposed predictor),
+/// * output is individual `let`-bindings rather than an array initializer
+///   (so the device-eval helper can consume them directly).
+///
+/// Sparsity pattern comes from `ir.sparsity.n_v.nz_by_row`, coefficient
+/// values from `ir.n_v(i, j)`. Rows with no non-zero columns emit `0.0` —
+/// which can happen in pathological device layouts and stays valid Rust
+/// even though it short-circuits the device evaluator (the paired
+/// `i_dev{i}` will evaluate to whatever the device helpers return at zero
+/// controlling voltage, which may or may not be physically meaningful).
+fn emit_dc_op_extract_v_nl_dk(ir: &CircuitIR, indent: &str) -> String {
+    let m = ir.topology.m;
+    let mut out = String::new();
+    for i in 0..m {
+        let nz_cols = &ir.sparsity.n_v.nz_by_row[i];
+        let mut expr = String::new();
+        if nz_cols.is_empty() {
+            expr.push_str("0.0");
+        } else {
+            let mut first = true;
+            for &j in nz_cols {
+                let coeff = ir.n_v(i, j);
+                let abs_val = coeff.abs();
+                let is_negative = coeff < 0.0;
+                if first {
+                    if is_negative {
+                        expr.push('-');
+                    }
+                } else if is_negative {
+                    expr.push_str(" - ");
+                } else {
+                    expr.push_str(" + ");
+                }
+                if (abs_val - 1.0).abs() < 1e-15 {
+                    expr.push_str(&format!("v_node[{j}]"));
+                } else {
+                    expr.push_str(&format!("{} * v_node[{j}]", fmt_f64(abs_val)));
+                }
+                first = false;
+            }
+        }
+        out.push_str(&format!("{indent}let v_d{i} = {expr};\n"));
+    }
+    out
+}
+
+/// Emit the Phase E.4 per-device evaluator block inside `recompute_dc_op`.
+///
+/// Layout of the emitted block:
+/// ```text
+/// {
+///     let v_node: [f64; N] = self.v_prev;   // warm-start seed
+///     let v_d0 = …; let v_d1 = …; …          // v_nl = N_v · v_node
+///     let i_dev0 = …; let jdev_0_0 = …; …    // shared device-eval helper
+///     let mut i_nl = [0.0; M];
+///     let mut j_dev = [[0.0; M]; M];
+///     i_nl[0] = i_dev0; …                    // pack flat locals → dense arrays
+///     j_dev[0][0] = jdev_0_0; …
+///     let _ = (v_node, i_nl, j_dev);          // E.5 replaces this discard
+/// }
+/// ```
+///
+/// The inner locals deliberately reuse the `v_d{i}` / `i_dev{i}` /
+/// `jdev_{r}_{c}` naming from `solve_nonlinear` so the shared
+/// [`emit_dk_device_evaluation`] helper drops in without renaming.
+///
+/// Caller guarantees `ir.topology.m > 0` and non-empty `device_slots` — the
+/// block would compile when those are empty but packing a `[f64; 0]` is
+/// dead code, so the outer dispatcher skips the call entirely in that case.
+fn emit_dc_op_evaluate_devices_dk(
+    ir: &CircuitIR,
+    indent: &str,
+) -> Result<String, CodegenError> {
+    let m = ir.topology.m;
+    let inner = format!("{indent}    ");
+    let mut out = String::new();
+
+    out.push_str(&format!(
+        "\n{indent}// --- Phase E.4: evaluate device currents + dense Jacobian ----\n\
+         {indent}//\n\
+         {indent}// Warm-starts from `self.v_prev`, extracts `v_nl = N_v·v_node`,\n\
+         {indent}// and reuses the transient `solve_nonlinear` device dispatch via\n\
+         {indent}// `nr_helpers::emit_dk_device_evaluation`. E.5 wraps this block\n\
+         {indent}// in the NR iteration; until then the outputs are discarded.\n\
+         {indent}//\n\
+         {indent}// The shared device evaluator emits `state.device_N_*` accessors\n\
+         {indent}// (it's the same block `solve_nonlinear(&mut CircuitState)` uses).\n\
+         {indent}// `recompute_dc_op(&mut self)` has no `state` binding, so we\n\
+         {indent}// introduce one here — immutable borrow is enough because device\n\
+         {indent}// evaluation only reads per-device parameters.\n\
+         {indent}{{\n\
+         {inner}let state: &CircuitState = &*self;\n\
+         {inner}let v_node: [f64; N] = state.v_prev;\n\n"
+    ));
+
+    // v_nl extraction (from v_node, not v_pred).
+    out.push_str(&emit_dc_op_extract_v_nl_dk(ir, &inner));
+    out.push('\n');
+
+    // Per-device current + Jacobian emission (shared with solve_nonlinear).
+    emit_dk_device_evaluation(&mut out, ir, &inner)?;
+
+    // Pack flat `i_dev{i}` / `jdev_{r}_{c}` locals into dense arrays the
+    // NR loop (E.5) will consume.
+    out.push_str(&format!(
+        "{inner}// Pack into dense i_nl / j_dev for E.5's NR iteration.\n\
+         {inner}let mut i_nl: [f64; M] = [0.0; M];\n"
+    ));
+    for i in 0..m {
+        out.push_str(&format!("{inner}i_nl[{i}] = i_dev{i};\n"));
+    }
+    out.push_str(&format!(
+        "{inner}let mut j_dev: [[f64; M]; M] = [[0.0; M]; M];\n"
+    ));
+    for (dev_num, slot) in ir.device_slots.iter().enumerate() {
+        let _ = dev_num;
+        let blk_start = slot.start_idx;
+        let blk_dim = slot.dimension;
+        for r in blk_start..blk_start + blk_dim {
+            for c in blk_start..blk_start + blk_dim {
+                out.push_str(&format!(
+                    "{inner}j_dev[{r}][{c}] = jdev_{r}_{c};\n"
+                ));
+            }
+        }
+    }
+
+    // E.5 replaces this with the NR loop.
+    out.push_str(&format!(
+        "\n{inner}// Discard pending E.5 — keeps the unused-variable lint quiet.\n\
+         {inner}let _ = (v_node, i_nl, j_dev);\n\
+         {indent}}}\n"
+    ));
+
+    Ok(out)
 }

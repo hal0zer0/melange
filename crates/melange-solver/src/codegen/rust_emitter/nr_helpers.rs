@@ -3,11 +3,278 @@
 //! Free functions that emit NR singular fallback, voltage limiting, and
 //! convergence checking code. Used by both DK and nodal solver paths.
 
-use crate::codegen::ir::{CircuitIR, DeviceType};
+use crate::codegen::ir::{CircuitIR, DeviceParams, DeviceType};
+use crate::codegen::CodegenError;
+use super::helpers::emit_pentode_nr_dk_stamp;
 
 // ============================================================================
 // Procedural NR solver generation (too complex for templates)
 // ============================================================================
+
+/// Emit the DK-path per-device evaluation block: for each [`DeviceSlot`],
+/// produce `i_dev{s..}` current locals and `jdev_{r}_{c}` dense-block-Jacobian
+/// locals, reading `v_d{i}` controlling-voltage locals from the surrounding
+/// scope.
+///
+/// Shared between:
+///   * [`super::dk_solver::RustEmitter::generate_solve_nonlinear`] — Schur
+///     M-dim current-space NR (transient process_sample).
+///   * [`super::dc_op_emitter::emit_recompute_dc_op_body_dk`] — Phase E
+///     runtime DC-OP recompute (N-dim node-voltage NR). The same per-slot
+///     dispatch applies because the device physics is identical; only the
+///     surrounding NR loop shape differs.
+///
+/// The caller owns the `v_d{i}` bindings (from N_v extraction) and consumes
+/// the emitted `i_dev{i}` + `jdev_{r}_{c}` locals in whatever form its NR
+/// formulation needs. `indent` sets the leading whitespace on every emitted
+/// line so the block can nest inside arbitrary scopes.
+pub(super) fn emit_dk_device_evaluation(
+    code: &mut String,
+    ir: &CircuitIR,
+    indent: &str,
+) -> Result<(), CodegenError> {
+    code.push_str(&format!(
+        "{indent}// Evaluate device currents and Jacobians\n"
+    ));
+    for (dev_num, slot) in ir.device_slots.iter().enumerate() {
+        match slot.device_type {
+            DeviceType::Diode => {
+                let s = slot.start_idx;
+                let d = dev_num;
+                let dp = match &slot.params {
+                    DeviceParams::Diode(dp) => dp,
+                    other => {
+                        return Err(CodegenError::InvalidDevice(format!(
+                            "device_type=Diode but params={:?}",
+                            other
+                        )))
+                    }
+                };
+                if dp.has_rs() && dp.has_bv() {
+                    // RS + BV: solve inner NR for junction voltage, then add breakdown
+                    code.push_str(&format!(
+                        "{indent}let i_dev{s} = diode_current_with_rs(v_d{s}, state.device_{d}_is, state.device_{d}_n_vt, DEVICE_{d}_RS) + diode_breakdown_current(v_d{s}, state.device_{d}_n_vt, DEVICE_{d}_BV, DEVICE_{d}_IBV);\n"
+                    ));
+                    code.push_str(&format!(
+                        "{indent}let jdev_{s}_{s} = diode_conductance_with_rs(v_d{s}, state.device_{d}_is, state.device_{d}_n_vt, DEVICE_{d}_RS) + diode_breakdown_conductance(v_d{s}, state.device_{d}_n_vt, DEVICE_{d}_BV, DEVICE_{d}_IBV);\n"
+                    ));
+                } else if dp.has_rs() {
+                    // RS only: solve inner NR for junction voltage
+                    code.push_str(&format!(
+                        "{indent}let i_dev{s} = diode_current_with_rs(v_d{s}, state.device_{d}_is, state.device_{d}_n_vt, DEVICE_{d}_RS);\n"
+                    ));
+                    code.push_str(&format!(
+                        "{indent}let jdev_{s}_{s} = diode_conductance_with_rs(v_d{s}, state.device_{d}_is, state.device_{d}_n_vt, DEVICE_{d}_RS);\n"
+                    ));
+                } else if dp.has_bv() {
+                    // BV only: add breakdown to standard diode
+                    code.push_str(&format!(
+                        "{indent}let i_dev{s} = diode_current(v_d{s}, state.device_{d}_is, state.device_{d}_n_vt) + diode_breakdown_current(v_d{s}, state.device_{d}_n_vt, DEVICE_{d}_BV, DEVICE_{d}_IBV);\n"
+                    ));
+                    code.push_str(&format!(
+                        "{indent}let jdev_{s}_{s} = diode_conductance(v_d{s}, state.device_{d}_is, state.device_{d}_n_vt) + diode_breakdown_conductance(v_d{s}, state.device_{d}_n_vt, DEVICE_{d}_BV, DEVICE_{d}_IBV);\n"
+                    ));
+                } else {
+                    // Standard diode (no RS, no BV)
+                    code.push_str(&format!(
+                        "{indent}let i_dev{s} = diode_current(v_d{s}, state.device_{d}_is, state.device_{d}_n_vt);\n"
+                    ));
+                    code.push_str(&format!(
+                        "{indent}let jdev_{s}_{s} = diode_conductance(v_d{s}, state.device_{d}_is, state.device_{d}_n_vt);\n"
+                    ));
+                }
+            }
+            DeviceType::Bjt => {
+                let s = slot.start_idx;
+                let s1 = s + 1;
+                let d = dev_num;
+                let bp = match &slot.params {
+                    DeviceParams::Bjt(bp) => bp,
+                    other => {
+                        return Err(CodegenError::InvalidDevice(format!(
+                            "device_type=Bjt but params={:?}",
+                            other
+                        )))
+                    }
+                };
+                if bp.has_parasitics() && !slot.has_internal_mna_nodes {
+                    // Use inner 2D NR for parasitic resistances
+                    code.push_str(&format!(
+                        "{indent}let (i_dev{s}, i_dev{s1}, bjt{d}_jac) = bjt_with_parasitics(v_d{s}, v_d{s1}, state.device_{d}_is, state.device_{d}_vt, DEVICE_{d}_NF, DEVICE_{d}_NR, state.device_{d}_bf, state.device_{d}_br, DEVICE_{d}_SIGN, DEVICE_{d}_USE_GP, DEVICE_{d}_VAF, DEVICE_{d}_VAR, DEVICE_{d}_IKF, DEVICE_{d}_IKR, DEVICE_{d}_ISE, DEVICE_{d}_NE, DEVICE_{d}_ISC, DEVICE_{d}_NC, DEVICE_{d}_RB, DEVICE_{d}_RC, DEVICE_{d}_RE);\n"
+                    ));
+                } else {
+                    // Combined evaluation: shared exp() across ic, ib, jacobian
+                    // (parasitics handled by MNA internal nodes when has_internal_mna_nodes)
+                    code.push_str(&format!(
+                        "{indent}let (i_dev{s}, i_dev{s1}, bjt{d}_jac) = bjt_evaluate(v_d{s}, v_d{s1}, state.device_{d}_is, state.device_{d}_vt, DEVICE_{d}_NF, DEVICE_{d}_NR, state.device_{d}_bf, state.device_{d}_br, DEVICE_{d}_SIGN, DEVICE_{d}_USE_GP, DEVICE_{d}_VAF, DEVICE_{d}_VAR, DEVICE_{d}_IKF, DEVICE_{d}_IKR, DEVICE_{d}_ISE, DEVICE_{d}_NE, DEVICE_{d}_ISC, DEVICE_{d}_NC);\n"
+                    ));
+                }
+                code.push_str(&format!("{indent}let jdev_{s}_{s} = bjt{d}_jac[0];\n"));
+                code.push_str(&format!("{indent}let jdev_{s}_{s1} = bjt{d}_jac[1];\n"));
+                code.push_str(&format!("{indent}let jdev_{s1}_{s} = bjt{d}_jac[2];\n"));
+                code.push_str(&format!("{indent}let jdev_{s1}_{s1} = bjt{d}_jac[3];\n"));
+            }
+            DeviceType::BjtForwardActive => {
+                // 1D forward-active BJT: only Vbe→Ic, Ib=Ic/BF folded into N_i
+                let s = slot.start_idx;
+                let d = dev_num;
+                code.push_str(&format!(
+                    "{indent}// BJT {d} forward-active (1D: Vbe→Ic only)\n"
+                ));
+                code.push_str(&format!(
+                    "{indent}let vbe_{d} = v_d{s} * DEVICE_{d}_SIGN;\n"
+                ));
+                code.push_str(&format!(
+                    "{indent}let exp_be_{d} = fast_exp(vbe_{d} / (DEVICE_{d}_NF * state.device_{d}_vt));\n"
+                ));
+                code.push_str(&format!(
+                    "{indent}let i_dev{s} = state.device_{d}_is * (exp_be_{d} - 1.0) * DEVICE_{d}_SIGN;\n"
+                ));
+                code.push_str(&format!(
+                    "{indent}let jdev_{s}_{s} = state.device_{d}_is / (DEVICE_{d}_NF * state.device_{d}_vt) * exp_be_{d};\n"
+                ));
+            }
+            DeviceType::Jfet => {
+                let s = slot.start_idx;
+                let s1 = s + 1;
+                let d = dev_num;
+                let jp = match &slot.params {
+                    DeviceParams::Jfet(jp) => jp,
+                    other => {
+                        return Err(CodegenError::InvalidDevice(format!(
+                            "device_type=Jfet but params={:?}",
+                            other
+                        )))
+                    }
+                };
+                // IDSS, VP, LAMBDA from state; SIGN stays as const.
+                // N_v ordering: dim s = Vds, dim s+1 = Vgs.
+                // Functions expect (vgs, vds), so pass (v_d{s1}, v_d{s}).
+                code.push_str(&format!(
+                    "{indent}let i_dev{s} = jfet_id(v_d{s1}, v_d{s}, state.device_{d}_idss, state.device_{d}_vp, state.device_{d}_lambda, DEVICE_{d}_SIGN);\n"
+                ));
+                code.push_str(&format!(
+                    "{indent}let i_dev{s1} = jfet_ig(v_d{s1}, DEVICE_{d}_SIGN);\n"
+                ));
+                if jp.has_rd_rs() {
+                    code.push_str(&format!(
+                        "{indent}let jfet{d}_jac = jfet_jacobian_with_rd_rs(v_d{s1}, v_d{s}, state.device_{d}_idss, state.device_{d}_vp, state.device_{d}_lambda, DEVICE_{d}_SIGN, DEVICE_{d}_RD, DEVICE_{d}_RS);\n"
+                    ));
+                } else {
+                    code.push_str(&format!(
+                        "{indent}let jfet{d}_jac = jfet_jacobian(v_d{s1}, v_d{s}, state.device_{d}_idss, state.device_{d}_vp, state.device_{d}_lambda, DEVICE_{d}_SIGN);\n"
+                    ));
+                }
+                // In dim-space (dim0=Vds, dim1=Vgs):
+                //   jdev_s_s   = dId/dVds = jac[1]
+                //   jdev_s_s1  = dId/dVgs = jac[0]
+                //   jdev_s1_s  = dIg/dVds = jac[3]
+                //   jdev_s1_s1 = dIg/dVgs = jac[2]
+                code.push_str(&format!("{indent}let jdev_{s}_{s} = jfet{d}_jac[1];\n"));
+                code.push_str(&format!("{indent}let jdev_{s}_{s1} = jfet{d}_jac[0];\n"));
+                code.push_str(&format!("{indent}let jdev_{s1}_{s} = jfet{d}_jac[3];\n"));
+                code.push_str(&format!(
+                    "{indent}let jdev_{s1}_{s1} = jfet{d}_jac[2];\n"
+                ));
+            }
+            DeviceType::Mosfet => {
+                let s = slot.start_idx;
+                let s1 = s + 1;
+                let d = dev_num;
+                let mp = match &slot.params {
+                    DeviceParams::Mosfet(mp) => mp,
+                    other => {
+                        return Err(CodegenError::InvalidDevice(format!(
+                            "device_type=Mosfet but params={:?}",
+                            other
+                        )))
+                    }
+                };
+                // KP, VT, LAMBDA from state; SIGN stays as const.
+                // N_v ordering: dim s = Vds, dim s+1 = Vgs.
+                // Functions expect (vgs, vds), so pass (v_d{s1}, v_d{s}).
+                code.push_str(&format!(
+                    "{indent}let i_dev{s} = mosfet_id(v_d{s1}, v_d{s}, state.device_{d}_kp, state.device_{d}_vt, state.device_{d}_lambda, DEVICE_{d}_SIGN);\n"
+                ));
+                code.push_str(&format!(
+                    "{indent}let i_dev{s1} = mosfet_ig(v_d{s1}, DEVICE_{d}_SIGN);\n"
+                ));
+                if mp.has_rd_rs() {
+                    code.push_str(&format!(
+                        "{indent}let mos{d}_jac = mosfet_jacobian_with_rd_rs(v_d{s1}, v_d{s}, state.device_{d}_kp, state.device_{d}_vt, state.device_{d}_lambda, DEVICE_{d}_SIGN, DEVICE_{d}_RD, DEVICE_{d}_RS);\n"
+                    ));
+                } else {
+                    code.push_str(&format!(
+                        "{indent}let mos{d}_jac = mosfet_jacobian(v_d{s1}, v_d{s}, state.device_{d}_kp, state.device_{d}_vt, state.device_{d}_lambda, DEVICE_{d}_SIGN);\n"
+                    ));
+                }
+                code.push_str(&format!("{indent}let jdev_{s}_{s} = mos{d}_jac[1];\n"));
+                code.push_str(&format!("{indent}let jdev_{s}_{s1} = mos{d}_jac[0];\n"));
+                code.push_str(&format!("{indent}let jdev_{s1}_{s} = mos{d}_jac[3];\n"));
+                code.push_str(&format!("{indent}let jdev_{s1}_{s1} = mos{d}_jac[2];\n"));
+            }
+            DeviceType::Tube => {
+                let s = slot.start_idx;
+                let s1 = s + 1;
+                let d = dev_num;
+                let tp = match &slot.params {
+                    DeviceParams::Tube(tp) => tp,
+                    other => {
+                        return Err(CodegenError::InvalidDevice(format!(
+                            "device_type=Tube but params={:?}",
+                            other
+                        )))
+                    }
+                };
+                if tp.is_pentode() {
+                    // Pentode / beam tetrode NR block. 3D (Vgk→Ip,
+                    // Vpk→Ig2, Vg2k→Ig1) for sharp / variable-mu /
+                    // Classical; 2D for grid-off (Vg2k frozen, Ig1
+                    // dropped). See [`pentode_dispatch`] for the
+                    // 8-way helper family selection.
+                    emit_pentode_nr_dk_stamp(code, tp, d, s, indent);
+                } else {
+                    if tp.has_rgi() {
+                        // RGI: solve for internal Vgk, evaluate at internal voltage
+                        code.push_str(&format!(
+                            "{indent}let (i_dev{s}, i_dev{s1}, tube{d}_jac) = tube_evaluate_with_rgi(v_d{s}, v_d{s1}, state.device_{d}_mu, state.device_{d}_ex, state.device_{d}_kg1, state.device_{d}_kp, state.device_{d}_kvb, state.device_{d}_ig_max, state.device_{d}_vgk_onset, state.device_{d}_lambda, DEVICE_{d}_RGI);\n"
+                        ));
+                    } else {
+                        // Standard tube (no RGI)
+                        code.push_str(&format!(
+                            "{indent}let (i_dev{s}, i_dev{s1}, tube{d}_jac) = tube_evaluate(v_d{s}, v_d{s1}, state.device_{d}_mu, state.device_{d}_ex, state.device_{d}_kg1, state.device_{d}_kp, state.device_{d}_kvb, state.device_{d}_ig_max, state.device_{d}_vgk_onset, state.device_{d}_lambda);\n"
+                        ));
+                    }
+                    code.push_str(&format!("{indent}let jdev_{s}_{s} = tube{d}_jac[0];\n"));
+                    code.push_str(&format!("{indent}let jdev_{s}_{s1} = tube{d}_jac[1];\n"));
+                    code.push_str(&format!("{indent}let jdev_{s1}_{s} = tube{d}_jac[2];\n"));
+                    code.push_str(&format!(
+                        "{indent}let jdev_{s1}_{s1} = tube{d}_jac[3];\n"
+                    ));
+                }
+            }
+            DeviceType::Vca => {
+                let s = slot.start_idx;
+                let s1 = s + 1;
+                let d = dev_num;
+                // VCA dim 0 = V_sig, dim 1 = V_ctrl (direct mapping, no swap)
+                code.push_str(&format!(
+                    "{indent}let i_dev{s} = vca_current(v_d{s}, v_d{s1}, state.device_{d}_g0, state.device_{d}_vscale, DEVICE_{d}_THD);\n"
+                ));
+                code.push_str(&format!("{indent}let i_dev{s1} = 0.0;\n"));
+                code.push_str(&format!(
+                    "{indent}let vca{d}_jac = vca_jacobian(v_d{s}, v_d{s1}, state.device_{d}_g0, state.device_{d}_vscale, DEVICE_{d}_THD);\n"
+                ));
+                code.push_str(&format!("{indent}let jdev_{s}_{s} = vca{d}_jac[0];\n"));
+                code.push_str(&format!("{indent}let jdev_{s}_{s1} = vca{d}_jac[1];\n"));
+                code.push_str(&format!("{indent}let jdev_{s1}_{s} = vca{d}_jac[2];\n"));
+                code.push_str(&format!("{indent}let jdev_{s1}_{s1} = vca{d}_jac[3];\n"));
+            }
+        }
+    }
+    code.push('\n');
+    Ok(())
+}
 
 /// Emit damped fallback for singular Jacobian: half-step on residual, clamped.
 ///
