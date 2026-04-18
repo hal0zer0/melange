@@ -310,26 +310,37 @@ pub fn generate_analyze_main(
     format!(
         r#"
 fn main() {{
-    let mut base_state = CircuitState::default();
-{pot_lines}{switch_lines}    base_state.set_sample_rate({sample_rate:.1});
+    // Number of sine cycles integrated per frequency point for the 1-bin
+    // DFT. 10 gives ~40 dB SNR on a settled linear response — plenty for
+    // the passband / rolloff / linearity checks this tool ships. Raise
+    // here (not via a magic number anywhere else) if a specific circuit
+    // needs lower noise floor at a particular frequency band.
+    const DFT_CYCLES: usize = 10;
+
+    let mut state = CircuitState::default();
+{pot_lines}{switch_lines}    state.set_sample_rate({sample_rate:.1});
 
     let freqs: &[f64] = &[{freq_list}];
     let amplitude = {amplitude};
     let sr = {sample_rate:.1};
     let settle_samples = ({settle_secs:.1} * sr) as usize;
 
+    // Settle once, outside the frequency loop. The state carries over
+    // between frequency points — the DFT integrates over integer cycles
+    // of the new drive, which rejects both DC and any residual component
+    // at the previous frequency. Circuits with time constants longer
+    // than the DFT window would bias the result, so if a future circuit
+    // needs per-point settle back, expose a `--cold-start` flag on
+    // `melange analyze` and re-introduce `state = base_state.clone()`
+    // plus an inner settle loop here.
+    for _ in 0..settle_samples {{
+        process_sample(0.0, &mut state);
+    }}
+
     println!("frequency_hz,gain_db,phase_deg");
     for &freq in freqs {{
-        let mut state = base_state.clone();
-
-        // Settle: run silent samples then sine to reach steady state
-        for _ in 0..settle_samples {{
-            process_sample(0.0, &mut state);
-        }}
-
-        // Measure: single-bin DFT over integer number of cycles
-        let cycles = ((sr / freq).ceil() as usize).max(10);
-        let measure_samples = ((cycles as f64) * sr / freq).round() as usize;
+        // Measure: single-bin DFT over `DFT_CYCLES` integer cycles.
+        let measure_samples = ((DFT_CYCLES as f64) * sr / freq).round() as usize;
 
         let mut sum_cos = 0.0f64;
         let mut sum_sin = 0.0f64;
