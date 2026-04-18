@@ -178,6 +178,14 @@ pub struct CircuitState {
 {% if noise_enabled_emit %}
     // --- Authentic circuit noise (Phase 1: thermal) ---
 {{ noise_state_fields }}{% endif %}
+{% if runtime_sources | length > 0 %}
+    // --- Runtime voltage sources (.runtime directive) ---
+    // Host writes these each sample; RHS builder stamps them into the VS
+    // row of the augmented system. Additive with any DC bias declared on
+    // the voltage source itself.
+{% for rt in runtime_sources %}    /// Runtime value for voltage source {{ rt.vs_name }} (RHS row {{ rt.vs_row }}).
+    pub {{ rt.field_name }}: f64,
+{% endfor %}{% endif %}
 }
 
 impl Default for CircuitState {
@@ -274,7 +282,8 @@ impl Default for CircuitState {
             device_{{ td.dev_num }}_tj: DEVICE_{{ td.dev_num }}_TAMB,
 {% endfor %}
 {% endif %}
-{% if noise_enabled_emit %}{{ noise_default_fields }}{% endif %}        }
+{% if noise_enabled_emit %}{{ noise_default_fields }}{% endif %}{% if runtime_sources | length > 0 %}{% for rt in runtime_sources %}            {{ rt.field_name }}: 0.0,
+{% endfor %}{% endif %}        }
     }
 }
 
@@ -347,7 +356,8 @@ impl CircuitState {
         self.device_{{ td.dev_num }}_tj = DEVICE_{{ td.dev_num }}_TAMB;
 {% endfor %}
 {% endif %}
-{% if noise_enabled_emit %}{{ noise_reset_body }}{% endif %}
+{% if noise_enabled_emit %}{{ noise_reset_body }}{% endif %}{% if runtime_sources | length > 0 %}{% for rt in runtime_sources %}        self.{{ rt.field_name }} = 0.0;
+{% endfor %}{% endif %}
     }
 
     /// Set DC operating point (call after DC analysis)

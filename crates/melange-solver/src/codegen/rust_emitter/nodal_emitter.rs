@@ -1273,6 +1273,16 @@ impl RustEmitter {
             }
         }
 
+        // Runtime voltage sources (.runtime directive): host-driven values,
+        // stamped into the augmented-MNA RHS by the per-sample emitter block.
+        for rt in &ir.runtime_sources {
+            code.push_str(&format!(
+                "    /// Runtime value for voltage source {} (RHS row {}).\n\
+                 \x20   pub {}: f64,\n",
+                rt.vs_name, rt.vs_row, rt.field_name
+            ));
+        }
+
         code.push_str("}\n\n");
 
         // Default impl
@@ -1529,6 +1539,11 @@ impl RustEmitter {
             }
         }
 
+        // Runtime voltage sources (.runtime directive): init to 0.
+        for rt in &ir.runtime_sources {
+            code.push_str(&format!("            {}: 0.0,\n", rt.field_name));
+        }
+
         code.push_str("        };\n");
         code.push_str("        state.warmup();\n");
         code.push_str("        state\n");
@@ -1716,6 +1731,11 @@ impl RustEmitter {
                     os_info.state_size_outer, os_info.state_size_outer
                 ));
             }
+        }
+        // Runtime voltage sources: clear field to 0 so the VS contributes no
+        // RHS stamp until the host writes a new value.
+        for rt in &ir.runtime_sources {
+            code.push_str(&format!("        self.{} = 0.0;\n", rt.field_name));
         }
         code.push_str("        self.warmup();\n");
         code.push_str("    }\n\n");
@@ -2715,6 +2735,20 @@ impl RustEmitter {
         code.push_str("    let input_conductance = 1.0 / INPUT_RESISTANCE;\n");
         code.push_str("    rhs[INPUT_NODE] += (input + state.input_prev) * input_conductance;\n");
         code.push_str("    state.input_prev = input;\n\n");
+
+        // Runtime voltage sources (.runtime directive): host-driven per-sample values.
+        // Stamped after the DC RHS_CONST and the input stamp so the field value is
+        // additive with any DC bias declared on the voltage source itself.
+        if !ir.runtime_sources.is_empty() {
+            code.push_str("    // Runtime voltage sources (.runtime directive)\n");
+            for rt in &ir.runtime_sources {
+                code.push_str(&format!(
+                    "    rhs[{}] += state.{};\n",
+                    rt.vs_row, rt.field_name
+                ));
+            }
+            code.push('\n');
+        }
 
         // Step 2: Linear prediction v_pred = S * rhs (O(N^2))
         code.push_str("    // Step 2: Linear prediction v_pred = S * rhs (O(N^2))\n");
@@ -4290,6 +4324,18 @@ impl RustEmitter {
             );
         }
         code.push_str("    state.input_prev = input;\n\n");
+
+        // Runtime voltage sources (.runtime directive): host-driven per-sample values.
+        if !ir.runtime_sources.is_empty() {
+            code.push_str("    // Runtime voltage sources (.runtime directive)\n");
+            for rt in &ir.runtime_sources {
+                code.push_str(&format!(
+                    "    rhs[{}] += state.{};\n",
+                    rt.vs_row, rt.field_name
+                ));
+            }
+            code.push('\n');
+        }
 
         // Handle linear circuits (M=0): direct LU solve, no NR iteration
         if m == 0 {

@@ -73,6 +73,10 @@ pub struct MnaSystem {
     pub ideal_transformers: Vec<IdealTransformerCoupling>,
     /// Potentiometer info (resolved from .pot directives)
     pub pots: Vec<PotInfo>,
+    /// Runtime voltage sources (resolved from `.runtime` directives).
+    /// Each entry carries the VS's aug-MNA row (for RHS stamping) plus the
+    /// Rust field name codegen should emit on CircuitState. See Oomox P1.
+    pub runtime_sources: Vec<RuntimeSourceInfo>,
     /// Switch info (resolved from .switch directives)
     pub switches: Vec<SwitchInfo>,
     /// Op-amp info (for VCCS stamping)
@@ -521,6 +525,21 @@ pub struct SwitchComponentInfo {
     pub nominal_value: f64,
 }
 
+/// Runtime voltage source resolved from `.runtime` directive.
+///
+/// `vs_row` is the aug-MNA row where the VS's KVL constraint lives
+/// (= `n_nodes + ext_idx`). Each sample, codegen stamps the plugin-supplied
+/// value into this row of the RHS vector.
+#[derive(Debug, Clone)]
+pub struct RuntimeSourceInfo {
+    /// Name of the voltage source (as written in the netlist, preserving case).
+    pub vs_name: String,
+    /// Generated `CircuitState` field name (valid Rust identifier).
+    pub field_name: String,
+    /// Aug-MNA row index where `state.<field_name>` is stamped each sample.
+    pub vs_row: usize,
+}
+
 /// Switch information resolved from .switch directive.
 #[derive(Debug, Clone)]
 pub struct SwitchInfo {
@@ -625,6 +644,7 @@ impl MnaSystem {
             transformer_groups: Vec::new(),
             ideal_transformers: Vec::new(),
             pots: Vec::new(),
+            runtime_sources: Vec::new(),
             switches: Vec::new(),
             opamps: Vec::new(),
             vcas: Vec::new(),
@@ -3102,6 +3122,29 @@ impl MnaBuilder {
                 mna.g[nm - 1][k] -= 1.0;
                 mna.g[k][nm - 1] -= 1.0;
             }
+        }
+
+        // Resolve `.runtime` directives to aug-MNA rows. Parser already
+        // validated each directive's VS name exists; here we translate the
+        // name to its stamped row. The row is `n_base + ext_idx` to match
+        // the aug-MNA convention used by the VS stamping loop above.
+        for rt in &netlist.runtime_sources {
+            let vs_idx = mna
+                .voltage_sources
+                .iter()
+                .position(|v| v.name.eq_ignore_ascii_case(&rt.vs_name))
+                .ok_or_else(|| {
+                    MnaError::TopologyError(format!(
+                        ".runtime references voltage source '{}' that was not resolved in MNA",
+                        rt.vs_name
+                    ))
+                })?;
+            let vs = &mna.voltage_sources[vs_idx];
+            mna.runtime_sources.push(RuntimeSourceInfo {
+                vs_name: vs.name.clone(),
+                field_name: rt.field_name.clone(),
+                vs_row: n_base + vs.ext_idx,
+            });
         }
 
         // Stamp VCVS elements with augmented MNA.

@@ -170,6 +170,11 @@ impl RustEmitter {
             &named_const_entries(&ir.named_constants.pots),
         );
 
+        // Runtime voltage sources (.runtime directive). Always insert the list
+        // (possibly empty) so state.rs.tera and build_rhs.rs.tera can use
+        // `runtime_sources | length > 0` guards unconditionally.
+        ctx.insert("runtime_sources", &ir.runtime_sources);
+
         // G and C matrices (sample-rate independent)
         ctx.insert("g_rows", &format_matrix_rows(n, n, |i, j| ir.g(i, j)));
         ctx.insert("c_rows", &format_matrix_rows(n, n, |i, j| ir.c(i, j)));
@@ -533,6 +538,11 @@ impl RustEmitter {
         let has_be_fallback = !ir.matrices.s_be.is_empty() && ir.topology.m > 0;
         ctx.insert("has_be_fallback", &has_be_fallback);
         ctx.insert("backward_euler", &ir.solver_config.backward_euler);
+
+        // Runtime voltage sources (.runtime directive). Same list is used by
+        // state.rs.tera for field + default + reset emission; build_rhs.rs.tera
+        // emits the per-sample `rhs[row] += state.<field>` stamps.
+        ctx.insert("runtime_sources", &ir.runtime_sources);
 
         self.render("state", &ctx)
     }
@@ -1562,6 +1572,10 @@ impl RustEmitter {
         ctx.insert("has_dc_sources", &ir.has_dc_sources);
         ctx.insert("augmented_inductors", &ir.topology.augmented_inductors);
         ctx.insert("backward_euler", &ir.solver_config.backward_euler);
+        // Runtime voltage sources: emit `rhs[row] += state.<field>` per entry
+        // after the input stamp. Safe on both trapezoidal and BE paths — the
+        // field is the raw per-sample value, not rate-dependent.
+        ctx.insert("runtime_sources", &ir.runtime_sources);
 
         // When augmented_inductors is true, companion model history is handled by A_neg,
         // so num_inductors/num_coupled_inductors/num_transformer_groups should be 0

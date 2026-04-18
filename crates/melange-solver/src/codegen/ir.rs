@@ -99,6 +99,25 @@ pub struct CircuitIR {
     /// See Oomox plugin roadmap P2 + P3.
     #[serde(default)]
     pub named_constants: NamedConstantsIR,
+    /// `.runtime`-bound voltage sources. Codegen emits one `pub <field>: f64`
+    /// on `CircuitState` per entry and stamps `rhs[vs_row] += state.<field>`
+    /// in both trapezoidal and backward-Euler RHS builders. See Oomox P1.
+    #[serde(default)]
+    pub runtime_sources: Vec<RuntimeSourceIR>,
+}
+
+/// `.runtime` voltage source in IR form.
+///
+/// Mirrors `mna::RuntimeSourceInfo` but without the MNA coupling so it can
+/// round-trip through serde for IR snapshotting.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeSourceIR {
+    /// Voltage source name (for diagnostics).
+    pub vs_name: String,
+    /// Rust identifier for the `CircuitState` field.
+    pub field_name: String,
+    /// Aug-MNA row that receives `state.<field_name>` each sample.
+    pub vs_row: usize,
 }
 
 /// Named topology constants for plugin-runtime indexing.
@@ -2751,6 +2770,15 @@ impl CircuitIR {
         };
 
         let named_constants = build_named_constants(mna, topology.n_nodes);
+        let runtime_sources: Vec<RuntimeSourceIR> = mna
+            .runtime_sources
+            .iter()
+            .map(|rt| RuntimeSourceIR {
+                vs_name: rt.vs_name.clone(),
+                field_name: rt.field_name.clone(),
+                vs_row: rt.vs_row,
+            })
+            .collect();
 
         Ok(CircuitIR {
             metadata,
@@ -2826,6 +2854,7 @@ impl CircuitIR {
                 },
             },
             named_constants,
+            runtime_sources,
         })
     }
 
@@ -3395,6 +3424,15 @@ impl CircuitIR {
         };
 
         let named_constants = build_named_constants(mna, topology.n_nodes);
+        let runtime_sources: Vec<RuntimeSourceIR> = mna
+            .runtime_sources
+            .iter()
+            .map(|rt| RuntimeSourceIR {
+                vs_name: rt.vs_name.clone(),
+                field_name: rt.field_name.clone(),
+                vs_row: rt.vs_row,
+            })
+            .collect();
 
         Ok(CircuitIR {
             metadata,
@@ -3676,6 +3714,7 @@ impl CircuitIR {
                 },
             },
             named_constants,
+            runtime_sources,
         })
     }
 

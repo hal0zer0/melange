@@ -84,6 +84,29 @@ pub struct Netlist {
     /// DC bias currents added to rhs_const, and the BJT is removed
     /// from the nonlinear system (M dimension reduced by 2 per device).
     pub linearize_devices: Vec<String>,
+    /// Runtime voltage source directives (.runtime V1 as field_name)
+    /// Each entry marks an existing voltage source whose value the plugin
+    /// host will update every sample. Codegen emits `pub <field>: f64` on
+    /// CircuitState and stamps `rhs[VSOURCE_<NAME>_RHS_ROW] += state.<field>`
+    /// in both trapezoidal and backward-Euler RHS builders. See Oomox
+    /// roadmap P1.
+    pub runtime_sources: Vec<RuntimeDirective>,
+}
+
+/// A runtime voltage source directive (.runtime Vname as field_name).
+///
+/// Binds a voltage source already declared in the netlist to a mutable
+/// `pub <field>: f64` on the generated `CircuitState`. The plugin host
+/// writes the field; codegen stamps the value into the VS's KVL constraint
+/// row each sample.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RuntimeDirective {
+    /// Name of the voltage source (case-insensitive match to Element::VoltageSource).
+    pub vs_name: String,
+    /// Rust identifier used for the generated CircuitState field.
+    /// Validated at parse time: must be non-empty, ASCII, start with a
+    /// letter or underscore, and contain only `[A-Za-z0-9_]`.
+    pub field_name: String,
 }
 
 /// A potentiometer directive (.pot Rname min max).
@@ -198,6 +221,7 @@ impl Netlist {
             delay_feedback_nodes: Vec::new(),
             input_impedance: None,
             linearize_devices: Vec::new(),
+            runtime_sources: Vec::new(),
         }
     }
 
@@ -1245,6 +1269,50 @@ impl Parser {
             }
         }
 
+        // Verify all .runtime directives reference existing voltage sources,
+        // each VS is only bound once, and no two directives claim the same
+        // field name. Duplicate VS or field names would produce generated
+        // code that fails to compile (two `pub field: f64` declarations), so
+        // rejecting here gives a better error than waiting for rustc.
+        {
+            let mut seen_sources = std::collections::HashSet::new();
+            let mut seen_fields = std::collections::HashSet::new();
+            for rt in &netlist.runtime_sources {
+                let exists = netlist.elements.iter().any(|e| {
+                    matches!(e, Element::VoltageSource { name, .. }
+                             if name.eq_ignore_ascii_case(&rt.vs_name))
+                });
+                if !exists {
+                    return Err(ParseError {
+                        line: 0,
+                        message: format!(
+                            ".runtime references voltage source '{}' which was not found in the netlist",
+                            rt.vs_name
+                        ),
+                    });
+                }
+                let vs_key = rt.vs_name.to_ascii_uppercase();
+                if !seen_sources.insert(vs_key) {
+                    return Err(ParseError {
+                        line: 0,
+                        message: format!(
+                            ".runtime declares voltage source '{}' more than once",
+                            rt.vs_name
+                        ),
+                    });
+                }
+                if !seen_fields.insert(rt.field_name.clone()) {
+                    return Err(ParseError {
+                        line: 0,
+                        message: format!(
+                            ".runtime declares field name '{}' more than once",
+                            rt.field_name
+                        ),
+                    });
+                }
+            }
+        }
+
         // Verify all coupling (K) directives: no duplicate names, reference existing inductors.
         // An inductor MAY appear in multiple K directives (multi-winding transformers).
         {
@@ -1739,6 +1807,10 @@ impl Parser {
                 for name in &parts[1..] {
                     netlist.linearize_devices.push(name.to_ascii_uppercase());
                 }
+            }
+            ".runtime" => {
+                let rt = self.parse_runtime_directive(&parts)?;
+                netlist.runtime_sources.push(rt);
             }
             ".input_impedance" => {
                 self.parse_input_impedance_directive(&parts, netlist)?;
@@ -2294,6 +2366,47 @@ impl Parser {
         })
     }
 
+    /// Parse `.runtime Vname as field_name`.
+    ///
+    /// `Vname` must reference a voltage source declared elsewhere in the
+    /// netlist (validated later in the netlist-wide validation pass, so this
+    /// parser doesn't require source-order). `field_name` must be a valid
+    /// Rust identifier — this is where codegen will emit `pub <field>: f64`
+    /// on the generated CircuitState.
+    fn parse_runtime_directive(
+        &self,
+        parts: &[&str],
+    ) -> Result<RuntimeDirective, ParseError> {
+        // .runtime Vname as field_name
+        self.require_parts(parts, 4, ".runtime Vname as field_name")?;
+        if !parts[2].eq_ignore_ascii_case("as") {
+            return Err(self.error(format!(
+                ".runtime expects 'as' between source name and field name, got '{}'",
+                parts[2]
+            )));
+        }
+        let vs_name = parts[1].to_string();
+        let first_char = vs_name.chars().next().unwrap_or(' ').to_ascii_uppercase();
+        if first_char != 'V' {
+            return Err(self.error(format!(
+                ".runtime target '{}' must be a voltage source (name starts with V)",
+                vs_name
+            )));
+        }
+        let field_name = parts[3].to_string();
+        if !is_valid_rust_ident(&field_name) {
+            return Err(self.error(format!(
+                ".runtime field name '{}' is not a valid Rust identifier \
+                 (must start with letter or _, contain only ASCII letters/digits/_)",
+                field_name
+            )));
+        }
+        Ok(RuntimeDirective {
+            vs_name,
+            field_name,
+        })
+    }
+
     fn parse_input_impedance_directive(
         &self,
         parts: &[&str],
@@ -2718,6 +2831,24 @@ impl Parser {
 /// wrap this in `self.error(...)` to attach a line number. Split out so that
 /// both the top-level element loop and the subcircuit-inner element loop can
 /// apply it consistently.
+/// Is `s` a valid Rust identifier suitable for use as a struct field name?
+///
+/// Enforces ASCII-only (raw identifiers, unicode idents, and `r#` prefix are
+/// rejected) to keep the codegen surface predictable. Does not reject Rust
+/// keywords — if an oomox user writes `.runtime Vfoo as loop`, the emitted
+/// field will fail to compile and the error message will be clear.
+fn is_valid_rust_ident(s: &str) -> bool {
+    if s.is_empty() || s.len() > MAX_NODE_NAME_LEN {
+        return false;
+    }
+    let mut chars = s.chars();
+    let first = chars.next().unwrap();
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return false;
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 fn validate_element_node_lengths(elem: &Element) -> Result<(), String> {
     fn check(node: &str) -> Result<(), String> {
         let len = node.chars().count();

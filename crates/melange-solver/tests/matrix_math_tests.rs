@@ -542,6 +542,7 @@ fn test_singular_matrix_error_path() {
         linearized_triodes: vec![],
         pot_default_overrides: HashMap::new(),
         switch_default_overrides: HashMap::new(),
+        runtime_sources: vec![],
         wiper_groups: vec![],
         gang_groups: vec![],
     };
