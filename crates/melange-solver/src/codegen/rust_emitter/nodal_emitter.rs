@@ -1825,6 +1825,39 @@ impl RustEmitter {
         code.push_str("        &self.dc_operating_point\n");
         code.push_str("    }\n\n");
 
+        // recompute_dc_op() — Oomox P6 / Phase E. Nodal path stub (E.8.1):
+        // emits the method surface uniformly with the DK path, but the body
+        // only bumps `diag_nr_max_iter_count` and returns until the full
+        // nodal NR solve lands (E.8.2+). Feature-gated so the default
+        // codegen path stays byte-identical.
+        if ir.solver_config.emit_dc_op_recompute {
+            let body = super::dc_op_emitter::emit_recompute_dc_op_body_nodal(ir)
+                .expect("nodal stub body must be infallible");
+            code.push_str(
+                "    /// Re-solve the DC operating point at the current pot/switch values\n\
+                 \x20   /// (Oomox plugin roadmap P6).\n\
+                 \x20   ///\n\
+                 \x20   /// **Not audio-thread safe.** Intended for plugin initialization\n\
+                 \x20   /// after applying per-instance pot/switch jitter.\n\
+                 \x20   ///\n\
+                 \x20   /// # Phase E.8.1 stub on the nodal full-LU path\n\
+                 \x20   ///\n\
+                 \x20   /// The nodal solver runs on the augmented MNA and uses a different\n\
+                 \x20   /// device stamping scheme than the DK path — the full runtime NR is\n\
+                 \x20   /// shipped incrementally as Phase E.8.2 → E.8.5. Calling this method\n\
+                 \x20   /// today on a nodal-routed circuit bumps `diag_nr_max_iter_count`\n\
+                 \x20   /// and returns without touching `dc_operating_point` or `v_prev`,\n\
+                 \x20   /// so plugin authors should watch the counter and fall back to the\n\
+                 \x20   /// `WARMUP_SAMPLES_RECOMMENDED` silence loop when it ticks.\n\
+                 \x20   ///\n\
+                 \x20   /// See `docs/aidocs/DC_OP.md` \"Runtime DC OP recompute\" for the\n\
+                 \x20   /// DK-path semantics and the nodal-path delta.\n\
+                 \x20   pub fn recompute_dc_op(&mut self) {\n",
+            );
+            code.push_str(&body);
+            code.push_str("    }\n\n");
+        }
+
         // dc_op_dump() — pretty printer using NODE_<NAME> constants from P3.
         if !ir.named_constants.nodes.is_empty() {
             code.push_str(

@@ -1458,3 +1458,168 @@ fn e7_ts808_clipping_stage_converges_at_nominal() {
         String::from_utf8_lossy(&run.stdout)
     );
 }
+
+// -----------------------------------------------------------------------------
+// Phase E.8.1: nodal full-LU recompute_dc_op stub
+//
+// The nodal path emits a `recompute_dc_op` method when the flag is on so the
+// plugin surface is uniform across DK and nodal circuits. The stub body bumps
+// `diag_nr_max_iter_count` and returns without touching state — plugin authors
+// observe the counter tick and fall back to the warmup loop until the full
+// nodal NR body ships (E.8.2 → E.8.5). These tests guard:
+//
+//   * The stub is feature-gated (flag OFF → no emission, flag ON → emission).
+//   * Flag-off output is byte-identical for a nodal circuit.
+//   * Flag-on output compiles and the stub is callable from default state.
+// -----------------------------------------------------------------------------
+
+fn generate_nodal(spice: &str, emit_recompute: bool) -> String {
+    let netlist = Netlist::parse(spice).expect("parse");
+    let mna = MnaSystem::from_netlist(&netlist).expect("mna");
+    let cfg = CodegenConfig {
+        circuit_name: "dc_op_recompute_nodal_test".to_string(),
+        sample_rate: 44100.0,
+        input_node: 0,
+        output_nodes: vec![if mna.n > 1 { 1 } else { 0 }],
+        input_resistance: 1.0,
+        emit_dc_op_recompute: emit_recompute,
+        ..CodegenConfig::default()
+    };
+    CodeGenerator::new(cfg)
+        .generate_nodal(&mna, &netlist)
+        .expect("codegen_nodal")
+        .code
+}
+
+/// Simple linear RC circuit routed through the nodal full-LU emitter.
+/// Doesn't matter that it would normally route DK — `generate_nodal` forces
+/// the nodal entrypoint so we're exercising the right emitter.
+const NODAL_REGRESSION_NETLIST: &str = "\
+Phase E.8 nodal regression guard
+R1 in mid 4.7k
+R2 mid out 22k
+C1 out 0 47n
+R3 out 0 1meg
+";
+
+#[test]
+fn e8_nodal_flag_off_does_not_emit_recompute_dc_op() {
+    let code = generate_nodal(NODAL_REGRESSION_NETLIST, false);
+    assert!(
+        !code.contains("fn recompute_dc_op"),
+        "nodal flag OFF must not emit `fn recompute_dc_op`, found in:\n{}",
+        code.lines()
+            .filter(|l| l.contains("fn recompute_dc_op"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
+
+#[test]
+fn e8_nodal_flag_off_byte_identical_to_default() {
+    let off_code = generate_nodal(NODAL_REGRESSION_NETLIST, false);
+    let netlist = Netlist::parse(NODAL_REGRESSION_NETLIST).expect("parse");
+    let mna = MnaSystem::from_netlist(&netlist).expect("mna");
+    let cfg = CodegenConfig {
+        circuit_name: "dc_op_recompute_nodal_test".to_string(),
+        sample_rate: 44100.0,
+        input_node: 0,
+        output_nodes: vec![if mna.n > 1 { 1 } else { 0 }],
+        input_resistance: 1.0,
+        ..CodegenConfig::default()
+    };
+    let default_code = CodeGenerator::new(cfg)
+        .generate_nodal(&mna, &netlist)
+        .expect("codegen_nodal")
+        .code;
+    assert_eq!(
+        off_code, default_code,
+        "nodal flag-off output must be byte-identical to CodegenConfig::default()"
+    );
+}
+
+#[test]
+fn e8_nodal_flag_on_emits_stub_signature() {
+    let code = generate_nodal(NODAL_REGRESSION_NETLIST, true);
+    assert!(
+        code.contains("pub fn recompute_dc_op(&mut self)"),
+        "nodal flag ON must emit `recompute_dc_op` method signature"
+    );
+    assert!(
+        code.contains("diag_nr_max_iter_count"),
+        "nodal stub body must bump diag counter to signal no-op"
+    );
+    assert!(
+        code.contains("Phase E.8.1 stub"),
+        "nodal stub must carry explanatory comment"
+    );
+}
+
+/// Flag-on nodal output compiles and the stub is callable without panicking.
+/// Also verifies the no-op contract: `diag_nr_max_iter_count` advances by one
+/// per call (mirrors DK-path convergence-failure fallback) and
+/// `dc_operating_point` is unchanged (we didn't touch state).
+#[test]
+fn e8_nodal_flag_on_stub_compiles_and_is_callable() {
+    use std::io::Write;
+
+    let code = generate_nodal(NODAL_REGRESSION_NETLIST, true);
+
+    let main = "\n\nfn main() {\n\
+        let mut state = CircuitState::default();\n\
+        let before: [f64; N] = *state.dc_op();\n\
+        let c_before = state.diag_nr_max_iter_count;\n\
+        state.recompute_dc_op();\n\
+        let after: [f64; N] = *state.dc_op();\n\
+        let c_after = state.diag_nr_max_iter_count;\n\
+        for i in 0..N {\n\
+            assert_eq!(before[i], after[i],\n\
+                \"stub must not touch dc_operating_point[{}]: {} -> {}\",\n\
+                i, before[i], after[i]);\n\
+        }\n\
+        assert_eq!(c_after, c_before + 1,\n\
+            \"stub must bump diag_nr_max_iter_count exactly once per call: {} -> {}\",\n\
+            c_before, c_after);\n\
+        println!(\"ok\");\n\
+    }\n";
+
+    let full = format!("{}{}", code, main);
+    let tmp = std::env::temp_dir();
+    let src = tmp.join("melange_dc_op_recompute_e8_nodal_stub.rs");
+    let bin = tmp.join("melange_dc_op_recompute_e8_nodal_stub");
+    std::fs::File::create(&src)
+        .unwrap()
+        .write_all(full.as_bytes())
+        .unwrap();
+    let compile = std::process::Command::new("rustc")
+        .args([
+            src.to_str().unwrap(),
+            "-o",
+            bin.to_str().unwrap(),
+            "--edition",
+            "2021",
+        ])
+        .output()
+        .expect("rustc");
+    let _ = std::fs::remove_file(&src);
+    if !compile.status.success() {
+        let _ = std::fs::remove_file(&bin);
+        panic!(
+            "compile failed:\n{}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+    }
+    let run = std::process::Command::new(&bin).output().expect("run");
+    let _ = std::fs::remove_file(&bin);
+    assert!(
+        run.status.success(),
+        "binary failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&run.stdout).contains("ok"),
+        "unexpected output: {}",
+        String::from_utf8_lossy(&run.stdout)
+    );
+}

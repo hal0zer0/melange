@@ -15,9 +15,9 @@
 //! linear op-amp, VCA — i.e. whatever the compile-time DC OP handles today,
 //! minus multi-equilibrium refinements.
 //!
-//! ## Layering (shipped across E.1 → E.5)
+//! ## Layering (shipped across E.1 → E.6)
 //!
-//! 1. `emit_recompute_dc_op_body_dk` — top-level body assembler.
+//! 1. `emit_recompute_dc_op_body_dk` — top-level body assembler (DK path).
 //! 2. `emit_dc_op_build_g_aug_dk` — G_aug base construction from live
 //!    pot/switch state (E.3).
 //! 3. `emit_dc_op_build_b_dc_dk` — DC RHS from `RHS_CONST` (halved on
@@ -27,7 +27,14 @@
 //! 5. `emit_dc_op_nr_loop_dk` — Direct NR loop with LU solve, flat
 //!    damping, convergence check (E.5).
 //! 6. `emit_dc_op_writeback_dk` — write converged `v_node` + `i_nl` back
-//!    to state, clear DC-blocker history (E.5).
+//!    to state, seed DC blocker at new DC output, sync pot `_prev`,
+//!    zero oversampler/inductor/transformer history (E.5 + E.6).
+//! 7. `emit_recompute_dc_op_body_nodal` — stub top-level emitter for the
+//!    nodal full-LU path (E.8.1). Emits a method that bumps
+//!    `diag_nr_max_iter_count` and returns, so plugins can install the
+//!    Phase E surface uniformly while the nodal body lands
+//!    incrementally in E.8.2+. Callers check the diag counter to know
+//!    whether to fall back to the warmup-silence loop.
 //!
 //! ## DC fixed-point algebra (E.5 derivation)
 //!
@@ -703,4 +710,39 @@ fn emit_dc_op_writeback_dk(ir: &CircuitIR, nonlinear: bool) -> String {
     }
 
     body
+}
+
+/// Emit the body of `CircuitState::recompute_dc_op()` for a nodal full-LU
+/// circuit (Phase E.8.1 stub).
+///
+/// The nodal solver operates on the augmented MNA directly (N = n_aug rather
+/// than the DK path's N = n_nodes + augmented_rows), and its NR device
+/// evaluator uses `emit_nodal_device_evaluation_body/_final` — a different
+/// stamping scheme than `emit_dk_device_evaluation`. A correct body therefore
+/// needs a nodal-specific parallel of `emit_dc_op_build_g_aug_dk` /
+/// `_build_b_dc_dk` / `_nr_loop_dk` that stamps into the augmented system.
+/// That body is tracked as Phase E.8.2 → E.8.5.
+///
+/// For now the stub emits a method that bumps the NR max-iter diagnostic
+/// counter and returns without touching `v_prev` or `dc_operating_point`.
+/// Plugin authors who enable the flag get a uniform `recompute_dc_op`
+/// surface across DK and nodal circuits (so host code doesn't need a
+/// solver-path branch), and on a nodal circuit the counter tick tells them
+/// "the recompute was a no-op, fall back to the warmup-silence loop".
+///
+/// The contract matches the DK path's NR-failure branch:
+/// `diag_nr_max_iter_count += 1` on any failed convergence. Callers already
+/// have the fallback logic from the DK path; this stub reuses it verbatim.
+pub(super) fn emit_recompute_dc_op_body_nodal(_ir: &CircuitIR) -> Result<String, CodegenError> {
+    Ok("        // Phase E.8.1 stub — nodal full-LU runtime DC OP recompute is\n\
+        \x20       // not yet implemented. Bump the NR-max-iter diag counter so the\n\
+        \x20       // caller can observe the no-op and fall back to the\n\
+        \x20       // `WARMUP_SAMPLES_RECOMMENDED` silence loop (matches the DK\n\
+        \x20       // path's convergence-failure contract).\n\
+        \x20       //\n\
+        \x20       // Tracked as Phase E.8.2 → E.8.5 in the Oomox roadmap. See\n\
+        \x20       // `docs/aidocs/DC_OP.md` \"Runtime DC OP recompute\" for the\n\
+        \x20       // delta between the DK body and the required nodal body.\n\
+        \x20       self.diag_nr_max_iter_count += 1;\n"
+        .to_string())
 }
