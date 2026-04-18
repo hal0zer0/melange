@@ -544,6 +544,12 @@ impl RustEmitter {
         // emits the per-sample `rhs[row] += state.<field>` stamps.
         ctx.insert("runtime_sources", &ir.runtime_sources);
 
+        // Named nodes for the dc_op_dump() pretty printer (Oomox P4).
+        ctx.insert(
+            "named_nodes",
+            &named_const_entries(&ir.named_constants.nodes),
+        );
+
         self.render("state", &ctx)
     }
 

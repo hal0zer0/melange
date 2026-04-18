@@ -366,6 +366,36 @@ impl CircuitState {
         self.v_prev = v_dc;
     }
 
+    /// Read the baked DC operating point for this circuit.
+    ///
+    /// This is the solution to the nonlinear DC system computed at codegen
+    /// time (at nominal pot/switch values) and frozen into the `DC_OP`
+    /// constant. Prefer this over `v_prev` when you want the *designed*
+    /// bias point — `v_prev` carries per-sample dynamics plus any updates
+    /// from `set_dc_operating_point` / `recompute_dc_op`.
+    ///
+    /// For per-node access with readable names, see [`dc_op_dump`].
+    #[inline]
+    pub fn dc_op(&self) -> &[f64; N] {
+        &self.dc_operating_point
+    }
+{% if named_nodes | length > 0 %}
+    /// Pretty-print the DC operating point with user-assigned node names.
+    ///
+    /// Writes one line per named node to `stderr` in the form
+    /// `  V(node_name) = +X.XXX V`. Useful for sanity-checking circuit
+    /// bias during plugin bring-up. Internal / augmented nodes (VS/VCVS
+    /// branch currents, transformer windings) are not emitted — they have
+    /// no stable user-facing name.
+    ///
+    /// Call order-of-magnitude-free: formatting allocates. Not meant for
+    /// the audio thread.
+    pub fn dc_op_dump(&self) {
+        let dc = &self.dc_operating_point;
+{% for entry in named_nodes %}        eprintln!("  V({{ entry.name }}) = {:+.4} V", dc[{{ entry.value }}]);
+{% endfor %}    }
+{% endif %}
+
     /// Recompute all sample-rate-dependent matrices for a new sample rate.
     ///
     /// Call this once during plugin initialization (NOT on the audio thread).

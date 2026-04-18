@@ -1796,6 +1796,48 @@ impl RustEmitter {
         code.push_str("        self.v_prev = v_dc;\n");
         code.push_str("    }\n\n");
 
+        // dc_op() accessor — P4 from the Oomox plugin roadmap. Lets plugins
+        // read the baked DC bias point without reaching into the dynamic
+        // `v_prev` field (which carries per-sample updates).
+        code.push_str("    /// Read the baked DC operating point for this circuit.\n");
+        code.push_str("    ///\n");
+        code.push_str(
+            "    /// Solution to the nonlinear DC system computed at codegen time (at nominal\n",
+        );
+        code.push_str(
+            "    /// pot/switch values) and frozen into `DC_OP`. Prefer this over `v_prev` when\n",
+        );
+        code.push_str(
+            "    /// you want the *designed* bias point — `v_prev` carries per-sample dynamics.\n",
+        );
+        code.push_str("    #[inline]\n");
+        code.push_str("    pub fn dc_op(&self) -> &[f64; N] {\n");
+        code.push_str("        &self.dc_operating_point\n");
+        code.push_str("    }\n\n");
+
+        // dc_op_dump() — pretty printer using NODE_<NAME> constants from P3.
+        if !ir.named_constants.nodes.is_empty() {
+            code.push_str(
+                "    /// Pretty-print the DC operating point with user-assigned node names.\n",
+            );
+            code.push_str("    ///\n");
+            code.push_str(
+                "    /// Writes one line per named node to `stderr`. Intended for plugin\n",
+            );
+            code.push_str(
+                "    /// bring-up diagnostics, not the audio thread (formatting allocates).\n",
+            );
+            code.push_str("    pub fn dc_op_dump(&self) {\n");
+            code.push_str("        let dc = &self.dc_operating_point;\n");
+            for (name, idx) in &ir.named_constants.nodes {
+                code.push_str(&format!(
+                    "        eprintln!(\"  V({}) = {{:+.4}} V\", dc[{}]);\n",
+                    name, idx
+                ));
+            }
+            code.push_str("    }\n\n");
+        }
+
         // set_sample_rate()
         code.push_str(
             "    /// Recompute all sample-rate-dependent matrices for a new sample rate.\n",
