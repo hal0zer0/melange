@@ -80,6 +80,21 @@ Mark variable resistors as pots and switchable components as switches:
 .switch C_tone 100n 220n 470n "Tone"
 ```
 
+`.switch` is also the right tool for **discrete component selection** — pedal
+bypass, channel select, clipping-diode picker, bright switch, etc. List one
+or more components and the values they take in each position:
+
+```spice
+* Bright switch: either 0 (off) or a small coupling cap in parallel
+.switch C_bright 0 470p "Bright"
+
+* Clipping diode selector (5 positions, ganged across 5 R_sel resistors)
+.switch R_sel_ge,R_sel_si,R_sel_led 1/10Meg/10Meg 10Meg/1/10Meg 10Meg/10Meg/1 "Clip"
+```
+
+Position 0 is always the initial state; the G/C matrix is stamped at the
+pos-0 values so the circuit boots into a consistent starting point.
+
 For 3-terminal wiper pots (top, wiper, bottom), use two resistors and `.wiper`:
 
 ```spice
@@ -93,6 +108,21 @@ Link multiple pots or wipers to a single knob with `.gang`:
 ```spice
 .gang "Tone" R_treble R_bass
 ```
+
+For **host-driven per-sample voltage injection** (sidechain CV, LFO,
+envelope follower, any modulation input), declare a voltage source with
+`DC 0` and bind it to a `CircuitState` field with `.runtime`:
+
+```spice
+Vctrl ctrl 0 DC 0
+R_ctrl ctrl vca_gain 10k
+.runtime Vctrl as ctrl_voltage
+```
+
+Codegen emits `pub ctrl_voltage: f64` on `CircuitState`; the plugin writes
+it each sample and melange stamps the value into the VS's RHS row
+automatically. Any DC value you declare on the voltage source is preserved
+as a bias, so `V1 n1 0 DC 5` + `.runtime V1 as foo` gives `5 + foo` total.
 
 See [spice-grammar.md](spice-grammar.md#5-melange-extensions) for full syntax.
 
@@ -318,6 +348,10 @@ melange compile my-circuit.cir --format plugin -o my-plugin
 - **Use `melange analyze`** to see the frequency response before compiling. It's fast and catches many issues.
 - **Use `melange simulate --amplitude 0.1`** as a quick sanity check — if you hear the circuit working, the netlist is correct.
 - **Model parameters matter.** A BJT with default `IS=1e-16` behaves very differently from one with `IS=1e-14`. Use datasheet values or known SPICE models.
+- **Decompose large circuits when there's no global feedback.** If your circuit has no feedback path between subsystems — e.g. a preamp → tone-stack → power-amp cascade where each stage drives the next through a coupling cap and nothing feeds back — compile each subsystem as a separate `.cir` and chain them in plugin code. This keeps N and M small per kernel (linear in DK cost, cubic in nodal), avoids cross-subsystem matrix conditioning issues, and lets each stage pick its best solver path independently. A 16-stage tube cascade with real global feedback has to be one monolithic netlist; an 8-stage preamp where each stage is capacitively coupled to the next does not.
+- **Use `.linearize` for semantic control, not CPU savings.** NR converges in 0–1 iterations for devices in their small-signal region, so linearizing produces negligible speedup. The real use case is **forcing a device to stay small-signal** — e.g. a Vbe multiplier that must not clip, a preamp stage that should be clean even at extreme input. Linearized devices cannot clip because they're replaced with small-signal conductances at the DC operating point.
+- **Per-instance parameter jitter needs warmup.** If the plugin sets `state.pot_N_resistance = jittered_value` at construction, loop `process_sample(0.0, &mut state)` `WARMUP_SAMPLES_RECOMMENDED` times before processing audio — the DC_OP constant is baked at nominal values, so jittered circuits need time to settle to their actual equilibrium.
+- **Runtime-adjustable device model fields** are already emitted as `pub` on `CircuitState`: `device_0_mu`, `device_0_ex`, `device_0_kg1`, etc. for tubes; similar for BJTs, JFETs, MOSFETs. Write them directly from plugin code for per-instance tube aging, transistor matching, or user-exposed model parameters. No codegen changes needed.
 
 ## Further Reading
 

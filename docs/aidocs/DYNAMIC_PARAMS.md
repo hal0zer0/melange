@@ -166,9 +166,53 @@ entries are restamped and downstream matrices recomputed).
   frequency knobs).
 - **`.switch`** for discrete-position component selectors (impedance
   switches, EQ shape selectors, oscilloscope-style range switches,
-  Pultec frequency selectors). Switches change topology values, not
-  just one conductance, so they need a real rebuild rather than a
-  rank-1 update.
+  Pultec frequency selectors, pedal bypass, channel select, clipping-diode
+  picker, bright switch). Switches change topology values, not just one
+  conductance, so they need a real rebuild rather than a rank-1 update.
+
+## `.runtime` — Host-Driven Voltage Source
+
+### Syntax
+```
+Vctrl ctrl 0 DC 0
+.runtime Vctrl as ctrl_voltage
+```
+
+### Semantics
+Binds an existing voltage source to a `pub <field>: f64` on the generated
+`CircuitState`. The plugin writes the field each sample; codegen stamps
+`rhs[VSOURCE_<NAME>_RHS_ROW] += state.<field>` in both trapezoidal and
+backward-Euler RHS builders. Additive with any DC bias declared on the
+voltage source itself, so `V1 n1 0 DC 5` + `.runtime V1 as foo` gives a
+constant 5 V bias plus host-driven modulation.
+
+### When to use it
+Any host-driven per-sample voltage input: sidechain CV for compressors,
+LFO injection, envelope-follower drive, external modulation ports. Before
+`.runtime`, plugins injecting CV had to hand-patch `circuit.rs` after every
+`melange compile` (add a field, init it, zero in reset, stamp the RHS in
+two integrator paths) — silently broken by VS reordering because RHS row
+indices are position-dependent. `.runtime` makes it first-class.
+
+### Constraints
+- `Vname` must reference an existing voltage source (name starts with `V`).
+- `field_name` must be a valid ASCII Rust identifier (letter or `_` start,
+  then `[A-Za-z0-9_]`). Rust keywords are rejected by rustc downstream,
+  not by the parser — if you write `.runtime V1 as loop`, compilation will
+  fail with a clear message.
+- Each VS can be bound at most once; each field name is unique per circuit.
+- Emitted row reference uses `VSOURCE_<NAME>_RHS_ROW` so the stamp tracks
+  VS position shifts automatically.
+
+### Plugin usage
+```rust
+let mut state = CircuitState::default();
+for sample in input_buffer {
+    state.ctrl_voltage = compute_cv(sample);
+    let out = process_sample(sample, &mut state);
+    // ...
+}
+```
 
 ## Plugin Code Generation
 

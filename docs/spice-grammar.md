@@ -1101,11 +1101,55 @@ Removes a nonlinear device from the Newton-Raphson system and replaces it with s
 ```
 
 **Notes:**
-- Useful when a device is always in the same operating region (e.g., a Vbe multiplier BJT, or a clean gain stage triode)
+- `.linearize` is a **semantic** tool, not a CPU optimization. For small-signal stages that stay in their linear region, NR already converges in 0–1 iterations, so linearizing produces negligible CPU savings. The real reason to use it is to **force small-signal mode** — removing a device that happens to traverse a nonlinear knee from its DC bias but musically should not (e.g. a Vbe-multiplier BJT in a power amp, a clean cathode-bypass stage in a preamp). A linearized device cannot clip.
 - BJTs: reduces M by 2 per device (stamps g_m, g_pi, r_o into G)
 - Triodes: reduces M by 2 per device (stamps g_m, 1/r_p into G)
 - The device still affects the circuit via its linearized conductances
 - The linearization is computed from the DC operating point, so it is only accurate for small signals around that point
+
+---
+
+### .runtime — Host-Driven Voltage Source
+
+Binds an existing voltage source to a `pub <field>: f64` on the generated `CircuitState` so the plugin host can drive the source value per sample (sidechain CV, LFO, envelope follower, external modulation input).
+
+**Syntax:**
+```
+.runtime Vname as field_name
+```
+
+**Requirements:**
+- `Vname` must reference a voltage source (name starts with `V`) declared elsewhere in the netlist.
+- `field_name` must be a valid ASCII Rust identifier.
+- Each voltage source may be bound at most once; each field name is unique per circuit.
+
+**Example:**
+```spice
+Vctrl ctrl 0 DC 0
+R_ctrl ctrl vca_gain 10k
+.runtime Vctrl as ctrl_voltage
+```
+
+**Generated code:**
+```rust
+struct CircuitState {
+    // ...
+    pub ctrl_voltage: f64,
+}
+
+fn build_rhs(input: f64, input_prev: f64, state: &CircuitState) -> [f64; N] {
+    // ...
+    rhs[VSOURCE_VCTRL_RHS_ROW] += state.ctrl_voltage;
+    rhs
+}
+```
+
+**Semantics:**
+- Additive with any DC bias declared on the voltage source itself: `V1 n1 0 DC 5` + `.runtime V1 as foo` ⇒ `5 + state.foo` total.
+- `reset()` zeroes each runtime field.
+- Stamp site emitted in both trapezoidal and backward-Euler RHS builders and in the nodal solver's per-sample RHS.
+
+See [DYNAMIC_PARAMS.md](aidocs/DYNAMIC_PARAMS.md#runtime--host-driven-voltage-source) for the full reference.
 
 ---
 

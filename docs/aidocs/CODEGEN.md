@@ -46,6 +46,105 @@ pub const DC_NL_I: [f64; M] = [1.234e-3, 5.678e-6];  // From dc_op solver
 Emitted when `has_dc_nl` is true (M > 0 and any dc_nl_current is nonzero).
 Used to initialize `i_nl_prev` in both `Default` and `reset()`.
 
+### Plugin-Runtime Surface (Oomox roadmap P1–P5)
+
+The generated module exposes a stable, name-addressable surface for plugin
+code. Indices computed from netlist position are error-prone — a new voltage
+source added above the one you care about shifts every downstream index.
+These constants and accessors let plugin code reference the topology by name.
+
+#### Named topology constants (Phase A: P2 + P3)
+
+For every user-named circuit node, voltage source, and `.pot`:
+
+```rust
+pub const NODE_IN: usize = 0;
+pub const NODE_OUT: usize = 1;
+pub const NODE_VCC: usize = 2;
+// ...
+
+pub const VSOURCE_VCC_RHS_ROW: usize = 4;   // = n_nodes + vs.ext_idx
+pub const VSOURCE_VCTRL_RHS_ROW: usize = 5;
+
+pub const POT_RVOL_INDEX: usize = 0;
+pub const POT_RTONE_INDEX: usize = 1;
+```
+
+Names are sanitized to `SCREAMING_SNAKE` (non-alphanumeric → `_`, leading
+digit prefixed with `_`). Collisions dedupe with numeric suffixes in
+declaration order (`FOO`, `FOO_2`, `FOO_3`). Ground (index 0) is implicit.
+BJT `basePrime`/`colPrime`/`emitPrime` and transformer-decomposition
+internal nodes are deliberately NOT emitted — those are solver
+implementation details.
+
+#### `.runtime` voltage sources (Phase B: P1)
+
+Netlist:
+```spice
+Vctrl ctrl 0 DC 0
+.runtime Vctrl as ctrl_voltage
+```
+
+Emitted:
+```rust
+struct CircuitState {
+    // ...
+    pub ctrl_voltage: f64,
+}
+
+impl Default for CircuitState {
+    fn default() -> Self { Self { /* ... */ ctrl_voltage: 0.0, /* ... */ } }
+}
+
+fn build_rhs(input: f64, input_prev: f64, state: &CircuitState) -> [f64; N] {
+    // ...
+    rhs[VSOURCE_VCTRL_RHS_ROW] += state.ctrl_voltage;
+    rhs
+}
+```
+
+Stamped in both trapezoidal and backward-Euler RHS paths and in the nodal
+solver's per-sample RHS builder. `reset()` zeroes each runtime field.
+Semantics: additive with any DC bias declared on the voltage source.
+
+#### `dc_op()` accessor + `dc_op_dump()` (Phase C: P4)
+
+```rust
+impl CircuitState {
+    /// Baked DC operating point (frozen at codegen time at nominal pot/switch
+    /// values). Prefer this over `v_prev` for the *designed* bias point.
+    pub fn dc_op(&self) -> &[f64; N] { &self.dc_operating_point }
+
+    /// Dump each named node's DC voltage to stderr.
+    /// Emitted only when named nodes exist.
+    pub fn dc_op_dump(&self) { /* eprintln per NODE_<NAME> */ }
+}
+```
+
+#### `WARMUP_SAMPLES_RECOMMENDED` (Phase D: P5)
+
+```rust
+pub const WARMUP_SAMPLES_RECOMMENDED: usize = 528;  // circuit-dependent
+```
+
+Computed at codegen time as `ceil(5 · τ_max · internal_rate)` where
+`τ_max = max_i(C[i][i] / G[i][i])` over the augmented system. Covers 99.3%
+of the slowest pole's final settled response. Plugins applying per-instance
+pot/switch jitter should run this many silent samples after configuring
+state before audio starts:
+
+```rust
+let mut state = CircuitState::default();
+state.pot_0_resistance = jittered_r;
+for _ in 0..WARMUP_SAMPLES_RECOMMENDED {
+    let _ = process_sample(0.0, &mut state);
+}
+```
+
+Heuristic only — tightly-coupled RC networks where the slowest mode is
+orthogonal to every node's individual τ can still fool it. Eigen upgrade
+is deferred; the cheap per-node scan covers the common case.
+
 ### State (Runtime, Per-Channel)
 ```rust
 struct CircuitState {

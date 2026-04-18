@@ -2,7 +2,7 @@
 //!
 //! Parses a subset of SPICE sufficient for audio circuits:
 //! - Components: R, C, L, V (DC/AC), I, D, Q, J, M, U (op-amp), E (VCVS), G (VCCS), Y (VCA), X
-//! - Directives: .model, .subckt, .param, .pot, .wiper, .switch, .input_impedance, .end
+//! - Directives: .model, .subckt, .param, .pot, .wiper, .switch, .gang, .linearize, .runtime, .input_impedance, .end
 //!
 //! The parser builds an AST (Abstract Syntax Tree) representation
 //! of the circuit that can be processed by the MNA assembler.

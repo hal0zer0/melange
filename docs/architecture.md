@@ -104,7 +104,7 @@ The core. Depends on primitives and devices.
 **Netlist Parser:**
 - Parse a subset of SPICE sufficient for audio circuits
 - Components: R, C, L (including ISAT= saturation), V (DC), I, D (diode), Q (BJT), J (JFET), M (MOSFET), T (triode), P (pentode), U (op-amp), Y (VCA), X (subcircuit), E (VCVS), G (VCCS), K (coupled inductors)
-- Directives: `.model`, `.subckt`, `.pot`, `.wiper`, `.switch`, `.gang`, `.linearize`, `.input_impedance`
+- Directives: `.model`, `.subckt`, `.pot`, `.wiper`, `.switch`, `.gang`, `.linearize`, `.runtime`, `.input_impedance`
 - Output: `Netlist` struct with elements, models, and directives
 
 **MNA Assembler:**
