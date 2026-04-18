@@ -4514,6 +4514,15 @@ impl RustEmitter {
             // Op-amp output clamping inside NR loop — prevents physically impossible
             // voltages that destabilize downstream device evaluation. Applied after the
             // back-solve, before device voltage limiting.
+            //
+            // For ActiveSetBe we ALSO raise `active_set_engaged` whenever the clamp
+            // fires. The engagement check after the NR break (`emit_nodal_active_set_check`)
+            // is strict-inequality against the rail, so if the clamp pinned v to
+            // exactly the rail the check otherwise misses engagement — and the BE
+            // fallback + KCL-consistent resolve never run, leaving the network in
+            // a state where the rail-pinned node satisfies only "v = c_k", not KCL.
+            // That residual slowly drifts cap history and device state per sample,
+            // producing the sub-Hz instability seen on 4kbuscomp (>2 s duration).
             {
                 let clampable: Vec<&crate::codegen::ir::OpampIR> = ir
                     .opamps
@@ -4527,18 +4536,34 @@ impl RustEmitter {
                     for oa in &clampable {
                         let o = oa.n_out_idx;
                         if oa.vclamp_hi.is_finite() {
-                            code.push_str(&format!(
-                                "        if v_new[{o}] > {hi:.17e} {{ v_new[{o}] = {hi:.17e}; }}\n",
-                                o = o,
-                                hi = oa.vclamp_hi,
-                            ));
+                            if active_set_be_mode_full_lu {
+                                code.push_str(&format!(
+                                    "        if v_new[{o}] > {hi:.17e} {{ v_new[{o}] = {hi:.17e}; active_set_engaged = true; }}\n",
+                                    o = o,
+                                    hi = oa.vclamp_hi,
+                                ));
+                            } else {
+                                code.push_str(&format!(
+                                    "        if v_new[{o}] > {hi:.17e} {{ v_new[{o}] = {hi:.17e}; }}\n",
+                                    o = o,
+                                    hi = oa.vclamp_hi,
+                                ));
+                            }
                         }
                         if oa.vclamp_lo.is_finite() {
-                            code.push_str(&format!(
-                                "        if v_new[{o}] < {lo:.17e} {{ v_new[{o}] = {lo:.17e}; }}\n",
-                                o = o,
-                                lo = oa.vclamp_lo,
-                            ));
+                            if active_set_be_mode_full_lu {
+                                code.push_str(&format!(
+                                    "        if v_new[{o}] < {lo:.17e} {{ v_new[{o}] = {lo:.17e}; active_set_engaged = true; }}\n",
+                                    o = o,
+                                    lo = oa.vclamp_lo,
+                                ));
+                            } else {
+                                code.push_str(&format!(
+                                    "        if v_new[{o}] < {lo:.17e} {{ v_new[{o}] = {lo:.17e}; }}\n",
+                                    o = o,
+                                    lo = oa.vclamp_lo,
+                                ));
+                            }
                         }
                     }
                     code.push('\n');
@@ -4707,11 +4732,14 @@ impl RustEmitter {
             // (`OpampRailMode` is already imported above.)
             if matches!(
                 ir.solver_config.opamp_rail_mode,
-                OpampRailMode::BoyleDiodes
+                OpampRailMode::BoyleDiodes | OpampRailMode::ActiveSetBe | OpampRailMode::ActiveSet
             ) {
-                code.push_str("        // BoyleDiodes residual check: re-evaluate i_nl at the\n");
-                code.push_str("        // post-step v and force NR to keep iterating if the\n");
-                code.push_str("        // chord linearisation produced an inconsistent fixed point.\n");
+                code.push_str("        // Residual check: re-evaluate i_nl at the post-step v and force\n");
+                code.push_str("        // NR to keep iterating if the chord linearisation produced an\n");
+                code.push_str("        // inconsistent fixed point. Required for any topology where the\n");
+                code.push_str("        // per-iteration op-amp rail clamp + stale chord_j_dev can\n");
+                code.push_str("        // combine to produce false convergence (voltage step small,\n");
+                code.push_str("        // but device KCL residual huge).\n");
                 code.push_str("        if !max_step_exceeded {\n");
                 code.push_str("            let i_nl_chord = i_nl;\n");
                 code.push_str("            let mut v_nl = [0.0f64; M];\n");

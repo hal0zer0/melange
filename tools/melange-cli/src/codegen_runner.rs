@@ -232,11 +232,35 @@ fn main() {{
 
     let mut output = Vec::with_capacity(samples.len());
     let mut max_abs_v_prev = 0.0f64;
-    for &s in &samples {{
+    let trace_nodes: Vec<(&str, usize)> = std::env::var("MELANGE_TRACE_NODES")
+        .ok()
+        .map(|s| s.split(',').filter_map(|tok| {{
+            let mut parts = tok.splitn(2, '=');
+            let name = parts.next()?.to_string();
+            let idx: usize = parts.next()?.parse().ok()?;
+            Some((name, idx))
+        }}).collect::<Vec<_>>())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(n, i)| (Box::leak(n.into_boxed_str()) as &str, i))
+        .collect();
+    let trace_every: usize = std::env::var("MELANGE_TRACE_EVERY").ok().and_then(|s| s.parse().ok()).unwrap_or(500);
+    for (i, &s) in samples.iter().enumerate() {{
         let out = process_sample(s, &mut state);
         output.push(out[0]);
         for &v in &state.v_prev {{
             if v.abs() > max_abs_v_prev {{ max_abs_v_prev = v.abs(); }}
+        }}
+        if !trace_nodes.is_empty() && (i % trace_every == 0 || out[0].abs() > 1e3) {{
+            let mut buf = format!("DIAG:TRACE s={{}} ", i);
+            for (name, idx) in &trace_nodes {{
+                buf.push_str(&format!("{{}}[{{}}]={{:.4}} ", name, idx, state.v_prev[*idx]));
+            }}
+            for k in 0..state.i_nl_prev.len() {{
+                buf.push_str(&format!("i[{{}}]={{:.4e}} ", k, state.i_nl_prev[k]));
+            }}
+            eprintln!("{{}}", buf);
+            if out[0].abs() > 1e3 {{ break; }}
         }}
     }}
 
@@ -249,6 +273,7 @@ fn main() {{
     eprintln!("DIAG:nr_max_iter_count={{}}", state.diag_nr_max_iter_count);
     eprintln!("DIAG:substep_count={{}}", state.diag_substep_count);
     eprintln!("DIAG:nan_reset_count={{}}", state.diag_nan_reset_count);
+    eprintln!("DIAG:be_fallback_count={{}}", state.diag_be_fallback_count);
     eprintln!("DIAG:max_abs_v_prev={{:.6}}", max_abs_v_prev);
 }}
 "#,

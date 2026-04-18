@@ -246,6 +246,89 @@ nonlinear devices.
 | Catch diode `j_dev` jumps 32 OOM (1e-31 reverse → 1e+1 forward) within one NR loop, chord stays stale until iter 5 refactor | The default `iter % CHORD_REFACTOR == 0` refactor is too coarse for diodes whose Jacobian changes by orders of magnitude | Adaptive refactor trigger: at the start of each NR iteration, force refactor if any device's `\|j_dev[k][k]\| / \|chord_j_dev[k][k]\|` exceeds 50% relative change. BoyleDiodes-gated. (FIXED, commit `39397d1`) |
 | Heavy clipping (amp ≥ 0.05 V on Klon) under `--opamp-rail-mode boyle-diodes`: raw output node `state.v_prev[OUTPUT_NODES[0]]` diverges to 45–3068 V, NR fails every sample. The generated `output[i].clamp(-10.0, 10.0)` safety rail masks this to a visible 10 V, so superficial inspection shows "output=10 V" while the actual solver state is ±3000 V. Always measure raw node voltage when debugging BoyleDiodes convergence. | Three fix candidates empirically tested 2026-04-08 fourth session with a disciplined amp sweep [0.01, 0.03, 0.05, 0.07, 0.10, 0.15, 0.20, 0.30, 0.50]: (a) targeted Gmin bump on `_oa_int_*` rows — destroys linear-regime op-amp gain; (b) force `need_refactor = true` in BoyleDiodes (ngspice-style refactor-every-iter) — preserves linear, doesn't fix heavy clip; (c) disable global `damp_thresh` step cap — preserves linear, doesn't fix heavy clip. None satisfied the confirmation criteria (zero NR failures at all amps, peak in [10.0, 11.0] V). The chord-LU Newton direction appears to be wrong at the catch-diode knee, not just the magnitude, so no form of step damping or single-row regularization fixes the underlying issue. Prior "bistable chord-LU fixed points" and "PTC doesn't work because of static pivots" diagnoses were both retracted; see `task_12_bistable_oscillation_finding.md` "FOURTH SESSION" for the full audit and sweep data. | **Not blocking for Klon release.** Klon auto-detect routes to `active-set-be`, which was empirically verified in the same sweep: raw peak bounded 10.70–10.76 V at every tested amplitude, trap NR falls through to BE fallback at heavy clip and BE converges every time. BoyleDiodes mode remains opt-in (`--opamp-rail-mode boyle-diodes`) and is a known limitation at heavy clip; it works correctly for light clip (amp ≤ 0.03 V on Klon) and for control-path topologies. If heavy-clip BoyleDiodes convergence becomes a priority later, the next tier of escalation candidates are: Anderson acceleration (m=3, Walker-Ni + Zhang-Peng-Ouyang safeguards), trust-region Newton with actual-vs-predicted ratio, or a BoyleDiodes → ActiveSetBe failure-hybrid that tries BoyleDiodes trap and falls through to ActiveSetBe on divergence. |
 
+## ActiveSetBe Chord-NR False Convergence (Precision Rectifiers)
+
+**Primary cause on real circuits: op-amp `.model` VSAT mis-calibrated against
+the supply rails actually used in the netlist.** First investigated on
+4kbuscomp and mistaken for a solver bug; root-caused 2026-04-17 to a one-line
+model error — see "Root cause on 4kbuscomp" below. The mechanism described
+in this section *can* bite any topology where an op-amp is unnaturally
+DC-railed, so the diagnostic signature is still worth keeping. In practice,
+the first question when you see it is "does the op-amp's VSAT match its
+actual supply rails?"
+
+### Root cause on 4kbuscomp (2026-04-17)
+
+`.model OA_TL074 OA(... VSAT=11 ...)` was appropriate for a ±12 V-supplied
+TL074, but the 4kbuscomp netlist runs on ±15 V supplies (`Vpos vcc15 0 DC
+15`, `Vneg vee15 0 DC -15`). On ±15 V, a real TL074 saturates at about
+±13.5 V (datasheet: output swing = VCC − 1.5 V). U8 and U9 in the precision
+rectifier have `n_plus = vee12 = -12 V`; in real hardware that's inside both
+the input CMR *and* the output range, and the op-amp is **not** DC-railed.
+In melange with VSAT=11 it *is* DC-railed at −11 V, which is what triggers
+every symptom below.
+
+Fix: set `VSAT=13.5` (or `VCC=13.5 VEE=-13.5`) on the TL074 model. With that
+change alone, 4kbuscomp is stable at `d = 5 s` across `amp ∈ {0.01, 0.1,
+0.5}` with zero NR max-iter hits and zero BE fallbacks. No solver changes
+were required.
+
+### Mechanism (when the op-amp really is DC-railed)
+
+1. Generated NR emits `if v_new[n_out] < -VSAT { v_new[n_out] = -VSAT }` after
+   every LU back-solve (`nodal_emitter.rs`, "Per-iteration op-amp output rail
+   clamp"). This is ALWAYS emitted in the trap path, regardless of rail mode.
+2. With `v[rect_a_out]` pinned at exactly `-VSAT`, a forward-biased feedback
+   diode (e.g. 4kbuscomp D2, anode=rect_a_out, cathode=jct_b) sees
+   `V_d = -VSAT − v[jct_b]`. If the physical operating point of the cathode
+   node sits below `-VSAT` (which happens specifically when VSAT is
+   mis-calibrated against the supplies), `V_d` goes deep into forward bias.
+   The emitted `diode_current` clamps `V_d` to `40·N·VT ≈ 1.81 V`, but even
+   clamped, `I_D ≈ 10¹ A` — non-physical.
+3. The chord NR uses `G_aug = A − N_i · chord_j_dev · N_v`. With large
+   `chord_j_dev[D][D] ≈ 330 S`, the LU back-solve DOES satisfy the
+   linearised equation. But because `v[n_out]` was clamped (not a KCL
+   solution), the linearised system enforces KCL only at the un-clamped
+   nodes — the rail-pinned node's residual goes "out through the clamp."
+4. `active_set_engaged` (the flag that gates the BE fallback + constrained
+   `emit_nodal_active_set_resolve`) uses strict inequality against the rail:
+   `v[n_out] > hi || v[n_out] < lo`. Since the clamp makes `v[n_out]` exactly
+   equal to the rail, the engagement check NEVER fires. BE fallback never
+   runs. No constrained resolve. The cap-history `A_neg · v_prev` and
+   `N_I · i_nl_prev` carry the sub-sample KCL residual to the next sample.
+5. Over thousands of samples the residual drifts slowly, then enters a
+   sub-Hz oscillation (period ~2 s on 4kbuscomp, coupled through the
+   22 µF sidechain coupling cap) whose amplitude grows until `V_D` exceeds
+   the clamp and `i_nl[D]` runs away exponentially.
+
+### Symptoms
+
+| Signature | Notes |
+|-----------|-------|
+| An op-amp's non-inverting input sits outside `[-VSAT, +VSAT]` at the DC operating point | Model-calibration check. Compare the input node's DC voltage to the `.model`'s VSAT; if the input is outside the rail, the sim will DC-rail the op-amp even when real hardware would not. This is the first thing to check before reaching for solver changes. |
+| `state.i_nl_prev[D]` far larger than any real diode rating (e.g. 15 A on a 1N4148) at sample 0, growing exponentially over 40 000+ samples | Diode current is self-consistent with the clamped `v[n_out]` and the drifted cathode voltage, but KCL at the cathode is violated by the full `i_nl[D]` magnitude. |
+| `state.diag_nr_max_iter_count = 0` and `diag_be_fallback_count = 0` for the entire stable phase | The voltage-step convergence criterion is fooled; NR reports converged on the false fixed point. |
+| `v[n_out] = ±VSAT` exactly (all digits) every sample | Clamp signature. If you see this with no BE fallbacks, `active_set_engaged` is starved. |
+| Sub-Hz oscillation of the cathode node growing in amplitude until blow-up, with lower amplitudes taking *longer* to diverge rather than shorter | The instability is in the DC-rail regime — independent of signal amplitude. |
+
+### Residual check (shipped 2026-04-17, load-bearing)
+
+Regardless of the VSAT calibration story, the BoyleDiodes residual check in
+`nodal_emitter.rs` is extended to `BoyleDiodes | ActiveSetBe | ActiveSet`.
+After the damped NR step, re-evaluate `i_nl_fresh` from device equations at
+post-step `v` and set `max_step_exceeded = true` if any device current
+differs from the chord's `i_nl` by more than
+`1e-3 · max(|fresh|, |chord|, 1e-9) + 1e-12`.
+
+Retained because it catches the same bug class on other topologies
+(rail-engaged op-amp + stale chord_j_dev producing a false fixed point) and
+costs only M device-equation calls per NR iter. Zero regressions on the
+validated-circuits suite.
+
+See also `memory/project_4kbuscomp_chord_false_convergence.md` for the
+investigation trail and `memory/project_4kbuscomp_basin_trap.md` for the
+DC-OP basin-trap entry — different bug class (DC solver), same circuit.
+
 ### Positive Definiteness Rule for Transformer Coupling
 All windings on the same core must have coupling coefficients that form a positive-definite
 inductance matrix. For a 4-winding transformer with k_ab=0.95 and k_ac=0.95, k_bc must be
@@ -420,7 +503,9 @@ spectral radius (up to 1.002). Only circuits with pathological K AND ill-conditi
 hit this — no known circuit triggers both conditions simultaneously.
 
 **Future hardening** (if a circuit is found that needs both):
-- Unconditional residual check in full-LU NR (currently BoyleDiodes-only)
+- Unconditional residual check in full-LU NR (currently
+  `BoyleDiodes | ActiveSetBe | ActiveSet`-gated since the 4kbuscomp partial
+  fix — see "ActiveSetBe Chord-NR False Convergence" above)
 - Iterative refinement in the chord back-solve (one extra O(N²) pass)
 - Schur-complement-within-full-LU hybrid (M-dim correction inside N-dim NR)
 
