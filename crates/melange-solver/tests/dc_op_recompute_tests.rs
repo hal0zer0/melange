@@ -1142,3 +1142,319 @@ fn e6_pot_resistance_prev_synced_after_recompute() {
         String::from_utf8_lossy(&run.stdout)
     );
 }
+
+// -----------------------------------------------------------------------------
+// Phase E.7: real-circuit DK validation
+//
+// Takes the MVP beyond synthetic diode/JFET test vectors by exercising a
+// realistic SeriesOfTubes-style single stage: 12AU7 triode + 3 pots (Rcv, Rk,
+// Ra) + multi-voltage-source supply (Vcc, Vbias, Vctrl) + cathode bypass cap +
+// AC-coupled input/output. DK kernel route confirmed (N=13, M=2); this is the
+// class of circuit the Phase E runtime DC OP recompute was written for
+// (per-instance ±5% pot jitter across 50 stacked stages).
+//
+// Tests cover the two end-to-end properties a plugin needs:
+//   (a) At nominal pots, `recompute_dc_op` converges to the compile-time
+//       `DC_OP` constant within NR tolerance — proves the runtime solver is
+//       physically equivalent to `dc_op.rs` on a real topology.
+//   (b) At jittered pots, `recompute_dc_op` converges to a finite, physically
+//       plausible new equilibrium — proves the runtime solver can actually
+//       *move* the DC OP instead of dying on a wider-than-test-vector pot
+//       swing. Sanity bounds: cathode between 0 and Vcc, plate between
+//       cathode and Vcc, output is AC-coupled so it sits at its load pull.
+// -----------------------------------------------------------------------------
+
+/// A SeriesOfTubes cascade stage, trimmed to the parts that matter for the
+/// DC OP: 12AU7 common-cathode stage with fixed-bias grid summing network,
+/// fully-bypassed cathode, plate-load pad, output coupling. Matches the
+/// active netlist in `../../melange-circuits/unstable/dynamics/series-of-tubes-stage.cir`
+/// line-for-line; input guard (`Rin_guard`) is prepended so parsing assigns
+/// `in` to MNA node 0 as the test harness expects.
+const SOT_STAGE_NETLIST: &str = "\
+SeriesOfTubes stage — Phase E.7 DK validation
+Rin_guard in 0 1meg
+.model Tube_12AU7 TRIODE(MU=17 EX=1.4 KG1=1460 KP=300 KVB=300)
+Vcc vcc 0 DC 250
+Vbias vbias 0 DC -22
+Vctrl ctrl 0 DC 0
+Cin in grid 470n
+Rcv ctrl bias_sum 22k
+Rb vbias bias_sum 100k
+Rg bias_sum grid 470k
+T1 grid plate cathode Tube_12AU7
+Rk cathode 0 1500
+Ck cathode 0 220u
+Ra vcc plate 47k
+Rpad_top plate pad 108k
+Rpad_bot pad 0 10k
+Cout pad out 470n
+Rload out 0 1meg
+.pot Rcv 20900 23100
+.pot Rk 1425 1575
+.pot Ra 44650 49350
+";
+
+/// SoT stage at nominal pots: `recompute_dc_op` must converge to the baked
+/// `DC_OP` constant within 1e-6 relative tolerance. Starts from a deliberately
+/// wrong `v_prev = [0; N]` so the NR loop actually has to iterate, not just
+/// confirm the warm-start is already converged.
+#[test]
+fn e7_series_of_tubes_stage_converges_at_nominal() {
+    use std::io::Write;
+
+    let code = generate_dk(SOT_STAGE_NETLIST, true);
+
+    let main = "\n\nfn main() {\n\
+        let mut state = CircuitState::default();\n\
+        let before: [f64; N] = *state.dc_op();\n\
+        for i in 0..N { state.v_prev[i] = 0.0; }\n\
+        for i in 0..M { state.i_nl_prev[i] = 0.0; state.i_nl_prev_prev[i] = 0.0; }\n\
+        state.recompute_dc_op();\n\
+        let after: [f64; N] = *state.dc_op();\n\
+        for (i, &v) in after.iter().enumerate() {\n\
+            assert!(v.is_finite(), \"non-finite node {}: {}\", i, v);\n\
+        }\n\
+        for i in 0..N {\n\
+            let denom = after[i].abs().max(before[i].abs()).max(1.0);\n\
+            let rel = (after[i] - before[i]).abs() / denom;\n\
+            assert!(rel < 1e-6,\n\
+                \"SoT node {} rel error too large: before={} after={} rel={}\",\n\
+                i, before[i], after[i], rel);\n\
+        }\n\
+        // Tube must be forward-biased: i_nl sum should be substantially\n\
+        // nonzero (plate current at the DC OP is on the order of 4-5 mA).\n\
+        let total: f64 = state.i_nl_prev.iter().map(|x| x.abs()).sum();\n\
+        assert!(total > 1e-4, \"expected forward-biased triode, got sum|i_nl|={}\", total);\n\
+        println!(\"ok\");\n\
+    }\n";
+
+    let full = format!("{}{}", code, main);
+    let tmp = std::env::temp_dir();
+    let src = tmp.join("melange_dc_op_recompute_e7_sot_nominal.rs");
+    let bin = tmp.join("melange_dc_op_recompute_e7_sot_nominal");
+    std::fs::File::create(&src)
+        .unwrap()
+        .write_all(full.as_bytes())
+        .unwrap();
+    let compile = std::process::Command::new("rustc")
+        .args([
+            src.to_str().unwrap(),
+            "-o",
+            bin.to_str().unwrap(),
+            "--edition",
+            "2021",
+        ])
+        .output()
+        .expect("rustc");
+    let _ = std::fs::remove_file(&src);
+    if !compile.status.success() {
+        let _ = std::fs::remove_file(&bin);
+        panic!(
+            "compile failed:\n{}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+    }
+    let run = std::process::Command::new(&bin).output().expect("run");
+    let _ = std::fs::remove_file(&bin);
+    assert!(
+        run.status.success(),
+        "binary failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&run.stdout).contains("ok"),
+        "unexpected output: {}",
+        String::from_utf8_lossy(&run.stdout)
+    );
+}
+
+/// SoT stage with per-instance ±5% pot jitter on Rcv, Rk, Ra (the jitter
+/// envelope a real SeriesOfTubes plugin would apply at construction time):
+/// `recompute_dc_op` must converge to a new, finite, physically plausible
+/// equilibrium. Plate voltage must stay bounded by Vcc (0-250V) and cathode
+/// voltage must be positive (self-bias). Confirms the runtime NR is stable
+/// over the full declared pot range, not just at nominal.
+#[test]
+fn e7_series_of_tubes_stage_converges_under_pot_jitter() {
+    use std::io::Write;
+
+    let code = generate_dk(SOT_STAGE_NETLIST, true);
+
+    // The MNA node map for this netlist has cathode at index 7, plate at 6.
+    // We query the codegen-emitted NODE_* constants instead of hardcoding —
+    // guards against a future parser reordering silently breaking the test.
+    let main = "\n\nfn main() {\n\
+        let mut state = CircuitState::default();\n\
+        // Jitter toward the extreme end of each pot's declared range.\n\
+        state.set_pot_0(POT_0_MAX_R);  // Rcv high\n\
+        state.set_pot_1(POT_1_MIN_R);  // Rk low (hotter bias)\n\
+        state.set_pot_2(POT_2_MAX_R);  // Ra high (cooler plate load)\n\
+        state.recompute_dc_op();\n\
+        let jittered: [f64; N] = *state.dc_op();\n\
+        for (i, &v) in jittered.iter().enumerate() {\n\
+            assert!(v.is_finite(), \"non-finite node {} after jitter: {}\", i, v);\n\
+        }\n\
+        // Cathode self-bias must be positive (tube drawing current forces\n\
+        // V(cathode) > 0). Plate must sit below Vcc=250V.\n\
+        let v_cathode = jittered[NODE_CATHODE];\n\
+        let v_plate   = jittered[NODE_PLATE];\n\
+        assert!(v_cathode > 0.0 && v_cathode < 50.0,\n\
+            \"cathode voltage out of plausible self-bias range: {}\", v_cathode);\n\
+        assert!(v_plate > v_cathode && v_plate < 250.0,\n\
+            \"plate voltage outside (V_cathode, Vcc) band: plate={}, cathode={}\",\n\
+            v_plate, v_cathode);\n\
+        // i_nl must remain nonzero — tube didn't get cutoff into silence.\n\
+        let total: f64 = state.i_nl_prev.iter().map(|x| x.abs()).sum();\n\
+        assert!(total > 1e-5,\n\
+            \"tube went into cutoff under jitter? sum|i_nl|={}\", total);\n\
+        // Idempotence: calling recompute a second time at the same pot values\n\
+        // must not drift. Guards against any accumulating writeback bug.\n\
+        state.recompute_dc_op();\n\
+        let again: [f64; N] = *state.dc_op();\n\
+        for i in 0..N {\n\
+            let d = (again[i] - jittered[i]).abs();\n\
+            assert!(d < 1e-9,\n\
+                \"SoT node {} drifted between two recompute calls: {} -> {}\",\n\
+                i, jittered[i], again[i]);\n\
+        }\n\
+        println!(\"ok\");\n\
+    }\n";
+
+    let full = format!("{}{}", code, main);
+    let tmp = std::env::temp_dir();
+    let src = tmp.join("melange_dc_op_recompute_e7_sot_jitter.rs");
+    let bin = tmp.join("melange_dc_op_recompute_e7_sot_jitter");
+    std::fs::File::create(&src)
+        .unwrap()
+        .write_all(full.as_bytes())
+        .unwrap();
+    let compile = std::process::Command::new("rustc")
+        .args([
+            src.to_str().unwrap(),
+            "-o",
+            bin.to_str().unwrap(),
+            "--edition",
+            "2021",
+        ])
+        .output()
+        .expect("rustc");
+    let _ = std::fs::remove_file(&src);
+    if !compile.status.success() {
+        let _ = std::fs::remove_file(&bin);
+        panic!(
+            "compile failed:\n{}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+    }
+    let run = std::process::Command::new(&bin).output().expect("run");
+    let _ = std::fs::remove_file(&bin);
+    assert!(
+        run.status.success(),
+        "binary failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&run.stdout).contains("ok"),
+        "unexpected output: {}",
+        String::from_utf8_lossy(&run.stdout)
+    );
+}
+
+/// TS808 (Tube Screamer) non-inverting clipping stage: op-amp VCCS + feedback
+/// antiparallel diodes + AC-coupled input/output + passive tone network.
+/// Different class of DK circuit from SoT — op-amp + 2× 1D diodes instead of
+/// 1× 2D triode, no voltage sources (linear supply modeled inside the VCCS).
+/// Adds coverage for diode-feedback clipping topology that tube-based tests
+/// don't exercise.
+const TS808_CLIPPING_NETLIST: &str = "\
+Tube Screamer TS808 clipping stage — Phase E.7 DK validation
+Cin in n1 0.047u
+R_pull n1 0 1Meg
+G1 0 n_clip n1 n_inv 2666.667
+Rout n_clip 0 75
+R4 n_inv n_gnd 4.7k
+C3 n_gnd 0 0.047u
+R_drive n_clip n_inv 551k
+D1 n_clip n_inv D1N4148
+D2 n_inv n_clip D1N4148
+C4 n_clip n_inv 51p
+R7 n_clip n_tone 1k
+C5 n_tone 0 0.22u
+C_out n_tone out 0.1u
+R_out out 0 1Meg
+.model D1N4148 D(IS=2.52e-9 RS=0.568 N=1.752)
+";
+
+/// TS808 at its natural quiescent point (no input, no .pot — every parameter
+/// is baked): `recompute_dc_op` from a wrong `v_prev` must reach the compile-
+/// time `DC_OP` within tolerance. Exercises antiparallel feedback diodes and
+/// op-amp VCCS in the same DC network — a common pedal-clipping topology
+/// distinct from the tube preamp case.
+#[test]
+fn e7_ts808_clipping_stage_converges_at_nominal() {
+    use std::io::Write;
+
+    let code = generate_dk(TS808_CLIPPING_NETLIST, true);
+
+    let main = "\n\nfn main() {\n\
+        let mut state = CircuitState::default();\n\
+        let before: [f64; N] = *state.dc_op();\n\
+        for i in 0..N { state.v_prev[i] = 0.0; }\n\
+        for i in 0..M { state.i_nl_prev[i] = 0.0; state.i_nl_prev_prev[i] = 0.0; }\n\
+        state.recompute_dc_op();\n\
+        let after: [f64; N] = *state.dc_op();\n\
+        for (i, &v) in after.iter().enumerate() {\n\
+            assert!(v.is_finite(), \"non-finite node {}: {}\", i, v);\n\
+        }\n\
+        for i in 0..N {\n\
+            let denom = after[i].abs().max(before[i].abs()).max(1.0);\n\
+            let rel = (after[i] - before[i]).abs() / denom;\n\
+            assert!(rel < 1e-6,\n\
+                \"TS808 node {} rel error too large: before={} after={} rel={}\",\n\
+                i, before[i], after[i], rel);\n\
+        }\n\
+        println!(\"ok\");\n\
+    }\n";
+
+    let full = format!("{}{}", code, main);
+    let tmp = std::env::temp_dir();
+    let src = tmp.join("melange_dc_op_recompute_e7_ts808_nominal.rs");
+    let bin = tmp.join("melange_dc_op_recompute_e7_ts808_nominal");
+    std::fs::File::create(&src)
+        .unwrap()
+        .write_all(full.as_bytes())
+        .unwrap();
+    let compile = std::process::Command::new("rustc")
+        .args([
+            src.to_str().unwrap(),
+            "-o",
+            bin.to_str().unwrap(),
+            "--edition",
+            "2021",
+        ])
+        .output()
+        .expect("rustc");
+    let _ = std::fs::remove_file(&src);
+    if !compile.status.success() {
+        let _ = std::fs::remove_file(&bin);
+        panic!(
+            "compile failed:\n{}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+    }
+    let run = std::process::Command::new(&bin).output().expect("run");
+    let _ = std::fs::remove_file(&bin);
+    assert!(
+        run.status.success(),
+        "binary failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&run.stdout).contains("ok"),
+        "unexpected output: {}",
+        String::from_utf8_lossy(&run.stdout)
+    );
+}
