@@ -830,6 +830,40 @@ impl RustEmitter {
             code.push('\n');
         }
 
+        // Named topology constants (Oomox P2 + P3). Emitted so plugin code
+        // can refer to nodes, VS rows, and pots by name rather than by
+        // position-dependent numeric index.
+        let nc = &ir.named_constants;
+        if !nc.nodes.is_empty() || !nc.vsources.is_empty() || !nc.pots.is_empty() {
+            code.push_str(
+                "// -----------------------------------------------------------------------------\n\
+                 // Named topology constants (Oomox plugin roadmap P2 + P3).\n\
+                 //\n\
+                 // Plugin code references these instead of hard-coding numeric indices that\n\
+                 // shift when a netlist revision adds or reorders components.\n\
+                 // -----------------------------------------------------------------------------\n",
+            );
+            for (name, idx) in &nc.nodes {
+                code.push_str(&format!("pub const NODE_{}: usize = {};\n", name, idx));
+            }
+            if !nc.nodes.is_empty() && (!nc.vsources.is_empty() || !nc.pots.is_empty()) {
+                code.push('\n');
+            }
+            for (name, row) in &nc.vsources {
+                code.push_str(&format!(
+                    "pub const VSOURCE_{}_RHS_ROW: usize = {};\n",
+                    name, row
+                ));
+            }
+            if !nc.vsources.is_empty() && !nc.pots.is_empty() {
+                code.push('\n');
+            }
+            for (name, idx) in &nc.pots {
+                code.push_str(&format!("pub const POT_{}_INDEX: usize = {};\n", name, idx));
+            }
+            code.push('\n');
+        }
+
         code
     }
 

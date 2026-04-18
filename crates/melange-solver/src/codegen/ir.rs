@@ -94,6 +94,37 @@ pub struct CircuitIR {
     /// Authentic circuit noise configuration + source lists. See `NoiseIR`.
     #[serde(default)]
     pub noise: NoiseIR,
+    /// Named topology constants emitted into generated code so plugins can
+    /// reference nodes, VS rows, and pots by name instead of by numeric index.
+    /// See Oomox plugin roadmap P2 + P3.
+    #[serde(default)]
+    pub named_constants: NamedConstantsIR,
+}
+
+/// Named topology constants for plugin-runtime indexing.
+///
+/// Emitted as `pub const NODE_<N>: usize`, `pub const VSOURCE_<N>_RHS_ROW: usize`,
+/// and `pub const POT_<N>_INDEX: usize` so plugin code can refer to matrix/vector
+/// rows and pot slots by name rather than by position-dependent numeric index.
+///
+/// Names are sanitized to SCREAMING_SNAKE: non-alphanumeric → `_`, leading digit
+/// prefixed with `_`, uppercased. Collisions (two netlist names sanitizing to the
+/// same ident) get a numeric suffix (`_2`, `_3`, …) in declaration order.
+///
+/// Auto-generated internal nodes (BJT `basePrime`/`colPrime`/`emitPrime`, transformer
+/// branch currents) are intentionally NOT emitted — those are solver implementation
+/// details and plugins must not take dependencies on them.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct NamedConstantsIR {
+    /// User-named circuit nodes: (sanitized const suffix, 0-based node index).
+    /// Ground is implicit (index 0) and not emitted.
+    pub nodes: Vec<(String, usize)>,
+    /// Voltage sources: (sanitized const suffix, RHS row = n_nodes + vs.ext_idx).
+    /// The row index is the aug-MNA row where the VS's KVL constraint lives,
+    /// i.e. where a `.runtime` voltage source (P1) stamps its per-sample value.
+    pub vsources: Vec<(String, usize)>,
+    /// Pots: (sanitized const suffix, index into the pot array on CircuitState).
+    pub pots: Vec<(String, usize)>,
 }
 
 /// Circuit metadata (name, title, generator version).
@@ -936,6 +967,151 @@ fn default_oversampling_factor() -> usize {
 
 fn default_output_scales() -> Vec<f64> {
     vec![1.0]
+}
+
+/// Sanitize a netlist name to a Rust `SCREAMING_SNAKE_CASE` constant-suffix:
+/// uppercase, non-alphanumeric → `_`, leading digit prefixed with `_`.
+///
+/// Collisions are NOT handled here — the caller must dedupe within its own scope
+/// (see [`build_named_constants`]).
+fn sanitize_const_suffix(name: &str) -> String {
+    let mut out = String::with_capacity(name.len() + 1);
+    for c in name.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_uppercase());
+        } else {
+            out.push('_');
+        }
+    }
+    if out.chars().next().map_or(false, |c| c.is_ascii_digit()) {
+        out.insert(0, '_');
+    }
+    if out.is_empty() {
+        out.push('_');
+    }
+    out
+}
+
+/// Dedupe sanitized suffixes in declaration order by appending `_2`, `_3`, ….
+/// Pure function; easier to unit-test than inlining into `build_named_constants`.
+fn dedupe_in_order(pairs: Vec<(String, usize)>) -> Vec<(String, usize)> {
+    let mut seen: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    let mut out = Vec::with_capacity(pairs.len());
+    for (name, idx) in pairs {
+        let count = seen.entry(name.clone()).or_insert(0);
+        *count += 1;
+        let final_name = if *count == 1 {
+            name
+        } else {
+            format!("{}_{}", name, *count)
+        };
+        out.push((final_name, idx));
+    }
+    out
+}
+
+/// Build [`NamedConstantsIR`] from an already-built MNA + topology.
+///
+/// `n_nodes` must be the original circuit node count (excluding augmented
+/// VS/VCVS rows and augmented inductor branch currents), matching
+/// `Topology::n_nodes`. VS row indices are computed as `n_nodes + ext_idx`.
+///
+/// Skips the ground entry (`"0"` → 0). Does not currently filter auto-inserted
+/// internal nodes because `mna.node_map` only contains user-named nodes plus
+/// ground (BJT prime nodes live on `mna.bjt_internal_nodes`, transformer
+/// decomposition nodes are allocated past `node_map`).
+pub(crate) fn build_named_constants(
+    mna: &crate::mna::MnaSystem,
+    n_nodes: usize,
+) -> NamedConstantsIR {
+    let nodes_raw: Vec<(String, usize)> = {
+        let mut v: Vec<(String, usize)> = mna
+            .node_map
+            .iter()
+            .filter(|(name, idx)| **idx != 0 && name.as_str() != "0")
+            .map(|(name, idx)| (sanitize_const_suffix(name), *idx - 1))
+            .collect();
+        // Sort by index so emission order is deterministic (HashMap iteration
+        // order is randomized per-process).
+        v.sort_by_key(|(_, idx)| *idx);
+        dedupe_in_order(v)
+    };
+
+    let vsources_raw: Vec<(String, usize)> = mna
+        .voltage_sources
+        .iter()
+        .map(|vs| (sanitize_const_suffix(&vs.name), n_nodes + vs.ext_idx))
+        .collect();
+    let vsources = dedupe_in_order(vsources_raw);
+
+    let pots: Vec<(String, usize)> = {
+        let raw: Vec<(String, usize)> = mna
+            .pots
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (sanitize_const_suffix(&p.name), i))
+            .collect();
+        dedupe_in_order(raw)
+    };
+
+    NamedConstantsIR {
+        nodes: nodes_raw,
+        vsources,
+        pots,
+    }
+}
+
+#[cfg(test)]
+mod named_constants_tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_uppercase_alphanumeric() {
+        assert_eq!(sanitize_const_suffix("vin"), "VIN");
+        assert_eq!(sanitize_const_suffix("Vin"), "VIN");
+        assert_eq!(sanitize_const_suffix("out_1"), "OUT_1");
+    }
+
+    #[test]
+    fn sanitize_nonalphanumeric_to_underscore() {
+        assert_eq!(sanitize_const_suffix("n+1"), "N_1");
+        assert_eq!(sanitize_const_suffix("a.b"), "A_B");
+        assert_eq!(sanitize_const_suffix("x1-x2"), "X1_X2");
+    }
+
+    #[test]
+    fn sanitize_leading_digit_gets_underscore_prefix() {
+        assert_eq!(sanitize_const_suffix("12ax7"), "_12AX7");
+        assert_eq!(sanitize_const_suffix("3.3v"), "_3_3V");
+    }
+
+    #[test]
+    fn sanitize_empty_yields_underscore() {
+        assert_eq!(sanitize_const_suffix(""), "_");
+    }
+
+    #[test]
+    fn dedupe_in_order_suffixes_duplicates() {
+        let input = vec![
+            ("FOO".to_string(), 1),
+            ("BAR".to_string(), 2),
+            ("FOO".to_string(), 3),
+            ("FOO".to_string(), 4),
+            ("BAR".to_string(), 5),
+        ];
+        let out = dedupe_in_order(input);
+        assert_eq!(
+            out,
+            vec![
+                ("FOO".to_string(), 1),
+                ("BAR".to_string(), 2),
+                ("FOO_2".to_string(), 3),
+                ("FOO_3".to_string(), 4),
+                ("BAR_2".to_string(), 5),
+            ]
+        );
+    }
 }
 
 /// All matrices needed by the generated solver (flattened row-major).
@@ -2574,6 +2750,8 @@ impl CircuitIR {
             lu: None, // DK path doesn't use full LU
         };
 
+        let named_constants = build_named_constants(mna, topology.n_nodes);
+
         Ok(CircuitIR {
             metadata,
             topology,
@@ -2647,6 +2825,7 @@ impl CircuitIR {
                     Vec::new()
                 },
             },
+            named_constants,
         })
     }
 
@@ -3215,6 +3394,8 @@ impl CircuitIR {
             lu: lu_sparsity,
         };
 
+        let named_constants = build_named_constants(mna, topology.n_nodes);
+
         Ok(CircuitIR {
             metadata,
             topology,
@@ -3494,6 +3675,7 @@ impl CircuitIR {
                     Vec::new()
                 },
             },
+            named_constants,
         })
     }
 

@@ -46,6 +46,29 @@ pub(super) struct TransformerGroupTemplateData {
     pub(super) y_matrix: Vec<String>,
 }
 
+/// Named constant entry for Tera templates.
+///
+/// Used for `NODE_<name>`, `VSOURCE_<name>_RHS_ROW`, and `POT_<name>_INDEX`
+/// constants emitted by `constants.rs.tera`. Kept as a struct with named
+/// fields rather than a `(String, usize)` tuple because Tera's tuple-indexing
+/// syntax is fragile across versions.
+#[derive(Serialize)]
+pub(super) struct NamedConstEntry {
+    pub(super) name: String,
+    pub(super) value: usize,
+}
+
+/// Convert `NamedConstantsIR` lists into Tera template data.
+pub(super) fn named_const_entries(pairs: &[(String, usize)]) -> Vec<NamedConstEntry> {
+    pairs
+        .iter()
+        .map(|(n, v)| NamedConstEntry {
+            name: n.clone(),
+            value: *v,
+        })
+        .collect()
+}
+
 /// Switch component data passed to Tera templates.
 #[derive(Serialize)]
 pub(super) struct SwitchCompTemplateData {

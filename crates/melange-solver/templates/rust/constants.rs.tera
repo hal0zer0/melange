@@ -81,6 +81,21 @@ pub const N_I: [[f64; N]; M] = [
 pub const S_NI_DEFAULT: [[f64; M]; N] = [
 {% for row in s_ni_rows %}    [{{ row }}],
 {% endfor %}];
+{% if named_nodes | length > 0 or named_vsources | length > 0 or named_pots | length > 0 %}
+
+// -----------------------------------------------------------------------------
+// Named topology constants (Oomox plugin roadmap P2 + P3).
+//
+// Plugin code references these instead of hard-coding numeric indices that
+// shift when a netlist revision adds or reorders components.
+// -----------------------------------------------------------------------------
+{% if named_nodes | length > 0 %}
+{% for entry in named_nodes %}pub const NODE_{{ entry.name }}: usize = {{ entry.value }};
+{% endfor %}{% endif %}{% if named_vsources | length > 0 %}
+{% for entry in named_vsources %}pub const VSOURCE_{{ entry.name }}_RHS_ROW: usize = {{ entry.value }};
+{% endfor %}{% endif %}{% if named_pots | length > 0 %}
+{% for entry in named_pots %}pub const POT_{{ entry.name }}_INDEX: usize = {{ entry.value }};
+{% endfor %}{% endif %}{% endif %}
 {% if has_be_fallback %}
 
 /// S_be matrix: A_be^{-1} (backward Euler, at SAMPLE_RATE)

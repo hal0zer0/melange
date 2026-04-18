@@ -13,7 +13,7 @@ use super::RustEmitter;
 use super::helpers::{
     self_heating_device_data, device_param_template_data, fmt_f64, format_matrix_rows,
     inductor_template_data, coupled_inductor_template_data, transformer_group_template_data,
-    section_banner, emit_device_const, oversampling_info,
+    named_const_entries, section_banner, emit_device_const, oversampling_info,
     SwitchTemplateData, SwitchCompTemplateData,
 };
 
@@ -153,6 +153,22 @@ impl RustEmitter {
             &fmt_f64(ir.solver_config.input_resistance),
         );
         ctx.insert("has_dc_sources", &ir.has_dc_sources);
+
+        // Named topology constants (Oomox P2 + P3). Always inserted so the
+        // template can unconditionally reference `named_nodes`, `named_vsources`,
+        // `named_pots` — empty lists produce no emission.
+        ctx.insert(
+            "named_nodes",
+            &named_const_entries(&ir.named_constants.nodes),
+        );
+        ctx.insert(
+            "named_vsources",
+            &named_const_entries(&ir.named_constants.vsources),
+        );
+        ctx.insert(
+            "named_pots",
+            &named_const_entries(&ir.named_constants.pots),
+        );
 
         // G and C matrices (sample-rate independent)
         ctx.insert("g_rows", &format_matrix_rows(n, n, |i, j| ir.g(i, j)));
