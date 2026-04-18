@@ -145,6 +145,46 @@ Heuristic only — tightly-coupled RC networks where the slowest mode is
 orthogonal to every node's individual τ can still fool it. Eigen upgrade
 is deferred; the cheap per-node scan covers the common case.
 
+#### `recompute_dc_op()` (Phase E: P6)
+
+Opt-in runtime DC-OP solver that replaces the `WARMUP_SAMPLES_RECOMMENDED`
+silence loop above:
+
+```rust
+let mut state = CircuitState::default();
+state.pot_0_resistance = jittered_r;
+state.recompute_dc_op();   // ← jumps to new fixed point directly
+// plugin ready to process audio, no warmup needed
+```
+
+Emitted only when `--emit-dc-op-recompute` is passed to `melange compile`
+(default OFF). Implementation is a specialization of
+`crates/melange-solver/src/dc_op.rs` baked at codegen time: N, M, device
+slots, pot→row mapping, per-device stamps all unrolled into the generated
+module. Not audio-thread safe (hundreds of microseconds per call — call
+from init or parameter-change callbacks).
+
+**DK path**: full runtime NR with LU solve + flat damping + convergence.
+Converges to `DC_OP` bitwise for inductor-free circuits; inductor-bearing
+circuits converge to the `process_sample(0.0)` steady state instead
+(companion-shunt equilibrium differs from `dc_op.rs`'s inductor-short
+equilibrium — see `docs/aidocs/DC_OP.md`).
+
+**Nodal full-LU path**: currently ships a stub that bumps
+`diag_nr_max_iter_count` and returns without touching state. The surface
+matches the DK path so plugin host code doesn't need a solver-path branch;
+plugins on the nodal route should watch the counter and fall back to the
+warmup-silence loop. The full nodal body is tracked as Phase E.8.2 → E.8.5.
+
+State touched by the DK-path method (mirror of `reset()` but preserving
+noise RNG, pot/switch values, device runtime params, and diag counters):
+`dc_operating_point`, `v_prev`, `input_prev`, `i_nl_prev`/`i_nl_prev_prev`,
+`dc_block_x_prev` (seeded at new DC output, not 0),
+`pot_N_resistance_prev` (synced to `pot_N_resistance`),
+oversampler taps zeroed, inductor / coupled-inductor / transformer history
+zeroed. See `docs/aidocs/DC_OP.md` "Runtime DC OP recompute" for the full
+contract and derivation.
+
 ### State (Runtime, Per-Channel)
 ```rust
 struct CircuitState {

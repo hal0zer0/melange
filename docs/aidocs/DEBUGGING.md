@@ -542,6 +542,104 @@ hit this — no known circuit triggers both conditions simultaneously.
 - Iterative refinement in the chord back-solve (one extra O(N²) pass)
 - Schur-complement-within-full-LU hybrid (M-dim correction inside N-dim NR)
 
+## Codegen Emission Footguns
+
+Rules for writing code that emits Rust. Surfaced across Phase E.5 of the
+Oomox DC-OP recompute work — none are solver bugs, but all of them either
+produce code that fails `rustc` or produce code that silently disagrees
+with the compile-time solver and makes tests hunt the wrong ghost.
+
+### 1. `format!("{x}")` on an `f64` const emits integer literals
+
+`const DAMP_THRESHOLD: f64 = 10.0;` formatted via `format!("{DAMP_THRESHOLD}")`
+writes the literal `10` into the generated source — no trailing `.0`,
+because Rust's `Display` for `f64` drops the trailing zero on round
+values. If the emitted line puts that literal next to an `f64` local,
+`rustc` rejects it (`expected f64, found integer`).
+
+```rust
+// Wrong — emits "if max_delta > 10 { ... }" which fails to typecheck.
+format!("if max_delta > {DAMP_THRESHOLD} {{ ... }}")
+
+// Right — emits "if max_delta > 10.0_f64 { ... }".
+format!("if max_delta > {DAMP_THRESHOLD:.1}_f64 {{ ... }}")
+```
+
+Always emit explicit suffixes (`_f64`) when using `f64` consts inside
+emitted code — it's cheap, unambiguous, and survives `{x}` vs `{x:?}`
+formatter choice changes. The `fmt_f64` helper already does this for
+matrix entries; extend the same habit to thresholds and clamp limits.
+
+### 2. Test helper unconditionally stamps `mna.g[0][0] += 1.0`
+
+`tests/dc_op_recompute_tests.rs::generate_dk` (and similar helpers
+elsewhere) unconditionally stamp 1 S of input conductance at node 0
+before building the kernel — the convention is "input signal arrives
+at node 0 through a 1 Ω Thevenin source." The codegen config also
+passes `input_resistance: 1.0` with `input_node: 0`, so the compile-
+time DC OP stamps `g_dc[0][0] += 1/R_in = 1.0` a **second** time on
+its own working copy.
+
+When a test netlist accidentally puts a VCC-bearing node at MNA index 0
+(i.e. the first non-ground node to appear in the netlist is also the
+supply rail), the compile-time DC OP sees 2 S of shunt to ground at
+that node while the runtime NR's baked `G` matrix sees only 1 S. On
+simple resistive networks the error shows up as a **2× discrepancy on
+the VS branch-current variable** (the VCC aug row), while node
+voltages themselves can still look plausible. Symptom: runtime
+`recompute_dc_op` converges to values that differ from the baked
+`DC_OP` constant by a factor of 2 at the augmented row (and by the
+same ratio through every node KCL that touches the rail).
+
+**Fix**: declare an isolated signal-side resistor first in the test
+netlist so node 0 is always a benign input, not a power-supply node:
+
+```spice
+* Good — node 0 = "in", VCC at node ≥ 1. Single input-conductance stamp.
+R_in_load in 0 10k
+VCC vcc 0 5.0
+R1 vcc mid 1k
+...
+
+* Bad — VCC is the first element, so mna.node_map("vcc") = 0.
+* Test helper stamps g[0][0] += 1 at VCC node; codegen DC OP stamps
+* again via input_resistance. Runtime NR converges to half the
+* baked DC_OP on the VS branch current.
+VCC vcc 0 5.0
+R1 vcc mid 1k
+...
+```
+
+Not a bug in the emitter, but a test-writing contract: *any* helper
+that force-stamps input conductance assumes node 0 is the signal input.
+
+### 3. `RHS_CONST` node rows are trapezoidally doubled; VS aug rows are not
+
+`dk::build_rhs_const` multiplies current-source injections in node
+rows `[0..n)` by 2 (trapezoidal averaging of the continuous-time
+source over one sample), while VS / VCVS / ideal-transformer aug
+rows (`[n_nodes..n_aug)`) are left at their algebraic DC value
+(KVL has no time averaging). When reusing `RHS_CONST` to derive a
+**DC fixed-point RHS**:
+
+```rust
+let mut b_dc = RHS_CONST;
+for i in 0..N_NODES { b_dc[i] *= 0.5; }  // halve node rows only
+// b_dc[n_nodes..] untouched
+```
+
+Substituting `v_{n+1} = v_n = v_dc` into the trapezoidal per-sample
+equation collapses the node-row factor of 2 (`A - A_neg = 2·G` on
+node rows), while VS aug rows stay algebraic (`A - A_neg = G`,
+`A_neg` is explicitly zeroed on algebraic rows by
+`MnaSystem::get_a_neg_matrix`, so the row-wise identity cancels
+back to `G`). **Halving the VS rows too** gives `v_plus - v_minus =
+V_dc / 2` — hits convergence silently, sounds wrong later.
+
+Same rule applies to current-source injections from `.runtime`
+voltage-source fields: they write to a VS aug row, so they get
+added to `b_dc` **without** halving.
+
 ## Historical Failure Signatures
 
 Catalog of previously-diagnosed failure modes. Commit hashes link to the fix;
@@ -572,6 +670,9 @@ a "have we seen this before?" lookup before starting a new debugging session.
 | DC OP basin trap: precision-rectifier op-amp railed at −VSAT with clamp diode at 11 V forward bias even after AOL cap | Multi-equilibrium: correct basin + pathological basin both self-consistent. Homotopy-path problem, not cap-magnitude | FIXED 2026-04-17 (commit `b771512`). AOL continuation alone did not converge (physical basin at AOL=1 is v_out ≈ −6.3 V, not the VEE seed). Actual fix is post-fallback refinement NR: `seed_sr_feedback_diodes` clamps feedback-diode terminals to `v_out ± 0.65 V`, then direct NR in `aol_cont_mode` runs from the synthesized state and converges in 411 iters. Gated on `has_sidechain_rectifier`. See "Precision Rectifier DC OP Convergence" above |
 | Transient chord-NR false convergence on DC-railed op-amp: `v[n_out] = ±VSAT` every sample, forward-biased feedback diode drawing 10+ A, sub-Hz drift into exponential blow-up at d ≥ 0.9 s (amp 0.1) / d ≥ 3.3 s (amp 0.01) | Strict-inequality `active_set_engaged` check doesn't count clamped-to-rail as engaged; BE fallback and active-set resolve never fire; residual leaks through `A_neg·v_prev` / `N_I·i_nl_prev` | PARTIAL FIX 2026-04-17 (commit `c3d3eae`): residual check in `nodal_emitter.rs` extended from `BoyleDiodes` to `BoyleDiodes \| ActiveSetBe \| ActiveSet`. After damped NR step, re-evaluate `i_nl_fresh` and force `max_step_exceeded = true` on >1e-3 relative mismatch. Gets d ≤ 2 s stable at all amps with zero NR/BE events. **d = 5 s still diverges on the original netlist (82,899 NR max-iter hits)** — closed only when combined with netlist-side `.model OA_TL074 VSAT=11 → 13.5` fix (uncommitted in melange-circuits as of 2026-04-17). See "ActiveSetBe Chord-NR False Convergence" above and `memory/project_4kbuscomp_chord_false_convergence.md` for candidate next steps (tighter residual tol, adaptive refactor, KCL-consistent active-set resolve, every-iter refactor on rail engagement) |
 | `.switch` resistor off by (1/static − 1/pos_0) on every switch change, `set_switch_N(0)` silent no-op at init | Initial `switch_position = 0` but G stamped at static netlist value, not pos-0. `rebuild_matrices` computes delta against static; set_switch_N(0) short-circuits when already at 0 | `MnaSystem::switch_default_overrides` stamps G/C/L at pos-0 (canonical baseline). `SwitchComponentInfo.nominal_value` stores pos-0 so codegen delta baseline matches. `log::info!` when static ≠ pos-0 (FIXED 2026-04-17 commit `586c2a8`) |
+| Generated Rust fails to compile at `if max_delta > 10 {` / `delta.clamp(-50, 50)` | `format!("{DAMP_THRESHOLD}")` on a `const f64 = 10.0` emits literal `10` (no trailing `.0`) | Use explicit suffix: `format!("{DAMP_THRESHOLD:.1}_f64")`. See "Codegen Emission Footguns" above (Phase E.5 commit `6322bf7`) |
+| Runtime `recompute_dc_op` converges to half the baked `DC_OP` on the VS branch-current variable | Test netlist puts a VCC node at MNA index 0; test helper stamps 1 S input conductance there; compile-time DC OP stamps a second 1 S via `config.input_resistance` | Put an isolated signal-side resistor first in the test netlist so node 0 is a benign input. See "Codegen Emission Footguns #2" above (Phase E.5 commit `6322bf7`) |
+| Runtime DC OP VS row converges to `V_dc / 2` (or node row converges to 2× the compile-time value) | Built DC RHS by copying `RHS_CONST` verbatim, or by halving every row uniformly | Halve ONLY node rows `[0..n_nodes)`; VS / VCVS / ideal-xfmr aug rows `[n_nodes..n_aug)` and inductor branch rows `[n_aug..N)` are preserved. See "Codegen Emission Footguns #3" above (Phase E.5 commit `6322bf7`) |
 
 ## References
 - TU Delft Analog Electronics Webbook: MNA stamps

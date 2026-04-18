@@ -280,3 +280,99 @@ V(coll) ≈ 1.73V  (12 - 1.51e-3 * 6800)
 | PNP BJT wrong polarity | Missing sign parameter | Check `is_pnp` flag in DeviceParams |
 | V_node all zeros | Input conductance not stamped | Check `config.input_resistance > 0` |
 | BJT oscillation in transient | Mixed integration mismatch | Fixed: DK now uses trapezoidal for nonlinear currents |
+
+## Runtime DC OP Recompute (Oomox P6, Phase E)
+
+The compile-time DC OP baked into the generated code (`DC_OP` / `DC_NL_I`
+constants) is computed at **nominal** pot/switch values. Plugins that apply
+per-instance jitter (e.g. SeriesOfTubes' 50 tube stages each with ±5% on
+Rk/Ra/Rcv, or preset recall that moves a pot by 40% from its codegen
+default) therefore start `CircuitState::default()` at the *wrong* fixed
+point. Without intervention the solver has to silence-warm for `5 · τ_max`
+to drift into the jittered equilibrium — seconds of silent output for
+circuits with large coupling caps.
+
+Phase E adds an opt-in runtime DC-OP recompute so plugins can jump to the
+jittered equilibrium in tens of microseconds instead:
+
+```rust
+let mut state = CircuitState::default();
+state.pot_0_resistance = jittered_rk;
+state.pot_1_resistance = jittered_ra;
+state.recompute_dc_op();   // ← jumps to new fixed point
+// plugin ready to process — no warmup loop needed
+```
+
+Enabled by the `--emit-dc-op-recompute` CLI flag (default OFF) or
+`CodegenConfig::emit_dc_op_recompute = true` at the API level. **Not
+audio-thread safe** — intended for plugin init / parameter-change callbacks.
+
+### Method contract
+
+| State field | After `recompute_dc_op()` |
+|---|---|
+| `dc_operating_point` | Converged node voltages at current pot/switch values |
+| `v_prev` | Same — next sample starts at equilibrium |
+| `i_nl_prev`, `i_nl_prev_prev` | Converged per-device current vector |
+| `input_prev` | `0.0` (new equilibrium assumes zero input history) |
+| `dc_block_x_prev[k]` | `v_node[OUTPUT_NODES[k]]` — seeds IIR at steady state |
+| `dc_block_y_prev` | `[0.0; NUM_OUTPUTS]` — DC blocker's fixed point |
+| `pot_N_resistance_prev` | `pot_N_resistance` — no phantom A_neg delta |
+| `os_up_state`, `os_dn_state` (+ `_outer`) | Zeroed — stale DC trajectory discarded |
+| `ind_*_prev`, `ci_*_prev`, `xfmr_*_prev`, `*_i_hist` | Zeroed (DK MVP companion-shunt equilibrium has `V_L = I_L = 0`) |
+| `noise_rng_state` | **Preserved** — resetting would repeat the same noise after every param change |
+| `pot_N_resistance`, `switch_N_position` | **Preserved** — they're the INPUT to this solve |
+| `device_N_*` runtime params, `device_N_tj` | **Preserved** |
+| `diag_*` counters | **Preserved** (caller may be watching) |
+
+### DC fixed-point algebra
+
+The transient NR step at a converged sample is
+`A · v_{n+1} = RHS + A_neg · v_n + N_i · i_nl + input`. Substituting
+steady state (`v_{n+1} = v_n = v_dc`, `input = 0`, `i_nl_prev = i_nl_dc`)
+and using `A - A_neg = 2·G` on node rows / `A - A_neg = G` on VS/VCVS
+algebraic rows gives the DC fixed point:
+
+```
+2·G · v_dc = RHS_CONST + 2·N_i · i_nl_dc          (node rows)
+  G · v_dc = RHS_CONST                             (VS/VCVS rows)
+```
+
+The runtime solver halves the node rows of `RHS_CONST` (folding the
+trapezoidal current doubling back into the DC source value), preserves
+VS/VCVS rows, adds `.runtime` voltage-source fields, then Newton-iterates
+`G_aug_nr = g_aug − N_i · J_dev · N_v`,
+`rhs_nr = b_dc + N_i · (i_nl − J_dev · v_nl)`,
+`v_new = G_aug_nr⁻¹ · rhs_nr` to convergence (1e-9 step tolerance).
+
+### MVP limitations
+
+- **Direct NR only** — no source / Gmin stepping. The warm-start from
+  `v_prev` (a physically valid prior equilibrium) makes this sufficient
+  for small-to-moderate jitter. On failure the method bumps
+  `diag_nr_max_iter_count` and returns without updating state, so the
+  caller can fall back to the `WARMUP_SAMPLES_RECOMMENDED` silence loop.
+- **No basin-trap handling** — precision-rectifier topologies that rely
+  on the compile-time solver's `seed_sr_feedback_diodes` refinement
+  stay on the warmup loop.
+- **No parasitic-BJT internal-node expansion on the DK path** (those
+  nodes are ill-conditioning risks outside the MVP).
+- **Inductor-bearing circuits converge to `process_sample(0.0)`
+  equilibrium**, not the inductor-short DC OP that `dc_op.rs` would
+  compute. Inductor-free circuits match compile-time `DC_OP` bitwise.
+  The delta is the companion shunt `g_eq = T/(2L)` that's already baked
+  into `G`.
+- **Nodal full-LU path** (pultec, 4kbuscomp, VCR ALC) currently ships a
+  stub body that bumps `diag_nr_max_iter_count` and returns. The full
+  nodal NR solve is tracked as Phase E.8.2 → E.8.5; until it lands,
+  plugins on the nodal path observe the counter tick and stay on the
+  warmup loop. The method surface itself is uniform across DK and nodal
+  so host code doesn't need a solver-path branch.
+
+### Real-time safety
+
+`recompute_dc_op` runs a full NR loop (LU factorization + back-solve +
+device evaluation, potentially hundreds of iterations). Expected cost
+is tens to hundreds of microseconds — hundreds of times an audio
+sample period. Call it from plugin initialization or
+parameter-change callbacks, never from `process_sample`.
