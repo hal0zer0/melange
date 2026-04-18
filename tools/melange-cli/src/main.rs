@@ -2681,6 +2681,16 @@ fn analyze_freq_response(
 
     // Apply pot overrides: modify element values in netlist before building MNA.
     // Also apply .pot defaults for any pot NOT overridden (so analyze uses "flat" defaults).
+    //
+    // Name resolution for each --pot SPEC:
+    //   1. Try .wiper labels first. A wiper has two legs (cw/ccw) that co-vary with
+    //      a position in 0.0..=1.0; the value is interpreted as a position, and
+    //      both legs are set accordingly.
+    //   2. Fall back to .pot (by label or resistor name). Value is a resistance in
+    //      ohms (accepts engineering suffixes, e.g. "200k").
+    //
+    // Minimum leg resistance (MIN_LEG_R) must track the constant in parser::expand_wipers.
+    const WIPER_MIN_LEG_R: f64 = 10.0;
     {
         let mut overridden_resistors: std::collections::HashSet<String> =
             std::collections::HashSet::new();
@@ -2690,6 +2700,73 @@ fn analyze_freq_response(
             let (name, val_str) = spec.split_once('=').ok_or_else(|| {
                 anyhow::anyhow!("Invalid --pot format '{}', expected NAME=VALUE", spec)
             })?;
+
+            // Try wiper label first (the label on `.wiper` lives on the directive, not
+            // on the expanded PotDirective entries — those have label:None).
+            let wiper_match = netlist.wipers.iter().find(|w| {
+                w.label
+                    .as_deref()
+                    .map(|l| l.eq_ignore_ascii_case(name))
+                    .unwrap_or(false)
+            });
+
+            if let Some(wiper) = wiper_match {
+                // Wiper: interpret value as position 0.0..=1.0
+                let pos = val_str.parse::<f64>().map_err(|_| {
+                    anyhow::anyhow!(
+                        "Invalid wiper position '{}' in --pot {} (expected 0.0..=1.0)",
+                        val_str, spec
+                    )
+                })?;
+                if !pos.is_finite() || !(0.0..=1.0).contains(&pos) {
+                    anyhow::bail!(
+                        "Wiper position must be in 0.0..=1.0: {} (got {})",
+                        spec, pos
+                    );
+                }
+                let r_total = wiper.total_resistance;
+                let range = r_total - 2.0 * WIPER_MIN_LEG_R;
+                // Matches parser::expand_wipers and plugin_template wiper_assignments.
+                let r_cw = (1.0 - pos) * range + WIPER_MIN_LEG_R;
+                let r_ccw = pos * range + WIPER_MIN_LEG_R;
+                let cw_name = wiper.resistor_cw.clone();
+                let ccw_name = wiper.resistor_ccw.clone();
+
+                for (resistor_name, r_val) in [(&cw_name, r_cw), (&ccw_name, r_ccw)] {
+                    let found = netlist.elements.iter_mut().any(|e| {
+                        if let melange_solver::parser::Element::Resistor {
+                            name: n, value: v, ..
+                        } = e
+                        {
+                            if n.eq_ignore_ascii_case(resistor_name) {
+                                *v = r_val;
+                                return true;
+                            }
+                        }
+                        false
+                    });
+                    if !found {
+                        anyhow::bail!(
+                            "Wiper resistor '{}' not found in netlist",
+                            resistor_name
+                        );
+                    }
+                    for p in netlist.pots.iter_mut() {
+                        if p.resistor_name.eq_ignore_ascii_case(resistor_name) {
+                            p.default_value = Some(r_val);
+                            break;
+                        }
+                    }
+                    overridden_resistors.insert(resistor_name.to_ascii_uppercase());
+                }
+                eprintln!(
+                    "  Wiper override: {} pos={:.3} ({} = {:.1}Ω, {} = {:.1}Ω)",
+                    name, pos, cw_name, r_cw, ccw_name, r_ccw,
+                );
+                continue;
+            }
+
+            // Pot: interpret value as a resistance in ohms
             let value = melange_solver::parser::parse_value(val_str).map_err(|_| {
                 anyhow::anyhow!("Invalid resistance value '{}' in --pot {}", val_str, spec)
             })?;
@@ -2710,7 +2787,7 @@ fn analyze_freq_response(
                 })
                 .map(|p| p.resistor_name.clone())
                 .ok_or_else(|| {
-                    let available: Vec<String> = netlist
+                    let mut available: Vec<String> = netlist
                         .pots
                         .iter()
                         .map(|p| {
@@ -2721,6 +2798,11 @@ fn analyze_freq_response(
                             )
                         })
                         .collect();
+                    for w in &netlist.wipers {
+                        if let Some(label) = &w.label {
+                            available.push(format!("[wiper] {} (pos 0.0..=1.0)", label));
+                        }
+                    }
                     anyhow::anyhow!(
                         "Pot '{}' not found. Available: {}",
                         name,

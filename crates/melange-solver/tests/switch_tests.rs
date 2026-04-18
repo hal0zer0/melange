@@ -274,6 +274,89 @@ C1 out 0 100n
 }
 
 #[test]
+fn test_switch_resistor_pos0_override_in_g() {
+    // Regression: when a .switch claims a resistor and the static netlist value
+    // differs from the switch's position-0 value, G must be stamped at pos-0 (not
+    // the static value). Otherwise set_switch_N(0) is a no-op at init, nobody ever
+    // applies the delta, and every subsequent switch change stamps a delta off by
+    // (1/static - 1/pos_0). See periodic-pedal.cir "Crystal" switch on R_gain.
+    let spice = "\
+Switch Init Mismatch Test
+R_gain a 0 10k
+C1 a 0 1n
+.switch R_gain 43k 10k 1k
+";
+    let netlist = Netlist::parse(spice).expect("parse failed");
+    let mna = MnaSystem::from_netlist(&netlist).expect("MNA failed");
+    // nominal_value in SwitchComponentInfo must be pos-0 (the stamped baseline),
+    // because codegen computes delta = 1/new_val - 1/nominal. If they don't match,
+    // the first set_switch stamp lands off-by-(1/static - 1/pos_0).
+    assert!(
+        (mna.switches[0].components[0].nominal_value - 43e3).abs() < 1e-9,
+        "nominal_value should be pos-0 (43k), got {}",
+        mna.switches[0].components[0].nominal_value
+    );
+    // G[0][0] (self-conductance at node a) should be 1/43k (pos-0), not 1/10k (static).
+    // Node `a` maps to MNA index 0 (1-indexed → 0-indexed).
+    let node_a = mna.node_map["a"] - 1;
+    let expected = 1.0 / 43e3;
+    assert!(
+        (mna.g[node_a][node_a] - expected).abs() < expected * 1e-9,
+        "G[a][a] should be 1/43k = {:.6e} (pos-0), got {:.6e}",
+        expected,
+        mna.g[node_a][node_a]
+    );
+    // switch_default_overrides must carry the pos-0 entry so downstream consumers
+    // (inductor value propagation, coupled-inductor refs) can see it.
+    let (kind, pos_0) = mna.switch_default_overrides["R_GAIN"];
+    assert_eq!(kind, 'R');
+    assert!((pos_0 - 43e3).abs() < 1e-9);
+}
+
+#[test]
+fn test_switch_capacitor_pos0_override_in_c() {
+    // Same regression for capacitors in a tone switch with declaration ≠ pos-0.
+    let spice = "\
+Switch Cap Init Test
+R1 in a 1k
+C_tone a 0 100n
+.switch C_tone 47n 100n 220n
+";
+    let netlist = Netlist::parse(spice).expect("parse failed");
+    let mna = MnaSystem::from_netlist(&netlist).expect("MNA failed");
+    assert!(
+        (mna.switches[0].components[0].nominal_value - 47e-9).abs() < 1e-18,
+        "nominal_value should be pos-0 (47n)"
+    );
+    let node_a = mna.node_map["a"] - 1;
+    assert!(
+        (mna.c[node_a][node_a] - 47e-9).abs() < 1e-18,
+        "C[a][a] should be 47n (pos-0), got {:.6e}",
+        mna.c[node_a][node_a]
+    );
+}
+
+#[test]
+fn test_switch_inductor_pos0_override() {
+    // Uncoupled inductor in a .switch: self.inductors value must also track pos-0
+    // so the augmented MNA (c_nod[k][k] = ind.value) stays consistent with G/C.
+    let spice = "\
+Switch Inductor Init Test
+R1 in a 1k
+L_tone a 0 500m
+.switch L_tone 5m 50m 200m 500m
+";
+    let netlist = Netlist::parse(spice).expect("parse failed");
+    let mna = MnaSystem::from_netlist(&netlist).expect("MNA failed");
+    let ind = mna.inductors.iter().find(|i| i.name.eq_ignore_ascii_case("L_tone")).expect("L_tone");
+    assert!(
+        (ind.value - 5e-3).abs() < 1e-12,
+        "L_tone value should be pos-0 (5m), got {}",
+        ind.value
+    );
+}
+
+#[test]
 fn test_mna_ganged_switch_resolution() {
     let spice = "\
 MNA Ganged Test

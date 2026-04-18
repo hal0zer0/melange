@@ -92,6 +92,12 @@ pub struct MnaSystem {
     /// When a .pot has a default value, the G matrix is stamped at this value
     /// (not the component declaration value). Empty for circuits without .pot defaults.
     pub pot_default_overrides: HashMap<String, f64>,
+    /// Switch initial-position overrides: component name (uppercase) → (type, pos-0 value).
+    /// When a component appears in a `.switch` directive, the G/C matrix is stamped at
+    /// the switch's position-0 value (not the component declaration value). The initial
+    /// switch_position is always 0, so stamping pos-0 keeps the initial state
+    /// self-consistent. Empty when no `.switch` directives are present.
+    pub switch_default_overrides: HashMap<String, (char, f64)>,
     /// Wiper potentiometer groups (links two pots as complementary legs).
     pub wiper_groups: Vec<WiperGroupInfo>,
     /// Gang groups (links multiple pots/wipers under one parameter).
@@ -626,6 +632,7 @@ impl MnaSystem {
             linearized_bjts: Vec::new(),
             linearized_triodes: Vec::new(),
             pot_default_overrides: HashMap::new(),
+            switch_default_overrides: HashMap::new(),
             wiper_groups: Vec::new(),
             gang_groups: Vec::new(),
         }
@@ -2503,14 +2510,25 @@ impl MnaBuilder {
             });
         }
 
-        // Resolve switch directives
+        // Resolve switch directives.
+        //
+        // The initial state of a switch is always position 0, so G/C/L are stamped
+        // at the position-0 value (the "canonical baseline") rather than the static
+        // netlist declaration. This keeps the initial state self-consistent: the
+        // default matrices reflect the default position, and `set_switch_N(non-zero)`
+        // applies the correct incremental delta from the pos-0 baseline.
+        //
+        // Circuit authors who write `R_gain oa_neg 0 10k` but then list `43k 10k ...`
+        // as the switch positions no longer need the declaration to match pos-0 — we
+        // log a note so the mismatch is visible, but the simulation behaves correctly.
         for sw_dir in &netlist.switches {
             let mut components = Vec::new();
-            for comp_name in &sw_dir.component_names {
+            for (ci, comp_name) in sw_dir.component_names.iter().enumerate() {
                 // For expanded subcircuit names like "X1.C1", use base name after last dot
                 let base = comp_name.rsplit('.').next().unwrap_or(comp_name);
                 let first_char = base.chars().next().unwrap_or(' ').to_ascii_uppercase();
-                let (node_p, node_q, nominal_value) = match first_char {
+                let pos_0 = sw_dir.positions[0][ci];
+                let (node_p, node_q, static_value) = match first_char {
                     'R' => {
                         let elem = netlist.elements.iter().find(|e| {
                             matches!(e, Element::Resistor { name, .. } if name.eq_ignore_ascii_case(comp_name))
@@ -2575,18 +2593,41 @@ impl MnaBuilder {
                         )));
                     }
                 };
+                if (static_value - pos_0).abs() > static_value.abs() * 1e-12 {
+                    log::info!(
+                        ".switch {}: component '{}' declared at {:.6e} but pos-0 is {:.6e}; \
+                         stamping pos-0 as the initial value",
+                        comp_name, comp_name, static_value, pos_0,
+                    );
+                }
+                mna.switch_default_overrides
+                    .insert(comp_name.to_ascii_uppercase(), (first_char, pos_0));
                 components.push(SwitchComponentInfo {
                     name: comp_name.clone(),
                     component_type: first_char,
                     node_p,
                     node_q,
-                    nominal_value,
+                    nominal_value: pos_0,
                 });
             }
             mna.switches.push(SwitchInfo {
                 components,
                 positions: sw_dir.positions.clone(),
             });
+        }
+
+        // Apply switch pos-0 overrides to already-collected uncoupled inductor values.
+        // `self.inductors` was populated during `categorize_element` (before switch
+        // resolution), so its `value` field still holds the static netlist declaration.
+        // `build_augmented_matrices` and the DK companion model read this directly, so
+        // we normalize it here to keep the augmented MNA consistent with G/C.
+        for ind in &mut self.inductors {
+            if let Some((_, pos_0)) = mna
+                .switch_default_overrides
+                .get(&ind.name.to_ascii_uppercase())
+            {
+                ind.value = *pos_0;
+            }
         }
 
         // Resolve coupling (K) directives: group inductors into transformer groups.
@@ -2616,11 +2657,20 @@ impl MnaBuilder {
                         matches!(e, Element::Inductor { name, .. } if name.eq_ignore_ascii_case(ind_name))
                     })
                 {
+                    // Apply switch pos-0 override so coupled-inductor paths
+                    // (CoupledInductorInfo, TransformerGroupInfo, ideal-transformer
+                    // decomposition) use the same initial L as the augmented C matrix.
+                    let effective_value = mna
+                        .switch_default_overrides
+                        .get(&name.to_ascii_uppercase())
+                        .filter(|(kind, _)| *kind == 'L')
+                        .map(|(_, v)| *v)
+                        .unwrap_or(*value);
                     inductor_refs.insert(lower, InductorRef {
                         name: name.clone(),
                         node_i: self.node_map[n_plus],
                         node_j: self.node_map[n_minus],
-                        value: *value,
+                        value: effective_value,
                         isat: *isat,
                     });
                 }
@@ -3148,12 +3198,17 @@ impl MnaBuilder {
             match elem.element_type {
                 ElementType::Resistor => {
                     if elem.nodes.len() >= 2 && elem.value != 0.0 {
-                        // Use pot default override if available (stamps G at the pot's
-                        // default position rather than the component declaration value)
+                        // Override priority: switch pos-0 > pot default > static value.
+                        // Switch wins because a component can only be in one .switch and
+                        // pos-0 defines the canonical initial stamp. Pots and switches
+                        // on the same resistor are nonsensical; switch takes precedence.
+                        let key = elem.name.to_ascii_uppercase();
                         let r = mna
-                            .pot_default_overrides
-                            .get(&elem.name.to_ascii_uppercase())
-                            .copied()
+                            .switch_default_overrides
+                            .get(&key)
+                            .filter(|(kind, _)| *kind == 'R')
+                            .map(|(_, v)| *v)
+                            .or_else(|| mna.pot_default_overrides.get(&key).copied())
                             .unwrap_or(elem.value);
                         let g = 1.0 / r;
                         stamp_conductance_to_ground(&mut mna.g, elem.nodes[0], elem.nodes[1], g);
@@ -3161,11 +3216,18 @@ impl MnaBuilder {
                 }
                 ElementType::Capacitor => {
                     if elem.nodes.len() >= 2 {
+                        // Switch pos-0 override for switched capacitors (e.g. tone-switch caps)
+                        let c_val = mna
+                            .switch_default_overrides
+                            .get(&elem.name.to_ascii_uppercase())
+                            .filter(|(kind, _)| *kind == 'C')
+                            .map(|(_, v)| *v)
+                            .unwrap_or(elem.value);
                         stamp_conductance_to_ground(
                             &mut mna.c,
                             elem.nodes[0],
                             elem.nodes[1],
-                            elem.value,
+                            c_val,
                         );
                     }
                 }

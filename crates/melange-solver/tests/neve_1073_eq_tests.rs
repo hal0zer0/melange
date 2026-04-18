@@ -182,13 +182,17 @@ R_hterm out 0 5.1K
 }
 
 /// HPF compiles through codegen and produces highpass rolloff.
-/// At default position (3H, 220nF = ~110 Hz cutoff):
+/// Select position 2 (3H, 220nF = ~110 Hz cutoff) explicitly:
 /// - 1 kHz should pass (near 0 dB attenuation)
 /// - 30 Hz should be heavily attenuated (>20 dB below 1 kHz)
+///
+/// Position 0 is the true initial state (10H, 1µF, ~50 Hz cutoff) now that
+/// switch-controlled components are stamped at the pos-0 baseline. This test
+/// specifically exercises the pos-2 frequency response described in the comment.
 #[test]
 fn test_neve_1073_hpf_rolloff() {
     let code = codegen_from_spice(hpf_spice(), 600.0);
-    let main_code = make_freq_main(&[30.0, 100.0, 1000.0, 5000.0], 0.01, &[]);
+    let main_code = make_freq_main(&[30.0, 100.0, 1000.0, 5000.0], 0.01, &["state.set_switch_0(2);"]);
     let output = compile_and_run(&code, &main_code, "hpf_rolloff");
 
     let g30 = parse_kv(&output, "freq_30=");
