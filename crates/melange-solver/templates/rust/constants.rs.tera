@@ -36,6 +36,16 @@ pub const OUTPUT_NODES: [usize; NUM_OUTPUTS] = [{{ output_nodes_values }}];
 /// Input resistance (Thevenin equivalent)
 pub const INPUT_RESISTANCE: f64 = {{ input_resistance }};
 
+/// Recommended silent-warmup sample count (≥1).
+///
+/// Computed from the slowest node RC time constant in the circuit at the
+/// internal sample rate: `ceil(5 · τ_max · SAMPLE_RATE · OVERSAMPLING_FACTOR)`,
+/// which covers 99.3% of the final settled response. Plugins applying
+/// per-instance pot/switch jitter to CircuitState before audio starts
+/// should loop `process_sample(0.0, &mut state)` this many times to reach
+/// the jittered equilibrium. See Oomox plugin roadmap P5.
+pub const WARMUP_SAMPLES_RECOMMENDED: usize = {{ warmup_samples_recommended }};
+
 /// G matrix: conductance matrix (sample-rate independent)
 /// Includes input conductance and voltage source Norton equivalents.
 const G: [[f64; N]; N] = [

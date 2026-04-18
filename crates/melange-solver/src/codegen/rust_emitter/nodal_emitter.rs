@@ -10,7 +10,7 @@ use crate::codegen::CodegenError;
 use super::RustEmitter;
 use super::helpers::{
     fmt_f64, format_matrix_rows, section_banner, oversampling_info,
-    pentode_dispatch, emit_pentode_nr_dk_stamp,
+    pentode_dispatch, emit_pentode_nr_dk_stamp, recommended_warmup_samples,
     self_heating_device_data, device_param_template_data,
 };
 use super::nr_helpers::{
@@ -402,6 +402,16 @@ impl RustEmitter {
         code.push_str(&format!(
             "/// Input resistance (Thevenin equivalent)\npub const INPUT_RESISTANCE: f64 = {};\n\n",
             fmt_f64(ir.solver_config.input_resistance)
+        ));
+
+        // WARMUP_SAMPLES_RECOMMENDED (Oomox P5) — see constants.rs.tera doc.
+        code.push_str(
+            "/// Recommended silent-warmup sample count (5τ_max at internal rate, ≥1).\n\
+             /// See Oomox plugin roadmap P5.\n",
+        );
+        code.push_str(&format!(
+            "pub const WARMUP_SAMPLES_RECOMMENDED: usize = {};\n\n",
+            recommended_warmup_samples(ir)
         ));
 
         // IIR op-amp constants (per-op-amp with GBW dominant pole)

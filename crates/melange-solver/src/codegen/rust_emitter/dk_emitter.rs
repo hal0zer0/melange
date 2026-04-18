@@ -13,8 +13,8 @@ use super::RustEmitter;
 use super::helpers::{
     self_heating_device_data, device_param_template_data, fmt_f64, format_matrix_rows,
     inductor_template_data, coupled_inductor_template_data, transformer_group_template_data,
-    named_const_entries, section_banner, emit_device_const, oversampling_info,
-    SwitchTemplateData, SwitchCompTemplateData,
+    named_const_entries, recommended_warmup_samples, section_banner, emit_device_const,
+    oversampling_info, SwitchTemplateData, SwitchCompTemplateData,
 };
 
 impl RustEmitter {
@@ -174,6 +174,11 @@ impl RustEmitter {
         // (possibly empty) so state.rs.tera and build_rhs.rs.tera can use
         // `runtime_sources | length > 0` guards unconditionally.
         ctx.insert("runtime_sources", &ir.runtime_sources);
+
+        // WARMUP_SAMPLES_RECOMMENDED (Oomox P5): 5τ_max at the internal sample
+        // rate, rounded up, minimum 1. Plugins driving per-instance parameter
+        // jitter (e.g. SeriesOfTubes) use this to size the silent warmup loop.
+        ctx.insert("warmup_samples_recommended", &recommended_warmup_samples(ir));
 
         // G and C matrices (sample-rate independent)
         ctx.insert("g_rows", &format_matrix_rows(n, n, |i, j| ir.g(i, j)));

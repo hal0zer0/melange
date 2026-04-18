@@ -69,6 +69,46 @@ pub(super) fn named_const_entries(pairs: &[(String, usize)]) -> Vec<NamedConstEn
         .collect()
 }
 
+/// Estimate the slowest settling time constant (seconds) of the circuit.
+///
+/// Per-node heuristic: `τ_i = C[i][i] / G[i][i]` when both are positive,
+/// where the diagonals already aggregate the node's total cap and
+/// conductance to ground (coupling caps between nodes i and j stamp into
+/// both `C[i][i] += C` and `C[j][j] += C`, so the diagonal dominates the
+/// node's RC time). Returns the maximum τ across the augmented system,
+/// clamped to a small floor to avoid zero-length warmups.
+///
+/// Fast O(n) scan. Not a replacement for a proper eigen-analysis of
+/// `C⁻¹G` for tightly-coupled RC chains — see the Phase 5 plan in
+/// [oomox_missing_functionality_roadmap.md] — but adequate for the common
+/// "one dominant pole somewhere" case that covers most audio circuits.
+pub(super) fn estimate_settle_time_seconds(ir: &CircuitIR) -> f64 {
+    let n = ir.topology.n;
+    let mut tau_max: f64 = 0.0;
+    for i in 0..n {
+        let g_ii = ir.g(i, i);
+        let c_ii = ir.c(i, i);
+        if c_ii > 0.0 && g_ii > 0.0 {
+            let tau = c_ii / g_ii;
+            if tau > tau_max {
+                tau_max = tau;
+            }
+        }
+    }
+    tau_max
+}
+
+/// Translate the estimated settling time into a sample count using a 5τ
+/// safety factor (99.3% settled) and rounding up. Minimum 1 sample so the
+/// constant is always positive.
+pub(super) fn recommended_warmup_samples(ir: &CircuitIR) -> usize {
+    let tau = estimate_settle_time_seconds(ir);
+    let internal_rate =
+        ir.solver_config.sample_rate * ir.solver_config.oversampling_factor as f64;
+    let samples = (5.0 * tau * internal_rate).ceil() as i64;
+    samples.max(1) as usize
+}
+
 /// Switch component data passed to Tera templates.
 #[derive(Serialize)]
 pub(super) struct SwitchCompTemplateData {
