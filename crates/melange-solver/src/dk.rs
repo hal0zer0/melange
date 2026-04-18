@@ -220,9 +220,13 @@ impl From<crate::mna::MnaError> for DkError {
 /// Circuits with more than MAX_M nonlinear dimensions are rejected to prevent
 /// unbounded allocation and O(M^3) NR solve cost.
 ///
-/// M=16 supports: full tube preamp (4 triodes × 2 = 8) + bias diodes,
-/// or complex multi-device circuits.
-pub const MAX_M: usize = 16;
+/// M=24 supports the heaviest circuits in the stable catalog: Uniquorn v2's
+/// 8-stage active-NR cascade + CF buffer + clipper (M=20) with headroom for
+/// v3's additions and future split-band saturation designs. Circuits at
+/// M≥10 typically route to the nodal full-LU path via the `|K|>1e8` /
+/// `ρ(S·A_neg)>0.999` / positive-K-diagonal guards — MAX_M bounds the
+/// kernel-build hard reject, not which solver path actually runs.
+pub const MAX_M: usize = 24;
 
 /// Maximum supported system dimension (total rows/columns in the A/S matrices).
 ///

@@ -122,8 +122,8 @@ if !i_nl.iter().all(|x| x.is_finite()) {
   delta0 = (j11*f0 - j01*f1) / det
   delta1 = (-j10*f0 + j00*f1) / det
   ```
-- M=3..16: Inline Gaussian elimination with partial pivoting
-- M>16: Not supported (MAX_M=16)
+- M=3..24: Inline Gaussian elimination with partial pivoting
+- M>24: Not supported (MAX_M=24)
 
 ## Warm Start
 Use `i_nl_prev` from previous time sample as initial guess. Reduces iterations from 10-20 to 3-5.

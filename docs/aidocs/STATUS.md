@@ -202,7 +202,7 @@ Source: Sowter DWG E-72,658-2 + Peerless/Triad winding data.
 - Tube Koren: lambda parameter models finite plate resistance; no space-charge or transit-time effects
 - BJT GP: no substrate current or avalanche breakdown
 - All device models fixed at room temperature (27°C); no TNOM/TC1/TC2/XTI
-- `MAX_M=16` — bound on NR dimension; iterative/sparse NR for M>16 deferred
+- `MAX_M=24` — bound on NR dimension; iterative/sparse NR for M>24 deferred. Bumped from 16 on 2026-04-19 to admit Uniquorn v2 (M=20) and leave headroom for split-band saturation designs.
 - Full-LU NR + ill-conditioned A (cond(A) > ~1000): Schur preferred when K well-conditioned. No known circuit needs both pathological K and ill-conditioned A. See DEBUGGING.md "Known Full-LU NR Limitations"
 - Ideal transformer decomposition (dependent sources + explicit leakage/magnetizing L): deferred, current coupled-inductor approach sufficient for Pultec at +1.8 dB
 
@@ -236,7 +236,7 @@ and compilation are necessary but not sufficient).
 - Ideal transformer formulation (Pultec at +1.8 dB with current approach, not blocking)
 - Phase 6a/6b type safety (NodeIdx newtype, field visibility)
 - Phase 7 crate split (extract melange-parser, melange-codegen)
-- M>16 iterative/sparse NR
+- M>24 iterative/sparse NR
 - BoyleDiodes heavy-clip Anderson acceleration / BoyleDiodes→ActiveSetBe hybrid (low priority)
 
 ## Cross-Compilation (macOS from Linux)

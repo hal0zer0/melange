@@ -1529,12 +1529,12 @@ C1 out 0 100p
 // Test: M > MAX_M rejection at DK kernel build time
 // ==========================================================================
 
-/// Verify that M=17 is rejected at DK kernel build time (MAX_M=16).
+/// Verify that M=25 is rejected at DK kernel build time (MAX_M=24).
 #[test]
 fn test_m_gt_max_rejected() {
-    // 17 diodes → M=17 which exceeds MAX_M=16
+    // 25 diodes → M=25 which exceeds MAX_M=24
     let spice = "\
-Seventeen Diodes
+Twenty-five Diodes
 Rin in 0 1k
 D1 in m1 D1N4148
 D2 m1 m2 D1N4148
@@ -1552,7 +1552,15 @@ D13 m12 m13 D1N4148
 D14 m13 m14 D1N4148
 D15 m14 m15 D1N4148
 D16 m15 m16 D1N4148
-D17 m16 out D1N4148
+D17 m16 m17 D1N4148
+D18 m17 m18 D1N4148
+D19 m18 m19 D1N4148
+D20 m19 m20 D1N4148
+D21 m20 m21 D1N4148
+D22 m21 m22 D1N4148
+D23 m22 m23 D1N4148
+D24 m23 m24 D1N4148
+D25 m24 out D1N4148
 R1 m1 0 10k
 R2 m2 0 10k
 R3 m3 0 10k
@@ -1569,6 +1577,14 @@ R13 m13 0 10k
 R14 m14 0 10k
 R15 m15 0 10k
 R16 m16 0 10k
+R17 m17 0 10k
+R18 m18 0 10k
+R19 m19 0 10k
+R20 m20 0 10k
+R21 m21 0 10k
+R22 m22 0 10k
+R23 m23 0 10k
+R24 m24 0 10k
 C1 out 0 1u
 .model D1N4148 D(IS=1e-15)
 ";
@@ -1576,15 +1592,15 @@ C1 out 0 1u
     let netlist = Netlist::parse(spice).expect("failed to parse netlist");
     let mna = MnaSystem::from_netlist(&netlist).expect("failed to build MNA");
 
-    // M=17 exceeds MAX_M=16, so kernel build should fail
+    // M=25 exceeds MAX_M=24, so kernel build should fail
     let result = DkKernel::from_mna(&mna, 44100.0);
     assert!(
         result.is_err(),
-        "M=17 should be rejected at DK kernel build time (MAX_M=16)"
+        "M=25 should be rejected at DK kernel build time (MAX_M=24)"
     );
 }
 
-/// Verify that M=10 (10 diodes) succeeds with MAX_M=16.
+/// Verify that M=10 (10 diodes) succeeds with MAX_M=24.
 #[test]
 fn test_m10_accepted() {
     let spice = "\
@@ -1617,8 +1633,8 @@ C1 out 0 1u
     let mna = MnaSystem::from_netlist(&netlist).expect("failed to build MNA");
     assert_eq!(mna.m, 10, "10 diodes should give M=10");
 
-    // M=10 is within MAX_M=16, should succeed
-    let kernel = DkKernel::from_mna(&mna, 44100.0).expect("M=10 should succeed with MAX_M=16");
+    // M=10 is within MAX_M=24, should succeed
+    let kernel = DkKernel::from_mna(&mna, 44100.0).expect("M=10 should succeed with MAX_M=24");
     assert_eq!(kernel.m, 10);
 
     // Also verify codegen works for M=10

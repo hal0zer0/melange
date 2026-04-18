@@ -209,9 +209,9 @@ flatten_matrix(M, r, c)    2D -> 1D row-major (index = row * cols + col)
 |---|--------|----------|
 | 1 | Direct division | Codegen template |
 | 2 | Cramer's rule | Codegen template |
-| 3-16 | Gaussian elimination (unrolled) | Codegen template |
+| 3-24 | Gaussian elimination (unrolled) | Codegen template |
 | Any (full LU path) | Sparse LU + chord refactor | `lu.rs` + codegen-emitted straight-line code |
-| >16 | Not supported (DK/Nodal Schur paths) | MAX_M = 16 |
+| >24 | Not supported (DK/Nodal Schur paths) | MAX_M = 24 |
 
 ## Singularity Thresholds by Context
 
