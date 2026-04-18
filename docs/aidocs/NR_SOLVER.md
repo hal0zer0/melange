@@ -118,9 +118,9 @@ if !i_nl.iter().all(|x| x.is_finite()) {
 - M=1: Direct division
 - M=2: Cramer's rule (explicit 2x2 inverse)
   ```
-  det = j00*j11 - j01*j10
-  delta0 = (j11*f0 - j01*f1) / det
-  delta1 = (-j10*f0 + j00*f1) / det
+  det = j0_0*j1_1 - j0_1*j1_0
+  delta0 = (j1_1*f0 - j0_1*f1) / det
+  delta1 = (-j1_0*f0 + j0_0*f1) / det
   ```
 - M=3..24: Inline Gaussian elimination with partial pivoting
 - M>24: Not supported (MAX_M=24)

@@ -125,7 +125,9 @@ impl RustEmitter {
                     for k in blk_start..blk_start + blk_dim {
                         terms.push_str(&format!(" - jdev_{}_{} * state.k[{}][{}]", i, k, k, j));
                     }
-                    code.push_str(&format!("        let j{}{} = {}{};\n", i, j, diag, terms));
+                    // Separator is load-bearing: `j{i}{j}` without it collides
+                    // at M≥12 (e.g. j110 could be i=1,j=10 or i=11,j=0).
+                    code.push_str(&format!("        let j{}_{} = {}{};\n", i, j, diag, terms));
                 }
             }
             code.push('\n');
@@ -134,7 +136,7 @@ impl RustEmitter {
             match m {
                 1 => {
                     code.push_str("        // Solve 1x1 system: J * delta = f\n");
-                    code.push_str("        let det = j00;\n");
+                    code.push_str("        let det = j0_0;\n");
                     code.push_str("        if det.abs() < SINGULARITY_THRESHOLD {\n");
                     emit_nr_singular_fallback(code, 1, "            ");
                     code.push_str("            continue;\n");
@@ -144,17 +146,17 @@ impl RustEmitter {
                 }
                 2 => {
                     code.push_str("        // Solve 2x2 system: J * delta = f (Cramer's rule)\n");
-                    code.push_str("        let det = j00 * j11 - j01 * j10;\n");
+                    code.push_str("        let det = j0_0 * j1_1 - j0_1 * j1_0;\n");
                     code.push_str("        if det.abs() < SINGULARITY_THRESHOLD {\n");
                     emit_nr_singular_fallback(code, 2, "            ");
                     code.push_str("            continue;\n");
                     code.push_str("        }\n");
                     code.push_str("        let inv_det = 1.0 / det;\n");
-                    code.push_str("        let delta0 = inv_det * (j11 * f0 - j01 * f1);\n");
-                    code.push_str("        let delta1 = inv_det * (-j10 * f0 + j00 * f1);\n\n");
+                    code.push_str("        let delta0 = inv_det * (j1_1 * f0 - j0_1 * f1);\n");
+                    code.push_str("        let delta1 = inv_det * (-j1_0 * f0 + j0_0 * f1);\n\n");
                     emit_nr_limit_and_converge(code, ir, 2, "        ");
                 }
-                3..=16 => {
+                3..=24 => {
                     Self::generate_gauss_elim(code, ir, m);
                 }
                 _ => {
@@ -202,7 +204,7 @@ impl RustEmitter {
         code.push_str("        let mut a = [\n");
         for i in 0..dim {
             let row = (0..dim)
-                .map(|j| format!("j{i}{j}"))
+                .map(|j| format!("j{i}_{j}"))
                 .collect::<Vec<_>>()
                 .join(", ");
             code.push_str(&format!("            [{row}],\n"));
@@ -272,7 +274,7 @@ impl RustEmitter {
         code.push_str("        let mut a = [\n");
         for i in 0..dim {
             let row = (0..dim)
-                .map(|j| format!("j{i}{j}"))
+                .map(|j| format!("j{i}_{j}"))
                 .collect::<Vec<_>>()
                 .join(", ");
             code.push_str(&format!("            [{row}],\n"));

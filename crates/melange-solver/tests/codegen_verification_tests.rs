@@ -122,7 +122,7 @@ fn test_generated_code_contains_correct_jacobian_formula() {
     assert_eq!(kernel.m, 1, "Expected m=1 for single-diode circuit");
 
     // The diagonal Jacobian entry for device 0 should be:
-    //   j00 = 1.0 - jdev_0_0 * K[0][0]
+    //   j0_0 = 1.0 - jdev_0_0 * K[0][0]
     // Since K is negative, this is > 1, which is correct for stable NR.
     assert!(
         code.contains("1.0 - jdev_0_0 * state.k[0][0]"),
@@ -672,14 +672,14 @@ fn test_two_diode_controlling_voltages() {
     );
 
     // Check Jacobian entries exist for the 2x2 system
-    assert!(code.contains("let j00 ="), "Missing Jacobian j00");
-    assert!(code.contains("let j01 ="), "Missing Jacobian j01");
-    assert!(code.contains("let j10 ="), "Missing Jacobian j10");
-    assert!(code.contains("let j11 ="), "Missing Jacobian j11");
+    assert!(code.contains("let j0_0 ="), "Missing Jacobian j0_0");
+    assert!(code.contains("let j0_1 ="), "Missing Jacobian j0_1");
+    assert!(code.contains("let j1_0 ="), "Missing Jacobian j1_0");
+    assert!(code.contains("let j1_1 ="), "Missing Jacobian j1_1");
 
     // Check that the 2x2 solve uses Cramer's rule (determinant)
     assert!(
-        code.contains("let det = j00 * j11 - j01 * j10"),
+        code.contains("let det = j0_0 * j1_1 - j0_1 * j1_0"),
         "2x2 NR solver should use Cramer's rule with determinant."
     );
 }
@@ -782,13 +782,13 @@ fn test_codegen_bjt_nr_solver_generates_residuals_and_jacobian() {
     );
 
     // NR Jacobian should use the 2D chain rule:
-    // j00 = 1.0 - jdev_0_0 * K[0][0] - jdev_0_1 * K[1][0]
-    // j01 = 0.0 - jdev_0_0 * K[0][1] - jdev_0_1 * K[1][1]
+    // j0_0 = 1.0 - jdev_0_0 * K[0][0] - jdev_0_1 * K[1][0]
+    // j0_1 = 0.0 - jdev_0_0 * K[0][1] - jdev_0_1 * K[1][1]
     // (i.e., sum over k in device block for each row)
-    assert!(code.contains("let j00 ="), "Missing Jacobian entry j00");
-    assert!(code.contains("let j01 ="), "Missing Jacobian entry j01");
-    assert!(code.contains("let j10 ="), "Missing Jacobian entry j10");
-    assert!(code.contains("let j11 ="), "Missing Jacobian entry j11");
+    assert!(code.contains("let j0_0 ="), "Missing Jacobian entry j0_0");
+    assert!(code.contains("let j0_1 ="), "Missing Jacobian entry j0_1");
+    assert!(code.contains("let j1_0 ="), "Missing Jacobian entry j1_0");
+    assert!(code.contains("let j1_1 ="), "Missing Jacobian entry j1_1");
 
     // Diagonal entries should start with 1.0
     // Off-diagonal should start with 0.0
@@ -800,7 +800,7 @@ fn test_codegen_bjt_nr_solver_generates_residuals_and_jacobian() {
 
     // Should use 2x2 Cramer's rule solver
     assert!(
-        code.contains("let det = j00 * j11 - j01 * j10"),
+        code.contains("let det = j0_0 * j1_1 - j0_1 * j1_0"),
         "2x2 NR solver should use Cramer's rule."
     );
 }
@@ -876,8 +876,8 @@ fn test_codegen_mixed_diode_bjt_device_map() {
     // 3x3 Jacobian entries should exist
     for i in 0..3 {
         for j in 0..3 {
-            let entry = format!("let j{}{} =", i, j);
-            assert!(code.contains(&entry), "Missing Jacobian entry j{}{}", i, j);
+            let entry = format!("let j{}_{} =", i, j);
+            assert!(code.contains(&entry), "Missing Jacobian entry j{}_{}", i, j);
         }
     }
 
@@ -2788,8 +2788,8 @@ fn test_codegen_m5_generates_gauss_elim() {
     for i in 0..5 {
         for j in 0..5 {
             assert!(
-                code.contains(&format!("let j{}{} =", i, j)),
-                "Missing Jacobian entry j{}{}",
+                code.contains(&format!("let j{}_{} =", i, j)),
+                "Missing Jacobian entry j{}_{}",
                 i,
                 j
             );
@@ -2952,8 +2952,8 @@ fn test_codegen_m8_generates_gauss_elim() {
     for i in 0..8 {
         for j in 0..8 {
             assert!(
-                code.contains(&format!("let j{}{} =", i, j)),
-                "Missing Jacobian entry j{}{}",
+                code.contains(&format!("let j{}_{} =", i, j)),
+                "Missing Jacobian entry j{}_{}",
                 i,
                 j
             );
