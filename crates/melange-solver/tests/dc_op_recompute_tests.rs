@@ -988,3 +988,157 @@ fn e4_jfet_flag_on_compiles_and_runs() {
         String::from_utf8_lossy(&run.stdout)
     );
 }
+
+// -----------------------------------------------------------------------------
+// Phase E.6: state-reset audit
+//
+// Writeback covers more than just `v_prev` / `i_nl_prev` / `dc_operating_point`:
+// the DC blocker, per-pot `_prev` shadows, oversampler taps, and linear-
+// companion-model history (inductor / coupled / transformer) all need to land
+// in a state consistent with the new DC equilibrium so the first
+// `process_sample` call after `recompute_dc_op` doesn't generate a spurious
+// step transient. These tests guard the non-obvious pieces.
+// -----------------------------------------------------------------------------
+
+/// DC blocker seeding: `dc_block_x_prev[k]` must equal `v_node[OUTPUT_NODES[k]]`
+/// after `recompute_dc_op`, not 0. Setting it to 0 would make the first
+/// sample's IIR evaluation see `raw_out - 0 = V_dc` as a step and pass it
+/// through, taking ~5/fc seconds to decay — exactly the warmup-style
+/// transient that `recompute_dc_op` is supposed to eliminate.
+#[test]
+fn e6_dc_block_seeded_at_dc_output() {
+    use std::io::Write;
+
+    let code = generate_dk(REGRESSION_NETLIST, true);
+
+    let main = "\n\nfn main() {\n\
+        let mut state = CircuitState::default();\n\
+        // Dirty the blocker history so we can see recompute overwrite it.\n\
+        for k in 0..NUM_OUTPUTS {\n\
+            state.dc_block_x_prev[k] = 99.0;\n\
+            state.dc_block_y_prev[k] = 99.0;\n\
+        }\n\
+        state.recompute_dc_op();\n\
+        let dc = *state.dc_op();\n\
+        for k in 0..NUM_OUTPUTS {\n\
+            let expected = dc[OUTPUT_NODES[k]];\n\
+            let got = state.dc_block_x_prev[k];\n\
+            assert!((got - expected).abs() < 1e-12,\n\
+                \"dc_block_x_prev[{}] = {}, expected v_node[OUTPUT_NODES[{}]] = {}\",\n\
+                k, got, k, expected);\n\
+            assert_eq!(state.dc_block_y_prev[k], 0.0,\n\
+                \"dc_block_y_prev[{}] = {} (expected 0 for DC fixed point)\", k, state.dc_block_y_prev[k]);\n\
+        }\n\
+        println!(\"ok\");\n\
+    }\n";
+
+    let full = format!("{}{}", code, main);
+    let tmp = std::env::temp_dir();
+    let src = tmp.join("melange_dc_op_recompute_e6_dc_block.rs");
+    let bin = tmp.join("melange_dc_op_recompute_e6_dc_block");
+    std::fs::File::create(&src)
+        .unwrap()
+        .write_all(full.as_bytes())
+        .unwrap();
+    let compile = std::process::Command::new("rustc")
+        .args([
+            src.to_str().unwrap(),
+            "-o",
+            bin.to_str().unwrap(),
+            "--edition",
+            "2021",
+        ])
+        .output()
+        .expect("rustc");
+    let _ = std::fs::remove_file(&src);
+    if !compile.status.success() {
+        let _ = std::fs::remove_file(&bin);
+        panic!(
+            "compile failed:\n{}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+    }
+    let run = std::process::Command::new(&bin).output().expect("run");
+    let _ = std::fs::remove_file(&bin);
+    assert!(
+        run.status.success(),
+        "binary failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&run.stdout).contains("ok"),
+        "unexpected output: {}",
+        String::from_utf8_lossy(&run.stdout)
+    );
+}
+
+/// Pot `_prev` shadow sync: after `recompute_dc_op`, each
+/// `pot_N_resistance_prev` must equal the corresponding `pot_N_resistance`.
+/// The per-sample A_neg correction uses the previous timestep's conductance
+/// to undo the history term; leaving `_prev` pointing at a stale (pre-jitter)
+/// resistance would make the first `process_sample` fire a phantom conductance
+/// delta and inject a one-sample glitch.
+#[test]
+fn e6_pot_resistance_prev_synced_after_recompute() {
+    use std::io::Write;
+
+    let code = generate_dk(POT_NETLIST, true);
+
+    let main = "\n\nfn main() {\n\
+        let mut state = CircuitState::default();\n\
+        // Mimic the real user flow: set the pot, THEN call recompute.\n\
+        // After recompute_dc_op, _prev must point at the new value so the\n\
+        // next process_sample doesn't see a phantom conductance delta.\n\
+        let target = (POT_0_MIN_R + POT_0_MAX_R) * 0.5;\n\
+        state.pot_0_resistance = target;\n\
+        state.pot_0_resistance_prev = POT_0_MIN_R; // deliberately stale\n\
+        state.recompute_dc_op();\n\
+        assert!(\n\
+            (state.pot_0_resistance_prev - state.pot_0_resistance).abs() < 1e-12,\n\
+            \"pot_0_resistance_prev ({}) did not sync to pot_0_resistance ({}) after recompute_dc_op\",\n\
+            state.pot_0_resistance_prev, state.pot_0_resistance\n\
+        );\n\
+        println!(\"ok\");\n\
+    }\n";
+
+    let full = format!("{}{}", code, main);
+    let tmp = std::env::temp_dir();
+    let src = tmp.join("melange_dc_op_recompute_e6_pot_prev.rs");
+    let bin = tmp.join("melange_dc_op_recompute_e6_pot_prev");
+    std::fs::File::create(&src)
+        .unwrap()
+        .write_all(full.as_bytes())
+        .unwrap();
+    let compile = std::process::Command::new("rustc")
+        .args([
+            src.to_str().unwrap(),
+            "-o",
+            bin.to_str().unwrap(),
+            "--edition",
+            "2021",
+        ])
+        .output()
+        .expect("rustc");
+    let _ = std::fs::remove_file(&src);
+    if !compile.status.success() {
+        let _ = std::fs::remove_file(&bin);
+        panic!(
+            "compile failed:\n{}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+    }
+    let run = std::process::Command::new(&bin).output().expect("run");
+    let _ = std::fs::remove_file(&bin);
+    assert!(
+        run.status.success(),
+        "binary failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&run.stdout).contains("ok"),
+        "unexpected output: {}",
+        String::from_utf8_lossy(&run.stdout)
+    );
+}

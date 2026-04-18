@@ -68,7 +68,7 @@
 use crate::codegen::ir::CircuitIR;
 use crate::codegen::CodegenError;
 
-use super::helpers::fmt_f64;
+use super::helpers::{fmt_f64, oversampling_info};
 use super::nr_helpers::emit_dk_device_evaluation;
 
 /// Emit the body of `CircuitState::recompute_dc_op()` for a DK-path circuit.
@@ -569,10 +569,39 @@ fn emit_dc_op_nr_loop_dk(ir: &CircuitIR) -> Result<String, CodegenError> {
 /// Writes the converged node voltages to `self.dc_operating_point`, seeds
 /// `self.v_prev`, and (when the circuit has nonlinear devices) both
 /// `self.i_nl_prev` and `self.i_nl_prev_prev` with the converged `i_nl`.
-/// Also clears the DC-blocking filter's per-output sample history so it
-/// doesn't take seconds to re-settle from a stale output offset. Does NOT
-/// touch input history, RNG state, oversampler taps, or inductor history —
-/// those either remain physically correct or aren't in scope for the MVP.
+///
+/// Also touches the following mirror-of-`reset()` state so the first
+/// `process_sample` call after `recompute_dc_op` starts from a consistent
+/// equilibrium instead of the stale pre-recompute trajectory:
+///
+///   * `dc_block_x_prev[k] = v_node[OUTPUT_NODES[k]]`, `dc_block_y_prev[k] = 0`
+///     — the DC-blocker IIR's fixed point is `y = 0, x = V_dc`. Setting
+///     `x_prev` to the raw DC output (not 0) suppresses the step transient
+///     the blocker would otherwise generate on the first sample.
+///   * `pot_N_resistance_prev = pot_N_resistance` for every pot — the
+///     per-sample A_neg correction uses `_prev` to undo last sample's
+///     conductance contribution. Without this sync the first sample after
+///     recompute would see a phantom pot jump if the user had called
+///     `set_pot_N` earlier (which leaves `_prev` pointing at the pre-jitter
+///     value).
+///   * Oversampler filter taps zeroed (`os_up_state`, `os_dn_state`,
+///     and the `_outer` pair for 4× OS). Mid-stream the filter state
+///     reflects the old DC level and would ring down as the output steps to
+///     the new one; zeroing matches `reset()`.
+///   * Linear-companion-model history for inductors / coupled inductors /
+///     transformer groups (`ind_{i,v}_prev`, `ind_i_hist`, etc.) zeroed —
+///     the DK MVP solves the `process_sample(0.0)` companion-shunt
+///     equilibrium where `I_L = V_L = 0`, which matches these zeroed
+///     histories exactly. Inductor-bearing circuits that rely on the
+///     inductor-short DC answer are already scoped out of the MVP (see
+///     module-level derivation).
+///
+/// Deliberately preserved: `noise_rng_state` (footgun — resetting would make
+/// plugins produce identical noise sequences after every parameter change),
+/// pot resistances and switch positions (they're the INPUT to this solve),
+/// runtime voltage sources, device runtime params, BJT junction temperature,
+/// diagnostic counters (caller may be watching them), and `last_nr_iterations`
+/// (the NR loop itself isn't plumbed through this counter in the MVP).
 fn emit_dc_op_writeback_dk(ir: &CircuitIR, nonlinear: bool) -> String {
     let mut body = String::new();
     body.push_str(
@@ -587,14 +616,91 @@ fn emit_dc_op_writeback_dk(ir: &CircuitIR, nonlinear: bool) -> String {
              \x20       self.i_nl_prev_prev = i_nl_final;\n",
         );
     }
-    if ir.dc_block {
+
+    // DC blocker: seed x_prev with the converged DC output (not 0.0) so the
+    // next sample's IIR evaluation `raw_out - x_prev + r*y_prev` gives 0,
+    // i.e. the filter starts already at steady state. y_prev stays 0 because
+    // the fixed point of `y = x - x + r*y` is `y*(1-r) = 0 ⇒ y = 0`.
+    if ir.dc_block && !ir.solver_config.output_nodes.is_empty() {
         body.push_str(
-            "        // Clear DC blocker history — the new DC offset replaces the old\n\
-             \x20       // one, and the IIR high-pass would otherwise take ~5/fc seconds\n\
-             \x20       // to re-converge.\n\
-             \x20       self.dc_block_x_prev = [0.0; NUM_OUTPUTS];\n\
-             \x20       self.dc_block_y_prev = [0.0; NUM_OUTPUTS];\n",
+            "        // Seed DC blocker at its steady state (y=0, x=V_dc_out) so it\n\
+             \x20       // doesn't generate a step transient on the first sample.\n",
         );
+        for (k, &node) in ir.solver_config.output_nodes.iter().enumerate() {
+            body.push_str(&format!(
+                "        self.dc_block_x_prev[{k}] = v_node[{node}];\n",
+            ));
+        }
+        body.push_str("        self.dc_block_y_prev = [0.0; NUM_OUTPUTS];\n");
     }
+
+    // Pot prev sync — the per-sample A_neg correction uses the previous
+    // timestep's conductance. After recompute we've jumped to a new
+    // equilibrium at the current pot value, so `_prev` must track it too.
+    if !ir.pots.is_empty() {
+        body.push_str(
+            "        // Sync pot_N_resistance_prev so the first sample's A_neg\n\
+             \x20       // correction doesn't fire on a phantom conductance delta.\n",
+        );
+        for idx in 0..ir.pots.len() {
+            body.push_str(&format!(
+                "        self.pot_{idx}_resistance_prev = self.pot_{idx}_resistance;\n",
+            ));
+        }
+    }
+
+    // Oversampler filter state — mid-stream these taps carry the old DC
+    // trajectory. Zero them so the new DC doesn't appear as a step that the
+    // half-band IIR has to ring down. Sizes are compile-time derived from
+    // the oversampling factor (matching `state.rs.tera`'s literal sizing).
+    if ir.solver_config.oversampling_factor > 1 {
+        let os = oversampling_info(ir.solver_config.oversampling_factor);
+        body.push_str(&format!(
+            "        // Reset oversampler half-band filter state (stale DC trajectory).\n\
+             \x20       self.os_up_state = [0.0; {size}];\n\
+             \x20       self.os_dn_state = [[0.0; {size}]; NUM_OUTPUTS];\n",
+            size = os.state_size,
+        ));
+        if ir.solver_config.oversampling_factor == 4 {
+            body.push_str(&format!(
+                "        self.os_up_state_outer = [0.0; {size}];\n\
+                 \x20       self.os_dn_state_outer = [[0.0; {size}]; NUM_OUTPUTS];\n",
+                size = os.state_size_outer,
+            ));
+        }
+    }
+
+    // Linear-companion-model history: inductors, coupled inductors, and
+    // transformer winding currents. The DK MVP's DC equilibrium is the
+    // `process_sample(0.0)` fixed point where the companion shunt keeps
+    // `V_L = 0` and therefore `I_L = 0` — which is exactly the zeroed state.
+    if !ir.inductors.is_empty() {
+        let n = ir.inductors.len();
+        body.push_str(&format!(
+            "        self.ind_i_prev = [0.0; {n}];\n\
+             \x20       self.ind_v_prev = [0.0; {n}];\n\
+             \x20       self.ind_i_hist = [0.0; {n}];\n",
+        ));
+    }
+    if !ir.coupled_inductors.is_empty() {
+        let n = ir.coupled_inductors.len();
+        body.push_str(&format!(
+            "        self.ci_i1_prev = [0.0; {n}];\n\
+             \x20       self.ci_i2_prev = [0.0; {n}];\n\
+             \x20       self.ci_v1_prev = [0.0; {n}];\n\
+             \x20       self.ci_v2_prev = [0.0; {n}];\n\
+             \x20       self.ci_i1_hist = [0.0; {n}];\n\
+             \x20       self.ci_i2_hist = [0.0; {n}];\n",
+        ));
+    }
+    for (idx, g) in ir.transformer_groups.iter().enumerate() {
+        let nw = g.num_windings;
+        body.push_str(&format!(
+            "        self.xfmr_{idx}_i_prev = [0.0; {nw}];\n\
+             \x20       self.xfmr_{idx}_v_prev = [0.0; {nw}];\n\
+             \x20       self.xfmr_{idx}_i_hist = [0.0; {nw}];\n",
+        ));
+    }
+
     body
 }
