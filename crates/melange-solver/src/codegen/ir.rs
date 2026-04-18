@@ -225,6 +225,14 @@ pub struct SolverConfig {
     /// [`OpampRailMode::Auto`]: crate::codegen::OpampRailMode::Auto
     #[serde(default = "default_opamp_rail_mode")]
     pub opamp_rail_mode: crate::codegen::OpampRailMode,
+    /// Emit `CircuitState::recompute_dc_op()` for runtime DC operating-point
+    /// re-solve (Oomox roadmap P6 / Phase E). Default `false` → output is
+    /// byte-identical to pre-Phase-E codegen. Threaded from
+    /// [`CodegenConfig::emit_dc_op_recompute`].
+    ///
+    /// [`CodegenConfig::emit_dc_op_recompute`]: crate::codegen::CodegenConfig::emit_dc_op_recompute
+    #[serde(default)]
+    pub emit_dc_op_recompute: bool,
 }
 
 fn default_opamp_rail_mode() -> crate::codegen::OpampRailMode {
@@ -2216,6 +2224,7 @@ impl CircuitIR {
             pot_settle_samples: config.pot_settle_samples,
             backward_euler: be,
             opamp_rail_mode: rail_mode.mode,
+            emit_dc_op_recompute: config.emit_dc_op_recompute,
         };
 
         let metadata = CircuitMetadata {
@@ -3215,6 +3224,7 @@ impl CircuitIR {
             pot_settle_samples: config.pot_settle_samples,
             backward_euler: config.backward_euler,
             opamp_rail_mode: rail_mode.mode,
+            emit_dc_op_recompute: config.emit_dc_op_recompute,
         };
 
         // Compute S = A^{-1} for Schur complement NR (O(M³) instead of O(N³) per iteration)

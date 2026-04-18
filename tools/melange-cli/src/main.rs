@@ -157,6 +157,17 @@ enum Commands {
         #[arg(long, value_name = "SEED", default_value = "0")]
         noise_seed: u64,
 
+        /// Emit `CircuitState::recompute_dc_op()` for runtime DC operating
+        /// point re-solve after pot/switch changes (Oomox plugin roadmap P6).
+        ///
+        /// Default OFF: generated code is byte-identical to pre-Phase-E output.
+        /// When ON, plugins with per-instance component jitter can call
+        /// `state.recompute_dc_op()` to jump to the jittered equilibrium
+        /// without a warmup loop. See docs/aidocs/DC_OP.md for MVP scope
+        /// (Direct-NR only, no basin-trap handling).
+        #[arg(long)]
+        emit_dc_op_recompute: bool,
+
         /// Plugin display name (defaults to capitalized circuit filename)
         #[arg(long)]
         name: Option<String>,
@@ -511,6 +522,7 @@ fn main() -> Result<()> {
             opamp_rail_mode,
             noise,
             noise_seed,
+            emit_dc_op_recompute,
             name,
             mono,
             wet_dry_mix,
@@ -607,6 +619,7 @@ fn main() -> Result<()> {
                 rail_mode,
                 noise_mode,
                 noise_seed,
+                emit_dc_op_recompute,
                 name.as_deref(),
                 mono,
                 wet_dry_mix,
@@ -869,6 +882,7 @@ fn compile_circuit_source(
     opamp_rail_mode: melange_solver::codegen::OpampRailMode,
     noise_mode: melange_solver::codegen::NoiseMode,
     noise_seed: u64,
+    emit_dc_op_recompute: bool,
     plugin_name: Option<&str>,
     mono: bool,
     wet_dry_mix: bool,
@@ -1592,6 +1606,7 @@ fn compile_circuit_source(
         opamp_rail_mode,
         noise_mode,
         noise_master_seed: noise_seed,
+        emit_dc_op_recompute,
         ..CodegenConfig::default()
     };
 
@@ -2569,6 +2584,7 @@ fn simulate_circuit_source(
         opamp_rail_mode: opts.opamp_rail_mode,
         noise_mode: opts.noise_mode,
         noise_master_seed: opts.noise_seed,
+        emit_dc_op_recompute: false,
     };
     let generator = CodeGenerator::new(config);
     let generated = if use_nodal {
@@ -3116,6 +3132,7 @@ fn analyze_freq_response(
         opamp_rail_mode: melange_solver::codegen::OpampRailMode::Auto,
         noise_mode: melange_solver::codegen::NoiseMode::Off,
         noise_master_seed: 0,
+        emit_dc_op_recompute: false,
     };
     let generator = CodeGenerator::new(config);
     let generated = if use_nodal {

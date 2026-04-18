@@ -280,6 +280,17 @@ pub struct CodegenConfig {
     /// this via SplitMix64, reproducible across runs. Ignored when
     /// `noise_mode == NoiseMode::Off`.
     pub noise_master_seed: u64,
+    /// Emit `CircuitState::recompute_dc_op()` (Oomox plugin roadmap P6).
+    ///
+    /// When enabled, the generated code includes a runtime DC operating point
+    /// solver so plugins can re-solve the bias after changing pot/switch values
+    /// at arbitrary magnitudes — avoiding the warmup loop required to settle
+    /// into a jittered equilibrium. Default `false` (no emission, byte-identical
+    /// output to pre-Phase-E codegen). See `docs/aidocs/DC_OP.md` for scope.
+    ///
+    /// MVP scope: Direct-NR only, no source/Gmin stepping, no basin-trap handling.
+    /// Not supported for DK circuits with parasitic-R BJTs (use nodal path).
+    pub emit_dc_op_recompute: bool,
 }
 
 #[cfg(feature = "codegen")]
@@ -354,6 +365,7 @@ impl Default for CodegenConfig {
             opamp_rail_mode: OpampRailMode::Auto,
             noise_mode: NoiseMode::Off,
             noise_master_seed: 0,
+            emit_dc_op_recompute: false,
         }
     }
 }
