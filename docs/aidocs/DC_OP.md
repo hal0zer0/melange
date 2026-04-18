@@ -362,12 +362,16 @@ VS/VCVS rows, adds `.runtime` voltage-source fields, then Newton-iterates
   compute. Inductor-free circuits match compile-time `DC_OP` bitwise.
   The delta is the companion shunt `g_eq = T/(2L)` that's already baked
   into `G`.
-- **Nodal full-LU path** (pultec, 4kbuscomp, VCR ALC) currently ships a
-  stub body that bumps `diag_nr_max_iter_count` and returns. The full
-  nodal NR solve is tracked as Phase E.8.2 → E.8.5; until it lands,
-  plugins on the nodal path observe the counter tick and stay on the
-  warmup loop. The method surface itself is uniform across DK and nodal
-  so host code doesn't need a solver-path branch.
+- **Nodal full-LU path** (pultec, 4kbuscomp, VCR ALC, wurli power amp)
+  ships a stub body that bumps `diag_nr_max_iter_count` and returns —
+  **this is the permanent path for nodal-routed circuits**, not a
+  temporary placeholder. The method surface is uniform across DK and
+  nodal so host code doesn't need a solver-path branch, but on nodal
+  circuits the diagnostic-fallback pattern (check the counter, fall
+  back to `WARMUP_SAMPLES_RECOMMENDED`) is the only viable workflow.
+  The full nodal NR body is deferred indefinitely — no shipping plugin
+  blocks on it, and the warmup loop already uses the per-sample NR
+  which is guaranteed to converge to the physically correct DC OP.
 
 ### Real-time safety
 

@@ -1825,11 +1825,15 @@ impl RustEmitter {
         code.push_str("        &self.dc_operating_point\n");
         code.push_str("    }\n\n");
 
-        // recompute_dc_op() — Oomox P6 / Phase E. Nodal path stub (E.8.1):
-        // emits the method surface uniformly with the DK path, but the body
-        // only bumps `diag_nr_max_iter_count` and returns until the full
-        // nodal NR solve lands (E.8.2+). Feature-gated so the default
-        // codegen path stays byte-identical.
+        // recompute_dc_op() — Oomox P6 / Phase E. Nodal path ships a
+        // permanent stub: emits the method surface uniformly with the DK
+        // path but the body only bumps `diag_nr_max_iter_count` and
+        // returns. Nodal-routed plugins continue using the
+        // `WARMUP_SAMPLES_RECOMMENDED` silence loop (the documented path
+        // for nodal circuits). The full nodal NR body is deferred
+        // indefinitely — see `emit_recompute_dc_op_body_nodal` in
+        // `dc_op_emitter.rs` for the rationale. Feature-gated so the
+        // default codegen path stays byte-identical.
         if ir.solver_config.emit_dc_op_recompute {
             let body = super::dc_op_emitter::emit_recompute_dc_op_body_nodal(ir)
                 .expect("nodal stub body must be infallible");
@@ -1840,18 +1844,24 @@ impl RustEmitter {
                  \x20   /// **Not audio-thread safe.** Intended for plugin initialization\n\
                  \x20   /// after applying per-instance pot/switch jitter.\n\
                  \x20   ///\n\
-                 \x20   /// # Phase E.8.1 stub on the nodal full-LU path\n\
+                 \x20   /// # Nodal full-LU path: stub only\n\
                  \x20   ///\n\
-                 \x20   /// The nodal solver runs on the augmented MNA and uses a different\n\
-                 \x20   /// device stamping scheme than the DK path — the full runtime NR is\n\
-                 \x20   /// shipped incrementally as Phase E.8.2 → E.8.5. Calling this method\n\
-                 \x20   /// today on a nodal-routed circuit bumps `diag_nr_max_iter_count`\n\
-                 \x20   /// and returns without touching `dc_operating_point` or `v_prev`,\n\
-                 \x20   /// so plugin authors should watch the counter and fall back to the\n\
-                 \x20   /// `WARMUP_SAMPLES_RECOMMENDED` silence loop when it ticks.\n\
+                 \x20   /// The runtime DC OP solve is shipped on the DK path only. Nodal\n\
+                 \x20   /// circuits (pultec, 4kbuscomp, VCR ALC, wurli power amp) continue\n\
+                 \x20   /// using the `WARMUP_SAMPLES_RECOMMENDED` silence loop — this is\n\
+                 \x20   /// the documented path for nodal circuits, not a placeholder. The\n\
+                 \x20   /// warmup loop runs the full per-sample NR and is guaranteed to\n\
+                 \x20   /// converge to the physically correct DC OP.\n\
+                 \x20   ///\n\
+                 \x20   /// Calling this method on a nodal-routed circuit bumps\n\
+                 \x20   /// `diag_nr_max_iter_count` and returns without touching\n\
+                 \x20   /// `dc_operating_point` or `v_prev`. The standard fallback\n\
+                 \x20   /// pattern — check the counter, run warmup on tick — handles\n\
+                 \x20   /// both DK-convergence-failure and nodal-stub cases uniformly,\n\
+                 \x20   /// so plugin host code doesn't need a solver-path branch.\n\
                  \x20   ///\n\
                  \x20   /// See `docs/aidocs/DC_OP.md` \"Runtime DC OP recompute\" for the\n\
-                 \x20   /// DK-path semantics and the nodal-path delta.\n\
+                 \x20   /// DK-path semantics and the deferral rationale.\n\
                  \x20   pub fn recompute_dc_op(&mut self) {\n",
             );
             code.push_str(&body);

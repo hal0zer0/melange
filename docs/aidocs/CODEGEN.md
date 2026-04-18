@@ -170,11 +170,16 @@ circuits converge to the `process_sample(0.0)` steady state instead
 (companion-shunt equilibrium differs from `dc_op.rs`'s inductor-short
 equilibrium — see `docs/aidocs/DC_OP.md`).
 
-**Nodal full-LU path**: currently ships a stub that bumps
-`diag_nr_max_iter_count` and returns without touching state. The surface
-matches the DK path so plugin host code doesn't need a solver-path branch;
-plugins on the nodal route should watch the counter and fall back to the
-warmup-silence loop. The full nodal body is tracked as Phase E.8.2 → E.8.5.
+**Nodal full-LU path**: ships a stub that bumps `diag_nr_max_iter_count`
+and returns without touching state — **this is the permanent path for
+nodal circuits**, not a placeholder. The surface matches the DK path so
+plugin host code doesn't need a solver-path branch, but plugins on the
+nodal route must watch the counter and fall back to the warmup-silence
+loop. The full nodal body is deferred indefinitely; no shipping plugin
+blocks on it, and the warmup loop already uses the per-sample NR which
+converges to the physically correct DC OP. See
+`docs/aidocs/DC_OP.md` and the `phase_e_handoff_runtime_dc_op` memory
+for the reviver's plan if priorities change.
 
 State touched by the DK-path method (mirror of `reset()` but preserving
 noise RNG, pot/switch values, device runtime params, and diag counters):

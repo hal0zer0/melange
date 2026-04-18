@@ -1460,13 +1460,15 @@ fn e7_ts808_clipping_stage_converges_at_nominal() {
 }
 
 // -----------------------------------------------------------------------------
-// Phase E.8.1: nodal full-LU recompute_dc_op stub
+// Nodal full-LU recompute_dc_op — permanent stub
 //
 // The nodal path emits a `recompute_dc_op` method when the flag is on so the
 // plugin surface is uniform across DK and nodal circuits. The stub body bumps
 // `diag_nr_max_iter_count` and returns without touching state — plugin authors
-// observe the counter tick and fall back to the warmup loop until the full
-// nodal NR body ships (E.8.2 → E.8.5). These tests guard:
+// observe the counter tick and fall back to the `WARMUP_SAMPLES_RECOMMENDED`
+// silence loop (the documented path for nodal circuits; the full nodal NR
+// body is deferred indefinitely — see `emit_recompute_dc_op_body_nodal`).
+// These tests guard:
 //
 //   * The stub is feature-gated (flag OFF → no emission, flag ON → emission).
 //   * Flag-off output is byte-identical for a nodal circuit.
@@ -1550,8 +1552,8 @@ fn e8_nodal_flag_on_emits_stub_signature() {
         "nodal stub body must bump diag counter to signal no-op"
     );
     assert!(
-        code.contains("Phase E.8.1 stub"),
-        "nodal stub must carry explanatory comment"
+        code.contains("deferred") && code.contains("warmup loop"),
+        "nodal stub must carry explanatory deferral comment pointing at warmup fallback"
     );
 }
 
