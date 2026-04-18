@@ -379,6 +379,32 @@ impl CircuitState {
     pub fn dc_op(&self) -> &[f64; N] {
         &self.dc_operating_point
     }
+{% if emit_dc_op_recompute %}
+    /// Re-solve the DC operating point at the current pot/switch values
+    /// (Oomox plugin roadmap P6).
+    ///
+    /// Call once after applying per-instance pot/switch jitter (or a preset
+    /// change) and before processing audio, to skip the
+    /// `WARMUP_SAMPLES_RECOMMENDED` silence loop that would otherwise be
+    /// needed for the solver to settle into the jittered equilibrium.
+    ///
+    /// **Not audio-thread safe.** The NR solve can take tens to hundreds of
+    /// microseconds. Call from plugin initialization or parameter-change
+    /// callbacks, not inside `process_sample`.
+    ///
+    /// # MVP limitations (Phase E)
+    ///
+    /// - Direct Newton-Raphson only; no source or Gmin stepping. If the NR
+    ///   fails to converge (e.g. after a massive pot swing on a basin-trap
+    ///   circuit), state is left unchanged and the caller should fall back
+    ///   to the warmup loop.
+    /// - No handling of multi-equilibrium precision-rectifier topologies.
+    ///
+    /// See `docs/aidocs/DC_OP.md` "Runtime DC OP recompute" for the full
+    /// surface and semantic contract.
+    pub fn recompute_dc_op(&mut self) {
+{{ recompute_dc_op_body }}    }
+{% endif %}
 {% if named_nodes | length > 0 %}
     /// Pretty-print the DC operating point with user-assigned node names.
     ///

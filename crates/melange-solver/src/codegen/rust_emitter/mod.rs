@@ -19,6 +19,7 @@ mod dk_emitter;
 mod dk_solver;
 mod nr_helpers;
 mod nodal_emitter;
+mod dc_op_emitter;
 
 use tera::{Context, Tera};
 

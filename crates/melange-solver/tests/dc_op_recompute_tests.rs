@@ -105,3 +105,85 @@ fn codegen_config_default_has_recompute_off() {
         "CodegenConfig default must leave emit_dc_op_recompute disabled"
     );
 }
+
+/// With the flag ON, codegen emits `pub fn recompute_dc_op(&mut self)` in
+/// the `CircuitState` impl. Guards the emission pathway end-to-end.
+#[test]
+fn flag_on_emits_recompute_dc_op_signature() {
+    let code = generate_dk(REGRESSION_NETLIST, true);
+    assert!(
+        code.contains("pub fn recompute_dc_op(&mut self)"),
+        "flag ON must emit `pub fn recompute_dc_op(&mut self)`;\nrelevant lines:\n{}",
+        code.lines()
+            .filter(|l| l.contains("recompute_dc_op"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    // Phase E.2 skeleton: the body is a documented no-op. Later phases will
+    // replace the marker with actual NR-solve code — updating this assertion
+    // then is a deliberate synchronization point.
+    assert!(
+        code.contains("Phase E MVP skeleton"),
+        "flag ON should emit the Phase E skeleton comment"
+    );
+}
+
+/// With the flag ON, the generated code compiles and the emitted method
+/// is callable. Proves the flag plumbing end-to-end without requiring the
+/// full NR solve to be implemented yet.
+#[test]
+fn flag_on_compiles_and_method_callable() {
+    use std::io::Write;
+
+    let code = generate_dk(REGRESSION_NETLIST, true);
+
+    let main = "\n\nfn main() {\n\
+        let mut state = CircuitState::default();\n\
+        // Phase E skeleton: no-op, but must be callable without panic.\n\
+        state.recompute_dc_op();\n\
+        // DC OP accessor still returns a consistent value after the call.\n\
+        let dc = state.dc_op();\n\
+        assert_eq!(dc.len(), N);\n\
+        println!(\"ok\");\n\
+    }\n";
+    let full = format!("{}{}", code, main);
+
+    let tmp = std::env::temp_dir();
+    let src = tmp.join("melange_dc_op_recompute_flag_on.rs");
+    let bin = tmp.join("melange_dc_op_recompute_flag_on");
+    std::fs::File::create(&src)
+        .unwrap()
+        .write_all(full.as_bytes())
+        .unwrap();
+    let compile = std::process::Command::new("rustc")
+        .args([
+            src.to_str().unwrap(),
+            "-o",
+            bin.to_str().unwrap(),
+            "--edition",
+            "2021",
+        ])
+        .output()
+        .expect("rustc");
+    let _ = std::fs::remove_file(&src);
+    if !compile.status.success() {
+        let _ = std::fs::remove_file(&bin);
+        panic!(
+            "compile failed:\n{}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+    }
+    let run = std::process::Command::new(&bin).output().expect("run");
+    let _ = std::fs::remove_file(&bin);
+    assert!(
+        run.status.success(),
+        "binary failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&run.stdout).contains("ok"),
+        "unexpected output: {}",
+        String::from_utf8_lossy(&run.stdout)
+    );
+}

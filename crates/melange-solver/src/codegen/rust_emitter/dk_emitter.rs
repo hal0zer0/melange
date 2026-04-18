@@ -555,6 +555,18 @@ impl RustEmitter {
             &named_const_entries(&ir.named_constants.nodes),
         );
 
+        // Runtime DC operating point recompute (Oomox P6 / Phase E). The
+        // template renders a stub body when this flag is on; full device
+        // eval + NR loop emission is layered on in subsequent commits.
+        let emit_dc_op_recompute = ir.solver_config.emit_dc_op_recompute;
+        ctx.insert("emit_dc_op_recompute", &emit_dc_op_recompute);
+        if emit_dc_op_recompute {
+            ctx.insert(
+                "recompute_dc_op_body",
+                &super::dc_op_emitter::emit_recompute_dc_op_body_dk(ir),
+            );
+        }
+
         self.render("state", &ctx)
     }
 
