@@ -15,20 +15,55 @@
 //! linear op-amp, VCA — i.e. whatever the compile-time DC OP handles today,
 //! minus multi-equilibrium refinements.
 //!
-//! ## Layering (implemented across subsequent commits)
+//! ## Layering (shipped across E.1 → E.5)
 //!
-//! 1. `emit_recompute_dc_op_body_dk` — top-level no-op stub (E.2).
-//! 2. `emit_dc_op_build_g_aug_dk` — G_aug construction from live pot/switch
-//!    state (E.3, this file).
-//! 3. `emit_dc_op_evaluate_devices_dk` — per-device i_nl + Jacobian (E.4).
-//! 4. `emit_dc_op_solve` — NR loop, limiting, dense LU (E.5).
-//! 5. Compose + state resets (E.6).
-//! 6. Nodal mirror (E.8).
+//! 1. `emit_recompute_dc_op_body_dk` — top-level body assembler.
+//! 2. `emit_dc_op_build_g_aug_dk` — G_aug base construction from live
+//!    pot/switch state (E.3).
+//! 3. `emit_dc_op_build_b_dc_dk` — DC RHS from `RHS_CONST` (halved on
+//!    node rows) + `.runtime` voltage source fields (E.5).
+//! 4. `emit_dc_op_extract_v_nl_dk` + `emit_dk_device_evaluation` —
+//!    per-device i_nl + Jacobian evaluator shared with transient NR (E.4).
+//! 5. `emit_dc_op_nr_loop_dk` — Direct NR loop with LU solve, flat
+//!    damping, convergence check (E.5).
+//! 6. `emit_dc_op_writeback_dk` — write converged `v_node` + `i_nl` back
+//!    to state, clear DC-blocker history (E.5).
 //!
-//! The skeleton body below builds `g_aug` from the current pot/switch fields
-//! and emits the per-device current + Jacobian evaluator, but does not yet
-//! wrap them in an NR loop. Subsequent phases close that loop. See the
-//! Phase E handoff memory file for the full definition of done.
+//! ## DC fixed-point algebra (E.5 derivation)
+//!
+//! The trapezoidal per-sample equation is
+//!
+//! ```text
+//!     A · v_{n+1} = RHS_CONST + A_neg · v_n + N_i · i_nl_prev + input
+//! ```
+//!
+//! and the NR loop in `process_sample` adds `N_i · i_nl(v_{n+1})` to both
+//! sides. Substituting steady state `v_{n+1} = v_n = v_dc`, `input = 0`,
+//! `i_nl_prev = i_nl_dc`, and using `A - A_neg = 2·G` on node rows (`A_neg`
+//! is zeroed on VS/VCVS algebraic rows by `get_a_neg_matrix`, so the row-
+//! wise identity `A - A_neg = G` holds there and `N_i`'s VS-row entries are
+//! structurally zero anyway) gives the DC fixed point
+//!
+//! ```text
+//!     2·G · v_dc = RHS_CONST + 2·N_i · i_nl_dc            (node rows)
+//!        G · v_dc = RHS_CONST                               (VS/VCVS rows)
+//! ```
+//!
+//! Halving the node-row equation and folding both into a single Newton step
+//! yields the compile-time `dc_op.rs` form
+//!
+//! ```text
+//!     G_aug_nr = g_aug − N_i · J_dev · N_v
+//!     rhs_nr   = b_dc  + N_i · (i_nl − J_dev · v_nl)
+//!     v_new    = G_aug_nr⁻¹ · rhs_nr
+//! ```
+//!
+//! with `b_dc` built from `RHS_CONST` by halving rows `[0..n_nodes)`. This
+//! converges to the exact compile-time DC OP for inductor-free circuits —
+//! inductor-bearing circuits converge to the `process_sample(0.0)` steady
+//! state instead (the `g_eq = T/(2L)` companion shunt already baked into
+//! `G` differs from the inductor-short augmented row the compile-time
+//! solver uses). That distinction is documented in the method docstring.
 
 use crate::codegen::ir::CircuitIR;
 use crate::codegen::CodegenError;
@@ -38,28 +73,36 @@ use super::nr_helpers::emit_dk_device_evaluation;
 
 /// Emit the body of `CircuitState::recompute_dc_op()` for a DK-path circuit.
 ///
-/// **Current state (Phase E.4)**: builds a local `g_aug` matrix and a local
-/// `v_node` warm-started from `self.v_prev`, extracts `v_nl = N_v · v_node`,
-/// and evaluates the per-device current + dense Jacobian. Nothing consumes
-/// those values yet — the NR loop (E.5) will iterate `g_aug`, `i_nl`, and
-/// `j_dev` to convergence, then write back to `self.dc_operating_point`,
-/// `self.v_prev`, and `self.i_nl_prev`. Until E.5 lands, everything is
-/// discarded with `let _ = (...);` so the emitted method stays compilable
-/// and callable (as a no-op semantically).
+/// Assembles the full Direct-NR runtime DC OP solve:
+///   1. Build the resistive `g_aug` base matrix from `G` + live pot/switch
+///      state (E.3).
+///   2. Build the DC RHS `b_dc` from `RHS_CONST` (halving node rows) and
+///      any `.runtime` voltage source fields (E.5).
+///   3. Direct NR loop: warm-start from `self.v_prev`, extract `v_nl`,
+///      evaluate per-device currents + Jacobian, LU-solve for the Newton
+///      step, apply flat voltage damping + clamp, check convergence (E.5).
+///   4. On convergence, write the solution back to `self.dc_operating_point`,
+///      `self.v_prev`, `self.i_nl_prev` / `i_nl_prev_prev`, and clear the
+///      DC blocker's sample history so it doesn't need seconds to re-settle
+///      from a stale offset (E.5).
+///
+/// Linear-only circuits (`M == 0` or no device slots) short-circuit the NR
+/// loop: a single `invert_n(g_aug)` solve gives the resistive fixed point.
 pub(super) fn emit_recompute_dc_op_body_dk(ir: &CircuitIR) -> Result<String, CodegenError> {
     let mut body = String::new();
     body.push_str(
         "        // Phase E MVP (Oomox P6) — Direct Newton-Raphson DC OP recompute.\n\
          \x20       //\n\
-         \x20       // Phases E.3+E.4 build `g_aug` and evaluate per-device currents +\n\
-         \x20       // Jacobians from the live pot/switch state and a warm-started\n\
-         \x20       // `v_node`. Phase E.5 wraps them in the NR loop and writes back\n\
-         \x20       // to `self.dc_operating_point`, `self.v_prev`, and\n\
-         \x20       // `self.i_nl_prev`. Until all phases land, calling this is a\n\
-         \x20       // no-op — plugin code that needs jittered-pot convergence must\n\
-         \x20       // keep using the `WARMUP_SAMPLES_RECOMMENDED` silence loop.\n\
+         \x20       // Warm-starts from `self.v_prev` (a physically valid prior\n\
+         \x20       // equilibrium), rebuilds `g_aug` from live pot/switch state,\n\
+         \x20       // and iterates classic companion-linearized NR until the node-\n\
+         \x20       // voltage step falls below the convergence tolerance. On\n\
+         \x20       // convergence the result is written back; on failure, state is\n\
+         \x20       // left untouched and `diag_nr_max_iter_count` is bumped so the\n\
+         \x20       // caller can fall back to the `WARMUP_SAMPLES_RECOMMENDED`\n\
+         \x20       // silence loop.\n\
          \x20       //\n\
-         \x20       // Scope notes for the MVP (subject to revision before E.6):\n\
+         \x20       // Scope notes (documented in the method's public docstring):\n\
          \x20       //   * Parasitic-BJT internal nodes (RB/RC/RE > 0) are NOT\n\
          \x20       //     expanded on the DK path — see `docs/aidocs/DC_OP.md`.\n\
          \x20       //   * Inductor-as-short augmented rows are not re-stamped;\n\
@@ -67,27 +110,19 @@ pub(super) fn emit_recompute_dc_op_body_dk(ir: &CircuitIR) -> Result<String, Cod
          \x20       //     `g_eq = T/(2L)`, so the fixed point solved here matches\n\
          \x20       //     `process_sample(0.0, ...)` steady state, not the\n\
          \x20       //     inductor-short DC OP that `dc_op.rs` would compute.\n\
-         \x20       //     For inductor-free circuits these agree bitwise.\n",
+         \x20       //     For inductor-free circuits these agree bitwise.\n\
+         \x20       //   * No source / Gmin stepping, no basin-trap handling.\n",
     );
     body.push_str(&emit_dc_op_build_g_aug_dk(ir));
+    body.push_str(&emit_dc_op_build_b_dc_dk(ir));
 
-    // E.4: per-device i_nl + dense Jacobian from a warm-started v_node.
-    // Wrapped in a scoped block so the transient `v_d{i}` / `i_dev{i}` /
-    // `jdev_{r}_{c}` locals shared with `solve_nonlinear` don't leak into
-    // the outer function body.
-    if ir.topology.m > 0 && !ir.device_slots.is_empty() {
-        body.push_str(&emit_dc_op_evaluate_devices_dk(ir, "        ")?);
+    if ir.topology.m == 0 || ir.device_slots.is_empty() {
+        // Linear circuit: single LU solve. No NR loop needed.
+        body.push_str(&emit_dc_op_linear_solve_dk(ir));
+    } else {
+        body.push_str(&emit_dc_op_nr_loop_dk(ir)?);
     }
 
-    // Phase E.5 will iterate the NR loop. Until then discard everything so
-    // the unused-variable lint stays quiet. The discard list grows as
-    // subsequent phases add more locals (v_node / i_nl / j_dev).
-    body.push_str(
-        "\n        // Phase E.5 will iterate the NR loop over `g_aug`, `i_nl`,\n\
-         \x20       // and `j_dev`. Until then, discard so the unused-variable\n\
-         \x20       // lint stays quiet.\n\
-         \x20       let _ = g_aug;\n",
-    );
     Ok(body)
 }
 
@@ -251,66 +286,147 @@ fn emit_dc_op_extract_v_nl_dk(ir: &CircuitIR, indent: &str) -> String {
     out
 }
 
-/// Emit the Phase E.4 per-device evaluator block inside `recompute_dc_op`.
+/// Emit the DC RHS vector `b_dc: [f64; N]` for `recompute_dc_op`.
 ///
-/// Layout of the emitted block:
-/// ```text
-/// {
-///     let v_node: [f64; N] = self.v_prev;   // warm-start seed
-///     let v_d0 = …; let v_d1 = …; …          // v_nl = N_v · v_node
-///     let i_dev0 = …; let jdev_0_0 = …; …    // shared device-eval helper
-///     let mut i_nl = [0.0; M];
-///     let mut j_dev = [[0.0; M]; M];
-///     i_nl[0] = i_dev0; …                    // pack flat locals → dense arrays
-///     j_dev[0][0] = jdev_0_0; …
-///     let _ = (v_node, i_nl, j_dev);          // E.5 replaces this discard
-/// }
-/// ```
+/// Maps `RHS_CONST` (the per-sample trapezoidal Norton current vector) to the
+/// DC steady-state RHS:
+///   * Node rows `[0..n_nodes)` are halved (`RHS_CONST` doubles current-source
+///     injections for trapezoidal averaging — at DC that averaging collapses
+///     back to the single DC source value).
+///   * VS / VCVS / ideal-transformer aug rows `[n_nodes..n_aug)` are preserved
+///     (their per-sample value is already the algebraic RHS — `V_dc` for VS,
+///     0 for VCVS / ideal-xfmr KVL — with no trapezoidal scaling).
+///   * Inductor branch rows `[n_aug..N)` are preserved (zero, since inductor
+///     short-circuit constraints contribute 0 to `RHS_CONST` by construction
+///     in `dk::build_rhs_const`).
+///   * `.runtime` voltage sources add `self.<field>` to their target VS row
+///     so `recompute_dc_op` converges to the bias point the host will drive
+///     on the first real sample.
+fn emit_dc_op_build_b_dc_dk(ir: &CircuitIR) -> String {
+    let mut body = String::new();
+    let n_nodes = ir.topology.n_nodes;
+
+    body.push_str(
+        "\n        // Build b_dc: DC steady-state RHS from the per-sample RHS_CONST.\n\
+         \x20       // Node rows are halved (trapezoidal averaging collapses at DC);\n\
+         \x20       // VS/VCVS/ideal-xfmr algebraic rows and inductor branch rows are\n\
+         \x20       // preserved verbatim. See module-level DC fixed-point derivation.\n",
+    );
+    if ir.has_dc_sources {
+        body.push_str("        let mut b_dc: [f64; N] = RHS_CONST;\n");
+        if n_nodes > 0 {
+            body.push_str(&format!(
+                "        for i in 0..{n_nodes} {{ b_dc[i] *= 0.5; }}\n",
+            ));
+        }
+    } else {
+        body.push_str("        let mut b_dc: [f64; N] = [0.0; N];\n");
+    }
+
+    if !ir.runtime_sources.is_empty() {
+        body.push_str(
+            "\n        // `.runtime` voltage sources: include their current value so\n\
+             \x20       // recompute converges to the equilibrium the host will drive.\n",
+        );
+        for rt in &ir.runtime_sources {
+            body.push_str(&format!(
+                "        b_dc[{row}] += self.{field};\n",
+                row = rt.vs_row,
+                field = rt.field_name,
+            ));
+        }
+    }
+
+    body
+}
+
+/// Emit the linear-only DC OP solve (`M == 0` or no device slots).
 ///
-/// The inner locals deliberately reuse the `v_d{i}` / `i_dev{i}` /
-/// `jdev_{r}_{c}` naming from `solve_nonlinear` so the shared
-/// [`emit_dk_device_evaluation`] helper drops in without renaming.
+/// Skips the NR loop entirely: the system `g_aug · v = b_dc` is already
+/// linear, so a single `invert_n` + matrix-vector multiply gives the fixed
+/// point. On singular `g_aug`, state is left unchanged and the diag counter
+/// is bumped.
+fn emit_dc_op_linear_solve_dk(_ir: &CircuitIR) -> String {
+    let mut body = String::new();
+    body.push_str(
+        "\n        // Linear circuit (M == 0): solve g_aug · v = b_dc once.\n\
+         \x20       let (g_inv, singular) = invert_n(g_aug);\n\
+         \x20       if singular {\n\
+         \x20           self.diag_singular_matrix_count += 1;\n\
+         \x20           return;\n\
+         \x20       }\n\
+         \x20       let mut v_node = [0.0_f64; N];\n\
+         \x20       for i in 0..N {\n\
+         \x20           let mut sum = 0.0;\n\
+         \x20           for j in 0..N {\n\
+         \x20               sum += g_inv[i][j] * b_dc[j];\n\
+         \x20           }\n\
+         \x20           v_node[i] = sum;\n\
+         \x20       }\n",
+    );
+    body.push_str(&emit_dc_op_writeback_dk(_ir, /*nonlinear=*/ false));
+    body
+}
+
+/// Emit the Direct-Newton-Raphson loop for the nonlinear DC OP solve.
 ///
-/// Caller guarantees `ir.topology.m > 0` and non-empty `device_slots` — the
-/// block would compile when those are empty but packing a `[f64; 0]` is
-/// dead code, so the outer dispatcher skips the call entirely in that case.
-fn emit_dc_op_evaluate_devices_dk(
-    ir: &CircuitIR,
-    indent: &str,
-) -> Result<String, CodegenError> {
+/// Wraps the shared `emit_dk_device_evaluation` helper inside a fixed-
+/// iteration loop that:
+///   1. Extracts `v_nl = N_v · v_node` from the current iterate.
+///   2. Evaluates per-device currents + dense Jacobian.
+///   3. Builds `G_aug_nr = g_aug − N_i · J_dev · N_v`.
+///   4. Builds `rhs_nr = b_dc + N_i · (i_nl − J_dev · v_nl)`.
+///   5. LU-solves `G_aug_nr · v_new = rhs_nr` via the emitted `invert_n`
+///      helper (returns `(inv, singular)`).
+///   6. Applies flat global voltage damping when any element of the step
+///      exceeds the damping threshold, plus a per-element clamp, and
+///      advances `v_node`.
+///   7. Declares convergence when the damped step falls below `TOL`.
+///
+/// On convergence `v_node` and the final `i_nl` are written back via
+/// `emit_dc_op_writeback_dk`; on max-iter exhaustion `diag_nr_max_iter_count`
+/// is bumped and state is left untouched so the caller can fall back to the
+/// warmup loop.
+fn emit_dc_op_nr_loop_dk(ir: &CircuitIR) -> Result<String, CodegenError> {
+    const MAX_ITER: usize = 200;
+    const TOL: f64 = 1e-9;
+    const DAMP_THRESHOLD: f64 = 10.0;
+    const CLAMP: f64 = 50.0;
+
     let m = ir.topology.m;
-    let inner = format!("{indent}    ");
     let mut out = String::new();
 
     out.push_str(&format!(
-        "\n{indent}// --- Phase E.4: evaluate device currents + dense Jacobian ----\n\
-         {indent}//\n\
-         {indent}// Warm-starts from `self.v_prev`, extracts `v_nl = N_v·v_node`,\n\
-         {indent}// and reuses the transient `solve_nonlinear` device dispatch via\n\
-         {indent}// `nr_helpers::emit_dk_device_evaluation`. E.5 wraps this block\n\
-         {indent}// in the NR iteration; until then the outputs are discarded.\n\
-         {indent}//\n\
-         {indent}// The shared device evaluator emits `state.device_N_*` accessors\n\
-         {indent}// (it's the same block `solve_nonlinear(&mut CircuitState)` uses).\n\
-         {indent}// `recompute_dc_op(&mut self)` has no `state` binding, so we\n\
-         {indent}// introduce one here — immutable borrow is enough because device\n\
-         {indent}// evaluation only reads per-device parameters.\n\
-         {indent}{{\n\
-         {inner}let state: &CircuitState = &*self;\n\
-         {inner}let v_node: [f64; N] = state.v_prev;\n\n"
+        "\n        // --- Direct Newton-Raphson DC OP loop -----------------------\n\
+         \x20       let mut v_node: [f64; N] = self.v_prev;\n\
+         \x20       let mut i_nl_final: [f64; M] = [0.0; M];\n\
+         \x20       let mut nr_converged = false;\n\
+         \x20       const MAX_ITER: usize = {MAX_ITER};\n\
+         \x20       const TOL: f64 = {TOL:e};\n\
+         \x20       for _iter in 0..MAX_ITER {{\n"
     ));
 
-    // v_nl extraction (from v_node, not v_pred).
-    out.push_str(&emit_dc_op_extract_v_nl_dk(ir, &inner));
+    let inner = "            ";
+
+    // v_nl extraction — locals `v_d{i}` live inside the loop body.
+    out.push_str(&format!(
+        "{inner}// Extract controlling voltages v_nl = N_v · v_node.\n"
+    ));
+    out.push_str(&emit_dc_op_extract_v_nl_dk(ir, inner));
     out.push('\n');
 
-    // Per-device current + Jacobian emission (shared with solve_nonlinear).
-    emit_dk_device_evaluation(&mut out, ir, &inner)?;
-
-    // Pack flat `i_dev{i}` / `jdev_{r}_{c}` locals into dense arrays the
-    // NR loop (E.5) will consume.
+    // Device evaluation — shared helper emits `state.device_*` reads, so we
+    // need a `state: &CircuitState` local inside the loop body. Immutable
+    // borrow is enough because device evaluation never mutates self.
     out.push_str(&format!(
-        "{inner}// Pack into dense i_nl / j_dev for E.5's NR iteration.\n\
+        "{inner}// Reuse the transient per-device evaluator (shared helper).\n\
+         {inner}let state: &CircuitState = &*self;\n"
+    ));
+    emit_dk_device_evaluation(&mut out, ir, inner)?;
+
+    // Pack flat per-device locals into dense arrays.
+    out.push_str(&format!(
+        "{inner}// Pack flat device locals into dense i_nl / j_dev arrays.\n\
          {inner}let mut i_nl: [f64; M] = [0.0; M];\n"
     ));
     for i in 0..m {
@@ -319,12 +435,11 @@ fn emit_dc_op_evaluate_devices_dk(
     out.push_str(&format!(
         "{inner}let mut j_dev: [[f64; M]; M] = [[0.0; M]; M];\n"
     ));
-    for (dev_num, slot) in ir.device_slots.iter().enumerate() {
-        let _ = dev_num;
-        let blk_start = slot.start_idx;
-        let blk_dim = slot.dimension;
-        for r in blk_start..blk_start + blk_dim {
-            for c in blk_start..blk_start + blk_dim {
+    for slot in &ir.device_slots {
+        let s = slot.start_idx;
+        let d = slot.dimension;
+        for r in s..s + d {
+            for c in s..s + d {
                 out.push_str(&format!(
                     "{inner}j_dev[{r}][{c}] = jdev_{r}_{c};\n"
                 ));
@@ -332,12 +447,154 @@ fn emit_dc_op_evaluate_devices_dk(
         }
     }
 
-    // E.5 replaces this with the NR loop.
+    // v_nl as a dense array for the J·v_nl product below.
+    out.push_str(&format!("{inner}let v_nl: [f64; M] = ["));
+    for i in 0..m {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        out.push_str(&format!("v_d{i}"));
+    }
+    out.push_str("];\n\n");
+
+    // Build G_aug_nr = g_aug − N_i · J_dev · N_v.
+    // We use the N_I / N_V consts directly (dense scan). At typical M ≤ 6
+    // the inner loop is trivially small; optimizer unrolls it. `N_I` is
+    // stored transposed as [M][N], so `N_i[a][i] = N_I[i][a]`.
     out.push_str(&format!(
-        "\n{inner}// Discard pending E.5 — keeps the unused-variable lint quiet.\n\
-         {inner}let _ = (v_node, i_nl, j_dev);\n\
-         {indent}}}\n"
+        "{inner}// Apply companion linearization: g_aug_nr = g_aug − N_i · J · N_v.\n\
+         {inner}let mut g_aug_nr = g_aug;\n\
+         {inner}for a in 0..N {{\n\
+         {inner}    for b in 0..N {{\n\
+         {inner}        let mut corr = 0.0;\n\
+         {inner}        for i in 0..M {{\n\
+         {inner}            let ni_ai = N_I[i][a];\n\
+         {inner}            if ni_ai == 0.0 {{ continue; }}\n\
+         {inner}            for j in 0..M {{\n\
+         {inner}                corr += ni_ai * j_dev[i][j] * N_V[j][b];\n\
+         {inner}            }}\n\
+         {inner}        }}\n\
+         {inner}        g_aug_nr[a][b] -= corr;\n\
+         {inner}    }}\n\
+         {inner}}}\n\n"
     ));
 
+    // Build rhs_nr = b_dc + N_i · (i_nl − J_dev · v_nl).
+    out.push_str(&format!(
+        "{inner}// Build rhs_nr = b_dc + N_i · (i_nl − J · v_nl).\n\
+         {inner}let mut rhs_nr = b_dc;\n\
+         {inner}for i in 0..M {{\n\
+         {inner}    let mut jv = 0.0;\n\
+         {inner}    for j in 0..M {{\n\
+         {inner}        jv += j_dev[i][j] * v_nl[j];\n\
+         {inner}    }}\n\
+         {inner}    let i_comp = i_nl[i] - jv;\n\
+         {inner}    if i_comp == 0.0 {{ continue; }}\n\
+         {inner}    for a in 0..N {{\n\
+         {inner}        rhs_nr[a] += N_I[i][a] * i_comp;\n\
+         {inner}    }}\n\
+         {inner}}}\n\n"
+    ));
+
+    // LU-solve.
+    out.push_str(&format!(
+        "{inner}// Solve G_aug_nr · v_new = rhs_nr via the shared `invert_n`.\n\
+         {inner}let (g_inv, singular) = invert_n(g_aug_nr);\n\
+         {inner}if singular {{\n\
+         {inner}    self.diag_singular_matrix_count += 1;\n\
+         {inner}    break;\n\
+         {inner}}}\n\
+         {inner}let mut v_new = [0.0_f64; N];\n\
+         {inner}for a in 0..N {{\n\
+         {inner}    let mut sum = 0.0;\n\
+         {inner}    for b in 0..N {{\n\
+         {inner}        sum += g_inv[a][b] * rhs_nr[b];\n\
+         {inner}    }}\n\
+         {inner}    v_new[a] = sum;\n\
+         {inner}}}\n\n"
+    ));
+
+    // Guard against NaN/Inf — if any entry is non-finite, bail.
+    out.push_str(&format!(
+        "{inner}if !v_new.iter().all(|x| x.is_finite()) {{\n\
+         {inner}    self.diag_nan_reset_count += 1;\n\
+         {inner}    break;\n\
+         {inner}}}\n\n"
+    ));
+
+    // Global flat damping + per-element clamp. Matches the simple-form
+    // damping used in `dc_op.rs::nr_dc_solve` (scale all deltas by
+    // `DAMP_THRESHOLD / max_delta` when max exceeds threshold).
+    out.push_str(&format!(
+        "{inner}// Flat damping + per-element clamp on the Newton step.\n\
+         {inner}let mut max_delta = 0.0_f64;\n\
+         {inner}for a in 0..N {{\n\
+         {inner}    let d = (v_new[a] - v_node[a]).abs();\n\
+         {inner}    if d > max_delta {{ max_delta = d; }}\n\
+         {inner}}}\n\
+         {inner}let damping = if max_delta > {DAMP_THRESHOLD:.1}_f64 {{\n\
+         {inner}    ({DAMP_THRESHOLD:.1}_f64 / max_delta).max(0.1)\n\
+         {inner}}} else {{ 1.0 }};\n\
+         {inner}if damping < 1.0 {{ self.diag_voltage_damp_count += 1; }}\n\
+         {inner}let mut step_max = 0.0_f64;\n\
+         {inner}for a in 0..N {{\n\
+         {inner}    let delta = (v_new[a] - v_node[a]) * damping;\n\
+         {inner}    let limited = delta.clamp(-{CLAMP:.1}_f64, {CLAMP:.1}_f64);\n\
+         {inner}    v_node[a] += limited;\n\
+         {inner}    let la = limited.abs();\n\
+         {inner}    if la > step_max {{ step_max = la; }}\n\
+         {inner}}}\n\
+         {inner}i_nl_final = i_nl;\n\
+         {inner}if step_max < TOL {{\n\
+         {inner}    nr_converged = true;\n\
+         {inner}    break;\n\
+         {inner}}}\n\
+         \x20       }}\n\n"
+    ));
+
+    // Max-iter fallback path.
+    out.push_str(
+        "        if !nr_converged {\n\
+         \x20           self.diag_nr_max_iter_count += 1;\n\
+         \x20           return;\n\
+         \x20       }\n",
+    );
+
+    out.push_str(&emit_dc_op_writeback_dk(ir, /*nonlinear=*/ true));
     Ok(out)
+}
+
+/// Emit state writeback for a converged DC OP solve.
+///
+/// Writes the converged node voltages to `self.dc_operating_point`, seeds
+/// `self.v_prev`, and (when the circuit has nonlinear devices) both
+/// `self.i_nl_prev` and `self.i_nl_prev_prev` with the converged `i_nl`.
+/// Also clears the DC-blocking filter's per-output sample history so it
+/// doesn't take seconds to re-settle from a stale output offset. Does NOT
+/// touch input history, RNG state, oversampler taps, or inductor history —
+/// those either remain physically correct or aren't in scope for the MVP.
+fn emit_dc_op_writeback_dk(ir: &CircuitIR, nonlinear: bool) -> String {
+    let mut body = String::new();
+    body.push_str(
+        "\n        // --- Converged: write back to state -----------------------\n\
+         \x20       self.dc_operating_point = v_node;\n\
+         \x20       self.v_prev = v_node;\n\
+         \x20       self.input_prev = 0.0;\n",
+    );
+    if nonlinear && ir.topology.m > 0 {
+        body.push_str(
+            "        self.i_nl_prev = i_nl_final;\n\
+             \x20       self.i_nl_prev_prev = i_nl_final;\n",
+        );
+    }
+    if ir.dc_block {
+        body.push_str(
+            "        // Clear DC blocker history — the new DC offset replaces the old\n\
+             \x20       // one, and the IIR high-pass would otherwise take ~5/fc seconds\n\
+             \x20       // to re-converge.\n\
+             \x20       self.dc_block_x_prev = [0.0; NUM_OUTPUTS];\n\
+             \x20       self.dc_block_y_prev = [0.0; NUM_OUTPUTS];\n",
+        );
+    }
+    body
 }
