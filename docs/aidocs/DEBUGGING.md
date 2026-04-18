@@ -248,30 +248,44 @@ nonlinear devices.
 
 ## ActiveSetBe Chord-NR False Convergence (Precision Rectifiers)
 
-**Primary cause on real circuits: op-amp `.model` VSAT mis-calibrated against
-the supply rails actually used in the netlist.** First investigated on
-4kbuscomp and mistaken for a solver bug; root-caused 2026-04-17 to a one-line
-model error — see "Root cause on 4kbuscomp" below. The mechanism described
-in this section *can* bite any topology where an op-amp is unnaturally
-DC-railed, so the diagnostic signature is still worth keeping. In practice,
-the first question when you see it is "does the op-amp's VSAT match its
-actual supply rails?"
+Solver bug class: when an op-amp is DC-railed (`v[n_out] = ±VSAT` exactly
+every sample) and a feedback diode then sits in deep forward bias from the
+pinned rail down to a cathode node below `-VSAT`, the chord-NR reports
+converged on a KCL-violating fixed point. The residual leaks through
+`A_neg·v_prev` / `N_I·i_nl_prev` to the next sample, drifts sub-Hz, and
+eventually blows up exponentially.
 
-### Root cause on 4kbuscomp (2026-04-17)
+The first diagnostic question is always **"does the op-amp's VSAT match its
+actual supply rails?"** — a mis-calibrated VSAT unnaturally DC-rails an
+op-amp that real hardware would not, and triggers this bug class on the
+solver side. Fix the netlist first (see "Symptoms" below), then treat any
+residual divergence as a genuine solver problem.
 
-`.model OA_TL074 OA(... VSAT=11 ...)` was appropriate for a ±12 V-supplied
-TL074, but the 4kbuscomp netlist runs on ±15 V supplies (`Vpos vcc15 0 DC
-15`, `Vneg vee15 0 DC -15`). On ±15 V, a real TL074 saturates at about
-±13.5 V (datasheet: output swing = VCC − 1.5 V). U8 and U9 in the precision
-rectifier have `n_plus = vee12 = -12 V`; in real hardware that's inside both
-the input CMR *and* the output range, and the op-amp is **not** DC-railed.
-In melange with VSAT=11 it *is* DC-railed at −11 V, which is what triggers
-every symptom below.
+### 4kbuscomp: both contributions (2026-04-17)
 
-Fix: set `VSAT=13.5` (or `VCC=13.5 VEE=-13.5`) on the TL074 model. With that
-change alone, 4kbuscomp is stable at `d = 5 s` across `amp ∈ {0.01, 0.1,
-0.5}` with zero NR max-iter hits and zero BE fallbacks. No solver changes
-were required.
+On 4kbuscomp the bug had two independent contributions:
+
+**Netlist-side (primary)**: `.model OA_TL074 OA(... VSAT=11 ...)` was
+appropriate for a ±12 V-supplied TL074, but the 4kbuscomp netlist runs on
+±15 V supplies (`Vpos vcc15 0 DC 15`, `Vneg vee15 0 DC -15`). On ±15 V,
+a real TL074 saturates at about ±13.5 V (datasheet: output swing = VCC − 1.5 V).
+U8 and U9 in the precision rectifier have `n_plus = vee12 = -12 V`; in real
+hardware that's inside both the input CMR *and* the output range, and the
+op-amp is **not** DC-railed. In melange with VSAT=11 it *is* DC-railed at
+−11 V. Fix: set `VSAT=13.5` (or `VCC=13.5 VEE=-13.5`) on the TL074 model.
+This change lives in `melange-circuits/unstable/dynamics/4kbuscomp.cir` and
+as of 2026-04-17 is uncommitted in the working tree of that repo.
+
+**Solver-side (general hardening)**: the residual check in `nodal_emitter.rs`
+shipped in `c3d3eae` — see "Residual check" below. This is load-bearing for
+any topology where an op-amp gets DC-railed regardless of VSAT correctness.
+
+With the solver-side residual check alone, 4kbuscomp is stable at `d ≤ 2 s`
+at all amps (zero NR/BE events), but `d = 5 s` still diverges with 82,899
+NR max-iter hits — see `memory/project_4kbuscomp_chord_false_convergence.md`
+for the remaining open tail and four ranked candidate next steps. With the
+netlist-side VSAT=13.5 fix combined, 4kbuscomp is stable at `d = 5 s` across
+`amp ∈ {0.01, 0.1, 0.5}` with zero NR max-iter hits and zero BE fallbacks.
 
 ### Mechanism (when the op-amp really is DC-railed)
 
@@ -311,19 +325,22 @@ were required.
 | `v[n_out] = ±VSAT` exactly (all digits) every sample | Clamp signature. If you see this with no BE fallbacks, `active_set_engaged` is starved. |
 | Sub-Hz oscillation of the cathode node growing in amplitude until blow-up, with lower amplitudes taking *longer* to diverge rather than shorter | The instability is in the DC-rail regime — independent of signal amplitude. |
 
-### Residual check (shipped 2026-04-17, load-bearing)
+### Residual check (shipped 2026-04-17 commit `c3d3eae`, load-bearing)
 
-Regardless of the VSAT calibration story, the BoyleDiodes residual check in
-`nodal_emitter.rs` is extended to `BoyleDiodes | ActiveSetBe | ActiveSet`.
-After the damped NR step, re-evaluate `i_nl_fresh` from device equations at
-post-step `v` and set `max_step_exceeded = true` if any device current
-differs from the chord's `i_nl` by more than
-`1e-3 · max(|fresh|, |chord|, 1e-9) + 1e-12`.
+The BoyleDiodes residual check in `nodal_emitter.rs` is extended to
+`BoyleDiodes | ActiveSetBe | ActiveSet`. After the damped NR step,
+re-evaluate `i_nl_fresh` from device equations at post-step `v` and set
+`max_step_exceeded = true` if any device current differs from the chord's
+`i_nl` by more than `1e-3 · max(|fresh|, |chord|, 1e-9) + 1e-12`.
 
-Retained because it catches the same bug class on other topologies
-(rail-engaged op-amp + stale chord_j_dev producing a false fixed point) and
-costs only M device-equation calls per NR iter. Zero regressions on the
-validated-circuits suite.
+Catches the same bug class on any topology (rail-engaged op-amp + stale
+`chord_j_dev` producing a false fixed point). Costs only M device-equation
+calls per NR iter. Zero regressions on the validated-circuits suite. Gets
+4kbuscomp stable to `d ≤ 2 s` without the netlist-side VSAT fix; `d = 5 s`
+remains open on the original netlist (see the chord memory's ranked next
+steps: tighter RELTOL, adaptive refactor on `|j_dev/chord_j_dev| > 1.5`,
+KCL-consistent active-set resolve that stamps device Jacobian into `g_as`,
+or every-iter refactor when a rail is engaged).
 
 See also `memory/project_4kbuscomp_chord_false_convergence.md` for the
 investigation trail and `memory/project_4kbuscomp_basin_trap.md` for the
@@ -391,24 +408,40 @@ a different diode conducting.
 TL074 outputs instead of +11 V). DC_OP_CONVERGED=false (formal convergence not achieved),
 but the values are physically correct.
 
-**Status (2026-04-16, OPEN)**: A distinct failure remains in the precision-rectifier op-amps
-themselves (`U8`, `U9` — not the sidechain buffer). The op-amp output rails at −VSAT while
-the clamp diode (D1, D3 — anode = inv input, cathode = op-amp output) sits at +11 V forward
-bias, giving `I_diode ≈ 1e14 A`. This is a valid NR fixed point but non-physical — the correct
-basin has the op-amp following `v+ = vee12` via D1 feedback with `v(out) ≈ v+ + Vd`.
+**Status (2026-04-16, surfaced)**: A distinct failure surfaced in the precision-rectifier
+op-amps themselves (`U8`, `U9` — not the sidechain buffer). The op-amp output rails at −VSAT
+while the clamp diode (D1, D3 — anode = inv input, cathode = op-amp output) sits at +11 V
+forward bias, giving `I_diode ≈ 1e14 A`. This is a valid NR fixed point but non-physical —
+the correct basin has the op-amp following `v+ = vee12` via D1 feedback with
+`v(out) ≈ v+ + Vd`. The AOL cap (200 k → 1 k) did not escape this basin: both equilibria
+remain self-consistent at AOL = 1 k, and the linear initial guess + exponential diode
+Jacobian lands and stays in the wrong one.
 
-The AOL cap (200 k → 1 k) is not enough to escape this basin: both equilibria remain
-self-consistent at AOL = 1 k, and the linear initial guess + exponential diode Jacobian
-lands and stays in the wrong one. This is a **homotopy-path problem**, not a cap-magnitude
-problem.
+**Status (2026-04-17, FIXED commit `b771512`)**: the originally-greenlit plan (AOL
+continuation `[1, 10, 100, 1000, target]`) did not work alone — at AOL=1 the physical
+basin is `v_out ≈ AOL·(VEE−0.65)/(1+AOL) ≈ −6.3 V` (op-amp does not rail), 5 V from the
+`v_out = VEE` seed; cascaded diodes (D5/D6, D2/D4) create additional local minima.
 
-**Greenlit fix (not yet implemented)**: op-amp AOL continuation in `dc_op.rs`. Insert a new
-fallback strategy between Gmin Stepping and Linear Fallback that ramps AOL through
-geometric steps (`[1, 10, 100, 1000, target]`) for Rule-D'-classified op-amps, seeding
-each step with the previous step's solution. At AOL = 1 the clamp diode dominates the
-feedback loop and the correct basin is trivially found; continuation walks it up to
-target without re-entering the wrong basin. Gates on the existing Rule D' classifier.
-Reproduction + asserted post-fix values in `memory/project_4kbuscomp_basin_trap.md`.
+The shipped fix is a **post-fallback refinement NR** (gated on `has_sidechain_rectifier`):
+
+1. `seed_sr_feedback_diodes()` — after `seed_opamp_outputs` places op-amp outputs at rail,
+   clamp each direct-feedback diode's non-output terminal to `v_out ± 0.65 V` if currently
+   forward-biased > 1 V. Cascade diodes left to NR.
+2. **Fallback-refinement NR tail** — after Strategies 1–4 (Direct NR, Source Stepping,
+   Gmin Stepping, AOL Stepping) all fail, run direct NR in `aol_cont_mode = true`
+   (widened rails) from the synthesized linear-fallback + diode-consistency state. For
+   4kbuscomp this converges in **411 iters** and pulls diode currents from the bogus
+   4.3 mA down to 16 µA, satisfying KCL.
+
+The infrastructure for AOL continuation (Strategy 4 `AolStepping`, `patch_g_dc_for_aol`,
+`dc_opamp_is_sidechain_rectifier` / Rule D' DC-OP reimplementation, `aol_cont_mode`
+rail-widening in `nr_dc_solve`) is all present and exercised; the refinement tail is what
+actually finds the correct basin. Post-fix values in `memory/project_4kbuscomp_basin_trap.md`:
+v(rect_a_inv)=−12.01 V, v(rect_a_out)=−12.41 V, D1/D3 forward at ~16–32 µA.
+
+Also added in the same commit: op-amp `.model OA(IB=… RIN=…)` input-stage parasitics
+(signed bias current A, shunt conductance Ω). Defaults `IB=0` / `RIN=+∞` produce
+byte-identical generated code (verified via md5).
 
 The pre-revert `4kbuscomp.cir` in `melange-circuits` had `Rsc_vca = 1 Ω` (undocumented
 solver-stability workaround, reverted 2026-04-16 to the schematic-accurate `1 MEG`).
@@ -508,6 +541,37 @@ hit this — no known circuit triggers both conditions simultaneously.
   fix — see "ActiveSetBe Chord-NR False Convergence" above)
 - Iterative refinement in the chord back-solve (one extra O(N²) pass)
 - Schur-complement-within-full-LU hybrid (M-dim correction inside N-dim NR)
+
+## Historical Failure Signatures
+
+Catalog of previously-diagnosed failure modes. Commit hashes link to the fix;
+dated entries are narrative notes preserved for pattern-matching. Use this as
+a "have we seen this before?" lookup before starting a new debugging session.
+
+| Symptom | Cause | Fix / Status |
+|---------|-------|--------------|
+| NodalSolver NaN after DC OP | Inductor currents not initialized | Copy full v_node (incl. inductor branch currents) from DC OP |
+| NodalSolver wrong A_neg | Inductor rows zeroed | Zero n_nodes..n_aug (all augmented), NOT n_aug..n_nodal (inductor branches) |
+| Codegen diverges ~5000 samples | Boyle A_neg trapezoidal instability | A_neg must zero ALL augmented rows (Gm ±2000 creates spectral radius > 1) |
+| Codegen stable but wrong level | K≈0, Schur NR has J=I (no damping) | Route K≈0 circuits to full N×N LU NR (device Jacobian in G_aug) |
+| BoyleDiodes: augmented system input row zero, first signal sample explodes | `MnaSystem::from_netlist(&augmented)` rebuilds MNA, losing the in-place G_in stamp | Re-stamp `g[input][input] += 1/R_in` + junction caps after rebuild in `generate_nodal` (FIXED `5544c8a`) |
+| BoyleDiodes false convergence: trap NR declares converged with wildly wrong v[buf_in] on first signal sample | Voltage-step convergence check passes when chord_j_dev is many OOM stale; no residual gate | Residual check + adaptive refactor trigger (>50% j_dev change), BoyleDiodes-gated (FIXED `39397d1`) |
+| BoyleDiodes heavy clipping (amp ≥ 0.05 on Klon): NR diverges, raw 45–3068 V | Chord-LU Newton direction wrong (not just magnitude). Gmin/line-search can't fix wrong direction | Not a blocker. Auto-routes to ActiveSetBe. BoyleDiodes opt-in only. See "Op-amp BoyleDiodes Failure Signatures" above |
+| DK kernel singular at col N (transistor ladder / cap-only nodes) | Intermediate nodes connected only through BJT junctions + bridging caps have G≈Gmin (1e-12). A = G+2C/T nearly singular | Routes to nodal automatically. DK limitation for series-BJT topologies without parallel resistors |
+| Nodal Schur flat output (+9 dB, no filtering) on BJT ladder | S = A⁻¹ has extreme entries (>1e6) at cap-only nodes → K spans 10^11 → J = I-J_dev·K swamped | S magnitude check: `max\|S\| > 1e6` routes to full LU NR. Invariant to FA reduction (FIXED 2026-04-10) |
+| simulate/analyze crash "Augmented fallback failed" | DK fails, augmented DK also fails, no nodal fallback | Dummy kernel with dk_failed=true, falls through to nodal codegen (FIXED 2026-04-10) |
+| BJT diverges from ngspice at NF ≠ 1 or high injection | q2 used bare VT and omitted `-1`; Ib forward was divided by qb | q2 uses `cbe/IKF + cbc/IKR` where `cbe = IS*(exp(Vbe/(NF*VT))-1)`; Ib ideal forward NOT divided by qb. Matches `bjtload.c:571,618` (FIXED `d7427c4`) |
+| Parser panics on non-ASCII component value (e.g. `1ſ`) | `to_uppercase()` changes byte length; byte-slice landed mid-codepoint | `parse_value()` normalizes non-ASCII at entry (µ/μ → u; else `Err`) (FIXED `e96c340`) |
+| Click on every pot/switch move in generated plugin | `rebuild_matrices()` zeroed DC blocker + oversampler state | Removed filter state resets from DK Schur `rebuild_matrices` (FIXED `07712a0`) |
+| Zipper noise on knob automation | Pot values read once per buffer via `.value()`, smoother unused | Per-sample `.smoothed.next()` read in plugin template (FIXED `7c0fc02`) |
+| NR max-iter on wide-range pot jumps (preset recall, automation step) | Stale `v_prev`/`i_nl_prev` from different operating point; NR starts far from new bias | Warm DC-OP re-init in `set_pot_N`/`set_switch_N` when `|r - r_prev|/r_prev > 0.20` (FIXED `e8e18a7`). Earlier SM removal (`eaee955`) treated a symptom — SM is mathematically exact; stale DC-OP seed was the root cause |
+| DC OP wrong polarity for precision rectifier op-amps (e.g., 4kbuscomp sidechain TL074 at +11V instead of -11V) | Multi-equilibrium: AOL=200K overshoots NR between rails in one iteration | AOL capped at 1000 in DC G matrix, op-amp output seeding, per-iteration rail clamp in DC OP NR (FIXED 2026-04-15) |
+| DC OP diode reverse bias: nodes float to non-physical (91kV) when diodes off | DC OP `evaluate_devices_inner()` ignored BV/IBV and had zero reverse-bias conductance | BV/IBV breakdown added to DC OP diode evaluation; device-level Gmin 1e-12 S (FIXED 2026-04-15) |
+| Precision rectifier transient: trap NR never converges, every sample falls to BE | DC OP fails → `DC_NL_I` garbage (1.21e11 A) → coupling caps uncharged after 50-sample warmup (RC > 0.5s needs ~143K samples at 48kHz) | Low-rate DC warmup: 200 Hz × 1000 samples (5s circuit time) charges caps before transient NR. BE fallback <1% (FIXED 2026-04-16). See "Low-Rate DC Warmup" above |
+| Full-LU NR: VCCS back-sub contamination (1.18B V at linear neighbor nodes) | Op-amp VCCS Gm ≈ 2000 in A. LU back-sub computes v_new[op_out]=400kV, uses it for neighbors before post-solve clamp. NR convergence checks device nodes only | Selective op-amp Gm cap via Rule D' topology classifier (n_plus on non-zero DC rail AND diode connects output→inv-input through R-only path). User override: `.model OA(AOL_TRANSIENT_CAP=N)` (FIXED 2026-04-16). See "Precision Rectifier Transient NR" above |
+| DC OP basin trap: precision-rectifier op-amp railed at −VSAT with clamp diode at 11 V forward bias even after AOL cap | Multi-equilibrium: correct basin + pathological basin both self-consistent. Homotopy-path problem, not cap-magnitude | FIXED 2026-04-17 (commit `b771512`). AOL continuation alone did not converge (physical basin at AOL=1 is v_out ≈ −6.3 V, not the VEE seed). Actual fix is post-fallback refinement NR: `seed_sr_feedback_diodes` clamps feedback-diode terminals to `v_out ± 0.65 V`, then direct NR in `aol_cont_mode` runs from the synthesized state and converges in 411 iters. Gated on `has_sidechain_rectifier`. See "Precision Rectifier DC OP Convergence" above |
+| Transient chord-NR false convergence on DC-railed op-amp: `v[n_out] = ±VSAT` every sample, forward-biased feedback diode drawing 10+ A, sub-Hz drift into exponential blow-up at d ≥ 0.9 s (amp 0.1) / d ≥ 3.3 s (amp 0.01) | Strict-inequality `active_set_engaged` check doesn't count clamped-to-rail as engaged; BE fallback and active-set resolve never fire; residual leaks through `A_neg·v_prev` / `N_I·i_nl_prev` | PARTIAL FIX 2026-04-17 (commit `c3d3eae`): residual check in `nodal_emitter.rs` extended from `BoyleDiodes` to `BoyleDiodes \| ActiveSetBe \| ActiveSet`. After damped NR step, re-evaluate `i_nl_fresh` and force `max_step_exceeded = true` on >1e-3 relative mismatch. Gets d ≤ 2 s stable at all amps with zero NR/BE events. **d = 5 s still diverges on the original netlist (82,899 NR max-iter hits)** — closed only when combined with netlist-side `.model OA_TL074 VSAT=11 → 13.5` fix (uncommitted in melange-circuits as of 2026-04-17). See "ActiveSetBe Chord-NR False Convergence" above and `memory/project_4kbuscomp_chord_false_convergence.md` for candidate next steps (tighter residual tol, adaptive refactor, KCL-consistent active-set resolve, every-iter refactor on rail engagement) |
+| `.switch` resistor off by (1/static − 1/pos_0) on every switch change, `set_switch_N(0)` silent no-op at init | Initial `switch_position = 0` but G stamped at static netlist value, not pos-0. `rebuild_matrices` computes delta against static; set_switch_N(0) short-circuits when already at 0 | `MnaSystem::switch_default_overrides` stamps G/C/L at pos-0 (canonical baseline). `SwitchComponentInfo.nominal_value` stores pos-0 so codegen delta baseline matches. `log::info!` when static ≠ pos-0 (FIXED 2026-04-17 commit `586c2a8`) |
 
 ## References
 - TU Delft Analog Electronics Webbook: MNA stamps

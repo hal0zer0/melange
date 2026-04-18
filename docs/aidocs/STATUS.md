@@ -131,3 +131,116 @@ Source: Sowter DWG E-72,658-2 + Peerless/Triad winding data.
 - **Feedback winding**: 12AX7 pin 3→360Ω→S-217-D pin 3; pin 8→360Ω→pin 5
 - **Cathode**: 820Ω to GROUND (not through transformer)
 - Gain budget: +25 dB amp - 23 dB EQ = +2 dB net
+
+## Feature Inventory
+
+### Core Pipeline
+- MNA stamping: R, C, L, V/I sources, diodes, BJTs, JFETs, MOSFETs, tubes, op-amps, VCAs
+- DK kernel with proper trapezoidal discretization; NR solver 1D / 2D / M-dimensional (M≤16)
+- Codegen for diode, BJT, JFET, MOSFET, tube/triode/pentode (Gaussian elimination M=3..16)
+- Per-device `.model` params (heterogeneous models supported per device)
+- Parasitic cap auto-insertion (10pF junction caps) when nonlinear circuit has no caps
+- Sparsity-aware emission (systematic zero-skipping in A_neg, N_v, K, S*N_i)
+- Runtime sample rate: `set_sample_rate()` recomputes matrices from G+C
+
+### DC Operating Point
+- LU with partial pivoting, logarithmic junction-aware voltage limiting, source + Gmin stepping
+- Internal nodes for parasitic BJTs (basePrime/colPrime/emitPrime, ngspice-style)
+- Op-amp seeding + per-iteration rail clamp + AOL=1000 cap in DC G (precision rectifiers)
+- Diode BV/IBV breakdown + device-level Gmin (1e-12 S) — physical reverse bias
+- Low-rate DC warmup (200 Hz × 1000 samples) for failed-DC-OP circuits; settled state cached
+- `DC_NL_I` constant initializes `i_nl_prev` in generated code
+
+### Device Models
+- **BJT**: Gummel-Poon (VAF/VAR/IKF/IKR, CJE/CJC, NF/ISE/NE) matching ngspice `bjtload.c` line-for-line; Ebers-Moll fallback; self-heating (RTH/CTH/TAMB); RB/RC/RE parasitic R
+- **JFET/MOSFET**: 2D Shichman-Hodges / Level 1; CGS/CGD junction caps; RD/RS parasitic R; MOSFET body effect (GAMMA/PHI)
+- **Diode**: Shockley + RS + CJO + BV/IBV Zener
+- **Tube (triode)**: Koren + Leach grid current, early-effect lambda, CCG/CGP/CCP junction caps, RGI grid-stop
+- **Tube (pentode)**: 3 screen-current equation families — Rational (Reefman §4.4), Exponential (DerkE §4.5), Classical Koren. `--tube-grid-fa {auto,on,off}` reduces 3D→2D when Vgk<cutoff
+- **Op-amp**: Boyle macromodel, VCC/VEE asymmetric rails, optional `SR=` slew-rate limiting (V/μs), rail modes `auto/none/hard/active-set/active-set-be/boyle-diodes`, `AOL_TRANSIENT_CAP` override
+- **VCA**: THAT 2180 / DBX 2150 current-mode exponential gain with gain-dependent THD
+
+### Dynamic Parameters
+- `.pot R min max [default] [label]`: per-block O(N³) rebuild on change; per-sample smoother via `.smoothed.next()`; warm DC-OP re-init when `|r - r_prev|/r_prev > 0.20`
+- `.wiper R_cw R_ccw total [pos] [label]`: two-resistor wiper; position-0..1 UI param
+- `.switch R/C/L pos0 pos1 ...`: up to 16 switches; G/C/L stamped at pos-0 baseline (not static) so initial state is self-consistent
+- `.gang "Label" m1 m2 ...`: links multiple pot/wiper members under one parameter; `!` prefix inverts
+
+### Codegen Infrastructure
+- **DK codegen** with augmented MNA (≤1 transformer group, M<10, K well-conditioned)
+- **Nodal Schur** (medium complexity), **Nodal full LU** (K≈0 / positive K / ill-cond K or S)
+- Full-LU optimizations stacked: chord method + cross-timestep Jacobian persistence + compile-time sparse LU (AMD ordering, symbolic factorization)
+- Oversampling 2x/4x: self-contained polyphase half-band IIR, no runtime dependencies
+- `--solver {auto|dk|nodal}`, `--backward-euler`, `--oversampling {1,2,4}`, `--opamp-rail-mode`
+
+### CLI
+- `melange compile` → Rust code or plugin project
+- `melange simulate` → parse → MNA → DK/nodal → process WAV (`--input`, `--amplitude`)
+- `melange analyze` → frequency response with `--pot`/`--switch` overrides
+- `melange dc-op` → DC operating point
+- Plugin shipability flags: `--vendor`, `--vendor-url`, `--email`, `--vst3-id`, `--clap-id`
+- Plugin level params: Input Level + Output Level (±24 dB), `--no-level-params` to opt out
+
+### Validation & Quality
+- SPICE validation infrastructure (ngspice correlation)
+- Parser hardening: input-size caps (10M bytes, 50k elements, 1k models, 256 name len), non-ASCII normalization
+- cargo-fuzz target (parser → MNA → DkKernel → CircuitIR)
+- Error types: `#[non_exhaustive]` enums, no panicking library code
+- Logging via `log` crate (no `eprintln!` in library code)
+- Real-time safety: no alloc/locks/syscalls in audio processing, all buffers preallocated
+
+## Performance
+
+- DK circuits: 100–600× realtime (Schur path)
+- Nodal full LU (Pultec, N=41, M=8, 2 transformers): ~11× realtime with all stacked optimizations
+- VCA compressor (N=21, M=3, nodal full LU): ~42× realtime
+- 8-BJT Class AB power amp (DK M=9): 0.4× realtime (parasitic-R limited; K_eff approach planned)
+
+## Known Limitations
+
+- Parasitic caps (10pF) auto-inserted across junctions for purely resistive nonlinear circuits
+- Tube Koren: lambda parameter models finite plate resistance; no space-charge or transit-time effects
+- BJT GP: no substrate current or avalanche breakdown
+- All device models fixed at room temperature (27°C); no TNOM/TC1/TC2/XTI
+- `MAX_M=16` — bound on NR dimension; iterative/sparse NR for M>16 deferred
+- Full-LU NR + ill-conditioned A (cond(A) > ~1000): Schur preferred when K well-conditioned. No known circuit needs both pathological K and ill-conditioned A. See DEBUGGING.md "Known Full-LU NR Limitations"
+- Ideal transformer decomposition (dependent sources + explicit leakage/magnetizing L): deferred, current coupled-inductor approach sufficient for Pultec at +1.8 dB
+
+## Validated Circuits
+
+Circuit netlists live in the [melange-audio/circuits](https://github.com/melange-audio/circuits) repo
+(locally `../melange-circuits`). Circuit-specific tests use `.test.toml` sidecars. All circuits
+start in `unstable/`; promotion to `stable/` requires user DAW sign-off (SPICE correlation
+and compilation are necessary but not sufficient).
+
+- **Passive tube EQ** (passive-eq1a): 4 tubes, 2 transformers, 7 pots, 3 switches, global NFB. Sowter DWG E-72,658-2. ~11× RT on nodal full LU. Flat ±1 dB 20Hz–15kHz, 21 dB differential NFB.
+- **Wurlitzer 200A preamp** (wurli-preamp): N=11, M=3–5 FA, 2N5089 Ebers-Moll. SPICE-validated 6-nines, 3.2% RMS.
+- **Wurlitzer 200A power amp** (wurli-power-amp): N=20, M=9–16 FA, quasi-complementary class AB. DK codegen 0.4× RT, nodal 0.04×.
+- **Tweed-style 2-stage 12AX7 preamp** (twas-preamp): N=13, M=4. 50 mV → 549 mV (+20.8 dB). Zero NR divergence.
+- **SSL bus compressor** (4kbuscomp): 12 op-amps, 2 VCAs, 6 diodes, 2 pots, 2 switches. DC OP basin trap FIXED 2026-04-17 (`b771512`, post-fallback refinement NR). Transient chord-NR false convergence PARTIAL FIX 2026-04-17 (`c3d3eae`, residual check on ActiveSetBe/ActiveSet) — stable at `d ≤ 2 s` all amps on the original netlist. `d = 5 s` closes only with the netlist-side `.model OA_TL074 VSAT=11 → 13.5` fix (TL07x on ±15 V swings to ±13.5 V per TI datasheet); that diff is currently uncommitted in `melange-circuits/unstable/dynamics/4kbuscomp.cir`. See DEBUGGING.md "ActiveSetBe Chord-NR False Convergence" and "Precision Rectifier DC OP Convergence".
+- **VCR audio ALC compressor**: N=21, M=3, nodal full-LU ~42× RT. Key: 100Ω Rdecouple between VCA sig- and I-V converter fixes positive K diagonal.
+- **Klon Centaur**: ActiveSetBe auto-route (verified amp=[0.01..0.50]). BoyleDiodes opt-in only (heavy-clip divergence at amp ≥ 0.05 unsolved — not a blocker, see DEBUGGING.md).
+- **Tube Screamer** / guitar pedals: stable.
+- **Pentode stages**: EL84 single stage, Tweed Deluxe (6V6GT beam tetrode), 6K7 varimu, Plexi (4×EL34 grid-off FA M=18→14). DC-OP validated, end-to-end compile-and-run verified.
+- **Uniquorn v2**: 16-stage cascade (N=64, M=12, ~3× RT mono) + push-pull power (N=23, M=6, ~15× RT).
+
+## Pending Work
+
+- **Neve 1073**: EQ section (Stage 3), integration (Stage 4), plugin (Stage 5). Stages 1 & 2 BA283 amps SPICE-validated.
+- **Oomox plugin roadmap**: `.runtime` VS, named constants, DC op accessor, warmup constant, runtime DC OP recompute
+- **Performance**: DK parasitic BJTs (power amp 0.41×, K_eff approach planned); hot/cold state split; fast_powf for Koren tube model
+- **Documentation**: user-facing docs, example circuits, getting-started guide
+- **Multi-language codegen**: `Emitter` trait + `CircuitIR` are language-agnostic by design. Planned: C++, FAUST, Python/NumPy, MATLAB/Octave.
+
+### Deferred
+- Ideal transformer formulation (Pultec at +1.8 dB with current approach, not blocking)
+- Phase 6a/6b type safety (NodeIdx newtype, field visibility)
+- Phase 7 crate split (extract melange-parser, melange-codegen)
+- M>16 iterative/sparse NR
+- BoyleDiodes heavy-clip Anderson acceleration / BoyleDiodes→ActiveSetBe hybrid (low priority)
+
+## Cross-Compilation (macOS from Linux)
+
+Zig 0.13 + cargo-zigbuild + macOS SDK 13.3 + rcodesign (ad-hoc signing).
+`cargo zigbuild --release --target universal2-apple-darwin` produces universal Mac binaries.
+melange-cli does NOT cross-compile (ureq/dirs need CoreFoundation), but generated plugins do.
