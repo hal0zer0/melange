@@ -1463,6 +1463,12 @@ pub struct PotentiometerIR {
     pub max_resistance: f64,
     /// True if one terminal is grounded
     pub grounded: bool,
+    /// If Some, this entry was declared via `.runtime R` rather than `.pot`.
+    /// The contained string is the Rust identifier the emitter uses for
+    /// `set_runtime_R_<field>` (no DC-OP warm re-init) and the `<field>()`
+    /// getter. Plugin template skips nih-plug knob emission for these.
+    #[serde(default)]
+    pub runtime_field: Option<String>,
 }
 
 /// Wiper potentiometer group for code generation.
@@ -2639,6 +2645,7 @@ impl CircuitIR {
                 min_resistance: p.min_resistance,
                 max_resistance: p.max_resistance,
                 grounded: p.grounded,
+                runtime_field: p.runtime_field.clone(),
             })
             .collect();
 
@@ -3579,6 +3586,7 @@ impl CircuitIR {
                     min_resistance: p.min_resistance,
                     max_resistance: p.max_resistance,
                     grounded: p.grounded,
+                    runtime_field: p.runtime_field.clone(),
                 })
                 .collect(),
             wiper_groups: mna

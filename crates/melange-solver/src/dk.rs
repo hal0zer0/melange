@@ -113,6 +113,10 @@ pub struct SmPotData {
     pub max_resistance: f64,
     /// True if one terminal is grounded
     pub grounded: bool,
+    /// Mirror of `PotInfo::runtime_field`. If Some, this pot was declared
+    /// via `.runtime R` — emitter uses this identifier for the setter name
+    /// and skips the DC-OP snap block.
+    pub runtime_field: Option<String>,
 }
 
 /// DK kernel for a circuit.
@@ -408,6 +412,7 @@ impl DkKernel {
                 min_resistance: pot_info.min_resistance,
                 max_resistance: pot_info.max_resistance,
                 grounded: pot_info.grounded,
+                runtime_field: pot_info.runtime_field.clone(),
             });
         }
 
@@ -802,6 +807,7 @@ impl DkKernel {
                 min_resistance: pot_info.min_resistance,
                 max_resistance: pot_info.max_resistance,
                 grounded: pot_info.grounded,
+                runtime_field: pot_info.runtime_field.clone(),
             });
         }
 

@@ -550,6 +550,12 @@ pub struct SwitchInfo {
 }
 
 /// Potentiometer information resolved from .pot directive.
+///
+/// Also used for `.runtime R` entries (audio-rate resistor modulation).
+/// When `runtime_field = Some(field_name)`, this pot represents a runtime
+/// resistor rather than a user-facing knob: codegen emits
+/// `set_runtime_R_<field_name>` without the 20% DC-OP warm re-init, and
+/// the plugin template does NOT emit a nih-plug FloatParam for it.
 #[derive(Debug, Clone)]
 pub struct PotInfo {
     /// Name of the resistor this pot controls
@@ -566,6 +572,10 @@ pub struct PotInfo {
     pub max_resistance: f64,
     /// True if one terminal is grounded (simplifies SM update)
     pub grounded: bool,
+    /// If Some, this entry is a `.runtime R` rather than a `.pot`. The
+    /// contained string is the Rust identifier for the generated setter
+    /// (`set_runtime_R_<field>`) and getter. None = ordinary user knob.
+    pub runtime_field: Option<String>,
 }
 
 /// Wiper potentiometer group — links two `PotInfo` entries as complementary legs.
@@ -2446,11 +2456,49 @@ impl MnaBuilder {
                     min_resistance: pot_dir.min_value,
                     max_resistance: pot_dir.max_value,
                     grounded,
+                    runtime_field: None,
                 });
             } else {
                 return Err(MnaError::TopologyError(format!(
                     ".pot references resistor '{}' which was not found",
                     pot_dir.resistor_name
+                )));
+            }
+        }
+
+        // Resolve .runtime R directives. These share the pot table so
+        // rebuild_matrices / DK-kernel / nodal-emitter machinery applies
+        // unchanged, but `runtime_field = Some(...)` tells downstream
+        // codegen to emit `set_runtime_R_<field>` (no DC-OP snap) rather
+        // than `set_pot_N`.
+        for rr_dir in &netlist.runtime_resistors {
+            let resistor = netlist.elements.iter().find(|e| {
+                matches!(e, Element::Resistor { name, .. } if name.eq_ignore_ascii_case(&rr_dir.resistor_name))
+            });
+            if let Some(Element::Resistor {
+                n_plus,
+                n_minus,
+                value,
+                ..
+            }) = resistor
+            {
+                let node_p = self.node_map[n_plus];
+                let node_q = self.node_map[n_minus];
+                let grounded = node_p == 0 || node_q == 0;
+                mna.pots.push(PotInfo {
+                    name: rr_dir.resistor_name.clone(),
+                    node_p,
+                    node_q,
+                    g_nominal: 1.0 / *value,
+                    min_resistance: rr_dir.min_value,
+                    max_resistance: rr_dir.max_value,
+                    grounded,
+                    runtime_field: Some(rr_dir.field_name.clone()),
+                });
+            } else {
+                return Err(MnaError::TopologyError(format!(
+                    ".runtime R references resistor '{}' which was not found",
+                    rr_dir.resistor_name
                 )));
             }
         }

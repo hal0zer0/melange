@@ -91,6 +91,13 @@ pub struct Netlist {
     /// in both trapezoidal and backward-Euler RHS builders. See Oomox
     /// roadmap P1.
     pub runtime_sources: Vec<RuntimeDirective>,
+    /// Runtime resistor directives (.runtime R1 min max as field_name).
+    /// Audio-rate resistor modulation for envelope-linked bias (Latinum §5(b)).
+    /// Unlike `.pot`, these DO NOT trigger the large-jump DC-OP warm re-init —
+    /// envelope followers drive the setter every block/sample and a mid-stream
+    /// reseed is audible as a click. Share the 64-slot pot table at MNA level
+    /// but do not emit plugin knobs.
+    pub runtime_resistors: Vec<RuntimeResistorDirective>,
 }
 
 /// A runtime voltage source directive (.runtime Vname as field_name).
@@ -106,6 +113,27 @@ pub struct RuntimeDirective {
     /// Rust identifier used for the generated CircuitState field.
     /// Validated at parse time: must be non-empty, ASCII, start with a
     /// letter or underscore, and contain only `[A-Za-z0-9_]`.
+    pub field_name: String,
+}
+
+/// A runtime resistor directive (.runtime Rname min max as field_name).
+///
+/// Audio-rate resistor modulation target. Codegen emits
+/// `set_runtime_R_<field>(r)` on `CircuitState` that clamps to [min, max]
+/// and marks matrices dirty — without the large-jump DC-OP warm re-init
+/// that `.pot R` uses (which would be an audible click at envelope-follower
+/// update rates). Plugin template does NOT emit a nih-plug knob for these;
+/// the plugin drives the setter from its own envelope follower.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RuntimeResistorDirective {
+    /// Name of the resistor this directive claims (case-insensitive match).
+    pub resistor_name: String,
+    /// Minimum resistance (ohms), used for clamp at runtime.
+    pub min_value: f64,
+    /// Maximum resistance (ohms), used for clamp at runtime.
+    pub max_value: f64,
+    /// Rust identifier used for the generated setter name
+    /// (`set_runtime_R_<field_name>`) and getter (`<field_name>()`).
     pub field_name: String,
 }
 
@@ -222,6 +250,7 @@ impl Netlist {
             input_impedance: None,
             linearize_devices: Vec::new(),
             runtime_sources: Vec::new(),
+            runtime_resistors: Vec::new(),
         }
     }
 
@@ -1274,6 +1303,9 @@ impl Parser {
         // field name. Duplicate VS or field names would produce generated
         // code that fails to compile (two `pub field: f64` declarations), so
         // rejecting here gives a better error than waiting for rustc.
+        //
+        // .runtime R (resistor) field names share the namespace with
+        // .runtime V so a circuit cannot bind both `V1 as foo` and `R1 as foo`.
         {
             let mut seen_sources = std::collections::HashSet::new();
             let mut seen_fields = std::collections::HashSet::new();
@@ -1307,6 +1339,69 @@ impl Parser {
                         message: format!(
                             ".runtime declares field name '{}' more than once",
                             rt.field_name
+                        ),
+                    });
+                }
+            }
+
+            // Same checks for .runtime R: resistor exists, unique resistor,
+            // unique field name (shared namespace with runtime_sources), and
+            // the resistor is not already claimed by a .pot or .wiper.
+            let mut seen_resistors = std::collections::HashSet::new();
+            let pot_claimed: std::collections::HashSet<String> = netlist
+                .pots
+                .iter()
+                .map(|p| p.resistor_name.to_ascii_uppercase())
+                .collect();
+            let wiper_claimed: std::collections::HashSet<String> = netlist
+                .wipers
+                .iter()
+                .flat_map(|w| {
+                    [
+                        w.resistor_cw.to_ascii_uppercase(),
+                        w.resistor_ccw.to_ascii_uppercase(),
+                    ]
+                })
+                .collect();
+            for rr in &netlist.runtime_resistors {
+                let exists = netlist.elements.iter().any(|e| {
+                    matches!(e, Element::Resistor { name, .. }
+                             if name.eq_ignore_ascii_case(&rr.resistor_name))
+                });
+                if !exists {
+                    return Err(ParseError {
+                        line: 0,
+                        message: format!(
+                            ".runtime R references resistor '{}' which was not found in the netlist",
+                            rr.resistor_name
+                        ),
+                    });
+                }
+                let rkey = rr.resistor_name.to_ascii_uppercase();
+                if pot_claimed.contains(&rkey) || wiper_claimed.contains(&rkey) {
+                    return Err(ParseError {
+                        line: 0,
+                        message: format!(
+                            ".runtime R resistor '{}' is already claimed by a .pot or .wiper directive",
+                            rr.resistor_name
+                        ),
+                    });
+                }
+                if !seen_resistors.insert(rkey) {
+                    return Err(ParseError {
+                        line: 0,
+                        message: format!(
+                            ".runtime R declares resistor '{}' more than once",
+                            rr.resistor_name
+                        ),
+                    });
+                }
+                if !seen_fields.insert(rr.field_name.clone()) {
+                    return Err(ParseError {
+                        line: 0,
+                        message: format!(
+                            ".runtime declares field name '{}' more than once",
+                            rr.field_name
                         ),
                     });
                 }
@@ -1809,8 +1904,25 @@ impl Parser {
                 }
             }
             ".runtime" => {
-                let rt = self.parse_runtime_directive(&parts)?;
-                netlist.runtime_sources.push(rt);
+                // Dispatch on target prefix: V → voltage source, R → resistor.
+                let target = parts.get(1).copied().unwrap_or("");
+                let first = target.chars().next().unwrap_or(' ').to_ascii_uppercase();
+                match first {
+                    'V' => {
+                        let rt = self.parse_runtime_directive(&parts)?;
+                        netlist.runtime_sources.push(rt);
+                    }
+                    'R' => {
+                        let rr = self.parse_runtime_resistor_directive(&parts)?;
+                        netlist.runtime_resistors.push(rr);
+                    }
+                    _ => {
+                        return Err(self.error(format!(
+                            ".runtime target '{}' must start with V (voltage source) or R (resistor)",
+                            target
+                        )));
+                    }
+                }
             }
             ".input_impedance" => {
                 self.parse_input_impedance_directive(&parts, netlist)?;
@@ -2403,6 +2515,57 @@ impl Parser {
         }
         Ok(RuntimeDirective {
             vs_name,
+            field_name,
+        })
+    }
+
+    /// Parse `.runtime Rname min max as field_name`.
+    ///
+    /// The resistor must already exist in the netlist (checked in the
+    /// netlist-wide validation pass). `min` and `max` bound the audio-rate
+    /// clamp applied by the generated setter. `field_name` names the
+    /// `set_runtime_R_<field>` setter and `<field>()` getter emitted on
+    /// `CircuitState`.
+    fn parse_runtime_resistor_directive(
+        &self,
+        parts: &[&str],
+    ) -> Result<RuntimeResistorDirective, ParseError> {
+        // .runtime Rname min max as field_name
+        self.require_parts(parts, 6, ".runtime Rname min max as field_name")?;
+        if !parts[4].eq_ignore_ascii_case("as") {
+            return Err(self.error(format!(
+                ".runtime expects 'as' before field name, got '{}'",
+                parts[4]
+            )));
+        }
+        let resistor_name = parts[1].to_string();
+        let base_name = resistor_name.rsplit('.').next().unwrap_or(&resistor_name);
+        if !base_name.starts_with('R') && !base_name.starts_with('r') {
+            return Err(self.error(format!(
+                ".runtime R target '{}' must be a resistor (name starting with R)",
+                resistor_name
+            )));
+        }
+        let min_value = self.parse_positive_value(parts[2], ".runtime R min")?;
+        let max_value = self.parse_positive_value(parts[3], ".runtime R max")?;
+        if min_value >= max_value {
+            return Err(self.error(format!(
+                ".runtime R min ({}) must be less than max ({})",
+                min_value, max_value
+            )));
+        }
+        let field_name = parts[5].to_string();
+        if !is_valid_rust_ident(&field_name) {
+            return Err(self.error(format!(
+                ".runtime R field name '{}' is not a valid Rust identifier \
+                 (must start with letter or _, contain only ASCII letters/digits/_)",
+                field_name
+            )));
+        }
+        Ok(RuntimeResistorDirective {
+            resistor_name,
+            min_value,
+            max_value,
             field_name,
         })
     }

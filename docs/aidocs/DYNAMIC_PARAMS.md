@@ -170,7 +170,7 @@ entries are restamped and downstream matrices recomputed).
   picker, bright switch). Switches change topology values, not just one
   conductance, so they need a real rebuild rather than a rank-1 update.
 
-## `.runtime` — Host-Driven Voltage Source
+## `.runtime V` — Host-Driven Voltage Source
 
 ### Syntax
 ```
@@ -200,7 +200,8 @@ indices are position-dependent. `.runtime` makes it first-class.
   then `[A-Za-z0-9_]`). Rust keywords are rejected by rustc downstream,
   not by the parser — if you write `.runtime V1 as loop`, compilation will
   fail with a clear message.
-- Each VS can be bound at most once; each field name is unique per circuit.
+- Each VS can be bound at most once; each field name is unique per circuit
+  (shared namespace with `.runtime R`).
 - Emitted row reference uses `VSOURCE_<NAME>_RHS_ROW` so the stamp tracks
   VS position shifts automatically.
 
@@ -213,6 +214,87 @@ for sample in input_buffer {
     // ...
 }
 ```
+
+## `.runtime R` — Audio-Rate Resistor Modulation
+
+### Syntax
+```
+Rk_L1 cathode1 0 10k
+.runtime Rk_L1 2k 12k as bias_r_L1
+```
+
+### Semantics
+Audio-rate resistor-modulation target. Unlike `.pot R` (user knob) and
+unlike `.runtime V` (voltage source), this is for **per-block or per-sample
+resistance updates** driven by plugin-side control signals — envelope
+followers, LFOs, sidechain detectors.
+
+Codegen emits on `CircuitState`:
+- `pub const RUNTIME_R_<FIELD>_MIN: f64`, `_MAX`, `_NOMINAL` — discoverable
+  consts keyed on the field name (so plugin code can read the declared
+  clamp range without knowing the internal pot index).
+- `pub fn <field>(&self) -> f64` — read-only accessor returning the
+  current resistance.
+- `pub fn set_runtime_R_<field>(&mut self, r: f64)` — clamps `r` to
+  `[RUNTIME_R_<FIELD>_MIN, RUNTIME_R_<FIELD>_MAX]`, marks matrices dirty,
+  returns. The next `process_sample` rebuilds A/S/K before stepping.
+
+Internally, `.runtime R` reuses the `.pot` machinery (conductance delta
+into G on rebuild), so MNA/kernel/nodal codegen are all unchanged. The
+distinguishing contract lives in the setter body — see next section.
+
+### Difference from `.pot R` (this is the whole point)
+`.pot R` applies a **warm DC-OP re-init on pot jumps >20%** — when a knob
+sweeps rapidly, `v_prev` is snapped back to `DC_OP` and `i_nl_prev` to
+`DC_NL_I` so NR doesn't burn its iteration budget on a stale seed. Fine
+for user knob drags (paired with the plugin template's 10 ms smoother);
+**fatal at envelope-follower update rates** — every mid-signal seed reset
+is an audible click.
+
+`.runtime R` deliberately **omits that snap**. The plugin-side envelope
+follower is the smoother; the setter delivers the requested R exactly,
+without any internal state reset.
+
+| Concern | `.pot R` | `.runtime R` |
+|---|---|---|
+| Setter name | `set_pot_N(r)` | `set_runtime_R_<field>(r)` |
+| Plugin knob emitted? | Yes (nih-plug `FloatParam`) | No (plugin drives directly) |
+| Warm DC-OP re-init? | Yes (>20% delta) | No |
+| Internal smoothing? | Plugin template adds 10 ms linear smoother | None — caller is the smoother |
+| Expected call rate | Per sample (smoothed knob pos) | Per block or per sample (envelope) |
+| Clamp range source | `.pot` min/max | `.runtime R` min/max |
+
+### Constraints
+- `Rname` must reference an existing resistor (name starts with `R`).
+- `min < max`, both positive (ohms).
+- `field_name` must be a valid ASCII Rust identifier.
+- A resistor claimed by `.runtime R` cannot also be claimed by `.pot` or
+  `.wiper`, and vice versa.
+- Field namespace is shared with `.runtime V` — the same field name cannot
+  be bound to both a VS and a resistor in one circuit.
+- Bare-resistor topologies only for v1. Resistors that participate in
+  trapezoidal integrator state (e.g. coupled-inductor tap resistances)
+  may work but are not in the validated envelope.
+
+### Plugin usage
+```rust
+// Build a BiasEnvelope on the plugin side (peak follower, 3 ms attack /
+// 80 ms release), map envelope 0..1 to R_nominal × (1 − 0.2·env), and
+// write via the audio-rate setter every block (or every sample if the
+// envelope follower is inside the per-sample loop).
+let env = bias_env.tick(sample.abs());
+let r = RUNTIME_R_BIAS_R_L1_NOMINAL * (1.0 - 0.2 * env);
+state.set_runtime_R_bias_r_L1(r);
+let out = process_sample(sample, &mut state);
+```
+
+### Validation path
+Testing a `.runtime R` plugin should include a click regression: at a
+sustained 1 kHz 0.3 V tone, sweep the resistor across ±20% in 5 ms and
+confirm no discontinuity >0.5 dB between adjacent samples. `.pot R` fails
+that test (DC-OP snap fires); `.runtime R` passes. See the
+`runtime_r_sweep_no_nan_and_no_interstate_discontinuity` test in
+`tests/runtime_source_tests.rs` for the reference harness.
 
 ## Plugin Code Generation
 

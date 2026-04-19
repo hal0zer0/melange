@@ -1618,10 +1618,15 @@ fn compile_circuit_source(
             };
 
             // Build pot/switch parameter info from MNA data (works for both DK and nodal paths).
+            // Skip entries declared via `.runtime R` — those are driven by plugin-side
+            // envelope followers via `set_runtime_R_<field>` and do not get nih-plug
+            // knobs. The netlist.pots index lookup stays aligned because `.pot`
+            // directives are pushed into mna.pots BEFORE `.runtime R` directives.
             let pot_params: Vec<plugin_template::PotParamInfo> = mna
                 .pots
                 .iter()
                 .enumerate()
+                .filter(|(_, p)| p.runtime_field.is_none())
                 .map(|(idx, p)| plugin_template::PotParamInfo {
                     index: idx,
                     name: netlist

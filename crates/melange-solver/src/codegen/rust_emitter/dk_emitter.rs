@@ -1000,40 +1000,76 @@ impl RustEmitter {
             ));
         }
 
-        // Emit set_pot_N() methods for DK path
+        // Emit set_pot_N() / set_runtime_R_<field>() methods for DK path.
+        //
+        // `.pot`: user-facing knob. Setter applies the 20% DC-OP warm re-init
+        // so that wide pot jumps land on a bias-consistent NR seed.
+        //
+        // `.runtime R` (runtime_field = Some(field)): audio-rate modulation
+        // target (e.g. envelope-linked bias). Setter name is
+        // `set_runtime_R_<field>`, and the DC-OP snap is deliberately
+        // omitted — envelope followers call the setter every block/sample
+        // and a mid-signal state reset is audible as a click.
         for (idx, pot) in ir.pots.iter().enumerate() {
-            let dc_op_reset = if dk_has_dc_op {
-                "            self.v_prev = DC_OP;\n".to_string()
-            } else {
-                "            self.v_prev = [0.0; N];\n".to_string()
-            };
-            let dc_nl_reset = if dk_has_dc_nl {
-                "            self.i_nl_prev = DC_NL_I;\n".to_string()
-            } else {
-                String::new()
-            };
-            code.push_str(&format!(
-                "    /// Set potentiometer {idx} resistance (clamped to [{:.1}..{:.1}] ohms).\n\
-                 \x20   ///\n\
-                 \x20   /// Marks matrices dirty. Rebuild deferred to next `process_sample()`.\n\
-                 \x20   pub fn set_pot_{idx}(&mut self, resistance: f64) {{\n\
-                 \x20       if !resistance.is_finite() {{ return; }}\n\
-                 \x20       let r = resistance.clamp(POT_{idx}_MIN_R, POT_{idx}_MAX_R);\n\
-                 \x20       if (r - self.pot_{idx}_resistance).abs() < 1e-12 {{ return; }}\n\
-                 \x20       let r_prev = self.pot_{idx}_resistance;\n\
-                 \x20       self.pot_{idx}_resistance = r;\n\
-                 \x20       self.matrices_dirty = true;\n\
-                 \x20       // Warm DC-OP re-init: on large pot jumps, reset NR seed to DC bias.\n\
-                 \x20       // Gated at 20% relative delta so smoothed per-sample sweeps do not\n\
-                 \x20       // snap v_prev mid-signal and cause audible clicks. See Batch D Phase 2.\n\
-                 \x20       let rel_delta = (r - r_prev).abs() / r_prev.max(1e-12);\n\
-                 \x20       if rel_delta > 0.20 {{\n\
+            match &pot.runtime_field {
+                None => {
+                    let dc_op_reset = if dk_has_dc_op {
+                        "            self.v_prev = DC_OP;\n".to_string()
+                    } else {
+                        "            self.v_prev = [0.0; N];\n".to_string()
+                    };
+                    let dc_nl_reset = if dk_has_dc_nl {
+                        "            self.i_nl_prev = DC_NL_I;\n".to_string()
+                    } else {
+                        String::new()
+                    };
+                    code.push_str(&format!(
+                        "    /// Set potentiometer {idx} resistance (clamped to [{:.1}..{:.1}] ohms).\n\
+                         \x20   ///\n\
+                         \x20   /// Marks matrices dirty. Rebuild deferred to next `process_sample()`.\n\
+                         \x20   pub fn set_pot_{idx}(&mut self, resistance: f64) {{\n\
+                         \x20       if !resistance.is_finite() {{ return; }}\n\
+                         \x20       let r = resistance.clamp(POT_{idx}_MIN_R, POT_{idx}_MAX_R);\n\
+                         \x20       if (r - self.pot_{idx}_resistance).abs() < 1e-12 {{ return; }}\n\
+                         \x20       let r_prev = self.pot_{idx}_resistance;\n\
+                         \x20       self.pot_{idx}_resistance = r;\n\
+                         \x20       self.matrices_dirty = true;\n\
+                         \x20       // Warm DC-OP re-init: on large pot jumps, reset NR seed to DC bias.\n\
+                         \x20       // Gated at 20% relative delta so smoothed per-sample sweeps do not\n\
+                         \x20       // snap v_prev mid-signal and cause audible clicks. See Batch D Phase 2.\n\
+                         \x20       let rel_delta = (r - r_prev).abs() / r_prev.max(1e-12);\n\
+                         \x20       if rel_delta > 0.20 {{\n\
 {dc_op_reset}\
 {dc_nl_reset}\
-                 \x20       }}\n\
-                 \x20   }}\n\n",
-                pot.min_resistance, pot.max_resistance,
-            ));
+                         \x20       }}\n\
+                         \x20   }}\n\n",
+                        pot.min_resistance, pot.max_resistance,
+                    ));
+                }
+                Some(field) => {
+                    let field_upper = field.to_ascii_uppercase();
+                    code.push_str(&format!(
+                        "    /// Current resistance of runtime resistor `{field}` (ohms).\n\
+                         \x20   ///\n\
+                         \x20   /// Read-only accessor; use `set_runtime_R_{field}` to update.\n\
+                         \x20   #[inline]\n\
+                         \x20   pub fn {field}(&self) -> f64 {{ self.pot_{idx}_resistance }}\n\n\
+                         \x20   /// Set runtime resistor `{field}` (clamped to [{:.1}..{:.1}] ohms).\n\
+                         \x20   ///\n\
+                         \x20   /// Audio-rate safe: no DC-OP warm re-init, no internal smoothing.\n\
+                         \x20   /// Caller (plugin-side envelope follower) is the smoother.\n\
+                         \x20   /// Marks matrices dirty. Rebuild deferred to next `process_sample()`.\n\
+                         \x20   pub fn set_runtime_R_{field}(&mut self, resistance: f64) {{\n\
+                         \x20       if !resistance.is_finite() {{ return; }}\n\
+                         \x20       let r = resistance.clamp(RUNTIME_R_{field_upper}_MIN, RUNTIME_R_{field_upper}_MAX);\n\
+                         \x20       if (r - self.pot_{idx}_resistance).abs() < 1e-12 {{ return; }}\n\
+                         \x20       self.pot_{idx}_resistance = r;\n\
+                         \x20       self.matrices_dirty = true;\n\
+                         \x20   }}\n\n",
+                        pot.min_resistance, pot.max_resistance,
+                    ));
+                }
+            }
         }
 
         // Emit rebuild_matrices()
@@ -1499,6 +1535,24 @@ impl RustEmitter {
                 idx,
                 fmt_f64(pot.max_resistance)
             ));
+            // For .runtime R entries, also emit discoverable public aliases
+            // keyed on the runtime field name so plugin code can read the
+            // clamp range without knowing the pot index.
+            if let Some(field) = &pot.runtime_field {
+                let u = field.to_ascii_uppercase();
+                code.push_str(&format!(
+                    "pub const RUNTIME_R_{u}_MIN: f64 = POT_{}_MIN_R;\n",
+                    idx
+                ));
+                code.push_str(&format!(
+                    "pub const RUNTIME_R_{u}_MAX: f64 = POT_{}_MAX_R;\n",
+                    idx
+                ));
+                code.push_str(&format!(
+                    "pub const RUNTIME_R_{u}_NOMINAL: f64 = 1.0 / POT_{}_G_NOM;\n",
+                    idx
+                ));
+            }
             code.push('\n');
         }
         code

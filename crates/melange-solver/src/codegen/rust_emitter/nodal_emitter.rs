@@ -744,6 +744,16 @@ impl RustEmitter {
                 idx,
                 pot.max_resistance
             ));
+            // .runtime R alias constants (keyed on field name so plugin code
+            // can read clamp range without knowing the pot index).
+            if let Some(field) = &pot.runtime_field {
+                let u = field.to_ascii_uppercase();
+                code.push_str(&format!(
+                    "pub const RUNTIME_R_{u}_MIN: f64 = POT_{idx}_MIN_R;\n\
+                     pub const RUNTIME_R_{u}_MAX: f64 = POT_{idx}_MAX_R;\n\
+                     pub const RUNTIME_R_{u}_NOMINAL: f64 = 1.0 / POT_{idx}_G_NOM;\n\n",
+                ));
+            }
         }
 
         // Saturating inductor constants
@@ -2267,30 +2277,56 @@ impl RustEmitter {
 
         code.push_str("    }\n\n");
 
-        // set_pot_N() methods — O(1) delta stamping into A/A_neg/A_be matrices
-        // Since A = G + alpha*C, changing G by delta_g means A changes by delta_g at the same entries.
-        // A_neg = alpha*C - G, so A_neg changes by -delta_g. A_neg_be has no G term (unchanged).
+        // set_pot_N() / set_runtime_R_<field>() methods — O(1) delta stamping
+        // into A/A_neg/A_be matrices. Since A = G + alpha*C, changing G by
+        // delta_g means A changes by delta_g at the same entries. A_neg =
+        // alpha*C - G, so A_neg changes by -delta_g. A_neg_be has no G term.
+        //
+        // `.pot` setters apply the 20% warm DC-OP re-init (seeds NR from bias
+        // when the knob crosses a big delta). `.runtime R` setters skip that
+        // block — they are called every block/sample by plugin envelope
+        // followers, and any mid-signal NR-seed reset is audible as a click.
         for (idx, pot) in ir.pots.iter().enumerate() {
             let np = pot.node_p;
             let nq = pot.node_q;
+            let is_runtime = pot.runtime_field.is_some();
+            let (setter_name, doc_noun) = match &pot.runtime_field {
+                Some(field) => (format!("set_runtime_R_{field}"), format!("runtime resistor `{field}`")),
+                None => (format!("set_pot_{idx}"), format!("potentiometer {idx}")),
+            };
+            let min_const = match &pot.runtime_field {
+                Some(field) => format!("RUNTIME_R_{}_MIN", field.to_ascii_uppercase()),
+                None => format!("POT_{idx}_MIN_R"),
+            };
+            let max_const = match &pot.runtime_field {
+                Some(field) => format!("RUNTIME_R_{}_MAX", field.to_ascii_uppercase()),
+                None => format!("POT_{idx}_MAX_R"),
+            };
+            if let Some(field) = &pot.runtime_field {
+                // Emit a read-only accessor so the plugin can inspect current R.
+                code.push_str(&format!(
+                    "    /// Current resistance of runtime resistor `{field}` (ohms).\n\
+                     \x20   #[inline]\n\
+                     \x20   pub fn {field}(&self) -> f64 {{ self.pot_{idx}_resistance }}\n\n",
+                ));
+            }
             code.push_str(&format!(
-                "    /// Set potentiometer {} resistance (clamped to [{:.1}..{:.1}] ohms).\n\
+                "    /// Set {doc_noun} (clamped to [{:.1}..{:.1}] ohms).\n\
                  \x20   ///\n\
                  \x20   /// Updates g_work and rebuilds all matrices (O(N^3)).\n\
                  \x20   /// Call per-block, not per-sample.\n",
-                idx, pot.min_resistance, pot.max_resistance
+                pot.min_resistance, pot.max_resistance
             ));
             code.push_str(&format!(
-                "    pub fn set_pot_{}(&mut self, resistance: f64) {{\n",
-                idx
+                "    pub fn {setter_name}(&mut self, resistance: f64) {{\n",
             ));
             code.push_str(&format!(
                 "        if !resistance.is_finite() {{ return; }}\n\
-                 \x20       let r = resistance.clamp(POT_{}_MIN_R, POT_{}_MAX_R);\n\
+                 \x20       let r = resistance.clamp({min_const}, {max_const});\n\
                  \x20       if (r - self.pot_{}_resistance).abs() < 1e-12 {{ return; }}\n\n\
                  \x20       // Delta conductance: stamp into A, A_neg, A_be (NOT A_neg_be: no G term)\n\
                  \x20       let delta_g = 1.0 / r - 1.0 / self.pot_{}_resistance;\n",
-                idx, idx, idx, idx
+                idx, idx
             ));
 
             // Emit conductance stamp into g_work (full dimension if Boyle, reduced otherwise)
@@ -2359,32 +2395,38 @@ impl RustEmitter {
                 }
             }
 
-            // Capture old resistance for warm DC-OP re-init gate before updating
-            code.push_str(&format!("\n        let r_prev_{} = self.pot_{}_resistance;\n", idx, idx));
+            // Capture old resistance before updating (only needed for the
+            // warm DC-OP gate below; skip the binding entirely for .runtime R
+            // to avoid unused-variable warnings).
+            if !is_runtime {
+                code.push_str(&format!("\n        let r_prev_{} = self.pot_{}_resistance;\n", idx, idx));
+            }
             code.push_str(&format!("        self.pot_{}_resistance = r;\n", idx));
             code.push_str("        self.matrices_dirty = true;\n");
 
-            // Warm DC-OP re-init: on large pot jumps, reset NR seed state to the baked DC
-            // operating point. This prevents NR max-iter-cap hits when v_prev is stale from
-            // the old operating point. Gated at 20% relative delta so per-sample smoothed
-            // sweeps do not snap v_prev mid-signal and cause clicks. See Batch D Phase 2.
-            let has_dc_op_nodal = ir.has_dc_op;
-            let has_dc_nl_nodal = ir.topology.m > 0
-                && !ir.dc_nl_currents.is_empty()
-                && ir.dc_nl_currents.iter().any(|&v| v.abs() > 1e-30);
-            code.push_str(&format!(
-                "        let rel_delta_{idx} = (r - r_prev_{idx}).abs() / r_prev_{idx}.max(1e-12);\n\
-                 \x20       if rel_delta_{idx} > 0.20 {{\n",
-            ));
-            if has_dc_op_nodal {
-                code.push_str("            self.v_prev = DC_OP;\n");
-            } else {
-                code.push_str("            self.v_prev = [0.0; N];\n");
+            if !is_runtime {
+                // Warm DC-OP re-init: on large pot jumps, reset NR seed state to the baked DC
+                // operating point. This prevents NR max-iter-cap hits when v_prev is stale from
+                // the old operating point. Gated at 20% relative delta so per-sample smoothed
+                // sweeps do not snap v_prev mid-signal and cause clicks. See Batch D Phase 2.
+                let has_dc_op_nodal = ir.has_dc_op;
+                let has_dc_nl_nodal = ir.topology.m > 0
+                    && !ir.dc_nl_currents.is_empty()
+                    && ir.dc_nl_currents.iter().any(|&v| v.abs() > 1e-30);
+                code.push_str(&format!(
+                    "        let rel_delta_{idx} = (r - r_prev_{idx}).abs() / r_prev_{idx}.max(1e-12);\n\
+                     \x20       if rel_delta_{idx} > 0.20 {{\n",
+                ));
+                if has_dc_op_nodal {
+                    code.push_str("            self.v_prev = DC_OP;\n");
+                } else {
+                    code.push_str("            self.v_prev = [0.0; N];\n");
+                }
+                if has_dc_nl_nodal {
+                    code.push_str("            self.i_nl_prev = DC_NL_I;\n");
+                }
+                code.push_str("        }\n");
             }
-            if has_dc_nl_nodal {
-                code.push_str("            self.i_nl_prev = DC_NL_I;\n");
-            }
-            code.push_str("        }\n");
 
             code.push_str("    }\n\n");
         }
