@@ -104,6 +104,14 @@ enum Commands {
         #[arg(long)]
         backward_euler: bool,
 
+        /// Force trapezoidal even when the nodal auto-detector would promote
+        /// to backward Euler (trap propagation operator spectral_radius >
+        /// 1.002 — persistent Nyquist-rate limit cycle in v_prev). Escape
+        /// hatch for bisecting regressions or reproducing legacy output.
+        /// Ignored when `--backward-euler` is already set.
+        #[arg(long)]
+        force_trap: bool,
+
         /// Pentode grid-off dimension reduction mode.
         ///
         /// When a pentode's grid is biased well below cutoff at DC-OP, the
@@ -312,6 +320,17 @@ enum Commands {
         /// Master noise seed (u64). `0` → entropy from system clock; nonzero → deterministic.
         #[arg(long, value_name = "SEED", default_value = "0")]
         noise_seed: u64,
+
+        /// Probe an internal node. May be repeated. Probe samples are written
+        /// to a sidecar CSV (one column per probe) alongside the WAV; the
+        /// primary `-n/--output-node` signal goes to the WAV unchanged.
+        #[arg(long = "probe", value_name = "NODE")]
+        probes: Vec<String>,
+
+        /// Where to write the probe CSV. Defaults to `<output>.probes.csv`
+        /// (ignored when no `--probe` is given).
+        #[arg(long = "probe-csv", value_name = "PATH")]
+        probe_csv: Option<PathBuf>,
     },
 
     /// Analyze circuit frequency response
@@ -362,6 +381,12 @@ enum Commands {
         /// Set switch position: "Label=pos" or index=pos (0-indexed, e.g. "LF Freq=3")
         #[arg(long = "switch", value_name = "NAME=POS")]
         switch_overrides: Vec<String>,
+
+        /// Measure up to N harmonics per frequency point (0 = fundamental only,
+        /// the legacy CSV). When >0, appends `thd_pct, h2_dbc, ..., hN_dbc`
+        /// columns. Harmonics above Nyquist are reported as `nan`.
+        #[arg(long, default_value = "0")]
+        harmonics: usize,
     },
 
     /// Compute DC operating point and print node voltages
@@ -518,6 +543,7 @@ fn main() -> Result<()> {
             oversampling,
             solver,
             backward_euler,
+            force_trap,
             tube_grid_fa,
             opamp_rail_mode,
             noise,
@@ -615,6 +641,7 @@ fn main() -> Result<()> {
                 no_dc_block,
                 &solver,
                 backward_euler,
+                force_trap,
                 &tube_grid_fa,
                 rail_mode,
                 noise_mode,
@@ -680,6 +707,8 @@ fn main() -> Result<()> {
             oversampling,
             noise,
             noise_seed,
+            probes,
+            probe_csv,
         } => {
             if oversampling != 1 && oversampling != 2 && oversampling != 4 {
                 anyhow::bail!("oversampling must be 1, 2, or 4, got {}", oversampling);
@@ -701,6 +730,21 @@ fn main() -> Result<()> {
                 })?;
             let circuit_source = circuits::resolve(&input)?;
             println!("Resolved circuit: {}", circuit_source.name());
+            // Default probe CSV: derive from output WAV (foo.wav → foo.probes.csv).
+            // Only consulted when --probe is non-empty.
+            let probe_csv_path: Option<PathBuf> = if probes.is_empty() {
+                None
+            } else if let Some(p) = probe_csv {
+                Some(p)
+            } else {
+                let mut p = output.clone();
+                let stem = p.file_stem()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| "output".to_string());
+                p.set_file_name(format!("{}.probes.csv", stem));
+                Some(p)
+            };
             simulate_circuit_source(
                 &circuit_source,
                 &SimulateOptions {
@@ -717,6 +761,8 @@ fn main() -> Result<()> {
                     oversampling,
                     noise_mode,
                     noise_seed,
+                    probes: &probes,
+                    probe_csv: probe_csv_path.as_deref(),
                 },
             )
         }
@@ -733,6 +779,7 @@ fn main() -> Result<()> {
             output,
             pot_overrides,
             switch_overrides,
+            harmonics,
         } => {
             // Validate numeric CLI parameters
             if start_freq <= 0.0 || !start_freq.is_finite() {
@@ -765,6 +812,7 @@ fn main() -> Result<()> {
                 output.as_ref(),
                 &pot_overrides,
                 &switch_overrides,
+                harmonics,
             )
         }
         Commands::DcOp {
@@ -878,6 +926,7 @@ fn compile_circuit_source(
     no_dc_block: bool,
     solver_override: &str,
     backward_euler: bool,
+    force_trap: bool,
     tube_grid_fa: &str,
     opamp_rail_mode: melange_solver::codegen::OpampRailMode,
     noise_mode: melange_solver::codegen::NoiseMode,
@@ -1381,6 +1430,7 @@ fn compile_circuit_source(
         oversampling_factor: oversampling,
         dc_block: !no_dc_block,
         backward_euler,
+        force_trap,
         opamp_rail_mode,
         noise_mode,
         noise_master_seed: noise_seed,
@@ -1915,6 +1965,8 @@ struct SimulateOptions<'a> {
     oversampling: usize,
     noise_mode: melange_solver::codegen::NoiseMode,
     noise_seed: u64,
+    probes: &'a [String],
+    probe_csv: Option<&'a std::path::Path>,
 }
 
 fn simulate_circuit_source(
@@ -1974,6 +2026,23 @@ fn simulate_circuit_source(
     })?;
     if output_node_raw == 0 { anyhow::bail!("Output node cannot be ground"); }
     let output_node_idx = output_node_raw - 1;
+
+    // Resolve probes — each name must be an existing non-ground node.
+    // Probes are additive to the primary `-n` output; they share the same
+    // `output_nodes` slot ordering as the generated `process_sample` return.
+    let mut probe_indices: Vec<usize> = Vec::with_capacity(opts.probes.len());
+    for probe_name in opts.probes {
+        let raw = mna.node_map.get(probe_name.as_str()).copied().ok_or_else(|| {
+            anyhow::anyhow!(
+                "Probe node '{}' not found. Available: {:?}",
+                probe_name, mna.node_map.keys().collect::<Vec<_>>()
+            )
+        })?;
+        if raw == 0 {
+            anyhow::bail!("Probe node '{}' is ground (not probeable)", probe_name);
+        }
+        probe_indices.push(raw - 1);
+    }
 
     // Input resistance
     let (input_resistance, ir_source) = if let Some(r) = opts.input_resistance_flag {
@@ -2134,8 +2203,14 @@ fn simulate_circuit_source(
         }
     }
 
-    // Step 5: Generate circuit code
+    // Step 5: Generate circuit code.
+    // output_nodes layout: [primary, probe_1, probe_2, ...]. The generated
+    // `process_sample` returns these in order; the simulate main routes
+    // index 0 to the WAV and indices 1.. to the probe CSV.
     println!("Step 4: Generating code...");
+    let mut output_nodes = vec![output_node_idx];
+    output_nodes.extend(probe_indices.iter().copied());
+    let output_scales = vec![1.0; output_nodes.len()];
     let config = CodegenConfig {
         circuit_name: "simulate".to_string(),
         sample_rate: opts.sample_rate,
@@ -2143,15 +2218,16 @@ fn simulate_circuit_source(
         tolerance: 1e-9,
         input_resistance,
         input_node: input_node_idx,
-        output_nodes: vec![output_node_idx],
+        output_nodes,
         oversampling_factor: opts.oversampling,
-        output_scales: vec![1.0],
+        output_scales,
         include_dc_op: true,
         dc_op_max_iterations: 200,
         dc_op_tolerance: 1e-9,
         dc_block: false, // preserve DC for accurate WAV output
         pot_settle_samples: 64,
         backward_euler: false,
+        force_trap: false,
         disable_be_fallback: false,
         opamp_rail_mode: opts.opamp_rail_mode,
         noise_mode: opts.noise_mode,
@@ -2168,8 +2244,11 @@ fn simulate_circuit_source(
     };
     println!("  {} lines of code", generated.code.lines().count());
 
-    // Step 6: Append simulate main, compile, run
+    // Step 6: Append simulate main, compile, run.
+    // Probe names map 1:1 to `output_nodes[1..]`. The generated main uses
+    // them for the CSV header; the runtime argv[3] supplies the CSV path.
     println!("Step 5: Compiling and running...");
+    let probe_names: Vec<&str> = opts.probes.iter().map(|s| s.as_str()).collect();
     let simulate_main = codegen_runner::generate_simulate_main(
         opts.sample_rate,
         &[], // pot overrides (future)
@@ -2177,6 +2256,7 @@ fn simulate_circuit_source(
         if opts.input_audio.is_none() { Some(opts.amplitude) } else { None },
         1000.0, // test tone freq
         opts.duration,
+        &probe_names,
     );
     let full_source = format!("{}\n{}", generated.code, simulate_main);
 
@@ -2190,7 +2270,10 @@ fn simulate_circuit_source(
         println!("  Compiled successfully");
     }
 
-    // Run the binary
+    // Run the binary. argv layout:
+    //   [1] input.wav | "--tone"
+    //   [2] output.wav
+    //   [3] probes.csv  (only present when probes were baked in)
     let mut cmd = std::process::Command::new(&compiled.path);
     if let Some(audio_path) = opts.input_audio {
         cmd.arg(audio_path.to_str().unwrap_or("input.wav"));
@@ -2198,6 +2281,9 @@ fn simulate_circuit_source(
         cmd.arg("--tone");
     }
     cmd.arg(opts.output.to_str().unwrap_or("output.wav"));
+    if let Some(csv_path) = opts.probe_csv {
+        cmd.arg(csv_path.to_str().unwrap_or("probes.csv"));
+    }
 
     let result = cmd.output()
         .with_context(|| "Failed to run compiled binary")?;
@@ -2220,6 +2306,9 @@ fn simulate_circuit_source(
 
     println!();
     println!("Output written to: {}", opts.output.display());
+    if let Some(csv_path) = opts.probe_csv {
+        println!("Probes written to: {}", csv_path.display());
+    }
     Ok(())
 }
 
@@ -2541,6 +2630,7 @@ fn analyze_freq_response(
     output_file: Option<&PathBuf>,
     pot_overrides: &[String],
     switch_overrides: &[String],
+    harmonics: usize,
 ) -> Result<()> {
     use melange_solver::{
         codegen::{CodeGenerator, CodegenConfig, routing},
@@ -3020,6 +3110,7 @@ fn analyze_freq_response(
         dc_block: false,
         pot_settle_samples: 64,
         backward_euler: false,
+        force_trap: false,
         disable_be_fallback: false,
         opamp_rail_mode: melange_solver::codegen::OpampRailMode::Auto,
         noise_mode: melange_solver::codegen::NoiseMode::Off,
@@ -3050,6 +3141,7 @@ fn analyze_freq_response(
         settle_secs,
         &[], // pot calls (already baked into netlist)
         &[], // switch calls (already baked into netlist)
+        harmonics,
     );
     let full_source = format!("{}\n{}", generated.code, analyze_main);
 

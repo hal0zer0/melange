@@ -419,23 +419,48 @@ impl RustEmitter {
         // Bilinear-transformed dominant pole (PURE EXPLICIT formulation):
         //   y[n] = a1*y[n-1] + b0*(x[n-1] + x[n-1]) = a1*y[n-1] + 2*b0*x[n-1]
         //   a1 = (alpha*C_dom - Go) / (alpha*C_dom + Go)
-        //   b0 = Gm / (alpha*C_dom + Go)
+        //   b0 = Gm / (alpha*C_dom + Go)   (alpha = 2/T)
+        //
+        // Backward Euler discretisation of the same ODE:
+        //   (alpha_be*C_dom + Go) * y[n] = alpha_be*C_dom * y[n-1] + Gm * x[n]
+        //   a1_be = alpha_be*C_dom / (alpha_be*C_dom + Go)
+        //   b0_be = Gm / (alpha_be*C_dom + Go)   (alpha_be = 1/T)
+        // With explicit 1-sample-lag approximation (x[n] ≈ x[n-1]):
+        //   y_new = a1_be*y_prev + b0_be*x_prev      (no ×2 factor — BE uses a
+        //                                            single sample, not trap's
+        //                                            midpoint sum)
+        //   rhs[o] += Go * y_new                    (BE stamps current ×1, not
+        //                                            trap's ×2 average)
         //
         // Gm is NOT in G — it has been stripped in ir.rs. The entire VCCS current
         // is injected in RHS using only previous-sample state (y_prev, x_prev):
-        //   y_new = a1*y_prev + 2*b0*x_prev          (computed BEFORE solve)
-        //   rhs[o] += Go*(y_new + y_prev)            (trapezoidal VCCS injection)
+        //   y_new = a1*y_prev + 2*b0*x_prev          (trap; computed BEFORE solve)
+        //   rhs[o] += Go*(y_new + y_prev)            (trap VCCS injection, ×2 avg)
         //
-        // DC gain check: y_ss*(1-a1) = 2*b0*x_ss  ⇒  y_ss = (Gm/Go)*x_ss = AOL*x_ss ✓
+        // DC gain checks:
+        //   trap: y_ss*(1 - a1_trap) = 2*b0*x_ss  ⇒  y_ss = AOL*x_ss ✓
+        //   BE:   y_ss*(1 - a1_be)   = b0_be*x_ss ⇒  y_ss = AOL*x_ss ✓
         //
         // After solve, save x_new = v[np] - v[nm] from the converged solution and
         // advance y_prev = y_new (pre-computed value, before it was consumed by RHS).
+        //
+        // The MNA primary integrator's choice drives which discretisation fires.
+        // Mixing a trap IIR with a BE MNA step (or vice versa) puts the op-amp's
+        // internal dominant-pole state on a different time grid than v_prev — NR
+        // diverges from DC_OP on stiff op-amp circuits (pipe-shouter at default
+        // pots: v[21] drifts 186 V in 50 warmup samples under a BE MNA mixed
+        // with a trap IIR).
+        let be = ir.solver_config.backward_euler;
         let internal_rate = ir.solver_config.sample_rate
             * ir.solver_config.oversampling_factor as f64;
         for (idx, oa_iir) in ir.opamp_iir.iter().enumerate() {
-            let alpha_oa = 2.0 * internal_rate;
+            let alpha_oa = if be { internal_rate } else { 2.0 * internal_rate };
             let denom = alpha_oa * oa_iir.c_dom + oa_iir.go;
-            let a1 = (alpha_oa * oa_iir.c_dom - oa_iir.go) / denom;
+            let a1 = if be {
+                alpha_oa * oa_iir.c_dom / denom
+            } else {
+                (alpha_oa * oa_iir.c_dom - oa_iir.go) / denom
+            };
             let b0 = oa_iir.gm / denom;
             code.push_str(&format!(
                 "/// IIR op-amp {idx}: Gm={:.4}, Go={:.4}, C_dom={:.4e} (pure explicit)\n",
@@ -2105,16 +2130,34 @@ impl RustEmitter {
             }
         }
 
-        // Recompute IIR op-amp filter coefficients for the new sample rate
+        // Recompute IIR op-amp filter coefficients for the new sample rate.
+        // Discretisation must match the MNA primary integrator (see
+        // `emit_opamp_iir_constants` for derivation). Under trap the IIR
+        // uses midpoint-rule coefficients and a ×2 input multiplier at the
+        // injection site; under BE the IIR uses a first-order explicit
+        // coefficient set and a single (non-averaged) injection.
         for (idx, _oa_iir) in ir.opamp_iir.iter().enumerate() {
-            code.push_str(&format!(
-                "        {{\n\
-                 \x20           let alpha_oa = 2.0 * internal_rate;\n\
-                 \x20           let denom = alpha_oa * OA{idx}_C_DOM + OA{idx}_GO;\n\
-                 \x20           self.oa{idx}_a1 = (alpha_oa * OA{idx}_C_DOM - OA{idx}_GO) / denom;\n\
-                 \x20           self.oa{idx}_b0 = OA{idx}_GM / denom;\n\
-                 \x20       }}\n"
-            ));
+            if ir.solver_config.backward_euler {
+                code.push_str(&format!(
+                    "        {{\n\
+                     \x20           // BE: alpha_oa = 1/T\n\
+                     \x20           let alpha_oa = internal_rate;\n\
+                     \x20           let denom = alpha_oa * OA{idx}_C_DOM + OA{idx}_GO;\n\
+                     \x20           self.oa{idx}_a1 = (alpha_oa * OA{idx}_C_DOM) / denom;\n\
+                     \x20           self.oa{idx}_b0 = OA{idx}_GM / denom;\n\
+                     \x20       }}\n"
+                ));
+            } else {
+                code.push_str(&format!(
+                    "        {{\n\
+                     \x20           // Trap: alpha_oa = 2/T\n\
+                     \x20           let alpha_oa = 2.0 * internal_rate;\n\
+                     \x20           let denom = alpha_oa * OA{idx}_C_DOM + OA{idx}_GO;\n\
+                     \x20           self.oa{idx}_a1 = (alpha_oa * OA{idx}_C_DOM - OA{idx}_GO) / denom;\n\
+                     \x20           self.oa{idx}_b0 = OA{idx}_GM / denom;\n\
+                     \x20       }}\n"
+                ));
+            }
         }
 
         // Recompute Schur complement matrices: S = A^{-1}, K = N_v*S*N_i, S_NI = S*N_i
@@ -2827,8 +2870,24 @@ impl RustEmitter {
                 ));
             }
         }
-        // Sparse N_i * i_nl_prev
-        if m > 0 {
+        // Sparse N_i * i_nl_prev.
+        //
+        // This term is TRAPEZOIDAL MIDPOINT machinery: combined with the full
+        // `S*N_i*i_nl` that the NR loop adds via `v = v_pred + S_ni*i_nl`, the
+        // net effective contribution becomes `N_i*(i_nl_prev + i_nl)` — the
+        // midpoint average of the nonlinear current across the step (see
+        // `docs/aidocs/NR_SOLVER.md:20` and `DK_METHOD.md:62-66`).
+        //
+        // Under BACKWARD EULER we want ONLY `N_i*i_nl(n+1)` — no averaging.
+        // Omitting the i_nl_prev stamp here, combined with the `S*N_i*i_nl`
+        // that NR still adds later, yields exactly the BE companion. Keeping
+        // the i_nl_prev stamp under BE was the root cause of the pipe-shouter
+        // warmup divergence (v_prev[21] drifting 186 V in 50 zero-input
+        // samples): `v_pred` over-incorporated the previous sample's
+        // nonlinear current, NR couldn't climb out of the wrong basin, hit
+        // MAX_ITER every sample, and BE fallback landed at whatever the
+        // last iterate was.
+        if m > 0 && !ir.solver_config.backward_euler {
             for i in 0..n {
                 for &j in &ir.sparsity.n_i.nz_by_row[i] {
                     code.push_str(&format!(
@@ -2839,24 +2898,58 @@ impl RustEmitter {
             }
         }
         // IIR op-amp RHS injection (PURE EXPLICIT — Gm is NOT in G):
-        //   y_new = a1*y_prev + 2*b0*x_prev    (1-sample delay)
-        //   rhs[o] += Go*(y_new + y_prev)      (full VCCS current, no matrix coupling)
-        // At DC: y_ss = (2*b0/(1-a1))*x_ss = (Gm/Go)*x_ss = AOL*x_ss ✓
+        //   trap: y_new = a1*y_prev + 2*b0*x_prev
+        //         rhs[o] += Go*(y_new + y_prev)      (trap: midpoint + ×2 stamp)
+        //   BE:   y_new = a1*y_prev + b0*x_prev      (no ×2 — single sample)
+        //         rhs[o] += Go*y_new                  (BE stamps current ×1)
+        // At DC (both schemes): y_ss = AOL*x_ss ✓ — see
+        // `emit_opamp_iir_constants` for the full derivation.
         for (idx, oa_iir) in ir.opamp_iir.iter().enumerate() {
-            code.push_str(&format!(
-                "    let oa{idx}_y_new = state.oa{idx}_a1 * state.oa{idx}_y_prev + 2.0 * state.oa{idx}_b0 * state.oa{idx}_x_prev;\n"
-            ));
-            code.push_str(&format!(
-                "    rhs[{out}] += OA{idx}_GO * (oa{idx}_y_new + state.oa{idx}_y_prev);\n",
-                out = oa_iir.out_idx
-            ));
+            if ir.solver_config.backward_euler {
+                code.push_str(&format!(
+                    "    let oa{idx}_y_new = state.oa{idx}_a1 * state.oa{idx}_y_prev + state.oa{idx}_b0 * state.oa{idx}_x_prev;\n"
+                ));
+                code.push_str(&format!(
+                    "    rhs[{out}] += OA{idx}_GO * oa{idx}_y_new;\n",
+                    out = oa_iir.out_idx
+                ));
+            } else {
+                code.push_str(&format!(
+                    "    let oa{idx}_y_new = state.oa{idx}_a1 * state.oa{idx}_y_prev + 2.0 * state.oa{idx}_b0 * state.oa{idx}_x_prev;\n"
+                ));
+                code.push_str(&format!(
+                    "    rhs[{out}] += OA{idx}_GO * (oa{idx}_y_new + state.oa{idx}_y_prev);\n",
+                    out = oa_iir.out_idx
+                ));
+            }
         }
         code.push('\n');
 
-        // Input source (Thevenin, trapezoidal)
-        code.push_str("    // Input source (Thevenin, trapezoidal)\n");
+        // Input source (Thevenin).
+        //
+        // Trapezoidal stamps the average of V_in(n) and V_in(n+1):
+        //     rhs[in] += (V_in(n+1) + V_in(n)) * G_in
+        // Backward Euler stamps only V_in(n+1):
+        //     rhs[in] += V_in(n+1) * G_in
+        // Mixing trap input stamping with a BE `a_neg` (which is `alpha*C`,
+        // no `-G` history term) is a discretization mismatch — the first
+        // non-zero sample pushes the solver into an NR basin it cannot
+        // climb out of. Observed on pipe-shouter at Tone=1.0 / amp=0.1 /
+        // 96 kHz as instant v[7] runaway to 10^13 V and NR max-iter hits
+        // on every sample. Branch on `ir.solver_config.backward_euler`
+        // so the Schur path matches the emitter's integrator choice —
+        // same gate used by `emit_nodal_process_sample` for the full-LU
+        // NR (see the `if ir.solver_config.backward_euler` block there).
         code.push_str("    let input_conductance = 1.0 / INPUT_RESISTANCE;\n");
-        code.push_str("    rhs[INPUT_NODE] += (input + state.input_prev) * input_conductance;\n");
+        if ir.solver_config.backward_euler {
+            code.push_str("    // Input source (backward Euler: V_in * G_in)\n");
+            code.push_str("    rhs[INPUT_NODE] += input * input_conductance;\n");
+        } else {
+            code.push_str("    // Input source (trapezoidal: (V_in + V_in_prev) * G_in)\n");
+            code.push_str(
+                "    rhs[INPUT_NODE] += (input + state.input_prev) * input_conductance;\n",
+            );
+        }
         code.push_str("    state.input_prev = input;\n\n");
 
         // Runtime voltage sources (.runtime directive): host-driven per-sample values.
@@ -4413,8 +4506,12 @@ impl RustEmitter {
                 ));
             }
         }
-        // Sparse N_i * i_nl_prev (N_I is N×M, direct row access)
-        if m > 0 {
+        // Sparse N_i * i_nl_prev (N_I is N×M, direct row access).
+        // Trap-midpoint companion, skipped under BE — see the matching
+        // comment block in `emit_nodal_schur_process_sample` for the
+        // derivation and the pipe-shouter warmup-divergence case this
+        // fixes.
+        if m > 0 && !ir.solver_config.backward_euler {
             for i in 0..n {
                 for &j in &ir.sparsity.n_i.nz_by_row[i] {
                     code.push_str(&format!(
@@ -4425,17 +4522,30 @@ impl RustEmitter {
             }
         }
         // IIR op-amp RHS injection (PURE EXPLICIT — Gm is NOT in G):
-        //   y_new = a1*y_prev + 2*b0*x_prev    (1-sample delay)
-        //   rhs[o] += Go*(y_new + y_prev)      (full VCCS current, no matrix coupling)
-        // At DC: y_ss = (2*b0/(1-a1))*x_ss = (Gm/Go)*x_ss = AOL*x_ss ✓
+        //   trap: y_new = a1*y_prev + 2*b0*x_prev
+        //         rhs[o] += Go*(y_new + y_prev)      (trap: midpoint + ×2 stamp)
+        //   BE:   y_new = a1*y_prev + b0*x_prev      (no ×2 — single sample)
+        //         rhs[o] += Go*y_new                  (BE stamps current ×1)
+        // At DC (both schemes): y_ss = AOL*x_ss ✓ — see
+        // `emit_opamp_iir_constants` for the full derivation.
         for (idx, oa_iir) in ir.opamp_iir.iter().enumerate() {
-            code.push_str(&format!(
-                "    let oa{idx}_y_new = state.oa{idx}_a1 * state.oa{idx}_y_prev + 2.0 * state.oa{idx}_b0 * state.oa{idx}_x_prev;\n"
-            ));
-            code.push_str(&format!(
-                "    rhs[{out}] += OA{idx}_GO * (oa{idx}_y_new + state.oa{idx}_y_prev);\n",
-                out = oa_iir.out_idx
-            ));
+            if ir.solver_config.backward_euler {
+                code.push_str(&format!(
+                    "    let oa{idx}_y_new = state.oa{idx}_a1 * state.oa{idx}_y_prev + state.oa{idx}_b0 * state.oa{idx}_x_prev;\n"
+                ));
+                code.push_str(&format!(
+                    "    rhs[{out}] += OA{idx}_GO * oa{idx}_y_new;\n",
+                    out = oa_iir.out_idx
+                ));
+            } else {
+                code.push_str(&format!(
+                    "    let oa{idx}_y_new = state.oa{idx}_a1 * state.oa{idx}_y_prev + 2.0 * state.oa{idx}_b0 * state.oa{idx}_x_prev;\n"
+                ));
+                code.push_str(&format!(
+                    "    rhs[{out}] += OA{idx}_GO * (oa{idx}_y_new + state.oa{idx}_y_prev);\n",
+                    out = oa_iir.out_idx
+                ));
+            }
         }
         code.push('\n');
 
@@ -4722,14 +4832,18 @@ impl RustEmitter {
             // voltages that destabilize downstream device evaluation. Applied after the
             // back-solve, before device voltage limiting.
             //
-            // For ActiveSetBe we ALSO raise `active_set_engaged` whenever the clamp
-            // fires. The engagement check after the NR break (`emit_nodal_active_set_check`)
-            // is strict-inequality against the rail, so if the clamp pinned v to
-            // exactly the rail the check otherwise misses engagement — and the BE
-            // fallback + KCL-consistent resolve never run, leaving the network in
-            // a state where the rail-pinned node satisfies only "v = c_k", not KCL.
-            // That residual slowly drifts cap history and device state per sample,
-            // producing the sub-Hz instability seen on 4kbuscomp (>2 s duration).
+            // The clamp itself runs for every mode that wants hard output bounding.
+            // For `ActiveSetBe` we used to ALSO raise `active_set_engaged = true`
+            // here so the post-convergence check didn't miss a "v pinned exactly at
+            // rail" case (the check used strict inequality). That was load-bearing
+            // for 4kbuscomp but sticky — intermediate NR iterations can ride AOL
+            // into rail-range values mid-solve on high-gain feedback clippers
+            // (pipe-shouter at Tone=1.0 was seeing the flag latched for entire
+            // linear-regime buffers, firing BE fallback on every sample), crushing
+            // H2 purity and dropping gain 5–15 dB. The post-convergence check now
+            // uses inclusive `>=` / `<=` (see `emit_nodal_active_set_check`), which
+            // covers the 4kbuscomp pinned-at-rail case without tracking per-NR-
+            // iteration transients.
             {
                 let clampable: Vec<&crate::codegen::ir::OpampIR> = ir
                     .opamps
@@ -4743,34 +4857,18 @@ impl RustEmitter {
                     for oa in &clampable {
                         let o = oa.n_out_idx;
                         if oa.vclamp_hi.is_finite() {
-                            if active_set_be_mode_full_lu {
-                                code.push_str(&format!(
-                                    "        if v_new[{o}] > {hi:.17e} {{ v_new[{o}] = {hi:.17e}; active_set_engaged = true; }}\n",
-                                    o = o,
-                                    hi = oa.vclamp_hi,
-                                ));
-                            } else {
-                                code.push_str(&format!(
-                                    "        if v_new[{o}] > {hi:.17e} {{ v_new[{o}] = {hi:.17e}; }}\n",
-                                    o = o,
-                                    hi = oa.vclamp_hi,
-                                ));
-                            }
+                            code.push_str(&format!(
+                                "        if v_new[{o}] > {hi:.17e} {{ v_new[{o}] = {hi:.17e}; }}\n",
+                                o = o,
+                                hi = oa.vclamp_hi,
+                            ));
                         }
                         if oa.vclamp_lo.is_finite() {
-                            if active_set_be_mode_full_lu {
-                                code.push_str(&format!(
-                                    "        if v_new[{o}] < {lo:.17e} {{ v_new[{o}] = {lo:.17e}; active_set_engaged = true; }}\n",
-                                    o = o,
-                                    lo = oa.vclamp_lo,
-                                ));
-                            } else {
-                                code.push_str(&format!(
-                                    "        if v_new[{o}] < {lo:.17e} {{ v_new[{o}] = {lo:.17e}; }}\n",
-                                    o = o,
-                                    lo = oa.vclamp_lo,
-                                ));
-                            }
+                            code.push_str(&format!(
+                                "        if v_new[{o}] < {lo:.17e} {{ v_new[{o}] = {lo:.17e}; }}\n",
+                                o = o,
+                                lo = oa.vclamp_lo,
+                            ));
                         }
                     }
                     code.push('\n');
@@ -6019,9 +6117,17 @@ impl RustEmitter {
             return;
         }
 
+        // Inclusive comparison is deliberate. When the NR-inner rail clamp
+        // pins `v_new[n] = hi` exactly on a clip-engaged sample, the final
+        // converged `v[n]` lands at the rail to the last bit. Strict `>` / `<`
+        // misses that case — the BE fallback never runs, KCL residual sits
+        // out through the clamp, and cap history drifts into the sub-Hz
+        // oscillation observed on 4kbuscomp. `>=` / `<=` catches both the
+        // "pinned exactly" case and any tiny numerical overshoot past the
+        // rail, covering 4kbuscomp without over-eager NR-iteration tracking.
         for oa in &clampable {
             code.push_str(&format!(
-                "{indent}if v[{node}] > {hi:.17e} || v[{node}] < {lo:.17e} {{ {flag_name} = true; }}\n",
+                "{indent}if v[{node}] >= {hi:.17e} || v[{node}] <= {lo:.17e} {{ {flag_name} = true; }}\n",
                 node = oa.n_out_idx,
                 hi = oa.vclamp_hi,
                 lo = oa.vclamp_lo,

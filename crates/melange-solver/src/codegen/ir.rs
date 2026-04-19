@@ -466,14 +466,26 @@ fn opamp_has_r_only_path_to_nonlinear(
     // - ground ("0")
     // - the op-amp's own inverting input (feedback loop)
     // - any DC voltage source node (bias rails are AC-ground)
+    //
+    // The starting node is NEVER counted as a downstream terminal. A
+    // nonlinear device directly anchored to the op-amp output is a local
+    // feedback element (classic diode-feedback clipper: D1 anode = op-amp
+    // output, cathode = inv input) — not a control-path driver. A real
+    // control path requires at least one R-hop so the op-amp drives the
+    // downstream device through a signal-path resistor (e.g. VCR ALC
+    // sidechain: `Rsc op_out sc_node 10k; D1 sc_node cv_node`). Tracking
+    // the starting node explicitly via `start_node` keeps the BFS
+    // conditional simple.
+    let start_node = out_name.clone();
     let mut visited: HashSet<String> = HashSet::new();
     let mut frontier: Vec<String> = vec![out_name.clone()];
     visited.insert(out_name);
 
     while let Some(node) = frontier.pop() {
         // If this node is itself a (filtered) nonlinear-device terminal,
-        // we've found a real control path.
-        if nonlinear_terminal_names.contains(&node) {
+        // we've found a real control path — but only if we reached it
+        // via an R-hop from the op-amp output, not as the seed itself.
+        if node != start_node && nonlinear_terminal_names.contains(&node) {
             return true;
         }
 
@@ -2900,7 +2912,12 @@ impl CircuitIR {
 
         let sample_rate = config.sample_rate;
         let internal_rate = sample_rate * config.oversampling_factor as f64;
-        let alpha = if config.backward_euler {
+        // Provisional integrator. If the nodal auto-detector decides the trap
+        // propagation operator `S*A_neg` is unstable (spectral_radius > 1.002,
+        // matching the `schur_unstable` gate in `nodal_emitter.rs`), the
+        // promotion block below swaps in the BE matrices already built as the
+        // transient fallback and flips `be`/`alpha`/`solver_config` in place.
+        let mut alpha = if config.backward_euler {
             internal_rate
         } else {
             2.0 * internal_rate
@@ -3000,7 +3017,7 @@ impl CircuitIR {
         }
 
         // Build rhs_const: trapezoidal (node rows ×2, VS rows ×1) or BE (all ×1)
-        let rhs_const = if be {
+        let mut rhs_const = if be {
             // BE: current sources ×1 (not ×2), VS ×1
             let mut rc = vec![0.0f64; n];
             for src in &mna.current_sources {
@@ -3211,7 +3228,9 @@ impl CircuitIR {
             rail_mode.reason.as_str()
         );
 
-        let solver_config = SolverConfig {
+        // Provisional solver_config. `alpha` and `backward_euler` may still be
+        // updated by the auto-BE promotion block below.
+        let mut solver_config = SolverConfig {
             sample_rate,
             alpha,
             tolerance: config.tolerance,
@@ -3222,14 +3241,14 @@ impl CircuitIR {
             oversampling_factor: config.oversampling_factor,
             output_scales: config.output_scales.clone(),
             pot_settle_samples: config.pot_settle_samples,
-            backward_euler: config.backward_euler,
+            backward_euler: be,
             opamp_rail_mode: rail_mode.mode,
             emit_dc_op_recompute: config.emit_dc_op_recompute,
         };
 
         // Compute S = A^{-1} for Schur complement NR (O(M³) instead of O(N³) per iteration)
-        let s_flat = invert_flat_matrix(&a_flat, n)?;
-        let k_flat = if m > 0 {
+        let mut s_flat = invert_flat_matrix(&a_flat, n)?;
+        let mut k_flat = if m > 0 {
             compute_k_from_s(&s_flat, &n_v_flat, &n_i_flat, n, m)
         } else {
             Vec::new()
@@ -3295,7 +3314,7 @@ impl CircuitIR {
         // Compute spectral radius of S * A_neg to detect Schur instability.
         // When rho(S * A_neg) > 1, the trapezoidal feedback v_pred = S*(A_neg*v_prev + ...)
         // amplifies errors exponentially. Route to full LU NR instead.
-        let spectral_radius_s_aneg = if n > 0 && !s_flat.is_empty() {
+        let mut spectral_radius_s_aneg = if n > 0 && !s_flat.is_empty() {
             let mut x = vec![1.0 / (n as f64).sqrt(); n];
             let mut rho = 0.0f64;
             for _ in 0..100 {
@@ -3332,6 +3351,90 @@ impl CircuitIR {
         } else {
             0.0
         };
+
+        // Auto-BE promotion for the nodal path.
+        //
+        // The trap propagation operator `S*A_neg` is A-stable but not
+        // L-stable: on stiff nodal circuits its spectral radius can exceed 1
+        // and seed a stationary Nyquist-rate `(-1)^n` limit cycle in
+        // `v_prev`. Inaudible above SR/2 but large enough (observed A2/A1 ≈
+        // 1.73 on pipe-shouter small-signal) to wreck narrow post-circuit
+        // EQs and inflate RMS meters. BE is L-stable and always has ρ ≤ 1.
+        //
+        // The BE matrices are already built above as the transient BE
+        // fallback (`a_be_flat`, `a_neg_be_flat`, `s_be_flat`, `k_be_flat`,
+        // `rhs_const_be`). When trap is unstable we clone them into the
+        // primary slot and flip `alpha`/`solver_config.backward_euler` so
+        // every downstream emitter picks BE formulas. `config.force_trap`
+        // is the escape hatch for bisection only — trap on a circuit where
+        // the auto-detector fires produces a real Nyquist-rate artifact.
+        //
+        // Threshold 1.002 matches `schur_unstable` in `nodal_emitter.rs`.
+        // Strict `> 1.0` false-fires on trivial passive networks where
+        // power iteration converges to exactly 1.0 plus float noise (pure
+        // RC lowpass, etc.) and would promote them unnecessarily.
+        const BE_PROMOTION_THRESHOLD: f64 = 1.002;
+        if !be && !config.force_trap && spectral_radius_s_aneg > BE_PROMOTION_THRESHOLD {
+            log::warn!(
+                "Nodal: auto-enabling backward Euler — spectral_radius(S*A_neg) = \
+                 {:.4} > {:.3} under trapezoidal (dominant eigenmode would grow \
+                 unboundedly — Nyquist-rate limit cycle in v_prev). BE is L-stable. \
+                 Override with --force-trap only to reproduce legacy trap output.",
+                spectral_radius_s_aneg, BE_PROMOTION_THRESHOLD
+            );
+            alpha = alpha_be;
+            a_flat = a_be_flat.clone();
+            a_neg_flat = a_neg_be_flat.clone();
+            rhs_const = rhs_const_be.clone();
+            s_flat = s_be_flat.clone();
+            k_flat = k_be_flat.clone();
+            solver_config.backward_euler = true;
+            solver_config.alpha = alpha;
+            // Recompute rho on BE matrices. BE is L-stable so this must be
+            // ≤ 1; a violation would mean the BE matrix builder has a bug,
+            // which we flag loudly rather than silently pushing into the
+            // emitter.
+            let new_rho = if n > 0 && !s_flat.is_empty() {
+                let mut x = vec![1.0 / (n as f64).sqrt(); n];
+                let mut rho = 0.0f64;
+                for _ in 0..100 {
+                    let mut ax = vec![0.0; n];
+                    for i in 0..n {
+                        for j in 0..n {
+                            ax[i] += a_neg_flat[i * n + j] * x[j];
+                        }
+                    }
+                    let mut y = vec![0.0; n];
+                    for i in 0..n {
+                        for j in 0..n {
+                            y[i] += s_flat[i * n + j] * ax[j];
+                        }
+                    }
+                    let norm: f64 = y.iter().map(|v| v * v).sum::<f64>().sqrt();
+                    if norm < 1e-30 {
+                        break;
+                    }
+                    rho = norm / x.iter().map(|v| v * v).sum::<f64>().sqrt();
+                    x.fill(0.0);
+                    for (i, yi) in y.iter().enumerate() {
+                        x[i] = yi / norm;
+                    }
+                }
+                rho
+            } else {
+                0.0
+            };
+            if new_rho > 1.0 + 1e-6 {
+                log::error!(
+                    "Nodal: BE matrices still have spectral_radius(S_be*A_neg_be) = \
+                     {:.4} > 1 after auto-promotion. BE is L-stable by construction \
+                     — matrix builder has a stamping bug.",
+                    new_rho
+                );
+            }
+            spectral_radius_s_aneg = new_rho;
+        }
+        let _ = alpha_be;
 
         let matrices = Matrices {
             s: s_flat,
@@ -5722,5 +5825,73 @@ U3 0 sum3 out OA1
         let r = parse_and_resolve(spice);
         assert_eq!(r.mode, OpampRailMode::ActiveSet);
         assert_eq!(r.reason, OpampRailModeReason::AcCoupledDownstream);
+    }
+
+    fn parse_and_refine(spice: &str) -> ResolvedOpampRailMode {
+        let netlist = crate::parser::Netlist::parse(spice)
+            .unwrap_or_else(|e| panic!("failed to parse: {}", e));
+        let mna = MnaSystem::from_netlist(&netlist)
+            .unwrap_or_else(|e| panic!("failed to build MNA: {}", e));
+        let resolved = resolve_opamp_rail_mode(&mna, OpampRailMode::Auto);
+        refine_active_set_for_audio_path(resolved, &mna, &netlist)
+    }
+
+    /// Pipe-shouter / tube-screamer feedback-clipper pattern: two antiparallel
+    /// diodes span the op-amp output and its inverting input. Before the
+    /// starting-node exclusion, the BFS returned true on iteration 0 (the
+    /// op-amp output was itself a diode terminal), which demoted the whole
+    /// family of overdrive pedals from `ActiveSetBe` to `ActiveSet` and
+    /// starved the sub-step Nyquist damping that runs on rail engagement.
+    #[test]
+    fn feedback_clipper_refines_to_active_set_be() {
+        let spice = "\
+Feedback Clipper Test (overdrive pedal pattern)
+R1 in sum 10k
+R2 sum clip_out 100k
+C1 clip_out ac_out 1u
+R3 ac_out 0 100k
+D1 clip_out sum DCLIP
+D2 sum clip_out DCLIP
+U1 0 sum clip_out OA1
+.model DCLIP D(IS=1e-14 N=1.9)
+.model OA1 OA(AOL=200k GBW=3e6 ROUT=75 VCC=4.5 VEE=-4.5)
+";
+        let r = parse_and_refine(spice);
+        assert_eq!(
+            r.mode,
+            OpampRailMode::ActiveSetBe,
+            "feedback clipper must refine to ActiveSetBe — the diodes are in \
+             the op-amp's own feedback loop, not a downstream control path"
+        );
+    }
+
+    /// VCR ALC sidechain-rectifier pattern: the op-amp output drives a
+    /// rectifier diode *through a series resistor* (`Rsc op_out sc_node`).
+    /// The R-hop makes this a genuine control path: the rail voltage
+    /// directly drives the downstream device's operating point. Stays on
+    /// `ActiveSet` so the steady DC rail value is preserved across a
+    /// rail-engage boundary (BE's sub-step would corrupt envelope dynamics).
+    #[test]
+    fn sidechain_rectifier_stays_on_active_set() {
+        let spice = "\
+Sidechain Rectifier Test (compressor/ALC pattern)
+R1 in sum 10k
+R2 sum op_out 100k
+C1 op_out ac_out 100n
+R3 ac_out 0 100k
+Rsc op_out sc_node 10k
+D1 sc_node cv_node DRECT
+Rrel cv_node 0 2MEG
+U1 0 sum op_out OA1
+.model DRECT D(IS=2e-9 N=1.906)
+.model OA1 OA(AOL=200k GBW=3e6 ROUT=75 VCC=9 VEE=-9)
+";
+        let r = parse_and_refine(spice);
+        assert_eq!(
+            r.mode,
+            OpampRailMode::ActiveSet,
+            "sidechain rectifier must stay on ActiveSet — the op-amp drives \
+             the detector diode through Rsc, which IS a downstream control path"
+        );
     }
 }

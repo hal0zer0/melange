@@ -262,6 +262,14 @@ pub struct CodegenConfig {
     /// amplifiers where trapezoidal's imaginary-axis preservation causes oscillation.
     /// Trades second-order accuracy for first-order, giving slight HF rolloff.
     pub backward_euler: bool,
+    /// Escape hatch: force trapezoidal integration even when the nodal
+    /// auto-detector would promote to backward Euler (trap propagation
+    /// operator `S*A_neg` has spectral radius > 1.002, which seeds a
+    /// persistent Nyquist-rate limit cycle in `v_prev`). For bisecting
+    /// regressions or reproducing legacy output only — auto-promoted BE
+    /// is the correct default on circuits where trap is unstable.
+    /// Ignored when `backward_euler` is already `true`.
+    pub force_trap: bool,
     /// Disable adaptive backward Euler fallback for the DK codegen path.
     /// When false (default), the generated code includes pre-computed BE matrices
     /// and can fall back to BE for individual samples where trapezoidal NR diverges.
@@ -361,6 +369,7 @@ impl Default for CodegenConfig {
             dc_block: true,
             pot_settle_samples: 64,
             backward_euler: false,
+            force_trap: false,
             disable_be_fallback: false,
             opamp_rail_mode: OpampRailMode::Auto,
             noise_mode: NoiseMode::Off,
