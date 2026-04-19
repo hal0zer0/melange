@@ -308,6 +308,14 @@ enum Commands {
         #[arg(long, default_value = "auto")]
         opamp_rail_mode: String,
 
+        /// Pentode grid-off dimension reduction mode: auto, on, off.
+        /// When a pentode is biased below cutoff at DC-OP, the Ig1 NR dimension
+        /// is dropped (3D→2D per tube). `auto` inspects bias and reduces where
+        /// applicable; `on` forces all non-variable-mu pentodes; `off` keeps
+        /// full 3D blocks. Mirrors `compile --tube-grid-fa`.
+        #[arg(long, default_value = "auto")]
+        tube_grid_fa: String,
+
         /// Oversampling factor (1=none, 2=2x, 4=4x). Higher reduces aliasing
         /// and improves NR stability for circuits with diode switching.
         #[arg(long, default_value = "1")]
@@ -387,6 +395,12 @@ enum Commands {
         /// columns. Harmonics above Nyquist are reported as `nan`.
         #[arg(long, default_value = "0")]
         harmonics: usize,
+
+        /// Pentode grid-off dimension reduction mode: auto, on, off.
+        /// Mirrors `compile --tube-grid-fa`. See `simulate --tube-grid-fa` for
+        /// the auto/on/off semantics. Defaults to `auto`.
+        #[arg(long, default_value = "auto")]
+        tube_grid_fa: String,
     },
 
     /// Compute DC operating point and print node voltages
@@ -704,6 +718,7 @@ fn main() -> Result<()> {
             input_resistance: input_resistance_flag,
             solver,
             opamp_rail_mode,
+            tube_grid_fa,
             oversampling,
             noise,
             noise_seed,
@@ -712,6 +727,12 @@ fn main() -> Result<()> {
         } => {
             if oversampling != 1 && oversampling != 2 && oversampling != 4 {
                 anyhow::bail!("oversampling must be 1, 2, or 4, got {}", oversampling);
+            }
+            if !matches!(tube_grid_fa.as_str(), "auto" | "on" | "off") {
+                anyhow::bail!(
+                    "Unknown --tube-grid-fa '{}'. Valid values: auto, on, off",
+                    tube_grid_fa
+                );
             }
             let rail_mode = melange_solver::codegen::OpampRailMode::parse(&opamp_rail_mode)
                 .ok_or_else(|| {
@@ -758,6 +779,7 @@ fn main() -> Result<()> {
                     input_resistance_flag,
                     solver: &solver,
                     opamp_rail_mode: rail_mode,
+                    tube_grid_fa: &tube_grid_fa,
                     oversampling,
                     noise_mode,
                     noise_seed,
@@ -780,6 +802,7 @@ fn main() -> Result<()> {
             pot_overrides,
             switch_overrides,
             harmonics,
+            tube_grid_fa,
         } => {
             // Validate numeric CLI parameters
             if start_freq <= 0.0 || !start_freq.is_finite() {
@@ -797,6 +820,12 @@ fn main() -> Result<()> {
             if points_per_decade == 0 {
                 anyhow::bail!("points-per-decade must be at least 1");
             }
+            if !matches!(tube_grid_fa.as_str(), "auto" | "on" | "off") {
+                anyhow::bail!(
+                    "Unknown --tube-grid-fa '{}'. Valid values: auto, on, off",
+                    tube_grid_fa
+                );
+            }
 
             let circuit_source = circuits::resolve(&input)?;
             analyze_freq_response(
@@ -813,6 +842,7 @@ fn main() -> Result<()> {
                 &pot_overrides,
                 &switch_overrides,
                 harmonics,
+                &tube_grid_fa,
             )
         }
         Commands::DcOp {
@@ -1171,53 +1201,17 @@ fn compile_circuit_source(
     // the reduced dimension. Only runs on DK solver — nodal doesn't
     // benefit from M-reduction at the solver level.
     // `--tube-grid-fa off` skips entirely; `on` forces all pentodes.
-    let grid_off_pentodes = if tube_grid_fa == "off" || solver_override == "nodal" {
-        std::collections::HashMap::new()
-    } else {
-        let force_all = tube_grid_fa == "on";
-        melange_solver::codegen::ir::CircuitIR::detect_grid_off_pentodes(
-            &mna, &netlist, &fa_config, force_all,
-        )
-    };
-    if !grid_off_pentodes.is_empty() {
-        // Sorted pretty-print: names + frozen Vg2k per slot. Useful when
-        // diagnosing plexi-class circuits where the screen bias tells you
-        // which tube dropped into cutoff and by how much.
-        let mut pretty: Vec<(String, f64)> = grid_off_pentodes
-            .iter()
-            .map(|(k, v)| (k.clone(), *v))
-            .collect();
-        pretty.sort_by(|a, b| a.0.cmp(&b.0));
-        let pretty_str: String = pretty
-            .iter()
-            .map(|(n, v)| format!("{n}(Vg2k={v:.1}V)"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        println!(
-            "  Grid-off pentodes: [{}] (M reduces by {})",
-            pretty_str,
-            grid_off_pentodes.len()
-        );
-        // Rebuild MNA with reduced-dimension pentodes
-        mna = MnaSystem::from_netlist_with_grid_off(&netlist, &grid_off_pentodes)
-            .with_context(|| "Failed to rebuild MNA for grid-off pentodes")?;
-        // Re-stamp input conductance (primary always grounded, but the rebuild
-        // zeroes it out so we re-apply like the FA path does)
-        if input_node_idx < mna.n {
-            mna.g[input_node_idx][input_node_idx] += input_conductance;
-        }
-        // Re-stamp junction capacitances
-        {
-            let device_slots =
-                melange_solver::codegen::ir::CircuitIR::build_device_info_with_mna(
-                    &netlist,
-                    Some(&mna),
-                )
-                .unwrap_or_default();
-            if !device_slots.is_empty() {
-                mna.stamp_device_junction_caps(&device_slots);
-            }
-        }
+    let grid_off_pentodes = apply_grid_off_reduction(
+        &mut mna,
+        &netlist,
+        &fa_config,
+        tube_grid_fa,
+        solver_override,
+        input_node_idx,
+        input_conductance,
+    )?;
+    if let Some(msg) = format_grid_off_log(&grid_off_pentodes) {
+        println!("{msg}");
     }
 
     // Apply `.linearize` directives: DC-OP → extract g-params → rebuild
@@ -1962,6 +1956,7 @@ struct SimulateOptions<'a> {
     input_resistance_flag: Option<f64>,
     solver: &'a str,
     opamp_rail_mode: melange_solver::codegen::OpampRailMode,
+    tube_grid_fa: &'a str,
     oversampling: usize,
     noise_mode: melange_solver::codegen::NoiseMode,
     noise_seed: u64,
@@ -2112,10 +2107,23 @@ fn simulate_circuit_source(
         }
     }
 
-    // Apply `.linearize` directives — shared helper documented at its
-    // definition. Grid-off detection isn't wired into simulate today, so
-    // we pass an empty map; FA results flow through.
-    let grid_off_pentodes = std::collections::HashMap::new();
+    // Detect grid-off pentodes (shared helper with compile/analyze). For
+    // `--solver nodal` this is a no-op — nodal doesn't benefit from M-reduction
+    // at the solver level.
+    let grid_off_pentodes = apply_grid_off_reduction(
+        &mut mna,
+        &netlist,
+        &config_for_fa,
+        opts.tube_grid_fa,
+        opts.solver,
+        input_node_idx,
+        input_conductance,
+    )?;
+    if let Some(msg) = format_grid_off_log(&grid_off_pentodes) {
+        println!("{msg}");
+    }
+
+    // Apply `.linearize` directives — shared helper documented at its definition.
     apply_linearize_reductions(
         &mut mna,
         &netlist,
@@ -2347,6 +2355,90 @@ struct LinearizeOutcome {
 /// was pasted three times; the `analyze` copy was missing entirely, which
 /// is why `melange analyze` reported the pre-linearize M value (Uniquorn v2
 /// reported M=38 rather than M=20).
+/// Detect grid-off pentodes at DC-OP and reduce the MNA accordingly.
+///
+/// When a pentode's grid is biased well below cutoff (`Vgk < -(vgk_onset + 0.5)`
+/// and `Vg2k > 1.0`), the Ig1 NR dimension collapses and we freeze Vg2k into
+/// the stamp. This turns a 3D pentode block into a 2D one, shrinking the DK M
+/// by 1 per tube. See `crates/melange-solver/src/codegen/ir.rs:detect_grid_off_pentodes`.
+///
+/// When rebuild fires, the MNA is replaced with the reduced version, input
+/// conductance is re-stamped (the rebuild zeroes G[in][in]), and junction caps
+/// are re-stamped against the new device slot layout.
+///
+/// `tube_grid_fa`:
+///   - "auto" — inspect DC-OP bias, reduce where below cutoff.
+///   - "on"   — force grid-off on every non-variable-mu pentode regardless of bias.
+///   - "off"  — never reduce; returns an empty map without touching `mna`.
+/// `solver_override == "nodal"` is also treated as "off" because nodal doesn't
+/// benefit from M-reduction at the solver level.
+///
+/// Single source of truth for the grid-off reduction pipeline — `compile`,
+/// `simulate`, and `analyze` all call this. Previously the block lived only in
+/// `compile`; `simulate` / `analyze` passed an empty map, which is why the 5F1
+/// Champ single-ended 6V6 didn't get its free 3D→2D reduction in those paths.
+#[allow(clippy::too_many_arguments)]
+fn apply_grid_off_reduction(
+    mna: &mut melange_solver::mna::MnaSystem,
+    netlist: &melange_solver::parser::Netlist,
+    fa_config: &melange_solver::codegen::CodegenConfig,
+    tube_grid_fa: &str,
+    solver_override: &str,
+    input_node_idx: usize,
+    input_conductance: f64,
+) -> Result<std::collections::HashMap<String, f64>> {
+    use melange_solver::{codegen::ir::CircuitIR, mna::MnaSystem};
+
+    let grid_off_pentodes = if tube_grid_fa == "off" || solver_override == "nodal" {
+        std::collections::HashMap::new()
+    } else {
+        let force_all = tube_grid_fa == "on";
+        CircuitIR::detect_grid_off_pentodes(mna, netlist, fa_config, force_all)
+    };
+
+    if !grid_off_pentodes.is_empty() {
+        *mna = MnaSystem::from_netlist_with_grid_off(netlist, &grid_off_pentodes)
+            .with_context(|| "Failed to rebuild MNA for grid-off pentodes")?;
+        if input_node_idx < mna.n {
+            mna.g[input_node_idx][input_node_idx] += input_conductance;
+        }
+        let device_slots =
+            CircuitIR::build_device_info_with_mna(netlist, Some(&*mna)).unwrap_or_default();
+        if !device_slots.is_empty() {
+            mna.stamp_device_junction_caps(&device_slots);
+        }
+    }
+
+    Ok(grid_off_pentodes)
+}
+
+/// Format the grid-off detection result for user output. Returns `None` when
+/// nothing was reduced — the caller decides whether to log at all and on which
+/// stream (`println!` for compile/simulate progress, `eprintln!` for analyze,
+/// which writes CSV to stdout).
+fn format_grid_off_log(
+    grid_off_pentodes: &std::collections::HashMap<String, f64>,
+) -> Option<String> {
+    if grid_off_pentodes.is_empty() {
+        return None;
+    }
+    let mut pretty: Vec<(String, f64)> = grid_off_pentodes
+        .iter()
+        .map(|(k, v)| (k.clone(), *v))
+        .collect();
+    pretty.sort_by(|a, b| a.0.cmp(&b.0));
+    let pretty_str: String = pretty
+        .iter()
+        .map(|(n, v)| format!("{n}(Vg2k={v:.1}V)"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!(
+        "  Grid-off pentodes: [{}] (M reduces by {})",
+        pretty_str,
+        grid_off_pentodes.len()
+    ))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn apply_linearize_reductions(
     mna: &mut melange_solver::mna::MnaSystem,
@@ -2617,6 +2709,7 @@ fn apply_linearize_reductions(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn analyze_freq_response(
     circuit_source: &circuits::CircuitSource,
     input_node_name: &str,
@@ -2631,6 +2724,7 @@ fn analyze_freq_response(
     pot_overrides: &[String],
     switch_overrides: &[String],
     harmonics: usize,
+    tube_grid_fa: &str,
 ) -> Result<()> {
     use melange_solver::{
         codegen::{CodeGenerator, CodegenConfig, routing},
@@ -3011,12 +3105,25 @@ fn analyze_freq_response(
         }
     }
 
+    // Detect grid-off pentodes (shared helper with compile/simulate). Analyze
+    // writes CSV to stdout, so progress messages go to stderr. Analyze doesn't
+    // expose --solver, so we pass "" (helper treats non-"nodal" as "run it").
+    let grid_off_pentodes = apply_grid_off_reduction(
+        &mut mna,
+        &netlist,
+        &config_for_fa,
+        tube_grid_fa,
+        /*solver_override=*/ "",
+        input_node_idx,
+        input_conductance,
+    )?;
+    if let Some(msg) = format_grid_off_log(&grid_off_pentodes) {
+        eprintln!("{msg}");
+    }
+
     // Apply `.linearize` directives — shared helper with compile/simulate.
     // Previously missing here, which is why `melange analyze` reported the
     // pre-linearize M on circuits like Uniquorn v2 (M=38 instead of M=20).
-    // Grid-off detection isn't wired into analyze today, so pass an empty
-    // map; FA results flow through.
-    let grid_off_pentodes = std::collections::HashMap::new();
     apply_linearize_reductions(
         &mut mna,
         &netlist,
