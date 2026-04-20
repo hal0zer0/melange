@@ -7304,6 +7304,113 @@ C1 out 0 1u
 }
 
 // ---------------------------------------------------------------------------
+// Phase 1.5 Step 2 v2 — .switch R dynamic thermal noise
+// ---------------------------------------------------------------------------
+
+const SWITCH_R_SPICE: &str = "\
+RC with switch R
+R1 in mid 10k
+R2 mid out 10k
+C1 out 0 1u
+.switch R2 10k 47k 100k \"Tone\"
+";
+
+#[test]
+fn noise_thermal_includes_switch_r() {
+    // Step 2 v1 included `.pot` / `.runtime R` / `.wiper`. Step 2 v2
+    // lifts the final skip: R-type `.switch` components are now thermal
+    // noise sources. The per-sample coefficient lives in
+    // `state.noise_thermal_sqrt_inv_r[k]` and the emitted
+    // `set_switch_N(position)` refreshes it from the DK
+    // `SWITCH_<N>_VALUES[position][<ci>]` 2D array (or the nodal path's
+    // per-component 1D array — different layout, same semantic).
+    let config = CodegenConfig {
+        noise_mode: melange_solver::codegen::NoiseMode::Thermal,
+        ..default_config()
+    };
+    let code = generate_code_with_config(SWITCH_R_SPICE, config);
+
+    assert!(
+        code.contains("pub const NOISE_THERMAL_N: usize = 2;"),
+        "expected 2 thermal sources (R1 static + R2 switch-backed), got:\n{}",
+        code.lines()
+            .filter(|l| l.contains("NOISE_THERMAL_N"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+
+    // DK path emits the 2D VALUES array access. Look specifically inside
+    // set_switch_0 to be sure the refresh lives in the setter.
+    let setter_start = code.find("pub fn set_switch_0").expect("set_switch_0 missing");
+    let setter_body = &code[setter_start..setter_start + 1200];
+    assert!(
+        setter_body.contains("self.noise_thermal_sqrt_inv_r[")
+            && setter_body.contains("SWITCH_0_VALUES[position]["),
+        "set_switch_0 must refresh state.noise_thermal_sqrt_inv_r from \
+         SWITCH_0_VALUES[position][ci]. Body was:\n{}",
+        setter_body
+    );
+}
+
+#[test]
+fn noise_nodal_thermal_includes_switch_r_via_per_component_values() {
+    // Same circuit, forced through the nodal path. The value syntax
+    // differs: nodal emits `SWITCH_<N>_COMP_<ci>_VALUES[position]`.
+    let config = CodegenConfig {
+        noise_mode: melange_solver::codegen::NoiseMode::Thermal,
+        ..default_config()
+    };
+    let code = generate_nodal_code_with_config(SWITCH_R_SPICE, config);
+
+    assert!(
+        code.contains("pub const NOISE_THERMAL_N: usize = 2;"),
+        "nodal: expected 2 thermal sources; got:\n{}",
+        code.lines()
+            .filter(|l| l.contains("NOISE_THERMAL_N"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    let setter_start = code.find("pub fn set_switch_0").expect("set_switch_0 missing");
+    let setter_body = &code[setter_start..setter_start + 2400];
+    assert!(
+        setter_body.contains("self.noise_thermal_sqrt_inv_r[")
+            && setter_body.contains("SWITCH_0_COMP_0_VALUES[position]"),
+        "nodal set_switch_0 must refresh via SWITCH_0_COMP_0_VALUES[position]. \
+         Body was:\n{}",
+        setter_body
+    );
+}
+
+#[test]
+fn noise_switch_r_off_stays_byte_identical() {
+    // With noise mode Off, no noise tokens should appear. Guards against
+    // the collector or emitter accidentally running its switch-R path
+    // when noise is compiled out.
+    let default_code = generate_code_with_config(SWITCH_R_SPICE, default_config());
+    let explicit_off = CodegenConfig {
+        noise_mode: melange_solver::codegen::NoiseMode::Off,
+        ..default_config()
+    };
+    let off_code = generate_code_with_config(SWITCH_R_SPICE, explicit_off);
+    assert_eq!(
+        default_code, off_code,
+        "explicit NoiseMode::Off must produce byte-identical output to default on switch-R circuit"
+    );
+    for tok in [
+        "NOISE_THERMAL_N",
+        "NOISE_THERMAL_SQRT_INV_R",
+        "noise_thermal_sqrt_inv_r",
+        "set_noise_enabled",
+    ] {
+        assert!(
+            !default_code.contains(tok),
+            "noise-off codegen leaked `{}` on switch-R circuit",
+            tok
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Phase 2 shot-noise emission tests (Step 4)
 // ---------------------------------------------------------------------------
 

@@ -2592,6 +2592,22 @@ impl RustEmitter {
             ));
             code.push_str("        self.matrices_dirty = true;\n");
 
+            // Authentic-noise coefficient refresh for any R-type components
+            // in this switch that back a thermal noise source. Runs before
+            // the DC-OP warm re-init so the live `noise_thermal_sqrt_inv_r`
+            // is in sync with the freshly-selected R for the next sample.
+            if noise.enabled {
+                if let Some(slots) = noise.switch_comp_to_noise_slot.get(idx) {
+                    for (ci, maybe_slot) in slots.iter().enumerate() {
+                        if let Some(slot) = maybe_slot {
+                            code.push_str(&format!(
+                                "        self.noise_thermal_sqrt_inv_r[{slot}] = (1.0 / SWITCH_{idx}_COMP_{ci}_VALUES[position]).sqrt();\n",
+                            ));
+                        }
+                    }
+                }
+            }
+
             // Warm DC-OP re-init on switch change: reset NR seed to DC bias.
             // Switches have no smoother so any change is a step; always re-init.
             // See Batch D Phase 2.

@@ -440,6 +440,102 @@ fn main() {{
     );
 }
 
+/// Phase 1.5 Step 2 v2: `.switch` R-component noise tracks `set_switch_N`.
+///
+/// Analogue of `dynamic_pot_noise_tracks_set_pot` for discrete-position
+/// switch R. Two observations:
+///
+/// - kTC variance stays inside the wide tolerance window at BOTH switch
+///   positions — the per-sample coefficient is refreshed from the new R.
+/// - Same seed → different first-sample output between positions 0 and 2.
+///   Load-bearing: if `set_switch_N` didn't refresh
+///   `state.noise_thermal_sqrt_inv_r`, the RNG stream would produce a
+///   byte-identical first sample at both positions.
+#[test]
+fn dynamic_switch_r_noise_tracks_set_switch() {
+    const RC_SPICE_SWITCH: &str = r#"* RC lowpass with .switch R1 — Step 2 v2 switch-R noise
+R1 in out 10k
+C1 out 0 100n
+.switch R1 1k 10k 100k "Tone"
+.end
+"#;
+    let sr = 96_000.0;
+    let config = CodegenConfig {
+        circuit_name: "rc_switch_noise_psd".to_string(),
+        sample_rate: sr,
+        input_node: 0,
+        output_nodes: vec![1],
+        input_resistance: 1.0,
+        dc_block: false,
+        noise_mode: NoiseMode::Thermal,
+        noise_master_seed: 42,
+        ..CodegenConfig::default()
+    };
+    let (code, _n, _m) = support::generate_circuit_code(RC_SPICE_SWITCH, &config);
+
+    let main = format!(
+        r#"
+fn run_at_position(pos: usize) -> (f64, f64) {{
+    let mut state = CircuitState::default();
+    state.set_sample_rate({sr}_f64);
+    state.set_switch_0(pos);
+    state.set_seed(42);
+    state.set_noise_enabled(true);
+    state.set_temperature_k(290.0);
+    for _ in 0..5_000 {{ let _ = process_sample(0.0, &mut state); }}
+    let mut sum = 0.0_f64;
+    let mut sum_sq = 0.0_f64;
+    let mut first = 0.0_f64;
+    let n = 1usize << 16;
+    for i in 0..n {{
+        let v = process_sample(0.0, &mut state)[0];
+        if i == 0 {{ first = v; }}
+        sum += v;
+        sum_sq += v * v;
+    }}
+    let mean = sum / n as f64;
+    let var = (sum_sq / n as f64 - mean * mean).max(0.0);
+    (var, first)
+}}
+
+fn main() {{
+    let (var_pos0, first_pos0) = run_at_position(0);
+    let (var_pos2, first_pos2) = run_at_position(2);
+    println!("VAR:pos0={{:.15e}}", var_pos0);
+    println!("VAR:pos2={{:.15e}}", var_pos2);
+    println!("VAR:first_pos0={{:.15e}}", first_pos0);
+    println!("VAR:first_pos2={{:.15e}}", first_pos2);
+}}
+"#,
+        sr = sr
+    );
+    let out = support::compile_and_run(&code, &main, "noise_switch_dynamic");
+
+    let var_pos0 = parse_var(&out.stdout, "pos0");
+    let var_pos2 = parse_var(&out.stdout, "pos2");
+    let first_pos0 = parse_var(&out.stdout, "first_pos0");
+    let first_pos2 = parse_var(&out.stdout, "first_pos2");
+
+    let expected = K_B * 290.0 / CAP_F;
+    for (var, label) in [(var_pos0, "pos=0 (1k)"), (var_pos2, "pos=2 (100k)")] {
+        let ratio = var / expected;
+        assert!(
+            (0.70..=1.30).contains(&ratio),
+            "switch-R kTC violated at {label}: variance {var:.3e} V² vs \
+             kT/C {expected:.3e} V² (ratio {ratio:.3})"
+        );
+    }
+
+    // Load-bearing: different R → different first-sample output at same
+    // seed. Proves `set_switch_0(2)` refreshed the coefficient.
+    assert_ne!(
+        first_pos0.to_bits(),
+        first_pos2.to_bits(),
+        "set_switch_0 did not change the first-sample noise output — \
+         coefficient refresh likely not wired (first={first_pos0:.6e})"
+    );
+}
+
 /// kTC theorem on the **nodal** codegen path (Phase 1.5 Step 1).
 ///
 /// The DK and nodal paths share the same trapezoidal MNA discretization

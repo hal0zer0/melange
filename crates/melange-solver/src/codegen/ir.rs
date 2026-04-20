@@ -1733,16 +1733,25 @@ pub struct ThermalNoiseSource {
     pub node_j: usize,
     /// Resistance in ohms at the default operating point.
     ///
-    /// For dynamic sources (`pot_slot = Some(_)`) this is the codegen-time
-    /// default; the runtime value lives in `state.noise_thermal_sqrt_inv_r`
-    /// and is refreshed by `set_pot_N` / `set_runtime_R_<field>`.
+    /// For dynamic sources (`pot_slot` or `switch_slot` is `Some(_)`) this
+    /// is the codegen-time default; the runtime value lives in
+    /// `state.noise_thermal_sqrt_inv_r` and is refreshed by the matching
+    /// `set_pot_N` / `set_runtime_R_<field>` / `set_switch_N` setter.
     pub resistance: f64,
     /// `Some(i)` when this R is a `.pot` / `.runtime R` / `.wiper` member
     /// backed by `mna.pots[i]`. The emitter injects a coefficient update
     /// into the corresponding pot / runtime-R setter so the per-sample
-    /// `sqrt(1/R)` tracks the live resistance. `None` for fixed resistors.
+    /// `sqrt(1/R)` tracks the live resistance. `None` for fixed resistors
+    /// and switch-R components.
     #[serde(default)]
     pub pot_slot: Option<usize>,
+    /// `Some((switch_idx, comp_idx))` when this R is an R-type component
+    /// under a `.switch` directive. The emitter injects a coefficient
+    /// update into the corresponding `set_switch_N(position)` setter so
+    /// the per-sample `sqrt(1/R)` tracks the discrete R value selected by
+    /// the current position. `None` for fixed and pot-backed resistors.
+    #[serde(default)]
+    pub switch_slot: Option<(usize, usize)>,
 }
 
 /// Shot (junction) noise source stamped at one forward-biased PN junction.
@@ -1790,18 +1799,20 @@ pub struct NoiseIR {
 /// Collect Johnson-Nyquist thermal noise sources from the netlist.
 ///
 /// Includes every `Element::Resistor` that maps to a circuit node, with
-/// two source kinds:
+/// three source kinds (all indexed uniformly at
+/// `state.noise_thermal_sqrt_inv_r[k]`):
 ///
-/// - **Static** (`pot_slot = None`) — fixed-value resistor. The per-sample
-///   coefficient `sqrt(1/R)` is baked at codegen time.
-/// - **Dynamic** (`pot_slot = Some(i)`) — `.pot` / `.wiper` / `.runtime R`
-///   member backed by `mna.pots[i]`. The coefficient is state-backed
-///   and refreshed inside the emitted `set_pot_N` / `set_runtime_R_<field>`
-///   method so noise tracks the live resistance in real time.
-///
-/// Switches (`.switch` R components) are still skipped — they need a
-/// position→resistance table and per-position recompute inside
-/// `set_switch_N`. Deferred to Step 2 v2 / plan doc.
+/// - **Static** (both `pot_slot` and `switch_slot` are `None`) —
+///   fixed-value resistor. The per-sample coefficient `sqrt(1/R)` is baked
+///   at codegen time.
+/// - **Pot-backed** (`pot_slot = Some(i)`) — `.pot` / `.wiper` /
+///   `.runtime R` member backed by `mna.pots[i]`. The coefficient is
+///   state-backed and refreshed inside `set_pot_N` /
+///   `set_runtime_R_<field>`.
+/// - **Switch-backed** (`switch_slot = Some((sw, comp))`) — R-type
+///   component under a `.switch` directive. The coefficient is refreshed
+///   inside `set_switch_N(position)` using the position-indexed value
+///   array emitted by each solver's constants block.
 ///
 /// Node indices are MNA 1-indexed (0 = ground) via `mna.node_map`. Resistors
 /// whose terminals fail to resolve (would collapse to ground–ground) are
@@ -1810,7 +1821,7 @@ pub fn collect_thermal_noise_sources(
     netlist: &Netlist,
     mna: &MnaSystem,
 ) -> Vec<ThermalNoiseSource> {
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashMap;
 
     // Upper-cased name → pot index in mna.pots. Covers .pot, .runtime R,
     // and wiper-derived pot entries (wipers decompose into cw/ccw pots
@@ -1820,12 +1831,15 @@ pub fn collect_thermal_noise_sources(
         pot_slot.insert(p.name.to_ascii_uppercase(), i);
     }
 
-    // Switch R components stay skipped. See the doc comment above.
-    let mut skip_switch: HashSet<String> = HashSet::new();
-    for sw in &mna.switches {
-        for c in &sw.components {
+    // Upper-cased name → (switch_idx, comp_idx) for R-type switch
+    // components. C and L components don't generate thermal noise and are
+    // skipped here — they also aren't Element::Resistor at the netlist
+    // level, so the loop below never sees them.
+    let mut switch_slot_map: HashMap<String, (usize, usize)> = HashMap::new();
+    for (sw_idx, sw) in mna.switches.iter().enumerate() {
+        for (ci, c) in sw.components.iter().enumerate() {
             if c.component_type == 'R' {
-                skip_switch.insert(c.name.to_ascii_uppercase());
+                switch_slot_map.insert(c.name.to_ascii_uppercase(), (sw_idx, ci));
             }
         }
     }
@@ -1840,9 +1854,6 @@ pub fn collect_thermal_noise_sources(
         } = el
         {
             let upper = name.to_ascii_uppercase();
-            if skip_switch.contains(&upper) {
-                continue;
-            }
             if !value.is_finite() || *value <= 0.0 {
                 continue;
             }
@@ -1851,25 +1862,35 @@ pub fn collect_thermal_noise_sources(
             if node_i == 0 && node_j == 0 {
                 continue;
             }
-            let slot = pot_slot.get(&upper).copied();
-            // For dynamic sources, use the pot's default (1/g_nominal) as
-            // the initial resistance. The netlist `value` may be nominal
-            // max or midpoint depending on how .pot was declared; the MNA
-            // builder resolves it to g_nominal, which is the single source
-            // of truth the runtime setter compares against.
-            let resistance = match slot {
-                Some(i) => {
-                    let g = mna.pots[i].g_nominal;
-                    if g > 0.0 && g.is_finite() { 1.0 / g } else { *value }
+            let pot_idx = pot_slot.get(&upper).copied();
+            let sw_idx = switch_slot_map.get(&upper).copied();
+            // A single R cannot be under both `.pot` and `.switch` in the
+            // parser (those directives validate mutually exclusive
+            // membership), so at most one of pot_idx / sw_idx is Some.
+            // Resolve initial resistance from the backing structure:
+            //   - pot: use `1/g_nominal` (MNA-canonical value)
+            //   - switch: use position-0 value (matches Default::default)
+            //   - neither: use the netlist literal value
+            let resistance = if let Some(i) = pot_idx {
+                let g = mna.pots[i].g_nominal;
+                if g > 0.0 && g.is_finite() { 1.0 / g } else { *value }
+            } else if let Some((sw, comp)) = sw_idx {
+                let positions = &mna.switches[sw].positions;
+                let r0 = positions.first().and_then(|row| row.get(comp)).copied();
+                match r0 {
+                    Some(v) if v.is_finite() && v > 0.0 => v,
+                    _ => *value,
                 }
-                None => *value,
+            } else {
+                *value
             };
             sources.push(ThermalNoiseSource {
                 name: name.clone(),
                 node_i,
                 node_j,
                 resistance,
-                pot_slot: slot,
+                pot_slot: pot_idx,
+                switch_slot: sw_idx,
             });
         }
     }

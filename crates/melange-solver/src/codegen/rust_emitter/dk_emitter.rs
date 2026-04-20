@@ -980,6 +980,32 @@ impl RustEmitter {
             } else {
                 String::new()
             };
+            // Authentic-noise coefficient refresh for any R-type components
+            // in this switch that back a thermal noise source. Emitted only
+            // when noise is compiled in AND this switch has at least one
+            // noise-tracked R. DK uses the 2D const array
+            // `SWITCH_<N>_VALUES[position][comp_idx]`, distinct from
+            // the nodal path's per-component arrays.
+            let noise_update: String = if noise.enabled {
+                let idx = sw.index;
+                noise
+                    .switch_comp_to_noise_slot
+                    .get(idx)
+                    .map(|slots| {
+                        let mut out = String::new();
+                        for (ci, maybe_slot) in slots.iter().enumerate() {
+                            if let Some(slot) = maybe_slot {
+                                out.push_str(&format!(
+                                    "        self.noise_thermal_sqrt_inv_r[{slot}] = (1.0 / SWITCH_{idx}_VALUES[position][{ci}]).sqrt();\n",
+                                ));
+                            }
+                        }
+                        out
+                    })
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            };
             code.push_str(&format!(
                 "    /// Set switch {} position (0..{}).\n\
                  \x20   ///\n\
@@ -989,6 +1015,7 @@ impl RustEmitter {
                  \x20       if self.switch_{}_position == position {{ return; }}\n\
                  \x20       self.switch_{}_position = position;\n\
                  \x20       self.matrices_dirty = true;\n\
+{noise_update}\
                  \x20       // Warm DC-OP re-init on switch change: reset NR seed to DC bias.\n\
                  \x20       // Switches have no smoother so any change is a step. See Batch D Phase 2.\n\
 {dc_op_reset}\
@@ -2620,6 +2647,13 @@ pub(super) struct NoiseEmission {
     /// the pot setter for that index should update
     /// `state.noise_thermal_sqrt_inv_r[k]` after writing the new resistance.
     pub pot_to_noise_slot: Vec<Option<usize>>,
+    /// Reverse lookup: `[switch_idx][comp_idx] → noise source index` for
+    /// R-type switch components. The outer Vec is indexed by the switch
+    /// number (matching `ir.switches`), the inner by the component index
+    /// within that switch. A `Some(k)` entry means `set_switch_N(position)`
+    /// should update `state.noise_thermal_sqrt_inv_r[k]` from the
+    /// position-indexed R value. C/L components always map to `None`.
+    pub switch_comp_to_noise_slot: Vec<Vec<Option<usize>>>,
 }
 
 impl RustEmitter {
@@ -3009,6 +3043,24 @@ impl RustEmitter {
             }
         }
 
+        // Same for switches: a per-(switch, component) reverse lookup so
+        // the emitted `set_switch_N(position)` can spot-update every
+        // R-backed noise slot. C/L components map to `None` by default.
+        let mut switch_comp_to_noise_slot: Vec<Vec<Option<usize>>> = ir
+            .switches
+            .iter()
+            .map(|sw| vec![None; sw.components.len()])
+            .collect();
+        for (k, src) in ir.noise.thermal_sources.iter().enumerate() {
+            if let Some((sw, comp)) = src.switch_slot {
+                if sw < switch_comp_to_noise_slot.len()
+                    && comp < switch_comp_to_noise_slot[sw].len()
+                {
+                    switch_comp_to_noise_slot[sw][comp] = Some(k);
+                }
+            }
+        }
+
         NoiseEmission {
             top_level: top,
             state_fields,
@@ -3021,6 +3073,7 @@ impl RustEmitter {
             enabled: true,
             thermal_n,
             pot_to_noise_slot,
+            switch_comp_to_noise_slot,
         }
     }
 }
