@@ -2666,13 +2666,14 @@ impl RustEmitter {
     pub(super) fn build_noise_emission(&self, ir: &CircuitIR) -> NoiseEmission {
         let thermal_n = ir.noise.thermal_sources.len();
         let shot_n = ir.noise.shot_sources.len();
-        if ir.noise.mode == NoiseMode::Off || (thermal_n == 0 && shot_n == 0) {
+        let flicker_n = ir.noise.flicker_sources.len();
+        if ir.noise.mode == NoiseMode::Off || (thermal_n == 0 && shot_n == 0 && flicker_n == 0) {
             return NoiseEmission::default();
         }
 
         let mut top = String::new();
         top.push_str("// ----------------------------------------------------------------------\n");
-        top.push_str("// Authentic circuit noise — Phases 1 (thermal) + 2 (shot)\n");
+        top.push_str("// Authentic circuit noise — Phases 1 (thermal) + 2 (shot) + 3 (flicker)\n");
         top.push_str("// Generated when --noise {thermal|shot|full}. See docs/aidocs/NOISE.md\n");
         top.push_str("// ----------------------------------------------------------------------\n\n");
 
@@ -2753,6 +2754,61 @@ impl RustEmitter {
             ));
         }
 
+        // Flicker (1/f) noise source table. Per-sample amplitude is
+        //   sqrt(4·fs) · sqrt(KF) · |I_prev|^(AF/2) · N(0,1)
+        // fed into a Paul Kellett 7-pole pink filter. The `4·…·fs` matches
+        // the thermal/shot trap-MNA compensation (see NOISE.md "Constant
+        // derivation"). Source collection only adds devices whose `.model`
+        // supplies `KF > 0`, so zero-KF builds leak no flicker constants.
+        if flicker_n > 0 {
+            top.push_str(&format!(
+                "pub const NOISE_FLICKER_N: usize = {};\n",
+                flicker_n
+            ));
+            let fl_slot: Vec<usize> = ir
+                .noise
+                .flicker_sources
+                .iter()
+                .map(|s| s.slot_idx)
+                .collect();
+            let fl_ni: Vec<usize> =
+                ir.noise.flicker_sources.iter().map(|s| s.node_i).collect();
+            let fl_nj: Vec<usize> =
+                ir.noise.flicker_sources.iter().map(|s| s.node_j).collect();
+            let fl_sqrt_kf: Vec<String> = ir
+                .noise
+                .flicker_sources
+                .iter()
+                .map(|s| fmt_f64(s.kf.sqrt()))
+                .collect();
+            let fl_half_af: Vec<String> = ir
+                .noise
+                .flicker_sources
+                .iter()
+                .map(|s| fmt_f64(0.5 * s.af))
+                .collect();
+            top.push_str(&format!(
+                "pub(crate) const NOISE_FLICKER_SLOT_IDX: [usize; NOISE_FLICKER_N] = [{}];\n",
+                fmt_usize_arr(&fl_slot)
+            ));
+            top.push_str(&format!(
+                "pub(crate) const NOISE_FLICKER_NODE_I: [usize; NOISE_FLICKER_N] = [{}];\n",
+                fmt_usize_arr(&fl_ni)
+            ));
+            top.push_str(&format!(
+                "pub(crate) const NOISE_FLICKER_NODE_J: [usize; NOISE_FLICKER_N] = [{}];\n",
+                fmt_usize_arr(&fl_nj)
+            ));
+            top.push_str(&format!(
+                "pub(crate) const NOISE_FLICKER_SQRT_KF: [f64; NOISE_FLICKER_N] = [{}];\n",
+                fl_sqrt_kf.join(", ")
+            ));
+            top.push_str(&format!(
+                "pub(crate) const NOISE_FLICKER_HALF_AF: [f64; NOISE_FLICKER_N] = [{}];\n\n",
+                fl_half_af.join(", ")
+            ));
+        }
+
         // xoshiro256++ RNG: fast, high-quality, 256-bit state per stream.
         top.push_str("#[derive(Clone, Copy, Debug)]\n");
         top.push_str("pub struct Xoshiro256pp { pub s: [u64; 4] }\n\n");
@@ -2823,6 +2879,34 @@ impl RustEmitter {
         top.push_str("/// under a deterministic seed. Chosen to be a high-entropy value.\n");
         top.push_str("pub const NOISE_SHOT_SALT: u64 = 0xA5A5_DEAD_BEEF_CAFE;\n\n");
 
+        if flicker_n > 0 {
+            top.push_str("/// Flicker-noise salt. Distinct from thermal and shot salts so\n");
+            top.push_str("/// every pink-filter input stream is independent under a\n");
+            top.push_str("/// deterministic master seed.\n");
+            top.push_str(
+                "pub const NOISE_FLICKER_SALT: u64 = 0xC0DE_BABE_DEAD_BEEF;\n\n",
+            );
+            // Paul Kellett 7-pole pink filter (musicdsp.org pk3 variant,
+            // ±0.05 dB over 9.2 octaves). White in, pink out with a ~1/f
+            // PSD shape. The `* 0.11` tail normalizes the cascade to ~unit
+            // RMS gain on unit-variance white — without it, Kellett's raw
+            // output is ~3× the input RMS. Calibration is empirical; the
+            // shipped PSD test asserts slope, not absolute level.
+            top.push_str("#[inline(always)]\n");
+            top.push_str("fn kellett_pink(white: f64, state: &mut [f64; 7]) -> f64 {\n");
+            top.push_str("    state[0] = 0.99886 * state[0] + white * 0.0555179;\n");
+            top.push_str("    state[1] = 0.99332 * state[1] + white * 0.0750759;\n");
+            top.push_str("    state[2] = 0.96900 * state[2] + white * 0.1538520;\n");
+            top.push_str("    state[3] = 0.86650 * state[3] + white * 0.3104856;\n");
+            top.push_str("    state[4] = 0.55000 * state[4] + white * 0.5329522;\n");
+            top.push_str("    state[5] = -0.7616 * state[5] - white * 0.0168980;\n");
+            top.push_str("    let pink = state[0] + state[1] + state[2] + state[3]\n");
+            top.push_str("        + state[4] + state[5] + state[6] + white * 0.5362;\n");
+            top.push_str("    state[6] = white * 0.115926;\n");
+            top.push_str("    pink * 0.11\n");
+            top.push_str("}\n\n");
+        }
+
         // Gaussian via Marsaglia polar method.
         top.push_str("/// Standard-normal (µ=0, σ=1) sample via Marsaglia polar method.\n");
         top.push_str("/// One RNG pair yields two Gaussians; the second is cached for the next call.\n");
@@ -2888,6 +2972,23 @@ impl RustEmitter {
             state_fields.push_str("    /// Updated by `set_sample_rate`.\n");
             state_fields.push_str("    pub noise_shot_scale: f64,\n");
         }
+        if flicker_n > 0 {
+            state_fields.push_str("    /// Per-source xoshiro256++ state for the Kellett pink-filter\n");
+            state_fields.push_str("    /// input — salted distinct from thermal and shot streams.\n");
+            state_fields.push_str("    pub noise_flicker_rng: [Xoshiro256pp; NOISE_FLICKER_N],\n");
+            state_fields.push_str("    /// Cached second Gaussian from Marsaglia polar pair (flicker stream).\n");
+            state_fields.push_str("    pub noise_flicker_gaussian_cache: [Option<f64>; NOISE_FLICKER_N],\n");
+            state_fields.push_str("    /// Per-source 7-pole Kellett filter state. Zeroed at `default()`\n");
+            state_fields.push_str("    /// and at `reset()`; settles in a handful of samples once audio\n");
+            state_fields.push_str("    /// processing begins.\n");
+            state_fields.push_str("    pub noise_flicker_state: [[f64; 7]; NOISE_FLICKER_N],\n");
+            state_fields.push_str("    /// Scalar applied only to flicker sources (Phase 3). Runtime.\n");
+            state_fields.push_str("    pub flicker_gain: f64,\n");
+            state_fields.push_str("    /// Precomputed `sqrt(4·fs_internal)`. Per-sample amplitude is\n");
+            state_fields.push_str("    /// `noise_flicker_scale · NOISE_FLICKER_SQRT_KF[k] · |I_prev|^(AF/2)`\n");
+            state_fields.push_str("    /// before being shaped by the Kellett pink filter.\n");
+            state_fields.push_str("    pub noise_flicker_scale: f64,\n");
+        }
 
         // Default impl: compute thermal_scale and seed RNGs
         let mut default_stmts = String::new();
@@ -2915,6 +3016,16 @@ impl RustEmitter {
             default_stmts.push_str("        let noise_shot_scale = (4.0 * Q_E * fs_internal).sqrt();\n");
             default_stmts.push_str("        let noise_shot_rng = seed_noise_rngs_salted::<NOISE_SHOT_N>(NOISE_MASTER_SEED_DEFAULT, NOISE_SHOT_SALT);\n");
         }
+        if flicker_n > 0 {
+            default_stmts.push_str("        // Flicker streams: salted distinct from thermal/shot streams.\n");
+            default_stmts.push_str("        // Per-source white-input variance fed into the Kellett filter:\n");
+            default_stmts.push_str("        //   σ_w² = 4·KF·|I|^AF·fs\n");
+            default_stmts.push_str("        // (same 2× trap-MNA compensation as thermal/shot). The `sqrt(4·fs)`\n");
+            default_stmts.push_str("        // factor is shared across sources; sqrt(KF) and |I|^(AF/2) live\n");
+            default_stmts.push_str("        // in per-source constants and runtime state.\n");
+            default_stmts.push_str("        let noise_flicker_scale = (4.0 * fs_internal).sqrt();\n");
+            default_stmts.push_str("        let noise_flicker_rng = seed_noise_rngs_salted::<NOISE_FLICKER_N>(NOISE_MASTER_SEED_DEFAULT, NOISE_FLICKER_SALT);\n");
+        }
 
         let mut default_fields = String::new();
         default_fields.push_str("            noise_rng,\n");
@@ -2933,6 +3044,16 @@ impl RustEmitter {
             default_fields.push_str("            shot_gain: 1.0,\n");
             default_fields.push_str("            noise_shot_scale,\n");
         }
+        if flicker_n > 0 {
+            default_fields.push_str("            noise_flicker_rng,\n");
+            default_fields.push_str(
+                "            noise_flicker_gaussian_cache: [None; NOISE_FLICKER_N],\n",
+            );
+            default_fields
+                .push_str("            noise_flicker_state: [[0.0; 7]; NOISE_FLICKER_N],\n");
+            default_fields.push_str("            flicker_gain: 1.0,\n");
+            default_fields.push_str("            noise_flicker_scale,\n");
+        }
 
         // reset() — reseed RNG and clear gaussian cache; keep user settings.
         let mut reset_body = String::new();
@@ -2948,6 +3069,16 @@ impl RustEmitter {
             reset_body.push_str("        self.noise_shot_rng = seed_noise_rngs_salted::<NOISE_SHOT_N>(self.noise_master_seed, NOISE_SHOT_SALT);\n");
             reset_body.push_str("        self.noise_shot_gaussian_cache = [None; NOISE_SHOT_N];\n");
         }
+        if flicker_n > 0 {
+            reset_body.push_str(
+                "        // Re-seed flicker RNGs + zero Kellett pink-filter state.\n",
+            );
+            reset_body.push_str("        self.noise_flicker_rng = seed_noise_rngs_salted::<NOISE_FLICKER_N>(self.noise_master_seed, NOISE_FLICKER_SALT);\n");
+            reset_body
+                .push_str("        self.noise_flicker_gaussian_cache = [None; NOISE_FLICKER_N];\n");
+            reset_body
+                .push_str("        self.noise_flicker_state = [[0.0; 7]; NOISE_FLICKER_N];\n");
+        }
 
         // set_sample_rate tail: recompute thermal_scale at the new rate
         let mut ssr_body = String::new();
@@ -2956,6 +3087,11 @@ impl RustEmitter {
         ssr_body.push_str("        self.noise_thermal_scale = (8.0 * K_B * self.temperature_k * self.noise_fs).sqrt();\n");
         if shot_n > 0 {
             ssr_body.push_str("        self.noise_shot_scale = (4.0 * Q_E * self.noise_fs).sqrt();\n");
+        }
+        if flicker_n > 0 {
+            ssr_body.push_str(
+                "        self.noise_flicker_scale = (4.0 * self.noise_fs).sqrt();\n",
+            );
         }
 
         // Public API
@@ -2981,6 +3117,14 @@ impl RustEmitter {
             methods.push_str("    /// also muting thermal.\n");
             methods.push_str("    pub fn set_shot_gain(&mut self, gain: f64) { self.shot_gain = gain; }\n\n");
         }
+        if flicker_n > 0 {
+            methods.push_str("    /// Scalar applied only to flicker (1/f) noise sources.\n");
+            methods.push_str("    /// Runtime-settable. Set to `0.0` to mute flicker without\n");
+            methods.push_str("    /// also muting thermal or shot.\n");
+            methods.push_str(
+                "    pub fn set_flicker_gain(&mut self, gain: f64) { self.flicker_gain = gain; }\n\n",
+            );
+        }
         methods.push_str("    /// Set the master seed. `0` → entropy-seeded from system clock.\n");
         methods.push_str("    /// Any nonzero value → deterministic (same seed → bit-identical noise).\n");
         methods.push_str("    pub fn set_seed(&mut self, master: u64) {\n");
@@ -2990,6 +3134,12 @@ impl RustEmitter {
         if shot_n > 0 {
             methods.push_str("        self.noise_shot_rng = seed_noise_rngs_salted::<NOISE_SHOT_N>(master, NOISE_SHOT_SALT);\n");
             methods.push_str("        self.noise_shot_gaussian_cache = [None; NOISE_SHOT_N];\n");
+        }
+        if flicker_n > 0 {
+            methods.push_str("        self.noise_flicker_rng = seed_noise_rngs_salted::<NOISE_FLICKER_N>(master, NOISE_FLICKER_SALT);\n");
+            methods
+                .push_str("        self.noise_flicker_gaussian_cache = [None; NOISE_FLICKER_N];\n");
+            methods.push_str("        self.noise_flicker_state = [[0.0; 7]; NOISE_FLICKER_N];\n");
         }
         methods.push_str("    }\n");
 
@@ -3024,6 +3174,28 @@ impl RustEmitter {
             rhs_stamp.push_str("                let i_n = shot_scale * i_abs.sqrt() * g;\n");
             rhs_stamp.push_str("                let ni = NOISE_SHOT_NODE_I[k];\n");
             rhs_stamp.push_str("                let nj = NOISE_SHOT_NODE_J[k];\n");
+            rhs_stamp.push_str("                if ni > 0 { rhs[ni - 1] += i_n; }\n");
+            rhs_stamp.push_str("                if nj > 0 { rhs[nj - 1] -= i_n; }\n");
+            rhs_stamp.push_str("            }\n");
+            rhs_stamp.push_str("        }\n");
+        }
+        if flicker_n > 0 {
+            rhs_stamp.push_str("        // Flicker (1/f): white draw → sqrt(4·KF·|I|^AF·fs) scale →\n");
+            rhs_stamp.push_str("        // Kellett 7-pole pink filter → RHS. `|I_prev|` comes from\n");
+            rhs_stamp.push_str("        // `state.i_nl_prev` (one-sample lag, same as shot). The per-\n");
+            rhs_stamp.push_str("        // source sqrt(KF) and AF/2 are compile-time baked so the hot\n");
+            rhs_stamp.push_str("        // loop is branch-free.\n");
+            rhs_stamp.push_str("        let flicker_scale = state.noise_flicker_scale * state.noise_gain * state.flicker_gain;\n");
+            rhs_stamp.push_str("        if flicker_scale != 0.0 {\n");
+            rhs_stamp.push_str("            for k in 0..NOISE_FLICKER_N {\n");
+            rhs_stamp.push_str("                let i_abs = state.i_nl_prev[NOISE_FLICKER_SLOT_IDX[k]].abs();\n");
+            rhs_stamp.push_str("                if i_abs <= 0.0 { continue; }\n");
+            rhs_stamp.push_str("                let white = gaussian(&mut state.noise_flicker_rng[k], &mut state.noise_flicker_gaussian_cache[k]);\n");
+            rhs_stamp.push_str("                let pink = kellett_pink(white, &mut state.noise_flicker_state[k]);\n");
+            rhs_stamp.push_str("                let amp = flicker_scale * NOISE_FLICKER_SQRT_KF[k] * i_abs.powf(NOISE_FLICKER_HALF_AF[k]);\n");
+            rhs_stamp.push_str("                let i_n = amp * pink;\n");
+            rhs_stamp.push_str("                let ni = NOISE_FLICKER_NODE_I[k];\n");
+            rhs_stamp.push_str("                let nj = NOISE_FLICKER_NODE_J[k];\n");
             rhs_stamp.push_str("                if ni > 0 { rhs[ni - 1] += i_n; }\n");
             rhs_stamp.push_str("                if nj > 0 { rhs[nj - 1] -= i_n; }\n");
             rhs_stamp.push_str("            }\n");

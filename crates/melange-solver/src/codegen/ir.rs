@@ -1774,6 +1774,35 @@ pub struct ShotNoiseSource {
     pub node_j: usize,
 }
 
+/// Flicker (1/f) noise source stamped at one current-carrying junction.
+///
+/// Emitted as a Norton current source whose amplitude is shaped by a Paul
+/// Kellett 7-pole pink filter (≈ -3 dB/oct slope, ±0.5 dB over 10 Hz-20 kHz).
+/// For sample rate `fs`, instantaneous bias current `|I(t)|` (read from
+/// `state.i_nl_prev`), device-specific `KF` and `AF` model params, the
+/// per-sample injected current is
+/// `kellett(sqrt(4·KF·fs) · |I|^(AF/2) · N(0,1))`.
+/// Same `4·…·fs` 2× trap-MNA compensation as thermal and shot; the Kellett
+/// cascade has ~unity RMS power gain so the white-input PSD shapes into
+/// 1/f at the output. See `docs/aidocs/NOISE.md`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FlickerNoiseSource {
+    /// Device name (and port suffix where relevant, e.g. "Q1.Ic").
+    pub name: String,
+    /// Index into `state.i_nl_prev` providing the instantaneous bias current.
+    pub slot_idx: usize,
+    /// 1-indexed positive injection node (0 = ground).
+    pub node_i: usize,
+    /// 1-indexed negative injection node (0 = ground).
+    pub node_j: usize,
+    /// Flicker coefficient `KF` from the device's `.model` (0 → source is
+    /// filtered out before this struct is built; every emitted source has
+    /// `kf > 0`).
+    pub kf: f64,
+    /// Flicker exponent `AF` from the device's `.model`. ngspice default 1.0.
+    pub af: f64,
+}
+
 /// Noise configuration baked into the generated code.
 ///
 /// Built from [`crate::codegen::NoiseMode`] + a scan of `netlist.elements`.
@@ -1794,6 +1823,11 @@ pub struct NoiseIR {
     /// `mode.includes_shot()`.
     #[serde(default)]
     pub shot_sources: Vec<ShotNoiseSource>,
+    /// Flicker (1/f) noise sources (Phase 3). Populated only when
+    /// `mode.includes_full()` AND the device's `.model` supplies a positive
+    /// `KF`. Zero-`KF` devices produce no entry — zero codegen overhead.
+    #[serde(default)]
+    pub flicker_sources: Vec<FlickerNoiseSource>,
 }
 
 /// Collect Johnson-Nyquist thermal noise sources from the netlist.
@@ -1999,6 +2033,150 @@ pub fn collect_shot_noise_sources(mna: &MnaSystem) -> Vec<ShotNoiseSource> {
                 // Skipped: shot at a VCA control port is not physically
                 // meaningful; the VCA sig port is linear in the small-
                 // signal sense and doesn't have a junction current.
+            }
+        }
+    }
+    sources
+}
+
+/// Collect flicker (1/f) noise sources from the nonlinear device list.
+///
+/// Per-device port layout mirrors `collect_shot_noise_sources` — Diode 1,
+/// BJT 2 (Ic + Ib), BjtForwardActive 1 (Ic only), JFET/MOSFET 1 (Id), Tube 1
+/// (Ip), VCA skipped — but each device is filtered on `KF > 0` so circuits
+/// with zero-`KF` (the default) models produce no flicker entries and incur
+/// no per-sample cost. `AF` defaults to 1.0 (ngspice convention).
+///
+/// Model lookup walks `netlist.elements` once to map device name → model
+/// name, then `netlist.models` for the KF/AF pair. The cost is O(N_dev +
+/// N_elem) per codegen invocation; negligible compared to matrix assembly.
+pub fn collect_flicker_noise_sources(
+    netlist: &Netlist,
+    mna: &MnaSystem,
+) -> Vec<FlickerNoiseSource> {
+    use crate::mna::NonlinearDeviceType;
+    use std::collections::HashMap;
+
+    // Build device-name → model-name map once.
+    let mut model_for: HashMap<String, String> = HashMap::new();
+    for el in &netlist.elements {
+        match el {
+            Element::Diode { name, model, .. }
+            | Element::Bjt { name, model, .. }
+            | Element::Jfet { name, model, .. }
+            | Element::Mosfet { name, model, .. }
+            | Element::Triode { name, model, .. }
+            | Element::Pentode { name, model, .. } => {
+                model_for.insert(name.to_ascii_uppercase(), model.clone());
+            }
+            _ => {}
+        }
+    }
+
+    // Resolve (KF, AF) for a given device by its name, returning `None` when
+    // the device is not modeled (shouldn't happen — defensive) or KF <= 0.
+    let kf_af = |dev_name: &str| -> Option<(f64, f64)> {
+        let model = model_for.get(&dev_name.to_ascii_uppercase())?;
+        let m = netlist
+            .models
+            .iter()
+            .find(|m| m.name.eq_ignore_ascii_case(model))?;
+        let mut kf = 0.0_f64;
+        let mut af = 1.0_f64;
+        for (k, v) in &m.params {
+            match k.to_ascii_uppercase().as_str() {
+                "KF" => kf = *v,
+                "AF" => af = *v,
+                _ => {}
+            }
+        }
+        if kf > 0.0 && kf.is_finite() && af > 0.0 && af.is_finite() {
+            Some((kf, af))
+        } else {
+            None
+        }
+    };
+
+    let mut sources = Vec::new();
+    for dev in &mna.nonlinear_devices {
+        let Some((kf, af)) = kf_af(&dev.name) else {
+            continue;
+        };
+        let nodes = &dev.node_indices;
+        match dev.device_type {
+            NonlinearDeviceType::Diode => {
+                if nodes.len() >= 2 {
+                    sources.push(FlickerNoiseSource {
+                        name: dev.name.clone(),
+                        slot_idx: dev.start_idx,
+                        node_i: nodes[0],
+                        node_j: nodes[1],
+                        kf,
+                        af,
+                    });
+                }
+            }
+            NonlinearDeviceType::Bjt => {
+                if nodes.len() >= 3 {
+                    let (c, b, e) = (nodes[0], nodes[1], nodes[2]);
+                    sources.push(FlickerNoiseSource {
+                        name: format!("{}.Ic", dev.name),
+                        slot_idx: dev.start_idx,
+                        node_i: c,
+                        node_j: e,
+                        kf,
+                        af,
+                    });
+                    sources.push(FlickerNoiseSource {
+                        name: format!("{}.Ib", dev.name),
+                        slot_idx: dev.start_idx + 1,
+                        node_i: b,
+                        node_j: e,
+                        kf,
+                        af,
+                    });
+                }
+            }
+            NonlinearDeviceType::BjtForwardActive => {
+                if nodes.len() >= 3 {
+                    sources.push(FlickerNoiseSource {
+                        name: format!("{}.Ic", dev.name),
+                        slot_idx: dev.start_idx,
+                        node_i: nodes[0],
+                        node_j: nodes[2],
+                        kf,
+                        af,
+                    });
+                }
+            }
+            NonlinearDeviceType::Jfet | NonlinearDeviceType::Mosfet => {
+                if nodes.len() >= 3 {
+                    sources.push(FlickerNoiseSource {
+                        name: format!("{}.Id", dev.name),
+                        slot_idx: dev.start_idx,
+                        node_i: nodes[0],
+                        node_j: nodes[2],
+                        kf,
+                        af,
+                    });
+                }
+            }
+            NonlinearDeviceType::Tube => {
+                if nodes.len() >= 3 {
+                    let plate = nodes[0];
+                    let cathode = *nodes.last().unwrap();
+                    sources.push(FlickerNoiseSource {
+                        name: format!("{}.Ip", dev.name),
+                        slot_idx: dev.start_idx,
+                        node_i: plate,
+                        node_j: cathode,
+                        kf,
+                        af,
+                    });
+                }
+            }
+            NonlinearDeviceType::Vca => {
+                // Skipped: no junction current; shot/flicker not defined.
             }
         }
     }
@@ -3077,6 +3255,11 @@ impl CircuitIR {
                 } else {
                     Vec::new()
                 },
+                flicker_sources: if config.noise_mode.includes_full() {
+                    collect_flicker_noise_sources(netlist, mna)
+                } else {
+                    Vec::new()
+                },
             },
             named_constants,
             runtime_sources,
@@ -4035,6 +4218,11 @@ impl CircuitIR {
                 } else {
                     Vec::new()
                 },
+                flicker_sources: if config.noise_mode.includes_full() {
+                    collect_flicker_noise_sources(netlist, mna)
+                } else {
+                    Vec::new()
+                },
             },
             named_constants,
             runtime_sources,
@@ -4502,7 +4690,11 @@ impl CircuitIR {
             validate_positive_finite(ibv, "diode model IBV")?;
         }
 
-        Self::warn_unrecognized_params(netlist, model, &["IS", "N", "CJO", "RS", "BV", "IBV"]);
+        Self::warn_unrecognized_params(
+            netlist,
+            model,
+            &["IS", "N", "CJO", "RS", "BV", "IBV", "KF", "AF"],
+        );
 
         Ok(DiodeParams {
             is,
@@ -4700,7 +4892,8 @@ impl CircuitIR {
             model,
             &[
                 "IS", "BF", "BR", "VAF", "VAR", "IKF", "IKR", "CJE", "CJC", "NF", "NR", "ISE",
-                "NE", "ISC", "NC", "RB", "RC", "RE", "RTH", "CTH", "XTI", "EG", "TAMB",
+                "NE", "ISC", "NC", "RB", "RC", "RE", "RTH", "CTH", "XTI", "EG", "TAMB", "KF",
+                "AF",
             ],
         );
 
@@ -4806,7 +4999,7 @@ impl CircuitIR {
         Self::warn_unrecognized_params(
             netlist,
             model,
-            &["VTO", "BETA", "IDSS", "LAMBDA", "CGS", "CGD", "RD", "RS"],
+            &["VTO", "BETA", "IDSS", "LAMBDA", "CGS", "CGD", "RD", "RS", "KF", "AF"],
         );
 
         Ok(JfetParams {
@@ -4903,7 +5096,7 @@ impl CircuitIR {
             netlist,
             model,
             &[
-                "KP", "VTO", "LAMBDA", "CGS", "CGD", "RD", "RS", "GAMMA", "PHI",
+                "KP", "VTO", "LAMBDA", "CGS", "CGD", "RD", "RS", "GAMMA", "PHI", "KF", "AF",
             ],
         );
 
@@ -5047,6 +5240,8 @@ impl CircuitIR {
                 "MU_B",
                 "SVAR",
                 "EX_B",
+                "KF",
+                "AF",
             ],
         );
 
@@ -5294,6 +5489,8 @@ impl CircuitIR {
                 "MU_B",
                 "SVAR",
                 "EX_B",
+                "KF",
+                "AF",
             ],
         );
 

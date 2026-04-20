@@ -7683,3 +7683,169 @@ fn noise_nodal_generated_code_compiles() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+// ---------------------------------------------------------------------------
+// Phase 3 flicker-noise emission tests (Step 5)
+// ---------------------------------------------------------------------------
+
+const DIODE_WITH_KF_SPICE: &str = "\
+Diode flicker
+Rin in a 1k
+D1 a 0 D1N4148
+R2 a out 10k
+C1 out 0 1u
+.model D1N4148 D(IS=1e-15 KF=1e-14 AF=1.0)
+";
+
+const DIODE_NO_KF_SPICE: &str = "\
+Diode no flicker
+Rin in a 1k
+D1 a 0 D1N4148
+R2 a out 10k
+C1 out 0 1u
+.model D1N4148 D(IS=1e-15)
+";
+
+#[test]
+fn noise_flicker_absent_when_kf_zero() {
+    // NoiseMode::Full with all devices' KF unset (default 0) must NOT emit
+    // flicker scaffolding — keeps thermal+shot builds token-clean and
+    // preserves byte-identity vs pre-Step-5 builds of such circuits.
+    let config = CodegenConfig {
+        noise_mode: melange_solver::codegen::NoiseMode::Full,
+        ..default_config()
+    };
+    let code = generate_code_with_config(DIODE_NO_KF_SPICE, config);
+
+    for tok in [
+        "NOISE_FLICKER_N",
+        "NOISE_FLICKER_SALT",
+        "NOISE_FLICKER_SQRT_KF",
+        "noise_flicker_rng",
+        "noise_flicker_state",
+        "flicker_gain",
+        "noise_flicker_scale",
+        "kellett_pink",
+        "set_flicker_gain",
+    ] {
+        assert!(
+            !code.contains(tok),
+            "zero-KF circuit in Full mode leaked flicker token `{}`",
+            tok
+        );
+    }
+    // Thermal + shot still emit normally.
+    assert!(code.contains("NOISE_THERMAL_N"));
+    assert!(code.contains("NOISE_SHOT_N"));
+}
+
+#[test]
+fn noise_flicker_emits_when_kf_set() {
+    let config = CodegenConfig {
+        noise_mode: melange_solver::codegen::NoiseMode::Full,
+        noise_master_seed: 42,
+        ..default_config()
+    };
+    let code = generate_code_with_config(DIODE_WITH_KF_SPICE, config);
+
+    // One diode with KF>0 → one flicker source.
+    assert!(
+        code.contains("pub const NOISE_FLICKER_N: usize = 1;"),
+        "expected NOISE_FLICKER_N=1 for single KF-enabled diode; lines:\n{}",
+        code.lines()
+            .filter(|l| l.contains("NOISE_FLICKER_N"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+
+    for tok in [
+        "NOISE_FLICKER_SLOT_IDX",
+        "NOISE_FLICKER_NODE_I",
+        "NOISE_FLICKER_NODE_J",
+        "NOISE_FLICKER_SQRT_KF",
+        "NOISE_FLICKER_HALF_AF",
+        "NOISE_FLICKER_SALT",
+        "fn kellett_pink",
+        "noise_flicker_rng",
+        "noise_flicker_gaussian_cache",
+        "noise_flicker_state",
+        "flicker_gain: f64",
+        "noise_flicker_scale",
+        "pub fn set_flicker_gain",
+    ] {
+        assert!(
+            code.contains(tok),
+            "flicker codegen missing token `{}`",
+            tok
+        );
+    }
+
+    // RHS stamp threads |I_prev| through Kellett.
+    assert!(
+        code.contains("state.i_nl_prev[NOISE_FLICKER_SLOT_IDX[")
+            && code.contains("kellett_pink(white, &mut state.noise_flicker_state["),
+        "flicker RHS stamp must read |i_nl_prev| and run the Kellett filter"
+    );
+}
+
+#[test]
+fn noise_flicker_off_when_mode_is_shot() {
+    // NoiseMode::Shot with KF set must still NOT emit flicker scaffolding —
+    // `includes_full()` is the gate; Shot stops one level below.
+    let config = CodegenConfig {
+        noise_mode: melange_solver::codegen::NoiseMode::Shot,
+        ..default_config()
+    };
+    let code = generate_code_with_config(DIODE_WITH_KF_SPICE, config);
+
+    for tok in [
+        "NOISE_FLICKER_N",
+        "kellett_pink",
+        "noise_flicker_rng",
+        "noise_flicker_state",
+        "set_flicker_gain",
+    ] {
+        assert!(
+            !code.contains(tok),
+            "Shot mode with KF set still leaked flicker token `{}`",
+            tok
+        );
+    }
+    // Shot scaffolding still present.
+    assert!(code.contains("NOISE_SHOT_N"));
+}
+
+#[test]
+fn noise_flicker_bjt_emits_two_sources() {
+    // A full-2D BJT contributes both Ic and Ib flicker sources when the
+    // .model has KF>0. Mirrors the shot-count test.
+    const BJT_WITH_KF_SPICE: &str = "\
+BJT flicker
+Rin in b 1k
+Rb b 0 100k
+Q1 c b e 2N3904
+Re e 0 1k
+Rc vcc c 10k
+VCC vcc 0 12
+Rout c out 1k
+Cout out 0 1u
+.model 2N3904 NPN(IS=1e-14 BF=200 KF=1e-15 AF=1.0)
+";
+    let config = CodegenConfig {
+        noise_mode: melange_solver::codegen::NoiseMode::Full,
+        ..default_config()
+    };
+    let code = generate_code_with_config(BJT_WITH_KF_SPICE, config);
+
+    let n_line = code
+        .lines()
+        .find(|l| l.contains("pub const NOISE_FLICKER_N"))
+        .expect("NOISE_FLICKER_N missing")
+        .to_string();
+    // 2 (BJT Ic + Ib) or 1 (forward-active reduction) depending on DC OP.
+    assert!(
+        n_line.contains(": usize = 2;") || n_line.contains(": usize = 1;"),
+        "expected 1 or 2 flicker sources for KF-enabled BJT, got: {}",
+        n_line
+    );
+}

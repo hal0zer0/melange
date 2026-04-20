@@ -7,12 +7,12 @@
 >   Default `--noise off` → byte-identical to pre-feature codegen.
 > - **Phase 1.5 Step 1 shipped** (`2b09cc3`). Nodal codegen path — `build_noise_emission` wired into `emit_nodal` end-to-end; kTC theorem
 >   holds on the nodal path with the same calibration constant.
-> - **Phase 1.5 Step 2 shipped** (`1fdcac2`). Dynamic resistors —
->   `.pot` / `.wiper` / `.runtime R` members are now thermal noise
->   sources; the per-sample `sqrt(1/R)` coefficient lives in
->   `state.noise_thermal_sqrt_inv_r[k]` and is refreshed inside each
->   emitted `set_pot_N` / `set_runtime_R_<field>` setter. `.switch`
->   R-components still deferred (need position→R table).
+> - **Phase 1.5 Step 2 shipped** (`1fdcac2` + `a282217`). Dynamic
+>   resistors — `.pot` / `.wiper` / `.runtime R` / `.switch` R members
+>   are now thermal noise sources; the per-sample `sqrt(1/R)` coefficient
+>   lives in `state.noise_thermal_sqrt_inv_r[k]` and is refreshed inside
+>   each emitted `set_pot_N` / `set_runtime_R_<field>` / `set_switch_N`
+>   setter.
 > - **Phase 1.5 Step 3 closed** (investigation only, 2026-04-20). The
 >   originally-noted "persistent Nyquist-rate component after
 >   `set_noise_enabled(false)`" does not reproduce on the reference RC
@@ -28,18 +28,28 @@
 >   `set_shot_gain(f64)`; salted RNG streams (`NOISE_SHOT_SALT`) so
 >   thermal and shot never share a prefix. Available via `--noise shot`
 >   or `--noise full`.
+> - **Phase 3 (1/f flicker) shipped** 2026-04-20. Per-junction flicker
+>   sources using Paul Kellett's 7-pole pink filter — same per-device
+>   port layout as shot (Diode 1, BJT 2 / forward-active 1, JFET/MOSFET
+>   1, Tube 1). Opt-in via `.model NAME TYPE(KF=… AF=…)`; devices with
+>   `KF=0` (the default) contribute no flicker source, so zero-KF builds
+>   emit byte-identical code to pre-Phase-3. Per-sample amplitude
+>   `kellett(sqrt(4·KF·|I_prev|^AF·fs) · N(0,1))`. Runtime
+>   `set_flicker_gain(f64)`; salted stream `NOISE_FLICKER_SALT`.
+>   Available via `--noise full`.
 > - **Constants resolved**: thermal `sqrt(8·k_B·T·fs/R)`, shot
->   `sqrt(4·q·|I|·fs)`. Both carry the same 2× trap-MNA compensation;
+>   `sqrt(4·q·|I|·fs)`, flicker white input `sqrt(4·KF·|I|^AF·fs)` pre-
+>   Kellett cascade. All three carry the same 2× trap-MNA compensation;
 >   see "Constant derivation".
-> - **Tested**: 10 emission-assertion tests in
->   `crates/melange-solver/tests/codegen_verification_tests.rs` + 4
->   end-to-end PSD tests in `tests/noise_psd_validation.rs` (DK kTC,
->   nodal kTC, dynamic-pot first-sample-divergence, shot-noise
->   audible-wiring check).
-> - **Phases 3–5 deferred**: 1/f flicker, op-amp en/in, pentode
->   partition. The `NoiseIR` + `build_noise_emission` scaffold accepts
->   them without architectural churn — add per-phase `Vec<*NoiseSource>`
->   fields + a stamp fragment.
+> - **Tested**: 14 emission-assertion tests in
+>   `crates/melange-solver/tests/codegen_verification_tests.rs` + 6
+>   tests in `tests/noise_psd_validation.rs` (DK kTC, nodal kTC,
+>   dynamic-pot/switch first-sample-divergence, shot-noise
+>   audible-wiring check, Kellett filter slope, flicker wiring).
+> - **Phases 4–5 deferred**: op-amp en/in, pentode partition. The
+>   `NoiseIR` + `build_noise_emission` scaffold accepts them without
+>   architectural churn — add per-phase `Vec<*NoiseSource>` fields + a
+>   stamp fragment.
 
 ## Why this is different
 
@@ -237,7 +247,7 @@ it's the granularity of charge-carrier flow. Use `i_nl_prev` from the
 previous sample (one-sample lag; at 48-192 kHz this is below the audible
 modulation threshold).
 
-### Flicker (1/f) Noise — Phase 3
+### Flicker (1/f) Noise — Phase 3 (shipped 2026-04-20)
 
 ngspice's `KF`, `AF` model parameters. PSD shape:
 
@@ -246,13 +256,49 @@ S_id(f) = KF · I_d^AF / f           [A²/Hz] for MOSFET
 S_ib(f) = KF · I_b^AF / f           [A²/Hz] for BJT
 ```
 
-**Implementation**: Paul Kellett pink filter (cascade of 1-pole IIRs, ~3 dB/oct,
-accurate to within 0.5 dB over 10 Hz–20 kHz). Per-device state: 7 filter-state
-floats. Pink output is scaled by `sqrt(KF · |I|^AF)` using current operating
-point.
+**Filter**: Paul Kellett 7-pole pink filter (musicdsp "pk3" variant,
+±0.05 dB over 9.2 octaves at 96 kHz). Per-source state: 7 filter floats,
+zeroed at `default()` and `reset()`. The cascade has ~unity RMS power gain
+after the shipped `* 0.11` normalization tail so the per-sample amplitude
+stays in the injection-current space.
 
-Some tubes (especially DHT) have audible 1/f. Default `KF=0`, opt-in via
-`.model` params. Per-device override supported.
+**Per-sample injection**: for flicker source `k` at sample `n`,
+```
+white_k   = N(0, 1)                                           // xoshiro256++ + Marsaglia polar
+amp_k     = sqrt(4·fs) · sqrt(KF_k) · |i_nl_prev[slot_k]|^(AF_k/2)
+i_flicker = amp_k · kellett_pink(white_k, state_k)
+```
+The `4·…·fs` carries the same 2× trap-MNA compensation as thermal and
+shot. Per-device constants `NOISE_FLICKER_SQRT_KF[k]` and
+`NOISE_FLICKER_HALF_AF[k]` are baked at codegen to keep the hot loop
+branch-free (`i_abs.powf(half_af)` is one `powf` per source per sample).
+
+**Per-device layout** (mirrors shot):
+- Diode: 1 source at (anode, cathode), slot = start_idx.
+- BJT (2D): 2 sources — Ic at (C, E), slot=start_idx; Ib at (B, E),
+  slot=start_idx+1.
+- BJT forward-active (1D): 1 source at (C, E).
+- JFET / MOSFET: 1 source at (drain, source), slot=start_idx.
+- Tube: 1 source at (plate, cathode), slot=start_idx.
+- VCA: skipped.
+
+**Opt-in**: `KF` defaults to `0` in the parser. A device with `KF=0` is
+**not** added to `NoiseIR.flicker_sources`, so no per-source constants,
+no state fields, no rhs-stamp loop iterations, no cost. A circuit where
+no `.model` supplies `KF` produces byte-identical code to a pre-Phase-3
+build under `--noise full`. `AF` defaults to `1.0` (ngspice convention).
+
+**Runtime**: `set_flicker_gain(f64)` mutes/attenuates flicker without
+touching thermal or shot. Salted stream `NOISE_FLICKER_SALT =
+0xC0DE_BABE_DEAD_BEEF` guarantees no prefix overlap with
+`NOISE_SHOT_SALT` or the unsalted thermal streams under a deterministic
+master seed. `reset()` zeros the Kellett filter state (settles in a few
+samples; no audible reset thunk).
+
+**Device-class notes**: germanium BJTs and DHTs have audible 1/f —
+typical `KF=1e-13` to `1e-11`, corner 10–100 kHz. Silicon BJTs: `KF ≈
+1e-16` to `1e-14`, corner 1–10 kHz. JFETs are low-noise: `KF ≈ 1e-18` to
+`1e-16`.
 
 ### Op-Amp Input-Referred — Phase 4
 

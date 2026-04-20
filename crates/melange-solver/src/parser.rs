@@ -1792,6 +1792,33 @@ impl Parser {
                         });
                     }
                 }
+                // Flicker (1/f) noise coefficient must be non-negative.
+                // Zero (default) disables per-device flicker generation —
+                // the NoiseIR collector skips the device when KF <= 0.
+                "KF" => {
+                    if *value < 0.0 {
+                        return Err(ParseError {
+                            line: 0,
+                            message: format!(
+                                ".model '{}': {} must be >= 0, got {}",
+                                model.name, key, value
+                            ),
+                        });
+                    }
+                }
+                // Flicker exponent. ngspice default is 1.0; must be positive
+                // so `|I|^AF` is well-defined for nonzero currents.
+                "AF" => {
+                    if *value <= 0.0 {
+                        return Err(ParseError {
+                            line: 0,
+                            message: format!(
+                                ".model '{}': {} must be > 0, got {}",
+                                model.name, key, value
+                            ),
+                        });
+                    }
+                }
                 _ => {} // Unknown params: no range check (warned elsewhere)
             }
         }
