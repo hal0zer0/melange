@@ -1745,6 +1745,26 @@ pub struct ThermalNoiseSource {
     pub pot_slot: Option<usize>,
 }
 
+/// Shot (junction) noise source stamped at one forward-biased PN junction.
+///
+/// Emitted as a Norton current source in the MNA RHS: for sample rate `fs`
+/// and instantaneous bias current `|I(t)|` (read from `state.i_nl_prev`),
+/// the per-sample current is `sqrt(4·q·|I|·fs) · N(0,1)` injected at
+/// `node_i` and extracted at `node_j`. The `4·q·fs` matches thermal's
+/// trap-MNA calibration (2× the textbook one-sided `2·q·|I|` PSD). See
+/// `docs/aidocs/NOISE.md` "Constant derivation" for why.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShotNoiseSource {
+    /// Device name (for debug / future per-device overrides).
+    pub name: String,
+    /// Index into `state.i_nl_prev` providing the instantaneous bias current.
+    pub slot_idx: usize,
+    /// 1-indexed positive injection node (0 = ground).
+    pub node_i: usize,
+    /// 1-indexed negative injection node (0 = ground).
+    pub node_j: usize,
+}
+
 /// Noise configuration baked into the generated code.
 ///
 /// Built from [`crate::codegen::NoiseMode`] + a scan of `netlist.elements`.
@@ -1761,6 +1781,10 @@ pub struct NoiseIR {
     /// Johnson-Nyquist noise sources (Phase 1).
     #[serde(default)]
     pub thermal_sources: Vec<ThermalNoiseSource>,
+    /// Shot (junction) noise sources (Phase 2). Populated only when
+    /// `mode.includes_shot()`.
+    #[serde(default)]
+    pub shot_sources: Vec<ShotNoiseSource>,
 }
 
 /// Collect Johnson-Nyquist thermal noise sources from the netlist.
@@ -1847,6 +1871,114 @@ pub fn collect_thermal_noise_sources(
                 resistance,
                 pot_slot: slot,
             });
+        }
+    }
+    sources
+}
+
+/// Collect shot-noise sources from the nonlinear device list.
+///
+/// Emits one `ShotNoiseSource` per current-carrying junction, with the
+/// `slot_idx` pointing at the relevant entry of `state.i_nl_prev`:
+///
+/// - Diode: 1 source at (anode, cathode), slot = start_idx (Id).
+/// - BJT (2D): 2 sources — (collector, emitter) at slot=start_idx (Ic),
+///   (base, emitter) at slot=start_idx+1 (Ib).
+/// - BJT forward-active (1D): 1 source at (collector, emitter),
+///   slot=start_idx. The Ib shot is folded in via the BF stamping.
+/// - JFET / MOSFET: 1 source at (drain, source), slot=start_idx (Id).
+///   Gate shot is ≈ 0 for MOS and deferred for JFET reverse-bias leakage.
+/// - Tube (triode or pentode): 1 source at (plate, cathode),
+///   slot=start_idx (Ip). Pentode partition noise is Step 7 work.
+/// - VCA: skipped — shot at a control port is not physically meaningful.
+///
+/// The returned sources stamp Norton currents at the **external** device
+/// nodes even when the nodal path has internal-node expansion active.
+/// In that case the parasitic series R shapes the injection from outside,
+/// not from inside the junction — a small-magnitude approximation that is
+/// inaudible at audio rates and avoids threading internal-node indices
+/// through the collector. Revisit if BJT RB/RE become tonally relevant
+/// for shot content.
+pub fn collect_shot_noise_sources(mna: &MnaSystem) -> Vec<ShotNoiseSource> {
+    use crate::mna::NonlinearDeviceType;
+    let mut sources = Vec::new();
+    for dev in &mna.nonlinear_devices {
+        let nodes = &dev.node_indices;
+        match dev.device_type {
+            NonlinearDeviceType::Diode => {
+                // node_indices = [anode, cathode]
+                if nodes.len() >= 2 {
+                    sources.push(ShotNoiseSource {
+                        name: dev.name.clone(),
+                        slot_idx: dev.start_idx,
+                        node_i: nodes[0],
+                        node_j: nodes[1],
+                    });
+                }
+            }
+            NonlinearDeviceType::Bjt => {
+                // node_indices = [collector, base, emitter]
+                if nodes.len() >= 3 {
+                    let (c, b, e) = (nodes[0], nodes[1], nodes[2]);
+                    // Ic shot: C↔E
+                    sources.push(ShotNoiseSource {
+                        name: format!("{}.Ic", dev.name),
+                        slot_idx: dev.start_idx,
+                        node_i: c,
+                        node_j: e,
+                    });
+                    // Ib shot: B↔E
+                    sources.push(ShotNoiseSource {
+                        name: format!("{}.Ib", dev.name),
+                        slot_idx: dev.start_idx + 1,
+                        node_i: b,
+                        node_j: e,
+                    });
+                }
+            }
+            NonlinearDeviceType::BjtForwardActive => {
+                // node_indices = [collector, base, emitter] ; Ib folded in,
+                // so only Ic gets a shot source.
+                if nodes.len() >= 3 {
+                    sources.push(ShotNoiseSource {
+                        name: format!("{}.Ic", dev.name),
+                        slot_idx: dev.start_idx,
+                        node_i: nodes[0],
+                        node_j: nodes[2],
+                    });
+                }
+            }
+            NonlinearDeviceType::Jfet | NonlinearDeviceType::Mosfet => {
+                // node_indices = [drain, gate, source, (bulk)]
+                if nodes.len() >= 3 {
+                    sources.push(ShotNoiseSource {
+                        name: format!("{}.Id", dev.name),
+                        slot_idx: dev.start_idx,
+                        node_i: nodes[0],
+                        node_j: nodes[2],
+                    });
+                }
+            }
+            NonlinearDeviceType::Tube => {
+                // Triode node_indices = [plate, grid, cathode];
+                // pentode node_indices = [plate, grid, screen, cathode].
+                // Ip stamps plate-to-cathode in both cases.
+                if nodes.len() >= 3 {
+                    let plate = nodes[0];
+                    let cathode = *nodes.last().unwrap();
+                    sources.push(ShotNoiseSource {
+                        name: format!("{}.Ip", dev.name),
+                        slot_idx: dev.start_idx,
+                        node_i: plate,
+                        node_j: cathode,
+                    });
+                }
+            }
+            NonlinearDeviceType::Vca => {
+                // Skipped: shot at a VCA control port is not physically
+                // meaningful; the VCA sig port is linear in the small-
+                // signal sense and doesn't have a junction current.
+            }
         }
     }
     sources
@@ -2919,6 +3051,11 @@ impl CircuitIR {
                 } else {
                     Vec::new()
                 },
+                shot_sources: if config.noise_mode.includes_shot() {
+                    collect_shot_noise_sources(mna)
+                } else {
+                    Vec::new()
+                },
             },
             named_constants,
             runtime_sources,
@@ -3869,6 +4006,11 @@ impl CircuitIR {
                 master_seed: config.noise_master_seed,
                 thermal_sources: if config.noise_mode.includes_thermal() {
                     collect_thermal_noise_sources(netlist, mna)
+                } else {
+                    Vec::new()
+                },
+                shot_sources: if config.noise_mode.includes_shot() {
+                    collect_shot_noise_sources(mna)
                 } else {
                     Vec::new()
                 },

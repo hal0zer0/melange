@@ -19,16 +19,27 @@
 >   lowpass + 5 Hz DC-blocker repro — measured residual is ~200 nV,
 >   non-Nyquist, and matches the DC-blocker HPF settling time constant.
 >   See "Known Phase 1 observations" below for the measurement.
-> - **Constant resolved**: per-sample Norton-current scale is
->   `sqrt(8·k_B·T·fs/R)`, not `4` or `2`. See "Constant derivation".
-> - **Tested**: 7 emission-assertion tests in
->   `crates/melange-solver/tests/codegen_verification_tests.rs` + 3
+> - **Phase 2 (shot noise) shipped** 2026-04-20. Per-junction shot
+>   sources — Diode 1 (anode/cathode), BJT 2 (Ic at C/E, Ib at B/E) or
+>   1 when forward-active reduced, JFET/MOSFET 1 (drain/source), Tube 1
+>   (plate/cathode). VCA/op-amp skipped. Per-sample amplitude
+>   `sqrt(4·q·|I_prev|·fs)` using `state.i_nl_prev[slot]` one-sample
+>   lagged — same 2× trap-MNA calibration as thermal. Runtime
+>   `set_shot_gain(f64)`; salted RNG streams (`NOISE_SHOT_SALT`) so
+>   thermal and shot never share a prefix. Available via `--noise shot`
+>   or `--noise full`.
+> - **Constants resolved**: thermal `sqrt(8·k_B·T·fs/R)`, shot
+>   `sqrt(4·q·|I|·fs)`. Both carry the same 2× trap-MNA compensation;
+>   see "Constant derivation".
+> - **Tested**: 10 emission-assertion tests in
+>   `crates/melange-solver/tests/codegen_verification_tests.rs` + 4
 >   end-to-end PSD tests in `tests/noise_psd_validation.rs` (DK kTC,
->   nodal kTC, dynamic-pot first-sample-divergence).
-> - **Phases 2–5 deferred**: shot, 1/f, op-amp en/in, pentode partition.
->   The `NoiseIR` + `build_noise_emission` scaffold accepts them without
->   architectural churn — add `Vec<*NoiseSource>` fields + a per-phase
->   stamp fragment.
+>   nodal kTC, dynamic-pot first-sample-divergence, shot-noise
+>   audible-wiring check).
+> - **Phases 3–5 deferred**: 1/f flicker, op-amp en/in, pentode
+>   partition. The `NoiseIR` + `build_noise_emission` scaffold accepts
+>   them without architectural churn — add per-phase `Vec<*NoiseSource>`
+>   fields + a stamp fragment.
 
 ## Why this is different
 

@@ -285,6 +285,161 @@ fn main() {{
     );
 }
 
+/// Phase 2 Step 4: shot noise actually stamps into the RHS.
+///
+/// A clean quantitative test of shot-noise variance is hard on a voltage-
+/// output circuit because the output impedance `Z_out ≈ r_d = Vt/I`
+/// scales as `1/I`, so output voltage variance scales like
+/// `(shot_current_variance) × Z_out² ∝ I × 1/I² = 1/I` — high bias is
+/// *quieter* at the output, masking the per-source `∝ I` scaling with
+/// a bias-dependent gain.
+///
+/// Instead this test makes three load-bearing observations:
+///
+/// 1. With `thermal_gain = 0` (thermal muted) and `shot_gain = 1`, the
+///    forward-biased diode produces non-zero output variance. If the
+///    shot stamp weren't wired, the output would be a deterministic
+///    trajectory of the DC OP and variance would be < f64::EPSILON.
+///
+/// 2. With `shot_gain = 0` (shot muted) and `thermal_gain = 1`, variance
+///    is still non-zero (thermal from R_drive). This shows the two
+///    contributions are independently gated.
+///
+/// 3. Same seed + same DC bias → bit-identical output sequence. Proves
+///    the shot RNG is deterministic under `set_seed`.
+///
+/// 4. Two different DC biases with `shot_gain=1, thermal_gain=0` produce
+///    different first-sample outputs (same seed → same Gaussian stream;
+///    the divergence comes from the `sqrt(|I_prev|)` weighting). This is
+///    the Step 2 first-sample divergence pattern applied to shot — if
+///    the stamp weren't reading `i_nl_prev`, the two biases would give
+///    bit-identical first samples.
+#[test]
+fn shot_noise_is_audibly_wired_for_diode() {
+    const DIODE_BIAS_SPICE: &str = r#"* Diode driven by input voltage
+R_drive in a 10k
+D1 a 0 D1N4148
+.model D1N4148 D(IS=1e-15)
+.end
+"#;
+    let sr = 96_000.0;
+    let config = CodegenConfig {
+        circuit_name: "shot_diode".to_string(),
+        sample_rate: sr,
+        input_node: 0,
+        output_nodes: vec![1], // "a" = anode node (1-indexed MNA = 2?  No, solver-config uses 0-indexed)
+        input_resistance: 1.0,
+        dc_block: false,
+        noise_mode: NoiseMode::Shot,
+        noise_master_seed: 42,
+        ..CodegenConfig::default()
+    };
+    let (code, _n, _m) = support::generate_circuit_code(DIODE_BIAS_SPICE, &config);
+
+    let main = format!(
+        r#"
+fn run_variance(thermal: f64, shot: f64, dc: f64, seed: u64) -> (f64, f64) {{
+    let mut state = CircuitState::default();
+    state.set_sample_rate({sr}_f64);
+    state.set_seed(seed);
+    state.set_noise_enabled(true);
+    state.set_temperature_k(290.0);
+    state.set_thermal_gain(thermal);
+    state.set_shot_gain(shot);
+    state.set_noise_gain(1.0);
+
+    for _ in 0..5_000 {{ let _ = process_sample(dc, &mut state); }}
+
+    let n = 1usize << 16;
+    let mut sum = 0.0_f64;
+    let mut sum_sq = 0.0_f64;
+    let mut first = 0.0_f64;
+    for i in 0..n {{
+        let v = process_sample(dc, &mut state)[0];
+        if i == 0 {{ first = v; }}
+        sum += v;
+        sum_sq += v * v;
+    }}
+    let mean = sum / n as f64;
+    let var = (sum_sq / n as f64 - mean * mean).max(0.0);
+    (var, first)
+}}
+
+fn main() {{
+    // Shot-only at low and high bias
+    let (var_shot_lo, first_shot_lo) = run_variance(0.0, 1.0, 1.0, 42);
+    let (var_shot_hi, first_shot_hi) = run_variance(0.0, 1.0, 3.0, 42);
+    // Thermal-only at same bias
+    let (var_thermal_only, _) = run_variance(1.0, 0.0, 1.0, 42);
+    // Determinism check
+    let (var_shot_lo_repeat, _) = run_variance(0.0, 1.0, 1.0, 42);
+    // Both muted
+    let (var_silent, _) = run_variance(0.0, 0.0, 1.0, 42);
+
+    println!("VAR:shot_lo={{:.15e}}",   var_shot_lo);
+    println!("VAR:shot_hi={{:.15e}}",   var_shot_hi);
+    println!("VAR:thermal={{:.15e}}",   var_thermal_only);
+    println!("VAR:repeat={{:.15e}}",    var_shot_lo_repeat);
+    println!("VAR:silent={{:.15e}}",    var_silent);
+    println!("VAR:first_lo={{:.15e}}",  first_shot_lo);
+    println!("VAR:first_hi={{:.15e}}",  first_shot_hi);
+}}
+"#,
+        sr = sr
+    );
+    let out = support::compile_and_run(&code, &main, "noise_shot_diode");
+
+    let var_shot_lo = parse_var(&out.stdout, "shot_lo");
+    let var_shot_hi = parse_var(&out.stdout, "shot_hi");
+    let var_thermal = parse_var(&out.stdout, "thermal");
+    let var_repeat = parse_var(&out.stdout, "repeat");
+    let var_silent = parse_var(&out.stdout, "silent");
+    let first_lo = parse_var(&out.stdout, "first_lo");
+    let first_hi = parse_var(&out.stdout, "first_hi");
+
+    // (0) Both-muted must be essentially zero — DC input gives steady state
+    //     output = DC level; variance around it ≈ 0.
+    assert!(
+        var_silent < 1e-20,
+        "both-muted variance should be near-zero (pure DC response), got {var_silent:.3e}"
+    );
+
+    // (1) Shot-only at either bias must produce non-zero variance.
+    assert!(
+        var_shot_lo > 1e-18,
+        "shot-only at low bias should stamp non-zero variance, got {var_shot_lo:.3e}"
+    );
+    assert!(
+        var_shot_hi > 1e-18,
+        "shot-only at high bias should stamp non-zero variance, got {var_shot_hi:.3e}"
+    );
+
+    // (2) Thermal-only must ALSO produce non-zero variance — independent
+    //     gating. Catches shot_gain/thermal_gain accidental cross-wiring.
+    assert!(
+        var_thermal > 1e-18,
+        "thermal-only variance should be non-zero, got {var_thermal:.3e}"
+    );
+
+    // (3) Determinism: same seed → same variance.
+    assert_eq!(
+        var_shot_lo.to_bits(),
+        var_repeat.to_bits(),
+        "seed determinism violated: shot_lo={var_shot_lo:.15e} repeat={var_repeat:.15e}"
+    );
+
+    // (4) Different bias → different first-sample output. Load-bearing:
+    //     proves the shot stamp reads state.i_nl_prev (otherwise first
+    //     samples would be bit-identical since the RNG stream is the same).
+    assert_ne!(
+        first_lo.to_bits(),
+        first_hi.to_bits(),
+        "shot first-sample output did not change between bias levels \
+         (lo={first_lo:.6e} hi={first_hi:.6e}) — stamp may not be reading \
+         state.i_nl_prev"
+    );
+}
+
 /// kTC theorem on the **nodal** codegen path (Phase 1.5 Step 1).
 ///
 /// The DK and nodal paths share the same trapezoidal MNA discretization

@@ -7304,6 +7304,138 @@ C1 out 0 1u
 }
 
 // ---------------------------------------------------------------------------
+// Phase 2 shot-noise emission tests (Step 4)
+// ---------------------------------------------------------------------------
+
+const DIODE_ONE_SPICE: &str = "\
+Diode test
+Rin in a 1k
+D1 a 0 D1N4148
+R2 a out 10k
+C1 out 0 1u
+.model D1N4148 D(IS=1e-15)
+";
+
+#[test]
+fn noise_shot_mode_emits_shot_tokens_and_source_count() {
+    let config = CodegenConfig {
+        noise_mode: melange_solver::codegen::NoiseMode::Shot,
+        noise_master_seed: 42,
+        ..default_config()
+    };
+    let code = generate_code_with_config(DIODE_ONE_SPICE, config);
+
+    // One diode → one shot source (slot=0, anode↔cathode).
+    assert!(
+        code.contains("pub const NOISE_SHOT_N: usize = 1;"),
+        "expected NOISE_SHOT_N=1 for single diode; got:\n{}",
+        code.lines()
+            .filter(|l| l.contains("NOISE_SHOT_N"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+
+    for tok in [
+        "pub const Q_E: f64 = 1.602176634e-19",
+        "NOISE_SHOT_SLOT_IDX",
+        "NOISE_SHOT_NODE_I",
+        "NOISE_SHOT_NODE_J",
+        "NOISE_SHOT_SALT",
+        "noise_shot_rng",
+        "noise_shot_gaussian_cache",
+        "shot_gain: f64",
+        "noise_shot_scale",
+        "fn seed_noise_rngs_salted",
+        "pub fn set_shot_gain",
+    ] {
+        assert!(
+            code.contains(tok),
+            "shot-noise codegen missing token `{}`",
+            tok
+        );
+    }
+
+    // RHS stamp references shot state.
+    assert!(
+        code.contains("state.i_nl_prev[NOISE_SHOT_SLOT_IDX[")
+            && code.contains("i_abs.sqrt()"),
+        "shot RHS stamp must read |i_nl_prev| and take sqrt"
+    );
+}
+
+#[test]
+fn noise_thermal_mode_does_not_emit_shot_tokens() {
+    // NoiseMode::Thermal must NOT emit any shot scaffolding — keeps the
+    // thermal-only binary lean and preserves byte-identity vs pre-Step-4
+    // builds of thermal-only circuits.
+    let config = CodegenConfig {
+        noise_mode: melange_solver::codegen::NoiseMode::Thermal,
+        ..default_config()
+    };
+    let code = generate_code_with_config(DIODE_ONE_SPICE, config);
+
+    assert!(
+        code.contains("pub const NOISE_THERMAL_N"),
+        "thermal mode must still emit thermal scaffolding"
+    );
+    for tok in [
+        "NOISE_SHOT_N",
+        "NOISE_SHOT_SLOT_IDX",
+        "noise_shot_rng",
+        "shot_gain",
+        "Q_E",
+        "noise_shot_scale",
+        "set_shot_gain",
+    ] {
+        assert!(
+            !code.contains(tok),
+            "thermal-only mode leaked shot token `{}` into generated code",
+            tok
+        );
+    }
+}
+
+#[test]
+fn noise_shot_source_count_matches_bjt_device_dimensions() {
+    // One full-2D BJT + one diode = 2 shot sources from BJT (Ic, Ib) + 1
+    // from the diode = 3 total. Exercises the collector's per-device
+    // branch for each NonlinearDeviceType.
+    const MIXED_SPICE: &str = "\
+Mixed BJT + diode
+Rin in b 1k
+Rb b 0 100k
+Q1 c b e 2N3904
+Re e 0 1k
+Rc vcc c 10k
+VCC vcc 0 12
+D1 out 0 D1N4148
+R_out c out 1k
+C_out out 0 1u
+.model 2N3904 NPN(IS=1e-14 BF=200)
+.model D1N4148 D(IS=1e-15)
+";
+    let config = CodegenConfig {
+        noise_mode: melange_solver::codegen::NoiseMode::Shot,
+        ..default_config()
+    };
+    let code = generate_code_with_config(MIXED_SPICE, config);
+
+    // Expect Ic + Ib + D = 3 shot sources when BJT stays 2D.
+    // (If the DC OP detects BF-only forward-active reduction to 1D, the
+    // count would be 2 — Ic + D. Accept either as long as > 1 shot source
+    // was emitted, with at least one BJT contribution.)
+    let n_line = code
+        .lines()
+        .find(|l| l.contains("pub const NOISE_SHOT_N"))
+        .expect("NOISE_SHOT_N missing")
+        .to_string();
+    assert!(
+        n_line.contains(": usize = 3;") || n_line.contains(": usize = 2;"),
+        "expected 2 or 3 shot sources for BJT+diode circuit, got: {}",
+        n_line
+    );
+}
+// ---------------------------------------------------------------------------
 // Phase 1.5 Step 1 — nodal codegen path noise emission tests
 // ---------------------------------------------------------------------------
 
