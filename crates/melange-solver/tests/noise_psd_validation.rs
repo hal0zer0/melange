@@ -91,6 +91,22 @@ fn generate_rc_noise_code(sample_rate: f64, seed: u64) -> String {
     code
 }
 
+fn generate_rc_noise_code_nodal(sample_rate: f64, seed: u64) -> String {
+    let config = CodegenConfig {
+        circuit_name: "rc_noise_psd_nodal".to_string(),
+        sample_rate,
+        input_node: 0,
+        output_nodes: vec![1],
+        input_resistance: 1.0,
+        dc_block: false,
+        noise_mode: NoiseMode::Thermal,
+        noise_master_seed: seed,
+        ..CodegenConfig::default()
+    };
+    let (code, _n, _m) = support::generate_circuit_code_nodal(RC_SPICE, &config);
+    code
+}
+
 fn parse_var(stdout: &str, key: &str) -> f64 {
     let prefix = format!("VAR:{key}=");
     stdout
@@ -160,5 +176,62 @@ fn thermal_noise_matches_ktc_theorem() {
         v_baseline.to_bits(),
         "same seed produced different variance: baseline {v_baseline:.15e} \
          vs repeat {v_repeat:.15e}"
+    );
+}
+
+/// kTC theorem on the **nodal** codegen path (Phase 1.5 Step 1).
+///
+/// The DK and nodal paths share the same trapezoidal MNA discretization
+/// (`(A - A_neg) = 2G` at steady state), so the calibration constant `8`
+/// in `sqrt(8·k_B·T·fs/R)` carries over identically. This test forces
+/// the linear RC lowpass through `generate_nodal` and asserts the same
+/// `k_B·T/C` equilibrium — proves the noise stamp lands in the right
+/// place in the nodal RHS construction *and* that no double-counting or
+/// missed-stamp regression slipped in.
+#[test]
+fn thermal_noise_matches_ktc_theorem_nodal() {
+    let sr = 96_000.0;
+    let code = generate_rc_noise_code_nodal(sr, 42);
+    let main = main_template(1 << 17, 5_000, sr);
+    let out = support::compile_and_run(&code, &main, "noise_psd_ktc_nodal");
+
+    let v_baseline = parse_var(&out.stdout, "baseline");
+    let v_temp77 = parse_var(&out.stdout, "temp77");
+    let v_gain_half = parse_var(&out.stdout, "gain_half");
+    let v_repeat = parse_var(&out.stdout, "repeat");
+
+    let expected = K_B * 290.0 / CAP_F;
+    let ratio = v_baseline / expected;
+    assert!(
+        (0.85..=1.15).contains(&ratio),
+        "kTC theorem violated on NODAL path: measured variance \
+         {v_baseline:.3e} V² vs physical kT/C = {expected:.3e} V² \
+         (ratio {ratio:.3}). The DK and nodal paths share the trap-MNA \
+         relation `(A - A_neg) = 2G`, so the `8·k_B·T·fs/R` calibration \
+         must carry over unchanged."
+    );
+
+    let temp_ratio = v_temp77 / v_baseline;
+    let expected_temp_ratio = 77.0 / 290.0;
+    let temp_err = (temp_ratio / expected_temp_ratio - 1.0).abs();
+    assert!(
+        temp_err < 0.15,
+        "nodal temperature scaling wrong: variance(77K)/variance(290K) = \
+         {temp_ratio:.4}, expected {expected_temp_ratio:.4}"
+    );
+
+    let gain_ratio = v_gain_half / v_baseline;
+    let gain_err = (gain_ratio / 0.25 - 1.0).abs();
+    assert!(
+        gain_err < 0.01,
+        "nodal gain scaling wrong: variance(gain=0.5)/variance(gain=1.0) = \
+         {gain_ratio:.6}, expected 0.25"
+    );
+
+    assert_eq!(
+        v_repeat.to_bits(),
+        v_baseline.to_bits(),
+        "nodal: same seed produced different variance: baseline \
+         {v_baseline:.15e} vs repeat {v_repeat:.15e}"
     );
 }

@@ -8,6 +8,7 @@
 use crate::codegen::ir::{CircuitIR, DeviceParams, DeviceType, LuOp};
 use crate::codegen::CodegenError;
 use super::RustEmitter;
+use super::dk_emitter::NoiseEmission;
 use super::helpers::{
     fmt_f64, format_matrix_rows, section_banner, oversampling_info,
     pentode_dispatch, emit_pentode_nr_dk_stamp, recommended_warmup_samples,
@@ -232,8 +233,15 @@ impl RustEmitter {
         // Now emit header, constants, device models, state (needs use_full_nodal)
         code.push_str(&self.emit_header(ir)?);
         code.push_str(&self.emit_nodal_constants(ir));
+        // Authentic circuit noise (Phase 1: thermal). Returns an empty
+        // `NoiseEmission` when noise mode is Off — every fragment is "" and
+        // emission is byte-identical to a noiseless build.
+        let noise = self.build_noise_emission(ir);
+        if noise.enabled {
+            code.push_str(&noise.top_level);
+        }
         code.push_str(&self.emit_device_models(ir)?);
-        code.push_str(&self.emit_nodal_state(ir, use_full_nodal));
+        code.push_str(&self.emit_nodal_state(ir, use_full_nodal, &noise));
         code.push_str(&Self::emit_nodal_invert_n(ir));
 
         if use_full_nodal {
@@ -275,7 +283,7 @@ impl RustEmitter {
                 code.push_str(&Self::emit_sparse_lu_factor(ir));
                 code.push_str(&Self::emit_sparse_lu_back_solve(ir));
             }
-            code.push_str(&Self::emit_nodal_process_sample(ir));
+            code.push_str(&Self::emit_nodal_process_sample(ir, &noise));
         } else {
             if linearized_bypass {
                 log::warn!(
@@ -289,7 +297,7 @@ impl RustEmitter {
             if needs_lu_solve {
                 code.push_str(&Self::emit_nodal_lu_solve(ir));
             }
-            code.push_str(&Self::emit_nodal_schur_process_sample(ir)?);
+            code.push_str(&Self::emit_nodal_schur_process_sample(ir, &noise)?);
         }
 
         if ir.solver_config.oversampling_factor > 1 {
@@ -913,7 +921,7 @@ impl RustEmitter {
     }
 
     /// Emit state struct, Default impl, set_sample_rate, and reset for nodal solver.
-    pub(super) fn emit_nodal_state(&self, ir: &CircuitIR, use_full_nodal: bool) -> String {
+    pub(super) fn emit_nodal_state(&self, ir: &CircuitIR, use_full_nodal: bool, noise: &NoiseEmission) -> String {
         let n = ir.topology.n;
         let m = ir.topology.m;
         let n_nodes = if ir.topology.n_nodes > 0 {
@@ -1328,11 +1336,24 @@ impl RustEmitter {
             ));
         }
 
+        // Authentic circuit noise — Phase 1 thermal state fields.
+        // Empty string when noise mode is Off.
+        if noise.enabled {
+            code.push_str("\n    // --- Authentic circuit noise (Phase 1) ---\n");
+            code.push_str(&noise.state_fields);
+        }
+
         code.push_str("}\n\n");
 
         // Default impl
         code.push_str("impl Default for CircuitState {\n");
         code.push_str("    fn default() -> Self {\n");
+        // Noise: prelude statements (e.g. `let noise_thermal_scale = …;`).
+        // Must precede the struct literal so the field-shorthand bindings
+        // referenced by `noise.default_fields` are in scope.
+        if noise.enabled {
+            code.push_str(&noise.default_stmts);
+        }
         code.push_str("        let mut state = Self {\n");
         if has_dc_op {
             code.push_str("            v_prev: DC_OP,\n");
@@ -1589,6 +1610,11 @@ impl RustEmitter {
             code.push_str(&format!("            {}: 0.0,\n", rt.field_name));
         }
 
+        // Noise: per-source RNG arrays + scalars (matches `state_fields` order).
+        if noise.enabled {
+            code.push_str(&noise.default_fields);
+        }
+
         code.push_str("        };\n");
         code.push_str("        state.warmup();\n");
         code.push_str("        state\n");
@@ -1782,6 +1808,10 @@ impl RustEmitter {
         for rt in &ir.runtime_sources {
             code.push_str(&format!("        self.{} = 0.0;\n", rt.field_name));
         }
+        // Noise: re-seed RNGs from stored master seed; user prefs untouched.
+        if noise.enabled {
+            code.push_str(&noise.reset_body);
+        }
         code.push_str("        self.warmup();\n");
         code.push_str("    }\n\n");
 
@@ -1967,6 +1997,14 @@ impl RustEmitter {
         code.push_str("        if !(sample_rate > 0.0 && sample_rate.is_finite()) {\n");
         code.push_str("            return;\n");
         code.push_str("        }\n\n");
+        // Noise: refresh thermal_scale at the new fs (and noise_fs cache).
+        // Runs unconditionally so the fast-path early return below still
+        // sees the updated coefficient — temperature_k may have changed
+        // since codegen.
+        if noise.enabled {
+            code.push_str(&noise.set_sample_rate_body);
+            code.push('\n');
+        }
         code.push_str("        // If same as codegen sample rate, reset to defaults\n");
         code.push_str("        if (sample_rate - SAMPLE_RATE).abs() < 0.5 {\n");
         code.push_str("            self.a = A_DEFAULT;\n");
@@ -2560,6 +2598,13 @@ impl RustEmitter {
             code.push_str("    }\n\n");
         }
 
+        // Authentic circuit noise — Phase 1 public API
+        // (set_noise_enabled / set_noise_gain / set_thermal_gain /
+        //  set_temperature_k / set_seed). Empty when noise mode is Off.
+        if noise.enabled {
+            code.push_str(&noise.methods);
+        }
+
         code.push_str("}\n\n");
 
         let _ = (n, m, n_nodes, n_aug, num_outputs);
@@ -2637,7 +2682,7 @@ impl RustEmitter {
     /// 3. Extract device voltages: p = N_v * v_pred (O(M*N))
     /// 4. M-dim NR (same as DK: O(M^3) per iteration)
     /// 5. Recover full v = v_pred + S_NI * i_nl (O(M*N))
-    pub(super) fn emit_nodal_schur_process_sample(ir: &CircuitIR) -> Result<String, CodegenError> {
+    pub(super) fn emit_nodal_schur_process_sample(ir: &CircuitIR, noise: &NoiseEmission) -> Result<String, CodegenError> {
         let n = ir.topology.n;
         let m = ir.topology.m;
         let n_nodes = if ir.topology.n_nodes > 0 {
@@ -3005,6 +3050,22 @@ impl RustEmitter {
                     rt.vs_row, rt.field_name
                 ));
             }
+            code.push('\n');
+        }
+
+        // Authentic circuit noise — Phase 1 thermal stamp.
+        //
+        // Stamped once per audio sample (NOT per NR iteration), after all
+        // deterministic RHS contributions and before the linear prediction
+        // `v_pred = S * rhs` so noise is shaped by the circuit's transfer
+        // function exactly like the input source. BE-fallback samples don't
+        // re-draw — they reuse the trapezoidal NR's noise contribution
+        // implicitly via `v_prev` history.
+        //
+        // The fragment is `""` when noise mode is Off — zero bytes emitted
+        // and the build is byte-identical to a noiseless one.
+        if noise.enabled {
+            code.push_str(&noise.rhs_stamp);
             code.push('\n');
         }
 
@@ -4470,7 +4531,7 @@ impl RustEmitter {
     /// Used when the Schur path is unstable: K ≈ 0 (device Jacobian provides
     /// essential damping not captured by Schur), positive K diagonal, or
     /// ill-conditioned K. Matches the runtime NodalSolver's solve_equilibrated().
-    pub(super) fn emit_nodal_process_sample(ir: &CircuitIR) -> String {
+    pub(super) fn emit_nodal_process_sample(ir: &CircuitIR, noise: &NoiseEmission) -> String {
         let n = ir.topology.n;
         let m = ir.topology.m;
         let n_nodes = if ir.topology.n_nodes > 0 {
@@ -4613,6 +4674,15 @@ impl RustEmitter {
                     rt.vs_row, rt.field_name
                 ));
             }
+            code.push('\n');
+        }
+
+        // Authentic circuit noise — Phase 1 thermal stamp.
+        // One draw per audio sample, before NR (and before the M=0 direct
+        // LU solve). See `emit_nodal_schur_process_sample` for the full
+        // rationale; the placement is identical here.
+        if noise.enabled {
+            code.push_str(&noise.rhs_stamp);
             code.push('\n');
         }
 

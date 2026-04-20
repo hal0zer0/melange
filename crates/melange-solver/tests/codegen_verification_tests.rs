@@ -7246,3 +7246,145 @@ C1 out 0 1u
         "pot-marked R2 must be excluded from thermal sources"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Phase 1.5 Step 1 — nodal codegen path noise emission tests
+// ---------------------------------------------------------------------------
+
+fn generate_nodal_code_with_config(spice: &str, config: CodegenConfig) -> String {
+    let netlist = Netlist::parse(spice).expect("failed to parse netlist");
+    let mna = MnaSystem::from_netlist(&netlist).expect("failed to build MNA");
+    let codegen = CodeGenerator::new(config);
+    codegen
+        .generate_nodal(&mna, &netlist)
+        .expect("nodal code generation failed")
+        .code
+}
+
+#[test]
+fn noise_nodal_off_is_byte_identical_to_baseline() {
+    // Default config (NoiseMode::Off) and explicit Off must produce
+    // byte-identical output, and neither may leak any noise tokens into
+    // the generated nodal code.
+    let default_code = generate_nodal_code_with_config(RC_CIRCUIT_SPICE, default_config());
+    let explicit_off = CodegenConfig {
+        noise_mode: melange_solver::codegen::NoiseMode::Off,
+        ..default_config()
+    };
+    let off_code = generate_nodal_code_with_config(RC_CIRCUIT_SPICE, explicit_off);
+
+    assert_eq!(
+        default_code, off_code,
+        "explicit NoiseMode::Off must produce byte-identical nodal output to default"
+    );
+
+    for tok in [
+        "K_B",
+        "T_ROOM_K",
+        "NOISE_THERMAL_N",
+        "Xoshiro256pp",
+        "gaussian",
+        "noise_enabled",
+        "set_noise_enabled",
+    ] {
+        assert!(
+            !default_code.contains(tok),
+            "noise-off nodal codegen leaked token `{}` into generated code",
+            tok
+        );
+    }
+}
+
+#[test]
+fn noise_nodal_emits_expected_tokens_and_source_count() {
+    let config = CodegenConfig {
+        noise_mode: melange_solver::codegen::NoiseMode::Thermal,
+        noise_master_seed: 7,
+        ..default_config()
+    };
+    let code = generate_nodal_code_with_config(RC_CIRCUIT_SPICE, config);
+
+    // RC_CIRCUIT_SPICE has one explicit Element::Resistor (R1).
+    assert!(
+        code.contains("pub const NOISE_THERMAL_N: usize = 1;"),
+        "expected NOISE_THERMAL_N=1 for nodal RC_CIRCUIT_SPICE, got:\n{}",
+        code.lines()
+            .filter(|l| l.contains("NOISE_THERMAL_N"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    assert!(
+        code.contains("pub const NOISE_MASTER_SEED_DEFAULT: u64 = 7;"),
+        "master seed not baked into nodal generated constant"
+    );
+
+    for tok in [
+        "pub const K_B: f64 = 1.380649e-23",
+        "pub const T_ROOM_K: f64 = 290.0",
+        "pub struct Xoshiro256pp",
+        "fn splitmix64",
+        "fn seed_noise_rngs",
+        "fn gaussian",
+        "NOISE_THERMAL_NODE_I",
+        "NOISE_THERMAL_NODE_J",
+        "NOISE_THERMAL_SQRT_INV_R",
+        "noise_enabled: bool",
+        "noise_gain: f64",
+        "thermal_gain: f64",
+        "temperature_k: f64",
+        "pub fn set_noise_enabled",
+        "pub fn set_noise_gain",
+        "pub fn set_thermal_gain",
+        "pub fn set_temperature_k",
+        "pub fn set_seed",
+    ] {
+        assert!(
+            code.contains(tok),
+            "nodal thermal-noise codegen missing expected token `{}`",
+            tok
+        );
+    }
+
+    // Per-sample stamp is gated on state.noise_enabled.
+    assert!(
+        code.contains("if state.noise_enabled"),
+        "nodal noise stamp must be runtime-gated on state.noise_enabled"
+    );
+}
+
+#[test]
+fn noise_nodal_generated_code_compiles() {
+    // Sanity check: nodal code with noise enabled must rustc-compile.
+    // Catches identifier collisions, missing imports, and template-vs-emitter
+    // drift between the DK and nodal paths.
+    let config = CodegenConfig {
+        noise_mode: melange_solver::codegen::NoiseMode::Thermal,
+        noise_master_seed: 1,
+        ..default_config()
+    };
+    let code = generate_nodal_code_with_config(RC_CIRCUIT_SPICE, config);
+
+    let tmp_dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let src = tmp_dir.join(format!("noise_nodal_compiles_{}.rs", pid));
+    let rlib = tmp_dir.join(format!("noise_nodal_compiles_{}.rlib", pid));
+    let lib_rlib = tmp_dir.join(format!("libnoise_nodal_compiles_{}.rlib", pid));
+    std::fs::write(&src, &code).expect("write generated code");
+
+    let out = std::process::Command::new("rustc")
+        .args(["--edition", "2024", "--crate-type", "lib", "-o"])
+        .arg(&rlib)
+        .arg(&src)
+        .output()
+        .expect("invoke rustc");
+
+    let _ = std::fs::remove_file(&src);
+    let _ = std::fs::remove_file(&rlib);
+    let _ = std::fs::remove_file(&lib_rlib);
+
+    assert!(
+        out.status.success(),
+        "generated nodal noise code failed to compile:\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
