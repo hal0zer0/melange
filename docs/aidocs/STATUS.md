@@ -164,7 +164,9 @@ Source: Sowter DWG E-72,658-2 + Peerless/Triad winding data.
 - `.pot R min max [default] [label]`: per-block O(N³) rebuild on change; per-sample smoother via `.smoothed.next()`; warm DC-OP re-init when `|r - r_prev|/r_prev > 0.20`
 - `.wiper R_cw R_ccw total [pos] [label]`: two-resistor wiper; position-0..1 UI param
 - `.switch R/C/L pos0 pos1 ...`: up to 16 switches; G/C/L stamped at pos-0 baseline (not static) so initial state is self-consistent
-- `.gang "Label" m1 m2 ...`: links multiple pot/wiper members under one parameter; `!` prefix inverts
+- `.gang "Label" m1 m2 ...`: links multiple `.pot`/`.wiper` members under one parameter; `!` prefix inverts; `.runtime R` members rejected at parse time (drive multiple setters from one plugin envelope instead)
+- `.runtime V as <field>`: binds existing VS to `pub <field>: f64` on `CircuitState`; host writes per sample, RHS stamp uses `VSOURCE_<NAME>_RHS_ROW`
+- `.runtime R min max as <field>` (2026-04-19): audio-rate resistor modulation; emits `set_runtime_R_<field>(r)` WITHOUT the `.pot R` 20% DC-OP warm re-init (that snap clicks at envelope-follower rates); emits `RUNTIME_R_<FIELD>_MIN/_MAX/_NOMINAL` consts + `<field>()` getter; no nih-plug knob. Unblocks Latinum §5(b) envelope-linked bias
 
 ### Codegen Infrastructure
 - **DK codegen** with augmented MNA (≤1 transformer group, M<10, K well-conditioned)

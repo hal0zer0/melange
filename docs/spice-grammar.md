@@ -1109,7 +1109,13 @@ Removes a nonlinear device from the Newton-Raphson system and replaces it with s
 
 ---
 
-### .runtime — Host-Driven Voltage Source
+### .runtime — Host-Driven Voltage Source or Audio-Rate Resistor
+
+`.runtime` has two forms, dispatched on the first character of the target
+name (`V…` → voltage source; `R…` → resistor). Both bind a netlist element
+to a plugin-writable surface on `CircuitState`.
+
+#### .runtime V — Host-Driven Voltage Source
 
 Binds an existing voltage source to a `pub <field>: f64` on the generated `CircuitState` so the plugin host can drive the source value per sample (sidechain CV, LFO, envelope follower, external modulation input).
 
@@ -1121,7 +1127,7 @@ Binds an existing voltage source to a `pub <field>: f64` on the generated `Circu
 **Requirements:**
 - `Vname` must reference a voltage source (name starts with `V`) declared elsewhere in the netlist.
 - `field_name` must be a valid ASCII Rust identifier.
-- Each voltage source may be bound at most once; each field name is unique per circuit.
+- Each voltage source may be bound at most once; each field name is unique per circuit (shared namespace with `.runtime R`).
 
 **Example:**
 ```spice
@@ -1149,7 +1155,50 @@ fn build_rhs(input: f64, input_prev: f64, state: &CircuitState) -> [f64; N] {
 - `reset()` zeroes each runtime field.
 - Stamp site emitted in both trapezoidal and backward-Euler RHS builders and in the nodal solver's per-sample RHS.
 
-See [DYNAMIC_PARAMS.md](aidocs/DYNAMIC_PARAMS.md#runtime--host-driven-voltage-source) for the full reference.
+#### .runtime R — Audio-Rate Resistor Modulation
+
+Declares a resistor whose value the plugin drives at audio rate (envelope follower, LFO, sidechain dynamics). Unlike `.pot R`, the generated setter has **no DC-OP warm re-init** — the plugin-side envelope is the smoother, and a mid-signal NR-seed reset would be audible as a click.
+
+**Syntax:**
+```
+.runtime Rname min max as field_name
+```
+
+**Requirements:**
+- `Rname` must reference a resistor (name starts with `R`).
+- `min < max`, both positive (ohms). These are the clamp range applied by the setter.
+- `field_name` must be a valid ASCII Rust identifier (shared namespace with `.runtime V`).
+- A resistor claimed by `.runtime R` cannot also be claimed by `.pot` or `.wiper`.
+- `.gang` members must be `.pot` or `.wiper` — a `.runtime R` resistor listed in `.gang` is rejected at parse time (drive multiple `set_runtime_R_*` setters from one plugin envelope instead).
+
+**Example:**
+```spice
+Rk_L1 cathode1 0 10k
+.runtime Rk_L1 2k 12k as bias_r_L1
+```
+
+**Generated code:**
+```rust
+pub const RUNTIME_R_BIAS_R_L1_MIN: f64     = POT_0_MIN_R;     // 2_000.0
+pub const RUNTIME_R_BIAS_R_L1_MAX: f64     = POT_0_MAX_R;     // 12_000.0
+pub const RUNTIME_R_BIAS_R_L1_NOMINAL: f64 = 1.0 / POT_0_G_NOM; // 10_000.0
+
+impl CircuitState {
+    pub fn bias_r_L1(&self) -> f64 { self.pot_0_resistance }
+
+    pub fn set_runtime_R_bias_r_L1(&mut self, resistance: f64) {
+        // clamp, skip if unchanged, mark matrices dirty
+        // (no DC-OP snap — see .pot R for the knob-drag variant that does snap)
+    }
+}
+```
+
+**Semantics:**
+- No nih-plug knob is emitted — the plugin is the driver.
+- Setter clamps to `[RUNTIME_R_<FIELD>_MIN, RUNTIME_R_<FIELD>_MAX]`, sets `matrices_dirty = true`, returns. Rebuild of A/S/K is deferred to the next `process_sample`.
+- `<field>()` returns the current resistance; `RUNTIME_R_<FIELD>_NOMINAL` exposes the netlist value for envelope-scale math.
+
+See [DYNAMIC_PARAMS.md](aidocs/DYNAMIC_PARAMS.md#runtime-v--host-driven-voltage-source) for the full reference, including the `.pot R` ↔ `.runtime R` contrast table.
 
 ---
 

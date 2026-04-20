@@ -111,7 +111,7 @@ Link multiple pots or wipers to a single knob with `.gang`:
 
 For **host-driven per-sample voltage injection** (sidechain CV, LFO,
 envelope follower, any modulation input), declare a voltage source with
-`DC 0` and bind it to a `CircuitState` field with `.runtime`:
+`DC 0` and bind it to a `CircuitState` field with `.runtime V`:
 
 ```spice
 Vctrl ctrl 0 DC 0
@@ -123,6 +123,21 @@ Codegen emits `pub ctrl_voltage: f64` on `CircuitState`; the plugin writes
 it each sample and melange stamps the value into the VS's RHS row
 automatically. Any DC value you declare on the voltage source is preserved
 as a bias, so `V1 n1 0 DC 5` + `.runtime V1 as foo` gives `5 + foo` total.
+
+For **audio-rate resistor modulation** (envelope-linked bias, dynamic sag,
+LFO on a cathode/source/emitter resistor), use `.runtime R`:
+
+```spice
+Rk_L1 cathode1 0 10k
+.runtime Rk_L1 2k 12k as bias_r_L1
+```
+
+Codegen emits `set_runtime_R_bias_r_L1(r)` on `CircuitState`. The plugin
+drives it from its own envelope follower — unlike `.pot R`, this setter
+has **no DC-OP warm re-init** (that snap is what makes `.pot R` click at
+envelope update rates). Also emits `RUNTIME_R_BIAS_R_L1_MIN/_MAX/_NOMINAL`
+consts and a `bias_r_L1()` read accessor. No nih-plug knob is generated —
+the plugin is the driver.
 
 See [spice-grammar.md](spice-grammar.md#5-melange-extensions) for full syntax.
 

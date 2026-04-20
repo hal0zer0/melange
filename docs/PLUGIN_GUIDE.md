@@ -26,7 +26,8 @@ Contains everything the circuit needs to run in real-time:
 - **CircuitState** — all runtime state (node voltages, previous samples, pot/switch state)
 - **process_sample()** — the main DSP function, called once per sample
 - **set_sample_rate()** — recomputes matrices for a new sample rate
-- **Pot/switch methods** — `set_pot_0()`, `set_switch_0()`, etc.
+- **Pot/switch methods** — `set_pot_0()`, `set_switch_0()`, etc. (user knobs)
+- **Runtime setters** — `set_runtime_R_<field>()` for `.runtime R` resistors (audio-rate, no DC-OP snap) and `pub <field>: f64` for `.runtime V` voltage sources
 
 If you change the netlist and want to update the DSP without losing your `lib.rs` edits:
 
