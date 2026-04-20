@@ -1537,6 +1537,27 @@ impl Parser {
                         w.resistor_cw.eq_ignore_ascii_case(&name_upper)
                             || w.resistor_ccw.eq_ignore_ascii_case(&name_upper)
                     });
+                    let in_runtime_r = netlist
+                        .runtime_resistors
+                        .iter()
+                        .any(|r| r.resistor_name.eq_ignore_ascii_case(&name_upper));
+                    if in_runtime_r {
+                        // `.gang` is a UI construct — one nih-plug FloatParam
+                        // drives every member in lockstep. `.runtime R` is
+                        // explicitly NOT a knob; the plugin drives the setter
+                        // directly from an envelope/LFO. The two surfaces do
+                        // not compose. Drive multiple runtime-R fields from
+                        // the same plugin-side envelope instead.
+                        return Err(ParseError {
+                            line: 0,
+                            message: format!(
+                                ".gang member '{}' is a .runtime R target — .gang only accepts .pot and .wiper members. \
+                                 Drive multiple .runtime R fields from the same plugin-side envelope/LFO by calling \
+                                 each set_runtime_R_<field> from one follower tick.",
+                                member.resistor_name
+                            ),
+                        });
+                    }
                     if !in_pot && !in_wiper {
                         return Err(ParseError {
                             line: 0,

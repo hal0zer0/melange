@@ -409,6 +409,29 @@ R2 bias 0 10k
 }
 
 #[test]
+fn parser_rejects_gang_member_that_is_runtime_r() {
+    // `.gang` is a UI construct; `.runtime R` intentionally has no knob.
+    // Mixing them would be nonsensical, so reject with a pointer to the
+    // right pattern (drive multiple setters from one plugin-side envelope).
+    let spice = "\
+Gang Over Runtime R
+R1 in out 10k
+R2 a 0 10k
+R3 b 0 10k
+.runtime R2 2k 12k as bias_a
+.runtime R3 2k 12k as bias_b
+.gang \"Bias\" R2 R3
+";
+    let err = Netlist::parse(spice).unwrap_err();
+    let msg = format!("{}", err);
+    assert!(
+        msg.contains(".runtime R target") && msg.contains("plugin-side envelope"),
+        "expected runtime-R gang rejection with guidance, got: {}",
+        err
+    );
+}
+
+#[test]
 fn parser_rejects_runtime_r_field_collision_with_vs() {
     // Shared field namespace between .runtime V and .runtime R — a field
     // name bound to one cannot be rebound to the other.
