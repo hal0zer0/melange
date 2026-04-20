@@ -1,24 +1,31 @@
 # Authentic Circuit Noise
 
-> **Status** (2026-04-16)
-> - **Phase 1 in tree, uncommitted.** Johnson-Nyquist thermal noise on fixed
->   resistors via MNA-RHS Norton-current stamping, **DK codegen path only**.
+> **Status** (2026-04-20)
+> - **Phase 1 shipped** (`25b61ba`). Johnson-Nyquist thermal noise on
+>   fixed resistors via MNA-RHS Norton-current stamping, DK codegen path.
 >   Runtime `set_noise_enabled(bool)` + gain/temperature/seed controls.
 >   Default `--noise off` → byte-identical to pre-feature codegen.
-> - **Tested**: 3 emission-assertion unit tests in
->   `crates/melange-solver/tests/codegen_verification_tests.rs` + an
->   end-to-end kTC-theorem PSD validation test in
->   `crates/melange-solver/tests/noise_psd_validation.rs` (asserts the
->   output variance of an RC lowpass matches the physical `kT/C` to ±15 %,
->   plus `T∝σ²`, `gain² scaling`, and seed determinism).
-> - **Constant resolved**: the per-sample Norton-current scale is
->   `sqrt(8·k_B·T·fs/R)`, not `4` or `2` as originally hypothesized.
->   See the "Constant derivation" note below for why `8` is right
->   given melange's DK-trap formulation.
-> - **Open for Phase 1.5** (see "Next phase starting points" at the bottom):
->   nodal codegen path, `.pot`/`.switch` dynamic resistors, trap-rule +
->   DC-blocker Nyquist sustain investigation.
-> - **Phase 2-5 deferred**: shot, 1/f, op-amp en/in, pentode partition.
+> - **Phase 1.5 Step 1 shipped** (`2b09cc3`). Nodal codegen path — `build_noise_emission` wired into `emit_nodal` end-to-end; kTC theorem
+>   holds on the nodal path with the same calibration constant.
+> - **Phase 1.5 Step 2 shipped** (`1fdcac2`). Dynamic resistors —
+>   `.pot` / `.wiper` / `.runtime R` members are now thermal noise
+>   sources; the per-sample `sqrt(1/R)` coefficient lives in
+>   `state.noise_thermal_sqrt_inv_r[k]` and is refreshed inside each
+>   emitted `set_pot_N` / `set_runtime_R_<field>` setter. `.switch`
+>   R-components still deferred (need position→R table).
+> - **Phase 1.5 Step 3 closed** (investigation only, 2026-04-20). The
+>   originally-noted "persistent Nyquist-rate component after
+>   `set_noise_enabled(false)`" does not reproduce on the reference RC
+>   lowpass + 5 Hz DC-blocker repro — measured residual is ~200 nV,
+>   non-Nyquist, and matches the DC-blocker HPF settling time constant.
+>   See "Known Phase 1 observations" below for the measurement.
+> - **Constant resolved**: per-sample Norton-current scale is
+>   `sqrt(8·k_B·T·fs/R)`, not `4` or `2`. See "Constant derivation".
+> - **Tested**: 7 emission-assertion tests in
+>   `crates/melange-solver/tests/codegen_verification_tests.rs` + 3
+>   end-to-end PSD tests in `tests/noise_psd_validation.rs` (DK kTC,
+>   nodal kTC, dynamic-pot first-sample-divergence).
+> - **Phases 2–5 deferred**: shot, 1/f, op-amp en/in, pentode partition.
 >   The `NoiseIR` + `build_noise_emission` scaffold accepts them without
 >   architectural churn — add `Vec<*NoiseSource>` fields + a per-phase
 >   stamp fragment.
@@ -410,22 +417,36 @@ else add to wherever `VT_THERMAL` etc. live).
 
 ## Known Phase 1 observations
 
-### Trapezoidal-rule + DC-blocker Nyquist sustain
+### Trapezoidal-rule + DC-blocker post-noise decay
 
-When noise is injected into a linear circuit followed by the emitted 5 Hz DC
-blocker, the generated code's output can retain a persistent Nyquist-rate
-component of order 0.1-2 mV after noise is disabled — the DC blocker's pole
-near `z=1` plus the trap rule's gain near `z=-1` produces a long decay time
-(~30 ms on top of any in-circuit memory). This is **not a noise-specific
-bug**: the same artifact occurs if you inject any broadband excitation and
-then cut it. In practice the downstream plugin/DAC reconstruction filters
-remove it before it reaches the listener.
+*Status (2026-04-20, after Phase 1.5 Step 3 investigation):* the
+originally-documented "persistent 0.1–2 mV Nyquist-rate component" does
+**not** reproduce on the reference RC lowpass + 5 Hz DC blocker. Measured
+on DK (and bit-identically on nodal), the tail after `set_noise_enabled(false)`
+is:
 
-Two mitigations we may pursue in Phase 1.5 if measurements show it audibly
-colors the noise:
-1. Bandlimit the per-sample Gaussian through a 1-pole lowpass before
-   injection (targets fs/4, trading HF fidelity for clean time-domain decay).
-2. Add backward Euler as a codegen-option for noise injection only.
+- **No Nyquist content** — sign-flip fraction ≈ 0 across the decay.
+- **Peak ≈ 200 nV**, not 0.1–2 mV.
+- **Smooth exponential decay** with time constant ~32 ms — exactly the
+  `1/(2π·5 Hz)` HPF relaxation of the 5 Hz DC blocker.
+
+The orthogonal control (compile with `--noise off`, inject the same
+white-noise energy as external input, stop input, sample tail) produces
+the same decay shape — confirming the residual is the DC-blocker's
+expected transient response to any broadband-input cessation, not a
+noise-specific bug. The plugin-side DAC reconstruction filter handles it
+identically to any other zero-input transient.
+
+What may have been fixed between the Phase 1 note and this recheck:
+either `232ec5f` (stiff-circuit nodal auto-promotion to backward Euler on
+`spectral_radius(S*A_neg) > 1.002`, though the RC lowpass is not stiff
+enough to trigger it) or the original observation conflated DC-blocker
+HPF settling with a Nyquist limit cycle. No solver fix is needed.
+
+If a specific circuit ever does show genuine Nyquist-rate residual (flip
+fraction approaching 1.0), the mitigation ladder is unchanged — check
+stiffness first (`--force-trap` off, i.e. auto-BE on), then consider a
+1-pole lowpass on the per-sample Gaussian at `fs/4` before scaling.
 
 ### Constant derivation — why `8`, not `4` or `2`
 
