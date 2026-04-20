@@ -7223,10 +7223,11 @@ fn noise_thermal_emits_expected_tokens_and_source_count() {
 }
 
 #[test]
-fn noise_thermal_skips_pot_resistors() {
-    // Verify that resistors marked .pot are excluded from thermal noise sources
-    // (Phase 1 limitation — runtime-variable R requires coefficient recompute on
-    // pot change; to be handled in Phase 1.5).
+fn noise_thermal_includes_pot_resistors() {
+    // Phase 1.5 Step 2: resistors marked `.pot` ARE included as thermal
+    // noise sources. The per-sample `sqrt(1/R)` coefficient lives in
+    // `state.noise_thermal_sqrt_inv_r` (not a const) and is refreshed
+    // inside the emitted `set_pot_N` method so noise tracks the live R.
     let spice_with_pot = "\
 RC With Pot
 R1 in mid 10k
@@ -7240,10 +7241,65 @@ C1 out 0 1u
     };
     let code = generate_code_with_config(spice_with_pot, config);
 
-    // Only R1 should contribute a thermal source (R2 is under .pot)
+    // Both R1 (static) and R2 (pot-backed, dynamic) should be sources.
     assert!(
-        code.contains("pub const NOISE_THERMAL_N: usize = 1;"),
-        "pot-marked R2 must be excluded from thermal sources"
+        code.contains("pub const NOISE_THERMAL_N: usize = 2;"),
+        "expected both static R1 and pot-backed R2 to contribute thermal sources"
+    );
+    // The default-values const is the new naming (Step 2 rename).
+    assert!(
+        code.contains("NOISE_THERMAL_SQRT_INV_R_DEFAULT"),
+        "Step 2 rename: const is now `NOISE_THERMAL_SQRT_INV_R_DEFAULT`"
+    );
+    // State-backed sqrt(1/R) mirror must be present.
+    assert!(
+        code.contains("noise_thermal_sqrt_inv_r: [f64; NOISE_THERMAL_N]"),
+        "dynamic R requires a state-backed sqrt(1/R) array"
+    );
+    // set_pot_0 must refresh the coefficient after writing the new R.
+    assert!(
+        code.contains("self.noise_thermal_sqrt_inv_r[")
+            && code.contains("] = (1.0 / r).sqrt();"),
+        "set_pot_0 must update state.noise_thermal_sqrt_inv_r[..] from r"
+    );
+}
+
+#[test]
+fn noise_thermal_dk_runtime_r_refreshes_coefficient() {
+    // `.runtime R` envelope-rate setter must also refresh the noise
+    // coefficient so the live R shows up in the next RHS stamp. The
+    // runtime setter skips the DC-OP warm re-init on purpose (envelope
+    // followers hit it every sample), but the noise coefficient must
+    // update per call — stale coefficients would decouple the audible
+    // noise from the modulated R.
+    let spice = "\
+Runtime R smoke
+R1 in out 10k
+C1 out 0 1u
+.runtime R1 1k 100k as rmod
+";
+    let config = CodegenConfig {
+        noise_mode: melange_solver::codegen::NoiseMode::Thermal,
+        ..default_config()
+    };
+    let code = generate_code_with_config(spice, config);
+
+    assert!(
+        code.contains("pub fn set_runtime_R_rmod"),
+        "expected `.runtime R` setter to be emitted"
+    );
+    // Find the runtime setter body and verify the coefficient update
+    // lives inside it. We scan for the setter header and confirm the
+    // update statement appears before the next method definition.
+    let idx = code.find("pub fn set_runtime_R_rmod").unwrap();
+    let tail = &code[idx..];
+    let end = tail.find("\n    pub fn ").unwrap_or(tail.len() - 1) + 1;
+    let body = &tail[..end];
+    assert!(
+        body.contains("self.noise_thermal_sqrt_inv_r[")
+            && body.contains("= (1.0 / r).sqrt();"),
+        "set_runtime_R_rmod must refresh state.noise_thermal_sqrt_inv_r. Body was:\n{}",
+        body
     );
 }
 

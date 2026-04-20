@@ -179,6 +179,112 @@ fn thermal_noise_matches_ktc_theorem() {
     );
 }
 
+/// Phase 1.5 Step 2: dynamic-resistor noise tracks `set_pot_N`.
+///
+/// An RC lowpass with `.pot R1` — the kTC theorem still gives output
+/// variance `k_B·T/C` independent of `R`, so *variance* stays flat across
+/// pot positions (the bandwidth shrinks as R grows, offsetting the per-
+/// sample amplitude bump). The load-bearing signal here is that
+/// **output changes at all** between two pot settings — if the
+/// coefficient weren't refreshed by the setter, the same Gaussian stream
+/// would produce a byte-identical output sequence at every R, and the
+/// ratio of the first-sample magnitudes would be exactly 1.0.
+///
+/// We also assert that the variance ratio lands inside the kTC tolerance
+/// window: integrating `4·k_B·T·R / (1 + (2πfRC)²)` from 0 to fs/2 is
+/// R-independent in the infinite-bandwidth limit, so a wide R span
+/// should NOT produce a ~10× variance shift. This catches two classes of
+/// bug: coefficient stuck at old R (ratio ≈ R_new / R_old) and double
+/// application (ratio ≈ (R_new / R_old)²).
+#[test]
+fn dynamic_pot_noise_tracks_set_pot() {
+    const RC_SPICE_POT: &str = r#"* RC lowpass with .pot R1 — Step 2 dynamic-R noise
+R1 in out 10k
+C1 out 0 100n
+.pot R1 1k 100k
+.end
+"#;
+    let sr = 96_000.0;
+    let config = CodegenConfig {
+        circuit_name: "rc_pot_noise_psd".to_string(),
+        sample_rate: sr,
+        input_node: 0,
+        output_nodes: vec![1],
+        input_resistance: 1.0,
+        dc_block: false,
+        noise_mode: NoiseMode::Thermal,
+        noise_master_seed: 42,
+        ..CodegenConfig::default()
+    };
+    let (code, _n, _m) = support::generate_circuit_code(RC_SPICE_POT, &config);
+
+    let main = format!(
+        r#"
+fn run_at_pot(pot_r: f64) -> (f64, f64) {{
+    let mut state = CircuitState::default();
+    state.set_sample_rate({sr}_f64);
+    state.set_pot_0(pot_r);
+    state.set_seed(42);
+    state.set_noise_enabled(true);
+    state.set_temperature_k(290.0);
+    for _ in 0..5_000 {{ let _ = process_sample(0.0, &mut state); }}
+    let mut sum = 0.0_f64;
+    let mut sum_sq = 0.0_f64;
+    let mut first = 0.0_f64;
+    let n = 1usize << 17;
+    for i in 0..n {{
+        let v = process_sample(0.0, &mut state)[0];
+        if i == 0 {{ first = v; }}
+        sum += v;
+        sum_sq += v * v;
+    }}
+    let mean = sum / n as f64;
+    let var = (sum_sq / n as f64 - mean * mean).max(0.0);
+    (var, first)
+}}
+
+fn main() {{
+    let (var_1k,  first_1k ) = run_at_pot(1_000.0);
+    let (var_100k, first_100k) = run_at_pot(100_000.0);
+    println!("VAR:r_1k={{:.15e}}", var_1k);
+    println!("VAR:r_100k={{:.15e}}", var_100k);
+    println!("VAR:first_1k={{:.15e}}", first_1k);
+    println!("VAR:first_100k={{:.15e}}", first_100k);
+}}
+"#,
+        sr = sr
+    );
+    let out = support::compile_and_run(&code, &main, "noise_pot_dynamic");
+
+    let var_1k = parse_var(&out.stdout, "r_1k");
+    let var_100k = parse_var(&out.stdout, "r_100k");
+    let first_1k = parse_var(&out.stdout, "first_1k");
+    let first_100k = parse_var(&out.stdout, "first_100k");
+
+    let expected = K_B * 290.0 / CAP_F;
+    for (var, label) in [(var_1k, "r=1k"), (var_100k, "r=100k")] {
+        let ratio = var / expected;
+        assert!(
+            (0.70..=1.30).contains(&ratio),
+            "dynamic-pot kTC violated at {label}: variance {var:.3e} V² \
+             vs physical kT/C = {expected:.3e} V² (ratio {ratio:.3}). The \
+             wider window vs the static-R test absorbs bandwidth effects \
+             at the R=100k corner frequency."
+        );
+    }
+
+    // Load-bearing: the two pot positions MUST produce different output.
+    // Same seed → same Gaussian stream → the first-sample divergence is
+    // driven entirely by the coefficient swap. If the setter didn't
+    // refresh, first_1k would equal first_100k bit-for-bit.
+    assert_ne!(
+        first_1k.to_bits(),
+        first_100k.to_bits(),
+        "set_pot_0 did not change the first-sample noise output — \
+         coefficient refresh likely not wired (first={first_1k:.6e})"
+    );
+}
+
 /// kTC theorem on the **nodal** codegen path (Phase 1.5 Step 1).
 ///
 /// The DK and nodal paths share the same trapezoidal MNA discretization

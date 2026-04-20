@@ -1732,7 +1732,17 @@ pub struct ThermalNoiseSource {
     /// 1-indexed negative node (0 = ground).
     pub node_j: usize,
     /// Resistance in ohms at the default operating point.
+    ///
+    /// For dynamic sources (`pot_slot = Some(_)`) this is the codegen-time
+    /// default; the runtime value lives in `state.noise_thermal_sqrt_inv_r`
+    /// and is refreshed by `set_pot_N` / `set_runtime_R_<field>`.
     pub resistance: f64,
+    /// `Some(i)` when this R is a `.pot` / `.runtime R` / `.wiper` member
+    /// backed by `mna.pots[i]`. The emitter injects a coefficient update
+    /// into the corresponding pot / runtime-R setter so the per-sample
+    /// `sqrt(1/R)` tracks the live resistance. `None` for fixed resistors.
+    #[serde(default)]
+    pub pot_slot: Option<usize>,
 }
 
 /// Noise configuration baked into the generated code.
@@ -1755,10 +1765,19 @@ pub struct NoiseIR {
 
 /// Collect Johnson-Nyquist thermal noise sources from the netlist.
 ///
-/// Includes every `Element::Resistor` whose name is *not* marked as runtime-
-/// variable by a `.pot`, `.wiper`, or `.switch` directive. Phase 1 keeps the
-/// per-source noise coefficient baked at codegen time; dynamic resistors are
-/// deferred to Phase 1.5 which will recompute on pot/switch changes.
+/// Includes every `Element::Resistor` that maps to a circuit node, with
+/// two source kinds:
+///
+/// - **Static** (`pot_slot = None`) — fixed-value resistor. The per-sample
+///   coefficient `sqrt(1/R)` is baked at codegen time.
+/// - **Dynamic** (`pot_slot = Some(i)`) — `.pot` / `.wiper` / `.runtime R`
+///   member backed by `mna.pots[i]`. The coefficient is state-backed
+///   and refreshed inside the emitted `set_pot_N` / `set_runtime_R_<field>`
+///   method so noise tracks the live resistance in real time.
+///
+/// Switches (`.switch` R components) are still skipped — they need a
+/// position→resistance table and per-position recompute inside
+/// `set_switch_N`. Deferred to Step 2 v2 / plan doc.
 ///
 /// Node indices are MNA 1-indexed (0 = ground) via `mna.node_map`. Resistors
 /// whose terminals fail to resolve (would collapse to ground–ground) are
@@ -1767,16 +1786,22 @@ pub fn collect_thermal_noise_sources(
     netlist: &Netlist,
     mna: &MnaSystem,
 ) -> Vec<ThermalNoiseSource> {
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
 
-    let mut dynamic: HashSet<String> = HashSet::new();
-    for p in &mna.pots {
-        dynamic.insert(p.name.to_ascii_uppercase());
+    // Upper-cased name → pot index in mna.pots. Covers .pot, .runtime R,
+    // and wiper-derived pot entries (wipers decompose into cw/ccw pots
+    // that both live in mna.pots).
+    let mut pot_slot: HashMap<String, usize> = HashMap::new();
+    for (i, p) in mna.pots.iter().enumerate() {
+        pot_slot.insert(p.name.to_ascii_uppercase(), i);
     }
+
+    // Switch R components stay skipped. See the doc comment above.
+    let mut skip_switch: HashSet<String> = HashSet::new();
     for sw in &mna.switches {
         for c in &sw.components {
             if c.component_type == 'R' {
-                dynamic.insert(c.name.to_ascii_uppercase());
+                skip_switch.insert(c.name.to_ascii_uppercase());
             }
         }
     }
@@ -1791,7 +1816,7 @@ pub fn collect_thermal_noise_sources(
         } = el
         {
             let upper = name.to_ascii_uppercase();
-            if dynamic.contains(&upper) {
+            if skip_switch.contains(&upper) {
                 continue;
             }
             if !value.is_finite() || *value <= 0.0 {
@@ -1802,11 +1827,25 @@ pub fn collect_thermal_noise_sources(
             if node_i == 0 && node_j == 0 {
                 continue;
             }
+            let slot = pot_slot.get(&upper).copied();
+            // For dynamic sources, use the pot's default (1/g_nominal) as
+            // the initial resistance. The netlist `value` may be nominal
+            // max or midpoint depending on how .pot was declared; the MNA
+            // builder resolves it to g_nominal, which is the single source
+            // of truth the runtime setter compares against.
+            let resistance = match slot {
+                Some(i) => {
+                    let g = mna.pots[i].g_nominal;
+                    if g > 0.0 && g.is_finite() { 1.0 / g } else { *value }
+                }
+                None => *value,
+            };
             sources.push(ThermalNoiseSource {
                 name: name.clone(),
                 node_i,
                 node_j,
-                resistance: *value,
+                resistance,
+                pot_slot: slot,
             });
         }
     }

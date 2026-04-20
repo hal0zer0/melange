@@ -517,7 +517,7 @@ impl RustEmitter {
         ctx.insert("switch_indices", &switch_indices);
         // Generate pot/switch methods procedurally (rebuild_matrices, set_pot_N, set_switch_N)
         if num_switches > 0 || num_pots > 0 {
-            let switch_methods = self.emit_switch_methods(ir);
+            let switch_methods = self.emit_switch_methods(ir, noise);
             ctx.insert("switch_methods", &switch_methods);
         }
 
@@ -948,7 +948,7 @@ impl RustEmitter {
     }
 
     /// Generate switch setter methods and rebuild_matrices() procedurally.
-    fn emit_switch_methods(&self, ir: &CircuitIR) -> String {
+    fn emit_switch_methods(&self, ir: &CircuitIR, noise: &NoiseEmission) -> String {
         let n = ir.topology.n;
         let m = ir.topology.m;
         let n_nodes = if ir.topology.n_nodes > 0 {
@@ -1011,6 +1011,21 @@ impl RustEmitter {
         // omitted — envelope followers call the setter every block/sample
         // and a mid-signal state reset is audible as a click.
         for (idx, pot) in ir.pots.iter().enumerate() {
+            // Authentic-noise coefficient refresh — emitted only when
+            // noise is enabled at codegen AND this pot backs a thermal
+            // source. Keeps `state.noise_thermal_sqrt_inv_r[k]` in sync
+            // with the live R so Johnson-Nyquist variance tracks the knob.
+            let noise_update: String = if noise.enabled {
+                match noise.pot_to_noise_slot.get(idx).copied().flatten() {
+                    Some(slot) => format!(
+                        "        self.noise_thermal_sqrt_inv_r[{slot}] = (1.0 / r).sqrt();\n",
+                    ),
+                    None => String::new(),
+                }
+            } else {
+                String::new()
+            };
+
             match &pot.runtime_field {
                 None => {
                     let dc_op_reset = if dk_has_dc_op {
@@ -1034,6 +1049,7 @@ impl RustEmitter {
                          \x20       let r_prev = self.pot_{idx}_resistance;\n\
                          \x20       self.pot_{idx}_resistance = r;\n\
                          \x20       self.matrices_dirty = true;\n\
+{noise_update}\
                          \x20       // Warm DC-OP re-init: on large pot jumps, reset NR seed to DC bias.\n\
                          \x20       // Gated at 20% relative delta so smoothed per-sample sweeps do not\n\
                          \x20       // snap v_prev mid-signal and cause audible clicks. See Batch D Phase 2.\n\
@@ -1065,6 +1081,7 @@ impl RustEmitter {
                          \x20       if (r - self.pot_{idx}_resistance).abs() < 1e-12 {{ return; }}\n\
                          \x20       self.pot_{idx}_resistance = r;\n\
                          \x20       self.matrices_dirty = true;\n\
+{noise_update}\
                          \x20   }}\n\n",
                         pot.min_resistance, pot.max_resistance,
                     ));
@@ -2597,6 +2614,12 @@ pub(super) struct NoiseEmission {
     /// Count of thermal sources. Kept for debug logging.
     #[allow(dead_code)]
     pub thermal_n: usize,
+    /// Reverse lookup: `pot_index → noise source index` for dynamic
+    /// sources (`.pot` / `.wiper` / `.runtime R` members). Empty vec of
+    /// length `mna.pots.len()` when noise is off. A `Some(k)` entry means
+    /// the pot setter for that index should update
+    /// `state.noise_thermal_sqrt_inv_r[k]` after writing the new resistance.
+    pub pot_to_noise_slot: Vec<Option<usize>>,
 }
 
 impl RustEmitter {
@@ -2647,8 +2670,14 @@ impl RustEmitter {
             "pub(crate) const NOISE_THERMAL_NODE_J: [usize; NOISE_THERMAL_N] = [{}];\n",
             fmt_usize_arr(&node_j)
         ));
-        // Precomputed sqrt(1/R) — the R-dependent part of the noise coefficient,
-        // baked at codegen time since fixed-resistor R is constant.
+        // Precomputed sqrt(1/R) default values — one per source. Static
+        // entries (fixed resistors) are baked once and never change;
+        // dynamic entries (`.pot` / `.wiper` / `.runtime R`) start from the
+        // pot's nominal R and get refreshed in `set_pot_N` /
+        // `set_runtime_R_<field>` so the per-sample coefficient tracks the
+        // live resistance. The runtime mirror lives in
+        // `state.noise_thermal_sqrt_inv_r[k]` — both are read from the same
+        // index in the RHS stamp.
         let sqrt_inv_r: Vec<String> = ir
             .noise
             .thermal_sources
@@ -2656,7 +2685,7 @@ impl RustEmitter {
             .map(|s| fmt_f64((1.0 / s.resistance).sqrt()))
             .collect();
         top.push_str(&format!(
-            "pub(crate) const NOISE_THERMAL_SQRT_INV_R: [f64; NOISE_THERMAL_N] = [{}];\n\n",
+            "pub(crate) const NOISE_THERMAL_SQRT_INV_R_DEFAULT: [f64; NOISE_THERMAL_N] = [{}];\n\n",
             sqrt_inv_r.join(", ")
         ));
 
@@ -2765,6 +2794,11 @@ impl RustEmitter {
         state_fields.push_str("    /// Effective internal sample rate (host_rate × OVERSAMPLING_FACTOR).\n");
         state_fields.push_str("    /// Tracked so `set_temperature_k` can recompute `noise_thermal_scale`.\n");
         state_fields.push_str("    pub noise_fs: f64,\n");
+        state_fields.push_str("    /// Per-source `sqrt(1/R)` — live mirror of `NOISE_THERMAL_SQRT_INV_R_DEFAULT`.\n");
+        state_fields.push_str("    /// Static entries stay at their baked value. Dynamic entries (`.pot` /\n");
+        state_fields.push_str("    /// `.wiper` / `.runtime R` members) are refreshed inside the matching\n");
+        state_fields.push_str("    /// `set_pot_N` / `set_runtime_R_<field>` setter.\n");
+        state_fields.push_str("    pub noise_thermal_sqrt_inv_r: [f64; NOISE_THERMAL_N],\n");
 
         // Default impl: compute thermal_scale and seed RNGs
         let mut default_stmts = String::new();
@@ -2793,12 +2827,17 @@ impl RustEmitter {
         default_fields.push_str("            noise_master_seed: NOISE_MASTER_SEED_DEFAULT,\n");
         default_fields.push_str("            noise_thermal_scale,\n");
         default_fields.push_str("            noise_fs: fs_internal,\n");
+        default_fields.push_str("            noise_thermal_sqrt_inv_r: NOISE_THERMAL_SQRT_INV_R_DEFAULT,\n");
 
         // reset() — reseed RNG and clear gaussian cache; keep user settings.
         let mut reset_body = String::new();
         reset_body.push_str("        // Re-seed noise RNGs (keeps noise_enabled, gains, temperature untouched).\n");
         reset_body.push_str("        self.noise_rng = seed_noise_rngs::<NOISE_THERMAL_N>(self.noise_master_seed);\n");
         reset_body.push_str("        self.noise_gaussian_cache = [None; NOISE_THERMAL_N];\n");
+        reset_body.push_str("        // Restore per-source sqrt(1/R) to defaults. Dynamic sources will\n");
+        reset_body.push_str("        // be re-updated by any subsequent set_pot_N / set_runtime_R call;\n");
+        reset_body.push_str("        // this mirrors how reset() restores pot_<i>_resistance to nominal.\n");
+        reset_body.push_str("        self.noise_thermal_sqrt_inv_r = NOISE_THERMAL_SQRT_INV_R_DEFAULT;\n");
 
         // set_sample_rate tail: recompute thermal_scale at the new rate
         let mut ssr_body = String::new();
@@ -2840,7 +2879,7 @@ impl RustEmitter {
         rhs_stamp.push_str("        if scale != 0.0 {\n");
         rhs_stamp.push_str("            for k in 0..NOISE_THERMAL_N {\n");
         rhs_stamp.push_str("                let g = gaussian(&mut state.noise_rng[k], &mut state.noise_gaussian_cache[k]);\n");
-        rhs_stamp.push_str("                let i_n = scale * NOISE_THERMAL_SQRT_INV_R[k] * g;\n");
+        rhs_stamp.push_str("                let i_n = scale * state.noise_thermal_sqrt_inv_r[k] * g;\n");
         rhs_stamp.push_str("                let ni = NOISE_THERMAL_NODE_I[k];\n");
         rhs_stamp.push_str("                let nj = NOISE_THERMAL_NODE_J[k];\n");
         rhs_stamp.push_str("                if ni > 0 { rhs[ni - 1] += i_n; }\n");
@@ -2848,6 +2887,18 @@ impl RustEmitter {
         rhs_stamp.push_str("            }\n");
         rhs_stamp.push_str("        }\n");
         rhs_stamp.push_str("    }\n");
+
+        // Reverse lookup populated from each source's `pot_slot`. Pots with
+        // no noise source (there aren't any in the current pipeline, but
+        // future FA reductions / skip lists may produce them) stay `None`.
+        let mut pot_to_noise_slot = vec![None; ir.pots.len()];
+        for (k, src) in ir.noise.thermal_sources.iter().enumerate() {
+            if let Some(p) = src.pot_slot {
+                if p < pot_to_noise_slot.len() {
+                    pot_to_noise_slot[p] = Some(k);
+                }
+            }
+        }
 
         NoiseEmission {
             top_level: top,
@@ -2860,6 +2911,7 @@ impl RustEmitter {
             methods,
             enabled: true,
             thermal_n,
+            pot_to_noise_slot,
         }
     }
 }

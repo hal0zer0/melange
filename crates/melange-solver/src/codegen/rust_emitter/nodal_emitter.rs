@@ -2442,6 +2442,19 @@ impl RustEmitter {
             code.push_str(&format!("        self.pot_{}_resistance = r;\n", idx));
             code.push_str("        self.matrices_dirty = true;\n");
 
+            // Authentic-noise coefficient refresh (Step 2 / Phase 1.5).
+            // Keeps `state.noise_thermal_sqrt_inv_r[k]` in sync with the
+            // live pot / runtime-R value so the per-sample Johnson-Nyquist
+            // variance tracks the knob. Emitted only when noise is enabled
+            // at codegen AND this pot backs a thermal source.
+            if noise.enabled {
+                if let Some(slot) = noise.pot_to_noise_slot.get(idx).copied().flatten() {
+                    code.push_str(&format!(
+                        "        self.noise_thermal_sqrt_inv_r[{slot}] = (1.0 / r).sqrt();\n",
+                    ));
+                }
+            }
+
             if !is_runtime {
                 // Warm DC-OP re-init: on large pot jumps, reset NR seed state to the baked DC
                 // operating point. This prevents NR max-iter-cap hits when v_prev is stale from
