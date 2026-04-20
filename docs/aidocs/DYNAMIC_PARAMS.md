@@ -37,22 +37,56 @@ per-block rebuild of S, K, A_neg, and the S·N_i product via dense
 inside the process loop, so rebuilds fire at the smoother's staircase
 rate (bounded by the 10 ms smoother time constant), not per audio sample.
 
-After a large pot jump (`|r - r_prev| / r_prev > 0.20`), `set_pot_N`
-also resets `v_prev` to `DC_OP` and `i_nl_prev` to `DC_NL_I` so the NR
-loop starts the next sample from a bias-consistent seed instead of the
-stale previous-sample state. This is gated on delta magnitude so that
-smoothed knob sweeps (per-sample deltas ≪ 0.2%) do not trigger
-mid-signal state resets. See `set_pot_N` emission in
-`rust_emitter/dk_emitter.rs` (DK Schur) and `rust_emitter/nodal_emitter.rs` (nodal paths).
+`set_pot_N` is **reseed-free** — it only updates conductance and flags
+the matrices dirty. For smoothed knob sweeps (the common case) the NR
+seed (`v_prev`/`i_nl_prev`) stays consistent with the previous sample's
+solution, which is within basin for any realistic per-sample delta.
+
+For preset recalls, MIDI program changes, or any *unsmoothed* large R
+jump, callers should follow with `recompute_dc_op()`:
+
+```rust
+state.set_pot_0(r_new);
+state.recompute_dc_op();  // DK path: solves NR; nodal path: stub
+```
+
+On nodal circuits `recompute_dc_op()` is a stub today (Phase E handoff
+— body deferred); NR catches up on its own over roughly
+`WARMUP_SAMPLES_RECOMMENDED` samples. See `set_pot_N` emission in
+`rust_emitter/dk_emitter.rs` (DK Schur) and
+`rust_emitter/nodal_emitter.rs` (nodal paths).
+
+**Historical note.** A prior iteration of `set_pot_N` applied a warm
+DC-OP re-init when `|r - r_prev| / r_prev > 0.20` (Batch D Phase 2,
+commit `e8e18a7`). The gate was intended to protect against NR
+divergence on wide raw knob snaps, but on log-taper pots with
+R_max/R_min ≥ 1000:1 the gate fired on every per-block update at
+DAW-typical block sizes (≥128), snapping `v_prev` to `DC_OP`
+mid-signal and producing an audible ~–15 dBFS click on every knob
+drag. Removed 2026-04-20 in favor of the explicit `recompute_dc_op()`
+pattern, which resolves to the *correct* operating point for the new R
+rather than the frozen codegen-time DC_OP.
 
 Sherman-Morrison rank-1 updates were removed in 2026-04-04 (commit
 `eaee955`). The removal was originally motivated by NR max-iter-cap
 hits on wide-range pot jumps, but subsequent research showed that SM
-is mathematically exact (same K' as full rebuild, to 1e-9 float noise)
-— the real root cause was DC-OP seed staleness, fixed by the warm
-re-init described above. `SHERMAN_MORRISON.md` remains as math
-reference; the SM precomputation (`su`, `usu`, `nv_su`, `u_ni`) still
-runs at codegen time but is currently unused by the Tera templates.
+is mathematically exact (same K' as full rebuild, to 1e-9 float
+noise) — the real root cause was DC-OP seed staleness, now fixed at
+the correct layer by `recompute_dc_op()` (see
+`dc_op_recompute_tests.rs::e5_diode_vcc_converges_within_tolerance`).
+`SHERMAN_MORRISON.md` remains as math reference; the SM
+precomputation (`su`, `usu`, `nv_su`, `u_ni`) still runs at codegen
+time but is currently unused by the Tera templates.
+
+**Deferred performance work (Phase 5).** Per-sample `set_pot_N` calls
+still cost one full O(N^3) matrix rebuild per changing sample, which
+pegs CPU during knob drags. If that cost ever blocks a shipping
+plugin, revive Sherman-Morrison rank-1 updates — the precomputed
+vectors and ctx inserts are already in `rust_emitter.rs:2229-2256`;
+only the Tera template hookup (~80 LOC) is missing. See
+`batch_d_phase1_phase2.md` and `batch_d_research_swarm.md`. Do not
+pre-emptively land it — the click fix is orthogonal and landed first
+on its own merits.
 
 ### Constraints
 - Maximum 32 combined `.pot` + `.wiper` legs per circuit (each `.wiper`
@@ -240,29 +274,28 @@ Codegen emits on `CircuitState`:
   returns. The next `process_sample` rebuilds A/S/K before stepping.
 
 Internally, `.runtime R` reuses the `.pot` machinery (conductance delta
-into G on rebuild), so MNA/kernel/nodal codegen are all unchanged. The
-distinguishing contract lives in the setter body — see next section.
+into G on rebuild), so MNA/kernel/nodal codegen are all unchanged. Since
+the 2026-04-20 reseed strip, the setter body is structurally identical
+to `set_pot_N`; only the name, doc comments, and clamp consts differ.
 
-### Difference from `.pot R` (this is the whole point)
-`.pot R` applies a **warm DC-OP re-init on pot jumps >20%** — when a knob
-sweeps rapidly, `v_prev` is snapped back to `DC_OP` and `i_nl_prev` to
-`DC_NL_I` so NR doesn't burn its iteration budget on a stale seed. Fine
-for user knob drags (paired with the plugin template's 10 ms smoother);
-**fatal at envelope-follower update rates** — every mid-signal seed reset
-is an audible click.
-
-`.runtime R` deliberately **omits that snap**. The plugin-side envelope
-follower is the smoother; the setter delivers the requested R exactly,
-without any internal state reset.
+### Difference from `.pot R` (what's left after the reseed strip)
+Both setters are now reseed-free. The remaining differences are API
+ergonomics, not semantics:
 
 | Concern | `.pot R` | `.runtime R` |
 |---|---|---|
 | Setter name | `set_pot_N(r)` | `set_runtime_R_<field>(r)` |
 | Plugin knob emitted? | Yes (nih-plug `FloatParam`) | No (plugin drives directly) |
-| Warm DC-OP re-init? | Yes (>20% delta) | No |
 | Internal smoothing? | Plugin template adds 10 ms linear smoother | None — caller is the smoother |
 | Expected call rate | Per sample (smoothed knob pos) | Per block or per sample (envelope) |
 | Clamp range source | `.pot` min/max | `.runtime R` min/max |
+| Read-only accessor | None | `state.<field>()` returns current R |
+
+Historically `.runtime R` existed *because* `.pot R` applied a warm
+DC-OP re-init on >20% jumps (clicky for envelope followers). With that
+gate gone from `.pot R`, the two directives differ only in API shape —
+pick based on whether the parameter is user-facing (`.pot`) or
+plugin-driven (`.runtime R`).
 
 ### Constraints
 - `Rname` must reference an existing resistor (name starts with `R`).
@@ -291,10 +324,15 @@ let out = process_sample(sample, &mut state);
 ### Validation path
 Testing a `.runtime R` plugin should include a click regression: at a
 sustained 1 kHz 0.3 V tone, sweep the resistor across ±20% in 5 ms and
-confirm no discontinuity >0.5 dB between adjacent samples. `.pot R` fails
-that test (DC-OP snap fires); `.runtime R` passes. See the
-`runtime_r_sweep_no_nan_and_no_interstate_discontinuity` test in
-`tests/runtime_source_tests.rs` for the reference harness.
+confirm the inter-sample jump stays near the natural signal step. Both
+`.pot R` and `.runtime R` should pass this test since the 2026-04-20
+reseed strip. See:
+
+- `runtime_r_sweep_no_nan_and_no_interstate_discontinuity` in
+  `tests/runtime_source_tests.rs` — the original harness for `.runtime R`.
+- `log_taper_block_sweep_no_clicks` in `tests/pot_tests.rs` — log-taper
+  `.pot` with 1000:1 range at block sizes {64,128,256,512}, guards
+  against reseed regression in `set_pot_N`.
 
 ## Plugin Code Generation
 
@@ -315,8 +353,10 @@ a float subtract + abs + compare; actual matrix rebuilds fire only
 when the smoothed value crosses that threshold.
 
 Switches are not smoothed — flipping a switch is expected to be a
-discrete event. `set_switch_N` also applies an unconditional DC-OP
-re-init (no gate, since every switch change is a step).
+discrete event. `set_switch_N` is also reseed-free; callers that need a
+fresh NR seed after a switch flip should follow with `recompute_dc_op()`
+on DK circuits (nodal falls back to NR catch-up over
+`WARMUP_SAMPLES_RECOMMENDED` samples).
 
 ## Common Pitfalls
 

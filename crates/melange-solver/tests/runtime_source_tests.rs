@@ -521,12 +521,14 @@ Rbias out 0 10k
 }
 
 #[test]
-fn codegen_pot_setter_still_has_dc_op_snap() {
-    // Regression: introducing `.runtime R` must not strip the warm DC-OP
-    // snap from ordinary `.pot` setters — that gate is correct for user
-    // knob drags and removing it would re-open the NR max-iter bug.
+fn codegen_pot_setter_has_no_reseed_block() {
+    // `.pot` and `.runtime R` setters now share the same reseed-free shape.
+    // The historical warm DC-OP gate (Batch D Phase 2) was removed because
+    // it produced audible clicks on per-block log-taper sweeps; explicit
+    // `recompute_dc_op()` is the supported reseed mechanism for preset
+    // recall or unsmoothed jumps.
     let spice = "\
-Pot Snap Regression
+Pot Reseed Regression
 R1 in out 1k
 Rknob out 0 10k
 .pot Rknob 1k 100k
@@ -541,8 +543,13 @@ Rknob out 0 10k
             .expect("setter end brace");
     let setter_body = &code[setter_start..setter_end];
     assert!(
-        setter_body.contains("rel_delta"),
-        "pot setter must still emit the warm DC-OP gate; got:\n{}",
+        !setter_body.contains("rel_delta"),
+        "pot setter must NOT emit the warm DC-OP gate (stripped 2026-04-20); got:\n{}",
+        setter_body
+    );
+    assert!(
+        !setter_body.contains("DC_OP"),
+        "pot setter must NOT touch DC_OP; got:\n{}",
         setter_body
     );
 }

@@ -126,26 +126,26 @@ impl CircuitState {
     #[inline]
     pub fn bias_r(&self) -> f64 { self.pot_0_resistance }
 
-    /// Audio-rate safe: no DC-OP warm re-init, no internal smoothing.
+    /// Audio-rate safe: no internal smoothing — caller is the smoother.
     pub fn set_runtime_R_bias_r(&mut self, resistance: f64) {
         if !resistance.is_finite() { return; }
         let r = resistance.clamp(RUNTIME_R_BIAS_R_MIN, RUNTIME_R_BIAS_R_MAX);
         if (r - self.pot_0_resistance).abs() < 1e-12 { return; }
         self.pot_0_resistance = r;
         self.matrices_dirty = true;
-        // NOTE: no `rel_delta > 0.20 → v_prev = DC_OP` block. That snap is
-        // correct for user knob drags (see `set_pot_N`) but clicks at
-        // envelope-follower rates.
     }
 }
 ```
 
-Internally shares the `.pot` storage (`pot_N_resistance`) and rebuild path
-(`matrices_dirty` → per-block A/S/K rebuild in `process_sample`). The
-only code difference from `set_pot_N` is the omitted warm DC-OP re-init
-block. Emitted by both DK (`dk_emitter.rs`) and nodal (`nodal_emitter.rs`)
-paths; plugin template (`main.rs` in melange-cli) filters runtime-R
-entries out of `pot_params` so no nih-plug `FloatParam` is generated.
+Internally shares the `.pot` storage (`pot_N_resistance`) and rebuild
+path (`matrices_dirty` → per-block A/S/K rebuild in `process_sample`).
+Setter body is structurally identical to `set_pot_N` since the
+2026-04-20 reseed strip — the remaining difference is API shape (the
+field-named setter, a read-only `state.<field>()` accessor, no
+nih-plug knob). Emitted by both DK (`dk_emitter.rs`) and nodal
+(`nodal_emitter.rs`) paths; plugin template (`main.rs` in melange-cli)
+filters runtime-R entries out of `pot_params` so no `FloatParam` is
+generated.
 
 `.gang` members must be `.pot`/`.wiper`; a `.runtime R` resistor listed
 in a `.gang` is rejected at parse time (the two surfaces do not compose).

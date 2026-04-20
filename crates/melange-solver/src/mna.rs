@@ -554,8 +554,9 @@ pub struct SwitchInfo {
 /// Also used for `.runtime R` entries (audio-rate resistor modulation).
 /// When `runtime_field = Some(field_name)`, this pot represents a runtime
 /// resistor rather than a user-facing knob: codegen emits
-/// `set_runtime_R_<field_name>` without the 20% DC-OP warm re-init, and
-/// the plugin template does NOT emit a nih-plug FloatParam for it.
+/// `set_runtime_R_<field_name>` and a read-only accessor; the plugin
+/// template does NOT emit a nih-plug FloatParam for it. Setter body
+/// matches `.pot` since the 2026-04-20 reseed strip.
 #[derive(Debug, Clone)]
 pub struct PotInfo {
     /// Name of the resistor this pot controls
@@ -2468,9 +2469,10 @@ impl MnaBuilder {
 
         // Resolve .runtime R directives. These share the pot table so
         // rebuild_matrices / DK-kernel / nodal-emitter machinery applies
-        // unchanged, but `runtime_field = Some(...)` tells downstream
-        // codegen to emit `set_runtime_R_<field>` (no DC-OP snap) rather
-        // than `set_pot_N`.
+        // unchanged; `runtime_field = Some(...)` tells downstream codegen
+        // to emit `set_runtime_R_<field>` (with a read-only accessor)
+        // rather than `set_pot_N`. Setter bodies are otherwise identical
+        // since the 2026-04-20 reseed strip.
         for rr_dir in &netlist.runtime_resistors {
             let resistor = netlist.elements.iter().find(|e| {
                 matches!(e, Element::Resistor { name, .. } if name.eq_ignore_ascii_case(&rr_dir.resistor_name))

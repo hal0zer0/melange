@@ -114,8 +114,10 @@ pub struct SmPotData {
     /// True if one terminal is grounded
     pub grounded: bool,
     /// Mirror of `PotInfo::runtime_field`. If Some, this pot was declared
-    /// via `.runtime R` — emitter uses this identifier for the setter name
-    /// and skips the DC-OP snap block.
+    /// via `.runtime R` — emitter uses this identifier for the setter
+    /// name (`set_runtime_R_<field>`) and emits a read-only accessor.
+    /// Setter body is otherwise identical to `.pot` since the 2026-04-20
+    /// reseed strip.
     pub runtime_field: Option<String>,
 }
 

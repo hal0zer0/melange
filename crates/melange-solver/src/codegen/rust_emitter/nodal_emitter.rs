@@ -2320,14 +2320,14 @@ impl RustEmitter {
         // delta_g means A changes by delta_g at the same entries. A_neg =
         // alpha*C - G, so A_neg changes by -delta_g. A_neg_be has no G term.
         //
-        // `.pot` setters apply the 20% warm DC-OP re-init (seeds NR from bias
-        // when the knob crosses a big delta). `.runtime R` setters skip that
-        // block — they are called every block/sample by plugin envelope
-        // followers, and any mid-signal NR-seed reset is audible as a click.
+        // Neither setter reseeds NR state. Callers that need a fresh NR
+        // seed (preset recall, raw unsmoothed jumps) must follow with
+        // `recompute_dc_op()`. On the nodal path `recompute_dc_op()` is a
+        // stub today (see Phase E handoff); nodal preset recall falls back
+        // to WARMUP_SAMPLES_RECOMMENDED samples of NR catch-up.
         for (idx, pot) in ir.pots.iter().enumerate() {
             let np = pot.node_p;
             let nq = pot.node_q;
-            let is_runtime = pot.runtime_field.is_some();
             let (setter_name, doc_noun) = match &pot.runtime_field {
                 Some(field) => (format!("set_runtime_R_{field}"), format!("runtime resistor `{field}`")),
                 None => (format!("set_pot_{idx}"), format!("potentiometer {idx}")),
@@ -2433,12 +2433,6 @@ impl RustEmitter {
                 }
             }
 
-            // Capture old resistance before updating (only needed for the
-            // warm DC-OP gate below; skip the binding entirely for .runtime R
-            // to avoid unused-variable warnings).
-            if !is_runtime {
-                code.push_str(&format!("\n        let r_prev_{} = self.pot_{}_resistance;\n", idx, idx));
-            }
             code.push_str(&format!("        self.pot_{}_resistance = r;\n", idx));
             code.push_str("        self.matrices_dirty = true;\n");
 
@@ -2455,37 +2449,22 @@ impl RustEmitter {
                 }
             }
 
-            if !is_runtime {
-                // Warm DC-OP re-init: on large pot jumps, reset NR seed state to the baked DC
-                // operating point. This prevents NR max-iter-cap hits when v_prev is stale from
-                // the old operating point. Gated at 20% relative delta so per-sample smoothed
-                // sweeps do not snap v_prev mid-signal and cause clicks. See Batch D Phase 2.
-                let has_dc_op_nodal = ir.has_dc_op;
-                let has_dc_nl_nodal = ir.topology.m > 0
-                    && !ir.dc_nl_currents.is_empty()
-                    && ir.dc_nl_currents.iter().any(|&v| v.abs() > 1e-30);
-                code.push_str(&format!(
-                    "        let rel_delta_{idx} = (r - r_prev_{idx}).abs() / r_prev_{idx}.max(1e-12);\n\
-                     \x20       if rel_delta_{idx} > 0.20 {{\n",
-                ));
-                if has_dc_op_nodal {
-                    code.push_str("            self.v_prev = DC_OP;\n");
-                } else {
-                    code.push_str("            self.v_prev = [0.0; N];\n");
-                }
-                if has_dc_nl_nodal {
-                    code.push_str("            self.i_nl_prev = DC_NL_I;\n");
-                }
-                code.push_str("        }\n");
-            }
-
+            // No NR-state reseed: callers that need one (preset recall,
+            // raw unsmoothed jumps) should follow with `recompute_dc_op()`.
+            // Nodal circuits route through the stub body — falls back to
+            // WARMUP_SAMPLES_RECOMMENDED if a full nodal recompute is ever
+            // needed (see Phase E handoff).
             code.push_str("    }\n\n");
         }
 
         // set_switch_N() methods
         for (idx, sw) in ir.switches.iter().enumerate() {
             code.push_str(&format!(
-                "    /// Set switch {} position (0-indexed, {} positions).\n",
+                "    /// Set switch {} position (0-indexed, {} positions).\n\
+                 \x20   ///\n\
+                 \x20   /// A switch flip is a topology step — follow with `recompute_dc_op()`\n\
+                 \x20   /// on DK circuits to refresh the NR seed. On nodal (stub recompute)\n\
+                 \x20   /// NR catches up over WARMUP_SAMPLES_RECOMMENDED samples.\n",
                 idx, sw.num_positions
             ));
             code.push_str(&format!(
@@ -2593,9 +2572,9 @@ impl RustEmitter {
             code.push_str("        self.matrices_dirty = true;\n");
 
             // Authentic-noise coefficient refresh for any R-type components
-            // in this switch that back a thermal noise source. Runs before
-            // the DC-OP warm re-init so the live `noise_thermal_sqrt_inv_r`
-            // is in sync with the freshly-selected R for the next sample.
+            // in this switch that back a thermal noise source. Keeps the
+            // live `noise_thermal_sqrt_inv_r` in sync with the freshly-
+            // selected R for the next sample.
             if noise.enabled {
                 if let Some(slots) = noise.switch_comp_to_noise_slot.get(idx) {
                     for (ci, maybe_slot) in slots.iter().enumerate() {
@@ -2608,21 +2587,11 @@ impl RustEmitter {
                 }
             }
 
-            // Warm DC-OP re-init on switch change: reset NR seed to DC bias.
-            // Switches have no smoother so any change is a step; always re-init.
-            // See Batch D Phase 2.
-            let has_dc_op_sw = ir.has_dc_op;
-            let has_dc_nl_sw = ir.topology.m > 0
-                && !ir.dc_nl_currents.is_empty()
-                && ir.dc_nl_currents.iter().any(|&v| v.abs() > 1e-30);
-            if has_dc_op_sw {
-                code.push_str("        self.v_prev = DC_OP;\n");
-            } else {
-                code.push_str("        self.v_prev = [0.0; N];\n");
-            }
-            if has_dc_nl_sw {
-                code.push_str("        self.i_nl_prev = DC_NL_I;\n");
-            }
+            // No NR-state reseed: a switch flip is a topology step, but
+            // reseeding `v_prev` mid-signal snaps the trajectory to DC_OP
+            // and is audible as a click. Callers should follow with
+            // `recompute_dc_op()` on DK circuits, or accept NR catch-up
+            // on nodal circuits (stub) over WARMUP_SAMPLES_RECOMMENDED.
 
             code.push_str("    }\n\n");
         }

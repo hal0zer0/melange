@@ -161,7 +161,7 @@ Source: Sowter DWG E-72,658-2 + Peerless/Triad winding data.
 - **VCA**: THAT 2180 / DBX 2150 current-mode exponential gain with gain-dependent THD
 
 ### Dynamic Parameters
-- `.pot R min max [default] [label]`: per-block O(N³) rebuild on change; per-sample smoother via `.smoothed.next()`; warm DC-OP re-init when `|r - r_prev|/r_prev > 0.20`
+- `.pot R min max [default] [label]`: per-block O(N³) rebuild on change; per-sample smoother via `.smoothed.next()`; reseed-free setter — use `recompute_dc_op()` for preset-recall NR refresh (DK only; nodal falls back to NR catch-up)
 - `.wiper R_cw R_ccw total [pos] [label]`: two-resistor wiper; position-0..1 UI param
 - `.switch R/C/L pos0 pos1 ...`: up to 16 switches; G/C/L stamped at pos-0 baseline (not static) so initial state is self-consistent
 - `.gang "Label" m1 m2 ...`: links multiple `.pot`/`.wiper` members under one parameter; `!` prefix inverts; `.runtime R` members rejected at parse time (drive multiple setters from one plugin envelope instead)

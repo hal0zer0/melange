@@ -965,21 +965,7 @@ impl RustEmitter {
         let mut code = String::new();
 
         // Emit set_switch_N() for each switch (DK path)
-        let dk_has_dc_op = ir.has_dc_op;
-        let dk_has_dc_nl = ir.topology.m > 0
-            && !ir.dc_nl_currents.is_empty()
-            && ir.dc_nl_currents.iter().any(|&v| v.abs() > 1e-30);
         for sw in &ir.switches {
-            let dc_op_reset = if dk_has_dc_op {
-                "        self.v_prev = DC_OP;\n".to_string()
-            } else {
-                "        self.v_prev = [0.0; N];\n".to_string()
-            };
-            let dc_nl_reset = if dk_has_dc_nl {
-                "        self.i_nl_prev = DC_NL_I;\n".to_string()
-            } else {
-                String::new()
-            };
             // Authentic-noise coefficient refresh for any R-type components
             // in this switch that back a thermal noise source. Emitted only
             // when noise is compiled in AND this switch has at least one
@@ -1010,16 +996,14 @@ impl RustEmitter {
                 "    /// Set switch {} position (0..{}).\n\
                  \x20   ///\n\
                  \x20   /// Marks matrices dirty. Rebuild deferred to next `process_sample()`.\n\
+                 \x20   /// A switch flip is a topology step — follow with `recompute_dc_op()`\n\
+                 \x20   /// to refresh the NR seed and avoid audible glitches on the next sample.\n\
                  \x20   pub fn set_switch_{}(&mut self, position: usize) {{\n\
                  \x20       if position >= SWITCH_{}_NUM_POSITIONS {{ return; }}\n\
                  \x20       if self.switch_{}_position == position {{ return; }}\n\
                  \x20       self.switch_{}_position = position;\n\
                  \x20       self.matrices_dirty = true;\n\
 {noise_update}\
-                 \x20       // Warm DC-OP re-init on switch change: reset NR seed to DC bias.\n\
-                 \x20       // Switches have no smoother so any change is a step. See Batch D Phase 2.\n\
-{dc_op_reset}\
-{dc_nl_reset}\
                  \x20   }}\n\n",
                 sw.index,
                 sw.num_positions - 1,
@@ -1029,14 +1013,13 @@ impl RustEmitter {
 
         // Emit set_pot_N() / set_runtime_R_<field>() methods for DK path.
         //
-        // `.pot`: user-facing knob. Setter applies the 20% DC-OP warm re-init
-        // so that wide pot jumps land on a bias-consistent NR seed.
-        //
-        // `.runtime R` (runtime_field = Some(field)): audio-rate modulation
-        // target (e.g. envelope-linked bias). Setter name is
-        // `set_runtime_R_<field>`, and the DC-OP snap is deliberately
-        // omitted — envelope followers call the setter every block/sample
-        // and a mid-signal state reset is audible as a click.
+        // Both setters have identical bodies: clamp → skip-if-unchanged →
+        // stamp the dirty flag → refresh noise coefficient. No NR-state
+        // reseed — callers that need one (preset recall, raw unsmoothed
+        // jumps) should follow the setter with `recompute_dc_op()`.
+        // Plugin-template callers feed `.smoothed.next()` values; nih-plug
+        // smoothing keeps per-sample deltas tiny, so NR stays within basin
+        // on the previous sample's seed.
         for (idx, pot) in ir.pots.iter().enumerate() {
             // Authentic-noise coefficient refresh — emitted only when
             // noise is enabled at codegen AND this pot backs a thermal
@@ -1055,36 +1038,18 @@ impl RustEmitter {
 
             match &pot.runtime_field {
                 None => {
-                    let dc_op_reset = if dk_has_dc_op {
-                        "            self.v_prev = DC_OP;\n".to_string()
-                    } else {
-                        "            self.v_prev = [0.0; N];\n".to_string()
-                    };
-                    let dc_nl_reset = if dk_has_dc_nl {
-                        "            self.i_nl_prev = DC_NL_I;\n".to_string()
-                    } else {
-                        String::new()
-                    };
                     code.push_str(&format!(
                         "    /// Set potentiometer {idx} resistance (clamped to [{:.1}..{:.1}] ohms).\n\
                          \x20   ///\n\
                          \x20   /// Marks matrices dirty. Rebuild deferred to next `process_sample()`.\n\
+                         \x20   /// For preset recall / unsmoothed jumps, follow with `recompute_dc_op()`.\n\
                          \x20   pub fn set_pot_{idx}(&mut self, resistance: f64) {{\n\
                          \x20       if !resistance.is_finite() {{ return; }}\n\
                          \x20       let r = resistance.clamp(POT_{idx}_MIN_R, POT_{idx}_MAX_R);\n\
                          \x20       if (r - self.pot_{idx}_resistance).abs() < 1e-12 {{ return; }}\n\
-                         \x20       let r_prev = self.pot_{idx}_resistance;\n\
                          \x20       self.pot_{idx}_resistance = r;\n\
                          \x20       self.matrices_dirty = true;\n\
 {noise_update}\
-                         \x20       // Warm DC-OP re-init: on large pot jumps, reset NR seed to DC bias.\n\
-                         \x20       // Gated at 20% relative delta so smoothed per-sample sweeps do not\n\
-                         \x20       // snap v_prev mid-signal and cause audible clicks. See Batch D Phase 2.\n\
-                         \x20       let rel_delta = (r - r_prev).abs() / r_prev.max(1e-12);\n\
-                         \x20       if rel_delta > 0.20 {{\n\
-{dc_op_reset}\
-{dc_nl_reset}\
-                         \x20       }}\n\
                          \x20   }}\n\n",
                         pot.min_resistance, pot.max_resistance,
                     ));
@@ -1099,8 +1064,8 @@ impl RustEmitter {
                          \x20   pub fn {field}(&self) -> f64 {{ self.pot_{idx}_resistance }}\n\n\
                          \x20   /// Set runtime resistor `{field}` (clamped to [{:.1}..{:.1}] ohms).\n\
                          \x20   ///\n\
-                         \x20   /// Audio-rate safe: no DC-OP warm re-init, no internal smoothing.\n\
-                         \x20   /// Caller (plugin-side envelope follower) is the smoother.\n\
+                         \x20   /// Audio-rate safe: no internal smoothing; caller (plugin-side\n\
+                         \x20   /// envelope follower) is the smoother.\n\
                          \x20   /// Marks matrices dirty. Rebuild deferred to next `process_sample()`.\n\
                          \x20   pub fn set_runtime_R_{field}(&mut self, resistance: f64) {{\n\
                          \x20       if !resistance.is_finite() {{ return; }}\n\

@@ -126,7 +126,7 @@ See the [Plugin Development Guide](docs/PLUGIN_GUIDE.md) for details.
 | Op-Amp | Boyle VCCS macromodel | GBW pole, slew-rate limiting, asymmetric VCC/VEE rails, 4 clamping strategies |
 | VCA | THAT 2180 exponential | Current-mode with gain-dependent THD |
 | CdS LDR | VTL5C3/4, NSL-32 | Asymmetric attack/release envelope |
-| Potentiometer | `.pot` / `.wiper` / `.gang` directives | Per-sample smoothing, warm DC-OP re-init on large jumps |
+| Potentiometer | `.pot` / `.wiper` / `.gang` directives | Per-sample smoothing; `recompute_dc_op()` available for preset-recall NR-seed refresh |
 | Switch | `.switch` directive | Ganged R/C/L component switching |
 
 All device parameters use standard SPICE `.model` syntax. Temperature is fixed at 27°C; no noise simulation.

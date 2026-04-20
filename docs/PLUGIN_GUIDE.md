@@ -27,7 +27,7 @@ Contains everything the circuit needs to run in real-time:
 - **process_sample()** — the main DSP function, called once per sample
 - **set_sample_rate()** — recomputes matrices for a new sample rate
 - **Pot/switch methods** — `set_pot_0()`, `set_switch_0()`, etc. (user knobs)
-- **Runtime setters** — `set_runtime_R_<field>()` for `.runtime R` resistors (audio-rate, no DC-OP snap) and `pub <field>: f64` for `.runtime V` voltage sources
+- **Runtime setters** — `set_runtime_R_<field>()` for `.runtime R` resistors (audio-rate, reseed-free) and `pub <field>: f64` for `.runtime V` voltage sources
 
 If you change the netlist and want to update the DSP without losing your `lib.rs` edits:
 
@@ -74,6 +74,25 @@ Each `.pot` directive in the netlist becomes a `FloatParam` with:
 - **All solvers**: per-block (matrix rebuild O(N^3) on value change)
 - Per-sample smoothing via `.smoothed.next()` interpolates between rebuilds
 
+**Preset recall / large unsmoothed jumps.** The `set_pot_N` setter is
+reseed-free — it only updates conductance and flags a rebuild; it does
+not touch NR state. For the common case (smoothed knob sweeps) this is
+exactly what you want: NR picks up from the previous sample's `v_prev`
+with no mid-signal snap. For the rare case of a *large unsmoothed* jump
+(preset recall, MIDI program change, automation step that bypasses the
+smoother), follow with `recompute_dc_op()`:
+
+```rust
+state.set_pot_0(r_new);
+state.recompute_dc_op();  // refresh NR seed to the new operating point
+```
+
+On DK-path circuits this re-solves the operating point from the new pot
+value and writes `v_prev`/`i_nl_prev` with the converged equilibrium. On
+nodal-path circuits `recompute_dc_op()` is a stub today (Phase E handoff
+— body deferred); NR catches up on its own over roughly
+`WARMUP_SAMPLES_RECOMMENDED` samples after the jump.
+
 ### Switch Parameters (from `.switch` directives)
 
 ```rust
@@ -81,7 +100,7 @@ switch_0: IntParam   // range: 0..num_positions-1
 switch_1: IntParam   // ...
 ```
 
-Each `.switch` directive becomes an `IntParam`. Position 0 = first value set, position 1 = second, etc. Switches always update per-block (matrix rebuild on position change).
+Each `.switch` directive becomes an `IntParam`. Position 0 = first value set, position 1 = second, etc. Switches always update per-block (matrix rebuild on position change). A switch flip is a topology step — call `recompute_dc_op()` afterward on DK circuits to refresh the NR seed (nodal falls back to NR catch-up over `WARMUP_SAMPLES_RECOMMENDED` samples).
 
 ### Wet/Dry Mix (opt-in)
 
@@ -268,7 +287,8 @@ Requires zig 0.13, cargo-zigbuild, macOS SDK 13.3, and rcodesign.
 | No output / silence | Wrong input/output node names | Check `melange nodes circuit.cir` |
 | Very quiet output | Level params at default (0 dB) but circuit expects hot input | Increase Input Level in the plugin UI |
 | Clicks on parameter changes | Smoothing too short | Increase `.with_smoother(SmoothingStyle::Linear(50.0))` |
-| Clicks on preset/DAW load | State not reset | Check that `reset()` calls `state.reset()` |
+| Clicks on preset/DAW load | NR seed stale after large unsmoothed jump | Call `state.recompute_dc_op()` right after `set_pot_*` / `set_switch_*` (DK path). On nodal circuits the runtime stub just bumps a diagnostic counter — let NR catch up over ~`WARMUP_SAMPLES_RECOMMENDED` samples |
+| Clicks on log-taper knob drags | Audio-taper ratio ≥1000:1 + per-block updates used to trip an internal reseed gate | Already fixed (2026-04-20) — regen the plugin. If you pinned a pre-2026-04-20 melange, upgrade |
 | High CPU usage | Nodal solver with many pots | Expected — pots trigger O(N^3) rebuild. Reduce pot count or use DK-compatible circuit |
 | NaN / noise burst | DC operating point wrong | Try `--backward-euler`; check circuit biasing |
 | Ear protection clipping clean signal | Output exceeds 0 dBFS | Reduce Output Level, or disable ear protection for measurement |

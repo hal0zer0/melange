@@ -1028,13 +1028,17 @@ fn test_codegen_no_sm_s_correction() {
 }
 
 // ---------------------------------------------------------------------------
-// Batch D Phase 2: warm DC-OP re-init in set_pot_N
+// set_pot_N is reseed-free — callers must use `recompute_dc_op()` for preset
+// recall (see `dc_op_recompute_tests` for the positive coverage). Historical
+// note: the warm DC-OP re-init gate (commit e8e18a7, Batch D Phase 2) was
+// removed because it caused audible clicks on per-block log-taper sweeps;
+// explicit `recompute_dc_op()` replaced it as the correct mechanism.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn test_codegen_set_pot_has_warm_dc_reinit_gate() {
-    // A pot circuit with a nonlinear device (diode) will have DC_OP and DC_NL_I.
-    // Verify that set_pot_N contains the 20%-relative-delta gate and re-init logic.
+fn test_codegen_set_pot_has_no_reseed_block() {
+    // Nonlinear circuit: still no reseed. The setter must not touch
+    // v_prev / i_nl_prev / DC_OP mid-signal — that was the click source.
     let code = generate_code(DIODE_POT_SPICE);
 
     let set_pot_idx = code
@@ -1047,23 +1051,29 @@ fn test_codegen_set_pot_has_warm_dc_reinit_gate() {
     let set_pot_body = &code[set_pot_idx..set_pot_end];
 
     assert!(
-        set_pot_body.contains("rel_delta"),
-        "set_pot_0 should contain rel_delta gate (Batch D Phase 2)"
+        !set_pot_body.contains("rel_delta"),
+        "set_pot_0 must NOT contain the rel_delta reseed gate; got:\n{}",
+        set_pot_body
     );
     assert!(
-        set_pot_body.contains("> 0.20"),
-        "set_pot_0 should gate on 20% relative delta"
+        !set_pot_body.contains("DC_OP"),
+        "set_pot_0 must NOT touch DC_OP; got:\n{}",
+        set_pot_body
     );
     assert!(
-        set_pot_body.contains("v_prev"),
-        "set_pot_0 should reset v_prev on large jumps"
+        !set_pot_body.contains("i_nl_prev"),
+        "set_pot_0 must NOT touch i_nl_prev; got:\n{}",
+        set_pot_body
     );
+    // Positive contract: the setter still clamps, dedupes, and marks dirty.
+    assert!(set_pot_body.contains("clamp(POT_0_MIN_R, POT_0_MAX_R)"));
+    assert!(set_pot_body.contains("self.matrices_dirty = true"));
 }
 
 #[test]
-fn test_codegen_set_pot_linear_circuit_has_gate_no_dc_nl() {
-    // A pure linear pot circuit (no nonlinear devices) still gets the gate,
-    // but resets v_prev to [0.0; N] (no DC_OP) and does not touch i_nl_prev.
+fn test_codegen_set_pot_linear_circuit_has_no_reseed() {
+    // Linear circuit has no DC_OP / DC_NL_I constants anyway, but the
+    // setter body must also be stripped of any v_prev zeroing.
     let code = generate_code(RC_POT_SPICE);
 
     let set_pot_idx = code
@@ -1076,17 +1086,158 @@ fn test_codegen_set_pot_linear_circuit_has_gate_no_dc_nl() {
     let set_pot_body = &code[set_pot_idx..set_pot_end];
 
     assert!(
-        set_pot_body.contains("rel_delta"),
-        "set_pot_0 should contain rel_delta gate even for linear circuits"
+        !set_pot_body.contains("rel_delta"),
+        "linear set_pot_0 must NOT contain rel_delta; got:\n{}",
+        set_pot_body
     );
-    // Linear circuit: no DC_OP constant, resets to zero
     assert!(
-        set_pot_body.contains("[0.0; N]"),
-        "Linear circuit set_pot_0 should reset v_prev to [0.0; N]"
+        !set_pot_body.contains("v_prev"),
+        "linear set_pot_0 must NOT touch v_prev; got:\n{}",
+        set_pot_body
     );
-    // No i_nl_prev reset in purely linear circuit
+}
+
+// ---------------------------------------------------------------------------
+// Log-taper block-rate sweep must not click — the reseed-fix regression test.
+//
+// Canonical audio-taper pot (100 Ω .. 100 kΩ, 1000:1 ratio), 150 ms linear
+// smoother on a normalized 0..1 parameter, exponential map to R. Sweep the
+// normalized param 0→1 while feeding a sustained 1 kHz tone. `set_pot_0`
+// runs once per "host block" at sizes {64, 128, 256, 512}. At block sizes
+// ≥128 the per-block ΔR/R crosses the historical 20% gate (21.8% at 128,
+// 38.8% at 256, 62.6% at 512) — the gate used to snap v_prev to DC_OP
+// mid-signal and produce a ~–15 dBFS click. The strip (2026-04-20) removed
+// the gate; this test guards against it coming back.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn log_taper_block_sweep_no_clicks() {
+    // Diode clipper with a log-taper drive pot. Nonlinear circuit so the
+    // historical reseed would snap v_prev to DC_OP (not just [0; N]).
+    let spice = "\
+LogTaper Click Regression
+R1 in out 10k
+D1 out 0 Dmod
+C1 out 0 100n
+.model Dmod D(IS=2.52e-9 N=1.5)
+.pot R1 100 100k
+";
+    let code = generate_code(spice);
+
+    // Generated program:
+    //   - warm-up 1000 samples at midpoint pot (stable operating point)
+    //   - sweep the normalized 0..1 param up linearly over 7200 samples
+    //     (150 ms @ 48 kHz), exponentially map to R (log taper), and push
+    //     `set_pot_0(r)` once per block. Feed a 1 kHz 0.3 V sine in the
+    //     background. Record the worst sample-to-sample |Δy| for each block
+    //     size and print it.
+    //
+    // Pass criterion: worst |Δy| < 0.08 V across every block size. The 1
+    // kHz sine at 48 kHz has a baseline per-sample step of
+    // 0.3 · 2π · 1000 / 48000 ≈ 0.0393 V, so 0.08 V leaves ~2× headroom for
+    // the legitimate R-induced divider shift. When the reseed fires (the
+    // bug we're guarding against), max jump on this topology hits ≥0.3 V.
+    let main = r#"
+
+fn main() {
+    use std::f64::consts::PI;
+    let sr = 48000.0f64;
+    let r_min = 100.0f64;
+    let r_max = 100_000.0f64;
+    let sweep_samples: usize = 7200; // 150 ms at 48 kHz
+
+    for &block in &[64usize, 128, 256, 512] {
+        let mut s = CircuitState::default();
+        let mut prev = 0.0f64;
+        let mut max_jump = 0.0f64;
+        let mut nan = false;
+
+        // Warm-up at midpoint R.
+        let r_mid = (r_min * r_max).sqrt();
+        s.set_pot_0(r_mid);
+        for i in 0..1000 {
+            let t = i as f64 / sr;
+            let v = 0.3 * (2.0 * PI * 1000.0 * t).sin();
+            let y = process_sample(v, &mut s)[0];
+            if !y.is_finite() { nan = true; }
+            prev = y;
+        }
+
+        // Sweep phase: normalized 0→1 over sweep_samples. Update pot once
+        // per block with the block-start value (standard oomox pattern).
+        for i in 0..sweep_samples {
+            if i % block == 0 {
+                let u = i as f64 / sweep_samples as f64;
+                let r = r_max * (r_min / r_max).powf(u);
+                s.set_pot_0(r);
+            }
+            let t = (i + 1000) as f64 / sr;
+            let v = 0.3 * (2.0 * PI * 1000.0 * t).sin();
+            let y = process_sample(v, &mut s)[0];
+            if !y.is_finite() { nan = true; }
+            let jump = (y - prev).abs();
+            if jump > max_jump { max_jump = jump; }
+            prev = y;
+        }
+
+        println!("block={} nan={} max_jump={:.9}", block, nan, max_jump);
+    }
+}
+"#;
+    let full = format!("{}{}", code, main);
+
+    let tmp = std::env::temp_dir();
+    let src = tmp.join("melange_log_taper_sweep.rs");
+    let bin = tmp.join("melange_log_taper_sweep");
+    std::fs::File::create(&src)
+        .expect("create src")
+        .write_all(full.as_bytes())
+        .expect("write src");
+    let compile = std::process::Command::new("rustc")
+        .args([
+            src.to_str().unwrap(),
+            "-o",
+            bin.to_str().unwrap(),
+            "--edition",
+            "2021",
+            "-O",
+        ])
+        .output()
+        .expect("run rustc");
+    let _ = std::fs::remove_file(&src);
+    if !compile.status.success() {
+        let _ = std::fs::remove_file(&bin);
+        panic!(
+            "log-taper sweep harness failed to compile:\n{}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+    }
+    let run = std::process::Command::new(&bin).output().expect("run");
+    let _ = std::fs::remove_file(&bin);
     assert!(
-        !set_pot_body.contains("i_nl_prev"),
-        "Linear circuit set_pot_0 should not touch i_nl_prev (no nonlinear devices)"
+        run.status.success(),
+        "log-taper sweep binary failed:\nstderr: {}",
+        String::from_utf8_lossy(&run.stderr)
     );
+
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    for line in stdout.lines() {
+        assert!(line.contains("nan=false"), "NaN in sweep: {}", line);
+        let jump: f64 = line
+            .split_whitespace()
+            .find(|t| t.starts_with("max_jump="))
+            .expect("max_jump field")
+            .split_once('=')
+            .unwrap()
+            .1
+            .parse()
+            .expect("parse jump");
+        assert!(
+            jump < 0.08,
+            "log-taper sweep produced {:.6} V jump (reseed click?); line: {}\nfull stdout:\n{}",
+            jump,
+            line,
+            stdout
+        );
+    }
 }

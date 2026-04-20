@@ -1188,7 +1188,8 @@ impl CircuitState {
 
     pub fn set_runtime_R_bias_r_L1(&mut self, resistance: f64) {
         // clamp, skip if unchanged, mark matrices dirty
-        // (no DC-OP snap — see .pot R for the knob-drag variant that does snap)
+        // Body is structurally identical to `set_pot_N` since the 2026-04-20
+        // reseed strip — only the setter name + read-only accessor differ.
     }
 }
 ```

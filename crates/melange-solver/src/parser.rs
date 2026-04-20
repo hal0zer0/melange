@@ -93,10 +93,9 @@ pub struct Netlist {
     pub runtime_sources: Vec<RuntimeDirective>,
     /// Runtime resistor directives (.runtime R1 min max as field_name).
     /// Audio-rate resistor modulation for envelope-linked bias (Latinum §5(b)).
-    /// Unlike `.pot`, these DO NOT trigger the large-jump DC-OP warm re-init —
-    /// envelope followers drive the setter every block/sample and a mid-stream
-    /// reseed is audible as a click. Share the 64-slot pot table at MNA level
-    /// but do not emit plugin knobs.
+    /// Shares the 64-slot pot table at MNA level; distinguished from `.pot` at
+    /// codegen by the API shape (no nih-plug knob, `state.<field>()` accessor).
+    /// Setter bodies are identical to `.pot` since the 2026-04-20 reseed strip.
     pub runtime_resistors: Vec<RuntimeResistorDirective>,
 }
 
@@ -120,10 +119,11 @@ pub struct RuntimeDirective {
 ///
 /// Audio-rate resistor modulation target. Codegen emits
 /// `set_runtime_R_<field>(r)` on `CircuitState` that clamps to [min, max]
-/// and marks matrices dirty — without the large-jump DC-OP warm re-init
-/// that `.pot R` uses (which would be an audible click at envelope-follower
-/// update rates). Plugin template does NOT emit a nih-plug knob for these;
-/// the plugin drives the setter from its own envelope follower.
+/// and marks matrices dirty. Plugin template does NOT emit a nih-plug
+/// knob for these; the plugin drives the setter from its own envelope
+/// follower. Semantically identical to `.pot R`'s setter since the
+/// 2026-04-20 reseed strip — the remaining differences are API shape
+/// (field-named setter + read-only accessor, no plugin knob).
 #[derive(Debug, Clone, PartialEq)]
 pub struct RuntimeResistorDirective {
     /// Name of the resistor this directive claims (case-insensitive match).

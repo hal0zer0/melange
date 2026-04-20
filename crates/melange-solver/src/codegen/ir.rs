@@ -1465,8 +1465,9 @@ pub struct PotentiometerIR {
     pub grounded: bool,
     /// If Some, this entry was declared via `.runtime R` rather than `.pot`.
     /// The contained string is the Rust identifier the emitter uses for
-    /// `set_runtime_R_<field>` (no DC-OP warm re-init) and the `<field>()`
-    /// getter. Plugin template skips nih-plug knob emission for these.
+    /// the `set_runtime_R_<field>` setter and the `<field>()` read-only
+    /// accessor. Plugin template skips nih-plug knob emission for these.
+    /// Setter body is identical to `.pot` since the 2026-04-20 reseed strip.
     #[serde(default)]
     pub runtime_field: Option<String>,
 }

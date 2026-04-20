@@ -216,7 +216,8 @@ pub struct DeviceSlot {
     /// this field holds the DC-OP-converged value of `Vg2k = V[screen] −
     /// V[cathode]`, which the reduced 2D math uses as a constant in place
     /// of the third NR dimension. Written by the DC-OP grid-off detection
-    /// pass; re-computed on warm DC-OP re-init after large pot/switch jumps.
+    /// pass; refreshed when callers invoke `recompute_dc_op()` after a
+    /// large pot/switch jump.
     ///
     /// For all other device types (and for sharp `SharpPentode` slots) this
     /// field is unused and stays at its default of 0.0.
