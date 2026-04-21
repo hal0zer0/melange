@@ -4784,6 +4784,50 @@ impl CircuitIR {
             )));
         }
 
+        // Depletion-cap parameters (SPICE defaults: VJ = 0.75 V, MJ = 0.33, FC = 0.5).
+        // VJ must be strictly positive so `(1 - V/VJ)` is well-defined.
+        // MJ is typically in [0.2, 0.5]; we accept anything finite and non-negative.
+        // FC must be in [0, 0.95] — values at or above 1 would put the tangent
+        // extension inside the singular region of the depletion formula.
+        let vje = Self::lookup_model_param(netlist, model, "VJE").unwrap_or(0.75);
+        if vje <= 0.0 || !vje.is_finite() {
+            return Err(CodegenError::InvalidConfig(format!(
+                "BJT model VJE must be positive and finite, got {vje}"
+            )));
+        }
+        let mje = Self::lookup_model_param(netlist, model, "MJE").unwrap_or(0.33);
+        if mje < 0.0 || !mje.is_finite() {
+            return Err(CodegenError::InvalidConfig(format!(
+                "BJT model MJE must be non-negative and finite, got {mje}"
+            )));
+        }
+        let vjc = Self::lookup_model_param(netlist, model, "VJC").unwrap_or(0.75);
+        if vjc <= 0.0 || !vjc.is_finite() {
+            return Err(CodegenError::InvalidConfig(format!(
+                "BJT model VJC must be positive and finite, got {vjc}"
+            )));
+        }
+        let mjc = Self::lookup_model_param(netlist, model, "MJC").unwrap_or(0.33);
+        if mjc < 0.0 || !mjc.is_finite() {
+            return Err(CodegenError::InvalidConfig(format!(
+                "BJT model MJC must be non-negative and finite, got {mjc}"
+            )));
+        }
+        let fc = Self::lookup_model_param(netlist, model, "FC").unwrap_or(0.5);
+        if !fc.is_finite() || !(0.0..=0.95).contains(&fc) {
+            return Err(CodegenError::InvalidConfig(format!(
+                "BJT model FC must be in [0.0, 0.95], got {fc}"
+            )));
+        }
+
+        // Forward transit time for diffusion capacitance (default 0 = disabled).
+        let tf = Self::lookup_model_param(netlist, model, "TF").unwrap_or(0.0);
+        if tf < 0.0 || !tf.is_finite() {
+            return Err(CodegenError::InvalidConfig(format!(
+                "BJT model TF must be non-negative and finite, got {tf}"
+            )));
+        }
+
         // Forward emission coefficient (default 1.0 = ideal)
         let nf = Self::lookup_model_param(netlist, model, "NF").unwrap_or(1.0);
         if nf <= 0.0 || !nf.is_finite() {
@@ -4892,9 +4936,9 @@ impl CircuitIR {
             netlist,
             model,
             &[
-                "IS", "BF", "BR", "VAF", "VAR", "IKF", "IKR", "CJE", "CJC", "NF", "NR", "ISE",
-                "NE", "ISC", "NC", "RB", "RC", "RE", "RTH", "CTH", "XTI", "EG", "TAMB", "KF",
-                "AF",
+                "IS", "BF", "BR", "VAF", "VAR", "IKF", "IKR", "CJE", "CJC", "VJE", "MJE", "VJC",
+                "MJC", "FC", "TF", "NF", "NR", "ISE", "NE", "ISC", "NC", "RB", "RC", "RE", "RTH",
+                "CTH", "XTI", "EG", "TAMB", "KF", "AF",
             ],
         );
 
@@ -4910,6 +4954,12 @@ impl CircuitIR {
             ikr,
             cje,
             cjc,
+            tf,
+            vje,
+            mje,
+            vjc,
+            mjc,
+            fc,
             nf,
             nr,
             ise,

@@ -95,12 +95,43 @@ pub struct BjtParams {
         deserialize_with = "deserialize_f64_or_infinity"
     )]
     pub ikr: f64,
-    /// Base-emitter junction capacitance [F] (0.0 = disabled)
+    /// Base-emitter zero-bias junction capacitance [F] (0.0 = disabled).
+    /// The depletion-cap linearization at the DC operating point uses
+    /// `Cje_eff = CJE · (1 - Vbe/VJE)^(-MJE)` below `FC·VJE` and a tangent
+    /// extension above (ngspice `bjtcap.c`). With default `VJE = 0.75`,
+    /// `MJE = 0.33`, `FC = 0.5`, `Cje_eff(0) = CJE` so the zero-bias code
+    /// path matches the previous behaviour.
     #[serde(default)]
     pub cje: f64,
-    /// Base-collector junction capacitance [F] (0.0 = disabled)
+    /// Base-collector zero-bias junction capacitance [F] (0.0 = disabled).
+    /// Same depletion formula as `cje`, evaluated at `Vbc_op` with
+    /// `vjc`/`mjc`/`fc`.
     #[serde(default)]
     pub cjc: f64,
+    /// Forward transit time [s] (0.0 = disabled). Adds diffusion capacitance
+    /// `Cd_be = TF · |Ic_op| / Vt` to the base-emitter small-signal cap at
+    /// the DC operating point. Typical silicon small-signal BJT: 400 ps –
+    /// 10 ns. Matters for high-frequency rolloff in audio amplifier stages
+    /// (e.g. Neve 1073 output transformer drive).
+    #[serde(default)]
+    pub tf: f64,
+    /// Base-emitter junction built-in potential [V] (SPICE default 0.75).
+    #[serde(default = "default_vj")]
+    pub vje: f64,
+    /// Base-emitter junction grading coefficient (SPICE default 0.33).
+    #[serde(default = "default_mj")]
+    pub mje: f64,
+    /// Base-collector junction built-in potential [V] (SPICE default 0.75).
+    #[serde(default = "default_vj")]
+    pub vjc: f64,
+    /// Base-collector junction grading coefficient (SPICE default 0.33).
+    #[serde(default = "default_mj")]
+    pub mjc: f64,
+    /// Forward-bias depletion-cap smoothing coefficient (SPICE default 0.5).
+    /// Above `V = FC · VJ` the analytic depletion formula is replaced by
+    /// its tangent extension so `Cj` stays finite and monotonic.
+    #[serde(default = "default_fc")]
+    pub fc: f64,
     /// Forward emission coefficient (1.0 = ideal, default)
     #[serde(default = "default_one")]
     pub nf: f64,
@@ -742,6 +773,18 @@ fn default_tamb() -> f64 {
 
 fn default_phi() -> f64 {
     0.6
+}
+
+fn default_vj() -> f64 {
+    0.75
+}
+
+fn default_mj() -> f64 {
+    0.33
+}
+
+fn default_fc() -> f64 {
+    0.5
 }
 
 /// Deserialize an f64 that may be null (JSON cannot represent infinity).

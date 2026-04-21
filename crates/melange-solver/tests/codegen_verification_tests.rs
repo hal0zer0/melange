@@ -3877,6 +3877,12 @@ fn test_ir_bjt_params_gp_serde_roundtrip() {
         ikr: f64::INFINITY,
         cje: 0.0,
         cjc: 0.0,
+        tf: 0.0,
+        vje: 0.75,
+        mje: 0.33,
+        vjc: 0.75,
+        mjc: 0.33,
+        fc: 0.5,
         nf: 1.0,
         nr: 1.0,
         ise: 0.0,
@@ -3916,6 +3922,121 @@ fn test_ir_bjt_params_old_json_compat() {
     assert!(bp.ikf.is_infinite(), "ikf should default to infinity");
     assert!(bp.ikr.is_infinite(), "ikr should default to infinity");
     assert!(!bp.is_gummel_poon(), "should be plain Ebers-Moll");
+
+    // Charge-storage defaults land on SPICE values when the JSON predates
+    // the TF/VJE/MJE/VJC/MJC/FC additions. Existing callers' persisted IRs
+    // must keep deserializing.
+    assert_eq!(bp.tf, 0.0, "tf should default to 0");
+    assert!((bp.vje - 0.75).abs() < 1e-12, "vje should default to 0.75");
+    assert!((bp.mje - 0.33).abs() < 1e-12, "mje should default to 0.33");
+    assert!((bp.vjc - 0.75).abs() < 1e-12, "vjc should default to 0.75");
+    assert!((bp.mjc - 0.33).abs() < 1e-12, "mjc should default to 0.33");
+    assert!((bp.fc - 0.5).abs() < 1e-12, "fc should default to 0.5");
+}
+
+/// BJT `.model` cards with charge-storage parameters parse end-to-end and
+/// land on the correct `BjtParams` fields. Exercises parser →
+/// `resolve_bjt_params` → `build_ir` all the way through to the IR's
+/// DeviceSlot. The values come from an ngspice BC547B-style card.
+#[test]
+fn test_bjt_charge_storage_params_parse_to_ir() {
+    use melange_solver::codegen::ir::DeviceParams;
+
+    let spice = "\
+BJT Charge Storage
+Q1 c b e BC547B
+Rc c 0 1k
+Rb b 0 100k
+Re e 0 1k
+.model BC547B NPN(IS=7e-15 BF=400 TF=410p CJE=11.5p VJE=0.71 MJE=0.38
++                 CJC=5.25p VJC=0.57 MJC=0.31 FC=0.5)
+";
+    let ir = build_ir(spice);
+
+    assert_eq!(ir.device_slots.len(), 1);
+    match &ir.device_slots[0].params {
+        DeviceParams::Bjt(bp) => {
+            assert!((bp.tf - 410e-12).abs() < 1e-18, "tf = 410 ps");
+            assert!((bp.cje - 11.5e-12).abs() < 1e-18, "cje = 11.5 pF");
+            assert!((bp.vje - 0.71).abs() < 1e-12, "vje from .model");
+            assert!((bp.mje - 0.38).abs() < 1e-12, "mje from .model");
+            assert!((bp.cjc - 5.25e-12).abs() < 1e-18, "cjc = 5.25 pF");
+            assert!((bp.vjc - 0.57).abs() < 1e-12, "vjc from .model");
+            assert!((bp.mjc - 0.31).abs() < 1e-12, "mjc from .model");
+            assert!((bp.fc - 0.5).abs() < 1e-12, "fc from .model");
+        }
+        _ => panic!("Expected BJT device params, got {:?}", ir.device_slots[0].params),
+    }
+}
+
+/// BJT `.model` cards that omit charge-storage parameters keep the SPICE
+/// defaults (TF=0, VJE=VJC=0.75, MJE=MJC=0.33, FC=0.5). Guards against
+/// regressions that would silently change the no-TF baseline and shift
+/// every previously-validated BJT correlation.
+#[test]
+fn test_bjt_charge_storage_defaults_when_omitted() {
+    use melange_solver::codegen::ir::DeviceParams;
+
+    let spice = "\
+BJT Default Charge Storage
+Q1 c b e DEFAULT_BJT
+Rc c 0 1k
+Rb b 0 100k
+Re e 0 1k
+.model DEFAULT_BJT NPN(IS=1e-14 BF=200)
+";
+    let ir = build_ir(spice);
+
+    match &ir.device_slots[0].params {
+        DeviceParams::Bjt(bp) => {
+            assert_eq!(bp.tf, 0.0);
+            assert_eq!(bp.cje, 0.0);
+            assert_eq!(bp.cjc, 0.0);
+            assert!((bp.vje - 0.75).abs() < 1e-12);
+            assert!((bp.mje - 0.33).abs() < 1e-12);
+            assert!((bp.vjc - 0.75).abs() < 1e-12);
+            assert!((bp.mjc - 0.33).abs() < 1e-12);
+            assert!((bp.fc - 0.5).abs() < 1e-12);
+        }
+        _ => panic!("Expected BJT device params"),
+    }
+}
+
+/// Invalid charge-storage values must be rejected at codegen time with a
+/// clear error, not silently coerced. Covers each new validation rule.
+#[test]
+fn test_bjt_charge_storage_validation_rejects_invalid() {
+    use melange_solver::dk::DkKernel;
+    use melange_solver::mna::MnaSystem;
+    use melange_solver::parser::Netlist;
+
+    for (param_card, needle) in [
+        (".model BAD NPN(IS=1e-14 BF=200 VJE=0)", "VJE"),
+        (".model BAD NPN(IS=1e-14 BF=200 VJE=-0.1)", "VJE"),
+        (".model BAD NPN(IS=1e-14 BF=200 MJE=-0.1)", "MJE"),
+        (".model BAD NPN(IS=1e-14 BF=200 FC=1.0)", "FC"),
+        (".model BAD NPN(IS=1e-14 BF=200 FC=-0.1)", "FC"),
+        (".model BAD NPN(IS=1e-14 BF=200 TF=-1e-12)", "TF"),
+    ] {
+        let spice = format!(
+            "BJT Bad Param\nQ1 c b e BAD\nRc c 0 1k\nRb b 0 100k\nRe e 0 1k\n{param_card}\n"
+        );
+        let netlist = Netlist::parse(&spice).expect("parse");
+        let mna = MnaSystem::from_netlist(&netlist).expect("mna");
+        let kernel = DkKernel::from_mna(&mna, 44100.0).expect("kernel");
+        let result = CircuitIR::from_kernel(&kernel, &mna, &netlist, &default_config());
+
+        match result {
+            Err(CodegenError::InvalidConfig(msg)) => {
+                assert!(
+                    msg.contains(needle),
+                    "error message should mention {needle}, got: {msg}"
+                );
+            }
+            Err(other) => panic!("expected InvalidConfig for {param_card}, got {other:?}"),
+            Ok(_) => panic!("{param_card} should have been rejected"),
+        }
+    }
 }
 
 // ==========================================================================
