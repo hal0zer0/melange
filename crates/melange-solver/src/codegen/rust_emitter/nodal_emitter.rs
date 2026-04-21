@@ -75,6 +75,136 @@ fn emit_sparse_ni_matvec_add(ir: &CircuitIR, result_arr: &str, vec_var: &str, in
 }
 
 // ============================================================================
+// Shared NaN/Inf state-reset emitter (nodal Schur + full-LU)
+// ============================================================================
+
+/// Emit the `if !v.iter().all(|x| x.is_finite()) { ... }` recovery block that
+/// clears persistent solver state after a numerical blow-up, then returns the
+/// DC-operating-point output clamped to ±10 V.
+///
+/// Must stay in sync with the DK-path equivalent in
+/// `templates/rust/process_sample.rs.tera` (Step 7). Reset list:
+///
+/// - `v_prev`  ← `dc_operating_point`
+/// - `i_nl_prev` / `i_nl_prev_prev` ← `DC_NL_I` or zeros
+/// - `input_prev` ← 0
+/// - `dc_block_x_prev` / `dc_block_y_prev` (when `ir.dc_block`)
+/// - BJT self-heating thermal state (per device with `RTH < ∞`)
+/// - Op-amp IIR dominant-pole state (`oaN_x_prev` / `oaN_y_prev`)
+/// - `pot_N_resistance` / `pot_N_resistance_prev` ← nominal resistance
+/// - Oversampler filter state (inner + outer 4× when applicable)
+/// - `chord_valid` ← false (full-LU path only)
+/// - `diag_nan_reset_count` += 1
+///
+/// `indent` is the indent prefix of the outer `if` line (usually `"    "`).
+/// `is_full_lu` selects the full-LU-only chord-LU invalidation.
+///
+/// Augmented MNA stores inductor branch currents in `v_prev` (no separate
+/// companion history), so the DK-template's `ind_i_prev`/`ci_*_prev`/xfmr
+/// group reset is not needed here.
+fn emit_nodal_nan_reset(code: &mut String, ir: &CircuitIR, indent: &str, is_full_lu: bool) {
+    let body = format!("{indent}    ");
+    let has_dc_nl = ir.dc_nl_currents.iter().any(|&v| v != 0.0);
+    let m = ir.topology.m;
+
+    code.push_str(&format!(
+        "{indent}// NaN/Inf check BEFORE state update — prevents corruption of v_prev/i_nl_prev.\n"
+    ));
+    code.push_str(&format!(
+        "{indent}// Mirrors the DK-path reset in templates/rust/process_sample.rs.tera (Step 7).\n"
+    ));
+    code.push_str(&format!("{indent}if !v.iter().all(|x| x.is_finite()) {{\n"));
+
+    // Core NR state
+    code.push_str(&format!("{body}state.v_prev = state.dc_operating_point;\n"));
+    if has_dc_nl {
+        code.push_str(&format!("{body}state.i_nl_prev = DC_NL_I;\n"));
+        code.push_str(&format!("{body}state.i_nl_prev_prev = DC_NL_I;\n"));
+    } else {
+        code.push_str(&format!("{body}state.i_nl_prev = [0.0; M];\n"));
+        code.push_str(&format!("{body}state.i_nl_prev_prev = [0.0; M];\n"));
+    }
+    code.push_str(&format!("{body}state.input_prev = 0.0;\n"));
+
+    // DC blocker history
+    if ir.dc_block {
+        code.push_str(&format!(
+            "{body}state.dc_block_x_prev = [0.0; NUM_OUTPUTS];\n\
+             {body}state.dc_block_y_prev = [0.0; NUM_OUTPUTS];\n"
+        ));
+    }
+
+    // BJT self-heating thermal state
+    for (dev_num, slot) in ir.device_slots.iter().enumerate() {
+        if let DeviceParams::Bjt(bp) = &slot.params {
+            if bp.has_self_heating() {
+                code.push_str(&format!(
+                    "{body}state.device_{dev_num}_tj = DEVICE_{dev_num}_TAMB;\n\
+                     {body}state.device_{dev_num}_is = DEVICE_{dev_num}_IS;\n\
+                     {body}state.device_{dev_num}_vt = DEVICE_{dev_num}_VT;\n"
+                ));
+            }
+        }
+    }
+
+    // Op-amp IIR dominant-pole filter state
+    for (idx, _) in ir.opamp_iir.iter().enumerate() {
+        code.push_str(&format!(
+            "{body}state.oa{idx}_x_prev = 0.0;\n\
+             {body}state.oa{idx}_y_prev = 0.0;\n"
+        ));
+    }
+
+    // Pots: snap back to nominal resistance (matches DK template and reset()).
+    for (idx, pot) in ir.pots.iter().enumerate() {
+        let r_nom = 1.0 / pot.g_nominal;
+        code.push_str(&format!(
+            "{body}state.pot_{idx}_resistance = {r_nom:.17e};\n\
+             {body}state.pot_{idx}_resistance_prev = {r_nom:.17e};\n"
+        ));
+    }
+
+    // Oversampler filter state (inner polyphase + outer 4× halfband)
+    let os_factor = ir.solver_config.oversampling_factor;
+    if os_factor > 1 {
+        let os_info = oversampling_info(os_factor);
+        code.push_str(&format!(
+            "{body}state.os_up_state = [0.0; {}];\n\
+             {body}state.os_dn_state = [[0.0; {}]; NUM_OUTPUTS];\n",
+            os_info.state_size, os_info.state_size
+        ));
+        if os_factor == 4 {
+            code.push_str(&format!(
+                "{body}state.os_up_state_outer = [0.0; {}];\n\
+                 {body}state.os_dn_state_outer = [[0.0; {}]; NUM_OUTPUTS];\n",
+                os_info.state_size_outer, os_info.state_size_outer
+            ));
+        }
+    }
+
+    // Full-LU-only: invalidate the cross-timestep chord LU factorization.
+    if is_full_lu && m > 0 {
+        code.push_str(&format!("{body}state.chord_valid = false;\n"));
+    }
+
+    code.push_str(&format!("{body}state.diag_nan_reset_count += 1;\n"));
+
+    // Return DC-OP output (clamped to ±10 V) instead of zero, to minimize the
+    // discontinuity at the recovery edge. Values baked at codegen time.
+    code.push_str(&format!("{body}let mut nan_out = [0.0f64; NUM_OUTPUTS];\n"));
+    for (oi, &node) in ir.solver_config.output_nodes.iter().enumerate() {
+        if node < ir.dc_operating_point.len() {
+            let dc_val = ir.dc_operating_point[node];
+            let scale = ir.solver_config.output_scales.get(oi).copied().unwrap_or(1.0);
+            let out_val = (dc_val * scale).clamp(-10.0, 10.0);
+            code.push_str(&format!("{body}nan_out[{oi}] = {out_val:.17e};\n"));
+        }
+    }
+    code.push_str(&format!("{body}return nan_out;\n"));
+    code.push_str(&format!("{indent}}}\n\n"));
+}
+
+// ============================================================================
 // Nodal solver emission (full N×N NR per sample, LU solve per iteration)
 // ============================================================================
 
@@ -3668,38 +3798,9 @@ impl RustEmitter {
             code.push_str("    }\n\n"); // end BE fallback block
         }
 
-        // NaN check BEFORE state update (prevents corruption of v_prev/i_nl_prev)
-        code.push_str("    if !v.iter().all(|x| x.is_finite()) {\n");
-        code.push_str("        state.v_prev = state.dc_operating_point;\n");
-        if ir.dc_nl_currents.iter().any(|&v| v != 0.0) {
-            code.push_str("        state.i_nl_prev = DC_NL_I;\n");
-            code.push_str("        state.i_nl_prev_prev = DC_NL_I;\n");
-        } else {
-            code.push_str("        state.i_nl_prev = [0.0; M];\n");
-            code.push_str("        state.i_nl_prev_prev = [0.0; M];\n");
-        }
-        code.push_str("        state.input_prev = 0.0;\n");
-        for (dev_num, slot) in ir.device_slots.iter().enumerate() {
-            if let crate::codegen::ir::DeviceParams::Bjt(bp) = &slot.params {
-                if bp.has_self_heating() {
-                    code.push_str(&format!(
-                        "        state.device_{dev_num}_tj = DEVICE_{dev_num}_TAMB;\n\
-                         \x20       state.device_{dev_num}_is = DEVICE_{dev_num}_IS;\n\
-                         \x20       state.device_{dev_num}_vt = DEVICE_{dev_num}_VT;\n"
-                    ));
-                }
-            }
-        }
-        // Reset IIR op-amp state on NaN
-        for (idx, _oa_iir) in ir.opamp_iir.iter().enumerate() {
-            code.push_str(&format!(
-                "        state.oa{idx}_x_prev = 0.0;\n\
-                 \x20       state.oa{idx}_y_prev = 0.0;\n"
-            ));
-        }
-        code.push_str("        state.diag_nan_reset_count += 1;\n");
-        code.push_str("        return [0.0; NUM_OUTPUTS];\n");
-        code.push_str("    }\n\n");
+        // NaN/Inf recovery: shared reset + DC-OP return. Schur path has no
+        // cross-timestep chord LU to invalidate, so is_full_lu = false.
+        emit_nodal_nan_reset(&mut code, ir, "    ", false);
 
         // Op-amp slew-rate limiting (nodal Schur path). Clamp the per-sample
         // voltage delta at each op-amp output node to ±SR*dt. This is
@@ -5727,54 +5828,9 @@ impl RustEmitter {
             code.push_str("    }\n\n"); // end BE fallback block
         }
 
-        // NaN check BEFORE state update (prevents corruption of v_prev/i_nl_prev)
-        code.push_str("    if !v.iter().all(|x| x.is_finite()) {\n");
-        code.push_str("        state.v_prev = state.dc_operating_point;\n");
-        if ir.dc_nl_currents.iter().any(|&v| v != 0.0) {
-            code.push_str("        state.i_nl_prev = DC_NL_I;\n");
-            code.push_str("        state.i_nl_prev_prev = DC_NL_I;\n");
-        } else {
-            code.push_str("        state.i_nl_prev = [0.0; M];\n");
-            code.push_str("        state.i_nl_prev_prev = [0.0; M];\n");
-        }
-        code.push_str("        state.input_prev = 0.0;\n");
-        for (dev_num, slot) in ir.device_slots.iter().enumerate() {
-            if let DeviceParams::Bjt(bp) = &slot.params {
-                if bp.has_self_heating() {
-                    code.push_str(&format!(
-                        "        state.device_{dev_num}_tj = DEVICE_{dev_num}_TAMB;\n\
-                         \x20       state.device_{dev_num}_is = DEVICE_{dev_num}_IS;\n\
-                         \x20       state.device_{dev_num}_vt = DEVICE_{dev_num}_VT;\n"
-                    ));
-                }
-            }
-        }
-        // Reset IIR op-amp state on NaN
-        for (idx, _oa_iir) in ir.opamp_iir.iter().enumerate() {
-            code.push_str(&format!(
-                "        state.oa{idx}_x_prev = 0.0;\n\
-                 \x20       state.oa{idx}_y_prev = 0.0;\n"
-            ));
-        }
-        code.push_str("        state.diag_nan_reset_count += 1;\n");
-        if m > 0 {
-            code.push_str("        state.chord_valid = false;\n");
-        }
-        // Return DC OP output (not zero) to minimize discontinuity on NaN recovery
-        code.push_str("        let mut nan_out = [0.0f64; NUM_OUTPUTS];\n");
-        for (oi, &node) in ir.solver_config.output_nodes.iter().enumerate() {
-            if node < ir.dc_operating_point.len() {
-                let dc_val = ir.dc_operating_point[node];
-                let scale = ir.solver_config.output_scales.get(oi).copied().unwrap_or(1.0);
-                let out_val = dc_val * scale;
-                code.push_str(&format!(
-                    "        nan_out[{oi}] = {:.17e};\n",
-                    out_val
-                ));
-            }
-        }
-        code.push_str("        return nan_out;\n");
-        code.push_str("    }\n\n");
+        // NaN/Inf recovery: shared reset + DC-OP return. Full-LU path
+        // invalidates the cross-timestep chord LU factorization.
+        emit_nodal_nan_reset(&mut code, ir, "    ", true);
 
         // No VSAT clamping on v — clamping any subset of nodes creates physical
         // inconsistency with unclamped neighbors (e.g., 100Ω resistor between

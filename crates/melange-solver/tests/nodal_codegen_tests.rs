@@ -411,3 +411,55 @@ fn test_rebuild_matrices_be_a_neg_no_g_subtraction() {
     );
 }
 
+/// The nodal-path NaN reset must restore the same state the DK-path resets
+/// (v_prev, i_nl, pots, oversampler, DC blocker, BJT thermal, op-amp IIR) —
+/// not just the minimal `v_prev` / `i_nl_prev` from before the 1.3 fix. The
+/// Schur path previously returned `[0.0; NUM_OUTPUTS]` which caused an audible
+/// click at the recovery edge; it now returns the DC-OP output like the
+/// full-LU path and the DK template.
+///
+/// Uses `TUBE_TRANSFORMER_WITH_POT` because it carries a `.pot` (must reset
+/// `pot_0_resistance`) and routes through the nodal emitter.
+#[test]
+fn test_nodal_nan_reset_includes_extended_state() {
+    let code = generate_nodal(TUBE_TRANSFORMER_WITH_POT, "in", "out");
+
+    // Shared helper signature — if this string disappears, the helper was
+    // deleted or renamed; the test assertion names below will point at the
+    // concrete field that regressed.
+    assert!(
+        code.contains("Mirrors the DK-path reset"),
+        "nodal NaN reset must be emitted via the shared helper"
+    );
+
+    // Core state that was always reset — sanity check it still is.
+    assert!(
+        code.contains("state.v_prev = state.dc_operating_point;"),
+        "v_prev must be reset on NaN"
+    );
+    assert!(
+        code.contains("state.input_prev = 0.0;"),
+        "input_prev must be reset on NaN"
+    );
+
+    // Fields added in the 1.3 fix (previously silent drift after NaN):
+    assert!(
+        code.contains("state.pot_0_resistance ="),
+        "pot_0_resistance must be snapped back to nominal on NaN"
+    );
+    assert!(
+        code.contains("state.pot_0_resistance_prev ="),
+        "pot_0_resistance_prev must be synced to nominal on NaN"
+    );
+
+    // Return strategy: DC-OP output, not zero (Schur regression fix).
+    assert!(
+        code.contains("return nan_out;"),
+        "nodal NaN reset must return nan_out (DC-OP output), not zero"
+    );
+    assert!(
+        !code.contains("return [0.0; NUM_OUTPUTS];"),
+        "nodal NaN reset must NOT fall back to zero return — causes click at recovery"
+    );
+}
+
