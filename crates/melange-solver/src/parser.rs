@@ -4194,6 +4194,25 @@ Q1 coll base emit 2N2222
         assert!(result.is_err(), "Zero ISAT should be rejected");
     }
 
+    /// Non-finite inductor values must be rejected at parse time. The
+    /// coupled-inductor `max_by` selector in MNA assumes finite values
+    /// (guarded by `total_cmp`), but defense-in-depth at the parser keeps
+    /// the invariant visible and documented.
+    #[test]
+    fn test_inductor_nan_rejected() {
+        let result = Netlist::parse("Test\nL1 1 0 NaN\n");
+        assert!(result.is_err(), "NaN inductor value should be rejected");
+    }
+
+    #[test]
+    fn test_inductor_infinity_rejected() {
+        let result = Netlist::parse("Test\nL1 1 0 Inf\n");
+        assert!(
+            result.is_err(),
+            "Infinite inductor value should be rejected"
+        );
+    }
+
     #[test]
     fn test_missing_nodes_voltage_source() {
         let result = Netlist::parse("Test\nV1 1\n");

@@ -2835,14 +2835,16 @@ impl MnaBuilder {
                 // connects between the internal nodes.
 
                 // Pick reference winding (largest inductance).
+                // total_cmp is NaN-safe; parser already rejects non-finite L
+                // at parse_positive_value, but programmatic construction could
+                // still produce NaN and panic partial_cmp().unwrap().
                 let ref_idx = members
                     .iter()
                     .enumerate()
                     .max_by(|(_, a), (_, b)| {
                         inductor_refs[*a]
                             .value
-                            .partial_cmp(&inductor_refs[*b].value)
-                            .unwrap()
+                            .total_cmp(&inductor_refs[*b].value)
                     })
                     .map(|(i, _)| i)
                     .unwrap_or(0);
