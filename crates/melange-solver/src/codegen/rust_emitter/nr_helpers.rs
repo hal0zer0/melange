@@ -513,6 +513,13 @@ pub(super) fn emit_schur_nr_limit_and_converge(
                 (DeviceType::Tube, 0) => format!(
                     "pnjlim(v_trial{i}, v_d{i}, state.device_{dev_num}_vgk_onset / 3.0, DEVICE_{dev_num}_VCRIT)"
                 ),
+                (DeviceType::Tube, 2) => format!(
+                    // Pentode dim 2 = Vg2k — softplus knee behavior identical to Vgk.
+                    // Must use log-junction limiting to prevent NR from stepping past
+                    // the E1 knee. Triodes are 2D and never reach dim==2.
+                    // Matches the non-Schur helper `emit_nr_limit_and_converge`.
+                    "pnjlim(v_trial{i}, v_d{i}, state.device_{dev_num}_vgk_onset / 3.0, DEVICE_{dev_num}_VCRIT)"
+                ),
                 (DeviceType::Tube, _) => format!("fetlim(v_trial{i}, v_d{i}, 0.0)"),
                 (DeviceType::Vca, _) => format!("v_trial{i}"), // No limiting needed
             };
