@@ -4691,10 +4691,51 @@ impl CircuitIR {
             validate_positive_finite(ibv, "diode model IBV")?;
         }
 
+        // Self-heating parameters (optional). Defaults match BjtParams so
+        // `.model D(RTH=50)` with everything else implicit gives a sensible
+        // silicon diode with 1 ms thermal memory.
+        let rth = Self::lookup_model_param(netlist, model, "RTH").unwrap_or(f64::INFINITY);
+        if rth.is_finite() && rth <= 0.0 {
+            return Err(CodegenError::InvalidConfig(format!(
+                "diode model RTH must be positive (or infinite to disable), got {rth}"
+            )));
+        }
+
+        let cth = Self::lookup_model_param(netlist, model, "CTH").unwrap_or(1e-3);
+        if cth <= 0.0 || !cth.is_finite() {
+            return Err(CodegenError::InvalidConfig(format!(
+                "diode model CTH must be positive and finite, got {cth}"
+            )));
+        }
+
+        let xti = Self::lookup_model_param(netlist, model, "XTI").unwrap_or(3.0);
+        if !xti.is_finite() {
+            return Err(CodegenError::InvalidConfig(format!(
+                "diode model XTI must be finite, got {xti}"
+            )));
+        }
+
+        let eg = Self::lookup_model_param(netlist, model, "EG").unwrap_or(1.11);
+        if eg <= 0.0 || !eg.is_finite() {
+            return Err(CodegenError::InvalidConfig(format!(
+                "diode model EG must be positive and finite, got {eg}"
+            )));
+        }
+
+        let tamb = Self::lookup_model_param(netlist, model, "TAMB").unwrap_or(300.15);
+        if tamb <= 0.0 || !tamb.is_finite() {
+            return Err(CodegenError::InvalidConfig(format!(
+                "diode model TAMB must be positive and finite, got {tamb}"
+            )));
+        }
+
         Self::warn_unrecognized_params(
             netlist,
             model,
-            &["IS", "N", "CJO", "RS", "BV", "IBV", "KF", "AF"],
+            &[
+                "IS", "N", "CJO", "RS", "BV", "IBV", "KF", "AF", "RTH", "CTH", "XTI", "EG",
+                "TAMB",
+            ],
         );
 
         Ok(DiodeParams {
@@ -4704,6 +4745,11 @@ impl CircuitIR {
             rs,
             bv,
             ibv,
+            rth,
+            cth,
+            xti,
+            eg,
+            tamb,
         })
     }
 

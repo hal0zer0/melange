@@ -134,16 +134,24 @@ fn emit_nodal_nan_reset(code: &mut String, ir: &CircuitIR, indent: &str, is_full
         ));
     }
 
-    // BJT self-heating thermal state
+    // Device self-heating thermal state (BJT and diode)
     for (dev_num, slot) in ir.device_slots.iter().enumerate() {
-        if let DeviceParams::Bjt(bp) = &slot.params {
-            if bp.has_self_heating() {
+        match &slot.params {
+            DeviceParams::Bjt(bp) if bp.has_self_heating() => {
                 code.push_str(&format!(
                     "{body}state.device_{dev_num}_tj = DEVICE_{dev_num}_TAMB;\n\
                      {body}state.device_{dev_num}_is = DEVICE_{dev_num}_IS;\n\
                      {body}state.device_{dev_num}_vt = DEVICE_{dev_num}_VT;\n"
                 ));
             }
+            DeviceParams::Diode(dp) if dp.has_self_heating() => {
+                code.push_str(&format!(
+                    "{body}state.device_{dev_num}_tj = DEVICE_{dev_num}_TAMB;\n\
+                     {body}state.device_{dev_num}_is = DEVICE_{dev_num}_IS;\n\
+                     {body}state.device_{dev_num}_n_vt = DEVICE_{dev_num}_N_VT;\n"
+                ));
+            }
+            _ => {}
         }
     }
 
@@ -3860,10 +3868,10 @@ impl RustEmitter {
         }
         code.push('\n');
 
-        // BJT self-heating thermal update
+        // Device self-heating thermal update (BJT and diode)
         for (dev_num, slot) in ir.device_slots.iter().enumerate() {
-            if let crate::codegen::ir::DeviceParams::Bjt(bp) = &slot.params {
-                if bp.has_self_heating() {
+            match &slot.params {
+                crate::codegen::ir::DeviceParams::Bjt(bp) if bp.has_self_heating() => {
                     let s = slot.start_idx;
                     let s1 = s + 1;
                     code.push_str(&format!(
@@ -3889,6 +3897,28 @@ impl RustEmitter {
                          \x20   }}\n"
                     ));
                 }
+                crate::codegen::ir::DeviceParams::Diode(dp) if dp.has_self_heating() => {
+                    let s = slot.start_idx;
+                    code.push_str(&format!(
+                        "    {{ // Diode {dev_num} self-heating thermal update\n\
+                         \x20       let id = i_nl[{s}];\n\
+                         \x20       let mut vd_sum = 0.0f64;\n\
+                         \x20       for j in 0..N {{ vd_sum += N_V[{s}][j] * v[j]; }}\n\
+                         \x20       let p = vd_sum * id;\n\
+                         \x20       let dt = 1.0 / SAMPLE_RATE;\n\
+                         \x20       let d_tj = (p - (state.device_{dev_num}_tj - DEVICE_{dev_num}_TAMB) / DEVICE_{dev_num}_RTH) / DEVICE_{dev_num}_CTH * dt;\n\
+                         \x20       state.device_{dev_num}_tj += d_tj;\n\
+                         \x20       state.device_{dev_num}_tj = state.device_{dev_num}_tj.clamp(200.0, 500.0);\n\
+                         \x20       let t_ratio = state.device_{dev_num}_tj / DEVICE_{dev_num}_TAMB;\n\
+                         \x20       state.device_{dev_num}_n_vt = DEVICE_{dev_num}_N_VT_NOM * t_ratio;\n\
+                         \x20       let vt_nom = BOLTZMANN_Q * DEVICE_{dev_num}_TAMB;\n\
+                         \x20       state.device_{dev_num}_is = DEVICE_{dev_num}_IS_NOM\n\
+                         \x20           * t_ratio.powf(DEVICE_{dev_num}_XTI)\n\
+                         \x20           * fast_exp((DEVICE_{dev_num}_EG / vt_nom) * (1.0 - DEVICE_{dev_num}_TAMB / state.device_{dev_num}_tj));\n\
+                         \x20   }}\n"
+                    ));
+                }
+                _ => {}
             }
         }
 
@@ -5915,10 +5945,11 @@ impl RustEmitter {
         }
         code.push('\n');
 
-        // Step 3b: BJT self-heating thermal update (quasi-static, outside NR)
+        // Step 3b: Device self-heating thermal update (BJT and diode,
+        // quasi-static, outside NR).
         for (dev_num, slot) in ir.device_slots.iter().enumerate() {
-            if let DeviceParams::Bjt(bp) = &slot.params {
-                if bp.has_self_heating() {
+            match &slot.params {
+                DeviceParams::Bjt(bp) if bp.has_self_heating() => {
                     let s = slot.start_idx;
                     let s1 = s + 1;
                     code.push_str(&format!(
@@ -5945,6 +5976,28 @@ impl RustEmitter {
                              \x20   }}\n"
                         ));
                 }
+                DeviceParams::Diode(dp) if dp.has_self_heating() => {
+                    let s = slot.start_idx;
+                    code.push_str(&format!(
+                            "    {{ // Diode {dev_num} self-heating thermal update\n\
+                             \x20       let id = i_nl[{s}];\n\
+                             \x20       let mut vd_sum = 0.0f64;\n\
+                             \x20       for j in 0..N {{ vd_sum += N_V[{s}][j] * v[j]; }}\n\
+                             \x20       let p = vd_sum * id;\n\
+                             \x20       let dt = 1.0 / SAMPLE_RATE;\n\
+                             \x20       let d_tj = (p - (state.device_{dev_num}_tj - DEVICE_{dev_num}_TAMB) / DEVICE_{dev_num}_RTH) / DEVICE_{dev_num}_CTH * dt;\n\
+                             \x20       state.device_{dev_num}_tj += d_tj;\n\
+                             \x20       state.device_{dev_num}_tj = state.device_{dev_num}_tj.clamp(200.0, 500.0);\n\
+                             \x20       let t_ratio = state.device_{dev_num}_tj / DEVICE_{dev_num}_TAMB;\n\
+                             \x20       state.device_{dev_num}_n_vt = DEVICE_{dev_num}_N_VT_NOM * t_ratio;\n\
+                             \x20       let vt_nom = BOLTZMANN_Q * DEVICE_{dev_num}_TAMB;\n\
+                             \x20       state.device_{dev_num}_is = DEVICE_{dev_num}_IS_NOM\n\
+                             \x20           * t_ratio.powf(DEVICE_{dev_num}_XTI)\n\
+                             \x20           * fast_exp((DEVICE_{dev_num}_EG / vt_nom) * (1.0 - DEVICE_{dev_num}_TAMB / state.device_{dev_num}_tj));\n\
+                             \x20   }}\n"
+                        ));
+                }
+                _ => {}
             }
         }
 

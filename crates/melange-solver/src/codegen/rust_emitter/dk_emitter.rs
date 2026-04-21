@@ -581,12 +581,15 @@ impl RustEmitter {
         let mut has_mosfet = false;
         let mut has_tube = false;
         let mut has_vca = false;
-        let mut has_bjt_self_heating = false;
+        let mut has_self_heating = false;
 
         for (dev_num, slot) in ir.device_slots.iter().enumerate() {
             match &slot.params {
                 DeviceParams::Diode(dp) => {
                     has_diode = true;
+                    if dp.has_self_heating() {
+                        has_self_heating = true;
+                    }
                     emit_device_const(&mut code, dev_num, "IS", dp.is);
                     emit_device_const(&mut code, dev_num, "N_VT", dp.n_vt);
                     // Precomputed critical voltage for SPICE pnjlim
@@ -599,12 +602,21 @@ impl RustEmitter {
                         emit_device_const(&mut code, dev_num, "BV", dp.bv);
                         emit_device_const(&mut code, dev_num, "IBV", dp.ibv);
                     }
+                    if dp.has_self_heating() {
+                        emit_device_const(&mut code, dev_num, "RTH", dp.rth);
+                        emit_device_const(&mut code, dev_num, "CTH", dp.cth);
+                        emit_device_const(&mut code, dev_num, "XTI", dp.xti);
+                        emit_device_const(&mut code, dev_num, "EG", dp.eg);
+                        emit_device_const(&mut code, dev_num, "TAMB", dp.tamb);
+                        emit_device_const(&mut code, dev_num, "IS_NOM", dp.is);
+                        emit_device_const(&mut code, dev_num, "N_VT_NOM", dp.n_vt);
+                    }
                     code.push('\n');
                 }
                 DeviceParams::Bjt(bp) => {
                     has_bjt = true;
                     if bp.has_self_heating() {
-                        has_bjt_self_heating = true;
+                        has_self_heating = true;
                     }
                     emit_device_const(&mut code, dev_num, "IS", bp.is);
                     emit_device_const(&mut code, dev_num, "VT", bp.vt);
@@ -745,7 +757,7 @@ impl RustEmitter {
         }
 
         // Boltzmann constant / elementary charge (k/q in eV/K)
-        if has_bjt_self_heating {
+        if has_self_heating {
             code.push_str("/// Boltzmann constant / elementary charge [eV/K]\n");
             code.push_str("const BOLTZMANN_Q: f64 = 8.617333262e-5;\n\n");
         }
@@ -2045,11 +2057,14 @@ impl RustEmitter {
             ctx.insert("body_effect_update", &body_effect_update);
         }
 
-        // BJT self-heating thermal update (after NR, before state save)
+        // Device self-heating thermal update (after NR, before state save).
+        // Runs for each BJT/diode whose `.model` sets a finite RTH. Uses the
+        // converged `i_nl` and node voltages from this sample to compute P
+        // and advances Tj by one quasi-static forward Euler step.
         let mut thermal_update = String::new();
         for (dev_num, slot) in ir.device_slots.iter().enumerate() {
-            if let DeviceParams::Bjt(bp) = &slot.params {
-                if bp.has_self_heating() {
+            match &slot.params {
+                DeviceParams::Bjt(bp) if bp.has_self_heating() => {
                     let s = slot.start_idx;
                     let s1 = s + 1;
                     // Extract Ic, Ib from converged i_nl; compute Vbe, Vbc from final v
@@ -2075,6 +2090,28 @@ impl RustEmitter {
                              \x20   }}\n"
                         ));
                 }
+                DeviceParams::Diode(dp) if dp.has_self_heating() => {
+                    let s = slot.start_idx;
+                    thermal_update.push_str(&format!(
+                            "    {{ // Diode {dev_num} self-heating thermal update\n\
+                             \x20       let id = i_nl[{s}];\n\
+                             \x20       let v_nl_th = extract_controlling_voltages(&v);\n\
+                             \x20       let vd = v_nl_th[{s}];\n\
+                             \x20       let p = vd * id;\n\
+                             \x20       let dt = 1.0 / SAMPLE_RATE;\n\
+                             \x20       let d_tj = (p - (state.device_{dev_num}_tj - DEVICE_{dev_num}_TAMB) / DEVICE_{dev_num}_RTH) / DEVICE_{dev_num}_CTH * dt;\n\
+                             \x20       state.device_{dev_num}_tj += d_tj;\n\
+                             \x20       state.device_{dev_num}_tj = state.device_{dev_num}_tj.clamp(200.0, 500.0);\n\
+                             \x20       let t_ratio = state.device_{dev_num}_tj / DEVICE_{dev_num}_TAMB;\n\
+                             \x20       state.device_{dev_num}_n_vt = DEVICE_{dev_num}_N_VT_NOM * t_ratio;\n\
+                             \x20       let vt_nom = BOLTZMANN_Q * DEVICE_{dev_num}_TAMB;\n\
+                             \x20       state.device_{dev_num}_is = DEVICE_{dev_num}_IS_NOM\n\
+                             \x20           * t_ratio.powf(DEVICE_{dev_num}_XTI)\n\
+                             \x20           * fast_exp((DEVICE_{dev_num}_EG / vt_nom) * (1.0 - DEVICE_{dev_num}_TAMB / state.device_{dev_num}_tj));\n\
+                             \x20   }}\n"
+                        ));
+                }
+                _ => {}
             }
         }
         if !thermal_update.is_empty() {

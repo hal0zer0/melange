@@ -153,30 +153,44 @@ pub(super) struct DeviceParamEntry {
     pub(super) const_suffix: String,
 }
 
-/// Data for a BJT with self-heating enabled (passed to Tera templates).
+/// Data for a device with self-heating enabled (passed to Tera templates).
+///
+/// Covers both BJTs and diodes. `vt_field_name` / `vt_const_name` let the
+/// templates emit the correct identifier when resetting thermal state on a
+/// NaN recovery (BJT carries `state.device_N_vt` backed by `DEVICE_N_VT`;
+/// diode carries `state.device_N_n_vt` backed by `DEVICE_N_N_VT`).
 #[derive(Serialize)]
 pub(super) struct SelfHeatingDeviceData {
     /// Device index (0-based)
     pub(super) dev_num: usize,
-    /// Start index in M-dimensional NR space (Vbe/Ic slot)
+    /// Start index in M-dimensional NR space (Vd for diodes, Vbe/Ic for BJTs)
     pub(super) start_idx: usize,
+    /// Lowercase state-field suffix for the ideality-scaled thermal voltage
+    /// (`"vt"` for BJT, `"n_vt"` for diode).
+    pub(super) vt_field_name: String,
+    /// Uppercase const-suffix for the same, e.g. `"VT"` or `"N_VT"`.
+    pub(super) vt_const_name: String,
 }
 
-/// Collect BJT devices that have self-heating enabled.
+/// Collect all devices that have self-heating enabled (BJTs and diodes).
 pub(super) fn self_heating_device_data(ir: &CircuitIR) -> Vec<SelfHeatingDeviceData> {
     ir.device_slots
         .iter()
         .enumerate()
-        .filter_map(|(dev_num, slot)| {
-            if let DeviceParams::Bjt(bp) = &slot.params {
-                if bp.has_self_heating() {
-                    return Some(SelfHeatingDeviceData {
-                        dev_num,
-                        start_idx: slot.start_idx,
-                    });
-                }
-            }
-            None
+        .filter_map(|(dev_num, slot)| match &slot.params {
+            DeviceParams::Bjt(bp) if bp.has_self_heating() => Some(SelfHeatingDeviceData {
+                dev_num,
+                start_idx: slot.start_idx,
+                vt_field_name: "vt".to_string(),
+                vt_const_name: "VT".to_string(),
+            }),
+            DeviceParams::Diode(dp) if dp.has_self_heating() => Some(SelfHeatingDeviceData {
+                dev_num,
+                start_idx: slot.start_idx,
+                vt_field_name: "n_vt".to_string(),
+                vt_const_name: "N_VT".to_string(),
+            }),
+            _ => None,
         })
         .collect()
 }

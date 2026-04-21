@@ -40,6 +40,31 @@ pub struct DiodeParams {
     /// Reverse breakdown current [A] (default 1e-10)
     #[serde(default = "default_ibv")]
     pub ibv: f64,
+    /// Thermal resistance [K/W] (inf = disabled, default).
+    ///
+    /// When finite, enables the quasi-static self-heating model shared with
+    /// BJTs: `dTj/dt = (P_diss − (Tj − Tamb)/Rth) / Cth`, with
+    /// `P_diss = Vd · Id`. Temperature feeds back to the junction through
+    /// `IS(T) = IS_nom · (Tj/Tnom)^XTI · exp(EG/VT_nom · (1 − Tnom/Tj))` and
+    /// `N·VT(T) = (N·VT)_nom · (Tj/Tnom)`. Default `f64::INFINITY` makes the
+    /// whole thermal block codegen dead-code.
+    #[serde(
+        default = "default_infinity",
+        deserialize_with = "deserialize_f64_or_infinity"
+    )]
+    pub rth: f64,
+    /// Thermal capacitance [J/K] (default 1e-3, typical small-signal diode).
+    #[serde(default = "default_cth")]
+    pub cth: f64,
+    /// IS temperature exponent (default 3.0).
+    #[serde(default = "default_xti")]
+    pub xti: f64,
+    /// Bandgap energy [eV] (default 1.11, silicon).
+    #[serde(default = "default_eg")]
+    pub eg: f64,
+    /// Ambient temperature [K] (default 300.15 = 27 °C).
+    #[serde(default = "default_tamb")]
+    pub tamb: f64,
 }
 
 impl DiodeParams {
@@ -50,6 +75,10 @@ impl DiodeParams {
     /// Returns true if reverse breakdown is enabled.
     pub fn has_bv(&self) -> bool {
         self.bv.is_finite()
+    }
+    /// Returns true if self-heating is enabled (RTH is finite).
+    pub fn has_self_heating(&self) -> bool {
+        self.rth.is_finite()
     }
 }
 

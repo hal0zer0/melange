@@ -169,9 +169,9 @@ pub struct CircuitState {
 {% endfor %}{% endfor %}
 {% endif %}
 {% if num_thermal_devices > 0 %}
-    // --- BJT self-heating thermal state ---
+    // --- Device self-heating thermal state (BJT and diode) ---
 {% for td in thermal_devices %}
-    /// BJT {{ td.dev_num }} junction temperature [K]
+    /// Device {{ td.dev_num }} junction temperature [K]
     pub device_{{ td.dev_num }}_tj: f64,
 {% endfor %}
 {% endif %}
