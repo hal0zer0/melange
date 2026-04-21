@@ -2748,54 +2748,69 @@ impl RustEmitter {
         let mut code = section_banner("MATRIX INVERSION (for rebuild_matrices)");
 
         code.push_str(
-            "/// Invert an N×N matrix using Gauss-Jordan elimination with partial pivoting.\n",
+            "/// Invert an N×N matrix via LU factorization with partial pivoting.\n",
         );
-        code.push_str("/// Returns None if the matrix is singular.\n");
+        code.push_str("/// Returns None if the matrix is singular (pivot < 1e-30).\n");
+        code.push_str("///\n");
+        code.push_str("/// Called three times per `rebuild_matrices` on the nodal path\n");
+        code.push_str("/// (S = A^-1, S_be = A_be^-1, S_sub = A_sub^-1), so factor-then-\n");
+        code.push_str("/// solve uses ~half the work of the prior Gauss-Jordan on an\n");
+        code.push_str("/// augmented [A | I] matrix and halves the stack footprint.\n");
         code.push_str("#[inline(never)]\n");
         code.push_str("fn invert_n(a: &[[f64; N]; N]) -> Option<[[f64; N]; N]> {\n");
-        code.push_str("    let mut aug = [[0.0f64; 2 * N]; N];\n");
-        code.push_str("    for i in 0..N {\n");
-        code.push_str("        for j in 0..N {\n");
-        code.push_str("            aug[i][j] = a[i][j];\n");
-        code.push_str("        }\n");
-        code.push_str("        aug[i][N + i] = 1.0;\n");
-        code.push_str("    }\n\n");
 
-        // Forward elimination with partial pivoting
-        code.push_str("    for col in 0..N {\n");
-        code.push_str("        let mut max_row = col;\n");
-        code.push_str("        let mut max_val = aug[col][col].abs();\n");
-        code.push_str("        for row in (col + 1)..N {\n");
-        code.push_str("            let v = aug[row][col].abs();\n");
-        code.push_str("            if v > max_val { max_val = v; max_row = row; }\n");
+        // LU factorization in place with partial pivoting.
+        code.push_str("    let mut lu = *a;\n");
+        code.push_str("    let mut perm = [0usize; N];\n");
+        code.push_str("    for i in 0..N { perm[i] = i; }\n\n");
+
+        code.push_str("    for k in 0..N {\n");
+        code.push_str("        let mut max_row = k;\n");
+        code.push_str("        let mut max_val = lu[k][k].abs();\n");
+        code.push_str("        for i in (k + 1)..N {\n");
+        code.push_str("            let v = lu[i][k].abs();\n");
+        code.push_str("            if v > max_val { max_val = v; max_row = i; }\n");
         code.push_str("        }\n");
         code.push_str("        if max_val < 1e-30 { return None; }\n");
-        code.push_str("        if max_row != col { aug.swap(col, max_row); }\n");
-        code.push_str("        let pivot = aug[col][col];\n");
-        code.push_str("        for row in (col + 1)..N {\n");
-        code.push_str("            let factor = aug[row][col] / pivot;\n");
-        code.push_str(
-            "            for j in col..(2 * N) { aug[row][j] -= factor * aug[col][j]; }\n",
-        );
+        code.push_str("        if max_row != k { lu.swap(k, max_row); perm.swap(k, max_row); }\n");
+        code.push_str("        let pivot = lu[k][k];\n");
+        code.push_str("        for i in (k + 1)..N {\n");
+        code.push_str("            let m = lu[i][k] / pivot;\n");
+        code.push_str("            lu[i][k] = m;\n");
+        code.push_str("            for j in (k + 1)..N {\n");
+        code.push_str("                lu[i][j] -= m * lu[k][j];\n");
+        code.push_str("            }\n");
         code.push_str("        }\n");
         code.push_str("    }\n\n");
 
-        // Back substitution
-        code.push_str("    for col in (0..N).rev() {\n");
-        code.push_str("        let pivot = aug[col][col];\n");
-        code.push_str("        if pivot.abs() < 1e-30 { return None; }\n");
-        code.push_str("        for j in 0..(2 * N) { aug[col][j] /= pivot; }\n");
-        code.push_str("        for row in 0..col {\n");
-        code.push_str("            let factor = aug[row][col];\n");
-        code.push_str("            for j in 0..(2 * N) { aug[row][j] -= factor * aug[col][j]; }\n");
-        code.push_str("        }\n");
-        code.push_str("    }\n\n");
-
-        // Extract result
+        // Identity-column back-solves.
         code.push_str("    let mut result = [[0.0f64; N]; N];\n");
-        code.push_str("    for i in 0..N {\n");
-        code.push_str("        for j in 0..N { result[i][j] = aug[i][N + j]; }\n");
-        code.push_str("    }\n");
+        code.push_str("    for col in 0..N {\n");
+        code.push_str("        let mut b = [0.0f64; N];\n");
+        code.push_str("        let mut start = N;\n");
+        code.push_str("        for i in 0..N {\n");
+        code.push_str("            if perm[i] == col { b[i] = 1.0; start = i; break; }\n");
+        code.push_str("        }\n");
+
+        // Forward substitution (L unit lower triangular, skip leading zeros).
+        code.push_str("        for i in (start + 1)..N {\n");
+        code.push_str("            let mut sum = b[i];\n");
+        code.push_str("            for j in start..i { sum -= lu[i][j] * b[j]; }\n");
+        code.push_str("            b[i] = sum;\n");
+        code.push_str("        }\n");
+
+        // Backward substitution (U on and above diagonal).
+        code.push_str("        for i in (0..N).rev() {\n");
+        code.push_str("            let mut sum = b[i];\n");
+        code.push_str("            for j in (i + 1)..N { sum -= lu[i][j] * b[j]; }\n");
+        code.push_str("            let pivot = lu[i][i];\n");
+        code.push_str("            if pivot.abs() < 1e-30 { return None; }\n");
+        code.push_str("            b[i] = sum / pivot;\n");
+        code.push_str("        }\n");
+
+        code.push_str("        for i in 0..N { result[i][col] = b[i]; }\n");
+        code.push_str("    }\n\n");
+
         code.push_str("    Some(result)\n");
         code.push_str("}\n\n");
 
