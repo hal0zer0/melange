@@ -107,6 +107,49 @@ pub struct Netlist {
     /// Mismatch RNG master seed (.seed 12345). When `None`, mismatch draws
     /// use seed 0. Unused when `mismatch_specs` is empty.
     pub seed: Option<u64>,
+    /// Fixed-resistor value tolerance (`.tolerance R=0.01`). Applied once
+    /// at the end of parse: every `R` element that isn't claimed by a
+    /// `.pot` / `.wiper` / `.switch` / `.runtime R` directive gets its
+    /// value multiplied by `(1 + tol · u)` with `u ∈ [-1, 1]` drawn from
+    /// the same deterministic RNG stream as `.mismatch`, separated by
+    /// class tag so R/C/L draws don't alias. Default `0.0` = disabled.
+    pub tolerance_r: f64,
+    /// Fixed-capacitor value tolerance (`.tolerance C=0.01`). Same mechanics
+    /// as `tolerance_r`, applied to `Element::Capacitor` entries that
+    /// aren't controlled by a `.switch`.
+    pub tolerance_c: f64,
+    /// Fixed-inductor value tolerance (`.tolerance L=0.01`). Same mechanics
+    /// as `tolerance_r`, applied to `Element::Inductor` entries that
+    /// aren't controlled by a `.switch`. Also jitters each coupled-inductor
+    /// winding independently — which happens to match real transformer
+    /// turn-count variation.
+    pub tolerance_l: f64,
+}
+
+/// Deterministic uniform `[-1, 1]` draw from `(seed, class_tag, name)`.
+///
+/// FNV-64 feeds a SplitMix64 finalizer, giving well-decorrelated output
+/// even for adjacent seeds / short strings. The high 53 bits of the
+/// finalizer become a uniform double in `[0, 1)`, then mapped to
+/// `[-1, 1]`. A null-byte separator between `class_tag` and `name`
+/// prevents `"R" + "C1"` from colliding with `"RC" + "1"`.
+pub(crate) fn deterministic_draw(seed: u64, class_tag: &str, name: &str) -> f64 {
+    const FNV_PRIME: u64 = 0x100000001b3;
+    let mut h = seed ^ 0xcbf29ce484222325u64;
+    for b in class_tag.as_bytes() {
+        h = (h ^ (b.to_ascii_uppercase() as u64)).wrapping_mul(FNV_PRIME);
+    }
+    // Null-byte separator.
+    h = (h ^ 0x00).wrapping_mul(FNV_PRIME);
+    for b in name.as_bytes() {
+        h = (h ^ (b.to_ascii_uppercase() as u64)).wrapping_mul(FNV_PRIME);
+    }
+    // SplitMix64 finalizer.
+    h = (h ^ (h >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+    h = (h ^ (h >> 27)).wrapping_mul(0x94d049bb133111eb);
+    h ^= h >> 31;
+    let u01 = (h >> 11) as f64 / (1u64 << 53) as f64;
+    2.0 * u01 - 1.0
 }
 
 /// A `.mismatch` directive — per-device-type parameter jitter spec.
@@ -280,6 +323,79 @@ impl Netlist {
             runtime_resistors: Vec::new(),
             mismatch_specs: Vec::new(),
             seed: None,
+            tolerance_r: 0.0,
+            tolerance_c: 0.0,
+            tolerance_l: 0.0,
+        }
+    }
+
+    /// Apply `.tolerance` jitter to every fixed R/C/L whose value isn't
+    /// externally controlled. Called automatically at the end of
+    /// [`Netlist::parse`]; only acts when at least one tolerance is
+    /// nonzero. Idempotent-safe to call multiple times only if callers
+    /// first reset `tolerance_r/c/l` to zero — otherwise the jitter
+    /// compounds.
+    ///
+    /// Skipped components:
+    /// - any resistor named by a `.pot` (wiper halves appear as `.pot`
+    ///   entries after `expand_wipers`)
+    /// - any resistor named by a `.runtime R`
+    /// - any component (R, C, or L) named by a `.switch`
+    ///
+    /// The RNG is the same FNV → SplitMix64 chain used by `.mismatch`,
+    /// seeded from `(self.seed, "R"|"C"|"L", component_name)`, so
+    /// different seeds produce different unit personalities and the R/C/L
+    /// streams can't alias each other.
+    pub fn apply_passive_tolerance(&mut self) {
+        if self.tolerance_r == 0.0 && self.tolerance_c == 0.0 && self.tolerance_l == 0.0 {
+            return;
+        }
+        let seed = self.seed.unwrap_or(0);
+
+        // Build the skip set once. Names are compared case-insensitively
+        // because SPICE identifiers are case-insensitive.
+        let mut skip: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for p in &self.pots {
+            skip.insert(p.resistor_name.to_ascii_lowercase());
+        }
+        for r in &self.runtime_resistors {
+            skip.insert(r.resistor_name.to_ascii_lowercase());
+        }
+        for sw in &self.switches {
+            for n in &sw.component_names {
+                skip.insert(n.to_ascii_lowercase());
+            }
+        }
+
+        let tol_r = self.tolerance_r;
+        let tol_c = self.tolerance_c;
+        let tol_l = self.tolerance_l;
+
+        for elem in self.elements.iter_mut() {
+            match elem {
+                Element::Resistor { name, value, .. } if tol_r > 0.0 => {
+                    if skip.contains(&name.to_ascii_lowercase()) {
+                        continue;
+                    }
+                    let u = deterministic_draw(seed, "R", name);
+                    *value *= 1.0 + tol_r * u;
+                }
+                Element::Capacitor { name, value, .. } if tol_c > 0.0 => {
+                    if skip.contains(&name.to_ascii_lowercase()) {
+                        continue;
+                    }
+                    let u = deterministic_draw(seed, "C", name);
+                    *value *= 1.0 + tol_c * u;
+                }
+                Element::Inductor { name, value, .. } if tol_l > 0.0 => {
+                    if skip.contains(&name.to_ascii_lowercase()) {
+                        continue;
+                    }
+                    let u = deterministic_draw(seed, "L", name);
+                    *value *= 1.0 + tol_l * u;
+                }
+                _ => {}
+            }
         }
     }
 
@@ -1196,6 +1312,10 @@ impl Parser {
 
         Self::expand_wipers(&mut netlist)?;
         Self::validate_netlist(&netlist)?;
+        // `.tolerance` jitter runs *after* validation so a bad netlist
+        // fails with a clear schema error before we silently mutate
+        // values the user wrote. No-op when all tolerances are zero.
+        netlist.apply_passive_tolerance();
         Ok(netlist)
     }
 
@@ -2017,6 +2137,9 @@ impl Parser {
                 })?;
                 netlist.seed = Some(v);
             }
+            ".tolerance" => {
+                self.parse_tolerance_directive(&parts, netlist)?;
+            }
             ".end" | ".ends" => {
                 // End of netlist or subcircuit
             }
@@ -2025,6 +2148,44 @@ impl Parser {
             }
         }
 
+        Ok(())
+    }
+
+    fn parse_tolerance_directive(
+        &self,
+        parts: &[&str],
+        netlist: &mut Netlist,
+    ) -> Result<(), ParseError> {
+        if parts.len() < 2 {
+            return Err(self.error(
+                ".tolerance requires at least one CLASS=TOL pair (R, C, or L)",
+            ));
+        }
+        for tok in &parts[1..] {
+            let (k, v) = tok.split_once('=').ok_or_else(|| {
+                self.error(format!(
+                    ".tolerance entry '{tok}' must be CLASS=TOL (R, C, or L)"
+                ))
+            })?;
+            let tol: f64 = v
+                .parse()
+                .map_err(|_| self.error(format!(".tolerance value '{v}' is not a valid number")))?;
+            if !tol.is_finite() || tol < 0.0 || tol >= 1.0 {
+                return Err(self.error(format!(
+                    ".tolerance must be in [0.0, 1.0), got {tol}"
+                )));
+            }
+            match k.to_ascii_uppercase().as_str() {
+                "R" => netlist.tolerance_r = tol,
+                "C" => netlist.tolerance_c = tol,
+                "L" => netlist.tolerance_l = tol,
+                other => {
+                    return Err(self.error(format!(
+                        ".tolerance class '{other}' must be R, C, or L"
+                    )));
+                }
+            }
+        }
         Ok(())
     }
 
@@ -4972,5 +5133,120 @@ U1 0 inv out opamp
         let n = Netlist::parse(spice).expect("parse");
         assert!(n.mismatch_specs.is_empty());
         assert_eq!(n.seed, None);
+    }
+
+    #[test]
+    fn test_tolerance_directive_parses() {
+        let spice =
+            "Tol\n.seed 7\n.tolerance R=0.01 C=0.02 L=0.005\nR1 a b 1k\nC1 b 0 1u\nL1 a 0 1m\n.end\n";
+        let n = Netlist::parse(spice).expect("parse");
+        // Values have already been jittered at parse end — read the
+        // directive fields directly instead.
+        assert!((n.tolerance_r - 0.01).abs() < 1e-12);
+        assert!((n.tolerance_c - 0.02).abs() < 1e-12);
+        assert!((n.tolerance_l - 0.005).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_tolerance_rejects_bad_class() {
+        let spice = "Bad\n.tolerance Z=0.01\nR1 a b 1k\n.end\n";
+        let err = Netlist::parse(spice).unwrap_err();
+        assert!(
+            err.message.contains("must be R, C, or L"),
+            "expected class error, got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn test_tolerance_rejects_out_of_range() {
+        let spice = "Bad\n.tolerance R=1.5\nR1 a b 1k\n.end\n";
+        let err = Netlist::parse(spice).unwrap_err();
+        assert!(
+            err.message.contains("must be in [0.0, 1.0)"),
+            "expected range error, got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn test_tolerance_jitters_fixed_resistors() {
+        // Two fixed resistors, ±1% tolerance. They should land at
+        // different values, both within tolerance of nominal.
+        let spice = "Jitter\n\
+                     .seed 42\n\
+                     .tolerance R=0.01\n\
+                     R1 a b 1k\n\
+                     R2 b 0 1k\n\
+                     .end\n";
+        let n = Netlist::parse(spice).expect("parse");
+        let (v1, v2) = {
+            let mut iter = n.elements.iter().filter_map(|e| match e {
+                Element::Resistor { name, value, .. } => Some((name.clone(), *value)),
+                _ => None,
+            });
+            let a = iter.next().unwrap();
+            let b = iter.next().unwrap();
+            (a.1, b.1)
+        };
+        assert_ne!(v1, v2, "R1 and R2 should get different jittered values");
+        assert!((v1 - 1000.0).abs() / 1000.0 <= 0.01, "R1 outside 1% band: {v1}");
+        assert!((v2 - 1000.0).abs() / 1000.0 <= 0.01, "R2 outside 1% band: {v2}");
+    }
+
+    #[test]
+    fn test_tolerance_skips_pot_controlled_resistors() {
+        // R_pot is a `.pot` target — its value must be left nominal so
+        // the UI slider still maps cleanly to [min, max]. R_fixed gets
+        // jittered.
+        let spice = "Skip Pot\n\
+                     .seed 99\n\
+                     .tolerance R=0.05\n\
+                     R_pot a b 50k\n\
+                     R_fixed b 0 10k\n\
+                     .pot R_pot 1 100k\n\
+                     .end\n";
+        let n = Netlist::parse(spice).expect("parse");
+        let mut values: std::collections::HashMap<String, f64> =
+            std::collections::HashMap::new();
+        for e in &n.elements {
+            if let Element::Resistor { name, value, .. } = e {
+                values.insert(name.clone(), *value);
+            }
+        }
+        assert_eq!(values["R_pot"], 50_000.0, "pot target must remain nominal");
+        assert_ne!(values["R_fixed"], 10_000.0, "fixed R should be jittered");
+    }
+
+    #[test]
+    fn test_tolerance_determinism() {
+        // Same seed must produce identical jittered values every run.
+        let spice = "Det\n\
+                     .seed 12345\n\
+                     .tolerance R=0.02\n\
+                     R1 a b 1k\n\
+                     R2 b 0 1k\n\
+                     .end\n";
+        let a = Netlist::parse(spice).expect("parse a");
+        let b = Netlist::parse(spice).expect("parse b");
+        for (ea, eb) in a.elements.iter().zip(b.elements.iter()) {
+            if let (Element::Resistor { value: va, .. }, Element::Resistor { value: vb, .. }) =
+                (ea, eb)
+            {
+                assert_eq!(va, vb, "determinism: same seed must produce same jitter");
+            }
+        }
+    }
+
+    #[test]
+    fn test_tolerance_absent_is_no_op() {
+        // Without `.tolerance`, R values are exactly the netlist nominals.
+        let spice = "Noop\nR1 a b 1k\n.end\n";
+        let n = Netlist::parse(spice).expect("parse");
+        for e in &n.elements {
+            if let Element::Resistor { name: _, value, .. } = e {
+                assert_eq!(*value, 1000.0);
+            }
+        }
     }
 }
