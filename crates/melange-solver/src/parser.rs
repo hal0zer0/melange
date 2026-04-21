@@ -97,6 +97,33 @@ pub struct Netlist {
     /// codegen by the API shape (no nih-plug knob, `state.<field>()` accessor).
     /// Setter bodies are identical to `.pot` since the 2026-04-20 reseed strip.
     pub runtime_resistors: Vec<RuntimeResistorDirective>,
+    /// Per-device parameter mismatch directives (.mismatch D IS=0.02 ...).
+    /// Applied at codegen time: each device of the listed type gets its
+    /// nominal model parameter jittered by `nominal · (1 + tol · u)` with
+    /// `u ∈ [-1, 1]` drawn deterministically from a seed hashed from
+    /// `(netlist.seed, device_name, param_name)`. Default is no mismatch —
+    /// the jitter only fires when the directive is present.
+    pub mismatch_specs: Vec<MismatchSpec>,
+    /// Mismatch RNG master seed (.seed 12345). When `None`, mismatch draws
+    /// use seed 0. Unused when `mismatch_specs` is empty.
+    pub seed: Option<u64>,
+}
+
+/// A `.mismatch` directive — per-device-type parameter jitter spec.
+///
+/// Syntax: `.mismatch <type> <param>=<tol> [<param>=<tol> ...]` where
+/// `type` is a single-character device class (`D` = diode, `Q` = BJT,
+/// `J` = JFET, `M` = MOSFET, `T` = triode/pentode) and each `tol` is a
+/// dimensionless fraction (0.02 → ±2% worst case, drawn uniform).
+///
+/// Multiple `.mismatch` directives for the same type are merged: the
+/// last tolerance wins per param name.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MismatchSpec {
+    /// Single-character device class, uppercased at parse time.
+    pub device_class: char,
+    /// `(param_name_uppercase, tolerance)` pairs, e.g. `("IS", 0.02)`.
+    pub params: Vec<(String, f64)>,
 }
 
 /// A runtime voltage source directive (.runtime Vname as field_name).
@@ -251,6 +278,8 @@ impl Netlist {
             linearize_devices: Vec::new(),
             runtime_sources: Vec::new(),
             runtime_resistors: Vec::new(),
+            mismatch_specs: Vec::new(),
+            seed: None,
         }
     }
 
@@ -1975,6 +2004,19 @@ impl Parser {
             ".input_impedance" => {
                 self.parse_input_impedance_directive(&parts, netlist)?;
             }
+            ".mismatch" => {
+                let spec = self.parse_mismatch_directive(&parts)?;
+                netlist.mismatch_specs.push(spec);
+            }
+            ".seed" => {
+                if parts.len() < 2 {
+                    return Err(self.error(".seed requires a u64 value"));
+                }
+                let v: u64 = parts[1].parse().map_err(|_| {
+                    self.error(format!(".seed value '{}' is not a valid u64", parts[1]))
+                })?;
+                netlist.seed = Some(v);
+            }
             ".end" | ".ends" => {
                 // End of netlist or subcircuit
             }
@@ -1984,6 +2026,44 @@ impl Parser {
         }
 
         Ok(())
+    }
+
+    fn parse_mismatch_directive(&self, parts: &[&str]) -> Result<MismatchSpec, ParseError> {
+        if parts.len() < 3 {
+            return Err(self.error(
+                ".mismatch requires a device class (D/Q/J/M/T) and at least one PARAM=TOL pair",
+            ));
+        }
+        let class_str = parts[1];
+        if class_str.len() != 1 {
+            return Err(self.error(format!(
+                ".mismatch device class '{class_str}' must be a single character (D, Q, J, M, or T)"
+            )));
+        }
+        let device_class = class_str.chars().next().unwrap().to_ascii_uppercase();
+        if !matches!(device_class, 'D' | 'Q' | 'J' | 'M' | 'T') {
+            return Err(self.error(format!(
+                ".mismatch device class '{device_class}' is not one of D, Q, J, M, T"
+            )));
+        }
+        let mut params = Vec::new();
+        for tok in &parts[2..] {
+            let (k, v) = tok.split_once('=').ok_or_else(|| {
+                self.error(format!(
+                    ".mismatch entry '{tok}' must be PARAM=TOL (e.g. IS=0.02)"
+                ))
+            })?;
+            let tol: f64 = v.parse().map_err(|_| {
+                self.error(format!(".mismatch tolerance '{v}' is not a valid number"))
+            })?;
+            if !tol.is_finite() || tol < 0.0 || tol >= 1.0 {
+                return Err(self.error(format!(
+                    ".mismatch tolerance must be in [0.0, 1.0), got {tol}"
+                )));
+            }
+            params.push((k.to_ascii_uppercase(), tol));
+        }
+        Ok(MismatchSpec { device_class, params })
     }
 
     fn parse_model(&self, parts: &[&str]) -> Result<Model, ParseError> {
@@ -4818,5 +4898,79 @@ U1 0 inv out opamp
         let spice = format!("Test\n.model M1 D({params})\n");
         let netlist = Netlist::parse(&spice).expect("exactly MAX_MODEL_PARAMS should parse");
         assert_eq!(netlist.models[0].params.len(), MAX_MODEL_PARAMS);
+    }
+
+    #[test]
+    fn test_mismatch_and_seed_directives_parse() {
+        let spice = "Mismatch Test\n\
+                     .seed 42\n\
+                     .mismatch D IS=0.02 N=0.01\n\
+                     .mismatch Q BF=0.05\n\
+                     R1 in out 1k\n\
+                     .end\n";
+        let n = Netlist::parse(spice).expect("parse");
+        assert_eq!(n.seed, Some(42));
+        assert_eq!(n.mismatch_specs.len(), 2);
+        assert_eq!(n.mismatch_specs[0].device_class, 'D');
+        assert_eq!(
+            n.mismatch_specs[0].params,
+            vec![("IS".to_string(), 0.02), ("N".to_string(), 0.01)]
+        );
+        assert_eq!(n.mismatch_specs[1].device_class, 'Q');
+        assert_eq!(n.mismatch_specs[1].params, vec![("BF".to_string(), 0.05)]);
+    }
+
+    #[test]
+    fn test_mismatch_rejects_bad_class() {
+        let spice = "Bad\n.mismatch X IS=0.01\nR1 a b 1k\n.end\n";
+        let err = Netlist::parse(spice).unwrap_err();
+        assert!(
+            err.message.contains("not one of D, Q, J, M, T"),
+            "expected class error, got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn test_mismatch_rejects_out_of_range_tolerance() {
+        let spice = "Bad\n.mismatch D IS=1.5\nR1 a b 1k\n.end\n";
+        let err = Netlist::parse(spice).unwrap_err();
+        assert!(
+            err.message.contains("tolerance must be in [0.0, 1.0)"),
+            "expected tolerance range error, got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn test_mismatch_rejects_malformed_entry() {
+        let spice = "Bad\n.mismatch D IS\nR1 a b 1k\n.end\n";
+        let err = Netlist::parse(spice).unwrap_err();
+        assert!(
+            err.message.contains("PARAM=TOL"),
+            "expected PARAM=TOL error, got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn test_seed_rejects_non_numeric() {
+        let spice = "Bad\n.seed abc\nR1 a b 1k\n.end\n";
+        let err = Netlist::parse(spice).unwrap_err();
+        assert!(
+            err.message.contains("not a valid u64"),
+            "expected u64 parse error, got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn test_mismatch_absent_is_no_op() {
+        // No `.mismatch` directive — Netlist should default to empty specs
+        // and None seed.
+        let spice = "Noop\nR1 a b 1k\n.end\n";
+        let n = Netlist::parse(spice).expect("parse");
+        assert!(n.mismatch_specs.is_empty());
+        assert_eq!(n.seed, None);
     }
 }

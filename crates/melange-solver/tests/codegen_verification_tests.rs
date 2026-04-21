@@ -7970,3 +7970,136 @@ Cout out 0 1u
         n_line
     );
 }
+
+// ---------------------------------------------------------------------------
+// .mismatch directive — per-device parameter jitter
+// ---------------------------------------------------------------------------
+
+fn extract_const_f64(code: &str, name: &str) -> f64 {
+    let needle = format!("const {name}: f64 = ");
+    let line = code
+        .lines()
+        .find(|l| l.contains(&needle))
+        .unwrap_or_else(|| panic!("expected const {name} in generated code"));
+    let after = line.split("= ").nth(1).expect("= in const line");
+    let value = after.trim_end_matches(';').trim();
+    value
+        .parse::<f64>()
+        .unwrap_or_else(|_| panic!("could not parse {name} value '{value}'"))
+}
+
+#[test]
+fn test_mismatch_directive_jitters_per_device_within_tolerance() {
+    // Two antiparallel 1N4148s sharing the same `.model` card. Without
+    // `.mismatch` they would get byte-identical constants. With
+    // `.mismatch D IS=0.05 N=0.02` each device's IS and N*VT are drawn
+    // from a deterministic seeded RNG within the declared tolerance.
+    const SPICE: &str = "\
+Mismatched Antiparallel Diodes
+.seed 42
+.mismatch D IS=0.05 N=0.02
+Rin in out 1k
+D1 out 0 D1N4148
+D2 0 out D1N4148
+C1 out 0 1u
+.model D1N4148 D(IS=2.52e-9 N=1.752)
+";
+    let (code, _, _, _) = generate_code(SPICE);
+
+    let is0 = extract_const_f64(&code, "DEVICE_0_IS");
+    let is1 = extract_const_f64(&code, "DEVICE_1_IS");
+    let nvt0 = extract_const_f64(&code, "DEVICE_0_N_VT");
+    let nvt1 = extract_const_f64(&code, "DEVICE_1_N_VT");
+
+    let is_nom = 2.52e-9;
+    let nvt_nom = 1.752 * melange_primitives::VT_ROOM;
+
+    // Devices must have diverged from each other.
+    assert_ne!(is0, is1, "D1 and D2 IS must differ under .mismatch");
+    assert_ne!(nvt0, nvt1, "D1 and D2 N*VT must differ under .mismatch");
+
+    // Each device must stay inside its declared tolerance band.
+    let is_tol = 0.05;
+    let nvt_tol = 0.02;
+    for (val, nom, tol, label) in [
+        (is0, is_nom, is_tol, "DEVICE_0_IS"),
+        (is1, is_nom, is_tol, "DEVICE_1_IS"),
+        (nvt0, nvt_nom, nvt_tol, "DEVICE_0_N_VT"),
+        (nvt1, nvt_nom, nvt_tol, "DEVICE_1_N_VT"),
+    ] {
+        let rel = (val - nom).abs() / nom;
+        assert!(
+            rel <= tol,
+            "{label} drift {rel:.4} exceeds declared tolerance {tol}"
+        );
+    }
+}
+
+#[test]
+fn test_mismatch_deterministic_across_runs() {
+    // Same netlist + same seed must produce byte-identical constants on
+    // every run. This is what keeps plugin presets reproducible.
+    const SPICE: &str = "\
+Determinism Check
+.seed 1234
+.mismatch D IS=0.03
+R1 in out 1k
+D1 out 0 D1N4148
+D2 0 out D1N4148
+C1 out 0 1u
+.model D1N4148 D(IS=2.52e-9 N=1.752)
+";
+    let (code_a, _, _, _) = generate_code(SPICE);
+    let (code_b, _, _, _) = generate_code(SPICE);
+    assert_eq!(
+        extract_const_f64(&code_a, "DEVICE_0_IS"),
+        extract_const_f64(&code_b, "DEVICE_0_IS"),
+        "same seed must produce same jitter"
+    );
+    assert_eq!(
+        extract_const_f64(&code_a, "DEVICE_1_IS"),
+        extract_const_f64(&code_b, "DEVICE_1_IS"),
+    );
+}
+
+#[test]
+fn test_mismatch_different_seeds_diverge() {
+    // Different `.seed` values must produce different jittered constants
+    // — otherwise the seed directive would be useless.
+    const TEMPLATE: &str = "\
+Seed Sensitivity
+.seed {SEED}
+.mismatch D IS=0.05
+R1 in out 1k
+D1 out 0 D1N4148
+C1 out 0 1u
+.model D1N4148 D(IS=2.52e-9 N=1.752)
+";
+    let (code_42, _, _, _) = generate_code(&TEMPLATE.replace("{SEED}", "42"));
+    let (code_99, _, _, _) = generate_code(&TEMPLATE.replace("{SEED}", "99"));
+    assert_ne!(
+        extract_const_f64(&code_42, "DEVICE_0_IS"),
+        extract_const_f64(&code_99, "DEVICE_0_IS"),
+        "different seeds must produce different jitter"
+    );
+}
+
+#[test]
+fn test_no_mismatch_is_byte_identical() {
+    // Regression guard: when `.mismatch` is absent the generated code is
+    // byte-identical to the baseline. The SPICE validation suite relies
+    // on this — otherwise every ngspice-compared circuit would drift.
+    const SPICE: &str = "\
+No Mismatch
+R1 in out 1k
+D1 out 0 D1N4148
+D2 0 out D1N4148
+C1 out 0 1u
+.model D1N4148 D(IS=2.52e-9 N=1.752)
+";
+    let (code, _, _, _) = generate_code(SPICE);
+    let is0 = extract_const_f64(&code, "DEVICE_0_IS");
+    let is1 = extract_const_f64(&code, "DEVICE_1_IS");
+    assert_eq!(is0, 2.52e-9);
+    assert_eq!(is1, 2.52e-9);
+}

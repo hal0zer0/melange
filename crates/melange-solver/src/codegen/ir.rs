@@ -4437,6 +4437,75 @@ impl CircuitIR {
         Self::build_device_info_with_mna(netlist, None)
     }
 
+    /// Deterministic per-(device, param) jitter draw.
+    ///
+    /// Hashes the netlist seed together with the device name and the
+    /// uppercase param tag into an FNV-64 accumulator, then runs the
+    /// SplitMix64 finalizer so well-correlated input bits can't produce
+    /// correlated output bits. The high 53 bits become a uniform double
+    /// in [0, 1) and the result is mapped to [-1, 1].
+    fn mismatch_draw(seed: u64, device_name: &str, param_name: &str) -> f64 {
+        const FNV_PRIME: u64 = 0x100000001b3;
+        let mut h = seed ^ 0xcbf29ce484222325u64;
+        for b in device_name.as_bytes() {
+            h = (h ^ (b.to_ascii_uppercase() as u64)).wrapping_mul(FNV_PRIME);
+        }
+        // Null byte separator so "Q1" + "SA" can't collide with "Q" + "1SA".
+        h = (h ^ 0x00).wrapping_mul(FNV_PRIME);
+        for b in param_name.as_bytes() {
+            h = (h ^ (b.to_ascii_uppercase() as u64)).wrapping_mul(FNV_PRIME);
+        }
+        // SplitMix64 finalizer
+        h = (h ^ (h >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+        h = (h ^ (h >> 27)).wrapping_mul(0x94d049bb133111eb);
+        h ^= h >> 31;
+        let u01 = (h >> 11) as f64 / (1u64 << 53) as f64;
+        2.0 * u01 - 1.0
+    }
+
+    /// Look up the tolerance for `param_name` on `device_class` across all
+    /// `.mismatch` specs in the netlist. Returns 0.0 when the directive is
+    /// absent or the param isn't listed.
+    fn mismatch_tol_for(
+        netlist: &Netlist,
+        device_class: char,
+        param_name: &str,
+    ) -> f64 {
+        let upper = param_name;
+        let mut tol = 0.0f64;
+        for spec in &netlist.mismatch_specs {
+            if spec.device_class != device_class {
+                continue;
+            }
+            for (k, v) in &spec.params {
+                if k == upper {
+                    tol = *v; // last one wins (documented behavior)
+                }
+            }
+        }
+        tol
+    }
+
+    /// Multiply `nominal` by `(1 + tol · u)` where `u ∈ [-1, 1]` is drawn
+    /// deterministically from the (seed, device, param) triple. When the
+    /// tolerance is zero this is a pure pass-through — the return value
+    /// is bit-identical to `nominal`.
+    fn apply_mismatch(
+        netlist: &Netlist,
+        device_name: &str,
+        param_name: &str,
+        device_class: char,
+        nominal: f64,
+    ) -> f64 {
+        let tol = Self::mismatch_tol_for(netlist, device_class, param_name);
+        if tol == 0.0 {
+            return nominal;
+        }
+        let seed = netlist.seed.unwrap_or(0);
+        let u = Self::mismatch_draw(seed, device_name, param_name);
+        nominal * (1.0 + tol * u)
+    }
+
     /// Build device info, optionally using MNA device dimensions (for forward-active BJTs).
     pub fn build_device_info_with_mna(
         netlist: &Netlist,
@@ -4448,8 +4517,15 @@ impl CircuitIR {
 
         for elem in &netlist.elements {
             match elem {
-                Element::Diode { model, .. } => {
-                    let params = Self::resolve_diode_params(netlist, model)?;
+                Element::Diode { name, model, .. } => {
+                    let mut params = Self::resolve_diode_params(netlist, model)?;
+                    // Per-diode `.mismatch D …` jitter. No-op when the
+                    // directive is absent or the param isn't listed.
+                    params.is = Self::apply_mismatch(netlist, name, "IS", 'D', params.is);
+                    params.n_vt = Self::apply_mismatch(netlist, name, "N", 'D', params.n_vt);
+                    if params.rs > 0.0 {
+                        params.rs = Self::apply_mismatch(netlist, name, "RS", 'D', params.rs);
+                    }
                     slots.push(DeviceSlot {
                         device_type: DeviceType::Diode,
                         start_idx: dim_offset,
@@ -4471,7 +4547,15 @@ impl CircuitIR {
                     if is_linearized {
                         continue; // Don't create a DeviceSlot, don't increment nl_dev_idx
                     }
-                    let params = Self::resolve_bjt_params(netlist, model)?;
+                    let mut params = Self::resolve_bjt_params(netlist, model)?;
+                    // Per-BJT `.mismatch Q …` jitter. Pushing mismatch to the
+                    // *device* params (not the shared `.model`) is what makes
+                    // push-pull pairs and antiparallel-style stages audibly
+                    // asymmetric even when both transistors point at the same
+                    // model card.
+                    params.is = Self::apply_mismatch(netlist, name, "IS", 'Q', params.is);
+                    params.beta_f = Self::apply_mismatch(netlist, name, "BF", 'Q', params.beta_f);
+                    params.beta_r = Self::apply_mismatch(netlist, name, "BR", 'Q', params.beta_r);
                     // Check if MNA has this BJT as forward-active (1D)
                     let is_fa = mna.is_some_and(|m| {
                         nl_dev_idx < m.nonlinear_devices.len()
