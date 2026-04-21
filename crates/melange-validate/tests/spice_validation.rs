@@ -319,13 +319,28 @@ fn run_melange_codegen(
         mna.g[input_node][input_node] += 1.0; // G_in = 1.0 S
     }
 
-    // Stamp junction caps
-    {
-        let device_slots = build_device_slots_from_netlist(&netlist);
-        if !device_slots.is_empty() {
-            mna.stamp_device_junction_caps(&device_slots);
+    // Stamp junction caps + pre-solve DC OP so BJT charge-storage caps are
+    // linearized at the real operating point. Uses the IR's
+    // `build_device_info_with_mna` rather than the harness's
+    // `build_device_slots_from_netlist` stub — the latter hardcoded
+    // CJE/CJC/TF to zero regardless of the `.model` card and would defeat
+    // the re-linearization. When all BJTs use the SPICE defaults this is
+    // byte-identical to the zero-bias stamp.
+    let dc_preflight = {
+        let device_slots =
+            melange_solver::codegen::ir::CircuitIR::build_device_info_with_mna(&netlist, Some(&mna))
+                .unwrap_or_default();
+        if device_slots.is_empty() {
+            None
+        } else {
+            let dc_config = melange_solver::dc_op::DcOpConfig {
+                input_node,
+                input_resistance: 1.0,
+                ..melange_solver::dc_op::DcOpConfig::default()
+            };
+            Some(mna.stamp_caps_and_solve_dc_op(&device_slots, &dc_config))
         }
-    }
+    };
 
     // Build kernel and route
     let has_inductors = !mna.inductors.is_empty()
@@ -373,7 +388,7 @@ fn run_melange_codegen(
     let generated = if use_nodal {
         generator.generate_nodal(&mna, &netlist)
     } else {
-        generator.generate(&kernel, &mna, &netlist)
+        generator.generate_with_dc_op(&kernel, &mna, &netlist, dc_preflight)
     }
     .map_err(|e| ValidationError::Solver(format!("Codegen: {}", e)))?;
 

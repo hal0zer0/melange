@@ -1115,6 +1115,154 @@ impl MnaSystem {
         }
     }
 
+    /// Re-linearize BJT junction capacitances at the supplied DC operating
+    /// point. Must be called AFTER `stamp_device_junction_caps` has set the
+    /// zero-bias CJE/CJC baseline, and AFTER the DC OP has been solved.
+    ///
+    /// For each BJT with a non-trivial charge-storage profile (any of
+    /// `CJE`, `CJC`, `TF` non-zero, or `VJE`/`MJE`/`VJC`/`MJC`/`FC` deviating
+    /// from SPICE defaults) this computes the voltage-dependent depletion
+    /// cap at `Vbe_op`/`Vbc_op` plus the diffusion cap `TF·|Ic_op|/Vt`, and
+    /// stamps the *delta* relative to the zero-bias baseline into `self.c`.
+    ///
+    /// Delta stamping lets us avoid a clear-and-restamp pass — the C matrix
+    /// keeps whatever upstream contributions have been accumulated (device
+    /// parasitic caps, user capacitors, parasitic auto-insertion, etc.) and
+    /// only the BJT junction row/col entries move by the voltage-dependent
+    /// correction. When the circuit has no forward-biased junctions (bias
+    /// at zero), the delta is zero and the call is a no-op, preserving the
+    /// pre-2026-04-21 behaviour byte-for-byte.
+    ///
+    /// Augmented-MNA systems are supported: `v_nl` already carries the
+    /// appropriate node-difference voltages (it is `N_v · v_node`), so no
+    /// node-vector re-indexing is needed.
+    ///
+    /// `v_nl` is the M-vector of nonlinear controlling voltages (from
+    /// `DcOpResult::v_nl`). `i_nl` is the M-vector of nonlinear currents.
+    /// For 2D BJTs `v_nl[start_idx] = Vbe` and `v_nl[start_idx+1] = Vbc`;
+    /// for forward-active (1D) BJTs only Vbe is tracked and Vbc is treated
+    /// as zero for the depletion formula.
+    pub fn relinearize_bjt_caps_at_dc_op(
+        &mut self,
+        device_slots: &[crate::device_types::DeviceSlot],
+        v_nl: &[f64],
+        i_nl: &[f64],
+    ) {
+        use crate::device_types::{DeviceParams, DeviceType};
+
+        let mut deltas: Vec<(usize, usize, f64)> = Vec::new();
+
+        for (dev_info, slot) in self.nonlinear_devices.iter().zip(device_slots.iter()) {
+            let bp = match &slot.params {
+                DeviceParams::Bjt(bp) => bp,
+                _ => continue,
+            };
+            if bp.cje == 0.0 && bp.cjc == 0.0 && bp.tf == 0.0 {
+                continue;
+            }
+
+            let vbe_op = v_nl.get(slot.start_idx).copied().unwrap_or(0.0);
+            let vbc_op = match slot.device_type {
+                DeviceType::BjtForwardActive => 0.0,
+                _ => v_nl.get(slot.start_idx + 1).copied().unwrap_or(0.0),
+            };
+            let ic_op = i_nl.get(slot.start_idx).copied().unwrap_or(0.0);
+
+            let (cbe_eff, cbc_eff) = bp.linearized_junction_caps(vbe_op, vbc_op, ic_op);
+
+            // node_indices: [c, b, e] (1-indexed, 0 = ground). If parasitic-R
+            // internal nodes were expanded, junction caps live between the
+            // primed nodes instead.
+            let (nc, nb, ne) = (
+                dev_info.node_indices[0],
+                dev_info.node_indices[1],
+                dev_info.node_indices[2],
+            );
+            let int = self
+                .bjt_internal_nodes
+                .iter()
+                .find(|n| n.start_idx == slot.start_idx);
+
+            let cbe_delta = cbe_eff - bp.cje;
+            if cbe_delta != 0.0 {
+                let cap_b = int.and_then(|n| n.int_base).map(|i| i + 1).unwrap_or(nb);
+                let cap_e = int.and_then(|n| n.int_emitter).map(|i| i + 1).unwrap_or(ne);
+                deltas.push((cap_b, cap_e, cbe_delta));
+            }
+            let cbc_delta = cbc_eff - bp.cjc;
+            if cbc_delta != 0.0 {
+                let cap_b = int.and_then(|n| n.int_base).map(|i| i + 1).unwrap_or(nb);
+                let cap_c = int
+                    .and_then(|n| n.int_collector)
+                    .map(|i| i + 1)
+                    .unwrap_or(nc);
+                deltas.push((cap_b, cap_c, cbc_delta));
+            }
+        }
+
+        for (node_a, node_b, delta) in deltas {
+            self.stamp_signed_cap_delta(node_a, node_b, delta);
+        }
+    }
+
+    /// Signed cap-shaped stamp used by `relinearize_bjt_caps_at_dc_op` to
+    /// adjust a previously-stamped zero-bias cap by a voltage-dependent
+    /// delta. Bypasses `stamp_capacitor_raw`'s `cap <= 0` early return so a
+    /// reverse-bias junction (whose effective cap is smaller than zero-bias
+    /// CJE/CJC) can have its contribution reduced. The final C matrix entry
+    /// will still be non-negative because the SPICE depletion formula never
+    /// returns a value smaller than `CJ · (1 - 0.95·FC)^(-MJ)` over the
+    /// relevant voltage range.
+    fn stamp_signed_cap_delta(&mut self, node_a: usize, node_b: usize, cap: f64) {
+        if cap == 0.0 {
+            return;
+        }
+        match (node_a > 0, node_b > 0) {
+            (true, true) => {
+                let (a, b) = (node_a - 1, node_b - 1);
+                self.c[a][a] += cap;
+                self.c[b][b] += cap;
+                self.c[a][b] -= cap;
+                self.c[b][a] -= cap;
+            }
+            (true, false) => self.c[node_a - 1][node_a - 1] += cap,
+            (false, true) => self.c[node_b - 1][node_b - 1] += cap,
+            (false, false) => {}
+        }
+    }
+
+    /// Stamp zero-bias BJT junction caps, solve the DC operating point, and
+    /// re-linearize the caps at that operating point. Convenience wrapper
+    /// combining `stamp_device_junction_caps` +
+    /// `crate::dc_op::solve_dc_operating_point` +
+    /// `relinearize_bjt_caps_at_dc_op`.
+    ///
+    /// Returns the solved `DcOpResult` so callers can forward it to
+    /// `CircuitIR::from_kernel_with_dc_op` and skip a redundant solve. If
+    /// the DC OP does not converge, the re-linearization step is skipped
+    /// and the zero-bias baseline is retained — the returned result still
+    /// carries `converged = false` so callers can downgrade gracefully.
+    ///
+    /// This is the preflight both the CLI codegen path and the SPICE
+    /// validation harness call before `DkKernel::from_mna` so the kernel's
+    /// precomputed `S = A^-1` reflects the BJT charge-storage params
+    /// (`TF`, `VJE`/`MJE`/`VJC`/`MJC`/`FC`) at the true bias point. With
+    /// default params (CJE = CJC = TF = 0 or VJE = VJC = 0.75, etc.) the
+    /// re-linearization is a no-op and the kernel is byte-identical to the
+    /// pre-2.1b behaviour.
+    pub fn stamp_caps_and_solve_dc_op(
+        &mut self,
+        device_slots: &[crate::device_types::DeviceSlot],
+        dc_op_config: &crate::dc_op::DcOpConfig,
+    ) -> crate::dc_op::DcOpResult {
+        self.stamp_device_junction_caps(device_slots);
+        let dc = crate::dc_op::solve_dc_operating_point(self, device_slots, dc_op_config);
+        if dc.converged {
+            self.relinearize_bjt_caps_at_dc_op(device_slots, &dc.v_nl, &dc.i_nl);
+        }
+        dc
+    }
+
     /// Expand MNA with internal nodes for parasitic BJTs (RB/RC/RE).
     ///
     /// For each non-forward-active BJT with non-zero parasitic resistances, creates

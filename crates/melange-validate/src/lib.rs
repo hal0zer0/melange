@@ -505,13 +505,36 @@ fn run_melange_solver_from_str(
         mna.g[input_node][input_node] += 1.0;
     }
 
-    // Stamp junction caps
-    {
-        let device_slots = build_device_slots_from_netlist(&netlist);
-        if !device_slots.is_empty() {
-            mna.stamp_device_junction_caps(&device_slots);
+    // Stamp junction caps + pre-solve DC OP so BJT charge-storage caps are
+    // linearized at the true operating point. When all BJTs use the default
+    // CJE/CJC/TF parameters this is byte-identical to the zero-bias stamp;
+    // when `.model` cards carry TF/VJE/etc. the kernel now sees the ngspice
+    // depletion + diffusion cap values rather than the zero-bias shape.
+    //
+    // Uses `CircuitIR::build_device_info_with_mna` rather than the harness's
+    // bare-minimum `build_device_slots_from_netlist` so the BJT `.model`
+    // card's CJE/CJC/TF/VJE/MJE/VJC/MJC/FC are actually read. The original
+    // harness builder hardcoded these to zero, which defeated the fix.
+    //
+    // The pre-solved DC OP is forwarded to `generate_with_dc_op` below so
+    // we don't double-solve.
+    let dc_preflight = {
+        let device_slots = melange_solver::codegen::ir::CircuitIR::build_device_info_with_mna(
+            &netlist,
+            Some(&mna),
+        )
+        .unwrap_or_default();
+        if device_slots.is_empty() {
+            None
+        } else {
+            let dc_config = melange_solver::dc_op::DcOpConfig {
+                input_node,
+                input_resistance: 1.0,
+                ..melange_solver::dc_op::DcOpConfig::default()
+            };
+            Some(mna.stamp_caps_and_solve_dc_op(&device_slots, &dc_config))
         }
-    }
+    };
 
     // Build kernel and route
     let has_inductors = !mna.inductors.is_empty()
@@ -557,7 +580,7 @@ fn run_melange_solver_from_str(
     let generated = if use_nodal {
         generator.generate_nodal(&mna, &netlist)
     } else {
-        generator.generate(&kernel, &mna, &netlist)
+        generator.generate_with_dc_op(&kernel, &mna, &netlist, dc_preflight)
     }.map_err(|e| ValidationError::Solver(format!("Codegen: {}", e)))?;
 
     // Append stdin/stdout main

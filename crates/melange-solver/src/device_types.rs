@@ -224,6 +224,67 @@ impl BjtParams {
             self.rb,           // R_p[bc,bc]: Vbc drop from Ib * RB
         ]
     }
+
+    /// Compute linearized base-emitter and base-collector junction
+    /// capacitances at the supplied DC operating point. Mirrors the
+    /// ngspice `bjtcap.c` + `bjtload.c` formulation:
+    ///
+    /// ```text
+    /// Cj(V) = CJ · (1 - V/VJ)^(-MJ)                         for V < FC·VJ
+    /// Cj(V) = CJ / (1-FC)^(1+MJ) · (1 - FC·(1+MJ) + MJ·V/VJ)  for V >= FC·VJ
+    /// Cd_be = TF · |Ic| / Vt      (diffusion cap on the BE junction only)
+    /// ```
+    ///
+    /// Returns `(Cbe_eff, Cbc_eff)`. When `CJE == CJC == TF == 0` the result
+    /// is `(0, 0)` so disabled caps stay disabled. When the bias point is
+    /// zero (all DC OP voltages / currents zero), the depletion formula
+    /// collapses to `(CJE, CJC)` and the diffusion term drops out, which
+    /// matches the previous zero-bias behaviour exactly.
+    ///
+    /// `ic` is signed; the diffusion term uses `|ic|` so PNP/NPN sign
+    /// conventions are handled uniformly.
+    pub fn linearized_junction_caps(&self, vbe: f64, vbc: f64, ic: f64) -> (f64, f64) {
+        let cbe_depl = spice_depletion_cap(self.cje, self.vje, self.mje, self.fc, vbe);
+        let cbc_depl = spice_depletion_cap(self.cjc, self.vjc, self.mjc, self.fc, vbc);
+        let cbe_diff = if self.tf > 0.0 && self.vt > 0.0 {
+            self.tf * ic.abs() / self.vt
+        } else {
+            0.0
+        };
+        (cbe_depl + cbe_diff, cbc_depl)
+    }
+}
+
+/// SPICE3f5-style depletion capacitance evaluated at voltage `v`.
+///
+/// Arguments:
+/// - `cj0`: zero-bias capacitance [F]; if 0 the result is 0 (disabled cap)
+/// - `vj`:  built-in potential [V]; must be > 0
+/// - `mj`:  grading coefficient (typical 0.33); must be >= 0
+/// - `fc`:  forward-bias smoothing coefficient (typical 0.5); in [0, 0.95]
+/// - `v`:   junction voltage (positive = forward bias)
+///
+/// See `docs/aidocs/DEVICE_MODELS.md` "Depletion Capacitance" for the full
+/// derivation. The piecewise form keeps `Cj(V)` continuous and bounded
+/// through strong forward bias, unlike the bare Shockley denominator
+/// which diverges at `V = VJ`.
+fn spice_depletion_cap(cj0: f64, vj: f64, mj: f64, fc: f64, v: f64) -> f64 {
+    if cj0 == 0.0 {
+        return 0.0;
+    }
+    let v_knee = fc * vj;
+    if v < v_knee {
+        // Analytic region: standard SPICE depletion formula.
+        let arg = 1.0 - v / vj;
+        // arg must be > 0 here since v < FC*VJ < VJ; guard against edge cases.
+        let arg = arg.max(1e-30);
+        cj0 * arg.powf(-mj)
+    } else {
+        // Tangent extension region: linear in v, C1-continuous at v = FC*VJ.
+        let one_minus_fc = 1.0 - fc;
+        let denom = one_minus_fc.powf(1.0 + mj).max(1e-30);
+        (cj0 / denom) * (1.0 - fc * (1.0 + mj) + mj * v / vj)
+    }
 }
 
 /// A slot in the nonlinear system: maps a device to its M-dimension range.
@@ -795,6 +856,152 @@ where
 {
     let opt: Option<f64> = Option::deserialize(deserializer)?;
     Ok(opt.unwrap_or(f64::INFINITY))
+}
+
+#[cfg(test)]
+mod bjt_charge_storage_tests {
+    use super::*;
+
+    fn base_params() -> BjtParams {
+        BjtParams {
+            is: 1.0e-14,
+            vt: 0.02585,
+            beta_f: 200.0,
+            beta_r: 3.0,
+            is_pnp: false,
+            vaf: f64::INFINITY,
+            var: f64::INFINITY,
+            ikf: f64::INFINITY,
+            ikr: f64::INFINITY,
+            cje: 10.0e-12,
+            cjc: 5.0e-12,
+            tf: 500.0e-12,
+            vje: 0.75,
+            mje: 0.33,
+            vjc: 0.75,
+            mjc: 0.33,
+            fc: 0.5,
+            nf: 1.0,
+            nr: 1.0,
+            ise: 0.0,
+            ne: 1.5,
+            isc: 0.0,
+            nc: 2.0,
+            rb: 0.0,
+            rc: 0.0,
+            re: 0.0,
+            rth: f64::INFINITY,
+            cth: 1.0e-3,
+            xti: 3.0,
+            eg: 1.11,
+            tamb: 300.15,
+        }
+    }
+
+    /// At zero bias, the depletion formula gives `Cj(0) = CJ · 1^(-MJ) = CJ`,
+    /// and the diffusion term vanishes because `|Ic| = 0`. The
+    /// re-linearization must therefore return exactly the zero-bias values
+    /// the legacy stamp uses — no silent drift for circuits at rest.
+    #[test]
+    fn zero_bias_returns_cje_cjc_exactly() {
+        let bp = base_params();
+        let (cbe, cbc) = bp.linearized_junction_caps(0.0, 0.0, 0.0);
+        assert!((cbe - bp.cje).abs() < 1e-18, "cbe(0) should equal CJE");
+        assert!((cbc - bp.cjc).abs() < 1e-18, "cbc(0) should equal CJC");
+    }
+
+    /// At the FC·VJ knee the analytic and extension branches must agree
+    /// (C1-continuous transition per SPICE3f5 `bjtcap.c`). Check both sides
+    /// of the knee for the BE junction at the default `FC = 0.5`,
+    /// `VJE = 0.75` → knee at Vbe = 0.375.
+    #[test]
+    fn depletion_cap_continuous_at_fc_knee() {
+        let bp = base_params();
+        let v_knee = bp.fc * bp.vje;
+        let eps = 1e-6;
+        let (cbe_lo, _) = bp.linearized_junction_caps(v_knee - eps, 0.0, 0.0);
+        let (cbe_hi, _) = bp.linearized_junction_caps(v_knee + eps, 0.0, 0.0);
+        let expected = bp.cje * (1.0 - bp.fc).powf(-bp.mje);
+        assert!((cbe_lo - expected).abs() < 1e-15, "analytic side at knee");
+        assert!((cbe_hi - expected).abs() < 1e-9, "tangent side at knee");
+        assert!(
+            (cbe_hi - cbe_lo).abs() < 1e-9,
+            "analytic and tangent branches must meet at v = FC·VJ"
+        );
+    }
+
+    /// Forward bias within the analytic region (`V < FC·VJ`) must follow
+    /// `Cj(V) = CJ·(1 − V/VJ)^(−MJ)`. Spot-check at V = 0.2 V on the BE
+    /// junction with the defaults.
+    #[test]
+    fn depletion_cap_analytic_region() {
+        let bp = base_params();
+        let v = 0.2;
+        let (cbe, _) = bp.linearized_junction_caps(v, 0.0, 0.0);
+        // Diffusion is 0 because Ic = 0; the BE cap is pure depletion.
+        let expected = bp.cje * (1.0 - v / bp.vje).powf(-bp.mje);
+        assert!(
+            (cbe - expected).abs() < 1e-18,
+            "analytic depletion mismatch: got {cbe}, expected {expected}"
+        );
+    }
+
+    /// The diffusion term `Cd = TF·|Ic|/Vt` is added only to the BE cap.
+    /// A collector current of 1 mA with TF = 500 ps, Vt = 25.85 mV should
+    /// add about 19.3 pF to Cbe_eff.
+    #[test]
+    fn diffusion_cap_added_to_be_only() {
+        let bp = base_params();
+        let ic = 1.0e-3;
+        let (cbe, cbc) = bp.linearized_junction_caps(0.0, 0.0, ic);
+        let diffusion = bp.tf * ic.abs() / bp.vt;
+        assert!(
+            (cbe - (bp.cje + diffusion)).abs() < 1e-18,
+            "BE cap should include diffusion at Ic"
+        );
+        assert!(
+            (cbc - bp.cjc).abs() < 1e-18,
+            "BC cap should have no diffusion term"
+        );
+    }
+
+    /// A BJT with CJE = CJC = TF = 0 must return zero caps regardless of
+    /// bias — the depletion formula's short-circuit keeps circuits that
+    /// explicitly disable junction caps from picking up parasitic ones.
+    #[test]
+    fn zero_params_stay_zero() {
+        let mut bp = base_params();
+        bp.cje = 0.0;
+        bp.cjc = 0.0;
+        bp.tf = 0.0;
+        let (cbe, cbc) = bp.linearized_junction_caps(0.4, -5.0, 1.0e-3);
+        assert_eq!(cbe, 0.0);
+        assert_eq!(cbc, 0.0);
+    }
+
+    /// Reverse bias on the BC junction (Vbc < 0, typical forward-active
+    /// operating point) shrinks the depletion cap toward zero; as Vbc
+    /// climbs back toward zero the cap grows monotonically up to CJC.
+    /// Verify monotonicity across a sweep Vbc from deep reverse to 0 V.
+    /// At Vbc = 0 the cap must exactly equal CJC (analytic-region limit).
+    #[test]
+    fn reverse_bias_reduces_depletion_cap() {
+        let bp = base_params();
+        let sweep = [-10.0, -5.0, -1.0, -0.1, 0.0];
+        let mut prev = 0.0_f64;
+        for v in sweep {
+            let (_, cbc) = bp.linearized_junction_caps(0.0, v, 0.0);
+            assert!(
+                cbc > prev,
+                "Cbc must grow as Vbc rises toward 0; v = {v} gave {cbc}, prev = {prev}"
+            );
+            assert!(cbc < bp.cjc + 1e-18, "Cbc must stay below CJC for V ≤ 0");
+            prev = cbc;
+        }
+        // At exactly V = 0, cap equals CJC.
+        let (_, cbc_zero) = bp.linearized_junction_caps(0.0, 0.0, 0.0);
+        assert!((cbc_zero - bp.cjc).abs() < 1e-18);
+    }
 }
 
 #[cfg(test)]
