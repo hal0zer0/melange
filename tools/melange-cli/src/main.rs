@@ -875,6 +875,49 @@ fn main() -> Result<()> {
 /// Check if a capacitor is directly connected to the given output node.
 /// Returns true if the circuit already has an output coupling cap, meaning
 /// melange's built-in DC blocker is redundant.
+/// Pre-kernel preflight: solve the DC operating point on the fully-reduced
+/// MNA and re-linearize BJT junction capacitances at that bias point.
+///
+/// Matches the SPICE validation harness so a plugin built with
+/// `melange compile` sees the same ngspice-parity cap stamps that the
+/// validation tests exercise. Without this call, BJT `.model` cards
+/// carrying `TF` / `VJE` / `MJE` / `VJC` / `MJC` / `FC` parameters ship
+/// with zero-bias linear caps and the diffusion-cap contribution is
+/// silently dropped.
+///
+/// Must be called AFTER all MNA reductions (FA / grid-off / linearize)
+/// have produced their final mna and stamped zero-bias caps, but BEFORE
+/// `DkKernel::from_mna` — the kernel's precomputed `S = A⁻¹` must see
+/// the re-linearized `C`.
+///
+/// Returns the converged `DcOpResult` so the caller can thread it into
+/// `CodeGenerator::generate_with_dc_op` and avoid a redundant solve
+/// inside codegen. Returns `None` when the circuit has no nonlinear
+/// devices (nothing to re-linearize).
+fn preflight_relinearize_bjt_caps(
+    mna: &mut melange_solver::mna::MnaSystem,
+    netlist: &melange_solver::parser::Netlist,
+    input_node: usize,
+    input_resistance: f64,
+) -> Option<melange_solver::dc_op::DcOpResult> {
+    let device_slots =
+        melange_solver::codegen::ir::CircuitIR::build_device_info_with_mna(netlist, Some(mna))
+            .unwrap_or_default();
+    if device_slots.is_empty() {
+        return None;
+    }
+    let dc_config = melange_solver::dc_op::DcOpConfig {
+        input_node,
+        input_resistance,
+        ..melange_solver::dc_op::DcOpConfig::default()
+    };
+    let dc = melange_solver::dc_op::solve_dc_operating_point(mna, &device_slots, &dc_config);
+    if dc.converged {
+        mna.relinearize_bjt_caps_at_dc_op(&device_slots, &dc.v_nl, &dc.i_nl);
+    }
+    Some(dc)
+}
+
 fn has_output_coupling_cap(
     netlist: &melange_solver::parser::Netlist,
     output_node_name: &str,
@@ -1232,6 +1275,19 @@ fn compile_circuit_source(
     // solver routing. The DK path handles parasitics via bjt_with_parasitics() inner NR.
     // Only the nodal path benefits from MNA-level internal nodes (eliminates inner NR).
 
+    // BJT junction-cap preflight: solve DC OP on the fully-reduced MNA and
+    // re-linearize CJE/CJC at Vbe_op/Vbc_op, then add the diffusion-cap
+    // contribution `TF · |Ic| / Vt`. No-op when every BJT uses the SPICE
+    // defaults (TF = 0, CJE = CJC = 0, etc.). See the SPICE validation
+    // harness for the matching call site — the two paths must agree so a
+    // plugin built from `melange compile` behaves like the validated one.
+    let dc_preflight = preflight_relinearize_bjt_caps(
+        &mut mna,
+        &netlist,
+        input_node_idx,
+        input_resistance,
+    );
+
     // Step 3: Create DK kernel
     // Use augmented MNA for inductor circuits (well-conditioned for large L)
     let has_inductors_compile = !mna.inductors.is_empty()
@@ -1488,7 +1544,7 @@ fn compile_circuit_source(
             println!("  Using DK codegen with augmented MNA for inductors");
         }
         generator
-            .generate(&kernel, &mna, &netlist)
+            .generate_with_dc_op(&kernel, &mna, &netlist, dc_preflight)
             .with_context(|| "Code generation failed")?
     };
 
@@ -2139,6 +2195,16 @@ fn simulate_circuit_source(
         input_resistance,
     )?;
 
+    // BJT junction-cap preflight — see compile path for rationale. Keeping
+    // simulate in sync with compile means `melange simulate` hears the
+    // same plugin the user will eventually `melange compile`.
+    let dc_preflight = preflight_relinearize_bjt_caps(
+        &mut mna,
+        &netlist,
+        input_node_idx,
+        input_resistance,
+    );
+
     // Step 4: Build DK kernel and route
     let has_inductors = !mna.inductors.is_empty()
         || !mna.coupled_inductors.is_empty()
@@ -2252,7 +2318,7 @@ fn simulate_circuit_source(
         generator.generate_nodal(&mna, &netlist)
             .with_context(|| "Nodal codegen failed")?
     } else {
-        generator.generate(&kernel, &mna, &netlist)
+        generator.generate_with_dc_op(&kernel, &mna, &netlist, dc_preflight)
             .with_context(|| "DK codegen failed")?
     };
     println!("  {} lines of code", generated.code.lines().count());
@@ -3139,6 +3205,16 @@ fn analyze_freq_response(
         input_resistance,
     )?;
 
+    // BJT junction-cap preflight — see compile path for rationale. Analyze
+    // must match compile so the harmonic / frequency-response curve reflects
+    // what the user will hear in the generated plugin.
+    let dc_preflight = preflight_relinearize_bjt_caps(
+        &mut mna,
+        &netlist,
+        input_node_idx,
+        input_resistance,
+    );
+
     // Build DK kernel and route
     let has_inductors = !mna.inductors.is_empty()
         || !mna.coupled_inductors.is_empty()
@@ -3234,7 +3310,7 @@ fn analyze_freq_response(
         generator.generate_nodal(&mna, &netlist)
             .with_context(|| "Nodal codegen failed")?
     } else {
-        generator.generate(&kernel, &mna, &netlist)
+        generator.generate_with_dc_op(&kernel, &mna, &netlist, dc_preflight)
             .with_context(|| "DK codegen failed")?
     };
 
