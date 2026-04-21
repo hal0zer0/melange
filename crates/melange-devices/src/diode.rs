@@ -196,37 +196,60 @@ impl NonlinearDevice<1> for DiodeWithRs {
 
 /// LED model (diode with higher forward voltage).
 ///
-/// LEDs have the same physics as regular diodes but with
-/// higher bandgap (and thus higher forward voltage).
+/// LEDs have the same physics as regular diodes but with higher bandgap
+/// (and thus higher forward voltage). Preset constructors (`red`, `green`,
+/// `blue`) derive `Is` from the datasheet Vf at 1 mA using an LED-typical
+/// emission coefficient `n`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Led {
     diode: DiodeShockley,
-    /// Forward voltage drop (for rough approximations) [V]
+    /// Forward voltage drop at the design operating current [V]
     pub vf: f64,
 }
 
 impl Led {
-    /// Create an LED with the given color/voltage characteristics.
+    /// Create an LED by specifying `Is` directly. Uses a default emission
+    /// coefficient `n = 2.0`, typical for red-orange LEDs.
     pub fn new(is: f64, vf: f64) -> Self {
         Self {
-            diode: DiodeShockley::new_room_temp(is, 1.0),
+            diode: DiodeShockley::new_room_temp(is, 2.0),
             vf,
         }
     }
 
-    /// Red LED (~1.8V forward voltage).
+    /// Construct an LED from a datasheet operating point `(I_typ, Vf)` and
+    /// emission coefficient `n`. Derives `Is = I_typ / (exp(Vf/(n·Vt)) − 1)`.
+    ///
+    /// `n` must be large enough that `Vf/(n·Vt) ≤ 40` (the `safe_exp` clamp),
+    /// otherwise the diode's current at Vf falls into the linear-extension
+    /// region and the preset is unphysical. For a given target Vf this
+    /// translates to `n ≥ Vf / (40·Vt) ≈ Vf / 1.034` at room temperature.
+    pub fn with_vf_at(current_amps: f64, vf_v: f64, n: f64) -> Self {
+        let denom = (vf_v / (n * VT_ROOM)).exp() - 1.0;
+        let is = current_amps / denom;
+        Self {
+            diode: DiodeShockley::new_room_temp(is, n),
+            vf: vf_v,
+        }
+    }
+
+    /// Red LED (~1.8 V @ 1 mA, n ≈ 2.0).
     pub fn red() -> Self {
-        Self::new(1e-20, 1.8)
+        Self::with_vf_at(1.0e-3, 1.8, 2.0)
     }
 
-    /// Green LED (~2.2V forward voltage).
+    /// Green LED (~2.2 V @ 1 mA, n ≈ 2.5).
     pub fn green() -> Self {
-        Self::new(1e-20, 2.2)
+        Self::with_vf_at(1.0e-3, 2.2, 2.5)
     }
 
-    /// Blue/White LED (~3.3V forward voltage).
+    /// Blue / white LED (~3.3 V @ 1 mA, n ≈ 3.5).
+    ///
+    /// Blue LEDs use InGaN and have ideality factors up to 3-5 in practice.
+    /// The high `n` here also keeps `Vf/(n·Vt) < 40` under the `safe_exp`
+    /// clamp so the Shockley equation evaluates without linear extension.
     pub fn blue() -> Self {
-        Self::new(1e-25, 3.3)
+        Self::with_vf_at(1.0e-3, 3.3, 3.5)
     }
 }
 
@@ -316,6 +339,31 @@ mod tests {
             i_red > i_blue,
             "Red LED should conduct more at 2V than blue"
         );
+    }
+
+    /// Verify LED presets produce ~1 mA at their datasheet Vf. The previous
+    /// implementation hardcoded n=1.0 internally and kept `vf` as a cosmetic
+    /// field, so `red()` actually conducted ~1 mA near 1.0 V instead of 1.8 V.
+    #[test]
+    fn test_led_presets_hit_vf_at_1ma() {
+        let target = 1.0e-3; // 1 mA design point
+        for (name, led, vf) in [
+            ("red", Led::red(), 1.8),
+            ("green", Led::green(), 2.2),
+            ("blue", Led::blue(), 3.3),
+        ] {
+            let i_at_vf = led.current(&[vf]);
+            let rel_err = (i_at_vf - target).abs() / target;
+            assert!(
+                rel_err < 0.2,
+                "LED {} at {} V should produce ~{} A, got {} A (rel_err {:.3})",
+                name,
+                vf,
+                target,
+                i_at_vf,
+                rel_err
+            );
+        }
     }
 
     /// Verify DiodeWithRs conductance is always finite, even at edge voltages
