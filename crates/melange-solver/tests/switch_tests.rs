@@ -689,6 +689,62 @@ C2 out 0 47n
     compile_and_run(&test_harness, "multi_switch");
 }
 
+#[test]
+fn test_compile_switched_inductor_runtime_delta() {
+    // Regression: DK + augmented-MNA path used to emit `let _ = new_val;`
+    // for L-type switch components in `rebuild_matrices()`, silently
+    // dropping the new inductance. The switched L had no audible effect
+    // at runtime. This test flips L between 500 mH and 1 mH (500× ratio)
+    // and asserts the sample-level output actually differs — `is_finite`
+    // alone is not enough to catch the silent no-op.
+    let code = generate(
+        "\
+Switched L Runtime Delta Test
+L1 in mid 500m
+R1 mid out 1k
+C1 out 0 100n
+R2 out 0 10k
+.switch L1 500m 1m
+",
+    );
+    let test_harness = format!(
+        "{}\n\
+         fn main() {{\n\
+             let mut state_a = CircuitState::default();\n\
+             let mut state_b = CircuitState::default();\n\
+             // state_a stays at position 0 (500 mH); state_b flips to position 1 (1 mH).\n\
+             state_b.set_switch_0(1);\n\
+             \n\
+             // Drive both states with a 1 kHz tone. At 500 mH the LRC rolls off\n\
+             // hard below 1 kHz; at 1 mH it passes through nearly flat.\n\
+             let sr = 44100.0;\n\
+             let mut max_diff = 0.0f64;\n\
+             for n in 0..2000 {{\n\
+                 let t = n as f64 / sr;\n\
+                 let drive = (2.0 * std::f64::consts::PI * 1000.0 * t).sin();\n\
+                 let out_a = process_sample(drive, &mut state_a)[0];\n\
+                 let out_b = process_sample(drive, &mut state_b)[0];\n\
+                 let d = (out_a - out_b).abs();\n\
+                 if d > max_diff {{ max_diff = d; }}\n\
+             }}\n\
+             \n\
+             // If the bug regresses, state_a and state_b produce identical samples\n\
+             // (both run with the compile-time-baked 500 mH). A 500x L change\n\
+             // must shift the transfer function by many orders of magnitude at\n\
+             // 1 kHz; require at least 0.01 absolute sample delta somewhere in\n\
+             // the window to confirm the switch actually propagated.\n\
+             assert!(\n\
+                 max_diff > 1e-2,\n\
+                 \"L-switch had no runtime effect: max |out_a - out_b| = {{:e}}\",\n\
+                 max_diff\n\
+             );\n\
+             eprintln!(\"Switched L runtime-delta test passed (max diff {{:.4}})\", max_diff);\n\
+         }}\n",
+        code
+    );
+    compile_and_run(&test_harness, "switched_l_runtime_delta");
+}
+
 // ===========================================================================
 // Infix notation standalone tests
 // ===========================================================================

@@ -3060,7 +3060,38 @@ impl CircuitIR {
             })
             .collect();
 
-        // Build switches from MNA resolved info
+        // Build switches from MNA resolved info.
+        //
+        // When augmented MNA is used for inductors (DK path with
+        // `augmented_inductors = true`), `rebuild_matrices()` stamps the L
+        // delta into `c_eff[aug_row][aug_row]` — mirroring the nodal path.
+        // Without this, the switch-delta loop in the DK emitter hits the
+        // `augmented_row: None` branch, emits a stub, and the companion-stamp
+        // fallback is compiled out because `num_inductors` is forced to 0
+        // under augmented MNA. See `dk_emitter::emit_switch_methods`.
+        let inductor_aug_rows: std::collections::HashMap<String, usize> = if augmented_inductors {
+            let mut map = std::collections::HashMap::new();
+            let mut var_idx = mna.n_aug;
+            for ind in &mna.inductors {
+                map.insert(ind.name.to_ascii_uppercase(), var_idx);
+                var_idx += 1;
+            }
+            for ci in &mna.coupled_inductors {
+                map.insert(ci.l1_name.to_ascii_uppercase(), var_idx);
+                map.insert(ci.l2_name.to_ascii_uppercase(), var_idx + 1);
+                var_idx += 2;
+            }
+            for group in &mna.transformer_groups {
+                for (widx, name) in group.winding_names.iter().enumerate() {
+                    map.insert(name.to_ascii_uppercase(), var_idx + widx);
+                }
+                var_idx += group.num_windings;
+            }
+            map
+        } else {
+            std::collections::HashMap::new()
+        };
+
         let switches: Vec<SwitchIR> = mna
             .switches
             .iter()
@@ -3098,6 +3129,13 @@ impl CircuitIR {
                             } else {
                                 (None, None)
                             };
+                        let augmented_row = if comp.component_type == 'L' {
+                            inductor_aug_rows
+                                .get(&comp.name.to_ascii_uppercase())
+                                .copied()
+                        } else {
+                            None
+                        };
                         SwitchComponentIR {
                             name: comp.name.clone(),
                             component_type: comp.component_type,
@@ -3105,7 +3143,7 @@ impl CircuitIR {
                             node_q: comp.node_q,
                             nominal_value: comp.nominal_value,
                             inductor_index,
-                            augmented_row: None, // DK path uses companion model
+                            augmented_row,
                             coupled_inductor_index,
                             coupled_winding,
                         }
