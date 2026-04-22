@@ -3009,11 +3009,15 @@ fn analyze_freq_response(
         }
     }
 
-    // Apply switch overrides: modify element values in netlist before building MNA.
-    {
-        let mut overridden_switches: std::collections::HashSet<usize> =
-            std::collections::HashSet::new();
-
+    // Resolve switch overrides into (switch_idx, position) pairs. We keep the
+    // netlist at position-0 element values here and apply the override at
+    // runtime via `state.set_switch_N(position)` — see `switch_calls` passed
+    // to `generate_analyze_main` below. Mutating `netlist.elements` up front
+    // would desync the emitted G/C constants from `SwitchComponentIR.nominal_value`
+    // (always pos-0), producing a double-application when set_switch_N runs
+    // its delta-from-nominal stamp.
+    let switch_runtime_overrides: Vec<(usize, usize)> = {
+        let mut resolved = Vec::with_capacity(switch_overrides.len());
         for spec in switch_overrides {
             let (name, pos_str) = spec.split_once('=').ok_or_else(|| {
                 anyhow::anyhow!("Invalid --switch format '{}', expected NAME=POS", spec)
@@ -3069,18 +3073,15 @@ fn analyze_freq_response(
                 );
             }
 
-            apply_switch_position(&mut netlist.elements, sw, position);
-            overridden_switches.insert(switch_idx);
+            resolved.push((switch_idx, position));
             eprintln!(
                 "  Switch override: {} = position {}",
                 sw.label.as_deref().unwrap_or(name),
                 position
             );
         }
-
-        // Default: switches stay at position 0 (netlist nominal values are position 0)
-        // No action needed — netlist already has position 0 values.
-    }
+        resolved
+    };
 
     // Build MNA
     let mut mna =
@@ -3321,14 +3322,23 @@ fn analyze_freq_response(
     // Determine settle time
     let settle_secs = if has_inductors { 5.0 } else { 0.5 };
 
-    // Append analyze main, compile, run
+    // Append analyze main, compile, run.
+    //
+    // Switch overrides are applied at runtime via `state.set_switch_N(position)`
+    // before the settle loop; the settle loop then converges NR (if M>0) on
+    // the new topology. Pot overrides remain netlist-baked (R-only, flows
+    // into G at codegen time).
+    let switch_calls: Vec<String> = switch_runtime_overrides
+        .iter()
+        .map(|(idx, pos)| format!("state.set_switch_{idx}({pos})"))
+        .collect();
     let analyze_main = codegen_runner::generate_analyze_main(
         &frequencies,
         amplitude,
         sample_rate,
         settle_secs,
         &[], // pot calls (already baked into netlist)
-        &[], // switch calls (already baked into netlist)
+        &switch_calls,
         harmonics,
     );
     let full_source = format!("{}\n{}", generated.code, analyze_main);
@@ -3368,35 +3378,6 @@ fn analyze_freq_response(
     }
 
     Ok(())
-}
-
-/// Apply a switch position by updating element values in the netlist.
-fn apply_switch_position(
-    elements: &mut [melange_solver::parser::Element],
-    switch: &melange_solver::parser::SwitchDirective,
-    position: usize,
-) {
-    for (comp_idx, comp_name) in switch.component_names.iter().enumerate() {
-        let value = switch.positions[position][comp_idx];
-        for e in elements.iter_mut() {
-            let (name, val) = match e {
-                melange_solver::parser::Element::Resistor { name, value, .. } => {
-                    (name as &str, value)
-                }
-                melange_solver::parser::Element::Capacitor { name, value, .. } => {
-                    (name as &str, value)
-                }
-                melange_solver::parser::Element::Inductor { name, value, .. } => {
-                    (name as &str, value)
-                }
-                _ => continue,
-            };
-            if name.eq_ignore_ascii_case(comp_name) {
-                *val = value;
-                break;
-            }
-        }
-    }
 }
 
 fn generate_log_frequencies(start: f64, end: f64, points_per_decade: usize) -> Vec<f64> {
