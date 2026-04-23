@@ -37,6 +37,7 @@ AI agent consumption: dense equations, code patterns, cross-references, no narra
 | Checking project status, validation results, routing | [STATUS.md](STATUS.md) |
 | Modeling tungsten-based components (Schottky, cat's whisker, WSe2) | [TUNGSTEN_MATERIAL.md](TUNGSTEN_MATERIAL.md) |
 | Authentic circuit noise (Johnson-Nyquist, shot, 1/f, op-amp en/in) | [NOISE.md](NOISE.md) |
+| Per-unit variation (`.mismatch`, `.tolerance`, `.seed`) | [UNIT_VARIATION.md](UNIT_VARIATION.md) |
 
 ## Critical Equations (Verified)
 
@@ -139,6 +140,7 @@ K' = K - scale * (N_v * su) * (su^T * N_i)
 | [STATUS.md](STATUS.md) | Reference | What's implemented, validated circuits, codegen routing |
 | [TUNGSTEN_MATERIAL.md](TUNGSTEN_MATERIAL.md) | Reference | Tungsten metal/compound properties, Schottky barriers, cat's whisker diodes, WSe2/WS2 semiconductors |
 | [NOISE.md](NOISE.md) | Comprehensive | Authentic circuit noise: Johnson-Nyquist/shot/flicker/op-amp PSD, RHS injection, RNG, phases 1-6 |
+| [UNIT_VARIATION.md](UNIT_VARIATION.md) | Reference | `.mismatch` (device params) + `.tolerance` (passive R/C/L) + `.seed`; deterministic FNV→SplitMix64 RNG |
 
 ## External References
 

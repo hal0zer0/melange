@@ -160,6 +160,13 @@ Source: Sowter DWG E-72,658-2 + Peerless/Triad winding data.
 - **Op-amp**: Boyle macromodel, VCC/VEE asymmetric rails, optional `SR=` slew-rate limiting (V/μs), rail modes `auto/none/hard/active-set/active-set-be/boyle-diodes`, `AOL_TRANSIENT_CAP` override
 - **VCA**: THAT 2180 / DBX 2150 current-mode exponential gain with gain-dependent THD
 
+### Unit Variation (2026-04-21)
+- `.seed <u64>`: sets master RNG seed (default 0). Shared by `.mismatch` and `.tolerance`.
+- `.mismatch D IS=tol N=tol RS=tol` / `.mismatch Q IS=tol BF=tol BR=tol`: per-device parameter jitter, baked at codegen. Two diodes on the same `.model` land at distinct `DEVICE_N_IS` constants — the thing that makes antiparallel clippers and push-pull pairs audibly asymmetric. `J` / `M` / `T` parse but aren't yet IR-wired.
+- `.tolerance R=0.01 C=0.02 L=0.005`: fixed-passive value jitter, applied at end of `Netlist::parse()`. Skips components under `.pot`/`.wiper`/`.switch`/`.runtime R` control so UI-driven mappings stay intact.
+- Deterministic: `FNV(seed, class_tag, name) → SplitMix64 → [-1, 1]`. Same seed always produces the same unit personality. Absent directives ⇒ byte-identical output (regression-guarded).
+- Full reference: [UNIT_VARIATION.md](UNIT_VARIATION.md).
+
 ### Dynamic Parameters
 - `.pot R min max [default] [label]`: per-block O(N³) rebuild on change; per-sample smoother via `.smoothed.next()`; reseed-free setter — use `recompute_dc_op()` for preset-recall NR refresh (DK only; nodal falls back to NR catch-up)
 - `.wiper R_cw R_ccw total [pos] [label]`: two-resistor wiper; position-0..1 UI param
