@@ -5440,6 +5440,46 @@ impl CircuitIR {
             )));
         }
 
+        // Self-heating thermal params (optional; disabled by default so the
+        // generated solver is byte-identical for every non-thermal triode).
+        // Mirrors the BJT/diode contract: `RTH` is the gate — any finite,
+        // positive value activates the per-sample envelope-temperature update
+        // and the `VBIAS_ALPHA · (Tp - TAMB)` Vgk drift baked into the Koren
+        // call site. `CTH` sets the thermal time constant τ = RTH·CTH. Pentode
+        // support is gated at the model layer (`has_self_heating`) — the
+        // resolver still accepts the params so pentode circuits don't trip
+        // the unrecognized-param warning, but the emitter won't use them
+        // until pentode screen-dissipation is wired.
+        let rth = Self::lookup_model_param(netlist, model, "RTH").unwrap_or(f64::INFINITY);
+        if rth.is_finite() && rth <= 0.0 {
+            return Err(CodegenError::InvalidConfig(format!(
+                "tube model RTH must be positive (or infinite to disable), got {rth}"
+            )));
+        }
+        let cth = Self::lookup_model_param(netlist, model, "CTH").unwrap_or(0.0);
+        if !cth.is_finite() || cth < 0.0 {
+            return Err(CodegenError::InvalidConfig(format!(
+                "tube model CTH must be non-negative and finite, got {cth}"
+            )));
+        }
+        if rth.is_finite() && cth <= 0.0 {
+            return Err(CodegenError::InvalidConfig(format!(
+                "tube model CTH must be positive when RTH is finite (thermal time constant τ = RTH·CTH would otherwise be zero), got CTH={cth}"
+            )));
+        }
+        let vbias_alpha = Self::lookup_model_param(netlist, model, "VBIAS_ALPHA").unwrap_or(0.0);
+        if !vbias_alpha.is_finite() {
+            return Err(CodegenError::InvalidConfig(format!(
+                "tube model VBIAS_ALPHA must be finite, got {vbias_alpha}"
+            )));
+        }
+        let tamb = Self::lookup_model_param(netlist, model, "TAMB").unwrap_or(300.15);
+        if !tamb.is_finite() || tamb <= 0.0 {
+            return Err(CodegenError::InvalidConfig(format!(
+                "tube model TAMB must be positive and finite, got {tamb}"
+            )));
+        }
+
         Self::warn_unrecognized_params(
             netlist,
             model,
@@ -5461,6 +5501,10 @@ impl CircuitIR {
                 "EX_B",
                 "KF",
                 "AF",
+                "RTH",
+                "CTH",
+                "VBIAS_ALPHA",
+                "TAMB",
             ],
         );
 
@@ -5486,6 +5530,10 @@ impl CircuitIR {
             mu_b,
             svar,
             ex_b,
+            rth,
+            cth,
+            vbias_alpha,
+            tamb,
         })
     }
 
@@ -5738,6 +5786,12 @@ impl CircuitIR {
             mu_b: 0.0,
             svar: 0.0,
             ex_b: 0.0,
+            // Pentode self-heating not wired yet — screen dissipation needs a
+            // separate term (Ip·Vpk + Ig2·Vg2k). Triode path is live.
+            rth: f64::INFINITY,
+            cth: 0.0,
+            vbias_alpha: 0.0,
+            tamb: 300.15,
         };
         params
             .validate()

@@ -234,15 +234,26 @@ pub(super) fn emit_dk_device_evaluation(
                     // 8-way helper family selection.
                     emit_pentode_nr_dk_stamp(code, tp, d, s, indent);
                 } else {
+                    // Self-heating Vgk drift: when `RTH < ∞`, shift Vgk by
+                    // `VBIAS_ALPHA · (Tj - TAMB)` before feeding Koren.
+                    // Contact-potential drift with cathode temperature,
+                    // quasi-statically fed by the previous sample's Tj.
+                    // `has_self_heating()` is gated to SharpTriode in phase 1,
+                    // so pentodes fall through with `v_d{s}` unchanged.
+                    let vgk_expr = if tp.has_self_heating() {
+                        format!("(v_d{s} + DEVICE_{d}_VBIAS_ALPHA * (state.device_{d}_tj - DEVICE_{d}_TAMB))")
+                    } else {
+                        format!("v_d{s}")
+                    };
                     if tp.has_rgi() {
                         // RGI: solve for internal Vgk, evaluate at internal voltage
                         code.push_str(&format!(
-                            "{indent}let (i_dev{s}, i_dev{s1}, tube{d}_jac) = tube_evaluate_with_rgi(v_d{s}, v_d{s1}, state.device_{d}_mu, state.device_{d}_ex, state.device_{d}_kg1, state.device_{d}_kp, state.device_{d}_kvb, state.device_{d}_ig_max, state.device_{d}_vgk_onset, state.device_{d}_lambda, DEVICE_{d}_RGI);\n"
+                            "{indent}let (i_dev{s}, i_dev{s1}, tube{d}_jac) = tube_evaluate_with_rgi({vgk_expr}, v_d{s1}, state.device_{d}_mu, state.device_{d}_ex, state.device_{d}_kg1, state.device_{d}_kp, state.device_{d}_kvb, state.device_{d}_ig_max, state.device_{d}_vgk_onset, state.device_{d}_lambda, DEVICE_{d}_RGI);\n"
                         ));
                     } else {
                         // Standard tube (no RGI)
                         code.push_str(&format!(
-                            "{indent}let (i_dev{s}, i_dev{s1}, tube{d}_jac) = tube_evaluate(v_d{s}, v_d{s1}, state.device_{d}_mu, state.device_{d}_ex, state.device_{d}_kg1, state.device_{d}_kp, state.device_{d}_kvb, state.device_{d}_ig_max, state.device_{d}_vgk_onset, state.device_{d}_lambda);\n"
+                            "{indent}let (i_dev{s}, i_dev{s1}, tube{d}_jac) = tube_evaluate({vgk_expr}, v_d{s1}, state.device_{d}_mu, state.device_{d}_ex, state.device_{d}_kg1, state.device_{d}_kp, state.device_{d}_kvb, state.device_{d}_ig_max, state.device_{d}_vgk_onset, state.device_{d}_lambda);\n"
                         ));
                     }
                     code.push_str(&format!("{indent}let jdev_{s}_{s} = tube{d}_jac[0];\n"));

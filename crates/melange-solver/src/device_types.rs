@@ -656,12 +656,53 @@ pub struct TubeParams {
     /// this field is ignored. 0.0 = sharp default.
     #[serde(default)]
     pub ex_b: f64,
+    /// Thermal resistance envelope-to-ambient [K/W]. `f64::INFINITY` (default)
+    /// disables self-heating entirely — the per-sample Tp update block is
+    /// elided by codegen and the struct stays byte-identical to a non-thermal
+    /// build. Finite values activate quasi-static envelope heating driven by
+    /// plate dissipation `P = Ip·Vpk + Ig·Vgk`. See
+    /// `memory/triode_self_heat_ceiling.md` for why this is seasoning rather
+    /// than voice on sharp-cutoff preamps; the infrastructure targets
+    /// power-tube circuits (champ-5f1 6V6, cutter-amp 6L6) where the physics
+    /// ceiling rises above the audibility floor.
+    #[serde(default = "default_infinity")]
+    #[serde(deserialize_with = "deserialize_f64_or_infinity")]
+    pub rth: f64,
+    /// Thermal mass [J/K]. Sets the envelope-heating time constant τ = RTH·CTH.
+    /// Ignored when `rth` is infinite.
+    #[serde(default)]
+    pub cth: f64,
+    /// Contact-potential drift coefficient [V/K]. Adds
+    /// `VBIAS_ALPHA · (Tp - TAMB)` to the Vgk seen by Koren. Physical origin
+    /// is the work-function-difference shift between hot cathode and cold
+    /// grid as cathode temperature tracks envelope temperature (via weak
+    /// radiative coupling). Typical order of magnitude:
+    /// - sharp-cutoff preamp (12AX7 / 12AU7): ~3e-4 V/K
+    /// - power triode / beam tetrode in triode mode (2A3, 300B): ~1e-3 V/K
+    /// Zero disables the Vgk shift — the envelope temperature still tracks,
+    /// but it has no effect on the tube current.
+    #[serde(default)]
+    pub vbias_alpha: f64,
+    /// Ambient temperature [K]. Default 300.15 (≈ 27 °C). Also the reference
+    /// at which the Koren fit is assumed valid: the Vgk bias shift is
+    /// `VBIAS_ALPHA · (Tp - TAMB)`, so Tp = TAMB is the zero-drift point.
+    #[serde(default = "default_tamb")]
+    pub tamb: f64,
 }
 
 impl TubeParams {
     /// Returns true if grid internal resistance is enabled.
     pub fn has_rgi(&self) -> bool {
         self.rgi > 0.0
+    }
+
+    /// Returns true when self-heating is enabled for this tube. Only
+    /// sharp-cutoff triodes carry the full thermal path in phase 1; pentodes
+    /// need a second-order screen-dissipation term that isn't wired yet, so
+    /// the flag stays false for them even when `rth` is finite. When pentode
+    /// self-heat lands, lift the `kind` guard.
+    pub fn has_self_heating(&self) -> bool {
+        self.rth.is_finite() && matches!(self.kind, TubeKind::SharpTriode)
     }
 
     /// Returns true if this tube is a pentode (in any form — sharp or
@@ -1060,6 +1101,10 @@ mod tube_params_tests {
             mu_b: 0.0,
             svar: 0.0,
             ex_b: 0.0,
+            rth: f64::INFINITY,
+            cth: 0.0,
+            vbias_alpha: 0.0,
+            tamb: 300.15,
         }
     }
 
@@ -1090,6 +1135,10 @@ mod tube_params_tests {
             mu_b: 3.4,
             svar: 0.083,
             ex_b: 1.223,
+            rth: f64::INFINITY,
+            cth: 0.0,
+            vbias_alpha: 0.0,
+            tamb: 300.15,
         }
     }
 
@@ -1120,6 +1169,10 @@ mod tube_params_tests {
             mu_b: 0.0,
             svar: 0.0,
             ex_b: 0.0,
+            rth: f64::INFINITY,
+            cth: 0.0,
+            vbias_alpha: 0.0,
+            tamb: 300.15,
         }
     }
 
@@ -1149,6 +1202,10 @@ mod tube_params_tests {
             mu_b: 0.0,
             svar: 0.0,
             ex_b: 0.0,
+            rth: f64::INFINITY,
+            cth: 0.0,
+            vbias_alpha: 0.0,
+            tamb: 300.15,
         }
     }
 
@@ -1177,6 +1234,10 @@ mod tube_params_tests {
             mu_b: 0.0,
             svar: 0.0,
             ex_b: 0.0,
+            rth: f64::INFINITY,
+            cth: 0.0,
+            vbias_alpha: 0.0,
+            tamb: 300.15,
         }
     }
 

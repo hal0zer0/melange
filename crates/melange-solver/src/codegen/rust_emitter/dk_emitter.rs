@@ -704,6 +704,9 @@ impl RustEmitter {
                 }
                 DeviceParams::Tube(tp) => {
                     has_tube = true;
+                    if tp.has_self_heating() {
+                        has_self_heating = true;
+                    }
                     emit_device_const(&mut code, dev_num, "MU", tp.mu);
                     emit_device_const(&mut code, dev_num, "EX", tp.ex);
                     emit_device_const(&mut code, dev_num, "KG1", tp.kg1);
@@ -744,6 +747,15 @@ impl RustEmitter {
                     let vt_tube = tp.vgk_onset / 3.0;
                     let vcrit = vt_tube * (vt_tube / (std::f64::consts::SQRT_2 * 1e-10)).ln();
                     emit_device_const(&mut code, dev_num, "VCRIT", vcrit);
+                    // Self-heating constants. Only the thermal gate (RTH) is
+                    // checked here — `has_self_heating()` is already false for
+                    // pentodes, so this block is triode-only in phase 1.
+                    if tp.has_self_heating() {
+                        emit_device_const(&mut code, dev_num, "RTH", tp.rth);
+                        emit_device_const(&mut code, dev_num, "CTH", tp.cth);
+                        emit_device_const(&mut code, dev_num, "VBIAS_ALPHA", tp.vbias_alpha);
+                        emit_device_const(&mut code, dev_num, "TAMB", tp.tamb);
+                    }
                     code.push('\n');
                 }
                 DeviceParams::Vca(vp) => {
@@ -2108,6 +2120,31 @@ impl RustEmitter {
                              \x20       state.device_{dev_num}_is = DEVICE_{dev_num}_IS_NOM\n\
                              \x20           * t_ratio.powf(DEVICE_{dev_num}_XTI)\n\
                              \x20           * fast_exp((DEVICE_{dev_num}_EG / vt_nom) * (1.0 - DEVICE_{dev_num}_TAMB / state.device_{dev_num}_tj));\n\
+                             \x20   }}\n"
+                        ));
+                }
+                DeviceParams::Tube(tp) if tp.has_self_heating() => {
+                    // Sharp-cutoff triode only in phase 1 (gated by
+                    // TubeParams::has_self_heating). Pdiss ≈ Ip·Vpk + Ig·Vgk;
+                    // the Ig·Vgk term is tiny in normal Class-A operation
+                    // (nA to µA Ig, mV Vgk) but carried through for
+                    // correctness under grid-current clip. No IS(T) /
+                    // VT(T) drift — the Vgk bias shift lives at the NR call
+                    // site in `nr_helpers.rs`, not here.
+                    let s = slot.start_idx;
+                    let s1 = s + 1;
+                    thermal_update.push_str(&format!(
+                            "    {{ // Triode {dev_num} self-heating thermal update\n\
+                             \x20       let ip = i_nl[{s}];\n\
+                             \x20       let ig = i_nl[{s1}];\n\
+                             \x20       let v_nl_th = extract_controlling_voltages(&v);\n\
+                             \x20       let vgk = v_nl_th[{s}];\n\
+                             \x20       let vpk = v_nl_th[{s1}];\n\
+                             \x20       let p = ip * vpk + ig * vgk;\n\
+                             \x20       let dt = 1.0 / SAMPLE_RATE;\n\
+                             \x20       let d_tj = (p - (state.device_{dev_num}_tj - DEVICE_{dev_num}_TAMB) / DEVICE_{dev_num}_RTH) / DEVICE_{dev_num}_CTH * dt;\n\
+                             \x20       state.device_{dev_num}_tj += d_tj;\n\
+                             \x20       state.device_{dev_num}_tj = state.device_{dev_num}_tj.clamp(200.0, 500.0);\n\
                              \x20   }}\n"
                         ));
                 }

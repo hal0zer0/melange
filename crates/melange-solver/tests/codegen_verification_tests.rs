@@ -4236,6 +4236,105 @@ fn test_codegen_triode_constants_and_functions() {
     );
 }
 
+/// Codegen: triode self-heating emits the expected constants, state field,
+/// NR bias injection, and post-sample thermal-update block. Non-thermal
+/// triode codegen must NOT emit any of those tokens (byte-identity gate).
+#[test]
+fn test_codegen_triode_self_heating_emission() {
+    // Thermal enabled: RTH+CTH+VBIAS_ALPHA all finite.
+    let hot = "\
+12AX7 Common Cathode Amplifier (thermal)
+Rin in 0 1Meg
+Cin in grid 100n
+Rg grid 0 1Meg
+T1 grid plate cathode 12AX7
+Rk cathode 0 1.5k
+Ck cathode 0 25u
+Rp vcc plate 100k
+Cout plate out 100n
+Rout out 0 1Meg
+V1 vcc 0 DC 250
+.model 12AX7 TUBE(MU=100 EX=1.4 KG1=1060 KP=600 KVB=300 RTH=500 CTH=5e-3 VBIAS_ALPHA=3e-4 TAMB=300.15)
+";
+    let (hot_code, _, _, _) = generate_code(hot);
+
+    assert!(
+        hot_code.contains("DEVICE_0_RTH"),
+        "thermal triode should emit DEVICE_0_RTH constant"
+    );
+    assert!(
+        hot_code.contains("DEVICE_0_CTH"),
+        "thermal triode should emit DEVICE_0_CTH constant"
+    );
+    assert!(
+        hot_code.contains("DEVICE_0_VBIAS_ALPHA"),
+        "thermal triode should emit DEVICE_0_VBIAS_ALPHA constant"
+    );
+    assert!(
+        hot_code.contains("DEVICE_0_TAMB"),
+        "thermal triode should emit DEVICE_0_TAMB constant"
+    );
+    assert!(
+        hot_code.contains("device_0_tj"),
+        "thermal triode should expose the device_0_tj state field"
+    );
+    assert!(
+        hot_code.contains("DEVICE_0_VBIAS_ALPHA * (state.device_0_tj - DEVICE_0_TAMB)"),
+        "thermal triode should inject the Vgk bias shift at the Koren call site"
+    );
+    assert!(
+        hot_code.contains("Triode 0 self-heating thermal update"),
+        "thermal triode should emit the post-sample Tp update block"
+    );
+
+    // The thermal emission paths are new — make sure the generated code
+    // still round-trips through rustc. Catches template-syntax errors in
+    // the post-sample update block, NaN-recovery guard, and NR bias
+    // injection that pure string-contains assertions miss.
+    let tmp_dir = std::env::temp_dir();
+    let tmp_path = tmp_dir.join("melange_codegen_test_triode_thermal.rs");
+    {
+        let mut f = std::fs::File::create(&tmp_path).unwrap();
+        f.write_all(hot_code.as_bytes()).unwrap();
+    }
+    let output = std::process::Command::new("rustc")
+        .args(["--edition", "2024", "--crate-type", "lib", "-o"])
+        .arg(tmp_dir.join("melange_codegen_test_triode_thermal.rlib"))
+        .arg(&tmp_path)
+        .output()
+        .expect("failed to run rustc");
+    let _ = std::fs::remove_file(&tmp_path);
+    let _ = std::fs::remove_file(tmp_dir.join("melange_codegen_test_triode_thermal.rlib"));
+    let _ = std::fs::remove_file(tmp_dir.join("libmelange_codegen_test_triode_thermal.rlib"));
+    assert!(
+        output.status.success(),
+        "Thermal triode codegen failed to compile:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Non-thermal triode: existing circuit, no thermal params. Byte-identity
+    // on the previously-shipped codegen is enforced by the broader test
+    // suite — here we just guard against a regression where the thermal
+    // tokens leak into circuits that never opted in.
+    let (cold_code, _, _, _) = generate_code(TRIODE_CC_SPICE);
+    assert!(
+        !cold_code.contains("DEVICE_0_RTH"),
+        "non-thermal triode must not emit DEVICE_0_RTH"
+    );
+    assert!(
+        !cold_code.contains("DEVICE_0_VBIAS_ALPHA"),
+        "non-thermal triode must not emit DEVICE_0_VBIAS_ALPHA"
+    );
+    assert!(
+        !cold_code.contains("device_0_tj"),
+        "non-thermal triode must not carry a device_0_tj state field"
+    );
+    assert!(
+        !cold_code.contains("Triode 0 self-heating thermal update"),
+        "non-thermal triode must not emit the post-sample Tp update block"
+    );
+}
+
 /// Codegen: 12AX7 common-cathode amplifier compiles.
 #[test]
 fn test_codegen_triode_compiles() {

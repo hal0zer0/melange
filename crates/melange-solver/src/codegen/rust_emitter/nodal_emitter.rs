@@ -134,7 +134,7 @@ fn emit_nodal_nan_reset(code: &mut String, ir: &CircuitIR, indent: &str, is_full
         ));
     }
 
-    // Device self-heating thermal state (BJT and diode)
+    // Device self-heating thermal state (BJT, diode, and triode)
     for (dev_num, slot) in ir.device_slots.iter().enumerate() {
         match &slot.params {
             DeviceParams::Bjt(bp) if bp.has_self_heating() => {
@@ -149,6 +149,13 @@ fn emit_nodal_nan_reset(code: &mut String, ir: &CircuitIR, indent: &str, is_full
                     "{body}state.device_{dev_num}_tj = DEVICE_{dev_num}_TAMB;\n\
                      {body}state.device_{dev_num}_is = DEVICE_{dev_num}_IS;\n\
                      {body}state.device_{dev_num}_n_vt = DEVICE_{dev_num}_N_VT;\n"
+                ));
+            }
+            DeviceParams::Tube(tp) if tp.has_self_heating() => {
+                // Triode: only Tj is carried as runtime state. The Vgk
+                // bias shift is computed on the fly at the NR call site.
+                code.push_str(&format!(
+                    "{body}state.device_{dev_num}_tj = DEVICE_{dev_num}_TAMB;\n"
                 ));
             }
             _ => {}
@@ -3918,6 +3925,28 @@ impl RustEmitter {
                          \x20   }}\n"
                     ));
                 }
+                crate::codegen::ir::DeviceParams::Tube(tp) if tp.has_self_heating() => {
+                    // Triode Schur path. Pdiss = Ip·Vpk + Ig·Vgk using
+                    // converged `i_nl` for Ip/Ig and the same N_V·v contraction
+                    // the BJT path uses for Vbe/Vbc.
+                    let s = slot.start_idx;
+                    let s1 = s + 1;
+                    code.push_str(&format!(
+                        "    {{ // Triode {dev_num} self-heating thermal update\n\
+                         \x20       let ip = i_nl[{s}];\n\
+                         \x20       let ig = i_nl[{s1}];\n\
+                         \x20       let mut vgk_sum = 0.0f64;\n\
+                         \x20       let mut vpk_sum = 0.0f64;\n\
+                         \x20       for j in 0..N {{ vgk_sum += N_V[{s}][j] * v[j]; }}\n\
+                         \x20       for j in 0..N {{ vpk_sum += N_V[{s1}][j] * v[j]; }}\n\
+                         \x20       let p = ip * vpk_sum + ig * vgk_sum;\n\
+                         \x20       let dt = 1.0 / SAMPLE_RATE;\n\
+                         \x20       let d_tj = (p - (state.device_{dev_num}_tj - DEVICE_{dev_num}_TAMB) / DEVICE_{dev_num}_RTH) / DEVICE_{dev_num}_CTH * dt;\n\
+                         \x20       state.device_{dev_num}_tj += d_tj;\n\
+                         \x20       state.device_{dev_num}_tj = state.device_{dev_num}_tj.clamp(200.0, 500.0);\n\
+                         \x20   }}\n"
+                    ));
+                }
                 _ => {}
             }
         }
@@ -4088,13 +4117,19 @@ impl RustEmitter {
                     // shared (primary + BE fallback) DK Schur emitter.
                     emit_pentode_nr_dk_stamp(code, tp, d, s, indent);
                 } else {
+                    // Self-heating Vgk drift: see `nr_helpers.rs` for rationale.
+                    let vgk_expr = if tp.has_self_heating() {
+                        format!("(v_d{s} + DEVICE_{d}_VBIAS_ALPHA * (state.device_{d}_tj - DEVICE_{d}_TAMB))")
+                    } else {
+                        format!("v_d{s}")
+                    };
                     if tp.has_rgi() {
                         code.push_str(&format!(
-                            "{indent}let (i_dev{s}, i_dev{s1}, tube{d}_jac) = tube_evaluate_with_rgi(v_d{s}, v_d{s1}, state.device_{d}_mu, state.device_{d}_ex, state.device_{d}_kg1, state.device_{d}_kp, state.device_{d}_kvb, state.device_{d}_ig_max, state.device_{d}_vgk_onset, state.device_{d}_lambda, DEVICE_{d}_RGI);\n"
+                            "{indent}let (i_dev{s}, i_dev{s1}, tube{d}_jac) = tube_evaluate_with_rgi({vgk_expr}, v_d{s1}, state.device_{d}_mu, state.device_{d}_ex, state.device_{d}_kg1, state.device_{d}_kp, state.device_{d}_kvb, state.device_{d}_ig_max, state.device_{d}_vgk_onset, state.device_{d}_lambda, DEVICE_{d}_RGI);\n"
                         ));
                     } else {
                         code.push_str(&format!(
-                            "{indent}let (i_dev{s}, i_dev{s1}, tube{d}_jac) = tube_evaluate(v_d{s}, v_d{s1}, state.device_{d}_mu, state.device_{d}_ex, state.device_{d}_kg1, state.device_{d}_kp, state.device_{d}_kvb, state.device_{d}_ig_max, state.device_{d}_vgk_onset, state.device_{d}_lambda);\n"
+                            "{indent}let (i_dev{s}, i_dev{s1}, tube{d}_jac) = tube_evaluate({vgk_expr}, v_d{s1}, state.device_{d}_mu, state.device_{d}_ex, state.device_{d}_kg1, state.device_{d}_kp, state.device_{d}_kvb, state.device_{d}_ig_max, state.device_{d}_vgk_onset, state.device_{d}_lambda);\n"
                         ));
                     }
                     code.push_str(&format!(
@@ -5997,6 +6032,26 @@ impl RustEmitter {
                              \x20   }}\n"
                         ));
                 }
+                DeviceParams::Tube(tp) if tp.has_self_heating() => {
+                    // Triode full-LU path. Same shape as the Schur variant.
+                    let s = slot.start_idx;
+                    let s1 = s + 1;
+                    code.push_str(&format!(
+                            "    {{ // Triode {dev_num} self-heating thermal update\n\
+                             \x20       let ip = i_nl[{s}];\n\
+                             \x20       let ig = i_nl[{s1}];\n\
+                             \x20       let mut vgk_sum = 0.0f64;\n\
+                             \x20       let mut vpk_sum = 0.0f64;\n\
+                             \x20       for j in 0..N {{ vgk_sum += N_V[{s}][j] * v[j]; }}\n\
+                             \x20       for j in 0..N {{ vpk_sum += N_V[{s1}][j] * v[j]; }}\n\
+                             \x20       let p = ip * vpk_sum + ig * vgk_sum;\n\
+                             \x20       let dt = 1.0 / SAMPLE_RATE;\n\
+                             \x20       let d_tj = (p - (state.device_{dev_num}_tj - DEVICE_{dev_num}_TAMB) / DEVICE_{dev_num}_RTH) / DEVICE_{dev_num}_CTH * dt;\n\
+                             \x20       state.device_{dev_num}_tj += d_tj;\n\
+                             \x20       state.device_{dev_num}_tj = state.device_{dev_num}_tj.clamp(200.0, 500.0);\n\
+                             \x20   }}\n"
+                        ));
+                }
                 _ => {}
             }
         }
@@ -6616,9 +6671,15 @@ impl RustEmitter {
                             ));
                         }
                     } else if tp.has_rgi() {
+                        // Self-heating Vgk drift: see `nr_helpers.rs`.
+                        let vgk_init = if tp.has_self_heating() {
+                            format!("v_nl[{s}] + DEVICE_{dev_num}_VBIAS_ALPHA * (state.device_{dev_num}_tj - DEVICE_{dev_num}_TAMB)")
+                        } else {
+                            format!("v_nl[{s}]")
+                        };
                         code.push_str(&format!(
                             "{indent}{{ // Tube {dev_num} (RGI)\n\
-                             {indent}    let vgk = v_nl[{s}];\n\
+                             {indent}    let vgk = {vgk_init};\n\
                              {indent}    let vpk = v_nl[{s1}];\n\
                              {indent}    let (ip_t, ig_t, jac) = tube_evaluate_with_rgi(vgk, vpk, state.device_{dev_num}_mu, state.device_{dev_num}_ex, state.device_{dev_num}_kg1, state.device_{dev_num}_kp, state.device_{dev_num}_kvb, state.device_{dev_num}_ig_max, state.device_{dev_num}_vgk_onset, state.device_{dev_num}_lambda, DEVICE_{dev_num}_RGI);\n\
                              {indent}    i_nl[{s}] = ip_t; i_nl[{s1}] = ig_t;\n\
@@ -6629,9 +6690,14 @@ impl RustEmitter {
                              {indent}}}\n"
                         ));
                     } else {
+                        let vgk_init = if tp.has_self_heating() {
+                            format!("v_nl[{s}] + DEVICE_{dev_num}_VBIAS_ALPHA * (state.device_{dev_num}_tj - DEVICE_{dev_num}_TAMB)")
+                        } else {
+                            format!("v_nl[{s}]")
+                        };
                         code.push_str(&format!(
                             "{indent}{{ // Tube {dev_num}\n\
-                             {indent}    let vgk = v_nl[{s}];\n\
+                             {indent}    let vgk = {vgk_init};\n\
                              {indent}    let vpk = v_nl[{s1}];\n\
                              {indent}    let (ip_t, ig_t, jac) = tube_evaluate(vgk, vpk, state.device_{dev_num}_mu, state.device_{dev_num}_ex, state.device_{dev_num}_kg1, state.device_{dev_num}_kp, state.device_{dev_num}_kvb, state.device_{dev_num}_ig_max, state.device_{dev_num}_vgk_onset, state.device_{dev_num}_lambda);\n\
                              {indent}    i_nl[{s}] = ip_t; i_nl[{s1}] = ig_t;\n\
@@ -6769,14 +6835,28 @@ impl RustEmitter {
                             ));
                         }
                     } else if tp.has_rgi() {
+                        // Final eval matches NR stamp: Vgk is thermally shifted
+                        // when `has_self_heating()`. The grid-current path
+                        // `tube_ig_with_rgi` also sees the shifted Vgk for
+                        // contact-potential consistency.
+                        let vgk_fe = if tp.has_self_heating() {
+                            format!("(v_nl_final[{s}] + DEVICE_{dev_num}_VBIAS_ALPHA * (state.device_{dev_num}_tj - DEVICE_{dev_num}_TAMB))")
+                        } else {
+                            format!("v_nl_final[{s}]")
+                        };
                         code.push_str(&format!(
-                            "{indent}i_nl[{s}] = tube_ip_with_rgi(v_nl_final[{s}], v_nl_final[{s1}], state.device_{dev_num}_mu, state.device_{dev_num}_ex, state.device_{dev_num}_kg1, state.device_{dev_num}_kp, state.device_{dev_num}_kvb, state.device_{dev_num}_lambda, state.device_{dev_num}_ig_max, state.device_{dev_num}_vgk_onset, DEVICE_{dev_num}_RGI);\n\
-                             {indent}i_nl[{s1}] = tube_ig_with_rgi(v_nl_final[{s}], state.device_{dev_num}_ig_max, state.device_{dev_num}_vgk_onset, DEVICE_{dev_num}_RGI);\n"
+                            "{indent}i_nl[{s}] = tube_ip_with_rgi({vgk_fe}, v_nl_final[{s1}], state.device_{dev_num}_mu, state.device_{dev_num}_ex, state.device_{dev_num}_kg1, state.device_{dev_num}_kp, state.device_{dev_num}_kvb, state.device_{dev_num}_lambda, state.device_{dev_num}_ig_max, state.device_{dev_num}_vgk_onset, DEVICE_{dev_num}_RGI);\n\
+                             {indent}i_nl[{s1}] = tube_ig_with_rgi({vgk_fe}, state.device_{dev_num}_ig_max, state.device_{dev_num}_vgk_onset, DEVICE_{dev_num}_RGI);\n"
                         ));
                     } else {
+                        let vgk_fe = if tp.has_self_heating() {
+                            format!("(v_nl_final[{s}] + DEVICE_{dev_num}_VBIAS_ALPHA * (state.device_{dev_num}_tj - DEVICE_{dev_num}_TAMB))")
+                        } else {
+                            format!("v_nl_final[{s}]")
+                        };
                         code.push_str(&format!(
-                            "{indent}i_nl[{s}] = tube_ip(v_nl_final[{s}], v_nl_final[{s1}], state.device_{dev_num}_mu, state.device_{dev_num}_ex, state.device_{dev_num}_kg1, state.device_{dev_num}_kp, state.device_{dev_num}_kvb, state.device_{dev_num}_lambda);\n\
-                             {indent}i_nl[{s1}] = tube_ig(v_nl_final[{s}], state.device_{dev_num}_ig_max, state.device_{dev_num}_vgk_onset);\n"
+                            "{indent}i_nl[{s}] = tube_ip({vgk_fe}, v_nl_final[{s1}], state.device_{dev_num}_mu, state.device_{dev_num}_ex, state.device_{dev_num}_kg1, state.device_{dev_num}_kp, state.device_{dev_num}_kvb, state.device_{dev_num}_lambda);\n\
+                             {indent}i_nl[{s1}] = tube_ig({vgk_fe}, state.device_{dev_num}_ig_max, state.device_{dev_num}_vgk_onset);\n"
                         ));
                     }
                 }

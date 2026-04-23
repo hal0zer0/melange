@@ -205,9 +205,9 @@ pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS
 {% endif %}{% if num_transformer_groups > 0 %}{{ xfmr_nan_reset_lines }}{% endif %}{% for default in pot_defaults %}        state.pot_{{ loop.index0 }}_resistance = {{ default }};
         state.pot_{{ loop.index0 }}_resistance_prev = {{ default }};
 {% endfor %}{% if num_thermal_devices > 0 %}{% for td in thermal_devices %}        state.device_{{ td.dev_num }}_tj = DEVICE_{{ td.dev_num }}_TAMB;
-        state.device_{{ td.dev_num }}_is = DEVICE_{{ td.dev_num }}_IS;
+{% if td.has_is_scaling %}        state.device_{{ td.dev_num }}_is = DEVICE_{{ td.dev_num }}_IS;
         state.device_{{ td.dev_num }}_{{ td.vt_field_name }} = DEVICE_{{ td.dev_num }}_{{ td.vt_const_name }};
-{% endfor %}{% endif %}{% if has_be_fallback %}        state.be_cooldown = 0;
+{% endif %}{% endfor %}{% endif %}{% if has_be_fallback %}        state.be_cooldown = 0;
 {% endif %}{% if oversampling_factor > 1 %}        state.os_up_state = [0.0; {{ os_state_size }}];
         state.os_dn_state = [[0.0; {{ os_state_size }}]; NUM_OUTPUTS];
 {% endif %}{% if oversampling_4x %}        state.os_up_state_outer = [0.0; {{ os_state_size_outer }}];

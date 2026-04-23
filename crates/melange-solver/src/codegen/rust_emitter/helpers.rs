@@ -155,24 +155,45 @@ pub(super) struct DeviceParamEntry {
 
 /// Data for a device with self-heating enabled (passed to Tera templates).
 ///
-/// Covers both BJTs and diodes. `vt_field_name` / `vt_const_name` let the
-/// templates emit the correct identifier when resetting thermal state on a
-/// NaN recovery (BJT carries `state.device_N_vt` backed by `DEVICE_N_VT`;
-/// diode carries `state.device_N_n_vt` backed by `DEVICE_N_N_VT`).
+/// Covers BJTs, diodes, and triodes — three flavors that share the same
+/// envelope-temperature state field (`state.device_N_tj`) but differ in what
+/// downstream fields the thermal update drifts and how NR consumes them:
+///
+/// * **IS-scaling** (BJT, diode): thermal update also writes
+///   `state.device_N_is` and `state.device_N_{vt|n_vt}`. NR reads those
+///   drifted values directly inside the junction-current evaluation.
+///   `has_is_scaling = true` and `vt_field_name` / `vt_const_name` carry
+///   the correct identifier so NaN-recovery can restore nominal values.
+/// * **Vgk-bias-shift** (sharp-cutoff triode): thermal update touches only
+///   `state.device_N_tj`. The Koren coefficients are untouched; instead the
+///   NR call site adds `VBIAS_ALPHA · (Tj - TAMB)` to the Vgk input,
+///   modeling contact-potential drift with cathode temperature.
+///   `has_is_scaling = false` and the `vt_*` fields are unused placeholders.
 #[derive(Serialize)]
 pub(super) struct SelfHeatingDeviceData {
     /// Device index (0-based)
     pub(super) dev_num: usize,
-    /// Start index in M-dimensional NR space (Vd for diodes, Vbe/Ic for BJTs)
+    /// Start index in M-dimensional NR space (Vd for diodes, Vbe/Ic for BJTs,
+    /// Vgk/Ip for triodes).
     pub(super) start_idx: usize,
+    /// Whether this flavor drifts an ideality-scaled thermal voltage and an
+    /// IS(T) saturation current on each sample. BJT/diode: true (NR reads
+    /// both drifted fields). Triode: false (Koren coefficients are
+    /// untouched; drift rides on a Vgk bias-shift injected at the call
+    /// site instead).
+    pub(super) has_is_scaling: bool,
     /// Lowercase state-field suffix for the ideality-scaled thermal voltage
-    /// (`"vt"` for BJT, `"n_vt"` for diode).
+    /// (`"vt"` for BJT, `"n_vt"` for diode). Empty for flavors where
+    /// `has_is_scaling = false`; Tera templates guard accesses on
+    /// `has_is_scaling` so the empty string is never rendered.
     pub(super) vt_field_name: String,
-    /// Uppercase const-suffix for the same, e.g. `"VT"` or `"N_VT"`.
+    /// Uppercase const-suffix for the same, e.g. `"VT"` or `"N_VT"`. Empty
+    /// for flavors without IS-scaling.
     pub(super) vt_const_name: String,
 }
 
-/// Collect all devices that have self-heating enabled (BJTs and diodes).
+/// Collect all devices that have self-heating enabled (BJTs, diodes, and
+/// sharp-cutoff triodes).
 pub(super) fn self_heating_device_data(ir: &CircuitIR) -> Vec<SelfHeatingDeviceData> {
     ir.device_slots
         .iter()
@@ -181,14 +202,23 @@ pub(super) fn self_heating_device_data(ir: &CircuitIR) -> Vec<SelfHeatingDeviceD
             DeviceParams::Bjt(bp) if bp.has_self_heating() => Some(SelfHeatingDeviceData {
                 dev_num,
                 start_idx: slot.start_idx,
+                has_is_scaling: true,
                 vt_field_name: "vt".to_string(),
                 vt_const_name: "VT".to_string(),
             }),
             DeviceParams::Diode(dp) if dp.has_self_heating() => Some(SelfHeatingDeviceData {
                 dev_num,
                 start_idx: slot.start_idx,
+                has_is_scaling: true,
                 vt_field_name: "n_vt".to_string(),
                 vt_const_name: "N_VT".to_string(),
+            }),
+            DeviceParams::Tube(tp) if tp.has_self_heating() => Some(SelfHeatingDeviceData {
+                dev_num,
+                start_idx: slot.start_idx,
+                has_is_scaling: false,
+                vt_field_name: String::new(),
+                vt_const_name: String::new(),
             }),
             _ => None,
         })
