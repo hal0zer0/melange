@@ -2531,7 +2531,21 @@ impl CircuitIR {
         // is too stiff for trapezoidal and needs backward Euler.
         // Note: for DK codegen, auto_be=true means the circuit should be routed
         // to the nodal solver instead (BE on DK still diverges for high-S circuits).
-        let auto_be = if !config.backward_euler && n > 0 {
+        //
+        // Gated on `m > 0`: passive linear circuits (M=0) are inherently stable
+        // under trap-rule discretization — the bilinear transform preserves
+        // unit-circle eigenvalues exactly for imaginary poles, so any measured
+        // `rho > 1` is LU round-off, not physical instability. Forcing BE on a
+        // passive LC (e.g., MM cartridge LRC at ~10 kHz) over-damps the
+        // resonance peak the circuit is supposed to produce. The Nyquist
+        // artifact that motivates auto-BE (`docs/aidocs/NOISE.md`,
+        // 2026-04-19 nodal fix) is specific to the nonlinear `N_i·i_nl_prev`
+        // RHS stamp and doesn't exist when `m == 0`. Empirical signature
+        // before the gate: gold-press-cartridge peak was killed at fs ∈
+        // {88.2k, 96k, 150k, 300k, 384k} with spectral_radius ∈ 1.002..1.29,
+        // while adjacent rates sampled rho < 1.002 and produced the correct
+        // +0.9 dB @ 10 kHz peak.
+        let auto_be = if !config.backward_euler && n > 0 && m > 0 {
             // Compute spectral radius estimate via power iteration on S_trap * A_neg_trap
             let s_trap = &kernel.s;
             let a_neg_trap = &kernel.a_neg;

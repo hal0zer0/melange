@@ -8183,6 +8183,56 @@ C1 out 0 1u
     );
 }
 
+/// Passive linear LC circuits (M=0) must NOT get auto-promoted to backward
+/// Euler, regardless of spectral radius measured on `S·A_neg`. Bilinear
+/// trap discretization preserves unit-circle poles for imaginary eigenvalues
+/// (passive LC is always marginally stable in the continuous-time domain);
+/// any `rho > 1` from the power iteration is LU round-off, not physical
+/// stiffness. Promoting to BE over-damps the resonance peak — this is what
+/// killed the MM-cartridge ~10 kHz bump at fs ∈ {88.2k, 96k, 150k, 300k,
+/// 384k} before the `m > 0` gate landed in codegen::ir::CircuitIR::new.
+///
+/// The guard: at 96 kHz host rate, the generated code for a passive LC
+/// cartridge must emit ALPHA = 2·fs (trap, 192e3) rather than ALPHA = fs
+/// (backward Euler, 96e3). Fails immediately if anyone ever softens the
+/// `m > 0` gate or drops the Nyquist exclusion.
+#[test]
+fn test_passive_lc_no_auto_be_promotion() {
+    const SPICE: &str = "\
+MM Cartridge (Shure M97xE)
+L_coil   in        coil_out  500m
+R_coil   coil_out  out       660
+C_cable  out       0         200p
+R_load   out       0         47k
+.end
+";
+    // fs=96k was the broken rate: power iteration measured rho ≈ 1.017 on
+    // the DK Schur kernel's S·A_neg, tripping the auto-BE gate.
+    let config = CodegenConfig {
+        circuit_name: "passive_lc_no_be".to_string(),
+        sample_rate: 96_000.0,
+        input_node: 0,
+        output_nodes: vec![2],
+        input_resistance: 1.0,
+        dc_block: false,
+        ..CodegenConfig::default()
+    };
+    let netlist = Netlist::parse(SPICE).expect("parse");
+    let mna = MnaSystem::from_netlist(&netlist).expect("mna");
+    let kernel = DkKernel::from_mna(&mna, 96_000.0).expect("kernel");
+    let codegen = CodeGenerator::new(config);
+    let result = codegen.generate(&kernel, &mna, &netlist).expect("generate");
+    let alpha = extract_const_f64(&result.code, "ALPHA");
+    let fs = 96_000.0_f64;
+    let trap_alpha = 2.0 * fs;
+    let be_alpha = fs;
+    assert!(
+        (alpha - trap_alpha).abs() < 1.0,
+        "passive LC at fs=96 kHz was auto-promoted to backward Euler (ALPHA={alpha:.1}, expected trap ALPHA={trap_alpha:.1}, BE ALPHA={be_alpha:.1}).\n\
+         Check codegen::ir::CircuitIR::new auto_be gate — the `m > 0` guard must stay in place for passive LC resonance fidelity."
+    );
+}
+
 #[test]
 fn test_no_mismatch_is_byte_identical() {
     // Regression guard: when `.mismatch` is absent the generated code is
