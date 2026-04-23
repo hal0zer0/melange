@@ -91,6 +91,23 @@ fn generate_rc_noise_code(sample_rate: f64, seed: u64) -> String {
     code
 }
 
+fn generate_rc_noise_code_os(sample_rate: f64, seed: u64, os_factor: usize) -> String {
+    let config = CodegenConfig {
+        circuit_name: "rc_noise_psd_os".to_string(),
+        sample_rate,
+        input_node: 0,
+        output_nodes: vec![1],
+        input_resistance: 1.0,
+        dc_block: false,
+        noise_mode: NoiseMode::Thermal,
+        noise_master_seed: seed,
+        oversampling_factor: os_factor,
+        ..CodegenConfig::default()
+    };
+    let (code, _n, _m) = support::generate_circuit_code(RC_SPICE, &config);
+    code
+}
+
 fn generate_rc_noise_code_nodal(sample_rate: f64, seed: u64) -> String {
     let config = CodegenConfig {
         circuit_name: "rc_noise_psd_nodal".to_string(),
@@ -176,6 +193,78 @@ fn thermal_noise_matches_ktc_theorem() {
         v_baseline.to_bits(),
         "same seed produced different variance: baseline {v_baseline:.15e} \
          vs repeat {v_repeat:.15e}"
+    );
+}
+
+/// Oversampling invariance of thermal-noise calibration.
+///
+/// The kTC theorem output variance `k_B·T/C` is a continuous-time result.
+/// It should be independent of internal sample rate — what matters is the
+/// end-to-end output noise in the audio band. At 4× oversampling the
+/// per-internal-sample variance scales with `fs_internal`, but the
+/// decimation filter discards the out-of-band portion, leaving in-band
+/// output noise power unchanged. This test pins that claim empirically —
+/// if a future change accidentally makes oversampled builds louder or
+/// quieter than baseline by more than ~1 dB, it fails here.
+///
+/// Load-bearing: oomox Gold Press (4× OS, +49 dB closed-loop gain, RIAA in
+/// feedback) observed ~+45 dB over expected noise floor and asked whether
+/// OS was the culprit. This test answers that question at the calibration
+/// level — downstream audibility is a topology/weighting discussion, not a
+/// melange calibration bug.
+#[test]
+fn thermal_noise_ktc_invariant_under_oversampling() {
+    let sr_host = 48_000.0;
+    let n_samples = 1 << 17;
+    let warmup = 5_000;
+
+    let code_1x = generate_rc_noise_code_os(sr_host, 42, 1);
+    let code_4x = generate_rc_noise_code_os(sr_host, 42, 4);
+    let main = main_template(n_samples, warmup, sr_host);
+
+    let out_1x = support::compile_and_run(&code_1x, &main, "noise_ktc_os1");
+    let out_4x = support::compile_and_run(&code_4x, &main, "noise_ktc_os4");
+
+    let v_1x = parse_var(&out_1x.stdout, "baseline");
+    let v_4x = parse_var(&out_4x.stdout, "baseline");
+
+    // Both must land in the kTC window at host rate. The 4× case is the
+    // one the regression guards — 1× is already covered by
+    // `thermal_noise_matches_ktc_theorem` but having it here makes a
+    // calibration drift easier to triangulate.
+    let expected = K_B * 290.0 / CAP_F;
+    let r_1x = v_1x / expected;
+    let r_4x = v_4x / expected;
+    assert!(
+        (0.85..=1.15).contains(&r_1x),
+        "1× OS kTC ratio out of window: {r_1x:.3} (variance {v_1x:.3e} V² vs kT/C = {expected:.3e})"
+    );
+    assert!(
+        (0.85..=1.15).contains(&r_4x),
+        "4× OS kTC ratio out of window: {r_4x:.3} (variance {v_4x:.3e} V² vs kT/C = {expected:.3e}).\n\
+         This means melange's OS path changes the absolute in-band noise\n\
+         level relative to the unoversampled baseline — either the\n\
+         per-internal-sample variance isn't scaling linearly with\n\
+         fs_internal, or the decimation filter isn't unity-passband for\n\
+         the injected noise spectrum. Inspect dk_emitter.rs:3035-3046\n\
+         (noise_thermal_scale using fs_internal) and the halfband filter\n\
+         coefficients in emit_oversampler."
+    );
+
+    // Direct OS-invariance check — the two should agree much more
+    // tightly than the ±15% kTC window, because we're not comparing to
+    // continuous-time physics, we're comparing two discrete realizations
+    // that should match each other in expectation. Allow ±10% for RNG
+    // sampling variance at N=2^17.
+    let os_ratio = v_4x / v_1x;
+    let os_err = (os_ratio - 1.0).abs();
+    assert!(
+        os_err < 0.10,
+        "OS breaks noise invariance: var(4×)/var(1×) = {os_ratio:.4} (expected ≈ 1.0).\n\
+         variance 1× = {v_1x:.3e}, variance 4× = {v_4x:.3e}.\n\
+         If the ratio is ≈ 4.0 the per-sample variance is using fs_internal\n\
+         without decimation compensation; if ≈ 0.25 the decimation filter\n\
+         is double-discounting."
     );
 }
 
