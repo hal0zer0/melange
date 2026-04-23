@@ -26,6 +26,45 @@ silicon_1n4148()   IS=2.52e-9, n=1.752 (signal diode)
 silicon_ideal()    IS=1e-14, n=1.0    (textbook ideal)
 ```
 
+### Self-Heating (Shared With BJT)
+
+The same quasi-static electrothermal model used on BJTs applies to
+diodes when RTH is finite on the `.model D(...)` card. Updated once
+per sample, outside the NR loop:
+
+```
+dTj/dt = (P_diss − (Tj − Tamb)/Rth) / Cth
+P_diss = Vd · Id
+IS(T)  = IS_nom · (Tj/Tnom)^XTI · exp(EG/VT_nom · (1 − Tnom/Tj))
+N·VT(T) = (N·VT)_nom · (Tj/Tnom)
+```
+
+The `N·VT` scaling exploits the fact that `N·VT = N·k·T/q` scales
+linearly in T, so we don't need to decompose the stored `n_vt`
+product. Forward Euler when `dt < 2·Rth·Cth`, implicit Euler
+otherwise. Default `RTH=∞` makes the whole block codegen dead-code
+(guarded by `DiodeParams::has_self_heating()`).
+
+Parameters are identical to the BJT set:
+
+```
+RTH   Thermal resistance [K/W]   (default inf = disabled)
+CTH   Thermal capacitance [J/K]  (default 1e-3)
+XTI   IS temperature exponent    (default 3.0, Si)
+EG    Bandgap energy [eV]        (default 1.11, Si — use 0.67 for Ge)
+TAMB  Ambient temperature [K]    (default 300.15 = 27 °C)
+```
+
+Shipping circuits with diode self-heating enabled:
+- `pipe-shouter.cir` (1N4148 feedback clippers): `RTH=500 CTH=2e-4`
+- `sad-bastard.cir` (1N34A Ge doom-fuzz clamp): `RTH=1200 CTH=1e-4 EG=0.67`
+
+Validated analytically (`/tmp/thermal_test`, not committed): steady-state
+`Tj = TAMB + P·Rth` and τ = `RTH·CTH` match measurements to displayed
+precision on both Si and Ge. ngspice parity not applicable — SPICE3f5
+silently drops RTH/CTH on level-1 BJT and diode models, so
+"analytics-validated" is the correct and final bar.
+
 ## BJT (Ebers-Moll)
 
 M-dimension: **2 per BJT** for the standard `Bjt` device type
