@@ -1202,11 +1202,17 @@ fn compile_circuit_source(
         input_resistance,
         ..melange_solver::codegen::CodegenConfig::default()
     };
-    // Skip FA detection for nodal solver (it handles all M natively via N×N NR).
-    // FA only benefits the DK solver where M×M NR cost dominates.
-    // Skip FA detection for nodal solver — the nodal-Schur path handles all M natively
-    // and the FA+nodal DC OP interaction has indexing issues that need separate fixing.
-    let forward_active = if solver_override == "nodal" {
+    // Skip FA detection when the final solver will be Nodal:
+    //   (a) user explicitly overrode with --solver nodal
+    //   (b) auto-routing will send this circuit to Nodal because the
+    //       un-reduced DK kernel is trap-unstable or fails to build.
+    // Motivation: the FA-reduced DC-OP can converge to a parasitic
+    // equilibrium on push-pull topologies (see memory/wurli_power_amp_...).
+    // Since Nodal handles full-dim BJTs natively, FA is unnecessary there.
+    let forward_active = if solver_override == "nodal"
+        || (solver_override == "auto"
+            && should_skip_fa_for_nodal_reroute(&mna, sample_rate))
+    {
         std::collections::HashSet::new()
     } else {
         melange_solver::codegen::ir::CircuitIR::detect_forward_active_bjts(
@@ -1559,7 +1565,14 @@ fn compile_circuit_source(
     if routing.spectral_radius > 0.0 {
         println!("    Spectral radius: {:.4}", routing.spectral_radius);
     }
-    println!("    Integration: {}", if backward_euler { "Backward Euler" } else { "Trapezoidal" });
+    // Integration line: suppressed here when auto-BE will fire, since the
+    // DC-OP block below prints the definitive "Backward Euler (auto-selected…)"
+    // line once it knows `meta.backward_euler_auto`. Without this, both lines
+    // would print and contradict each other on nodal circuits where auto-BE
+    // swaps in BE matrices under the initial `backward_euler == false` config.
+    if !generated.meta.backward_euler_auto {
+        println!("    Integration: {}", if backward_euler { "Backward Euler" } else { "Trapezoidal" });
+    }
     if max_iter != 50 {
         println!("    Max NR iterations: {} (auto-tuned from M={}, ρ={:.2})", max_iter, kernel.m, routing.spectral_radius);
     }
@@ -2137,7 +2150,11 @@ fn simulate_circuit_source(
         output_nodes: vec![output_node_idx],
         ..CodegenConfig::default()
     };
-    let forward_active = if opts.solver == "nodal" {
+    // See compile path for rationale — mirrors the same gate.
+    let forward_active = if opts.solver == "nodal"
+        || (opts.solver == "auto"
+            && should_skip_fa_for_nodal_reroute(&mna, opts.sample_rate))
+    {
         std::collections::HashSet::new()
     } else {
         melange_solver::codegen::ir::CircuitIR::detect_forward_active_bjts(
@@ -2272,13 +2289,37 @@ fn simulate_circuit_source(
     };
     println!("  Solver: {} ({})", if use_nodal { "nodal" } else { "DK" }, decision.reason);
 
-    // When auto-routing to nodal, expand BJT internal nodes
-    if use_nodal && opts.solver != "nodal" {
-        let device_slots = melange_solver::codegen::ir::CircuitIR::build_device_info_with_mna(
-            &netlist, Some(&mna),
-        ).unwrap_or_default();
-        if !device_slots.is_empty() {
-            mna.expand_bjt_internal_nodes(&device_slots);
+    // When routing to nodal, expand BJT internal nodes so parasitic RB/RC/RE
+    // are modeled at the MNA level (eliminates per-device inner NR). Gate on
+    // K conditioning: when K_diag is strongly negative (< -100), the Schur
+    // NR body won't be used anyway (nodal falls back to full N×N LU), and
+    // expanding just inflates N with high-conductance nodes that ill-condition
+    // the LU. Mirrors the compile path at ~line 1522.
+    //
+    // Previously this was gated on `opts.solver != "nodal"`, which meant auto
+    // routing would expand but explicit --solver nodal would not. That
+    // asymmetry is wrong: when wurli-power-amp auto-routed to Nodal, internal
+    // node expansion fired unguarded and destabilized the NR, while
+    // `--solver nodal` skipped expansion entirely and ran stably. Now both
+    // paths take the same expansion decision.
+    if use_nodal {
+        let k_diag_min = if kernel.m > 0 {
+            (0..kernel.m)
+                .map(|i| kernel.k[i * kernel.m + i])
+                .fold(0.0_f64, f64::min)
+        } else {
+            0.0
+        };
+        let skip_expansion = k_diag_min < -100.0;
+        if !skip_expansion {
+            let device_slots = melange_solver::codegen::ir::CircuitIR::build_device_info_with_mna(
+                &netlist, Some(&mna),
+            ).unwrap_or_default();
+            if !device_slots.is_empty() {
+                mna.expand_bjt_internal_nodes(&device_slots);
+            }
+        } else {
+            println!("  Skipping internal node expansion (K ill-conditioned, using full LU)");
         }
     }
 
@@ -2448,6 +2489,58 @@ struct LinearizeOutcome {
 /// `simulate`, and `analyze` all call this. Previously the block lived only in
 /// `compile`; `simulate` / `analyze` passed an empty map, which is why the 5F1
 /// Champ single-ended 6V6 didn't get its free 3D→2D reduction in those paths.
+/// Pre-route check: would the current (un-reduced) MNA route to the nodal
+/// solver?
+///
+/// When the answer is yes, `detect_forward_active_bjts` must be skipped.
+/// Two independent reasons:
+///
+/// 1. FA is unnecessary when the final solver is Nodal — Nodal handles
+///    full-dimension BJT blocks natively via N×N NR, so collapsing BJTs
+///    to 1D saves nothing at the solver level.
+/// 2. FA reduction can *destabilize* the trapezoidal propagation operator.
+///    On wurli-power-amp the un-reduced spectral radius(S·A_neg) is 1.0018
+///    (stable) but FA collapses 7 of 8 BJTs to 1D and drives it to 1.0145.
+///    The router then flips back to Nodal post-FA, but the DC-OP solver
+///    has already converged on a parasitic equilibrium in the FA-reduced
+///    MNA (many internal nodes pinned to rails). Runtime NR never
+///    recovers. See memory/wurli_power_amp_phase2_recheck.md.
+///
+/// Uses the full `auto_route` decision (`route == Nodal`), not just the
+/// `dk_unstable` flag — `large_m`, ill-conditioning, and multi-transformer
+/// also imply "don't bother with FA". Circuits currently relying on
+/// FA+DK *under* the `large_m` threshold are unaffected because their
+/// un-reduced route is DK in the first place.
+fn should_skip_fa_for_nodal_reroute(
+    mna: &melange_solver::mna::MnaSystem,
+    sample_rate: f64,
+) -> bool {
+    use melange_solver::codegen::routing::{self, SolverRoute};
+    use melange_solver::dk::DkKernel;
+
+    let has_inductors = !mna.inductors.is_empty()
+        || !mna.coupled_inductors.is_empty()
+        || !mna.transformer_groups.is_empty();
+    let kernel_result = if has_inductors {
+        DkKernel::from_mna_augmented(mna, sample_rate)
+    } else {
+        DkKernel::from_mna(mna, sample_rate)
+    };
+    let (kernel, dk_failed) = match kernel_result {
+        Ok(k) => (k, false),
+        Err(_) => {
+            log::info!("Pre-route: DK kernel failed on un-reduced MNA → skip FA");
+            return true;
+        }
+    };
+    let decision = routing::auto_route(&kernel, mna, dk_failed);
+    log::info!(
+        "Pre-route (un-reduced MNA, N={}, M={}): route={:?}, reason={}",
+        kernel.n, kernel.m, decision.route, decision.reason
+    );
+    decision.route == SolverRoute::Nodal
+}
+
 #[allow(clippy::too_many_arguments)]
 fn apply_grid_off_reduction(
     mna: &mut melange_solver::mna::MnaSystem,
@@ -3149,10 +3242,15 @@ fn analyze_freq_response(
         output_nodes: vec![output_node_idx],
         ..CodegenConfig::default()
     };
-    let forward_active =
+    // Analyze always auto-routes; skip FA if routing will pick Nodal due
+    // to DK trap instability / kernel failure. See compile path.
+    let forward_active = if should_skip_fa_for_nodal_reroute(&mna, sample_rate) {
+        std::collections::HashSet::new()
+    } else {
         melange_solver::codegen::ir::CircuitIR::detect_forward_active_bjts(
             &mna, &netlist, &config_for_fa,
-        );
+        )
+    };
     if !forward_active.is_empty() {
         eprintln!(
             "  Forward-active BJTs: {:?} (M reduces by {})",

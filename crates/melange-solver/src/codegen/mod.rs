@@ -771,6 +771,7 @@ impl CodeGenerator {
             n: ir.topology.n,
             m: ir.topology.m,
             meta: CodegenMeta {
+                backward_euler_auto: ir.solver_config.backward_euler && !self.config.backward_euler,
                 dc_op_method: ir.dc_op_method.clone(),
                 dc_op_iterations: ir.dc_op_iterations,
                 dc_op_converged: ir.dc_op_converged,

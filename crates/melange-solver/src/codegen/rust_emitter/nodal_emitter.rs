@@ -350,9 +350,46 @@ impl RustEmitter {
         } else {
             ir.matrices.spectral_radius_s_aneg > 1.0
         };
+        // High-magnitude K with linearized devices: even with the linearization
+        // bypass otherwise keeping us on Schur, if |K| >> 1 the M-space NR
+        // becomes hypersensitive — a mA change in `i_nl` swings `v_d` by tens
+        // of volts, pushing junction exponentials into nonphysical regions and
+        // producing the oscillate-between-wrong-branches pattern that
+        // wurli-power-amp hits (M=14 Schur, max|K|=9.9e3, ~20% NR failure at
+        // 10 mV input). Full-LU NR operates in v-space where the capacitor
+        // matrix naturally bounds step size, and converges on the same
+        // circuit. Threshold 1e3: K*i_nl with mA currents gives 1 V/step, the
+        // edge of where device `safe_exp` clamping still gives physical
+        // results. See memory/wurli_power_amp_phase2_recheck.md.
+        // Near-marginal trapezoidal stability with many coupled NR dims and
+        // high-magnitude K pushes Schur NR into the oscillate-between-wrong-
+        // branches pattern. Full-LU NR operates in v-space where the
+        // capacitor matrix naturally bounds step size, and converges on
+        // circuits that Schur can't.
+        //
+        // Motivating case: wurli-power-amp (M=14 after linearized Q9,
+        // max|K|=9.9e3, spectral_radius(S*A_neg) under BE = 0.9999 — i.e.
+        // right at the L-stability edge). On Schur: ~20% NR failure at 10 mV
+        // input with divergent output. On full-LU: zero NaN resets, peak
+        // bounded, gain matches ngspice within 1 dB. All three gate
+        // conditions had to match to exclude M=14 circuits that are stable
+        // on Schur (sad-bastard rho=0.979, tungsten-thunder-horse rho=0.993,
+        // uniquorn rho=0.994):
+        //   - max|K| > 1e3: strong nonlinear coupling (i_nl-step amplifies
+        //     in v-space)
+        //   - M ≥ 10: enough coupled dims that Schur step-direction error
+        //     compounds (basic-bitch at M=8 has max|K|=6e4 and is fine)
+        //   - rho > 0.995: marginal trap/BE stability means any NR
+        //     over-correction persists through several samples
+        // See memory/wurli_power_amp_phase2_recheck.md.
+        let k_large_magnitude_with_linearization = linearized_bypass
+            && k_max_abs > 1.0e3
+            && m >= 10
+            && ir.matrices.spectral_radius_s_aneg > 0.995;
+
         let use_full_nodal = if linearized_bypass {
-            // Only k_degenerate and spectral radius can block Schur
-            k_degenerate || schur_unstable
+            // Only k_degenerate, spectral radius, or large-|K| can block Schur
+            k_degenerate || schur_unstable || k_large_magnitude_with_linearization
         } else {
             has_positive_k_with_current
                 || k_diag_min < -1e12
@@ -413,6 +450,11 @@ impl RustEmitter {
                 log::warn!(
                     "Nodal: using full N×N LU NR (spectral_radius(S*A_neg) = {:.4}, Schur feedback unstable)",
                     ir.matrices.spectral_radius_s_aneg
+                );
+            } else if k_large_magnitude_with_linearization {
+                log::warn!(
+                    "Nodal: using full N×N LU NR (max|K|={:.2e} with linearized devices — Schur NR in M-space hypersensitive to i_nl steps; v-space NR converges better)",
+                    k_max_abs
                 );
             } else {
                 log::warn!(
