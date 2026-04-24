@@ -2288,9 +2288,19 @@ impl RustEmitter {
         );
 
         if factor == 2 {
-            Self::emit_2x_wrapper(&mut code, num_outputs, ir.dc_block);
+            Self::emit_2x_wrapper(
+                &mut code,
+                num_outputs,
+                ir.dc_block,
+                ir.solver_config.output_clamp_v,
+            );
         } else if factor == 4 {
-            Self::emit_4x_wrapper(&mut code, num_outputs, ir.dc_block);
+            Self::emit_4x_wrapper(
+                &mut code,
+                num_outputs,
+                ir.dc_block,
+                ir.solver_config.output_clamp_v,
+            );
         }
 
         code.push_str("}\n\n");
@@ -2336,7 +2346,12 @@ impl RustEmitter {
     }
 
     /// Emit the 2x oversampling wrapper body.
-    pub(super) fn emit_2x_wrapper(code: &mut String, num_outputs: usize, dc_block: bool) {
+    pub(super) fn emit_2x_wrapper(
+        code: &mut String,
+        num_outputs: usize,
+        dc_block: bool,
+        clamp_v: f64,
+    ) {
         // Upsample: halfband → 2 samples (single input)
         code.push_str(
             "    // Upsample: half-band filter produces 2 samples at internal rate\n\
@@ -2358,9 +2373,9 @@ impl RustEmitter {
         code.push_str("        let (_, dn2_odd) = os_halfband(out_odd[out_idx], &OS_COEFFS, &mut state.os_dn_state[out_idx]);\n");
         code.push_str("        let v = (dn1_even + dn2_odd) * 0.5;\n");
         if dc_block {
-            code.push_str(
-                "        result[out_idx] = if v.is_finite() { v.clamp(-10.0, 10.0) } else { 0.0 };\n",
-            );
+            code.push_str(&format!(
+                "        result[out_idx] = if v.is_finite() {{ v.clamp(-{clamp_v:e}, {clamp_v:e}) }} else {{ 0.0 }};\n",
+            ));
         } else {
             code.push_str("        result[out_idx] = if v.is_finite() { v } else { 0.0 };\n");
         }
@@ -2370,7 +2385,12 @@ impl RustEmitter {
     }
 
     /// Emit the 4x oversampling wrapper body (cascaded 2x stages).
-    pub(super) fn emit_4x_wrapper(code: &mut String, num_outputs: usize, dc_block: bool) {
+    pub(super) fn emit_4x_wrapper(
+        code: &mut String,
+        num_outputs: usize,
+        dc_block: bool,
+        clamp_v: f64,
+    ) {
         // Outer upsample: 1 → 2 at 2x rate (single input)
         code.push_str(
             "    // Outer upsample: 1 → 2 samples at 2x rate\n\
@@ -2422,9 +2442,9 @@ impl RustEmitter {
         code.push_str("        );\n");
         code.push_str("        let v = (dn_outer_e + dn_outer_o) * 0.5;\n");
         if dc_block {
-            code.push_str(
-                "        result[out_idx] = if v.is_finite() { v.clamp(-10.0, 10.0) } else { 0.0 };\n",
-            );
+            code.push_str(&format!(
+                "        result[out_idx] = if v.is_finite() {{ v.clamp(-{clamp_v:e}, {clamp_v:e}) }} else {{ 0.0 }};\n",
+            ));
         } else {
             code.push_str("        result[out_idx] = if v.is_finite() { v } else { 0.0 };\n");
         }

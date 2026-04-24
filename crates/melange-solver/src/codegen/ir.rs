@@ -207,6 +207,10 @@ pub struct SolverConfig {
     /// Output scale factors applied after DC blocking (one per output)
     #[serde(default = "default_output_scales")]
     pub output_scales: Vec<f64>,
+    /// Post-DC-block output limiter ceiling in volts. See
+    /// [`CodegenConfig::output_clamp_v`] for full docs.
+    #[serde(default = "default_output_clamp_v")]
+    pub output_clamp_v: f64,
     /// Silent samples to process after pot-triggered matrix rebuild (default 64).
     #[serde(default = "default_pot_settle_samples")]
     pub pot_settle_samples: usize,
@@ -1006,6 +1010,10 @@ fn default_oversampling_factor() -> usize {
 
 fn default_output_scales() -> Vec<f64> {
     vec![1.0]
+}
+
+fn default_output_clamp_v() -> f64 {
+    10.0
 }
 
 /// Sanitize a netlist name to a Rust `SCREAMING_SNAKE_CASE` constant-suffix:
@@ -2624,6 +2632,7 @@ impl CircuitIR {
             input_resistance: config.input_resistance,
             oversampling_factor: os_factor,
             output_scales: config.output_scales.clone(),
+            output_clamp_v: config.output_clamp_v,
             pot_settle_samples: config.pot_settle_samples,
             backward_euler: be,
             opamp_rail_mode: rail_mode.mode,
@@ -3680,6 +3689,7 @@ impl CircuitIR {
             input_resistance: config.input_resistance,
             oversampling_factor: config.oversampling_factor,
             output_scales: config.output_scales.clone(),
+            output_clamp_v: config.output_clamp_v,
             pot_settle_samples: config.pot_settle_samples,
             backward_euler: be,
             opamp_rail_mode: rail_mode.mode,

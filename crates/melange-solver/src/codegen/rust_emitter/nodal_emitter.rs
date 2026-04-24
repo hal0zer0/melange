@@ -211,7 +211,8 @@ fn emit_nodal_nan_reset(code: &mut String, ir: &CircuitIR, indent: &str, is_full
         if node < ir.dc_operating_point.len() {
             let dc_val = ir.dc_operating_point[node];
             let scale = ir.solver_config.output_scales.get(oi).copied().unwrap_or(1.0);
-            let out_val = (dc_val * scale).clamp(-10.0, 10.0);
+            let clamp_v = ir.solver_config.output_clamp_v;
+            let out_val = (dc_val * scale).clamp(-clamp_v, clamp_v);
             code.push_str(&format!("{body}nan_out[{oi}] = {out_val:.17e};\n"));
         }
     }
@@ -1237,7 +1238,7 @@ impl RustEmitter {
         }
         code.push_str("    /// Diagnostic: peak absolute output (pre-clamp)\n");
         code.push_str("    pub diag_peak_output: f64,\n");
-        code.push_str("    /// Diagnostic: number of times output exceeded +/-10V\n");
+        code.push_str("    /// Diagnostic: number of times output exceeded the ±output_clamp_v ceiling\n");
         code.push_str("    pub diag_clamp_count: u64,\n");
         code.push_str("    /// Diagnostic: number of times NR hit max iterations\n");
         code.push_str("    pub diag_nr_max_iter_count: u64,\n");
@@ -4015,8 +4016,13 @@ impl RustEmitter {
             "        if abs_out > state.diag_peak_output { state.diag_peak_output = abs_out; }\n",
         );
         if ir.dc_block {
-            code.push_str("        if abs_out > 10.0 { state.diag_clamp_count += 1; }\n");
-            code.push_str("        output[out_idx] = scaled.clamp(-10.0, 10.0);\n");
+            let clamp_v = ir.solver_config.output_clamp_v;
+            code.push_str(&format!(
+                "        if abs_out > {clamp_v:e} {{ state.diag_clamp_count += 1; }}\n"
+            ));
+            code.push_str(&format!(
+                "        output[out_idx] = scaled.clamp(-{clamp_v:e}, {clamp_v:e});\n"
+            ));
         } else {
             code.push_str(
                 "        output[out_idx] = if scaled.is_finite() { scaled } else { 0.0 };\n",
@@ -6126,8 +6132,13 @@ impl RustEmitter {
             "        if abs_out > state.diag_peak_output { state.diag_peak_output = abs_out; }\n",
         );
         if ir.dc_block {
-            code.push_str("        if abs_out > 10.0 { state.diag_clamp_count += 1; }\n");
-            code.push_str("        output[out_idx] = scaled.clamp(-10.0, 10.0);\n");
+            let clamp_v = ir.solver_config.output_clamp_v;
+            code.push_str(&format!(
+                "        if abs_out > {clamp_v:e} {{ state.diag_clamp_count += 1; }}\n"
+            ));
+            code.push_str(&format!(
+                "        output[out_idx] = scaled.clamp(-{clamp_v:e}, {clamp_v:e});\n"
+            ));
         } else {
             code.push_str(
                 "        output[out_idx] = if scaled.is_finite() { scaled } else { 0.0 };\n",

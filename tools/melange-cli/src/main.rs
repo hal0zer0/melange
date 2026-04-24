@@ -71,6 +71,15 @@ enum Commands {
         #[arg(long, default_value = "1.0")]
         output_scale: f64,
 
+        /// Post-DC-block output limiter ceiling in volts. The generated code emits
+        /// `scaled.clamp(-V, V)` after DC blocking and `diag_clamp_count` increments
+        /// above this threshold. Default 10.0 V preserves the historical "Signal Level
+        /// Contract" (see docs/aidocs/SIGNAL_LEVELS.md). Raise for circuits with rails
+        /// above ±10 V (e.g. a power amp at ±22 V rails needs 30 or higher). Ignored
+        /// when DC blocking is disabled.
+        #[arg(long, default_value = "10.0")]
+        output_clamp: f64,
+
         /// Add Input Level and Output Level parameters to the plugin (default: true)
         #[arg(long, default_value = "true")]
         with_level_params: bool,
@@ -549,6 +558,7 @@ fn main() -> Result<()> {
             max_iter,
             tolerance,
             output_scale,
+            output_clamp,
             format,
             with_level_params,
             no_level_params,
@@ -588,6 +598,12 @@ fn main() -> Result<()> {
             }
             if oversampling != 1 && oversampling != 2 && oversampling != 4 {
                 anyhow::bail!("oversampling must be 1, 2, or 4, got {}", oversampling);
+            }
+            if output_clamp <= 0.0 || !output_clamp.is_finite() {
+                anyhow::bail!(
+                    "--output-clamp must be positive and finite, got {}",
+                    output_clamp
+                );
             }
 
             // Parse op-amp rail mode. Unknown values are user errors, not silent fallbacks.
@@ -648,6 +664,7 @@ fn main() -> Result<()> {
                 max_iter,
                 tolerance,
                 output_scale,
+                output_clamp,
                 format,
                 level_params,
                 input_resistance_flag,
@@ -992,6 +1009,7 @@ fn compile_circuit_source(
     max_iter: usize,
     tolerance: f64,
     output_scale: f64,
+    output_clamp: f64,
     format: OutputFormat,
     with_level_params: bool,
     input_resistance_flag: Option<f64>,
@@ -1481,6 +1499,7 @@ fn compile_circuit_source(
         max_iterations: max_iter,
         tolerance,
         output_scales,
+        output_clamp_v: output_clamp,
         include_dc_op: true,
         input_resistance,
         oversampling_factor: oversampling,
@@ -1591,9 +1610,10 @@ fn compile_circuit_source(
     println!("    Oversampling: {}×", oversampling);
     println!("    Input: node \"{}\", resistance {}Ω ({})", input_node, input_resistance, ir_source);
     println!(
-        "    Output: node \"{}\", scale {}",
+        "    Output: node \"{}\", scale {}, clamp ±{} V",
         output_node_names.join(", "),
-        output_scale
+        output_scale,
+        output_clamp,
     );
     println!("    DC block: {}", if !no_dc_block { "enabled (5 Hz HPF)" } else { "disabled" });
     // DC operating point
@@ -2341,6 +2361,7 @@ fn simulate_circuit_source(
         output_nodes,
         oversampling_factor: opts.oversampling,
         output_scales,
+        output_clamp_v: 10.0,
         include_dc_op: true,
         dc_op_max_iterations: 200,
         dc_op_tolerance: 1e-9,
@@ -3391,6 +3412,7 @@ fn analyze_freq_response(
         output_nodes: vec![output_node_idx],
         oversampling_factor: 1,
         output_scales: vec![1.0],
+        output_clamp_v: 10.0,
         include_dc_op: true,
         dc_op_max_iterations: 200,
         dc_op_tolerance: 1e-9,

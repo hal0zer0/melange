@@ -10,7 +10,7 @@ All internal processing operates in **volts**:
 
 | Stage | Input | Output | Range |
 |-------|-------|--------|-------|
-| `process_sample(v)` | Volts | Volts (DC-blocked) | ±10V clamped |
+| `process_sample(v)` | Volts | Volts (DC-blocked) | ±`output_clamp_v` V clamped (default ±10 V) |
 | WAV file (f32) | 1.0 = 1V | 1.0 = 1V | ±1.0 typical |
 | Plugin audio buffer | ±1.0 float | ±1.0 float | DAW standard |
 
@@ -30,10 +30,11 @@ The DC block is transparent for audio-frequency signals (>20Hz) and settles with
 
 ## Output Scaling
 
-After DC blocking, the output is multiplied by `OUTPUT_SCALE` (default 1.0) and clamped to ±10V:
+After DC blocking, the output is multiplied by `OUTPUT_SCALE` (default 1.0) and clamped to
+`±output_clamp_v` (default ±10 V):
 
 ```
-output = (dc_blocked * OUTPUT_SCALE).clamp(-10.0, 10.0)
+output = (dc_blocked * OUTPUT_SCALE).clamp(-OUTPUT_CLAMP_V, OUTPUT_CLAMP_V)
 ```
 
 `--output-scale` exists as a CLI flag for **volts → DAW-unit mapping only**
@@ -43,6 +44,18 @@ convention). It is **not** a knob for fixing simulation errors. Per `CLAUDE.md`:
 errors — it's a voltage→DAW-unit mapping, not a bug fix."* If a circuit produces
 a wrong amplitude, the bug is in the solver/device-models, not in the output
 scale.
+
+`--output-clamp <V>` raises (or lowers) the post-DC-block ceiling when a circuit's
+rails exceed ±10 V. The flag is ignored when DC blocking is disabled
+(`--no-dc-block`) since the clamp is only emitted on the DC-blocked path. Setting
+it below the natural rail voltage hard-clips the output — use only to match a real
+limiter, never to work around simulation errors. Typical values:
+
+| Circuit class | `--output-clamp` |
+|---------------|------------------|
+| Line-level op-amp, tube preamp, distortion pedal | `10` (default) |
+| Class AB push-pull power amp at ±22 V rails | `30` |
+| High-voltage guitar amp at ±300 V rails | leave default and use `--output-scale 0.033` to map to ±10 V |
 
 ## Plugin Level Controls
 
@@ -72,7 +85,7 @@ Generated code tracks diagnostic counters in `CircuitState`:
 | Field | Description |
 |-------|-------------|
 | `diag_peak_output` | Peak absolute output (pre-clamp) |
-| `diag_clamp_count` | Times output exceeded ±10V |
+| `diag_clamp_count` | Times output exceeded ±`output_clamp_v` |
 | `diag_nr_max_iter_count` | Times Newton-Raphson hit max iterations |
 | `diag_nan_reset_count` | Times NaN triggered state reset |
 

@@ -243,6 +243,15 @@ pub struct CodegenConfig {
     pub oversampling_factor: usize,
     /// Output scale factors applied after DC blocking (one per output, default [1.0])
     pub output_scales: Vec<f64>,
+    /// Post-DC-block output limiter ceiling (volts). Generated code emits
+    /// `scaled.clamp(-output_clamp_v, output_clamp_v)` and the diag_clamp_count
+    /// increments above this threshold. Default 10.0 V preserves the historical
+    /// "Signal Level Contract" (see `docs/aidocs/SIGNAL_LEVELS.md`). Raise for
+    /// circuits whose rails exceed ±10 V (e.g. a Wurlitzer 200A power amp at
+    /// ±22 V needs ±30 V or higher); leave at default for line-level circuits.
+    /// Ignored when DC blocking is disabled — the scaled output is still
+    /// NaN-guarded but not clamped.
+    pub output_clamp_v: f64,
     /// Include DC operating point in generated code
     pub include_dc_op: bool,
     /// Maximum NR iterations for DC operating point solver
@@ -336,6 +345,12 @@ impl CodegenConfig {
                 )));
             }
         }
+        if !(self.output_clamp_v > 0.0 && self.output_clamp_v.is_finite()) {
+            return Err(CodegenError::InvalidConfig(format!(
+                "output_clamp_v must be positive and finite, got {}",
+                self.output_clamp_v
+            )));
+        }
         if !self.output_scales.is_empty()
             && !self.output_nodes.is_empty()
             && self.output_scales.len() != self.output_nodes.len()
@@ -363,6 +378,7 @@ impl Default for CodegenConfig {
             output_nodes: vec![0],
             oversampling_factor: 1,
             output_scales: vec![1.0],
+            output_clamp_v: 10.0,
             include_dc_op: true,
             dc_op_max_iterations: 200,
             dc_op_tolerance: 1e-9,
