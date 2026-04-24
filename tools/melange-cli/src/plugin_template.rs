@@ -1051,6 +1051,46 @@ fn generate_lib_rs(
         options.ear_protection,
     );
 
+    // Defensive smoother reset for every param consumed via `.smoothed.next()` in the
+    // per-sample loop. The framework normally calls `update_smoother(sr, true)` on every
+    // param in `activate()`/`set_active()` before `initialize()` runs, but some DAW /
+    // wrapper paths skip that handshake — in which case `.smoothed.next()` returns 0.0
+    // forever while `.value()` still returns the param's default, silently pinning the
+    // plugin at "all controls at zero" regardless of the visible UI state.
+    //
+    // Emitting the explicit reset here makes the generated plugin robust against that
+    // handshake quirk. The reset is idempotent when the framework DID call
+    // `update_smoother(sr, true)` first.
+    let smoother_reset_block: String = {
+        let mut out = String::new();
+        if with_level_params {
+            out.push_str("        self.params.input_level.smoothed.reset(self.params.input_level.value());\n");
+            out.push_str("        self.params.output_level.smoothed.reset(self.params.output_level.value());\n");
+        }
+        if options.wet_dry_mix {
+            out.push_str("        self.params.mix.smoothed.reset(self.params.mix.value());\n");
+        }
+        for p in pots {
+            out.push_str(&format!(
+                "        self.params.pot_{i}.smoothed.reset(self.params.pot_{i}.value());\n",
+                i = p.index,
+            ));
+        }
+        for w in wipers {
+            out.push_str(&format!(
+                "        self.params.wiper_{i}.smoothed.reset(self.params.wiper_{i}.value());\n",
+                i = w.wiper_index,
+            ));
+        }
+        for g in gangs {
+            out.push_str(&format!(
+                "        self.params.gang_{i}.smoothed.reset(self.params.gang_{i}.value());\n",
+                i = g.index,
+            ));
+        }
+        out
+    };
+
     // Conditional sections based on num_outputs
     let (circuit_import, plugin_struct, plugin_default, init_method, reset_method, deactivate_method) = if num_outputs
         > 1
@@ -1084,8 +1124,9 @@ fn generate_lib_rs(
                     + FTZ_DAZ_BLOCK
                     + "\x20       self.current_sample_rate = buffer_config.sample_rate as f64;\n\
                  \x20       self.circuit_state = CircuitState::default();\n\
-                 \x20       self.circuit_state.set_sample_rate(buffer_config.sample_rate as f64);\n\
-                 \x20       true\n\
+                 \x20       self.circuit_state.set_sample_rate(buffer_config.sample_rate as f64);\n"
+                    + &smoother_reset_block
+                    + "\x20       true\n\
                  \x20   }",
                 "    fn reset(&mut self) {\n\
                  \x20       self.circuit_state.reset();\n\
@@ -1124,8 +1165,9 @@ fn generate_lib_rs(
                  \x20   ) -> bool {\n"
                     .to_string()
                     + FTZ_DAZ_BLOCK
-                    + "\x20       self.current_sample_rate = buffer_config.sample_rate as f64;\n\
-                 \x20       self.circuit_states = vec![{\n\
+                    + "\x20       self.current_sample_rate = buffer_config.sample_rate as f64;\n"
+                    + &smoother_reset_block
+                    + "\x20       self.circuit_states = vec![{\n\
                  \x20           let mut s = CircuitState::default();\n\
                  \x20           s.set_sample_rate(buffer_config.sample_rate as f64);\n\
                  \x20           s\n\
@@ -1175,8 +1217,9 @@ fn generate_lib_rs(
                     + FTZ_DAZ_BLOCK
                     + "\x20       let num_channels = audio_io_layout.main_input_channels\n\
                  \x20           .map(|c| c.get() as usize).unwrap_or(2);\n\
-                 \x20       self.current_sample_rate = buffer_config.sample_rate as f64;\n\
-                 \x20       self.circuit_states = (0..num_channels).map(|_| {\n\
+                 \x20       self.current_sample_rate = buffer_config.sample_rate as f64;\n"
+                    + &smoother_reset_block
+                    + "\x20       self.circuit_states = (0..num_channels).map(|_| {\n\
                  \x20           let mut s = CircuitState::default();\n\
                  \x20           s.set_sample_rate(buffer_config.sample_rate as f64);\n\
                  \x20           s\n\
@@ -1677,6 +1720,27 @@ mod tests {
     }
 
     #[test]
+    fn lib_emits_smoother_reset_for_pot_in_initialize() {
+        // Regression guard: every smoothed param consumed via `.smoothed.next()` in the
+        // per-sample loop must have a matching `.smoothed.reset(.value())` call inside
+        // `initialize()` so the plugin is robust against DAW paths that skip the framework's
+        // `update_smoother(sr, true)` on activate. Without this the param is stuck at 0 for
+        // the whole session regardless of the visible UI state (see openwurli tremolo regression).
+        let pots = vec![PotParamInfo {
+            index: 0,
+            name: "R1".to_string(),
+            min_resistance: 100.0,
+            max_resistance: 10000.0,
+            default_resistance: 5000.0,
+        }];
+        let lib = test_generate_lib_rs("test", false, &pots);
+        assert!(
+            lib.contains("self.params.pot_0.smoothed.reset(self.params.pot_0.value());"),
+            "initialize() must prime pot_0 smoother with its default; missing from:\n{lib}"
+        );
+    }
+
+    #[test]
     fn lib_with_pot_converts_position_to_resistance() {
         let pots = vec![PotParamInfo {
             index: 0,
@@ -1688,7 +1752,13 @@ mod tests {
         let lib = test_generate_lib_rs("test", false, &pots);
         // Position-to-resistance conversion: min + position * (max - min), per-sample smoothed
         assert!(lib.contains("self.params.pot_0.smoothed.next()"), "should use smoothed.next() for per-sample pot update");
-        assert!(!lib.contains("self.params.pot_0.value()"), "should not use raw .value() for pot (use .smoothed.next())");
+        // `.value()` is legitimate in smoother-reset lines inside `initialize()` (those read
+        // the param default to prime the smoother), but must never appear as a per-sample
+        // consumer producing `pot_0_val`. Check for the per-sample shape, not a blanket ban.
+        assert!(
+            !lib.contains("pot_0_val = ") || !lib.contains("self.params.pot_0.value() as f64"),
+            "per-sample pot_0_val must be produced via .smoothed.next(), not .value()"
+        );
         assert!(lib.contains("set_pot_0(pot_0_val)"));
     }
 
