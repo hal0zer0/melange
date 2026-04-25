@@ -505,7 +505,7 @@ fraction approaching 1.0), the mitigation ladder is unchanged — check
 stiffness first (`--force-trap` off, i.e. auto-BE on), then consider a
 1-pole lowpass on the per-sample Gaussian at `fs/4` before scaling.
 
-### Constant derivation — why `8`, not `4` or `2`
+### Constant derivation — why `8` and the two-draw anti-alias scheme
 
 Physical one-sided PSD of a resistor's Norton current noise is
 `S_i(f) = 4·k_B·T/R  [A²/Hz]` over `[0, fs/2]`, so a naïvely-calibrated
@@ -518,25 +518,66 @@ But melange stamps into the DK-trap MNA equation
 current-source stamp of `I` yields `2G · v_ss = I`, i.e., half the
 continuous-time DC gain. The input stamp compensates by double-stamping
 `(V_new + V_prev)·G_in` (so a DC step gets `2V·G_in` and the expected
-continuous response). The noise stamp, however, uses a single per-sample
-Gaussian draw and therefore sees the factor-of-½ gain directly.
+continuous response).
 
-Two equivalent fixes:
+**The two-draw scheme (shipped 2026-04-24)** uses `stamp = w_new + w_prev`
+where each draw `w` has amplitude `sqrt(4·k_B·T·fs/R) = scale/2`. The
+consecutive-sum stamp has PSD `4 · σ²_w · cos²(πf/fs)` — zero at Nyquist,
+flat at audio frequencies. This eliminates the Nyquist-pole artifact on
+nodes without shunt capacitors (see "Nyquist anti-aliasing" section below).
 
-1. Stamp `i_n[n+1] + i_n_prev` (two independent draws per sample — variance
-   of the sum is `2σ²`, matching the input-stamp symmetry).
-2. Stamp a single draw with variance `2σ²` — equivalent statistics, one
-   fewer RNG call. **Chosen for Phase 1.**
+The kTC invariant holds: because `cos²(πf/fs) ≈ 1` for `f << fs/2`, the
+low-frequency PSD matches the single-draw approach. The factor works out as:
+`S_effective = 4 · σ²_w · 1 = 4 · (4·k_B·T·fs/R) / (fs/2) · (1/2) = 4·k_B·T/R`
+after the trap-MNA 2G gain factor, matching the physical Norton PSD.
 
-Under fix (2), per-sample variance becomes `σ²' = 2 · 2·k_B·T·fs/R =
-4·k_B·T·fs/R`… which, re-expressed via the `sqrt(X·k_B·T·fs/R)` template
-used throughout the emitter, is `X = 8`. Hence `8.0`.
+`noise_thermal_scale = sqrt(8·k_B·T·fs)` is kept as-is; each draw uses
+`scale / 2` in the emitter hot loop. The emitted state field
+`noise_thermal_w_prev` holds the previous draw per source; zeroed at
+`default()` and `reset()`.
 
-Validation: `tests/noise_psd_validation.rs` asserts the output variance
-of a 10 kΩ / 100 nF RC lowpass with zero input matches
-`k_B·T/C ≈ 4.00e-14 V²` to within ±15 % — the R-independent Nyquist kTC
-equilibrium that falls out of this formula if and only if the per-sample
-variance is correct.
+Validation: `tests/noise_psd_validation.rs` asserts:
+- `thermal_noise_matches_ktc_theorem`: output variance of 10 kΩ / 100 nF RC
+  matches `k_B·T/C ≈ 4.00e-14 V²` within ±15%.
+- `thermal_noise_no_nyquist_artifact_on_resistor_only_output_node`: lag-1
+  autocorrelation > -0.5 and RMS < 100 µV on a diode circuit with a
+  resistor-only output node (would be ~1 mV RMS with lag-1 ≈ -1 without
+  the two-draw fix).
+
+### Nyquist anti-aliasing in thermal noise injection (2026-04-24)
+
+**Problem**: Trapezoidal integration creates a Nyquist pole at every MNA
+node that lacks a shunt capacitor. Specifically, for a purely resistive
+node `i`, `A_neg[i][i] = -G[i][i]`, giving eigenvalue `z = -1` at
+Nyquist. A single-sample white Gaussian injection at such a node excites
+this pole; the energy accumulates in a stationary `(+1, -1, +1, ...)` mode.
+
+Measured on `wurli-preamp.cir` (two-stage NPN CE amp with series output
+resistor R9=6.8k): before the fix, R9's thermal noise gave 950 µV RMS
+(lag-1 autocorr = -0.9999) vs the physical expectation of ~1 µV. Total
+output noise 1.3 mV vs ngspice ~8 µV. The variance also scaled roughly
+linearly with `fs` instead of being fs-independent (kTC invariant).
+
+**Root cause**: The physical Norton PSD `4·k_B·T/R` is white — it contains
+Nyquist energy. Injecting white Gaussian draws injects Nyquist energy.
+Nodes without C have no mechanism to absorb it; it accumulates indefinitely.
+
+**Fix**: Use `stamp = (w_new + w_prev) / sqrt(2)` — equivalently
+`w_new = (scale/2)·sqrt_inv_r·gaussian(); stamp = w_new + w_prev`.
+The sum's PSD is `∝ |1 + e^{-jωT}|^2 = 4·cos²(ωT/2)` — exactly zero at
+Nyquist. The `scale/2` ensures the low-frequency PSD matches the physical
+Norton PSD after the trap-MNA gain factor. See "Constant derivation" above.
+
+**Scope**: thermal noise only (Phase 1). Shot noise is injected at device
+junctions which all have 10 pF auto-inserted parasitics — no Nyquist pole.
+Flicker noise is pink-filtered (Kellett 7-pole) which naturally attenuates
+Nyquist. Re-evaluate if shot/flicker noise is found too loud on
+resistor-only nodes in future circuits.
+
+**Gotcha for future agents**: the kTC theorem test (`thermal_noise_matches_ktc_theorem`)
+passes even without the fix because the RC test circuit has a cap at the
+output node. The new `thermal_noise_no_nyquist_artifact_on_resistor_only_output_node`
+test is the load-bearing guard for this class of bug.
 
 ## Why Phase 1 alone still beats the field
 

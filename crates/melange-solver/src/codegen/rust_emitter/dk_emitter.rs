@@ -3008,7 +3008,9 @@ impl RustEmitter {
         state_fields.push_str("    pub temperature_k: f64,\n");
         state_fields.push_str("    /// Master seed recorded for reset() re-derivation.\n");
         state_fields.push_str("    pub noise_master_seed: u64,\n");
-        state_fields.push_str("    /// Precomputed sqrt(8·K_B·T·fs_internal). Per-source coefficient is this × sqrt(1/R). See kTC-theorem note at codegen site.\n");
+        state_fields.push_str("    /// Precomputed sqrt(8·K_B·T·fs_internal). Halved in the two-draw stamp\n");
+        state_fields.push_str("    /// (each draw uses scale/2 so consecutive-draw sum preserves kTC; see\n");
+        state_fields.push_str("    /// NOISE.md 'Constant derivation' and 'Nyquist anti-aliasing' sections).\n");
         state_fields.push_str("    pub noise_thermal_scale: f64,\n");
         state_fields.push_str("    /// Effective internal sample rate (host_rate × OVERSAMPLING_FACTOR).\n");
         state_fields.push_str("    /// Tracked so `set_temperature_k` can recompute `noise_thermal_scale`.\n");
@@ -3018,6 +3020,11 @@ impl RustEmitter {
         state_fields.push_str("    /// `.wiper` / `.runtime R` members) are refreshed inside the matching\n");
         state_fields.push_str("    /// `set_pot_N` / `set_runtime_R_<field>` setter.\n");
         state_fields.push_str("    pub noise_thermal_sqrt_inv_r: [f64; NOISE_THERMAL_N],\n");
+        state_fields.push_str("    /// Per-source previous-draw buffer for the two-draw Nyquist-anti-alias\n");
+        state_fields.push_str("    /// scheme. Each thermal stamp uses `w_new + w_prev` where w_new is the\n");
+        state_fields.push_str("    /// current draw (amplitude scale/2) and w_prev is the previous draw.\n");
+        state_fields.push_str("    /// Zeroed at default() and reset(). See NOISE.md 'Nyquist anti-aliasing'.\n");
+        state_fields.push_str("    pub noise_thermal_w_prev: [f64; NOISE_THERMAL_N],\n");
         if shot_n > 0 {
             state_fields.push_str("    /// Per-source xoshiro256++ state for shot noise — salted so streams\n");
             state_fields.push_str("    /// cannot share a prefix with thermal streams under any master seed.\n");
@@ -3097,6 +3104,7 @@ impl RustEmitter {
         default_fields.push_str("            noise_thermal_scale,\n");
         default_fields.push_str("            noise_fs: fs_internal,\n");
         default_fields.push_str("            noise_thermal_sqrt_inv_r: NOISE_THERMAL_SQRT_INV_R_DEFAULT,\n");
+        default_fields.push_str("            noise_thermal_w_prev: [0.0; NOISE_THERMAL_N],\n");
         if shot_n > 0 {
             default_fields.push_str("            noise_shot_rng,\n");
             default_fields.push_str("            noise_shot_gaussian_cache: [None; NOISE_SHOT_N],\n");
@@ -3123,6 +3131,8 @@ impl RustEmitter {
         reset_body.push_str("        // be re-updated by any subsequent set_pot_N / set_runtime_R call;\n");
         reset_body.push_str("        // this mirrors how reset() restores pot_<i>_resistance to nominal.\n");
         reset_body.push_str("        self.noise_thermal_sqrt_inv_r = NOISE_THERMAL_SQRT_INV_R_DEFAULT;\n");
+        reset_body.push_str("        // Clear two-draw buffer so silence after reset produces true zero output.\n");
+        reset_body.push_str("        self.noise_thermal_w_prev = [0.0; NOISE_THERMAL_N];\n");
         if shot_n > 0 {
             reset_body.push_str("        // Re-seed shot RNGs (same master, distinct salt from thermal).\n");
             reset_body.push_str("        self.noise_shot_rng = seed_noise_rngs_salted::<NOISE_SHOT_N>(self.noise_master_seed, NOISE_SHOT_SALT);\n");
@@ -3207,11 +3217,22 @@ impl RustEmitter {
         rhs_stamp.push_str("\n    // Authentic circuit noise — Phases 1 (thermal) + 2 (shot).\n");
         rhs_stamp.push_str("    // Skipped entirely (zero RNG calls) when noise_enabled is false.\n");
         rhs_stamp.push_str("    if state.noise_enabled {\n");
-        rhs_stamp.push_str("        let scale = state.noise_thermal_scale * state.noise_gain * state.thermal_gain;\n");
-        rhs_stamp.push_str("        if scale != 0.0 {\n");
+        // Two-draw Nyquist anti-alias: stamp = w_new + w_prev where each draw has
+        // amplitude scale/2. The sum zeros the Nyquist bin (|1 + e^{-jπ}|² = 0)
+        // while preserving low-frequency PSD. kTC theorem holds: the sum of two
+        // draws each with variance (scale/2)² × (1/R) reconstructs the same
+        // kT/C equilibrium as the old single-draw-at-scale approach, because the
+        // cos²(πf/fs) envelope integrates to the same low-frequency PSD as flat
+        // white when convolved with the RC lowpass (fc << fs/2). Verified in
+        // tests/noise_psd_validation.rs::thermal_noise_matches_ktc_theorem.
+        rhs_stamp.push_str("        // Two-draw thermal stamp: w_new + w_prev (Nyquist-zeroed, kTC-calibrated).\n");
+        rhs_stamp.push_str("        let scale_half = state.noise_thermal_scale * state.noise_gain * state.thermal_gain * 0.5;\n");
+        rhs_stamp.push_str("        if scale_half != 0.0 {\n");
         rhs_stamp.push_str("            for k in 0..NOISE_THERMAL_N {\n");
         rhs_stamp.push_str("                let g = gaussian(&mut state.noise_rng[k], &mut state.noise_gaussian_cache[k]);\n");
-        rhs_stamp.push_str("                let i_n = scale * state.noise_thermal_sqrt_inv_r[k] * g;\n");
+        rhs_stamp.push_str("                let w_new = scale_half * state.noise_thermal_sqrt_inv_r[k] * g;\n");
+        rhs_stamp.push_str("                let i_n = w_new + state.noise_thermal_w_prev[k];\n");
+        rhs_stamp.push_str("                state.noise_thermal_w_prev[k] = w_new;\n");
         rhs_stamp.push_str("                let ni = NOISE_THERMAL_NODE_I[k];\n");
         rhs_stamp.push_str("                let nj = NOISE_THERMAL_NODE_J[k];\n");
         rhs_stamp.push_str("                if ni > 0 { rhs[ni - 1] += i_n; }\n");

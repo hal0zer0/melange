@@ -924,3 +924,144 @@ fn main() {{
         "flicker seed determinism violated: var={var_flick:.15e} repeat={var_repeat:.15e}"
     );
 }
+
+/// Regression test: thermal noise on a resistor-only output node must NOT produce
+/// a Nyquist oscillation (lag-1 autocorrelation close to -1).
+///
+/// Before the two-draw fix, nodes without shunt capacitors (i.e., purely
+/// resistive nodes in the MNA) had a Nyquist pole in the trapezoidal
+/// discretization. White Gaussian noise injection excited this pole, creating
+/// a stationary `(+1, -1, +1, -1, ...)` alternating sequence at the output.
+/// The resulting variance was ~10,000× the physical kTC prediction and scaled
+/// roughly linearly with fs instead of being fs-independent.
+///
+/// This test uses a minimal forward-biased diode circuit where the output is
+/// connected via a series resistor to the diode (no shunt cap at the output
+/// node). Before the fix this circuit exhibits:
+///   - lag-1 autocorrelation << -0.9 (pure Nyquist oscillation)
+///   - output RMS in the mV range (vs expected sub-10 µV)
+///
+/// After the fix (two-draw stamp: `i_n = w_new + w_prev` with each draw at
+/// scale/2) the Nyquist bin receives zero injection energy, the autocorrelation
+/// is positive, and the RMS stays in the physically expected range.
+#[test]
+fn thermal_noise_no_nyquist_artifact_on_resistor_only_output_node() {
+    // Diode driven through a series resistor, with an OUTPUT SERIES RESISTOR
+    // (R_out) that has no shunt cap. R_out is the node that historically
+    // developed the Nyquist artifact.
+    //
+    // The output is at node "out" (between R_out and load R_load-to-ground).
+    // Both R_out and R_load are purely resistive — no capacitor shunts "out"
+    // to ground directly, so (A - A_neg)[out][out] = 2G[out][out] ≠ 0 but
+    // A_neg[out][out] = -G[out][out] < 0, which creates the Nyquist pole in
+    // the single-draw path.
+    const DIODE_SERIES_R_SPICE: &str = r#"* Diode + series output resistor — Nyquist artifact regression
+R_drive in anode 10k
+D1 anode 0 D1N4148
+R_out anode out 6.8k
+R_load out 0 56k
+.model D1N4148 D(IS=1e-15)
+.end
+"#;
+    let sr = 48_000.0_f64;
+    let config = CodegenConfig {
+        circuit_name: "noise_nyquist_regress".to_string(),
+        sample_rate: sr,
+        input_node: 0,
+        output_nodes: vec![2], // "out" node index (0-indexed: in=0, anode=1, out=2)
+        input_resistance: 1.0,
+        dc_block: false,
+        noise_mode: NoiseMode::Thermal,
+        noise_master_seed: 42,
+        ..CodegenConfig::default()
+    };
+    let (code, _n, _m) = support::generate_circuit_code(DIODE_SERIES_R_SPICE, &config);
+
+    // Measure lag-1 autocorrelation of the output to detect Nyquist oscillation.
+    // Also measure RMS to detect the 1000× amplitude amplification.
+    let main = format!(
+        r#"
+fn main() {{
+    let sr = {sr}_f64;
+    let n_warmup = 5_000usize;
+    let n_samples = 1usize << 16;
+    let dc_bias = 1.0_f64; // forward-bias the diode
+
+    let mut state = CircuitState::default();
+    state.set_sample_rate(sr);
+    state.set_seed(42);
+    state.set_noise_enabled(true);
+    state.set_temperature_k(290.0);
+    state.set_noise_gain(1.0);
+    state.set_thermal_gain(1.0);
+
+    for _ in 0..n_warmup {{
+        let _ = process_sample(dc_bias, &mut state);
+    }}
+
+    // Collect samples and compute variance + lag-1 autocorrelation.
+    let mut samples = vec![0.0_f64; n_samples];
+    for i in 0..n_samples {{
+        samples[i] = process_sample(dc_bias, &mut state)[0];
+    }}
+
+    let mean = samples.iter().sum::<f64>() / n_samples as f64;
+    let var = samples.iter().map(|&v| (v - mean).powi(2)).sum::<f64>() / n_samples as f64;
+    let lag1_num = samples[..n_samples-1].iter()
+        .zip(samples[1..].iter())
+        .map(|(&a, &b)| (a - mean) * (b - mean))
+        .sum::<f64>() / (n_samples - 1) as f64;
+    let lag1 = if var > 0.0 {{ lag1_num / var }} else {{ 0.0 }};
+
+    println!("VAR={{:.15e}}", var);
+    println!("RMS={{:.15e}}", var.sqrt());
+    println!("LAG1={{:.8}}", lag1);
+}}
+"#,
+        sr = sr,
+    );
+
+    let out = support::compile_and_run(&code, &main, "noise_nyquist_regress");
+    let var: f64 = out.stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("VAR=").and_then(|v| v.parse().ok()))
+        .expect("VAR not found in stdout");
+    let rms: f64 = out.stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("RMS=").and_then(|v| v.parse().ok()))
+        .expect("RMS not found in stdout");
+    let lag1: f64 = out.stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("LAG1=").and_then(|v| v.parse().ok()))
+        .expect("LAG1 not found in stdout");
+
+    // Load-bearing: lag-1 autocorrelation must NOT be strongly negative.
+    // Before the fix: lag1 ≈ -0.9999 (pure Nyquist oscillation).
+    // After the fix: lag1 should be > -0.5 for a well-behaved noise process.
+    assert!(
+        lag1 > -0.5,
+        "Nyquist artifact detected on resistor-only output node: \
+         lag1={lag1:.4} (expected > -0.5). \
+         This means thermal noise is creating a stationary (+/-1) alternation \
+         at the output, indicating the two-draw Nyquist anti-alias stamp is \
+         not working. RMS={rms:.3e}"
+    );
+
+    // Load-bearing: output RMS must be sub-100 µV.
+    // Before the fix: RMS ≈ 1-5 mV (10,000× too large due to Nyquist accumulation).
+    // After the fix: RMS should be in the single-digit µV range.
+    assert!(
+        rms < 100e-6,
+        "Thermal noise RMS {rms:.3e} V exceeds 100 µV on a resistor-only output \
+         node. This likely indicates the Nyquist artifact is active — the two-draw \
+         anti-alias stamp is not eliminating the Nyquist bin injection. \
+         lag1={lag1:.4}"
+    );
+
+    // Sanity: noise is actually nonzero (the stamp is active).
+    assert!(
+        var > 1e-18,
+        "Thermal noise variance {var:.3e} V² is near-zero — noise may not be \
+         injected at all. Check that noise_enabled and the stamp are wired correctly."
+    );
+}
