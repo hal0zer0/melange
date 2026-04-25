@@ -1728,10 +1728,16 @@ pub struct MatrixSparsity {
 
 /// Johnson-Nyquist (thermal) noise source stamped at one fixed resistor.
 ///
-/// Emitted as a Norton current source in the MNA RHS: for sample rate `fs`
-/// and temperature `T`, the per-sample current is
-/// `sqrt(4·k_B·T·fs / resistance) · N(0,1)` injected at `node_i` and
-/// extracted at `node_j`. See `docs/aidocs/NOISE.md`.
+/// Emitted as a Norton current source in the MNA RHS via a two-draw
+/// Nyquist-anti-alias scheme (shipped 2026-04-24):
+/// `i_n[n] = w[n] + w[n-1]` where `w[n] = (scale/2)·sqrt(1/R)·N(0,1)`
+/// and `scale = sqrt(8·k_B·T·fs)`. The two-draw sum has PSD ∝
+/// `4·cos²(πf/fs)` — zero at Nyquist, ≈ flat at audio. Single source of
+/// truth: `RustEmitter::build_noise_emission` (used by both DK and
+/// nodal codegen paths). See `docs/aidocs/NOISE.md` for the full
+/// derivation, including the `8` (not `4` or `2`) calibration constant
+/// and the BE-fallback replay path that re-injects the cached `i_n`
+/// from `state.noise_thermal_last_i_n[k]` into `rhs_be`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThermalNoiseSource {
     /// Resistor component name (for debug / future per-source overrides).

@@ -1065,3 +1065,279 @@ fn main() {{
          injected at all. Check that noise_enabled and the stamp are wired correctly."
     );
 }
+
+/// Regression: fs-sweep on the same diode + series-R circuit as the
+/// `_on_resistor_only_output_node` test. The original bug's smoking gun was
+/// output RMS scaling roughly linearly with fs (the Nyquist pole accumulated
+/// more energy as Nyquist BW widened). After the two-draw fix, output RMS on
+/// a non-band-limited circuit should scale ~ sqrt(fs) (white noise integrated
+/// over Nyquist) — and on a band-limited circuit, it should be fs-independent
+/// (kTC invariant). For this circuit (no shunt caps anywhere → no
+/// band-limiting), sqrt(fs) is the expected scaling. We assert that the ratio
+/// from 48k → 192k stays well below the linear-fs (4×) scaling that signals
+/// the bug.
+#[test]
+fn thermal_noise_no_nyquist_artifact_fs_sweep() {
+    const SPICE: &str = r#"* Diode + series output resistor — fs-sweep regression
+R_drive in anode 10k
+D1 anode 0 D1N4148
+R_out anode out 6.8k
+R_load out 0 56k
+.model D1N4148 D(IS=1e-15)
+.end
+"#;
+    fn measure_at(sr: f64) -> (f64, f64) {
+        let config = CodegenConfig {
+            circuit_name: format!("noise_fs_sweep_{}", sr as u64),
+            sample_rate: sr,
+            input_node: 0,
+            output_nodes: vec![2],
+            input_resistance: 1.0,
+            dc_block: false,
+            noise_mode: NoiseMode::Thermal,
+            noise_master_seed: 42,
+            ..CodegenConfig::default()
+        };
+        let (code, _n, _m) = support::generate_circuit_code(SPICE, &config);
+        let main = format!(
+            r#"
+fn main() {{
+    let sr = {sr}_f64;
+    let mut state = CircuitState::default();
+    state.set_sample_rate(sr);
+    state.set_seed(42);
+    state.set_noise_enabled(true);
+    state.set_temperature_k(290.0);
+    state.set_noise_gain(1.0);
+    state.set_thermal_gain(1.0);
+    for _ in 0..5_000 {{ let _ = process_sample(1.0, &mut state); }}
+    let n = 1usize << 16;
+    let mut sum = 0.0f64;
+    let mut sum_sq = 0.0f64;
+    let mut prev = 0.0f64;
+    let mut sign_flips = 0usize;
+    for i in 0..n {{
+        let v = process_sample(1.0, &mut state)[0];
+        sum += v;
+        sum_sq += v * v;
+        if i > 0 && (v - prev).signum() != 0.0 {{
+            // Compare to running mean baseline rather than zero — signal could
+            // bias around DC. We just want a lag-1 anti-correlation proxy.
+        }}
+        if i > 0 {{
+            let dv = v - prev;
+            if dv.abs() > 1e-12 && (prev - sum / (i as f64 + 1.0)) * (v - sum / (i as f64 + 1.0)) < 0.0 {{
+                sign_flips += 1;
+            }}
+        }}
+        prev = v;
+    }}
+    let mean = sum / n as f64;
+    let var = (sum_sq / n as f64 - mean * mean).max(0.0);
+    let flip_frac = sign_flips as f64 / (n - 1) as f64;
+    println!("RMS={{:.15e}}", var.sqrt());
+    println!("FLIP={{:.6}}", flip_frac);
+}}
+"#,
+            sr = sr,
+        );
+        let out = support::compile_and_run(&code, &main, &format!("noise_fs_sweep_{}", sr as u64));
+        let rms: f64 = out.stdout.lines()
+            .find_map(|l| l.strip_prefix("RMS=").and_then(|v| v.parse().ok()))
+            .expect("RMS not found");
+        let flip: f64 = out.stdout.lines()
+            .find_map(|l| l.strip_prefix("FLIP=").and_then(|v| v.parse().ok()))
+            .expect("FLIP not found");
+        (rms, flip)
+    }
+
+    let (rms_48k, flip_48k) = measure_at(48_000.0);
+    let (rms_192k, flip_192k) = measure_at(192_000.0);
+
+    // Expected: sqrt(192/48) = 2.0 ratio for sqrt(fs) scaling. Bug behavior
+    // was linear-fs: ratio ≈ 4.0+. We allow a generous upper bound of 2.8
+    // (well below 4.0) and a lower bound of 1.4 (well above 1.0 — would
+    // indicate the noise is over-attenuated, also a bug).
+    let ratio = rms_192k / rms_48k;
+    assert!(
+        (1.4..=2.8).contains(&ratio),
+        "fs-scaling ratio (192k/48k) = {ratio:.3} out of [1.4, 2.8]. \
+         Expected ~2.0 (sqrt(fs) scaling for a non-band-limited circuit). \
+         Ratio ≥ 4.0 indicates the Nyquist accumulation bug. \
+         Ratio < 1.4 indicates over-attenuation. \
+         RMS(48k)={rms_48k:.3e}, RMS(192k)={rms_192k:.3e}"
+    );
+
+    // Sign-flip fraction (~1.0 = pure alternation = Nyquist artifact).
+    // After the fix, flips should be near 0.5 (white noise has uncorrelated
+    // sign changes around the DC baseline).
+    assert!(
+        flip_48k < 0.7 && flip_192k < 0.7,
+        "Sign-flip fraction high — Nyquist alternation may still be active. \
+         flip(48k)={flip_48k:.3}, flip(192k)={flip_192k:.3}"
+    );
+}
+
+/// Regression: purely passive resistor divider with no devices and no caps.
+/// This is the simplest topology where every node is resistor-only — the
+/// strongest sanity check for the Nyquist anti-alias stamp. The kTC theorem
+/// test (which uses an RC) cannot exercise this case because it has a cap
+/// at the output. Without the two-draw fix, every node would Nyquist-oscillate.
+#[test]
+fn thermal_noise_no_nyquist_artifact_passive_divider() {
+    const SPICE: &str = r#"* Pure passive resistor divider — Nyquist regression
+R1 in n1 1k
+R2 n1 0 4k7
+R_out n1 out 2k2
+R_load out 0 10k
+.end
+"#;
+    let sr = 48_000.0_f64;
+    let config = CodegenConfig {
+        circuit_name: "noise_nyquist_passive".to_string(),
+        sample_rate: sr,
+        input_node: 0,
+        output_nodes: vec![2], // out
+        input_resistance: 1.0,
+        dc_block: false,
+        noise_mode: NoiseMode::Thermal,
+        noise_master_seed: 42,
+        ..CodegenConfig::default()
+    };
+    let (code, _n, _m) = support::generate_circuit_code(SPICE, &config);
+    let main = format!(
+        r#"
+fn main() {{
+    let mut state = CircuitState::default();
+    state.set_sample_rate({sr}_f64);
+    state.set_seed(42);
+    state.set_noise_enabled(true);
+    state.set_temperature_k(290.0);
+    state.set_noise_gain(1.0);
+    state.set_thermal_gain(1.0);
+    for _ in 0..2_000 {{ let _ = process_sample(0.0, &mut state); }}
+    let n = 1usize << 16;
+    let mut samples = vec![0.0f64; n];
+    for i in 0..n {{ samples[i] = process_sample(0.0, &mut state)[0]; }}
+    let mean = samples.iter().sum::<f64>() / n as f64;
+    let var = samples.iter().map(|&v| (v - mean).powi(2)).sum::<f64>() / n as f64;
+    let lag1_num = samples[..n-1].iter().zip(samples[1..].iter())
+        .map(|(&a, &b)| (a - mean) * (b - mean)).sum::<f64>() / (n - 1) as f64;
+    let lag1 = if var > 0.0 {{ lag1_num / var }} else {{ 0.0 }};
+    println!("VAR={{:.15e}}", var);
+    println!("RMS={{:.15e}}", var.sqrt());
+    println!("LAG1={{:.8}}", lag1);
+}}
+"#,
+        sr = sr,
+    );
+    let out = support::compile_and_run(&code, &main, "noise_nyquist_passive");
+    let var: f64 = out.stdout.lines()
+        .find_map(|l| l.strip_prefix("VAR=").and_then(|v| v.parse().ok()))
+        .expect("VAR not found");
+    let rms: f64 = out.stdout.lines()
+        .find_map(|l| l.strip_prefix("RMS=").and_then(|v| v.parse().ok()))
+        .expect("RMS not found");
+    let lag1: f64 = out.stdout.lines()
+        .find_map(|l| l.strip_prefix("LAG1=").and_then(|v| v.parse().ok()))
+        .expect("LAG1 not found");
+
+    // The four resistors are 1k+4k7 (input divider) and 2k2+10k (output
+    // divider). Thermal noise on R_load (10k) at 48 kHz Nyquist gives
+    // PSD ≈ 8·k_B·T/10k ≈ 3.3e-21 A²/Hz, integrated over 24 kHz with the
+    // cos²-shaped envelope. The output transimpedance from R_load's
+    // current source is bounded by R_load itself (parallel with R_out
+    // back through R1+R2 to ground), so output RMS is on the order of
+    // a few microvolts. Without the two-draw fix, every resistor-only
+    // node accumulates Nyquist energy → mV-range RMS + lag-1 ≈ -1.
+    assert!(
+        lag1 > -0.3,
+        "Passive-divider Nyquist artifact: lag1={lag1:.4} (expected > -0.3). \
+         A purely resistive node should NOT exhibit a (+/-1) alternation in noise. \
+         RMS={rms:.3e}, var={var:.3e}"
+    );
+    assert!(
+        rms < 200e-6,
+        "Passive-divider noise RMS {rms:.3e} V exceeds 200 µV. \
+         Expected single-digit µV for a resistor divider at room temperature. \
+         lag1={lag1:.4}"
+    );
+    assert!(
+        var > 1e-20,
+        "Passive-divider noise variance {var:.3e} V² near-zero — noise stamp \
+         may be silent on linear-only circuits. Check NOISE_THERMAL_N > 0."
+    );
+}
+
+/// Regression: same diode + series-R Nyquist topology as the load-bearing
+/// test, but compiled via the **nodal** codegen path
+/// (`generate_circuit_code_nodal`). The two-draw fix lives in the shared
+/// `build_noise_emission` and is supposed to apply to both codegen paths;
+/// this test pins that claim.
+#[test]
+fn thermal_noise_no_nyquist_artifact_on_resistor_only_output_node_nodal() {
+    const SPICE: &str = r#"* Diode + series output resistor — nodal-path Nyquist regression
+R_drive in anode 10k
+D1 anode 0 D1N4148
+R_out anode out 6.8k
+R_load out 0 56k
+.model D1N4148 D(IS=1e-15)
+.end
+"#;
+    let sr = 48_000.0_f64;
+    let config = CodegenConfig {
+        circuit_name: "noise_nyquist_regress_nodal".to_string(),
+        sample_rate: sr,
+        input_node: 0,
+        output_nodes: vec![2],
+        input_resistance: 1.0,
+        dc_block: false,
+        noise_mode: NoiseMode::Thermal,
+        noise_master_seed: 42,
+        ..CodegenConfig::default()
+    };
+    let (code, _n, _m) = support::generate_circuit_code_nodal(SPICE, &config);
+    let main = format!(
+        r#"
+fn main() {{
+    let mut state = CircuitState::default();
+    state.set_sample_rate({sr}_f64);
+    state.set_seed(42);
+    state.set_noise_enabled(true);
+    state.set_temperature_k(290.0);
+    state.set_noise_gain(1.0);
+    state.set_thermal_gain(1.0);
+    for _ in 0..5_000 {{ let _ = process_sample(1.0, &mut state); }}
+    let n = 1usize << 16;
+    let mut samples = vec![0.0f64; n];
+    for i in 0..n {{ samples[i] = process_sample(1.0, &mut state)[0]; }}
+    let mean = samples.iter().sum::<f64>() / n as f64;
+    let var = samples.iter().map(|&v| (v - mean).powi(2)).sum::<f64>() / n as f64;
+    let lag1_num = samples[..n-1].iter().zip(samples[1..].iter())
+        .map(|(&a, &b)| (a - mean) * (b - mean)).sum::<f64>() / (n - 1) as f64;
+    let lag1 = if var > 0.0 {{ lag1_num / var }} else {{ 0.0 }};
+    println!("RMS={{:.15e}}", var.sqrt());
+    println!("LAG1={{:.8}}", lag1);
+}}
+"#,
+        sr = sr,
+    );
+    let out = support::compile_and_run(&code, &main, "noise_nyquist_regress_nodal");
+    let rms: f64 = out.stdout.lines()
+        .find_map(|l| l.strip_prefix("RMS=").and_then(|v| v.parse().ok()))
+        .expect("RMS not found");
+    let lag1: f64 = out.stdout.lines()
+        .find_map(|l| l.strip_prefix("LAG1=").and_then(|v| v.parse().ok()))
+        .expect("LAG1 not found");
+
+    assert!(
+        lag1 > -0.5,
+        "Nodal-path Nyquist artifact detected: lag1={lag1:.4} (expected > -0.5). \
+         The two-draw stamp may not be wired into the nodal codegen path. \
+         RMS={rms:.3e}"
+    );
+    assert!(
+        rms < 100e-6,
+        "Nodal-path noise RMS {rms:.3e} V exceeds 100 µV. lag1={lag1:.4}"
+    );
+}
