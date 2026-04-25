@@ -89,6 +89,7 @@ pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS
             rhs_be[i] = sum;
         }
         rhs_be[INPUT_NODE] += input / INPUT_RESISTANCE;
+{% if noise_enabled_emit %}{{ noise_rhs_stamp_be }}{% endif %}
         // BE linear prediction: v_pred_be = S_be * rhs_be
         let mut v_pred_be = [0.0f64; N];
         for i in 0..N {
@@ -212,7 +213,7 @@ pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS
         state.os_dn_state = [[0.0; {{ os_state_size }}]; NUM_OUTPUTS];
 {% endif %}{% if oversampling_4x %}        state.os_up_state_outer = [0.0; {{ os_state_size_outer }}];
         state.os_dn_state_outer = [[0.0; {{ os_state_size_outer }}]; NUM_OUTPUTS];
-{% endif %}        state.diag_nan_reset_count += 1;
+{% endif %}{% if noise_enabled_emit %}{{ noise_nan_recovery }}{% endif %}        state.diag_nan_reset_count += 1;
         // Return DC operating point output instead of zero to avoid discontinuity
         let mut dc_output = [0.0f64; NUM_OUTPUTS];
         for out_idx in 0..NUM_OUTPUTS {

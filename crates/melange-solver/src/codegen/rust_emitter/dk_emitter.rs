@@ -1848,6 +1848,8 @@ impl RustEmitter {
         let mut ctx = Context::new();
         ctx.insert("noise_enabled_emit", &noise.enabled);
         ctx.insert("noise_rhs_stamp", &noise.rhs_stamp);
+        ctx.insert("noise_rhs_stamp_be", &noise.rhs_stamp_be);
+        ctx.insert("noise_nan_recovery", &noise.nan_recovery_body);
         ctx.insert("augmented_inductors", &ir.topology.augmented_inductors);
         let n_nodes = if ir.topology.n_nodes > 0 {
             ir.topology.n_nodes
@@ -2687,10 +2689,28 @@ pub(super) struct NoiseEmission {
     pub default_stmts: String,
     pub default_fields: String,
     /// Per-sample stamp into `build_rhs` (after existing RHS construction,
-    /// before return). Empty when no sources.
+    /// before return). Empty when no sources. Also caches per-source `i_n`
+    /// into `state.noise_*_last_i_n[k]` so the BE-fallback replay
+    /// (`rhs_stamp_be`) can re-inject the same noise without consuming
+    /// fresh RNG samples (which would break determinism: same seed →
+    /// same audio output regardless of how many samples trip BE).
     pub rhs_stamp: String,
-    /// Body of `reset()` (re-seed RNG, clear gaussian cache).
+    /// BE-fallback noise replay. Reads cached per-source `i_n` from
+    /// `state.noise_*_last_i_n` and stamps into `rhs_be`. Injected into
+    /// the BE fallback block right after `rhs_be[INPUT_NODE] += …;`.
+    /// Empty when no sources. Trap-MNA 2× compensation is left in (BE
+    /// will be ~+3 dB hot vs strict physics during BE samples — bounded,
+    /// rare, far below the dominating signal that triggered BE in the
+    /// first place; preferable to noise dropouts during BE cooldowns).
+    pub rhs_stamp_be: String,
+    /// Body of `reset()` (re-seed RNG, clear gaussian cache, clear
+    /// per-source caches).
     pub reset_body: String,
+    /// Snippet emitted into the NaN-recovery block to clear
+    /// noise-specific transient state (`noise_thermal_w_prev` and the
+    /// per-source `last_i_n` caches). Does NOT re-seed the RNG —
+    /// determinism contract says `set_seed` is the only re-seed entry.
+    pub nan_recovery_body: String,
     /// Body to append inside `set_sample_rate` — recomputes `thermal_scale`.
     pub set_sample_rate_body: String,
     /// `impl CircuitState` methods: set_noise_enabled, set_noise_gain, …
@@ -3023,8 +3043,14 @@ impl RustEmitter {
         state_fields.push_str("    /// Per-source previous-draw buffer for the two-draw Nyquist-anti-alias\n");
         state_fields.push_str("    /// scheme. Each thermal stamp uses `w_new + w_prev` where w_new is the\n");
         state_fields.push_str("    /// current draw (amplitude scale/2) and w_prev is the previous draw.\n");
-        state_fields.push_str("    /// Zeroed at default() and reset(). See NOISE.md 'Nyquist anti-aliasing'.\n");
+        state_fields.push_str("    /// Zeroed at default(), reset(), and set_seed(). See NOISE.md 'Nyquist anti-aliasing'.\n");
         state_fields.push_str("    pub noise_thermal_w_prev: [f64; NOISE_THERMAL_N],\n");
+        state_fields.push_str("    /// Per-source last-stamped `i_n` cache. Populated by the trap rhs\n");
+        state_fields.push_str("    /// stamp; replayed by the BE-fallback stamp so BE samples carry the\n");
+        state_fields.push_str("    /// same noise content as the trap solve they replaced (no audible\n");
+        state_fields.push_str("    /// dropout during BE cooldowns; same RNG sequence regardless of how\n");
+        state_fields.push_str("    /// many samples trip BE).\n");
+        state_fields.push_str("    pub noise_thermal_last_i_n: [f64; NOISE_THERMAL_N],\n");
         if shot_n > 0 {
             state_fields.push_str("    /// Per-source xoshiro256++ state for shot noise — salted so streams\n");
             state_fields.push_str("    /// cannot share a prefix with thermal streams under any master seed.\n");
@@ -3037,6 +3063,8 @@ impl RustEmitter {
             state_fields.push_str("    /// amplitude is `noise_shot_scale · sqrt(|I_prev|) · N(0,1)`.\n");
             state_fields.push_str("    /// Updated by `set_sample_rate`.\n");
             state_fields.push_str("    pub noise_shot_scale: f64,\n");
+            state_fields.push_str("    /// Per-source last-stamped `i_n` cache (BE-fallback replay).\n");
+            state_fields.push_str("    pub noise_shot_last_i_n: [f64; NOISE_SHOT_N],\n");
         }
         if flicker_n > 0 {
             state_fields.push_str("    /// Per-source xoshiro256++ state for the Kellett pink-filter\n");
@@ -3054,6 +3082,8 @@ impl RustEmitter {
             state_fields.push_str("    /// `noise_flicker_scale · NOISE_FLICKER_SQRT_KF[k] · |I_prev|^(AF/2)`\n");
             state_fields.push_str("    /// before being shaped by the Kellett pink filter.\n");
             state_fields.push_str("    pub noise_flicker_scale: f64,\n");
+            state_fields.push_str("    /// Per-source last-stamped `i_n` cache (BE-fallback replay).\n");
+            state_fields.push_str("    pub noise_flicker_last_i_n: [f64; NOISE_FLICKER_N],\n");
         }
 
         // Default impl: compute thermal_scale and seed RNGs
@@ -3105,11 +3135,14 @@ impl RustEmitter {
         default_fields.push_str("            noise_fs: fs_internal,\n");
         default_fields.push_str("            noise_thermal_sqrt_inv_r: NOISE_THERMAL_SQRT_INV_R_DEFAULT,\n");
         default_fields.push_str("            noise_thermal_w_prev: [0.0; NOISE_THERMAL_N],\n");
+        default_fields
+            .push_str("            noise_thermal_last_i_n: [0.0; NOISE_THERMAL_N],\n");
         if shot_n > 0 {
             default_fields.push_str("            noise_shot_rng,\n");
             default_fields.push_str("            noise_shot_gaussian_cache: [None; NOISE_SHOT_N],\n");
             default_fields.push_str("            shot_gain: 1.0,\n");
             default_fields.push_str("            noise_shot_scale,\n");
+            default_fields.push_str("            noise_shot_last_i_n: [0.0; NOISE_SHOT_N],\n");
         }
         if flicker_n > 0 {
             default_fields.push_str("            noise_flicker_rng,\n");
@@ -3120,6 +3153,8 @@ impl RustEmitter {
                 .push_str("            noise_flicker_state: [[0.0; 7]; NOISE_FLICKER_N],\n");
             default_fields.push_str("            flicker_gain: 1.0,\n");
             default_fields.push_str("            noise_flicker_scale,\n");
+            default_fields
+                .push_str("            noise_flicker_last_i_n: [0.0; NOISE_FLICKER_N],\n");
         }
 
         // reset() — reseed RNG and clear gaussian cache; keep user settings.
@@ -3131,12 +3166,14 @@ impl RustEmitter {
         reset_body.push_str("        // be re-updated by any subsequent set_pot_N / set_runtime_R call;\n");
         reset_body.push_str("        // this mirrors how reset() restores pot_<i>_resistance to nominal.\n");
         reset_body.push_str("        self.noise_thermal_sqrt_inv_r = NOISE_THERMAL_SQRT_INV_R_DEFAULT;\n");
-        reset_body.push_str("        // Clear two-draw buffer so silence after reset produces true zero output.\n");
+        reset_body.push_str("        // Clear two-draw buffer + BE-replay cache so silence after reset is true zero.\n");
         reset_body.push_str("        self.noise_thermal_w_prev = [0.0; NOISE_THERMAL_N];\n");
+        reset_body.push_str("        self.noise_thermal_last_i_n = [0.0; NOISE_THERMAL_N];\n");
         if shot_n > 0 {
             reset_body.push_str("        // Re-seed shot RNGs (same master, distinct salt from thermal).\n");
             reset_body.push_str("        self.noise_shot_rng = seed_noise_rngs_salted::<NOISE_SHOT_N>(self.noise_master_seed, NOISE_SHOT_SALT);\n");
             reset_body.push_str("        self.noise_shot_gaussian_cache = [None; NOISE_SHOT_N];\n");
+            reset_body.push_str("        self.noise_shot_last_i_n = [0.0; NOISE_SHOT_N];\n");
         }
         if flicker_n > 0 {
             reset_body.push_str(
@@ -3147,6 +3184,8 @@ impl RustEmitter {
                 .push_str("        self.noise_flicker_gaussian_cache = [None; NOISE_FLICKER_N];\n");
             reset_body
                 .push_str("        self.noise_flicker_state = [[0.0; 7]; NOISE_FLICKER_N];\n");
+            reset_body
+                .push_str("        self.noise_flicker_last_i_n = [0.0; NOISE_FLICKER_N];\n");
         }
 
         // set_sample_rate tail: recompute thermal_scale at the new rate
@@ -3205,15 +3244,18 @@ impl RustEmitter {
         // previous stream. Without this, set_seed(42); set_seed(42); produces
         // two different sample-0 outputs.
         methods.push_str("        self.noise_thermal_w_prev = [0.0; NOISE_THERMAL_N];\n");
+        methods.push_str("        self.noise_thermal_last_i_n = [0.0; NOISE_THERMAL_N];\n");
         if shot_n > 0 {
             methods.push_str("        self.noise_shot_rng = seed_noise_rngs_salted::<NOISE_SHOT_N>(master, NOISE_SHOT_SALT);\n");
             methods.push_str("        self.noise_shot_gaussian_cache = [None; NOISE_SHOT_N];\n");
+            methods.push_str("        self.noise_shot_last_i_n = [0.0; NOISE_SHOT_N];\n");
         }
         if flicker_n > 0 {
             methods.push_str("        self.noise_flicker_rng = seed_noise_rngs_salted::<NOISE_FLICKER_N>(master, NOISE_FLICKER_SALT);\n");
             methods
                 .push_str("        self.noise_flicker_gaussian_cache = [None; NOISE_FLICKER_N];\n");
             methods.push_str("        self.noise_flicker_state = [[0.0; 7]; NOISE_FLICKER_N];\n");
+            methods.push_str("        self.noise_flicker_last_i_n = [0.0; NOISE_FLICKER_N];\n");
         }
         methods.push_str("    }\n");
 
@@ -3238,11 +3280,16 @@ impl RustEmitter {
         rhs_stamp.push_str("                let w_new = scale_half * state.noise_thermal_sqrt_inv_r[k] * g;\n");
         rhs_stamp.push_str("                let i_n = w_new + state.noise_thermal_w_prev[k];\n");
         rhs_stamp.push_str("                state.noise_thermal_w_prev[k] = w_new;\n");
+        rhs_stamp.push_str("                state.noise_thermal_last_i_n[k] = i_n;\n");
         rhs_stamp.push_str("                let ni = NOISE_THERMAL_NODE_I[k];\n");
         rhs_stamp.push_str("                let nj = NOISE_THERMAL_NODE_J[k];\n");
         rhs_stamp.push_str("                if ni > 0 { rhs[ni - 1] += i_n; }\n");
         rhs_stamp.push_str("                if nj > 0 { rhs[nj - 1] -= i_n; }\n");
         rhs_stamp.push_str("            }\n");
+        rhs_stamp.push_str("        } else {\n");
+        rhs_stamp.push_str("            // scale==0 (gain or thermal_gain muted): clear cache so BE replay\n");
+        rhs_stamp.push_str("            // doesn't re-inject the last enabled-mode i_n.\n");
+        rhs_stamp.push_str("            state.noise_thermal_last_i_n = [0.0; NOISE_THERMAL_N];\n");
         rhs_stamp.push_str("        }\n");
         if shot_n > 0 {
             rhs_stamp.push_str("        // Shot: sqrt(4·q·|I_prev|·fs) per source. `|I_prev|` is the\n");
@@ -3257,11 +3304,14 @@ impl RustEmitter {
             rhs_stamp.push_str("                if i_abs <= 0.0 { continue; }\n");
             rhs_stamp.push_str("                let g = gaussian(&mut state.noise_shot_rng[k], &mut state.noise_shot_gaussian_cache[k]);\n");
             rhs_stamp.push_str("                let i_n = shot_scale * i_abs.sqrt() * g;\n");
+            rhs_stamp.push_str("                state.noise_shot_last_i_n[k] = i_n;\n");
             rhs_stamp.push_str("                let ni = NOISE_SHOT_NODE_I[k];\n");
             rhs_stamp.push_str("                let nj = NOISE_SHOT_NODE_J[k];\n");
             rhs_stamp.push_str("                if ni > 0 { rhs[ni - 1] += i_n; }\n");
             rhs_stamp.push_str("                if nj > 0 { rhs[nj - 1] -= i_n; }\n");
             rhs_stamp.push_str("            }\n");
+            rhs_stamp.push_str("        } else {\n");
+            rhs_stamp.push_str("            state.noise_shot_last_i_n = [0.0; NOISE_SHOT_N];\n");
             rhs_stamp.push_str("        }\n");
         }
         if flicker_n > 0 {
@@ -3279,14 +3329,90 @@ impl RustEmitter {
             rhs_stamp.push_str("                let pink = kellett_pink(white, &mut state.noise_flicker_state[k]);\n");
             rhs_stamp.push_str("                let amp = flicker_scale * NOISE_FLICKER_SQRT_KF[k] * i_abs.powf(NOISE_FLICKER_HALF_AF[k]);\n");
             rhs_stamp.push_str("                let i_n = amp * pink;\n");
+            rhs_stamp.push_str("                state.noise_flicker_last_i_n[k] = i_n;\n");
             rhs_stamp.push_str("                let ni = NOISE_FLICKER_NODE_I[k];\n");
             rhs_stamp.push_str("                let nj = NOISE_FLICKER_NODE_J[k];\n");
             rhs_stamp.push_str("                if ni > 0 { rhs[ni - 1] += i_n; }\n");
             rhs_stamp.push_str("                if nj > 0 { rhs[nj - 1] -= i_n; }\n");
             rhs_stamp.push_str("            }\n");
+            rhs_stamp.push_str("        } else {\n");
+            rhs_stamp
+                .push_str("            state.noise_flicker_last_i_n = [0.0; NOISE_FLICKER_N];\n");
             rhs_stamp.push_str("        }\n");
         }
+        rhs_stamp.push_str("    } else {\n");
+        rhs_stamp.push_str("        // noise_enabled=false: clear caches so a future BE replay during a\n");
+        rhs_stamp.push_str("        // disabled-noise span doesn't re-inject the last enabled-mode i_n.\n");
+        rhs_stamp.push_str("        state.noise_thermal_last_i_n = [0.0; NOISE_THERMAL_N];\n");
+        if shot_n > 0 {
+            rhs_stamp.push_str("        state.noise_shot_last_i_n = [0.0; NOISE_SHOT_N];\n");
+        }
+        if flicker_n > 0 {
+            rhs_stamp.push_str("        state.noise_flicker_last_i_n = [0.0; NOISE_FLICKER_N];\n");
+        }
         rhs_stamp.push_str("    }\n");
+
+        // BE-fallback noise replay. Reads cached per-source `i_n` from the
+        // arrays populated by `rhs_stamp` and re-stamps into `rhs_be`. Same
+        // node table, same sign convention. Gated on `state.noise_enabled`
+        // so a disabled-noise span doesn't replay stale-cache values.
+        // Trap-MNA 2× compensation is left in place — BE samples are ~+3 dB
+        // hot vs strict physics during the short (typically 64-sample
+        // cooldown) BE-fallback windows. This is bounded, rare, and far
+        // below the dominating signal that triggered BE; preferable to
+        // noise dropouts during BE windows. See NOISE.md "BE-fallback
+        // noise calibration" for the math.
+        let mut rhs_stamp_be = String::new();
+        rhs_stamp_be.push_str("\n        // BE-fallback noise replay (re-stamps cached trap-stamp i_n into rhs_be).\n");
+        rhs_stamp_be.push_str("        if state.noise_enabled {\n");
+        rhs_stamp_be.push_str("            for k in 0..NOISE_THERMAL_N {\n");
+        rhs_stamp_be.push_str("                let i_n = state.noise_thermal_last_i_n[k];\n");
+        rhs_stamp_be.push_str("                let ni = NOISE_THERMAL_NODE_I[k];\n");
+        rhs_stamp_be.push_str("                let nj = NOISE_THERMAL_NODE_J[k];\n");
+        rhs_stamp_be.push_str("                if ni > 0 { rhs_be[ni - 1] += i_n; }\n");
+        rhs_stamp_be.push_str("                if nj > 0 { rhs_be[nj - 1] -= i_n; }\n");
+        rhs_stamp_be.push_str("            }\n");
+        if shot_n > 0 {
+            rhs_stamp_be.push_str("            for k in 0..NOISE_SHOT_N {\n");
+            rhs_stamp_be.push_str("                let i_n = state.noise_shot_last_i_n[k];\n");
+            rhs_stamp_be.push_str("                let ni = NOISE_SHOT_NODE_I[k];\n");
+            rhs_stamp_be.push_str("                let nj = NOISE_SHOT_NODE_J[k];\n");
+            rhs_stamp_be.push_str("                if ni > 0 { rhs_be[ni - 1] += i_n; }\n");
+            rhs_stamp_be.push_str("                if nj > 0 { rhs_be[nj - 1] -= i_n; }\n");
+            rhs_stamp_be.push_str("            }\n");
+        }
+        if flicker_n > 0 {
+            rhs_stamp_be.push_str("            for k in 0..NOISE_FLICKER_N {\n");
+            rhs_stamp_be.push_str("                let i_n = state.noise_flicker_last_i_n[k];\n");
+            rhs_stamp_be.push_str("                let ni = NOISE_FLICKER_NODE_I[k];\n");
+            rhs_stamp_be.push_str("                let nj = NOISE_FLICKER_NODE_J[k];\n");
+            rhs_stamp_be.push_str("                if ni > 0 { rhs_be[ni - 1] += i_n; }\n");
+            rhs_stamp_be.push_str("                if nj > 0 { rhs_be[nj - 1] -= i_n; }\n");
+            rhs_stamp_be.push_str("            }\n");
+        }
+        rhs_stamp_be.push_str("        }\n");
+
+        // NaN-recovery noise reset: clear the two-draw lag buffer and the
+        // BE-replay caches so a NaN-induced state.v_prev = DC_OP recovery
+        // also produces a clean noise sequence (no stale draw paired with
+        // the post-recovery sample). RNG itself is NOT re-seeded here —
+        // determinism contract says set_seed is the only re-seed entry.
+        let mut nan_recovery_body = String::new();
+        nan_recovery_body.push_str("        // Noise: clear two-draw lag + BE-replay caches (RNG seed preserved).\n");
+        nan_recovery_body
+            .push_str("        state.noise_thermal_w_prev = [0.0; NOISE_THERMAL_N];\n");
+        nan_recovery_body
+            .push_str("        state.noise_thermal_last_i_n = [0.0; NOISE_THERMAL_N];\n");
+        if shot_n > 0 {
+            nan_recovery_body
+                .push_str("        state.noise_shot_last_i_n = [0.0; NOISE_SHOT_N];\n");
+        }
+        if flicker_n > 0 {
+            nan_recovery_body
+                .push_str("        state.noise_flicker_last_i_n = [0.0; NOISE_FLICKER_N];\n");
+            nan_recovery_body
+                .push_str("        state.noise_flicker_state = [[0.0; 7]; NOISE_FLICKER_N];\n");
+        }
 
         // Reverse lookup populated from each source's `pot_slot`. Pots with
         // no noise source (there aren't any in the current pipeline, but
@@ -3324,7 +3450,9 @@ impl RustEmitter {
             default_stmts,
             default_fields,
             rhs_stamp,
+            rhs_stamp_be,
             reset_body,
+            nan_recovery_body,
             set_sample_rate_body: ssr_body,
             methods,
             enabled: true,

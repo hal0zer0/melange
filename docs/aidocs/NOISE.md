@@ -602,6 +602,19 @@ truth for the rhs_stamp; called by `emit_dk` (`dk_emitter.rs:24`) and
 `emit_nodal` (`nodal_emitter.rs:422`). Both paths emit the same two-draw
 fragment.
 
+**BE-fallback noise replay (2026-04-24)**: The trapezoidal `rhs_stamp`
+caches each per-source `i_n` into `state.noise_*_last_i_n[k]`. When the
+trap NR fails / rings and the BE fallback rebuilds `rhs_be` from scratch,
+the emitted `rhs_stamp_be` re-stamps the same cached currents into
+`rhs_be` (gated on `state.noise_enabled`). This avoids audible noise
+dropouts during BE cooldown windows (typically 64 samples = 1.3 ms at
+48 kHz). Trap-MNA 2× compensation is left in — BE samples are ~+3 dB
+hot vs strict physics (BE has no factor-of-½ on a constant stamp), but
+this is bounded, rare, and well below the dominating signal that
+triggered BE in the first place. The cache is also cleared in the NaN
+recovery block, in `set_seed()`, and in `reset()` — same reasoning, no
+stale-state replay.
+
 **Phases 2/3 (shot, flicker)**: NOT changed by this fix.
 - Shot is injected at device junction terminals (anode/cathode,
   collector/emitter, etc.). The 10 pF parasitic caps are auto-inserted

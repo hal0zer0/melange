@@ -102,7 +102,13 @@ fn emit_sparse_ni_matvec_add(ir: &CircuitIR, result_arr: &str, vec_var: &str, in
 /// Augmented MNA stores inductor branch currents in `v_prev` (no separate
 /// companion history), so the DK-template's `ind_i_prev`/`ci_*_prev`/xfmr
 /// group reset is not needed here.
-fn emit_nodal_nan_reset(code: &mut String, ir: &CircuitIR, indent: &str, is_full_lu: bool) {
+fn emit_nodal_nan_reset(
+    code: &mut String,
+    ir: &CircuitIR,
+    indent: &str,
+    is_full_lu: bool,
+    noise: &NoiseEmission,
+) {
     let body = format!("{indent}    ");
     let has_dc_nl = ir.dc_nl_currents.iter().any(|&v| v != 0.0);
     let m = ir.topology.m;
@@ -200,6 +206,23 @@ fn emit_nodal_nan_reset(code: &mut String, ir: &CircuitIR, indent: &str, is_full
     // Full-LU-only: invalidate the cross-timestep chord LU factorization.
     if is_full_lu && m > 0 {
         code.push_str(&format!("{body}state.chord_valid = false;\n"));
+    }
+
+    // Noise NaN-recovery: clear two-draw lag + BE-replay caches if noise
+    // codegen is enabled. Empty string when noise mode is Off — the
+    // template-style `{% if %}` gating in dk_emitter.rs.tera is handled
+    // here by the empty-fragment guarantee on `NoiseEmission`. Indent is
+    // already baked into the body (8-space DK convention); re-indent to
+    // match the local `body` prefix.
+    if noise.enabled && !noise.nan_recovery_body.is_empty() {
+        for line in noise.nan_recovery_body.lines() {
+            let trimmed = line.trim_start();
+            if trimmed.is_empty() {
+                code.push('\n');
+            } else {
+                code.push_str(&format!("{body}{trimmed}\n"));
+            }
+        }
     }
 
     code.push_str(&format!("{body}state.diag_nan_reset_count += 1;\n"));
@@ -3654,7 +3677,17 @@ impl RustEmitter {
             code.push_str("            for j in 0..M { sum += N_I[i][j] * state.i_nl_prev[j]; }\n");
             code.push_str("            rhs_be[i] = sum;\n");
             code.push_str("        }\n");
-            code.push_str("        rhs_be[INPUT_NODE] += input * input_conductance;\n\n");
+            code.push_str("        rhs_be[INPUT_NODE] += input * input_conductance;\n");
+
+            // BE-fallback noise replay: re-stamp the cached per-source i_n
+            // (populated by the trap rhs_stamp earlier this sample) into
+            // rhs_be so BE samples carry the same noise content as the trap
+            // solve they replaced — no audible silence during BE cooldowns.
+            // Empty fragment when noise mode is Off.
+            if noise.enabled && !noise.rhs_stamp_be.is_empty() {
+                code.push_str(&noise.rhs_stamp_be);
+            }
+            code.push('\n');
 
             // BE linear prediction
             code.push_str("        // BE linear prediction: v_pred_be = S_be * rhs_be\n");
@@ -3873,7 +3906,7 @@ impl RustEmitter {
 
         // NaN/Inf recovery: shared reset + DC-OP return. Schur path has no
         // cross-timestep chord LU to invalidate, so is_full_lu = false.
-        emit_nodal_nan_reset(&mut code, ir, "    ", false);
+        emit_nodal_nan_reset(&mut code, ir, "    ", false, noise);
 
         // Op-amp slew-rate limiting (nodal Schur path). Clamp the per-sample
         // voltage delta at each op-amp output node to ±SR*dt. This is
@@ -5702,7 +5735,13 @@ impl RustEmitter {
             code.push_str("            rhs_be[i] = sum;\n");
             code.push_str("        }\n");
             code.push_str("        // BE input: just input[n+1] * G_in (no trapezoidal average)\n");
-            code.push_str("        rhs_be[INPUT_NODE] += input * input_conductance;\n\n");
+            code.push_str("        rhs_be[INPUT_NODE] += input * input_conductance;\n");
+
+            // BE-fallback noise replay (full-LU path) — same shape as Schur.
+            if noise.enabled && !noise.rhs_stamp_be.is_empty() {
+                code.push_str(&noise.rhs_stamp_be);
+            }
+            code.push('\n');
 
             // BE NR loop
             code.push_str("        for _iter in 0..MAX_ITER {\n");
@@ -5958,7 +5997,7 @@ impl RustEmitter {
 
         // NaN/Inf recovery: shared reset + DC-OP return. Full-LU path
         // invalidates the cross-timestep chord LU factorization.
-        emit_nodal_nan_reset(&mut code, ir, "    ", true);
+        emit_nodal_nan_reset(&mut code, ir, "    ", true, noise);
 
         // No VSAT clamping on v — clamping any subset of nodes creates physical
         // inconsistency with unclamped neighbors (e.g., 100Ω resistor between
