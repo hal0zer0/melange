@@ -3200,6 +3200,11 @@ impl RustEmitter {
         methods.push_str("        self.noise_master_seed = master;\n");
         methods.push_str("        self.noise_rng = seed_noise_rngs::<NOISE_THERMAL_N>(master);\n");
         methods.push_str("        self.noise_gaussian_cache = [None; NOISE_THERMAL_N];\n");
+        // Clear two-draw lag buffer so sample 0 after re-seed is deterministic
+        // from the new RNG stream alone, not paired with a stale draw from the
+        // previous stream. Without this, set_seed(42); set_seed(42); produces
+        // two different sample-0 outputs.
+        methods.push_str("        self.noise_thermal_w_prev = [0.0; NOISE_THERMAL_N];\n");
         if shot_n > 0 {
             methods.push_str("        self.noise_shot_rng = seed_noise_rngs_salted::<NOISE_SHOT_N>(master, NOISE_SHOT_SALT);\n");
             methods.push_str("        self.noise_shot_gaussian_cache = [None; NOISE_SHOT_N];\n");
