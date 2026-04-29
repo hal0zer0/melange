@@ -4260,7 +4260,9 @@ impl RustEmitter {
         for (dev_num, slot) in ir.device_slots.iter().enumerate() {
             for d in 0..slot.dimension {
                 let i = slot.start_idx + d;
-                code.push_str(&format!("{indent}if dv{i}.abs() > 1e-15 {{\n"));
+                // Skip pnjlim/fetlim for steps < 0.1 mV — both are no-ops
+                // for |dv| < 2·Vt ≈ 52 mV (silicon), so 1e-4 is 500× conservative.
+                code.push_str(&format!("{indent}if dv{i}.abs() > 1e-4 {{\n"));
                 match (&slot.device_type, d) {
                     (crate::codegen::ir::DeviceType::Diode, _) => {
                         code.push_str(&format!(
@@ -6987,7 +6989,9 @@ impl RustEmitter {
                 code.push_str(&format!(
                     "{indent}    let dv = v_nl_proposed - v_nl_current;\n"
                 ));
-                code.push_str(&format!("{indent}    if dv.abs() > 1e-15 {{\n"));
+                // Same 1e-4 threshold as the transient path — pnjlim/fetlim are
+                // no-ops for |dv| < 2·Vt ≈ 52 mV, so 0.1 mV is safely conservative.
+                code.push_str(&format!("{indent}    if dv.abs() > 1e-4 {{\n"));
 
                 // Apply per-device limiter
                 match (&slot.device_type, d) {

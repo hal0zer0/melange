@@ -3301,7 +3301,7 @@ impl RustEmitter {
             rhs_stamp.push_str("        if shot_scale != 0.0 {\n");
             rhs_stamp.push_str("            for k in 0..NOISE_SHOT_N {\n");
             rhs_stamp.push_str("                let i_abs = state.i_nl_prev[NOISE_SHOT_SLOT_IDX[k]].abs();\n");
-            rhs_stamp.push_str("                if i_abs <= 0.0 { continue; }\n");
+            rhs_stamp.push_str("                if i_abs < 1e-15 { continue; }\n");
             rhs_stamp.push_str("                let g = gaussian(&mut state.noise_shot_rng[k], &mut state.noise_shot_gaussian_cache[k]);\n");
             rhs_stamp.push_str("                let i_n = shot_scale * i_abs.sqrt() * g;\n");
             rhs_stamp.push_str("                state.noise_shot_last_i_n[k] = i_n;\n");
@@ -3324,7 +3324,7 @@ impl RustEmitter {
             rhs_stamp.push_str("        if flicker_scale != 0.0 {\n");
             rhs_stamp.push_str("            for k in 0..NOISE_FLICKER_N {\n");
             rhs_stamp.push_str("                let i_abs = state.i_nl_prev[NOISE_FLICKER_SLOT_IDX[k]].abs();\n");
-            rhs_stamp.push_str("                if i_abs <= 0.0 { continue; }\n");
+            rhs_stamp.push_str("                if i_abs < 1e-15 { continue; }\n");
             rhs_stamp.push_str("                let white = gaussian(&mut state.noise_flicker_rng[k], &mut state.noise_flicker_gaussian_cache[k]);\n");
             rhs_stamp.push_str("                let pink = kellett_pink(white, &mut state.noise_flicker_state[k]);\n");
             rhs_stamp.push_str("                let amp = flicker_scale * NOISE_FLICKER_SQRT_KF[k] * i_abs.powf(NOISE_FLICKER_HALF_AF[k]);\n");

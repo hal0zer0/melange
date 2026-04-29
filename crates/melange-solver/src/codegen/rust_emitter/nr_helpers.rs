@@ -336,7 +336,10 @@ pub(super) fn emit_nr_limit_and_converge(code: &mut String, ir: &CircuitIR, dim:
     for (dev_num, slot) in ir.device_slots.iter().enumerate() {
         for d in 0..slot.dimension {
             let i = slot.start_idx + d;
-            code.push_str(&format!("{indent}if dv{i}.abs() > 1e-15 {{\n"));
+            // Skip pnjlim/fetlim when the voltage step is below 0.1 mV — both
+            // limiters are no-ops for |dv| < 2·Vt ≈ 52 mV (silicon), so this
+            // threshold is 500× conservative and safe for all device types.
+            code.push_str(&format!("{indent}if dv{i}.abs() > 1e-4 {{\n"));
             // Emit per-device limiter call based on device type and dimension
             match (&slot.device_type, d) {
                 (DeviceType::Diode, _) => {
@@ -411,7 +414,14 @@ pub(super) fn emit_nr_limit_and_converge(code: &mut String, ir: &CircuitIR, dim:
     // Per-device alpha breaks the coupled Newton direction for multi-device
     // systems (e.g., anti-parallel diodes), causing oscillation when limiting
     // is asymmetric. Scalar alpha preserves the descent direction.
-    code.push_str(&format!("{indent}let alpha_scalar = alpha.iter().copied().fold(1.0_f64, f64::min);\n"));
+    // Explicit min-chain avoids iterator overhead for the common small-M case
+    // (M=1..4). LLVM optimizes the fold too, but straight-line code is certain.
+    let min_chain = (0..dim)
+        .map(|i| format!("alpha[{i}]"))
+        .collect::<Vec<_>>()
+        .join(".min(")
+        + &")".repeat(dim.saturating_sub(1));
+    code.push_str(&format!("{indent}let alpha_scalar = {min_chain};\n"));
     code.push_str(&format!("{indent}if alpha_scalar < 1.0 {{ any_limited = true; }}\n"));
 
     // Current-space backstop: limit maximum current step per iteration.
@@ -504,12 +514,16 @@ pub(super) fn emit_schur_nr_limit_and_converge(
         code.push_str(";\n");
     }
 
-    // Per-device voltage limiting on trial voltages
+    // Per-device voltage limiting on trial voltages.
+    // Pre-compute dv_trial{i} = v_trial{i} - v_d{i} once per dimension so it
+    // can be reused in the alpha computation, backstop, and convergence check.
+    // The limiter call itself is skipped when |dv_trial| < 0.1 mV: both
+    // pnjlim and fetlim are no-ops for steps that small (pnjlim threshold is
+    // 2·Vt ≈ 52 mV for silicon), so the guard is 500× conservative.
     code.push_str(&format!("{indent}let mut any_limited = false;\n"));
     for (dev_num, slot) in ir.device_slots.iter().enumerate() {
         for d in 0..slot.dimension {
             let i = slot.start_idx + d;
-            // Apply pnjlim/fetlim: limit v_trial relative to v_d (current)
             let lim_expr = match (&slot.device_type, d) {
                 (DeviceType::Diode, _) => format!(
                     "pnjlim(v_trial{i}, v_d{i}, state.device_{dev_num}_n_vt, DEVICE_{dev_num}_VCRIT)"
@@ -521,38 +535,35 @@ pub(super) fn emit_schur_nr_limit_and_converge(
                 (DeviceType::Jfet, _) => format!("fetlim(v_trial{i}, v_d{i}, state.device_{dev_num}_vp)"),
                 (DeviceType::Mosfet, 0) => format!("fetlim(v_trial{i}, v_d{i}, 0.0)"),
                 (DeviceType::Mosfet, _) => format!("fetlim(v_trial{i}, v_d{i}, state.device_{dev_num}_vt)"),
-                (DeviceType::Tube, 0) => format!(
-                    "pnjlim(v_trial{i}, v_d{i}, state.device_{dev_num}_vgk_onset / 3.0, DEVICE_{dev_num}_VCRIT)"
-                ),
-                (DeviceType::Tube, 2) => format!(
-                    // Pentode dim 2 = Vg2k — softplus knee behavior identical to Vgk.
-                    // Must use log-junction limiting to prevent NR from stepping past
-                    // the E1 knee. Triodes are 2D and never reach dim==2.
-                    // Matches the non-Schur helper `emit_nr_limit_and_converge`.
+                (DeviceType::Tube, 0) | (DeviceType::Tube, 2) => format!(
+                    // Pentode dim 2 = Vg2k uses same softplus knee as Vgk (dim 0).
+                    // Triodes are 2D and never reach dim==2.
                     "pnjlim(v_trial{i}, v_d{i}, state.device_{dev_num}_vgk_onset / 3.0, DEVICE_{dev_num}_VCRIT)"
                 ),
                 (DeviceType::Tube, _) => format!("fetlim(v_trial{i}, v_d{i}, 0.0)"),
-                (DeviceType::Vca, _) => format!("v_trial{i}"), // No limiting needed
+                (DeviceType::Vca, _) => format!("v_trial{i}"),
             };
-            code.push_str(&format!("{indent}let v_lim{i} = {lim_expr};\n"));
+            code.push_str(&format!("{indent}let dv_trial{i} = v_trial{i} - v_d{i};\n"));
+            code.push_str(&format!(
+                "{indent}let v_lim{i} = if dv_trial{i}.abs() > 1e-4 {{ {lim_expr} }} else {{ v_trial{i} }};\n"
+            ));
         }
     }
 
-    // Compute global damping: ratio of limited voltage change to full voltage change
-    // Use the minimum ratio across all dimensions (most conservative).
-    // When dv_lim and dv_full have opposite signs (limiter reversed direction,
+    // Compute global damping: ratio of limited voltage change to full voltage change.
+    // When dv_lim and dv_trial have opposite signs (limiter reversed direction,
     // common with positive K diagonal), clamp to 0 — don't take the step.
     code.push_str(&format!("{indent}let mut global_alpha = 1.0_f64;\n"));
     for i in 0..dim {
         code.push_str(&format!(
-            "{indent}{{ let dv_full = v_trial{i} - v_d{i}; let dv_lim = v_lim{i} - v_d{i}; \
-             if dv_full.abs() > 1e-15 {{ let r = if dv_full * dv_lim < 0.0 {{ 0.0 }} \
-             else {{ (dv_lim / dv_full).clamp(0.0, 1.0) }}; \
+            "{indent}{{ let dv_lim = v_lim{i} - v_d{i}; \
+             if dv_trial{i}.abs() > 1e-15 {{ let r = if dv_trial{i} * dv_lim < 0.0 {{ 0.0 }} \
+             else {{ (dv_lim / dv_trial{i}).clamp(0.0, 1.0) }}; \
              if r < global_alpha {{ global_alpha = r; any_limited = true; }} }} }}\n"
         ));
     }
 
-    // Global voltage backstop: adaptive limit based on DC operating point voltages
+    // Global voltage backstop: adaptive limit based on DC operating point voltages.
     let max_dc_v = ir
         .dc_operating_point
         .iter()
@@ -566,11 +577,9 @@ pub(super) fn emit_schur_nr_limit_and_converge(
     code.push_str(&format!("{indent}{{ let max_dv = "));
     for i in 0..dim {
         if i > 0 {
-            code.push_str(&format!(
-                ".max(((v_trial{i} - v_d{i}) * global_alpha).abs())"
-            ));
+            code.push_str(&format!(".max((dv_trial{i} * global_alpha).abs())"));
         } else {
-            code.push_str(&format!("((v_trial{i} - v_d{i}) * global_alpha).abs()"));
+            code.push_str(&format!("(dv_trial{i} * global_alpha).abs()"));
         }
     }
     code.push_str(&format!(
@@ -590,7 +599,7 @@ pub(super) fn emit_schur_nr_limit_and_converge(
     code.push_str(&format!("{indent}    let mut nr_converged = true;\n"));
     for i in 0..dim {
         code.push_str(&format!(
-            "{indent}    {{ let dv = (v_trial{i} - v_d{i}) * global_alpha; let threshold = 1e-3 * v_d{i}.abs().max((v_d{i} + dv).abs()) + 1e-6; if dv.abs() > threshold {{ nr_converged = false; }} }}\n"
+            "{indent}    {{ let dv = dv_trial{i} * global_alpha; let threshold = 1e-3 * v_d{i}.abs().max((v_d{i} + dv).abs()) + 1e-6; if dv.abs() > threshold {{ nr_converged = false; }} }}\n"
         ));
     }
     code.push_str(&format!("{indent}    if nr_converged {{\n"));
