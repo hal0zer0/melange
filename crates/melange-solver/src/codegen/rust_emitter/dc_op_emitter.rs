@@ -431,7 +431,10 @@ fn emit_dc_op_nr_loop_dk(ir: &CircuitIR) -> Result<String, CodegenError> {
         "{inner}// Reuse the transient per-device evaluator (shared helper).\n\
          {inner}let state: &CircuitState = &*self;\n"
     ));
-    emit_dk_device_evaluation(&mut out, ir, inner)?;
+    // use_k_eff=false: DC-OP recompute uses node-voltage NR with G_aug, not
+    // state.k. v_d holds external terminal voltages, so parasitic BJTs need
+    // the inner-NR path (bjt_with_parasitics) when has_internal_mna_nodes=false.
+    emit_dk_device_evaluation(&mut out, ir, inner, false)?;
 
     // Pack flat per-device locals into dense arrays.
     out.push_str(&format!(

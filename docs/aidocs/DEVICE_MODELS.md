@@ -882,3 +882,40 @@ NR Jacobian row s+1: j_{s+1,j} = delta_{s+1,j} - jdev_{s+1}_{s}*K[s][j] - jdev_{
 - g_d ~ IS/VT at small v (linear region)
 - 12AX7 triode: Ip ~ 1.2mA at Vgk=0, Vpk=250V
 - Finite-difference Jacobian check: all device models have FD verification tests
+
+## BJT Parasitic R Absorption (`K_eff`)
+
+For BJTs with `RB`/`RC`/`RE` parasitic resistances, the relationship between
+external terminal voltages and internal junction voltages is exactly linear in
+the device currents:
+
+```
+V_be_int = V_be_ext - RE·Ic - (RB+RE)·Ib
+V_bc_int = V_bc_ext + RC·Ic - RB·Ib
+```
+
+In matrix form: `V_int = V_ext - R_p · (Ic, Ib)` where `R_p = [[RE, RB+RE], [-RC, RB]]`.
+
+**DK path absorption.** The DK transient NR variable is `i = (Ic, Ib, …)`, and
+`V_ext = p + K · i`. Substituting gives `V_int = p + (K - R_p) · i = p + K_eff · i`.
+The codegen pre-subtracts `R_p` from `K` (and `K_be`) so:
+
+- `state.k` holds `K_eff` after default-init and any pot/switch rebuild
+- `bjt_evaluate` (intrinsic) replaces `bjt_with_parasitics` (inner 2D NR) on the DK path
+- The Jacobian is `J = I - jdev_intrinsic · K_eff` — same fixed point, no inner-loop cost
+
+This is exact (not an approximation) because `R_p` is constant in `i`. The inner
+NR in `bjt_with_parasitics` was solving a problem that's already linear once
+expressed in current-space.
+
+**Where it does NOT apply.**
+- Nodal path: parasitics get real MNA internal nodes (collPrime/basePrime/emitPrime).
+  `slot.has_internal_mna_nodes = true`, `bjt_evaluate` is already used directly.
+- DC-OP recompute (Phase E): node-voltage NR with G_aug, doesn't use `state.k`.
+  Falls back to `bjt_with_parasitics` (controlled by `use_k_eff=false` parameter).
+
+Codegen entry points:
+- `parasitic_r_p_dk()` in `dk_emitter.rs` — block-diagonal R_p lookup
+- `K_DEFAULT` / `K_BE_DEFAULT` constants pre-subtract R_p at codegen time
+- `rebuild_matrices()` emits inline `k[s][s] -= RE; k[s][s+1] -= (RB+RE); …` after K is computed
+- `emit_dk_device_evaluation(use_k_eff: bool)` selects intrinsic vs inner-NR call

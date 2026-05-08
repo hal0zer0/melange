@@ -32,6 +32,7 @@ pub(super) fn emit_dk_device_evaluation(
     code: &mut String,
     ir: &CircuitIR,
     indent: &str,
+    use_k_eff: bool,
 ) -> Result<(), CodegenError> {
     code.push_str(&format!(
         "{indent}// Evaluate device currents and Jacobians\n"
@@ -97,14 +98,21 @@ pub(super) fn emit_dk_device_evaluation(
                         )))
                     }
                 };
-                if bp.has_parasitics() && !slot.has_internal_mna_nodes {
-                    // Use inner 2D NR for parasitic resistances
+                if bp.has_parasitics() && !slot.has_internal_mna_nodes && !use_k_eff {
+                    // Inner 2D NR for parasitic resistances. Used by the
+                    // Phase E DC-OP recompute path where v_d holds external
+                    // terminal voltages and parasitics aren't absorbed into K.
                     code.push_str(&format!(
                         "{indent}let (i_dev{s}, i_dev{s1}, bjt{d}_jac) = bjt_with_parasitics(v_d{s}, v_d{s1}, state.device_{d}_is, state.device_{d}_vt, DEVICE_{d}_NF, DEVICE_{d}_NR, state.device_{d}_bf, state.device_{d}_br, DEVICE_{d}_SIGN, DEVICE_{d}_USE_GP, DEVICE_{d}_VAF, DEVICE_{d}_VAR, DEVICE_{d}_IKF, DEVICE_{d}_IKR, DEVICE_{d}_ISE, DEVICE_{d}_NE, DEVICE_{d}_ISC, DEVICE_{d}_NC, DEVICE_{d}_RB, DEVICE_{d}_RC, DEVICE_{d}_RE);\n"
                     ));
                 } else {
-                    // Combined evaluation: shared exp() across ic, ib, jacobian
-                    // (parasitics handled by MNA internal nodes when has_internal_mna_nodes)
+                    // Intrinsic evaluation: shared exp() across ic, ib, jacobian.
+                    // Three callers reach this branch:
+                    //   - No parasitics (RB=RC=RE=0)
+                    //   - Parasitics handled by MNA internal nodes (nodal path)
+                    //   - DK transient with use_k_eff=true: state.k holds K_eff
+                    //     so v_d = p + K_eff*i is already the internal junction
+                    //     voltage; parasitic R drops are absorbed into K.
                     code.push_str(&format!(
                         "{indent}let (i_dev{s}, i_dev{s1}, bjt{d}_jac) = bjt_evaluate(v_d{s}, v_d{s1}, state.device_{d}_is, state.device_{d}_vt, DEVICE_{d}_NF, DEVICE_{d}_NR, state.device_{d}_bf, state.device_{d}_br, DEVICE_{d}_SIGN, DEVICE_{d}_USE_GP, DEVICE_{d}_VAF, DEVICE_{d}_VAR, DEVICE_{d}_IKF, DEVICE_{d}_IKR, DEVICE_{d}_ISE, DEVICE_{d}_NE, DEVICE_{d}_ISC, DEVICE_{d}_NC);\n"
                     ));

@@ -198,7 +198,14 @@ impl RustEmitter {
             ctx.insert("rhs_const_values", &rhs_const_values);
         }
 
-        ctx.insert("k_rows", &format_matrix_rows(m, m, |i, j| ir.k(i, j)));
+        // K_eff: pre-subtract parasitic-BJT R_p so the controlling-voltage map
+        // v_d = p + state.k * i feeds bjt_evaluate the *internal* junction
+        // voltage. Replaces the inner-NR cost of bjt_with_parasitics. R_p is
+        // exact (linear in i), so K_eff has the same fixed point.
+        ctx.insert(
+            "k_rows",
+            &format_matrix_rows(m, m, |i, j| ir.k(i, j) - parasitic_r_p_dk(ir, i, j)),
+        );
         ctx.insert("n_v_rows", &format_matrix_rows(m, n, |i, j| ir.n_v(i, j)));
         // N_i transposed: N_I[device][node] = n_i[node][device]
         ctx.insert("n_i_rows", &format_matrix_rows(m, n, |i, j| ir.n_i(j, i)));
@@ -226,7 +233,13 @@ impl RustEmitter {
         ctx.insert("has_be_fallback", &has_be_fallback);
         if has_be_fallback {
             ctx.insert("s_be_rows", &format_matrix_rows(n, n, |i, j| ir.s_be(i, j)));
-            ctx.insert("k_be_rows", &format_matrix_rows(m, m, |i, j| ir.k_be(i, j)));
+            // BE fallback K also gets the K_eff treatment — same parasitic
+            // BJT absorption applies because the BE NR uses the same K-mediated
+            // controlling-voltage map.
+            ctx.insert(
+                "k_be_rows",
+                &format_matrix_rows(m, m, |i, j| ir.k_be(i, j) - parasitic_r_p_dk(ir, i, j)),
+            );
             ctx.insert(
                 "a_neg_be_rows",
                 &format_matrix_rows(n, n, |i, j| ir.a_neg_be(i, j)),
@@ -1521,13 +1534,47 @@ impl RustEmitter {
              \x20               }}\n\
              \x20               k[i][j] = sum;\n\
              \x20           }}\n\
-             \x20       }}\n\n\
-             \x20       self.s = s;\n\
+             \x20       }}\n",
+            m = m,
+        ));
+
+        // K_eff: subtract parasitic-BJT R_p from each affected 2x2 block.
+        // Mirrors the codegen-time K_DEFAULT adjustment, so state.k holds
+        // K_eff after both default-init and any pot/switch rebuild.
+        let mut emitted_k_eff_header = false;
+        for slot in &ir.device_slots {
+            if let DeviceParams::Bjt(bp) = &slot.params {
+                if bp.has_parasitics() && !slot.has_internal_mna_nodes {
+                    if !emitted_k_eff_header {
+                        code.push_str(
+                            "\n        // K_eff: absorb parasitic-BJT R drops into K so v_d = p + state.k * i\n\
+                             \x20       // gives the internal junction voltage directly. Lets bjt_evaluate\n\
+                             \x20       // (intrinsic) replace the inner-NR cost of bjt_with_parasitics.\n",
+                        );
+                        emitted_k_eff_header = true;
+                    }
+                    let s = slot.start_idx;
+                    let s1 = s + 1;
+                    code.push_str(&format!(
+                        "        k[{s}][{s}] -= {re};\n\
+                         \x20       k[{s}][{s1}] -= {rb_re};\n\
+                         \x20       k[{s1}][{s}] -= {neg_rc};\n\
+                         \x20       k[{s1}][{s1}] -= {rb};\n",
+                        re = fmt_f64(bp.re),
+                        rb_re = fmt_f64(bp.rb + bp.re),
+                        neg_rc = fmt_f64(-bp.rc),
+                        rb = fmt_f64(bp.rb),
+                    ));
+                }
+            }
+        }
+
+        code.push_str(
+            "\n        self.s = s;\n\
              \x20       self.a_neg = a_neg;\n\
              \x20       self.k = k;\n\
              \x20       self.s_ni = s_ni;\n",
-            m = m,
-        ));
+        );
 
         // SM pot recomputation removed — per-block rebuild handles pots exactly
 
@@ -3461,4 +3508,28 @@ impl RustEmitter {
             switch_comp_to_noise_slot,
         }
     }
+}
+
+/// Block-diagonal parasitic-R coupling matrix R_p_full[i][j] for parasitic
+/// BJTs in the DK path. Returns 0 for entries outside any parasitic-BJT block,
+/// and `[RE, RB+RE, -RC, RB]` for the 2×2 block at each affected slot.
+///
+/// K_eff = K - R_p_full lets `bjt_evaluate` (intrinsic) replace `bjt_with_parasitics`
+/// (inner 2D NR) on the DK path, because v_d = p + K_eff * i then equals the
+/// internal junction voltage exactly. Only applied when the slot lacks
+/// internal MNA nodes (DK transient path; nodal path expands internal nodes
+/// instead, and DC-OP recompute uses node-voltage NR which doesn't touch K).
+pub(super) fn parasitic_r_p_dk(ir: &CircuitIR, i: usize, j: usize) -> f64 {
+    for slot in &ir.device_slots {
+        if let DeviceParams::Bjt(bp) = &slot.params {
+            if bp.has_parasitics() && !slot.has_internal_mna_nodes {
+                let s = slot.start_idx;
+                if i == s && j == s { return bp.re; }
+                if i == s && j == s + 1 { return bp.rb + bp.re; }
+                if i == s + 1 && j == s { return -bp.rc; }
+                if i == s + 1 && j == s + 1 { return bp.rb; }
+            }
+        }
+    }
+    0.0
 }

@@ -86,7 +86,10 @@ impl RustEmitter {
         if has_nonlinear {
             // Device currents and Jacobian entries (shared with Phase E
             // runtime DC-OP recompute — see `nr_helpers::emit_dk_device_evaluation`).
-            emit_dk_device_evaluation(code, ir, "        ")?;
+            // use_k_eff=true: state.k holds K - R_p, so parasitic BJT R drops are
+            // absorbed into the controlling-voltage map and bjt_evaluate (intrinsic)
+            // is correct. Replaces the inner-NR cost of bjt_with_parasitics.
+            emit_dk_device_evaluation(code, ir, "        ", true)?;
 
             // Residuals
             code.push_str("        // Residuals: f(i) = i - i_dev(v(i)) = 0\n");
