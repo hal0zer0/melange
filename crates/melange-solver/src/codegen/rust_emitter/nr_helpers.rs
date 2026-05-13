@@ -614,7 +614,10 @@ pub(super) fn emit_schur_nr_limit_and_converge(
     code.push_str(&format!(
         "{indent}        state.last_nr_iterations = iter as u32;\n"
     ));
-    code.push_str(&format!("{indent}        converged = true;\n"));
+    // No `converged = true;` here — the post-loop `let converged =
+    // state.last_nr_iterations < MAX_ITER as u32` shadow always determines
+    // convergence from the iteration count. Setting a now-shadowed mutable
+    // raised a clippy `unused_assignments` warning in generated code.
     code.push_str(&format!("{indent}        break;\n"));
     code.push_str(&format!("{indent}    }}\n"));
     code.push_str(&format!("{indent}}}\n"));

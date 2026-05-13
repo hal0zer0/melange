@@ -3357,7 +3357,13 @@ impl RustEmitter {
                 "        i_nl[i] = 2.0 * state.i_nl_prev[i] - state.i_nl_prev_prev[i];\n",
             );
             code.push_str("    }\n");
-            code.push_str("    let mut converged = false;\n");
+            // Convergence is determined post-loop by `state.last_nr_iterations
+            // < MAX_ITER as u32` (see emission a few lines below). Earlier
+            // versions of the emitter declared `let mut converged = false;`
+            // here and set it inside the NR loop; that was dead code because
+            // every emit path immediately shadowed it with `let converged =
+            // …;` after the loop. Removing the dead declaration eliminates a
+            // clippy `unused_assignments` warning in generated code.
             code.push_str("    state.last_nr_iterations = MAX_ITER as u32;\n\n");
 
             // Trapezoidal NR loop
