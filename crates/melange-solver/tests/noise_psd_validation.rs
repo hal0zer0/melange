@@ -1341,3 +1341,292 @@ fn main() {{
         "Nodal-path noise RMS {rms:.3e} V exceeds 100 µV. lag1={lag1:.4}"
     );
 }
+
+// ===========================================================================
+// Phase 3.5 — Resistor flicker (Hooge bias-squared)
+// ===========================================================================
+//
+// All four tests share a passive divider:
+//
+//   V_in → Rin (1k) → node a → R1 (10k, KF set) → 0
+//                              C1 (100n) ↓
+//                              0
+//
+// `dc_block: false` so we measure variance in raw output. With V_in = 1 V DC
+// the steady-state current through R1 is V_in / (Rin + R1) = 90.9 µA — that's
+// the load-bearing bias for the "biased" cases. With V_in = 0 there is no DC
+// current, so Hooge predicts zero excess 1/f.
+//
+// The output is sampled at node `a` (the divider midpoint). The 100 nF cap
+// shunts AC components above ~159 Hz, leaving the ~1/f tail measurable in
+// the audio band as low-frequency variance.
+
+const R_FLICKER_DIVIDER_SPICE: &str = r#"* R1 with KF in passive divider
+Rin in a 1k
+R1 a 0 10k KF=1e-3 AF=2.0
+C1 a 0 100n
+.end
+"#;
+
+// Same topology, no KF — used as the "thermal-only" reference baseline.
+const R_FLICKER_DIVIDER_NO_KF_SPICE: &str = r#"* R1 in same divider, no flicker
+Rin in a 1k
+R1 a 0 10k
+C1 a 0 100n
+.end
+"#;
+
+fn build_r_flicker_test_main(
+    fs: f64,
+    drive_dc: f64,
+    n_warmup: usize,
+    n_samples: usize,
+) -> String {
+    format!(
+        r#"
+fn run_case(thermal: f64, flicker: f64, temperature: f64, seed: u64) -> f64 {{
+    let mut state = CircuitState::default();
+    state.set_sample_rate({fs}_f64);
+    state.set_seed(seed);
+    state.set_noise_enabled(true);
+    state.set_temperature_k(temperature);
+    state.set_thermal_gain(thermal);
+    state.set_flicker_gain(flicker);
+    state.set_noise_gain(1.0);
+
+    for _ in 0..{w} {{ let _ = process_sample({drive}_f64, &mut state); }}
+
+    let mut sum = 0.0_f64;
+    let mut sum_sq = 0.0_f64;
+    let n = {n};
+    for _ in 0..n {{
+        let v = process_sample({drive}_f64, &mut state)[0];
+        sum += v;
+        sum_sq += v * v;
+    }}
+    let nf = n as f64;
+    let mean = sum / nf;
+    (sum_sq / nf - mean * mean).max(0.0)
+}}
+"#,
+        fs = fs,
+        drive = drive_dc,
+        w = n_warmup,
+        n = n_samples,
+    )
+}
+
+fn r_flicker_circuit_code(spice: &str) -> String {
+    let config = CodegenConfig {
+        circuit_name: "r_flicker_divider".to_string(),
+        sample_rate: 96_000.0,
+        input_node: 0,
+        output_nodes: vec![1], // node `a` (1-indexed; `in` is node 0 (input port), `a` is node 1)
+        input_resistance: 1.0,
+        dc_block: false,
+        noise_mode: NoiseMode::Full,
+        noise_master_seed: 7,
+        ..CodegenConfig::default()
+    };
+    let (code, _n, _m) = support::generate_circuit_code(spice, &config);
+    code
+}
+
+#[test]
+fn r_flicker_unbiased_resistor_emits_no_excess_one_over_f() {
+    // Load-bearing Hooge correctness: a resistor with KF set but zero DC
+    // bias and zero signal must emit thermal-only — NO excess 1/f. This is
+    // the test that distinguishes correct bias-squared physics from the
+    // original spec's phenomenological constant-floor hack.
+    //
+    // Strategy: run the SAME circuit twice with the SAME seed.
+    //   - flicker=1, thermal=1: full noise
+    //   - flicker=0, thermal=1: thermal only
+    // With zero drive (no current through R1) the two variances must agree
+    // within ±5% — the flicker `continue` guard (i_abs < 1e-15) skips the
+    // RNG advance + Kellett tick on every sample, leaving the per-sample
+    // RNG sequence identical.
+    let code = r_flicker_circuit_code(R_FLICKER_DIVIDER_SPICE);
+    let main = format!(
+        r#"{}
+fn main() {{
+    let var_full     = run_case(1.0, 1.0, 290.0, 7);
+    let var_thermal  = run_case(1.0, 0.0, 290.0, 7);
+    let var_flick_0  = run_case(0.0, 1.0, 290.0, 7);
+    println!("VAR:full={{:.15e}}",     var_full);
+    println!("VAR:thermal={{:.15e}}",  var_thermal);
+    println!("VAR:flicker_only={{:.15e}}", var_flick_0);
+}}
+"#,
+        build_r_flicker_test_main(96_000.0, 0.0, 8_000, 1usize << 16)
+    );
+    let out = support::compile_and_run(&code, &main, "r_flicker_unbiased");
+    let var_full = parse_var(&out.stdout, "full");
+    let var_thermal = parse_var(&out.stdout, "thermal");
+    let var_flicker_only = parse_var(&out.stdout, "flicker_only");
+
+    // (1) Unbiased: full ≈ thermal-only — no excess 1/f when zero current.
+    let ratio = var_full / var_thermal;
+    assert!(
+        (0.95..=1.05).contains(&ratio),
+        "Unbiased resistor leaked excess 1/f: var_full={:.3e}, var_thermal={:.3e}, ratio={:.4} \
+         (Hooge requires zero excess at zero bias; if this fails, check the i_abs<1e-15 guard \
+         in the r_flicker rhs_stamp)",
+        var_full,
+        var_thermal,
+        ratio
+    );
+
+    // (2) Sanity: flicker-only with zero drive must be ~zero (well below
+    //     the thermal baseline). Confirms the stamp doesn't inject without
+    //     bias even when thermal is muted.
+    assert!(
+        var_flicker_only < var_thermal * 1e-3,
+        "Unbiased flicker-only variance should be ~zero, got {:.3e} (thermal baseline {:.3e}, \
+         ratio {:.3e})",
+        var_flicker_only,
+        var_thermal,
+        var_flicker_only / var_thermal
+    );
+}
+
+#[test]
+fn r_flicker_biased_resistor_audibly_wired() {
+    // Mirror of `flicker_noise_is_audibly_wired` for the resistor path.
+    // With V_in = 1 V DC there is ~90 µA flowing through R1; flicker should
+    // contribute audibly above the thermal floor and be mute-able via
+    // `set_flicker_gain(0.0)`.
+    let code = r_flicker_circuit_code(R_FLICKER_DIVIDER_SPICE);
+    let main = format!(
+        r#"{}
+fn main() {{
+    let var_full     = run_case(1.0, 1.0, 290.0, 11);
+    let var_thermal  = run_case(1.0, 0.0, 290.0, 11);
+    let var_repeat   = run_case(1.0, 1.0, 290.0, 11);
+    println!("VAR:full={{:.15e}}",    var_full);
+    println!("VAR:thermal={{:.15e}}", var_thermal);
+    println!("VAR:repeat={{:.15e}}",  var_repeat);
+}}
+"#,
+        build_r_flicker_test_main(96_000.0, 1.0, 8_000, 1usize << 16)
+    );
+    let out = support::compile_and_run(&code, &main, "r_flicker_biased_wired");
+    let var_full = parse_var(&out.stdout, "full");
+    let var_thermal = parse_var(&out.stdout, "thermal");
+    let var_repeat = parse_var(&out.stdout, "repeat");
+
+    // (1) Biased + flicker on → variance materially exceeds thermal-only.
+    //     At KF=1e-3 the flicker contribution dominates by orders of
+    //     magnitude; even a 2× margin is conservative.
+    assert!(
+        var_full > var_thermal * 2.0,
+        "Biased flicker did not raise the variance floor: var_full={:.3e}, var_thermal={:.3e}, \
+         ratio={:.3e} (expected >> 2)",
+        var_full,
+        var_thermal,
+        var_full / var_thermal
+    );
+
+    // (2) Same seed → bit-identical variance (determinism contract).
+    assert_eq!(
+        var_full.to_bits(),
+        var_repeat.to_bits(),
+        "Resistor-flicker determinism violated: var_full={:.15e} repeat={:.15e}",
+        var_full,
+        var_repeat
+    );
+}
+
+#[test]
+fn r_flicker_is_temperature_independent() {
+    // Hooge bias-driven 1/f is *temperature-independent* — `set_temperature_k`
+    // affects only thermal noise. With thermal muted (`thermal_gain = 0`)
+    // and a steady DC bias on R1, the integrated variance must be invariant
+    // under T sweeps within ±10% (loose because flicker draws are noisy and
+    // we're integrating over a finite window).
+    //
+    // This is the test that catches a future regression where someone wires
+    // `r_flicker_sqrt_fs` through `noise_thermal_scale` (which carries T)
+    // by accident.
+    let code = r_flicker_circuit_code(R_FLICKER_DIVIDER_SPICE);
+    let main = format!(
+        r#"{}
+fn main() {{
+    let var_290 = run_case(0.0, 1.0, 290.0, 17);
+    let var_77  = run_case(0.0, 1.0,  77.0, 17);
+    let var_500 = run_case(0.0, 1.0, 500.0, 17);
+    println!("VAR:t290={{:.15e}}", var_290);
+    println!("VAR:t77={{:.15e}}",  var_77);
+    println!("VAR:t500={{:.15e}}", var_500);
+}}
+"#,
+        build_r_flicker_test_main(96_000.0, 1.0, 8_000, 1usize << 16)
+    );
+    let out = support::compile_and_run(&code, &main, "r_flicker_t_indep");
+    let v290 = parse_var(&out.stdout, "t290");
+    let v77 = parse_var(&out.stdout, "t77");
+    let v500 = parse_var(&out.stdout, "t500");
+
+    let ratio_77 = v77 / v290;
+    let ratio_500 = v500 / v290;
+
+    assert!(
+        (0.90..=1.10).contains(&ratio_77),
+        "1/f variance changed with T (290→77 K): ratio={:.4} (expected ~1.0). Hooge is T-independent.",
+        ratio_77
+    );
+    assert!(
+        (0.90..=1.10).contains(&ratio_500),
+        "1/f variance changed with T (290→500 K): ratio={:.4} (expected ~1.0).",
+        ratio_500
+    );
+}
+
+#[test]
+fn r_flicker_floor_scales_with_drive() {
+    // Spec rev2 §validation 3 — "loud passages get hissier". With thermal
+    // muted, the integrated 1/f variance should scale as |I_R|^AF = I².
+    // Doubling the drive doubles the current (passive divider, linear),
+    // which should ~quadruple the variance (within seed-tolerance).
+    let code = r_flicker_circuit_code(R_FLICKER_DIVIDER_SPICE);
+    let main = format!(
+        r#"
+{builder1}{builder3}
+fn main() {{
+    let var_drive_1v = run_drive_1v();
+    let var_drive_3v = run_drive_3v();
+    println!("VAR:drive_1v={{:.15e}}", var_drive_1v);
+    println!("VAR:drive_3v={{:.15e}}", var_drive_3v);
+}}
+"#,
+        builder1 = build_r_flicker_test_main(96_000.0, 1.0, 8_000, 1usize << 16)
+            .replace("fn run_case", "fn run_drive_1v_inner")
+            + "\nfn run_drive_1v() -> f64 { run_drive_1v_inner(0.0, 1.0, 290.0, 31) }\n",
+        builder3 = build_r_flicker_test_main(96_000.0, 3.0, 8_000, 1usize << 16)
+            .replace("fn run_case", "fn run_drive_3v_inner")
+            + "\nfn run_drive_3v() -> f64 { run_drive_3v_inner(0.0, 1.0, 290.0, 31) }\n",
+    );
+    let out = support::compile_and_run(&code, &main, "r_flicker_drive_scaling");
+    let v1 = parse_var(&out.stdout, "drive_1v");
+    let v3 = parse_var(&out.stdout, "drive_3v");
+
+    // I scales as drive (linear divider). With AF=2.0 the variance scales
+    // as I² ⇒ V_3v / V_1v should be ~9× (3²). Loose ±25% tolerance because
+    // the Kellett filter and finite integration window add seed-noise.
+    let ratio = v3 / v1;
+    assert!(
+        (6.0..=12.0).contains(&ratio),
+        "1/f variance did not scale ~9× with 3× drive (AF=2): ratio={:.3} \
+         (var_drive_1v={:.3e}, var_drive_3v={:.3e})",
+        ratio,
+        v1,
+        v3
+    );
+}
+
+// (No-KF byte-identity baseline lives in
+// `codegen_verification_tests.rs::noise_full_no_kf_resistors_emits_zero_r_flicker`
+// — no need to re-run a compile cycle here just to assert thermal-only
+// codegen on the same divider topology.)
+#[allow(dead_code)]
+const _R_FLICKER_NO_KF_DIVIDER_REFERENCE: &str = R_FLICKER_DIVIDER_NO_KF_SPICE;

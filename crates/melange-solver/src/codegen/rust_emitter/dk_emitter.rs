@@ -1011,21 +1011,26 @@ impl RustEmitter {
             // the nodal path's per-component arrays.
             let noise_update: String = if noise.enabled {
                 let idx = sw.index;
-                noise
-                    .switch_comp_to_noise_slot
-                    .get(idx)
-                    .map(|slots| {
-                        let mut out = String::new();
-                        for (ci, maybe_slot) in slots.iter().enumerate() {
-                            if let Some(slot) = maybe_slot {
-                                out.push_str(&format!(
-                                    "        self.noise_thermal_sqrt_inv_r[{slot}] = (1.0 / SWITCH_{idx}_VALUES[position][{ci}]).sqrt();\n",
-                                ));
-                            }
+                let mut out = String::new();
+                if let Some(slots) = noise.switch_comp_to_noise_slot.get(idx) {
+                    for (ci, maybe_slot) in slots.iter().enumerate() {
+                        if let Some(slot) = maybe_slot {
+                            out.push_str(&format!(
+                                "        self.noise_thermal_sqrt_inv_r[{slot}] = (1.0 / SWITCH_{idx}_VALUES[position][{ci}]).sqrt();\n",
+                            ));
                         }
-                        out
-                    })
-                    .unwrap_or_default()
+                    }
+                }
+                if let Some(slots) = noise.switch_comp_to_r_flicker_slot.get(idx) {
+                    for (ci, maybe_slot) in slots.iter().enumerate() {
+                        if let Some(slot) = maybe_slot {
+                            out.push_str(&format!(
+                                "        self.noise_r_flicker_inv_r[{slot}] = 1.0 / SWITCH_{idx}_VALUES[position][{ci}];\n",
+                            ));
+                        }
+                    }
+                }
+                out
             } else {
                 String::new()
             };
@@ -1063,12 +1068,18 @@ impl RustEmitter {
             // source. Keeps `state.noise_thermal_sqrt_inv_r[k]` in sync
             // with the live R so Johnson-Nyquist variance tracks the knob.
             let noise_update: String = if noise.enabled {
-                match noise.pot_to_noise_slot.get(idx).copied().flatten() {
-                    Some(slot) => format!(
+                let mut out = String::new();
+                if let Some(slot) = noise.pot_to_noise_slot.get(idx).copied().flatten() {
+                    out.push_str(&format!(
                         "        self.noise_thermal_sqrt_inv_r[{slot}] = (1.0 / r).sqrt();\n",
-                    ),
-                    None => String::new(),
+                    ));
                 }
+                if let Some(slot) = noise.pot_to_r_flicker_slot.get(idx).copied().flatten() {
+                    out.push_str(&format!(
+                        "        self.noise_r_flicker_inv_r[{slot}] = 1.0 / r;\n",
+                    ));
+                }
+                out
             } else {
                 String::new()
             };
@@ -2780,6 +2791,15 @@ pub(super) struct NoiseEmission {
     /// should update `state.noise_thermal_sqrt_inv_r[k]` from the
     /// position-indexed R value. C/L components always map to `None`.
     pub switch_comp_to_noise_slot: Vec<Vec<Option<usize>>>,
+    /// Reverse lookup: `pot_index → r_flicker source index` (Phase 3.5).
+    /// `Some(k)` means the pot setter should also update
+    /// `state.noise_r_flicker_inv_r[k]`. Sparse — most pots have no
+    /// resistor-flicker source unless the user opted in with `KF=…` on
+    /// the pot's resistor line.
+    pub pot_to_r_flicker_slot: Vec<Option<usize>>,
+    /// Reverse lookup: `[switch_idx][comp_idx] → r_flicker source index`.
+    /// Same shape as `switch_comp_to_noise_slot`; sparse.
+    pub switch_comp_to_r_flicker_slot: Vec<Vec<Option<usize>>>,
 }
 
 impl RustEmitter {
@@ -2793,9 +2813,16 @@ impl RustEmitter {
         let thermal_n = ir.noise.thermal_sources.len();
         let shot_n = ir.noise.shot_sources.len();
         let flicker_n = ir.noise.flicker_sources.len();
-        if ir.noise.mode == NoiseMode::Off || (thermal_n == 0 && shot_n == 0 && flicker_n == 0) {
+        let r_flicker_n = ir.noise.resistor_flicker_sources.len();
+        if ir.noise.mode == NoiseMode::Off
+            || (thermal_n == 0 && shot_n == 0 && flicker_n == 0 && r_flicker_n == 0)
+        {
             return NoiseEmission::default();
         }
+        // The Kellett pink filter helper is shared between junction flicker
+        // (Phase 3) and resistor flicker (Phase 3.5). Emit when either is
+        // present.
+        let need_kellett = flicker_n > 0 || r_flicker_n > 0;
 
         let mut top = String::new();
         top.push_str("// ----------------------------------------------------------------------\n");
@@ -2935,6 +2962,69 @@ impl RustEmitter {
             ));
         }
 
+        // Resistor flicker (Hooge bias-squared, Phase 3.5). Per-sample
+        // amplitude is `sqrt(KF·fs) · |I_R|^(AF/2) · N(0,1)` fed into the
+        // shared Kellett 7-pole pink filter. `I_R = (V_+ − V_−)/R` is read
+        // live from `state.v_prev` at each sample. The opt-in collector
+        // emits no entries when no resistor sets `KF`, so zero-KF builds
+        // leak no constants.
+        if r_flicker_n > 0 {
+            top.push_str(&format!(
+                "pub const NOISE_R_FLICKER_N: usize = {};\n",
+                r_flicker_n
+            ));
+            let rf_ni: Vec<usize> = ir
+                .noise
+                .resistor_flicker_sources
+                .iter()
+                .map(|s| s.node_i)
+                .collect();
+            let rf_nj: Vec<usize> = ir
+                .noise
+                .resistor_flicker_sources
+                .iter()
+                .map(|s| s.node_j)
+                .collect();
+            let rf_sqrt_kf: Vec<String> = ir
+                .noise
+                .resistor_flicker_sources
+                .iter()
+                .map(|s| fmt_f64(s.kf.sqrt()))
+                .collect();
+            let rf_half_af: Vec<String> = ir
+                .noise
+                .resistor_flicker_sources
+                .iter()
+                .map(|s| fmt_f64(0.5 * s.af))
+                .collect();
+            let rf_inv_r: Vec<String> = ir
+                .noise
+                .resistor_flicker_sources
+                .iter()
+                .map(|s| fmt_f64(1.0 / s.resistance))
+                .collect();
+            top.push_str(&format!(
+                "pub(crate) const NOISE_R_FLICKER_NODE_I: [usize; NOISE_R_FLICKER_N] = [{}];\n",
+                fmt_usize_arr(&rf_ni)
+            ));
+            top.push_str(&format!(
+                "pub(crate) const NOISE_R_FLICKER_NODE_J: [usize; NOISE_R_FLICKER_N] = [{}];\n",
+                fmt_usize_arr(&rf_nj)
+            ));
+            top.push_str(&format!(
+                "pub(crate) const NOISE_R_FLICKER_SQRT_KF: [f64; NOISE_R_FLICKER_N] = [{}];\n",
+                rf_sqrt_kf.join(", ")
+            ));
+            top.push_str(&format!(
+                "pub(crate) const NOISE_R_FLICKER_HALF_AF: [f64; NOISE_R_FLICKER_N] = [{}];\n",
+                rf_half_af.join(", ")
+            ));
+            top.push_str(&format!(
+                "pub(crate) const NOISE_R_FLICKER_INV_R_DEFAULT: [f64; NOISE_R_FLICKER_N] = [{}];\n\n",
+                rf_inv_r.join(", ")
+            ));
+        }
+
         // xoshiro256++ RNG: fast, high-quality, 256-bit state per stream.
         top.push_str("#[derive(Clone, Copy, Debug)]\n");
         top.push_str("pub struct Xoshiro256pp { pub s: [u64; 4] }\n\n");
@@ -3012,12 +3102,24 @@ impl RustEmitter {
             top.push_str(
                 "pub const NOISE_FLICKER_SALT: u64 = 0xC0DE_BABE_DEAD_BEEF;\n\n",
             );
+        }
+        if r_flicker_n > 0 {
+            top.push_str("/// Resistor-flicker salt. Distinct from junction flicker so\n");
+            top.push_str("/// resistor 1/f streams cannot share a prefix with junction\n");
+            top.push_str("/// flicker streams under a deterministic master seed.\n");
+            top.push_str(
+                "pub const NOISE_R_FLICKER_SALT: u64 = 0xCA12_B0CC_F11C_E12E;\n\n",
+            );
+        }
+        if need_kellett {
             // Paul Kellett 7-pole pink filter (musicdsp.org pk3 variant,
             // ±0.05 dB over 9.2 octaves). White in, pink out with a ~1/f
             // PSD shape. The `* 0.11` tail normalizes the cascade to ~unit
             // RMS gain on unit-variance white — without it, Kellett's raw
             // output is ~3× the input RMS. Calibration is empirical; the
-            // shipped PSD test asserts slope, not absolute level.
+            // shipped PSD test asserts slope, not absolute level. Shared
+            // between junction flicker (Phase 3) and resistor flicker
+            // (Phase 3.5).
             top.push_str("#[inline(always)]\n");
             top.push_str("fn kellett_pink(white: f64, state: &mut [f64; 7]) -> f64 {\n");
             top.push_str("    state[0] = 0.99886 * state[0] + white * 0.0555179;\n");
@@ -3123,7 +3225,13 @@ impl RustEmitter {
             state_fields.push_str("    /// and at `reset()`; settles in a handful of samples once audio\n");
             state_fields.push_str("    /// processing begins.\n");
             state_fields.push_str("    pub noise_flicker_state: [[f64; 7]; NOISE_FLICKER_N],\n");
-            state_fields.push_str("    /// Scalar applied only to flicker sources (Phase 3). Runtime.\n");
+            // `flicker_gain` is shared with resistor flicker (Phase 3.5), so
+            // it lives on `CircuitState` whenever any flicker source exists.
+            // Emitting it here vs. in the r_flicker block matters only for
+            // builds that have r_flicker but no junction flicker — handled
+            // by the r_flicker block below.
+            state_fields.push_str("    /// Scalar applied to flicker sources (Phase 3 junction +\n");
+            state_fields.push_str("    /// Phase 3.5 resistor). Runtime.\n");
             state_fields.push_str("    pub flicker_gain: f64,\n");
             state_fields.push_str("    /// Precomputed `sqrt(4·fs_internal)`. Per-sample amplitude is\n");
             state_fields.push_str("    /// `noise_flicker_scale · NOISE_FLICKER_SQRT_KF[k] · |I_prev|^(AF/2)`\n");
@@ -3131,6 +3239,36 @@ impl RustEmitter {
             state_fields.push_str("    pub noise_flicker_scale: f64,\n");
             state_fields.push_str("    /// Per-source last-stamped `i_n` cache (BE-fallback replay).\n");
             state_fields.push_str("    pub noise_flicker_last_i_n: [f64; NOISE_FLICKER_N],\n");
+        }
+        if r_flicker_n > 0 {
+            state_fields.push_str("    /// Per-source xoshiro256++ state for resistor 1/f (Phase 3.5).\n");
+            state_fields.push_str("    /// Salted distinct from thermal/shot/junction-flicker streams.\n");
+            state_fields.push_str("    pub noise_r_flicker_rng: [Xoshiro256pp; NOISE_R_FLICKER_N],\n");
+            state_fields.push_str("    /// Cached second Gaussian from Marsaglia polar pair (r-flicker stream).\n");
+            state_fields.push_str("    pub noise_r_flicker_gaussian_cache: [Option<f64>; NOISE_R_FLICKER_N],\n");
+            state_fields.push_str("    /// Per-source 7-pole Kellett filter state. Zeroed at `default()`\n");
+            state_fields.push_str("    /// and `reset()`. Frozen across samples where the resistor\n");
+            state_fields.push_str("    /// carries < 1e-15 A — same convention as junction flicker.\n");
+            state_fields.push_str("    pub noise_r_flicker_state: [[f64; 7]; NOISE_R_FLICKER_N],\n");
+            state_fields.push_str("    /// Per-source `1/R` — live mirror of `NOISE_R_FLICKER_INV_R_DEFAULT`.\n");
+            state_fields.push_str("    /// Static entries stay at their baked value; dynamic entries\n");
+            state_fields.push_str("    /// (`.pot` / `.wiper` / `.runtime R` / `.switch` R) are refreshed\n");
+            state_fields.push_str("    /// inside the matching `set_pot_N` / `set_runtime_R_<field>` /\n");
+            state_fields.push_str("    /// `set_switch_N` setter so 1/f tracks the live resistance.\n");
+            state_fields.push_str("    pub noise_r_flicker_inv_r: [f64; NOISE_R_FLICKER_N],\n");
+            state_fields.push_str("    /// Per-source last-stamped `i_n` cache (BE-fallback replay).\n");
+            state_fields.push_str("    pub noise_r_flicker_last_i_n: [f64; NOISE_R_FLICKER_N],\n");
+            state_fields.push_str("    /// Precomputed `sqrt(fs_internal)`. Per-sample amplitude is\n");
+            state_fields.push_str("    /// `sqrt_fs · NOISE_R_FLICKER_SQRT_KF[k] · |I_R|^(AF/2)` before\n");
+            state_fields.push_str("    /// the Kellett filter. Refreshed in `set_sample_rate`. No T\n");
+            state_fields.push_str("    /// coupling — Hooge 1/f is bias-driven and T-independent.\n");
+            state_fields.push_str("    pub noise_r_flicker_sqrt_fs: f64,\n");
+            if flicker_n == 0 {
+                // r_flicker without junction flicker still needs flicker_gain.
+                state_fields.push_str("    /// Scalar applied to flicker sources (Phase 3.5 resistor;\n");
+                state_fields.push_str("    /// no junction flicker present in this build). Runtime.\n");
+                state_fields.push_str("    pub flicker_gain: f64,\n");
+            }
         }
 
         // Default impl: compute thermal_scale and seed RNGs
@@ -3169,6 +3307,16 @@ impl RustEmitter {
             default_stmts.push_str("        let noise_flicker_scale = (4.0 * fs_internal).sqrt();\n");
             default_stmts.push_str("        let noise_flicker_rng = seed_noise_rngs_salted::<NOISE_FLICKER_N>(NOISE_MASTER_SEED_DEFAULT, NOISE_FLICKER_SALT);\n");
         }
+        if r_flicker_n > 0 {
+            default_stmts.push_str("        // Resistor-flicker streams (Hooge bias-squared, Phase 3.5).\n");
+            default_stmts.push_str("        // Per-sample white-input variance:  σ_w² = KF·|I_R|^AF·fs\n");
+            default_stmts.push_str("        // (no factor of 4 — resistor flicker is not trap-stamped\n");
+            default_stmts.push_str("        // through the (A − A_neg) = 2G companion path; the amplitude\n");
+            default_stmts.push_str("        // basis is current through the resistor, not a Norton stamp\n");
+            default_stmts.push_str("        // that needs DC-gain compensation). `sqrt_fs` is shared.\n");
+            default_stmts.push_str("        let noise_r_flicker_sqrt_fs = fs_internal.sqrt();\n");
+            default_stmts.push_str("        let noise_r_flicker_rng = seed_noise_rngs_salted::<NOISE_R_FLICKER_N>(NOISE_MASTER_SEED_DEFAULT, NOISE_R_FLICKER_SALT);\n");
+        }
 
         let mut default_fields = String::new();
         default_fields.push_str("            noise_rng,\n");
@@ -3203,6 +3351,23 @@ impl RustEmitter {
             default_fields
                 .push_str("            noise_flicker_last_i_n: [0.0; NOISE_FLICKER_N],\n");
         }
+        if r_flicker_n > 0 {
+            default_fields.push_str("            noise_r_flicker_rng,\n");
+            default_fields.push_str(
+                "            noise_r_flicker_gaussian_cache: [None; NOISE_R_FLICKER_N],\n",
+            );
+            default_fields
+                .push_str("            noise_r_flicker_state: [[0.0; 7]; NOISE_R_FLICKER_N],\n");
+            default_fields.push_str(
+                "            noise_r_flicker_inv_r: NOISE_R_FLICKER_INV_R_DEFAULT,\n",
+            );
+            default_fields
+                .push_str("            noise_r_flicker_last_i_n: [0.0; NOISE_R_FLICKER_N],\n");
+            default_fields.push_str("            noise_r_flicker_sqrt_fs,\n");
+            if flicker_n == 0 {
+                default_fields.push_str("            flicker_gain: 1.0,\n");
+            }
+        }
 
         // reset() — reseed RNG and clear gaussian cache; keep user settings.
         let mut reset_body = String::new();
@@ -3234,6 +3399,24 @@ impl RustEmitter {
             reset_body
                 .push_str("        self.noise_flicker_last_i_n = [0.0; NOISE_FLICKER_N];\n");
         }
+        if r_flicker_n > 0 {
+            reset_body.push_str(
+                "        // Re-seed resistor-flicker RNGs + zero Kellett state + restore 1/R.\n",
+            );
+            reset_body.push_str("        self.noise_r_flicker_rng = seed_noise_rngs_salted::<NOISE_R_FLICKER_N>(self.noise_master_seed, NOISE_R_FLICKER_SALT);\n");
+            reset_body.push_str(
+                "        self.noise_r_flicker_gaussian_cache = [None; NOISE_R_FLICKER_N];\n",
+            );
+            reset_body.push_str(
+                "        self.noise_r_flicker_state = [[0.0; 7]; NOISE_R_FLICKER_N];\n",
+            );
+            reset_body.push_str(
+                "        self.noise_r_flicker_last_i_n = [0.0; NOISE_R_FLICKER_N];\n",
+            );
+            reset_body.push_str(
+                "        self.noise_r_flicker_inv_r = NOISE_R_FLICKER_INV_R_DEFAULT;\n",
+            );
+        }
 
         // set_sample_rate tail: recompute thermal_scale at the new rate
         let mut ssr_body = String::new();
@@ -3246,6 +3429,11 @@ impl RustEmitter {
         if flicker_n > 0 {
             ssr_body.push_str(
                 "        self.noise_flicker_scale = (4.0 * self.noise_fs).sqrt();\n",
+            );
+        }
+        if r_flicker_n > 0 {
+            ssr_body.push_str(
+                "        self.noise_r_flicker_sqrt_fs = self.noise_fs.sqrt();\n",
             );
         }
 
@@ -3272,10 +3460,15 @@ impl RustEmitter {
             methods.push_str("    /// also muting thermal.\n");
             methods.push_str("    pub fn set_shot_gain(&mut self, gain: f64) { self.shot_gain = gain; }\n\n");
         }
-        if flicker_n > 0 {
-            methods.push_str("    /// Scalar applied only to flicker (1/f) noise sources.\n");
-            methods.push_str("    /// Runtime-settable. Set to `0.0` to mute flicker without\n");
-            methods.push_str("    /// also muting thermal or shot.\n");
+        // Single `set_flicker_gain` covers both Phase 3 (junction flicker)
+        // and Phase 3.5 (resistor flicker) — they share `state.flicker_gain`
+        // so one mute call silences all 1/f character. Emitted whenever
+        // either source kind exists.
+        if flicker_n > 0 || r_flicker_n > 0 {
+            methods.push_str("    /// Scalar applied to all flicker (1/f) noise sources —\n");
+            methods.push_str("    /// junction flicker (Phase 3) and resistor flicker (Phase 3.5).\n");
+            methods.push_str("    /// Runtime-settable. Set to `0.0` to mute 1/f without touching\n");
+            methods.push_str("    /// thermal or shot.\n");
             methods.push_str(
                 "    pub fn set_flicker_gain(&mut self, gain: f64) { self.flicker_gain = gain; }\n\n",
             );
@@ -3303,6 +3496,18 @@ impl RustEmitter {
                 .push_str("        self.noise_flicker_gaussian_cache = [None; NOISE_FLICKER_N];\n");
             methods.push_str("        self.noise_flicker_state = [[0.0; 7]; NOISE_FLICKER_N];\n");
             methods.push_str("        self.noise_flicker_last_i_n = [0.0; NOISE_FLICKER_N];\n");
+        }
+        if r_flicker_n > 0 {
+            methods.push_str("        self.noise_r_flicker_rng = seed_noise_rngs_salted::<NOISE_R_FLICKER_N>(master, NOISE_R_FLICKER_SALT);\n");
+            methods.push_str(
+                "        self.noise_r_flicker_gaussian_cache = [None; NOISE_R_FLICKER_N];\n",
+            );
+            methods.push_str(
+                "        self.noise_r_flicker_state = [[0.0; 7]; NOISE_R_FLICKER_N];\n",
+            );
+            methods.push_str(
+                "        self.noise_r_flicker_last_i_n = [0.0; NOISE_R_FLICKER_N];\n",
+            );
         }
         methods.push_str("    }\n");
 
@@ -3387,6 +3592,41 @@ impl RustEmitter {
                 .push_str("            state.noise_flicker_last_i_n = [0.0; NOISE_FLICKER_N];\n");
             rhs_stamp.push_str("        }\n");
         }
+        if r_flicker_n > 0 {
+            // Resistor flicker (Hooge bias-squared, Phase 3.5). Reads
+            // `state.v_prev` directly to compute live resistor current.
+            // Zero current → continue (skips RNG advance + Kellett tick),
+            // so unbiased resistors emit no excess 1/f. Same convention
+            // as junction flicker.
+            rhs_stamp.push_str("        // Resistor flicker (Hooge bias-squared, Phase 3.5):\n");
+            rhs_stamp.push_str("        // i_R = (V_+ − V_−)/R from v_prev → amp = sqrt(fs)·sqrt(KF)·|i_R|^(AF/2)\n");
+            rhs_stamp.push_str("        // → Kellett 7-pole pink → RHS. Zero current → zero excess 1/f.\n");
+            rhs_stamp.push_str("        // Shares `flicker_gain` with junction flicker so a single mute\n");
+            rhs_stamp.push_str("        // call silences all 1/f character.\n");
+            rhs_stamp.push_str("        let r_fl_scale = state.noise_r_flicker_sqrt_fs * state.noise_gain * state.flicker_gain;\n");
+            rhs_stamp.push_str("        if r_fl_scale != 0.0 {\n");
+            rhs_stamp.push_str("            for k in 0..NOISE_R_FLICKER_N {\n");
+            rhs_stamp.push_str("                let ni = NOISE_R_FLICKER_NODE_I[k];\n");
+            rhs_stamp.push_str("                let nj = NOISE_R_FLICKER_NODE_J[k];\n");
+            rhs_stamp.push_str("                let v_i = if ni > 0 { state.v_prev[ni - 1] } else { 0.0 };\n");
+            rhs_stamp.push_str("                let v_j = if nj > 0 { state.v_prev[nj - 1] } else { 0.0 };\n");
+            rhs_stamp.push_str("                let i_r = (v_i - v_j) * state.noise_r_flicker_inv_r[k];\n");
+            rhs_stamp.push_str("                let i_abs = i_r.abs();\n");
+            rhs_stamp.push_str("                if i_abs < 1e-15 { continue; }\n");
+            rhs_stamp.push_str("                let white = gaussian(&mut state.noise_r_flicker_rng[k], &mut state.noise_r_flicker_gaussian_cache[k]);\n");
+            rhs_stamp.push_str("                let pink = kellett_pink(white, &mut state.noise_r_flicker_state[k]);\n");
+            rhs_stamp.push_str("                let amp = r_fl_scale * NOISE_R_FLICKER_SQRT_KF[k] * i_abs.powf(NOISE_R_FLICKER_HALF_AF[k]);\n");
+            rhs_stamp.push_str("                let i_n = amp * pink;\n");
+            rhs_stamp.push_str("                state.noise_r_flicker_last_i_n[k] = i_n;\n");
+            rhs_stamp.push_str("                if ni > 0 { rhs[ni - 1] += i_n; }\n");
+            rhs_stamp.push_str("                if nj > 0 { rhs[nj - 1] -= i_n; }\n");
+            rhs_stamp.push_str("            }\n");
+            rhs_stamp.push_str("        } else {\n");
+            rhs_stamp.push_str(
+                "            state.noise_r_flicker_last_i_n = [0.0; NOISE_R_FLICKER_N];\n",
+            );
+            rhs_stamp.push_str("        }\n");
+        }
         rhs_stamp.push_str("    } else {\n");
         rhs_stamp.push_str("        // noise_enabled=false: clear caches so a future BE replay during a\n");
         rhs_stamp.push_str("        // disabled-noise span doesn't re-inject the last enabled-mode i_n.\n");
@@ -3396,6 +3636,11 @@ impl RustEmitter {
         }
         if flicker_n > 0 {
             rhs_stamp.push_str("        state.noise_flicker_last_i_n = [0.0; NOISE_FLICKER_N];\n");
+        }
+        if r_flicker_n > 0 {
+            rhs_stamp.push_str(
+                "        state.noise_r_flicker_last_i_n = [0.0; NOISE_R_FLICKER_N];\n",
+            );
         }
         rhs_stamp.push_str("    }\n");
 
@@ -3437,6 +3682,16 @@ impl RustEmitter {
             rhs_stamp_be.push_str("                if nj > 0 { rhs_be[nj - 1] -= i_n; }\n");
             rhs_stamp_be.push_str("            }\n");
         }
+        if r_flicker_n > 0 {
+            rhs_stamp_be.push_str("            for k in 0..NOISE_R_FLICKER_N {\n");
+            rhs_stamp_be
+                .push_str("                let i_n = state.noise_r_flicker_last_i_n[k];\n");
+            rhs_stamp_be.push_str("                let ni = NOISE_R_FLICKER_NODE_I[k];\n");
+            rhs_stamp_be.push_str("                let nj = NOISE_R_FLICKER_NODE_J[k];\n");
+            rhs_stamp_be.push_str("                if ni > 0 { rhs_be[ni - 1] += i_n; }\n");
+            rhs_stamp_be.push_str("                if nj > 0 { rhs_be[nj - 1] -= i_n; }\n");
+            rhs_stamp_be.push_str("            }\n");
+        }
         rhs_stamp_be.push_str("        }\n");
 
         // NaN-recovery noise reset: clear the two-draw lag buffer and the
@@ -3459,6 +3714,14 @@ impl RustEmitter {
                 .push_str("        state.noise_flicker_last_i_n = [0.0; NOISE_FLICKER_N];\n");
             nan_recovery_body
                 .push_str("        state.noise_flicker_state = [[0.0; 7]; NOISE_FLICKER_N];\n");
+        }
+        if r_flicker_n > 0 {
+            nan_recovery_body.push_str(
+                "        state.noise_r_flicker_last_i_n = [0.0; NOISE_R_FLICKER_N];\n",
+            );
+            nan_recovery_body.push_str(
+                "        state.noise_r_flicker_state = [[0.0; 7]; NOISE_R_FLICKER_N];\n",
+            );
         }
 
         // Reverse lookup populated from each source's `pot_slot`. Pots with
@@ -3491,6 +3754,33 @@ impl RustEmitter {
             }
         }
 
+        // Parallel pot/switch reverse lookups for resistor flicker (Phase 3.5).
+        // Sparse — most pot/switch resistors have no `KF` set, so most
+        // entries stay `None`. The setters check `Option::Some(k)` exactly
+        // like the thermal path.
+        let mut pot_to_r_flicker_slot = vec![None; ir.pots.len()];
+        for (k, src) in ir.noise.resistor_flicker_sources.iter().enumerate() {
+            if let Some(p) = src.pot_slot {
+                if p < pot_to_r_flicker_slot.len() {
+                    pot_to_r_flicker_slot[p] = Some(k);
+                }
+            }
+        }
+        let mut switch_comp_to_r_flicker_slot: Vec<Vec<Option<usize>>> = ir
+            .switches
+            .iter()
+            .map(|sw| vec![None; sw.components.len()])
+            .collect();
+        for (k, src) in ir.noise.resistor_flicker_sources.iter().enumerate() {
+            if let Some((sw, comp)) = src.switch_slot {
+                if sw < switch_comp_to_r_flicker_slot.len()
+                    && comp < switch_comp_to_r_flicker_slot[sw].len()
+                {
+                    switch_comp_to_r_flicker_slot[sw][comp] = Some(k);
+                }
+            }
+        }
+
         NoiseEmission {
             top_level: top,
             state_fields,
@@ -3506,6 +3796,8 @@ impl RustEmitter {
             thermal_n,
             pot_to_noise_slot,
             switch_comp_to_noise_slot,
+            pot_to_r_flicker_slot,
+            switch_comp_to_r_flicker_slot,
         }
     }
 }

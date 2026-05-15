@@ -8071,6 +8071,257 @@ Cout out 0 1u
 }
 
 // ---------------------------------------------------------------------------
+// Phase 3.5 resistor-flicker emission tests
+// ---------------------------------------------------------------------------
+
+const R_FLICKER_SPICE: &str = "\
+RC carbon-comp probe
+Rin in a 1k
+R1 a out 10k KF=1e-10 AF=2.0
+C1 out 0 1u
+";
+
+// Same title + topology as `R_FLICKER_SPICE`, just with KF stripped, so the
+// off-mode byte-identity test isolates the KF param's effect (not stray
+// title-comment differences).
+const R_FLICKER_NO_KF_SPICE: &str = "\
+RC carbon-comp probe
+Rin in a 1k
+R1 a out 10k
+C1 out 0 1u
+";
+
+#[test]
+fn noise_off_is_byte_identical_with_kf_resistor() {
+    // A resistor with KF=… in Off mode must produce byte-identical code to
+    // the same circuit without KF in Off mode — KF is purely a noise-mode
+    // input; nothing should leak when noise is off.
+    let off_with_kf = generate_code_with_config(R_FLICKER_SPICE, default_config());
+    let off_no_kf = generate_code_with_config(R_FLICKER_NO_KF_SPICE, default_config());
+    assert_eq!(
+        off_with_kf, off_no_kf,
+        "KF on a resistor leaked into Off-mode codegen"
+    );
+}
+
+#[test]
+fn noise_full_no_kf_resistors_emits_zero_r_flicker() {
+    // Full mode on a circuit where no resistor sets KF must emit no
+    // resistor-flicker scaffolding. Byte-identical to a pre-Phase-3.5 Full
+    // build of the same circuit at the relevant tokens.
+    let config = CodegenConfig {
+        noise_mode: melange_solver::codegen::NoiseMode::Full,
+        ..default_config()
+    };
+    let code = generate_code_with_config(R_FLICKER_NO_KF_SPICE, config);
+    for tok in [
+        "NOISE_R_FLICKER_N",
+        "NOISE_R_FLICKER_NODE_I",
+        "NOISE_R_FLICKER_SQRT_KF",
+        "NOISE_R_FLICKER_HALF_AF",
+        "NOISE_R_FLICKER_INV_R_DEFAULT",
+        "NOISE_R_FLICKER_SALT",
+        "noise_r_flicker_rng",
+        "noise_r_flicker_state",
+        "noise_r_flicker_inv_r",
+        "noise_r_flicker_sqrt_fs",
+        "noise_r_flicker_last_i_n",
+    ] {
+        assert!(
+            !code.contains(tok),
+            "no-KF Full build leaked resistor-flicker token `{}`",
+            tok
+        );
+    }
+    // Thermal scaffolding still emits.
+    assert!(code.contains("NOISE_THERMAL_N"));
+}
+
+#[test]
+fn noise_full_emits_r_flicker_tokens() {
+    let config = CodegenConfig {
+        noise_mode: melange_solver::codegen::NoiseMode::Full,
+        noise_master_seed: 42,
+        ..default_config()
+    };
+    let code = generate_code_with_config(R_FLICKER_SPICE, config);
+
+    // Single KF-enabled resistor → one r-flicker source.
+    assert!(
+        code.contains("pub const NOISE_R_FLICKER_N: usize = 1;"),
+        "expected NOISE_R_FLICKER_N=1; relevant lines:\n{}",
+        code.lines()
+            .filter(|l| l.contains("NOISE_R_FLICKER_N"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+
+    for tok in [
+        "NOISE_R_FLICKER_NODE_I",
+        "NOISE_R_FLICKER_NODE_J",
+        "NOISE_R_FLICKER_SQRT_KF",
+        "NOISE_R_FLICKER_HALF_AF",
+        "NOISE_R_FLICKER_INV_R_DEFAULT",
+        "NOISE_R_FLICKER_SALT",
+        "fn kellett_pink",
+        "noise_r_flicker_rng",
+        "noise_r_flicker_gaussian_cache",
+        "noise_r_flicker_state",
+        "noise_r_flicker_inv_r",
+        "noise_r_flicker_sqrt_fs",
+        "noise_r_flicker_last_i_n",
+        "pub fn set_flicker_gain",
+    ] {
+        assert!(
+            code.contains(tok),
+            "resistor-flicker codegen missing token `{}`",
+            tok
+        );
+    }
+
+    // Salt is the dedicated resistor-flicker constant — must NOT collide
+    // with the junction-flicker salt under a deterministic seed.
+    assert!(
+        code.contains("NOISE_R_FLICKER_SALT: u64 = 0xCA12_B0CC_F11C_E12E"),
+        "resistor-flicker salt constant missing or wrong value"
+    );
+
+    // RHS stamp must compute the live current via v_prev (NOT i_nl_prev).
+    assert!(
+        code.contains("(v_i - v_j) * state.noise_r_flicker_inv_r["),
+        "r-flicker RHS stamp must compute (V_+ − V_−)·(1/R) from v_prev"
+    );
+    assert!(
+        code.contains("kellett_pink(white, &mut state.noise_r_flicker_state["),
+        "r-flicker RHS stamp must run output through Kellett pink filter"
+    );
+}
+
+#[test]
+fn noise_full_r_flicker_default_af_is_2() {
+    // Per the spec: AF defaults to 2.0 (Hooge exponent for resistors) when
+    // KF is set without an explicit AF. Codegen bakes AF/2 = 1.0.
+    const SPICE_KF_ONLY: &str = "\
+RC default-AF carbon-comp
+Rin in a 1k
+R1 a out 10k KF=1e-10
+C1 out 0 1u
+";
+    let config = CodegenConfig {
+        noise_mode: melange_solver::codegen::NoiseMode::Full,
+        ..default_config()
+    };
+    let code = generate_code_with_config(SPICE_KF_ONLY, config);
+    let line = code
+        .lines()
+        .find(|l| l.contains("NOISE_R_FLICKER_HALF_AF"))
+        .expect("NOISE_R_FLICKER_HALF_AF missing");
+    assert!(
+        line.contains("[1") || line.contains("[1.0"),
+        "default AF should be 2.0 → HALF_AF entry should be 1.0; got: {}",
+        line
+    );
+}
+
+#[test]
+fn noise_full_r_flicker_pot_refresh() {
+    // A pot-backed resistor with KF set must refresh state.noise_r_flicker_inv_r
+    // inside its set_pot_N setter alongside the existing thermal refresh.
+    const SPICE: &str = "\
+RC with .pot carbon-comp
+Rin in a 1k
+R1 a out 10k KF=1e-10 AF=2.0
+C1 out 0 1u
+.pot R1 1k 100k
+";
+    let config = CodegenConfig {
+        noise_mode: melange_solver::codegen::NoiseMode::Full,
+        ..default_config()
+    };
+    let code = generate_code_with_config(SPICE, config);
+    // Find the set_pot_0 body and assert it touches noise_r_flicker_inv_r.
+    let setter = code
+        .split("pub fn set_pot_0")
+        .nth(1)
+        .and_then(|tail| tail.split("\n    }").next())
+        .expect("set_pot_0 method body missing");
+    assert!(
+        setter.contains("self.noise_r_flicker_inv_r["),
+        "set_pot_0 must refresh noise_r_flicker_inv_r when the pot's R has KF.\nBody:\n{}",
+        setter
+    );
+    // And the thermal refresh stays present.
+    assert!(
+        setter.contains("self.noise_thermal_sqrt_inv_r["),
+        "set_pot_0 must still refresh noise_thermal_sqrt_inv_r"
+    );
+}
+
+#[test]
+fn noise_full_r_flicker_switch_refresh() {
+    // A switch R-component carrying KF must refresh r_flicker_inv_r in
+    // its set_switch_N setter from the position-indexed value array.
+    const SPICE: &str = "\
+RC with switch-R carbon-comp
+Rin in a 1k
+R1 a out 10k KF=1e-10 AF=2.0
+C1 out 0 1u
+.switch R1 10k 22k 47k
+";
+    let config = CodegenConfig {
+        noise_mode: melange_solver::codegen::NoiseMode::Full,
+        ..default_config()
+    };
+    let code = generate_code_with_config(SPICE, config);
+    let setter = code
+        .split("pub fn set_switch_0")
+        .nth(1)
+        .and_then(|tail| tail.split("\n    }").next())
+        .expect("set_switch_0 method body missing");
+    assert!(
+        setter.contains("self.noise_r_flicker_inv_r["),
+        "set_switch_0 must refresh noise_r_flicker_inv_r for KF-enabled R-component.\nBody:\n{}",
+        setter
+    );
+}
+
+#[test]
+fn noise_full_r_flicker_generated_code_compiles() {
+    // The full r-flicker emission must produce code that rustc accepts.
+    // Mirrors the existing `noise_nodal_generated_code_compiles` gate.
+    let config = CodegenConfig {
+        noise_mode: melange_solver::codegen::NoiseMode::Full,
+        noise_master_seed: 1,
+        ..default_config()
+    };
+    let code = generate_code_with_config(R_FLICKER_SPICE, config);
+
+    let tmp_dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let src = tmp_dir.join(format!("noise_r_flicker_compiles_{}.rs", pid));
+    let rlib = tmp_dir.join(format!("noise_r_flicker_compiles_{}.rlib", pid));
+    let lib_rlib = tmp_dir.join(format!("libnoise_r_flicker_compiles_{}.rlib", pid));
+    std::fs::write(&src, &code).expect("write generated code");
+
+    let out = std::process::Command::new("rustc")
+        .args(["--edition", "2024", "--crate-type", "lib", "-o"])
+        .arg(&rlib)
+        .arg(&src)
+        .output()
+        .expect("invoke rustc");
+
+    let _ = std::fs::remove_file(&src);
+    let _ = std::fs::remove_file(&rlib);
+    let _ = std::fs::remove_file(&lib_rlib);
+
+    assert!(
+        out.status.success(),
+        "generated r-flicker code failed to compile:\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+// ---------------------------------------------------------------------------
 // .mismatch directive — per-device parameter jitter
 // ---------------------------------------------------------------------------
 

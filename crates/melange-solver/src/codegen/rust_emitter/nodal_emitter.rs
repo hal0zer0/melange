@@ -2658,6 +2658,11 @@ impl RustEmitter {
                         "        self.noise_thermal_sqrt_inv_r[{slot}] = (1.0 / r).sqrt();\n",
                     ));
                 }
+                if let Some(slot) = noise.pot_to_r_flicker_slot.get(idx).copied().flatten() {
+                    code.push_str(&format!(
+                        "        self.noise_r_flicker_inv_r[{slot}] = 1.0 / r;\n",
+                    ));
+                }
             }
 
             // No NR-state reseed: callers that need one (preset recall,
@@ -2792,6 +2797,15 @@ impl RustEmitter {
                         if let Some(slot) = maybe_slot {
                             code.push_str(&format!(
                                 "        self.noise_thermal_sqrt_inv_r[{slot}] = (1.0 / SWITCH_{idx}_COMP_{ci}_VALUES[position]).sqrt();\n",
+                            ));
+                        }
+                    }
+                }
+                if let Some(slots) = noise.switch_comp_to_r_flicker_slot.get(idx) {
+                    for (ci, maybe_slot) in slots.iter().enumerate() {
+                        if let Some(slot) = maybe_slot {
+                            code.push_str(&format!(
+                                "        self.noise_r_flicker_inv_r[{slot}] = 1.0 / SWITCH_{idx}_COMP_{ci}_VALUES[position];\n",
                             ));
                         }
                     }

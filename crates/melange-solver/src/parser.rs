@@ -580,12 +580,23 @@ impl Netlist {
 /// A circuit element (component).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Element {
-    /// Resistor: Rname n+ n- value
+    /// Resistor: Rname n+ n- value [KF=val] [AF=val]
+    ///
+    /// `kf`/`af` are opt-in 1/f flicker noise parameters (Hooge bias-squared
+    /// form, Phase 3.5). Per-sample injected current is
+    /// `sqrt(KF·fs) · |I_R(t)|^(AF/2) · kellett_pink(N(0,1))` where
+    /// `I_R(t) = (V_+ − V_−) / R` is the live current through this resistor.
+    /// Both default to `None`; codegen-time `kf == None || kf == Some(0.0)`
+    /// emits no flicker source for this resistor — byte-identical to a
+    /// pre-Phase-3.5 build. Default `AF = 2.0` when `KF` is set without `AF`
+    /// (Hooge's exponent for resistors). See `docs/aidocs/NOISE.md`.
     Resistor {
         name: String,
         n_plus: String,
         n_minus: String,
         value: f64,
+        kf: Option<f64>,
+        af: Option<f64>,
     },
     /// Capacitor: Cname n+ n- value [IC=initial]
     Capacitor {
@@ -835,11 +846,15 @@ impl Element {
                 n_plus,
                 n_minus,
                 value,
+                kf,
+                af,
             } => Element::Resistor {
                 name: prefixed(name),
                 n_plus: remap(n_plus),
                 n_minus: remap(n_minus),
                 value: *value,
+                kf: *kf,
+                af: *af,
             },
             Element::Capacitor {
                 name,
@@ -2953,11 +2968,73 @@ impl Parser {
         self.require_parts(parts, 4, "Rname n+ n- value")?;
         self.check_self_connection(parts[1], parts[2], parts[0])?;
         let value = self.parse_positive_value(parts[3], "Resistor")?;
+
+        // Optional trailing KF=/AF= for Phase 3.5 resistor flicker (Hooge).
+        // Both default to `None`; codegen emits no flicker source unless
+        // `KF > 0`. Order-independent. AF defaults to 2.0 when KF is set
+        // without an explicit AF.
+        let mut kf: Option<f64> = None;
+        let mut af: Option<f64> = None;
+        for token in &parts[4..] {
+            let t = token.trim();
+            let Some(eq) = t.find('=') else {
+                return Err(self.error(format!(
+                    "Resistor '{}': unrecognized trailing token '{}' (expected KF=… or AF=…)",
+                    parts[0], t
+                )));
+            };
+            let key = t[..eq].to_ascii_uppercase();
+            let val = parse_value(&t[eq + 1..]).map_err(|_| {
+                self.error(format!("Resistor '{}': invalid '{}' value", parts[0], key))
+            })?;
+            match key.as_str() {
+                "KF" => {
+                    if !val.is_finite() || val < 0.0 {
+                        return Err(self.error(format!(
+                            "Resistor '{}': KF must be a finite non-negative number, got {}",
+                            parts[0], val
+                        )));
+                    }
+                    kf = Some(val);
+                }
+                "AF" => {
+                    if !val.is_finite() || val <= 0.0 {
+                        return Err(self.error(format!(
+                            "Resistor '{}': AF must be a finite positive number, got {}",
+                            parts[0], val
+                        )));
+                    }
+                    af = Some(val);
+                }
+                _ => {
+                    return Err(self.error(format!(
+                        "Resistor '{}': unrecognized parameter '{}' (only KF and AF are supported)",
+                        parts[0], key
+                    )));
+                }
+            }
+        }
+        // KF=0 is equivalent to KF unset — a noise-source filter at codegen
+        // time excludes both. Normalize here so downstream code only has to
+        // check `kf.is_some()` to know the user opted in.
+        if matches!(kf, Some(v) if v == 0.0) {
+            kf = None;
+            af = None;
+        }
+        // AF without KF is meaningless (the formula has no flicker term);
+        // strip it to keep the IR signal clean and avoid surprising users
+        // who set only AF and wonder why nothing happens.
+        if kf.is_none() {
+            af = None;
+        }
+
         Ok(Element::Resistor {
             name: parts[0].to_string(),
             n_plus: parts[1].to_string(),
             n_minus: parts[2].to_string(),
             value,
+            kf,
+            af,
         })
     }
 
@@ -3574,11 +3651,102 @@ mod tests {
                 n_plus,
                 n_minus,
                 value,
+                kf,
+                af,
             } => {
                 assert_eq!(name, "R1");
                 assert_eq!(n_plus, "1");
                 assert_eq!(n_minus, "0");
                 assert_eq!(*value, 1000.0);
+                assert_eq!(*kf, None, "KF should default to None");
+                assert_eq!(*af, None, "AF should default to None");
+            }
+            _ => panic!("Expected resistor"),
+        }
+    }
+
+    #[test]
+    fn test_parse_resistor_with_kf_only() {
+        let netlist = Netlist::parse("Test\nR1 1 0 10k KF=1e-10\n").unwrap();
+        match &netlist.elements[0] {
+            Element::Resistor { kf, af, .. } => {
+                assert_eq!(*kf, Some(1e-10));
+                assert_eq!(*af, None, "AF unset stays None until codegen defaulting");
+            }
+            _ => panic!("Expected resistor"),
+        }
+    }
+
+    #[test]
+    fn test_parse_resistor_with_kf_and_af() {
+        let netlist = Netlist::parse("Test\nR1 1 0 10k KF=2.5e-9 AF=2.0\n").unwrap();
+        match &netlist.elements[0] {
+            Element::Resistor { kf, af, .. } => {
+                assert_eq!(*kf, Some(2.5e-9));
+                assert_eq!(*af, Some(2.0));
+            }
+            _ => panic!("Expected resistor"),
+        }
+    }
+
+    #[test]
+    fn test_parse_resistor_kf_af_order_independent() {
+        let netlist = Netlist::parse("Test\nR1 1 0 10k AF=1.5 KF=3e-10\n").unwrap();
+        match &netlist.elements[0] {
+            Element::Resistor { kf, af, .. } => {
+                assert_eq!(*kf, Some(3e-10));
+                assert_eq!(*af, Some(1.5));
+            }
+            _ => panic!("Expected resistor"),
+        }
+    }
+
+    #[test]
+    fn test_parse_resistor_kf_zero_normalizes_to_none() {
+        let netlist = Netlist::parse("Test\nR1 1 0 10k KF=0 AF=2.0\n").unwrap();
+        match &netlist.elements[0] {
+            Element::Resistor { kf, af, .. } => {
+                assert_eq!(*kf, None, "KF=0 should normalize to None");
+                assert_eq!(*af, None, "AF stripped when KF unset");
+            }
+            _ => panic!("Expected resistor"),
+        }
+    }
+
+    #[test]
+    fn test_parse_resistor_af_without_kf_stripped() {
+        let netlist = Netlist::parse("Test\nR1 1 0 10k AF=2.0\n").unwrap();
+        match &netlist.elements[0] {
+            Element::Resistor { kf, af, .. } => {
+                assert_eq!(*kf, None);
+                assert_eq!(*af, None, "AF without KF is meaningless; stripped");
+            }
+            _ => panic!("Expected resistor"),
+        }
+    }
+
+    #[test]
+    fn test_parse_resistor_kf_negative_rejected() {
+        assert!(Netlist::parse("Test\nR1 1 0 10k KF=-1e-10\n").is_err());
+    }
+
+    #[test]
+    fn test_parse_resistor_af_zero_rejected() {
+        assert!(Netlist::parse("Test\nR1 1 0 10k KF=1e-10 AF=0\n").is_err());
+    }
+
+    #[test]
+    fn test_parse_resistor_unknown_param_rejected() {
+        assert!(Netlist::parse("Test\nR1 1 0 10k XYZ=1\n").is_err());
+    }
+
+    #[test]
+    fn test_parse_resistor_case_insensitive_kf() {
+        let netlist = Netlist::parse("Test\nR1 1 0 10k kf=1e-10 af=2.0\n").unwrap();
+        match &netlist.elements[0] {
+            Element::Resistor { kf, af, .. } => {
+                assert_eq!(*kf, Some(1e-10));
+                assert_eq!(*af, Some(2.0));
             }
             _ => panic!("Expected resistor"),
         }

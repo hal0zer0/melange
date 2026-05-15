@@ -952,6 +952,8 @@ pub fn augment_netlist_with_boyle_diodes(
             n_plus: buf_out_node,
             n_minus: out_name.clone(),
             value: r_out,
+            kf: None,
+            af: None,
         });
 
         if has_upper {
@@ -1818,6 +1820,54 @@ pub struct FlickerNoiseSource {
     pub af: f64,
 }
 
+/// Resistor flicker (1/f) noise source — Hooge bias-squared form (Phase 3.5).
+///
+/// Emitted as a Norton current source whose amplitude is shaped by the same
+/// Paul Kellett 7-pole pink filter used by junction flicker. Per-sample
+/// injected current at sample rate `fs` is
+/// `kellett(sqrt(KF·fs) · |I_R(t)|^(AF/2) · N(0,1))`,
+/// where `I_R(t) = (V_+ − V_−) / R` is the **live** current through this
+/// resistor at the previous sample (read from `state.v_prev`). A resistor
+/// with no current carries only thermal — there is no constant pink floor.
+/// AF defaults to `2.0` at codegen time (Hooge's exponent for resistors;
+/// `Element::Resistor.af` is `Option<f64>` so an unspecified AF is filled
+/// in here, not at the parser).
+///
+/// Per-source baked constants `NOISE_R_FLICKER_SQRT_KF[k] = sqrt(KF)` and
+/// `NOISE_R_FLICKER_HALF_AF[k] = AF / 2`. Live `1/R` lives in
+/// `state.noise_r_flicker_inv_r[k]` so `.pot` / `.wiper` / `.switch` /
+/// `.runtime R` setters can refresh it without re-emitting code. The
+/// scalar `state.noise_r_flicker_sqrt_fs` tracks `sqrt(fs)` and is
+/// refreshed in `set_sample_rate`. See `docs/aidocs/NOISE.md` Phase 3.5.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResistorFlickerNoiseSource {
+    /// Resistor component name (debug + future per-source overrides).
+    pub name: String,
+    /// 1-indexed positive node (0 = ground).
+    pub node_i: usize,
+    /// 1-indexed negative node (0 = ground).
+    pub node_j: usize,
+    /// Resistance in ohms at the default operating point. For dynamic
+    /// sources (`pot_slot` / `switch_slot` Some) this is the codegen-time
+    /// default; the live `1/R` is in `state.noise_r_flicker_inv_r[k]`.
+    pub resistance: f64,
+    /// Hooge KF coefficient (validated `> 0` finite by the parser; this
+    /// struct is only built for opted-in resistors).
+    pub kf: f64,
+    /// Hooge AF exponent. Default 2.0 at codegen time when the parser
+    /// captured `af = None`. Per-element overrides allowed.
+    pub af: f64,
+    /// `Some(i)` when this R is a `.pot` / `.wiper` / `.runtime R` member
+    /// backed by `mna.pots[i]`. The emitter hooks the matching setter to
+    /// refresh `state.noise_r_flicker_inv_r[k]`.
+    #[serde(default)]
+    pub pot_slot: Option<usize>,
+    /// `Some((switch_idx, comp_idx))` when this R is an R-type switch
+    /// component. Same setter-refresh contract as `pot_slot`.
+    #[serde(default)]
+    pub switch_slot: Option<(usize, usize)>,
+}
+
 /// Noise configuration baked into the generated code.
 ///
 /// Built from [`crate::codegen::NoiseMode`] + a scan of `netlist.elements`.
@@ -1843,6 +1893,13 @@ pub struct NoiseIR {
     /// `KF`. Zero-`KF` devices produce no entry — zero codegen overhead.
     #[serde(default)]
     pub flicker_sources: Vec<FlickerNoiseSource>,
+    /// Resistor flicker (1/f) noise sources — Hooge bias-squared (Phase 3.5).
+    /// Populated only when `mode.includes_full()` AND the resistor line
+    /// supplies positive `KF`. Default-zero like junction flicker; netlists
+    /// without per-resistor `KF` produce byte-identical code to a
+    /// pre-Phase-3.5 build under `--noise full`.
+    #[serde(default)]
+    pub resistor_flicker_sources: Vec<ResistorFlickerNoiseSource>,
 }
 
 /// Collect Johnson-Nyquist thermal noise sources from the netlist.
@@ -1900,6 +1957,7 @@ pub fn collect_thermal_noise_sources(
             n_plus,
             n_minus,
             value,
+            ..
         } = el
         {
             let upper = name.to_ascii_uppercase();
@@ -2194,6 +2252,111 @@ pub fn collect_flicker_noise_sources(
                 // Skipped: no junction current; shot/flicker not defined.
             }
         }
+    }
+    sources
+}
+
+/// Collect resistor flicker (1/f) noise sources from the netlist.
+///
+/// Walks `Element::Resistor` entries, filtered on `kf == Some(v) if v > 0`,
+/// using the same fixed / pot / switch enumeration as
+/// [`collect_thermal_noise_sources`]:
+///
+/// - **Static** (both `pot_slot` and `switch_slot` are `None`) —
+///   fixed-value resistor. Live `1/R` baked at codegen time into
+///   `state.noise_r_flicker_inv_r[k]` at `Default::default()`.
+/// - **Pot-backed** (`pot_slot = Some(i)`) — `.pot` / `.wiper` /
+///   `.runtime R` member. The matching setter (`set_pot_N` /
+///   `set_runtime_R_<field>`) refreshes `inv_r[k]`.
+/// - **Switch-backed** (`switch_slot = Some((sw, comp))`) — R-type
+///   component under a `.switch`. `set_switch_N(position)` refreshes
+///   `inv_r[k]` from the position-indexed value array.
+///
+/// `AF` defaults to `2.0` here when the parser captured `af = None` (the
+/// Hooge exponent for resistors). Resistors whose terminals collapse to
+/// ground–ground are filtered (consistent with the thermal collector).
+pub fn collect_resistor_flicker_noise_sources(
+    netlist: &Netlist,
+    mna: &MnaSystem,
+) -> Vec<ResistorFlickerNoiseSource> {
+    use std::collections::HashMap;
+
+    let mut pot_slot: HashMap<String, usize> = HashMap::new();
+    for (i, p) in mna.pots.iter().enumerate() {
+        pot_slot.insert(p.name.to_ascii_uppercase(), i);
+    }
+
+    let mut switch_slot_map: HashMap<String, (usize, usize)> = HashMap::new();
+    for (sw_idx, sw) in mna.switches.iter().enumerate() {
+        for (ci, c) in sw.components.iter().enumerate() {
+            if c.component_type == 'R' {
+                switch_slot_map.insert(c.name.to_ascii_uppercase(), (sw_idx, ci));
+            }
+        }
+    }
+
+    let mut sources = Vec::new();
+    for el in &netlist.elements {
+        let Element::Resistor {
+            name,
+            n_plus,
+            n_minus,
+            value,
+            kf,
+            af,
+        } = el
+        else {
+            continue;
+        };
+        // Opt-in gate. Parser already normalizes KF=0 / KF unset to `None`
+        // and strips an AF-without-KF, so a `Some(v) if v > 0` here is
+        // fully validated.
+        let Some(kf) = *kf else {
+            continue;
+        };
+        if !kf.is_finite() || kf <= 0.0 {
+            continue;
+        }
+        if !value.is_finite() || *value <= 0.0 {
+            continue;
+        }
+        let node_i = mna.node_map.get(n_plus).copied().unwrap_or(0);
+        let node_j = mna.node_map.get(n_minus).copied().unwrap_or(0);
+        if node_i == 0 && node_j == 0 {
+            continue;
+        }
+        let upper = name.to_ascii_uppercase();
+        let pot_idx = pot_slot.get(&upper).copied();
+        let sw_idx = switch_slot_map.get(&upper).copied();
+        // Resolve initial resistance the same way the thermal collector does
+        // so the dynamic-R refresh path agrees on the codegen-time default.
+        let resistance = if let Some(i) = pot_idx {
+            let g = mna.pots[i].g_nominal;
+            if g > 0.0 && g.is_finite() { 1.0 / g } else { *value }
+        } else if let Some((sw, comp)) = sw_idx {
+            let positions = &mna.switches[sw].positions;
+            let r0 = positions.first().and_then(|row| row.get(comp)).copied();
+            match r0 {
+                Some(v) if v.is_finite() && v > 0.0 => v,
+                _ => *value,
+            }
+        } else {
+            *value
+        };
+        // AF default applied here, not in the parser, so an `Element::Resistor`
+        // round-trips through serde without the parser's defaulting being
+        // baked into the netlist representation.
+        let af_eff = af.unwrap_or(2.0);
+        sources.push(ResistorFlickerNoiseSource {
+            name: name.clone(),
+            node_i,
+            node_j,
+            resistance,
+            kf,
+            af: af_eff,
+            pot_slot: pot_idx,
+            switch_slot: sw_idx,
+        });
     }
     sources
 }
@@ -3328,6 +3491,11 @@ impl CircuitIR {
                 } else {
                     Vec::new()
                 },
+                resistor_flicker_sources: if config.noise_mode.includes_full() {
+                    collect_resistor_flicker_noise_sources(netlist, mna)
+                } else {
+                    Vec::new()
+                },
             },
             named_constants,
             runtime_sources,
@@ -4289,6 +4457,11 @@ impl CircuitIR {
                 },
                 flicker_sources: if config.noise_mode.includes_full() {
                     collect_flicker_noise_sources(netlist, mna)
+                } else {
+                    Vec::new()
+                },
+                resistor_flicker_sources: if config.noise_mode.includes_full() {
+                    collect_resistor_flicker_noise_sources(netlist, mna)
                 } else {
                     Vec::new()
                 },

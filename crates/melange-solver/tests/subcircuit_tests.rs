@@ -30,6 +30,7 @@ X1 a b buf
             n_plus,
             n_minus,
             value,
+            ..
         } => {
             assert_eq!(name, "X1.R1");
             assert_eq!(n_plus, "a");

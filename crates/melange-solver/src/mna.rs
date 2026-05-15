@@ -4293,6 +4293,7 @@ impl MnaBuilder {
                 n_plus,
                 n_minus,
                 value,
+                ..
             } => {
                 self.elements.push(ElementInfo {
                     element_type: ElementType::Resistor,

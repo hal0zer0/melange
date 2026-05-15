@@ -37,6 +37,22 @@
 >   `kellett(sqrt(4·KF·|I_prev|^AF·fs) · N(0,1))`. Runtime
 >   `set_flicker_gain(f64)`; salted stream `NOISE_FLICKER_SALT`.
 >   Available via `--noise full`.
+> - **Phase 3.5 (resistor 1/f flicker) shipped** 2026-05-14. Per-resistor
+>   flicker via standard Hooge bias-squared form: per-sample amplitude
+>   `kellett(sqrt(KF·fs) · |I_R|^(AF/2) · N(0,1))` where
+>   `I_R = (V_+ − V_−)/R` is read live from `state.v_prev`. Default
+>   `AF = 2.0` (Hooge's exponent for resistors; junctions kept their
+>   `AF = 1.0` default). **Bias-squared, not bias-independent** — a
+>   resistor with no current carries only thermal, matching every
+>   published noise-index measurement. Per-element opt-in:
+>   `R1 a b 10k KF=1e-10 AF=2.0`; resistors without `KF` produce no
+>   flicker source and emit byte-identical code to pre-Phase-3.5 builds
+>   under `--noise full`. Same Kellett filter / runtime gain
+>   (`set_flicker_gain` shared with junction flicker) / BE-fallback
+>   replay / dynamic-R refresh (`.pot` / `.wiper` / `.runtime R` /
+>   `.switch`) as the junction path. Salted stream
+>   `NOISE_R_FLICKER_SALT = 0xCA12_B0CC_F11C_E12E`. Available via
+>   `--noise full`.
 > - **Constants resolved**: thermal `sqrt(8·k_B·T·fs/R)`, shot
 >   `sqrt(4·q·|I|·fs)`, flicker white input `sqrt(4·KF·|I|^AF·fs)` pre-
 >   Kellett cascade. All three carry the same 2× trap-MNA compensation;
@@ -299,6 +315,114 @@ samples; no audible reset thunk).
 typical `KF=1e-13` to `1e-11`, corner 10–100 kHz. Silicon BJTs: `KF ≈
 1e-16` to `1e-14`, corner 1–10 kHz. JFETs are low-noise: `KF ≈ 1e-18` to
 `1e-16`.
+
+### Resistor Flicker (Hooge bias-squared) — Phase 3.5 (shipped 2026-05-14)
+
+Hooge's empirical law for resistor 1/f noise:
+
+```
+S_V(f) = α_H · V_DC² / (N · f)       [V²/Hz]
+S_I(f) = α_H · I_DC² / (N · f)       [A²/Hz]   ⇒   AF = 2 in ngspice notation
+```
+
+Strongest in granular composites (carbon-comp, ~α_H ≈ 1e-3); weaker in
+metal-film; weakest in wire-wound. **Bias-squared**: a resistor with no
+current emits zero excess 1/f. Below ~10 mV DC drop the excess sits below
+the thermal floor and cannot be measured — this is the standard
+noise-index methodology constraint.
+
+**Why this matters audibly.** In real audio gear (vintage tube preamps,
+guitar drives, RIAA stages), the resistors that *audibly* hiss are the
+ones carrying bias current — cathode resistors, plate loads, drive-stage
+input-bias networks. Coupling-network resistors with literal zero bias
+do not measurably hiss extra over metal-film equivalents. The Hooge form
+captures this exactly: loud passages drive more current through the bias
+network → louder 1/f, quiet passages let the resistors return to thermal
+floor. This is the "compresses and breathes" character of vintage gear.
+
+**Per-element syntax** (Phase 3.5 chose per-element over `.model R(…)`
+because Hooge constants are per-resistor material properties, not shared
+classes):
+
+```spice
+R1 a b 10k KF=1e-10 AF=2.0    ; carbon-comp on a tube cathode network
+R2 a b 22k                    ; metal-film, KF default 0 (no flicker)
+R3 a b 47k KF=1e-13           ; AF defaults to 2.0 when omitted
+```
+
+`KF` and `AF` are case-insensitive, order-independent. `KF = 0` and
+`KF` unset are equivalent — both produce no flicker source. AF without
+KF is stripped at parse time. The parser rejects `KF < 0` and `AF ≤ 0`.
+
+**Per-sample injection** for resistor `k` between nodes `(i, j)` with
+resistance `R_k` and parameters `KF_k`, `AF_k`:
+
+```
+i_R_prev[k] = (v_prev[i_k] − v_prev[j_k]) / R_k    // live current, one-sample lag
+white_k     = N(0, 1)                              // xoshiro256++ + Marsaglia polar
+amp_k       = sqrt(fs) · sqrt(KF_k) · |i_R_prev[k]|^(AF_k / 2)
+i_flicker   = amp_k · kellett_pink(white_k, state_k)
+```
+
+Per-source baked constants `NOISE_R_FLICKER_SQRT_KF[k] = sqrt(KF_k)` and
+`NOISE_R_FLICKER_HALF_AF[k] = AF_k / 2`. The `sqrt(fs)` lives in the
+state field `noise_r_flicker_sqrt_fs` (refreshed in `set_sample_rate`).
+The live `1/R` lives in `noise_r_flicker_inv_r[k]` (refreshed by
+`set_pot_N` / `set_runtime_R_<field>` / `set_switch_N` for dynamic R).
+
+**No `4·…·fs` factor** — unlike thermal/shot/junction-flicker, resistor
+flicker is not stamped through the trap-MNA `(A − A_neg) = 2G` companion
+path that requires the 2× DC-gain compensation. The amplitude basis is
+the live current through the resistor; the noise current source stamp is
+a direct addition to the RHS that does not interact with the trap-rule
+DC gain in the same way.
+
+**No temperature coupling.** Hooge bias-driven 1/f is T-independent;
+`set_temperature_k` adjusts only thermal, never r-flicker. Validated by
+`tests/noise_psd_validation.rs::r_flicker_is_temperature_independent`.
+
+**Zero-current guard.** Each per-source loop iterates with
+`if i_abs < 1e-15 { continue; }` — same convention as junction flicker.
+Unbiased resistors skip both the RNG advance and the Kellett tick, so
+they emit literally zero 1/f and burn no CPU. Validated by
+`tests/noise_psd_validation.rs::r_flicker_unbiased_resistor_emits_no_excess_one_over_f`.
+
+**Dynamic R support.** `.pot` / `.wiper` / `.runtime R` / `.switch` R
+members with `KF` set automatically refresh `noise_r_flicker_inv_r[k]`
+inside the corresponding setter (parallel to the existing thermal
+refresh). The flicker amplitude tracks the live resistance every block.
+
+**Salted stream**: `NOISE_R_FLICKER_SALT = 0xCA12_B0CC_F11C_E12E`,
+distinct from junction flicker (`0xC0DE_BABE_DEAD_BEEF`), shot
+(`0xA5A5_DEAD_BEEF_CAFE`), and thermal (unsalted). Resistor 1/f streams
+share no prefix with any other phase under a deterministic master seed.
+
+**Runtime knob shared with junction flicker.** `set_flicker_gain(f64)`
+mutes/attenuates *both* Phase 3 and Phase 3.5 — one knob silences all
+1/f character, which is the natural musical control. Hosts that need
+finer separation can disable specific resistors at the netlist level.
+
+**ngspice non-parity warning.** ngspice does not support resistor noise
+parameters in the standard model card. Setting `KF` on a resistor in
+melange generates valid melange code but breaks ngspice parity — strip
+KF/AF before SPICE-validating circuits that need ngspice correlation.
+Per-element jitter from `.tolerance R=…` follows the same per-element
+pattern, so this is consistent with how passive variation already
+breaks parity.
+
+**Per-device layout**: 1 source per opted-in resistor at `(node_i,
+node_j)`. Pots / wipers / switches that are also opted-in are still
+exactly 1 source each — they're a single resistor whose value happens
+to be runtime-mutable.
+
+**KF magnitudes are empirical.** The Hooge `α_H/N` for carbon-comp is
+~1e-23 dimensionless, but melange's `KF` parameterization absorbs the
+`N` factor and the trap-rule scaling. Real-world calibration: pick `KF`
+to hit a target dB-above-thermal at a representative DC drop, then
+sweep up/down for material variants. Don't expect `KF = 1e-10` to
+correspond to any specific Hooge α_H value across all R values — it's
+an empirical knob that produces audible 1/f at the right scale when the
+bias is real.
 
 ### Op-Amp Input-Referred — Phase 4
 
