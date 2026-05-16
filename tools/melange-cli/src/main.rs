@@ -1625,7 +1625,7 @@ fn compile_circuit_source(
             println!("    DC operating point: *** DID NOT CONVERGE *** ({}, {} iterations)", meta.dc_op_method, meta.dc_op_iterations);
         }
         if meta.backward_euler_auto {
-            println!("    Integration: Backward Euler (auto-selected, spectral radius > 1.002)");
+            println!("    Integration: Backward Euler (auto-selected — trap unstable or Nyquist-marginal; see RUST_LOG=info for details)");
         }
         if meta.parasitic_caps_inserted {
             println!("    Parasitic caps: auto-inserted (no capacitors in circuit)");

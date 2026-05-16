@@ -1823,8 +1823,24 @@ impl RustEmitter {
         }
         ctx.insert("a_neg_lines", &a_neg_lines);
 
-        // N_i * i_nl_prev lines (using pre-analyzed sparsity)
-        let has_nl_prev = m > 0;
+        // N_i * i_nl_prev lines (using pre-analyzed sparsity).
+        //
+        // Trap rule splits the trap-averaged nonlinear stamp
+        // `S * N_i * (i_nl_n + i_nl_prev) / 2` into a v_pred contribution
+        // (`S * N_i * i_nl_prev`, baked here into RHS) and a v_correction
+        // (`S_NI * i_nl_n`, applied in compute_final_voltages). The two
+        // halves combine to the correct trap average.
+        //
+        // Backward Euler does NOT trap-average — its nonlinear stamp is
+        // just `S_BE * N_i * i_nl_n` at the current sample. Including
+        // `N_I * i_nl_prev` in the BE RHS adds a spurious `S_BE * N_i *
+        // i_nl_prev` term that breaks the BE fixed point: at v_prev =
+        // DC_OP and i_nl_prev = DC_NL_I the next sample drifts by
+        // `S_BE * N_i * DC_NL_I` (nonzero whenever any device carries DC
+        // bias current). On high-gain cap-coupled cascades this seeds
+        // a multi-second clipped startup transient that has no physical
+        // basis. Gate on `!backward_euler` so BE skips the term entirely.
+        let has_nl_prev = m > 0 && !ir.solver_config.backward_euler;
         ctx.insert("has_nl_prev", &has_nl_prev);
         if has_nl_prev {
             let mut nl_prev_lines = String::new();

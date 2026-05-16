@@ -229,6 +229,107 @@ pub struct NonlinearDeviceInfo {
     pub vg2k_frozen: f64,
 }
 
+/// Physical port for a single junction current carried by a nonlinear
+/// device's NR slot. One port per slot that has a real shot/flicker-
+/// generating current; the noise collectors iterate these instead of
+/// indexing `node_indices` by hand.
+///
+/// `node_pos` / `node_neg` are oriented so a positive `i_nl[start_idx +
+/// slot_offset]` flows from `node_pos` into `node_neg` — the same
+/// convention shot/flicker stampers expect for Norton-equivalent
+/// injection.
+#[derive(Debug, Clone)]
+pub struct JunctionCurrentPort {
+    /// Display name suffix for this port (e.g. "Ic", "Ib", "Ip", "Id").
+    /// Empty for single-junction devices like diodes — emitted code uses
+    /// the bare device name in that case.
+    pub label: &'static str,
+    /// Offset from `NonlinearDeviceInfo::start_idx`. 0 = primary current
+    /// (Ic / Id / Ip), 1 = secondary (Ib for BJTs).
+    pub slot_offset: usize,
+    pub node_pos: usize,
+    pub node_neg: usize,
+}
+
+impl NonlinearDeviceInfo {
+    /// Physical ports for each NR-current slot that carries a junction
+    /// current. Single source of truth for shot- and flicker-noise port
+    /// lookup — the only place that knows the per-device-type mapping
+    /// from `node_indices` slots to physical (positive, negative) terminals.
+    ///
+    /// Tube branch handles both triode (3-node, `[grid, plate, cathode]`)
+    /// and pentode (4/5-node, `[plate, grid, cathode, screen, [supp]]`)
+    /// orderings — they're not the same, despite sharing
+    /// `NonlinearDeviceType::Tube`.
+    pub fn junction_current_ports(&self) -> Vec<JunctionCurrentPort> {
+        let n = &self.node_indices;
+        match self.device_type {
+            NonlinearDeviceType::Diode if n.len() >= 2 => vec![JunctionCurrentPort {
+                label: "",
+                slot_offset: 0,
+                node_pos: n[0], // anode
+                node_neg: n[1], // cathode
+            }],
+            NonlinearDeviceType::Bjt if n.len() >= 3 => vec![
+                JunctionCurrentPort {
+                    label: "Ic",
+                    slot_offset: 0,
+                    node_pos: n[0], // collector
+                    node_neg: n[2], // emitter
+                },
+                JunctionCurrentPort {
+                    label: "Ib",
+                    slot_offset: 1,
+                    node_pos: n[1], // base
+                    node_neg: n[2], // emitter
+                },
+            ],
+            NonlinearDeviceType::BjtForwardActive if n.len() >= 3 => {
+                vec![JunctionCurrentPort {
+                    label: "Ic",
+                    slot_offset: 0,
+                    node_pos: n[0], // collector
+                    node_neg: n[2], // emitter
+                }]
+            }
+            NonlinearDeviceType::Jfet | NonlinearDeviceType::Mosfet if n.len() >= 3 => {
+                vec![JunctionCurrentPort {
+                    label: "Id",
+                    slot_offset: 0,
+                    node_pos: n[0], // drain
+                    node_neg: n[2], // source
+                }]
+            }
+            NonlinearDeviceType::Tube => match n.len() {
+                // Triode: node_indices = [grid, plate, cathode]; Ip flows
+                // plate → cathode.
+                3 => vec![JunctionCurrentPort {
+                    label: "Ip",
+                    slot_offset: 0,
+                    node_pos: n[1],
+                    node_neg: n[2],
+                }],
+                // Pentode (4 = no suppressor, 5 = with suppressor):
+                // node_indices = [plate, grid, cathode, screen, [supp]];
+                // Ip flows plate → cathode in both forms. Phase 5 partition
+                // (Ig2 shot) is deferred — would land here as a second port.
+                4 | 5 => vec![JunctionCurrentPort {
+                    label: "Ip",
+                    slot_offset: 0,
+                    node_pos: n[0],
+                    node_neg: n[2],
+                }],
+                _ => Vec::new(),
+            },
+            // VCAs have no junction current (sig port is small-signal linear,
+            // ctrl port is a control voltage, not a transport current).
+            NonlinearDeviceType::Vca => Vec::new(),
+            // Truncated node_indices (defensive): no ports rather than panic.
+            _ => Vec::new(),
+        }
+    }
+}
+
 /// Types of nonlinear devices supported.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NonlinearDeviceType {

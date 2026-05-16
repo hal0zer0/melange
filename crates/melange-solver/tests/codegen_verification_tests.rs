@@ -40,7 +40,13 @@ fn default_config() -> CodegenConfig {
 
 fn generate_code(spice: &str) -> (String, Netlist, MnaSystem, DkKernel) {
     let (netlist, mna, kernel) = build_pipeline(spice);
-    let codegen = CodeGenerator::new(default_config());
+    // Existing tests in this file compare against `kernel.k(i,j)` and
+    // similar trap-rule matrices. Force trap so auto-BE promotion from
+    // the Nyquist-eigenvalue discriminator (added 2026-05-15) does not
+    // silently switch the codegen output to BE matrices.
+    let mut config = default_config();
+    config.force_trap = true;
+    let codegen = CodeGenerator::new(config);
     let result = codegen
         .generate(&kernel, &mna, &netlist)
         .expect("code generation failed");
@@ -7762,6 +7768,332 @@ C_out out 0 1u
         n_line
     );
 }
+
+// ---------------------------------------------------------------------------
+// Per-device-class shot / flicker port-pair regression tests.
+//
+// The Phase 2 shot collector originally hard-coded `nodes[0]` and
+// `nodes.last()` for tubes, with a comment claiming triodes were ordered
+// `[plate, grid, cathode]`. The actual mna.rs ordering is
+// `[grid, plate, cathode]` for triodes and `[plate, grid, cathode, screen,
+// [supp]]` for pentodes — so the shot stamp landed at (grid, cathode) for
+// triodes and (plate, screen)/(plate, suppressor) for pentodes. Same bug
+// in the Phase 3 flicker collector.
+//
+// These tests assert each emitted shot/flicker source's (node_i, node_j)
+// matches the *physical* port declared by the corresponding `Element`
+// variant — derived from the parsed netlist, not hand-typed. A future
+// node_indices reordering in mna.rs that breaks the noise mapping must
+// either fix `junction_current_ports()` or trip these assertions.
+// ---------------------------------------------------------------------------
+
+fn assert_device_shot_ports_match_elements(spice: &str) {
+    use melange_solver::codegen::ir::{
+        collect_flicker_noise_sources, collect_shot_noise_sources,
+    };
+    use melange_solver::parser::Element;
+
+    let netlist = Netlist::parse(spice).expect("failed to parse netlist");
+    let mna = MnaSystem::from_netlist(&netlist).expect("failed to build MNA");
+    let shot = collect_shot_noise_sources(&mna);
+    let flicker = collect_flicker_noise_sources(&netlist, &mna);
+
+    let n = |name: &str| {
+        if name == "0" {
+            0
+        } else {
+            *mna.node_map
+                .get(name)
+                .unwrap_or_else(|| panic!("node `{}` missing from node_map", name))
+        }
+    };
+
+    // Build the canonical (device_name, port_label) → (node_pos, node_neg) map
+    // straight from `Element` variants — the physical ground truth.
+    let mut expected: std::collections::HashMap<(String, &'static str), (usize, usize)> =
+        std::collections::HashMap::new();
+    for el in &netlist.elements {
+        match el {
+            Element::Diode {
+                name,
+                n_plus,
+                n_minus,
+                ..
+            } => {
+                expected.insert((name.clone(), ""), (n(n_plus), n(n_minus)));
+            }
+            Element::Bjt {
+                name, nc, nb, ne, ..
+            } => {
+                expected.insert((name.clone(), "Ic"), (n(nc), n(ne)));
+                expected.insert((name.clone(), "Ib"), (n(nb), n(ne)));
+            }
+            Element::Jfet {
+                name, nd, ns, ..
+            } => {
+                expected.insert((name.clone(), "Id"), (n(nd), n(ns)));
+            }
+            Element::Mosfet {
+                name, nd, ns, ..
+            } => {
+                expected.insert((name.clone(), "Id"), (n(nd), n(ns)));
+            }
+            Element::Triode {
+                name,
+                n_plate,
+                n_cathode,
+                ..
+            } => {
+                expected.insert((name.clone(), "Ip"), (n(n_plate), n(n_cathode)));
+            }
+            Element::Pentode {
+                name,
+                n_plate,
+                n_cathode,
+                ..
+            } => {
+                expected.insert((name.clone(), "Ip"), (n(n_plate), n(n_cathode)));
+            }
+            _ => {}
+        }
+    }
+
+    // Every emitted shot source must match the physical port for its device.
+    // Source.name has shape `<dev>` (single-junction diode) or `<dev>.<label>`.
+    let split = |full: &str| -> (String, &'static str) {
+        if let Some((dev, lbl)) = full.split_once('.') {
+            // Intern the label to a &'static str via a fixed match — keeps the
+            // expected map's key type consistent with the Element loop above.
+            let lbl_static: &'static str = match lbl {
+                "Ic" => "Ic",
+                "Ib" => "Ib",
+                "Id" => "Id",
+                "Ip" => "Ip",
+                other => panic!("unknown port label `{}` in source name `{}`", other, full),
+            };
+            (dev.to_string(), lbl_static)
+        } else {
+            (full.to_string(), "")
+        }
+    };
+
+    for src in &shot {
+        let key = split(&src.name);
+        let exp = expected.get(&key).unwrap_or_else(|| {
+            panic!(
+                "shot source `{}` has no matching Element port (key={:?})",
+                src.name, key
+            )
+        });
+        assert_eq!(
+            (src.node_i, src.node_j),
+            *exp,
+            "shot source `{}` stamps at (node_i={}, node_j={}) but its physical port is {:?}",
+            src.name,
+            src.node_i,
+            src.node_j,
+            exp
+        );
+    }
+
+    for src in &flicker {
+        let key = split(&src.name);
+        let exp = expected.get(&key).unwrap_or_else(|| {
+            panic!(
+                "flicker source `{}` has no matching Element port (key={:?})",
+                src.name, key
+            )
+        });
+        assert_eq!(
+            (src.node_i, src.node_j),
+            *exp,
+            "flicker source `{}` stamps at (node_i={}, node_j={}) but its physical port is {:?}",
+            src.name,
+            src.node_i,
+            src.node_j,
+            exp
+        );
+    }
+}
+
+#[test]
+fn shot_flicker_ports_match_diode_element() {
+    assert_device_shot_ports_match_elements(
+        "\
+Diode shot/flicker ports
+Rin in 0 1k
+D1 a out D1
+R1 out 0 10k
+.model D1 D(IS=1e-15 KF=1e-12 AF=1.0)
+",
+    );
+}
+
+#[test]
+fn shot_flicker_ports_match_bjt_element() {
+    assert_device_shot_ports_match_elements(
+        "\
+BJT 2D shot/flicker ports
+Rin in b 1k
+Rb b 0 100k
+Q1 c b e Q1
+Re e 0 1k
+Rc vcc c 10k
+VCC vcc 0 12
+.model Q1 NPN(IS=1e-14 BF=200 KF=1e-15 AF=1.0)
+",
+    );
+}
+
+#[test]
+fn shot_flicker_ports_match_bjt_forward_active_element() {
+    use melange_solver::codegen::ir::{
+        collect_flicker_noise_sources, collect_shot_noise_sources,
+    };
+    use melange_solver::parser::Element;
+    let spice = "\
+BJT FA shot/flicker ports
+Rin in b 1k
+Rb b 0 100k
+Q1 c b e Q1
+Re e 0 1k
+Rc vcc c 10k
+VCC vcc 0 12
+.model Q1 NPN(IS=1e-14 BF=200 KF=1e-15 AF=1.0)
+";
+    let netlist = Netlist::parse(spice).expect("parse");
+    let mut fa = std::collections::HashSet::new();
+    fa.insert("Q1".to_string());
+    let mna =
+        MnaSystem::from_netlist_forward_active(&netlist, &fa).expect("MNA forward-active");
+
+    // Confirm the device actually got reduced to FA.
+    assert_eq!(mna.nonlinear_devices.len(), 1);
+    assert_eq!(
+        mna.nonlinear_devices[0].device_type,
+        melange_solver::mna::NonlinearDeviceType::BjtForwardActive
+    );
+    assert_eq!(mna.nonlinear_devices[0].dimension, 1);
+
+    let shot = collect_shot_noise_sources(&mna);
+    let flicker = collect_flicker_noise_sources(&netlist, &mna);
+
+    // FA reduction emits only Ic — Ib is folded into the BF stamping.
+    assert_eq!(shot.len(), 1, "FA BJT must emit only Ic shot, got {:?}", shot);
+    assert_eq!(
+        flicker.len(),
+        1,
+        "FA BJT must emit only Ic flicker, got {:?}",
+        flicker
+    );
+    assert_eq!(shot[0].name, "Q1.Ic");
+    assert_eq!(flicker[0].name, "Q1.Ic");
+
+    // And both must land at the (collector, emitter) port pulled from the Element.
+    let q = netlist
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            Element::Bjt { name, nc, ne, .. } if name == "Q1" => Some((nc.clone(), ne.clone())),
+            _ => None,
+        })
+        .unwrap();
+    let exp = (mna.node_map[&q.0], mna.node_map[&q.1]);
+    assert_eq!((shot[0].node_i, shot[0].node_j), exp);
+    assert_eq!((flicker[0].node_i, flicker[0].node_j), exp);
+}
+
+#[test]
+fn shot_flicker_ports_match_jfet_element() {
+    assert_device_shot_ports_match_elements(
+        "\
+JFET shot/flicker ports
+Rin in g 1k
+Rg g 0 1Meg
+J1 d g s J1
+Rs s 0 1k
+Rd vcc d 10k
+VCC vcc 0 12
+.model J1 NJF(VTO=-2 BETA=1m KF=1e-15 AF=1.0)
+",
+    );
+}
+
+#[test]
+fn shot_flicker_ports_match_mosfet_element() {
+    assert_device_shot_ports_match_elements(
+        "\
+MOSFET shot/flicker ports
+Rin in g 1k
+Rg g 0 1Meg
+M1 d g s 0 M1
+Rs s 0 1k
+Rd vcc d 10k
+VCC vcc 0 12
+.model M1 NMOS(VTO=1 KP=1m KF=1e-15 AF=1.0)
+",
+    );
+}
+
+#[test]
+fn shot_flicker_ports_match_triode_element() {
+    // This is the regression test for the original bug — triode shot was
+    // landing at (grid, cathode) instead of (plate, cathode). Pre-fix this
+    // test would fail on the very first triode stamp.
+    assert_device_shot_ports_match_elements(
+        "\
+Triode shot/flicker ports
+Rin in g 1k
+Rg g 0 1Meg
+T1 g p k 12AX7
+Rk k 0 1k
+Rp vcc p 100k
+VCC vcc 0 250
+.model 12AX7 TUBE(MU=100 EX=1.4 KG1=1060 KP=600 KVB=300 KF=1e-15 AF=1.0)
+",
+    );
+}
+
+#[test]
+fn shot_flicker_ports_match_pentode_4node_element() {
+    // Same regression — pentode shot was landing at (plate, screen) instead
+    // of (plate, cathode). 4-node form (no suppressor).
+    assert_device_shot_ports_match_elements(
+        "\
+Pentode 4-node shot/flicker ports
+Rin in g 1k
+Rg g 0 1Meg
+P1 p g k scr EL84
+Rk k 0 150
+Rp vcc p 100k
+Rscr vcc scr 1k
+VCC vcc 0 300
+.model EL84 PENTODE(MU=20 KG1=1500 KP=200 KVB=300 EX=1.4 KG2=4500 KF=1e-15 AF=1.0)
+",
+    );
+}
+
+#[test]
+fn shot_flicker_ports_match_pentode_5node_element() {
+    // Pentode with explicit suppressor terminal (5th node). Pre-fix the
+    // shot stamp landed at (plate, suppressor); the cathode is `nodes[2]`
+    // either way.
+    assert_device_shot_ports_match_elements(
+        "\
+Pentode 5-node shot/flicker ports
+Rin in g 1k
+Rg g 0 1Meg
+P1 p g k scr supp EL84
+Rk k 0 150
+Rp vcc p 100k
+Rscr vcc scr 1k
+Rsupp supp 0 0.001
+VCC vcc 0 300
+.model EL84 PENTODE(MU=20 KG1=1500 KP=200 KVB=300 EX=1.4 KG2=4500 KF=1e-15 AF=1.0)
+",
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Phase 1.5 Step 1 — nodal codegen path noise emission tests
 // ---------------------------------------------------------------------------
@@ -8481,6 +8813,245 @@ R_load   out       0         47k
         (alpha - trap_alpha).abs() < 1.0,
         "passive LC at fs=96 kHz was auto-promoted to backward Euler (ALPHA={alpha:.1}, expected trap ALPHA={trap_alpha:.1}, BE ALPHA={be_alpha:.1}).\n\
          Check codegen::ir::CircuitIR::new auto_be gate — the `m > 0` guard must stay in place for passive LC resonance fidelity."
+    );
+}
+
+#[test]
+fn test_be_codegen_omits_n_i_i_nl_prev_from_rhs() {
+    // Regression guard for the BE-codegen RHS bug.
+    //
+    // Trap rule splits the trap-averaged nonlinear stamp into a
+    // `S * N_i * i_nl_prev` term in build_rhs and a `S_NI * i_nl_n`
+    // term in compute_final_voltages — the two halves combine to the
+    // correct trap average.
+    //
+    // BE does NOT trap-average. Its nonlinear stamp is just
+    // `S_BE * N_i * i_nl_n`. Including `N_I * i_nl_prev` in the BE RHS
+    // adds a spurious `S_BE * N_i * i_nl_prev` term that breaks the BE
+    // fixed point: at v_prev = DC_OP and i_nl_prev = DC_NL_I the next
+    // sample drifts by `S_BE * N_i * DC_NL_I`. On high-gain cap-coupled
+    // cascades (e.g. noyce-cascaded-triodes, 3× 12AX7) this produced a
+    // multi-second clipped startup transient and a ~28 mV residual.
+    //
+    // After the fix: BE-only build_rhs must contain neither
+    // `N_I[..][..] * state.i_nl_prev[..]` patterns nor a generic
+    // `for j in 0..M { sum += N_I[j][i] * state.i_nl_prev[j]; }` block.
+    const SPICE: &str = "\
+BE codegen no nl_prev
+Rin in g 1k
+Rg g 0 1Meg
+T1 g p k 12AX7
+Rk k 0 1.5k
+Rp vcc p 100k
+Cout p out 100n
+Rload out 0 1Meg
+VCC vcc 0 250
+.model 12AX7 TRIODE(MU=100 EX=1.4 KG1=1060 KP=600 KVB=300)
+";
+    let netlist = Netlist::parse(SPICE).expect("parse");
+    let mna = MnaSystem::from_netlist(&netlist).expect("mna");
+    let kernel = DkKernel::from_mna(&mna, 48000.0).expect("kernel");
+
+    let be_config = CodegenConfig {
+        circuit_name: "be_no_nl_prev".to_string(),
+        sample_rate: 48000.0,
+        input_node: 0,
+        output_nodes: vec![3],
+        input_resistance: 1.0,
+        backward_euler: true,
+        ..CodegenConfig::default()
+    };
+    let be_code = CodeGenerator::new(be_config)
+        .generate(&kernel, &mna, &netlist)
+        .expect("BE generate")
+        .code;
+
+    // BE-only path: no N_I * i_nl_prev in build_rhs.
+    let in_build_rhs: String = be_code
+        .split("fn build_rhs")
+        .nth(1)
+        .and_then(|after| after.split("fn ").next())
+        .unwrap_or("")
+        .to_string();
+    assert!(
+        !in_build_rhs.contains("N_I[")
+            || !in_build_rhs.contains("state.i_nl_prev"),
+        "BE codegen still emits N_I * i_nl_prev in build_rhs (BE doesn't trap-average — extra term breaks DC_OP fixed point):\n{}",
+        in_build_rhs
+    );
+
+    // Trap path (default): MUST still emit N_I * i_nl_prev (the trap-average split).
+    let trap_config = CodegenConfig {
+        circuit_name: "trap_keeps_nl_prev".to_string(),
+        sample_rate: 48000.0,
+        input_node: 0,
+        output_nodes: vec![3],
+        input_resistance: 1.0,
+        backward_euler: false,
+        // Force trap — single-triode also has a small Nyquist eigenvalue
+        // that the discriminator would otherwise auto-promote.
+        force_trap: true,
+        ..CodegenConfig::default()
+    };
+    let trap_code = CodeGenerator::new(trap_config)
+        .generate(&kernel, &mna, &netlist)
+        .expect("trap generate")
+        .code;
+    let trap_in_build_rhs: String = trap_code
+        .split("fn build_rhs")
+        .nth(1)
+        .and_then(|after| after.split("fn ").next())
+        .unwrap_or("")
+        .to_string();
+    assert!(
+        trap_in_build_rhs.contains("N_I[")
+            && trap_in_build_rhs.contains("state.i_nl_prev"),
+        "trap codegen lost N_I * i_nl_prev from build_rhs (trap NEEDS it for the proper trap-average split — would break trap fidelity):\n{}",
+        trap_in_build_rhs
+    );
+
+    // BE fallback (inside trap codegen, lines starting with `let mut rhs_be`):
+    // MUST NOT contain N_I * i_nl_prev either (same fix, inline emission).
+    let be_fallback_block: String = trap_code
+        .split("let mut rhs_be = ")
+        .nth(1)
+        .and_then(|after| after.split("rhs_be[INPUT_NODE]").next())
+        .unwrap_or("")
+        .to_string();
+    assert!(
+        !be_fallback_block.contains("N_I[")
+            || !be_fallback_block.contains("state.i_nl_prev"),
+        "in-trap BE fallback block still contains N_I * i_nl_prev — same bug as BE-only had:\n{}",
+        be_fallback_block
+    );
+}
+
+#[test]
+fn test_cap_coupled_triode_cascade_auto_promotes_to_be() {
+    // Regression guard for the noyce-cascaded-triodes Nyquist limit cycle.
+    //
+    // Three 12AX7 stages cap-coupled with 100n / 1Meg (~10 Hz HPF per
+    // stage). Cascade gain ~3800×. Under trap rule the propagation
+    // operator S·A_neg has its dominant eigenvalue at z ≈ -0.9999
+    // (Nyquist-marginal). Trap has gain magnitude 1 at fs/2, so any
+    // f64-round-off seed in the per-sample matrix-vector multiplications
+    // persists indefinitely, amplified through the cascade gain to a
+    // 28 mV fs/2 limit cycle at the output.
+    //
+    // The Nyquist-eigenvalue discriminator (added 2026-05-15) catches
+    // this and auto-promotes to backward Euler. Without the
+    // discriminator, the historical 1.002 threshold lets the cascade
+    // ship with the limit cycle, masked at calibrated noise levels but
+    // visible at low noise gain.
+    const CASCADE: &str = "\
+Cap-coupled triode cascade
+R_iso in   g1   1Meg
+Rg1   g1   0    1Meg
+T1    g1 p1 k1  12AX7
+Ra1   vcc p1    100k
+Rk1   k1  0     1.5k
+Cint12 p1 g2  100n
+Rg2    g2 0   1Meg
+T2    g2 p2 k2  12AX7
+Ra2   vcc p2    100k
+Rk2   k2  0     1.5k
+Ck2   k2  0     25u
+Cint23 p2 g3  100n
+Rg3    g3 0   1Meg
+T3    g3 p3 k3  12AX7
+Ra3   vcc p3    100k
+Rk3   k3  0     1.5k
+Ck3   k3  0     25u
+Cout  p3  out  100n
+Rload out 0    1Meg
+VCC vcc 0 250
+.model 12AX7 TRIODE(MU=100 EX=1.4 KG1=1060 KP=600 KVB=300)
+";
+    let netlist = Netlist::parse(CASCADE).expect("parse");
+    let mna = MnaSystem::from_netlist(&netlist).expect("mna");
+    let kernel = DkKernel::from_mna(&mna, 48000.0).expect("kernel");
+    let in_idx = mna.node_map["in"] - 1;
+    let out_idx = mna.node_map["out"] - 1;
+
+    // Default config: discriminator should fire and promote to BE.
+    let auto_config = CodegenConfig {
+        circuit_name: "cascade_auto".to_string(),
+        sample_rate: 48000.0,
+        input_node: in_idx,
+        output_nodes: vec![out_idx],
+        input_resistance: 1.0,
+        ..CodegenConfig::default()
+    };
+    let auto_result = CodeGenerator::new(auto_config)
+        .generate(&kernel, &mna, &netlist)
+        .expect("auto-config generate");
+    assert!(
+        auto_result.meta.backward_euler_auto,
+        "cap-coupled 3× 12AX7 cascade must auto-promote to BE \
+         (dominant eigenvalue near z=-1, Nyquist-marginal trap mode)"
+    );
+
+    // Force trap: meta.backward_euler_auto must stay false (escape hatch).
+    let force_trap_config = CodegenConfig {
+        circuit_name: "cascade_force_trap".to_string(),
+        sample_rate: 48000.0,
+        input_node: in_idx,
+        output_nodes: vec![out_idx],
+        input_resistance: 1.0,
+        force_trap: true,
+        ..CodegenConfig::default()
+    };
+    let trap_result = CodeGenerator::new(force_trap_config)
+        .generate(&kernel, &mna, &netlist)
+        .expect("force-trap generate");
+    assert!(
+        !trap_result.meta.backward_euler_auto,
+        "force_trap must override auto-BE (escape hatch for bisecting regressions)"
+    );
+}
+
+#[test]
+fn test_passive_rc_lowpass_does_not_auto_promote() {
+    // The Nyquist-eigenvalue discriminator must not false-fire on
+    // passive linear circuits. The Thevenin input stamping creates a
+    // "fake" eigenvalue near z=-1 in S·A_neg (S[in,in]·A_neg[in,in] ≈
+    // 1/G_in · -G_in = -1) that would trip a naïve discriminator.
+    //
+    // Two layers of defense:
+    // - The DK auto-BE gate checks `m > 0` (passive circuits have m=0
+    //   so the gate doesn't fire at all).
+    // - The Nyquist analyzer uses the deflated variant which projects
+    //   out the input-node component (so even nonlinear circuits with
+    //   only the input-Thevenin fake eigenvalue won't false-fire).
+    //
+    // Regression: noyce-cascaded-triodes auto-BE addition must not
+    // promote a simple RC lowpass.
+    const RC: &str = "\
+RC Lowpass
+R1 in out 1k
+C1 out 0 100n
+";
+    let netlist = Netlist::parse(RC).expect("parse");
+    let mna = MnaSystem::from_netlist(&netlist).expect("mna");
+    let kernel = DkKernel::from_mna(&mna, 48000.0).expect("kernel");
+    let in_idx = mna.node_map["in"] - 1;
+    let out_idx = mna.node_map["out"] - 1;
+
+    let config = CodegenConfig {
+        circuit_name: "rc_no_auto_be".to_string(),
+        sample_rate: 48000.0,
+        input_node: in_idx,
+        output_nodes: vec![out_idx],
+        input_resistance: 1.0,
+        ..CodegenConfig::default()
+    };
+    let result = CodeGenerator::new(config)
+        .generate(&kernel, &mna, &netlist)
+        .expect("generate");
+    assert!(
+        !result.meta.backward_euler_auto,
+        "passive RC lowpass must not auto-promote to BE \
+         (no nonlinear stages, no real Nyquist seeding mechanism)"
     );
 }
 

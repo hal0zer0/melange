@@ -22,6 +22,8 @@ pub mod ir;
 pub mod routing;
 #[cfg(feature = "codegen")]
 pub mod rust_emitter;
+#[cfg(feature = "codegen")]
+pub mod stability;
 
 #[cfg(feature = "codegen")]
 use crate::dk::DkKernel;

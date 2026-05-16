@@ -2028,85 +2028,20 @@ pub fn collect_thermal_noise_sources(
 /// through the collector. Revisit if BJT RB/RE become tonally relevant
 /// for shot content.
 pub fn collect_shot_noise_sources(mna: &MnaSystem) -> Vec<ShotNoiseSource> {
-    use crate::mna::NonlinearDeviceType;
     let mut sources = Vec::new();
     for dev in &mna.nonlinear_devices {
-        let nodes = &dev.node_indices;
-        match dev.device_type {
-            NonlinearDeviceType::Diode => {
-                // node_indices = [anode, cathode]
-                if nodes.len() >= 2 {
-                    sources.push(ShotNoiseSource {
-                        name: dev.name.clone(),
-                        slot_idx: dev.start_idx,
-                        node_i: nodes[0],
-                        node_j: nodes[1],
-                    });
-                }
-            }
-            NonlinearDeviceType::Bjt => {
-                // node_indices = [collector, base, emitter]
-                if nodes.len() >= 3 {
-                    let (c, b, e) = (nodes[0], nodes[1], nodes[2]);
-                    // Ic shot: C↔E
-                    sources.push(ShotNoiseSource {
-                        name: format!("{}.Ic", dev.name),
-                        slot_idx: dev.start_idx,
-                        node_i: c,
-                        node_j: e,
-                    });
-                    // Ib shot: B↔E
-                    sources.push(ShotNoiseSource {
-                        name: format!("{}.Ib", dev.name),
-                        slot_idx: dev.start_idx + 1,
-                        node_i: b,
-                        node_j: e,
-                    });
-                }
-            }
-            NonlinearDeviceType::BjtForwardActive => {
-                // node_indices = [collector, base, emitter] ; Ib folded in,
-                // so only Ic gets a shot source.
-                if nodes.len() >= 3 {
-                    sources.push(ShotNoiseSource {
-                        name: format!("{}.Ic", dev.name),
-                        slot_idx: dev.start_idx,
-                        node_i: nodes[0],
-                        node_j: nodes[2],
-                    });
-                }
-            }
-            NonlinearDeviceType::Jfet | NonlinearDeviceType::Mosfet => {
-                // node_indices = [drain, gate, source, (bulk)]
-                if nodes.len() >= 3 {
-                    sources.push(ShotNoiseSource {
-                        name: format!("{}.Id", dev.name),
-                        slot_idx: dev.start_idx,
-                        node_i: nodes[0],
-                        node_j: nodes[2],
-                    });
-                }
-            }
-            NonlinearDeviceType::Tube => {
-                // Triode node_indices = [plate, grid, cathode];
-                // pentode node_indices = [plate, grid, screen, cathode].
-                // Ip stamps plate-to-cathode in both cases.
-                if nodes.len() >= 3 {
-                    let plate = nodes[0];
-                    let cathode = *nodes.last().unwrap();
-                    sources.push(ShotNoiseSource {
-                        name: format!("{}.Ip", dev.name),
-                        slot_idx: dev.start_idx,
-                        node_i: plate,
-                        node_j: cathode,
-                    });
-                }
-            }
-            NonlinearDeviceType::Vca => {
-                // Skipped: shot at a VCA control port is not physically
-                // meaningful; the VCA sig port is linear in the small-
-                // signal sense and doesn't have a junction current.
-            }
+        for port in dev.junction_current_ports() {
+            let name = if port.label.is_empty() {
+                dev.name.clone()
+            } else {
+                format!("{}.{}", dev.name, port.label)
+            };
+            sources.push(ShotNoiseSource {
+                name,
+                slot_idx: dev.start_idx + port.slot_offset,
+                node_i: port.node_pos,
+                node_j: port.node_neg,
+            });
         }
     }
     sources
@@ -2127,7 +2062,6 @@ pub fn collect_flicker_noise_sources(
     netlist: &Netlist,
     mna: &MnaSystem,
 ) -> Vec<FlickerNoiseSource> {
-    use crate::mna::NonlinearDeviceType;
     use std::collections::HashMap;
 
     // Build device-name → model-name map once.
@@ -2175,82 +2109,20 @@ pub fn collect_flicker_noise_sources(
         let Some((kf, af)) = kf_af(&dev.name) else {
             continue;
         };
-        let nodes = &dev.node_indices;
-        match dev.device_type {
-            NonlinearDeviceType::Diode => {
-                if nodes.len() >= 2 {
-                    sources.push(FlickerNoiseSource {
-                        name: dev.name.clone(),
-                        slot_idx: dev.start_idx,
-                        node_i: nodes[0],
-                        node_j: nodes[1],
-                        kf,
-                        af,
-                    });
-                }
-            }
-            NonlinearDeviceType::Bjt => {
-                if nodes.len() >= 3 {
-                    let (c, b, e) = (nodes[0], nodes[1], nodes[2]);
-                    sources.push(FlickerNoiseSource {
-                        name: format!("{}.Ic", dev.name),
-                        slot_idx: dev.start_idx,
-                        node_i: c,
-                        node_j: e,
-                        kf,
-                        af,
-                    });
-                    sources.push(FlickerNoiseSource {
-                        name: format!("{}.Ib", dev.name),
-                        slot_idx: dev.start_idx + 1,
-                        node_i: b,
-                        node_j: e,
-                        kf,
-                        af,
-                    });
-                }
-            }
-            NonlinearDeviceType::BjtForwardActive => {
-                if nodes.len() >= 3 {
-                    sources.push(FlickerNoiseSource {
-                        name: format!("{}.Ic", dev.name),
-                        slot_idx: dev.start_idx,
-                        node_i: nodes[0],
-                        node_j: nodes[2],
-                        kf,
-                        af,
-                    });
-                }
-            }
-            NonlinearDeviceType::Jfet | NonlinearDeviceType::Mosfet => {
-                if nodes.len() >= 3 {
-                    sources.push(FlickerNoiseSource {
-                        name: format!("{}.Id", dev.name),
-                        slot_idx: dev.start_idx,
-                        node_i: nodes[0],
-                        node_j: nodes[2],
-                        kf,
-                        af,
-                    });
-                }
-            }
-            NonlinearDeviceType::Tube => {
-                if nodes.len() >= 3 {
-                    let plate = nodes[0];
-                    let cathode = *nodes.last().unwrap();
-                    sources.push(FlickerNoiseSource {
-                        name: format!("{}.Ip", dev.name),
-                        slot_idx: dev.start_idx,
-                        node_i: plate,
-                        node_j: cathode,
-                        kf,
-                        af,
-                    });
-                }
-            }
-            NonlinearDeviceType::Vca => {
-                // Skipped: no junction current; shot/flicker not defined.
-            }
+        for port in dev.junction_current_ports() {
+            let name = if port.label.is_empty() {
+                dev.name.clone()
+            } else {
+                format!("{}.{}", dev.name, port.label)
+            };
+            sources.push(FlickerNoiseSource {
+                name,
+                slot_idx: dev.start_idx + port.slot_offset,
+                node_i: port.node_pos,
+                node_j: port.node_neg,
+                kf,
+                af,
+            });
         }
     }
     sources
@@ -2722,40 +2594,38 @@ impl CircuitIR {
         // {88.2k, 96k, 150k, 300k, 384k} with spectral_radius ∈ 1.002..1.29,
         // while adjacent rates sampled rho < 1.002 and produced the correct
         // +0.9 dB @ 10 kHz peak.
-        let auto_be = if !config.backward_euler && n > 0 && m > 0 {
-            // Compute spectral radius estimate via power iteration on S_trap * A_neg_trap
-            let s_trap = &kernel.s;
-            let a_neg_trap = &kernel.a_neg;
-            // One matrix-vector multiply: y = S * A_neg * x, iterate to find dominant eigenvalue
-            let mut x = vec![1.0 / (n as f64).sqrt(); n];
-            let mut y = vec![0.0; n];
-            let mut spectral_radius = 0.0;
-            for _ in 0..20 {
-                // 20 power iterations
-                // y = S * (A_neg * x)
-                let mut ax = vec![0.0; n];
-                for i in 0..n {
-                    for j in 0..n {
-                        ax[i] += a_neg_trap[i * n + j] * x[j];
+        let auto_be = if !config.backward_euler && !config.force_trap && n > 0 && m > 0 {
+            // Trap-rule stability via shared analyzer: returns rho =
+            // max|eigenvalue(S·A_neg)| AND the sign of the dominant
+            // eigenvalue (positive → near +1, slow LF mode trap handles
+            // exactly via bilinear; negative → near -1, Nyquist-marginal
+            // trap mode that has gain magnitude 1 at fs/2 and seeds an
+            // f64-round-off limit cycle the trap rule cannot damp).
+            //
+            // The Nyquist case at rho ≈ 0.999..1.0 was the
+            // noyce-cascaded-triodes regression: 3× 12AX7 cap-coupled
+            // cascade, dominant eigenvalue at z ≈ -0.9999, output 28 mV
+            // fs/2 limit cycle from cascade gain × f64 round-off seed.
+            // Pre-discriminator the gate at 1.002 missed it.
+            let stability = crate::codegen::stability::analyze_trap_stability_deflated(
+                &kernel.s,
+                &kernel.a_neg,
+                n,
+                config.input_node,
+            );
+            if crate::codegen::stability::trap_needs_be(stability) {
+                log::info!(
+                    "Auto-selecting backward Euler: spectral_radius(S*A_neg) = {:.4}, dominant_sign = {:+.0} \
+                     (trapezoidal {} — promoting to BE)",
+                    stability.rho,
+                    stability.dominant_sign,
+                    if stability.rho > 1.002 {
+                        "unstable"
+                    } else {
+                        "marginally stable at fs/2 with negative dominant eigenvalue \
+                         (Nyquist-rate limit cycle in v_prev for high-gain cap-coupled cascades)"
                     }
-                }
-                for i in 0..n {
-                    y[i] = 0.0;
-                    for j in 0..n {
-                        y[i] += s_trap[i * n + j] * ax[j];
-                    }
-                }
-                let norm: f64 = y.iter().map(|v| v * v).sum::<f64>().sqrt();
-                if norm < 1e-30 {
-                    break;
-                }
-                spectral_radius = norm / x.iter().map(|v| v * v).sum::<f64>().sqrt();
-                for i in 0..n {
-                    x[i] = y[i] / norm;
-                }
-            }
-            if spectral_radius > 1.002 {
-                log::info!("Auto-selecting backward Euler: spectral radius {:.4} > 1.002 (trapezoidal unstable)", spectral_radius);
+                );
                 true
             } else {
                 false
@@ -3938,43 +3808,23 @@ impl CircuitIR {
         // Compute spectral radius of S * A_neg to detect Schur instability.
         // When rho(S * A_neg) > 1, the trapezoidal feedback v_pred = S*(A_neg*v_prev + ...)
         // amplifies errors exponentially. Route to full LU NR instead.
-        let mut spectral_radius_s_aneg = if n > 0 && !s_flat.is_empty() {
-            let mut x = vec![1.0 / (n as f64).sqrt(); n];
-            let mut rho = 0.0f64;
-            for _ in 0..100 {
-                // y = S * (A_neg * x)
-                let mut ax = vec![0.0; n];
-                for i in 0..n {
-                    for j in 0..n {
-                        ax[i] += a_neg_flat[i * n + j] * x[j];
-                    }
-                }
-                let mut y = vec![0.0; n];
-                for i in 0..n {
-                    for j in 0..n {
-                        y[i] += s_flat[i * n + j] * ax[j];
-                    }
-                }
-                let norm: f64 = y.iter().map(|v| v * v).sum::<f64>().sqrt();
-                if norm < 1e-30 {
-                    break;
-                }
-                rho = norm / x.iter().map(|v| v * v).sum::<f64>().sqrt();
-                x.fill(0.0);
-                for (i, yi) in y.iter().enumerate() {
-                    x[i] = yi / norm;
-                }
-            }
-            if rho > 0.99 {
-                log::info!(
-                    "Nodal: spectral_radius(S*A_neg) = {:.4} (marginally stable; Schur used when K well-conditioned)",
-                    rho
-                );
-            }
-            rho
-        } else {
-            0.0
-        };
+        //
+        // Discriminate Nyquist-marginal (eigenvalue near -1) from slow LF
+        // (eigenvalue near +1) — see `crate::codegen::stability` for the
+        // power-iteration sign analysis. The Nyquist case at rho ≈ 0.999
+        // promotes to BE; the slow LF case stays on trap (bilinear
+        // preserves those poles exactly).
+        let trap_stability = crate::codegen::stability::analyze_trap_stability_deflated(
+            &s_flat, &a_neg_flat, n, config.input_node,
+        );
+        let mut spectral_radius_s_aneg = trap_stability.rho;
+        if spectral_radius_s_aneg > 0.99 {
+            log::info!(
+                "Nodal: spectral_radius(S*A_neg) = {:.4}, dominant_sign = {:+.0} \
+                 (marginally stable; Schur used when K well-conditioned)",
+                spectral_radius_s_aneg, trap_stability.dominant_sign
+            );
+        }
 
         // Auto-BE promotion for the nodal path.
         //
@@ -3993,18 +3843,35 @@ impl CircuitIR {
         // is the escape hatch for bisection only — trap on a circuit where
         // the auto-detector fires produces a real Nyquist-rate artifact.
         //
-        // Threshold 1.002 matches `schur_unstable` in `nodal_emitter.rs`.
-        // Strict `> 1.0` false-fires on trivial passive networks where
-        // power iteration converges to exactly 1.0 plus float noise (pure
-        // RC lowpass, etc.) and would promote them unnecessarily.
-        const BE_PROMOTION_THRESHOLD: f64 = 1.002;
-        if !be && !config.force_trap && spectral_radius_s_aneg > BE_PROMOTION_THRESHOLD {
+        // Gate: `trap_needs_be(stability)` — promotes when (rho > 1.002) OR
+        // (rho > 0.999 AND dominant_sign < 0). The lower threshold for the
+        // Nyquist case catches noyce-cascaded-triodes (rho=0.9999, eigenvalue
+        // near -1) without false-firing on passive LC tanks (rho near +1,
+        // bilinear preserves exactly — gold-press cartridge regression).
+        //
+        // Additional `m > 0` gate (matching the DK path): pure-linear passive
+        // circuits don't have the `N_i·i_nl_prev` RHS stamp that seeds the
+        // Nyquist mode, AND their Thevenin-stamped input nodes can produce a
+        // degenerate eigenvalue near -1 in `S·A_neg` that has no physical
+        // meaning (the input is driven externally each sample, so the
+        // input-row dynamics are arbitrary). Without the gate, an RC lowpass
+        // false-fires the discriminator. See augmented_mna_tests::
+        // test_no_inductors_exact_match.
+        if !be && !config.force_trap && m > 0
+            && crate::codegen::stability::trap_needs_be(trap_stability)
+        {
             log::warn!(
                 "Nodal: auto-enabling backward Euler — spectral_radius(S*A_neg) = \
-                 {:.4} > {:.3} under trapezoidal (dominant eigenmode would grow \
-                 unboundedly — Nyquist-rate limit cycle in v_prev). BE is L-stable. \
+                 {:.4}, dominant_sign = {:+.0} ({}). BE is L-stable. \
                  Override with --force-trap only to reproduce legacy trap output.",
-                spectral_radius_s_aneg, BE_PROMOTION_THRESHOLD
+                trap_stability.rho,
+                trap_stability.dominant_sign,
+                if trap_stability.rho > 1.002 {
+                    "trap unstable, mode would grow unboundedly"
+                } else {
+                    "Nyquist-marginal trap mode that trap cannot damp \
+                     — fs/2 limit cycle in v_prev for high-gain cap-coupled cascades"
+                }
             );
             alpha = alpha_be;
             a_flat = a_be_flat.clone();
