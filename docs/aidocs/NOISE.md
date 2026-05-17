@@ -79,12 +79,33 @@
 >   /`set_seed()` handle partition state the same as shot. Available via
 >   `--noise full`. Zero codegen / zero state for triode-only or
 >   passive-only circuits — byte-identical to pre-Phase-5 builds.
-> - **Phase 4 deferred**: op-amp en/in. The `NoiseIR` +
->   `build_noise_emission` scaffold accepts it without architectural
->   churn — see the "Op-Amp Input-Referred — Phase 4" section below for
->   the stamping plan agreed with Noyce (Norton current at in+ scaled by
->   G_diag, refreshed under dynamic-R commits; one new
->   `set_opamp_input_gain` runtime knob).
+> - **Phase 4 (op-amp en/in) shipped** 2026-05-17 (v1 white-only).
+>   Per-op-amp three Norton streams via `.model OA(EN=… IN=…)`:
+>   - **en** at `n_plus_idx`, amp `EN · noise_opamp_en_g_diag[k] · sqrt(2·fs)`
+>     (Norton equivalent of voltage-source-in-series-with-input — no netlist
+>     resistor inserted; uses the existing G-matrix diagonal at in+).
+>   - **in+** at `n_plus_idx`, amp `IN · sqrt(2·fs)`.
+>   - **in-** at `n_minus_idx`, amp `IN · sqrt(2·fs)`.
+>   All three use two-draw Nyquist anti-alias and the trap-MNA 4× PSD
+>   compensation folded into `sqrt(2·fs)`. New runtime knob
+>   `set_opamp_input_gain` — signal-independent, distinct from `shot_gain`
+>   per the Noyce response-letter UX. Salts: `NOISE_OPAMP_EN_SALT =
+>   0x0FA3_94E5_E700_5A17`, `NOISE_OPAMP_IN_SALT = 0x0FA3_94E5_1700_5A17`
+>   (2N stream array — `2k` for in+, `2k+1` for in-). `noise_opamp_en_g_diag[k]`
+>   is initialized to the static `G[in+, in+]` and refreshed in emitted
+>   `set_pot_N` / `set_runtime_R_<field>` setters when a pot touches the
+>   op-amp's non-inverting input (incremental `delta_g = 1/r − 1/r_old`).
+>   `EN_FC`/`IN_FC` parameters are parsed and stored on `OpampInfo` /
+>   `OpampNoiseSource` but **not yet wired** in v1 — v1 is white-only;
+>   Kellett-pink 1/f blend is reserved for follow-up. Zero codegen / zero
+>   state for op-amps without EN/IN — byte-identical to pre-Phase-4 builds
+>   under `--noise full`. Available via `--noise full`. Runtime smoke test:
+>   `tests/noise_psd_validation.rs::opamp_noise_emission_compiles_and_runs`.
+>
+> - **All five noise phases shipped**. NoiseIR now carries six per-phase
+>   source vectors (thermal, shot, junction-flicker, resistor-flicker,
+>   pentode-partition, op-amp-en-in); `build_noise_emission` is the
+>   single source of truth for both DK and nodal codegen paths.
 
 ## Why this is different
 

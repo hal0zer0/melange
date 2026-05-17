@@ -1868,6 +1868,65 @@ pub struct ResistorFlickerNoiseSource {
     pub switch_slot: Option<(usize, usize)>,
 }
 
+/// Op-amp input-referred noise source (Phase 4).
+///
+/// Datasheet `en` (V/√Hz) and `in` (A/√Hz) input-referred noise — three
+/// independent Norton current streams per op-amp:
+/// - **en stream** at `node_plus`, amplitude `en · G_diag(in+) · sqrt(fs)`.
+///   Equivalent to "voltage source `en` in series with non-inverting input",
+///   Norton-transformed via the existing diagonal admittance at `n_plus_idx`
+///   so no netlist resistor is inserted.
+/// - **in+ stream** at `node_plus`, amplitude `in_amps · sqrt(fs)`.
+/// - **in- stream** at `node_minus`, amplitude `in_amps · sqrt(fs)`.
+/// All three use the two-draw Nyquist anti-alias and 2× trap-MNA compensation
+/// (per-sample `sqrt(4·…·fs)` form for in; en uses `sqrt(2·en²·fs)` because
+/// the source is voltage and the Norton transform absorbs the conductance).
+///
+/// `g_diag_plus_default` is the static `G[in+, in+]` at codegen time. v1
+/// ships with the default baked into a runtime state field but **not yet
+/// refreshed on dynamic-R commits** — the response-letter promise of
+/// per-setter refresh is reserved for v1.5. Most planned op-amp circuits
+/// (NE5534, 4558 single-stage) have fixed input networks, so static G_diag
+/// matches measurement; circuits with level pots in series with `in+` need
+/// the v1.5 refresh to track the knob.
+///
+/// `en_fc` and `in_fc` (1/f corner frequencies) are parsed and stored but
+/// **not yet wired to codegen** in v1 — Kellett-pink blend is the planned
+/// extension. Per the response-letter agreement with Noyce, white-band
+/// en/in magnitude dominates the audible op-amp signature; the 1/f shaping
+/// is a v1.5 enhancement.
+///
+/// `in+` and `in-` streams are uncorrelated (independent xoshiro states
+/// salted via `NOISE_OPAMP_IN_SALT`). The literature treats `en`/`in`
+/// correlation as zero 90 % of the time and the result lands within ~1 dB
+/// of measurement; uncorrelated is the v1 target.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpampNoiseSource {
+    /// Op-amp name (debug + future per-device overrides).
+    pub name: String,
+    /// 1-indexed non-inverting input node. `0` = grounded (en stamp skipped
+    /// for that source; in+ stamp also skipped).
+    pub node_plus: usize,
+    /// 1-indexed inverting input node. `0` = grounded (in- stamp skipped).
+    pub node_minus: usize,
+    /// Input-referred voltage noise spectral density [V/√Hz].
+    pub en: f64,
+    /// Input-referred current noise spectral density [A/√Hz]. Stamps
+    /// independently at `node_plus` and `node_minus` (two streams).
+    pub in_amps: f64,
+    /// 1/f corner for en [Hz]. Parsed/stored; not yet wired to codegen
+    /// (v1 is white-only).
+    pub en_fc: f64,
+    /// 1/f corner for in [Hz]. Same v1 semantics as [`en_fc`].
+    pub in_fc: f64,
+    /// Static `G[in+, in+]` at codegen time — diagonal admittance seen at
+    /// the non-inverting input. The `en` stamp uses this as the
+    /// voltage-to-Norton-current conversion factor: `i_n = en · G_diag · g`.
+    /// v1 bakes this as a const default into `state.noise_opamp_en_g_diag[k]`;
+    /// runtime refresh on dynamic-R commits is deferred to v1.5.
+    pub g_diag_plus_default: f64,
+}
+
 /// Pentode partition noise source (Phase 5).
 ///
 /// Pentode plate current is set by grid voltage, but the *partition* between
@@ -1948,6 +2007,13 @@ pub struct NoiseIR {
     /// the corresponding filter.
     #[serde(default)]
     pub partition_sources: Vec<PentodePartitionSource>,
+    /// Op-amp input-referred noise sources (Phase 4). One per op-amp whose
+    /// `.model OA(EN=… IN=…)` supplies a positive `en` or `in` parameter.
+    /// Populated only when `mode.includes_full()`. Zero-en zero-in op-amps
+    /// are filtered, so circuits without these params produce byte-identical
+    /// code to pre-Phase-4 builds under `--noise full`.
+    #[serde(default)]
+    pub opamp_noise_sources: Vec<OpampNoiseSource>,
 }
 
 /// Collect Johnson-Nyquist thermal noise sources from the netlist.
@@ -2178,6 +2244,62 @@ pub fn collect_pentode_partition_sources(
             node_i: node_plate,
             node_j: node_cathode,
             partition_f: partition_f_for(&dev.name),
+        });
+    }
+    sources
+}
+
+/// Collect op-amp input-referred noise sources (Phase 4).
+///
+/// Walks `mna.opamps`, filters on `en > 0.0 || in_amps > 0.0`, and for each
+/// opted-in op-amp captures the static `G[in+, in+]` diagonal — the
+/// voltage-to-Norton-current conversion factor for `en` (equivalent
+/// thermal-R Norton transform, but applied to whatever bias network the
+/// user already has at the input). Op-amps with grounded `n_plus_idx == 0`
+/// store `g_diag_plus_default = 0.0`; their en stamp becomes a no-op.
+///
+/// The static G_diag is baked into a runtime state field; v1.5 will refresh
+/// it on dynamic-R commits (`.pot` / `.switch` setters touching the in+
+/// node). For v1 the field exists but is only restored to default on
+/// `reset()` / `set_seed()`.
+pub fn collect_opamp_noise_sources(mna: &MnaSystem) -> Vec<OpampNoiseSource> {
+    let mut sources = Vec::new();
+    for oa in &mna.opamps {
+        let en = oa.en;
+        let in_amps = oa.in_amps;
+        if !(en > 0.0 && en.is_finite()) && !(in_amps > 0.0 && in_amps.is_finite()) {
+            continue;
+        }
+        let np = oa.n_plus_idx;
+        let nm = oa.n_minus_idx;
+        // Static G diagonal at in+. For grounded in+ (np == 0) there is no
+        // diagonal — en stamp will skip because we test `np > 0` per stamp.
+        let g_diag = if np > 0 && np <= mna.g.len() {
+            mna.g[np - 1][np - 1]
+        } else {
+            0.0
+        };
+        sources.push(OpampNoiseSource {
+            name: oa.name.clone(),
+            node_plus: np,
+            node_minus: nm,
+            en: if en.is_finite() && en > 0.0 { en } else { 0.0 },
+            in_amps: if in_amps.is_finite() && in_amps > 0.0 {
+                in_amps
+            } else {
+                0.0
+            },
+            en_fc: if oa.en_fc.is_finite() && oa.en_fc > 0.0 {
+                oa.en_fc
+            } else {
+                0.0
+            },
+            in_fc: if oa.in_fc.is_finite() && oa.in_fc > 0.0 {
+                oa.in_fc
+            } else {
+                0.0
+            },
+            g_diag_plus_default: if g_diag.is_finite() { g_diag } else { 0.0 },
         });
     }
     sources
@@ -3507,6 +3629,11 @@ impl CircuitIR {
                 } else {
                     Vec::new()
                 },
+                opamp_noise_sources: if config.noise_mode.includes_full() {
+                    collect_opamp_noise_sources(mna)
+                } else {
+                    Vec::new()
+                },
             },
             named_constants,
             runtime_sources,
@@ -4475,6 +4602,11 @@ impl CircuitIR {
                 },
                 partition_sources: if config.noise_mode.includes_full() {
                     collect_pentode_partition_sources(netlist, mna)
+                } else {
+                    Vec::new()
+                },
+                opamp_noise_sources: if config.noise_mode.includes_full() {
+                    collect_opamp_noise_sources(mna)
                 } else {
                     Vec::new()
                 },
@@ -6289,6 +6421,10 @@ mod opamp_rail_mode_tests {
             n_internal_idx: 0,
             iir_c_dom: 0.0,
             n_int_idx: 0,
+            en: 0.0,
+            in_amps: 0.0,
+            en_fc: 0.0,
+            in_fc: 0.0,
         }
     }
 
@@ -6393,6 +6529,10 @@ mod opamp_rail_mode_tests {
             n_internal_idx: 0,
             iir_c_dom: 0.0,
             n_int_idx: 0,
+            en: 0.0,
+            in_amps: 0.0,
+            en_fc: 0.0,
+            in_fc: 0.0,
         }
     }
 

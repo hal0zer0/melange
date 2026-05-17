@@ -1882,3 +1882,338 @@ fn rc_lowpass_under_noise_full_emits_no_partition() {
          under --noise full"
     );
 }
+
+// =============================================================================
+// Phase 4: Op-amp input-referred noise (en/in) validation
+// =============================================================================
+//
+// Three Norton streams per opted-in op-amp:
+//   en  at NODE_PLUS : amp = en  · noise_opamp_en_g_diag[k] · sqrt(2·fs)
+//   in+ at NODE_PLUS : amp = in  · sqrt(2·fs)
+//   in- at NODE_MINUS: amp = in  · sqrt(2·fs)
+// Two-draw Nyquist anti-alias on all three. `noise_opamp_en_g_diag[k]` is
+// initialized to the static `G[in+, in+]` at codegen time and refreshed in
+// the emitted `set_pot_N` / `set_runtime_R_<field>` body when a pot touches
+// the op-amp's non-inverting input (incremental `delta_g = 1/r − 1/r_old`).
+
+// NE5534-style single-stage non-inverting amp: input via R_source, fixed
+// feedback divider, supplies via VCC/VEE. EN=3.5e-9 and IN=1.5e-12 are the
+// canonical NE5534 datasheet numbers used by Noyce's noyce-ne5534.cir.
+const OPAMP_NE5534_SPICE: &str = "\
+NE5534 single-stage non-inverting amp
+Rsrc in 1 1k
+Rg1 0 2 1k
+Rf 2 out 10k
+U1 1 2 out NE5534
+V1 vcc 0 DC 15
+V2 vee 0 DC -15
+Rload out 0 10k
+.model NE5534 OA(AOL=200000 GBW=10MEG ROUT=75 VCC=15 VEE=-15 EN=3.5e-9 IN=1.5e-12)
+";
+
+// Same topology with a level pot in the input path — exercises the dynamic
+// `noise_opamp_en_g_diag[k]` refresh in `set_pot_N`. The pot sits between
+// the input network and the op-amp's non-inverting input (node 1), so a
+// pot terminal coincides with `oa.n_plus_idx`. The pot's conductance
+// stamps positively into `G[1, 1]`, so changing it shifts the live G_diag
+// at in+. (`.pot` modifies an existing R; declare it first as Rlevel.)
+const OPAMP_NE5534_WITH_INPUT_POT_SPICE: &str = "\
+NE5534 with level pot in input path
+Rlevel 1 0 25k
+Rg1 0 2 1k
+Rf 2 out 10k
+U1 1 2 out NE5534
+V1 vcc 0 DC 15
+V2 vee 0 DC -15
+Rload out 0 10k
+.pot Rlevel 100 50k
+.model NE5534 OA(AOL=200000 GBW=10MEG ROUT=75 VCC=15 VEE=-15 EN=3.5e-9 IN=1.5e-12)
+";
+
+// Op-amp circuit without EN/IN — must produce byte-identical codegen to a
+// pre-Phase-4 build under `--noise full`. The OA model card omits both
+// noise parameters; `collect_opamp_noise_sources` filters this op-amp out
+// of `partition_sources`/`opamp_noise_sources` entirely.
+const OPAMP_NO_NOISE_SPICE: &str = "\
+Ideal op-amp with no EN/IN — no Phase 4 noise emission
+Rin in 1 1k
+Rg1 0 2 1k
+Rf 2 out 10k
+U1 1 2 out IDEAL_OA
+V1 vcc 0 DC 15
+V2 vee 0 DC -15
+Rload out 0 10k
+.model IDEAL_OA OA(AOL=1e6 ROUT=1 VCC=15 VEE=-15)
+";
+
+/// Op-amp en/in noise is collected and emitted under `--noise full`.
+/// Presence of `NOISE_OPAMP_N`, EN/IN const tables, EN_G_DIAG_DEFAULT, both
+/// salts, the input-gain setter, and per-source state fields identifies a
+/// well-formed Phase 4 source. The static G_diag default must be positive
+/// (the input network has a finite admittance at `in+`).
+#[test]
+fn opamp_emits_constants_for_ne5534_under_noise_full() {
+    let code = generate_partition_code(
+        OPAMP_NE5534_SPICE,
+        NoiseMode::Full,
+        "opamp_emit_full",
+        42,
+    );
+    assert!(
+        code.contains("pub const NOISE_OPAMP_N: usize = 1"),
+        "expected NOISE_OPAMP_N=1 for single-op-amp NE5534 circuit"
+    );
+    assert!(
+        code.contains("pub const NOISE_OPAMP_IN_N: usize = 2"),
+        "expected NOISE_OPAMP_IN_N=2 (one in+ + one in- per op-amp)"
+    );
+    assert!(
+        code.contains("NOISE_OPAMP_EN") && code.contains("NOISE_OPAMP_IN"),
+        "expected NOISE_OPAMP_EN and NOISE_OPAMP_IN arrays"
+    );
+    assert!(
+        code.contains("NOISE_OPAMP_NODE_PLUS") && code.contains("NOISE_OPAMP_NODE_MINUS"),
+        "expected per-source node-index arrays"
+    );
+    assert!(
+        code.contains("NOISE_OPAMP_EN_G_DIAG_DEFAULT"),
+        "expected baked static G_diag(in+) default array"
+    );
+    assert!(
+        code.contains("NOISE_OPAMP_EN_SALT") && code.contains("NOISE_OPAMP_IN_SALT"),
+        "expected both Phase 4 salts (EN and IN distinct streams)"
+    );
+    assert!(
+        code.contains("noise_opamp_en_rng") && code.contains("noise_opamp_in_rng"),
+        "expected per-source xoshiro state for en and in streams"
+    );
+    assert!(
+        code.contains("noise_opamp_en_g_diag"),
+        "expected dynamic-refreshable G_diag(in+) mirror in state"
+    );
+    assert!(
+        code.contains("noise_opamp_en_w_prev")
+            && code.contains("noise_opamp_in_w_prev"),
+        "expected two-draw Nyquist anti-alias buffers for en and in"
+    );
+    assert!(
+        code.contains("noise_opamp_en_last_i_n")
+            && code.contains("noise_opamp_in_last_i_n"),
+        "expected BE-replay caches for en and in"
+    );
+    assert!(
+        code.contains("pub fn set_opamp_input_gain"),
+        "expected set_opamp_input_gain runtime knob"
+    );
+    assert!(
+        code.contains("opamp_input_gain: 1.0"),
+        "expected opamp_input_gain default of 1.0"
+    );
+    // EN = 3.5e-9: f64 representation rounds slightly so fmt_f64 may emit
+    // `3.4…e-9` or `3.5…e-9` depending on the bit pattern. Check the
+    // exponent and approximate leading digit.
+    let en_line = code
+        .lines()
+        .find(|l| l.contains("NOISE_OPAMP_EN: [f64; NOISE_OPAMP_N]"))
+        .expect("expected NOISE_OPAMP_EN line in emitted code");
+    assert!(
+        en_line.contains("e-9") && (en_line.contains("[3.") || en_line.contains("[3,")),
+        "EN=3.5e-9 should propagate as ~3.5e-9; got line: {en_line}"
+    );
+    let in_line = code
+        .lines()
+        .find(|l| l.contains("NOISE_OPAMP_IN: [f64; NOISE_OPAMP_N]"))
+        .expect("expected NOISE_OPAMP_IN line in emitted code");
+    assert!(
+        in_line.contains("e-12") && (in_line.contains("[1.") || in_line.contains("[1,")),
+        "IN=1.5e-12 should propagate as ~1.5e-12; got line: {in_line}"
+    );
+}
+
+/// `--noise shot` does NOT emit op-amp noise — Phase 4 gates on
+/// `includes_full()` like junction flicker and partition. Op-amp circuits
+/// under `--noise shot` get thermal + shot (no opt-in op-amps for shot
+/// either, since op-amps are linear/M=0) but no en/in.
+#[test]
+fn opamp_under_noise_shot_emits_no_opamp_noise() {
+    let code = generate_partition_code(
+        OPAMP_NE5534_SPICE,
+        NoiseMode::Shot,
+        "opamp_shot_mode",
+        42,
+    );
+    assert!(
+        !code.contains("NOISE_OPAMP_N"),
+        "op-amp noise should not be emitted under --noise shot"
+    );
+    assert!(
+        !code.contains("set_opamp_input_gain"),
+        "set_opamp_input_gain should not be emitted without Phase 4 sources"
+    );
+}
+
+/// An op-amp `.model OA(...)` without EN or IN produces byte-identical
+/// codegen to a pre-Phase-4 build — `collect_opamp_noise_sources` filters
+/// it out, so no Phase 4 symbols are emitted under `--noise full`.
+#[test]
+fn opamp_without_en_in_emits_no_phase_4_symbols() {
+    let code = generate_partition_code(
+        OPAMP_NO_NOISE_SPICE,
+        NoiseMode::Full,
+        "opamp_no_noise",
+        42,
+    );
+    assert!(
+        !code.contains("NOISE_OPAMP_N"),
+        "op-amp without EN/IN must not emit Phase 4 noise constants"
+    );
+    assert!(
+        !code.contains("noise_opamp_en_rng"),
+        "op-amp without EN/IN must not emit Phase 4 state fields"
+    );
+    assert!(
+        !code.contains("set_opamp_input_gain"),
+        "op-amp without EN/IN must not emit set_opamp_input_gain"
+    );
+}
+
+/// Non-op-amp circuit under `--noise full`: no Phase 4 symbols emitted,
+/// byte-identical to pre-Phase-4 builds. Companion to the partition no-pentode
+/// guard.
+#[test]
+fn non_opamp_circuit_under_noise_full_emits_no_opamp_noise() {
+    let config = CodegenConfig {
+        circuit_name: "rc_no_opamp_noise".to_string(),
+        sample_rate: 96_000.0,
+        input_node: 0,
+        output_nodes: vec![1],
+        input_resistance: 1.0,
+        dc_block: false,
+        noise_mode: NoiseMode::Full,
+        noise_master_seed: 42,
+        ..CodegenConfig::default()
+    };
+    let (code, _n, _m) = support::generate_circuit_code(RC_SPICE, &config);
+    assert!(
+        !code.contains("NOISE_OPAMP"),
+        "non-op-amp circuit must emit no NOISE_OPAMP_* symbols under --noise full"
+    );
+}
+
+/// Phase 4 dynamic-R refresh: a `.pot` whose node terminates at an op-amp's
+/// non-inverting input must produce per-pot refresh code in `set_pot_N`
+/// that updates `state.noise_opamp_en_g_diag[k]`. Validates the
+/// `pot_to_opamp_en_refresh` lookup and the incremental-delta update
+/// (`+= 1/r - 1/r_old`).
+#[test]
+fn opamp_en_g_diag_refreshes_on_pot_touching_in_plus() {
+    let code = generate_partition_code(
+        OPAMP_NE5534_WITH_INPUT_POT_SPICE,
+        NoiseMode::Full,
+        "opamp_en_pot_refresh",
+        42,
+    );
+    // Refresh code must be present inside the pot setter.
+    assert!(
+        code.contains("self.noise_opamp_en_g_diag[0] += opamp_g_delta"),
+        "set_pot_N for a pot touching op-amp in+ must refresh en_g_diag[0]"
+    );
+    // The delta computation uses old/new pot resistances.
+    assert!(
+        code.contains("let opamp_g_delta = 1.0 / r - 1.0 / r_old"),
+        "refresh body must compute opamp_g_delta = 1/r − 1/r_old"
+    );
+    // r_old must be saved BEFORE the resistance is overwritten.
+    assert!(
+        code.contains("let r_old = self.pot_0_resistance"),
+        "refresh must save r_old before the new resistance is stored"
+    );
+}
+
+/// The op-amp en/in codegen path must produce valid Rust that compiles
+/// and runs without panicking. This is the structural smoke test —
+/// verifies state-field declarations, default-impl initializers, the
+/// `set_opamp_input_gain` runtime method, the rhs stamp, BE replay, NaN
+/// recovery, and set_seed all type-check and execute end-to-end. PSD
+/// validation is plugin-side (per the Noyce response letter).
+#[test]
+fn opamp_noise_emission_compiles_and_runs() {
+    let sr = 96_000.0;
+    let config = CodegenConfig {
+        circuit_name: "opamp_emit_runtime".to_string(),
+        sample_rate: sr,
+        input_node: 0,
+        output_nodes: vec![3],
+        input_resistance: 1.0,
+        dc_block: false,
+        noise_mode: NoiseMode::Full,
+        noise_master_seed: 42,
+        ..CodegenConfig::default()
+    };
+    let (code, _n, _m) = support::generate_circuit_code(OPAMP_NE5534_SPICE, &config);
+    let main = format!(
+        r#"
+fn main() {{
+    let mut state = CircuitState::default();
+    state.set_sample_rate({sr}_f64);
+    state.set_seed(42);
+    state.set_noise_enabled(true);
+    state.set_opamp_input_gain(1.0);
+    // A handful of samples — just enough to exercise the rhs_stamp and
+    // confirm process_sample doesn't panic / NaN on op-amp noise.
+    let mut last = 0.0_f64;
+    for _ in 0..32 {{
+        last = process_sample(0.0, &mut state)[0];
+    }}
+    println!("VAR:final={{:.15e}}", last);
+    // Mute path
+    state.set_opamp_input_gain(0.0);
+    for _ in 0..16 {{
+        last = process_sample(0.0, &mut state)[0];
+    }}
+    println!("VAR:muted={{:.15e}}", last);
+}}
+"#,
+        sr = sr
+    );
+    let out = support::compile_and_run(&code, &main, "opamp_emit_runtime");
+    let final_v = parse_var(&out.stdout, "final");
+    let muted_v = parse_var(&out.stdout, "muted");
+    assert!(
+        final_v.is_finite(),
+        "op-amp noise rhs_stamp should produce finite output, got {final_v}"
+    );
+    assert!(
+        muted_v.is_finite(),
+        "muted op-amp output should be finite, got {muted_v}"
+    );
+}
+
+/// Pots that don't touch any op-amp's in+ must NOT emit refresh code —
+/// byte-identical to a non-op-amp build at the pot-setter level. Uses the
+/// existing thermal-noise pot test circuit (RC with a pot between two nodes
+/// neither of which is an op-amp input — in fact, no op-amps at all).
+#[test]
+fn pot_not_touching_opamp_emits_no_opamp_refresh() {
+    const SIMPLE_POT_RC_SPICE: &str = "\
+Simple RC with a pot — no op-amps
+R1 in mid 10k
+R2 mid 0 50k
+C1 mid 0 100n
+.pot R2 100 100k
+";
+    let code = generate_partition_code(
+        SIMPLE_POT_RC_SPICE,
+        NoiseMode::Full,
+        "pot_no_opamp_refresh",
+        42,
+    );
+    assert!(
+        !code.contains("opamp_g_delta"),
+        "pot setter must emit no opamp_g_delta in the absence of op-amps"
+    );
+    assert!(
+        !code.contains("noise_opamp_en_g_diag"),
+        "circuit without op-amps must emit no en_g_diag refresh code"
+    );
+}

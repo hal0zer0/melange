@@ -553,6 +553,30 @@ pub struct OpampInfo {
     /// that name (referenced from buffer/diode elements), so the field is
     /// non-zero only when the op-amp has gone through the augmentation pass.
     pub n_int_idx: usize,
+    /// Input-referred voltage noise spectral density [V/√Hz] at the non-
+    /// inverting input (Phase 4). Default 0.0 = no en noise emitted; users
+    /// opt in via `.model OA(EN=…)`. Typical datasheet values: NE5534 =
+    /// 3.5e-9, 4558 = 8e-9, TL072 = 18e-9, OP07 = 10e-9.
+    /// Stamped as a Norton current at `n_plus_idx` scaled by the live
+    /// diagonal `G[n_plus, n_plus]` — voltage-source-in-series-with-input
+    /// equivalent without inserting a netlist resistor.
+    pub en: f64,
+    /// Input-referred current noise spectral density [A/√Hz] at each input
+    /// (Phase 4). Default 0.0 = no in noise emitted. Typical datasheet:
+    /// NE5534 = 1.5e-12, 4558 = 0.5e-12, TL072 = 0.01e-12 (FET-input).
+    /// Stamped as an independent Norton current at each of `n_plus_idx`
+    /// and `n_minus_idx` — two uncorrelated streams per op-amp.
+    pub in_amps: f64,
+    /// 1/f corner frequency [Hz] for `en` (Phase 4, reserved). v1 emits
+    /// white-only en/in (per the Noyce response letter: "the audible
+    /// signature is dominated by the flat-band magnitude"); EN_FC is
+    /// parsed and stored for a future Kellett-pink blend extension.
+    /// `0.0` (default) = pure white. Currently has no codegen effect.
+    pub en_fc: f64,
+    /// 1/f corner frequency [Hz] for `in` (Phase 4, reserved). Same v1
+    /// semantics as [`en_fc`] — parsed but unused; future extension will
+    /// blend Kellett-pink shaping when non-zero.
+    pub in_fc: f64,
 }
 
 /// Effective output resistance for the
@@ -2593,6 +2617,14 @@ impl MnaBuilder {
                             "AOL_TRANSIENT_CAP" => oa.aol_transient_cap = *val,
                             "IB" => oa.ib = *val,
                             "RIN" => oa.rin = *val,
+                            // Phase 4 input-referred noise (datasheet en/in
+                            // and their 1/f corner frequencies). 1/f corners
+                            // are parsed but not yet wired (v1 is white-only;
+                            // Kellett-pink blend reserved for follow-up).
+                            "EN" => oa.en = *val,
+                            "IN" => oa.in_amps = *val,
+                            "EN_FC" => oa.en_fc = *val,
+                            "IN_FC" => oa.in_fc = *val,
                             _ => log::warn!(
                                 ".model {}: unrecognized parameter '{}' (ignored)",
                                 m.name,
@@ -4747,6 +4779,13 @@ impl MnaBuilder {
                     n_internal_idx: 0,
                     iir_c_dom: 0.0,
                     n_int_idx: 0,
+                    // Phase 4 noise — opt-in via `.model OA(EN=… IN=…)`.
+                    // Defaults of 0.0 mean zero per-source emission and
+                    // byte-identical codegen to pre-Phase-4 builds.
+                    en: 0.0,
+                    in_amps: 0.0,
+                    en_fc: 0.0,
+                    in_fc: 0.0,
                 });
             }
             Element::Vcvs {
