@@ -1868,6 +1868,48 @@ pub struct ResistorFlickerNoiseSource {
     pub switch_slot: Option<(usize, usize)>,
 }
 
+/// Pentode partition noise source (Phase 5).
+///
+/// Pentode plate current is set by grid voltage, but the *partition* between
+/// plate and screen is statistical — the screen-grid divert thins the cathode
+/// beam reaching the plate. Per Schottky 1918 the resulting plate-current
+/// noise PSD is **lower** than bare shot:
+/// ```text
+/// S_i(plate) = 2·q · I_p · I_s / (I_p + I_s)       [A²/Hz]
+/// ```
+/// At matched `I_p` a pentode is *quieter* than a triode would be — the
+/// suppression factor `I_s / (I_p + I_s)` lands in 0.05–0.30 for typical
+/// pentode bias. This **replaces** the bare-shot stamp at the plate; the
+/// `collect_shot_noise_sources` collector filters pentode plate ports out
+/// when the partition collector picks them up.
+///
+/// Per-sample injected current at sample rate `fs` is
+/// `sqrt(4·q · I_p·I_s/(I_p+I_s) · fs) · PARTITION_F · N(0,1)`,
+/// stamped with the same two-draw Nyquist anti-alias as thermal/shot and
+/// the same 2× trap-MNA compensation factor. `I_p` and `I_s` are read
+/// one-sample-lagged from `state.i_nl_prev[ip_slot]` / `[is_slot]`.
+///
+/// `PARTITION_F` is a process-variation knob from `.model TUBE(PARTITION_F=…)`,
+/// default 1.0 (textbook). The dominant control over pentode noise floor is
+/// the bias network in the `.cir` (sets `I_s/I_p`); this is the secondary
+/// matched-tube character knob.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PentodePartitionSource {
+    /// Device name (debug + future per-device overrides).
+    pub name: String,
+    /// Index into `state.i_nl_prev` for plate current `I_p`.
+    pub ip_slot_idx: usize,
+    /// Index into `state.i_nl_prev` for screen current `I_s` (Ig2).
+    pub is_slot_idx: usize,
+    /// 1-indexed positive injection node (plate). 0 = ground.
+    pub node_i: usize,
+    /// 1-indexed negative injection node (cathode). 0 = ground.
+    pub node_j: usize,
+    /// Partition-multiplier `PARTITION_F`. Defaults to 1.0 (textbook
+    /// Schottky); values < 1.0 model low-noise-selected pentode batches.
+    pub partition_f: f64,
+}
+
 /// Noise configuration baked into the generated code.
 ///
 /// Built from [`crate::codegen::NoiseMode`] + a scan of `netlist.elements`.
@@ -1900,6 +1942,12 @@ pub struct NoiseIR {
     /// pre-Phase-3.5 build under `--noise full`.
     #[serde(default)]
     pub resistor_flicker_sources: Vec<ResistorFlickerNoiseSource>,
+    /// Pentode partition noise sources (Phase 5). One per pentode device.
+    /// Populated only when `mode.includes_full()`. **Replaces** the bare
+    /// plate-shot stamp for pentodes — see `collect_shot_noise_sources` for
+    /// the corresponding filter.
+    #[serde(default)]
+    pub partition_sources: Vec<PentodePartitionSource>,
 }
 
 /// Collect Johnson-Nyquist thermal noise sources from the netlist.
@@ -2030,7 +2078,18 @@ pub fn collect_thermal_noise_sources(
 pub fn collect_shot_noise_sources(mna: &MnaSystem) -> Vec<ShotNoiseSource> {
     let mut sources = Vec::new();
     for dev in &mna.nonlinear_devices {
+        // Phase 5: pentode plate noise is handled by `collect_pentode_partition_sources`
+        // — it's partition-suppressed, not bare Schottky shot. Skip the Ip
+        // (slot_offset=0) port for pentodes (4 or 5 node_indices); pentodes
+        // contribute nothing else to shot today (Ig2/Ig1 are unused), so the
+        // whole device drops out of the shot loop. Triodes (3 nodes) keep
+        // their Ip port — full shot.
+        let is_pentode = matches!(dev.device_type, crate::mna::NonlinearDeviceType::Tube)
+            && matches!(dev.node_indices.len(), 4 | 5);
         for port in dev.junction_current_ports() {
+            if is_pentode && port.slot_offset == 0 {
+                continue;
+            }
             let name = if port.label.is_empty() {
                 dev.name.clone()
             } else {
@@ -2043,6 +2102,83 @@ pub fn collect_shot_noise_sources(mna: &MnaSystem) -> Vec<ShotNoiseSource> {
                 node_j: port.node_neg,
             });
         }
+    }
+    sources
+}
+
+/// Collect pentode partition noise sources (Phase 5).
+///
+/// Walks `mna.nonlinear_devices` for pentodes (4 or 5 `node_indices`,
+/// `device_type == Tube`) and emits one [`PentodePartitionSource`] per device.
+/// The plate slot is `start_idx + 0`, the screen slot is `start_idx + 1`
+/// (same layout for both `SharpPentode` 3D and `SharpPentodeGridOff` 2D — in
+/// the grid-off case `Ig1` is dropped but `Ig2` stays at slot 1).
+///
+/// `partition_f` is read from the model's `PARTITION_F` parameter via the
+/// netlist; defaults to 1.0 (textbook Schottky 1918) when omitted.
+///
+/// Pentodes whose `node_indices` don't expose plate (`n[0]`) and cathode
+/// (`n[2]`) are filtered defensively — matches the [`collect_shot_noise_sources`]
+/// convention for malformed nodes.
+pub fn collect_pentode_partition_sources(
+    netlist: &Netlist,
+    mna: &MnaSystem,
+) -> Vec<PentodePartitionSource> {
+    use std::collections::HashMap;
+
+    let mut model_for: HashMap<String, String> = HashMap::new();
+    for el in &netlist.elements {
+        if let Element::Pentode { name, model, .. } = el {
+            model_for.insert(name.to_ascii_uppercase(), model.clone());
+        }
+    }
+
+    // PARTITION_F resolver: explicit `.model TUBE(PARTITION_F=…)` wins; default
+    // 1.0 (textbook). Validated `> 0 && finite` by `TubeParams::validate()`,
+    // which the pentode resolver in `resolve_pentode_params` already runs —
+    // so by the time we get here every PARTITION_F is safe to use.
+    let partition_f_for = |dev_name: &str| -> f64 {
+        let Some(model) = model_for.get(&dev_name.to_ascii_uppercase()) else {
+            return 1.0;
+        };
+        let Some(m) = netlist
+            .models
+            .iter()
+            .find(|m| m.name.eq_ignore_ascii_case(model))
+        else {
+            return 1.0;
+        };
+        for (k, v) in &m.params {
+            if k.eq_ignore_ascii_case("PARTITION_F") && v.is_finite() && *v > 0.0 {
+                return *v;
+            }
+        }
+        1.0
+    };
+
+    let mut sources = Vec::new();
+    for dev in &mna.nonlinear_devices {
+        if !matches!(dev.device_type, crate::mna::NonlinearDeviceType::Tube) {
+            continue;
+        }
+        let n = &dev.node_indices;
+        if !matches!(n.len(), 4 | 5) {
+            continue;
+        }
+        // Pentode node order: [plate, grid, cathode, screen, [supp]]
+        let node_plate = n[0];
+        let node_cathode = n[2];
+        if node_plate == 0 && node_cathode == 0 {
+            continue;
+        }
+        sources.push(PentodePartitionSource {
+            name: dev.name.clone(),
+            ip_slot_idx: dev.start_idx,
+            is_slot_idx: dev.start_idx + 1,
+            node_i: node_plate,
+            node_j: node_cathode,
+            partition_f: partition_f_for(&dev.name),
+        });
     }
     sources
 }
@@ -3366,6 +3502,11 @@ impl CircuitIR {
                 } else {
                     Vec::new()
                 },
+                partition_sources: if config.noise_mode.includes_full() {
+                    collect_pentode_partition_sources(netlist, mna)
+                } else {
+                    Vec::new()
+                },
             },
             named_constants,
             runtime_sources,
@@ -4329,6 +4470,11 @@ impl CircuitIR {
                 },
                 resistor_flicker_sources: if config.noise_mode.includes_full() {
                     collect_resistor_flicker_noise_sources(netlist, mna)
+                } else {
+                    Vec::new()
+                },
+                partition_sources: if config.noise_mode.includes_full() {
+                    collect_pentode_partition_sources(netlist, mna)
                 } else {
                     Vec::new()
                 },
@@ -5596,6 +5742,10 @@ impl CircuitIR {
             alpha_s: 0.0,
             a_factor: 0.0,
             beta_factor: 0.0,
+            // Phase 5: partition noise is pentode-only. Triode plate-shot is
+            // bare Schottky `2q·Ip`; PARTITION_F is unused and the field is
+            // gated by `is_pentode()` at the codegen-collector layer.
+            partition_f: 1.0,
             screen_form: crate::device_types::ScreenForm::Rational,
             mu_b,
             svar,
@@ -5665,6 +5815,10 @@ impl CircuitIR {
         let beta_factor = Self::lookup_model_param(netlist, model, "BETA_FACTOR")
             .or_else(|| cat.map(|c| c.beta_factor))
             .unwrap_or(0.148);
+        // Phase 5 partition-noise multiplier. Default 1.0 (textbook Schottky
+        // partition statistics). Not in the catalog — it's a process-variation
+        // knob applied at codegen, not a fitted device parameter.
+        let partition_f = Self::lookup_model_param(netlist, model, "PARTITION_F").unwrap_or(1.0);
         let ig_max = Self::lookup_model_param(netlist, model, "IG_MAX")
             .or_else(|| cat.map(|c| c.ig_max))
             .unwrap_or(8e-3);
@@ -5815,6 +5969,7 @@ impl CircuitIR {
                 "ALPHA_S",
                 "A_FACTOR",
                 "BETA_FACTOR",
+                "PARTITION_F",
                 "SCREEN_FORM",
                 "IG_MAX",
                 "VGK_ONSET",
@@ -5849,6 +6004,7 @@ impl CircuitIR {
             alpha_s,
             a_factor,
             beta_factor,
+            partition_f,
             screen_form,
             // Phase 1c: variable-mu §5 params. Defaults to sharp (svar=0).
             // Resolved by a follow-up (task P1c-03) which reads MU_B / SVAR /

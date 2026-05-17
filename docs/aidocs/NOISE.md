@@ -62,10 +62,29 @@
 >   tests in `tests/noise_psd_validation.rs` (DK kTC, nodal kTC,
 >   dynamic-pot/switch first-sample-divergence, shot-noise
 >   audible-wiring check, Kellett filter slope, flicker wiring).
-> - **Phases 4–5 deferred**: op-amp en/in, pentode partition. The
->   `NoiseIR` + `build_noise_emission` scaffold accepts them without
->   architectural churn — add per-phase `Vec<*NoiseSource>` fields + a
->   stamp fragment.
+> - **Phase 5 (pentode partition) shipped** 2026-05-17. Per-pentode
+>   plate-current noise via Schottky 1918 partition statistics —
+>   `S_i(plate) = 2·q · I_p · I_s / (I_p + I_s)` **replaces** the Phase 2
+>   bare plate-shot stamp for pentodes (the shot collector filters
+>   plate ports for 4/5-node Tube devices; triodes keep full shot). Per-
+>   sample amplitude `sqrt(4·q · I_p·I_s/(I_p+I_s) · fs) · PARTITION_F`
+>   with the same 2× trap-MNA compensation and two-draw Nyquist anti-alias
+>   as thermal/shot. `.model TUBE(PARTITION_F=…)` is a process-variation
+>   knob (default 1.0 textbook; ~0.6 for selected low-noise EF86 batches);
+>   the dominant control over pentode noise floor is the bias network in
+>   the `.cir` (sets `I_s/I_p`). Reuses `noise_shot_scale`, `shot_gain`,
+>   and `set_shot_gain` (partition is shot at the screen-divert barrier;
+>   one mute call silences both). Salted stream `NOISE_PARTITION_SALT =
+>   0x9E27_0DE9_A271_710E`. BE-fallback replay, NaN recovery, and `reset()`
+>   /`set_seed()` handle partition state the same as shot. Available via
+>   `--noise full`. Zero codegen / zero state for triode-only or
+>   passive-only circuits — byte-identical to pre-Phase-5 builds.
+> - **Phase 4 deferred**: op-amp en/in. The `NoiseIR` +
+>   `build_noise_emission` scaffold accepts it without architectural
+>   churn — see the "Op-Amp Input-Referred — Phase 4" section below for
+>   the stamping plan agreed with Noyce (Norton current at in+ scaled by
+>   G_diag, refreshed under dynamic-R commits; one new
+>   `set_opamp_input_gain` runtime knob).
 
 ## Why this is different
 

@@ -1630,3 +1630,255 @@ fn main() {{
 // codegen on the same divider topology.)
 #[allow(dead_code)]
 const _R_FLICKER_NO_KF_DIVIDER_REFERENCE: &str = R_FLICKER_DIVIDER_NO_KF_SPICE;
+
+// =============================================================================
+// Phase 5: Pentode partition noise validation
+// =============================================================================
+//
+// Stamp formula (Schottky 1918, textbook):
+//   S_i(plate) = 2·q · I_p · I_s / (I_p + I_s)   [A²/Hz]
+//
+// Replaces the Phase 2 bare plate-shot `2q·I_p` — pentodes at matched I_p are
+// quieter than triodes by the partition suppression factor `I_s/(I_p+I_s)`.
+// Per-sample injected current at rate `fs`:
+//   sqrt(4·q · I_p·I_s/(I_p+I_s) · fs) · PARTITION_F · N(0,1)
+// with the same 2× trap-MNA compensation as thermal/shot/junction-flicker
+// and the same two-draw Nyquist anti-alias.
+
+const PENTODE_PARTITION_SPICE: &str = "\
+EL84 partition-noise test bench
+Rin in 0 1Meg
+Cin in grid 100n
+Rg grid 0 1Meg
+P1 plate grid cathode screen EL84
+Rk cathode 0 130
+Ck cathode 0 100u
+Rscreen vcc screen 1k
+Cscreen screen 0 47u
+Rp vcc plate 4.7k
+Cout plate out 1u
+Rout out 0 100k
+V1 vcc 0 DC 300
+.model EL84 VP(MU=23.36 EX=1.138 KG1=117.4 KG2=1275.0 KP=152.4 KVB=4015.8 ALPHA_S=7.66 A_FACTOR=4.344e-4 BETA_FACTOR=0.148)
+";
+
+const PENTODE_PARTITION_HALF_SPICE: &str = "\
+EL84 partition-noise test bench with PARTITION_F=0.5
+Rin in 0 1Meg
+Cin in grid 100n
+Rg grid 0 1Meg
+P1 plate grid cathode screen EL84
+Rk cathode 0 130
+Ck cathode 0 100u
+Rscreen vcc screen 1k
+Cscreen screen 0 47u
+Rp vcc plate 4.7k
+Cout plate out 1u
+Rout out 0 100k
+V1 vcc 0 DC 300
+.model EL84 VP(MU=23.36 EX=1.138 KG1=117.4 KG2=1275.0 KP=152.4 KVB=4015.8 ALPHA_S=7.66 A_FACTOR=4.344e-4 BETA_FACTOR=0.148 PARTITION_F=0.5)
+";
+
+const TRIODE_NO_PARTITION_SPICE: &str = "\
+12AX7 single-stage common cathode (control: no partition expected)
+Rin in 0 1Meg
+Cin in grid 100n
+Rg grid 0 1Meg
+T1 plate grid cathode 12AX7
+Rk cathode 0 1.5k
+Ck cathode 0 22u
+Rp vcc plate 100k
+Cout plate out 1u
+Rout out 0 1Meg
+V1 vcc 0 DC 250
+.model 12AX7 VT(MU=100 EX=1.4 KG1=600 KP=300 KVB=300)
+";
+
+fn generate_partition_code(spice: &str, mode: NoiseMode, name: &str, seed: u64) -> String {
+    let config = CodegenConfig {
+        circuit_name: name.to_string(),
+        sample_rate: 96_000.0,
+        input_node: 0,
+        output_nodes: vec![1],
+        input_resistance: 1.0,
+        dc_block: false,
+        noise_mode: mode,
+        noise_master_seed: seed,
+        ..CodegenConfig::default()
+    };
+    let (code, _n, _m) = support::generate_circuit_code(spice, &config);
+    code
+}
+
+/// Pentode partition is collected and emitted under `--noise full`.
+/// The presence of `NOISE_PARTITION_N`, the per-source const tables, the
+/// salt, and the rhs stamp identifies a partition source. Defaults make
+/// `PARTITION_F = 1.0` (textbook Schottky).
+#[test]
+fn partition_emits_constants_for_pentode_under_noise_full() {
+    let code = generate_partition_code(
+        PENTODE_PARTITION_SPICE,
+        NoiseMode::Full,
+        "partition_emit_full",
+        42,
+    );
+    assert!(
+        code.contains("pub const NOISE_PARTITION_N: usize = 1"),
+        "expected NOISE_PARTITION_N=1 for single-pentode circuit"
+    );
+    assert!(
+        code.contains("NOISE_PARTITION_IP_SLOT"),
+        "expected NOISE_PARTITION_IP_SLOT array"
+    );
+    assert!(
+        code.contains("NOISE_PARTITION_IS_SLOT"),
+        "expected NOISE_PARTITION_IS_SLOT array (screen-current slot)"
+    );
+    assert!(
+        code.contains("NOISE_PARTITION_F"),
+        "expected NOISE_PARTITION_F array baking the per-device multiplier"
+    );
+    assert!(
+        code.contains("NOISE_PARTITION_SALT"),
+        "expected NOISE_PARTITION_SALT for the dedicated RNG stream"
+    );
+    assert!(
+        code.contains("noise_partition_rng"),
+        "expected noise_partition_rng state field"
+    );
+    assert!(
+        code.contains("noise_partition_w_prev"),
+        "expected two-draw lag buffer for partition (Nyquist anti-alias)"
+    );
+    assert!(
+        code.contains("noise_partition_last_i_n"),
+        "expected BE-replay cache for partition"
+    );
+    // Default PARTITION_F is 1.0 (textbook Schottky). `fmt_f64` emits
+    // scientific notation, so 1.0 renders as `1.00000000000000000e0`.
+    assert!(
+        code.contains("NOISE_PARTITION_F: [f64; NOISE_PARTITION_N] = [1.0")
+            && code.contains("e0]"),
+        "default PARTITION_F should be 1.0 (textbook); got:\n{}",
+        code.lines()
+            .find(|l| l.contains("NOISE_PARTITION_F"))
+            .unwrap_or("<not found>")
+    );
+}
+
+/// `--noise shot` mode includes thermal + shot but NOT partition (partition
+/// gates on `includes_full()` like junction flicker). A pentode under
+/// `--noise shot` therefore emits *no* plate-side noise at all — the bare
+/// plate-shot is skipped by `collect_shot_noise_sources` since partition
+/// owns that port, and partition itself is gated off.
+///
+/// This is the intended contract: partition is a "full" feature; users who
+/// want pentodes loud need `--noise full`.
+#[test]
+fn pentode_under_noise_shot_emits_no_plate_noise() {
+    let code = generate_partition_code(
+        PENTODE_PARTITION_SPICE,
+        NoiseMode::Shot,
+        "partition_shot_mode",
+        42,
+    );
+    // Partition not emitted under --noise shot (it gates on includes_full).
+    assert!(
+        !code.contains("NOISE_PARTITION_N"),
+        "partition should not be emitted under --noise shot"
+    );
+    // Pentode plate Ip slot=0 should NOT appear as a shot source either —
+    // the collector filters pentode plate ports out (partition owns that
+    // junction). For this circuit the pentode is the only nonlinear device,
+    // so NOISE_SHOT_N should be absent (no other shot sources).
+    assert!(
+        !code.contains("NOISE_SHOT_N"),
+        "single-pentode circuit under --noise shot should emit no shot \
+         sources (pentode plate goes through partition, not bare shot)"
+    );
+}
+
+/// `.model TUBE(PARTITION_F=0.5)` flows through the parser, the pentode IR
+/// resolver, and the codegen const table. A user who selects low-noise EF86
+/// batches gets the right per-sample amplitude scaling baked into the
+/// generated code.
+#[test]
+fn partition_f_override_propagates_to_codegen() {
+    let code = generate_partition_code(
+        PENTODE_PARTITION_HALF_SPICE,
+        NoiseMode::Full,
+        "partition_f_half",
+        42,
+    );
+    // fmt_f64 emits scientific notation: 0.5 → `5.00000000000000000e-1`.
+    assert!(
+        code.contains("NOISE_PARTITION_F: [f64; NOISE_PARTITION_N] = [5.0")
+            && code.contains("e-1]"),
+        "PARTITION_F=0.5 should propagate as 5.0…e-1; got:\n{}",
+        code.lines()
+            .find(|l| l.contains("NOISE_PARTITION_F"))
+            .unwrap_or("<not found>")
+    );
+}
+
+/// Triodes get bare Schottky plate shot, not partition. The collector skips
+/// only 4/5-node Tube devices; triodes (3 nodes) emit a shot port at the
+/// plate. A pure-triode circuit must produce no `NOISE_PARTITION_*` symbols
+/// at all — byte-identical noise emission to a pre-Phase-5 build for
+/// triode-only stages.
+#[test]
+fn triode_emits_no_partition_under_noise_full() {
+    let code = generate_partition_code(
+        TRIODE_NO_PARTITION_SPICE,
+        NoiseMode::Full,
+        "triode_no_partition",
+        42,
+    );
+    assert!(
+        !code.contains("NOISE_PARTITION_N"),
+        "triode-only circuit must not emit NOISE_PARTITION_N"
+    );
+    assert!(
+        !code.contains("NOISE_PARTITION_F"),
+        "triode-only circuit must not emit NOISE_PARTITION_F"
+    );
+    assert!(
+        !code.contains("noise_partition_rng"),
+        "triode-only circuit must not emit partition RNG state"
+    );
+    assert!(
+        !code.contains("NOISE_PARTITION_SALT"),
+        "triode-only circuit must not emit partition salt"
+    );
+    // Triode plate shot is still wired (Phase 2). One Ip shot source for
+    // the single triode in this circuit.
+    assert!(
+        code.contains("NOISE_SHOT_N: usize = 1"),
+        "triode-only circuit should emit one bare plate-shot source"
+    );
+}
+
+/// Circuit with no pentodes (and no per-resistor KF) under `--noise full`
+/// must remain byte-identical to a pre-Phase-5 build: no partition symbols,
+/// no extra state, no extra constants. Companion to the existing
+/// `noise_full_no_kf_resistors_emits_zero_r_flicker` byte-identity guard.
+#[test]
+fn rc_lowpass_under_noise_full_emits_no_partition() {
+    let config = CodegenConfig {
+        circuit_name: "rc_no_partition".to_string(),
+        sample_rate: 96_000.0,
+        input_node: 0,
+        output_nodes: vec![1],
+        input_resistance: 1.0,
+        dc_block: false,
+        noise_mode: NoiseMode::Full,
+        noise_master_seed: 42,
+        ..CodegenConfig::default()
+    };
+    let (code, _n, _m) = support::generate_circuit_code(RC_SPICE, &config);
+    assert!(
+        !code.contains("NOISE_PARTITION"),
+        "no-pentode circuit must not emit any NOISE_PARTITION_* symbols \
+         under --noise full"
+    );
+}

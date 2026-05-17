@@ -2830,8 +2830,13 @@ impl RustEmitter {
         let shot_n = ir.noise.shot_sources.len();
         let flicker_n = ir.noise.flicker_sources.len();
         let r_flicker_n = ir.noise.resistor_flicker_sources.len();
+        let partition_n = ir.noise.partition_sources.len();
         if ir.noise.mode == NoiseMode::Off
-            || (thermal_n == 0 && shot_n == 0 && flicker_n == 0 && r_flicker_n == 0)
+            || (thermal_n == 0
+                && shot_n == 0
+                && flicker_n == 0
+                && r_flicker_n == 0
+                && partition_n == 0)
         {
             return NoiseEmission::default();
         }
@@ -2839,6 +2844,13 @@ impl RustEmitter {
         // (Phase 3) and resistor flicker (Phase 3.5). Emit when either is
         // present.
         let need_kellett = flicker_n > 0 || r_flicker_n > 0;
+        // `Q_E`, `noise_shot_scale`, `shot_gain` and `set_shot_gain` are
+        // shared between Phase 2 shot and Phase 5 pentode partition — both
+        // need `sqrt(4·q·…·fs)` amplitudes and the `shot_gain` runtime knob
+        // (partition is shot at the screen-divert barrier; one mute call
+        // silences both, matching the user-facing convention agreed with
+        // Noyce). Gate the shared infrastructure on whichever phase needs it.
+        let need_q_scale = shot_n > 0 || partition_n > 0;
 
         let mut top = String::new();
         top.push_str("// ----------------------------------------------------------------------\n");
@@ -2850,8 +2862,9 @@ impl RustEmitter {
         top.push_str("pub const K_B: f64 = 1.380649e-23;\n");
         top.push_str("/// Standard lab noise temperature [K] (16.85 °C, the \"kT\" reference).\n");
         top.push_str("pub const T_ROOM_K: f64 = 290.0;\n");
-        if shot_n > 0 {
-            top.push_str("/// Elementary charge [C] (exact SI 2019). Used for shot-noise PSD.\n");
+        if need_q_scale {
+            top.push_str("/// Elementary charge [C] (exact SI 2019). Used for shot-noise PSD\n");
+            top.push_str("/// (Phase 2) and pentode partition noise (Phase 5).\n");
             top.push_str("pub const Q_E: f64 = 1.602176634e-19;\n");
         }
         top.push_str(&format!("/// Default master seed baked in by codegen. `0` → entropy-seeded at Default.\n"));
@@ -3041,6 +3054,73 @@ impl RustEmitter {
             ));
         }
 
+        // Pentode partition noise table (Phase 5). One entry per pentode
+        // device. Per-sample plate-current amplitude is
+        //   sqrt(4·q · I_p · I_s / (I_p + I_s) · fs) · PARTITION_F · N(0,1)
+        // = noise_shot_scale · sqrt(I_p·I_s/(I_p+I_s)) · PARTITION_F · N(0,1)
+        // with `I_p = state.i_nl_prev[IP_SLOT[k]]` and
+        // `I_s = state.i_nl_prev[IS_SLOT[k]]` (both one-sample lagged).
+        // Replaces the Phase 2 bare plate-shot for pentodes (the shot
+        // collector filters those out — `collect_shot_noise_sources` in ir.rs).
+        // Same 2× trap-MNA compensation as thermal/shot/junction-flicker;
+        // two-draw Nyquist anti-alias preserves the kTC-style invariant.
+        if partition_n > 0 {
+            top.push_str(&format!(
+                "pub const NOISE_PARTITION_N: usize = {};\n",
+                partition_n
+            ));
+            let p_ip: Vec<usize> = ir
+                .noise
+                .partition_sources
+                .iter()
+                .map(|s| s.ip_slot_idx)
+                .collect();
+            let p_is: Vec<usize> = ir
+                .noise
+                .partition_sources
+                .iter()
+                .map(|s| s.is_slot_idx)
+                .collect();
+            let p_ni: Vec<usize> = ir
+                .noise
+                .partition_sources
+                .iter()
+                .map(|s| s.node_i)
+                .collect();
+            let p_nj: Vec<usize> = ir
+                .noise
+                .partition_sources
+                .iter()
+                .map(|s| s.node_j)
+                .collect();
+            let p_f: Vec<String> = ir
+                .noise
+                .partition_sources
+                .iter()
+                .map(|s| fmt_f64(s.partition_f))
+                .collect();
+            top.push_str(&format!(
+                "pub(crate) const NOISE_PARTITION_IP_SLOT: [usize; NOISE_PARTITION_N] = [{}];\n",
+                fmt_usize_arr(&p_ip)
+            ));
+            top.push_str(&format!(
+                "pub(crate) const NOISE_PARTITION_IS_SLOT: [usize; NOISE_PARTITION_N] = [{}];\n",
+                fmt_usize_arr(&p_is)
+            ));
+            top.push_str(&format!(
+                "pub(crate) const NOISE_PARTITION_NODE_I: [usize; NOISE_PARTITION_N] = [{}];\n",
+                fmt_usize_arr(&p_ni)
+            ));
+            top.push_str(&format!(
+                "pub(crate) const NOISE_PARTITION_NODE_J: [usize; NOISE_PARTITION_N] = [{}];\n",
+                fmt_usize_arr(&p_nj)
+            ));
+            top.push_str(&format!(
+                "pub(crate) const NOISE_PARTITION_F: [f64; NOISE_PARTITION_N] = [{}];\n\n",
+                p_f.join(", ")
+            ));
+        }
+
         // xoshiro256++ RNG: fast, high-quality, 256-bit state per stream.
         top.push_str("#[derive(Clone, Copy, Debug)]\n");
         top.push_str("pub struct Xoshiro256pp { pub s: [u64; 4] }\n\n");
@@ -3125,6 +3205,14 @@ impl RustEmitter {
             top.push_str("/// flicker streams under a deterministic master seed.\n");
             top.push_str(
                 "pub const NOISE_R_FLICKER_SALT: u64 = 0xCA12_B0CC_F11C_E12E;\n\n",
+            );
+        }
+        if partition_n > 0 {
+            top.push_str("/// Pentode partition salt (Phase 5). Distinct from thermal /\n");
+            top.push_str("/// shot / flicker so partition streams never share a prefix\n");
+            top.push_str("/// with the cathode-shot streams in the same circuit.\n");
+            top.push_str(
+                "pub const NOISE_PARTITION_SALT: u64 = 0x9E27_0DE9_A271_710E;\n\n",
             );
         }
         if need_kellett {
@@ -3216,18 +3304,23 @@ impl RustEmitter {
         state_fields.push_str("    /// dropout during BE cooldowns; same RNG sequence regardless of how\n");
         state_fields.push_str("    /// many samples trip BE).\n");
         state_fields.push_str("    pub noise_thermal_last_i_n: [f64; NOISE_THERMAL_N],\n");
+        if need_q_scale {
+            state_fields.push_str("    /// Scalar applied to shot-noise sources (Phase 2) and pentode\n");
+            state_fields.push_str("    /// partition noise (Phase 5). Shared because partition is shot\n");
+            state_fields.push_str("    /// at a different barrier; one mute call silences both.\n");
+            state_fields.push_str("    pub shot_gain: f64,\n");
+            state_fields.push_str("    /// Precomputed `sqrt(4·Q_E·fs_internal)`. Shared between shot and\n");
+            state_fields.push_str("    /// partition: shot uses `noise_shot_scale · sqrt(|I_prev|)`,\n");
+            state_fields.push_str("    /// partition uses `noise_shot_scale · sqrt(I_p·I_s/(I_p+I_s))`.\n");
+            state_fields.push_str("    /// Updated by `set_sample_rate`.\n");
+            state_fields.push_str("    pub noise_shot_scale: f64,\n");
+        }
         if shot_n > 0 {
             state_fields.push_str("    /// Per-source xoshiro256++ state for shot noise — salted so streams\n");
             state_fields.push_str("    /// cannot share a prefix with thermal streams under any master seed.\n");
             state_fields.push_str("    pub noise_shot_rng: [Xoshiro256pp; NOISE_SHOT_N],\n");
             state_fields.push_str("    /// Cached second Gaussian from Marsaglia polar pair (shot stream).\n");
             state_fields.push_str("    pub noise_shot_gaussian_cache: [Option<f64>; NOISE_SHOT_N],\n");
-            state_fields.push_str("    /// Scalar applied only to shot-noise sources (Phase 2). Runtime.\n");
-            state_fields.push_str("    pub shot_gain: f64,\n");
-            state_fields.push_str("    /// Precomputed `sqrt(4·Q_E·fs_internal)`. The per-sample shot\n");
-            state_fields.push_str("    /// amplitude is `noise_shot_scale · sqrt(|I_prev|) · N(0,1)`.\n");
-            state_fields.push_str("    /// Updated by `set_sample_rate`.\n");
-            state_fields.push_str("    pub noise_shot_scale: f64,\n");
             state_fields.push_str("    /// Per-source last-stamped `i_n` cache (BE-fallback replay).\n");
             state_fields.push_str("    pub noise_shot_last_i_n: [f64; NOISE_SHOT_N],\n");
         }
@@ -3286,6 +3379,20 @@ impl RustEmitter {
                 state_fields.push_str("    pub flicker_gain: f64,\n");
             }
         }
+        if partition_n > 0 {
+            state_fields.push_str("    /// Per-source xoshiro256++ state for pentode partition (Phase 5).\n");
+            state_fields.push_str("    /// Salted distinct from shot so partition streams never share a\n");
+            state_fields.push_str("    /// prefix with the cathode-shot streams.\n");
+            state_fields.push_str("    pub noise_partition_rng: [Xoshiro256pp; NOISE_PARTITION_N],\n");
+            state_fields.push_str("    /// Cached second Gaussian from Marsaglia polar pair (partition).\n");
+            state_fields.push_str("    pub noise_partition_gaussian_cache: [Option<f64>; NOISE_PARTITION_N],\n");
+            state_fields.push_str("    /// Per-source previous-draw buffer for two-draw Nyquist anti-alias.\n");
+            state_fields.push_str("    /// Each partition stamp uses `w_new + w_prev`. Zeroed at default(),\n");
+            state_fields.push_str("    /// reset(), set_seed(), and NaN recovery. Same pattern as thermal.\n");
+            state_fields.push_str("    pub noise_partition_w_prev: [f64; NOISE_PARTITION_N],\n");
+            state_fields.push_str("    /// Per-source last-stamped `i_n` cache (BE-fallback replay).\n");
+            state_fields.push_str("    pub noise_partition_last_i_n: [f64; NOISE_PARTITION_N],\n");
+        }
 
         // Default impl: compute thermal_scale and seed RNGs
         let mut default_stmts = String::new();
@@ -3303,14 +3410,19 @@ impl RustEmitter {
         //  theorem test in tests/noise_psd_validation.rs.)
         default_stmts.push_str("        let noise_thermal_scale = (8.0 * K_B * T_ROOM_K * fs_internal).sqrt();\n");
         default_stmts.push_str("        let noise_rng = seed_noise_rngs::<NOISE_THERMAL_N>(NOISE_MASTER_SEED_DEFAULT);\n");
-        if shot_n > 0 {
-            default_stmts.push_str("        // Shot-noise streams: salted distinct from thermal streams.\n");
+        if need_q_scale {
+            default_stmts.push_str("        // Shared shot/partition amplitude: sqrt(4·Q_E·fs).\n");
             default_stmts.push_str("        // Per-sample variance: σ² = 4·Q_E·|I|·fs. Same 2× trap-MNA\n");
             default_stmts.push_str("        // compensation as thermal (PSD 2·q·|I| on [0, fs/2] gives\n");
             default_stmts.push_str("        // naive σ² = q·|I|·fs; doubling to preserve DK-trap DC gain\n");
             default_stmts.push_str("        // yields 2·q·|I|·fs; amplitude expressed as sqrt(X·Q_E·|I|·fs)\n");
-            default_stmts.push_str("        // has X=4).\n");
+            default_stmts.push_str("        // has X=4). Partition reuses this scale with a different\n");
+            default_stmts.push_str("        // per-sample sqrt(...) factor (I_p·I_s/(I_p+I_s) rather than\n");
+            default_stmts.push_str("        // |I|).\n");
             default_stmts.push_str("        let noise_shot_scale = (4.0 * Q_E * fs_internal).sqrt();\n");
+        }
+        if shot_n > 0 {
+            default_stmts.push_str("        // Shot-noise streams: salted distinct from thermal streams.\n");
             default_stmts.push_str("        let noise_shot_rng = seed_noise_rngs_salted::<NOISE_SHOT_N>(NOISE_MASTER_SEED_DEFAULT, NOISE_SHOT_SALT);\n");
         }
         if flicker_n > 0 {
@@ -3333,6 +3445,12 @@ impl RustEmitter {
             default_stmts.push_str("        let noise_r_flicker_sqrt_fs = fs_internal.sqrt();\n");
             default_stmts.push_str("        let noise_r_flicker_rng = seed_noise_rngs_salted::<NOISE_R_FLICKER_N>(NOISE_MASTER_SEED_DEFAULT, NOISE_R_FLICKER_SALT);\n");
         }
+        if partition_n > 0 {
+            default_stmts.push_str("        // Pentode partition streams (Phase 5). Salted distinct from\n");
+            default_stmts.push_str("        // shot so partition does not share a prefix with cathode-shot\n");
+            default_stmts.push_str("        // under any master seed. Amplitude scaling reuses noise_shot_scale.\n");
+            default_stmts.push_str("        let noise_partition_rng = seed_noise_rngs_salted::<NOISE_PARTITION_N>(NOISE_MASTER_SEED_DEFAULT, NOISE_PARTITION_SALT);\n");
+        }
 
         let mut default_fields = String::new();
         default_fields.push_str("            noise_rng,\n");
@@ -3348,11 +3466,13 @@ impl RustEmitter {
         default_fields.push_str("            noise_thermal_w_prev: [0.0; NOISE_THERMAL_N],\n");
         default_fields
             .push_str("            noise_thermal_last_i_n: [0.0; NOISE_THERMAL_N],\n");
+        if need_q_scale {
+            default_fields.push_str("            shot_gain: 1.0,\n");
+            default_fields.push_str("            noise_shot_scale,\n");
+        }
         if shot_n > 0 {
             default_fields.push_str("            noise_shot_rng,\n");
             default_fields.push_str("            noise_shot_gaussian_cache: [None; NOISE_SHOT_N],\n");
-            default_fields.push_str("            shot_gain: 1.0,\n");
-            default_fields.push_str("            noise_shot_scale,\n");
             default_fields.push_str("            noise_shot_last_i_n: [0.0; NOISE_SHOT_N],\n");
         }
         if flicker_n > 0 {
@@ -3383,6 +3503,16 @@ impl RustEmitter {
             if flicker_n == 0 {
                 default_fields.push_str("            flicker_gain: 1.0,\n");
             }
+        }
+        if partition_n > 0 {
+            default_fields.push_str("            noise_partition_rng,\n");
+            default_fields.push_str(
+                "            noise_partition_gaussian_cache: [None; NOISE_PARTITION_N],\n",
+            );
+            default_fields
+                .push_str("            noise_partition_w_prev: [0.0; NOISE_PARTITION_N],\n");
+            default_fields
+                .push_str("            noise_partition_last_i_n: [0.0; NOISE_PARTITION_N],\n");
         }
 
         // reset() — reseed RNG and clear gaussian cache; keep user settings.
@@ -3433,13 +3563,28 @@ impl RustEmitter {
                 "        self.noise_r_flicker_inv_r = NOISE_R_FLICKER_INV_R_DEFAULT;\n",
             );
         }
+        if partition_n > 0 {
+            reset_body.push_str(
+                "        // Re-seed partition RNGs + clear two-draw lag + BE-replay cache.\n",
+            );
+            reset_body.push_str("        self.noise_partition_rng = seed_noise_rngs_salted::<NOISE_PARTITION_N>(self.noise_master_seed, NOISE_PARTITION_SALT);\n");
+            reset_body.push_str(
+                "        self.noise_partition_gaussian_cache = [None; NOISE_PARTITION_N];\n",
+            );
+            reset_body.push_str(
+                "        self.noise_partition_w_prev = [0.0; NOISE_PARTITION_N];\n",
+            );
+            reset_body.push_str(
+                "        self.noise_partition_last_i_n = [0.0; NOISE_PARTITION_N];\n",
+            );
+        }
 
         // set_sample_rate tail: recompute thermal_scale at the new rate
         let mut ssr_body = String::new();
         ssr_body.push_str("        // Noise: recompute sqrt(4·K_B·T·fs_internal) for the new rate.\n");
         ssr_body.push_str("        self.noise_fs = sample_rate * OVERSAMPLING_FACTOR as f64;\n");
         ssr_body.push_str("        self.noise_thermal_scale = (8.0 * K_B * self.temperature_k * self.noise_fs).sqrt();\n");
-        if shot_n > 0 {
+        if need_q_scale {
             ssr_body.push_str("        self.noise_shot_scale = (4.0 * Q_E * self.noise_fs).sqrt();\n");
         }
         if flicker_n > 0 {
@@ -3470,10 +3615,11 @@ impl RustEmitter {
         methods.push_str("        // Recompute thermal_scale at the currently-set sample rate.\n");
         methods.push_str("        self.noise_thermal_scale = (8.0 * K_B * kelvin * self.noise_fs).sqrt();\n");
         methods.push_str("    }\n\n");
-        if shot_n > 0 {
-            methods.push_str("    /// Scalar applied only to shot (junction) noise sources.\n");
-            methods.push_str("    /// Runtime-settable. Set to `0.0` to mute shot content without\n");
-            methods.push_str("    /// also muting thermal.\n");
+        if need_q_scale {
+            methods.push_str("    /// Scalar applied to shot (Phase 2 junction) noise and pentode\n");
+            methods.push_str("    /// partition (Phase 5) sources. Both are shot at different barriers\n");
+            methods.push_str("    /// — one knob mutes both. Runtime-settable. Set to `0.0` to mute\n");
+            methods.push_str("    /// shot/partition content without touching thermal.\n");
             methods.push_str("    pub fn set_shot_gain(&mut self, gain: f64) { self.shot_gain = gain; }\n\n");
         }
         // Single `set_flicker_gain` covers both Phase 3 (junction flicker)
@@ -3523,6 +3669,18 @@ impl RustEmitter {
             );
             methods.push_str(
                 "        self.noise_r_flicker_last_i_n = [0.0; NOISE_R_FLICKER_N];\n",
+            );
+        }
+        if partition_n > 0 {
+            methods.push_str("        self.noise_partition_rng = seed_noise_rngs_salted::<NOISE_PARTITION_N>(master, NOISE_PARTITION_SALT);\n");
+            methods.push_str(
+                "        self.noise_partition_gaussian_cache = [None; NOISE_PARTITION_N];\n",
+            );
+            methods.push_str(
+                "        self.noise_partition_w_prev = [0.0; NOISE_PARTITION_N];\n",
+            );
+            methods.push_str(
+                "        self.noise_partition_last_i_n = [0.0; NOISE_PARTITION_N];\n",
             );
         }
         methods.push_str("    }\n");
@@ -3608,6 +3766,43 @@ impl RustEmitter {
                 .push_str("            state.noise_flicker_last_i_n = [0.0; NOISE_FLICKER_N];\n");
             rhs_stamp.push_str("        }\n");
         }
+        if partition_n > 0 {
+            // Pentode partition noise (Phase 5). Per-sample amplitude is
+            //   noise_shot_scale · sqrt(I_p·I_s/(I_p+I_s)) · PARTITION_F · g
+            // where I_p and I_s come from state.i_nl_prev (one-sample lag).
+            // Two-draw Nyquist anti-alias: i_n[n] = w[n] + w[n-1], with
+            // w = (scale_half)·amp·g. Zero total current → skip (zero amp,
+            // pre-Kellett zero-current guard convention).
+            rhs_stamp.push_str("        // Pentode partition: i_n = w_new + w_prev, w_new = (shot_scale * shot_gain * noise_gain / 2)\n");
+            rhs_stamp.push_str("        //                                                 · sqrt(I_p·I_s/(I_p+I_s)) · PARTITION_F · N(0,1).\n");
+            rhs_stamp.push_str("        // Reuses shot_gain (partition is shot at a different barrier).\n");
+            rhs_stamp.push_str("        let part_scale_half = state.noise_shot_scale * state.noise_gain * state.shot_gain * 0.5;\n");
+            rhs_stamp.push_str("        if part_scale_half != 0.0 {\n");
+            rhs_stamp.push_str("            for k in 0..NOISE_PARTITION_N {\n");
+            rhs_stamp.push_str("                let ip = state.i_nl_prev[NOISE_PARTITION_IP_SLOT[k]].abs();\n");
+            rhs_stamp.push_str("                let is_c = state.i_nl_prev[NOISE_PARTITION_IS_SLOT[k]].abs();\n");
+            rhs_stamp.push_str("                let total = ip + is_c;\n");
+            rhs_stamp.push_str("                if total < 1e-15 {\n");
+            rhs_stamp.push_str("                    // Pre-bias / unbiased: emit zero, keep w_prev so the\n");
+            rhs_stamp.push_str("                    // first non-zero sample doesn't double-count the lag.\n");
+            rhs_stamp.push_str("                    state.noise_partition_last_i_n[k] = 0.0;\n");
+            rhs_stamp.push_str("                    continue;\n");
+            rhs_stamp.push_str("                }\n");
+            rhs_stamp.push_str("                let psd_coef = ip * is_c / total;\n");
+            rhs_stamp.push_str("                let g = gaussian(&mut state.noise_partition_rng[k], &mut state.noise_partition_gaussian_cache[k]);\n");
+            rhs_stamp.push_str("                let w_new = part_scale_half * psd_coef.sqrt() * NOISE_PARTITION_F[k] * g;\n");
+            rhs_stamp.push_str("                let i_n = w_new + state.noise_partition_w_prev[k];\n");
+            rhs_stamp.push_str("                state.noise_partition_w_prev[k] = w_new;\n");
+            rhs_stamp.push_str("                state.noise_partition_last_i_n[k] = i_n;\n");
+            rhs_stamp.push_str("                let ni = NOISE_PARTITION_NODE_I[k];\n");
+            rhs_stamp.push_str("                let nj = NOISE_PARTITION_NODE_J[k];\n");
+            rhs_stamp.push_str("                if ni > 0 { rhs[ni - 1] += i_n; }\n");
+            rhs_stamp.push_str("                if nj > 0 { rhs[nj - 1] -= i_n; }\n");
+            rhs_stamp.push_str("            }\n");
+            rhs_stamp.push_str("        } else {\n");
+            rhs_stamp.push_str("            state.noise_partition_last_i_n = [0.0; NOISE_PARTITION_N];\n");
+            rhs_stamp.push_str("        }\n");
+        }
         if r_flicker_n > 0 {
             // Resistor flicker (Hooge bias-squared, Phase 3.5). Reads
             // `state.v_prev` directly to compute live resistor current.
@@ -3656,6 +3851,11 @@ impl RustEmitter {
         if r_flicker_n > 0 {
             rhs_stamp.push_str(
                 "        state.noise_r_flicker_last_i_n = [0.0; NOISE_R_FLICKER_N];\n",
+            );
+        }
+        if partition_n > 0 {
+            rhs_stamp.push_str(
+                "        state.noise_partition_last_i_n = [0.0; NOISE_PARTITION_N];\n",
             );
         }
         rhs_stamp.push_str("    }\n");
@@ -3708,6 +3908,16 @@ impl RustEmitter {
             rhs_stamp_be.push_str("                if nj > 0 { rhs_be[nj - 1] -= i_n; }\n");
             rhs_stamp_be.push_str("            }\n");
         }
+        if partition_n > 0 {
+            rhs_stamp_be.push_str("            for k in 0..NOISE_PARTITION_N {\n");
+            rhs_stamp_be
+                .push_str("                let i_n = state.noise_partition_last_i_n[k];\n");
+            rhs_stamp_be.push_str("                let ni = NOISE_PARTITION_NODE_I[k];\n");
+            rhs_stamp_be.push_str("                let nj = NOISE_PARTITION_NODE_J[k];\n");
+            rhs_stamp_be.push_str("                if ni > 0 { rhs_be[ni - 1] += i_n; }\n");
+            rhs_stamp_be.push_str("                if nj > 0 { rhs_be[nj - 1] -= i_n; }\n");
+            rhs_stamp_be.push_str("            }\n");
+        }
         rhs_stamp_be.push_str("        }\n");
 
         // NaN-recovery noise reset: clear the two-draw lag buffer and the
@@ -3737,6 +3947,13 @@ impl RustEmitter {
             );
             nan_recovery_body.push_str(
                 "        state.noise_r_flicker_state = [[0.0; 7]; NOISE_R_FLICKER_N];\n",
+            );
+        }
+        if partition_n > 0 {
+            nan_recovery_body
+                .push_str("        state.noise_partition_w_prev = [0.0; NOISE_PARTITION_N];\n");
+            nan_recovery_body.push_str(
+                "        state.noise_partition_last_i_n = [0.0; NOISE_PARTITION_N];\n",
             );
         }
 

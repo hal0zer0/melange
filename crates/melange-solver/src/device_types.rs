@@ -624,6 +624,17 @@ pub struct TubeParams {
     /// Rational, 0.05–0.1 (1/V) for Exponential.
     #[serde(default)]
     pub beta_factor: f64,
+    /// Partition-noise multiplier (Phase 5). Defaults to 1.0 — textbook
+    /// Schottky 1918 partition statistics, plate PSD
+    /// `2·q·I_p·I_s/(I_p+I_s)`. Process-variation knob: values < 1.0
+    /// model low-noise-selected pentode batches (e.g. EF86 at ~0.6) where
+    /// the measured partition coefficient falls below the theoretical full-
+    /// Schottky value. The dominant control over pentode noise floor is the
+    /// bias network in the `.cir` (sets I_s/I_p); this is the secondary
+    /// matched-tube character knob. Pentode-only; ignored when
+    /// `kind == SharpTriode`. Validated `> 0 && finite`.
+    #[serde(default = "default_one")]
+    pub partition_f: f64,
     /// Screen-current functional form (`Rational` for true pentodes / Derk §4.4,
     /// `Exponential` for beam tetrodes / DerkE §4.5). Defaults to `Rational`
     /// to preserve pre-phase-1a.1 behavior for all existing pentode catalog
@@ -785,6 +796,16 @@ impl TubeParams {
                         self.beta_factor
                     ));
                 }
+            }
+            // Partition-noise multiplier (Phase 5). Must be strictly positive;
+            // zero would silence partition entirely, which the noise-off path
+            // already covers via `--noise off` / `set_shot_gain(0)`. Negative
+            // makes no physical sense (amplitude is `sqrt(...) · PARTITION_F`).
+            if !self.partition_f.is_finite() || self.partition_f <= 0.0 {
+                return Err(format!(
+                    "pentode PARTITION_F must be positive and finite, got {}",
+                    self.partition_f
+                ));
             }
         }
         // Variable-mu §5 (Reefman two-section Koren) constraints — apply to
@@ -1105,6 +1126,7 @@ mod tube_params_tests {
             cth: 0.0,
             vbias_alpha: 0.0,
             tamb: 300.15,
+            partition_f: 1.0,
         }
     }
 
@@ -1139,6 +1161,7 @@ mod tube_params_tests {
             cth: 0.0,
             vbias_alpha: 0.0,
             tamb: 300.15,
+            partition_f: 1.0,
         }
     }
 
@@ -1173,6 +1196,7 @@ mod tube_params_tests {
             cth: 0.0,
             vbias_alpha: 0.0,
             tamb: 300.15,
+            partition_f: 1.0,
         }
     }
 
@@ -1206,6 +1230,7 @@ mod tube_params_tests {
             cth: 0.0,
             vbias_alpha: 0.0,
             tamb: 300.15,
+            partition_f: 1.0,
         }
     }
 
@@ -1238,6 +1263,7 @@ mod tube_params_tests {
             cth: 0.0,
             vbias_alpha: 0.0,
             tamb: 300.15,
+            partition_f: 1.0,
         }
     }
 
