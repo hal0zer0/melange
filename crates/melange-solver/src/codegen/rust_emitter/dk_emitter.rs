@@ -1583,10 +1583,13 @@ impl RustEmitter {
         // K_eff: subtract parasitic-BJT R_p from each affected 2x2 block.
         // Mirrors the codegen-time K_DEFAULT adjustment, so state.k holds
         // K_eff after both default-init and any pot/switch rebuild.
+        // Gated on slot.dimension == 2: FA-reduced (1D) BJTs ignore parasitics
+        // by design (see ir.rs::detect_forward_active_bjts comment), and their
+        // start_idx+1 lands in the next device's slot, not the same BJT's Vbc row.
         let mut emitted_k_eff_header = false;
         for slot in &ir.device_slots {
             if let DeviceParams::Bjt(bp) = &slot.params {
-                if bp.has_parasitics() && !slot.has_internal_mna_nodes {
+                if bp.has_parasitics() && !slot.has_internal_mna_nodes && slot.dimension == 2 {
                     if !emitted_k_eff_header {
                         code.push_str(
                             "\n        // K_eff: absorb parasitic-BJT R drops into K so v_d = p + state.k * i\n\
@@ -4441,10 +4444,14 @@ impl RustEmitter {
 /// internal junction voltage exactly. Only applied when the slot lacks
 /// internal MNA nodes (DK transient path; nodal path expands internal nodes
 /// instead, and DC-OP recompute uses node-voltage NR which doesn't touch K).
+///
+/// Gated on slot.dimension == 2: FA-reduced (1D) BJTs ignore parasitics
+/// by design (see ir.rs::detect_forward_active_bjts comment) and their
+/// start_idx+1 lands in the next device's slot, not the same BJT's Vbc row.
 pub(super) fn parasitic_r_p_dk(ir: &CircuitIR, i: usize, j: usize) -> f64 {
     for slot in &ir.device_slots {
         if let DeviceParams::Bjt(bp) = &slot.params {
-            if bp.has_parasitics() && !slot.has_internal_mna_nodes {
+            if bp.has_parasitics() && !slot.has_internal_mna_nodes && slot.dimension == 2 {
                 let s = slot.start_idx;
                 if i == s && j == s { return bp.re; }
                 if i == s && j == s + 1 { return bp.rb + bp.re; }

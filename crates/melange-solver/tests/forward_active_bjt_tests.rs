@@ -1018,3 +1018,141 @@ fn test_detect_grid_off_no_panic_after_fa_reduction() {
         "D1 start_idx should be 3 after Q1 FA reduction (1+2=3), not 4 (pre-FA)"
     );
 }
+
+// ============================================================================
+// Regression: K_eff parasitic absorption + FA-reduced BJTs
+// ============================================================================
+//
+// Pre-fix bug (May 2026): K_eff stamping used slot.start_idx and start_idx+1
+// without checking slot.dimension. For an FA-reduced BJT (dimension=1), s+1
+// landed in the NEXT device's slot, silently corrupting K_DEFAULT for every
+// preceding FA-reduced parasitic BJT and panicking out-of-bounds on the last
+// one when a .pot triggered rebuild_matrices(). steve-1073-output (3 cascaded
+// FA-reduced parasitic BJTs, no pots) silently shipped wrong K_DEFAULT; the
+// openwurli wurli-preamp (2 FA-reduced parasitic BJTs + a .pot) panicked.
+//
+// The 1D FA path explicitly ignores parasitics by design (see
+// ir.rs::detect_forward_active_bjts: "Ib*RB << Vbe for forward-active"),
+// so K_eff stamping for FA-reduced slots is physics-incorrect regardless of
+// OOB. Fix gates both stamp sites on slot.dimension == 2.
+
+/// Two cascaded CE BJTs with parasitics. Both go forward-active (typical
+/// audio-stage bias). Mirrors the steve-1073-output and openwurli-wurli-preamp
+/// pattern that exposed the bug.
+const TWO_FA_PARASITIC_BJTS: &str = "\
+Two FA BJTs with parasitics
+.model NPN_PAR NPN(IS=1e-14 BF=200 BR=3 RB=50 RC=1 RE=0.5)
+VCC vcc 0 DC 15
+R1 vcc base1 100k
+R2 base1 0 10k
+RC1 vcc coll1 10k
+RE1 emit1 0 1k
+CE1 emit1 0 100u
+Q1 coll1 base1 emit1 NPN_PAR
+C12 coll1 base2 1u
+R3 vcc base2 100k
+R4 base2 0 10k
+RC2 vcc out 10k
+RE2 emit2 0 1k
+CE2 emit2 0 100u
+Q2 out base2 emit2 NPN_PAR
+";
+
+/// Same circuit but with a .pot so rebuild_matrices() runs at startup.
+/// Pre-fix this panicked OOB at the K_eff stamp for the LAST FA-reduced BJT.
+const TWO_FA_PARASITIC_BJTS_WITH_POT: &str = "\
+Two FA BJTs with parasitics and a pot
+.model NPN_PAR NPN(IS=1e-14 BF=200 BR=3 RB=50 RC=1 RE=0.5)
+VCC vcc 0 DC 15
+R1 vcc base1 100k
+R2 base1 0 10k
+RC1 vcc coll1 10k
+RE1 emit1 0 1k
+CE1 emit1 0 100u
+Q1 coll1 base1 emit1 NPN_PAR
+C12 coll1 base2 1u
+R3 vcc base2 100k
+R4 base2 0 10k
+RC2 vcc out 10k
+RE2 emit2 0 1k
+CE2 emit2 0 100u
+Q2 out base2 emit2 NPN_PAR
+Rvol out 0 50k
+.pot Rvol 1k 100k \"Volume\"
+";
+
+/// Regression: K_DEFAULT for cascaded FA-reduced BJTs with parasitics must
+/// equal K_DEFAULT for the same circuit with parasitics stripped — because
+/// the 1D FA path ignores parasitics by design, K_eff must be a no-op on
+/// FA-reduced slots.
+#[test]
+fn test_k_eff_skips_fa_reduced_parasitic_bjts() {
+    let (code_with_parasitics, m_par, fa_par) =
+        generate_with_forward_active(TWO_FA_PARASITIC_BJTS);
+
+    // Strip parasitics from the model to get the reference K_DEFAULT.
+    let stripped = TWO_FA_PARASITIC_BJTS
+        .replace("RB=50 RC=1 RE=0.5", "");
+    let (code_without_parasitics, m_ref, fa_ref) = generate_with_forward_active(&stripped);
+
+    assert_eq!(m_par, m_ref, "M should match between parasitic and stripped versions");
+    assert_eq!(fa_par.len(), 2, "Both BJTs should be FA-reduced in the parasitic version");
+    assert_eq!(fa_ref.len(), 2, "Both BJTs should be FA-reduced in the stripped version");
+
+    // Extract K_DEFAULT matrix text from each.
+    let k_par = extract_const_matrix(&code_with_parasitics, "K_DEFAULT");
+    let k_ref = extract_const_matrix(&code_without_parasitics, "K_DEFAULT");
+
+    assert_eq!(
+        k_par, k_ref,
+        "K_DEFAULT must be identical with/without parasitics on FA-reduced BJTs.\n\
+         The 1D FA path ignores parasitics; K_eff stamping must be a no-op on FA-reduced slots.\n\
+         With parasitics:\n{}\nStripped:\n{}",
+        k_par, k_ref
+    );
+}
+
+/// Regression: codegen with cascaded FA-reduced parasitic BJTs + a .pot must
+/// produce code that runs rebuild_matrices() without panicking OOB.
+/// Pre-fix, the K_eff stamp for the last BJT wrote k[s+1][s+1] where s+1==M.
+#[test]
+fn test_k_eff_no_oob_panic_with_pot_rebuild() {
+    let (code, _m, fa) = generate_with_forward_active(TWO_FA_PARASITIC_BJTS_WITH_POT);
+    assert_eq!(fa.len(), 2, "Both BJTs should be FA-reduced");
+
+    // compile_and_run constructs CircuitState::default(), which runs the
+    // pot-rebuild path. Pre-fix this panicked OOB on the last FA BJT's stamp.
+    let samples = compile_and_run(&code, 8, 44100.0, 0.001, "k_eff_fa_oob");
+    assert_eq!(samples.len(), 8, "Should produce 8 output samples without panic");
+    for (i, s) in samples.iter().enumerate() {
+        assert!(s.is_finite(), "Sample {i} should be finite, got {s}");
+    }
+}
+
+/// Extract a `pub const NAME: [[f64; M]; M] = [ ... ];` matrix body as a
+/// whitespace-normalized string for textual comparison. Skips past the type
+/// annotation to find the value array after `=`.
+fn extract_const_matrix(code: &str, name: &str) -> String {
+    let needle = format!("pub const {name}");
+    let start = code
+        .find(&needle)
+        .unwrap_or_else(|| panic!("{name} not found in generated code"));
+    let eq_off = code[start..]
+        .find('=')
+        .unwrap_or_else(|| panic!("{name} '=' not found"));
+    let abs_start = start
+        + eq_off
+        + 1
+        + code[start + eq_off + 1..]
+            .find('[')
+            .unwrap_or_else(|| panic!("{name} value array '[' not found"));
+    let abs_end = code[abs_start..]
+        .find("];")
+        .unwrap_or_else(|| panic!("{name} body terminator not found"))
+        + abs_start
+        + 1;
+    code[abs_start..abs_end]
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
