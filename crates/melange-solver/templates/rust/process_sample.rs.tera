@@ -81,17 +81,23 @@ pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS
         state.diag_be_fallback_count += 1;
         // Rebuild RHS with backward Euler matrices.
         //
-        // BE does NOT trap-average the nonlinear stamp — its contribution
-        // is `S_BE * N_i * i_nl_n` only (applied later in
-        // compute_final_voltages). Including `N_I * i_nl_prev` here would
-        // add a spurious `S_BE * N_i * DC_NL_I` perturbation each sample
-        // that breaks the BE fixed point at DC_OP. See the matching gate
-        // in dk_emitter::emit_build_rhs (BE-only codegen).
+        // This is the per-sample BE *fallback* inside a trapezoidal-primary
+        // solver — NOT a BE-primary integrator. The surrounding solver keeps
+        // `i_nl_prev` on the trap convention: every trap `build_rhs` consumes
+        // `N_I * i_nl_prev` (baked into v_pred). A fallback sample rebuilds the
+        // RHS from scratch, so it must consume `i_nl_prev` the same way or the
+        // previous sample's nonlinear charge is dropped — injecting a transient
+        // on every fallback (e.g. ~3× hot output where the fallback is
+        // load-bearing, and the `.runtime R` modulation pump). The "BE omits
+        // N_I*i_nl_prev" rule applies only to BE-*primary* codegen (every sample
+        // BE, i_nl_prev never trap-split), gated separately in
+        // dk_emitter::emit_build_rhs.
         let mut rhs_be = [0.0f64; N];
         for i in 0..N {
 {% if has_dc_sources %}            let mut sum = RHS_CONST_BE[i];
 {% else %}            let mut sum = 0.0;
 {% endif %}            for j in 0..N { sum += state.a_neg_be[i][j] * state.v_prev[j]; }
+            for j in 0..M { sum += N_I[j][i] * state.i_nl_prev[j]; }
             rhs_be[i] = sum;
         }
         rhs_be[INPUT_NODE] += input / INPUT_RESISTANCE;

@@ -1481,8 +1481,32 @@ fn compile_circuit_source(
         } else {
             50 + kernel.m * 5 // DK: scale with M (M=8 → 90 iters)
         };
-        // High spectral radius → stiffer system → may need more iterations
-        let stiffness_bonus = if routing.spectral_radius > 0.95 { 20 } else { 0 };
+        // Will this circuit actually run on trapezoidal? Replicate the codegen
+        // auto-BE decision (ir.rs `auto_be`) so the iteration budget matches the
+        // integrator that ships. A marginal-Nyquist circuit kept on TRAP has
+        // damped-NR convergence that slows sharply as ρ→1 (e.g. wurli-preamp,
+        // ρ≈1.0000, needs ~186 iters/sample); a BE-promoted circuit converges in
+        // a few iters and must NOT inherit that large worst-case bound.
+        let stays_trap = !backward_euler
+            && (force_trap
+                || !melange_solver::codegen::stability::trap_needs_be(
+                    melange_solver::codegen::stability::analyze_trap_stability_deflated(
+                        &kernel.s,
+                        &kernel.a_neg,
+                        kernel.n,
+                        input_node_idx,
+                    ),
+                ));
+        // High spectral radius → stiffer system → may need more iterations.
+        // Near-marginal trap (ρ→1) needs a far larger budget than the old flat
+        // +20; budget generously since the BE fallback catches the rare miss.
+        let stiffness_bonus = if routing.spectral_radius > 0.999 && stays_trap {
+            200
+        } else if routing.spectral_radius > 0.95 {
+            20
+        } else {
+            0
+        };
         base + stiffness_bonus
     } else {
         max_iter

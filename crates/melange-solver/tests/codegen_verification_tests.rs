@@ -8911,7 +8911,16 @@ VCC vcc 0 250
     );
 
     // BE fallback (inside trap codegen, lines starting with `let mut rhs_be`):
-    // MUST NOT contain N_I * i_nl_prev either (same fix, inline emission).
+    // MUST contain N_I * i_nl_prev. The fallback is a single-sample BE step
+    // embedded in a TRAP-primary solver, whose `i_nl_prev` follows the trap
+    // convention (consumed in every trap build_rhs). The fallback rebuilds the
+    // RHS from scratch, so it must consume i_nl_prev the same way or the prior
+    // sample's nonlinear charge is dropped — injecting a transient on every
+    // fallback (the wurli-preamp `.runtime R` pump regression). The
+    // "BE omits N_I*i_nl_prev" rule applies ONLY to BE-*primary* codegen
+    // (verified above), where every sample is BE and i_nl_prev is never
+    // trap-split. BE-primary circuits (noyce-cascaded-triodes, pipe-shouter)
+    // have no fallback block, so this does not affect them.
     let be_fallback_block: String = trap_code
         .split("let mut rhs_be = ")
         .nth(1)
@@ -8919,9 +8928,9 @@ VCC vcc 0 250
         .unwrap_or("")
         .to_string();
     assert!(
-        !be_fallback_block.contains("N_I[")
-            || !be_fallback_block.contains("state.i_nl_prev"),
-        "in-trap BE fallback block still contains N_I * i_nl_prev — same bug as BE-only had:\n{}",
+        be_fallback_block.contains("N_I[") && be_fallback_block.contains("state.i_nl_prev"),
+        "trap-primary BE fallback must contain N_I * i_nl_prev (trap-convention history \
+         continuity — dropping it injects a per-fallback transient):\n{}",
         be_fallback_block
     );
 }
