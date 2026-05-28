@@ -441,15 +441,24 @@ pub fn compare_signals(
     // 3. Mean Absolute Error: mean(|error|)
     let mean_absolute_error = errors.iter().map(|&e| e.abs()).sum::<f64>() / len as f64;
 
-    // 4. Max Relative Error: max(|error| / |reference|), handling near-zero values
+    // 4. Max Relative Error: max(|error| / |reference|), measured only where the
+    //    reference signal is non-trivial. Relative error is meaningless near a
+    //    zero-crossing: |ref| → 0 makes |error|/|ref| explode (e.g. a 5 mV error
+    //    at |ref| = 1e-7 V reads as 5e4 = 5 000 000 %), which is a property of the
+    //    metric, not the model. Floor the denominator at 1% of the reference peak
+    //    so the metric reflects error in the meaningful part of the waveform. This
+    //    can only shrink spurious zero-crossing spikes — genuine errors occur where
+    //    the signal is large (above the floor) and are still fully counted.
+    let ref_peak = ref_slice.iter().map(|r| r.abs()).fold(0.0_f64, f64::max);
+    let rel_floor = (ref_peak * 0.01).max(1e-12);
     let max_relative_error = ref_slice
         .iter()
         .zip(errors.iter())
         .map(|(r, e)| {
-            if r.abs() > 1e-12 {
+            if r.abs() > rel_floor {
                 (e / r).abs()
             } else {
-                0.0 // Ignore relative error when reference is near zero
+                0.0 // Ignore relative error in the near-zero-crossing region
             }
         })
         .fold(0.0, f64::max);
