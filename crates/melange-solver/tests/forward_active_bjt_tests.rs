@@ -1087,17 +1087,26 @@ Rvol out 0 50k
 /// FA-reduced slots.
 #[test]
 fn test_k_eff_skips_fa_reduced_parasitic_bjts() {
-    let (code_with_parasitics, m_par, fa_par) =
-        generate_with_forward_active(TWO_FA_PARASITIC_BJTS);
+    let (code_with_parasitics, m_par, fa_par) = generate_with_forward_active(TWO_FA_PARASITIC_BJTS);
 
     // Strip parasitics from the model to get the reference K_DEFAULT.
-    let stripped = TWO_FA_PARASITIC_BJTS
-        .replace("RB=50 RC=1 RE=0.5", "");
+    let stripped = TWO_FA_PARASITIC_BJTS.replace("RB=50 RC=1 RE=0.5", "");
     let (code_without_parasitics, m_ref, fa_ref) = generate_with_forward_active(&stripped);
 
-    assert_eq!(m_par, m_ref, "M should match between parasitic and stripped versions");
-    assert_eq!(fa_par.len(), 2, "Both BJTs should be FA-reduced in the parasitic version");
-    assert_eq!(fa_ref.len(), 2, "Both BJTs should be FA-reduced in the stripped version");
+    assert_eq!(
+        m_par, m_ref,
+        "M should match between parasitic and stripped versions"
+    );
+    assert_eq!(
+        fa_par.len(),
+        2,
+        "Both BJTs should be FA-reduced in the parasitic version"
+    );
+    assert_eq!(
+        fa_ref.len(),
+        2,
+        "Both BJTs should be FA-reduced in the stripped version"
+    );
 
     // Extract K_DEFAULT matrix text from each.
     let k_par = extract_const_matrix(&code_with_parasitics, "K_DEFAULT");
@@ -1123,7 +1132,11 @@ fn test_k_eff_no_oob_panic_with_pot_rebuild() {
     // compile_and_run constructs CircuitState::default(), which runs the
     // pot-rebuild path. Pre-fix this panicked OOB on the last FA BJT's stamp.
     let samples = compile_and_run(&code, 8, 44100.0, 0.001, "k_eff_fa_oob");
-    assert_eq!(samples.len(), 8, "Should produce 8 output samples without panic");
+    assert_eq!(
+        samples.len(),
+        8,
+        "Should produce 8 output samples without panic"
+    );
     for (i, s) in samples.iter().enumerate() {
         assert!(s.is_finite(), "Sample {i} should be finite, got {s}");
     }
