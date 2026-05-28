@@ -96,7 +96,10 @@ C1 out 0 100n
 .gang "Bad" R1 R_NOPE
 "#;
     let result = Netlist::parse(spice);
-    assert!(result.is_err(), "Gang referencing nonexistent pot should fail");
+    assert!(
+        result.is_err(),
+        "Gang referencing nonexistent pot should fail"
+    );
     if let Err(e) = result {
         assert!(
             e.message.contains("not found") || e.message.contains("Duplicate"),
@@ -122,10 +125,7 @@ C2 out2 0 100n
 .gang "Gang2" R1 R4
 "#;
     let result = Netlist::parse(spice);
-    assert!(
-        result.is_err(),
-        "Same pot in two gangs should fail"
-    );
+    assert!(result.is_err(), "Same pot in two gangs should fail");
     if let Err(e) = result {
         assert!(
             e.message.contains("multiple .gang"),

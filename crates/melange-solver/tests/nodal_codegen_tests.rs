@@ -462,4 +462,3 @@ fn test_nodal_nan_reset_includes_extended_state() {
         "nodal NaN reset must NOT fall back to zero return — causes click at recovery"
     );
 }
-

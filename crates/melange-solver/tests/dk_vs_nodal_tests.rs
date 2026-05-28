@@ -30,7 +30,10 @@ fn assert_dk_nodal_match(spice: &str, tag: &str, freq: f64, amp: f64, tol: f64) 
     let dk_peak: f64 = dk_out.iter().map(|s| s.abs()).fold(0.0_f64, f64::max);
     let nodal_peak: f64 = nodal_out.iter().map(|s| s.abs()).fold(0.0_f64, f64::max);
     assert!(dk_peak > 1e-6, "{tag} DK: peak too low ({dk_peak:.6e})");
-    assert!(nodal_peak > 1e-6, "{tag} Nodal: peak too low ({nodal_peak:.6e})");
+    assert!(
+        nodal_peak > 1e-6,
+        "{tag} Nodal: peak too low ({nodal_peak:.6e})"
+    );
 
     support::assert_samples_match(&dk_out, &nodal_out, tol, tag);
 }

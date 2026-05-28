@@ -77,11 +77,7 @@ impl RunOutput {
             .lines()
             .chain(self.stderr.lines())
             .find(|l| l.contains(&prefix))
-            .and_then(|l| {
-                l.split(&prefix)
-                    .nth(1)
-                    .and_then(|v| v.trim().parse().ok())
-            })
+            .and_then(|l| l.split(&prefix).nth(1).and_then(|v| v.trim().parse().ok()))
     }
 
     /// Parse a DIAG:key=value pair from stderr.
@@ -180,7 +176,12 @@ fn compile_source_and_run(source: &str, tag: &str, args: &[&str]) -> RunOutput {
 }
 
 /// Compile full source with main, run the binary, and pipe input data via stdin.
-fn compile_and_run_with_stdin(source: &str, tag: &str, args: &[&str], stdin_data: &str) -> RunOutput {
+fn compile_and_run_with_stdin(
+    source: &str,
+    tag: &str,
+    args: &[&str],
+    stdin_data: &str,
+) -> RunOutput {
     let tmp_dir = std::env::temp_dir();
     let pid = std::process::id();
     let id = next_id();
@@ -551,11 +552,7 @@ pub fn run_step_full(
 /// Run a cached circuit binary with an arbitrary input signal.
 ///
 /// Input samples are piped via stdin, one per line.
-pub fn run_signal(
-    circuit: &CompiledCircuit,
-    input: &[f64],
-    sample_rate: f64,
-) -> Vec<f64> {
+pub fn run_signal(circuit: &CompiledCircuit, input: &[f64], sample_rate: f64) -> Vec<f64> {
     let stdin_data: String = input.iter().map(|s| format!("{s:.15e}\n")).collect();
 
     let mut child = Command::new(&circuit.binary_path)

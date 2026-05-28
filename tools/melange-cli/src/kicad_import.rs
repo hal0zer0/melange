@@ -1,16 +1,21 @@
 //! KiCad netlist import — converts KiCad XML or SPICE netlists to Melange .cir format.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 use crate::ImportFormat;
 
 /// Entry point for `melange import`.
-pub fn import_kicad(input: &Path, output: &Path, format: &ImportFormat, from_schematic: bool) -> Result<()> {
+pub fn import_kicad(
+    input: &Path,
+    output: &Path,
+    format: &ImportFormat,
+    from_schematic: bool,
+) -> Result<()> {
     // Auto-detect .kicad_sch files
-    let is_schematic = from_schematic
-        || input.extension().map(|e| e == "kicad_sch").unwrap_or(false);
+    let is_schematic =
+        from_schematic || input.extension().map(|e| e == "kicad_sch").unwrap_or(false);
 
     if is_schematic {
         return import_from_schematic(input, output, format);
@@ -20,7 +25,9 @@ pub fn import_kicad(input: &Path, output: &Path, format: &ImportFormat, from_sch
         .with_context(|| format!("Failed to read {}", input.display()))?;
 
     let is_xml = match format {
-        ImportFormat::Auto => content.trim_start().starts_with("<?xml") || content.trim_start().starts_with("<export"),
+        ImportFormat::Auto => {
+            content.trim_start().starts_with("<?xml") || content.trim_start().starts_with("<export")
+        }
         ImportFormat::Xml => true,
         ImportFormat::Spice => false,
     };
@@ -84,8 +91,8 @@ fn import_from_schematic(input: &Path, output: &Path, _format: &ImportFormat) ->
         bail!("kicad-cli export failed:\n{stderr}");
     }
 
-    let xml_content = std::fs::read_to_string(&tmp_path)
-        .context("Failed to read kicad-cli XML output")?;
+    let xml_content =
+        std::fs::read_to_string(&tmp_path).context("Failed to read kicad-cli XML output")?;
 
     let result = import_xml(&xml_content)?;
 
@@ -215,7 +222,8 @@ fn import_xml(content: &str) -> Result<String> {
                     "field" if in_fields => {
                         if let Some(ref mut comp) = current_comp {
                             if !current_field_name.is_empty() {
-                                comp.fields.insert(current_field_name.clone(), current_text.clone());
+                                comp.fields
+                                    .insert(current_field_name.clone(), current_text.clone());
                             }
                         }
                     }
@@ -238,7 +246,11 @@ fn import_xml(content: &str) -> Result<String> {
                 }
             }
             Ok(Event::Eof) => break,
-            Err(e) => bail!("XML parse error at position {}: {}", reader.error_position(), e),
+            Err(e) => bail!(
+                "XML parse error at position {}: {}",
+                reader.error_position(),
+                e
+            ),
             _ => {}
         }
         buf.clear();
@@ -280,11 +292,19 @@ fn import_xml(content: &str) -> Result<String> {
                 let cw_node = get_node("1");
                 let w_node = get_node("2");
                 let ccw_node = get_node("3");
-                let wiper_field = comp.fields.get("Melange.Wiper").cloned().unwrap_or_default();
+                let wiper_field = comp
+                    .fields
+                    .get("Melange.Wiper")
+                    .cloned()
+                    .unwrap_or_default();
                 let parts: Vec<&str> = wiper_field.split_whitespace().collect();
                 let total_r = parts.first().copied().unwrap_or("100k");
                 let default_pos = parts.get(1).copied().unwrap_or("0.5");
-                let label = comp.fields.get("Melange.Label").cloned().unwrap_or_default();
+                let label = comp
+                    .fields
+                    .get("Melange.Label")
+                    .cloned()
+                    .unwrap_or_default();
 
                 // Parse total resistance to compute half for nominal values
                 let half_r = melange_solver::parser::parse_value(total_r)
@@ -308,8 +328,11 @@ fn import_xml(content: &str) -> Result<String> {
 
                 // Check for gang
                 if let Some(gang_label) = comp.fields.get("Melange.Gang") {
-                    let inverted = comp.fields.get("Melange.GangInvert")
-                        .map(|v| v.to_lowercase() == "true").unwrap_or(false);
+                    let inverted = comp
+                        .fields
+                        .get("Melange.GangInvert")
+                        .map(|v| v.to_lowercase() == "true")
+                        .unwrap_or(false);
                     gang_entries.push((gang_label.clone(), cw_ref.clone(), inverted));
                 }
 
@@ -321,10 +344,18 @@ fn import_xml(content: &str) -> Result<String> {
                 let val = format_value(&comp.value);
                 // Check for pot
                 if let Some(pot_field) = comp.fields.get("Melange.Pot") {
-                    let label = comp.fields.get("Melange.Label").cloned().unwrap_or_default();
+                    let label = comp
+                        .fields
+                        .get("Melange.Label")
+                        .cloned()
+                        .unwrap_or_default();
                     let parts: Vec<&str> = pot_field.split_whitespace().collect();
-                    let mut pot_str = format!(".pot {} {} {}", comp.ref_des,
-                        parts.first().unwrap_or(&"1k"), parts.get(1).unwrap_or(&"100k"));
+                    let mut pot_str = format!(
+                        ".pot {} {} {}",
+                        comp.ref_des,
+                        parts.first().unwrap_or(&"1k"),
+                        parts.get(1).unwrap_or(&"100k")
+                    );
                     if let Some(default) = parts.get(2) {
                         pot_str.push_str(&format!(" {default}"));
                     }
@@ -335,7 +366,11 @@ fn import_xml(content: &str) -> Result<String> {
                 }
                 // Check for switch
                 if let Some(sw_field) = comp.fields.get("Melange.Switch") {
-                    let label = comp.fields.get("Melange.Label").cloned().unwrap_or_default();
+                    let label = comp
+                        .fields
+                        .get("Melange.Label")
+                        .cloned()
+                        .unwrap_or_default();
                     let mut sw_str = format!(".switch {} {}", comp.ref_des, sw_field.trim());
                     if !label.is_empty() {
                         sw_str.push_str(&format!(" \"{label}\""));
@@ -344,8 +379,11 @@ fn import_xml(content: &str) -> Result<String> {
                 }
                 // Check for gang
                 if let Some(gang_label) = comp.fields.get("Melange.Gang") {
-                    let inverted = comp.fields.get("Melange.GangInvert")
-                        .map(|v| v.to_lowercase() == "true").unwrap_or(false);
+                    let inverted = comp
+                        .fields
+                        .get("Melange.GangInvert")
+                        .map(|v| v.to_lowercase() == "true")
+                        .unwrap_or(false);
                     gang_entries.push((gang_label.clone(), comp.ref_des.clone(), inverted));
                 }
                 format!("{} {} {} {}", comp.ref_des, n1, n2, val)
@@ -374,9 +412,16 @@ fn import_xml(content: &str) -> Result<String> {
                 let nd = get_node("1");
                 let ng = get_node("2");
                 let ns = get_node("3");
-                let nb = if comp.pin_nets.contains_key("4") { get_node("4") } else { ns.clone() };
+                let nb = if comp.pin_nets.contains_key("4") {
+                    get_node("4")
+                } else {
+                    ns.clone()
+                };
                 collect_model(comp, "", &mut models);
-                format!("{} {} {} {} {} {}", comp.ref_des, nd, ng, ns, nb, comp.value)
+                format!(
+                    "{} {} {} {} {} {}",
+                    comp.ref_des, nd, ng, ns, nb, comp.value
+                )
             }
             "T" => {
                 let ng = get_node("1");
@@ -396,12 +441,21 @@ fn import_xml(content: &str) -> Result<String> {
                 if comp.pin_nets.contains_key("5") {
                     let nsup = get_node("5");
                     if nsup != "0" {
-                        format!("{} {} {} {} {} {} {}", comp.ref_des, np, ng, nk, nscr, nsup, comp.value)
+                        format!(
+                            "{} {} {} {} {} {} {}",
+                            comp.ref_des, np, ng, nk, nscr, nsup, comp.value
+                        )
                     } else {
-                        format!("{} {} {} {} {} {}", comp.ref_des, np, ng, nk, nscr, comp.value)
+                        format!(
+                            "{} {} {} {} {} {}",
+                            comp.ref_des, np, ng, nk, nscr, comp.value
+                        )
                     }
                 } else {
-                    format!("{} {} {} {} {} {}", comp.ref_des, np, ng, nk, nscr, comp.value)
+                    format!(
+                        "{} {} {} {} {} {}",
+                        comp.ref_des, np, ng, nk, nscr, comp.value
+                    )
                 }
             }
             "U" => {
@@ -409,7 +463,10 @@ fn import_xml(content: &str) -> Result<String> {
                 let nminus = get_node("2");
                 let nout = get_node("3");
                 collect_model(comp, "OA", &mut models);
-                format!("{} {} {} {} {}", comp.ref_des, nplus, nminus, nout, comp.value)
+                format!(
+                    "{} {} {} {} {}",
+                    comp.ref_des, nplus, nminus, nout, comp.value
+                )
             }
             "Y" => {
                 let sp = get_node("1");
@@ -417,7 +474,10 @@ fn import_xml(content: &str) -> Result<String> {
                 let cp = get_node("3");
                 let cn = get_node("4");
                 collect_model(comp, "VCA", &mut models);
-                format!("{} {} {} {} {} {}", comp.ref_des, sp, sn, cp, cn, comp.value)
+                format!(
+                    "{} {} {} {} {} {}",
+                    comp.ref_des, sp, sn, cp, cn, comp.value
+                )
             }
             "V" => {
                 let n1 = get_node("1");
@@ -539,7 +599,10 @@ fn collect_model(comp: &XmlComponent, default_type: &str, models: &mut BTreeMap<
         return;
     }
     if let Some(model_field) = comp.fields.get("Melange.Model") {
-        models.insert(comp.value.clone(), format!(".model {} {}", comp.value, model_field));
+        models.insert(
+            comp.value.clone(),
+            format!(".model {} {}", comp.value, model_field),
+        );
     } else if let Some(sim_params) = comp.fields.get("Sim.Params") {
         if !default_type.is_empty() {
             models.insert(
@@ -606,7 +669,13 @@ fn import_spice(content: &str) -> Result<String> {
         }
 
         // Pass through .model, .subckt, .ends, .end, .param and component lines
-        if lower.starts_with('.') || trimmed.chars().next().map(|c| c.is_ascii_alphabetic()).unwrap_or(false) {
+        if lower.starts_with('.')
+            || trimmed
+                .chars()
+                .next()
+                .map(|c| c.is_ascii_alphabetic())
+                .unwrap_or(false)
+        {
             // Sanitize node name "GND" -> "0" in component lines
             if !lower.starts_with('.') {
                 let sanitized = sanitize_component_nodes(trimmed);
@@ -661,7 +730,10 @@ fn sanitize_component_nodes(line: &str) -> String {
 // ─── Shared helpers ─────────────────────────────────────────────────
 
 fn ref_prefix(ref_des: &str) -> String {
-    ref_des.chars().take_while(|c| c.is_ascii_alphabetic()).collect()
+    ref_des
+        .chars()
+        .take_while(|c| c.is_ascii_alphabetic())
+        .collect()
 }
 
 fn sanitize_node(name: &str) -> String {
@@ -670,14 +742,25 @@ fn sanitize_node(name: &str) -> String {
         return "0".into();
     }
     let s = name.trim_start_matches('/');
-    let s: String = s.chars().map(|c| {
-        if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' }
-    }).collect();
+    let s: String = s
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
     let s = s.trim_matches('_').to_lowercase();
     if s.is_empty() {
         return "node".into();
     }
-    if s.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+    if s.chars()
+        .next()
+        .map(|c| c.is_ascii_digit())
+        .unwrap_or(false)
+    {
         format!("n{s}")
     } else {
         s
@@ -688,6 +771,12 @@ fn format_value(value: &str) -> String {
     if value.is_empty() {
         return "0".into();
     }
-    let s = value.trim().trim_end_matches(|c: char| "ΩFHVAΩfhva".contains(c));
-    if s.is_empty() { value.trim().to_string() } else { s.to_string() }
+    let s = value
+        .trim()
+        .trim_end_matches(|c: char| "ΩFHVAΩfhva".contains(c));
+    if s.is_empty() {
+        value.trim().to_string()
+    } else {
+        s.to_string()
+    }
 }

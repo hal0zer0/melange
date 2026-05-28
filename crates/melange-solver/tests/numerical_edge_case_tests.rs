@@ -117,7 +117,8 @@ fn test_diode_extreme_small_is() {
 /// Diode with IS=1e-18 in a circuit solver.
 #[test]
 fn test_diode_extreme_small_is_in_circuit() {
-    let spice = "Stiff Diode\nRin in out 1k\nD1 out 0 D1N4148\nC1 out 0 1u\n.model D1N4148 D(IS=1e-18)\n";
+    let spice =
+        "Stiff Diode\nRin in out 1k\nD1 out 0 D1N4148\nC1 out 0 1u\n.model D1N4148 D(IS=1e-18)\n";
     let config = support::config_for_spice(spice, SAMPLE_RATE);
     let circuit = support::build_circuit(spice, &config, "stiff_diode");
     let output = support::run_step(&circuit, 1.0, 200, SAMPLE_RATE);
@@ -183,11 +184,21 @@ fn test_bjt_subnormal_voltages() {
 fn test_gummel_poon_subnormal_voltages() {
     use melange_devices::BjtGummelPoon;
     let base = BjtEbersMoll::new_room_temp(1e-14, 200.0, 3.0, melange_devices::BjtPolarity::Npn);
-    let gp = BjtGummelPoon::new(base, f64::INFINITY, f64::INFINITY, f64::INFINITY, f64::INFINITY);
+    let gp = BjtGummelPoon::new(
+        base,
+        f64::INFINITY,
+        f64::INFINITY,
+        f64::INFINITY,
+        f64::INFINITY,
+    );
     let subnormal: f64 = f64::MIN_POSITIVE / 2.0;
     let jac = gp.jacobian(&[subnormal, -subnormal]);
     for &val in &jac {
-        assert!(val.is_finite(), "GP Jacobian with subnormal should be finite: {}", val);
+        assert!(
+            val.is_finite(),
+            "GP Jacobian with subnormal should be finite: {}",
+            val
+        );
     }
 }
 
@@ -216,10 +227,18 @@ fn test_near_singular_extreme_mismatch() {
     let netlist = Netlist::parse(spice).unwrap();
     let mna = MnaSystem::from_netlist(&netlist).unwrap();
     let result = DkKernel::from_mna(&mna, SAMPLE_RATE);
-    assert!(result.is_ok(), "Kernel should handle 1:10M mismatch: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Kernel should handle 1:10M mismatch: {:?}",
+        result.err()
+    );
     let kernel = result.unwrap();
     for &val in &kernel.s {
-        assert!(val.is_finite(), "S not finite in mismatched circuit: {}", val);
+        assert!(
+            val.is_finite(),
+            "S not finite in mismatched circuit: {}",
+            val
+        );
     }
 }
 
@@ -233,14 +252,20 @@ fn test_near_singular_low_impedance_node() {
     support::assert_finite(&output);
     // Output should be very small since the node is nearly shorted
     for (i, &v) in output.iter().enumerate() {
-        assert!(v.abs() < 0.1, "Output[{}] should be small with near-short: {:.6}", i, v);
+        assert!(
+            v.abs() < 0.1,
+            "Output[{}] should be small with near-short: {:.6}",
+            i,
+            v
+        );
     }
 }
 
 /// Multiple voltage sources create near-singular G matrix blocks.
 #[test]
 fn test_multiple_voltage_sources_conditioning() {
-    let spice = "Multi VS\nV1 vcc 0 DC 12\nV2 vee 0 DC -12\nR1 vcc out 1k\nR2 out vee 1k\nC1 out 0 1u\n";
+    let spice =
+        "Multi VS\nV1 vcc 0 DC 12\nV2 vee 0 DC -12\nR1 vcc out 1k\nR2 out vee 1k\nC1 out 0 1u\n";
     let netlist = Netlist::parse(spice).unwrap();
     let mna = MnaSystem::from_netlist(&netlist).unwrap();
     let kernel = DkKernel::from_mna(&mna, SAMPLE_RATE).unwrap();
@@ -248,7 +273,11 @@ fn test_multiple_voltage_sources_conditioning() {
         assert!(val.is_finite(), "S not finite with multiple VS: {}", val);
     }
     for &val in &kernel.a_neg {
-        assert!(val.is_finite(), "A_neg not finite with multiple VS: {}", val);
+        assert!(
+            val.is_finite(),
+            "A_neg not finite with multiple VS: {}",
+            val
+        );
     }
 }
 
@@ -338,7 +367,11 @@ fn test_large_rc_chain() {
     let spice = "RC Chain\nR1 in n1 1k\nC1 n1 0 100n\nR2 n1 n2 1k\nC2 n2 0 100n\nR3 n2 n3 1k\nC3 n3 0 100n\nR4 n3 n4 1k\nC4 n4 0 100n\nR5 n4 out 1k\nC5 out 0 100n\n";
     let netlist = Netlist::parse(spice).unwrap();
     let mna = MnaSystem::from_netlist(&netlist).unwrap();
-    assert!(mna.n >= 5, "RC chain should have at least 5 nodes, got {}", mna.n);
+    assert!(
+        mna.n >= 5,
+        "RC chain should have at least 5 nodes, got {}",
+        mna.n
+    );
 
     let kernel = DkKernel::from_mna(&mna, SAMPLE_RATE).unwrap();
     for &val in &kernel.s {
@@ -352,7 +385,11 @@ fn test_large_rc_chain() {
 
     // After 500 samples, the output should have started charging
     let final_out = *output.last().unwrap();
-    assert!(final_out > 0.0, "RC chain final output should be positive: {:.6}", final_out);
+    assert!(
+        final_out > 0.0,
+        "RC chain final output should be positive: {:.6}",
+        final_out
+    );
 }
 
 // ============================================================================
@@ -374,7 +411,12 @@ fn test_diode_ideality_factor_3() {
 
     let diode_n1 = DiodeShockley::new_room_temp(1e-12, 1.0);
     let i_n1 = diode_n1.current_at(0.7);
-    assert!(i_fwd < i_n1, "n=3 should have less current than n=1: n3={:.2e}, n1={:.2e}", i_fwd, i_n1);
+    assert!(
+        i_fwd < i_n1,
+        "n=3 should have less current than n=1: n3={:.2e}, n1={:.2e}",
+        i_fwd,
+        i_n1
+    );
 }
 
 // ============================================================================
@@ -390,7 +432,11 @@ fn test_very_small_inductor() {
 
     assert_eq!(kernel.inductors.len(), 1);
     let g_eq = kernel.inductors[0].g_eq;
-    assert!(g_eq.is_finite() && g_eq > 1.0, "1uH inductor g_eq should be large: {}", g_eq);
+    assert!(
+        g_eq.is_finite() && g_eq > 1.0,
+        "1uH inductor g_eq should be large: {}",
+        g_eq
+    );
 
     let config = support::config_for_spice(spice, SAMPLE_RATE);
     let circuit = support::build_circuit(spice, &config, "small_l");

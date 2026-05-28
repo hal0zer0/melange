@@ -50,7 +50,10 @@ fn test_superposition_linear_circuit() {
 
     // Input B: 1kHz sine at 0.5V, phase-shifted 90°
     let input_b: Vec<f64> = (0..n)
-        .map(|i| 0.5 * (2.0 * std::f64::consts::PI * freq * i as f64 / SR + std::f64::consts::FRAC_PI_2).sin())
+        .map(|i| {
+            0.5 * (2.0 * std::f64::consts::PI * freq * i as f64 / SR + std::f64::consts::FRAC_PI_2)
+                .sin()
+        })
         .collect();
 
     // Input A+B
@@ -158,9 +161,15 @@ fn test_trapezoidal_matches_z_transform_rc() {
     // Test relative gain at two frequencies: the RATIO should match theory
     // regardless of DC blocking or input impedance
     let out_100 = support::run_sine(&circuit, 100.0, 1.0, 4800, SR);
-    let peak_100: f64 = out_100[1000..].iter().map(|s| s.abs()).fold(0.0_f64, f64::max);
+    let peak_100: f64 = out_100[1000..]
+        .iter()
+        .map(|s| s.abs())
+        .fold(0.0_f64, f64::max);
     let out_1k = support::run_sine(&circuit, 1000.0, 1.0, 4800, SR);
-    let peak_1k: f64 = out_1k[1000..].iter().map(|s| s.abs()).fold(0.0_f64, f64::max);
+    let peak_1k: f64 = out_1k[1000..]
+        .iter()
+        .map(|s| s.abs())
+        .fold(0.0_f64, f64::max);
 
     if peak_100 > 1e-6 {
         let ratio_measured = peak_1k / peak_100;

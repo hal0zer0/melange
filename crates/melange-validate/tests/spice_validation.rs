@@ -327,9 +327,11 @@ fn run_melange_codegen(
     // the re-linearization. When all BJTs use the SPICE defaults this is
     // byte-identical to the zero-bias stamp.
     let dc_preflight = {
-        let device_slots =
-            melange_solver::codegen::ir::CircuitIR::build_device_info_with_mna(&netlist, Some(&mna))
-                .unwrap_or_default();
+        let device_slots = melange_solver::codegen::ir::CircuitIR::build_device_info_with_mna(
+            &netlist,
+            Some(&mna),
+        )
+        .unwrap_or_default();
         if device_slots.is_empty() {
             None
         } else {
@@ -366,9 +368,11 @@ fn run_melange_codegen(
     let use_nodal = decision.route == routing::SolverRoute::Nodal;
 
     if use_nodal {
-        let device_slots =
-            melange_solver::codegen::ir::CircuitIR::build_device_info_with_mna(&netlist, Some(&mna))
-                .unwrap_or_default();
+        let device_slots = melange_solver::codegen::ir::CircuitIR::build_device_info_with_mna(
+            &netlist,
+            Some(&mna),
+        )
+        .unwrap_or_default();
         if !device_slots.is_empty() {
             mna.expand_bjt_internal_nodes(&device_slots);
         }
@@ -491,8 +495,6 @@ fn main() {
 
     Ok(samples)
 }
-
-
 
 /// Result of a validation run
 struct ValidationResult {
@@ -1012,7 +1014,6 @@ fn test_wurli_preamp_vs_spice() {
         gain_ratio
     );
 }
-
 
 /// Neve 1073 Output Amplifier (BA283 AM) vs ngspice
 ///
@@ -1541,9 +1542,6 @@ fn test_comparison_config_levels() {
     );
 }
 
-
-
-
 /// Test: Tube Screamer TS808 (Op-amp + Diode Clipping)
 ///
 /// Tests the classic TS808 inverting op-amp with antiparallel diode
@@ -1597,8 +1595,8 @@ fn test_tube_screamer_wiper_vs_spice() {
         ..nonlinear_config()
     };
 
-    let result = run_validation("tube_screamer_wiper", "out", &config)
-        .expect("Failed to run validation");
+    let result =
+        run_validation("tube_screamer_wiper", "out", &config).expect("Failed to run validation");
 
     print_validation_metrics(&result);
 

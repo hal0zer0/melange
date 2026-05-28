@@ -32,21 +32,35 @@ fn compile_and_run(code: &str, main_code: &str, tag: &str) -> String {
     let bin = tmp_dir.join(format!("melange_e2e_{tag}_{pid}_{id}"));
 
     let full = format!("{code}\n\n{main_code}\n");
-    { let mut f = std::fs::File::create(&src).unwrap(); f.write_all(full.as_bytes()).unwrap(); }
+    {
+        let mut f = std::fs::File::create(&src).unwrap();
+        f.write_all(full.as_bytes()).unwrap();
+    }
 
     let c = std::process::Command::new("rustc")
-        .arg(&src).arg("-o").arg(&bin).arg("--edition=2024").arg("-O")
-        .output().expect("rustc");
+        .arg(&src)
+        .arg("-o")
+        .arg(&bin)
+        .arg("--edition=2024")
+        .arg("-O")
+        .output()
+        .expect("rustc");
     let _ = std::fs::remove_file(&src);
     if !c.status.success() {
         let _ = std::fs::remove_file(&bin);
-        panic!("Compile failed for {tag}:\n{}", String::from_utf8_lossy(&c.stderr));
+        panic!(
+            "Compile failed for {tag}:\n{}",
+            String::from_utf8_lossy(&c.stderr)
+        );
     }
 
     let r = std::process::Command::new(&bin).output().expect("run");
     let _ = std::fs::remove_file(&bin);
     if !r.status.success() {
-        panic!("Run failed for {tag}:\n{}", String::from_utf8_lossy(&r.stderr));
+        panic!(
+            "Run failed for {tag}:\n{}",
+            String::from_utf8_lossy(&r.stderr)
+        );
     }
     String::from_utf8_lossy(&r.stdout).to_string()
 }
@@ -54,8 +68,18 @@ fn compile_and_run(code: &str, main_code: &str, tag: &str) -> String {
 fn generate_code(spice: &str, sample_rate: f64) -> String {
     let netlist = Netlist::parse(spice).unwrap();
     let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
-    let in_node = mna.node_map.get("in").copied().unwrap_or(1).saturating_sub(1);
-    let out_node = mna.node_map.get("out").copied().unwrap_or(2).saturating_sub(1);
+    let in_node = mna
+        .node_map
+        .get("in")
+        .copied()
+        .unwrap_or(1)
+        .saturating_sub(1);
+    let out_node = mna
+        .node_map
+        .get("out")
+        .copied()
+        .unwrap_or(2)
+        .saturating_sub(1);
     mna.g[in_node][in_node] += 1.0;
     let kernel = DkKernel::from_mna(&mna, sample_rate).unwrap();
     let config = CodegenConfig {
@@ -66,7 +90,10 @@ fn generate_code(spice: &str, sample_rate: f64) -> String {
         input_resistance: 1.0,
         ..CodegenConfig::default()
     };
-    CodeGenerator::new(config).generate(&kernel, &mna, &netlist).unwrap().code
+    CodeGenerator::new(config)
+        .generate(&kernel, &mna, &netlist)
+        .unwrap()
+        .code
 }
 
 // =========================================================================
@@ -77,9 +104,9 @@ fn generate_code(spice: &str, sample_rate: f64) -> String {
 fn test_parse_rc_lowpass() {
     let netlist = Netlist::parse(RC_LOWPASS_SPICE).unwrap();
     assert_eq!(netlist.elements.len(), 2, "Should parse 2 elements");
-    let has_r1 = netlist.elements.iter().any(|e| {
-        matches!(e, melange_solver::parser::Element::Resistor { name, .. } if name == "R1")
-    });
+    let has_r1 = netlist.elements.iter().any(
+        |e| matches!(e, melange_solver::parser::Element::Resistor { name, .. } if name == "R1"),
+    );
     assert!(has_r1, "Should have R1 resistor");
 }
 
@@ -125,18 +152,29 @@ fn main() {
 }
 "#;
     let stdout = compile_and_run(&code, main_code, "rc_e2e");
-    let output: Vec<f64> = stdout.lines().filter_map(|l| l.trim().parse().ok()).collect();
+    let output: Vec<f64> = stdout
+        .lines()
+        .filter_map(|l| l.trim().parse().ok())
+        .collect();
     assert_eq!(output.len(), 500);
 
     // Peak should exceed 0.8V
     let peak = output.iter().cloned().fold(0.0f64, f64::max);
-    assert!(peak > 0.8, "RC lowpass peak should exceed 0.8V, got {:.4}V", peak);
+    assert!(
+        peak > 0.8,
+        "RC lowpass peak should exceed 0.8V, got {:.4}V",
+        peak
+    );
 
     // Monotonically increasing in first 100 samples
     for i in 1..100 {
         assert!(
             output[i] >= output[i - 1] - 1e-10,
-            "Monotonic: output[{}]={:.6} < output[{}]={:.6}", i, output[i], i - 1, output[i - 1]
+            "Monotonic: output[{}]={:.6} < output[{}]={:.6}",
+            i,
+            output[i],
+            i - 1,
+            output[i - 1]
         );
     }
 
@@ -158,7 +196,10 @@ fn main() {
 }
 "#;
     let stdout = compile_and_run(&code, main_code, "diode_e2e");
-    let output: Vec<f64> = stdout.lines().filter_map(|l| l.trim().parse().ok()).collect();
+    let output: Vec<f64> = stdout
+        .lines()
+        .filter_map(|l| l.trim().parse().ok())
+        .collect();
     assert_eq!(output.len(), 200);
 
     for &v in &output {
@@ -166,6 +207,13 @@ fn main() {
     }
 
     let final_out = *output.last().unwrap();
-    assert!(final_out > 0.0, "Output should be positive for positive input");
-    assert!(final_out < 1.5, "Diode clipper should limit output below ~1V, got {:.4}V", final_out);
+    assert!(
+        final_out > 0.0,
+        "Output should be positive for positive input"
+    );
+    assert!(
+        final_out < 1.5,
+        "Diode clipper should limit output below ~1V, got {:.4}V",
+        final_out
+    );
 }

@@ -14,7 +14,10 @@
 
 mod support;
 
-use melange_devices::{BjtEbersMoll, BjtPolarity, DiodeShockley, Jfet, JfetChannel, KorenTriode, Mosfet, MosfetChannelType};
+use melange_devices::{
+    BjtEbersMoll, BjtPolarity, DiodeShockley, Jfet, JfetChannel, KorenTriode, Mosfet,
+    MosfetChannelType,
+};
 use melange_primitives::VT_ROOM;
 use melange_solver::dk::DkKernel;
 use melange_solver::mna::MnaSystem;
@@ -29,7 +32,14 @@ fn golden_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/golden")
 }
 
-fn write_golden(filename: &str, test_name: &str, spice: &str, output: &[f64], tolerance: f64, generator: &str) {
+fn write_golden(
+    filename: &str,
+    test_name: &str,
+    spice: &str,
+    output: &[f64],
+    tolerance: f64,
+    generator: &str,
+) {
     let dir = golden_dir();
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join(filename);
@@ -49,7 +59,11 @@ fn write_golden(filename: &str, test_name: &str, spice: &str, output: &[f64], to
     });
     let content = serde_json::to_string_pretty(&json).unwrap();
     std::fs::write(&path, &content).unwrap();
-    eprintln!("Recorded golden: {} ({} samples)", path.display(), output.len());
+    eprintln!(
+        "Recorded golden: {} ({} samples)",
+        path.display(),
+        output.len()
+    );
 }
 
 fn timestamp() -> String {
@@ -68,8 +82,18 @@ fn timestamp() -> String {
 fn build_linear(spice: &str) -> (MnaSystem, usize, usize) {
     let netlist = Netlist::parse(spice).unwrap();
     let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
-    let input_node = mna.node_map.get("in").copied().unwrap_or(1).saturating_sub(1);
-    let output_node = mna.node_map.get("out").copied().unwrap_or(2).saturating_sub(1);
+    let input_node = mna
+        .node_map
+        .get("in")
+        .copied()
+        .unwrap_or(1)
+        .saturating_sub(1);
+    let output_node = mna
+        .node_map
+        .get("out")
+        .copied()
+        .unwrap_or(2)
+        .saturating_sub(1);
     mna.g[input_node][input_node] += 1.0;
     (mna, input_node, output_node)
 }
@@ -107,8 +131,18 @@ fn run_nonlinear_sine(
 ) -> Vec<f64> {
     let netlist = Netlist::parse(spice).unwrap();
     let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
-    let input_node = mna.node_map.get("in").copied().unwrap_or(1).saturating_sub(1);
-    let output_node = mna.node_map.get("out").copied().unwrap_or(2).saturating_sub(1);
+    let input_node = mna
+        .node_map
+        .get("in")
+        .copied()
+        .unwrap_or(1)
+        .saturating_sub(1);
+    let output_node = mna
+        .node_map
+        .get("out")
+        .copied()
+        .unwrap_or(2)
+        .saturating_sub(1);
     mna.g[input_node][input_node] += 1.0;
     let kernel = DkKernel::from_mna(&mna, SR).unwrap();
 
@@ -414,7 +448,8 @@ fn record_triode_cc_sine_500hz() {
     let devices = {
         let mut devs = Vec::new();
         for dev_info in &mna.nonlinear_devices {
-            let tube = KorenTriode::with_all_params(100.0, 1.4, 1060.0, 600.0, 300.0, 2e-3, 0.5, 0.0);
+            let tube =
+                KorenTriode::with_all_params(100.0, 1.4, 1060.0, 600.0, 300.0, 2e-3, 0.5, 0.0);
             devs.push(DeviceEntry::new_tube(tube, dev_info.start_idx));
         }
         devs

@@ -717,7 +717,6 @@ K1 L1 L2 0.95\n";
     );
 }
 
-
 /// Test DC OP: VS + 3-winding transformer + resistor network.
 /// Minimal reproduction of Pultec-like topology.
 #[test]
@@ -821,4 +820,3 @@ fn test_lu_decompose_floating_node_with_inductor_short() {
     assert!(v[0].abs() < 1e-10, "v[0] should be 0V, got {}", v[0]);
     assert!(v[1].abs() < 1e-10, "v[1] should be 0V, got {}", v[1]);
 }
-

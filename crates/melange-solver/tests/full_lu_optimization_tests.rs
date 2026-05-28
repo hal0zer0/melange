@@ -377,7 +377,10 @@ fn main() {
     let max_diff_line = output.lines().find(|l| l.starts_with("max_diff="));
     if let Some(line) = max_diff_line {
         let val: f64 = line.split('=').nth(1).unwrap().parse().unwrap_or(1.0);
-        assert!(val < 1e-10, "Reset state should match fresh default, max_diff={val:.2e}");
+        assert!(
+            val < 1e-10,
+            "Reset state should match fresh default, max_diff={val:.2e}"
+        );
     }
     // No NR failures
     assert!(
@@ -460,9 +463,15 @@ fn main() {
         "Circuit should produce non-zero output. Output:\n{output}"
     );
     // All finite
-    assert!(output.contains("all_finite=true"), "All outputs should be finite. Output:\n{output}");
+    assert!(
+        output.contains("all_finite=true"),
+        "All outputs should be finite. Output:\n{output}"
+    );
     // No NR failures
-    assert!(output.contains("nr_fail=0"), "No NR failures expected. Output:\n{output}");
+    assert!(
+        output.contains("nr_fail=0"),
+        "No NR failures expected. Output:\n{output}"
+    );
 }
 
 // ── Gain sanity tests ────────────────────────────────────────────────
@@ -566,4 +575,3 @@ fn test_gain_sanity_two_tube() {
     );
     assert!(nr_fail == 0, "No NR failures expected, got {nr_fail}");
 }
-

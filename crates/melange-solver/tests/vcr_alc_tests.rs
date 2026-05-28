@@ -190,7 +190,11 @@ fn test_vcr_alc_parse_directives() {
     assert_eq!(netlist.pots[0].min_value, 100.0);
     assert_eq!(netlist.pots[0].max_value, 12000.0);
 
-    assert_eq!(netlist.switches.len(), 2, "Expected 2 switches (Attack, Release)");
+    assert_eq!(
+        netlist.switches.len(),
+        2,
+        "Expected 2 switches (Attack, Release)"
+    );
 }
 
 #[test]
@@ -203,7 +207,10 @@ fn test_vcr_alc_parse_vca_model() {
         .find(|m| m.name == "VCA_ALC")
         .expect("VCA_ALC model not found");
 
-    assert_eq!(vca_model.model_type, "VCA", "VCA_ALC should be a VCA model type");
+    assert_eq!(
+        vca_model.model_type, "VCA",
+        "VCA_ALC should be a VCA model type"
+    );
 }
 
 // ─── MNA build tests ────────────────────────────────────────────────
@@ -214,10 +221,7 @@ fn test_vcr_alc_mna_dimensions() {
     let mna = MnaSystem::from_netlist(&netlist).unwrap();
 
     // Verify node count
-    assert_eq!(
-        mna.n, 16,
-        "Expected 16 circuit nodes (excluding ground)"
-    );
+    assert_eq!(mna.n, 16, "Expected 16 circuit nodes (excluding ground)");
 
     // Verify nonlinear device count: 1 VCA (2D) + 1 diode (1D) = M=3
     let total_m: usize = mna.nonlinear_devices.iter().map(|d| d.dimension).sum();
@@ -234,7 +238,15 @@ fn test_vcr_alc_mna_key_nodes() {
     let netlist = Netlist::parse(VCR_ALC_SPICE).unwrap();
     let mna = MnaSystem::from_netlist(&netlist).unwrap();
 
-    for node in &["in", "out", "buf_out", "cv_node", "vca_in", "iv_out", "emph_node"] {
+    for node in &[
+        "in",
+        "out",
+        "buf_out",
+        "cv_node",
+        "vca_in",
+        "iv_out",
+        "emph_node",
+    ] {
         assert!(
             mna.node_map.contains_key(*node),
             "Node '{node}' missing from MNA"
@@ -269,7 +281,10 @@ fn test_vcr_alc_dk_kernel_builds() {
     let kernel = kernel.unwrap();
     assert_eq!(kernel.m, 3, "Expected M=3");
     // IIR op-amp model: no Boyle internal nodes, so N = 16 circuit nodes + 2 VS = 18
-    assert_eq!(kernel.n, 18, "Expected N=18 (16 nodes + 2 VS augmented, IIR op-amp has no internal nodes)");
+    assert_eq!(
+        kernel.n, 18,
+        "Expected N=18 (16 nodes + 2 VS augmented, IIR op-amp has no internal nodes)"
+    );
 }
 
 #[test]
@@ -283,10 +298,7 @@ fn test_vcr_alc_dk_kernel_k_diagonals() {
 
     // K[0][0] should be negative (diode: proper negative feedback)
     let k00 = kernel.k[(0 * kernel.m)];
-    assert!(
-        k00 < 0.0,
-        "K[0][0] (diode) should be negative, got {k00}"
-    );
+    assert!(k00 < 0.0, "K[0][0] (diode) should be negative, got {k00}");
 
     // K[1][1] should be negative (VCA signal: decoupling resistor provides feedback)
     let k11 = kernel.k[kernel.m + 1];
@@ -532,8 +544,8 @@ fn main() {
 "#;
     let output = compile_and_run(&code, main_code, "constant");
 
-    let rms_5 = parse_kv(&output, "rms_5");   // 0.5V input
-    let rms_10 = parse_kv(&output, "rms_10");  // 1.0V input
+    let rms_5 = parse_kv(&output, "rms_5"); // 0.5V input
+    let rms_10 = parse_kv(&output, "rms_10"); // 1.0V input
 
     // Both should be finite and non-zero
     assert!(rms_5 > 0.001 && rms_10 > 0.001);

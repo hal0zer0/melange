@@ -237,7 +237,11 @@ mod tests {
         // Treat S = I, A_neg = I → S·A_neg = I.
         let r = analyze_trap_stability(&m, &id, n);
         assert!((r.rho - 1.0).abs() < 1e-6, "rho={}", r.rho);
-        assert!(r.dominant_sign > 0.0, "expected positive sign, got {}", r.dominant_sign);
+        assert!(
+            r.dominant_sign > 0.0,
+            "expected positive sign, got {}",
+            r.dominant_sign
+        );
     }
 
     #[test]
@@ -248,7 +252,11 @@ mod tests {
         let id = vec![1.0, 0.0, 0.0, 1.0];
         let r = analyze_trap_stability(&s, &id, n);
         assert!((r.rho - 1.0).abs() < 1e-6, "rho={}", r.rho);
-        assert!(r.dominant_sign < 0.0, "expected negative sign, got {}", r.dominant_sign);
+        assert!(
+            r.dominant_sign < 0.0,
+            "expected negative sign, got {}",
+            r.dominant_sign
+        );
         // max|S| = 1 (low gain) → marginal Nyquist mode is sub-audible → must
         // NOT trip the gain-gated auto-BE clause.
         assert!(
@@ -266,7 +274,11 @@ mod tests {
         let (s, n) = flat(&[&[-1.0, 3.0e5], &[0.0, -0.5]]);
         let id = vec![1.0, 0.0, 0.0, 1.0];
         let r = analyze_trap_stability(&s, &id, n);
-        assert!(r.dominant_sign < 0.0, "expected negative sign, got {}", r.dominant_sign);
+        assert!(
+            r.dominant_sign < 0.0,
+            "expected negative sign, got {}",
+            r.dominant_sign
+        );
         assert!(r.max_abs_s > 1.0e5, "max_abs_s={}", r.max_abs_s);
         assert!(
             trap_needs_be(r),
@@ -282,7 +294,11 @@ mod tests {
         let (s, n) = flat(&[&[-1.0, 1.0e3], &[0.0, -0.5]]);
         let id = vec![1.0, 0.0, 0.0, 1.0];
         let r = analyze_trap_stability(&s, &id, n);
-        assert!(r.dominant_sign < 0.0, "expected negative sign, got {}", r.dominant_sign);
+        assert!(
+            r.dominant_sign < 0.0,
+            "expected negative sign, got {}",
+            r.dominant_sign
+        );
         assert!(
             !trap_needs_be(r),
             "low-gain (max|S|=1e3) Nyquist-marginal mode must NOT trip auto-BE"
@@ -296,8 +312,15 @@ mod tests {
         let (s, n) = flat(&[&[0.9999, 0.0], &[0.0, 0.5]]);
         let id = vec![1.0, 0.0, 0.0, 1.0];
         let r = analyze_trap_stability(&s, &id, n);
-        assert!(r.dominant_sign > 0.0, "passive LF mode should classify positive, got {}", r.dominant_sign);
-        assert!(!trap_needs_be(r), "ρ near +1 (passive LF) must NOT trip auto-BE");
+        assert!(
+            r.dominant_sign > 0.0,
+            "passive LF mode should classify positive, got {}",
+            r.dominant_sign
+        );
+        assert!(
+            !trap_needs_be(r),
+            "ρ near +1 (passive LF) must NOT trip auto-BE"
+        );
     }
 
     #[test]

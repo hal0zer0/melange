@@ -169,9 +169,7 @@ fn emit_dc_op_build_g_aug_dk(ir: &CircuitIR) -> String {
         .iter()
         .any(|sw| sw.components.iter().any(|c| c.component_type == 'R'));
     if has_r_switch {
-        body.push_str(
-            "\n        // Apply switch R-component deltas at the current position.\n",
-        );
+        body.push_str("\n        // Apply switch R-component deltas at the current position.\n");
         for sw in &ir.switches {
             for (ci, comp) in sw.components.iter().enumerate() {
                 if comp.component_type != 'R' {
@@ -452,9 +450,7 @@ fn emit_dc_op_nr_loop_dk(ir: &CircuitIR) -> Result<String, CodegenError> {
         let d = slot.dimension;
         for r in s..s + d {
             for c in s..s + d {
-                out.push_str(&format!(
-                    "{inner}j_dev[{r}][{c}] = jdev_{r}_{c};\n"
-                ));
+                out.push_str(&format!("{inner}j_dev[{r}][{c}] = jdev_{r}_{c};\n"));
             }
         }
     }
@@ -745,7 +741,8 @@ fn emit_dc_op_writeback_dk(ir: &CircuitIR, nonlinear: bool) -> String {
 /// "Runtime DC OP recompute" for the reviver's technical plan if
 /// priorities ever flip.
 pub(super) fn emit_recompute_dc_op_body_nodal(_ir: &CircuitIR) -> Result<String, CodegenError> {
-    Ok("        // Nodal full-LU path: runtime DC OP recompute is deferred\n\
+    Ok(
+        "        // Nodal full-LU path: runtime DC OP recompute is deferred\n\
         \x20       // indefinitely (warmup loop is the documented path for nodal\n\
         \x20       // circuits). Bump the NR max-iter diag counter so callers'\n\
         \x20       // standard fallback pattern (`if counter ticked, run warmup`)\n\
@@ -754,7 +751,8 @@ pub(super) fn emit_recompute_dc_op_body_nodal(_ir: &CircuitIR) -> Result<String,
         \x20       // See `docs/aidocs/DC_OP.md` \"Runtime DC OP recompute\" for\n\
         \x20       // the rationale and the reviver's plan if priorities change.\n\
         \x20       self.diag_nr_max_iter_count += 1;\n"
-        .to_string())
+            .to_string(),
+    )
 }
 
 /// Emit the body of `CircuitState::settle_dc_op()` — the

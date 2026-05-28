@@ -2836,12 +2836,16 @@ impl MnaBuilder {
                     .position(|p| p.name.eq_ignore_ascii_case(&name_upper))
                 {
                     // Check if this pot belongs to a wiper group
-                    let in_wiper = mna.wiper_groups.iter().enumerate().find(|(_, wg)| {
-                        wg.cw_pot_index == pot_idx || wg.ccw_pot_index == pot_idx
-                    });
+                    let in_wiper =
+                        mna.wiper_groups.iter().enumerate().find(|(_, wg)| {
+                            wg.cw_pot_index == pot_idx || wg.ccw_pot_index == pot_idx
+                        });
                     if let Some((wg_idx, _)) = in_wiper {
                         // This is a wiper member — add the wiper group (avoid duplicates)
-                        if !wiper_members.iter().any(|&(idx, _): &(usize, bool)| idx == wg_idx) {
+                        if !wiper_members
+                            .iter()
+                            .any(|&(idx, _): &(usize, bool)| idx == wg_idx)
+                        {
                             wiper_members.push((wg_idx, member.inverted));
                         }
                     } else {
@@ -2948,7 +2952,10 @@ impl MnaBuilder {
                     log::info!(
                         ".switch {}: component '{}' declared at {:.6e} but pos-0 is {:.6e}; \
                          stamping pos-0 as the initial value",
-                        comp_name, comp_name, static_value, pos_0,
+                        comp_name,
+                        comp_name,
+                        static_value,
+                        pos_0,
                     );
                 }
                 mna.switch_default_overrides
@@ -3123,9 +3130,7 @@ impl MnaBuilder {
                     .iter()
                     .enumerate()
                     .max_by(|(_, a), (_, b)| {
-                        inductor_refs[*a]
-                            .value
-                            .total_cmp(&inductor_refs[*b].value)
+                        inductor_refs[*a].value.total_cmp(&inductor_refs[*b].value)
                     })
                     .map(|(i, _)| i)
                     .unwrap_or(0);
@@ -4575,7 +4580,7 @@ impl MnaBuilder {
                         start_idx,
                         nodes: vec![nc.clone(), nb.clone(), ne.clone()],
                         node_indices,
-                    vg2k_frozen: 0.0,
+                        vg2k_frozen: 0.0,
                     });
                 }
             }
@@ -4646,8 +4651,7 @@ impl MnaBuilder {
                     self.node_map[n_plate],
                     self.node_map[n_cathode],
                 ];
-                let is_linearized =
-                    self.linearized_triodes.contains(&name.to_ascii_uppercase());
+                let is_linearized = self.linearized_triodes.contains(&name.to_ascii_uppercase());
                 if is_linearized {
                     // Linearized triodes are removed from the nonlinear system entirely.
                     // Their small-signal gm + 1/rp are stamped into G after DC OP.
@@ -5850,19 +5854,28 @@ Y1 sp sn cp cn vca1
 
         // ----- N_i columns (currents injected into node voltages) -----
         // Col 0 = Ip: extracted from plate, injected into cathode
-        assert_eq!(mna.n_i[p_idx][0], -1.0, "N_i[plate][0] should be -1 (Ip out)");
+        assert_eq!(
+            mna.n_i[p_idx][0], -1.0,
+            "N_i[plate][0] should be -1 (Ip out)"
+        );
         assert_eq!(mna.n_i[k_idx][0], 1.0, "N_i[cath][0] should be +1 (Ip in)");
         assert_eq!(mna.n_i[g_idx][0], 0.0, "N_i[grid][0] should be 0");
         assert_eq!(mna.n_i[s_idx][0], 0.0, "N_i[screen][0] should be 0");
 
         // Col 1 = Ig2: extracted from screen, injected into cathode
-        assert_eq!(mna.n_i[s_idx][1], -1.0, "N_i[screen][1] should be -1 (Ig2 out)");
+        assert_eq!(
+            mna.n_i[s_idx][1], -1.0,
+            "N_i[screen][1] should be -1 (Ig2 out)"
+        );
         assert_eq!(mna.n_i[k_idx][1], 1.0, "N_i[cath][1] should be +1 (Ig2 in)");
         assert_eq!(mna.n_i[p_idx][1], 0.0, "N_i[plate][1] should be 0");
         assert_eq!(mna.n_i[g_idx][1], 0.0, "N_i[grid][1] should be 0");
 
         // Col 2 = Ig1: extracted from grid, injected into cathode
-        assert_eq!(mna.n_i[g_idx][2], -1.0, "N_i[grid][2] should be -1 (Ig1 out)");
+        assert_eq!(
+            mna.n_i[g_idx][2], -1.0,
+            "N_i[grid][2] should be -1 (Ig1 out)"
+        );
         assert_eq!(mna.n_i[k_idx][2], 1.0, "N_i[cath][2] should be +1 (Ig1 in)");
         assert_eq!(mna.n_i[p_idx][2], 0.0, "N_i[plate][2] should be 0");
         assert_eq!(mna.n_i[s_idx][2], 0.0, "N_i[screen][2] should be 0");
@@ -5921,7 +5934,11 @@ Y1 sp sn cp cn vca1
         let s5 = *mna5.node_map.get("screen").unwrap() - 1;
 
         for row in 0..3 {
-            assert_eq!(mna4.n_v[row][p4], mna5.n_v[row][p5], "N_v row {} plate", row);
+            assert_eq!(
+                mna4.n_v[row][p4], mna5.n_v[row][p5],
+                "N_v row {} plate",
+                row
+            );
             assert_eq!(mna4.n_v[row][g4], mna5.n_v[row][g5], "N_v row {} grid", row);
             assert_eq!(mna4.n_v[row][k4], mna5.n_v[row][k5], "N_v row {} cath", row);
             assert_eq!(
@@ -5931,7 +5948,11 @@ Y1 sp sn cp cn vca1
             );
         }
         for col in 0..3 {
-            assert_eq!(mna4.n_i[p4][col], mna5.n_i[p5][col], "N_i col {} plate", col);
+            assert_eq!(
+                mna4.n_i[p4][col], mna5.n_i[p5][col],
+                "N_i col {} plate",
+                col
+            );
             assert_eq!(mna4.n_i[g4][col], mna5.n_i[g5][col], "N_i col {} grid", col);
             assert_eq!(mna4.n_i[k4][col], mna5.n_i[k5][col], "N_i col {} cath", col);
             assert_eq!(
@@ -6193,7 +6214,11 @@ Y1 sp sn cp cn vca1
             "grid-off pentode must still report NonlinearDeviceType::Tube"
         );
         assert_eq!(dev.dimension, 2);
-        assert_eq!(dev.nodes.len(), 4, "nodes vector must still be plate/grid/cath/screen");
+        assert_eq!(
+            dev.nodes.len(),
+            4,
+            "nodes vector must still be plate/grid/cath/screen"
+        );
     }
 
     #[test]
@@ -6340,7 +6365,10 @@ Y1 sp sn cp cn vca1
         )
         .unwrap();
         assert_eq!(mna_lin1.m, 2, "linearizing T1 should give M=2");
-        assert_eq!(mna_lin1.num_devices, 1, "only T2 should remain as nonlinear");
+        assert_eq!(
+            mna_lin1.num_devices, 1,
+            "only T2 should remain as nonlinear"
+        );
 
         // Linearize both → M=0
         lin_set.insert("T2".to_string());
@@ -6419,18 +6447,30 @@ Y1 sp sn cp cn vca1
         //   G[k][g] -= gm
         //   G[k][k] += gm + gp   (both contribute)
         //   G[k][p] -= gp
-        assert!((mna.g[pi][gi] - g_before[pi][gi] - gm).abs() < eps, "G[p][g] += gm");
+        assert!(
+            (mna.g[pi][gi] - g_before[pi][gi] - gm).abs() < eps,
+            "G[p][g] += gm"
+        );
         assert!(
             (mna.g[pi][ki] - g_before[pi][ki] + gm + gp).abs() < eps,
             "G[p][k] -= (gm + gp)"
         );
-        assert!((mna.g[pi][pi] - g_before[pi][pi] - gp).abs() < eps, "G[p][p] += gp");
-        assert!((mna.g[ki][gi] - g_before[ki][gi] + gm).abs() < eps, "G[k][g] -= gm");
+        assert!(
+            (mna.g[pi][pi] - g_before[pi][pi] - gp).abs() < eps,
+            "G[p][p] += gp"
+        );
+        assert!(
+            (mna.g[ki][gi] - g_before[ki][gi] + gm).abs() < eps,
+            "G[k][g] -= gm"
+        );
         assert!(
             (mna.g[ki][ki] - g_before[ki][ki] - gm - gp).abs() < eps,
             "G[k][k] += (gm + gp)"
         );
-        assert!((mna.g[ki][pi] - g_before[ki][pi] + gp).abs() < eps, "G[k][p] -= gp");
+        assert!(
+            (mna.g[ki][pi] - g_before[ki][pi] + gp).abs() < eps,
+            "G[k][p] -= gp"
+        );
     }
 
     #[test]
@@ -6485,7 +6525,10 @@ Y1 sp sn cp cn vca1
         );
 
         // Ip_dc: ground→plate
-        let ip_src = mna.current_sources.iter().find(|cs| cs.name.contains("Ip_dc"));
+        let ip_src = mna
+            .current_sources
+            .iter()
+            .find(|cs| cs.name.contains("Ip_dc"));
         assert!(ip_src.is_some(), "should have Ip_dc current source");
         let ip_src = ip_src.unwrap();
         assert_eq!(ip_src.n_plus_idx, 0);
@@ -6493,7 +6536,10 @@ Y1 sp sn cp cn vca1
         assert!((ip_src.dc_value - ip_dc).abs() < 1e-15);
 
         // Ik_dc: cathode→ground (Ip + Ig)
-        let ik_src = mna.current_sources.iter().find(|cs| cs.name.contains("Ik_dc"));
+        let ik_src = mna
+            .current_sources
+            .iter()
+            .find(|cs| cs.name.contains("Ik_dc"));
         assert!(ik_src.is_some(), "should have Ik_dc current source");
         let ik_src = ik_src.unwrap();
         assert_eq!(ik_src.n_plus_idx, k);

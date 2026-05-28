@@ -620,8 +620,8 @@ fn main() -> Result<()> {
                     )
                 })?;
 
-            let noise_mode = melange_solver::codegen::NoiseMode::parse(&noise)
-                .ok_or_else(|| {
+            let noise_mode =
+                melange_solver::codegen::NoiseMode::parse(&noise).ok_or_else(|| {
                     anyhow::anyhow!(
                         "Unknown --noise '{}'. Valid values: off, thermal, shot, full",
                         noise
@@ -635,10 +635,7 @@ fn main() -> Result<()> {
             if let Some(url) = vendor_url.as_deref() {
                 // Simple scheme check — we don't pull in a URL-parsing crate for this.
                 if !(url.starts_with("http://") || url.starts_with("https://")) {
-                    anyhow::bail!(
-                        "--vendor-url '{}' must start with http:// or https://",
-                        url
-                    );
+                    anyhow::bail!("--vendor-url '{}' must start with http:// or https://", url);
                 }
             }
             if let Some(id) = vst3_id.as_deref() {
@@ -764,8 +761,8 @@ fn main() -> Result<()> {
                         opamp_rail_mode
                     )
                 })?;
-            let noise_mode = melange_solver::codegen::NoiseMode::parse(&noise)
-                .ok_or_else(|| {
+            let noise_mode =
+                melange_solver::codegen::NoiseMode::parse(&noise).ok_or_else(|| {
                     anyhow::anyhow!(
                         "Invalid --noise '{}'. Valid: off, thermal, shot, full",
                         noise
@@ -781,7 +778,8 @@ fn main() -> Result<()> {
                 Some(p)
             } else {
                 let mut p = output.clone();
-                let stem = p.file_stem()
+                let stem = p
+                    .file_stem()
                     .and_then(|s| s.to_str())
                     .map(|s| s.to_string())
                     .unwrap_or_else(|| "output".to_string());
@@ -1102,9 +1100,7 @@ fn compile_circuit_source(
         } else {
             format!("Did you mean: {}?", suggestions.join(", "))
         };
-        anyhow::anyhow!(
-            "Input node '{}' not found in circuit. {}", input_node, hint
-        )
+        anyhow::anyhow!("Input node '{}' not found in circuit. {}", input_node, hint)
     })?;
     if input_node_raw == 0 {
         anyhow::bail!("Input node cannot be ground (0). Please specify a non-ground node.");
@@ -1182,22 +1178,38 @@ fn compile_circuit_source(
         let has_tube_input = netlist.elements.iter().any(|e| matches!(e,
             Element::Triode { n_grid, .. } | Element::Pentode { n_grid, .. } if n_grid == input_name
         ));
-        let has_jfet_input = netlist.elements.iter().any(|e| matches!(e,
-            Element::Jfet { ng, .. } if ng == input_name
-        ));
-        let has_mosfet_input = netlist.elements.iter().any(|e| matches!(e,
-            Element::Mosfet { ng, .. } if ng == input_name
-        ));
+        let has_jfet_input = netlist.elements.iter().any(|e| {
+            matches!(e,
+                Element::Jfet { ng, .. } if ng == input_name
+            )
+        });
+        let has_mosfet_input = netlist.elements.iter().any(|e| {
+            matches!(e,
+                Element::Mosfet { ng, .. } if ng == input_name
+            )
+        });
         // Check if input connects through a large resistor (>10k) suggesting high-Z input
         let has_large_input_r = netlist.elements.iter().any(|e| {
-            if let Element::Resistor { n_plus, n_minus, value, .. } = e {
+            if let Element::Resistor {
+                n_plus,
+                n_minus,
+                value,
+                ..
+            } = e
+            {
                 (n_plus == input_name || n_minus == input_name) && *value > 10_000.0
             } else {
                 false
             }
         });
         if has_tube_input || has_jfet_input || has_mosfet_input {
-            let device = if has_tube_input { "tube grid" } else if has_jfet_input { "JFET gate" } else { "MOSFET gate" };
+            let device = if has_tube_input {
+                "tube grid"
+            } else if has_jfet_input {
+                "JFET gate"
+            } else {
+                "MOSFET gate"
+            };
             println!(
                 "  Hint: Input connects to {} (high impedance). Consider --input-resistance 1M or .input_impedance 1M",
                 device
@@ -1233,8 +1245,7 @@ fn compile_circuit_source(
     // equilibrium on push-pull topologies (see memory/wurli_power_amp_...).
     // Since Nodal handles full-dim BJTs natively, FA is unnecessary there.
     let forward_active = if solver_override == "nodal"
-        || (solver_override == "auto"
-            && should_skip_fa_for_nodal_reroute(&mna, sample_rate))
+        || (solver_override == "auto" && should_skip_fa_for_nodal_reroute(&mna, sample_rate))
     {
         std::collections::HashSet::new()
     } else {
@@ -1310,12 +1321,8 @@ fn compile_circuit_source(
     // defaults (TF = 0, CJE = CJC = 0, etc.). See the SPICE validation
     // harness for the matching call site — the two paths must agree so a
     // plugin built from `melange compile` behaves like the validated one.
-    let dc_preflight = preflight_relinearize_bjt_caps(
-        &mut mna,
-        &netlist,
-        input_node_idx,
-        input_resistance,
-    );
+    let dc_preflight =
+        preflight_relinearize_bjt_caps(&mut mna, &netlist, input_node_idx, input_resistance);
 
     // Step 3: Create DK kernel
     // Use augmented MNA for inductor circuits (well-conditioned for large L)
@@ -1427,9 +1434,7 @@ fn compile_circuit_source(
             } else {
                 format!("Did you mean: {}?", suggestions.join(", "))
             };
-            anyhow::anyhow!(
-                "Output node '{}' not found in circuit. {}", name, hint
-            )
+            anyhow::anyhow!("Output node '{}' not found in circuit. {}", name, hint)
         })?;
         if raw == 0 {
             anyhow::bail!(
@@ -1454,7 +1459,9 @@ fn compile_circuit_source(
     // output node, the built-in 5 Hz DC blocker is redundant (double-filtering
     // and adds 200ms settle time). Suggest --no-dc-block.
     let dc_block_auto_skip = !no_dc_block
-        && output_node_names.iter().all(|name| has_output_coupling_cap(&netlist, name));
+        && output_node_names
+            .iter()
+            .all(|name| has_output_coupling_cap(&netlist, name));
     if dc_block_auto_skip {
         println!(
             "  Output coupling cap detected on \"{}\". Consider --no-dc-block to avoid double filtering.",
@@ -1467,9 +1474,15 @@ fn compile_circuit_source(
     if oversampling == 1 {
         let (diodes, _opamps, _tubes) = count_nonlinear_devices(&netlist);
         if diodes >= 4 {
-            println!("  Hint: {} diodes detected. Consider --oversampling 4 to reduce aliasing.", diodes);
+            println!(
+                "  Hint: {} diodes detected. Consider --oversampling 4 to reduce aliasing.",
+                diodes
+            );
         } else if diodes >= 2 {
-            println!("  Hint: {} diodes detected. Consider --oversampling 2 to reduce aliasing.", diodes);
+            println!(
+                "  Hint: {} diodes detected. Consider --oversampling 2 to reduce aliasing.",
+                diodes
+            );
         }
     }
 
@@ -1608,7 +1621,10 @@ fn compile_circuit_source(
     // Compilation summary: report all auto-detected decisions in one place.
     println!();
     println!("  Summary:");
-    println!("    Circuit: {} nodes, {} nonlinear dimensions", generated.n, generated.m);
+    println!(
+        "    Circuit: {} nodes, {} nonlinear dimensions",
+        generated.n, generated.m
+    );
     println!("    Solver: {} ({})", solver_label, solver_reason);
     if routing.spectral_radius > 0.0 {
         println!("    Spectral radius: {:.4}", routing.spectral_radius);
@@ -1619,10 +1635,20 @@ fn compile_circuit_source(
     // would print and contradict each other on nodal circuits where auto-BE
     // swaps in BE matrices under the initial `backward_euler == false` config.
     if !generated.meta.backward_euler_auto {
-        println!("    Integration: {}", if backward_euler { "Backward Euler" } else { "Trapezoidal" });
+        println!(
+            "    Integration: {}",
+            if backward_euler {
+                "Backward Euler"
+            } else {
+                "Trapezoidal"
+            }
+        );
     }
     if max_iter != 50 {
-        println!("    Max NR iterations: {} (auto-tuned from M={}, ρ={:.2})", max_iter, kernel.m, routing.spectral_radius);
+        println!(
+            "    Max NR iterations: {} (auto-tuned from M={}, ρ={:.2})",
+            max_iter, kernel.m, routing.spectral_radius
+        );
     }
     if routing.k_ill_conditioned {
         println!("    K matrix: ill-conditioned (max|K| > 1e8, routed to nodal)");
@@ -1633,25 +1659,44 @@ fn compile_circuit_source(
     {
         let n_lin = mna.linearized_triodes.len() + mna.linearized_bjts.len();
         if n_lin > 0 {
-            println!("    Linearized devices: {} (K/S magnitude guards bypassed)", n_lin);
+            println!(
+                "    Linearized devices: {} (K/S magnitude guards bypassed)",
+                n_lin
+            );
         }
     }
     println!("    Oversampling: {}×", oversampling);
-    println!("    Input: node \"{}\", resistance {}Ω ({})", input_node, input_resistance, ir_source);
+    println!(
+        "    Input: node \"{}\", resistance {}Ω ({})",
+        input_node, input_resistance, ir_source
+    );
     println!(
         "    Output: node \"{}\", scale {}, clamp ±{} V",
         output_node_names.join(", "),
         output_scale,
         output_clamp,
     );
-    println!("    DC block: {}", if !no_dc_block { "enabled (5 Hz HPF)" } else { "disabled" });
+    println!(
+        "    DC block: {}",
+        if !no_dc_block {
+            "enabled (5 Hz HPF)"
+        } else {
+            "disabled"
+        }
+    );
     // DC operating point
     if generated.m > 0 {
         let meta = &generated.meta;
         if meta.dc_op_converged {
-            println!("    DC operating point: converged ({}, {} iterations)", meta.dc_op_method, meta.dc_op_iterations);
+            println!(
+                "    DC operating point: converged ({}, {} iterations)",
+                meta.dc_op_method, meta.dc_op_iterations
+            );
         } else {
-            println!("    DC operating point: *** DID NOT CONVERGE *** ({}, {} iterations)", meta.dc_op_method, meta.dc_op_iterations);
+            println!(
+                "    DC operating point: *** DID NOT CONVERGE *** ({}, {} iterations)",
+                meta.dc_op_method, meta.dc_op_iterations
+            );
         }
         if meta.backward_euler_auto {
             println!("    Integration: Backward Euler (auto-selected — trap unstable or Nyquist-marginal; see RUST_LOG=info for details)");
@@ -1661,10 +1706,16 @@ fn compile_circuit_source(
         }
     }
     if !forward_active.is_empty() {
-        println!("    Forward-active reduction: {} BJTs linearized to 1D", forward_active.len());
+        println!(
+            "    Forward-active reduction: {} BJTs linearized to 1D",
+            forward_active.len()
+        );
     }
     if !grid_off_pentodes.is_empty() {
-        println!("    Grid-off reduction: {} pentodes reduced to 2D", grid_off_pentodes.len());
+        println!(
+            "    Grid-off reduction: {} pentodes reduced to 2D",
+            grid_off_pentodes.len()
+        );
     }
     if linearize_outcome.bjts_linearized > 0 {
         println!(
@@ -1785,9 +1836,7 @@ fn compile_circuit_source(
                     ccw_pot_index: wg.ccw_pot_index,
                     total_resistance: wg.total_resistance,
                     default_position: wg.default_position,
-                    name: wg.label
-                        .clone()
-                        .unwrap_or_else(|| format!("Wiper {}", idx)),
+                    name: wg.label.clone().unwrap_or_else(|| format!("Wiper {}", idx)),
                 })
                 .collect();
 
@@ -1804,7 +1853,12 @@ fn compile_circuit_source(
                         .pot_members
                         .iter()
                         .map(|&(pot_idx, inverted)| {
-                            (pot_idx, mna.pots[pot_idx].min_resistance, mna.pots[pot_idx].max_resistance, inverted)
+                            (
+                                pot_idx,
+                                mna.pots[pot_idx].min_resistance,
+                                mna.pots[pot_idx].max_resistance,
+                                inverted,
+                            )
                         })
                         .collect(),
                     wiper_members: gg
@@ -1812,7 +1866,12 @@ fn compile_circuit_source(
                         .iter()
                         .map(|&(wg_idx, inverted)| {
                             let wg = &mna.wiper_groups[wg_idx];
-                            (wg.cw_pot_index, wg.ccw_pot_index, wg.total_resistance, inverted)
+                            (
+                                wg.cw_pot_index,
+                                wg.ccw_pot_index,
+                                wg.total_resistance,
+                                inverted,
+                            )
                         })
                         .collect(),
                 })
@@ -1847,9 +1906,7 @@ fn compile_circuit_source(
             // Filter out gang-claimed wipers from individual wiper params
             let wiper_params: Vec<_> = wiper_params
                 .into_iter()
-                .filter(|w| {
-                    !gang_claimed_wipers.contains(&w.cw_pot_index)
-                })
+                .filter(|w| !gang_claimed_wipers.contains(&w.cw_pot_index))
                 .collect();
 
             let plugin_options = plugin_template::PluginOptions {
@@ -2092,7 +2149,7 @@ fn simulate_circuit_source(
     opts: &SimulateOptions,
 ) -> Result<()> {
     use melange_solver::{
-        codegen::{CodeGenerator, CodegenConfig, routing},
+        codegen::{routing, CodeGenerator, CodegenConfig},
         dk::DkKernel,
         mna::MnaSystem,
         parser::Netlist,
@@ -2118,31 +2175,42 @@ fn simulate_circuit_source(
 
     // Step 2: Parse netlist
     println!("Step 1: Parsing SPICE netlist...");
-    let mut netlist = Netlist::parse(&netlist_str)
-        .with_context(|| "Failed to parse SPICE netlist")?;
+    let mut netlist =
+        Netlist::parse(&netlist_str).with_context(|| "Failed to parse SPICE netlist")?;
     if !netlist.subcircuits.is_empty() {
-        netlist.expand_subcircuits()
+        netlist
+            .expand_subcircuits()
             .with_context(|| "Failed to expand subcircuits")?;
     }
     println!("  {} elements", netlist.elements.len());
 
     // Step 3: Build MNA
     println!("Step 2: Building MNA system...");
-    let mut mna = MnaSystem::from_netlist(&netlist)
-        .with_context(|| "Failed to build MNA system")?;
+    let mut mna =
+        MnaSystem::from_netlist(&netlist).with_context(|| "Failed to build MNA system")?;
 
     let input_node_raw = mna.node_map.get(opts.input_node).copied().ok_or_else(|| {
-        anyhow::anyhow!("Input node '{}' not found. Available: {:?}",
-            opts.input_node, mna.node_map.keys().collect::<Vec<_>>())
+        anyhow::anyhow!(
+            "Input node '{}' not found. Available: {:?}",
+            opts.input_node,
+            mna.node_map.keys().collect::<Vec<_>>()
+        )
     })?;
-    if input_node_raw == 0 { anyhow::bail!("Input node cannot be ground"); }
+    if input_node_raw == 0 {
+        anyhow::bail!("Input node cannot be ground");
+    }
     let input_node_idx = input_node_raw - 1;
 
     let output_node_raw = mna.node_map.get(opts.output_node).copied().ok_or_else(|| {
-        anyhow::anyhow!("Output node '{}' not found. Available: {:?}",
-            opts.output_node, mna.node_map.keys().collect::<Vec<_>>())
+        anyhow::anyhow!(
+            "Output node '{}' not found. Available: {:?}",
+            opts.output_node,
+            mna.node_map.keys().collect::<Vec<_>>()
+        )
     })?;
-    if output_node_raw == 0 { anyhow::bail!("Output node cannot be ground"); }
+    if output_node_raw == 0 {
+        anyhow::bail!("Output node cannot be ground");
+    }
     let output_node_idx = output_node_raw - 1;
 
     // Resolve probes — each name must be an existing non-ground node.
@@ -2150,12 +2218,17 @@ fn simulate_circuit_source(
     // `output_nodes` slot ordering as the generated `process_sample` return.
     let mut probe_indices: Vec<usize> = Vec::with_capacity(opts.probes.len());
     for probe_name in opts.probes {
-        let raw = mna.node_map.get(probe_name.as_str()).copied().ok_or_else(|| {
-            anyhow::anyhow!(
-                "Probe node '{}' not found. Available: {:?}",
-                probe_name, mna.node_map.keys().collect::<Vec<_>>()
-            )
-        })?;
+        let raw = mna
+            .node_map
+            .get(probe_name.as_str())
+            .copied()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Probe node '{}' not found. Available: {:?}",
+                    probe_name,
+                    mna.node_map.keys().collect::<Vec<_>>()
+                )
+            })?;
         if raw == 0 {
             anyhow::bail!("Probe node '{}' is ground (not probeable)", probe_name);
         }
@@ -2171,20 +2244,30 @@ fn simulate_circuit_source(
         (1.0, "default")
     };
     if !(input_resistance > 0.0 && input_resistance.is_finite()) {
-        anyhow::bail!("input resistance must be positive and finite, got {}", input_resistance);
+        anyhow::bail!(
+            "input resistance must be positive and finite, got {}",
+            input_resistance
+        );
     }
-    println!("  Input resistance: {} ohm ({})", input_resistance, ir_source);
+    println!(
+        "  Input resistance: {} ohm ({})",
+        input_resistance, ir_source
+    );
     let input_conductance = 1.0 / input_resistance;
     if input_node_idx < mna.n {
         mna.g[input_node_idx][input_node_idx] += input_conductance;
     }
 
-    println!("  {} nodes, {} nonlinear devices", mna.n, mna.nonlinear_devices.len());
+    println!(
+        "  {} nodes, {} nonlinear devices",
+        mna.n,
+        mna.nonlinear_devices.len()
+    );
 
     // Stamp junction caps
     {
-        let device_slots = melange_solver::codegen::ir::CircuitIR::build_device_info(&netlist)
-            .unwrap_or_default();
+        let device_slots =
+            melange_solver::codegen::ir::CircuitIR::build_device_info(&netlist).unwrap_or_default();
         if !device_slots.is_empty() {
             mna.stamp_device_junction_caps(&device_slots);
         }
@@ -2201,13 +2284,14 @@ fn simulate_circuit_source(
     };
     // See compile path for rationale — mirrors the same gate.
     let forward_active = if opts.solver == "nodal"
-        || (opts.solver == "auto"
-            && should_skip_fa_for_nodal_reroute(&mna, opts.sample_rate))
+        || (opts.solver == "auto" && should_skip_fa_for_nodal_reroute(&mna, opts.sample_rate))
     {
         std::collections::HashSet::new()
     } else {
         melange_solver::codegen::ir::CircuitIR::detect_forward_active_bjts(
-            &mna, &netlist, &config_for_fa,
+            &mna,
+            &netlist,
+            &config_for_fa,
         )
     };
     if !forward_active.is_empty() {
@@ -2223,12 +2307,11 @@ fn simulate_circuit_source(
         }
         // Use build_device_info_with_mna so FA-reduced BJT dims are reflected,
         // giving correct start_idx for junction cap stamping.
-        let device_slots =
-            melange_solver::codegen::ir::CircuitIR::build_device_info_with_mna(
-                &netlist,
-                Some(&mna),
-            )
-            .unwrap_or_default();
+        let device_slots = melange_solver::codegen::ir::CircuitIR::build_device_info_with_mna(
+            &netlist,
+            Some(&mna),
+        )
+        .unwrap_or_default();
         if !device_slots.is_empty() {
             mna.stamp_device_junction_caps(&device_slots);
         }
@@ -2264,12 +2347,8 @@ fn simulate_circuit_source(
     // BJT junction-cap preflight — see compile path for rationale. Keeping
     // simulate in sync with compile means `melange simulate` hears the
     // same plugin the user will eventually `melange compile`.
-    let dc_preflight = preflight_relinearize_bjt_caps(
-        &mut mna,
-        &netlist,
-        input_node_idx,
-        input_resistance,
-    );
+    let dc_preflight =
+        preflight_relinearize_bjt_caps(&mut mna, &netlist, input_node_idx, input_resistance);
 
     // Step 4: Build DK kernel and route
     let has_inductors = !mna.inductors.is_empty()
@@ -2282,20 +2361,31 @@ fn simulate_circuit_source(
         match DkKernel::from_mna_augmented(&mna, opts.sample_rate) {
             Ok(k) => k,
             Err(e) => {
-                if opts.solver == "dk" { anyhow::bail!("DK kernel failed: {e}"); }
+                if opts.solver == "dk" {
+                    anyhow::bail!("DK kernel failed: {e}");
+                }
                 println!("  Augmented DK kernel failed: {e}, auto-selecting nodal");
                 dk_failed = true;
                 let m = mna.m;
                 let n = mna.n_aug;
                 DkKernel {
-                    n, m, n_nodes: mna.n, num_devices: mna.num_devices,
+                    n,
+                    m,
+                    n_nodes: mna.n,
+                    num_devices: mna.num_devices,
                     sample_rate: opts.sample_rate,
-                    s: vec![0.0; n * n], a_neg: vec![0.0; n * n],
-                    k: vec![0.0; m * m], n_v: vec![0.0; m * n],
-                    n_i: vec![0.0; n * m], rhs_const: vec![0.0; n],
-                    inductors: vec![], coupled_inductors: vec![],
-                    transformer_groups: vec![], pots: vec![],
-                    wiper_groups: vec![], gang_groups: vec![],
+                    s: vec![0.0; n * n],
+                    a_neg: vec![0.0; n * n],
+                    k: vec![0.0; m * m],
+                    n_v: vec![0.0; m * n],
+                    n_i: vec![0.0; n * m],
+                    rhs_const: vec![0.0; n],
+                    inductors: vec![],
+                    coupled_inductors: vec![],
+                    transformer_groups: vec![],
+                    pots: vec![],
+                    wiper_groups: vec![],
+                    gang_groups: vec![],
                 }
             }
         }
@@ -2303,7 +2393,9 @@ fn simulate_circuit_source(
         match DkKernel::from_mna(&mna, opts.sample_rate) {
             Ok(k) => k,
             Err(e) => {
-                if opts.solver == "dk" { anyhow::bail!("DK kernel failed: {e}"); }
+                if opts.solver == "dk" {
+                    anyhow::bail!("DK kernel failed: {e}");
+                }
                 println!("  DK kernel failed: {e}, auto-selecting nodal");
                 dk_failed = true;
                 // Try augmented; if that also fails, build dummy kernel
@@ -2313,14 +2405,23 @@ fn simulate_circuit_source(
                         let m = mna.m;
                         let n = mna.n_aug;
                         DkKernel {
-                            n, m, n_nodes: mna.n, num_devices: mna.num_devices,
+                            n,
+                            m,
+                            n_nodes: mna.n,
+                            num_devices: mna.num_devices,
                             sample_rate: opts.sample_rate,
-                            s: vec![0.0; n * n], a_neg: vec![0.0; n * n],
-                            k: vec![0.0; m * m], n_v: vec![0.0; m * n],
-                            n_i: vec![0.0; n * m], rhs_const: vec![0.0; n],
-                            inductors: vec![], coupled_inductors: vec![],
-                            transformer_groups: vec![], pots: vec![],
-                            wiper_groups: vec![], gang_groups: vec![],
+                            s: vec![0.0; n * n],
+                            a_neg: vec![0.0; n * n],
+                            k: vec![0.0; m * m],
+                            n_v: vec![0.0; m * n],
+                            n_i: vec![0.0; n * m],
+                            rhs_const: vec![0.0; n],
+                            inductors: vec![],
+                            coupled_inductors: vec![],
+                            transformer_groups: vec![],
+                            pots: vec![],
+                            wiper_groups: vec![],
+                            gang_groups: vec![],
                         }
                     }
                 }
@@ -2336,7 +2437,11 @@ fn simulate_circuit_source(
         "dk" => false,
         _ => decision.route == routing::SolverRoute::Nodal,
     };
-    println!("  Solver: {} ({})", if use_nodal { "nodal" } else { "DK" }, decision.reason);
+    println!(
+        "  Solver: {} ({})",
+        if use_nodal { "nodal" } else { "DK" },
+        decision.reason
+    );
 
     // When routing to nodal, expand BJT internal nodes so parasitic RB/RC/RE
     // are modeled at the MNA level (eliminates per-device inner NR). Gate on
@@ -2362,8 +2467,10 @@ fn simulate_circuit_source(
         let skip_expansion = k_diag_min < -100.0;
         if !skip_expansion {
             let device_slots = melange_solver::codegen::ir::CircuitIR::build_device_info_with_mna(
-                &netlist, Some(&mna),
-            ).unwrap_or_default();
+                &netlist,
+                Some(&mna),
+            )
+            .unwrap_or_default();
             if !device_slots.is_empty() {
                 mna.expand_bjt_internal_nodes(&device_slots);
             }
@@ -2406,10 +2513,12 @@ fn simulate_circuit_source(
     };
     let generator = CodeGenerator::new(config);
     let generated = if use_nodal {
-        generator.generate_nodal(&mna, &netlist)
+        generator
+            .generate_nodal(&mna, &netlist)
             .with_context(|| "Nodal codegen failed")?
     } else {
-        generator.generate_with_dc_op(&kernel, &mna, &netlist, dc_preflight)
+        generator
+            .generate_with_dc_op(&kernel, &mna, &netlist, dc_preflight)
             .with_context(|| "DK codegen failed")?
     };
     println!("  {} lines of code", generated.code.lines().count());
@@ -2423,16 +2532,21 @@ fn simulate_circuit_source(
         opts.sample_rate,
         &[], // pot overrides (future)
         &[], // switch overrides (future)
-        if opts.input_audio.is_none() { Some(opts.amplitude) } else { None },
+        if opts.input_audio.is_none() {
+            Some(opts.amplitude)
+        } else {
+            None
+        },
         1000.0, // test tone freq
         opts.duration,
         &probe_names,
     );
     let full_source = format!("{}\n{}", generated.code, simulate_main);
 
-    let binary_cache = codegen_runner::BinaryCache::new()
-        .with_context(|| "Failed to create binary cache")?;
-    let compiled = binary_cache.compile(&full_source, "simulate")
+    let binary_cache =
+        codegen_runner::BinaryCache::new().with_context(|| "Failed to create binary cache")?;
+    let compiled = binary_cache
+        .compile(&full_source, "simulate")
         .with_context(|| "Compilation failed")?;
     if compiled.cached {
         println!("  Using cached binary");
@@ -2455,7 +2569,8 @@ fn simulate_circuit_source(
         cmd.arg(csv_path.to_str().unwrap_or("probes.csv"));
     }
 
-    let result = cmd.output()
+    let result = cmd
+        .output()
         .with_context(|| "Failed to run compiled binary")?;
 
     if !result.status.success() {
@@ -2586,7 +2701,10 @@ fn should_skip_fa_for_nodal_reroute(
     let decision = routing::auto_route(&kernel, mna, dk_failed);
     log::info!(
         "Pre-route (un-reduced MNA, N={}, M={}): route={:?}, reason={}",
-        kernel.n, kernel.m, decision.route, decision.reason
+        kernel.n,
+        kernel.m,
+        decision.route,
+        decision.reason
     );
     decision.route == SolverRoute::Nodal
 }
@@ -2691,9 +2809,7 @@ fn apply_linearize_reductions(
         }
         for name in &linearize_names {
             let upper = name.to_ascii_uppercase();
-            if !linearized_bjts_set.contains(&upper)
-                && !linearized_triodes_set.contains(&upper)
-            {
+            if !linearized_bjts_set.contains(&upper) && !linearized_triodes_set.contains(&upper) {
                 println!(
                     "  Warning: .linearize device '{}' is not a BJT or triode (ignored)",
                     name
@@ -2702,8 +2818,7 @@ fn apply_linearize_reductions(
         }
     }
 
-    let has_linearized =
-        !linearized_bjts_set.is_empty() || !linearized_triodes_set.is_empty();
+    let has_linearized = !linearized_bjts_set.is_empty() || !linearized_triodes_set.is_empty();
     if !has_linearized {
         return Ok(LinearizeOutcome::default());
     }
@@ -2711,21 +2826,15 @@ fn apply_linearize_reductions(
     // DC OP on the current (post-FA, pre-linearize) MNA to get the bias
     // point for small-signal g-parameter extraction.
     let device_slots =
-        melange_solver::codegen::ir::CircuitIR::build_device_info_with_mna(
-            netlist,
-            Some(mna),
-        )
-        .unwrap_or_default();
+        melange_solver::codegen::ir::CircuitIR::build_device_info_with_mna(netlist, Some(mna))
+            .unwrap_or_default();
     let dc_op_config = melange_solver::dc_op::DcOpConfig {
         input_node: input_node_idx,
         input_resistance,
         ..melange_solver::dc_op::DcOpConfig::default()
     };
-    let dc_result = melange_solver::dc_op::solve_dc_operating_point(
-        mna,
-        &device_slots,
-        &dc_op_config,
-    );
+    let dc_result =
+        melange_solver::dc_op::solve_dc_operating_point(mna, &device_slots, &dc_op_config);
 
     // Extract BJT small-signal g-params (gm, gpi, gmu, go) at DC bias.
     let mut bjt_lin_infos = Vec::new();
@@ -2751,9 +2860,7 @@ fn apply_linearize_reductions(
                     let exp_bc = (vbc_eff / bp.vt).clamp(-40.0, 40.0).exp();
 
                     let gm = bp.is / nf_vt * exp_be;
-                    let gmu = (bp.is / bp.vt * exp_bc
-                        + bp.is / (bp.beta_r * bp.vt) * exp_bc)
-                        .abs();
+                    let gmu = (bp.is / bp.vt * exp_bc + bp.is / (bp.beta_r * bp.vt) * exp_bc).abs();
                     let gpi = bp.is / (bp.beta_f * nf_vt) * exp_be;
                     let go = bp.is / (bp.beta_r * bp.vt) * exp_bc;
 
@@ -2907,11 +3014,8 @@ fn apply_linearize_reductions(
     }
 
     // Re-stamp junction caps against the reduced-dimension MNA.
-    let ds = melange_solver::codegen::ir::CircuitIR::build_device_info_with_mna(
-        netlist,
-        Some(mna),
-    )
-    .unwrap_or_default();
+    let ds = melange_solver::codegen::ir::CircuitIR::build_device_info_with_mna(netlist, Some(mna))
+        .unwrap_or_default();
     if !ds.is_empty() {
         mna.stamp_device_junction_caps(&ds);
     }
@@ -2939,7 +3043,7 @@ fn analyze_freq_response(
     tube_grid_fa: &str,
 ) -> Result<()> {
     use melange_solver::{
-        codegen::{CodeGenerator, CodegenConfig, routing},
+        codegen::{routing, CodeGenerator, CodegenConfig},
         dk::DkKernel,
         mna::MnaSystem,
         parser::Netlist,
@@ -2960,10 +3064,11 @@ fn analyze_freq_response(
         }
     };
 
-    let mut netlist = Netlist::parse(&netlist_str)
-        .with_context(|| "Failed to parse SPICE netlist")?;
+    let mut netlist =
+        Netlist::parse(&netlist_str).with_context(|| "Failed to parse SPICE netlist")?;
     if !netlist.subcircuits.is_empty() {
-        netlist.expand_subcircuits()
+        netlist
+            .expand_subcircuits()
             .with_context(|| "Failed to expand subcircuits")?;
     }
 
@@ -3003,13 +3108,15 @@ fn analyze_freq_response(
                 let pos = val_str.parse::<f64>().map_err(|_| {
                     anyhow::anyhow!(
                         "Invalid wiper position '{}' in --pot {} (expected 0.0..=1.0)",
-                        val_str, spec
+                        val_str,
+                        spec
                     )
                 })?;
                 if !pos.is_finite() || !(0.0..=1.0).contains(&pos) {
                     anyhow::bail!(
                         "Wiper position must be in 0.0..=1.0: {} (got {})",
-                        spec, pos
+                        spec,
+                        pos
                     );
                 }
                 let r_total = wiper.total_resistance;
@@ -3034,10 +3141,7 @@ fn analyze_freq_response(
                         false
                     });
                     if !found {
-                        anyhow::bail!(
-                            "Wiper resistor '{}' not found in netlist",
-                            resistor_name
-                        );
+                        anyhow::bail!("Wiper resistor '{}' not found in netlist", resistor_name);
                     }
                     for p in netlist.pots.iter_mut() {
                         if p.resistor_name.eq_ignore_ascii_case(resistor_name) {
@@ -3266,7 +3370,10 @@ fn analyze_freq_response(
             input_resistance
         );
     }
-    eprintln!("  Input resistance: {} ohm ({})", input_resistance, ir_source);
+    eprintln!(
+        "  Input resistance: {} ohm ({})",
+        input_resistance, ir_source
+    );
     let input_conductance = 1.0 / input_resistance;
     if input_node_idx < mna.n {
         mna.g[input_node_idx][input_node_idx] += input_conductance;
@@ -3296,7 +3403,9 @@ fn analyze_freq_response(
         std::collections::HashSet::new()
     } else {
         melange_solver::codegen::ir::CircuitIR::detect_forward_active_bjts(
-            &mna, &netlist, &config_for_fa,
+            &mna,
+            &netlist,
+            &config_for_fa,
         )
     };
     if !forward_active.is_empty() {
@@ -3312,12 +3421,11 @@ fn analyze_freq_response(
         }
         // Use build_device_info_with_mna so FA-reduced BJT dims are reflected,
         // giving correct start_idx for junction cap stamping.
-        let device_slots =
-            melange_solver::codegen::ir::CircuitIR::build_device_info_with_mna(
-                &netlist,
-                Some(&mna),
-            )
-            .unwrap_or_default();
+        let device_slots = melange_solver::codegen::ir::CircuitIR::build_device_info_with_mna(
+            &netlist,
+            Some(&mna),
+        )
+        .unwrap_or_default();
         if !device_slots.is_empty() {
             mna.stamp_device_junction_caps(&device_slots);
         }
@@ -3355,12 +3463,8 @@ fn analyze_freq_response(
     // BJT junction-cap preflight — see compile path for rationale. Analyze
     // must match compile so the harmonic / frequency-response curve reflects
     // what the user will hear in the generated plugin.
-    let dc_preflight = preflight_relinearize_bjt_caps(
-        &mut mna,
-        &netlist,
-        input_node_idx,
-        input_resistance,
-    );
+    let dc_preflight =
+        preflight_relinearize_bjt_caps(&mut mna, &netlist, input_node_idx, input_resistance);
 
     // Build DK kernel and route
     let has_inductors = !mna.inductors.is_empty()
@@ -3377,14 +3481,23 @@ fn analyze_freq_response(
                 let m = mna.m;
                 let n = mna.n_aug;
                 DkKernel {
-                    n, m, n_nodes: mna.n, num_devices: mna.num_devices,
+                    n,
+                    m,
+                    n_nodes: mna.n,
+                    num_devices: mna.num_devices,
                     sample_rate,
-                    s: vec![0.0; n * n], a_neg: vec![0.0; n * n],
-                    k: vec![0.0; m * m], n_v: vec![0.0; m * n],
-                    n_i: vec![0.0; n * m], rhs_const: vec![0.0; n],
-                    inductors: vec![], coupled_inductors: vec![],
-                    transformer_groups: vec![], pots: vec![],
-                    wiper_groups: vec![], gang_groups: vec![],
+                    s: vec![0.0; n * n],
+                    a_neg: vec![0.0; n * n],
+                    k: vec![0.0; m * m],
+                    n_v: vec![0.0; m * n],
+                    n_i: vec![0.0; n * m],
+                    rhs_const: vec![0.0; n],
+                    inductors: vec![],
+                    coupled_inductors: vec![],
+                    transformer_groups: vec![],
+                    pots: vec![],
+                    wiper_groups: vec![],
+                    gang_groups: vec![],
                 }
             }
         }
@@ -3400,14 +3513,23 @@ fn analyze_freq_response(
                         let m = mna.m;
                         let n = mna.n_aug;
                         DkKernel {
-                            n, m, n_nodes: mna.n, num_devices: mna.num_devices,
+                            n,
+                            m,
+                            n_nodes: mna.n,
+                            num_devices: mna.num_devices,
                             sample_rate,
-                            s: vec![0.0; n * n], a_neg: vec![0.0; n * n],
-                            k: vec![0.0; m * m], n_v: vec![0.0; m * n],
-                            n_i: vec![0.0; n * m], rhs_const: vec![0.0; n],
-                            inductors: vec![], coupled_inductors: vec![],
-                            transformer_groups: vec![], pots: vec![],
-                            wiper_groups: vec![], gang_groups: vec![],
+                            s: vec![0.0; n * n],
+                            a_neg: vec![0.0; n * n],
+                            k: vec![0.0; m * m],
+                            n_v: vec![0.0; m * n],
+                            n_i: vec![0.0; n * m],
+                            rhs_const: vec![0.0; n],
+                            inductors: vec![],
+                            coupled_inductors: vec![],
+                            transformer_groups: vec![],
+                            pots: vec![],
+                            wiper_groups: vec![],
+                            gang_groups: vec![],
                         }
                     }
                 }
@@ -3417,12 +3539,17 @@ fn analyze_freq_response(
 
     let decision = routing::auto_route(&kernel, &mna, dk_failed);
     let use_nodal = decision.route == routing::SolverRoute::Nodal;
-    eprintln!("  N={}, M={}, solver: {}", kernel.n, kernel.m, decision.reason);
+    eprintln!(
+        "  N={}, M={}, solver: {}",
+        kernel.n, kernel.m, decision.reason
+    );
 
     if use_nodal {
         let device_slots = melange_solver::codegen::ir::CircuitIR::build_device_info_with_mna(
-            &netlist, Some(&mna),
-        ).unwrap_or_default();
+            &netlist,
+            Some(&mna),
+        )
+        .unwrap_or_default();
         if !device_slots.is_empty() {
             mna.expand_bjt_internal_nodes(&device_slots);
         }
@@ -3455,16 +3582,23 @@ fn analyze_freq_response(
     };
     let generator = CodeGenerator::new(config);
     let generated = if use_nodal {
-        generator.generate_nodal(&mna, &netlist)
+        generator
+            .generate_nodal(&mna, &netlist)
             .with_context(|| "Nodal codegen failed")?
     } else {
-        generator.generate_with_dc_op(&kernel, &mna, &netlist, dc_preflight)
+        generator
+            .generate_with_dc_op(&kernel, &mna, &netlist, dc_preflight)
             .with_context(|| "DK codegen failed")?
     };
 
     // Generate frequency list
     let frequencies = generate_log_frequencies(start_freq, end_freq, points_per_decade);
-    eprintln!("  {} frequency points from {:.0} Hz to {:.0} Hz", frequencies.len(), start_freq, end_freq);
+    eprintln!(
+        "  {} frequency points from {:.0} Hz to {:.0} Hz",
+        frequencies.len(),
+        start_freq,
+        end_freq
+    );
 
     // Determine settle time
     let settle_secs = if has_inductors { 5.0 } else { 0.5 };
@@ -3490,9 +3624,10 @@ fn analyze_freq_response(
     );
     let full_source = format!("{}\n{}", generated.code, analyze_main);
 
-    let binary_cache = codegen_runner::BinaryCache::new()
-        .with_context(|| "Failed to create binary cache")?;
-    let compiled = binary_cache.compile(&full_source, "analyze")
+    let binary_cache =
+        codegen_runner::BinaryCache::new().with_context(|| "Failed to create binary cache")?;
+    let compiled = binary_cache
+        .compile(&full_source, "analyze")
         .with_context(|| "Compilation failed")?;
     if compiled.cached {
         eprintln!("  Using cached binary");
@@ -3857,7 +3992,7 @@ fn build_device_slots(
                         tamb: find_param(&model_name, "TAMB").unwrap_or(300.15),
                     }),
                     has_internal_mna_nodes: false,
-            vg2k_frozen: 0.0,
+                    vg2k_frozen: 0.0,
                 });
             }
             melange_solver::mna::NonlinearDeviceType::Bjt => {
@@ -3917,7 +4052,7 @@ fn build_device_slots(
                         tamb: 300.15,
                     }),
                     has_internal_mna_nodes: false,
-            vg2k_frozen: 0.0,
+                    vg2k_frozen: 0.0,
                 });
             }
             melange_solver::mna::NonlinearDeviceType::Jfet => {
@@ -3965,7 +4100,7 @@ fn build_device_slots(
                         rs: find_param(&model_name, "RS").unwrap_or(0.0),
                     }),
                     has_internal_mna_nodes: false,
-            vg2k_frozen: 0.0,
+                    vg2k_frozen: 0.0,
                 });
             }
             melange_solver::mna::NonlinearDeviceType::Mosfet => {
@@ -4013,7 +4148,7 @@ fn build_device_slots(
                         bulk_node: 0,
                     }),
                     has_internal_mna_nodes: false,
-            vg2k_frozen: 0.0,
+                    vg2k_frozen: 0.0,
                 });
             }
             melange_solver::mna::NonlinearDeviceType::Tube => {
@@ -4072,7 +4207,7 @@ fn build_device_slots(
                         tamb: 300.15,
                     }),
                     has_internal_mna_nodes: false,
-            vg2k_frozen: 0.0,
+                    vg2k_frozen: 0.0,
                 });
             }
             melange_solver::mna::NonlinearDeviceType::Vca => {
@@ -4098,13 +4233,9 @@ fn build_device_slots(
                     device_type: DeviceType::Vca,
                     start_idx: dev_info.start_idx,
                     dimension: 2,
-                    params: DeviceParams::Vca(melange_solver::VcaParams {
-                        vscale,
-                        g0,
-                        thd,
-                    }),
+                    params: DeviceParams::Vca(melange_solver::VcaParams { vscale, g0, thd }),
                     has_internal_mna_nodes: false,
-            vg2k_frozen: 0.0,
+                    vg2k_frozen: 0.0,
                 });
             }
             melange_solver::mna::NonlinearDeviceType::BjtForwardActive => {
@@ -4164,7 +4295,7 @@ fn build_device_slots(
                         tamb: 300.15,
                     }),
                     has_internal_mna_nodes: false,
-            vg2k_frozen: 0.0,
+                    vg2k_frozen: 0.0,
                 });
             }
         }
@@ -4565,7 +4696,11 @@ fn handle_cache(action: CacheAction) -> Result<()> {
             let bin_stats = bin_cache.stats();
             println!();
             println!("Compiled binaries:");
-            println!("  {} files ({})", bin_stats.total_files, bin_stats.formatted_size());
+            println!(
+                "  {} files ({})",
+                bin_stats.total_files,
+                bin_stats.formatted_size()
+            );
             Ok(())
         }
         CacheAction::Clear => {

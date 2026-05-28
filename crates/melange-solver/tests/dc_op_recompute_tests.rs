@@ -457,8 +457,7 @@ fn e4_diode_flag_on_emits_device_eval() {
         "E.4: diode slot must produce `let jdev_0_0 = diode_conductance(…)`"
     );
     assert!(
-        body.contains("let mut i_nl: [f64; M] = [0.0; M];")
-            && body.contains("i_nl[0] = i_dev0;"),
+        body.contains("let mut i_nl: [f64; M] = [0.0; M];") && body.contains("i_nl[0] = i_dev0;"),
         "E.4: must pack i_dev{{i}} into i_nl array"
     );
     assert!(

@@ -33,10 +33,7 @@ fn dk_residual(
 }
 
 /// Compute the analytical Jacobian J = I - K * J_dev (block-diagonal).
-fn analytical_jacobian(
-    kernel: &DkKernel,
-    j_dev: &[Vec<f64>],
-) -> Vec<Vec<f64>> {
+fn analytical_jacobian(kernel: &DkKernel, j_dev: &[Vec<f64>]) -> Vec<Vec<f64>> {
     let m = kernel.m;
     // K * J_dev
     let mut kj = vec![vec![0.0; m]; m];
@@ -122,7 +119,12 @@ Vcc vcc 0 DC 250
 fn build_kernel(spice: &str) -> (DkKernel, MnaSystem) {
     let netlist = Netlist::parse(spice).unwrap();
     let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
-    let input_node = mna.node_map.get("in").copied().unwrap_or(1).saturating_sub(1);
+    let input_node = mna
+        .node_map
+        .get("in")
+        .copied()
+        .unwrap_or(1)
+        .saturating_sub(1);
     if input_node < mna.n {
         mna.g[input_node][input_node] += 1.0;
     }
@@ -140,9 +142,7 @@ fn test_jacobian_fd_diode_clipper() {
     let n_vt = 1.752 * 0.025851991;
     let d1 = DiodeShockley::new(is, 1.0, n_vt);
 
-    let i_fn = |v: &[f64]| -> Vec<f64> {
-        vec![d1.current_at(v[0]), d1.current_at(v[1])]
-    };
+    let i_fn = |v: &[f64]| -> Vec<f64> { vec![d1.current_at(v[0]), d1.current_at(v[1])] };
     let j_dev_fn = |v: &[f64]| -> Vec<Vec<f64>> {
         vec![
             vec![d1.conductance_at(v[0]), 0.0],
@@ -249,13 +249,12 @@ fn test_jacobian_fd_triode() {
     use melange_devices::tube::KorenTriode;
     let tube = KorenTriode::new(100.0, 1.4, 1060.0, 600.0, 300.0);
 
-    let i_fn = |v: &[f64]| -> Vec<f64> {
-        vec![tube.plate_current(v[0], v[1]), tube.grid_current(v[0])]
-    };
+    let i_fn =
+        |v: &[f64]| -> Vec<f64> { vec![tube.plate_current(v[0], v[1]), tube.grid_current(v[0])] };
     let j_dev_fn = |v: &[f64]| -> Vec<Vec<f64>> {
         let jac = tube.jacobian(&[v[0], v[1]]);
         vec![
-            vec![jac[0], jac[1]], // dIp/dVgk, dIp/dVpk
+            vec![jac[0], jac[1]],                        // dIp/dVgk, dIp/dVpk
             vec![tube.grid_current_jacobian(v[0]), 0.0], // dIg/dVgk, dIg/dVpk
         ]
     };
@@ -294,9 +293,7 @@ fn test_jacobian_at_dc_op_is_near_identity_residual() {
     let n_vt = 1.752 * 0.025851991;
     let d1 = DiodeShockley::new(is, 1.0, n_vt);
 
-    let i_fn = |v: &[f64]| -> Vec<f64> {
-        vec![d1.current_at(v[0]), d1.current_at(v[1])]
-    };
+    let i_fn = |v: &[f64]| -> Vec<f64> { vec![d1.current_at(v[0]), d1.current_at(v[1])] };
 
     // At v_nl = [0, 0] (no input), residual should be near zero
     let v_nl = vec![0.0; dk.m];
@@ -322,9 +319,7 @@ fn test_nr_step_decreases_residual() {
     let n_vt = 1.752 * 0.025851991;
     let d1 = DiodeShockley::new(is, 1.0, n_vt);
 
-    let i_fn = |v: &[f64]| -> Vec<f64> {
-        vec![d1.current_at(v[0]), d1.current_at(v[1])]
-    };
+    let i_fn = |v: &[f64]| -> Vec<f64> { vec![d1.current_at(v[0]), d1.current_at(v[1])] };
     let j_dev_fn = |v: &[f64]| -> Vec<Vec<f64>> {
         vec![
             vec![d1.conductance_at(v[0]), 0.0],

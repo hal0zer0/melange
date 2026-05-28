@@ -14,12 +14,12 @@
 //! - `nr_helpers` — shared NR helper functions (voltage limiting, convergence)
 //! - `nodal_emitter` — nodal-path emit methods (Schur + full-LU)
 
-mod helpers;
+mod dc_op_emitter;
 mod dk_emitter;
 mod dk_solver;
-mod nr_helpers;
+mod helpers;
 mod nodal_emitter;
-mod dc_op_emitter;
+mod nr_helpers;
 
 use tera::{Context, Tera};
 
@@ -41,7 +41,8 @@ const TMPL_DEVICE_TUBE: &str = include_str!("../../../templates/rust/device_tube
 const TMPL_DEVICE_VCA: &str = include_str!("../../../templates/rust/device_vca.rs.tera");
 const TMPL_BUILD_RHS: &str = include_str!("../../../templates/rust/build_rhs.rs.tera");
 const TMPL_MAT_VEC_MUL_S: &str = include_str!("../../../templates/rust/mat_vec_mul_s.rs.tera");
-const TMPL_EXTRACT_VOLTAGES: &str = include_str!("../../../templates/rust/extract_voltages.rs.tera");
+const TMPL_EXTRACT_VOLTAGES: &str =
+    include_str!("../../../templates/rust/extract_voltages.rs.tera");
 const TMPL_FINAL_VOLTAGES: &str = include_str!("../../../templates/rust/final_voltages.rs.tera");
 const TMPL_UPDATE_HISTORY: &str = include_str!("../../../templates/rust/update_history.rs.tera");
 const TMPL_PROCESS_SAMPLE: &str = include_str!("../../../templates/rust/process_sample.rs.tera");
@@ -78,18 +79,16 @@ impl RustEmitter {
     }
 
     pub(super) fn render(&self, name: &str, ctx: &Context) -> Result<String, CodegenError> {
-        self.tera
-            .render(name, ctx)
-            .map_err(|e| {
-                use std::error::Error;
-                let mut msg = format!("{}: {}", name, e);
-                let mut source = e.source();
-                while let Some(s) = source {
-                    msg.push_str(&format!("\n  caused by: {}", s));
-                    source = s.source();
-                }
-                CodegenError::TemplateError(msg)
-            })
+        self.tera.render(name, ctx).map_err(|e| {
+            use std::error::Error;
+            let mut msg = format!("{}: {}", name, e);
+            let mut source = e.source();
+            while let Some(s) = source {
+                msg.push_str(&format!("\n  caused by: {}", s));
+                source = s.source();
+            }
+            CodegenError::TemplateError(msg)
+        })
     }
 }
 

@@ -192,7 +192,11 @@ R_hterm out 0 5.1K
 #[test]
 fn test_neve_1073_hpf_rolloff() {
     let code = codegen_from_spice(hpf_spice(), 600.0);
-    let main_code = make_freq_main(&[30.0, 100.0, 1000.0, 5000.0], 0.01, &["state.set_switch_0(2);"]);
+    let main_code = make_freq_main(
+        &[30.0, 100.0, 1000.0, 5000.0],
+        0.01,
+        &["state.set_switch_0(2);"],
+    );
     let output = compile_and_run(&code, &main_code, "hpf_rolloff");
 
     let g30 = parse_kv(&output, "freq_30=");
@@ -465,8 +469,14 @@ fn test_neve_1073_coupled_switch_positions_differ() {
     eprintln!("Pos 1 (1.3H/15nF): 100Hz={g100_p1:+.1}, 500Hz={g500_p1:+.1}");
 
     // Both positions should produce finite output
-    assert!(g100_p0.is_finite() && g500_p0.is_finite(), "Position 0 should produce finite output");
-    assert!(g100_p1.is_finite() && g500_p1.is_finite(), "Position 1 should produce finite output");
+    assert!(
+        g100_p0.is_finite() && g500_p0.is_finite(),
+        "Position 0 should produce finite output"
+    );
+    assert!(
+        g100_p1.is_finite() && g500_p1.is_finite(),
+        "Position 1 should produce finite output"
+    );
 
     // The responses should differ — different L and C values change the frequency behavior
     let diff_100 = (g100_p0 - g100_p1).abs();
@@ -477,4 +487,3 @@ fn test_neve_1073_coupled_switch_positions_differ() {
          diff@100Hz={diff_100:.2} dB, diff@500Hz={diff_500:.2} dB"
     );
 }
-

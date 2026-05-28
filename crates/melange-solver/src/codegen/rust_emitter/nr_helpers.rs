@@ -3,9 +3,9 @@
 //! Free functions that emit NR singular fallback, voltage limiting, and
 //! convergence checking code. Used by both DK and nodal solver paths.
 
+use super::helpers::emit_pentode_nr_dk_stamp;
 use crate::codegen::ir::{CircuitIR, DeviceParams, DeviceType};
 use crate::codegen::CodegenError;
-use super::helpers::emit_pentode_nr_dk_stamp;
 
 // ============================================================================
 // Procedural NR solver generation (too complex for templates)
@@ -181,9 +181,7 @@ pub(super) fn emit_dk_device_evaluation(
                 code.push_str(&format!("{indent}let jdev_{s}_{s} = jfet{d}_jac[1];\n"));
                 code.push_str(&format!("{indent}let jdev_{s}_{s1} = jfet{d}_jac[0];\n"));
                 code.push_str(&format!("{indent}let jdev_{s1}_{s} = jfet{d}_jac[3];\n"));
-                code.push_str(&format!(
-                    "{indent}let jdev_{s1}_{s1} = jfet{d}_jac[2];\n"
-                ));
+                code.push_str(&format!("{indent}let jdev_{s1}_{s1} = jfet{d}_jac[2];\n"));
             }
             DeviceType::Mosfet => {
                 let s = slot.start_idx;
@@ -267,9 +265,7 @@ pub(super) fn emit_dk_device_evaluation(
                     code.push_str(&format!("{indent}let jdev_{s}_{s} = tube{d}_jac[0];\n"));
                     code.push_str(&format!("{indent}let jdev_{s}_{s1} = tube{d}_jac[1];\n"));
                     code.push_str(&format!("{indent}let jdev_{s1}_{s} = tube{d}_jac[2];\n"));
-                    code.push_str(&format!(
-                        "{indent}let jdev_{s1}_{s1} = tube{d}_jac[3];\n"
-                    ));
+                    code.push_str(&format!("{indent}let jdev_{s1}_{s1} = tube{d}_jac[3];\n"));
                 }
             }
             DeviceType::Vca => {
@@ -317,7 +313,12 @@ pub(super) fn emit_nr_singular_fallback(code: &mut String, dim: usize, indent: &
 /// damping to maintain current-space NR consistency.
 ///
 /// Assumes `delta0..delta{dim-1}` and `v_d0..v_d{dim-1}` are in scope.
-pub(super) fn emit_nr_limit_and_converge(code: &mut String, ir: &CircuitIR, dim: usize, indent: &str) {
+pub(super) fn emit_nr_limit_and_converge(
+    code: &mut String,
+    ir: &CircuitIR,
+    dim: usize,
+    indent: &str,
+) {
     // Compute implied voltage changes: dv[i] = -sum_j K[i][j] * delta[j]
     code.push_str(&format!(
         "{indent}// Voltage-space limiting (SPICE pnjlim/fetlim through K matrix)\n"
@@ -430,7 +431,9 @@ pub(super) fn emit_nr_limit_and_converge(code: &mut String, ir: &CircuitIR, dim:
         .join(".min(")
         + &")".repeat(dim.saturating_sub(1));
     code.push_str(&format!("{indent}let alpha_scalar = {min_chain};\n"));
-    code.push_str(&format!("{indent}if alpha_scalar < 1.0 {{ any_limited = true; }}\n"));
+    code.push_str(&format!(
+        "{indent}if alpha_scalar < 1.0 {{ any_limited = true; }}\n"
+    ));
 
     // Current-space backstop: limit maximum current step per iteration.
     // Unlike the old voltage-space backstop (3.5V), this is K-independent.

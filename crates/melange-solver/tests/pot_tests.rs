@@ -290,7 +290,10 @@ fn test_codegen_pot_set_method() {
         code.contains("fn set_pot_0("),
         "Missing set_pot_0 method for per-block rebuild"
     );
-    assert!(code.contains("rebuild_matrices"), "set_pot should call rebuild_matrices");
+    assert!(
+        code.contains("rebuild_matrices"),
+        "set_pot should call rebuild_matrices"
+    );
 }
 
 #[test]
@@ -331,7 +334,9 @@ fn test_rebuild_matrices_preserves_filter_state() {
         .expect("rebuild_matrices should exist");
     // Find the end by matching brace depth from the function opening brace.
     let body = &code[start..];
-    let open_brace = body.find('{').expect("function should have an opening brace");
+    let open_brace = body
+        .find('{')
+        .expect("function should have an opening brace");
     let mut depth = 0i32;
     let mut end = open_brace;
     for (i, c) in body[open_brace..].char_indices() {
@@ -372,8 +377,14 @@ fn test_codegen_pot_nr_k_correction() {
     let code = generate_code(DIODE_POT_SPICE);
 
     // Per-block rebuild: NR solver should use state.k directly (not k_eff)
-    assert!(!code.contains("k_eff"), "SM k_eff should not be in NR solver (per-block rebuild)");
-    assert!(code.contains("state.k["), "NR solver should use state.k directly");
+    assert!(
+        !code.contains("k_eff"),
+        "SM k_eff should not be in NR solver (per-block rebuild)"
+    );
+    assert!(
+        code.contains("state.k["),
+        "NR solver should use state.k directly"
+    );
 }
 
 #[test]
@@ -640,14 +651,8 @@ fn test_two_pot_codegen() {
         code.contains("pot_1_resistance"),
         "Missing pot_1_resistance"
     );
-    assert!(
-        code.contains("fn set_pot_0"),
-        "Missing set_pot_0 method"
-    );
-    assert!(
-        code.contains("fn set_pot_1"),
-        "Missing set_pot_1 method"
-    );
+    assert!(code.contains("fn set_pot_0"), "Missing set_pot_0 method");
+    assert!(code.contains("fn set_pot_1"), "Missing set_pot_1 method");
 }
 
 #[test]
@@ -997,10 +1002,7 @@ fn test_codegen_jacobian_uses_state_k() {
         code.contains("state.k["),
         "Jacobian should use state.k (exact from per-block rebuild)"
     );
-    assert!(
-        !code.contains("k_eff"),
-        "SM k_eff should not be present"
-    );
+    assert!(!code.contains("k_eff"), "SM k_eff should not be present");
 }
 
 // ---------------------------------------------------------------------------

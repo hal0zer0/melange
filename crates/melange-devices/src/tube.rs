@@ -328,13 +328,7 @@ impl KorenTriode {
     /// the `E1` / `Ip_koren` values themselves, so it must match the section
     /// being evaluated.
     #[inline]
-    fn section_chain(
-        &self,
-        vgk: f64,
-        vpk_safe: f64,
-        mu: f64,
-        ex: f64,
-    ) -> Option<(f64, f64, f64)> {
+    fn section_chain(&self, vgk: f64, vpk_safe: f64, mu: f64, ex: f64) -> Option<(f64, f64, f64)> {
         let sec = self.koren_section(vgk, vpk_safe, mu, ex)?;
         // Extra guard matching the legacy Jacobian path: below 1e-10 the
         // E1^(ex-1) term blows up numerically for fractional exponents.
@@ -733,13 +727,7 @@ impl KorenPentode {
     ///
     /// Returns `None` when `E1 ≤ 1e-30` (deep-cutoff guard, per-section).
     #[inline]
-    fn shared_e1_with(
-        &self,
-        vgk: f64,
-        vg2k_safe: f64,
-        mu: f64,
-        ex: f64,
-    ) -> Option<SharedE1> {
+    fn shared_e1_with(&self, vgk: f64, vg2k_safe: f64, mu: f64, ex: f64) -> Option<SharedE1> {
         let s = (self.kvb + vg2k_safe * vg2k_safe).sqrt();
         let inner = self.kp * (1.0 / mu + vgk / s);
 
@@ -1099,12 +1087,7 @@ impl KorenPentode {
     /// `arctan` derivative at clamped `Vpk=0` gives `1/Kvb`, the
     /// tangent slope at the origin — consistent with the clamped
     /// plate current at the same input).
-    fn jacobian_3x3_classical(
-        &self,
-        vgk: f64,
-        vpk: f64,
-        vg2k: f64,
-    ) -> [[f64; 3]; 3] {
+    fn jacobian_3x3_classical(&self, vgk: f64, vpk: f64, vg2k: f64) -> [[f64; 3]; 3] {
         let vg2k_safe = vg2k.max(1e-3);
         let vpk_safe = vpk.max(0.0);
 
@@ -1141,8 +1124,7 @@ impl KorenPentode {
             //   dE1/dVg2k = softplus/Kp − sigmoid · Vgk / Vg2k_safe
             //   dE1/dVpk  = 0
             let de1_dvgk = sigmoid;
-            let de1_dvg2k =
-                softplus / self.kp - sigmoid * vgk / vg2k_safe;
+            let de1_dvg2k = softplus / self.kp - sigmoid * vgk / vg2k_safe;
 
             // Chain rule with G(Vpk) = arctan(Vpk/Kvb):
             //   dIp/dVgk  = (dIp0/dE1)·(dE1/dVgk) · G
@@ -1208,11 +1190,7 @@ impl KorenPentode {
 
         // Both sections in deep cutoff → Ip / Ig2 rows are identically zero.
         if ip0_v == 0.0 {
-            return [
-                [0.0, 0.0, 0.0],
-                [0.0, 0.0, 0.0],
-                [dig1_dvgk, 0.0, 0.0],
-            ];
+            return [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [dig1_dvgk, 0.0, 0.0]];
         }
 
         // F, H and their Vp derivatives — branches on screen_form (§4.4 vs §4.5).
@@ -1287,12 +1265,7 @@ impl KorenPentode {
     ///
     /// See also: [`jacobian_2x2_grid_off`](Self::jacobian_2x2_grid_off)
     /// for the matching reduced Jacobian.
-    pub fn plate_current_grid_off(
-        &self,
-        vgk: f64,
-        vpk: f64,
-        vg2k_frozen: f64,
-    ) -> f64 {
+    pub fn plate_current_grid_off(&self, vgk: f64, vpk: f64, vg2k_frozen: f64) -> f64 {
         self.plate_current(vgk, vpk, vg2k_frozen)
     }
 
@@ -1303,12 +1276,7 @@ impl KorenPentode {
     /// Works across all screen-form / variable-mu combinations because
     /// the dispatch happens inside
     /// [`screen_current`](Self::screen_current).
-    pub fn screen_current_grid_off(
-        &self,
-        vgk: f64,
-        vpk: f64,
-        vg2k_frozen: f64,
-    ) -> f64 {
+    pub fn screen_current_grid_off(&self, vgk: f64, vpk: f64, vg2k_frozen: f64) -> f64 {
         self.screen_current(vgk, vpk, vg2k_frozen)
     }
 
@@ -1337,17 +1305,9 @@ impl KorenPentode {
     // discarded multiplies per sample — not a bottleneck at phase 1b
     // (M-cap reduction is the primary win) but worth revisiting once
     // grid-off lands in production codegen.
-    pub fn jacobian_2x2_grid_off(
-        &self,
-        vgk: f64,
-        vpk: f64,
-        vg2k_frozen: f64,
-    ) -> [[f64; 2]; 2] {
+    pub fn jacobian_2x2_grid_off(&self, vgk: f64, vpk: f64, vg2k_frozen: f64) -> [[f64; 2]; 2] {
         let full = self.jacobian_3x3(vgk, vpk, vg2k_frozen);
-        [
-            [full[0][0], full[0][1]],
-            [full[1][0], full[1][1]],
-        ]
+        [[full[0][0], full[0][1]], [full[1][0], full[1][1]]]
     }
 }
 
@@ -1730,8 +1690,8 @@ mod tests {
         // And finally a positive-grid sanity check for the Ig1 dVgk entry.
         let vgk_pos = 0.5;
         let jac_pos = pent.jacobian_3x3(vgk_pos, vpk, vg2k);
-        let fd_ig1 = (pent.grid_current(vgk_pos + eps) - pent.grid_current(vgk_pos - eps))
-            / (2.0 * eps);
+        let fd_ig1 =
+            (pent.grid_current(vgk_pos + eps) - pent.grid_current(vgk_pos - eps)) / (2.0 * eps);
         let rel_err = (jac_pos[2][0] - fd_ig1).abs() / fd_ig1.abs();
         assert!(
             rel_err < 1e-3,
@@ -2166,7 +2126,11 @@ mod tests {
         let ip = tet.plate_current(-20.0, 300.0, 250.0);
         let ig2 = tet.screen_current(-20.0, 300.0, 250.0);
 
-        assert!(ip.is_finite() && !ip.is_nan(), "6L6GC Ip must be finite: {}", ip);
+        assert!(
+            ip.is_finite() && !ip.is_nan(),
+            "6L6GC Ip must be finite: {}",
+            ip
+        );
         assert!(
             ig2.is_finite() && !ig2.is_nan(),
             "6L6GC Ig2 must be finite: {}",
@@ -2195,7 +2159,11 @@ mod tests {
         let ip = tet.plate_current(-12.0, 300.0, 250.0);
         let ig2 = tet.screen_current(-12.0, 300.0, 250.0);
 
-        assert!(ip.is_finite() && !ip.is_nan(), "6V6GT Ip must be finite: {}", ip);
+        assert!(
+            ip.is_finite() && !ip.is_nan(),
+            "6V6GT Ip must be finite: {}",
+            ip
+        );
         assert!(
             ig2.is_finite() && !ig2.is_nan(),
             "6V6GT Ig2 must be finite: {}",
@@ -2502,12 +2470,10 @@ mod tests {
         // against each of the 3 voltages (Vgk, Vpk, Vg2k). Ig1 row is
         // excluded per the Derk test convention — the Leach power-law
         // has its own dedicated test elsewhere.
-        let ip_plus = |dgk: f64, dpk: f64, dg2k: f64| {
-            tube.plate_current(vgk + dgk, vpk + dpk, vg2k + dg2k)
-        };
-        let ig2_plus = |dgk: f64, dpk: f64, dg2k: f64| {
-            tube.screen_current(vgk + dgk, vpk + dpk, vg2k + dg2k)
-        };
+        let ip_plus =
+            |dgk: f64, dpk: f64, dg2k: f64| tube.plate_current(vgk + dgk, vpk + dpk, vg2k + dg2k);
+        let ig2_plus =
+            |dgk: f64, dpk: f64, dg2k: f64| tube.screen_current(vgk + dgk, vpk + dpk, vg2k + dg2k);
 
         let fd_ip_vgk = (ip_plus(eps, 0.0, 0.0) - ip_plus(-eps, 0.0, 0.0)) / (2.0 * eps);
         let fd_ip_vpk = (ip_plus(0.0, eps, 0.0) - ip_plus(0.0, -eps, 0.0)) / (2.0 * eps);

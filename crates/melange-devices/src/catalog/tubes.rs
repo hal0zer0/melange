@@ -644,7 +644,6 @@ pub const PENTODE_CATALOG: &[PentodeCatalogEntry] = &[
         ex_b: 0.0,
         source: "Reefman TubeLib.inc (2016), PenthodeD fit",
     },
-
     // --- Additional small-signal pentodes ---
 
     // EF80 / 6BX6 — Sharp-cutoff small-signal pentode, used in mic preamps (Philips).
@@ -754,7 +753,6 @@ pub const PENTODE_CATALOG: &[PentodeCatalogEntry] = &[
         ex_b: 0.0,
         source: "Reefman TubeLib.inc (2016), PenthodeD fit",
     },
-
     // --- Combo tube pentode sections ---
 
     // ECL82 / 6BM8 pentode section — European combo tube (pentode + triode),
@@ -802,7 +800,6 @@ pub const PENTODE_CATALOG: &[PentodeCatalogEntry] = &[
         ex_b: 0.0,
         source: "Reefman TubeLib.inc (2016), BTetrodeDE fit",
     },
-
     // --- Russian tubes (audio-relevant) ---
 
     // 4P1L — Russian directly-heated beam tetrode, popular in SE amp DIY community.
@@ -848,7 +845,6 @@ pub const PENTODE_CATALOG: &[PentodeCatalogEntry] = &[
         ex_b: 0.0,
         source: "Reefman TubeLib.inc (2016), BTetrodeDE fit",
     },
-
     // --- Classical Koren pentodes (Cohen-Hélie 2010 / Norman Koren 1996) ---
 
     // KT88 — Classical Koren beam power tetrode.
@@ -864,8 +860,8 @@ pub const PENTODE_CATALOG: &[PentodeCatalogEntry] = &[
         kg2: 4200.0,
         kp: 32.0,
         kvb: 16.0,
-        alpha_s: 0.0, // Classical Koren does not use αs
-        a_factor: 0.0, // Classical does not use A
+        alpha_s: 0.0,     // Classical Koren does not use αs
+        a_factor: 0.0,    // Classical does not use A
         beta_factor: 0.0, // Classical does not use β
         ig_max: 10e-3,
         vgk_onset: 0.7,
@@ -873,7 +869,8 @@ pub const PENTODE_CATALOG: &[PentodeCatalogEntry] = &[
         mu_b: 0.0,
         svar: 0.0,
         ex_b: 0.0,
-        source: "Cohen-Hélie 2010 DAFx Table 2 (originally Norman Koren 1996) — Classical Koren fit",
+        source:
+            "Cohen-Hélie 2010 DAFx Table 2 (originally Norman Koren 1996) — Classical Koren fit",
     },
     // 6550 — Classical Koren beam power tetrode, US military designation.
     // Cohen-Hélie 2010 DAFx Table 2 lists KT88 and 6550 with identical parameters
@@ -898,7 +895,8 @@ pub const PENTODE_CATALOG: &[PentodeCatalogEntry] = &[
         mu_b: 0.0,
         svar: 0.0,
         ex_b: 0.0,
-        source: "Cohen-Hélie 2010 DAFx Table 2 (originally Norman Koren 1996) — Classical Koren fit",
+        source:
+            "Cohen-Hélie 2010 DAFx Table 2 (originally Norman Koren 1996) — Classical Koren fit",
     },
 ];
 
@@ -1706,9 +1704,13 @@ mod tests {
         // Derk §4.4 / DerkE §4.5 knee extensions or the §5 variable-mu blend.
         // All of αs / A / β / svar / μ_b / ex_b must be exactly zero.
         for name in &["KT88", "6550"] {
-            let entry = lookup_pentode(name)
-                .unwrap_or_else(|| panic!("{} should resolve", name));
-            assert_eq!(entry.screen_form, ScreenForm::Classical, "{}: screen_form", name);
+            let entry = lookup_pentode(name).unwrap_or_else(|| panic!("{} should resolve", name));
+            assert_eq!(
+                entry.screen_form,
+                ScreenForm::Classical,
+                "{}: screen_form",
+                name
+            );
             assert_eq!(entry.alpha_s, 0.0, "{}: alpha_s", name);
             assert_eq!(entry.a_factor, 0.0, "{}: a_factor", name);
             assert_eq!(entry.beta_factor, 0.0, "{}: beta_factor", name);

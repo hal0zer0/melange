@@ -28,7 +28,6 @@ impl Default for Vca {
             vscale: 0.05298, // THAT 2180A: 6.1 mV/dB → 6.1e-3 / (ln(10)/20) V/neper
             g0: 1.0,
             thd: 0.0,
-
         }
     }
 }
@@ -39,17 +38,11 @@ impl Vca {
             vscale,
             g0,
             thd: 0.0,
-
         }
     }
 
     pub fn new_with_thd(vscale: f64, g0: f64, thd: f64) -> Self {
-        Self {
-            vscale,
-            g0,
-            thd,
-
-        }
+        Self { vscale, g0, thd }
     }
 
     /// Compute signal current: I = G0 * exp(-Vc / Vscale) * V_sig

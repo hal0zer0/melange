@@ -76,7 +76,8 @@ C1 out 0 10u
     assert!(
         n_slow >= 50 * n_fast,
         "slow ({}) should be ≥50× fast ({}) samples",
-        n_slow, n_fast
+        n_slow,
+        n_fast
     );
 }
 
@@ -94,7 +95,8 @@ C1 out 0 1u
     assert!(
         n_96k.abs_diff(2 * n_48k) <= 2,
         "expected ~2× scaling: 48k={} 96k={}",
-        n_48k, n_96k
+        n_48k,
+        n_96k
     );
 }
 

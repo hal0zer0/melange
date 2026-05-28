@@ -584,7 +584,10 @@ fn test_codegen_dc_op_produces_stable_output() {
     support::assert_finite(&output);
 
     // Generated code should include DC_OP constant (non-zero DC point)
-    assert!(circuit.code.contains("DC_OP"), "Codegen should include DC_OP constant");
+    assert!(
+        circuit.code.contains("DC_OP"),
+        "Codegen should include DC_OP constant"
+    );
 }
 
 // =============================================================================
@@ -622,7 +625,7 @@ fn build_device_slots(netlist: &Netlist, _mna: &MnaSystem) -> Vec<DeviceSlot> {
                         tamb: 300.15,
                     }),
                     has_internal_mna_nodes: false,
-            vg2k_frozen: 0.0,
+                    vg2k_frozen: 0.0,
                 });
                 dim_offset += 1;
             }
@@ -675,7 +678,7 @@ fn build_device_slots(netlist: &Netlist, _mna: &MnaSystem) -> Vec<DeviceSlot> {
                         tamb: 300.15,
                     }),
                     has_internal_mna_nodes: false,
-            vg2k_frozen: 0.0,
+                    vg2k_frozen: 0.0,
                 });
                 dim_offset += 2;
             }
@@ -717,4 +720,3 @@ fn lookup_model_param(netlist: &Netlist, model_name: &str, param_name: &str) -> 
 // Removed helpers (only used by those tests):
 //   - build_pentode_circuit_pipeline()
 //   - node_idx()
-

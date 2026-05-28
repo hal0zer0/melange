@@ -109,8 +109,6 @@ fn build_pipeline(spice: &str, sample_rate: f64) -> (Netlist, MnaSystem, DkKerne
     (netlist, mna, kernel, input_node, output_node)
 }
 
-
-
 /// Compile and run generated code with configurable amplitude, return output samples.
 fn compile_and_run_codegen_with_amplitude(
     code: &str,
@@ -174,7 +172,6 @@ fn compile_and_run_codegen_with_amplitude(
         .filter_map(|l| l.trim().parse::<f64>().ok())
         .collect()
 }
-
 
 // ============================================================================
 // Cross-validation tests

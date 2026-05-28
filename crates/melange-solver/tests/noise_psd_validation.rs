@@ -1022,15 +1022,18 @@ fn main() {{
     );
 
     let out = support::compile_and_run(&code, &main, "noise_nyquist_regress");
-    let var: f64 = out.stdout
+    let var: f64 = out
+        .stdout
         .lines()
         .find_map(|l| l.strip_prefix("VAR=").and_then(|v| v.parse().ok()))
         .expect("VAR not found in stdout");
-    let rms: f64 = out.stdout
+    let rms: f64 = out
+        .stdout
         .lines()
         .find_map(|l| l.strip_prefix("RMS=").and_then(|v| v.parse().ok()))
         .expect("RMS not found in stdout");
-    let lag1: f64 = out.stdout
+    let lag1: f64 = out
+        .stdout
         .lines()
         .find_map(|l| l.strip_prefix("LAG1=").and_then(|v| v.parse().ok()))
         .expect("LAG1 not found in stdout");
@@ -1142,10 +1145,14 @@ fn main() {{
             sr = sr,
         );
         let out = support::compile_and_run(&code, &main, &format!("noise_fs_sweep_{}", sr as u64));
-        let rms: f64 = out.stdout.lines()
+        let rms: f64 = out
+            .stdout
+            .lines()
             .find_map(|l| l.strip_prefix("RMS=").and_then(|v| v.parse().ok()))
             .expect("RMS not found");
-        let flip: f64 = out.stdout.lines()
+        let flip: f64 = out
+            .stdout
+            .lines()
             .find_map(|l| l.strip_prefix("FLIP=").and_then(|v| v.parse().ok()))
             .expect("FLIP not found");
         (rms, flip)
@@ -1232,13 +1239,19 @@ fn main() {{
         sr = sr,
     );
     let out = support::compile_and_run(&code, &main, "noise_nyquist_passive");
-    let var: f64 = out.stdout.lines()
+    let var: f64 = out
+        .stdout
+        .lines()
         .find_map(|l| l.strip_prefix("VAR=").and_then(|v| v.parse().ok()))
         .expect("VAR not found");
-    let rms: f64 = out.stdout.lines()
+    let rms: f64 = out
+        .stdout
+        .lines()
         .find_map(|l| l.strip_prefix("RMS=").and_then(|v| v.parse().ok()))
         .expect("RMS not found");
-    let lag1: f64 = out.stdout.lines()
+    let lag1: f64 = out
+        .stdout
+        .lines()
         .find_map(|l| l.strip_prefix("LAG1=").and_then(|v| v.parse().ok()))
         .expect("LAG1 not found");
 
@@ -1323,10 +1336,14 @@ fn main() {{
         sr = sr,
     );
     let out = support::compile_and_run(&code, &main, "noise_nyquist_regress_nodal");
-    let rms: f64 = out.stdout.lines()
+    let rms: f64 = out
+        .stdout
+        .lines()
         .find_map(|l| l.strip_prefix("RMS=").and_then(|v| v.parse().ok()))
         .expect("RMS not found");
-    let lag1: f64 = out.stdout.lines()
+    let lag1: f64 = out
+        .stdout
+        .lines()
         .find_map(|l| l.strip_prefix("LAG1=").and_then(|v| v.parse().ok()))
         .expect("LAG1 not found");
 
@@ -1376,12 +1393,7 @@ C1 a 0 100n
 .end
 "#;
 
-fn build_r_flicker_test_main(
-    fs: f64,
-    drive_dc: f64,
-    n_warmup: usize,
-    n_samples: usize,
-) -> String {
+fn build_r_flicker_test_main(fs: f64, drive_dc: f64, n_warmup: usize, n_samples: usize) -> String {
     format!(
         r#"
 fn run_case(thermal: f64, flicker: f64, temperature: f64, seed: u64) -> f64 {{
@@ -1757,8 +1769,7 @@ fn partition_emits_constants_for_pentode_under_noise_full() {
     // Default PARTITION_F is 1.0 (textbook Schottky). `fmt_f64` emits
     // scientific notation, so 1.0 renders as `1.00000000000000000e0`.
     assert!(
-        code.contains("NOISE_PARTITION_F: [f64; NOISE_PARTITION_N] = [1.0")
-            && code.contains("e0]"),
+        code.contains("NOISE_PARTITION_F: [f64; NOISE_PARTITION_N] = [1.0") && code.contains("e0]"),
         "default PARTITION_F should be 1.0 (textbook); got:\n{}",
         code.lines()
             .find(|l| l.contains("NOISE_PARTITION_F"))
@@ -1953,12 +1964,7 @@ Rload out 0 10k
 /// (the input network has a finite admittance at `in+`).
 #[test]
 fn opamp_emits_constants_for_ne5534_under_noise_full() {
-    let code = generate_partition_code(
-        OPAMP_NE5534_SPICE,
-        NoiseMode::Full,
-        "opamp_emit_full",
-        42,
-    );
+    let code = generate_partition_code(OPAMP_NE5534_SPICE, NoiseMode::Full, "opamp_emit_full", 42);
     assert!(
         code.contains("pub const NOISE_OPAMP_N: usize = 1"),
         "expected NOISE_OPAMP_N=1 for single-op-amp NE5534 circuit"
@@ -1992,13 +1998,11 @@ fn opamp_emits_constants_for_ne5534_under_noise_full() {
         "expected dynamic-refreshable G_diag(in+) mirror in state"
     );
     assert!(
-        code.contains("noise_opamp_en_w_prev")
-            && code.contains("noise_opamp_in_w_prev"),
+        code.contains("noise_opamp_en_w_prev") && code.contains("noise_opamp_in_w_prev"),
         "expected two-draw Nyquist anti-alias buffers for en and in"
     );
     assert!(
-        code.contains("noise_opamp_en_last_i_n")
-            && code.contains("noise_opamp_in_last_i_n"),
+        code.contains("noise_opamp_en_last_i_n") && code.contains("noise_opamp_in_last_i_n"),
         "expected BE-replay caches for en and in"
     );
     assert!(
@@ -2036,12 +2040,7 @@ fn opamp_emits_constants_for_ne5534_under_noise_full() {
 /// either, since op-amps are linear/M=0) but no en/in.
 #[test]
 fn opamp_under_noise_shot_emits_no_opamp_noise() {
-    let code = generate_partition_code(
-        OPAMP_NE5534_SPICE,
-        NoiseMode::Shot,
-        "opamp_shot_mode",
-        42,
-    );
+    let code = generate_partition_code(OPAMP_NE5534_SPICE, NoiseMode::Shot, "opamp_shot_mode", 42);
     assert!(
         !code.contains("NOISE_OPAMP_N"),
         "op-amp noise should not be emitted under --noise shot"
@@ -2057,12 +2056,7 @@ fn opamp_under_noise_shot_emits_no_opamp_noise() {
 /// it out, so no Phase 4 symbols are emitted under `--noise full`.
 #[test]
 fn opamp_without_en_in_emits_no_phase_4_symbols() {
-    let code = generate_partition_code(
-        OPAMP_NO_NOISE_SPICE,
-        NoiseMode::Full,
-        "opamp_no_noise",
-        42,
-    );
+    let code = generate_partition_code(OPAMP_NO_NOISE_SPICE, NoiseMode::Full, "opamp_no_noise", 42);
     assert!(
         !code.contains("NOISE_OPAMP_N"),
         "op-amp without EN/IN must not emit Phase 4 noise constants"

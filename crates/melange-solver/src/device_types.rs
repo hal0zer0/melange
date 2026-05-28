@@ -749,19 +749,34 @@ impl TubeParams {
     /// if the kind requires parameters that aren't set or are out of range.
     pub fn validate(&self) -> Result<(), String> {
         if !self.mu.is_finite() || self.mu <= 0.0 {
-            return Err(format!("tube MU must be positive and finite, got {}", self.mu));
+            return Err(format!(
+                "tube MU must be positive and finite, got {}",
+                self.mu
+            ));
         }
         if !self.ex.is_finite() || self.ex <= 0.0 {
-            return Err(format!("tube EX must be positive and finite, got {}", self.ex));
+            return Err(format!(
+                "tube EX must be positive and finite, got {}",
+                self.ex
+            ));
         }
         if !self.kg1.is_finite() || self.kg1 <= 0.0 {
-            return Err(format!("tube KG1 must be positive and finite, got {}", self.kg1));
+            return Err(format!(
+                "tube KG1 must be positive and finite, got {}",
+                self.kg1
+            ));
         }
         if !self.kp.is_finite() || self.kp <= 0.0 {
-            return Err(format!("tube KP must be positive and finite, got {}", self.kp));
+            return Err(format!(
+                "tube KP must be positive and finite, got {}",
+                self.kp
+            ));
         }
         if !self.kvb.is_finite() || self.kvb <= 0.0 {
-            return Err(format!("tube KVB must be positive and finite, got {}", self.kvb));
+            return Err(format!(
+                "tube KVB must be positive and finite, got {}",
+                self.kvb
+            ));
         }
         if self.is_pentode() {
             if !self.kg2.is_finite() || self.kg2 <= 0.0 {
@@ -836,11 +851,9 @@ impl TubeParams {
             // Classical arctan knee; no known tube needs this combination.
             // Reject at validation time so the codegen can stay single-branch.
             if self.is_pentode() && matches!(self.screen_form, ScreenForm::Classical) {
-                return Err(
-                    "variable-mu Classical Koren pentodes are not implemented; \
+                return Err("variable-mu Classical Koren pentodes are not implemented; \
                      use ScreenForm::Rational (6K7/EF89 pattern) for variable-mu tubes"
-                        .to_string(),
-                );
+                    .to_string());
             }
         }
         Ok(())
@@ -1137,8 +1150,8 @@ mod tube_params_tests {
         // Values from the background parameter-survey report (2026-04-11).
         TubeParams {
             kind: TubeKind::SharpPentode,
-            mu: 15.5,       // μ_a (section A — high-mu region)
-            ex: 1.573,      // ex_a (section A exponent)
+            mu: 15.5,  // μ_a (section A — high-mu region)
+            ex: 1.573, // ex_a (section A exponent)
             kg1: 1407.7,
             kp: 36.0,
             kvb: 1309.0,
@@ -1286,7 +1299,9 @@ mod tube_params_tests {
 
     #[test]
     fn pentode_validates_with_kg2() {
-        pentode_el84().validate().expect("EL84 with KG2 should validate");
+        pentode_el84()
+            .validate()
+            .expect("EL84 with KG2 should validate");
     }
 
     #[test]
@@ -1438,7 +1453,8 @@ mod tube_params_tests {
     #[test]
     fn variable_mu_pentode_validates() {
         let t = variable_mu_pentode_6k7();
-        t.validate().expect("6K7 variable-mu pentode should validate");
+        t.validate()
+            .expect("6K7 variable-mu pentode should validate");
         assert!(t.is_variable_mu());
         assert_eq!(t.svar, 0.083);
         assert_eq!(t.mu_b, 3.4);
@@ -1488,7 +1504,8 @@ mod tube_params_tests {
         assert_eq!(t.svar, 0.0);
         assert_eq!(t.mu_b, 0.0);
         assert_eq!(t.ex_b, 0.0);
-        t.validate().expect("sharp pentode with mu_b=ex_b=0 must validate");
+        t.validate()
+            .expect("sharp pentode with mu_b=ex_b=0 must validate");
     }
 
     #[test]

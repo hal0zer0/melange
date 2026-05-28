@@ -3971,7 +3971,10 @@ Re e 0 1k
             assert!((bp.mjc - 0.31).abs() < 1e-12, "mjc from .model");
             assert!((bp.fc - 0.5).abs() < 1e-12, "fc from .model");
         }
-        _ => panic!("Expected BJT device params, got {:?}", ir.device_slots[0].params),
+        _ => panic!(
+            "Expected BJT device params, got {:?}",
+            ir.device_slots[0].params
+        ),
     }
 }
 
@@ -4934,8 +4937,7 @@ fn test_codegen_mixed_pentode_beam_tetrode() {
     use melange_solver::codegen::ir::{DeviceParams, ScreenForm};
 
     // Parse the mixed netlist (both devices default to Rational).
-    let netlist =
-        Netlist::parse(MIXED_PENTODE_BEAM_TETRODE_SPICE).expect("parse mixed netlist");
+    let netlist = Netlist::parse(MIXED_PENTODE_BEAM_TETRODE_SPICE).expect("parse mixed netlist");
     let mna = MnaSystem::from_netlist(&netlist).expect("build MNA for mixed circuit");
     let kernel = DkKernel::from_mna(&mna, 44100.0).expect("build DK kernel for mixed circuit");
     let config = default_config();
@@ -5380,11 +5382,7 @@ V1 vcc 0 DC 300
 /// Build a grid-off CircuitIR + emitted code by rebuilding MNA with the
 /// given pentode names marked grid-off, then stamping `vg2k_frozen` into
 /// each grid-off slot. Returns the emitted code as a String.
-fn emit_grid_off_code(
-    spice: &str,
-    grid_off_names: &[&str],
-    vg2k: f64,
-) -> (String, CircuitIR) {
+fn emit_grid_off_code(spice: &str, grid_off_names: &[&str], vg2k: f64) -> (String, CircuitIR) {
     use melange_solver::codegen::ir::DeviceParams;
 
     let netlist = Netlist::parse(spice).expect("parse grid-off netlist");
@@ -5394,14 +5392,15 @@ fn emit_grid_off_code(
     // populate the map with the same `vg2k` value for every name and then
     // re-stamp `DeviceSlot.vg2k_frozen` after IR build (for belt-and-braces
     // robustness against upstream field-propagation changes).
-    let grid_off: std::collections::HashMap<String, f64> =
-        grid_off_names.iter().map(|s| (s.to_string(), vg2k)).collect();
+    let grid_off: std::collections::HashMap<String, f64> = grid_off_names
+        .iter()
+        .map(|s| (s.to_string(), vg2k))
+        .collect();
     let mna = MnaSystem::from_netlist_with_grid_off(&netlist, &grid_off)
         .expect("build MNA with grid-off");
     let kernel = DkKernel::from_mna(&mna, 44100.0).expect("build DK kernel");
     let config = default_config();
-    let mut ir = CircuitIR::from_kernel(&kernel, &mna, &netlist, &config)
-        .expect("build CircuitIR");
+    let mut ir = CircuitIR::from_kernel(&kernel, &mna, &netlist, &config).expect("build CircuitIR");
 
     // Stamp vg2k_frozen on every grid-off pentode slot. In production this
     // is written by the DC-OP bias-detection pass (P1b-04); here we use a
@@ -5677,11 +5676,23 @@ V1 vcc 0 DC 300
     // Jacobian stamps: sharp slot 0 has 3×3 (jdev_0_2, jdev_2_0 present);
     // grid-off slot 1 has 2×2 starting at start_idx=3 (after shift), so
     // jdev_3_3, jdev_3_4, jdev_4_3, jdev_4_4 — no jdev_*_5 / jdev_5_* for it.
-    assert!(code.contains("jdev_0_2"), "sharp slot 0 must have 3×3 Jacobian entry jdev_0_2");
-    assert!(code.contains("jdev_2_0"), "sharp slot 0 must have 3×3 Jacobian entry jdev_2_0");
+    assert!(
+        code.contains("jdev_0_2"),
+        "sharp slot 0 must have 3×3 Jacobian entry jdev_0_2"
+    );
+    assert!(
+        code.contains("jdev_2_0"),
+        "sharp slot 0 must have 3×3 Jacobian entry jdev_2_0"
+    );
     // Grid-off slot 1: 2×2 at s=3, s1=4.
-    assert!(code.contains("jdev_3_3"), "grid-off slot 1 must have jdev_3_3");
-    assert!(code.contains("jdev_4_4"), "grid-off slot 1 must have jdev_4_4");
+    assert!(
+        code.contains("jdev_3_3"),
+        "grid-off slot 1 must have jdev_3_3"
+    );
+    assert!(
+        code.contains("jdev_4_4"),
+        "grid-off slot 1 must have jdev_4_4"
+    );
     // The grid-off slot MUST NOT have a Vg2k-column jdev entry at its own
     // block. The dropped Ig1 dimension means there's no jdev_3_5 / jdev_5_3.
     // (Note: there's also no slot 5 in the reduced M=5 NR system at all.)
@@ -5708,10 +5719,22 @@ fn test_codegen_grid_off_2d_jacobian_stamps() {
     );
 
     // Expected 2×2 entries — at least one dispatch site must stamp each.
-    assert!(code.contains("jdev_0_0"), "grid-off slot must stamp jdev_0_0");
-    assert!(code.contains("jdev_0_1"), "grid-off slot must stamp jdev_0_1");
-    assert!(code.contains("jdev_1_0"), "grid-off slot must stamp jdev_1_0");
-    assert!(code.contains("jdev_1_1"), "grid-off slot must stamp jdev_1_1");
+    assert!(
+        code.contains("jdev_0_0"),
+        "grid-off slot must stamp jdev_0_0"
+    );
+    assert!(
+        code.contains("jdev_0_1"),
+        "grid-off slot must stamp jdev_0_1"
+    );
+    assert!(
+        code.contains("jdev_1_0"),
+        "grid-off slot must stamp jdev_1_0"
+    );
+    assert!(
+        code.contains("jdev_1_1"),
+        "grid-off slot must stamp jdev_1_1"
+    );
 
     // Forbidden 3D stamps: the slot MUST NOT have entries involving s+2=2
     // in its pentode block. Specifically, no `pentode0_jac[4]` through
@@ -5761,8 +5784,7 @@ fn test_codegen_classical_vp_independent_screen() {
     let mna = MnaSystem::from_netlist(&netlist).expect("MNA");
     let kernel = DkKernel::from_mna(&mna, 44100.0).expect("DK kernel");
     let config = default_config();
-    let mut ir = CircuitIR::from_kernel(&kernel, &mna, &netlist, &config)
-        .expect("build CircuitIR");
+    let mut ir = CircuitIR::from_kernel(&kernel, &mna, &netlist, &config).expect("build CircuitIR");
     force_classical_kt88(&mut ir);
 
     let emitter = RustEmitter::new().expect("create RustEmitter");
@@ -5823,7 +5845,11 @@ fn test_codegen_classical_vp_independent_screen() {
     let mut cursor = 0;
     while let Some(rel) = body[cursor..].find("vpk") {
         let abs = cursor + rel;
-        let preceding = if abs == 0 { ' ' } else { body.as_bytes()[abs - 1] as char };
+        let preceding = if abs == 0 {
+            ' '
+        } else {
+            body.as_bytes()[abs - 1] as char
+        };
         // Acceptable: preceding char is `_` (it's `_vpk`) or alphanumeric
         // (it's part of a longer identifier like `vpk_safe`).
         assert!(
@@ -7484,8 +7510,7 @@ C1 out 0 1u
     );
     // set_pot_0 must refresh the coefficient after writing the new R.
     assert!(
-        code.contains("self.noise_thermal_sqrt_inv_r[")
-            && code.contains("] = (1.0 / r).sqrt();"),
+        code.contains("self.noise_thermal_sqrt_inv_r[") && code.contains("] = (1.0 / r).sqrt();"),
         "set_pot_0 must update state.noise_thermal_sqrt_inv_r[..] from r"
     );
 }
@@ -7522,8 +7547,7 @@ C1 out 0 1u
     let end = tail.find("\n    pub fn ").unwrap_or(tail.len() - 1) + 1;
     let body = &tail[..end];
     assert!(
-        body.contains("self.noise_thermal_sqrt_inv_r[")
-            && body.contains("= (1.0 / r).sqrt();"),
+        body.contains("self.noise_thermal_sqrt_inv_r[") && body.contains("= (1.0 / r).sqrt();"),
         "set_runtime_R_rmod must refresh state.noise_thermal_sqrt_inv_r. Body was:\n{}",
         body
     );
@@ -7567,7 +7591,9 @@ fn noise_thermal_includes_switch_r() {
 
     // DK path emits the 2D VALUES array access. Look specifically inside
     // set_switch_0 to be sure the refresh lives in the setter.
-    let setter_start = code.find("pub fn set_switch_0").expect("set_switch_0 missing");
+    let setter_start = code
+        .find("pub fn set_switch_0")
+        .expect("set_switch_0 missing");
     let setter_body = &code[setter_start..setter_start + 1200];
     assert!(
         setter_body.contains("self.noise_thermal_sqrt_inv_r[")
@@ -7596,7 +7622,9 @@ fn noise_nodal_thermal_includes_switch_r_via_per_component_values() {
             .collect::<Vec<_>>()
             .join("\n")
     );
-    let setter_start = code.find("pub fn set_switch_0").expect("set_switch_0 missing");
+    let setter_start = code
+        .find("pub fn set_switch_0")
+        .expect("set_switch_0 missing");
     let setter_body = &code[setter_start..setter_start + 2400];
     assert!(
         setter_body.contains("self.noise_thermal_sqrt_inv_r[")
@@ -7690,8 +7718,7 @@ fn noise_shot_mode_emits_shot_tokens_and_source_count() {
 
     // RHS stamp references shot state.
     assert!(
-        code.contains("state.i_nl_prev[NOISE_SHOT_SLOT_IDX[")
-            && code.contains("i_abs.sqrt()"),
+        code.contains("state.i_nl_prev[NOISE_SHOT_SLOT_IDX[") && code.contains("i_abs.sqrt()"),
         "shot RHS stamp must read |i_nl_prev| and take sqrt"
     );
 }
@@ -7788,9 +7815,7 @@ C_out out 0 1u
 // ---------------------------------------------------------------------------
 
 fn assert_device_shot_ports_match_elements(spice: &str) {
-    use melange_solver::codegen::ir::{
-        collect_flicker_noise_sources, collect_shot_noise_sources,
-    };
+    use melange_solver::codegen::ir::{collect_flicker_noise_sources, collect_shot_noise_sources};
     use melange_solver::parser::Element;
 
     let netlist = Netlist::parse(spice).expect("failed to parse netlist");
@@ -7828,14 +7853,10 @@ fn assert_device_shot_ports_match_elements(spice: &str) {
                 expected.insert((name.clone(), "Ic"), (n(nc), n(ne)));
                 expected.insert((name.clone(), "Ib"), (n(nb), n(ne)));
             }
-            Element::Jfet {
-                name, nd, ns, ..
-            } => {
+            Element::Jfet { name, nd, ns, .. } => {
                 expected.insert((name.clone(), "Id"), (n(nd), n(ns)));
             }
-            Element::Mosfet {
-                name, nd, ns, ..
-            } => {
+            Element::Mosfet { name, nd, ns, .. } => {
                 expected.insert((name.clone(), "Id"), (n(nd), n(ns)));
             }
             Element::Triode {
@@ -7947,9 +7968,7 @@ VCC vcc 0 12
 
 #[test]
 fn shot_flicker_ports_match_bjt_forward_active_element() {
-    use melange_solver::codegen::ir::{
-        collect_flicker_noise_sources, collect_shot_noise_sources,
-    };
+    use melange_solver::codegen::ir::{collect_flicker_noise_sources, collect_shot_noise_sources};
     use melange_solver::parser::Element;
     let spice = "\
 BJT FA shot/flicker ports
@@ -7964,8 +7983,7 @@ VCC vcc 0 12
     let netlist = Netlist::parse(spice).expect("parse");
     let mut fa = std::collections::HashSet::new();
     fa.insert("Q1".to_string());
-    let mna =
-        MnaSystem::from_netlist_forward_active(&netlist, &fa).expect("MNA forward-active");
+    let mna = MnaSystem::from_netlist_forward_active(&netlist, &fa).expect("MNA forward-active");
 
     // Confirm the device actually got reduced to FA.
     assert_eq!(mna.nonlinear_devices.len(), 1);
@@ -7979,7 +7997,12 @@ VCC vcc 0 12
     let flicker = collect_flicker_noise_sources(&netlist, &mna);
 
     // FA reduction emits only Ic — Ib is folded into the BF stamping.
-    assert_eq!(shot.len(), 1, "FA BJT must emit only Ic shot, got {:?}", shot);
+    assert_eq!(
+        shot.len(),
+        1,
+        "FA BJT must emit only Ic shot, got {:?}",
+        shot
+    );
     assert_eq!(
         flicker.len(),
         1,

@@ -129,10 +129,17 @@ pub fn auto_route(kernel: &DkKernel, mna: &MnaSystem, dk_failed: bool) -> Routin
         reason = "K matrix ill-conditioned (max|K| > 1e8, nodal full-LU avoids K)".to_string();
     } else if s_ill_conditioned {
         route = SolverRoute::Nodal;
-        reason = "S matrix ill-conditioned (max|S| > 1e6, cap-only nodes lack resistive paths)".to_string();
+        reason = "S matrix ill-conditioned (max|S| > 1e6, cap-only nodes lack resistive paths)"
+            .to_string();
     } else if mna.inductors.iter().any(|ind| ind.isat.is_some())
-        || mna.coupled_inductors.iter().any(|ci| ci.l1_isat.is_some() || ci.l2_isat.is_some())
-        || mna.transformer_groups.iter().any(|g| g.winding_isats.iter().any(|i| i.is_some()))
+        || mna
+            .coupled_inductors
+            .iter()
+            .any(|ci| ci.l1_isat.is_some() || ci.l2_isat.is_some())
+        || mna
+            .transformer_groups
+            .iter()
+            .any(|g| g.winding_isats.iter().any(|i| i.is_some()))
     {
         route = SolverRoute::Nodal;
         reason = "saturating inductors require augmented MNA (per-sample L update)".to_string();

@@ -186,7 +186,10 @@ fn test_large_inductor_stability() {
     let output = result.parse_samples();
 
     for (i, &v) in output.iter().enumerate() {
-        assert!(v.is_finite(), "Output finite for 130H inductor at sample {i}");
+        assert!(
+            v.is_finite(),
+            "Output finite for 130H inductor at sample {i}"
+        );
     }
 
     let nan_reset = result.diag("nan_reset_count").unwrap_or(0.0);

@@ -591,7 +591,8 @@ impl CodeGenerator {
                  path. Either rerun with `--solver nodal` or use a different rail \
                  mode (`--opamp-rail-mode {hard|active-set|active-set-be}`). The \
                  auto-detector never picks BoyleDiodes today, so this error only \
-                 triggers on an explicit user override.".to_string()
+                 triggers on an explicit user override."
+                    .to_string(),
             ));
         }
 
@@ -600,7 +601,8 @@ impl CodeGenerator {
         // so these must include the parasitic caps (matching the kernel, which also
         // auto-inserts them in from_mna/from_mna_augmented).
         let patched_mna;
-        let parasitic_caps_inserted = mna.m > 0 && !mna.c.iter().any(|row| row.iter().any(|&v| v != 0.0));
+        let parasitic_caps_inserted =
+            mna.m > 0 && !mna.c.iter().any(|row| row.iter().any(|&v| v != 0.0));
         let mna = if parasitic_caps_inserted {
             log::info!(
                 "Codegen: C matrix is all zeros with M={} nonlinear devices; \
@@ -764,7 +766,8 @@ impl CodeGenerator {
         // nonlinear devices. Without capacitors, A = G and the trapezoidal
         // integrator degenerates (no energy storage → no dynamics).
         let patched_mna;
-        let parasitic_caps_inserted = mna.m > 0 && !mna.c.iter().any(|row| row.iter().any(|&v| v != 0.0));
+        let parasitic_caps_inserted =
+            mna.m > 0 && !mna.c.iter().any(|row| row.iter().any(|&v| v != 0.0));
         let mna = if parasitic_caps_inserted {
             log::info!(
                 "Codegen nodal: C matrix is all zeros with M={} nonlinear devices; \
@@ -846,8 +849,14 @@ mod tests {
         // Common short aliases.
         assert_eq!(OpampRailMode::parse("off"), Some(OpampRailMode::None));
         assert_eq!(OpampRailMode::parse("clamp"), Some(OpampRailMode::Hard));
-        assert_eq!(OpampRailMode::parse("boyle"), Some(OpampRailMode::BoyleDiodes));
-        assert_eq!(OpampRailMode::parse("diodes"), Some(OpampRailMode::BoyleDiodes));
+        assert_eq!(
+            OpampRailMode::parse("boyle"),
+            Some(OpampRailMode::BoyleDiodes)
+        );
+        assert_eq!(
+            OpampRailMode::parse("diodes"),
+            Some(OpampRailMode::BoyleDiodes)
+        );
     }
 
     #[test]

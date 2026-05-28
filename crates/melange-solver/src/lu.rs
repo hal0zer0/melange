@@ -328,7 +328,7 @@ mod tests {
         ];
         // N_i: 3x1, device injects at node 0 (-1) and node 1 (+1)
         let n_i_flat = vec![-1.0, 1.0, 0.0]; // [n0, n1, n2] for device 0
-        // N_v: 1x3, device reads v[0] - v[1]
+                                             // N_v: 1x3, device reads v[0] - v[1]
         let n_v_flat = vec![1.0, -1.0, 0.0]; // device 0 reads from nodes 0,1
 
         let slots = vec![DeviceSlot {
@@ -381,7 +381,11 @@ mod tests {
         assert_eq!(perm.len(), 4);
         let mut sorted = perm.clone();
         sorted.sort();
-        assert_eq!(sorted, vec![0, 1, 2, 3], "all nodes must appear exactly once");
+        assert_eq!(
+            sorted,
+            vec![0, 1, 2, 3],
+            "all nodes must appear exactly once"
+        );
     }
 
     #[test]
@@ -403,7 +407,11 @@ mod tests {
         // property: all nodes appear exactly once and the ordering is valid.
         let mut sorted = perm.clone();
         sorted.sort();
-        assert_eq!(sorted, vec![0, 1, 2, 3], "all nodes must appear exactly once");
+        assert_eq!(
+            sorted,
+            vec![0, 1, 2, 3],
+            "all nodes must appear exactly once"
+        );
     }
 
     #[test]
@@ -423,7 +431,10 @@ mod tests {
         let pattern = vec![vec![0, 1], vec![0, 1], vec![2]];
         let elim_order = vec![0, 1, 2];
         let swaps = find_row_swaps(&pattern, &elim_order, 3);
-        assert!(swaps.is_empty(), "no swaps needed when all diagonals present");
+        assert!(
+            swaps.is_empty(),
+            "no swaps needed when all diagonals present"
+        );
     }
 
     #[test]
@@ -450,9 +461,11 @@ mod tests {
         let sparsity = symbolic_lu(&pattern, &elim_order, &swaps, 3);
 
         // Execute the symbolic schedule on actual values
-        let mut a = [vec![2.0, 1.0, 1.0],
+        let mut a = [
+            vec![2.0, 1.0, 1.0],
             vec![4.0, 3.0, 3.0],
-            vec![8.0, 7.0, 9.0]];
+            vec![8.0, 7.0, 9.0],
+        ];
         // Apply row swaps
         for &(r1, r2) in &sparsity.row_swaps {
             a.swap(r1, r2);
@@ -538,12 +551,7 @@ mod tests {
             vec![0, 1, 2, 3],
             vec![0, 1, 2, 3],
         ];
-        let sparse_pattern = vec![
-            vec![0, 1],
-            vec![0, 1, 2],
-            vec![1, 2, 3],
-            vec![2, 3],
-        ];
+        let sparse_pattern = vec![vec![0, 1], vec![0, 1, 2], vec![1, 2, 3], vec![2, 3]];
 
         let eo_d = amd_ordering(&dense_pattern, 4);
         let sw_d = find_row_swaps(&dense_pattern, &eo_d, 4);

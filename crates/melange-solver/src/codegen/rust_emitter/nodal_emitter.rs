@@ -5,18 +5,16 @@
 //! Schur and full-LU process_sample, active-set resolve, device evaluation,
 //! and voltage limiting.
 
-use crate::codegen::ir::{CircuitIR, DeviceParams, DeviceType, LuOp};
-use crate::codegen::CodegenError;
-use super::RustEmitter;
 use super::dk_emitter::NoiseEmission;
 use super::helpers::{
-    fmt_f64, format_matrix_rows, section_banner, oversampling_info,
-    pentode_dispatch, emit_pentode_nr_dk_stamp, recommended_warmup_samples,
-    self_heating_device_data, device_param_template_data,
+    device_param_template_data, emit_pentode_nr_dk_stamp, fmt_f64, format_matrix_rows,
+    oversampling_info, pentode_dispatch, recommended_warmup_samples, section_banner,
+    self_heating_device_data,
 };
-use super::nr_helpers::{
-    emit_nr_singular_fallback, emit_schur_nr_limit_and_converge,
-};
+use super::nr_helpers::{emit_nr_singular_fallback, emit_schur_nr_limit_and_converge};
+use super::RustEmitter;
+use crate::codegen::ir::{CircuitIR, DeviceParams, DeviceType, LuOp};
+use crate::codegen::CodegenError;
 
 // ============================================================================
 // Sparse N_V / N_I helpers
@@ -27,7 +25,13 @@ use super::nr_helpers::{
 /// Instead of `for j in 0..N { result += N_V[row][j] * vec[j]; }`,
 /// emits only the nonzero terms: `N_V[row][c1] * vec[c1] + N_V[row][c2] * vec[c2]`.
 /// N_V typically has 2 nonzeros per row (±1 at device nodes), so this is ~28x faster at N=57.
-fn emit_sparse_nv_dot(ir: &CircuitIR, row: usize, result_var: &str, vec_var: &str, indent: &str) -> String {
+fn emit_sparse_nv_dot(
+    ir: &CircuitIR,
+    row: usize,
+    result_var: &str,
+    vec_var: &str,
+    indent: &str,
+) -> String {
     let nz = &ir.sparsity.n_v.nz_by_row;
     if row < nz.len() && !nz[row].is_empty() {
         let terms: Vec<String> = nz[row]
@@ -51,14 +55,22 @@ fn emit_sparse_nv_matvec(ir: &CircuitIR, result_arr: &str, vec_var: &str, indent
                 .iter()
                 .map(|&col| format!("N_V[{}][{}] * {}[{}]", i, col, vec_var, col))
                 .collect();
-            code.push_str(&format!("{indent}{result_arr}[{i}] = {};\n", terms.join(" + ")));
+            code.push_str(&format!(
+                "{indent}{result_arr}[{i}] = {};\n",
+                terms.join(" + ")
+            ));
         }
     }
     code
 }
 
 /// Emit sparse `rhs[i] += sum_j N_I[i][j] * vec[j]` for all N rows.
-fn emit_sparse_ni_matvec_add(ir: &CircuitIR, result_arr: &str, vec_var: &str, indent: &str) -> String {
+fn emit_sparse_ni_matvec_add(
+    ir: &CircuitIR,
+    result_arr: &str,
+    vec_var: &str,
+    indent: &str,
+) -> String {
     let n = ir.topology.n;
     let mut code = String::new();
     let nz = &ir.sparsity.n_i.nz_by_row;
@@ -68,7 +80,10 @@ fn emit_sparse_ni_matvec_add(ir: &CircuitIR, result_arr: &str, vec_var: &str, in
                 .iter()
                 .map(|&col| format!("N_I[{}][{}] * {}[{}]", i, col, vec_var, col))
                 .collect();
-            code.push_str(&format!("{indent}{result_arr}[{i}] += {};\n", terms.join(" + ")));
+            code.push_str(&format!(
+                "{indent}{result_arr}[{i}] += {};\n",
+                terms.join(" + ")
+            ));
         }
     }
     code
@@ -233,7 +248,12 @@ fn emit_nodal_nan_reset(
     for (oi, &node) in ir.solver_config.output_nodes.iter().enumerate() {
         if node < ir.dc_operating_point.len() {
             let dc_val = ir.dc_operating_point[node];
-            let scale = ir.solver_config.output_scales.get(oi).copied().unwrap_or(1.0);
+            let scale = ir
+                .solver_config
+                .output_scales
+                .get(oi)
+                .copied()
+                .unwrap_or(1.0);
             let clamp_v = ir.solver_config.output_clamp_v;
             let out_val = (dc_val * scale).clamp(-clamp_v, clamp_v);
             code.push_str(&format!("{body}nan_out[{oi}] = {out_val:.17e};\n"));
@@ -319,7 +339,11 @@ impl RustEmitter {
         // into the nonlinear solver, producing garbage regardless of K magnitude.
         let n = ir.topology.n;
         let s_max_abs = if n > 0 && !ir.matrices.s.is_empty() {
-            ir.matrices.s.iter().map(|v| v.abs()).fold(0.0_f64, f64::max)
+            ir.matrices
+                .s
+                .iter()
+                .map(|v| v.abs())
+                .fold(0.0_f64, f64::max)
         } else {
             0.0
         };
@@ -347,8 +371,11 @@ impl RustEmitter {
                 "Nodal: {} linearized devices — suppressing magnitude guards \
                  (max|K|={:.2e}, max|S|={:.2e}, K_diag_min={:.2e}, \
                  pos_K_with_I={}). Spectral radius = {:.4}.",
-                ir.topology.num_linearized_devices, k_max_abs, s_max_abs,
-                k_diag_min, has_positive_k_with_current,
+                ir.topology.num_linearized_devices,
+                k_max_abs,
+                s_max_abs,
+                k_diag_min,
+                has_positive_k_with_current,
                 ir.matrices.spectral_radius_s_aneg
             );
         }
@@ -431,10 +458,9 @@ impl RustEmitter {
         use crate::codegen::OpampRailMode;
         let needs_lu_solve = use_full_nodal
             || (matches!(
-                    ir.solver_config.opamp_rail_mode,
-                    OpampRailMode::ActiveSet | OpampRailMode::ActiveSetBe
-                )
-                && !ir.opamps.is_empty());
+                ir.solver_config.opamp_rail_mode,
+                OpampRailMode::ActiveSet | OpampRailMode::ActiveSetBe
+            ) && !ir.opamps.is_empty());
 
         // Now emit header, constants, device models, state (needs use_full_nodal)
         code.push_str(&self.emit_header(ir)?);
@@ -499,7 +525,8 @@ impl RustEmitter {
             if linearized_bypass {
                 log::warn!(
                     "Nodal: using Schur NR (M={}, {} linearized devices, rho={:.4})",
-                    m, ir.topology.num_linearized_devices,
+                    m,
+                    ir.topology.num_linearized_devices,
                     ir.matrices.spectral_radius_s_aneg
                 );
             }
@@ -670,10 +697,14 @@ impl RustEmitter {
         // pots: v[21] drifts 186 V in 50 warmup samples under a BE MNA mixed
         // with a trap IIR).
         let be = ir.solver_config.backward_euler;
-        let internal_rate = ir.solver_config.sample_rate
-            * ir.solver_config.oversampling_factor as f64;
+        let internal_rate =
+            ir.solver_config.sample_rate * ir.solver_config.oversampling_factor as f64;
         for (idx, oa_iir) in ir.opamp_iir.iter().enumerate() {
-            let alpha_oa = if be { internal_rate } else { 2.0 * internal_rate };
+            let alpha_oa = if be {
+                internal_rate
+            } else {
+                2.0 * internal_rate
+            };
             let denom = alpha_oa * oa_iir.c_dom + oa_iir.go;
             let a1 = if be {
                 alpha_oa * oa_iir.c_dom / denom
@@ -685,39 +716,20 @@ impl RustEmitter {
                 "/// IIR op-amp {idx}: Gm={:.4}, Go={:.4}, C_dom={:.4e} (pure explicit)\n",
                 oa_iir.gm, oa_iir.go, oa_iir.c_dom
             ));
-            code.push_str(&format!(
-                "const OA{idx}_GM: f64 = {:.17e};\n",
-                oa_iir.gm
-            ));
-            code.push_str(&format!(
-                "const OA{idx}_GO: f64 = {:.17e};\n",
-                oa_iir.go
-            ));
+            code.push_str(&format!("const OA{idx}_GM: f64 = {:.17e};\n", oa_iir.gm));
+            code.push_str(&format!("const OA{idx}_GO: f64 = {:.17e};\n", oa_iir.go));
             code.push_str(&format!(
                 "const OA{idx}_C_DOM: f64 = {:.17e};\n",
                 oa_iir.c_dom
             ));
-            code.push_str(&format!(
-                "const OA{idx}_A1_DEFAULT: f64 = {:.17e};\n",
-                a1
-            ));
-            code.push_str(&format!(
-                "const OA{idx}_B0_DEFAULT: f64 = {:.17e};\n",
-                b0
-            ));
-            code.push_str(&format!(
-                "const OA{idx}_OUT: usize = {};\n",
-                oa_iir.out_idx
-            ));
+            code.push_str(&format!("const OA{idx}_A1_DEFAULT: f64 = {:.17e};\n", a1));
+            code.push_str(&format!("const OA{idx}_B0_DEFAULT: f64 = {:.17e};\n", b0));
+            code.push_str(&format!("const OA{idx}_OUT: usize = {};\n", oa_iir.out_idx));
             if let Some(vhi) = Some(oa_iir.vclamp_hi).filter(|v| v.is_finite()) {
-                code.push_str(&format!(
-                    "const OA{idx}_VCC: f64 = {:.17e};\n", vhi
-                ));
+                code.push_str(&format!("const OA{idx}_VCC: f64 = {:.17e};\n", vhi));
             }
             if let Some(vlo) = Some(oa_iir.vclamp_lo).filter(|v| v.is_finite()) {
-                code.push_str(&format!(
-                    "const OA{idx}_VEE: f64 = {:.17e};\n", vlo
-                ));
+                code.push_str(&format!("const OA{idx}_VEE: f64 = {:.17e};\n", vlo));
             }
             code.push('\n');
         }
@@ -1042,7 +1054,11 @@ impl RustEmitter {
             let l0_str: Vec<String> = sg.l0s.iter().map(|v| format!("{:.17e}", v)).collect();
             let isat_str: Vec<String> = sg.isats.iter().map(|v| format!("{:.17e}", v)).collect();
             let row_str: Vec<String> = sg.aug_rows.iter().map(|v| format!("{}", v)).collect();
-            let kappa_str: Vec<String> = sg.coupling_flat.iter().map(|v| format!("{:.17e}", v)).collect();
+            let kappa_str: Vec<String> = sg
+                .coupling_flat
+                .iter()
+                .map(|v| format!("{:.17e}", v))
+                .collect();
             code.push_str(&format!(
                 "/// Saturating transformer group {idx}: {} ({w} windings)\n\
                  pub const SAT_XG_{idx}_W: usize = {w};\n\
@@ -1132,7 +1148,12 @@ impl RustEmitter {
     }
 
     /// Emit state struct, Default impl, set_sample_rate, and reset for nodal solver.
-    pub(super) fn emit_nodal_state(&self, ir: &CircuitIR, use_full_nodal: bool, noise: &NoiseEmission) -> String {
+    pub(super) fn emit_nodal_state(
+        &self,
+        ir: &CircuitIR,
+        use_full_nodal: bool,
+        noise: &NoiseEmission,
+    ) -> String {
         let n = ir.topology.n;
         let m = ir.topology.m;
         let n_nodes = if ir.topology.n_nodes > 0 {
@@ -1145,7 +1166,8 @@ impl RustEmitter {
         let has_pots = !ir.pots.is_empty();
         let has_switches = !ir.switches.is_empty();
         let has_sat_ind = !ir.saturating_inductors.is_empty();
-        let has_sat_coupled = !ir.saturating_coupled.is_empty() || !ir.saturating_xfmr_groups.is_empty();
+        let has_sat_coupled =
+            !ir.saturating_coupled.is_empty() || !ir.saturating_xfmr_groups.is_empty();
         let has_any_saturation = has_sat_ind || has_sat_coupled;
 
         let mut code = section_banner("STATE STRUCTURE (Nodal solver)");
@@ -1195,7 +1217,9 @@ impl RustEmitter {
         // pot/switch/sample-rate changes, not per sample. Keeping them
         // heap-allocated via Box prevents them from polluting L2 cache.
         if use_full_nodal {
-            code.push_str("/// Cold state: matrices only accessed on pot/switch/sample-rate changes.\n");
+            code.push_str(
+                "/// Cold state: matrices only accessed on pot/switch/sample-rate changes.\n",
+            );
             code.push_str("/// Heap-allocated to keep the per-sample hot path in L2 cache.\n");
             code.push_str("#[derive(Clone, Debug)]\n");
             code.push_str("pub struct CircuitStateCold {\n");
@@ -1241,12 +1265,18 @@ impl RustEmitter {
         code.push_str("    /// NR convergence diagnostic from the last sample's solve.\n");
         code.push_str("    ///\n");
         code.push_str("    /// Semantics:\n");
-        code.push_str("    /// - 0..MAX_ITER-1: 0-indexed iteration at which convergence was detected\n");
+        code.push_str(
+            "    /// - 0..MAX_ITER-1: 0-indexed iteration at which convergence was detected\n",
+        );
         code.push_str("    ///   (i.e. `last_nr_iterations + 1` iterations actually ran)\n");
         code.push_str("    /// - MAX_ITER: loop exhausted without convergence → NR failed\n");
         code.push_str("    ///\n");
-        code.push_str("    /// The check `last_nr_iterations >= MAX_ITER` is the BE-fallback trigger;\n");
-        code.push_str("    /// storing `iter` (not `iter + 1`) is intentional so that convergence at\n");
+        code.push_str(
+            "    /// The check `last_nr_iterations >= MAX_ITER` is the BE-fallback trigger;\n",
+        );
+        code.push_str(
+            "    /// storing `iter` (not `iter + 1`) is intentional so that convergence at\n",
+        );
         code.push_str("    /// the final permitted iteration (iter == MAX_ITER - 1) does not false-trigger.\n");
         code.push_str("    pub last_nr_iterations: u32,\n\n");
         if ir.dc_block {
@@ -1261,7 +1291,9 @@ impl RustEmitter {
         }
         code.push_str("    /// Diagnostic: peak absolute output (pre-clamp)\n");
         code.push_str("    pub diag_peak_output: f64,\n");
-        code.push_str("    /// Diagnostic: number of times output exceeded the ±output_clamp_v ceiling\n");
+        code.push_str(
+            "    /// Diagnostic: number of times output exceeded the ±output_clamp_v ceiling\n",
+        );
         code.push_str("    pub diag_clamp_count: u64,\n");
         code.push_str("    /// Diagnostic: number of times NR hit max iterations\n");
         code.push_str("    pub diag_nr_max_iter_count: u64,\n");
@@ -1276,8 +1308,12 @@ impl RustEmitter {
         code.push_str("    /// Diagnostic: number of samples hit by the global voltage-damping\n");
         code.push_str("    /// safety net. This is a legacy safeguard that scales v_new toward\n");
         code.push_str("    /// v_prev when any node moves more than ~2V (or 5% of max DC OP) in\n");
-        code.push_str("    /// one sample. Per CLAUDE.md, output limiting must never mask solver\n");
-        code.push_str("    /// bugs — treat a nonzero count here as a signal that the solver needs\n");
+        code.push_str(
+            "    /// one sample. Per CLAUDE.md, output limiting must never mask solver\n",
+        );
+        code.push_str(
+            "    /// bugs — treat a nonzero count here as a signal that the solver needs\n",
+        );
         code.push_str("    /// investigation, not as an acceptable steady-state.\n");
         code.push_str("    pub diag_voltage_damp_count: u64,\n\n");
 
@@ -1333,12 +1369,18 @@ impl RustEmitter {
         // When use_full_nodal, these are in a heap-allocated CircuitStateCold
         // to keep the hot per-sample working set in L2 cache.
         if use_full_nodal {
-            code.push_str("    /// Cold state: Schur complement + work matrices (heap-allocated,\n");
-            code.push_str("    /// only accessed on pot/switch changes and sample rate changes).\n");
+            code.push_str(
+                "    /// Cold state: Schur complement + work matrices (heap-allocated,\n",
+            );
+            code.push_str(
+                "    /// only accessed on pot/switch changes and sample rate changes).\n",
+            );
             code.push_str("    pub cold: Box<CircuitStateCold>,\n");
         } else {
             // Schur path: all matrices inline (small N, no cache pressure)
-            code.push_str("    /// S matrix: A^{-1} (trapezoidal), recomputed by set_sample_rate\n");
+            code.push_str(
+                "    /// S matrix: A^{-1} (trapezoidal), recomputed by set_sample_rate\n",
+            );
             code.push_str("    pub s: [[f64; N]; N],\n");
             if m > 0 {
                 code.push_str("    /// K matrix: N_v * S * N_i (nonlinear kernel), recomputed by set_sample_rate\n");
@@ -1366,7 +1408,9 @@ impl RustEmitter {
                 if m > 0 {
                     code.push_str("    /// K_sub matrix: N_v*S_sub*N_i (sub-step kernel)\n");
                     code.push_str("    pub k_sub: [[f64; M]; M],\n");
-                    code.push_str("    /// S_NI_sub matrix: S_sub*N_i (sub-step voltage recovery)\n");
+                    code.push_str(
+                        "    /// S_NI_sub matrix: S_sub*N_i (sub-step voltage recovery)\n",
+                    );
                     code.push_str("    pub s_ni_sub: [[f64; M]; N],\n");
                 }
             }
@@ -1385,7 +1429,9 @@ impl RustEmitter {
             } else {
                 code.push_str("    /// Working G matrix (modified by pots/switches)\n");
                 code.push_str("    pub g_work: [[f64; N]; N],\n");
-                code.push_str("    /// Working C matrix (modified by switches/saturating inductors)\n");
+                code.push_str(
+                    "    /// Working C matrix (modified by switches/saturating inductors)\n",
+                );
                 code.push_str("    pub c_work: [[f64; N]; N],\n");
                 code.push_str("    /// Current sample rate (for rebuild_matrices)\n");
                 code.push_str("    pub current_sample_rate: f64,\n");
@@ -1424,7 +1470,9 @@ impl RustEmitter {
         if has_any_saturation {
             code.push_str("    /// Decimation counter for saturation updates (counts down to 0)\n");
             code.push_str("    pub sat_update_counter: u32,\n");
-            code.push_str("    /// SM update counter; triggers full rebuild at SAT_RESYNC_INTERVAL\n");
+            code.push_str(
+                "    /// SM update counter; triggers full rebuild at SAT_RESYNC_INTERVAL\n",
+            );
             code.push_str("    pub sat_resync_counter: u32,\n\n");
         }
 
@@ -1888,7 +1936,11 @@ impl RustEmitter {
         code.push_str("        self.diag_substep_count = 0;\n");
         code.push_str("        self.diag_refactor_count = 0;\n");
         // Reset Schur complement matrices to defaults
-        let cp = if use_full_nodal { "self.cold." } else { "self." };
+        let cp = if use_full_nodal {
+            "self.cold."
+        } else {
+            "self."
+        };
         code.push_str(&format!("        {}s = S_DEFAULT;\n", cp));
         if m > 0 {
             code.push_str(&format!("        {}k = K_DEFAULT;\n", cp));
@@ -2048,9 +2100,7 @@ impl RustEmitter {
             code.push_str(
                 "            // DC OP didn't converge — fast-forward to DC steady state.\n",
             );
-            code.push_str(
-                "            // 1000 samples at 200Hz = 5 seconds of circuit time,\n",
-            );
+            code.push_str("            // 1000 samples at 200Hz = 5 seconds of circuit time,\n");
             code.push_str(
                 "            // enough for coupling caps up to RC ~1s to fully charge.\n",
             );
@@ -2062,9 +2112,7 @@ impl RustEmitter {
                 "            self.rebuild_matrices({:.17e});\n",
                 target_rate,
             ));
-            code.push_str(
-                "            // Cache settled state for future resets\n",
-            );
+            code.push_str("            // Cache settled state for future resets\n");
             code.push_str("            self.dc_operating_point = self.v_prev;\n");
             code.push_str("            self.settled_i_nl = self.i_nl_prev;\n");
             code.push_str("            self.dc_settled = true;\n");
@@ -2226,19 +2274,35 @@ impl RustEmitter {
             ir.solver_config.opamp_rail_mode,
             crate::codegen::OpampRailMode::BoyleDiodes
         ) {
-            code.push_str("            // BoyleDiodes-only: invalidate the cross-timestep chord LU.\n");
+            code.push_str(
+                "            // BoyleDiodes-only: invalidate the cross-timestep chord LU.\n",
+            );
             code.push_str("            // The chord_lu / chord_j_dev cache holds a *factored*\n");
             code.push_str("            // matrix and is paired with a specific (v_prev, j_dev)\n");
-            code.push_str("            // pair from the most recent refactor. After the 50-sample\n");
-            code.push_str("            // default warmup, chord_j_dev still reflects the deeply-\n");
+            code.push_str(
+                "            // pair from the most recent refactor. After the 50-sample\n",
+            );
+            code.push_str(
+                "            // default warmup, chord_j_dev still reflects the deeply-\n",
+            );
             code.push_str("            // reverse-biased catch diodes (j_dev ≈ 1e-31), and the\n");
-            code.push_str("            // adaptive trigger doesn't fire on the first signal sample\n");
-            code.push_str("            // because both `j_dev` and `chord_j_dev` are still ≈ 1e-31\n");
-            code.push_str("            // — but v_prev has drifted enough during warmup that the\n");
+            code.push_str(
+                "            // adaptive trigger doesn't fire on the first signal sample\n",
+            );
+            code.push_str(
+                "            // because both `j_dev` and `chord_j_dev` are still ≈ 1e-31\n",
+            );
+            code.push_str(
+                "            // — but v_prev has drifted enough during warmup that the\n",
+            );
             code.push_str("            // back-solve against the stale factor produces a wrong\n");
-            code.push_str("            // linear prediction. Forcing a refactor here is harmless\n");
+            code.push_str(
+                "            // linear prediction. Forcing a refactor here is harmless\n",
+            );
             code.push_str("            // for non-BoyleDiodes modes (no Schottky-class circuit\n");
-            code.push_str("            // exhibits the same staleness pattern), but it shifts the\n");
+            code.push_str(
+                "            // exhibits the same staleness pattern), but it shifts the\n",
+            );
             code.push_str("            // first-iteration NR state for VCR ALC and other\n");
             code.push_str("            // attack-timing-sensitive control circuits, so we gate\n");
             code.push_str("            // the reset on BoyleDiodes mode only.\n");
@@ -2312,12 +2376,20 @@ impl RustEmitter {
 
         // rebuild_matrices: recompute A/A_neg/A_be/A_neg_be from G+C
         let g_src = if has_pots || has_switches {
-            if use_full_nodal { "self.cold.g_work" } else { "self.g_work" }
+            if use_full_nodal {
+                "self.cold.g_work"
+            } else {
+                "self.g_work"
+            }
         } else {
             "G"
         };
         let c_src = if has_pots || has_switches {
-            if use_full_nodal { "self.cold.c_work" } else { "self.c_work" }
+            if use_full_nodal {
+                "self.cold.c_work"
+            } else {
+                "self.c_work"
+            }
         } else {
             "C"
         };
@@ -2366,7 +2438,9 @@ impl RustEmitter {
                  \x20               {cp}a_neg_sub[i][j] = alpha_sub * {c}[i][j] - {g}[i][j];\n\
                  \x20           }}\n\
                  \x20       }}\n",
-                cp = cp, c = c_src, g = g_src
+                cp = cp,
+                c = c_src,
+                g = g_src
             ));
         }
 
@@ -2431,7 +2505,8 @@ impl RustEmitter {
             code.push_str("                    for a in 0..N {\n");
             code.push_str("                        let mut s_ni_aj = 0.0;\n");
             code.push_str(&format!(
-                "                        for b in 0..N {{ s_ni_aj += {}s[a][b] * N_I[b][j]; }}\n", cp
+                "                        for b in 0..N {{ s_ni_aj += {}s[a][b] * N_I[b][j]; }}\n",
+                cp
             ));
             code.push_str("                        sum += N_V[i][a] * s_ni_aj;\n");
             code.push_str("                    }\n");
@@ -2443,7 +2518,8 @@ impl RustEmitter {
             code.push_str("                for j in 0..M {\n");
             code.push_str("                    let mut sum = 0.0;\n");
             code.push_str(&format!(
-                "                    for a in 0..N {{ sum += {}s[i][a] * N_I[a][j]; }}\n", cp
+                "                    for a in 0..N {{ sum += {}s[i][a] * N_I[a][j]; }}\n",
+                cp
             ));
             code.push_str(&format!("                    {}s_ni[i][j] = sum;\n", cp));
             code.push_str("                }\n");
@@ -2473,7 +2549,8 @@ impl RustEmitter {
             code.push_str("                for j in 0..M {\n");
             code.push_str("                    let mut sum = 0.0;\n");
             code.push_str(&format!(
-                "                    for a in 0..N {{ sum += {}s_be[i][a] * N_I[a][j]; }}\n", cp
+                "                    for a in 0..N {{ sum += {}s_be[i][a] * N_I[a][j]; }}\n",
+                cp
             ));
             code.push_str(&format!("                    {}s_ni_be[i][j] = sum;\n", cp));
             code.push_str("                }\n");
@@ -2483,7 +2560,9 @@ impl RustEmitter {
 
         // Recompute S_sub = (G + alpha_sub*C)^{-1} (trap at 2× rate)
         if !ir.matrices.s_sub.is_empty() {
-            code.push_str("        // Recompute S_sub = (G + alpha_sub*C)^{-1} (trap at 2× rate)\n");
+            code.push_str(
+                "        // Recompute S_sub = (G + alpha_sub*C)^{-1} (trap at 2× rate)\n",
+            );
             code.push_str(&format!(
                 "        let mut a_sub = [[0.0f64; N]; N];\n\
                  \x20       for i in 0..N {{ for j in 0..N {{ a_sub[i][j] = {g}[i][j] + alpha_sub * {c}[i][j]; }} }}\n",
@@ -2509,9 +2588,13 @@ impl RustEmitter {
                 code.push_str("                for j in 0..M {\n");
                 code.push_str("                    let mut sum = 0.0;\n");
                 code.push_str(&format!(
-                    "                    for a in 0..N {{ sum += {}s_sub[i][a] * N_I[a][j]; }}\n", cp
+                    "                    for a in 0..N {{ sum += {}s_sub[i][a] * N_I[a][j]; }}\n",
+                    cp
                 ));
-                code.push_str(&format!("                    {}s_ni_sub[i][j] = sum;\n", cp));
+                code.push_str(&format!(
+                    "                    {}s_ni_sub[i][j] = sum;\n",
+                    cp
+                ));
                 code.push_str("                }\n");
                 code.push_str("            }\n");
             }
@@ -2540,7 +2623,10 @@ impl RustEmitter {
             let np = pot.node_p;
             let nq = pot.node_q;
             let (setter_name, doc_noun) = match &pot.runtime_field {
-                Some(field) => (format!("set_runtime_R_{field}"), format!("runtime resistor `{field}`")),
+                Some(field) => (
+                    format!("set_runtime_R_{field}"),
+                    format!("runtime resistor `{field}`"),
+                ),
                 None => (format!("set_pot_{idx}"), format!("potentiometer {idx}")),
             };
             let min_const = match &pot.runtime_field {
@@ -2580,26 +2666,38 @@ impl RustEmitter {
 
             // Emit conductance stamp into g_work (full dimension if Boyle, reduced otherwise)
             // Pot node indices (np, nq) are 1-indexed MNA nodes (< n_nodes), same in both systems.
-            let gw = if use_full_nodal { "self.cold.g_work" } else { "self.g_work" };
+            let gw = if use_full_nodal {
+                "self.cold.g_work"
+            } else {
+                "self.g_work"
+            };
             let emit_g_work_stamp = |code: &mut String| {
                 if np > 0 {
                     code.push_str(&format!(
                         "        {}[{}][{}] += delta_g;\n",
-                        gw, np - 1, np - 1
+                        gw,
+                        np - 1,
+                        np - 1
                     ));
                 }
                 if nq > 0 {
                     code.push_str(&format!(
                         "        {}[{}][{}] += delta_g;\n",
-                        gw, nq - 1, nq - 1
+                        gw,
+                        nq - 1,
+                        nq - 1
                     ));
                 }
                 if np > 0 && nq > 0 {
                     code.push_str(&format!(
                         "        {}[{}][{}] -= delta_g;\n\
                          \x20       {}[{}][{}] -= delta_g;\n",
-                        gw, np - 1, nq - 1,
-                        gw, nq - 1, np - 1
+                        gw,
+                        np - 1,
+                        nq - 1,
+                        gw,
+                        nq - 1,
+                        np - 1
                     ));
                 }
             };
@@ -2610,13 +2708,15 @@ impl RustEmitter {
                     if np > 0 {
                         code.push_str(&format!(
                             "        self.{matrix}[{}][{}] {sign}= delta_g;\n",
-                            np - 1, np - 1
+                            np - 1,
+                            np - 1
                         ));
                     }
                     if nq > 0 {
                         code.push_str(&format!(
                             "        self.{matrix}[{}][{}] {sign}= delta_g;\n",
-                            nq - 1, nq - 1
+                            nq - 1,
+                            nq - 1
                         ));
                     }
                     if np > 0 && nq > 0 {
@@ -2624,8 +2724,10 @@ impl RustEmitter {
                         code.push_str(&format!(
                             "        self.{matrix}[{}][{}] {neg_sign}= delta_g;\n\
                              \x20       self.{matrix}[{}][{}] {neg_sign}= delta_g;\n",
-                            np - 1, nq - 1,
-                            nq - 1, np - 1
+                            np - 1,
+                            nq - 1,
+                            nq - 1,
+                            np - 1
                         ));
                     }
                 };
@@ -2694,8 +2796,16 @@ impl RustEmitter {
                 let np = comp.node_p;
                 let nq = comp.node_q;
                 let matrix = if comp.component_type == 'R' {
-                    if use_full_nodal { "cold.g_work" } else { "g_work" }
-                } else if use_full_nodal { "cold.c_work" } else { "c_work" };
+                    if use_full_nodal {
+                        "cold.g_work"
+                    } else {
+                        "g_work"
+                    }
+                } else if use_full_nodal {
+                    "cold.c_work"
+                } else {
+                    "c_work"
+                };
 
                 code.push_str(&format!(
                     "        // Switch {} component {} ({}, type {})\n",
@@ -2724,7 +2834,11 @@ impl RustEmitter {
                 // Stamp delta into g_work or c_work
                 if let Some(aug_row) = comp.augmented_row.filter(|_| comp.component_type == 'L') {
                     // Augmented MNA: L value on diagonal of branch variable row
-                    let cw = if use_full_nodal { "self.cold.c_work" } else { "self.c_work" };
+                    let cw = if use_full_nodal {
+                        "self.cold.c_work"
+                    } else {
+                        "self.c_work"
+                    };
                     code.push_str(&format!(
                         "        {cw}[{aug_row}][{aug_row}] += delta_{ci};\n"
                     ));
@@ -2761,7 +2875,11 @@ impl RustEmitter {
             // Recompute off-diagonal mutual inductance entries
             if !sw.mutual_entries.is_empty() {
                 code.push_str("        // Update mutual inductance off-diagonal entries\n");
-                let cw_m = if use_full_nodal { "self.cold.c_work" } else { "self.c_work" };
+                let cw_m = if use_full_nodal {
+                    "self.cold.c_work"
+                } else {
+                    "self.c_work"
+                };
                 for me in &sw.mutual_entries {
                     code.push_str(&format!(
                         "        {{\n\
@@ -2840,9 +2958,7 @@ impl RustEmitter {
     pub(super) fn emit_nodal_invert_n(_ir: &CircuitIR) -> String {
         let mut code = section_banner("MATRIX INVERSION (for rebuild_matrices)");
 
-        code.push_str(
-            "/// Invert an N×N matrix via LU factorization with partial pivoting.\n",
-        );
+        code.push_str("/// Invert an N×N matrix via LU factorization with partial pivoting.\n");
         code.push_str("/// Returns None if the matrix is singular (pivot < 1e-30).\n");
         code.push_str("///\n");
         code.push_str("/// Called three times per `rebuild_matrices` on the nodal path\n");
@@ -2918,7 +3034,10 @@ impl RustEmitter {
     /// 3. Extract device voltages: p = N_v * v_pred (O(M*N))
     /// 4. M-dim NR (same as DK: O(M^3) per iteration)
     /// 5. Recover full v = v_pred + S_NI * i_nl (O(M*N))
-    pub(super) fn emit_nodal_schur_process_sample(ir: &CircuitIR, noise: &NoiseEmission) -> Result<String, CodegenError> {
+    pub(super) fn emit_nodal_schur_process_sample(
+        ir: &CircuitIR,
+        noise: &NoiseEmission,
+    ) -> Result<String, CodegenError> {
         let n = ir.topology.n;
         let m = ir.topology.m;
         let n_nodes = if ir.topology.n_nodes > 0 {
@@ -2961,9 +3080,7 @@ impl RustEmitter {
         let has_any_saturation = !ir.saturating_inductors.is_empty()
             || !ir.saturating_coupled.is_empty()
             || !ir.saturating_xfmr_groups.is_empty();
-        let has_rebuild = has_pots
-            || !ir.switches.is_empty()
-            || has_any_saturation;
+        let has_rebuild = has_pots || !ir.switches.is_empty() || has_any_saturation;
         if has_rebuild {
             code.push_str(
                 "    // Lazy rebuild: batch all pot/switch changes into one matrix rebuild\n\
@@ -2983,7 +3100,9 @@ impl RustEmitter {
 
         // Decimated saturation update: check every SAT_UPDATE_INTERVAL samples
         if has_any_saturation {
-            code.push_str("    // Decimated saturation update (every SAT_UPDATE_INTERVAL samples)\n");
+            code.push_str(
+                "    // Decimated saturation update (every SAT_UPDATE_INTERVAL samples)\n",
+            );
             code.push_str("    if state.sat_update_counter == 0 {\n");
             code.push_str("        state.sat_update_counter = SAT_UPDATE_INTERVAL;\n");
         }
@@ -3090,11 +3209,17 @@ impl RustEmitter {
             code.push_str("                state.sat_resync_counter = 0;\n");
             code.push_str("                state.rebuild_matrices(state.current_sample_rate);\n");
             code.push_str("            } else {\n");
-            code.push_str("                // SM rank-1 update: O(N²) per changed diagonal entry\n");
+            code.push_str(
+                "                // SM rank-1 update: O(N²) per changed diagonal entry\n",
+            );
             if ir.solver_config.backward_euler {
-                code.push_str("                let alpha = state.current_sample_rate; // backward Euler\n");
+                code.push_str(
+                    "                let alpha = state.current_sample_rate; // backward Euler\n",
+                );
             } else {
-                code.push_str("                let alpha = 2.0 * state.current_sample_rate; // trapezoidal\n");
+                code.push_str(
+                    "                let alpha = 2.0 * state.current_sample_rate; // trapezoidal\n",
+                );
             }
         }
 
@@ -3169,7 +3294,9 @@ impl RustEmitter {
         // Close decimation block
         if has_any_saturation {
             code.push_str("    }\n");
-            code.push_str("    state.sat_update_counter = state.sat_update_counter.saturating_sub(1);\n\n");
+            code.push_str(
+                "    state.sat_update_counter = state.sat_update_counter.saturating_sub(1);\n\n",
+            );
         }
         // Step 1: Build RHS = rhs_const + A_neg * v_prev + N_i * i_nl_prev + input (sparse)
         code.push_str(
@@ -3518,10 +3645,8 @@ impl RustEmitter {
             //             here.
             // * `None`  — no clamping; caller accepts unbounded output.
             use crate::codegen::OpampRailMode;
-            let active_set_be_mode = matches!(
-                ir.solver_config.opamp_rail_mode,
-                OpampRailMode::ActiveSetBe
-            );
+            let active_set_be_mode =
+                matches!(ir.solver_config.opamp_rail_mode, OpampRailMode::ActiveSetBe);
             if active_set_be_mode {
                 code.push_str("    let mut active_set_engaged = false;\n");
             }
@@ -3544,22 +3669,11 @@ impl RustEmitter {
                 OpampRailMode::ActiveSet => {
                     // Original trap+pin behavior — preserves steady DC rail
                     // for control-path topologies (e.g. VCR ALC sidechain).
-                    Self::emit_nodal_active_set_resolve(
-                        &mut code,
-                        ir,
-                        "    ",
-                        "state.a",
-                        "rhs",
-                    );
+                    Self::emit_nodal_active_set_resolve(&mut code, ir, "    ", "state.a", "rhs");
                 }
                 OpampRailMode::ActiveSetBe => {
                     // Detect-only here; resolve happens in BE fallback below.
-                    Self::emit_nodal_active_set_check(
-                        &mut code,
-                        ir,
-                        "    ",
-                        "active_set_engaged",
-                    );
+                    Self::emit_nodal_active_set_check(&mut code, ir, "    ", "active_set_engaged");
                 }
                 OpampRailMode::BoyleDiodes => {
                     // Catch diodes are physically in the circuit — no extra
@@ -3610,25 +3724,46 @@ impl RustEmitter {
             if active_set_be_mode && !ir.matrices.s_sub.is_empty() {
                 code.push_str("    if !converged && active_set_engaged && state.last_nr_iterations < MAX_ITER as u32 {\n");
                 code.push_str("        // Sub-step at 2× rate using precomputed Schur matrices.\n");
-                code.push_str("        // At the finer timestep the discrete-time LC resonator from\n");
-                code.push_str("        // the ActiveSet pin has its Nyquist at 2× the audio Nyquist,\n");
-                code.push_str("        // so the artifact decays instead of sustaining. Cost: 2 × O(N²)\n");
-                code.push_str("        // matvec + O(M³) NR per sub-step — same as the normal Schur path.\n");
+                code.push_str(
+                    "        // At the finer timestep the discrete-time LC resonator from\n",
+                );
+                code.push_str(
+                    "        // the ActiveSet pin has its Nyquist at 2× the audio Nyquist,\n",
+                );
+                code.push_str(
+                    "        // so the artifact decays instead of sustaining. Cost: 2 × O(N²)\n",
+                );
+                code.push_str(
+                    "        // matvec + O(M³) NR per sub-step — same as the normal Schur path.\n",
+                );
                 code.push_str("        const N_SUB: usize = 2;\n");
                 code.push_str("        let mut v_sub = state.v_prev;\n");
                 code.push_str("        let mut i_nl_sub = state.i_nl_prev;\n");
-                code.push_str("        let input_step = (input - state.input_prev) / N_SUB as f64;\n");
+                code.push_str(
+                    "        let input_step = (input - state.input_prev) / N_SUB as f64;\n",
+                );
                 code.push_str("        for step in 0..N_SUB {\n");
-                code.push_str("            let inp_s = state.input_prev + input_step * (step + 1) as f64;\n");
-                code.push_str("            let inp_prev_s = state.input_prev + input_step * step as f64;\n");
+                code.push_str(
+                    "            let inp_s = state.input_prev + input_step * (step + 1) as f64;\n",
+                );
+                code.push_str(
+                    "            let inp_prev_s = state.input_prev + input_step * step as f64;\n",
+                );
                 // Build RHS: A_neg_sub * v_sub + N_i * i_nl_sub + input + rhs_const
                 code.push_str("            let mut rhs_s = [0.0f64; N];\n");
                 if ir.has_dc_sources {
                     code.push_str("            for i in 0..N { rhs_s[i] = RHS_CONST[i]; }\n");
                 }
                 code.push_str("            for i in 0..N { for j in 0..N { rhs_s[i] += state.a_neg_sub[i][j] * v_sub[j]; } }\n");
-                code.push_str(&emit_sparse_ni_matvec_add(ir, "rhs_s", "i_nl_sub", "            "));
-                code.push_str("            rhs_s[INPUT_NODE] += (inp_s + inp_prev_s) * input_conductance;\n");
+                code.push_str(&emit_sparse_ni_matvec_add(
+                    ir,
+                    "rhs_s",
+                    "i_nl_sub",
+                    "            ",
+                ));
+                code.push_str(
+                    "            rhs_s[INPUT_NODE] += (inp_s + inp_prev_s) * input_conductance;\n",
+                );
                 // Linear prediction: v_pred_s = S_sub * rhs_s (O(N²))
                 code.push_str("            let mut v_pred_s = [0.0f64; N];\n");
                 code.push_str("            for i in 0..N { for j in 0..N { v_pred_s[i] += state.s_sub[i][j] * rhs_s[j]; } }\n");
@@ -3662,7 +3797,9 @@ impl RustEmitter {
                     }
                     code.push_str(&format!(
                         "            v_sub[{idx}] = v_sub[{idx}].clamp({lo:.17e}, {hi:.17e});\n",
-                        idx = oa.n_out_idx, lo = oa.vclamp_lo, hi = oa.vclamp_hi,
+                        idx = oa.n_out_idx,
+                        lo = oa.vclamp_lo,
+                        hi = oa.vclamp_hi,
                     ));
                 }
                 code.push_str("        }\n");
@@ -3905,7 +4042,9 @@ impl RustEmitter {
                         }
                         code.push_str(&format!(
                             "        v[{idx}] = v[{idx}].clamp({lo:.17e}, {hi:.17e});\n",
-                            idx = oa.n_out_idx, lo = oa.vclamp_lo, hi = oa.vclamp_hi,
+                            idx = oa.n_out_idx,
+                            lo = oa.vclamp_lo,
+                            hi = oa.vclamp_hi,
                         ));
                     }
                 }
@@ -3914,9 +4053,9 @@ impl RustEmitter {
                     // mutation. (BE NR converged with the diodes active, so v
                     // is already saturation-bounded.)
                 }
-                OpampRailMode::Auto => unreachable!(
-                    "OpampRailMode::Auto should have been resolved in ir::from_mna"
-                ),
+                OpampRailMode::Auto => {
+                    unreachable!("OpampRailMode::Auto should have been resolved in ir::from_mna")
+                }
             }
 
             code.push_str("    }\n\n"); // end BE fallback block
@@ -4293,7 +4432,8 @@ impl RustEmitter {
                             "{indent}    let v_lim = pnjlim(v_d{i} + dv{i}, v_d{i}, state.device_{dev_num}_vt, DEVICE_{dev_num}_VCRIT);\n"
                         ));
                     }
-                    (crate::codegen::ir::DeviceType::Jfet, 0) | (crate::codegen::ir::DeviceType::Mosfet, 0) => {
+                    (crate::codegen::ir::DeviceType::Jfet, 0)
+                    | (crate::codegen::ir::DeviceType::Mosfet, 0) => {
                         code.push_str(&format!(
                             "{indent}    let v_lim = fetlim(v_d{i} + dv{i}, v_d{i}, 0.0);\n"
                         ));
@@ -4431,7 +4571,9 @@ impl RustEmitter {
         code.push_str("    // Row scaling: dr[i] = 1/max_j(|A[i][j]|)\n");
         code.push_str("    for i in 0..N {\n");
         code.push_str("        let mut row_max = 0.0f64;\n");
-        code.push_str("        for j in 0..N { let v = a[i][j].abs(); if v > row_max { row_max = v; } }\n");
+        code.push_str(
+            "        for j in 0..N { let v = a[i][j].abs(); if v > row_max { row_max = v; } }\n",
+        );
         code.push_str("        if row_max > 1e-30 { dr[i] = 1.0 / row_max; }\n");
         code.push_str("    }\n");
         code.push_str("    for i in 0..N {\n");
@@ -4440,7 +4582,9 @@ impl RustEmitter {
         code.push_str("    // Column scaling: dc[j] = 1/max_i(|A[i][j]|) (after row scaling)\n");
         code.push_str("    for j in 0..N {\n");
         code.push_str("        let mut col_max = 0.0f64;\n");
-        code.push_str("        for i in 0..N { let v = a[i][j].abs(); if v > col_max { col_max = v; } }\n");
+        code.push_str(
+            "        for i in 0..N { let v = a[i][j].abs(); if v > col_max { col_max = v; } }\n",
+        );
         code.push_str("        if col_max > 1e-30 { dc[j] = 1.0 / col_max; }\n");
         code.push_str("    }\n");
         code.push_str("    for i in 0..N {\n");
@@ -4537,9 +4681,13 @@ impl RustEmitter {
     pub(super) fn emit_nodal_lu_factor(_ir: &CircuitIR) -> String {
         let mut code = String::new();
 
-        code.push_str("/// LU factorization with asymmetric row/column equilibration and partial pivoting.\n");
+        code.push_str(
+            "/// LU factorization with asymmetric row/column equilibration and partial pivoting.\n",
+        );
         code.push_str("///\n");
-        code.push_str("/// After this call, `a` contains the LU factors, `dr`/`dc` the row/column\n");
+        code.push_str(
+            "/// After this call, `a` contains the LU factors, `dr`/`dc` the row/column\n",
+        );
         code.push_str(
             "/// equilibration, and `perm` the row permutation. Use `lu_back_solve` to solve.\n",
         );
@@ -4550,7 +4698,9 @@ impl RustEmitter {
         code.push_str("    // Row scaling: dr[i] = 1/max_j(|A[i][j]|)\n");
         code.push_str("    for i in 0..N {\n");
         code.push_str("        let mut row_max = 0.0f64;\n");
-        code.push_str("        for j in 0..N { let v = a[i][j].abs(); if v > row_max { row_max = v; } }\n");
+        code.push_str(
+            "        for j in 0..N { let v = a[i][j].abs(); if v > row_max { row_max = v; } }\n",
+        );
         code.push_str("        dr[i] = if row_max > 1e-30 { 1.0 / row_max } else { 1.0 };\n");
         code.push_str("    }\n");
         code.push_str("    for i in 0..N {\n");
@@ -4559,7 +4709,9 @@ impl RustEmitter {
         code.push_str("    // Column scaling: dc[j] = 1/max_i(|A[i][j]|) (after row scaling)\n");
         code.push_str("    for j in 0..N {\n");
         code.push_str("        let mut col_max = 0.0f64;\n");
-        code.push_str("        for i in 0..N { let v = a[i][j].abs(); if v > col_max { col_max = v; } }\n");
+        code.push_str(
+            "        for i in 0..N { let v = a[i][j].abs(); if v > col_max { col_max = v; } }\n",
+        );
         code.push_str("        dc[j] = if col_max > 1e-30 { 1.0 / col_max } else { 1.0 };\n");
         code.push_str("    }\n");
         code.push_str("    for i in 0..N {\n");
@@ -4609,7 +4761,9 @@ impl RustEmitter {
             "/// Solve using pre-factored LU: forward/backward substitution + de-equilibrate.\n",
         );
         code.push_str("///\n");
-        code.push_str("/// `a_lu` contains LU factors from `lu_factor`. `dr`/`dc` and `perm` are the\n");
+        code.push_str(
+            "/// `a_lu` contains LU factors from `lu_factor`. `dr`/`dc` and `perm` are the\n",
+        );
         code.push_str("/// equilibration and permutation from the same call. On return, `b`\n");
         code.push_str("/// contains the solution. O(N²) — no iterative refinement.\n");
         code.push_str("#[inline(always)]\n");
@@ -4677,7 +4831,9 @@ impl RustEmitter {
         code.push_str("    // Row scaling: dr[i] = 1/max_j(|A[i][j]|)\n");
         code.push_str("    for i in 0..N {\n");
         code.push_str("        let mut row_max = 0.0f64;\n");
-        code.push_str("        for j in 0..N { let v = a[i][j].abs(); if v > row_max { row_max = v; } }\n");
+        code.push_str(
+            "        for j in 0..N { let v = a[i][j].abs(); if v > row_max { row_max = v; } }\n",
+        );
         code.push_str("        dr[i] = if row_max > 1e-30 { 1.0 / row_max } else { 1.0 };\n");
         code.push_str("    }\n");
         code.push_str("    for i in 0..N {\n");
@@ -4686,7 +4842,9 @@ impl RustEmitter {
         code.push_str("    // Column scaling: dc[j] = 1/max_i(|A[i][j]|) (after row scaling)\n");
         code.push_str("    for j in 0..N {\n");
         code.push_str("        let mut col_max = 0.0f64;\n");
-        code.push_str("        for i in 0..N { let v = a[i][j].abs(); if v > col_max { col_max = v; } }\n");
+        code.push_str(
+            "        for i in 0..N { let v = a[i][j].abs(); if v > col_max { col_max = v; } }\n",
+        );
         code.push_str("        dc[j] = if col_max > 1e-30 { 1.0 / col_max } else { 1.0 };\n");
         code.push_str("    }\n");
         code.push_str("    for i in 0..N {\n");
@@ -5243,9 +5401,7 @@ impl RustEmitter {
                     .filter(|oa| oa.vclamp_hi.is_finite() || oa.vclamp_lo.is_finite())
                     .collect();
                 if !clampable.is_empty() {
-                    code.push_str(
-                        "        // Per-iteration op-amp output rail clamp\n",
-                    );
+                    code.push_str("        // Per-iteration op-amp output rail clamp\n");
                     for oa in &clampable {
                         let o = oa.n_out_idx;
                         if oa.vclamp_hi.is_finite() {
@@ -5309,7 +5465,10 @@ impl RustEmitter {
             code.push_str("        // Compute damped step, check convergence, then apply\n");
             code.push_str("        let mut max_step_exceeded = false;\n");
             {
-                let mut device_nodes: Vec<usize> = ir.sparsity.n_v.nz_by_row
+                let mut device_nodes: Vec<usize> = ir
+                    .sparsity
+                    .n_v
+                    .nz_by_row
                     .iter()
                     .flat_map(|row| row.iter().copied())
                     .collect();
@@ -5358,10 +5517,7 @@ impl RustEmitter {
             // double-limit and re-introduce the KCL corruption we're trying
             // to avoid. So BoyleDiodes skips the in-NR clamp entirely, same
             // as ActiveSet.
-            let emit_in_nr_clamp = matches!(
-                ir.solver_config.opamp_rail_mode,
-                OpampRailMode::Hard
-            );
+            let emit_in_nr_clamp = matches!(ir.solver_config.opamp_rail_mode, OpampRailMode::Hard);
             if emit_in_nr_clamp && !ir.opamps.is_empty() {
                 for oa in &ir.opamps {
                     if !oa.vclamp_lo.is_finite() && !oa.vclamp_hi.is_finite() {
@@ -5431,11 +5587,21 @@ impl RustEmitter {
                 ir.solver_config.opamp_rail_mode,
                 OpampRailMode::BoyleDiodes | OpampRailMode::ActiveSetBe | OpampRailMode::ActiveSet
             ) {
-                code.push_str("        // Residual check: re-evaluate i_nl at the post-step v and force\n");
-                code.push_str("        // NR to keep iterating if the chord linearisation produced an\n");
-                code.push_str("        // inconsistent fixed point. Required for any topology where the\n");
-                code.push_str("        // per-iteration op-amp rail clamp + stale chord_j_dev can\n");
-                code.push_str("        // combine to produce false convergence (voltage step small,\n");
+                code.push_str(
+                    "        // Residual check: re-evaluate i_nl at the post-step v and force\n",
+                );
+                code.push_str(
+                    "        // NR to keep iterating if the chord linearisation produced an\n",
+                );
+                code.push_str(
+                    "        // inconsistent fixed point. Required for any topology where the\n",
+                );
+                code.push_str(
+                    "        // per-iteration op-amp rail clamp + stale chord_j_dev can\n",
+                );
+                code.push_str(
+                    "        // combine to produce false convergence (voltage step small,\n",
+                );
                 code.push_str("        // but device KCL residual huge).\n");
                 code.push_str("        if !max_step_exceeded {\n");
                 code.push_str("            let i_nl_chord = i_nl;\n");
@@ -5444,9 +5610,15 @@ impl RustEmitter {
                 code.push_str("            let mut i_nl = [0.0f64; M];\n");
                 code.push_str("            let mut j_dev = [0.0f64; M * M];\n");
                 Self::emit_nodal_device_evaluation_body(&mut code, ir, "            ");
-                code.push_str("            // Tolerance matches DK Schur path: ABSTOL=1e-12, RELTOL=1e-3,\n");
-                code.push_str("            // with a 1e-9 floor on the magnitude denominator so devices\n");
-                code.push_str("            // with i_nl ≈ 0 don't have an unreachably tight tolerance.\n");
+                code.push_str(
+                    "            // Tolerance matches DK Schur path: ABSTOL=1e-12, RELTOL=1e-3,\n",
+                );
+                code.push_str(
+                    "            // with a 1e-9 floor on the magnitude denominator so devices\n",
+                );
+                code.push_str(
+                    "            // with i_nl ≈ 0 don't have an unreachably tight tolerance.\n",
+                );
                 code.push_str("            for i in 0..M {\n");
                 code.push_str("                let r = (i_nl[i] - i_nl_chord[i]).abs();\n");
                 code.push_str("                let tol = 1e-3 * i_nl[i].abs().max(i_nl_chord[i].abs()).max(1e-9) + 1e-12;\n");
@@ -5467,7 +5639,12 @@ impl RustEmitter {
             // Final device evaluation at converged point
             code.push_str("            // Final device evaluation at converged point\n");
             code.push_str("            let mut v_nl_final = [0.0f64; M];\n");
-            code.push_str(&emit_sparse_nv_matvec(ir, "v_nl_final", "v", "            "));
+            code.push_str(&emit_sparse_nv_matvec(
+                ir,
+                "v_nl_final",
+                "v",
+                "            ",
+            ));
             Self::emit_nodal_device_evaluation_final(&mut code, ir, "            ");
 
             // ActiveSet (plain) — pin and re-solve in trap matrices, preserving
@@ -5546,14 +5723,24 @@ impl RustEmitter {
             }
             code.push_str("                for i in 0..N { for j in 0..N { rhs_s[i] += a_neg_sub[i][j] * v_sub[j]; } }\n");
             if m > 0 {
-                code.push_str(&emit_sparse_ni_matvec_add(ir, "rhs_s", "i_nl_sub", "                "));
+                code.push_str(&emit_sparse_ni_matvec_add(
+                    ir,
+                    "rhs_s",
+                    "i_nl_sub",
+                    "                ",
+                ));
             }
             code.push_str("                rhs_s[INPUT_NODE] += (inp_s + inp_prev_s) * (1.0 / INPUT_RESISTANCE);\n");
             // Sub-step NR loop
             code.push_str("                let mut sub_converged = false;\n");
             code.push_str("                for _iter in 0..MAX_ITER {\n");
             code.push_str("                    let mut v_nl = [0.0f64; M];\n");
-            code.push_str(&emit_sparse_nv_matvec(ir, "v_nl", "v_sub", "                    "));
+            code.push_str(&emit_sparse_nv_matvec(
+                ir,
+                "v_nl",
+                "v_sub",
+                "                    ",
+            ));
             code.push_str("                    let mut i_nl = [0.0f64; M];\n");
             code.push_str("                    let mut j_dev = [0.0f64; M * M];\n");
             // Device evaluation
@@ -5674,7 +5861,12 @@ impl RustEmitter {
             // Uses `_final` variant: reads v_nl_final, writes i_nl (no j_dev update).
             code.push_str("                    // Re-extract i_nl at converged v\n");
             code.push_str("                    let mut v_nl_final = [0.0f64; M];\n");
-            code.push_str(&emit_sparse_nv_matvec(ir, "v_nl_final", "v_sub", "                    "));
+            code.push_str(&emit_sparse_nv_matvec(
+                ir,
+                "v_nl_final",
+                "v_sub",
+                "                    ",
+            ));
             Self::emit_nodal_device_evaluation_final(&mut code, ir, "                    ");
             code.push_str("                    i_nl_sub = i_nl;\n");
             code.push_str("                    if max_step < TOL + 1e-3 {\n");
@@ -5707,12 +5899,7 @@ impl RustEmitter {
             // inside the NR break block above.
             if active_set_be_mode_full_lu {
                 code.push_str("    if converged {\n");
-                Self::emit_nodal_active_set_check(
-                    &mut code,
-                    ir,
-                    "        ",
-                    "active_set_engaged",
-                );
+                Self::emit_nodal_active_set_check(&mut code, ir, "        ", "active_set_engaged");
                 code.push_str("    }\n\n");
             }
 
@@ -5861,9 +6048,7 @@ impl RustEmitter {
                     .filter(|oa| oa.vclamp_hi.is_finite() || oa.vclamp_lo.is_finite())
                     .collect();
                 if !clampable.is_empty() {
-                    code.push_str(
-                        "            // Per-iteration op-amp output rail clamp (BE)\n",
-                    );
+                    code.push_str("            // Per-iteration op-amp output rail clamp (BE)\n");
                     for oa in &clampable {
                         let o = oa.n_out_idx;
                         if oa.vclamp_hi.is_finite() {
@@ -5905,7 +6090,10 @@ impl RustEmitter {
             // are railed — causing BE to loop to MAX_ITER perpetually.
             code.push_str("            let mut be_step_exceeded = false;\n");
             {
-                let mut device_nodes: Vec<usize> = ir.sparsity.n_v.nz_by_row
+                let mut device_nodes: Vec<usize> = ir
+                    .sparsity
+                    .n_v
+                    .nz_by_row
                     .iter()
                     .flat_map(|row| row.iter().copied())
                     .collect();
@@ -5923,8 +6111,10 @@ impl RustEmitter {
             // ActiveSet and BoyleDiodes handle rails via their respective
             // mechanisms (active-set resolve / physical catch diodes), and a
             // hard clamp here would conflict with them.
-            if matches!(ir.solver_config.opamp_rail_mode, crate::codegen::OpampRailMode::Hard)
-                && !ir.opamps.is_empty()
+            if matches!(
+                ir.solver_config.opamp_rail_mode,
+                crate::codegen::OpampRailMode::Hard
+            ) && !ir.opamps.is_empty()
             {
                 for oa in &ir.opamps {
                     if !oa.vclamp_lo.is_finite() && !oa.vclamp_hi.is_finite() {
@@ -5932,7 +6122,9 @@ impl RustEmitter {
                     }
                     code.push_str(&format!(
                         "            v[{idx}] = v[{idx}].clamp({lo:.17e}, {hi:.17e});\n",
-                        idx = oa.n_out_idx, lo = oa.vclamp_lo, hi = oa.vclamp_hi,
+                        idx = oa.n_out_idx,
+                        lo = oa.vclamp_lo,
+                        hi = oa.vclamp_hi,
                     ));
                 }
             }
@@ -5984,7 +6176,12 @@ impl RustEmitter {
             code.push_str("                converged = true;\n");
             code.push_str("                state.diag_be_fallback_count += 1;\n");
             code.push_str("                let mut v_nl_final = [0.0f64; M];\n");
-            code.push_str(&emit_sparse_nv_matvec(ir, "v_nl_final", "v", "                "));
+            code.push_str(&emit_sparse_nv_matvec(
+                ir,
+                "v_nl_final",
+                "v",
+                "                ",
+            ));
             Self::emit_nodal_device_evaluation_final(&mut code, ir, "                ");
             code.push_str("                break;\n");
             code.push_str("            }\n");
@@ -5994,7 +6191,12 @@ impl RustEmitter {
             code.push_str("        // If still not converged, ensure i_nl is consistent with v\n");
             code.push_str("        if !converged {\n");
             code.push_str("            let mut v_nl_final = [0.0f64; M];\n");
-            code.push_str(&emit_sparse_nv_matvec(ir, "v_nl_final", "v", "            "));
+            code.push_str(&emit_sparse_nv_matvec(
+                ir,
+                "v_nl_final",
+                "v",
+                "            ",
+            ));
             Self::emit_nodal_device_evaluation_final(&mut code, ir, "            ");
             code.push_str("        }\n");
 
@@ -6040,7 +6242,9 @@ impl RustEmitter {
         // is invalidated to force a fresh factorization.
         if m > 0 {
             code.push_str("    if !converged {\n");
-            code.push_str("        // NR failed on all paths — keep previous state, invalidate chord\n");
+            code.push_str(
+                "        // NR failed on all paths — keep previous state, invalidate chord\n",
+            );
             code.push_str("        v = state.v_prev;\n");
             code.push_str("        i_nl = state.i_nl_prev;\n");
             code.push_str("        chord_valid = false;\n");
@@ -6368,7 +6572,8 @@ impl RustEmitter {
                  {indent}            g_as[{node}][{node}] = 1.0;\n\
                  {indent}            rhs_as[{node}] = c_k;\n\
                  {indent}        }}\n",
-                idx = idx, node = node,
+                idx = idx,
+                node = node,
             ));
         }
 
@@ -6457,12 +6662,7 @@ impl RustEmitter {
     /// No code is emitted when all op-amps have `sr = INFINITY`, so
     /// circuits without `SR=` in their .model card produce byte-identical
     /// generated code to the pre-slew-rate behaviour.
-    fn emit_opamp_slew_limit(
-        code: &mut String,
-        ir: &CircuitIR,
-        indent: &str,
-        v_name: &str,
-    ) {
+    fn emit_opamp_slew_limit(code: &mut String, ir: &CircuitIR, indent: &str, v_name: &str) {
         let slew_opamps: Vec<(usize, &crate::codegen::ir::OpampIR)> = ir
             .opamps
             .iter()
@@ -6537,7 +6737,11 @@ impl RustEmitter {
     }
 
     /// Emit device evaluation code WITHOUT declarations (writes to existing i_nl, j_dev).
-    pub(super) fn emit_nodal_device_evaluation_body(code: &mut String, ir: &CircuitIR, indent: &str) {
+    pub(super) fn emit_nodal_device_evaluation_body(
+        code: &mut String,
+        ir: &CircuitIR,
+        indent: &str,
+    ) {
         let m = ir.topology.m;
 
         for (dev_num, slot) in ir.device_slots.iter().enumerate() {
@@ -6846,7 +7050,11 @@ impl RustEmitter {
     }
 
     /// Emit final device evaluation at converged point (writes into existing `i_nl`).
-    pub(super) fn emit_nodal_device_evaluation_final(code: &mut String, ir: &CircuitIR, indent: &str) {
+    pub(super) fn emit_nodal_device_evaluation_final(
+        code: &mut String,
+        ir: &CircuitIR,
+        indent: &str,
+    ) {
         for (dev_num, slot) in ir.device_slots.iter().enumerate() {
             let s = slot.start_idx;
             match (&slot.device_type, &slot.params) {
@@ -6993,7 +7201,11 @@ impl RustEmitter {
     ///
     /// For each nonlinear device dimension, computes the proposed device voltage
     /// from v_new via N_v, applies pnjlim/fetlim, and reduces alpha if needed.
-    pub(super) fn emit_nodal_voltage_limiting_indented(code: &mut String, ir: &CircuitIR, indent: &str) {
+    pub(super) fn emit_nodal_voltage_limiting_indented(
+        code: &mut String,
+        ir: &CircuitIR,
+        indent: &str,
+    ) {
         let n = ir.topology.n;
 
         for (dev_num, slot) in ir.device_slots.iter().enumerate() {
@@ -7002,7 +7214,13 @@ impl RustEmitter {
 
                 // Compute proposed device voltage from v_new via N_v
                 code.push_str(&format!("{indent}{{ // Device {dev_num} dim {d}\n"));
-                code.push_str(&emit_sparse_nv_dot(ir, i, "v_nl_proposed", "v_new", &format!("{indent}    ")));
+                code.push_str(&emit_sparse_nv_dot(
+                    ir,
+                    i,
+                    "v_nl_proposed",
+                    "v_new",
+                    &format!("{indent}    "),
+                ));
                 code.push_str(&format!("{indent}    let v_nl_current = v_nl[{i}];\n"));
                 code.push_str(&format!(
                     "{indent}    let dv = v_nl_proposed - v_nl_current;\n"

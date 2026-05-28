@@ -348,7 +348,11 @@ L_tone a 0 500m
 ";
     let netlist = Netlist::parse(spice).expect("parse failed");
     let mna = MnaSystem::from_netlist(&netlist).expect("MNA failed");
-    let ind = mna.inductors.iter().find(|i| i.name.eq_ignore_ascii_case("L_tone")).expect("L_tone");
+    let ind = mna
+        .inductors
+        .iter()
+        .find(|i| i.name.eq_ignore_ascii_case("L_tone"))
+        .expect("L_tone");
     assert!(
         (ind.value - 5e-3).abs() < 1e-12,
         "L_tone value should be pos-0 (5m), got {}",

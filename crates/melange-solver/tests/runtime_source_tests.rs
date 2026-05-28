@@ -534,9 +534,7 @@ Rknob out 0 10k
 .pot Rknob 1k 100k
 ";
     let code = generate_dk(spice);
-    let setter_start = code
-        .find("pub fn set_pot_0(")
-        .expect("pot setter present");
+    let setter_start = code.find("pub fn set_pot_0(").expect("pot setter present");
     let setter_end = setter_start
         + code[setter_start..]
             .find("\n    }\n")

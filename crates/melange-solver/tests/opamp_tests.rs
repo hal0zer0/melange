@@ -22,10 +22,18 @@ fn measure_gain_from_output(output: &[f64], input_voltage: f64) -> f64 {
     let mut peak_pos = 0.0f64;
     let mut peak_neg = 0.0f64;
     for &v in output {
-        if v > peak_pos { peak_pos = v; }
-        if v < peak_neg { peak_neg = v; }
+        if v > peak_pos {
+            peak_pos = v;
+        }
+        if v < peak_neg {
+            peak_neg = v;
+        }
     }
-    let peak = if peak_pos.abs() > peak_neg.abs() { peak_pos } else { peak_neg };
+    let peak = if peak_pos.abs() > peak_neg.abs() {
+        peak_pos
+    } else {
+        peak_neg
+    };
     peak / input_voltage
 }
 
@@ -40,7 +48,11 @@ fn test_opamp_inverting_amplifier_gain() {
     let circuit = support::build_circuit(spice, &config, "oa_inv10");
     let output = support::run_step(&circuit, 0.1, 2000, 44100.0);
     let gain = measure_gain_from_output(&output, 0.1);
-    assert!((gain - (-10.0)).abs() < 0.5, "Inverting gain should be ~-10, got {:.3}", gain);
+    assert!(
+        (gain - (-10.0)).abs() < 0.5,
+        "Inverting gain should be ~-10, got {:.3}",
+        gain
+    );
 }
 
 #[test]
@@ -50,7 +62,11 @@ fn test_opamp_inverting_amplifier_unity_gain() {
     let circuit = support::build_circuit(spice, &config, "oa_inv1");
     let output = support::run_step(&circuit, 0.5, 2000, 44100.0);
     let gain = measure_gain_from_output(&output, 0.5);
-    assert!((gain - (-1.0)).abs() < 0.1, "Unity inverting gain should be ~-1, got {:.3}", gain);
+    assert!(
+        (gain - (-1.0)).abs() < 0.1,
+        "Unity inverting gain should be ~-1, got {:.3}",
+        gain
+    );
 }
 
 // =============================================================================
@@ -64,7 +80,11 @@ fn test_opamp_noninverting_amplifier_gain() {
     let circuit = support::build_circuit(spice, &config, "oa_ni11");
     let output = support::run_step(&circuit, 0.1, 2000, 44100.0);
     let gain = measure_gain_from_output(&output, 0.1);
-    assert!((gain - 11.0).abs() < 0.5, "Non-inverting gain should be ~11, got {:.3}", gain);
+    assert!(
+        (gain - 11.0).abs() < 0.5,
+        "Non-inverting gain should be ~11, got {:.3}",
+        gain
+    );
 }
 
 // =============================================================================
@@ -73,12 +93,17 @@ fn test_opamp_noninverting_amplifier_gain() {
 
 #[test]
 fn test_opamp_voltage_follower() {
-    let spice = "Voltage Follower\nC1 out 0 100n\nU1 in out out opamp\n.model opamp OA(AOL=200000)\n";
+    let spice =
+        "Voltage Follower\nC1 out 0 100n\nU1 in out out opamp\n.model opamp OA(AOL=200000)\n";
     let config = support::config_for_spice(spice, 44100.0);
     let circuit = support::build_circuit(spice, &config, "oa_foll");
     let output = support::run_step(&circuit, 0.5, 2000, 44100.0);
     let gain = measure_gain_from_output(&output, 0.5);
-    assert!((gain - 1.0).abs() < 0.05, "Follower gain should be ~1.0, got {:.4}", gain);
+    assert!(
+        (gain - 1.0).abs() < 0.05,
+        "Follower gain should be ~1.0, got {:.4}",
+        gain
+    );
 }
 
 // =============================================================================
@@ -92,7 +117,11 @@ fn test_opamp_summing_amplifier() {
     let circuit = support::build_circuit(spice, &config, "oa_sum");
     let output = support::run_step(&circuit, 0.3, 2000, 44100.0);
     let gain = measure_gain_from_output(&output, 0.3);
-    assert!((gain - (-1.0)).abs() < 0.1, "Summing amp gain should be ~-1, got {:.3}", gain);
+    assert!(
+        (gain - (-1.0)).abs() < 0.1,
+        "Summing amp gain should be ~-1, got {:.3}",
+        gain
+    );
 }
 
 // =============================================================================
@@ -203,7 +232,8 @@ fn test_opamp_inverting_ac_signal() {
     assert!(
         (output_amplitude - expected_amplitude).abs() / expected_amplitude < 0.15,
         "Output amplitude should be ~{:.3}V, got {:.3}V",
-        expected_amplitude, output_amplitude
+        expected_amplitude,
+        output_amplitude
     );
 }
 
@@ -272,7 +302,8 @@ fn test_opamp_gain_improves_with_higher_aol() {
     assert!(
         error_high < error_low,
         "Higher AOL should give more accurate gain: error_low={:.4}, error_high={:.4}",
-        error_low, error_high
+        error_low,
+        error_high
     );
 }
 
@@ -422,10 +453,14 @@ C2 out 0 100n
 
     let generated = result.unwrap();
     // Generated code should contain asymmetric clamp with VCC=9 and VEE=0
-    let has_clamp = generated.code.lines().any(|line| {
-        line.contains(".clamp(") && line.contains("9.0") && line.contains("0.0")
-    });
-    assert!(has_clamp, "Generated code should contain .clamp(0.0..., 9.0...) for VEE=0/VCC=9");
+    let has_clamp = generated
+        .code
+        .lines()
+        .any(|line| line.contains(".clamp(") && line.contains("9.0") && line.contains("0.0"));
+    assert!(
+        has_clamp,
+        "Generated code should contain .clamp(0.0..., 9.0...) for VEE=0/VCC=9"
+    );
 }
 
 #[test]

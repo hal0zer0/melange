@@ -445,7 +445,10 @@ fn test_nr_converges_with_correct_k_sign() {
         let output = support::run_step(&circuit, 1.0, 10, 44100.0);
         support::assert_finite(&output);
         let any_nonzero = output.iter().any(|&v| v.abs() > 1e-20);
-        assert!(any_nonzero, "At least one output must be non-zero for a 1V step");
+        assert!(
+            any_nonzero,
+            "At least one output must be non-zero for a 1V step"
+        );
     }
 
     // --- Part C: Negated K should cause divergence or failure ---

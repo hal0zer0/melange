@@ -1092,19 +1092,24 @@ fn generate_lib_rs(
     };
 
     // Conditional sections based on num_outputs
-    let (circuit_import, plugin_struct, plugin_default, init_method, reset_method, deactivate_method) = if num_outputs
-        > 1
-    {
+    let (
+        circuit_import,
+        plugin_struct,
+        plugin_default,
+        init_method,
+        reset_method,
+        deactivate_method,
+    ) = if num_outputs > 1 {
         // Multi-output: single circuit state, mono input → multi-output
         (
-                "use circuit::{process_sample, CircuitState, NUM_OUTPUTS};".to_string(),
-                "pub struct CircuitPlugin {\n\
+            "use circuit::{process_sample, CircuitState, NUM_OUTPUTS};".to_string(),
+            "pub struct CircuitPlugin {\n\
                  \x20   params: Arc<CircuitParams>,\n\
                  \x20   circuit_state: CircuitState,\n\
                  \x20   current_sample_rate: f64,\n\
                  }"
-                .to_string(),
-                "impl Default for CircuitPlugin {\n\
+            .to_string(),
+            "impl Default for CircuitPlugin {\n\
                  \x20   fn default() -> Self {\n\
                  \x20       Self {\n\
                  \x20           params: Arc::new(CircuitParams::default()),\n\
@@ -1113,41 +1118,41 @@ fn generate_lib_rs(
                  \x20       }\n\
                  \x20   }\n\
                  }"
-                .to_string(),
-                "    fn initialize(\n\
+            .to_string(),
+            "    fn initialize(\n\
                  \x20       &mut self,\n\
                  \x20       _audio_io_layout: &AudioIOLayout,\n\
                  \x20       buffer_config: &BufferConfig,\n\
                  \x20       _context: &mut impl InitContext<Self>,\n\
                  \x20   ) -> bool {\n"
-                    .to_string()
-                    + FTZ_DAZ_BLOCK
-                    + "\x20       self.current_sample_rate = buffer_config.sample_rate as f64;\n\
+                .to_string()
+                + FTZ_DAZ_BLOCK
+                + "\x20       self.current_sample_rate = buffer_config.sample_rate as f64;\n\
                  \x20       self.circuit_state = CircuitState::default();\n\
                  \x20       self.circuit_state.set_sample_rate(buffer_config.sample_rate as f64);\n"
-                    + &smoother_reset_block
-                    + "\x20       true\n\
+                + &smoother_reset_block
+                + "\x20       true\n\
                  \x20   }",
-                "    fn reset(&mut self) {\n\
+            "    fn reset(&mut self) {\n\
                  \x20       self.circuit_state.reset();\n\
                  \x20   }"
-                    .to_string(),
-                "    fn deactivate(&mut self) {\n\
+                .to_string(),
+            "    fn deactivate(&mut self) {\n\
                  \x20       self.circuit_state.reset();\n\
                  \x20   }"
-                    .to_string(),
-            )
+                .to_string(),
+        )
     } else if options.mono {
         // Mono: single-channel state
         (
-                "use circuit::{process_sample, CircuitState};".to_string(),
-                "pub struct CircuitPlugin {\n\
+            "use circuit::{process_sample, CircuitState};".to_string(),
+            "pub struct CircuitPlugin {\n\
                  \x20   params: Arc<CircuitParams>,\n\
                  \x20   circuit_states: Vec<CircuitState>,\n\
                  \x20   current_sample_rate: f64,\n\
                  }"
-                .to_string(),
-                "impl Default for CircuitPlugin {\n\
+            .to_string(),
+            "impl Default for CircuitPlugin {\n\
                  \x20   fn default() -> Self {\n\
                  \x20       Self {\n\
                  \x20           params: Arc::new(CircuitParams::default()),\n\
@@ -1156,48 +1161,48 @@ fn generate_lib_rs(
                  \x20       }\n\
                  \x20   }\n\
                  }"
-                .to_string(),
-                "    fn initialize(\n\
+            .to_string(),
+            "    fn initialize(\n\
                  \x20       &mut self,\n\
                  \x20       _audio_io_layout: &AudioIOLayout,\n\
                  \x20       buffer_config: &BufferConfig,\n\
                  \x20       _context: &mut impl InitContext<Self>,\n\
                  \x20   ) -> bool {\n"
-                    .to_string()
-                    + FTZ_DAZ_BLOCK
-                    + "\x20       self.current_sample_rate = buffer_config.sample_rate as f64;\n"
-                    + &smoother_reset_block
-                    + "\x20       self.circuit_states = vec![{\n\
+                .to_string()
+                + FTZ_DAZ_BLOCK
+                + "\x20       self.current_sample_rate = buffer_config.sample_rate as f64;\n"
+                + &smoother_reset_block
+                + "\x20       self.circuit_states = vec![{\n\
                  \x20           let mut s = CircuitState::default();\n\
                  \x20           s.set_sample_rate(buffer_config.sample_rate as f64);\n\
                  \x20           s\n\
                  \x20       }];\n\
                  \x20       true\n\
                  \x20   }",
-                "    fn reset(&mut self) {\n\
+            "    fn reset(&mut self) {\n\
                  \x20       for state in &mut self.circuit_states {\n\
                  \x20           state.reset();\n\
                  \x20       }\n\
                  \x20   }"
-                    .to_string(),
-                "    fn deactivate(&mut self) {\n\
+                .to_string(),
+            "    fn deactivate(&mut self) {\n\
                  \x20       for state in &mut self.circuit_states {\n\
                  \x20           state.reset();\n\
                  \x20       }\n\
                  \x20   }"
-                    .to_string(),
-            )
+                .to_string(),
+        )
     } else {
         // Single output: per-channel state duplication (stereo from mono)
         (
-                "use circuit::{process_sample, CircuitState};".to_string(),
-                "pub struct CircuitPlugin {\n\
+            "use circuit::{process_sample, CircuitState};".to_string(),
+            "pub struct CircuitPlugin {\n\
                  \x20   params: Arc<CircuitParams>,\n\
                  \x20   circuit_states: Vec<CircuitState>,\n\
                  \x20   current_sample_rate: f64,\n\
                  }"
-                .to_string(),
-                "impl Default for CircuitPlugin {\n\
+            .to_string(),
+            "impl Default for CircuitPlugin {\n\
                  \x20   fn default() -> Self {\n\
                  \x20       Self {\n\
                  \x20           params: Arc::new(CircuitParams::default()),\n\
@@ -1206,39 +1211,39 @@ fn generate_lib_rs(
                  \x20       }\n\
                  \x20   }\n\
                  }"
-                .to_string(),
-                "    fn initialize(\n\
+            .to_string(),
+            "    fn initialize(\n\
                  \x20       &mut self,\n\
                  \x20       audio_io_layout: &AudioIOLayout,\n\
                  \x20       buffer_config: &BufferConfig,\n\
                  \x20       _context: &mut impl InitContext<Self>,\n\
                  \x20   ) -> bool {\n"
-                    .to_string()
-                    + FTZ_DAZ_BLOCK
-                    + "\x20       let num_channels = audio_io_layout.main_input_channels\n\
+                .to_string()
+                + FTZ_DAZ_BLOCK
+                + "\x20       let num_channels = audio_io_layout.main_input_channels\n\
                  \x20           .map(|c| c.get() as usize).unwrap_or(2);\n\
                  \x20       self.current_sample_rate = buffer_config.sample_rate as f64;\n"
-                    + &smoother_reset_block
-                    + "\x20       self.circuit_states = (0..num_channels).map(|_| {\n\
+                + &smoother_reset_block
+                + "\x20       self.circuit_states = (0..num_channels).map(|_| {\n\
                  \x20           let mut s = CircuitState::default();\n\
                  \x20           s.set_sample_rate(buffer_config.sample_rate as f64);\n\
                  \x20           s\n\
                  \x20       }).collect();\n\
                  \x20       true\n\
                  \x20   }",
-                "    fn reset(&mut self) {\n\
+            "    fn reset(&mut self) {\n\
                  \x20       for state in &mut self.circuit_states {\n\
                  \x20           state.reset();\n\
                  \x20       }\n\
                  \x20   }"
-                    .to_string(),
-                "    fn deactivate(&mut self) {\n\
+                .to_string(),
+            "    fn deactivate(&mut self) {\n\
                  \x20       for state in &mut self.circuit_states {\n\
                  \x20           state.reset();\n\
                  \x20       }\n\
                  \x20   }"
-                    .to_string(),
-            )
+                .to_string(),
+        )
     };
 
     // Audio channel count for IO layout
@@ -1751,7 +1756,10 @@ mod tests {
         }];
         let lib = test_generate_lib_rs("test", false, &pots);
         // Position-to-resistance conversion: min + position * (max - min), per-sample smoothed
-        assert!(lib.contains("self.params.pot_0.smoothed.next()"), "should use smoothed.next() for per-sample pot update");
+        assert!(
+            lib.contains("self.params.pot_0.smoothed.next()"),
+            "should use smoothed.next() for per-sample pot update"
+        );
         // `.value()` is legitimate in smoother-reset lines inside `initialize()` (those read
         // the param default to prime the smoother), but must never appear as a per-sample
         // consumer producing `pot_0_val`. Check for the per-sample shape, not a blanket ban.
@@ -1847,7 +1855,8 @@ mod tests {
         let dir = std::env::temp_dir().join("melange_test_plugin_circuit");
         let _ = std::fs::remove_dir_all(&dir);
         let circuit_code = "// This is the generated circuit code\npub fn process_sample() {}";
-        let result = generate_plugin_project(&dir, circuit_code, "test", false, &[], &[], &[], &[], 1);
+        let result =
+            generate_plugin_project(&dir, circuit_code, "test", false, &[], &[], &[], &[], 1);
         assert!(result.is_ok());
         let written = std::fs::read_to_string(dir.join("src/circuit.rs")).unwrap();
         assert_eq!(written, circuit_code);
@@ -1858,8 +1867,17 @@ mod tests {
     fn generate_plugin_project_cargo_toml_has_correct_name() {
         let dir = std::env::temp_dir().join("melange_test_plugin_name");
         let _ = std::fs::remove_dir_all(&dir);
-        let result =
-            generate_plugin_project(&dir, "// code", "my-cool-plugin", false, &[], &[], &[], &[], 1);
+        let result = generate_plugin_project(
+            &dir,
+            "// code",
+            "my-cool-plugin",
+            false,
+            &[],
+            &[],
+            &[],
+            &[],
+            1,
+        );
         assert!(result.is_ok());
         let toml = std::fs::read_to_string(dir.join("Cargo.toml")).unwrap();
         assert!(toml.contains("name = \"my-cool-plugin\""));
@@ -2201,7 +2219,10 @@ mod tests {
     #[test]
     fn validate_vst3_id_rejects_short() {
         let err = validate_vst3_id("tooshort").unwrap_err().to_string();
-        assert!(err.contains("16 bytes"), "error should mention length: {err}");
+        assert!(
+            err.contains("16 bytes"),
+            "error should mention length: {err}"
+        );
     }
 
     #[test]
@@ -2209,7 +2230,10 @@ mod tests {
         let err = validate_vst3_id("this_is_way_too_long_for_vst3")
             .unwrap_err()
             .to_string();
-        assert!(err.contains("16 bytes"), "error should mention length: {err}");
+        assert!(
+            err.contains("16 bytes"),
+            "error should mention length: {err}"
+        );
     }
 
     #[test]
@@ -2247,7 +2271,7 @@ mod tests {
         // "é" is 2 bytes. A string containing it can't be 16 bytes long
         // AND 16 chars long; the byte-length check catches this.
         let s = "AcmeWurliPrëamp"; // mixed multi-byte
-        // Ensure byte length != 16 OR char length != 16; either way rejected.
+                                   // Ensure byte length != 16 OR char length != 16; either way rejected.
         if s.len() != 16 {
             assert!(validate_vst3_id(s).is_err());
         } else {

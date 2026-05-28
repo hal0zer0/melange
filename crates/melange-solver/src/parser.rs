@@ -1676,7 +1676,8 @@ impl Parser {
         // Validate .gang directives: each member must exist in .pot or .wiper,
         // no member may appear in multiple gangs.
         {
-            let mut gang_claimed: std::collections::HashSet<String> = std::collections::HashSet::new();
+            let mut gang_claimed: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
             for gang in &netlist.gangs {
                 for member in &gang.members {
                     let name_upper = member.resistor_name.to_ascii_uppercase();
@@ -2172,9 +2173,7 @@ impl Parser {
         netlist: &mut Netlist,
     ) -> Result<(), ParseError> {
         if parts.len() < 2 {
-            return Err(self.error(
-                ".tolerance requires at least one CLASS=TOL pair (R, C, or L)",
-            ));
+            return Err(self.error(".tolerance requires at least one CLASS=TOL pair (R, C, or L)"));
         }
         for tok in &parts[1..] {
             let (k, v) = tok.split_once('=').ok_or_else(|| {
@@ -2186,18 +2185,16 @@ impl Parser {
                 .parse()
                 .map_err(|_| self.error(format!(".tolerance value '{v}' is not a valid number")))?;
             if !tol.is_finite() || !(0.0..1.0).contains(&tol) {
-                return Err(self.error(format!(
-                    ".tolerance must be in [0.0, 1.0), got {tol}"
-                )));
+                return Err(self.error(format!(".tolerance must be in [0.0, 1.0), got {tol}")));
             }
             match k.to_ascii_uppercase().as_str() {
                 "R" => netlist.tolerance_r = tol,
                 "C" => netlist.tolerance_c = tol,
                 "L" => netlist.tolerance_l = tol,
                 other => {
-                    return Err(self.error(format!(
-                        ".tolerance class '{other}' must be R, C, or L"
-                    )));
+                    return Err(
+                        self.error(format!(".tolerance class '{other}' must be R, C, or L"))
+                    );
                 }
             }
         }
@@ -2239,7 +2236,10 @@ impl Parser {
             }
             params.push((k.to_ascii_uppercase(), tol));
         }
-        Ok(MismatchSpec { device_class, params })
+        Ok(MismatchSpec {
+            device_class,
+            params,
+        })
     }
 
     fn parse_model(&self, parts: &[&str]) -> Result<Model, ParseError> {
@@ -2472,9 +2472,7 @@ impl Parser {
             )));
         }
         if resistor_cw.eq_ignore_ascii_case(&resistor_ccw) {
-            return Err(self.error(
-                ".wiper CW and CCW legs must be different resistors",
-            ));
+            return Err(self.error(".wiper CW and CCW legs must be different resistors"));
         }
 
         let total_resistance = self.parse_positive_value(parts[3], ".wiper total_resistance")?;
@@ -2498,10 +2496,7 @@ impl Parser {
             )
             .collect();
         for name in [&resistor_cw, &resistor_ccw] {
-            if all_claimed
-                .iter()
-                .any(|c| c.eq_ignore_ascii_case(name))
-            {
+            if all_claimed.iter().any(|c| c.eq_ignore_ascii_case(name)) {
                 return Err(self.error(format!(
                     ".wiper resistor '{}' is already used by a .pot or .wiper directive",
                     name
@@ -2511,9 +2506,7 @@ impl Parser {
 
         // Each wiper adds 2 internal pots
         if netlist.pots.len() + (netlist.wipers.len() + 1) * 2 > 64 {
-            return Err(self.error(
-                "Maximum of 64 combined .pot + .wiper leg entries supported",
-            ));
+            return Err(self.error("Maximum of 64 combined .pot + .wiper leg entries supported"));
         }
 
         // Optional default position and label
@@ -2613,15 +2606,15 @@ impl Parser {
 
         // Parse label (must be quoted)
         let label_str = parts[1];
-        let label = if label_str.starts_with('"') && label_str.ends_with('"') && label_str.len() >= 2
-        {
-            label_str[1..label_str.len() - 1].to_string()
-        } else {
-            return Err(ParseError {
-                line: 0,
-                message: ".gang label must be a quoted string".to_string(),
-            });
-        };
+        let label =
+            if label_str.starts_with('"') && label_str.ends_with('"') && label_str.len() >= 2 {
+                label_str[1..label_str.len() - 1].to_string()
+            } else {
+                return Err(ParseError {
+                    line: 0,
+                    message: ".gang label must be a quoted string".to_string(),
+                });
+            };
 
         // Parse members and optional trailing default position
         let mut members = Vec::new();
@@ -2789,10 +2782,7 @@ impl Parser {
     /// parser doesn't require source-order). `field_name` must be a valid
     /// Rust identifier — this is where codegen will emit `pub <field>: f64`
     /// on the generated CircuitState.
-    fn parse_runtime_directive(
-        &self,
-        parts: &[&str],
-    ) -> Result<RuntimeDirective, ParseError> {
+    fn parse_runtime_directive(&self, parts: &[&str]) -> Result<RuntimeDirective, ParseError> {
         // .runtime Vname as field_name
         self.require_parts(parts, 4, ".runtime Vname as field_name")?;
         if !parts[2].eq_ignore_ascii_case("as") {
@@ -3065,10 +3055,12 @@ impl Parser {
         let value = self.parse_positive_value(parts[3], "Inductor")?;
         let mut isat = None;
         for &part in &parts[4..] {
-            if let Some(stripped) = part.strip_prefix("ISAT=").or_else(|| part.strip_prefix("isat=")) {
-                let v = parse_value(stripped).map_err(|_| {
-                    self.error(format!("Invalid ISAT value: {}", stripped))
-                })?;
+            if let Some(stripped) = part
+                .strip_prefix("ISAT=")
+                .or_else(|| part.strip_prefix("isat="))
+            {
+                let v = parse_value(stripped)
+                    .map_err(|_| self.error(format!("Invalid ISAT value: {}", stripped)))?;
                 if !(v > 0.0 && v.is_finite()) {
                     return Err(self.error("ISAT must be positive and finite"));
                 }
@@ -3395,12 +3387,24 @@ fn validate_element_node_lengths(elem: &Element) -> Result<(), String> {
     // Visit every node reference this element carries. Model/component names
     // are not nodes and are not checked here (they have their own limits).
     match elem {
-        Element::Resistor { n_plus, n_minus, .. }
-        | Element::Capacitor { n_plus, n_minus, .. }
-        | Element::Inductor { n_plus, n_minus, .. }
-        | Element::VoltageSource { n_plus, n_minus, .. }
-        | Element::CurrentSource { n_plus, n_minus, .. }
-        | Element::Diode { n_plus, n_minus, .. } => {
+        Element::Resistor {
+            n_plus, n_minus, ..
+        }
+        | Element::Capacitor {
+            n_plus, n_minus, ..
+        }
+        | Element::Inductor {
+            n_plus, n_minus, ..
+        }
+        | Element::VoltageSource {
+            n_plus, n_minus, ..
+        }
+        | Element::CurrentSource {
+            n_plus, n_minus, ..
+        }
+        | Element::Diode {
+            n_plus, n_minus, ..
+        } => {
             check(n_plus)?;
             check(n_minus)?;
         }
@@ -3420,12 +3424,22 @@ fn validate_element_node_lengths(elem: &Element) -> Result<(), String> {
             check(ns)?;
             check(nb)?;
         }
-        Element::Opamp { n_plus, n_minus, n_out, .. } => {
+        Element::Opamp {
+            n_plus,
+            n_minus,
+            n_out,
+            ..
+        } => {
             check(n_plus)?;
             check(n_minus)?;
             check(n_out)?;
         }
-        Element::Triode { n_grid, n_plate, n_cathode, .. } => {
+        Element::Triode {
+            n_grid,
+            n_plate,
+            n_cathode,
+            ..
+        } => {
             check(n_grid)?;
             check(n_plate)?;
             check(n_cathode)?;
@@ -3446,14 +3460,32 @@ fn validate_element_node_lengths(elem: &Element) -> Result<(), String> {
                 check(ns)?;
             }
         }
-        Element::Vca { n_sig_p, n_sig_n, n_ctrl_p, n_ctrl_n, .. } => {
+        Element::Vca {
+            n_sig_p,
+            n_sig_n,
+            n_ctrl_p,
+            n_ctrl_n,
+            ..
+        } => {
             check(n_sig_p)?;
             check(n_sig_n)?;
             check(n_ctrl_p)?;
             check(n_ctrl_n)?;
         }
-        Element::Vcvs { out_p, out_n, ctrl_p, ctrl_n, .. }
-        | Element::Vccs { out_p, out_n, ctrl_p, ctrl_n, .. } => {
+        Element::Vcvs {
+            out_p,
+            out_n,
+            ctrl_p,
+            ctrl_n,
+            ..
+        }
+        | Element::Vccs {
+            out_p,
+            out_n,
+            ctrl_p,
+            ctrl_n,
+            ..
+        } => {
             check(out_p)?;
             check(out_n)?;
             check(ctrl_p)?;
@@ -3954,10 +3986,7 @@ mod tests {
         // 6 nodes is invalid (max 5: plate, grid, cathode, screen, suppressor).
         let spice = "Test\nP1 a b c d e f g EL84\n";
         let result = Netlist::parse(spice);
-        assert!(
-            result.is_err(),
-            "Pentode with 6 nodes should be rejected"
-        );
+        assert!(result.is_err(), "Pentode with 6 nodes should be rejected");
     }
 
     #[test]
@@ -5358,8 +5387,14 @@ U1 0 inv out opamp
             (a.1, b.1)
         };
         assert_ne!(v1, v2, "R1 and R2 should get different jittered values");
-        assert!((v1 - 1000.0).abs() / 1000.0 <= 0.01, "R1 outside 1% band: {v1}");
-        assert!((v2 - 1000.0).abs() / 1000.0 <= 0.01, "R2 outside 1% band: {v2}");
+        assert!(
+            (v1 - 1000.0).abs() / 1000.0 <= 0.01,
+            "R1 outside 1% band: {v1}"
+        );
+        assert!(
+            (v2 - 1000.0).abs() / 1000.0 <= 0.01,
+            "R2 outside 1% band: {v2}"
+        );
     }
 
     #[test]
@@ -5375,8 +5410,7 @@ U1 0 inv out opamp
                      .pot R_pot 1 100k\n\
                      .end\n";
         let n = Netlist::parse(spice).expect("parse");
-        let mut values: std::collections::HashMap<String, f64> =
-            std::collections::HashMap::new();
+        let mut values: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
         for e in &n.elements {
             if let Element::Resistor { name, value, .. } = e {
                 values.insert(name.clone(), *value);

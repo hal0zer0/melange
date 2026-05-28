@@ -186,10 +186,7 @@ fn test_parse_wiper_same_resistor() {
 fn test_parse_wiper_total_r_invariant() {
     for pos_int in 0..=10 {
         let pos = pos_int as f64 / 10.0;
-        let spice = format!(
-            "Test\nR1 1 2 5k\nR2 2 0 5k\n.wiper R1 R2 10k {}\n",
-            pos
-        );
+        let spice = format!("Test\nR1 1 2 5k\nR2 2 0 5k\n.wiper R1 R2 10k {}\n", pos);
         let netlist = Netlist::parse(&spice).unwrap();
         let r_cw = netlist.pots[0].default_value.unwrap();
         let r_ccw = netlist.pots[1].default_value.unwrap();
@@ -277,15 +274,24 @@ fn test_wiper_sm_vectors() {
 #[test]
 fn test_wiper_codegen_compiles() {
     let code = generate_code(RC_WIPER_SPICE);
-    assert!(code.contains("fn set_pot_0"), "should have set_pot_0 method");
-    assert!(code.contains("fn set_pot_1"), "should have set_pot_1 method");
+    assert!(
+        code.contains("fn set_pot_0"),
+        "should have set_pot_0 method"
+    );
+    assert!(
+        code.contains("fn set_pot_1"),
+        "should have set_pot_1 method"
+    );
     assert!(code.contains("fn process_sample"));
 }
 
 #[test]
 fn test_wiper_plus_regular_pot_compiles() {
     let code = generate_code(MIXED_POT_WIPER_SPICE);
-    assert!(code.contains("fn set_pot_0"), "should have regular pot setter");
+    assert!(
+        code.contains("fn set_pot_0"),
+        "should have regular pot setter"
+    );
     assert!(code.contains("fn set_pot_1"), "should have CW pot setter");
     assert!(code.contains("fn set_pot_2"), "should have CCW pot setter");
 }
@@ -298,10 +304,7 @@ fn test_wiper_nonlinear_compiles() {
         code.contains("fn set_pot_0"),
         "should have set_pot_0 method"
     );
-    assert!(
-        code.contains("state.k["),
-        "NR should use state.k directly"
-    );
+    assert!(code.contains("state.k["), "NR should use state.k directly");
 }
 
 #[test]

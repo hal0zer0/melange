@@ -4,7 +4,6 @@
 
 mod support;
 
-
 const RC_LOWPASS: &str = "\
 RC Lowpass
 R1 in out 1k

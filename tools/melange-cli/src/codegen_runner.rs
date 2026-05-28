@@ -36,10 +36,7 @@ impl BinaryCache {
             .ok_or_else(|| anyhow::anyhow!("Cannot find cache directory"))?;
 
         std::fs::create_dir_all(&cache_dir).with_context(|| {
-            format!(
-                "Failed to create binary cache dir: {}",
-                cache_dir.display()
-            )
+            format!("Failed to create binary cache dir: {}", cache_dir.display())
         })?;
 
         Ok(Self { cache_dir })
@@ -186,14 +183,8 @@ pub fn generate_simulate_main(
     duration_secs: f64,
     probe_names: &[&str],
 ) -> String {
-    let pot_lines: String = pot_calls
-        .iter()
-        .map(|c| format!("    {c};\n"))
-        .collect();
-    let switch_lines: String = switch_calls
-        .iter()
-        .map(|c| format!("    {c};\n"))
-        .collect();
+    let pot_lines: String = pot_calls.iter().map(|c| format!("    {c};\n")).collect();
+    let switch_lines: String = switch_calls.iter().map(|c| format!("    {c};\n")).collect();
 
     // Embed minimal WAV reader/writer
     let wav_code = include_str!("wav_embed.rs.inc");
@@ -249,9 +240,11 @@ pub fn generate_simulate_main(
         String::new()
     };
     let probe_close: String = if has_probes {
-        String::from(r#"    probe_writer.flush().ok();
+        String::from(
+            r#"    probe_writer.flush().ok();
     eprintln!("DIAG:probes_written={}", samples.len());
-"#)
+"#,
+        )
     } else {
         String::new()
     };
@@ -365,14 +358,8 @@ pub fn generate_analyze_main(
     switch_calls: &[String],
     harmonics: usize,
 ) -> String {
-    let pot_lines: String = pot_calls
-        .iter()
-        .map(|c| format!("    {c};\n"))
-        .collect();
-    let switch_lines: String = switch_calls
-        .iter()
-        .map(|c| format!("    {c};\n"))
-        .collect();
+    let pot_lines: String = pot_calls.iter().map(|c| format!("    {c};\n")).collect();
+    let switch_lines: String = switch_calls.iter().map(|c| format!("    {c};\n")).collect();
 
     let freq_list: String = frequencies
         .iter()

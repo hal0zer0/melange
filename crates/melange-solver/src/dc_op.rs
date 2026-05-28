@@ -1030,10 +1030,9 @@ fn clamp_junction_voltages(
                 //     starts. We need to clamp Vg2k to a sane operating point
                 //     and force Vgk negative.
                 let (is_pentode, _kg2_present) = match &slot.params {
-                    DeviceParams::Tube(tp) => (
-                        matches!(tp.kind, TubeKind::SharpPentode),
-                        tp.kg2 > 0.0,
-                    ),
+                    DeviceParams::Tube(tp) => {
+                        (matches!(tp.kind, TubeKind::SharpPentode), tp.kg2 > 0.0)
+                    }
                     _ => (false, false),
                 };
                 if !is_pentode || slot.dimension < 3 {
@@ -1228,18 +1227,34 @@ fn nr_dc_solve(
                 "DC NR iter {} (scale={:.2}): v_nl[4..]=[{}]",
                 iter,
                 source_scale,
-                v_nl[4..].iter().enumerate().map(|(i, x)| format!("[{}]={:.4}", i+4, x)).collect::<Vec<_>>().join(", ")
+                v_nl[4..]
+                    .iter()
+                    .enumerate()
+                    .map(|(i, x)| format!("[{}]={:.4}", i + 4, x))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             );
         }
         if iter < 3 && aol_cont_mode {
             for oa in &mna.opamps {
                 let out = oa.n_out_idx;
                 if out > 0 && out - 1 < v.len() {
-                    let np_v = if oa.n_plus_idx > 0 { v[oa.n_plus_idx - 1] } else { 0.0 };
-                    let nm_v = if oa.n_minus_idx > 0 { v[oa.n_minus_idx - 1] } else { 0.0 };
+                    let np_v = if oa.n_plus_idx > 0 {
+                        v[oa.n_plus_idx - 1]
+                    } else {
+                        0.0
+                    };
+                    let nm_v = if oa.n_minus_idx > 0 {
+                        v[oa.n_minus_idx - 1]
+                    } else {
+                        0.0
+                    };
                     log::debug!(
                         "  opamp out_idx={} v_out={:.3} v+={:.3} v-={:.3} sr={}",
-                        out, v[out - 1], np_v, nm_v,
+                        out,
+                        v[out - 1],
+                        np_v,
+                        nm_v,
                         dc_opamp_is_sidechain_rectifier(oa, mna)
                     );
                 }
@@ -1478,28 +1493,35 @@ fn nr_dc_solve(
                     // Determine effective rail limits for this op-amp.
                     // Base rails scale with source_scale so op-amp output tracks the
                     // ramping supply during source stepping.
-                    let base_vcc = if oa.vcc.is_finite() { oa.vcc * source_scale } else { oa.vcc };
-                    let base_vee = if oa.vee.is_finite() { oa.vee * source_scale } else { oa.vee };
-
-                    let (eff_vcc, eff_vee) = if aol_cont_mode
-                        && dc_opamp_is_sidechain_rectifier(oa, mna)
-                    {
-                        // SR op-amps in AOL continuation: widen the VEE limit to allow
-                        // the output to reach the n_plus reference voltage (which is the
-                        // actual DC reference for the precision rectifier). Use the
-                        // current node voltage at n_plus rather than the model's VSAT.
-                        let v_nplus = if oa.n_plus_idx > 0 && oa.n_plus_idx - 1 < v.len() {
-                            v[oa.n_plus_idx - 1]
-                        } else {
-                            base_vee
-                        };
-                        // Allow output to go 1V below n_plus (headroom for diode drop).
-                        // Take the min with base_vee so output can't go below the supply.
-                        let eff_vee = (v_nplus - 1.0).min(base_vee);
-                        (base_vcc, eff_vee)
+                    let base_vcc = if oa.vcc.is_finite() {
+                        oa.vcc * source_scale
                     } else {
-                        (base_vcc, base_vee)
+                        oa.vcc
                     };
+                    let base_vee = if oa.vee.is_finite() {
+                        oa.vee * source_scale
+                    } else {
+                        oa.vee
+                    };
+
+                    let (eff_vcc, eff_vee) =
+                        if aol_cont_mode && dc_opamp_is_sidechain_rectifier(oa, mna) {
+                            // SR op-amps in AOL continuation: widen the VEE limit to allow
+                            // the output to reach the n_plus reference voltage (which is the
+                            // actual DC reference for the precision rectifier). Use the
+                            // current node voltage at n_plus rather than the model's VSAT.
+                            let v_nplus = if oa.n_plus_idx > 0 && oa.n_plus_idx - 1 < v.len() {
+                                v[oa.n_plus_idx - 1]
+                            } else {
+                                base_vee
+                            };
+                            // Allow output to go 1V below n_plus (headroom for diode drop).
+                            // Take the min with base_vee so output can't go below the supply.
+                            let eff_vee = (v_nplus - 1.0).min(base_vee);
+                            (base_vcc, eff_vee)
+                        } else {
+                            (base_vcc, base_vee)
+                        };
                     if eff_vcc.is_finite() && v[o] > eff_vcc {
                         v[o] = eff_vcc;
                     }
@@ -1534,11 +1556,24 @@ fn nr_dc_solve(
         log::debug!(
             "nr_dc_solve NON-CONVERGENCE (scale={:.3}, aol_mode): v_nl[4..]=[{}] op-amp-outs=[{}]",
             source_scale,
-            v_nl.iter().enumerate().skip(4).map(|(i, x)| format!("[{}]={:.3}", i, x)).collect::<Vec<_>>().join(", "),
-            mna.opamps.iter().filter_map(|oa| {
-                let out = oa.n_out_idx;
-                if out > 0 && out - 1 < v.len() { Some(format!("{:.3}", v[out-1])) } else { None }
-            }).collect::<Vec<_>>().join(", ")
+            v_nl.iter()
+                .enumerate()
+                .skip(4)
+                .map(|(i, x)| format!("[{}]={:.3}", i, x))
+                .collect::<Vec<_>>()
+                .join(", "),
+            mna.opamps
+                .iter()
+                .filter_map(|oa| {
+                    let out = oa.n_out_idx;
+                    if out > 0 && out - 1 < v.len() {
+                        Some(format!("{:.3}", v[out - 1]))
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
         );
     }
     (false, config.max_iterations)
@@ -1708,8 +1743,7 @@ fn dc_opamp_is_sidechain_rectifier(oa: &crate::mna::OpampInfo, mna: &MnaSystem) 
         return false;
     }
     let on_rail = mna.voltage_sources.iter().any(|vs| {
-        vs.dc_value != 0.0
-            && (vs.n_plus_idx == oa.n_plus_idx || vs.n_minus_idx == oa.n_plus_idx)
+        vs.dc_value != 0.0 && (vs.n_plus_idx == oa.n_plus_idx || vs.n_minus_idx == oa.n_plus_idx)
     });
     if !on_rail {
         return false;
@@ -1748,11 +1782,7 @@ fn dc_opamp_is_sidechain_rectifier(oa: &crate::mna::OpampInfo, mna: &MnaSystem) 
 /// this function further lowers (or restores) it to `aol_step`.
 ///
 /// Returns the patched copy. Only the op-amp VCCS rows are modified.
-fn patch_g_dc_for_aol(
-    base_g_dc: &[Vec<f64>],
-    mna: &MnaSystem,
-    aol_step: f64,
-) -> Vec<Vec<f64>> {
+fn patch_g_dc_for_aol(base_g_dc: &[Vec<f64>], mna: &MnaSystem, aol_step: f64) -> Vec<Vec<f64>> {
     let mut g = base_g_dc.to_vec();
     let n_aug = mna.n_aug;
 
@@ -2181,7 +2211,8 @@ pub fn solve_dc_operating_point(
         let frac = step as f64 / config.gmin_steps as f64;
         let gmin = (log_start + frac * (log_end - log_start)).exp();
 
-        let (converged, iters) = nr_dc_solve(&circuit, &mut v, &mut v_nl, &mut i_nl, 1.0, gmin, false);
+        let (converged, iters) =
+            nr_dc_solve(&circuit, &mut v, &mut v_nl, &mut i_nl, 1.0, gmin, false);
         total_iters += iters;
         if !converged {
             gmin_converged = false;
@@ -2196,7 +2227,8 @@ pub fn solve_dc_operating_point(
     );
     // Final solve without Gmin
     if gmin_converged {
-        let (converged, iters) = nr_dc_solve(&circuit, &mut v, &mut v_nl, &mut i_nl, 1.0, 0.0, false);
+        let (converged, iters) =
+            nr_dc_solve(&circuit, &mut v, &mut v_nl, &mut i_nl, 1.0, 0.0, false);
         total_iters += iters;
         if converged {
             return DcOpResult {
@@ -2269,8 +2301,15 @@ pub fn solve_dc_operating_point(
                 // The solution is already in the physical basin, so a single NR
                 // solve should converge quickly.
                 let mut v_warm = prev.clone();
-                let (ok, iters) =
-                    nr_dc_solve(&circuit_aol, &mut v_warm, &mut v_nl, &mut i_nl, 1.0, 0.0, true);
+                let (ok, iters) = nr_dc_solve(
+                    &circuit_aol,
+                    &mut v_warm,
+                    &mut v_nl,
+                    &mut i_nl,
+                    1.0,
+                    0.0,
+                    true,
+                );
                 step_ok = ok;
                 step_iters = iters;
                 if ok {
@@ -2283,8 +2322,15 @@ pub fn solve_dc_operating_point(
                 // initialization). This is the physically consistent starting
                 // point for a precision rectifier at quiescent DC.
                 let mut v_seed = v_clamped.clone();
-                let (ok, iters) =
-                    nr_dc_solve(&circuit_aol, &mut v_seed, &mut v_nl, &mut i_nl, 1.0, 0.0, true);
+                let (ok, iters) = nr_dc_solve(
+                    &circuit_aol,
+                    &mut v_seed,
+                    &mut v_nl,
+                    &mut i_nl,
+                    1.0,
+                    0.0,
+                    true,
+                );
                 step_ok = ok;
                 step_iters = iters;
                 if ok {
@@ -2310,8 +2356,15 @@ pub fn solve_dc_operating_point(
         if aol_converged {
             if let Some(mut v_final) = v_aol {
                 // Final solve on the full-AOL g_dc (base already at AOL_DC_MAX)
-                let (converged, iters) =
-                    nr_dc_solve(&circuit, &mut v_final, &mut v_nl, &mut i_nl, 1.0, 0.0, false);
+                let (converged, iters) = nr_dc_solve(
+                    &circuit,
+                    &mut v_final,
+                    &mut v_nl,
+                    &mut i_nl,
+                    1.0,
+                    0.0,
+                    false,
+                );
                 total_iters += iters;
                 if converged {
                     log::info!(
@@ -2466,8 +2519,7 @@ pub fn solve_dc_operating_point(
                 refine_iters
             );
             (v_refined, true, DcOpMethod::DirectNr)
-        } else if v_refined.iter().all(|x| x.is_finite())
-            && v_refined.iter().all(|x| x.abs() < 1e6)
+        } else if v_refined.iter().all(|x| x.is_finite()) && v_refined.iter().all(|x| x.abs() < 1e6)
         {
             log::info!(
                 "DC OP fallback-refine NR: partial progress after {} iters (not formally converged)",
@@ -2868,7 +2920,7 @@ mod tests {
                     tamb: 300.15,
                 }),
                 has_internal_mna_nodes: false,
-            vg2k_frozen: 0.0,
+                vg2k_frozen: 0.0,
             },
             DeviceSlot {
                 device_type: DeviceType::Diode,
@@ -2888,7 +2940,7 @@ mod tests {
                     tamb: 300.15,
                 }),
                 has_internal_mna_nodes: false,
-            vg2k_frozen: 0.0,
+                vg2k_frozen: 0.0,
             },
             DeviceSlot {
                 device_type: DeviceType::Diode,
@@ -2908,7 +2960,7 @@ mod tests {
                     tamb: 300.15,
                 }),
                 has_internal_mna_nodes: false,
-            vg2k_frozen: 0.0,
+                vg2k_frozen: 0.0,
             },
         ];
 

@@ -60,10 +60,7 @@ C1 out 0 100n
         code.contains("pub fn dc_op_dump(&self)"),
         "missing dc_op_dump when nodes are named"
     );
-    assert!(
-        code.contains("V(IN)"),
-        "dump should reference NODE_IN name"
-    );
+    assert!(code.contains("V(IN)"), "dump should reference NODE_IN name");
     assert!(
         code.contains("V(MID)"),
         "dump should reference NODE_MID name"

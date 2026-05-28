@@ -327,9 +327,9 @@ fn opamp_has_ac_coupled_downstream(
     if opamp.n_out_idx == 0 {
         return false;
     }
-    let out = opamp.n_out_idx - 1;   // 0-indexed
-    // Optional: the op-amp's own inverting input (for skipping feedback caps).
-    // 0 means grounded in the MNA's 1-indexed convention.
+    let out = opamp.n_out_idx - 1; // 0-indexed
+                                   // Optional: the op-amp's own inverting input (for skipping feedback caps).
+                                   // 0 means grounded in the MNA's 1-indexed convention.
     let inverting_input: Option<usize> = if opamp.n_minus_idx > 0 {
         Some(opamp.n_minus_idx - 1)
     } else {
@@ -446,7 +446,10 @@ fn opamp_has_r_only_path_to_nonlinear(
         .elements
         .iter()
         .filter_map(|e| {
-            if let Element::VoltageSource { n_plus, n_minus, .. } = e {
+            if let Element::VoltageSource {
+                n_plus, n_minus, ..
+            } = e
+            {
                 Some([n_plus.clone(), n_minus.clone()])
             } else {
                 None
@@ -820,10 +823,7 @@ pub fn augment_netlist_with_boyle_diodes(
         augmented.models.push(Model {
             name: BOYLE_CATCH_DIODE_MODEL.to_string(),
             model_type: "D".to_string(),
-            params: vec![
-                ("IS".to_string(), 1e-15),
-                ("N".to_string(), 1.0),
-            ],
+            params: vec![("IS".to_string(), 1e-15), ("N".to_string(), 1.0)],
         });
     }
 
@@ -863,7 +863,13 @@ pub fn augment_netlist_with_boyle_diodes(
         let safe_name: String = oa
             .name
             .chars()
-            .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
             .collect();
 
         let int_node = format!("_oa_int_{}", safe_name);
@@ -1044,8 +1050,7 @@ fn sanitize_const_suffix(name: &str) -> String {
 /// Dedupe sanitized suffixes in declaration order by appending `_2`, `_3`, ….
 /// Pure function; easier to unit-test than inlining into `build_named_constants`.
 fn dedupe_in_order(pairs: Vec<(String, usize)>) -> Vec<(String, usize)> {
-    let mut seen: std::collections::HashMap<String, usize> =
-        std::collections::HashMap::new();
+    let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut out = Vec::with_capacity(pairs.len());
     for (name, idx) in pairs {
         let count = seen.entry(name.clone()).or_insert(0);
@@ -1311,8 +1316,7 @@ fn opamp_n_plus_on_dc_rail(oa: &crate::mna::OpampInfo, mna: &crate::mna::MnaSyst
         return false;
     }
     mna.voltage_sources.iter().any(|vs| {
-        vs.dc_value != 0.0
-            && (vs.n_plus_idx == oa.n_plus_idx || vs.n_minus_idx == oa.n_plus_idx)
+        vs.dc_value != 0.0 && (vs.n_plus_idx == oa.n_plus_idx || vs.n_minus_idx == oa.n_plus_idx)
     })
 }
 
@@ -1338,7 +1342,10 @@ fn r_only_path_exists(
     visited[start] = true;
     while let Some(node) = queue.pop() {
         for el in &netlist.elements {
-            if let crate::parser::Element::Resistor { n_plus, n_minus, .. } = el {
+            if let crate::parser::Element::Resistor {
+                n_plus, n_minus, ..
+            } = el
+            {
                 let p = mna.node_map.get(n_plus).copied().unwrap_or(0);
                 let m = mna.node_map.get(n_minus).copied().unwrap_or(0);
                 let neighbor = if p == node {
@@ -1441,8 +1448,16 @@ fn opamp_ir_from_info(
     let gm_delta = (gm_full - gm_capped).max(0.0);
     OpampIR {
         n_out_idx: oa.n_out_idx - 1,
-        n_plus_idx: if oa.n_plus_idx > 0 { Some(oa.n_plus_idx - 1) } else { None },
-        n_minus_idx: if oa.n_minus_idx > 0 { Some(oa.n_minus_idx - 1) } else { None },
+        n_plus_idx: if oa.n_plus_idx > 0 {
+            Some(oa.n_plus_idx - 1)
+        } else {
+            None
+        },
+        n_minus_idx: if oa.n_minus_idx > 0 {
+            Some(oa.n_minus_idx - 1)
+        } else {
+            None
+        },
         vclamp_hi: oa.vcc,
         vclamp_lo: oa.vee,
         sr: oa.sr,
@@ -2094,7 +2109,11 @@ pub fn collect_thermal_noise_sources(
             //   - neither: use the netlist literal value
             let resistance = if let Some(i) = pot_idx {
                 let g = mna.pots[i].g_nominal;
-                if g > 0.0 && g.is_finite() { 1.0 / g } else { *value }
+                if g > 0.0 && g.is_finite() {
+                    1.0 / g
+                } else {
+                    *value
+                }
             } else if let Some((sw, comp)) = sw_idx {
                 let positions = &mna.switches[sw].positions;
                 let r0 = positions.first().and_then(|row| row.get(comp)).copied();
@@ -2462,7 +2481,11 @@ pub fn collect_resistor_flicker_noise_sources(
         // so the dynamic-R refresh path agrees on the codegen-time default.
         let resistance = if let Some(i) = pot_idx {
             let g = mna.pots[i].g_nominal;
-            if g > 0.0 && g.is_finite() { 1.0 / g } else { *value }
+            if g > 0.0 && g.is_finite() {
+                1.0 / g
+            } else {
+                *value
+            }
         } else if let Some((sw, comp)) = sw_idx {
             let positions = &mna.switches[sw].positions;
             let r0 = positions.first().and_then(|row| row.get(comp)).copied();
@@ -2826,8 +2849,7 @@ impl CircuitIR {
             num_devices: kernel.num_devices,
             n_aug: mna.n_aug,
             augmented_inductors,
-            num_linearized_devices: mna.linearized_triodes.len()
-                + mna.linearized_bjts.len(),
+            num_linearized_devices: mna.linearized_triodes.len() + mna.linearized_bjts.len(),
         };
 
         let os_factor = config.oversampling_factor;
@@ -3074,8 +3096,15 @@ impl CircuitIR {
             let want_be_fallback = !config.backward_euler && !config.disable_be_fallback && m > 0;
             let (s_be, k_be, a_neg_be, rhs_const_be) = if want_be_fallback {
                 compute_dk_be_fallback(
-                    &g_matrix, &c_matrix, n, m, n_nodes,
-                    &kernel.n_v, &kernel.n_i, internal_rate, mna,
+                    &g_matrix,
+                    &c_matrix,
+                    n,
+                    m,
+                    n_nodes,
+                    &kernel.n_v,
+                    &kernel.n_i,
+                    internal_rate,
+                    mna,
                 )?
             } else {
                 (Vec::new(), Vec::new(), Vec::new(), Vec::new())
@@ -3184,8 +3213,15 @@ impl CircuitIR {
             let want_be_fallback = !config.disable_be_fallback && m > 0;
             let (s_be, k_be, a_neg_be, rhs_const_be) = if want_be_fallback {
                 compute_dk_be_fallback(
-                    &g_matrix, &c_matrix, n, m, n_nodes,
-                    &kernel.n_v, &kernel.n_i, internal_rate, mna,
+                    &g_matrix,
+                    &c_matrix,
+                    n,
+                    m,
+                    n_nodes,
+                    &kernel.n_v,
+                    &kernel.n_i,
+                    internal_rate,
+                    mna,
                 )?
             } else {
                 (Vec::new(), Vec::new(), Vec::new(), Vec::new())
@@ -3854,43 +3890,43 @@ impl CircuitIR {
         // currently validated circuits. Re-enable when IIR math is fixed.
         #[allow(clippy::overly_complex_bool_expr)]
         if !has_vca && false {
-        for oa in &mna.opamps {
-            if oa.gbw.is_finite() && oa.gbw > 0.0 && oa.n_out_idx > 0 {
-                let o = oa.n_out_idx - 1;
-                let gm = oa.aol / oa.r_out;
-                let go = 1.0 / oa.r_out;
-                let np = oa.n_plus_idx;
-                let nm = oa.n_minus_idx;
-                let c_dom = oa.iir_c_dom;
+            for oa in &mna.opamps {
+                if oa.gbw.is_finite() && oa.gbw > 0.0 && oa.n_out_idx > 0 {
+                    let o = oa.n_out_idx - 1;
+                    let gm = oa.aol / oa.r_out;
+                    let go = 1.0 / oa.r_out;
+                    let np = oa.n_plus_idx;
+                    let nm = oa.n_minus_idx;
+                    let c_dom = oa.iir_c_dom;
 
-                // Pure-explicit IIR: strip Gm from G entirely.
-                if np > 0 && o < n {
-                    aug.g[o][np - 1] -= gm;
-                }
-                if nm > 0 && o < n {
-                    aug.g[o][nm - 1] += gm;
-                }
+                    // Pure-explicit IIR: strip Gm from G entirely.
+                    if np > 0 && o < n {
+                        aug.g[o][np - 1] -= gm;
+                    }
+                    if nm > 0 && o < n {
+                        aug.g[o][nm - 1] += gm;
+                    }
 
-                let np_idx = if np > 0 { Some(np - 1) } else { None };
-                let nm_idx = if nm > 0 { Some(nm - 1) } else { None };
+                    let np_idx = if np > 0 { Some(np - 1) } else { None };
+                    let nm_idx = if nm > 0 { Some(nm - 1) } else { None };
 
-                opamp_iir_data.push(OpampIirData {
-                    gm,
-                    go,
-                    c_dom,
-                    np_idx,
-                    nm_idx,
-                    out_idx: o,
-                    vclamp_hi: oa.vcc,
-                    vclamp_lo: oa.vee,
-                });
+                    opamp_iir_data.push(OpampIirData {
+                        gm,
+                        go,
+                        c_dom,
+                        np_idx,
+                        nm_idx,
+                        out_idx: o,
+                        vclamp_hi: oa.vcc,
+                        vclamp_lo: oa.vee,
+                    });
 
-                log::info!(
+                    log::info!(
                     "IIR op-amp {} (pure explicit): Gm={:.2} stripped from G[{}], Go={:.4}, C_dom={:.3e}",
                     oa.name, gm, o, go, c_dom,
                 );
+                }
             }
-        }
         } // end if !has_vca
 
         // Selective op-amp VCCS Gm cap.
@@ -3936,7 +3972,10 @@ impl CircuitIR {
             }
             log::info!(
                 "Selective Gm cap on op-amp {}: AOL {:.0} → {:.0} (delta_Gm={:.1} S)",
-                oa.name, oa.aol, aol_cap, delta,
+                oa.name,
+                oa.aol,
+                aol_cap,
+                delta,
             );
         }
 
@@ -3974,8 +4013,7 @@ impl CircuitIR {
             num_devices: mna.num_devices,
             n_aug,
             augmented_inductors: true,
-            num_linearized_devices: mna.linearized_triodes.len()
-                + mna.linearized_bjts.len(),
+            num_linearized_devices: mna.linearized_triodes.len() + mna.linearized_bjts.len(),
         };
 
         let rail_mode = refine_active_set_for_audio_path(
@@ -4083,14 +4121,18 @@ impl CircuitIR {
         // promotes to BE; the slow LF case stays on trap (bilinear
         // preserves those poles exactly).
         let trap_stability = crate::codegen::stability::analyze_trap_stability_deflated(
-            &s_flat, &a_neg_flat, n, config.input_node,
+            &s_flat,
+            &a_neg_flat,
+            n,
+            config.input_node,
         );
         let mut spectral_radius_s_aneg = trap_stability.rho;
         if spectral_radius_s_aneg > 0.99 {
             log::info!(
                 "Nodal: spectral_radius(S*A_neg) = {:.4}, dominant_sign = {:+.0} \
                  (marginally stable; Schur used when K well-conditioned)",
-                spectral_radius_s_aneg, trap_stability.dominant_sign
+                spectral_radius_s_aneg,
+                trap_stability.dominant_sign
             );
         }
 
@@ -4125,7 +4167,9 @@ impl CircuitIR {
         // input-row dynamics are arbitrary). Without the gate, an RC lowpass
         // false-fires the discriminator. See augmented_mna_tests::
         // test_no_inductors_exact_match.
-        if !be && !config.force_trap && m > 0
+        if !be
+            && !config.force_trap
+            && m > 0
             && crate::codegen::stability::trap_needs_be(trap_stability)
         {
             log::warn!(
@@ -4420,11 +4464,12 @@ impl CircuitIR {
                         for ci in &mna.coupled_inductors {
                             let l1 = ci.l1_name.to_ascii_uppercase();
                             let l2 = ci.l2_name.to_ascii_uppercase();
-                            if switch_inductor_names.contains(&l1) || switch_inductor_names.contains(&l2) {
-                                if let (Some(&ra), Some(&rb)) = (
-                                    inductor_aug_rows.get(&l1),
-                                    inductor_aug_rows.get(&l2),
-                                ) {
+                            if switch_inductor_names.contains(&l1)
+                                || switch_inductor_names.contains(&l2)
+                            {
+                                if let (Some(&ra), Some(&rb)) =
+                                    (inductor_aug_rows.get(&l1), inductor_aug_rows.get(&l2))
+                                {
                                     mutual_entries.push(SwitchMutualEntry {
                                         row_a: ra,
                                         row_b: rb,
@@ -4438,11 +4483,12 @@ impl CircuitIR {
                                 for j in (i + 1)..group.num_windings {
                                     let ni = group.winding_names[i].to_ascii_uppercase();
                                     let nj = group.winding_names[j].to_ascii_uppercase();
-                                    if switch_inductor_names.contains(&ni) || switch_inductor_names.contains(&nj) {
-                                        if let (Some(&ra), Some(&rb)) = (
-                                            inductor_aug_rows.get(&ni),
-                                            inductor_aug_rows.get(&nj),
-                                        ) {
+                                    if switch_inductor_names.contains(&ni)
+                                        || switch_inductor_names.contains(&nj)
+                                    {
+                                        if let (Some(&ra), Some(&rb)) =
+                                            (inductor_aug_rows.get(&ni), inductor_aug_rows.get(&nj))
+                                        {
                                             mutual_entries.push(SwitchMutualEntry {
                                                 row_a: ra,
                                                 row_b: rb,
@@ -4544,11 +4590,16 @@ impl CircuitIR {
                 for (i, group) in mna.transformer_groups.iter().enumerate() {
                     if group.winding_isats.iter().any(|isat| isat.is_some()) {
                         let w = group.num_windings;
-                        let aug_rows: Vec<usize> = (0..w).map(|wi| xfmr_base + xfmr_offset + wi).collect();
-                        let isats: Vec<f64> = group.winding_isats.iter()
+                        let aug_rows: Vec<usize> =
+                            (0..w).map(|wi| xfmr_base + xfmr_offset + wi).collect();
+                        let isats: Vec<f64> = group
+                            .winding_isats
+                            .iter()
                             .map(|isat| isat.unwrap_or(1e6))
                             .collect();
-                        let coupling_flat: Vec<f64> = group.coupling_matrix.iter()
+                        let coupling_flat: Vec<f64> = group
+                            .coupling_matrix
+                            .iter()
                             .flat_map(|row| row.iter().copied())
                             .collect();
                         sat_xfmr.push(SaturatingTransformerGroupIR {
@@ -4852,11 +4903,7 @@ impl CircuitIR {
     /// Look up the tolerance for `param_name` on `device_class` across all
     /// `.mismatch` specs in the netlist. Returns 0.0 when the directive is
     /// absent or the param isn't listed.
-    fn mismatch_tol_for(
-        netlist: &Netlist,
-        device_class: char,
-        param_name: &str,
-    ) -> f64 {
+    fn mismatch_tol_for(netlist: &Netlist, device_class: char, param_name: &str) -> f64 {
         let upper = param_name;
         let mut tol = 0.0f64;
         for spec in &netlist.mismatch_specs {
@@ -5022,7 +5069,11 @@ impl CircuitIR {
                         mna.and_then(|m| {
                             if nl_dev_idx < m.nonlinear_devices.len() {
                                 let v = m.nonlinear_devices[nl_dev_idx].vg2k_frozen;
-                                if v.abs() > 1e-15 { Some(v) } else { None }
+                                if v.abs() > 1e-15 {
+                                    Some(v)
+                                } else {
+                                    None
+                                }
                             } else {
                                 None
                             }
@@ -5203,8 +5254,7 @@ impl CircuitIR {
             netlist,
             model,
             &[
-                "IS", "N", "CJO", "RS", "BV", "IBV", "KF", "AF", "RTH", "CTH", "XTI", "EG",
-                "TAMB",
+                "IS", "N", "CJO", "RS", "BV", "IBV", "KF", "AF", "RTH", "CTH", "XTI", "EG", "TAMB",
             ],
         );
 
@@ -5566,7 +5616,9 @@ impl CircuitIR {
         Self::warn_unrecognized_params(
             netlist,
             model,
-            &["VTO", "BETA", "IDSS", "LAMBDA", "CGS", "CGD", "RD", "RS", "KF", "AF"],
+            &[
+                "VTO", "BETA", "IDSS", "LAMBDA", "CGS", "CGD", "RD", "RS", "KF", "AF",
+            ],
         );
 
         Ok(JfetParams {
@@ -5990,12 +6042,8 @@ impl CircuitIR {
                     )));
                 }
                 None => match cat.map(|c| c.screen_form) {
-                    Some(melange_devices::tube::ScreenForm::Exponential) => {
-                        ScreenForm::Exponential
-                    }
-                    Some(melange_devices::tube::ScreenForm::Classical) => {
-                        ScreenForm::Classical
-                    }
+                    Some(melange_devices::tube::ScreenForm::Exponential) => ScreenForm::Exponential,
+                    Some(melange_devices::tube::ScreenForm::Classical) => ScreenForm::Classical,
                     _ => ScreenForm::Rational,
                 },
             }
@@ -6151,9 +6199,7 @@ impl CircuitIR {
             vbias_alpha: 0.0,
             tamb: 300.15,
         };
-        params
-            .validate()
-            .map_err(CodegenError::InvalidConfig)?;
+        params.validate().map_err(CodegenError::InvalidConfig)?;
         Ok(params)
     }
 
@@ -6173,17 +6219,9 @@ impl CircuitIR {
             )));
         }
 
-        Self::warn_unrecognized_params(
-            netlist,
-            model,
-            &["VSCALE", "G0", "THD", "MODE"],
-        );
+        Self::warn_unrecognized_params(netlist, model, &["VSCALE", "G0", "THD", "MODE"]);
 
-        Ok(VcaParams {
-            vscale,
-            g0,
-            thd,
-        })
+        Ok(VcaParams { vscale, g0, thd })
     }
 
     /// Warn on unrecognized .model parameters (typo protection).
@@ -6552,11 +6590,7 @@ mod opamp_rail_mode_tests {
 
     #[test]
     fn resolver_auto_opamps_with_both_rails_picks_hard_when_dc_coupled() {
-        let mna = mna_with_opamps_and_caps(
-            3,
-            vec![opamp_at_nodes(2, 1, 1, 9.0, 0.0)],
-            &[],
-        );
+        let mna = mna_with_opamps_and_caps(3, vec![opamp_at_nodes(2, 1, 1, 9.0, 0.0)], &[]);
         let r = resolve_opamp_rail_mode(&mna, OpampRailMode::Auto);
         assert_eq!(r.mode, OpampRailMode::Hard);
         assert_eq!(r.reason, OpampRailModeReason::AllDcCoupled);
@@ -6763,7 +6797,10 @@ U2 0 sum2 out OA1
             .find(|(k, _)| k == "IS")
             .map(|(_, v)| *v)
             .unwrap();
-        assert!((is_val - 1e-15).abs() < 1e-20, "Is should be 1e-15, got {is_val}");
+        assert!(
+            (is_val - 1e-15).abs() < 1e-20,
+            "Is should be 1e-15, got {is_val}"
+        );
         let n_val = catch_model
             .params
             .iter()
@@ -6796,9 +6833,18 @@ U2 0 sum2 out OA1
                 matches!(e, crate::parser::Element::Vcvs { name, .. } if name.starts_with("E_oa_buf_"))
             })
             .count();
-        assert_eq!(vs_added, 4, "Expected 4 rail-reference voltage sources (2 op-amps × 2 rails)");
-        assert_eq!(diodes_added, 4, "Expected 4 catch diodes (2 op-amps × 2 rails)");
-        assert_eq!(buffer_vcvs_added, 2, "Expected 2 output-buffer VCVS (1 per clamped op-amp)");
+        assert_eq!(
+            vs_added, 4,
+            "Expected 4 rail-reference voltage sources (2 op-amps × 2 rails)"
+        );
+        assert_eq!(
+            diodes_added, 4,
+            "Expected 4 catch diodes (2 op-amps × 2 rails)"
+        );
+        assert_eq!(
+            buffer_vcvs_added, 2,
+            "Expected 2 output-buffer VCVS (1 per clamped op-amp)"
+        );
 
         let r_ro_added = aug_netlist
             .elements
@@ -6807,7 +6853,10 @@ U2 0 sum2 out OA1
                 matches!(e, crate::parser::Element::Resistor { name, .. } if name.starts_with("R_oa_ro_"))
             })
             .count();
-        assert_eq!(r_ro_added, 2, "Expected 2 output-buffer series resistors (1 per clamped op-amp)");
+        assert_eq!(
+            r_ro_added, 2,
+            "Expected 2 output-buffer series resistors (1 per clamped op-amp)"
+        );
 
         // Rebuild MNA from the augmented netlist — this must succeed.
         let aug_mna = MnaSystem::from_netlist(&aug_netlist).expect("augmented MNA build");
@@ -6839,7 +6888,11 @@ U2 0 sum2 out OA1
         // Each clamped op-amp must now have a non-zero n_int_idx.
         for oa in &aug_mna.opamps {
             if oa.vcc.is_finite() || oa.vee.is_finite() {
-                assert_ne!(oa.n_int_idx, 0, "op-amp {} should be in BoyleDiodes mode", oa.name);
+                assert_ne!(
+                    oa.n_int_idx, 0,
+                    "op-amp {} should be in BoyleDiodes mode",
+                    oa.name
+                );
             }
         }
 

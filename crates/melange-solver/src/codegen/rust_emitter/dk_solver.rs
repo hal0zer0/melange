@@ -4,13 +4,13 @@
 //! `generate_schur_gauss_elim` — the procedural NR solver code that is
 //! too deeply conditional for Tera templates.
 
-use crate::codegen::ir::CircuitIR;
-use crate::codegen::CodegenError;
-use super::RustEmitter;
 use super::nr_helpers::{
     emit_dk_device_evaluation, emit_nr_limit_and_converge, emit_nr_singular_fallback,
     emit_schur_nr_limit_and_converge,
 };
+use super::RustEmitter;
+use crate::codegen::ir::CircuitIR;
+use crate::codegen::CodegenError;
 
 impl RustEmitter {
     /// Generate solve_nonlinear function using Newton-Raphson.
@@ -30,9 +30,7 @@ impl RustEmitter {
         code.push_str("/// Solves: i_nl - i_d(p + K*i_nl) = 0\n");
         code.push_str("/// where p = N_v * v_pred is the linear prediction\n");
         code.push_str("#[inline(always)]\n");
-        code.push_str(
-            "fn solve_nonlinear(p: &[f64; M], state: &mut CircuitState) -> [f64; M] {\n",
-        );
+        code.push_str("fn solve_nonlinear(p: &[f64; M], state: &mut CircuitState) -> [f64; M] {\n");
         code.push_str(&format!(
             "    const MAX_ITER: usize = {};\n",
             ir.solver_config.max_iterations

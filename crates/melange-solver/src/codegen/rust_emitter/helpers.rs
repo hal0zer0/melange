@@ -103,8 +103,7 @@ pub(super) fn estimate_settle_time_seconds(ir: &CircuitIR) -> f64 {
 /// constant is always positive.
 pub(super) fn recommended_warmup_samples(ir: &CircuitIR) -> usize {
     let tau = estimate_settle_time_seconds(ir);
-    let internal_rate =
-        ir.solver_config.sample_rate * ir.solver_config.oversampling_factor as f64;
+    let internal_rate = ir.solver_config.sample_rate * ir.solver_config.oversampling_factor as f64;
     let samples = (5.0 * tau * internal_rate).ceil() as i64;
     samples.max(1) as usize
 }
@@ -386,7 +385,11 @@ pub(super) fn fmt_f64(v: f64) -> String {
 /// Format a matrix as rows of comma-separated full-precision floats.
 ///
 /// `rows` x `cols` elements are read from `get(i, j)`.
-pub(super) fn format_matrix_rows(rows: usize, cols: usize, get: impl Fn(usize, usize) -> f64) -> Vec<String> {
+pub(super) fn format_matrix_rows(
+    rows: usize,
+    cols: usize,
+    get: impl Fn(usize, usize) -> f64,
+) -> Vec<String> {
     (0..rows)
         .map(|i| {
             (0..cols)

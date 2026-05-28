@@ -480,7 +480,7 @@ fn run_melange_solver_from_str(
     output_node_name: &str,
     input_node_name: &str,
 ) -> Result<Vec<f64>, ValidationError> {
-    use melange_solver::codegen::{CodeGenerator, CodegenConfig, routing};
+    use melange_solver::codegen::{routing, CodeGenerator, CodegenConfig};
     use std::io::Write;
 
     let netlist = melange_solver::parser::Netlist::parse(netlist_str).map_err(|e| {
@@ -490,16 +490,30 @@ fn run_melange_solver_from_str(
     let mut mna = melange_solver::mna::MnaSystem::from_netlist(&netlist)
         .map_err(|e| ValidationError::Solver(format!("MNA error: {}", e)))?;
 
-    let input_node = mna.node_map.get(input_node_name).copied()
-        .ok_or_else(|| ValidationError::Solver(format!(
-            "Input node '{}' not found. Available: {:?}",
-            input_node_name, mna.node_map.keys().collect::<Vec<_>>()
-        )))?.saturating_sub(1);
-    let output_node = mna.node_map.get(output_node_name).copied()
-        .ok_or_else(|| ValidationError::Solver(format!(
-            "Output node '{}' not found. Available: {:?}",
-            output_node_name, mna.node_map.keys().collect::<Vec<_>>()
-        )))?.saturating_sub(1);
+    let input_node = mna
+        .node_map
+        .get(input_node_name)
+        .copied()
+        .ok_or_else(|| {
+            ValidationError::Solver(format!(
+                "Input node '{}' not found. Available: {:?}",
+                input_node_name,
+                mna.node_map.keys().collect::<Vec<_>>()
+            ))
+        })?
+        .saturating_sub(1);
+    let output_node = mna
+        .node_map
+        .get(output_node_name)
+        .copied()
+        .ok_or_else(|| {
+            ValidationError::Solver(format!(
+                "Output node '{}' not found. Available: {:?}",
+                output_node_name,
+                mna.node_map.keys().collect::<Vec<_>>()
+            ))
+        })?
+        .saturating_sub(1);
 
     if input_node < mna.n {
         mna.g[input_node][input_node] += 1.0;
@@ -560,8 +574,10 @@ fn run_melange_solver_from_str(
 
     if use_nodal {
         let slots = melange_solver::codegen::ir::CircuitIR::build_device_info_with_mna(
-            &netlist, Some(&mna),
-        ).unwrap_or_default();
+            &netlist,
+            Some(&mna),
+        )
+        .unwrap_or_default();
         if !slots.is_empty() {
             mna.expand_bjt_internal_nodes(&slots);
         }
@@ -581,7 +597,8 @@ fn run_melange_solver_from_str(
         generator.generate_nodal(&mna, &netlist)
     } else {
         generator.generate_with_dc_op(&kernel, &mna, &netlist, dc_preflight)
-    }.map_err(|e| ValidationError::Solver(format!("Codegen: {}", e)))?;
+    }
+    .map_err(|e| ValidationError::Solver(format!("Codegen: {}", e)))?;
 
     // Append stdin/stdout main
     let main_code = "fn main() {\n\
@@ -611,8 +628,11 @@ fn run_melange_solver_from_str(
         .map_err(|e| ValidationError::Solver(format!("Write: {}", e)))?;
 
     let compile = std::process::Command::new("rustc")
-        .arg(&src).arg("-o").arg(&bin)
-        .arg("--edition=2024").arg("-O")
+        .arg(&src)
+        .arg("-o")
+        .arg(&bin)
+        .arg("--edition=2024")
+        .arg("-O")
         .output()
         .map_err(|e| ValidationError::Solver(format!("rustc: {}", e)))?;
     let _ = std::fs::remove_file(&src);
@@ -620,7 +640,8 @@ fn run_melange_solver_from_str(
     if !compile.status.success() {
         let _ = std::fs::remove_file(&bin);
         return Err(ValidationError::Solver(format!(
-            "Compilation failed:\n{}", String::from_utf8_lossy(&compile.stderr)
+            "Compilation failed:\n{}",
+            String::from_utf8_lossy(&compile.stderr)
         )));
     }
 
@@ -634,17 +655,20 @@ fn run_melange_solver_from_str(
         .map_err(|e| ValidationError::Solver(format!("Spawn: {}", e)))?;
 
     if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(stdin_data.as_bytes())
+        stdin
+            .write_all(stdin_data.as_bytes())
             .map_err(|e| ValidationError::Solver(format!("Stdin: {}", e)))?;
     }
 
-    let result = child.wait_with_output()
+    let result = child
+        .wait_with_output()
         .map_err(|e| ValidationError::Solver(format!("Wait: {}", e)))?;
     let _ = std::fs::remove_file(&bin);
 
     if !result.status.success() {
         return Err(ValidationError::Solver(format!(
-            "Binary failed:\n{}", String::from_utf8_lossy(&result.stderr)
+            "Binary failed:\n{}",
+            String::from_utf8_lossy(&result.stderr)
         )));
     }
 
@@ -653,7 +677,6 @@ fn run_melange_solver_from_str(
         .filter_map(|l| l.trim().parse().ok())
         .collect())
 }
-
 
 /// Check if ngspice is available. Returns `true` if the test should be skipped.
 ///

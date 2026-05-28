@@ -998,7 +998,8 @@ fn test_weak_coupling_minimal_transfer() {
 
     // Now compare with strong coupling (k=0.95, same inductances)
     let config_strong = support::config_for_spice(UNITY_TRANSFORMER, 44100.0);
-    let circuit_strong = support::build_circuit(UNITY_TRANSFORMER, &config_strong, "strong_coupling");
+    let circuit_strong =
+        support::build_circuit(UNITY_TRANSFORMER, &config_strong, "strong_coupling");
     let output_strong = support::run_sine(&circuit_strong, 100.0, 1.0, 4410, 44100.0);
 
     // Measure RMS of settled region for both
@@ -1286,7 +1287,11 @@ C2 b 0 1n
     let mna = MnaSystem::from_netlist(&netlist)
         .expect("coupled inductors in .switch should now be accepted");
     assert_eq!(mna.switches.len(), 1, "should have 1 switch");
-    assert_eq!(mna.switches[0].components.len(), 2, "switch should have 2 components");
+    assert_eq!(
+        mna.switches[0].components.len(),
+        2,
+        "switch should have 2 components"
+    );
     assert_eq!(mna.coupled_inductors.len(), 1, "should have 1 coupled pair");
 }
 

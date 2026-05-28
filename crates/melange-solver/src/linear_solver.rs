@@ -264,8 +264,7 @@ impl LinearSolver {
             0.0
         };
         let raw_out = if raw_out.is_finite() { raw_out } else { 0.0 };
-        let dc_blocked =
-            raw_out - self.dc_block_x_prev + self.dc_block_r * self.dc_block_y_prev;
+        let dc_blocked = raw_out - self.dc_block_x_prev + self.dc_block_r * self.dc_block_y_prev;
         self.dc_block_x_prev = raw_out;
         self.dc_block_y_prev = dc_blocked.clamp(-100.0, 100.0);
 
@@ -331,7 +330,10 @@ mod tests {
             assert!(
                 output[i] >= output[i - 1] - 1e-10,
                 "Monotonic: [{}]={:.6} < [{}]={:.6}",
-                i, output[i], i - 1, output[i - 1]
+                i,
+                output[i],
+                i - 1,
+                output[i - 1]
             );
         }
     }
