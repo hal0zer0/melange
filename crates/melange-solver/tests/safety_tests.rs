@@ -157,7 +157,7 @@ Vin in 0 0
 
     let n = kernel.n;
     let output_node = n - 1;
-    let input_to_output_gain = kernel.s[(output_node * n)].abs();
+    let input_to_output_gain = kernel.s[output_node * n].abs();
 
     assert!(
         input_to_output_gain < MAX_SAFE_VOLTAGE,

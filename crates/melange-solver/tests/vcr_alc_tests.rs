@@ -297,7 +297,7 @@ fn test_vcr_alc_dk_kernel_k_diagonals() {
     let kernel = DkKernel::from_mna(&mna, 48000.0).unwrap();
 
     // K[0][0] should be negative (diode: proper negative feedback)
-    let k00 = kernel.k[(0 * kernel.m)];
+    let k00 = kernel.k[0 * kernel.m];
     assert!(k00 < 0.0, "K[0][0] (diode) should be negative, got {k00}");
 
     // K[1][1] should be negative (VCA signal: decoupling resistor provides feedback)
