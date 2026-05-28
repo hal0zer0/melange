@@ -2695,9 +2695,7 @@ impl RustEmitter {
                 let nq = comp.node_q;
                 let matrix = if comp.component_type == 'R' {
                     if use_full_nodal { "cold.g_work" } else { "g_work" }
-                } else {
-                    if use_full_nodal { "cold.c_work" } else { "c_work" }
-                };
+                } else if use_full_nodal { "cold.c_work" } else { "c_work" };
 
                 code.push_str(&format!(
                     "        // Switch {} component {} ({}, type {})\n",
@@ -5771,7 +5769,7 @@ impl RustEmitter {
             // Extract v_nl (sparse N_V)
             code.push_str("            let mut v_nl = [0.0f64; M];\n");
             code.push_str(&emit_sparse_nv_matvec(ir, "v_nl", "v", "            "));
-            code.push_str("\n");
+            code.push('\n');
 
             // Evaluate devices (write to outer i_nl, declare local j_dev)
             code.push_str("            // Evaluate devices\n");

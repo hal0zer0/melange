@@ -26,7 +26,7 @@ pub fn validate_s_matrix(kernel: &DkKernel) -> Result<(), String> {
             return Err(format!("S[{},{}] = {} is not positive", i, i, s_ii));
         }
 
-        if i == 0 && (s_ii < 1e-8 || s_ii > 100.0) {
+        if i == 0 && !(1e-8..=100.0).contains(&s_ii) {
             return Err(format!(
                 "S[0,0] = {} is out of safe range [1e-8, 100]",
                 s_ii
@@ -157,7 +157,7 @@ Vin in 0 0
 
     let n = kernel.n;
     let output_node = n - 1;
-    let input_to_output_gain = kernel.s[output_node * n + 0].abs();
+    let input_to_output_gain = kernel.s[(output_node * n)].abs();
 
     assert!(
         input_to_output_gain < MAX_SAFE_VOLTAGE,

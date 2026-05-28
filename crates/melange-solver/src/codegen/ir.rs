@@ -1032,7 +1032,7 @@ fn sanitize_const_suffix(name: &str) -> String {
             out.push('_');
         }
     }
-    if out.chars().next().map_or(false, |c| c.is_ascii_digit()) {
+    if out.chars().next().is_some_and(|c| c.is_ascii_digit()) {
         out.insert(0, '_');
     }
     if out.is_empty() {
@@ -2267,7 +2267,7 @@ pub fn collect_opamp_noise_sources(mna: &MnaSystem) -> Vec<OpampNoiseSource> {
     for oa in &mna.opamps {
         let en = oa.en;
         let in_amps = oa.in_amps;
-        if !(en > 0.0 && en.is_finite()) && !(in_amps > 0.0 && in_amps.is_finite()) {
+        if !((en > 0.0 && en.is_finite()) || (in_amps > 0.0 && in_amps.is_finite())) {
             continue;
         }
         let np = oa.n_plus_idx;
@@ -4837,7 +4837,7 @@ impl CircuitIR {
             h = (h ^ (b.to_ascii_uppercase() as u64)).wrapping_mul(FNV_PRIME);
         }
         // Null byte separator so "Q1" + "SA" can't collide with "Q" + "1SA".
-        h = (h ^ 0x00).wrapping_mul(FNV_PRIME);
+        h = h.wrapping_mul(FNV_PRIME);
         for b in param_name.as_bytes() {
             h = (h ^ (b.to_ascii_uppercase() as u64)).wrapping_mul(FNV_PRIME);
         }

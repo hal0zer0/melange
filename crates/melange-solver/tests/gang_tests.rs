@@ -46,7 +46,7 @@ C1 out 0 100n
 "#;
     let netlist = Netlist::parse(spice).unwrap();
 
-    assert_eq!(netlist.gangs[0].members[1].inverted, true);
+    assert!(netlist.gangs[0].members[1].inverted);
     assert_eq!(netlist.gangs[0].default_position, Some(0.75));
 }
 

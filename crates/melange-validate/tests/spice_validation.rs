@@ -194,7 +194,7 @@ fn run_validation(
     // Extract SPICE output
     let mut spice_output = spice_data
         .get_node_voltage(output_node)
-        .map_err(|e| ValidationError::Spice(e))?
+        .map_err(ValidationError::Spice)?
         .to_vec();
 
     // Strip VIN for melange solver (auto-detect and remove input voltage source)

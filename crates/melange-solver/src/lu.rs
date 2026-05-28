@@ -450,11 +450,9 @@ mod tests {
         let sparsity = symbolic_lu(&pattern, &elim_order, &swaps, 3);
 
         // Execute the symbolic schedule on actual values
-        let mut a = vec![
-            vec![2.0, 1.0, 1.0],
+        let mut a = [vec![2.0, 1.0, 1.0],
             vec![4.0, 3.0, 3.0],
-            vec![8.0, 7.0, 9.0],
-        ];
+            vec![8.0, 7.0, 9.0]];
         // Apply row swaps
         for &(r1, r2) in &sparsity.row_swaps {
             a.swap(r1, r2);

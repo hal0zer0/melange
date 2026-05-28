@@ -209,7 +209,7 @@ mod tests {
         // Check that hash values are in [0, 1)
         for i in 0..100 {
             let h = variation_hash(i, i * 7);
-            assert!(h >= 0.0 && h < 1.0, "Hash out of range: {}", h);
+            assert!((0.0..1.0).contains(&h), "Hash out of range: {}", h);
         }
     }
 

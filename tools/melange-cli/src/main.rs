@@ -7,6 +7,11 @@
 //!   melange sources list
 //!   melange builtins
 
+// CLI driver functions take many parameters by nature (mirrors the solver lib).
+#![allow(clippy::too_many_arguments)]
+// Doc comments use markdown lists whose continuations render fine.
+#![allow(clippy::doc_lazy_continuation)]
+
 mod builtins {
     // This module exists to include builtin circuit files
     // The actual content is embedded using include_str! in circuits.rs
@@ -2917,8 +2922,6 @@ fn apply_linearize_reductions(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 fn analyze_freq_response(
     circuit_source: &circuits::CircuitSource,
     input_node_name: &str,

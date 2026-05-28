@@ -7,6 +7,16 @@
 #![allow(clippy::too_many_arguments)]
 // Manual slice copying is clearer for small fixed-size operations.
 #![allow(clippy::manual_memcpy)]
+// Doc comments use markdown lists whose continuations render fine; the lazy-
+// continuation lint is purely cosmetic for our rustdoc output.
+#![allow(clippy::doc_lazy_continuation)]
+// Codegen builds some genuinely complex tuple/map types; extracting type aliases
+// for one-off internal returns hurts readability more than it helps.
+#![allow(clippy::type_complexity)]
+// Several device-param matches guard on `f64 == literal`; the "redundant" guard
+// can't be folded into a float-literal pattern without tripping the
+// illegal_floating_point_literal_pattern future-incompat lint.
+#![allow(clippy::redundant_guards)]
 
 //! MNA/DK-method circuit solver engine for real-time audio.
 //!

@@ -140,7 +140,7 @@ pub(crate) fn deterministic_draw(seed: u64, class_tag: &str, name: &str) -> f64 
         h = (h ^ (b.to_ascii_uppercase() as u64)).wrapping_mul(FNV_PRIME);
     }
     // Null-byte separator.
-    h = (h ^ 0x00).wrapping_mul(FNV_PRIME);
+    h = h.wrapping_mul(FNV_PRIME);
     for b in name.as_bytes() {
         h = (h ^ (b.to_ascii_uppercase() as u64)).wrapping_mul(FNV_PRIME);
     }
@@ -2185,7 +2185,7 @@ impl Parser {
             let tol: f64 = v
                 .parse()
                 .map_err(|_| self.error(format!(".tolerance value '{v}' is not a valid number")))?;
-            if !tol.is_finite() || tol < 0.0 || tol >= 1.0 {
+            if !tol.is_finite() || !(0.0..1.0).contains(&tol) {
                 return Err(self.error(format!(
                     ".tolerance must be in [0.0, 1.0), got {tol}"
                 )));
@@ -2232,7 +2232,7 @@ impl Parser {
             let tol: f64 = v.parse().map_err(|_| {
                 self.error(format!(".mismatch tolerance '{v}' is not a valid number"))
             })?;
-            if !tol.is_finite() || tol < 0.0 || tol >= 1.0 {
+            if !tol.is_finite() || !(0.0..1.0).contains(&tol) {
                 return Err(self.error(format!(
                     ".mismatch tolerance must be in [0.0, 1.0), got {tol}"
                 )));
@@ -3067,7 +3067,7 @@ impl Parser {
         for &part in &parts[4..] {
             if let Some(stripped) = part.strip_prefix("ISAT=").or_else(|| part.strip_prefix("isat=")) {
                 let v = parse_value(stripped).map_err(|_| {
-                    self.error(&format!("Invalid ISAT value: {}", stripped))
+                    self.error(format!("Invalid ISAT value: {}", stripped))
                 })?;
                 if !(v > 0.0 && v.is_finite()) {
                     return Err(self.error("ISAT must be positive and finite"));

@@ -1100,7 +1100,7 @@ fn clamp_junction_voltages(
                 // is below 250V (e.g. small signal bias network) we use
                 // supply - 50V to leave headroom for the screen-grid drop.
                 if let Some(s_node) = screen_node {
-                    let target_vg2 = v_cath + (v_supply - v_cath - 50.0).min(250.0).max(20.0);
+                    let target_vg2 = v_cath + (v_supply - v_cath - 50.0).clamp(20.0, 250.0);
                     let v_g2 = v[s_node];
                     if v_g2 - v_cath > 260.0 || v_g2 - v_cath < 10.0 {
                         v[s_node] = target_vg2;
@@ -2570,7 +2570,7 @@ mod tests {
             vec![0.0, 1.0, 4.0],
             vec![5.0, 6.0, 0.0],
         ];
-        let x_expected = vec![1.0, 2.0, 3.0];
+        let x_expected = [1.0, 2.0, 3.0];
         let b: Vec<f64> = (0..3)
             .map(|i| (0..3).map(|j| a[i][j] * x_expected[j]).sum())
             .collect();

@@ -2914,7 +2914,7 @@ impl RustEmitter {
             top.push_str("/// (Phase 2) and pentode partition noise (Phase 5).\n");
             top.push_str("pub const Q_E: f64 = 1.602176634e-19;\n");
         }
-        top.push_str(&format!("/// Default master seed baked in by codegen. `0` → entropy-seeded at Default.\n"));
+        top.push_str(&"/// Default master seed baked in by codegen. `0` → entropy-seeded at Default.\n".to_string());
         top.push_str(&format!(
             "pub const NOISE_MASTER_SEED_DEFAULT: u64 = {};\n\n",
             ir.noise.master_seed
@@ -3394,18 +3394,10 @@ impl RustEmitter {
 
         // State fields — injected inside CircuitState struct body
         let mut state_fields = String::new();
-        state_fields.push_str(&format!(
-            "    /// Per-source xoshiro256++ state — independent streams, no cross-correlation.\n"
-        ));
-        state_fields.push_str(&format!(
-            "    pub noise_rng: [Xoshiro256pp; NOISE_THERMAL_N],\n"
-        ));
-        state_fields.push_str(&format!(
-            "    /// Cached second Gaussian from Marsaglia polar pair.\n"
-        ));
-        state_fields.push_str(&format!(
-            "    pub noise_gaussian_cache: [Option<f64>; NOISE_THERMAL_N],\n"
-        ));
+        state_fields.push_str(&"    /// Per-source xoshiro256++ state — independent streams, no cross-correlation.\n".to_string());
+        state_fields.push_str(&"    pub noise_rng: [Xoshiro256pp; NOISE_THERMAL_N],\n".to_string());
+        state_fields.push_str(&"    /// Cached second Gaussian from Marsaglia polar pair.\n".to_string());
+        state_fields.push_str(&"    pub noise_gaussian_cache: [Option<f64>; NOISE_THERMAL_N],\n".to_string());
         state_fields.push_str("    /// Master noise switch — runtime. Default false (opt-in).\n");
         state_fields.push_str("    pub noise_enabled: bool,\n");
         state_fields.push_str("    /// Master scalar applied to every noise source.\n");
