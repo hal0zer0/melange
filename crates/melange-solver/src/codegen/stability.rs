@@ -210,9 +210,7 @@ fn apply_s_a_neg(s: &[f64], a_neg: &[f64], n: usize, x: &[f64]) -> Vec<f64> {
 ///   regardless of gain.
 pub fn trap_needs_be(stability: TrapStability) -> bool {
     stability.rho > 1.002
-        || (stability.rho > 0.999
-            && stability.dominant_sign < 0.0
-            && stability.max_abs_s > 1.0e5)
+        || (stability.rho > 0.999 && stability.dominant_sign < 0.0 && stability.max_abs_s > 1.0e5)
 }
 
 #[cfg(test)]
