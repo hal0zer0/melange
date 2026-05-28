@@ -1973,16 +1973,14 @@ impl Parser {
                 }
                 // Flicker exponent. ngspice default is 1.0; must be positive
                 // so `|I|^AF` is well-defined for nonzero currents.
-                "AF" => {
-                    if *value <= 0.0 {
-                        return Err(ParseError {
-                            line: 0,
-                            message: format!(
-                                ".model '{}': {} must be > 0, got {}",
-                                model.name, key, value
-                            ),
-                        });
-                    }
+                "AF" if *value <= 0.0 => {
+                    return Err(ParseError {
+                        line: 0,
+                        message: format!(
+                            ".model '{}': {} must be > 0, got {}",
+                            model.name, key, value
+                        ),
+                    });
                 }
                 _ => {} // Unknown params: no range check (warned elsewhere)
             }

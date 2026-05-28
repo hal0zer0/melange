@@ -4537,18 +4537,18 @@ impl CircuitIR {
                 // Build list of inductors with ISAT (iron-core saturation).
                 // Reuse the same augmented row mapping as switches.
                 let mut sat_inds = Vec::new();
-                let mut sat_var_idx = n_aug;
+                // aug_row for inductor i is n_aug + i (one augmented row each,
+                // matching the switch row mapping); no separate counter needed.
                 for (i, ind) in mna.inductors.iter().enumerate() {
                     if let Some(isat) = ind.isat {
                         sat_inds.push(SaturatingInductorIR {
                             name: ind.name.clone(),
                             l0: ind.value,
                             isat,
-                            aug_row: sat_var_idx,
+                            aug_row: n_aug + i,
                             inductor_index: i,
                         });
                     }
-                    sat_var_idx += 1;
                 }
                 sat_inds
             },
