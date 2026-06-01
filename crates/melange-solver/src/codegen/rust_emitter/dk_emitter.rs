@@ -1567,11 +1567,14 @@ impl RustEmitter {
             }
         }
 
-        // Invert A → S, compute S_NI, K
+        // Invert A → S, compute S_NI, K. Use the equilibrated invert so
+        // partial-pivoting LU keeps cond(A) inside f64 precision even when
+        // G_in (≈1 S) dominates internal conductances (1e-4 to 1e-6 S) by
+        // 4-6 decades.
         code.push_str(&format!(
             "\n\
-             \x20       // Invert A to get S\n\
-             \x20       let (s, singular) = invert_n(a);\n\
+             \x20       // Invert A to get S (asymmetric row/column equilibration)\n\
+             \x20       let (s, singular) = invert_n_equilibrated(a);\n\
              \x20       if singular {{ self.diag_singular_matrix_count += 1; }}\n\n\
              \x20       // Compute S * N_i product (N x M)\n\
              \x20       let mut s_ni = [[0.0f64; M]; N];\n\

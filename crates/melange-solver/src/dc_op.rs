@@ -826,12 +826,16 @@ fn extract_nl_voltages_with(m: usize, n_v: &[Vec<f64>], v: &[f64], v_nl: &mut [f
 /// Returns (LU, pivot) where LU holds L (below diagonal) and U (on+above diagonal).
 /// Returns None if the matrix is singular.
 pub fn lu_decompose(a: &[Vec<f64>]) -> Option<(Vec<Vec<f64>>, Vec<usize>)> {
-    let n = a.len();
-    let mut lu: Vec<Vec<f64>> = a.to_vec();
+    lu_decompose_in_place(a.to_vec())
+}
+
+/// Same as [`lu_decompose`] but consumes the input — avoids an extra clone
+/// when the matrix has already been built locally (e.g. after equilibration).
+fn lu_decompose_in_place(mut lu: Vec<Vec<f64>>) -> Option<(Vec<Vec<f64>>, Vec<usize>)> {
+    let n = lu.len();
     let mut pivot: Vec<usize> = (0..n).collect();
 
     for k in 0..n {
-        // Partial pivoting: find row with largest absolute value in column k
         let mut max_val = lu[k][k].abs();
         let mut max_row = k;
         for i in (k + 1)..n {
@@ -841,7 +845,7 @@ pub fn lu_decompose(a: &[Vec<f64>]) -> Option<(Vec<Vec<f64>>, Vec<usize>)> {
             }
         }
         if max_val < 1e-30 {
-            return None; // Singular
+            return None;
         }
         if max_row != k {
             lu.swap(k, max_row);
@@ -858,6 +862,60 @@ pub fn lu_decompose(a: &[Vec<f64>]) -> Option<(Vec<Vec<f64>>, Vec<usize>)> {
         }
     }
     Some((lu, pivot))
+}
+
+/// Asymmetric row/column equilibration: scales `a` in place so each row's
+/// max-norm and each column's max-norm equal 1. Returns the row/col scaling
+/// vectors `(dr, dc)` for de-equilibrating the solve.
+///
+/// Without this, melange's input row (Thevenin `G_in = 1 S`) dominates the
+/// MNA matrix by 4-6 decades over typical neighbouring conductances (1e-4 to
+/// 1e-6 S), so partial-pivoting LU enters factorisation with `cond(A) >= 1e6`
+/// and loses ~6 digits of f64 precision before solving anything.
+///
+/// Keep in sync with `nodal_emitter::emit_nodal_lu_factor` — the generated
+/// nodal path uses the same algorithm.
+fn equilibrate(a: &mut [Vec<f64>]) -> (Vec<f64>, Vec<f64>) {
+    let n = a.len();
+    let mut dr = vec![1.0; n];
+    let mut dc = vec![1.0; n];
+
+    // Row scaling: dr[i] = 1 / max_j |A[i][j]|
+    for i in 0..n {
+        let mut row_max = 0.0_f64;
+        for j in 0..n {
+            let v = a[i][j].abs();
+            if v > row_max {
+                row_max = v;
+            }
+        }
+        dr[i] = if row_max > 1e-30 { 1.0 / row_max } else { 1.0 };
+    }
+    for i in 0..n {
+        let s = dr[i];
+        for v in a[i].iter_mut() {
+            *v *= s;
+        }
+    }
+
+    // Column scaling: dc[j] = 1 / max_i |A[i][j]| (against the row-scaled matrix)
+    for j in 0..n {
+        let mut col_max = 0.0_f64;
+        for row in a.iter() {
+            let v = row[j].abs();
+            if v > col_max {
+                col_max = v;
+            }
+        }
+        dc[j] = if col_max > 1e-30 { 1.0 / col_max } else { 1.0 };
+    }
+    for row in a.iter_mut() {
+        for (j, v) in row.iter_mut().enumerate() {
+            *v *= dc[j];
+        }
+    }
+
+    (dr, dc)
 }
 
 /// Solve Ax = b given LU decomposition with pivoting.
@@ -886,12 +944,24 @@ pub fn lu_solve(lu: &[Vec<f64>], pivot: &[usize], b: &[f64]) -> Vec<f64> {
     x
 }
 
-/// Solve a linear system g_aug · v = rhs using LU decomposition.
+/// Solve a linear system g_aug · v = rhs using equilibrated LU decomposition.
 ///
-/// Returns None if the matrix is singular.
+/// Applies asymmetric row/column scaling before factorisation to keep `cond(A)`
+/// inside f64 precision regardless of unit imbalance between G_in (≈ 1 S) and
+/// neighbouring conductances (1e-4 to 1e-6 S). Returns None if the matrix is
+/// singular after equilibration.
 pub fn solve_linear(g_aug: &[Vec<f64>], rhs: &[f64]) -> Option<Vec<f64>> {
-    let (lu, pivot) = lu_decompose(g_aug)?;
-    Some(lu_solve(&lu, &pivot, rhs))
+    let mut a = g_aug.to_vec();
+    let (dr, dc) = equilibrate(&mut a);
+    let (lu, pivot) = lu_decompose_in_place(a)?;
+    let b_scaled: Vec<f64> = rhs.iter().zip(dr.iter()).map(|(&b, &d)| d * b).collect();
+    let y = lu_solve(&lu, &pivot, &b_scaled);
+    Some(
+        y.into_iter()
+            .zip(dc.iter())
+            .map(|(yi, &d)| d * yi)
+            .collect(),
+    )
 }
 
 /// Clamp junction voltages in the linear initial guess to prevent NR divergence.
@@ -2723,6 +2793,46 @@ mod tests {
         let b_copy = b.clone();
         let _x = solve_linear(&a, &b).unwrap();
         assert_eq!(b, b_copy, "b should not be modified");
+    }
+
+    #[test]
+    fn test_solve_linear_equilibration_recovers_precision() {
+        // Regression: 6-decade row imbalance (G_in = 1.0 vs internal-node
+        // conductances at 1e-6 S) is the typical melange MNA shape. Without
+        // equilibration, partial-pivoting LU loses ~6 digits of precision.
+        // With equilibration the residual ‖Ax-b‖∞ / ‖b‖∞ stays at the f64
+        // floor regardless of imbalance.
+        let g_in: f64 = 1.0;
+        let g_internal: f64 = 1.0e-6;
+        let a = vec![
+            vec![g_in + g_internal, -g_internal, 0.0],
+            vec![-g_internal, 2.0 * g_internal, -g_internal],
+            vec![0.0, -g_internal, g_internal + 1.0e-7],
+        ];
+        let b = vec![1.0, 0.0, 0.0];
+
+        let x = solve_linear(&a, &b).unwrap();
+
+        // Residual ‖Ax - b‖∞ / ‖b‖∞
+        let mut residual_inf: f64 = 0.0;
+        for i in 0..3 {
+            let row_dot: f64 = (0..3).map(|j| a[i][j] * x[j]).sum();
+            let r = (row_dot - b[i]).abs();
+            if r > residual_inf {
+                residual_inf = r;
+            }
+        }
+        let b_norm: f64 = b.iter().fold(0.0_f64, |m, &v| m.max(v.abs()));
+        let rel_residual = residual_inf / b_norm;
+
+        // Pre-equilibration this was around 1e-10. Post-equilibration it
+        // should be at the f64 floor (~1e-15). Pin at 1e-13 to leave headroom
+        // for unrelated FP noise.
+        assert!(
+            rel_residual < 1.0e-13,
+            "equilibrated solve residual too large: {} (matrix has 6-decade row imbalance)",
+            rel_residual
+        );
     }
 
     // ── evaluate_devices unit tests ──────────────────────────────────

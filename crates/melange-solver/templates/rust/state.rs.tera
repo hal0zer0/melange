@@ -647,8 +647,9 @@ impl CircuitState {
         // Add transformer group companion model conductances
 {{ xfmr_set_sample_rate_lines }}{% endif %}
 
-        // Invert A to get S
-        let (s, singular) = invert_n(a);
+        // Invert A to get S (equilibrated to keep cond(A) inside f64 precision
+        // regardless of unit imbalance between G_in and internal conductances)
+        let (s, singular) = invert_n_equilibrated(a);
         if singular {
             self.diag_singular_matrix_count += 1;
         }
@@ -708,7 +709,7 @@ impl CircuitState {
             }
         }
 {% endif %}
-        let (s_be, singular_be) = invert_n(a_be);
+        let (s_be, singular_be) = invert_n_equilibrated(a_be);
         if singular_be {
             self.diag_singular_matrix_count += 1;
         }
@@ -898,6 +899,65 @@ fn invert_n(a: [[f64; N]; N]) -> ([[f64; N]; N], bool) {
         }
     }
 
+    (result, false)
+}
+
+/// Equilibrated inverse: same as [`invert_n`] but pre-applies asymmetric
+/// row/column scaling so partial-pivoting LU sees a max-norm-balanced matrix.
+///
+/// Without this, melange's input row (`G_in = 1 S` Thevenin source) dominates
+/// the MNA G matrix by 4-6 decades over typical neighbouring conductances
+/// (1e-4 to 1e-6 S), bounding `cond(A)` below by ~1e6 and losing ~6 digits
+/// of f64 precision before solving.
+///
+/// Algorithm: scale `A_eq[i][j] = dr[i] * a[i][j] * dc[j]` with
+/// `dr[i] = 1/max_j|a[i][j]|` and `dc[j] = 1/max_i|A_eq[i][j]|`. Invert the
+/// equilibrated matrix; recover `A^-1[i][j] = dc[i] * A_eq^-1[i][j] * dr[j]`.
+///
+/// Keep in sync with the nodal-emitter `lu_factor` equilibration in
+/// `crates/melange-solver/src/codegen/rust_emitter/nodal_emitter.rs` and the
+/// DC-OP `equilibrate` helper in `crates/melange-solver/src/dc_op.rs`.
+fn invert_n_equilibrated(a: [[f64; N]; N]) -> ([[f64; N]; N], bool) {
+    let mut a_eq = a;
+    let mut dr = [1.0f64; N];
+    let mut dc = [1.0f64; N];
+
+    for i in 0..N {
+        let mut row_max = 0.0f64;
+        for j in 0..N {
+            let v = a_eq[i][j].abs();
+            if v > row_max { row_max = v; }
+        }
+        dr[i] = if row_max > 1e-30 { 1.0 / row_max } else { 1.0 };
+    }
+    for i in 0..N {
+        for j in 0..N { a_eq[i][j] *= dr[i]; }
+    }
+
+    for j in 0..N {
+        let mut col_max = 0.0f64;
+        for i in 0..N {
+            let v = a_eq[i][j].abs();
+            if v > col_max { col_max = v; }
+        }
+        dc[j] = if col_max > 1e-30 { 1.0 / col_max } else { 1.0 };
+    }
+    for i in 0..N {
+        for j in 0..N { a_eq[i][j] *= dc[j]; }
+    }
+
+    let (e_inv, singular) = invert_n(a_eq);
+    if singular {
+        return (e_inv, true);
+    }
+
+    // A^-1[i][j] = dc[i] * E^-1[i][j] * dr[j]
+    let mut result = [[0.0f64; N]; N];
+    for i in 0..N {
+        for j in 0..N {
+            result[i][j] = dc[i] * e_inv[i][j] * dr[j];
+        }
+    }
     (result, false)
 }
 
