@@ -266,7 +266,11 @@ cargo install --path tools/melange-cli
 
 # Or build from repo
 cargo build --workspace
-cargo test --workspace        # ~1100 tests
+cargo test --workspace        # ~1100 fast tests (no SPICE truth-comparison)
+
+# SPICE truth-comparison suite — gated behind --include-ignored
+# because it needs ngspice on PATH. CI runs this on every PR.
+cargo test -p melange-validate --test spice_validation -- --include-ignored
 ```
 
 ## Known Limitations
