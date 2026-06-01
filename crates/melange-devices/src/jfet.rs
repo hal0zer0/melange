@@ -140,13 +140,10 @@ impl Jfet {
         };
         let vgst = vgs_eff - vp_eff;
         if vgst <= 0.0 {
-            // Subthreshold: derivative of weak exponential
+            // Subthreshold: derivative of weak exponential.
+            // Matches device_jfet.rs.tera — unconditional, no dead branch.
             let sub = 1e-12 * (vgst / (2.0 * VT_ROOM)).exp().min(1.0);
-            let gm = if sub < 1e-12 {
-                sub / (2.0 * VT_ROOM)
-            } else {
-                0.0
-            };
+            let gm = sub / (2.0 * VT_ROOM);
             return (gm, 0.0);
         }
 
@@ -469,5 +466,23 @@ mod tests {
     #[should_panic(expected = "IDSS must be positive")]
     fn test_jfet_negative_idss_rejected() {
         let _ = Jfet::new(JfetChannel::N, -2.0, -1e-3);
+    }
+
+    #[test]
+    fn test_jfet_subthreshold_gm_boundary() {
+        // Regression: prior code had `if sub < 1e-12 { ... } else { 0.0 }`
+        // which incorrectly returned gm=0 at the exact vgst=0 boundary
+        // where sub = 1e-12 exactly. Codegen template has the unconditional
+        // form; runtime must match.
+        let jfet = Jfet::new(JfetChannel::N, -2.5, 10e-3);
+        let (gm, gds) = jfet.jacobian_partial(-2.5, 1.0); // vgs == vp -> vgst = 0
+        let expected_gm = 1e-12 / (2.0 * crate::VT_ROOM);
+        assert!(
+            (gm - expected_gm).abs() / expected_gm < 1e-9,
+            "subthreshold gm at vgst=0: got {}, expected {}",
+            gm,
+            expected_gm
+        );
+        assert_eq!(gds, 0.0);
     }
 }

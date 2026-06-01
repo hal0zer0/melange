@@ -30,7 +30,12 @@ fn vca_jacobian(v_sig: f64, v_ctrl: f64, g0: f64, vscale: f64, thd: f64) -> [f64
         let thd_factor = thd * (1.0 - gain.min(1.0));
         let sig_with_thd = v_sig + thd_factor * v_sig * v_sig * v_sig;
         let di_dvsig = gain * (1.0 + 3.0 * thd_factor * v_sig * v_sig);
-        let di_dvctrl = -gain * sig_with_thd / vscale;
+        // Chain rule: thd_factor depends on gain when gain < 1 (the .min(1.0)
+        // clamp zeros the derivative above unity). Without this term the
+        // Jacobian misses +thd*gain^2*v_sig^3/vscale. Keep in sync with
+        // crates/melange-devices/src/vca.rs.
+        let thd_chain = if gain < 1.0 { thd * gain * v_sig * v_sig * v_sig } else { 0.0 };
+        let di_dvctrl = gain * (-sig_with_thd + thd_chain) / vscale;
         [di_dvsig, di_dvctrl, 0.0, 0.0]
     }
 }

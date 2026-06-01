@@ -96,13 +96,10 @@ impl Mosfet {
         let vov = vgs_eff - vt_abs;
 
         if vov <= 0.0 {
-            // Subthreshold: derivative of weak exponential
+            // Subthreshold: derivative of weak exponential.
+            // Matches device_mosfet.rs.tera — unconditional, no dead branch.
             let sub = 1e-12 * (vov / (2.0 * VT_ROOM)).exp().min(1.0);
-            let gm = if sub < 1e-12 {
-                sub / (2.0 * VT_ROOM)
-            } else {
-                0.0
-            };
+            let gm = sub / (2.0 * VT_ROOM);
             return (gm, 0.0);
         }
 
@@ -363,5 +360,23 @@ mod tests {
     #[should_panic(expected = "Kp must be positive")]
     fn test_mosfet_zero_kp_rejected() {
         let _ = Mosfet::new(ChannelType::N, 2.0, 0.0, 0.01);
+    }
+
+    #[test]
+    fn test_mosfet_subthreshold_gm_boundary() {
+        // Regression: prior code had `if sub < 1e-12 { ... } else { 0.0 }`
+        // which incorrectly returned gm=0 at the exact vov=0 boundary
+        // where sub = 1e-12 exactly. Codegen template has the unconditional
+        // form; runtime must match.
+        let mos = Mosfet::new(ChannelType::N, 2.0, 0.1, 0.01);
+        let (gm, gds) = mos.jacobian_partial(2.0, 1.0); // vgs == Vt -> vov = 0
+        let expected_gm = 1e-12 / (2.0 * crate::VT_ROOM);
+        assert!(
+            (gm - expected_gm).abs() / expected_gm < 1e-9,
+            "subthreshold gm at vov=0: got {}, expected {}",
+            gm,
+            expected_gm
+        );
+        assert_eq!(gds, 0.0);
     }
 }

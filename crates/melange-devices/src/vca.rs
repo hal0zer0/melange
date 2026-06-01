@@ -77,7 +77,15 @@ impl Vca {
             let thd_factor = self.thd * (1.0 - gain.min(1.0));
             let sig_with_thd = v_sig + thd_factor * v_sig * v_sig * v_sig;
             let di_dvsig = gain * (1.0 + 3.0 * thd_factor * v_sig * v_sig);
-            let di_dvctrl = -gain * sig_with_thd / self.vscale;
+            // Chain rule: thd_factor itself depends on gain when gain < 1
+            // (the .min(1.0) clamp zeros the derivative above unity). Without
+            // this term the Jacobian misses +thd*gain^2*v_sig^3/vscale.
+            let thd_chain = if gain < 1.0 {
+                self.thd * gain * v_sig * v_sig * v_sig
+            } else {
+                0.0
+            };
+            let di_dvctrl = gain * (-sig_with_thd + thd_chain) / self.vscale;
             [
                 di_dvsig,  // dI_sig/dV_sig
                 di_dvctrl, // dI_sig/dV_ctrl
@@ -269,35 +277,47 @@ mod tests {
 
     #[test]
     fn test_thd_jacobian_vs_finite_differences() {
+        // Tight tolerance: catches the thd_chain term that the original 1e-4
+        // tolerance masked. h=1e-6 keeps central-difference roundoff well
+        // below the analytical tolerance.
         let vca = Vca::new_with_thd(0.05298, 1.0, 0.001);
-        let v_sig = 0.3;
-        let v_ctrl = 0.05;
-        let h = 1e-7;
 
-        let jac = vca.jacobian(v_sig, v_ctrl);
+        // Three test points exercising different gain regimes (the THD
+        // chain-rule term scales as gain^2, so high gain stresses it most).
+        // All v_ctrl stay strictly positive to keep the FD probe away from
+        // the gain=1 kink introduced by .min(1.0).
+        for (v_sig, v_ctrl) in &[
+            (0.3, 0.05),    // gain ~ 0.39
+            (0.5, 0.02706), // gain ~ 0.60 — chain-rule term largest here
+            (0.1, 0.01),    // gain ~ 0.83 — high gain, chain-rule still active
+        ] {
+            let h = 1e-6;
+            let jac = vca.jacobian(*v_sig, *v_ctrl);
 
-        // dI_sig/dV_sig (index 0)
-        let di_dvsig =
-            (vca.current(v_sig + h, v_ctrl) - vca.current(v_sig - h, v_ctrl)) / (2.0 * h);
-        assert!(
-            (jac[0] - di_dvsig).abs() < 1e-4,
-            "dI_sig/dV_sig with THD: analytical={}, numerical={}",
-            jac[0],
-            di_dvsig
-        );
+            let di_dvsig =
+                (vca.current(*v_sig + h, *v_ctrl) - vca.current(*v_sig - h, *v_ctrl)) / (2.0 * h);
+            assert!(
+                (jac[0] - di_dvsig).abs() / (di_dvsig.abs() + 1e-15) < 1e-7,
+                "dI_sig/dV_sig at (v_sig={}, v_ctrl={}): analytical={}, numerical={}",
+                v_sig,
+                v_ctrl,
+                jac[0],
+                di_dvsig
+            );
 
-        // dI_sig/dV_ctrl (index 1)
-        let di_dvctrl =
-            (vca.current(v_sig, v_ctrl + h) - vca.current(v_sig, v_ctrl - h)) / (2.0 * h);
-        assert!(
-            (jac[1] - di_dvctrl).abs() / (di_dvctrl.abs() + 1e-15) < 1e-4,
-            "dI_sig/dV_ctrl with THD: analytical={}, numerical={}",
-            jac[1],
-            di_dvctrl
-        );
+            let di_dvctrl =
+                (vca.current(*v_sig, *v_ctrl + h) - vca.current(*v_sig, *v_ctrl - h)) / (2.0 * h);
+            assert!(
+                (jac[1] - di_dvctrl).abs() / (di_dvctrl.abs() + 1e-15) < 1e-7,
+                "dI_sig/dV_ctrl at (v_sig={}, v_ctrl={}): analytical={}, numerical={}",
+                v_sig,
+                v_ctrl,
+                jac[1],
+                di_dvctrl
+            );
 
-        // Control port still zero
-        assert_eq!(jac[2], 0.0);
-        assert_eq!(jac[3], 0.0);
+            assert_eq!(jac[2], 0.0);
+            assert_eq!(jac[3], 0.0);
+        }
     }
 }
