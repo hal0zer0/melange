@@ -22,6 +22,30 @@
 //! unit circle are rare in audio circuits and not the common failure
 //! mode this gate is designed to catch.
 
+/// Trap-rule promotes to backward Euler above this spectral radius.
+/// Strict `> 1.0` false-fires on trivial passive networks where power
+/// iteration converges to ≈ 1.0 plus float noise (2026-04-22 passive-LC fix).
+pub const TRAP_BE_PROMOTION_RHO: f64 = 1.002;
+
+/// Lower-bound threshold for the sign-aware Nyquist-marginal gate.
+/// Activates when ρ between this and `TRAP_BE_PROMOTION_RHO` AND the
+/// dominant eigenvalue is real-negative AND the gain proxy `max|S|`
+/// exceeds [`NYQUIST_GATE_MAX_ABS_S`]. Excludes positive-eigenvalue
+/// modes (slow LF resonance — bilinear preserves those exactly).
+pub const TRAP_BE_SIGN_FLIP_RHO: f64 = 0.999;
+
+/// Gain proxy (resolvent magnitude) above which the Nyquist-marginal gate
+/// fires. Keeps low-gain marginal circuits on trap (a 2-stage BJT preamp
+/// at `max|S| ~ 3e4` stays at µV limit cycle; a 3× triode cascade at
+/// `max|S| ~ 5e5` produces an audible mV limit cycle without BE).
+pub const NYQUIST_GATE_MAX_ABS_S: f64 = 1.0e5;
+
+/// Post-promotion sanity check on backward-Euler matrices. BE is L-stable
+/// by construction, so `ρ` on the BE matrices must be ≤ 1. A violation
+/// above this threshold (1.0 + 1e-6 to absorb numerical noise) signals a
+/// matrix-builder bug, not a stability margin.
+pub const BE_POST_PROMOTION_LIMIT: f64 = 1.0 + 1e-6;
+
 /// Result of trap-rule stability analysis on `S · A_neg`.
 #[derive(Debug, Clone, Copy)]
 pub struct TrapStability {
@@ -209,8 +233,10 @@ fn apply_s_a_neg(s: &[f64], a_neg: &[f64], n: usize, x: &[f64]) -> Vec<f64> {
 ///   unstable circuits (`ρ > 1.002`) are caught by the first clause
 ///   regardless of gain.
 pub fn trap_needs_be(stability: TrapStability) -> bool {
-    stability.rho > 1.002
-        || (stability.rho > 0.999 && stability.dominant_sign < 0.0 && stability.max_abs_s > 1.0e5)
+    stability.rho > TRAP_BE_PROMOTION_RHO
+        || (stability.rho > TRAP_BE_SIGN_FLIP_RHO
+            && stability.dominant_sign < 0.0
+            && stability.max_abs_s > NYQUIST_GATE_MAX_ABS_S)
 }
 
 #[cfg(test)]
