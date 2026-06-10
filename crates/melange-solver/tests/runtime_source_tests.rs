@@ -616,6 +616,61 @@ Rbias out 0 10k
     );
 }
 
+#[test]
+fn runtime_r_setters_batch_into_one_deferred_rebuild() {
+    // Greenroom v2 contract (oomox spec, 2026-06-09): K runtime-R changes
+    // between samples must cost K cheap delta stamps + ONE matrix rebuild,
+    // not K rebuilds. Shipped as the lazy-rebuild pattern (c7bb887); `.runtime
+    // R` inherited it at birth (fa8474d). This pins both halves: setter
+    // bodies never call rebuild_matrices() eagerly, and process_sample()
+    // consumes the dirty flag at exactly one site.
+    let spice = "\
+Runtime R Batch
+R1 in out 1k
+Rint1 out n1 22k
+Rint2 n1 n2 22k
+Rint3 n2 n3 22k
+Rint4 n3 0 22k
+.runtime Rint1 5k 50k as integ_r_1
+.runtime Rint2 5k 50k as integ_r_2
+.runtime Rint3 5k 50k as integ_r_3
+.runtime Rint4 5k 50k as integ_r_4
+";
+    let code = generate_dk(spice);
+
+    for field in ["integ_r_1", "integ_r_2", "integ_r_3", "integ_r_4"] {
+        let needle = format!("pub fn set_runtime_R_{field}(");
+        let start = code
+            .find(&needle)
+            .unwrap_or_else(|| panic!("missing setter {needle}"));
+        let end = start
+            + code[start..]
+                .find("\n    }\n")
+                .expect("setter end brace");
+        let body = &code[start..end];
+        assert!(
+            body.contains("self.matrices_dirty = true"),
+            "setter {field} must mark matrices dirty; got:\n{body}"
+        );
+        assert!(
+            !body.contains("rebuild_matrices"),
+            "setter {field} must defer the rebuild, not call it eagerly; got:\n{body}"
+        );
+    }
+
+    assert_eq!(
+        code.matches("if state.matrices_dirty").count(),
+        1,
+        "dirty flag must be consumed at exactly one site (top of process_sample):\n{}",
+        excerpt(&code, "matrices_dirty")
+    );
+    assert!(
+        code.contains("state.matrices_dirty = false"),
+        "process_sample must clear the dirty flag after rebuilding:\n{}",
+        excerpt(&code, "matrices_dirty")
+    );
+}
+
 // --- Compile-and-run: sweep R across ±20% on a bias resistor ----------------
 
 #[test]

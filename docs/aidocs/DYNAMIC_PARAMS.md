@@ -278,6 +278,16 @@ into G on rebuild), so MNA/kernel/nodal codegen are all unchanged. Since
 the 2026-04-20 reseed strip, the setter body is structurally identical
 to `set_pot_N`; only the name, doc comments, and clamp consts differ.
 
+**Batched commit is implicit.** Setters never rebuild eagerly — they
+stamp the new value and set `matrices_dirty`; the flag is consumed at
+exactly one site, the top of the next `process_sample()` (lazy rebuild,
+commit `c7bb887`). So K runtime-R/pot/switch changes between samples
+cost K O(1) delta stamps + **one** O(N³) rebuild, on all three codegen
+paths. No separate batch API exists or is needed — calling
+`set_runtime_R_a(..); set_runtime_R_b(..); set_runtime_R_c(..)` back to
+back already coalesces. Regression guard:
+`runtime_source_tests.rs::runtime_r_setters_batch_into_one_deferred_rebuild`.
+
 ### Difference from `.pot R` (what's left after the reseed strip)
 Both setters are now reseed-free. The remaining differences are API
 ergonomics, not semantics:
