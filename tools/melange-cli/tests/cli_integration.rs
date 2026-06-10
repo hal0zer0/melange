@@ -237,6 +237,39 @@ fn test_simulate_sine_tone() {
     let _ = std::fs::remove_file(&cir);
 }
 
+#[test]
+fn test_analyze_integral_amplitude() {
+    // Regression: `--amplitude 1.0` used to emit `let amplitude = 1;` in the
+    // generated analyze main (f64 Display drops the trailing `.0`), producing
+    // an integer literal that fails rustc with E0277 (cannot multiply
+    // {integer} by f64). Reported by the velvet-elvis agent 2026-06-10.
+    let cir = write_test_circuit(TEST_RC_LOWPASS, "analyze_amp");
+
+    let stdout = run_melange(&[
+        "analyze",
+        cir.to_str().unwrap(),
+        "--input-node",
+        "in",
+        "--output-node",
+        "out",
+        "--amplitude",
+        "1.0",
+        "--start-freq",
+        "1000",
+        "--end-freq",
+        "2000",
+        "--points-per-decade",
+        "1",
+    ]);
+
+    assert!(
+        stdout.contains("frequency_hz,gain_db,phase_deg"),
+        "expected analyze CSV header, got:\n{stdout}"
+    );
+
+    let _ = std::fs::remove_file(&cir);
+}
+
 // ============================================================================
 // error cases
 // ============================================================================

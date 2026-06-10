@@ -395,7 +395,7 @@ fn main() {{
 {pot_lines}{switch_lines}    state.set_sample_rate({sample_rate:.1});
 
     let freqs: &[f64] = &[{freq_list}];
-    let amplitude = {amplitude};
+    let amplitude: f64 = {amplitude:.17e};
     let sr = {sample_rate:.1};
     let settle_samples = ({settle_secs:.1} * sr) as usize;
 
