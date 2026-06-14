@@ -424,13 +424,6 @@ pub enum CodegenError {
 /// (augmented constraint row), named parameters, and branch-current references.
 /// See `docs/aidocs/BEHAVIORAL_SOURCES.md §Codegen integration plan`.
 fn behavioral_emitter_supported(b: &crate::mna::BehavioralSourceInfo) -> Result<(), String> {
-    if matches!(b.kind, crate::parser::BSourceKind::Voltage) {
-        return Err(
-            "V={expr} (behavioral voltage source) not yet wired in codegen — needs the \
-             augmented constraint row; only I={expr} is supported so far"
-                .to_string(),
-        );
-    }
     if !b.expr.referenced_params().is_empty() {
         return Err(format!(
             "named parameters {:?} in the expression are not yet resolved in codegen",

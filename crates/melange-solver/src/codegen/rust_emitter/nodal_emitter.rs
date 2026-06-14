@@ -86,45 +86,63 @@ fn emit_behavioral_evals(code: &mut String, ir: &CircuitIR, indent: &str) {
     }
 }
 
-/// Stamp the behavioral Jacobian into `chord_lu` (= G_aug): for current source
-/// `f` from n+ to n-, `∂f/∂V(k)` adds at row n+, subtracts at row n-.
+/// Stamp the behavioral Jacobian into `chord_lu` (= G_aug).
+///
+/// - `I={}` (current source): `∂f/∂V(k)` adds at row n+, subtracts at row n-.
+/// - `V={}` (voltage constraint `V(n+)-V(n-)=f`): `−∂f/∂V(k)` into the
+///   augmented constraint row `r` (the `±1` on n+/n- is already in base G).
 fn emit_behavioral_jacobian(code: &mut String, ir: &CircuitIR, indent: &str) {
     for (si, b) in ir.behavioral_sources.iter().enumerate() {
-        let np = b.n_plus_idx;
-        let nm = b.n_minus_idx;
-        for (_name, col) in bsrc_ref_cols(b) {
-            if np > 0 {
+        if b.is_voltage {
+            let r = b.aug_row.expect("V={} source must have an aug_row");
+            for (_name, col) in bsrc_ref_cols(b) {
                 code.push_str(&format!(
-                    "{indent}chord_lu[{}][{col}] += bsrc_{si}_g_{col};\n",
-                    np - 1
+                    "{indent}chord_lu[{r}][{col}] -= bsrc_{si}_g_{col};\n"
                 ));
             }
-            if nm > 0 {
-                code.push_str(&format!(
-                    "{indent}chord_lu[{}][{col}] -= bsrc_{si}_g_{col};\n",
-                    nm - 1
-                ));
+        } else {
+            let (np, nm) = (b.n_plus_idx, b.n_minus_idx);
+            for (_name, col) in bsrc_ref_cols(b) {
+                if np > 0 {
+                    code.push_str(&format!(
+                        "{indent}chord_lu[{}][{col}] += bsrc_{si}_g_{col};\n",
+                        np - 1
+                    ));
+                }
+                if nm > 0 {
+                    code.push_str(&format!(
+                        "{indent}chord_lu[{}][{col}] -= bsrc_{si}_g_{col};\n",
+                        nm - 1
+                    ));
+                }
             }
         }
     }
 }
 
-/// Stamp the behavioral companion current into `rhs_work`:
-/// `comp = f(v) - Σ_k (∂f/∂V(k))·v[k]`, subtracted at n+, added at n-.
+/// Stamp the behavioral companion `comp = f(v) - Σ_k (∂f/∂V(k))·v[k]` into
+/// `rhs_work`.
+///
+/// - `I={}`: subtract at n+, add at n- (current injection).
+/// - `V={}`: add into the augmented constraint row `r`.
 fn emit_behavioral_rhs(code: &mut String, ir: &CircuitIR, indent: &str) {
     for (si, b) in ir.behavioral_sources.iter().enumerate() {
-        let np = b.n_plus_idx;
-        let nm = b.n_minus_idx;
         let mut comp = format!("bsrc_{si}_f");
         for (_name, col) in bsrc_ref_cols(b) {
             comp.push_str(&format!(" - bsrc_{si}_g_{col} * v[{col}]"));
         }
         code.push_str(&format!("{indent}let bsrc_{si}_comp = {comp};\n"));
-        if np > 0 {
-            code.push_str(&format!("{indent}rhs_work[{}] -= bsrc_{si}_comp;\n", np - 1));
-        }
-        if nm > 0 {
-            code.push_str(&format!("{indent}rhs_work[{}] += bsrc_{si}_comp;\n", nm - 1));
+        if b.is_voltage {
+            let r = b.aug_row.expect("V={} source must have an aug_row");
+            code.push_str(&format!("{indent}rhs_work[{r}] += bsrc_{si}_comp;\n"));
+        } else {
+            let (np, nm) = (b.n_plus_idx, b.n_minus_idx);
+            if np > 0 {
+                code.push_str(&format!("{indent}rhs_work[{}] -= bsrc_{si}_comp;\n", np - 1));
+            }
+            if nm > 0 {
+                code.push_str(&format!("{indent}rhs_work[{}] += bsrc_{si}_comp;\n", nm - 1));
+            }
         }
     }
 }
@@ -165,6 +183,9 @@ fn behavioral_convergence_nodes(ir: &CircuitIR) -> Vec<usize> {
         }
         if b.n_minus_idx > 0 {
             nodes.push(b.n_minus_idx - 1);
+        }
+        if let Some(r) = b.aug_row {
+            nodes.push(r);
         }
         for (_name, col) in bsrc_ref_cols(b) {
             nodes.push(col);

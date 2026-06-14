@@ -163,7 +163,7 @@ fn build_behavioral_sources_ir(mna: &MnaSystem) -> Vec<BehavioralSourceIR> {
             n_minus_idx: b.n_minus_idx,
             referenced_node_indices: b.referenced_node_indices.clone(),
             expr: b.expr.clone(),
-            aug_row: None,
+            aug_row: b.aug_row,
             time_dependent: b.expr.is_time_dependent(),
         })
         .collect()

@@ -5,7 +5,36 @@ expression over node voltages, branch currents, and time. Originally requested
 by oomox (Subspace radio plugin) to make FM capture/threshold/click behavior
 **emerge** from a limiter + discriminator instead of being faked in DSP.
 
-> Status (2026-06-13): **`I={}` (algebraic + `ddt`/`idt`/`time`) works end-to-end
+> Status (2026-06-13, late): **`I={}` and `V={}` both work end-to-end (algebraic
+> + `ddt`/`idt`/`time`); named params are the last guarded feature.** `V={}`
+> (augmented constraint row) validated: `V(out)=tanh(0.6)` directly, and the FM
+> limiter+phase chain (`sqrt`, `atan2`, chained `V={}` sources reading each
+> other) normalizes and detects phase correctly. `atan2` derivative is
+> regularized at the origin (`x²+y²+1e-30`) — required, else the discriminator
+> NaNs at startup when limiter outputs are 0.
+>
+> **KNOWN ISSUE — `ddt` discriminator stiffness.** `V={ ddt(atan2(...)) }` (the
+> full FM instantaneous-frequency discriminator) is numerically unstable in the
+> monolithic NR: `∂ddt/∂v = inv_dt·∂(inner)/∂v` is `SR×` larger (~38400 at 48 kHz)
+> than the rest of the matrix, ill-conditioning the coupled LU (the limiter nodes
+> collapse to 0, period-2 oscillation). The static phase detector (`atan2` without
+> `ddt`) is fine. **Fix direction**: treat `ddt`'s current-sample dependence as a
+> one-sample lag for the Jacobian only (a `.delay_feedback`-style chord — the
+> discriminator is feedforward, so a separate "NR-Jacobian diff that zeros `ddt`"
+> converges in ~2 iters and removes the stiff coupling; the output lags one
+> 20 µs sample, inaudible). Not yet implemented. The original spec's
+> "one-sample-difference idiom" is essentially this.
+>
+> **I-form idiom (melange-circuits agent, 2026-06-13)**: any `V={f}` driving an
+> otherwise-unloaded node equals `I={f}` into that node + a series-R to ground
+> (`V=I·R`), sign-invariant for the radio. So the antenna *could* be built on
+> `I={}` alone — but `V={}` now works, so this is optional. Recorded in
+> `~/dev/melange-circuits/local-docs/radio-bsource-iform-idiom-2026-06-13.md`,
+> which also flags that `idt` phase accumulators grow unbounded off-station
+> (no `wrap`/`fmod` in the function set yet — a future addition).
+>
+> ---
+> Earlier status line (superseded): **`I={}` (algebraic + `ddt`/`idt`/`time`) works end-to-end
 > (generate → compile → run → matches oracle); `V={}` and named params still
 > guarded.** `ddt(time)=1` and `idt(const)=ramp` are validated. Companion state
 > (`bsrc_x_prev`/`bsrc_int_prev`/`sim_time`/`bsrc_inv_dt`/`bsrc_half_dt`) is

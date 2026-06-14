@@ -448,6 +448,9 @@ pub struct BehavioralSourceInfo {
     /// (used to allocate the augmented branch-current row at codegen time).
     /// `None` for `I={}` sources.
     pub v_ext_idx: Option<usize>,
+    /// Augmented MNA row/col (branch current) for `V={}` sources, assigned in
+    /// `build()` after the voltage-source / VCVS rows. `None` for `I={}`.
+    pub aug_row: Option<usize>,
 }
 
 /// Current source information.
@@ -3448,8 +3451,15 @@ impl MnaBuilder {
         // [0] internal node (sig+_int) with dummy R to ground
         // [1] sensing source branch current
         let num_vca_augmented = mna.vcas.iter().filter(|v| v.current_mode).count() * 2;
-        let n_aug =
+        // Behavioral `V={}` sources each need a branch-current augmented row.
+        let num_behavioral_v = mna
+            .behavioral_sources
+            .iter()
+            .filter(|b| b.v_ext_idx.is_some())
+            .count();
+        let behavioral_v_base =
             n_base + num_vs + num_vcvs + num_ideal_xfmr + num_opamp_internal + num_vca_augmented;
+        let n_aug = behavioral_v_base + num_behavioral_v;
         mna.n_aug = n_aug;
 
         // Expand G, C, N_v, N_i to n_aug dimensions (extra rows/cols are zero).
@@ -3496,6 +3506,24 @@ impl MnaBuilder {
             if nm > 0 {
                 mna.g[nm - 1][k] -= 1.0;
                 mna.g[k][nm - 1] -= 1.0;
+            }
+        }
+
+        // Stamp behavioral `V={}` sources: same linear coupling as a voltage
+        // source (branch current + constraint row). The nonlinear `f(v)` part of
+        // the constraint `V(n+) - V(n-) = f(v)` is added by the nodal emitter's
+        // NR loop (residual + Jacobian); here we lay only the linear B^T part.
+        for b in &mut mna.behavioral_sources {
+            let Some(v_idx) = b.v_ext_idx else { continue };
+            let k = behavioral_v_base + v_idx;
+            b.aug_row = Some(k);
+            if b.n_plus_idx > 0 {
+                mna.g[b.n_plus_idx - 1][k] += 1.0;
+                mna.g[k][b.n_plus_idx - 1] += 1.0;
+            }
+            if b.n_minus_idx > 0 {
+                mna.g[b.n_minus_idx - 1][k] -= 1.0;
+                mna.g[k][b.n_minus_idx - 1] -= 1.0;
             }
         }
 
@@ -4992,6 +5020,7 @@ impl MnaBuilder {
                     referenced_node_indices,
                     expr,
                     v_ext_idx,
+                    aug_row: None,
                 });
             }
         }

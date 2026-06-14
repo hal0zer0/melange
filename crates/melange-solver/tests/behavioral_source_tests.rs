@@ -177,20 +177,83 @@ Cout out 0 1u
 }
 
 #[test]
-fn v_form_is_rejected_until_wired() {
-    // V={} must error cleanly (not silently drop) until the augmented-row path
-    // lands.
+fn behavioral_voltage_tanh_matches_oracle() {
+    // V={} sets V(out) - V(0) = tanh(V(a)) directly (positive, unlike I={}).
     let spice = "\
 Behavioral voltage source
-Va a 0 DC 0.5
+Va a 0 DC 0.6
 B1 out 0 V={ tanh(V(a)) }
-Rout out 0 1
+Rout out 0 1meg
+";
+    // Nodes (0-based): a=0, out=1.
+    let code = generate_nodal(spice, 0, 1);
+    let out = compile_and_run(&code, &settle_main(64), "vtanh");
+    let v_out: f64 = out.parse().unwrap_or_else(|_| panic!("bad output: {out:?}"));
+    let expected = 0.6f64.tanh();
+    assert!(
+        (v_out - expected).abs() < 1e-5,
+        "V=tanh: got {v_out}, expected {expected}"
+    );
+}
+
+#[test]
+fn fm_limiter_phase_chain_compiles_and_runs() {
+    // The Subspace FM front-end limiter (normalize I/Q) feeding a phase detector
+    // (atan2 of the limited I/Q). Exercises V={}, atan2, sqrt, and chained
+    // behavioral sources reading each other's nodes. A STATIC I/Q vector gives a
+    // constant phase = atan2(0.8, 0.6) ≈ 0.927 rad, and the limiter normalizes
+    // lim_i = iq_i/|iq| = 0.6.
+    //
+    // NOTE: the *ddt* discriminator (instantaneous frequency = ddt(phase)) is a
+    // separate known issue — its inv_dt-scaled Jacobian (~SR·∂atan2) ill-
+    // conditions the coupled NR. See docs/aidocs/BEHAVIORAL_SOURCES.md
+    // "ddt discriminator stiffness". This test covers the rest of the chain.
+    let spice = "\
+FM limiter + phase
+Viq_i iq_i 0 DC 0.6
+Viq_q iq_q 0 DC 0.8
+B_lim_i lim_i 0 V={ V(iq_i) / sqrt(V(iq_i)*V(iq_i) + V(iq_q)*V(iq_q) + 1e-9) }
+B_lim_q lim_q 0 V={ V(iq_q) / sqrt(V(iq_i)*V(iq_i) + V(iq_q)*V(iq_q) + 1e-9) }
+B_phase phase 0 V={ atan2(V(lim_q), V(lim_i)) }
+Rli lim_i 0 1meg
+Rlq lim_q 0 1meg
+Rp phase 0 1meg
+";
+    // Nodes (0-based): iq_i=0, iq_q=1, lim_i=2, lim_q=3, phase=4.
+    let code_li = generate_nodal(spice, 0, 2);
+    let lim_i: f64 = compile_and_run(&code_li, &settle_main(64), "fm_lim_i")
+        .parse()
+        .unwrap();
+    assert!(
+        (lim_i - 0.6).abs() < 1e-4,
+        "limiter normalize: lim_i got {lim_i}, expected 0.6"
+    );
+
+    let code_ph = generate_nodal(spice, 0, 4);
+    let phase: f64 = compile_and_run(&code_ph, &settle_main(64), "fm_phase")
+        .parse()
+        .unwrap();
+    let expected = 0.8f64.atan2(0.6);
+    assert!(
+        (phase - expected).abs() < 1e-4,
+        "phase detector: got {phase}, expected {expected}"
+    );
+}
+
+#[test]
+fn params_are_rejected_until_wired() {
+    // Named-parameter references must still error cleanly (not silently drop).
+    let spice = "\
+Behavioral with param
+Va a 0 DC 0.5
+B1 out 0 V={ gain * V(a) }
+Rout out 0 1meg
 ";
     let netlist = Netlist::parse(spice).expect("parse");
     let mut mna = MnaSystem::from_netlist(&netlist).expect("mna");
     mna.g[0][0] += 1.0;
     let cfg = CodegenConfig {
-        circuit_name: "vform".to_string(),
+        circuit_name: "pform".to_string(),
         sample_rate: 48000.0,
         input_node: 0,
         output_nodes: vec![1],
@@ -200,6 +263,8 @@ Rout out 0 1
     let err = CodeGenerator::new(cfg)
         .generate_nodal(&mna, &netlist)
         .unwrap_err();
-    let msg = format!("{err}");
-    assert!(msg.contains("V={expr}") || msg.to_lowercase().contains("voltage"), "unexpected: {msg}");
+    assert!(
+        format!("{err}").to_lowercase().contains("param"),
+        "unexpected: {err}"
+    );
 }

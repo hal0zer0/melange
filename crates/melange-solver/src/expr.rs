@@ -797,16 +797,22 @@ fn func2_derivative(f: BinFn, a: &Expr, b: &Expr, var: &Var) -> Expr {
     let da = a.diff(var);
     let db = b.diff(var);
     match f {
-        // d atan2(y, x) = (x*dy - y*dx) / (x^2 + y^2)
-        // here a = y, b = x
+        // d atan2(y, x) = (x*dy - y*dx) / (x^2 + y^2 + eps)
+        // here a = y, b = x. `eps` (1e-30) regularizes the Jacobian at the
+        // origin (y=x=0); without it the NR Jacobian is 0/0 = NaN — exactly the
+        // singularity the FM discriminator hits at startup when the limiter
+        // outputs are still 0. Negligible away from the origin.
         BinFn::Atan2 => {
             let num = Sub(
                 Box::new(Mul(Box::new(b.clone()), Box::new(da))),
                 Box::new(Mul(Box::new(a.clone()), Box::new(db))),
             );
             let den = Add(
-                Box::new(Mul(Box::new(a.clone()), Box::new(a.clone()))),
-                Box::new(Mul(Box::new(b.clone()), Box::new(b.clone()))),
+                Box::new(Add(
+                    Box::new(Mul(Box::new(a.clone()), Box::new(a.clone()))),
+                    Box::new(Mul(Box::new(b.clone()), Box::new(b.clone()))),
+                )),
+                Box::new(Const(1e-30)),
             );
             Div(Box::new(num), Box::new(den))
         }
