@@ -5,7 +5,25 @@ expression over node voltages, branch currents, and time. Originally requested
 by oomox (Subspace radio plugin) to make FM capture/threshold/click behavior
 **emerge** from a limiter + discriminator instead of being faked in DSP.
 
-> Status (2026-06-13, late): **`I={}` and `V={}` both work end-to-end (algebraic
+> Status (2026-06-13, latest): **`I={}` and `V={}` both work (algebraic +
+> `ddt`/`idt`/`time` + named params). The AM virtual-antenna front-end codegens.
+> Only `ddt`-discriminator stiffness remains (FM-specific).**
+>
+> **Named params** (the AM blocker) are wired:
+> - `.param name = value` (spaces around `=` tolerated) → baked constant.
+> - `.runtime <name> <min> <max> as <field>` → plugin-driven scalar (dispatched
+>   when the `.runtime` target starts with neither V nor R — SPICE components
+>   must, so a non-R/V target is unambiguously a scalar). Emits `pub <field>: f64`
+>   on `CircuitState`, a clamping `set_runtime_<field>(f64)` setter, default =
+>   `min`. Referenced by bare identifier in expressions.
+> - Bare identifier in an expression resolves to a `.param` const, then a scalar
+>   `.runtime`; an unknown identifier is a hard codegen error (not silent).
+> The `B_theta`/`B_I`/`B_Q`/`B_env` AM antenna (`idt`, `cos`/`sin`, `strength`,
+> `m`, `f_offset`, `sqrt`) compiles. Test:
+> `named_params_resolve_const_and_scalar_runtime`.
+>
+> ---
+> Earlier status (superseded): **`I={}` and `V={}` both work end-to-end (algebraic
 > + `ddt`/`idt`/`time`); named params are the last guarded feature.** `V={}`
 > (augmented constraint row) validated: `V(out)=tanh(0.6)` directly, and the FM
 > limiter+phase chain (`sqrt`, `atan2`, chained `V={}` sources reading each

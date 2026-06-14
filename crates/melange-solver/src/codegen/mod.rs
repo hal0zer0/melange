@@ -424,12 +424,6 @@ pub enum CodegenError {
 /// (augmented constraint row), named parameters, and branch-current references.
 /// See `docs/aidocs/BEHAVIORAL_SOURCES.md §Codegen integration plan`.
 fn behavioral_emitter_supported(b: &crate::mna::BehavioralSourceInfo) -> Result<(), String> {
-    if !b.expr.referenced_params().is_empty() {
-        return Err(format!(
-            "named parameters {:?} in the expression are not yet resolved in codegen",
-            b.expr.referenced_params()
-        ));
-    }
     if !b.expr.referenced_branches().is_empty() {
         return Err(format!(
             "branch-current references {:?} are not yet wired in codegen",
@@ -726,12 +720,27 @@ impl CodeGenerator {
         // time / ddt / idt) is wired; the rest error loudly rather than emit
         // code that silently ignores the source. See
         // docs/aidocs/BEHAVIORAL_SOURCES.md §Codegen integration plan.
+        let resolvable_params: std::collections::BTreeSet<&str> = netlist
+            .params
+            .iter()
+            .map(|p| p.name.as_str())
+            .chain(netlist.runtime_scalars.iter().map(|r| r.name.as_str()))
+            .collect();
         for b in &mna.behavioral_sources {
             if let Err(why) = behavioral_emitter_supported(b) {
                 return Err(CodegenError::UnsupportedTopology(format!(
                     "behavioral source '{}': {why}",
                     b.name
                 )));
+            }
+            for p in b.expr.referenced_params() {
+                if !resolvable_params.contains(p.as_str()) {
+                    return Err(CodegenError::UnsupportedTopology(format!(
+                        "behavioral source '{}': unknown parameter '{}' (define it with \
+                         `.param {} = <value>` or `.runtime {} <min> <max> as {}`)",
+                        b.name, p, p, p, p
+                    )));
+                }
             }
         }
 

@@ -46,21 +46,33 @@ Vctrl ctrl 0 DC 0
 }
 
 #[test]
-fn parser_rejects_non_vs_or_r_target() {
-    // `.runtime` dispatches on the first character of the target name:
-    // V → voltage source, R → resistor. Everything else is rejected at
-    // the dispatch stage, before argument parsing.
-    let spice = "\
-Runtime Non-VS Test
+fn parser_non_vr_target_is_scalar_param() {
+    // `.runtime` dispatches on the first character of the target: V → voltage
+    // source, R → resistor, everything else → a bare plugin-driven scalar param
+    // (`.runtime <name> <min> <max> as <field>`). A non-R/V target without the
+    // min/max/as scalar form is a malformed scalar directive.
+    let bad = "\
+Runtime Bad Scalar
 C1 in out 1u
 .runtime C1 as foo
 ";
-    let err = Netlist::parse(spice).unwrap_err();
+    let err = Netlist::parse(bad).unwrap_err();
     assert!(
-        format!("{}", err).contains("must start with V (voltage source) or R (resistor)"),
-        "expected V/R dispatch error, got: {}",
+        format!("{}", err).to_lowercase().contains("min max as"),
+        "expected scalar-form arity error, got: {}",
         err
     );
+
+    // A well-formed scalar directive parses.
+    let good = "\
+Runtime Scalar
+R1 in out 10k
+.runtime strength 0 2 as strength
+";
+    let netlist = Netlist::parse(good).expect("scalar param should parse");
+    assert_eq!(netlist.runtime_scalars.len(), 1);
+    assert_eq!(netlist.runtime_scalars[0].name, "strength");
+    assert_eq!(netlist.runtime_scalars[0].field_name, "strength");
 }
 
 #[test]

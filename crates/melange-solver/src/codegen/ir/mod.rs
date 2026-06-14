@@ -127,6 +127,27 @@ pub struct CircuitIR {
     /// node-space Newton system by the nodal emitter (forces nodal routing).
     #[serde(default)]
     pub behavioral_sources: Vec<BehavioralSourceIR>,
+    /// `.param name = value` constants referenced by name in behavioral
+    /// expressions (resolved to a baked literal).
+    #[serde(default)]
+    pub behavioral_param_consts: Vec<(String, f64)>,
+    /// Bare plugin-driven scalar params (`.runtime <name> <min> <max> as
+    /// <field>`) referenced in behavioral expressions (resolved to a live state
+    /// field; setter emitted).
+    #[serde(default)]
+    pub behavioral_scalar_runtimes: Vec<ScalarRuntimeIR>,
+}
+
+/// A plugin-driven scalar param in IR form (mirrors
+/// `parser::RuntimeScalarDirective`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScalarRuntimeIR {
+    pub name: String,
+    pub field_name: String,
+    pub min: f64,
+    pub max: f64,
+    /// Default value (clamped into `[min, max]`) used at construction.
+    pub default: f64,
 }
 
 /// Behavioral (`B`) source in IR form. Mirrors `mna::BehavioralSourceInfo`,
@@ -1838,6 +1859,19 @@ impl CircuitIR {
             })
             .collect();
         let behavioral_sources = build_behavioral_sources_ir(mna);
+        let behavioral_param_consts: Vec<(String, f64)> =
+            netlist.params.iter().map(|p| (p.name.clone(), p.value)).collect();
+        let behavioral_scalar_runtimes: Vec<ScalarRuntimeIR> = netlist
+            .runtime_scalars
+            .iter()
+            .map(|r| ScalarRuntimeIR {
+                name: r.name.clone(),
+                field_name: r.field_name.clone(),
+                min: r.min_value,
+                max: r.max_value,
+                default: r.min_value.clamp(r.min_value, r.max_value),
+            })
+            .collect();
 
         Ok(CircuitIR {
             metadata,
@@ -1940,6 +1974,8 @@ impl CircuitIR {
             named_constants,
             runtime_sources,
             behavioral_sources,
+            behavioral_param_consts,
+            behavioral_scalar_runtimes,
         })
     }
 
@@ -2624,6 +2660,19 @@ impl CircuitIR {
             })
             .collect();
         let behavioral_sources = build_behavioral_sources_ir(mna);
+        let behavioral_param_consts: Vec<(String, f64)> =
+            netlist.params.iter().map(|p| (p.name.clone(), p.value)).collect();
+        let behavioral_scalar_runtimes: Vec<ScalarRuntimeIR> = netlist
+            .runtime_scalars
+            .iter()
+            .map(|r| ScalarRuntimeIR {
+                name: r.name.clone(),
+                field_name: r.field_name.clone(),
+                min: r.min_value,
+                max: r.max_value,
+                default: r.min_value.clamp(r.min_value, r.max_value),
+            })
+            .collect();
 
         Ok(CircuitIR {
             metadata,
@@ -2940,6 +2989,8 @@ impl CircuitIR {
             named_constants,
             runtime_sources,
             behavioral_sources,
+            behavioral_param_consts,
+            behavioral_scalar_runtimes,
         })
     }
 

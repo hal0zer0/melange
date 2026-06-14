@@ -241,19 +241,50 @@ Rp phase 0 1meg
 }
 
 #[test]
-fn params_are_rejected_until_wired() {
-    // Named-parameter references must still error cleanly (not silently drop).
+fn named_params_resolve_const_and_scalar_runtime() {
+    // `.param gain` is a baked constant; `.runtime amp` is a plugin scalar set
+    // via set_runtime_amp. I = gain*amp*V(a) ⇒ V(out) = -gain*amp*V(a).
     let spice = "\
-Behavioral with param
+Behavioral with params
+Va a 0 DC 1
+.param gain = 0.5
+.runtime amp 0 2 as amp
+B1 out 0 I={ gain * amp * V(a) }
+Rout out 0 1
+Cout out 0 1u
+";
+    // Nodes (0-based): a=0, out=1.
+    let code = generate_nodal(spice, 0, 1);
+    let main = "fn main() {\n\
+        \x20   let mut s = CircuitState::default();\n\
+        \x20   s.set_runtime_amp(2.0);\n\
+        \x20   let mut y = [0.0f64; NUM_OUTPUTS];\n\
+        \x20   for _ in 0..256 { y = process_sample(0.0, &mut s); }\n\
+        \x20   println!(\"{:.9}\", y[0]);\n\
+        }\n";
+    let out = compile_and_run(&code, main, "params");
+    let v_out: f64 = out.parse().unwrap_or_else(|_| panic!("bad output: {out:?}"));
+    let expected = -(0.5 * 2.0 * 1.0);
+    assert!(
+        (v_out - expected).abs() < 1e-4,
+        "params: got {v_out}, expected {expected}"
+    );
+}
+
+#[test]
+fn unknown_param_is_rejected() {
+    // A bare identifier with no .param / .runtime definition must error clearly.
+    let spice = "\
+Behavioral unknown param
 Va a 0 DC 0.5
-B1 out 0 V={ gain * V(a) }
+B1 out 0 V={ mystery * V(a) }
 Rout out 0 1meg
 ";
     let netlist = Netlist::parse(spice).expect("parse");
     let mut mna = MnaSystem::from_netlist(&netlist).expect("mna");
     mna.g[0][0] += 1.0;
     let cfg = CodegenConfig {
-        circuit_name: "pform".to_string(),
+        circuit_name: "unk".to_string(),
         sample_rate: 48000.0,
         input_node: 0,
         output_nodes: vec![1],
@@ -264,7 +295,7 @@ Rout out 0 1meg
         .generate_nodal(&mna, &netlist)
         .unwrap_err();
     assert!(
-        format!("{err}").to_lowercase().contains("param"),
+        format!("{err}").to_lowercase().contains("mystery"),
         "unexpected: {err}"
     );
 }

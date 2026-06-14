@@ -24,6 +24,7 @@ use crate::expr::{ExprResolver, Var};
 /// other resolvers are placeholders guarded off in `behavioral_emitter_supported`.
 struct NodalBsrcResolver<'a> {
     node_idx: &'a std::collections::BTreeMap<String, usize>,
+    params: &'a std::collections::BTreeMap<String, String>,
 }
 
 impl ExprResolver for NodalBsrcResolver<'_> {
@@ -36,8 +37,12 @@ impl ExprResolver for NodalBsrcResolver<'_> {
     fn branch_i(&self, _name: &str) -> String {
         "0.0".to_string()
     }
-    fn param(&self, _name: &str) -> String {
-        "0.0".to_string()
+    fn param(&self, name: &str) -> String {
+        // Pre-validated in generate_nodal; default to 0.0 if somehow unresolved.
+        self.params
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| "0.0".to_string())
     }
     fn time(&self) -> String {
         "state.sim_time".to_string()
@@ -56,6 +61,28 @@ impl ExprResolver for NodalBsrcResolver<'_> {
     }
 }
 
+/// Resolve behavioral param names to generated-Rust strings: `.param` constants
+/// to a baked literal, plugin scalars to their `state.<field>`.
+fn bsrc_param_map(ir: &CircuitIR) -> std::collections::BTreeMap<String, String> {
+    let mut m = std::collections::BTreeMap::new();
+    for (name, val) in &ir.behavioral_param_consts {
+        m.insert(name.clone(), fmt_param_const(*val));
+    }
+    for r in &ir.behavioral_scalar_runtimes {
+        m.insert(r.name.clone(), format!("state.{}", r.field_name));
+    }
+    m
+}
+
+/// Format an `f64` param constant as a Rust literal.
+fn fmt_param_const(v: f64) -> String {
+    if v == v.trunc() && v.abs() < 1e15 {
+        format!("{:.1}", v)
+    } else {
+        format!("{:e}", v)
+    }
+}
+
 /// Non-ground referenced nodes as `(name, matrix_index)` pairs, deterministically
 /// ordered (BTreeMap iteration). `matrix_index = node_map_index - 1`.
 fn bsrc_ref_cols(b: &BehavioralSourceIR) -> Vec<(&String, usize)> {
@@ -70,9 +97,11 @@ fn bsrc_ref_cols(b: &BehavioralSourceIR) -> Vec<(&String, usize)> {
 /// per referenced node, evaluated at the current iterate `v`. Placed before the
 /// refactor/companion blocks so both can use them.
 fn emit_behavioral_evals(code: &mut String, ir: &CircuitIR, indent: &str) {
+    let params = bsrc_param_map(ir);
     for (si, b) in ir.behavioral_sources.iter().enumerate() {
         let res = NodalBsrcResolver {
             node_idx: &b.referenced_node_indices,
+            params: &params,
         };
         let f = b.expr.simplify();
         code.push_str(&format!("{indent}let bsrc_{si}_f = {};\n", f.to_rust(&res)));
@@ -152,9 +181,11 @@ fn emit_behavioral_rhs(code: &mut String, ir: &CircuitIR, indent: &str) {
 /// advancing `bsrc_int_prev` for `idt`, which needs the old value), then advance
 /// `sim_time` by one `dt`.
 fn emit_behavioral_time_update(code: &mut String, ir: &CircuitIR, indent: &str) {
+    let params = bsrc_param_map(ir);
     for b in &ir.behavioral_sources {
         let res = NodalBsrcResolver {
             node_idx: &b.referenced_node_indices,
+            params: &params,
         };
         for (slot, is_idt, inner) in b.expr.collect_time_ops() {
             let x = inner.simplify().to_rust(&res);
@@ -1497,6 +1528,17 @@ impl RustEmitter {
             code.push_str("    /// Running integral per idt slot\n");
             code.push_str("    pub bsrc_int_prev: [f64; N_BSRC_SLOTS],\n\n");
         }
+        // Plugin-driven scalar params (.runtime <name> min max as field).
+        for r in &ir.behavioral_scalar_runtimes {
+            code.push_str(&format!(
+                "    /// Plugin scalar `{}` (range [{}, {}]); set via set_runtime_{}\n",
+                r.name, r.min, r.max, r.field_name
+            ));
+            code.push_str(&format!("    pub {}: f64,\n", r.field_name));
+        }
+        if !ir.behavioral_scalar_runtimes.is_empty() {
+            code.push('\n');
+        }
         if ir.dc_block {
             code.push_str("    /// DC blocking filter: previous input samples (one per output)\n");
             code.push_str("    pub dc_block_x_prev: [f64; NUM_OUTPUTS],\n");
@@ -1859,6 +1901,12 @@ impl RustEmitter {
             code.push_str("            bsrc_x_prev: [0.0; N_BSRC_SLOTS],\n");
             code.push_str("            bsrc_int_prev: [0.0; N_BSRC_SLOTS],\n");
         }
+        for r in &ir.behavioral_scalar_runtimes {
+            code.push_str(&format!(
+                "            {}: {:.17e},\n",
+                r.field_name, r.default
+            ));
+        }
         if !ir.dc_op_converged && m > 0 {
             code.push_str("            dc_settled: false,\n");
             if has_dc_nl {
@@ -2108,6 +2156,23 @@ impl RustEmitter {
 
         // impl CircuitState
         code.push_str("impl CircuitState {\n");
+
+        // Plugin-driven scalar param setters (.runtime <name> min max as field).
+        for r in &ir.behavioral_scalar_runtimes {
+            code.push_str(&format!(
+                "    /// Set plugin scalar `{}` (clamped to [{}, {}]).\n",
+                r.name, r.min, r.max
+            ));
+            code.push_str(&format!(
+                "    #[inline]\n    pub fn set_runtime_{}(&mut self, value: f64) {{\n",
+                r.field_name
+            ));
+            code.push_str(&format!(
+                "        if value.is_finite() {{ self.{} = value.clamp({:.17e}, {:.17e}); }}\n",
+                r.field_name, r.min, r.max
+            ));
+            code.push_str("    }\n\n");
+        }
 
         // reset()
         code.push_str("    /// Reset to DC operating point\n");

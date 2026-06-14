@@ -97,6 +97,9 @@ pub struct Netlist {
     /// codegen by the API shape (no nih-plug knob, `state.<field>()` accessor).
     /// Setter bodies are identical to `.pot` since the 2026-04-20 reseed strip.
     pub runtime_resistors: Vec<RuntimeResistorDirective>,
+    /// Bare plugin-driven scalar params (`.runtime <name> <min> <max> as
+    /// <field>`), referenced by name in behavioral `B`-source expressions.
+    pub runtime_scalars: Vec<RuntimeScalarDirective>,
     /// Per-device parameter mismatch directives (.mismatch D IS=0.02 ...).
     /// Applied at codegen time: each device of the listed type gets its
     /// nominal model parameter jittered by `nominal · (1 + tol · u)` with
@@ -204,6 +207,25 @@ pub struct RuntimeResistorDirective {
     pub max_value: f64,
     /// Rust identifier used for the generated setter name
     /// (`set_runtime_R_<field_name>`) and getter (`<field_name>()`).
+    pub field_name: String,
+}
+
+/// A bare plugin-driven scalar (`​.runtime <name> <min> <max> as <field>`).
+///
+/// Unlike `.runtime R/V`, this is not attached to any element — it's a free
+/// scalar the plugin sets via `set_runtime_<field>`, referenced by name inside
+/// behavioral `B`-source expressions (e.g. `strength`, `f_offset`). Dispatched
+/// when the `.runtime` target starts with neither `V` nor `R` (SPICE component
+/// names must, so a non-R/V target is unambiguously a scalar).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RuntimeScalarDirective {
+    /// Parameter name as referenced in expressions.
+    pub name: String,
+    /// Clamp minimum.
+    pub min_value: f64,
+    /// Clamp maximum.
+    pub max_value: f64,
+    /// Rust identifier for the state field / `set_runtime_<field>` setter.
     pub field_name: String,
 }
 
@@ -321,6 +343,7 @@ impl Netlist {
             linearize_devices: Vec::new(),
             runtime_sources: Vec::new(),
             runtime_resistors: Vec::new(),
+            runtime_scalars: Vec::new(),
             mismatch_specs: Vec::new(),
             seed: None,
             tolerance_r: 0.0,
@@ -2169,10 +2192,9 @@ impl Parser {
                         netlist.runtime_resistors.push(rr);
                     }
                     _ => {
-                        return Err(self.error(format!(
-                            ".runtime target '{}' must start with V (voltage source) or R (resistor)",
-                            target
-                        )));
+                        // Non-R/V target → bare plugin-driven scalar param.
+                        let rs = self.parse_runtime_scalar_directive(&parts)?;
+                        netlist.runtime_scalars.push(rs);
                     }
                 }
             }
@@ -2336,12 +2358,13 @@ impl Parser {
 
     fn parse_param(&self, parts: &[&str]) -> Result<Parameter, ParseError> {
         self.require_parts(parts, 2, "name=value")?;
-        let param_str = parts[1];
-        let eq_pos = param_str
+        // Accept `name=value`, `name = value`, `name =value`, `name= value`.
+        let joined: String = parts[1..].concat();
+        let eq_pos = joined
             .find('=')
             .ok_or_else(|| self.error("Parameter must be name=value format"))?;
-        let name = param_str[..eq_pos].to_string();
-        let value_str = &param_str[eq_pos + 1..];
+        let name = joined[..eq_pos].to_string();
+        let value_str = &joined[eq_pos + 1..];
         let value = parse_value(value_str)
             .map_err(|_| self.error(format!("Invalid parameter value: {}", value_str)))?;
         Ok(Parameter { name, value })
@@ -2897,6 +2920,51 @@ impl Parser {
         }
         Ok(RuntimeResistorDirective {
             resistor_name,
+            min_value,
+            max_value,
+            field_name,
+        })
+    }
+
+    /// Parse a bare plugin-driven scalar param:
+    /// `.runtime <name> <min> <max> as <field>`.
+    fn parse_runtime_scalar_directive(
+        &self,
+        parts: &[&str],
+    ) -> Result<RuntimeScalarDirective, ParseError> {
+        self.require_parts(parts, 6, ".runtime name min max as field_name")?;
+        if !parts[4].eq_ignore_ascii_case("as") {
+            return Err(self.error(format!(
+                ".runtime scalar expects 'as' before field name, got '{}'",
+                parts[4]
+            )));
+        }
+        let name = parts[1].to_string();
+        if !is_valid_rust_ident(&name) {
+            return Err(self.error(format!(
+                ".runtime scalar name '{}' is not a valid identifier",
+                name
+            )));
+        }
+        let min_value =
+            parse_value(parts[2]).map_err(|_| self.error(".runtime scalar: invalid min"))?;
+        let max_value =
+            parse_value(parts[3]).map_err(|_| self.error(".runtime scalar: invalid max"))?;
+        if min_value >= max_value {
+            return Err(self.error(format!(
+                ".runtime scalar min ({}) must be less than max ({})",
+                min_value, max_value
+            )));
+        }
+        let field_name = parts[5].to_string();
+        if !is_valid_rust_ident(&field_name) {
+            return Err(self.error(format!(
+                ".runtime scalar field name '{}' is not a valid Rust identifier",
+                field_name
+            )));
+        }
+        Ok(RuntimeScalarDirective {
+            name,
             min_value,
             max_value,
             field_name,
