@@ -27,6 +27,7 @@ AI agent consumption: dense equations, code patterns, cross-references, no narra
 | Changing matrix inversion or linear solves | [LINEAR_ALGEBRA.md](LINEAR_ALGEBRA.md) |
 | Changing dynamic potentiometers (math) | [SHERMAN_MORRISON.md](SHERMAN_MORRISON.md) |
 | Adding `.pot` / `.wiper` / `.gang` / `.switch` directives | [DYNAMIC_PARAMS.md](DYNAMIC_PARAMS.md) |
+| Working on behavioral `B`-sources (arbitrary-expression V/I, ddt/idt, FM discriminator) | [BEHAVIORAL_SOURCES.md](BEHAVIORAL_SOURCES.md) |
 | Changing oversampling or anti-alias filters | [OVERSAMPLING.md](OVERSAMPLING.md) |
 | Changing generated code structure | [CODEGEN.md](CODEGEN.md) |
 | Changing trapezoidal integration or companions | [COMPANION_MODELS.md](COMPANION_MODELS.md) |
@@ -134,6 +135,7 @@ K' = K - scale * (N_v * su) * (su^T * N_i)
 | [OVERSAMPLING.md](OVERSAMPLING.md) | Comprehensive | Polyphase allpass half-band, 2x/4x, coefficients |
 | [CODEGEN.md](CODEGEN.md) | Comprehensive | Generated code structure, templates, codegen capability matrix |
 | [COMPANION_MODELS.md](COMPANION_MODELS.md) | Reference | Trapezoidal companion for C and L |
+| [BEHAVIORAL_SOURCES.md](BEHAVIORAL_SOURCES.md) | Reference | SPICE3 `B` arbitrary-expression V/I sources, expression engine, ddt/idt, FM discriminator |
 | [DEBUGGING.md](DEBUGGING.md) | Reference | Bug signatures, diagnostic patterns, verified values |
 | [SIGNAL_LEVELS.md](SIGNAL_LEVELS.md) | Reference | DC blocking, output scaling, plugin levels |
 | [SPICE_VALIDATION.md](SPICE_VALIDATION.md) | Reference | ngspice setup, correlation benchmarks |

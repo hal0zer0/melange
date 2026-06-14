@@ -58,6 +58,9 @@ pub struct MnaSystem {
     pub nonlinear_devices: Vec<NonlinearDeviceInfo>,
     /// Voltage source info (for augmented MNA)
     pub voltage_sources: Vec<VoltageSourceInfo>,
+    /// Behavioral (arbitrary-expression) `B`-sources. Stamped directly in node
+    /// space by codegen; their presence forces nodal routing.
+    pub behavioral_sources: Vec<BehavioralSourceInfo>,
     /// VCVS augmented row info (one entry per VCVS element, in element order)
     pub vcvs_sources: Vec<VcvsAugInfo>,
     /// Current source contributions to RHS
@@ -421,6 +424,32 @@ pub struct VoltageSourceInfo {
     pub ext_idx: usize,
 }
 
+/// Behavioral (arbitrary-expression) source — SPICE3 `B` element.
+///
+/// Behavioral sources do **not** use the `N_v`/`N_i` block-diagonal device
+/// machinery (which assumes one controlling node-pair voltage per dimension).
+/// Their expression references arbitrary nodes, so codegen stamps their current
+/// and Jacobian directly into the node-space Newton system — which is why their
+/// presence forces nodal routing.
+#[derive(Debug, Clone)]
+pub struct BehavioralSourceInfo {
+    pub name: String,
+    pub kind: crate::parser::BSourceKind,
+    pub n_plus: String,
+    pub n_minus: String,
+    pub n_plus_idx: usize,
+    pub n_minus_idx: usize,
+    /// Resolved node index for each node name the expression references.
+    pub referenced_node_indices: std::collections::BTreeMap<String, usize>,
+    /// The parsed expression, with `ddt`/`idt` state slots already assigned
+    /// (globally unique across all behavioral sources).
+    pub expr: crate::expr::Expr,
+    /// For `V={}` sources, the 0-based index among behavioral voltage sources
+    /// (used to allocate the augmented branch-current row at codegen time).
+    /// `None` for `I={}` sources.
+    pub v_ext_idx: Option<usize>,
+}
+
 /// Current source information.
 #[derive(Debug, Clone)]
 pub struct CurrentSourceInfo {
@@ -773,6 +802,7 @@ impl MnaSystem {
             node_map: HashMap::new(),
             nonlinear_devices: Vec::new(),
             voltage_sources: Vec::with_capacity(num_vs),
+            behavioral_sources: Vec::new(),
             vcvs_sources: Vec::new(),
             current_sources: Vec::new(),
             inductors: Vec::new(),
@@ -2506,6 +2536,10 @@ struct MnaBuilder {
     next_node_idx: usize,
     nonlinear_devices: Vec<NonlinearDeviceInfo>,
     voltage_sources: Vec<VoltageSourceInfo>,
+    behavioral_sources: Vec<BehavioralSourceInfo>,
+    /// Running global counter for `ddt`/`idt` companion-state slot ids across
+    /// all behavioral sources.
+    behavioral_state_slots: usize,
     current_sources: Vec<CurrentSourceInfo>,
     inductors: Vec<InductorElement>,
     opamps: Vec<OpampInfo>,
@@ -2558,6 +2592,8 @@ impl MnaBuilder {
             next_node_idx: 1,
             nonlinear_devices: Vec::new(),
             voltage_sources: Vec::new(),
+            behavioral_sources: Vec::new(),
+            behavioral_state_slots: 0,
             current_sources: Vec::new(),
             inductors: Vec::new(),
             opamps: Vec::new(),
@@ -3385,6 +3421,7 @@ impl MnaBuilder {
         mna.node_map = self.node_map;
         mna.nonlinear_devices = self.nonlinear_devices;
         mna.voltage_sources = self.voltage_sources;
+        mna.behavioral_sources = self.behavioral_sources;
         mna.current_sources = self.current_sources;
         mna.inductors = self.inductors;
         mna.opamps = self.opamps;
@@ -4406,6 +4443,18 @@ impl MnaBuilder {
                 n_ctrl_n,
                 ..
             } => vec![n_sig_p, n_sig_n, n_ctrl_p, n_ctrl_n],
+            Element::BSource {
+                n_plus,
+                n_minus,
+                expr,
+                ..
+            } => {
+                let mut nodes = vec![n_plus, n_minus];
+                // Register nodes the expression reads so they become circuit
+                // nodes even if no other element touches them.
+                nodes.extend(expr.referenced_node_refs());
+                nodes
+            }
             Element::SubcktInstance { name, .. } => {
                 return Err(MnaError::TopologyError(format!(
                     "subcircuit instance '{}' not supported (expand subcircuits before MNA)",
@@ -4895,6 +4944,56 @@ impl MnaBuilder {
                     name
                 )));
             }
+            Element::BSource {
+                name,
+                n_plus,
+                n_minus,
+                kind,
+                expr,
+            } => {
+                let n_plus_idx = self.node_map[n_plus];
+                let n_minus_idx = self.node_map[n_minus];
+
+                // Assign globally-unique ddt/idt companion-state slots.
+                let mut expr = expr.clone();
+                expr.assign_state_slots(&mut self.behavioral_state_slots);
+
+                // Resolve every node the expression references to its index.
+                let mut referenced_node_indices = std::collections::BTreeMap::new();
+                for node in expr.referenced_nodes() {
+                    let idx = *self.node_map.get(&node).ok_or_else(|| {
+                        MnaError::TopologyError(format!(
+                            "behavioral source '{}' references unknown node '{}'",
+                            name, node
+                        ))
+                    })?;
+                    referenced_node_indices.insert(node, idx);
+                }
+
+                // For V={} sources, reserve a behavioral-VS index (used to
+                // allocate the augmented branch-current row at codegen time).
+                let v_ext_idx = match kind {
+                    crate::parser::BSourceKind::Voltage => Some(
+                        self.behavioral_sources
+                            .iter()
+                            .filter(|b| b.v_ext_idx.is_some())
+                            .count(),
+                    ),
+                    crate::parser::BSourceKind::Current => None,
+                };
+
+                self.behavioral_sources.push(BehavioralSourceInfo {
+                    name: name.clone(),
+                    kind: *kind,
+                    n_plus: n_plus.clone(),
+                    n_minus: n_minus.clone(),
+                    n_plus_idx,
+                    n_minus_idx,
+                    referenced_node_indices,
+                    expr,
+                    v_ext_idx,
+                });
+            }
         }
 
         Ok(())
@@ -4904,7 +5003,109 @@ impl MnaBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::Netlist;
+    use crate::parser::{BSourceKind, Element, Netlist};
+
+    #[test]
+    fn bsource_parses_v_and_i_forms() {
+        let spice = r#"Behavioral source test
+Vqi qi 0 DC 0
+R1 qi 0 1meg
+B_clip out 0 V={ tanh(V(qi)) }
+B_inj  n2 0 I={ V(qi) * V(qi) }
+R2 n2 0 1k
+R3 out 0 1k
+"#;
+        let netlist = Netlist::parse(spice).unwrap();
+        let bsources: Vec<&Element> = netlist
+            .elements
+            .iter()
+            .filter(|e| matches!(e, Element::BSource { .. }))
+            .collect();
+        assert_eq!(bsources.len(), 2);
+
+        if let Element::BSource { name, kind, .. } = bsources[0] {
+            assert_eq!(name, "B_clip");
+            assert_eq!(*kind, BSourceKind::Voltage);
+        }
+        if let Element::BSource { name, kind, .. } = bsources[1] {
+            assert_eq!(name, "B_inj");
+            assert_eq!(*kind, BSourceKind::Current);
+        }
+
+        // MNA must carry both behavioral sources with resolved node indices.
+        let mna = MnaSystem::from_netlist(&netlist).unwrap();
+        assert_eq!(mna.behavioral_sources.len(), 2);
+        let clip = mna
+            .behavioral_sources
+            .iter()
+            .find(|b| b.name == "B_clip")
+            .unwrap();
+        assert_eq!(clip.kind, BSourceKind::Voltage);
+        assert_eq!(clip.v_ext_idx, Some(0));
+        // expression references node `qi` — must resolve to a real node index.
+        assert!(clip.referenced_node_indices.contains_key("qi"));
+        assert_eq!(clip.referenced_node_indices["qi"], mna.node_map["qi"]);
+
+        let inj = mna
+            .behavioral_sources
+            .iter()
+            .find(|b| b.name == "B_inj")
+            .unwrap();
+        assert_eq!(inj.kind, BSourceKind::Current);
+        assert_eq!(inj.v_ext_idx, None);
+    }
+
+    #[test]
+    fn bsource_ddt_idt_slots_are_globally_unique() {
+        // Two sources each with a ddt → slots 0 and 1.
+        let spice = r#"ddt slot test
+Vqi qi 0 DC 0
+R1 qi 0 1meg
+B_a a 0 V={ ddt(V(qi)) }
+B_b b 0 V={ ddt(V(qi)) + idt(V(qi)) }
+Ra a 0 1k
+Rb b 0 1k
+"#;
+        let netlist = Netlist::parse(spice).unwrap();
+        let mna = MnaSystem::from_netlist(&netlist).unwrap();
+        let total_slots: usize = mna
+            .behavioral_sources
+            .iter()
+            .map(|b| b.expr.state_slot_count())
+            .sum();
+        assert_eq!(total_slots, 3); // B_a: 1 ddt; B_b: 1 ddt + 1 idt
+    }
+
+    #[test]
+    fn radio_iq_discriminator_netlist_parses_and_builds_mna() {
+        // The Subspace FM front-end (limiter + discriminator) from the request.
+        let spice = r#"FM discriminator
+Viq_i iq_i 0 DC 0
+Viq_q iq_q 0 DC 0
+Ri iq_i 0 1meg
+Rq iq_q 0 1meg
+B_lim_i lim_i 0 V={ V(iq_i) / sqrt(V(iq_i)*V(iq_i) + V(iq_q)*V(iq_q) + 1e-9) }
+B_lim_q lim_q 0 V={ V(iq_q) / sqrt(V(iq_i)*V(iq_i) + V(iq_q)*V(iq_q) + 1e-9) }
+B_demod audio 0 V={ ddt( atan2(V(lim_q), V(lim_i)) ) }
+Rli lim_i 0 1meg
+Rlq lim_q 0 1meg
+Ra audio 0 1k
+"#;
+        let netlist = Netlist::parse(spice).unwrap();
+        let mna = MnaSystem::from_netlist(&netlist).unwrap();
+        assert_eq!(mna.behavioral_sources.len(), 3);
+        // The discriminator's ddt got a state slot.
+        let demod = mna
+            .behavioral_sources
+            .iter()
+            .find(|b| b.name == "B_demod")
+            .unwrap();
+        assert_eq!(demod.expr.state_slot_count(), 1);
+        assert!(demod.expr.is_time_dependent());
+        // It reads the two limiter outputs.
+        assert!(demod.referenced_node_indices.contains_key("lim_i"));
+        assert!(demod.referenced_node_indices.contains_key("lim_q"));
+    }
 
     #[test]
     fn test_mna_rc_circuit() {

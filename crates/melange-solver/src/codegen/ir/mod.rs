@@ -123,6 +123,50 @@ pub struct CircuitIR {
     /// in both trapezoidal and backward-Euler RHS builders. See Oomox P1.
     #[serde(default)]
     pub runtime_sources: Vec<RuntimeSourceIR>,
+    /// Behavioral (`B`) arbitrary-expression sources. Stamped directly into the
+    /// node-space Newton system by the nodal emitter (forces nodal routing).
+    #[serde(default)]
+    pub behavioral_sources: Vec<BehavioralSourceIR>,
+}
+
+/// Behavioral (`B`) source in IR form. Mirrors `mna::BehavioralSourceInfo`,
+/// carrying the parsed expression so codegen can emit its value + Jacobian.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BehavioralSourceIR {
+    pub name: String,
+    /// `true` for `V={}` (voltage constraint), `false` for `I={}` (current).
+    pub is_voltage: bool,
+    pub n_plus_idx: usize,
+    pub n_minus_idx: usize,
+    /// Node name → resolved index for every node the expression references.
+    pub referenced_node_indices: std::collections::BTreeMap<String, usize>,
+    pub expr: crate::expr::Expr,
+    /// Augmented branch-current row for `V={}` sources (`n_aug` index); `None`
+    /// for `I={}`.
+    pub aug_row: Option<usize>,
+    /// `true` if the expression contains `ddt`/`idt`/`time`.
+    pub time_dependent: bool,
+}
+
+/// Build the IR view of `mna.behavioral_sources`.
+///
+/// `aug_row` is left `None` here; the augmented branch-current rows for `V={}`
+/// sources are allocated when the nodal emitter consumes these (see
+/// `docs/aidocs/BEHAVIORAL_SOURCES.md §Codegen integration plan`).
+fn build_behavioral_sources_ir(mna: &MnaSystem) -> Vec<BehavioralSourceIR> {
+    mna.behavioral_sources
+        .iter()
+        .map(|b| BehavioralSourceIR {
+            name: b.name.clone(),
+            is_voltage: matches!(b.kind, crate::parser::BSourceKind::Voltage),
+            n_plus_idx: b.n_plus_idx,
+            n_minus_idx: b.n_minus_idx,
+            referenced_node_indices: b.referenced_node_indices.clone(),
+            expr: b.expr.clone(),
+            aug_row: None,
+            time_dependent: b.expr.is_time_dependent(),
+        })
+        .collect()
 }
 
 /// `.runtime` voltage source in IR form.
@@ -1793,6 +1837,7 @@ impl CircuitIR {
                 vs_row: rt.vs_row,
             })
             .collect();
+        let behavioral_sources = build_behavioral_sources_ir(mna);
 
         Ok(CircuitIR {
             metadata,
@@ -1894,6 +1939,7 @@ impl CircuitIR {
             },
             named_constants,
             runtime_sources,
+            behavioral_sources,
         })
     }
 
@@ -2570,6 +2616,7 @@ impl CircuitIR {
                 vs_row: rt.vs_row,
             })
             .collect();
+        let behavioral_sources = build_behavioral_sources_ir(mna);
 
         Ok(CircuitIR {
             metadata,
@@ -2885,6 +2932,7 @@ impl CircuitIR {
             },
             named_constants,
             runtime_sources,
+            behavioral_sources,
         })
     }
 

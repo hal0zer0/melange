@@ -520,6 +520,22 @@ impl CodeGenerator {
         mna: &MnaSystem,
         netlist: &Netlist,
     ) -> Result<GeneratedCode, CodegenError> {
+        // Behavioral `B`-sources parse and are represented in the MNA system,
+        // but the node-space NR stamping is not yet wired into the emitter.
+        // Fail loudly rather than silently dropping the source (which would
+        // generate a circuit missing its behavioral physics).
+        if !mna.behavioral_sources.is_empty() {
+            return Err(CodegenError::UnsupportedTopology(format!(
+                "behavioral B-source(s) {:?} are parsed and represented in MNA but codegen \
+                 emission is not yet implemented (nodal node-space stamping pending). See \
+                 docs/aidocs/BEHAVIORAL_SOURCES.md for the integration plan.",
+                mna.behavioral_sources
+                    .iter()
+                    .map(|b| b.name.as_str())
+                    .collect::<Vec<_>>()
+            )));
+        }
+
         // Validate config
         self.config.validate()?;
         match self.config.oversampling_factor {

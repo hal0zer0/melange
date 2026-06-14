@@ -530,6 +530,7 @@ fn test_singular_matrix_error_path() {
         node_map: HashMap::new(),
         nonlinear_devices: vec![],
         voltage_sources: vec![],
+        behavioral_sources: vec![],
         vcvs_sources: vec![],
         current_sources: vec![],
         inductors: vec![],

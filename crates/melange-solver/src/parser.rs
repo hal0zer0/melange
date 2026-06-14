@@ -777,6 +777,30 @@ pub enum Element {
         nodes: Vec<String>,
         subckt: String,
     },
+    /// Behavioral (arbitrary-expression) source — SPICE3 `B` element.
+    ///
+    /// `B<name> n+ n- V={expr}` is a nonlinear voltage source (augmented MNA
+    /// constraint `V(n+) - V(n-) = expr`); `I={expr}` is a nonlinear current
+    /// source injecting `expr` amps from `n+` to `n-`. The expression may
+    /// reference arbitrary node voltages / branch currents / `time`, so these
+    /// route the circuit to the nodal solver (the DK `N_v`/`N_i` reduction
+    /// assumes a single controlling node-pair voltage per dimension).
+    BSource {
+        name: String,
+        n_plus: String,
+        n_minus: String,
+        kind: BSourceKind,
+        expr: crate::expr::Expr,
+    },
+}
+
+/// Output quantity controlled by a behavioral [`Element::BSource`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BSourceKind {
+    /// `V={expr}` — behavioral voltage source.
+    Voltage,
+    /// `I={expr}` — behavioral current source.
+    Current,
 }
 
 impl Element {
@@ -798,7 +822,8 @@ impl Element {
             | Element::Vca { name, .. }
             | Element::Vcvs { name, .. }
             | Element::Vccs { name, .. }
-            | Element::SubcktInstance { name, .. } => name,
+            | Element::SubcktInstance { name, .. }
+            | Element::BSource { name, .. } => name,
         }
     }
 
@@ -1054,6 +1079,22 @@ impl Element {
                 name: prefixed(name),
                 nodes: nodes.iter().map(|n| remap(n)).collect(),
                 subckt: subckt.clone(),
+            },
+            Element::BSource {
+                name,
+                n_plus,
+                n_minus,
+                kind,
+                expr,
+            } => Element::BSource {
+                name: prefixed(name),
+                n_plus: remap(n_plus),
+                n_minus: remap(n_minus),
+                kind: *kind,
+                // Remap node/branch identifiers referenced inside the
+                // expression too — they live in the same naming scope as
+                // the source's terminals.
+                expr: expr.remap_idents(&remap),
             },
         }
     }
@@ -2948,8 +2989,81 @@ impl Parser {
             'E' => self.parse_vcvs(&parts),
             'G' => self.parse_vccs(&parts),
             'X' => self.parse_subckt_instance(&parts),
+            // Behavioral source: parse from the RAW line — the `{expr}` body
+            // contains spaces/commas/parens that `split_whitespace` shreds.
+            'B' => self.parse_bsource(line),
             _ => Err(self.error(format!("Unknown element type: {}", first_char))),
         }
+    }
+
+    /// Parse a behavioral source: `B<name> n+ n- V={expr}` / `I={expr}`.
+    ///
+    /// Operates on the raw line so the braced expression body survives. The
+    /// `V`/`I` keyword may be written with or without spaces around `=`
+    /// (`V={..}`, `V ={..}`, `V = {..}` all accepted).
+    fn parse_bsource(&self, line: &str) -> Result<Element, ParseError> {
+        let open = line.find('{').ok_or_else(|| {
+            self.error("Behavioral source requires a braced expression: B<name> n+ n- V={expr}")
+        })?;
+        // Brace-match for the closing `}` (expressions don't nest braces, but
+        // count defensively).
+        let bytes = line.as_bytes();
+        let mut depth = 0usize;
+        let mut close = None;
+        for (i, &b) in bytes.iter().enumerate().skip(open) {
+            match b {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        close = Some(i);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let close = close.ok_or_else(|| self.error("Behavioral source: unterminated '{'"))?;
+        let expr_str = &line[open + 1..close];
+
+        // Head = "B<name> n+ n- V=" (or "... I ="). Strip the trailing '='.
+        let head = line[..open].trim_end();
+        let head = head.strip_suffix('=').ok_or_else(|| {
+            self.error("Behavioral source: expected `V={expr}` or `I={expr}` (missing '=')")
+        })?;
+        let toks: Vec<&str> = head.split_whitespace().collect();
+        if toks.len() != 4 {
+            return Err(self.error(format!(
+                "Behavioral source '{}': expected `B<name> n+ n- V={{expr}}` (got head `{}`)",
+                toks.first().copied().unwrap_or("B?"),
+                head.trim()
+            )));
+        }
+        let name = toks[0];
+        let n_plus = toks[1];
+        let n_minus = toks[2];
+        let kind = match toks[3].to_ascii_uppercase().as_str() {
+            "V" => BSourceKind::Voltage,
+            "I" => BSourceKind::Current,
+            other => {
+                return Err(self.error(format!(
+                    "Behavioral source '{}': expected V or I before '=', got '{}'",
+                    name, other
+                )))
+            }
+        };
+        self.check_self_connection(n_plus, n_minus, name)?;
+
+        let expr = crate::expr::Expr::parse(expr_str)
+            .map_err(|e| self.error(format!("Behavioral source '{}': {}", name, e)))?;
+
+        Ok(Element::BSource {
+            name: name.to_string(),
+            n_plus: n_plus.to_string(),
+            n_minus: n_minus.to_string(),
+            kind,
+            expr,
+        })
     }
 
     fn parse_resistor(&self, parts: &[&str]) -> Result<Element, ParseError> {
@@ -3492,6 +3606,19 @@ fn validate_element_node_lengths(elem: &Element) -> Result<(), String> {
         Element::SubcktInstance { nodes, .. } => {
             for node in nodes {
                 check(node)?;
+            }
+        }
+        Element::BSource {
+            n_plus,
+            n_minus,
+            expr,
+            ..
+        } => {
+            check(n_plus)?;
+            check(n_minus)?;
+            // Also validate every node the expression references.
+            for node in expr.referenced_nodes() {
+                check(&node)?;
             }
         }
     }
