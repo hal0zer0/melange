@@ -272,6 +272,35 @@ Cout out 0 1u
 }
 
 #[test]
+fn bsource_with_slew_opamp_no_pots_compiles() {
+    // Regression: the B-source (full-LU nodal) path omitted `current_sample_rate`
+    // when there were no pots/switches, but the op-amp slew block (finite SR)
+    // references it → E0609. A B-source circuit with a slew-limited op-amp and no
+    // pots must still rustc-compile. (Mirrors the AM antenna's JRC4558 SR=1.)
+    let spice = "\
+Behavioral + slew op-amp, no pots
+Va a 0 DC 0.5
+B1 sig 0 I={ tanh(V(a)) }
+Rsig sig 0 1
+Csig sig 0 1u
+.model OP OA(AOL=200000 GBW=3MEG ROUT=75 SR=1 VCC=15 VEE=-15)
+U1 0 vn out OP
+Rg sig vn 1k
+Rf out vn 50k
+Rl out 0 100k
+";
+    // Just needs to generate AND rustc-compile (the bug is a compile error).
+    let code = generate_nodal(spice, 0, 0);
+    assert!(
+        code.contains("pub current_sample_rate: f64"),
+        "current_sample_rate field must be declared when an op-amp has finite SR"
+    );
+    // A trivial main that constructs state and runs one sample proves it compiles.
+    let main = "fn main() { let mut s = CircuitState::default(); let _ = process_sample(0.0, &mut s); }\n";
+    let _ = compile_and_run(&code, main, "slew_nopots");
+}
+
+#[test]
 fn unknown_param_is_rejected() {
     // A bare identifier with no .param / .runtime definition must error clearly.
     let spice = "\

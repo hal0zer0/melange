@@ -1404,6 +1404,13 @@ impl RustEmitter {
         let has_sat_ind = !ir.saturating_inductors.is_empty();
         let has_sat_coupled =
             !ir.saturating_coupled.is_empty() || !ir.saturating_xfmr_groups.is_empty();
+        // The op-amp slew block reads `state.current_sample_rate`, so that field
+        // must exist whenever any op-amp has a finite SR — independent of
+        // pots/switches. Behavioral B-source circuits (forced nodal) with a
+        // slew-limited op-amp and no pots/switches exposed this gap.
+        let has_opamp_slew = ir.opamps.iter().any(|oa| oa.sr.is_finite());
+        let needs_rebuild_state = has_pots || has_switches || has_sat_ind || has_sat_coupled;
+        let needs_current_sr = needs_rebuild_state || has_opamp_slew;
         let has_any_saturation = has_sat_ind || has_sat_coupled;
 
         let mut code = section_banner("STATE STRUCTURE (Nodal solver)");
@@ -1678,27 +1685,27 @@ impl RustEmitter {
         }
         code.push('\n');
 
-        // Mutable G and C for pot/switch/saturating-inductor re-stamping
-        if has_pots || has_switches || has_sat_ind || has_sat_coupled {
-            if use_full_nodal {
-                // g_work/c_work are cold (only used in rebuild_matrices, not per-sample).
-                // current_sample_rate and matrices_dirty are tiny scalars, stay hot.
-                code.push_str("    /// Current sample rate (for rebuild_matrices)\n");
-                code.push_str("    pub current_sample_rate: f64,\n");
-                code.push_str("    /// Lazy rebuild flag: set by set_pot/set_switch, cleared by process_sample\n");
-                code.push_str("    pub matrices_dirty: bool,\n\n");
-            } else {
-                code.push_str("    /// Working G matrix (modified by pots/switches)\n");
-                code.push_str("    pub g_work: [[f64; N]; N],\n");
-                code.push_str(
-                    "    /// Working C matrix (modified by switches/saturating inductors)\n",
-                );
-                code.push_str("    pub c_work: [[f64; N]; N],\n");
-                code.push_str("    /// Current sample rate (for rebuild_matrices)\n");
-                code.push_str("    pub current_sample_rate: f64,\n");
-                code.push_str("    /// Lazy rebuild flag: set by set_pot/set_switch, cleared by process_sample\n");
-                code.push_str("    pub matrices_dirty: bool,\n\n");
-            }
+        // Mutable G and C for pot/switch/saturating-inductor re-stamping (cold
+        // in the full-nodal layout). `current_sample_rate` is also needed by the
+        // op-amp slew block, so it's emitted whenever `needs_current_sr`.
+        if needs_rebuild_state && !use_full_nodal {
+            code.push_str("    /// Working G matrix (modified by pots/switches)\n");
+            code.push_str("    pub g_work: [[f64; N]; N],\n");
+            code.push_str(
+                "    /// Working C matrix (modified by switches/saturating inductors)\n",
+            );
+            code.push_str("    pub c_work: [[f64; N]; N],\n");
+        }
+        if needs_current_sr {
+            code.push_str("    /// Current sample rate (rebuild_matrices + op-amp slew dt)\n");
+            code.push_str("    pub current_sample_rate: f64,\n");
+        }
+        if needs_rebuild_state {
+            code.push_str("    /// Lazy rebuild flag: set by set_pot/set_switch, cleared by process_sample\n");
+            code.push_str("    pub matrices_dirty: bool,\n");
+        }
+        if needs_current_sr || needs_rebuild_state {
+            code.push('\n');
         }
 
         // Pot state fields
@@ -2005,23 +2012,18 @@ impl RustEmitter {
             }
         }
 
-        if has_pots || has_switches || has_sat_ind || has_sat_coupled {
-            if use_full_nodal {
-                // g_work/c_work are in cold; only emit the scalars here
-                code.push_str(&format!(
-                    "            current_sample_rate: {:.17e},\n",
-                    ir.solver_config.sample_rate * ir.solver_config.oversampling_factor as f64
-                ));
-                code.push_str("            matrices_dirty: false,\n");
-            } else {
-                code.push_str("            g_work: G,\n");
-                code.push_str("            c_work: C,\n");
-                code.push_str(&format!(
-                    "            current_sample_rate: {:.17e},\n",
-                    ir.solver_config.sample_rate * ir.solver_config.oversampling_factor as f64
-                ));
-                code.push_str("            matrices_dirty: false,\n");
-            }
+        if needs_rebuild_state && !use_full_nodal {
+            code.push_str("            g_work: G,\n");
+            code.push_str("            c_work: C,\n");
+        }
+        if needs_current_sr {
+            code.push_str(&format!(
+                "            current_sample_rate: {:.17e},\n",
+                ir.solver_config.sample_rate * ir.solver_config.oversampling_factor as f64
+            ));
+        }
+        if needs_rebuild_state {
+            code.push_str("            matrices_dirty: false,\n");
         }
         // Saturation decimation counter: 0 triggers update on first sample
         if has_any_saturation {
@@ -2639,7 +2641,7 @@ impl RustEmitter {
             "        let internal_rate = sample_rate * {}.0;\n",
             ir.solver_config.oversampling_factor
         ));
-        if has_pots || has_switches {
+        if needs_current_sr {
             code.push_str("        self.current_sample_rate = internal_rate;\n");
         }
         if ir.behavioral_sources.iter().any(|b| b.time_dependent) {
