@@ -106,7 +106,11 @@ fn emit_behavioral_evals(code: &mut String, ir: &CircuitIR, indent: &str) {
         let f = b.expr.simplify();
         code.push_str(&format!("{indent}let bsrc_{si}_f = {};\n", f.to_rust(&res)));
         for (name, col) in bsrc_ref_cols(b) {
-            let g = b.expr.diff(&Var::Node(name.clone())).simplify();
+            // Lagged Jacobian: ddt is treated as constant (∂ddt/∂v = 0) so the
+            // discriminator's inv_dt-scaled partials don't ill-condition the NR.
+            // The value (bsrc_f) still uses the full ddt, so the fixed point is
+            // exact. See Expr::diff_jacobian.
+            let g = b.expr.diff_jacobian(&Var::Node(name.clone())).simplify();
             code.push_str(&format!(
                 "{indent}let bsrc_{si}_g_{col} = {};\n",
                 g.to_rust(&res)
@@ -201,6 +205,25 @@ fn emit_behavioral_time_update(code: &mut String, ir: &CircuitIR, indent: &str) 
         }
     }
     code.push_str(&format!("{indent}state.sim_time += 2.0 * bsrc_half_dt;\n"));
+}
+
+/// Node indices (0-based) driven by behavioral `V={}` sources. These are set
+/// algebraically (`V = f`, solved exactly each NR iteration with the lagged
+/// Jacobian), so the global node-damping must NOT throttle on their step — a
+/// legitimate large value (e.g. the `ddt` discriminator's startup spike) would
+/// otherwise crush every node's step and stall convergence. Returns a Rust
+/// array literal of the excluded indices (empty `[]` when none).
+fn behavioral_damp_skip_literal(ir: &CircuitIR) -> String {
+    let mut nodes: Vec<usize> = Vec::new();
+    for b in &ir.behavioral_sources {
+        if b.is_voltage && b.n_plus_idx > 0 {
+            nodes.push(b.n_plus_idx - 1);
+        }
+    }
+    nodes.sort();
+    nodes.dedup();
+    let items: Vec<String> = nodes.iter().map(|n| format!("{n}usize")).collect();
+    format!("[{}]", items.join(", "))
 }
 
 /// Node indices (0-based) touched by behavioral sources — terminals + referenced
@@ -5766,22 +5789,32 @@ impl RustEmitter {
             Self::emit_nodal_voltage_limiting(&mut code, ir);
             code.push('\n');
 
-            // Layer 2: Global node voltage damping (adaptive threshold)
+            // Layer 2: Global node voltage damping (adaptive threshold).
+            // Behavioral V={} output nodes are algebraically forced (V=f), so
+            // they're excluded — a legit large value (the ddt discriminator
+            // startup spike) must not throttle every other node's step.
             code.push_str("        // Layer 2: Global node voltage damping\n");
             code.push_str("        {\n");
+            let damp_skip = if has_behavioral {
+                let lit = behavioral_damp_skip_literal(ir);
+                code.push_str(&format!("            let damp_skip = {lit};\n"));
+                "if damp_skip.contains(&i) { continue; } "
+            } else {
+                ""
+            };
             code.push_str("            let mut max_node_dv = 0.0_f64;\n");
             code.push_str(&format!(
                 "            for i in 0..{} {{\n\
-                 \x20               let dv = alpha * (v_new[i] - v[i]);\n\
+                 \x20               {}let dv = alpha * (v_new[i] - v[i]);\n\
                  \x20               max_node_dv = max_node_dv.max(dv.abs());\n\
                  \x20           }}\n",
-                n_nodes
+                n_nodes, damp_skip
             ));
             // Adaptive threshold: max(10V, 5% of max node voltage)
             code.push_str("            let mut max_v = 0.0_f64;\n");
             code.push_str(&format!(
-                "            for i in 0..{} {{ max_v = max_v.max(v[i].abs()); }}\n",
-                n_nodes
+                "            for i in 0..{} {{ {}max_v = max_v.max(v[i].abs()); }}\n",
+                n_nodes, damp_skip
             ));
             code.push_str("            let damp_thresh = 10.0_f64.max(max_v * 0.05);\n");
             code.push_str("            if max_node_dv > damp_thresh {\n");

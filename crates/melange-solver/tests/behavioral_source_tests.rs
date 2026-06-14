@@ -197,46 +197,80 @@ Rout out 0 1meg
 }
 
 #[test]
-fn fm_limiter_phase_chain_compiles_and_runs() {
-    // The Subspace FM front-end limiter (normalize I/Q) feeding a phase detector
-    // (atan2 of the limited I/Q). Exercises V={}, atan2, sqrt, and chained
-    // behavioral sources reading each other's nodes. A STATIC I/Q vector gives a
-    // constant phase = atan2(0.8, 0.6) ≈ 0.927 rad, and the limiter normalizes
-    // lim_i = iq_i/|iq| = 0.6.
-    //
-    // NOTE: the *ddt* discriminator (instantaneous frequency = ddt(phase)) is a
-    // separate known issue — its inv_dt-scaled Jacobian (~SR·∂atan2) ill-
-    // conditions the coupled NR. See docs/aidocs/BEHAVIORAL_SOURCES.md
-    // "ddt discriminator stiffness". This test covers the rest of the chain.
+fn fm_discriminator_static_phase_is_zero() {
+    // Full FM front-end: limiter (normalize I/Q) + discriminator
+    // (ddt of the instantaneous phase). A STATIC I/Q vector → constant phase →
+    // the demodulated output (instantaneous frequency) settles to ~0, and the
+    // limiter normalizes lim_i = iq_i/|iq| = 0.6. Exercises the ddt(atan2)
+    // discriminator with the lagged-Jacobian fix (no NR stiffness collapse).
     let spice = "\
-FM limiter + phase
+FM discriminator (static)
 Viq_i iq_i 0 DC 0.6
 Viq_q iq_q 0 DC 0.8
 B_lim_i lim_i 0 V={ V(iq_i) / sqrt(V(iq_i)*V(iq_i) + V(iq_q)*V(iq_q) + 1e-9) }
 B_lim_q lim_q 0 V={ V(iq_q) / sqrt(V(iq_i)*V(iq_i) + V(iq_q)*V(iq_q) + 1e-9) }
-B_phase phase 0 V={ atan2(V(lim_q), V(lim_i)) }
+B_demod audio 0 V={ ddt( atan2(V(lim_q), V(lim_i)) ) }
 Rli lim_i 0 1meg
 Rlq lim_q 0 1meg
-Rp phase 0 1meg
+Ra audio 0 1meg
 ";
-    // Nodes (0-based): iq_i=0, iq_q=1, lim_i=2, lim_q=3, phase=4.
+    // Nodes (0-based): iq_i=0, iq_q=1, lim_i=2, lim_q=3, audio=4.
     let code_li = generate_nodal(spice, 0, 2);
     let lim_i: f64 = compile_and_run(&code_li, &settle_main(64), "fm_lim_i")
         .parse()
         .unwrap();
     assert!(
         (lim_i - 0.6).abs() < 1e-4,
-        "limiter normalize: lim_i got {lim_i}, expected 0.6"
+        "limiter normalize: lim_i got {lim_i}, expected 0.6 (no NR collapse)"
     );
 
-    let code_ph = generate_nodal(spice, 0, 4);
-    let phase: f64 = compile_and_run(&code_ph, &settle_main(64), "fm_phase")
+    let code_d = generate_nodal(spice, 0, 4);
+    let audio: f64 = compile_and_run(&code_d, &settle_main(64), "fm_demod")
         .parse()
         .unwrap();
-    let expected = 0.8f64.atan2(0.6);
     assert!(
-        (phase - expected).abs() < 1e-4,
-        "phase detector: got {phase}, expected {expected}"
+        audio.is_finite() && audio.abs() < 1e-3,
+        "static-phase discriminator should be ~0, got {audio}"
+    );
+}
+
+#[test]
+fn fm_discriminator_recovers_frequency() {
+    // The discriminator must recover instantaneous frequency: a rotating carrier
+    // at f Hz (phase = idt(2π·f)) → ddt(atan2(Q, I)) = 2π·f between phase wraps.
+    // This is the whole point of the FM discriminator and the load-bearing
+    // ddt(atan2) path. f = 100 Hz ⇒ 2π·100 ≈ 628.3 rad/s.
+    let spice = "\
+FM discriminator (rotating)
+.runtime f_test 0 10000 as f_test
+B_ph ph 0 V={ idt(2*pi*f_test) }
+B_ci iq_i 0 V={ cos(V(ph)) }
+B_cq iq_q 0 V={ sin(V(ph)) }
+B_lim_i lim_i 0 V={ V(iq_i) / sqrt(V(iq_i)*V(iq_i) + V(iq_q)*V(iq_q) + 1e-9) }
+B_lim_q lim_q 0 V={ V(iq_q) / sqrt(V(iq_i)*V(iq_i) + V(iq_q)*V(iq_q) + 1e-9) }
+B_demod audio 0 V={ ddt( atan2(V(lim_q), V(lim_i)) ) }
+Rph ph 0 1meg
+Rii iq_i 0 1meg
+Riq iq_q 0 1meg
+Rli lim_i 0 1meg
+Rlq lim_q 0 1meg
+Ra audio 0 1meg
+";
+    // audio node index: ph=0, iq_i=1, iq_q=2, lim_i=3, lim_q=4, audio=5 (0-based).
+    let code = generate_nodal(spice, 0, 5);
+    // f=100 Hz: phase reaches π near sample 240; average over pre-wrap samples.
+    let main = "fn main() {\n\
+        \x20   let mut s = CircuitState::default();\n\
+        \x20   s.set_runtime_f_test(100.0);\n\
+        \x20   let mut acc = 0.0f64; let mut n = 0u32;\n\
+        \x20   for k in 0..200 { let y = process_sample(0.0, &mut s); if k >= 10 { acc += y[0]; n += 1; } }\n\
+        \x20   println!(\"{:.6}\", acc / (n as f64));\n\
+        }\n";
+    let mean: f64 = compile_and_run(&code, main, "fm_freq").parse().unwrap();
+    let expected = 2.0 * std::f64::consts::PI * 100.0;
+    assert!(
+        (mean - expected).abs() < 1.0,
+        "discriminator frequency: got {mean}, expected {expected}"
     );
 }
 

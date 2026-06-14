@@ -5,7 +5,33 @@ expression over node voltages, branch currents, and time. Originally requested
 by oomox (Subspace radio plugin) to make FM capture/threshold/click behavior
 **emerge** from a limiter + discriminator instead of being faked in DSP.
 
-> Status (2026-06-13, latest): **`I={}` and `V={}` both work (algebraic +
+> Status (2026-06-14): **COMPLETE. `I={}`, `V={}`, algebraic + `ddt`/`idt`/`time`
+> + named params, AND the FM `ddt(atan2)` discriminator all work end-to-end.**
+> The discriminator recovers instantaneous frequency (`ddt(atan2(Q,I)) = 2π·f`
+> between wraps) and is stable; static phase → ~0 output. AM and FM virtual
+> antennas both codegen + run. No guarded behavioral features remain.
+>
+> **`ddt`-discriminator fix (2026-06-14).** The discriminator had been unstable;
+> two mechanisms, both fixed:
+> 1. **Lagged Jacobian** ([`Expr::diff_jacobian`]) — `ddt`'s NR-Jacobian partial
+>    `inv_dt·∂x/∂v` is `~SR×` the rest of the matrix and ill-conditions the LU.
+>    `diff_jacobian` treats `ddt` as a constant (`∂ddt/∂v = 0`) for the Jacobian
+>    only; the residual/companion still uses the full `ddt` value, so a
+>    feedforward discriminator converges to `V = ddt(...)` exactly (the Jacobian
+>    steers the iteration, not the fixed point). `idt` keeps its `half_dt`
+>    scaling (tiny, never stiff). The emitter uses `diff_jacobian` for the
+>    behavioral `g_k` partials.
+> 2. **Damping exclusion** — behavioral `V={}` output nodes are algebraically
+>    forced (`V=f`), so the global node-damping must skip them; otherwise the
+>    legit `ddt` startup spike (phase 0→θ in one sample) drives the 5 %/iter
+>    damping, which can't drain it within `MAX_ITER` → the main NR hits max-iter
+>    and falls to the **BE fallback (no behavioral stamps)** → the limiter nodes
+>    collapse to 0 (period-2 osc). `behavioral_damp_skip_literal` excludes them.
+> Tests: `fm_discriminator_static_phase_is_zero`,
+> `fm_discriminator_recovers_frequency`, `expr::tests::diff_jacobian_lags_ddt`.
+>
+> ---
+> Earlier status (superseded): **`I={}` and `V={}` both work (algebraic +
 > `ddt`/`idt`/`time` + named params). The AM virtual-antenna front-end codegens.
 > Only `ddt`-discriminator stiffness remains (FM-specific).**
 >

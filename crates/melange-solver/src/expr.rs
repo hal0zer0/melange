@@ -713,6 +713,26 @@ impl Expr {
     /// simplified beyond trivial constant folding done by [`Expr::simplify`];
     /// call `.simplify()` on the result for compact codegen.
     pub fn diff(&self, var: &Var) -> Expr {
+        self.diff_impl(var, false)
+    }
+
+    /// Partial derivative for the **NR Jacobian** of a behavioral source, with
+    /// `ddt` treated as a constant (`∂ddt/∂v = 0`) — a "lagged Jacobian".
+    ///
+    /// `ddt(x)`'s true partial is `inv_dt·∂x/∂v`, which at audio rates is
+    /// `~SR×` (tens of thousands) larger than the rest of the system and
+    /// ill-conditions the coupled NR (the FM discriminator destabilises the
+    /// limiter). Treating `ddt` as constant in the Jacobian removes that
+    /// stiffness. It does **not** lag the output: the residual / companion
+    /// still uses the full `ddt` value at the current sample, so a feedforward
+    /// discriminator converges to `V = ddt(...)` exactly (the Jacobian only
+    /// steers the iteration, not the fixed point). `idt`'s partial keeps its
+    /// `half_dt` scaling — it's `~dt/2` (tiny), never the stiff term.
+    pub fn diff_jacobian(&self, var: &Var) -> Expr {
+        self.diff_impl(var, true)
+    }
+
+    fn diff_impl(&self, var: &Var, lag_ddt: bool) -> Expr {
         use Expr::*;
         match self {
             Const(_) | Time | InvDt | HalfDt | Param(_) => Const(0.0),
@@ -729,33 +749,45 @@ impl Expr {
                 Var::Branch(v) if v == n => Const(1.0),
                 _ => Const(0.0),
             },
-            Neg(a) => Neg(Box::new(a.diff(var))),
-            Add(a, b) => Add(Box::new(a.diff(var)), Box::new(b.diff(var))),
-            Sub(a, b) => Sub(Box::new(a.diff(var)), Box::new(b.diff(var))),
+            Neg(a) => Neg(Box::new(a.diff_impl(var, lag_ddt))),
+            Add(a, b) => Add(
+                Box::new(a.diff_impl(var, lag_ddt)),
+                Box::new(b.diff_impl(var, lag_ddt)),
+            ),
+            Sub(a, b) => Sub(
+                Box::new(a.diff_impl(var, lag_ddt)),
+                Box::new(b.diff_impl(var, lag_ddt)),
+            ),
             Mul(a, b) => {
                 // (a*b)' = a'*b + a*b'
                 Add(
-                    Box::new(Mul(Box::new(a.diff(var)), b.clone())),
-                    Box::new(Mul(a.clone(), Box::new(b.diff(var)))),
+                    Box::new(Mul(Box::new(a.diff_impl(var, lag_ddt)), b.clone())),
+                    Box::new(Mul(a.clone(), Box::new(b.diff_impl(var, lag_ddt)))),
                 )
             }
             Div(a, b) => {
                 // (a/b)' = (a'*b - a*b') / b^2
                 let num = Sub(
-                    Box::new(Mul(Box::new(a.diff(var)), b.clone())),
-                    Box::new(Mul(a.clone(), Box::new(b.diff(var)))),
+                    Box::new(Mul(Box::new(a.diff_impl(var, lag_ddt)), b.clone())),
+                    Box::new(Mul(a.clone(), Box::new(b.diff_impl(var, lag_ddt)))),
                 );
                 let den = Mul(b.clone(), b.clone());
                 Div(Box::new(num), Box::new(den))
             }
             Func1(f, a) => {
-                let da = a.diff(var);
+                let da = a.diff_impl(var, lag_ddt);
                 let outer = func1_derivative(*f, a);
                 Mul(Box::new(outer), Box::new(da))
             }
-            Func2(f, a, b) => func2_derivative(*f, a, b, var),
-            Ddt(_, a) => Mul(Box::new(InvDt), Box::new(a.diff(var))),
-            Idt(_, a) => Mul(Box::new(HalfDt), Box::new(a.diff(var))),
+            Func2(f, a, b) => func2_derivative(*f, a, b, var, lag_ddt),
+            Ddt(_, a) => {
+                if lag_ddt {
+                    Const(0.0)
+                } else {
+                    Mul(Box::new(InvDt), Box::new(a.diff_impl(var, lag_ddt)))
+                }
+            }
+            Idt(_, a) => Mul(Box::new(HalfDt), Box::new(a.diff_impl(var, lag_ddt))),
         }
     }
 }
@@ -792,10 +824,10 @@ fn func1_derivative(f: UnaryFn, a: &Expr) -> Expr {
     }
 }
 
-fn func2_derivative(f: BinFn, a: &Expr, b: &Expr, var: &Var) -> Expr {
+fn func2_derivative(f: BinFn, a: &Expr, b: &Expr, var: &Var, lag_ddt: bool) -> Expr {
     use Expr::*;
-    let da = a.diff(var);
-    let db = b.diff(var);
+    let da = a.diff_impl(var, lag_ddt);
+    let db = b.diff_impl(var, lag_ddt);
     match f {
         // d atan2(y, x) = (x*dy - y*dx) / (x^2 + y^2 + eps)
         // here a = y, b = x. `eps` (1e-30) regularizes the Jacobian at the
@@ -1321,6 +1353,30 @@ mod tests {
         ctx.integ_prev.insert(0, 10.0);
         // 10 + 0.5*(2 + 4) = 13
         assert_eq!(e.eval(&ctx), 13.0);
+    }
+
+    #[test]
+    fn diff_jacobian_lags_ddt() {
+        // Full diff of ddt(V(a)) uses inv_dt; the Jacobian variant zeros it.
+        let e = parse("ddt(V(a))");
+        let mut ctx = MapCtx::new().with("a", 1.0);
+        ctx.inv_dt = 9999.0;
+        assert!(e.diff(&Var::Node("a".into())).simplify().eval(&ctx) != 0.0);
+        assert!(e
+            .diff_jacobian(&Var::Node("a".into()))
+            .simplify()
+            .eval(&ctx)
+            .abs()
+            < 1e-12);
+
+        // In a product, ddt acts as a constant FACTOR: ∂/∂a [V(a)*ddt(V(b))] =
+        // ddt(V(b)) (the value is kept), not 0.
+        let p = parse("V(a) * ddt(V(b))");
+        let mut ctx2 = MapCtx::new().with("a", 2.0).with("b", 3.0);
+        ctx2.inv_dt = 100.0;
+        ctx2.x_prev.insert(0, 1.0); // ddt(V(b)) = (3 - 1)*100 = 200
+        let jac = p.diff_jacobian(&Var::Node("a".into())).simplify();
+        assert!((jac.eval(&ctx2) - 200.0).abs() < 1e-9, "got {}", jac.eval(&ctx2));
     }
 
     #[test]
