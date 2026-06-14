@@ -5,14 +5,31 @@ expression over node voltages, branch currents, and time. Originally requested
 by oomox (Subspace radio plugin) to make FM capture/threshold/click behavior
 **emerge** from a limiter + discriminator instead of being faked in DSP.
 
-> Status (2026-06-13): **front-end + MNA representation + IR plumbing landed and
-> tested; nodal emitter stamping pending.** The expression engine (symbolic
-> autodiff, named-parameter references), parsing, the MNA representation, and the
-> `CircuitIR.behavioral_sources` plumbing are implemented and unit-tested. The
-> node-space NR stamping in the emitter is **not yet wired** — `CodeGenerator`
-> returns `UnsupportedTopology` for any circuit containing a `B` source so
-> nothing silently mis-compiles. The remaining work is specified in
-> [§Codegen integration plan](#codegen-integration-plan) below.
+> Status (2026-06-13): **algebraic `I={}` works end-to-end (generate → compile →
+> run → matches oracle); `V={}`, `ddt`/`idt`, and named params still guarded.**
+> The expression engine (symbolic autodiff, params), parsing, MNA representation,
+> IR plumbing, routing, and the nodal node-space stamping for **algebraic current
+> sources** are implemented and tested. A `B I={V(a)*V(b)}` multiplier and
+> `B I={tanh(V(a))}` clipper generate code matching the analytic oracle to 1e-5
+> (`crates/melange-solver/tests/behavioral_source_tests.rs`). Still guarded
+> (`behavioral_emitter_supported` → `UnsupportedTopology`): `V={}` (augmented
+> constraint row), `ddt`/`idt`/`time`, named parameters, branch currents. The
+> remaining work is in [§Codegen integration plan](#codegen-integration-plan).
+>
+> **What's wired in the emitter (algebraic `I={}`):** behavioral circuits force
+> `SolverRoute::Nodal` + `use_full_nodal` (the full-LU path) and **backward
+> Euler** (`be = … || behavioral`), because the stamp is current-only and BE's
+> steady state is exactly `G·v = i` (trapezoidal would need an `i_prev` history
+> term — a future refinement; under trap the result is half-right). Per NR
+> iteration: `emit_behavioral_evals` (value + `∂f/∂V` partials at the iterate) →
+> `emit_behavioral_jacobian` stamps `∂f/∂V(k)` into `chord_lu` (full refactor
+> each iteration, since behavioral Jacobian isn't a frozen device block) →
+> `emit_behavioral_rhs` stamps the companion `f − Σ ∂f/∂V·v`. `M=0` behavioral
+> circuits take the NR path (not the linear shortcut) and their nodes join the
+> convergence set. Sign: current `f` flows n+→n-, drawing `f` from n+ ⇒
+> `V(out) = −f` for a source into a 1Ω-to-ground load. **Gotcha proven in test:**
+> the default output DC-blocker high-passes a DC behavioral output to zero — use
+> `dc_block:false` (or an AC signal) when validating DC oracles.
 >
 > **Two oomox requests, one feature.** The original FM-only request
 > (`melange-behavioral-bsource-request.md`) was superseded by

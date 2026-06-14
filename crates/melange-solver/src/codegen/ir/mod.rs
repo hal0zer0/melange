@@ -2007,7 +2007,14 @@ impl CircuitIR {
         // Build A = G + alpha*C, A_neg = alpha*C - G (trapezoidal) or alpha*C (BE)
         // NOTE: These initial matrices include Gm stamps. After DC OP, we strip Gm
         // from aug.g and rebuild A/A_neg for transient (IIR filter handles VCCS externally).
-        let be = config.backward_euler;
+        //
+        // Behavioral B-sources are stamped current-only (no trapezoidal history
+        // term yet), which is exact under backward Euler (steady state G·v = i)
+        // but only half-right under trapezoidal. BE is also the stable choice for
+        // strongly-nonlinear sources (atan2 discriminators). Force it on.
+        // (Trapezoidal + a behavioral i_prev history term is a future refinement
+        // — see docs/aidocs/BEHAVIORAL_SOURCES.md.)
+        let be = config.backward_euler || !mna.behavioral_sources.is_empty();
         let mut a_flat = vec![0.0f64; n * n];
         let mut a_neg_flat = vec![0.0f64; n * n];
         for i in 0..n {

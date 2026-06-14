@@ -103,7 +103,13 @@ pub fn auto_route(kernel: &DkKernel, mna: &MnaSystem, dk_failed: bool) -> Routin
     // Routing decision (first match wins)
     let route;
     let reason;
-    if dk_failed {
+    if !mna.behavioral_sources.is_empty() {
+        // Behavioral B-sources reference arbitrary nodes (rectangular control),
+        // which the DK N_v/N_i reduction can't express. They are stamped
+        // directly in node space by the nodal emitter.
+        route = SolverRoute::Nodal;
+        reason = "behavioral B-source present (node-space stamping requires nodal path)".to_string();
+    } else if dk_failed {
         route = SolverRoute::Nodal;
         reason = "DK kernel build failed (positive feedback or oscillator circuit)".to_string();
     } else if dk_unstable {

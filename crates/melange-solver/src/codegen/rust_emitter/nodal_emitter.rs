@@ -13,8 +13,142 @@ use super::helpers::{
 };
 use super::nr_helpers::{emit_nr_singular_fallback, emit_schur_nr_limit_and_converge};
 use super::RustEmitter;
-use crate::codegen::ir::{CircuitIR, DeviceParams, DeviceType, LuOp};
+use crate::codegen::ir::{BehavioralSourceIR, CircuitIR, DeviceParams, DeviceType, LuOp};
 use crate::codegen::CodegenError;
+use crate::expr::{ExprResolver, Var};
+
+/// Resolves behavioral-expression leaves to generated-Rust strings against the
+/// nodal NR loop's `v[]` voltage vector. Node indices in
+/// `referenced_node_indices` are 1-based (0 = ground); matrix/`v[]` index is
+/// `idx - 1`. Only the algebraic `I={}` surface (nodes) is wired today; the
+/// other resolvers are placeholders guarded off in `behavioral_emitter_supported`.
+struct NodalBsrcResolver<'a> {
+    node_idx: &'a std::collections::BTreeMap<String, usize>,
+}
+
+impl ExprResolver for NodalBsrcResolver<'_> {
+    fn node_v(&self, name: &str) -> String {
+        match self.node_idx.get(name).copied().unwrap_or(0) {
+            0 => "0.0".to_string(),
+            i => format!("v[{}]", i - 1),
+        }
+    }
+    fn branch_i(&self, _name: &str) -> String {
+        "0.0".to_string()
+    }
+    fn param(&self, _name: &str) -> String {
+        "0.0".to_string()
+    }
+    fn time(&self) -> String {
+        "state.sim_time".to_string()
+    }
+    fn inv_dt(&self) -> String {
+        "bsrc_inv_dt".to_string()
+    }
+    fn half_dt(&self) -> String {
+        "bsrc_half_dt".to_string()
+    }
+    fn x_prev(&self, slot: usize) -> String {
+        format!("state.bsrc_x_prev[{slot}]")
+    }
+    fn integ_prev(&self, slot: usize) -> String {
+        format!("state.bsrc_int_prev[{slot}]")
+    }
+}
+
+/// Non-ground referenced nodes as `(name, matrix_index)` pairs, deterministically
+/// ordered (BTreeMap iteration). `matrix_index = node_map_index - 1`.
+fn bsrc_ref_cols(b: &BehavioralSourceIR) -> Vec<(&String, usize)> {
+    b.referenced_node_indices
+        .iter()
+        .filter(|(_, &idx)| idx > 0)
+        .map(|(name, &idx)| (name, idx - 1))
+        .collect()
+}
+
+/// Emit `let bsrc_<si>_f = <expr>;` and one `let bsrc_<si>_g_<col> = <∂expr/∂node>;`
+/// per referenced node, evaluated at the current iterate `v`. Placed before the
+/// refactor/companion blocks so both can use them.
+fn emit_behavioral_evals(code: &mut String, ir: &CircuitIR, indent: &str) {
+    for (si, b) in ir.behavioral_sources.iter().enumerate() {
+        let res = NodalBsrcResolver {
+            node_idx: &b.referenced_node_indices,
+        };
+        let f = b.expr.simplify();
+        code.push_str(&format!("{indent}let bsrc_{si}_f = {};\n", f.to_rust(&res)));
+        for (name, col) in bsrc_ref_cols(b) {
+            let g = b.expr.diff(&Var::Node(name.clone())).simplify();
+            code.push_str(&format!(
+                "{indent}let bsrc_{si}_g_{col} = {};\n",
+                g.to_rust(&res)
+            ));
+        }
+    }
+}
+
+/// Stamp the behavioral Jacobian into `chord_lu` (= G_aug): for current source
+/// `f` from n+ to n-, `∂f/∂V(k)` adds at row n+, subtracts at row n-.
+fn emit_behavioral_jacobian(code: &mut String, ir: &CircuitIR, indent: &str) {
+    for (si, b) in ir.behavioral_sources.iter().enumerate() {
+        let np = b.n_plus_idx;
+        let nm = b.n_minus_idx;
+        for (_name, col) in bsrc_ref_cols(b) {
+            if np > 0 {
+                code.push_str(&format!(
+                    "{indent}chord_lu[{}][{col}] += bsrc_{si}_g_{col};\n",
+                    np - 1
+                ));
+            }
+            if nm > 0 {
+                code.push_str(&format!(
+                    "{indent}chord_lu[{}][{col}] -= bsrc_{si}_g_{col};\n",
+                    nm - 1
+                ));
+            }
+        }
+    }
+}
+
+/// Stamp the behavioral companion current into `rhs_work`:
+/// `comp = f(v) - Σ_k (∂f/∂V(k))·v[k]`, subtracted at n+, added at n-.
+fn emit_behavioral_rhs(code: &mut String, ir: &CircuitIR, indent: &str) {
+    for (si, b) in ir.behavioral_sources.iter().enumerate() {
+        let np = b.n_plus_idx;
+        let nm = b.n_minus_idx;
+        let mut comp = format!("bsrc_{si}_f");
+        for (_name, col) in bsrc_ref_cols(b) {
+            comp.push_str(&format!(" - bsrc_{si}_g_{col} * v[{col}]"));
+        }
+        code.push_str(&format!("{indent}let bsrc_{si}_comp = {comp};\n"));
+        if np > 0 {
+            code.push_str(&format!("{indent}rhs_work[{}] -= bsrc_{si}_comp;\n", np - 1));
+        }
+        if nm > 0 {
+            code.push_str(&format!("{indent}rhs_work[{}] += bsrc_{si}_comp;\n", nm - 1));
+        }
+    }
+}
+
+/// Node indices (0-based) touched by behavioral sources — terminals + referenced
+/// nodes — so the NR convergence check includes them (behavioral circuits are
+/// often `M=0`, where the device-node set would otherwise be empty).
+fn behavioral_convergence_nodes(ir: &CircuitIR) -> Vec<usize> {
+    let mut nodes = Vec::new();
+    for b in &ir.behavioral_sources {
+        if b.n_plus_idx > 0 {
+            nodes.push(b.n_plus_idx - 1);
+        }
+        if b.n_minus_idx > 0 {
+            nodes.push(b.n_minus_idx - 1);
+        }
+        for (_name, col) in bsrc_ref_cols(b) {
+            nodes.push(col);
+        }
+    }
+    nodes.sort();
+    nodes.dedup();
+    nodes
+}
 
 // ============================================================================
 // Sparse N_V / N_I helpers
@@ -438,7 +572,11 @@ impl RustEmitter {
             && m >= 10
             && ir.matrices.spectral_radius_s_aneg > 0.995;
 
-        let use_full_nodal = if linearized_bypass {
+        let use_full_nodal = if !ir.behavioral_sources.is_empty() {
+            // Behavioral B-sources are stamped in node space only on the full-LU
+            // path (the Schur reduction can't express their rectangular control).
+            true
+        } else if linearized_bypass {
             // Only k_degenerate, spectral radius, or large-|K| can block Schur
             k_degenerate || schur_unstable || k_large_magnitude_with_linearization
         } else {
@@ -1329,8 +1467,9 @@ impl RustEmitter {
             code.push_str("    pub settled_i_nl: [f64; M],\n\n");
         }
 
-        // Cross-timestep chord state (persisted LU for full LU path)
-        if m > 0 {
+        // Cross-timestep chord state (persisted LU for full LU path). Behavioral
+        // B-sources force the full-LU path even at M=0, so they need it too.
+        if m > 0 || !ir.behavioral_sources.is_empty() {
             code.push_str(
                 "    // --- Cross-timestep chord method state (persisted LU factors) ---\n",
             );
@@ -1672,7 +1811,7 @@ impl RustEmitter {
         code.push_str("            diag_substep_count: 0,\n");
         code.push_str("            diag_refactor_count: 0,\n");
         code.push_str("            diag_voltage_damp_count: 0,\n");
-        if m > 0 {
+        if m > 0 || !ir.behavioral_sources.is_empty() {
             code.push_str("            chord_lu: [[0.0; N]; N],\n");
             code.push_str("            chord_dr: [1.0; N],\n");
             code.push_str("            chord_dc: [1.0; N],\n");
@@ -4979,6 +5118,7 @@ impl RustEmitter {
         };
         let num_outputs = ir.solver_config.output_nodes.len();
         let os_factor = ir.solver_config.oversampling_factor;
+        let has_behavioral = !ir.behavioral_sources.is_empty();
 
         let mut code = section_banner("PROCESS SAMPLE (Full-nodal NR with LU solve)");
 
@@ -5124,8 +5264,10 @@ impl RustEmitter {
             code.push('\n');
         }
 
-        // Handle linear circuits (M=0): direct LU solve, no NR iteration
-        if m == 0 {
+        // Handle linear circuits (M=0): direct LU solve, no NR iteration.
+        // Behavioral B-sources are nonlinear even when M=0, so they take the NR
+        // path below.
+        if m == 0 && !has_behavioral {
             code.push_str("    // Linear circuit: direct LU solve (no NR needed)\n");
             code.push_str("    let mut g_aug = state.a;\n");
             code.push_str(
@@ -5200,6 +5342,14 @@ impl RustEmitter {
             Self::emit_nodal_device_evaluation_body(&mut code, ir, "        ");
             code.push('\n');
 
+            // Behavioral B-source value + partials at the current iterate.
+            // Used by both the Jacobian (2c) and companion RHS (2d) below.
+            if has_behavioral {
+                code.push_str("        // Behavioral B-source evaluation (value + partials)\n");
+                emit_behavioral_evals(&mut code, ir, "        ");
+                code.push('\n');
+            }
+
             // 2c. Build and factor Jacobian: G_aug = A - N_i * J_dev * N_v (chord method)
             // Factor LU periodically: iter 0, then every CHORD_REFACTOR iterations.
             // Between refactors, reuse stored LU for O(N²) back-solve instead of O(N³) factor.
@@ -5241,7 +5391,13 @@ impl RustEmitter {
                 ir.solver_config.opamp_rail_mode,
                 crate::codegen::OpampRailMode::BoyleDiodes
             );
-            if emit_adaptive_refactor {
+            if has_behavioral {
+                // Behavioral B-source Jacobian entries change every iteration
+                // (nonlinear in arbitrary nodes) and are not part of the frozen
+                // chord device block, so refactor each iteration. Correctness
+                // over the chord's per-sample speedup.
+                code.push_str("        let need_refactor = true;\n");
+            } else if emit_adaptive_refactor {
                 code.push_str("        let mut need_refactor = !chord_valid || (iter > 0 && iter % CHORD_REFACTOR == 0) || iter >= 10;\n");
                 code.push_str("        if !need_refactor {\n");
                 code.push_str("            for k in 0..M {\n");
@@ -5296,6 +5452,10 @@ impl RustEmitter {
                         }
                     }
                 }
+            }
+            // Behavioral B-source Jacobian: stamp ∂f/∂V directly into G_aug.
+            if has_behavioral {
+                emit_behavioral_jacobian(&mut code, ir, "            ");
             }
             // Factor: try sparse LU (if available), fall back to dense
             if ir.sparsity.lu.is_some() {
@@ -5360,6 +5520,10 @@ impl RustEmitter {
                         code.push_str("        }\n");
                     }
                 }
+            }
+            // Behavioral B-source companion current: f(v) - Σ (∂f/∂V)·v.
+            if has_behavioral {
+                emit_behavioral_rhs(&mut code, ir, "        ");
             }
             code.push('\n');
 
@@ -5472,6 +5636,9 @@ impl RustEmitter {
                     .iter()
                     .flat_map(|row| row.iter().copied())
                     .collect();
+                // Behavioral B-sources are often M=0 (no N_v rows); include their
+                // terminal + referenced nodes so the check isn't vacuously true.
+                device_nodes.extend(behavioral_convergence_nodes(ir));
                 device_nodes.sort();
                 device_nodes.dedup();
                 for &node in &device_nodes {
@@ -6097,6 +6264,9 @@ impl RustEmitter {
                     .iter()
                     .flat_map(|row| row.iter().copied())
                     .collect();
+                // Behavioral B-sources are often M=0 (no N_v rows); include their
+                // terminal + referenced nodes so the check isn't vacuously true.
+                device_nodes.extend(behavioral_convergence_nodes(ir));
                 device_nodes.sort();
                 device_nodes.dedup();
                 for &node in &device_nodes {

@@ -417,6 +417,42 @@ pub enum CodegenError {
     Mna(crate::mna::MnaError),
 }
 
+/// Classify whether the nodal emitter can currently stamp a behavioral source.
+///
+/// Wired today: `I={}` current sources whose expression references only node
+/// voltages, `time`, `ddt`, and `idt`. Deferred (errors loudly): `V={}`
+/// (augmented constraint row), named parameters, and branch-current references.
+/// See `docs/aidocs/BEHAVIORAL_SOURCES.md §Codegen integration plan`.
+fn behavioral_emitter_supported(b: &crate::mna::BehavioralSourceInfo) -> Result<(), String> {
+    if matches!(b.kind, crate::parser::BSourceKind::Voltage) {
+        return Err(
+            "V={expr} (behavioral voltage source) not yet wired in codegen — needs the \
+             augmented constraint row; only I={expr} is supported so far"
+                .to_string(),
+        );
+    }
+    if !b.expr.referenced_params().is_empty() {
+        return Err(format!(
+            "named parameters {:?} in the expression are not yet resolved in codegen",
+            b.expr.referenced_params()
+        ));
+    }
+    if !b.expr.referenced_branches().is_empty() {
+        return Err(format!(
+            "branch-current references {:?} are not yet wired in codegen",
+            b.expr.referenced_branches()
+        ));
+    }
+    if b.expr.is_time_dependent() {
+        return Err(
+            "time-dependent expressions (ddt / idt / time) are not yet wired in codegen \
+             (algebraic I={expr} sources are supported)"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 impl std::fmt::Display for CodegenError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let (label, msg) = match self {
@@ -520,20 +556,15 @@ impl CodeGenerator {
         mna: &MnaSystem,
         netlist: &Netlist,
     ) -> Result<GeneratedCode, CodegenError> {
-        // Behavioral `B`-sources parse and are represented in the MNA system,
-        // but the node-space NR stamping is not yet wired into the emitter.
-        // Fail loudly rather than silently dropping the source (which would
-        // generate a circuit missing its behavioral physics).
+        // Behavioral B-sources route to the nodal path (see `routing.rs`); they
+        // are not supported on this DK entry. `generate_nodal` is where the
+        // node-space stamping lives.
         if !mna.behavioral_sources.is_empty() {
-            return Err(CodegenError::UnsupportedTopology(format!(
-                "behavioral B-source(s) {:?} are parsed and represented in MNA but codegen \
-                 emission is not yet implemented (nodal node-space stamping pending). See \
-                 docs/aidocs/BEHAVIORAL_SOURCES.md for the integration plan.",
-                mna.behavioral_sources
-                    .iter()
-                    .map(|b| b.name.as_str())
-                    .collect::<Vec<_>>()
-            )));
+            return Err(CodegenError::UnsupportedTopology(
+                "behavioral B-sources must use the nodal path (they route there \
+                 automatically; call generate_nodal). See docs/aidocs/BEHAVIORAL_SOURCES.md."
+                    .to_string(),
+            ));
         }
 
         // Validate config
@@ -702,6 +733,20 @@ impl CodeGenerator {
                 self.config.output_scales.len(),
                 self.config.output_nodes.len()
             )));
+        }
+
+        // Behavioral B-sources: the nodal node-space stamping is being brought
+        // up incrementally. The `I={}` class (current source over node /
+        // time / ddt / idt) is wired; the rest error loudly rather than emit
+        // code that silently ignores the source. See
+        // docs/aidocs/BEHAVIORAL_SOURCES.md §Codegen integration plan.
+        for b in &mna.behavioral_sources {
+            if let Err(why) = behavioral_emitter_supported(b) {
+                return Err(CodegenError::UnsupportedTopology(format!(
+                    "behavioral source '{}': {why}",
+                    b.name
+                )));
+            }
         }
 
         // BoyleDiodes mode: augment the netlist with the internal-gain-node
