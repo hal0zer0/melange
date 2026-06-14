@@ -129,6 +129,31 @@ fn emit_behavioral_rhs(code: &mut String, ir: &CircuitIR, indent: &str) {
     }
 }
 
+/// Emit the post-convergence `ddt`/`idt` companion-state update at the
+/// converged `v`: store each inner-expression value into `bsrc_x_prev` (after
+/// advancing `bsrc_int_prev` for `idt`, which needs the old value), then advance
+/// `sim_time` by one `dt`.
+fn emit_behavioral_time_update(code: &mut String, ir: &CircuitIR, indent: &str) {
+    for b in &ir.behavioral_sources {
+        let res = NodalBsrcResolver {
+            node_idx: &b.referenced_node_indices,
+        };
+        for (slot, is_idt, inner) in b.expr.collect_time_ops() {
+            let x = inner.simplify().to_rust(&res);
+            code.push_str(&format!("{indent}let bsrc_slot_{slot}_x = {x};\n"));
+            if is_idt {
+                code.push_str(&format!(
+                    "{indent}state.bsrc_int_prev[{slot}] += bsrc_half_dt * (bsrc_slot_{slot}_x + state.bsrc_x_prev[{slot}]);\n"
+                ));
+            }
+            code.push_str(&format!(
+                "{indent}state.bsrc_x_prev[{slot}] = bsrc_slot_{slot}_x;\n"
+            ));
+        }
+    }
+    code.push_str(&format!("{indent}state.sim_time += 2.0 * bsrc_half_dt;\n"));
+}
+
 /// Node indices (0-based) touched by behavioral sources — terminals + referenced
 /// nodes — so the NR convergence check includes them (behavioral circuits are
 /// often `M=0`, where the device-node set would otherwise be empty).
@@ -751,6 +776,27 @@ impl RustEmitter {
             ));
         }
         code.push('\n');
+
+        // Behavioral B-source ddt/idt companion constants.
+        let n_bsrc_slots: usize = ir
+            .behavioral_sources
+            .iter()
+            .map(|b| b.expr.state_slot_count())
+            .sum();
+        if ir.behavioral_sources.iter().any(|b| b.time_dependent) {
+            let internal_rate =
+                ir.solver_config.sample_rate * ir.solver_config.oversampling_factor as f64;
+            code.push_str(&format!(
+                "/// Number of behavioral ddt/idt companion-state slots\npub const N_BSRC_SLOTS: usize = {n_bsrc_slots};\n"
+            ));
+            code.push_str(&format!(
+                "/// 1/dt at codegen sample rate (behavioral ddt). Updated by set_sample_rate.\nconst BSRC_INV_DT_DEFAULT: f64 = {internal_rate:.17e};\n"
+            ));
+            code.push_str(&format!(
+                "/// dt/2 at codegen sample rate (behavioral idt). Updated by set_sample_rate.\nconst BSRC_HALF_DT_DEFAULT: f64 = {:.17e};\n\n",
+                0.5 / internal_rate
+            ));
+        }
 
         // I/O configuration
         code.push_str(&format!(
@@ -1417,6 +1463,19 @@ impl RustEmitter {
         );
         code.push_str("    /// the final permitted iteration (iter == MAX_ITER - 1) does not false-trigger.\n");
         code.push_str("    pub last_nr_iterations: u32,\n\n");
+        // Behavioral B-source ddt/idt companion state.
+        if ir.behavioral_sources.iter().any(|b| b.time_dependent) {
+            code.push_str("    /// Simulation time (s), advanced one dt per inner sample\n");
+            code.push_str("    pub sim_time: f64,\n");
+            code.push_str("    /// 1/dt for behavioral ddt (set by set_sample_rate)\n");
+            code.push_str("    pub bsrc_inv_dt: f64,\n");
+            code.push_str("    /// dt/2 for behavioral idt (set by set_sample_rate)\n");
+            code.push_str("    pub bsrc_half_dt: f64,\n");
+            code.push_str("    /// Previous inner-expression value per ddt/idt slot\n");
+            code.push_str("    pub bsrc_x_prev: [f64; N_BSRC_SLOTS],\n");
+            code.push_str("    /// Running integral per idt slot\n");
+            code.push_str("    pub bsrc_int_prev: [f64; N_BSRC_SLOTS],\n\n");
+        }
         if ir.dc_block {
             code.push_str("    /// DC blocking filter: previous input samples (one per output)\n");
             code.push_str("    pub dc_block_x_prev: [f64; NUM_OUTPUTS],\n");
@@ -1772,6 +1831,13 @@ impl RustEmitter {
         }
         code.push_str("            input_prev: 0.0,\n");
         code.push_str("            last_nr_iterations: 0,\n");
+        if ir.behavioral_sources.iter().any(|b| b.time_dependent) {
+            code.push_str("            sim_time: 0.0,\n");
+            code.push_str("            bsrc_inv_dt: BSRC_INV_DT_DEFAULT,\n");
+            code.push_str("            bsrc_half_dt: BSRC_HALF_DT_DEFAULT,\n");
+            code.push_str("            bsrc_x_prev: [0.0; N_BSRC_SLOTS],\n");
+            code.push_str("            bsrc_int_prev: [0.0; N_BSRC_SLOTS],\n");
+        }
         if !ir.dc_op_converged && m > 0 {
             code.push_str("            dc_settled: false,\n");
             if has_dc_nl {
@@ -2048,6 +2114,11 @@ impl RustEmitter {
         }
         code.push_str("        self.input_prev = 0.0;\n");
         code.push_str("        self.last_nr_iterations = 0;\n");
+        if ir.behavioral_sources.iter().any(|b| b.time_dependent) {
+            code.push_str("        self.sim_time = 0.0;\n");
+            code.push_str("        self.bsrc_x_prev = [0.0; N_BSRC_SLOTS];\n");
+            code.push_str("        self.bsrc_int_prev = [0.0; N_BSRC_SLOTS];\n");
+        }
         if m > 0 {
             code.push_str("        self.chord_valid = false;\n");
         }
@@ -2484,6 +2555,10 @@ impl RustEmitter {
         ));
         if has_pots || has_switches {
             code.push_str("        self.current_sample_rate = internal_rate;\n");
+        }
+        if ir.behavioral_sources.iter().any(|b| b.time_dependent) {
+            code.push_str("        self.bsrc_inv_dt = internal_rate;\n");
+            code.push_str("        self.bsrc_half_dt = 0.5 / internal_rate;\n");
         }
         code.push_str("        self.rebuild_matrices(internal_rate);\n\n");
 
@@ -5119,6 +5194,7 @@ impl RustEmitter {
         let num_outputs = ir.solver_config.output_nodes.len();
         let os_factor = ir.solver_config.oversampling_factor;
         let has_behavioral = !ir.behavioral_sources.is_empty();
+        let has_bsrc_time = ir.behavioral_sources.iter().any(|b| b.time_dependent);
 
         let mut code = section_banner("PROCESS SAMPLE (Full-nodal NR with LU solve)");
 
@@ -5144,6 +5220,12 @@ impl RustEmitter {
         code.push_str(
             "    let input = if input.is_finite() { input.clamp(-100.0, 100.0) } else { 0.0 };\n\n",
         );
+
+        // Behavioral ddt/idt scaling locals (referenced by the resolver).
+        if has_bsrc_time {
+            code.push_str("    let bsrc_inv_dt = state.bsrc_inv_dt;\n");
+            code.push_str("    let bsrc_half_dt = state.bsrc_half_dt;\n\n");
+        }
 
         // Lazy rebuild: batch all pot/switch changes into one matrix rebuild
         let has_pots = !ir.pots.is_empty();
@@ -6423,6 +6505,10 @@ impl RustEmitter {
 
         // Step 3: Update state
         code.push_str("    // Step 3: Update state\n");
+        if has_bsrc_time {
+            code.push_str("    // Behavioral ddt/idt companion-state update (at converged v)\n");
+            emit_behavioral_time_update(&mut code, ir, "    ");
+        }
         code.push_str("    state.v_prev = v;\n");
         if m > 0 {
             code.push_str("    state.i_nl_prev_prev = state.i_nl_prev;\n");

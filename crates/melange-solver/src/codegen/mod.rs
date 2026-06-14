@@ -443,13 +443,6 @@ fn behavioral_emitter_supported(b: &crate::mna::BehavioralSourceInfo) -> Result<
             b.expr.referenced_branches()
         ));
     }
-    if b.expr.is_time_dependent() {
-        return Err(
-            "time-dependent expressions (ddt / idt / time) are not yet wired in codegen \
-             (algebraic I={expr} sources are supported)"
-                .to_string(),
-        );
-    }
     Ok(())
 }
 

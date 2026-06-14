@@ -134,6 +134,49 @@ Cout out 0 1u
 }
 
 #[test]
+fn behavioral_ddt_of_time_is_unity() {
+    // ddt(time) = (t - t_prev)/dt = 1 every sample after the first.
+    // I = ddt(time) into 1Ω ⇒ V(out) = -1.
+    let spice = "\
+Behavioral ddt(time)
+B1 out 0 I={ ddt(time) }
+Rout out 0 1
+Cout out 0 1u
+Rin in 0 1meg
+";
+    // Nodes (0-based): out=0, in=1. Drive input on the isolated `in` node.
+    let code = generate_nodal(spice, 1, 0);
+    let out = compile_and_run(&code, &settle_main(64), "ddt_time");
+    let v_out: f64 = out.parse().unwrap_or_else(|_| panic!("bad output: {out:?}"));
+    assert!(
+        (v_out - (-1.0)).abs() < 1e-4,
+        "ddt(time): got {v_out}, expected -1.0"
+    );
+}
+
+#[test]
+fn behavioral_idt_of_constant_is_a_ramp() {
+    // idt(V(a)) with V(a)=1 accumulates ≈ N·dt. I = idt(1) into 1Ω ⇒
+    // V(out) ≈ -N·dt. At 48 kHz over 4800 samples: ≈ -0.1.
+    let spice = "\
+Behavioral idt(const)
+Va a 0 DC 1
+B1 out 0 I={ idt(V(a)) }
+Rout out 0 1
+Cout out 0 1u
+";
+    // Nodes (0-based): a=0, out=1.
+    let code = generate_nodal(spice, 0, 1);
+    let out = compile_and_run(&code, &settle_main(4800), "idt_const");
+    let v_out: f64 = out.parse().unwrap_or_else(|_| panic!("bad output: {out:?}"));
+    let expected = -(4800.0 / 48000.0);
+    assert!(
+        (v_out - expected).abs() < 5e-3,
+        "idt(const): got {v_out}, expected ≈ {expected}"
+    );
+}
+
+#[test]
 fn v_form_is_rejected_until_wired() {
     // V={} must error cleanly (not silently drop) until the augmented-row path
     // lands.

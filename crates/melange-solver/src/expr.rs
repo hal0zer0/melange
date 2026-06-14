@@ -538,6 +538,37 @@ impl Expr {
         found
     }
 
+    /// Collect every `ddt`/`idt` node as `(slot, is_idt, inner_expr)`, for the
+    /// codegen post-convergence companion-state update.
+    pub fn collect_time_ops(&self) -> Vec<(usize, bool, &Expr)> {
+        let mut out = Vec::new();
+        self.collect_time_ops_into(&mut out);
+        out
+    }
+
+    fn collect_time_ops_into<'a>(&'a self, out: &mut Vec<(usize, bool, &'a Expr)>) {
+        match self {
+            Expr::Ddt(slot, a) => {
+                out.push((*slot, false, a));
+                a.collect_time_ops_into(out);
+            }
+            Expr::Idt(slot, a) => {
+                out.push((*slot, true, a));
+                a.collect_time_ops_into(out);
+            }
+            Expr::Neg(a) | Expr::Func1(_, a) => a.collect_time_ops_into(out),
+            Expr::Add(a, b)
+            | Expr::Sub(a, b)
+            | Expr::Mul(a, b)
+            | Expr::Div(a, b)
+            | Expr::Func2(_, a, b) => {
+                a.collect_time_ops_into(out);
+                b.collect_time_ops_into(out);
+            }
+            _ => {}
+        }
+    }
+
     fn walk(&self, f: &mut impl FnMut(&Expr)) {
         f(self);
         match self {

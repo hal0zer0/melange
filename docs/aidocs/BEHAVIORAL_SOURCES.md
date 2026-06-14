@@ -5,8 +5,14 @@ expression over node voltages, branch currents, and time. Originally requested
 by oomox (Subspace radio plugin) to make FM capture/threshold/click behavior
 **emerge** from a limiter + discriminator instead of being faked in DSP.
 
-> Status (2026-06-13): **algebraic `I={}` works end-to-end (generate → compile →
-> run → matches oracle); `V={}`, `ddt`/`idt`, and named params still guarded.**
+> Status (2026-06-13): **`I={}` (algebraic + `ddt`/`idt`/`time`) works end-to-end
+> (generate → compile → run → matches oracle); `V={}` and named params still
+> guarded.** `ddt(time)=1` and `idt(const)=ramp` are validated. Companion state
+> (`bsrc_x_prev`/`bsrc_int_prev`/`sim_time`/`bsrc_inv_dt`/`bsrc_half_dt`) is
+> emitted on `CircuitState`, updated post-convergence at the converged `v`, and
+> recomputed in `set_sample_rate`. The `ddt`/`idt` companion is independent of
+> the circuit's BE-vs-trap integration (it's the source's own backward-diff /
+> trap accumulator).
 > The expression engine (symbolic autodiff, params), parsing, MNA representation,
 > IR plumbing, routing, and the nodal node-space stamping for **algebraic current
 > sources** are implemented and tested. A `B I={V(a)*V(b)}` multiplier and
