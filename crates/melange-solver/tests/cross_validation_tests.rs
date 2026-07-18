@@ -222,12 +222,13 @@ fn test_codegen_triode_cc() {
     support::assert_peak_above(&output[2400..], 1e-4);
 }
 
-/// Test: Sherman-Morrison pot data is consistent in kernel.
+/// Test: pot data is consistent in kernel.
 ///
-/// Verifies SM precomputed vectors are finite and have correct dimensions.
+/// (Was `test_sherman_morrison_pot_data_sanity`; the SM su/usu vectors were
+/// removed with the SM machinery — per-block rebuild handles pots.)
 #[test]
-fn test_sherman_morrison_pot_data_sanity() {
-    let spice = "SM test\nR1 in mid 1k\n.pot R1 100 10k\nR2 mid out 1k\nC1 out 0 10n\n.end";
+fn test_kernel_pot_data_sanity() {
+    let spice = "Pot test\nR1 in mid 1k\n.pot R1 100 10k\nR2 mid out 1k\nC1 out 0 10n\n.end";
     let netlist = Netlist::parse(spice).expect("parse");
     let mut mna = MnaSystem::from_netlist(&netlist).expect("mna");
     let input_node = mna
@@ -244,13 +245,6 @@ fn test_sherman_morrison_pot_data_sanity() {
     // Verify pot data exists
     assert_eq!(kernel.pots.len(), 1, "Expected 1 pot in kernel");
     let pot = &kernel.pots[0];
-
-    // SU vector should have length N
-    assert_eq!(pot.su.len(), n, "SU length should match N");
-
-    // USU should be finite and non-zero (for a non-degenerate circuit)
-    assert!(pot.usu.is_finite(), "USU should be finite");
-    assert!(pot.usu.abs() > 1e-30, "USU should be non-zero");
 
     // Resistance range should be valid
     assert!(
@@ -283,7 +277,7 @@ fn test_sherman_morrison_pot_data_sanity() {
     );
 
     println!(
-        "SM sanity: N={}, M={}, pot min_R={:.0}, max_R={:.0}, g_nom={:.6e}",
+        "Pot data sanity: N={}, M={}, pot min_R={:.0}, max_R={:.0}, g_nom={:.6e}",
         n, kernel.m, pot.min_resistance, pot.max_resistance, pot.g_nominal
     );
 }

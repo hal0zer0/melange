@@ -58,11 +58,6 @@ Zero dependencies. `no_std`. The foundation everything else builds on.
 - `nr_solve_2d` — 2x2 NR with Cramer's rule (covers most audio circuits)
 - NaN recovery: detect divergence, reset to last known good state
 
-**Companion Models:**
-- `TrapezoidalCompanion` — capacitor discretization: conductance + history source
-- `BilinearCompanion` — for series R-C combinations
-- `companion_conductance(C, fs)` and `companion_update(v_new, v_old)`
-
 **Utilities:**
 - `variation_hash(seed, index)` — deterministic per-instance detuning
 - `midi_to_freq(note)` — standard tuning conversion

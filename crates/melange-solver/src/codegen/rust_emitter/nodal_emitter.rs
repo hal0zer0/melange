@@ -1640,7 +1640,17 @@ impl RustEmitter {
             code.push_str(
                 "    /// Whether chord LU factors are valid (false until first convergence)\n",
             );
-            code.push_str("    pub chord_valid: bool,\n\n");
+            code.push_str("    pub chord_valid: bool,\n");
+            code.push_str(
+                "    /// Whether chord_lu holds DENSE (partial-pivoting) factors from the\n",
+            );
+            code.push_str(
+                "    /// runtime fallback (sparse static pivoting rejected: tiny pivot or\n",
+            );
+            code.push_str(
+                "    /// excessive element growth). Selects the matching back-solve.\n",
+            );
+            code.push_str("    pub chord_dense: bool,\n\n");
         }
 
         code.push_str(
@@ -1983,6 +1993,7 @@ impl RustEmitter {
             code.push_str("            chord_perm: {{ let mut p = [0usize; N]; let mut i = 0; while i < N { p[i] = i; i += 1; } p }},\n");
             code.push_str("            chord_j_dev: [0.0; M * M],\n");
             code.push_str("            chord_valid: false,\n");
+            code.push_str("            chord_dense: false,\n");
         }
         code.push_str("            a: A_DEFAULT,\n");
         code.push_str("            a_neg: A_NEG_DEFAULT,\n");
@@ -3572,7 +3583,14 @@ impl RustEmitter {
                  \x20                   let new_a_kk = state.g_work[k][k] + alpha * state.c_work[k][k];\n\
                  \x20                   let delta_a = new_a_kk - state.a[k][k];\n\
                  \x20                   if delta_a.abs() > 1e-15 {{\n\
-                 \x20                       let scale = delta_a / (1.0 + delta_a * state.s[k][k]);\n\
+                 \x20                       // Guard the SM denominator (LINEAR_ALGEBRA.md \"SM denominator\"\n\
+                 \x20                       // convention, threshold 1e-15, mirroring the DK pot-update guard):\n\
+                 \x20                       // |1 + delta*u^T*S*u| ≈ 0 means the rank-1 update is singular —\n\
+                 \x20                       // skip it and fall back to a full rebuild so S/K/A_neg stay\n\
+                 \x20                       // consistent with the already-patched c_work.\n\
+                 \x20                       let sm_denom = 1.0 + delta_a * state.s[k][k];\n\
+                 \x20                       if sm_denom.abs() > 1e-15 {{\n\
+                 \x20                       let scale = delta_a / sm_denom;\n\
                  \x20                       let mut s_col = [0.0f64; N];\n\
                  \x20                       let mut s_row = [0.0f64; N];\n\
                  \x20                       for i in 0..N {{ s_col[i] = state.s[i][k]; s_row[i] = state.s[k][i]; }}\n\
@@ -3601,7 +3619,15 @@ impl RustEmitter {
                      \x20                       }\n",
                 );
             }
-            code.push_str("                   }\n                }\n");
+            code.push_str(
+                "                       } else {\n\
+                 \x20                       // Singular SM denominator: full O(N³) rebuild instead\n\
+                 \x20                       state.sat_resync_counter = 0;\n\
+                 \x20                       state.rebuild_matrices(state.current_sample_rate);\n\
+                 \x20                       }\n\
+                 \x20                  }\n\
+                 \x20               }\n",
+            );
         }
 
         // TODO: SM for coupled inductors and transformer groups would go here.
@@ -4796,13 +4822,13 @@ impl RustEmitter {
         code.push_str("/// Solve A*x = b using equilibrated LU with partial pivoting + iterative refinement.\n");
         code.push_str("///\n");
         code.push_str(
-            "/// Diagonal equilibration scales rows/cols by 1/sqrt(|A[i][i]|) to reduce\n",
+            "/// Asymmetric row/column max-norm equilibration: rows are scaled by\n",
+        );
+        code.push_str(
+            "/// 1/max_j(|A[i][j]|), then columns by 1/max_i(|A[i][j]|), to reduce the\n",
         );
         code.push_str(
             "/// condition number. One round of iterative refinement corrects residual error.\n",
-        );
-        code.push_str(
-            "/// Matches the runtime solver's `solve_equilibrated()` for numerical parity.\n",
         );
         code.push_str(
             "/// Modifies `a` in place (LU factors). On success, `b` contains the solution.\n",
@@ -5049,12 +5075,17 @@ impl RustEmitter {
     /// Emit compile-time sparse LU factorization (straight-line code, no loops).
     ///
     /// Uses the pre-computed AMD ordering and symbolic elimination schedule from
-    /// `LuSparsity`. Each operation is one line of generated code. Static pivoting
-    /// with a runtime growth-factor check and dense fallback.
-    /// Emit compile-time sparse LU factorization (in-place on original indices).
+    /// `LuSparsity`. Each operation is one line of generated code, in-place on
+    /// original indices — AMD ordering determines the ORDER of elimination, not
+    /// the physical layout, and there are no permutation arrays.
     ///
-    /// All operations reference original node indices. AMD ordering determines
-    /// the ORDER of elimination, not the physical layout. No permutation arrays.
+    /// Pivoting is STATIC (fixed at codegen time), so the emitted function
+    /// guards itself at runtime: it returns `false` on a numerically-tiny pivot
+    /// or when the post-factorization growth check trips (max |entry| of the
+    /// factored matrix > 1e8; the input is equilibrated to unit max-norm, so
+    /// that ratio IS the element growth factor). The caller then re-factors the
+    /// same stamped G_aug densely with partial pivoting (see the `chord_dense`
+    /// fallback in `emit_nodal_process_sample`).
     fn emit_sparse_lu_factor(ir: &CircuitIR) -> String {
         let lu = match &ir.sparsity.lu {
             Some(lu) => lu,
@@ -5071,8 +5102,15 @@ impl RustEmitter {
             n * n * n / 3
         ));
         code.push_str(
-            "/// Returns false if a pivot is too small (fall back to dense lu_factor).\n",
+            "/// Static (symbolic) pivoting. Returns false when a pivot is numerically\n",
         );
+        code.push_str(
+            "/// too small OR the growth-factor check trips (max |factored entry| > 1e8\n",
+        );
+        code.push_str(
+            "/// against the equilibrated unit max-norm input); the caller re-factors\n",
+        );
+        code.push_str("/// the same stamped matrix with dense partial-pivoting lu_factor.\n");
         code.push_str("#[inline(always)]\n");
         code.push_str("fn sparse_lu_factor(a: &mut [[f64; N]; N], dr: &mut [f64; N], dc: &mut [f64; N]) -> bool {\n");
 
@@ -5129,6 +5167,21 @@ impl RustEmitter {
                 }
             }
         }
+
+        // Growth-factor check. Equilibration bounded the pre-factor matrix to
+        // unit max-norm, so max |entry| of the factored matrix directly measures
+        // element growth under the static pivot order. Dense partial pivoting
+        // bounds growth; static pivoting does not — a knee-crossing device
+        // Jacobian can make a symbolically-fine pivot numerically tiny and blow
+        // the factors up. Reject so the caller re-factors densely.
+        code.push_str("\n    // Growth-factor check (pre-factor matrix has unit max-norm)\n");
+        code.push_str("    let mut growth = 0.0f64;\n");
+        code.push_str("    for i in 0..N {\n");
+        code.push_str(
+            "        for j in 0..N { let v = a[i][j].abs(); if v > growth { growth = v; } }\n",
+        );
+        code.push_str("    }\n");
+        code.push_str("    if !growth.is_finite() || growth > 1e8 { return false; }\n");
 
         code.push_str("\n    true\n");
         code.push_str("}\n\n");
@@ -5429,7 +5482,11 @@ impl RustEmitter {
             code.push_str("    let mut chord_dc = state.chord_dc;\n");
             code.push_str("    let mut chord_perm = state.chord_perm;\n");
             code.push_str("    let mut chord_j_dev = state.chord_j_dev;\n");
-            code.push_str("    let mut chord_valid = state.chord_valid;\n\n");
+            code.push_str("    let mut chord_valid = state.chord_valid;\n");
+            if ir.sparsity.lu.is_some() {
+                code.push_str("    let mut chord_dense = state.chord_dense;\n");
+            }
+            code.push('\n');
 
             // Trapezoidal NR loop
             code.push_str("    for iter in 0..MAX_ITER {\n");
@@ -5476,45 +5533,38 @@ impl RustEmitter {
                 "        // 2c. Build and factor Jacobian (adaptive chord: reuse across timesteps)\n",
             );
             // Refactor when: (a) no valid LU, (b) within-sample periodic
-            // refresh, OR (BoyleDiodes only) (c) any device's diagonal
-            // Jacobian has diverged from `chord_j_dev` by >50 % relative.
+            // refresh, OR (c) any device's diagonal Jacobian has diverged
+            // from `chord_j_dev` by >50 % relative.
             //
             // The cross-timestep chord persistence holds `chord_j_dev`
-            // frozen across many samples. That's fine for smoothly-
-            // conducting devices (Schottky, BJT, JFET, MOSFET, tube), but
-            // it breaks for the Boyle catch-diode model: at the DC
-            // operating point a catch diode is deeply reverse-biased and
-            // `j_dev ≈ 1e-31`, but the moment an op-amp output reaches
-            // its rail the same diode wants `j_dev ≈ 1e1` — 32 orders of
-            // magnitude away. Even with the residual check (added
-            // separately below), NR can't find the true convergence
-            // within MAX_ITER=50 iterations because every refactor only
-            // happens at iter % 5 == 0, by which point pnjlim has
-            // damped the steps so far that the chord can't catch up.
+            // frozen across many samples. That's fine while a device
+            // conducts smoothly, but a stale chord across an exponential
+            // knee is device-generic: any diode/junction crossing from
+            // reverse- to forward-bias moves `j_dev` by many orders of
+            // magnitude between refactors (the extreme case is the Boyle
+            // catch diode: ≈1e-31 S deeply reverse-biased vs ≈1e1 S at
+            // the rail — 32 OOM). Without the adaptive trigger, refactors
+            // only happen at iter % 5 == 0 / iter >= 10, by which point
+            // pnjlim has damped the steps so far that the chord can't
+            // catch up within MAX_ITER.
             //
-            // Gating the adaptive trigger on BoyleDiodes mode keeps
-            // VCR ALC's compressor attack timing tests byte-for-byte
-            // unchanged: the rectifier diodes in the sidechain don't
-            // exhibit the deep-reverse → deep-forward transition that
-            // catch diodes do, so the trigger never fires for them
-            // anyway when BoyleDiodes is off (and we don't even emit
-            // the check for non-BoyleDiodes circuits).
+            // The trigger is emitted unconditionally (was BoyleDiodes-only):
+            // it only compares the already-computed per-iteration `j_dev`
+            // diagonal against the persisted `chord_j_dev` — O(M) compares,
+            // no extra device evaluations — and for smoothly-conducting
+            // devices it simply never fires.
             //
             // The 50 % threshold is empirical: lower (e.g. 20 %) causes
             // spurious refactors that trap pnjlim's step damping in a
             // different slow-oscillation regime; higher (e.g. 80 %)
             // misses the diode-knee transition.
-            let emit_adaptive_refactor = matches!(
-                ir.solver_config.opamp_rail_mode,
-                crate::codegen::OpampRailMode::BoyleDiodes
-            );
             if has_behavioral {
                 // Behavioral B-source Jacobian entries change every iteration
                 // (nonlinear in arbitrary nodes) and are not part of the frozen
                 // chord device block, so refactor each iteration. Correctness
                 // over the chord's per-sample speedup.
                 code.push_str("        let need_refactor = true;\n");
-            } else if emit_adaptive_refactor {
+            } else {
                 code.push_str("        let mut need_refactor = !chord_valid || (iter > 0 && iter % CHORD_REFACTOR == 0) || iter >= 10;\n");
                 code.push_str("        if !need_refactor {\n");
                 code.push_str("            for k in 0..M {\n");
@@ -5527,8 +5577,6 @@ impl RustEmitter {
                 code.push_str("                }\n");
                 code.push_str("            }\n");
                 code.push_str("        }\n");
-            } else {
-                code.push_str("        let need_refactor = !chord_valid || (iter > 0 && iter % CHORD_REFACTOR == 0) || iter >= 10;\n");
             }
             code.push_str("        if need_refactor {\n");
             code.push_str("            chord_j_dev = j_dev;\n");
@@ -5574,12 +5622,27 @@ impl RustEmitter {
             if has_behavioral {
                 emit_behavioral_jacobian(&mut code, ir, "            ");
             }
-            // Factor: try sparse LU (if available), fall back to dense
+            // Factor: try sparse LU (if available). The sparse schedule uses
+            // STATIC (symbolic) pivoting, which can fail at runtime — a pivot
+            // numerically near zero, or excessive element growth (checked
+            // inside sparse_lu_factor). On rejection, re-factor DENSE with
+            // partial pivoting in the same NR iteration on the saved stamped
+            // G_aug; `chord_dense` records which factorization the persisted
+            // chord_lu holds so back-solves (this sample and later ones via
+            // cross-timestep persistence) dispatch correctly.
             if ir.sparsity.lu.is_some() {
-                code.push_str("            if !sparse_lu_factor(&mut chord_lu, &mut chord_dr, &mut chord_dc) {\n");
-                code.push_str("                // Sparse pivot too small — fall back to dense LU with partial pivoting\n");
-                code.push_str("                state.diag_nr_max_iter_count += 1;\n");
-                code.push_str("                break;\n");
+                code.push_str("            let g_aug_stamped = chord_lu;\n");
+                code.push_str("            if sparse_lu_factor(&mut chord_lu, &mut chord_dr, &mut chord_dc) {\n");
+                code.push_str("                chord_dense = false;\n");
+                code.push_str("            } else {\n");
+                code.push_str("                // Sparse factor rejected (tiny pivot or growth-factor check):\n");
+                code.push_str("                // re-factor DENSE with partial pivoting in this same iteration.\n");
+                code.push_str("                chord_lu = g_aug_stamped;\n");
+                code.push_str("                if !lu_factor(&mut chord_lu, &mut chord_dr, &mut chord_dc, &mut chord_perm) {\n");
+                code.push_str("                    state.diag_nr_max_iter_count += 1;\n");
+                code.push_str("                    break;\n");
+                code.push_str("                }\n");
+                code.push_str("                chord_dense = true;\n");
                 code.push_str("            }\n");
             } else {
                 code.push_str(
@@ -5646,9 +5709,14 @@ impl RustEmitter {
 
             // 2e. Solve with stored LU factors (O(N²) back-solve)
             if ir.sparsity.lu.is_some() {
-                code.push_str("        // 2e. Sparse back-solve with stored LU factors\n");
+                code.push_str("        // 2e. Back-solve with stored LU factors (sparse, or the dense\n");
+                code.push_str("        // runtime fallback when the sparse factorization was rejected)\n");
                 code.push_str("        let mut v_new = rhs_work;\n");
-                code.push_str("        sparse_lu_back_solve(&chord_lu, &chord_dr, &chord_dc, &mut v_new);\n\n");
+                code.push_str("        if chord_dense {\n");
+                code.push_str("            lu_back_solve(&chord_lu, &chord_dr, &chord_dc, &chord_perm, &mut v_new);\n");
+                code.push_str("        } else {\n");
+                code.push_str("            sparse_lu_back_solve(&chord_lu, &chord_dr, &chord_dc, &mut v_new);\n");
+                code.push_str("        }\n\n");
             } else {
                 code.push_str(
                     "        // 2e. Solve with stored LU factors (chord: O(N²) back-solve)\n",
@@ -5836,7 +5904,8 @@ impl RustEmitter {
                 }
             }
 
-            // Residual-based convergence safety net (BoyleDiodes only).
+            // Residual-based convergence safety net (unconditional whenever a
+            // chord is in use — i.e. always on this path when M > 0).
             //
             // The voltage-step check above (`max_step_exceeded`) declares
             // convergence whenever the damped Newton step is small. That
@@ -5844,43 +5913,37 @@ impl RustEmitter {
             // persistence holds a stale Jacobian: the LU back-solve uses
             // `chord_j_dev` while the actual device current at the new
             // operating point is `i_dev(v_nl_new)`. If `chord_j_dev` is
-            // grossly out of date — which happens specifically for Boyle
-            // catch diodes whose `j_dev` spans 32 OOM between deeply-
-            // reverse-biased (≈1e-31 S at v_nl=-3 V) and forward-biased
-            // (≈1e+1 S at v_nl=+0.8 V) — the LU's "fixed point" is a
-            // non-physical state where KCL is satisfied for the LINEARISED
-            // network but not for the actual nonlinear devices. NR happily
-            // reports converged on a wildly wrong v.
+            // grossly out of date, the LU's "fixed point" is a non-physical
+            // state where KCL is satisfied for the LINEARISED network but
+            // not for the actual nonlinear devices — NR happily reports
+            // converged on a wildly wrong v. A stale chord across an
+            // exponential knee is device-generic (any diode/junction
+            // crossing reverse→forward moves j_dev by many OOM between
+            // refactors); the historical extreme is the Boyle catch diode
+            // (≈1e-31 S reverse-biased vs ≈1e+1 S at the rail, 32 OOM),
+            // and 4kbuscomp's ActiveSetBe precision rectifiers hit the
+            // same class — which is why this used to be rail-mode-gated
+            // (BoyleDiodes, later + ActiveSet/ActiveSetBe) and is now
+            // emitted unconditionally, matching the DK path, whose
+            // residual check has always been ungated (see
+            // `nr_helpers.rs::emit_nr_limit_and_converge`, "Current
+            // residual check: always").
             //
-            // The DK Schur NR loop has had a residual check since
-            // melange-solver inception (see `emit_nr_limit_and_converge`,
-            // ~line 2920). This block ports the same idea to the full-LU
-            // path: after the step is applied, re-evaluate `i_nl_fresh`
-            // from the device equations at the updated v and require
-            // it to match the `i_nl` that the LU was solved against.
-            // Mismatch ⇒ NR keeps iterating, eventually triggering the
-            // periodic chord refactor (iter % 5 == 0 or iter ≥ 10), the
-            // sub-step retry, or the BE fallback — any of which has a
-            // chance to break out of the stale-chord trap.
+            // Cost: the block only runs on the ACCEPTING iteration (inside
+            // `if !max_step_exceeded`), so it adds M device evaluations
+            // once per sample, not per NR iteration.
             //
-            // Gated to BoyleDiodes because (a) no other validated circuit
-            // exhibits the false-convergence pattern, and (b) the
-            // re-evaluation costs M device-equation calls per NR
-            // iteration. Schottky/BJT/JFET/MOSFET/tube circuits all have
-            // their `j_dev` evolve smoothly enough that the chord stays
-            // close enough to satisfy the voltage-step criterion as a
-            // sufficient convergence check on its own.
+            // Mismatch ⇒ NR keeps iterating, triggering the adaptive
+            // >50 %-j_dev refactor above, the periodic chord refactor, the
+            // sub-step retry, or the BE fallback — any of which can break
+            // out of the stale-chord trap.
             //
             // Implementation note: the device-evaluation helper writes
             // into local `v_nl`, `i_nl`, `j_dev` arrays of fixed names.
             // We use a nested `{ }` block so Rust shadows those bindings
             // — the throwaway `j_dev` inside the block doesn't disturb
             // the chord-stamped `j_dev` in the outer scope.
-            // (`OpampRailMode` is already imported above.)
-            if matches!(
-                ir.solver_config.opamp_rail_mode,
-                OpampRailMode::BoyleDiodes | OpampRailMode::ActiveSetBe | OpampRailMode::ActiveSet
-            ) {
+            if m > 0 {
                 code.push_str(
                     "        // Residual check: re-evaluate i_nl at the post-step v and force\n",
                 );
@@ -6561,6 +6624,9 @@ impl RustEmitter {
             code.push_str("    state.chord_perm = chord_perm;\n");
             code.push_str("    state.chord_j_dev = chord_j_dev;\n");
             code.push_str("    state.chord_valid = chord_valid;\n");
+            if ir.sparsity.lu.is_some() {
+                code.push_str("    state.chord_dense = chord_dense;\n");
+            }
         }
         // IIR op-amp state update (PURE EXPLICIT):
         //   x_prev ← x_new (from converged v, for next sample's explicit injection)

@@ -27,8 +27,11 @@ fn pnjlim(vnew: f64, vold: f64, vt: f64, vcrit: f64) -> f64 {
 fn fetlim(vnew: f64, vold: f64, vto: f64) -> f64 {
     let delv = vnew - vold;
     let vtox = vto + 3.5;
+    // SPICE3f5 DEVfetlim (with Alan Gillespie's vtstlo fix):
+    //   vtsthi = |2*(vold-vto)| + 2
+    //   vtstlo = |vold-vto| + 1     (= vtsthi/2)
     let vtsthi = (2.0 * (vold - vto)).abs() + 2.0;
-    let vtstlo = vtsthi / 2.0 + 2.0;
+    let vtstlo = (vold - vto).abs() + 1.0;
 
     if vold >= vto {
         // Device is "on"
@@ -59,8 +62,9 @@ fn fetlim(vnew: f64, vold: f64, vto: f64) -> f64 {
     } else {
         // Device is "off"
         if delv <= 0.0 {
-            if -delv > vtstlo {
-                return vold - vtstlo;
+            // SPICE clamps the off/decreasing branch with vtsthi (NOT vtstlo)
+            if -delv > vtsthi {
+                return vold - vtsthi;
             }
         } else if vnew <= vto + 0.5 {
             if delv > vtstlo {

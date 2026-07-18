@@ -561,7 +561,7 @@ When factor > 1, the codegen:
 ### Filter Design
 - **2x**: 3-section polyphase allpass half-band (~80dB stopband rejection)
 - **4x**: Cascaded 2x — outer stage uses 2-section (~60dB), inner stage uses 3-section (~80dB)
-- Coefficients from `melange-primitives/src/oversampling.rs` (HB_3SECTION, HB_2SECTION)
+- Coefficients from `melange-primitives/src/oversampling.rs` (HB_STEEP_7SECTION for 2x and the 4x outer stage, HB_WIDE_3SECTION for the 4x inner stage — hiir-designed polyphase half-band sets; see OVERSAMPLING.md)
 
 ### State Fields
 - `os_up_state`, `os_dn_state`: allpass filter state for upsample/downsample (2x)

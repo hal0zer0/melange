@@ -96,7 +96,7 @@ use super::nr_helpers::emit_dk_device_evaluation;
 ///      from a stale offset (E.5).
 ///
 /// Linear-only circuits (`M == 0` or no device slots) short-circuit the NR
-/// loop: a single `invert_n(g_aug)` solve gives the resistive fixed point.
+/// loop: a single `invert_n_equilibrated(g_aug)` solve gives the resistive fixed point.
 pub(super) fn emit_recompute_dc_op_body_dk(ir: &CircuitIR) -> Result<String, CodegenError> {
     let mut body = String::new();
     body.push_str(
@@ -350,14 +350,18 @@ fn emit_dc_op_build_b_dc_dk(ir: &CircuitIR) -> String {
 /// Emit the linear-only DC OP solve (`M == 0` or no device slots).
 ///
 /// Skips the NR loop entirely: the system `g_aug · v = b_dc` is already
-/// linear, so a single `invert_n` + matrix-vector multiply gives the fixed
+/// linear, so a single `invert_n_equilibrated` + matrix-vector multiply gives the fixed
 /// point. On singular `g_aug`, state is left unchanged and the diag counter
 /// is bumped.
 fn emit_dc_op_linear_solve_dk(_ir: &CircuitIR) -> String {
     let mut body = String::new();
     body.push_str(
         "\n        // Linear circuit (M == 0): solve g_aug · v = b_dc once.\n\
-         \x20       let (g_inv, singular) = invert_n(g_aug);\n\
+         \x20       // Use the equilibrated inverse — g_aug can be badly scaled\n\
+         \x20       // (mixed conductance/constraint rows), and the runtime pot/\n\
+         \x20       // switch values it was rebuilt from can push cond(g_aug) far\n\
+         \x20       // beyond the codegen-time matrix.\n\
+         \x20       let (g_inv, singular) = invert_n_equilibrated(g_aug);\n\
          \x20       if singular {\n\
          \x20           self.diag_singular_matrix_count += 1;\n\
          \x20           return;\n\
@@ -383,7 +387,7 @@ fn emit_dc_op_linear_solve_dk(_ir: &CircuitIR) -> String {
 ///   2. Evaluates per-device currents + dense Jacobian.
 ///   3. Builds `G_aug_nr = g_aug − N_i · J_dev · N_v`.
 ///   4. Builds `rhs_nr = b_dc + N_i · (i_nl − J_dev · v_nl)`.
-///   5. LU-solves `G_aug_nr · v_new = rhs_nr` via the emitted `invert_n`
+///   5. LU-solves `G_aug_nr · v_new = rhs_nr` via the emitted `invert_n_equilibrated`
 ///      helper (returns `(inv, singular)`).
 ///   6. Applies flat global voltage damping when any element of the step
 ///      exceeds the damping threshold, plus a per-element clamp, and
@@ -506,8 +510,10 @@ fn emit_dc_op_nr_loop_dk(ir: &CircuitIR) -> Result<String, CodegenError> {
 
     // LU-solve.
     out.push_str(&format!(
-        "{inner}// Solve G_aug_nr · v_new = rhs_nr via the shared `invert_n`.\n\
-         {inner}let (g_inv, singular) = invert_n(g_aug_nr);\n\
+        "{inner}// Solve G_aug_nr · v_new = rhs_nr via the shared equilibrated inverse\n\
+         {inner}// (same rationale as the linear solve: G_aug_nr mixes conductance,\n\
+         {inner}// constraint, and device-Jacobian scales).\n\
+         {inner}let (g_inv, singular) = invert_n_equilibrated(g_aug_nr);\n\
          {inner}if singular {{\n\
          {inner}    self.diag_singular_matrix_count += 1;\n\
          {inner}    break;\n\

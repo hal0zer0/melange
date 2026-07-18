@@ -685,6 +685,487 @@ Vdd vdd 0 DC 12
         }
     }
 
+    // ── Companion-path inductor time-march vs exact trapezoidal reference ──
+    //
+    // These tests march the DK kernel's companion-model inductor path
+    // (LinearSolver-equivalent loop: rhs = rhs_const + A_neg*v_prev +
+    // i_hist injections + trapezoidal input, v = S*rhs, update state)
+    // against an independent per-step solve of the exact trapezoidal
+    // discretization of the circuit ODEs. Any error in the stored history
+    // current (F1: i_hist must be 2*i[n-1], not the single-step Norton
+    // i[n] - g_eq*v[n]) shows up as a large per-sample deviation.
+
+    /// March the kernel's companion path for `steps` samples of `input`,
+    /// with G_in = 1.0 stamped at `input_idx` (0-based). Returns node
+    /// voltage history (steps × n_nodes).
+    fn march_companion_kernel(
+        kernel: &mut DkKernel,
+        input: &[f64],
+        input_idx: usize,
+    ) -> Vec<Vec<f64>> {
+        let n = kernel.n;
+        let mut v_prev = vec![0.0; n];
+        let mut v = vec![0.0; n];
+        let mut rhs = vec![0.0; n];
+        let mut input_prev = 0.0;
+        let mut out = Vec::with_capacity(input.len());
+        for &u in input {
+            for i in 0..n {
+                let mut sum = kernel.rhs_const[i];
+                for j in 0..n {
+                    sum += kernel.a_neg(i, j) * v_prev[j];
+                }
+                rhs[i] = sum;
+            }
+            for ind in &kernel.inductors {
+                if ind.node_i > 0 {
+                    rhs[ind.node_i - 1] -= ind.i_hist;
+                }
+                if ind.node_j > 0 {
+                    rhs[ind.node_j - 1] += ind.i_hist;
+                }
+            }
+            for ci in &kernel.coupled_inductors {
+                if ci.l1_node_i > 0 {
+                    rhs[ci.l1_node_i - 1] -= ci.i1_hist;
+                }
+                if ci.l1_node_j > 0 {
+                    rhs[ci.l1_node_j - 1] += ci.i1_hist;
+                }
+                if ci.l2_node_i > 0 {
+                    rhs[ci.l2_node_i - 1] -= ci.i2_hist;
+                }
+                if ci.l2_node_j > 0 {
+                    rhs[ci.l2_node_j - 1] += ci.i2_hist;
+                }
+            }
+            for group in &kernel.transformer_groups {
+                for k in 0..group.num_windings {
+                    if group.winding_node_i[k] > 0 {
+                        rhs[group.winding_node_i[k] - 1] -= group.i_hist[k];
+                    }
+                    if group.winding_node_j[k] > 0 {
+                        rhs[group.winding_node_j[k] - 1] += group.i_hist[k];
+                    }
+                }
+            }
+            rhs[input_idx] += (u + input_prev) * 1.0;
+            input_prev = u;
+            for i in 0..n {
+                let mut sum = 0.0;
+                for j in 0..n {
+                    sum += kernel.s(i, j) * rhs[j];
+                }
+                v[i] = sum;
+            }
+            v_prev.copy_from_slice(&v);
+            kernel.update_inductors(&v);
+            kernel.update_coupled_inductors(&v);
+            kernel.update_transformer_groups(&v);
+            out.push(v.clone());
+        }
+        out
+    }
+
+    fn sine_input(steps: usize, fs: f64, freq: f64, amp: f64) -> Vec<f64> {
+        (0..steps)
+            .map(|k| amp * (2.0 * std::f64::consts::PI * freq * k as f64 / fs).sin())
+            .collect()
+    }
+
+    /// Uncoupled inductor: series R (Thevenin 1Ω + 100Ω) into L to ground.
+    /// Exact trapezoidal reference:
+    ///   i[n](1 + c) = i[n-1](1 - c) + (T/2L)(u[n] + u[n-1]),  c = T*R_tot/(2L)
+    ///   v_out[n] = u[n] - R_tot*i[n]
+    #[test]
+    fn test_companion_inductor_rl_time_march_matches_exact_trapezoidal() {
+        let spice = "RL Highpass\nR1 in out 100\nL1 out 0 10m\n";
+        let netlist = Netlist::parse(spice).unwrap();
+        let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
+        let in_idx = mna.node_map["in"] - 1;
+        let out_idx = mna.node_map["out"] - 1;
+        mna.g[in_idx][in_idx] += 1.0;
+
+        let fs = 48000.0;
+        let t = 1.0 / fs;
+        let mut kernel = DkKernel::from_mna(&mna, fs).unwrap();
+        let input = sine_input(512, fs, 1000.0, 1.0);
+        let v_hist = march_companion_kernel(&mut kernel, &input, in_idx);
+
+        // Exact trapezoidal reference
+        let r_tot = 101.0;
+        let l = 10e-3;
+        let c = t * r_tot / (2.0 * l);
+        let mut i = 0.0;
+        let mut u_prev = 0.0;
+        let mut max_err = 0.0_f64;
+        for (k, &u) in input.iter().enumerate() {
+            i = (i * (1.0 - c) + (t / (2.0 * l)) * (u + u_prev)) / (1.0 + c);
+            u_prev = u;
+            let v_out_ref = u - r_tot * i;
+            let v_in_ref = u - 1.0 * i;
+            max_err = max_err
+                .max((v_hist[k][out_idx] - v_out_ref).abs())
+                .max((v_hist[k][in_idx] - v_in_ref).abs());
+        }
+        assert!(
+            max_err < 1e-12,
+            "RL companion march deviates from exact trapezoidal reference: \
+             max_err = {max_err:.3e} (i_hist formula wrong? F1: must inject -2*i[n-1])"
+        );
+    }
+
+    /// Series RLC: exercises the interaction of companion-inductor history
+    /// with the A_neg capacitor history.
+    #[test]
+    fn test_companion_inductor_rlc_time_march_matches_exact_trapezoidal() {
+        let spice = "RLC Series\nR1 in a 100\nL1 a b 10m\nC1 b 0 100n\n";
+        let netlist = Netlist::parse(spice).unwrap();
+        let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
+        let in_idx = mna.node_map["in"] - 1;
+        let a_idx = mna.node_map["a"] - 1;
+        let b_idx = mna.node_map["b"] - 1;
+        mna.g[in_idx][in_idx] += 1.0;
+
+        let fs = 48000.0;
+        let t = 1.0 / fs;
+        let mut kernel = DkKernel::from_mna(&mna, fs).unwrap();
+        let input = sine_input(512, fs, 2000.0, 1.0);
+        let v_hist = march_companion_kernel(&mut kernel, &input, in_idx);
+
+        // Exact trapezoidal reference: states i (series current), v_c.
+        //   v_L = u - R_tot*i - v_c
+        //   i[n] = i[n-1] + (T/2L)(v_L[n] + v_L[n-1])
+        //   v_c[n] = v_c[n-1] + (T/2C)(i[n] + i[n-1])
+        let r_tot = 101.0;
+        let l = 10e-3;
+        let cap = 100e-9;
+        let al = t / (2.0 * l);
+        let bc = t / (2.0 * cap);
+        let mut i = 0.0;
+        let mut v_c = 0.0;
+        let mut v_l = 0.0;
+        let mut max_err = 0.0_f64;
+        for (k, &u) in input.iter().enumerate() {
+            // i[n]*(1 + al*R_tot + al*bc) = i[n-1]*(1 - al*bc) + al*(u - v_c[n-1] + v_L[n-1])
+            let i_new = (i * (1.0 - al * bc) + al * (u - v_c + v_l)) / (1.0 + al * r_tot + al * bc);
+            let v_c_new = v_c + bc * (i_new + i);
+            let v_l_new = u - r_tot * i_new - v_c_new;
+            i = i_new;
+            v_c = v_c_new;
+            v_l = v_l_new;
+            let v_in_ref = u - 1.0 * i;
+            let v_a_ref = u - r_tot * i;
+            let v_b_ref = v_c;
+            max_err = max_err
+                .max((v_hist[k][in_idx] - v_in_ref).abs())
+                .max((v_hist[k][a_idx] - v_a_ref).abs())
+                .max((v_hist[k][b_idx] - v_b_ref).abs());
+        }
+        assert!(
+            max_err < 1e-12,
+            "RLC companion march deviates from exact trapezoidal reference: max_err = {max_err:.3e}"
+        );
+    }
+
+    /// Coupled 2-winding pair (K statement): vector companion history.
+    /// Reference: i[n] = i[n-1] + (T/2)*inv(L)*(v[n] + v[n-1]) with
+    /// v = b - D*i (b = [u, 0], D = diag(R_tot, R_load)).
+    #[test]
+    fn test_companion_coupled_pair_time_march_matches_exact_trapezoidal() {
+        let spice = "Coupled Pair\nR1 in p1 100\nL1 p1 0 10m\nL2 s1 0 10m\nK1 L1 L2 0.9\nRload s1 0 1k\n";
+        let netlist = Netlist::parse(spice).unwrap();
+        let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
+        assert_eq!(mna.coupled_inductors.len(), 1);
+        let in_idx = mna.node_map["in"] - 1;
+        let p1_idx = mna.node_map["p1"] - 1;
+        let s1_idx = mna.node_map["s1"] - 1;
+        mna.g[in_idx][in_idx] += 1.0;
+
+        let fs = 48000.0;
+        let t = 1.0 / fs;
+        let mut kernel = DkKernel::from_mna(&mna, fs).unwrap();
+        let input = sine_input(512, fs, 1000.0, 1.0);
+        let v_hist = march_companion_kernel(&mut kernel, &input, in_idx);
+
+        // Reference
+        let l1 = 10e-3_f64;
+        let l2 = 10e-3_f64;
+        let m_val = 0.9 * (l1 * l2).sqrt();
+        let l_mat = vec![vec![l1, m_val], vec![m_val, l2]];
+        let y_l = invert_matrix(&l_mat).unwrap();
+        let d = [101.0, 1000.0];
+        let ht = t / 2.0;
+        // Solve (I + ht*Y*D) i[n] = i[n-1] + ht*Y*(b[n] + v[n-1]) each step
+        let mut sys = vec![vec![0.0; 2]; 2];
+        for r in 0..2 {
+            for c in 0..2 {
+                sys[r][c] = (r == c) as u32 as f64 + ht * y_l[r][c] * d[c];
+            }
+        }
+        let sys_inv = invert_matrix(&sys).unwrap();
+        let mut i = [0.0_f64; 2];
+        let mut v = [0.0_f64; 2];
+        let mut max_err = 0.0_f64;
+        for (k, &u) in input.iter().enumerate() {
+            let b = [u, 0.0];
+            let mut rhs = [0.0_f64; 2];
+            for r in 0..2 {
+                rhs[r] = i[r];
+                for c in 0..2 {
+                    rhs[r] += ht * y_l[r][c] * (b[c] + v[c]);
+                }
+            }
+            let mut i_new = [0.0_f64; 2];
+            for r in 0..2 {
+                for c in 0..2 {
+                    i_new[r] += sys_inv[r][c] * rhs[c];
+                }
+            }
+            for r in 0..2 {
+                v[r] = b[r] - d[r] * i_new[r];
+            }
+            i = i_new;
+            max_err = max_err
+                .max((v_hist[k][p1_idx] - v[0]).abs())
+                .max((v_hist[k][s1_idx] - v[1]).abs());
+        }
+        assert!(
+            max_err < 1e-12,
+            "Coupled-pair companion march deviates from exact trapezoidal reference: \
+             max_err = {max_err:.3e}"
+        );
+    }
+
+    /// 3-winding transformer group (2-winding K pairs route to
+    /// coupled_inductors; the NxN group path needs >= 3 windings).
+    #[test]
+    fn test_companion_transformer_group_time_march_matches_exact_trapezoidal() {
+        let spice = "Three Winding\nR1 in p1 100\nL1 p1 0 10m\nL2 s1 0 10m\nL3 s2 0 10m\n\
+K1 L1 L2 0.9\nK2 L1 L3 0.9\nK3 L2 L3 0.9\nR2 s1 0 1k\nR3 s2 0 2.2k\n";
+        let netlist = Netlist::parse(spice).unwrap();
+        let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
+        assert_eq!(
+            mna.transformer_groups.len(),
+            1,
+            "3 mutually coupled windings should form one transformer group"
+        );
+        assert_eq!(mna.transformer_groups[0].num_windings, 3);
+        let in_idx = mna.node_map["in"] - 1;
+        let p1_idx = mna.node_map["p1"] - 1;
+        let s1_idx = mna.node_map["s1"] - 1;
+        let s2_idx = mna.node_map["s2"] - 1;
+        mna.g[in_idx][in_idx] += 1.0;
+
+        let fs = 48000.0;
+        let t = 1.0 / fs;
+        let mut kernel = DkKernel::from_mna(&mna, fs).unwrap();
+        let input = sine_input(512, fs, 1000.0, 1.0);
+        let v_hist = march_companion_kernel(&mut kernel, &input, in_idx);
+
+        // Reference with 3x3 L matrix (all couplings 0.9)
+        let lv = 10e-3;
+        let mv = 0.9 * lv;
+        let l_mat = vec![
+            vec![lv, mv, mv],
+            vec![mv, lv, mv],
+            vec![mv, mv, lv],
+        ];
+        let y_l = invert_matrix(&l_mat).unwrap();
+        let d = [101.0, 1000.0, 2200.0];
+        let ht = t / 2.0;
+        let mut sys = vec![vec![0.0; 3]; 3];
+        for r in 0..3 {
+            for c in 0..3 {
+                sys[r][c] = (r == c) as u32 as f64 + ht * y_l[r][c] * d[c];
+            }
+        }
+        let sys_inv = invert_matrix(&sys).unwrap();
+        let mut i = [0.0_f64; 3];
+        let mut v = [0.0_f64; 3];
+        let mut max_err = 0.0_f64;
+        for (k, &u) in input.iter().enumerate() {
+            let b = [u, 0.0, 0.0];
+            let mut rhs = [0.0_f64; 3];
+            for r in 0..3 {
+                rhs[r] = i[r];
+                for c in 0..3 {
+                    rhs[r] += ht * y_l[r][c] * (b[c] + v[c]);
+                }
+            }
+            let mut i_new = [0.0_f64; 3];
+            for r in 0..3 {
+                for c in 0..3 {
+                    i_new[r] += sys_inv[r][c] * rhs[c];
+                }
+            }
+            for r in 0..3 {
+                v[r] = b[r] - d[r] * i_new[r];
+            }
+            i = i_new;
+            max_err = max_err
+                .max((v_hist[k][p1_idx] - v[0]).abs())
+                .max((v_hist[k][s1_idx] - v[1]).abs())
+                .max((v_hist[k][s2_idx] - v[2]).abs());
+        }
+        assert!(
+            max_err < 1e-12,
+            "Transformer-group companion march deviates from exact trapezoidal reference: \
+             max_err = {max_err:.3e}"
+        );
+    }
+
+    // ── from_mna_augmented identity tests (F4b) ─────────────────────────
+
+    /// Augmented-MNA inductor branch rows must carry exact trapezoidal
+    /// structure: A[k][k] = 2L/T on the branch diagonal, A_neg branch row
+    /// mirroring it (same 2L/T, opposite-signed node couplings — so
+    /// A_neg*x_prev preserves the v_L_prev + (2L/T)*j_prev history), and
+    /// VS algebraic rows zeroed in A_neg.
+    #[test]
+    fn test_from_mna_augmented_branch_row_identities() {
+        let spice = "Aug RL\nVcc vcc 0 DC 9\nR1 vcc a 100\nL1 a 0 10m\nC1 a 0 100n\n";
+        let netlist = Netlist::parse(spice).unwrap();
+        let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
+        let in_idx = mna.node_map["vcc"] - 1;
+        mna.g[in_idx][in_idx] += 1.0;
+
+        let fs = 48000.0;
+        let t = 1.0 / fs;
+        let kernel = DkKernel::from_mna_augmented(&mna, fs).unwrap();
+
+        let n_aug = mna.n_aug;
+        let n = kernel.n;
+        assert_eq!(n, n_aug + 1, "one uncoupled inductor adds one branch var");
+        let branch = n_aug; // first (only) inductor branch row
+        let l = 10e-3;
+        let expected_diag = 2.0 * l / t;
+
+        // A is not stored on the kernel, but A = S^{-1}; check the identity
+        // through A*S = I is already covered elsewhere. Instead verify the
+        // stored A_neg directly and rebuild A from the augmented matrices.
+        let aug = mna.build_augmented_matrices();
+        let alpha = 2.0 / t;
+        let a_branch_diag = aug.g[branch][branch] + alpha * aug.c[branch][branch];
+        assert!(
+            (a_branch_diag.abs() - expected_diag).abs() < 1e-9,
+            "branch row diagonal |A[k][k]| = {a_branch_diag} should be 2L/T = {expected_diag}"
+        );
+
+        // A_neg branch row: diagonal keeps +2L/T (from alpha*C), node
+        // couplings flip sign vs A (from -G) — preserving trapezoidal
+        // history v_L_prev + (2L/T)*j_prev.
+        let a_neg_branch_diag = kernel.a_neg(branch, branch);
+        assert!(
+            (a_neg_branch_diag.abs() - expected_diag).abs() < 1e-9,
+            "A_neg branch diagonal |{a_neg_branch_diag}| should be 2L/T = {expected_diag}"
+        );
+        let a_node = mna.node_map["a"] - 1;
+        let g_branch_node = aug.g[branch][a_node];
+        assert!(
+            g_branch_node.abs() > 0.5,
+            "branch row must couple to the inductor node with a ±1 entry"
+        );
+        assert!(
+            (kernel.a_neg(branch, a_node) + g_branch_node).abs() < 1e-12,
+            "A_neg branch/node coupling must be -G coupling (sign flip vs A)"
+        );
+
+        // VS algebraic row (row n_nodes..n_aug) must be zeroed in A_neg
+        for row in mna.n..n_aug {
+            for j in 0..n {
+                assert_eq!(
+                    kernel.a_neg(row, j),
+                    0.0,
+                    "VS algebraic A_neg row {row} must be zeroed (col {j})"
+                );
+            }
+        }
+    }
+
+    // ── build_rhs_const scaling (F4c) ───────────────────────────────────
+
+    /// DC current-source node rows are doubled (trapezoidal average of a
+    /// constant); VS augmented rows are NOT doubled (algebraic constraint).
+    #[test]
+    fn test_build_rhs_const_scaling() {
+        let spice = "RHS Const\nVcc vcc 0 DC 9\nI1 0 a DC 2m\nR1 vcc a 10k\nR2 a 0 10k\nC1 a 0 1u\n";
+        let netlist = Netlist::parse(spice).unwrap();
+        let mna = MnaSystem::from_netlist(&netlist).unwrap();
+        let kernel = DkKernel::from_mna(&mna, 48000.0).unwrap();
+
+        // I1 0 a: node a is n_minus → injection is -I_dc, doubled by the
+        // trapezoidal source average to -2*I_dc.
+        let a_node = mna.node_map["a"] - 1;
+        assert!(
+            (kernel.rhs_const[a_node] - (-2.0 * 2e-3)).abs() < 1e-15,
+            "current-source node row must be ±2*I_dc (trapezoidal doubling), got {}",
+            kernel.rhs_const[a_node]
+        );
+
+        let vs = &mna.voltage_sources[0];
+        let vs_row = mna.n + vs.ext_idx;
+        assert!(
+            (kernel.rhs_const[vs_row] - 9.0).abs() < 1e-15,
+            "VS augmented row must be V_dc un-doubled, got {}",
+            kernel.rhs_const[vs_row]
+        );
+    }
+
+    // ── K verified against an independent solve (F4d) ───────────────────
+
+    /// K = N_v * S * N_i is only meaningful if S is actually A^{-1}.
+    /// Recomputing N_v*S*N_i from the kernel's own S is circular; instead
+    /// assert A * (S*N_i) = N_i column-wise, which validates the solve
+    /// underlying K without requiring a second matrix inverter.
+    #[test]
+    fn test_k_via_a_times_s_ni_equals_n_i() {
+        let spice = r#"BJT CE for K check
+Cin in base 10u
+R1 vcc base 100k
+R2 base 0 22k
+Q1 coll base emit MYBJTCE
+Rc vcc coll 4.7k
+Re emit 0 1k
+Ce emit 0 100u
+Cout coll out 10u
+Rload out 0 100k
+Vcc vcc 0 DC 12
+.model MYBJTCE NPN(IS=1e-14 BF=200 BR=3)
+"#;
+        let netlist = Netlist::parse(spice).unwrap();
+        let mna = MnaSystem::from_netlist(&netlist).unwrap();
+        let kernel = DkKernel::from_mna(&mna, 44100.0).unwrap();
+        let a = mna.get_a_matrix(44100.0).unwrap();
+        let n = kernel.n;
+        let m = kernel.m;
+        assert!(m >= 2);
+
+        // s_ni[i][j] = sum_k S[i][k] * N_i[k][j]
+        let mut s_ni = vec![vec![0.0; m]; n];
+        for i in 0..n {
+            for j in 0..m {
+                for k in 0..n {
+                    s_ni[i][j] += kernel.s(i, k) * kernel.n_i(k, j);
+                }
+            }
+        }
+        // Check A * (S*N_i) = N_i column-wise
+        for col in 0..m {
+            for row in 0..n {
+                let mut sum = 0.0;
+                for k in 0..n {
+                    sum += a[row][k] * s_ni[k][col];
+                }
+                assert!(
+                    (sum - kernel.n_i(row, col)).abs() < 1e-9,
+                    "A*(S*N_i) != N_i at [{row}][{col}]: {sum} vs {}",
+                    kernel.n_i(row, col)
+                );
+            }
+        }
+    }
+
     #[test]
     fn test_k_diagonal_negative_triode() {
         let spice = r#"Triode CC

@@ -2,6 +2,19 @@
 
 Quick-reference for AI agents. For math details see other aidocs. For architecture see CLAUDE.md.
 
+> **2026-07-18 accuracy campaign (commit `3e246cb` + in-progress chunk-3 wave):** a
+> full-codebase accuracy review fixed, among others: op-amp VCCS polarity (was
+> inverted — clipping/comparator behavior changed), Koren triode ×2 factor (triode
+> stages now run at datasheet current/gm — Pultec/SeriesOfTubes gain staging
+> shifted), oversampling decimator + half-band tables (2x/4x plugins gain flat HF
+> passband and real (−87 dB) alias rejection), vendor-verbatim BJT/diode catalog
+> cards, FET reverse quadrant/depletion NMOS, DC-OP device parity + pnjlim
+> normalization, and 16 parser strictness fixes (femto suffix, node case-folding,
+> gnd alias, model-type validation). All SPICE validations re-pass. Shipped-circuit
+> sound WILL shift (accuracy-correct); nothing promoted without listening. See
+> DEBUGGING.md "Historical Failure Signatures" (2026-07-18 rows) and the
+> codebase-review-2026-07 memory for the full inventory.
+
 ## SPICE Validation Results
 
 Tests in `crates/melange-validate/tests/spice_validation.rs`. Run with

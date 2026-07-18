@@ -232,14 +232,52 @@ pub struct Biquad {
 }
 
 /// Biquad filter types.
+///
+/// Shelf filters take an RBJ shelf slope parameter `slope` (the cookbook's
+/// `S`). `slope = 1.0` is the standard maximally-steep monotonic shelf; use
+/// [`BiquadType::low_shelf`] / [`BiquadType::high_shelf`] for that default.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum BiquadType {
     Lowpass { fc: f64, q: f64 },
     Highpass { fc: f64, q: f64 },
     Bandpass { fc: f64, q: f64 },
     PeakingEq { fc: f64, q: f64, gain_db: f64 },
-    LowShelf { fc: f64, gain_db: f64 },
-    HighShelf { fc: f64, gain_db: f64 },
+    LowShelf { fc: f64, gain_db: f64, slope: f64 },
+    HighShelf { fc: f64, gain_db: f64, slope: f64 },
+}
+
+impl BiquadType {
+    /// Low shelf with the default RBJ slope S = 1.0.
+    pub fn low_shelf(fc: f64, gain_db: f64) -> Self {
+        BiquadType::LowShelf {
+            fc,
+            gain_db,
+            slope: 1.0,
+        }
+    }
+
+    /// High shelf with the default RBJ slope S = 1.0.
+    pub fn high_shelf(fc: f64, gain_db: f64) -> Self {
+        BiquadType::HighShelf {
+            fc,
+            gain_db,
+            slope: 1.0,
+        }
+    }
+}
+
+/// RBJ audio-EQ-cookbook shelf intermediate term `2*sqrt(A)*alpha`.
+///
+/// From the cookbook (shelving-filter case):
+///   alpha = sin(w0)/2 * sqrt( (A + 1/A)*(1/S - 1) + 2 )
+/// so:
+///   2*sqrt(A)*alpha = sqrt(A) * sin(w0) * sqrt( (A + 1/A)*(1/S - 1) + 2 )
+/// At S = 1 this reduces to sqrt(2*A) * sin(w0).
+#[inline]
+fn rbj_shelf_term(a: f64, sin_w0: f64, slope: f64) -> f64 {
+    let s = slope.max(1e-6); // guard against division by zero / negative S
+    let alpha = sin_w0 / 2.0 * ((a + 1.0 / a) * (1.0 / s - 1.0) + 2.0).sqrt();
+    2.0 * a.sqrt() * alpha
 }
 
 impl Biquad {
@@ -314,33 +352,33 @@ impl Biquad {
                 self.a1 = (-2.0 * cos_w0) / a0;
                 self.a2 = (1.0 - alpha / a) / a0;
             }
-            BiquadType::LowShelf { fc, gain_db } => {
+            BiquadType::LowShelf { fc, gain_db, slope } => {
                 let w0 = core::f64::consts::TAU * fc.min(fs * 0.499) / fs;
                 let cos_w0 = w0.cos();
                 let sin_w0 = w0.sin();
                 let a = 10.0_f64.powf(gain_db / 40.0);
-                let sqrt_a_2 = 2.0 * a.sqrt();
+                let shelf = rbj_shelf_term(a, sin_w0, slope); // 2*sqrt(A)*alpha
 
-                let a0 = (a + 1.0) + (a - 1.0) * cos_w0 + sqrt_a_2 * sin_w0;
-                self.b0 = (a * ((a + 1.0) - (a - 1.0) * cos_w0 + sqrt_a_2 * sin_w0)) / a0;
+                let a0 = (a + 1.0) + (a - 1.0) * cos_w0 + shelf;
+                self.b0 = (a * ((a + 1.0) - (a - 1.0) * cos_w0 + shelf)) / a0;
                 self.b1 = (2.0 * a * ((a - 1.0) - (a + 1.0) * cos_w0)) / a0;
-                self.b2 = (a * ((a + 1.0) - (a - 1.0) * cos_w0 - sqrt_a_2 * sin_w0)) / a0;
+                self.b2 = (a * ((a + 1.0) - (a - 1.0) * cos_w0 - shelf)) / a0;
                 self.a1 = (-2.0 * ((a - 1.0) + (a + 1.0) * cos_w0)) / a0;
-                self.a2 = ((a + 1.0) + (a - 1.0) * cos_w0 - sqrt_a_2 * sin_w0) / a0;
+                self.a2 = ((a + 1.0) + (a - 1.0) * cos_w0 - shelf) / a0;
             }
-            BiquadType::HighShelf { fc, gain_db } => {
+            BiquadType::HighShelf { fc, gain_db, slope } => {
                 let w0 = core::f64::consts::TAU * fc.min(fs * 0.499) / fs;
                 let cos_w0 = w0.cos();
                 let sin_w0 = w0.sin();
                 let a = 10.0_f64.powf(gain_db / 40.0);
-                let sqrt_a_2 = 2.0 * a.sqrt();
+                let shelf = rbj_shelf_term(a, sin_w0, slope); // 2*sqrt(A)*alpha
 
-                let a0 = (a + 1.0) - (a - 1.0) * cos_w0 + sqrt_a_2 * sin_w0;
-                self.b0 = (a * ((a + 1.0) + (a - 1.0) * cos_w0 + sqrt_a_2 * sin_w0)) / a0;
+                let a0 = (a + 1.0) - (a - 1.0) * cos_w0 + shelf;
+                self.b0 = (a * ((a + 1.0) + (a - 1.0) * cos_w0 + shelf)) / a0;
                 self.b1 = (-2.0 * a * ((a - 1.0) + (a + 1.0) * cos_w0)) / a0;
-                self.b2 = (a * ((a + 1.0) + (a - 1.0) * cos_w0 - sqrt_a_2 * sin_w0)) / a0;
+                self.b2 = (a * ((a + 1.0) + (a - 1.0) * cos_w0 - shelf)) / a0;
                 self.a1 = (2.0 * ((a - 1.0) - (a + 1.0) * cos_w0)) / a0;
-                self.a2 = ((a + 1.0) - (a - 1.0) * cos_w0 - sqrt_a_2 * sin_w0) / a0;
+                self.a2 = ((a + 1.0) - (a - 1.0) * cos_w0 - shelf) / a0;
             }
         }
     }
@@ -412,6 +450,87 @@ mod tests {
         );
         let output = bq.process(1.0);
         assert!(output > 0.0 && output <= 1.0);
+    }
+
+    /// Magnitude response of a biquad at frequency f (Hz).
+    fn biquad_mag(bq: &Biquad, f: f64, fs: f64) -> f64 {
+        let w = core::f64::consts::TAU * f / fs;
+        let (c1, s1) = (w.cos(), w.sin());
+        let (c2, s2) = ((2.0 * w).cos(), (2.0 * w).sin());
+        let num_re = bq.b0 + bq.b1 * c1 + bq.b2 * c2;
+        let num_im = -(bq.b1 * s1 + bq.b2 * s2);
+        let den_re = 1.0 + bq.a1 * c1 + bq.a2 * c2;
+        let den_im = -(bq.a1 * s1 + bq.a2 * s2);
+        ((num_re * num_re + num_im * num_im) / (den_re * den_re + den_im * den_im)).sqrt()
+    }
+
+    /// Pin shelf coefficients against hand-computed RBJ audio-EQ-cookbook
+    /// values at fs=48kHz, fc=1kHz, +6 dB, S=1.
+    ///
+    /// Reference (cookbook): A = 10^(6/40), w0 = 2*pi*1000/48000,
+    /// alpha = sin(w0)/2 * sqrt((A + 1/A)*(1/S - 1) + 2) = sin(w0)/2 * sqrt(2),
+    /// shelf term = 2*sqrt(A)*alpha = sqrt(2A)*sin(w0).
+    /// The pre-fix code used 2*sqrt(A)*sin(w0) (i.e. alpha = sin(w0), a Q=0.5
+    /// resonance-style term), which is NOT any RBJ S=1 shelf.
+    #[test]
+    fn test_shelf_coefficients_match_rbj_cookbook() {
+        let fs = 48000.0;
+        let low = Biquad::new(BiquadType::low_shelf(1000.0, 6.0), fs);
+        let expected_low = [
+            1.0325624832475901,   // b0
+            -1.8388568718996405,  // b1
+            0.8287476843124698,   // b2
+            -1.8444568671609198,  // a1
+            0.8557101722987808,   // a2
+        ];
+        let got_low = [low.b0, low.b1, low.b2, low.a1, low.a2];
+        for (g, e) in got_low.iter().zip(expected_low.iter()) {
+            assert!((g - e).abs() < 1e-12, "low shelf: got {:?}, expected {:?}", got_low, expected_low);
+        }
+
+        let high = Biquad::new(BiquadType::high_shelf(1000.0, 6.0), fs);
+        let expected_high = [
+            1.9323405094996573,   // b0
+            -3.5641187224398734,  // b1
+            1.6535234303238655,   // b2
+            -1.7808674067995507,  // a1
+            0.8026126241831999,   // a2
+        ];
+        let got_high = [high.b0, high.b1, high.b2, high.a1, high.a2];
+        for (g, e) in got_high.iter().zip(expected_high.iter()) {
+            assert!((g - e).abs() < 1e-12, "high shelf: got {:?}, expected {:?}", got_high, expected_high);
+        }
+    }
+
+    /// RBJ shelf response properties: low shelf has full gain at DC and unity
+    /// at Nyquist (high shelf mirrored), and exactly half the dB gain at fc
+    /// (the cookbook defines fc as the shelf midpoint frequency).
+    #[test]
+    fn test_shelf_response_properties() {
+        let fs = 48000.0;
+        let gain_db = 6.0;
+        let full = 10.0_f64.powf(gain_db / 20.0);
+        let half = 10.0_f64.powf(gain_db / 40.0); // half gain in dB
+
+        let low = Biquad::new(BiquadType::low_shelf(1000.0, gain_db), fs);
+        assert!((biquad_mag(&low, 1e-3, fs) - full).abs() < 1e-6);
+        assert!((biquad_mag(&low, fs / 2.0, fs) - 1.0).abs() < 1e-6);
+        assert!(
+            (biquad_mag(&low, 1000.0, fs) - half).abs() < 1e-6,
+            "low shelf midpoint gain at fc: got {}, expected {}",
+            biquad_mag(&low, 1000.0, fs),
+            half
+        );
+
+        let high = Biquad::new(BiquadType::high_shelf(1000.0, gain_db), fs);
+        assert!((biquad_mag(&high, 1e-3, fs) - 1.0).abs() < 1e-6);
+        assert!((biquad_mag(&high, fs / 2.0, fs) - full).abs() < 1e-6);
+        assert!(
+            (biquad_mag(&high, 1000.0, fs) - half).abs() < 1e-6,
+            "high shelf midpoint gain at fc: got {}, expected {}",
+            biquad_mag(&high, 1000.0, fs),
+            half
+        );
     }
 
     #[test]

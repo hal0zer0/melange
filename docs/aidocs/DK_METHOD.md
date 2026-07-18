@@ -101,6 +101,43 @@ discretization used for linear elements (`A = G + 2C/T`). Using only the delta
 a mixed integration scheme that is conditionally unstable (period-3 oscillation in
 BJT circuits).
 
+## Companion Inductors in the DK Formulation
+
+The DK RHS equation is the *sum* of the KCL systems at steps n and n-1 —
+that is what `A = G + 2C/T`, `A_neg = 2C/T − G`, the doubled source terms
+(`2*I_dc`, `(V_in + V_in_prev)*G_in`), and the trapezoidal nonlinear
+average all encode. A companion-model inductor therefore contributes
+`i_L[n] + i_L[n-1]` to that summed equation, and with the trapezoidal
+update `i_L[n] = i_L[n-1] + g_eq*(v[n] + v[n-1])` (g_eq = T/2L, stamped
+into G so it rides A and A_neg):
+
+```
+i_L[n] + i_L[n-1] = 2*i_L[n-1] + g_eq*(v[n] + v[n-1])
+```
+
+The `g_eq*(v[n] + v[n-1])` part is already carried by the g_eq stamp;
+the history injection is exactly:
+
+```
+i_hist = 2 * i_L[n-1]          (NOT the single-step Norton i[n-1] + g_eq*v[n-1])
+```
+
+The single-step Norton source is correct for plain MNA at a single
+timestep, but under-injects history in the doubled DK equation and makes
+the inductor behave as ~2L (fixed 2026-07-18; verified against an exact
+trapezoidal reference to <1e-12 in `dk_math_verification.rs`). The same
+`2*i[n-1]` form applies vector-wise to coupled pairs and transformer
+groups (`Y*(v[n]+v[n-1])` carried by the admittance stamps).
+
+Note: because `A + A_neg = (4/T)*C` exactly (G cancels), node-voltage
+patterns in null(C) are marginally-stable period-2 (Nyquist) modes of
+this formulation. They stay at zero when state is consistent, but a
+startup inconsistency (e.g. `v_prev = DC_OP` with `ind_i_prev = 0`) can
+excite them on capacitance-free nodes. Physical nodes always carry some
+capacitance (hence the parasitic-cap auto-insertion for resistive
+nonlinear circuits); the augmented-MNA inductor path does not have this
+companion-state consistency concern.
+
 ## Sign Convention Summary
 
 | Component | Convention | Sign in K |

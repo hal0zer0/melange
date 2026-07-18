@@ -282,10 +282,13 @@ where
         // Solve J * dv = rhs using Gaussian elimination
         let (dv, singular) = solve_linear_m::<M>(&j, &rhs);
 
-        // Singular Jacobian — fall back to damped step
+        // Singular Jacobian — fall back to a damped step along the residual
+        // descent direction. `rhs` already holds -residual, and the Newton
+        // direction satisfies sign(dv) = sign(rhs) (J ≈ I for well-posed
+        // kernels), so the step must ADD rhs, not subtract it.
         if singular {
             for m in 0..M {
-                v[m] -= rhs[m] * 0.5_f64.min(clamp);
+                v[m] += rhs[m] * 0.5_f64.min(clamp);
             }
             continue;
         }
@@ -439,8 +442,11 @@ pub fn pnjlim(vnew: f64, vold: f64, vt: f64, vcrit: f64) -> f64 {
 pub fn fetlim(vnew: f64, vold: f64, vto: f64) -> f64 {
     let delv = vnew - vold;
     let vtox = vto + 3.5;
+    // SPICE3f5 DEVfetlim (with Alan Gillespie's vtstlo fix):
+    //   vtsthi = |2*(vold-vto)| + 2
+    //   vtstlo = |vold-vto| + 1     (= vtsthi/2)
     let vtsthi = (2.0 * (vold - vto)).abs() + 2.0;
-    let vtstlo = vtsthi / 2.0 + 2.0;
+    let vtstlo = (vold - vto).abs() + 1.0;
 
     if vold >= vto {
         // Device is "on"
@@ -471,8 +477,9 @@ pub fn fetlim(vnew: f64, vold: f64, vto: f64) -> f64 {
     } else {
         // Device is "off"
         if delv <= 0.0 {
-            if -delv > vtstlo {
-                return vold - vtstlo;
+            // SPICE clamps the off/decreasing branch with vtsthi (NOT vtstlo)
+            if -delv > vtsthi {
+                return vold - vtsthi;
             }
         } else if vnew <= vto + 0.5 {
             if delv > vtstlo {
@@ -611,6 +618,94 @@ mod tests {
             }
             assert!((sum - b[i]).abs() < 1e-9, "Row {}: {} != {}", i, sum, b[i]);
         }
+    }
+
+    /// Pin fetlim against hand-evaluated SPICE3f5 DEVfetlim (devsup.c, with
+    /// Alan Gillespie's vtstlo fix) at points covering all four quadrants
+    /// (on/off x increasing/decreasing) plus the middle region. Any future
+    /// drift from the SPICE formulas fails loudly here.
+    ///
+    /// Reference formulas: vtsthi = |2*(vold-vto)|+2, vtstlo = |vold-vto|+1,
+    /// vtox = vto+3.5. The off/decreasing branch clamps with vtsthi.
+    #[test]
+    fn test_fetlim_matches_spice3f5_devfetlim() {
+        // (vnew, vold, vto, expected DEVfetlim result)
+        let cases: [(f64, f64, f64, f64); 12] = [
+            // --- ON, far on (vold >= vtox), increasing (staying on) ---
+            // vtsthi = |2*4|+2 = 10; delv = 16 >= 10 -> vold + vtsthi = 14
+            (20.0, 4.0, 0.0, 14.0),
+            // delv = 1 < vtsthi -> unclamped
+            (5.0, 4.0, 0.0, 5.0),
+            // --- ON, far on, decreasing (going off) ---
+            // vnew >= vtox: -delv = 6 <= vtstlo = 11 -> unclamped
+            (4.0, 10.0, 0.0, 4.0),
+            // vnew < vtox: max(vnew, vto+2) = 2
+            (1.0, 10.0, 0.0, 2.0),
+            // vnew < vtox but above vto+2: passes through
+            (3.0, 10.0, 0.0, 3.0),
+            // --- ON, middle region (vto <= vold < vtox) ---
+            // decreasing: max(vnew, vto-0.5) = -0.5
+            (-3.0, 1.0, 0.0, -0.5),
+            // increasing: min(vnew, vto+4) = 4
+            (8.0, 1.0, 0.0, 4.0),
+            // --- OFF (vold < vto), decreasing ---
+            // vtsthi = |2*(-2)|+2 = 6; -delv = 18 > 6 -> vold - vtsthi = -8
+            // (deviant pre-fix code clamped with vtstlo and returned -7)
+            (-20.0, -2.0, 0.0, -8.0),
+            // -delv = 5.5 <= vtsthi = 6 -> unclamped
+            // (deviant pre-fix code clamped at vold - (vtsthi/2 + 2) = -7)
+            (-7.5, -2.0, 0.0, -7.5),
+            // --- OFF, increasing ---
+            // vnew <= vto+0.5: delv = 6.2 <= vtstlo = 7 -> unclamped
+            (0.2, -6.0, 0.0, 0.2),
+            // vnew > vto+0.5 -> vto + 0.5
+            (3.0, -2.0, 0.0, 0.5),
+            // --- Nonzero vto (JFET pinch-off), off/decreasing ---
+            // vtsthi = |2*(-3)|+2 = 8; -delv = 25 > 8 -> vold - vtsthi = -13
+            (-30.0, -5.0, -2.0, -13.0),
+        ];
+        for &(vnew, vold, vto, expected) in &cases {
+            let got = fetlim(vnew, vold, vto);
+            assert!(
+                (got - expected).abs() < 1e-12,
+                "fetlim({}, {}, {}) = {}, DEVfetlim gives {}",
+                vnew,
+                vold,
+                vto,
+                got,
+                expected
+            );
+        }
+    }
+
+    /// The singular-Jacobian fallback must step along the descent direction.
+    ///
+    /// System: v = p + K*i(v) with i(v) = v^2/2, K = 1, p = 0.375.
+    /// Roots: v = 0.5 and v = 1.5. Jacobian J = 1 - K*g = 1 - v is exactly
+    /// singular at the initial guess v0 = 1. residual(1) = +0.125, so the
+    /// correct fallback (v += rhs*damp, rhs = -residual) steps DOWN and NR
+    /// then converges to the 0.5 root. The old anti-descent sign (v -= ...)
+    /// stepped up and converged to 1.5 instead.
+    #[test]
+    fn test_nr_dk_singular_jacobian_fallback_descends() {
+        let p = [0.375];
+        let k = [[1.0]];
+        let (v, _iters, converged) = nr_solve_dk::<1, _, _>(
+            &p,
+            &k,
+            |v| [0.5 * v[0] * v[0]],
+            |v| [v[0]],
+            &[1.0], // exactly at the singular point of J = 1 - v
+            50,
+            1e-10,
+            0.5,
+        );
+        assert!(converged, "fallback path must still converge");
+        assert!(
+            (v[0] - 0.5).abs() < 1e-6,
+            "fallback must descend to the 0.5 root, got {}",
+            v[0]
+        );
     }
 
     #[test]

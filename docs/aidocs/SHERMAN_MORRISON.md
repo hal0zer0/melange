@@ -1,5 +1,19 @@
 # Sherman-Morrison Rank-1 Updates (Dynamic Potentiometers)
 
+> **STATUS (2026-07-18): REMOVED for pots.** The per-sample SM correction
+> machinery for potentiometers has been fully deleted: the `SmPotData`
+> su/usu/nv_su/u_ni vectors in `dk.rs` (struct now `PotKernelData`,
+> topology + range only), the matching `PotentiometerIR` fields, and the
+> dk_emitter SM emission functions (`emit_sequential_sm_setup`,
+> `emit_a_neg_correction`, `emit_s_correction`, `emit_sni_correction`) —
+> the generated code they produced had been dead (no template referenced
+> it) since the Batch D per-block `rebuild_matrices` shipped, and it
+> referenced state fields that no longer exist. Pot changes are handled by
+> per-block O(N³) rebuild (see memory: batch_d_phase1_phase2). SM survives
+> **only** in the saturating-inductor rank-1 update
+> (docs/aidocs/… see `saturating_inductors` memory). The math below is kept
+> as reference for that use and for historical context.
+
 ## Purpose
 
 Enable real-time resistance changes without O(N^3) matrix re-inversion. A potentiometer

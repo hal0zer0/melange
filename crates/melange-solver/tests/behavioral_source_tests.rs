@@ -362,3 +362,120 @@ Rout out 0 1meg
         "unexpected: {err}"
     );
 }
+
+/// Regression: the compile-time sparse-LU pattern must include behavioral
+/// B-source Jacobian stamp positions.
+///
+/// `emit_behavioral_jacobian` stamps aug/terminal rows × every referenced-node
+/// column. Before the fix, `lu::compute_g_aug_pattern` knew nothing of
+/// behavioral sources, so on a sparse-eligible circuit (N >= 8, density < 40%)
+/// with a B-source coexisting with M >= 1 devices, those positions were absent
+/// from the symbolic elimination schedule — the stamps were silently never
+/// eliminated and NR converged to a wrong fixed point with no diagnostic.
+///
+/// The test uses a `V={}` source referencing non-terminal nodes plus a diode
+/// (M=1) on an RC ladder (N=10 incl. the behavioral aug row), and compares the
+/// sparse-path output against the dense path (forced at the emitted refactor
+/// site, which also exercises the runtime sparse→dense fallback wiring) to 1e-9.
+#[test]
+fn behavioral_sparse_lu_pattern_matches_dense() {
+    let spice = "\
+Bsrc sparse LU pattern regression
+R1 in n1 1k
+C1 n1 0 10n
+R2 n1 n2 1k
+C2 n2 0 10n
+R3 n2 n3 1k
+C3 n3 0 10n
+R4 n3 n4 1k
+C4 n4 0 10n
+R5 n4 n5 1k
+C5 n5 0 10n
+R6 n5 n6 1k
+C6 n6 0 10n
+D1 n6 0 DCLIP
+.model DCLIP D(IS=2.52e-9 N=1.752)
+B1 bout 0 V={ tanh(2.0*V(n3)) + 0.5*V(n6) }
+Rl bout out 1k
+Rout out 0 10k
+Cout out 0 10n
+";
+    let netlist = Netlist::parse(spice).expect("parse");
+    let mut mna = MnaSystem::from_netlist(&netlist).expect("mna");
+    let input_node = mna.node_map["in"] - 1;
+    let output_node = mna.node_map["out"] - 1;
+    mna.g[input_node][input_node] += 1.0;
+    let cfg = CodegenConfig {
+        circuit_name: "bsrc_sparse".to_string(),
+        sample_rate: 48000.0,
+        input_node,
+        output_nodes: vec![output_node],
+        output_scales: vec![1.0],
+        input_resistance: 1.0,
+        dc_block: false,
+        ..CodegenConfig::default()
+    };
+    let code = CodeGenerator::new(cfg)
+        .generate_nodal(&mna, &netlist)
+        .expect("codegen")
+        .code;
+
+    // The circuit must actually take the sparse path, or this test is vacuous.
+    assert!(
+        code.contains("fn sparse_lu_factor"),
+        "expected sparse LU to be emitted for this circuit (N >= 8, low density)"
+    );
+    // The behavioral V={} Jacobian stamp must appear in the refactor block.
+    assert!(
+        code.contains("bsrc_0_g_"),
+        "expected behavioral Jacobian partials in generated code"
+    );
+
+    // Dense variant: force the runtime sparse->dense fallback at the emitted
+    // call site. This is the SAME binary logic path used when the growth-factor
+    // check rejects a sparse factorization.
+    let dense_code = code.replace("if sparse_lu_factor(", "if false && sparse_lu_factor(");
+    assert_ne!(code, dense_code, "dense forcing substitution did not apply");
+
+    let main = "fn main() {\n\
+        \x20   let mut s = CircuitState::default();\n\
+        \x20   for i in 0..512u32 {\n\
+        \x20       let t = i as f64 / 48000.0;\n\
+        \x20       let input = 2.0 * (2.0 * std::f64::consts::PI * 1000.0 * t).sin();\n\
+        \x20       let y = process_sample(input, &mut s);\n\
+        \x20       println!(\"{:.15e}\", y[0]);\n\
+        \x20   }\n\
+        }\n";
+
+    let sparse_out = compile_and_run(&code, main, "sparse_pattern_sparse");
+    let dense_out = compile_and_run(&dense_code, main, "sparse_pattern_dense");
+
+    let parse = |s: &str| -> Vec<f64> {
+        s.lines()
+            .filter_map(|l| l.trim().parse::<f64>().ok())
+            .collect()
+    };
+    let sparse_v = parse(&sparse_out);
+    let dense_v = parse(&dense_out);
+    assert_eq!(sparse_v.len(), 512);
+    assert_eq!(dense_v.len(), 512);
+
+    // Output must be non-trivial (signal + nonlinearities actually engaged).
+    let peak = sparse_v.iter().map(|v| v.abs()).fold(0.0f64, f64::max);
+    assert!(peak > 1e-3, "output should be non-trivial, peak={peak:.3e}");
+    assert!(
+        sparse_v.iter().all(|v| v.is_finite()),
+        "sparse outputs must be finite"
+    );
+
+    let max_diff = sparse_v
+        .iter()
+        .zip(dense_v.iter())
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f64, f64::max);
+    assert!(
+        max_diff < 1e-9,
+        "sparse vs dense mismatch: max_diff={max_diff:.3e} — behavioral stamp \
+         positions missing from the sparse-LU pattern?"
+    );
+}

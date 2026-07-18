@@ -730,12 +730,37 @@ pub(super) fn emit_pentode_nr_dk_stamp(
 // Oversampling configuration
 // ============================================================================
 
-/// Half-band filter coefficients from melange-primitives/src/oversampling.rs.
-/// 3-section (~80dB rejection, balanced quality/cost).
-const HB_3SECTION: [f64; 3] = [0.036681502163648017, 0.2746317593794541, 0.7856959333713522];
+/// Half-band filter coefficients. Must stay identical to
+/// melange-primitives/src/oversampling.rs `coefficients` (twin-drift hazard).
+///
+/// Generated with the published hiir designer
+/// `PolyphaseIir2Designer::compute_coefs_spec_order_tbw(n, tbw)`
+/// (Laurent de Soras, 2005, WTFPL; <http://ldesoras.free.fr/prod.html#src_hiir>,
+/// mirrored at <https://github.com/unevens/hiir>). `tbw` is normalized to the
+/// filter's running rate; passband edge = (0.5 - tbw)/2 of that rate.
+///
+/// 7-section steep half-band: tbw = 0.04, -86.9 dB worst-case stopband,
+/// passband to 0.23 * f_internal (20.3 kHz at a 44.1 kHz host for a 2x stage).
+/// Used for 2x oversampling and the base-Nyquist (outer) stage of 4x.
+const HB_STEEP_7SECTION: [f64; 7] = [
+    0.05180201146164933,
+    0.1879784418196106,
+    0.3650536901969154,
+    0.5423273752059077,
+    0.6977781305199374,
+    0.8282265929955739,
+    0.9431266539721422,
+];
 
-/// 2-section half-band (minimal CPU, ~60dB rejection) for 4x outer stage.
-const HB_2SECTION: [f64; 2] = [0.07986642623635751, 0.5453536510716122];
+/// 3-section wide-transition half-band for the inner (4x-rate) stage:
+/// tbw = 0.27 per the hiir cascade rule TBW[stage] = (TBW[stage-1]+0.5)/2,
+/// -95.1 dB over its design stopband. The inner stage only needs to protect
+/// the spectrum the steep outer stage keeps.
+const HB_WIDE_3SECTION: [f64; 3] = [
+    0.06687030230470327,
+    0.2756202830232181,
+    0.6763597685457587,
+];
 
 /// Oversampling stage configuration.
 pub(super) struct OversamplingInfo {
@@ -757,10 +782,10 @@ pub(super) struct OversamplingInfo {
 pub(super) fn oversampling_info(factor: usize) -> OversamplingInfo {
     match factor {
         2 => {
-            let num_sections = HB_3SECTION.len();
+            let num_sections = HB_STEEP_7SECTION.len();
             OversamplingInfo {
                 num_sections,
-                coeffs: HB_3SECTION.to_vec(),
+                coeffs: HB_STEEP_7SECTION.to_vec(),
                 state_size: num_sections * 2,
                 state_size_outer: 0,
                 coeffs_outer: Vec::new(),
@@ -768,15 +793,17 @@ pub(super) fn oversampling_info(factor: usize) -> OversamplingInfo {
             }
         }
         4 => {
-            // Inner 2x stage uses 3-section, outer uses 2-section
-            let inner = HB_3SECTION.len();
-            let outer = HB_2SECTION.len();
+            // The STEEP filter guards the base-Nyquist boundary (outer,
+            // 1x<->2x); the cheap wide-band filter runs at the inner
+            // 2x<->4x boundary where only a wide transition band is needed.
+            let inner = HB_WIDE_3SECTION.len();
+            let outer = HB_STEEP_7SECTION.len();
             OversamplingInfo {
                 num_sections: inner,
-                coeffs: HB_3SECTION.to_vec(),
+                coeffs: HB_WIDE_3SECTION.to_vec(),
                 state_size: inner * 2,
                 state_size_outer: outer * 2,
-                coeffs_outer: HB_2SECTION.to_vec(),
+                coeffs_outer: HB_STEEP_7SECTION.to_vec(),
                 num_sections_outer: outer,
             }
         }

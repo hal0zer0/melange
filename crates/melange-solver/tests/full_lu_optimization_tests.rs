@@ -575,3 +575,58 @@ fn test_gain_sanity_two_tube() {
     );
     assert!(nr_fail == 0, "No NR failures expected, got {nr_fail}");
 }
+
+/// Saturating-inductor SM update: the emitted rank-1 Sherman-Morrison block
+/// must guard its denominator (|1 + delta*S[k][k]| > 1e-15, the
+/// LINEAR_ALGEBRA.md "SM denominator" convention) and fall back to a full
+/// rebuild when singular. This test pins the emitted structure (guard present)
+/// and proves the generated code still compiles and runs — there was
+/// previously no end-to-end coverage of this emission path.
+#[test]
+fn test_saturating_inductor_sm_denominator_guard() {
+    const SAT_IND: &str = "\
+Saturating inductor SM guard
+R1 in a 100
+L1 a b 100m ISAT=20m
+Rb b 0 1k
+D1 b 0 DCLIP
+.model DCLIP D(IS=2.52e-9 N=1.752)
+C1 b 0 100n
+Rout2 b out 1k
+Cout out 0 100n
+Rterm out 0 10k
+.END";
+    let code = generate_nodal_code(SAT_IND, 48000.0);
+    assert!(
+        code.contains("SM for inductor"),
+        "expected the saturating-inductor SM block to be emitted"
+    );
+    assert!(
+        code.contains("let sm_denom = 1.0 + delta_a * state.s[k][k];"),
+        "SM denominator must be bound and guarded"
+    );
+    assert!(
+        code.contains("if sm_denom.abs() > 1e-15"),
+        "SM denominator guard (1e-15) missing"
+    );
+
+    let main_code = r#"
+fn main() {
+    let mut state = CircuitState::default();
+    let mut peak = 0.0f64;
+    for i in 0..960u32 {
+        let t = i as f64 / 48000.0;
+        // Drive hard enough to swing the inductor current through Isat.
+        let input = 5.0 * (2.0 * std::f64::consts::PI * 100.0 * t).sin();
+        let output = process_sample(input, &mut state);
+        let v = output[0];
+        if v.abs() > peak { peak = v.abs(); }
+        assert!(v.is_finite(), "non-finite output at sample {i}");
+    }
+    println!("{:.9e}", peak);
+}
+"#;
+    let out = compile_and_run(&code, main_code, "sat_ind_sm_guard");
+    let peak: f64 = out.trim().parse().expect("peak parse");
+    assert!(peak > 1e-4, "saturating-inductor circuit should pass signal, peak={peak:.3e}");
+}

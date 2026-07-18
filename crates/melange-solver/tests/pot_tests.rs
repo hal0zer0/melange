@@ -169,64 +169,42 @@ fn test_mna_grounded_pot_resolution() {
 }
 
 // ---------------------------------------------------------------------------
-// Step 3: DK kernel SM vector precomputation
+// Step 3: DK kernel pot data
+//
+// The per-sample Sherman-Morrison correction vectors (su/usu/nv_su/u_ni)
+// were removed from the kernel — pot changes are handled by per-block
+// rebuild_matrices in generated code (Batch D). The kernel now carries only
+// topology + range for codegen; the SM-math verification tests that lived
+// here (SM update vs full rebuild, manual su/usu recomputation) were
+// deleted along with the machinery. See docs/aidocs/SHERMAN_MORRISON.md.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn test_dk_kernel_sm_vectors() {
+fn test_dk_kernel_pot_data() {
     let (_netlist, _mna, kernel) = build_pipeline(RC_POT_SPICE);
     assert_eq!(kernel.pots.len(), 1);
 
     let pot = &kernel.pots[0];
 
-    // SU vector should have N elements
-    assert_eq!(pot.su.len(), kernel.n);
-
-    // USU should be finite and positive (conductance change on a resistor
-    // between two non-ground nodes should give positive u^T S u)
-    assert!(pot.usu.is_finite(), "USU should be finite");
-    assert!(
-        pot.usu > 0.0,
-        "USU should be positive for non-grounded resistor, got {}",
-        pot.usu
-    );
-
     // G_nominal should be 1/10k
     assert!((pot.g_nominal - 1e-4).abs() < 1e-15);
-
-    // NV_SU and U_NI should be empty (linear circuit, M=0)
-    assert_eq!(pot.nv_su.len(), 0, "No nonlinear devices → empty NV_SU");
-    assert_eq!(pot.u_ni.len(), 0, "No nonlinear devices → empty U_NI");
+    assert_eq!(pot.min_resistance, 1000.0);
+    assert_eq!(pot.max_resistance, 100000.0);
+    assert!(pot.node_p > 0 && pot.node_q > 0, "pot spans two live nodes");
 }
 
 #[test]
-fn test_dk_kernel_sm_vectors_nonlinear() {
+fn test_dk_kernel_pot_data_nonlinear() {
     let (_netlist, _mna, kernel) = build_pipeline(DIODE_POT_SPICE);
     assert_eq!(kernel.pots.len(), 1);
     assert!(kernel.m > 0, "Should have nonlinear device");
-
     let pot = &kernel.pots[0];
-
-    // NV_SU and U_NI should have M elements (diode: M=1)
-    assert_eq!(pot.nv_su.len(), kernel.m);
-    assert_eq!(pot.u_ni.len(), kernel.m);
-
-    // All vectors should be finite
-    for v in &pot.su {
-        assert!(v.is_finite());
-    }
-    for v in &pot.nv_su {
-        assert!(v.is_finite());
-    }
-    for v in &pot.u_ni {
-        assert!(v.is_finite());
-    }
+    assert!(pot.g_nominal.is_finite() && pot.g_nominal > 0.0);
 }
 
 #[test]
-fn test_dk_kernel_sm_identity_at_nominal() {
-    // Verify that at nominal resistance, delta_g = 0 and scale = 0
-    // (Sherman-Morrison correction vanishes)
+fn test_dk_kernel_delta_g_zero_at_nominal() {
+    // At nominal resistance the rebuild path's conductance delta vanishes
     let (_netlist, _mna, kernel) = build_pipeline(RC_POT_SPICE);
     let pot = &kernel.pots[0];
 
@@ -251,7 +229,7 @@ fn test_circuit_ir_has_pots() {
 
     assert_eq!(ir.pots.len(), 1);
     assert!((ir.pots[0].g_nominal - 1e-4).abs() < 1e-15);
-    assert_eq!(ir.pots[0].su.len(), kernel.n);
+    let _ = &kernel; // kernel only needed to build the IR
 }
 
 // ---------------------------------------------------------------------------
@@ -488,123 +466,11 @@ fn test_grounded_pot_codegen() {
 // Numerical accuracy: SM vectors match hand computation for 2-node RC
 // ---------------------------------------------------------------------------
 
-#[test]
-fn test_sm_vectors_match_manual_computation() {
-    // For a 2-node RC circuit with R=10k between nodes 1,2 and C=100n from node 2 to gnd:
-    // G = [[g, -g], [-g, g]], C = [[0, 0], [0, c]]
-    // where g = 1/10000 = 1e-4, c = 100e-9
-    //
-    // A = G + alpha*C where alpha = 2*44100
-    // u = [1, -1] (pot between the two nodes)
-    // S = A^-1
-    // su = S * u, usu = u^T * su
-    //
-    // We verify our precomputed SM vectors against a fresh A inversion.
-
-    let (_netlist, _mna, kernel) = build_pipeline(RC_POT_SPICE);
-    let n = kernel.n;
-    assert_eq!(n, 2);
-
-    let pot = &kernel.pots[0];
-
-    // Build u vector manually
-    let mut u = vec![0.0; n];
-    if pot.node_p > 0 {
-        u[pot.node_p - 1] = 1.0;
-    }
-    if pot.node_q > 0 {
-        u[pot.node_q - 1] = -1.0;
-    }
-
-    // Get S matrix from kernel
-    let s = |i: usize, j: usize| -> f64 { kernel.s[i * n + j] };
-
-    // Compute S*u manually
-    let mut su_manual = vec![0.0; n];
-    for i in 0..n {
-        for j in 0..n {
-            su_manual[i] += s(i, j) * u[j];
-        }
-    }
-
-    // Compare with precomputed
-    for i in 0..n {
-        assert!(
-            (pot.su[i] - su_manual[i]).abs() < 1e-12,
-            "SU[{}] mismatch: precomputed={}, manual={}",
-            i,
-            pot.su[i],
-            su_manual[i]
-        );
-    }
-
-    // Compute u^T * S * u manually
-    let mut usu_manual = 0.0;
-    for i in 0..n {
-        usu_manual += u[i] * su_manual[i];
-    }
-    assert!(
-        (pot.usu - usu_manual).abs() < 1e-12,
-        "USU mismatch: precomputed={}, manual={}",
-        pot.usu,
-        usu_manual
-    );
-}
-
-// ---------------------------------------------------------------------------
-// Numerical accuracy: SM at non-nominal R matches full rebuild
-// ---------------------------------------------------------------------------
-
-#[test]
-fn test_sm_update_matches_full_rebuild() {
-    // Build RC circuit with R=10k, get S via SM
-    // Build RC circuit with R=5k directly, get S via full inversion
-    // Compare S_updated vs S_rebuilt
-
-    // Circuit 1: R=10k (nominal), with pot
-    let spice_10k = "\
-RC 10k
-R1 in out 10k
-C1 out 0 100n
-.pot R1 1k 100k
-";
-    let (_, _, kernel_10k) = build_pipeline(spice_10k);
-    let n = kernel_10k.n;
-    let pot = &kernel_10k.pots[0];
-
-    // Circuit 2: R=5k (target), no pot
-    let spice_5k = "\
-RC 5k
-R1 in out 5k
-C1 out 0 100n
-";
-    let (_, _, kernel_5k) = build_pipeline(spice_5k);
-
-    // Compute SM-updated S matrix for R=5k
-    let r_new = 5000.0;
-    let delta_g = 1.0 / r_new - pot.g_nominal;
-    let denom = 1.0 + delta_g * pot.usu;
-    let scale = delta_g / denom;
-
-    // S' = S - scale * su * su^T (symmetric A → symmetric S)
-    for i in 0..n {
-        for j in 0..n {
-            let s_old = kernel_10k.s[i * n + j];
-            let s_updated = s_old - scale * pot.su[i] * pot.su[j];
-            let s_rebuilt = kernel_5k.s[i * n + j];
-
-            assert!(
-                (s_updated - s_rebuilt).abs() < 1e-10,
-                "S[{}][{}] mismatch: SM update={:.15e}, full rebuild={:.15e}, diff={:.2e}",
-                i,
-                j,
-                s_updated,
-                s_rebuilt,
-                (s_updated - s_rebuilt).abs()
-            );
-        }
-    }
-}
+// (test_sm_vectors_match_manual_computation and
+// test_sm_update_matches_full_rebuild removed with the SM machinery —
+// they verified the deleted su/usu precomputation against full rebuild.
+// The per-block rebuild path is covered by the compile-and-run pot sweep
+// tests and sm_pot_sweep_tests.rs.)
 
 // ===========================================================================
 // NEW TESTS: Filling coverage gaps identified by multi-agent review
@@ -620,17 +486,13 @@ fn test_two_pot_pipeline() {
     assert_eq!(mna.pots.len(), 2);
     assert_eq!(kernel.pots.len(), 2);
 
-    // Both pots should have distinct SM vectors
+    // Both pots carry independent codegen data
     let pot0 = &kernel.pots[0];
     let pot1 = &kernel.pots[1];
-    assert_eq!(pot0.su.len(), kernel.n);
-    assert_eq!(pot1.su.len(), kernel.n);
-    assert!(pot0.usu > 0.0);
-    assert!(pot1.usu > 0.0);
-    // Different pots → different USU values
+    assert!(pot0.g_nominal > 0.0 && pot1.g_nominal > 0.0);
     assert!(
-        (pot0.usu - pot1.usu).abs() > 1e-6,
-        "Two pots should have distinct USU values"
+        (pot0.node_p, pot0.node_q) != (pot1.node_p, pot1.node_q),
+        "Two pots should attach to distinct node pairs"
     );
 }
 
@@ -689,176 +551,32 @@ fn test_grounded_pot_diode_compiles_rustc() {
     assert_compiles(&code, "grounded_pot_diode");
 }
 
-// ---------------------------------------------------------------------------
-// SM-corrected K matrix matches full rebuild
-// ---------------------------------------------------------------------------
-
-#[test]
-fn test_sm_k_update_matches_full_rebuild() {
-    // For a nonlinear circuit, verify K' via SM matches K from fresh build at R=5k
-    let spice_10k = "\
-Diode K test
-R1 in mid 10k
-R2 in 0 100k
-D1 mid out Dmod
-C1 out 0 100n
-.model Dmod D(IS=2.52e-9 N=1.5)
-.pot R1 1k 100k
-";
-    let (_, _, kernel_10k) = build_pipeline(spice_10k);
-    let _n = kernel_10k.n;
-    let m = kernel_10k.m;
-    assert!(m > 0, "Need nonlinear device for K test");
-    let pot = &kernel_10k.pots[0];
-
-    let spice_5k = "\
-Diode K test 5k
-R1 in mid 5k
-R2 in 0 100k
-D1 mid out Dmod
-C1 out 0 100n
-.model Dmod D(IS=2.52e-9 N=1.5)
-";
-    let (_, _, kernel_5k) = build_pipeline(spice_5k);
-
-    // SM scale for R=5k
-    let r_new = 5000.0;
-    let delta_g = 1.0 / r_new - pot.g_nominal;
-    let scale = delta_g / (1.0 + delta_g * pot.usu);
-
-    // K' = K - scale * nv_su * u_ni^T
-    // (where nv_su = N_v*su, u_ni = su^T*N_i after our fix)
-    for i in 0..m {
-        for j in 0..m {
-            let k_old = kernel_10k.k[i * m + j];
-            let k_updated = k_old - scale * pot.nv_su[i] * pot.u_ni[j];
-            let k_rebuilt = kernel_5k.k[i * m + j];
-
-            assert!(
-                (k_updated - k_rebuilt).abs() < 1e-8,
-                "K[{}][{}] mismatch: SM={:.15e}, rebuilt={:.15e}, diff={:.2e}",
-                i,
-                j,
-                k_updated,
-                k_rebuilt,
-                (k_updated - k_rebuilt).abs()
-            );
-        }
-    }
-}
+// (test_sm_k_update_matches_full_rebuild, test_sm_nonlinear_vectors_match_manual
+// and test_sm_scale_at_extremes removed with the SM machinery — they
+// verified the deleted su/usu/nv_su/u_ni precomputation. Pot clamping
+// behavior in generated code is covered by the clamp assertions in the
+// compile-and-run tests below.)
 
 // ---------------------------------------------------------------------------
-// Manual verification of nv_su and u_ni vectors
+// Pot resistance clamping (delta_g clamp behavior, rebuild path)
 // ---------------------------------------------------------------------------
 
 #[test]
-fn test_sm_nonlinear_vectors_match_manual() {
-    let (_, mna, kernel) = build_pipeline(DIODE_POT_SPICE);
-    let n = kernel.n;
-    let m = kernel.m;
-    let pot = &kernel.pots[0];
-
-    // nv_su = N_v * su
-    // N_v is M×N, su is N-vector → nv_su is M-vector
-    for i in 0..m {
-        let mut nv_su_manual = 0.0;
-        for j in 0..n {
-            nv_su_manual += mna.n_v[i][j] * pot.su[j];
-        }
-        assert!(
-            (pot.nv_su[i] - nv_su_manual).abs() < 1e-10,
-            "nv_su[{}] mismatch: precomputed={:.15e}, manual={:.15e}",
-            i,
-            pot.nv_su[i],
-            nv_su_manual
-        );
-    }
-
-    // u_ni = su^T * N_i (after our fix)
-    // su is N-vector, N_i is N×M → u_ni is M-vector
-    for j in 0..m {
-        let mut u_ni_manual = 0.0;
-        for i in 0..n {
-            u_ni_manual += pot.su[i] * mna.n_i[i][j];
-        }
-        assert!(
-            (pot.u_ni[j] - u_ni_manual).abs() < 1e-10,
-            "u_ni[{}] mismatch: precomputed={:.15e}, manual={:.15e}",
-            j,
-            pot.u_ni[j],
-            u_ni_manual
-        );
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Pot at extreme resistance values
-// ---------------------------------------------------------------------------
-
-#[test]
-fn test_sm_scale_at_extremes() {
+fn test_pot_delta_g_clamp_at_extremes() {
     let (_, _, kernel) = build_pipeline(RC_POT_SPICE);
     let pot = &kernel.pots[0];
 
-    // Helper: compute (delta_g, scale) for a given resistance
-    let sm_scale = |r: f64| -> (f64, f64) {
+    // delta_g as the generated rebuild computes it (with range clamp)
+    let delta_g = |r: f64| -> f64 {
         let r = r.clamp(pot.min_resistance, pot.max_resistance);
-        let delta_g = 1.0 / r - pot.g_nominal;
-        let denom = 1.0 + delta_g * pot.usu;
-        let scale = if denom.abs() > 1e-15 {
-            delta_g / denom
-        } else {
-            0.0
-        };
-        (delta_g, scale)
+        1.0 / r - pot.g_nominal
     };
 
-    // At nominal: delta_g ≈ 0
-    let (dg_nom, scale_nom) = sm_scale(1.0 / pot.g_nominal);
-    assert!(dg_nom.abs() < 1e-15, "delta_g should be ~0 at nominal");
-    assert!(scale_nom.abs() < 1e-15, "scale should be ~0 at nominal");
-
-    // At min_r: delta_g > 0 (conductance increases)
-    let (dg_min, scale_min) = sm_scale(pot.min_resistance);
-    assert!(
-        dg_min > 0.0,
-        "delta_g should be positive at min_r (more conductance)"
-    );
-    assert!(scale_min.is_finite(), "scale at min_r should be finite");
-
-    // At max_r: delta_g < 0 (conductance decreases)
-    let (dg_max, scale_max) = sm_scale(pot.max_resistance);
-    assert!(
-        dg_max < 0.0,
-        "delta_g should be negative at max_r (less conductance)"
-    );
-    assert!(scale_max.is_finite(), "scale at max_r should be finite");
-
-    // Below min_r should clamp to min_r
-    let (dg_below, _) = sm_scale(100.0); // below min of 1k
-    assert_eq!(dg_below, dg_min, "Below min_r should clamp");
-
-    // Above max_r should clamp to max_r
-    let (dg_above, _) = sm_scale(1e6); // above max of 100k
-    assert_eq!(dg_above, dg_max, "Above max_r should clamp");
-
-    // Verify the corrected S matrix is still positive definite (diagonal > 0)
-    // by checking that the SM-updated diagonal entries remain positive
-    let n = kernel.n;
-    for &r in &[pot.min_resistance, pot.max_resistance] {
-        let (_, scale) = sm_scale(r);
-        for i in 0..n {
-            let s_corrected = kernel.s[i * n + i] - scale * pot.su[i] * pot.su[i];
-            assert!(
-                s_corrected > 0.0,
-                "S_corrected[{}][{}] should be positive at R={}, got {}",
-                i,
-                i,
-                r,
-                s_corrected
-            );
-        }
-    }
+    assert!(delta_g(1.0 / pot.g_nominal).abs() < 1e-15);
+    assert!(delta_g(pot.min_resistance) > 0.0, "more conductance at min_r");
+    assert!(delta_g(pot.max_resistance) < 0.0, "less conductance at max_r");
+    assert_eq!(delta_g(100.0), delta_g(pot.min_resistance), "clamps below min");
+    assert_eq!(delta_g(1e6), delta_g(pot.max_resistance), "clamps above max");
 }
 
 // ---------------------------------------------------------------------------
@@ -877,7 +595,6 @@ C1 out 0 100n
     let (_, _, kernel) = build_pipeline(spice_at_min);
     let pot = &kernel.pots[0];
     assert!((1.0 / pot.g_nominal - 1000.0).abs() < 1e-10);
-    assert!(pot.usu > 0.0);
 
     // Nominal R = max_r
     let spice_at_max = "\
@@ -889,7 +606,6 @@ C1 out 0 100n
     let (_, _, kernel) = build_pipeline(spice_at_max);
     let pot = &kernel.pots[0];
     assert!((1.0 / pot.g_nominal - 100000.0).abs() < 1e-6);
-    assert!(pot.usu > 0.0);
 }
 
 // ---------------------------------------------------------------------------
@@ -904,14 +620,8 @@ fn test_grounded_pot_diode_pipeline() {
     assert!(kernel.m > 0, "Should have nonlinear device");
 
     let pot = &kernel.pots[0];
-    assert_eq!(pot.nv_su.len(), kernel.m);
-    assert_eq!(pot.u_ni.len(), kernel.m);
-    for v in &pot.nv_su {
-        assert!(v.is_finite());
-    }
-    for v in &pot.u_ni {
-        assert!(v.is_finite());
-    }
+    assert!(pot.grounded);
+    assert!(pot.g_nominal > 0.0 && pot.g_nominal.is_finite());
 }
 
 // ---------------------------------------------------------------------------

@@ -86,23 +86,18 @@ pub struct TransformerGroupState {
     pub v_new: Vec<f64>,
 }
 
-/// Precomputed Sherman-Morrison data for a potentiometer.
+/// Potentiometer data carried on the kernel for code generation.
 ///
-/// When a pot changes resistance from R_nom to R_new, the conductance change
-/// `delta_g = 1/R_new - 1/R_nom` produces a rank-1 update to the A matrix.
-/// These precomputed vectors enable O(N^2) correction instead of O(N^3) re-inversion.
+/// Holds the pot's topology (node indices) and resistance range. The
+/// per-sample Sherman-Morrison correction vectors (su/usu/nv_su/u_ni) that
+/// used to live here were removed: pot changes are handled by per-block
+/// matrix rebuild in the generated code (Batch D — see
+/// docs/aidocs/SHERMAN_MORRISON.md). SM survives only in the
+/// saturating-inductor rank-1 update.
 #[derive(Debug, Clone)]
-pub struct SmPotData {
-    /// S * u where u is the pot's node difference vector (N-vector)
-    pub su: Vec<f64>,
-    /// u^T * S * u (scalar for SM denominator)
-    pub usu: f64,
+pub struct PotKernelData {
     /// Nominal conductance 1/R_nom
     pub g_nominal: f64,
-    /// N_v * su (M-vector, for K correction in NR loop)
-    pub nv_su: Vec<f64>,
-    /// su^T * N_i = (S*u)^T * N_i (M-vector, for correction to K and S*N_i products)
-    pub u_ni: Vec<f64>,
     /// Positive terminal node index (0 = ground, 1-indexed)
     pub node_p: usize,
     /// Negative terminal node index (0 = ground, 1-indexed)
@@ -157,8 +152,8 @@ pub struct DkKernel {
     pub coupled_inductors: Vec<CoupledInductorState>,
     /// Multi-winding transformer group companion model info (3+ windings)
     pub transformer_groups: Vec<TransformerGroupState>,
-    /// Potentiometer Sherman-Morrison precomputed data
-    pub pots: Vec<SmPotData>,
+    /// Potentiometer codegen data (topology + range; no SM vectors)
+    pub pots: Vec<PotKernelData>,
     /// Wiper potentiometer groups (passthrough from MNA for codegen)
     pub wiper_groups: Vec<crate::mna::WiperGroupInfo>,
     /// Gang groups (passthrough from MNA for codegen)
@@ -369,54 +364,23 @@ impl DkKernel {
         // Build constant sources from voltage and current sources
         let rhs_const = build_rhs_const(mna);
 
-        // Precompute Sherman-Morrison vectors for pots.
-        // u is n_aug-sized; pot node indices are < n_nodes < n, so they fit.
-        let mut pots = Vec::with_capacity(mna.pots.len());
-        for pot_info in &mna.pots {
-            // Build the u vector: u[p-1] = 1, u[q-1] = -1 (for non-grounded)
-            // If one terminal is grounded, only the non-ground terminal has +1
-            let mut u = vec![0.0; n];
-            if pot_info.node_p > 0 {
-                u[pot_info.node_p - 1] = 1.0;
-            }
-            if pot_info.node_q > 0 {
-                u[pot_info.node_q - 1] = -1.0;
-            }
-
-            // su = S * u (N-vector)
-            let su = mat_vec_mul(&s_2d, &u);
-
-            // usu = u^T * S * u (scalar)
-            let usu: f64 = u.iter().zip(su.iter()).map(|(a, b)| a * b).sum();
-
-            // nv_su = N_v * su (M-vector)
-            let nv_su = if m > 0 {
-                mat_vec_mul(&mna.n_v, &su)
-            } else {
-                Vec::new()
-            };
-
-            // u_ni[j] = su^T * N_i[:,j] = (S*u)^T * N_i[:,j] (M-vector)
-            // Sherman-Morrison requires su^T*N_i (not u^T*N_i) because
-            // S' = S - scale * (S*u) * (u^T*S) and S is symmetric, so u^T*S = su^T
-            let u_ni: Vec<f64> = (0..m)
-                .map(|j| su.iter().enumerate().map(|(i, &s)| s * mna.n_i[i][j]).sum())
-                .collect();
-
-            pots.push(SmPotData {
-                su,
-                usu,
+        // Pot codegen data (topology + range). The per-sample SM correction
+        // vectors that used to be precomputed here were removed — pot
+        // changes are handled by per-block matrix rebuild in the generated
+        // code.
+        let pots = mna
+            .pots
+            .iter()
+            .map(|pot_info| PotKernelData {
                 g_nominal: pot_info.g_nominal,
-                nv_su,
-                u_ni,
                 node_p: pot_info.node_p,
                 node_q: pot_info.node_q,
                 min_resistance: pot_info.min_resistance,
                 max_resistance: pot_info.max_resistance,
                 grounded: pot_info.grounded,
                 runtime_field: pot_info.runtime_field.clone(),
-            });
-        }
+            })
+            .collect();
 
         // Flatten N_v (M × n_aug) and N_i (n_aug × M) from MNA
         let n_v = flatten_matrix(&mna.n_v, m, n);
@@ -518,6 +482,49 @@ impl DkKernel {
             }
             // Compute Y = (T/2) * inv(L)
             let y_raw = invert_small_matrix(&l_mat);
+            // Guard: invert_small_matrix falls back to identity (with only a
+            // warn) on singular/near-singular input, and its absolute 1e-30
+            // pivot threshold is meaningless against O(1e-3..1e2) inductance
+            // entries — a coupling k→1 group can produce garbage Y silently.
+            // Validate the inverse scale-relatively and hard-error like the
+            // 2-winding det<=0 path does.
+            {
+                let mut max_resid = 0.0_f64;
+                for i in 0..w {
+                    for j in 0..w {
+                        if !y_raw[i][j].is_finite() {
+                            return Err(DkError::SingularMatrix(format!(
+                                "Transformer group '{}': non-finite entry in inverted \
+                                 inductance matrix at [{}][{}]",
+                                group.name, i, j
+                            )));
+                        }
+                    }
+                }
+                // ‖L·Y − I‖_inf residual check
+                for i in 0..w {
+                    for j in 0..w {
+                        let mut sum = 0.0;
+                        for kk in 0..w {
+                            sum += l_mat[i][kk] * y_raw[kk][j];
+                        }
+                        let target = if i == j { 1.0 } else { 0.0 };
+                        let resid = (sum - target).abs();
+                        if resid > max_resid {
+                            max_resid = resid;
+                        }
+                    }
+                }
+                if max_resid > 1e-6 {
+                    return Err(DkError::SingularMatrix(format!(
+                        "Transformer group '{}': inductance matrix is singular or \
+                         near-singular (‖L·L⁻¹−I‖_inf = {:.2e} > 1e-6). Coupling \
+                         coefficients are too close to 1 for a stable companion \
+                         model — reduce k or model winding leakage explicitly.",
+                        group.name, max_resid
+                    )));
+                }
+            }
             let half_t = t / 2.0;
             let mut y_flat = vec![0.0f64; w * w];
             for i in 0..w {
@@ -714,15 +721,32 @@ impl DkKernel {
 
         for (i, row) in k_2d.iter().enumerate() {
             if row[i] >= 0.0 {
+                // Exception (mirrors from_mna): dimensions whose N_i column is
+                // all zeros (VCA control port, MOSFET insulated gate) have
+                // K[i][i] = 0 by construction — no current feedback, benign.
+                let ni_col_all_zero = n_i_2d.iter().all(|ni_row| ni_row[i].abs() < 1e-30);
+                if ni_col_all_zero {
+                    log::debug!(
+                        "K[{}][{}] = {} (zero N_i column — no current feedback, OK)",
+                        i,
+                        i,
+                        row[i]
+                    );
+                    continue;
+                }
                 // For the augmented MNA / nodal solver path, the K matrix is not used
                 // for NR iteration — the nodal solver does full Newton-Raphson on the
                 // augmented system directly. A non-negative K diagonal may occur with
                 // feedback windings (e.g., push-pull output transformer tertiary) and
-                // does not indicate an unstable circuit. Downgrade to warning.
+                // does not indicate an unstable circuit — but it DOES mean the DK
+                // Schur NR (J = I - J_dev*K) would see positive feedback and diverge.
+                // auto_route re-derives this condition from the kernel's K and the
+                // MNA N_i and forces the nodal route (see routing.rs k_diag_unsafe).
                 log::warn!(
                     "K diagonal [{}][{}] = {} is non-negative. \
                      This is expected for circuits with transformer-coupled NFB. \
-                     The nodal solver handles this correctly via full NR.",
+                     The nodal solver handles this correctly via full NR; \
+                     auto_route will not select DK Schur for this circuit.",
                     i,
                     i,
                     row[i]
@@ -780,40 +804,20 @@ impl DkKernel {
             rhs_const[i] = rhs_const_base[i];
         }
 
-        // Precompute Sherman-Morrison pot vectors at the expanded dimension
-        let mut pots = Vec::with_capacity(mna.pots.len());
-        for pot_info in &mna.pots {
-            let mut u = vec![0.0; n];
-            if pot_info.node_p > 0 {
-                u[pot_info.node_p - 1] = 1.0;
-            }
-            if pot_info.node_q > 0 {
-                u[pot_info.node_q - 1] = -1.0;
-            }
-            let su = mat_vec_mul(&s_2d, &u);
-            let usu: f64 = u.iter().zip(su.iter()).map(|(a, b)| a * b).sum();
-            let nv_su = if m > 0 {
-                mat_vec_mul(&n_v_2d, &su)
-            } else {
-                Vec::new()
-            };
-            let u_ni: Vec<f64> = (0..m)
-                .map(|j| su.iter().enumerate().map(|(i, &s)| s * n_i_2d[i][j]).sum())
-                .collect();
-            pots.push(SmPotData {
-                su,
-                usu,
+        // Pot codegen data (topology + range; no SM vectors — see from_mna)
+        let pots = mna
+            .pots
+            .iter()
+            .map(|pot_info| PotKernelData {
                 g_nominal: pot_info.g_nominal,
-                nv_su,
-                u_ni,
                 node_p: pot_info.node_p,
                 node_q: pot_info.node_q,
                 min_resistance: pot_info.min_resistance,
                 max_resistance: pot_info.max_resistance,
                 grounded: pot_info.grounded,
                 runtime_field: pot_info.runtime_field.clone(),
-            });
-        }
+            })
+            .collect();
 
         if n_inductor_vars > 0 {
             log::info!(
@@ -988,10 +992,23 @@ impl DkKernel {
     /// inductor current and history for next timestep.
     ///
     /// Uses trapezoidal companion model:
-    /// - Equivalent conductance: g_eq = T/(2L)
-    /// - History current: J_n = i_{n-1} + g_eq * v_{n-1}
+    /// - Equivalent conductance: g_eq = T/(2L) (stamped into G, so it
+    ///   appears in both A and A_neg)
+    /// - History current: J = 2 * i[n-1]
     ///
-    /// The history current J_n is the Norton equivalent source.
+    /// Why 2*i[n-1] and not the single-step Norton `i[n-1] + g_eq*v[n-1]`:
+    /// the DK RHS is the *sum* of the KCL equations at steps n and n-1
+    /// (that is what `A = G + 2C/T`, `A_neg = 2C/T - G`, and the doubled
+    /// source terms encode). The inductor contributes `i_L[n] + i_L[n-1]`
+    /// to that summed equation. With the trapezoidal update
+    /// `i_L[n] = i_L[n-1] + g_eq*(v[n] + v[n-1])`, the voltage-dependent
+    /// part `g_eq*(v[n] + v[n-1])` is already carried by the g_eq stamp in
+    /// G (via A on the left and -G inside A_neg on the right), leaving
+    /// exactly `2*i_L[n-1]` to inject. Using the single-step Norton source
+    /// here under-injects history and makes the inductor behave as ~2L
+    /// (verified: RL highpass tracks the exact-2L response to ~6e-3 while
+    /// deviating 3.4e-1 from the true response; the 2*i[n-1] form matches
+    /// the exact trapezoidal reference to <1e-12).
     pub fn update_inductors(&mut self, v_node: &[f64]) {
         for ind in &mut self.inductors {
             // Get voltage across inductor at current timestep
@@ -1013,10 +1030,11 @@ impl DkKernel {
             // i_new = i_prev + g_eq * (v_prev + v_new)
             let i_new = ind.i_prev + g_eq * (ind.v_prev + v_l_new);
 
-            // Compute history current for NEXT timestep's companion model:
-            // J = i_new - g_eq * v_new = i_prev + g_eq * v_prev
-            // This is the Norton equivalent current source.
-            ind.i_hist = i_new - g_eq * v_l_new;
+            // History current for the NEXT timestep's doubled-trapezoidal
+            // KCL: J = 2 * i[n-1]. The g_eq*(v[n] + v[n-1]) part of
+            // i_L[n] + i_L[n-1] is already carried by the g_eq stamp in
+            // A / A_neg (see method doc).
+            ind.i_hist = 2.0 * i_new;
 
             // Save state for next iteration
             ind.i_prev = i_new;
@@ -1029,8 +1047,14 @@ impl DkKernel {
     /// Uses trapezoidal companion model for coupled inductors:
     ///   i1_new = i1_prev + g_self_1*(v1_prev + v1_new) + g_mutual*(v2_prev + v2_new)
     ///   i2_new = i2_prev + g_mutual*(v1_prev + v1_new) + g_self_2*(v2_prev + v2_new)
-    ///   i1_hist = i1_new - g_self_1*v1_new - g_mutual*v2_new
-    ///   i2_hist = i2_new - g_mutual*v1_new - g_self_2*v2_new
+    ///   i1_hist = 2 * i1_new
+    ///   i2_hist = 2 * i2_new
+    ///
+    /// The history is the vector analog of the uncoupled case (see
+    /// [`update_inductors`](Self::update_inductors)): the doubled
+    /// trapezoidal KCL needs `i[n] + i[n-1]` per winding, and the
+    /// `Y*(v[n] + v[n-1])` part is already carried by the conductance
+    /// stamps in A / A_neg, leaving `2*i[n-1]` to inject.
     pub fn update_coupled_inductors(&mut self, v_node: &[f64]) {
         for ci in &mut self.coupled_inductors {
             let v1i = if ci.l1_node_i > 0 {
@@ -1064,8 +1088,8 @@ impl DkKernel {
                 + ci.g_mutual * (ci.v1_prev + v1_new)
                 + ci.g_self_2 * (ci.v2_prev + v2_new);
 
-            ci.i1_hist = i1_new - ci.g_self_1 * v1_new - ci.g_mutual * v2_new;
-            ci.i2_hist = i2_new - ci.g_mutual * v1_new - ci.g_self_2 * v2_new;
+            ci.i1_hist = 2.0 * i1_new;
+            ci.i2_hist = 2.0 * i2_new;
 
             ci.i1_prev = i1_new;
             ci.i2_prev = i2_new;
@@ -1078,7 +1102,10 @@ impl DkKernel {
     ///
     /// For each group with W windings, uses the NxN admittance matrix Y:
     ///   i_k_new = i_k_prev + sum_j Y[k][j] * (v_j_prev + v_j_new)
-    ///   i_k_hist = i_k_new - sum_j Y[k][j] * v_j_new
+    ///   i_k_hist = 2 * i_k_new
+    ///
+    /// See [`update_inductors`](Self::update_inductors) for why the
+    /// doubled-trapezoidal history is `2*i[n-1]` per winding.
     pub fn update_transformer_groups(&mut self, v_node: &[f64]) {
         for group in &mut self.transformer_groups {
             let w = group.num_windings;
@@ -1099,13 +1126,11 @@ impl DkKernel {
             // Compute new currents and history
             for k in 0..w {
                 let mut i_new = group.i_prev[k];
-                let mut y_v_new = 0.0f64;
                 for j in 0..w {
                     let y_kj = group.y_matrix[k * w + j];
                     i_new += y_kj * (group.v_prev[j] + group.v_new[j]);
-                    y_v_new += y_kj * group.v_new[j];
                 }
-                group.i_hist[k] = i_new - y_v_new;
+                group.i_hist[k] = 2.0 * i_new;
                 group.i_prev[k] = i_new;
             }
             // Update previous voltages
@@ -1311,6 +1336,22 @@ pub(crate) fn invert_matrix(a: &[Vec<f64>]) -> Result<Vec<Vec<f64>>, String> {
         return Ok(Vec::new());
     }
 
+    // Step 0: Non-finite guard. NaN comparisons are always false, so a NaN
+    // entry sails through the pivot magnitude checks below and silently
+    // poisons S (and everything derived from it: K, S*N_i, the condition
+    // estimate). Mirror mna::invert_small_matrix's guard, but as a hard
+    // error — callers map this to DkError::SingularMatrix.
+    for (i, row) in a.iter().enumerate() {
+        for (j, &v) in row.iter().enumerate() {
+            if !v.is_finite() {
+                return Err(format!(
+                    "matrix contains non-finite entry {} at [{}][{}] — cannot invert",
+                    v, i, j
+                ));
+            }
+        }
+    }
+
     // Step 1: Compute symmetric equilibration D = diag(1/sqrt(|A[i][i]|))
     let mut d = vec![1.0; n];
     for i in 0..n {
@@ -1489,6 +1530,10 @@ fn infinity_norm(a: &[Vec<f64>]) -> f64 {
 }
 
 /// Matrix-vector multiplication: y = A * x
+///
+/// Only used by in-crate verification tests since the SM pot vector
+/// precomputation was removed.
+#[cfg_attr(not(test), allow(dead_code))]
 #[allow(clippy::needless_range_loop)]
 pub(crate) fn mat_vec_mul(a: &[Vec<f64>], x: &[f64]) -> Vec<f64> {
     let m = a.len();

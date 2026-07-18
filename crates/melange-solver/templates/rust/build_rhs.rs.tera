@@ -11,7 +11,9 @@ fn build_rhs(input: f64, input_prev: f64, state: &CircuitState) -> [f64; N] {
 {{ a_neg_lines }}
 {% if has_nl_prev %}    // Add N_i * i_nl_prev contribution
 {{ nl_prev_lines }}
-{% endif %}{% if num_inductors > 0 %}    // Add inductor history current contribution (Norton companion model)
+{% endif %}{% if num_inductors > 0 %}    // Add inductor history current contribution (doubled-trapezoidal
+    // companion: i_hist = 2*i[n-1]; the g_eq*(v[n]+v[n-1]) part of
+    // i_L[n]+i_L[n-1] is carried by the g_eq stamps in A / A_neg)
 {% for ind in inductors %}{% if ind.node_i > 0 %}    rhs[{{ ind.node_i - 1 }}] -= state.ind_i_hist[{{ loop.index0 }}];
 {% endif %}{% if ind.node_j > 0 %}    rhs[{{ ind.node_j - 1 }}] += state.ind_i_hist[{{ loop.index0 }}];
 {% endif %}{% endfor %}

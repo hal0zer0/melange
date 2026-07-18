@@ -14,7 +14,7 @@ use super::helpers::{
     transformer_group_template_data, SwitchCompTemplateData, SwitchTemplateData,
 };
 use super::RustEmitter;
-use crate::codegen::ir::{CircuitIR, DeviceParams, DeviceType, PotentiometerIR};
+use crate::codegen::ir::{CircuitIR, DeviceParams, DeviceType};
 use crate::codegen::{CodegenError, NoiseMode};
 
 impl RustEmitter {
@@ -1388,10 +1388,16 @@ impl RustEmitter {
                 }
             }
             code.push_str(&format!(
-                "        self.ind_i_prev = [0.0; {}];\n\
-                 \x20       self.ind_v_prev = [0.0; {}];\n\
-                 \x20       self.ind_i_hist = [0.0; {}];\n",
-                num_inductors, num_inductors, num_inductors,
+                "        // Preserve inductor transient state across rebuilds: zeroing\n\
+                 \x20       // i_prev here would dump any standing DC current on every\n\
+                 \x20       // pot/switch move (per-sample pot smoothing calls rebuild\n\
+                 \x20       // continuously → audible DC thump). Refresh the history from\n\
+                 \x20       // the preserved current: i_hist = 2*i_prev (doubled-trapezoidal\n\
+                 \x20       // form, independent of g_eq).\n\
+                 \x20       for li in 0..{} {{\n\
+                 \x20           self.ind_i_hist[li] = 2.0 * self.ind_i_prev[li];\n\
+                 \x20       }}\n",
+                num_inductors,
             ));
         }
 
@@ -1468,12 +1474,13 @@ impl RustEmitter {
                 let _ = ci; // suppress unused warning
             }
             code.push_str(&format!(
-                "        self.ci_i1_prev = [0.0; {n}];\n\
-                 \x20       self.ci_i2_prev = [0.0; {n}];\n\
-                 \x20       self.ci_v1_prev = [0.0; {n}];\n\
-                 \x20       self.ci_v2_prev = [0.0; {n}];\n\
-                 \x20       self.ci_i1_hist = [0.0; {n}];\n\
-                 \x20       self.ci_i2_hist = [0.0; {n}];\n",
+                "        // Preserve coupled-inductor transient state across rebuilds\n\
+                 \x20       // (see uncoupled comment); refresh history from preserved\n\
+                 \x20       // winding currents: i_hist = 2*i_prev.\n\
+                 \x20       for ci in 0..{n} {{\n\
+                 \x20           self.ci_i1_hist[ci] = 2.0 * self.ci_i1_prev[ci];\n\
+                 \x20           self.ci_i2_hist[ci] = 2.0 * self.ci_i2_prev[ci];\n\
+                 \x20       }}\n",
                 n = num_coupled,
             ));
         }
@@ -1556,13 +1563,15 @@ impl RustEmitter {
                 }
                 code.push_str("        }\n");
             }
-            // Reset transformer group transient state
+            // Preserve transformer-group transient state across rebuilds
+            // (see uncoupled comment); refresh history from preserved
+            // winding currents: i_hist = 2*i_prev.
             for (gi, g) in ir.transformer_groups.iter().enumerate() {
                 let w = g.num_windings;
                 code.push_str(&format!(
-                    "        self.xfmr_{gi}_i_prev = [0.0; {w}];\n\
-                     \x20       self.xfmr_{gi}_v_prev = [0.0; {w}];\n\
-                     \x20       self.xfmr_{gi}_i_hist = [0.0; {w}];\n",
+                    "        for wk in 0..{w} {{\n\
+                     \x20           self.xfmr_{gi}_i_hist[wk] = 2.0 * self.xfmr_{gi}_i_prev[wk];\n\
+                     \x20       }}\n",
                 ));
             }
         }
@@ -1641,6 +1650,104 @@ impl RustEmitter {
              \x20       self.k = k;\n\
              \x20       self.s_ni = s_ni;\n",
         );
+
+        // Rebuild the backward-Euler fallback matrix set from the same
+        // g_eff/c_eff. Without this, s_be/k_be/a_neg_be/s_ni_be go stale on
+        // every pot/switch move — and permanently wrong after
+        // set_sample_rate (which delegates here on pot/switch circuits, so
+        // the no-pot template's BE rebuild never runs). The BE fallback
+        // fires on exactly the stressed samples, so a stale BE set corrupts
+        // the samples that most need it. Mirrors the no-pot
+        // set_sample_rate body in state.rs.tera.
+        let has_be_fallback = !ir.matrices.s_be.is_empty() && ir.topology.m > 0;
+        if has_be_fallback {
+            code.push_str(
+                "\n        // Rebuild backward-Euler fallback matrices (stale BE set\n\
+                 \x20       // would corrupt exactly the stressed samples that trigger\n\
+                 \x20       // the fallback)\n\
+                 \x20       let alpha_be = internal_rate; // 1/T for backward Euler\n\
+                 \x20       let mut a_be = [[0.0f64; N]; N];\n\
+                 \x20       for i in 0..N {\n\
+                 \x20           for j in 0..N {\n\
+                 \x20               a_be[i][j] = g_eff[i][j] + alpha_be * c_eff[i][j];\n\
+                 \x20           }\n\
+                 \x20       }\n\
+                 \x20       let mut a_neg_be = [[0.0f64; N]; N];\n\
+                 \x20       for i in 0..N {\n\
+                 \x20           for j in 0..N {\n\
+                 \x20               a_neg_be[i][j] = alpha_be * c_eff[i][j];\n\
+                 \x20           }\n\
+                 \x20       }\n",
+            );
+            if n_nodes < a_neg_zero_end {
+                code.push_str(&format!(
+                    "        // Zero VS/VCVS algebraic rows in A_neg_be (NOT inductor rows)\n\
+                     \x20       for i in {n_nodes}..{a_neg_zero_end} {{\n\
+                     \x20           for j in 0..N {{\n\
+                     \x20               a_neg_be[i][j] = 0.0;\n\
+                     \x20           }}\n\
+                     \x20       }}\n"
+                ));
+            }
+            code.push_str(
+                "        let (s_be, singular_be) = invert_n_equilibrated(a_be);\n\
+                 \x20       if singular_be { self.diag_singular_matrix_count += 1; }\n\
+                 \x20       let mut s_ni_be = [[0.0f64; M]; N];\n\
+                 \x20       for i in 0..N {\n\
+                 \x20           for j in 0..M {\n\
+                 \x20               let mut sum = 0.0;\n\
+                 \x20               for kk in 0..N {\n\
+                 \x20                   sum += s_be[i][kk] * N_I[j][kk];\n\
+                 \x20               }\n\
+                 \x20               s_ni_be[i][j] = sum;\n\
+                 \x20           }\n\
+                 \x20       }\n\
+                 \x20       let mut k_be = [[0.0f64; M]; M];\n\
+                 \x20       for i in 0..M {\n\
+                 \x20           for j in 0..M {\n\
+                 \x20               let mut sum = 0.0;\n\
+                 \x20               for n_idx in 0..N {\n\
+                 \x20                   sum += N_V[i][n_idx] * s_ni_be[n_idx][j];\n\
+                 \x20               }\n\
+                 \x20               k_be[i][j] = sum;\n\
+                 \x20           }\n\
+                 \x20       }\n",
+            );
+            // K_eff: same parasitic-BJT absorption as the trap K above —
+            // K_BE_DEFAULT is emitted with this adjustment, so the rebuild
+            // must apply it too.
+            let mut emitted_be_k_eff_header = false;
+            for slot in &ir.device_slots {
+                if let DeviceParams::Bjt(bp) = &slot.params {
+                    if bp.has_parasitics() && !slot.has_internal_mna_nodes && slot.dimension == 2 {
+                        if !emitted_be_k_eff_header {
+                            code.push_str(
+                                "        // K_eff for the BE kernel (same parasitic-BJT absorption as trap K)\n",
+                            );
+                            emitted_be_k_eff_header = true;
+                        }
+                        let s = slot.start_idx;
+                        let s1 = s + 1;
+                        code.push_str(&format!(
+                            "        k_be[{s}][{s}] -= {re};\n\
+                             \x20       k_be[{s}][{s1}] -= {rb_re};\n\
+                             \x20       k_be[{s1}][{s}] -= {neg_rc};\n\
+                             \x20       k_be[{s1}][{s1}] -= {rb};\n",
+                            re = fmt_f64(bp.re),
+                            rb_re = fmt_f64(bp.rb + bp.re),
+                            neg_rc = fmt_f64(-bp.rc),
+                            rb = fmt_f64(bp.rb),
+                        ));
+                    }
+                }
+            }
+            code.push_str(
+                "        self.s_be = s_be;\n\
+                 \x20       self.k_be = k_be;\n\
+                 \x20       self.s_ni_be = s_ni_be;\n\
+                 \x20       self.a_neg_be = a_neg_be;\n",
+            );
+        }
 
         // SM pot recomputation removed — per-block rebuild handles pots exactly
 
@@ -2069,15 +2176,14 @@ impl RustEmitter {
                     }
                     xfmr_update_lines.push_str(";\n");
                 }
-                // Compute history currents: i_hist[k] = i_new[k] - sum_j Y[k][j] * v_new[j]
+                // Doubled-trapezoidal history: i_hist[k] = 2 * i_new[k].
+                // The Y*(v[n]+v[n-1]) part of i[n]+i[n-1] is already carried
+                // by the admittance stamps in A / A_neg (mirrors
+                // DkKernel::update_transformer_groups).
                 for k in 0..w {
-                    xfmr_update_lines
-                        .push_str(&format!("        state.xfmr_{gi}_i_hist[{k}] = i_new_{k}"));
-                    for j in 0..w {
-                        xfmr_update_lines
-                            .push_str(&format!(" - state.xfmr_{gi}_y[{}] * v_new_{j}", k * w + j,));
-                    }
-                    xfmr_update_lines.push_str(";\n");
+                    xfmr_update_lines.push_str(&format!(
+                        "        state.xfmr_{gi}_i_hist[{k}] = 2.0 * i_new_{k};\n"
+                    ));
                 }
                 // Update i_prev and v_prev
                 for k in 0..w {
@@ -2136,41 +2242,11 @@ impl RustEmitter {
             ir.pots.iter().map(|p| fmt_f64(1.0 / p.g_nominal)).collect();
         ctx.insert("pot_defaults", &pot_defaults);
 
-        // Generate pot correction code blocks procedurally
-        if num_pots > 0 {
-            let n = ir.topology.n;
-            let m = ir.topology.m;
-
-            // Sequential SM setup with cross-corrections for multi-pot stability
-            let sm_scale_lines = Self::emit_sequential_sm_setup(&ir.pots, n, m);
-            ctx.insert("sm_scale_lines", &sm_scale_lines);
-
-            // A_neg correction: modify rhs for pot conductance change on v_prev
-            let mut a_neg_correction = String::new();
-            for (idx, pot) in ir.pots.iter().enumerate() {
-                Self::emit_a_neg_correction(&mut a_neg_correction, idx, pot);
-            }
-            ctx.insert("a_neg_correction", &a_neg_correction);
-
-            // S correction: apply SM to v_pred after mat_vec_mul_s
-            let mut s_correction = String::new();
-            for (idx, pot) in ir.pots.iter().enumerate() {
-                Self::emit_s_correction(&mut s_correction, idx, pot, n);
-            }
-            ctx.insert("s_correction", &s_correction);
-
-            // S*N_i correction: after compute_final_voltages (only if M > 0)
-            let mut sni_correction = String::new();
-            if m > 0 {
-                for (idx, pot) in ir.pots.iter().enumerate() {
-                    Self::emit_sni_correction(&mut sni_correction, idx, pot, n, m);
-                }
-            }
-            ctx.insert("sni_correction", &sni_correction);
-
-            // SM k_eff removed — per-block rebuild keeps state.k exact
-            ctx.insert("use_k_eff", &false);
-        }
+        // Per-sample SM pot corrections removed — pot changes are handled by
+        // per-block rebuild_matrices (Batch D). No sm_scale_lines /
+        // a_neg_correction / s_correction / sni_correction context vars are
+        // emitted; the templates never referenced them. `use_k_eff` is left
+        // undefined, which the process_sample template treats as false.
 
         // MOSFET body effect: compute VT_eff from v_pred before NR (DK path only)
         let mut body_effect_update = String::new();
@@ -2429,12 +2505,21 @@ impl RustEmitter {
              }\n\n",
         );
 
-        // Emit halfband_process inline function
+        // Emit polyphase interpolator + decimator functions.
+        // Upsampler and downsampler use SEPARATE state arrays; each branch of
+        // each filter is clocked exactly once per LOW-rate sample (polyphase).
         Self::emit_halfband_fn(&mut code, "os_halfband", &info.coeffs, info.state_size);
+        Self::emit_halfband_down_fn(&mut code, "os_halfband_down", &info.coeffs, info.state_size);
         if factor == 4 {
             Self::emit_halfband_fn(
                 &mut code,
                 "os_halfband_outer",
+                &info.coeffs_outer,
+                info.state_size_outer,
+            );
+            Self::emit_halfband_down_fn(
+                &mut code,
+                "os_halfband_down_outer",
                 &info.coeffs_outer,
                 info.state_size_outer,
             );
@@ -2477,7 +2562,10 @@ impl RustEmitter {
         code
     }
 
-    /// Emit a halfband filter function that processes input through even/odd allpass chains.
+    /// Emit a polyphase half-band interpolator step: one low-rate input
+    /// produces the two internal-rate samples `(out[2n], out[2n+1])` from the
+    /// even (A0) and odd (A1) allpass branches. Each branch is clocked once
+    /// per call.
     pub(super) fn emit_halfband_fn(
         code: &mut String,
         name: &str,
@@ -2489,7 +2577,8 @@ impl RustEmitter {
         let odd_count = num_sections / 2;
 
         code.push_str(&format!(
-            "/// Half-band filter: processes input through even/odd allpass chains.\n\
+            "/// Half-band interpolator step: (even, odd) = (out[2n], out[2n+1]).\n\
+             /// Each allpass branch is clocked once per low-rate input sample.\n\
              #[inline(always)]\n\
              fn {name}(input: f64, coeffs: &[f64], state: &mut [f64; {state_size}]) -> (f64, f64) {{\n"
         ));
@@ -2520,6 +2609,58 @@ impl RustEmitter {
         code.push_str("}\n\n");
     }
 
+    /// Emit a polyphase half-band decimator step: a pair of internal-rate
+    /// samples (`x0` earlier, `x1` later) produces one low-rate output.
+    ///
+    /// hiir convention (`Downsampler2x::process_sample`): the even (A0)
+    /// branch filters the LATER sample, the odd (A1) branch the EARLIER
+    /// sample; output is their average. Each branch is clocked exactly once
+    /// per output sample — clocking a branch twice per output (the pre-2026-07
+    /// bug) collapses the allpass cells to first-order in the internal-rate z
+    /// and destroys the stopband entirely.
+    pub(super) fn emit_halfband_down_fn(
+        code: &mut String,
+        name: &str,
+        coeffs: &[f64],
+        state_size: usize,
+    ) {
+        let num_sections = coeffs.len();
+        let even_count = num_sections.div_ceil(2);
+        let odd_count = num_sections / 2;
+
+        code.push_str(&format!(
+            "/// Half-band decimator step: y[n] = (A_even(x[2n+1]) + A_odd(x[2n])) / 2.\n\
+             /// Each allpass branch is clocked once per low-rate output sample.\n\
+             #[inline(always)]\n\
+             fn {name}(x0: f64, x1: f64, coeffs: &[f64], state: &mut [f64; {state_size}]) -> f64 {{\n"
+        ));
+
+        // Even chain (coefficients 0, 2, 4, ...) consumes the LATER sample.
+        // State layout matches the interpolator: even sections first.
+        code.push_str("    let mut even = x1;\n");
+        for i in 0..even_count {
+            let coeff_idx = i * 2;
+            let state_base = i * 2;
+            code.push_str(&format!(
+                "    even = os_allpass(even, coeffs[{coeff_idx}], state, {state_base});\n",
+            ));
+        }
+
+        // Odd chain (coefficients 1, 3, 5, ...) consumes the EARLIER sample.
+        code.push_str("    let mut odd = x0;\n");
+        let odd_state_offset = even_count * 2;
+        for i in 0..odd_count {
+            let coeff_idx = i * 2 + 1;
+            let state_base = odd_state_offset + i * 2;
+            code.push_str(&format!(
+                "    odd = os_allpass(odd, coeffs[{coeff_idx}], state, {state_base});\n",
+            ));
+        }
+
+        code.push_str("    (even + odd) * 0.5\n");
+        code.push_str("}\n\n");
+    }
+
     /// Emit the 2x oversampling wrapper body.
     pub(super) fn emit_2x_wrapper(
         code: &mut String,
@@ -2527,26 +2668,24 @@ impl RustEmitter {
         dc_block: bool,
         clamp_v: f64,
     ) {
-        // Upsample: halfband → 2 samples (single input)
+        // Upsample: polyphase interpolator, 1 input → 2 internal-rate samples
         code.push_str(
-            "    // Upsample: half-band filter produces 2 samples at internal rate\n\
+            "    // Upsample: interpolator produces (out[2n], out[2n+1]) at internal rate\n\
              \x20   let (up_even, up_odd) = os_halfband(input, &OS_COEFFS, &mut state.os_up_state);\n\n",
         );
 
         // Process both at 2x rate — returns [f64; NUM_OUTPUTS]
         code.push_str(
-            "    // Process both samples at 2x rate\n\
+            "    // Process both samples at 2x rate (up_even is the earlier sample)\n\
              \x20   let out_even = process_sample_inner(up_even, state);\n\
              \x20   let out_odd = process_sample_inner(up_odd, state);\n\n",
         );
 
-        // Downsample per-output
-        code.push_str("    // Downsample: per-output half-band filter combines 2 samples into 1\n");
+        // Downsample per-output: ONE decimator step per output sample
+        code.push_str("    // Downsample: per-output polyphase decimator, 2 samples → 1\n");
         code.push_str("    let mut result = [0.0f64; NUM_OUTPUTS];\n");
         code.push_str("    for out_idx in 0..NUM_OUTPUTS {\n");
-        code.push_str("        let (dn1_even, _) = os_halfband(out_even[out_idx], &OS_COEFFS, &mut state.os_dn_state[out_idx]);\n");
-        code.push_str("        let (_, dn2_odd) = os_halfband(out_odd[out_idx], &OS_COEFFS, &mut state.os_dn_state[out_idx]);\n");
-        code.push_str("        let v = (dn1_even + dn2_odd) * 0.5;\n");
+        code.push_str("        let v = os_halfband_down(out_even[out_idx], out_odd[out_idx], &OS_COEFFS, &mut state.os_dn_state[out_idx]);\n");
         if dc_block {
             code.push_str(&format!(
                 "        result[out_idx] = if v.is_finite() {{ v.clamp(-{clamp_v:e}, {clamp_v:e}) }} else {{ 0.0 }};\n",
@@ -2566,9 +2705,9 @@ impl RustEmitter {
         dc_block: bool,
         clamp_v: f64,
     ) {
-        // Outer upsample: 1 → 2 at 2x rate (single input)
+        // Outer upsample: 1 → 2 at 2x rate (steep base-Nyquist filter)
         code.push_str(
-            "    // Outer upsample: 1 → 2 samples at 2x rate\n\
+            "    // Outer upsample: 1 → 2 samples at 2x rate (steep filter)\n\
              \x20   let (outer_even, outer_odd) = os_halfband_outer(\n\
              \x20       input, &OS_COEFFS_OUTER, &mut state.os_up_state_outer,\n\
              \x20   );\n\n",
@@ -2582,12 +2721,10 @@ impl RustEmitter {
              \x20   let proc_o0 = process_sample_inner(inner_o0, state);\n\n",
         );
 
-        // Inner downsample per-output for first 2x pair
+        // Inner decimator per-output for first 2x pair (one step per pair)
         code.push_str("    let mut inner_out0 = [0.0f64; NUM_OUTPUTS];\n");
         code.push_str("    for out_idx in 0..NUM_OUTPUTS {\n");
-        code.push_str("        let (dn_e0, _) = os_halfband(proc_e0[out_idx], &OS_COEFFS, &mut state.os_dn_state[out_idx]);\n");
-        code.push_str("        let (_, dn_o0) = os_halfband(proc_o0[out_idx], &OS_COEFFS, &mut state.os_dn_state[out_idx]);\n");
-        code.push_str("        inner_out0[out_idx] = (dn_e0 + dn_o0) * 0.5;\n");
+        code.push_str("        inner_out0[out_idx] = os_halfband_down(proc_e0[out_idx], proc_o0[out_idx], &OS_COEFFS, &mut state.os_dn_state[out_idx]);\n");
         code.push_str("    }\n\n");
 
         // Second inner upsample + process pair
@@ -2597,25 +2734,19 @@ impl RustEmitter {
              \x20   let proc_o1 = process_sample_inner(inner_o1, state);\n\n",
         );
 
-        // Inner downsample per-output for second 2x pair
+        // Inner decimator per-output for second 2x pair
         code.push_str("    let mut inner_out1 = [0.0f64; NUM_OUTPUTS];\n");
         code.push_str("    for out_idx in 0..NUM_OUTPUTS {\n");
-        code.push_str("        let (dn_e1, _) = os_halfband(proc_e1[out_idx], &OS_COEFFS, &mut state.os_dn_state[out_idx]);\n");
-        code.push_str("        let (_, dn_o1) = os_halfband(proc_o1[out_idx], &OS_COEFFS, &mut state.os_dn_state[out_idx]);\n");
-        code.push_str("        inner_out1[out_idx] = (dn_e1 + dn_o1) * 0.5;\n");
+        code.push_str("        inner_out1[out_idx] = os_halfband_down(proc_e1[out_idx], proc_o1[out_idx], &OS_COEFFS, &mut state.os_dn_state[out_idx]);\n");
         code.push_str("    }\n\n");
 
-        // Outer downsample per-output
-        code.push_str("    // Outer downsample: per-output 2 → 1 sample at host rate\n");
+        // Outer decimator per-output: 2 samples at 2x rate → 1 at host rate
+        code.push_str("    // Outer downsample: per-output polyphase decimator (steep filter)\n");
         code.push_str("    let mut result = [0.0f64; NUM_OUTPUTS];\n");
         code.push_str("    for out_idx in 0..NUM_OUTPUTS {\n");
-        code.push_str("        let (dn_outer_e, _) = os_halfband_outer(\n");
-        code.push_str("            inner_out0[out_idx], &OS_COEFFS_OUTER, &mut state.os_dn_state_outer[out_idx],\n");
+        code.push_str("        let v = os_halfband_down_outer(\n");
+        code.push_str("            inner_out0[out_idx], inner_out1[out_idx], &OS_COEFFS_OUTER, &mut state.os_dn_state_outer[out_idx],\n");
         code.push_str("        );\n");
-        code.push_str("        let (_, dn_outer_o) = os_halfband_outer(\n");
-        code.push_str("            inner_out1[out_idx], &OS_COEFFS_OUTER, &mut state.os_dn_state_outer[out_idx],\n");
-        code.push_str("        );\n");
-        code.push_str("        let v = (dn_outer_e + dn_outer_o) * 0.5;\n");
         if dc_block {
             code.push_str(&format!(
                 "        result[out_idx] = if v.is_finite() {{ v.clamp(-{clamp_v:e}, {clamp_v:e}) }} else {{ 0.0 }};\n",
@@ -2626,215 +2757,6 @@ impl RustEmitter {
         code.push_str("    }\n");
         code.push_str("    result\n");
         let _ = num_outputs; // used for signature type
-    }
-
-    fn emit_a_neg_correction(code: &mut String, idx: usize, pot: &PotentiometerIR) {
-        // A_neg correction: the backward term uses the PREVIOUS timestep's conductance.
-        // Trapezoidal discretization of time-varying G(t):
-        //   Forward: A[n] = G[n] + (2/T)*C → uses current delta_g (in SM correction)
-        //   Backward: A_neg[n-1] = (2/T)*C - G[n-1] → uses previous delta_g
-        // Using current delta_g here causes artifacts when pot changes between samples
-        // (e.g., tremolo LDR modulation at 5.63 Hz).
-        code.push_str(&format!(
-            "    let delta_g_{idx}_prev = {{\n\
-             \x20       let r = state.pot_{idx}_resistance_prev.clamp(POT_{idx}_MIN_R, POT_{idx}_MAX_R);\n\
-             \x20       1.0 / r - POT_{idx}_G_NOM\n\
-             \x20   }};\n"
-        ));
-        if pot.node_p > 0 && pot.node_q > 0 {
-            let p = pot.node_p - 1;
-            let q = pot.node_q - 1;
-            code.push_str(&format!(
-                "    let v_diff_{} = state.v_prev[{}] - state.v_prev[{}];\n",
-                idx, p, q
-            ));
-            code.push_str(&format!(
-                "    rhs[{}] -= delta_g_{}_prev * v_diff_{};\n",
-                p, idx, idx
-            ));
-            code.push_str(&format!(
-                "    rhs[{}] += delta_g_{}_prev * v_diff_{};\n",
-                q, idx, idx
-            ));
-        } else if pot.node_p > 0 {
-            let p = pot.node_p - 1;
-            code.push_str(&format!(
-                "    rhs[{}] -= delta_g_{}_prev * state.v_prev[{}];\n",
-                p, idx, p
-            ));
-        } else if pot.node_q > 0 {
-            let q = pot.node_q - 1;
-            code.push_str(&format!(
-                "    rhs[{}] -= delta_g_{}_prev * state.v_prev[{}];\n",
-                q, idx, q
-            ));
-        }
-    }
-
-    fn emit_s_correction(code: &mut String, idx: usize, _pot: &PotentiometerIR, n: usize) {
-        // S correction using sequentially corrected local su_c{idx} and scale_c{idx}.
-        code.push_str(&format!("    let mut su_dot_rhs_{} = 0.0;\n", idx));
-        code.push_str(&format!(
-            "    for _k in 0..N {{ su_dot_rhs_{idx} += su_c{idx}[_k] * rhs[_k]; }}\n"
-        ));
-
-        code.push_str(&format!(
-            "    let factor_{} = scale_c{} * su_dot_rhs_{};\n",
-            idx, idx, idx
-        ));
-        for k in 0..n {
-            code.push_str(&format!(
-                "    v_pred[{}] -= factor_{} * su_c{}[{}];\n",
-                k, idx, idx, k
-            ));
-        }
-    }
-
-    fn emit_sni_correction(
-        code: &mut String,
-        idx: usize,
-        _pot: &PotentiometerIR,
-        n: usize,
-        _m: usize,
-    ) {
-        // S*N_i correction using sequentially corrected local vectors.
-        code.push_str(&format!("    let mut u_ni_dot_inl_{} = 0.0;\n", idx));
-        code.push_str(&format!(
-            "    for _j in 0..M {{ u_ni_dot_inl_{idx} += u_ni_c{idx}[_j] * i_nl[_j]; }}\n"
-        ));
-        code.push_str(&format!(
-            "    let sni_factor_{} = scale_c{} * u_ni_dot_inl_{};\n",
-            idx, idx, idx
-        ));
-        for k in 0..n {
-            code.push_str(&format!(
-                "    v[{}] -= sni_factor_{} * su_c{}[{}];\n",
-                k, idx, idx, k
-            ));
-        }
-    }
-
-    /// Generate sequential SM setup code with cross-corrections between pots.
-    ///
-    /// For multiple pots, independent SM rank-1 updates are incorrect because
-    /// each update changes S, which affects subsequent updates. This method
-    /// generates code that applies corrections sequentially: pot k's SU vector
-    /// is corrected for the cumulative effect of pots 0..k-1.
-    ///
-    /// Math: su_ck = S_corrected * u_k = su_k - Σ_{j<k} scale_cj * su_cj * (su_cj^T * u_k)
-    fn emit_sequential_sm_setup(pots: &[PotentiometerIR], _n: usize, m: usize) -> String {
-        let mut code = String::new();
-        code.push_str("    // Sequential Sherman-Morrison setup with cross-corrections\n");
-
-        for k in 0..pots.len() {
-            let pot_k = &pots[k];
-
-            // Delta G computation (independent per pot)
-            code.push_str(&format!(
-                "    let delta_g_{k} = {{\n\
-                 \x20       let r = state.pot_{k}_resistance.clamp(POT_{k}_MIN_R, POT_{k}_MAX_R);\n\
-                 \x20       1.0 / r - POT_{k}_G_NOM\n\
-                 \x20   }};\n"
-            ));
-
-            if k == 0 {
-                // First pot: no cross-corrections needed
-                code.push_str(&format!("    let su_c{k} = state.pot_{k}_su;\n"));
-            } else {
-                // Compute cross-correction dot products: su_cj^T * u_k
-                for j in 0..k {
-                    let dot_expr = Self::emit_dot_su_u(j, pot_k);
-                    code.push_str(&format!("    let dot_{j}_{k} = {dot_expr};\n"));
-                }
-
-                // Corrected SU vector: su_ck = su_k - Σ_{j<k} scale_cj * su_cj * dot_j_k
-                code.push_str(&format!("    let mut su_c{k} = state.pot_{k}_su;\n"));
-                code.push_str("    for _n in 0..N {\n");
-                for j in 0..k {
-                    code.push_str(&format!(
-                        "        su_c{k}[_n] -= scale_c{j} * su_c{j}[_n] * dot_{j}_{k};\n"
-                    ));
-                }
-                code.push_str("    }\n");
-            }
-
-            // Corrected USU: u_k^T * su_ck (extract from corrected su_ck at pot's node indices)
-            let usu_expr = Self::emit_usu_from_su(k, pot_k);
-            code.push_str(&format!("    let usu_c{k} = {usu_expr};\n"));
-
-            // Scale factor
-            code.push_str(&format!(
-                "    let scale_c{k} = if (1.0 + delta_g_{k} * usu_c{k}).abs() > 1e-15 {{\n\
-                 \x20       delta_g_{k} / (1.0 + delta_g_{k} * usu_c{k})\n\
-                 \x20   }} else {{ 0.0 }};\n"
-            ));
-
-            // If M > 0, compute corrected nv_su and u_ni for K_eff
-            if m > 0 {
-                if k == 0 {
-                    code.push_str(&format!("    let nv_su_c{k} = state.pot_{k}_nv_su;\n"));
-                    code.push_str(&format!("    let u_ni_c{k} = state.pot_{k}_u_ni;\n"));
-                } else {
-                    // Corrected NV_SU: nv_su_ck = nv_su_k - Σ_{j<k} scale_cj * nv_su_cj * dot_j_k
-                    code.push_str(&format!("    let mut nv_su_c{k} = state.pot_{k}_nv_su;\n"));
-                    for j in 0..k {
-                        code.push_str(&format!(
-                            "    for _i in 0..M {{ nv_su_c{k}[_i] -= scale_c{j} * nv_su_c{j}[_i] * dot_{j}_{k}; }}\n"
-                        ));
-                    }
-                    // Corrected U_NI: u_ni_ck = u_ni_k - Σ_{j<k} scale_cj * u_ni_cj * dot_j_k
-                    code.push_str(&format!("    let mut u_ni_c{k} = state.pot_{k}_u_ni;\n"));
-                    for j in 0..k {
-                        code.push_str(&format!(
-                            "    for _i in 0..M {{ u_ni_c{k}[_i] -= scale_c{j} * u_ni_c{j}[_i] * dot_{j}_{k}; }}\n"
-                        ));
-                    }
-                }
-            }
-
-            code.push('\n');
-        }
-
-        code
-    }
-
-    /// Emit dot product expression: su_cj^T * u_k
-    /// u_k has entries +1 at node_p-1 and -1 at node_q-1 (grounded nodes omitted)
-    fn emit_dot_su_u(j: usize, pot_k: &PotentiometerIR) -> String {
-        if pot_k.node_p > 0 && pot_k.node_q > 0 {
-            format!(
-                "su_c{}[{}] - su_c{}[{}]",
-                j,
-                pot_k.node_p - 1,
-                j,
-                pot_k.node_q - 1
-            )
-        } else if pot_k.node_p > 0 {
-            format!("su_c{}[{}]", j, pot_k.node_p - 1)
-        } else if pot_k.node_q > 0 {
-            format!("-su_c{}[{}]", j, pot_k.node_q - 1)
-        } else {
-            "0.0".to_string()
-        }
-    }
-
-    /// Emit USU expression from corrected SU: u_k^T * su_ck
-    fn emit_usu_from_su(k: usize, pot_k: &PotentiometerIR) -> String {
-        if pot_k.node_p > 0 && pot_k.node_q > 0 {
-            format!(
-                "su_c{}[{}] - su_c{}[{}]",
-                k,
-                pot_k.node_p - 1,
-                k,
-                pot_k.node_q - 1
-            )
-        } else if pot_k.node_p > 0 {
-            format!("su_c{}[{}]", k, pot_k.node_p - 1)
-        } else if pot_k.node_q > 0 {
-            format!("-su_c{}[{}]", k, pot_k.node_q - 1)
-        } else {
-            "0.0".to_string()
-        }
     }
 }
 

@@ -71,17 +71,19 @@ Used for: JFETs (Vgs around pinch-off), MOSFETs (Vgs around threshold),
 tube plate voltage (Vpk around 0V).
 
 ```
-fetlim(vnew, vold, vto) -> f64:
+fetlim(vnew, vold, vto) -> f64:      // SPICE3f5 DEVfetlim (Gillespie vtstlo fix)
   delv = vnew - vold
   vtox = vto + 3.5
   vtsthi = 2 * |vold - vto| + 2.0
-  vtstlo = vtsthi / 2.0 + 2.0
+  vtstlo = |vold - vto| + 1.0        // = vtsthi / 2
 
   if vold >= vto:                    // Device ON
     if vold >= vtox:                 // Far on
       if delv <= 0:                  // Going off
-        if |delv| > vtstlo: return vold - vtstlo
-        else: return vnew
+        if vnew >= vtox:
+          if |delv| > vtstlo: return vold - vtstlo
+          else: return vnew
+        else: return max(vnew, vto + 2.0)
       else:                          // Staying on
         if delv >= vtsthi: return vold + vtsthi
         else: return vnew
@@ -90,7 +92,7 @@ fetlim(vnew, vold, vto) -> f64:
       else: return min(vnew, vto + 4.0)
   else:                              // Device OFF
     if delv <= 0:
-      if |delv| > vtstlo: return vold - vtstlo
+      if |delv| > vtsthi: return vold - vtsthi    // NOTE: vtsthi here, not vtstlo
       else: return vnew
     else if vnew <= vto + 0.5:
       if delv > vtstlo: return vold + vtstlo

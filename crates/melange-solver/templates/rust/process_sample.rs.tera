@@ -249,7 +249,11 @@ pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS
         let v_new = v_i - v_j;
         let g_eq = state.ind_g_eq[{{ loop.index0 }}];
         let i_new = state.ind_i_prev[{{ loop.index0 }}] + g_eq * (state.ind_v_prev[{{ loop.index0 }}] + v_new);
-        state.ind_i_hist[{{ loop.index0 }}] = i_new - g_eq * v_new;
+        // Doubled-trapezoidal history: the DK RHS sums the KCL of steps n
+        // and n-1, so the injection is i_L[n] + i_L[n-1] minus the
+        // g_eq*(v[n]+v[n-1]) part already carried by the g_eq stamp in
+        // A / A_neg — leaving exactly 2*i[n-1].
+        state.ind_i_hist[{{ loop.index0 }}] = 2.0 * i_new;
         state.ind_i_prev[{{ loop.index0 }}] = i_new;
         state.ind_v_prev[{{ loop.index0 }}] = v_new;
     }
@@ -268,8 +272,10 @@ pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS
         let gm = state.ci_g_mutual[{{ loop.index0 }}];
         let i1_new = state.ci_i1_prev[{{ loop.index0 }}] + gs1 * (state.ci_v1_prev[{{ loop.index0 }}] + v1_new) + gm * (state.ci_v2_prev[{{ loop.index0 }}] + v2_new);
         let i2_new = state.ci_i2_prev[{{ loop.index0 }}] + gm * (state.ci_v1_prev[{{ loop.index0 }}] + v1_new) + gs2 * (state.ci_v2_prev[{{ loop.index0 }}] + v2_new);
-        state.ci_i1_hist[{{ loop.index0 }}] = i1_new - gs1 * v1_new - gm * v2_new;
-        state.ci_i2_hist[{{ loop.index0 }}] = i2_new - gm * v1_new - gs2 * v2_new;
+        // Doubled-trapezoidal history (vector form): 2*i[n-1] per winding;
+        // the Y*(v[n]+v[n-1]) part is already in the A / A_neg stamps.
+        state.ci_i1_hist[{{ loop.index0 }}] = 2.0 * i1_new;
+        state.ci_i2_hist[{{ loop.index0 }}] = 2.0 * i2_new;
         state.ci_i1_prev[{{ loop.index0 }}] = i1_new;
         state.ci_i2_prev[{{ loop.index0 }}] = i2_new;
         state.ci_v1_prev[{{ loop.index0 }}] = v1_new;

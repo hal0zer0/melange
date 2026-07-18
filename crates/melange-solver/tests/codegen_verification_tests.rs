@@ -3682,6 +3682,254 @@ fn test_oversampling_4x_diode_clipper_compiles() {
     );
 }
 
+/// Regression guard for the 2026-07 oversampling bug pair:
+/// (A) decimator must be a single polyphase step (os_halfband_down), not two
+///     full os_halfband calls on the same state;
+/// (B) coefficient tables: 2x uses the steep 7-section set; the 4x cascade
+///     puts the STEEP filter at the base-Nyquist (outer) boundary and the
+///     cheap wide-band 3-section filter at the 4x inner stage (the old
+///     assignment was backwards).
+#[test]
+fn test_oversampling_polyphase_structure_and_stage_assignment() {
+    let (netlist, mna, kernel) = build_pipeline(DIODE_CLIPPER_SPICE);
+
+    // 2x: steep 7-section set, decimator function present
+    let config_2x = CodegenConfig {
+        circuit_name: "test_os2x_stage".to_string(),
+        sample_rate: 44100.0,
+        input_node: 0,
+        output_nodes: vec![1],
+        input_resistance: 1000.0,
+        oversampling_factor: 2,
+        ..CodegenConfig::default()
+    };
+    let code_2x = CodeGenerator::new(config_2x)
+        .generate(&kernel, &mna, &netlist)
+        .unwrap()
+        .code;
+    assert!(
+        code_2x.contains("const OS_COEFFS: [f64; 7]"),
+        "2x should use the steep 7-section half-band"
+    );
+    assert!(
+        code_2x.contains("fn os_halfband_down("),
+        "2x should emit a dedicated polyphase decimator"
+    );
+    // The decimator must be called exactly once per output sample; the old
+    // dual-call pattern clocked both allpass chains twice per output.
+    assert!(
+        !code_2x.contains("let (dn1_even, _) = os_halfband("),
+        "2x must not use the dual-halfband decimation pattern"
+    );
+
+    // 4x: steep filter OUTER (base Nyquist), wide 3-section INNER
+    let config_4x = CodegenConfig {
+        circuit_name: "test_os4x_stage".to_string(),
+        sample_rate: 44100.0,
+        input_node: 0,
+        output_nodes: vec![1],
+        input_resistance: 1000.0,
+        oversampling_factor: 4,
+        ..CodegenConfig::default()
+    };
+    let code_4x = CodeGenerator::new(config_4x)
+        .generate(&kernel, &mna, &netlist)
+        .unwrap()
+        .code;
+    assert!(
+        code_4x.contains("const OS_COEFFS: [f64; 3]"),
+        "4x inner stage should use the wide 3-section half-band"
+    );
+    assert!(
+        code_4x.contains("const OS_COEFFS_OUTER: [f64; 7]"),
+        "4x outer stage should use the steep 7-section half-band"
+    );
+    assert!(
+        code_4x.contains("fn os_halfband_down("),
+        "4x should emit the inner decimator"
+    );
+    assert!(
+        code_4x.contains("fn os_halfband_down_outer("),
+        "4x should emit the outer decimator"
+    );
+    // First steep coefficient must appear in the OUTER table
+    let steep_c0 = format!("{:.17e}", 0.05180201146164933_f64);
+    let outer_pos = code_4x.find("const OS_COEFFS_OUTER").unwrap();
+    let outer_slice = &code_4x[outer_pos..outer_pos + 400];
+    assert!(
+        outer_slice.contains(&steep_c0),
+        "outer table should contain the steep set's first coefficient"
+    );
+}
+
+/// Compile-and-run measurement test on the emitted 2x oversampler.
+///
+/// Would have caught both 2026-07 bugs: the emitted decimator is driven with
+/// an internal-rate tone in its stopband (0.9*pi) and must reject the folded
+/// alias by the design margin; a passband tone must pass within +/-0.1 dB;
+/// and the emitted interpolator's image rejection is measured at the
+/// internal rate. (A full audio-path spectral measurement is confounded for
+/// a LINEAR circuit because a 2x round-trip image folds exactly onto the
+/// source bin, and the clipper's RC pole buries HF harmonics — so the
+/// emitted filter functions are measured directly inside the compiled
+/// generated code, plus a full process_sample sanity run.)
+#[test]
+fn test_oversampling_2x_emitted_filters_measured() {
+    let (netlist, mna, kernel) = build_pipeline(DIODE_CLIPPER_SPICE);
+    let config = CodegenConfig {
+        circuit_name: "test_os2x_measure".to_string(),
+        sample_rate: 44100.0,
+        input_node: 0,
+        output_nodes: vec![1],
+        input_resistance: 1000.0,
+        oversampling_factor: 2,
+        ..CodegenConfig::default()
+    };
+    let result = CodeGenerator::new(config)
+        .generate(&kernel, &mna, &netlist)
+        .unwrap();
+
+    let test_harness = format!(
+        "{}\n{}",
+        result.code,
+        r#"
+const N_FFT: usize = 4096;
+const SETTLE: usize = 4096;
+
+fn bin_amplitude(signal: &[f64], k: usize) -> f64 {
+    let n = signal.len();
+    let mut re = 0.0;
+    let mut im = 0.0;
+    for (i, &s) in signal.iter().enumerate() {
+        let w = 2.0 * std::f64::consts::PI * (k as f64) * (i as f64) / (n as f64);
+        re += s * w.cos();
+        im -= s * w.sin();
+    }
+    2.0 * (re * re + im * im).sqrt() / n as f64
+}
+
+fn main() {
+    let pi = std::f64::consts::PI;
+
+    // (a) Emitted decimator alias rejection: internal tone at ~0.9*pi
+    // folds to bin k_a. Steep 7-section design rejection is -86.9 dB.
+    let k_a = 410usize;
+    let nu_a = k_a as f64 / N_FFT as f64;
+    let u = (1.0 - nu_a) / 2.0; // cycles per internal sample
+    let mut st = [0.0f64; 14];
+    let mut out = Vec::with_capacity(SETTLE + N_FFT);
+    let mut i_int: u64 = 0;
+    for _ in 0..(SETTLE + N_FFT) {
+        let x0 = (2.0 * pi * u * i_int as f64).sin();
+        let x1 = (2.0 * pi * u * (i_int + 1) as f64).sin();
+        i_int += 2;
+        out.push(os_halfband_down(x0, x1, &OS_COEFFS, &mut st));
+    }
+    let tail = &out[SETTLE..];
+    let db = 20.0 * bin_amplitude(tail, k_a).log10();
+    eprintln!("emitted 2x decimator alias rejection: {:.2} dB", db);
+    assert!(db < -75.0, "emitted decimator alias rejection {:.1} dB, expected < -75 dB", db);
+
+    // (b) Emitted decimator passband flatness at 0.25*pi internal.
+    let k_p = N_FFT / 4;
+    let u_p = 0.125;
+    let mut st = [0.0f64; 14];
+    let mut out = Vec::with_capacity(SETTLE + N_FFT);
+    let mut i_int: u64 = 0;
+    for _ in 0..(SETTLE + N_FFT) {
+        let x0 = (2.0 * pi * u_p * i_int as f64).sin();
+        let x1 = (2.0 * pi * u_p * (i_int + 1) as f64).sin();
+        i_int += 2;
+        out.push(os_halfband_down(x0, x1, &OS_COEFFS, &mut st));
+    }
+    let tail = &out[SETTLE..];
+    let db = 20.0 * bin_amplitude(tail, k_p).log10();
+    eprintln!("emitted 2x decimator passband level: {:.5} dB", db);
+    assert!(db.abs() < 0.1, "emitted decimator passband {:.4} dB, expected within +/-0.1 dB", db);
+
+    // (c) Emitted interpolator image rejection: base-rate tone at bin k_a,
+    // image at internal rate must be suppressed by the same design margin.
+    let nu = k_a as f64 / N_FFT as f64;
+    let mut st = [0.0f64; 14];
+    let mut internal = Vec::with_capacity(2 * (SETTLE + N_FFT));
+    for i in 0..(SETTLE + N_FFT) {
+        let x = (2.0 * pi * nu * i as f64).sin();
+        let (e, o) = os_halfband(x, &OS_COEFFS, &mut st);
+        internal.push(e);
+        internal.push(o);
+    }
+    let tail = &internal[2 * SETTLE..];
+    // signal at nu/2 cycles/internal-sample = bin k_a of 2*N_FFT; image at 0.5 - nu/2
+    let k_img = N_FFT - k_a; // (0.5 - nu/2) * 2*N_FFT
+    let sig_db = 20.0 * bin_amplitude(tail, k_a).log10();
+    let img_db = 20.0 * bin_amplitude(tail, k_img).log10();
+    eprintln!("emitted 2x interpolator: signal {:.3} dB, image {:.2} dB", sig_db, img_db);
+    assert!(sig_db.abs() < 0.1, "interpolator signal level {:.3} dB", sig_db);
+    assert!(img_db < -75.0, "interpolator image rejection {:.1} dB, expected < -75 dB", img_db);
+
+    // (d) Full wrapper sanity: finite, non-zero output through the circuit.
+    let mut state = CircuitState::default();
+    let mut any_nonzero = false;
+    for i in 0..2000 {
+        let t = i as f64 / 44100.0;
+        let input = 0.5 * (2.0 * pi * 1000.0 * t).sin();
+        let out = process_sample(input, &mut state)[0];
+        assert!(out.is_finite(), "process_sample output must be finite at {}", i);
+        if out.abs() > 1e-9 {
+            any_nonzero = true;
+        }
+    }
+    assert!(any_nonzero, "2x wrapper output should not be all zeros");
+    eprintln!("emitted 2x oversampler measurement test passed");
+}
+"#
+    );
+
+    let tmp_dir = std::env::temp_dir();
+    let src_path = tmp_dir.join("melange_os2x_measure_test.rs");
+    let bin_path = tmp_dir.join("melange_os2x_measure_test");
+    {
+        let mut f = std::fs::File::create(&src_path).expect("create temp file");
+        f.write_all(test_harness.as_bytes()).expect("write temp file");
+    }
+
+    let compile = std::process::Command::new("rustc")
+        .args([
+            src_path.to_str().unwrap(),
+            "-O",
+            "-o",
+            bin_path.to_str().unwrap(),
+            "--edition",
+            "2021",
+        ])
+        .output()
+        .expect("run rustc");
+
+    if !compile.status.success() {
+        let _ = std::fs::remove_file(&src_path);
+        panic!(
+            "2x oversampling measurement test failed to compile:\n{}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+    }
+
+    let run = std::process::Command::new(&bin_path)
+        .output()
+        .expect("run test binary");
+    let _ = std::fs::remove_file(&src_path);
+    let _ = std::fs::remove_file(&bin_path);
+
+    if !run.status.success() {
+        panic!(
+            "2x oversampling measurement test failed:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&run.stdout),
+            String::from_utf8_lossy(&run.stderr)
+        );
+    }
+    // Surface the measured numbers in test output
+    eprintln!("{}", String::from_utf8_lossy(&run.stderr));
+}
+
 #[test]
 fn test_oversampling_2x_matrices_at_internal_rate() {
     let (netlist, mna, kernel) = build_pipeline(DIODE_CLIPPER_SPICE);

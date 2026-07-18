@@ -174,7 +174,7 @@ pub fn is_valid_audio(x: f64) -> bool {
 
 /// Get the thermal voltage Vt at a given temperature.
 ///
-/// Vt = kT/q ≈ 25.85 mV at 27°C (300K)
+/// Vt = kT/q ≈ 25.87 mV at 27°C (300.15 K)
 ///
 /// # Arguments
 /// * `temp_c` - Temperature in Celsius
@@ -187,8 +187,14 @@ pub fn thermal_voltage(temp_c: f64) -> f64 {
     K_BOLTZMANN * temp_k / Q_ELECTRON
 }
 
-/// Standard thermal voltage at room temperature (27°C).
-pub const VT_ROOM: f64 = 0.025851991; // kT/q at 300.15K (27°C)
+/// Standard thermal voltage: kT/q at 300.00 K (= 0.025852 V).
+///
+/// NOTE: this is NOT the same reference temperature as `thermal_voltage(27.0)`
+/// — ngspice's TNOM = 27°C = 300.15 K gives kT/q = 0.025865 V. The ~0.05%
+/// discrepancy is a known internal inconsistency; unification is a
+/// catalog-coordinated change (device catalogs were fit against this value)
+/// tracked as a follow-up. Do not change this constant in isolation.
+pub const VT_ROOM: f64 = 0.025851991; // kT/q at 300.00 K
 
 #[cfg(test)]
 mod tests {

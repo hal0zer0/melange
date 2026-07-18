@@ -784,19 +784,16 @@ fn opamp_ir_from_info(
     }
 }
 
-/// Potentiometer parameters for code generation (Sherman-Morrison precomputed data).
+/// Potentiometer parameters for code generation (topology + range).
+///
+/// The per-sample Sherman-Morrison correction vectors (su/usu/nv_su/u_ni)
+/// were removed — pot changes are handled by per-block `rebuild_matrices`
+/// in the generated code (Batch D). SM survives only in the
+/// saturating-inductor rank-1 update.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PotentiometerIR {
-    /// S * u where u is the pot's node difference vector (N-vector)
-    pub su: Vec<f64>,
-    /// u^T * S * u (scalar for SM denominator)
-    pub usu: f64,
     /// Nominal conductance 1/R_nom
     pub g_nominal: f64,
-    /// N_v * su (M-vector, for K correction in NR loop)
-    pub nv_su: Vec<f64>,
-    /// su^T * N_i = (S*u)^T * N_i (M-vector, for correction to K and S*N_i products)
-    pub u_ni: Vec<f64>,
     /// Positive terminal node index (0 = ground, 1-indexed)
     pub node_p: usize,
     /// Negative terminal node index (0 = ground, 1-indexed)
@@ -1655,11 +1652,7 @@ impl CircuitIR {
             .pots
             .iter()
             .map(|p| PotentiometerIR {
-                su: p.su.clone(),
-                usu: p.usu,
                 g_nominal: p.g_nominal,
-                nv_su: p.nv_su.clone(),
-                u_ni: p.u_ni.clone(),
                 node_p: p.node_p,
                 node_q: p.node_q,
                 min_resistance: p.min_resistance,
@@ -2617,8 +2610,33 @@ impl CircuitIR {
         Self::resolve_mosfet_nodes(&mut device_slots, mna);
 
         // Sparsity analysis (K is now computed for Schur complement NR)
-        let lu_sparsity = if m > 0 {
+        //
+        // Behavioral B-source Jacobian stamps (`emit_behavioral_jacobian`) hit
+        // positions outside the device N_i·J_dev·N_v envelope — the aug/terminal
+        // rows × every referenced-node column. They MUST be part of the symbolic
+        // pattern: a position absent from the pattern is never eliminated by the
+        // straight-line sparse schedule, silently dropping the stamp and
+        // converging to a wrong fixed point.
+        let behavioral_stamp_patterns: Vec<lu::BehavioralStamp> = mna
+            .behavioral_sources
+            .iter()
+            .map(|b| lu::BehavioralStamp {
+                is_voltage: b.v_ext_idx.is_some(),
+                aug_row: b.aug_row,
+                n_plus_idx: b.n_plus_idx,
+                n_minus_idx: b.n_minus_idx,
+                referenced_node_indices: b.referenced_node_indices.values().copied().collect(),
+            })
+            .collect();
+        // Belt-and-braces: if any V={} source somehow lacks its aug_row, the
+        // stamp geometry cannot be guaranteed complete — prefer correctness and
+        // route to the dense LU (which pivots at runtime and needs no pattern).
+        let behavioral_pattern_complete = behavioral_stamp_patterns
+            .iter()
+            .all(|b| !b.is_voltage || b.aug_row.is_some());
+        let lu_sparsity = if m > 0 && behavioral_pattern_complete {
             // Compute G_aug = A - N_i*J_dev*N_v sparsity pattern
+            // (+ behavioral B-source stamp positions)
             let g_aug_pattern = lu::compute_g_aug_pattern(
                 &matrices.a_matrix,
                 &matrices.n_i,
@@ -2626,6 +2644,7 @@ impl CircuitIR {
                 n,
                 m,
                 &device_slots,
+                &behavioral_stamp_patterns,
             );
             let g_aug_nnz: usize = g_aug_pattern.iter().map(|r| r.len()).sum();
             let density = g_aug_nnz as f64 / (n * n) as f64;
@@ -2709,11 +2728,7 @@ impl CircuitIR {
                 .pots
                 .iter()
                 .map(|p| PotentiometerIR {
-                    su: Vec::new(), // not used in nodal (no Sherman-Morrison)
-                    usu: 0.0,
                     g_nominal: p.g_nominal,
-                    nv_su: Vec::new(),
-                    u_ni: Vec::new(),
                     node_p: p.node_p,
                     node_q: p.node_q,
                     min_resistance: p.min_resistance,

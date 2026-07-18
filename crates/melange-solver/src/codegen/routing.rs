@@ -39,6 +39,12 @@ pub struct RoutingDecision {
     pub large_m: bool,
     /// Whether K matrix is ill-conditioned (max|K| > 1e8).
     pub k_ill_conditioned: bool,
+    /// Whether any K diagonal with a live N_i column is non-negative
+    /// (positive feedback in the DK Schur NR — e.g. single-transformer NFB
+    /// circuits built via `from_mna_augmented`, which only warns).
+    /// Dimensions whose N_i column is all zeros (MOSFET gate, VCA control)
+    /// have K[i][i] = 0 by construction and are excluded.
+    pub k_diag_unsafe: bool,
     /// Whether S matrix is ill-conditioned (max|S| > 1e6).
     pub s_ill_conditioned: bool,
     /// Human-readable reason for the routing decision.
@@ -87,6 +93,23 @@ pub fn auto_route(kernel: &DkKernel, mna: &MnaSystem, dk_failed: bool) -> Routin
         false
     };
 
+    // Check K diagonal sign: the DK Schur NR Jacobian is J = I - J_dev*K,
+    // which requires negative K diagonals (negative feedback) on every
+    // dimension that actually has current injection. `from_mna` hard-errors
+    // on violations (→ dk_failed), but `from_mna_augmented` — used for
+    // inductor/transformer circuits — only warns, so a single-transformer
+    // NFB circuit could otherwise sail through to DkSchur and diverge.
+    // Dimensions with an all-zero N_i column (MOSFET insulated gate, VCA
+    // control port) have K[i][i] = 0 by construction and are benign.
+    let k_diag_unsafe = if !dk_failed && m > 0 {
+        (0..m).any(|i| {
+            kernel.k[i * m + i] >= 0.0
+                && mna.n_i.iter().any(|ni_row| ni_row[i].abs() >= 1e-30)
+        })
+    } else {
+        false
+    };
+
     // Check S matrix conditioning: max|S| > 1e6 means cap-only nodes
     // lack resistive paths — Schur prediction is unreliable.
     let s_ill_conditioned = if !dk_failed && n > 0 {
@@ -116,6 +139,9 @@ pub fn auto_route(kernel: &DkKernel, mna: &MnaSystem, dk_failed: bool) -> Routin
             "trapezoidal unstable (spectral radius {:.4} > 1.002)",
             spectral_radius
         );
+    } else if k_diag_unsafe {
+        route = SolverRoute::Nodal;
+        reason = "non-negative K diagonal with live N_i column (positive feedback in DK Schur NR, e.g. transformer-coupled NFB)".to_string();
     } else if multi_transformer {
         route = SolverRoute::Nodal;
         reason = format!(
@@ -160,6 +186,7 @@ pub fn auto_route(kernel: &DkKernel, mna: &MnaSystem, dk_failed: bool) -> Routin
         multi_transformer,
         large_m,
         k_ill_conditioned,
+        k_diag_unsafe,
         s_ill_conditioned,
         reason,
     }

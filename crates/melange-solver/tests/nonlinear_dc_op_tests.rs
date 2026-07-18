@@ -1247,3 +1247,473 @@ R2 out 0 1k
         "must not warn on circuits without behavioral sources"
     );
 }
+
+// =============================================================================
+// Regression tests: DC OP NR machinery fixes (2026-07-18)
+//   1. pnjlim correction distribution pseudo-inverse normalization
+//   2. SPICE-style RELTOL/ABSTOL convergence (300 V circuits)
+//   3. is_voltage_row: inductor branch currents excluded from clamp/damping
+//   4. fetlim dispatch for JFET/MOSFET at DC
+//   5. unified degeneracy predicate + no-DC-source skip
+//   6. singular linear system reported honestly
+// =============================================================================
+
+/// Fix 1: floating series diode pair. D1 (a→b) has a floating N_v row
+/// ([+1, −1], ‖row‖² = 2), so the pre-fix raw-transpose pnjlim distribution
+/// applied DOUBLE the limiting correction to that junction — a strong limiting
+/// event became a REVERSED step. Measured pre-fix behavior on this circuit:
+/// the reversed step flips D1 into reverse bias and NR "converges" DirectNr
+/// to a NON-PHYSICAL equilibrium with Vf(D1) ≈ −96.5 V (wrong basin — would
+/// have poisoned DC_NL_I). With the pseudo-inverse normalization, Direct NR
+/// must land on the physical series-pair OP; the Vf/current assertions below
+/// are the discriminator.
+#[test]
+fn test_floating_series_diode_pair_direct_nr() {
+    let spice = "Floating Series Diode Pair
+VCC vcc 0 DC 100
+R1 vcc a 100
+D1 a b DMOD
+D2 b 0 DMOD
+C1 b 0 1u
+.MODEL DMOD D(IS=2.52e-9 N=1.752)
+";
+    let (netlist, mna, _) = build_pipeline(spice);
+    let config = DcOpConfig {
+        input_node: mna
+            .node_map
+            .get("in")
+            .copied()
+            .unwrap_or(1)
+            .saturating_sub(1),
+        input_resistance: 1.0,
+        // Iteration budget: the normalized distribution needs ~34 pnjlim-paced
+        // iterations (each iteration multiplies the diode current by ~e while
+        // climbing from the clamped 0.6 V seed to the 0.9 V high-current Vf).
+        max_iterations: 60,
+        ..DcOpConfig::default()
+    };
+    let slots = build_device_slots(&netlist, &mna);
+    let result = solve_dc_operating_point(&mna, &slots, &config);
+
+    assert!(result.converged, "series diode pair DC OP must converge");
+    assert_eq!(
+        result.method,
+        DcOpMethod::DirectNr,
+        "must converge via Direct NR (not fall through to stepping), got {:?} in {} iters",
+        result.method,
+        result.iterations
+    );
+
+    // Physics: I ≈ (100 − 2·Vf)/100 ≈ 0.98 A, Vf(≈1 A, IS=2.52e-9, n=1.752)
+    // ≈ n·Vt·ln(I/IS) ≈ 0.045·19.8 ≈ 0.89 V per diode.
+    let node = |name: &str| -> f64 {
+        let idx = mna.node_map.get(name).copied().unwrap() - 1;
+        result.v_node[idx]
+    };
+    let (v_a, v_b) = (node("a"), node("b"));
+    let vf1 = v_a - v_b;
+    let vf2 = v_b;
+    assert!(
+        vf1 > 0.7 && vf1 < 1.1,
+        "floating diode Vf out of range: {vf1}"
+    );
+    assert!(
+        vf2 > 0.7 && vf2 < 1.1,
+        "grounded diode Vf out of range: {vf2}"
+    );
+    // Both diodes carry the same series current: I = (100 − V(a))/100.
+    let i_series = (100.0 - v_a) / 100.0;
+    for (k, &i) in result.i_nl.iter().enumerate() {
+        assert!(
+            (i - i_series).abs() < 1e-6 * i_series.abs().max(1.0),
+            "diode {k} current {i} != series current {i_series}"
+        );
+    }
+}
+
+/// Fix 2: 300 V rails. The pre-fix convergence check was absolute-only
+/// (|delta| < 1e-9 for every row), which demands ~3 ppt relative precision on
+/// a 300 V node — at or below the LU round-off floor for ill-scaled systems.
+/// The SPICE-style `|delta_i| < reltol·|v_i| + abstol` check (reltol = 1e-6)
+/// must let the scaled circuit converge via Direct NR with the same junction
+/// physics as the 5 V version.
+#[test]
+fn test_high_voltage_divider_diode_direct_nr() {
+    // Wide resistance spread (1meg : 10) on a 300 V rail pushes the LU
+    // round-off floor on the high-voltage nodes above the old 1e-9 absolute
+    // tolerance — the pre-fix absolute-only check false-fails here.
+    let spice = "HV Diode with 300V rail
+VCC vcc 0 DC 300
+R1 vcc mid 1meg
+R2 mid out 10
+D1 out 0 DMOD
+C1 out 0 1u
+.MODEL DMOD D(IS=2.52e-9 N=1.752)
+";
+    let (netlist, mna, _) = build_pipeline(spice);
+    let config = DcOpConfig {
+        input_node: mna
+            .node_map
+            .get("in")
+            .copied()
+            .unwrap_or(1)
+            .saturating_sub(1),
+        input_resistance: 1.0,
+        ..DcOpConfig::default()
+    };
+    let slots = build_device_slots(&netlist, &mna);
+    let result = solve_dc_operating_point(&mna, &slots, &config);
+
+    assert!(result.converged, "300 V circuit DC OP must converge");
+    assert_eq!(
+        result.method,
+        DcOpMethod::DirectNr,
+        "300 V circuit must converge via Direct NR, got {:?} in {} iters",
+        result.method,
+        result.iterations
+    );
+    let node = |name: &str| -> f64 {
+        let idx = mna.node_map.get(name).copied().unwrap() - 1;
+        result.v_node[idx]
+    };
+    assert!(
+        (node("vcc") - 300.0).abs() < 1e-3,
+        "VCC node must sit at 300 V, got {}",
+        node("vcc")
+    );
+    let v_out = node("out");
+    assert!(
+        v_out > 0.4 && v_out < 1.0,
+        "diode forward drop out of range at 300 V rails: {v_out}"
+    );
+    // Diode current ≈ (300 − Vf)/1meg ≈ 0.3 mA
+    assert!(
+        result.i_nl.iter().any(|&i| (i - 0.3e-3).abs() < 0.05e-3),
+        "expected ≈0.3 mA diode current, got {:?}",
+        result.i_nl
+    );
+}
+
+/// Fix 3: when MNA-level BJT internal nodes exist, the pre-fix damping loop
+/// classified every row `i >= internal_node_start` as a voltage row — sweeping
+/// the inductor DC-short branch-current rows (amperes!) into the ±50 "V" flat
+/// clamp and the 10 V damping scan. A branch current that legitimately exceeds
+/// 50 A then needed |I|/50 clamped iterations (with 0.1× damping poisoning all
+/// node updates on the way), blowing the iteration budget. With the explicit
+/// is_voltage_row classification, Direct NR must converge with the branch
+/// current landing at its physical value in one clean Newton trajectory.
+#[test]
+fn test_inductor_branch_current_not_clamped_with_internal_nodes() {
+    use melange_solver::device_types::BjtParams;
+
+    let spice = "Inductor big branch current + parasitic BJT
+VCC vcc 0 DC 300
+L1 vcc a 10m
+D1 a b DMOD
+RS b 0 0.05
+R1 vcc base 300k
+R2 base 0 22k
+Q1 coll base emit QPAR
+RC vcc coll 6.8k
+RE emit 0 1k
+C1 in base 10u
+.MODEL DMOD D(IS=2.52e-9 N=1.752)
+.MODEL QPAR NPN(IS=1.8e-14 BF=200 BR=10)
+";
+    let netlist = Netlist::parse(spice).expect("parse failed");
+    let mut mna = MnaSystem::from_netlist(&netlist).expect("MNA failed");
+    let input_node = mna
+        .node_map
+        .get("in")
+        .copied()
+        .unwrap_or(1)
+        .saturating_sub(1);
+    if input_node < mna.n {
+        mna.g[input_node][input_node] += 1.0;
+    }
+
+    // Build slots, then give the BJT parasitic resistances and expand
+    // MNA-level internal nodes (the transient/nodal pipeline does this via
+    // expand_bjt_internal_nodes) so the DC system sees mna.bjt_internal_nodes.
+    let mut slots = build_device_slots(&netlist, &mna);
+    for slot in slots.iter_mut() {
+        if let DeviceParams::Bjt(BjtParams { rb, rc, re, .. }) = &mut slot.params {
+            *rb = 100.0;
+            *rc = 10.0;
+            *re = 1.0;
+        }
+    }
+    mna.expand_bjt_internal_nodes(&slots);
+    assert!(
+        !mna.bjt_internal_nodes.is_empty(),
+        "test setup: MNA internal nodes must exist to exercise the conflation"
+    );
+    for slot in slots.iter_mut() {
+        if matches!(slot.device_type, DeviceType::Bjt) {
+            slot.has_internal_mna_nodes = true;
+        }
+    }
+
+    let config = DcOpConfig {
+        input_node,
+        input_resistance: 1.0,
+        // Pre-fix, the ~5900 A branch current is clamped to 50 per iteration:
+        // ≥118 iterations just for the branch row. 80 iterations is generous
+        // for the fixed solver and unreachable for the clamped one.
+        max_iterations: 80,
+        ..DcOpConfig::default()
+    };
+    let result = solve_dc_operating_point(&mna, &slots, &config);
+
+    assert!(
+        result.converged,
+        "inductor + parasitic-BJT DC OP must converge (method {:?}, {} iters)",
+        result.method, result.iterations
+    );
+    assert_eq!(
+        result.method,
+        DcOpMethod::DirectNr,
+        "must converge via Direct NR, got {:?} in {} iters",
+        result.method,
+        result.iterations
+    );
+
+    // The inductor is a DC short: I ≈ (300 − Vf(D1)) / 0.05 Ω ≈ 5.97 kA.
+    // Its branch-current row is the first row after mna.n_aug (post-expansion).
+    let branch_idx = mna.n_aug;
+    assert!(
+        branch_idx < result.v_node.len(),
+        "branch row {branch_idx} must be inside the DC solution vector ({})",
+        result.v_node.len()
+    );
+    let i_branch = result.v_node[branch_idx].abs();
+    assert!(
+        i_branch > 50.0,
+        "branch current must legitimately exceed the old 50 'V' clamp, got {i_branch}"
+    );
+    assert!(
+        (i_branch - 5.97e3).abs() < 0.05 * 5.97e3,
+        "branch current must land near (300 − Vf)/0.05 ≈ 5.97 kA, got {i_branch}"
+    );
+
+    // The BJT bias must be sane too (base divider ≈ 20.5 V, Vbe ≈ 0.7).
+    let vbe = result.v_nl[slots
+        .iter()
+        .find(|s| matches!(s.device_type, DeviceType::Bjt))
+        .unwrap()
+        .start_idx];
+    assert!(
+        vbe > 0.5 && vbe < 0.9,
+        "BJT Vbe out of range with internal nodes: {vbe}"
+    );
+}
+
+/// Fix 4: JFET fetlim dispatch at DC. A self-biased N-JFET source follower
+/// whose linear guess starts far from the operating point must converge via
+/// Direct NR with the fetlim-limited trajectory, landing on the physical
+/// self-bias point (Vgs between Vp and 0, Id between 0 and IDSS).
+#[test]
+fn test_jfet_self_bias_dc_op_with_fetlim() {
+    use melange_solver::device_types::JfetParams;
+
+    let spice = "JFET self bias
+VCC vcc 0 DC 24
+J1 drain gate src JMOD
+RD vcc drain 2.2k
+RG gate 0 1meg
+RSRC src 0 1k
+C1 in gate 10u
+.MODEL JMOD NJF(VTO=-2.0 BETA=1.25e-3 LAMBDA=0)
+";
+    let netlist = Netlist::parse(spice).expect("parse failed");
+    let mut mna = MnaSystem::from_netlist(&netlist).expect("MNA failed");
+    let input_node = mna
+        .node_map
+        .get("in")
+        .copied()
+        .unwrap_or(1)
+        .saturating_sub(1);
+    if input_node < mna.n {
+        mna.g[input_node][input_node] += 1.0;
+    }
+
+    // Manual slot: build_device_slots doesn't cover JFETs.
+    // IDSS = BETA·VTO² = 1.25e-3·4 = 5 mA.
+    let slots = vec![DeviceSlot {
+        device_type: DeviceType::Jfet,
+        start_idx: 0,
+        dimension: 2,
+        params: DeviceParams::Jfet(JfetParams {
+            idss: 5e-3,
+            vp: -2.0,
+            lambda: 0.0,
+            is_p_channel: false,
+            cgs: 0.0,
+            cgd: 0.0,
+            rd: 0.0,
+            rs: 0.0,
+        }),
+        has_internal_mna_nodes: false,
+        vg2k_frozen: 0.0,
+    }];
+
+    let config = DcOpConfig {
+        input_node,
+        input_resistance: 1.0,
+        ..DcOpConfig::default()
+    };
+    let result = solve_dc_operating_point(&mna, &slots, &config);
+
+    assert!(result.converged, "JFET self-bias DC OP must converge");
+    assert_eq!(
+        result.method,
+        DcOpMethod::DirectNr,
+        "JFET self-bias must converge via Direct NR, got {:?} in {} iters",
+        result.method,
+        result.iterations
+    );
+    // v_nl layout: dim 0 = Vds, dim 1 = Vgs.
+    let (vds, vgs) = (result.v_nl[0], result.v_nl[1]);
+    assert!(
+        vgs > -2.0 && vgs < 0.0,
+        "self-bias Vgs must sit between Vp and 0, got {vgs}"
+    );
+    assert!(vds > 0.0, "N-JFET Vds must be positive, got {vds}");
+    // Self-bias: Id·RSRC = −Vgs → Id = −Vgs/1k, and Id = IDSS·(1 − Vgs/Vp)².
+    let id = result.i_nl[0];
+    assert!(
+        (id - (-vgs / 1e3)).abs() < 1e-6,
+        "Id {id} must satisfy the self-bias constraint −Vgs/RSRC = {}",
+        -vgs / 1e3
+    );
+    assert!(
+        id > 0.0 && id < 5e-3,
+        "Id must be between 0 and IDSS, got {id}"
+    );
+}
+
+/// Fix 5: a diode circuit with NO DC sources (b_dc all zero). The all-off
+/// solution IS the true operating point, so the degeneracy check must be
+/// skipped and Direct NR must be accepted immediately — pre-fix, Strategy 1
+/// rejected the (correct) all-off solution as degenerate and burned source
+/// stepping iterations to arrive at the same answer.
+#[test]
+fn test_source_free_diode_clipper_accepts_all_off() {
+    let spice = "Source-free diode clipper
+R1 in a 10k
+D1 a 0 DMOD
+D2 0 a DMOD
+C1 a 0 10n
+.MODEL DMOD D(IS=2.52e-9 N=1.752)
+";
+    let (netlist, mna, _) = build_pipeline(spice);
+    let config = DcOpConfig {
+        input_node: mna
+            .node_map
+            .get("in")
+            .copied()
+            .unwrap_or(1)
+            .saturating_sub(1),
+        input_resistance: 1.0,
+        ..DcOpConfig::default()
+    };
+    let slots = build_device_slots(&netlist, &mna);
+    let result = solve_dc_operating_point(&mna, &slots, &config);
+
+    assert!(result.converged, "source-free clipper DC OP must converge");
+    assert_eq!(
+        result.method,
+        DcOpMethod::DirectNr,
+        "all-off is the true OP for a source-free circuit — Direct NR must be \
+         accepted, not rejected as degenerate (got {:?})",
+        result.method
+    );
+    assert!(
+        result.v_node.iter().all(|&v| v.abs() < 1e-6),
+        "source-free OP must be ~0 V everywhere, got {:?}",
+        result.v_node
+    );
+    assert!(
+        result.i_nl.iter().all(|&i| i.abs() < 1e-9),
+        "source-free OP must have ~zero device currents, got {:?}",
+        result.i_nl
+    );
+}
+
+/// Fix 6: a structurally singular linear DC system (two parallel voltage
+/// sources with conflicting values → linearly dependent constraint rows) must
+/// be reported as converged = false with the distinct SingularLinear method —
+/// pre-fix it silently returned all-zeros with converged = true.
+#[test]
+fn test_singular_linear_system_reported_not_converged() {
+    let spice = "Conflicting parallel voltage sources
+V1 a 0 DC 5
+V2 a 0 DC 3
+R1 a 0 1k
+";
+    let netlist = Netlist::parse(spice).expect("parse failed");
+    let mna = MnaSystem::from_netlist(&netlist).expect("MNA failed");
+
+    let config = DcOpConfig::default();
+    let result = solve_dc_operating_point(&mna, &[], &config);
+
+    assert!(
+        !result.converged,
+        "singular linear system must NOT be reported as converged"
+    );
+    assert_eq!(
+        result.method,
+        DcOpMethod::SingularLinear,
+        "singular linear system must use the distinct SingularLinear method, got {:?}",
+        result.method
+    );
+    assert!(
+        result.v_node.iter().all(|&v| v == 0.0),
+        "singular fallback returns zeros"
+    );
+}
+
+/// Fix-point invariance guard: the pnjlim normalization (fix 1) and the
+/// RELTOL convergence check (fix 2) change NR trajectories, not fixed points.
+/// The canonical BJT common-emitter bias must land on the SAME operating point
+/// as before (values from the pre-fix solver / DC_OP.md verification table).
+#[test]
+fn test_bjt_ce_fixed_point_unchanged_by_nr_fixes() {
+    let (netlist, mna, _) = build_pipeline(BJT_COMMON_EMITTER);
+    let config = DcOpConfig {
+        input_node: mna
+            .node_map
+            .get("in")
+            .copied()
+            .unwrap_or(1)
+            .saturating_sub(1),
+        input_resistance: 1.0,
+        ..DcOpConfig::default()
+    };
+    let slots = build_device_slots(&netlist, &mna);
+    let result = solve_dc_operating_point(&mna, &slots, &config);
+    assert!(result.converged);
+
+    let node = |name: &str| -> f64 {
+        let idx = mna.node_map.get(name).copied().unwrap() - 1;
+        result.v_node[idx]
+    };
+    // DC_OP.md expected values: V(base) ≈ 2.1 V (divider loaded by Ib),
+    // V(emit) ≈ V(base) − 0.65, V(coll) ≈ 12 − Ic·6.8k.
+    let (v_base, v_emit, v_coll) = (node("base"), node("emit"), node("coll"));
+    assert!(
+        (v_base - 2.1).abs() < 0.2,
+        "V(base) moved: expected ≈2.1 V, got {v_base}"
+    );
+    assert!(
+        (v_base - v_emit - 0.65).abs() < 0.08,
+        "Vbe moved: expected ≈0.65 V, got {}",
+        v_base - v_emit
+    );
+    let ic = v_emit / 1000.0; // I_E ≈ I_C through RE=1k
+    let v_coll_expected = 12.0 - ic * 6800.0;
+    assert!(
+        (v_coll - v_coll_expected).abs() < 0.3,
+        "V(coll) inconsistent with Ic·RC: got {v_coll}, expected ≈{v_coll_expected}"
+    );
+}

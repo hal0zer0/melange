@@ -7,8 +7,11 @@ const DIODE_MAX_FWD_I: f64 = 1e3;
 
 /// Diode current: i_d = is * (exp(v_d / n_vt) - 1)
 ///
-/// For v_d ≤ 40·n_vt this is the legacy fast_exp path (bit-exact with prior
-/// behavior). Above it, the true exponential continues in ln-current space
+/// Below -40·n_vt the current extends linearly with slope equal to the
+/// clamped conductance, keeping value and derivative consistent (canonical
+/// form: DiodeShockley::current_at in melange-devices). For -40·n_vt ≤ v_d ≤
+/// 40·n_vt this is the legacy fast_exp path (bit-exact with prior behavior).
+/// Above it, the true exponential continues in ln-current space
 /// (is·e^x = e^(x + ln is), immune to exp overflow and the fast_exp ±40
 /// clamp) until forward current reaches DIODE_MAX_FWD_I, then extends
 /// linearly. Without this, extreme-IS models (wide-bandgap junctions,
@@ -17,8 +20,19 @@ const DIODE_MAX_FWD_I: f64 = 1e3;
 #[inline(always)]
 fn diode_current(v_d: f64, is: f64, n_vt: f64) -> f64 {
     let x = v_d / n_vt;
+    if x < -40.0 {
+        // Deep reverse: linear extension consistent with diode_conductance
+        // (matches canonical DiodeShockley::current_at in melange-devices).
+        // A flat clamp here would return constant current while the
+        // conductance stays nonzero — value/derivative inconsistency that
+        // stalls NR in deep reverse bias.
+        let exp_clamp = fast_exp(-40.0);
+        let i_clamp = is * (exp_clamp - 1.0);
+        let g_clamp = (is / n_vt) * exp_clamp;
+        return i_clamp + g_clamp * (v_d + 40.0 * n_vt);
+    }
     if x <= 40.0 {
-        return is * (fast_exp(x.max(-40.0)) - 1.0);
+        return is * (fast_exp(x) - 1.0);
     }
     // Cold path: beyond the legacy clamp (NR overshoot or wide-bandgap knee)
     let ln_is = is.ln();

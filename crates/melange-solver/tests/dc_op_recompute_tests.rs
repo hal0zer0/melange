@@ -396,7 +396,7 @@ fn flag_on_switch_compiles_and_runs_at_each_position() {
 // These tests guard that the device evaluator block is emitted when the
 // circuit has at least one nonlinear device, mirrors the transient solver's
 // device dispatch, packs locals into `i_nl` + `j_dev`, and that the E.5 NR
-// loop consumes those matrices, calls `invert_n`, applies damping, and
+// loop consumes those matrices, calls `invert_n_equilibrated`, applies damping, and
 // writes back `dc_operating_point` / `v_prev` / `i_nl_prev` on convergence.
 // -----------------------------------------------------------------------------
 
@@ -466,8 +466,8 @@ fn e4_diode_flag_on_emits_device_eval() {
         "E.4: must pack jdev_{{r}}_{{c}} into dense j_dev matrix"
     );
     assert!(
-        body.contains("let (g_inv, singular) = invert_n(g_aug_nr);"),
-        "E.5: NR loop must call invert_n on the linearized g_aug_nr"
+        body.contains("let (g_inv, singular) = invert_n_equilibrated(g_aug_nr);"),
+        "E.5: NR loop must call invert_n_equilibrated on the linearized g_aug_nr"
     );
 }
 
@@ -508,7 +508,7 @@ fn e4_jfet_flag_on_emits_jfet_evaluate() {
 }
 
 /// Linear-only circuit with the flag ON: the dispatcher falls through to the
-/// E.5 linear-solve path — no NR loop, no device eval, just one `invert_n`
+/// E.5 linear-solve path — no NR loop, no device eval, just one `invert_n_equilibrated`
 /// + matrix-vector multiply directly on `g_aug`.
 #[test]
 fn e4_linear_m0_flag_on_skips_device_eval() {
@@ -536,7 +536,7 @@ fn e4_linear_m0_flag_on_skips_device_eval() {
         "linear-only circuit must take the direct-LU path"
     );
     assert!(
-        body.contains("let (g_inv, singular) = invert_n(g_aug);"),
+        body.contains("let (g_inv, singular) = invert_n_equilibrated(g_aug);"),
         "linear-only circuit must invert the base g_aug (no NR correction)"
     );
 }

@@ -8,25 +8,23 @@
 //! - [`filters`] — One-pole, biquad, DC blocker, and TPT integrator filters
 //! - [`oversampling`] — Polyphase half-band IIR oversampling (2x/4x)
 //! - [`nr`] — Newton-Raphson helpers: `pnjlim`/`fetlim` voltage limiting, 1D/2D solvers
-//! - [`companion`] — Trapezoidal and backward Euler companion model discretization
 //! - [`util`] — Audio math utilities: dB conversion, soft clipping, thermal voltage, etc.
+//!
+//! Note: companion-model discretization (2C/T stamping) lives in the solver's
+//! MNA/DK layer (`melange-solver/src/mna.rs`, `dk.rs`), not here. A former
+//! `companion` module duplicated that math (incorrectly) and had no consumers;
+//! it was removed.
 //!
 //! # Real-Time Safety
 //!
 //! All types are designed for real-time audio: no heap allocation after construction,
 //! no panics on valid input, deterministic execution time.
 
-pub mod companion;
 pub mod filters;
 pub mod nr;
 pub mod oversampling;
 pub mod util;
 
-pub use companion::{
-    companion_conductance_backward_euler, companion_conductance_trapezoidal,
-    history_current_trapezoidal, inductor_companion_conductance_trapezoidal,
-    BackwardEulerCompanion, BilinearCompanion, InductorCompanion, TrapezoidalCompanion,
-};
 pub use filters::{Biquad, BiquadType, DcBlocker, OnePoleHpf, OnePoleLpf, TptLpf};
 pub use nr::{fetlim, nr_solve_1d, nr_solve_2d, nr_solve_dk, pn_vcrit, pnjlim, NrResult};
 pub use oversampling::{

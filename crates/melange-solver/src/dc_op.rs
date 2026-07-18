@@ -14,13 +14,20 @@ use crate::mna::{inject_rhs_current, MnaSystem};
 use melange_devices::bjt::{BjtEbersMoll, BjtGummelPoon, BjtPolarity};
 use melange_devices::diode::{DiodeShockley, DiodeWithRs};
 use melange_devices::tube::{KorenPentode, KorenTriode};
-use melange_primitives::nr::{pn_vcrit, pnjlim};
+use melange_primitives::nr::{fetlim, pn_vcrit, pnjlim};
 
 /// Configuration for the DC operating point solver.
 #[derive(Debug, Clone)]
 pub struct DcOpConfig {
-    /// Convergence tolerance (V)
+    /// Absolute convergence tolerance (V). Acts as ABSTOL in the SPICE-style
+    /// per-variable check `|delta_i| < reltol·|v_i| + tolerance`.
     pub tolerance: f64,
+    /// Relative convergence tolerance (dimensionless). DC OP uses a much
+    /// tighter RELTOL than the transient path's 1e-3: at 1e-6 low-voltage
+    /// circuits keep (effectively) the legacy absolute-only behavior while
+    /// high-voltage circuits (300 V rails) stop false-failing on the LU
+    /// round-off floor, which is proportional to |v|.
+    pub reltol: f64,
     /// Maximum NR iterations per solve attempt
     pub max_iterations: usize,
     /// Number of source stepping stages
@@ -41,6 +48,7 @@ impl Default for DcOpConfig {
     fn default() -> Self {
         Self {
             tolerance: 1e-9,
+            reltol: 1e-6,
             max_iterations: 200,
             source_steps: 50,
             gmin_start: 1e-2,
@@ -84,6 +92,11 @@ pub enum DcOpMethod {
     AolStepping,
     /// All methods failed — returned linear fallback
     Failed,
+    /// The linear DC system itself was singular — returned zeros, NOT converged.
+    /// Callers should treat this like `Failed` (warmup settling required), but the
+    /// distinct variant lets them tell "NR could not converge" apart from
+    /// "the G matrix is structurally broken".
+    SingularLinear,
 }
 
 /// Evaluate all nonlinear device currents and Jacobian entries.
@@ -701,8 +714,13 @@ struct DcSystemInfo {
     dc_n_i: Vec<Vec<f64>>,
     /// Internal node mappings (empty if no parasitic BJTs)
     bjt_internal: Vec<BjtInternalNodes>,
-    /// Index where internal BJT nodes start (for damping).
-    internal_node_start: usize,
+    /// Per-row classification of the DC system: `true` for rows that carry a
+    /// node VOLTAGE (circuit nodes 0..n, MNA-level BJT internal nodes, and
+    /// DC-added BJT internal nodes), `false` for algebraic/branch-current rows
+    /// (VS/VCVS extension rows, inductor short-circuit branch currents).
+    /// Voltage rows are subject to NR damping and the ±50 V flat clamp;
+    /// current rows (amperes, not volts) must never be clamped.
+    is_voltage_row: Vec<bool>,
 }
 
 /// Build the DC conductance matrix and source vector from MNA.
@@ -1020,6 +1038,40 @@ fn build_dc_system(
         dc_n_i[bjt.int_emitter][s + 1] = 1.0;
     }
 
+    // Classify every DC-system row as voltage-carrying (clamp/damp) or
+    // algebraic/branch-current (never clamp). Layout:
+    //   [0..n)                      circuit nodes                → voltage
+    //   [n..n_aug)                  VS/VCVS ext rows             → current
+    //     ... except MNA-level BJT internal nodes (appended to the tail of
+    //         n_aug by `expand_bjt_internal_nodes`)              → voltage
+    //   [n_aug..n_aug+num_ind)      inductor short branch rows   → current
+    //   [internal_node_start..n_dc) DC-added BJT internal nodes  → voltage
+    let mut is_voltage_row = vec![false; n_dc];
+    for flag in is_voltage_row.iter_mut().take(n) {
+        *flag = true;
+    }
+    for mna_bjt in &mna.bjt_internal_nodes {
+        for idx in [
+            mna_bjt.int_base,
+            mna_bjt.int_collector,
+            mna_bjt.int_emitter,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if idx < n_dc {
+                is_voltage_row[idx] = true;
+            }
+        }
+    }
+    for flag in is_voltage_row
+        .iter_mut()
+        .take(n_dc)
+        .skip(internal_node_start)
+    {
+        *flag = true;
+    }
+
     DcSystemInfo {
         g_dc,
         b_dc,
@@ -1027,7 +1079,39 @@ fn build_dc_system(
         dc_n_v,
         dc_n_i,
         bjt_internal,
-        internal_node_start,
+        is_voltage_row,
+    }
+}
+
+/// Distribute a junction-space voltage-limiting correction back into node
+/// space through the pseudo-inverse of the junction's N_v row.
+///
+/// A raw `pn_corrections[j] += n_v[idx][j] * correction` (plain transpose)
+/// applies a junction-space change of `‖N_v row‖² · correction`: exact for
+/// grounded junctions (‖row‖² = 1) but DOUBLED for floating junctions
+/// (row = [+1, −1] → ‖row‖² = 2). A strong limiting event then overshoots
+/// past the limited target into a REVERSED step (e.g. v_old = 0.5, raw 5.0,
+/// v_lim = 0.634 lands at −3.73 V), which is the classic period-2 NR
+/// oscillation signature. Normalizing by ‖row‖² (the Moore-Penrose
+/// pseudo-inverse of the 1×n row) makes the post-correction junction voltage
+/// land exactly on `v_lim` — the minimum-norm node update with that property.
+///
+/// Zero rows (tied terminals — degenerate junction) are skipped: there is no
+/// node update that can change such a junction voltage.
+fn distribute_junction_correction(
+    n_v_row: &[f64],
+    correction: f64,
+    pn_corrections: &mut [f64],
+) {
+    let norm_sq: f64 = n_v_row.iter().map(|x| x * x).sum();
+    if norm_sq < 1e-30 {
+        return;
+    }
+    let scaled = correction / norm_sq;
+    for (corr, &nv) in pn_corrections.iter_mut().zip(n_v_row.iter()) {
+        if nv != 0.0 {
+            *corr += nv * scaled;
+        }
     }
 }
 
@@ -1436,10 +1520,11 @@ struct DcCircuit<'a> {
     n_dc: usize,
     /// Whether internal junction nodes are present (skip parasitic inner loop)
     has_internal_nodes: bool,
-    /// Index where internal BJT nodes start (for damping).
-    /// Augmented variables (n..n_aug_plus_ind) are NOT damped, but internal
-    /// nodes (n_aug_plus_ind..n_dc) MUST be damped like circuit nodes.
-    internal_node_start: usize,
+    /// Per-row voltage/current classification (n_dc entries; see
+    /// [`DcSystemInfo::is_voltage_row`]). Voltage rows (circuit nodes + BJT
+    /// internal nodes) are damped and flat-clamped; branch-current rows
+    /// (VS/VCVS/inductor augmented variables) are updated directly.
+    is_voltage_row: &'a [bool],
 }
 
 /// Uses companion formulation at each iteration:
@@ -1675,10 +1760,11 @@ fn nr_dc_solve(
                     let v_raw = v_nl_new[idx];
                     let v_lim = pnjlim(v_raw, v_old, vt, vcrit);
                     if (v_lim - v_raw).abs() > 1e-15 {
-                        let correction = v_lim - v_raw;
-                        for j in 0..n_dc {
-                            pn_corrections[j] += dc_n_v[idx][j] * correction;
-                        }
+                        distribute_junction_correction(
+                            &dc_n_v[idx],
+                            v_lim - v_raw,
+                            &mut pn_corrections,
+                        );
                     }
                 }
                 (DeviceType::Bjt, DeviceParams::Bjt(bp))
@@ -1703,9 +1789,11 @@ fn nr_dc_solve(
                     let v_lim_be = pnjlim(v_raw_be, v_old_be, nf_vt, vcrit_be);
                     if (v_lim_be - v_raw_be).abs() > 1e-15 {
                         let correction = sign * (v_lim_be - v_raw_be);
-                        for j in 0..n_dc {
-                            pn_corrections[j] += dc_n_v[be_idx][j] * correction;
-                        }
+                        distribute_junction_correction(
+                            &dc_n_v[be_idx],
+                            correction,
+                            &mut pn_corrections,
+                        );
                     }
                     // Vbc dimension (if 2D)
                     if slot.dimension > 1 {
@@ -1716,13 +1804,73 @@ fn nr_dc_solve(
                         let v_lim_bc = pnjlim(v_raw_bc, v_old_bc, nr_vt, vcrit_bc);
                         if (v_lim_bc - v_raw_bc).abs() > 1e-15 {
                             let correction = sign * (v_lim_bc - v_raw_bc);
-                            for j in 0..n_dc {
-                                pn_corrections[j] += dc_n_v[bc_idx][j] * correction;
-                            }
+                            distribute_junction_correction(
+                                &dc_n_v[bc_idx],
+                                correction,
+                                &mut pn_corrections,
+                            );
                         }
                     }
                 }
-                _ => {} // FETs and tubes: no PN junction limiting needed
+                // JFET/MOSFET: SPICE fetlim, mirroring the transient dispatch
+                // table (nr_helpers.rs): dim 0 = Vds → fetlim(·, ·, 0.0),
+                // dim 1 = Vgs → fetlim(·, ·, vto) with vto = raw pinch-off /
+                // threshold in the device's own sign convention (jp.vp is
+                // negative for N-channel JFETs, mp.vt negative for PMOS —
+                // exactly the value the transient path passes as
+                // `state.device_N_vp` / `state.device_N_vt`; no polarity flip).
+                (DeviceType::Jfet, DeviceParams::Jfet(jp)) => {
+                    let ds_idx = slot.start_idx;
+                    let v_lim_ds = fetlim(v_nl_new[ds_idx], v_nl[ds_idx], 0.0);
+                    if (v_lim_ds - v_nl_new[ds_idx]).abs() > 1e-15 {
+                        distribute_junction_correction(
+                            &dc_n_v[ds_idx],
+                            v_lim_ds - v_nl_new[ds_idx],
+                            &mut pn_corrections,
+                        );
+                    }
+                    if slot.dimension > 1 {
+                        let gs_idx = slot.start_idx + 1;
+                        let v_lim_gs = fetlim(v_nl_new[gs_idx], v_nl[gs_idx], jp.vp);
+                        if (v_lim_gs - v_nl_new[gs_idx]).abs() > 1e-15 {
+                            distribute_junction_correction(
+                                &dc_n_v[gs_idx],
+                                v_lim_gs - v_nl_new[gs_idx],
+                                &mut pn_corrections,
+                            );
+                        }
+                    }
+                }
+                (DeviceType::Mosfet, DeviceParams::Mosfet(mp)) => {
+                    let ds_idx = slot.start_idx;
+                    let v_lim_ds = fetlim(v_nl_new[ds_idx], v_nl[ds_idx], 0.0);
+                    if (v_lim_ds - v_nl_new[ds_idx]).abs() > 1e-15 {
+                        distribute_junction_correction(
+                            &dc_n_v[ds_idx],
+                            v_lim_ds - v_nl_new[ds_idx],
+                            &mut pn_corrections,
+                        );
+                    }
+                    if slot.dimension > 1 {
+                        let gs_idx = slot.start_idx + 1;
+                        let v_lim_gs = fetlim(v_nl_new[gs_idx], v_nl[gs_idx], mp.vt);
+                        if (v_lim_gs - v_nl_new[gs_idx]).abs() > 1e-15 {
+                            distribute_junction_correction(
+                                &dc_n_v[gs_idx],
+                                v_lim_gs - v_nl_new[gs_idx],
+                                &mut pn_corrections,
+                            );
+                        }
+                    }
+                }
+                // Tubes: intentionally unlimited here. The transient path uses
+                // pnjlim(Vgk, ·, vgk_onset/3, VCRIT) + fetlim(Vpk, ·, 0.0), but
+                // the tube VCRIT constant is derived in the codegen emitters
+                // and is not trivially available at this call site; the pentode
+                // bias seeding in `clamp_junction_voltages` covers the known
+                // divergence cases. Port the tube dispatch if a DC OP tube
+                // oscillation ever shows up.
+                _ => {}
             }
         }
 
@@ -1734,19 +1882,20 @@ fn nr_dc_solve(
             .collect();
 
         // Global node voltage damping: if max change > 10V, scale all node updates.
-        // Includes both external circuit nodes (0..n) and internal parasitic nodes.
-        let n = mna.n;
-        let int_start = circuit.internal_node_start;
+        // Only VOLTAGE rows participate (circuit nodes + BJT internal nodes, per
+        // the explicit is_voltage_row classification). Branch-current rows
+        // (VS/VCVS extension rows, inductor DC-short branch currents) are in
+        // amperes — sweeping them into the voltage damping scan or the ±50 "V"
+        // flat clamp would stall convergence whenever a branch current
+        // legitimately exceeds 50 A (or trigger phantom damping from large
+        // current steps).
         let v_max_step = 50.0;
         let mut max_delta = 0.0_f64;
-        // Compute max delta across circuit nodes AND internal nodes
-        for i in 0..n {
-            let delta = (v_limited[i] - v[i]).abs();
-            max_delta = max_delta.max(delta);
-        }
-        for i in int_start..n_dc {
-            let delta = (v_limited[i] - v[i]).abs();
-            max_delta = max_delta.max(delta);
+        for i in 0..n_dc {
+            if circuit.is_voltage_row[i] {
+                let delta = (v_limited[i] - v[i]).abs();
+                max_delta = max_delta.max(delta);
+            }
         }
         let damping = if max_delta > 10.0 {
             (10.0 / max_delta).max(0.1)
@@ -1754,11 +1903,15 @@ fn nr_dc_solve(
             1.0
         };
 
-        let mut final_max_delta = 0.0_f64;
+        // Per-variable SPICE-style convergence check on the ACTUALLY APPLIED
+        // step: |delta_i| < reltol·|v_i| + abstol. The relative term keeps
+        // high-voltage circuits (300 V rails) from false-failing on the LU
+        // round-off floor; abstol = config.tolerance preserves the legacy
+        // behavior for small-signal nodes.
+        let mut all_within_tol = true;
         for i in 0..n_dc {
             let delta = v_limited[i] - v[i];
-            let is_node = i < n || i >= int_start;
-            let limited = if is_node {
+            let limited = if circuit.is_voltage_row[i] {
                 // Circuit node or internal parasitic node: apply damping + flat clamp
                 let damped = delta * damping;
                 damped.clamp(-v_max_step, v_max_step)
@@ -1767,7 +1920,9 @@ fn nr_dc_solve(
                 delta
             };
             v[i] += limited;
-            final_max_delta = final_max_delta.max(limited.abs());
+            if limited.abs() >= config.reltol * v[i].abs() + config.tolerance {
+                all_within_tol = false;
+            }
         }
 
         // Clamp op-amp output voltages to rail limits.
@@ -1789,7 +1944,7 @@ fn nr_dc_solve(
             let out = oa.n_out_idx; // 1-indexed
             if out > 0 {
                 let o = out - 1; // 0-indexed
-                if o < n {
+                if o < mna.n {
                     // Determine effective rail limits for this op-amp.
                     // Base rails scale with source_scale so op-amp output tracks the
                     // ramping supply during source stepping.
@@ -1832,9 +1987,7 @@ fn nr_dc_solve(
             }
         }
 
-        let max_delta = final_max_delta;
-
-        if max_delta < config.tolerance {
+        if all_within_tol {
             // Final evaluation at converged point
             extract_nl_voltages_with(m, dc_n_v, v, v_nl);
             evaluate_devices_inner(
@@ -1886,6 +2039,53 @@ fn nr_dc_solve(
         );
     }
     (false, config.max_iterations)
+}
+
+/// Degenerate-solution check shared by all convergence strategies.
+///
+/// A converged NR solution with every PN junction OFF ("all devices at supply
+/// rails") is usually the spurious open-loop fixed point of a feedback bias
+/// network — unless the circuit has no DC excitation at all (`b_dc` all zero),
+/// in which case all-off IS the true operating point and the check is skipped.
+///
+/// Semantics are any-device-validates: a single forward-biased junction (or
+/// any non-junction device — FET/tube/VCA/op-amp results are trusted as-is)
+/// validates the whole solution. Per-device validation would be stricter but
+/// is a larger behavior change (multi-stage circuits where one stage is
+/// legitimately off would start false-failing) — keep any-device semantics.
+fn solution_has_active_junction(
+    device_slots: &[DeviceSlot],
+    v_nl: &[f64],
+    has_dc_excitation: bool,
+) -> bool {
+    if !has_dc_excitation {
+        // No DC sources: all-junctions-off is the physically correct OP.
+        return true;
+    }
+    for slot in device_slots {
+        match &slot.params {
+            DeviceParams::Bjt(bp) => {
+                if slot.start_idx < v_nl.len() {
+                    let sign = if bp.is_pnp { -1.0 } else { 1.0 };
+                    // Forward-biased B-E junction: sign·Vbe > 0.3V
+                    if sign * v_nl[slot.start_idx] > 0.3 {
+                        return true;
+                    }
+                }
+            }
+            DeviceParams::Diode(_) => {
+                if slot.start_idx < v_nl.len() && v_nl[slot.start_idx].abs() > 0.3 {
+                    return true;
+                }
+            }
+            // Non-junction devices: trust the converged result.
+            _ => return true,
+        }
+    }
+    // Junction-only circuit with every junction off under DC excitation:
+    // degenerate (also covers empty device_slots, which callers gate on m == 0
+    // before reaching this point).
+    device_slots.is_empty()
 }
 
 /// Seed op-amp outputs from (V+ - V-) sign to select the correct equilibrium.
@@ -2216,7 +2416,27 @@ pub fn solve_dc_operating_point(
 
     // Compute linear initial guess. The g_dc matrix already has Gmin floor
     // regularization for floating nodes, so this should not be singular.
-    let v_linear = solve_linear(&dc_sys.g_dc, &dc_sys.b_dc).unwrap_or_else(|| vec![0.0; n_dc]);
+    // If it IS singular, the G matrix is structurally broken — report it
+    // honestly instead of silently returning zeros as a "converged" OP.
+    let v_linear = match solve_linear(&dc_sys.g_dc, &dc_sys.b_dc) {
+        Some(v) => v,
+        None => {
+            log::warn!(
+                "DC OP: linear DC system is singular (n_dc={}) — G matrix is \
+                 structurally defective (floating subcircuit or conflicting \
+                 constraints). Returning zeros with converged=false.",
+                n_dc
+            );
+            return DcOpResult {
+                v_node: vec![0.0; n_dc],
+                v_nl: vec![0.0; m],
+                i_nl: vec![0.0; m],
+                converged: false,
+                method: DcOpMethod::SingularLinear,
+                iterations: 0,
+            };
+        }
+    };
 
     // If no nonlinear devices, return linear result
     if m == 0 || device_slots.is_empty() {
@@ -2241,20 +2461,7 @@ pub fn solve_dc_operating_point(
         dc_n_i: &dc_sys.dc_n_i,
         n_dc,
         has_internal_nodes,
-        internal_node_start: if has_mna_internal {
-            // MNA internal nodes start at the lowest internal node index
-            mna.bjt_internal_nodes
-                .iter()
-                .flat_map(|n| {
-                    [n.int_base, n.int_collector, n.int_emitter]
-                        .into_iter()
-                        .flatten()
-                })
-                .min()
-                .unwrap_or(dc_sys.internal_node_start)
-        } else {
-            dc_sys.internal_node_start
-        },
+        is_voltage_row: &dc_sys.is_voltage_row,
     };
 
     // Clamp junction voltages in the linear initial guess to prevent
@@ -2341,36 +2548,16 @@ pub fn solve_dc_operating_point(
     let mut v_nl = vec![0.0; m];
     let mut i_nl = vec![0.0; m];
 
+    // With no DC excitation (b_dc all zero — no DC sources), the all-off
+    // solution IS the true operating point; skip the degeneracy check.
+    let has_dc_excitation = dc_sys.b_dc.iter().any(|x| x.abs() > 0.0);
+
     // Strategy 1: Direct NR from junction-clamped linear guess
     let (converged, iters) = nr_dc_solve(&circuit, &mut v, &mut v_nl, &mut i_nl, 1.0, 0.0, false);
     // Sanity check: verify the solution isn't degenerate (all nodes at supply rails).
     // A degenerate solution has all BJTs off — check that at least one junction is forward-biased.
-    let mut has_active_junction = m == 0; // linear circuits are always OK
-    if converged && m > 0 {
-        for slot in device_slots {
-            match &slot.params {
-                DeviceParams::Bjt(bp) => {
-                    let vbe = v_nl[slot.start_idx];
-                    let sign = if bp.is_pnp { -1.0 } else { 1.0 };
-                    // Forward-biased junction: |Vbe| > 0.3V
-                    if (sign * vbe) > 0.3 {
-                        has_active_junction = true;
-                        break;
-                    }
-                }
-                DeviceParams::Diode(_) => {
-                    if v_nl[slot.start_idx].abs() > 0.3 {
-                        has_active_junction = true;
-                        break;
-                    }
-                }
-                _ => {
-                    has_active_junction = true;
-                    break;
-                } // non-BJT devices: trust the result
-            }
-        }
-    }
+    let has_active_junction =
+        converged && solution_has_active_junction(device_slots, &v_nl, has_dc_excitation);
     log::info!(
         "DC OP Strategy 1 (Direct NR): converged={} iters={} active_junctions={}",
         converged,
@@ -2426,23 +2613,12 @@ pub fn solve_dc_operating_point(
         total_iters += this_iters;
 
         if this_converged {
-            // Check for degenerate solution
+            // Check for degenerate solution (same predicate as Strategy 1;
+            // pre-unification this site skipped the diode check, so a
+            // diode-only circuit that source-stepped to all-off passed).
             extract_nl_voltages_with(m, &dc_sys.dc_n_v, &v, &mut v_nl);
-            let mut has_active = m == 0;
-            for slot in device_slots {
-                if let DeviceParams::Bjt(bp) = &slot.params {
-                    if slot.start_idx < v_nl.len() {
-                        let sign = if bp.is_pnp { -1.0 } else { 1.0 };
-                        if (sign * v_nl[slot.start_idx]) > 0.3 {
-                            has_active = true;
-                            break;
-                        }
-                    }
-                } else {
-                    has_active = true;
-                    break;
-                }
-            }
+            let has_active =
+                solution_has_active_junction(device_slots, &v_nl, has_dc_excitation);
             if has_active {
                 log::info!("DC OP Strategy 2 (Source stepping attempt {}, {} steps): converged, active, iters={}",
                     attempt, config.source_steps, this_iters);
@@ -2639,7 +2815,7 @@ pub fn solve_dc_operating_point(
                 dc_n_i: &dc_sys.dc_n_i,
                 n_dc,
                 has_internal_nodes,
-                internal_node_start: circuit.internal_node_start,
+                is_voltage_row: &dc_sys.is_voltage_row,
             };
 
             let step_ok;
@@ -3500,6 +3676,79 @@ mod tests {
         assert!(
             (g[0][2] - dc_sys.g_dc[0][2]).abs() < 1e-12,
             "patch must not touch input rows"
+        );
+    }
+
+    // =========================================================================
+    // pnjlim correction distribution — pseudo-inverse normalization (2026-07-18)
+    // =========================================================================
+
+    /// Grounded junction (N_v row = [1, 0, ...], ‖row‖² = 1): the applied
+    /// junction-space change must equal the correction exactly. This was
+    /// already exact pre-fix; guard that the normalization didn't break it.
+    #[test]
+    fn test_distribute_correction_grounded_junction_exact() {
+        let row = vec![1.0, 0.0, 0.0];
+        let mut corrections = vec![0.0; 3];
+        let correction = -4.366; // strong pnjlim event: v_lim - v_raw
+        distribute_junction_correction(&row, correction, &mut corrections);
+        // Applied junction-space change = row · corrections
+        let applied: f64 = row.iter().zip(&corrections).map(|(a, b)| a * b).sum();
+        assert!(
+            (applied - correction).abs() < 1e-12,
+            "grounded junction: applied {} != correction {}",
+            applied,
+            correction
+        );
+    }
+
+    /// Floating junction (N_v row = [1, -1, 0], ‖row‖² = 2): the raw transpose
+    /// distribution applied 2× the correction, turning a limited step into a
+    /// REVERSED step (v_old=0.5, raw 5.0, v_lim=0.634 landed at −3.73 V — the
+    /// period-2 NR oscillation signature). With the pseudo-inverse
+    /// normalization the post-limit junction voltage must equal v_lim exactly.
+    #[test]
+    fn test_distribute_correction_floating_junction_lands_on_v_lim() {
+        let row = vec![1.0, -1.0, 0.0];
+        let v_old = 0.5_f64;
+        let v_raw = 5.0_f64;
+        // Realistic pnjlim outcome for a strong forward step (vt=0.026):
+        let v_lim = pnjlim(v_raw, v_old, 0.026, 0.615);
+        assert!(v_lim < 1.0, "sanity: pnjlim should compress the 5 V step");
+        let correction = v_lim - v_raw;
+
+        let mut corrections = vec![0.0; 3];
+        distribute_junction_correction(&row, correction, &mut corrections);
+        let applied: f64 = row.iter().zip(&corrections).map(|(a, b)| a * b).sum();
+        let v_post = v_raw + applied;
+        assert!(
+            (v_post - v_lim).abs() < 1e-12,
+            "floating junction must land exactly on v_lim={}, got {} \
+             (raw-transpose doubling would give {})",
+            v_lim,
+            v_post,
+            v_raw + 2.0 * correction
+        );
+        // And explicitly: the step must NOT reverse direction past v_old.
+        assert!(
+            v_post > v_old,
+            "post-limit voltage {} reversed past v_old {} — doubling bug",
+            v_post,
+            v_old
+        );
+    }
+
+    /// Zero N_v row (tied terminals): no node update can change the junction
+    /// voltage — the distribution must be a no-op, not a division by zero.
+    #[test]
+    fn test_distribute_correction_zero_row_noop() {
+        let row = vec![0.0, 0.0, 0.0];
+        let mut corrections = vec![0.0; 3];
+        distribute_junction_correction(&row, -1.0, &mut corrections);
+        assert!(
+            corrections.iter().all(|&c| c == 0.0),
+            "zero row must not distribute anything, got {:?}",
+            corrections
         );
     }
 }

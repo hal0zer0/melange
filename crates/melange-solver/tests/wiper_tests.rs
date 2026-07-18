@@ -257,16 +257,16 @@ fn test_mna_mixed_pot_and_wiper() {
 }
 
 // ============================================================
-// SM vector / codegen tests
+// Kernel pot data / codegen tests
+// (SM vectors removed — per-block rebuild handles pots)
 // ============================================================
 
 #[test]
-fn test_wiper_sm_vectors() {
+fn test_wiper_kernel_pot_data() {
     let (_, _, kernel) = build_pipeline(RC_WIPER_SPICE);
     assert_eq!(kernel.pots.len(), 2);
     for pot in &kernel.pots {
-        assert_eq!(pot.su.len(), kernel.n);
-        assert!(pot.usu > 0.0, "usu should be positive");
+        assert!(pot.g_nominal > 0.0 && pot.g_nominal.is_finite());
     }
     assert_eq!(kernel.wiper_groups.len(), 1);
 }
