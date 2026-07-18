@@ -1343,32 +1343,39 @@ impl CircuitIR {
                 }
             }
 
-            // Zero VS/VCVS/ideal-transformer algebraic rows in A_neg (NOT inductor
-            // rows or internal BJT node rows — they need trapezoidal history).
-            for vs in &mna.voltage_sources {
-                let row = n_nodes + vs.ext_idx;
-                if row < n {
-                    for j in 0..n {
-                        a_neg_flat[row * n + j] = 0.0;
-                    }
-                }
-            }
-            let num_vs = mna.voltage_sources.len();
-            for (vcvs_idx, _) in mna.vcvs_sources.iter().enumerate() {
-                let row = n_nodes + num_vs + vcvs_idx;
-                if row < n {
-                    for j in 0..n {
-                        a_neg_flat[row * n + j] = 0.0;
-                    }
-                }
-            }
-            let num_vcvs = mna.vcvs_sources.len();
-            for (xfmr_idx, _) in mna.ideal_transformers.iter().enumerate() {
-                let row = n_nodes + num_vs + num_vcvs + xfmr_idx;
-                if row < n {
-                    for j in 0..n {
-                        a_neg_flat[row * n + j] = 0.0;
-                    }
+            // Zero ALL augmented rows (n_nodes..mna.n_aug) in A_neg — same
+            // semantics as the nodal branch's blanket zeroing in `from_mna`.
+            // The previous per-type enumeration (VS, VCVS, ideal transformers)
+            // missed Boyle op-amp internal rows, current-mode VCA rows
+            // (internal node + sense branch), and behavioral-V rows, leaving
+            // stale -G history feedback on those algebraic constraints.
+            //
+            // Row layout on this path (verified against mna.rs):
+            //   0..n_nodes                circuit nodes (keep history)
+            //   n_nodes..mna.n_aug        VS / VCVS / ideal-xfmr / Boyle
+            //                             op-amp internal / current-mode VCA
+            //                             (internal + sense) / behavioral-V
+            //                             rows → zeroed here. For Boyle
+            //                             internal nodes this is effectively
+            //                             BE for the dominant pole —
+            //                             deliberate, matches the nodal
+            //                             branch (unconditionally stable for
+            //                             high-Gm VCCS).
+            //   mna.n_aug..n              inductor branch rows appended by
+            //                             build_augmented_matrices (L lives
+            //                             in C on these rows) → NOT zeroed,
+            //                             they need trapezoidal history.
+            //                             When `!augmented_inductors`,
+            //                             inductors are companion-stamped
+            //                             into node rows and no branch rows
+            //                             exist, so the range is safe either
+            //                             way.
+            // BJT internal nodes (expand_bjt_internal_nodes) also land inside
+            // n_nodes..n_aug, but only on the nodal route — the DK path never
+            // expands them (see melange-cli routing).
+            for row in n_nodes..mna.n_aug.min(n) {
+                for j in 0..n {
+                    a_neg_flat[row * n + j] = 0.0;
                 }
             }
 
@@ -2210,11 +2217,14 @@ impl CircuitIR {
                     let c_dom = oa.iir_c_dom;
 
                     // Pure-explicit IIR: strip Gm from G entirely.
+                    // Mirror of the (corrected) VCCS stamp polarity: the stamp
+                    // is np -= gm / nm += gm, so removing it is np += gm /
+                    // nm -= gm (same direction as the selective Gm cap below).
                     if np > 0 && o < n {
-                        aug.g[o][np - 1] -= gm;
+                        aug.g[o][np - 1] += gm;
                     }
                     if nm > 0 && o < n {
-                        aug.g[o][nm - 1] += gm;
+                        aug.g[o][nm - 1] -= gm;
                     }
 
                     let np_idx = if np > 0 { Some(np - 1) } else { None };
@@ -2274,11 +2284,14 @@ impl CircuitIR {
             if o >= n {
                 continue;
             }
+            // Un-stamp direction must mirror the (corrected) VCCS stamp:
+            // stamp is np -= gm / nm += gm, so the cap removes delta with
+            // np += delta / nm -= delta.
             if oa.n_plus_idx > 0 && oa.n_plus_idx - 1 < n {
-                aug.g[o][oa.n_plus_idx - 1] -= delta;
+                aug.g[o][oa.n_plus_idx - 1] += delta;
             }
             if oa.n_minus_idx > 0 && oa.n_minus_idx - 1 < n {
-                aug.g[o][oa.n_minus_idx - 1] += delta;
+                aug.g[o][oa.n_minus_idx - 1] -= delta;
             }
             log::info!(
                 "Selective Gm cap on op-amp {}: AOL {:.0} → {:.0} (delta_Gm={:.1} S)",
@@ -3003,6 +3016,15 @@ impl CircuitIR {
     /// Returns the names (uppercased) of BJTs with Vbc < -0.5V that can be
     /// modeled as 1D (Vbe→Ic only), reducing M by 1 each.
     ///
+    /// Only pure Ebers-Moll devices qualify (no Gummel-Poon VAF/VAR/IKF/IKR,
+    /// no ISE leakage, no self-heating RTH, no ohmic parasitics RB/RC/RE) —
+    /// for those the reduction is exact. GP/leaky BJTs are left full-2D even
+    /// when forward-active, because the 1D emission has no qb and uses
+    /// Ib = Ic/BF. Self-heating BJTs stay 2D because the thermal update reads
+    /// the (Ic, Ib) slot pair at (s, s+1). Parasitic-carded BJTs stay 2D
+    /// because the FA emission drops RB/RC/RE entirely (gm·RE is O(1) on
+    /// power BJTs).
+    ///
     /// Call this BEFORE building the final MNA/kernel. If non-empty, rebuild
     /// MNA with `from_netlist_forward_active()` and kernel before calling `from_kernel()`.
     pub fn detect_forward_active_bjts(
@@ -3050,13 +3072,48 @@ impl CircuitIR {
                 let vbc = v_b - v_c;
                 let sign = if bp.is_pnp { -1.0 } else { 1.0 };
                 let vbc_eff = sign * vbc;
-                // Forward-active: allow parasitics and GP models.
-                // 1D FA ignores parasitics (small for forward-active: Ib*RB << Vbe).
-                // GP qb(Vbc) is ~constant when Vbc is deeply reverse-biased.
+                // FA reduction is only exact for pure Ebers-Moll devices:
+                // the 1D emission has no qb (drops Early/IKF) and uses
+                // Ib = Ic/BF (drops ISE leakage). Gummel-Poon or ISE-carded
+                // BJTs must route full-2D — slower but correct. A frozen-qb
+                // 1D enhancement is a recorded follow-up.
+                //
+                // Self-heating (finite RTH) is also excluded: the thermal
+                // update reads the 2D slot pair (Ic at s, Ib at s+1 and the
+                // matching Vbe/Vbc rows). A 1D FA slot would make s+1 alias
+                // the NEXT device's slot (or run out of bounds).
+                //
+                // Ohmic parasitics (RB/RC/RE) are also excluded: the 1D FA
+                // emission drops them entirely, and gm·RE reaches O(1) on
+                // power BJTs (RE=0.5Ω @ 100 mA → gm·RE ≈ 1.9 — a several-x
+                // transconductance error on exactly the devices FA targets).
+                //
                 // Threshold -0.5V provides adequate margin for audio-level signals
                 // (typical stage Vce margin is 0.85V in cascaded topologies).
                 if vbc_eff < -0.5 {
                     let name = dev.name.to_ascii_uppercase();
+                    if bp.is_gummel_poon()
+                        || bp.has_ise()
+                        || bp.has_self_heating()
+                        || bp.has_parasitics()
+                    {
+                        let mechanism = if bp.is_gummel_poon() {
+                            "Gummel-Poon params present (VAF/VAR/IKF/IKR) — 1D FA emission has no qb"
+                        } else if bp.has_ise() {
+                            "ISE leakage present — 1D FA emission uses Ib=Ic/BF"
+                        } else if bp.has_self_heating() {
+                            "self-heating present (RTH finite) — thermal update needs the 2D (Ic,Ib) slot pair; a 1D slot would alias the next device's slot"
+                        } else {
+                            "ohmic parasitics present (RB/RC/RE) — 1D FA emission drops them; gm·RE reaches O(1) on power BJTs"
+                        };
+                        log::info!(
+                            "BJT '{}' is forward-active (Vbc={:.3}V) but NOT 1D-reduced: {}. Routing full-2D.",
+                            name,
+                            vbc_eff,
+                            mechanism
+                        );
+                        continue;
+                    }
                     log::info!(
                         "BJT '{}' forward-active (Vbc={:.3}V). Using 1D model.",
                         name,
@@ -3501,9 +3558,20 @@ impl CircuitIR {
     fn resolve_diode_params(netlist: &Netlist, model: &str) -> Result<DiodeParams, CodegenError> {
         let vt = melange_primitives::VT_ROOM;
         let cat = melange_devices::catalog::diodes::lookup(model);
-        let is = Self::lookup_model_param(netlist, model, "IS")
-            .or_else(|| cat.map(|c| c.is))
-            .unwrap_or(2.52e-9);
+        let is = match Self::lookup_model_param(netlist, model, "IS").or_else(|| cat.map(|c| c.is))
+        {
+            Some(v) => v,
+            None => {
+                // SPICE default diode (IS=1e-14, N=1.0) for ngspice parity.
+                // The old fallback was a chimera: 1N4148's IS (2.52e-9) paired
+                // with N=1.0 — matched neither the SPICE default nor a 1N4148.
+                log::warn!(
+                    "Diode model '{}' not in catalog and no IS given — falling back to the SPICE default diode (IS=1e-14, N=1.0)",
+                    model
+                );
+                1e-14
+            }
+        };
         let n = Self::lookup_model_param(netlist, model, "N")
             .or_else(|| cat.map(|c| c.n))
             .unwrap_or(1.0);
@@ -3533,8 +3601,9 @@ impl CircuitIR {
             validate_positive_finite(bv, "diode model BV")?;
         }
 
-        // Reverse breakdown current (optional, default 1e-10)
-        let ibv = Self::lookup_model_param(netlist, model, "IBV").unwrap_or(1e-10);
+        // Reverse breakdown current (optional; SPICE3f5 default IBV=1e-3).
+        // A smaller default shifts the breakdown knee ~0.4·N V past BV.
+        let ibv = Self::lookup_model_param(netlist, model, "IBV").unwrap_or(1e-3);
         if ibv.is_finite() {
             validate_positive_finite(ibv, "diode model IBV")?;
         }
@@ -3550,10 +3619,16 @@ impl CircuitIR {
         }
 
         let cth = Self::lookup_model_param(netlist, model, "CTH").unwrap_or(1e-3);
-        if cth <= 0.0 || !cth.is_finite() {
+        if cth < 0.0 || !cth.is_finite() {
             return Err(CodegenError::InvalidConfig(format!(
-                "diode model CTH must be positive and finite, got {cth}"
+                "diode model CTH must be non-negative and finite, got {cth}"
             )));
+        }
+        if cth == 0.0 {
+            log::info!(
+                "Diode model '{}': CTH=0 — thermal state has no memory; junction temperature tracks dissipation quasi-statically (Tj = TAMB + RTH·P each sample)",
+                model
+            );
         }
 
         let xti = Self::lookup_model_param(netlist, model, "XTI").unwrap_or(3.0);
@@ -3798,10 +3873,16 @@ impl CircuitIR {
         }
 
         let cth = Self::lookup_model_param(netlist, model, "CTH").unwrap_or(1e-3);
-        if cth <= 0.0 || !cth.is_finite() {
+        if cth < 0.0 || !cth.is_finite() {
             return Err(CodegenError::InvalidConfig(format!(
-                "BJT model CTH must be positive and finite, got {cth}"
+                "BJT model CTH must be non-negative and finite, got {cth}"
             )));
+        }
+        if cth == 0.0 {
+            log::info!(
+                "BJT model '{}': CTH=0 — thermal state has no memory; junction temperature tracks dissipation quasi-statically (Tj = TAMB + RTH·P each sample)",
+                model
+            );
         }
 
         let xti = Self::lookup_model_param(netlist, model, "XTI").unwrap_or(3.0);
@@ -3829,9 +3910,9 @@ impl CircuitIR {
             netlist,
             model,
             &[
-                "IS", "BF", "BR", "VAF", "VAR", "IKF", "IKR", "CJE", "CJC", "VJE", "MJE", "VJC",
-                "MJC", "FC", "TF", "NF", "NR", "ISE", "NE", "ISC", "NC", "RB", "RC", "RE", "RTH",
-                "CTH", "XTI", "EG", "TAMB", "KF", "AF",
+                "IS", "VT", "BF", "BR", "VAF", "VA", "VAR", "VB", "IKF", "JBF", "IKR", "JBR",
+                "CJE", "CJC", "VJE", "MJE", "VJC", "MJC", "FC", "TF", "NF", "NR", "ISE", "NE",
+                "ISC", "NC", "RB", "RC", "RE", "RTH", "CTH", "XTI", "EG", "TAMB", "KF", "AF",
             ],
         );
 
@@ -3887,8 +3968,35 @@ impl CircuitIR {
         let default_vp = cat
             .map(|c| c.vp)
             .unwrap_or(if is_p_channel { 2.0 } else { -2.0 });
-        let vp = Self::lookup_model_param(netlist, model, "VTO").unwrap_or(default_vp);
-        // ngspice BETA = IDSS / VP^2, so IDSS = BETA * VP^2
+        // Melange's JFET device convention stores VP POSITIVE for P-channel
+        // (the device model flips it internally: vp_eff = -vp for P). Every
+        // vendor PJF card uses the SPICE convention VTO < 0, so copying VTO
+        // verbatim would double-flip the pinch-off and leave the device dead.
+        // Normalize SPICE-convention PJF cards (VTO < 0) to the melange
+        // convention (vp = -VTO). N-channel VTO < 0 already matches — unchanged.
+        let vp = match Self::lookup_model_param(netlist, model, "VTO") {
+            Some(raw_vto) if is_p_channel && raw_vto < 0.0 => {
+                log::warn!(
+                    "P-channel JFET model '{}': SPICE-convention VTO={} normalized to melange convention vp={} (P-channel pinch-off stored positive; device model flips internally)",
+                    model,
+                    raw_vto,
+                    -raw_vto
+                );
+                -raw_vto
+            }
+            Some(raw_vto) if is_p_channel => {
+                log::info!(
+                    "P-channel JFET model '{}': VTO={} > 0 accepted as already melange-convention (positive P-channel pinch-off)",
+                    model,
+                    raw_vto
+                );
+                raw_vto
+            }
+            Some(raw_vto) => raw_vto,
+            None => default_vp,
+        };
+        // ngspice BETA = IDSS / VP^2, so IDSS = BETA * VP^2.
+        // Uses the normalized vp — sign-safe regardless (vp is squared).
         let idss = if let Some(raw_idss) = Self::lookup_model_param(netlist, model, "IDSS") {
             raw_idss
         } else if let Some(beta) = Self::lookup_model_param(netlist, model, "BETA") {
@@ -3990,6 +4098,16 @@ impl CircuitIR {
                 "MOSFET model VT must be finite, got {vt}"
             )));
         }
+        // MOSFET VTO sign is PRESERVED (unlike the P-JFET normalization above):
+        // the device math honors signed VTO, so NMOS with VTO < 0 is a valid
+        // depletion-mode device (conducting at Vgs=0), not a convention clash.
+        if !is_p_channel && vt < 0.0 {
+            log::info!(
+                "NMOS model '{}': VTO={} < 0 — depletion-mode device (conducts at Vgs=0); sign preserved",
+                model,
+                vt
+            );
+        }
         if !lambda.is_finite() || lambda < 0.0 {
             return Err(CodegenError::InvalidConfig(format!(
                 "MOSFET model LAMBDA must be non-negative and finite, got {lambda}"
@@ -4042,7 +4160,7 @@ impl CircuitIR {
             netlist,
             model,
             &[
-                "KP", "VTO", "LAMBDA", "CGS", "CGD", "RD", "RS", "GAMMA", "PHI", "KF", "AF",
+                "KP", "VTO", "VT", "LAMBDA", "CGS", "CGD", "RD", "RS", "GAMMA", "PHI", "KF", "AF",
             ],
         );
 
@@ -4189,10 +4307,11 @@ impl CircuitIR {
                 "tube model CTH must be non-negative and finite, got {cth}"
             )));
         }
-        if rth.is_finite() && cth <= 0.0 {
-            return Err(CodegenError::InvalidConfig(format!(
-                "tube model CTH must be positive when RTH is finite (thermal time constant τ = RTH·CTH would otherwise be zero), got CTH={cth}"
-            )));
+        if rth.is_finite() && cth == 0.0 {
+            log::info!(
+                "Tube model '{}': CTH=0 with finite RTH — thermal time constant τ = RTH·CTH is zero; envelope temperature tracks dissipation quasi-statically (Tp = TAMB + RTH·P each sample)",
+                model
+            );
         }
         let vbias_alpha = Self::lookup_model_param(netlist, model, "VBIAS_ALPHA").unwrap_or(0.0);
         if !vbias_alpha.is_finite() {

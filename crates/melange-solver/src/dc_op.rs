@@ -12,7 +12,7 @@
 use crate::device_types::{DeviceParams, DeviceSlot, DeviceType, TubeKind};
 use crate::mna::{inject_rhs_current, MnaSystem};
 use melange_devices::bjt::{BjtEbersMoll, BjtGummelPoon, BjtPolarity};
-use melange_devices::diode::DiodeShockley;
+use melange_devices::diode::{DiodeShockley, DiodeWithRs};
 use melange_devices::tube::{KorenPentode, KorenTriode};
 use melange_primitives::nr::{pn_vcrit, pnjlim};
 
@@ -100,12 +100,33 @@ pub fn evaluate_devices(
     j_dev: &mut [f64],
     m: usize,
 ) {
-    evaluate_devices_inner(v_nl, device_slots, i_nl, j_dev, m, false);
+    evaluate_devices_inner(v_nl, device_slots, i_nl, j_dev, m, false, None);
+}
+
+/// Like [`evaluate_devices`], but with the node-voltage vector available so
+/// node-referenced device corrections (currently the MOSFET body effect,
+/// which needs `Vsb = V(source) − V(bulk)`) can be applied. `v_node` is the
+/// N-dimensional (or n_dc-dimensional) node vector; 1-based MNA node index
+/// `i` maps to `v_node[i - 1]`, index 0 is ground.
+pub fn evaluate_devices_with_nodes(
+    v_nl: &[f64],
+    device_slots: &[DeviceSlot],
+    i_nl: &mut [f64],
+    j_dev: &mut [f64],
+    m: usize,
+    v_node: &[f64],
+) {
+    evaluate_devices_inner(v_nl, device_slots, i_nl, j_dev, m, false, Some(v_node));
 }
 
 /// Like `evaluate_devices`, but when `internal_junctions` is true, skip the
 /// parasitic inner loop because v_nl already represents internal junction
 /// voltages (from DC system with expanded internal nodes).
+///
+/// `v_node` (when available) is the current node-voltage iterate, used for
+/// device corrections that reference node voltages beyond the M controlling
+/// voltages (MOSFET body effect). `None` falls back to nominal parameters,
+/// which is exact whenever Vsb = 0.
 fn evaluate_devices_inner(
     v_nl: &[f64],
     device_slots: &[DeviceSlot],
@@ -113,6 +134,7 @@ fn evaluate_devices_inner(
     j_dev: &mut [f64],
     m: usize,
     internal_junctions: bool,
+    v_node: Option<&[f64]>,
 ) {
     // Zero outputs
     for x in i_nl.iter_mut() {
@@ -130,8 +152,25 @@ fn evaluate_devices_inner(
                 // DiodeParams stores pre-multiplied n_vt, so use n=1.0, vt=n_vt.
                 let diode = DiodeShockley::new(dp.is, 1.0, dp.n_vt);
                 let v = v_nl[s];
-                i_nl[s] = diode.current_at(v);
-                j_dev[s * m + s] = diode.conductance_at(v);
+                if dp.has_rs() {
+                    // Series resistance: the transient runtime solves the
+                    // junction voltage V_j from V_j + I(V_j)·RS = V (see
+                    // diode_current_with_rs in device_diode.rs.tera), so the
+                    // DC OP must use the same I-V law or the baked bias point
+                    // and DC_NL_I disagree with the transient fixed point.
+                    // DiodeWithRs is the canonical devices-crate form of that
+                    // same junction solve (pnjlim-limited scalar NR).
+                    let drs = DiodeWithRs::new(diode, dp.rs);
+                    i_nl[s] = drs.current_at(v);
+                    j_dev[s * m + s] = drs.conductance_at(v);
+                } else {
+                    i_nl[s] = diode.current_at(v);
+                    j_dev[s * m + s] = diode.conductance_at(v);
+                }
+                // Reverse breakdown: evaluated at the TERMINAL voltage, not
+                // the RS-adjusted junction voltage — this mirrors the runtime
+                // composition exactly (nr_helpers.rs emits
+                // `diode_current_with_rs(v) + diode_breakdown_current(v)`).
                 // Reverse breakdown: I_bv = -IBV * exp(-(v + BV) / n_vt)
                 // Matches codegen template (device_diode.rs.tera:57-70)
                 if dp.has_bv() {
@@ -172,51 +211,46 @@ fn evaluate_devices_inner(
                 } else {
                     BjtPolarity::Npn
                 };
+                // Leakage diodes (ISE/NE, ISC/NC): the transient runtime's
+                // `bjt_evaluate` (device_bjt.rs.tera) always includes these
+                // terms in Ib and its Jacobian. The DC OP must carry the same
+                // params or the bias point (and the baked DC_NL_I seeds)
+                // converge to a different fixed point than the transient —
+                // for a 2N3904 at Vbe≈0.65 the leakage term exceeds the ideal
+                // Ib, which is volts of error through MΩ-class bias networks.
                 let em = BjtEbersMoll::new(bp.is, bp.vt, bp.beta_f, bp.beta_r, polarity)
                     .with_nf(bp.nf)
-                    .with_nr(bp.nr);
+                    .with_nr(bp.nr)
+                    .with_leakage(bp.ise, bp.ne, bp.isc, bp.nc);
+                // Gummel-Poon wraps the SAME leakage-carrying Ebers-Moll core:
+                // GP modulates only the transport (collector) current by qb;
+                // Ib and its Jacobian delegate to the base Ebers-Moll model —
+                // exactly the composition of the runtime `bjt_evaluate`.
+                let gp = if bp.is_gummel_poon() {
+                    Some(BjtGummelPoon::new(em, bp.vaf, bp.var, bp.ikf, bp.ikr))
+                } else {
+                    None
+                };
                 let vbe = v_nl[s];
                 let vbc = v_nl[s + 1];
 
                 // If the BJT has parasitic resistances and we're NOT using
-                // internal junction nodes, iteratively estimate internal junction
-                // voltages. When internal_junctions is true, v_nl already contains
-                // the correct internal voltages from dc_n_v.
-                let (vbe_int, vbc_int) = if bp.has_parasitics() && !internal_junctions {
-                    let mut vbe_i = vbe;
-                    let mut vbc_i = vbc;
-                    for _ in 0..3 {
-                        let ic = em.collector_current(vbe_i, vbc_i);
-                        let ib = em.base_current(vbe_i, vbc_i);
-                        vbe_i = vbe - ib * bp.rb - (ic + ib) * bp.re;
-                        vbc_i = vbc - ib * bp.rb + ic * bp.rc;
-                    }
-                    (vbe_i, vbc_i)
+                // internal junction nodes, solve for the internal junction
+                // voltages with the same damped 2D Newton the generated
+                // runtime uses (`bjt_with_parasitics`). When internal_junctions
+                // is true, v_nl already contains the correct internal voltages
+                // from dc_n_v.
+                let (ic, ib, jac) = if bp.has_parasitics() && !internal_junctions {
+                    bjt_with_parasitics_dc(&em, gp.as_ref(), vbe, vbc, bp.rb, bp.rc, bp.re, bp.vt)
                 } else {
-                    (vbe, vbc)
+                    bjt_eval_intrinsic(&em, gp.as_ref(), vbe, vbc)
                 };
-
-                if bp.is_gummel_poon() {
-                    // Gummel-Poon model (Early effect + high injection)
-                    let gp = BjtGummelPoon::new(em, bp.vaf, bp.var, bp.ikf, bp.ikr);
-                    use melange_devices::NonlinearDevice;
-                    i_nl[s] = gp.collector_current(vbe_int, vbc_int);
-                    i_nl[s + 1] = em.base_current(vbe_int, vbc_int);
-                    let jac = gp.jacobian(&[vbe_int, vbc_int]);
-                    j_dev[s * m + s] = jac[0]; // dIc/dVbe
-                    j_dev[s * m + (s + 1)] = jac[1]; // dIc/dVbc
-                    j_dev[(s + 1) * m + s] = em.base_current_jacobian_dvbe(vbe_int, vbc_int);
-                    j_dev[(s + 1) * m + (s + 1)] = em.base_current_jacobian_dvbc(vbe_int, vbc_int);
-                } else {
-                    // Standard Ebers-Moll
-                    i_nl[s] = em.collector_current(vbe_int, vbc_int);
-                    i_nl[s + 1] = em.base_current(vbe_int, vbc_int);
-                    let (dic_dvbe, dic_dvbc) = em.collector_jacobian(vbe_int, vbc_int);
-                    j_dev[s * m + s] = dic_dvbe;
-                    j_dev[s * m + (s + 1)] = dic_dvbc;
-                    j_dev[(s + 1) * m + s] = em.base_current_jacobian_dvbe(vbe_int, vbc_int);
-                    j_dev[(s + 1) * m + (s + 1)] = em.base_current_jacobian_dvbc(vbe_int, vbc_int);
-                }
+                i_nl[s] = ic;
+                i_nl[s + 1] = ib;
+                j_dev[s * m + s] = jac[0]; // dIc/dVbe
+                j_dev[s * m + (s + 1)] = jac[1]; // dIc/dVbc
+                j_dev[(s + 1) * m + s] = jac[2]; // dIb/dVbe
+                j_dev[(s + 1) * m + (s + 1)] = jac[3]; // dIb/dVbc
             }
             (DeviceType::Jfet, DeviceParams::Jfet(jp)) => {
                 // 2D JFET: dim 0 = Vds (at start_idx), dim 1 = Vgs (at start_idx+1)
@@ -230,12 +264,19 @@ fn evaluate_devices_inner(
                 let vds = v_nl[s]; // dim 0 = Vds
                 let vgs = v_nl[s + 1]; // dim 1 = Vgs
                 i_nl[s] = jfet.drain_current(vgs, vds); // Id (dim 0 current)
-                i_nl[s + 1] = jfet.gate_current(vgs); // Ig (dim 1 current)
+                                                        // Ig ≡ 0: the transient runtime's `jfet_ig` returns exactly 0
+                                                        // (device_jfet.rs.tera) with zero partials. Evaluating a real
+                                                        // exponential gate diode here while zeroing its Jacobian gives
+                                                        // an exponential residual with no Newton direction (wrecks DC
+                                                        // NR at forward gate bias) AND disagrees with the transient
+                                                        // contract. DC OP must not lead the runtime — real gate-
+                                                        // junction wiring is a transient-side follow-up.
+                i_nl[s + 1] = 0.0; // Ig (dim 1 current)
                 let (gm, gds) = jfet.jacobian_partial(vgs, vds);
                 j_dev[s * m + s] = gds; // dId/dVds (dim0 curr, dim0 volt)
                 j_dev[s * m + (s + 1)] = gm; // dId/dVgs (dim0 curr, dim1 volt)
-                j_dev[(s + 1) * m + s] = 0.0; // dIg/dVds ≈ 0
-                j_dev[(s + 1) * m + (s + 1)] = 0.0; // dIg/dVgs ≈ 0 (reverse-biased)
+                j_dev[(s + 1) * m + s] = 0.0; // dIg/dVds = 0
+                j_dev[(s + 1) * m + (s + 1)] = 0.0; // dIg/dVgs = 0
             }
             (DeviceType::Mosfet, DeviceParams::Mosfet(mp)) => {
                 // 2D MOSFET: dim 0 = Vds (at start_idx), dim 1 = Vgs (at start_idx+1)
@@ -244,7 +285,41 @@ fn evaluate_devices_inner(
                 } else {
                     melange_devices::mosfet::ChannelType::N
                 };
-                let mos = melange_devices::mosfet::Mosfet::new(channel, mp.vt, mp.kp, mp.lambda);
+                // Body effect (GAMMA/PHI): the DC OP must evaluate the SAME
+                // device the transient runtime evaluates. Both generated
+                // paths adjust VT from Vsb per iteration/sample:
+                //   dk_emitter.rs ~L2200 (body_effect_update, from v_pred)
+                //   nodal_emitter.rs ~L7325/L3806 (vt_eff, each NR iteration)
+                // with the channel-signed magnitude-space formula
+                //   vsb    = sign · (V(source) − V(bulk))     (sign = −1 PMOS)
+                //   vt_eff = VT + sign · GAMMA · (√(PHI + max(vsb,0)) − √PHI)
+                // so reverse body bias always increases |VT| (VT stays signed;
+                // PMOS VT < 0). Keep this in lockstep with both emitter sites.
+                //
+                // source_node/bulk_node are 1-based MNA node indices resolved
+                // by CircuitIR::resolve_mosfet_nodes (0 = ground / unresolved,
+                // reading 0 V). When no node vector is available (legacy
+                // `evaluate_devices` callers), fall back to nominal VT — the
+                // exact result whenever Vsb = 0.
+                let sign = if mp.is_p_channel { -1.0 } else { 1.0 };
+                let vt_eff = match (mp.has_body_effect(), v_node) {
+                    (true, Some(v)) => {
+                        let vs = if mp.source_node > 0 {
+                            v.get(mp.source_node - 1).copied().unwrap_or(0.0)
+                        } else {
+                            0.0
+                        };
+                        let vb = if mp.bulk_node > 0 {
+                            v.get(mp.bulk_node - 1).copied().unwrap_or(0.0)
+                        } else {
+                            0.0
+                        };
+                        let vsb = sign * (vs - vb);
+                        mp.vt + sign * mp.gamma * ((mp.phi + vsb.max(0.0)).sqrt() - mp.phi.sqrt())
+                    }
+                    _ => mp.vt,
+                };
+                let mos = melange_devices::mosfet::Mosfet::new(channel, vt_eff, mp.kp, mp.lambda);
                 let vds = v_nl[s]; // dim 0 = Vds
                 let vgs = v_nl[s + 1]; // dim 1 = Vgs
                 i_nl[s] = mos.drain_current(vgs, vds); // Id (dim 0 current)
@@ -436,7 +511,11 @@ fn evaluate_devices_inner(
                 // 2D VCA: dim 0 = V_signal (at start_idx), dim 1 = V_control (at start_idx+1)
                 let v_sig = v_nl[s];
                 let v_ctrl = v_nl[s + 1];
-                let vca = melange_devices::Vca::new(vp.vscale, vp.g0);
+                // Carry THD: the generated runtime evaluates the VCA with
+                // DEVICE_THD (gain-dependent cubic distortion), so the DC OP
+                // must too — `Vca::new` would silently zero it and bias any
+                // DC-offset signal port away from the runtime's fixed point.
+                let vca = melange_devices::Vca::new_with_thd(vp.vscale, vp.g0, vp.thd);
                 i_nl[s] = vca.current(v_sig, v_ctrl);
                 i_nl[s + 1] = 0.0; // Control port draws no current
                 let jac = vca.jacobian(v_sig, v_ctrl);
@@ -454,6 +533,148 @@ fn evaluate_devices_inner(
             }
         }
     }
+}
+
+/// Evaluate the intrinsic BJT (Ebers-Moll, optionally Gummel-Poon-modulated
+/// transport current) at internal junction voltages.
+///
+/// Returns `(Ic, Ib, [dIc/dVbe, dIc/dVbc, dIb/dVbe, dIb/dVbc])` — the same
+/// contract as the generated runtime's `bjt_evaluate` (device_bjt.rs.tera):
+/// GP modulates the transport current only; Ib and its Jacobian come from
+/// the leakage-carrying Ebers-Moll base model.
+fn bjt_eval_intrinsic(
+    em: &BjtEbersMoll,
+    gp: Option<&BjtGummelPoon>,
+    vbe: f64,
+    vbc: f64,
+) -> (f64, f64, [f64; 4]) {
+    use melange_devices::NonlinearDevice;
+    let (ic, dic) = match gp {
+        Some(g) => (g.collector_current(vbe, vbc), g.jacobian(&[vbe, vbc])),
+        None => {
+            let (dic_dvbe, dic_dvbc) = em.collector_jacobian(vbe, vbc);
+            (em.collector_current(vbe, vbc), [dic_dvbe, dic_dvbc])
+        }
+    };
+    let ib = em.base_current(vbe, vbc);
+    let dib_dvbe = em.base_current_jacobian_dvbe(vbe, vbc);
+    let dib_dvbc = em.base_current_jacobian_dvbc(vbe, vbc);
+    (ic, ib, [dic[0], dic[1], dib_dvbe, dib_dvbc])
+}
+
+/// BJT with parasitic resistances (RB, RC, RE), evaluated at EXTERNAL
+/// terminal-pair voltages.
+///
+/// Mirrors the generated runtime's `bjt_with_parasitics`
+/// (device_bjt.rs.tera): a damped 2D Newton on the internal junction
+/// voltages (Vbe_int, Vbc_int) with residuals
+///   F1 = Vbe_int - Vbe_ext + Ib·RB + (Ic+Ib)·RE
+///   F2 = Vbc_int - Vbc_ext + Ib·RB - Ic·RC
+/// analytic 2×2 J_F from the device Jacobian, and a ±4·VT step clamp.
+///
+/// This replaces the previous 3-iteration UNDAMPED fixed point
+/// `vbe_i = vbe - ib·rb - (ic+ib)·re`, which diverges (oscillates between
+/// cutoff and saturation) whenever gm·(RE + RB/β) ≳ 1 — i.e. Ic > VT/RE,
+/// only 2.6 mA at RE = 10 Ω, well inside power-BJT operating range.
+///
+/// Returned Jacobian is the EXTERNAL one: J_ext = J_dev · J_F⁻¹ (implicit-
+/// function chain rule through the internal solve), matching the runtime
+/// template. The previous code stamped the raw internal Jacobian against
+/// external controlling voltages, which is an inconsistent Newton
+/// linearization (overestimates conductance by the local-feedback factor
+/// 1 + gm·RE + ...); the companion stamp `G_aug = G_dc - N_i·J_dev·N_v`
+/// and the companion RHS `i_nl - J_dev·v_nl` both consume this Jacobian
+/// against external v_nl, so the external form is the coherent choice.
+#[allow(clippy::too_many_arguments)]
+fn bjt_with_parasitics_dc(
+    em: &BjtEbersMoll,
+    gp: Option<&BjtGummelPoon>,
+    vbe_ext: f64,
+    vbc_ext: f64,
+    rb: f64,
+    rc: f64,
+    re: f64,
+    vt: f64,
+) -> (f64, f64, [f64; 4]) {
+    const INNER_MAX_ITER: usize = 50;
+    const INNER_TOL: f64 = 1e-12;
+
+    // Initial guess: internal = external
+    let mut vbe_int = vbe_ext;
+    let mut vbc_int = vbc_ext;
+
+    for _ in 0..INNER_MAX_ITER {
+        let (ic, ib, j) = bjt_eval_intrinsic(em, gp, vbe_int, vbc_int);
+        let (dic_dvbe, dic_dvbc, dib_dvbe, dib_dvbc) = (j[0], j[1], j[2], j[3]);
+
+        // Residuals (RE term uses Ie = -(Ic+Ib):
+        // V_E_int = V_E_ext - Ie·RE = V_E_ext + (Ic+Ib)·RE)
+        let f1 = vbe_int - vbe_ext + ib * rb + (ic + ib) * re;
+        let f2 = vbc_int - vbc_ext + ib * rb - ic * rc;
+
+        if f1.abs() < INNER_TOL && f2.abs() < INNER_TOL {
+            break;
+        }
+
+        // Jacobian of F w.r.t. (Vbe_int, Vbc_int)
+        let j11 = 1.0 + dib_dvbe * rb + (dic_dvbe + dib_dvbe) * re;
+        let j12 = dib_dvbc * rb + (dic_dvbc + dib_dvbc) * re;
+        let j21 = dib_dvbe * rb - dic_dvbe * rc;
+        let j22 = 1.0 + dib_dvbc * rb - dic_dvbc * rc;
+
+        // Solve 2x2 via Cramer's rule
+        let det = j11 * j22 - j12 * j21;
+        if det.abs() < 1e-30 {
+            break;
+        }
+        let inv_det = 1.0 / det;
+        let dvbe = (j22 * f1 - j12 * f2) * inv_det;
+        let dvbc = (j11 * f2 - j21 * f1) * inv_det;
+
+        // Step limiting: max ±4·VT per iteration (damping)
+        let max_step = 4.0 * vt;
+        let dvbe = dvbe.clamp(-max_step, max_step);
+        let dvbc = dvbc.clamp(-max_step, max_step);
+
+        vbe_int -= dvbe;
+        vbc_int -= dvbc;
+    }
+
+    // Final evaluation at converged internal voltages
+    let (ic, ib, j) = bjt_eval_intrinsic(em, gp, vbe_int, vbc_int);
+    let (dic_dvbe, dic_dvbc, dib_dvbe, dib_dvbc) = (j[0], j[1], j[2], j[3]);
+
+    // External Jacobian: J_ext = J_device · J_F⁻¹ (recompute J_F at the
+    // converged point, same as the runtime template).
+    let j11 = 1.0 + dib_dvbe * rb + (dic_dvbe + dib_dvbe) * re;
+    let j12 = dib_dvbc * rb + (dic_dvbc + dib_dvbc) * re;
+    let j21 = dib_dvbe * rb - dic_dvbe * rc;
+    let j22 = 1.0 + dib_dvbc * rb - dic_dvbc * rc;
+
+    let det = j11 * j22 - j12 * j21;
+    if det.abs() < 1e-30 {
+        // Fallback: return intrinsic Jacobian
+        return (ic, ib, j);
+    }
+    let inv_det = 1.0 / det;
+
+    // J_F⁻¹ = [[j22, -j12], [-j21, j11]] / det
+    let fi11 = j22 * inv_det;
+    let fi12 = -j12 * inv_det;
+    let fi21 = -j21 * inv_det;
+    let fi22 = j11 * inv_det;
+
+    // J_ext = J_device · J_F⁻¹
+    let dic_dvbe_ext = dic_dvbe * fi11 + dic_dvbc * fi21;
+    let dic_dvbc_ext = dic_dvbe * fi12 + dic_dvbc * fi22;
+    let dib_dvbe_ext = dib_dvbe * fi11 + dib_dvbc * fi21;
+    let dib_dvbc_ext = dib_dvbe * fi12 + dib_dvbc * fi22;
+
+    (
+        ic,
+        ib,
+        [dic_dvbe_ext, dic_dvbc_ext, dib_dvbe_ext, dib_dvbc_ext],
+    )
 }
 
 /// Internal node mapping for a BJT with parasitic resistances in the DC system.
@@ -555,12 +776,13 @@ fn build_dc_system(
         let gm_full = oa.aol / oa.r_out;
         let gm_capped = AOL_DC_MAX / oa.r_out;
         let delta_gm = gm_full - gm_capped;
-        // Undo the excess Gm from the MNA stamps
+        // Undo the excess Gm from the MNA stamps. The corrected VCCS stamp is
+        // np -= gm / nm += gm, so removing delta_gm reverses those signs.
         if np > 0 && np - 1 < n_aug {
-            g_dc[o][np - 1] -= delta_gm;
+            g_dc[o][np - 1] += delta_gm;
         }
         if nm > 0 && nm - 1 < n_aug {
-            g_dc[o][nm - 1] += delta_gm; // was stamped as -gm, so undo with +
+            g_dc[o][nm - 1] -= delta_gm;
         }
     }
 
@@ -1272,7 +1494,15 @@ fn nr_dc_solve(
         // 2. Evaluate device currents and Jacobian
         // When internal nodes are present, v_nl already has true junction voltages
         // — skip the parasitic inner loop to avoid double-correction.
-        evaluate_devices_inner(v_nl, device_slots, i_nl, &mut j_dev, m, internal_junctions);
+        evaluate_devices_inner(
+            v_nl,
+            device_slots,
+            i_nl,
+            &mut j_dev,
+            m,
+            internal_junctions,
+            Some(v),
+        );
 
         // Check for NaN/Inf in device evaluation
         if i_nl.iter().any(|x| !x.is_finite()) || j_dev.iter().any(|x| !x.is_finite()) {
@@ -1607,7 +1837,15 @@ fn nr_dc_solve(
         if max_delta < config.tolerance {
             // Final evaluation at converged point
             extract_nl_voltages_with(m, dc_n_v, v, v_nl);
-            evaluate_devices_inner(v_nl, device_slots, i_nl, &mut j_dev, m, internal_junctions);
+            evaluate_devices_inner(
+                v_nl,
+                device_slots,
+                i_nl,
+                &mut j_dev,
+                m,
+                internal_junctions,
+                Some(v),
+            );
             return (true, iter + 1);
         }
     }
@@ -1621,6 +1859,7 @@ fn nr_dc_solve(
         &mut vec![0.0; m * m],
         m,
         internal_junctions,
+        Some(v),
     );
     if aol_cont_mode {
         log::debug!(
@@ -1887,21 +2126,55 @@ fn patch_g_dc_for_aol(base_g_dc: &[Vec<f64>], mna: &MnaSystem, aol_step: f64) ->
             continue;
         }
 
-        // The MNA VCCS stamps:
-        //   G[out][n_plus]  += +Gm  (or += -Gm if n_plus is 0-indexed here)
-        //   G[out][n_minus] += -Gm
-        // build_dc_system undoes excess Gm by doing:
-        //   g_dc[o][np - 1] -= delta_gm
-        //   g_dc[o][nm - 1] += delta_gm
-        // We apply an additional undo on top of that.
+        // The corrected MNA VCCS stamp (current leaving `out`):
+        //   G[out][n_plus]  -= Gm
+        //   G[out][n_minus] += Gm
+        // so removing excess Gm reverses those signs (same convention as
+        // build_dc_system's AOL_DC_MAX undo). We apply an additional undo
+        // on top of that for the homotopy step.
         if np > 0 && np - 1 < n_aug {
-            g[o][np - 1] -= delta_gm;
+            g[o][np - 1] += delta_gm;
         }
         if nm > 0 && nm - 1 < n_aug {
-            g[o][nm - 1] += delta_gm;
+            g[o][nm - 1] -= delta_gm;
         }
     }
     g
+}
+
+/// Build the DC-OP limitation warning for behavioral B-sources, if any are
+/// present in the MNA system.
+///
+/// The DC OP currently has NO model for behavioral sources: `I={expr}`
+/// sources are treated as open circuits (I = 0) and `V={expr}` sources'
+/// augmented rows enforce `V+ − V− = 0` (V = 0) instead of `= f(v_dc)`.
+/// The transient solver evaluates the real expressions and converges to the
+/// true operating point over warmup. Full DC evaluation is a recorded
+/// follow-up — see `docs/aidocs/BEHAVIORAL_SOURCES.md` §6; do not silently
+/// "fix" this here without implementing that section.
+///
+/// Returns `Some(message)` naming each behavioral source and its DC
+/// treatment, or `None` when the circuit has no behavioral sources.
+pub fn behavioral_dc_op_warning(mna: &MnaSystem) -> Option<String> {
+    if mna.behavioral_sources.is_empty() {
+        return None;
+    }
+    let listing: Vec<String> = mna
+        .behavioral_sources
+        .iter()
+        .map(|b| match b.kind {
+            crate::parser::BSourceKind::Current => format!("{} (I={{}} treated as I=0/open)", b.name),
+            crate::parser::BSourceKind::Voltage => {
+                format!("{} (V={{}} treated as V=0 constraint)", b.name)
+            }
+        })
+        .collect();
+    Some(format!(
+        "DC OP: behavioral source(s) [{}] have no DC model — expressions are \
+         ignored at the operating point (transient warmup converges to the true \
+         OP). Full DC support is a recorded follow-up (BEHAVIORAL_SOURCES.md §6).",
+        listing.join(", ")
+    ))
 }
 
 /// Compute the DC operating point for a circuit with nonlinear devices.
@@ -1919,6 +2192,12 @@ pub fn solve_dc_operating_point(
     config: &DcOpConfig,
 ) -> DcOpResult {
     let m = mna.m;
+
+    // Behavioral B-sources have no DC model yet (BEHAVIORAL_SOURCES.md §6
+    // follow-up) — be honest about it instead of silently biasing the OP.
+    if let Some(msg) = behavioral_dc_op_warning(mna) {
+        log::warn!("{}", msg);
+    }
 
     // Build DC system with internal nodes for parasitic BJTs.
     // Dimension n_dc = n_aug + num_inductors + num_internal_nodes.
@@ -2615,6 +2894,7 @@ pub fn solve_dc_operating_point(
         &mut vec![0.0; m * m],
         m,
         has_internal_nodes,
+        Some(&v_out),
     );
     DcOpResult {
         v_node: v_out,
@@ -3103,5 +3383,123 @@ mod tests {
                 "device {idx}: current differs when evaluated together vs alone"
             );
         }
+    }
+
+    // ── AOL homotopy patch polarity regression ───────────────────────
+
+    /// Pins the sign convention of `patch_g_dc_for_aol` so a future
+    /// "harmonization" can't silently flip it back.
+    ///
+    /// The MNA VCCS stamp is `G[out][n_plus] -= Gm`, `G[out][n_minus] += Gm`
+    /// (current LEAVING `out` is −Gm·V+ + Gm·V−). `build_dc_system` undoes
+    /// the excess above AOL_DC_MAX by REVERSING those signs (`+= delta` /
+    /// `-= delta`), and `patch_g_dc_for_aol` applies a further undo down to
+    /// `aol_step` with the SAME reversal. Therefore after patching, the
+    /// effective entry must be
+    ///     g[o][np−1] == −(aol_step / r_out) + (base non-opamp contribution)
+    ///     g[o][nm−1] == +(aol_step / r_out) + (base non-opamp contribution)
+    /// where the base contributions here are the (negative off-diagonal)
+    /// resistor stamps. A polarity flip would instead ADD conductance and
+    /// blow both assertions up by ~2·Gm.
+    #[test]
+    fn test_patch_g_dc_for_aol_polarity_pinned() {
+        use crate::mna::OpampInfo;
+
+        // Minimal 3-node system: n_plus = node 1, n_minus = node 2,
+        // out = node 3 (1-based MNA indices; matrix rows are index−1).
+        let aol = 200_000.0;
+        let r_out = 50.0;
+        let mut mna = MnaSystem::new(3, 0, 0, 0);
+        mna.opamps.push(OpampInfo {
+            name: "U_TEST".to_string(),
+            n_plus_idx: 1,
+            n_minus_idx: 2,
+            n_out_idx: 3,
+            aol,
+            r_out,
+            vsat: f64::INFINITY,
+            vcc: f64::INFINITY,
+            vee: f64::NEG_INFINITY,
+            voh_drop: 1.5,
+            vol_drop: 1.5,
+            gbw: f64::INFINITY,
+            sr: f64::INFINITY,
+            ib: 0.0,
+            rin: f64::INFINITY,
+            aol_transient_cap: f64::INFINITY,
+            n_internal_idx: 0,
+            iir_c_dom: 0.0,
+            n_int_idx: 0,
+            en: 0.0,
+            in_amps: 0.0,
+            en_fc: 0.0,
+            in_fc: 0.0,
+        });
+
+        // Base non-opamp contributions: feedback resistors from `out` to each
+        // input. Standard resistor stamp — off-diagonals are NEGATIVE.
+        let g_fb_np = 5e-4; // 2 kΩ out ↔ n_plus
+        let g_fb_nm = 1e-3; // 1 kΩ out ↔ n_minus
+        mna.g[2][0] -= g_fb_np;
+        mna.g[0][2] -= g_fb_np;
+        mna.g[0][0] += g_fb_np;
+        mna.g[2][2] += g_fb_np;
+        mna.g[2][1] -= g_fb_nm;
+        mna.g[1][2] -= g_fb_nm;
+        mna.g[1][1] += g_fb_nm;
+        mna.g[2][2] += g_fb_nm;
+
+        // Full-AOL VCCS stamp, exactly as MnaSystem::build's simple-VCCS
+        // path does it (mna.rs "Simple VCCS (no GBW)" arm).
+        let gm_full = aol / r_out;
+        mna.g[2][0] -= gm_full;
+        mna.g[2][1] += gm_full;
+        mna.g[2][2] += 1.0 / r_out;
+
+        // build_dc_system bakes the AOL_DC_MAX=1000 cap into base g_dc.
+        let config = DcOpConfig::default();
+        let dc_sys = build_dc_system(&mna, &[], &config);
+        const AOL_DC_MAX: f64 = 1000.0; // must match dc_op.rs constants
+        let gm_capped = AOL_DC_MAX / r_out;
+        assert!(
+            (dc_sys.g_dc[2][0] - (-gm_capped - g_fb_np)).abs() < 1e-9,
+            "base g_dc[out][np] should be −Gm_capped − g_fb_np, got {}",
+            dc_sys.g_dc[2][0]
+        );
+
+        // Homotopy step: lower AOL further to aol_step.
+        let aol_step = 10.0;
+        let g = patch_g_dc_for_aol(&dc_sys.g_dc, &mna, aol_step);
+        let gm_step = aol_step / r_out;
+
+        // THE pinned polarity: effective VCCS at n_plus column stays NEGATIVE
+        // (−Gm·V+ leaving-current convention), reduced in magnitude to
+        // aol_step/r_out, with the base resistor stamp preserved.
+        assert!(
+            (g[2][0] - (-gm_step - g_fb_np)).abs() < 1e-9,
+            "patched g[out][np] must be −(aol_step/r_out) − g_fb_np = {}, got {}",
+            -gm_step - g_fb_np,
+            g[2][0]
+        );
+        assert!(
+            g[2][0] < 0.0,
+            "patched g[out][np] must stay negative (VCCS polarity flipped!)"
+        );
+        // Mirror column: n_minus stays POSITIVE.
+        assert!(
+            (g[2][1] - (gm_step - g_fb_nm)).abs() < 1e-9,
+            "patched g[out][nm] must be +(aol_step/r_out) − g_fb_nm = {}, got {}",
+            gm_step - g_fb_nm,
+            g[2][1]
+        );
+        // Output self-conductance and all other entries untouched by the patch.
+        assert!(
+            (g[2][2] - dc_sys.g_dc[2][2]).abs() < 1e-12,
+            "patch must not touch g[out][out]"
+        );
+        assert!(
+            (g[0][2] - dc_sys.g_dc[0][2]).abs() < 1e-12,
+            "patch must not touch input rows"
+        );
     }
 }

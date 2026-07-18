@@ -110,6 +110,14 @@ pub mod safeguards {
     /// Minimum conductance to prevent divide-by-zero.
     pub const MIN_CONDUCTANCE: f64 = 1e-15;
 
+    /// Forward-current ceiling for the extended diode exponential region [A].
+    /// Beyond `MAX_EXP_V`, the diode I-V curve continues as a true exponential
+    /// (in ln-current space) until forward current reaches this ceiling, then
+    /// extends linearly. Lets extreme-IS models (wide-bandgap junctions,
+    /// IS=1e-30, Vf ≈ 3 V) conduct; for IS ≥ e^-40·MAX_DIODE_FWD_I ≈ 4.3e-15
+    /// the legacy clamp boundary is unchanged.
+    pub const MAX_DIODE_FWD_I: f64 = 1e3;
+
     /// Limit voltage for safe exponential calculation.
     #[inline(always)]
     pub fn limit_exp_v(v: f64, vt: f64) -> f64 {

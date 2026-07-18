@@ -202,3 +202,27 @@ fn golden_triode_cc_sine_500hz() {
     // 2e-4 tolerance is well within inaudible range.
     support::assert_matches_golden(&output, "triode_cc_sine_500hz.json", 2e-4);
 }
+
+/// Re-records the triode golden reference from the current codegen output.
+/// `record_golden` refuses to overwrite — delete the JSON first, run with
+/// `-- --include-ignored record_triode`, then commit the regenerated file.
+///
+/// History: the original recording came from the (since deleted) runtime
+/// CircuitSolver via record_golden_refs.rs. It was re-recorded 2026-07-18
+/// after restoring the missing ×2 in the Koren triode plate-current
+/// equation (Ip = 2·E1^EX/KG1); the old file asserted the halved currents.
+#[test]
+#[ignore]
+fn record_triode_cc_sine_500hz_codegen() {
+    let c = config(TRIODE_CC);
+    let circuit = support::build_circuit(TRIODE_CC, &c, "g_triode_rec");
+    let output = support::run_sine(&circuit, 500.0, 0.5, 960, SR);
+    support::record_golden(
+        "triode_cc_sine_500hz.json",
+        "triode_cc_sine_500hz",
+        TRIODE_CC,
+        &output,
+        1e-4,
+        "codegen_dk (2026-07-18, Koren x2 fix)",
+    );
+}

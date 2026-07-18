@@ -27,16 +27,30 @@ use std::collections::HashMap;
 /// After discretization with timestep T:
 ///   A = 2*C/T + G  (trapezoidal rule)
 ///
-/// When voltage sources or VCVS elements are present, the system is augmented
-/// with extra unknowns for the source currents. The augmented dimension is
-///   n_aug = n + num_vs + num_vcvs
-/// All matrices (G, C, N_v, N_i) are expanded to n_aug × n_aug.
+/// When elements that need branch-current unknowns or algebraic constraint
+/// rows are present, the system is augmented with extra rows/columns beyond
+/// the `n` circuit nodes. All matrices (G, C, N_v, N_i) are expanded to
+/// n_aug × n_aug (N_v to m × n_aug, N_i to n_aug × m).
 #[derive(Debug, Clone)]
 pub struct MnaSystem {
     /// Number of circuit nodes (excluding ground)
     pub n: usize,
-    /// Augmented system dimension: n + num_vs + num_vcvs.
-    /// Equal to n when no voltage sources or VCVS elements are present.
+    /// Augmented system dimension. Rows `n..n_aug` are, in index order:
+    ///   1. Voltage-source branch currents (`n + vs.ext_idx`), one per VS
+    ///   2. VCVS branch currents (`n + num_vs + vcvs_idx`)
+    ///   3. Ideal-transformer coupling currents (`n + num_vs + num_vcvs + xfmr_idx`)
+    ///   4. Current-mode VCA rows, two per current-mode VCA: the internal
+    ///      `sig+_int` node (with a 1 Ω dummy terminator) followed by the
+    ///      0 V sensing-source branch current (`vca.n_internal_idx` /
+    ///      `vca.n_sense_idx`, both stored 1-indexed)
+    ///   5. Behavioral `V={}` source branch currents (`BehavioralSourceInfo::aug_row`)
+    /// All of the above are algebraic constraint/branch rows with no
+    /// capacitance — they are blanket-zeroed in A_neg (no trapezoidal
+    /// history). Additionally, `expand_bjt_internal_nodes` can append
+    /// parasitic-BJT internal nodes AFTER these rows (growing n_aug);
+    /// those are physical nodes with G and C stamps and are excluded from
+    /// the A_neg zeroing (see `build_discretized_matrix`).
+    /// Equal to n when none of the above elements are present.
     pub n_aug: usize,
     /// Total voltage dimension (sum of device dimensions)
     pub m: usize,
@@ -386,6 +400,15 @@ pub struct LinearizedBjtInfo {
     /// DC bias currents
     pub ic_dc: f64,
     pub ib_dc: f64,
+    /// Operating-point controlling voltages in EXTERNAL node space
+    /// (Vbe0 = V(nb) - V(ne), Vbc0 = V(nb) - V(nc) at the DC OP).
+    /// Required so `stamp_linearized_bjts` can inject the proper Norton
+    /// constant I0 - g·v0: the small-signal conductances are stamped
+    /// against FULL node voltages, so the companion current source must
+    /// subtract the linear-model current at the OP or the linearized
+    /// circuit's DC fixed point drifts away from the operating point.
+    pub vbe0: f64,
+    pub vbc0: f64,
 }
 
 /// Linearized triode info: small-signal conductances stamped into G at DC OP.
@@ -409,6 +432,12 @@ pub struct LinearizedTriodeInfo {
     pub ip_dc: f64,
     /// DC grid current at operating point (should be ~0 for valid linearization)
     pub ig_dc: f64,
+    /// Operating-point controlling voltages in EXTERNAL node space
+    /// (Vgk0 = V(ng) - V(nk), Vpk0 = V(np) - V(nk) at the DC OP).
+    /// Used by `stamp_linearized_triodes` for the Norton constant
+    /// I0 - g·v0 — see `LinearizedBjtInfo::vbe0` for the invariant.
+    pub vgk0: f64,
+    pub vpk0: f64,
 }
 
 /// Voltage source information for extended MNA.
@@ -739,7 +768,10 @@ pub struct PotInfo {
 /// Wiper potentiometer group — links two `PotInfo` entries as complementary legs.
 ///
 /// A single UI parameter (wiper position 0.0–1.0) controls both resistances:
-/// R_cw = pos * (total - 2) + 1, R_ccw = (1-pos) * (total - 2) + 1.
+/// R_cw = (1-pos) * (total - 20) + 10, R_ccw = pos * (total - 20) + 10
+/// (MIN_LEG_R = 10 Ω end-stop on each leg; pos = 1 → wiper at the CW end →
+/// R_cw at its 10 Ω minimum). Must match `parser::expand_wipers` and the
+/// CLI/plugin wiper mapping (`WIPER_MIN_LEG_R`).
 #[derive(Debug, Clone)]
 pub struct WiperGroupInfo {
     /// Index into `MnaSystem::pots` for the CW (top→wiper) leg
@@ -993,32 +1025,86 @@ impl MnaSystem {
                 self.g[c][b] -= bjt.go;
             }
 
-            // DC bias currents (as current source injections)
-            // Ic flows into collector, out of emitter
+            // DC bias injections — proper Norton companion constants.
+            //
+            // The conductance stamps above implement a linear terminal-current
+            // model I_lin(v) evaluated against FULL node voltages, not
+            // deviations from the operating point. The exact companion of
+            // I(v) ≈ I0 + g·(v − v0) therefore needs the constant injection
+            // I_lin(v0) − I0 at each terminal (current INTO the node), so
+            // that v = v0 is exactly the DC fixed point of the linearized
+            // circuit. Injecting raw ±I0 alone (the pre-2026-07 behavior)
+            // left the huge g·v0 term uncancelled — e.g. a 12AX7-class gm
+            // against Vbe0 ≈ 0.65 V produced multi-mA KCL error at the
+            // collector row and tens of volts of bias shift.
+            //
+            // I_lin per terminal mirrors the stamp blocks above, including
+            // their per-terminal ground guards (a grounded terminal has
+            // v = 0, so the vbe0/vbc0 node-difference forms stay exact for
+            // the diagonal-only fallback stamps). `go` is only stamped when
+            // BOTH base and collector are non-ground, so its OP term follows
+            // the same condition.
+            let vbe0 = bjt.vbe0;
+            let vbc0 = bjt.vbc0;
+            let mut i_lin_b = 0.0;
+            let mut i_lin_c = 0.0;
+            let mut i_lin_e = 0.0;
+            if bjt.gpi.abs() > 1e-30 {
+                if nb > 0 {
+                    i_lin_b += bjt.gpi * vbe0;
+                }
+                if ne > 0 {
+                    i_lin_e -= bjt.gpi * vbe0;
+                }
+            }
+            if bjt.gm.abs() > 1e-30 {
+                if nc > 0 {
+                    i_lin_c += bjt.gm * vbe0;
+                }
+                if ne > 0 {
+                    i_lin_e -= bjt.gm * vbe0;
+                }
+            }
+            if bjt.gmu.abs() > 1e-30 {
+                if nb > 0 {
+                    i_lin_b += bjt.gmu * vbc0;
+                }
+                if nc > 0 {
+                    i_lin_c -= bjt.gmu * vbc0;
+                }
+            }
+            if bjt.go.abs() > 1e-30 && nb > 0 && nc > 0 {
+                i_lin_b += bjt.go * vbc0;
+                i_lin_c -= bjt.go * vbc0;
+            }
+
+            // Terminal DC currents drawn OUT of each node by the real device:
+            // collector ic_dc, base ib_dc, emitter -(ic_dc + ib_dc).
+            // Injection INTO node = I_lin(v0) − I_dc(terminal).
+            // (CurrentSourceInfo convention: dc_value injected at n_plus_idx,
+            // extracted at n_minus_idx — see dc_op.rs / dk.rs consumers.)
             if nc > 0 {
                 self.current_sources.push(CurrentSourceInfo {
                     name: format!("{}_Ic_dc", bjt.name),
-                    n_plus_idx: 0,
-                    n_minus_idx: nc,
-                    dc_value: bjt.ic_dc,
+                    n_plus_idx: nc,
+                    n_minus_idx: 0,
+                    dc_value: i_lin_c - bjt.ic_dc,
                 });
             }
-            // Ib flows into base, out of emitter
             if nb > 0 {
                 self.current_sources.push(CurrentSourceInfo {
                     name: format!("{}_Ib_dc", bjt.name),
-                    n_plus_idx: 0,
-                    n_minus_idx: nb,
-                    dc_value: bjt.ib_dc,
+                    n_plus_idx: nb,
+                    n_minus_idx: 0,
+                    dc_value: i_lin_b - bjt.ib_dc,
                 });
             }
-            // Ie = -(Ic + Ib) flows out of emitter
             if ne > 0 {
                 self.current_sources.push(CurrentSourceInfo {
                     name: format!("{}_Ie_dc", bjt.name),
                     n_plus_idx: ne,
                     n_minus_idx: 0,
-                    dc_value: bjt.ic_dc + bjt.ib_dc,
+                    dc_value: i_lin_e + bjt.ic_dc + bjt.ib_dc,
                 });
             }
         }
@@ -1071,17 +1157,46 @@ impl MnaSystem {
                 }
             }
 
-            // DC bias currents
-            // Ip flows into plate (from cathode through tube)
+            // DC bias injections — proper Norton companion constants.
+            // Same invariant as `stamp_linearized_bjts`: the gm/gp stamps
+            // above act on FULL node voltages, so the constant injection at
+            // each terminal must be I_lin(v0) − I_dc(terminal) (current INTO
+            // the node), making v = v0 the exact DC fixed point. The grid has
+            // no stamped conductance (no grid-conduction model in the
+            // linearized triode), so its linear-model current is zero and the
+            // injection stays −ig_dc.
+            let vgk0 = tube.vgk0;
+            let vpk0 = tube.vpk0;
+            let mut i_lin_p = 0.0;
+            let mut i_lin_k = 0.0;
+            if tube.gm.abs() > 1e-30 {
+                if np > 0 {
+                    i_lin_p += tube.gm * vgk0;
+                }
+                if nk > 0 {
+                    i_lin_k -= tube.gm * vgk0;
+                }
+            }
+            if tube.gp.abs() > 1e-30 {
+                if np > 0 {
+                    i_lin_p += tube.gp * vpk0;
+                }
+                if nk > 0 {
+                    i_lin_k -= tube.gp * vpk0;
+                }
+            }
+
+            // Terminal DC currents drawn OUT of each node by the real device:
+            // plate ip_dc, grid ig_dc, cathode -(ip_dc + ig_dc).
             if np > 0 {
                 self.current_sources.push(CurrentSourceInfo {
                     name: format!("{}_Ip_dc", tube.name),
-                    n_plus_idx: 0,
-                    n_minus_idx: np,
-                    dc_value: tube.ip_dc,
+                    n_plus_idx: np,
+                    n_minus_idx: 0,
+                    dc_value: i_lin_p - tube.ip_dc,
                 });
             }
-            // Ig flows into grid (only non-negligible when tube is near grid conduction)
+            // Grid injection (only non-negligible when tube is near grid conduction)
             if ng > 0 && tube.ig_dc.abs() > 1e-15 {
                 self.current_sources.push(CurrentSourceInfo {
                     name: format!("{}_Ig_dc", tube.name),
@@ -1090,14 +1205,12 @@ impl MnaSystem {
                     dc_value: tube.ig_dc,
                 });
             }
-            // Ik = Ip + Ig flows out of cathode
             if nk > 0 {
-                let ik = tube.ip_dc + tube.ig_dc;
                 self.current_sources.push(CurrentSourceInfo {
                     name: format!("{}_Ik_dc", tube.name),
                     n_plus_idx: nk,
                     n_minus_idx: 0,
-                    dc_value: ik,
+                    dc_value: i_lin_k + tube.ip_dc + tube.ig_dc,
                 });
             }
         }
@@ -1177,12 +1290,25 @@ impl MnaSystem {
         for (dev_info, slot) in self.nonlinear_devices.iter().zip(device_slots.iter()) {
             match &slot.params {
                 DeviceParams::Tube(p) => {
-                    // node_indices: [grid, plate, cathode]
-                    let (ng, np, nk) = (
-                        dev_info.node_indices[0],
-                        dev_info.node_indices[1],
-                        dev_info.node_indices[2],
-                    );
+                    // Node layout differs by tube shape (same dispatch as
+                    // `add_parasitic_caps`; see `categorize_element`):
+                    //   - Triode (3 nodes):      [grid, plate, cathode]
+                    //   - Pentode (4-5 nodes):   [plate, grid, cathode, screen, (suppressor?)]
+                    // Without the dispatch a pentode's CCG landed
+                    // plate-cathode and CCP grid-cathode (swapped).
+                    let (ng, np, nk) = if dev_info.node_indices.len() >= 4 {
+                        (
+                            dev_info.node_indices[1],
+                            dev_info.node_indices[0],
+                            dev_info.node_indices[2],
+                        )
+                    } else {
+                        (
+                            dev_info.node_indices[0],
+                            dev_info.node_indices[1],
+                            dev_info.node_indices[2],
+                        )
+                    };
                     if p.ccg > 0.0 {
                         caps.push((nk, ng, p.ccg));
                     }
@@ -1601,34 +1727,38 @@ impl MnaSystem {
                 self.n_i[i][s + 1] = 0.0;
             }
 
+            // Re-stamp with accumulation (`+=`) into the freshly-zeroed
+            // rows/cols above: if two effective terminals resolve to the SAME
+            // node (tied external terminals with no parasitic R on either),
+            // the entries must cancel to 0, not overwrite.
             // Re-stamp N_v: Vbe_int = V(basePrime) - V(emitterPrime)
             if let Some(b) = eff_b {
-                self.n_v[s][b] = 1.0;
+                self.n_v[s][b] += 1.0;
             }
             if let Some(e) = eff_e {
-                self.n_v[s][e] = -1.0;
+                self.n_v[s][e] += -1.0;
             }
             // N_v: Vbc_int = V(basePrime) - V(collectorPrime)
             if let Some(b) = eff_b {
-                self.n_v[s + 1][b] = 1.0;
+                self.n_v[s + 1][b] += 1.0;
             }
             if let Some(c) = eff_c {
-                self.n_v[s + 1][c] = -1.0;
+                self.n_v[s + 1][c] += -1.0;
             }
 
             // N_i: Ic enters collectorPrime, exits emitterPrime
             if let Some(c) = eff_c {
-                self.n_i[c][s] = -1.0;
+                self.n_i[c][s] += -1.0;
             }
             if let Some(e) = eff_e {
-                self.n_i[e][s] = 1.0;
+                self.n_i[e][s] += 1.0;
             }
             // N_i: Ib enters basePrime, exits emitterPrime
             if let Some(b) = eff_b {
-                self.n_i[b][s + 1] = -1.0;
+                self.n_i[b][s + 1] += -1.0;
             }
             if let Some(e) = eff_e {
-                self.n_i[e][s + 1] = 1.0;
+                self.n_i[e][s + 1] += 1.0;
             }
 
             self.bjt_internal_nodes.push(BjtTransientInternalNodes {
@@ -1674,14 +1804,22 @@ impl MnaSystem {
     ///
     /// The device current flows from anode (i) to cathode (j).
     /// Controlling voltage is V_i - V_j.
+    ///
+    /// N_v/N_i entries ACCUMULATE (`+=`) into the device-owned rows/columns
+    /// (freshly zeroed at MNA construction) so that two terminals tied to the
+    /// SAME node cancel to 0 instead of the second write overwriting the
+    /// first. This applies to every device stamp below — a diode-connected
+    /// BJT (`Q1 x x e`), a gate-source-strapped JFET, a MOSFET G-S tie, or a
+    /// triode grid-cathode tie must see a zero controlling-voltage row
+    /// (V = 0 exactly) and a cancelled KCL column, not a phantom ±V(x).
     pub fn stamp_nonlinear_2terminal(&mut self, device_idx: usize, i: usize, j: usize) {
         // N_v extracts controlling voltage: v_nl = v_i - v_j
-        self.n_v[device_idx][i] = 1.0;
-        self.n_v[device_idx][j] = -1.0;
+        self.n_v[device_idx][i] += 1.0;
+        self.n_v[device_idx][j] += -1.0;
 
         // N_i injects current: i_i = -i_nl, i_j = i_nl
-        self.n_i[i][device_idx] = -1.0;
-        self.n_i[j][device_idx] = 1.0;
+        self.n_i[i][device_idx] += -1.0;
+        self.n_i[j][device_idx] += 1.0;
     }
 
     /// Stamp a BJT (2-dimensional device).
@@ -1691,22 +1829,24 @@ impl MnaSystem {
     ///
     /// start_idx: starting row/column in N_v/N_i for this device
     pub fn stamp_bjt(&mut self, start_idx: usize, nc: usize, nb: usize, ne: usize) {
+        // Accumulate (`+=`) so tied terminals (e.g. diode-connected Q1 x x e)
+        // cancel to a zero row/column — see `stamp_nonlinear_2terminal`.
         // Row start_idx: Vbe = Vb - Ve
-        self.n_v[start_idx][nb] = 1.0;
-        self.n_v[start_idx][ne] = -1.0;
+        self.n_v[start_idx][nb] += 1.0;
+        self.n_v[start_idx][ne] += -1.0;
 
         // Row start_idx+1: Vbc = Vb - Vc
-        self.n_v[start_idx + 1][nb] = 1.0;
-        self.n_v[start_idx + 1][nc] = -1.0;
+        self.n_v[start_idx + 1][nb] += 1.0;
+        self.n_v[start_idx + 1][nc] += -1.0;
 
         // Column start_idx: Ic enters collector, exits emitter
         // N_i convention: positive = current entering node from device
-        self.n_i[nc][start_idx] = -1.0; // Ic enters collector (current into device = negative)
-        self.n_i[ne][start_idx] = 1.0; // Ic exits emitter (current out of device = positive by KCL)
+        self.n_i[nc][start_idx] += -1.0; // Ic enters collector (current into device = negative)
+        self.n_i[ne][start_idx] += 1.0; // Ic exits emitter (current out of device = positive by KCL)
 
         // Column start_idx+1: Ib enters base, exits emitter
-        self.n_i[nb][start_idx + 1] = -1.0; // Ib enters base
-        self.n_i[ne][start_idx + 1] = 1.0; // Ib exits emitter (KCL conservation)
+        self.n_i[nb][start_idx + 1] += -1.0; // Ib enters base
+        self.n_i[ne][start_idx + 1] += 1.0; // Ib exits emitter (KCL conservation)
     }
 
     /// Stamp forward-active BJT nonlinear matrices (1D).
@@ -1724,14 +1864,15 @@ impl MnaSystem {
         ne: usize,
         beta_f: f64,
     ) {
+        // Accumulate (`+=`) so tied terminals cancel — see `stamp_nonlinear_2terminal`.
         // N_v: extract Vbe = Vb - Ve
-        self.n_v[start_idx][nb] = 1.0;
-        self.n_v[start_idx][ne] = -1.0;
+        self.n_v[start_idx][nb] += 1.0;
+        self.n_v[start_idx][ne] += -1.0;
 
         // N_i: single column with Ic + Ib = Ic * (1 + 1/BF) for KCL
-        self.n_i[nc][start_idx] = -1.0; // Ic extracted from collector
-        self.n_i[nb][start_idx] = -1.0 / beta_f; // Ib = Ic/BF extracted from base
-        self.n_i[ne][start_idx] = 1.0 + 1.0 / beta_f; // Ic + Ib injected into emitter
+        self.n_i[nc][start_idx] += -1.0; // Ic extracted from collector
+        self.n_i[nb][start_idx] += -1.0 / beta_f; // Ib = Ic/BF extracted from base
+        self.n_i[ne][start_idx] += 1.0 + 1.0 / beta_f; // Ic + Ib injected into emitter
     }
 
     /// Stamp triode nonlinear matrices.
@@ -1748,21 +1889,23 @@ impl MnaSystem {
     /// - Column start_idx: Ip flows plate→cathode
     /// - Column start_idx+1: Ig flows grid→cathode
     pub fn stamp_triode(&mut self, start_idx: usize, ng: usize, np: usize, nk: usize) {
+        // Accumulate (`+=`) so tied terminals (e.g. grid-cathode strap)
+        // cancel — see `stamp_nonlinear_2terminal`.
         // Row start_idx: Vgk = V_grid - V_cathode
-        self.n_v[start_idx][ng] = 1.0;
-        self.n_v[start_idx][nk] = -1.0;
+        self.n_v[start_idx][ng] += 1.0;
+        self.n_v[start_idx][nk] += -1.0;
 
         // Row start_idx+1: Vpk = V_plate - V_cathode
-        self.n_v[start_idx + 1][np] = 1.0;
-        self.n_v[start_idx + 1][nk] = -1.0;
+        self.n_v[start_idx + 1][np] += 1.0;
+        self.n_v[start_idx + 1][nk] += -1.0;
 
         // Column start_idx: Ip enters plate, exits cathode
-        self.n_i[np][start_idx] = -1.0; // Ip enters plate (current into device)
-        self.n_i[nk][start_idx] = 1.0; // Ip exits cathode
+        self.n_i[np][start_idx] += -1.0; // Ip enters plate (current into device)
+        self.n_i[nk][start_idx] += 1.0; // Ip exits cathode
 
         // Column start_idx+1: Ig enters grid, exits cathode
-        self.n_i[ng][start_idx + 1] = -1.0; // Ig enters grid
-        self.n_i[nk][start_idx + 1] = 1.0; // Ig exits cathode
+        self.n_i[ng][start_idx + 1] += -1.0; // Ig enters grid
+        self.n_i[nk][start_idx + 1] += 1.0; // Ig exits cathode
     }
 
     /// Stamp grid-off reduced pentode nonlinear matrices (2D).
@@ -1793,21 +1936,22 @@ impl MnaSystem {
         n_cathode: usize,
         n_screen: usize,
     ) {
+        // Accumulate (`+=`) so tied terminals cancel — see `stamp_nonlinear_2terminal`.
         // Row start_idx: Vgk
-        self.n_v[start_idx][n_grid] = 1.0;
-        self.n_v[start_idx][n_cathode] = -1.0;
+        self.n_v[start_idx][n_grid] += 1.0;
+        self.n_v[start_idx][n_cathode] += -1.0;
 
         // Row start_idx + 1: Vpk
-        self.n_v[start_idx + 1][n_plate] = 1.0;
-        self.n_v[start_idx + 1][n_cathode] = -1.0;
+        self.n_v[start_idx + 1][n_plate] += 1.0;
+        self.n_v[start_idx + 1][n_cathode] += -1.0;
 
         // Col start_idx: Ip (plate current — flows plate → cathode through the device)
-        self.n_i[n_plate][start_idx] = -1.0;
-        self.n_i[n_cathode][start_idx] = 1.0;
+        self.n_i[n_plate][start_idx] += -1.0;
+        self.n_i[n_cathode][start_idx] += 1.0;
 
         // Col start_idx + 1: Ig2 (screen current — flows screen → cathode through the device)
-        self.n_i[n_screen][start_idx + 1] = -1.0;
-        self.n_i[n_cathode][start_idx + 1] = 1.0;
+        self.n_i[n_screen][start_idx + 1] += -1.0;
+        self.n_i[n_cathode][start_idx + 1] += 1.0;
     }
 
     /// Build a discretized system matrix from G and C with inductor companion models.
@@ -1844,38 +1988,51 @@ impl MnaSystem {
             }
         }
 
-        // Zero A_neg rows for algebraic constraints (VS/VCVS/ideal transformers).
-        // These rows have no capacitance — no trapezoidal history term.
-        // Important: do NOT zero internal BJT node rows (they are physical nodes
-        // with capacitance and need trapezoidal history).
-        if g_sign < 0.0 {
-            // VS rows: at indices n + vs.ext_idx
-            for vs in &self.voltage_sources {
-                let row = self.n + vs.ext_idx;
-                if row < n_aug {
-                    for j in 0..n_aug {
-                        mat[row][j] = 0.0;
+        // Zero A_neg rows for algebraic constraints. These rows have no
+        // capacitance — no trapezoidal history term — and carrying the -G
+        // part forward as "history" couples the constraint to the previous
+        // sample's residual (a marginally-stable ±1 mode; the classic
+        // Nyquist-rate artifact on algebraic rows).
+        //
+        // Blanket-zero ALL augmented rows n..n_aug rather than enumerating
+        // per element type: the old per-type enumeration (VS, VCVS,
+        // ideal-xfmr) missed current-mode VCA rows (internal sig+_int node +
+        // sensing-source branch) and behavioral `V={}` branch rows. This
+        // matches the generated `rebuild_matrices` (dk_emitter) and the
+        // nodal IR builder, which blanket-zero the same range.
+        //
+        // Exclusions/non-issues, verified against the index layout:
+        // - BJT transient internal nodes (`expand_bjt_internal_nodes`) are
+        //   appended AFTER the algebraic rows, inside n..n_aug. They are
+        //   physical nodes carrying G (RB/RC/RE) and C (junction caps) and
+        //   NEED their trapezoidal history, so they are excluded here. (In
+        //   practice the CLI only expands them after routing to the nodal
+        //   path, where this function is no longer consulted — the exclusion
+        //   is defensive.)
+        // - Inductor branch variables NEVER appear in n..n_aug on this path:
+        //   `build_discretized_matrix` handles all inductor types via
+        //   companion-model conductance stamps into node rows (below).
+        //   Branch-current variables only exist in the separate
+        //   `build_augmented_matrices` output, at rows n_aug..n_nodal of a
+        //   matrix that never reaches this function.
+        if g_sign < 0.0 && n_aug > self.n {
+            let mut is_bjt_internal = vec![false; n_aug];
+            for bn in &self.bjt_internal_nodes {
+                for idx in [bn.int_base, bn.int_collector, bn.int_emitter]
+                    .into_iter()
+                    .flatten()
+                {
+                    if idx < n_aug {
+                        is_bjt_internal[idx] = true;
                     }
                 }
             }
-            // VCVS rows: at indices n + num_vs + vcvs_idx
-            let num_vs = self.voltage_sources.len();
-            for (vcvs_idx, _) in self.vcvs_sources.iter().enumerate() {
-                let row = self.n + num_vs + vcvs_idx;
-                if row < n_aug {
-                    for j in 0..n_aug {
-                        mat[row][j] = 0.0;
-                    }
+            for row in self.n..n_aug {
+                if is_bjt_internal[row] {
+                    continue;
                 }
-            }
-            // Ideal transformer rows: at indices n + num_vs + num_vcvs + xfmr_idx
-            let num_vcvs = self.vcvs_sources.len();
-            for (xfmr_idx, _) in self.ideal_transformers.iter().enumerate() {
-                let row = self.n + num_vs + num_vcvs + xfmr_idx;
-                if row < n_aug {
-                    for j in 0..n_aug {
-                        mat[row][j] = 0.0;
-                    }
+                for j in 0..n_aug {
+                    mat[row][j] = 0.0;
                 }
             }
         }
@@ -2495,12 +2652,19 @@ pub(crate) fn inject_rhs_current(rhs: &mut [f64], node: usize, current: f64) {
     }
 }
 
-/// Stamp a voltage-controlled current source (VCCS) into the G matrix.
+/// Stamp a voltage-controlled current source (VCCS, SPICE `G` element) into
+/// the G matrix.
 ///
-/// Current `I = gm * (V_ctrl_p - V_ctrl_n)` flows into `out_p` and out of `out_n`.
+/// Node-current direction (explicit, do NOT "harmonize" with the op-amp
+/// stamps): the element DRAWS `I = gm * (V_ctrl_p - V_ctrl_n)` OUT of node
+/// `out_p` and injects it INTO node `out_n` — i.e. positive current flows
+/// from `out_p` through the source to `out_n` (standard SPICE G-element
+/// convention). The op-amp VCCS stamps use the OPPOSITE orientation
+/// (they inject `+Gm·(V+ − V−)` INTO the output node) and therefore carry a
+/// negated gm; both are correct for their element.
 /// Node indices use MNA convention: 0 = ground (excluded from matrix).
 ///
-/// G stamps:
+/// G stamps (G[k][j]·Vj = current LEAVING node k):
 ///   G[out_p, ctrl_p] += gm
 ///   G[out_p, ctrl_n] -= gm
 ///   G[out_n, ctrl_p] -= gm
@@ -3735,97 +3899,17 @@ impl MnaBuilder {
                 continue;
             }
 
-            // BoyleDiodes auto-detection: look up the synthesized internal
-            // node by name. If present, switch to internal-node stamping for
-            // this op-amp and skip the rest of the dispatch.
-            let safe_name: String = oa
-                .name
-                .chars()
-                .map(|c| {
-                    if c.is_ascii_alphanumeric() || c == '_' {
-                        c
-                    } else {
-                        '_'
-                    }
-                })
-                .collect();
-            let int_node_key = format!("_oa_int_{}", safe_name);
-            if let Some(&int_idx_one) = mna.node_map.get(&int_node_key) {
-                // 1-indexed in node_map; convert to 0-indexed matrix row.
-                let int_row = int_idx_one - 1;
-                // Effective Gm/Go derived from R_BOYLE_INT_LOAD so the
-                // catch diode (anchored externally to this node) only
-                // fights ~1 µS, not the op-amp's nominal 1/r_out.
-                let gm_int = oa.aol / R_BOYLE_INT_LOAD;
-                let go_int = 1.0 / R_BOYLE_INT_LOAD;
-                if np > 0 {
-                    mna.g[int_row][np - 1] += gm_int;
-                }
-                if nm > 0 {
-                    mna.g[int_row][nm - 1] -= gm_int;
-                }
-                mna.g[int_row][int_row] += go_int;
-
-                oa.n_int_idx = int_idx_one;
-                log::debug!(
-                    "Op-amp {} (BoyleDiodes): int_node={}, Gm_int={:.3e}, Go_int={:.3e}",
-                    oa.name,
-                    int_idx_one,
-                    gm_int,
-                    go_int,
-                );
-                continue;
-            }
-
-            let gm = oa.aol / oa.r_out;
-            let go = 1.0 / oa.r_out;
-            let o = out - 1;
-
-            let has_gbw = oa.gbw.is_finite() && oa.gbw > 0.0;
-
-            if has_gbw {
-                // IIR op-amp model: stamp Gm at output (same as non-GBW) for DC OP.
-                // The GBW dominant pole is modeled as an external IIR filter in codegen,
-                // which strips Gm from G before building A for transient simulation.
-                // NO internal node is created — this avoids Boyle's Gm~4000 S conditioning disaster.
-                if np > 0 {
-                    mna.g[o][np - 1] += gm;
-                }
-                if nm > 0 {
-                    mna.g[o][nm - 1] -= gm;
-                }
-                mna.g[o][o] += go;
-
-                // Store IIR parameters for codegen
-                let c_dom = oa.aol / (2.0 * std::f64::consts::PI * oa.gbw * oa.r_out);
-                oa.iir_c_dom = c_dom;
-                // n_internal_idx stays 0 (no internal node)
-
-                log::debug!(
-                    "Op-amp {} (IIR): GBW={:.0}Hz, C_dom={:.3e}F, Gm={:.2}, Go={:.4}",
-                    oa.name,
-                    oa.gbw,
-                    c_dom,
-                    gm,
-                    go,
-                );
-            } else {
-                // Simple VCCS (no GBW): direct stamp at output (original behavior)
-                if np > 0 {
-                    mna.g[o][np - 1] += gm;
-                }
-                if nm > 0 {
-                    mna.g[o][nm - 1] -= gm;
-                }
-                mna.g[o][o] += go;
-            }
-
             // Input-stage parasitics (IB + RIN): tiny effects that matter for
             // circuits where the op-amp input node is a high-impedance
             // integrator (e.g. SSL 4kbuscomp sidechain U10 where a 3.3 MΩ /
             // 10 pF integrator winds up unboundedly under any DC offset
             // without a bleed path to ground). Default IB=0 / RIN=+∞
             // preserves ideal-op-amp behavior byte-identically.
+            //
+            // Stamped BEFORE the output-stage mode dispatch because these
+            // touch only the INPUT nodes and apply to every mode — the
+            // BoyleDiodes branch below `continue`s early and used to skip
+            // IB/RIN entirely.
             //
             // IB sign convention: positive IB injects `+IB` at both input
             // nodes (current flowing out of the op-amp pin into the external
@@ -3865,6 +3949,102 @@ impl MnaBuilder {
                     mna.g[nm - 1][nm - 1] += g_in;
                 }
             }
+
+            // BoyleDiodes auto-detection: look up the synthesized internal
+            // node by name. If present, switch to internal-node stamping for
+            // this op-amp and skip the rest of the output-stage dispatch
+            // (input parasitics above are already stamped).
+            let safe_name: String = oa
+                .name
+                .chars()
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() || c == '_' {
+                        c
+                    } else {
+                        '_'
+                    }
+                })
+                .collect();
+            let int_node_key = format!("_oa_int_{}", safe_name);
+            if let Some(&int_idx_one) = mna.node_map.get(&int_node_key) {
+                // 1-indexed in node_map; convert to 0-indexed matrix row.
+                let int_row = int_idx_one - 1;
+                // Effective Gm/Go derived from R_BOYLE_INT_LOAD so the
+                // catch diode (anchored externally to this node) only
+                // fights ~1 µS, not the op-amp's nominal 1/r_out.
+                let gm_int = oa.aol / R_BOYLE_INT_LOAD;
+                let go_int = 1.0 / R_BOYLE_INT_LOAD;
+                // Convention: G[k][j]·Vj = current LEAVING node k. The op-amp
+                // injects +Gm·(V+ − V−) INTO the internal node, so the current
+                // leaving is −Gm·V+ + Gm·V−.
+                if np > 0 {
+                    mna.g[int_row][np - 1] -= gm_int;
+                }
+                if nm > 0 {
+                    mna.g[int_row][nm - 1] += gm_int;
+                }
+                mna.g[int_row][int_row] += go_int;
+
+                oa.n_int_idx = int_idx_one;
+                log::debug!(
+                    "Op-amp {} (BoyleDiodes): int_node={}, Gm_int={:.3e}, Go_int={:.3e}",
+                    oa.name,
+                    int_idx_one,
+                    gm_int,
+                    go_int,
+                );
+                continue;
+            }
+
+            let gm = oa.aol / oa.r_out;
+            let go = 1.0 / oa.r_out;
+            let o = out - 1;
+
+            let has_gbw = oa.gbw.is_finite() && oa.gbw > 0.0;
+
+            if has_gbw {
+                // IIR op-amp model: stamp Gm at output (same as non-GBW) for DC OP.
+                // The GBW dominant pole is modeled as an external IIR filter in codegen,
+                // which strips Gm from G before building A for transient simulation.
+                // NO internal node is created — this avoids Boyle's Gm~4000 S conditioning disaster.
+                // Convention: G[k][j]·Vj = current LEAVING node k. The op-amp
+                // injects +Gm·(V+ − V−) INTO the output node, so the current
+                // leaving is −Gm·V+ + Gm·V−.
+                if np > 0 {
+                    mna.g[o][np - 1] -= gm;
+                }
+                if nm > 0 {
+                    mna.g[o][nm - 1] += gm;
+                }
+                mna.g[o][o] += go;
+
+                // Store IIR parameters for codegen
+                let c_dom = oa.aol / (2.0 * std::f64::consts::PI * oa.gbw * oa.r_out);
+                oa.iir_c_dom = c_dom;
+                // n_internal_idx stays 0 (no internal node)
+
+                log::debug!(
+                    "Op-amp {} (IIR): GBW={:.0}Hz, C_dom={:.3e}F, Gm={:.2}, Go={:.4}",
+                    oa.name,
+                    oa.gbw,
+                    c_dom,
+                    gm,
+                    go,
+                );
+            } else {
+                // Simple VCCS (no GBW): direct stamp at output.
+                // Convention: G[k][j]·Vj = current LEAVING node k. The op-amp
+                // injects +Gm·(V+ − V−) INTO the output node, so the current
+                // leaving is −Gm·V+ + Gm·V−.
+                if np > 0 {
+                    mna.g[o][np - 1] -= gm;
+                }
+                if nm > 0 {
+                    mna.g[o][nm - 1] += gm;
+                }
+                mna.g[o][o] += go;
+            }
+
         }
 
         // Allocate augmented rows for current-mode VCA sensing sources
@@ -3940,12 +4120,12 @@ impl MnaBuilder {
                         // - Injected into cathode: N_i[cathode] = +1
                         if node_i == 0 && node_j > 0 {
                             let j = node_j - 1;
-                            mna.n_v[start_idx][j] = -1.0; // v_d = 0 - v_j = -v_j
-                            mna.n_i[j][start_idx] = 1.0; // Current injected into cathode
+                            mna.n_v[start_idx][j] += -1.0; // v_d = 0 - v_j = -v_j
+                            mna.n_i[j][start_idx] += 1.0; // Current injected into cathode
                         } else if node_j == 0 && node_i > 0 {
                             let i = node_i - 1;
-                            mna.n_v[start_idx][i] = 1.0; // v_d = v_i - 0 = v_i
-                            mna.n_i[i][start_idx] = -1.0; // Current extracted from anode
+                            mna.n_v[start_idx][i] += 1.0; // v_d = v_i - 0 = v_i
+                            mna.n_i[i][start_idx] += -1.0; // Current extracted from anode
                         } else if node_i > 0 && node_j > 0 {
                             let i = node_i - 1;
                             let j = node_j - 1;
@@ -3965,34 +4145,36 @@ impl MnaBuilder {
                             // No grounded terminals — use standard stamp
                             mna.stamp_bjt(start_idx, c_raw - 1, b_raw - 1, e_raw - 1);
                         } else {
-                            // Per-terminal ground handling
+                            // Per-terminal ground handling.
+                            // Accumulate (`+=`) so tied non-ground terminals
+                            // cancel — see `stamp_nonlinear_2terminal`.
                             // N_v row 0 (Vbe): +1 at B, -1 at E
                             if b_raw > 0 {
-                                mna.n_v[start_idx][b_raw - 1] = 1.0;
+                                mna.n_v[start_idx][b_raw - 1] += 1.0;
                             }
                             if e_raw > 0 {
-                                mna.n_v[start_idx][e_raw - 1] = -1.0;
+                                mna.n_v[start_idx][e_raw - 1] += -1.0;
                             }
                             // N_v row 1 (Vbc): +1 at B, -1 at C
                             if b_raw > 0 {
-                                mna.n_v[start_idx + 1][b_raw - 1] = 1.0;
+                                mna.n_v[start_idx + 1][b_raw - 1] += 1.0;
                             }
                             if c_raw > 0 {
-                                mna.n_v[start_idx + 1][c_raw - 1] = -1.0;
+                                mna.n_v[start_idx + 1][c_raw - 1] += -1.0;
                             }
                             // N_i col 0 (Ic): -1 at C, +1 at E
                             if c_raw > 0 {
-                                mna.n_i[c_raw - 1][start_idx] = -1.0;
+                                mna.n_i[c_raw - 1][start_idx] += -1.0;
                             }
                             if e_raw > 0 {
-                                mna.n_i[e_raw - 1][start_idx] = 1.0;
+                                mna.n_i[e_raw - 1][start_idx] += 1.0;
                             }
                             // N_i col 1 (Ib): -1 at B, +1 at E
                             if b_raw > 0 {
-                                mna.n_i[b_raw - 1][start_idx + 1] = -1.0;
+                                mna.n_i[b_raw - 1][start_idx + 1] += -1.0;
                             }
                             if e_raw > 0 {
-                                mna.n_i[e_raw - 1][start_idx + 1] = 1.0;
+                                mna.n_i[e_raw - 1][start_idx + 1] += 1.0;
                             }
                         }
                     }
@@ -4038,21 +4220,23 @@ impl MnaBuilder {
                                 beta_f,
                             );
                         } else {
-                            // Per-terminal ground handling for 1D forward-active
+                            // Per-terminal ground handling for 1D forward-active.
+                            // Accumulate (`+=`) so tied non-ground terminals
+                            // cancel — see `stamp_nonlinear_2terminal`.
                             if b_raw > 0 {
-                                mna.n_v[start_idx][b_raw - 1] = 1.0;
+                                mna.n_v[start_idx][b_raw - 1] += 1.0;
                             }
                             if e_raw > 0 {
-                                mna.n_v[start_idx][e_raw - 1] = -1.0;
+                                mna.n_v[start_idx][e_raw - 1] += -1.0;
                             }
                             if c_raw > 0 {
-                                mna.n_i[c_raw - 1][start_idx] = -1.0;
+                                mna.n_i[c_raw - 1][start_idx] += -1.0;
                             }
                             if b_raw > 0 {
-                                mna.n_i[b_raw - 1][start_idx] = -1.0 / beta_f;
+                                mna.n_i[b_raw - 1][start_idx] += -1.0 / beta_f;
                             }
                             if e_raw > 0 {
-                                mna.n_i[e_raw - 1][start_idx] = 1.0 + 1.0 / beta_f;
+                                mna.n_i[e_raw - 1][start_idx] += 1.0 + 1.0 / beta_f;
                             }
                         }
                     }
@@ -4074,34 +4258,36 @@ impl MnaBuilder {
                         let g_raw = node_indices[1];
                         let s_raw = node_indices[2];
 
+                        // Accumulate (`+=`) so tied terminals (e.g. gate-source
+                        // strap `J1 out ctl ctl`) cancel — see `stamp_nonlinear_2terminal`.
                         // N_v row 0 (Vds): +1 at D, -1 at S
                         if d_raw > 0 {
-                            mna.n_v[start_idx][d_raw - 1] = 1.0;
+                            mna.n_v[start_idx][d_raw - 1] += 1.0;
                         }
                         if s_raw > 0 {
-                            mna.n_v[start_idx][s_raw - 1] = -1.0;
+                            mna.n_v[start_idx][s_raw - 1] += -1.0;
                         }
                         // N_v row 1 (Vgs): +1 at G, -1 at S
                         if g_raw > 0 {
-                            mna.n_v[start_idx + 1][g_raw - 1] = 1.0;
+                            mna.n_v[start_idx + 1][g_raw - 1] += 1.0;
                         }
                         if s_raw > 0 {
-                            mna.n_v[start_idx + 1][s_raw - 1] = -1.0;
+                            mna.n_v[start_idx + 1][s_raw - 1] += -1.0;
                         }
 
                         // N_i col 0 (Id): -1 at D (extracted), +1 at S (injected)
                         if d_raw > 0 {
-                            mna.n_i[d_raw - 1][start_idx] = -1.0;
+                            mna.n_i[d_raw - 1][start_idx] += -1.0;
                         }
                         if s_raw > 0 {
-                            mna.n_i[s_raw - 1][start_idx] = 1.0;
+                            mna.n_i[s_raw - 1][start_idx] += 1.0;
                         }
                         // N_i col 1 (Ig): -1 at G (extracted), +1 at S (injected)
                         if g_raw > 0 {
-                            mna.n_i[g_raw - 1][start_idx + 1] = -1.0;
+                            mna.n_i[g_raw - 1][start_idx + 1] += -1.0;
                         }
                         if s_raw > 0 {
-                            mna.n_i[s_raw - 1][start_idx + 1] = 1.0;
+                            mna.n_i[s_raw - 1][start_idx + 1] += 1.0;
                         }
                     }
                 }
@@ -4121,34 +4307,36 @@ impl MnaBuilder {
                         let g_raw = node_indices[1];
                         let s_raw = node_indices[2];
 
+                        // Accumulate (`+=`) so tied terminals (e.g. G-S tie)
+                        // cancel — see `stamp_nonlinear_2terminal`.
                         // N_v row 0 (Vds): +1 at D, -1 at S
                         if d_raw > 0 {
-                            mna.n_v[start_idx][d_raw - 1] = 1.0;
+                            mna.n_v[start_idx][d_raw - 1] += 1.0;
                         }
                         if s_raw > 0 {
-                            mna.n_v[start_idx][s_raw - 1] = -1.0;
+                            mna.n_v[start_idx][s_raw - 1] += -1.0;
                         }
                         // N_v row 1 (Vgs): +1 at G, -1 at S
                         if g_raw > 0 {
-                            mna.n_v[start_idx + 1][g_raw - 1] = 1.0;
+                            mna.n_v[start_idx + 1][g_raw - 1] += 1.0;
                         }
                         if s_raw > 0 {
-                            mna.n_v[start_idx + 1][s_raw - 1] = -1.0;
+                            mna.n_v[start_idx + 1][s_raw - 1] += -1.0;
                         }
 
                         // N_i col 0 (Id): -1 at D (extracted), +1 at S (injected)
                         if d_raw > 0 {
-                            mna.n_i[d_raw - 1][start_idx] = -1.0;
+                            mna.n_i[d_raw - 1][start_idx] += -1.0;
                         }
                         if s_raw > 0 {
-                            mna.n_i[s_raw - 1][start_idx] = 1.0;
+                            mna.n_i[s_raw - 1][start_idx] += 1.0;
                         }
                         // N_i col 1 (Ig): effectively zero (insulated gate), but stamp for framework
                         if g_raw > 0 {
-                            mna.n_i[g_raw - 1][start_idx + 1] = -1.0;
+                            mna.n_i[g_raw - 1][start_idx + 1] += -1.0;
                         }
                         if s_raw > 0 {
-                            mna.n_i[s_raw - 1][start_idx + 1] = 1.0;
+                            mna.n_i[s_raw - 1][start_idx + 1] += 1.0;
                         }
                     }
                 }
@@ -4170,34 +4358,36 @@ impl MnaBuilder {
                         let k_raw = node_indices[2];
                         let s_raw = node_indices[3]; // screen (g2)
 
+                        // Accumulate (`+=`) so tied terminals cancel —
+                        // see `stamp_nonlinear_2terminal`.
                         // N_v row 0 (Vgk): +1 at grid, -1 at cathode
                         if g_raw > 0 {
-                            mna.n_v[start_idx][g_raw - 1] = 1.0;
+                            mna.n_v[start_idx][g_raw - 1] += 1.0;
                         }
                         if k_raw > 0 {
-                            mna.n_v[start_idx][k_raw - 1] = -1.0;
+                            mna.n_v[start_idx][k_raw - 1] += -1.0;
                         }
                         // N_v row 1 (Vpk): +1 at plate, -1 at cathode
                         if p_raw > 0 {
-                            mna.n_v[start_idx + 1][p_raw - 1] = 1.0;
+                            mna.n_v[start_idx + 1][p_raw - 1] += 1.0;
                         }
                         if k_raw > 0 {
-                            mna.n_v[start_idx + 1][k_raw - 1] = -1.0;
+                            mna.n_v[start_idx + 1][k_raw - 1] += -1.0;
                         }
 
                         // N_i col 0 (Ip): -1 at plate, +1 at cathode
                         if p_raw > 0 {
-                            mna.n_i[p_raw - 1][start_idx] = -1.0;
+                            mna.n_i[p_raw - 1][start_idx] += -1.0;
                         }
                         if k_raw > 0 {
-                            mna.n_i[k_raw - 1][start_idx] = 1.0;
+                            mna.n_i[k_raw - 1][start_idx] += 1.0;
                         }
                         // N_i col 1 (Ig2): -1 at screen, +1 at cathode
                         if s_raw > 0 {
-                            mna.n_i[s_raw - 1][start_idx + 1] = -1.0;
+                            mna.n_i[s_raw - 1][start_idx + 1] += -1.0;
                         }
                         if k_raw > 0 {
-                            mna.n_i[k_raw - 1][start_idx + 1] = 1.0;
+                            mna.n_i[k_raw - 1][start_idx + 1] += 1.0;
                         }
                     } else if dim == 3 {
                         // Pentode 3D layout (rows / columns must agree so the
@@ -4224,48 +4414,50 @@ impl MnaBuilder {
                             let k_raw = node_indices[2];
                             let s_raw = node_indices[3]; // screen (g2)
 
+                            // Accumulate (`+=`) so tied terminals cancel —
+                            // see `stamp_nonlinear_2terminal`.
                             // N_v row 0 (Vgk): +1 at grid, -1 at cathode
                             if g_raw > 0 {
-                                mna.n_v[start_idx][g_raw - 1] = 1.0;
+                                mna.n_v[start_idx][g_raw - 1] += 1.0;
                             }
                             if k_raw > 0 {
-                                mna.n_v[start_idx][k_raw - 1] = -1.0;
+                                mna.n_v[start_idx][k_raw - 1] += -1.0;
                             }
                             // N_v row 1 (Vpk): +1 at plate, -1 at cathode
                             if p_raw > 0 {
-                                mna.n_v[start_idx + 1][p_raw - 1] = 1.0;
+                                mna.n_v[start_idx + 1][p_raw - 1] += 1.0;
                             }
                             if k_raw > 0 {
-                                mna.n_v[start_idx + 1][k_raw - 1] = -1.0;
+                                mna.n_v[start_idx + 1][k_raw - 1] += -1.0;
                             }
                             // N_v row 2 (Vg2k): +1 at screen, -1 at cathode
                             if s_raw > 0 {
-                                mna.n_v[start_idx + 2][s_raw - 1] = 1.0;
+                                mna.n_v[start_idx + 2][s_raw - 1] += 1.0;
                             }
                             if k_raw > 0 {
-                                mna.n_v[start_idx + 2][k_raw - 1] = -1.0;
+                                mna.n_v[start_idx + 2][k_raw - 1] += -1.0;
                             }
 
                             // N_i col 0 (Ip): -1 at plate (extracted), +1 at cathode (injected)
                             if p_raw > 0 {
-                                mna.n_i[p_raw - 1][start_idx] = -1.0;
+                                mna.n_i[p_raw - 1][start_idx] += -1.0;
                             }
                             if k_raw > 0 {
-                                mna.n_i[k_raw - 1][start_idx] = 1.0;
+                                mna.n_i[k_raw - 1][start_idx] += 1.0;
                             }
                             // N_i col 1 (Ig2): -1 at screen, +1 at cathode
                             if s_raw > 0 {
-                                mna.n_i[s_raw - 1][start_idx + 1] = -1.0;
+                                mna.n_i[s_raw - 1][start_idx + 1] += -1.0;
                             }
                             if k_raw > 0 {
-                                mna.n_i[k_raw - 1][start_idx + 1] = 1.0;
+                                mna.n_i[k_raw - 1][start_idx + 1] += 1.0;
                             }
                             // N_i col 2 (Ig1): -1 at grid, +1 at cathode
                             if g_raw > 0 {
-                                mna.n_i[g_raw - 1][start_idx + 2] = -1.0;
+                                mna.n_i[g_raw - 1][start_idx + 2] += -1.0;
                             }
                             if k_raw > 0 {
-                                mna.n_i[k_raw - 1][start_idx + 2] = 1.0;
+                                mna.n_i[k_raw - 1][start_idx + 2] += 1.0;
                             }
                         }
                     } else if node_indices.len() >= 3 {
@@ -4278,34 +4470,36 @@ impl MnaBuilder {
                         if g_raw > 0 && p_raw > 0 && k_raw > 0 {
                             mna.stamp_triode(start_idx, g_raw - 1, p_raw - 1, k_raw - 1);
                         } else {
-                            // Per-terminal ground handling
+                            // Per-terminal ground handling.
+                            // Accumulate (`+=`) so tied non-ground terminals
+                            // cancel — see `stamp_nonlinear_2terminal`.
                             // N_v row 0 (Vgk): +1 at grid, -1 at cathode
                             if g_raw > 0 {
-                                mna.n_v[start_idx][g_raw - 1] = 1.0;
+                                mna.n_v[start_idx][g_raw - 1] += 1.0;
                             }
                             if k_raw > 0 {
-                                mna.n_v[start_idx][k_raw - 1] = -1.0;
+                                mna.n_v[start_idx][k_raw - 1] += -1.0;
                             }
                             // N_v row 1 (Vpk): +1 at plate, -1 at cathode
                             if p_raw > 0 {
-                                mna.n_v[start_idx + 1][p_raw - 1] = 1.0;
+                                mna.n_v[start_idx + 1][p_raw - 1] += 1.0;
                             }
                             if k_raw > 0 {
-                                mna.n_v[start_idx + 1][k_raw - 1] = -1.0;
+                                mna.n_v[start_idx + 1][k_raw - 1] += -1.0;
                             }
                             // N_i col 0 (Ip): -1 at plate, +1 at cathode
                             if p_raw > 0 {
-                                mna.n_i[p_raw - 1][start_idx] = -1.0;
+                                mna.n_i[p_raw - 1][start_idx] += -1.0;
                             }
                             if k_raw > 0 {
-                                mna.n_i[k_raw - 1][start_idx] = 1.0;
+                                mna.n_i[k_raw - 1][start_idx] += 1.0;
                             }
                             // N_i col 1 (Ig): -1 at grid, +1 at cathode
                             if g_raw > 0 {
-                                mna.n_i[g_raw - 1][start_idx + 1] = -1.0;
+                                mna.n_i[g_raw - 1][start_idx + 1] += -1.0;
                             }
                             if k_raw > 0 {
-                                mna.n_i[k_raw - 1][start_idx + 1] = 1.0;
+                                mna.n_i[k_raw - 1][start_idx + 1] += 1.0;
                             }
                         }
                     }
@@ -4333,14 +4527,17 @@ impl MnaBuilder {
                             //
                             // Uses an internal node (sig+_int) to break the path between
                             // sig+ and sig-. The 0V sensing source between sig+ and
-                            // sig+_int measures I_in. A dummy 1MEG resistor terminates
-                            // sig+_int to ground (the VCA absorbs the input current).
+                            // sig+_int measures I_in. A dummy 1 Ω resistor (g_dummy = 1.0,
+                            // stamped during augmented-row allocation above) terminates
+                            // sig+_int to ground, holding sig+ at virtual ground — see
+                            // the Rdummy divider-error discussion at the allocation site
+                            // (the original 1 MΩ caused ~32 dB passband loss).
                             // N_i injects G*I_in at sig- independently — no linear
                             // pass-through from sig+ to sig-.
                             //
                             // This matches ngspice's CCCS topology:
                             //   Vsense sig+ sig+_int 0
-                            //   Rdummy sig+_int 0 1MEG
+                            //   Rdummy sig+_int 0 1
                             //   Bvca 0 sig- I={G*I(Vsense)}
                             let k = mna.vcas[vca_idx].n_sense_idx;
                             let int = mna.vcas[vca_idx].n_internal_idx;
@@ -4359,38 +4556,40 @@ impl MnaBuilder {
                                 // (Rdummy at sig+_int already stamped during allocation)
 
                                 // N_v row 0: extract branch current (sense variable)
-                                mna.n_v[start_idx][k0] = 1.0;
+                                mna.n_v[start_idx][k0] += 1.0;
 
                                 // N_i col 0: inject I_out = G*I_in at sig- ONLY
                                 // No injection at sig+ — decoupled input/output
                                 if sn_raw > 0 {
-                                    mna.n_i[sn_raw - 1][start_idx] = 1.0;
+                                    mna.n_i[sn_raw - 1][start_idx] += 1.0;
                                 }
                             }
                         } else {
                             // VOLTAGE MODE (original): I_out = G(Vc) * V_sig
+                            // Accumulate (`+=`) so tied terminals cancel —
+                            // see `stamp_nonlinear_2terminal`.
                             // N_v row 0 (V_signal): +1 at sig+, -1 at sig-
                             if sp_raw > 0 {
-                                mna.n_v[start_idx][sp_raw - 1] = 1.0;
+                                mna.n_v[start_idx][sp_raw - 1] += 1.0;
                             }
                             if sn_raw > 0 {
-                                mna.n_v[start_idx][sn_raw - 1] = -1.0;
+                                mna.n_v[start_idx][sn_raw - 1] += -1.0;
                             }
                             // N_i col 0 (I_signal): -1 at sig+ (extracted), +1 at sig- (injected)
                             if sp_raw > 0 {
-                                mna.n_i[sp_raw - 1][start_idx] = -1.0;
+                                mna.n_i[sp_raw - 1][start_idx] += -1.0;
                             }
                             if sn_raw > 0 {
-                                mna.n_i[sn_raw - 1][start_idx] = 1.0;
+                                mna.n_i[sn_raw - 1][start_idx] += 1.0;
                             }
                         }
 
                         // N_v row 1 (V_control): +1 at ctrl+, -1 at ctrl- (same for both modes)
                         if cp_raw > 0 {
-                            mna.n_v[start_idx + 1][cp_raw - 1] = 1.0;
+                            mna.n_v[start_idx + 1][cp_raw - 1] += 1.0;
                         }
                         if cn_raw > 0 {
-                            mna.n_v[start_idx + 1][cn_raw - 1] = -1.0;
+                            mna.n_v[start_idx + 1][cn_raw - 1] += -1.0;
                         }
                         // N_i col 1 (I_control): NO stamping — control draws no current
                     }
@@ -5254,11 +5453,13 @@ U1 0 inv out opamp
         let o = out_idx - 1;
         let i = inv_idx - 1;
 
-        // G[out, inv] should have -Gm - g_R2
+        // inv is the INVERTING input (V−). Correct polarity: the op-amp
+        // injects +Gm·(V+ − V−) into out, so current leaving out gets
+        // +Gm·V_inv → G[out,inv] = +Gm. R2 (inv↔out) adds −g_R2.
         let g_r2 = 1.0 / 100_000.0;
         assert!(
-            (mna.g[o][i] - (-200_000.0 - g_r2)).abs() < 1e-6,
-            "G[out,inv] should be -Gm - g_R2, got {}",
+            (mna.g[o][i] - (200_000.0 - g_r2)).abs() < 1e-6,
+            "G[out,inv] should be +Gm - g_R2, got {}",
             mna.g[o][i]
         );
 
@@ -5310,7 +5511,11 @@ D1 out 0 D1N4148
 
     #[test]
     fn test_mna_vccs_basic() {
-        // G1 out 0 in 0 0.01 — current gm*(V_in - 0) flows into out
+        // G1 out 0 in 0 0.01 — SPICE G-element convention: the source DRAWS
+        // gm*(V_in - 0) OUT of node `out` (and injects it into ground), hence
+        // the +gm stamp at G[out][in] (G·v = current leaving the node).
+        // This is the OPPOSITE of the op-amp VCCS orientation — do not
+        // "harmonize" the two.
         let spice = r#"VCCS Test
 R1 in 0 1k
 R2 out 0 1k
@@ -6661,6 +6866,8 @@ Y1 sp sn cp cn vca1
             gp,
             ip_dc: 1.2e-3,
             ig_dc: 0.0,
+            vgk0: -1.5,
+            vpk0: 150.0,
         }];
         mna.stamp_linearized_triodes();
 
@@ -6730,6 +6937,10 @@ Y1 sp sn cp cn vca1
         let cs_count_before = mna.current_sources.len();
         let ip_dc = 1.2e-3;
         let ig_dc = 0.0; // no grid current (valid linearization)
+        let gm = 1.5e-3;
+        let gp = 6.25e-5;
+        let vgk0 = -1.5;
+        let vpk0 = 150.0;
 
         let g = *mna.node_map.get("grid").unwrap();
         let p = *mna.node_map.get("plate").unwrap();
@@ -6740,10 +6951,12 @@ Y1 sp sn cp cn vca1
             ng: g,
             np: p,
             nk: k,
-            gm: 1.5e-3,
-            gp: 6.25e-5,
+            gm,
+            gp,
             ip_dc,
             ig_dc,
+            vgk0,
+            vpk0,
         }];
         mna.stamp_linearized_triodes();
 
@@ -6754,18 +6967,27 @@ Y1 sp sn cp cn vca1
             "should add Ip_dc + Ik_dc (Ig_dc skipped when ~0)"
         );
 
-        // Ip_dc: ground→plate
+        // Norton companion constants: injection INTO node = I_lin(v0) - I_dc.
+        // I_lin at plate = gm*Vgk0 + gp*Vpk0 (the linear-model current drawn
+        // out of the plate node by the gm/gp stamps at the OP).
+        let i_lin_p = gm * vgk0 + gp * vpk0;
+
+        // Ip_dc: injection at the plate node = i_lin_p - ip_dc
         let ip_src = mna
             .current_sources
             .iter()
             .find(|cs| cs.name.contains("Ip_dc"));
         assert!(ip_src.is_some(), "should have Ip_dc current source");
         let ip_src = ip_src.unwrap();
-        assert_eq!(ip_src.n_plus_idx, 0);
-        assert_eq!(ip_src.n_minus_idx, p);
-        assert!((ip_src.dc_value - ip_dc).abs() < 1e-15);
+        assert_eq!(ip_src.n_plus_idx, p);
+        assert_eq!(ip_src.n_minus_idx, 0);
+        assert!(
+            (ip_src.dc_value - (i_lin_p - ip_dc)).abs() < 1e-15,
+            "plate Norton constant should be I_lin(v0) - Ip_dc, got {}",
+            ip_src.dc_value
+        );
 
-        // Ik_dc: cathode→ground (Ip + Ig)
+        // Ik_dc: injection at the cathode node = -I_lin(v0) + Ip + Ig
         let ik_src = mna
             .current_sources
             .iter()
@@ -6774,7 +6996,11 @@ Y1 sp sn cp cn vca1
         let ik_src = ik_src.unwrap();
         assert_eq!(ik_src.n_plus_idx, k);
         assert_eq!(ik_src.n_minus_idx, 0);
-        assert!((ik_src.dc_value - ip_dc).abs() < 1e-15);
+        assert!(
+            (ik_src.dc_value - (-i_lin_p + ip_dc + ig_dc)).abs() < 1e-15,
+            "cathode Norton constant should be -I_lin(v0) + Ip + Ig, got {}",
+            ik_src.dc_value
+        );
     }
 
     #[test]

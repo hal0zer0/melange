@@ -71,15 +71,27 @@ impl DiodeShockley {
     ///
     /// Uses linear extension beyond the exponential clamp boundaries so that
     /// the derivative of `current_at` matches `conductance_at` everywhere.
+    ///
+    /// Above `MAX_EXP_V·n_vt` the true exponential continues in ln-current
+    /// space (`is·e^x = e^(x + ln is)`, immune to exp overflow) until the
+    /// forward current reaches `MAX_DIODE_FWD_I`, then extends linearly.
+    /// Without this, extreme-IS models (wide-bandgap junctions, IS=1e-30,
+    /// Vf ≈ 3 V) have their conduction knee above the fixed clamp and the
+    /// device is electrically absent at any voltage.
     pub fn current_at(&self, v: f64) -> f64 {
         let v_over_nvt = v / self.n_vt;
         if v_over_nvt > safeguards::MAX_EXP_V {
-            // Linear extension: I(v_clamp) + G(v_clamp) * (v - v_clamp)
-            let v_clamp = safeguards::MAX_EXP_V * self.n_vt;
-            let exp_clamp = safeguards::MAX_EXP_V.exp();
-            let i_clamp = self.is * (exp_clamp - 1.0);
-            let g_clamp = (self.is / self.n_vt) * exp_clamp;
-            i_clamp + g_clamp * (v - v_clamp)
+            // Extended exponential region, evaluated as ln of forward current
+            let ln_is = self.is.ln();
+            let y = v_over_nvt + ln_is;
+            let y_max = (safeguards::MAX_EXP_V + ln_is).max(safeguards::MAX_DIODE_FWD_I.ln());
+            if y <= y_max {
+                y.exp() - self.is
+            } else {
+                // Linear extension: I(y_max) + G(y_max) * (v - v(y_max))
+                let i_c = y_max.exp();
+                (i_c - self.is) + i_c * (y - y_max)
+            }
         } else if v_over_nvt < safeguards::MIN_EXP_V {
             // Linear extension for large reverse bias
             let v_clamp = safeguards::MIN_EXP_V * self.n_vt;
@@ -93,7 +105,15 @@ impl DiodeShockley {
     }
 
     /// Calculate conductance (di/dv) for a given voltage.
+    /// Matches the derivative of `current_at` in all regions.
     pub fn conductance_at(&self, v: f64) -> f64 {
+        let v_over_nvt = v / self.n_vt;
+        if v_over_nvt > safeguards::MAX_EXP_V {
+            let ln_is = self.is.ln();
+            let y_max = (safeguards::MAX_EXP_V + ln_is).max(safeguards::MAX_DIODE_FWD_I.ln());
+            let y = (v_over_nvt + ln_is).min(y_max);
+            return y.exp() / self.n_vt;
+        }
         let v_limited = safeguards::limit_exp_v(v, self.n_vt);
         // di/dv = (Is / (n*Vt)) * exp(V / (n*Vt))
         (self.is / self.n_vt) * (v_limited / self.n_vt).exp()
@@ -131,8 +151,8 @@ impl DiodeWithRs {
     /// Current-voltage relationship.
     ///
     /// Solves V_j + Id(V_j)*Rs = V for the junction voltage V_j using
-    /// Newton-Raphson with SPICE-style voltage limiting (steps clamped to
-    /// 4*n*Vt per iteration). Then I = Id(V_j).
+    /// Newton-Raphson with SPICE-style voltage limiting (pnjlim, seeded at
+    /// vcrit). Then I = Id(V_j).
     ///
     /// The previous single fixed-point iteration had O((g_d*Rs)^2) error —
     /// unusable for forward-biased diodes with Rs > 10 ohm.
@@ -159,23 +179,22 @@ impl DiodeWithRs {
 
     /// Solve for junction voltage: V_j + Id(V_j)*Rs = V.
     ///
-    /// NR with step limiting (4*n*Vt per iteration) for robust convergence
-    /// even with stiff exponentials and large Rs.
+    /// Scalar NR seeded at vcrit with pnjlim log-compressed steps. A flat
+    /// 4·n·Vt step clamp from a 0.7 V seed cannot reach wide-bandgap
+    /// conduction knees (Vf ≈ 3 V) within any reasonable iteration budget.
     fn solve_junction_voltage(&self, v: f64) -> f64 {
         let n_vt = self.diode.n * self.diode.vt;
-        let max_step = 4.0 * n_vt;
-        // Initial guess: clamp to a reasonable forward voltage
-        let mut v_j = if v > 0.0 { v.min(0.7) } else { v };
-        for _ in 0..15 {
+        let vcrit = melange_primitives::pn_vcrit(n_vt, self.diode.is);
+        let mut v_j = if v > 0.0 { v.min(vcrit) } else { v };
+        for _ in 0..32 {
             let id = self.diode.current_at(v_j);
             let gd = self.diode.conductance_at(v_j);
             // f(V_j) = V_j + Id(V_j)*Rs - V
             let f = v_j + id * self.rs - v;
             let fp = 1.0 + gd * self.rs;
-            let mut delta = f / fp;
-            // Clamp step to prevent overshoot in stiff exponential region
-            delta = delta.clamp(-max_step, max_step);
-            v_j -= delta;
+            let v_new = melange_primitives::pnjlim(v_j - f / fp, v_j, n_vt, vcrit);
+            let delta = v_new - v_j;
+            v_j = v_new;
             if delta.abs() < 1e-10 {
                 break;
             }
@@ -579,6 +598,83 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Wide-bandgap (extreme-IS) diode must conduct above the legacy clamp.
+    ///
+    /// SiC-class card IS=1e-30 N=2.0 has its conduction knee at
+    /// x = v/n_vt ≈ 62–69, above the legacy 40·n_vt exp clamp. Before the
+    /// extended exponential region, max representable current was
+    /// is·e^40 ≈ 2.4e-13 A — the device was electrically absent at any
+    /// voltage, and op-amp feedback clippers using it ran open-loop.
+    #[test]
+    fn test_wide_bandgap_diode_conducts_above_legacy_clamp() {
+        let diode = DiodeShockley::new_room_temp(1e-30, 2.0);
+        let n_vt = 2.0 * VT_ROOM;
+
+        // Analytic Shockley at Vf = 3.2 V (≈ 0.76 mA)
+        let expected = 1e-30 * ((3.2 / n_vt).exp() - 1.0);
+        let got = diode.current_at(3.2);
+        let rel_err = (got - expected).abs() / expected;
+        assert!(
+            rel_err < 1e-9,
+            "extended region must be exact Shockley: got={:.6e} expected={:.6e}",
+            got,
+            expected
+        );
+        assert!(
+            got > 1e-4 && got < 1e-2,
+            "SiC diode at 3.2V should be mA-scale, got {:.3e} A",
+            got
+        );
+    }
+
+    /// conductance_at must equal d(current_at)/dv across the legacy boundary,
+    /// the extended exponential region, and the linear extension.
+    #[test]
+    fn test_extended_region_derivative_consistency() {
+        for (is, n) in [(1e-30, 2.0), (1e-24, 2.0), (2.68e-14, 1.07)] {
+            let diode = DiodeShockley::new_room_temp(is, n);
+            let h = 1e-7;
+            for &v in &[1.0, 1.2, 2.0, 2.5, 3.0, 3.2, 3.6, 4.2, 6.0] {
+                let fd = (diode.current_at(v + h) - diode.current_at(v - h)) / (2.0 * h);
+                let g = diode.conductance_at(v);
+                let rel_err = (fd - g).abs() / g.abs().max(1e-12);
+                assert!(
+                    rel_err < 1e-3,
+                    "g/dI mismatch at v={} (is={:.0e}, n={}): g={:.6e} fd={:.6e}",
+                    v,
+                    is,
+                    n,
+                    g,
+                    fd
+                );
+            }
+        }
+    }
+
+    /// Op-amp clipper repro: 78 V across IS=1e-30 N=2 RS=4 must draw the
+    /// current the series resistance allows (≈18.6 A), not picoamps. The old
+    /// junction solve (0.7 V seed, 8 iters, flat 4·n_vt steps) couldn't reach
+    /// a 3.7 V junction voltage.
+    #[test]
+    fn test_wide_bandgap_diode_with_rs_hard_drive() {
+        let dwrs = DiodeWithRs::new(DiodeShockley::new_room_temp(1e-30, 2.0), 4.0);
+        let i = dwrs.current_at(78.0);
+        assert!(
+            i > 17.0 && i < 20.0,
+            "expected ~18.6 A through RS=4 at 78 V, got {:.3e} A",
+            i
+        );
+        // Self-consistency: I must equal Id(V - I·RS)
+        let i_check = dwrs.diode.current_at(78.0 - i * 4.0);
+        let rel_err = (i - i_check).abs() / i;
+        assert!(
+            rel_err < 1e-2,
+            "junction solve inconsistent: I={:.4} Id(V-I*RS)={:.4}",
+            i,
+            i_check
+        );
     }
 
     /// Verify exponential I-V ratio is approximately constant (Shockley equation).

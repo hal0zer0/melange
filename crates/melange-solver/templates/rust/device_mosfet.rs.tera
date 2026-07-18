@@ -2,6 +2,18 @@
 // Duplicated here because generated code must be self-contained.
 // 2D Level 1 SPICE model: triode + saturation regions, with channel-length modulation.
 // Dimension 0: Id (drain current), Dimension 1: Ig (gate current = 0, insulated gate).
+//
+// VTO is kept signed through the effective-space math: vov = vgs_eff - sign*vt
+// handles enhancement AND depletion devices for both polarities (depletion NMOS
+// has VTO < 0 and conducts at Vgs = 0; standard PMOS has VTO < 0 with sign = -1).
+//
+// SPICE-style mode handling: for vds_eff >= 0 (normal mode) the source-referenced
+// overdrive governs. For vds_eff < 0 (reverse mode) the drain acts as the source,
+// so the drain-referenced overdrive Vgd - VTO governs: the normal-mode equations
+// are evaluated at (vgd, -vds) and the result is negated. The triode expression
+// is exactly symmetric under this swap, so value and all Jacobian entries are
+// continuous across Vds = 0. Channel-length modulation uses the mode-consistent
+// |Vds| (SPICE behavior).
 
 /// MOSFET drain current (Level 1 SPICE, 2D model).
 /// sign: +1.0 for N-channel, -1.0 for P-channel
@@ -10,19 +22,33 @@
 fn mosfet_id(vgs: f64, vds: f64, kp: f64, vt: f64, lambda: f64, sign: f64) -> f64 {
     let vgs_eff = sign * vgs;
     let vds_eff = sign * vds;
-    let vt_abs = vt.abs();
-    let vov = vgs_eff - vt_abs; // Overdrive voltage
-    if vov <= 0.0 {
-        // Subthreshold: weak exponential for smooth NR convergence
-        return sign * 1e-12 * fast_exp(vov / (2.0 * 0.025851991)).min(1.0);
-    }
-    if vds_eff < vov {
-        // Triode region: Id = kp * ((Vgs-Vt)*Vds - 0.5*Vds^2) * (1 + lambda*Vds)
-        let id = kp * (vov * vds_eff - 0.5 * vds_eff * vds_eff);
-        sign * id * (1.0 + lambda * vds_eff)
+    // Signed threshold in effective (N-channel) space.
+    let vt_eff = sign * vt;
+    // Mode selection: vc = controlling gate reference, vd = |vds_eff|,
+    // m = polarity of the drain current.
+    let (vc, vd, m) = if vds_eff >= 0.0 {
+        (vgs_eff, vds_eff, 1.0)
     } else {
-        // Saturation region: Id = 0.5 * kp * Vov^2 * (1 + lambda*Vds)
-        sign * 0.5 * kp * vov * vov * (1.0 + lambda * vds_eff)
+        // Reverse mode: drain acts as source. vgd_eff = vgs_eff - vds_eff.
+        (vgs_eff - vds_eff, -vds_eff, -1.0)
+    };
+    let vov = vc - vt_eff; // Overdrive voltage
+    if vov <= 0.0 {
+        // Subthreshold: weak exponential for smooth NR convergence.
+        // Gated by tanh(vd/2VT) so the leakage is continuous (and zero)
+        // at Vds = 0 where the mode polarity m flips sign.
+        let sub = 1e-12 * fast_exp(vov / (2.0 * 0.025851991)).min(1.0);
+        return sign * m * sub * (vd / (2.0 * 0.025851991)).tanh();
+    }
+    // Channel-length modulation uses the mode-consistent |Vds|.
+    let clm = 1.0 + lambda * vd;
+    if vd < vov {
+        // Triode region: Id = kp * ((Vgs-Vt)*Vds - 0.5*Vds^2) * (1 + lambda*|Vds|)
+        let id = kp * (vov * vd - 0.5 * vd * vd);
+        sign * m * id * clm
+    } else {
+        // Saturation region: Id = 0.5 * kp * Vov^2 * (1 + lambda*|Vds|)
+        sign * m * 0.5 * kp * vov * vov * clm
     }
 }
 
@@ -37,28 +63,50 @@ fn mosfet_ig(_vgs: f64, _sign: f64) -> f64 {
 fn mosfet_jacobian(vgs: f64, vds: f64, kp: f64, vt: f64, lambda: f64, sign: f64) -> [f64; 4] {
     let vgs_eff = sign * vgs;
     let vds_eff = sign * vds;
-    let vt_abs = vt.abs();
-    let vov = vgs_eff - vt_abs;
-    if vov <= 0.0 {
-        // Subthreshold: derivative of weak exponential
-        let sub = 1e-12 * fast_exp(vov / (2.0 * 0.025851991)).min(1.0);
-        let gm = sub / (2.0 * 0.025851991);
-        return [gm, 0.0, 0.0, 0.0];
-    }
-
-    let (d_id_d_vgs, d_id_d_vds) = if vds_eff < vov {
-        // Triode region
-        let clm = 1.0 + lambda * vds_eff;
-        let gm = kp * vds_eff * clm;
-        let gds_base = kp * (vov - vds_eff);
-        let id_full = kp * (vov * vds_eff - 0.5 * vds_eff * vds_eff);
-        (gm, gds_base * clm + id_full * lambda)
+    let vt_eff = sign * vt;
+    // Mode selection — must mirror mosfet_id exactly.
+    // Id = sign * m * f(vc, vd), with:
+    //   normal  (m=+1): vc = vgs_eff,           vd = vds_eff
+    //   reverse (m=-1): vc = vgs_eff - vds_eff, vd = -vds_eff
+    // Chain rule to external (vgs, vds), with sign^2 = 1:
+    //   normal:  dId/dVgs = f_c            dId/dVds = f_d
+    //   reverse: dId/dVgs = -f_c           dId/dVds = f_c + f_d
+    let (vc, vd, m) = if vds_eff >= 0.0 {
+        (vgs_eff, vds_eff, 1.0)
     } else {
-        // Saturation region
-        let clm = 1.0 + lambda * vds_eff;
-        let gm = kp * vov * clm;
-        let gds = 0.5 * kp * vov * vov * lambda;
-        (gm, gds)
+        (vgs_eff - vds_eff, -vds_eff, -1.0)
+    };
+    let vov = vc - vt_eff;
+
+    // (f_c, f_d) = (df/dvc, df/dvd)
+    let (f_c, f_d) = if vov <= 0.0 {
+        // Subthreshold: derivative of tanh-gated weak exponential
+        let sub = 1e-12 * fast_exp(vov / (2.0 * 0.025851991)).min(1.0);
+        let t = (vd / (2.0 * 0.025851991)).tanh();
+        (
+            sub * t / (2.0 * 0.025851991),
+            sub * (1.0 - t * t) / (2.0 * 0.025851991),
+        )
+    } else {
+        let clm = 1.0 + lambda * vd;
+        if vd < vov {
+            // Triode region
+            let f_c = kp * vd * clm;
+            let id_base = kp * (vov - vd);
+            let id_full = kp * (vov * vd - 0.5 * vd * vd);
+            (f_c, id_base * clm + id_full * lambda)
+        } else {
+            // Saturation region
+            let f_c = kp * vov * clm;
+            let f_d = 0.5 * kp * vov * vov * lambda;
+            (f_c, f_d)
+        }
+    };
+
+    let (d_id_d_vgs, d_id_d_vds) = if m >= 0.0 {
+        (f_c, f_d)
+    } else {
+        (-f_c, f_c + f_d)
     };
 
     // Gate current derivatives are zero (insulated gate)
@@ -79,4 +127,3 @@ fn mosfet_jacobian_with_rd_rs(vgs: f64, vds: f64, kp: f64, vt: f64, lambda: f64,
     if denom.abs() < 1e-30 { return jac; }
     [gm / denom, gds / denom, 0.0, 0.0]
 }
-

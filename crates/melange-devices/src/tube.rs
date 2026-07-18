@@ -130,9 +130,13 @@ impl KorenTriode {
 
     /// 12AX7 (ECC83) - high-mu twin triode, common in guitar amps.
     ///
-    /// Uses original Koren 1996 parameters (Kg1=1060). Overestimates plate current
-    /// vs datasheet (~3.4mA vs ~1.2mA at Vgk=0, Vpk=250V). For datasheet-accurate
-    /// plate current, use [`ecc83_fitted`](Self::ecc83_fitted).
+    /// Uses Norman Koren's published 1996 card (mu=100, ex=1.4, Kg1=1060,
+    /// Kp=600, Kvb=300) with the full `Ip = 2·E1^EX/Kg1` equation. At the
+    /// RCA typical-operation point (Vgk=-2V, Vpk=250V) the model gives
+    /// ~0.95mA vs the datasheet 1.2mA, and gm ~1.67mA/V vs 1.6mA/V.
+    /// [`ecc83_fitted`](Self::ecc83_fitted) loads the same card (the
+    /// historical Kg1=3000 "fit" compensated for a missing ×2 against a
+    /// misread datasheet point and was removed).
     pub fn ecc83() -> Self {
         let c = crate::catalog::tubes::lookup("12AX7").expect("12AX7 catalog entry");
         Self::with_all_params(
@@ -147,11 +151,15 @@ impl KorenTriode {
         )
     }
 
-    /// 12AX7 (ECC83) fitted to RCA datasheet - high-mu twin triode.
+    /// 12AX7 (ECC83) "fitted" alias - high-mu twin triode.
     ///
-    /// Kg1 re-fit from 1060 to 3000 to match RCA 12AX7 datasheet:
-    /// ~1.2mA at Vgk=0, Vpk=250V (vs ~3.4mA with original Koren params).
-    /// All other parameters identical to [`ecc83`](Self::ecc83).
+    /// Historically carried Kg1=3000, a re-fit that compensated for the
+    /// missing ×2 in the plate-current equation against a misread datasheet
+    /// point (the RCA 1.2mA typical-operation row is at Vgk=-2V, not Vgk=0).
+    /// With the ×2 restored, Koren's published Kg1=1060 card IS the balanced
+    /// datasheet fit (geometric-mean single-knob Kg1 refit over Ip/gm/rp at
+    /// the -2V/250V row lands at ~1050), so this now loads the same card as
+    /// [`ecc83`](Self::ecc83). Retained for netlists using "12AX7F".
     pub fn ecc83_fitted() -> Self {
         let c = crate::catalog::tubes::lookup("12AX7F").expect("12AX7F catalog entry");
         Self::with_all_params(
@@ -239,7 +247,11 @@ impl KorenTriode {
             return None;
         }
 
-        let ip_koren = e1.powf(ex) / self.kg1;
+        // Koren 1996: Ip = (PWR(E1,EX) + PWRS(E1,EX)) / KG1 = 2·E1^EX / KG1
+        // for E1 > 0 (PWRS is the signed power; both terms are equal here).
+        // The ×2 is part of the published model — Koren's KG1 values are
+        // fitted WITH it (dropping it halves every current and gm).
+        let ip_koren = 2.0 * e1.powf(ex) / self.kg1;
         Some(TriodeSection {
             e1,
             sigmoid,
@@ -257,7 +269,7 @@ impl KorenTriode {
     /// Uses Koren 1996 equation with optional Early-effect multiplier:
     ///   inner = Kp * (1/mu + Vgk / sqrt(Kvb + Vpk^2))
     ///   E1 = (Vpk / Kp) * ln(1 + exp(inner))
-    ///   Ip_koren = E1^ex / Kg1   (if E1 > 0)
+    ///   Ip_koren = 2 * E1^ex / Kg1   (if E1 > 0; Koren's PWR+PWRS form)
     ///   Ip = Ip_koren * (1 + lambda * Vpk)
     ///
     /// When `svar > 0`, the plate current is the Reefman §5 variable-mu blend
@@ -324,7 +336,7 @@ impl KorenTriode {
     /// (`e1 ≤ 1e-10`), in which case the section contributes zero to
     /// both the current and both Jacobian columns.
     ///
-    /// The `ex`-parameter enters both `dip_de1 = ex · E1^(ex−1) / Kg1` and
+    /// The `ex`-parameter enters both `dip_de1 = 2·ex · E1^(ex−1) / Kg1` and
     /// the `E1` / `Ip_koren` values themselves, so it must match the section
     /// being evaluated.
     #[inline]
@@ -343,8 +355,9 @@ impl KorenTriode {
             ip_koren,
         } = sec;
 
-        // dIp_koren/dE1 = ex · E1^(ex − 1) / Kg1
-        let dip_de1 = ex * e1.powf(ex - 1.0) / self.kg1;
+        // dIp_koren/dE1 = 2 · ex · E1^(ex − 1) / Kg1  (×2 from Koren's
+        // PWR + PWRS plate-current form; see koren_section)
+        let dip_de1 = 2.0 * ex * e1.powf(ex - 1.0) / self.kg1;
         // dE1/dVgk = Vpk · σ(inner) / s
         let de1_dvgk = vpk_safe * sigmoid / s;
         // dE1/dVpk = softplus/Kp − σ·Vgk·Vpk² / s³
@@ -366,7 +379,7 @@ impl NonlinearDevice<2> for KorenTriode {
     /// Jacobian: [dIp/dVgk, dIp/dVpk]
     ///
     /// Computed via chain rule through the Koren E1 equation with Early-effect:
-    ///   Ip_koren = E1^ex / Kg1
+    ///   Ip_koren = 2 * E1^ex / Kg1
     ///   Ip = Ip_koren * (1 + lambda * Vpk)
     ///   dIp/dVgk = dIp_koren/dVgk * (1 + lambda * Vpk)
     ///   dIp/dVpk = dIp_koren/dVpk * (1 + lambda * Vpk) + Ip_koren * lambda
@@ -437,7 +450,7 @@ struct TriodeSection {
     softplus: f64,
     /// `s = sqrt(Kvb + Vpk²)`
     s: f64,
-    /// `Ip_koren = E1^ex / Kg1`
+    /// `Ip_koren = 2·E1^ex / Kg1` (Koren PWR + PWRS form)
     ip_koren: f64,
 }
 
@@ -1432,24 +1445,26 @@ mod tests {
     fn test_12ax7_plate_curves() {
         let tube = KorenTriode::ecc83();
 
+        // Koren 1996 published card with the full ×2 equation.
+        // RCA typical operation row: Vgk=-2, Vpk=250 → 1.2mA (model 0.95mA).
         let ip_0 = tube.plate_current(0.0, 250.0);
         assert!(
-            ip_0 > 0.5e-3 && ip_0 < 5.0e-3,
-            "Ip(Vgk=0, Vpk=250) = {:.3}mA, expected 0.5-5.0mA",
+            ip_0 > 4.0e-3 && ip_0 < 9.0e-3,
+            "Ip(Vgk=0, Vpk=250) = {:.3}mA, expected ~6.8mA (extrapolated)",
             ip_0 * 1000.0
         );
 
         let ip_m1 = tube.plate_current(-1.0, 250.0);
         assert!(
-            ip_m1 > 0.1e-3 && ip_m1 < 3.0e-3,
-            "Ip(Vgk=-1, Vpk=250) = {:.3}mA, expected 0.1-3.0mA",
+            ip_m1 > 2.5e-3 && ip_m1 < 4.5e-3,
+            "Ip(Vgk=-1, Vpk=250) = {:.3}mA, expected ~3.4mA",
             ip_m1 * 1000.0
         );
 
         let ip_m2 = tube.plate_current(-2.0, 250.0);
         assert!(
-            ip_m2 > 0.01e-3 && ip_m2 < 1.5e-3,
-            "Ip(Vgk=-2, Vpk=250) = {:.3}mA, expected 0.01-1.5mA",
+            ip_m2 > 0.7e-3 && ip_m2 < 1.3e-3,
+            "Ip(Vgk=-2, Vpk=250) = {:.3}mA, expected ~0.95mA (datasheet 1.2mA)",
             ip_m2 * 1000.0
         );
 
@@ -1465,40 +1480,30 @@ mod tests {
 
     #[test]
     fn test_12ax7_fitted_plate_curves() {
+        // ecc83_fitted() now loads the same Koren 1996 card as ecc83():
+        // with the ×2 restored, Koren's Kg1=1060 IS the balanced datasheet
+        // fit (the old Kg1=3000 compensated for the missing ×2 against a
+        // misread datasheet point — RCA's 1.2mA row is at Vgk=-2, not 0).
         let tube = KorenTriode::ecc83_fitted();
 
-        // Fitted to RCA datasheet: Vgk=0, Vpk=250V → ~1.2mA
-        let ip_0 = tube.plate_current(0.0, 250.0);
-        assert!(
-            ip_0 > 1.0e-3 && ip_0 < 1.4e-3,
-            "Ip(Vgk=0, Vpk=250) = {:.4}mA, expected ~1.2mA",
-            ip_0 * 1000.0
-        );
-
-        // Vgk=-1V: fitted → ~0.59mA (datasheet: ~0.5mA)
-        let ip_m1 = tube.plate_current(-1.0, 250.0);
-        assert!(
-            ip_m1 > 0.3e-3 && ip_m1 < 0.8e-3,
-            "Ip(Vgk=-1, Vpk=250) = {:.4}mA, expected ~0.5-0.6mA",
-            ip_m1 * 1000.0
-        );
-
-        // Vgk=-2V: fitted → ~0.17mA (datasheet: ~0.1mA)
+        // RCA typical-operation row: Vgk=-2, Vpk=250 → 1.2mA (model 0.95mA).
         let ip_m2 = tube.plate_current(-2.0, 250.0);
         assert!(
-            ip_m2 > 0.05e-3 && ip_m2 < 0.3e-3,
-            "Ip(Vgk=-2, Vpk=250) = {:.4}mA, expected ~0.1-0.2mA",
+            ip_m2 > 0.7e-3 && ip_m2 < 1.3e-3,
+            "Ip(Vgk=-2, Vpk=250) = {:.4}mA, expected ~0.95mA (datasheet 1.2mA)",
             ip_m2 * 1000.0
         );
 
         // Monotonicity and cutoff
+        let ip_0 = tube.plate_current(0.0, 250.0);
+        let ip_m1 = tube.plate_current(-1.0, 250.0);
         assert!(ip_0 > ip_m1 && ip_m1 > ip_m2);
         assert!(
             tube.plate_current(-4.0, 250.0) < 0.01e-3,
             "Should be near cutoff at Vgk=-4"
         );
 
-        // Fitted parameters now match default (both use Kg1=3000)
+        // Fitted alias matches the default published card exactly.
         let default = KorenTriode::ecc83();
         assert_eq!(tube.mu, default.mu);
         assert_eq!(tube.ex, default.ex);
@@ -1506,7 +1511,7 @@ mod tests {
         assert_eq!(tube.kvb, default.kvb);
         assert_eq!(
             tube.kg1, default.kg1,
-            "Fitted and default now use same Kg1=3000"
+            "Fitted and default both use Koren's published Kg1=1060"
         );
     }
 

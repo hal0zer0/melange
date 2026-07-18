@@ -2,6 +2,14 @@
 // Duplicated here because generated code must be self-contained.
 // 2D Shichman-Hodges model: triode + saturation regions, with channel-length modulation.
 // Dimension 0: Id (drain current), Dimension 1: Ig (gate leakage current ≈ 0).
+//
+// SPICE-style mode handling: for vds_eff >= 0 (normal mode) the source-referenced
+// overdrive Vgs - Vp governs. For vds_eff < 0 (reverse mode) the drain acts as the
+// source, so the drain-referenced overdrive Vgd - Vp governs: the normal-mode
+// equations are evaluated at (vgd, -vds) and the result is negated. The triode
+// expression is exactly symmetric under this swap, so value and all Jacobian
+// entries are continuous across Vds = 0. Channel-length modulation uses the
+// mode-consistent |Vds| (SPICE behavior).
 
 /// JFET drain current (Shichman-Hodges 2D model).
 /// sign: +1.0 for N-channel, -1.0 for P-channel
@@ -10,21 +18,34 @@ fn jfet_id(vgs: f64, vds: f64, idss: f64, vp: f64, lambda: f64, sign: f64) -> f6
     let vgs_eff = sign * vgs;
     let vds_eff = sign * vds;
     let vp_eff = sign * vp; // Always negative after sign application
-    let vgst = vgs_eff - vp_eff;
+    // Mode selection: vc = controlling gate reference, vd = |vds_eff|,
+    // m = polarity of the drain current.
+    let (vc, vd, m) = if vds_eff >= 0.0 {
+        (vgs_eff, vds_eff, 1.0)
+    } else {
+        // Reverse mode: drain acts as source. vgd_eff = vgs_eff - vds_eff.
+        (vgs_eff - vds_eff, -vds_eff, -1.0)
+    };
+    let vgst = vc - vp_eff;
     if vgst <= 0.0 {
-        // Subthreshold: weak exponential for smooth NR convergence
-        return sign * 1e-12 * fast_exp(vgst / (2.0 * 0.025851991)).min(1.0);
+        // Subthreshold: weak exponential for smooth NR convergence.
+        // Gated by tanh(vd/2VT) so the leakage is continuous (and zero)
+        // at Vds = 0 where the mode polarity m flips sign.
+        let sub = 1e-12 * fast_exp(vgst / (2.0 * 0.025851991)).min(1.0);
+        return sign * m * sub * (vd / (2.0 * 0.025851991)).tanh();
     }
     let vp_abs = vp.abs();
     let vds_sat = vgst;
-    if vds_eff < vds_sat {
-        // Triode region: Id = IDSS/Vp^2 * (2*Vgst*Vds - Vds^2) * (1 + lambda*Vds)
-        let id = idss / (vp_abs * vp_abs) * (2.0 * vgst * vds_eff - vds_eff * vds_eff);
-        sign * id * (1.0 + lambda * vds_eff)
+    // Channel-length modulation uses the mode-consistent |Vds|.
+    let clm = 1.0 + lambda * vd;
+    if vd < vds_sat {
+        // Triode region: Id = IDSS/Vp^2 * (2*Vgst*Vds - Vds^2) * (1 + lambda*|Vds|)
+        let id = idss / (vp_abs * vp_abs) * (2.0 * vgst * vd - vd * vd);
+        sign * m * id * clm
     } else {
-        // Saturation region: Id = IDSS * (Vgst/|Vp|)^2 * (1 + lambda*Vds)
+        // Saturation region: Id = IDSS * (Vgst/|Vp|)^2 * (1 + lambda*|Vds|)
         let ratio = vgst / vp_abs;
-        sign * idss * ratio * ratio * (1.0 + lambda * vds_eff)
+        sign * m * idss * ratio * ratio * clm
     }
 }
 
@@ -40,31 +61,53 @@ fn jfet_jacobian(vgs: f64, vds: f64, idss: f64, vp: f64, lambda: f64, sign: f64)
     let vgs_eff = sign * vgs;
     let vds_eff = sign * vds;
     let vp_eff = sign * vp;
-    let vgst = vgs_eff - vp_eff;
-    if vgst <= 0.0 {
-        // Subthreshold: derivative of weak exponential
-        let sub = 1e-12 * fast_exp(vgst / (2.0 * 0.025851991)).min(1.0);
-        let gm = sub / (2.0 * 0.025851991);
-        return [gm, 0.0, 0.0, 0.0];
-    }
-    let vp_abs = vp.abs();
-    let vp2 = vp_abs * vp_abs;
-    let vds_sat = vgst;
-
-    let (d_id_d_vgs, d_id_d_vds) = if vds_eff < vds_sat {
-        // Triode region
-        let clm = 1.0 + lambda * vds_eff;
-        let gm = idss * 2.0 * vds_eff / vp2 * clm;
-        let gds_base = idss / vp2 * (2.0 * vgst - 2.0 * vds_eff);
-        let gds_lambda = idss / vp2 * (2.0 * vgst * vds_eff - vds_eff * vds_eff) * lambda;
-        (gm, gds_base * clm + gds_lambda)
+    // Mode selection — must mirror jfet_id exactly.
+    // Id = sign * m * f(vc, vd), with:
+    //   normal  (m=+1): vc = vgs_eff,           vd = vds_eff
+    //   reverse (m=-1): vc = vgs_eff - vds_eff, vd = -vds_eff
+    // Chain rule to external (vgs, vds), with sign^2 = 1:
+    //   normal:  dId/dVgs = f_c            dId/dVds = f_d
+    //   reverse: dId/dVgs = -f_c           dId/dVds = f_c + f_d
+    let (vc, vd, m) = if vds_eff >= 0.0 {
+        (vgs_eff, vds_eff, 1.0)
     } else {
-        // Saturation region
-        let ratio = vgst / vp_abs;
-        let clm = 1.0 + lambda * vds_eff;
-        let gm = idss * 2.0 * vgst / vp2 * clm;
-        let gds = idss * ratio * ratio * lambda;
-        (gm, gds)
+        (vgs_eff - vds_eff, -vds_eff, -1.0)
+    };
+    let vgst = vc - vp_eff;
+
+    // (f_c, f_d) = (df/dvc, df/dvd)
+    let (f_c, f_d) = if vgst <= 0.0 {
+        // Subthreshold: derivative of tanh-gated weak exponential
+        let sub = 1e-12 * fast_exp(vgst / (2.0 * 0.025851991)).min(1.0);
+        let t = (vd / (2.0 * 0.025851991)).tanh();
+        (
+            sub * t / (2.0 * 0.025851991),
+            sub * (1.0 - t * t) / (2.0 * 0.025851991),
+        )
+    } else {
+        let vp_abs = vp.abs();
+        let vp2 = vp_abs * vp_abs;
+        let vds_sat = vgst;
+        let clm = 1.0 + lambda * vd;
+        if vd < vds_sat {
+            // Triode region
+            let f_c = idss * 2.0 * vd / vp2 * clm;
+            let f_d_base = idss / vp2 * (2.0 * vgst - 2.0 * vd);
+            let f_d_lambda = idss / vp2 * (2.0 * vgst * vd - vd * vd) * lambda;
+            (f_c, f_d_base * clm + f_d_lambda)
+        } else {
+            // Saturation region
+            let ratio = vgst / vp_abs;
+            let f_c = idss * 2.0 * vgst / vp2 * clm;
+            let f_d = idss * ratio * ratio * lambda;
+            (f_c, f_d)
+        }
+    };
+
+    let (d_id_d_vgs, d_id_d_vds) = if m >= 0.0 {
+        (f_c, f_d)
+    } else {
+        (-f_c, f_c + f_d)
     };
 
     // Gate current derivatives are zero (no gate leakage in this model)
@@ -85,4 +128,3 @@ fn jfet_jacobian_with_rd_rs(vgs: f64, vds: f64, idss: f64, vp: f64, lambda: f64,
     if denom.abs() < 1e-30 { return jac; }
     [gm / denom, gds / denom, 0.0, 0.0]
 }
-

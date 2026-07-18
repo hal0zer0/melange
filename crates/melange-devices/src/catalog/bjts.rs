@@ -32,7 +32,10 @@ pub struct BjtCatalogEntry {
 /// The BJT catalog.
 pub const CATALOG: &[BjtCatalogEntry] = &[
     // 2N2222 / 2N2222A / PN2222A — NPN general purpose
-    // ON Semi SPICE model: IS=1.26e-14, BF=200, BR=3, VAF=100
+    // Closest published card is Philips 2N2222: IS=1E-14 BF=200 BR=3
+    // VAF=100 IKF=0.3 (no VAR, no IKR). This entry deviates from it in
+    // IS (1.26e-14), VAR (10) and IKR (6mA), which trace to no vendor card.
+    // NOT verbatim vendor data — do not cite as such.
     BjtCatalogEntry {
         names: &["2N2222", "2N2222A", "PN2222A"],
         is: 1.26e-14,
@@ -44,39 +47,51 @@ pub const CATALOG: &[BjtCatalogEntry] = &[
         var: 10.0,
         ikf: 0.3,
         ikr: 0.006,
-        source: "ON Semiconductor SPICE model",
+        source: "Based on Philips 2N2222 SPICE card; IS/VAR/IKR deviate (unsourced)",
     },
     // 2N3904 — NPN general purpose
-    // ON Semi SPICE model: IS=6.73e-15, BF=416, BR=0.737, VAF=74.03
+    // Fairchild (now onsemi) datasheet SPICE model:
+    //   .model 2N3904 NPN(Is=6.734f Bf=416.4 Br=.7371 Vaf=74.03 Ikf=66.78m
+    //                     Ikr=0 Ne=1.259 Ise=6.734f ...)
+    // Ikr=0 in SPICE means disabled; Var is absent (disabled). Both encode
+    // here as f64::INFINITY, which collapses the corresponding qb term.
     BjtCatalogEntry {
         names: &["2N3904"],
-        is: 6.73e-15,
+        is: 6.734e-15,
         vt: 0.025851991,
-        beta_f: 416.0,
-        beta_r: 0.737,
+        beta_f: 416.4,
+        beta_r: 0.7371,
         is_pnp: false,
         vaf: 74.03,
-        var: 28.0,
-        ikf: 0.0667,
-        ikr: 1.2e-4,
-        source: "ON Semiconductor SPICE model",
+        var: f64::INFINITY,
+        ikf: 0.06678,
+        ikr: f64::INFINITY,
+        source: "Fairchild/onsemi 2N3904 datasheet SPICE model",
     },
     // 2N3906 — PNP general purpose
-    // ON Semi SPICE model: IS=1.27e-14, BF=207, BR=1.68, VAF=115.7
+    // Fairchild (now onsemi) datasheet SPICE model:
+    //   .model 2N3906 PNP(Is=1.41f Bf=180.7 Br=4.977 Vaf=18.7 Ikf=80m
+    //                     Ikr=0 Ne=1.5 Ise=0 ...)
+    // Ikr=0 (disabled) and Var absent (disabled) → f64::INFINITY here.
     BjtCatalogEntry {
         names: &["2N3906"],
-        is: 1.27e-14,
+        is: 1.41e-15,
         vt: 0.025851991,
-        beta_f: 207.0,
-        beta_r: 1.68,
+        beta_f: 180.7,
+        beta_r: 4.977,
         is_pnp: true,
-        vaf: 115.7,
-        var: 18.0,
-        ikf: 0.0708,
-        ikr: 3.0e-4,
-        source: "ON Semiconductor SPICE model",
+        vaf: 18.7,
+        var: f64::INFINITY,
+        ikf: 0.08,
+        ikr: f64::INFINITY,
+        source: "Fairchild/onsemi 2N3906 datasheet SPICE model",
     },
     // 2N5088 / 2N5089 — NPN high-gain, low-noise (used in fuzz/boost pedals)
+    // Representative effective-beta values, NOT a vendor card. Vendor GP
+    // cards (NSC 2N5088: BF=1122 IKF=14.92m VAF=62.37; Fairchild 2N5089:
+    // BF=1434 IKF=15.4m) pair huge BF with ISE leakage terms this
+    // leakage-free model cannot represent; BF=600 approximates the
+    // effective beta at pedal currents.
     BjtCatalogEntry {
         names: &["2N5088", "2N5089"],
         is: 4.8e-14,
@@ -88,23 +103,33 @@ pub const CATALOG: &[BjtCatalogEntry] = &[
         var: f64::INFINITY,
         ikf: 0.04,
         ikr: f64::INFINITY,
-        source: "ON Semiconductor / Central Semi SPICE model",
+        source: "Representative values (no vendor card match; see entry comment)",
     },
     // BC547B / BC547C — NPN small signal (European standard)
+    // Zetex BC547BP SPICE model (rev 4/90):
+    //   .MODEL BC547BP/ZTX NPN IS=1.8E-14 BF=400 BR=35.5 IKF=.14 IKR=.03
+    //          VAF=80 VAR=12.5 NF=.9955 NE=1.46 ISE=5.0E-14 ...
+    // Previous entry was this card mislabeled "Philips/NXP" with two
+    // transcription errors: IKF=0.1 (card: 0.14) and IKR=3.0e-4 (card: 0.03).
     BjtCatalogEntry {
         names: &["BC547B", "BC547C"],
         is: 1.8e-14,
         vt: 0.025851991,
         beta_f: 400.0,
-        beta_r: 35.0,
+        beta_r: 35.5,
         is_pnp: false,
         vaf: 80.0,
         var: 12.5,
-        ikf: 0.1,
-        ikr: 3.0e-4,
-        source: "Philips/NXP SPICE model",
+        ikf: 0.14,
+        ikr: 0.03,
+        source: "Zetex BC547BP SPICE model (rev 4/90)",
     },
     // BC557B — PNP small signal (complement of BC547)
+    // Composite values matching no single published card. Nearest sourced
+    // alternatives: Philips BC557B (IS=3.83E-14 BF=344.4 VAF=21.11
+    // IKF=.08039 IKR=.047 VAR=32.02 BR=14.84, in LTspice standard.bjt) and
+    // Zetex BC557AP (IS=1.149E-14 BF=330 BR=13 IKF=.1 IKR=.012 VAF=84.56
+    // VAR=8.15). NOT verbatim vendor data — do not cite as such.
     BjtCatalogEntry {
         names: &["BC557B"],
         is: 2.0e-14,
@@ -116,7 +141,7 @@ pub const CATALOG: &[BjtCatalogEntry] = &[
         var: 12.0,
         ikf: 0.08,
         ikr: 2.0e-4,
-        source: "Philips/NXP SPICE model",
+        source: "Composite estimate (no vendor card match; see entry comment)",
     },
     // AC128 — PNP germanium (vintage fuzz: Fuzz Face, Tone Bender)
     // Germanium parameters estimated from measurements
@@ -150,18 +175,24 @@ pub const CATALOG: &[BjtCatalogEntry] = &[
     },
     // 2N3055 — NPN power transistor (TO-3 package)
     // Used in Neve BA283 Class A output stage (~70mA bias).
+    // PSpice/LTspice standard library card (mfg=Texas Instruments):
+    //   .model 2N3055 NPN(Is=974.4f Bf=99.49 Br=2.949 Vaf=50 Ikf=4.029
+    //                     Ikr=0 Ne=1.941 Ise=902.5p ...)
+    // BF≈99.5 matches datasheet hFE (20-70 at 4A, ~100 at low current);
+    // IKF≈4A is right for a 15A device — the previous BF=360/IKF=0.25A
+    // values traced to no vendor card and fired beta droop 16x early.
     BjtCatalogEntry {
         names: &["2N3055"],
-        is: 4.66e-12,
+        is: 9.744e-13,
         vt: 0.025851991,
-        beta_f: 360.0,
-        beta_r: 2.0,
+        beta_f: 99.49,
+        beta_r: 2.949,
         is_pnp: false,
-        vaf: 100.0,
-        var: 20.0,
-        ikf: 0.25,
-        ikr: 0.01,
-        source: "ON Semiconductor / Motorola SPICE model",
+        vaf: 50.0,
+        var: f64::INFINITY,
+        ikf: 4.029,
+        ikr: f64::INFINITY,
+        source: "PSpice/LTspice standard library 2N3055 card (mfg=Texas Instruments)",
     },
 ];
 
@@ -510,7 +541,7 @@ mod tests {
             let measured_beta = ic / ib;
             assert!(
                 measured_beta > 50.0 && measured_beta < 500.0,
-                "2N3055 beta={:.0} (expected ~360)",
+                "2N3055 beta={:.0} (expected ~99.5 per TI/PSpice card BF)",
                 measured_beta
             );
         }

@@ -162,8 +162,8 @@ rhs[input_node] += (V_in[n+1] + V_in[n]) * G_in
 Gm = AOL / ROUT     (transconductance)
 Go = 1 / ROUT       (output conductance)
 
-G[out, n_plus]  += Gm
-G[out, n_minus] -= Gm
+G[out, n_plus]  -= Gm
+G[out, n_minus] += Gm
 G[out, out]     += Go
 ```
 

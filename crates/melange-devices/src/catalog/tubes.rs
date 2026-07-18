@@ -33,26 +33,31 @@ pub struct TubeCatalogEntry {
 /// The tube catalog.
 pub const CATALOG: &[TubeCatalogEntry] = &[
     // 12AX7 / ECC83 — high-mu twin triode, the workhorse of guitar amps.
-    // Koren 1996 mu/ex/Kp/Kvb with Kg1=3000 (datasheet-accurate).
-    // Ip ∝ 1/Kg1; Kg1=3000 gives ~1.2mA at Vgk=0, Vpk=250V (matches RCA datasheet).
-    //   Default:  Vgk=0 → 1.20mA,  Vgk=-1 → 0.60mA,  Vgk=-2 → 0.17mA  (at Vpk=250V)
-    //   Datasheet: Vgk=0 → ~1.2mA,  Vgk=-1 → ~0.5mA,  Vgk=-2 → ~0.1mA  (RCA 12AX7)
+    // Norman Koren's published 1996 card, used with the full Koren equation
+    // Ip = 2·E1^EX/Kg1 (the ×2 comes from Koren's PWR+PWRS form — his Kg1
+    // values are fitted WITH it).
+    //   Model:     Vgk=-2 → 0.95mA (gm 1.67mA/V, rp ~54k),  Vgk=-1 → 3.37mA,
+    //              Vgk=0 → 6.81mA (extrapolated; outside published curve family)
+    //   Datasheet: RCA/GE 12AX7 typical operation at Vpk=250V, Vgk=-2V:
+    //              Ip=1.2mA, gm=1.6mA/V, rp=62.5k. (The 1.2mA row is at
+    //              Vgk=-2V, NOT Vgk=0 — an earlier Kg1=3000 "re-fit" here
+    //              compensated for a missing ×2 against that misread point.)
     TubeCatalogEntry {
         names: &["12AX7", "ECC83", "7025", "CV4004"],
         mu: 100.0,
         ex: 1.4,
-        kg1: 3000.0,
+        kg1: 1060.0,
         kp: 600.0,
         kvb: 300.0,
         ig_max: 2e-3,
         vgk_onset: 0.5,
         lambda: 0.0,
-        source: "Koren 1996 with Kg1=3000 (datasheet-accurate)",
+        source: "Koren 1996 published card (Glass Audio 8-5; normankoren.com Table 1)",
     },
-    // 12AX7K — Koren 1996 original parameters (Kg1=1060).
-    // Overestimates plate current vs RCA datasheet (~3.4mA vs ~1.2mA at Vgk=0, Vpk=250V).
-    // Retained for backwards compatibility with circuits calibrated to Koren 1996.
-    //   Koren:    Vgk=0 → 3.40mA,  Vgk=-1 → 1.69mA,  Vgk=-2 → 0.48mA  (at Vpk=250V)
+    // 12AX7K — explicit alias of Koren's 1996 original card. Now identical
+    // to the default 12AX7 entry (the default was restored to Koren's
+    // published Kg1=1060 when the missing ×2 in the plate equation was
+    // fixed). Retained for netlists that reference "12AX7K" explicitly.
     TubeCatalogEntry {
         names: &["12AX7K", "ECC83K"],
         mu: 100.0,
@@ -65,24 +70,32 @@ pub const CATALOG: &[TubeCatalogEntry] = &[
         lambda: 0.0,
         source: "Koren 1996 Table 1 (original Kg1=1060)",
     },
-    // 12AX7F — 12AX7 fitted alias (same as default 12AX7 with Kg1=3000).
-    // Kept for backwards compatibility with netlists using "12AX7F".
+    // 12AX7F — historical "fitted" alias, kept for netlists using "12AX7F".
+    // The old Kg1=3000 value compensated for the missing ×2 against a
+    // misread datasheet point (RCA's 1.2mA typical-operation row is at
+    // Vgk=-2V, not Vgk=0). With the ×2 restored, Koren's published Kg1=1060
+    // IS the balanced datasheet fit: a single-knob Kg1 refit at the true
+    // (-2V, 250V) row targets Ip→841 / gm→1107 / rp→1234, geometric mean
+    // ~1050 — within 1% of Koren's 1060. So this entry now equals 12AX7.
     TubeCatalogEntry {
         names: &["12AX7F", "ECC83F"],
         mu: 100.0,
         ex: 1.4,
-        kg1: 3000.0,
+        kg1: 1060.0,
         kp: 600.0,
         kvb: 300.0,
         ig_max: 2e-3,
         vgk_onset: 0.5,
         lambda: 0.0,
-        source: "Koren 1996 with Kg1 re-fit to RCA 12AX7 datasheet (Ip=1.2mA at Vgk=0, Vpk=250V)",
+        source: "Koren 1996 published card (equals 12AX7; historical Kg1=3000 refit removed)",
     },
     // 12AU7 / ECC82 — medium-mu twin triode (mu≈17).
-    // Koren fit to Sylvania data: mu=21.5, ex=1.3, Kg1=1180, Kp=84, Kvb=300
-    // Note: published Koren fits vary; these values give best plate curve match
-    // to Sylvania 12AU7 datasheet at typical audio operating points.
+    // Norman Koren's original 12AU7 card (verified byte-identical to
+    // 12AU7_OLD in Koren's Glass Audio 1996 library).
+    //   Model:     Vgk=-8.5, Vpk=250 → 10.4mA (gm 2.5mA/V)
+    //   Datasheet: Sylvania 12AU7 typical operation at 250V is Vgk=-8.5V →
+    //              Ip=10.5mA, gm=2.2mA/V. (Earlier comments here attributed
+    //              negative-grid typical currents to Vgk=0 — wrong point.)
     TubeCatalogEntry {
         names: &["12AU7", "ECC82", "5963", "CV4003"],
         mu: 21.5,
@@ -93,10 +106,14 @@ pub const CATALOG: &[TubeCatalogEntry] = &[
         ig_max: 4e-3,
         vgk_onset: 0.7,
         lambda: 0.0,
-        source: "Koren fit to Sylvania 12AU7 datasheet",
+        source: "Koren 1996 original card (12AU7_OLD in Koren's library)",
     },
     // 12AT7 / ECC81 — medium-mu triode (mu≈60).
-    // Koren fit: mu=60, ex=1.35, Kg1=460, Kp=300, Kvb=300
+    // Norman Koren's original 12AT7 card (verified byte-identical to
+    // 12AT7_OLD in Koren's Glass Audio 1996 library).
+    //   Model:     Vgk=-2, Vpk=250 → 12.8mA
+    //   Datasheet: GE 12AT7 typical operation at 250V, Vgk≈-2V (200Ω
+    //              cathode bias) → Ip=10mA, gm=5.5mA/V.
     TubeCatalogEntry {
         names: &["12AT7", "ECC81", "6201", "CV4024"],
         mu: 60.0,
@@ -107,10 +124,15 @@ pub const CATALOG: &[TubeCatalogEntry] = &[
         ig_max: 4e-3,
         vgk_onset: 0.5,
         lambda: 0.0,
-        source: "Koren fit, verified against GE 12AT7 datasheet",
+        source: "Koren 1996 original card (12AT7_OLD in Koren's library)",
     },
     // 6SL7 / 6SL7GT — high-mu octal triode.
-    // Koren fit: mu=70, ex=1.3, Kg1=1600, Kp=260, Kvb=300
+    // Koren-form fit: mu=70, ex=1.3, Kg1=1600, Kp=260, Kvb=300 (not in
+    // Koren's published library; local fit checked against the datasheet
+    // typical-operation row).
+    //   Model:     Vgk=-2, Vpk=250 → 2.58mA
+    //   Datasheet: RCA 6SL7GT typical operation at 250V, Vgk=-2V →
+    //              Ip=2.3mA, gm=1.6mA/V, rp=44k.
     TubeCatalogEntry {
         names: &["6SL7", "6SL7GT"],
         mu: 70.0,
@@ -121,13 +143,14 @@ pub const CATALOG: &[TubeCatalogEntry] = &[
         ig_max: 2e-3,
         vgk_onset: 0.5,
         lambda: 0.0,
-        source: "Koren fit to RCA 6SL7GT datasheet",
+        source: "Koren-form fit to RCA 6SL7GT datasheet (Ip=2.3mA at Vgk=-2, Vpk=250)",
     },
     // 6SN7 / 6SN7GT — medium-mu dual triode (mu=20), the "Fairchild tube".
-    // Koren fit to Sylvania/RCA 6SN7GT datasheet curves.
-    // Like all Koren single-mu fits, overestimates current at Vgk=0.
-    //   Koren:    Vgk=0 → ~20mA,  Vgk=-4 → ~12mA,  Vgk=-8 → ~5mA  (at Vpk=250V)
-    //   Datasheet: Vgk=0 → ~9mA,  Vgk=-4 → ~3mA,  Vgk=-8 → ~0.5mA (RCA 6SN7GT)
+    // Koren-form fit (not in Koren's published library).
+    //   Model:     Vgk=-8, Vpk=250 → 9.8mA,  Vgk=0 → ~41mA (extrapolated)
+    //   Datasheet: RCA 6SN7GT typical operation at 250V is Vgk=-8V →
+    //              Ip=9mA, gm=2.6mA/V, rp=7.7k. (An earlier comment here
+    //              placed the 9mA row at Vgk=0 — wrong point.)
     TubeCatalogEntry {
         names: &["6SN7", "6SN7GT", "6SN7GTA", "6SN7GTB"],
         mu: 20.0,
@@ -138,7 +161,7 @@ pub const CATALOG: &[TubeCatalogEntry] = &[
         ig_max: 2e-3,
         vgk_onset: 0.5,
         lambda: 0.0,
-        source: "Koren fit to Sylvania/RCA 6SN7GT datasheet",
+        source: "Koren-form fit checked against RCA 6SN7GT datasheet (Ip=9mA at Vgk=-8, Vpk=250)",
     },
     // 6J5 / 6J5GT — single triode version of 6SN7 (same electrical characteristics).
     // Identical Koren parameters; only physical packaging differs (single vs dual triode).
@@ -155,7 +178,14 @@ pub const CATALOG: &[TubeCatalogEntry] = &[
         source: "Same as 6SN7GT (single triode version)",
     },
     // 6V6 / 6V6GT — beam power tube (triode-connected).
-    // Koren fit for triode mode: mu=8.7, ex=1.35, Kg1=1460, Kp=48, Kvb=12
+    // PROVENANCE FLAG (2026-07-18): these parameters are byte-identical to
+    // Norman Koren's original 6L6GC beam-tetrode card (6L6GC_OLD in his
+    // Glass Audio 1996 library: MU=8.7 EX=1.35 KG1=1460 KP=48 KVB=12) —
+    // there is NO published Koren 6V6 card with these values. The earlier
+    // "Duncan Amps" citation could not be sourced. With the ×2 restored the
+    // card reads +21% above RCA triode-connection typical operation
+    // (model 60mA vs datasheet 49.5mA at Vgk=-12.5, Vpk=250; mu=9.6,
+    // rp=1.96k, gm=4.9mA/V). Kept pending a proper triode-mode 6V6 refit.
     TubeCatalogEntry {
         names: &["6V6", "6V6GT"],
         mu: 8.7,
@@ -166,10 +196,15 @@ pub const CATALOG: &[TubeCatalogEntry] = &[
         ig_max: 6e-3,
         vgk_onset: 0.7,
         lambda: 0.0,
-        source: "Published Koren triode-mode fit (Duncan Amps)",
+        source: "Koren 1996 6L6GC card applied to 6V6 (no published Koren 6V6 card; flagged)",
     },
     // EL84 / 6BQ5 — small power pentode (triode-connected).
-    // Koren fit for triode mode: mu=11.5, ex=1.35, Kg1=600, Kp=200, Kvb=300
+    // PROVENANCE FLAG (2026-07-18): no published Koren triode-mode EL84
+    // card with these values could be sourced (the earlier "Duncan Amps"
+    // citation is unverifiable). Philips EL84 datasheet triode connection
+    // (g2 tied to anode) gives mu ≈ 19.5 vs this card's 11.5. Values kept
+    // pending a sourced refit — changing mu alone without refitting
+    // Kg1/Kp against triode-connected curves would be parameter tuning.
     TubeCatalogEntry {
         names: &["EL84", "6BQ5"],
         mu: 11.5,
@@ -180,10 +215,14 @@ pub const CATALOG: &[TubeCatalogEntry] = &[
         ig_max: 8e-3,
         vgk_onset: 0.7,
         lambda: 0.0,
-        source: "Duncan Amps Koren triode-mode fit",
+        source: "Unsourced Koren-form triode-mode fit (flagged: Philips triode-connected mu~19.5)",
     },
     // EL34 / 6CA7 — power pentode (triode-connected).
-    // Koren fit for triode mode: mu=11, ex=1.35, Kg1=650, Kp=60, Kvb=24
+    // Norman Koren's original EL34 card (verified byte-identical to
+    // EL34_OLD in Koren's Glass Audio 1996 library: MU=11 EX=1.35 KG1=650
+    // KP=60 KVB=24). Note this is Koren's PENTODE-mode card; melange uses
+    // its MU/EX/KG1 in the triode equation for triode-connected operation,
+    // per Koren's own guidance that triode-mode curves fix MU/EX/KG1.
     TubeCatalogEntry {
         names: &["EL34", "6CA7"],
         mu: 11.0,
@@ -194,10 +233,16 @@ pub const CATALOG: &[TubeCatalogEntry] = &[
         ig_max: 10e-3,
         vgk_onset: 0.7,
         lambda: 0.0,
-        source: "Duncan Amps Koren triode-mode fit",
+        source: "Koren 1996 original EL34 card (EL34_OLD in Koren's library)",
     },
     // 6L6 / 6L6GC / 5881 — beam power tube (triode-connected).
-    // Koren fit for triode mode: mu=8.7, ex=1.35, Kg1=890, Kp=48, Kvb=12
+    // PROVENANCE FLAG (2026-07-18): Kg1=890 is not a published Koren value
+    // for the 6L6GC (Koren's 6L6GC_OLD card has KG1=1460; 890 is the KG1 of
+    // his 6550_OLD card, which otherwise differs: MU=7.9 KP=60 KVB=24).
+    // 890 is however close to the atan-knee fold-in of Koren's 6L6GC card
+    // for triode-equation use (1460·2/π ≈ 929), and with the ×2 restored it
+    // reads +20% at Tung-Sol triode-connection typical operation (model
+    // 47.8mA vs datasheet 40mA at Vgk=-20, Vpk=250). Kept, flagged.
     TubeCatalogEntry {
         names: &["6L6", "6L6GC", "5881"],
         mu: 8.7,
@@ -208,7 +253,7 @@ pub const CATALOG: &[TubeCatalogEntry] = &[
         ig_max: 8e-3,
         vgk_onset: 0.7,
         lambda: 0.0,
-        source: "Published Koren triode-mode fit",
+        source: "Koren 1996 6L6GC card with unpublished Kg1=890 (~2/pi knee fold; flagged)",
     },
 ];
 
@@ -1002,7 +1047,7 @@ mod tests {
 
     #[test]
     fn test_ecc83_matches_catalog() {
-        // ecc83() factory now uses catalog "12AX7" (Kg1=3000, datasheet-accurate)
+        // ecc83() factory uses catalog "12AX7" (Koren 1996 published card, Kg1=1060)
         let factory = KorenTriode::ecc83();
         let cat = lookup("12AX7").unwrap();
         assert_eq!(factory.mu, cat.mu);
@@ -1085,18 +1130,29 @@ mod tests {
     #[test]
     fn test_12ax7_operating_points() {
         let t = make_tube(lookup("12AX7").unwrap());
-        // Kg1=3000 (datasheet-accurate): Vgk=0V, Vpk=250V → Ip ≈ 1.2mA
-        let ip0 = t.plate_current(0.0, 250.0);
-        assert_ip_approx(ip0, 1.2e-3, 0.2e-3, "12AX7 Vgk=0");
-        // Vgk=-1V, Vpk=250V: ~0.6mA (datasheet: ~0.5mA)
-        let ip_m1 = t.plate_current(-1.0, 250.0);
-        assert_ip_approx(ip_m1, 0.5e-3, 0.15e-3, "12AX7 Vgk=-1");
-        // Monotonicity: more negative grid → less current
+        // RCA/GE 12AX7 typical operation: Vpk=250V, Vgk=-2V → Ip=1.2mA,
+        // gm=1.6mA/V, rp=62.5k. Koren's published card (with the ×2) gives
+        // Ip=0.95mA (-21%), gm=1.67mA/V (+4%), rp=53.7k (-14%) there.
+        let ip_m2 = t.plate_current(-2.0, 250.0);
+        assert_ip_approx(ip_m2, 1.2e-3, 0.35e-3, "12AX7 Vgk=-2 (datasheet 1.2mA)");
+        let gm_m2 = t.jacobian(&[-2.0, 250.0])[0];
         assert!(
-            ip_m1 < ip0,
-            "12AX7: Ip should decrease with more negative Vgk"
+            (gm_m2 - 1.6e-3).abs() < 0.25e-3,
+            "12AX7 gm at (-2, 250) = {:.3}mA/V, datasheet 1.6mA/V",
+            gm_m2 * 1e3
         );
-        // Cutoff: Vgk=-4V → Ip ≈ 0
+        // Vgk=0 is outside the published typical-operation rows — sanity
+        // band only (model extrapolates to ~6.8mA).
+        let ip0 = t.plate_current(0.0, 250.0);
+        assert!(
+            ip0 > 4e-3 && ip0 < 9e-3,
+            "12AX7 Vgk=0: Ip={:.2}mA (extrapolated, expected ~6.8mA)",
+            ip0 * 1e3
+        );
+        // Monotonicity: more negative grid → less current
+        let ip_m1 = t.plate_current(-1.0, 250.0);
+        assert!(ip_m1 < ip0 && ip_m2 < ip_m1, "12AX7: Ip must decrease with Vgk");
+        // Cutoff: Vgk=-4V → Ip ≈ 0 (model 3.6µA)
         assert!(
             t.plate_current(-4.0, 250.0) < 0.01e-3,
             "12AX7 should be near cutoff at Vgk=-4"
@@ -1105,23 +1161,27 @@ mod tests {
 
     #[test]
     fn test_12ax7f_operating_points() {
+        // 12AX7F now loads the same Koren 1996 card as the default 12AX7
+        // (the historical Kg1=3000 refit compensated for the missing ×2
+        // against a misread datasheet point — the RCA 1.2mA row is at
+        // Vgk=-2, not Vgk=0).
         let t = make_tube(lookup("12AX7F").unwrap());
-        // Fitted to RCA 12AX7 datasheet: Vgk=0, Vpk=250V → ~1.2mA
-        let ip0 = t.plate_current(0.0, 250.0);
-        assert_ip_approx(ip0, 1.2e-3, 0.1e-3, "12AX7F Vgk=0");
-        // Vgk=-1V, Vpk=250V: fitted → ~0.59mA (datasheet: ~0.5mA)
-        let ip_m1 = t.plate_current(-1.0, 250.0);
-        assert_ip_approx(ip_m1, 0.5e-3, 0.15e-3, "12AX7F Vgk=-1");
-        // Vgk=-2V, Vpk=250V: fitted → ~0.17mA (datasheet: ~0.1mA)
         let ip_m2 = t.plate_current(-2.0, 250.0);
-        assert_ip_approx(ip_m2, 0.1e-3, 0.1e-3, "12AX7F Vgk=-2");
-        // Monotonicity
-        assert!(
-            ip_m1 < ip0,
-            "12AX7F: Ip should decrease with more negative Vgk"
-        );
-        assert!(ip_m2 < ip_m1, "12AX7F: Ip should decrease further");
-        // Cutoff: Vgk=-4V → Ip near zero
+        assert_ip_approx(ip_m2, 1.2e-3, 0.35e-3, "12AX7F Vgk=-2 (datasheet 1.2mA)");
+        // Identical to the default card at every probed point.
+        let d = make_tube(lookup("12AX7").unwrap());
+        for vgk in [0.0, -1.0, -2.0, -4.0] {
+            assert_eq!(
+                t.plate_current(vgk, 250.0),
+                d.plate_current(vgk, 250.0),
+                "12AX7F must equal 12AX7 at Vgk={}",
+                vgk
+            );
+        }
+        // Monotonicity and cutoff
+        let ip0 = t.plate_current(0.0, 250.0);
+        let ip_m1 = t.plate_current(-1.0, 250.0);
+        assert!(ip0 > ip_m1 && ip_m1 > ip_m2, "12AX7F: Ip must decrease with Vgk");
         assert!(
             t.plate_current(-4.0, 250.0) < 0.01e-3,
             "12AX7F should be near cutoff at Vgk=-4"
@@ -1131,20 +1191,17 @@ mod tests {
     #[test]
     fn test_12au7_operating_points() {
         let t = make_tube(lookup("12AU7").unwrap());
-        // Koren model at Vgk=0V, Vpk=250V → Ip ≈ 20mA
-        // (Sylvania datasheet: ~11.5mA; Koren single-mu overestimates at zero grid bias)
+        // Sylvania 12AU7 typical operation: Vpk=250V, Vgk=-8.5V → Ip=10.5mA,
+        // gm=2.2mA/V. Koren's original card (with the ×2) gives 10.4mA there.
+        let ip_neg = t.plate_current(-8.5, 250.0);
+        assert_ip_approx(ip_neg, 10.5e-3, 1.5e-3, "12AU7 Vgk=-8.5 (datasheet 10.5mA)");
+        // Vgk=0 is far outside typical operation — sanity band only
+        // (model extrapolates to ~41mA).
         let ip0 = t.plate_current(0.0, 250.0);
         assert!(
-            ip0 > 5e-3 && ip0 < 40e-3,
-            "12AU7 Vgk=0: Ip={:.1}mA",
+            ip0 > 20e-3 && ip0 < 60e-3,
+            "12AU7 Vgk=0: Ip={:.1}mA (extrapolated, expected ~41mA)",
             ip0 * 1e3
-        );
-        // Vgk=-8.5V, Vpk=250V: Koren gives ~5.2mA (datasheet: ~2.3mA)
-        let ip_neg = t.plate_current(-8.5, 250.0);
-        assert!(
-            ip_neg > 0.5e-3 && ip_neg < 15e-3,
-            "12AU7 Vgk=-8.5: Ip={:.1}mA",
-            ip_neg * 1e3
         );
         assert!(
             ip_neg < ip0,
@@ -1157,19 +1214,41 @@ mod tests {
     #[test]
     fn test_12at7_operating_points() {
         let t = make_tube(lookup("12AT7").unwrap());
-        // GE datasheet: Vgk=0V, Vpk=250V → Ip ≈ 15mA
-        assert_ip_approx(t.plate_current(0.0, 250.0), 15.0e-3, 7.0e-3, "12AT7 Vgk=0");
-        // Vgk=-2V, Vpk=250V → Ip ≈ 5mA (typical op point)
-        assert_ip_approx(t.plate_current(-2.0, 250.0), 5.0e-3, 3.0e-3, "12AT7 Vgk=-2");
+        // GE 12AT7 typical operation: Vpk=250V, Vgk≈-2V (200Ω cathode bias)
+        // → Ip=10mA, gm=5.5mA/V. Koren's original card gives 12.8mA (+28%).
+        assert_ip_approx(
+            t.plate_current(-2.0, 250.0),
+            10.0e-3,
+            4.0e-3,
+            "12AT7 Vgk=-2 (datasheet 10mA)",
+        );
+        // Vgk=0 extrapolation sanity band (model ~30mA).
+        let ip0 = t.plate_current(0.0, 250.0);
+        assert!(
+            ip0 > 15e-3 && ip0 < 45e-3,
+            "12AT7 Vgk=0: Ip={:.1}mA (extrapolated, expected ~30mA)",
+            ip0 * 1e3
+        );
     }
 
     #[test]
     fn test_6sl7_operating_points() {
         let t = make_tube(lookup("6SL7").unwrap());
-        // RCA datasheet: Vgk=0V, Vpk=250V → Ip ≈ 2.3mA
-        assert_ip_approx(t.plate_current(0.0, 250.0), 2.3e-3, 1.5e-3, "6SL7 Vgk=0");
-        // Vgk=-2V, Vpk=250V → Ip ≈ 0.8mA
-        assert_ip_approx(t.plate_current(-2.0, 250.0), 0.8e-3, 0.6e-3, "6SL7 Vgk=-2");
+        // RCA 6SL7GT typical operation: Vpk=250V, Vgk=-2V → Ip=2.3mA,
+        // gm=1.6mA/V. The catalog fit (with the ×2) gives 2.58mA there.
+        assert_ip_approx(
+            t.plate_current(-2.0, 250.0),
+            2.3e-3,
+            0.5e-3,
+            "6SL7 Vgk=-2 (datasheet 2.3mA)",
+        );
+        // Vgk=0 extrapolation sanity band (model ~6.6mA).
+        let ip0 = t.plate_current(0.0, 250.0);
+        assert!(
+            ip0 > 3e-3 && ip0 < 10e-3,
+            "6SL7 Vgk=0: Ip={:.1}mA (extrapolated, expected ~6.6mA)",
+            ip0 * 1e3
+        );
     }
 
     #[test]
@@ -1207,22 +1286,18 @@ mod tests {
     #[test]
     fn test_6sn7_operating_points() {
         let t = make_tube(lookup("6SN7").unwrap());
-        // RCA 6SN7GT datasheet: Vgk=0V, Vpk=250V → Ip ≈ 9mA
-        // Koren single-mu model overestimates (~20mA), same pattern as 12AU7.
-        // Accept wide range: model accuracy vs datasheet is known limitation.
+        // RCA 6SN7GT typical operation: Vpk=250V, Vgk=-8V → Ip=9mA,
+        // gm=2.6mA/V, rp=7.7k. The catalog fit (with the ×2) gives 9.8mA
+        // there. (An earlier comment placed the 9mA row at Vgk=0 — wrong
+        // point; Vgk=0 at 250V is far outside the published curve family.)
+        let ip_m8 = t.plate_current(-8.0, 250.0);
+        assert_ip_approx(ip_m8, 9.0e-3, 1.5e-3, "6SN7 Vgk=-8 (datasheet 9mA)");
+        // Vgk=0 extrapolation sanity band (model ~41mA).
         let ip0 = t.plate_current(0.0, 250.0);
         assert!(
-            ip0 > 5e-3 && ip0 < 40e-3,
-            "6SN7 Vgk=0: Ip={:.1}mA (datasheet ~9mA, Koren overestimates)",
+            ip0 > 20e-3 && ip0 < 60e-3,
+            "6SN7 Vgk=0: Ip={:.1}mA (extrapolated, expected ~41mA)",
             ip0 * 1e3
-        );
-        // RCA datasheet: Vgk=-8V, Vpk=250V → Ip ≈ 0.5mA (near cutoff)
-        // Koren model gives ~5mA (overestimates near cutoff)
-        let ip_m8 = t.plate_current(-8.0, 250.0);
-        assert!(
-            ip_m8 > 0.1e-3 && ip_m8 < 15e-3,
-            "6SN7 Vgk=-8: Ip={:.1}mA (datasheet ~0.5mA)",
-            ip_m8 * 1e3
         );
         // Monotonicity: more negative grid → less current
         assert!(
@@ -1239,29 +1314,39 @@ mod tests {
     #[test]
     fn test_6v6_triode_operating_points() {
         let t = make_tube(lookup("6V6").unwrap());
-        // 6V6 triode-connected: Vgk=0V, Vpk=250V → Ip ≈ 40-60mA
+        // RCA 6V6GT triode-connection typical operation: Vpk=250V,
+        // Vgk=-12.5V → Ip=49.5mA (mu=9.6, rp=1.96k, gm=4.9mA/V).
+        // The card (Koren's 6L6GC parameters — see provenance flag on the
+        // catalog entry) gives 60.1mA there (+21%).
+        let ip_typ = t.plate_current(-12.5, 250.0);
+        assert_ip_approx(ip_typ, 49.5e-3, 15e-3, "6V6 Vgk=-12.5 (datasheet 49.5mA)");
+        // Vgk=0 extrapolation sanity band (model ~128mA, off-chart on the
+        // datasheet curve family).
         let ip = t.plate_current(0.0, 250.0);
-        assert!(ip > 15e-3 && ip < 100e-3, "6V6 Vgk=0: Ip={:.1}mA", ip * 1e3);
+        assert!(ip > 60e-3 && ip < 200e-3, "6V6 Vgk=0: Ip={:.1}mA", ip * 1e3);
         // Vgk=-20V, Vpk=250V → should be reduced substantially
         let ip_neg = t.plate_current(-20.0, 250.0);
-        assert!(ip_neg < ip, "6V6 negative grid should reduce current");
+        assert!(ip_neg < ip_typ, "6V6 negative grid should reduce current");
     }
 
     #[test]
     fn test_el84_triode_operating_points() {
         let t = make_tube(lookup("EL84").unwrap());
-        // EL84 triode-connected: Vgk=0V, Vpk=250V → Ip in tens of mA
+        // EL84 triode-connected: Vgk=0V, Vpk=250V → model extrapolates to
+        // ~213mA (sanity band only; see provenance flag on the entry —
+        // this card is unsourced and its mu disagrees with Philips data).
         let ip = t.plate_current(0.0, 250.0);
-        assert!(ip > 5e-3 && ip < 150e-3, "EL84 Vgk=0: Ip={:.1}mA", ip * 1e3);
+        assert!(ip > 50e-3 && ip < 300e-3, "EL84 Vgk=0: Ip={:.1}mA", ip * 1e3);
     }
 
     #[test]
     fn test_el34_triode_operating_points() {
         let t = make_tube(lookup("EL34").unwrap());
-        // EL34 triode-connected: Vgk=0V, Vpk=250V → Ip in tens of mA
+        // EL34 triode-connected (Koren's original EL34 card): Vgk=0V,
+        // Vpk=250V → model extrapolates to ~209mA (sanity band only).
         let ip = t.plate_current(0.0, 250.0);
         assert!(
-            ip > 10e-3 && ip < 200e-3,
+            ip > 50e-3 && ip < 300e-3,
             "EL34 Vgk=0: Ip={:.1}mA",
             ip * 1e3
         );
@@ -1270,9 +1355,14 @@ mod tests {
     #[test]
     fn test_6l6_triode_operating_points() {
         let t = make_tube(lookup("6L6").unwrap());
-        // 6L6 triode-connected: Vgk=0V, Vpk=250V → Ip in tens of mA
+        // Tung-Sol 6L6GC triode-connection typical operation: Vpk=250V,
+        // Vgk=-20V → Ip=40mA (mu=8, rp=1.7k). The card gives 47.8mA (+20%);
+        // see provenance flag on the catalog entry (Kg1=890 unpublished).
+        let ip_typ = t.plate_current(-20.0, 250.0);
+        assert_ip_approx(ip_typ, 40e-3, 12e-3, "6L6 Vgk=-20 (datasheet 40mA)");
+        // Vgk=0 extrapolation sanity band (model ~209mA).
         let ip = t.plate_current(0.0, 250.0);
-        assert!(ip > 15e-3 && ip < 150e-3, "6L6 Vgk=0: Ip={:.1}mA", ip * 1e3);
+        assert!(ip > 100e-3 && ip < 300e-3, "6L6 Vgk=0: Ip={:.1}mA", ip * 1e3);
     }
 
     // --- Tier 3: Jacobian consistency for each tube entry ---

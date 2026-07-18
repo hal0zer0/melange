@@ -628,22 +628,29 @@ fn test_generated_code_includes_diode_model() {
 }
 
 /// Verify the generated code includes BJT model functions.
+///
+/// Only `bjt_evaluate` / `bjt_with_parasitics` are live; the historical
+/// per-quantity helpers (bjt_ic / bjt_ib / bjt_jacobian / bjt_qb) were dead
+/// code in every generated solver and were removed from device_bjt.rs.tera
+/// so there is a single implementation to keep in sync.
 #[test]
 fn test_generated_code_includes_bjt_model() {
     let (code, _netlist, _mna, _kernel) = generate_code(BJT_SPICE);
 
     assert!(
-        code.contains("fn bjt_ic("),
-        "Generated code should include bjt_ic function."
+        code.contains("fn bjt_evaluate("),
+        "Generated code should include bjt_evaluate function."
     );
     assert!(
-        code.contains("fn bjt_ib("),
-        "Generated code should include bjt_ib function."
+        code.contains("fn bjt_with_parasitics("),
+        "Generated code should include bjt_with_parasitics function."
     );
-    assert!(
-        code.contains("fn bjt_jacobian("),
-        "Generated code should include bjt_jacobian function."
-    );
+    for dead in ["fn bjt_ic(", "fn bjt_ib(", "fn bjt_jacobian(", "fn bjt_qb("] {
+        assert!(
+            !code.contains(dead),
+            "Generated code should NOT include dead function {dead} — removed from device_bjt.rs.tera."
+        );
+    }
     assert!(
         code.contains("DEVICE_0_IS"),
         "Generated code should include per-device IS constant."
@@ -764,7 +771,7 @@ fn test_codegen_bjt_nr_solver_generates_device_calls() {
         "NR solver should call bjt_evaluate with state fields for IS/VT/BF/BR and const for SIGN/NF/NR/GP/ISE/NE/ISC/NC params."
     );
 
-    // Should assign all 4 Jacobian entries from the bjt_jacobian result
+    // Should assign all 4 Jacobian entries from the bjt_evaluate result
     assert!(code.contains("jdev_0_0"), "Missing jdev_0_0 (dIc/dVbe)");
     assert!(code.contains("jdev_0_1"), "Missing jdev_0_1 (dIc/dVbc)");
     assert!(code.contains("jdev_1_0"), "Missing jdev_1_0 (dIb/dVbe)");
@@ -3835,9 +3842,15 @@ fn test_codegen_bjt_gp_constants_emitted() {
         code.contains("DEVICE_0_IKF"),
         "IKF constant should be emitted"
     );
+    // bjt_qb was removed as dead code — the GP base-charge math lives inline
+    // in bjt_evaluate, the single live implementation.
     assert!(
-        code.contains("bjt_qb"),
-        "qb function should be in generated code"
+        code.contains("fn bjt_evaluate("),
+        "bjt_evaluate (carrying the inline GP qb math) should be in generated code"
+    );
+    assert!(
+        !code.contains("fn bjt_qb("),
+        "dead bjt_qb function should no longer be emitted"
     );
 }
 
@@ -9105,4 +9118,188 @@ C1 out 0 1u
     let is1 = extract_const_f64(&code, "DEVICE_1_IS");
     assert_eq!(is0, 2.52e-9);
     assert_eq!(is1, 2.52e-9);
+}
+
+// ===========================================================================
+// Regression tests: DK emitter fixes (2026-07-18)
+//   1. Self-heating: exact-exponential Tj step at the INTERNAL sample rate,
+//      and SPICE3f5 1/N in the diode IS(T) exponents.
+//   2. Single-sided op-amp rail clamp must emit valid Rust (no bare `inf`).
+//   3. PMOS body effect applied in magnitude space (channel-signed GAMMA).
+// ===========================================================================
+
+#[test]
+fn test_thermal_diode_exact_exponential_step_and_is_over_n() {
+    // Self-heating diode clipper (DK path). RTH finite gates the thermal
+    // block; N != 1 makes the 1/N scaling observable in the emitted tokens.
+    const SPICE: &str = "\
+Thermal Diode Clipper
+Rin in out 1k
+D1 out 0 DTH
+C1 out 0 100n
+.model DTH D(IS=2.52e-9 N=1.752 RTH=500 CTH=2e-4)
+";
+    let (code, _, _, _) = generate_code(SPICE);
+
+    assert!(
+        code.contains("Diode 0 self-heating thermal update"),
+        "thermal block should be emitted for RTH-gated diode"
+    );
+    // At 1x oversampling INTERNAL_SAMPLE_RATE is not emitted by
+    // constants.rs.tera; SAMPLE_RATE is the (identical) internal rate.
+    assert!(
+        code.contains("let dt = 1.0 / SAMPLE_RATE;"),
+        "thermal dt at 1x should use SAMPLE_RATE"
+    );
+    // Exact exponential update of the RC thermal ODE replaces forward Euler.
+    assert!(
+        code.contains("(1.0 - (-dt / tau).exp())"),
+        "Tj advance must use the exact exponential step"
+    );
+    assert!(
+        !code.contains("let d_tj"),
+        "forward-Euler Tj step must be gone"
+    );
+    // SPICE3f5: IS(T) = IS_NOM*(Tj/TAMB)^(XTI/N)*exp((EG/(N*vt_nom))*(1-TAMB/Tj)).
+    // N = 1.752 is recovered from n_vt/VT_ROOM and baked in at codegen time.
+    assert!(
+        code.contains("t_ratio.powf(DEVICE_0_XTI / 1.75"),
+        "diode IS(T) power-law exponent must be divided by N"
+    );
+    assert!(
+        code.contains("DEVICE_0_EG / (1.75"),
+        "diode IS(T) bandgap exponent must be divided by N"
+    );
+
+    // With oversampling, dt must be the INTERNAL period: the thermal block
+    // lives inside process_sample, which the oversampling wrapper calls
+    // `factor` times per external sample. `1.0 / SAMPLE_RATE` would heat
+    // oversampled circuits `factor`x too fast.
+    let (netlist, mna, kernel) = build_pipeline(SPICE);
+    let mut config = default_config();
+    config.force_trap = true;
+    config.oversampling_factor = 2;
+    let result = CodeGenerator::new(config)
+        .generate(&kernel, &mna, &netlist)
+        .expect("oversampled thermal codegen failed");
+    assert!(
+        result.code.contains("let dt = 1.0 / INTERNAL_SAMPLE_RATE;"),
+        "thermal dt at 2x must use INTERNAL_SAMPLE_RATE"
+    );
+}
+
+#[test]
+fn test_thermal_diode_quasi_static_not_emitted_for_positive_cth() {
+    // CTH > 0 must produce the dynamic exponential form, not the
+    // quasi-static instant-settling form.
+    const SPICE: &str = "\
+Thermal Diode Clipper
+Rin in out 1k
+D1 out 0 DTH
+C1 out 0 100n
+.model DTH D(IS=2.52e-9 N=1.752 RTH=500 CTH=2e-4)
+";
+    let (code, _, _, _) = generate_code(SPICE);
+    assert!(
+        code.contains("let tau = DEVICE_0_RTH * DEVICE_0_CTH;"),
+        "dynamic thermal path should compute tau"
+    );
+    assert!(
+        !code.contains("state.device_0_tj = tss.clamp(200.0, 500.0);"),
+        "quasi-static form must not be emitted when CTH > 0"
+    );
+}
+
+#[test]
+fn test_single_sided_opamp_rail_clamp_emits_valid_rust() {
+    // Only VCC given (no VEE / VSAT / GBW) -> vclamp_lo stays -inf. The old
+    // `{:.17e}` formatting rendered that bound as the invalid token `-inf`;
+    // it must now emit `f64::NEG_INFINITY` (behaviorally the one-sided
+    // `.min(hi)` clamp).
+    // Closed-loop inverting stage + diode, mirrors the DK-routed circuit in
+    // opamp_tests::test_opamp_vcc_vee_codegen_asymmetric_clamp but with VEE
+    // omitted from the model card.
+    const SPICE: &str = "\
+Single-Sided Rail
+R1 in inv 10k
+R2 inv opout 100k
+C1 opout 0 100n
+U1 0 inv opout oa
+Rcouple opout out 1k
+D1 out 0 D1N4148
+Rload out 0 10k
+C2 out 0 100n
+.model oa OA(AOL=200000 VCC=9)
+.model D1N4148 D(IS=2.52e-9 N=1.752)
+";
+    let (code, _, _, _) = generate_code(SPICE);
+
+    let clamp_lines: Vec<&str> = code
+        .lines()
+        .filter(|l| l.contains(".clamp(") && l.contains("9.0"))
+        .collect();
+    assert!(
+        !clamp_lines.is_empty(),
+        "single-sided VCC=9 op-amp should still emit a rail clamp"
+    );
+    for line in &clamp_lines {
+        assert!(
+            line.contains("f64::NEG_INFINITY"),
+            "missing VEE bound must render as f64::NEG_INFINITY, got: {line}"
+        );
+        assert!(
+            !line.contains("-inf"),
+            "invalid `-inf` token leaked into generated code: {line}"
+        );
+    }
+}
+
+#[test]
+fn test_pmos_body_effect_uses_channel_sign() {
+    // PMOS (VTO < 0): the GAMMA shift must be applied in magnitude space,
+    // i.e. multiplied by the channel sign, so reverse body bias always
+    // *increases* |VT|. The unsigned form shrank |VT| for PMOS.
+    const PMOS_SPICE: &str = "\
+PMOS CS with Body Effect
+Cin in gate 1u
+Vss vss 0 DC -12
+R1 vss gate 100k
+R2 gate 0 47k
+Rd vss drain 2.2k
+Rs source 0 470
+Cs source 0 100u
+Cout drain out 1u
+Rload out 0 100k
+M1 drain gate source 0 PMOD_BE
+.model PMOD_BE PM(VTO=-2.0 KP=0.1 LAMBDA=0.01 GAMMA=0.37 PHI=0.65)
+";
+    let (code, _, _, _) = generate_code(PMOS_SPICE);
+    assert!(
+        code.contains("MOSFET 0 body effect"),
+        "body-effect update block should be emitted"
+    );
+    assert!(
+        code.contains("DEVICE_0_VT + (-1.0) * DEVICE_0_GAMMA"),
+        "PMOS body-effect GAMMA term must carry the channel sign (-1.0)"
+    );
+
+    const NMOS_SPICE: &str = "\
+NMOS CS with Body Effect
+Cin in gate 1u
+Vdd vdd 0 DC 12
+R1 vdd gate 100k
+R2 gate 0 47k
+Rd vdd drain 2.2k
+Rs source 0 470
+Cs source 0 100u
+Cout drain out 1u
+Rload out 0 100k
+M1 drain gate source 0 NMOD_BE
+.model NMOD_BE NM(VTO=2.0 KP=0.1 LAMBDA=0.01 GAMMA=0.37 PHI=0.65)
+";
+    let (code, _, _, _) = generate_code(NMOS_SPICE);
+    assert!(
+        code.contains("DEVICE_0_VT + (1.0) * DEVICE_0_GAMMA"),
+        "NMOS body-effect GAMMA term must carry the channel sign (+1.0)"
+    );
 }

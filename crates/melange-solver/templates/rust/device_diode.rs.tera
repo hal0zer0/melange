@@ -1,36 +1,78 @@
 // Canonical source: melange-devices/src/diode.rs (DiodeShockley)
 // Duplicated here because generated code must be self-contained.
 
+/// Forward-current ceiling for the extended exponential region [A].
+/// Above this the I-V curve continues as a linear extension (hard wall).
+const DIODE_MAX_FWD_I: f64 = 1e3;
+
 /// Diode current: i_d = is * (exp(v_d / n_vt) - 1)
+///
+/// For v_d ≤ 40·n_vt this is the legacy fast_exp path (bit-exact with prior
+/// behavior). Above it, the true exponential continues in ln-current space
+/// (is·e^x = e^(x + ln is), immune to exp overflow and the fast_exp ±40
+/// clamp) until forward current reaches DIODE_MAX_FWD_I, then extends
+/// linearly. Without this, extreme-IS models (wide-bandgap junctions,
+/// IS=1e-30, Vf ≈ 3 V) have their conduction knee above the clamp and the
+/// device is electrically absent at any voltage.
 #[inline(always)]
 fn diode_current(v_d: f64, is: f64, n_vt: f64) -> f64 {
-    let v_clamped = v_d.clamp(-40.0 * n_vt, 40.0 * n_vt);
-    is * (fast_exp(v_clamped / n_vt) - 1.0)
+    let x = v_d / n_vt;
+    if x <= 40.0 {
+        return is * (fast_exp(x.max(-40.0)) - 1.0);
+    }
+    // Cold path: beyond the legacy clamp (NR overshoot or wide-bandgap knee)
+    let ln_is = is.ln();
+    let y = x + ln_is; // ln of forward current
+    let y_max = (40.0 + ln_is).max(DIODE_MAX_FWD_I.ln());
+    if y <= y_max {
+        y.exp() - is
+    } else {
+        let i_c = y_max.exp();
+        (i_c - is) + i_c * (y - y_max)
+    }
 }
 
 /// Diode conductance: g_d = di/dv = (is / n_vt) * exp(v_d / n_vt)
+/// Matches the derivative of diode_current in all three regions.
 #[inline(always)]
 fn diode_conductance(v_d: f64, is: f64, n_vt: f64) -> f64 {
-    let v_clamped = v_d.clamp(-40.0 * n_vt, 40.0 * n_vt);
-    (is / n_vt) * fast_exp(v_clamped / n_vt)
+    let x = v_d / n_vt;
+    if x <= 40.0 {
+        return (is / n_vt) * fast_exp(x.max(-40.0));
+    }
+    let ln_is = is.ln();
+    let y_max = (40.0 + ln_is).max(DIODE_MAX_FWD_I.ln());
+    let y = (x + ln_is).min(y_max);
+    y.exp() / n_vt
 }
 
-/// Diode with series resistance: solve V_j + I(V_j)*RS = V_d for V_j,
-/// then return I(V_j). Uses NR with step limiting.
+/// Solve V_j + I(V_j)*RS = V_d for the junction voltage V_j.
+///
+/// Scalar NR seeded at vcrit with pnjlim log-compressed steps. A flat
+/// 4·n_vt step clamp from a 0.7 V seed cannot reach wide-bandgap knees
+/// (Vf ≈ 3 V) within any reasonable iteration budget.
 #[inline(always)]
-fn diode_current_with_rs(v_d: f64, is: f64, n_vt: f64, rs: f64) -> f64 {
-    let max_step = 4.0 * n_vt;
-    let mut v_j = if v_d > 0.0 { v_d.min(0.7) } else { v_d };
-    for _ in 0..8 {
+fn diode_solve_vj(v_d: f64, is: f64, n_vt: f64, rs: f64) -> f64 {
+    let vcrit = n_vt * (n_vt / (std::f64::consts::SQRT_2 * is)).ln();
+    let mut v_j = if v_d > 0.0 { v_d.min(vcrit) } else { v_d };
+    for _ in 0..32 {
         let id = diode_current(v_j, is, n_vt);
         let gd = diode_conductance(v_j, is, n_vt);
         let f = v_j + id * rs - v_d;
         let fp = 1.0 + gd * rs;
-        let mut delta = f / fp;
-        delta = delta.clamp(-max_step, max_step);
-        v_j -= delta;
+        let v_new = pnjlim(v_j - f / fp, v_j, n_vt, vcrit);
+        let delta = v_new - v_j;
+        v_j = v_new;
         if delta.abs() < 1e-10 { break; }
     }
+    v_j
+}
+
+/// Diode with series resistance: solve V_j + I(V_j)*RS = V_d for V_j,
+/// then return I(V_j).
+#[inline(always)]
+fn diode_current_with_rs(v_d: f64, is: f64, n_vt: f64, rs: f64) -> f64 {
+    let v_j = diode_solve_vj(v_d, is, n_vt, rs);
     diode_current(v_j, is, n_vt)
 }
 
@@ -38,18 +80,7 @@ fn diode_current_with_rs(v_d: f64, is: f64, n_vt: f64, rs: f64) -> f64 {
 /// where g_j is evaluated at the NR-solved junction voltage.
 #[inline(always)]
 fn diode_conductance_with_rs(v_d: f64, is: f64, n_vt: f64, rs: f64) -> f64 {
-    let max_step = 4.0 * n_vt;
-    let mut v_j = if v_d > 0.0 { v_d.min(0.7) } else { v_d };
-    for _ in 0..8 {
-        let id = diode_current(v_j, is, n_vt);
-        let gd = diode_conductance(v_j, is, n_vt);
-        let f = v_j + id * rs - v_d;
-        let fp = 1.0 + gd * rs;
-        let mut delta = f / fp;
-        delta = delta.clamp(-max_step, max_step);
-        v_j -= delta;
-        if delta.abs() < 1e-10 { break; }
-    }
+    let v_j = diode_solve_vj(v_d, is, n_vt, rs);
     let g_j = diode_conductance(v_j, is, n_vt);
     g_j / (1.0 + g_j * rs)
 }

@@ -345,12 +345,20 @@ impl BjtGummelPoon {
         let vbe_eff = s * vbe;
         let vbc_eff = s * vbc;
 
-        // Early effect — clamp to positive to prevent sign-flip near Early voltage
+        // Early effect — clamp to positive to prevent sign-flip near Early
+        // voltage. In the guard region q1 = 1 (with dq1 = 0 in `jacobian`)
+        // while the high-injection factor (1+D)/2 below stays live, so that
+        // the value and derivative describe the *same* function across the
+        // guard boundary. This matches the guard in `jacobian()` and the
+        // generated runtime's `bjt_evaluate` (device_bjt.rs.tera) — an early
+        // `return 1.0` here would silently drop high-injection roll-off and
+        // make DC OP disagree with the runtime.
         let q1_denom = 1.0 - vbe_eff / self.var - vbc_eff / self.vaf;
-        if q1_denom <= 0.0 || q1_denom.abs() < 1e-30 {
-            return 1.0;
-        }
-        let q1 = 1.0 / q1_denom;
+        let q1 = if q1_denom <= 0.0 || q1_denom.abs() < 1e-30 {
+            1.0
+        } else {
+            1.0 / q1_denom
+        };
 
         // High-level injection: q2 = cbe/IKF + cbc/IKR
         //     cbe = IS*(exp(Vbe/(NF*VT)) - 1), cbc = IS*(exp(Vbc/(NR*VT)) - 1)
@@ -544,8 +552,14 @@ mod tests {
         assert!(ic_npn > 0.0);
         assert!(ic_pnp < 0.0);
 
-        // Magnitudes should be similar
-        assert!((ic_npn.abs() - ic_pnp.abs()).abs() / ic_npn.abs() < 0.5);
+        // Magnitude symmetry is a property of polarity handling, not of two
+        // unrelated parts (2N2222A vs 2N3906 differ ~9x in IS): assert exact
+        // mirror behavior on a same-parameter NPN/PNP pair.
+        let npn_m = BjtEbersMoll::new(1e-14, 0.025851991, 200.0, 2.0, BjtPolarity::Npn);
+        let pnp_m = BjtEbersMoll::new(1e-14, 0.025851991, 200.0, 2.0, BjtPolarity::Pnp);
+        let i_n = npn_m.collector_current(vbe, vbc);
+        let i_p = pnp_m.collector_current(-vbe, -vbc);
+        assert!((i_n + i_p).abs() <= 1e-12 * i_n.abs());
     }
 
     #[test]
@@ -1742,5 +1756,77 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// GP qb guard region: `collector_current` and `jacobian` must describe
+    /// the SAME function on both sides of the q1_denom = 0 boundary.
+    ///
+    /// Historical bug: `qb()` returned 1.0 outright in the guard region
+    /// (`q1_denom <= 0`), silently dropping the live high-injection factor
+    /// (1+D)/2, while `jacobian()` set only q1 = 1 / dq1 = 0 and KEPT (1+D)/2
+    /// — so the value and derivative described different functions there, and
+    /// the DC OP path (this crate) disagreed with the generated runtime's
+    /// `bjt_evaluate` (device_bjt.rs.tera), which always kept (1+D)/2.
+    #[test]
+    fn test_gp_qb_guard_value_derivative_consistency() {
+        // Tiny Early voltages put the q1_denom = 0 boundary at reachable
+        // bias: q1_denom = 1 - vbe/VAR - vbc/VAF with VAR = 1, VAF = 2
+        // crosses zero at vbe = 0.85 when vbc = 0.3.
+        let is = 1e-14;
+        let base = BjtEbersMoll::new(is, VT_ROOM, 200.0, 2.0, BjtPolarity::Npn);
+        let gp = BjtGummelPoon::new(base, 2.0, 1.0, 0.3, 0.006);
+        let vbc = 0.3;
+        let vbe_boundary = 1.0 - vbc / 2.0; // q1_denom = 0 at vbe = 0.85
+
+        // FD-vs-analytic Jacobian check at points straddling the guard
+        // boundary. Each central-difference stencil stays fully on one side
+        // (offset 5e-3 vs h = 1e-5), because the guard clamp itself is a
+        // (deliberate) jump in q1. h = 1e-5 keeps f64 cancellation noise
+        // (~eps*Ic/2h) below the tiny dIc/dVbc (~3e-7 A/V) while truncation
+        // error stays ~(h/vt)^2/6 ~ 2e-8 relative.
+        let h = 1e-5;
+        for vbe0 in [vbe_boundary - 5e-3, vbe_boundary + 5e-3] {
+            let jac = gp.jacobian(&[vbe0, vbc]);
+
+            let fd_dvbe = (gp.collector_current(vbe0 + h, vbc)
+                - gp.collector_current(vbe0 - h, vbc))
+                / (2.0 * h);
+            let rel_be = (jac[0] - fd_dvbe).abs() / fd_dvbe.abs().max(1e-12);
+            assert!(
+                rel_be < 1e-4,
+                "dIc/dVbe FD mismatch at vbe={vbe0} (guard={}): analytic={:.6e} fd={fd_dvbe:.6e} rel={rel_be:.2e}",
+                vbe0 > vbe_boundary,
+                jac[0]
+            );
+
+            let fd_dvbc = (gp.collector_current(vbe0, vbc + h)
+                - gp.collector_current(vbe0, vbc - h))
+                / (2.0 * h);
+            let rel_bc = (jac[1] - fd_dvbc).abs() / fd_dvbc.abs().max(1e-12);
+            assert!(
+                rel_bc < 1e-4,
+                "dIc/dVbc FD mismatch at vbe={vbe0} (guard={}): analytic={:.6e} fd={fd_dvbc:.6e} rel={rel_bc:.2e}",
+                vbe0 > vbe_boundary,
+                jac[1]
+            );
+        }
+
+        // Inside the guard region the high-injection factor must stay live:
+        // Ic = Icc / qb - Is/BR*(exp_bc - 1) with qb = (1 + sqrt(1 + 4*q2))/2
+        // (q1 clamped to 1). The old early-return gave qb = 1 (~3.3x more
+        // current here), so this pins the unified semantics exactly.
+        let vbe_g = vbe_boundary + 5e-3;
+        let exp_be = (vbe_g / VT_ROOM).exp();
+        let exp_bc = (vbc / VT_ROOM).exp();
+        let q2 = is * (exp_be - 1.0) / 0.3 + is * (exp_bc - 1.0) / 0.006;
+        let qb = (1.0 + (1.0 + 4.0 * q2).sqrt()) / 2.0;
+        assert!(qb > 2.0, "test setup: expected strong high injection, qb={qb}");
+        let expected = is * (exp_be - exp_bc) / qb - is / 2.0 * (exp_bc - 1.0);
+        let ic = gp.collector_current(vbe_g, vbc);
+        let rel = ((ic - expected) / expected).abs();
+        assert!(
+            rel < 1e-9,
+            "guard-region Ic must keep (1+D)/2: got {ic:.6e}, expected {expected:.6e}, rel={rel:.2e}"
+        );
     }
 }

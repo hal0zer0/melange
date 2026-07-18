@@ -58,13 +58,11 @@ pub fn auto_route(kernel: &DkKernel, mna: &MnaSystem, dk_failed: bool) -> Routin
     let n = kernel.n;
     let m = kernel.m;
 
-    // Count transformer groups
-    let n_xfmr_groups = mna.transformer_groups.len()
-        + if !mna.coupled_inductors.is_empty() {
-            1
-        } else {
-            0
-        };
+    // Count transformer groups. Each coupled-inductor K-pair is an
+    // independent 2-winding group — counting them all (not collapsing to 1)
+    // enforces the documented ≤1-transformer limit for the DK Schur path:
+    // two independent K-pairs must route nodal.
+    let n_xfmr_groups = mna.transformer_groups.len() + mna.coupled_inductors.len();
     let has_inductors = !mna.inductors.is_empty()
         || !mna.coupled_inductors.is_empty()
         || !mna.transformer_groups.is_empty();
@@ -238,6 +236,53 @@ C1 out 0 1u
         let decision = auto_route(&kernel, &mna, false);
         assert_eq!(decision.route, SolverRoute::DkSchur);
         assert!(decision.spectral_radius < 1.002);
+    }
+
+    /// Two independent 2-winding K-pairs must count as two transformer
+    /// groups and route off DK Schur. Pre-fix, all coupled_inductors
+    /// collapsed to a single group, so a two-transformer circuit evaded the
+    /// documented ≤1-transformer DK limit.
+    #[test]
+    fn test_route_two_independent_k_pairs_off_dk_schur() {
+        let spice = "\
+Two independent transformer pairs
+R1 in p1 100
+L1 p1 0 10m
+L2 s1 0 10m
+K1 L1 L2 0.95
+R2 s1 p2 100
+L3 p2 0 10m
+L4 s2 0 10m
+K2 L3 L4 0.95
+R3 s2 out 100
+Rload out 0 1k
+C1 p1 0 100p
+C2 s1 0 100p
+C3 out 0 100p
+";
+        let netlist = Netlist::parse(spice).unwrap();
+        let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
+        mna.g[0][0] += 1.0;
+        assert_eq!(
+            mna.coupled_inductors.len(),
+            2,
+            "circuit should have two independent K-pairs"
+        );
+        let (kernel, dk_failed) = match DkKernel::from_mna(&mna, 44100.0) {
+            Ok(k) => (k, false),
+            Err(_) => (DkKernel::from_mna_augmented(&mna, 44100.0).unwrap(), true),
+        };
+        let decision = auto_route(&kernel, &mna, dk_failed);
+        assert!(
+            decision.multi_transformer,
+            "two independent K-pairs must be counted as two transformer groups"
+        );
+        assert_eq!(
+            decision.route,
+            SolverRoute::Nodal,
+            "two-transformer circuit must route off DK Schur (reason: {})",
+            decision.reason
+        );
     }
 
     #[test]

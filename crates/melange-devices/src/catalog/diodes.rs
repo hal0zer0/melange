@@ -36,19 +36,33 @@ pub const CATALOG: &[DiodeCatalogEntry] = &[
         source: "ON Semiconductor SPICE model",
     },
     // 1N34A — germanium point-contact diode
+    // MODPEX-fitted measured card (widely published, e.g. All About
+    // Circuits SPICE-models chapter):
+    //   .MODEL 1N34A D(is=2e-7 rs=7 n=1.3 bv=75 ibv=18e-3 eg=0.67 ...)
+    // RS=7 ohm is not representable in this entry (IS/N only); Vf@1mA with
+    // IS/N alone is ~0.286V vs ~0.293V with RS — acceptable. The previous
+    // N=1.05 was atypically hard for point-contact Ge (curve knee far too
+    // sharp); no published card was found using it. Matches the local
+    // D1N34A cards in melange-circuits (sad-bastard, uniquorn, horseface,
+    // pretty-baby). LTspice standard.dio ships an alternative fit
+    // (IS=2.6u N=1.6 RS=6.5).
     DiodeCatalogEntry {
         names: &["1N34A", "1N34"],
         is: 2e-7,
-        n: 1.05,
-        source: "Germanium datasheet (typical)",
+        n: 1.3,
+        source: "MODPEX measured fit (IS=2e-7 N=1.3 RS=7; RS not represented)",
     },
     // BAT41 / BAT46 — Schottky barrier diode
-    // Vishay: IS≈2e-8, N≈1.04
+    // Approximation, NOT a verbatim vendor card. Vishay's published BAT41
+    // model uses an extended form (IS=11n N=1.0 plus recombination
+    // ISR/NR and RS terms) that this IS/N-only entry cannot represent;
+    // both agree near 1mA (Vf ~0.29V). Philips BAT46WJ (LTspice
+    // standard.dio): Is=.1703u N=1.06 Rs=1.3.
     DiodeCatalogEntry {
         names: &["BAT41", "BAT46"],
         is: 2e-8,
         n: 1.04,
-        source: "Vishay SPICE model",
+        source: "Small-signal Schottky approximation (no verbatim vendor card)",
     },
     // OA91 — vintage germanium diode
     DiodeCatalogEntry {
@@ -58,11 +72,17 @@ pub const CATALOG: &[DiodeCatalogEntry] = &[
         source: "Vintage germanium (estimated from measurements)",
     },
     // 1N5819 — 1A Schottky rectifier
+    // onsemi card (LTspice standard.dio, mfg=OnSemi):
+    //   .model 1N5819 D(Is=31.7u Rs=.051 N=1.373 Cjo=110p Eg=.69 ...)
+    // RS=0.051 ohm is not representable here (IS/N only): Vf@1A is ~0.368V
+    // vs ~0.419V with RS (datasheet max 0.45V @ 1A). The previous
+    // IS=1e-8/N=1.04 claimed the same provenance but matched no power-
+    // Schottky card (Vf@1A ~0.50V, above datasheet max).
     DiodeCatalogEntry {
         names: &["1N5819"],
-        is: 1e-8,
-        n: 1.04,
-        source: "ON Semiconductor SPICE model",
+        is: 3.17e-5,
+        n: 1.373,
+        source: "onsemi 1N5819 SPICE model via LTspice standard.dio (RS=0.051 not represented)",
     },
 ];
 
@@ -145,8 +165,7 @@ mod tests {
 
     #[test]
     fn test_schottky_matches_1n5819() {
-        // schottky() factory uses slightly different IS from 1N5819 catalog
-        // (1e-8 vs 1e-8) — verify same concept
+        // schottky() factory resolves through this catalog entry — must match.
         let factory = DiodeShockley::schottky();
         let cat = lookup("1N5819").unwrap();
         assert_eq!(factory.is, cat.is);
@@ -210,11 +229,34 @@ mod tests {
     #[test]
     fn test_1n34a_forward_voltage() {
         let d = make_diode(lookup("1N34A").unwrap());
-        // Germanium: Vf ≈ 0.3V @ 1mA
+        // Germanium: Vf ≈ 0.3V @ 1mA (datasheet typical).
+        // MODPEX card IS=2e-7/N=1.3 gives 0.286V without RS (0.293V with
+        // the card's RS=7, which this model omits).
         let vf_1ma = solve_vf(&d, 1e-3);
         assert!(
             (vf_1ma - 0.3).abs() < 0.15,
             "1N34A Vf@1mA = {:.3}V (expected ~0.3V)",
+            vf_1ma
+        );
+    }
+
+    #[test]
+    fn test_1n5819_forward_voltage() {
+        let d = make_diode(lookup("1N5819").unwrap());
+        // onsemi datasheet: Vf max 0.45V @ 1A (25C), typ ~0.34-0.40V.
+        // The onsemi card (Is=31.7u N=1.373) gives ~0.368V without RS
+        // (~0.419V with the card's RS=0.051, which this model omits).
+        let vf_1a = solve_vf(&d, 1.0);
+        assert!(
+            vf_1a > 0.30 && vf_1a < 0.45,
+            "1N5819 Vf@1A = {:.3}V (card predicts ~0.368V, datasheet max 0.45V)",
+            vf_1a
+        );
+        // Low-current sanity: Schottky knee well below silicon.
+        let vf_1ma = solve_vf(&d, 1e-3);
+        assert!(
+            vf_1ma > 0.05 && vf_1ma < 0.25,
+            "1N5819 Vf@1mA = {:.3}V (card predicts ~0.124V)",
             vf_1ma
         );
     }
@@ -282,5 +324,9 @@ mod tests {
     #[test]
     fn test_oa91_conductance() {
         check_diode_conductance(lookup("OA91").unwrap());
+    }
+    #[test]
+    fn test_1n5819_conductance() {
+        check_diode_conductance(lookup("1N5819").unwrap());
     }
 }

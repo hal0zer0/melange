@@ -6,7 +6,8 @@
 /// Uses Koren 1996 equation with channel-length modulation:
 ///   inner = Kp * (1/mu + Vgk / sqrt(Kvb + Vpk^2))
 ///   E1 = (Vpk / Kp) * ln(1 + exp(inner))
-///   Ip_koren = E1^ex / Kg1   (if E1 > 0)
+///   Ip_koren = 2 * E1^ex / Kg1   (if E1 > 0; Koren PWR+PWRS form —
+///              the ×2 is part of the published model, Kg1 is fitted WITH it)
 ///   Ip = Ip_koren * (1 + lambda * Vpk)
 #[inline(always)]
 fn tube_ip(vgk: f64, vpk: f64, mu: f64, ex: f64, kg1: f64, kp: f64, kvb: f64,
@@ -18,7 +19,7 @@ fn tube_ip(vgk: f64, vpk: f64, mu: f64, ex: f64, kg1: f64, kp: f64, kvb: f64,
                    else if inner < -20.0 { 0.0 }
                    else { fast_ln(1.0 + fast_exp(inner)) };
     let e1 = (vpk / kp) * softplus;
-    let ip_koren = if e1 <= 0.0 { 0.0 } else { e1.powf(ex) / kg1 };
+    let ip_koren = if e1 <= 0.0 { 0.0 } else { 2.0 * e1.powf(ex) / kg1 };
     ip_koren * (1.0 + lambda * vpk)
 }
 
@@ -64,10 +65,10 @@ fn tube_jacobian(vgk: f64, vpk: f64, mu: f64, ex: f64, kg1: f64, kp: f64, kvb: f
     let e1 = (vpk / kp) * softplus;
     if e1 <= 1e-10 { return [0.0, 0.0, dig_dvgk, 0.0]; }
 
-    let ip_koren = e1.powf(ex) / kg1;
+    let ip_koren = 2.0 * e1.powf(ex) / kg1;
     let lambda_factor = 1.0 + lambda * vpk;
 
-    let dip_de1 = ex * e1.powf(ex - 1.0) / kg1;
+    let dip_de1 = 2.0 * ex * e1.powf(ex - 1.0) / kg1;
     let de1_dvgk = vpk * sigmoid / s;
     let de1_dvpk = softplus / kp - sigmoid * vgk * vpk * vpk / (s * s * s);
 
@@ -154,13 +155,14 @@ fn tube_evaluate(vgk: f64, vpk: f64, mu: f64, ex: f64, kg1: f64, kp: f64, kvb: f
         return (0.0, ig, [0.0, 0.0, dig_dvgk, 0.0]);
     }
 
-    // Shared: compute e1^ex once, derive e1^(ex-1) = e1^ex / e1
+    // Shared: compute e1^ex once, derive e1^(ex-1) = e1^ex / e1.
+    // ×2 from Koren's PWR+PWRS plate-current form (see tube_ip).
     let e1_pow_ex = e1.powf(ex);
-    let ip_koren = e1_pow_ex / kg1;
+    let ip_koren = 2.0 * e1_pow_ex / kg1;
     let lambda_factor = 1.0 + lambda * vpk;
     let ip = ip_koren * lambda_factor;
 
-    let dip_de1 = ex * e1_pow_ex / (e1 * kg1);
+    let dip_de1 = 2.0 * ex * e1_pow_ex / (e1 * kg1);
     let de1_dvgk = vpk * sigmoid / s;
     let de1_dvpk = softplus / kp - sigmoid * vgk * vpk * vpk / (s * s * s);
 

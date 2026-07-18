@@ -62,8 +62,9 @@ CE emitter 0 100u
 Q1 collector base emitter PNP1
 ";
 
-/// BJT with parasitic resistances. Should NOT be detected as forward-active
-/// even if Vbc < -1V (excluded by design because inner NR changes dimension).
+/// BJT with parasitic resistances. Must NOT be FA-reduced even though
+/// Vbc < -1V: the 1D FA emission drops RB/RC/RE entirely, and gm·RE reaches
+/// O(1) on power BJTs (a several-x transconductance error).
 const BJT_WITH_PARASITICS: &str = "\
 BJT with parasitics
 .model NPN_R NPN(IS=1e-14 BF=200 BR=3 RB=100 RC=10 RE=5)
@@ -76,8 +77,8 @@ CE emitter 0 100u
 Q1 collector base emitter NPN_R
 ";
 
-/// BJT with Gummel-Poon params (finite VAF). Should NOT be detected as
-/// forward-active (excluded by design because GP model is more accurate).
+/// BJT with Gummel-Poon params (finite VAF). Must NOT be FA-reduced —
+/// the 1D FA emission is pure Ebers-Moll and would drop qb/Early/IKF.
 const BJT_WITH_GP: &str = "\
 BJT with Gummel-Poon
 .model NPN_GP NPN(IS=1e-14 BF=200 BR=3 VAF=100 IKF=0.3)
@@ -282,6 +283,37 @@ fn generate_with_forward_active(spice: &str) -> (String, usize, HashSet<String>)
     (result.code, m, forward_active)
 }
 
+/// Forward-active pipeline with a caller-forced FA set (bypasses detection).
+///
+/// Since 2026-07-18, `detect_forward_active_bjts` excludes parasitic-carded
+/// and self-heating BJTs, so the K_eff-vs-FA regression tests below can no
+/// longer reach the FA-reduced-parasitic-BJT state through detection. The
+/// state is still reachable through the public
+/// `MnaSystem::from_netlist_forward_active` API, so the emitter-side
+/// dimension gates keep their own regression coverage via this helper.
+fn generate_with_forced_fa(spice: &str, forced: &HashSet<String>) -> (String, usize) {
+    let netlist = Netlist::parse(spice).expect("parse");
+    let mut mna = MnaSystem::from_netlist_forward_active(&netlist, forced).expect("FA MNA");
+    let (input_node, output_node) = resolve_nodes(&mna);
+
+    let device_slots =
+        CircuitIR::build_device_info_with_mna(&netlist, Some(&mna)).unwrap_or_default();
+    if !device_slots.is_empty() {
+        mna.stamp_device_junction_caps(&device_slots);
+    }
+    if input_node < mna.n {
+        mna.g[input_node][input_node] += 1.0;
+    }
+
+    let config = make_config(input_node, output_node);
+    let kernel = DkKernel::from_mna(&mna, 44100.0).expect("kernel");
+    let m = kernel.m;
+
+    let codegen = CodeGenerator::new(config);
+    let result = codegen.generate(&kernel, &mna, &netlist).expect("codegen");
+    (result.code, m)
+}
+
 /// Generate code WITHOUT forward-active optimization (standard 2D).
 fn generate_without_forward_active(spice: &str) -> (String, usize) {
     let netlist = Netlist::parse(spice).expect("parse");
@@ -377,10 +409,12 @@ fn test_detect_forward_active_pnp() {
     );
 }
 
-/// BJT with parasitic resistances (RB/RC/RE > 0) should NOT be detected.
-/// The forward-active optimization is excluded for BJTs with parasitics
-/// BJT with parasitics IS now detected as forward-active.
-/// The 1D FA model ignores parasitics (small for forward-active operation).
+/// BJT with parasitic resistances (RB/RC/RE > 0) must NOT be FA-reduced:
+/// the 1D FA emission drops the ohmic parasitics entirely. gm·RE is O(1) on
+/// power BJTs (RE=0.5Ω @ 100 mA → gm·RE ≈ 1.9), so dropping them is a
+/// several-x transconductance error on exactly the devices FA targets.
+/// (Expectation flipped 2026-07-18: parasitics were previously allowed on
+/// the strength of "Ib·RB << Vbe", which only ever justified dropping RB.)
 #[test]
 fn test_detect_forward_active_with_parasitics() {
     let (netlist, mut mna) = build_mna_with_gin(BJT_WITH_PARASITICS);
@@ -394,13 +428,15 @@ fn test_detect_forward_active_with_parasitics() {
     let fa = CircuitIR::detect_forward_active_bjts(&mna, &netlist, &config);
 
     assert!(
-        !fa.is_empty(),
-        "BJT with parasitics SHOULD be detected as forward-active (parasitics ignored in 1D model)"
+        fa.is_empty(),
+        "BJT with parasitics must NOT be FA-reduced (FA emission drops RB/RC/RE; gm·RE is O(1) on power BJTs). Got: {:?}",
+        fa
     );
 }
 
-/// BJT with Gummel-Poon params IS now detected as forward-active.
-/// GP qb(Vbc) is ~constant when Vbc is deeply reverse-biased.
+/// BJT with Gummel-Poon params (finite VAF/IKF) must NOT be FA-reduced:
+/// the 1D FA emission is pure Ebers-Moll (no qb → no Early/IKF, Ib=Ic/BF
+/// ignores ISE), so GP-carded devices route full-2D for accuracy.
 #[test]
 fn test_detect_forward_active_with_gummel_poon() {
     let (netlist, mut mna) = build_mna_with_gin(BJT_WITH_GP);
@@ -414,8 +450,41 @@ fn test_detect_forward_active_with_gummel_poon() {
     let fa = CircuitIR::detect_forward_active_bjts(&mna, &netlist, &config);
 
     assert!(
-        !fa.is_empty(),
-        "BJT with GP params SHOULD be detected as forward-active (qb ~constant at deep reverse bias)"
+        fa.is_empty(),
+        "GP-carded BJT must NOT be FA-reduced (1D emission drops qb/Early/IKF). Got: {:?}",
+        fa
+    );
+}
+
+/// BJT with ISE leakage must NOT be FA-reduced: the 1D FA emission uses
+/// Ib = Ic/BF, which ignores the ISE leakage term.
+#[test]
+fn test_detect_forward_active_with_ise_not_reduced() {
+    let spice = "\
+BJT with ISE leakage
+.model NPN_ISE NPN(IS=1e-14 BF=200 BR=3 ISE=1e-13 NE=1.5)
+VCC vcc 0 DC 15
+R1 vcc base 100k
+R2 base 0 10k
+RC vcc collector 10k
+RE emitter 0 1k
+CE emitter 0 100u
+Q1 collector base emitter NPN_ISE
+";
+    let (netlist, mut mna) = build_mna_with_gin(spice);
+
+    let device_slots = CircuitIR::build_device_info(&netlist).unwrap_or_default();
+    if !device_slots.is_empty() {
+        mna.stamp_device_junction_caps(&device_slots);
+    }
+
+    let config = make_config(0, 0);
+    let fa = CircuitIR::detect_forward_active_bjts(&mna, &netlist, &config);
+
+    assert!(
+        fa.is_empty(),
+        "ISE-carded BJT must NOT be FA-reduced (1D Ib=Ic/BF drops ISE leakage). Got: {:?}",
+        fa
     );
 }
 
@@ -935,9 +1004,11 @@ fn test_device_slots_forward_active_type() {
 /// Circuit with one FA BJT followed by another BJT and a diode.
 /// Mirrors the failing wurli-preamp topology: Q1 FA (1D) + Q2 (2D) + D1 (1D) = M=4.
 /// detect_grid_off_pentodes must not panic on this FA-reduced MNA.
+/// NPN1 is a pure Ebers-Moll card (no VAF/IKF): GP-carded BJTs no longer
+/// FA-reduce, and this regression needs the FA reduction to actually fire.
 const TWO_BJT_DIODE_FA: &str = "\
 Two BJT plus Diode (FA regression)
-.model NPN1 NPN(IS=2.66e-15 BF=500 NF=1.0 VAF=100 IKF=0.03)
+.model NPN1 NPN(IS=2.66e-15 BF=500 NF=1.0)
 .model D1N4148 D(IS=2.52e-9 N=1.752)
 R1 in mid_in 10k
 C1 mid_in base1 1u
@@ -1031,10 +1102,15 @@ fn test_detect_grid_off_no_panic_after_fa_reduction() {
 // FA-reduced parasitic BJTs, no pots) silently shipped wrong K_DEFAULT; the
 // openwurli wurli-preamp (2 FA-reduced parasitic BJTs + a .pot) panicked.
 //
-// The 1D FA path explicitly ignores parasitics by design (see
-// ir.rs::detect_forward_active_bjts: "Ib*RB << Vbe for forward-active"),
-// so K_eff stamping for FA-reduced slots is physics-incorrect regardless of
-// OOB. Fix gates both stamp sites on slot.dimension == 2.
+// The 1D FA path ignores parasitics, so K_eff stamping for FA-reduced slots
+// is physics-incorrect regardless of OOB. Fix gates both stamp sites on
+// slot.dimension == 2.
+//
+// NOTE (2026-07-18): detect_forward_active_bjts now excludes parasitic-carded
+// BJTs from FA reduction entirely (FA emission drops RB/RC/RE; gm·RE is O(1)
+// on power BJTs), so these tests force the FA set through
+// from_netlist_forward_active to keep the emitter-side dimension gates under
+// regression coverage.
 
 /// Two cascaded CE BJTs with parasitics. Both go forward-active (typical
 /// audio-stage bias). Mirrors the steve-1073-output and openwurli-wurli-preamp
@@ -1087,26 +1163,18 @@ Rvol out 0 50k
 /// FA-reduced slots.
 #[test]
 fn test_k_eff_skips_fa_reduced_parasitic_bjts() {
-    let (code_with_parasitics, m_par, fa_par) = generate_with_forward_active(TWO_FA_PARASITIC_BJTS);
+    let forced: HashSet<String> = ["Q1".to_string(), "Q2".to_string()].into_iter().collect();
+    let (code_with_parasitics, m_par) = generate_with_forced_fa(TWO_FA_PARASITIC_BJTS, &forced);
 
     // Strip parasitics from the model to get the reference K_DEFAULT.
     let stripped = TWO_FA_PARASITIC_BJTS.replace("RB=50 RC=1 RE=0.5", "");
-    let (code_without_parasitics, m_ref, fa_ref) = generate_with_forward_active(&stripped);
+    let (code_without_parasitics, m_ref) = generate_with_forced_fa(&stripped, &forced);
 
     assert_eq!(
         m_par, m_ref,
         "M should match between parasitic and stripped versions"
     );
-    assert_eq!(
-        fa_par.len(),
-        2,
-        "Both BJTs should be FA-reduced in the parasitic version"
-    );
-    assert_eq!(
-        fa_ref.len(),
-        2,
-        "Both BJTs should be FA-reduced in the stripped version"
-    );
+    assert_eq!(m_par, 2, "Both BJTs forced FA-reduced → M=2");
 
     // Extract K_DEFAULT matrix text from each.
     let k_par = extract_const_matrix(&code_with_parasitics, "K_DEFAULT");
@@ -1126,8 +1194,9 @@ fn test_k_eff_skips_fa_reduced_parasitic_bjts() {
 /// Pre-fix, the K_eff stamp for the last BJT wrote k[s+1][s+1] where s+1==M.
 #[test]
 fn test_k_eff_no_oob_panic_with_pot_rebuild() {
-    let (code, _m, fa) = generate_with_forward_active(TWO_FA_PARASITIC_BJTS_WITH_POT);
-    assert_eq!(fa.len(), 2, "Both BJTs should be FA-reduced");
+    let forced: HashSet<String> = ["Q1".to_string(), "Q2".to_string()].into_iter().collect();
+    let (code, m) = generate_with_forced_fa(TWO_FA_PARASITIC_BJTS_WITH_POT, &forced);
+    assert_eq!(m, 2, "Both BJTs forced FA-reduced → M=2");
 
     // compile_and_run constructs CircuitState::default(), which runs the
     // pot-rebuild path. Pre-fix this panicked OOB on the last FA BJT's stamp.
@@ -1140,6 +1209,134 @@ fn test_k_eff_no_oob_panic_with_pot_rebuild() {
     for (i, s) in samples.iter().enumerate() {
         assert!(s.is_finite(), "Sample {i} should be finite, got {s}");
     }
+}
+
+// ============================================================================
+// Regression: self-heating / parasitic BJTs excluded from FA reduction
+// ============================================================================
+//
+// Pre-fix bug (July 2026): both emitters' thermal-update loops matched
+// `DeviceParams::Bjt(bp) if bp.has_self_heating()` with no device_type check
+// and emitted `i_nl[s+1]` / Vbc reads for the 2D slot pair. For a 1D
+// FA-reduced BJT, s+1 is the NEXT device's slot — silently corrupting the
+// thermal power computation — or out of bounds when the BJT is the last
+// device, in which case the generated code does not even compile
+// (const-index OOB on a fixed-size array is a hard rustc error).
+//
+// Fixed at both ends:
+//   (a) detect_forward_active_bjts excludes has_self_heating() (and
+//       has_parasitics()) from FA reduction;
+//   (b) both emitter thermal arms additionally require
+//       slot.device_type == DeviceType::Bjt.
+
+/// Pure Ebers-Moll BJT with self-heating (RTH/CTH), forward-active bias.
+/// Q1 is the LAST (only) nonlinear device, so pre-fix the emitted
+/// `i_nl[s+1]` was out of bounds and the generated code failed to compile.
+const BJT_SELF_HEATING_FA: &str = "\
+Self-heating BJT in forward-active bias
+.model NPN_TH NPN(IS=1e-14 BF=200 BR=3 RTH=500 CTH=1e-3)
+VCC vcc 0 DC 15
+R1 vcc base 100k
+R2 base 0 10k
+RC vcc collector 10k
+RE emitter 0 1k
+CE emitter 0 100u
+Q1 collector base emitter NPN_TH
+";
+
+/// Pure Ebers-Moll BJT with only RE=0.5 (power-BJT emitter resistance),
+/// forward-active bias. gm·RE reaches O(1) at power-stage currents, so the
+/// FA emission (which drops RE entirely) must not be used.
+const BJT_RE_ONLY_FA: &str = "\
+BJT with RE=0.5 in forward-active bias
+.model NPN_RE NPN(IS=1e-14 BF=200 BR=3 RE=0.5)
+VCC vcc 0 DC 15
+R1 vcc base 100k
+R2 base 0 10k
+RC vcc collector 10k
+RE emitter 0 1k
+CE emitter 0 100u
+Q1 collector base emitter NPN_RE
+";
+
+/// Self-heating BJT in FA bias must NOT be FA-reduced: the thermal update
+/// reads the 2D (Ic, Ib)/(Vbe, Vbc) slot pair at (s, s+1).
+#[test]
+fn test_detect_forward_active_self_heating_not_reduced() {
+    let (netlist, mut mna) = build_mna_with_gin(BJT_SELF_HEATING_FA);
+
+    let device_slots = CircuitIR::build_device_info(&netlist).unwrap_or_default();
+    if !device_slots.is_empty() {
+        mna.stamp_device_junction_caps(&device_slots);
+    }
+
+    let config = make_config(0, 0);
+    let fa = CircuitIR::detect_forward_active_bjts(&mna, &netlist, &config);
+    assert!(
+        fa.is_empty(),
+        "Self-heating BJT must NOT be FA-reduced (thermal update reads the 2D slot pair). Got: {:?}",
+        fa
+    );
+
+    // Full-2D dimension is preserved through the pipeline.
+    let q1 = mna
+        .nonlinear_devices
+        .iter()
+        .find(|d| d.name.eq_ignore_ascii_case("Q1"))
+        .expect("Q1 not found");
+    assert_eq!(q1.dimension, 2, "Q1 must stay 2D");
+}
+
+/// Full pipeline on the self-heating FA circuit: no FA reduction (M stays 2)
+/// and the generated code compiles. Pre-fix, if the FA reduction fired the
+/// thermal arm emitted `i_nl[1]` on an M=1 kernel → rustc hard error.
+#[test]
+fn test_codegen_self_heating_fa_bias_stays_2d_and_compiles() {
+    let (code, m, fa) = generate_with_forward_active(BJT_SELF_HEATING_FA);
+    assert!(
+        fa.is_empty(),
+        "Self-heating BJT must NOT be FA-reduced. Got: {:?}",
+        fa
+    );
+    assert_eq!(m, 2, "M must stay 2 (full-2D BJT)");
+    assert!(
+        code.contains("self-heating thermal update"),
+        "Generated code should contain the BJT thermal update block"
+    );
+    assert_compiles(&code, "self-heating BJT in FA bias");
+}
+
+/// RE=0.5 (power-BJT) card in FA bias must NOT be FA-reduced, and the
+/// generated full-2D code compiles.
+#[test]
+fn test_codegen_re_only_fa_bias_stays_2d_and_compiles() {
+    let (code, m, fa) = generate_with_forward_active(BJT_RE_ONLY_FA);
+    assert!(
+        fa.is_empty(),
+        "RE-carded BJT must NOT be FA-reduced (gm·RE is O(1) on power BJTs). Got: {:?}",
+        fa
+    );
+    assert_eq!(m, 2, "M must stay 2 (full-2D BJT)");
+    assert_compiles(&code, "RE=0.5 BJT in FA bias");
+}
+
+/// Belt-and-braces (emitter-side guard): even when FA reduction is FORCED on
+/// a self-heating BJT through the public from_netlist_forward_active API,
+/// the thermal arm must not emit — the match arms require
+/// slot.device_type == DeviceType::Bjt, making slot aliasing structurally
+/// impossible. Pre-guard, this emitted `i_nl[1]` on an M=1 kernel and the
+/// generated code failed to compile.
+#[test]
+fn test_forced_fa_self_heating_thermal_arm_not_emitted() {
+    let forced: HashSet<String> = ["Q1".to_string()].into_iter().collect();
+    let (code, m) = generate_with_forced_fa(BJT_SELF_HEATING_FA, &forced);
+    assert_eq!(m, 1, "Forced FA reduction should give M=1");
+    assert!(
+        !code.contains("self-heating thermal update"),
+        "Thermal update must NOT be emitted for an FA-reduced (1D) slot — \
+         it reads the 2D slot pair and would alias the next device's slot"
+    );
+    assert_compiles(&code, "forced-FA self-heating BJT (thermal arm suppressed)");
 }
 
 /// Extract a `pub const NAME: [[f64; M]; M] = [ ... ];` matrix body as a

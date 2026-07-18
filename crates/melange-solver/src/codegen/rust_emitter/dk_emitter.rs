@@ -14,7 +14,7 @@ use super::helpers::{
     transformer_group_template_data, SwitchCompTemplateData, SwitchTemplateData,
 };
 use super::RustEmitter;
-use crate::codegen::ir::{CircuitIR, DeviceParams, PotentiometerIR};
+use crate::codegen::ir::{CircuitIR, DeviceParams, DeviceType, PotentiometerIR};
 use crate::codegen::{CodegenError, NoiseMode};
 
 impl RustEmitter {
@@ -2190,10 +2190,17 @@ impl RustEmitter {
                             "0.0".to_string()
                         };
                         let sign = if mp.is_p_channel { -1.0 } else { 1.0 };
+                        // The body-effect shift must be applied in the
+                        // channel's effective (magnitude) space: the stored VT
+                        // is signed (negative for PMOS — device_mosfet.rs.tera
+                        // does vt_eff = sign * vt), so the GAMMA term is
+                        // multiplied by the channel sign. Reverse body bias
+                        // then always *increases* |VT|; without the sign a
+                        // PMOS |VT| would shrink instead.
                         body_effect_update.push_str(&format!(
                                 "    {{ // MOSFET {dev_num} body effect\n\
                                  \x20       let vsb = ({sign:.1}) * ({vs_expr} - {vb_expr});\n\
-                                 \x20       state.device_{dev_num}_vt = DEVICE_{dev_num}_VT + DEVICE_{dev_num}_GAMMA * ((DEVICE_{dev_num}_PHI + vsb.max(0.0)).sqrt() - DEVICE_{dev_num}_PHI.sqrt());\n\
+                                 \x20       state.device_{dev_num}_vt = DEVICE_{dev_num}_VT + ({sign:.1}) * DEVICE_{dev_num}_GAMMA * ((DEVICE_{dev_num}_PHI + vsb.max(0.0)).sqrt() - DEVICE_{dev_num}_PHI.sqrt());\n\
                                  \x20   }}\n"
                             ));
                     }
@@ -2207,13 +2214,25 @@ impl RustEmitter {
         // Device self-heating thermal update (after NR, before state save).
         // Runs for each BJT/diode whose `.model` sets a finite RTH. Uses the
         // converged `i_nl` and node voltages from this sample to compute P
-        // and advances Tj by one quasi-static forward Euler step.
+        // and advances Tj by one exact-exponential step of the RC thermal
+        // ODE (see `emit_thermal_tj_advance`).
         let mut thermal_update = String::new();
         for (dev_num, slot) in ir.device_slots.iter().enumerate() {
             match &slot.params {
-                DeviceParams::Bjt(bp) if bp.has_self_heating() => {
+                // The `device_type == Bjt` guard (not BjtForwardActive) is
+                // belt-and-braces against slot aliasing: this arm reads the
+                // 2D slot pair (i_nl[s], i_nl[s+1]); on a 1D FA-reduced slot
+                // s+1 would be the NEXT device's slot (or out of bounds).
+                // detect_forward_active_bjts excludes self-heating BJTs from
+                // FA reduction, so this guard should never fire — but if that
+                // gating ever regresses, aliasing stays structurally
+                // impossible here.
+                DeviceParams::Bjt(bp)
+                    if bp.has_self_heating() && slot.device_type == DeviceType::Bjt =>
+                {
                     let s = slot.start_idx;
                     let s1 = s + 1;
+                    let tj_advance = emit_thermal_tj_advance(dev_num, bp.cth, ir.solver_config.oversampling_factor);
                     // Extract Ic, Ib from converged i_nl; compute Vbe, Vbc from final v
                     thermal_update.push_str(&format!(
                             "    {{ // BJT {dev_num} self-heating thermal update\n\
@@ -2224,10 +2243,7 @@ impl RustEmitter {
                              \x20       let vbc = v_nl_th[{s1}];\n\
                              \x20       let vce = vbe - vbc;\n\
                              \x20       let p = vce * ic + vbe * ib;\n\
-                             \x20       let dt = 1.0 / SAMPLE_RATE;\n\
-                             \x20       let d_tj = (p - (state.device_{dev_num}_tj - DEVICE_{dev_num}_TAMB) / DEVICE_{dev_num}_RTH) / DEVICE_{dev_num}_CTH * dt;\n\
-                             \x20       state.device_{dev_num}_tj += d_tj;\n\
-                             \x20       state.device_{dev_num}_tj = state.device_{dev_num}_tj.clamp(200.0, 500.0);\n\
+                             {tj_advance}\
                              \x20       state.device_{dev_num}_vt = BOLTZMANN_Q * state.device_{dev_num}_tj;\n\
                              \x20       let t_ratio = state.device_{dev_num}_tj / DEVICE_{dev_num}_TAMB;\n\
                              \x20       let vt_nom = BOLTZMANN_Q * DEVICE_{dev_num}_TAMB;\n\
@@ -2239,22 +2255,28 @@ impl RustEmitter {
                 }
                 DeviceParams::Diode(dp) if dp.has_self_heating() => {
                     let s = slot.start_idx;
+                    let tj_advance = emit_thermal_tj_advance(dev_num, dp.cth, ir.solver_config.oversampling_factor);
+                    // SPICE3f5 diode temperature scaling includes the emission
+                    // coefficient N:
+                    //   IS(T) = IS_NOM · (Tj/TAMB)^(XTI/N)
+                    //                  · exp((EG/(N·vt_nom)) · (1 − TAMB/Tj))
+                    // N is not stored separately in DiodeParams — recover it
+                    // from n_vt = N · VT_ROOM (ir/mod.rs resolve_diode_params)
+                    // and bake it into the emitted expression at codegen time.
+                    let n_emission = dp.n_vt / melange_primitives::VT_ROOM;
                     thermal_update.push_str(&format!(
                             "    {{ // Diode {dev_num} self-heating thermal update\n\
                              \x20       let id = i_nl[{s}];\n\
                              \x20       let v_nl_th = extract_controlling_voltages(&v);\n\
                              \x20       let vd = v_nl_th[{s}];\n\
                              \x20       let p = vd * id;\n\
-                             \x20       let dt = 1.0 / SAMPLE_RATE;\n\
-                             \x20       let d_tj = (p - (state.device_{dev_num}_tj - DEVICE_{dev_num}_TAMB) / DEVICE_{dev_num}_RTH) / DEVICE_{dev_num}_CTH * dt;\n\
-                             \x20       state.device_{dev_num}_tj += d_tj;\n\
-                             \x20       state.device_{dev_num}_tj = state.device_{dev_num}_tj.clamp(200.0, 500.0);\n\
+                             {tj_advance}\
                              \x20       let t_ratio = state.device_{dev_num}_tj / DEVICE_{dev_num}_TAMB;\n\
                              \x20       state.device_{dev_num}_n_vt = DEVICE_{dev_num}_N_VT_NOM * t_ratio;\n\
                              \x20       let vt_nom = BOLTZMANN_Q * DEVICE_{dev_num}_TAMB;\n\
                              \x20       state.device_{dev_num}_is = DEVICE_{dev_num}_IS_NOM\n\
-                             \x20           * t_ratio.powf(DEVICE_{dev_num}_XTI)\n\
-                             \x20           * fast_exp((DEVICE_{dev_num}_EG / vt_nom) * (1.0 - DEVICE_{dev_num}_TAMB / state.device_{dev_num}_tj));\n\
+                             \x20           * t_ratio.powf(DEVICE_{dev_num}_XTI / {n_emission:.17e})\n\
+                             \x20           * fast_exp((DEVICE_{dev_num}_EG / ({n_emission:.17e} * vt_nom)) * (1.0 - DEVICE_{dev_num}_TAMB / state.device_{dev_num}_tj));\n\
                              \x20   }}\n"
                         ));
                 }
@@ -2268,6 +2290,7 @@ impl RustEmitter {
                     // site in `nr_helpers.rs`, not here.
                     let s = slot.start_idx;
                     let s1 = s + 1;
+                    let tj_advance = emit_thermal_tj_advance(dev_num, tp.cth, ir.solver_config.oversampling_factor);
                     thermal_update.push_str(&format!(
                             "    {{ // Triode {dev_num} self-heating thermal update\n\
                              \x20       let ip = i_nl[{s}];\n\
@@ -2276,10 +2299,7 @@ impl RustEmitter {
                              \x20       let vgk = v_nl_th[{s}];\n\
                              \x20       let vpk = v_nl_th[{s1}];\n\
                              \x20       let p = ip * vpk + ig * vgk;\n\
-                             \x20       let dt = 1.0 / SAMPLE_RATE;\n\
-                             \x20       let d_tj = (p - (state.device_{dev_num}_tj - DEVICE_{dev_num}_TAMB) / DEVICE_{dev_num}_RTH) / DEVICE_{dev_num}_CTH * dt;\n\
-                             \x20       state.device_{dev_num}_tj += d_tj;\n\
-                             \x20       state.device_{dev_num}_tj = state.device_{dev_num}_tj.clamp(200.0, 500.0);\n\
+                             {tj_advance}\
                              \x20   }}\n"
                         ));
                 }
@@ -2308,9 +2328,24 @@ impl RustEmitter {
                 .filter(|oa| oa.vclamp_lo.is_finite() || oa.vclamp_hi.is_finite())
                 .map(|oa| {
                     let mut m = std::collections::HashMap::new();
+                    // Single-sided supplies (only one of VCC/VEE given) leave
+                    // the other bound infinite. `{:.17e}` renders f64 infinity
+                    // as `inf` — not a valid Rust token — so emit the
+                    // `f64::INFINITY` const path instead. `x.clamp(f64::NEG_INFINITY, hi)`
+                    // behaves exactly as the one-sided `.min(hi)` (and
+                    // symmetrically for a missing hi bound).
+                    let fmt_bound = |v: f64| {
+                        if v.is_finite() {
+                            format!("{v:.17e}")
+                        } else if v > 0.0 {
+                            "f64::INFINITY".to_string()
+                        } else {
+                            "f64::NEG_INFINITY".to_string()
+                        }
+                    };
                     m.insert("out_idx", oa.n_out_idx.to_string());
-                    m.insert("lo", format!("{:.17e}", oa.vclamp_lo));
-                    m.insert("hi", format!("{:.17e}", oa.vclamp_hi));
+                    m.insert("lo", fmt_bound(oa.vclamp_lo));
+                    m.insert("hi", fmt_bound(oa.vclamp_hi));
                     m.insert("has_internal", "".to_string());
                     m.insert("int_idx", "0".to_string());
                     m
@@ -4706,4 +4741,46 @@ pub(super) fn parasitic_r_p_dk(ir: &CircuitIR, i: usize, j: usize) -> f64 {
         }
     }
     0.0
+}
+
+/// Emit the junction-temperature advance for a self-heating device.
+///
+/// Exact solution of the first-order RC thermal ODE over one internal sample:
+///   Tss = TAMB + P·RTH,   τ = RTH·CTH,   Tj += (Tss − Tj)·(1 − e^(−dt/τ))
+///
+/// This replaces the forward-Euler step `Tj += (P − (Tj−TAMB)/RTH)/CTH·dt`,
+/// which overshoots (and can oscillate or blow through the clamp) whenever
+/// dt > τ. The exponential form is unconditionally stable for any dt/τ and
+/// converges to the same trajectory as Euler in the dt ≪ τ limit.
+///
+/// `dt` is the INTERNAL (oversampled) sample period: this block lives inside
+/// the templated `process_sample`, which the oversampling wrapper calls once
+/// per internal sample — so `1.0 / SAMPLE_RATE` would heat oversampled
+/// circuits `factor`× too fast. The `INTERNAL_SAMPLE_RATE` constant is only
+/// emitted by constants.rs.tera when `oversampling_factor > 1`, so fall back
+/// to `SAMPLE_RATE` (identical value) at 1× — same convention as the nodal
+/// emitter's thermal block.
+///
+/// When CTH ≤ 0 the thermal pole is instantaneous — emit the quasi-static
+/// form `Tj = Tss` directly. Both forms keep the [200, 500] K runaway clamp.
+fn emit_thermal_tj_advance(dev_num: usize, cth: f64, oversampling_factor: usize) -> String {
+    if cth > 0.0 {
+        let dt_expr = if oversampling_factor > 1 {
+            "1.0 / INTERNAL_SAMPLE_RATE"
+        } else {
+            "1.0 / SAMPLE_RATE"
+        };
+        format!(
+            "        let dt = {dt_expr};\n\
+             \x20       let tss = DEVICE_{dev_num}_TAMB + p * DEVICE_{dev_num}_RTH;\n\
+             \x20       let tau = DEVICE_{dev_num}_RTH * DEVICE_{dev_num}_CTH;\n\
+             \x20       state.device_{dev_num}_tj += (tss - state.device_{dev_num}_tj) * (1.0 - (-dt / tau).exp());\n\
+             \x20       state.device_{dev_num}_tj = state.device_{dev_num}_tj.clamp(200.0, 500.0);\n"
+        )
+    } else {
+        format!(
+            "        let tss = DEVICE_{dev_num}_TAMB + p * DEVICE_{dev_num}_RTH;\n\
+             \x20       state.device_{dev_num}_tj = tss.clamp(200.0, 500.0);\n"
+        )
+    }
 }

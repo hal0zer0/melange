@@ -744,6 +744,9 @@ fn main() -> Result<()> {
             probes,
             probe_csv,
         } => {
+            // Match parse-time node normalization (lowercase, gnd→0).
+            let input_node = melange_solver::parser::normalize_node_name(&input_node);
+            let output_node = melange_solver::parser::normalize_node_name(&output_node);
             if oversampling != 1 && oversampling != 2 && oversampling != 4 {
                 anyhow::bail!("oversampling must be 1, 2, or 4, got {}", oversampling);
             }
@@ -1036,6 +1039,12 @@ fn compile_circuit_source(
     vst3_id_override: Option<&str>,
     clap_id_override: Option<&str>,
 ) -> Result<()> {
+    // Netlist node names are normalized (lowercase, gnd→0) at parse time;
+    // fold the CLI-provided names the same way so lookups match.
+    let input_node_owned = melange_solver::parser::normalize_node_name(input_node);
+    let input_node = input_node_owned.as_str();
+    let output_node_owned = melange_solver::parser::normalize_node_name(output_node);
+    let output_node = output_node_owned.as_str();
     use melange_solver::{
         codegen::{CodeGenerator, CodegenConfig},
         dk::DkKernel,
@@ -1972,6 +1981,11 @@ fn validate_circuit_source(
     csv_output: Option<&PathBuf>,
     relaxed: bool,
 ) -> Result<()> {
+    // Match parse-time node normalization (lowercase, gnd→0).
+    let input_node_owned = melange_solver::parser::normalize_node_name(input_node);
+    let input_node = input_node_owned.as_str();
+    let output_node_owned = melange_solver::parser::normalize_node_name(output_node);
+    let output_node = output_node_owned.as_str();
     use melange_validate::{
         comparison::ComparisonConfig, spice_runner::is_ngspice_available,
         validate_circuit_with_options, ValidationOptions,
@@ -2847,10 +2861,32 @@ fn apply_linearize_reductions(
             if let Some(dev) = dev {
                 if linearized_bjts_set.contains(&dev.name.to_ascii_uppercase()) {
                     let s = slot.start_idx;
+                    let (nc, nb, ne) = (
+                        dev.node_indices[0],
+                        dev.node_indices[1],
+                        dev.node_indices[2],
+                    );
+                    // Node-voltage lookup (1-indexed device nodes, 0 = ground).
+                    let v_at = |idx: usize| -> f64 {
+                        if idx > 0 {
+                            dc_result.v_node.get(idx - 1).copied().unwrap_or(0.0)
+                        } else {
+                            0.0
+                        }
+                    };
                     let vbe = dc_result.v_nl.get(s).copied().unwrap_or(0.0);
-                    let vbc = dc_result.v_nl.get(s + 1).copied().unwrap_or(0.0);
                     let ic = dc_result.i_nl.get(s).copied().unwrap_or(0.0);
-                    let ib = dc_result.i_nl.get(s + 1).copied().unwrap_or(0.0);
+                    // Guard on slot.dimension: for an FA-reduced (1D) BJT,
+                    // v_nl[s+1]/i_nl[s+1] belong to the NEXT device's slot.
+                    // FA contract: Vbc from node voltages, Ib = Ic / BF.
+                    let (vbc, ib) = if slot.dimension == 2 {
+                        (
+                            dc_result.v_nl.get(s + 1).copied().unwrap_or(0.0),
+                            dc_result.i_nl.get(s + 1).copied().unwrap_or(0.0),
+                        )
+                    } else {
+                        (v_at(nb) - v_at(nc), ic / bp.beta_f)
+                    };
 
                     let sign = if bp.is_pnp { -1.0 } else { 1.0 };
                     let vbe_eff = sign * vbe;
@@ -2864,11 +2900,12 @@ fn apply_linearize_reductions(
                     let gpi = bp.is / (bp.beta_f * nf_vt) * exp_be;
                     let go = bp.is / (bp.beta_r * bp.vt) * exp_bc;
 
-                    let (nc, nb, ne) = (
-                        dev.node_indices[0],
-                        dev.node_indices[1],
-                        dev.node_indices[2],
-                    );
+                    // Norton operating-point voltages in EXTERNAL node space
+                    // (the linearized conductances are stamped between the
+                    // external terminals, so the I0 - g·v0 constant must use
+                    // external node differences — see LinearizedBjtInfo docs).
+                    let vbe0 = v_at(nb) - v_at(ne);
+                    let vbc0 = v_at(nb) - v_at(nc);
                     println!(
                         "  Linearized {}: gm={:.4e} gpi={:.4e} gmu={:.4e} Ic_dc={:.4e} Ib_dc={:.4e}",
                         dev.name, gm, gpi, gmu, ic, ib
@@ -2884,6 +2921,8 @@ fn apply_linearize_reductions(
                         go,
                         ic_dc: ic,
                         ib_dc: ib,
+                        vbe0,
+                        vbc0,
                     });
                 }
             }
@@ -2952,6 +2991,18 @@ fn apply_linearize_reductions(
                         dev.node_indices[1], // plate
                         dev.node_indices[2], // cathode
                     );
+                    // Norton operating-point voltages in EXTERNAL node space
+                    // (see LinearizedTriodeInfo docs). For triodes without
+                    // internal nodes these equal v_nl[s]/v_nl[s+1].
+                    let v_at = |idx: usize| -> f64 {
+                        if idx > 0 {
+                            dc_result.v_node.get(idx - 1).copied().unwrap_or(0.0)
+                        } else {
+                            0.0
+                        }
+                    };
+                    let vgk0 = v_at(ng) - v_at(nk);
+                    let vpk0 = v_at(np) - v_at(nk);
                     let rp = if gp.abs() > 1e-30 {
                         1.0 / gp
                     } else {
@@ -2970,6 +3021,8 @@ fn apply_linearize_reductions(
                         gp,
                         ip_dc,
                         ig_dc,
+                        vgk0,
+                        vpk0,
                     });
                 }
             }
@@ -3042,6 +3095,11 @@ fn analyze_freq_response(
     harmonics: usize,
     tube_grid_fa: &str,
 ) -> Result<()> {
+    // Match parse-time node normalization (lowercase, gnd→0).
+    let input_node_owned = melange_solver::parser::normalize_node_name(input_node_name);
+    let input_node_name = input_node_owned.as_str();
+    let output_node_owned = melange_solver::parser::normalize_node_name(output_node_name);
+    let output_node_name = output_node_owned.as_str();
     use melange_solver::{
         codegen::{routing, CodeGenerator, CodegenConfig},
         dk::DkKernel,
@@ -4404,6 +4462,9 @@ fn run_dc_op(
     input_resistance: f64,
     format: &str,
 ) -> Result<()> {
+    // Match parse-time node normalization (lowercase, gnd→0).
+    let input_node_owned = melange_solver::parser::normalize_node_name(input_node_name);
+    let input_node_name = input_node_owned.as_str();
     use melange_solver::codegen::ir::CircuitIR;
     use melange_solver::dc_op::{solve_dc_operating_point, DcOpConfig};
     use melange_solver::mna::MnaSystem;

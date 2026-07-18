@@ -768,9 +768,12 @@ C1 out 0 3n3
     if let melange_solver::parser::Element::Resistor { value, .. } = &netlist.elements[0] {
         assert!((value - 4700.0).abs() < 0.01, "4k7 = {}", value);
     }
-    // R2 = 1m5 = 1.5e-3 ohm (milliohm)
+    // R2 = 1m5 = 1.5e6 ohm — infix 'M'/'m' is MEGA per BS-1852 (4M7 = 4.7 MΩ;
+    // nobody writes 1.5 mΩ as "1m5"). Suffix-position 'm' ("10m") stays milli.
+    // Contract changed 2026-07 (previously parsed as milli, silently building
+    // wrong circuits).
     if let melange_solver::parser::Element::Resistor { value, .. } = &netlist.elements[1] {
-        assert!((value - 1.5e-3).abs() < 1e-10, "1m5 = {}", value);
+        assert!((value - 1.5e6).abs() < 1.0, "1m5 = {}", value);
     }
     // C1 = 3n3 = 3.3nF
     if let melange_solver::parser::Element::Capacitor { value, .. } = &netlist.elements[2] {

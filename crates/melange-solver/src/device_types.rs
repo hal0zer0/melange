@@ -37,7 +37,7 @@ pub struct DiodeParams {
         deserialize_with = "deserialize_f64_or_infinity"
     )]
     pub bv: f64,
-    /// Reverse breakdown current [A] (default 1e-10)
+    /// Reverse breakdown current [A] (default 1e-3, the SPICE3f5 default)
     #[serde(default = "default_ibv")]
     pub ibv: f64,
     /// Thermal resistance [K/W] (inf = disabled, default).
@@ -905,7 +905,8 @@ fn default_infinity() -> f64 {
 }
 
 fn default_ibv() -> f64 {
-    1e-10
+    // SPICE3f5 default (matches resolve_diode_params' 1e-3, not the old 1e-10)
+    1e-3
 }
 
 fn default_one() -> f64 {

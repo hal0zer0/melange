@@ -40,23 +40,34 @@ pub const CATALOG: &[MosfetCatalogEntry] = &[
         source: "ON Semiconductor datasheet, Level 1 fit",
     },
     // IRF510 — N-channel power MOSFET
-    // IR/Infineon: VGS(th)=2-4V (typ ~3V), high KP
+    // Vishay Siliconix datasheet (doc 91015): VGS(th)=2-4V (typ ~3V),
+    // gfs = 1.3 S (min) at VDS=50V, ID=3.4A.
+    // Level-1 fit: KP = gfs^2/(2*Id) = 1.3^2/(2*3.4) ≈ 0.25 A/V^2.
+    // Cross-check: Rds(on) ≈ 1/(KP*(Vgs-Vt)) = 1/(0.25*7) ≈ 0.57 Ω at
+    // Vgs=10V vs datasheet max 0.54 Ω — consistent.
+    // (Previous KP=1.8 predicted gfs ≈ 3.5 S, ~2.7x the datasheet value.)
     MosfetCatalogEntry {
         names: &["IRF510"],
-        kp: 1.8,
+        kp: 0.25,
         vt: 3.0,
         lambda: 0.01,
         is_p_channel: false,
-        source: "Infineon/IR datasheet, Level 1 fit",
+        source: "Level-1 fit from Vishay datasheet gfs (1.3 S @ 3.4 A), not a vendor SPICE card",
     },
     // IRF520 — N-channel power MOSFET
+    // Vishay Siliconix datasheet (doc 91017): VGS(th)=2-4V,
+    // gfs = 2.7 S (min) at VDS=50V, ID=5.5A.
+    // Level-1 fit: KP = gfs^2/(2*Id) = 2.7^2/(2*5.5) ≈ 0.66 A/V^2.
+    // Cross-check: Rds(on) ≈ 1/(0.66*7) ≈ 0.22 Ω at Vgs=10V vs datasheet
+    // max 0.27 Ω — consistent.
+    // (Previous KP=2.5 predicted gfs ≈ 5.2 S, ~2x the datasheet value.)
     MosfetCatalogEntry {
         names: &["IRF520"],
-        kp: 2.5,
+        kp: 0.66,
         vt: 3.0,
         lambda: 0.008,
         is_p_channel: false,
-        source: "Infineon/IR datasheet, Level 1 fit",
+        source: "Level-1 fit from Vishay datasheet gfs (2.7 S @ 5.5 A), not a vendor SPICE card",
     },
 ];
 
@@ -254,6 +265,31 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Lock the IRF510/IRF520 KP refit to the datasheet transconductance:
+    /// level-1 saturation gives gfs = sqrt(2*KP*Id), which must reproduce the
+    /// Vishay datasheet gfs at the datasheet test current (lambda ignored;
+    /// 10% tolerance).
+    #[test]
+    fn test_irf_kp_matches_datasheet_gfs() {
+        // IRF510 (Vishay 91015): gfs = 1.3 S at Id = 3.4 A
+        let irf510 = lookup("IRF510").unwrap();
+        let gfs510 = (2.0 * irf510.kp * 3.4).sqrt();
+        assert!(
+            (gfs510 - 1.3).abs() / 1.3 < 0.10,
+            "IRF510 predicted gfs {:.2} S vs datasheet 1.3 S",
+            gfs510
+        );
+
+        // IRF520 (Vishay 91017): gfs = 2.7 S at Id = 5.5 A
+        let irf520 = lookup("IRF520").unwrap();
+        let gfs520 = (2.0 * irf520.kp * 5.5).sqrt();
+        assert!(
+            (gfs520 - 2.7).abs() / 2.7 < 0.10,
+            "IRF520 predicted gfs {:.2} S vs datasheet 2.7 S",
+            gfs520
+        );
     }
 
     #[test]

@@ -443,3 +443,118 @@ fn test_very_small_inductor() {
     let output = support::run_step(&circuit, 1.0, 200, SAMPLE_RATE);
     support::assert_finite(&output);
 }
+
+// ============================================================================
+// 11. Extreme-IS (wide-bandgap) diode in op-amp feedback clipper
+// ============================================================================
+
+/// Minimal repro from local-docs/extreme-is-diode-opamp-clipper-nr-failure-2026-06-09.md.
+///
+/// SiC-class diode card (IS=1e-30 N=2.0, Vf ≈ 3.2 V) in an op-amp feedback
+/// clipper at gain 48. The conduction knee sits above the legacy 40·n_vt exp
+/// clamp, so before the extended-exponential diode region the device was
+/// electrically absent: NR "converged" in 0 iterations on the open-loop
+/// solution (78.7 V peak — violating both the diode law and the ±13 V rail)
+/// with zero failure telemetry.
+const WIDE_BANDGAP_CLIPPER_SPICE: &str = "\
+Wide-bandgap feedback clipper
+Rterm in 0 1Meg
+U1 in oa_neg clip_out OA_PP
+R_gain oa_neg 0 10k
+R_fb oa_neg clip_out 470k
+R_sel oa_neg sic_m 1
+D_f clip_out sic_m D_SIC
+D_r sic_m clip_out D_SIC
+C_out clip_out out 1u
+R_out out 0 100k
+.model D_SIC D(IS=1e-30 N=2.0 RS=4)
+.model OA_PP OA(AOL=200000 ROUT=50 GBW=3Meg VSAT=13 SR=13)
+";
+
+#[test]
+fn test_wide_bandgap_clipper_clamps_at_diode_knee() {
+    let config = support::config_for_spice(WIDE_BANDGAP_CLIPPER_SPICE, 48000.0);
+    let circuit = support::build_circuit(WIDE_BANDGAP_CLIPPER_SPICE, &config, "wbg_clipper");
+    let samples = support::run_sine(&circuit, 440.0, 0.5, 4800, 48000.0);
+    support::assert_finite(&samples);
+
+    let peak = samples.iter().fold(0.0f64, |a, &b| a.max(b.abs()));
+    // Clamp level = input peak + Vf(I ≈ 26 µA) ≈ 3.55 V.
+    assert!(
+        peak < 5.0,
+        "wide-bandgap clipper must clamp near in + Vf (~3.6 V), got peak {:.3} V \
+         (78.7 V = diode electrically absent, running open-loop)",
+        peak
+    );
+    assert!(
+        peak > 2.5,
+        "clipper output should actually reach the clip level, got peak {:.3} V",
+        peak
+    );
+}
+
+// ============================================================================
+// 12. Extreme-IS diode WITHOUT RS on the nodal full-LU path
+// ============================================================================
+
+/// No-RS variant of the wide-bandgap clipper, forced onto the nodal full-LU
+/// path. The RS variant above routes through `diode_current_with_rs` (already
+/// extended-exp); the no-RS branches of the nodal device-evaluation emitters
+/// used an inline legacy `v.clamp(±40·n_vt)` + `fast_exp` block, so an
+/// IS=1e-30 diode (knee ≈ 3 V, above the clamp) was electrically absent and
+/// the clipper ran open-loop — exactly the bug the RS fix closed elsewhere.
+/// The inert `B_frc`/`R_frc` branch deterministically forces full LU
+/// (behavioral sources are full-LU-only).
+const WIDE_BANDGAP_CLIPPER_NO_RS_SPICE: &str = "\
+Wide-bandgap feedback clipper (no RS, nodal full-LU)
+Rterm in 0 1Meg
+U1 in oa_neg clip_out OA_PP
+R_gain oa_neg 0 10k
+R_fb oa_neg clip_out 470k
+R_sel oa_neg sic_m 1
+D_f clip_out sic_m D_SIC
+D_r sic_m clip_out D_SIC
+C_out clip_out out 1u
+R_out out 0 100k
+B_frc frc 0 V={0}
+R_frc frc 0 1k
+.model D_SIC D(IS=1e-30 N=2.0)
+.model OA_PP OA(AOL=200000 ROUT=50 GBW=3Meg VSAT=13 SR=13)
+";
+
+#[test]
+fn test_wide_bandgap_clipper_no_rs_nodal_full_lu() {
+    let config = support::config_for_spice(WIDE_BANDGAP_CLIPPER_NO_RS_SPICE, 48000.0);
+    let circuit = support::build_circuit_nodal(
+        WIDE_BANDGAP_CLIPPER_NO_RS_SPICE,
+        &config,
+        "wbg_clipper_no_rs",
+    );
+    // The forcing branch must actually route full-LU, and the no-RS diode
+    // must go through the shared extended-exp helpers, not the inline clamp.
+    assert!(
+        circuit.code.contains("g_aug"),
+        "forcing branch must route the nodal build to full-LU NR"
+    );
+    assert!(
+        !circuit.code.contains(".clamp(-40.0 * state.device_"),
+        "legacy inline diode clamp must be gone from nodal device evaluation"
+    );
+
+    let samples = support::run_sine(&circuit, 440.0, 0.5, 4800, 48000.0);
+    support::assert_finite(&samples);
+
+    let peak = samples.iter().fold(0.0f64, |a, &b| a.max(b.abs()));
+    // Clamp level ≈ input peak + Vf(N=2, IS=1e-30 at ~µA–tens of µA) ≈ 3.5 V.
+    assert!(
+        peak < 5.0,
+        "no-RS wide-bandgap clipper must clamp near in + Vf (~3.5 V), got peak {:.3} V \
+         (a much larger peak = diode electrically absent, running open-loop)",
+        peak
+    );
+    assert!(
+        peak > 2.5,
+        "clipper output should actually reach the clip level, got peak {:.3} V",
+        peak
+    );
+}

@@ -3802,10 +3802,15 @@ impl RustEmitter {
                             "0.0".to_string()
                         };
                         let sign = if mp.is_p_channel { -1.0 } else { 1.0 };
+                        // Body effect in magnitude space: reverse body bias
+                        // (vsb > 0 in channel-sign convention) must INCREASE
+                        // |VT|. VT is signed (PMOS VT < 0), so the GAMMA
+                        // correction carries the channel sign: for NMOS it
+                        // raises VT, for PMOS it makes VT more negative.
                         code.push_str(&format!(
                             "    {{ // MOSFET {dev_num} body effect\n\
                              \x20       let vsb = ({sign:.1}) * ({vs_expr} - {vb_expr});\n\
-                             \x20       state.device_{dev_num}_vt = DEVICE_{dev_num}_VT + DEVICE_{dev_num}_GAMMA * ((DEVICE_{dev_num}_PHI + vsb.max(0.0)).sqrt() - DEVICE_{dev_num}_PHI.sqrt());\n\
+                             \x20       state.device_{dev_num}_vt = DEVICE_{dev_num}_VT + ({sign:.1}) * DEVICE_{dev_num}_GAMMA * ((DEVICE_{dev_num}_PHI + vsb.max(0.0)).sqrt() - DEVICE_{dev_num}_PHI.sqrt());\n\
                              \x20   }}\n"
                         ));
                     }
@@ -3978,17 +3983,15 @@ impl RustEmitter {
             match ir.solver_config.opamp_rail_mode {
                 OpampRailMode::Hard => {
                     for oa in &ir.opamps {
-                        // Skip op-amps that only appear in OpampIR for
-                        // slew-rate limiting (VCC/VEE both infinite).
-                        if !oa.vclamp_lo.is_finite() && !oa.vclamp_hi.is_finite() {
-                            continue;
+                        // rail_clamp_stmt returns None for op-amps that only
+                        // appear in OpampIR for slew-rate limiting (VCC/VEE
+                        // both infinite) and clamps only finite bounds.
+                        let target = format!("v[{}]", oa.n_out_idx);
+                        if let Some(stmt) =
+                            Self::rail_clamp_stmt(&target, oa.vclamp_lo, oa.vclamp_hi)
+                        {
+                            code.push_str(&format!("    {stmt}\n"));
                         }
-                        code.push_str(&format!(
-                            "    v[{idx}] = v[{idx}].clamp({lo:.17e}, {hi:.17e});\n",
-                            idx = oa.n_out_idx,
-                            lo = oa.vclamp_lo,
-                            hi = oa.vclamp_hi,
-                        ));
                     }
                 }
                 OpampRailMode::ActiveSet => {
@@ -4117,15 +4120,11 @@ impl RustEmitter {
                 // reintroduction from S_sub column propagation); the elevated
                 // downstream voltages are handled by output scaling.
                 for oa in &ir.opamps {
-                    if !oa.vclamp_lo.is_finite() && !oa.vclamp_hi.is_finite() {
-                        continue;
+                    let target = format!("v_sub[{}]", oa.n_out_idx);
+                    if let Some(stmt) = Self::rail_clamp_stmt(&target, oa.vclamp_lo, oa.vclamp_hi)
+                    {
+                        code.push_str(&format!("            {stmt}\n"));
                     }
-                    code.push_str(&format!(
-                        "            v_sub[{idx}] = v_sub[{idx}].clamp({lo:.17e}, {hi:.17e});\n",
-                        idx = oa.n_out_idx,
-                        lo = oa.vclamp_lo,
-                        hi = oa.vclamp_hi,
-                    ));
                 }
                 code.push_str("        }\n");
                 code.push_str("        v = v_sub;\n");
@@ -4362,15 +4361,12 @@ impl RustEmitter {
                 }
                 OpampRailMode::Hard | OpampRailMode::None => {
                     for oa in &ir.opamps {
-                        if !oa.vclamp_lo.is_finite() && !oa.vclamp_hi.is_finite() {
-                            continue;
+                        let target = format!("v[{}]", oa.n_out_idx);
+                        if let Some(stmt) =
+                            Self::rail_clamp_stmt(&target, oa.vclamp_lo, oa.vclamp_hi)
+                        {
+                            code.push_str(&format!("        {stmt}\n"));
                         }
-                        code.push_str(&format!(
-                            "        v[{idx}] = v[{idx}].clamp({lo:.17e}, {hi:.17e});\n",
-                            idx = oa.n_out_idx,
-                            lo = oa.vclamp_lo,
-                            hi = oa.vclamp_hi,
-                        ));
                     }
                 }
                 OpampRailMode::BoyleDiodes => {
@@ -4433,81 +4429,9 @@ impl RustEmitter {
         }
         code.push('\n');
 
-        // Device self-heating thermal update (BJT and diode)
-        for (dev_num, slot) in ir.device_slots.iter().enumerate() {
-            match &slot.params {
-                crate::codegen::ir::DeviceParams::Bjt(bp) if bp.has_self_heating() => {
-                    let s = slot.start_idx;
-                    let s1 = s + 1;
-                    code.push_str(&format!(
-                        "    {{ // BJT {dev_num} self-heating thermal update\n\
-                         \x20       let ic = i_nl[{s}];\n\
-                         \x20       let ib = i_nl[{s1}];\n\
-                         \x20       let mut vbe_sum = 0.0f64;\n\
-                         \x20       let mut vbc_sum = 0.0f64;\n\
-                         \x20       for j in 0..N {{ vbe_sum += N_V[{s}][j] * v[j]; }}\n\
-                         \x20       for j in 0..N {{ vbc_sum += N_V[{s1}][j] * v[j]; }}\n\
-                         \x20       let vce = vbe_sum - vbc_sum;\n\
-                         \x20       let p = vce * ic + vbe_sum * ib;\n\
-                         \x20       let dt = 1.0 / SAMPLE_RATE;\n\
-                         \x20       let d_tj = (p - (state.device_{dev_num}_tj - DEVICE_{dev_num}_TAMB) / DEVICE_{dev_num}_RTH) / DEVICE_{dev_num}_CTH * dt;\n\
-                         \x20       state.device_{dev_num}_tj += d_tj;\n\
-                         \x20       state.device_{dev_num}_tj = state.device_{dev_num}_tj.clamp(200.0, 500.0);\n\
-                         \x20       state.device_{dev_num}_vt = BOLTZMANN_Q * state.device_{dev_num}_tj;\n\
-                         \x20       let t_ratio = state.device_{dev_num}_tj / DEVICE_{dev_num}_TAMB;\n\
-                         \x20       let vt_nom = BOLTZMANN_Q * DEVICE_{dev_num}_TAMB;\n\
-                         \x20       state.device_{dev_num}_is = DEVICE_{dev_num}_IS_NOM\n\
-                         \x20           * t_ratio.powf(DEVICE_{dev_num}_XTI)\n\
-                         \x20           * fast_exp((DEVICE_{dev_num}_EG / vt_nom) * (1.0 - DEVICE_{dev_num}_TAMB / state.device_{dev_num}_tj));\n\
-                         \x20   }}\n"
-                    ));
-                }
-                crate::codegen::ir::DeviceParams::Diode(dp) if dp.has_self_heating() => {
-                    let s = slot.start_idx;
-                    code.push_str(&format!(
-                        "    {{ // Diode {dev_num} self-heating thermal update\n\
-                         \x20       let id = i_nl[{s}];\n\
-                         \x20       let mut vd_sum = 0.0f64;\n\
-                         \x20       for j in 0..N {{ vd_sum += N_V[{s}][j] * v[j]; }}\n\
-                         \x20       let p = vd_sum * id;\n\
-                         \x20       let dt = 1.0 / SAMPLE_RATE;\n\
-                         \x20       let d_tj = (p - (state.device_{dev_num}_tj - DEVICE_{dev_num}_TAMB) / DEVICE_{dev_num}_RTH) / DEVICE_{dev_num}_CTH * dt;\n\
-                         \x20       state.device_{dev_num}_tj += d_tj;\n\
-                         \x20       state.device_{dev_num}_tj = state.device_{dev_num}_tj.clamp(200.0, 500.0);\n\
-                         \x20       let t_ratio = state.device_{dev_num}_tj / DEVICE_{dev_num}_TAMB;\n\
-                         \x20       state.device_{dev_num}_n_vt = DEVICE_{dev_num}_N_VT_NOM * t_ratio;\n\
-                         \x20       let vt_nom = BOLTZMANN_Q * DEVICE_{dev_num}_TAMB;\n\
-                         \x20       state.device_{dev_num}_is = DEVICE_{dev_num}_IS_NOM\n\
-                         \x20           * t_ratio.powf(DEVICE_{dev_num}_XTI)\n\
-                         \x20           * fast_exp((DEVICE_{dev_num}_EG / vt_nom) * (1.0 - DEVICE_{dev_num}_TAMB / state.device_{dev_num}_tj));\n\
-                         \x20   }}\n"
-                    ));
-                }
-                crate::codegen::ir::DeviceParams::Tube(tp) if tp.has_self_heating() => {
-                    // Triode Schur path. Pdiss = Ip·Vpk + Ig·Vgk using
-                    // converged `i_nl` for Ip/Ig and the same N_V·v contraction
-                    // the BJT path uses for Vbe/Vbc.
-                    let s = slot.start_idx;
-                    let s1 = s + 1;
-                    code.push_str(&format!(
-                        "    {{ // Triode {dev_num} self-heating thermal update\n\
-                         \x20       let ip = i_nl[{s}];\n\
-                         \x20       let ig = i_nl[{s1}];\n\
-                         \x20       let mut vgk_sum = 0.0f64;\n\
-                         \x20       let mut vpk_sum = 0.0f64;\n\
-                         \x20       for j in 0..N {{ vgk_sum += N_V[{s}][j] * v[j]; }}\n\
-                         \x20       for j in 0..N {{ vpk_sum += N_V[{s1}][j] * v[j]; }}\n\
-                         \x20       let p = ip * vpk_sum + ig * vgk_sum;\n\
-                         \x20       let dt = 1.0 / SAMPLE_RATE;\n\
-                         \x20       let d_tj = (p - (state.device_{dev_num}_tj - DEVICE_{dev_num}_TAMB) / DEVICE_{dev_num}_RTH) / DEVICE_{dev_num}_CTH * dt;\n\
-                         \x20       state.device_{dev_num}_tj += d_tj;\n\
-                         \x20       state.device_{dev_num}_tj = state.device_{dev_num}_tj.clamp(200.0, 500.0);\n\
-                         \x20   }}\n"
-                    ));
-                }
-                _ => {}
-            }
-        }
+        // Device self-heating thermal update (BJT, diode, triode) — shared
+        // exact-exponential emitter (see emit_self_heating_thermal_updates).
+        Self::emit_self_heating_thermal_updates(&mut code, ir);
 
         // (NaN check already done before state update)
 
@@ -5890,13 +5814,15 @@ impl RustEmitter {
             let emit_in_nr_clamp = matches!(ir.solver_config.opamp_rail_mode, OpampRailMode::Hard);
             if emit_in_nr_clamp && !ir.opamps.is_empty() {
                 for oa in &ir.opamps {
-                    if !oa.vclamp_lo.is_finite() && !oa.vclamp_hi.is_finite() {
+                    let target = format!("v[{}]", oa.n_out_idx);
+                    let Some(stmt) = Self::rail_clamp_stmt(&target, oa.vclamp_lo, oa.vclamp_hi)
+                    else {
                         continue;
-                    }
+                    };
                     code.push_str(&format!(
                         "        {{\n\
                          \x20           let v_pre_clamp = v[{idx}];\n\
-                         \x20           v[{idx}] = v[{idx}].clamp({lo:.17e}, {hi:.17e});\n\
+                         \x20           {stmt}\n\
                          \x20           // Post-clamp convergence re-check: if the clamp mutated\n\
                          \x20           // v[{idx}] meaningfully, the iteration hasn't really\n\
                          \x20           // converged — the rest of the network is still consistent\n\
@@ -5906,8 +5832,6 @@ impl RustEmitter {
                          \x20           if clamp_delta >= clamp_thresh {{ max_step_exceeded = true; }}\n\
                          \x20       }}\n",
                         idx = oa.n_out_idx,
-                        lo = oa.vclamp_lo,
-                        hi = oa.vclamp_hi,
                     ));
                 }
             }
@@ -6490,15 +6414,11 @@ impl RustEmitter {
             ) && !ir.opamps.is_empty()
             {
                 for oa in &ir.opamps {
-                    if !oa.vclamp_lo.is_finite() && !oa.vclamp_hi.is_finite() {
-                        continue;
+                    let target = format!("v[{}]", oa.n_out_idx);
+                    if let Some(stmt) = Self::rail_clamp_stmt(&target, oa.vclamp_lo, oa.vclamp_hi)
+                    {
+                        code.push_str(&format!("            {stmt}\n"));
                     }
-                    code.push_str(&format!(
-                        "            v[{idx}] = v[{idx}].clamp({lo:.17e}, {hi:.17e});\n",
-                        idx = oa.n_out_idx,
-                        lo = oa.vclamp_lo,
-                        hi = oa.vclamp_hi,
-                    ));
                 }
             }
 
@@ -6668,81 +6588,9 @@ impl RustEmitter {
         }
         code.push('\n');
 
-        // Step 3b: Device self-heating thermal update (BJT and diode,
-        // quasi-static, outside NR).
-        for (dev_num, slot) in ir.device_slots.iter().enumerate() {
-            match &slot.params {
-                DeviceParams::Bjt(bp) if bp.has_self_heating() => {
-                    let s = slot.start_idx;
-                    let s1 = s + 1;
-                    code.push_str(&format!(
-                            "    {{ // BJT {dev_num} self-heating thermal update\n\
-                             \x20       let ic = i_nl[{s}];\n\
-                             \x20       let ib = i_nl[{s1}];\n\
-                             \x20       // Extract controlling voltages from final node voltages\n\
-                             \x20       let mut vbe_sum = 0.0f64;\n\
-                             \x20       let mut vbc_sum = 0.0f64;\n\
-                             \x20       for j in 0..N {{ vbe_sum += N_V[{s}][j] * v[j]; }}\n\
-                             \x20       for j in 0..N {{ vbc_sum += N_V[{s1}][j] * v[j]; }}\n\
-                             \x20       let vce = vbe_sum - vbc_sum;\n\
-                             \x20       let p = vce * ic + vbe_sum * ib;\n\
-                             \x20       let dt = 1.0 / SAMPLE_RATE;\n\
-                             \x20       let d_tj = (p - (state.device_{dev_num}_tj - DEVICE_{dev_num}_TAMB) / DEVICE_{dev_num}_RTH) / DEVICE_{dev_num}_CTH * dt;\n\
-                             \x20       state.device_{dev_num}_tj += d_tj;\n\
-                             \x20       state.device_{dev_num}_tj = state.device_{dev_num}_tj.clamp(200.0, 500.0);\n\
-                             \x20       state.device_{dev_num}_vt = BOLTZMANN_Q * state.device_{dev_num}_tj;\n\
-                             \x20       let t_ratio = state.device_{dev_num}_tj / DEVICE_{dev_num}_TAMB;\n\
-                             \x20       let vt_nom = BOLTZMANN_Q * DEVICE_{dev_num}_TAMB;\n\
-                             \x20       state.device_{dev_num}_is = DEVICE_{dev_num}_IS_NOM\n\
-                             \x20           * t_ratio.powf(DEVICE_{dev_num}_XTI)\n\
-                             \x20           * fast_exp((DEVICE_{dev_num}_EG / vt_nom) * (1.0 - DEVICE_{dev_num}_TAMB / state.device_{dev_num}_tj));\n\
-                             \x20   }}\n"
-                        ));
-                }
-                DeviceParams::Diode(dp) if dp.has_self_heating() => {
-                    let s = slot.start_idx;
-                    code.push_str(&format!(
-                            "    {{ // Diode {dev_num} self-heating thermal update\n\
-                             \x20       let id = i_nl[{s}];\n\
-                             \x20       let mut vd_sum = 0.0f64;\n\
-                             \x20       for j in 0..N {{ vd_sum += N_V[{s}][j] * v[j]; }}\n\
-                             \x20       let p = vd_sum * id;\n\
-                             \x20       let dt = 1.0 / SAMPLE_RATE;\n\
-                             \x20       let d_tj = (p - (state.device_{dev_num}_tj - DEVICE_{dev_num}_TAMB) / DEVICE_{dev_num}_RTH) / DEVICE_{dev_num}_CTH * dt;\n\
-                             \x20       state.device_{dev_num}_tj += d_tj;\n\
-                             \x20       state.device_{dev_num}_tj = state.device_{dev_num}_tj.clamp(200.0, 500.0);\n\
-                             \x20       let t_ratio = state.device_{dev_num}_tj / DEVICE_{dev_num}_TAMB;\n\
-                             \x20       state.device_{dev_num}_n_vt = DEVICE_{dev_num}_N_VT_NOM * t_ratio;\n\
-                             \x20       let vt_nom = BOLTZMANN_Q * DEVICE_{dev_num}_TAMB;\n\
-                             \x20       state.device_{dev_num}_is = DEVICE_{dev_num}_IS_NOM\n\
-                             \x20           * t_ratio.powf(DEVICE_{dev_num}_XTI)\n\
-                             \x20           * fast_exp((DEVICE_{dev_num}_EG / vt_nom) * (1.0 - DEVICE_{dev_num}_TAMB / state.device_{dev_num}_tj));\n\
-                             \x20   }}\n"
-                        ));
-                }
-                DeviceParams::Tube(tp) if tp.has_self_heating() => {
-                    // Triode full-LU path. Same shape as the Schur variant.
-                    let s = slot.start_idx;
-                    let s1 = s + 1;
-                    code.push_str(&format!(
-                            "    {{ // Triode {dev_num} self-heating thermal update\n\
-                             \x20       let ip = i_nl[{s}];\n\
-                             \x20       let ig = i_nl[{s1}];\n\
-                             \x20       let mut vgk_sum = 0.0f64;\n\
-                             \x20       let mut vpk_sum = 0.0f64;\n\
-                             \x20       for j in 0..N {{ vgk_sum += N_V[{s}][j] * v[j]; }}\n\
-                             \x20       for j in 0..N {{ vpk_sum += N_V[{s1}][j] * v[j]; }}\n\
-                             \x20       let p = ip * vpk_sum + ig * vgk_sum;\n\
-                             \x20       let dt = 1.0 / SAMPLE_RATE;\n\
-                             \x20       let d_tj = (p - (state.device_{dev_num}_tj - DEVICE_{dev_num}_TAMB) / DEVICE_{dev_num}_RTH) / DEVICE_{dev_num}_CTH * dt;\n\
-                             \x20       state.device_{dev_num}_tj += d_tj;\n\
-                             \x20       state.device_{dev_num}_tj = state.device_{dev_num}_tj.clamp(200.0, 500.0);\n\
-                             \x20   }}\n"
-                        ));
-                }
-                _ => {}
-            }
-        }
+        // Step 3b: Device self-heating thermal update (BJT, diode, triode) —
+        // shared exact-exponential emitter, same as the Schur path.
+        Self::emit_self_heating_thermal_updates(&mut code, ir);
 
         // (NaN check already done before state update)
 
@@ -6886,20 +6734,35 @@ impl RustEmitter {
         // circuits the whole resolve when nothing needs clamping (the common case).
         code.push_str(&format!("{indent}    let mut any_pinned = false;\n"));
         for (idx, oa) in clampable.iter().enumerate() {
+            // Emit a violation branch per FINITE rail only — formatting an
+            // infinite bound would render the invalid Rust token `-inf`/`inf`
+            // for single-supply op-amps (only one of VCC/VEE specified).
+            // `clampable` guarantees at least one branch is emitted.
+            let mut branches = String::new();
+            if oa.vclamp_hi.is_finite() {
+                branches.push_str(&format!(
+                    "if v[{node}] > {hi:.17e} {{\n\
+                     {indent}        any_pinned = true;\n\
+                     {indent}        Some({hi:.17e})\n\
+                     {indent}    }} else ",
+                    node = oa.n_out_idx,
+                    hi = oa.vclamp_hi,
+                ));
+            }
+            if oa.vclamp_lo.is_finite() {
+                branches.push_str(&format!(
+                    "if v[{node}] < {lo:.17e} {{\n\
+                     {indent}        any_pinned = true;\n\
+                     {indent}        Some({lo:.17e})\n\
+                     {indent}    }} else ",
+                    node = oa.n_out_idx,
+                    lo = oa.vclamp_lo,
+                ));
+            }
             code.push_str(&format!(
-                "{indent}    let pinned_{idx}: Option<f64> = if v[{node}] > {hi:.17e} {{\n\
-                 {indent}        any_pinned = true;\n\
-                 {indent}        Some({hi:.17e})\n\
-                 {indent}    }} else if v[{node}] < {lo:.17e} {{\n\
-                 {indent}        any_pinned = true;\n\
-                 {indent}        Some({lo:.17e})\n\
-                 {indent}    }} else {{\n\
+                "{indent}    let pinned_{idx}: Option<f64> = {branches}{{\n\
                  {indent}        None\n\
                  {indent}    }};\n",
-                idx = idx,
-                node = oa.n_out_idx,
-                hi = oa.vclamp_hi,
-                lo = oa.vclamp_lo,
             ));
         }
 
@@ -7104,12 +6967,198 @@ impl RustEmitter {
         // "pinned exactly" case and any tiny numerical overshoot past the
         // rail, covering 4kbuscomp without over-eager NR-iteration tracking.
         for oa in &clampable {
+            // Compare against FINITE rails only (an infinite bound would emit
+            // the invalid token `inf`/`-inf`). `clampable` guarantees at
+            // least one comparison per op-amp.
+            let mut conds: Vec<String> = Vec::new();
+            if oa.vclamp_hi.is_finite() {
+                conds.push(format!(
+                    "v[{node}] >= {hi:.17e}",
+                    node = oa.n_out_idx,
+                    hi = oa.vclamp_hi
+                ));
+            }
+            if oa.vclamp_lo.is_finite() {
+                conds.push(format!(
+                    "v[{node}] <= {lo:.17e}",
+                    node = oa.n_out_idx,
+                    lo = oa.vclamp_lo
+                ));
+            }
             code.push_str(&format!(
-                "{indent}if v[{node}] >= {hi:.17e} || v[{node}] <= {lo:.17e} {{ {flag_name} = true; }}\n",
-                node = oa.n_out_idx,
-                hi = oa.vclamp_hi,
-                lo = oa.vclamp_lo,
+                "{indent}if {} {{ {flag_name} = true; }}\n",
+                conds.join(" || ")
             ));
+        }
+    }
+
+    /// Format a rail-clamp expression for `target` (e.g. `"v[3]"`) that is
+    /// safe for single-sided rails: `.max(lo)` / `.min(hi)` are emitted only
+    /// for FINITE bounds. Returns `None` when neither bound is finite.
+    ///
+    /// The previous `{target}.clamp({lo:.17e}, {hi:.17e})` formatting rendered
+    /// `f64::NEG_INFINITY` as the invalid Rust token `-inf` whenever exactly
+    /// one of VCC/VEE was specified (the guards only skipped when BOTH were
+    /// infinite), producing generated code that failed to compile.
+    fn rail_clamp_expr(target: &str, lo: f64, hi: f64) -> Option<String> {
+        let mut expr = target.to_string();
+        if lo.is_finite() {
+            expr.push_str(&format!(".max({lo:.17e})"));
+        }
+        if hi.is_finite() {
+            expr.push_str(&format!(".min({hi:.17e})"));
+        }
+        if expr.len() == target.len() {
+            None
+        } else {
+            Some(expr)
+        }
+    }
+
+    /// Format a full rail-clamp statement `{target} = <clamped>;` (no
+    /// trailing newline). Returns `None` when neither bound is finite.
+    fn rail_clamp_stmt(target: &str, lo: f64, hi: f64) -> Option<String> {
+        Self::rail_clamp_expr(target, lo, hi).map(|expr| format!("{target} = {expr};"))
+    }
+
+    /// Emit per-sample device self-heating thermal updates (BJT, diode, triode).
+    ///
+    /// Shared by the Schur and full-LU nodal `process_sample` emitters — both
+    /// call this at 4-space indent after `i_nl` and `v` are final for the
+    /// sample, so the dissipated power P uses converged values.
+    ///
+    /// Thermal ODE: `CTH·dTj/dt = P - (Tj - TAMB)/RTH`. For fixed P this is
+    /// linear in Tj, so the per-sample step is the EXACT exponential update
+    /// toward the steady state `Tss = TAMB + P·RTH`:
+    ///
+    /// ```ignore
+    /// Tj += (Tss - Tj) * (1.0 - (-dt/tau).exp());   // tau = RTH*CTH
+    /// ```
+    ///
+    /// which is unconditionally stable for any dt/τ (the previous forward
+    /// Euler step diverged when dt > 2τ). When `CTH ≤ 0` the thermal pole is
+    /// infinitely fast — the quasi-static form `Tj = Tss` is emitted at
+    /// codegen time instead (no division by CTH).
+    ///
+    /// `dt` is the INTERNAL sample period: this code runs inside the
+    /// per-internal-sample body, which executes OVERSAMPLING_FACTOR× per base
+    /// sample, so dt = 1/INTERNAL_SAMPLE_RATE when oversampling is active.
+    ///
+    /// Temperature scaling after the Tj step:
+    /// - BJT: `VT(T) = k/q·Tj`, `IS(T) = IS·(Tj/TAMB)^XTI·exp((EG/vt_nom)·(1-TAMB/Tj))`
+    ///   (SPICE3f5 BJT law — no ideality division).
+    /// - Diode: `N·VT(T)` scales linearly; `IS(T)` divides both exponents by
+    ///   the ideality factor N (SPICE3f5 diode law:
+    ///   `IS(T) = IS·(Tj/TAMB)^(XTI/N)·exp((EG/(N·vt_nom))·(1-TAMB/Tj))`).
+    ///   N is recovered at codegen time as `dp.n_vt / VT_ROOM`, the same
+    ///   constant `resolve_diode_params` used to build `n_vt = N·VT_ROOM`.
+    /// - Triode: Tj only — the Koren coefficients are untouched; the drift
+    ///   rides the `VBIAS_ALPHA·(Tj-TAMB)` Vgk shift at the NR call sites.
+    fn emit_self_heating_thermal_updates(code: &mut String, ir: &CircuitIR) {
+        let dt_expr = if ir.solver_config.oversampling_factor > 1 {
+            "1.0 / INTERNAL_SAMPLE_RATE"
+        } else {
+            "1.0 / SAMPLE_RATE"
+        };
+        // Exact exponential Tj step (or quasi-static form when CTH ≤ 0).
+        // Expects `p` (dissipated power, W) in scope; leaves the [200,500] K
+        // clamped Tj in `state.device_{dev_num}_tj`.
+        let tj_step = |dev_num: usize, cth: f64| -> String {
+            if cth > 0.0 {
+                format!(
+                    "\x20       let tss = DEVICE_{dev_num}_TAMB + p * DEVICE_{dev_num}_RTH;\n\
+                     \x20       let tau = DEVICE_{dev_num}_RTH * DEVICE_{dev_num}_CTH;\n\
+                     \x20       let dt = {dt_expr};\n\
+                     \x20       state.device_{dev_num}_tj += (tss - state.device_{dev_num}_tj) * (1.0 - (-dt / tau).exp());\n\
+                     \x20       state.device_{dev_num}_tj = state.device_{dev_num}_tj.clamp(200.0, 500.0);\n"
+                )
+            } else {
+                format!(
+                    "\x20       // CTH <= 0: quasi-static thermal (instant settling)\n\
+                     \x20       state.device_{dev_num}_tj = (DEVICE_{dev_num}_TAMB + p * DEVICE_{dev_num}_RTH).clamp(200.0, 500.0);\n"
+                )
+            }
+        };
+        for (dev_num, slot) in ir.device_slots.iter().enumerate() {
+            match &slot.params {
+                // The `device_type == Bjt` guard (not BjtForwardActive) is
+                // belt-and-braces against slot aliasing: this arm reads the
+                // 2D slot pair (i_nl[s], i_nl[s+1]); on a 1D FA-reduced slot
+                // s+1 would be the NEXT device's slot (or out of bounds).
+                // detect_forward_active_bjts excludes self-heating BJTs from
+                // FA reduction, so this guard should never fire — but if that
+                // gating ever regresses, aliasing stays structurally
+                // impossible here.
+                DeviceParams::Bjt(bp)
+                    if bp.has_self_heating() && slot.device_type == DeviceType::Bjt =>
+                {
+                    let s = slot.start_idx;
+                    let s1 = s + 1;
+                    code.push_str(&format!(
+                        "    {{ // BJT {dev_num} self-heating thermal update\n\
+                         \x20       let ic = i_nl[{s}];\n\
+                         \x20       let ib = i_nl[{s1}];\n\
+                         \x20       let mut vbe_sum = 0.0f64;\n\
+                         \x20       let mut vbc_sum = 0.0f64;\n\
+                         \x20       for j in 0..N {{ vbe_sum += N_V[{s}][j] * v[j]; }}\n\
+                         \x20       for j in 0..N {{ vbc_sum += N_V[{s1}][j] * v[j]; }}\n\
+                         \x20       let vce = vbe_sum - vbc_sum;\n\
+                         \x20       let p = vce * ic + vbe_sum * ib;\n"
+                    ));
+                    code.push_str(&tj_step(dev_num, bp.cth));
+                    code.push_str(&format!(
+                        "\x20       state.device_{dev_num}_vt = BOLTZMANN_Q * state.device_{dev_num}_tj;\n\
+                         \x20       let t_ratio = state.device_{dev_num}_tj / DEVICE_{dev_num}_TAMB;\n\
+                         \x20       let vt_nom = BOLTZMANN_Q * DEVICE_{dev_num}_TAMB;\n\
+                         \x20       state.device_{dev_num}_is = DEVICE_{dev_num}_IS_NOM\n\
+                         \x20           * t_ratio.powf(DEVICE_{dev_num}_XTI)\n\
+                         \x20           * fast_exp((DEVICE_{dev_num}_EG / vt_nom) * (1.0 - DEVICE_{dev_num}_TAMB / state.device_{dev_num}_tj));\n\
+                         \x20   }}\n"
+                    ));
+                }
+                DeviceParams::Diode(dp) if dp.has_self_heating() => {
+                    let s = slot.start_idx;
+                    // SPICE3f5 diode law divides both IS(T) exponents by the
+                    // ideality factor N. n_vt was built as N·VT_ROOM.
+                    let n_ideality = dp.n_vt / melange_primitives::VT_ROOM;
+                    code.push_str(&format!(
+                        "    {{ // Diode {dev_num} self-heating thermal update\n\
+                         \x20       let id = i_nl[{s}];\n\
+                         \x20       let mut vd_sum = 0.0f64;\n\
+                         \x20       for j in 0..N {{ vd_sum += N_V[{s}][j] * v[j]; }}\n\
+                         \x20       let p = vd_sum * id;\n"
+                    ));
+                    code.push_str(&tj_step(dev_num, dp.cth));
+                    code.push_str(&format!(
+                        "\x20       let t_ratio = state.device_{dev_num}_tj / DEVICE_{dev_num}_TAMB;\n\
+                         \x20       state.device_{dev_num}_n_vt = DEVICE_{dev_num}_N_VT_NOM * t_ratio;\n\
+                         \x20       let vt_nom = BOLTZMANN_Q * DEVICE_{dev_num}_TAMB;\n\
+                         \x20       state.device_{dev_num}_is = DEVICE_{dev_num}_IS_NOM\n\
+                         \x20           * t_ratio.powf(DEVICE_{dev_num}_XTI / {n_ideality:.17e})\n\
+                         \x20           * fast_exp((DEVICE_{dev_num}_EG / ({n_ideality:.17e} * vt_nom)) * (1.0 - DEVICE_{dev_num}_TAMB / state.device_{dev_num}_tj));\n\
+                         \x20   }}\n"
+                    ));
+                }
+                DeviceParams::Tube(tp) if tp.has_self_heating() => {
+                    // Pdiss = Ip·Vpk + Ig·Vgk using converged i_nl and the
+                    // same N_V·v contraction the BJT path uses.
+                    let s = slot.start_idx;
+                    let s1 = s + 1;
+                    code.push_str(&format!(
+                        "    {{ // Triode {dev_num} self-heating thermal update\n\
+                         \x20       let ip = i_nl[{s}];\n\
+                         \x20       let ig = i_nl[{s1}];\n\
+                         \x20       let mut vgk_sum = 0.0f64;\n\
+                         \x20       let mut vpk_sum = 0.0f64;\n\
+                         \x20       for j in 0..N {{ vgk_sum += N_V[{s}][j] * v[j]; }}\n\
+                         \x20       for j in 0..N {{ vpk_sum += N_V[{s1}][j] * v[j]; }}\n\
+                         \x20       let p = ip * vpk_sum + ig * vgk_sum;\n"
+                    ));
+                    code.push_str(&tj_step(dev_num, tp.cth));
+                    code.push_str("\x20   }\n");
+                }
+                _ => {}
+            }
         }
     }
 
@@ -7151,28 +7200,23 @@ impl RustEmitter {
                             has_rs = dp.has_rs(), has_bv = dp.has_bv(),
                         ));
                     } else if dp.has_bv() {
-                        // Breakdown only (no RS): inline standard + breakdown
+                        // Breakdown only (no RS): shared extended-exp helpers +
+                        // breakdown. The old inline 40·n_vt clamp made
+                        // extreme-IS (wide-bandgap) diodes electrically absent
+                        // and used an inconsistent value/derivative pair.
                         code.push_str(&format!(
                             "{indent}{{ // Diode {dev_num} (BV)\n\
                              {indent}    let v = v_nl[{s}];\n\
-                             {indent}    let v_clamped = v.clamp(-40.0 * state.device_{dev_num}_n_vt, 40.0 * state.device_{dev_num}_n_vt);\n\
-                             {indent}    let e = fast_exp(v_clamped / state.device_{dev_num}_n_vt);\n\
-                             {indent}    i_nl[{s}] = state.device_{dev_num}_is * (e - 1.0) + diode_breakdown_current(v, state.device_{dev_num}_n_vt, DEVICE_{dev_num}_BV, DEVICE_{dev_num}_IBV);\n\
-                             {indent}    let g = state.device_{dev_num}_is * e / state.device_{dev_num}_n_vt;\n\
-                             {indent}    let g_base = if v > 40.0 * state.device_{dev_num}_n_vt {{ g + state.device_{dev_num}_is / state.device_{dev_num}_n_vt }} else {{ g }};\n\
-                             {indent}    j_dev[{jd_ss}] = g_base + diode_breakdown_conductance(v, state.device_{dev_num}_n_vt, DEVICE_{dev_num}_BV, DEVICE_{dev_num}_IBV);\n\
+                             {indent}    i_nl[{s}] = diode_current(v, state.device_{dev_num}_is, state.device_{dev_num}_n_vt) + diode_breakdown_current(v, state.device_{dev_num}_n_vt, DEVICE_{dev_num}_BV, DEVICE_{dev_num}_IBV);\n\
+                             {indent}    j_dev[{jd_ss}] = diode_conductance(v, state.device_{dev_num}_is, state.device_{dev_num}_n_vt) + diode_breakdown_conductance(v, state.device_{dev_num}_n_vt, DEVICE_{dev_num}_BV, DEVICE_{dev_num}_IBV);\n\
                              {indent}}}\n"
                         ));
                     } else {
-                        // Standard diode (no RS, no BV)
+                        // Standard diode (no RS, no BV): shared extended-exp helpers
                         code.push_str(&format!(
                             "{indent}{{ // Diode {dev_num}\n\
-                             {indent}    let v = v_nl[{s}];\n\
-                             {indent}    let v_clamped = v.clamp(-40.0 * state.device_{dev_num}_n_vt, 40.0 * state.device_{dev_num}_n_vt);\n\
-                             {indent}    let e = fast_exp(v_clamped / state.device_{dev_num}_n_vt);\n\
-                             {indent}    i_nl[{s}] = state.device_{dev_num}_is * (e - 1.0);\n\
-                             {indent}    let g = state.device_{dev_num}_is * e / state.device_{dev_num}_n_vt;\n\
-                             {indent}    j_dev[{jd_ss}] = if v > 40.0 * state.device_{dev_num}_n_vt {{ g + state.device_{dev_num}_is / state.device_{dev_num}_n_vt }} else {{ g }};\n\
+                             {indent}    i_nl[{s}] = diode_current(v_nl[{s}], state.device_{dev_num}_is, state.device_{dev_num}_n_vt);\n\
+                             {indent}    j_dev[{jd_ss}] = diode_conductance(v_nl[{s}], state.device_{dev_num}_is, state.device_{dev_num}_n_vt);\n\
                              {indent}}}\n"
                         ));
                     }
@@ -7242,6 +7286,13 @@ impl RustEmitter {
                             "jfet_jacobian(vgs, vds, state.device_{dev_num}_idss, state.device_{dev_num}_vp, state.device_{dev_num}_lambda, sign)"
                         )
                     };
+                    // jac = [dId/dVgs, dId/dVds, dIg/dVgs, dIg/dVds] but the
+                    // NR dims are (s = Vds, s+1 = Vgs), so the columns swap:
+                    //   j_dev[s][s]   = dId/dVds = jac[1]
+                    //   j_dev[s][s1]  = dId/dVgs = jac[0]
+                    //   j_dev[s1][s]  = dIg/dVds = jac[3]
+                    //   j_dev[s1][s1] = dIg/dVgs = jac[2]
+                    // (mirrors emit_dk_device_eval_for_nodal_schur_indented)
                     code.push_str(&format!(
                         "{indent}{{ // JFET {dev_num}\n\
                          {indent}    let vds = v_nl[{s}];\n\
@@ -7250,10 +7301,10 @@ impl RustEmitter {
                          {indent}    i_nl[{s}] = jfet_id(vgs, vds, state.device_{dev_num}_idss, state.device_{dev_num}_vp, state.device_{dev_num}_lambda, sign);\n\
                          {indent}    i_nl[{s1}] = jfet_ig(vgs, sign);\n\
                          {indent}    let jac = {jac_fn};\n\
-                         {indent}    j_dev[{jd_ss}] = jac[0];\n\
-                         {indent}    j_dev[{jd_01}] = jac[1];\n\
-                         {indent}    j_dev[{jd_10}] = jac[2];\n\
-                         {indent}    j_dev[{jd_11}] = jac[3];\n\
+                         {indent}    j_dev[{jd_ss}] = jac[1];\n\
+                         {indent}    j_dev[{jd_01}] = jac[0];\n\
+                         {indent}    j_dev[{jd_10}] = jac[3];\n\
+                         {indent}    j_dev[{jd_11}] = jac[2];\n\
                          {indent}}}\n"
                     ));
                 }
@@ -7275,10 +7326,13 @@ impl RustEmitter {
                             "0.0".to_string()
                         };
                         let sign_val = if mp.is_p_channel { -1.0 } else { 1.0 };
+                        // Magnitude-space body effect: the GAMMA correction
+                        // carries the channel sign so reverse body bias always
+                        // increases |VT| (VT stays signed; PMOS VT < 0).
                         code.push_str(&format!(
                             "{indent}{{ // MOSFET {dev_num} body effect\n\
-                             {indent}    let vsb = {sign_val:.1} * ({vs_expr} - {vb_expr});\n\
-                             {indent}    let vt_eff = DEVICE_{dev_num}_VT + DEVICE_{dev_num}_GAMMA * ((DEVICE_{dev_num}_PHI + vsb.max(0.0)).sqrt() - DEVICE_{dev_num}_PHI.sqrt());\n\
+                             {indent}    let vsb = ({sign_val:.1}) * ({vs_expr} - {vb_expr});\n\
+                             {indent}    let vt_eff = DEVICE_{dev_num}_VT + ({sign_val:.1}) * DEVICE_{dev_num}_GAMMA * ((DEVICE_{dev_num}_PHI + vsb.max(0.0)).sqrt() - DEVICE_{dev_num}_PHI.sqrt());\n\
                              {indent}    state.device_{dev_num}_vt = vt_eff;\n"
                         ));
                         "vt_eff".to_string()
@@ -7295,6 +7349,9 @@ impl RustEmitter {
                             "mosfet_jacobian(vgs, vds, state.device_{dev_num}_kp, {vt_expr}, state.device_{dev_num}_lambda, sign)"
                         )
                     };
+                    // jac = [dId/dVgs, dId/dVds, dIg/dVgs, dIg/dVds]; NR dims
+                    // are (s = Vds, s+1 = Vgs) — column swap, same as JFET
+                    // above and emit_dk_device_eval_for_nodal_schur_indented.
                     code.push_str(&format!(
                         "{indent}    let vds = v_nl[{s}];\n\
                          {indent}    let vgs = v_nl[{s1}];\n\
@@ -7302,10 +7359,10 @@ impl RustEmitter {
                          {indent}    i_nl[{s}] = mosfet_id(vgs, vds, state.device_{dev_num}_kp, {vt_expr}, state.device_{dev_num}_lambda, sign);\n\
                          {indent}    i_nl[{s1}] = 0.0; // Insulated gate\n\
                          {indent}    let jac = {jac_fn};\n\
-                         {indent}    j_dev[{jd_ss}] = jac[0];\n\
-                         {indent}    j_dev[{jd_01}] = jac[1];\n\
-                         {indent}    j_dev[{jd_10}] = jac[2];\n\
-                         {indent}    j_dev[{jd_11}] = jac[3];\n\
+                         {indent}    j_dev[{jd_ss}] = jac[1];\n\
+                         {indent}    j_dev[{jd_01}] = jac[0];\n\
+                         {indent}    j_dev[{jd_10}] = jac[3];\n\
+                         {indent}    j_dev[{jd_11}] = jac[2];\n\
                          {indent}}}\n"
                     ));
                 }
@@ -7448,18 +7505,13 @@ impl RustEmitter {
                             "{indent}i_nl[{s}] = diode_current_with_rs(v_nl_final[{s}], state.device_{dev_num}_is, state.device_{dev_num}_n_vt, DEVICE_{dev_num}_RS){bv_i};\n"
                         ));
                     } else if dp.has_bv() {
+                        // Shared extended-exp helper (matches NR-loop stamp).
                         code.push_str(&format!(
-                            "{indent}{{ let v = v_nl_final[{s}];\n\
-                             {indent}  let v_clamped = v.clamp(-40.0 * state.device_{dev_num}_n_vt, 40.0 * state.device_{dev_num}_n_vt);\n\
-                             {indent}  i_nl[{s}] = state.device_{dev_num}_is * (fast_exp(v_clamped / state.device_{dev_num}_n_vt) - 1.0) + diode_breakdown_current(v, state.device_{dev_num}_n_vt, DEVICE_{dev_num}_BV, DEVICE_{dev_num}_IBV);\n\
-                             {indent}}}\n"
+                            "{indent}i_nl[{s}] = diode_current(v_nl_final[{s}], state.device_{dev_num}_is, state.device_{dev_num}_n_vt) + diode_breakdown_current(v_nl_final[{s}], state.device_{dev_num}_n_vt, DEVICE_{dev_num}_BV, DEVICE_{dev_num}_IBV);\n"
                         ));
                     } else {
                         code.push_str(&format!(
-                            "{indent}{{ let v = v_nl_final[{s}];\n\
-                             {indent}  let v_clamped = v.clamp(-40.0 * state.device_{dev_num}_n_vt, 40.0 * state.device_{dev_num}_n_vt);\n\
-                             {indent}  i_nl[{s}] = state.device_{dev_num}_is * (fast_exp(v_clamped / state.device_{dev_num}_n_vt) - 1.0);\n\
-                             {indent}}}\n"
+                            "{indent}i_nl[{s}] = diode_current(v_nl_final[{s}], state.device_{dev_num}_is, state.device_{dev_num}_n_vt);\n"
                         ));
                     }
                 }

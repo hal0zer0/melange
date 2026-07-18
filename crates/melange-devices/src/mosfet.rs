@@ -60,27 +60,57 @@ impl Mosfet {
     }
 
     /// Drain current given Vgs and Vds.
+    ///
+    /// VTO is kept signed through the effective-space math:
+    /// `vov = vgs_eff - s*vt` handles enhancement AND depletion devices for
+    /// both polarities (depletion NMOS has VTO < 0 and conducts at Vgs = 0;
+    /// standard PMOS has VTO < 0 with s = -1).
+    ///
+    /// SPICE-style mode handling: for `vds_eff >= 0` (normal mode) the
+    /// source-referenced overdrive governs. For `vds_eff < 0` (reverse mode)
+    /// the drain acts as the source, so the drain-referenced overdrive
+    /// `vgd_eff - vt_eff` governs: the normal-mode equations are evaluated at
+    /// `(vgd, -vds)` and the result is negated. The triode expression is
+    /// exactly symmetric under this swap, so value and all Jacobian entries
+    /// are continuous across Vds = 0.
     pub fn drain_current(&self, vgs: f64, vds: f64) -> f64 {
         let s = self.sign();
         let vgs_eff = s * vgs;
         let vds_eff = s * vds;
 
-        let vt_abs = self.vt.abs();
-        let vov = vgs_eff - vt_abs; // Overdrive voltage
+        // Signed threshold in effective (N-channel) space.
+        let vt_eff = s * self.vt;
+
+        // Mode selection: vc = controlling gate reference, vd = |vds_eff|,
+        // m = polarity of the drain current.
+        let (vc, vd, m) = if vds_eff >= 0.0 {
+            (vgs_eff, vds_eff, 1.0)
+        } else {
+            // Reverse mode: drain acts as source. vgd_eff = vgs_eff - vds_eff.
+            (vgs_eff - vds_eff, -vds_eff, -1.0)
+        };
+        let vov = vc - vt_eff; // Overdrive voltage
 
         if vov <= 0.0 {
-            // Subthreshold: weak exponential for smooth NR convergence
-            return s * 1e-12 * (vov / (2.0 * VT_ROOM)).exp().min(1.0);
+            // Subthreshold: weak exponential for smooth NR convergence.
+            // Gated by tanh(vd/2VT) so the leakage is continuous (and zero)
+            // at Vds = 0 where the mode polarity m flips sign.
+            let sub = 1e-12 * (vov / (2.0 * VT_ROOM)).exp().min(1.0);
+            return s * m * sub * (vd / (2.0 * VT_ROOM)).tanh();
         }
 
-        if vds_eff < vov {
+        // Channel-length modulation uses the mode-consistent |Vds| (SPICE
+        // behavior — see DEVICE_MODELS.md, `1 + LAMBDA*|Vds|`).
+        let clm = 1.0 + self.lambda * vd;
+
+        if vd < vov {
             // Linear (triode) region
-            let id = self.kp * (vov * vds_eff - 0.5 * vds_eff * vds_eff);
-            s * id * (1.0 + self.lambda * vds_eff)
+            let id = self.kp * (vov * vd - 0.5 * vd * vd);
+            s * m * id * clm
         } else {
             // Saturation region
             let id = 0.5 * self.kp * vov * vov;
-            s * id * (1.0 + self.lambda * vds_eff)
+            s * m * id * clm
         }
     }
 
@@ -92,41 +122,56 @@ impl Mosfet {
         let vgs_eff = s * vgs;
         let vds_eff = s * vds;
 
-        let vt_abs = self.vt.abs();
-        let vov = vgs_eff - vt_abs;
+        let vt_eff = s * self.vt;
 
-        if vov <= 0.0 {
-            // Subthreshold: derivative of weak exponential.
+        // Mode selection — must mirror drain_current exactly.
+        // Id = s * m * f(vc, vd), with:
+        //   normal  (m=+1): vc = vgs_eff,           vd = vds_eff
+        //   reverse (m=-1): vc = vgs_eff - vds_eff, vd = -vds_eff
+        // Chain rule to external (vgs, vds), with s² = 1:
+        //   normal:  dId/dVgs = f_c            dId/dVds = f_d
+        //   reverse: dId/dVgs = -f_c           dId/dVds = f_c + f_d
+        let (vc, vd, m) = if vds_eff >= 0.0 {
+            (vgs_eff, vds_eff, 1.0)
+        } else {
+            (vgs_eff - vds_eff, -vds_eff, -1.0)
+        };
+        let vov = vc - vt_eff;
+
+        // (f_c, f_d) = (∂f/∂vc, ∂f/∂vd)
+        let (f_c, f_d) = if vov <= 0.0 {
+            // Subthreshold: derivative of tanh-gated weak exponential.
             // Matches device_mosfet.rs.tera — unconditional, no dead branch.
             let sub = 1e-12 * (vov / (2.0 * VT_ROOM)).exp().min(1.0);
-            let gm = sub / (2.0 * VT_ROOM);
-            return (gm, 0.0);
+            let t = (vd / (2.0 * VT_ROOM)).tanh();
+            (
+                sub * t / (2.0 * VT_ROOM),
+                sub * (1.0 - t * t) / (2.0 * VT_ROOM),
+            )
+        } else {
+            let clm = 1.0 + self.lambda * vd;
+
+            if vd < vov {
+                // Linear (triode) region
+                // f_c = ∂/∂vc [kp*((vc-Vt)*vd - 0.5*vd^2)*(1+lambda*vd)] = kp*vd*clm
+                let f_c = self.kp * vd * clm;
+                // f_d = kp*(vov - vd)*clm + kp*(vov*vd - 0.5*vd^2)*lambda
+                let id_base = self.kp * (vov - vd);
+                let id_full = self.kp * (vov * vd - 0.5 * vd * vd);
+                (f_c, id_base * clm + id_full * self.lambda)
+            } else {
+                // Saturation region
+                let f_c = self.kp * vov * clm;
+                let f_d = 0.5 * self.kp * vov * vov * self.lambda;
+                (f_c, f_d)
+            }
+        };
+
+        if m >= 0.0 {
+            (f_c, f_d)
+        } else {
+            (-f_c, f_c + f_d)
         }
-
-        // ∂Id/∂Vgs
-        let d_id_d_vgs = if vds_eff < vov {
-            // Linear: ∂/∂Vgs [kp*((Vgs-Vt)*Vds - 0.5*Vds^2)] = kp * Vds
-            self.kp * vds_eff * (1.0 + self.lambda * vds_eff)
-        } else {
-            // Saturation: ∂/∂Vgs [0.5*kp*(Vgs-Vt)^2] = kp * (Vgs-Vt)
-            self.kp * vov * (1.0 + self.lambda * vds_eff)
-        };
-
-        // ∂Id/∂Vds
-        let d_id_d_vds = if vds_eff < vov {
-            // Linear: ∂/∂Vds [kp*((Vgs-Vt)*Vds - 0.5*Vds^2)*(1+lambda*Vds)]
-            // = kp*(Vgs-Vt - Vds)*(1+lambda*Vds) + kp*((Vgs-Vt)*Vds - 0.5*Vds^2)*lambda
-            let id_base = self.kp * (vov - vds_eff);
-            let id_full = self.kp * (vov * vds_eff - 0.5 * vds_eff * vds_eff);
-            id_base * (1.0 + self.lambda * vds_eff) + id_full * self.lambda
-        } else {
-            // Saturation: 0.5*kp*Vov^2 * lambda
-            0.5 * self.kp * vov * vov * self.lambda
-        };
-
-        // Apply chain rule for polarity: ∂Id/∂vgs = s * ∂(s*f)/∂(s*vgs) = s² * ∂f/∂vgs_eff
-        // For N-channel (s=1): s²=1, no change. For P-channel (s=-1): s²=1, sign preserved.
-        (s * s * d_id_d_vgs, s * s * d_id_d_vds)
     }
 }
 
@@ -370,6 +415,7 @@ mod tests {
         // form; runtime must match.
         let mos = Mosfet::new(ChannelType::N, 2.0, 0.1, 0.01);
         let (gm, gds) = mos.jacobian_partial(2.0, 1.0); // vgs == Vt -> vov = 0
+        // tanh(vd/2VT) gate at vd=1.0 is 1.0 to machine precision.
         let expected_gm = 1e-12 / (2.0 * crate::VT_ROOM);
         assert!(
             (gm - expected_gm).abs() / expected_gm < 1e-9,
@@ -377,6 +423,244 @@ mod tests {
             gm,
             expected_gm
         );
-        assert_eq!(gds, 0.0);
+        // gds carries the tanh-gate derivative sub*(1-t^2)/(2VT); at vd=1.0
+        // sech^2 has fully decayed, so it is zero to well below any solver
+        // tolerance (< 1e-24 A/V).
+        assert!(
+            gds.abs() < 1e-24,
+            "subthreshold gds at vov=0, vds=1: got {}",
+            gds
+        );
+    }
+
+    /// VTO must stay signed: a depletion-mode NMOS (VTO < 0, e.g. LND150 /
+    /// DN2540 CCS parts) conducts at Vgs = 0. The old `vt.abs()` silently
+    /// converted these into enhancement devices (off at Vgs = 0).
+    #[test]
+    fn test_mosfet_depletion_nmos_conducts_at_vgs_zero() {
+        // Depletion NMOS: VTO = -2.0 V
+        let mos = Mosfet::new(ChannelType::N, -2.0, 1e-3, 0.01);
+
+        // Vgs = 0: vov = 0 - (-2) = 2 > 0 -> conducts (saturation at Vds=10)
+        let id = mos.drain_current(0.0, 10.0);
+        let expected = 0.5 * 1e-3 * 2.0 * 2.0 * (1.0 + 0.01 * 10.0);
+        assert!(
+            (id - expected).abs() / expected < 1e-12,
+            "depletion NMOS at Vgs=0: got {:.6e}, expected {:.6e}",
+            id,
+            expected
+        );
+        assert!(id > 1e-3, "depletion NMOS should conduct mA at Vgs=0");
+
+        // Pinches off below VTO: Vgs = -3 < -2 -> subthreshold
+        assert!(
+            mos.drain_current(-3.0, 10.0) < 1e-9,
+            "depletion NMOS should be off at Vgs=-3"
+        );
+
+        // FD Jacobian check at the Vgs=0 operating point
+        let eps = 1e-7;
+        let (gm, gds) = mos.jacobian_partial(0.0, 10.0);
+        let fd_gm =
+            (mos.drain_current(eps, 10.0) - mos.drain_current(-eps, 10.0)) / (2.0 * eps);
+        let fd_gds =
+            (mos.drain_current(0.0, 10.0 + eps) - mos.drain_current(0.0, 10.0 - eps)) / (2.0 * eps);
+        assert!((gm - fd_gm).abs() / fd_gm.abs() < 0.01);
+        assert!((gds - fd_gds).abs() / fd_gds.abs() < 0.01);
+    }
+
+    /// Enhancement NMOS sanity after the signed-VTO change (unchanged
+    /// behavior): off at Vgs=0, on above VTO.
+    #[test]
+    fn test_mosfet_enhancement_nmos_signed_vto() {
+        let mos = Mosfet::new(ChannelType::N, 2.0, 0.1, 0.01);
+        assert!(mos.drain_current(0.0, 10.0).abs() < 1e-12);
+        let id = mos.drain_current(4.0, 10.0);
+        let expected = 0.5 * 0.1 * 2.0 * 2.0 * (1.0 + 0.01 * 10.0);
+        assert!((id - expected).abs() / expected < 1e-12);
+    }
+
+    /// Standard PMOS (VTO < 0) must still work with signed VTO (previously
+    /// rescued by the abs()): off at Vgs=0, on when Vgs < VTO.
+    #[test]
+    fn test_mosfet_pmos_negative_vto_signed() {
+        let mos = Mosfet::new(ChannelType::P, -2.0, 0.1, 0.01);
+        // Off at Vgs = 0
+        assert!(mos.drain_current(0.0, -10.0).abs() < 1e-12);
+        // On at Vgs = -4: vov = -(-4) - (-1)*(-2) = 4 - 2 = 2
+        let id = mos.drain_current(-4.0, -10.0);
+        let expected = -0.5 * 0.1 * 2.0 * 2.0 * (1.0 + 0.01 * 10.0);
+        assert!(
+            (id - expected).abs() / expected.abs() < 1e-12,
+            "PMOS at Vgs=-4: got {:.6e}, expected {:.6e}",
+            id,
+            expected
+        );
+    }
+
+    /// Reverse-mode conduction: when Vgs is below threshold but the
+    /// drain-referenced overdrive Vgd - VTO > 0 (Vds negative enough), the
+    /// device conducts reverse saturation. The old source-referenced-only
+    /// cutoff returned picoamps with dId/dVds = 0.
+    #[test]
+    fn test_mosfet_reverse_saturation_conducts() {
+        let mos = Mosfet::new(ChannelType::N, 2.0, 0.1, 0.01);
+
+        // Vgs = 1 (below VTO=2), Vds = -2: Vgd = 3 -> reverse overdrive 1 V.
+        // vd = 2 >= vov_r = 1 -> reverse saturation:
+        // Id = -0.5*kp*1^2*(1+lambda*2)
+        let id = mos.drain_current(1.0, -2.0);
+        let expected = -0.5 * 0.1 * 1.0 * (1.0 + 0.01 * 2.0);
+        assert!(
+            (id - expected).abs() / expected.abs() < 1e-12,
+            "reverse saturation: got {:.6e}, expected {:.6e}",
+            id,
+            expected
+        );
+
+        let (gm, gds) = mos.jacobian_partial(1.0, -2.0);
+        assert!(gds > 1e-3, "reverse-mode gds should be substantial");
+        assert!(gm < 0.0, "reverse-mode gm should be negative");
+    }
+
+    /// FD Jacobian checks in the reverse quadrant (Vds < 0 for N-channel),
+    /// covering reverse triode, reverse saturation, points straddling the
+    /// Vds=0 mode boundary, and points straddling the reverse cutoff
+    /// boundary. Matches the multi-region FD test style.
+    #[test]
+    fn test_mosfet_reverse_mode_fd_jacobian() {
+        let eps = 1e-7;
+
+        // N-channel: Vt=2.0, Kp=0.1, lambda=0.01
+        let n_mos = Mosfet::new(ChannelType::N, 2.0, 0.1, 0.01);
+        let n_points: &[(f64, f64, &str)] = &[
+            // Reverse saturation (Vgs below Vt, Vgd above Vt)
+            (1.0, -2.0, "N reverse saturation"),
+            (0.0, -4.0, "N reverse saturation deep"),
+            // Reverse triode (both overdrives positive)
+            (5.0, -1.0, "N reverse triode"),
+            (4.0, -0.5, "N reverse triode shallow"),
+            // Straddling the Vds=0 mode boundary while conducting
+            (5.0, 0.02, "N mode boundary + side"),
+            (5.0, -0.02, "N mode boundary - side"),
+            // Straddling the reverse cutoff boundary (Vgd crosses Vt):
+            // Vgd = Vgs - Vds = 2.2 / 1.8 around Vt = 2.0
+            (1.0, -1.2, "N reverse just conducting"),
+            (1.0, -0.8, "N reverse just cutoff"),
+        ];
+
+        for &(vgs, vds, desc) in n_points {
+            let (d_id_d_vgs, d_id_d_vds) = n_mos.jacobian_partial(vgs, vds);
+
+            let fd_vgs = (n_mos.drain_current(vgs + eps, vds)
+                - n_mos.drain_current(vgs - eps, vds))
+                / (2.0 * eps);
+            let fd_vds = (n_mos.drain_current(vgs, vds + eps)
+                - n_mos.drain_current(vgs, vds - eps))
+                / (2.0 * eps);
+
+            for (name, analytic, fd) in [
+                ("dId/dVgs", d_id_d_vgs, fd_vgs),
+                ("dId/dVds", d_id_d_vds, fd_vds),
+            ] {
+                let rel_err = if fd.abs() > 1e-15 {
+                    (analytic - fd).abs() / fd.abs()
+                } else {
+                    analytic.abs()
+                };
+                assert!(
+                    rel_err < 0.01,
+                    "N-MOSFET {} at {} (Vgs={}, Vds={}): analytic={:.6e} fd={:.6e} err={:.2e}",
+                    name,
+                    desc,
+                    vgs,
+                    vds,
+                    analytic,
+                    fd,
+                    rel_err
+                );
+            }
+        }
+
+        // P-channel: Vt=-2.0; reverse quadrant is Vds > 0.
+        let p_mos = Mosfet::new(ChannelType::P, -2.0, 0.1, 0.01);
+        let p_points: &[(f64, f64, &str)] = &[
+            (-1.0, 2.0, "P reverse saturation"),
+            (-5.0, 1.0, "P reverse triode"),
+            (-5.0, 0.02, "P mode boundary + side"),
+            (-5.0, -0.02, "P mode boundary - side"),
+        ];
+
+        for &(vgs, vds, desc) in p_points {
+            let (d_id_d_vgs, d_id_d_vds) = p_mos.jacobian_partial(vgs, vds);
+
+            let fd_vgs = (p_mos.drain_current(vgs + eps, vds)
+                - p_mos.drain_current(vgs - eps, vds))
+                / (2.0 * eps);
+            let fd_vds = (p_mos.drain_current(vgs, vds + eps)
+                - p_mos.drain_current(vgs, vds - eps))
+                / (2.0 * eps);
+
+            for (name, analytic, fd) in [
+                ("dId/dVgs", d_id_d_vgs, fd_vgs),
+                ("dId/dVds", d_id_d_vds, fd_vds),
+            ] {
+                let rel_err = if fd.abs() > 1e-15 {
+                    (analytic - fd).abs() / fd.abs()
+                } else {
+                    analytic.abs()
+                };
+                assert!(
+                    rel_err < 0.01,
+                    "P-MOSFET {} at {} (Vgs={}, Vds={}): analytic={:.6e} fd={:.6e} err={:.2e}",
+                    name,
+                    desc,
+                    vgs,
+                    vds,
+                    analytic,
+                    fd,
+                    rel_err
+                );
+            }
+        }
+    }
+
+    /// Value and Jacobian continuity across the Vds=0 mode boundary, in
+    /// conduction, subthreshold, and at the threshold boundary itself.
+    #[test]
+    fn test_mosfet_continuity_across_vds_zero() {
+        let mos = Mosfet::new(ChannelType::N, 2.0, 0.1, 0.01);
+        let eps = 1e-9;
+
+        for &vgs in &[5.0, 3.0, 2.0, 1.0, 0.0] {
+            let id_pos = mos.drain_current(vgs, eps);
+            let id_neg = mos.drain_current(vgs, -eps);
+            // Continuous function: |Id(+eps) - Id(-eps)| is O(2*eps*gds),
+            // not zero. gds here is at most ~0.3 S -> bound 1e-8 A.
+            assert!(
+                (id_pos - id_neg).abs() < 1e-8,
+                "Id discontinuity at Vds=0, Vgs={}: {:.3e} vs {:.3e}",
+                vgs,
+                id_pos,
+                id_neg
+            );
+
+            let (gm_pos, gds_pos) = mos.jacobian_partial(vgs, eps);
+            let (gm_neg, gds_neg) = mos.jacobian_partial(vgs, -eps);
+            assert!(
+                (gm_pos - gm_neg).abs() < 1e-6,
+                "gm discontinuity at Vds=0, Vgs={}: {:.6e} vs {:.6e}",
+                vgs,
+                gm_pos,
+                gm_neg
+            );
+            assert!(
+                (gds_pos - gds_neg).abs() < 1e-6,
+                "gds discontinuity at Vds=0, Vgs={}: {:.6e} vs {:.6e}",
+                vgs,
+                gds_pos,
+                gds_neg
+            );
+        }
     }
 }

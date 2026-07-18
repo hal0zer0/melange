@@ -1306,6 +1306,21 @@ struct Parser {
     line_num: usize,
 }
 
+/// Strip an inline comment (`;` or `$` to end of line) from a netlist line,
+/// respecting double-quoted regions so labels like `.pot R1 1k 100k "Bass; Mid"`
+/// keep their full text.
+fn strip_inline_comment(line: &str) -> &str {
+    let mut in_quote = false;
+    for (i, c) in line.char_indices() {
+        match c {
+            '"' => in_quote = !in_quote,
+            ';' | '$' if !in_quote => return &line[..i],
+            _ => {}
+        }
+    }
+    line
+}
+
 impl Parser {
     fn new(input: &str) -> Self {
         // Pre-process: join continuation lines and strip comments
@@ -1314,21 +1329,14 @@ impl Parser {
         let mut i = 0;
 
         while i < raw_lines.len() {
-            // Strip inline comments (semicolon and $ delimiter)
-            let line = raw_lines[i]
-                .split([';', '$'])
-                .next()
-                .unwrap_or(raw_lines[i])
-                .trim();
+            // Strip inline comments (semicolon and $ delimiter), respecting
+            // double-quoted regions (labels may legally contain ';' / '$').
+            let line = strip_inline_comment(raw_lines[i]).trim();
 
             // Accumulate continuation lines: next line starts with '+'
             let mut accumulated = line.to_string();
             while i + 1 < raw_lines.len() {
-                let next = raw_lines[i + 1]
-                    .split([';', '$'])
-                    .next()
-                    .unwrap_or(raw_lines[i + 1])
-                    .trim();
+                let next = strip_inline_comment(raw_lines[i + 1]).trim();
                 if let Some(stripped) = next.strip_prefix('+') {
                     // Continuation line: strip '+' and append
                     accumulated.push(' ');
@@ -1353,6 +1361,7 @@ impl Parser {
     fn parse(mut self) -> Result<Netlist, ParseError> {
         // First line is title
         let title = self.next_line().unwrap_or_default();
+        Self::warn_if_title_looks_like_content(&title);
         let mut netlist = Netlist::new(title);
 
         while let Some(line) = self.next_line() {
@@ -1361,6 +1370,38 @@ impl Parser {
             // Skip empty lines and comments
             if line.is_empty() || line.starts_with('*') {
                 continue;
+            }
+
+            // Top-level `.end` terminates the netlist (ngspice semantics).
+            // Anything after it is NOT part of the circuit — warn if the
+            // user left non-blank content there.
+            let first_token_lower = line
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if first_token_lower == ".end" {
+                let mut trailing = 0usize;
+                let mut first_trailing: Option<String> = None;
+                while let Some(rest) = self.next_line() {
+                    let rest = rest.trim();
+                    if rest.is_empty() || rest.starts_with('*') {
+                        continue;
+                    }
+                    trailing += 1;
+                    if first_trailing.is_none() {
+                        first_trailing = Some(rest.to_string());
+                    }
+                }
+                if trailing > 0 {
+                    log::warn!(
+                        "{} non-blank line(s) after '.end' were ignored (parsing stops at .end, \
+                         ngspice semantics); first ignored line: '{}'",
+                        trailing,
+                        first_trailing.as_deref().unwrap_or("")
+                    );
+                }
+                break;
             }
 
             // Parse directive or element
@@ -1398,6 +1439,45 @@ impl Parser {
         Ok(netlist)
     }
 
+    /// SPICE semantics: line 1 is ALWAYS the title, even if it looks like an
+    /// element or directive. Warn when the consumed title is plausibly a
+    /// circuit line so a missing title line fails loudly instead of silently
+    /// dropping the first component.
+    fn warn_if_title_looks_like_content(title: &str) {
+        let t = title.trim();
+        if t.is_empty() {
+            return;
+        }
+        if t.starts_with('.') {
+            log::warn!(
+                "first line '{}' was consumed as the netlist title (SPICE semantics) but looks \
+                 like a directive — add a title line above it if this was unintended",
+                t
+            );
+            return;
+        }
+        let toks: Vec<&str> = t.split_whitespace().collect();
+        let first = toks[0];
+        let first_char = first.chars().next().unwrap_or(' ').to_ascii_uppercase();
+        let known_element_letter = matches!(
+            first_char,
+            'R' | 'C' | 'L' | 'V' | 'I' | 'D' | 'Q' | 'J' | 'M' | 'T' | 'P' | 'U' | 'Y' | 'E'
+                | 'G' | 'X' | 'B' | 'K'
+        );
+        // Require an element-name shape (letter + digit somewhere, identifier
+        // chars only) to keep prose titles like "RC lowpass test" quiet.
+        let looks_like_element_name = known_element_letter
+            && first.chars().skip(1).any(|c| c.is_ascii_digit())
+            && first.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+        if looks_like_element_name && toks.len() >= 3 {
+            log::warn!(
+                "first line '{}' was consumed as the netlist title (SPICE semantics) but looks \
+                 like a circuit element — add a title line above it if this was unintended",
+                t
+            );
+        }
+    }
+
     /// Post-parse validation: duplicate names, model references, pot targets.
     fn validate_netlist(netlist: &Netlist) -> Result<(), ParseError> {
         // Check for duplicate component names (case-insensitive)
@@ -1411,14 +1491,32 @@ impl Parser {
             }
         }
 
+        // Check for duplicate .model names (case-insensitive). Before this
+        // check the FIRST definition silently won — the project's worst
+        // failure mode (a wrong circuit that solves perfectly).
+        let mut seen_model_names = std::collections::HashSet::new();
+        for model in &netlist.models {
+            if !seen_model_names.insert(model.name.to_ascii_lowercase()) {
+                return Err(ParseError {
+                    line: 0,
+                    message: format!(
+                        "Duplicate .model name: '{}' is defined more than once",
+                        model.name
+                    ),
+                });
+            }
+        }
+
         // Check that devices referencing models have matching .model definitions
+        // AND that the model's type matches the element kind (a diode bound to
+        // an NPN card previously sailed through and produced a wrong circuit).
         for elem in &netlist.elements {
             if let Some(model_ref) = elem.model_name() {
-                let model_exists = netlist
+                let model = netlist
                     .models
                     .iter()
-                    .any(|m| m.name.eq_ignore_ascii_case(model_ref));
-                if !model_exists {
+                    .find(|m| m.name.eq_ignore_ascii_case(model_ref));
+                let Some(model) = model else {
                     return Err(ParseError {
                         line: 0,
                         message: format!(
@@ -1427,6 +1525,59 @@ impl Parser {
                             model_ref
                         ),
                     });
+                };
+                // Allowed type sets follow the de facto contract in mna.rs /
+                // codegen/ir (polarity is decided by starts_with("PNP"),
+                // starts_with("PJ"), starts_with("PM"), so short forms like
+                // NJ/PM are legal). `TUBE` is an accepted triode type
+                // alongside TRIODE/VT.
+                enum TypeRule {
+                    Exact(&'static [&'static str]),
+                    Prefix(&'static [&'static str]),
+                }
+                let expected: Option<(TypeRule, &str)> = match elem {
+                    Element::Diode { .. } => Some((TypeRule::Exact(&["D"]), "diode")),
+                    Element::Bjt { .. } => Some((TypeRule::Prefix(&["NPN", "PNP"]), "BJT")),
+                    Element::Jfet { .. } => Some((TypeRule::Prefix(&["NJ", "PJ"]), "JFET")),
+                    Element::Mosfet { .. } => Some((TypeRule::Prefix(&["NM", "PM"]), "MOSFET")),
+                    Element::Triode { .. } => {
+                        Some((TypeRule::Exact(&["TRIODE", "VT", "TUBE"]), "triode"))
+                    }
+                    Element::Pentode { .. } => {
+                        Some((TypeRule::Exact(&["VP", "PENTODE"]), "pentode"))
+                    }
+                    Element::Opamp { .. } => Some((TypeRule::Exact(&["OA"]), "op-amp")),
+                    Element::Vca { .. } => Some((TypeRule::Exact(&["VCA"]), "VCA")),
+                    _ => None,
+                };
+                if let Some((rule, kind)) = expected {
+                    let mt = model.model_type.trim().to_ascii_uppercase();
+                    let (ok, allowed_desc) = match rule {
+                        TypeRule::Exact(set) => {
+                            (set.iter().any(|a| *a == mt), set.join(", "))
+                        }
+                        TypeRule::Prefix(set) => (
+                            set.iter().any(|a| mt.starts_with(a)),
+                            set.iter()
+                                .map(|a| format!("{a}*"))
+                                .collect::<Vec<_>>()
+                                .join(", "),
+                        ),
+                    };
+                    if !ok {
+                        return Err(ParseError {
+                            line: 0,
+                            message: format!(
+                                "Component '{}' is a {} but references model '{}' of type '{}' \
+                                 (expected one of: {})",
+                                elem.name(),
+                                kind,
+                                model.name,
+                                model.model_type,
+                                allowed_desc
+                            ),
+                        });
+                    }
                 }
             }
         }
@@ -1523,6 +1674,29 @@ impl Parser {
                         ),
                     });
                 }
+            }
+        }
+
+        // A component may not be claimed by BOTH a .pot/.wiper and a .switch —
+        // the two runtime-update mechanisms would fight over the same stamp.
+        // (pot↔wiper and pot↔runtime-R are already cross-validated elsewhere;
+        // this closes the pot↔switch gap. Wiper legs are covered because
+        // expand_wipers() has already pushed them into `netlist.pots`.)
+        for pot in &netlist.pots {
+            let claimed_by_switch = netlist.switches.iter().any(|sw| {
+                sw.component_names
+                    .iter()
+                    .any(|n| n.eq_ignore_ascii_case(&pot.resistor_name))
+            });
+            if claimed_by_switch {
+                return Err(ParseError {
+                    line: 0,
+                    message: format!(
+                        "Component '{}' is claimed by both a .pot/.wiper and a .switch directive — \
+                         a component can only have one runtime-update mechanism",
+                        pot.resistor_name
+                    ),
+                });
             }
         }
 
@@ -2096,7 +2270,10 @@ impl Parser {
             ".subckt" => {
                 self.require_parts(&parts, 2, "a name")?;
                 let subckt_name = parts[1].to_string();
-                let subckt_nodes: Vec<String> = parts[2..].iter().map(|s| s.to_string()).collect();
+                let subckt_nodes: Vec<String> = parts[2..]
+                    .iter()
+                    .map(|s| normalize_node_name(s))
+                    .collect();
                 let mut subckt_elements = Vec::new();
 
                 // Collect elements until .ends
@@ -2123,6 +2300,13 @@ impl Parser {
                             }
                             let model = self.parse_model(&sub_parts)?;
                             netlist.models.push(model);
+                        } else {
+                            log::warn!(
+                                "directive '{}' inside .subckt '{}' is ignored — only .model is \
+                                 honored inside subcircuit bodies; move it to the top level",
+                                sub_parts[0],
+                                subckt_name
+                            );
                         }
                         continue;
                     }
@@ -2166,7 +2350,7 @@ impl Parser {
                     return Err(self.error(".delay_feedback requires at least one node name"));
                 }
                 for name in &parts[1..] {
-                    netlist.delay_feedback_nodes.push(name.to_string());
+                    netlist.delay_feedback_nodes.push(normalize_node_name(name));
                 }
             }
             ".linearize" => {
@@ -2308,45 +2492,97 @@ impl Parser {
         let mut params = Vec::new();
 
         // Reconstruct everything after ".model NAME" to handle TYPE(PARAMS...) correctly
-        // e.g. ".model D1N4148 D(IS=1e-15)" or ".model 2N2222 NPN(IS=1e-15 BF=200)"
-        let rest: String = parts[2..].join(" ");
+        // e.g. ".model D1N4148 D(IS=1e-15)" or ".model 2N2222 NPN(IS=1e-15 BF=200)".
+        // Rejoin `KEY = VAL` / `KEY =VAL` / `KEY= VAL` token triples up front so
+        // whitespace around '=' does not silently drop parameters.
+        let rest = collapse_ws_around_eq(&parts[2..].join(" "));
 
-        // Extract model type: everything before the first '('
-        let model_type = if let Some(paren_pos) = rest.find('(') {
-            rest[..paren_pos].trim().to_ascii_uppercase()
-        } else {
-            rest.trim().to_ascii_uppercase()
+        // Locate the parameter region. Two accepted grammars:
+        //   .model NAME TYPE(K=V K=V ...)   — parenthesized (classic)
+        //   .model NAME TYPE K=V K=V ...    — paren-less (ngspice-compatible)
+        // Unbalanced parens are a HARD error — previously they silently
+        // produced a model with zero parameters.
+        let open = rest.find('(');
+        let close = rest.rfind(')');
+        let (model_type, params_region) = match (open, close) {
+            (Some(o), Some(c)) if o < c => {
+                let after = rest[c + 1..].trim();
+                if !after.is_empty() {
+                    return Err(self.error(format!(
+                        ".model '{}': unexpected text after closing ')': '{}'",
+                        name, after
+                    )));
+                }
+                (
+                    rest[..o].trim().to_ascii_uppercase(),
+                    rest[o + 1..c].to_string(),
+                )
+            }
+            (None, None) => {
+                // Paren-less: first token is the type, the remainder must be
+                // KEY=VAL pairs.
+                let mut it = rest.split_whitespace();
+                let type_tok = it.next().unwrap_or("");
+                if type_tok.contains('=') {
+                    return Err(self.error(format!(
+                        ".model '{}': missing model type before parameter '{}'",
+                        name, type_tok
+                    )));
+                }
+                let region_start = rest.find(type_tok).map(|p| p + type_tok.len()).unwrap_or(0);
+                (
+                    type_tok.trim().to_ascii_uppercase(),
+                    rest[region_start..].to_string(),
+                )
+            }
+            _ => {
+                return Err(self.error(format!(
+                    ".model '{}': unbalanced parentheses in '{}'",
+                    name, rest
+                )));
+            }
         };
 
-        // Extract params from between parentheses (if any)
-        // SPICE allows both space-separated and comma-separated params:
+        // Parse params. SPICE allows both space-separated and comma-separated:
         //   NPN(IS=1e-14 BF=200 RE=0.001)    — spaces only
         //   NPN(IS=1e-14,BF=200,RE=0.001)    — commas only
         //   NPN(IS=1e-14, BF=200, RE=0.001)  — commas + spaces
-        if let (Some(open), Some(close)) = (rest.find('('), rest.rfind(')')) {
-            let params_str = &rest[open + 1..close];
-            for token in params_str.split(|c: char| c.is_ascii_whitespace() || c == ',') {
-                let token = token.trim();
-                if token.is_empty() {
-                    continue;
-                }
-                if let Some(eq_pos) = token.find('=') {
-                    if params.len() >= MAX_MODEL_PARAMS {
-                        return Err(self.error(format!(
-                            "too many parameters on .model '{}': {} exceeds MAX_MODEL_PARAMS ({})",
-                            name,
-                            params.len() + 1,
-                            MAX_MODEL_PARAMS
-                        )));
-                    }
-                    let key = token[..eq_pos].to_ascii_uppercase();
-                    let value_str = &token[eq_pos + 1..];
-                    let value = parse_value(value_str).map_err(|_| {
-                        self.error(format!("Invalid model parameter value: {}", value_str))
-                    })?;
-                    params.push((key, value));
-                }
+        // Anything in the params region that is not KEY=VAL is a HARD error —
+        // previously such tokens were silently dropped.
+        for token in params_region.split(|c: char| c.is_ascii_whitespace() || c == ',') {
+            let token = token.trim();
+            if token.is_empty() {
+                continue;
             }
+            let Some(eq_pos) = token.find('=') else {
+                return Err(self.error(format!(
+                    ".model '{}': unexpected token '{}' in parameter list (expected KEY=VAL)",
+                    name, token
+                )));
+            };
+            if params.len() >= MAX_MODEL_PARAMS {
+                return Err(self.error(format!(
+                    "too many parameters on .model '{}': {} exceeds MAX_MODEL_PARAMS ({})",
+                    name,
+                    params.len() + 1,
+                    MAX_MODEL_PARAMS
+                )));
+            }
+            let key = token[..eq_pos].to_ascii_uppercase();
+            let value_str = &token[eq_pos + 1..];
+            if key.is_empty() || value_str.is_empty() {
+                return Err(self.error(format!(
+                    ".model '{}': malformed parameter '{}' (expected KEY=VAL)",
+                    name, token
+                )));
+            }
+            // Model parameters are dimensionless context: a single trailing
+            // 'f'/'F' after a digit is femto (IS=6.734f → 6.734e-15), matching
+            // ngspice. Element positions keep the Farad reading for bare 'F'.
+            let value = parse_value_model_param(value_str).map_err(|_| {
+                self.error(format!("Invalid model parameter value: {}", value_str))
+            })?;
+            params.push((key, value));
         }
 
         Ok(Model {
@@ -2483,17 +2719,15 @@ impl Parser {
             label_start = 5;
         }
 
+        // Label: quoted ("Tone") or bare (Tone) — a bare trailing token used
+        // to be silently dropped.
         let label = if parts.len() > label_start {
             let rest = parts[label_start..].join(" ");
-            if rest.starts_with('"') {
-                let trimmed = rest.trim_matches('"');
-                if trimmed.is_empty() {
-                    None
-                } else {
-                    Some(trimmed.to_string())
-                }
-            } else {
+            let trimmed = rest.trim_matches('"');
+            if trimmed.is_empty() {
                 None
+            } else {
+                Some(trimmed.to_string())
             }
         } else {
             None
@@ -2592,17 +2826,15 @@ impl Parser {
             label_start = 5;
         }
 
+        // Label: quoted or bare, same grammar as .pot (bare trailing tokens
+        // used to be silently dropped).
         let label = if parts.len() > label_start {
             let rest = parts[label_start..].join(" ");
-            if rest.starts_with('"') {
-                let trimmed = rest.trim_matches('"');
-                if trimmed.is_empty() {
-                    None
-                } else {
-                    Some(trimmed.to_string())
-                }
-            } else {
+            let trimmed = rest.trim_matches('"');
+            if trimmed.is_empty() {
                 None
+            } else {
+                Some(trimmed.to_string())
             }
         } else {
             None
@@ -2666,23 +2898,35 @@ impl Parser {
             });
         }
 
-        // Parse label (must be quoted)
-        let label_str = parts[1];
-        let label =
-            if label_str.starts_with('"') && label_str.ends_with('"') && label_str.len() >= 2 {
-                label_str[1..label_str.len() - 1].to_string()
-            } else {
+        // Parse label (must be quoted; may span multiple whitespace-separated
+        // tokens, e.g. `.gang "Stereo Volume" R1 R2` — the same join-then-
+        // unquote logic as .pot/.wiper/.switch labels).
+        if !parts[1].starts_with('"') {
+            return Err(ParseError {
+                line: 0,
+                message: ".gang label must be a quoted string".to_string(),
+            });
+        }
+        let (label, members_start) = if parts[1].len() >= 2 && parts[1].ends_with('"') {
+            (parts[1][1..parts[1].len() - 1].to_string(), 2)
+        } else {
+            // Multi-token label: join tokens until one ends with '"'.
+            let close = parts[2..].iter().position(|p| p.ends_with('"'));
+            let Some(close) = close else {
                 return Err(ParseError {
                     line: 0,
-                    message: ".gang label must be a quoted string".to_string(),
+                    message: ".gang label has an unterminated quote".to_string(),
                 });
             };
+            let joined = parts[1..=2 + close].join(" ");
+            (joined.trim_matches('"').to_string(), 3 + close)
+        };
 
         // Parse members and optional trailing default position
         let mut members = Vec::new();
         let mut default_position = None;
 
-        for &part in &parts[2..] {
+        for &part in &parts[members_start..] {
             // Try to parse as a float (default position) — only valid as last arg
             if let Ok(pos) = part.parse::<f64>() {
                 if (0.0..=1.0).contains(&pos) {
@@ -3040,7 +3284,7 @@ impl Parser {
         let name = parts[0];
         let first_char = name.chars().next().unwrap_or(' ').to_ascii_uppercase();
 
-        match first_char {
+        let mut elem = match first_char {
             'R' => self.parse_resistor(&parts),
             'C' => self.parse_capacitor(&parts),
             'L' => self.parse_inductor(&parts),
@@ -3061,7 +3305,74 @@ impl Parser {
             // contains spaces/commas/parens that `split_whitespace` shreds.
             'B' => self.parse_bsource(line),
             _ => Err(self.error(format!("Unknown element type: {}", first_char))),
+        }?;
+
+        // Normalize every node reference: fold to lowercase (SPICE/ngspice
+        // node names are case-insensitive — `IN` and `in` are the same net)
+        // and alias `gnd`/`ground` to "0". Done here, once, so mna.rs only
+        // ever sees normalized names.
+        normalize_element_nodes(&mut elem);
+
+        // Re-check self-connection AFTER normalization: `R1 gnd 0 1k` passes
+        // the pre-normalization check ("gnd" != "0") but is self-connected
+        // once the alias fires.
+        match &elem {
+            Element::Resistor {
+                name,
+                n_plus,
+                n_minus,
+                ..
+            }
+            | Element::Capacitor {
+                name,
+                n_plus,
+                n_minus,
+                ..
+            }
+            | Element::Inductor {
+                name,
+                n_plus,
+                n_minus,
+                ..
+            }
+            | Element::VoltageSource {
+                name,
+                n_plus,
+                n_minus,
+                ..
+            }
+            | Element::CurrentSource {
+                name,
+                n_plus,
+                n_minus,
+                ..
+            }
+            | Element::Diode {
+                name,
+                n_plus,
+                n_minus,
+                ..
+            }
+            | Element::BSource {
+                name,
+                n_plus,
+                n_minus,
+                ..
+            } => {
+                self.check_self_connection(n_plus, n_minus, name)?;
+            }
+            Element::Vca {
+                name,
+                n_sig_p,
+                n_sig_n,
+                ..
+            } => {
+                self.check_self_connection(n_sig_p, n_sig_n, name)?;
+            }
+            _ => {}
         }
+
+        Ok(elem)
     }
 
     /// Parse a behavioral source: `B<name> n+ n- V={expr}` / `I={expr}`.
@@ -3213,12 +3524,17 @@ impl Parser {
         self.check_self_connection(parts[1], parts[2], parts[0])?;
         let value = self.parse_positive_value(parts[3], "Capacitor")?;
 
-        let ic = parts[4..]
-            .iter()
-            .find(|p| p.to_uppercase().starts_with("IC="))
-            .map(|p| parse_value(&p[3..]))
-            .transpose()
-            .map_err(|_| self.error("Invalid IC value"))?;
+        let mut ic = None;
+        for p in &parts[4..] {
+            if p.to_uppercase().starts_with("IC=") {
+                ic = Some(parse_value(&p[3..]).map_err(|_| self.error("Invalid IC value"))?);
+            } else {
+                return Err(self.error(format!(
+                    "Capacitor '{}': unrecognized trailing token '{}' (only IC=<value> is supported)",
+                    parts[0], p
+                )));
+            }
+        }
 
         Ok(Element::Capacitor {
             name: parts[0].to_string(),
@@ -3245,6 +3561,11 @@ impl Parser {
                     return Err(self.error("ISAT must be positive and finite"));
                 }
                 isat = Some(v);
+            } else {
+                return Err(self.error(format!(
+                    "Inductor '{}': unrecognized trailing token '{}' (only ISAT=<value> is supported)",
+                    parts[0], part
+                )));
             }
         }
         Ok(Element::Inductor {
@@ -3296,6 +3617,13 @@ impl Parser {
                 };
                 ac = Some((mag, phase));
                 i += consumed;
+            } else if Self::is_transient_spec_token(parts[i]) {
+                return Err(self.error(format!(
+                    "Voltage source '{}': transient specification '{}' (SIN/PULSE/PWL/EXP/...) \
+                     is not supported — melange input comes via the input node; remove the \
+                     transient spec and keep only the DC value",
+                    parts[0], parts[i]
+                )));
             } else if dc.is_none() {
                 // Bare value is DC
                 dc = Some(
@@ -3304,7 +3632,12 @@ impl Parser {
                 );
                 i += 1;
             } else {
-                i += 1;
+                // Previously silently skipped — a wrong circuit that solves
+                // perfectly. Every token on a source line must be consumed.
+                return Err(self.error(format!(
+                    "Voltage source '{}': unexpected token '{}' (expected DC/AC specifications only)",
+                    parts[0], parts[i]
+                )));
             }
         }
 
@@ -3317,25 +3650,67 @@ impl Parser {
         })
     }
 
+    /// Does this token open a SPICE transient specification (`SIN(...)`,
+    /// `PULSE(...)`, `PWL(...)`, ...)? Used to give a targeted error instead
+    /// of a generic "invalid value" / silent skip.
+    fn is_transient_spec_token(tok: &str) -> bool {
+        let upper = tok.to_ascii_uppercase();
+        ["SIN", "PULSE", "PWL", "EXP", "SFFM", "AM"]
+            .iter()
+            .any(|kw| upper == *kw || upper.starts_with(&format!("{}(", kw)))
+    }
+
     fn parse_current_source(&self, parts: &[&str]) -> Result<Element, ParseError> {
         self.require_parts(parts, 3, "Iname n+ n-")?;
         self.check_self_connection(parts[1], parts[2], parts[0])?;
 
-        let dc = match parts.get(3) {
+        let (dc, consumed) = match parts.get(3) {
             Some(p) if p.to_uppercase() == "DC" => {
                 let val_str = parts
                     .get(4)
                     .ok_or_else(|| self.error("DC keyword requires a value"))?;
-                Some(
-                    parse_value(val_str)
-                        .map_err(|_| self.error(format!("Invalid DC value: {}", val_str)))?,
+                (
+                    Some(
+                        parse_value(val_str)
+                            .map_err(|_| self.error(format!("Invalid DC value: {}", val_str)))?,
+                    ),
+                    5,
                 )
             }
-            Some(p) => {
-                Some(parse_value(p).map_err(|_| self.error(format!("Invalid DC value: {}", p)))?)
+            Some(p) if Self::is_transient_spec_token(p) => {
+                return Err(self.error(format!(
+                    "Current source '{}': transient specification '{}' (SIN/PULSE/PWL/EXP/...) \
+                     is not supported — melange input comes via the input node; remove the \
+                     transient spec and keep only the DC value",
+                    parts[0], p
+                )));
             }
-            None => None,
+            Some(p) => (
+                Some(parse_value(p).map_err(|_| self.error(format!("Invalid DC value: {}", p)))?),
+                4,
+            ),
+            None => (None, 3),
         };
+
+        // Previously tokens past the DC value were silently ignored — hard
+        // error so SIN/PULSE specs (or plain junk) fail loudly.
+        if parts.len() > consumed {
+            let extra = &parts[consumed..];
+            if extra.iter().any(|t| Self::is_transient_spec_token(t)) {
+                return Err(self.error(format!(
+                    "Current source '{}': transient specification '{}' (SIN/PULSE/PWL/EXP/...) \
+                     is not supported — melange input comes via the input node; remove the \
+                     transient spec and keep only the DC value",
+                    parts[0],
+                    extra.iter().find(|t| Self::is_transient_spec_token(t)).unwrap()
+                )));
+            }
+            return Err(self.error(format!(
+                "Current source '{}': unexpected trailing token(s): {}",
+                parts[0],
+                extra.join(" ")
+            )));
+        }
 
         Ok(Element::CurrentSource {
             name: parts[0].to_string(),
@@ -3348,6 +3723,14 @@ impl Parser {
     fn parse_diode(&self, parts: &[&str]) -> Result<Element, ParseError> {
         self.require_parts(parts, 4, "Dname n+ n- modelname")?;
         self.check_self_connection(parts[1], parts[2], parts[0])?;
+        if parts.len() > 4 {
+            return Err(self.error(format!(
+                "Diode '{}': unexpected trailing token(s): '{}' — area factors and instance \
+                 parameters are not supported (scale IS in the .model card instead)",
+                parts[0],
+                parts[4..].join(" ")
+            )));
+        }
         Ok(Element::Diode {
             name: parts[0].to_string(),
             n_plus: parts[1].to_string(),
@@ -3360,6 +3743,14 @@ impl Parser {
         // Qname nc nb ne [ns] modelname
         self.require_parts(parts, 5, "Qname nc nb ne modelname")?;
         // Model is always the last part (substrate node, if present, is skipped)
+        if parts.len() > 6 {
+            return Err(self.error(format!(
+                "BJT '{}': unexpected trailing token(s): '{}' — expected 'Qname nc nb ne [ns] \
+                 modelname'; area factors and instance parameters are not supported",
+                parts[0],
+                parts[6..].join(" ")
+            )));
+        }
         Ok(Element::Bjt {
             name: parts[0].to_string(),
             nc: parts[1].to_string(),
@@ -3371,6 +3762,14 @@ impl Parser {
 
     fn parse_jfet(&self, parts: &[&str]) -> Result<Element, ParseError> {
         self.require_parts(parts, 5, "Jname nd ng ns modelname")?;
+        if parts.len() > 5 {
+            return Err(self.error(format!(
+                "JFET '{}': unexpected trailing token(s): '{}' — area factors and instance \
+                 parameters are not supported",
+                parts[0],
+                parts[5..].join(" ")
+            )));
+        }
         Ok(Element::Jfet {
             name: parts[0].to_string(),
             nd: parts[1].to_string(),
@@ -3382,6 +3781,29 @@ impl Parser {
 
     fn parse_mosfet(&self, parts: &[&str]) -> Result<Element, ParseError> {
         self.require_parts(parts, 6, "Mname nd ng ns nb modelname")?;
+        if parts.len() > 6 {
+            let extra = &parts[6..];
+            let has_geometry = extra.iter().any(|t| {
+                let upper = t.to_ascii_uppercase();
+                matches!(
+                    upper.split('=').next().unwrap_or(""),
+                    "L" | "W" | "M" | "AD" | "AS" | "PD" | "PS" | "NRD" | "NRS"
+                ) && upper.contains('=')
+            });
+            if has_geometry {
+                return Err(self.error(format!(
+                    "MOSFET '{}': instance geometry parameters ('{}') are not yet supported; \
+                     fold W/L into KP or use a .model card",
+                    parts[0],
+                    extra.join(" ")
+                )));
+            }
+            return Err(self.error(format!(
+                "MOSFET '{}': unexpected trailing token(s): '{}'",
+                parts[0],
+                extra.join(" ")
+            )));
+        }
         Ok(Element::Mosfet {
             name: parts[0].to_string(),
             nd: parts[1].to_string(),
@@ -3395,6 +3817,14 @@ impl Parser {
     fn parse_opamp(&self, parts: &[&str]) -> Result<Element, ParseError> {
         // Uname n_plus n_minus n_out modelname
         self.require_parts(parts, 5, "Uname n_plus n_minus n_out modelname")?;
+        if parts.len() > 5 {
+            return Err(self.error(format!(
+                "Op-amp '{}': unexpected trailing token(s): '{}' — expected \
+                 'Uname n_plus n_minus n_out modelname'",
+                parts[0],
+                parts[5..].join(" ")
+            )));
+        }
         Ok(Element::Opamp {
             name: parts[0].to_string(),
             n_plus: parts[1].to_string(),
@@ -3407,6 +3837,14 @@ impl Parser {
     fn parse_triode(&self, parts: &[&str]) -> Result<Element, ParseError> {
         // Tname n_grid n_plate n_cathode modelname
         self.require_parts(parts, 5, "Tname n_grid n_plate n_cathode modelname")?;
+        if parts.len() > 5 {
+            return Err(self.error(format!(
+                "Triode '{}': unexpected trailing token(s): '{}' — expected \
+                 'Tname n_grid n_plate n_cathode modelname'",
+                parts[0],
+                parts[5..].join(" ")
+            )));
+        }
         Ok(Element::Triode {
             name: parts[0].to_string(),
             n_grid: parts[1].to_string(),
@@ -3461,6 +3899,14 @@ impl Parser {
         self.require_parts(parts, 6, "Yname sig+ sig- ctrl+ ctrl- modelname")?;
         // Validate signal pair not self-connected
         self.check_self_connection(parts[1], parts[2], parts[0])?;
+        if parts.len() > 6 {
+            return Err(self.error(format!(
+                "VCA '{}': unexpected trailing token(s): '{}' — expected \
+                 'Yname sig+ sig- ctrl+ ctrl- modelname'",
+                parts[0],
+                parts[6..].join(" ")
+            )));
+        }
         Ok(Element::Vca {
             name: parts[0].to_string(),
             n_sig_p: parts[1].to_string(),
@@ -3474,6 +3920,13 @@ impl Parser {
     fn parse_vcvs(&self, parts: &[&str]) -> Result<Element, ParseError> {
         // Ename out+ out- ctrl+ ctrl- gain
         self.require_parts(parts, 6, "Ename out+ out- ctrl+ ctrl- gain")?;
+        if parts.len() > 6 {
+            return Err(self.error(format!(
+                "VCVS '{}': unexpected trailing token(s): '{}'",
+                parts[0],
+                parts[6..].join(" ")
+            )));
+        }
         let gain = parse_value(parts[5])
             .map_err(|_| self.error(format!("Invalid VCVS gain: {}", parts[5])))?;
         if !gain.is_finite() || gain == 0.0 {
@@ -3495,6 +3948,13 @@ impl Parser {
     fn parse_vccs(&self, parts: &[&str]) -> Result<Element, ParseError> {
         // Gname out+ out- ctrl+ ctrl- gm
         self.require_parts(parts, 6, "Gname out+ out- ctrl+ ctrl- gm")?;
+        if parts.len() > 6 {
+            return Err(self.error(format!(
+                "VCCS '{}': unexpected trailing token(s): '{}'",
+                parts[0],
+                parts[6..].join(" ")
+            )));
+        }
         let gm = parse_value(parts[5])
             .map_err(|_| self.error(format!("Invalid VCCS transconductance: {}", parts[5])))?;
         if !gm.is_finite() || gm == 0.0 {
@@ -3693,6 +4153,183 @@ fn validate_element_node_lengths(elem: &Element) -> Result<(), String> {
     Ok(())
 }
 
+/// Normalize a node-name token.
+///
+/// SPICE node names are case-insensitive (ngspice folds case), so fold to
+/// lowercase — otherwise `IN` and `in` silently become two different nets.
+/// `gnd` / `ground` (any case) are aliased to the ground node "0", matching
+/// ngspice's automatic gnd handling.
+pub fn normalize_node_name(raw: &str) -> String {
+    let lower = raw.to_ascii_lowercase();
+    if lower == "gnd" || lower == "ground" {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static GND_ALIAS_LOGGED: AtomicBool = AtomicBool::new(false);
+        if !GND_ALIAS_LOGGED.swap(true, Ordering::Relaxed) {
+            log::info!(
+                "node name '{}' aliased to ground node '0' (ngspice-compatible gnd handling)",
+                raw
+            );
+        }
+        return "0".to_string();
+    }
+    lower
+}
+
+/// Apply [`normalize_node_name`] to every node reference an element carries.
+///
+/// Component and model names are NOT nodes and keep their case (they are
+/// compared case-insensitively everywhere they are consumed).
+fn normalize_element_nodes(elem: &mut Element) {
+    let norm = |n: &mut String| *n = normalize_node_name(n);
+    match elem {
+        Element::Resistor {
+            n_plus, n_minus, ..
+        }
+        | Element::Capacitor {
+            n_plus, n_minus, ..
+        }
+        | Element::Inductor {
+            n_plus, n_minus, ..
+        }
+        | Element::VoltageSource {
+            n_plus, n_minus, ..
+        }
+        | Element::CurrentSource {
+            n_plus, n_minus, ..
+        }
+        | Element::Diode {
+            n_plus, n_minus, ..
+        } => {
+            norm(n_plus);
+            norm(n_minus);
+        }
+        Element::Bjt { nc, nb, ne, .. } => {
+            norm(nc);
+            norm(nb);
+            norm(ne);
+        }
+        Element::Jfet { nd, ng, ns, .. } => {
+            norm(nd);
+            norm(ng);
+            norm(ns);
+        }
+        Element::Mosfet { nd, ng, ns, nb, .. } => {
+            norm(nd);
+            norm(ng);
+            norm(ns);
+            norm(nb);
+        }
+        Element::Opamp {
+            n_plus,
+            n_minus,
+            n_out,
+            ..
+        } => {
+            norm(n_plus);
+            norm(n_minus);
+            norm(n_out);
+        }
+        Element::Triode {
+            n_grid,
+            n_plate,
+            n_cathode,
+            ..
+        } => {
+            norm(n_grid);
+            norm(n_plate);
+            norm(n_cathode);
+        }
+        Element::Pentode {
+            n_plate,
+            n_grid,
+            n_cathode,
+            n_screen,
+            n_suppressor,
+            ..
+        } => {
+            norm(n_plate);
+            norm(n_grid);
+            norm(n_cathode);
+            norm(n_screen);
+            if let Some(ns) = n_suppressor {
+                norm(ns);
+            }
+        }
+        Element::Vca {
+            n_sig_p,
+            n_sig_n,
+            n_ctrl_p,
+            n_ctrl_n,
+            ..
+        } => {
+            norm(n_sig_p);
+            norm(n_sig_n);
+            norm(n_ctrl_p);
+            norm(n_ctrl_n);
+        }
+        Element::Vcvs {
+            out_p,
+            out_n,
+            ctrl_p,
+            ctrl_n,
+            ..
+        }
+        | Element::Vccs {
+            out_p,
+            out_n,
+            ctrl_p,
+            ctrl_n,
+            ..
+        } => {
+            norm(out_p);
+            norm(out_n);
+            norm(ctrl_p);
+            norm(ctrl_n);
+        }
+        Element::SubcktInstance { nodes, .. } => {
+            for node in nodes.iter_mut() {
+                norm(node);
+            }
+        }
+        Element::BSource {
+            n_plus,
+            n_minus,
+            expr,
+            ..
+        } => {
+            norm(n_plus);
+            norm(n_minus);
+            // Normalize `V(node)` / `V(a,b)` references inside the expression
+            // so they resolve to the same nets as element terminals. (This
+            // also folds `I(elem)` branch references to lowercase; branch
+            // names are matched case-insensitively downstream.)
+            *expr = expr.remap_idents(&|n| normalize_node_name(n));
+        }
+    }
+}
+
+/// Collapse whitespace around `=` so `KEY = VAL`, `KEY =VAL`, and `KEY= VAL`
+/// all tokenize as a single `KEY=VAL`. Used by `.model` parameter parsing —
+/// previously a spaced `=` silently dropped the parameter.
+fn collapse_ws_around_eq(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '=' {
+            while out.ends_with(|c: char| c.is_ascii_whitespace()) {
+                out.pop();
+            }
+            out.push('=');
+            while chars.peek().is_some_and(|c| c.is_ascii_whitespace()) {
+                chars.next();
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// Try to parse infix notation where a scale character replaces the decimal point.
 ///
 /// Examples: "6n8" → 6.8e-9, "3n3" → 3.3e-9, "4k7" → 4.7e3, "1m5" → 1.5e-3
@@ -3736,7 +4373,20 @@ fn try_parse_infix(s: &str) -> Option<f64> {
         'T' => 1e12,
         'G' => 1e9,
         'K' => 1e3,
-        'M' => 1e-3,
+        // BS-1852 infix notation: 'M' means MEGA (4M7 = 4.7 MΩ). This differs
+        // from SPICE *suffix* position, where 'M'/'m' is milli (10m = 10e-3).
+        // Nobody writes 4.7 mΩ as "4M7"; parsing it as milli silently built a
+        // wrong circuit.
+        'M' => {
+            log::warn!(
+                "value '{}': infix 'M' interpreted as MEGA per BS-1852 ({} = {:.3e}); \
+                 suffix-position 'm' remains milli (e.g. '10m' = 10e-3)",
+                s,
+                s,
+                base * 1e6
+            );
+            1e6
+        }
         'U' => 1e-6,
         'N' => 1e-9,
         'P' => 1e-12,
@@ -3756,11 +4406,26 @@ fn try_parse_infix(s: &str) -> Option<f64> {
 /// - "1k" -> 1000.0
 /// - "4.7u" -> 4.7e-6
 /// - "10pF" -> 10e-12
-/// - "1F" -> 1.0 (Farad, not femto)
+/// - "1fF" -> 1e-15 (femto + Farad unit)
+/// - "1F" -> 1.0 (Farad, not femto — element-value positions only; warns)
 /// - "6n8" -> 6.8e-9 (infix notation)
 ///
 /// Parses a component value string with engineering notation (e.g. "10k", "4n7", "1Meg").
 pub fn parse_value(s: &str) -> Result<f64, ParseFloatError> {
+    parse_value_ctx(s, false)
+}
+
+/// Parse a `.model` parameter value.
+///
+/// Model parameters are a dimensionless context, so a single trailing
+/// `f`/`F` after a digit is the femto scale (`.model DX D(IS=6.734f)` →
+/// 6.734e-15), matching ngspice. In element-value positions (`parse_value`)
+/// a bare trailing `F` keeps the Farad reading.
+pub fn parse_value_model_param(s: &str) -> Result<f64, ParseFloatError> {
+    parse_value_ctx(s, true)
+}
+
+fn parse_value_ctx(s: &str, model_param_ctx: bool) -> Result<f64, ParseFloatError> {
     let s = s.trim();
     if s.is_empty() {
         return Err(ParseFloatError);
@@ -3806,6 +4471,52 @@ pub fn parse_value(s: &str) -> Result<f64, ParseFloatError> {
         return Ok(value * 1e6);
     }
 
+    // Femto handling. The general unit-stripping below removes trailing
+    // F/H/V/A/S/Z letters, which would silently eat a femto suffix
+    // ('6.734f' → 6.734). Detect femto here: take the trailing run of unit
+    // letters; if it starts with 'f'/'F' immediately after a digit, it is
+    // the femto scale when either
+    //   (a) we're in a .model parameter (dimensionless) context, or
+    //   (b) further unit letters follow it ('1fF' = 1 femtofarad).
+    // A bare digit+'F' in an element-value position stays 1.0× (Farad) with
+    // a loud warning — write '1e-15' or '1fF' for femto there.
+    {
+        let bytes = s.as_bytes();
+        let mut run_start = s.len();
+        while run_start > 0
+            && matches!(
+                bytes[run_start - 1].to_ascii_uppercase(),
+                b'F' | b'H' | b'V' | b'A' | b'S' | b'Z'
+            )
+        {
+            run_start -= 1;
+        }
+        if run_start > 0
+            && run_start < s.len()
+            && bytes[run_start].eq_ignore_ascii_case(&b'F')
+            && bytes[run_start - 1].is_ascii_digit()
+        {
+            let run_len = s.len() - run_start;
+            if model_param_ctx || run_len > 1 {
+                let num: f64 = s[..run_start].parse().map_err(|_| ParseFloatError)?;
+                let result = num * 1e-15;
+                if !result.is_finite() {
+                    return Err(ParseFloatError);
+                }
+                return Ok(result);
+            }
+            log::warn!(
+                "value '{}' parsed as {} (trailing 'F' treated as a Farad unit, NOT femto); \
+                 write '{}e-15' or '{}fF' if femto was intended",
+                s,
+                &s[..run_start],
+                &s[..run_start],
+                &s[..run_start]
+            );
+            // fall through: the normal path strips the 'F' and applies scale 1.0
+        }
+    }
+
     // Strip unit suffixes FIRST (F, H, V, A, OHM, HZ)
     // Note: We remove from s_upper to get the uppercase version, then apply to original s
     let stripped_upper = s_upper.trim_end_matches(|c: char| {
@@ -3827,11 +4538,8 @@ pub fn parse_value(s: &str) -> Result<f64, ParseFloatError> {
             'U' | 'µ' if num_part.len() > 1 => (&num_part[..num_part.len() - 1], 1e-6),
             'N' if num_part.len() > 1 => (&num_part[..num_part.len() - 1], 1e-9),
             'P' if num_part.len() > 1 => (&num_part[..num_part.len() - 1], 1e-12),
-            // Note: 'F' as femto is only recognized if no unit was stripped
-            // This avoids ambiguity with Farad
-            'F' if chars_stripped == 0 && num_part.len() > 1 => {
-                (&num_part[..num_part.len() - 1], 1e-15)
-            }
+            // 'F' never survives to this point: trailing F is either femto
+            // (handled above) or stripped as the Farad unit letter.
             _ => (num_part, 1.0),
         };
         num_part = new_num;
@@ -4046,9 +4754,20 @@ mod tests {
         assert!((parse_value("1u").unwrap() - 1e-6).abs() < 1e-15);
         assert!((parse_value("1n").unwrap() - 1e-9).abs() < 1e-18);
         assert!((parse_value("1p").unwrap() - 1e-12).abs() < 1e-21);
-        // "1f" is ambiguous with Farad unit suffix; femto requires no unit suffix after it
-        // "1F" = 1.0 Farad (F is unit, not scale), by design
+        // Femto contract (see parse_value_ctx):
+        // - Element-value positions: bare "1F"/"1f" = 1.0 Farad (with a
+        //   log::warn); femto there must be written "1e-15" or "1fF".
+        // - "1fF" (unit letter after the f) = 1e-15 everywhere.
+        // - .model parameter values (parse_value_model_param): dimensionless
+        //   context, so a single trailing f/F IS femto (ngspice-compatible;
+        //   ".model DX D(IS=6.734f)" = 6.734e-15).
         assert!((parse_value("1F").unwrap() - 1.0).abs() < 1e-10);
+        assert!((parse_value("1fF").unwrap() - 1e-15).abs() < 1e-25);
+        assert!((parse_value_model_param("6.734f").unwrap() - 6.734e-15).abs() < 1e-25);
+        assert!((parse_value_model_param("1F").unwrap() - 1e-15).abs() < 1e-25);
+        // Non-femto values are identical in both contexts
+        assert!((parse_value_model_param("10pF").unwrap() - 10e-12).abs() < 1e-21);
+        assert!((parse_value_model_param("1k").unwrap() - 1e3).abs() < 1e-6);
     }
 
     #[test]

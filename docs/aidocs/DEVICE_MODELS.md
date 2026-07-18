@@ -14,10 +14,27 @@ g_d = di/dv = (IS/(N*VT)) * exp(v_d/(N*VT))
             = (i_d + IS) / (N*VT)
 ```
 
-### Clamping (prevent overflow)
+### Clamping (prevent overflow) — IS-aware since 2026-06-09
 ```
-v_clamped = clamp(v_d, -40*N*VT, 40*N*VT)
+x = v_d / (N*VT)
+x ≤ 40:  legacy path, i = IS*(exp(max(x, -40)) - 1)      (bit-exact pre-fix)
+x > 40:  extended exponential in ln-current space:
+         y = x + ln(IS)              (y = ln of forward current; no overflow)
+         y_max = max(40 + ln(IS), ln(MAX_DIODE_FWD_I))    MAX_DIODE_FWD_I = 1e3 A
+         y ≤ y_max:  i = exp(y) - IS
+         y > y_max:  linear extension  i = i_c - IS + i_c*(y - y_max),  i_c = exp(y_max)
 ```
+A fixed `40·N·VT` clamp caps current at `IS·e^40` — for wide-bandgap cards
+(`IS=1e-30 N=2`, Vf ≈ 3.2 V) that is 2.4e-13 A and the clamp sits *below*
+vcrit, making the device electrically absent (silent open-loop clippers; see
+DEBUGGING.md 2026-06-09 entry). For `IS ≥ e^-40·1e3 ≈ 4.3e-15` the boundary
+is unchanged from legacy. ngspice floors IS at 1e-28 silently; melange
+honors the card.
+
+### Series resistance (RS) junction solve
+Scalar NR on `V_j + Id(V_j)·RS = V_d`, seeded at vcrit, pnjlim-compressed
+steps, 32 iters. (The pre-2026-06-09 version — 0.7 V seed, flat 4·N·VT
+steps, 8 iters — could not reach a 3 V wide-bandgap knee.)
 
 ### Named Constructors
 ```
@@ -696,8 +713,8 @@ captured by stamps in the G matrix.
 Gm = AOL / ROUT    (transconductance)
 Go = 1 / ROUT      (output conductance)
 
-G[out, n_plus]  += Gm
-G[out, n_minus] -= Gm
+G[out, n_plus]  -= Gm
+G[out, n_minus] += Gm
 G[out, out]     += Go
 ```
 

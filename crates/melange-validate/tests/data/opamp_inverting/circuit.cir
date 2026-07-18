@@ -6,9 +6,11 @@
 R1 in inv 10k
 R2 inv out 100k
 
-* Op-amp as VCCS + Rout (matches melange model)
+* Op-amp as VCCS + Rout (matches melange OA model)
 * Gm = AOL/ROUT = 200000 S, Go = 1/ROUT = 1 S
-G1 0 out inv 0 200000
+* Physically correct polarity: current Gm*(V+ - V-) injected INTO out.
+* Here V+ = 0 (ground), V- = inv, so -Gm*V(inv) into out:
+G1 out 0 inv 0 200000
 Rout out 0 1
 
 * Stabilization cap (needed for DK trapezoidal method)
