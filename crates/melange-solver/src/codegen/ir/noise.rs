@@ -56,14 +56,50 @@ pub struct ThermalNoiseSource {
     pub switch_slot: Option<(usize, usize)>,
 }
 
+/// Classification of a shot-noise source that changes how the emitter
+/// calibrates its amplitude (the Γ² multiplier relative to full Schottky
+/// shot `2·q·|I|`).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+pub enum ShotSourceKind {
+    /// Plain PN-junction shot — full `2·q·|I|`, Γ² = 1.
+    #[default]
+    Junction,
+    /// Triode plate current. Space-charge smoothing (van der Ziel) reduces
+    /// plate shot below full Schottky: the emitter computes
+    /// `Γ² = 10·k·T₀·gm / (2·q·I_p)` at the DC operating point (the
+    /// Thompson/North/Harris `R_eq ≈ 2.5/gm` equivalent-noise-resistance
+    /// form, referenced to `T₀ = 290 K`), clamped to (0, 1]. The grid node
+    /// is carried so the emitter can recover `Vgk` from the DC OP for the
+    /// gm evaluation. `gamma2_override` (`.model TUBE(SHOT_GAMMA2=…)`)
+    /// bypasses the computation; `SHOT_GAMMA2=1.0` restores full shot.
+    TriodePlate {
+        /// 1-indexed grid node (0 = ground) — for Vgk at the DC OP.
+        grid_node: usize,
+    },
+    /// Base shot of a forward-active-reduced (1D) BJT. The NR slot carries
+    /// `Ic`; the physical base shot is `2·q·Ib = 2·q·Ic/BF`, so the emitter
+    /// sets `Γ² = 1/BF` (from the resolved `BjtParams::beta_f`) and injects
+    /// at the (base, emitter) pair.
+    FaBase,
+}
+
 /// Shot (junction) noise source stamped at one forward-biased PN junction.
 ///
 /// Emitted as a Norton current source in the MNA RHS: for sample rate `fs`
 /// and instantaneous bias current `|I(t)|` (read from `state.i_nl_prev`),
-/// the per-sample current is `sqrt(4·q·|I|·fs) · N(0,1)` injected at
-/// `node_i` and extracted at `node_j`. The `4·q·fs` matches thermal's
-/// trap-MNA calibration (2× the textbook one-sided `2·q·|I|` PSD). See
+/// the per-sample current is `sqrt(Γ²) · sqrt(4·q·|I|·fs) · N(0,1)`
+/// injected at `node_i` and extracted at `node_j`. The `4·q·fs` matches
+/// thermal's trap-MNA calibration (2× amplitude / 4× variance over the
+/// physical one-sided `2·q·|I|` PSD; ×1 amplitude under BE-primary). See
 /// `docs/aidocs/NOISE.md` "Constant derivation" for why.
+///
+/// `Γ²` (the shot-suppression multiplier) defaults to 1 for plain
+/// junctions; see [`ShotSourceKind`] for the tube-plate smoothing and
+/// FA base-shot cases. The multiplier is resolved by the emitter
+/// (`build_noise_emission`) which has access to resolved device params
+/// and the DC operating point; only sources with `Γ² ≠ 1` cause a
+/// `NOISE_SHOT_GAMMA` const to be emitted, so plain-junction circuits
+/// stay byte-identical to pre-Γ builds.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShotNoiseSource {
     /// Device name (for debug / future per-device overrides).
@@ -74,19 +110,37 @@ pub struct ShotNoiseSource {
     pub node_i: usize,
     /// 1-indexed negative injection node (0 = ground).
     pub node_j: usize,
+    /// Amplitude-calibration class (see [`ShotSourceKind`]).
+    #[serde(default)]
+    pub kind: ShotSourceKind,
+    /// Explicit Γ² from the device's `.model` card (`SHOT_GAMMA2=…`,
+    /// tubes only in v1). `Some(1.0)` restores the pre-smoothing full-shot
+    /// behavior exactly. `None` → the emitter derives Γ² from `kind`.
+    #[serde(default)]
+    pub gamma2_override: Option<f64>,
 }
 
 /// Flicker (1/f) noise source stamped at one current-carrying junction.
 ///
 /// Emitted as a Norton current source whose amplitude is shaped by a Paul
 /// Kellett 7-pole pink filter (≈ -3 dB/oct slope, ±0.5 dB over 10 Hz-20 kHz).
-/// For sample rate `fs`, instantaneous bias current `|I(t)|` (read from
-/// `state.i_nl_prev`), device-specific `KF` and `AF` model params, the
-/// per-sample injected current is
-/// `kellett(sqrt(4·KF·fs) · |I|^(AF/2) · N(0,1))`.
-/// Same `4·…·fs` 2× trap-MNA compensation as thermal and shot; the Kellett
-/// cascade has ~unity RMS power gain so the white-input PSD shapes into
-/// 1/f at the output. See `docs/aidocs/NOISE.md`.
+/// For instantaneous bias current `|I(t)|` (read from `state.i_nl_prev`)
+/// and device-specific `KF` / `AF` model params, the per-sample injected
+/// current is
+/// `kellett(sqrt(2·KF/K_pink) · |I|^(AF/2) · N(0,1))`  (trapezoidal build)
+/// where `K_pink = kellett_pink_normalized_gain()` ≈ 0.0060 is the
+/// cascade's normalized-frequency gain constant (`|H(ν)|² ≈ K_pink/ν`).
+/// This calibration is **fs- and oversampling-invariant** and lands the
+/// output PSD at the ngspice semantics `S_i(f) = KF·I^AF / f` (one-sided
+/// A²/Hz) — see `docs/aidocs/NOISE.md` "Flicker calibration" for the full
+/// derivation, including the trap-MNA ×2-amplitude compensation folded
+/// into the `2·…` factor (BE-primary uses `0.5·KF/K_pink`).
+///
+/// (Pre-2026-07-18 this used `sqrt(4·KF·fs)` white-input scaling — correct
+/// for WHITE phases whose PSD = σ²/fs, but wrong through a fixed digital
+/// pink filter, where `|H(f/fs)|² ≈ K_pink·fs/f` makes the output PSD grow
+/// ∝ fs. Combined with the cascade's actual ≈0.113 white power gain, the
+/// shipped level was ~3 decades hot at 96 kHz and doubled per fs octave.)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FlickerNoiseSource {
     /// Device name (and port suffix where relevant, e.g. "Q1.Ic").
@@ -108,12 +162,23 @@ pub struct FlickerNoiseSource {
 /// Resistor flicker (1/f) noise source — Hooge bias-squared form (Phase 3.5).
 ///
 /// Emitted as a Norton current source whose amplitude is shaped by the same
-/// Paul Kellett 7-pole pink filter used by junction flicker. Per-sample
-/// injected current at sample rate `fs` is
-/// `kellett(sqrt(KF·fs) · |I_R(t)|^(AF/2) · N(0,1))`,
-/// where `I_R(t) = (V_+ − V_−) / R` is the **live** current through this
+/// Paul Kellett 7-pole pink filter used by junction flicker, with the same
+/// fs/OS-invariant calibration (2026-07-18):
+/// `kellett(sqrt(2·KF/K_pink) · |I_R(t)|^(AF/2) · N(0,1))`  (trap build;
+/// `0.5·KF/K_pink` under BE-primary), landing the output PSD at
+/// `S_i(f) = KF·I_R^AF / f` (one-sided A²/Hz).
+/// `I_R(t) = (V_+ − V_−) / R` is the **live** current through this
 /// resistor at the previous sample (read from `state.v_prev`). A resistor
 /// with no current carries only thermal — there is no constant pink floor.
+///
+/// (Pre-2026-07-18 the amplitude was `sqrt(KF·fs)·…` — fs-dependent, and
+/// additionally missing the trap-MNA stamp compensation that every other
+/// phase carries. The old rationale that r-flicker "is not stamped through
+/// the trap companion path" was false: the stamp is a Norton RHS current
+/// identical to junction flicker's, so it sees the same `(A−A_neg) = 2G`
+/// halved LF gain. Both errors are fixed by the shared calibration above;
+/// `KF` remains the documented empirical Hooge-style knob, but its
+/// dimensioning is now literally `S_i·f/I^AF`, consistent across fs.)
 /// AF defaults to `2.0` at codegen time (Hooge's exponent for resistors;
 /// `Element::Resistor.af` is `Option<f64>` so an unspecified AF is filled
 /// in here, not at the parser).
@@ -167,13 +232,14 @@ pub struct ResistorFlickerNoiseSource {
 /// (per-sample `sqrt(4·…·fs)` form for in; en uses `sqrt(2·en²·fs)` because
 /// the source is voltage and the Norton transform absorbs the conductance).
 ///
-/// `g_diag_plus_default` is the static `G[in+, in+]` at codegen time. v1
-/// ships with the default baked into a runtime state field but **not yet
-/// refreshed on dynamic-R commits** — the response-letter promise of
-/// per-setter refresh is reserved for v1.5. Most planned op-amp circuits
-/// (NE5534, 4558 single-stage) have fixed input networks, so static G_diag
-/// matches measurement; circuits with level pots in series with `in+` need
-/// the v1.5 refresh to track the knob.
+/// `g_diag_plus_default` is the static `G[in+, in+]` at codegen time.
+/// Dynamic elements at in+ are tracked by the emitted
+/// `refresh_opamp_en_g_diag()` — since 2026-07-18 an ABSOLUTE recompute
+/// (`NOISE_OPAMP_EN_G_BASE[k]` + Σ live dynamic conductances) invoked
+/// from every `set_pot_N` / `set_runtime_R_<field>` / `set_switch_N`
+/// whose element touches in+. The earlier incremental
+/// `+= 1/r − 1/r_old` accumulation (FP drift over unbounded knob rides)
+/// and the missing `.switch` hook are both gone.
 ///
 /// `en_fc` and `in_fc` (1/f corner frequencies) are parsed and stored but
 /// **not yet wired to codegen** in v1 — Kellett-pink blend is the planned
@@ -322,6 +388,20 @@ pub struct NoiseIR {
 /// Node indices are MNA 1-indexed (0 = ground) via `mna.node_map`. Resistors
 /// whose terminals fail to resolve (would collapse to ground–ground) are
 /// filtered out — they inject nothing useful.
+///
+/// **BJT parasitic RB/RC/RE (2026-07-18).** Parasitic ohmic resistances
+/// never exist as `Element::Resistor` — they live on the `.model` card and
+/// are stamped either as internal-node conductances (nodal path,
+/// `expand_bjt_internal_nodes`) or absorbed into `K_eff` (DK path). This
+/// collector adds one thermal source per parasitic R **when the MNA carries
+/// the matching internal node** (nodal path): the source spans the real
+/// (external, internal) node pair, exactly where the physical resistor
+/// sits — `rbb′` is the classically dominant BJT voltage-noise term.
+/// On the DK path (no internal nodes; series R folded into `K_eff`) there
+/// is no node pair to inject across with the existing Norton machinery, so
+/// the source is **skipped honestly** with a `log::warn!` — see
+/// `docs/aidocs/NOISE.md` "BJT parasitic-R thermal noise" for the gap and
+/// the planned base-side equivalent-injection follow-up.
 pub fn collect_thermal_noise_sources(
     netlist: &Netlist,
     mna: &MnaSystem,
@@ -404,6 +484,99 @@ pub fn collect_thermal_noise_sources(
             });
         }
     }
+
+    // BJT parasitic RB/RC/RE thermal sources (see the doc comment above).
+    // Model params are read raw from the netlist (same pattern as the
+    // pentode PARTITION_F resolver) — RB/RC/RE default to 0 when absent.
+    {
+        use std::collections::HashMap;
+        let mut bjt_model_for: HashMap<String, String> = HashMap::new();
+        for el in &netlist.elements {
+            if let Element::Bjt { name, model, .. } = el {
+                bjt_model_for.insert(name.to_ascii_uppercase(), model.clone());
+            }
+        }
+        let parasitic_r_for = |dev_name: &str| -> (f64, f64, f64) {
+            let Some(model) = bjt_model_for.get(&dev_name.to_ascii_uppercase()) else {
+                return (0.0, 0.0, 0.0);
+            };
+            let Some(m) = netlist
+                .models
+                .iter()
+                .find(|m| m.name.eq_ignore_ascii_case(model))
+            else {
+                return (0.0, 0.0, 0.0);
+            };
+            let (mut rb, mut rc, mut re) = (0.0_f64, 0.0_f64, 0.0_f64);
+            for (k, v) in &m.params {
+                match k.to_ascii_uppercase().as_str() {
+                    "RB" => rb = *v,
+                    "RC" => rc = *v,
+                    "RE" => re = *v,
+                    _ => {}
+                }
+            }
+            let ok = |r: f64| if r.is_finite() && r > 0.0 { r } else { 0.0 };
+            (ok(rb), ok(rc), ok(re))
+        };
+
+        for dev in &mna.nonlinear_devices {
+            if !matches!(dev.device_type, crate::mna::NonlinearDeviceType::Bjt) {
+                continue;
+            }
+            let (rb, rc, re) = parasitic_r_for(&dev.name);
+            if rb == 0.0 && rc == 0.0 && re == 0.0 {
+                continue;
+            }
+            let n = &dev.node_indices;
+            if n.len() < 3 {
+                continue;
+            }
+            // Internal-node record exists only after expand_bjt_internal_nodes
+            // (nodal path). int_* indices are 0-indexed matrix rows; the noise
+            // stamp convention is 1-indexed (0 = ground), hence the +1.
+            let internal = mna
+                .bjt_internal_nodes
+                .iter()
+                .find(|bn| bn.device_name.eq_ignore_ascii_case(&dev.name));
+            let Some(internal) = internal else {
+                // DK path (K_eff absorption): no internal node pair to inject
+                // across. Honest skip — do not fake an equivalent stamp.
+                log::warn!(
+                    "noise: BJT {} parasitic RB/RC/RE thermal noise skipped — \
+                     DK path has no internal nodes (K_eff absorption). \
+                     rbb' hiss for this device is under-modeled; route the \
+                     circuit nodal to include it. See NOISE.md.",
+                    dev.name
+                );
+                continue;
+            };
+            // node_indices order: [collector, base, emitter] (1-indexed).
+            let (ext_c, ext_b, ext_e) = (n[0], n[1], n[2]);
+            let mut push_parasitic = |label: &str, r: f64, ext: usize, int: Option<usize>| {
+                let Some(int) = int else { return };
+                if r <= 0.0 {
+                    return;
+                }
+                let node_int = int + 1; // 0-indexed matrix row → 1-indexed node
+                if ext == 0 && node_int == 0 {
+                    return;
+                }
+                sources.push(ThermalNoiseSource {
+                    name: format!("{}.{}", dev.name, label),
+                    node_i: ext,
+                    node_j: node_int,
+                    resistance: r,
+                    pot_slot: None,
+                    switch_slot: None,
+                });
+            };
+            push_parasitic("RB", rb, ext_b, internal.int_base);
+            push_parasitic("RC", rc, ext_c, internal.int_collector);
+            push_parasitic("RE", re, ext_e, internal.int_emitter);
+        }
+    }
+
     sources
 }
 
@@ -415,12 +588,21 @@ pub fn collect_thermal_noise_sources(
 /// - Diode: 1 source at (anode, cathode), slot = start_idx (Id).
 /// - BJT (2D): 2 sources — (collector, emitter) at slot=start_idx (Ic),
 ///   (base, emitter) at slot=start_idx+1 (Ib).
-/// - BJT forward-active (1D): 1 source at (collector, emitter),
-///   slot=start_idx. The Ib shot is folded in via the BF stamping.
+/// - BJT forward-active (1D): 2 sources — (collector, emitter) at
+///   slot=start_idx (Ic, Γ²=1) AND (base, emitter) at slot=start_idx with
+///   `kind = FaBase` (Γ² = 1/BF, resolved by the emitter). The FA reduction
+///   folds `Ib = Ic/BF` into the *deterministic* N_i stamping, but that
+///   never carried the base junction's independent shot statistics — the
+///   pre-2026-07-18 comment claiming it did was wrong.
 /// - JFET / MOSFET: 1 source at (drain, source), slot=start_idx (Id).
 ///   Gate shot is ≈ 0 for MOS and deferred for JFET reverse-bias leakage.
-/// - Tube (triode or pentode): 1 source at (plate, cathode),
-///   slot=start_idx (Ip). Pentode partition noise is Step 7 work.
+/// - Tube triode: 1 source at (plate, cathode), slot=start_idx (Ip), with
+///   `kind = TriodePlate` so the emitter applies van der Ziel space-charge
+///   smoothing (Γ² ≈ 10·k·T₀·gm/(2·q·I_p) at the DC OP; `.model
+///   TUBE(SHOT_GAMMA2=…)` overrides, 1.0 = legacy full shot). Grid-current
+///   shot (when a grid port ever gets one) would stay full — grid current
+///   is emission/ion current, not space-charge-limited.
+/// - Tube pentode: plate port handled by partition (Phase 5); nothing here.
 /// - VCA: skipped — shot at a control port is not physically meaningful.
 ///
 /// The returned sources stamp Norton currents at the **external** device
@@ -428,9 +610,33 @@ pub fn collect_thermal_noise_sources(
 /// In that case the parasitic series R shapes the injection from outside,
 /// not from inside the junction — a small-magnitude approximation that is
 /// inaudible at audio rates and avoids threading internal-node indices
-/// through the collector. Revisit if BJT RB/RE become tonally relevant
-/// for shot content.
-pub fn collect_shot_noise_sources(mna: &MnaSystem) -> Vec<ShotNoiseSource> {
+/// through the collector. (Parasitic-R *thermal* noise is handled by
+/// `collect_thermal_noise_sources`.)
+pub fn collect_shot_noise_sources(netlist: &Netlist, mna: &MnaSystem) -> Vec<ShotNoiseSource> {
+    use std::collections::HashMap;
+
+    // Tube-device → model map for the SHOT_GAMMA2 override (triodes only in
+    // v1; same raw-model-param pattern as the PARTITION_F resolver).
+    let mut tube_model_for: HashMap<String, String> = HashMap::new();
+    for el in &netlist.elements {
+        if let Element::Triode { name, model, .. } | Element::Pentode { name, model, .. } = el {
+            tube_model_for.insert(name.to_ascii_uppercase(), model.clone());
+        }
+    }
+    let shot_gamma2_for = |dev_name: &str| -> Option<f64> {
+        let model = tube_model_for.get(&dev_name.to_ascii_uppercase())?;
+        let m = netlist
+            .models
+            .iter()
+            .find(|m| m.name.eq_ignore_ascii_case(model))?;
+        for (k, v) in &m.params {
+            if k.eq_ignore_ascii_case("SHOT_GAMMA2") && v.is_finite() && *v > 0.0 {
+                return Some(*v);
+            }
+        }
+        None
+    };
+
     let mut sources = Vec::new();
     for dev in &mna.nonlinear_devices {
         // Phase 5: pentode plate noise is handled by `collect_pentode_partition_sources`
@@ -441,6 +647,8 @@ pub fn collect_shot_noise_sources(mna: &MnaSystem) -> Vec<ShotNoiseSource> {
         // their Ip port — full shot.
         let is_pentode = matches!(dev.device_type, crate::mna::NonlinearDeviceType::Tube)
             && matches!(dev.node_indices.len(), 4 | 5);
+        let is_triode = matches!(dev.device_type, crate::mna::NonlinearDeviceType::Tube)
+            && dev.node_indices.len() == 3;
         for port in dev.junction_current_ports() {
             if is_pentode && port.slot_offset == 0 {
                 continue;
@@ -450,11 +658,45 @@ pub fn collect_shot_noise_sources(mna: &MnaSystem) -> Vec<ShotNoiseSource> {
             } else {
                 format!("{}.{}", dev.name, port.label)
             };
+            // Triode plate port: space-charge-smoothed shot. Carry the grid
+            // node (triode node_indices = [grid, plate, cathode]) so the
+            // emitter can recover Vgk at the DC OP for the gm evaluation.
+            let (kind, gamma2_override) = if is_triode && port.slot_offset == 0 {
+                (
+                    ShotSourceKind::TriodePlate {
+                        grid_node: dev.node_indices[0],
+                    },
+                    shot_gamma2_for(&dev.name),
+                )
+            } else {
+                (ShotSourceKind::Junction, None)
+            };
             sources.push(ShotNoiseSource {
                 name,
                 slot_idx: dev.start_idx + port.slot_offset,
                 node_i: port.node_pos,
                 node_j: port.node_neg,
+                kind,
+                gamma2_override,
+            });
+        }
+        // Forward-active-reduced BJTs (1D): junction_current_ports only
+        // exposes the Ic port. Add the base-shot source — physically
+        // `S_i = 2·q·Ib = 2·q·Ic/BF`, injected at (base, emitter). The NR
+        // slot carries Ic; the emitter resolves Γ² = 1/BF from BjtParams.
+        if matches!(
+            dev.device_type,
+            crate::mna::NonlinearDeviceType::BjtForwardActive
+        ) && dev.node_indices.len() >= 3
+        {
+            let n = &dev.node_indices;
+            sources.push(ShotNoiseSource {
+                name: format!("{}.Ib", dev.name),
+                slot_idx: dev.start_idx,
+                node_i: n[1], // base
+                node_j: n[2], // emitter
+                kind: ShotSourceKind::FaBase,
+                gamma2_override: None,
             });
         }
     }
@@ -547,10 +789,10 @@ pub fn collect_pentode_partition_sources(
 /// user already has at the input). Op-amps with grounded `n_plus_idx == 0`
 /// store `g_diag_plus_default = 0.0`; their en stamp becomes a no-op.
 ///
-/// The static G_diag is baked into a runtime state field; v1.5 will refresh
-/// it on dynamic-R commits (`.pot` / `.switch` setters touching the in+
-/// node). For v1 the field exists but is only restored to default on
-/// `reset()` / `set_seed()`.
+/// The static G_diag is baked into a runtime state field and refreshed by
+/// the emitted `refresh_opamp_en_g_diag()` absolute recompute whenever a
+/// `.pot` / `.runtime R` / `.switch` R touching in+ commits (2026-07-18);
+/// `reset()` / `set_seed()` restore the codegen-time default.
 pub fn collect_opamp_noise_sources(mna: &MnaSystem) -> Vec<OpampNoiseSource> {
     let mut sources = Vec::new();
     for oa in &mna.opamps {
@@ -782,4 +1024,78 @@ pub fn collect_resistor_flicker_noise_sources(
         });
     }
     sources
+}
+
+/// Normalized-frequency gain constant `K_pink` of the emitted Kellett
+/// 7-pole pink cascade (including its `× 0.11` output tail).
+///
+/// Definition: over the pink-accurate band the cascade's power response
+/// satisfies `|H(ν)|² ≈ K_pink / ν` for normalized frequency `ν = f/fs`.
+/// This is the single constant that converts a white per-sample input
+/// variance into an absolute 1/f output PSD:
+///
+/// ```text
+/// white input:  S_white(two-sided) = σ² / fs                [x²/Hz]
+/// pink output:  S_out(f) = (σ²/fs) · |H(f/fs)|²
+///                        = (σ²/fs) · K_pink · fs / f
+///                        =  σ² · K_pink / f                 (fs cancels!)
+/// ```
+///
+/// so `σ² = KF·I^AF / (2·K_pink)` yields `S_out = KF·I^AF/(2f)` two-sided
+/// = `KF·I^AF/f` one-sided — the ngspice `.model KF/AF` semantics — at any
+/// sample rate and oversampling factor. (Codegen then applies the same
+/// trap/BE stamp compensation the other phases use: ×4 variance under
+/// trap, ×1 under BE-primary.)
+///
+/// Computed analytically at codegen time (no magic constant): the cascade
+///
+/// ```text
+/// s_i[n] = a_i·s_i[n-1] + b_i·w[n]   (six one-pole sections)
+/// pink   = Σ s_i + 0.115926·w[n-1] + 0.5362·w[n],  out = 0.11·pink
+/// ```
+///
+/// has the exact transfer function
+/// `H(z) = 0.11·( Σ b_i/(1 − a_i·z⁻¹) + 0.5362 + 0.115926·z⁻¹ )`,
+/// evaluated on the unit circle at 200 log-spaced ν ∈ [1e-3, 1e-1] (the
+/// band containing 1 kHz for every supported fs·OS from 44.1 kHz to
+/// 384 kHz; measured ripple of ν·|H(ν)|² across it is < 0.1 dB). The
+/// arithmetic mean of ν·|H(ν)|² over that band is returned — ≈ 6.0e-3.
+///
+/// Below ν ≈ 2e-4 the cascade rolls off ~1-2 dB relative to ideal 1/f
+/// (documented Kellett band edge); at 4× OS this shaves the sub-40 Hz
+/// flicker tail slightly. Audio-band accuracy is unaffected.
+pub fn kellett_pink_normalized_gain() -> f64 {
+    const B: [f64; 6] = [
+        0.0555179,
+        0.0750759,
+        0.1538520,
+        0.3104856,
+        0.5329522,
+        -0.0168980,
+    ];
+    const A: [f64; 6] = [0.99886, 0.99332, 0.96900, 0.86650, 0.55000, -0.7616];
+    const N_PTS: usize = 200;
+    let (nu_lo, nu_hi) = (1e-3_f64, 1e-1_f64);
+    let log_lo = nu_lo.ln();
+    let log_step = (nu_hi / nu_lo).ln() / (N_PTS - 1) as f64;
+    let mut acc = 0.0_f64;
+    for i in 0..N_PTS {
+        let nu = (log_lo + log_step * i as f64).exp();
+        let w = 2.0 * std::f64::consts::PI * nu;
+        // z⁻¹ = e^{-jω}
+        let (zr, zi) = (w.cos(), -w.sin());
+        // H/0.11 = Σ b_k/(1 − a_k z⁻¹) + 0.5362 + 0.115926·z⁻¹
+        let (mut hr, mut hi) = (0.5362 + 0.115926 * zr, 0.115926 * zi);
+        for k in 0..6 {
+            // b/(1 − a·z⁻¹): denominator d = (1 − a·zr, −a·zi)
+            let dr = 1.0 - A[k] * zr;
+            let di = -A[k] * zi;
+            let d2 = dr * dr + di * di;
+            hr += B[k] * dr / d2;
+            hi += -B[k] * di / d2;
+        }
+        let h2 = 0.11 * 0.11 * (hr * hr + hi * hi);
+        acc += nu * h2;
+    }
+    acc / N_PTS as f64
 }

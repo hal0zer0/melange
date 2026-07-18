@@ -2107,20 +2107,29 @@ fn opamp_en_g_diag_refreshes_on_pot_touching_in_plus() {
         "opamp_en_pot_refresh",
         42,
     );
-    // Refresh code must be present inside the pot setter.
+    // 2026-07-18: the refresh is an ABSOLUTE recompute (BASE + Σ live
+    // dynamic conductances at in+), not the old incremental
+    // `+= 1/r − 1/r_old` (which drifted in FP over unbounded knob rides).
     assert!(
-        code.contains("self.noise_opamp_en_g_diag[0] += opamp_g_delta"),
-        "set_pot_N for a pot touching op-amp in+ must refresh en_g_diag[0]"
+        code.contains("self.refresh_opamp_en_g_diag();"),
+        "set_pot_N for a pot touching op-amp in+ must call refresh_opamp_en_g_diag()"
     );
-    // The delta computation uses old/new pot resistances.
     assert!(
-        code.contains("let opamp_g_delta = 1.0 / r - 1.0 / r_old"),
-        "refresh body must compute opamp_g_delta = 1/r − 1/r_old"
+        code.contains("fn refresh_opamp_en_g_diag(&mut self)"),
+        "generated code must define the absolute-recompute method"
     );
-    // r_old must be saved BEFORE the resistance is overwritten.
     assert!(
-        code.contains("let r_old = self.pot_0_resistance"),
-        "refresh must save r_old before the new resistance is stored"
+        code.contains("NOISE_OPAMP_EN_G_BASE")
+            && code.contains(
+                "self.noise_opamp_en_g_diag[0] = NOISE_OPAMP_EN_G_BASE[0]"
+            )
+            && code.contains("+ 1.0 / self.pot_0_resistance"),
+        "refresh body must recompute en_g_diag[0] = BASE[0] + 1/pot_0_resistance"
+    );
+    // The incremental machinery must be gone.
+    assert!(
+        !code.contains("opamp_g_delta"),
+        "incremental opamp_g_delta accumulation must be replaced by the absolute recompute"
     );
 }
 
@@ -2211,3 +2220,1115 @@ C1 mid 0 100n
         "circuit without op-amps must emit no en_g_diag refresh code"
     );
 }
+
+// ======================================================================
+// BE-primary noise calibration (2026-07-18)
+// ======================================================================
+
+/// RC lowpass + unbiased diode. The diode makes M=1 so the build exercises
+/// the nonlinear DK path (the realistic shape of an auto-BE-promoted
+/// circuit); its zero-bias conductance (IS/(N·VT) ≈ 2e-11 S) is 7 decades
+/// below 1/R1, so the analytic kTC anchor `kT/C` still holds to << 1 %.
+const RC_DIODE_SPICE: &str = r#"* RC + diode — BE-primary noise calibration
+R1 in out 10k
+C1 out 0 100n
+D1 out 0 DNOISE
+.model DNOISE D(IS=1e-12 N=1.8)
+.end
+"#;
+
+fn generate_rc_diode_noise_code(sample_rate: f64, seed: u64, backward_euler: bool) -> String {
+    let config = CodegenConfig {
+        circuit_name: if backward_euler {
+            "rc_diode_noise_be".to_string()
+        } else {
+            "rc_diode_noise_trap".to_string()
+        },
+        sample_rate,
+        input_node: 0,
+        output_nodes: vec![1],
+        input_resistance: 1.0,
+        dc_block: false,
+        noise_mode: NoiseMode::Thermal,
+        noise_master_seed: seed,
+        backward_euler,
+        ..CodegenConfig::default()
+    };
+    let (code, _n, _m) = support::generate_circuit_code(RC_DIODE_SPICE, &config);
+    code
+}
+
+fn be_anchor_main(n_samples: usize, warmup: usize, sample_rate: f64) -> String {
+    format!(
+        r#"
+fn main() {{
+    let mut state = CircuitState::default();
+    state.set_sample_rate({sr:?});
+    state.set_seed(42);
+    state.set_noise_enabled(true);
+    for _ in 0..{warmup} {{
+        let _ = process_sample(0.0, &mut state);
+    }}
+    let mut sum = 0.0_f64;
+    let mut sum_sq = 0.0_f64;
+    for _ in 0..{n} {{
+        let v = process_sample(0.0, &mut state)[0];
+        sum += v;
+        sum_sq += v * v;
+    }}
+    let n = {n} as f64;
+    let mean = sum / n;
+    println!("VAR:variance={{:.15e}}", (sum_sq / n - mean * mean).max(0.0));
+}}
+"#,
+        sr = sample_rate,
+        warmup = warmup,
+        n = n_samples
+    )
+}
+
+/// BE-primary noise stamps must match the validated trapezoidal anchor.
+///
+/// The trap-calibrated stamps (`sqrt(8kT·fs)` two-draw thermal, etc.)
+/// compensate for the trap kernel's halved LF gain (`A − A_neg = 2G`).
+/// Under BE-primary (`A − A_neg = G`, full gain) the identical stamps come
+/// out +6 dB hot at LF. The fix emits single-draw stamps at half the trap
+/// stamp's LF amplitude (`sqrt(2·kT·fs)` thermal single-draw — the trap
+/// per-draw amplitude). See NOISE.md "Backward-Euler-primary stamps".
+///
+/// Anchors:
+/// 1. absolute — BE build variance ≈ kT/C (the kTC theorem, fc ≈ 159 Hz so
+///    total variance ≈ LF PSD integral; BE vs trap filter-shape difference
+///    at fc << fs/2 is < 1 %);
+/// 2. relative — BE build variance ≈ trap build variance (the validated
+///    anchor). Same seed → same Gaussian draw sequence in both builds
+///    (thermal consumes exactly one draw per source per sample in either
+///    integrator), so the ratio is nearly free of sampling error.
+///
+/// The pre-fix behavior fails both by ~4× (+6 dB).
+#[test]
+fn thermal_noise_be_primary_matches_trap_anchor() {
+    let sr = 96_000.0;
+    let n = 1 << 17;
+    let warmup = 5_000; // τ = RC = 1 ms → 10·τ ≈ 1000 samples; 5000 is generous
+
+    let code_trap = generate_rc_diode_noise_code(sr, 42, false);
+    let code_be = generate_rc_diode_noise_code(sr, 42, true);
+
+    // Structural: the BE build carries the un-doubled single-draw stamp.
+    assert!(
+        code_be.contains("(2.0 * K_B * T_ROOM_K * fs_internal).sqrt()"),
+        "BE-primary build must derive noise_thermal_scale = sqrt(2·kB·T·fs)"
+    );
+    assert!(
+        !code_be.contains("w_new + state.noise_thermal_w_prev"),
+        "BE-primary build must emit a single-draw thermal stamp (no w[n]+w[n-1] pair)"
+    );
+    assert!(
+        code_trap.contains("(8.0 * K_B * T_ROOM_K * fs_internal).sqrt()")
+            && code_trap.contains("w_new + state.noise_thermal_w_prev"),
+        "trap build must keep the two-draw sqrt(8kT·fs) calibration"
+    );
+
+    let main = be_anchor_main(n, warmup, sr);
+    let out_trap = support::compile_and_run(&code_trap, &main, "noise_be_anchor_trap");
+    let out_be = support::compile_and_run(&code_be, &main, "noise_be_anchor_be");
+
+    let v_trap = parse_var(&out_trap.stdout, "variance");
+    let v_be = parse_var(&out_be.stdout, "variance");
+    println!(
+        "BE-anchor variances: trap = {v_trap:.6e} V², BE = {v_be:.6e} V², \
+         kT/C = {:.6e} V²",
+        K_B * 290.0 / CAP_F
+    );
+
+    // Absolute anchor: kTC theorem on the BE build.
+    let expected = K_B * 290.0 / CAP_F;
+    let ktc_ratio = v_be / expected;
+    assert!(
+        (0.85..=1.15).contains(&ktc_ratio),
+        "BE-primary kTC violated: measured {v_be:.3e} V² vs kT/C = {expected:.3e} V² \
+         (ratio {ktc_ratio:.3}). Ratio ≈ 4.0 means the trap-calibrated stamp is \
+         running through BE's full-gain kernel (+6 dB LF); ratio ≈ 2.0 means the \
+         variance was un-doubled but the amplitude wasn't halved (the LF gain \
+         doubling is an amplitude factor: correction is amplitude ÷2, not variance ÷2)."
+    );
+
+    // Relative anchor: BE LF PSD matches the validated trap build.
+    let rel = v_be / v_trap;
+    assert!(
+        (0.88..=1.14).contains(&rel),
+        "BE-primary variance {v_be:.3e} V² deviates from the trap anchor \
+         {v_trap:.3e} V² (ratio {rel:.3}; expected ≈ 1.0, pre-fix ≈ 4.0)"
+    );
+}
+
+/// BE-primary emission must compile and run for every noise phase, and the
+/// emitted stamps must be single-draw at the halved scales. This is the
+/// string+compile guard companion to `thermal_noise_be_primary_matches_trap_anchor`
+/// (which anchors the calibration numerically for thermal): it covers shot,
+/// junction flicker, resistor flicker, pentode partition, and op-amp en/in.
+#[test]
+fn be_primary_full_noise_phases_compile_and_are_single_draw() {
+    let smoke_main = r#"
+fn main() {
+    let mut state = CircuitState::default();
+    state.set_seed(42);
+    state.set_noise_enabled(true);
+    for _ in 0..512 {
+        let v = process_sample(0.0, &mut state)[0];
+        assert!(v.is_finite(), "BE-primary noise build produced non-finite output");
+    }
+    println!("VAR:ok=1.0");
+}
+"#;
+    let gen_be = |spice: &str, name: &str| -> String {
+        let config = CodegenConfig {
+            circuit_name: name.to_string(),
+            sample_rate: 96_000.0,
+            input_node: 0,
+            output_nodes: vec![1],
+            input_resistance: 1.0,
+            dc_block: false,
+            noise_mode: NoiseMode::Full,
+            noise_master_seed: 42,
+            backward_euler: true,
+            ..CodegenConfig::default()
+        };
+        let (code, _n, _m) = support::generate_circuit_code(spice, &config);
+        code
+    };
+
+    // Shot + junction flicker (diode with KF).
+    const DIODE_KF_SPICE: &str = r#"* Diode with KF — BE Full smoke
+R_drive in a 10k
+D1 a 0 D1N4148
+.model D1N4148 D(IS=1e-15 KF=1e-14 AF=1.0)
+.end
+"#;
+    let code = gen_be(DIODE_KF_SPICE, "be_full_diode_kf");
+    assert!(
+        code.contains("let noise_shot_scale = (Q_E * fs_internal).sqrt();"),
+        "BE shot scale must be sqrt(q·fs) (half the trap sqrt(4q·fs) amplitude)"
+    );
+    // Flicker calibration (2026-07-18): fs/OS-invariant white-input scale
+    // sqrt(0.5/K_pink) under BE (half the trap sqrt(2/K_pink) amplitude).
+    // K_pink ≈ 6.0e-3 → BE scale ≈ sqrt(0.5/6.0e-3) ≈ 9.1.
+    let k_pink = melange_solver::codegen::ir::kellett_pink_normalized_gain();
+    let be_flicker_scale = (0.5 / k_pink).sqrt();
+    let scale_line = code
+        .lines()
+        .find(|l| l.contains("let noise_flicker_scale = "))
+        .expect("BE build must derive noise_flicker_scale");
+    assert!(
+        !scale_line.contains("fs_internal"),
+        "BE junction-flicker scale must be fs-INVARIANT (sqrt(0.5/K_pink)), got: {scale_line}"
+    );
+    let emitted: f64 = scale_line
+        .trim()
+        .trim_start_matches("let noise_flicker_scale = ")
+        .trim_end_matches(';')
+        .parse()
+        .expect("flicker scale literal");
+    assert!(
+        (emitted / be_flicker_scale - 1.0).abs() < 1e-12,
+        "BE flicker scale {emitted} != sqrt(0.5/K_pink) = {be_flicker_scale}"
+    );
+    let out = support::compile_and_run(&code, smoke_main, "be_full_diode_kf");
+    assert!(out.stdout.contains("VAR:ok"), "diode KF BE smoke run failed:\n{}", out.stderr);
+
+    // Resistor flicker.
+    const R_FLICKER_SPICE: &str = r#"* R1 with KF — BE Full smoke
+Rin in a 1k
+R1 a 0 10k KF=1e-3 AF=2.0
+C1 a 0 100n
+.end
+"#;
+    let code = gen_be(R_FLICKER_SPICE, "be_full_r_flicker");
+    // Same fs-invariant BE calibration as junction flicker (the legacy
+    // field name noise_r_flicker_sqrt_fs is kept; the value is now
+    // sqrt(0.5/K_pink), no fs term).
+    let rf_line = code
+        .lines()
+        .find(|l| l.contains("let noise_r_flicker_sqrt_fs = "))
+        .expect("BE build must derive noise_r_flicker_sqrt_fs");
+    assert!(
+        !rf_line.contains("fs_internal"),
+        "BE resistor-flicker scale must be fs-INVARIANT, got: {rf_line}"
+    );
+    let rf_emitted: f64 = rf_line
+        .trim()
+        .trim_start_matches("let noise_r_flicker_sqrt_fs = ")
+        .trim_end_matches(';')
+        .parse()
+        .expect("r-flicker scale literal");
+    assert!(
+        (rf_emitted / be_flicker_scale - 1.0).abs() < 1e-12,
+        "BE r-flicker scale {rf_emitted} != sqrt(0.5/K_pink) = {be_flicker_scale} \
+         (junction and resistor flicker must share one calibration — the old \
+         ×4-relative-error split is the bug this pins)"
+    );
+    let out = support::compile_and_run(&code, smoke_main, "be_full_r_flicker");
+    assert!(out.stdout.contains("VAR:ok"), "r-flicker BE smoke run failed:\n{}", out.stderr);
+
+    // Pentode partition (single-draw, no ×0.5, no w_prev pair).
+    let code = gen_be(PENTODE_PARTITION_SPICE, "be_full_partition");
+    assert!(
+        code.contains(
+            "let part_scale_half = state.noise_shot_scale * state.noise_gain * state.shot_gain;\n"
+        ),
+        "BE partition stamp must consume noise_shot_scale at full amplitude (no ×0.5)"
+    );
+    assert!(
+        !code.contains("w_new + state.noise_partition_w_prev"),
+        "BE partition stamp must be single-draw (no pair sum)"
+    );
+    let out = support::compile_and_run(&code, smoke_main, "be_full_partition");
+    assert!(out.stdout.contains("VAR:ok"), "partition BE smoke run failed:\n{}", out.stderr);
+
+    // Op-amp en/in (single-draw at sqrt(0.5·fs)).
+    let code = gen_be(OPAMP_NE5534_SPICE, "be_full_opamp");
+    assert!(
+        code.contains("let noise_opamp_sqrt_fs = (0.5 * fs_internal).sqrt();"),
+        "BE op-amp scale must be sqrt(0.5·fs) (the trap per-draw amplitude)"
+    );
+    assert!(
+        !code.contains("w_new + state.noise_opamp_en_w_prev")
+            && !code.contains("w_new + state.noise_opamp_in_w_prev"),
+        "BE op-amp en/in stamps must be single-draw (no pair sum)"
+    );
+    let out = support::compile_and_run(&code, smoke_main, "be_full_opamp");
+    assert!(out.stdout.contains("VAR:ok"), "op-amp BE smoke run failed:\n{}", out.stderr);
+}
+
+// ======================================================================
+// Flicker absolute calibration + fs/OS invariance (2026-07-18)
+// ======================================================================
+//
+// Target semantics (NOISE.md "Flicker calibration"): injected junction
+// flicker must land the OUTPUT PSD at the ngspice model-card meaning
+//   S_i(f) = KF · I^AF / f      [A²/Hz, one-sided]
+// independent of sample rate and oversampling. The pre-fix emission fed
+// σ² = 4·KF·I^AF·fs white into the Kellett pink filter — correct scaling
+// for WHITE phases (PSD = σ²/fs) but wrong through a fixed digital pink
+// filter whose |H(f/fs)|² ≈ K_pink·fs/f, making the output PSD ∝ fs and
+// ~3 decades hot at audio rates.
+
+/// Elementary charge [C].
+const Q_E: f64 = 1.602176634e-19;
+/// Diode thermal voltage at the melange default (N = 1).
+const DIODE_N_VT: f64 = 0.025851991;
+
+/// Rust snippet (inlined into generated-test mains): one-sided PSD
+/// [V²/Hz] averaged over the DFT bins of [f_lo, f_hi], Bartlett-averaged
+/// over non-overlapping rectangular segments. Also returns the average
+/// 1/f over the same bins (for predicting a band-averaged 1/f PSD).
+/// Goertzel per bin — no FFT dependency.
+const PSD_HELPER_SNIPPET: &str = r#"
+fn psd_band(xs: &[f64], fs: f64, seg_len: usize, f_lo: f64, f_hi: f64) -> (f64, f64) {
+    let n_seg = xs.len() / seg_len;
+    let df = fs / seg_len as f64;
+    let k_lo = (f_lo / df).ceil() as usize;
+    let k_hi = (f_hi / df).floor() as usize;
+    assert!(k_hi >= k_lo, "PSD band holds no bins");
+    let mut acc = 0.0_f64;
+    let mut invf = 0.0_f64;
+    let mut count = 0usize;
+    for s in 0..n_seg {
+        let seg = &xs[s * seg_len..(s + 1) * seg_len];
+        let mean = seg.iter().sum::<f64>() / seg_len as f64;
+        for k in k_lo..=k_hi {
+            let w = 2.0 * std::f64::consts::PI * k as f64 / seg_len as f64;
+            let coeff = 2.0 * w.cos();
+            let (mut s1, mut s2) = (0.0_f64, 0.0_f64);
+            for &x in seg {
+                let s0 = (x - mean) + coeff * s1 - s2;
+                s2 = s1;
+                s1 = s0;
+            }
+            let power = s1 * s1 + s2 * s2 - coeff * s1 * s2; // |X_k|²
+            acc += 2.0 * power / (fs * seg_len as f64); // one-sided PSD
+            invf += 1.0 / (k as f64 * df);
+            count += 1;
+        }
+    }
+    (acc / count as f64, invf / count as f64)
+}
+"#;
+
+/// Generated-main builder for the flicker/shot PSD circuits: measures the
+/// noise-off DC output level (for bias-current recovery in the host test)
+/// and the band PSD with a chosen gain gating.
+fn flicker_psd_main(
+    fs_host: f64,
+    drive_dc: f64,
+    f_lo: f64,
+    f_hi: f64,
+    thermal: f64,
+    shot_stmt: &str,
+    flicker: f64,
+) -> String {
+    format!(
+        r#"{psd}
+fn main() {{
+    let fs = {fs_host}_f64;
+    let mut state = CircuitState::default();
+    state.set_sample_rate(fs);
+    state.set_seed(1234);
+    // Pass 1: noise off — recover the DC operating level at the output.
+    for _ in 0..4096 {{ let _ = process_sample({dc}_f64, &mut state); }}
+    let mut vdc = 0.0_f64;
+    for _ in 0..4096 {{ vdc += process_sample({dc}_f64, &mut state)[0]; }}
+    vdc /= 4096.0;
+    // Pass 2: selected noise phases on, collect and measure band PSD.
+    state.set_noise_enabled(true);
+    state.set_temperature_k(290.0);
+    state.set_noise_gain(1.0);
+    state.set_thermal_gain({thermal}_f64);
+    {shot_stmt}
+    state.set_flicker_gain({flicker}_f64);
+    for _ in 0..8192 {{ let _ = process_sample({dc}_f64, &mut state); }}
+    let seg_len = 8192usize;
+    let n = seg_len * 48;
+    let mut xs = Vec::with_capacity(n);
+    for _ in 0..n {{
+        xs.push(process_sample({dc}_f64, &mut state)[0]);
+    }}
+    let (psd, invf) = psd_band(&xs, fs, seg_len, {f_lo}_f64, {f_hi}_f64);
+    println!("VAR:vdc={{:.15e}}", vdc);
+    println!("VAR:psd={{:.15e}}", psd);
+    println!("VAR:invf={{:.15e}}", invf);
+}}
+"#,
+        psd = PSD_HELPER_SNIPPET,
+        fs_host = fs_host,
+        dc = drive_dc,
+        f_lo = f_lo,
+        f_hi = f_hi,
+        thermal = thermal,
+        shot_stmt = shot_stmt,
+        flicker = flicker,
+    )
+}
+
+/// (a) Junction flicker ABSOLUTE level + fs/OS invariance.
+///
+/// Diode biased through R_drive = 1 kΩ; flicker-only (thermal and shot
+/// muted). Predicted output PSD at the anode:
+///   S_v(f) = KF·I^AF/f · |Z|²,  Z = 1 / (g_d + 1/(R_drive + R_in)),
+///   g_d = I / (N·VT),  I recovered from the measured DC output level.
+/// Asserts:
+///   1. measured band PSD (≈1 kHz) within ±3 dB of prediction at 48 kHz,
+///      96 kHz, and 48 kHz + 2× oversampling;
+///   2. the three measurements agree pairwise within ±1 dB (fs/OS
+///      invariance — the pre-fix emission fails this by ~2× per fs octave
+///      and misses the absolute level by ~3 orders of magnitude).
+#[test]
+fn junction_flicker_absolute_level_and_fs_os_invariance() {
+    const KF: f64 = 1e-8;
+    const R_DRIVE: f64 = 1_000.0;
+    const DRIVE_DC: f64 = 0.55;
+    const SPICE: &str = r#"* Diode flicker absolute level
+Rdrive in a 1k
+D1 a 0 DFLICK
+.model DFLICK D(IS=1e-14 KF=1e-8 AF=1.0)
+.end
+"#;
+    let gen = |fs: f64, os: usize, name: &str| -> String {
+        let config = CodegenConfig {
+            circuit_name: name.to_string(),
+            sample_rate: fs,
+            input_node: 0,
+            output_nodes: vec![1],
+            input_resistance: 1.0,
+            dc_block: false,
+            noise_mode: NoiseMode::Full,
+            noise_master_seed: 77,
+            oversampling_factor: os,
+            ..CodegenConfig::default()
+        };
+        let (code, _n, _m) = support::generate_circuit_code(SPICE, &config);
+        code
+    };
+
+    let run = |fs: f64, os: usize, name: &str| -> (f64, f64, f64) {
+        let code = gen(fs, os, name);
+        let main = flicker_psd_main(
+            fs,
+            DRIVE_DC,
+            900.0,
+            1120.0,
+            0.0,
+            "state.set_shot_gain(0.0);",
+            1.0,
+        );
+        let out = support::compile_and_run(&code, &main, name);
+        (
+            parse_var(&out.stdout, "vdc"),
+            parse_var(&out.stdout, "psd"),
+            parse_var(&out.stdout, "invf"),
+        )
+    };
+
+    let cases = [
+        run(48_000.0, 1, "flick_abs_48k"),
+        run(96_000.0, 1, "flick_abs_96k"),
+        run(48_000.0, 2, "flick_abs_48k_os2"),
+    ];
+    let labels = ["48k", "96k", "48k+2xOS"];
+
+    let mut ratios = Vec::new();
+    for ((vdc, psd, invf), label) in cases.iter().zip(labels) {
+        // Recover bias current and small-signal anode impedance.
+        let i_dc = (DRIVE_DC - vdc) / (R_DRIVE + 1.0);
+        assert!(
+            i_dc > 1e-7,
+            "{label}: implausible diode bias current {i_dc:.3e} A (vdc={vdc:.4})"
+        );
+        let g_d = i_dc / DIODE_N_VT;
+        let z = 1.0 / (g_d + 1.0 / (R_DRIVE + 1.0));
+        // Band-averaged prediction: KF·I·⟨1/f⟩·Z² (AF = 1).
+        let predicted = KF * i_dc * invf * z * z;
+        let ratio = psd / predicted;
+        assert!(
+            (0.5..=2.0).contains(&ratio),
+            "{label}: junction flicker absolute level off: measured {psd:.3e} V²/Hz \
+             vs predicted KF·I/f·Z² = {predicted:.3e} V²/Hz (ratio {ratio:.3}, \
+             I={i_dc:.3e} A, Z={z:.1} Ω). A ratio in the hundreds means the \
+             σ²∝fs white-input scaling regressed; ~0.11 means the Kellett tail \
+             is being double-counted."
+        );
+        ratios.push(psd / predicted);
+    }
+    // fs/OS invariance: pairwise within ±1 dB (factor 1.259).
+    for i in 0..cases.len() {
+        for j in (i + 1)..cases.len() {
+            let r = ratios[i] / ratios[j];
+            assert!(
+                (1.0 / 1.259..=1.259).contains(&r),
+                "flicker calibration not fs/OS-invariant: {} vs {} normalized \
+                 PSD ratio {r:.3} (expected within ±1 dB). Pre-fix behavior \
+                 scales the output PSD linearly with fs_internal.",
+                labels[i],
+                labels[j]
+            );
+        }
+    }
+}
+
+/// (b) Flicker corner frequency vs shot — sanity of the absolute scale.
+///
+/// For AF = 1 the 1/f corner against shot (2·q·I) is
+///   f_c = KF · I^(AF−1) / (2q) = KF / (2q),
+/// independent of bias. With KF = 1e-15 (typical silicon), f_c ≈ 3.12 kHz
+/// — single-digit kHz at mA-class currents, the classic BJT/diode corner.
+/// Both PSDs pass through the same output impedance, so
+///   f_c(measured) = f0 · PSD_flicker(f0) / PSD_shot(f0)
+/// cancels Z and I entirely. Asserts f_c within ±3 dB of KF/(2q).
+#[test]
+fn flicker_corner_vs_shot_matches_kf_over_2q() {
+    const KF: f64 = 1e-15;
+    const SPICE: &str = r#"* Diode flicker corner vs shot
+Rdrive in a 1Meg
+D1 a 0 DCORNER
+.model DCORNER D(IS=1e-14 KF=1e-15 AF=1.0)
+.end
+"#;
+    let fs = 96_000.0;
+    let config = CodegenConfig {
+        circuit_name: "flicker_corner".to_string(),
+        sample_rate: fs,
+        input_node: 0,
+        output_nodes: vec![1],
+        input_resistance: 1.0,
+        dc_block: false,
+        noise_mode: NoiseMode::Full,
+        noise_master_seed: 99,
+        ..CodegenConfig::default()
+    };
+    let (code, _n, _m) = support::generate_circuit_code(SPICE, &config);
+
+    // Two runs in one binary: flicker-only and shot-only, same band.
+    let main = format!(
+        r#"{psd}
+fn run(shot: f64, flicker: f64) -> (f64, f64) {{
+    let fs = 96000.0_f64;
+    let mut state = CircuitState::default();
+    state.set_sample_rate(fs);
+    state.set_seed(4321);
+    state.set_noise_enabled(true);
+    state.set_temperature_k(290.0);
+    state.set_noise_gain(1.0);
+    state.set_thermal_gain(0.0);
+    state.set_shot_gain(shot);
+    state.set_flicker_gain(flicker);
+    for _ in 0..8192 {{ let _ = process_sample(0.41_f64, &mut state); }}
+    let seg_len = 8192usize;
+    let n = seg_len * 48;
+    let mut xs = Vec::with_capacity(n);
+    for _ in 0..n {{
+        xs.push(process_sample(0.41_f64, &mut state)[0]);
+    }}
+    psd_band(&xs, fs, seg_len, 900.0, 1120.0)
+}}
+fn main() {{
+    let (psd_flick, invf) = run(0.0, 1.0);
+    let (psd_shot, _) = run(1.0, 0.0);
+    println!("VAR:psd_flick={{:.15e}}", psd_flick);
+    println!("VAR:psd_shot={{:.15e}}", psd_shot);
+    println!("VAR:invf={{:.15e}}", invf);
+}}
+"#,
+        psd = PSD_HELPER_SNIPPET
+    );
+    let out = support::compile_and_run(&code, &main, "flicker_corner");
+    let psd_flick = parse_var(&out.stdout, "psd_flick");
+    let psd_shot = parse_var(&out.stdout, "psd_shot");
+    let invf = parse_var(&out.stdout, "invf");
+
+    assert!(psd_shot > 0.0 && psd_flick > 0.0, "zero band PSD measured");
+    // PSD_flick/PSD_shot = KF·⟨1/f⟩/(2q) = f_c·⟨1/f⟩ ⇒ f_c = ratio/⟨1/f⟩.
+    let f_c_measured = (psd_flick / psd_shot) / invf;
+    let f_c_expected = KF / (2.0 * Q_E); // ≈ 3120.8 Hz
+    let ratio = f_c_measured / f_c_expected;
+    assert!(
+        (0.5..=2.0).contains(&ratio),
+        "flicker/shot corner off: measured f_c = {f_c_measured:.0} Hz vs \
+         KF/(2q) = {f_c_expected:.0} Hz (ratio {ratio:.3}). This pins the \
+         RELATIVE calibration of Phase 3 (flicker) against Phase 2 (shot)."
+    );
+}
+
+// ======================================================================
+// BJT parasitic RB thermal noise (rbb′) — nodal internal-node path
+// ======================================================================
+
+/// Nodal codegen with BJT internal-node expansion (the CLI arrangement —
+/// the plain `support::generate_circuit_code_nodal` does not expand, so
+/// parasitic-R noise sources would have no internal node to attach to).
+fn generate_nodal_expanded(spice: &str, config: &CodegenConfig, out_node: &str) -> String {
+    use melange_solver::codegen::{ir::CircuitIR, CodeGenerator};
+    use melange_solver::mna::MnaSystem;
+    use melange_solver::parser::Netlist;
+    let netlist = Netlist::parse(spice).expect("parse failed");
+    let mut mna = MnaSystem::from_netlist(&netlist).expect("MNA build failed");
+    let input_node = config.input_node;
+    if input_node < mna.n {
+        mna.g[input_node][input_node] += 1.0 / config.input_resistance;
+    }
+    let slots = CircuitIR::build_device_info(&netlist).expect("device info");
+    mna.expand_bjt_internal_nodes(&slots);
+    // Resolve the output row from the node map instead of guessing the
+    // numbering scheme (node order is an MNA implementation detail).
+    let out_row = mna
+        .node_map
+        .get(out_node)
+        .or_else(|| mna.node_map.get(&out_node.to_ascii_uppercase()))
+        .or_else(|| mna.node_map.get(&out_node.to_ascii_lowercase()))
+        .copied()
+        .unwrap_or_else(|| panic!("node {out_node} not in node_map"))
+        - 1;
+    let mut config = config.clone();
+    config.output_nodes = vec![out_row];
+    let generator = CodeGenerator::new(config);
+    generator
+        .generate_nodal(&mna, &netlist)
+        .expect("nodal codegen failed")
+        .code
+}
+
+/// (c) rbb′ thermal presence and magnitude.
+///
+/// Three builds of the same common-emitter stage (nodal, expanded):
+///   A: `.model … RB=1000` (parasitic — the new collector path)
+///   B: RB=0 + an EXPLICIT external 1 kΩ resistor in series with the base
+///      (physically identical network; its thermal noise flows through the
+///      long-validated Element::Resistor machinery — this IS the
+///      "predicted 4kT·RB contribution", including the exact circuit
+///      shaping, with no hand-waved analytic transfer function)
+///   C: RB=0, no extra resistor (control)
+/// Asserts: var(A) ≈ var(B) within ±15 % (parasitic source reproduces the
+/// explicit-resistor physics; RNG stream assignment differs so the match
+/// is statistical, not bit-exact) and var(A) exceeds var(C) by > 10 %
+/// (the source actually exists). Also pins NOISE_THERMAL_N per build.
+#[test]
+fn bjt_parasitic_rb_thermal_matches_explicit_base_resistor_nodal() {
+    const SPICE_A: &str = "\
+BJT rbb thermal — parasitic RB
+Cin in nin 1u
+Rin nin b 1k
+Rb1 vcc b 47k
+Rb2 b 0 10k
+Q1 c b e QRB
+Re e 0 2.2k
+Ce e 0 100u
+Rc vcc c 10k
+VCC vcc 0 12
+.model QRB NPN(IS=1e-14 BF=200 RB=1000)
+";
+    const SPICE_B: &str = "\
+BJT rbb thermal — explicit base resistor
+Cin in nin 1u
+Rin nin b 1k
+Rb1 vcc b 47k
+Rb2 b 0 10k
+Q1 c bx e QNRB
+Rbb b bx 1000
+Re e 0 2.2k
+Ce e 0 100u
+Rc vcc c 10k
+VCC vcc 0 12
+.model QNRB NPN(IS=1e-14 BF=200)
+";
+    const SPICE_C: &str = "\
+BJT rbb thermal — no RB control
+Cin in nin 1u
+Rin nin b 1k
+Rb1 vcc b 47k
+Rb2 b 0 10k
+Q1 c b e QNRB
+Re e 0 2.2k
+Ce e 0 100u
+Rc vcc c 10k
+VCC vcc 0 12
+.model QNRB NPN(IS=1e-14 BF=200)
+";
+    let sr = 96_000.0;
+    // Output node: first-appearance order in→0, b→1, vcc→2, c→3 (0-indexed
+    // rows; same for all three netlists — B appends bx AFTER c).
+    let config = |name: &str| CodegenConfig {
+        circuit_name: name.to_string(),
+        sample_rate: sr,
+        input_node: 0,
+        output_nodes: vec![3],
+        input_resistance: 1.0,
+        dc_block: false,
+        noise_mode: NoiseMode::Thermal,
+        noise_master_seed: 42,
+        ..CodegenConfig::default()
+    };
+    let code_a = generate_nodal_expanded(SPICE_A, &config("rbb_parasitic"), "c");
+    let code_b = generate_nodal_expanded(SPICE_B, &config("rbb_explicit"), "c");
+    let code_c = generate_nodal_expanded(SPICE_C, &config("rbb_control"), "c");
+
+    // Emission-level: parasitic RB adds exactly one thermal source.
+    assert!(
+        code_a.contains("pub const NOISE_THERMAL_N: usize = 6;"),
+        "circuit A must emit 5 explicit + 1 parasitic RB thermal sources; got:\n{}",
+        code_a
+            .lines()
+            .find(|l| l.contains("NOISE_THERMAL_N"))
+            .unwrap_or("<missing>")
+    );
+    assert!(
+        code_b.contains("pub const NOISE_THERMAL_N: usize = 6;"),
+        "circuit B must emit 6 explicit thermal sources"
+    );
+    assert!(
+        code_c.contains("pub const NOISE_THERMAL_N: usize = 5;"),
+        "circuit C must emit 5 thermal sources (no RB)"
+    );
+
+    let main = format!(
+        r#"
+fn main() {{
+    let mut state = CircuitState::default();
+    state.set_sample_rate({sr}_f64);
+    state.set_seed(42);
+    state.set_noise_enabled(true);
+    state.set_temperature_k(290.0);
+    for _ in 0..8192 {{ let _ = process_sample(0.0, &mut state); }}
+    let mut sum = 0.0_f64;
+    let mut sum_sq = 0.0_f64;
+    let n = 1usize << 17;
+    for _ in 0..n {{
+        let v = process_sample(0.0, &mut state)[0];
+        sum += v;
+        sum_sq += v * v;
+    }}
+    let nf = n as f64;
+    let mean = sum / nf;
+    println!("VAR:variance={{:.15e}}", (sum_sq / nf - mean * mean).max(0.0));
+}}
+"#,
+        sr = sr
+    );
+    let var_a = parse_var(
+        &support::compile_and_run(&code_a, &main, "rbb_parasitic").stdout,
+        "variance",
+    );
+    let var_b = parse_var(
+        &support::compile_and_run(&code_b, &main, "rbb_explicit").stdout,
+        "variance",
+    );
+    let var_c = parse_var(
+        &support::compile_and_run(&code_c, &main, "rbb_control").stdout,
+        "variance",
+    );
+
+    println!("rbb variances: A(parasitic)={var_a:.6e} B(explicit)={var_b:.6e} C(control)={var_c:.6e}");
+    let ab = var_a / var_b;
+    assert!(
+        (0.85..=1.15).contains(&ab),
+        "parasitic-RB thermal does not reproduce the explicit-resistor \
+         physics: var(RB=1000) = {var_a:.3e}, var(explicit 1k) = {var_b:.3e} \
+         (ratio {ab:.3}, expected ≈ 1.0)"
+    );
+    let ac = var_a / var_c;
+    assert!(
+        ac > 1.10,
+        "parasitic-RB thermal source is missing or inaudible: \
+         var(RB=1000)/var(RB=0) = {ac:.3} (expected > 1.10; the 1 kΩ rbb' \
+         roughly doubles the base-network noise power in this bias network)"
+    );
+}
+
+// ======================================================================
+// Tube plate shot — van der Ziel space-charge smoothing (2026-07-18)
+// ======================================================================
+
+const TRIODE_SHOT_FULL_OVERRIDE_SPICE: &str = "\
+12AX7 single-stage — SHOT_GAMMA2=1.0 restores legacy full shot
+Rin in 0 1Meg
+Cin in grid 100n
+Rg grid 0 1Meg
+T1 plate grid cathode 12AX7
+Rk cathode 0 1.5k
+Ck cathode 0 22u
+Rp vcc plate 100k
+Cout plate out 1u
+Rout out 0 1Meg
+V1 vcc 0 DC 250
+.model 12AX7 VT(MU=100 EX=1.4 KG1=600 KP=300 KVB=300 SHOT_GAMMA2=1.0)
+";
+
+/// (d) Triode plate shot is space-charge smoothed at the DC OP.
+///
+/// Formulation (cited in resolve_shot_gamma2, dk_emitter.rs): equivalent
+/// noise resistance R_eq ≈ 2.5/gm at T₀ = 290 K (Thompson/North/Harris,
+/// "Fluctuations in Space-Charge-Limited Currents", RCA Review Jan 1940;
+/// van der Ziel, *Noise*, 1954) ⇒ S_i = 4·k·T₀·gm²·R_eq = 10·k·T₀·gm,
+/// i.e. Γ² = 10·k·T₀·gm/(2·q·I_p) relative to full shot. Input-referred
+/// e_n = sqrt(4·k·T₀·2.5/gm) ≈ 5–6 nV/√Hz for a 12AX7 (R_eq ≈ 1.6 kΩ).
+///
+/// Asserts:
+///  1. the emitted `NOISE_SHOT_GAMMA_AMP` matches an INDEPENDENT Γ²
+///     prediction (test-side bisection DC solve of the cathode-biased
+///     stage + KorenTriode gm) within ±3 dB — equivalent to the e_n
+///     check, both being sqrt(Γ²) × the shared full-shot baseline;
+///  2. runtime: with the same seed, variance(smoothed)/variance(full
+///     override) == Γ² within ±5 % (the streams are identical, only the
+///     amplitude multiplier differs);
+///  3. `.model … SHOT_GAMMA2=1.0` emits NO gamma const — byte-level
+///     restoration of the legacy full-shot behavior.
+#[test]
+fn triode_plate_shot_space_charge_smoothing() {
+    const K_B_LOCAL: f64 = 1.380649e-23;
+    let sr = 96_000.0;
+    let gen = |spice: &str, name: &str| -> String {
+        let config = CodegenConfig {
+            circuit_name: name.to_string(),
+            sample_rate: sr,
+            input_node: 0,
+            output_nodes: vec![1],
+            input_resistance: 1.0,
+            dc_block: false,
+            noise_mode: NoiseMode::Full,
+            noise_master_seed: 42,
+            ..CodegenConfig::default()
+        };
+        let (code, _n, _m) = support::generate_circuit_code(spice, &config);
+        code
+    };
+    let code_smoothed = gen(TRIODE_NO_PARTITION_SPICE, "triode_shot_smoothed");
+    let code_full = gen(TRIODE_SHOT_FULL_OVERRIDE_SPICE, "triode_shot_full");
+
+    // (3) Override restores legacy emission — no gamma const at all.
+    assert!(
+        !code_full.contains("NOISE_SHOT_GAMMA_AMP"),
+        "SHOT_GAMMA2=1.0 must restore the legacy full-shot emission \
+         (no NOISE_SHOT_GAMMA_AMP const)"
+    );
+    // (1) Parse the emitted sqrt(Γ²).
+    let gamma_line = code_smoothed
+        .lines()
+        .find(|l| l.contains("NOISE_SHOT_GAMMA_AMP: [f64; NOISE_SHOT_N]"))
+        .expect("smoothed build must emit NOISE_SHOT_GAMMA_AMP");
+    let gamma_amp: f64 = gamma_line
+        .split('[')
+        .nth(2)
+        .and_then(|s| s.split(']').next())
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or_else(|| panic!("cannot parse gamma from: {gamma_line}"));
+    let gamma2 = gamma_amp * gamma_amp;
+    assert!(
+        gamma2 > 0.0 && gamma2 < 1.0,
+        "triode Γ² must be in (0, 1) — smoothing cannot exceed full shot; got {gamma2}"
+    );
+
+    // Independent Γ² prediction: bisection DC solve of the cathode-biased
+    // stage (Rk = 1.5k, Rp = 100k, VCC = 250, grid at ~0 V through Rg),
+    // then gm by central difference on the same Koren model.
+    let triode = melange_devices::tube::KorenTriode {
+        mu: 100.0,
+        ex: 1.4,
+        kg1: 600.0,
+        kp: 300.0,
+        kvb: 300.0,
+        ig_max: 0.0,
+        vgk_onset: 0.5,
+        lambda: 0.0,
+        mu_b: 0.0,
+        svar: 0.0,
+        ex_b: 0.0,
+    };
+    let residual = |ip: f64| -> f64 {
+        let vk = ip * 1_500.0;
+        let vp = 250.0 - ip * 100_000.0;
+        triode.plate_current(-vk, vp - vk) - ip
+    };
+    let (mut lo, mut hi) = (1e-6_f64, 2.4e-3_f64);
+    assert!(
+        residual(lo) > 0.0 && residual(hi) < 0.0,
+        "test-side DC bracket invalid"
+    );
+    for _ in 0..60 {
+        let mid = 0.5 * (lo + hi);
+        if residual(mid) > 0.0 {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    let ip_op = 0.5 * (lo + hi);
+    let vk = ip_op * 1_500.0;
+    let (vgk, vpk) = (-vk, 250.0 - ip_op * 100_000.0 - vk);
+    let h = 1e-3;
+    let gm = (triode.plate_current(vgk + h, vpk) - triode.plate_current(vgk - h, vpk)) / (2.0 * h);
+    let gamma2_pred = (10.0 * K_B_LOCAL * 290.0 * gm / (2.0 * Q_E * ip_op)).min(1.0);
+    let g_ratio = gamma2 / gamma2_pred;
+    assert!(
+        (0.5..=2.0).contains(&g_ratio),
+        "emitted Γ² = {gamma2:.4} disagrees with the independent \
+         10kT₀gm/(2qIp) prediction {gamma2_pred:.4} (ratio {g_ratio:.3}; \
+         Ip = {ip_op:.3e} A, gm = {gm:.3e} S). Equivalent input-referred \
+         e_n target: sqrt(4kT₀·2.5/gm) = {:.2e} V/√Hz.",
+        (4.0 * K_B_LOCAL * 290.0 * 2.5 / gm).sqrt()
+    );
+
+    // (2) Runtime ratio: shot-only variance, same seed, both builds.
+    let main = format!(
+        r#"
+fn main() {{
+    let mut state = CircuitState::default();
+    state.set_sample_rate({sr}_f64);
+    state.set_seed(42);
+    state.set_noise_enabled(true);
+    state.set_temperature_k(290.0);
+    state.set_thermal_gain(0.0);
+    state.set_shot_gain(1.0);
+    // (no flicker sources in this build — 12AX7 card has no KF)
+    for _ in 0..16384 {{ let _ = process_sample(0.0, &mut state); }}
+    let mut sum = 0.0_f64;
+    let mut sum_sq = 0.0_f64;
+    let n = 1usize << 17;
+    for _ in 0..n {{
+        let v = process_sample(0.0, &mut state)[0];
+        sum += v;
+        sum_sq += v * v;
+    }}
+    let nf = n as f64;
+    let mean = sum / nf;
+    println!("VAR:variance={{:.15e}}", (sum_sq / nf - mean * mean).max(0.0));
+}}
+"#,
+        sr = sr
+    );
+    let var_smoothed = parse_var(
+        &support::compile_and_run(&code_smoothed, &main, "triode_shot_smoothed").stdout,
+        "variance",
+    );
+    let var_full = parse_var(
+        &support::compile_and_run(&code_full, &main, "triode_shot_full").stdout,
+        "variance",
+    );
+    assert!(var_full > 0.0, "full-shot variance is zero — shot not wired");
+    let ratio = var_smoothed / var_full;
+    assert!(
+        (ratio / gamma2 - 1.0).abs() < 0.05,
+        "runtime smoothing ratio {ratio:.4} != emitted Γ² {gamma2:.4} \
+         (same seed ⇒ near-exact proportionality expected)"
+    );
+}
+
+// ======================================================================
+// FA-reduced BJT base shot (2026-07-18)
+// ======================================================================
+
+/// (e) Forward-active-reduced BJTs carry a base-shot source.
+///
+/// The FA reduction folds `Ib = Ic/BF` into the deterministic N_i
+/// stamping, but that never carried the base junction's independent shot
+/// statistics — the old collector comment claimed it did, and FA circuits
+/// silently lost their base shot. The collector now emits a second source
+/// at (base, emitter), slot = Ic, with the emitter scaling it by
+/// Γ² = 1/BF (sqrt(1/200) ≈ 0.0707 here). Compile+run smoke included.
+#[test]
+fn fa_reduced_bjt_emits_base_shot() {
+    use melange_solver::codegen::CodeGenerator;
+    use melange_solver::dk::DkKernel;
+    use melange_solver::mna::MnaSystem;
+    use melange_solver::parser::Netlist;
+    const SPICE: &str = "\
+BJT FA base shot
+Rin in b 1k
+Rb b 0 100k
+Q1 c b e QFA
+Re e 0 1k
+Rc vcc c 10k
+VCC vcc 0 12
+.model QFA NPN(IS=1e-14 BF=200)
+";
+    let netlist = Netlist::parse(SPICE).expect("parse");
+    let mut fa = std::collections::HashSet::new();
+    fa.insert("Q1".to_string());
+    let mut mna = MnaSystem::from_netlist_forward_active(&netlist, &fa).expect("FA MNA");
+    mna.g[0][0] += 1.0; // 1 Ω input stamp at `in`
+    let kernel = DkKernel::from_mna(&mna, 96_000.0).expect("kernel");
+    let config = CodegenConfig {
+        circuit_name: "fa_base_shot".to_string(),
+        sample_rate: 96_000.0,
+        input_node: 0,
+        output_nodes: vec![2], // node `c` (rows: in=0, b=1, c=2, e=3, vcc=4)
+        input_resistance: 1.0,
+        dc_block: false,
+        noise_mode: NoiseMode::Shot,
+        noise_master_seed: 42,
+        ..CodegenConfig::default()
+    };
+    let generator = CodeGenerator::new(config);
+    let code = generator
+        .generate(&kernel, &mna, &netlist)
+        .expect("codegen")
+        .code;
+
+    assert!(
+        code.contains("pub const NOISE_SHOT_N: usize = 2;"),
+        "FA BJT must emit Ic shot + base shot (2 sources); got:\n{}",
+        code.lines()
+            .find(|l| l.contains("NOISE_SHOT_N"))
+            .unwrap_or("<missing>")
+    );
+    let gamma_line = code
+        .lines()
+        .find(|l| l.contains("NOISE_SHOT_GAMMA_AMP: [f64; NOISE_SHOT_N]"))
+        .expect("FA build must emit NOISE_SHOT_GAMMA_AMP");
+    // Entries: [1.0 (Ic), sqrt(1/200) ≈ 7.0710678e-2 (base)].
+    let inner = gamma_line
+        .split('[')
+        .nth(2)
+        .and_then(|s| s.split(']').next())
+        .expect("gamma array literal");
+    let vals: Vec<f64> = inner
+        .split(',')
+        .map(|s| s.trim().parse().expect("gamma entry"))
+        .collect();
+    assert_eq!(vals.len(), 2);
+    assert!(
+        (vals[0] - 1.0).abs() < 1e-12,
+        "Ic shot must stay at Γ = 1, got {}",
+        vals[0]
+    );
+    let expected = (1.0_f64 / 200.0).sqrt();
+    assert!(
+        (vals[1] / expected - 1.0).abs() < 1e-9,
+        "FA base-shot Γ must be sqrt(1/BF) = {expected}, got {}",
+        vals[1]
+    );
+
+    // Smoke: the emitted stamp compiles and runs finite with shot enabled.
+    let main = r#"
+fn main() {
+    let mut state = CircuitState::default();
+    state.set_seed(42);
+    state.set_noise_enabled(true);
+    state.set_thermal_gain(0.0);
+    state.set_shot_gain(1.0);
+    for _ in 0..512 {
+        let v = process_sample(0.0, &mut state)[0];
+        assert!(v.is_finite(), "FA base-shot build produced non-finite output");
+    }
+    println!("VAR:ok=1.0");
+}
+"#;
+    let out = support::compile_and_run(&code, main, "fa_base_shot");
+    assert!(
+        out.stdout.contains("VAR:ok"),
+        "FA base-shot smoke run failed:\n{}",
+        out.stderr
+    );
+}
+
+// ======================================================================
+// Op-amp en G-diag: .switch refresh hook (fix 6a) + Kellett constant
+// ======================================================================
+
+/// A `.switch`-controlled resistor at an op-amp's non-inverting input must
+/// refresh `noise_opamp_en_g_diag` — previously only pots hooked the
+/// refresh, so switch flips left the en Norton conversion factor stale.
+#[test]
+fn opamp_en_g_diag_refreshes_on_switch_touching_in_plus() {
+    const SPICE: &str = "\
+NE5534 with switched input load
+Rlevel 1 0 25k
+Rg1 0 2 1k
+Rf 2 out 10k
+U1 1 2 out NE5534
+V1 vcc 0 DC 15
+V2 vee 0 DC -15
+Rload out 0 10k
+.switch Rlevel 10k 25k 50k
+.model NE5534 OA(AOL=200000 GBW=10MEG ROUT=75 VCC=15 VEE=-15 EN=3.5e-9 IN=1.5e-12)
+";
+    let code = generate_partition_code(SPICE, NoiseMode::Full, "opamp_en_switch_refresh", 42);
+    assert!(
+        code.contains("fn refresh_opamp_en_g_diag(&mut self)"),
+        "switch-at-in+ build must define the absolute-recompute method"
+    );
+    assert!(
+        code.contains("NOISE_OPAMP_EN_G_BASE"),
+        "switch-at-in+ build must bake the static G base const"
+    );
+    assert!(
+        code.contains("+ 1.0 / SWITCH_0_VALUES[self.switch_0_position]"),
+        "refresh body must read the live switch position's R value"
+    );
+    // The setter itself must invoke the refresh.
+    let setter_body = code
+        .split("pub fn set_switch_0")
+        .nth(1)
+        .expect("set_switch_0 emitted");
+    let setter_body = setter_body.split("pub fn").next().unwrap_or(setter_body);
+    assert!(
+        setter_body.contains("self.refresh_opamp_en_g_diag();"),
+        "set_switch_0 must call refresh_opamp_en_g_diag(); body:\n{setter_body}"
+    );
+}
+
+/// The analytic Kellett normalized-gain constant K_pink (the anchor of the
+/// flicker absolute calibration) must stay at its derived value ≈ 6.0e-3.
+/// A drift here means either the emitted filter coefficients and the
+/// analytic model diverged, or someone re-tuned the 0.11 tail without
+/// re-deriving the calibration — both are calibration-breaking.
+#[test]
+fn kellett_normalized_gain_constant_is_stable() {
+    let k = melange_solver::codegen::ir::kellett_pink_normalized_gain();
+    assert!(
+        (5.5e-3..=6.5e-3).contains(&k),
+        "kellett_pink_normalized_gain() = {k:.6e}, expected ≈ 6.0e-3 \
+         (|H(ν)|²·ν averaged over ν ∈ [1e-3, 1e-1])"
+    );
+}
+
+
+

@@ -188,7 +188,10 @@ pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS
     // next sample's cap history reflects the slew-limited voltage
     // (preserves KCL across the sample boundary).
     let mut v = v;
-    let _oa_slew_dt = 1.0 / (SAMPLE_RATE * OVERSAMPLING_FACTOR as f64);
+    // Runtime host rate (state.current_sample_rate), NOT the baked SAMPLE_RATE
+    // const — a 96 kHz host running a 44.1k-compiled circuit would otherwise
+    // get ~2.2x loose slew limiting. Mirrors the nodal-emitter fix (7e32bf8).
+    let _oa_slew_dt = 1.0 / (state.current_sample_rate * OVERSAMPLING_FACTOR as f64);
 {% for s in opamp_slew %}    {
         let prev = state.v_prev[{{ s.out_idx }}];
         let max_dv = OA{{ s.idx }}_SR * _oa_slew_dt;
@@ -230,7 +233,7 @@ pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS
         let mut dc_output = [0.0f64; NUM_OUTPUTS];
         for out_idx in 0..NUM_OUTPUTS {
             let raw = state.dc_operating_point[OUTPUT_NODES[out_idx]];
-            dc_output[out_idx] = (raw * OUTPUT_SCALES[out_idx]).clamp(-10.0, 10.0);
+            dc_output[out_idx] = (raw * OUTPUT_SCALES[out_idx]).clamp(-{{ output_clamp_v }}, {{ output_clamp_v }});
         }
         return dc_output;
     }
@@ -312,8 +315,8 @@ pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS
 {% else %}        let scaled = raw_out * OUTPUT_SCALES[out_idx];
 {% endif %}        let abs_out = scaled.abs();
         if abs_out > state.diag_peak_output { state.diag_peak_output = abs_out; }
-{% if dc_block %}        if abs_out > 10.0 { state.diag_clamp_count += 1; }
-        output[out_idx] = scaled.clamp(-10.0, 10.0);
+{% if dc_block %}        if abs_out > {{ output_clamp_v }} { state.diag_clamp_count += 1; }
+        output[out_idx] = scaled.clamp(-{{ output_clamp_v }}, {{ output_clamp_v }});
 {% else %}        output[out_idx] = if scaled.is_finite() { scaled } else { 0.0 };
 {% endif %}
     }

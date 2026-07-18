@@ -136,6 +136,16 @@ pub struct CircuitIR {
     /// field; setter emitted).
     #[serde(default)]
     pub behavioral_scalar_runtimes: Vec<ScalarRuntimeIR>,
+    /// Diagnostic: spectral radius evaluated by the trap-stability
+    /// discriminator on the trap `S·A_neg` pair at the shipped rate (the
+    /// internal rate under oversampling). 0.0 when the discriminator did
+    /// not run (explicit `--backward-euler`, `--force-trap`, or `m == 0`).
+    /// Unlike `matrices.spectral_radius_s_aneg` (an emitter-contract value
+    /// that the nodal path overwrites with the post-promotion BE rho), this
+    /// always holds the trap-side measurement, so `CodegenMeta` can report
+    /// the value that actually triggered auto-BE.
+    #[serde(default)]
+    pub trap_discriminator_rho: f64,
 }
 
 /// A plugin-driven scalar param in IR form (mirrors
@@ -1075,12 +1085,229 @@ pub struct SparseInfo {
     pub k: MatrixSparsity,
     /// Sparse LU elimination schedule for G_aug (full LU path only)
     pub lu: Option<LuSparsity>,
+    /// G_aug sparsity-pattern density (0.0..1.0 fraction of nonzeros)
+    /// computed for the sparse-LU decision on the nodal path. 0.0 when no
+    /// pattern was computed (DK path, or `m == 0`). Surfaced through
+    /// `CodegenMeta::sparse_lu_density`.
+    #[serde(default)]
+    pub g_aug_density: f64,
 }
 
 // LuSparsity, LuOp, and SPARSITY_THRESHOLD are defined in crate::lu
 // and re-imported at the top of this file.
 
 /// Analyze sparsity pattern of a flattened row-major matrix.
+/// Stamp DK companion-model inductor conductances into (A, A_neg) at time
+/// step `t = 1/rate`.
+///
+/// No-op on the augmented-inductor path (branch rows carry L in C there).
+/// The companion form is the trapezoidal one (`g_eq = T/(2L)`, `−g_eq` into
+/// A_neg) for BOTH primary integrators — this mirrors the emitted
+/// `rebuild_matrices()`, which stamps the same form regardless of
+/// `backward_euler`, and the per-sample history update
+/// (`i_hist = 2·i_prev`, doubled-trapezoidal). Baked constants must equal
+/// the first runtime rebuild's output or the integrator convention would
+/// silently swap on the first pot/switch/sample-rate change.
+fn stamp_dk_companion_inductors(
+    a_flat: &mut [f64],
+    a_neg_flat: &mut [f64],
+    n: usize,
+    augmented_inductors: bool,
+    kernel: &DkKernel,
+    t: f64,
+) {
+    if augmented_inductors {
+        return;
+    }
+    // Companion model path: stamp inductor conductances at this rate
+    for ind in &kernel.inductors {
+        let g_eq = t / (2.0 * ind.inductance);
+        stamp_flat_conductance(a_flat, n, ind.node_i, ind.node_j, g_eq);
+        stamp_flat_conductance(a_neg_flat, n, ind.node_i, ind.node_j, -g_eq);
+    }
+
+    // Stamp coupled inductor companion conductances at this rate
+    for ci in &kernel.coupled_inductors {
+        let m_val = ci.coupling * (ci.l1_inductance * ci.l2_inductance).sqrt();
+        let det = ci.l1_inductance * ci.l2_inductance - m_val * m_val;
+        let half_t = t / 2.0;
+        let gs1 = half_t * ci.l2_inductance / det;
+        let gs2 = half_t * ci.l1_inductance / det;
+        let gm = -half_t * m_val / det;
+        stamp_flat_conductance(a_flat, n, ci.l1_node_i, ci.l1_node_j, gs1);
+        stamp_flat_conductance(a_neg_flat, n, ci.l1_node_i, ci.l1_node_j, -gs1);
+        stamp_flat_conductance(a_flat, n, ci.l2_node_i, ci.l2_node_j, gs2);
+        stamp_flat_conductance(a_neg_flat, n, ci.l2_node_i, ci.l2_node_j, -gs2);
+        stamp_flat_mutual(
+            a_flat,
+            n,
+            ci.l1_node_i,
+            ci.l1_node_j,
+            ci.l2_node_i,
+            ci.l2_node_j,
+            gm,
+        );
+        stamp_flat_mutual(
+            a_flat,
+            n,
+            ci.l2_node_i,
+            ci.l2_node_j,
+            ci.l1_node_i,
+            ci.l1_node_j,
+            gm,
+        );
+        stamp_flat_mutual(
+            a_neg_flat,
+            n,
+            ci.l1_node_i,
+            ci.l1_node_j,
+            ci.l2_node_i,
+            ci.l2_node_j,
+            -gm,
+        );
+        stamp_flat_mutual(
+            a_neg_flat,
+            n,
+            ci.l2_node_i,
+            ci.l2_node_j,
+            ci.l1_node_i,
+            ci.l1_node_j,
+            -gm,
+        );
+    }
+}
+
+/// Blanket-zero ALL augmented algebraic rows (`n_nodes..mna_n_aug`) in a DK
+/// history matrix — same semantics as the nodal branch's blanket zeroing in
+/// `from_mna` and the emitted `rebuild_matrices()`.
+///
+/// A per-type enumeration (VS, VCVS, ideal transformers) misses Boyle
+/// op-amp internal rows, current-mode VCA rows (internal node + sense
+/// branch), and behavioral-V rows, leaving stale history feedback on those
+/// algebraic constraints.
+///
+/// Row layout on the DK path (verified against mna.rs):
+///   0..n_nodes                circuit nodes (keep history)
+///   n_nodes..mna_n_aug        VS / VCVS / ideal-xfmr / Boyle op-amp
+///                             internal / current-mode VCA (internal +
+///                             sense) / behavioral-V rows → zeroed here.
+///                             For Boyle internal nodes this is effectively
+///                             BE for the dominant pole — deliberate,
+///                             matches the nodal branch (unconditionally
+///                             stable for high-Gm VCCS).
+///   mna_n_aug..n              inductor branch rows appended by
+///                             build_augmented_matrices (L lives in C on
+///                             these rows) → NOT zeroed, they need
+///                             trapezoidal history. When
+///                             `!augmented_inductors`, inductors are
+///                             companion-stamped into node rows and no
+///                             branch rows exist, so the range is safe
+///                             either way.
+/// BJT internal nodes (expand_bjt_internal_nodes) also land inside
+/// n_nodes..n_aug, but only on the nodal route — the DK path never expands
+/// them (see melange-cli routing).
+fn zero_augmented_history_rows(a_neg_flat: &mut [f64], n: usize, n_nodes: usize, mna_n_aug: usize) {
+    for row in n_nodes..mna_n_aug.min(n) {
+        for j in 0..n {
+            a_neg_flat[row * n + j] = 0.0;
+        }
+    }
+}
+
+/// Build the DK trapezoidal (A, A_neg) pair from raw G/C at an arbitrary
+/// rate. Used for the oversampled internal rate: the pair returned here is
+/// both what the generated solver ships AND what the auto-BE discriminator
+/// must evaluate (rho(S·A_neg) is strongly rate-dependent).
+#[allow(clippy::too_many_arguments)]
+fn build_dk_trap_matrices_at_rate(
+    g_matrix: &[f64],
+    c_matrix: &[f64],
+    n: usize,
+    n_nodes: usize,
+    mna_n_aug: usize,
+    augmented_inductors: bool,
+    kernel: &DkKernel,
+    rate: f64,
+) -> (Vec<f64>, Vec<f64>) {
+    let alpha = 2.0 * rate;
+    let t = 1.0 / rate;
+
+    // Build A = G + alpha*C, A_neg = alpha*C - G
+    let mut a_flat = vec![0.0f64; n * n];
+    let mut a_neg_flat = vec![0.0f64; n * n];
+    for i in 0..n {
+        for j in 0..n {
+            let g = g_matrix[i * n + j];
+            let c = c_matrix[i * n + j];
+            a_flat[i * n + j] = g + alpha * c;
+            a_neg_flat[i * n + j] = alpha * c - g;
+        }
+    }
+
+    stamp_dk_companion_inductors(&mut a_flat, &mut a_neg_flat, n, augmented_inductors, kernel, t);
+    zero_augmented_history_rows(&mut a_neg_flat, n, n_nodes, mna_n_aug);
+
+    (a_flat, a_neg_flat)
+}
+
+/// Build the DK backward-Euler (S, A_neg, rhs_const) set from raw G/C at an
+/// arbitrary rate. Used by the BE + oversampling bake so the shipped
+/// constants use ONE integrator convention: A = G + (1/T)·C,
+/// A_neg = (1/T)·C (no −G term), rhs_const ×1 — exactly mirroring the
+/// os=1 BE branch of `from_kernel_with_dc_op`, evaluated at the internal
+/// rate, plus the companion-inductor stamps and blanket algebraic-row
+/// zeroing that the emitted `rebuild_matrices()` applies (baked constants
+/// must equal the first runtime rebuild's output).
+#[allow(clippy::too_many_arguments)]
+fn build_dk_be_matrices_at_rate(
+    g_matrix: &[f64],
+    c_matrix: &[f64],
+    n: usize,
+    n_nodes: usize,
+    mna_n_aug: usize,
+    augmented_inductors: bool,
+    kernel: &DkKernel,
+    rate: f64,
+    mna: &MnaSystem,
+) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>), CodegenError> {
+    let alpha = rate; // BE: alpha = 1/T
+    let t = 1.0 / rate;
+
+    let mut a_flat = vec![0.0f64; n * n];
+    let mut a_neg_flat = vec![0.0f64; n * n];
+    for i in 0..n {
+        for j in 0..n {
+            let g = g_matrix[i * n + j];
+            let c = c_matrix[i * n + j];
+            a_flat[i * n + j] = g + alpha * c;
+            a_neg_flat[i * n + j] = alpha * c; // BE: no -G term
+        }
+    }
+
+    stamp_dk_companion_inductors(&mut a_flat, &mut a_neg_flat, n, augmented_inductors, kernel, t);
+    // BE A_neg = alpha·C is already zero on most algebraic rows, but
+    // Boyle-internal / current-mode-VCA / behavioral-V rows can carry C
+    // entries — blanket-zero to match the trap arm and the runtime rebuild.
+    zero_augmented_history_rows(&mut a_neg_flat, n, n_nodes, mna_n_aug);
+
+    let s = invert_flat_matrix(&a_flat, n)?;
+
+    // BE rhs_const: current sources ×1 (not ×2), VS ×1
+    let mut rhs_const_be = vec![0.0f64; n];
+    for src in &mna.current_sources {
+        crate::mna::inject_rhs_current(&mut rhs_const_be, src.n_plus_idx, src.dc_value);
+        crate::mna::inject_rhs_current(&mut rhs_const_be, src.n_minus_idx, -src.dc_value);
+    }
+    for vs in &mna.voltage_sources {
+        let k_row = n_nodes + vs.ext_idx;
+        if k_row < n {
+            rhs_const_be[k_row] = vs.dc_value;
+        }
+    }
+
+    Ok((s, a_neg_flat, rhs_const_be))
+}
+
 impl CircuitIR {
     /// Build a `CircuitIR` from the compiled kernel, MNA system, netlist, and config.
     ///
@@ -1138,6 +1365,53 @@ impl CircuitIR {
         let os_factor = config.oversampling_factor;
         let internal_rate = config.sample_rate * os_factor as f64;
 
+        // Store the raw G and C matrices for runtime sample rate recomputation.
+        // The MNA G matrix already includes input conductance (stamped before kernel build).
+        // When augmented inductors are used, kernel.n > mna.n_aug, so we need the
+        // augmented G/C (with inductor KCL/KVL/L stamps) at the full n_nodal dimension.
+        //
+        // Built up-front (before the auto-BE discriminator) because the
+        // oversampled trap matrices — the pair the discriminator must
+        // evaluate — are derived from G/C at the internal rate.
+        let (g_matrix, c_matrix) = if augmented_inductors {
+            let aug = mna.build_augmented_matrices();
+            (
+                dk::flatten_matrix(&aug.g, n, n),
+                dk::flatten_matrix(&aug.c, n, n),
+            )
+        } else {
+            (
+                dk::flatten_matrix(&mna.g, n, n),
+                dk::flatten_matrix(&mna.c, n, n),
+            )
+        };
+
+        // When oversampling, the shipped trap matrices are rebuilt at the
+        // internal (oversampled) rate. Build them BEFORE the auto-BE
+        // discriminator so the discriminator evaluates the exact (S, A_neg)
+        // pair the generated solver ships. rho(S·A_neg) is strongly
+        // rate-dependent (passive-LC survey: 1.0023 → 1.2871 across sample
+        // rates), so evaluating the base-rate kernel pair while shipping
+        // internal-rate matrices mis-gates the promotion in both directions.
+        // Skipped when the user forced BE explicitly — no trap pair is
+        // shipped or discriminated in that case.
+        let os_trap_pair = if os_factor > 1 && !config.backward_euler {
+            let (a_flat, a_neg_flat) = build_dk_trap_matrices_at_rate(
+                &g_matrix,
+                &c_matrix,
+                n,
+                n_nodes,
+                mna.n_aug,
+                augmented_inductors,
+                kernel,
+                internal_rate,
+            );
+            let s = invert_flat_matrix(&a_flat, n)?;
+            Some((s, a_neg_flat))
+        } else {
+            None
+        };
+
         // Auto-detect stiffness: if the trapezoidal time-stepping operator S*A_neg
         // has spectral radius > 1.001 (above stability boundary), the circuit
         // is too stiff for trapezoidal and needs backward Euler.
@@ -1157,6 +1431,7 @@ impl CircuitIR {
         // {88.2k, 96k, 150k, 300k, 384k} with spectral_radius ∈ 1.002..1.29,
         // while adjacent rates sampled rho < 1.002 and produced the correct
         // +0.9 dB @ 10 kHz peak.
+        let mut trap_discriminator_rho = 0.0f64;
         let auto_be = if !config.backward_euler && !config.force_trap && n > 0 && m > 0 {
             // Trap-rule stability via shared analyzer: returns rho =
             // max|eigenvalue(S·A_neg)| AND the sign of the dominant
@@ -1170,17 +1445,27 @@ impl CircuitIR {
             // cascade, dominant eigenvalue at z ≈ -0.9999, output 28 mV
             // fs/2 limit cycle from cascade gain × f64 round-off seed.
             // Pre-discriminator the gate at 1.002 missed it.
+            //
+            // Under oversampling, the internal-rate pair built above is
+            // used — the base-rate kernel matrices are never shipped and
+            // their rho is the wrong question.
+            let (s_ref, a_neg_ref): (&[f64], &[f64]) = match &os_trap_pair {
+                Some((s, a_neg)) => (s.as_slice(), a_neg.as_slice()),
+                None => (kernel.s.as_slice(), kernel.a_neg.as_slice()),
+            };
             let stability = crate::codegen::stability::analyze_trap_stability_deflated(
-                &kernel.s,
-                &kernel.a_neg,
+                s_ref,
+                a_neg_ref,
                 n,
                 config.input_node,
             );
+            trap_discriminator_rho = stability.rho;
             if crate::codegen::stability::trap_needs_be(stability) {
                 log::info!(
-                    "Auto-selecting backward Euler: spectral_radius(S*A_neg) = {:.4}, dominant_sign = {:+.0} \
-                     (trapezoidal {} — promoting to BE)",
+                    "Auto-selecting backward Euler: spectral_radius(S*A_neg) = {:.4} at {} Hz, \
+                     dominant_sign = {:+.0} (trapezoidal {} — promoting to BE)",
                     stability.rho,
+                    internal_rate,
                     stability.dominant_sign,
                     if stability.rho > crate::codegen::stability::TRAP_BE_PROMOTION_RHO {
                         "unstable"
@@ -1247,137 +1532,59 @@ impl CircuitIR {
             generator_version: env!("CARGO_PKG_VERSION").to_string(),
         };
 
-        // Store the raw G and C matrices for runtime sample rate recomputation.
-        // The MNA G matrix already includes input conductance (stamped before kernel build).
-        // When augmented inductors are used, kernel.n > mna.n_aug, so we need the
-        // augmented G/C (with inductor KCL/KVL/L stamps) at the full n_nodal dimension.
-        let (g_matrix, c_matrix) = if augmented_inductors {
-            let aug = mna.build_augmented_matrices();
-            (
-                dk::flatten_matrix(&aug.g, n, n),
-                dk::flatten_matrix(&aug.c, n, n),
-            )
-        } else {
-            (
-                dk::flatten_matrix(&mna.g, n, n),
-                dk::flatten_matrix(&mna.c, n, n),
-            )
-        };
-
-        let matrices = if os_factor > 1 {
-            // Recompute matrices at internal (oversampled) rate from G and C.
-            let alpha = 2.0 * internal_rate;
-            let t = 1.0 / internal_rate;
-
-            // Build A = G + alpha*C
-            let mut a_flat = vec![0.0f64; n * n];
-            let mut a_neg_flat = vec![0.0f64; n * n];
-            for i in 0..n {
-                for j in 0..n {
-                    let g = g_matrix[i * n + j];
-                    let c = c_matrix[i * n + j];
-                    a_flat[i * n + j] = g + alpha * c;
-                    a_neg_flat[i * n + j] = alpha * c - g;
-                }
+        let matrices = if os_factor > 1 && be {
+            // BE + oversampling: build backward-Euler matrices at the
+            // INTERNAL rate, mirroring the os=1 BE branch below. This branch
+            // previously did not exist — the oversampled path unconditionally
+            // baked trap matrices (alpha = 2·rate, A_neg = alpha·C − G,
+            // rhs_const ×2) even when `be` was true, while
+            // `solver_config.backward_euler` made the emitter use BE
+            // semantics everywhere else. That mixed integrator shipped a
+            // wrong DC fixed point (the ×2 trap rhs_const against BE update
+            // equations halves the effective nonlinear bias current) and the
+            // first runtime `rebuild_matrices()` silently swapped the
+            // convention to consistent BE, stepping the operating point
+            // mid-signal.
+            let (s, a_neg_flat, rhs_const_be) = build_dk_be_matrices_at_rate(
+                &g_matrix,
+                &c_matrix,
+                n,
+                n_nodes,
+                mna.n_aug,
+                augmented_inductors,
+                kernel,
+                internal_rate,
+                mna,
+            )?;
+            let k = compute_k_from_s(&s, &kernel.n_v, &kernel.n_i, n, m);
+            Matrices {
+                s,
+                a_neg: a_neg_flat,
+                k,
+                n_v: kernel.n_v.clone(),
+                n_i: kernel.n_i.clone(),
+                rhs_const: rhs_const_be,
+                g_matrix,
+                c_matrix,
+                a_matrix: Vec::new(),
+                a_matrix_be: Vec::new(),
+                // Primary integrator is already BE — no BE fallback set
+                // (mirrors the os=1 BE branch).
+                a_neg_be: Vec::new(),
+                rhs_const_be: Vec::new(),
+                s_be: Vec::new(),
+                k_be: Vec::new(),
+                spectral_radius_s_aneg: 0.0,
+                s_sub: Vec::new(),
+                k_sub: Vec::new(),
+                a_neg_sub: Vec::new(),
             }
-
-            if !augmented_inductors {
-                // Companion model path: stamp inductor conductances at internal rate
-                for ind in &kernel.inductors {
-                    let g_eq = t / (2.0 * ind.inductance);
-                    stamp_flat_conductance(&mut a_flat, n, ind.node_i, ind.node_j, g_eq);
-                    stamp_flat_conductance(&mut a_neg_flat, n, ind.node_i, ind.node_j, -g_eq);
-                }
-
-                // Stamp coupled inductor companion conductances at internal rate
-                for ci in &kernel.coupled_inductors {
-                    let m_val = ci.coupling * (ci.l1_inductance * ci.l2_inductance).sqrt();
-                    let det = ci.l1_inductance * ci.l2_inductance - m_val * m_val;
-                    let half_t = t / 2.0;
-                    let gs1 = half_t * ci.l2_inductance / det;
-                    let gs2 = half_t * ci.l1_inductance / det;
-                    let gm = -half_t * m_val / det;
-                    stamp_flat_conductance(&mut a_flat, n, ci.l1_node_i, ci.l1_node_j, gs1);
-                    stamp_flat_conductance(&mut a_neg_flat, n, ci.l1_node_i, ci.l1_node_j, -gs1);
-                    stamp_flat_conductance(&mut a_flat, n, ci.l2_node_i, ci.l2_node_j, gs2);
-                    stamp_flat_conductance(&mut a_neg_flat, n, ci.l2_node_i, ci.l2_node_j, -gs2);
-                    stamp_flat_mutual(
-                        &mut a_flat,
-                        n,
-                        ci.l1_node_i,
-                        ci.l1_node_j,
-                        ci.l2_node_i,
-                        ci.l2_node_j,
-                        gm,
-                    );
-                    stamp_flat_mutual(
-                        &mut a_flat,
-                        n,
-                        ci.l2_node_i,
-                        ci.l2_node_j,
-                        ci.l1_node_i,
-                        ci.l1_node_j,
-                        gm,
-                    );
-                    stamp_flat_mutual(
-                        &mut a_neg_flat,
-                        n,
-                        ci.l1_node_i,
-                        ci.l1_node_j,
-                        ci.l2_node_i,
-                        ci.l2_node_j,
-                        -gm,
-                    );
-                    stamp_flat_mutual(
-                        &mut a_neg_flat,
-                        n,
-                        ci.l2_node_i,
-                        ci.l2_node_j,
-                        ci.l1_node_i,
-                        ci.l1_node_j,
-                        -gm,
-                    );
-                }
-            }
-
-            // Zero ALL augmented rows (n_nodes..mna.n_aug) in A_neg — same
-            // semantics as the nodal branch's blanket zeroing in `from_mna`.
-            // The previous per-type enumeration (VS, VCVS, ideal transformers)
-            // missed Boyle op-amp internal rows, current-mode VCA rows
-            // (internal node + sense branch), and behavioral-V rows, leaving
-            // stale -G history feedback on those algebraic constraints.
-            //
-            // Row layout on this path (verified against mna.rs):
-            //   0..n_nodes                circuit nodes (keep history)
-            //   n_nodes..mna.n_aug        VS / VCVS / ideal-xfmr / Boyle
-            //                             op-amp internal / current-mode VCA
-            //                             (internal + sense) / behavioral-V
-            //                             rows → zeroed here. For Boyle
-            //                             internal nodes this is effectively
-            //                             BE for the dominant pole —
-            //                             deliberate, matches the nodal
-            //                             branch (unconditionally stable for
-            //                             high-Gm VCCS).
-            //   mna.n_aug..n              inductor branch rows appended by
-            //                             build_augmented_matrices (L lives
-            //                             in C on these rows) → NOT zeroed,
-            //                             they need trapezoidal history.
-            //                             When `!augmented_inductors`,
-            //                             inductors are companion-stamped
-            //                             into node rows and no branch rows
-            //                             exist, so the range is safe either
-            //                             way.
-            // BJT internal nodes (expand_bjt_internal_nodes) also land inside
-            // n_nodes..n_aug, but only on the nodal route — the DK path never
-            // expands them (see melange-cli routing).
-            for row in n_nodes..mna.n_aug.min(n) {
-                for j in 0..n {
-                    a_neg_flat[row * n + j] = 0.0;
-                }
-            }
-
-            // Invert A to get S
-            let s = invert_flat_matrix(&a_flat, n)?;
+        } else if os_factor > 1 {
+            // Trapezoidal + oversampling: the internal-rate pair was already
+            // built above (before the auto-BE discriminator, which evaluated
+            // exactly these matrices).
+            let (s, a_neg_flat) =
+                os_trap_pair.expect("internal-rate trap pair built when os>1 and trap ships");
 
             // Compute K = N_v * S * N_i
             let k = compute_k_from_s(&s, &kernel.n_v, &kernel.n_i, n, m);
@@ -1846,6 +2053,7 @@ impl CircuitIR {
             n_i: analyze_matrix_sparsity(&matrices.n_i, n, m),
             k: analyze_matrix_sparsity(&matrices.k, m, m),
             lu: None, // DK path doesn't use full LU
+            g_aug_density: 0.0,
         };
 
         let named_constants = build_named_constants(mna, topology.n_nodes);
@@ -1889,17 +2097,18 @@ impl CircuitIR {
                 let mut dc = dc_result.v_node.clone();
                 dc.resize(kernel.n, 0.0);
                 dc.truncate(kernel.n);
-                // Clamp op-amp output nodes to VCC/VEE supply rails.
-                // The DC OP solver doesn't know about supply rails and can converge
-                // to voltages beyond rail limits at output/internal nodes.
-                for oa in &mna.opamps {
-                    if (oa.vcc.is_finite() || oa.vee.is_finite()) && oa.n_out_idx > 0 {
-                        let o = oa.n_out_idx - 1;
-                        if o < dc.len() {
-                            dc[o] = dc[o].clamp(oa.vee, oa.vcc);
-                        }
-                    }
-                }
+                // Do NOT clamp op-amp output nodes to VCC/VEE supply rails
+                // here — matching the nodal-path policy. Clamping v_prev
+                // while `dc_nl_currents` (→ i_nl_prev) comes from the
+                // UNCLAMPED solve leaves the state pair inconsistent: the
+                // downstream device states encoded in i_nl no longer match
+                // the clamped node voltages, and that inconsistency drifts
+                // the state over thousands of samples before NR blows up
+                // (observed on the nodal path as the 4kbuscomp failure:
+                // ~2300 stable samples then 1e27 V explosion). A consistent
+                // state pair beats prettier initial voltages; the emitted
+                // per-sample rail handling plus the warmup samples cover
+                // the transient from a beyond-rail DC seed.
                 dc
             },
             device_slots,
@@ -1946,7 +2155,7 @@ impl CircuitIR {
                     Vec::new()
                 },
                 shot_sources: if config.noise_mode.includes_shot() {
-                    collect_shot_noise_sources(mna)
+                    collect_shot_noise_sources(netlist, mna)
                 } else {
                     Vec::new()
                 },
@@ -1976,6 +2185,7 @@ impl CircuitIR {
             behavioral_sources,
             behavioral_param_consts,
             behavioral_scalar_runtimes,
+            trap_discriminator_rho,
         })
     }
 
@@ -2393,28 +2603,17 @@ impl CircuitIR {
                 a_neg_sub_flat[i * n + j] = alpha_sub * c - g;
             }
         }
-        // Zero algebraic rows in A_neg_sub (same rows as A_neg)
-        for vs in &mna.voltage_sources {
-            let row = n_nodes + vs.ext_idx;
-            if row < n {
-                for j in 0..n {
-                    a_neg_sub_flat[row * n + j] = 0.0;
-                }
-            }
-        }
-        let num_vs_sub = mna.voltage_sources.len();
-        for (idx, _) in mna.vcvs_sources.iter().enumerate() {
-            let row = n_nodes + num_vs_sub + idx;
-            if row < n {
-                for j in 0..n {
-                    a_neg_sub_flat[row * n + j] = 0.0;
-                }
-            }
-        }
-        let num_vcvs_sub = mna.vcvs_sources.len();
-        for (idx, _) in mna.ideal_transformers.iter().enumerate() {
-            let row = n_nodes + num_vs_sub + num_vcvs_sub + idx;
-            if row < n {
+        // Blanket-zero ALL augmented algebraic rows in A_neg_sub — the same
+        // rows and policy as A_neg / A_neg_be above and as the emitted
+        // `rebuild_matrices()` (which zeroes `n_nodes..n_aug` for all three
+        // history matrices in one loop). The old per-type enumeration
+        // (VS / VCVS / ideal-xfmr) missed Boyle op-amp internal rows,
+        // current-mode VCA rows (internal node + sense branch), and
+        // behavioral-V rows, so the baked A_NEG_SUB_DEFAULT disagreed with
+        // the first runtime rebuild. Inductor branch rows (>= n_aug) keep
+        // their trapezoidal history — L lives in C there.
+        if n_aug > n_nodes {
+            for row in n_nodes..n_aug.min(n) {
                 for j in 0..n {
                     a_neg_sub_flat[row * n + j] = 0.0;
                 }
@@ -2443,6 +2642,10 @@ impl CircuitIR {
             config.input_node,
         );
         let mut spectral_radius_s_aneg = trap_stability.rho;
+        // Diagnostic copy of the trap-side rho: `spectral_radius_s_aneg` is
+        // overwritten with the post-promotion BE rho when auto-BE fires, but
+        // CodegenMeta must report the value that TRIGGERED the promotion.
+        let trap_discriminator_rho = trap_stability.rho;
         if spectral_radius_s_aneg > 0.99 {
             log::info!(
                 "Nodal: spectral_radius(S*A_neg) = {:.4}, dominant_sign = {:+.0} \
@@ -2634,6 +2837,7 @@ impl CircuitIR {
         let behavioral_pattern_complete = behavioral_stamp_patterns
             .iter()
             .all(|b| !b.is_voltage || b.aug_row.is_some());
+        let mut g_aug_density = 0.0f64;
         let lu_sparsity = if m > 0 && behavioral_pattern_complete {
             // Compute G_aug = A - N_i*J_dev*N_v sparsity pattern
             // (+ behavioral B-source stamp positions)
@@ -2648,6 +2852,7 @@ impl CircuitIR {
             );
             let g_aug_nnz: usize = g_aug_pattern.iter().map(|r| r.len()).sum();
             let density = g_aug_nnz as f64 / (n * n) as f64;
+            g_aug_density = density;
             log::info!(
                 "Sparse LU: G_aug pattern has {} nonzeros out of {} ({:.1}% density)",
                 g_aug_nnz,
@@ -2679,6 +2884,7 @@ impl CircuitIR {
             n_i: analyze_matrix_sparsity(&matrices.n_i, n, m),
             k: analyze_matrix_sparsity(&matrices.k, m, m),
             lu: lu_sparsity,
+            g_aug_density,
         };
 
         let named_constants = build_named_constants(mna, topology.n_nodes);
@@ -2989,7 +3195,7 @@ impl CircuitIR {
                     Vec::new()
                 },
                 shot_sources: if config.noise_mode.includes_shot() {
-                    collect_shot_noise_sources(mna)
+                    collect_shot_noise_sources(netlist, mna)
                 } else {
                     Vec::new()
                 },
@@ -3019,6 +3225,7 @@ impl CircuitIR {
             behavioral_sources,
             behavioral_param_consts,
             behavioral_scalar_runtimes,
+            trap_discriminator_rho,
         })
     }
 

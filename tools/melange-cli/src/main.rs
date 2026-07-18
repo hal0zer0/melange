@@ -1297,6 +1297,7 @@ fn compile_circuit_source(
         &mut mna,
         &netlist,
         &fa_config,
+        &forward_active,
         tube_grid_fa,
         solver_override,
         input_node_idx,
@@ -2338,6 +2339,7 @@ fn simulate_circuit_source(
         &mut mna,
         &netlist,
         &config_for_fa,
+        &forward_active,
         opts.tube_grid_fa,
         opts.solver,
         input_node_idx,
@@ -2728,6 +2730,7 @@ fn apply_grid_off_reduction(
     mna: &mut melange_solver::mna::MnaSystem,
     netlist: &melange_solver::parser::Netlist,
     fa_config: &melange_solver::codegen::CodegenConfig,
+    forward_active: &std::collections::HashSet<String>,
     tube_grid_fa: &str,
     solver_override: &str,
     input_node_idx: usize,
@@ -2743,8 +2746,17 @@ fn apply_grid_off_reduction(
     };
 
     if !grid_off_pentodes.is_empty() {
-        *mna = MnaSystem::from_netlist_with_grid_off(netlist, &grid_off_pentodes)
-            .with_context(|| "Failed to rebuild MNA for grid-off pentodes")?;
+        // Compose grid-off WITH the forward-active BJT reduction the caller
+        // already applied. Rebuilding from the netlist with only the
+        // grid-off map would silently discard the FA reduction (the compile
+        // summary would still print the FA line while the shipped MNA had
+        // full-dimension BJT blocks) — plexi-class circuits need both.
+        *mna = MnaSystem::from_netlist_with_grid_off_and_fa(
+            netlist,
+            forward_active,
+            &grid_off_pentodes,
+        )
+        .with_context(|| "Failed to rebuild MNA for grid-off pentodes (+ FA BJTs)")?;
         if input_node_idx < mna.n {
             mna.g[input_node_idx][input_node_idx] += input_conductance;
         }
@@ -3496,6 +3508,7 @@ fn analyze_freq_response(
         &mut mna,
         &netlist,
         &config_for_fa,
+        &forward_active,
         tube_grid_fa,
         /*solver_override=*/ "",
         input_node_idx,
@@ -4802,5 +4815,67 @@ mod tests {
             Commands::Builtins => {}
             _ => panic!("Expected Builtins command"),
         }
+    }
+
+    /// Fix 4 regression: `apply_grid_off_reduction` used to rebuild the MNA
+    /// via `from_netlist_with_grid_off` with an EMPTY forward-active set,
+    /// silently discarding the FA BJT reduction the caller had already
+    /// applied (while the compile summary still printed the FA line).
+    /// Plexi-class circuits need both reductions composed.
+    #[test]
+    fn grid_off_rebuild_preserves_forward_active_reduction() {
+        use melange_solver::mna::MnaSystem;
+        use melange_solver::parser::Netlist;
+
+        let spice = "\
+FA + grid-off composition
+V1 vcc 0 DC 250
+RB1 vcc b 470k
+RB2 b 0 47k
+RC vcc c 10k
+RE e 0 1k
+Q1 c b e QNPN
+P1 plate grid cath screen EL84
+RGL grid 0 1Meg
+RSC vcc screen 1k
+RPL vcc plate 5k
+RK cath 0 130
+.model QNPN NPN(IS=1e-14 BF=100)
+.model EL84 VP(MU=23.36 EX=1.138 KG1=117.4 KG2=1275 \
+              KP=152.4 KVB=4015.8 ALPHA_S=7.66 \
+              A_FACTOR=4.344e-4 BETA_FACTOR=0.148)
+";
+        let netlist = Netlist::parse(spice).expect("parse");
+        let full = MnaSystem::from_netlist(&netlist).expect("full MNA");
+        assert_eq!(full.m, 5, "full system: BJT 2D + pentode 3D");
+
+        // Simulate the caller's FA step (composition test — the FA set is
+        // hand-supplied; detection is covered elsewhere).
+        let forward_active: std::collections::HashSet<String> =
+            ["Q1".to_string()].into_iter().collect();
+        let mut mna = MnaSystem::from_netlist_forward_active(&netlist, &forward_active)
+            .expect("FA-reduced MNA");
+        assert_eq!(mna.m, 4, "after FA: BJT 1D + pentode 3D");
+
+        let fa_config = melange_solver::codegen::CodegenConfig::default();
+        // `--tube-grid-fa on` forces grid-off on every non-variable-mu
+        // pentode regardless of DC bias, so detection is deterministic here.
+        let grid_off = apply_grid_off_reduction(
+            &mut mna,
+            &netlist,
+            &fa_config,
+            &forward_active,
+            "on",
+            "",
+            0,
+            1.0,
+        )
+        .expect("grid-off reduction");
+        assert_eq!(grid_off.len(), 1, "pentode P1 must be grid-off reduced");
+        assert_eq!(
+            mna.m, 3,
+            "after grid-off rebuild BOTH reductions must survive: BJT 1D + pentode 2D \
+             (old bug: rebuild dropped FA, giving M=4 while the summary claimed FA)"
+        );
     }
 }

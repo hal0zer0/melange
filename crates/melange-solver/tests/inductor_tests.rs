@@ -628,13 +628,18 @@ fn test_inductor_reset() {
     let reset_idx = code.find("fn reset(");
     assert!(reset_idx.is_some(), "Should have reset() method");
 
+    // Scan the whole reset() body — up to the next method definition. The
+    // previous first-`}` heuristic broke when reset() gained a for-loop
+    // (2026-07-18: dc_block_x_prev is now seeded from the output-node DC OP
+    // in a loop, so the first `}` closes that loop, not the function).
     let after_reset = &code[reset_idx.unwrap()..];
-    let end_fn = after_reset.find('}').expect("reset function should close");
+    let end_fn = after_reset
+        .find("\n    pub fn ")
+        .unwrap_or(after_reset.len());
     let reset_body = &after_reset[..end_fn];
 
     assert!(
-        reset_body.contains("ind_i_prev")
-            || after_reset[..after_reset.len().min(300)].contains("ind_i_prev"),
+        reset_body.contains("ind_i_prev"),
         "reset() should clear inductor state (ind_i_prev)"
     );
 }

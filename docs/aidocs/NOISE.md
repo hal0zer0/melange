@@ -1,5 +1,52 @@
 # Authentic Circuit Noise
 
+> **Status addendum (2026-07-18) — noise-physics correction wave.**
+> Six verified physics bugs fixed in one pass (all validated in
+> `tests/noise_psd_validation.rs`; kTC anchors untouched and green):
+> 1. **Junction flicker recalibrated** — was ~3 decades hot and
+>    fs/OS-dependent (white-input σ² ∝ fs through a fixed digital pink
+>    filter ⇒ output PSD ∝ fs; plus the "0.11 tail normalizes to ~unit
+>    RMS gain" premise was false — measured white power gain ≈ 0.113).
+>    New fs/OS-invariant calibration lands the output at the ngspice
+>    semantics `S_i(f) = KF·I^AF/f` (one-sided). See "Flicker calibration
+>    (2026-07-18)". At 96 kHz this drops junction flicker by ~30.6 dB
+>    (÷1160 in power); the level is now *physical*, not vibes.
+> 2. **Resistor flicker** — same fs bug, plus it was missing the trap
+>    stamp compensation the other phases carry (the Phase 3.5 claim that
+>    it "is not stamped through the trap companion path" was FALSE — it
+>    is a Norton RHS stamp identical to junction flicker's). Now shares
+>    the exact same calibration; `KF` remains the empirical Hooge knob
+>    but is now literally `S_i·f/I^AF`, stable across fs.
+> 3. **Flicker Nyquist anti-alias pair** (both flicker phases, trap
+>    builds): `i_n = 0.5·amp·(pink[n]+pink[n-1])`. The Kellett cascade
+>    leaves only ~−14 dB at fs/2; on resistive junction nodes the trap
+>    z=−1 pole amplified that tail by ~+60 dB and the device
+>    nonlinearity rectified/intermodulated it into the audio band
+>    (measured ×2400 PSD inflation at 1 kHz on a biased-diode bench —
+>    the deferred "lower-priority candidate" from 2026-04-24 surfaced).
+>    Pair-sum zeroes fs/2, leaves the audio band unchanged
+>    (cos²(πf/fs) ≥ −0.05 dB below 5 kHz).
+> 4. **BJT parasitic RB/RC/RE thermal noise now actually collected**
+>    (nodal internal-node path) — the old "Resistor selection" claim
+>    that parasitics "appear as regular R elements after MNA expansion"
+>    was false; they never exist as `Element::Resistor`. rbb′ is the
+>    classically dominant BJT voltage-noise term. DK path (K_eff
+>    absorption) is skipped honestly with a `log::warn!` — see "BJT
+>    parasitic-R thermal noise".
+> 5. **Triode plate shot space-charge smoothing** (van der Ziel /
+>    Thompson-North-Harris `R_eq ≈ 2.5/gm`): `Γ² = 10·k·T₀·gm/(2·q·I_p)`
+>    at the DC OP replaces bare full shot. A 12AX7 CE stage measures
+>    Γ² ≈ 0.234 (−6.3 dB plate hiss; e_n ≈ 4.7 nV/√Hz, R_eq ≈ 1.4 kΩ —
+>    textbook). `.model TUBE(SHOT_GAMMA2=…)` overrides; `1.0` restores
+>    the legacy full-shot emission byte-identically.
+> 6. **FA-reduced BJT base shot restored** — the 1D reduction folds
+>    `Ib = Ic/BF` into the *deterministic* stamping but never carried the
+>    base junction's independent shot statistics. New source at
+>    (base, emitter), Γ² = 1/BF.
+> Also: op-amp en G-diag refresh is now an **absolute recompute**
+> (`refresh_opamp_en_g_diag()`, immune to FP drift) and `.switch` R at
+> in+ finally hooks it (previously only pots did).
+
 > **Status** (2026-04-20)
 > - **Phase 1 shipped** (`25b61ba`). Johnson-Nyquist thermal noise on
 >   fixed resistors via MNA-RHS Norton-current stamping, DK codegen path.
@@ -34,12 +81,18 @@
 >   1, Tube 1). Opt-in via `.model NAME TYPE(KF=… AF=…)`; devices with
 >   `KF=0` (the default) contribute no flicker source, so zero-KF builds
 >   emit byte-identical code to pre-Phase-3. Per-sample amplitude
->   `kellett(sqrt(4·KF·|I_prev|^AF·fs) · N(0,1))`. Runtime
+>   ~~`kellett(sqrt(4·KF·|I_prev|^AF·fs) · N(0,1))`~~ → recalibrated
+>   2026-07-18 to the fs-invariant
+>   `kellett(sqrt(2·KF/K_pink) · |I_prev|^(AF/2) · N(0,1))` with a
+>   Nyquist pair-sum on the pink output (see status addendum). Runtime
 >   `set_flicker_gain(f64)`; salted stream `NOISE_FLICKER_SALT`.
 >   Available via `--noise full`.
 > - **Phase 3.5 (resistor 1/f flicker) shipped** 2026-05-14. Per-resistor
 >   flicker via standard Hooge bias-squared form: per-sample amplitude
->   `kellett(sqrt(KF·fs) · |I_R|^(AF/2) · N(0,1))` where
+>   ~~`kellett(sqrt(KF·fs) · |I_R|^(AF/2) · N(0,1))`~~ → recalibrated
+>   2026-07-18 to the same fs-invariant
+>   `kellett(sqrt(2·KF/K_pink) · |I_R|^(AF/2) · N(0,1))` + Nyquist pair
+>   as junction flicker (see status addendum) where
 >   `I_R = (V_+ − V_−)/R` is read live from `state.v_prev`. Default
 >   `AF = 2.0` (Hooge's exponent for resistors; junctions kept their
 >   `AF = 1.0` default). **Bias-squared, not bias-independent** — a
@@ -54,14 +107,21 @@
 >   `NOISE_R_FLICKER_SALT = 0xCA12_B0CC_F11C_E12E`. Available via
 >   `--noise full`.
 > - **Constants resolved**: thermal `sqrt(8·k_B·T·fs/R)`, shot
->   `sqrt(4·q·|I|·fs)`, flicker white input `sqrt(4·KF·|I|^AF·fs)` pre-
->   Kellett cascade. All three carry the same 2× trap-MNA compensation;
->   see "Constant derivation".
-> - **Tested**: 14 emission-assertion tests in
->   `crates/melange-solver/tests/codegen_verification_tests.rs` + 6
+>   `sqrt(Γ²)·sqrt(4·q·|I|·fs)` (Γ² = 1 for plain junctions), flicker
+>   white input `sqrt(2·KF/K_pink)·|I|^(AF/2)` pre-Kellett cascade
+>   (fs-INVARIANT — superseded the original `sqrt(4·KF·|I|^AF·fs)` on
+>   2026-07-18; see the status addendum and "Flicker calibration").
+>   Thermal/shot carry the 2× trap-MNA amplitude compensation in the
+>   `8`/`4`; flicker carries it in the `2` (vs the physical `0.5`).
+> - **Tested**: emission-assertion tests in
+>   `crates/melange-solver/tests/codegen_verification_tests.rs` + 37
 >   tests in `tests/noise_psd_validation.rs` (DK kTC, nodal kTC,
 >   dynamic-pot/switch first-sample-divergence, shot-noise
->   audible-wiring check, Kellett filter slope, flicker wiring).
+>   audible-wiring check, Kellett filter slope, flicker wiring, and the
+>   2026-07-18 additions: flicker ABSOLUTE level + fs/OS invariance,
+>   flicker-vs-shot corner, rbb′ vs explicit-resistor equivalence,
+>   triode shot smoothing + SHOT_GAMMA2 override, FA base-shot
+>   presence, `.switch`-at-in+ en refresh, K_pink stability).
 > - **Phase 5 (pentode partition) shipped** 2026-05-17. Per-pentode
 >   plate-current noise via Schottky 1918 partition statistics —
 >   `S_i(plate) = 2·q · I_p · I_s / (I_p + I_s)` **replaces** the Phase 2
@@ -92,9 +152,13 @@
 >   per the Noyce response-letter UX. Salts: `NOISE_OPAMP_EN_SALT =
 >   0x0FA3_94E5_E700_5A17`, `NOISE_OPAMP_IN_SALT = 0x0FA3_94E5_1700_5A17`
 >   (2N stream array — `2k` for in+, `2k+1` for in-). `noise_opamp_en_g_diag[k]`
->   is initialized to the static `G[in+, in+]` and refreshed in emitted
->   `set_pot_N` / `set_runtime_R_<field>` setters when a pot touches the
->   op-amp's non-inverting input (incremental `delta_g = 1/r − 1/r_old`).
+>   is initialized to the static `G[in+, in+]` and refreshed by
+>   `refresh_opamp_en_g_diag()` — since 2026-07-18 an ABSOLUTE recompute
+>   (`NOISE_OPAMP_EN_G_BASE[k]` + Σ live dynamic conductances at in+),
+>   called from every `set_pot_N` / `set_runtime_R_<field>` **and**
+>   `set_switch_N` whose element touches in+. (Replaced the incremental
+>   `+= 1/r − 1/r_old` accumulation, which drifted in FP over unbounded
+>   knob rides; the `.switch` hook was previously missing entirely.)
 >   `EN_FC`/`IN_FC` parameters are parsed and stored on `OpampInfo` /
 >   `OpampNoiseSource` but **not yet wired** in v1 — v1 is white-only;
 >   Kellett-pink 1/f blend is reserved for follow-up. Zero codegen / zero
@@ -171,10 +235,13 @@ for stream in 0..NOISE_N {
 }
 ```
 
-Master seed 0 at `CircuitState::default()` → seeded from system entropy
-(`getrandom`); any nonzero value → deterministic. `set_seed(master)` re-derives
-all streams. Reproducible renders available; nobody pays for them unless they
-opt in.
+Master seed 0 at `CircuitState::default()` → seeded from the system clock
+(`std::time::SystemTime::now()` nanoseconds since epoch — checked against
+the generated code 2026-07-18; the original design note said `getrandom`,
+but the emitted code never used it: no extra dependency in generated
+crates, and clock entropy is entirely adequate for hiss). Any nonzero
+value → deterministic. `set_seed(master)` re-derives all streams.
+Reproducible renders available; nobody pays for them unless they opt in.
 
 Gaussian transform: **Marsaglia polar method** (~1 log + 1 sqrt, no trig,
 60% acceptance, caches one sample via `has_next_gaussian` flag). No Ziggurat
@@ -293,15 +360,71 @@ else does this.
 **Implementation**:
 - Diode: inject across (anode, cathode), `I = i_nl_prev[k]`
 - BJT: inject at (collector, emitter) for `Ic`, at (base, emitter) for `Ib`,
-  using block-diagonal M indices
+  using block-diagonal M indices. **Assumption documented 2026-07-18**: the
+  `Ic` and `Ib` shot sources are treated as statistically INDEPENDENT
+  streams. Physically both currents originate from the same emitter
+  injection, so their shot fluctuations are partially correlated
+  (`Ic = Ie − Ib`); the standard SPICE noise model makes the same
+  independence approximation (separate `2qIc` and `2qIb` generators), and
+  at BF ≫ 1 the correlation term is O(1/BF) — below measurement floor
+  for audio circuits. Do not "fix" this without a citation.
+- BJT forward-active (1D): TWO sources — `Ic` at (C, E), full shot, plus a
+  base-shot source at (B, E) with `Γ² = 1/BF` reading the same Ic slot
+  (`S_i = 2·q·Ic/BF = 2·q·Ib`). Added 2026-07-18: the FA reduction folds
+  `Ib = Ic/BF` into the *deterministic* N_i stamping, which never carried
+  the base junction's independent shot statistics — the old comment
+  claiming it did was false, and FA circuits silently lost base shot.
 - JFET/MOSFET: inject at (drain, source) for `Id`; gate shot ≈ 0 for MOS (good
   approximation), nonzero for JFET reverse-biased gate leakage
-- Tube: inject at (plate, cathode) for `Ip`, at (grid, cathode) for `Ig`
+- Tube triode: inject at (plate, cathode) for `Ip` — **space-charge
+  smoothed** since 2026-07-18, see below. (Grid current shot, when a grid
+  port ever ships, stays full — emission/ion current is not
+  space-charge-limited.)
+- Tube pentode: plate handled by Phase 5 partition, not bare shot.
 
 Sign of `|I|`: always take magnitude. Shot noise doesn't care about direction;
 it's the granularity of charge-carrier flow. Use `i_nl_prev` from the
 previous sample (one-sample lag; at 48-192 kHz this is below the audible
 modulation threshold).
+
+#### Triode plate shot — space-charge smoothing (2026-07-18)
+
+A space-charge-limited vacuum diode/triode does NOT show full Schottky
+shot: the potential minimum in front of the cathode regulates emission
+statistics. Bare `2·q·I_p` overstates a small-signal triode's plate hiss
+by ~4–8 dB. Melange uses the standard audio-engineering formulation —
+the **equivalent noise resistance** `R_eq ≈ 2.5/gm` referenced to
+`T₀ = 290 K` (B.J. Thompson, D.O. North, W.A. Harris, "Fluctuations in
+Space-Charge-Limited Currents", RCA Review, Jan 1940 (triode result
+R_eq ≈ 2.5/gm); A. van der Ziel, *Noise*, Prentice-Hall 1954, §14):
+
+```
+e_n² = 4·k·T₀·R_eq          [V²/Hz]  input-referred
+S_i  = e_n²·gm² = 10·k·T₀·gm [A²/Hz]  at the plate
+Γ²   = S_i / (2·q·I_p) = 10·k·T₀·gm / (2·q·I_p)   (clamped to (0, 1])
+```
+
+The emitter (`resolve_shot_gamma2`, dk_emitter.rs) evaluates `gm` at the
+DC operating point (central difference of the Koren plate current at the
+OP Vgk/Vpk from `ir.dc_operating_point` / `ir.dc_nl_currents`) and bakes
+`sqrt(Γ²)` into `NOISE_SHOT_GAMMA_AMP`. The stamp still tracks the live
+`|i_nl_prev|`, so signal-dependent shot modulation survives; only the Γ²
+*ratio* is frozen at the OP (its drift over the swing is second-order).
+Degenerate OPs (cutoff, gm ≤ 0, missing DC data) fall back to Γ² = 1.
+
+Measured on the 12AX7 CE reference stage: `Γ² = 0.234` (−6.3 dB),
+`R_eq = 1.40 kΩ`, `e_n = 4.7 nV/√Hz` — textbook 12AX7 values. Validated
+by `noise_psd_validation.rs::triode_plate_shot_space_charge_smoothing`
+(independent test-side OP solve agrees with the emitted Γ² to 5 decimal
+places; runtime variance ratio matches Γ² exactly under a shared seed).
+
+**Override**: `.model TUBE(SHOT_GAMMA2=…)` sets Γ² explicitly (process
+knob / A-B tool). `SHOT_GAMMA2=1.0` restores the pre-2026-07-18 bare
+full-shot emission **byte-identically** (no gamma const emitted).
+Equivalent-Γ² note for the van der Ziel form
+`S_i = 4·k·T_c·Γ_vdZ²·gm, T_c ≈ 0.6·T_cath`: at oxide-cathode
+temperatures both formulations land within ~2 dB; melange ships the
+R_eq form because it is the one audio literature quotes R_eq values for.
 
 ### Flicker (1/f) Noise — Phase 3 (shipped 2026-04-20)
 
@@ -314,20 +437,61 @@ S_ib(f) = KF · I_b^AF / f           [A²/Hz] for BJT
 
 **Filter**: Paul Kellett 7-pole pink filter (musicdsp "pk3" variant,
 ±0.05 dB over 9.2 octaves at 96 kHz). Per-source state: 7 filter floats,
-zeroed at `default()` and `reset()`. The cascade has ~unity RMS power gain
-after the shipped `* 0.11` normalization tail so the per-sample amplitude
-stays in the injection-current space.
+zeroed at `default()` and `reset()`. **Corrected 2026-07-18**: the
+`* 0.11` output tail does NOT normalize the cascade to unit gain — the
+tailed cascade's white power gain is ≈ 0.113 (RMS gain ≈ 0.336). The
+absolute level is calibrated through the analytic `K_pink` constant
+instead (next paragraph); do not retune 0.11 in isolation.
 
-**Per-sample injection**: for flicker source `k` at sample `n`,
+**Per-sample injection** (recalibrated 2026-07-18; see "Flicker
+calibration" below for the derivation): for flicker source `k` at sample
+`n`, trapezoidal build,
 ```
-white_k   = N(0, 1)                                           // xoshiro256++ + Marsaglia polar
-amp_k     = sqrt(4·fs) · sqrt(KF_k) · |i_nl_prev[slot_k]|^(AF_k/2)
-i_flicker = amp_k · kellett_pink(white_k, state_k)
+white_k   = N(0, 1)                                     // xoshiro256++ + Marsaglia polar
+amp_k     = sqrt(2·KF_k / K_pink) · |i_nl_prev[slot_k]|^(AF_k/2)   // fs-INVARIANT
+w_k[n]    = 0.5 · amp_k · kellett_pink(white_k, state_k)
+i_flicker = w_k[n] + w_k[n-1]                           // Nyquist anti-alias pair
 ```
-The `4·…·fs` carries the same 2× trap-MNA compensation as thermal and
-shot. Per-device constants `NOISE_FLICKER_SQRT_KF[k]` and
+`K_pink = kellett_pink_normalized_gain()` ≈ 6.0e-3 (analytic, computed at
+codegen time in `ir/noise.rs`). The `2` (vs the physical `0.5`) carries
+the trap-MNA ×2-amplitude compensation; BE-primary builds use
+`sqrt(0.5·KF/K_pink)` single-draw (no pair — BE damps z = −1 itself).
+The pair-sum multiplies the output PSD by `cos²(πf/fs)`: unity in the
+audio band (−0.02 dB at 1 kHz / 48 kHz), zero at fs/2 — required because
+the Kellett cascade leaves only ~−14 dB at Nyquist, which the trap z=−1
+pole on resistive junction nodes otherwise amplifies by tens of dB and
+the device nonlinearity folds into the audio band (measured ×2400 PSD
+inflation on a biased-diode bench before the pair landed).
+Per-device constants `NOISE_FLICKER_SQRT_KF[k]` and
 `NOISE_FLICKER_HALF_AF[k]` are baked at codegen to keep the hot loop
 branch-free (`i_abs.powf(half_af)` is one `powf` per source per sample).
+
+**Flicker calibration (2026-07-18)** — why the white input variance must
+be fs-independent:
+```
+white input :  S_white(two-sided) = σ² / fs                       [A²/Hz]
+Kellett gain:  |H(ν)|² ≈ K_pink / ν   for ν = f/fs (pink band)
+pink output :  S_out(f) = (σ²/fs) · K_pink·fs/f = σ² · K_pink / f  (fs cancels)
+choose      :  σ² = KF·I^AF / (2·K_pink)
+            ⇒  S_out = KF·I^AF/(2f) two-sided = KF·I^AF/f one-sided  ✓ ngspice
+```
+then apply the same trap/BE stamp compensation as every other phase
+(trap ×4 variance ⇒ σ² = 2·KF·I^AF/K_pink; BE ×1). The superseded
+`σ² = 4·KF·I^AF·fs` rule is the correct construction for WHITE phases
+(whose PSD is σ²/fs) but wrong through a fixed digital pink filter — it
+made the output PSD proportional to fs (×2 per fs octave, OS-dependent)
+and, combined with the wrong unit-gain assumption about the 0.11 tail,
+about `2·K_pink·fs` ≈ **×1160 (+30.6 dB) hot at 96 kHz**. Sanity anchor:
+for silicon KF = 1e-15, AF = 1, the 1/f-vs-shot corner is
+`f_c = KF·I^(AF−1)/(2q) = KF/(2q) ≈ 3.1 kHz` — single-digit kHz at
+mA-class currents, as it should be. Validated by
+`junction_flicker_absolute_level_and_fs_os_invariance` (absolute ±3 dB
+at 48 k / 96 k / 48 k+2×OS, pairwise ±1 dB) and
+`flicker_corner_vs_shot_matches_kf_over_2q`.
+Band note: `K_pink` is averaged over ν ∈ [1e-3, 1e-1] (ripple < 0.1 dB);
+below ν ≈ 2e-4 the Kellett cascade sags 1–2 dB vs ideal 1/f, so at 4× OS
+the sub-40 Hz flicker tail is slightly under-modeled. Audio band is
+unaffected.
 
 **Per-device layout** (mirrors shot):
 - Diode: 1 source at (anode, cathode), slot = start_idx.
@@ -400,22 +564,34 @@ resistance `R_k` and parameters `KF_k`, `AF_k`:
 ```
 i_R_prev[k] = (v_prev[i_k] − v_prev[j_k]) / R_k    // live current, one-sample lag
 white_k     = N(0, 1)                              // xoshiro256++ + Marsaglia polar
-amp_k       = sqrt(fs) · sqrt(KF_k) · |i_R_prev[k]|^(AF_k / 2)
-i_flicker   = amp_k · kellett_pink(white_k, state_k)
+amp_k       = sqrt(2·KF_k / K_pink) · |i_R_prev[k]|^(AF_k / 2)   // fs-INVARIANT
+w_k[n]      = 0.5 · amp_k · kellett_pink(white_k, state_k)
+i_flicker   = w_k[n] + w_k[n-1]                    // Nyquist anti-alias pair
 ```
+(2026-07-18 recalibration — identical construction to junction flicker,
+including the trap ×2-amplitude compensation and the Nyquist pair;
+BE-primary uses `sqrt(0.5·KF/K_pink)` single-draw. Output PSD lands at
+`S_i(f) = KF·I_R^AF / f` one-sided, fs/OS-invariant.)
 
 Per-source baked constants `NOISE_R_FLICKER_SQRT_KF[k] = sqrt(KF_k)` and
-`NOISE_R_FLICKER_HALF_AF[k] = AF_k / 2`. The `sqrt(fs)` lives in the
-state field `noise_r_flicker_sqrt_fs` (refreshed in `set_sample_rate`).
+`NOISE_R_FLICKER_HALF_AF[k] = AF_k / 2`. The scale constant lives in the
+state field `noise_r_flicker_sqrt_fs` — **legacy name**: it held
+`sqrt(fs)` before 2026-07-18 and now holds the fs-independent
+`sqrt(2/K_pink)`; nothing recomputes it in `set_sample_rate` anymore.
 The live `1/R` lives in `noise_r_flicker_inv_r[k]` (refreshed by
 `set_pot_N` / `set_runtime_R_<field>` / `set_switch_N` for dynamic R).
 
-**No `4·…·fs` factor** — unlike thermal/shot/junction-flicker, resistor
-flicker is not stamped through the trap-MNA `(A − A_neg) = 2G` companion
-path that requires the 2× DC-gain compensation. The amplitude basis is
-the live current through the resistor; the noise current source stamp is
-a direct addition to the RHS that does not interact with the trap-rule
-DC gain in the same way.
+**Retraction (2026-07-18)** — the original Phase 3.5 claim that resistor
+flicker "is not stamped through the trap-MNA `(A − A_neg) = 2G`
+companion path" was **false**. The r-flicker stamp is a Norton RHS
+current identical in kind to junction flicker's; it sees exactly the
+same halved trap LF gain and therefore needs exactly the same
+compensation. The missing factor made r-flicker 4× (−6 dB) low RELATIVE
+to junction flicker at any given fs (on top of both phases' shared fs
+bug). Both classes are now mutually consistent under one calibration.
+`KF` on resistors remains an empirical Hooge-style knob (absolute
+recalibration of shipped `.cir` values was not performed), but its
+meaning is now stable: `KF = S_i·f / I_R^AF`, independent of fs.
 
 **No temperature coupling.** Hooge bias-driven 1/f is T-independent;
 `set_temperature_k` adjusts only thermal, never r-flicker. Validated by
@@ -577,9 +753,40 @@ is behind the same cfg.
   per-source coefficient in `set_pot_N`. Mentioned in a code comment.
 - **Include** auto-inserted parasitic caps: N/A — caps are noiseless (no
   dissipation)
-- **Include** internal-node parasitics (`RB`, `RC`, `RE`, `RS`, `RGI`): they
-  appear as regular R elements after MNA expansion — yes, they count. The
-  per-device parasitic Rs are part of the resistor list.
+- **BJT parasitic RB/RC/RE**: collected since 2026-07-18 on the nodal
+  internal-node path — see "BJT parasitic-R thermal noise" below. (The
+  original claim here that parasitics "appear as regular R elements after
+  MNA expansion" was false: they live on the `.model` card and are stamped
+  as raw conductances / absorbed into K_eff, never as `Element::Resistor`,
+  so the element walk silently missed them for two months.) `RS` (diode)
+  and `RGI` (tube) are still not thermal-noise sources — same class of
+  gap, smaller magnitude; extend the same pattern when they matter.
+
+### BJT parasitic-R thermal noise (2026-07-18)
+
+`rbb′` is the classically dominant BJT voltage-noise term
+(`e_n² = 4·k·T·rb` in series with the base — it is why low-noise BJTs
+advertise low base spreading resistance). `collect_thermal_noise_sources`
+now emits one thermal source per parasitic R with `RB`/`RC`/`RE > 0` on
+the model card:
+
+- **Nodal path** (internal-node expansion active): the source spans the
+  real (external, internal) node pair — exactly where the physical
+  resistor sits. No approximation. Validated by
+  `noise_psd_validation.rs::bjt_parasitic_rb_thermal_matches_explicit_base_resistor_nodal`:
+  a CE stage with `.model … RB=1000` matches the same stage built with an
+  explicit external 1 kΩ base resistor to 0.1 % in output noise variance
+  (and exceeds the RB=0 control by ~69 % in that bias network).
+- **DK path** (K_eff absorption, no internal nodes): there is no node
+  pair to inject across with the existing Norton machinery, so the
+  source is **skipped** and codegen logs
+  `log::warn!("noise: BJT <name> parasitic RB/RC/RE thermal noise skipped …")`.
+  This is an honest under-modeling of rbb′ hiss on DK-routed multi-BJT
+  circuits (wurli/Neve class when they route DK). A faithful DK-side
+  equivalent (base-side voltage noise → current injection across
+  (base, emitter) scaled by the small-signal loop admittance at the OP)
+  needs the loop Jacobian at codegen time; do it properly or not at all —
+  do not fake a magnitude. Routing the circuit nodal includes the noise.
 
 ## Validation
 
@@ -779,7 +986,7 @@ triggered BE in the first place. The cache is also cleared in the NaN
 recovery block, in `set_seed()`, and in `reset()` — same reasoning, no
 stale-state replay.
 
-**Phases 2/3 (shot, flicker)**: NOT changed by this fix.
+**Phases 2/3 (shot, flicker)**:
 - Shot is injected at device junction terminals (anode/cathode,
   collector/emitter, etc.). The 10 pF parasitic caps are auto-inserted
   ONLY when the circuit's C matrix is entirely empty
@@ -788,14 +995,84 @@ stale-state replay.
   structurally exposed to the same Nyquist pole on a junction terminal
   with no shunt cap. Has not surfaced in shipped circuits, but if it
   does, port the same two-draw pattern to the shot stamp.
-- Flicker is fed through the Kellett 7-pole pink filter, which
-  attenuates Nyquist by ~20+ dB per the filter's slope but does not
-  zero it. Lower-priority candidate for the same fix.
+- Flicker: **fixed 2026-07-18** — it DID surface, exactly as predicted,
+  the moment an absolute-level test biased a diode with a 10 pF-only
+  junction node: the Kellett cascade's ~−14 dB fs/2 tail rang the z=−1
+  pole (|H_trap(fs/2)| = T/(4C) ≈ 520 kΩ vs ~350 Ω in-band for the
+  bench circuit, +63 dB) and the exponential diode rectified the
+  near-Nyquist swing into `i_nl_prev`, inflating the measured 1 kHz PSD
+  ×2400 (≈×14 through amplitude modulation, the rest through
+  intermodulation). Both flicker phases now stamp the pair-sum
+  `i_n = 0.5·amp·(pink[n] + pink[n−1])` on trap builds — LF calibration
+  unchanged (cos²(πf/fs)), fs/2 zeroed. New state:
+  `noise_flicker_w_prev` / `noise_r_flicker_w_prev`, cleared at
+  `default()` / `reset()` / `set_seed()` / NaN recovery, not emitted on
+  BE-primary builds (BE damps z=−1; single-draw there).
 
 **Gotcha for future agents**: the kTC theorem test (`thermal_noise_matches_ktc_theorem`)
 passes even without the fix because the RC test circuit has a cap at the
 output node. The new `thermal_noise_no_nyquist_artifact_on_resistor_only_output_node`
 test is the load-bearing guard for this class of bug.
+
+### Backward-Euler-primary stamps (2026-07-18)
+
+All scale constants above are calibrated for the **trapezoidal** kernel,
+whose LF stamp-to-voltage gain is `(A − A_neg)⁻¹ = (2G)⁻¹` — half the
+physical DC gain. The trap stamps compensate in one of two ways:
+
+- **two-draw phases** (thermal, partition, op-amp en/in): the pair sum
+  `i_n = w[n] + w[n-1]` doubles the LF amplitude (×2 at `z = 1`), exactly
+  cancelling the halved kernel gain — mirroring the trapezoidal input
+  stamp `(V_new + V_prev)·G_in`.
+- **single-draw phases** (shot, junction flicker, resistor flicker): the
+  amplitude constant carries an explicit ×2 (variance ×4, e.g. the `4` in
+  `sqrt(4·q·I·fs)`).
+
+A **BE-primary** build (`--backward-euler`, or auto-BE promotion on
+either codegen path) has `A − A_neg = G` — **full** LF gain, 2× trap in
+amplitude. Running the trap-calibrated stamps through it lands **+6 dB
+hot at LF** (verified numerically against the kTC anchor). It also keeps
+the two-draw `cos²(ωT/2)` envelope, which is a *spurious* −3 dB@fs/4
+droop under BE — BE is L-stable and damps `z = −1` by itself; no
+anti-alias pair is needed.
+
+**Rule** (exact mirror of the DC-source branch, `rhs_const` ×1 under BE
+vs ×2 under trap): *every BE-primary stamp must be half the trap stamp's
+LF amplitude, delivered as a single draw*. Emitted by
+`build_noise_emission` when `ir.solver_config.backward_euler` is set:
+
+| Phase | Trap emission | BE-primary emission |
+|-------|---------------|---------------------|
+| thermal | two-draw, per-draw `sqrt(8kT·fs)/2 · sqrt(1/R)` | single-draw `sqrt(2·kT·fs) · sqrt(1/R)` |
+| shot | single-draw `sqrt(Γ²)·sqrt(4·q·fs) · sqrt(I)` | single-draw `sqrt(Γ²)·sqrt(q·fs) · sqrt(I)` |
+| junction flicker | pink pair-sum, per-draw `0.5·sqrt(2·KF/K_pink) · I^(AF/2)` | single-draw `sqrt(0.5·KF/K_pink) · I^(AF/2)` → pink |
+| resistor flicker | pink pair-sum, per-draw `0.5·sqrt(2·KF/K_pink) · I^(AF/2)` | single-draw `sqrt(0.5·KF/K_pink) · I^(AF/2)` → pink |
+| partition | two-draw, per-draw `sqrt(4·q·fs)/2 · …` | single-draw `sqrt(q·fs) · …` |
+| op-amp en/in | two-draw, per-draw `0.5 · sqrt(2·fs) · …` | single-draw `sqrt(0.5·fs) · …` |
+
+(Flicker rows rewritten 2026-07-18 — the original `sqrt(4·fs)` /
+`sqrt(fs)` entries carried the fs-dependence bug; note flicker's BE:trap
+LF ratio is the same amplitude ÷2 as every other phase, delivered via
+the fs-invariant constants.)
+
+Note the BE constants for the two-draw phases equal the **trap per-draw
+amplitude** (dropping the pair halves the LF amplitude by itself); the
+single-draw phases halve the amplitude in the constant (variance ÷4).
+A naive "un-double the variance" (e.g. `sqrt(4kT·fs)` single-draw at
+full amplitude for thermal) is **+3 dB hot** — the LF gain doubling is
+an *amplitude* factor, so the correction is amplitude ÷2 = variance ÷4
+relative to the trap stamp's LF-equivalent, not variance ÷2.
+
+`set_sample_rate` and `set_temperature_k` recompute the same BE
+constants. The BE-*fallback* replay (previous section) is unrelated: it
+applies to trap-primary builds only and intentionally keeps the trap
+calibration for its rare 64-sample windows.
+
+**Validation**:
+`noise_psd_validation.rs::thermal_noise_be_primary_matches_trap_anchor`
+compiles the same RC+diode circuit twice (trap and `backward_euler:
+true`) and asserts the output noise variance (LF-dominated, fc ≈ 159 Hz)
+matches the validated trap anchor and the analytic kT/C.
 
 ## Why Phase 1 alone still beats the field
 

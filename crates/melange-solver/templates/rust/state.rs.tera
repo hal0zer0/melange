@@ -42,7 +42,7 @@ pub struct CircuitState {
 {% endif %}
     /// Diagnostic: peak absolute output (pre-clamp)
     pub diag_peak_output: f64,
-    /// Diagnostic: number of times output exceeded ±10V
+    /// Diagnostic: number of times output exceeded the configured output clamp
     pub diag_clamp_count: u64,
     /// Diagnostic: number of times NR hit max iterations
     pub diag_nr_max_iter_count: u64,
@@ -152,9 +152,12 @@ pub struct CircuitState {
     pub switch_{{ idx }}_position: usize,
 {% endfor %}
 {% endif %}
-{% if num_switches > 0 or num_pots > 0 %}
-    /// Current sample rate (needed for rebuild_matrices)
+{% if needs_current_sr %}
+    /// Current host sample rate (needed for rebuild_matrices and the op-amp
+    /// slew-rate limiter's per-sample dt)
     pub current_sample_rate: f64,
+{% endif %}
+{% if num_switches > 0 or num_pots > 0 %}
     /// Lazy rebuild flag: set by set_pot/set_switch, cleared by process_sample
     pub matrices_dirty: bool,
 {% endif %}
@@ -188,9 +191,22 @@ pub struct CircuitState {
 {% endfor %}{% endif %}
 }
 
-impl Default for CircuitState {
+{% if opamp_rail_degrade_warn is defined %}/// One-shot latch for the DK rail-mode degradation warning emitted from
+/// `Default::default()` — fires at most once per process, not per channel.
+static OPAMP_RAIL_DEGRADE_WARN_ONCE: std::sync::Once = std::sync::Once::new();
+
+{% endif %}impl Default for CircuitState {
     fn default() -> Self {
-{% if noise_enabled_emit %}{{ noise_default_stmts }}{% endif %}        Self {
+{% if opamp_rail_degrade_warn is defined %}        OPAMP_RAIL_DEGRADE_WARN_ONCE.call_once(|| {
+            eprintln!("{{ opamp_rail_degrade_warn }}");
+        });
+{% endif %}{% if noise_enabled_emit %}{{ noise_default_stmts }}{% endif %}{% if dc_block and has_dc_op %}        // Seed the DC blocker's x[n-1] with the output-node DC operating point.
+        // Starting from 0 while v_prev = DC_OP injects a deterministic startup
+        // thump of ~DC_OP[out]*SCALE decaying at the 5 Hz blocker pole
+        // (tau ~ 32 ms). Mirrors Phase E's recompute_dc_op() reseed contract.
+        let mut dc_block_x_seed = [0.0f64; NUM_OUTPUTS];
+        for k in 0..NUM_OUTPUTS { dc_block_x_seed[k] = DC_OP[OUTPUT_NODES[k]]; }
+{% endif %}        Self {
 {% if has_dc_op %}            v_prev: DC_OP,
 {% if has_dc_nl %}            i_nl_prev: DC_NL_I,
             i_nl_prev_prev: DC_NL_I,
@@ -205,7 +221,7 @@ impl Default for CircuitState {
 {% endif %}            dc_operating_point: [0.0; N],
 {% endif %}            input_prev: 0.0,
             last_nr_iterations: 0,
-{% if dc_block %}            dc_block_x_prev: [0.0; NUM_OUTPUTS],
+{% if dc_block %}            dc_block_x_prev: {% if has_dc_op %}dc_block_x_seed{% else %}[0.0; NUM_OUTPUTS]{% endif %},
             dc_block_y_prev: [0.0; NUM_OUTPUTS],
             dc_block_r: DC_BLOCK_R,
 {% endif %}            diag_peak_output: 0.0,
@@ -268,8 +284,10 @@ impl Default for CircuitState {
             switch_{{ idx }}_position: 0,
 {% endfor %}
 {% endif %}
-{% if num_switches > 0 or num_pots > 0 %}
+{% if needs_current_sr %}
             current_sample_rate: SAMPLE_RATE,
+{% endif %}
+{% if num_switches > 0 or num_pots > 0 %}
             matrices_dirty: false,
 {% endif %}
 {% if num_device_params > 0 %}
@@ -297,7 +315,9 @@ impl CircuitState {
         self.i_nl_prev_prev = [0.0; M];
 {% endif %}        self.input_prev = 0.0;
         self.last_nr_iterations = 0;
-{% if dc_block %}        self.dc_block_x_prev = [0.0; NUM_OUTPUTS];
+{% if dc_block %}        // Seed the DC blocker's x[n-1] from the output-node DC OP (see Default)
+        // so reset() doesn't re-inject the startup thump.
+        for k in 0..NUM_OUTPUTS { self.dc_block_x_prev[k] = self.dc_operating_point[OUTPUT_NODES[k]]; }
         self.dc_block_y_prev = [0.0; NUM_OUTPUTS];
 {% endif %}        self.diag_peak_output = 0.0;
         self.diag_clamp_count = 0;
@@ -456,9 +476,9 @@ impl CircuitState {
             return; // Invalid sample rate, keep defaults
         }
 {% if noise_enabled_emit %}{{ noise_set_sample_rate_body }}{% endif %}
+{% if needs_current_sr %}        self.current_sample_rate = sample_rate;
+{% endif %}
 {% if num_switches > 0 or num_pots > 0 %}
-        self.current_sample_rate = sample_rate;
-
         // If same as codegen sample rate AND all switches at default position, reset to defaults
         if (sample_rate - SAMPLE_RATE).abs() < 0.5 {
             let all_default = true
@@ -479,7 +499,7 @@ impl CircuitState {
                 self.ind_g_eq = [{% for ind in inductors %}IND_{{ loop.index0 }}_G_EQ{% if not loop.last %}, {% endif %}{% endfor %}];
 {% endif %}
 {% if dc_block %}                self.dc_block_r = DC_BLOCK_R;
-                self.dc_block_x_prev = [0.0; NUM_OUTPUTS];
+                for k in 0..NUM_OUTPUTS { self.dc_block_x_prev[k] = self.dc_operating_point[OUTPUT_NODES[k]]; }
                 self.dc_block_y_prev = [0.0; NUM_OUTPUTS];
 {% endif %}
 {% if oversampling_factor > 1 %}
@@ -548,7 +568,7 @@ impl CircuitState {
 {% endfor %}
 {% endif %}
 {% if dc_block %}            self.dc_block_r = DC_BLOCK_R;
-            self.dc_block_x_prev = [0.0; NUM_OUTPUTS];
+            for k in 0..NUM_OUTPUTS { self.dc_block_x_prev[k] = self.dc_operating_point[OUTPUT_NODES[k]]; }
             self.dc_block_y_prev = [0.0; NUM_OUTPUTS];
 {% endif %}
             return;
@@ -755,7 +775,7 @@ impl CircuitState {
         let internal_rate = sample_rate;
         {% endif %}
 {% if dc_block %}        self.dc_block_r = 1.0 - 2.0 * std::f64::consts::PI * 5.0 / internal_rate;
-        self.dc_block_x_prev = [0.0; NUM_OUTPUTS];
+        for k in 0..NUM_OUTPUTS { self.dc_block_x_prev[k] = self.dc_operating_point[OUTPUT_NODES[k]]; }
         self.dc_block_y_prev = [0.0; NUM_OUTPUTS];
 {% endif %}
 {% endif %}

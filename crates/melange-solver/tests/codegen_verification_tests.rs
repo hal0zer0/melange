@@ -6364,12 +6364,20 @@ fn test_mosfet_codegen_compiles_and_runs() {
 /// P-channel MOSFET: verify codegen compiles and runs.
 #[test]
 fn test_pmos_codegen_compiles_and_runs() {
+    // NOTE (2026-07-18): `Rg in gate 10k` wires the input to the PMOS gate.
+    // The original netlist left `in` connected only to ground via R2 — the
+    // sine never reached the amplifier, and the "output not all zeros"
+    // assertion passed solely on the DC-blocker startup thump (x_prev
+    // seeded 0 while v_prev = DC_OP, τ ≈ 32 ms tail). That thump was a bug
+    // and is now fixed (dc_block_x_prev seeded from the output-node DC OP),
+    // so the test must exercise a real signal path.
     let spice = "\
 PMOS Test
 M1 out gate vcc vcc PMOD
 .model PMOD PM(VTO=-2.0 KP=0.1 LAMBDA=0.01)
 R1 out 0 1k
 R2 in 0 100
+Rg in gate 10k
 C1 gate 0 100n
 VCC vcc 0 DC 12
 ";
@@ -8081,7 +8089,7 @@ fn assert_device_shot_ports_match_elements(spice: &str) {
 
     let netlist = Netlist::parse(spice).expect("failed to parse netlist");
     let mna = MnaSystem::from_netlist(&netlist).expect("failed to build MNA");
-    let shot = collect_shot_noise_sources(&mna);
+    let shot = collect_shot_noise_sources(&netlist, &mna);
     let flicker = collect_flicker_noise_sources(&netlist, &mna);
 
     let n = |name: &str| {
@@ -8254,14 +8262,17 @@ VCC vcc 0 12
     );
     assert_eq!(mna.nonlinear_devices[0].dimension, 1);
 
-    let shot = collect_shot_noise_sources(&mna);
+    let shot = collect_shot_noise_sources(&netlist, &mna);
     let flicker = collect_flicker_noise_sources(&netlist, &mna);
 
-    // FA reduction emits only Ic — Ib is folded into the BF stamping.
+    // FA reduction: Ic shot at (C, E) PLUS a base-shot source at (B, E)
+    // with kind = FaBase (2026-07-18 fix — the deterministic Ib = Ic/BF
+    // N_i stamping never carried the base junction's independent shot
+    // statistics; the emitter scales the FaBase source by Γ² = 1/BF).
     assert_eq!(
         shot.len(),
-        1,
-        "FA BJT must emit only Ic shot, got {:?}",
+        2,
+        "FA BJT must emit Ic shot + FaBase base shot, got {:?}",
         shot
     );
     assert_eq!(
@@ -8271,20 +8282,31 @@ VCC vcc 0 12
         flicker
     );
     assert_eq!(shot[0].name, "Q1.Ic");
+    assert_eq!(shot[1].name, "Q1.Ib");
+    assert_eq!(
+        shot[1].kind,
+        melange_solver::codegen::ir::ShotSourceKind::FaBase
+    );
+    // Both FA shot sources read the same NR slot (Ic).
+    assert_eq!(shot[0].slot_idx, shot[1].slot_idx);
     assert_eq!(flicker[0].name, "Q1.Ic");
 
-    // And both must land at the (collector, emitter) port pulled from the Element.
+    // Ic shot + flicker land at (collector, emitter); base shot at (base, emitter).
     let q = netlist
         .elements
         .iter()
         .find_map(|e| match e {
-            Element::Bjt { name, nc, ne, .. } if name == "Q1" => Some((nc.clone(), ne.clone())),
+            Element::Bjt {
+                name, nc, nb, ne, ..
+            } if name == "Q1" => Some((nc.clone(), nb.clone(), ne.clone())),
             _ => None,
         })
         .unwrap();
-    let exp = (mna.node_map[&q.0], mna.node_map[&q.1]);
-    assert_eq!((shot[0].node_i, shot[0].node_j), exp);
-    assert_eq!((flicker[0].node_i, flicker[0].node_j), exp);
+    let exp_ce = (mna.node_map[&q.0], mna.node_map[&q.2]);
+    let exp_be = (mna.node_map[&q.1], mna.node_map[&q.2]);
+    assert_eq!((shot[0].node_i, shot[0].node_j), exp_ce);
+    assert_eq!((shot[1].node_i, shot[1].node_j), exp_be);
+    assert_eq!((flicker[0].node_i, flicker[0].node_j), exp_ce);
 }
 
 #[test]

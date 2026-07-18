@@ -72,12 +72,124 @@ pub struct TrapStability {
     pub max_abs_s: f64,
 }
 
+/// Relative-change convergence tolerance for the power iteration's growth
+/// (norm-ratio) estimate. Chosen so that with a subdominant-to-dominant
+/// ratio of ~0.98 (the worst realistic case: promotion thresholds
+/// 0.999/1.002 are only 0.3% apart) the stopping error stays well below
+/// 1e-4 — the fixed 20-iteration scheme this replaces had ~0.5-1% bias in
+/// that regime, larger than the threshold gap itself.
+const POWER_ITER_REL_TOL: f64 = 1e-6;
+
+/// Hard cap on power iterations. Cost is O(cap · n²) at compile time,
+/// negligible. Sized so a subdominant/dominant ratio of 0.977 (the
+/// λ = {1.003, 0.98} worst case around the 0.999/1.002 thresholds) reaches
+/// the relative-change stop (~150 iterations with the stability window)
+/// instead of being truncated with ~1e-4 residual bias.
+const POWER_ITER_MAX: usize = 500;
+
+/// The relative change must stay below [`POWER_ITER_REL_TOL`] for this many
+/// CONSECUTIVE iterations before the loop stops. Guards against spurious
+/// stops on transient plateaus of strongly non-normal operators (the
+/// noyce-class triode cascade has large off-diagonal S entries whose
+/// transient growth phase can hold the estimate briefly steady before the
+/// asymptotic regime).
+const POWER_ITER_STABLE_ITERS: usize = 5;
+
+/// Shared power-iteration core: iterate `x ← (S·A_neg)·x` (optionally
+/// deflating one basis direction) until the growth estimate
+/// `ρ_k = |y| / |x|` stabilizes to [`POWER_ITER_REL_TOL`] relative change
+/// for [`POWER_ITER_STABLE_ITERS`] consecutive iterations, capped at
+/// [`POWER_ITER_MAX`].
+///
+/// Returns `(rho, dominant_sign)`:
+/// - `rho` = converged norm ratio. For a well-separated real dominant
+///   eigenvalue this converges to |λ_dom| at the same geometric rate as the
+///   eigenvector, and — unlike a fixed iteration count — the stop criterion
+///   guarantees the estimate has actually settled (fixed-20 carried
+///   ~0.5-1% bias with close subdominant eigenvalues). For an eigenvalue
+///   CLUSTER near the unit circle (cap-coupled cascades put one z ≈ -1
+///   mode per coupling cap), the iterate settles into the near-invariant
+///   cluster subspace: the norm ratio converges to the cluster's growth
+///   rate — exactly the quantity the trap-stability gates need — even
+///   though no single eigenvector is ever isolated. This is why ρ is NOT
+///   estimated from the Rayleigh quotient: on the noyce-cascaded-triodes
+///   operator the quotient needs tens of thousands of iterations to cross
+///   the cluster (measured: still -0.87 after 2000 iterations while the
+///   norm ratio locked at 0.9998 by iteration 100).
+/// - `dominant_sign` = sign of `⟨x, (S·A_neg)·x⟩` at the stopped iterate
+///   (the Rayleigh quotient's sign). Recovers sign(λ_dom) for a real
+///   dominant eigenvalue, and empirically classifies the z ≈ -1 cluster
+///   correctly (the quotient is negative throughout the iteration).
+///
+/// Known limits (documented, accepted): for a **complex conjugate**
+/// dominant pair the iterate rotates in the invariant plane; the norm
+/// ratio oscillates around |λ| with the rotation and the loop may run to
+/// the cap, returning a point on that oscillation, while `dominant_sign`
+/// reflects only the real part's orientation. Complex pairs near the unit
+/// circle are rare in audio circuits and are not the failure mode the
+/// auto-BE gates discriminate; a genuinely unstable complex pair still
+/// shows sustained growth that trips the `rho > 1.002` clause.
+fn power_iterate_rho_sign(
+    s: &[f64],
+    a_neg: &[f64],
+    n: usize,
+    x: &mut [f64],
+    deflate: Option<usize>,
+) -> (f64, f64) {
+    let mut rho = 0.0_f64;
+    let mut rho_prev = f64::NAN;
+    let mut last_dot = 0.0_f64;
+    let mut stable_iters = 0usize;
+
+    for _ in 0..POWER_ITER_MAX {
+        let mut y = apply_s_a_neg(s, a_neg, n, x);
+        if let Some(d) = deflate {
+            y[d] = 0.0;
+        }
+        let x_norm: f64 = x.iter().map(|v| v * v).sum::<f64>().sqrt();
+        if x_norm < 1e-30 {
+            break;
+        }
+        last_dot = x.iter().zip(y.iter()).map(|(a, b)| a * b).sum::<f64>() / (x_norm * x_norm);
+        let norm: f64 = y.iter().map(|v| v * v).sum::<f64>().sqrt();
+        if norm < 1e-30 {
+            // Operator annihilates the iterate — degenerate/null direction.
+            return (rho, 0.0);
+        }
+        rho = norm / x_norm;
+        for i in 0..n {
+            x[i] = y[i] / norm;
+        }
+        // Converge on the estimate, not on an iteration count.
+        if rho_prev.is_finite()
+            && (rho - rho_prev).abs() <= POWER_ITER_REL_TOL * rho.max(1e-30)
+        {
+            stable_iters += 1;
+            if stable_iters >= POWER_ITER_STABLE_ITERS {
+                break;
+            }
+        } else {
+            stable_iters = 0;
+        }
+        rho_prev = rho;
+    }
+
+    let dominant_sign = if last_dot.abs() < 1e-30 {
+        0.0
+    } else {
+        last_dot.signum()
+    };
+    (rho, dominant_sign)
+}
+
 /// Power-iteration estimate of the trap propagation operator's stability.
 ///
 /// `s` and `a_neg` are flat row-major `n × n` matrices (`s[i*n + j]`).
-/// 20 iterations matches the existing helpers in `routing.rs` and
-/// `ir.rs`; convergence on real audio circuits' dominant eigenvalue is
-/// usually within 5-10 iterations.
+/// Iterates to a relative-change tolerance on the growth (norm-ratio)
+/// estimate (see [`power_iterate_rho_sign`]) instead of a fixed iteration
+/// count — the old fixed-20 scheme carried ~0.5-1% bias when a subdominant
+/// eigenvalue sat close to the dominant one, while the promotion
+/// thresholds (0.999 / 1.002) are only 0.3% apart.
 pub fn analyze_trap_stability(s: &[f64], a_neg: &[f64], n: usize) -> TrapStability {
     if n == 0 || s.is_empty() || a_neg.is_empty() {
         return TrapStability {
@@ -89,31 +201,7 @@ pub fn analyze_trap_stability(s: &[f64], a_neg: &[f64], n: usize) -> TrapStabili
 
     let max_abs_s = s.iter().fold(0.0_f64, |m, &v| m.max(v.abs()));
     let mut x = vec![1.0 / (n as f64).sqrt(); n];
-    let mut rho = 0.0_f64;
-
-    for _ in 0..20 {
-        let y = apply_s_a_neg(s, a_neg, n, &x);
-        let norm: f64 = y.iter().map(|v| v * v).sum::<f64>().sqrt();
-        if norm < 1e-30 {
-            return TrapStability {
-                rho,
-                dominant_sign: 0.0,
-                max_abs_s,
-            };
-        }
-        let x_norm: f64 = x.iter().map(|v| v * v).sum::<f64>().sqrt().max(1e-30);
-        rho = norm / x_norm;
-        for i in 0..n {
-            x[i] = y[i] / norm;
-        }
-    }
-
-    // After power iteration converges, `(S·A_neg)·x` is approximately
-    // λ_dom · x. <x, y> ≈ λ_dom · |x|² recovers the sign of λ_dom when
-    // it's real.
-    let y_post = apply_s_a_neg(s, a_neg, n, &x);
-    let dot: f64 = x.iter().zip(y_post.iter()).map(|(a, b)| a * b).sum();
-    let dominant_sign = if dot.abs() < 1e-30 { 0.0 } else { dot.signum() };
+    let (rho, dominant_sign) = power_iterate_rho_sign(s, a_neg, n, &mut x, None);
 
     TrapStability {
         rho,
@@ -156,31 +244,7 @@ pub fn analyze_trap_stability_deflated(
     for v in &mut x {
         *v /= init_norm;
     }
-    let mut rho = 0.0_f64;
-
-    for _ in 0..20 {
-        let mut y = apply_s_a_neg(s, a_neg, n, &x);
-        // Deflate: project out the input-direction component.
-        y[input_node] = 0.0;
-        let norm: f64 = y.iter().map(|v| v * v).sum::<f64>().sqrt();
-        if norm < 1e-30 {
-            return TrapStability {
-                rho,
-                dominant_sign: 0.0,
-                max_abs_s,
-            };
-        }
-        let x_norm: f64 = x.iter().map(|v| v * v).sum::<f64>().sqrt().max(1e-30);
-        rho = norm / x_norm;
-        for i in 0..n {
-            x[i] = y[i] / norm;
-        }
-    }
-
-    let mut y_post = apply_s_a_neg(s, a_neg, n, &x);
-    y_post[input_node] = 0.0;
-    let dot: f64 = x.iter().zip(y_post.iter()).map(|(a, b)| a * b).sum();
-    let dominant_sign = if dot.abs() < 1e-30 { 0.0 } else { dot.signum() };
+    let (rho, dominant_sign) = power_iterate_rho_sign(s, a_neg, n, &mut x, Some(input_node));
 
     TrapStability {
         rho,
@@ -357,6 +421,64 @@ mod tests {
         let r = analyze_trap_stability(&s, &id, n);
         assert!(r.rho > 1.002);
         assert!(trap_needs_be(r));
+    }
+
+    #[test]
+    fn close_subdominant_eigenvalue_converges_within_1e4() {
+        // λ = {1.003, 0.98}: subdominant/dominant ratio 0.977. The old
+        // fixed-20-iteration norm-ratio estimate lands at ≈ 0.9964 — BELOW
+        // the 1.002 promotion threshold even though the true dominant
+        // eigenvalue (1.003) is above it, so a genuinely trap-unstable mode
+        // escaped auto-BE. The CONVERGED estimate must land within 1e-4 of
+        // the true 1.003.
+        let (s, n) = flat(&[&[1.003, 0.0], &[0.0, 0.98]]);
+        let id = vec![1.0, 0.0, 0.0, 1.0];
+        let r = analyze_trap_stability(&s, &id, n);
+        assert!(
+            (r.rho - 1.003).abs() < 1e-4,
+            "converged rho should be within 1e-4 of 1.003, got {}",
+            r.rho
+        );
+        assert!(r.dominant_sign > 0.0, "dominant sign should be positive");
+        assert!(
+            trap_needs_be(r),
+            "rho=1.003 > 1.002 must trip auto-BE (old fixed-20 estimate ~0.9964 missed it)"
+        );
+    }
+
+    #[test]
+    fn close_subdominant_negative_dominant_converges() {
+        // Same closeness stress but with a negative dominant eigenvalue:
+        // λ = {-1.003, 0.98}: rho must converge to 1.003, sign negative.
+        let (s, n) = flat(&[&[-1.003, 0.0], &[0.0, 0.98]]);
+        let id = vec![1.0, 0.0, 0.0, 1.0];
+        let r = analyze_trap_stability(&s, &id, n);
+        assert!(
+            (r.rho - 1.003).abs() < 1e-4,
+            "converged rho should be within 1e-4 of 1.003, got {}",
+            r.rho
+        );
+        assert!(
+            r.dominant_sign < 0.0,
+            "dominant sign should be negative, got {}",
+            r.dominant_sign
+        );
+    }
+
+    #[test]
+    fn exact_plus_minus_pair_reports_unit_magnitude() {
+        // diag(1, -1): the Rayleigh quotient cancels exactly (x·Ax = 0 for
+        // the equal-component start vector), so the sign is unclassifiable
+        // (0), while the norm ratio still reports the mode magnitude 1.
+        let (s, n) = flat(&[&[1.0, 0.0], &[0.0, -1.0]]);
+        let id = vec![1.0, 0.0, 0.0, 1.0];
+        let r = analyze_trap_stability(&s, &id, n);
+        assert!(
+            (r.rho - 1.0).abs() < 1e-6,
+            "±1 pair should report rho=1 via norm-ratio fallback, got {}",
+            r.rho
+        );
+        assert_eq!(r.dominant_sign, 0.0, "±λ pair sign is unclassifiable");
     }
 
     #[test]

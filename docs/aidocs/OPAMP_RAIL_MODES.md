@@ -29,7 +29,8 @@ heavy-clip convergence bug documented below.
 | VCR ALC (sidechain compressor) | `ActiveSet` | Control-path: rail-clipped value drives a secondary nonlinear device; need exact pinned voltage, not soft saturation |
 | SSL bus compressor | `ActiveSetBe` | Same audio-path reasoning as Klon |
 | Anything else with finite rails | `ActiveSet` | Fallback for control-path-style topologies |
-| Anything with infinite rails (`.model OA(GBW=…)` only) | `None` | Linear VCCS, no clamping needed |
+| `.model OA(GBW=…)` with no VCC/VEE/VSAT | a **clamped** mode (Hard/ActiveSet/ActiveSetBe by topology) | GBW triggers the ±13 V auto-default rails (`mna.rs`, priority VCC/VEE > VSAT > GBW-default), so the op-amp is NOT rail-free. Caveat: the default applies per side — a single-supply card like `OA(VCC=9 GBW=3MEG)` gets an asymmetric 9 V / −13 V clamp window, not 9 V / 0 V |
+| Truly infinite rails (no VCC, no VEE, no VSAT, **and no GBW**) | `None` | Linear VCCS, no clamping needed |
 
 The auto-detector lives in `codegen::ir::resolve_opamp_rail_mode` + `refine_active_set_for_audio_path` (`crates/melange-solver/src/codegen/ir.rs:479-599`). It inspects the netlist topology around each clamped op-amp and picks the rail mode based on whether the output is cap-coupled (audio path) or DC-coupled to other nonlinear devices (control path).
 

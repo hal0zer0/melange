@@ -133,9 +133,24 @@ fn bjt_config() -> ComparisonConfig {
 }
 
 /// Apply a 5Hz DC blocking HPF to a signal.
+///
+/// Seeds `x_prev` with the signal's own first sample (rather than 0) so the
+/// filter starts already settled at the reference's DC operating point,
+/// instead of injecting an artificial startup transient that decays at the
+/// 5 Hz pole (tau ~32ms). This mirrors the generated code's DC blocker,
+/// which seeds `dc_block_x_prev` from the compile-time `DC_OP[out]` value
+/// (`state.rs.tera`, "Seed the DC blocker's x[n-1] with the output-node DC
+/// operating point") specifically to avoid that startup thump. Without this
+/// seed, `dc_block_signal` and the generated code apply non-equivalent
+/// filters whenever the raw output has a non-zero DC bias (e.g. an amplifier
+/// stage with no output coupling cap): the reference exhibits a multi-volt
+/// decaying transient over the comparison window while melange's output is
+/// already settled, producing a spurious low-correlation "regression" that
+/// is a test-harness artifact, not a solver bug. See wurli-preamp
+/// (~9.1V raw DC bias, no output coupling cap).
 fn dc_block_signal(signal: &mut [f64], sample_rate: f64) {
     let r = 1.0 - 2.0 * std::f64::consts::PI * 5.0 / sample_rate;
-    let mut x_prev = 0.0f64;
+    let mut x_prev = signal.first().copied().unwrap_or(0.0);
     let mut y_prev = 0.0f64;
     for sample in signal.iter_mut() {
         let x = *sample;

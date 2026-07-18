@@ -2858,6 +2858,21 @@ impl MnaBuilder {
                     oa.vee = -13.0;
                 }
             }
+            // Hard-error on inverted/degenerate rails at resolve time. A
+            // swapped card (e.g. `OA(VCC=-9 VEE=9)`) would otherwise sail
+            // through codegen and panic inside `f64::clamp(min, max)` with
+            // min > max — on the audio thread, at the first processed
+            // sample. Both-finite is required: a single-rail clamp
+            // (one side ±inf) is legal and clamp() handles it fine.
+            if oa.vcc.is_finite() && oa.vee.is_finite() && oa.vcc <= oa.vee {
+                return Err(MnaError::InvalidParameter(format!(
+                    "Op-amp {}: resolved supply rails are inverted or degenerate \
+                     (VCC={} V <= VEE={} V). VCC must be strictly above VEE — \
+                     check the OA model card's VCC/VEE (or VSAT, which resolves \
+                     to VCC=+VSAT / VEE=-VSAT and must be positive).",
+                    oa.name, oa.vcc, oa.vee
+                )));
+            }
             if oa.vcc.is_finite() || oa.vee.is_finite() {
                 log::debug!(
                     "Op-amp {}: output clamp VCC={:.1}V, VEE={:.1}V",

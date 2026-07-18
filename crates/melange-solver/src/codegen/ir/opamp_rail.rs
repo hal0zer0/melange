@@ -29,8 +29,9 @@ pub enum OpampRailModeReason {
     /// At least one clamped op-amp has an output cap coupling into a downstream
     /// non-feedback node. The post-NR hard clamp would corrupt that cap's
     /// trapezoidal history on rail-violating samples. Auto-select `ActiveSet`
-    /// to keep KCL consistent. (When `BoyleDiodes` lands, this reason will
-    /// also be used to upgrade distortion-class circuits further.)
+    /// to keep KCL consistent. (`BoyleDiodes` has since landed as an explicit
+    /// opt-in mode, but the auto-resolver never picks it — it diverges at
+    /// heavy clip; see `docs/aidocs/OPAMP_RAIL_MODES.md`.)
     AcCoupledDownstream,
     /// At least one clamped op-amp output is connected via an R-only path
     /// (no series caps) to a nonlinear device terminal. This is the
@@ -106,6 +107,18 @@ fn opamp_has_ac_coupled_downstream(
     // C matrix is NxN (where N is mna.n, the current MNA dimension). A cap
     // between nodes i and j stamps into C[i][i], C[j][j], C[i][j], C[j][i].
     // We scan row `out` of C for non-zero off-diagonal entries.
+    //
+    // Known blind spot: a cap from the op-amp output straight to GROUND
+    // stamps ONLY the diagonal C[out][out] (ground has no matrix row), and
+    // the scan skips the diagonal — so out-to-ground caps are invisible
+    // here. That's acceptable for this detector's purpose: the hard-clamp
+    // corruption it guards against needs a FAR-SIDE node that integrates
+    // the clamp-induced discontinuity (a series coupling cap whose other
+    // plate drifts as `(2C/T)·v_prev` history goes inconsistent). A
+    // grounded cap's other plate is fixed at 0 V; its stored voltage IS
+    // the output-node voltage, so clamping v[out] leaves that cap's
+    // history self-consistent — worst case is a one-sample transient at
+    // the output node itself, not a drifting downstream integrator.
     let n = mna.c.len();
     if out >= n {
         return false;
@@ -324,12 +337,14 @@ fn opamp_has_r_only_path_to_nonlinear(
 ///    would corrupt that cap's trapezoidal history on rail-violating
 ///    samples; the active-set resolve keeps KCL consistent.
 ///
-/// The future `OpampRailMode::BoyleDiodes` upgrade (Step 5 in the task
-/// series) will make rule 3 promote distortion-class circuits even further
-/// — to a Boyle catch-diode model that produces the soft exponential knee
-/// characteristic of real op-amp saturation. For Step 6 we stop at
-/// `ActiveSet`, which fixes the numerical bug without changing distortion
-/// character; `BoyleDiodes` will change character and lands separately.
+/// `OpampRailMode::BoyleDiodes` has since landed as an explicit opt-in mode
+/// (`--opamp-rail-mode boyle-diodes`, scaffolding in
+/// [`augment_netlist_with_boyle_diodes`]) — a Boyle catch-diode model that
+/// produces the soft exponential knee characteristic of real op-amp
+/// saturation. The auto-resolver deliberately still stops at
+/// `ActiveSet`/`ActiveSetBe` and never picks BoyleDiodes: it is validated
+/// for light clip only and diverges at heavy clip (see
+/// `docs/aidocs/OPAMP_RAIL_MODES.md`, "The BoyleDiodes heavy-clip problem").
 ///
 /// # Explicit user overrides
 ///

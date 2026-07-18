@@ -419,9 +419,11 @@ pub enum CodegenError {
 
 /// Classify whether the nodal emitter can currently stamp a behavioral source.
 ///
-/// Wired today: `I={}` current sources whose expression references only node
-/// voltages, `time`, `ddt`, and `idt`. Deferred (errors loudly): `V={}`
-/// (augmented constraint row), named parameters, and branch-current references.
+/// Wired today: `I={}` current sources AND `V={}` voltage sources (augmented
+/// constraint row) whose expressions reference node voltages, `time`, `ddt`,
+/// `idt`, and named `.param`/`.runtime` parameters (parameter resolution is
+/// validated separately in `generate_nodal`). Deferred (errors loudly):
+/// branch-current references.
 /// See `docs/aidocs/BEHAVIORAL_SOURCES.md §Codegen integration plan`.
 fn behavioral_emitter_supported(b: &crate::mna::BehavioralSourceInfo) -> Result<(), String> {
     if !b.expr.referenced_branches().is_empty() {
@@ -479,8 +481,13 @@ pub struct GeneratedCode {
 
 /// Metadata about decisions made during code generation.
 ///
-/// Populated by the codegen pipeline so the CLI can report what happened
-/// without the user needing `RUST_LOG=info`.
+/// Every field here is actually populated by the codegen pipeline (the CLI
+/// consumes a subset today; the rest are available for diagnostics without
+/// `RUST_LOG=info`). The Schur-vs-full-LU sub-path decision is NOT surfaced
+/// here: it is made inside the nodal emitter from the finished IR, and
+/// duplicating that gate in the pipeline would create a second source of
+/// truth that could silently diverge from what the emitter actually did.
+/// Surfacing it honestly means returning it from the emitter — future work.
 #[cfg(feature = "codegen")]
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
@@ -488,7 +495,10 @@ pub struct CodegenMeta {
     /// Whether backward Euler was auto-selected (spectral radius > threshold).
     /// `false` if the user explicitly requested it via `--backward-euler`.
     pub backward_euler_auto: bool,
-    /// Spectral radius that triggered auto-BE (0.0 if not applicable).
+    /// Spectral radius measured by the trap-stability discriminator that
+    /// triggered auto-BE (0.0 when auto-BE did not fire). Evaluated on the
+    /// trap `S·A_neg` pair at the rate the solver actually ships — under
+    /// oversampling that is the internal (oversampled) rate.
     pub backward_euler_spectral_radius: f64,
     /// DC operating point convergence method (e.g. "Direct NR", "Source Stepping").
     pub dc_op_method: String,
@@ -496,13 +506,12 @@ pub struct CodegenMeta {
     pub dc_op_iterations: usize,
     /// Whether DC operating point converged.
     pub dc_op_converged: bool,
-    /// Nodal sub-path: "schur" or "full-lu" (empty for DK path).
-    pub nodal_subpath: String,
-    /// Nodal full-LU reason (empty if Schur or DK).
-    pub nodal_full_lu_reason: String,
-    /// Whether sparse LU is used (nodal full-LU path only).
+    /// Whether a sparse LU elimination schedule was baked (nodal path;
+    /// requires G_aug density < 40% and N >= 8). `false` on the DK path.
     pub sparse_lu_enabled: bool,
-    /// Sparse LU density percentage (0.0 if not applicable).
+    /// G_aug sparsity-pattern density (0.0..1.0 fraction of nonzeros) that
+    /// drove the sparse-LU decision. 0.0 when not applicable (DK path or
+    /// M=0 circuits, where no pattern is computed).
     pub sparse_lu_density: f64,
     /// Whether parasitic caps were auto-inserted.
     pub parasitic_caps_inserted: bool,
@@ -557,10 +566,16 @@ impl CodeGenerator {
                 )));
             }
         }
-        if self.config.input_node >= kernel.n {
+        // Validate against n_nodes (original circuit nodes), not kernel.n:
+        // kernel.n includes augmented rows (VS/VCVS branch constraints,
+        // inductor branch currents). An input_node pointing at an aug row
+        // would pass a `< kernel.n` check but stamp the input current into
+        // an algebraic constraint row — same rule as output nodes below.
+        if self.config.input_node >= kernel.n_nodes {
             return Err(CodegenError::InvalidConfig(format!(
-                "input_node {} >= N={}",
-                self.config.input_node, kernel.n
+                "input_node {} >= n_nodes={} (original circuit node count; \
+                 augmented rows are not valid input nodes)",
+                self.config.input_node, kernel.n_nodes
             )));
         }
         if self.config.output_nodes.is_empty() {
@@ -649,17 +664,27 @@ impl CodeGenerator {
         let ir = CircuitIR::from_kernel_with_dc_op(kernel, mna, netlist, &self.config, dc_op)?;
         let code = RustEmitter::new()?.emit(&ir)?;
 
+        let backward_euler_auto = ir.solver_config.backward_euler && !self.config.backward_euler;
         Ok(GeneratedCode {
             code,
             n: ir.topology.n,
             m: ir.topology.m,
             meta: CodegenMeta {
-                backward_euler_auto: ir.solver_config.backward_euler && !self.config.backward_euler,
+                backward_euler_auto,
+                // The bake stores the trap rho the discriminator evaluated
+                // (internal-rate matrices under oversampling). Report it
+                // only when auto-BE fired, matching the field contract.
+                backward_euler_spectral_radius: if backward_euler_auto {
+                    ir.trap_discriminator_rho
+                } else {
+                    0.0
+                },
                 dc_op_method: ir.dc_op_method.clone(),
                 dc_op_iterations: ir.dc_op_iterations,
                 dc_op_converged: ir.dc_op_converged,
+                sparse_lu_enabled: ir.sparsity.lu.is_some(),
+                sparse_lu_density: ir.sparsity.g_aug_density,
                 parasitic_caps_inserted,
-                ..CodegenMeta::default()
             },
         })
     }
@@ -843,17 +868,24 @@ impl CodeGenerator {
         let ir = CircuitIR::from_mna(mna, netlist, &self.config)?;
         let code = RustEmitter::new()?.emit(&ir)?;
 
+        let backward_euler_auto = ir.solver_config.backward_euler && !self.config.backward_euler;
         Ok(GeneratedCode {
             code,
             n: ir.topology.n,
             m: ir.topology.m,
             meta: CodegenMeta {
-                backward_euler_auto: ir.solver_config.backward_euler && !self.config.backward_euler,
+                backward_euler_auto,
+                backward_euler_spectral_radius: if backward_euler_auto {
+                    ir.trap_discriminator_rho
+                } else {
+                    0.0
+                },
                 dc_op_method: ir.dc_op_method.clone(),
                 dc_op_iterations: ir.dc_op_iterations,
                 dc_op_converged: ir.dc_op_converged,
+                sparse_lu_enabled: ir.sparsity.lu.is_some(),
+                sparse_lu_density: ir.sparsity.g_aug_density,
                 parasitic_caps_inserted,
-                ..CodegenMeta::default()
             },
         })
     }

@@ -75,8 +75,14 @@ fn bsrc_param_map(ir: &CircuitIR) -> std::collections::BTreeMap<String, String> 
 }
 
 /// Format an `f64` param constant as a Rust literal.
+///
+/// Non-finite values route through `fmt_f64` — `{:e}` would render them as
+/// the invalid Rust tokens `inf` / `-inf` / `NaN` instead of
+/// `f64::INFINITY` / `f64::NEG_INFINITY` / `f64::NAN`.
 fn fmt_param_const(v: f64) -> String {
-    if v == v.trunc() && v.abs() < 1e15 {
+    if !v.is_finite() {
+        fmt_f64(v)
+    } else if v == v.trunc() && v.abs() < 1e15 {
         format!("{:.1}", v)
     } else {
         format!("{:e}", v)
@@ -1589,6 +1595,9 @@ impl RustEmitter {
         code.push_str("    pub diag_nr_max_iter_count: u64,\n");
         code.push_str("    /// Diagnostic: number of backward Euler fallback activations\n");
         code.push_str("    pub diag_be_fallback_count: u64,\n");
+        code.push_str("    /// Diagnostic: number of samples where the active-set rail resolve\n");
+        code.push_str("    /// pinned at least one op-amp output (ActiveSet/ActiveSetBe only)\n");
+        code.push_str("    pub diag_active_set_pin_count: u64,\n");
         code.push_str("    /// Diagnostic: number of times NaN triggered state reset\n");
         code.push_str("    pub diag_nan_reset_count: u64,\n");
         code.push_str("    /// Diagnostic: number of samples that needed adaptive sub-stepping\n");
@@ -1982,6 +1991,7 @@ impl RustEmitter {
         code.push_str("            diag_clamp_count: 0,\n");
         code.push_str("            diag_nr_max_iter_count: 0,\n");
         code.push_str("            diag_be_fallback_count: 0,\n");
+        code.push_str("            diag_active_set_pin_count: 0,\n");
         code.push_str("            diag_nan_reset_count: 0,\n");
         code.push_str("            diag_substep_count: 0,\n");
         code.push_str("            diag_refactor_count: 0,\n");
@@ -2263,6 +2273,7 @@ impl RustEmitter {
         code.push_str("        self.diag_clamp_count = 0;\n");
         code.push_str("        self.diag_nr_max_iter_count = 0;\n");
         code.push_str("        self.diag_be_fallback_count = 0;\n");
+        code.push_str("        self.diag_active_set_pin_count = 0;\n");
         code.push_str("        self.diag_nan_reset_count = 0;\n");
         code.push_str("        self.diag_voltage_damp_count = 0;\n");
         code.push_str("        self.diag_substep_count = 0;\n");
@@ -3101,6 +3112,15 @@ impl RustEmitter {
                         "        self.noise_r_flicker_inv_r[{slot}] = 1.0 / r;\n",
                     ));
                 }
+                // Phase 4: op-amp en_g_diag absolute recompute for pots at an
+                // op-amp in+ (shared refresh_opamp_en_g_diag from noise.methods).
+                if noise
+                    .pot_to_opamp_en_refresh
+                    .get(idx)
+                    .is_some_and(|v| !v.is_empty())
+                {
+                    code.push_str("        self.refresh_opamp_en_g_diag();\n");
+                }
             }
 
             // No NR-state reseed: callers that need one (preset recall,
@@ -3261,6 +3281,15 @@ impl RustEmitter {
                             ));
                         }
                     }
+                }
+                // Phase 4: switch R at an op-amp in+ → en_g_diag recompute.
+                if noise
+                    .switch_to_opamp_en_refresh
+                    .get(idx)
+                    .copied()
+                    .unwrap_or(false)
+                {
+                    code.push_str("        self.refresh_opamp_en_g_diag();\n");
                 }
             }
 
@@ -3792,10 +3821,17 @@ impl RustEmitter {
         code.push_str("        v_pred[i] = sum;\n");
         code.push_str("    }\n\n");
 
-        // Handle linear circuits (M=0): v_pred is the final answer
+        // Handle linear circuits (M=0): v_pred is the final answer, plus
+        // mode-appropriate op-amp rail handling (historically none was
+        // emitted in any mode — see emit_nodal_m0_rail_handling).
         if m == 0 {
             code.push_str("    // Linear circuit: v = v_pred (no NR needed)\n");
-            code.push_str("    let v = v_pred;\n\n");
+            if Self::m0_rail_handling_mutates_v(ir) {
+                code.push_str("    let mut v = v_pred;\n\n");
+            } else {
+                code.push_str("    let v = v_pred;\n\n");
+            }
+            Self::emit_nodal_m0_rail_handling(&mut code, ir, "    ");
         } else {
             // Step 3: Extract device voltages p = N_v * v_pred (O(M*N))
             code.push_str("    // Step 3: Extract device voltages p = N_v * v_pred (sparse)\n");
@@ -4385,7 +4421,7 @@ impl RustEmitter {
                         "rhs_be",
                     );
                 }
-                OpampRailMode::Hard | OpampRailMode::None => {
+                OpampRailMode::Hard => {
                     for oa in &ir.opamps {
                         let target = format!("v[{}]", oa.n_out_idx);
                         if let Some(stmt) =
@@ -4394,6 +4430,12 @@ impl RustEmitter {
                             code.push_str(&format!("        {stmt}\n"));
                         }
                     }
+                }
+                OpampRailMode::None => {
+                    // No clamping — `None` means the caller accepts unbounded
+                    // op-amp output on every path, including the BE fallback.
+                    // (This arm used to share the Hard clamp, which silently
+                    // bounded None-mode output on BE-fallback samples.)
                 }
                 OpampRailMode::BoyleDiodes => {
                     // Catch diodes are physically in the circuit; no post-NR
@@ -5449,6 +5491,13 @@ impl RustEmitter {
             code.push_str("        v = state.v_prev;\n");
             code.push_str("    }\n\n");
 
+            // Op-amp supply rail handling. The M=0 branch historically
+            // emitted none in any mode; see emit_nodal_m0_rail_handling.
+            // (The blanket "no VSAT clamping" rule below applies to
+            // arbitrary nodes — the Hard rail clamp here is scoped to
+            // op-amp OUTPUT nodes, matching the M>0 paths' Hard mode.)
+            Self::emit_nodal_m0_rail_handling(&mut code, ir, "    ");
+
             // No VSAT clamping — matches runtime NodalSolver. Clamping any node
             // creates inconsistency with unclamped neighbors (e.g., 100Ω apart but
             // 227V difference), corrupting the trapezoidal history feedback.
@@ -5731,7 +5780,23 @@ impl RustEmitter {
             // voltages that destabilize downstream device evaluation. Applied after the
             // back-solve, before device voltage limiting.
             //
-            // The clamp itself runs for every mode that wants hard output bounding.
+            // Emitted for `Hard` mode ONLY. This clamp originally ran for
+            // every mode with clampable op-amps (b5c5011 death-spiral
+            // protection), but that contradicted the mode contracts:
+            //   * `None` must leave the output unbounded (raw-diagnostic use);
+            //   * `ActiveSet`/`ActiveSetBe` deliberately skip the in-NR clamp
+            //     so NR converges to the unconstrained solution and the
+            //     post-convergence pin-and-resolve sees a genuine violation
+            //     (the clamp pinned v EXACTLY at the rail, so the resolve's
+            //     detection never fired and ActiveSet degraded to Hard
+            //     semantics on this path);
+            //   * `BoyleDiodes` models saturation with physical catch diodes —
+            //     clamping on top double-limits.
+            // Non-Hard modes keep their divergence protection from the global
+            // node damping (damp_thresh), SPICE device voltage limiting, the
+            // residual check, the substep retry, the BE fallback, and the
+            // failed-sample state-keep below.
+            //
             // For `ActiveSetBe` we used to ALSO raise `active_set_engaged = true`
             // here so the post-convergence check didn't miss a "v pinned exactly at
             // rail" case (the check used strict inequality). That was load-bearing
@@ -5743,14 +5808,17 @@ impl RustEmitter {
             // uses inclusive `>=` / `<=` (see `emit_nodal_active_set_check`), which
             // covers the 4kbuscomp pinned-at-rail case without tracking per-NR-
             // iteration transients.
-            {
+            if matches!(
+                ir.solver_config.opamp_rail_mode,
+                crate::codegen::OpampRailMode::Hard
+            ) {
                 let clampable: Vec<&crate::codegen::ir::OpampIR> = ir
                     .opamps
                     .iter()
                     .filter(|oa| oa.vclamp_hi.is_finite() || oa.vclamp_lo.is_finite())
                     .collect();
                 if !clampable.is_empty() {
-                    code.push_str("        // Per-iteration op-amp output rail clamp\n");
+                    code.push_str("        // Per-iteration op-amp output rail clamp (Hard mode)\n");
                     for oa in &clampable {
                         let o = oa.n_out_idx;
                         if oa.vclamp_hi.is_finite() {
@@ -6004,24 +6072,11 @@ impl RustEmitter {
             ));
             Self::emit_nodal_device_evaluation_final(&mut code, ir, "            ");
 
-            // ActiveSet (plain) — pin and re-solve in trap matrices, preserving
-            // the steady DC rail value the op-amp converged to. Used by
-            // control-path topologies (VCR ALC sidechain etc.) where the
-            // rail-clamped value drives a nonlinear device's operating point.
-            // ActiveSetBe takes a different path: detect-only here, BE
-            // fallback for the actual resolve.
-            if matches!(
-                ir.solver_config.opamp_rail_mode,
-                crate::codegen::OpampRailMode::ActiveSet
-            ) {
-                Self::emit_nodal_active_set_resolve(
-                    &mut code,
-                    ir,
-                    "            ",
-                    "state.a",
-                    "rhs",
-                );
-            }
+            // ActiveSet (plain): the pin-and-resolve used to be emitted right
+            // here, inside the trap NR convergence block — which silently
+            // skipped substep-recovered samples. It now runs once after the
+            // trap+substep section (see "ActiveSet (plain) — pin and
+            // re-solve" below), covering both convergence paths.
 
             code.push_str("            break;\n");
             code.push_str("        }\n");
@@ -6176,10 +6231,16 @@ impl RustEmitter {
             // LU solve
             code.push_str("                    let mut v_new_s = rhs_w;\n");
             code.push_str("                    if !lu_solve(&mut g_s, &mut v_new_s) { break; }\n");
-            // Op-amp supply rail clamping (VCC/VEE) in sub-step. Applied for all
-            // modes that have clampable op-amps — prevents physically impossible
-            // voltages that destabilize downstream device evaluation.
-            {
+            // Op-amp supply rail clamping (VCC/VEE) in sub-step. Hard mode
+            // only — same gating rationale as the trap-loop per-iteration
+            // clamp above: None must stay unbounded, ActiveSet/ActiveSetBe
+            // rely on their post-convergence pin-and-resolve seeing the
+            // genuine (unclamped) violation, and BoyleDiodes saturates via
+            // physical catch diodes.
+            if matches!(
+                ir.solver_config.opamp_rail_mode,
+                crate::codegen::OpampRailMode::Hard
+            ) {
                 let clampable: Vec<&crate::codegen::ir::OpampIR> = ir
                     .opamps
                     .iter()
@@ -6257,6 +6318,24 @@ impl RustEmitter {
             if active_set_be_mode_full_lu {
                 code.push_str("    if converged {\n");
                 Self::emit_nodal_active_set_check(&mut code, ir, "        ", "active_set_engaged");
+                code.push_str("    }\n\n");
+            }
+
+            // ActiveSet (plain) — pin and re-solve in trap matrices, preserving
+            // the steady DC rail value the op-amp converged to. Used by
+            // control-path topologies (VCR ALC sidechain etc.) where the
+            // rail-clamped value drives a nonlinear device's operating point.
+            // Runs on the final converged v from EITHER the regular trap NR
+            // loop or the substep recovery (it used to be emitted inside the
+            // trap NR convergence block, which skipped substep-recovered
+            // samples). ActiveSetBe takes a different path: detect-only above,
+            // BE fallback for the actual resolve.
+            if matches!(
+                ir.solver_config.opamp_rail_mode,
+                crate::codegen::OpampRailMode::ActiveSet
+            ) {
+                code.push_str("    if converged {\n");
+                Self::emit_nodal_active_set_resolve(&mut code, ir, "        ", "state.a", "rhs");
                 code.push_str("    }\n\n");
             }
 
@@ -6397,15 +6476,22 @@ impl RustEmitter {
             code.push_str("            let mut v_new = rhs_work;\n");
             code.push_str("            if !lu_solve(&mut g_aug, &mut v_new) { break; }\n\n");
 
-            // Per-iteration op-amp output rail clamp for BE path
-            {
+            // Per-iteration op-amp output rail clamp for BE path. Hard mode
+            // only — same gating rationale as the trap-loop clamp: for
+            // ActiveSet/ActiveSetBe the post-BE pin-and-resolve below needs
+            // to see the genuine unclamped violation, None stays unbounded,
+            // and BoyleDiodes uses physical catch diodes.
+            if matches!(
+                ir.solver_config.opamp_rail_mode,
+                crate::codegen::OpampRailMode::Hard
+            ) {
                 let clampable: Vec<&crate::codegen::ir::OpampIR> = ir
                     .opamps
                     .iter()
                     .filter(|oa| oa.vclamp_hi.is_finite() || oa.vclamp_lo.is_finite())
                     .collect();
                 if !clampable.is_empty() {
-                    code.push_str("            // Per-iteration op-amp output rail clamp (BE)\n");
+                    code.push_str("            // Per-iteration op-amp output rail clamp (BE, Hard mode)\n");
                     for oa in &clampable {
                         let o = oa.n_out_idx;
                         if oa.vclamp_hi.is_finite() {
@@ -6560,7 +6646,17 @@ impl RustEmitter {
             // the BE result, pin and re-solve against `state.a_be`. BE+pin
             // doesn't develop the trap+pin Nyquist limit cycle, so the cap
             // history stays consistent across the next sample.
-            if active_set_be_mode_full_lu {
+            //
+            // Plain ActiveSet also resolves here when it reaches the BE
+            // fallback (trap + substep both failed): its trap-path resolve
+            // only runs on converged samples, and with the per-iteration
+            // clamp now Hard-gated the BE result would otherwise carry an
+            // unbounded op-amp output into v_prev. Mirrors the Schur BE
+            // fallback's `ActiveSetBe | ActiveSet` dispatch arm.
+            if matches!(
+                ir.solver_config.opamp_rail_mode,
+                crate::codegen::OpampRailMode::ActiveSetBe | crate::codegen::OpampRailMode::ActiveSet
+            ) {
                 Self::emit_nodal_active_set_resolve(
                     &mut code,
                     ir,
@@ -6707,6 +6803,103 @@ impl RustEmitter {
         code
     }
 
+    /// True when [`Self::emit_nodal_m0_rail_handling`] will emit code that
+    /// mutates `v` for this IR — callers use it to decide between
+    /// `let v = …;` and `let mut v = …;` on the linear (M=0) paths.
+    pub(super) fn m0_rail_handling_mutates_v(ir: &CircuitIR) -> bool {
+        use crate::codegen::OpampRailMode;
+        let any_clampable = ir
+            .opamps
+            .iter()
+            .any(|oa| oa.vclamp_hi.is_finite() || oa.vclamp_lo.is_finite());
+        match ir.solver_config.opamp_rail_mode {
+            OpampRailMode::Hard
+            | OpampRailMode::ActiveSet
+            | OpampRailMode::ActiveSetBe => any_clampable,
+            OpampRailMode::None | OpampRailMode::BoyleDiodes | OpampRailMode::Auto => false,
+        }
+    }
+
+    /// Emit op-amp supply-rail handling for the linear (M=0) nodal paths.
+    ///
+    /// Historically the M=0 branches (Schur `v = v_pred` and full-LU direct
+    /// LU solve) emitted NO rail handling in ANY mode — a linear circuit with
+    /// finite-rail op-amps driven past its rails produced physically
+    /// impossible output regardless of the requested mode. This helper emits
+    /// the mode-appropriate handling on the final `v`:
+    ///
+    /// * `Hard` — the plain output clamp. Cheap, and KCL-safe exactly for the
+    ///   `AllDcCoupled` topologies the auto-resolver picks Hard for.
+    /// * `ActiveSet` — the full pin-and-resolve against `state.a`/`rhs`. On a
+    ///   linear circuit this is a single extra dense LU solve per
+    ///   rail-engaged sample (no device re-evaluation: M=0).
+    /// * `ActiveSetBe` — same pin-and-resolve against the trap matrices. The
+    ///   M=0 paths have no BE fallback machinery, so the BE-matrix re-solve
+    ///   ActiveSetBe normally uses is unavailable; a codegen-time warning
+    ///   records the honest degrade (risk: trap+pin ringing on sustained
+    ///   rail engagement into a cap-coupled load).
+    /// * `BoyleDiodes` — nothing. Catch-diode augmentation makes every
+    ///   clamped op-amp contribute M≥1, so a BoyleDiodes circuit that still
+    ///   has M=0 has no clamped op-amps and nothing to do.
+    /// * `None` — nothing, by contract.
+    ///
+    /// The caller must have a mutable `v`, `rhs`, `state`, and (for the
+    /// ActiveSet modes) the generated `lu_solve` in scope — the `needs_lu_solve`
+    /// gate in `emit_nodal` already covers ActiveSet/ActiveSetBe on the Schur
+    /// path, and the full-LU path always emits `lu_solve`.
+    pub(super) fn emit_nodal_m0_rail_handling(code: &mut String, ir: &CircuitIR, indent: &str) {
+        use crate::codegen::OpampRailMode;
+        let any_clampable = ir
+            .opamps
+            .iter()
+            .any(|oa| oa.vclamp_hi.is_finite() || oa.vclamp_lo.is_finite());
+        match ir.solver_config.opamp_rail_mode {
+            OpampRailMode::Hard => {
+                if any_clampable {
+                    code.push_str(&format!(
+                        "{indent}// Op-amp supply rail clamp (Hard mode, linear circuit)\n"
+                    ));
+                    for oa in &ir.opamps {
+                        let target = format!("v[{}]", oa.n_out_idx);
+                        if let Some(stmt) =
+                            Self::rail_clamp_stmt(&target, oa.vclamp_lo, oa.vclamp_hi)
+                        {
+                            code.push_str(&format!("{indent}{stmt}\n"));
+                        }
+                    }
+                    code.push('\n');
+                }
+            }
+            OpampRailMode::ActiveSet => {
+                Self::emit_nodal_active_set_resolve(code, ir, indent, "state.a", "rhs");
+            }
+            OpampRailMode::ActiveSetBe => {
+                if any_clampable {
+                    log::warn!(
+                        "Nodal M=0: ActiveSetBe requested but the linear path has no BE \
+                         fallback machinery — degrading to the trap-matrix ActiveSet \
+                         pin-and-resolve for rail-engaged samples (risk: trap+pin ringing \
+                         on sustained rail engagement into cap-coupled loads)"
+                    );
+                }
+                Self::emit_nodal_active_set_resolve(code, ir, indent, "state.a", "rhs");
+            }
+            OpampRailMode::BoyleDiodes => {
+                // Catch-diode augmentation adds M≥1 per clamped op-amp, so an
+                // M=0 BoyleDiodes circuit has no clamped op-amps — nothing to do.
+            }
+            OpampRailMode::None => {
+                // No clamping — caller accepts unbounded op-amp output.
+            }
+            OpampRailMode::Auto => {
+                unreachable!(
+                    "OpampRailMode::Auto should have been resolved in ir::from_mna; \
+                     emitter should only see concrete modes"
+                );
+            }
+        }
+    }
+
     /// Emit the active-set constrained-resolve block for a nodal NR path.
     ///
     /// Called after NR has converged in the Schur or full-LU nodal paths when
@@ -6798,6 +6991,17 @@ impl RustEmitter {
         // Step 1: detect violations. `pinned_N` carries either `Some(rail)` or
         // `None` based on whether v[out] exceeds its range. `any_pinned` short-
         // circuits the whole resolve when nothing needs clamping (the common case).
+        //
+        // Inclusive comparison (`>=` / `<=`) is deliberate and must stay
+        // coherent with `emit_nodal_active_set_check` (same rationale as its
+        // c3d3eae fix): if anything upstream — the Hard-seeded DC OP, a
+        // previous sample's resolve, or any residual clamp — has left `v[out]`
+        // sitting EXACTLY at the rail bit-for-bit, strict `>` / `<` never
+        // fires, `any_pinned` stays false, and the KCL-consistent pin-and-
+        // resolve silently never runs (historically this degraded ActiveSet
+        // to Hard semantics on the full-LU path). Re-resolving a value already
+        // at the rail is idempotent, so the inclusive form costs at most one
+        // redundant LU solve on exactly-at-rail samples.
         code.push_str(&format!("{indent}    let mut any_pinned = false;\n"));
         for (idx, oa) in clampable.iter().enumerate() {
             // Emit a violation branch per FINITE rail only — formatting an
@@ -6807,7 +7011,7 @@ impl RustEmitter {
             let mut branches = String::new();
             if oa.vclamp_hi.is_finite() {
                 branches.push_str(&format!(
-                    "if v[{node}] > {hi:.17e} {{\n\
+                    "if v[{node}] >= {hi:.17e} {{\n\
                      {indent}        any_pinned = true;\n\
                      {indent}        Some({hi:.17e})\n\
                      {indent}    }} else ",
@@ -6817,7 +7021,7 @@ impl RustEmitter {
             }
             if oa.vclamp_lo.is_finite() {
                 branches.push_str(&format!(
-                    "if v[{node}] < {lo:.17e} {{\n\
+                    "if v[{node}] <= {lo:.17e} {{\n\
                      {indent}        any_pinned = true;\n\
                      {indent}        Some({lo:.17e})\n\
                      {indent}    }} else ",
@@ -6833,6 +7037,9 @@ impl RustEmitter {
         }
 
         code.push_str(&format!("{indent}    if any_pinned {{\n"));
+        code.push_str(&format!(
+            "{indent}        state.diag_active_set_pin_count += 1;\n"
+        ));
 
         // Step 2: build the linear system `A * v = rhs + N_i * i_nl` at the
         // converged operating point. Copy the matrix as scratch, add Gmin on

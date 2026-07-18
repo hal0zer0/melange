@@ -552,6 +552,42 @@ impl RustEmitter {
 
         ctx.insert("dc_block", &ir.dc_block);
 
+        // `current_sample_rate` is read by rebuild_matrices (pots/switches)
+        // AND by the op-amp slew-rate limiter's per-sample dt in
+        // process_sample.rs.tera. Emit the field whenever either consumer
+        // exists — mirrors the nodal-emitter fix (7e32bf8): a DK circuit
+        // with a finite-SR op-amp and no pots would otherwise fail rustc.
+        let needs_current_sr = num_pots > 0
+            || num_switches > 0
+            || ir.opamps.iter().any(|oa| oa.sr.is_finite());
+        ctx.insert("needs_current_sr", &needs_current_sr);
+
+        // DK rail-mode consumption: the DK path implements only the Hard
+        // post-NR clamp. ActiveSet/ActiveSetBe degrade to Hard (+ the BE
+        // fallback that DK already carries), so surface a one-shot runtime
+        // warning at construction of the generated state. `None` suppresses
+        // the clamp entirely (handled in emit_process_sample); Hard and
+        // BoyleDiodes (guarded off DK upstream) emit no warning.
+        let has_clamped_opamp = ir
+            .opamps
+            .iter()
+            .any(|oa| oa.vclamp_lo.is_finite() || oa.vclamp_hi.is_finite());
+        if has_clamped_opamp
+            && matches!(
+                ir.solver_config.opamp_rail_mode,
+                crate::codegen::OpampRailMode::ActiveSet
+                    | crate::codegen::OpampRailMode::ActiveSetBe
+            )
+        {
+            ctx.insert(
+                "opamp_rail_degrade_warn",
+                &format!(
+                    "melange: warning: opamp rail mode '{}' degrades to Hard+BE-fallback on the DK path",
+                    ir.solver_config.opamp_rail_mode.as_str()
+                ),
+            );
+        }
+
         // Backward Euler fallback state fields (for BE fallback in DK NR solver)
         let has_be_fallback = !ir.matrices.s_be.is_empty() && ir.topology.m > 0;
         ctx.insert("has_be_fallback", &has_be_fallback);
@@ -1030,6 +1066,18 @@ impl RustEmitter {
                         }
                     }
                 }
+                // Phase 4: switch R at an op-amp in+ shifts the en Norton
+                // conversion factor — absolute recompute (previously the
+                // switch hook was missing entirely; only pots refreshed).
+                // Runs after `self.switch_N_position = position`.
+                if noise
+                    .switch_to_opamp_en_refresh
+                    .get(idx)
+                    .copied()
+                    .unwrap_or(false)
+                {
+                    out.push_str("        self.refresh_opamp_en_g_diag();\n");
+                }
                 out
             } else {
                 String::new()
@@ -1077,13 +1125,6 @@ impl RustEmitter {
                 .get(idx)
                 .map(Vec::as_slice)
                 .unwrap_or(&[]);
-            let need_r_old = noise.enabled && !opamp_refresh_targets.is_empty();
-            let r_old_line: String = if need_r_old {
-                "        let r_old = self.pot_{IDX}_resistance;\n"
-                    .replace("{IDX}", &idx.to_string())
-            } else {
-                String::new()
-            };
             let noise_update: String = if noise.enabled {
                 let mut out = String::new();
                 if let Some(slot) = noise.pot_to_noise_slot.get(idx).copied().flatten() {
@@ -1096,18 +1137,12 @@ impl RustEmitter {
                         "        self.noise_r_flicker_inv_r[{slot}] = 1.0 / r;\n",
                     ));
                 }
-                // Phase 4: incremental refresh of op-amp en_g_diag for each
-                // op-amp whose in+ this pot touches. `delta_g = 1/r − 1/r_old`
-                // is the change in pot conductance (which goes positively into
-                // the G-matrix diagonal at both pot terminals, including the
-                // op-amp in+ node).
+                // Phase 4: op-amp en_g_diag refresh for pots touching an
+                // op-amp in+. Absolute recompute (BASE + Σ live dynamic G) —
+                // see refresh_opamp_en_g_diag; runs after the new resistance
+                // is stored so it reads the fresh value.
                 if !opamp_refresh_targets.is_empty() {
-                    out.push_str("        let opamp_g_delta = 1.0 / r - 1.0 / r_old;\n");
-                    for &oa_idx in opamp_refresh_targets {
-                        out.push_str(&format!(
-                            "        self.noise_opamp_en_g_diag[{oa_idx}] += opamp_g_delta;\n",
-                        ));
-                    }
+                    out.push_str("        self.refresh_opamp_en_g_diag();\n");
                 }
                 out
             } else {
@@ -1125,7 +1160,6 @@ impl RustEmitter {
                          \x20       if !resistance.is_finite() {{ return; }}\n\
                          \x20       let r = resistance.clamp(POT_{idx}_MIN_R, POT_{idx}_MAX_R);\n\
                          \x20       if (r - self.pot_{idx}_resistance).abs() < 1e-12 {{ return; }}\n\
-{r_old_line}\
                          \x20       self.pot_{idx}_resistance = r;\n\
                          \x20       self.matrices_dirty = true;\n\
 {noise_update}\
@@ -1150,7 +1184,6 @@ impl RustEmitter {
                          \x20       if !resistance.is_finite() {{ return; }}\n\
                          \x20       let r = resistance.clamp(RUNTIME_R_{field_upper}_MIN, RUNTIME_R_{field_upper}_MAX);\n\
                          \x20       if (r - self.pot_{idx}_resistance).abs() < 1e-12 {{ return; }}\n\
-{r_old_line}\
                          \x20       self.pot_{idx}_resistance = r;\n\
                          \x20       self.matrices_dirty = true;\n\
 {noise_update}\
@@ -2231,6 +2264,17 @@ impl RustEmitter {
         let num_outputs = ir.solver_config.output_nodes.len();
         ctx.insert("num_outputs", &num_outputs);
 
+        // Output clamp bound (CodegenConfig::output_clamp_v, default ±10 V).
+        // Used for the final output clamp, the diag_clamp_count threshold,
+        // and the NaN-recovery return path. High-voltage circuits (e.g. the
+        // Wurlitzer power amp at ±30 V) set this above the default; the
+        // nodal emitter already honors it (nodal_emitter.rs) — this threads
+        // it into the DK template as well.
+        ctx.insert(
+            "output_clamp_v",
+            &format!("{:e}", ir.solver_config.output_clamp_v),
+        );
+
         ctx.insert("max_iter", &ir.solver_config.max_iterations);
         ctx.insert("m", &ir.topology.m);
 
@@ -2397,7 +2441,15 @@ impl RustEmitter {
         // whose VCC/VEE are both infinite — those entries exist in
         // `ir.opamps` only because `sr` is finite (slew limiting is handled
         // via a separate `opamp_slew` context block below).
-        if !ir.opamps.is_empty() {
+        //
+        // Rail-mode consumption (DK path): `--opamp-rail-mode none` suppresses
+        // the clamp vars entirely; every other mode emits the Hard post-NR
+        // clamp (ActiveSet/ActiveSetBe degrade to Hard+BE-fallback here — a
+        // one-shot runtime warning is emitted from the generated Default,
+        // see emit_state).
+        if !ir.opamps.is_empty()
+            && ir.solver_config.opamp_rail_mode != crate::codegen::OpampRailMode::None
+        {
             let opamp_clamps: Vec<std::collections::HashMap<&str, String>> = ir
                 .opamps
                 .iter()
@@ -2836,13 +2888,21 @@ pub(super) struct NoiseEmission {
     /// Reverse lookup: `[switch_idx][comp_idx] → r_flicker source index`.
     /// Same shape as `switch_comp_to_noise_slot`; sparse.
     pub switch_comp_to_r_flicker_slot: Vec<Vec<Option<usize>>>,
+    /// Per-switch flag: `true` when the switch controls an R component
+    /// touching some op-amp's non-inverting input, so the emitted
+    /// `set_switch_N(position)` must call `refresh_opamp_en_g_diag()`
+    /// (absolute recompute — see `methods`). Empty when noise is off or no
+    /// op-amp noise sources exist.
+    pub switch_to_opamp_en_refresh: Vec<bool>,
     /// Reverse lookup: `pot_index → list of op-amp source indices` whose
     /// `noise_opamp_en_g_diag[k]` must be refreshed when this pot's
     /// resistance changes (Phase 4). A pot between (a, b) with conductance
-    /// `g_pot` contributes `+g_pot` to `G[a, a]` AND `G[b, b]`. For each
-    /// op-amp source whose `node_plus` matches either terminal, the
-    /// `delta_g = 1/r_new − 1/r_old` is added to `en_g_diag[k]` inside
-    /// the corresponding `set_pot_N` / `set_runtime_R_<field>` body.
+    /// `g_pot` contributes `+g_pot` to `G[a, a]` AND `G[b, b]`. Non-empty
+    /// entries make the corresponding `set_pot_N` / `set_runtime_R_<field>`
+    /// body call `refresh_opamp_en_g_diag()` — an **absolute recompute**
+    /// from `NOISE_OPAMP_EN_G_BASE[k]` + every live dynamic conductance at
+    /// in+ (2026-07-18; replaces the old incremental `+= 1/r − 1/r_old`
+    /// accumulation, which drifted in FP over unbounded knob rides).
     /// Empty for pots that don't touch any op-amp's in+ (zero codegen
     /// overhead for circuits with fixed-resistor input networks — the
     /// common case).
@@ -2850,12 +2910,115 @@ pub(super) struct NoiseEmission {
 }
 
 impl RustEmitter {
-    /// Produce all code fragments for Phase 1 thermal-noise emission.
+    /// Produce all code fragments for noise emission — every phase
+    /// (thermal, shot incl. Γ² smoothing, junction/resistor flicker,
+    /// pentode partition, op-amp en/in). Single source of truth for both
+    /// the DK and nodal codegen paths.
     ///
     /// Returns all-empty `NoiseEmission` (enabled=false) when
-    /// `ir.noise.mode == NoiseMode::Off` or `ir.noise.thermal_sources` is
-    /// empty. All other phases (shot/flicker/op-amp) are deferred — their
-    /// source lists are not populated by the IR builder yet.
+    /// `ir.noise.mode == NoiseMode::Off` or every per-phase source list
+    /// is empty.
+    /// Resolve the shot-suppression multiplier Γ² for one shot source.
+    ///
+    /// - `Junction` → 1.0 (full Schottky shot `2·q·|I|`).
+    /// - `FaBase` → `1/BF`: the FA-reduced NR slot carries `Ic`; the base
+    ///   junction's shot PSD is `2·q·Ib = (1/BF)·2·q·Ic`.
+    /// - `TriodePlate` → van der Ziel space-charge smoothing via the
+    ///   Thompson/North/Harris equivalent noise resistance `R_eq ≈ 2.5/gm`
+    ///   referenced to `T₀ = 290 K` (RCA Review, Jan 1940; van der Ziel,
+    ///   *Noise*, 1954 §14; standard audio form R_eq[triode] = 2.5/gm):
+    ///   `S_i = 4·k·T₀·R_eq·gm² = 10·k·T₀·gm  [A²/Hz]`, so relative to
+    ///   full shot `Γ² = 10·k·T₀·gm / (2·q·I_p)`, evaluated at the DC
+    ///   operating point (gm by central difference of the Koren plate
+    ///   current at the OP Vgk/Vpk) and clamped to (0, 1] — smoothing can
+    ///   never exceed full shot. `.model TUBE(SHOT_GAMMA2=…)` overrides the
+    ///   computation; `SHOT_GAMMA2=1.0` restores the legacy full-shot
+    ///   emission exactly (no `NOISE_SHOT_GAMMA` const, byte-identical).
+    ///   The Γ² *ratio* is a codegen-time constant; the stamp still tracks
+    ///   the live `|i_nl_prev|`, so signal-dependent shot modulation is
+    ///   preserved (the ratio drift of gm/Ip over the swing is second-order).
+    ///   Falls back to 1.0 (full shot) when the OP data is unavailable or
+    ///   degenerate (cutoff bias, gm ≤ 0) — at cutoff the amplitude is ~0
+    ///   anyway.
+    fn resolve_shot_gamma2(ir: &CircuitIR, src: &crate::codegen::ir::ShotNoiseSource) -> f64 {
+        use crate::codegen::ir::ShotSourceKind;
+        const K_B: f64 = 1.380649e-23;
+        const Q_E: f64 = 1.602176634e-19;
+        const T0_K: f64 = 290.0;
+
+        // Explicit override always wins (validated finite > 0 at collection).
+        if let Some(g2) = src.gamma2_override {
+            return g2;
+        }
+        let slot_params = ir
+            .device_slots
+            .iter()
+            .find(|s| s.start_idx == src.slot_idx)
+            .map(|s| &s.params);
+        match src.kind {
+            ShotSourceKind::Junction => 1.0,
+            ShotSourceKind::FaBase => match slot_params {
+                Some(DeviceParams::Bjt(bp)) if bp.beta_f.is_finite() && bp.beta_f > 0.0 => {
+                    1.0 / bp.beta_f
+                }
+                _ => 1.0,
+            },
+            ShotSourceKind::TriodePlate { grid_node } => {
+                let Some(DeviceParams::Tube(tp)) = slot_params else {
+                    return 1.0;
+                };
+                let ip_dc = ir
+                    .dc_nl_currents
+                    .get(src.slot_idx)
+                    .copied()
+                    .unwrap_or(0.0)
+                    .abs();
+                if !(ip_dc.is_finite() && ip_dc > 1e-12) {
+                    return 1.0;
+                }
+                let v_at = |node: usize| -> f64 {
+                    if node == 0 {
+                        0.0
+                    } else {
+                        ir.dc_operating_point
+                            .get(node - 1)
+                            .copied()
+                            .unwrap_or(0.0)
+                    }
+                };
+                let v_k = v_at(src.node_j); // cathode
+                let vgk = v_at(grid_node) - v_k;
+                let vpk = v_at(src.node_i) - v_k;
+                let triode = melange_devices::tube::KorenTriode {
+                    mu: tp.mu,
+                    ex: tp.ex,
+                    kg1: tp.kg1,
+                    kp: tp.kp,
+                    kvb: tp.kvb,
+                    ig_max: tp.ig_max,
+                    vgk_onset: tp.vgk_onset,
+                    lambda: tp.lambda,
+                    mu_b: tp.mu_b,
+                    svar: tp.svar,
+                    ex_b: tp.ex_b,
+                };
+                let h = 1e-3;
+                let gm = (triode.plate_current(vgk + h, vpk)
+                    - triode.plate_current(vgk - h, vpk))
+                    / (2.0 * h);
+                if !(gm.is_finite() && gm > 0.0) {
+                    return 1.0;
+                }
+                let gamma2 = 10.0 * K_B * T0_K * gm / (2.0 * Q_E * ip_dc);
+                if gamma2.is_finite() && gamma2 > 0.0 {
+                    gamma2.min(1.0)
+                } else {
+                    1.0
+                }
+            }
+        }
+    }
+
     pub(super) fn build_noise_emission(&self, ir: &CircuitIR) -> NoiseEmission {
         let thermal_n = ir.noise.thermal_sources.len();
         let shot_n = ir.noise.shot_sources.len();
@@ -2873,10 +3036,40 @@ impl RustEmitter {
         {
             return NoiseEmission::default();
         }
+        // BE-primary calibration (auto-BE promotion or --backward-euler):
+        // every noise scale below carries trap-MNA compensation sized for the
+        // trapezoidal kernel's halved LF gain (A − A_neg = 2G). Under
+        // BE-primary the kernel has FULL LF gain (A − A_neg = G, 2x trap in
+        // amplitude), so the trap-calibrated stamps come out +6 dB hot at LF.
+        // Mirror of the DC-source branch (rhs_const x1 under BE vs x2 trap):
+        // every BE stamp must be HALF the trap stamp's LF amplitude.
+        //   - two-draw phases (thermal, partition, opamp en/in): emit a
+        //     single draw at the trap per-draw amplitude. Dropping the
+        //     w[n] + w[n-1] pair halves the LF amplitude exactly AND removes
+        //     the pair-sum's cos^2 envelope (a spurious -3 dB @ fs/4 droop
+        //     under BE — BE damps z = -1 by itself, no anti-alias pair
+        //     needed).
+        //   - single-draw phases (shot, flicker, r-flicker): halve the
+        //     amplitude via the scale constant (variance / 4).
+        // Numerically validated against the trap kTC anchor in
+        // tests/noise_psd_validation.rs::thermal_noise_be_primary_matches_trap_anchor.
+        // See NOISE.md "Backward-Euler-primary stamps".
+        let be_primary = ir.solver_config.backward_euler;
         // The Kellett pink filter helper is shared between junction flicker
         // (Phase 3) and resistor flicker (Phase 3.5). Emit when either is
         // present.
         let need_kellett = flicker_n > 0 || r_flicker_n > 0;
+        // Flicker absolute calibration (2026-07-18): both flicker phases use
+        // an fs/OS-INVARIANT white-input amplitude scale
+        //   trap:        sqrt(2  · 1/K_pink)   (×2 amplitude = trap-MNA comp)
+        //   BE-primary:  sqrt(0.5 · 1/K_pink)  (physical, full-gain kernel)
+        // where K_pink = kellett_pink_normalized_gain() ≈ 6.0e-3 is the
+        // cascade's |H(ν)|² ≈ K_pink/ν gain constant, computed analytically
+        // at codegen time. Full derivation in ir/noise.rs and NOISE.md
+        // "Flicker calibration".
+        let kellett_k = crate::codegen::ir::kellett_pink_normalized_gain();
+        let flicker_scale_trap = (2.0 / kellett_k).sqrt();
+        let flicker_scale_be = (0.5 / kellett_k).sqrt();
         // `Q_E`, `noise_shot_scale`, `shot_gain` and `set_shot_gain` are
         // shared between Phase 2 shot and Phase 5 pentode partition — both
         // need `sqrt(4·q·…·fs)` amplitudes and the `shot_gain` runtime knob
@@ -2884,6 +3077,68 @@ impl RustEmitter {
         // silences both, matching the user-facing convention agreed with
         // Noyce). Gate the shared infrastructure on whichever phase needs it.
         let need_q_scale = shot_n > 0 || partition_n > 0;
+
+        // Shot-suppression amplitude multipliers sqrt(Γ²) (tube plate
+        // space-charge smoothing, FA base shot 1/BF). Emitted only when at
+        // least one source has Γ² ≠ 1 so plain-junction circuits — and
+        // tube circuits carded with SHOT_GAMMA2=1.0 — remain byte-identical
+        // to pre-Γ builds. See `resolve_shot_gamma2`.
+        let shot_gamma_amp: Vec<f64> = ir
+            .noise
+            .shot_sources
+            .iter()
+            .map(|s| Self::resolve_shot_gamma2(ir, s).sqrt())
+            .collect();
+        let shot_gamma_needed = shot_gamma_amp.iter().any(|g| (g - 1.0).abs() > 1e-12);
+
+        // Phase 4 en-stamp dynamic conductance survey (2026-07-18): for each
+        // op-amp noise source with an active en stamp, find every `.pot` /
+        // `.wiper` / `.runtime R` and every `.switch` R component with a
+        // terminal on `node_plus`. These drive the `refresh_opamp_en_g_diag`
+        // ABSOLUTE recompute: `en_g_diag[k] = BASE[k] + Σ live dynamic G`,
+        // where BASE strips the codegen-time dynamic contributions out of
+        // the static `G[in+, in+]`. Replaces the old incremental
+        // `+= 1/r − 1/r_old` (FP drift over unbounded knob rides) and adds
+        // the previously-missing `.switch` refresh hook.
+        let opamp_dyn_pots: Vec<Vec<usize>> = ir
+            .noise
+            .opamp_noise_sources
+            .iter()
+            .map(|src| {
+                if !(src.en > 0.0 && src.node_plus > 0) {
+                    return Vec::new();
+                }
+                ir.pots
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, p)| p.node_p == src.node_plus || p.node_q == src.node_plus)
+                    .map(|(i, _)| i)
+                    .collect()
+            })
+            .collect();
+        let opamp_dyn_switches: Vec<Vec<(usize, usize)>> = ir
+            .noise
+            .opamp_noise_sources
+            .iter()
+            .map(|src| {
+                if !(src.en > 0.0 && src.node_plus > 0) {
+                    return Vec::new();
+                }
+                let mut v = Vec::new();
+                for (si, sw) in ir.switches.iter().enumerate() {
+                    for (ci, comp) in sw.components.iter().enumerate() {
+                        if comp.component_type == 'R'
+                            && (comp.node_p == src.node_plus || comp.node_q == src.node_plus)
+                        {
+                            v.push((si, ci));
+                        }
+                    }
+                }
+                v
+            })
+            .collect();
+        let opamp_any_dynamic = opamp_dyn_pots.iter().any(|v| !v.is_empty())
+            || opamp_dyn_switches.iter().any(|v| !v.is_empty());
 
         let mut top = String::new();
         top.push_str("// ----------------------------------------------------------------------\n");
@@ -2975,13 +3230,29 @@ impl RustEmitter {
                 "pub(crate) const NOISE_SHOT_NODE_J: [usize; NOISE_SHOT_N] = [{}];\n\n",
                 fmt_usize_arr(&shot_nj)
             ));
+            if shot_gamma_needed {
+                let gamma_amp: Vec<String> =
+                    shot_gamma_amp.iter().map(|g| fmt_f64(*g)).collect();
+                top.push_str(
+                    "/// Per-source shot amplitude multiplier `sqrt(Γ²)`. Γ² = 1 for plain\n\
+                     /// junctions; triode plates carry van der Ziel space-charge smoothing\n\
+                     /// Γ² = 10·k·T₀·gm/(2·q·I_p) at the DC OP (R_eq ≈ 2.5/gm form,\n\
+                     /// Thompson/North/Harris 1940; `.model TUBE(SHOT_GAMMA2=…)` overrides);\n\
+                     /// FA-reduced BJT base-shot sources carry Γ² = 1/BF (slot current is\n\
+                     /// Ic, physical base shot is 2·q·Ic/BF).\n",
+                );
+                top.push_str(&format!(
+                    "pub(crate) const NOISE_SHOT_GAMMA_AMP: [f64; NOISE_SHOT_N] = [{}];\n\n",
+                    gamma_amp.join(", ")
+                ));
+            }
         }
 
         // Flicker (1/f) noise source table. Per-sample amplitude is
-        //   sqrt(4·fs) · sqrt(KF) · |I_prev|^(AF/2) · N(0,1)
-        // fed into a Paul Kellett 7-pole pink filter. The `4·…·fs` matches
-        // the thermal/shot trap-MNA compensation (see NOISE.md "Constant
-        // derivation"). Source collection only adds devices whose `.model`
+        //   sqrt(2/K_pink) · sqrt(KF) · |I_prev|^(AF/2) · N(0,1)   (trap)
+        // fed into a Paul Kellett 7-pole pink filter — fs/OS-invariant,
+        // output PSD S_i(f) = KF·I^AF/f one-sided (see NOISE.md "Flicker
+        // calibration"). Source collection only adds devices whose `.model`
         // supplies `KF > 0`, so zero-KF builds leak no flicker constants.
         if flicker_n > 0 {
             top.push_str(&format!(
@@ -3031,7 +3302,8 @@ impl RustEmitter {
         }
 
         // Resistor flicker (Hooge bias-squared, Phase 3.5). Per-sample
-        // amplitude is `sqrt(KF·fs) · |I_R|^(AF/2) · N(0,1)` fed into the
+        // amplitude is `sqrt(2·KF/K_pink) · |I_R|^(AF/2) · N(0,1)` (trap;
+        // same fs/OS-invariant calibration as junction flicker) fed into the
         // shared Kellett 7-pole pink filter. `I_R = (V_+ − V_−)/R` is read
         // live from `state.v_prev` at each sample. The opt-in collector
         // emits no entries when no resistor sets `KF`, so zero-KF builds
@@ -3228,6 +3500,39 @@ impl RustEmitter {
                 "pub(crate) const NOISE_OPAMP_EN_G_DIAG_DEFAULT: [f64; NOISE_OPAMP_N] = [{}];\n\n",
                 oa_g.join(", ")
             ));
+            if opamp_any_dynamic {
+                let oa_base: Vec<String> = ir
+                    .noise
+                    .opamp_noise_sources
+                    .iter()
+                    .enumerate()
+                    .map(|(k, src)| {
+                        let mut base = src.g_diag_plus_default;
+                        for &p in &opamp_dyn_pots[k] {
+                            base -= ir.pots[p].g_nominal;
+                        }
+                        for &(s, c) in &opamp_dyn_switches[k] {
+                            let nominal = ir.switches[s].components[c].nominal_value;
+                            if nominal.is_finite() && nominal > 0.0 {
+                                base -= 1.0 / nominal;
+                            }
+                        }
+                        fmt_f64(base)
+                    })
+                    .collect();
+                top.push_str(
+                    "/// Static (non-dynamic) part of `G[in+, in+]` per op-amp source —\n\
+                     /// the codegen-time diagonal with every `.pot`/`.wiper`/`.runtime R`/\n\
+                     /// `.switch`-R contribution at in+ stripped out. `refresh_opamp_en_g_diag`\n\
+                     /// rebuilds the live diagonal as BASE + Σ current dynamic conductances\n\
+                     /// (absolute recompute — immune to FP drift, correct after any\n\
+                     /// pot/switch history).\n",
+                );
+                top.push_str(&format!(
+                    "pub(crate) const NOISE_OPAMP_EN_G_BASE: [f64; NOISE_OPAMP_N] = [{}];\n\n",
+                    oa_base.join(", ")
+                ));
+            }
         }
 
         // xoshiro256++ RNG: fast, high-quality, 256-bit state per stream.
@@ -3334,12 +3639,16 @@ impl RustEmitter {
         if need_kellett {
             // Paul Kellett 7-pole pink filter (musicdsp.org pk3 variant,
             // ±0.05 dB over 9.2 octaves). White in, pink out with a ~1/f
-            // PSD shape. The `* 0.11` tail normalizes the cascade to ~unit
-            // RMS gain on unit-variance white — without it, Kellett's raw
-            // output is ~3× the input RMS. Calibration is empirical; the
-            // shipped PSD test asserts slope, not absolute level. Shared
-            // between junction flicker (Phase 3) and resistor flicker
-            // (Phase 3.5).
+            // PSD shape. NOTE on the `* 0.11` tail: it does NOT normalize
+            // the cascade to unit gain — the measured white power gain of
+            // the tailed cascade is ≈ 0.113 (RMS gain ≈ 0.34). Absolute
+            // flicker level is therefore NOT calibrated here; it is set by
+            // the analytic K_pink constant (|H(ν)|² ≈ K_pink/ν ≈ 6.0e-3/ν,
+            // includes the 0.11 tail) baked into `noise_flicker_scale` /
+            // `noise_r_flicker_sqrt_fs`. Do not retune 0.11 — it would
+            // silently shift K_pink out from under the baked constants;
+            // both are derived together at codegen time. Shared between
+            // junction flicker (Phase 3) and resistor flicker (Phase 3.5).
             top.push_str("#[inline(always)]\n");
             top.push_str("fn kellett_pink(white: f64, state: &mut [f64; 7]) -> f64 {\n");
             top.push_str("    state[0] = 0.99886 * state[0] + white * 0.0555179;\n");
@@ -3397,15 +3706,25 @@ impl RustEmitter {
         state_fields.push_str("    pub temperature_k: f64,\n");
         state_fields.push_str("    /// Master seed recorded for reset() re-derivation.\n");
         state_fields.push_str("    pub noise_master_seed: u64,\n");
-        state_fields.push_str(
-            "    /// Precomputed sqrt(8·K_B·T·fs_internal). Halved in the two-draw stamp\n",
-        );
-        state_fields.push_str(
-            "    /// (each draw uses scale/2 so consecutive-draw sum preserves kTC; see\n",
-        );
-        state_fields.push_str(
-            "    /// NOISE.md 'Constant derivation' and 'Nyquist anti-aliasing' sections).\n",
-        );
+        if be_primary {
+            state_fields.push_str(
+                "    /// Precomputed sqrt(2·K_B·T·fs_internal) — BE-primary single-draw\n",
+            );
+            state_fields.push_str(
+                "    /// calibration (un-doubled; see NOISE.md 'Backward-Euler-primary\n",
+            );
+            state_fields.push_str("    /// stamps').\n");
+        } else {
+            state_fields.push_str(
+                "    /// Precomputed sqrt(8·K_B·T·fs_internal). Halved in the two-draw stamp\n",
+            );
+            state_fields.push_str(
+                "    /// (each draw uses scale/2 so consecutive-draw sum preserves kTC; see\n",
+            );
+            state_fields.push_str(
+                "    /// NOISE.md 'Constant derivation' and 'Nyquist anti-aliasing' sections).\n",
+            );
+        }
         state_fields.push_str("    pub noise_thermal_scale: f64,\n");
         state_fields.push_str(
             "    /// Effective internal sample rate (host_rate × OVERSAMPLING_FACTOR).\n",
@@ -3508,16 +3827,37 @@ impl RustEmitter {
                 .push_str("    /// Scalar applied to flicker sources (Phase 3 junction +\n");
             state_fields.push_str("    /// Phase 3.5 resistor). Runtime.\n");
             state_fields.push_str("    pub flicker_gain: f64,\n");
-            state_fields
-                .push_str("    /// Precomputed `sqrt(4·fs_internal)`. Per-sample amplitude is\n");
+            state_fields.push_str(
+                "    /// Flicker white-input scale `sqrt(2/K_pink)` (trap; `sqrt(0.5/K_pink)`\n",
+            );
+            state_fields.push_str(
+                "    /// BE-primary) — fs/OS-INVARIANT. Per-sample amplitude is\n",
+            );
             state_fields.push_str(
                 "    /// `noise_flicker_scale · NOISE_FLICKER_SQRT_KF[k] · |I_prev|^(AF/2)`\n",
             );
-            state_fields.push_str("    /// before being shaped by the Kellett pink filter.\n");
+            state_fields.push_str("    /// before being shaped by the Kellett pink filter,\n");
+            state_fields.push_str(
+                "    /// landing the output PSD at S_i(f) = KF·|I|^AF / f (one-sided).\n",
+            );
             state_fields.push_str("    pub noise_flicker_scale: f64,\n");
             state_fields
                 .push_str("    /// Per-source last-stamped `i_n` cache (BE-fallback replay).\n");
             state_fields.push_str("    pub noise_flicker_last_i_n: [f64; NOISE_FLICKER_N],\n");
+            if !be_primary {
+                state_fields.push_str(
+                    "    /// Previous half-stamp of the flicker Nyquist anti-alias pair\n\
+                     \x20   /// (`i_n = w[n] + w[n-1]`, w = 0.5·amp·pink). The Kellett cascade\n\
+                     \x20   /// only attenuates Nyquist ~14 dB; on resistive junction nodes the\n\
+                     \x20   /// trap z=-1 pole amplifies that tail by tens of dB and the device\n\
+                     \x20   /// nonlinearity intermodulates it into the audio band (same failure\n\
+                     \x20   /// class as the 2026-04-24 thermal artifact). The pair-sum zeroes\n\
+                     \x20   /// the Nyquist bin while leaving the audio-band 1/f calibration\n\
+                     \x20   /// unchanged (cos²(πf/fs) ≈ 1). Zeroed at default/reset/set_seed.\n",
+                );
+                state_fields
+                    .push_str("    pub noise_flicker_w_prev: [f64; NOISE_FLICKER_N],\n");
+            }
         }
         if r_flicker_n > 0 {
             state_fields
@@ -3557,14 +3897,29 @@ impl RustEmitter {
             state_fields
                 .push_str("    /// Per-source last-stamped `i_n` cache (BE-fallback replay).\n");
             state_fields.push_str("    pub noise_r_flicker_last_i_n: [f64; NOISE_R_FLICKER_N],\n");
+            if !be_primary {
+                state_fields.push_str(
+                    "    /// Previous half-stamp of the r-flicker Nyquist anti-alias pair\n\
+                     \x20   /// (same scheme as `noise_flicker_w_prev`).\n",
+                );
+                state_fields
+                    .push_str("    pub noise_r_flicker_w_prev: [f64; NOISE_R_FLICKER_N],\n");
+            }
+            state_fields.push_str(
+                "    /// Resistor-flicker white-input scale — same fs/OS-INVARIANT\n",
+            );
+            state_fields.push_str(
+                "    /// `sqrt(2/K_pink)` (trap) / `sqrt(0.5/K_pink)` (BE) constant as\n",
+            );
             state_fields
-                .push_str("    /// Precomputed `sqrt(fs_internal)`. Per-sample amplitude is\n");
+                .push_str("    /// junction flicker. Field name is legacy (held `sqrt(fs)`\n");
             state_fields
-                .push_str("    /// `sqrt_fs · NOISE_R_FLICKER_SQRT_KF[k] · |I_R|^(AF/2)` before\n");
+                .push_str("    /// before the 2026-07-18 calibration fix). Per-sample amplitude\n");
             state_fields
-                .push_str("    /// the Kellett filter. Refreshed in `set_sample_rate`. No T\n");
+                .push_str("    /// `· NOISE_R_FLICKER_SQRT_KF[k] · |I_R|^(AF/2)` before the\n");
             state_fields
-                .push_str("    /// coupling — Hooge 1/f is bias-driven and T-independent.\n");
+                .push_str("    /// Kellett filter. No T coupling — Hooge 1/f is bias-driven\n");
+            state_fields.push_str("    /// and T-independent.\n");
             state_fields.push_str("    pub noise_r_flicker_sqrt_fs: f64,\n");
             if flicker_n == 0 {
                 // r_flicker without junction flicker still needs flicker_gain.
@@ -3628,11 +3983,15 @@ impl RustEmitter {
             );
             state_fields.push_str("    /// Live `G[in+, in+]` mirror — initialized to\n");
             state_fields.push_str(
-                "    /// `NOISE_OPAMP_EN_G_DIAG_DEFAULT`. v1: refreshed only on `reset()`\n",
+                "    /// `NOISE_OPAMP_EN_G_DIAG_DEFAULT`; recomputed absolutely by\n",
             );
-            state_fields
-                .push_str("    /// / `set_seed()` (static). v1.5 will refresh under dynamic-R\n");
-            state_fields.push_str("    /// commits (`.pot` / `.switch` setters that touch in+).\n");
+            state_fields.push_str(
+                "    /// `refresh_opamp_en_g_diag()` from every pot/runtime-R/switch\n",
+            );
+            state_fields.push_str(
+                "    /// setter whose element touches in+; restored to the default on\n",
+            );
+            state_fields.push_str("    /// `reset()` / `set_seed()`.\n");
             state_fields.push_str("    pub noise_opamp_en_g_diag: [f64; NOISE_OPAMP_N],\n");
             state_fields.push_str("    /// Two-draw lag buffers — separate for en, in+, in-.\n");
             state_fields.push_str("    pub noise_opamp_en_w_prev: [f64; NOISE_OPAMP_N],\n");
@@ -3679,9 +4038,21 @@ impl RustEmitter {
         //  RNG draw. Net: output V²_rms = kT/C across every RC lowpass,
         //  matching the Nyquist kTC equilibrium. Validated by the kTC
         //  theorem test in tests/noise_psd_validation.rs.)
-        default_stmts.push_str(
-            "        let noise_thermal_scale = (8.0 * K_B * T_ROOM_K * fs_internal).sqrt();\n",
-        );
+        if be_primary {
+            default_stmts.push_str(
+                "        // BE-primary: single-draw stamp at the un-doubled amplitude\n\
+                 \x20       // sqrt(2*K_B*T*fs) — BE's LF kernel gain (A - A_neg = G) is 2x\n\
+                 \x20       // trap's (2G), so the trap pair-sum stamp would be +6 dB hot.\n\
+                 \x20       // See NOISE.md 'Backward-Euler-primary stamps'.\n",
+            );
+            default_stmts.push_str(
+                "        let noise_thermal_scale = (2.0 * K_B * T_ROOM_K * fs_internal).sqrt();\n",
+            );
+        } else {
+            default_stmts.push_str(
+                "        let noise_thermal_scale = (8.0 * K_B * T_ROOM_K * fs_internal).sqrt();\n",
+            );
+        }
         default_stmts.push_str("        let noise_rng = seed_noise_rngs::<NOISE_THERMAL_N>(NOISE_MASTER_SEED_DEFAULT);\n");
         if need_q_scale {
             default_stmts.push_str("        // Shared shot/partition amplitude: sqrt(4·Q_E·fs).\n");
@@ -3700,8 +4071,19 @@ impl RustEmitter {
                 "        // per-sample sqrt(...) factor (I_p·I_s/(I_p+I_s) rather than\n",
             );
             default_stmts.push_str("        // |I|).\n");
-            default_stmts
-                .push_str("        let noise_shot_scale = (4.0 * Q_E * fs_internal).sqrt();\n");
+            if be_primary {
+                default_stmts.push_str(
+                    "        // BE-primary: half amplitude (X=1) — BE's full LF kernel gain\n\
+                     \x20       // makes the trap X=4 stamp +6 dB hot. Partition consumes this\n\
+                     \x20       // scale at full amplitude single-draw (its trap x0.5 pair-sum\n\
+                     \x20       // factor is dropped in the stamp).\n",
+                );
+                default_stmts
+                    .push_str("        let noise_shot_scale = (Q_E * fs_internal).sqrt();\n");
+            } else {
+                default_stmts
+                    .push_str("        let noise_shot_scale = (4.0 * Q_E * fs_internal).sqrt();\n");
+            }
         }
         if shot_n > 0 {
             default_stmts
@@ -3715,33 +4097,56 @@ impl RustEmitter {
             default_stmts.push_str(
                 "        // Per-source white-input variance fed into the Kellett filter:\n",
             );
-            default_stmts.push_str("        //   σ_w² = 4·KF·|I|^AF·fs\n");
+            default_stmts.push_str(&format!(
+                "        //   σ_w² = {}·KF·|I|^AF / K_pink,  K_pink ≈ {:.4e}\n",
+                if be_primary { "0.5" } else { "2" },
+                kellett_k
+            ));
             default_stmts.push_str(
-                "        // (same 2× trap-MNA compensation as thermal/shot). The `sqrt(4·fs)`\n",
+                "        // K_pink is the Kellett cascade's normalized-frequency gain\n\
+                 \x20       // constant (|H(ν)|² ≈ K_pink/ν), computed analytically at codegen\n\
+                 \x20       // time (kellett_pink_normalized_gain in ir/noise.rs). Because the\n\
+                 \x20       // pink filter's gain at fixed physical f scales as K_pink·fs/f,\n\
+                 \x20       // the white-input variance must be fs-INDEPENDENT for the output\n\
+                 \x20       // PSD to land at S_i(f) = KF·I^AF/f (one-sided, ngspice KF/AF\n\
+                 \x20       // semantics) at every fs and oversampling factor. The 2 (vs the\n\
+                 \x20       // physical 0.5) carries the trap-MNA ×2-amplitude compensation;\n\
+                 \x20       // BE-primary keeps the physical 0.5 (full-gain kernel).\n",
             );
-            default_stmts.push_str(
-                "        // factor is shared across sources; sqrt(KF) and |I|^(AF/2) live\n",
-            );
-            default_stmts.push_str("        // in per-source constants and runtime state.\n");
-            default_stmts
-                .push_str("        let noise_flicker_scale = (4.0 * fs_internal).sqrt();\n");
+            default_stmts.push_str(&format!(
+                "        let noise_flicker_scale = {};\n",
+                fmt_f64(if be_primary {
+                    flicker_scale_be
+                } else {
+                    flicker_scale_trap
+                })
+            ));
             default_stmts.push_str("        let noise_flicker_rng = seed_noise_rngs_salted::<NOISE_FLICKER_N>(NOISE_MASTER_SEED_DEFAULT, NOISE_FLICKER_SALT);\n");
         }
         if r_flicker_n > 0 {
             default_stmts
                 .push_str("        // Resistor-flicker streams (Hooge bias-squared, Phase 3.5).\n");
-            default_stmts
-                .push_str("        // Per-sample white-input variance:  σ_w² = KF·|I_R|^AF·fs\n");
-            default_stmts
-                .push_str("        // (no factor of 4 — resistor flicker is not trap-stamped\n");
+            default_stmts.push_str(&format!(
+                "        // Per-source white-input variance: σ_w² = {}·KF·|I_R|^AF / K_pink —\n",
+                if be_primary { "0.5" } else { "2" }
+            ));
             default_stmts.push_str(
-                "        // through the (A − A_neg) = 2G companion path; the amplitude\n",
+                "        // identical calibration to junction flicker (same Kellett cascade,\n\
+                 \x20       // same Norton RHS stamp through the same trap/BE kernel — the old\n\
+                 \x20       // claim that r-flicker bypasses the (A − A_neg) = 2G companion\n\
+                 \x20       // gain was false), so output PSD lands at S_i = KF·I_R^AF/f\n\
+                 \x20       // one-sided, fs/OS-invariant. Field name `noise_r_flicker_sqrt_fs`\n\
+                 \x20       // is legacy (pre-2026-07-18 it held sqrt(fs)); it now carries the\n\
+                 \x20       // fs-independent scale constant.\n",
             );
-            default_stmts
-                .push_str("        // basis is current through the resistor, not a Norton stamp\n");
-            default_stmts
-                .push_str("        // that needs DC-gain compensation). `sqrt_fs` is shared.\n");
-            default_stmts.push_str("        let noise_r_flicker_sqrt_fs = fs_internal.sqrt();\n");
+            default_stmts.push_str(&format!(
+                "        let noise_r_flicker_sqrt_fs = {};\n",
+                fmt_f64(if be_primary {
+                    flicker_scale_be
+                } else {
+                    flicker_scale_trap
+                })
+            ));
             default_stmts.push_str("        let noise_r_flicker_rng = seed_noise_rngs_salted::<NOISE_R_FLICKER_N>(NOISE_MASTER_SEED_DEFAULT, NOISE_R_FLICKER_SALT);\n");
         }
         if partition_n > 0 {
@@ -3764,8 +4169,17 @@ impl RustEmitter {
             default_stmts.push_str(
                 "        // in- at 2k+1). Shared `sqrt(2·fs)` factor — see state field doc.\n",
             );
-            default_stmts
-                .push_str("        let noise_opamp_sqrt_fs = (2.0 * fs_internal).sqrt();\n");
+            if be_primary {
+                default_stmts.push_str(
+                    "        // BE-primary: sqrt(0.5*fs) = trap per-draw amplitude; the stamp\n\
+                     \x20       // is single-draw at full scale (no x0.5, no w_prev pair).\n",
+                );
+                default_stmts
+                    .push_str("        let noise_opamp_sqrt_fs = (0.5 * fs_internal).sqrt();\n");
+            } else {
+                default_stmts
+                    .push_str("        let noise_opamp_sqrt_fs = (2.0 * fs_internal).sqrt();\n");
+            }
             default_stmts.push_str("        let noise_opamp_en_rng = seed_noise_rngs_salted::<NOISE_OPAMP_N>(NOISE_MASTER_SEED_DEFAULT, NOISE_OPAMP_EN_SALT);\n");
             default_stmts.push_str("        let noise_opamp_in_rng = seed_noise_rngs_salted::<NOISE_OPAMP_IN_N>(NOISE_MASTER_SEED_DEFAULT, NOISE_OPAMP_IN_SALT);\n");
         }
@@ -3804,6 +4218,10 @@ impl RustEmitter {
             default_fields.push_str("            noise_flicker_scale,\n");
             default_fields
                 .push_str("            noise_flicker_last_i_n: [0.0; NOISE_FLICKER_N],\n");
+            if !be_primary {
+                default_fields
+                    .push_str("            noise_flicker_w_prev: [0.0; NOISE_FLICKER_N],\n");
+            }
         }
         if r_flicker_n > 0 {
             default_fields.push_str("            noise_r_flicker_rng,\n");
@@ -3816,6 +4234,11 @@ impl RustEmitter {
                 .push_str("            noise_r_flicker_inv_r: NOISE_R_FLICKER_INV_R_DEFAULT,\n");
             default_fields
                 .push_str("            noise_r_flicker_last_i_n: [0.0; NOISE_R_FLICKER_N],\n");
+            if !be_primary {
+                default_fields.push_str(
+                    "            noise_r_flicker_w_prev: [0.0; NOISE_R_FLICKER_N],\n",
+                );
+            }
             default_fields.push_str("            noise_r_flicker_sqrt_fs,\n");
             if flicker_n == 0 {
                 default_fields.push_str("            flicker_gain: 1.0,\n");
@@ -3889,6 +4312,10 @@ impl RustEmitter {
             reset_body
                 .push_str("        self.noise_flicker_state = [[0.0; 7]; NOISE_FLICKER_N];\n");
             reset_body.push_str("        self.noise_flicker_last_i_n = [0.0; NOISE_FLICKER_N];\n");
+            if !be_primary {
+                reset_body
+                    .push_str("        self.noise_flicker_w_prev = [0.0; NOISE_FLICKER_N];\n");
+            }
         }
         if r_flicker_n > 0 {
             reset_body.push_str(
@@ -3902,6 +4329,11 @@ impl RustEmitter {
                 .push_str("        self.noise_r_flicker_state = [[0.0; 7]; NOISE_R_FLICKER_N];\n");
             reset_body
                 .push_str("        self.noise_r_flicker_last_i_n = [0.0; NOISE_R_FLICKER_N];\n");
+            if !be_primary {
+                reset_body.push_str(
+                    "        self.noise_r_flicker_w_prev = [0.0; NOISE_R_FLICKER_N];\n",
+                );
+            }
             reset_body
                 .push_str("        self.noise_r_flicker_inv_r = NOISE_R_FLICKER_INV_R_DEFAULT;\n");
         }
@@ -3943,24 +4375,42 @@ impl RustEmitter {
                 .push_str("        self.noise_opamp_in_last_i_n = [0.0; NOISE_OPAMP_IN_N];\n");
         }
 
-        // set_sample_rate tail: recompute thermal_scale at the new rate
+        // set_sample_rate tail: recompute noise scales at the new rate.
+        // BE-primary builds use the un-doubled/halved factors — keep in sync
+        // with the Default derivation above (see BE-primary comment there).
         let mut ssr_body = String::new();
-        ssr_body
-            .push_str("        // Noise: recompute sqrt(4·K_B·T·fs_internal) for the new rate.\n");
+        ssr_body.push_str("        // Noise: recompute rate-dependent scales for the new rate.\n");
         ssr_body.push_str("        self.noise_fs = sample_rate * OVERSAMPLING_FACTOR as f64;\n");
-        ssr_body.push_str("        self.noise_thermal_scale = (8.0 * K_B * self.temperature_k * self.noise_fs).sqrt();\n");
-        if need_q_scale {
-            ssr_body
-                .push_str("        self.noise_shot_scale = (4.0 * Q_E * self.noise_fs).sqrt();\n");
+        if be_primary {
+            ssr_body.push_str("        self.noise_thermal_scale = (2.0 * K_B * self.temperature_k * self.noise_fs).sqrt();\n");
+            if need_q_scale {
+                ssr_body
+                    .push_str("        self.noise_shot_scale = (Q_E * self.noise_fs).sqrt();\n");
+            }
+            if opamp_n > 0 {
+                ssr_body.push_str(
+                    "        self.noise_opamp_sqrt_fs = (0.5 * self.noise_fs).sqrt();\n",
+                );
+            }
+        } else {
+            ssr_body.push_str("        self.noise_thermal_scale = (8.0 * K_B * self.temperature_k * self.noise_fs).sqrt();\n");
+            if need_q_scale {
+                ssr_body.push_str(
+                    "        self.noise_shot_scale = (4.0 * Q_E * self.noise_fs).sqrt();\n",
+                );
+            }
+            if opamp_n > 0 {
+                ssr_body.push_str(
+                    "        self.noise_opamp_sqrt_fs = (2.0 * self.noise_fs).sqrt();\n",
+                );
+            }
         }
-        if flicker_n > 0 {
-            ssr_body.push_str("        self.noise_flicker_scale = (4.0 * self.noise_fs).sqrt();\n");
-        }
-        if r_flicker_n > 0 {
-            ssr_body.push_str("        self.noise_r_flicker_sqrt_fs = self.noise_fs.sqrt();\n");
-        }
-        if opamp_n > 0 {
-            ssr_body.push_str("        self.noise_opamp_sqrt_fs = (2.0 * self.noise_fs).sqrt();\n");
+        if flicker_n > 0 || r_flicker_n > 0 {
+            ssr_body.push_str(
+                "        // Flicker scales are fs/OS-INVARIANT by construction (the Kellett\n\
+                 \x20       // pink filter's K_pink·fs/f gain at fixed physical f cancels the\n\
+                 \x20       // white input's 1/fs PSD) — nothing to recompute here.\n",
+            );
         }
 
         // Public API
@@ -3987,9 +4437,15 @@ impl RustEmitter {
         methods.push_str("        if !(kelvin.is_finite() && kelvin > 0.0) { return; }\n");
         methods.push_str("        self.temperature_k = kelvin;\n");
         methods.push_str("        // Recompute thermal_scale at the currently-set sample rate.\n");
-        methods.push_str(
-            "        self.noise_thermal_scale = (8.0 * K_B * kelvin * self.noise_fs).sqrt();\n",
-        );
+        if be_primary {
+            methods.push_str(
+                "        self.noise_thermal_scale = (2.0 * K_B * kelvin * self.noise_fs).sqrt();\n",
+            );
+        } else {
+            methods.push_str(
+                "        self.noise_thermal_scale = (8.0 * K_B * kelvin * self.noise_fs).sqrt();\n",
+            );
+        }
         methods.push_str("    }\n\n");
         if need_q_scale {
             methods
@@ -4037,6 +4493,43 @@ impl RustEmitter {
             );
             methods.push_str("    /// Runtime-settable; set to `0.0` to mute op-amp IC hiss.\n");
             methods.push_str("    pub fn set_opamp_input_gain(&mut self, gain: f64) { self.opamp_input_gain = gain; }\n\n");
+            if opamp_any_dynamic {
+                let is_nodal =
+                    matches!(ir.solver_mode, crate::codegen::ir::SolverMode::Nodal);
+                methods.push_str(
+                    "    /// Absolute recompute of the live `G[in+, in+]` diagonal used as the\n\
+                     \x20   /// en-stamp Norton conversion factor. Called by every `set_pot_N` /\n\
+                     \x20   /// `set_runtime_R_<field>` / `set_switch_N` whose element touches an\n\
+                     \x20   /// op-amp non-inverting input. Absolute (BASE + Σ live dynamic G)\n\
+                     \x20   /// rather than incremental so unbounded knob rides cannot\n\
+                     \x20   /// accumulate FP drift.\n",
+                );
+                methods.push_str("    fn refresh_opamp_en_g_diag(&mut self) {\n");
+                for (k, _src) in ir.noise.opamp_noise_sources.iter().enumerate() {
+                    if opamp_dyn_pots[k].is_empty() && opamp_dyn_switches[k].is_empty() {
+                        continue;
+                    }
+                    methods.push_str(&format!(
+                        "        self.noise_opamp_en_g_diag[{k}] = NOISE_OPAMP_EN_G_BASE[{k}]"
+                    ));
+                    for &p in &opamp_dyn_pots[k] {
+                        methods.push_str(&format!("\n            + 1.0 / self.pot_{p}_resistance"));
+                    }
+                    for &(s, c) in &opamp_dyn_switches[k] {
+                        if is_nodal {
+                            methods.push_str(&format!(
+                                "\n            + 1.0 / SWITCH_{s}_COMP_{c}_VALUES[self.switch_{s}_position]"
+                            ));
+                        } else {
+                            methods.push_str(&format!(
+                                "\n            + 1.0 / SWITCH_{s}_VALUES[self.switch_{s}_position][{c}]"
+                            ));
+                        }
+                    }
+                    methods.push_str(";\n");
+                }
+                methods.push_str("    }\n\n");
+            }
         }
         methods.push_str("    /// Set the master seed. `0` → entropy-seeded from system clock.\n");
         methods.push_str(
@@ -4063,6 +4556,10 @@ impl RustEmitter {
                 .push_str("        self.noise_flicker_gaussian_cache = [None; NOISE_FLICKER_N];\n");
             methods.push_str("        self.noise_flicker_state = [[0.0; 7]; NOISE_FLICKER_N];\n");
             methods.push_str("        self.noise_flicker_last_i_n = [0.0; NOISE_FLICKER_N];\n");
+            if !be_primary {
+                methods
+                    .push_str("        self.noise_flicker_w_prev = [0.0; NOISE_FLICKER_N];\n");
+            }
         }
         if r_flicker_n > 0 {
             methods.push_str("        self.noise_r_flicker_rng = seed_noise_rngs_salted::<NOISE_R_FLICKER_N>(master, NOISE_R_FLICKER_SALT);\n");
@@ -4072,6 +4569,11 @@ impl RustEmitter {
             methods
                 .push_str("        self.noise_r_flicker_state = [[0.0; 7]; NOISE_R_FLICKER_N];\n");
             methods.push_str("        self.noise_r_flicker_last_i_n = [0.0; NOISE_R_FLICKER_N];\n");
+            if !be_primary {
+                methods.push_str(
+                    "        self.noise_r_flicker_w_prev = [0.0; NOISE_R_FLICKER_N];\n",
+                );
+            }
         }
         if partition_n > 0 {
             methods.push_str("        self.noise_partition_rng = seed_noise_rngs_salted::<NOISE_PARTITION_N>(master, NOISE_PARTITION_SALT);\n");
@@ -4110,19 +4612,35 @@ impl RustEmitter {
         // cos²(πf/fs) envelope integrates to the same low-frequency PSD as flat
         // white when convolved with the RC lowpass (fc << fs/2). Verified in
         // tests/noise_psd_validation.rs::thermal_noise_matches_ktc_theorem.
-        rhs_stamp.push_str(
+        if be_primary {
+            rhs_stamp.push_str(
+                "        // BE-primary single-draw thermal stamp (un-doubled amplitude; no\n\
+                 \x20       // w[n]+w[n-1] pair — BE damps z=-1 itself, and the pair-sum's\n\
+                 \x20       // cos^2 envelope would add a spurious -3 dB @ fs/4 droop).\n",
+            );
+            rhs_stamp.push_str("        let scale_th = state.noise_thermal_scale * state.noise_gain * state.thermal_gain;\n");
+            rhs_stamp.push_str("        if scale_th != 0.0 {\n");
+            rhs_stamp.push_str("            for k in 0..NOISE_THERMAL_N {\n");
+            rhs_stamp.push_str("                let g = gaussian(&mut state.noise_rng[k], &mut state.noise_gaussian_cache[k]);\n");
+            rhs_stamp.push_str(
+                "                let i_n = scale_th * state.noise_thermal_sqrt_inv_r[k] * g;\n",
+            );
+            rhs_stamp.push_str("                state.noise_thermal_last_i_n[k] = i_n;\n");
+        } else {
+            rhs_stamp.push_str(
             "        // Two-draw thermal stamp: w_new + w_prev (Nyquist-zeroed, kTC-calibrated).\n",
         );
-        rhs_stamp.push_str("        let scale_half = state.noise_thermal_scale * state.noise_gain * state.thermal_gain * 0.5;\n");
-        rhs_stamp.push_str("        if scale_half != 0.0 {\n");
-        rhs_stamp.push_str("            for k in 0..NOISE_THERMAL_N {\n");
-        rhs_stamp.push_str("                let g = gaussian(&mut state.noise_rng[k], &mut state.noise_gaussian_cache[k]);\n");
-        rhs_stamp.push_str(
-            "                let w_new = scale_half * state.noise_thermal_sqrt_inv_r[k] * g;\n",
-        );
-        rhs_stamp.push_str("                let i_n = w_new + state.noise_thermal_w_prev[k];\n");
-        rhs_stamp.push_str("                state.noise_thermal_w_prev[k] = w_new;\n");
-        rhs_stamp.push_str("                state.noise_thermal_last_i_n[k] = i_n;\n");
+            rhs_stamp.push_str("        let scale_half = state.noise_thermal_scale * state.noise_gain * state.thermal_gain * 0.5;\n");
+            rhs_stamp.push_str("        if scale_half != 0.0 {\n");
+            rhs_stamp.push_str("            for k in 0..NOISE_THERMAL_N {\n");
+            rhs_stamp.push_str("                let g = gaussian(&mut state.noise_rng[k], &mut state.noise_gaussian_cache[k]);\n");
+            rhs_stamp.push_str(
+                "                let w_new = scale_half * state.noise_thermal_sqrt_inv_r[k] * g;\n",
+            );
+            rhs_stamp.push_str("                let i_n = w_new + state.noise_thermal_w_prev[k];\n");
+            rhs_stamp.push_str("                state.noise_thermal_w_prev[k] = w_new;\n");
+            rhs_stamp.push_str("                state.noise_thermal_last_i_n[k] = i_n;\n");
+        }
         rhs_stamp.push_str("                let ni = NOISE_THERMAL_NODE_I[k];\n");
         rhs_stamp.push_str("                let nj = NOISE_THERMAL_NODE_J[k];\n");
         rhs_stamp.push_str("                if ni > 0 { rhs[ni - 1] += i_n; }\n");
@@ -4136,8 +4654,18 @@ impl RustEmitter {
         rhs_stamp.push_str("            state.noise_thermal_last_i_n = [0.0; NOISE_THERMAL_N];\n");
         rhs_stamp.push_str("        }\n");
         if shot_n > 0 {
+            if be_primary {
+                rhs_stamp.push_str(
+                    "        // Shot: sqrt(q·|I_prev|·fs) per source (BE-primary: half the\n\
+                     \x20       // trap amplitude — see the scale derivation in Default).\n",
+                );
+            } else {
+                rhs_stamp.push_str(
+                    "        // Shot: sqrt(4·q·|I_prev|·fs) per source.\n",
+                );
+            }
             rhs_stamp
-                .push_str("        // Shot: sqrt(4·q·|I_prev|·fs) per source. `|I_prev|` is the\n");
+                .push_str("        // `|I_prev|` is the\n");
             rhs_stamp.push_str(
                 "        // one-sample-lagged junction current from `state.i_nl_prev`;\n",
             );
@@ -4156,7 +4684,11 @@ impl RustEmitter {
             );
             rhs_stamp.push_str("                if i_abs < 1e-15 { continue; }\n");
             rhs_stamp.push_str("                let g = gaussian(&mut state.noise_shot_rng[k], &mut state.noise_shot_gaussian_cache[k]);\n");
-            rhs_stamp.push_str("                let i_n = shot_scale * i_abs.sqrt() * g;\n");
+            if shot_gamma_needed {
+                rhs_stamp.push_str("                let i_n = shot_scale * NOISE_SHOT_GAMMA_AMP[k] * i_abs.sqrt() * g;\n");
+            } else {
+                rhs_stamp.push_str("                let i_n = shot_scale * i_abs.sqrt() * g;\n");
+            }
             rhs_stamp.push_str("                state.noise_shot_last_i_n[k] = i_n;\n");
             rhs_stamp.push_str("                let ni = NOISE_SHOT_NODE_I[k];\n");
             rhs_stamp.push_str("                let nj = NOISE_SHOT_NODE_J[k];\n");
@@ -4168,8 +4700,9 @@ impl RustEmitter {
             rhs_stamp.push_str("        }\n");
         }
         if flicker_n > 0 {
-            rhs_stamp
-                .push_str("        // Flicker (1/f): white draw → sqrt(4·KF·|I|^AF·fs) scale →\n");
+            rhs_stamp.push_str(
+                "        // Flicker (1/f): white draw → sqrt(2·KF/K_pink)·|I|^(AF/2) scale →\n",
+            );
             rhs_stamp
                 .push_str("        // Kellett 7-pole pink filter → RHS. `|I_prev|` comes from\n");
             rhs_stamp.push_str(
@@ -4189,7 +4722,23 @@ impl RustEmitter {
             rhs_stamp.push_str("                let white = gaussian(&mut state.noise_flicker_rng[k], &mut state.noise_flicker_gaussian_cache[k]);\n");
             rhs_stamp.push_str("                let pink = kellett_pink(white, &mut state.noise_flicker_state[k]);\n");
             rhs_stamp.push_str("                let amp = flicker_scale * NOISE_FLICKER_SQRT_KF[k] * i_abs.powf(NOISE_FLICKER_HALF_AF[k]);\n");
-            rhs_stamp.push_str("                let i_n = amp * pink;\n");
+            if be_primary {
+                rhs_stamp.push_str(
+                    "                let i_n = amp * pink; // BE-primary: single-draw (BE damps z=-1)\n",
+                );
+            } else {
+                rhs_stamp.push_str(
+                    "                // Nyquist anti-alias pair on the pink output: the Kellett\n\
+                     \x20               // cascade leaves ~-14 dB at fs/2, which the trap z=-1 pole\n\
+                     \x20               // on resistive junction nodes amplifies and the device\n\
+                     \x20               // nonlinearity folds into the audio band. The pair-sum\n\
+                     \x20               // (x cos²(πf/fs)) zeroes fs/2 and leaves audio unchanged.\n",
+                );
+                rhs_stamp.push_str("                let w_new = 0.5 * amp * pink;\n");
+                rhs_stamp
+                    .push_str("                let i_n = w_new + state.noise_flicker_w_prev[k];\n");
+                rhs_stamp.push_str("                state.noise_flicker_w_prev[k] = w_new;\n");
+            }
             rhs_stamp.push_str("                state.noise_flicker_last_i_n[k] = i_n;\n");
             rhs_stamp.push_str("                let ni = NOISE_FLICKER_NODE_I[k];\n");
             rhs_stamp.push_str("                let nj = NOISE_FLICKER_NODE_J[k];\n");
@@ -4216,7 +4765,13 @@ impl RustEmitter {
             );
             rhs_stamp
                 .push_str("        let oa_scale = state.opamp_input_gain * state.noise_gain;\n");
-            rhs_stamp.push_str("        let oa_scale_half = oa_scale * 0.5;\n");
+            if be_primary {
+                // BE-primary: single-draw at full scale — noise_opamp_sqrt_fs
+                // is already the halved sqrt(0.5*fs) per-draw factor.
+                rhs_stamp.push_str("        let oa_scale_half = oa_scale;\n");
+            } else {
+                rhs_stamp.push_str("        let oa_scale_half = oa_scale * 0.5;\n");
+            }
             rhs_stamp.push_str("        if oa_scale_half != 0.0 {\n");
             rhs_stamp.push_str("            let sqrt_2fs = state.noise_opamp_sqrt_fs;\n");
             rhs_stamp.push_str("            for k in 0..NOISE_OPAMP_N {\n");
@@ -4231,10 +4786,14 @@ impl RustEmitter {
             rhs_stamp.push_str("                    let amp = en * g_diag * sqrt_2fs;\n");
             rhs_stamp.push_str("                    let g = gaussian(&mut state.noise_opamp_en_rng[k], &mut state.noise_opamp_en_gaussian_cache[k]);\n");
             rhs_stamp.push_str("                    let w_new = oa_scale_half * amp * g;\n");
-            rhs_stamp.push_str(
-                "                    let i_n = w_new + state.noise_opamp_en_w_prev[k];\n",
-            );
-            rhs_stamp.push_str("                    state.noise_opamp_en_w_prev[k] = w_new;\n");
+            if be_primary {
+                rhs_stamp.push_str("                    let i_n = w_new; // BE-primary: single-draw\n");
+            } else {
+                rhs_stamp.push_str(
+                    "                    let i_n = w_new + state.noise_opamp_en_w_prev[k];\n",
+                );
+                rhs_stamp.push_str("                    state.noise_opamp_en_w_prev[k] = w_new;\n");
+            }
             rhs_stamp.push_str("                    state.noise_opamp_en_last_i_n[k] = i_n;\n");
             rhs_stamp.push_str("                    rhs[np - 1] += i_n;\n");
             rhs_stamp.push_str("                } else {\n");
@@ -4247,10 +4806,15 @@ impl RustEmitter {
             rhs_stamp.push_str("                    let amp = in_a * sqrt_2fs;\n");
             rhs_stamp.push_str("                    let g = gaussian(&mut state.noise_opamp_in_rng[2 * k], &mut state.noise_opamp_in_gaussian_cache[2 * k]);\n");
             rhs_stamp.push_str("                    let w_new = oa_scale_half * amp * g;\n");
-            rhs_stamp.push_str(
-                "                    let i_n = w_new + state.noise_opamp_in_w_prev[2 * k];\n",
-            );
-            rhs_stamp.push_str("                    state.noise_opamp_in_w_prev[2 * k] = w_new;\n");
+            if be_primary {
+                rhs_stamp.push_str("                    let i_n = w_new; // BE-primary: single-draw\n");
+            } else {
+                rhs_stamp.push_str(
+                    "                    let i_n = w_new + state.noise_opamp_in_w_prev[2 * k];\n",
+                );
+                rhs_stamp
+                    .push_str("                    state.noise_opamp_in_w_prev[2 * k] = w_new;\n");
+            }
             rhs_stamp.push_str("                    state.noise_opamp_in_last_i_n[2 * k] = i_n;\n");
             rhs_stamp.push_str("                    rhs[np - 1] += i_n;\n");
             rhs_stamp.push_str("                } else {\n");
@@ -4262,11 +4826,16 @@ impl RustEmitter {
             rhs_stamp.push_str("                    let amp = in_a * sqrt_2fs;\n");
             rhs_stamp.push_str("                    let g = gaussian(&mut state.noise_opamp_in_rng[2 * k + 1], &mut state.noise_opamp_in_gaussian_cache[2 * k + 1]);\n");
             rhs_stamp.push_str("                    let w_new = oa_scale_half * amp * g;\n");
-            rhs_stamp.push_str(
-                "                    let i_n = w_new + state.noise_opamp_in_w_prev[2 * k + 1];\n",
-            );
-            rhs_stamp
-                .push_str("                    state.noise_opamp_in_w_prev[2 * k + 1] = w_new;\n");
+            if be_primary {
+                rhs_stamp.push_str("                    let i_n = w_new; // BE-primary: single-draw\n");
+            } else {
+                rhs_stamp.push_str(
+                    "                    let i_n = w_new + state.noise_opamp_in_w_prev[2 * k + 1];\n",
+                );
+                rhs_stamp.push_str(
+                    "                    state.noise_opamp_in_w_prev[2 * k + 1] = w_new;\n",
+                );
+            }
             rhs_stamp
                 .push_str("                    state.noise_opamp_in_last_i_n[2 * k + 1] = i_n;\n");
             rhs_stamp.push_str("                    rhs[nm - 1] += i_n;\n");
@@ -4294,7 +4863,13 @@ impl RustEmitter {
             rhs_stamp.push_str(
                 "        // Reuses shot_gain (partition is shot at a different barrier).\n",
             );
-            rhs_stamp.push_str("        let part_scale_half = state.noise_shot_scale * state.noise_gain * state.shot_gain * 0.5;\n");
+            if be_primary {
+                // BE-primary: single-draw at full scale — noise_shot_scale is
+                // already halved to sqrt(Q_E*fs) (the trap per-draw amplitude).
+                rhs_stamp.push_str("        let part_scale_half = state.noise_shot_scale * state.noise_gain * state.shot_gain;\n");
+            } else {
+                rhs_stamp.push_str("        let part_scale_half = state.noise_shot_scale * state.noise_gain * state.shot_gain * 0.5;\n");
+            }
             rhs_stamp.push_str("        if part_scale_half != 0.0 {\n");
             rhs_stamp.push_str("            for k in 0..NOISE_PARTITION_N {\n");
             rhs_stamp.push_str(
@@ -4317,9 +4892,14 @@ impl RustEmitter {
             rhs_stamp.push_str("                let psd_coef = ip * is_c / total;\n");
             rhs_stamp.push_str("                let g = gaussian(&mut state.noise_partition_rng[k], &mut state.noise_partition_gaussian_cache[k]);\n");
             rhs_stamp.push_str("                let w_new = part_scale_half * psd_coef.sqrt() * NOISE_PARTITION_F[k] * g;\n");
-            rhs_stamp
-                .push_str("                let i_n = w_new + state.noise_partition_w_prev[k];\n");
-            rhs_stamp.push_str("                state.noise_partition_w_prev[k] = w_new;\n");
+            if be_primary {
+                rhs_stamp.push_str("                let i_n = w_new; // BE-primary: single-draw\n");
+            } else {
+                rhs_stamp.push_str(
+                    "                let i_n = w_new + state.noise_partition_w_prev[k];\n",
+                );
+                rhs_stamp.push_str("                state.noise_partition_w_prev[k] = w_new;\n");
+            }
             rhs_stamp.push_str("                state.noise_partition_last_i_n[k] = i_n;\n");
             rhs_stamp.push_str("                let ni = NOISE_PARTITION_NODE_I[k];\n");
             rhs_stamp.push_str("                let nj = NOISE_PARTITION_NODE_J[k];\n");
@@ -4339,7 +4919,7 @@ impl RustEmitter {
             // so unbiased resistors emit no excess 1/f. Same convention
             // as junction flicker.
             rhs_stamp.push_str("        // Resistor flicker (Hooge bias-squared, Phase 3.5):\n");
-            rhs_stamp.push_str("        // i_R = (V_+ − V_−)/R from v_prev → amp = sqrt(fs)·sqrt(KF)·|i_R|^(AF/2)\n");
+            rhs_stamp.push_str("        // i_R = (V_+ − V_−)/R from v_prev → amp = sqrt(2·KF/K_pink)·|i_R|^(AF/2)\n");
             rhs_stamp.push_str(
                 "        // → Kellett 7-pole pink → RHS. Zero current → zero excess 1/f.\n",
             );
@@ -4366,7 +4946,20 @@ impl RustEmitter {
             rhs_stamp.push_str("                let white = gaussian(&mut state.noise_r_flicker_rng[k], &mut state.noise_r_flicker_gaussian_cache[k]);\n");
             rhs_stamp.push_str("                let pink = kellett_pink(white, &mut state.noise_r_flicker_state[k]);\n");
             rhs_stamp.push_str("                let amp = r_fl_scale * NOISE_R_FLICKER_SQRT_KF[k] * i_abs.powf(NOISE_R_FLICKER_HALF_AF[k]);\n");
-            rhs_stamp.push_str("                let i_n = amp * pink;\n");
+            if be_primary {
+                rhs_stamp.push_str(
+                    "                let i_n = amp * pink; // BE-primary: single-draw (BE damps z=-1)\n",
+                );
+            } else {
+                rhs_stamp.push_str(
+                    "                // Nyquist anti-alias pair (see junction-flicker stamp).\n",
+                );
+                rhs_stamp.push_str("                let w_new = 0.5 * amp * pink;\n");
+                rhs_stamp.push_str(
+                    "                let i_n = w_new + state.noise_r_flicker_w_prev[k];\n",
+                );
+                rhs_stamp.push_str("                state.noise_r_flicker_w_prev[k] = w_new;\n");
+            }
             rhs_stamp.push_str("                state.noise_r_flicker_last_i_n[k] = i_n;\n");
             rhs_stamp.push_str("                if ni > 0 { rhs[ni - 1] += i_n; }\n");
             rhs_stamp.push_str("                if nj > 0 { rhs[nj - 1] -= i_n; }\n");
@@ -4503,12 +5096,21 @@ impl RustEmitter {
         if flicker_n > 0 {
             nan_recovery_body
                 .push_str("        state.noise_flicker_last_i_n = [0.0; NOISE_FLICKER_N];\n");
+            if !be_primary {
+                nan_recovery_body
+                    .push_str("        state.noise_flicker_w_prev = [0.0; NOISE_FLICKER_N];\n");
+            }
             nan_recovery_body
                 .push_str("        state.noise_flicker_state = [[0.0; 7]; NOISE_FLICKER_N];\n");
         }
         if r_flicker_n > 0 {
             nan_recovery_body
                 .push_str("        state.noise_r_flicker_last_i_n = [0.0; NOISE_R_FLICKER_N];\n");
+            if !be_primary {
+                nan_recovery_body.push_str(
+                    "        state.noise_r_flicker_w_prev = [0.0; NOISE_R_FLICKER_N];\n",
+                );
+            }
             nan_recovery_body
                 .push_str("        state.noise_r_flicker_state = [[0.0; 7]; NOISE_R_FLICKER_N];\n");
         }
@@ -4607,6 +5209,19 @@ impl RustEmitter {
             }
         }
 
+        // Switches whose R components touch an op-amp in+ → their setters
+        // must call refresh_opamp_en_g_diag() (previously missing entirely:
+        // only pots hooked the refresh, so a `.switch` R at in+ left the en
+        // Norton factor stale).
+        let mut switch_to_opamp_en_refresh = vec![false; ir.switches.len()];
+        for list in &opamp_dyn_switches {
+            for &(s, _) in list {
+                if s < switch_to_opamp_en_refresh.len() {
+                    switch_to_opamp_en_refresh[s] = true;
+                }
+            }
+        }
+
         NoiseEmission {
             top_level: top,
             state_fields,
@@ -4624,6 +5239,7 @@ impl RustEmitter {
             switch_comp_to_noise_slot,
             pot_to_r_flicker_slot,
             switch_comp_to_r_flicker_slot,
+            switch_to_opamp_en_refresh,
             pot_to_opamp_en_refresh,
         }
     }
