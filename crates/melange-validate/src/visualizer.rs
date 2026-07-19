@@ -286,20 +286,32 @@ fn format_html_report(
         rms_error = report.rms_error,
         norm_rms = report.normalized_rms_error,
         norm_rms_pct = report.normalized_rms_error * 100.0,
-        rms_status = format_pass(report.normalized_rms_error < 0.001),
+        // Per-metric pass marks are judged against the tolerances the
+        // comparison actually ran with (report.config), not hardcoded
+        // defaults — otherwise a report could show all-✗ metrics for a
+        // PASSED run (or vice versa) whenever the test used a non-default
+        // config.
+        rms_status = format_pass(report.normalized_rms_error <= report.config.rms_error_tolerance),
         peak_error = report.peak_error,
-        peak_status = format_pass(report.peak_error < 0.01),
+        peak_status = format_pass(report.peak_error <= report.config.peak_error_tolerance),
         mae = report.mean_absolute_error,
         max_rel = report.max_relative_error,
         max_rel_pct = report.max_relative_error * 100.0,
-        rel_status = format_pass(report.max_relative_error < 0.01),
+        rel_status = format_pass(report.max_relative_error <= report.config.max_relative_tolerance),
         corr = report.correlation_coefficient,
-        corr_status = format_pass(report.correlation_coefficient > 0.9999),
+        corr_status = format_pass(report.correlation_coefficient >= report.config.correlation_min),
         snr = report.snr_db,
         thd_spice = report.thd_spice,
         thd_melange = report.thd_melange,
         thd_err = report.thd_error_db,
-        thd_status = format_pass(report.thd_error_db.abs() < 1.0),
+        thd_status = if report.config.skip_thd {
+            "-".to_string()
+        } else {
+            format_pass(
+                report.thd_error_db.is_finite()
+                    && report.thd_error_db.abs() <= report.config.thd_error_tolerance_db,
+            )
+        },
         failures_section = generate_failures_html(report),
         signal_overlay_svg = signal_overlay_svg,
         error_signal_svg = error_signal_svg,

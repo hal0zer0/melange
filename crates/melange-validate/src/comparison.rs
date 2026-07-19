@@ -148,6 +148,21 @@ pub struct ComparisonConfig {
     pub full_scale: f64,
     /// Skip THD computation (faster for large signals)
     pub skip_thd: bool,
+    /// Settle window in seconds: this many seconds are excluded from the
+    /// START of BOTH signals (symmetrically) before any metric is computed.
+    ///
+    /// Rationale: even with a first-sample-seeded DC blocker, the first
+    /// ~1–2 tau of a comparison window can be dominated by startup
+    /// artifacts that are properties of the harness (5 Hz blocker settling
+    /// on a residual DC-operating-point difference between melange and
+    /// ngspice, decaying at tau = 1/(2*pi*5) ~ 32 ms) rather than of the
+    /// solver. Excluding a settle window lets the steady-state gates be
+    /// tightened honestly instead of widening them to cover the transient.
+    ///
+    /// Default is 0.0 (no exclusion) so the library API behavior is
+    /// explicit per test — each test that wants an exclusion must opt in
+    /// with a window it can justify against its own signal length.
+    pub settle_time_s: f64,
 }
 
 impl Default for ComparisonConfig {
@@ -160,6 +175,7 @@ impl Default for ComparisonConfig {
             thd_error_tolerance_db: 1.0, // 1 dB
             full_scale: 1.0,             // Assume 1V full scale by default
             skip_thd: false,
+            settle_time_s: 0.0,
         }
     }
 }
@@ -175,6 +191,7 @@ impl ComparisonConfig {
             thd_error_tolerance_db: 0.1, // 0.1 dB
             full_scale: 1.0,
             skip_thd: false,
+            settle_time_s: 0.0,
         }
     }
 
@@ -188,6 +205,7 @@ impl ComparisonConfig {
             thd_error_tolerance_db: 3.0, // 3 dB
             full_scale: 1.0,
             skip_thd: false,
+            settle_time_s: 0.0,
         }
     }
 }
@@ -235,6 +253,11 @@ pub struct ComparisonReport {
     pub passed: bool,
     /// List of specific failures
     pub failures: Vec<String>,
+    /// The tolerance configuration this comparison was evaluated against.
+    /// Carried in the report so downstream consumers (e.g. the HTML
+    /// visualizer's per-metric pass marks) judge each metric against the
+    /// tolerances that were actually used, not hardcoded defaults.
+    pub config: ComparisonConfig,
 
     // Raw error signal (for debugging/plotting)
     /// Per-sample absolute errors (only stored if configured)
@@ -398,31 +421,54 @@ pub fn compare_signals(
             );
         }
     }
+
+    // Settle-window exclusion: skip the first `settle_time_s` seconds of
+    // BOTH signals symmetrically before computing any metric. A window
+    // that consumes the whole signal is a test misconfiguration and fails
+    // loudly rather than silently comparing nothing.
+    let settle_skip = if config.settle_time_s > 0.0 {
+        (config.settle_time_s * reference.sample_rate).round() as usize
+    } else {
+        0
+    };
+
+    let empty_report = |failure: String| ComparisonReport {
+        circuit_name: String::new(),
+        node_name: actual.name.clone(),
+        sample_count: 0,
+        sample_rate: reference.sample_rate,
+        rms_error: f64::NAN,
+        peak_error: f64::NAN,
+        max_relative_error: f64::NAN,
+        mean_absolute_error: f64::NAN,
+        normalized_rms_error: f64::NAN,
+        correlation_coefficient: f64::NAN,
+        snr_db: f64::NAN,
+        thd_spice: f64::NAN,
+        thd_melange: f64::NAN,
+        thd_error_db: f64::NAN,
+        passed: false,
+        failures: vec![failure],
+        config: *config,
+        absolute_errors: None,
+        relative_errors: None,
+    };
+
     if len == 0 {
-        return ComparisonReport {
-            circuit_name: String::new(),
-            node_name: actual.name.clone(),
-            sample_count: 0,
-            sample_rate: reference.sample_rate,
-            rms_error: f64::NAN,
-            peak_error: f64::NAN,
-            max_relative_error: f64::NAN,
-            mean_absolute_error: f64::NAN,
-            normalized_rms_error: f64::NAN,
-            correlation_coefficient: f64::NAN,
-            snr_db: f64::NAN,
-            thd_spice: f64::NAN,
-            thd_melange: f64::NAN,
-            thd_error_db: f64::NAN,
-            passed: false,
-            failures: vec!["Empty signals".to_string()],
-            absolute_errors: None,
-            relative_errors: None,
-        };
+        return empty_report("Empty signals".to_string());
+    }
+    if settle_skip >= len {
+        return empty_report(format!(
+            "Settle window ({} samples, {:.1} ms) consumes the entire signal ({} samples)",
+            settle_skip,
+            config.settle_time_s * 1000.0,
+            len
+        ));
     }
 
-    let ref_slice = &reference.samples[..len];
-    let act_slice = &resampled_actual.samples[..len];
+    let ref_slice = &reference.samples[settle_skip..len];
+    let act_slice = &resampled_actual.samples[settle_skip..len];
+    let len = len - settle_skip;
 
     // Compute error signal
     let errors: Vec<f64> = ref_slice
@@ -463,8 +509,9 @@ pub fn compare_signals(
         })
         .fold(0.0, f64::max);
 
-    // 5. Normalized RMS Error (relative to reference RMS)
-    let ref_rms = reference.rms();
+    // 5. Normalized RMS Error (relative to reference RMS over the same
+    //    settled window the error was measured on)
+    let ref_rms = (ref_slice.iter().map(|&s| s * s).sum::<f64>() / len as f64).sqrt();
     let normalized_rms_error = if ref_rms > 1e-12 {
         rms_error / ref_rms
     } else {
@@ -513,7 +560,7 @@ pub fn compare_signals(
     let (thd_spice, thd_melange, thd_error_db) = if config.skip_thd {
         (f64::NAN, f64::NAN, f64::NAN)
     } else {
-        compute_thd_metrics(reference, &resampled_actual, len)
+        compute_thd_metrics(ref_slice, act_slice, reference.sample_rate)
     };
 
     // Determine pass/fail
@@ -576,6 +623,7 @@ pub fn compare_signals(
         thd_error_db,
         passed,
         failures,
+        config: *config,
         absolute_errors: Some(errors.iter().map(|&e| e.abs()).collect()),
         relative_errors: Some(
             ref_slice
@@ -588,15 +636,18 @@ pub fn compare_signals(
 }
 
 /// Compute THD (Total Harmonic Distortion) for both signals
-fn compute_thd_metrics(reference: &Signal, actual: &Signal, len: usize) -> (f64, f64, f64) {
+///
+/// Operates on the already-settled/truncated sample slices so the THD
+/// window matches the time-domain metric window exactly.
+fn compute_thd_metrics(ref_slice: &[f64], act_slice: &[f64], sample_rate: f64) -> (f64, f64, f64) {
     // Use a reasonable FFT size (next power of 2)
-    let fft_size = len.next_power_of_two();
+    let fft_size = ref_slice.len().next_power_of_two();
 
     // Compute THD for reference
-    let thd_ref = compute_thd(&reference.samples[..len], fft_size, reference.sample_rate);
+    let thd_ref = compute_thd(ref_slice, fft_size, sample_rate);
 
     // Compute THD for actual
-    let thd_act = compute_thd(&actual.samples[..len], fft_size, actual.sample_rate);
+    let thd_act = compute_thd(act_slice, fft_size, sample_rate);
 
     // THD error in dB
     let thd_error = if thd_ref.is_finite() && thd_act.is_finite() {
@@ -646,7 +697,16 @@ fn compute_thd(samples: &[f64], fft_size: usize, sample_rate: f64) -> f64 {
 
     // Find fundamental frequency: first significant peak (low→high), not global max.
     // This prevents strong harmonics from being misidentified as the fundamental.
-    let search_start = (20.0 * fft_size as f64 / sample_rate) as usize; // Skip below 20 Hz
+    //
+    // Floor the search at bin 2: bin 0 is DC and the Hann mainlobe of any
+    // residual DC spans bins 0-1, and DC is never a valid fundamental. For
+    // short signals (small FFT) the 20 Hz formula rounds to bin 0, and a
+    // waveform with residual DC (e.g. an asymmetric single-diode clamp whose
+    // offset the 5 Hz blocker has not fully bled off inside the window) made
+    // bin 0 win the first-peak scan and trip the `fundamental_idx == 0` NaN
+    // guard below. For FFTs long enough that bins 1-2 are below 20 Hz the
+    // formula already exceeds 2, so the floor only affects the small-FFT case.
+    let search_start = ((20.0 * fft_size as f64 / sample_rate) as usize).max(2); // Skip below 20 Hz / DC skirt
     let search_end = (20000.0 * fft_size as f64 / sample_rate) as usize; // Limit to 20 kHz
 
     // First pass: find the global max to establish a threshold

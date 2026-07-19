@@ -1,6 +1,5 @@
 //! Plugin project template generation
 
-use std::hash::{Hash, Hasher};
 use std::path::Path;
 
 use anyhow::Result;
@@ -381,25 +380,45 @@ fn capitalize_word(s: &str) -> String {
     }
 }
 
+/// 64-bit FNV-1a — a fixed, documented hash so derived VST3 IDs are stable
+/// across Rust toolchain versions. `DefaultHasher` (SipHash with unspecified
+/// keys/algorithm) is explicitly NOT guaranteed stable between std releases,
+/// which would silently change every derived VST3 ID on a toolchain upgrade
+/// and break DAW sessions.
+fn fnv1a_64(bytes: &[u8]) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut h = FNV_OFFSET;
+    for &b in bytes {
+        h ^= b as u64;
+        h = h.wrapping_mul(FNV_PRIME);
+    }
+    h
+}
+
 /// Compute a stable 16-byte VST3 ID string from a circuit name.
 ///
-/// Uses `DefaultHasher` (SipHash) for better distribution, then derives 16
-/// bytes via two hashes (name and name + salt) to fill the full ID space.
-/// Each byte is mapped to an uppercase ASCII letter for a valid `b"..."` literal.
+/// Uses FNV-1a (see [`fnv1a_64`]) and derives 16 bytes via two hashes
+/// (name, and salt + name) to fill the full ID space. Each byte is mapped
+/// to an uppercase ASCII letter for a valid `b"..."` literal.
 ///
-/// Note: renaming the circuit file will change the ID and break DAW sessions.
-/// A future `--vst3-id` CLI override could allow pinning the ID explicitly.
+/// ONE-TIME BREAK (2026-07): this previously used `std::collections::hash_map::
+/// DefaultHasher`, whose output is not stable across toolchains. Switching to
+/// FNV-1a changes every previously derived ID exactly once; plugins generated
+/// before the switch present a new VST3 ID to the DAW when regenerated. Pin
+/// `--vst3-id` for released plugins to keep old sessions loading.
+///
+/// Note: renaming the circuit file will also change the ID and break DAW
+/// sessions — `--vst3-id` pins the ID explicitly.
 fn compute_vst3_id(circuit_name: &str) -> String {
     // First 8 bytes from hashing the name directly
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    circuit_name.hash(&mut hasher);
-    let h1 = hasher.finish().to_le_bytes();
+    let h1 = fnv1a_64(circuit_name.as_bytes()).to_le_bytes();
 
     // Second 8 bytes from hashing the name with a salt
-    let mut hasher2 = std::collections::hash_map::DefaultHasher::new();
-    "melange-vst3-salt".hash(&mut hasher2);
-    circuit_name.hash(&mut hasher2);
-    let h2 = hasher2.finish().to_le_bytes();
+    let mut salted = Vec::with_capacity(17 + circuit_name.len());
+    salted.extend_from_slice(b"melange-vst3-salt");
+    salted.extend_from_slice(circuit_name.as_bytes());
+    let h2 = fnv1a_64(&salted).to_le_bytes();
 
     let mut id = [0u8; 16];
     for i in 0..8 {
@@ -482,7 +501,7 @@ fn generate_wiper_default(wiper: &WiperParamInfo) -> String {
     format!(
         r#"            wiper_{idx}: FloatParam::new(
                 "{name}",
-                {default},
+                {default:?},
                 FloatRange::Linear {{
                     min: 0.0,
                     max: 1.0,
@@ -492,6 +511,8 @@ fn generate_wiper_default(wiper: &WiperParamInfo) -> String {
 "#,
         idx = wiper.wiper_index,
         name = name,
+        // `{:?}` keeps integral floats as float literals ("1.0", not "1") —
+        // Display would emit an integer literal and break the generated build.
         default = wiper.default_position,
     )
 }
@@ -553,7 +574,7 @@ fn generate_params_struct(
         defaults.push_str(&format!(
             r#"            gang_{idx}: FloatParam::new(
                 "{name}",
-                {default},
+                {default:?},
                 FloatRange::Linear {{
                     min: 0.0,
                     max: 1.0,
@@ -585,6 +606,17 @@ impl Default for CircuitParams {{
     )
 }
 
+/// Half-band IIR decimator group delay in output samples for a given
+/// oversampling factor. Must agree with the `latency()` method emitted by
+/// `generate_lib_rs` — the dry-path delay ring uses the same value.
+fn oversampling_latency_samples(oversampling_factor: usize) -> usize {
+    match oversampling_factor {
+        2 => 2,
+        4 => 4,
+        _ => oversampling_factor,
+    }
+}
+
 fn generate_process_loop(
     with_level_params: bool,
     pots: &[PotParamInfo],
@@ -595,6 +627,7 @@ fn generate_process_loop(
     mono: bool,
     wet_dry_mix: bool,
     ear_protection: bool,
+    oversampling_factor: usize,
 ) -> String {
     // Final output expression: ear protection applies soft limiter when enabled at runtime
     let output_write = if ear_protection {
@@ -613,6 +646,7 @@ fn generate_process_loop(
     let has_any_params = with_level_params
         || !pots.is_empty()
         || !wipers.is_empty()
+        || !gangs.is_empty()
         || !switches.is_empty()
         || wet_dry_mix
         || ear_protection;
@@ -753,10 +787,56 @@ fn generate_process_loop(
         })
         .collect();
 
-    // Gang reads: per-sample for DK, per-block for nodal
-    // Gang reads/assignments: always per-block (moved to pre-loop).
-    let gang_reads = String::new();
-    let gang_assignments = String::new();
+    // Per-sample gang reads: same pattern as pots — the smoother advances once
+    // per sample (outside the per-channel loop). See commit 7c0fc02 for why
+    // per-block reads are wrong: nih-plug smoothers step per *sample*, so a
+    // per-block `.smoothed.next()` stretches a 10 ms ramp into seconds.
+    let gang_reads: String = gangs
+        .iter()
+        .map(|g| {
+            format!(
+                "            let gang_{i}_pos = self.params.gang_{i}.smoothed.next() as f64;\n",
+                i = g.index,
+            )
+        })
+        .collect();
+    // Per-sample gang assignments: call set_pot_N per channel. The
+    // (r - prev).abs() < 1e-12 skip guard inside set_pot_N means the O(N^3)
+    // rebuild only fires when the smoothed value actually changes.
+    //
+    // Member mapping matches standalone pots and DYNAMIC_PARAMS.md:
+    //   non-inverted: R = min + pos * (max - min)
+    //   inverted (`!` member): R = max - pos * (max - min)
+    let gang_assignments: String = gangs
+        .iter()
+        .flat_map(|g| {
+            let mut lines = Vec::new();
+            for &(pot_idx, min_r, max_r, inverted) in &g.pot_members {
+                let range = max_r - min_r;
+                let r_expr = if inverted {
+                    format!("{max_r:.17e} - gang_{gi}_pos * {range:.17e}", gi = g.index)
+                } else {
+                    format!("{min_r:.17e} + gang_{gi}_pos * {range:.17e}", gi = g.index)
+                };
+                lines.push(format!(
+                    "                state.set_pot_{pot_idx}({r_expr});\n",
+                ));
+            }
+            for &(cw_idx, ccw_idx, total_r, inverted) in &g.wiper_members {
+                let wrange = total_r - 20.0;
+                let pos_expr = if inverted {
+                    format!("(1.0 - gang_{}_pos)", g.index)
+                } else {
+                    format!("gang_{}_pos", g.index)
+                };
+                lines.push(format!(
+                    "                state.set_pot_{cw_idx}((1.0 - {pos_expr}) * {wrange:.17e} + 10.0);\n\
+                     \x20               state.set_pot_{ccw_idx}({pos_expr} * {wrange:.17e} + 10.0);\n",
+                ));
+            }
+            lines
+        })
+        .collect();
 
     // Per-sample pot updates: reads smoothed pot values, triggers rebuild_matrices only on changes.
     // Smoother advances in pot_reads (once per sample, outside per-channel loop);
@@ -768,77 +848,44 @@ fn generate_process_loop(
     // set_pot calls in wiper_assignments (per channel). Same skip guard applies.
     let wiper_pre_loop = String::new();
 
-    // Per-block gang reads: done once per buffer before the sample loop.
-    let gang_pre_loop: String = if !gangs.is_empty() {
-        let reads: String = gangs
-            .iter()
-            .map(|g| {
-                format!(
-                    "            let gang_{i}_pos = self.params.gang_{i}.smoothed.next() as f64;\n",
-                    i = g.index,
-                )
-            })
-            .collect();
-        let assigns: String = gangs
-            .iter()
-            .flat_map(|g| {
-                let mut lines = Vec::new();
-                for &(pot_idx, min_r, max_r, inverted) in &g.pot_members {
-                    let range = max_r - min_r;
-                    let (r_expr, comment) = if inverted {
-                        (format!("{min_r:.17e} + gang_{gi}_pos * {range:.17e}", gi = g.index), "inverted")
-                    } else {
-                        (format!("{max_r:.17e} - gang_{gi}_pos * {range:.17e}", gi = g.index), "")
-                    };
-                    let _ = comment; // suppress unused warning
-                    if num_outputs > 1 {
-                        lines.push(format!(
-                            "            self.circuit_state.set_pot_{pot_idx}({r_expr});\n",
-                        ));
-                    } else {
-                        lines.push(format!(
-                            "            for state in self.circuit_states.iter_mut() {{\n\
-                             \x20               state.set_pot_{pot_idx}({r_expr});\n\
-                             \x20           }}\n",
-                        ));
-                    }
-                }
-                for &(cw_idx, ccw_idx, total_r, inverted) in &g.wiper_members {
-                    let wrange = total_r - 20.0;
-                    let pos_expr = if inverted {
-                        format!("(1.0 - gang_{}_pos)", g.index)
-                    } else {
-                        format!("gang_{}_pos", g.index)
-                    };
-                    if num_outputs > 1 {
-                        lines.push(format!(
-                            "            self.circuit_state.set_pot_{cw_idx}((1.0 - {pos_expr}) * {wrange:.17e} + 10.0);\n\
-                             \x20           self.circuit_state.set_pot_{ccw_idx}({pos_expr} * {wrange:.17e} + 10.0);\n",
-                        ));
-                    } else {
-                        lines.push(format!(
-                            "            for state in self.circuit_states.iter_mut() {{\n\
-                             \x20               state.set_pot_{cw_idx}((1.0 - {pos_expr}) * {wrange:.17e} + 10.0);\n\
-                             \x20               state.set_pot_{ccw_idx}({pos_expr} * {wrange:.17e} + 10.0);\n\
-                             \x20           }}\n",
-                        ));
-                    }
-                }
-                lines
-            })
-            .collect();
-        format!("        {{ // Per-block gang updates (nodal: O(N³) rebuild on change)\n{reads}{assigns}        }}\n")
-    } else {
-        String::new()
-    };
+    // Gang smoother reads happen per sample in `gang_reads`; assignments per
+    // channel in `gang_assignments`. Nothing left to do before the loop.
+    let gang_pre_loop = String::new();
 
     // Switch assignments removed from inner loop — handled in switch_pre_loop above
 
-    // Build sample processing snippet
-    let dry_capture = if wet_dry_mix {
-        "                let dry = *sample;\n"
+    // Build sample processing snippet.
+    //
+    // Wet/dry + oversampling: the wet path is delayed by the decimator group
+    // delay (the same value reported via `latency()`), so the dry branch must
+    // be delayed to match — an undelayed dry mix comb-filters at HF. Small
+    // fixed ring buffer per channel; allocated in initialize(), never in
+    // process().
+    let dry_delay_active = wet_dry_mix && oversampling_factor > 1;
+    let dry_delay_len = oversampling_latency_samples(oversampling_factor);
+    let make_dry_capture = |chan_idx: &str, src: &str| -> String {
+        if !wet_dry_mix {
+            String::new()
+        } else if dry_delay_active {
+            format!(
+                "                let dry = {{\n\
+                 \x20                   let dl = &mut self.dry_delay[{chan_idx}];\n\
+                 \x20                   let delayed = dl[self.dry_delay_pos];\n\
+                 \x20                   dl[self.dry_delay_pos] = {src};\n\
+                 \x20                   delayed\n\
+                 \x20               }};\n"
+            )
+        } else {
+            format!("                let dry = {src};\n")
+        }
+    };
+    let dry_capture = make_dry_capture("ch", "*sample");
+    let dry_capture_mono = make_dry_capture("0", "*sample");
+    // Ring position advances once per sample frame (shared across channels).
+    let dry_pos_advance = if dry_delay_active {
+        format!("            self.dry_delay_pos = (self.dry_delay_pos + 1) % {dry_delay_len};\n")
     } else {
-        ""
+        String::new()
     };
 
     let sample_processing = if num_outputs > 1 {
@@ -865,11 +912,7 @@ fn generate_process_loop(
     // Build the inner loop: multi-output, mono, or stereo
     let inner_loop = if num_outputs > 1 {
         // Multi-output: ONE circuit instance, input from channel 0, multiple output channels
-        let multi_dry_capture = if wet_dry_mix {
-            "                let dry = input_sample;\n"
-        } else {
-            ""
-        };
+        let multi_dry_capture = make_dry_capture("0", "input_sample");
         let output_gain_line = if with_level_params {
             "                    let out = out * output_gain;\n"
         } else {
@@ -892,6 +935,7 @@ fn generate_process_loop(
              \x20               }}\n",
         )
     } else if mono {
+        let dry_capture = dry_capture_mono;
         format!(
             "\x20           let sample = channel_samples.into_iter().next().unwrap();\n\
              \x20               let state = &mut self.circuit_states[0];\n\
@@ -931,6 +975,7 @@ fn generate_process_loop(
          {wiper_reads}\
          {gang_reads}\
          {inner_loop}\
+         {dry_pos_advance}\
          \x20       }}"
     )
 }
@@ -1049,6 +1094,7 @@ fn generate_lib_rs(
         options.mono,
         options.wet_dry_mix,
         options.ear_protection,
+        oversampling_factor,
     );
 
     // Defensive smoother reset for every param consumed via `.smoothed.next()` in the
@@ -1246,6 +1292,67 @@ fn generate_lib_rs(
         )
     };
 
+    // Wet/dry + oversampling: patch the struct/default/init/reset skeletons
+    // with a per-channel dry-path delay ring matching the decimator group
+    // delay reported by latency(). Allocation happens in initialize(), and
+    // Default pre-allocates so an out-of-order process() call can't panic.
+    let dry_delay_active = options.wet_dry_mix && oversampling_factor > 1;
+    let (plugin_struct, plugin_default, init_method, reset_method) = if dry_delay_active {
+        let lat = oversampling_latency_samples(oversampling_factor);
+        let default_channels = if num_outputs > 1 || options.mono { 1 } else { 2 };
+        let init_channels = if num_outputs > 1 {
+            "1".to_string()
+        } else {
+            "self.circuit_states.len()".to_string()
+        };
+        let patched_struct = plugin_struct.replace(
+            "    current_sample_rate: f64,",
+            "    current_sample_rate: f64,\n\
+             \x20   // Dry-path delay ring matching the oversampling decimator latency\n\
+             \x20   dry_delay: Vec<Vec<f32>>,\n\
+             \x20   dry_delay_pos: usize,",
+        );
+        let patched_default = plugin_default.replace(
+            "            current_sample_rate: 0.0,",
+            &format!(
+                "            current_sample_rate: 0.0,\n\
+                 \x20           dry_delay: vec![vec![0.0f32; {lat}]; {default_channels}],\n\
+                 \x20           dry_delay_pos: 0,"
+            ),
+        );
+        let patched_init = init_method.replace(
+            "        true\n    }",
+            &format!(
+                "        // Wet/dry + oversampling: delay dry by the decimator group\n\
+                 \x20       // delay ({lat} samples) so the mix doesn't comb-filter.\n\
+                 \x20       self.dry_delay = vec![vec![0.0f32; {lat}]; {init_channels}];\n\
+                 \x20       self.dry_delay_pos = 0;\n\
+                 \x20       true\n\
+                 \x20   }}"
+            ),
+        );
+        let patched_reset = reset_method.replace(
+            "    fn reset(&mut self) {\n",
+            "    fn reset(&mut self) {\n\
+             \x20       for dl in self.dry_delay.iter_mut() {\n\
+             \x20           for v in dl.iter_mut() {\n\
+             \x20               *v = 0.0;\n\
+             \x20           }\n\
+             \x20       }\n\
+             \x20       self.dry_delay_pos = 0;\n",
+        );
+        debug_assert!(
+            patched_struct != plugin_struct
+                && patched_default != plugin_default
+                && patched_init != init_method
+                && patched_reset != reset_method,
+            "dry-delay skeleton patch anchors must match the generated templates"
+        );
+        (patched_struct, patched_default, patched_init, patched_reset)
+    } else {
+        (plugin_struct, plugin_default, init_method, reset_method)
+    };
+
     // Audio channel count for IO layout
     let num_channels = if options.mono { 1 } else { 2 };
     let clap_channel_feature = if options.mono {
@@ -1256,11 +1363,7 @@ fn generate_lib_rs(
 
     // Oversampling latency: half-band IIR group delay in output samples
     let latency_method = if oversampling_factor > 1 {
-        let latency_samples = match oversampling_factor {
-            2 => 2,
-            4 => 4,
-            _ => oversampling_factor as u32,
-        };
+        let latency_samples = oversampling_latency_samples(oversampling_factor);
         format!(
             "\n    fn latency(&self) -> u32 {{\n\
              \x20       // Oversampling {}x half-band IIR decimation filter group delay\n\
@@ -1391,6 +1494,9 @@ impl ClapPlugin for CircuitPlugin {{
 }}
 
 impl Vst3Plugin for CircuitPlugin {{
+    // Derived from the circuit name via FNV-1a (stable across toolchains).
+    // NOTE: IDs derived before the 2026-07 FNV switch differ from this value —
+    // pass --vst3-id to pin the old ID if a DAW session must keep loading.
     const VST3_CLASS_ID: [u8; 16] = *b"{vst3_id_str}";
 
     const VST3_SUBCATEGORIES: &'static [Vst3SubCategory] = &[
@@ -2264,6 +2370,258 @@ mod tests {
         let s = "AcmeWurliPreamp\\";
         assert_eq!(s.len(), 16);
         assert!(validate_vst3_id(s).is_err());
+    }
+
+    // === Gang mapping tests (fix: members were swapped vs standalone pots) ===
+
+    fn gang_fixture() -> Vec<GangParamInfo> {
+        vec![GangParamInfo {
+            index: 0,
+            label: "Gain".to_string(),
+            default_position: 0.5,
+            // pot 0 non-inverted, pot 1 inverted (`!` member)
+            pot_members: vec![(0, 100.0, 10100.0, false), (1, 200.0, 20200.0, true)],
+            wiper_members: vec![],
+        }]
+    }
+
+    fn extract_line<'a>(lib: &'a str, needle: &str) -> &'a str {
+        lib.lines()
+            .find(|l| l.contains(needle))
+            .unwrap_or_else(|| panic!("missing line containing {needle:?} in:\n{lib}"))
+    }
+
+    #[test]
+    fn gang_pot_member_maps_min_plus_pos_times_range() {
+        // Non-inverted gang member must follow the standalone-pot contract
+        // (DYNAMIC_PARAMS.md): R = min + pos * (max - min).
+        let gangs = gang_fixture();
+        let lib = generate_lib_rs(
+            "test",
+            false,
+            &[],
+            &[],
+            &gangs,
+            &[],
+            1,
+            1,
+            &PluginOptions::default(),
+        );
+        let line = extract_line(&lib, "set_pot_0(");
+        assert!(
+            line.contains("+ gang_0_pos *"),
+            "non-inverted gang pot must be min + pos*range shaped, got: {line}"
+        );
+        assert!(
+            line.contains("1.00000000000000000e2"),
+            "non-inverted expression must start from min_r (100.0), got: {line}"
+        );
+    }
+
+    #[test]
+    fn gang_inverted_member_maps_max_minus_pos_times_range() {
+        let gangs = gang_fixture();
+        let lib = generate_lib_rs(
+            "test",
+            false,
+            &[],
+            &[],
+            &gangs,
+            &[],
+            1,
+            1,
+            &PluginOptions::default(),
+        );
+        let line = extract_line(&lib, "set_pot_1(");
+        assert!(
+            line.contains("- gang_0_pos *"),
+            "inverted (`!`) gang pot must be max - pos*range shaped, got: {line}"
+        );
+        assert!(
+            line.contains("2.02000000000000000e4"),
+            "inverted expression must start from max_r (20200.0), got: {line}"
+        );
+    }
+
+    #[test]
+    fn gang_mixed_pot_and_wiper_sweep_same_direction() {
+        // A non-inverted pot member and a non-inverted wiper member of the same
+        // gang must sweep the same direction as their standalone counterparts:
+        // pot resistance rises with position; wiper ccw leg rises with position
+        // (cw leg gets 1.0 - pos), exactly like standalone wiper_assignments.
+        let gangs = vec![GangParamInfo {
+            index: 0,
+            label: "Tone".to_string(),
+            default_position: 0.5,
+            pot_members: vec![(0, 100.0, 10100.0, false)],
+            wiper_members: vec![(1, 2, 100_000.0, false)],
+        }];
+        let lib = generate_lib_rs(
+            "test",
+            false,
+            &[],
+            &[],
+            &gangs,
+            &[],
+            1,
+            1,
+            &PluginOptions::default(),
+        );
+        let pot_line = extract_line(&lib, "set_pot_0(");
+        assert!(pot_line.contains("+ gang_0_pos *"), "pot member: {pot_line}");
+        let cw_line = extract_line(&lib, "set_pot_1(");
+        assert!(
+            cw_line.contains("(1.0 - gang_0_pos) *"),
+            "cw leg must use 1.0 - pos (normal wiper mapping): {cw_line}"
+        );
+        let ccw_line = extract_line(&lib, "set_pot_2(");
+        assert!(
+            ccw_line.contains("gang_0_pos *") && !ccw_line.contains("(1.0 - gang_0_pos)"),
+            "ccw leg must use pos directly (normal wiper mapping): {ccw_line}"
+        );
+    }
+
+    #[test]
+    fn gang_smoother_consumed_per_sample_not_per_block() {
+        // Regression: gangs used to call .smoothed.next() once per process()
+        // block, stretching a 10 ms ramp into seconds. The read must sit
+        // INSIDE the per-sample `iter_samples` loop, like pots (7c0fc02).
+        let gangs = gang_fixture();
+        let lib = generate_lib_rs(
+            "test",
+            false,
+            &[],
+            &[],
+            &gangs,
+            &[],
+            1,
+            1,
+            &PluginOptions::default(),
+        );
+        let loop_pos = lib
+            .find("for channel_samples in buffer.iter_samples()")
+            .expect("sample loop missing");
+        let read_pos = lib
+            .find("self.params.gang_0.smoothed.next()")
+            .expect("gang smoother read missing");
+        assert!(
+            read_pos > loop_pos,
+            "gang smoother read must be inside the per-sample loop \
+             (read at {read_pos}, loop starts at {loop_pos})"
+        );
+    }
+
+    #[test]
+    fn gang_smoother_reset_still_emitted() {
+        let gangs = gang_fixture();
+        let lib = generate_lib_rs(
+            "test",
+            false,
+            &[],
+            &[],
+            &gangs,
+            &[],
+            1,
+            1,
+            &PluginOptions::default(),
+        );
+        assert!(lib.contains("self.params.gang_0.smoothed.reset(self.params.gang_0.value());"));
+    }
+
+    // === Integral default float-literal tests (fix: `{default}` printed `1`) ===
+
+    #[test]
+    fn wiper_integral_default_emits_float_literal() {
+        let wipers = vec![WiperParamInfo {
+            wiper_index: 0,
+            cw_pot_index: 0,
+            ccw_pot_index: 1,
+            total_resistance: 100_000.0,
+            default_position: 1.0,
+            name: "Volume".to_string(),
+        }];
+        let lib = generate_lib_rs(
+            "test",
+            false,
+            &[],
+            &wipers,
+            &[],
+            &[],
+            1,
+            1,
+            &PluginOptions::default(),
+        );
+        assert!(
+            lib.contains("\"Volume\",\n                1.0,"),
+            "wiper default 1.0 must emit a float literal (E0308 otherwise):\n{lib}"
+        );
+    }
+
+    #[test]
+    fn gang_integral_default_emits_float_literal() {
+        let gangs = vec![GangParamInfo {
+            index: 0,
+            label: "Gain".to_string(),
+            default_position: 1.0,
+            pot_members: vec![(0, 100.0, 10100.0, false)],
+            wiper_members: vec![],
+        }];
+        let lib = generate_lib_rs(
+            "test",
+            false,
+            &[],
+            &[],
+            &gangs,
+            &[],
+            1,
+            1,
+            &PluginOptions::default(),
+        );
+        assert!(
+            lib.contains("\"Gain\",\n                1.0,"),
+            "gang default 1.0 must emit a float literal (E0308 otherwise):\n{lib}"
+        );
+    }
+
+    // === Wet/dry + oversampling dry-delay tests ===
+
+    #[test]
+    fn wet_dry_with_oversampling_delays_dry_path() {
+        let opts = PluginOptions {
+            wet_dry_mix: true,
+            ..Default::default()
+        };
+        let lib = generate_lib_rs("test", false, &[], &[], &[], &[], 1, 4, &opts);
+        assert!(
+            lib.contains("dry_delay: Vec<Vec<f32>>"),
+            "plugin struct must carry the dry delay ring:\n{lib}"
+        );
+        assert!(
+            lib.contains("self.dry_delay = vec![vec![0.0f32; 4];"),
+            "initialize() must allocate the ring at the 4x decimator latency:\n{lib}"
+        );
+        assert!(
+            lib.contains("self.dry_delay_pos = (self.dry_delay_pos + 1) % 4;"),
+            "ring position must advance once per sample frame:\n{lib}"
+        );
+        assert!(
+            !lib.contains("let dry = *sample;"),
+            "undelayed dry capture must be replaced by the delayed read:\n{lib}"
+        );
+        assert!(lib.contains("mix * out + (1.0 - mix) * dry"));
+        // Latency report and dry delay must agree.
+        assert!(lib.contains("fn latency(&self) -> u32"));
+    }
+
+    #[test]
+    fn wet_dry_without_oversampling_keeps_undelayed_dry() {
+        let opts = PluginOptions {
+            wet_dry_mix: true,
+            ..Default::default()
+        };
+        let lib = generate_lib_rs("test", false, &[], &[], &[], &[], 1, 1, &opts);
+        assert!(lib.contains("let dry = *sample;"));
+        assert!(!lib.contains("dry_delay"));
     }
 
     #[test]

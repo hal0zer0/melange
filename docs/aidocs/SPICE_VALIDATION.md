@@ -5,14 +5,17 @@ Verify melange solver matches ngspice output within tight tolerances.
 
 ## Expected Correlation Benchmarks
 
+Measured 2026-07-18 (HEAD b421358, ngspice-42, reltol=1e-4 reference):
+
 | Circuit Type | Correlation | RMS Error | Notes |
 |--------------|-------------|-----------|-------|
 | Linear (RC, RL) | > 0.999999 (6 nines) | < 0.1% | Should match almost exactly |
-| Nonlinear (diodes) | > 0.9999 (4 nines) | < 1% | NR convergence differences |
-| BJT circuits | > 0.96 | < 40% | Model parameter variations |
-| Op-amp (linear) | ~1.0 | ~0% | Boyle macromodel matches ngspice |
-| JFET circuits | > 0.999 | < 5% | Shichman-Hodges 2D |
+| Nonlinear (diodes) | > 0.999999 (6 nines) | < 0.15% | Includes off-nominal `.pot` positions |
+| BJT circuits | > 0.9996 | < 5% | BJT CE is the loosest (GP model gain ratio 1.024); wurli/neve are at 0.03-0.25% |
+| Op-amp (linear) | ~1.0 | ~0% | VCCS macromodel matches ngspice |
+| JFET circuits | > 0.9994 | < 4% | Shichman-Hodges 2D, ngspice BETA→IDSS |
 | MOSFET circuits | > 0.99999 | < 0.1% | Level 1 SPICE |
+| Audio-rate `.pot` R(t) | > 0.9999 | < 2% | vs native ngspice B-source; residual is per-sample ZOH of R(t) |
 
 All tests are `#[ignore]`d so they only run with
 `cargo test -p melange-validate --test spice_validation -- --include-ignored`
@@ -27,35 +30,35 @@ recorded correlation/RMS values.
 
 ## ngspice Setup for Sample-Accurate Comparison
 
-### Required Netlist Modifications
+### What the harness does automatically (`spice_runner.rs`)
 
-1. **Add `.OPTIONS INTERP`**
-   ```spice
-   .OPTIONS INTERP
-   ```
-   Forces ngspice to interpolate output at uniform timesteps instead of printing adaptive timestep points.
+1. **Injects `.OPTIONS INTERP reltol=1e-4`** right after the title line.
+   INTERP forces ngspice to interpolate output at uniform timesteps instead
+   of printing adaptive timestep points; reltol=1e-4 (vs the 1e-3 default)
+   tightens the reference's own truncation error (measured 2026-07-18:
+   every suite correlation held or improved). Deck-author `.OPTIONS` lines
+   are KEPT — ngspice merges multiple `.OPTIONS` statements, and author
+   options appearing later override the injected ones for the same keyword.
 
-2. **Match Solver Sample Rate**
-   ```spice
-   .TRAN {tstep} {tstop}
-   ```
-   Where `tstep = 1.0 / sample_rate` (e.g., 2.083e-5 for 48kHz)
+2. **Replaces `.TRAN`** with `tstep = 1.0 / sample_rate` (e.g., 2.083e-5
+   for 48 kHz) and the tstop derived from the input signal.
 
-3. **Use PWL Source for Input**
-   ```spice
-   VIN in 0 PWL(0 0 1e-4 0.309 2e-4 0.5878 ...)
-   ```
-   PWL points should match solver's input samples.
+3. **Replaces the input source with a Thevenin PWL pair** (`inject_thevenin_pwl`):
+   the deck's voltage source whose n+ terminal is the input node (`in`) is
+   replaced by `V... in_mlg_src ... PWL(...)` + `R_mlg_src in_mlg_src in 1`,
+   matching melange's 1-ohm Thevenin input model.
 
-### Netlist Structure
+4. **Strips melange-only directives** so ngspice can parse the deck:
+   `.pot`, `.switch`, `.input_impedance`, `.wiper`, `.gang`, `.runtime`,
+   `.mismatch`, `.tolerance`, `.seed`.
 
-For validation, you need TWO netlists:
+### Netlist Structure — SINGLE deck, strip-VIN protocol
 
-**circuit.cir** (for ngspice):
+Each test data dir carries ONE `circuit.cir` used by BOTH engines:
+
 ```spice
 * Circuit title (line 1 is ALWAYS title in SPICE)
-.OPTIONS INTERP
-VIN in 0 PWL(...)
+VIN in 0 DC 0
 R1 in out 10k
 C1 out 0 10n
 .TRAN 2.083e-5 10m
@@ -63,18 +66,44 @@ C1 out 0 10n
 .END
 ```
 
-**circuit_no_vin.cir** (for melange solver):
-```spice
-* Circuit without input source - input applied via input_conductance
-R1 in out 10k
-C1 out 0 10n
-.END
-```
+- **ngspice side**: the harness replaces `VIN` with the Thevenin PWL pair
+  (see above).
+- **melange side**: `strip_vin_source(netlist, "in")` removes `VIN` (matched
+  by n+ terminal == input node) and melange applies the input via
+  `input_conductance` stamping. A voltage source left in the melange netlist
+  would clamp the node — that's why the strip exists.
 
-**Why two netlists?**
-- ngspice needs `VIN` as PWL voltage source
-- Melange applies input via `input_conductance` Thevenin equivalent
-- Voltage source in netlist would clamp node with 1e6 S Norton equivalent
+**Footguns:**
+- The VIN's n+ terminal must BE the input node (`VIN in 0 DC 0`). A deck
+  that bakes its own Thevenin pair (`VIN in_src 0` + `R_src in_src in 1`)
+  escapes both the strip and the inject — neither matches n+ == "in" — and
+  the leftover source adds a second 1-ohm shunt at the input node on both
+  sides, halving the drive level (this bug shipped in the neve_1073_output
+  deck until 2026-07-18).
+- The input PWL should start at 0 V. ngspice pre-settles its DC operating
+  point at PWL(t=0) while melange starts from its own (zero-input) DC OP; a
+  non-zero first sample gives the two engines different initial conditions
+  and puts a genuine onset transient in melange's output with no counterpart
+  in the reference (5 Hz blocker droop, ~0.4 RMS over 100 ms for a unit step).
+
+The historical two-netlist protocol (`circuit_no_vin.cir` variants) is
+retired; the four remaining dead `circuit_no_vin.cir` files were deleted
+2026-07-18.
+
+### DC blocking and settle windows
+
+- Generated melange code runs with `dc_block: true` (5 Hz HPF seeded from
+  the compile-time DC OP). The harness applies `melange_validate::
+  dc_block_signal` — the single shared implementation, seeded from the
+  signal's first sample — to the ngspice output ONCE. Never DC-block the
+  melange output again in a test: it is already blocked inside the generated
+  binary (a double-block inflated the neve-preamp error 15x until
+  2026-07-18).
+- `ComparisonConfig.settle_time_s` (default 0.0) symmetrically excludes the
+  first N seconds of both signals before any metric is computed, so
+  steady-state gates can be tightened without widening them to cover startup
+  residue. Tests opt in per-signal-length (e.g. 64 ms = 2x the 5 Hz blocker
+  tau on the 500 ms neve-preamp signal; 3 ms on the 10 ms BJT CE signal).
 
 ## Melange Solver Setup
 

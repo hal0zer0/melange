@@ -21,12 +21,17 @@
 //! | `test_rc_lowpass_step_response` | Linear RC | 0 | Strict |
 //! | `test_rc_lowpass_chirp` | Linear RC | 0 | Strict |
 //! | `test_diode_clipper_silence_to_signal` | Diode clipper | 2 diodes | Default |
-//! | `test_wurli_preamp_vs_spice` | Wurli 200A preamp | 2 BJTs + 1 diode | BJT |
+//! | `test_wurli_preamp_vs_spice` | Wurli 200A preamp | 2 BJTs + 1 diode | Wurli |
+//! | `test_neve_1073_output_vs_spice` | Neve BA283 AM | 3 BJTs + transformer | Neve output |
+//! | `test_neve_1073_preamp_vs_spice` | Neve BA283 AV | 3 BJTs | Neve preamp |
+//! | `test_pot_static_offnominal_vs_spice` | Off-nominal `.pot` | 1 diode | Nonlinear |
+//! | `test_pot_modulation_vs_spice` | Audio-rate `.pot` vs B-source | 1 diode + R(t) | Custom |
 
 use std::path::PathBuf;
 
 use melange_validate::{
     comparison::{compare_signals, ComparisonConfig, Signal},
+    dc_block_signal,
     spice_runner::{is_ngspice_available, run_transient_with_thevenin_pwl},
     strip_vin_source, validate_circuit,
     visualizer::generate_html_report,
@@ -91,6 +96,7 @@ fn strict_linear_config() -> ComparisonConfig {
         thd_error_tolerance_db: 0.1, // 0.1 dB
         full_scale: 1.0,
         skip_thd: false,
+        settle_time_s: 0.0,
     }
 }
 
@@ -100,66 +106,139 @@ fn strict_linear_config() -> ComparisonConfig {
 /// - Device model differences (melange doesn't model RS, CJO, TT)
 /// - Newton-Raphson convergence differences
 /// - Numerical precision in exponential functions
+///
+/// Measured 2026-07-18 (HEAD b421358, ngspice-42, reltol=1e-4 reference)
+/// across the direct users of this config:
+///   diode_clipper        rms 0.069%  peak 1.6e-3 V  corr 0.99999991  THD err 0.00 dB
+///   antiparallel_diodes  rms 0.059%  peak 1.2e-3 V  corr 0.99999983  THD err 0.03 dB
+///   tube_screamer        rms 0.442%  peak 9.9e-3 V  corr 0.99999032  THD err 0.04 dB
+///   diode silence→signal rms 0.125%  peak 1.43e-2 V corr 0.99999934  THD err <0.1 dB
+/// Gates below sit ~3.5-10x above the worst measured user per metric
+/// (rms: tube_screamer; peak: silence→signal onset; corr: tube_screamer).
+/// tube_screamer_wiper overrides rms/corr with its own cited numbers.
 fn nonlinear_config() -> ComparisonConfig {
     ComparisonConfig {
-        rms_error_tolerance: 0.20,   // 20% — DK vs SPICE method differences
-        peak_error_tolerance: 0.5,   // 500mV
+        rms_error_tolerance: 0.02, // was 0.20; worst measured 0.442% → 4.5x headroom
+        peak_error_tolerance: 0.05, // was 0.5 V; worst measured 1.43e-2 V → 3.5x headroom
         max_relative_tolerance: 5.0, // 500% — near zero-crossings, large relative error expected
-        correlation_min: 0.99,       // Two 9s — waveform shape should match
-        thd_error_tolerance_db: 3.0, // 3 dB — DK method produces different harmonics than SPICE
-        full_scale: 5.0,             // Diode clippers can hit 5V
+        correlation_min: 0.9999,   // was 0.99; worst measured 1-corr = 9.7e-6 → 10.3x headroom
+        thd_error_tolerance_db: 1.0, // was 3.0; worst measured 0.04 dB → 25x headroom
+        full_scale: 5.0,           // Diode clippers can hit 5V
         skip_thd: false,
+        settle_time_s: 0.0,
     }
 }
 
-/// BJT-specific tolerances.
+/// BJT common-emitter tolerances (test_bjt_common_emitter_vs_spice).
 ///
 /// BJT circuits have larger error vs SPICE because:
 /// - Gummel-Poon implementation differences (melange vs ngspice)
-/// - ~0.5V DC offset from different model operating points
-/// - ~10% gain mismatch (182x melange vs 201x ngspice)
+/// - small gain mismatch (measured 213.2x melange vs 208.3x ngspice, ratio 1.024)
 ///
-/// Measured values (2026-03-19): RMS 12%, peak 0.38V, correlation 0.998
+/// Measured 2026-07-18 (HEAD b421358, ngspice-42, reltol=1e-4 reference,
+/// 3 ms settle window): rms 4.26%, peak 0.164 V, corr 0.99964880.
+/// The old peak gate (0.5 V) was documented as widened for a startup
+/// transient; today's measurement shows the settled peak (0.164 V) is
+/// steady-state model mismatch (gain ratio 1.024 on a ~4.2 V p-p output),
+/// not startup — the settle window removes the startup contribution and
+/// the peak gate is tightened to 0.30 V (1.8x over the settled peak).
 fn bjt_config() -> ComparisonConfig {
     ComparisonConfig {
-        rms_error_tolerance: 0.15, // 15% — GP model with ISE/NE leakage (measured: 11.8%)
-        peak_error_tolerance: 0.5, // 0.5V — startup transient (measured: 0.38V)
+        rms_error_tolerance: 0.10, // was 0.15; measured 4.26% → 2.3x headroom
+        peak_error_tolerance: 0.30, // was 0.5 V; measured settled peak 0.164 V → 1.8x
         max_relative_tolerance: 100.0, // near zero-crossings
-        correlation_min: 0.99,     // waveform shape match (measured: 0.998)
+        correlation_min: 0.995,    // was 0.99; measured 1-corr = 3.5e-4 → 14x headroom
         thd_error_tolerance_db: 5.0, // model differences in distortion
         full_scale: 10.0,          // BJT CE output can swing wider
         skip_thd: true,            // THD comparison not meaningful for nonlinear BJT
+        // 3 ms settle on the 10 ms signal: excludes the DC-blocker/DC-OP
+        // startup region while keeping 70% of the window. (The 5 Hz blocker
+        // tau is ~32 ms, but both sides use first-sample/DC-OP-seeded
+        // blockers, so only a short residual remains.)
+        settle_time_s: 0.003,
     }
 }
 
-/// Apply a 5Hz DC blocking HPF to a signal.
+/// Wurlitzer 200A preamp tolerances (test_wurli_preamp_vs_spice).
 ///
-/// Seeds `x_prev` with the signal's own first sample (rather than 0) so the
-/// filter starts already settled at the reference's DC operating point,
-/// instead of injecting an artificial startup transient that decays at the
-/// 5 Hz pole (tau ~32ms). This mirrors the generated code's DC blocker,
-/// which seeds `dc_block_x_prev` from the compile-time `DC_OP[out]` value
-/// (`state.rs.tera`, "Seed the DC blocker's x[n-1] with the output-node DC
-/// operating point") specifically to avoid that startup thump. Without this
-/// seed, `dc_block_signal` and the generated code apply non-equivalent
-/// filters whenever the raw output has a non-zero DC bias (e.g. an amplifier
-/// stage with no output coupling cap): the reference exhibits a multi-volt
-/// decaying transient over the comparison window while melange's output is
-/// already settled, producing a spurious low-correlation "regression" that
-/// is a test-harness artifact, not a solver bug. See wurli-preamp
-/// (~9.1V raw DC bias, no output coupling cap).
-fn dc_block_signal(signal: &mut [f64], sample_rate: f64) {
-    let r = 1.0 - 2.0 * std::f64::consts::PI * 5.0 / sample_rate;
-    let mut x_prev = signal.first().copied().unwrap_or(0.0);
-    let mut y_prev = 0.0f64;
-    for sample in signal.iter_mut() {
-        let x = *sample;
-        let y = x - x_prev + r * y_prev;
-        x_prev = x;
-        y_prev = y;
-        *sample = y;
+/// Split from bjt_config 2026-07-18 — the wurli circuit measures far tighter
+/// than the BJT CE test, so sharing the CE gates hid ~17x of margin.
+/// Measured 2026-07-18 (HEAD b421358, ngspice-42, reltol=1e-4 reference,
+/// 10 ms settle on the 50 ms signal): rms 0.235%, peak 1.28e-3 V,
+/// corr 0.99999734, gain ratio 1.0006.
+fn wurli_config() -> ComparisonConfig {
+    ComparisonConfig {
+        rms_error_tolerance: 0.01, // was 0.15; measured 0.235% → 4.3x headroom
+        peak_error_tolerance: 0.01, // was 0.5 V; measured settled peak 1.28 mV → 7.8x headroom
+        max_relative_tolerance: 100.0, // near zero-crossings
+        correlation_min: 0.9999,   // was 0.99; measured 1-corr = 2.7e-6 → 37x headroom
+        thd_error_tolerance_db: 5.0,
+        full_scale: 10.0,
+        skip_thd: true,
+        // 10 ms settle on a 50 ms signal: comfortably excludes the residual
+        // startup region while keeping 80% of the window.
+        settle_time_s: 0.010,
     }
 }
+
+/// Neve 1073 output amp (BA283 AM) tolerances (test_neve_1073_output_vs_spice).
+///
+/// Armed 2026-07-18 — this test previously ran everything and asserted
+/// nothing. STATUS.md recorded corr 0.9961 / rms 14.4% ("marginal") from
+/// 2026-04-08; measured today (HEAD b421358, ngspice-42, reltol=1e-4,
+/// corrected single-VIN deck, 10 ms settle on the 50 ms signal):
+/// rms 0.107%, peak 1.06e-4 V, corr 0.99999952, gain 6.7x with
+/// gain ratio 1.0000 — the emitter-NR campaign (and interim BJT/transformer
+/// fixes since April) fixed the marginal correlation.
+///
+/// Corrected drive level: the deck previously baked in a `VIN in_src` +
+/// `R_src 1` Thevenin pair that escaped both the harness strip and the
+/// Thevenin inject (n+ was "in_src", not "in"), leaving a second 1-ohm
+/// shunt at the input node on both sides. Removing it doubled the drive:
+/// measured gain went 3.4x → 6.7x (16.5 dB) at identical correlation.
+fn neve_output_config() -> ComparisonConfig {
+    ComparisonConfig {
+        rms_error_tolerance: 0.01, // measured 0.107% → 9.3x headroom
+        peak_error_tolerance: 0.005, // measured 1.06e-4 V → 47x headroom
+        max_relative_tolerance: 100.0, // near zero-crossings
+        correlation_min: 0.9999,   // measured 1-corr = 4.8e-7 → 208x headroom
+        thd_error_tolerance_db: 5.0,
+        full_scale: 10.0,
+        skip_thd: true,
+        settle_time_s: 0.010,
+    }
+}
+
+/// Neve 1073 preamp (BA283 AV) tolerances (test_neve_1073_preamp_vs_spice).
+///
+/// Armed 2026-07-18 — this test previously ran everything and asserted
+/// nothing. Historical record: corr 0.99999 / rms 0.53% (STATUS "5-nines").
+/// Measured today (HEAD b421358, ngspice-42, reltol=1e-4, 64 ms settle —
+/// 2x the 5 Hz blocker tau of ~32 ms — on the 500 ms signal):
+/// rms 0.0346%, peak 1.12e-4 V, corr 1.00000000 (printed at 8 decimals),
+/// gain 26.0x with gain ratio 0.9996.
+///
+/// Most of the historical 0.53% rms was a harness artifact: the melange
+/// output was DC-blocked TWICE (once inside the generated code, once in
+/// the test) while the SPICE side was blocked once. Removing the second
+/// application dropped rms 0.508% → 0.0346% and corr 0.99998710 → ~1.0.
+fn neve_preamp_config() -> ComparisonConfig {
+    ComparisonConfig {
+        rms_error_tolerance: 0.005, // measured 0.0346% → 14x headroom
+        peak_error_tolerance: 0.002, // measured 1.12e-4 V → 18x headroom
+        max_relative_tolerance: 100.0, // near zero-crossings
+        correlation_min: 0.99999,  // measured 1-corr < 5e-9 → >2000x headroom
+        thd_error_tolerance_db: 5.0,
+        full_scale: 10.0,
+        skip_thd: true,
+        settle_time_s: 0.064,
+    }
+}
+
+// NOTE: `dc_block_signal` is imported from the melange_validate library —
+// there is intentionally NO test-local copy. The library implementation
+// seeds `x_prev` from the signal's first sample (mirroring the generated
+// code's DC-OP-seeded blocker); see its doc comment in `src/lib.rs`.
 
 /// Run validation for a circuit and return the result
 ///
@@ -218,7 +297,9 @@ fn run_validation(
 
     let melange_output = run_melange_codegen(&stripped_netlist, &input_signal, SAMPLE_RATE)?;
 
-    // Apply DC blocking to SPICE output to match melange (codegen dc_block=false, so match raw)
+    // Apply DC blocking to SPICE output to match melange's built-in blocker
+    // (run_melange_codegen generates with dc_block: true, so the melange
+    // output is already 5 Hz-blocked; the reference must get the same filter).
     dc_block_signal(&mut spice_output, SAMPLE_RATE);
 
     // Create signals for comparison
@@ -306,6 +387,35 @@ fn run_melange_codegen(
     input_signal: &[f64],
     sample_rate: f64,
 ) -> Result<Vec<f64>, ValidationError> {
+    // Standard main: read a sample per stdin line, process, print.
+    let main_code = r#"
+fn main() {
+    let mut state = CircuitState::default();
+    let stdin = std::io::stdin();
+    let mut line = String::new();
+    loop {
+        line.clear();
+        if stdin.read_line(&mut line).unwrap() == 0 { break; }
+        if let Ok(input) = line.trim().parse::<f64>() {
+            let out = process_sample(input, &mut state);
+            println!("{:.15e}", out[0]);
+        }
+    }
+}
+"#;
+    run_melange_codegen_with_main(netlist_str, input_signal, sample_rate, main_code)
+}
+
+/// Like [`run_melange_codegen`], but with a caller-supplied `fn main()` body
+/// appended to the generated code. Used by the pot-modulation tests to drive
+/// `set_pot_0(...)` per sample (or once, off-nominal) — something the standard
+/// stdin/stdout main has no hook for.
+fn run_melange_codegen_with_main(
+    netlist_str: &str,
+    input_signal: &[f64],
+    sample_rate: f64,
+    main_code: &str,
+) -> Result<Vec<f64>, ValidationError> {
     use melange_solver::codegen::routing;
     use melange_solver::codegen::{CodeGenerator, CodegenConfig};
     use melange_solver::dk::DkKernel;
@@ -317,17 +427,31 @@ fn run_melange_codegen(
     let mut mna = melange_solver::mna::MnaSystem::from_netlist(&netlist)
         .map_err(|e| ValidationError::Solver(format!("MNA: {}", e)))?;
 
+    // Hard-error on missing nodes (like the library twin in src/lib.rs).
+    // The old `.unwrap_or(1)` / `.unwrap_or(2)` fallback silently compared
+    // against an arbitrary node when a deck renamed in/out — a wrong-node
+    // comparison must fail loudly, not produce plausible garbage.
     let input_node = mna
         .node_map
         .get("in")
         .copied()
-        .unwrap_or(1)
+        .ok_or_else(|| {
+            ValidationError::Solver(format!(
+                "Input node 'in' not found. Available: {:?}",
+                mna.node_map.keys().collect::<Vec<_>>()
+            ))
+        })?
         .saturating_sub(1);
     let output_node = mna
         .node_map
         .get("out")
         .copied()
-        .unwrap_or(2)
+        .ok_or_else(|| {
+            ValidationError::Solver(format!(
+                "Output node 'out' not found. Available: {:?}",
+                mna.node_map.keys().collect::<Vec<_>>()
+            ))
+        })?
         .saturating_sub(1);
 
     if input_node < mna.n {
@@ -411,22 +535,7 @@ fn run_melange_codegen(
     }
     .map_err(|e| ValidationError::Solver(format!("Codegen: {}", e)))?;
 
-    // Append a main that reads input from stdin, processes, writes output to stdout
-    let main_code = r#"
-fn main() {
-    let mut state = CircuitState::default();
-    let stdin = std::io::stdin();
-    let mut line = String::new();
-    loop {
-        line.clear();
-        if stdin.read_line(&mut line).unwrap() == 0 { break; }
-        if let Ok(input) = line.trim().parse::<f64>() {
-            let out = process_sample(input, &mut state);
-            println!("{:.15e}", out[0]);
-        }
-    }
-}
-"#;
+    // Append the caller-supplied main (stdin samples in, stdout samples out)
     let full_source = format!("{}\n{}", generated.code, main_code);
 
     // Compile
@@ -848,14 +957,20 @@ fn test_jfet_common_source_vs_spice() {
     println!("\n=== JFET Common Source Amplifier Validation ===");
     println!("Circuit: N-channel JFET, Rd=2.2k, Rs=1k, VDD=12V");
 
+    // Measured 2026-07-18 (HEAD b421358, ngspice-42, reltol=1e-4):
+    // rms 3.47%, peak 4.6e-6 V, corr 0.99940687, THD err 4.70 dB.
+    // rms margin is only 2.9x — left at 0.10 (tightening would leave <10x).
+    // Peak tightened 0.5 → 1e-4 (measured 4.6e-6 → 22x headroom; the output
+    // signal is micro-volt scale, so a 0.5 V peak gate was vacuous).
     let config = ComparisonConfig {
         rms_error_tolerance: 0.10,
-        peak_error_tolerance: 0.5,
+        peak_error_tolerance: 1e-4,
         max_relative_tolerance: 5.0,
         correlation_min: 0.999,
         thd_error_tolerance_db: 5.0, // DK method produces different harmonics than SPICE
         full_scale: 5.0,
         skip_thd: false,
+        settle_time_s: 0.0,
     };
 
     let result =
@@ -883,14 +998,20 @@ fn test_mosfet_common_source_vs_spice() {
     println!("\n=== MOSFET Common Source Amplifier Validation ===");
     println!("Circuit: N-channel MOSFET, Rd=1k, VDD=5V");
 
+    // Measured 2026-07-18 (HEAD b421358, ngspice-42, reltol=1e-4):
+    // rms 0.0287%, peak 2.7e-6 V, corr 0.99999997.
+    // rms tightened 0.10 → 0.005 (17x headroom); peak 0.5 → 1e-4 (37x —
+    // micro-volt-scale output made the 0.5 V gate vacuous); corr 0.999 →
+    // 0.9999 (measured 1-corr = 3e-8 → >1000x headroom even after tightening).
     let config = ComparisonConfig {
-        rms_error_tolerance: 0.10,
-        peak_error_tolerance: 0.5,
+        rms_error_tolerance: 0.005,
+        peak_error_tolerance: 1e-4,
         max_relative_tolerance: 5.0,
-        correlation_min: 0.999,
+        correlation_min: 0.9999,
         thd_error_tolerance_db: 5.0,
         full_scale: 5.0,
         skip_thd: true, // small-signal linear region: THD too low to measure reliably
+        settle_time_s: 0.0,
     };
 
     let result =
@@ -962,7 +1083,7 @@ fn test_wurli_preamp_vs_spice() {
         .expect("melange codegen failed");
 
     // --- Compare ---
-    let config = bjt_config();
+    let config = wurli_config();
     let spice_signal = Signal::new(spice_output.clone(), SAMPLE_RATE, "SPICE");
     let melange_signal = Signal::new(melange_output.clone(), SAMPLE_RATE, "Melange");
     let mut report = compare_signals(&spice_signal, &melange_signal, &config);
@@ -1019,11 +1140,12 @@ fn test_wurli_preamp_vs_spice() {
         "Wurli preamp should amplify signal, got {:.2}x gain",
         melange_gain
     );
-    // Melange gain should be within 4x of SPICE gain (allow for model differences)
+    // Tightened 2026-07-18 from [0.25..4.0] to [0.8..1.25]:
+    // measured gain ratio 1.0006 (melange 2.4x vs SPICE 2.4x).
     let gain_ratio = melange_gain / spice_gain;
     assert!(
-        gain_ratio > 0.25 && gain_ratio < 4.0,
-        "Melange gain ({:.1}x) should be within 4x of SPICE gain ({:.1}x), ratio={:.2}",
+        gain_ratio > 0.8 && gain_ratio < 1.25,
+        "Melange gain ({:.1}x) should be within [0.8..1.25] of SPICE gain ({:.1}x), ratio={:.4}",
         melange_gain,
         spice_gain,
         gain_ratio
@@ -1075,7 +1197,7 @@ fn test_neve_1073_output_vs_spice() {
         .expect("melange codegen failed");
 
     // --- Compare ---
-    let config = bjt_config();
+    let config = neve_output_config();
     let spice_signal = Signal::new(spice_output.clone(), SAMPLE_RATE, "SPICE");
     let melange_signal = Signal::new(melange_output.clone(), SAMPLE_RATE, "Melange");
     let mut report = compare_signals(&spice_signal, &melange_signal, &config);
@@ -1121,6 +1243,25 @@ fn test_neve_1073_output_vs_spice() {
         melange_pp,
         melange_gain,
         20.0 * melange_gain.log10()
+    );
+
+    // --- Gates (armed 2026-07-18; this test previously asserted nothing) ---
+    // Measured: corr 0.99999952, rms 0.107%, gain ratio 1.0000 — see
+    // neve_output_config() for the full measurement citation.
+    assert!(
+        result.report.passed,
+        "Neve 1073 output validation failed:\n{}\nReport saved to: {:?}",
+        result.report.summary(),
+        result.html_report_path
+    );
+    let gain_ratio = melange_gain / spice_gain;
+    assert!(
+        gain_ratio > 0.8 && gain_ratio < 1.25,
+        "Melange gain ({:.2}x) should be within [0.8..1.25] of SPICE gain ({:.2}x), ratio={:.4} \
+         (measured ratio 1.0002 on 2026-07-18)",
+        melange_gain,
+        spice_gain,
+        gain_ratio
     );
 }
 
@@ -1168,14 +1309,16 @@ fn test_neve_1073_preamp_vs_spice() {
     let melange_output = run_melange_codegen(&stripped_netlist, &input_signal, SAMPLE_RATE)
         .expect("melange codegen failed");
 
-    // DC-block melange output too
-    let mut melange_dc_blocked = melange_output.clone();
-    dc_block_signal(&mut melange_dc_blocked, SAMPLE_RATE);
+    // NOTE: melange_output is NOT filtered again here — run_melange_codegen
+    // generates with dc_block: true, so the generated binary already applied
+    // the 5 Hz blocker. A second application (removed 2026-07-18) rolled off
+    // the melange side twice while the SPICE side was blocked once,
+    // introducing an asymmetric LF error that was a harness artifact.
 
     // --- Compare ---
-    let config = bjt_config();
+    let config = neve_preamp_config();
     let spice_signal = Signal::new(spice_output.clone(), SAMPLE_RATE, "SPICE");
-    let melange_signal = Signal::new(melange_dc_blocked.clone(), SAMPLE_RATE, "Melange");
+    let melange_signal = Signal::new(melange_output.clone(), SAMPLE_RATE, "Melange");
     let mut report = compare_signals(&spice_signal, &melange_signal, &config);
     report.circuit_name = "neve_1073_preamp".to_string();
     report.node_name = "out".to_string();
@@ -1193,14 +1336,11 @@ fn test_neve_1073_preamp_vs_spice() {
         .cloned()
         .fold(f64::NEG_INFINITY, f64::max)
         - input_signal.iter().cloned().fold(f64::INFINITY, f64::min);
-    let melange_pp = melange_dc_blocked
+    let melange_pp = melange_output
         .iter()
         .cloned()
         .fold(f64::NEG_INFINITY, f64::max)
-        - melange_dc_blocked
-            .iter()
-            .cloned()
-            .fold(f64::INFINITY, f64::min);
+        - melange_output.iter().cloned().fold(f64::INFINITY, f64::min);
     let spice_pp = spice_output
         .iter()
         .cloned()
@@ -1222,6 +1362,25 @@ fn test_neve_1073_preamp_vs_spice() {
         melange_pp,
         melange_gain,
         20.0 * melange_gain.log10()
+    );
+
+    // --- Gates (armed 2026-07-18; this test previously asserted nothing) ---
+    // Measured: corr 1.00000000, rms 0.0346%, gain ratio 0.9996 — see
+    // neve_preamp_config() for the full measurement citation.
+    assert!(
+        result.report.passed,
+        "Neve 1073 preamp validation failed:\n{}\nReport saved to: {:?}",
+        result.report.summary(),
+        result.html_report_path
+    );
+    let gain_ratio = melange_gain / spice_gain;
+    assert!(
+        gain_ratio > 0.8 && gain_ratio < 1.25,
+        "Melange gain ({:.2}x) should be within [0.8..1.25] of SPICE gain ({:.2}x), ratio={:.4} \
+         (measured ratio 0.9996 on 2026-07-18)",
+        melange_gain,
+        spice_gain,
+        gain_ratio
     );
 }
 
@@ -1368,7 +1527,7 @@ fn test_rc_lowpass_step_response() {
 
     let num_samples = (SAMPLE_RATE * 0.1) as usize; // 100ms
     let period_samples = (SAMPLE_RATE / 500.0) as usize; // 96 samples per cycle
-    let input: Vec<f64> = (0..num_samples)
+    let mut input: Vec<f64> = (0..num_samples)
         .map(|i| {
             if (i % period_samples) < period_samples / 2 {
                 1.0
@@ -1377,19 +1536,33 @@ fn test_rc_lowpass_step_response() {
             }
         })
         .collect();
+    // Start the input at 0 so both engines see the same onset. ngspice
+    // pre-settles its DC operating point at PWL(t=0): a square wave whose
+    // first sample is +1.0 starts ngspice pre-charged at +1 V while melange
+    // starts from silence and genuinely sees the 0->+1 onset step. That
+    // asymmetry puts a 5 Hz-blocker droop (r^n, RMS ~0.4 over 100 ms) in the
+    // melange output with no counterpart in the reference. (It was
+    // historically masked by a zero-seeded reference-side DC blocker that
+    // injected the same r^n term by accident; the unified first-sample-seeded
+    // blocker exposed it.) With input[0] = 0, both engines settle at 0 V and
+    // both see the identical step one sample later.
+    input[0] = 0.0;
 
     let netlist_path = test_data_dir().join("rc_lowpass").join("circuit.cir");
-    // Square wave tolerances: the bilinear transform can't track instantaneous
-    // steps, so peak error is large (~1V) at transitions. RMS and correlation
-    // still validate overall accuracy over 100ms of error accumulation.
+    // Measured 2026-07-18 (after the input[0] = 0 onset fix and reltol=1e-4):
+    // rms 0.132%, peak 6.9e-3 V, corr 0.99999924. The historical 5% / 1 V
+    // gates were covering the onset-asymmetry artifact (rms was 2.24e-2),
+    // not transition error — with matched onsets the bilinear step response
+    // tracks ngspice to millivolts.
     let config = ComparisonConfig {
-        rms_error_tolerance: 0.05,   // 5% — step transitions dominate error
-        peak_error_tolerance: 1.0,   // 1V — bilinear can't track instantaneous jump
+        rms_error_tolerance: 0.01,   // was 0.05; measured 0.132% → 7.6x headroom
+        peak_error_tolerance: 0.05,  // was 1.0 V; measured 6.9e-3 V → 7.3x headroom
         max_relative_tolerance: 1e4, // near zero-crossings
-        correlation_min: 0.999,      // shape should match well despite peak errors
+        correlation_min: 0.9999,     // was 0.999; measured 1-corr = 7.6e-7 → 131x headroom
         thd_error_tolerance_db: 5.0,
         full_scale: 1.0,
         skip_thd: true, // square wave THD is not meaningful
+        settle_time_s: 0.0,
     };
 
     let result = validate_circuit(&netlist_path, &input, SAMPLE_RATE, "out", &config)
@@ -1397,6 +1570,12 @@ fn test_rc_lowpass_step_response() {
 
     println!("  Samples: {}", result.report.sample_count);
     println!("  RMS Error: {:.6e}", result.report.rms_error);
+    println!(
+        "  Normalized RMS: {:.6} ({:.4}%)",
+        result.report.normalized_rms_error,
+        result.report.normalized_rms_error * 100.0
+    );
+    println!("  Peak Error: {:.6e}", result.report.peak_error);
     println!(
         "  Correlation: {:.8}",
         result.report.correlation_coefficient
@@ -1449,6 +1628,7 @@ fn test_rc_lowpass_chirp() {
         thd_error_tolerance_db: 5.0,
         full_scale: 1.0,
         skip_thd: true, // chirp has no meaningful THD
+        settle_time_s: 0.0,
     };
 
     let result = validate_circuit(&netlist_path, &input, SAMPLE_RATE, "out", &config)
@@ -1460,6 +1640,12 @@ fn test_rc_lowpass_chirp() {
         1000.0 * num_samples as f64 / SAMPLE_RATE
     );
     println!("  RMS Error: {:.6e}", result.report.rms_error);
+    println!(
+        "  Normalized RMS: {:.6} ({:.4}%)",
+        result.report.normalized_rms_error,
+        result.report.normalized_rms_error * 100.0
+    );
+    println!("  Peak Error: {:.6e}", result.report.peak_error);
     println!(
         "  Correlation: {:.8}",
         result.report.correlation_coefficient
@@ -1508,6 +1694,12 @@ fn test_diode_clipper_silence_to_signal() {
         signal_samples * 1000 / SAMPLE_RATE as usize
     );
     println!("  RMS Error: {:.6e}", result.report.rms_error);
+    println!(
+        "  Normalized RMS: {:.6} ({:.4}%)",
+        result.report.normalized_rms_error,
+        result.report.normalized_rms_error * 100.0
+    );
+    println!("  Peak Error: {:.6e}", result.report.peak_error);
     println!(
         "  Correlation: {:.8}",
         result.report.correlation_coefficient
@@ -1605,8 +1797,19 @@ fn test_tube_screamer_wiper_vs_spice() {
 
     // Volume pot attenuation (pos=0.85 → 15% loss) pushes zero-crossings closer to zero,
     // where relative error spikes. Relax max_relative_tolerance vs base nonlinear_config.
+    //
+    // rms/corr overrides vs the (tightened) base nonlinear_config, measured
+    // 2026-07-18: rms 5.71%, corr 0.99838696. The wiper variant's divider +
+    // deliberately simplified tone network give it a genuinely larger
+    // time-domain offset than the clipping-only tube_screamer (see the
+    // correlation assert comment below); the THD match (0.11 dB) is the
+    // sonically meaningful gate. rms 0.10 = 1.75x over measured (was
+    // effectively 0.20 before the base config tightening — this is still a
+    // tightening, not a widening).
     let config = ComparisonConfig {
         max_relative_tolerance: 5000.0, // near-zero relative error from volume divider
+        rms_error_tolerance: 0.10,      // measured 5.71% → 1.75x headroom
+        correlation_min: 0.997,         // measured 0.99838696; matches the assert below
         ..nonlinear_config()
     };
 
@@ -1633,6 +1836,220 @@ fn test_tube_screamer_wiper_vs_spice() {
         result.report.correlation_coefficient > 0.997,
         "Correlation too low: {:.8}",
         result.report.correlation_coefficient
+    );
+}
+
+// =============================================================================
+// Dynamic Potentiometer Validation (tests/data/pot_modulation)
+// =============================================================================
+
+/// Shared harness for the pot_modulation deck pair.
+///
+/// `ngspice_deck` is run through the standard Thevenin-PWL path;
+/// `circuit_melange.cir` (no VIN, `.pot R_ldr 1k 100k`, nominal 5.5k) is run
+/// through codegen with a caller-supplied main so the test can drive
+/// `set_pot_0(...)`.
+fn run_pot_validation(
+    ngspice_deck: &str,
+    input_signal: &[f64],
+    main_code: &str,
+) -> (Vec<f64>, Vec<f64>) {
+    let data_dir = test_data_dir().join("pot_modulation");
+    let ngspice_netlist = std::fs::read_to_string(data_dir.join(ngspice_deck))
+        .expect("Failed to read ngspice pot deck");
+    let melange_netlist = std::fs::read_to_string(data_dir.join("circuit_melange.cir"))
+        .expect("Failed to read melange pot deck");
+
+    let duration = input_signal.len() as f64 / SAMPLE_RATE;
+    let tstep = 1.0 / SAMPLE_RATE;
+    let pwl_data: Vec<(f64, f64)> = input_signal
+        .iter()
+        .enumerate()
+        .map(|(i, &v)| (i as f64 / SAMPLE_RATE, v))
+        .collect();
+
+    let spice_data = run_transient_with_thevenin_pwl(
+        &ngspice_netlist,
+        tstep,
+        duration,
+        "in",
+        &pwl_data,
+        1.0,
+        &["out".to_string()],
+    )
+    .expect("ngspice failed on pot deck");
+
+    let mut spice_output = spice_data.get_node_voltage("out").unwrap().to_vec();
+    dc_block_signal(&mut spice_output, SAMPLE_RATE);
+
+    // circuit_melange.cir carries no VIN; strip is a no-op but kept for symmetry
+    let (stripped, _) = strip_vin_source(&melange_netlist, "in");
+    let melange_output =
+        run_melange_codegen_with_main(&stripped, input_signal, SAMPLE_RATE, main_code)
+            .expect("melange codegen failed on pot deck");
+
+    (spice_output, melange_output)
+}
+
+/// Static off-nominal pot position vs ngspice.
+///
+/// First validation of a NON-nominal pot position through the `.pot`
+/// mechanism: the melange deck's R_ldr is nominally 5.5k, and the test moves
+/// it to 10k via `set_pot_0(10_000.0)` before the first sample (triggering
+/// the lazy matrix rebuild path), then compares against ngspice running the
+/// same topology with a fixed 10k resistor (`circuit_static.cir`).
+/// This isolates the pot re-stamp/rebuild machinery from any R(t)
+/// zero-order-hold considerations — if this is tight and the dynamic test
+/// below is loose, the looseness is R(t) discretization, not the mechanism.
+#[test]
+#[ignore] // requires ngspice
+fn test_pot_static_offnominal_vs_spice() {
+    assert!(is_ngspice_available(), "ngspice not found");
+
+    println!("\n=== Pot Static Off-Nominal (R_ldr 5.5k -> 10k) Validation ===");
+
+    // 500 Hz, 1 V, 20 ms — clips positive half on D1, divider on negative half
+    let num_samples = (SAMPLE_RATE * 0.020) as usize;
+    let input: Vec<f64> = (0..num_samples)
+        .map(|i| (2.0 * std::f64::consts::PI * 500.0 * i as f64 / SAMPLE_RATE).sin())
+        .collect();
+
+    let main_code = r#"
+fn main() {
+    let mut state = CircuitState::default();
+    // Off-nominal pot position: nominal is 5.5k, move to 10k before the
+    // first sample. Rebuild happens lazily inside process_sample().
+    state.set_pot_0(10_000.0);
+    let stdin = std::io::stdin();
+    let mut line = String::new();
+    loop {
+        line.clear();
+        if stdin.read_line(&mut line).unwrap() == 0 { break; }
+        if let Ok(input) = line.trim().parse::<f64>() {
+            let out = process_sample(input, &mut state);
+            println!("{:.15e}", out[0]);
+        }
+    }
+}
+"#;
+
+    let (spice_output, melange_output) =
+        run_pot_validation("circuit_static.cir", &input, main_code);
+
+    // Measured 2026-07-18 (first arming): rms 0.0374%, peak 4.06e-3 V,
+    // corr 0.99999995, THD err 0.01 dB — the off-nominal rebuild is exactly
+    // as tight as the nominal-position diode tests, so nonlinear_config
+    // (rms 2%, peak 0.05 V, corr 0.9999, THD 1 dB) applies unchanged.
+    let config = nonlinear_config();
+    let spice_signal = Signal::new(spice_output, SAMPLE_RATE, "SPICE");
+    let melange_signal = Signal::new(melange_output, SAMPLE_RATE, "Melange");
+    let mut report = compare_signals(&spice_signal, &melange_signal, &config);
+    report.circuit_name = "pot_static_offnominal".to_string();
+    report.node_name = "out".to_string();
+
+    let result = ValidationResult {
+        report,
+        html_report_path: None,
+    };
+    print_validation_metrics(&result);
+
+    assert!(
+        result.report.passed,
+        "Pot static off-nominal validation failed:\n{}",
+        result.report.summary()
+    );
+}
+
+/// Audio-rate pot modulation vs a native ngspice B-source reference.
+///
+/// The ngspice side (`circuit.cir`) models the time-varying resistance with
+/// a behavioral current source — `I = V(mid,out) / (5500 + 4500*sin(2*pi*
+/// 5000*time))` — an INDEPENDENT reference, not a melange mirror: ngspice
+/// evaluates R(t) continuously inside its own adaptive integration. The
+/// melange side drives the same law through the `.pot` mechanism with one
+/// `set_pot_0()` call per sample (full per-sample O(N^3) rebuild path).
+///
+/// R(t) on the melange side is evaluated at the trapezoidal step midpoint
+/// (t_n - T/2): melange holds R constant across each step while ngspice
+/// integrates through the continuously-varying R, so the midpoint value is
+/// the natural zero-order-hold representative. Measured 2026-07-18:
+///   midpoint  (t_n - T/2): rms 1.28%, peak 3.93e-2 V, corr 0.99991763
+///   end-point (t_n):       rms 1.70%, peak 3.04e-2 V, corr 0.99985445
+/// Midpoint wins on rms and correlation and is what the test uses. The
+/// static off-nominal test above sits at the 0.037% floor, confirming the
+/// residual here is R(t) discretization, not the pot mechanism.
+#[test]
+#[ignore] // requires ngspice
+fn test_pot_modulation_vs_spice() {
+    assert!(is_ngspice_available(), "ngspice not found");
+
+    println!("\n=== Pot Modulation (5 kHz R sweep 1k-10k, B-source ref) Validation ===");
+
+    // 500 Hz, 1 V, 50 ms signal; R modulated 1k..10k at 5 kHz (per the deck)
+    let num_samples = (SAMPLE_RATE * 0.050) as usize;
+    let input: Vec<f64> = (0..num_samples)
+        .map(|i| (2.0 * std::f64::consts::PI * 500.0 * i as f64 / SAMPLE_RATE).sin())
+        .collect();
+
+    let main_code = r#"
+fn main() {
+    let mut state = CircuitState::default();
+    let stdin = std::io::stdin();
+    let mut line = String::new();
+    let mut n: u64 = 0;
+    loop {
+        line.clear();
+        if stdin.read_line(&mut line).unwrap() == 0 { break; }
+        if let Ok(input) = line.trim().parse::<f64>() {
+            // R(t) evaluated at the step midpoint (t_n - T/2); melange holds
+            // R constant over the step [t_{n-1}, t_n] that ngspice integrates
+            // with continuously-varying R. Matches the deck's B-source law:
+            // R(t) = 5500 + 4500*sin(2*pi*5000*t).
+            let t = (n as f64 - 0.5) / 48000.0;
+            let r = 5500.0 + 4500.0 * (2.0 * std::f64::consts::PI * 5000.0 * t).sin();
+            state.set_pot_0(r);
+            let out = process_sample(input, &mut state);
+            println!("{:.15e}", out[0]);
+            n += 1;
+        }
+    }
+}
+"#;
+
+    let (spice_output, melange_output) = run_pot_validation("circuit.cir", &input, main_code);
+
+    // Gates measured 2026-07-18 (midpoint R evaluation, see doc comment):
+    // rms 1.28%, peak 3.93e-2 V, corr 0.99991763. Dynamic-R comparison is
+    // inherently looser than static: melange's per-sample zero-order hold of
+    // R(t) vs ngspice's continuous B-source evaluation leaves a genuine
+    // discretization residual at 5 kHz mod / 48 kHz fs (9.6 samples per
+    // modulation period). Gates sit ~2.5-12x over measured.
+    let config = ComparisonConfig {
+        rms_error_tolerance: 0.05,  // measured 1.28% → 3.9x headroom
+        peak_error_tolerance: 0.10, // measured 3.93e-2 V → 2.5x headroom
+        max_relative_tolerance: 50.0, // near zero-crossings under modulation
+        correlation_min: 0.999,     // measured 1-corr = 8.2e-5 → 12x headroom
+        thd_error_tolerance_db: 5.0,
+        full_scale: 1.0,
+        skip_thd: true, // modulation sidebands, not harmonics — THD is meaningless
+        settle_time_s: 0.0,
+    };
+    let spice_signal = Signal::new(spice_output, SAMPLE_RATE, "SPICE");
+    let melange_signal = Signal::new(melange_output, SAMPLE_RATE, "Melange");
+    let mut report = compare_signals(&spice_signal, &melange_signal, &config);
+    report.circuit_name = "pot_modulation".to_string();
+    report.node_name = "out".to_string();
+
+    let result = ValidationResult {
+        report,
+        html_report_path: None,
+    };
+    print_validation_metrics(&result);
+
+    assert!(
+        result.report.passed,
+        "Pot modulation validation failed:\n{}",
+        result.report.summary()
     );
 }
 

@@ -343,6 +343,25 @@ enum Commands {
         #[arg(long, value_name = "SEED", default_value = "0")]
         noise_seed: u64,
 
+        /// Use backward Euler integration instead of trapezoidal.
+        /// Unconditionally stable — fixes divergence in high-gain feedback
+        /// amplifiers. Mirrors `compile --backward-euler`.
+        #[arg(long)]
+        backward_euler: bool,
+
+        /// Force trapezoidal even when the nodal auto-detector would promote
+        /// to backward Euler. Escape hatch for bisecting regressions.
+        /// Ignored when `--backward-euler` is already set. Mirrors
+        /// `compile --force-trap`.
+        #[arg(long)]
+        force_trap: bool,
+
+        /// Maximum NR iterations per sample. Defaults to the same auto-tuned
+        /// budget `compile` uses (scales with M, solver route, and trap
+        /// spectral radius).
+        #[arg(long)]
+        max_iter: Option<usize>,
+
         /// Probe an internal node. May be repeated. Probe samples are written
         /// to a sidecar CSV (one column per probe) alongside the WAV; the
         /// primary `-n/--output-node` signal goes to the WAV unchanged.
@@ -415,6 +434,48 @@ enum Commands {
         /// the auto/on/off semantics. Defaults to `auto`.
         #[arg(long, default_value = "auto")]
         tube_grid_fa: String,
+
+        /// Solver type: auto (default), dk (DK method), nodal (full-nodal NR).
+        /// Mirrors `compile --solver`.
+        #[arg(long, default_value = "auto")]
+        solver: String,
+
+        /// Oversampling factor (1=none, 2=2x, 4=4x). Mirrors
+        /// `compile --oversampling` so the analyzed response matches the
+        /// generated plugin.
+        #[arg(long, default_value = "1")]
+        oversampling: usize,
+
+        /// Op-amp rail saturation mode: auto, none, hard, active-set,
+        /// active-set-be, boyle-diodes. Mirrors `compile --opamp-rail-mode`.
+        #[arg(long, value_name = "MODE", default_value = "auto")]
+        opamp_rail_mode: String,
+
+        /// Authentic circuit noise mode: off (default), thermal, shot, full.
+        /// Mirrors `compile --noise`.
+        #[arg(long, value_name = "MODE", default_value = "off")]
+        noise: String,
+
+        /// Master noise seed (u64). `0` → entropy from system clock; nonzero → deterministic.
+        /// Mirrors `compile --noise-seed`.
+        #[arg(long, value_name = "SEED", default_value = "0")]
+        noise_seed: u64,
+
+        /// Use backward Euler integration instead of trapezoidal.
+        /// Mirrors `compile --backward-euler`.
+        #[arg(long)]
+        backward_euler: bool,
+
+        /// Force trapezoidal even when auto-BE would fire. Ignored when
+        /// `--backward-euler` is already set. Mirrors `compile --force-trap`.
+        #[arg(long)]
+        force_trap: bool,
+
+        /// Maximum NR iterations per sample. Defaults to the same auto-tuned
+        /// budget `compile` uses (scales with M, solver route, and trap
+        /// spectral radius).
+        #[arg(long)]
+        max_iter: Option<usize>,
     },
 
     /// Compute DC operating point and print node voltages
@@ -426,9 +487,11 @@ enum Commands {
         #[arg(short, long, default_value = "in")]
         input_node: String,
 
-        /// Input resistance in ohms
-        #[arg(long, default_value = "1.0")]
-        input_resistance: f64,
+        /// Override input resistance (ohms). Default: 1Ω, or from
+        /// .input_impedance directive. An explicit flag beats the directive,
+        /// matching compile/simulate/analyze.
+        #[arg(long)]
+        input_resistance: Option<f64>,
 
         /// Output format: "human" (default) or "json"
         #[arg(short = 'f', long, default_value = "human")]
@@ -741,12 +804,21 @@ fn main() -> Result<()> {
             oversampling,
             noise,
             noise_seed,
+            backward_euler,
+            force_trap,
+            max_iter,
             probes,
             probe_csv,
         } => {
             // Match parse-time node normalization (lowercase, gnd→0).
             let input_node = melange_solver::parser::normalize_node_name(&input_node);
             let output_node = melange_solver::parser::normalize_node_name(&output_node);
+            // Probes are node names too — normalize them the same way so
+            // `--probe GND`-style refs and mixed-case names resolve.
+            let probes: Vec<String> = probes
+                .iter()
+                .map(|p| melange_solver::parser::normalize_node_name(p))
+                .collect();
             if oversampling != 1 && oversampling != 2 && oversampling != 4 {
                 anyhow::bail!("oversampling must be 1, 2, or 4, got {}", oversampling);
             }
@@ -806,6 +878,9 @@ fn main() -> Result<()> {
                     oversampling,
                     noise_mode,
                     noise_seed,
+                    backward_euler,
+                    force_trap,
+                    max_iter,
                     probes: &probes,
                     probe_csv: probe_csv_path.as_deref(),
                 },
@@ -826,6 +901,14 @@ fn main() -> Result<()> {
             switch_overrides,
             harmonics,
             tube_grid_fa,
+            solver,
+            oversampling,
+            opamp_rail_mode,
+            noise,
+            noise_seed,
+            backward_euler,
+            force_trap,
+            max_iter,
         } => {
             // Validate numeric CLI parameters
             if start_freq <= 0.0 || !start_freq.is_finite() {
@@ -849,23 +932,51 @@ fn main() -> Result<()> {
                     tube_grid_fa
                 );
             }
+            if oversampling != 1 && oversampling != 2 && oversampling != 4 {
+                anyhow::bail!("oversampling must be 1, 2, or 4, got {}", oversampling);
+            }
+            let rail_mode = melange_solver::codegen::OpampRailMode::parse(&opamp_rail_mode)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Invalid --opamp-rail-mode '{}'. Valid: auto, none, hard, \
+                         active-set, active-set-be, boyle-diodes",
+                        opamp_rail_mode
+                    )
+                })?;
+            let noise_mode =
+                melange_solver::codegen::NoiseMode::parse(&noise).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Invalid --noise '{}'. Valid: off, thermal, shot, full",
+                        noise
+                    )
+                })?;
 
             let circuit_source = circuits::resolve(&input)?;
             analyze_freq_response(
                 &circuit_source,
-                &input_node,
-                &output_node,
-                start_freq,
-                end_freq,
-                points_per_decade,
-                amplitude,
-                sample_rate,
-                input_resistance,
-                output.as_ref(),
-                &pot_overrides,
-                &switch_overrides,
-                harmonics,
-                &tube_grid_fa,
+                &AnalyzeOptions {
+                    input_node: &input_node,
+                    output_node: &output_node,
+                    start_freq,
+                    end_freq,
+                    points_per_decade,
+                    amplitude,
+                    sample_rate,
+                    input_resistance_flag: input_resistance,
+                    output_file: output.as_ref(),
+                    pot_overrides: &pot_overrides,
+                    switch_overrides: &switch_overrides,
+                    harmonics,
+                    tube_grid_fa: &tube_grid_fa,
+                    solver: &solver,
+                    oversampling,
+                    opamp_rail_mode: rail_mode,
+                    noise_mode,
+                    noise_seed,
+                    backward_euler,
+                    force_trap,
+                    max_iter,
+                },
             )
         }
         Commands::DcOp {
@@ -1455,6 +1566,20 @@ fn compile_circuit_source(
         output_node_indices.push(raw - 1);
     }
 
+    // --mono is incompatible with multiple output nodes: a multi-output
+    // plugin takes mono input and routes each output node to its own audio
+    // channel, so a 1-channel layout can't represent it. Erroring beats
+    // silently generating a plugin whose second output node is inaudible.
+    if mono && output_node_indices.len() > 1 {
+        anyhow::bail!(
+            "--mono cannot be combined with multiple output nodes ({} given: \"{}\"). \
+             Multi-output plugins route each output node to its own channel — \
+             drop --mono, or pass a single --output-node.",
+            output_node_indices.len(),
+            output_node_names.join(", ")
+        );
+    }
+
     // Auto-mono: single output node with single-channel circuit → default to mono.
     // Stereo duplicates the same mono circuit per channel, which is correct but
     // doubles CPU for no benefit unless the user has a stereo reason (e.g. wet/dry).
@@ -1499,46 +1624,18 @@ fn compile_circuit_source(
     // Route solver first — routing info feeds into config auto-tuning.
     let routing = melange_solver::codegen::routing::auto_route(&kernel, &mna, dk_failed);
 
-    // Tier 3b: Auto-tune max_iter based on M and solver path.
-    // Only adjust if the user didn't explicitly set --max-iter (detect via default value).
-    let max_iter = if max_iter == 50 && kernel.m > 0 {
-        // Nodal full-LU is O(N³) per iteration — each iter is expensive but
-        // converges more reliably. DK Schur is O(M³) — cheap iters, may need more.
-        let base = if routing.route == melange_solver::codegen::routing::SolverRoute::Nodal {
-            50
-        } else {
-            50 + kernel.m * 5 // DK: scale with M (M=8 → 90 iters)
-        };
-        // Will this circuit actually run on trapezoidal? Replicate the codegen
-        // auto-BE decision (ir.rs `auto_be`) so the iteration budget matches the
-        // integrator that ships. A marginal-Nyquist circuit kept on TRAP has
-        // damped-NR convergence that slows sharply as ρ→1 (e.g. wurli-preamp,
-        // ρ≈1.0000, needs ~186 iters/sample); a BE-promoted circuit converges in
-        // a few iters and must NOT inherit that large worst-case bound.
-        let stays_trap = !backward_euler
-            && (force_trap
-                || !melange_solver::codegen::stability::trap_needs_be(
-                    melange_solver::codegen::stability::analyze_trap_stability_deflated(
-                        &kernel.s,
-                        &kernel.a_neg,
-                        kernel.n,
-                        input_node_idx,
-                    ),
-                ));
-        // High spectral radius → stiffer system → may need more iterations.
-        // Near-marginal trap (ρ→1) needs a far larger budget than the old flat
-        // +20; budget generously since the BE fallback catches the rare miss.
-        let stiffness_bonus = if routing.spectral_radius > 0.999 && stays_trap {
-            200
-        } else if routing.spectral_radius > 0.95 {
-            20
-        } else {
-            0
-        };
-        base + stiffness_bonus
-    } else {
-        max_iter
-    };
+    // Tier 3b: Auto-tune max_iter based on M and solver path (shared with
+    // simulate/analyze — see `auto_tune_max_iter`). `--max-iter 50` (the
+    // default value) is treated as "not explicitly set", preserving the
+    // historical detect-via-default behavior of this flag.
+    let max_iter = auto_tune_max_iter(
+        if max_iter == 50 { None } else { Some(max_iter) },
+        &kernel,
+        &routing,
+        backward_euler,
+        force_trap,
+        input_node_idx,
+    );
 
     // Broadcast single output_scale to all outputs
     let output_scales = vec![output_scale; output_node_indices.len()];
@@ -2155,8 +2252,97 @@ struct SimulateOptions<'a> {
     oversampling: usize,
     noise_mode: melange_solver::codegen::NoiseMode,
     noise_seed: u64,
+    backward_euler: bool,
+    force_trap: bool,
+    /// Explicit `--max-iter` override; `None` → auto-tuned (see [`auto_tune_max_iter`]).
+    max_iter: Option<usize>,
     probes: &'a [String],
     probe_csv: Option<&'a std::path::Path>,
+}
+
+/// Options bundle for `melange analyze` — mirrors [`SimulateOptions`].
+struct AnalyzeOptions<'a> {
+    input_node: &'a str,
+    output_node: &'a str,
+    start_freq: f64,
+    end_freq: f64,
+    points_per_decade: usize,
+    amplitude: f64,
+    sample_rate: f64,
+    input_resistance_flag: Option<f64>,
+    output_file: Option<&'a PathBuf>,
+    pot_overrides: &'a [String],
+    switch_overrides: &'a [String],
+    harmonics: usize,
+    tube_grid_fa: &'a str,
+    solver: &'a str,
+    oversampling: usize,
+    opamp_rail_mode: melange_solver::codegen::OpampRailMode,
+    noise_mode: melange_solver::codegen::NoiseMode,
+    noise_seed: u64,
+    backward_euler: bool,
+    force_trap: bool,
+    /// Explicit `--max-iter` override; `None` → auto-tuned (see [`auto_tune_max_iter`]).
+    max_iter: Option<usize>,
+}
+
+/// Auto-tune the NR iteration budget from routing + trap stability (Tier 3b).
+///
+/// Shared by `compile`, `simulate`, and `analyze` so every command runs the
+/// same budget — simulate/analyze previously hardcoded 100 while compile
+/// auto-tuned up to 50 + 5·M + 200, meaning a circuit could converge in the
+/// shipped plugin but falsely "diverge" under `melange simulate`.
+///
+/// `user_max_iter = Some(n)` (an explicit `--max-iter`) always wins.
+///
+/// Rationale for the numbers (kept verbatim from the original compile-path
+/// implementation): nodal full-LU is O(N³) per iteration — expensive iters
+/// that converge reliably, so a flat 50; DK Schur is O(M³) — cheap iters
+/// that may need more, so 50 + 5·M. A marginal-Nyquist circuit kept on TRAP
+/// has damped-NR convergence that slows sharply as ρ→1 (e.g. wurli-preamp,
+/// ρ≈1.0000, needs ~186 iters/sample), hence the +200 bonus when ρ > 0.999
+/// and the circuit actually stays on trapezoidal; a BE-promoted circuit
+/// converges in a few iters and must NOT inherit that worst-case bound.
+fn auto_tune_max_iter(
+    user_max_iter: Option<usize>,
+    kernel: &melange_solver::dk::DkKernel,
+    routing: &melange_solver::codegen::routing::RoutingDecision,
+    backward_euler: bool,
+    force_trap: bool,
+    input_node_idx: usize,
+) -> usize {
+    if let Some(n) = user_max_iter {
+        return n;
+    }
+    if kernel.m == 0 {
+        return 50;
+    }
+    let base = if routing.route == melange_solver::codegen::routing::SolverRoute::Nodal {
+        50
+    } else {
+        50 + kernel.m * 5 // DK: scale with M (M=8 → 90 iters)
+    };
+    // Will this circuit actually run on trapezoidal? Replicate the codegen
+    // auto-BE decision (ir.rs `auto_be`) so the iteration budget matches the
+    // integrator that ships.
+    let stays_trap = !backward_euler
+        && (force_trap
+            || !melange_solver::codegen::stability::trap_needs_be(
+                melange_solver::codegen::stability::analyze_trap_stability_deflated(
+                    &kernel.s,
+                    &kernel.a_neg,
+                    kernel.n,
+                    input_node_idx,
+                ),
+            ));
+    let stiffness_bonus = if routing.spectral_radius > 0.999 && stays_trap {
+        200
+    } else if routing.spectral_radius > 0.95 {
+        20
+    } else {
+        0
+    };
+    base + stiffness_bonus
 }
 
 fn simulate_circuit_source(
@@ -2373,7 +2559,11 @@ fn simulate_circuit_source(
 
     println!("Step 3: Building DK kernel...");
     let mut dk_failed = false;
-    let kernel = if has_inductors && opts.solver != "dk" {
+    // Inductor circuits always use the augmented-MNA kernel — including under
+    // `--solver dk`. The previous `opts.solver != "dk"` gate sent dk-forced
+    // inductor circuits through the non-augmented companion-model path,
+    // diverging from compile/analyze.
+    let kernel = if has_inductors {
         match DkKernel::from_mna_augmented(&mna, opts.sample_rate) {
             Ok(k) => k,
             Err(e) => {
@@ -2503,10 +2693,21 @@ fn simulate_circuit_source(
     let mut output_nodes = vec![output_node_idx];
     output_nodes.extend(probe_indices.iter().copied());
     let output_scales = vec![1.0; output_nodes.len()];
+    let max_iterations = auto_tune_max_iter(
+        opts.max_iter,
+        &kernel,
+        &decision,
+        opts.backward_euler,
+        opts.force_trap,
+        input_node_idx,
+    );
+    if max_iterations != 100 {
+        println!("  Max NR iterations: {max_iterations}");
+    }
     let config = CodegenConfig {
         circuit_name: "simulate".to_string(),
         sample_rate: opts.sample_rate,
-        max_iterations: 100,
+        max_iterations,
         tolerance: 1e-9,
         input_resistance,
         input_node: input_node_idx,
@@ -2519,8 +2720,8 @@ fn simulate_circuit_source(
         dc_op_tolerance: 1e-9,
         dc_block: false, // preserve DC for accurate WAV output
         pot_settle_samples: 64,
-        backward_euler: false,
-        force_trap: false,
+        backward_euler: opts.backward_euler,
+        force_trap: opts.force_trap,
         disable_be_fallback: false,
         opamp_rail_mode: opts.opamp_rail_mode,
         noise_mode: opts.noise_mode,
@@ -3093,20 +3294,31 @@ fn apply_linearize_reductions(
 
 fn analyze_freq_response(
     circuit_source: &circuits::CircuitSource,
-    input_node_name: &str,
-    output_node_name: &str,
-    start_freq: f64,
-    end_freq: f64,
-    points_per_decade: usize,
-    amplitude: f64,
-    sample_rate: f64,
-    input_resistance_flag: Option<f64>,
-    output_file: Option<&PathBuf>,
-    pot_overrides: &[String],
-    switch_overrides: &[String],
-    harmonics: usize,
-    tube_grid_fa: &str,
+    opts: &AnalyzeOptions<'_>,
 ) -> Result<()> {
+    let AnalyzeOptions {
+        input_node: input_node_name,
+        output_node: output_node_name,
+        start_freq,
+        end_freq,
+        points_per_decade,
+        amplitude,
+        sample_rate,
+        input_resistance_flag,
+        output_file,
+        pot_overrides,
+        switch_overrides,
+        harmonics,
+        tube_grid_fa,
+        solver,
+        oversampling,
+        opamp_rail_mode,
+        noise_mode,
+        noise_seed,
+        backward_euler,
+        force_trap,
+        max_iter,
+    } = *opts;
     // Match parse-time node normalization (lowercase, gnd→0).
     let input_node_owned = melange_solver::parser::normalize_node_name(input_node_name);
     let input_node_name = input_node_owned.as_str();
@@ -3467,9 +3679,10 @@ fn analyze_freq_response(
         output_nodes: vec![output_node_idx],
         ..CodegenConfig::default()
     };
-    // Analyze always auto-routes; skip FA if routing will pick Nodal due
-    // to DK trap instability / kernel failure. See compile path.
-    let forward_active = if should_skip_fa_for_nodal_reroute(&mna, sample_rate) {
+    // See compile path for rationale — mirrors the same gate.
+    let forward_active = if solver == "nodal"
+        || (solver == "auto" && should_skip_fa_for_nodal_reroute(&mna, sample_rate))
+    {
         std::collections::HashSet::new()
     } else {
         melange_solver::codegen::ir::CircuitIR::detect_forward_active_bjts(
@@ -3502,15 +3715,14 @@ fn analyze_freq_response(
     }
 
     // Detect grid-off pentodes (shared helper with compile/simulate). Analyze
-    // writes CSV to stdout, so progress messages go to stderr. Analyze doesn't
-    // expose --solver, so we pass "" (helper treats non-"nodal" as "run it").
+    // writes CSV to stdout, so progress messages go to stderr.
     let grid_off_pentodes = apply_grid_off_reduction(
         &mut mna,
         &netlist,
         &config_for_fa,
         &forward_active,
         tube_grid_fa,
-        /*solver_override=*/ "",
+        solver,
         input_node_idx,
         input_conductance,
     )?;
@@ -3547,6 +3759,9 @@ fn analyze_freq_response(
         match DkKernel::from_mna_augmented(&mna, sample_rate) {
             Ok(k) => k,
             Err(e) => {
+                if solver == "dk" {
+                    anyhow::bail!("DK kernel failed: {e}");
+                }
                 eprintln!("  Augmented DK kernel failed: {e}, auto-selecting nodal");
                 dk_failed = true;
                 let m = mna.m;
@@ -3576,6 +3791,9 @@ fn analyze_freq_response(
         match DkKernel::from_mna(&mna, sample_rate) {
             Ok(k) => k,
             Err(e) => {
+                if solver == "dk" {
+                    anyhow::bail!("DK kernel failed: {e}");
+                }
                 eprintln!("  DK kernel failed: {e}, using nodal");
                 dk_failed = true;
                 match DkKernel::from_mna_augmented(&mna, sample_rate) {
@@ -3609,10 +3827,19 @@ fn analyze_freq_response(
     };
 
     let decision = routing::auto_route(&kernel, &mna, dk_failed);
-    let use_nodal = decision.route == routing::SolverRoute::Nodal;
+    let use_nodal = match solver {
+        "nodal" => true,
+        "dk" => false,
+        _ => decision.route == routing::SolverRoute::Nodal,
+    };
+    let solver_reason = if solver == "nodal" || solver == "dk" {
+        format!("--solver {solver} (user override)")
+    } else {
+        decision.reason.clone()
+    };
     eprintln!(
         "  N={}, M={}, solver: {}",
-        kernel.n, kernel.m, decision.reason
+        kernel.n, kernel.m, solver_reason
     );
 
     if use_nodal {
@@ -3627,15 +3854,26 @@ fn analyze_freq_response(
     }
 
     // Generate circuit code
+    let max_iterations = auto_tune_max_iter(
+        max_iter,
+        &kernel,
+        &decision,
+        backward_euler,
+        force_trap,
+        input_node_idx,
+    );
+    if max_iterations != 100 {
+        eprintln!("  Max NR iterations: {max_iterations}");
+    }
     let config = CodegenConfig {
         circuit_name: "analyze".to_string(),
         sample_rate,
-        max_iterations: 100,
+        max_iterations,
         tolerance: 1e-9,
         input_resistance,
         input_node: input_node_idx,
         output_nodes: vec![output_node_idx],
-        oversampling_factor: 1,
+        oversampling_factor: oversampling,
         output_scales: vec![1.0],
         output_clamp_v: 10.0,
         include_dc_op: true,
@@ -3643,12 +3881,12 @@ fn analyze_freq_response(
         dc_op_tolerance: 1e-9,
         dc_block: false,
         pot_settle_samples: 64,
-        backward_euler: false,
-        force_trap: false,
+        backward_euler,
+        force_trap,
         disable_be_fallback: false,
-        opamp_rail_mode: melange_solver::codegen::OpampRailMode::Auto,
-        noise_mode: melange_solver::codegen::NoiseMode::Off,
-        noise_master_seed: 0,
+        opamp_rail_mode,
+        noise_mode,
+        noise_master_seed: noise_seed,
         emit_dc_op_recompute: false,
     };
     let generator = CodeGenerator::new(config);
@@ -4472,7 +4710,7 @@ fn list_nodes_source(circuit_source: &circuits::CircuitSource) -> Result<()> {
 fn run_dc_op(
     circuit_source: &circuits::CircuitSource,
     input_node_name: &str,
-    input_resistance: f64,
+    input_resistance_flag: Option<f64>,
     format: &str,
 ) -> Result<()> {
     // Match parse-time node normalization (lowercase, gnd→0).
@@ -4503,21 +4741,28 @@ fn run_dc_op(
             .with_context(|| "Failed to expand subcircuits")?;
     }
 
-    // Check for .input_impedance directive
-    let mut r_in = input_resistance;
-    if let Some(r) = netlist.input_impedance {
-        r_in = r;
+    // Resolve input resistance: CLI flag > .input_impedance directive > 1Ω
+    // default — matching compile/simulate/analyze. (The flag used to be
+    // silently overridden by the directive.)
+    let r_in = if let Some(r) = input_resistance_flag {
+        r
+    } else if let Some(r) = netlist.input_impedance {
+        r
+    } else {
+        1.0
+    };
+    if !(r_in > 0.0 && r_in.is_finite()) {
+        anyhow::bail!("input resistance must be positive and finite, got {}", r_in);
     }
 
     // Build MNA (no FA detection — DC OP wants full device dimensions)
     let mut mna =
         MnaSystem::from_netlist(&netlist).with_context(|| "Failed to build MNA system")?;
 
-    let input_node_idx = mna
+    let input_node_raw = mna
         .node_map
         .get(input_node_name)
         .copied()
-        .map(|idx| idx - 1)
         .with_context(|| {
             let available: Vec<_> = mna.node_map.keys().collect();
             format!(
@@ -4525,6 +4770,10 @@ fn run_dc_op(
                 input_node_name, available
             )
         })?;
+    if input_node_raw == 0 {
+        anyhow::bail!("Input node cannot be ground (0). Please specify a non-ground node.");
+    }
+    let input_node_idx = input_node_raw - 1;
 
     // Stamp input conductance
     let input_conductance = 1.0 / r_in;

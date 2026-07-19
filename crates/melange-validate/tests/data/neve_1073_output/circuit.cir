@@ -2,9 +2,13 @@
 * Class A, 3 BJTs: TR1/TR2 (BC184C) + TR3 (2N3055), LO1166 output transformer.
 * CE input (TR1) -> Darlington CE (TR2+TR3) -> LO1166 transformer.
 
-* --- Input (1 ohm Thevenin source for ngspice) ---
-VIN   in_src  0   DC 0
-R_src in_src  in  1
+* --- Input source ---
+* Plain VIN at the input node: the harness strips it for melange and
+* replaces it with the standard Thevenin PWL pair (1 ohm) for ngspice.
+* (A baked-in VIN+R_src Thevenin here previously escaped both the strip and
+* the inject because its n+ was "in_src", not "in" — leaving a second 1-ohm
+* shunt at the input node on BOTH sides and halving the drive level.)
+VIN   in   0   DC 0
 
 * --- Input coupling ---
 C1    in     base1   10U

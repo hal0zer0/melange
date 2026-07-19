@@ -1,10 +1,17 @@
-* Pot Modulation Test Circuit - Static baseline
-* Same topology as circuit.cir but with fixed R_ldr = 10k
+* Pot Modulation Test Circuit - Static off-nominal baseline
+* Same topology as circuit.cir / circuit_melange.cir but with fixed
+* R_ldr = 10k (the top of the B-source modulation sweep).
+* C1 aligned to 1n (2026-07-18) to match the deck pair - it was 100n while
+* this deck sat unwired, which silently diverged from the topology the
+* dynamic pair validates.
+* ngspice runs this deck as-is (harness strips .pot); melange runs
+* circuit_melange.cir with set_pot_0(10_000.0) - a genuine off-nominal
+* pot position driven through the .pot mechanism.
 
 VIN in 0 DC 0 AC 1
 R1 in mid 1k
 R_ldr mid out 10k
-C1 out 0 100n
+C1 out 0 1n
 D1 out 0 D1N4148
 Rload out 0 100k
 

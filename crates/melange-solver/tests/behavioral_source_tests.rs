@@ -479,3 +479,100 @@ Cout out 0 10n
          positions missing from the sparse-LU pattern?"
     );
 }
+
+#[test]
+fn behavioral_abs_at_zero_converges_from_zero_start() {
+    // F3 trigger scenario: abs(V(a)) over a node sitting exactly at ground.
+    // The old abs derivative emitted x/abs(x), which is 0/0 = NaN at the NR
+    // zero start — one NaN in the behavioral Jacobian poisons the whole LU and
+    // every output goes NaN. The branchless subgradient sign (0 at exactly 0)
+    // must converge cleanly to V(out) = -abs(0) = 0.
+    let spice = "\
+Behavioral abs at ground
+Va a 0 DC 0
+B1 out 0 I={ abs(V(a)) }
+Rout out 0 1
+Cout out 0 1u
+";
+    // Nodes (0-based): a=0, out=1.
+    let code = generate_nodal(spice, 0, 1);
+    let out = compile_and_run(&code, &settle_main(64), "abs_zero");
+    let v_out: f64 = out.parse().unwrap_or_else(|_| panic!("bad output: {out:?}"));
+    assert!(
+        v_out.is_finite(),
+        "abs(V=0) must not NaN the solver, got {v_out}"
+    );
+    assert!(
+        v_out.abs() < 1e-6,
+        "abs(V=0): expected ~0, got {v_out}"
+    );
+}
+
+#[test]
+fn behavioral_abs_negative_input_matches_oracle() {
+    // abs of a negative node voltage: I = abs(-0.75) ⇒ V(out) = -0.75.
+    let spice = "\
+Behavioral abs negative
+Va a 0 DC -0.75
+B1 out 0 I={ abs(V(a)) }
+Rout out 0 1
+Cout out 0 1u
+";
+    let code = generate_nodal(spice, 0, 1);
+    let out = compile_and_run(&code, &settle_main(64), "abs_neg");
+    let v_out: f64 = out.parse().unwrap_or_else(|_| panic!("bad output: {out:?}"));
+    assert!(
+        (v_out - (-0.75)).abs() < 1e-5,
+        "abs(-0.75): got {v_out}, expected -0.75"
+    );
+}
+
+#[test]
+fn behavioral_exp_source_compiles_and_matches_oracle() {
+    // Regression: exp() emission used to call bsrc_safe_exp(), which no
+    // emitter ever defines — any exp() B-source failed rustc (E0425). The
+    // emission is now inline (.clamp(-40.0, 40.0).exp()). I = exp(V(a)) with
+    // V(a)=0.6 ⇒ V(out) = -e^0.6.
+    let spice = "\
+Behavioral exp source
+Va a 0 DC 0.6
+B1 out 0 I={ exp(V(a)) }
+Rout out 0 1
+Cout out 0 1u
+";
+    let code = generate_nodal(spice, 0, 1);
+    assert!(
+        !code.contains("bsrc_safe_exp"),
+        "generated code must not reference the undefined bsrc_safe_exp helper"
+    );
+    let out = compile_and_run(&code, &settle_main(64), "exp_src");
+    let v_out: f64 = out.parse().unwrap_or_else(|_| panic!("bad output: {out:?}"));
+    let expected = -(0.6f64.exp());
+    assert!(
+        (v_out - expected).abs() < 1e-5,
+        "exp source: got {v_out}, expected {expected}"
+    );
+}
+
+#[test]
+fn behavioral_pow_negative_base_matches_oracle() {
+    // ngspice PTpower semantics: pow with a negative base and fractional
+    // exponent is |x|^y (the old plain powf emitted NaN, which froze NR at
+    // whatever iterate it had). I = pow(V(a), 1.5) with V(a) = -0.5 ⇒
+    // V(out) = -(0.5^1.5) ≈ -0.35355.
+    let spice = "\
+Behavioral pow negative base
+Va a 0 DC -0.5
+B1 out 0 I={ pow(V(a), 1.5) }
+Rout out 0 1
+Cout out 0 1u
+";
+    let code = generate_nodal(spice, 0, 1);
+    let out = compile_and_run(&code, &settle_main(64), "pow_negbase");
+    let v_out: f64 = out.parse().unwrap_or_else(|_| panic!("bad output: {out:?}"));
+    let expected = -(0.5f64.powf(1.5));
+    assert!(
+        v_out.is_finite() && (v_out - expected).abs() < 1e-5,
+        "pow(-0.5, 1.5): got {v_out}, expected {expected}"
+    );
+}

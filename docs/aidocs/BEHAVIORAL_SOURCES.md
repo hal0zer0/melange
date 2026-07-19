@@ -136,11 +136,71 @@ B<name> n+ n- I={<expr>}     ; behavioral current source  (expr amps, n+ → n-)
   currents).
 - **`time`** — simulation time in seconds. **`pi`** — the constant π.
 - **Operators** `+ - * / ^` (`**` is an alias for `^`), unary `-`, parentheses.
-  `^` is right-associative.
-- **Functions** `atan2(y,x) sqrt abs exp ln(=log) sin cos tanh min max pow`.
+  Precedence (loosest → tightest): `+ -` < `* /` < unary `-` < `^`, so
+  `-x^2 = -(x^2)` (ngspice/standard-math convention — fixed 2026-07-18; it
+  previously parsed as `(-x)^2`). `^` is right-associative — see the
+  compatibility notes below.
+- **Functions** `atan2(y,x) sqrt abs exp ln(=log) sin cos tanh min max pow
+  pwr`. `pwr(x,y) = sign(x)·|x|^y` (ngspice `PTpwr`) — the odd-symmetric,
+  audio-friendly power: preserves signal polarity even for even/fractional
+  exponents, e.g. `pwr(V(a), 1.5)` as a smooth polarity-keeping waveshaper.
 - **`ddt(x)` / `idt(x)`** — time derivative / integral of a sub-expression.
 
 The `V`/`I` keyword may be written `V={..}`, `V ={..}`, or `V = {..}`.
+
+### ngspice compatibility notes
+
+- **`^` associativity DIVERGES from ngspice.** melange's `^` is
+  right-associative (`2^3^2 = 2^(3^2) = 512`, the standard math convention);
+  ngspice declares `%left '^'` (`inpptree-parser.y`), so there `2^3^2 =
+  (2^3)^2 = 64`. Parenthesize chained powers in any netlist that must
+  cross-validate against ngspice.
+- **Unary-minus precedence MATCHES ngspice** (since 2026-07-18): `%left NEG`
+  is declared before `%left '^'` in ngspice, so `^` binds tighter —
+  `-x^2 = -(x^2)`. Write `(-x)^2` to square a negation.
+- **Numeric-literal suffixes are NOT accepted inside `{}`** — `1k`, `1meg`,
+  `100n` etc. parse as a number followed by an identifier (→ unknown-param
+  error). Use plain or scientific notation (`1000`, `1e3`, `100e-9`) inside
+  expressions; suffixes remain fine on component-value fields outside `{}`.
+- **`pow` follows ngspice `PTpower`** (`ptfuncs.c`): a negative base with a
+  (near-)integer exponent snaps to the sign-correct integer power
+  (`pow(-2, 3) = -8`); a negative base with a fractional exponent evaluates
+  `|x|^y` (`pow(-0.5, 1.5) = +0.3536`) — never NaN. The near-integer
+  predicate is `|y - round(y)| < 1e-6·max(1, |y|)` (ngspice's own test has a
+  quirky `y + 0.001` denominator; same intent). The symbolic derivative
+  follows whichever branch the value takes.
+- **Division `/` has ngspice value semantics — no melange-side guard.** A
+  zero denominator yields ±inf in the VALUE (ngspice nudges by
+  `PTfudge_factor = gmin·1e-20`, effectively the same hazard). Only the
+  emitted *derivative* denominator is guarded (`b² + 1e-300`) so the NR
+  Jacobian cannot produce 0/0 = NaN. If a denominator can cross zero, guard
+  it at the netlist level — the limiter idiom
+  `V(a) / sqrt(V(b)*V(b) + 1e-9)` or, for a known-positive denominator,
+  `V(a) / (V(b) + 1e-9)`.
+
+### Derivative guards (Jacobian NaN-safety)
+
+Every intrinsic's symbolic derivative is paired with its (clamped) value so
+the NR Jacobian is NaN-free at domain boundaries. The guards live in the AST
+itself, so the interpreter (`Expr::eval`) and the emitted Rust agree by
+construction:
+
+| Function | Value | Derivative at the boundary |
+|----------|-------|---------------------------|
+| `abs(x)` | `x.abs()` | branchless sign `x/(|x|+1e-300)` — exactly **0 at x = 0** (subgradient) |
+| `min/max` | native | tie (`a = b`) → **0.5/0.5 split** `(da+db)/2` via the same sign guard |
+| `sqrt(x)` | `max(0).sqrt()` (flat for x < 0) | `0.5/(sqrt+1e-150)` — huge-but-finite cliff (5e149) at/below 0, never +inf |
+| `ln(x)` | `max(1e-300).ln()` (pinned below 0) | `1/max(x, 1e-300)` — ≤ 1e300, finite everywhere |
+| `exp(x)` | `clamp(-40, 40).exp()`, emitted inline | paired gate: `exp(x)` inside the window, **exactly 0** in the clamped-flat region |
+| `pow(a,b)` | PTpower (above) | branch-matched; `a/(a²+1e-300)` guards the `b·da/a` term and `ln|a|` the exponent term |
+| `a/b` | unguarded (ngspice parity) | denominator `b²+1e-300` (0/0 → 0, not NaN) |
+
+Boundary coverage: `expr::tests::derivative_domain_boundaries_never_nan`
+(unit, central-difference harness) and the compile-and-run tests
+`behavioral_abs_at_zero_converges_from_zero_start` /
+`behavioral_exp_source_compiles_and_matches_oracle` /
+`behavioral_pow_negative_base_matches_oracle` in
+`tests/behavioral_source_tests.rs`.
 
 ### `ddt` / `idt` semantics
 
@@ -188,18 +248,24 @@ Pure, self-contained, fully unit-tested (`cargo test -p melange-solver expr::`):
   counter; the MNA builder does this in `categorize_element`).
 - `Expr::diff(&Var) -> Expr` — symbolic partial derivative. `Var` is a
   `Node(name)` or `Branch(name)`. `min`/`max` differentiate via the
-  `(a±b∓|a−b|)/2` identity (subgradient through `abs`). `pow(a, const)` uses the
-  power rule to avoid emitting `ln(a)` (which would blow up for `a ≤ 0`).
-  Verified against central differences in `expr::tests::diff_matches_numeric`.
+  `(a±b∓|a−b|)/2` identity with the branchless subgradient sign
+  (`x/(|x|+1e-300)`) — 0.5/0.5 split at a tie. `pow` derivatives are matched
+  to the PTpower value branch (integer power rule / `|a|^p` rule / `ln|a|`
+  for variable exponents) — see "Derivative guards" above. Verified against
+  central differences in `expr::tests::diff_matches_numeric` and at domain
+  boundaries in `expr::tests::derivative_domain_boundaries_never_nan`.
 - `Expr::simplify()` — constant folding + identity elimination (keeps the
   emitted Jacobian compact; drops `0.0 * …` chains).
 - `Expr::eval(&dyn EvalCtx) -> f64` — the interpreter, used by the DC OP solver
   and as the test oracle for the emitted straight-line code.
 - `Expr::to_rust(&dyn ExprResolver) -> String` — straight-line Rust emitter
-  (no AST interpreter in the audio thread). Guards match the interpreter:
-  `bsrc_safe_exp` (clamp `[-40,40]`), `sqrt`→`.max(0.0).sqrt()`,
-  `ln`→`.max(1e-300).ln()`, `atan2` native (guard `I²+Q²` at the netlist level
-  with `+1e-9` as the request does).
+  (no AST interpreter in the audio thread). **Self-contained**: all guards are
+  emitted inline and match the interpreter — `exp`→`.clamp(-40.0, 40.0).exp()`
+  (an earlier version called a `bsrc_safe_exp` helper that no emitter defined,
+  so `exp()` B-sources failed rustc), `sqrt`→`.max(0.0).sqrt()`,
+  `ln`→`.max(1e-300).ln()`, `pow`→PTpower inline (powi for integer constant
+  exponents), `atan2` native (guard `I²+Q²` at the netlist level with `+1e-9`
+  as the request does). Derivative-side guards: see "Derivative guards" above.
 - Helpers: `referenced_nodes`, `referenced_node_refs` (borrowed, for MNA node
   collection), `referenced_branches`, `variables`, `is_time_dependent`,
   `state_slot_count`, `remap_idents` (subcircuit expansion).
@@ -254,7 +320,9 @@ without a `B` source are **byte-identical** to today's output (acceptance #4).
 - `sim_time: f64` (advance by `dt` each `process_sample_inner`).
 - Consts `INV_DT = internal_rate`, `HALF_DT = 0.5/internal_rate` (recompute in
   `set_sample_rate`).
-- An emitted `bsrc_safe_exp(x)` free function (clamp `[-40,40]`).
+- ~~An emitted `bsrc_safe_exp(x)` free function (clamp `[-40,40]`).~~ Not
+  needed: `Expr::to_rust` emits the exp clamp (and all other guards) inline —
+  the generated expression code is self-contained.
 - `ExprResolver::param(name)` must map bare identifiers to the right surface:
   `.pot`/`.runtime R` → the pot resistance/value field, `.runtime V` → its
   field, `.param` → a baked constant. Reuse the name tables the named-constant /

@@ -270,9 +270,101 @@ fn test_analyze_integral_amplitude() {
     let _ = std::fs::remove_file(&cir);
 }
 
+#[test]
+fn test_analyze_linear_circuit_harmonics_at_numerical_floor() {
+    // Regression for the DFT leakage bug: the measurement window rounded to N
+    // samples while the drive frequency stayed exact, leaving up to 0.5
+    // samples of cycle mismatch. The rectangular-window leakage floored
+    // h2..hN at −50..−75 dBc even on a perfectly linear circuit. With the
+    // drive snapped to the exact bin DFT_CYCLES·sr/N, a linear RC must show
+    // every harmonic at the numerical floor (below −120 dBc) or nan
+    // (above Nyquist).
+    //
+    // Frequencies are chosen so DFT_CYCLES·sr/f is NOT an integer — the
+    // pre-fix leakage regime.
+    let cir = write_test_circuit(TEST_RC_LOWPASS, "analyze_leakage");
+
+    let stdout = run_melange(&[
+        "analyze",
+        cir.to_str().unwrap(),
+        "--input-node",
+        "in",
+        "--output-node",
+        "out",
+        "--amplitude",
+        "0.5",
+        "--start-freq",
+        "313",
+        "--end-freq",
+        "7919",
+        "--points-per-decade",
+        "2",
+        "--harmonics",
+        "5",
+    ]);
+    let _ = std::fs::remove_file(&cir);
+
+    // CSV: frequency_hz,gain_db,phase_deg,thd_pct,h2_dbc..h5_dbc,nyquist_dbc
+    let mut data_rows = 0;
+    for line in stdout.lines().skip_while(|l| !l.starts_with("frequency_hz")) {
+        if line.starts_with("frequency_hz") || line.trim().is_empty() {
+            continue;
+        }
+        let cols: Vec<&str> = line.split(',').collect();
+        assert!(
+            cols.len() >= 9,
+            "expected >= 9 CSV columns with --harmonics 5, got {}: {line}",
+            cols.len()
+        );
+        data_rows += 1;
+        for (i, col) in cols[4..8].iter().enumerate() {
+            if *col == "nan" {
+                continue; // harmonic above Nyquist
+            }
+            let dbc: f64 = col
+                .parse()
+                .unwrap_or_else(|_| panic!("unparseable h{}_dbc {col:?} in {line}", i + 2));
+            assert!(
+                dbc < -120.0,
+                "h{}_dbc = {dbc} dBc on a pure linear RC — DFT leakage floor is back \
+                 (was −50..−75 dBc before the bin snap). Row: {line}",
+                i + 2
+            );
+        }
+    }
+    assert!(data_rows >= 3, "expected >= 3 data rows, got:\n{stdout}");
+}
+
 // ============================================================================
 // error cases
 // ============================================================================
+
+#[test]
+fn test_compile_mono_with_multiple_outputs_errors() {
+    // --mono + multiple output nodes cannot be represented (multi-output
+    // plugins route one node per channel) and used to generate a broken
+    // plugin silently.
+    let cir = write_test_circuit(
+        "Two Output Test\nR1 in out 10k\nC1 out 0 10n\nR2 out out2 1k\nC2 out2 0 10n\n",
+        "mono_multi",
+    );
+    let stderr = run_melange_fail(&[
+        "compile",
+        cir.to_str().unwrap(),
+        "--output",
+        "/tmp/melange_cli_mono_multi.rs",
+        "--input-node",
+        "in",
+        "--output-node",
+        "out,out2",
+        "--mono",
+    ]);
+    let _ = std::fs::remove_file(&cir);
+    assert!(
+        stderr.contains("--mono") && stderr.contains("output node"),
+        "should explain the --mono / multi-output conflict: {stderr}"
+    );
+}
 
 #[test]
 fn test_compile_missing_file() {

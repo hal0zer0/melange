@@ -280,10 +280,28 @@ fn import_xml(content: &str) -> Result<String> {
 
         let prefix = ref_prefix(&comp.ref_des);
         let get_node = |pin: &str| -> String {
-            comp.pin_nets
-                .get(pin)
-                .map(|n| sanitize_node(n))
-                .unwrap_or_else(|| "0".into())
+            match comp.pin_nets.get(pin) {
+                Some(n) => sanitize_node(n),
+                None => {
+                    eprintln!(
+                        "  Warning: {} pin {} is unconnected — tying to ground (0). \
+                         Check the schematic if this pin should carry signal.",
+                        comp.ref_des, pin
+                    );
+                    "0".into()
+                }
+            }
+        };
+        // format_value with an empty-value warning carrying the ref-des context.
+        let fmt_value = |v: &str| -> String {
+            if v.trim().is_empty() {
+                eprintln!(
+                    "  Warning: {} has an empty value — emitting 0. \
+                     Edit the generated .cir before compiling.",
+                    comp.ref_des
+                );
+            }
+            format_value(v)
         };
 
         let line = match prefix.as_str() {
@@ -341,7 +359,7 @@ fn import_xml(content: &str) -> Result<String> {
             "R" | "C" | "L" => {
                 let n1 = get_node("1");
                 let n2 = get_node("2");
-                let val = format_value(&comp.value);
+                let val = fmt_value(&comp.value);
                 // Check for pot
                 if let Some(pot_field) = comp.fields.get("Melange.Pot") {
                     let label = comp
@@ -482,13 +500,13 @@ fn import_xml(content: &str) -> Result<String> {
             "V" => {
                 let n1 = get_node("1");
                 let n2 = get_node("2");
-                let val = format_value(&comp.value);
+                let val = fmt_value(&comp.value);
                 format!("{} {} {} DC {}", comp.ref_des, n1, n2, val)
             }
             "I" => {
                 let n1 = get_node("1");
                 let n2 = get_node("2");
-                let val = format_value(&comp.value);
+                let val = fmt_value(&comp.value);
                 format!("{} {} {} DC {}", comp.ref_des, n1, n2, val)
             }
             "K" => {
@@ -499,7 +517,7 @@ fn import_xml(content: &str) -> Result<String> {
                 let n2 = get_node("2");
                 let n3 = get_node("3");
                 let n4 = get_node("4");
-                let val = format_value(&comp.value);
+                let val = fmt_value(&comp.value);
                 format!("{} {} {} {} {} {}", comp.ref_des, n1, n2, n3, n4, val)
             }
             "X" => {
@@ -767,16 +785,88 @@ fn sanitize_node(name: &str) -> String {
     }
 }
 
+/// Strip trailing unit letters (Ω, F, H, V, A) from a KiCad value string.
+///
+/// `f`/`F` (farad) and `a`/`A` (ampere) double as SPICE engineering prefixes
+/// (femto, atto). They are only stripped when preceded by another letter —
+/// i.e. an engineering prefix, as in "4.7nF" — never when preceded by a digit:
+/// "100f" means 100 femto-units and must survive intact ("100 F" would be a
+/// 15-order-of-magnitude mangling). Ω and V are never prefixes and are always
+/// stripped.
 fn format_value(value: &str) -> String {
     if value.is_empty() {
         return "0".into();
     }
-    let s = value
-        .trim()
-        .trim_end_matches(|c: char| "ΩFHVAΩfhva".contains(c));
+    let mut s = value.trim().to_string();
+    loop {
+        let Some(last) = s.chars().last() else { break };
+        if !"ΩFHVAfhva".contains(last) {
+            break;
+        }
+        if matches!(last, 'f' | 'F' | 'a' | 'A') {
+            // Ambiguous letter: unit only when it follows an engineering
+            // prefix letter (e.g. "4.7nF" → strip); after a digit it IS the
+            // engineering prefix (e.g. "100f" femtofarad → keep).
+            let follows_letter = s
+                .chars()
+                .rev()
+                .nth(1)
+                .map(|p| p.is_alphabetic() && p != 'Ω')
+                .unwrap_or(false);
+            if !follows_letter {
+                break;
+            }
+        }
+        s.pop();
+    }
     if s.is_empty() {
         value.trim().to_string()
     } else {
-        s.to_string()
+        s
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_value_keeps_digit_preceded_femto_and_atto() {
+        // `f`/`a` after a digit are SPICE engineering prefixes, not unit
+        // letters. Stripping them turned 100 fF into 100 F (15 orders off).
+        assert_eq!(format_value("100f"), "100f");
+        assert_eq!(format_value("2.2a"), "2.2a");
+        assert_eq!(format_value("100F"), "100F");
+    }
+
+    #[test]
+    fn format_value_strips_unit_after_prefix_letter() {
+        assert_eq!(format_value("4.7nF"), "4.7n");
+        assert_eq!(format_value("10pF"), "10p");
+        assert_eq!(format_value("100uF"), "100u");
+        assert_eq!(format_value("10uH"), "10u");
+        assert_eq!(format_value("100mA"), "100m");
+    }
+
+    #[test]
+    fn format_value_leaves_plain_engineering_values() {
+        assert_eq!(format_value("2.2k"), "2.2k");
+        assert_eq!(format_value("470"), "470");
+        assert_eq!(format_value("1Meg"), "1Meg");
+    }
+
+    #[test]
+    fn format_value_strips_unambiguous_units() {
+        // Ω and V are never engineering prefixes — always stripped,
+        // even directly after a digit.
+        assert_eq!(format_value("470Ω"), "470");
+        assert_eq!(format_value("2.2kΩ"), "2.2k");
+        assert_eq!(format_value("9V"), "9");
+        assert_eq!(format_value("100H"), "100");
+    }
+
+    #[test]
+    fn format_value_empty_becomes_zero() {
+        assert_eq!(format_value(""), "0");
     }
 }

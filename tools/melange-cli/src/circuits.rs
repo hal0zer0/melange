@@ -109,6 +109,15 @@ pub fn resolve(circuit_ref: &str) -> Result<CircuitSource> {
         });
     }
 
+    // Try direct URL. This must run BEFORE the friendly-ref branch: a URL
+    // contains ':' and would otherwise be mis-parsed as source "https" /
+    // circuit "//example.com/…", making direct URL refs unreachable.
+    if circuit_ref.starts_with("http://") || circuit_ref.starts_with("https://") {
+        return Ok(CircuitSource::Url {
+            url: circuit_ref.to_string(),
+        });
+    }
+
     // Try friendly source (source:circuit pattern)
     if let Some((source, circuit)) = parse_friendly_ref(circuit_ref) {
         let config = crate::sources::SourcesConfig::load()?;
@@ -120,11 +129,21 @@ pub fn resolve(circuit_ref: &str) -> Result<CircuitSource> {
         });
     }
 
-    // Try direct URL
-    if circuit_ref.starts_with("http://") || circuit_ref.starts_with("https://") {
-        return Ok(CircuitSource::Url {
-            url: circuit_ref.to_string(),
-        });
+    // Bare circuit name → fall back to the configured default source. This is
+    // the documented intent of `melange builtins`' usage examples
+    // ("melange compile tube-screamer …" with no source prefix).
+    if is_bare_name(circuit_ref) {
+        let config = crate::sources::SourcesConfig::load()?;
+        if let Some(default) = config.default_source.clone() {
+            if config.has_source(&default) {
+                let url = config.resolve_circuit(&default, circuit_ref)?;
+                return Ok(CircuitSource::Friendly {
+                    source: default,
+                    circuit: circuit_ref.to_string(),
+                    url,
+                });
+            }
+        }
     }
 
     anyhow::bail!(
@@ -132,9 +151,10 @@ pub fn resolve(circuit_ref: &str) -> Result<CircuitSource> {
          Tried:\n\
          - Local file (not found)\n\
          - Builtin circuit (not found)\n\
+         - URL (must start with http:// or https://)\n\
          - Friendly source (invalid format)\n\
-         - URL (must start with http:// or https://)\n\n\
-         Use 'melange builtins' to list available builtin circuits.",
+         - Default source (bare name, but no default source is configured)\n\n\
+         Use 'melange sources list' to see configured sources.",
         circuit_ref
     )
 }
@@ -145,6 +165,16 @@ pub fn resolve(circuit_ref: &str) -> Result<CircuitSource> {
 /// Use friendly source syntax instead: `melange:pipe-shouter`, `melange:rc-lowpass`, etc.
 fn get_builtin(_name: &str) -> Option<String> {
     None
+}
+
+/// A bare circuit name: no source prefix, no path separators, non-empty.
+/// Eligible for the default-source fallback.
+fn is_bare_name(circuit_ref: &str) -> bool {
+    !circuit_ref.is_empty()
+        && !circuit_ref.contains(':')
+        && !circuit_ref.contains('@')
+        && !circuit_ref.contains('/')
+        && !circuit_ref.contains('\\')
 }
 
 /// Parse friendly source reference (source:circuit or circuit@source)
@@ -228,6 +258,34 @@ mod tests {
         // Windows paths like C:\file.txt should not be parsed as friendly refs
         let result = parse_friendly_ref("C:\\file.txt");
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_resolve_direct_url() {
+        // Regression: URLs used to be swallowed by the friendly-ref branch
+        // (split at ':' → source "https"), so direct URL refs always failed
+        // with "Unknown source: 'https'".
+        let source = resolve("https://example.com/circuits/fuzz.cir").unwrap();
+        match source {
+            CircuitSource::Url { url } => {
+                assert_eq!(url, "https://example.com/circuits/fuzz.cir");
+            }
+            other => panic!("expected Url variant, got {other:?}"),
+        }
+        let source = resolve("http://example.com/a.cir").unwrap();
+        assert!(matches!(source, CircuitSource::Url { .. }));
+    }
+
+    #[test]
+    fn test_is_bare_name() {
+        assert!(is_bare_name("tube-screamer"));
+        assert!(is_bare_name("rc_lowpass"));
+        assert!(!is_bare_name(""));
+        assert!(!is_bare_name("melange:tube-screamer"));
+        assert!(!is_bare_name("tube-screamer@melange"));
+        assert!(!is_bare_name("./local/file.cir"));
+        assert!(!is_bare_name("C:\\file.txt"));
+        assert!(!is_bare_name("https://example.com/a.cir"));
     }
 
     #[test]

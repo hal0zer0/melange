@@ -338,10 +338,13 @@ fn main() {{
 /// The binary runs a frequency sweep internally and outputs CSV to stdout.
 ///
 /// `harmonics`: 0 = fundamental only (legacy 3-column CSV). N>0 measures the
-/// fundamental plus H2..HN on the same sample run — the window is already an
-/// integer number of fundamental cycles, so harmonic k also sits on an integer
-/// bin and uses the same single-bin DFT. Bins at or above Nyquist are reported
-/// as `nan` rather than aliased.
+/// fundamental plus H2..HN on the same sample run — the drive frequency is
+/// snapped to the exact bin `DFT_CYCLES·sr/N` so the window is an integer
+/// number of fundamental cycles, and harmonic k also sits on an integer bin
+/// using the same single-bin DFT. The CSV reports the snapped frequency (it
+/// can differ from the requested log-spaced value by up to half a sample's
+/// worth of period). Bins at or above Nyquist are reported as `nan` rather
+/// than aliased.
 ///
 /// When `harmonics>0` an extra `nyquist_dbc` column is appended, reporting the
 /// peak amplitude at exactly SR/2 (correlated against `(-1)^n`) in dB relative
@@ -400,11 +403,12 @@ fn main() {{
     let settle_samples = ({settle_secs:.1} * sr) as usize;
 
     // Settle once, outside the frequency loop. The state carries over
-    // between frequency points — the DFT integrates over integer cycles
-    // of the new drive, which rejects both DC and any residual component
-    // at the previous frequency. Circuits with time constants longer
-    // than the DFT window would bias the result, so if a future circuit
-    // needs per-point settle back, expose a `--cold-start` flag on
+    // between frequency points; each point then pre-rolls one full DFT
+    // window at its own drive (see below) so the broadband switch
+    // transient decays before measurement, and the integer-cycle window
+    // rejects DC exactly. Circuits with time constants longer than the
+    // DFT window would still bias the result, so if a future circuit
+    // needs per-point cold-start settle, expose a `--cold-start` flag on
     // `melange analyze` and re-introduce `state = base_state.clone()`
     // plus an inner settle loop here.
     for _ in 0..settle_samples {{
@@ -422,6 +426,26 @@ fn main() {{
         // fundamental. Harmonic k has k*DFT_CYCLES cycles in that window —
         // still integer, so the k-th bin is clean against the others.
         let measure_samples = ((DFT_CYCLES as f64) * sr / freq).round() as usize;
+        // Snap the drive frequency to the exact DFT bin DFT_CYCLES·sr/N.
+        // Rounding N while keeping the requested frequency leaves up to 0.5
+        // samples of cycle mismatch — rectangular-window leakage that floors
+        // h2..hN at −50..−75 dBc (and pollutes thd/nyquist) even on perfectly
+        // linear circuits. The snapped value is used everywhere below: drive,
+        // correlation kernels, and the CSV frequency column.
+        let freq = (DFT_CYCLES as f64) * sr / (measure_samples as f64);
+
+        // Pre-roll one full window at the new drive before accumulating.
+        // Switching frequency launches a broadband circuit transient that is
+        // NOT bin-aligned, so the DFT does not reject it (it floored h2..hN
+        // around −60 dBc on pure linear circuits). The pre-roll spans exactly
+        // DFT_CYCLES cycles of the snapped frequency, so the drive phase is
+        // continuous into the measurement loop below (i and i+measure_samples
+        // share the same phase mod 2π).
+        for i in 0..measure_samples {{
+            let t = i as f64 / sr;
+            let phase = 2.0 * std::f64::consts::PI * freq * t;
+            process_sample(amplitude * phase.sin(), &mut state);
+        }}
 
         for s in sum_cos.iter_mut() {{ *s = 0.0; }}
         for s in sum_sin.iter_mut() {{ *s = 0.0; }}

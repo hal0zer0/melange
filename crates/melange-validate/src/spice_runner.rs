@@ -148,10 +148,16 @@ pub fn run_transient(
         // inject .OPTIONS INTERP to force uniform output timestep.
         // Without this, ngspice prints at all internal adaptive timestep points,
         // which gives non-uniform time spacing and breaks index-based comparison.
+        //
+        // reltol=1e-4 (vs ngspice's 1e-3 default) tightens the reference's own
+        // truncation error so the comparison measures melange against a better
+        // reference. Measured 2026-07-18 across the full 20-test suite: every
+        // correlation held or improved (no test moved by more than its noise
+        // floor), so it is applied unconditionally rather than per config class.
         if first_line {
             modified_content.push_str(line);
             modified_content.push('\n');
-            modified_content.push_str(".OPTIONS INTERP\n");
+            modified_content.push_str(".OPTIONS INTERP reltol=1e-4\n");
             first_line = false;
             continue;
         }
@@ -168,8 +174,13 @@ pub fn run_transient(
                 format_scientific(tstop)
             ));
         } else if trimmed_upper.starts_with(".OPTIONS") {
-            // Skip existing .OPTIONS lines to avoid conflicts with our INTERP
-            continue;
+            // Keep deck-author .OPTIONS lines: ngspice merges multiple
+            // .OPTIONS statements, so author options coexist with the
+            // injected INTERP/reltol line instead of being discarded.
+            // (Discarding them silently altered decks that set e.g. their
+            // own reltol/abstol/gmin.)
+            modified_content.push_str(line);
+            modified_content.push('\n');
         } else if trimmed_upper.starts_with(".PRINT") {
             // Update .PRINT to capture at our timestep
             modified_content.push_str(&format!(
@@ -369,11 +380,20 @@ impl Drop for ModifiedNetlist {
 }
 
 /// Check if a line is a melange-specific directive that ngspice doesn't understand
+///
+/// Must cover every directive melange's parser accepts that is not standard
+/// SPICE, otherwise a deck carrying one cannot be fed to ngspice unmodified.
 fn is_melange_directive(line: &str) -> bool {
     let trimmed = line.trim().to_uppercase();
     trimmed.starts_with(".POT ")
         || trimmed.starts_with(".SWITCH ")
         || trimmed.starts_with(".INPUT_IMPEDANCE ")
+        || trimmed.starts_with(".WIPER ")
+        || trimmed.starts_with(".GANG ")
+        || trimmed.starts_with(".RUNTIME ")
+        || trimmed.starts_with(".MISMATCH ")
+        || trimmed.starts_with(".TOLERANCE ")
+        || trimmed.starts_with(".SEED ")
 }
 
 /// Inject a Thevenin-equivalent PWL source into a netlist string
