@@ -218,6 +218,34 @@ R1 in out 1meg    ; 1 MΩ (correct)
 R2 in out 1M      ; 1 mΩ (probably wrong!)
 ```
 
+## Circuit Noise (opt-in)
+
+Melange can emit the circuit's authentic noise floor — thermal, shot, 1/f
+flicker, pentode partition, and op-amp en/in — when you compile with the
+`--noise` flag. It is off by default. Thermal and shot need no netlist changes;
+the other mechanisms opt in per device on the `.model` card or per element:
+
+```spice
+* Junction flicker: KF/AF on the device model (AF defaults to 1.0)
+.model GE1N34A D(IS=1e-7 N=1.3 KF=1e-12 AF=1.0)
+
+* Resistor flicker: KF/AF on the element (Hooge bias-squared, AF defaults to 2.0)
+R1 vcc plate 100k KF=1e-10 AF=2.0
+
+* Op-amp en/in: EN/IN on the model (EN_FC/IN_FC parse but are not yet wired)
+.model NE5534 OA(AOL=1e5 ROUT=75 EN=3.5n IN=0.4p)
+
+* Pentode partition / triode shot smoothing: PARTITION_F / SHOT_GAMMA2 on the tube model
+.model EF86 TUBE(... PARTITION_F=0.6)
+```
+
+`KF=0` (the default) means no flicker source is generated — a circuit whose
+models carry no noise parameters produces byte-identical code to a build without
+them. Note that resistor `KF`/`AF` and the `.mismatch`/`.tolerance` directives
+break ngspice parity; strip them before `melange validate`. See the
+[Circuit Noise Guide](NOISE_GUIDE.md) for the full per-device coverage table,
+the runtime API, level calibration, and worked examples.
+
 ## Worked Example: Fender-Style Tone Stack
 
 Here's a complete netlist for a passive tone stack (the kind found in guitar amps):

@@ -168,8 +168,9 @@ enum Commands {
         opamp_rail_mode: String,
 
         /// Authentic circuit noise mode: off (default), thermal, shot, full.
-        /// `thermal` emits Johnson-Nyquist noise on every fixed resistor;
-        /// `shot`/`full` add junction and 1/f sources (phases 2-5, currently no-op).
+        /// `thermal` emits Johnson-Nyquist noise on every resistor; `shot` adds
+        /// junction shot; `full` adds 1/f flicker, pentode partition, and op-amp
+        /// en/in. Off by default and byte-identical to a noiseless build when off.
         /// See docs/aidocs/NOISE.md. Runtime toggle via `set_noise_enabled(bool)`.
         #[arg(long, value_name = "MODE", default_value = "off")]
         noise: String,

@@ -228,6 +228,36 @@ Oversampling helps with:
 
 Cost: CPU scales roughly linearly with the oversampling factor.
 
+## Circuit Noise
+
+If the circuit was compiled with `--noise {thermal|shot|full}`, `CircuitState`
+gains a runtime noise API. These methods exist **only** in noise-enabled builds
+(and each is emitted only when its mechanism is present in the circuit):
+
+```rust
+state.set_noise_enabled(true);    // master on/off
+state.set_noise_gain(1.0);        // master scalar over all mechanisms
+state.set_thermal_gain(1.0);      // resistor hiss alone
+state.set_shot_gain(1.0);         // junction shot (also gates pentode partition)
+state.set_flicker_gain(1.0);      // all 1/f (junction + resistor together)
+state.set_opamp_input_gain(1.0);  // op-amp en/in (present only with EN/IN models)
+state.set_temperature_k(290.0);   // thermal temperature, Kelvin (default 290)
+state.set_seed(42);               // deterministic re-seed
+```
+
+Wire a "noise amount" knob to `set_noise_gain`, a Temperature knob to
+`set_temperature_k`, per-mechanism trims to the `set_*_gain` setters, and a
+reproducibility control to `set_seed`. Treat `set_seed` and `set_temperature_k`
+as parameter-change callbacks (they recompute per-source coefficients); the
+gain scalars and `set_noise_enabled` are per-block-safe.
+
+Melange noise is physically scaled, so bare sources are genuinely quiet
+(a Zener junction is sub-microvolt at its terminal). Land the floor at your
+target level with a post-`process_sample` output trim in `lib.rs` — that is
+voltage→dBFS mapping, the plugin's job, not a fix for the netlist. See the
+[Circuit Noise Guide](NOISE_GUIDE.md) for the full API, level calibration, and
+per-device coverage.
+
 ## NaN Recovery
 
 The generated code includes NaN guards. If `process_sample()` produces NaN or infinity:

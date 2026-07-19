@@ -8,6 +8,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Authentic circuit noise** (opt-in, off by default; `--noise {off|thermal|shot|full}`
+  + `--noise-seed <u64>`). Time-domain stochastic currents injected as Norton
+  sources into the nonlinear MNA RHS, so noise is shaped by the circuit's transfer
+  function and modulated by the operating point (shot noise scales with `|I(t)|`).
+  Sources: Johnson-Nyquist thermal (fixed + dynamic R), junction shot (diode/BJT/FET/
+  triode, triode plate space-charge-smoothed), 1/f flicker on junctions
+  (`.model … KF=/AF=`) and resistors (per-element Hooge bias-squared), pentode
+  partition (Schottky), and op-amp en/in (`.model OA(EN=/IN=)`, white-band v1).
+  Per-stream xoshiro256++ RNG seeded via SplitMix64. Runtime controls:
+  `set_noise_enabled`, `set_noise_gain`, `set_thermal_gain`/`set_shot_gain`/
+  `set_flicker_gain`, `set_temperature_k` (default 290 K), `set_seed`. With
+  `--noise off` the generated code is byte-identical to a noiseless build. See
+  `docs/aidocs/NOISE.md`.
+- **Device self-heating**: quasi-static electrothermal RC model (`RTH`/`CTH`/`XTI`/
+  `EG`/`TAMB`) for diodes and triodes, alongside the existing BJT self-heating.
+  Disabled by default (`RTH=∞` → dead code); analytic-validated (SPICE3f5 drops
+  `RTH` silently, so no ngspice parity).
+- **Unit-variation directives** (`.mismatch` / `.tolerance` / `.seed`): per-device
+  `.model` parameter jitter (`.mismatch D|Q P=tol …`) and per-passive value jitter
+  (`.tolerance R=/C=/L=`), baked deterministically at codegen time (FNV → SplitMix64).
+  Opt-in, byte-identical output when absent; breaks ngspice parity by design. See
+  `docs/aidocs/UNIT_VARIATION.md`.
 - **VCA device type**: THAT 2180 / DBX 2150 Blackmer model (`Y` element prefix)
   - 4-terminal current-mode exponential gain: `I = G0 * exp(-Vc/VSCALE) * V_sig`
   - Gain-dependent THD parameter for harmonic distortion modeling
@@ -28,6 +50,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Codegen clippy fixes**: 9 lint categories suppressed in generated code headers
 
 ### Fixed
+- **2026-07 accuracy campaign** (commits `3e246cb`..`8056f95`): op-amp VCCS output
+  polarity (was inverted — clipping/comparator behavior corrected); Koren triode ×2
+  scale factor (triode stages now run at datasheet current/gm — gain staging shifted);
+  oversampling decimator + half-band coefficient tables (2×/4× plugins regain flat HF
+  passband and ~−87 dB alias rejection); FET reverse-quadrant / depletion-NMOS and
+  subthreshold Jacobian (`gm` at threshold); DC-OP device parity + pnjlim normalization;
+  and 16 parser strictness fixes (femto suffix, node case-folding, `gnd` alias,
+  `.model`-type validation). All SPICE validations re-pass at tightened gates.
+- **Shot-noise two-draw Nyquist anti-alias** (`a472807`): single-draw shot rang the
+  trapezoidal `z=−1` pole on stiff reverse-breakdown junctions; the shot path now
+  emits `i_n = w[n]+w[n-1]` with per-draw `sqrt(4·q·|I|·fs)·0.5` (BE-primary stays
+  single-draw). Companion thermal two-draw fix landed in `a5dff8c`.
 - VCA VSCALE default: 0.00528 → 0.05298 (was 10x off)
 - GP q2 uses plain VT (not NF*VT) matching SPICE3f5
 - Runtime GP q2 consistency (codegen was fixed, runtime wasn't)

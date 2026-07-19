@@ -32,10 +32,18 @@ Melange supports the following SPICE elements:
 
 - **F** (Current-Controlled Current Source) -- current mirrors
 - **H** (Current-Controlled Voltage Source)
-- **B** (Behavioral sources) -- arbitrary expressions
 - **T** (Transmission lines)
 
 **Workaround:** Model these using combinations of existing elements where possible.
+
+### Behavioral Sources (B) [PARTIAL]
+
+`B... V={expr}` / `I={expr}` arbitrary-expression sources are wired on the
+**nodal codegen path**: expressions over node voltages, `time`, `ddt`, `idt`,
+and `.param`/`.runtime` parameters compile and are oracle-validated
+(`behavioral_source_tests.rs`). Not yet supported: branch-current references in
+expressions, and the DK path -- a circuit containing a B-source routes nodal, or
+errors loudly if it cannot. See `docs/aidocs/BEHAVIORAL_SOURCES.md`.
 
 ### Missing Directives [DEFERRED]
 
@@ -51,13 +59,15 @@ Expressions like `{R1*2}` in component values are not supported. Only numeric va
 
 ### Temperature Dependencies [PARTIAL]
 
-Temperature coefficients (TC1, TC2) on resistors are ignored. BJT self-heating (Rth, Cth, XTI, EG) is available via thermal RC model with SPICE3f5 IS(T) scaling (default disabled, Rth=infinity). All other simulations run at fixed 27C.
+Temperature coefficients (TC1, TC2) on resistors are ignored, and there is no global temperature sweep (`.temp`). Device self-heating (Rth, Cth, XTI, EG, TAMB) is available via a quasi-static thermal RC model with SPICE3f5 IS(T) scaling for **diodes, BJTs, and triodes** (default disabled, Rth=infinity → dead code). Base device models otherwise run at a fixed nominal 27C.
+
+Separately, the authentic-noise feature carries a runtime-settable noise temperature (`set_temperature_k`, default 290 K), which scales only thermal noise — it does not affect the deterministic device equations. See the Circuit Noise section below.
 
 ## Device Model Limitations
 
 ### Diode
 - BV/IBV: hard clamp reverse breakdown (no smooth Zener knee)
-- No temperature coefficients
+- No TC1/TC2 temperature coefficients; optional quasi-static self-heating (RTH/CTH/XTI/EG/TAMB), disabled by default
 
 ### BJT (Gummel-Poon)
 - Q1 Early effect guard: `q1_denom <= 0` clamps to 1.0 (physically near Early voltage limit)
@@ -112,7 +122,7 @@ Temperature coefficients (TC1, TC2) on resistors are ignored. BJT self-heating (
 - `.gang "Label" member1 member2` links multiple pots/wipers to a single UI parameter (`!` prefix inverts a member)
 - Per-block O(N^3) matrix rebuild on value change
 - Per-sample smoothing via `.smoothed.next()` in generated plugin
-- Warm DC-OP re-init on large jumps (>20% relative change)
+- Reseed-free setters (stamp ΔG only, no mid-signal NR-state reset); call `recompute_dc_op()` explicitly for preset-recall / unsmoothed jumps (DK path)
 - Maximum 64 pots per circuit
 
 ### Switches
@@ -142,7 +152,7 @@ Condition number estimation is performed during DK kernel build. A `log::warn!` 
 
 ### Nonlinear System Size
 
-Codegen supports up to M=16 nonlinear device dimensions. For M > 2, the solver uses full Newton-Raphson with block-diagonal Jacobian and Gaussian elimination (M=3..16). Forward-active detection, grid-off FA reduction, and `.linearize` all reduce M.
+Codegen supports up to M=24 nonlinear device dimensions (`MAX_M=24`). For M > 2, the solver uses full Newton-Raphson with block-diagonal Jacobian and Gaussian elimination (M=3..24). Forward-active detection, grid-off FA reduction, and `.linearize` all reduce M.
 
 ## Solver Limitations
 
@@ -182,13 +192,36 @@ For typical circuits (N<=41 validated), pot rebuild takes ~250us at N=37 -- well
 - Nodal full-LU with chord + cross-timestep + sparse LU: ~11x realtime (Pultec EQP-1A, N=41, M=8)
 - 16-stage cascade (Uniquorn, N=64, M=12): ~3x realtime mono
 
+## Circuit Noise [PARTIAL]
+
+Authentic time-domain circuit noise is implemented (opt-in, off by default) and
+injected as Norton current sources into the MNA RHS, so it is shaped by the
+solver's transfer function and modulated by the nonlinear operating point.
+Enable with `--noise {off|thermal|shot|full}` (`--noise-seed <u64>` for
+determinism). Runtime controls: `set_noise_enabled`, `set_noise_gain`,
+`set_thermal_gain` / `set_shot_gain` / `set_flicker_gain`, `set_temperature_k`,
+`set_seed`. With `--noise off` (default) the generated code is byte-identical to
+a noiseless build. Full reference: `docs/aidocs/NOISE.md`.
+
+Shipped noise sources:
+- **Thermal (Johnson-Nyquist)** on every fixed and dynamic (`.pot`/`.wiper`/`.runtime R`/`.switch`) resistor
+- **Shot** on every junction (diode, BJT, JFET/MOSFET, triode plate with space-charge smoothing)
+- **1/f flicker** on junctions (`.model … KF=… AF=…`) and on resistors (per-element `KF=`/`AF=`, Hooge bias-squared)
+- **Pentode partition** noise (Schottky) and **op-amp en/in** (`.model OA(EN=… IN=…)`, white-band v1)
+
+Noise limitations:
+- Op-amp `EN_FC`/`IN_FC` (1/f corner) parameters parse but are **not yet wired** — Phase 4 is white-band only
+- On the **DK codegen path**, BJT parasitic RB/RC/RE thermal noise (rbb′) is skipped (logged as a `warn!`); route the circuit nodal to include it
+- Diode `RS` and tube `RGI` parasitic resistances are not yet thermal-noise sources
+- Setting `KF`/`AF` on resistors (or any `.mismatch`/`.tolerance` jitter) breaks ngspice parity — strip before SPICE-validating
+- **Tube microphonics** (Phase 6) is research only, not implemented
+
 ## Not Implemented [DEFERRED]
 
-- **Noise models**: thermal, shot, 1/f flicker noise (design phase)
-- **LFO/Modulation**: no time-varying sources for tremolo/vibrato
-- **Temperature sweep**: all simulations at 27C
+- **LFO/Modulation**: no time-varying sources for tremolo/vibrato (use `.runtime R`/`.runtime V` host-driven modulation instead)
+- **Temperature sweep**: no `.temp` directive or global temperature sweep (device self-heating is available per-device, see Temperature Dependencies above)
 - **Multi-language codegen**: C++, FAUST, Python/NumPy, MATLAB targets planned
-- **M > 16**: iterative/sparse NR for very large nonlinear systems
+- **M > 24**: iterative/sparse NR for very large nonlinear systems (MAX_M=24)
 - **Ideal transformer formulation**: dependent sources + explicit leakage/magnetizing L
 
 ## Validation
@@ -229,4 +262,4 @@ These are intentional trade-offs, not bugs:
 
 ---
 
-*Last updated: 2026-04-15*
+*Last updated: 2026-07-19*
