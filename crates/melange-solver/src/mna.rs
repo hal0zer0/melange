@@ -3253,8 +3253,24 @@ impl MnaBuilder {
             }
         }
 
-        // Build a graph of inductor connections via K directives (union-find)
-        let ind_names: Vec<String> = inductor_refs.keys().cloned().collect();
+        // Netlist-appearance position of an inductor (lowercased name). Used as
+        // the deterministic ordering key everywhere below — HashMap key/iteration
+        // order is randomized per process, so anything derived from raw HashMap
+        // order would permute the emitted matrices build-to-build for the same
+        // netlist. `usize::MAX` for names with no matching element (shouldn't
+        // happen; keeps the sort total).
+        let ind_pos = |m: &str| -> usize {
+            netlist
+                .elements
+                .iter()
+                .position(|e| matches!(e, Element::Inductor { name, .. } if name.to_ascii_lowercase() == m))
+                .unwrap_or(usize::MAX)
+        };
+
+        // Build a graph of inductor connections via K directives (union-find).
+        // Sorted by netlist position so union roots and grouping are stable.
+        let mut ind_names: Vec<String> = inductor_refs.keys().cloned().collect();
+        ind_names.sort_by_key(|m| ind_pos(m));
         let mut parent: std::collections::HashMap<String, String> =
             ind_names.iter().map(|n| (n.clone(), n.clone())).collect();
         fn find(parent: &mut std::collections::HashMap<String, String>, x: &str) -> String {
@@ -3279,27 +3295,32 @@ impl MnaBuilder {
             union(&mut parent, &l1, &l2);
         }
 
-        // Group inductors by their root in the union-find
+        // Group inductors by their root in the union-find.
         let mut groups: std::collections::HashMap<String, Vec<String>> =
             std::collections::HashMap::new();
         for name in &ind_names {
             let root = find(&mut parent, name);
             groups.entry(root).or_default().push(name.clone());
         }
+        // Deterministic processing order. Sort each group's members by netlist
+        // position, then order the groups themselves by their first member's
+        // position. Iterating the `groups` HashMap directly would assign the
+        // augmented transformer/coupled-inductor branch rows in a per-process
+        // random order — a pure row permutation (correctness-neutral, hence it
+        // validates equivalent) but non-reproducible codegen, which breaks
+        // byte-identical regen and commit-pinned provenance.
+        let mut ordered_groups: Vec<Vec<String>> = groups.into_values().collect();
+        for members in &mut ordered_groups {
+            members.sort_by_key(|m| ind_pos(m));
+        }
+        ordered_groups.sort_by_key(|members| members.first().map(|m| ind_pos(m)).unwrap_or(usize::MAX));
 
         // Track internal nodes added by ideal transformer decomposition.
         // Internal nodes are 1-indexed, starting after the last circuit node.
         let mut next_internal_node = n + 1;
 
         // Process each group
-        for (_root, mut members) in groups {
-            // Sort members for deterministic ordering (by original element order)
-            members.sort_by_key(|m| {
-                netlist.elements.iter().position(|e| {
-                    matches!(e, Element::Inductor { name, .. } if name.to_ascii_lowercase() == *m)
-                }).unwrap_or(usize::MAX)
-            });
-
+        for members in ordered_groups {
             for m in &members {
                 coupled_inductor_names.insert(m.clone());
             }

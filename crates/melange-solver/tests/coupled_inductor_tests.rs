@@ -167,6 +167,28 @@ C2 secondary 0 100p
 C3 out 0 100p
 ";
 
+/// Two independent coupled-inductor groups (two transformers). Exercises the
+/// across-group ordering that assigns augmented branch rows — the codegen
+/// determinism guard below relies on there being more than one group.
+const TWO_TRANSFORMERS: &str = "\
+Two Transformers
+R1 in pa 100
+L1 pa 0 10m
+L2 sa 0 100m
+K1 L1 L2 0.95
+R2 sa mid 1k
+R3 mid pb 100
+L3 pb 0 100m
+L4 sb 0 10m
+K2 L3 L4 0.95
+R4 sb out 1k
+C1 pa 0 100p
+C2 sa 0 100p
+C3 pb 0 100p
+C4 sb 0 100p
+C5 out 0 100p
+";
+
 // ===========================================================================
 // Parser Tests
 // ===========================================================================
@@ -1448,4 +1470,34 @@ C2 b 0 1p
         "A[a][b] should have mutual coupling: {:.6e}",
         a[a_idx][b_idx]
     );
+}
+
+/// Regression: codegen for a transformer / coupled-inductor circuit must be
+/// byte-identical across repeated builds of the same netlist.
+///
+/// Coupled-inductor groups were assigned augmented branch-row indices in
+/// `HashMap` iteration order (`mna.rs`), which Rust randomizes per process. For
+/// a multi-transformer circuit that permuted the emitted matrices build-to-build
+/// — a correctness-neutral row permutation (it validates equivalent) that
+/// nonetheless broke byte-identical regeneration and commit-pinned provenance
+/// (reported by the oomox agent 2026-07-19 on the Noyce transformer-triode
+/// source). The fix orders groups by their first member's netlist position.
+///
+/// `TWO_TRANSFORMERS` has two groups (2! orderings) and each `generate_code`
+/// call builds a fresh `groups` HashMap with a fresh random seed, so a
+/// regression would almost certainly diverge within the 32 rebuilds below
+/// (verified: in-process HashMaps reliably differ in iteration order).
+#[test]
+fn transformer_codegen_is_deterministic_across_builds() {
+    let first = generate_code(TWO_TRANSFORMERS);
+    for i in 1..32 {
+        let again = generate_code(TWO_TRANSFORMERS);
+        assert_eq!(
+            first, again,
+            "codegen for a two-transformer circuit differs between builds \
+             (rebuild {i}): augmented branch-row ordering is non-deterministic. \
+             Coupled-inductor group ordering in mna.rs must not depend on HashMap \
+             iteration order."
+        );
+    }
 }
