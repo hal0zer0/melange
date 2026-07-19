@@ -187,6 +187,11 @@ history for stable trapezoidal integration.
 
 ## Common Integration Pitfalls
 
+> **Noise scope note:** on the DK path, parasitic-BJT RB/RC/RE are absorbed
+> via K_eff (no internal nodes), so their thermal (rbb′) noise sources are
+> NOT collected — a codegen warning fires. The nodal path models them fully.
+> See NOISE.md "BJT parasitic-R thermal noise".
+
 ### Input Handling
 
 **WRONG** — Building the kernel before the input conductance is in G:

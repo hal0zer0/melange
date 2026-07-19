@@ -13,6 +13,10 @@
 #![allow(clippy::excessive_precision)]
 #![allow(clippy::needless_range_loop)]
 #![allow(clippy::too_many_arguments)]
+// NaN-honest convergence predicates are deliberately written as !(a < b) so a
+// NaN iterate reads as not-converged — do not "simplify" them back.
+#![allow(clippy::neg_cmp_op_on_partial_ord)]
+#![allow(clippy::nonminimal_bool)]
 #![allow(unexpected_cfgs)]
 #![allow(dead_code)]
 // `.runtime R <name> as <field>` emits `set_runtime_R_<field>` (capital R), and
