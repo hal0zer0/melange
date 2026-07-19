@@ -71,10 +71,14 @@
 >   1 when forward-active reduced, JFET/MOSFET 1 (drain/source), Tube 1
 >   (plate/cathode). VCA/op-amp skipped. Per-sample amplitude
 >   `sqrt(4·q·|I_prev|·fs)` using `state.i_nl_prev[slot]` one-sample
->   lagged — same 2× trap-MNA calibration as thermal. Runtime
->   `set_shot_gain(f64)`; salted RNG streams (`NOISE_SHOT_SALT`) so
->   thermal and shot never share a prefix. Available via `--noise shot`
->   or `--noise full`.
+>   lagged — same 2× trap-MNA calibration as thermal. **Two-draw Nyquist
+>   anti-alias added 2026-07-19** (`i_n = w[n]+w[n-1]`, per-draw
+>   `sqrt(4·q·|I|·fs)·0.5`, `noise_shot_w_prev` state) after the Noyce
+>   Zener source revealed that single-draw shot rings the trap z=−1 pole
+>   on stiff reverse-breakdown junctions; BE-primary stays single-draw.
+>   See "Nyquist anti-aliasing" shot bullet. Runtime `set_shot_gain(f64)`;
+>   salted RNG streams (`NOISE_SHOT_SALT`) so thermal and shot never share
+>   a prefix. Available via `--noise shot` or `--noise full`.
 > - **Phase 3 (1/f flicker) shipped** 2026-04-20. Per-junction flicker
 >   sources using Paul Kellett's 7-pole pink filter — same per-device
 >   port layout as shot (Diode 1, BJT 2 / forward-active 1, JFET/MOSFET
@@ -987,14 +991,32 @@ recovery block, in `set_seed()`, and in `reset()` — same reasoning, no
 stale-state replay.
 
 **Phases 2/3 (shot, flicker)**:
-- Shot is injected at device junction terminals (anode/cathode,
+- Shot: **fixed 2026-07-19** — it DID surface, exactly as predicted. Shot
+  is injected at device junction terminals (anode/cathode,
   collector/emitter, etc.). The 10 pF parasitic caps are auto-inserted
   ONLY when the circuit's C matrix is entirely empty
   (`mna.rs::add_parasitic_caps`, gated at `dk.rs:265`), so any circuit
-  with user-defined caps does not get them. Shot is therefore
-  structurally exposed to the same Nyquist pole on a junction terminal
-  with no shunt cap. Has not surfaced in shipped circuits, but if it
-  does, port the same two-draw pattern to the shot stamp.
+  with user-defined caps does not get them — AND even when they are
+  inserted, a stiff junction defeats them: on a reverse-breakdown Zener
+  the dynamic resistance is ~26 Ω (`n_vt/IBV`), so the 10 pF Cak pole sits
+  at ~600 MHz, four decades above fs/2, leaving the junction node
+  effectively resistor-only at Nyquist. The Noyce Zener source (reported
+  by the oomox agent) showed the full signature: single-draw shot excited
+  the z=−1 pole into an fs/2 limit cycle (lag-1 autocorr = −1.000) that the
+  breakdown exponential rectified into the audio band — seed-dependent σ
+  (13–17 dB spread), ~46 dB hot, non-Gaussian (crest ~5 dB). Now the trap
+  shot stamp uses the same two-draw pair `i_n = w[n] + w[n−1]`, each draw
+  at `sqrt(4·q·|I|·fs)·0.5`; LF PSD unchanged, fs/2 zeroed. New state
+  `noise_shot_w_prev`, cleared at `default()` / `reset()` / `set_seed()` /
+  NaN recovery; **not** emitted on BE-primary builds (BE damps z=−1;
+  single-draw there). A zero-current guard sets `w_new = 0` when
+  `|I| < 1e-15` so the lagged half flushes over one sample rather than
+  freezing a stale draw. Guard: `noise_psd_validation.rs::
+  shot_noise_no_nyquist_artifact_on_stiff_breakdown_junction` (6-seed
+  Zener bench; lag-1 > −0.5 per seed is the window-independent primary
+  assert). This was pre-existing since Phase 2 shot (2026-04-20), not a
+  regression — the shot path simply never carried the two-draw scheme the
+  thermal path got on 2026-04-24.
 - Flicker: **fixed 2026-07-18** — it DID surface, exactly as predicted,
   the moment an absolute-level test biased a diode with a 10 pF-only
   junction node: the Kellett cascade's ~−14 dB fs/2 tail rang the z=−1
@@ -1020,13 +1042,20 @@ All scale constants above are calibrated for the **trapezoidal** kernel,
 whose LF stamp-to-voltage gain is `(A − A_neg)⁻¹ = (2G)⁻¹` — half the
 physical DC gain. The trap stamps compensate in one of two ways:
 
-- **two-draw phases** (thermal, partition, op-amp en/in): the pair sum
-  `i_n = w[n] + w[n-1]` doubles the LF amplitude (×2 at `z = 1`), exactly
-  cancelling the halved kernel gain — mirroring the trapezoidal input
-  stamp `(V_new + V_prev)·G_in`.
-- **single-draw phases** (shot, junction flicker, resistor flicker): the
-  amplitude constant carries an explicit ×2 (variance ×4, e.g. the `4` in
-  `sqrt(4·q·I·fs)`).
+- **two-draw phases** (thermal, shot, junction flicker, resistor flicker,
+  partition, op-amp en/in): the pair sum `i_n = w[n] + w[n-1]` doubles the
+  LF amplitude (×2 at `z = 1`), exactly cancelling the halved kernel gain —
+  mirroring the trapezoidal input stamp `(V_new + V_prev)·G_in` — and
+  zeroes the fs/2 injection. The amplitude constant still carries its
+  explicit ×2 (variance ×4, e.g. the `4` in `sqrt(4·q·I·fs)`); the pair's
+  half-scale (`·0.5` per draw) plus the ×2-at-DC of the sum nets to the
+  same LF PSD as a single draw at full scale. (Shot joined this group
+  2026-07-19; before that it was single-draw and rang the z=−1 pole on
+  stiff junction nodes — see the shot bullet under "Nyquist anti-aliasing".)
+- **BE-primary builds**: every phase reverts to a **single draw** (no
+  pair). BE damps the `z = -1` pole itself, so the `cos²(ωT/2)` envelope of
+  a pair would only add a spurious −3 dB@fs/4 droop; the amplitude constant
+  drops its trap ×2 compensation (e.g. shot uses `sqrt(q·I·fs)`).
 
 A **BE-primary** build (`--backward-euler`, or auto-BE promotion on
 either codegen path) has `A − A_neg = G` — **full** LF gain, 2× trap in
@@ -1044,7 +1073,7 @@ LF amplitude, delivered as a single draw*. Emitted by
 | Phase | Trap emission | BE-primary emission |
 |-------|---------------|---------------------|
 | thermal | two-draw, per-draw `sqrt(8kT·fs)/2 · sqrt(1/R)` | single-draw `sqrt(2·kT·fs) · sqrt(1/R)` |
-| shot | single-draw `sqrt(Γ²)·sqrt(4·q·fs) · sqrt(I)` | single-draw `sqrt(Γ²)·sqrt(q·fs) · sqrt(I)` |
+| shot | two-draw, per-draw `sqrt(Γ²)·sqrt(4·q·fs)/2 · sqrt(I)` | single-draw `sqrt(Γ²)·sqrt(q·fs) · sqrt(I)` |
 | junction flicker | pink pair-sum, per-draw `0.5·sqrt(2·KF/K_pink) · I^(AF/2)` | single-draw `sqrt(0.5·KF/K_pink) · I^(AF/2)` → pink |
 | resistor flicker | pink pair-sum, per-draw `0.5·sqrt(2·KF/K_pink) · I^(AF/2)` | single-draw `sqrt(0.5·KF/K_pink) · I^(AF/2)` → pink |
 | partition | two-draw, per-draw `sqrt(4·q·fs)/2 · …` | single-draw `sqrt(q·fs) · …` |
