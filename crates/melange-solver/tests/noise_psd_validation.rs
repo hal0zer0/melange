@@ -1069,6 +1069,153 @@ fn main() {{
     );
 }
 
+/// Regression test: SHOT noise on a stiff reverse-breakdown junction node must
+/// NOT produce a seed-dependent Nyquist oscillation.
+///
+/// This is the shot-path analogue of
+/// `thermal_noise_no_nyquist_artifact_on_resistor_only_output_node`. Shot noise
+/// was single-draw (the 2026-04-24 two-draw Nyquist fix was thermal-only, on
+/// the assumption that junction parasitic caps always kill the z=-1 pole). For
+/// a stiff reverse-breakdown Zener the dynamic resistance is ~26 Ω, so the
+/// ~10 pF Cak pole sits at ~600 MHz — four decades above fs/2. The junction
+/// node is therefore effectively resistor-only at Nyquist, single-draw shot
+/// injection excites the trap z=-1 pole into an fs/2 limit cycle, and the
+/// breakdown exponential rectifies it into the audio band. Symptoms (Noyce
+/// Zener source, reported by the oomox agent 2026-07-19):
+///   - lag-1 autocorrelation ≈ -1.0 (pure Nyquist)
+///   - σ depends on the RNG seed by 13-17 dB (rectification is amplitude-dep.)
+///   - output ~46 dB hotter than the physical sqrt(4·q·I·fs)·Rz prediction
+///
+/// After the two-draw shot fix the autocorrelation is positive and σ is
+/// seed-independent (spread < 1 dB across seeds).
+#[test]
+fn shot_noise_no_nyquist_artifact_on_stiff_breakdown_junction() {
+    // Reverse-biased 5.1 V Zener at its breakdown knee (I_z = IBV = 1 mA).
+    // n_zener sits at the stiff exponential with ~26 Ω dynamic resistance and
+    // no shunt cap below Nyquist — the node that develops the shot artifact.
+    const ZENER_BREAKDOWN_SPICE: &str = r#"* Reverse-breakdown Zener — shot Nyquist artifact regression
+.model ZENER_5V1 D(BV=5.1 IBV=1e-3)
+VCC vcc 0 DC 9
+R_bias vcc n_zener 3.9k
+D1 0 n_zener ZENER_5V1
+Cout n_zener out 100n
+Rload out 0 1Meg
+.end
+"#;
+    let sr = 96_000.0_f64;
+    let config = CodegenConfig {
+        circuit_name: "shot_nyquist_regress".to_string(),
+        sample_rate: sr,
+        input_node: 0,
+        output_nodes: vec![2], // "out" (nodes by appearance: vcc=0, n_zener=1, out=2)
+        input_resistance: 1.0,
+        dc_block: false,
+        noise_mode: NoiseMode::Shot,
+        noise_master_seed: 1,
+        ..CodegenConfig::default()
+    };
+    let (code, _n, _m) = support::generate_circuit_code(ZENER_BREAKDOWN_SPICE, &config);
+
+    // Per-seed σ + lag-1 autocorrelation. Six seeds probe the seed-dependence.
+    let main = format!(
+        r#"
+fn sigma_and_lag1(seed: u64) -> (f64, f64) {{
+    let sr = {sr}_f64;
+    let mut state = CircuitState::default();
+    state.set_sample_rate(sr);
+    state.set_seed(seed);
+    state.set_noise_enabled(true);
+    state.set_temperature_k(290.0);
+    state.set_noise_gain(1.0);
+    state.set_shot_gain(1.0);
+    for _ in 0..(sr as usize) {{ let _ = process_sample(0.0, &mut state); }} // 1 s warmup
+    let n = (3.0 * sr) as usize; // 3 s measure (tight σ estimate, low window variance)
+    let mut v = vec![0.0_f64; n];
+    for i in 0..n {{ v[i] = process_sample(0.0, &mut state)[0]; }}
+    let mean = v.iter().sum::<f64>() / n as f64;
+    let var = v.iter().map(|&x| (x - mean).powi(2)).sum::<f64>() / n as f64;
+    let lag1_num = v[..n-1].iter().zip(v[1..].iter())
+        .map(|(&a, &b)| (a - mean) * (b - mean)).sum::<f64>() / (n - 1) as f64;
+    let lag1 = if var > 0.0 {{ lag1_num / var }} else {{ 0.0 }};
+    (var.sqrt(), lag1)
+}}
+
+fn main() {{
+    let seeds = [1u64, 2, 3, 0xdeadbeef, 0x12345678deadbeef, 0xa5a55a5a];
+    let mut min_s = f64::INFINITY;
+    let mut max_s = 0.0_f64;
+    let mut worst_lag1 = f64::NEG_INFINITY;
+    for &s in seeds.iter() {{
+        let (sigma, lag1) = sigma_and_lag1(s);
+        if sigma < min_s {{ min_s = sigma; }}
+        if sigma > max_s {{ max_s = sigma; }}
+        if lag1 > worst_lag1 {{ worst_lag1 = lag1; }}
+        println!("SEED sigma={{:.6e}} lag1={{:.6}}", sigma, lag1);
+    }}
+    println!("MIN_SIGMA={{:.15e}}", min_s);
+    println!("MAX_SIGMA={{:.15e}}", max_s);
+    println!("SPREAD_DB={{:.6}}", 20.0 * (max_s / min_s).log10());
+}}
+"#,
+        sr = sr,
+    );
+
+    let out = support::compile_and_run(&code, &main, "shot_nyquist_regress");
+    let parse = |key: &str| -> f64 {
+        out.stdout
+            .lines()
+            .find_map(|l| l.strip_prefix(key).and_then(|v| v.parse().ok()))
+            .unwrap_or_else(|| panic!("{key} not found in stdout:\n{}", out.stdout))
+    };
+    let min_sigma = parse("MIN_SIGMA=");
+    let spread_db = parse("SPREAD_DB=");
+
+    // (1) Seed-independence: σ spread across 6 seeds must be small. Before the
+    //     fix this was 13-17 dB; the fixed path gives ~0.4-0.8 dB over a 3 s
+    //     window. Bound at 2 dB — 8× below the bug, with headroom for the
+    //     residual σ-estimation variance of a finite window (the lag-1 assert
+    //     below is the window-independent primary guard).
+    assert!(
+        spread_db < 2.0,
+        "shot σ is seed-dependent ({spread_db:.2} dB across 6 seeds, expected < 2). \
+         The single-draw shot Nyquist artifact is active on the breakdown junction — \
+         the two-draw shot stamp is not eliminating the fs/2 injection."
+    );
+
+    // (2) No Nyquist oscillation on ANY seed (worst-case lag-1 must be > -0.5).
+    //     Before the fix lag-1 ≈ -1.0 for every seed.
+    for line in out.stdout.lines() {
+        if let Some(rest) = line.strip_prefix("SEED ") {
+            let lag1: f64 = rest
+                .split("lag1=")
+                .nth(1)
+                .and_then(|v| v.trim().parse().ok())
+                .expect("lag1 parse");
+            assert!(
+                lag1 > -0.5,
+                "shot Nyquist artifact: lag-1 autocorrelation {lag1:.4} (expected > -0.5) — \
+                 stationary (+/-1) fs/2 oscillation on the breakdown junction node."
+            );
+        }
+    }
+
+    // (3) Physical level: σ ≈ sqrt(4·q·I·fs)·Rz ≈ 200 nV at the breakdown knee.
+    //     Before the fix σ was 7-49 µV (~46 dB hot). Bound generously (the DC
+    //     path + estimate roughness put the true value ~140 nV); anything under
+    //     2 µV proves the +46 dB rectified pump is gone.
+    assert!(
+        min_sigma < 2e-6,
+        "shot σ {min_sigma:.3e} V exceeds 2 µV on the breakdown junction — the \
+         rectified Nyquist pump (~46 dB hot) is still present."
+    );
+
+    // (4) Sanity: shot noise is actually nonzero (the stamp is active).
+    assert!(
+        min_sigma > 1e-9,
+        "shot σ {min_sigma:.3e} V is near-zero — shot noise may not be injected."
+    );
+}
+
 /// Regression: fs-sweep on the same diode + series-R circuit as the
 /// `_on_resistor_only_output_node` test. The original bug's smoking gun was
 /// output RMS scaling roughly linearly with fs (the Nyquist pole accumulated

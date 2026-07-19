@@ -3802,6 +3802,12 @@ impl RustEmitter {
             );
             state_fields
                 .push_str("    pub noise_shot_gaussian_cache: [Option<f64>; NOISE_SHOT_N],\n");
+            state_fields.push_str(
+                "    /// Per-source previous half-draw for the two-draw Nyquist-anti-alias\n\
+                 \x20   /// pair (trap path only; BE-primary is single-draw). Zeroed at\n\
+                 \x20   /// default(), reset(), and set_seed(). See NOISE.md 'Nyquist anti-aliasing'.\n",
+            );
+            state_fields.push_str("    pub noise_shot_w_prev: [f64; NOISE_SHOT_N],\n");
             state_fields
                 .push_str("    /// Per-source last-stamped `i_n` cache (BE-fallback replay).\n");
             state_fields.push_str("    pub noise_shot_last_i_n: [f64; NOISE_SHOT_N],\n");
@@ -4213,6 +4219,7 @@ impl RustEmitter {
             default_fields.push_str("            noise_shot_rng,\n");
             default_fields
                 .push_str("            noise_shot_gaussian_cache: [None; NOISE_SHOT_N],\n");
+            default_fields.push_str("            noise_shot_w_prev: [0.0; NOISE_SHOT_N],\n");
             default_fields.push_str("            noise_shot_last_i_n: [0.0; NOISE_SHOT_N],\n");
         }
         if flicker_n > 0 {
@@ -4308,6 +4315,7 @@ impl RustEmitter {
             );
             reset_body.push_str("        self.noise_shot_rng = seed_noise_rngs_salted::<NOISE_SHOT_N>(self.noise_master_seed, NOISE_SHOT_SALT);\n");
             reset_body.push_str("        self.noise_shot_gaussian_cache = [None; NOISE_SHOT_N];\n");
+            reset_body.push_str("        self.noise_shot_w_prev = [0.0; NOISE_SHOT_N];\n");
             reset_body.push_str("        self.noise_shot_last_i_n = [0.0; NOISE_SHOT_N];\n");
         }
         if flicker_n > 0 {
@@ -4555,6 +4563,7 @@ impl RustEmitter {
         if shot_n > 0 {
             methods.push_str("        self.noise_shot_rng = seed_noise_rngs_salted::<NOISE_SHOT_N>(master, NOISE_SHOT_SALT);\n");
             methods.push_str("        self.noise_shot_gaussian_cache = [None; NOISE_SHOT_N];\n");
+            methods.push_str("        self.noise_shot_w_prev = [0.0; NOISE_SHOT_N];\n");
             methods.push_str("        self.noise_shot_last_i_n = [0.0; NOISE_SHOT_N];\n");
         }
         if flicker_n > 0 {
@@ -4661,50 +4670,85 @@ impl RustEmitter {
         rhs_stamp.push_str("            state.noise_thermal_last_i_n = [0.0; NOISE_THERMAL_N];\n");
         rhs_stamp.push_str("        }\n");
         if shot_n > 0 {
+            rhs_stamp.push_str(
+                "        // Shot: `|I_prev|` is the one-sample-lagged junction current from\n\
+                 \x20       // `state.i_nl_prev` (inaudible lag; lets the stamp run before NR).\n\
+                 \x20       // The gate includes `shot_gain` so hosts can mute shot alone.\n",
+            );
+            let gamma_factor = if shot_gamma_needed {
+                "NOISE_SHOT_GAMMA_AMP[k] * "
+            } else {
+                ""
+            };
             if be_primary {
+                // BE-primary: single-draw, un-doubled amplitude. BE damps the
+                // z=-1 pole itself, so no two-draw pair (its cos^2 envelope would
+                // add a spurious droop) — `noise_shot_scale` is already sqrt(q·fs).
                 rhs_stamp.push_str(
-                    "        // Shot: sqrt(q·|I_prev|·fs) per source (BE-primary: half the\n\
-                     \x20       // trap amplitude — see the scale derivation in Default).\n",
+                    "        // BE-primary: single-draw sqrt(q·|I_prev|·fs) (BE damps z=-1 itself).\n",
                 );
-            } else {
+                rhs_stamp.push_str("        let shot_scale = state.noise_shot_scale * state.noise_gain * state.shot_gain;\n");
+                rhs_stamp.push_str("        if shot_scale != 0.0 {\n");
+                rhs_stamp.push_str("            for k in 0..NOISE_SHOT_N {\n");
                 rhs_stamp.push_str(
-                    "        // Shot: sqrt(4·q·|I_prev|·fs) per source.\n",
+                    "                let i_abs = state.i_nl_prev[NOISE_SHOT_SLOT_IDX[k]].abs();\n",
                 );
-            }
-            rhs_stamp
-                .push_str("        // `|I_prev|` is the\n");
-            rhs_stamp.push_str(
-                "        // one-sample-lagged junction current from `state.i_nl_prev`;\n",
-            );
-            rhs_stamp.push_str(
-                "        // at audio rates the lag is inaudible and lets the stamp run\n",
-            );
-            rhs_stamp.push_str(
-                "        // before NR. The gate includes `shot_gain` so hosts can mute\n",
-            );
-            rhs_stamp.push_str("        // shot alone without touching thermal.\n");
-            rhs_stamp.push_str("        let shot_scale = state.noise_shot_scale * state.noise_gain * state.shot_gain;\n");
-            rhs_stamp.push_str("        if shot_scale != 0.0 {\n");
-            rhs_stamp.push_str("            for k in 0..NOISE_SHOT_N {\n");
-            rhs_stamp.push_str(
-                "                let i_abs = state.i_nl_prev[NOISE_SHOT_SLOT_IDX[k]].abs();\n",
-            );
-            rhs_stamp.push_str("                if i_abs < 1e-15 { continue; }\n");
-            rhs_stamp.push_str("                let g = gaussian(&mut state.noise_shot_rng[k], &mut state.noise_shot_gaussian_cache[k]);\n");
-            if shot_gamma_needed {
-                rhs_stamp.push_str("                let i_n = shot_scale * NOISE_SHOT_GAMMA_AMP[k] * i_abs.sqrt() * g;\n");
+                rhs_stamp.push_str("                if i_abs < 1e-15 { continue; }\n");
+                rhs_stamp.push_str("                let g = gaussian(&mut state.noise_shot_rng[k], &mut state.noise_shot_gaussian_cache[k]);\n");
+                rhs_stamp.push_str(&format!(
+                    "                let i_n = shot_scale * {gamma_factor}i_abs.sqrt() * g;\n"
+                ));
+                rhs_stamp.push_str("                state.noise_shot_last_i_n[k] = i_n;\n");
+                rhs_stamp.push_str("                let ni = NOISE_SHOT_NODE_I[k];\n");
+                rhs_stamp.push_str("                let nj = NOISE_SHOT_NODE_J[k];\n");
+                rhs_stamp.push_str("                if ni > 0 { rhs[ni - 1] += i_n; }\n");
+                rhs_stamp.push_str("                if nj > 0 { rhs[nj - 1] -= i_n; }\n");
+                rhs_stamp.push_str("            }\n");
+                rhs_stamp.push_str("        } else {\n");
+                rhs_stamp.push_str("            state.noise_shot_last_i_n = [0.0; NOISE_SHOT_N];\n");
+                rhs_stamp.push_str("        }\n");
             } else {
-                rhs_stamp.push_str("                let i_n = shot_scale * i_abs.sqrt() * g;\n");
+                // Trapezoidal: two-draw Nyquist anti-alias pair `w_new + w_prev`,
+                // each draw at half amplitude (sqrt(4·q·|I|·fs)·0.5). Without it,
+                // the single-draw white shot injection excites the trap z=-1 pole
+                // on a stiff / high-impedance junction node (e.g. a reverse-
+                // breakdown Zener, whose ~10 pF Cak pole sits far above fs/2, so
+                // the node is resistor-only at Nyquist) into an fs/2 limit cycle
+                // that the junction exponential rectifies down into the audio band
+                // (seed-dependent, hot, non-Gaussian). Mirrors the thermal
+                // two-draw scheme; see NOISE.md "Nyquist anti-aliasing". When |I|
+                // collapses below the floor, w_new = 0 so the lagged half flushes
+                // over one sample instead of freezing a stale draw.
+                rhs_stamp.push_str(
+                    "        // Trap: two-draw Nyquist pair w_new + w_prev, sqrt(4·q·|I_prev|·fs)·0.5.\n",
+                );
+                rhs_stamp.push_str("        let shot_scale = state.noise_shot_scale * state.noise_gain * state.shot_gain * 0.5;\n");
+                rhs_stamp.push_str("        if shot_scale != 0.0 {\n");
+                rhs_stamp.push_str("            for k in 0..NOISE_SHOT_N {\n");
+                rhs_stamp.push_str(
+                    "                let i_abs = state.i_nl_prev[NOISE_SHOT_SLOT_IDX[k]].abs();\n",
+                );
+                rhs_stamp.push_str("                let w_new = if i_abs < 1e-15 {\n");
+                rhs_stamp.push_str("                    0.0\n");
+                rhs_stamp.push_str("                } else {\n");
+                rhs_stamp.push_str("                    let g = gaussian(&mut state.noise_shot_rng[k], &mut state.noise_shot_gaussian_cache[k]);\n");
+                rhs_stamp.push_str(&format!(
+                    "                    shot_scale * {gamma_factor}i_abs.sqrt() * g\n"
+                ));
+                rhs_stamp.push_str("                };\n");
+                rhs_stamp.push_str("                let i_n = w_new + state.noise_shot_w_prev[k];\n");
+                rhs_stamp.push_str("                state.noise_shot_w_prev[k] = w_new;\n");
+                rhs_stamp.push_str("                state.noise_shot_last_i_n[k] = i_n;\n");
+                rhs_stamp.push_str("                let ni = NOISE_SHOT_NODE_I[k];\n");
+                rhs_stamp.push_str("                let nj = NOISE_SHOT_NODE_J[k];\n");
+                rhs_stamp.push_str("                if ni > 0 { rhs[ni - 1] += i_n; }\n");
+                rhs_stamp.push_str("                if nj > 0 { rhs[nj - 1] -= i_n; }\n");
+                rhs_stamp.push_str("            }\n");
+                rhs_stamp.push_str("        } else {\n");
+                rhs_stamp.push_str("            state.noise_shot_w_prev = [0.0; NOISE_SHOT_N];\n");
+                rhs_stamp.push_str("            state.noise_shot_last_i_n = [0.0; NOISE_SHOT_N];\n");
+                rhs_stamp.push_str("        }\n");
             }
-            rhs_stamp.push_str("                state.noise_shot_last_i_n[k] = i_n;\n");
-            rhs_stamp.push_str("                let ni = NOISE_SHOT_NODE_I[k];\n");
-            rhs_stamp.push_str("                let nj = NOISE_SHOT_NODE_J[k];\n");
-            rhs_stamp.push_str("                if ni > 0 { rhs[ni - 1] += i_n; }\n");
-            rhs_stamp.push_str("                if nj > 0 { rhs[nj - 1] -= i_n; }\n");
-            rhs_stamp.push_str("            }\n");
-            rhs_stamp.push_str("        } else {\n");
-            rhs_stamp.push_str("            state.noise_shot_last_i_n = [0.0; NOISE_SHOT_N];\n");
-            rhs_stamp.push_str("        }\n");
         }
         if flicker_n > 0 {
             rhs_stamp.push_str(
@@ -5097,6 +5141,7 @@ impl RustEmitter {
         nan_recovery_body
             .push_str("        state.noise_thermal_last_i_n = [0.0; NOISE_THERMAL_N];\n");
         if shot_n > 0 {
+            nan_recovery_body.push_str("        state.noise_shot_w_prev = [0.0; NOISE_SHOT_N];\n");
             nan_recovery_body
                 .push_str("        state.noise_shot_last_i_n = [0.0; NOISE_SHOT_N];\n");
         }
