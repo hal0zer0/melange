@@ -125,7 +125,8 @@ is automatic now. See [DC_OP.md](DC_OP.md) for the solver algorithm.
 
 **CRITICAL**: Stamp into MNA before building DK kernel:
 ```rust
-let mut mna = MnaSystem::from_netlist(&netlist_no_vin)?;
+// `stripped` is the single deck after strip_vin_source() removed VIN
+let mut mna = MnaSystem::from_netlist(&stripped)?;
 
 // Stamp input conductance (1.0 for near-ideal voltage source)
 let input_conductance = 1.0;  // 1 ohm

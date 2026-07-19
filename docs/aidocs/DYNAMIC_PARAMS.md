@@ -89,8 +89,8 @@ pre-emptively land it — the click fix is orthogonal and landed first
 on its own merits.
 
 ### Constraints
-- Maximum 32 combined `.pot` + `.wiper` legs per circuit (each `.wiper`
-  counts as 2 legs).
+- Maximum 64 combined `.pot` + `.wiper` legs per circuit (each `.wiper`
+  counts as 2 legs; parser enforces the 64 cap).
 - The named resistor must already exist in the netlist before the `.pot`
   directive.
 - A resistor can only be claimed by one `.pot` or one `.wiper` (not both).
@@ -111,26 +111,29 @@ single 100k pot with a wiper that splits the resistance into two legs
 that always sum to the total. A single UI parameter (position 0.0–1.0)
 controls both legs simultaneously:
 ```
-R_cw  = (1 - pos) * (total - 2) + 1
-R_ccw = pos       * (total - 2) + 1
+R_cw  = (1 - pos) * (total - 20) + 10
+R_ccw = pos       * (total - 20) + 10
 ```
-The `+1`/`-2` keep both legs > 0 even at the extremes (avoids singular
-matrices when pos = 0 or 1). At runtime, two sequential Sherman-Morrison
-rank-1 updates are applied, one per leg, with cross-correction so the
-second update accounts for the first.
+`MIN_LEG_R = 10` Ω: the `+10`/`-20` keep both legs ≥ 10 Ω even at the
+extremes (avoids singular matrices when pos = 0 or 1), and the two legs
+always sum to `total`. Direction: `R_cw` uses `(1 - pos)`, matching
+`parser::expand_wipers`. At runtime a wiper change triggers the same
+per-block O(N³) matrix rebuild as a `.pot` change, restamping both legs
+(Sherman-Morrison rank-1 updates were removed 2026-04-04 — see the `.pot`
+section above; SM now survives only in the saturating-inductor path).
 
 ### When to use `.wiper` vs `.pot`
 - **`.pot`** if the circuit only uses two terminals of the pot (rheostat
-  configuration). Cheaper — one rank-1 update.
+  configuration). Cheaper — one leg restamped per rebuild.
 - **`.wiper`** if the circuit uses all three terminals (true voltage
-  divider). Two rank-1 updates, but physically correct.
+  divider). Both legs restamped per rebuild, but physically correct.
 
 Most volume/tone controls in audio circuits are `.wiper` candidates.
 
 ### Constraints
 - CW and CCW legs must be different resistors.
 - Total resistance must be > 20 Ω.
-- Each `.wiper` consumes 2 of the 32 combined pot/wiper slots.
+- Each `.wiper` consumes 2 of the 64 combined pot/wiper slots.
 
 ## `.gang` — Multi-Member Single Parameter
 
@@ -178,8 +181,8 @@ C1 hp_in 0 100n
 A `.switch` directive declares one or more components (R, C, or L) whose
 values change in lock-step across discrete positions. Position 0 is the
 default. Changing positions at runtime triggers a partial matrix rebuild
-(more expensive than a Sherman-Morrison pot update — the affected G/C
-entries are restamped and downstream matrices recomputed).
+(like a `.pot` change, but touching several components at once — the
+affected G/C/L entries are restamped and downstream matrices recomputed).
 
 ### Component value syntax
 - **One component**: `.switch C1 v0 v1 v2 v3 ...` — each value applies to C1.
@@ -201,8 +204,8 @@ entries are restamped and downstream matrices recomputed).
 - **`.switch`** for discrete-position component selectors (impedance
   switches, EQ shape selectors, oscilloscope-style range switches,
   Pultec frequency selectors, pedal bypass, channel select, clipping-diode
-  picker, bright switch). Switches change topology values, not just one
-  conductance, so they need a real rebuild rather than a rank-1 update.
+  picker, bright switch). Switches change several component values at once,
+  not just one conductance.
 
 ## `.runtime V` — Host-Driven Voltage Source
 
@@ -377,4 +380,4 @@ on DK circuits (nodal falls back to NR catch-up over
 | Gang member responds backward | Direction expected but not inverted | Add `!` prefix on the gang-member reference |
 | Switch position N produces wrong tone | Component value list misaligned with name list | Re-check `.switch C1,C2` slash order vs name order |
 | "Resistor already claimed" error | Same resistor in two `.pot`/`.wiper` directives | A resistor can only be in one |
-| > 32 pots error | Combined `.pot` + 2×`.wiper` count > 32 | Reduce or simplify |
+| > 64 pots error | Combined `.pot` + 2×`.wiper` count > 64 | Reduce or simplify |

@@ -136,9 +136,8 @@ No alloc/locks/syscalls in audio processing. All buffers pre-allocated in solver
 
 Tests compare melange output against ngspice (`crates/melange-validate/`). See `docs/aidocs/SPICE_VALIDATION.md` for full protocol and `STATUS.md` for the latest correlation table.
 
-- `circuit.cir` — full SPICE netlist (with VIN source) for ngspice.
-- `circuit_no_vin.cir` — same circuit minus VIN, for melange (input via conductance stamping).
-- `.OPTIONS INTERP` added automatically for uniform timestep output (must come AFTER title line).
+- Single `circuit.cir` per test: the harness strips the VIN source (matched by n+ == input node) and injects a PWL Thevenin drive for ngspice; melange gets the input via conductance stamping. The old `circuit_no_vin.cir` two-netlist protocol is retired.
+- `.OPTIONS INTERP reltol=1e-4` injected automatically (INTERP must come AFTER the title line); deck-author `.OPTIONS` lines survive and win per-keyword.
 
 ### Most common SPICE-validation footguns
 
@@ -147,7 +146,8 @@ Tests compare melange output against ngspice (`crates/melange-validate/`). See `
 | Correlation ~ 0 | Stamp `mna.g[in][in] += G_in` **before** `DkKernel::from_mna()` |
 | ~3% error on linear circuit | Using `2*V*G` instead of `(V+V_prev)*G` — track `input_prev`, use proper trapezoidal |
 | Sample count mismatch | Add `.OPTIONS INTERP` (after title line!) |
-| Output all zeros | VIN left in `circuit_no_vin.cir` |
+| Halved drive / ~6 dB low on a validated deck | VIN's n+ must BE the input node (`in`). A baked Thevenin pair like `VIN in_src 0` + `R_src in_src in` evades `strip_vin_source` AND the harness Thevenin inject, leaving a second 1Ω shunt at the input on both sides |
+| Onset transient / LF droop vs ngspice | PWL input must start at 0 V — ngspice pre-settles its DC OP at PWL(t=0); an abrupt nonzero first sample gives the two engines different initial conditions |
 | Output ±10V oscillating | Purely resistive nonlinear circuit — parasitic 10pF caps should auto-insert, or add explicit caps |
 | BJT output wrong | DC operating point not initialized — `DC_NL_I` should be non-zero |
 | DC OP NR diverges | Wrong Jacobian sign — must be `G_aug = G_dc - N_i·J_dev·N_v` (**subtraction**) |

@@ -181,14 +181,29 @@ j_dev[s+1,s+1] = em.base_jacobian_dvbc;
 
 ## Catalog BJTs with GP Parameters
 
-| Device | IS | BF | VAF | VAR | IKF | IKR |
-|--------|----|----|-----|-----|-----|-----|
-| 2N2222A | 1.26e-14 | 200 | 100V | 10V | 0.3A | 6mA |
-| 2N3904 | 6.73e-15 | 416 | 74V | 28V | 66mA | — |
-| 2N3906 | 1.41e-15 | 180 | 18V | 5.5V | 30mA | 11mA |
-| BC547B | 1.8e-14 | 400 | 75V | — | 0.2A | — |
+The authoritative values live in `crates/melange-devices/src/catalog/bjts.rs`
+(each entry carries a `source:` string); the table below mirrors that file.
+
+| Device | IS | BF | VAF | VAR | IKF | IKR | Source |
+|--------|----|----|-----|-----|-----|-----|--------|
+| 2N2222A | 1.26e-14 | 200 | 100V | 10V | 0.3A | 6mA | Composite (see note) |
+| 2N3904 | 6.73e-15 | 416 | 74V | — | 66mA | — | Fairchild/onsemi card |
+| 2N3906 | 1.41e-15 | 181 | 18.7V | — | 80mA | — | Fairchild/onsemi card |
+| BC547B | 1.8e-14 | 400 | 80V | 12.5V | 0.14A | 0.03A | Zetex BC547BP (rev 4/90) |
 
 (— = infinity, pure EM for that parameter)
+
+Notes:
+- **2N3904 / 2N3906** encode the Fairchild (now onsemi) datasheet cards
+  verbatim. Both cards give `Ikr=0` (disabled) and omit `Var` (disabled),
+  which map to `f64::INFINITY` here and collapse the corresponding `qb`
+  terms — hence the `—` in VAR/IKR.
+- **BC547B** is the Zetex BC547BP SPICE model (rev 4/90), not a Philips/NXP
+  card. The previous entry mislabeled the vendor and carried two
+  transcription errors (IKF 0.1 vs card 0.14; IKR 3e-4 vs card 0.03).
+- **2N2222A** is a *composite*, not verbatim vendor data: it is based on the
+  Philips 2N2222 card but deviates in IS (1.26e-14), VAR (10V), and IKR (6mA),
+  none of which trace to a published card. Do not cite it as vendor data.
 
 ## Ebers-Moll Fallback
 

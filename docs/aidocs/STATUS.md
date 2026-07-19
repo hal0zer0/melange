@@ -2,7 +2,7 @@
 
 Quick-reference for AI agents. For math details see other aidocs. For architecture see CLAUDE.md.
 
-> **2026-07-18 accuracy campaign (commit `3e246cb` + in-progress chunk-3 wave):** a
+> **2026-07-18 accuracy campaign (commits `3e246cb`, `5159b8c`, `fde289a`, `b421358`, `8056f95` — all six review chunks complete):** a
 > full-codebase accuracy review fixed, among others: op-amp VCCS polarity (was
 > inverted — clipping/comparator behavior changed), Koren triode ×2 factor (triode
 > stages now run at datasheet current/gm — Pultec/SeriesOfTubes gain staging
@@ -24,34 +24,52 @@ generates Rust code from the netlist via the codegen pipeline, compiles it
 with `rustc -O`, runs it as a subprocess, and compares the output samples
 against ngspice with `.OPTIONS INTERP` for sample alignment.
 
-**Last re-baselined: 2026-04-08** (full sweep, 19/19 passing in 4.78 s).
+**Last re-baselined: 2026-07-18** (HEAD `b421358`, ngspice-42, single-VIN
+Thevenin-PWL decks, ngspice `reltol=1e-4`). The suite is now 22 tests (18
+gated on ngspice + 4 unit/harness tests). Every gated test carries a cited
+measured value in its gate comment (`crates/melange-validate/tests/spice_validation.rs`);
+the table below is derived from those comments. Gains, settle windows, and
+per-metric gates were all tightened in the same pass.
 
-| Circuit | Correlation | Norm RMS | THD Err | Notes |
-|---------|-------------|----------|---------|-------|
-| RC lowpass | 0.99999995 | 0.030% | 0.00 dB | Linear reference, SNR 70.4 dB |
-| Diode clipper | 0.99999990 | 0.071% | 0.00 dB | 1N4148 antiparallel, SNR 63.0 dB |
-| Antiparallel diodes (2D) | 0.99999985 | 0.058% | 0.03 dB | Two-diode soft clipper, SNR 64.8 dB |
-| BJT common-emitter | 0.99970213 | 5.63% | — | BC547 NPN, gain ~210×, SNR 23.8 dB |
-| Op-amp inverting | 1.00000000 | 0.000% | 0.00 dB | Boyle macromodel, SNR 130.7 dB |
-| JFET common-source | 0.99940687 | 3.47% | 4.70 dB | N-channel, ngspice BETA→IDSS |
-| MOSFET common-source | 0.99999997 | 0.029% | — | N-channel Level 1, SNR 70.8 dB |
-| Tube Screamer (TS808) | 0.99999064 | 0.43% | 0.04 dB | Op-amp + 1N4148 clipping, SNR 47.2 dB |
-| Tube Screamer (wiper) | 0.99998416 | 0.59% | 0.04 dB | TS808 + 100K wiper at pos=0.85 |
-| Wurli preamp | 0.99999998 | 0.014% | — | 2× 2N5089, M=5, gain 39.9×, SNR 69.2 dB |
-| Neve 1073 output (BA283 AM) | 0.99609584 | 14.4% | — | 3 BJT + LO1166 transformer, gain 3.7×, marginal |
+| Circuit | Correlation | Norm RMS | Peak err | Notes |
+|---------|-------------|----------|----------|-------|
+| RC lowpass (1 kHz sine) | > 0.99999 | < 0.05% | — | Linear reference (strict-linear gate) |
+| RC lowpass step (500 Hz square) | 0.99999924 | 0.132% | 6.9e-3 V | Onset matched via `input[0]=0` |
+| RC lowpass chirp (100 Hz→10 kHz) | > 0.9999 | < 2% | — | Trapezoidal HF-warping gate (no cited point measurement) |
+| Op-amp inverting (gain −10) | > 0.99999 | < 0.05% | — | VCCS model, M=0 linear |
+| Diode clipper | 0.99999991 | 0.069% | 1.6e-3 V | 1N4148 antiparallel, THD err 0.00 dB |
+| Antiparallel diodes (2D) | 0.99999983 | 0.059% | 1.2e-3 V | THD err 0.03 dB |
+| Diode clipper silence→signal | 0.99999934 | 0.125% | 1.43e-2 V | NR startup transient |
+| BJT common-emitter | 0.99964880 | 4.26% | 0.164 V | BC547, gain ratio 1.024, 3 ms settle |
+| JFET common-source | 0.99940687 | 3.47% | 4.6e-6 V | THD err 4.70 dB |
+| MOSFET common-source | 0.99999997 | 0.029% | 2.7e-6 V | Level 1, small-signal |
+| Tube Screamer (TS808) | 0.99999032 | 0.442% | 9.9e-3 V | Op-amp + 1N4148, THD err 0.04 dB |
+| Tube Screamer (wiper, pos=0.85) | 0.99838696 | 5.71% | — | Volume divider + simplified tone; THD err 0.11 dB |
+| Wurli preamp | 0.99999734 | 0.235% | 1.28e-3 V | 2× 2N5089, M=5, gain ratio 1.0006, 10 ms settle |
+| Neve 1073 output (BA283 AM) | 0.99999952 | 0.107% | 1.06e-4 V | 3 BJT + LO1166 xfmr, gain 6.7×, ratio 1.0000, 10 ms settle |
+| Neve 1073 preamp (BA283 AV) | 1.00000000 | 0.0346% | 1.12e-4 V | 3× BC184C, gain 26.0×, ratio 0.9996, 64 ms settle |
+| Pot static off-nominal | 0.99999995 | 0.0374% | 4.06e-3 V | `.pot` rebuild vs fixed-R deck, THD err 0.01 dB |
+| Pot modulation (5 kHz R sweep) | 0.99991763 | 1.28% | 3.93e-2 V | vs native ngspice B-source; residual is per-sample ZOH of R(t) |
 
-Additional smoke tests (no SPICE comparison):
+Two rows corrected the largest stale figures from the 2026-04-08 baseline:
 
-| Test | Correlation | RMS Error |
-|---|---|---|
-| Diode clipper silence→signal | 0.99999933 | 5.84e-4 |
-| RC lowpass chirp (100Hz→10kHz, 100ms) | 0.99994732 | 3.36e-3 |
-| RC lowpass step response (500Hz square) | 0.99968801 | 2.24e-2 |
+- **Neve 1073 output** was recorded at corr 0.9961 / rms 14.4% ("marginal").
+  That predated the deck double-load fix — the deck baked in a `VIN in_src` +
+  `R_src in_src in` Thevenin pair that escaped both the harness VIN strip and
+  the Thevenin inject (n+ was `in_src`, not `in`), leaving a second 1-ohm
+  shunt at the input node on both sides. Removing it doubled the drive
+  (gain 3.4× → 6.7×) at corr 0.99999952.
+- **Neve 1073 preamp** was recorded at corr 0.99999 / rms 0.53%. Most of that
+  rms was a harness artifact: the melange output was DC-blocked twice (once
+  inside the generated code, once in the test) while the SPICE side was
+  blocked once. Removing the second application dropped rms to 0.0346% at
+  corr 1.00000000.
 
-Tests excluded from this baseline: `test_klon_centaur_vs_spice` (under
-investigation in a parallel session), `test_neve_1073_preamp_vs_spice`
-(unstable, hung the runner). Re-include them via `--include-ignored` once
-the underlying circuits stabilize.
+The pot static / pot modulation rows are new tests (first armed 2026-07-18).
+The static off-nominal test sits at the 0.037% floor — the same floor as the
+nominal-position diode tests — which confirms the 1.28% modulation residual
+is R(t) zero-order-hold discretization at 5 kHz mod / 48 kHz fs, not the
+`.pot` rebuild mechanism.
 
 ## Device Model Features (All Implemented 2026-03-18)
 

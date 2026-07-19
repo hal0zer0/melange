@@ -357,11 +357,19 @@ VS/VCVS rows, adds `.runtime` voltage-source fields, then Newton-iterates
   stay on the warmup loop.
 - **No parasitic-BJT internal-node expansion on the DK path** (those
   nodes are ill-conditioning risks outside the MVP).
-- **Inductor-bearing circuits converge to `process_sample(0.0)`
-  equilibrium**, not the inductor-short DC OP that `dc_op.rs` would
-  compute. Inductor-free circuits match compile-time `DC_OP` bitwise.
-  The delta is the companion shunt `g_eq = T/(2L)` that's already baked
-  into `G`.
+- **DC-carrying inductors (plate chokes, DC-biased transformer windings)
+  are refused, not approximated.** The recompute converges to the exact
+  compile-time `DC_OP` for inductor-free circuits — and for windings that
+  carry no DC current, where `|V_L| < 1 mV` — matching bitwise. But a
+  winding with a nonzero DC voltage drop has no self-consistent state
+  under the const-`G` companion shunt (`g_eq = T/(2L)`, baked into `G`),
+  so the writeback guard in `dc_op_emitter.rs`
+  (`emit_dc_op_writeback_dk`) checks every winding's `|V_L|` after
+  convergence: on any `|V_L| > 1 mV` it bumps `diag_nr_max_iter_count`
+  and returns with state **untouched**, rather than writing back a false
+  "settled" state that would slew audibly. Callers then fall back to the
+  `WARMUP_SAMPLES_RECOMMENDED` loop, which lets the true companion
+  history build up over the warmup window.
 - **Nodal full-LU path** (pultec, 4kbuscomp, VCR ALC, wurli power amp)
   ships a stub body that bumps `diag_nr_max_iter_count` and returns —
   **this is the permanent path for nodal-routed circuits**, not a
