@@ -262,8 +262,15 @@ impl RustEmitter {
                 .collect();
             ctx.insert("s_ni_be_rows", &s_ni_be_rows);
 
-            // RHS_CONST_BE (backward Euler: DC sources x1)
-            if ir.has_dc_sources && !ir.matrices.rhs_const_be.is_empty() {
+            // RHS_CONST_BE (backward Euler: DC sources x1).
+            //
+            // Guard on `has_dc_sources` ONLY — must stay symmetric with the
+            // template pair: constants.rs.tera emits the constant under
+            // `{% if has_dc_sources %}` (inside `has_be_fallback`) and
+            // process_sample.rs.tera references it under the same condition.
+            // A short/empty `rhs_const_be` vec is padded with zeros below so
+            // the constant is always well-formed when the guard fires.
+            if ir.has_dc_sources {
                 let rhs_const_be_values = (0..n)
                     .map(|i| {
                         if i < ir.matrices.rhs_const_be.len() {
@@ -493,10 +500,6 @@ impl RustEmitter {
             ir.pots.iter().map(|p| fmt_f64(1.0 / p.g_nominal)).collect();
         ctx.insert("pot_defaults", &pot_defaults);
 
-        // Pot indices for template iteration
-        let pot_indices: Vec<usize> = (0..num_pots).collect();
-        ctx.insert("pot_indices", &pot_indices);
-
         if ir.has_dc_op {
             let dc_op_values = ir
                 .dc_operating_point
@@ -552,14 +555,17 @@ impl RustEmitter {
 
         ctx.insert("dc_block", &ir.dc_block);
 
-        // `current_sample_rate` is read by rebuild_matrices (pots/switches)
-        // AND by the op-amp slew-rate limiter's per-sample dt in
-        // process_sample.rs.tera. Emit the field whenever either consumer
+        // `current_sample_rate` is read by rebuild_matrices (pots/switches),
+        // by the op-amp slew-rate limiter's per-sample dt, AND by the device
+        // self-heating thermal update's dt (all in process_sample.rs.tera /
+        // emit_thermal_tj_advance). Emit the field whenever any consumer
         // exists — mirrors the nodal-emitter fix (7e32bf8): a DK circuit
-        // with a finite-SR op-amp and no pots would otherwise fail rustc.
+        // with a finite-SR op-amp (or a thermal device) and no pots would
+        // otherwise fail rustc.
         let needs_current_sr = num_pots > 0
             || num_switches > 0
-            || ir.opamps.iter().any(|oa| oa.sr.is_finite());
+            || ir.opamps.iter().any(|oa| oa.sr.is_finite())
+            || num_thermal_devices > 0;
         ctx.insert("needs_current_sr", &needs_current_sr);
 
         // DK rail-mode consumption: the DK path implements only the Hard
@@ -1790,9 +1796,11 @@ impl RustEmitter {
         // on every knob move causes an audible click from the half-band filter
         // ringing through; zeroing dc_block_x_prev/y_prev produces an instant DC
         // step and multi-second HPF re-settle. The `dc_block_r` coefficient depends
-        // only on the sample rate (handled by set_sample_rate), not on pots/switches,
-        // so it does not need recomputing here either. (Legitimate filter resets still
-        // happen in reset() and set_sample_rate().)
+        // only on the sample rate, not on pots/switches, so it is not recomputed
+        // here — set_sample_rate recomputes it on a genuine rate change (in BOTH
+        // the pot/switch and no-pot template variants) and restores DC_BLOCK_R on
+        // same-rate calls. (Legitimate filter resets happen only on a genuine
+        // rate change in set_sample_rate(), plus reset()'s blocker reseed.)
 
         code.push_str("    }\n");
         code
@@ -2282,15 +2290,16 @@ impl RustEmitter {
         ctx.insert("num_pots", &num_pots);
         let num_switches = ir.switches.len();
         ctx.insert("num_switches", &num_switches);
-        let pot_defaults: Vec<String> =
-            ir.pots.iter().map(|p| fmt_f64(1.0 / p.g_nominal)).collect();
-        ctx.insert("pot_defaults", &pot_defaults);
+
+        // Runtime voltage sources (.runtime directive): the BE-fallback RHS
+        // in process_sample.rs.tera stamps the same rows/values as build_rhs
+        // (VS algebraic rows are integration-scheme-independent).
+        ctx.insert("runtime_sources", &ir.runtime_sources);
 
         // Per-sample SM pot corrections removed — pot changes are handled by
         // per-block rebuild_matrices (Batch D). No sm_scale_lines /
         // a_neg_correction / s_correction / sni_correction context vars are
-        // emitted; the templates never referenced them. `use_k_eff` is left
-        // undefined, which the process_sample template treats as false.
+        // emitted; the templates never referenced them.
 
         // MOSFET body effect: compute VT_eff from v_pred before NR (DK path only)
         let mut body_effect_update = String::new();
@@ -2352,7 +2361,7 @@ impl RustEmitter {
                 {
                     let s = slot.start_idx;
                     let s1 = s + 1;
-                    let tj_advance = emit_thermal_tj_advance(dev_num, bp.cth, ir.solver_config.oversampling_factor);
+                    let tj_advance = emit_thermal_tj_advance(dev_num, bp.cth);
                     // Extract Ic, Ib from converged i_nl; compute Vbe, Vbc from final v
                     thermal_update.push_str(&format!(
                             "    {{ // BJT {dev_num} self-heating thermal update\n\
@@ -2375,7 +2384,7 @@ impl RustEmitter {
                 }
                 DeviceParams::Diode(dp) if dp.has_self_heating() => {
                     let s = slot.start_idx;
-                    let tj_advance = emit_thermal_tj_advance(dev_num, dp.cth, ir.solver_config.oversampling_factor);
+                    let tj_advance = emit_thermal_tj_advance(dev_num, dp.cth);
                     // SPICE3f5 diode temperature scaling includes the emission
                     // coefficient N:
                     //   IS(T) = IS_NOM · (Tj/TAMB)^(XTI/N)
@@ -2410,7 +2419,7 @@ impl RustEmitter {
                     // site in `nr_helpers.rs`, not here.
                     let s = slot.start_idx;
                     let s1 = s + 1;
-                    let tj_advance = emit_thermal_tj_advance(dev_num, tp.cth, ir.solver_config.oversampling_factor);
+                    let tj_advance = emit_thermal_tj_advance(dev_num, tp.cth);
                     thermal_update.push_str(&format!(
                             "    {{ // Triode {dev_num} self-heating thermal update\n\
                              \x20       let ip = i_nl[{s}];\n\
@@ -2474,8 +2483,6 @@ impl RustEmitter {
                     m.insert("out_idx", oa.n_out_idx.to_string());
                     m.insert("lo", fmt_bound(oa.vclamp_lo));
                     m.insert("hi", fmt_bound(oa.vclamp_hi));
-                    m.insert("has_internal", "".to_string());
-                    m.insert("int_idx", "0".to_string());
                     m
                 })
                 .collect();
@@ -5293,21 +5300,20 @@ pub(super) fn parasitic_r_p_dk(ir: &CircuitIR, i: usize, j: usize) -> f64 {
 ///
 /// `dt` is the INTERNAL (oversampled) sample period: this block lives inside
 /// the templated `process_sample`, which the oversampling wrapper calls once
-/// per internal sample — so `1.0 / SAMPLE_RATE` would heat oversampled
-/// circuits `factor`× too fast. The `INTERNAL_SAMPLE_RATE` constant is only
-/// emitted by constants.rs.tera when `oversampling_factor > 1`, so fall back
-/// to `SAMPLE_RATE` (identical value) at 1× — same convention as the nodal
-/// emitter's thermal block.
+/// per internal sample — so a host-rate dt would heat oversampled circuits
+/// `factor`× too fast. The rate is read from `state.current_sample_rate`
+/// (host-rate semantics on the DK path, kept live by `set_sample_rate`) ×
+/// OVERSAMPLING_FACTOR, NOT the baked SAMPLE_RATE/INTERNAL_SAMPLE_RATE
+/// consts — a 96 kHz host running a 44.1k-compiled circuit would otherwise
+/// integrate the thermal ODE ~2.2× too fast per second of audio. The
+/// `needs_current_sr` gate in emit_state includes thermal devices so the
+/// field always exists here.
 ///
 /// When CTH ≤ 0 the thermal pole is instantaneous — emit the quasi-static
 /// form `Tj = Tss` directly. Both forms keep the [200, 500] K runaway clamp.
-fn emit_thermal_tj_advance(dev_num: usize, cth: f64, oversampling_factor: usize) -> String {
+fn emit_thermal_tj_advance(dev_num: usize, cth: f64) -> String {
     if cth > 0.0 {
-        let dt_expr = if oversampling_factor > 1 {
-            "1.0 / INTERNAL_SAMPLE_RATE"
-        } else {
-            "1.0 / SAMPLE_RATE"
-        };
+        let dt_expr = "1.0 / (state.current_sample_rate * OVERSAMPLING_FACTOR as f64)";
         format!(
             "        let dt = {dt_expr};\n\
              \x20       let tss = DEVICE_{dev_num}_TAMB + p * DEVICE_{dev_num}_RTH;\n\

@@ -1827,3 +1827,454 @@ fn settle_nodal_path_falls_back_to_warmup() {
         String::from_utf8_lossy(&run.stdout)
     );
 }
+
+// -----------------------------------------------------------------------------
+// Phase E runtime-recompute bugfix batch (2026-07-18)
+//
+// Regression guards for six verified bugs in the emitted `recompute_dc_op`:
+//
+//   1. BE-primary RHS halving — the node-row `b_dc[i] *= 0.5` derives from
+//      the trapezoidal identity `A − A_neg = 2G`; under BE-primary
+//      integration RHS_CONST is the ×1 BE build and `A − A_neg = G`, so
+//      halving converged to a fixed point with HALF the DC current-source
+//      injection.
+//   2. Body-effect VT frozen — a GAMMA-carrying MOSFET with Vsb ≠ 0
+//      recomputed to a no-body-effect OP because `state.device_N_vt` was
+//      never refreshed inside the DC-OP NR loop (offline solver and
+//      transient NR both update vt_eff per iteration / per sample).
+//   3. Inductor writeback zeroing — zero winding history is only an
+//      equilibrium when V_L = 0; a DC-biased choke got a false "settled"
+//      state. Now the writeback refuses (bumps `diag_nr_max_iter_count`)
+//      when any winding's |V_L| > 1 mV, so `settle_dc_op` runs warmup.
+//   4. RELTOL — convergence was absolute-only (`step < 1e-9`), which
+//      false-fails 300 V circuits at the LU round-off floor. Now mirrors
+//      dc_op.rs: `|Δ| < 1e-6·|v| + 1e-9`.
+//   5. Voltage-row classification — damping / ±50 V clamp swept VS/VCVS
+//      branch-current rows (amperes); now restricted to node rows.
+//   6. Linear singular path — bumped only `diag_singular_matrix_count`,
+//      but `settle_dc_op` watches `diag_nr_max_iter_count`; now bumps both
+//      so the warmup fallback engages.
+// -----------------------------------------------------------------------------
+
+/// Like `generate_dk` but with backward-Euler-primary integration, so the
+/// baked `RHS_CONST` is the ×1 BE build (`A − A_neg = G` on all rows).
+fn generate_dk_be(spice: &str) -> String {
+    let netlist = Netlist::parse(spice).expect("parse");
+    let mut mna = MnaSystem::from_netlist(&netlist).expect("mna");
+    if mna.n > 0 {
+        mna.g[0][0] += 1.0;
+    }
+    let kernel = DkKernel::from_mna(&mna, 44100.0).expect("kernel");
+    let cfg = CodegenConfig {
+        circuit_name: "dc_op_recompute_be_test".to_string(),
+        sample_rate: 44100.0,
+        input_node: 0,
+        output_nodes: vec![if kernel.n > 1 { 1 } else { 0 }],
+        input_resistance: 1.0,
+        emit_dc_op_recompute: true,
+        backward_euler: true,
+        ..CodegenConfig::default()
+    };
+    CodeGenerator::new(cfg)
+        .generate(&kernel, &mna, &netlist)
+        .expect("codegen")
+        .code
+}
+
+/// Shared rustc-compile-and-run harness for the bugfix tests (same pattern
+/// as the E.4–E.8 tests above, factored out to keep the additions readable).
+fn compile_and_run(code: &str, main: &str, tag: &str) {
+    use std::io::Write;
+
+    let full = format!("{}{}", code, main);
+    let tmp = std::env::temp_dir();
+    let src = tmp.join(format!("melange_dc_op_recompute_{tag}.rs"));
+    let bin = tmp.join(format!("melange_dc_op_recompute_{tag}"));
+    std::fs::File::create(&src)
+        .unwrap()
+        .write_all(full.as_bytes())
+        .unwrap();
+    let compile = std::process::Command::new("rustc")
+        .args([
+            src.to_str().unwrap(),
+            "-o",
+            bin.to_str().unwrap(),
+            "--edition",
+            "2021",
+        ])
+        .output()
+        .expect("rustc");
+    let _ = std::fs::remove_file(&src);
+    if !compile.status.success() {
+        let _ = std::fs::remove_file(&bin);
+        panic!(
+            "compile failed ({tag}):\n{}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+    }
+    let run = std::process::Command::new(&bin).output().expect("run");
+    let _ = std::fs::remove_file(&bin);
+    assert!(
+        run.status.success(),
+        "binary failed ({tag}):\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&run.stdout).contains("ok"),
+        "unexpected output ({tag}): {}",
+        String::from_utf8_lossy(&run.stdout)
+    );
+}
+
+/// Extract the `recompute_dc_op` body window (up to `settle_dc_op`, which is
+/// always emitted right after it) so string assertions don't false-match on
+/// the settle wrapper or other methods.
+fn recompute_body(code: &str) -> &str {
+    let start = code
+        .find("pub fn recompute_dc_op")
+        .expect("recompute_dc_op must be emitted");
+    let rest = &code[start..];
+    let end = rest
+        .find("pub fn settle_dc_op")
+        .unwrap_or(rest.len().min(24_000));
+    &rest[..end]
+}
+
+// --- Fix 1: BE-primary RHS halving ------------------------------------------
+
+/// DC current source into a diode-clamped node. Under BE-primary the halving
+/// bug converged this to the OP of a HALF-strength current source (diode Vf
+/// low by ~n·Vt·ln 2, resistor-dominated nodes at half voltage).
+const BE_ISRC_NETLIST: &str = "\
+BE-primary DC current source bias — fix 1 regression
+R_in in 0 10k
+I1 mid 0 DC 1m
+R1 mid 0 4.7k
+D1 mid 0 DMOD
+C1 mid out 100n
+R2 out 0 100k
+.model DMOD D(IS=2.5e-9 N=1.8)
+";
+
+/// BE-primary emission must NOT halve node rows (RHS_CONST is already ×1);
+/// trapezoidal emission must keep the halving (RHS_CONST is ×2).
+#[test]
+fn fix1_be_primary_omits_node_row_halving() {
+    let be_code = generate_dk_be(BE_ISRC_NETLIST);
+    assert!(
+        !be_code.contains("b_dc[i] *= 0.5"),
+        "BE-primary recompute must not halve node rows of b_dc"
+    );
+    assert!(
+        be_code.contains("BE-primary: RHS_CONST is the"),
+        "BE-primary recompute should carry the explanatory comment"
+    );
+
+    // Trap-primary control: the halving must remain.
+    let trap_code = generate_dk(DIODE_VCC_NETLIST, true);
+    assert!(
+        trap_code.contains("b_dc[i] *= 0.5"),
+        "trapezoidal recompute must keep the node-row halving"
+    );
+}
+
+/// Behavioral: BE-primary recompute from a cold start must converge to the
+/// baked `DC_OP` constants (computed by the offline, integration-agnostic
+/// dc_op.rs solver). With the halving bug the mid node sat at the OP of a
+/// 0.5 mA source instead of 1 mA — a multi-percent relative error.
+#[test]
+fn fix1_be_primary_recompute_matches_baked_dc_op() {
+    let code = generate_dk_be(BE_ISRC_NETLIST);
+
+    let main = "\n\nfn main() {\n\
+        let mut state = CircuitState::default();\n\
+        let before: [f64; N] = *state.dc_op();\n\
+        for i in 0..N { state.v_prev[i] = 0.0; }\n\
+        for i in 0..M { state.i_nl_prev[i] = 0.0; state.i_nl_prev_prev[i] = 0.0; }\n\
+        state.recompute_dc_op();\n\
+        assert_eq!(state.diag_nr_max_iter_count, 0,\n\
+            \"BE recompute must converge, counter={}\", state.diag_nr_max_iter_count);\n\
+        let after: [f64; N] = *state.dc_op();\n\
+        for (i, &v) in after.iter().enumerate() {\n\
+            assert!(v.is_finite(), \"non-finite node {}: {}\", i, v);\n\
+        }\n\
+        for i in 0..N {\n\
+            let denom = after[i].abs().max(before[i].abs()).max(1.0);\n\
+            let rel = (after[i] - before[i]).abs() / denom;\n\
+            assert!(rel < 1e-6,\n\
+                \"BE-primary DC current source OP mismatch: node {} before={} after={} rel={}\",\n\
+                i, before[i], after[i], rel);\n\
+        }\n\
+        println!(\"ok\");\n\
+    }\n";
+
+    compile_and_run(&code, main, "fix1_be_isrc");
+}
+
+// --- Fix 2: MOSFET body-effect VT frozen ------------------------------------
+
+/// NMOS source follower with source degeneration: the source rides several
+/// volts above the grounded bulk, so GAMMA raises VT_eff by ~0.6 V and the
+/// true OP sits ~0.6 V below the no-body-effect answer. With the frozen-VT
+/// bug the runtime recompute converged to the no-body-effect OP.
+const NMOS_BODY_EFFECT_NETLIST: &str = "\
+NMOS source follower with body effect — fix 2 regression
+R_in_guard in 0 1meg
+VCC vdd 0 DC 12
+RG1 vdd g 1meg
+RG2 g 0 1meg
+M1 vdd g s 0 MMOD
+RS_deg s 0 10k
+Cout s out 1u
+Rload out 0 1meg
+.model MMOD NMOS(KP=2e-3 VTO=1.0 LAMBDA=0.01 GAMMA=0.5 PHI=0.6)
+";
+
+/// The DC-OP NR loop must emit the per-iteration vt_eff refresh for
+/// body-effect MOSFETs (mirroring the transient emission, with `v_node`
+/// standing in for `v_pred`).
+#[test]
+fn fix2_body_effect_vt_refresh_emitted() {
+    let code = generate_dk(NMOS_BODY_EFFECT_NETLIST, true);
+    let body = recompute_body(&code);
+    assert!(
+        body.contains("body effect (per-iteration vt_eff)"),
+        "DC-OP NR loop must refresh body-effect VT per iteration"
+    );
+    assert!(
+        body.contains("self.device_0_vt = DEVICE_0_VT + (1.0) * DEVICE_0_GAMMA"),
+        "vt refresh must recompute from the nominal VT + GAMMA term"
+    );
+}
+
+/// Behavioral: runtime recompute must land on the body-effect OP the offline
+/// solver baked into `DC_OP`, and the converged `device_0_vt` must show the
+/// body-effect shift (VT_eff > VTO for an NMOS with elevated source).
+#[test]
+fn fix2_body_effect_recompute_matches_baked_dc_op() {
+    let code = generate_dk(NMOS_BODY_EFFECT_NETLIST, true);
+
+    let main = "\n\nfn main() {\n\
+        let mut state = CircuitState::default();\n\
+        let before: [f64; N] = *state.dc_op();\n\
+        // Cold start: wrong voltages AND nominal (no-body-effect) VT.\n\
+        for i in 0..N { state.v_prev[i] = 0.0; }\n\
+        for i in 0..M { state.i_nl_prev[i] = 0.0; state.i_nl_prev_prev[i] = 0.0; }\n\
+        state.device_0_vt = DEVICE_0_VT;\n\
+        state.recompute_dc_op();\n\
+        assert_eq!(state.diag_nr_max_iter_count, 0,\n\
+            \"body-effect recompute must converge, counter={}\", state.diag_nr_max_iter_count);\n\
+        let after: [f64; N] = *state.dc_op();\n\
+        for (i, &v) in after.iter().enumerate() {\n\
+            assert!(v.is_finite(), \"non-finite node {}: {}\", i, v);\n\
+        }\n\
+        for i in 0..N {\n\
+            let denom = after[i].abs().max(before[i].abs()).max(1.0);\n\
+            let rel = (after[i] - before[i]).abs() / denom;\n\
+            assert!(rel < 1e-6,\n\
+                \"body-effect OP mismatch: node {} before={} after={} rel={}\",\n\
+                i, before[i], after[i], rel);\n\
+        }\n\
+        // The converged VT must carry the body-effect shift: source sits\n\
+        // volts above bulk, so VT_eff = VTO + GAMMA(sqrt(PHI+Vsb)-sqrt(PHI))\n\
+        // must exceed the nominal VTO by a clearly-nonzero margin.\n\
+        assert!(state.device_0_vt > DEVICE_0_VT + 0.05,\n\
+            \"expected body-effect VT shift, got vt_eff={} vs nominal {}\",\n\
+            state.device_0_vt, DEVICE_0_VT);\n\
+        println!(\"ok\");\n\
+    }\n";
+
+    compile_and_run(&code, main, "fix2_body_effect");
+}
+
+// --- Fix 3: DC-biased winding honest-failure guard ---------------------------
+
+/// Choke carrying DC current: at the companion-shunt fixed point the winding
+/// drops V_L = I·2L/T (volts, not microvolts), so the zero-history writeback
+/// would be a false equilibrium. The guard must refuse and leave state
+/// untouched; `settle_dc_op` must fall back to warmup.
+const DC_CHOKE_NETLIST: &str = "\
+DC-biased choke — fix 3 honest-failure regression
+R_in in 0 10k
+VCC vcc 0 DC 10
+L1 vcc mid 100m
+Rload mid 0 1k
+C1 mid out 1u
+R2 out 0 100k
+";
+
+/// AC-coupled shunt inductor with zero DC bias: V_L = 0 at the fixed point,
+/// so the guard must NOT fire and the writeback must proceed as before.
+const AC_CHOKE_NETLIST: &str = "\
+AC-coupled choke with no DC bias — fix 3 control (guard must not fire)
+R_in in 0 10k
+C1 in mid 100n
+L1 mid 0 100m
+R1 mid out 1k
+R2 out 0 100k
+";
+
+/// recompute_dc_op on a DC-biased choke must refuse: state untouched,
+/// `diag_nr_max_iter_count` bumped exactly once (the settle failure signal).
+#[test]
+fn fix3_dc_biased_choke_recompute_refuses() {
+    let code = generate_dk(DC_CHOKE_NETLIST, true);
+    // Emission check: the guard is present and precedes the writeback.
+    let body = recompute_body(&code);
+    assert!(
+        body.contains("Inductor equilibrium guard"),
+        "recompute body must carry the winding V_L guard"
+    );
+    assert!(
+        body.contains("max_winding_v > 1e-3"),
+        "guard must compare winding voltage against the 1 mV tolerance"
+    );
+
+    let main = "\n\nfn main() {\n\
+        let mut state = CircuitState::default();\n\
+        let before: [f64; N] = *state.dc_op();\n\
+        let v_prev_before: [f64; N] = state.v_prev;\n\
+        let c0 = state.diag_nr_max_iter_count;\n\
+        state.recompute_dc_op();\n\
+        assert_eq!(state.diag_nr_max_iter_count, c0 + 1,\n\
+            \"DC-biased choke: recompute must report failure exactly once, got {} -> {}\",\n\
+            c0, state.diag_nr_max_iter_count);\n\
+        for i in 0..N {\n\
+            assert_eq!(state.dc_op()[i], before[i],\n\
+                \"refused recompute must not touch dc_operating_point[{}]\", i);\n\
+            assert_eq!(state.v_prev[i], v_prev_before[i],\n\
+                \"refused recompute must not touch v_prev[{}]\", i);\n\
+        }\n\
+        println!(\"ok\");\n\
+    }\n";
+
+    compile_and_run(&code, main, "fix3_dc_choke_refuse");
+}
+
+/// settle_dc_op on the DC-biased choke must detect the refusal and run the
+/// warmup loop, which DOES reach the true (inductor-short) OP: mid node
+/// within a volt of the 10 V supply after settling.
+#[test]
+fn fix3_dc_biased_choke_settle_falls_back_to_warmup() {
+    let code = generate_dk(DC_CHOKE_NETLIST, true);
+
+    let main = "\n\nfn main() {\n\
+        let mut state = CircuitState::default();\n\
+        // Cold start so the warmup fallback has real work to do.\n\
+        for i in 0..N { state.v_prev[i] = 0.0; }\n\
+        let c0 = state.diag_nr_max_iter_count;\n\
+        state.settle_dc_op();\n\
+        assert!(state.diag_nr_max_iter_count > c0,\n\
+            \"settle must have detected the recompute refusal\");\n\
+        for (i, &v) in state.v_prev.iter().enumerate() {\n\
+            assert!(v.is_finite(), \"non-finite v_prev[{}] after settle: {}\", i, v);\n\
+        }\n\
+        // Warmup reaches the true DC OP: the choke is a DC short, so the\n\
+        // mid node settles at the 10 V supply (tau = L/R = 0.1 ms << warmup).\n\
+        let v_mid = state.v_prev[NODE_MID];\n\
+        assert!((v_mid - 10.0).abs() < 1.0,\n\
+            \"warmup fallback should reach inductor-short OP at mid ~10 V, got {}\", v_mid);\n\
+        println!(\"ok\");\n\
+    }\n";
+
+    compile_and_run(&code, main, "fix3_dc_choke_settle");
+}
+
+/// Control: an unbiased inductor (V_L = 0 at the fixed point) must recompute
+/// exactly as before — no guard trip, writeback runs (v_prev re-seeded).
+#[test]
+fn fix3_unbiased_choke_recompute_still_succeeds() {
+    let code = generate_dk(AC_CHOKE_NETLIST, true);
+
+    let main = "\n\nfn main() {\n\
+        let mut state = CircuitState::default();\n\
+        // Dirty v_prev so we can observe the writeback actually running.\n\
+        for i in 0..N { state.v_prev[i] = 1.0; }\n\
+        let c0 = state.diag_nr_max_iter_count;\n\
+        state.recompute_dc_op();\n\
+        assert_eq!(state.diag_nr_max_iter_count, c0,\n\
+            \"unbiased choke must not trip the winding guard\");\n\
+        for i in 0..N {\n\
+            assert!(state.v_prev[i].is_finite());\n\
+            assert_eq!(state.v_prev[i], state.dc_op()[i],\n\
+                \"writeback must have run (v_prev re-seeded at node {})\", i);\n\
+            assert!(state.v_prev[i].abs() < 1e-9,\n\
+                \"source-free circuit DC OP must be ~0 at node {}, got {}\", i, state.v_prev[i]);\n\
+        }\n\
+        println!(\"ok\");\n\
+    }\n";
+
+    compile_and_run(&code, main, "fix3_ac_choke_ok");
+}
+
+// --- Fix 4: RELTOL convergence -----------------------------------------------
+
+/// The NR loop must emit the SPICE-style per-variable convergence check
+/// `|delta| < RELTOL * |v| + TOL` with RELTOL mirroring dc_op.rs (1e-6).
+#[test]
+fn fix4_reltol_convergence_emitted() {
+    let code = generate_dk(SOT_STAGE_NETLIST, true);
+    let body = recompute_body(&code);
+    assert!(
+        body.contains("const RELTOL: f64 = 1e-6;"),
+        "NR loop must define RELTOL = 1e-6 (mirrors dc_op.rs reltol)"
+    );
+    assert!(
+        body.contains("RELTOL * v_node[a].abs() + TOL"),
+        "convergence must be the per-variable |delta| < RELTOL*|v| + TOL check"
+    );
+    assert!(
+        !body.contains("step_max < TOL"),
+        "absolute-only step_max check must be gone"
+    );
+}
+
+// --- Fix 5: voltage-row classification ---------------------------------------
+
+/// DIODE_VCC_NETLIST has 4 circuit nodes + 1 VS extension row (N = 5). The
+/// damping scan and the damp+clamp application must sweep only the 4 node
+/// rows; the VS branch-current row (amperes) is applied undamped.
+#[test]
+fn fix5_damping_restricted_to_node_rows() {
+    let code = generate_dk(DIODE_VCC_NETLIST, true);
+    let body = recompute_body(&code);
+    let damp_start = body
+        .find("Flat damping")
+        .expect("damping block must be emitted");
+    let window = &body[damp_start..];
+    assert!(
+        window.contains("for a in 0..4 {"),
+        "damping max-delta scan must sweep node rows only (0..4 for this netlist)"
+    );
+    assert!(
+        window.contains("let limited = if a < 4 {"),
+        "damp+clamp must apply to node rows only; VS rows get the raw delta"
+    );
+    assert!(
+        window.contains("mirrors dc_op.rs is_voltage_row"),
+        "emitted comment should cite the offline classification it mirrors"
+    );
+}
+
+// --- Fix 6: linear singular path must trip the settle contract ---------------
+
+/// The linear (M == 0) singular branch must bump `diag_nr_max_iter_count`
+/// (the signal `settle_dc_op` watches) in addition to the singular counter,
+/// so the warmup fallback engages instead of silently proceeding.
+#[test]
+fn fix6_linear_singular_bumps_settle_signal() {
+    let code = generate_dk(REGRESSION_NETLIST, true);
+    let body = recompute_body(&code);
+    // Linear-only circuit: the singular branch is the only failure path.
+    let sing = body
+        .find("self.diag_singular_matrix_count += 1;")
+        .expect("linear path must keep the singular counter");
+    let after_sing = &body[sing..];
+    let ret = after_sing.find("return;").expect("singular branch returns");
+    assert!(
+        after_sing[..ret].contains("self.diag_nr_max_iter_count += 1;"),
+        "linear singular branch must also bump diag_nr_max_iter_count \
+         (settle_dc_op's failure signal) before returning"
+    );
+}

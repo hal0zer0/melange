@@ -262,6 +262,29 @@ pub(super) fn validate_positive_finite(value: f64, param_label: &str) -> Result<
 ///
 /// Returns (s_be, k_be, a_neg_be, rhs_const_be) or empty vecs if BE fallback is disabled.
 /// The BE matrices use alpha_be = 1/T (instead of trapezoidal alpha = 2/T).
+///
+/// # Companion-model magnetics are NOT supported here
+///
+/// `g_matrix`/`c_matrix` are the raw MNA matrices — they carry no
+/// companion-model inductor / coupled-inductor / transformer-group stamps
+/// (the shipped trap matrices get those separately via
+/// `stamp_dk_companion_inductors`, with the trapezoidal `g_eq = T/(2L)`).
+/// Consequently the A_be/S_be built here treat companion-modeled magnetics
+/// as open circuits, and the per-sample BE RHS in process_sample.rs.tera
+/// stamps no magnetics history currents at all. Callers must therefore gate
+/// the BE fallback OFF when companion-path magnetics exist (done in
+/// `CircuitIR::from_kernel_with_dc_op`). A future BE-consistent
+/// implementation needs, per companion element:
+///   * conductance stamps with the BE companion value `g_eq = T/L`
+///     (coupled/xfmr: `T·L⁻¹` of the full inductance matrix, i.e. the
+///     half_t factors doubled) stamped into A_be — NOT the trap `T/(2L)`;
+///   * history current injection ×1 (`i_hist = i[n-1]`, not the
+///     doubled-trapezoidal `2·i[n-1]`) stamped into the BE RHS each
+///     fallback sample, plus a state-update convention that keeps the trap
+///     path's doubled history intact for the next trap sample.
+/// Augmented-inductor systems (branch rows, L in the C matrix) need none of
+/// this — `A_be = G + (1/T)·C`, `A_neg_be = (1/T)·C` is already the exact
+/// BE discretization of the branch equations.
 pub(super) fn compute_dk_be_fallback(
     g_matrix: &[f64],
     c_matrix: &[f64],

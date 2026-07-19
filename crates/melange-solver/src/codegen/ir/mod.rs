@@ -1532,6 +1532,35 @@ impl CircuitIR {
             generator_version: env!("CARGO_PKG_VERSION").to_string(),
         };
 
+        // DK BE fallback vs companion-model magnetics: the fallback matrices
+        // (`compute_dk_be_fallback`) are built from the raw MNA G/C, which do
+        // NOT carry the trapezoidal companion-model magnetics stamps that the
+        // shipped trap matrices get via `stamp_dk_companion_inductors` — and
+        // the per-sample BE RHS in process_sample.rs.tera stamps no
+        // inductor / coupled-inductor / transformer history currents. A BE
+        // fallback sample would therefore see every companion-modeled
+        // inductor as an OPEN CIRCUIT and drop its standing current. Until
+        // the fallback carries BE-consistent magnetics (g_eq = T/L, history
+        // ×1 — see the `compute_dk_be_fallback` doc), gate the fallback OFF
+        // when companion-path magnetics are present. Augmented-inductor
+        // systems (branch rows with L in the C matrix) are exact under
+        // A_be = G + (1/T)·C / A_neg_be = (1/T)·C and keep the fallback.
+        let has_companion_magnetics = !kernel.inductors.is_empty()
+            || !kernel.coupled_inductors.is_empty()
+            || !kernel.transformer_groups.is_empty();
+        if has_companion_magnetics && !config.disable_be_fallback && m > 0 && !be {
+            log::info!(
+                "DK backward-Euler fallback disabled: companion-model magnetics present \
+                 ({} inductor(s), {} coupled pair(s), {} transformer group(s)) — the BE \
+                 fallback matrices/RHS lack companion magnetics stamps and history \
+                 (mechanism: be-fallback-companion-magnetics gate; augmented-inductor \
+                 circuits are unaffected)",
+                kernel.inductors.len(),
+                kernel.coupled_inductors.len(),
+                kernel.transformer_groups.len(),
+            );
+        }
+
         let matrices = if os_factor > 1 && be {
             // BE + oversampling: build backward-Euler matrices at the
             // INTERNAL rate, mirroring the os=1 BE branch below. This branch
@@ -1590,7 +1619,10 @@ impl CircuitIR {
             let k = compute_k_from_s(&s, &kernel.n_v, &kernel.n_i, n, m);
 
             // Compute BE fallback matrices for adaptive per-sample fallback
-            let want_be_fallback = !config.backward_euler && !config.disable_be_fallback && m > 0;
+            let want_be_fallback = !config.backward_euler
+                && !config.disable_be_fallback
+                && m > 0
+                && !has_companion_magnetics;
             let (s_be, k_be, a_neg_be, rhs_const_be) = if want_be_fallback {
                 compute_dk_be_fallback(
                     &g_matrix,
@@ -1707,7 +1739,8 @@ impl CircuitIR {
         } else {
             // Standard trapezoidal: use kernel matrices directly.
             // Also compute BE fallback matrices for adaptive per-sample fallback.
-            let want_be_fallback = !config.disable_be_fallback && m > 0;
+            let want_be_fallback =
+                !config.disable_be_fallback && m > 0 && !has_companion_magnetics;
             let (s_be, k_be, a_neg_be, rhs_const_be) = if want_be_fallback {
                 compute_dk_be_fallback(
                     &g_matrix,
@@ -1747,8 +1780,10 @@ impl CircuitIR {
         };
 
         // BE fallback matrices are populated for nonlinear circuits (m>0) unless
-        // config.disable_be_fallback is set. Linear circuits (m=0) skip BE fallback
-        // since they don't have NR iteration that could diverge.
+        // config.disable_be_fallback is set OR companion-model magnetics are
+        // present (see the has_companion_magnetics gate above). Linear circuits
+        // (m=0) skip BE fallback since they don't have NR iteration that could
+        // diverge.
 
         let mut device_slots = Self::build_device_info_with_mna(netlist, Some(mna))?;
         Self::resolve_mosfet_nodes(&mut device_slots, mna);

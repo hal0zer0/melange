@@ -21,7 +21,8 @@
 //! 2. `emit_dc_op_build_g_aug_dk` — G_aug base construction from live
 //!    pot/switch state (E.3).
 //! 3. `emit_dc_op_build_b_dc_dk` — DC RHS from `RHS_CONST` (halved on
-//!    node rows) + `.runtime` voltage source fields (E.5).
+//!    node rows in trapezoidal mode; verbatim under BE-primary) +
+//!    `.runtime` voltage source fields (E.5).
 //! 4. `emit_dc_op_extract_v_nl_dk` + `emit_dk_device_evaluation` —
 //!    per-device i_nl + Jacobian evaluator shared with transient NR (E.4).
 //! 5. `emit_dc_op_nr_loop_dk` — Direct NR loop with LU solve, flat
@@ -67,12 +68,24 @@
 //!     v_new    = G_aug_nr⁻¹ · rhs_nr
 //! ```
 //!
-//! with `b_dc` built from `RHS_CONST` by halving rows `[0..n_nodes)`. This
-//! converges to the exact compile-time DC OP for inductor-free circuits —
-//! inductor-bearing circuits converge to the `process_sample(0.0)` steady
-//! state instead (the `g_eq = T/(2L)` companion shunt already baked into
-//! `G` differs from the inductor-short augmented row the compile-time
-//! solver uses). That distinction is documented in the method docstring.
+//! with `b_dc` built from `RHS_CONST` by halving rows `[0..n_nodes)` — **in
+//! trapezoidal mode only**. Under BE-primary integration
+//! (`solver_config.backward_euler`) the baked `RHS_CONST` is already the ×1
+//! BE build and the row-wise identity is `A − A_neg = G` on ALL rows (BE
+//! also skips the `N_i·i_nl_prev` history stamp), so `b_dc = RHS_CONST`
+//! verbatim — halving there would converge to a fixed point with HALF the
+//! DC current-source injection.
+//!
+//! This converges to the exact compile-time DC OP for inductor-free
+//! circuits. Inductor-bearing circuits: the `g_eq = T/(2L)` companion shunt
+//! already baked into `G` differs from the inductor-short augmented row the
+//! compile-time solver uses, so the solved fixed point is only a true
+//! `process_sample(0.0)` equilibrium when `V_L ≈ 0` across every companion
+//! winding (i.e. no DC current through the winding). The writeback guards
+//! this honestly: if any winding sees `|V_L|` above a small tolerance, the
+//! recompute reports failure (bumps `diag_nr_max_iter_count`) instead of
+//! writing back a false equilibrium, and `settle_dc_op` routes to the
+//! `WARMUP_SAMPLES_RECOMMENDED` loop which does reach the true OP.
 
 use crate::codegen::ir::CircuitIR;
 use crate::codegen::CodegenError;
@@ -115,11 +128,14 @@ pub(super) fn emit_recompute_dc_op_body_dk(ir: &CircuitIR) -> Result<String, Cod
          \x20       //   * Parasitic-BJT internal nodes (RB/RC/RE > 0) are NOT\n\
          \x20       //     expanded on the DK path — see `docs/aidocs/DC_OP.md`.\n\
          \x20       //   * Inductor-as-short augmented rows are not re-stamped;\n\
-         \x20       //     `G` already carries the trapezoidal companion shunt\n\
-         \x20       //     `g_eq = T/(2L)`, so the fixed point solved here matches\n\
-         \x20       //     `process_sample(0.0, ...)` steady state, not the\n\
-         \x20       //     inductor-short DC OP that `dc_op.rs` would compute.\n\
-         \x20       //     For inductor-free circuits these agree bitwise.\n\
+         \x20       //     `G` carries the companion shunt `g_eq = T/(2L)` instead,\n\
+         \x20       //     so the solved fixed point is only a true equilibrium\n\
+         \x20       //     when V_L ≈ 0 across every companion winding. Windings\n\
+         \x20       //     carrying DC current are detected after convergence and\n\
+         \x20       //     reported as failure (see writeback guard) so callers\n\
+         \x20       //     fall back to the warmup loop rather than accepting a\n\
+         \x20       //     false equilibrium. Inductor-free circuits agree bitwise\n\
+         \x20       //     with `dc_op.rs`.\n\
          \x20       //   * No source / Gmin stepping, no basin-trap handling.\n",
     );
     body.push_str(&emit_dc_op_build_g_aug_dk(ir));
@@ -295,11 +311,15 @@ fn emit_dc_op_extract_v_nl_dk(ir: &CircuitIR, indent: &str) -> String {
 
 /// Emit the DC RHS vector `b_dc: [f64; N]` for `recompute_dc_op`.
 ///
-/// Maps `RHS_CONST` (the per-sample trapezoidal Norton current vector) to the
-/// DC steady-state RHS:
-///   * Node rows `[0..n_nodes)` are halved (`RHS_CONST` doubles current-source
-///     injections for trapezoidal averaging — at DC that averaging collapses
-///     back to the single DC source value).
+/// Maps `RHS_CONST` (the per-sample Norton current vector) to the DC
+/// steady-state RHS:
+///   * Node rows `[0..n_nodes)` are halved in trapezoidal mode (`RHS_CONST`
+///     doubles current-source injections for trapezoidal averaging — at DC
+///     that averaging collapses back to the single DC source value). Under
+///     BE-primary integration (`solver_config.backward_euler`) the baked
+///     `RHS_CONST` is already the ×1 BE build (`A − A_neg = G` row-wise), so
+///     node rows are preserved verbatim — halving would solve a fixed point
+///     with half the DC current-source injection.
 ///   * VS / VCVS / ideal-transformer aug rows `[n_nodes..n_aug)` are preserved
 ///     (their per-sample value is already the algebraic RHS — `V_dc` for VS,
 ///     0 for VCVS / ideal-xfmr KVL — with no trapezoidal scaling).
@@ -313,15 +333,26 @@ fn emit_dc_op_build_b_dc_dk(ir: &CircuitIR) -> String {
     let mut body = String::new();
     let n_nodes = ir.topology.n_nodes;
 
-    body.push_str(
-        "\n        // Build b_dc: DC steady-state RHS from the per-sample RHS_CONST.\n\
-         \x20       // Node rows are halved (trapezoidal averaging collapses at DC);\n\
-         \x20       // VS/VCVS/ideal-xfmr algebraic rows and inductor branch rows are\n\
-         \x20       // preserved verbatim. See module-level DC fixed-point derivation.\n",
-    );
+    let halve_node_rows = !ir.solver_config.backward_euler;
+    if halve_node_rows {
+        body.push_str(
+            "\n        // Build b_dc: DC steady-state RHS from the per-sample RHS_CONST.\n\
+             \x20       // Node rows are halved (trapezoidal averaging collapses at DC);\n\
+             \x20       // VS/VCVS/ideal-xfmr algebraic rows and inductor branch rows are\n\
+             \x20       // preserved verbatim. See module-level DC fixed-point derivation.\n",
+        );
+    } else {
+        body.push_str(
+            "\n        // Build b_dc: DC steady-state RHS from the per-sample RHS_CONST.\n\
+             \x20       // BE-primary: RHS_CONST is the ×1 backward-Euler build and\n\
+             \x20       // A − A_neg = G holds row-wise, so b_dc = RHS_CONST verbatim\n\
+             \x20       // (no node-row halving — that is trapezoidal-only algebra).\n\
+             \x20       // See module-level DC fixed-point derivation.\n",
+        );
+    }
     if ir.has_dc_sources {
         body.push_str("        let mut b_dc: [f64; N] = RHS_CONST;\n");
-        if n_nodes > 0 {
+        if n_nodes > 0 && halve_node_rows {
             body.push_str(&format!(
                 "        for i in 0..{n_nodes} {{ b_dc[i] *= 0.5; }}\n",
             ));
@@ -351,8 +382,10 @@ fn emit_dc_op_build_b_dc_dk(ir: &CircuitIR) -> String {
 ///
 /// Skips the NR loop entirely: the system `g_aug · v = b_dc` is already
 /// linear, so a single `invert_n_equilibrated` + matrix-vector multiply gives the fixed
-/// point. On singular `g_aug`, state is left unchanged and the diag counter
-/// is bumped.
+/// point. On singular `g_aug`, state is left unchanged and both
+/// `diag_singular_matrix_count` and `diag_nr_max_iter_count` are bumped —
+/// the latter is the signal `settle_dc_op` watches, so the warmup fallback
+/// engages instead of silently proceeding with stale state.
 fn emit_dc_op_linear_solve_dk(_ir: &CircuitIR) -> String {
     let mut body = String::new();
     body.push_str(
@@ -364,6 +397,10 @@ fn emit_dc_op_linear_solve_dk(_ir: &CircuitIR) -> String {
          \x20       let (g_inv, singular) = invert_n_equilibrated(g_aug);\n\
          \x20       if singular {\n\
          \x20           self.diag_singular_matrix_count += 1;\n\
+         \x20           // settle_dc_op watches diag_nr_max_iter_count exclusively as\n\
+         \x20           // its \"state not updated\" signal — bump it too so the\n\
+         \x20           // WARMUP_SAMPLES_RECOMMENDED fallback engages.\n\
+         \x20           self.diag_nr_max_iter_count += 1;\n\
          \x20           return;\n\
          \x20       }\n\
          \x20       let mut v_node = [0.0_f64; N];\n\
@@ -389,10 +426,14 @@ fn emit_dc_op_linear_solve_dk(_ir: &CircuitIR) -> String {
 ///   4. Builds `rhs_nr = b_dc + N_i · (i_nl − J_dev · v_nl)`.
 ///   5. LU-solves `G_aug_nr · v_new = rhs_nr` via the emitted `invert_n_equilibrated`
 ///      helper (returns `(inv, singular)`).
-///   6. Applies flat global voltage damping when any element of the step
-///      exceeds the damping threshold, plus a per-element clamp, and
-///      advances `v_node`.
-///   7. Declares convergence when the damped step falls below `TOL`.
+///   6. Applies flat global voltage damping when any node-voltage element
+///      of the step exceeds the damping threshold, plus a per-element
+///      clamp, and advances `v_node`. Damping/clamp sweep VOLTAGE rows
+///      only (`[0..n_nodes)`); VS/VCVS branch-current rows (amperes) are
+///      applied undamped, mirroring `dc_op.rs`'s `is_voltage_row`
+///      classification.
+///   7. Declares convergence when every applied step element satisfies the
+///      SPICE-style per-variable check `|Δ| < RELTOL·|v| + TOL`.
 ///
 /// On convergence `v_node` and the final `i_nl` are written back via
 /// `emit_dc_op_writeback_dk`; on max-iter exhaustion `diag_nr_max_iter_count`
@@ -401,6 +442,11 @@ fn emit_dc_op_linear_solve_dk(_ir: &CircuitIR) -> String {
 fn emit_dc_op_nr_loop_dk(ir: &CircuitIR) -> Result<String, CodegenError> {
     const MAX_ITER: usize = 200;
     const TOL: f64 = 1e-9;
+    /// Relative convergence term, mirroring `dc_op.rs::DcOpConfig::reltol`
+    /// (SPICE-style `|Δ| < reltol·|v| + abstol`). Keeps 300 V circuits from
+    /// false-failing at the LU round-off floor, where an absolute-only 1e-9
+    /// check can never be satisfied.
+    const RELTOL: f64 = 1e-6;
     const DAMP_THRESHOLD: f64 = 10.0;
     const CLAMP: f64 = 50.0;
 
@@ -414,6 +460,7 @@ fn emit_dc_op_nr_loop_dk(ir: &CircuitIR) -> Result<String, CodegenError> {
          \x20       let mut nr_converged = false;\n\
          \x20       const MAX_ITER: usize = {MAX_ITER};\n\
          \x20       const TOL: f64 = {TOL:e};\n\
+         \x20       const RELTOL: f64 = {RELTOL:e};\n\
          \x20       for _iter in 0..MAX_ITER {{\n"
     ));
 
@@ -425,6 +472,51 @@ fn emit_dc_op_nr_loop_dk(ir: &CircuitIR) -> Result<String, CodegenError> {
     ));
     out.push_str(&emit_dc_op_extract_v_nl_dk(ir, inner));
     out.push('\n');
+
+    // MOSFET body effect: refresh vt_eff from the current iterate BEFORE
+    // taking the immutable `state` alias below. The shared evaluator reads
+    // `state.device_{d}_vt`; freezing it at its pre-recompute value would
+    // converge a GAMMA-carrying MOSFET with Vsb ≠ 0 to a no-body-effect OP
+    // (both the offline `dc_op.rs` solver and the transient NR update
+    // vt_eff per iteration / per sample). Formula replicates the transient
+    // emission in dk_emitter's `body_effect_update` with `v_node` standing
+    // in for `v_pred`.
+    {
+        use crate::codegen::ir::DeviceParams;
+        let mut body_effect = String::new();
+        for (dev_num, slot) in ir.device_slots.iter().enumerate() {
+            if let DeviceParams::Mosfet(mp) = &slot.params {
+                if mp.has_body_effect() {
+                    let vs_expr = if mp.source_node > 0 {
+                        format!("v_node[{}]", mp.source_node - 1)
+                    } else {
+                        "0.0".to_string()
+                    };
+                    let vb_expr = if mp.bulk_node > 0 {
+                        format!("v_node[{}]", mp.bulk_node - 1)
+                    } else {
+                        "0.0".to_string()
+                    };
+                    let sign = if mp.is_p_channel { -1.0 } else { 1.0 };
+                    body_effect.push_str(&format!(
+                        "{inner}{{ // MOSFET {dev_num} body effect (per-iteration vt_eff)\n\
+                         {inner}    let vsb = ({sign:.1}) * ({vs_expr} - {vb_expr});\n\
+                         {inner}    self.device_{dev_num}_vt = DEVICE_{dev_num}_VT + ({sign:.1}) * DEVICE_{dev_num}_GAMMA * ((DEVICE_{dev_num}_PHI + vsb.max(0.0)).sqrt() - DEVICE_{dev_num}_PHI.sqrt());\n\
+                         {inner}}}\n"
+                    ));
+                }
+            }
+        }
+        if !body_effect.is_empty() {
+            out.push_str(&format!(
+                "{inner}// Refresh body-effect VT from the current iterate (mirrors the\n\
+                 {inner}// transient per-sample update; offline dc_op.rs does the same\n\
+                 {inner}// per NR iteration).\n"
+            ));
+            out.push_str(&body_effect);
+            out.push('\n');
+        }
+    }
 
     // Device evaluation — shared helper emits `state.device_*` reads, so we
     // need a `state: &CircuitState` local inside the loop body. Immutable
@@ -538,11 +630,24 @@ fn emit_dc_op_nr_loop_dk(ir: &CircuitIR) -> Result<String, CodegenError> {
 
     // Global flat damping + per-element clamp. Matches the simple-form
     // damping used in `dc_op.rs::nr_dc_solve` (scale all deltas by
-    // `DAMP_THRESHOLD / max_delta` when max exceeds threshold).
+    // `DAMP_THRESHOLD / max_delta` when max exceeds threshold), including
+    // its voltage-row classification: only rows [0..n_nodes) are node
+    // voltages on the DK path (internal parasitic nodes are not expanded
+    // here); rows [n_nodes..N) are VS/VCVS branch currents in AMPERES —
+    // sweeping them into the voltage damping scan or the ±50 "V" clamp
+    // would stall convergence whenever a branch current legitimately
+    // exceeds the thresholds. Convergence uses the SPICE-style
+    // per-variable check `|Δ| < RELTOL·|v| + TOL` (mirrors dc_op.rs
+    // reltol) so high-voltage circuits (300 V rails) don't false-fail at
+    // the LU round-off floor.
+    let n_v_rows = ir.topology.n_nodes;
     out.push_str(&format!(
         "{inner}// Flat damping + per-element clamp on the Newton step.\n\
+         {inner}// Voltage rows only ([0..{n_v_rows}) = circuit nodes); VS/VCVS\n\
+         {inner}// branch-current rows are in amperes and are applied undamped\n\
+         {inner}// (mirrors dc_op.rs is_voltage_row classification).\n\
          {inner}let mut max_delta = 0.0_f64;\n\
-         {inner}for a in 0..N {{\n\
+         {inner}for a in 0..{n_v_rows} {{\n\
          {inner}    let d = (v_new[a] - v_node[a]).abs();\n\
          {inner}    if d > max_delta {{ max_delta = d; }}\n\
          {inner}}}\n\
@@ -550,16 +655,23 @@ fn emit_dc_op_nr_loop_dk(ir: &CircuitIR) -> Result<String, CodegenError> {
          {inner}    ({DAMP_THRESHOLD:.1}_f64 / max_delta).max(0.1)\n\
          {inner}}} else {{ 1.0 }};\n\
          {inner}if damping < 1.0 {{ self.diag_voltage_damp_count += 1; }}\n\
-         {inner}let mut step_max = 0.0_f64;\n\
+         {inner}// Per-variable SPICE-style convergence on the APPLIED step:\n\
+         {inner}// |delta| < RELTOL·|v| + TOL (abstol). See dc_op.rs.\n\
+         {inner}let mut all_within_tol = true;\n\
          {inner}for a in 0..N {{\n\
-         {inner}    let delta = (v_new[a] - v_node[a]) * damping;\n\
-         {inner}    let limited = delta.clamp(-{CLAMP:.1}_f64, {CLAMP:.1}_f64);\n\
+         {inner}    let delta = v_new[a] - v_node[a];\n\
+         {inner}    let limited = if a < {n_v_rows} {{\n\
+         {inner}        (delta * damping).clamp(-{CLAMP:.1}_f64, {CLAMP:.1}_f64)\n\
+         {inner}    }} else {{\n\
+         {inner}        delta\n\
+         {inner}    }};\n\
          {inner}    v_node[a] += limited;\n\
-         {inner}    let la = limited.abs();\n\
-         {inner}    if la > step_max {{ step_max = la; }}\n\
+         {inner}    if limited.abs() >= RELTOL * v_node[a].abs() + TOL {{\n\
+         {inner}        all_within_tol = false;\n\
+         {inner}    }}\n\
          {inner}}}\n\
          {inner}i_nl_final = i_nl;\n\
-         {inner}if step_max < TOL {{\n\
+         {inner}if all_within_tol {{\n\
          {inner}    nr_converged = true;\n\
          {inner}    break;\n\
          {inner}}}\n\
@@ -604,11 +716,16 @@ fn emit_dc_op_nr_loop_dk(ir: &CircuitIR) -> Result<String, CodegenError> {
 ///     the new one; zeroing matches `reset()`.
 ///   * Linear-companion-model history for inductors / coupled inductors /
 ///     transformer groups (`ind_{i,v}_prev`, `ind_i_hist`, etc.) zeroed —
-///     the DK MVP solves the `process_sample(0.0)` companion-shunt
-///     equilibrium where `I_L = V_L = 0`, which matches these zeroed
-///     histories exactly. Inductor-bearing circuits that rely on the
-///     inductor-short DC answer are already scoped out of the MVP (see
-///     module-level derivation).
+///     valid ONLY when `V_L ≈ 0` across every companion winding at the
+///     converged point (zero history is the `I_L = V_L = 0` equilibrium).
+///     A DC-carrying winding (e.g. a plate choke) has `V_L ≠ 0` at the
+///     companion-shunt fixed point, so writing back zeroed history there
+///     would be a false equilibrium that slews audibly as `process_sample`
+///     rebuilds the true history. The writeback therefore guards: if any
+///     winding's `|V_L|` exceeds 1 mV, it bumps `diag_nr_max_iter_count`
+///     (the `settle_dc_op` failure signal) and returns with state
+///     untouched, routing callers to the `WARMUP_SAMPLES_RECOMMENDED`
+///     fallback which does reach the true DC OP.
 ///
 /// Deliberately preserved: `noise_rng_state` (footgun — resetting would make
 /// plugins produce identical noise sequences after every parameter change),
@@ -618,6 +735,70 @@ fn emit_dc_op_nr_loop_dk(ir: &CircuitIR) -> Result<String, CodegenError> {
 /// (the NR loop itself isn't plumbed through this counter in the MVP).
 fn emit_dc_op_writeback_dk(ir: &CircuitIR, nonlinear: bool) -> String {
     let mut body = String::new();
+
+    // Inductor equilibrium guard (honest-failure principle): the zeroed
+    // winding history written back below is only a true equilibrium when
+    // V_L ≈ 0 across every companion winding. Check the converged node
+    // voltages first; on violation, report failure via the settle_dc_op
+    // signal counter and leave state untouched.
+    let has_windings = !ir.inductors.is_empty()
+        || !ir.coupled_inductors.is_empty()
+        || !ir.transformer_groups.is_empty();
+    if has_windings {
+        let node_expr = |node: usize| -> String {
+            if node > 0 {
+                format!("v_node[{}]", node - 1)
+            } else {
+                "0.0".to_string()
+            }
+        };
+        body.push_str(
+            "\n        // --- Inductor equilibrium guard ---------------------------\n\
+             \x20       // The zeroed winding history below is only an equilibrium when\n\
+             \x20       // V_L = 0. A DC-carrying winding (plate choke, DC-biased xfmr\n\
+             \x20       // primary) sees V_L = I·2L/T at the companion fixed point —\n\
+             \x20       // writing back a false \"settled\" state would slew audibly as\n\
+             \x20       // process_sample rebuilds the true history. Refuse honestly:\n\
+             \x20       // bump the settle_dc_op failure signal so callers run the\n\
+             \x20       // WARMUP_SAMPLES_RECOMMENDED loop (which reaches the true OP).\n\
+             \x20       let mut max_winding_v = 0.0_f64;\n",
+        );
+        for ind in &ir.inductors {
+            body.push_str(&format!(
+                "        {{ let vl = ({} - {}).abs(); if vl > max_winding_v {{ max_winding_v = vl; }} }}\n",
+                node_expr(ind.node_i),
+                node_expr(ind.node_j),
+            ));
+        }
+        for ci in &ir.coupled_inductors {
+            body.push_str(&format!(
+                "        {{ let vl = ({} - {}).abs(); if vl > max_winding_v {{ max_winding_v = vl; }} }}\n",
+                node_expr(ci.l1_node_i),
+                node_expr(ci.l1_node_j),
+            ));
+            body.push_str(&format!(
+                "        {{ let vl = ({} - {}).abs(); if vl > max_winding_v {{ max_winding_v = vl; }} }}\n",
+                node_expr(ci.l2_node_i),
+                node_expr(ci.l2_node_j),
+            ));
+        }
+        for g in &ir.transformer_groups {
+            for w in 0..g.num_windings {
+                body.push_str(&format!(
+                    "        {{ let vl = ({} - {}).abs(); if vl > max_winding_v {{ max_winding_v = vl; }} }}\n",
+                    node_expr(g.winding_node_i[w]),
+                    node_expr(g.winding_node_j[w]),
+                ));
+            }
+        }
+        body.push_str(
+            "        if max_winding_v > 1e-3 {\n\
+             \x20           self.diag_nr_max_iter_count += 1;\n\
+             \x20           return;\n\
+             \x20       }\n",
+        );
+    }
+
     body.push_str(
         "\n        // --- Converged: write back to state -----------------------\n\
          \x20       self.dc_operating_point = v_node;\n\
@@ -794,9 +975,10 @@ pub(super) fn emit_settle_dc_op_body() -> String {
      \x20       //\n\
      \x20       // The counter-check uses `diag_nr_max_iter_count` exclusively —\n\
      \x20       // damping and substep counters can fire during successful\n\
-     \x20       // convergence, so they're not failure signals. The NR path\n\
-     \x20       // increments this counter on iter exhaustion, singular LU, and\n\
-     \x20       // NaN resets (all \"state not updated\" outcomes), and the\n\
+     \x20       // convergence, so they're not failure signals. The DK recompute\n\
+     \x20       // increments this counter on every \"state not updated\" outcome\n\
+     \x20       // (NR iter exhaustion, singular LU on either the linear or NR\n\
+     \x20       // path, NaN resets, DC-biased winding rejection), and the\n\
      \x20       // nodal stub increments it unconditionally — so this single\n\
      \x20       // field cleanly distinguishes \"ready\" from \"fall back\".\n\
      \x20       let before = self.diag_nr_max_iter_count;\n\

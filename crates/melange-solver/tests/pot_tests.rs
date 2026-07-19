@@ -672,30 +672,34 @@ fn test_codegen_nan_guard_in_set_pot() {
 }
 
 // ---------------------------------------------------------------------------
-// State sanitization resets pot resistance
+// State sanitization must NOT snap pot resistance
 // ---------------------------------------------------------------------------
 
 #[test]
-fn test_codegen_sanitization_resets_pot() {
+fn test_codegen_sanitization_preserves_pot() {
+    // 2026-07 state-lifecycle fix: the NaN recovery block must NOT restore
+    // pot fields to nominal. The live matrices were built at the actual knob
+    // positions and remain valid; snapping the fields to nominal creates a
+    // field/matrix disagreement that the setters' unchanged-value check
+    // (`< 1e-12`) can then lock in forever.
     let code = generate_code(RC_POT_SPICE);
 
-    // The NaN sanitization block should reset pot resistance
-    // Find the sanitization block and check it contains pot reset
-    // NaN check now happens before state write: checks local `v` not `state.v_prev`
+    // NaN check happens before state write: checks local `v` not `state.v_prev`
     let sanitize_idx = code
         .find("if !v.iter().all(|x| x.is_finite())")
         .or_else(|| code.find("if !state.v_prev.iter().all(|x| x.is_finite())"))
         .expect("Missing sanitization block");
     let after_sanitize = &code[sanitize_idx..];
-    // NaN reset now returns DC operating point output instead of zeros
+    // NaN reset returns DC operating point output instead of zeros
     let return_idx = after_sanitize
         .find("return dc_output;")
         .or_else(|| after_sanitize.find("return [0.0; NUM_OUTPUTS];"))
         .expect("Missing return in sanitization");
     let sanitize_block = &after_sanitize[..return_idx];
     assert!(
-        sanitize_block.contains("pot_0_resistance"),
-        "Sanitization block should reset pot_0_resistance"
+        !sanitize_block.contains("pot_0_resistance"),
+        "Sanitization block must NOT snap pot_0_resistance to nominal \
+         (matrices already match the live knob position)"
     );
 }
 

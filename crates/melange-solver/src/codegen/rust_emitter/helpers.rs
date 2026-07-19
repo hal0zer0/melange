@@ -101,10 +101,15 @@ pub(super) fn estimate_settle_time_seconds(ir: &CircuitIR) -> f64 {
 /// Translate the estimated settling time into a sample count using a 5τ
 /// safety factor (99.3% settled) and rounding up. Minimum 1 sample so the
 /// constant is always positive.
+///
+/// The unit is HOST-rate `process_sample` calls: each public call advances
+/// `OVERSAMPLING_FACTOR` internal solver steps but only `1/sample_rate`
+/// seconds of circuit time, so τ converts at the host rate. Multiplying by
+/// the oversampling factor here (the pre-2026-07 behavior) made oversampled
+/// warmup loops `factor`× longer than the physics requires.
 pub(super) fn recommended_warmup_samples(ir: &CircuitIR) -> usize {
     let tau = estimate_settle_time_seconds(ir);
-    let internal_rate = ir.solver_config.sample_rate * ir.solver_config.oversampling_factor as f64;
-    let samples = (5.0 * tau * internal_rate).ceil() as i64;
+    let samples = (5.0 * tau * ir.solver_config.sample_rate).ceil() as i64;
     samples.max(1) as usize
 }
 

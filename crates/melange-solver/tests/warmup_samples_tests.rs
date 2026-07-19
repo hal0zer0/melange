@@ -101,6 +101,47 @@ C1 out 0 1u
 }
 
 #[test]
+fn warmup_does_not_scale_with_oversampling() {
+    // 2026-07 units fix: WARMUP_SAMPLES_RECOMMENDED is consumed as HOST-rate
+    // process_sample calls. Each call advances OVERSAMPLING_FACTOR internal
+    // steps but only 1/SAMPLE_RATE seconds of circuit time, so the count
+    // must NOT multiply by the oversampling factor (the old behavior made
+    // 4x-oversampled warmup loops 4x longer than the physics requires).
+    let spice = "\
+OS Invariance
+R1 in out 10k
+C1 out 0 1u
+";
+    let generate_at_os = |os: usize| -> String {
+        let netlist = Netlist::parse(spice).expect("parse");
+        let mut mna = MnaSystem::from_netlist(&netlist).expect("mna");
+        if mna.n > 0 {
+            mna.g[0][0] += 1.0;
+        }
+        let kernel = DkKernel::from_mna(&mna, 44100.0).expect("kernel");
+        let cfg = CodegenConfig {
+            circuit_name: "warmup_os_test".to_string(),
+            sample_rate: 44100.0,
+            input_node: 0,
+            output_nodes: vec![1],
+            input_resistance: 1.0,
+            oversampling_factor: os,
+            ..CodegenConfig::default()
+        };
+        CodeGenerator::new(cfg)
+            .generate(&kernel, &mna, &netlist)
+            .expect("codegen")
+            .code
+    };
+    let n_1x = extract_warmup_samples(&generate_at_os(1));
+    let n_4x = extract_warmup_samples(&generate_at_os(4));
+    assert_eq!(
+        n_1x, n_4x,
+        "warmup count must be oversampling-invariant (host-rate units): 1x={n_1x} 4x={n_4x}"
+    );
+}
+
+#[test]
 fn warmup_const_compiles_and_is_positive_usize() {
     // Roundtrip check: generated code compiles and the const is usable.
     use std::io::Write;

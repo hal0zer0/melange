@@ -9415,11 +9415,14 @@ C1 out 0 100n
         code.contains("Diode 0 self-heating thermal update"),
         "thermal block should be emitted for RTH-gated diode"
     );
-    // At 1x oversampling INTERNAL_SAMPLE_RATE is not emitted by
-    // constants.rs.tera; SAMPLE_RATE is the (identical) internal rate.
+    // 2026-07 state-lifecycle fix: thermal dt reads the LIVE host rate
+    // (state.current_sample_rate × OVERSAMPLING_FACTOR), not the baked
+    // SAMPLE_RATE/INTERNAL_SAMPLE_RATE consts — a 96 kHz host running a
+    // 44.1k-compiled circuit would otherwise integrate the thermal ODE
+    // ~2.2× too fast per second of audio.
     assert!(
-        code.contains("let dt = 1.0 / SAMPLE_RATE;"),
-        "thermal dt at 1x should use SAMPLE_RATE"
+        code.contains("let dt = 1.0 / (state.current_sample_rate * OVERSAMPLING_FACTOR as f64);"),
+        "thermal dt must use the live host sample rate"
     );
     // Exact exponential update of the RC thermal ODE replaces forward Euler.
     assert!(
@@ -9441,10 +9444,11 @@ C1 out 0 100n
         "diode IS(T) bandgap exponent must be divided by N"
     );
 
-    // With oversampling, dt must be the INTERNAL period: the thermal block
-    // lives inside process_sample, which the oversampling wrapper calls
-    // `factor` times per external sample. `1.0 / SAMPLE_RATE` would heat
-    // oversampled circuits `factor`x too fast.
+    // With oversampling, dt must still be the INTERNAL period: the thermal
+    // block lives inside process_sample, which the oversampling wrapper
+    // calls `factor` times per external sample. The live-rate expression
+    // (host rate × OVERSAMPLING_FACTOR) covers this for every factor —
+    // same token at 2x as at 1x, with OVERSAMPLING_FACTOR = 2 baked.
     let (netlist, mna, kernel) = build_pipeline(SPICE);
     let mut config = default_config();
     config.force_trap = true;
@@ -9453,8 +9457,10 @@ C1 out 0 100n
         .generate(&kernel, &mna, &netlist)
         .expect("oversampled thermal codegen failed");
     assert!(
-        result.code.contains("let dt = 1.0 / INTERNAL_SAMPLE_RATE;"),
-        "thermal dt at 2x must use INTERNAL_SAMPLE_RATE"
+        result
+            .code
+            .contains("let dt = 1.0 / (state.current_sample_rate * OVERSAMPLING_FACTOR as f64);"),
+        "thermal dt at 2x must use the live host rate x OVERSAMPLING_FACTOR"
     );
 }
 

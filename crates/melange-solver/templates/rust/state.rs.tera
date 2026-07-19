@@ -306,9 +306,22 @@ static OPAMP_RAIL_DEGRADE_WARN_ONCE: std::sync::Once = std::sync::Once::new();
 }
 
 impl CircuitState {
-    /// Reset to DC operating point
+    /// Reset to the factory state.
+    ///
+    /// "Factory state" means everything returns to what codegen baked in:
+    /// the DC operating point, the baked nonlinear bias currents, and
+    /// nominal pot/switch values — all restored together so they agree.
+    /// A runtime-recomputed operating point (from `recompute_dc_op`) is
+    /// intentionally discarded here; callers that want coherence at
+    /// *jittered* pot/device values should call `recompute_dc_op()` (or
+    /// `settle_dc_op()`) after applying them, not `reset()`.
     pub fn reset(&mut self) {
-        self.v_prev = self.dc_operating_point;
+{% if has_dc_op %}        // Restore the baked DC OP so it agrees with the baked bias currents
+        // and the nominal pot/switch values restored below (a recomputed OP
+        // at moved pots paired with the baked bias would be incoherent).
+        self.dc_operating_point = DC_OP;
+{% else %}        self.dc_operating_point = [0.0; N];
+{% endif %}        self.v_prev = self.dc_operating_point;
 {% if has_dc_nl %}        self.i_nl_prev = DC_NL_I;
         self.i_nl_prev_prev = DC_NL_I;
 {% else %}        self.i_nl_prev = [0.0; M];
@@ -358,6 +371,16 @@ impl CircuitState {
 {% for idx in switch_indices %}
         self.switch_{{ idx }}_position = 0;
 {% endfor %}
+{% endif %}
+{% if num_switches > 0 or num_pots > 0 %}
+        // Pots/switches were just restored to their defaults, but the live
+        // S/K/A_neg matrices may still reflect the previous knob values.
+        // Force a rebuild on the next process_sample so fields and matrices
+        // agree. (Noise-coefficient defaults — thermal sqrt(1/R), resistor
+        // flicker 1/R, op-amp en_g_diag — are restored to their baked
+        // constants by the noise reset body below, which matches the
+        // nominal pot values restored here.)
+        self.matrices_dirty = true;
 {% endif %}
 {% if oversampling_factor > 1 %}
         self.os_up_state = [0.0; {{ os_state_size }}];
@@ -466,11 +489,13 @@ impl CircuitState {
     /// Recompute all sample-rate-dependent matrices for a new sample rate.
     ///
     /// Call this once during plugin initialization (NOT on the audio thread).
-    /// This recomputes S, A_neg, K, S*N_i, inductor g_eq, and pot SM vectors
-    /// from the stored G and C matrices.
+    /// This recomputes S, A_neg, K, S*N_i, and inductor g_eq from the stored
+    /// G and C matrices.
     ///
-    /// If `sample_rate` matches [`SAMPLE_RATE`], this is a no-op (the defaults
-    /// are already correct).
+    /// If `sample_rate` matches [`SAMPLE_RATE`], only the rate-dependent
+    /// coefficients are restored to their baked defaults; transient state
+    /// (filter and magnetics history) is preserved so a no-op rate call
+    /// never clicks.
     pub fn set_sample_rate(&mut self, sample_rate: f64) {
         if !(sample_rate > 0.0 && sample_rate.is_finite()) {
             return; // Invalid sample rate, keep defaults
@@ -479,10 +504,17 @@ impl CircuitState {
 {% if needs_current_sr %}        self.current_sample_rate = sample_rate;
 {% endif %}
 {% if num_switches > 0 or num_pots > 0 %}
-        // If same as codegen sample rate AND all switches at default position, reset to defaults
+        // Same-rate call: restore rate-dependent defaults where possible.
         if (sample_rate - SAMPLE_RATE).abs() < 0.5 {
+            // The baked S/K/A_neg defaults were computed at nominal pot
+            // resistances AND default switch positions, so BOTH must be at
+            // default before loading them. Checking only switches would
+            // silently revert a moved pot to nominal matrices — and the
+            // pot setter's unchanged-value early-return would then lock
+            // the stale matrices in until the next actual knob motion.
             let all_default = true
 {% for idx in switch_indices %}                && self.switch_{{ idx }}_position == 0
+{% endfor %}{% for default in pot_defaults %}                && (self.pot_{{ loop.index0 }}_resistance - {{ default }}).abs() < 1e-9
 {% endfor %}            ;
             if all_default {
                 self.s = S_DEFAULT;
@@ -498,29 +530,7 @@ impl CircuitState {
 {% if num_inductors > 0 %}
                 self.ind_g_eq = [{% for ind in inductors %}IND_{{ loop.index0 }}_G_EQ{% if not loop.last %}, {% endif %}{% endfor %}];
 {% endif %}
-{% if dc_block %}                self.dc_block_r = DC_BLOCK_R;
-                for k in 0..NUM_OUTPUTS { self.dc_block_x_prev[k] = self.dc_operating_point[OUTPUT_NODES[k]]; }
-                self.dc_block_y_prev = [0.0; NUM_OUTPUTS];
-{% endif %}
-{% if oversampling_factor > 1 %}
-                self.os_up_state = [0.0; {{ os_state_size }}];
-                self.os_dn_state = [[0.0; {{ os_state_size }}]; NUM_OUTPUTS];
-{% endif %}{% if oversampling_4x %}
-                self.os_up_state_outer = [0.0; {{ os_state_size_outer }}];
-                self.os_dn_state_outer = [[0.0; {{ os_state_size_outer }}]; NUM_OUTPUTS];
-{% endif %}
-{% if num_inductors > 0 %}
-                self.ind_i_prev = [0.0; {{ num_inductors }}];
-                self.ind_v_prev = [0.0; {{ num_inductors }}];
-                self.ind_i_hist = [0.0; {{ num_inductors }}];
-{% endif %}
 {% if num_coupled_inductors > 0 %}
-                self.ci_i1_prev = [0.0; {{ num_coupled_inductors }}];
-                self.ci_i2_prev = [0.0; {{ num_coupled_inductors }}];
-                self.ci_v1_prev = [0.0; {{ num_coupled_inductors }}];
-                self.ci_v2_prev = [0.0; {{ num_coupled_inductors }}];
-                self.ci_i1_hist = [0.0; {{ num_coupled_inductors }}];
-                self.ci_i2_hist = [0.0; {{ num_coupled_inductors }}];
                 self.ci_g_self_1 = [{% for ci in coupled_inductors %}CI_{{ loop.index0 }}_G_SELF_1{% if not loop.last %}, {% endif %}{% endfor %}];
                 self.ci_g_self_2 = [{% for ci in coupled_inductors %}CI_{{ loop.index0 }}_G_SELF_2{% if not loop.last %}, {% endif %}{% endfor %}];
                 self.ci_g_mutual = [{% for ci in coupled_inductors %}CI_{{ loop.index0 }}_G_MUTUAL{% if not loop.last %}, {% endif %}{% endfor %}];
@@ -528,18 +538,48 @@ impl CircuitState {
 {% if num_transformer_groups > 0 %}
 {% for g in transformer_groups %}
                 self.xfmr_{{ g.index }}_y = XFMR_{{ g.index }}_Y_DEFAULT;
-                self.xfmr_{{ g.index }}_i_prev = [0.0; {{ g.num_windings }}];
-                self.xfmr_{{ g.index }}_v_prev = [0.0; {{ g.num_windings }}];
-                self.xfmr_{{ g.index }}_i_hist = [0.0; {{ g.num_windings }}];
 {% endfor %}
 {% endif %}
+{% if dc_block %}                self.dc_block_r = DC_BLOCK_R;
+{% endif %}
+                // POLICY: transient state — oversampler filter history,
+                // inductor / coupled-inductor / transformer standing
+                // currents, DC-blocker history — is PRESERVED here. Only
+                // coefficients and matrices are restored: a same-rate call
+                // is a no-op reconfiguration and must not click (mirrors
+                // rebuild_matrices' standing-current rationale).
                 return;
             }
+            // Same rate but pots/switches are off-default: rebuild the
+            // matrices at the live values. Rate-dependent coefficients
+            // equal their baked defaults at this rate; transient state is
+            // preserved (see POLICY above).
+{% if dc_block %}            self.dc_block_r = DC_BLOCK_R;
+{% endif %}            self.rebuild_matrices();
+            return;
         }
+
+        // Genuine sample-rate change: rebuild matrices at the new rate
+        // (rebuild_matrices reads self.current_sample_rate, set above) and
+        // recompute every rate-dependent coefficient. Filter state built at
+        // the old rate is invalid at the new one, so the oversampler and DC
+        // blocker are re-seeded here — same contract as the no-pot variant.
         self.rebuild_matrices();
+{% if dc_block %}        let internal_rate = sample_rate * OVERSAMPLING_FACTOR as f64;
+        self.dc_block_r = 1.0 - 2.0 * std::f64::consts::PI * 5.0 / internal_rate;
+        for k in 0..NUM_OUTPUTS { self.dc_block_x_prev[k] = self.dc_operating_point[OUTPUT_NODES[k]]; }
+        self.dc_block_y_prev = [0.0; NUM_OUTPUTS];
+{% endif %}
+{% if oversampling_factor > 1 %}        // Reset oversampler filter state (old state is incompatible with new rate)
+        self.os_up_state = [0.0; {{ os_state_size }}];
+        self.os_dn_state = [[0.0; {{ os_state_size }}]; NUM_OUTPUTS];
+{% endif %}{% if oversampling_4x %}        self.os_up_state_outer = [0.0; {{ os_state_size_outer }}];
+        self.os_dn_state_outer = [[0.0; {{ os_state_size_outer }}]; NUM_OUTPUTS];
+{% endif %}
 {% else %}
 
-        // If same as codegen sample rate, reset to defaults (avoids numerical drift)
+        // If same as codegen sample rate, restore rate-dependent defaults
+        // (avoids numerical drift from repeated rebuilds).
         if (sample_rate - SAMPLE_RATE).abs() < 0.5 {
             self.s = S_DEFAULT;
             self.a_neg = A_NEG_DEFAULT;
@@ -562,15 +602,16 @@ impl CircuitState {
 {% if num_transformer_groups > 0 %}
 {% for g in transformer_groups %}
             self.xfmr_{{ g.index }}_y = XFMR_{{ g.index }}_Y_DEFAULT;
-            self.xfmr_{{ g.index }}_i_prev = [0.0; {{ g.num_windings }}];
-            self.xfmr_{{ g.index }}_v_prev = [0.0; {{ g.num_windings }}];
-            self.xfmr_{{ g.index }}_i_hist = [0.0; {{ g.num_windings }}];
 {% endfor %}
 {% endif %}
 {% if dc_block %}            self.dc_block_r = DC_BLOCK_R;
-            for k in 0..NUM_OUTPUTS { self.dc_block_x_prev[k] = self.dc_operating_point[OUTPUT_NODES[k]]; }
-            self.dc_block_y_prev = [0.0; NUM_OUTPUTS];
 {% endif %}
+            // POLICY: transient state — oversampler filter history,
+            // inductor / coupled-inductor / transformer standing currents,
+            // DC-blocker history — is PRESERVED here. Only coefficients and
+            // matrices are restored: a same-rate call is a no-op
+            // reconfiguration and must not click (same standing-current
+            // rationale as the pot-variant early-out and the rebuild path).
             return;
         }
 

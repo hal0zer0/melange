@@ -412,14 +412,24 @@ fn test_rebuild_matrices_be_a_neg_no_g_subtraction() {
 }
 
 /// The nodal-path NaN reset must restore the same state the DK-path resets
-/// (v_prev, i_nl, pots, oversampler, DC blocker, BJT thermal, op-amp IIR) —
+/// (v_prev, i_nl, oversampler, DC blocker, BJT thermal, op-amp IIR) —
 /// not just the minimal `v_prev` / `i_nl_prev` from before the 1.3 fix. The
 /// Schur path previously returned `[0.0; NUM_OUTPUTS]` which caused an audible
 /// click at the recovery edge; it now returns the DC-OP output like the
 /// full-LU path and the DK template.
 ///
-/// Uses `TUBE_TRANSFORMER_WITH_POT` because it carries a `.pot` (must reset
-/// `pot_0_resistance`) and routes through the nodal emitter.
+/// 2026-07-18 revision: pot fields are deliberately NO LONGER touched by the
+/// NaN reset. The matrices already reflect the live pot fields; snapping the
+/// fields to nominal WITHOUT setting `matrices_dirty` (which the old emission
+/// did) left fields and matrices disagreeing until the next knob move. Since
+/// pot rebuilds are absolute-from-nominal, leaving both alone is the coherent
+/// state. The DC blocker history is now reseeded from the DC operating point
+/// instead of zeros (zero x_prev turned the output's standing DC bias into a
+/// full-scale step through the differentiator — a second click right after
+/// the NaN event).
+///
+/// Uses `TUBE_TRANSFORMER_WITH_POT` because it carries a `.pot` (must NOT be
+/// snapped) and routes through the nodal emitter.
 #[test]
 fn test_nodal_nan_reset_includes_extended_state() {
     let code = generate_nodal(TUBE_TRANSFORMER_WITH_POT, "in", "out");
@@ -442,14 +452,33 @@ fn test_nodal_nan_reset_includes_extended_state() {
         "input_prev must be reset on NaN"
     );
 
-    // Fields added in the 1.3 fix (previously silent drift after NaN):
+    // 2026-07-18: pot fields must NOT be touched by the NaN reset (the
+    // matrices already match them; a nominal snap without matrices_dirty
+    // desyncs fields from matrices). Scope the check to the reset block so
+    // the legitimate `pot_0_resistance_prev = pot_0_resistance` state update
+    // elsewhere in process_sample doesn't trip it.
+    let reset_start = code
+        .find("Mirrors the DK-path reset")
+        .expect("NaN reset marker comment present");
+    let reset_end = code[reset_start..]
+        .find("return nan_out;")
+        .map(|off| reset_start + off)
+        .expect("NaN reset return present after marker");
+    let reset_block = &code[reset_start..reset_end];
     assert!(
-        code.contains("state.pot_0_resistance ="),
-        "pot_0_resistance must be snapped back to nominal on NaN"
+        !reset_block.contains("pot_0_resistance"),
+        "NaN reset must not snap pot fields (fields/matrices coherence)"
+    );
+
+    // DC blocker history: x_prev reseeds from the DC operating point (not
+    // zero), y_prev zeros — same as reset() and the DK template.
+    assert!(
+        reset_block.contains("state.dc_block_x_prev[0] = state.dc_operating_point["),
+        "NaN reset must reseed dc_block_x_prev from the DC operating point"
     );
     assert!(
-        code.contains("state.pot_0_resistance_prev ="),
-        "pot_0_resistance_prev must be synced to nominal on NaN"
+        reset_block.contains("state.dc_block_y_prev = [0.0; NUM_OUTPUTS];"),
+        "NaN reset must zero dc_block_y_prev"
     );
 
     // Return strategy: DC-OP output, not zero (Schur regression fix).

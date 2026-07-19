@@ -36,14 +36,16 @@ pub const OUTPUT_NODES: [usize; NUM_OUTPUTS] = [{{ output_nodes_values }}];
 /// Input resistance (Thevenin equivalent)
 pub const INPUT_RESISTANCE: f64 = {{ input_resistance }};
 
-/// Recommended silent-warmup sample count (≥1).
+/// Recommended silent-warmup sample count (≥1), in HOST-rate samples.
 ///
-/// Computed from the slowest node RC time constant in the circuit at the
-/// internal sample rate: `ceil(5 · τ_max · SAMPLE_RATE · OVERSAMPLING_FACTOR)`,
-/// which covers 99.3% of the final settled response. Plugins applying
-/// per-instance pot/switch jitter to CircuitState before audio starts
-/// should loop `process_sample(0.0, &mut state)` this many times to reach
-/// the jittered equilibrium. See Oomox plugin roadmap P5.
+/// Computed from the slowest node RC time constant in the circuit:
+/// `ceil(5 · τ_max · SAMPLE_RATE)`, which covers 99.3% of the final settled
+/// response. The unit is public `process_sample` calls — each call advances
+/// `OVERSAMPLING_FACTOR` internal steps but only 1/SAMPLE_RATE seconds of
+/// circuit time, so the count does NOT scale with the oversampling factor.
+/// Plugins applying per-instance pot/switch jitter to CircuitState before
+/// audio starts should loop `process_sample(0.0, &mut state)` this many
+/// times to reach the jittered equilibrium. See Oomox plugin roadmap P5.
 pub const WARMUP_SAMPLES_RECOMMENDED: usize = {{ warmup_samples_recommended }};
 
 /// G matrix: conductance matrix (sample-rate independent)
@@ -127,8 +129,11 @@ pub const S_NI_BE_DEFAULT: [[f64; M]; N] = [
 pub const A_NEG_BE_DEFAULT: [[f64; N]; N] = [
 {% for row in a_neg_be_rows %}    [{{ row }}],
 {% endfor %}];
-{% if has_dc_sources and rhs_const_be_values is defined %}
+{% if has_dc_sources %}
 /// RHS constant contribution from DC sources (backward Euler: all rows x1)
+/// Guarded on `has_dc_sources` — the SAME condition process_sample.rs.tera
+/// uses to reference RHS_CONST_BE in the BE-fallback RHS build, so the
+/// constant can never be referenced without being emitted.
 pub const RHS_CONST_BE: [f64; N] = [{{ rhs_const_be_values }}];
 {% endif %}
 {% endif %}
