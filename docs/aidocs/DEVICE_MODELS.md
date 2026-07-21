@@ -47,20 +47,38 @@ silicon_ideal()    IS=1e-14, n=1.0    (textbook ideal)
 
 The same quasi-static electrothermal model used on BJTs applies to
 diodes when RTH is finite on the `.model D(...)` card. Updated once
-per sample, outside the NR loop:
+per internal (oversampled) sample, outside the NR loop, via the exact
+solution of the first-order RC thermal ODE:
 
 ```
-dTj/dt = (P_diss − (Tj − Tamb)/Rth) / Cth
 P_diss = Vd · Id
-IS(T)  = IS_nom · (Tj/Tnom)^XTI · exp(EG/VT_nom · (1 − Tnom/Tj))
+Tss    = TAMB + P_diss · Rth              (steady-state junction temp)
+tau    = Rth · Cth
+Tj    += (Tss − Tj) · (1 − exp(−dt/tau))  (exact exponential step)
+Tj     = clamp(Tj, 200 K, 500 K)          (runaway guard)
+
+IS(T)   = IS_nom · (Tj/Tnom)^(XTI/N) · exp(EG/(N·VT_nom) · (1 − Tnom/Tj))
 N·VT(T) = (N·VT)_nom · (Tj/Tnom)
 ```
 
+Note the diode IS(T) divides **both** the XTI power and the EG exponent by
+the emission coefficient N — SPICE3f5/ngspice diode convention (the BJT
+IS(T) below has no such division). N is not stored separately in
+`DiodeParams`; codegen recovers it as `n_vt / VT_ROOM` and bakes it in.
 The `N·VT` scaling exploits the fact that `N·VT = N·k·T/q` scales
-linearly in T, so we don't need to decompose the stored `n_vt`
-product. Forward Euler when `dt < 2·Rth·Cth`, implicit Euler
-otherwise. Default `RTH=∞` makes the whole block codegen dead-code
-(guarded by `DiodeParams::has_self_heating()`).
+linearly in T, so we don't need to decompose the stored `n_vt` product.
+
+The exact-exponential step is unconditionally stable for any `dt/tau`
+(it replaced a forward-Euler integrator that overshot whenever
+`dt > tau`). `dt` is the internal sample period; the DK emitter reads it
+from the live rate (`1 / (state.current_sample_rate ·
+OVERSAMPLING_FACTOR)`, `dk_emitter.rs::emit_thermal_tj_advance`) so
+`set_sample_rate` keeps the thermal time constant correct. (Known twin
+divergence: the nodal emitter currently bakes dt from the codegen-time
+rate consts — no shipped nodal circuit uses RTH.) When `CTH ≤ 0` the
+thermal pole is instantaneous and the emitted form is quasi-static
+`Tj = clamp(Tss)`. Default `RTH=∞` makes the whole block codegen
+dead-code (guarded by `DiodeParams::has_self_heating()`).
 
 Parameters are identical to the BJT set:
 
@@ -132,26 +150,36 @@ beta_R = 3
 
 ### Self-Heating (Electrothermal Model)
 
-Optional quasi-static thermal model that updates junction temperature once per sample,
-outside the NR loop.
+Optional quasi-static thermal model that updates junction temperature once
+per internal (oversampled) sample, outside the NR loop. Same exact-exponential
+thermal step as the diode (see the diode Self-Heating section for the dt and
+CTH≤0 details):
 
 ```
-dTj/dt = (P_diss - (Tj - T_amb) / Rth) / Cth
+P_diss = Vce · Ic + Vbe · Ib               (instantaneous power dissipation)
+Tss    = TAMB + P_diss · Rth
+tau    = Rth · Cth
+Tj    += (Tss − Tj) · (1 − exp(−dt/tau))   (exact exponential step)
+Tj     = clamp(Tj, 200 K, 500 K)
 ```
 
-- `P_diss = Vce * Ic + Vbe * Ib` (instantaneous power dissipation)
-- Forward Euler when stable (`dt < 2 * Rth * Cth`), implicit Euler otherwise
-- Temperature-dependent saturation current (SPICE3f5 exact):
-  `IS(T) = IS_nom * (Tj/Tnom)^XTI * exp(EG/VT_nom * (Tj/Tnom - 1))`
+- Temperature-dependent saturation current (SPICE3f5 exact, BJT convention —
+  no /N division, unlike the diode form above):
+  `IS(T) = IS_nom * (Tj/Tnom)^XTI * exp(EG/VT_nom * (1 - Tnom/Tj))`
+  where `VT_nom = k·Tnom/q`. This is the SPICE identity
+  `exp(EG/vt(T) * (T/Tnom - 1))` rewritten at the nominal thermal voltage —
+  do not "simplify" to `exp(EG/VT_nom * (Tj/Tnom - 1))`, which differs by a
+  factor of `Tj/Tnom` in the exponent argument.
 - `VT(T) = k * Tj / q` (thermal voltage tracks junction temperature)
 - Zero overhead when disabled (RTH = infinity, the default)
 
 #### Parameters
 ```
 RTH   Thermal resistance [K/W]  (default: inf = disabled)
-CTH   Thermal capacitance [J/K] (default: 0)
+CTH   Thermal capacitance [J/K] (default: 1e-3)
 XTI   IS temperature exponent   (default: 3.0)
 EG    Bandgap energy [eV]       (default: 1.11)
+TAMB  Ambient temperature [K]   (default: 300.15 = 27 °C)
 ```
 
 ### Charge Storage Dynamics
@@ -191,9 +219,23 @@ M-dimension: 2 per triode (Vgk -> Ip, Vpk -> Ig)
 ```
 inner = Kp * (1/mu + Vgk / sqrt(Kvb + Vpk^2))
 E1 = (Vpk / Kp) * ln(1 + exp(inner))
-Ip_koren = E1^ex / Kg1   (if E1 > 0, else 0)
+Ip_koren = 2 * E1^ex / Kg1   (if E1 > 0, else 0)
 Ip = Ip_koren * (1 + lambda * Vpk)
 ```
+
+**The ×2 is part of the published model — do NOT remove it.** Koren 1996
+writes the plate current as `(PWR(E1,EX) + PWRS(E1,EX)) / KG1`; for `E1 > 0`
+the power and signed-power terms are equal, giving `2·E1^EX/KG1`. Koren's
+Kg1 values are fitted WITH the ×2. Dropping it halves every plate current
+and gm — this exact drift (code without the ×2 "compensated" by a misfit
+Kg1=3000 card) was the July 2026 campaign bug; the restored equation with
+Kg1=1060 is what `tube.rs` and `device_tube.rs.tera` implement at HEAD, and
+`template_primitive_sync_tests.rs` pins the two copies against each other.
+
+12AX7 checkpoints (RCA typical operation, Vgk=−2 V, Vpk=250 V): the model
+gives Ip ≈ 0.95 mA (datasheet 1.2 mA), gm ≈ 1.67 mA/V (datasheet 1.6 mA/V),
+Ip(0 V, 250 V) ≈ 6.8 mA. A halved (missing-×2) implementation gives
+0.476 mA / 0.84 mA/V at the same point — if you measure that, the ×2 is gone.
 
 The `lambda` parameter models channel-length modulation (Early effect) for triodes,
 analogous to MOSFET/JFET lambda. When `lambda = 0.0` (default), the model reduces
@@ -202,6 +244,7 @@ operating point is approximately `rp = 1 / (lambda * Ip)`.
 
 ### Jacobian with lambda
 ```
+dIp_koren/dE1 = 2 * ex * E1^(ex-1) / Kg1     (×2 carried through the chain rule)
 dIp/dVgk = dIp_koren/dVgk * (1 + lambda * Vpk)
 dIp/dVpk = dIp_koren/dVpk * (1 + lambda * Vpk) + Ip_koren * lambda
 ```
@@ -217,6 +260,10 @@ Ig = 0                                 for vgk <= 0
 mu = 100, Kp = 600, Kvb = 300, Kg1 = 1060, ex = 1.4
 ig_max = 2e-3, vgk_onset = 0.5, lambda = 0.0
 ```
+
+Kg1 = 1060 is Norman Koren's published card and is only valid together with
+the `2·E1^ex/Kg1` plate equation above (see `catalog/tubes.rs` for the
+history of the Kg1=3000 compensating misfit).
 
 ## Pentode / Beam Tetrode (Reefman "Derk" §4.4)
 
@@ -897,7 +944,7 @@ NR Jacobian row s+1: j_{s+1,j} = delta_{s+1,j} - jdev_{s+1}_{s}*K[s][j] - jdev_{
 - Diode: current = 0 at v=0, forward voltage ~0.6-0.7V at 1mA
 - Conductance always positive (passive device)
 - g_d ~ IS/VT at small v (linear region)
-- 12AX7 triode: Ip ~ 1.2mA at Vgk=0, Vpk=250V
+- 12AX7 triode: Ip ~ 0.95mA at Vgk=-2V, Vpk=250V (datasheet typ. 1.2mA); Ip ~ 6.8mA at Vgk=0, Vpk=250V. (The old "1.2mA at Vgk=0" figure was the Kg1=3000 misread — datasheet 1.2mA is specified at Vgk=-2V, not 0V.)
 - Finite-difference Jacobian check: all device models have FD verification tests
 
 ## BJT Parasitic R Absorption (`K_eff`)
