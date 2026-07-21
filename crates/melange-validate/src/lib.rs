@@ -662,7 +662,11 @@ fn run_melange_solver_from_str(
     }
 
     // Run: pipe input via stdin
-    let stdin_data: String = input_signal.iter().map(|s| format!("{s:.15e}\n")).collect();
+    let stdin_data: Vec<u8> = input_signal
+        .iter()
+        .map(|s| format!("{s:.15e}\n"))
+        .collect::<String>()
+        .into_bytes();
     let mut child = std::process::Command::new(&bin)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -670,15 +674,27 @@ fn run_melange_solver_from_str(
         .spawn()
         .map_err(|e| ValidationError::Solver(format!("Spawn: {}", e)))?;
 
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(stdin_data.as_bytes())
-            .map_err(|e| ValidationError::Solver(format!("Stdin: {}", e)))?;
-    }
+    // Write stdin on a separate thread so `wait_with_output()` below drains
+    // stdout/stderr concurrently. Otherwise, when both the input AND the
+    // generated binary's output exceed the OS pipe buffer (~64 KB) and the
+    // child interleaves reading stdin with writing stdout, `write_all` and the
+    // child's stdout write deadlock against each other (the parent blocks
+    // writing stdin while the child blocks writing a full stdout pipe that no
+    // one is reading yet). Dropping the stdin handle at the end of the thread
+    // closes the pipe, signalling EOF. A broken-pipe error here means the child
+    // exited early — that surfaces via the exit-status check below, so it's
+    // intentionally ignored.
+    let stdin = child.stdin.take();
+    let writer = std::thread::spawn(move || {
+        if let Some(mut s) = stdin {
+            let _ = s.write_all(&stdin_data);
+        }
+    });
 
     let result = child
         .wait_with_output()
         .map_err(|e| ValidationError::Solver(format!("Wait: {}", e)))?;
+    let _ = writer.join();
     let _ = std::fs::remove_file(&bin);
 
     if !result.status.success() {
