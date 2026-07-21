@@ -698,9 +698,14 @@ struct BjtInternalNodes {
     ext_base: usize,  // 1-indexed external node (0=ground)
     ext_collector: usize,
     ext_emitter: usize,
-    int_base: usize, // 0-indexed into g_dc (same as ext if R=0)
-    int_collector: usize,
-    int_emitter: usize,
+    /// 0-indexed row in `g_dc`: `Some(new internal row)` when the terminal's
+    /// parasitic R > 0, `Some(ext - 1)` when R = 0 on a non-ground terminal,
+    /// `None` when R = 0 on a grounded terminal. Ground has no matrix row —
+    /// the old `else { 0 }` fallback aliased it onto circuit node index 0,
+    /// injecting device current into whatever node happened to be first.
+    int_base: Option<usize>,
+    int_collector: Option<usize>,
+    int_emitter: Option<usize>,
 }
 
 /// Extended DC system info including internal nodes for parasitic BJTs.
@@ -870,33 +875,35 @@ fn build_dc_system(
                     let ext_b = dev.node_indices[1]; // base
                     let ext_e = dev.node_indices[2]; // emitter
 
-                    // Create internal nodes for non-zero resistances
+                    // Create internal nodes for non-zero resistances.
+                    // R = 0 on a grounded terminal maps to None (ground has
+                    // no matrix row; stamping is skipped for it).
                     let int_b = if bp.rb > 0.0 {
                         let idx = n_dc;
                         n_dc += 1;
-                        idx
+                        Some(idx)
                     } else if ext_b > 0 {
-                        ext_b - 1
+                        Some(ext_b - 1)
                     } else {
-                        0
+                        None
                     };
                     let int_c = if bp.rc > 0.0 {
                         let idx = n_dc;
                         n_dc += 1;
-                        idx
+                        Some(idx)
                     } else if ext_c > 0 {
-                        ext_c - 1
+                        Some(ext_c - 1)
                     } else {
-                        0
+                        None
                     };
                     let int_e = if bp.re > 0.0 {
                         let idx = n_dc;
                         n_dc += 1;
-                        idx
+                        Some(idx)
                     } else if ext_e > 0 {
-                        ext_e - 1
+                        Some(ext_e - 1)
                     } else {
-                        0
+                        None
                     };
 
                     bjt_internal.push(BjtInternalNodes {
@@ -929,38 +936,46 @@ fn build_dc_system(
     for bjt in &bjt_internal {
         if let Some(slot) = device_slots.iter().find(|s| s.start_idx == bjt.start_idx) {
             if let DeviceParams::Bjt(bp) = &slot.params {
+                // R > 0 always allocates a fresh internal row, so the
+                // `if let` bindings below are infallible under each guard.
                 // RB: external base ↔ internal base
                 if bp.rb > 0.0 {
-                    let g = 1.0 / bp.rb;
-                    if bjt.ext_base > 0 {
-                        let eb = bjt.ext_base - 1;
-                        g_dc[eb][eb] += g;
-                        g_dc[eb][bjt.int_base] -= g;
-                        g_dc[bjt.int_base][eb] -= g;
+                    if let Some(ib) = bjt.int_base {
+                        let g = 1.0 / bp.rb;
+                        if bjt.ext_base > 0 {
+                            let eb = bjt.ext_base - 1;
+                            g_dc[eb][eb] += g;
+                            g_dc[eb][ib] -= g;
+                            g_dc[ib][eb] -= g;
+                        }
+                        g_dc[ib][ib] += g;
                     }
-                    g_dc[bjt.int_base][bjt.int_base] += g;
                 }
                 // RC: external collector ↔ internal collector
                 if bp.rc > 0.0 {
-                    let g = 1.0 / bp.rc;
-                    if bjt.ext_collector > 0 {
-                        let ec = bjt.ext_collector - 1;
-                        g_dc[ec][ec] += g;
-                        g_dc[ec][bjt.int_collector] -= g;
-                        g_dc[bjt.int_collector][ec] -= g;
+                    if let Some(ic) = bjt.int_collector {
+                        let g = 1.0 / bp.rc;
+                        if bjt.ext_collector > 0 {
+                            let ec = bjt.ext_collector - 1;
+                            g_dc[ec][ec] += g;
+                            g_dc[ec][ic] -= g;
+                            g_dc[ic][ec] -= g;
+                        }
+                        g_dc[ic][ic] += g;
                     }
-                    g_dc[bjt.int_collector][bjt.int_collector] += g;
                 }
                 // RE: external emitter ↔ internal emitter
                 if bp.re > 0.0 {
-                    let g = 1.0 / bp.re;
-                    if bjt.ext_emitter > 0 {
-                        let ee = bjt.ext_emitter - 1;
-                        g_dc[ee][ee] += g;
-                        g_dc[ee][bjt.int_emitter] -= g;
-                        g_dc[bjt.int_emitter][ee] -= g;
+                    if let Some(ie) = bjt.int_emitter {
+                        let g = 1.0 / bp.re;
+                        if bjt.ext_emitter > 0 {
+                            let ee = bjt.ext_emitter - 1;
+                            g_dc[ee][ee] += g;
+                            g_dc[ee][ie] -= g;
+                            g_dc[ie][ee] -= g;
+                        }
+                        g_dc[ie][ie] += g;
                     }
-                    g_dc[bjt.int_emitter][bjt.int_emitter] += g;
                 }
             }
         }
@@ -976,13 +991,19 @@ fn build_dc_system(
         if let Some(slot) = device_slots.iter().find(|s| s.start_idx == bjt.start_idx) {
             if let DeviceParams::Bjt(bp) = &slot.params {
                 if bp.rb > 0.0 {
-                    g_dc[bjt.int_base][bjt.int_base] += gmin_floor;
+                    if let Some(ib) = bjt.int_base {
+                        g_dc[ib][ib] += gmin_floor;
+                    }
                 }
                 if bp.rc > 0.0 {
-                    g_dc[bjt.int_collector][bjt.int_collector] += gmin_floor;
+                    if let Some(ic) = bjt.int_collector {
+                        g_dc[ic][ic] += gmin_floor;
+                    }
                 }
                 if bp.re > 0.0 {
-                    g_dc[bjt.int_emitter][bjt.int_emitter] += gmin_floor;
+                    if let Some(ie) = bjt.int_emitter {
+                        g_dc[ie][ie] += gmin_floor;
+                    }
                 }
             }
         }
@@ -1023,19 +1044,42 @@ fn build_dc_system(
             dc_n_i[i][s + 1] = 0.0;
         }
 
+        // Zero-then-ACCUMULATE (rows/cols were cleared above), mirroring
+        // mna.rs `expand_bjt_internal_nodes`. Assign-stamps overwrote the
+        // first entry when two terminals share a matrix row (diode-connected
+        // `Q x x e`, strapped junctions with a zero parasitic R): e.g. the
+        // Vbc row got `-1` instead of the canceled `+1 - 1 = 0`, sensing a
+        // phantom `Vbc = -V(x)`. `None` (grounded, R = 0) contributes
+        // nothing — ground is 0 V in N_v and swallows N_i current.
         // N_v: extract Vbe_int = V(basePrime) - V(emitterPrime)
-        dc_n_v[s][bjt.int_base] = 1.0;
-        dc_n_v[s][bjt.int_emitter] = -1.0;
+        if let Some(ib) = bjt.int_base {
+            dc_n_v[s][ib] += 1.0;
+        }
+        if let Some(ie) = bjt.int_emitter {
+            dc_n_v[s][ie] -= 1.0;
+        }
         // N_v: extract Vbc_int = V(basePrime) - V(collectorPrime)
-        dc_n_v[s + 1][bjt.int_base] = 1.0;
-        dc_n_v[s + 1][bjt.int_collector] = -1.0;
+        if let Some(ib) = bjt.int_base {
+            dc_n_v[s + 1][ib] += 1.0;
+        }
+        if let Some(ic) = bjt.int_collector {
+            dc_n_v[s + 1][ic] -= 1.0;
+        }
 
         // N_i: Ic enters collectorPrime, exits emitterPrime
-        dc_n_i[bjt.int_collector][s] = -1.0;
-        dc_n_i[bjt.int_emitter][s] = 1.0;
+        if let Some(ic) = bjt.int_collector {
+            dc_n_i[ic][s] -= 1.0;
+        }
+        if let Some(ie) = bjt.int_emitter {
+            dc_n_i[ie][s] += 1.0;
+        }
         // N_i: Ib enters basePrime, exits emitterPrime
-        dc_n_i[bjt.int_base][s + 1] = -1.0;
-        dc_n_i[bjt.int_emitter][s + 1] = 1.0;
+        if let Some(ib) = bjt.int_base {
+            dc_n_i[ib][s + 1] -= 1.0;
+        }
+        if let Some(ie) = bjt.int_emitter {
+            dc_n_i[ie][s + 1] += 1.0;
+        }
     }
 
     // Classify every DC-system row as voltage-carrying (clamp/damp) or
@@ -2473,21 +2517,27 @@ pub fn solve_dc_operating_point(
         if let Some(slot) = device_slots.iter().find(|s| s.start_idx == bjt.start_idx) {
             if let DeviceParams::Bjt(bp) = &slot.params {
                 if bp.rb > 0.0 && bjt.ext_base > 0 {
-                    v_clamped[bjt.int_base] = v_clamped[bjt.ext_base - 1];
+                    if let Some(ib) = bjt.int_base {
+                        v_clamped[ib] = v_clamped[bjt.ext_base - 1];
+                    }
                 }
                 if bp.rc > 0.0 && bjt.ext_collector > 0 {
-                    v_clamped[bjt.int_collector] = v_clamped[bjt.ext_collector - 1];
+                    if let Some(ic) = bjt.int_collector {
+                        v_clamped[ic] = v_clamped[bjt.ext_collector - 1];
+                    }
                 }
                 if bp.re > 0.0 && bjt.ext_emitter > 0 {
-                    let base_v = if bp.rb > 0.0 {
-                        v_clamped[bjt.int_base]
-                    } else if bjt.ext_base > 0 {
-                        v_clamped[bjt.ext_base - 1]
-                    } else {
-                        0.0
-                    };
-                    let sign = if bp.is_pnp { -1.0 } else { 1.0 };
-                    v_clamped[bjt.int_emitter] = base_v - sign * 0.65;
+                    if let Some(ie) = bjt.int_emitter {
+                        let base_v = if bp.rb > 0.0 {
+                            bjt.int_base.map(|ib| v_clamped[ib]).unwrap_or(0.0)
+                        } else if bjt.ext_base > 0 {
+                            v_clamped[bjt.ext_base - 1]
+                        } else {
+                            0.0
+                        };
+                        let sign = if bp.is_pnp { -1.0 } else { 1.0 };
+                        v_clamped[ie] = base_v - sign * 0.65;
+                    }
                 }
             }
         }
@@ -2655,21 +2705,27 @@ pub fn solve_dc_operating_point(
         if let Some(slot) = device_slots.iter().find(|s| s.start_idx == bjt.start_idx) {
             if let DeviceParams::Bjt(bp) = &slot.params {
                 if bp.rb > 0.0 && bjt.ext_base > 0 {
-                    v[bjt.int_base] = v[bjt.ext_base - 1];
+                    if let Some(ib) = bjt.int_base {
+                        v[ib] = v[bjt.ext_base - 1];
+                    }
                 }
                 if bp.rc > 0.0 && bjt.ext_collector > 0 {
-                    v[bjt.int_collector] = v[bjt.ext_collector - 1];
+                    if let Some(ic) = bjt.int_collector {
+                        v[ic] = v[bjt.ext_collector - 1];
+                    }
                 }
                 if bp.re > 0.0 && bjt.ext_emitter > 0 {
-                    let base_v = if bp.rb > 0.0 {
-                        v[bjt.int_base]
-                    } else if bjt.ext_base > 0 {
-                        v[bjt.ext_base - 1]
-                    } else {
-                        0.0
-                    };
-                    let sign = if bp.is_pnp { -1.0 } else { 1.0 };
-                    v[bjt.int_emitter] = base_v - sign * 0.65;
+                    if let Some(ie) = bjt.int_emitter {
+                        let base_v = if bp.rb > 0.0 {
+                            bjt.int_base.map(|ib| v[ib]).unwrap_or(0.0)
+                        } else if bjt.ext_base > 0 {
+                            v[bjt.ext_base - 1]
+                        } else {
+                            0.0
+                        };
+                        let sign = if bp.is_pnp { -1.0 } else { 1.0 };
+                        v[ie] = base_v - sign * 0.65;
+                    }
                 }
             }
         }

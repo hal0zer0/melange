@@ -1477,8 +1477,19 @@ impl RustEmitter {
         // behavioral full-LU circuit as well.
         let has_opamp_slew = ir.opamps.iter().any(|oa| oa.sr.is_finite());
         let has_full_lu_substep = use_full_nodal && (m > 0 || !ir.behavioral_sources.is_empty());
+        // Device self-heating reads `state.current_sample_rate` for its
+        // thermal dt (emit_self_heating_thermal_updates, DK parity) — the
+        // field must exist even for a Schur-routed thermal circuit with no
+        // pots/switches/slew.
+        let has_thermal_sr_consumer = ir.device_slots.iter().any(|s| match &s.params {
+            DeviceParams::Bjt(bp) => bp.has_self_heating(),
+            DeviceParams::Diode(dp) => dp.has_self_heating(),
+            DeviceParams::Tube(tp) => tp.has_self_heating(),
+            _ => false,
+        });
         let needs_rebuild_state = has_pots || has_switches || has_sat_ind || has_sat_coupled;
-        let needs_current_sr = needs_rebuild_state || has_opamp_slew || has_full_lu_substep;
+        let needs_current_sr =
+            needs_rebuild_state || has_opamp_slew || has_full_lu_substep || has_thermal_sr_consumer;
         let has_any_saturation = has_sat_ind || has_sat_coupled;
 
         let mut code = section_banner("STATE STRUCTURE (Nodal solver)");
@@ -2739,32 +2750,41 @@ impl RustEmitter {
         }
         if ir.dc_block {
             code.push_str("            self.dc_block_r = DC_BLOCK_R;\n");
-            // Reseed the blocker history from the DC operating point (matches
-            // reset() and the DK template) — zeroing x_prev makes the first
-            // post-rate-change sample see a full-scale DC step through the
-            // differentiator.
-            emit_dc_block_history_reseed(&mut code, ir, "            ", "self");
         }
-        if os_factor > 1 {
-            let os_info = oversampling_info(os_factor);
-            code.push_str(&format!(
-                "            self.os_up_state = [0.0; {}];\n\
-                 \x20           self.os_dn_state = [[0.0; {}]; NUM_OUTPUTS];\n",
-                os_info.state_size, os_info.state_size
-            ));
-            if os_factor == 4 {
-                code.push_str(&format!(
-                    "            self.os_up_state_outer = [0.0; {}];\n\
-                     \x20           self.os_dn_state_outer = [[0.0; {}]; NUM_OUTPUTS];\n",
-                    os_info.state_size_outer, os_info.state_size_outer
-                ));
-            }
-        }
+        code.push_str(
+            "            // POLICY: transient state — oversampler filter history,\n\
+             \x20           // DC-blocker history, solver v_prev/i_nl history — is\n\
+             \x20           // PRESERVED here. Only coefficients and matrices are\n\
+             \x20           // restored: a same-rate call is a no-op reconfiguration\n\
+             \x20           // and must not click (DK-template parity).\n",
+        );
         code.push_str("            return;\n");
         if has_pots || has_switches {
             // Close the `if all_default` guard — off-default pots/switches
-            // fall through to the full rebuild below.
+            // rebuild at the live values, still preserving transient state
+            // (mirrors the DK pot-variant same-rate off-default arm).
             code.push_str("            }\n");
+            code.push_str(
+                "            // Same rate but pots/switches are off-default: rebuild the\n\
+                 \x20           // matrices at the live values. Rate-dependent coefficients\n\
+                 \x20           // equal their baked defaults at this rate; transient state\n\
+                 \x20           // is preserved (see POLICY above).\n",
+            );
+            if ir.dc_block {
+                code.push_str("            self.dc_block_r = DC_BLOCK_R;\n");
+            }
+            if ir.behavioral_sources.iter().any(|b| b.time_dependent) {
+                code.push_str(&format!(
+                    "            self.bsrc_inv_dt = sample_rate * {}.0;\n\
+                     \x20           self.bsrc_half_dt = 0.5 / (sample_rate * {}.0);\n",
+                    ir.solver_config.oversampling_factor, ir.solver_config.oversampling_factor
+                ));
+            }
+            code.push_str(&format!(
+                "            self.rebuild_matrices(sample_rate * {}.0);\n",
+                ir.solver_config.oversampling_factor
+            ));
+            code.push_str("            return;\n");
         }
         code.push_str("        }\n\n");
 
@@ -7547,7 +7567,14 @@ impl RustEmitter {
     ///
     /// `dt` is the INTERNAL sample period: this code runs inside the
     /// per-internal-sample body, which executes OVERSAMPLING_FACTOR× per base
-    /// sample, so dt = 1/INTERNAL_SAMPLE_RATE when oversampling is active.
+    /// sample. The rate is read from `state.current_sample_rate` (HOST-rate
+    /// semantics, kept live by `set_sample_rate`) × OVERSAMPLING_FACTOR, NOT
+    /// the baked SAMPLE_RATE/INTERNAL_SAMPLE_RATE consts — mirrors the DK
+    /// path's `emit_thermal_tj_advance`. A baked dt makes the thermal time
+    /// constant scale with fs_host/fs_codegen after `set_sample_rate` (e.g.
+    /// 2× too-fast heating at 96 kHz on a 48 kHz build). The
+    /// `needs_current_sr` gate includes thermal devices so the field always
+    /// exists here.
     ///
     /// Temperature scaling after the Tj step:
     /// - BJT: `VT(T) = k/q·Tj`, `IS(T) = IS·(Tj/TAMB)^XTI·exp((EG/vt_nom)·(1-TAMB/Tj))`
@@ -7560,11 +7587,7 @@ impl RustEmitter {
     /// - Triode: Tj only — the Koren coefficients are untouched; the drift
     ///   rides the `VBIAS_ALPHA·(Tj-TAMB)` Vgk shift at the NR call sites.
     fn emit_self_heating_thermal_updates(code: &mut String, ir: &CircuitIR) {
-        let dt_expr = if ir.solver_config.oversampling_factor > 1 {
-            "1.0 / INTERNAL_SAMPLE_RATE"
-        } else {
-            "1.0 / SAMPLE_RATE"
-        };
+        let dt_expr = "1.0 / (state.current_sample_rate * OVERSAMPLING_FACTOR as f64)";
         // Exact exponential Tj step (or quasi-static form when CTH ≤ 0).
         // Expects `p` (dissipated power, W) in scope; leaves the [200,500] K
         // clamped Tj in `state.device_{dev_num}_tj`.

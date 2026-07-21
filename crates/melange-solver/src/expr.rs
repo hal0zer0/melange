@@ -51,6 +51,14 @@ pub enum Var {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UnaryFn {
     Sqrt,
+    /// INTERNAL — not parseable. The derivative paired with the domain-clamped
+    /// `sqrt` value (`max(x, 0).sqrt()`): `0.5/sqrt(x)` for `x > 0`, exactly
+    /// `0` in the clamped-flat region `x <= 0` (the value is flat there, so
+    /// the slope must be too — the old `0.5/(sqrt(x)+1e-150)` guard put a
+    /// ~5e149 cliff in the NR Jacobian, freezing any node that dipped below
+    /// the domain and risking inf-product NaN in the LU).
+    /// Produced only by differentiating [`UnaryFn::Sqrt`].
+    SqrtDeriv,
     Abs,
     Exp,
     /// INTERNAL — not parseable. The derivative paired with the clamped `exp`
@@ -59,6 +67,12 @@ pub enum UnaryFn {
     /// Produced only by differentiating [`UnaryFn::Exp`].
     ExpDeriv,
     Ln,
+    /// INTERNAL — not parseable. The derivative paired with the domain-clamped
+    /// `ln` value (`ln(max(x, 1e-300))`): `1/x` for `x > 1e-300`, exactly `0`
+    /// in the clamped-flat region (the old `1/max(x, 1e-300)` guard emitted a
+    /// 1e300 Jacobian entry there — same freeze/overflow class as SqrtDeriv).
+    /// Produced only by differentiating [`UnaryFn::Ln`].
+    LnDeriv,
     Sin,
     Cos,
     Tanh,
@@ -842,17 +856,28 @@ fn sign_subgradient(a: &Expr) -> Expr {
 fn func1_derivative(f: UnaryFn, a: &Expr) -> Expr {
     use Expr::*;
     match f {
-        // d/dx sqrt(x) = 1/(2*sqrt(x)). The value clamps the domain
-        // (`max(0.0).sqrt()`), so the raw form is +inf at x <= 0; the 1e-150
-        // denominator guard makes the slope at/below 0 huge (5e149) but
-        // FINITE — NR sees a cliff and takes a tiny step instead of NaN.
-        UnaryFn::Sqrt => Div(
-            Box::new(Const(0.5)),
-            Box::new(Add(
-                Box::new(Func1(UnaryFn::Sqrt, Box::new(a.clone()))),
-                Box::new(Const(1e-150)),
+        // d/dx sqrt(x) = 1/(2*sqrt(x)) inside the domain; the value clamps
+        // the domain (`max(0.0).sqrt()`), so the paired derivative is exactly
+        // 0 in the flat region x <= 0 — value and slope agree everywhere
+        // (same pattern as Exp/ExpDeriv). The old 1e-150-guarded form put a
+        // ~5e149 cliff in the flat region: Newton steps of residual/5e149
+        // froze any node starting at (or dipping below) 0, and products with
+        // other Jacobian entries could overflow to inf → NaN in the LU.
+        UnaryFn::Sqrt => Func1(UnaryFn::SqrtDeriv, Box::new(a.clone())),
+        // d/dx [0.5·x^(-1/2)] = -0.25·x^(-3/2) inside the domain, 0 in the
+        // flat region. Written as -0.5·SqrtDeriv(x)/max(x, 1e-300) so the
+        // flat-region zero propagates and the division is guarded.
+        UnaryFn::SqrtDeriv => Neg(Box::new(Div(
+            Box::new(Mul(
+                Box::new(Const(0.5)),
+                Box::new(Func1(UnaryFn::SqrtDeriv, Box::new(a.clone()))),
             )),
-        ),
+            Box::new(Func2(
+                BinFn::Max,
+                Box::new(a.clone()),
+                Box::new(Const(1e-300)),
+            )),
+        ))),
         // d/dx abs(x) = sign(x), as the branchless subgradient
         // x/(|x|+1e-300): exactly 0 at x == 0, never 0/0 = NaN. (The previous
         // x/abs(x) form claimed an epsilon guard "at codegen" that did not
@@ -866,17 +891,18 @@ fn func1_derivative(f: UnaryFn, a: &Expr) -> Expr {
         // again (2nd derivative), keep the pairing: inside the window the
         // slope's slope is exp(x) again, outside it is 0.
         UnaryFn::ExpDeriv => Func1(UnaryFn::ExpDeriv, Box::new(a.clone())),
-        // d/dx ln(x) = 1/x, guarded to match the value's ln(max(x, 1e-300)):
-        // 1/max(x, 1e-300) is finite (<= 1e300) for ALL x, including 0 and
-        // negatives, where the value is pinned at ln(1e-300).
-        UnaryFn::Ln => Div(
-            Box::new(Const(1.0)),
-            Box::new(Func2(
-                BinFn::Max,
-                Box::new(a.clone()),
-                Box::new(Const(1e-300)),
-            )),
-        ),
+        // d/dx ln(x) = 1/x inside the domain; the value is pinned at
+        // ln(1e-300) for x <= 1e-300, so the paired derivative is exactly 0
+        // there — value and slope agree everywhere (same pattern as
+        // Exp/ExpDeriv). The old 1/max(x, 1e-300) form emitted a 1e300
+        // Jacobian entry in the flat region (freeze + inf-product NaN risk).
+        UnaryFn::Ln => Func1(UnaryFn::LnDeriv, Box::new(a.clone())),
+        // d/dx [1/x] = -1/x² inside the domain, 0 in the flat region —
+        // exactly -LnDeriv(x)² everywhere.
+        UnaryFn::LnDeriv => Neg(Box::new(Mul(
+            Box::new(Func1(UnaryFn::LnDeriv, Box::new(a.clone()))),
+            Box::new(Func1(UnaryFn::LnDeriv, Box::new(a.clone()))),
+        ))),
         // d/dx sin(x) = cos(x)
         UnaryFn::Sin => Func1(UnaryFn::Cos, Box::new(a.clone())),
         // d/dx cos(x) = -sin(x)
@@ -1165,6 +1191,28 @@ fn safe_exp_deriv(x: f64) -> f64 {
     }
 }
 
+/// The paired derivative of the domain-clamped sqrt value `max(x, 0).sqrt()`:
+/// `0.5/sqrt(x)` inside the domain, exactly 0 in the clamped-flat region
+/// `x <= 0`. Emitter inlines the same logic (see [`Expr::to_rust`]).
+fn safe_sqrt_deriv(x: f64) -> f64 {
+    if x > 0.0 {
+        0.5 / x.sqrt()
+    } else {
+        0.0
+    }
+}
+
+/// The paired derivative of the domain-clamped ln value `ln(max(x, 1e-300))`:
+/// `1/x` inside the domain, exactly 0 in the clamped-flat region
+/// `x <= 1e-300`. Emitter inlines the same logic (see [`Expr::to_rust`]).
+fn safe_ln_deriv(x: f64) -> f64 {
+    if x > 1e-300 {
+        1.0 / x
+    } else {
+        0.0
+    }
+}
+
 /// Near-integer exponent predicate shared by the `pow` value ([`bsrc_pow`]) and
 /// its symbolic derivative, and mirrored textually by the emitted Rust — the
 /// three MUST stay in sync. This is a cleaned-up form of ngspice `PTpower`'s
@@ -1223,10 +1271,12 @@ impl Expr {
                 let x = a.eval(ctx);
                 match f {
                     UnaryFn::Sqrt => x.max(0.0).sqrt(),
+                    UnaryFn::SqrtDeriv => safe_sqrt_deriv(x),
                     UnaryFn::Abs => x.abs(),
                     UnaryFn::Exp => safe_exp(x),
                     UnaryFn::ExpDeriv => safe_exp_deriv(x),
                     UnaryFn::Ln => x.max(1e-300).ln(),
+                    UnaryFn::LnDeriv => safe_ln_deriv(x),
                     UnaryFn::Sin => x.sin(),
                     UnaryFn::Cos => x.cos(),
                     UnaryFn::Tanh => x.tanh(),
@@ -1304,6 +1354,12 @@ impl Expr {
                 match f {
                     // sqrt guarded at 0 (the limiter already adds 1e-9 inside)
                     UnaryFn::Sqrt => format!("({x}).max(0.0).sqrt()"),
+                    // Paired derivative of the domain-clamped sqrt: 0 where
+                    // the value is flat. Matches interpreter `safe_sqrt_deriv`.
+                    UnaryFn::SqrtDeriv => format!(
+                        "({{ let bsx: f64 = {x}; \
+                         if bsx > 0.0 {{ 0.5 / bsx.sqrt() }} else {{ 0.0 }} }})"
+                    ),
                     UnaryFn::Abs => format!("({x}).abs()"),
                     // Inline clamp — matches interpreter `safe_exp`.
                     UnaryFn::Exp => format!("({x}).clamp(-40.0, 40.0).exp()"),
@@ -1314,6 +1370,12 @@ impl Expr {
                          if bsx >= -40.0 && bsx <= 40.0 {{ bsx.exp() }} else {{ 0.0 }} }})"
                     ),
                     UnaryFn::Ln => format!("({x}).max(1e-300).ln()"),
+                    // Paired derivative of the domain-clamped ln: 0 where the
+                    // value is flat. Matches interpreter `safe_ln_deriv`.
+                    UnaryFn::LnDeriv => format!(
+                        "({{ let bsx: f64 = {x}; \
+                         if bsx > 1e-300 {{ 1.0 / bsx }} else {{ 0.0 }} }})"
+                    ),
                     UnaryFn::Sin => format!("({x}).sin()"),
                     UnaryFn::Cos => format!("({x}).cos()"),
                     UnaryFn::Tanh => format!("({x}).tanh()"),
@@ -1711,24 +1773,32 @@ mod tests {
         let d = analytic_diff("min(V(a), V(b))", "a", &[("a", 0.0), ("b", 0.0)]);
         assert!((d - 0.5).abs() < 1e-12, "min tie at origin: got {d}");
 
-        // sqrt at 0 and below: value is clamped flat (max(0).sqrt()); the
-        // guarded derivative 0.5/(sqrt+1e-150) is a huge-but-FINITE cliff
-        // (5e149), never +inf/NaN.
+        // sqrt at 0 and below: value is clamped flat (max(0).sqrt()), so the
+        // paired derivative is exactly 0 — same value/slope pairing as exp.
+        // (The old 0.5/(sqrt+1e-150) guard put a ~5e149 cliff here: Newton
+        // steps of residual/5e149 froze a node starting at 0, and Jacobian
+        // products could overflow to inf → NaN in the LU.)
         for x in [0.0, -1.0] {
             let d = analytic_diff("sqrt(V(a))", "a", &[("a", x)]);
-            assert!(
-                d.is_finite() && d > 0.0,
-                "sqrt' at {x}: expected finite cliff, got {d}"
-            );
+            assert_eq!(d, 0.0, "sqrt' at {x} (clamped-flat region): got {d}");
         }
+        // Just inside the domain the true derivative is emitted (0.5/sqrt(x)).
+        let d = analytic_diff("sqrt(V(a))", "a", &[("a", 0.25)]);
+        assert!(
+            (d - 1.0).abs() < 1e-12,
+            "sqrt' at 0.25: expected 1.0, got {d}"
+        );
 
-        // ln at 0 and below: value pinned at ln(1e-300); derivative
-        // 1/max(x,1e-300) = 1e300 — finite, never inf/NaN.
+        // ln at 0 and below: value pinned flat at ln(1e-300), so the paired
+        // derivative is exactly 0 (was a 1e300 cliff — same freeze/overflow
+        // class as sqrt).
         for x in [0.0, -1.0] {
             let d = analytic_diff("ln(V(a))", "a", &[("a", x)]);
-            assert!(d.is_finite(), "ln' at {x}: got {d}");
-            assert!(d > 1e299, "ln' at {x}: expected the ~1e300 cliff, got {d}");
+            assert_eq!(d, 0.0, "ln' at {x} (clamped-flat region): got {d}");
         }
+        // Just inside the domain the true derivative is emitted (1/x).
+        let d = analytic_diff("ln(V(a))", "a", &[("a", 0.5)]);
+        assert!((d - 2.0).abs() < 1e-12, "ln' at 0.5: expected 2.0, got {d}");
 
         // exp outside the ±40 clamp window: value is flat, slope must be
         // exactly 0 (paired ExpDeriv) — and match the (flat) numeric diff.
@@ -1919,24 +1989,26 @@ mod tests {
             "abs' emission must carry the sign guard: {d}"
         );
 
-        // sqrt derivative: guarded denominator.
+        // sqrt derivative: flat-region-gated (0 for x <= 0), true 0.5/sqrt(x)
+        // inside the domain — pairs with the max(0).sqrt() value.
         let d = parse("sqrt(V(a))")
             .diff(&Var::Node("a".into()))
             .simplify()
             .to_rust(&r);
         assert!(
-            d.contains("1e-150"),
-            "sqrt' emission must carry the 1e-150 guard: {d}"
+            d.contains("bsx > 0.0") && d.contains("0.5 / bsx.sqrt()") && d.contains("else { 0.0 }"),
+            "sqrt' emission must gate on the value's clamped-flat region: {d}"
         );
 
-        // ln derivative: guarded 1/max(x, 1e-300).
+        // ln derivative: flat-region-gated (0 for x <= 1e-300), true 1/x
+        // inside the domain — pairs with the ln(max(x, 1e-300)) value.
         let d = parse("ln(V(a))")
             .diff(&Var::Node("a".into()))
             .simplify()
             .to_rust(&r);
         assert!(
-            d.contains(".max(1e-300)"),
-            "ln' emission must be guarded: {d}"
+            d.contains("bsx > 1e-300") && d.contains("1.0 / bsx") && d.contains("else { 0.0 }"),
+            "ln' emission must gate on the value's clamped-flat region: {d}"
         );
 
         // pow with constant integer exponent → sign-correct powi.

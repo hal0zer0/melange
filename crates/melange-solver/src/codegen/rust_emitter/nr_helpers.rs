@@ -471,18 +471,22 @@ pub(super) fn emit_nr_limit_and_converge(
     ));
     code.push_str(&format!("{indent}{{\n"));
     code.push_str(&format!("{indent}    let mut nr_converged = true;\n"));
+    // NaN-honest predicates: written as `!(a <= b)` so a non-finite step or
+    // residual reads as NOT converged (mirrors the nodal emitter; a NaN
+    // iterate must flow into the BE fallback, not exit NR "converged" and
+    // trip the sample-level NaN reset). Do not simplify to `a > b`.
     // Voltage-step check: only when not limited (step direction is reliable)
     code.push_str(&format!("{indent}    if !any_limited {{\n"));
     for i in 0..dim {
         code.push_str(&format!(
-            "{indent}        {{ let step = dv{i} * alpha_scalar; let v_new = v_d{i} + step; let v_thr = 1e-3 * v_d{i}.abs().max(v_new.abs()) + 1e-6; if step.abs() > v_thr {{ nr_converged = false; }} }}\n"
+            "{indent}        {{ let step = dv{i} * alpha_scalar; let v_new = v_d{i} + step; let v_thr = 1e-3 * v_d{i}.abs().max(v_new.abs()) + 1e-6; if !(step.abs() <= v_thr) {{ nr_converged = false; }} }}\n"
         ));
     }
     code.push_str(&format!("{indent}    }}\n"));
     // Current residual check: always (K-independent, catches cancellation artifacts)
     for i in 0..dim {
         code.push_str(&format!(
-            "{indent}    {{ let i_thr = 1e-3 * i_nl[{i}].abs().max(i_dev{i}.abs()).max(1e-9) + 1e-12; if f{i}.abs() > i_thr {{ nr_converged = false; }} }}\n"
+            "{indent}    {{ let i_thr = 1e-3 * i_nl[{i}].abs().max(i_dev{i}.abs()).max(1e-9) + 1e-12; if !(f{i}.abs() <= i_thr) {{ nr_converged = false; }} }}\n"
         ));
     }
     code.push_str(&format!("{indent}    if nr_converged {{\n"));
@@ -608,9 +612,11 @@ pub(super) fn emit_schur_nr_limit_and_converge(
     ));
     code.push_str(&format!("{indent}if !any_limited {{\n"));
     code.push_str(&format!("{indent}    let mut nr_converged = true;\n"));
+    // NaN-honest predicate: `!(dv.abs() <= threshold)` reads a non-finite
+    // step as NOT converged (mirrors the nodal emitter). Do not simplify.
     for i in 0..dim {
         code.push_str(&format!(
-            "{indent}    {{ let dv = dv_trial{i} * global_alpha; let threshold = 1e-3 * v_d{i}.abs().max((v_d{i} + dv).abs()) + 1e-6; if dv.abs() > threshold {{ nr_converged = false; }} }}\n"
+            "{indent}    {{ let dv = dv_trial{i} * global_alpha; let threshold = 1e-3 * v_d{i}.abs().max((v_d{i} + dv).abs()) + 1e-6; if !(dv.abs() <= threshold) {{ nr_converged = false; }} }}\n"
         ));
     }
     code.push_str(&format!("{indent}    if nr_converged {{\n"));

@@ -737,7 +737,7 @@ impl CircuitState {
                 }
                 k[i][j] = sum;
             }
-        }
+        }{{ k_eff_adjust_lines }}
 
         self.s = s;
         self.a_neg = a_neg;
@@ -793,7 +793,7 @@ impl CircuitState {
                 }
                 k_be[i][j] = sum;
             }
-        }
+        }{{ k_be_eff_adjust_lines }}
         self.s_be = s_be;
         self.k_be = k_be;
         self.s_ni_be = s_ni_be;

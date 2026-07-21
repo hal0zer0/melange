@@ -308,10 +308,17 @@ fn test_self_heating_exact_exponential_thermal_step() {
         !code.contains("let d_tj ="),
         "forward-Euler thermal step must be gone"
     );
-    // No oversampling: dt at base rate.
+    // dt must track the LIVE sample rate (set_sample_rate), not a baked
+    // compile-rate const — a baked dt gives the wrong thermal tau after a
+    // host rate change (DK parity; 2026-07 review-round-2 fix). With
+    // oversampling off, OVERSAMPLING_FACTOR is 1 and this is the base rate.
     assert!(
-        code.contains("let dt = 1.0 / SAMPLE_RATE;"),
-        "dt must be the base-rate period when oversampling is off"
+        code.contains("let dt = 1.0 / (state.current_sample_rate * OVERSAMPLING_FACTOR as f64);"),
+        "thermal dt must derive from state.current_sample_rate"
+    );
+    assert!(
+        !code.contains("let dt = 1.0 / SAMPLE_RATE;"),
+        "baked compile-rate thermal dt must be gone"
     );
 
     // SPICE3f5 diode IS(T): both exponents divided by the ideality factor N
@@ -336,10 +343,17 @@ fn test_self_heating_dt_uses_internal_rate_under_oversampling() {
     let mut config = support::config_for_spice(SELF_HEATING_DIODE_SPICE, SR);
     config.oversampling_factor = 4;
     let (code, _n, _m) = support::generate_circuit_code_nodal(SELF_HEATING_DIODE_SPICE, &config);
+    // The update runs OVERSAMPLING_FACTOR times per base sample, so dt is the
+    // internal period — derived from the LIVE rate, not the baked
+    // INTERNAL_SAMPLE_RATE const (wrong thermal tau after set_sample_rate;
+    // 2026-07 review-round-2 fix, DK parity).
     assert!(
-        code.contains("let dt = 1.0 / INTERNAL_SAMPLE_RATE;"),
-        "thermal dt must be the internal (oversampled) period — the update \
-         runs OVERSAMPLING_FACTOR times per base sample"
+        code.contains("let dt = 1.0 / (state.current_sample_rate * OVERSAMPLING_FACTOR as f64);"),
+        "thermal dt must be the internal-rate period derived from state.current_sample_rate"
+    );
+    assert!(
+        !code.contains("let dt = 1.0 / INTERNAL_SAMPLE_RATE;"),
+        "baked internal-rate thermal dt must be gone"
     );
     // Sanity: it still compiles and runs at 4x OS.
     let circuit = support::build_circuit_nodal(SELF_HEATING_DIODE_SPICE, &config, "sh_diode_os4");

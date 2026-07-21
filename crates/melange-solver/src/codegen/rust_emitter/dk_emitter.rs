@@ -610,6 +610,36 @@ impl RustEmitter {
             &named_const_entries(&ir.named_constants.nodes),
         );
 
+        // K_eff twin for the no-pot set_sample_rate rebuild (template body).
+        // The baked K_DEFAULT/K_BE_DEFAULT and the pot-path rebuild_matrices
+        // both absorb parasitic-BJT RB/RC/RE into K; a genuine rate change
+        // through the template body must apply the same absorption or the
+        // parasitics are electrically deleted at any non-codegen host rate.
+        // The fragments render byte-neutral (empty string, no extra lines)
+        // when no slot qualifies — which is every shipped circuit today.
+        let k_eff_stmts = k_eff_adjust_stmts(ir, "k", "        ");
+        let k_eff_fragment = if k_eff_stmts.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "\n\n        // K_eff: absorb parasitic-BJT R drops into K so v_d = p + state.k * i\n\
+                 \x20       // gives the internal junction voltage directly. Lets bjt_evaluate\n\
+                 \x20       // (intrinsic) replace the inner-NR cost of bjt_with_parasitics.\n{}",
+                k_eff_stmts.trim_end_matches('\n')
+            )
+        };
+        ctx.insert("k_eff_adjust_lines", &k_eff_fragment);
+        let k_be_eff_stmts = k_eff_adjust_stmts(ir, "k_be", "        ");
+        let k_be_eff_fragment = if k_be_eff_stmts.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "\n        // K_eff for the BE kernel (same parasitic-BJT absorption as trap K)\n{}",
+                k_be_eff_stmts.trim_end_matches('\n')
+            )
+        };
+        ctx.insert("k_be_eff_adjust_lines", &k_be_eff_fragment);
+
         // Runtime DC operating point recompute (Oomox P6 / Phase E). The
         // template renders a stub body when this flag is on; full device
         // eval + NR loop emission is layered on in subsequent commits.
@@ -1655,32 +1685,14 @@ impl RustEmitter {
         // Gated on slot.dimension == 2: FA-reduced (1D) BJTs ignore parasitics
         // by design (see ir.rs::detect_forward_active_bjts comment), and their
         // start_idx+1 lands in the next device's slot, not the same BJT's Vbc row.
-        let mut emitted_k_eff_header = false;
-        for slot in &ir.device_slots {
-            if let DeviceParams::Bjt(bp) = &slot.params {
-                if bp.has_parasitics() && !slot.has_internal_mna_nodes && slot.dimension == 2 {
-                    if !emitted_k_eff_header {
-                        code.push_str(
-                            "\n        // K_eff: absorb parasitic-BJT R drops into K so v_d = p + state.k * i\n\
-                             \x20       // gives the internal junction voltage directly. Lets bjt_evaluate\n\
-                             \x20       // (intrinsic) replace the inner-NR cost of bjt_with_parasitics.\n",
-                        );
-                        emitted_k_eff_header = true;
-                    }
-                    let s = slot.start_idx;
-                    let s1 = s + 1;
-                    code.push_str(&format!(
-                        "        k[{s}][{s}] -= {re};\n\
-                         \x20       k[{s}][{s1}] -= {rb_re};\n\
-                         \x20       k[{s1}][{s}] -= {neg_rc};\n\
-                         \x20       k[{s1}][{s1}] -= {rb};\n",
-                        re = fmt_f64(bp.re),
-                        rb_re = fmt_f64(bp.rb + bp.re),
-                        neg_rc = fmt_f64(-bp.rc),
-                        rb = fmt_f64(bp.rb),
-                    ));
-                }
-            }
+        let k_eff_stmts = k_eff_adjust_stmts(ir, "k", "        ");
+        if !k_eff_stmts.is_empty() {
+            code.push_str(
+                "\n        // K_eff: absorb parasitic-BJT R drops into K so v_d = p + state.k * i\n\
+                 \x20       // gives the internal junction voltage directly. Lets bjt_evaluate\n\
+                 \x20       // (intrinsic) replace the inner-NR cost of bjt_with_parasitics.\n",
+            );
+            code.push_str(&k_eff_stmts);
         }
 
         code.push_str(
@@ -1755,30 +1767,12 @@ impl RustEmitter {
             // K_eff: same parasitic-BJT absorption as the trap K above —
             // K_BE_DEFAULT is emitted with this adjustment, so the rebuild
             // must apply it too.
-            let mut emitted_be_k_eff_header = false;
-            for slot in &ir.device_slots {
-                if let DeviceParams::Bjt(bp) = &slot.params {
-                    if bp.has_parasitics() && !slot.has_internal_mna_nodes && slot.dimension == 2 {
-                        if !emitted_be_k_eff_header {
-                            code.push_str(
-                                "        // K_eff for the BE kernel (same parasitic-BJT absorption as trap K)\n",
-                            );
-                            emitted_be_k_eff_header = true;
-                        }
-                        let s = slot.start_idx;
-                        let s1 = s + 1;
-                        code.push_str(&format!(
-                            "        k_be[{s}][{s}] -= {re};\n\
-                             \x20       k_be[{s}][{s1}] -= {rb_re};\n\
-                             \x20       k_be[{s1}][{s}] -= {neg_rc};\n\
-                             \x20       k_be[{s1}][{s1}] -= {rb};\n",
-                            re = fmt_f64(bp.re),
-                            rb_re = fmt_f64(bp.rb + bp.re),
-                            neg_rc = fmt_f64(-bp.rc),
-                            rb = fmt_f64(bp.rb),
-                        ));
-                    }
-                }
+            let k_be_eff_stmts = k_eff_adjust_stmts(ir, "k_be", "        ");
+            if !k_be_eff_stmts.is_empty() {
+                code.push_str(
+                    "        // K_eff for the BE kernel (same parasitic-BJT absorption as trap K)\n",
+                );
+                code.push_str(&k_be_eff_stmts);
             }
             code.push_str(
                 "        self.s_be = s_be;\n\
@@ -5319,6 +5313,38 @@ pub(super) fn parasitic_r_p_dk(ir: &CircuitIR, i: usize, j: usize) -> f64 {
         }
     }
     0.0
+}
+
+/// Emit the per-slot K_eff adjustment statements (`{var}[s][s] -= RE;` …) for
+/// every parasitic-absorbed BJT. Gating is identical to [`parasitic_r_p_dk`]:
+/// `has_parasitics() && !has_internal_mna_nodes && dimension == 2`.
+///
+/// Shared by the three K-rebuild sites that must agree byte-for-byte on the
+/// absorption: the baked `K_DEFAULT`/`K_BE_DEFAULT` (via `parasitic_r_p_dk`),
+/// the pot/switch `rebuild_matrices` body, and the no-pot `set_sample_rate`
+/// template body (passed in as `k_eff_adjust_lines`/`k_be_eff_adjust_lines`
+/// context). Returns an empty string when no slot qualifies.
+fn k_eff_adjust_stmts(ir: &CircuitIR, var: &str, indent: &str) -> String {
+    let mut out = String::new();
+    for slot in &ir.device_slots {
+        if let DeviceParams::Bjt(bp) = &slot.params {
+            if bp.has_parasitics() && !slot.has_internal_mna_nodes && slot.dimension == 2 {
+                let s = slot.start_idx;
+                let s1 = s + 1;
+                out.push_str(&format!(
+                    "{indent}{var}[{s}][{s}] -= {re};\n\
+                     {indent}{var}[{s}][{s1}] -= {rb_re};\n\
+                     {indent}{var}[{s1}][{s}] -= {neg_rc};\n\
+                     {indent}{var}[{s1}][{s1}] -= {rb};\n",
+                    re = fmt_f64(bp.re),
+                    rb_re = fmt_f64(bp.rb + bp.re),
+                    neg_rc = fmt_f64(-bp.rc),
+                    rb = fmt_f64(bp.rb),
+                ));
+            }
+        }
+    }
+    out
 }
 
 /// Emit the junction-temperature advance for a self-heating device.
