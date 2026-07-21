@@ -306,7 +306,10 @@ fn test_analyze_linear_circuit_harmonics_at_numerical_floor() {
 
     // CSV: frequency_hz,gain_db,phase_deg,thd_pct,h2_dbc..h5_dbc,nyquist_dbc
     let mut data_rows = 0;
-    for line in stdout.lines().skip_while(|l| !l.starts_with("frequency_hz")) {
+    for line in stdout
+        .lines()
+        .skip_while(|l| !l.starts_with("frequency_hz"))
+    {
         if line.starts_with("frequency_hz") || line.trim().is_empty() {
             continue;
         }

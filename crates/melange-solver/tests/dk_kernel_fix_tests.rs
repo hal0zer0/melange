@@ -64,7 +64,11 @@ R3 s2 0 2.2k
 ";
     let netlist = Netlist::parse(spice).unwrap();
     let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
-    assert_eq!(mna.transformer_groups.len(), 1, "should form one 3-winding group");
+    assert_eq!(
+        mna.transformer_groups.len(),
+        1,
+        "should form one 3-winding group"
+    );
     mna.g[0][0] += 1.0;
 
     match DkKernel::from_mna(&mna, 48000.0) {
@@ -230,8 +234,8 @@ Vdd vdd 0 DC 5
     let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
     mna.g[0][0] += 1.0;
 
-    let kernel = DkKernel::from_mna_augmented(&mna, 48000.0)
-        .expect("augmented MOSFET kernel must build");
+    let kernel =
+        DkKernel::from_mna_augmented(&mna, 48000.0).expect("augmented MOSFET kernel must build");
     let decision = auto_route(&kernel, &mna, false);
     assert!(
         !decision.k_diag_unsafe,

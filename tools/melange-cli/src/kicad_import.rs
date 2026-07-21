@@ -798,8 +798,7 @@ fn format_value(value: &str) -> String {
         return "0".into();
     }
     let mut s = value.trim().to_string();
-    loop {
-        let Some(last) = s.chars().last() else { break };
+    while let Some(last) = s.chars().last() {
         if !"ΩFHVAfhva".contains(last) {
             break;
         }

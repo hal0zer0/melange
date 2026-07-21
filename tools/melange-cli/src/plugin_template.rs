@@ -610,11 +610,10 @@ impl Default for CircuitParams {{
 /// oversampling factor. Must agree with the `latency()` method emitted by
 /// `generate_lib_rs` — the dry-path delay ring uses the same value.
 fn oversampling_latency_samples(oversampling_factor: usize) -> usize {
-    match oversampling_factor {
-        2 => 2,
-        4 => 4,
-        _ => oversampling_factor,
-    }
+    // For the supported half-band factors (2, 4) the decimator group delay in
+    // output samples equals the oversampling factor; factor 1 (no oversampling)
+    // has no decimator and falls through to the same identity.
+    oversampling_factor
 }
 
 fn generate_process_loop(
@@ -1299,7 +1298,11 @@ fn generate_lib_rs(
     let dry_delay_active = options.wet_dry_mix && oversampling_factor > 1;
     let (plugin_struct, plugin_default, init_method, reset_method) = if dry_delay_active {
         let lat = oversampling_latency_samples(oversampling_factor);
-        let default_channels = if num_outputs > 1 || options.mono { 1 } else { 2 };
+        let default_channels = if num_outputs > 1 || options.mono {
+            1
+        } else {
+            2
+        };
         let init_channels = if num_outputs > 1 {
             "1".to_string()
         } else {
@@ -2468,7 +2471,10 @@ mod tests {
             &PluginOptions::default(),
         );
         let pot_line = extract_line(&lib, "set_pot_0(");
-        assert!(pot_line.contains("+ gang_0_pos *"), "pot member: {pot_line}");
+        assert!(
+            pot_line.contains("+ gang_0_pos *"),
+            "pot member: {pot_line}"
+        );
         let cw_line = extract_line(&lib, "set_pot_1(");
         assert!(
             cw_line.contains("(1.0 - gang_0_pos) *"),

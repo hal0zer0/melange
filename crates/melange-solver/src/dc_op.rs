@@ -1051,13 +1051,9 @@ fn build_dc_system(
         *flag = true;
     }
     for mna_bjt in &mna.bjt_internal_nodes {
-        for idx in [
-            mna_bjt.int_base,
-            mna_bjt.int_collector,
-            mna_bjt.int_emitter,
-        ]
-        .into_iter()
-        .flatten()
+        for idx in [mna_bjt.int_base, mna_bjt.int_collector, mna_bjt.int_emitter]
+            .into_iter()
+            .flatten()
         {
             if idx < n_dc {
                 is_voltage_row[idx] = true;
@@ -1098,11 +1094,7 @@ fn build_dc_system(
 ///
 /// Zero rows (tied terminals — degenerate junction) are skipped: there is no
 /// node update that can change such a junction voltage.
-fn distribute_junction_correction(
-    n_v_row: &[f64],
-    correction: f64,
-    pn_corrections: &mut [f64],
-) {
+fn distribute_junction_correction(n_v_row: &[f64], correction: f64, pn_corrections: &mut [f64]) {
     let norm_sq: f64 = n_v_row.iter().map(|x| x * x).sum();
     if norm_sq < 1e-30 {
         return;
@@ -2363,7 +2355,9 @@ pub fn behavioral_dc_op_warning(mna: &MnaSystem) -> Option<String> {
         .behavioral_sources
         .iter()
         .map(|b| match b.kind {
-            crate::parser::BSourceKind::Current => format!("{} (I={{}} treated as I=0/open)", b.name),
+            crate::parser::BSourceKind::Current => {
+                format!("{} (I={{}} treated as I=0/open)", b.name)
+            }
             crate::parser::BSourceKind::Voltage => {
                 format!("{} (V={{}} treated as V=0 constraint)", b.name)
             }
@@ -2617,8 +2611,7 @@ pub fn solve_dc_operating_point(
             // pre-unification this site skipped the diode check, so a
             // diode-only circuit that source-stepped to all-off passed).
             extract_nl_voltages_with(m, &dc_sys.dc_n_v, &v, &mut v_nl);
-            let has_active =
-                solution_has_active_junction(device_slots, &v_nl, has_dc_excitation);
+            let has_active = solution_has_active_junction(device_slots, &v_nl, has_dc_excitation);
             if has_active {
                 log::info!("DC OP Strategy 2 (Source stepping attempt {}, {} steps): converged, active, iters={}",
                     attempt, config.source_steps, this_iters);

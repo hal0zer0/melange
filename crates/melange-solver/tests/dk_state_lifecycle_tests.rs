@@ -402,7 +402,10 @@ fn rhs_const_be_guard_symmetry() {
         referenced, emitted,
         "RHS_CONST_BE reference/emission must be symmetric (referenced={referenced}, emitted={emitted})"
     );
-    assert!(emitted, "DC-source circuit with BE fallback must emit RHS_CONST_BE");
+    assert!(
+        emitted,
+        "DC-source circuit with BE fallback must emit RHS_CONST_BE"
+    );
 }
 
 // ---------------------------------------------------------------------------

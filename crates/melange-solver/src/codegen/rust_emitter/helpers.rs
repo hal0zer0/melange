@@ -761,11 +761,7 @@ const HB_STEEP_7SECTION: [f64; 7] = [
 /// tbw = 0.27 per the hiir cascade rule TBW[stage] = (TBW[stage-1]+0.5)/2,
 /// -95.1 dB over its design stopband. The inner stage only needs to protect
 /// the spectrum the steep outer stage keeps.
-const HB_WIDE_3SECTION: [f64; 3] = [
-    0.06687030230470327,
-    0.2756202830232181,
-    0.6763597685457587,
-];
+const HB_WIDE_3SECTION: [f64; 3] = [0.06687030230470327, 0.2756202830232181, 0.6763597685457587];
 
 /// Oversampling stage configuration.
 pub(super) struct OversamplingInfo {

@@ -415,7 +415,7 @@ mod tests {
         // form; runtime must match.
         let mos = Mosfet::new(ChannelType::N, 2.0, 0.1, 0.01);
         let (gm, gds) = mos.jacobian_partial(2.0, 1.0); // vgs == Vt -> vov = 0
-        // tanh(vd/2VT) gate at vd=1.0 is 1.0 to machine precision.
+                                                        // tanh(vd/2VT) gate at vd=1.0 is 1.0 to machine precision.
         let expected_gm = 1e-12 / (2.0 * crate::VT_ROOM);
         assert!(
             (gm - expected_gm).abs() / expected_gm < 1e-9,
@@ -461,8 +461,7 @@ mod tests {
         // FD Jacobian check at the Vgs=0 operating point
         let eps = 1e-7;
         let (gm, gds) = mos.jacobian_partial(0.0, 10.0);
-        let fd_gm =
-            (mos.drain_current(eps, 10.0) - mos.drain_current(-eps, 10.0)) / (2.0 * eps);
+        let fd_gm = (mos.drain_current(eps, 10.0) - mos.drain_current(-eps, 10.0)) / (2.0 * eps);
         let fd_gds =
             (mos.drain_current(0.0, 10.0 + eps) - mos.drain_current(0.0, 10.0 - eps)) / (2.0 * eps);
         assert!((gm - fd_gm).abs() / fd_gm.abs() < 0.01);

@@ -1461,8 +1461,23 @@ impl Parser {
         let first_char = first.chars().next().unwrap_or(' ').to_ascii_uppercase();
         let known_element_letter = matches!(
             first_char,
-            'R' | 'C' | 'L' | 'V' | 'I' | 'D' | 'Q' | 'J' | 'M' | 'T' | 'P' | 'U' | 'Y' | 'E'
-                | 'G' | 'X' | 'B' | 'K'
+            'R' | 'C'
+                | 'L'
+                | 'V'
+                | 'I'
+                | 'D'
+                | 'Q'
+                | 'J'
+                | 'M'
+                | 'T'
+                | 'P'
+                | 'U'
+                | 'Y'
+                | 'E'
+                | 'G'
+                | 'X'
+                | 'B'
+                | 'K'
         );
         // Require an element-name shape (letter + digit somewhere, identifier
         // chars only) to keep prose titles like "RC lowpass test" quiet.
@@ -1553,9 +1568,7 @@ impl Parser {
                 if let Some((rule, kind)) = expected {
                     let mt = model.model_type.trim().to_ascii_uppercase();
                     let (ok, allowed_desc) = match rule {
-                        TypeRule::Exact(set) => {
-                            (set.iter().any(|a| *a == mt), set.join(", "))
-                        }
+                        TypeRule::Exact(set) => (set.iter().any(|a| *a == mt), set.join(", ")),
                         TypeRule::Prefix(set) => (
                             set.iter().any(|a| mt.starts_with(a)),
                             set.iter()
@@ -2270,10 +2283,8 @@ impl Parser {
             ".subckt" => {
                 self.require_parts(&parts, 2, "a name")?;
                 let subckt_name = parts[1].to_string();
-                let subckt_nodes: Vec<String> = parts[2..]
-                    .iter()
-                    .map(|s| normalize_node_name(s))
-                    .collect();
+                let subckt_nodes: Vec<String> =
+                    parts[2..].iter().map(|s| normalize_node_name(s)).collect();
                 let mut subckt_elements = Vec::new();
 
                 // Collect elements until .ends
@@ -2579,9 +2590,8 @@ impl Parser {
             // Model parameters are dimensionless context: a single trailing
             // 'f'/'F' after a digit is femto (IS=6.734f → 6.734e-15), matching
             // ngspice. Element positions keep the Farad reading for bare 'F'.
-            let value = parse_value_model_param(value_str).map_err(|_| {
-                self.error(format!("Invalid model parameter value: {}", value_str))
-            })?;
+            let value = parse_value_model_param(value_str)
+                .map_err(|_| self.error(format!("Invalid model parameter value: {}", value_str)))?;
             params.push((key, value));
         }
 
@@ -3702,7 +3712,10 @@ impl Parser {
                      is not supported — melange input comes via the input node; remove the \
                      transient spec and keep only the DC value",
                     parts[0],
-                    extra.iter().find(|t| Self::is_transient_spec_token(t)).unwrap()
+                    extra
+                        .iter()
+                        .find(|t| Self::is_transient_spec_token(t))
+                        .unwrap()
                 )));
             }
             return Err(self.error(format!(

@@ -628,5 +628,8 @@ fn main() {
 "#;
     let out = compile_and_run(&code, main_code, "sat_ind_sm_guard");
     let peak: f64 = out.trim().parse().expect("peak parse");
-    assert!(peak > 1e-4, "saturating-inductor circuit should pass signal, peak={peak:.3e}");
+    assert!(
+        peak > 1e-4,
+        "saturating-inductor circuit should pass signal, peak={peak:.3e}"
+    );
 }

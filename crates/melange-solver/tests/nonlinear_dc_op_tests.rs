@@ -1058,19 +1058,12 @@ fn test_dc_op_mosfet_body_effect_parity() {
     let vds = 3.0;
     let vgs = 2.5;
     let v_nl = vec![vds, vgs]; // dim 0 = Vds, dim 1 = Vgs
-    // Source elevated 1.5 V above grounded bulk → Vsb = 1.5 V.
+                               // Source elevated 1.5 V above grounded bulk → Vsb = 1.5 V.
     let v_node = vec![1.5, 0.0, 4.5];
 
     let mut i_nl = vec![0.0; m];
     let mut j_dev = vec![0.0; m * m];
-    evaluate_devices_with_nodes(
-        &v_nl,
-        &[make_slot(0.5)],
-        &mut i_nl,
-        &mut j_dev,
-        m,
-        &v_node,
-    );
+    evaluate_devices_with_nodes(&v_nl, &[make_slot(0.5)], &mut i_nl, &mut j_dev, m, &v_node);
 
     // Hand-computed body-shifted evaluation (same formula the emitters bake):
     //   vt_eff = VT + GAMMA·(√(PHI + Vsb) − √PHI)   (NMOS: sign = +1)
@@ -1088,7 +1081,10 @@ fn test_dc_op_mosfet_body_effect_parity() {
         (j_dev[0] - gds_expected).abs() < 1e-15 && (j_dev[1] - gm_expected).abs() < 1e-15,
         "DC Jacobian must come from the body-shifted device"
     );
-    assert!(i_nl[1].abs() < 1e-30, "insulated gate must carry no current");
+    assert!(
+        i_nl[1].abs() < 1e-30,
+        "insulated gate must carry no current"
+    );
 
     // And it must DIFFER from the GAMMA-ignored evaluation (the pre-fix bug).
     let nominal = Mosfet::new(ChannelType::N, 1.0, 2e-3, 0.01);
@@ -1166,8 +1162,7 @@ fn test_dc_op_vca_thd_parity() {
         i_expected
     );
     assert!(
-        (j_dev[0] - jac_expected[0]).abs() < 1e-15
-            && (j_dev[1] - jac_expected[1]).abs() < 1e-15,
+        (j_dev[0] - jac_expected[0]).abs() < 1e-15 && (j_dev[1] - jac_expected[1]).abs() < 1e-15,
         "DC Jacobian must match thd-carrying Vca"
     );
 
@@ -1221,7 +1216,10 @@ Rout out 0 1
     let netlist_v = Netlist::parse(spice_v).expect("parse failed");
     let mna_v = MnaSystem::from_netlist(&netlist_v).expect("MNA failed");
     let msg_v = behavioral_dc_op_warning(&mna_v).expect("must warn for V={} too");
-    assert!(msg_v.contains("B2"), "warning must name the source: {msg_v}");
+    assert!(
+        msg_v.contains("B2"),
+        "warning must name the source: {msg_v}"
+    );
     assert!(
         msg_v.contains("V=0"),
         "warning must state the V={{}} DC treatment: {msg_v}"

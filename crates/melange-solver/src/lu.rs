@@ -496,8 +496,8 @@ mod tests {
         let bsrc_i = BehavioralStamp {
             is_voltage: false,
             aug_row: None,
-            n_plus_idx: 1, // matrix row 0
-            n_minus_idx: 4, // matrix row 3
+            n_plus_idx: 1,                    // matrix row 0
+            n_minus_idx: 4,                   // matrix row 3
             referenced_node_indices: vec![3], // col 2
         };
         let pattern_i = compute_g_aug_pattern(&a_flat, &[], &[], n, 0, &[], &[bsrc_i]);
@@ -607,14 +607,14 @@ mod tests {
         // row 1 instead.
         let n = 8;
         let pattern: Vec<Vec<usize>> = vec![
-            vec![0, 4, 5],    // node 0
-            vec![1, 5],       // node 1
-            vec![2, 6],       // node 2 (inductor 1 terminal)
-            vec![3, 7],       // node 3 (inductor 2 terminal)
-            vec![0],          // VS1 constraint row — no diagonal
-            vec![0, 1],       // VS2 constraint row — no diagonal
-            vec![2, 6],       // inductor branch 1 — diagonal present
-            vec![3, 7],       // inductor branch 2 — diagonal present
+            vec![0, 4, 5], // node 0
+            vec![1, 5],    // node 1
+            vec![2, 6],    // node 2 (inductor 1 terminal)
+            vec![3, 7],    // node 3 (inductor 2 terminal)
+            vec![0],       // VS1 constraint row — no diagonal
+            vec![0, 1],    // VS2 constraint row — no diagonal
+            vec![2, 6],    // inductor branch 1 — diagonal present
+            vec![3, 7],    // inductor branch 2 — diagonal present
         ];
         // Force the aug rows to be eliminated first (worst case for swaps).
         let elim_order = vec![4, 5, 6, 7, 0, 1, 2, 3];

@@ -177,10 +177,16 @@ fn emit_behavioral_rhs(code: &mut String, ir: &CircuitIR, indent: &str) {
         } else {
             let (np, nm) = (b.n_plus_idx, b.n_minus_idx);
             if np > 0 {
-                code.push_str(&format!("{indent}rhs_work[{}] -= bsrc_{si}_comp;\n", np - 1));
+                code.push_str(&format!(
+                    "{indent}rhs_work[{}] -= bsrc_{si}_comp;\n",
+                    np - 1
+                ));
             }
             if nm > 0 {
-                code.push_str(&format!("{indent}rhs_work[{}] += bsrc_{si}_comp;\n", nm - 1));
+                code.push_str(&format!(
+                    "{indent}rhs_work[{}] += bsrc_{si}_comp;\n",
+                    nm - 1
+                ));
             }
         }
     }
@@ -350,9 +356,7 @@ fn emit_dc_block_history_reseed(code: &mut String, ir: &CircuitIR, indent: &str,
                 "{indent}{recv}.dc_block_x_prev[{oi}] = {recv}.dc_operating_point[{node}];\n"
             ));
         } else {
-            code.push_str(&format!(
-                "{indent}{recv}.dc_block_x_prev[{oi}] = 0.0;\n"
-            ));
+            code.push_str(&format!("{indent}{recv}.dc_block_x_prev[{oi}] = 0.0;\n"));
         }
     }
     code.push_str(&format!(
@@ -1472,8 +1476,7 @@ impl RustEmitter {
         // codegen rate), so the field is emitted for every nonlinear /
         // behavioral full-LU circuit as well.
         let has_opamp_slew = ir.opamps.iter().any(|oa| oa.sr.is_finite());
-        let has_full_lu_substep =
-            use_full_nodal && (m > 0 || !ir.behavioral_sources.is_empty());
+        let has_full_lu_substep = use_full_nodal && (m > 0 || !ir.behavioral_sources.is_empty());
         let needs_rebuild_state = has_pots || has_switches || has_sat_ind || has_sat_coupled;
         let needs_current_sr = needs_rebuild_state || has_opamp_slew || has_full_lu_substep;
         let has_any_saturation = has_sat_ind || has_sat_coupled;
@@ -1692,9 +1695,7 @@ impl RustEmitter {
             code.push_str(
                 "    /// runtime fallback (sparse static pivoting rejected: tiny pivot or\n",
             );
-            code.push_str(
-                "    /// excessive element growth). Selects the matching back-solve.\n",
-            );
+            code.push_str("    /// excessive element growth). Selects the matching back-solve.\n");
             code.push_str("    pub chord_dense: bool,\n\n");
         }
 
@@ -1769,20 +1770,24 @@ impl RustEmitter {
         if needs_rebuild_state && !use_full_nodal {
             code.push_str("    /// Working G matrix (modified by pots/switches)\n");
             code.push_str("    pub g_work: [[f64; N]; N],\n");
-            code.push_str(
-                "    /// Working C matrix (modified by switches/saturating inductors)\n",
-            );
+            code.push_str("    /// Working C matrix (modified by switches/saturating inductors)\n");
             code.push_str("    pub c_work: [[f64; N]; N],\n");
         }
         if needs_current_sr {
-            code.push_str("    /// Current HOST sample rate (Hz), as passed to `set_sample_rate`.\n");
-            code.push_str("    /// Multiply by `OVERSAMPLING_FACTOR` to get the internal rate at\n");
+            code.push_str(
+                "    /// Current HOST sample rate (Hz), as passed to `set_sample_rate`.\n",
+            );
+            code.push_str(
+                "    /// Multiply by `OVERSAMPLING_FACTOR` to get the internal rate at\n",
+            );
             code.push_str("    /// consumption sites (rebuild_matrices, op-amp slew dt, substep\n");
             code.push_str("    /// alpha). Matches the DK path's field semantics (API parity).\n");
             code.push_str("    pub current_sample_rate: f64,\n");
         }
         if needs_rebuild_state {
-            code.push_str("    /// Lazy rebuild flag: set by set_pot/set_switch, cleared by process_sample\n");
+            code.push_str(
+                "    /// Lazy rebuild flag: set by set_pot/set_switch, cleared by process_sample\n",
+            );
             code.push_str("    pub matrices_dirty: bool,\n");
         }
         if needs_current_sr || needs_rebuild_state {
@@ -2723,7 +2728,10 @@ impl RustEmitter {
         // they were rebuilt by any earlier off-rate set_sample_rate call.
         if !ir.matrices.s_sub.is_empty() {
             code.push_str(&format!("            {}s_sub = S_SUB_DEFAULT;\n", cp));
-            code.push_str(&format!("            {}a_neg_sub = A_NEG_SUB_DEFAULT;\n", cp));
+            code.push_str(&format!(
+                "            {}a_neg_sub = A_NEG_SUB_DEFAULT;\n",
+                cp
+            ));
             if m > 0 {
                 code.push_str(&format!("            {}k_sub = K_SUB_DEFAULT;\n", cp));
                 code.push_str(&format!("            {}s_ni_sub = S_NI_SUB_DEFAULT;\n", cp));
@@ -4280,7 +4288,9 @@ impl RustEmitter {
                 code.push_str("                i_nl_sub = i_nl;\n");
                 code.push_str("                if nr_ok { break; }\n");
                 code.push_str("            }\n");
-                code.push_str("            if !nr_ok || !i_nl_sub.iter().all(|x| x.is_finite()) {\n");
+                code.push_str(
+                    "            if !nr_ok || !i_nl_sub.iter().all(|x| x.is_finite()) {\n",
+                );
                 code.push_str("                sub_ok = false;\n");
                 code.push_str("                break;\n");
                 code.push_str("            }\n");
@@ -4294,14 +4304,17 @@ impl RustEmitter {
                 // downstream voltages are handled by output scaling.
                 for oa in &ir.opamps {
                     let target = format!("v_sub[{}]", oa.n_out_idx);
-                    if let Some(stmt) = Self::rail_clamp_stmt(&target, oa.vclamp_lo, oa.vclamp_hi)
-                    {
+                    if let Some(stmt) = Self::rail_clamp_stmt(&target, oa.vclamp_lo, oa.vclamp_hi) {
                         code.push_str(&format!("            {stmt}\n"));
                     }
                 }
                 code.push_str("        }\n");
-                code.push_str("        // Commit only when every sub-step's fixed point settled;\n");
-                code.push_str("        // otherwise leave converged = false so the BE fallback runs.\n");
+                code.push_str(
+                    "        // Commit only when every sub-step's fixed point settled;\n",
+                );
+                code.push_str(
+                    "        // otherwise leave converged = false so the BE fallback runs.\n",
+                );
                 code.push_str("        if sub_ok {\n");
                 code.push_str("            v = v_sub;\n");
                 code.push_str("            i_nl = i_nl_sub;\n");
@@ -4951,9 +4964,7 @@ impl RustEmitter {
             .collect::<Vec<_>>()
             .join(".min(")
             + &")".repeat(dim.saturating_sub(1));
-        code.push_str(&format!(
-            "{indent}let mut alpha_scalar = {min_chain};\n"
-        ));
+        code.push_str(&format!("{indent}let mut alpha_scalar = {min_chain};\n"));
 
         // Global voltage backstop: adaptive limit based on DC operating point voltages
         let max_dc_v = ir
@@ -5013,9 +5024,7 @@ impl RustEmitter {
 
         code.push_str("/// Solve A*x = b using equilibrated LU with partial pivoting + iterative refinement.\n");
         code.push_str("///\n");
-        code.push_str(
-            "/// Asymmetric row/column max-norm equilibration: rows are scaled by\n",
-        );
+        code.push_str("/// Asymmetric row/column max-norm equilibration: rows are scaled by\n");
         code.push_str(
             "/// 1/max_j(|A[i][j]|), then columns by 1/max_i(|A[i][j]|), to reduce the\n",
         );
@@ -5299,9 +5308,7 @@ impl RustEmitter {
         code.push_str(
             "/// too small OR the growth-factor check trips (max |factored entry| > 1e8\n",
         );
-        code.push_str(
-            "/// against the equilibrated unit max-norm input); the caller re-factors\n",
-        );
+        code.push_str("/// against the equilibrated unit max-norm input); the caller re-factors\n");
         code.push_str("/// the same stamped matrix with dense partial-pivoting lu_factor.\n");
         code.push_str("#[inline(always)]\n");
         code.push_str("fn sparse_lu_factor(a: &mut [[f64; N]; N], dr: &mut [f64; N], dc: &mut [f64; N]) -> bool {\n");
@@ -5922,8 +5929,12 @@ impl RustEmitter {
 
             // 2e. Solve with stored LU factors (O(N²) back-solve)
             if ir.sparsity.lu.is_some() {
-                code.push_str("        // 2e. Back-solve with stored LU factors (sparse, or the dense\n");
-                code.push_str("        // runtime fallback when the sparse factorization was rejected)\n");
+                code.push_str(
+                    "        // 2e. Back-solve with stored LU factors (sparse, or the dense\n",
+                );
+                code.push_str(
+                    "        // runtime fallback when the sparse factorization was rejected)\n",
+                );
                 code.push_str("        let mut v_new = rhs_work;\n");
                 code.push_str("        if chord_dense {\n");
                 code.push_str("            lu_back_solve(&chord_lu, &chord_dr, &chord_dc, &chord_perm, &mut v_new);\n");
@@ -5982,7 +5993,9 @@ impl RustEmitter {
                     .filter(|oa| oa.vclamp_hi.is_finite() || oa.vclamp_lo.is_finite())
                     .collect();
                 if !clampable.is_empty() {
-                    code.push_str("        // Per-iteration op-amp output rail clamp (Hard mode)\n");
+                    code.push_str(
+                        "        // Per-iteration op-amp output rail clamp (Hard mode)\n",
+                    );
                     for oa in &clampable {
                         let o = oa.n_out_idx;
                         if oa.vclamp_hi.is_finite() {
@@ -6695,7 +6708,9 @@ impl RustEmitter {
                     .filter(|oa| oa.vclamp_hi.is_finite() || oa.vclamp_lo.is_finite())
                     .collect();
                 if !clampable.is_empty() {
-                    code.push_str("            // Per-iteration op-amp output rail clamp (BE, Hard mode)\n");
+                    code.push_str(
+                        "            // Per-iteration op-amp output rail clamp (BE, Hard mode)\n",
+                    );
                     for oa in &clampable {
                         let o = oa.n_out_idx;
                         if oa.vclamp_hi.is_finite() {
@@ -6768,8 +6783,7 @@ impl RustEmitter {
             {
                 for oa in &ir.opamps {
                     let target = format!("v[{}]", oa.n_out_idx);
-                    if let Some(stmt) = Self::rail_clamp_stmt(&target, oa.vclamp_lo, oa.vclamp_hi)
-                    {
+                    if let Some(stmt) = Self::rail_clamp_stmt(&target, oa.vclamp_lo, oa.vclamp_hi) {
                         code.push_str(&format!("            {stmt}\n"));
                     }
                 }
@@ -6861,7 +6875,8 @@ impl RustEmitter {
             // fallback's `ActiveSetBe | ActiveSet` dispatch arm.
             if matches!(
                 ir.solver_config.opamp_rail_mode,
-                crate::codegen::OpampRailMode::ActiveSetBe | crate::codegen::OpampRailMode::ActiveSet
+                crate::codegen::OpampRailMode::ActiveSetBe
+                    | crate::codegen::OpampRailMode::ActiveSet
             ) {
                 Self::emit_nodal_active_set_resolve(
                     &mut code,
@@ -7029,9 +7044,9 @@ impl RustEmitter {
             .iter()
             .any(|oa| oa.vclamp_hi.is_finite() || oa.vclamp_lo.is_finite());
         match ir.solver_config.opamp_rail_mode {
-            OpampRailMode::Hard
-            | OpampRailMode::ActiveSet
-            | OpampRailMode::ActiveSetBe => any_clampable,
+            OpampRailMode::Hard | OpampRailMode::ActiveSet | OpampRailMode::ActiveSetBe => {
+                any_clampable
+            }
             OpampRailMode::None | OpampRailMode::BoyleDiodes | OpampRailMode::Auto => false,
         }
     }

@@ -103,8 +103,7 @@ pub fn auto_route(kernel: &DkKernel, mna: &MnaSystem, dk_failed: bool) -> Routin
     // control port) have K[i][i] = 0 by construction and are benign.
     let k_diag_unsafe = if !dk_failed && m > 0 {
         (0..m).any(|i| {
-            kernel.k[i * m + i] >= 0.0
-                && mna.n_i.iter().any(|ni_row| ni_row[i].abs() >= 1e-30)
+            kernel.k[i * m + i] >= 0.0 && mna.n_i.iter().any(|ni_row| ni_row[i].abs() >= 1e-30)
         })
     } else {
         false
@@ -129,7 +128,8 @@ pub fn auto_route(kernel: &DkKernel, mna: &MnaSystem, dk_failed: bool) -> Routin
         // which the DK N_v/N_i reduction can't express. They are stamped
         // directly in node space by the nodal emitter.
         route = SolverRoute::Nodal;
-        reason = "behavioral B-source present (node-space stamping requires nodal path)".to_string();
+        reason =
+            "behavioral B-source present (node-space stamping requires nodal path)".to_string();
     } else if dk_failed {
         route = SolverRoute::Nodal;
         reason = "DK kernel build failed (positive feedback or oscillator circuit)".to_string();

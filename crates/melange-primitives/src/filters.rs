@@ -477,28 +477,38 @@ mod tests {
         let fs = 48000.0;
         let low = Biquad::new(BiquadType::low_shelf(1000.0, 6.0), fs);
         let expected_low = [
-            1.0325624832475901,   // b0
-            -1.8388568718996405,  // b1
-            0.8287476843124698,   // b2
-            -1.8444568671609198,  // a1
-            0.8557101722987808,   // a2
+            1.0325624832475901,  // b0
+            -1.8388568718996405, // b1
+            0.8287476843124698,  // b2
+            -1.8444568671609198, // a1
+            0.8557101722987808,  // a2
         ];
         let got_low = [low.b0, low.b1, low.b2, low.a1, low.a2];
         for (g, e) in got_low.iter().zip(expected_low.iter()) {
-            assert!((g - e).abs() < 1e-12, "low shelf: got {:?}, expected {:?}", got_low, expected_low);
+            assert!(
+                (g - e).abs() < 1e-12,
+                "low shelf: got {:?}, expected {:?}",
+                got_low,
+                expected_low
+            );
         }
 
         let high = Biquad::new(BiquadType::high_shelf(1000.0, 6.0), fs);
         let expected_high = [
-            1.9323405094996573,   // b0
-            -3.5641187224398734,  // b1
-            1.6535234303238655,   // b2
-            -1.7808674067995507,  // a1
-            0.8026126241831999,   // a2
+            1.9323405094996573,  // b0
+            -3.5641187224398734, // b1
+            1.6535234303238655,  // b2
+            -1.7808674067995507, // a1
+            0.8026126241831999,  // a2
         ];
         let got_high = [high.b0, high.b1, high.b2, high.a1, high.a2];
         for (g, e) in got_high.iter().zip(expected_high.iter()) {
-            assert!((g - e).abs() < 1e-12, "high shelf: got {:?}, expected {:?}", got_high, expected_high);
+            assert!(
+                (g - e).abs() < 1e-12,
+                "high shelf: got {:?}, expected {:?}",
+                got_high,
+                expected_high
+            );
         }
     }
 

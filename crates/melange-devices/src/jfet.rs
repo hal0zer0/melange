@@ -512,7 +512,7 @@ mod tests {
         // form; runtime must match.
         let jfet = Jfet::new(JfetChannel::N, -2.5, 10e-3);
         let (gm, gds) = jfet.jacobian_partial(-2.5, 1.0); // vgs == vp -> vgst = 0
-        // tanh(vd/2VT) gate at vd=1.0 is 1.0 to machine precision.
+                                                          // tanh(vd/2VT) gate at vd=1.0 is 1.0 to machine precision.
         let expected_gm = 1e-12 / (2.0 * crate::VT_ROOM);
         assert!(
             (gm - expected_gm).abs() / expected_gm < 1e-9,
@@ -563,7 +563,11 @@ mod tests {
             gds
         );
         // Raising Vgs raises Vgd -> more reverse conduction -> Id more negative.
-        assert!(gm < 0.0, "reverse-mode gm should be negative, got {:.3e}", gm);
+        assert!(
+            gm < 0.0,
+            "reverse-mode gm should be negative, got {:.3e}",
+            gm
+        );
     }
 
     /// FD Jacobian checks in the reverse quadrant (Vds < 0 for N-channel),

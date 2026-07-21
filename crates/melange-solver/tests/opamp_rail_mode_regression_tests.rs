@@ -300,7 +300,10 @@ fn m0_schur_active_set_resolve_fires() {
     let out = compile_and_run(&code, DRIVE_MAIN, "m0_schur_activeset");
     let peak = parse_kv(&out, "peak");
     let pins = parse_kv(&out, "pins");
-    assert!(pins > 0.0, "M=0 Schur active-set resolve never pinned (peak={peak:.3})");
+    assert!(
+        pins > 0.0,
+        "M=0 Schur active-set resolve never pinned (peak={peak:.3})"
+    );
     assert!(
         peak <= RAIL + RAIL_EPS,
         "M=0 Schur ActiveSet must bound the output at the rail, got peak={peak:.6}"
@@ -343,7 +346,10 @@ fn m0_full_lu_active_set_resolve_fires() {
     let out = compile_and_run(&code, DRIVE_MAIN, "m0_fulllu_activeset");
     let peak = parse_kv(&out, "peak");
     let pins = parse_kv(&out, "pins");
-    assert!(pins > 0.0, "M=0 full-LU active-set resolve never pinned (peak={peak:.3})");
+    assert!(
+        pins > 0.0,
+        "M=0 full-LU active-set resolve never pinned (peak={peak:.3})"
+    );
     assert!(
         peak <= RAIL + RAIL_EPS,
         "M=0 full-LU ActiveSet must bound the output at the rail, got peak={peak:.6}"

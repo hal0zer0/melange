@@ -3313,7 +3313,8 @@ impl MnaBuilder {
         for members in &mut ordered_groups {
             members.sort_by_key(|m| ind_pos(m));
         }
-        ordered_groups.sort_by_key(|members| members.first().map(|m| ind_pos(m)).unwrap_or(usize::MAX));
+        ordered_groups
+            .sort_by_key(|members| members.first().map(|m| ind_pos(m)).unwrap_or(usize::MAX));
 
         // Track internal nodes added by ideal transformer decomposition.
         // Internal nodes are 1-indexed, starting after the last circuit node.
@@ -4080,7 +4081,6 @@ impl MnaBuilder {
                 }
                 mna.g[o][o] += go;
             }
-
         }
 
         // Allocate augmented rows for current-mode VCA sensing sources

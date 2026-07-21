@@ -1066,12 +1066,7 @@ pub fn collect_resistor_flicker_noise_sources(
 /// flicker tail slightly. Audio-band accuracy is unaffected.
 pub fn kellett_pink_normalized_gain() -> f64 {
     const B: [f64; 6] = [
-        0.0555179,
-        0.0750759,
-        0.1538520,
-        0.3104856,
-        0.5329522,
-        -0.0168980,
+        0.0555179, 0.0750759, 0.1538520, 0.3104856, 0.5329522, -0.0168980,
     ];
     const A: [f64; 6] = [0.99886, 0.99332, 0.96900, 0.86650, 0.55000, -0.7616];
     const N_PTS: usize = 200;

@@ -294,7 +294,10 @@ fn runtime_v_source_stamped_in_all_rhs_rebuilds() {
     );
     let re_rhs = regex_lite_count(&schur, "rhs[", "state.ctrl_v;");
     let re_be = regex_lite_count(&schur, "rhs_be[", "state.ctrl_v;");
-    assert!(re_rhs >= 1, "Schur trap RHS must stamp the runtime V source");
+    assert!(
+        re_rhs >= 1,
+        "Schur trap RHS must stamp the runtime V source"
+    );
     assert!(
         re_be >= 1,
         "Schur BE-fallback RHS must stamp the runtime V source (it vanished \
@@ -303,10 +306,7 @@ fn runtime_v_source_stamped_in_all_rhs_rebuilds() {
 
     // Full-LU route: trap RHS + sub-step RHS + BE fallback.
     let full = {
-        let spice = format!(
-            "{}B_frc frc 0 V={{0}}\nR_frc frc 0 1k\n",
-            CLIPPER_RUNTIME_V
-        );
+        let spice = format!("{}B_frc frc 0 V={{0}}\nR_frc frc 0 1k\n", CLIPPER_RUNTIME_V);
         nodal_code(&spice)
     };
     assert!(
@@ -389,7 +389,9 @@ fn full_lu_diag_counter_contract() {
     // own increments, so scope the count to process_sample.
     let ps_start = find(&code, "pub fn process_sample", "process_sample");
     let ps_code = &code[ps_start..];
-    let bumps = ps_code.matches("state.diag_nr_max_iter_count += 1;").count();
+    let bumps = ps_code
+        .matches("state.diag_nr_max_iter_count += 1;")
+        .count();
     assert_eq!(
         bumps, 1,
         "process_sample must have exactly ONE diag_nr_max_iter_count \
@@ -408,12 +410,18 @@ fn full_lu_diag_counter_contract() {
 
     // (c) be_fallback counts ENTRY, not success: the single increment must
     // come before the BE NR loop, not inside `if be_converged`.
-    let be_bumps = ps_code.matches("state.diag_be_fallback_count += 1;").count();
+    let be_bumps = ps_code
+        .matches("state.diag_be_fallback_count += 1;")
+        .count();
     assert_eq!(
         be_bumps, 1,
         "process_sample must count BE fallback exactly once, at entry"
     );
-    let be_bump = find(ps_code, "state.diag_be_fallback_count += 1;", "BE entry count");
+    let be_bump = find(
+        ps_code,
+        "state.diag_be_fallback_count += 1;",
+        "BE entry count",
+    );
     let be_loop = find(
         ps_code,
         "// Rebuild RHS with backward Euler matrices",
@@ -580,12 +588,8 @@ fn main() {
 "#;
 
     let out = support::compile_and_run(&code, main_code, "ssr_pot_guard");
-    let max_diff = out
-        .parse_kv("max_diff")
-        .expect("main must print max_diff");
-    let nom_diff = out
-        .parse_kv("nom_diff")
-        .expect("main must print nom_diff");
+    let max_diff = out.parse_kv("max_diff").expect("main must print max_diff");
+    let nom_diff = out.parse_kv("nom_diff").expect("main must print nom_diff");
     assert!(
         nom_diff > 1e-6,
         "test premise broken: pot position doesn't affect the output \

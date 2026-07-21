@@ -161,9 +161,7 @@ fn power_iterate_rho_sign(
             x[i] = y[i] / norm;
         }
         // Converge on the estimate, not on an iteration count.
-        if rho_prev.is_finite()
-            && (rho - rho_prev).abs() <= POWER_ITER_REL_TOL * rho.max(1e-30)
-        {
+        if rho_prev.is_finite() && (rho - rho_prev).abs() <= POWER_ITER_REL_TOL * rho.max(1e-30) {
             stable_iters += 1;
             if stable_iters >= POWER_ITER_STABLE_ITERS {
                 break;

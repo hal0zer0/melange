@@ -144,13 +144,13 @@ fn nonlinear_config() -> ComparisonConfig {
 /// the peak gate is tightened to 0.30 V (1.8x over the settled peak).
 fn bjt_config() -> ComparisonConfig {
     ComparisonConfig {
-        rms_error_tolerance: 0.10, // was 0.15; measured 4.26% → 2.3x headroom
-        peak_error_tolerance: 0.30, // was 0.5 V; measured settled peak 0.164 V → 1.8x
+        rms_error_tolerance: 0.10,     // was 0.15; measured 4.26% → 2.3x headroom
+        peak_error_tolerance: 0.30,    // was 0.5 V; measured settled peak 0.164 V → 1.8x
         max_relative_tolerance: 100.0, // near zero-crossings
-        correlation_min: 0.995,    // was 0.99; measured 1-corr = 3.5e-4 → 14x headroom
-        thd_error_tolerance_db: 5.0, // model differences in distortion
-        full_scale: 10.0,          // BJT CE output can swing wider
-        skip_thd: true,            // THD comparison not meaningful for nonlinear BJT
+        correlation_min: 0.995,        // was 0.99; measured 1-corr = 3.5e-4 → 14x headroom
+        thd_error_tolerance_db: 5.0,   // model differences in distortion
+        full_scale: 10.0,              // BJT CE output can swing wider
+        skip_thd: true,                // THD comparison not meaningful for nonlinear BJT
         // 3 ms settle on the 10 ms signal: excludes the DC-blocker/DC-OP
         // startup region while keeping 70% of the window. (The 5 Hz blocker
         // tau is ~32 ms, but both sides use first-sample/DC-OP-seeded
@@ -168,10 +168,10 @@ fn bjt_config() -> ComparisonConfig {
 /// corr 0.99999734, gain ratio 1.0006.
 fn wurli_config() -> ComparisonConfig {
     ComparisonConfig {
-        rms_error_tolerance: 0.01, // was 0.15; measured 0.235% → 4.3x headroom
-        peak_error_tolerance: 0.01, // was 0.5 V; measured settled peak 1.28 mV → 7.8x headroom
+        rms_error_tolerance: 0.01,     // was 0.15; measured 0.235% → 4.3x headroom
+        peak_error_tolerance: 0.01,    // was 0.5 V; measured settled peak 1.28 mV → 7.8x headroom
         max_relative_tolerance: 100.0, // near zero-crossings
-        correlation_min: 0.9999,   // was 0.99; measured 1-corr = 2.7e-6 → 37x headroom
+        correlation_min: 0.9999,       // was 0.99; measured 1-corr = 2.7e-6 → 37x headroom
         thd_error_tolerance_db: 5.0,
         full_scale: 10.0,
         skip_thd: true,
@@ -198,10 +198,10 @@ fn wurli_config() -> ComparisonConfig {
 /// measured gain went 3.4x → 6.7x (16.5 dB) at identical correlation.
 fn neve_output_config() -> ComparisonConfig {
     ComparisonConfig {
-        rms_error_tolerance: 0.01, // measured 0.107% → 9.3x headroom
-        peak_error_tolerance: 0.005, // measured 1.06e-4 V → 47x headroom
+        rms_error_tolerance: 0.01,     // measured 0.107% → 9.3x headroom
+        peak_error_tolerance: 0.005,   // measured 1.06e-4 V → 47x headroom
         max_relative_tolerance: 100.0, // near zero-crossings
-        correlation_min: 0.9999,   // measured 1-corr = 4.8e-7 → 208x headroom
+        correlation_min: 0.9999,       // measured 1-corr = 4.8e-7 → 208x headroom
         thd_error_tolerance_db: 5.0,
         full_scale: 10.0,
         skip_thd: true,
@@ -224,10 +224,10 @@ fn neve_output_config() -> ComparisonConfig {
 /// application dropped rms 0.508% → 0.0346% and corr 0.99998710 → ~1.0.
 fn neve_preamp_config() -> ComparisonConfig {
     ComparisonConfig {
-        rms_error_tolerance: 0.005, // measured 0.0346% → 14x headroom
-        peak_error_tolerance: 0.002, // measured 1.12e-4 V → 18x headroom
+        rms_error_tolerance: 0.005,    // measured 0.0346% → 14x headroom
+        peak_error_tolerance: 0.002,   // measured 1.12e-4 V → 18x headroom
         max_relative_tolerance: 100.0, // near zero-crossings
-        correlation_min: 0.99999,  // measured 1-corr < 5e-9 → >2000x headroom
+        correlation_min: 0.99999,      // measured 1-corr < 5e-9 → >2000x headroom
         thd_error_tolerance_db: 5.0,
         full_scale: 10.0,
         skip_thd: true,
@@ -2025,10 +2025,10 @@ fn main() {
     // discretization residual at 5 kHz mod / 48 kHz fs (9.6 samples per
     // modulation period). Gates sit ~2.5-12x over measured.
     let config = ComparisonConfig {
-        rms_error_tolerance: 0.05,  // measured 1.28% → 3.9x headroom
-        peak_error_tolerance: 0.10, // measured 3.93e-2 V → 2.5x headroom
+        rms_error_tolerance: 0.05,    // measured 1.28% → 3.9x headroom
+        peak_error_tolerance: 0.10,   // measured 3.93e-2 V → 2.5x headroom
         max_relative_tolerance: 50.0, // near zero-crossings under modulation
-        correlation_min: 0.999,     // measured 1-corr = 8.2e-5 → 12x headroom
+        correlation_min: 0.999,       // measured 1-corr = 8.2e-5 → 12x headroom
         thd_error_tolerance_db: 5.0,
         full_scale: 1.0,
         skip_thd: true, // modulation sidebands, not harmonics — THD is meaningless

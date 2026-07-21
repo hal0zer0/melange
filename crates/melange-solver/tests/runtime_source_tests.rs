@@ -655,10 +655,7 @@ Rint4 n3 0 22k
         let start = code
             .find(&needle)
             .unwrap_or_else(|| panic!("missing setter {needle}"));
-        let end = start
-            + code[start..]
-                .find("\n    }\n")
-                .expect("setter end brace");
+        let end = start + code[start..].find("\n    }\n").expect("setter end brace");
         let body = &code[start..end];
         assert!(
             body.contains("self.matrices_dirty = true"),

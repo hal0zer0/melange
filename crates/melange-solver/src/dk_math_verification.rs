@@ -873,7 +873,8 @@ Vdd vdd 0 DC 12
     /// v = b - D*i (b = [u, 0], D = diag(R_tot, R_load)).
     #[test]
     fn test_companion_coupled_pair_time_march_matches_exact_trapezoidal() {
-        let spice = "Coupled Pair\nR1 in p1 100\nL1 p1 0 10m\nL2 s1 0 10m\nK1 L1 L2 0.9\nRload s1 0 1k\n";
+        let spice =
+            "Coupled Pair\nR1 in p1 100\nL1 p1 0 10m\nL2 s1 0 10m\nK1 L1 L2 0.9\nRload s1 0 1k\n";
         let netlist = Netlist::parse(spice).unwrap();
         let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
         assert_eq!(mna.coupled_inductors.len(), 1);
@@ -966,11 +967,7 @@ K1 L1 L2 0.9\nK2 L1 L3 0.9\nK3 L2 L3 0.9\nR2 s1 0 1k\nR3 s2 0 2.2k\n";
         // Reference with 3x3 L matrix (all couplings 0.9)
         let lv = 10e-3;
         let mv = 0.9 * lv;
-        let l_mat = vec![
-            vec![lv, mv, mv],
-            vec![mv, lv, mv],
-            vec![mv, mv, lv],
-        ];
+        let l_mat = vec![vec![lv, mv, mv], vec![mv, lv, mv], vec![mv, mv, lv]];
         let y_l = invert_matrix(&l_mat).unwrap();
         let d = [101.0, 1000.0, 2200.0];
         let ht = t / 2.0;
@@ -1089,7 +1086,8 @@ K1 L1 L2 0.9\nK2 L1 L3 0.9\nK3 L2 L3 0.9\nR2 s1 0 1k\nR3 s2 0 2.2k\n";
     /// constant); VS augmented rows are NOT doubled (algebraic constraint).
     #[test]
     fn test_build_rhs_const_scaling() {
-        let spice = "RHS Const\nVcc vcc 0 DC 9\nI1 0 a DC 2m\nR1 vcc a 10k\nR2 a 0 10k\nC1 a 0 1u\n";
+        let spice =
+            "RHS Const\nVcc vcc 0 DC 9\nI1 0 a DC 2m\nR1 vcc a 10k\nR2 a 0 10k\nC1 a 0 1u\n";
         let netlist = Netlist::parse(spice).unwrap();
         let mna = MnaSystem::from_netlist(&netlist).unwrap();
         let kernel = DkKernel::from_mna(&mna, 48000.0).unwrap();

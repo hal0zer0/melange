@@ -356,7 +356,10 @@ Rb bx 0 1k
             }
         }
     }
-    assert!(any_constraint, "aug rows should carry constraint stamps in A");
+    assert!(
+        any_constraint,
+        "aug rows should carry constraint stamps in A"
+    );
 }
 
 // ── Fix 5: DK bake must not rail-clamp DC_OP against unclamped DC_NL_I ──
@@ -403,7 +406,8 @@ Rin in vp 1Meg
         input_resistance: config.input_resistance,
         ..melange_solver::dc_op::DcOpConfig::default()
     };
-    let mut dc = melange_solver::dc_op::solve_dc_operating_point(&mna, &device_slots, &dc_op_config);
+    let mut dc =
+        melange_solver::dc_op::solve_dc_operating_point(&mna, &device_slots, &dc_op_config);
     dc.v_node[oout_idx] = 12.0; // beyond the +9 V rail
 
     let ir = CircuitIR::from_kernel_with_dc_op(&kernel, &mna, &netlist, &config, Some(dc))
@@ -504,7 +508,10 @@ fn codegen_meta_sparse_lu_fields_populated() {
     let generated = CodeGenerator::new(config)
         .generate(&kernel, &mna, &netlist)
         .expect("DK codegen");
-    assert!(!generated.meta.sparse_lu_enabled, "DK path has no sparse LU");
+    assert!(
+        !generated.meta.sparse_lu_enabled,
+        "DK path has no sparse LU"
+    );
     assert_eq!(generated.meta.sparse_lu_density, 0.0);
 
     // Nodal path with m > 0: the G_aug pattern density is computed and must
@@ -537,4 +544,3 @@ fn codegen_meta_sparse_lu_fields_populated() {
         generated2.meta.sparse_lu_density, n
     );
 }
-

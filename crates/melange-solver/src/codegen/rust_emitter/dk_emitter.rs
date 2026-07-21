@@ -2421,7 +2421,7 @@ impl RustEmitter {
                     let s1 = s + 1;
                     let tj_advance = emit_thermal_tj_advance(dev_num, tp.cth);
                     thermal_update.push_str(&format!(
-                            "    {{ // Triode {dev_num} self-heating thermal update\n\
+                        "    {{ // Triode {dev_num} self-heating thermal update\n\
                              \x20       let ip = i_nl[{s}];\n\
                              \x20       let ig = i_nl[{s1}];\n\
                              \x20       let v_nl_th = extract_controlling_voltages(&v);\n\
@@ -2430,7 +2430,7 @@ impl RustEmitter {
                              \x20       let p = ip * vpk + ig * vgk;\n\
                              {tj_advance}\
                              \x20   }}\n"
-                        ));
+                    ));
                 }
                 _ => {}
             }
@@ -2987,10 +2987,7 @@ impl RustEmitter {
                     if node == 0 {
                         0.0
                     } else {
-                        ir.dc_operating_point
-                            .get(node - 1)
-                            .copied()
-                            .unwrap_or(0.0)
+                        ir.dc_operating_point.get(node - 1).copied().unwrap_or(0.0)
                     }
                 };
                 let v_k = v_at(src.node_j); // cathode
@@ -3010,8 +3007,7 @@ impl RustEmitter {
                     ex_b: tp.ex_b,
                 };
                 let h = 1e-3;
-                let gm = (triode.plate_current(vgk + h, vpk)
-                    - triode.plate_current(vgk - h, vpk))
+                let gm = (triode.plate_current(vgk + h, vpk) - triode.plate_current(vgk - h, vpk))
                     / (2.0 * h);
                 if !(gm.is_finite() && gm > 0.0) {
                     return 1.0;
@@ -3238,8 +3234,7 @@ impl RustEmitter {
                 fmt_usize_arr(&shot_nj)
             ));
             if shot_gamma_needed {
-                let gamma_amp: Vec<String> =
-                    shot_gamma_amp.iter().map(|g| fmt_f64(*g)).collect();
+                let gamma_amp: Vec<String> = shot_gamma_amp.iter().map(|g| fmt_f64(*g)).collect();
                 top.push_str(
                     "/// Per-source shot amplitude multiplier `sqrt(Γ²)`. Γ² = 1 for plain\n\
                      /// junctions; triode plates carry van der Ziel space-charge smoothing\n\
@@ -3843,9 +3838,8 @@ impl RustEmitter {
             state_fields.push_str(
                 "    /// Flicker white-input scale `sqrt(2/K_pink)` (trap; `sqrt(0.5/K_pink)`\n",
             );
-            state_fields.push_str(
-                "    /// BE-primary) — fs/OS-INVARIANT. Per-sample amplitude is\n",
-            );
+            state_fields
+                .push_str("    /// BE-primary) — fs/OS-INVARIANT. Per-sample amplitude is\n");
             state_fields.push_str(
                 "    /// `noise_flicker_scale · NOISE_FLICKER_SQRT_KF[k] · |I_prev|^(AF/2)`\n",
             );
@@ -3868,8 +3862,7 @@ impl RustEmitter {
                      \x20   /// the Nyquist bin while leaving the audio-band 1/f calibration\n\
                      \x20   /// unchanged (cos²(πf/fs) ≈ 1). Zeroed at default/reset/set_seed.\n",
                 );
-                state_fields
-                    .push_str("    pub noise_flicker_w_prev: [f64; NOISE_FLICKER_N],\n");
+                state_fields.push_str("    pub noise_flicker_w_prev: [f64; NOISE_FLICKER_N],\n");
             }
         }
         if r_flicker_n > 0 {
@@ -3918,9 +3911,8 @@ impl RustEmitter {
                 state_fields
                     .push_str("    pub noise_r_flicker_w_prev: [f64; NOISE_R_FLICKER_N],\n");
             }
-            state_fields.push_str(
-                "    /// Resistor-flicker white-input scale — same fs/OS-INVARIANT\n",
-            );
+            state_fields
+                .push_str("    /// Resistor-flicker white-input scale — same fs/OS-INVARIANT\n");
             state_fields.push_str(
                 "    /// `sqrt(2/K_pink)` (trap) / `sqrt(0.5/K_pink)` (BE) constant as\n",
             );
@@ -3995,15 +3987,12 @@ impl RustEmitter {
                 "    pub noise_opamp_in_gaussian_cache: [Option<f64>; NOISE_OPAMP_IN_N],\n",
             );
             state_fields.push_str("    /// Live `G[in+, in+]` mirror — initialized to\n");
-            state_fields.push_str(
-                "    /// `NOISE_OPAMP_EN_G_DIAG_DEFAULT`; recomputed absolutely by\n",
-            );
-            state_fields.push_str(
-                "    /// `refresh_opamp_en_g_diag()` from every pot/runtime-R/switch\n",
-            );
-            state_fields.push_str(
-                "    /// setter whose element touches in+; restored to the default on\n",
-            );
+            state_fields
+                .push_str("    /// `NOISE_OPAMP_EN_G_DIAG_DEFAULT`; recomputed absolutely by\n");
+            state_fields
+                .push_str("    /// `refresh_opamp_en_g_diag()` from every pot/runtime-R/switch\n");
+            state_fields
+                .push_str("    /// setter whose element touches in+; restored to the default on\n");
             state_fields.push_str("    /// `reset()` / `set_seed()`.\n");
             state_fields.push_str("    pub noise_opamp_en_g_diag: [f64; NOISE_OPAMP_N],\n");
             state_fields.push_str("    /// Two-draw lag buffers — separate for en, in+, in-.\n");
@@ -4249,9 +4238,8 @@ impl RustEmitter {
             default_fields
                 .push_str("            noise_r_flicker_last_i_n: [0.0; NOISE_R_FLICKER_N],\n");
             if !be_primary {
-                default_fields.push_str(
-                    "            noise_r_flicker_w_prev: [0.0; NOISE_R_FLICKER_N],\n",
-                );
+                default_fields
+                    .push_str("            noise_r_flicker_w_prev: [0.0; NOISE_R_FLICKER_N],\n");
             }
             default_fields.push_str("            noise_r_flicker_sqrt_fs,\n");
             if flicker_n == 0 {
@@ -4345,9 +4333,8 @@ impl RustEmitter {
             reset_body
                 .push_str("        self.noise_r_flicker_last_i_n = [0.0; NOISE_R_FLICKER_N];\n");
             if !be_primary {
-                reset_body.push_str(
-                    "        self.noise_r_flicker_w_prev = [0.0; NOISE_R_FLICKER_N];\n",
-                );
+                reset_body
+                    .push_str("        self.noise_r_flicker_w_prev = [0.0; NOISE_R_FLICKER_N];\n");
             }
             reset_body
                 .push_str("        self.noise_r_flicker_inv_r = NOISE_R_FLICKER_INV_R_DEFAULT;\n");
@@ -4403,9 +4390,8 @@ impl RustEmitter {
                     .push_str("        self.noise_shot_scale = (Q_E * self.noise_fs).sqrt();\n");
             }
             if opamp_n > 0 {
-                ssr_body.push_str(
-                    "        self.noise_opamp_sqrt_fs = (0.5 * self.noise_fs).sqrt();\n",
-                );
+                ssr_body
+                    .push_str("        self.noise_opamp_sqrt_fs = (0.5 * self.noise_fs).sqrt();\n");
             }
         } else {
             ssr_body.push_str("        self.noise_thermal_scale = (8.0 * K_B * self.temperature_k * self.noise_fs).sqrt();\n");
@@ -4415,9 +4401,8 @@ impl RustEmitter {
                 );
             }
             if opamp_n > 0 {
-                ssr_body.push_str(
-                    "        self.noise_opamp_sqrt_fs = (2.0 * self.noise_fs).sqrt();\n",
-                );
+                ssr_body
+                    .push_str("        self.noise_opamp_sqrt_fs = (2.0 * self.noise_fs).sqrt();\n");
             }
         }
         if flicker_n > 0 || r_flicker_n > 0 {
@@ -4509,8 +4494,7 @@ impl RustEmitter {
             methods.push_str("    /// Runtime-settable; set to `0.0` to mute op-amp IC hiss.\n");
             methods.push_str("    pub fn set_opamp_input_gain(&mut self, gain: f64) { self.opamp_input_gain = gain; }\n\n");
             if opamp_any_dynamic {
-                let is_nodal =
-                    matches!(ir.solver_mode, crate::codegen::ir::SolverMode::Nodal);
+                let is_nodal = matches!(ir.solver_mode, crate::codegen::ir::SolverMode::Nodal);
                 methods.push_str(
                     "    /// Absolute recompute of the live `G[in+, in+]` diagonal used as the\n\
                      \x20   /// en-stamp Norton conversion factor. Called by every `set_pot_N` /\n\
@@ -4573,8 +4557,7 @@ impl RustEmitter {
             methods.push_str("        self.noise_flicker_state = [[0.0; 7]; NOISE_FLICKER_N];\n");
             methods.push_str("        self.noise_flicker_last_i_n = [0.0; NOISE_FLICKER_N];\n");
             if !be_primary {
-                methods
-                    .push_str("        self.noise_flicker_w_prev = [0.0; NOISE_FLICKER_N];\n");
+                methods.push_str("        self.noise_flicker_w_prev = [0.0; NOISE_FLICKER_N];\n");
             }
         }
         if r_flicker_n > 0 {
@@ -4586,9 +4569,8 @@ impl RustEmitter {
                 .push_str("        self.noise_r_flicker_state = [[0.0; 7]; NOISE_R_FLICKER_N];\n");
             methods.push_str("        self.noise_r_flicker_last_i_n = [0.0; NOISE_R_FLICKER_N];\n");
             if !be_primary {
-                methods.push_str(
-                    "        self.noise_r_flicker_w_prev = [0.0; NOISE_R_FLICKER_N];\n",
-                );
+                methods
+                    .push_str("        self.noise_r_flicker_w_prev = [0.0; NOISE_R_FLICKER_N];\n");
             }
         }
         if partition_n > 0 {
@@ -4653,7 +4635,8 @@ impl RustEmitter {
             rhs_stamp.push_str(
                 "                let w_new = scale_half * state.noise_thermal_sqrt_inv_r[k] * g;\n",
             );
-            rhs_stamp.push_str("                let i_n = w_new + state.noise_thermal_w_prev[k];\n");
+            rhs_stamp
+                .push_str("                let i_n = w_new + state.noise_thermal_w_prev[k];\n");
             rhs_stamp.push_str("                state.noise_thermal_w_prev[k] = w_new;\n");
             rhs_stamp.push_str("                state.noise_thermal_last_i_n[k] = i_n;\n");
         }
@@ -4705,7 +4688,8 @@ impl RustEmitter {
                 rhs_stamp.push_str("                if nj > 0 { rhs[nj - 1] -= i_n; }\n");
                 rhs_stamp.push_str("            }\n");
                 rhs_stamp.push_str("        } else {\n");
-                rhs_stamp.push_str("            state.noise_shot_last_i_n = [0.0; NOISE_SHOT_N];\n");
+                rhs_stamp
+                    .push_str("            state.noise_shot_last_i_n = [0.0; NOISE_SHOT_N];\n");
                 rhs_stamp.push_str("        }\n");
             } else {
                 // Trapezoidal: two-draw Nyquist anti-alias pair `w_new + w_prev`,
@@ -4736,7 +4720,8 @@ impl RustEmitter {
                     "                    shot_scale * {gamma_factor}i_abs.sqrt() * g\n"
                 ));
                 rhs_stamp.push_str("                };\n");
-                rhs_stamp.push_str("                let i_n = w_new + state.noise_shot_w_prev[k];\n");
+                rhs_stamp
+                    .push_str("                let i_n = w_new + state.noise_shot_w_prev[k];\n");
                 rhs_stamp.push_str("                state.noise_shot_w_prev[k] = w_new;\n");
                 rhs_stamp.push_str("                state.noise_shot_last_i_n[k] = i_n;\n");
                 rhs_stamp.push_str("                let ni = NOISE_SHOT_NODE_I[k];\n");
@@ -4746,7 +4731,8 @@ impl RustEmitter {
                 rhs_stamp.push_str("            }\n");
                 rhs_stamp.push_str("        } else {\n");
                 rhs_stamp.push_str("            state.noise_shot_w_prev = [0.0; NOISE_SHOT_N];\n");
-                rhs_stamp.push_str("            state.noise_shot_last_i_n = [0.0; NOISE_SHOT_N];\n");
+                rhs_stamp
+                    .push_str("            state.noise_shot_last_i_n = [0.0; NOISE_SHOT_N];\n");
                 rhs_stamp.push_str("        }\n");
             }
         }
@@ -4838,7 +4824,8 @@ impl RustEmitter {
             rhs_stamp.push_str("                    let g = gaussian(&mut state.noise_opamp_en_rng[k], &mut state.noise_opamp_en_gaussian_cache[k]);\n");
             rhs_stamp.push_str("                    let w_new = oa_scale_half * amp * g;\n");
             if be_primary {
-                rhs_stamp.push_str("                    let i_n = w_new; // BE-primary: single-draw\n");
+                rhs_stamp
+                    .push_str("                    let i_n = w_new; // BE-primary: single-draw\n");
             } else {
                 rhs_stamp.push_str(
                     "                    let i_n = w_new + state.noise_opamp_en_w_prev[k];\n",
@@ -4858,7 +4845,8 @@ impl RustEmitter {
             rhs_stamp.push_str("                    let g = gaussian(&mut state.noise_opamp_in_rng[2 * k], &mut state.noise_opamp_in_gaussian_cache[2 * k]);\n");
             rhs_stamp.push_str("                    let w_new = oa_scale_half * amp * g;\n");
             if be_primary {
-                rhs_stamp.push_str("                    let i_n = w_new; // BE-primary: single-draw\n");
+                rhs_stamp
+                    .push_str("                    let i_n = w_new; // BE-primary: single-draw\n");
             } else {
                 rhs_stamp.push_str(
                     "                    let i_n = w_new + state.noise_opamp_in_w_prev[2 * k];\n",
@@ -4878,7 +4866,8 @@ impl RustEmitter {
             rhs_stamp.push_str("                    let g = gaussian(&mut state.noise_opamp_in_rng[2 * k + 1], &mut state.noise_opamp_in_gaussian_cache[2 * k + 1]);\n");
             rhs_stamp.push_str("                    let w_new = oa_scale_half * amp * g;\n");
             if be_primary {
-                rhs_stamp.push_str("                    let i_n = w_new; // BE-primary: single-draw\n");
+                rhs_stamp
+                    .push_str("                    let i_n = w_new; // BE-primary: single-draw\n");
             } else {
                 rhs_stamp.push_str(
                     "                    let i_n = w_new + state.noise_opamp_in_w_prev[2 * k + 1];\n",
@@ -5159,9 +5148,8 @@ impl RustEmitter {
             nan_recovery_body
                 .push_str("        state.noise_r_flicker_last_i_n = [0.0; NOISE_R_FLICKER_N];\n");
             if !be_primary {
-                nan_recovery_body.push_str(
-                    "        state.noise_r_flicker_w_prev = [0.0; NOISE_R_FLICKER_N];\n",
-                );
+                nan_recovery_body
+                    .push_str("        state.noise_r_flicker_w_prev = [0.0; NOISE_R_FLICKER_N];\n");
             }
             nan_recovery_body
                 .push_str("        state.noise_r_flicker_state = [[0.0; 7]; NOISE_R_FLICKER_N];\n");

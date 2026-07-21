@@ -4745,13 +4745,9 @@ fn run_dc_op(
     // Resolve input resistance: CLI flag > .input_impedance directive > 1Ω
     // default — matching compile/simulate/analyze. (The flag used to be
     // silently overridden by the directive.)
-    let r_in = if let Some(r) = input_resistance_flag {
-        r
-    } else if let Some(r) = netlist.input_impedance {
-        r
-    } else {
-        1.0
-    };
+    let r_in = input_resistance_flag
+        .or(netlist.input_impedance)
+        .unwrap_or(1.0);
     if !(r_in > 0.0 && r_in.is_finite()) {
         anyhow::bail!("input resistance must be positive and finite, got {}", r_in);
     }

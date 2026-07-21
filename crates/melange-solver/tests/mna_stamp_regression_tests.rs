@@ -155,8 +155,7 @@ R2 ctl 0 1k
         );
     }
 
-    let slots =
-        CircuitIR::build_device_info_with_mna(&netlist, Some(&mna)).expect("device slots");
+    let slots = CircuitIR::build_device_info_with_mna(&netlist, Some(&mna)).expect("device slots");
     let dc = solve_dc_operating_point(&mna, &slots, &DcOpConfig::default());
     assert!(dc.converged, "JFET DC OP must converge");
 
@@ -214,8 +213,7 @@ V1 vcc 0 DC 300
 ";
     let netlist = Netlist::parse(spice).expect("parse pentode netlist");
     let mut mna = MnaSystem::from_netlist(&netlist).expect("build pentode MNA");
-    let slots =
-        CircuitIR::build_device_info_with_mna(&netlist, Some(&mna)).expect("device slots");
+    let slots = CircuitIR::build_device_info_with_mna(&netlist, Some(&mna)).expect("device slots");
 
     let g = node(&mna, "grid") - 1;
     let p = node(&mna, "plate") - 1;

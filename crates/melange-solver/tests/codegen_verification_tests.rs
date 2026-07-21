@@ -3890,7 +3890,8 @@ fn main() {
     let bin_path = tmp_dir.join("melange_os2x_measure_test");
     {
         let mut f = std::fs::File::create(&src_path).expect("create temp file");
-        f.write_all(test_harness.as_bytes()).expect("write temp file");
+        f.write_all(test_harness.as_bytes())
+            .expect("write temp file");
     }
 
     let compile = std::process::Command::new("rustc")

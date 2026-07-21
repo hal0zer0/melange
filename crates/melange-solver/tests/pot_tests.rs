@@ -573,10 +573,24 @@ fn test_pot_delta_g_clamp_at_extremes() {
     };
 
     assert!(delta_g(1.0 / pot.g_nominal).abs() < 1e-15);
-    assert!(delta_g(pot.min_resistance) > 0.0, "more conductance at min_r");
-    assert!(delta_g(pot.max_resistance) < 0.0, "less conductance at max_r");
-    assert_eq!(delta_g(100.0), delta_g(pot.min_resistance), "clamps below min");
-    assert_eq!(delta_g(1e6), delta_g(pot.max_resistance), "clamps above max");
+    assert!(
+        delta_g(pot.min_resistance) > 0.0,
+        "more conductance at min_r"
+    );
+    assert!(
+        delta_g(pot.max_resistance) < 0.0,
+        "less conductance at max_r"
+    );
+    assert_eq!(
+        delta_g(100.0),
+        delta_g(pot.min_resistance),
+        "clamps below min"
+    );
+    assert_eq!(
+        delta_g(1e6),
+        delta_g(pot.max_resistance),
+        "clamps above max"
+    );
 }
 
 // ---------------------------------------------------------------------------

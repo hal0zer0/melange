@@ -182,7 +182,11 @@ fn parenless_model_params_are_parsed() {
     let netlist = Netlist::parse(spice).unwrap();
     let model = &netlist.models[0];
     assert_eq!(model.model_type, "D");
-    assert_eq!(model.params.len(), 2, "paren-less params must not be dropped");
+    assert_eq!(
+        model.params.len(),
+        2,
+        "paren-less params must not be dropped"
+    );
     assert!(model.params.iter().any(|(k, v)| k == "IS" && *v == 1e-3));
     assert!(model.params.iter().any(|(k, v)| k == "N" && *v == 4.0));
 }
@@ -218,7 +222,10 @@ fn model_junk_token_in_params_rejected() {
 fn vsource_with_sin_after_dc_rejected() {
     let spice = "Test\nV1 x 0 DC 2 SIN(0 1 1k)\nR1 x 0 1k\n";
     let result = Netlist::parse(spice);
-    assert!(result.is_err(), "DC + SIN must be a hard error, not a silent drop");
+    assert!(
+        result.is_err(),
+        "DC + SIN must be a hard error, not a silent drop"
+    );
     let msg = result.unwrap_err().message;
     assert!(
         msg.contains("SIN") || msg.contains("transient"),
@@ -246,7 +253,10 @@ fn vsource_with_bare_sin_rejected_loudly() {
 fn vsource_trailing_junk_rejected() {
     let spice = "Test\nV1 x 0 5 3\nR1 x 0 1k\n";
     let result = Netlist::parse(spice);
-    assert!(result.is_err(), "trailing junk on a V line must be a hard error");
+    assert!(
+        result.is_err(),
+        "trailing junk on a V line must be a hard error"
+    );
 }
 
 #[test]
@@ -336,7 +346,10 @@ fn parse_value_infix_mega() {
     assert!((parse_value("4M7").unwrap() - 4.7e6).abs() < 1.0);
     assert!((parse_value("1M0").unwrap() - 1.0e6).abs() < 1.0);
     assert!((parse_value("10m").unwrap() - 10e-3).abs() < 1e-10);
-    assert!((parse_value("10M").unwrap() - 10e-3).abs() < 1e-10, "suffix M is milli (SPICE)");
+    assert!(
+        (parse_value("10M").unwrap() - 10e-3).abs() < 1e-10,
+        "suffix M is milli (SPICE)"
+    );
 }
 
 // ===========================================================================
@@ -373,9 +386,15 @@ fn jfet_trailing_token_rejected() {
 #[test]
 fn triode_and_opamp_trailing_tokens_rejected() {
     let t = "Test\nT1 g p k 12AX7 extra\nR1 p 0 100k\n.model 12AX7 TRIODE(MU=100)\n";
-    assert!(Netlist::parse(t).is_err(), "triode trailing token must error");
+    assert!(
+        Netlist::parse(t).is_err(),
+        "triode trailing token must error"
+    );
     let u = "Test\nU1 p m o OA1 extra\nR1 o 0 1k\n.model OA1 OA(AOL=1e5)\n";
-    assert!(Netlist::parse(u).is_err(), "opamp trailing token must error");
+    assert!(
+        Netlist::parse(u).is_err(),
+        "opamp trailing token must error"
+    );
 }
 
 #[test]

@@ -1244,7 +1244,14 @@ fn build_dk_trap_matrices_at_rate(
         }
     }
 
-    stamp_dk_companion_inductors(&mut a_flat, &mut a_neg_flat, n, augmented_inductors, kernel, t);
+    stamp_dk_companion_inductors(
+        &mut a_flat,
+        &mut a_neg_flat,
+        n,
+        augmented_inductors,
+        kernel,
+        t,
+    );
     zero_augmented_history_rows(&mut a_neg_flat, n, n_nodes, mna_n_aug);
 
     (a_flat, a_neg_flat)
@@ -1284,7 +1291,14 @@ fn build_dk_be_matrices_at_rate(
         }
     }
 
-    stamp_dk_companion_inductors(&mut a_flat, &mut a_neg_flat, n, augmented_inductors, kernel, t);
+    stamp_dk_companion_inductors(
+        &mut a_flat,
+        &mut a_neg_flat,
+        n,
+        augmented_inductors,
+        kernel,
+        t,
+    );
     // BE A_neg = alpha·C is already zero on most algebraic rows, but
     // Boyle-internal / current-mode-VCA / behavioral-V rows can carry C
     // entries — blanket-zero to match the trap arm and the runtime rebuild.
@@ -1739,8 +1753,7 @@ impl CircuitIR {
         } else {
             // Standard trapezoidal: use kernel matrices directly.
             // Also compute BE fallback matrices for adaptive per-sample fallback.
-            let want_be_fallback =
-                !config.disable_be_fallback && m > 0 && !has_companion_magnetics;
+            let want_be_fallback = !config.disable_be_fallback && m > 0 && !has_companion_magnetics;
             let (s_be, k_be, a_neg_be, rhs_const_be) = if want_be_fallback {
                 compute_dk_be_fallback(
                     &g_matrix,
@@ -2102,8 +2115,11 @@ impl CircuitIR {
             })
             .collect();
         let behavioral_sources = build_behavioral_sources_ir(mna);
-        let behavioral_param_consts: Vec<(String, f64)> =
-            netlist.params.iter().map(|p| (p.name.clone(), p.value)).collect();
+        let behavioral_param_consts: Vec<(String, f64)> = netlist
+            .params
+            .iter()
+            .map(|p| (p.name.clone(), p.value))
+            .collect();
         let behavioral_scalar_runtimes: Vec<ScalarRuntimeIR> = netlist
             .runtime_scalars
             .iter()
@@ -2933,8 +2949,11 @@ impl CircuitIR {
             })
             .collect();
         let behavioral_sources = build_behavioral_sources_ir(mna);
-        let behavioral_param_consts: Vec<(String, f64)> =
-            netlist.params.iter().map(|p| (p.name.clone(), p.value)).collect();
+        let behavioral_param_consts: Vec<(String, f64)> = netlist
+            .params
+            .iter()
+            .map(|p| (p.name.clone(), p.value))
+            .collect();
         let behavioral_scalar_runtimes: Vec<ScalarRuntimeIR> = netlist
             .runtime_scalars
             .iter()

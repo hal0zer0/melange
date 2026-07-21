@@ -1820,7 +1820,10 @@ mod tests {
         let exp_bc = (vbc / VT_ROOM).exp();
         let q2 = is * (exp_be - 1.0) / 0.3 + is * (exp_bc - 1.0) / 0.006;
         let qb = (1.0 + (1.0 + 4.0 * q2).sqrt()) / 2.0;
-        assert!(qb > 2.0, "test setup: expected strong high injection, qb={qb}");
+        assert!(
+            qb > 2.0,
+            "test setup: expected strong high injection, qb={qb}"
+        );
         let expected = is * (exp_be - exp_bc) / qb - is / 2.0 * (exp_bc - 1.0);
         let ic = gp.collector_current(vbe_g, vbc);
         let rel = ((ic - expected) / expected).abs();

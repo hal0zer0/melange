@@ -104,7 +104,9 @@ Cout out 0 1u
     // Nodes (0-based): a=0, b=1, out=2.
     let code = generate_nodal(spice, 0, 2);
     let out = compile_and_run(&code, &settle_main(64), "multiplier");
-    let v_out: f64 = out.parse().unwrap_or_else(|_| panic!("bad output: {out:?}"));
+    let v_out: f64 = out
+        .parse()
+        .unwrap_or_else(|_| panic!("bad output: {out:?}"));
     let expected = -(0.6 * 0.4);
     assert!(
         (v_out - expected).abs() < 1e-5,
@@ -125,7 +127,9 @@ Cout out 0 1u
     // Nodes (0-based): a=0, out=1.
     let code = generate_nodal(spice, 0, 1);
     let out = compile_and_run(&code, &settle_main(64), "tanh");
-    let v_out: f64 = out.parse().unwrap_or_else(|_| panic!("bad output: {out:?}"));
+    let v_out: f64 = out
+        .parse()
+        .unwrap_or_else(|_| panic!("bad output: {out:?}"));
     let expected = -(0.6f64.tanh());
     assert!(
         (v_out - expected).abs() < 1e-5,
@@ -147,7 +151,9 @@ Rin in 0 1meg
     // Nodes (0-based): out=0, in=1. Drive input on the isolated `in` node.
     let code = generate_nodal(spice, 1, 0);
     let out = compile_and_run(&code, &settle_main(64), "ddt_time");
-    let v_out: f64 = out.parse().unwrap_or_else(|_| panic!("bad output: {out:?}"));
+    let v_out: f64 = out
+        .parse()
+        .unwrap_or_else(|_| panic!("bad output: {out:?}"));
     assert!(
         (v_out - (-1.0)).abs() < 1e-4,
         "ddt(time): got {v_out}, expected -1.0"
@@ -168,7 +174,9 @@ Cout out 0 1u
     // Nodes (0-based): a=0, out=1.
     let code = generate_nodal(spice, 0, 1);
     let out = compile_and_run(&code, &settle_main(4800), "idt_const");
-    let v_out: f64 = out.parse().unwrap_or_else(|_| panic!("bad output: {out:?}"));
+    let v_out: f64 = out
+        .parse()
+        .unwrap_or_else(|_| panic!("bad output: {out:?}"));
     let expected = -(4800.0 / 48000.0);
     assert!(
         (v_out - expected).abs() < 5e-3,
@@ -188,7 +196,9 @@ Rout out 0 1meg
     // Nodes (0-based): a=0, out=1.
     let code = generate_nodal(spice, 0, 1);
     let out = compile_and_run(&code, &settle_main(64), "vtanh");
-    let v_out: f64 = out.parse().unwrap_or_else(|_| panic!("bad output: {out:?}"));
+    let v_out: f64 = out
+        .parse()
+        .unwrap_or_else(|_| panic!("bad output: {out:?}"));
     let expected = 0.6f64.tanh();
     assert!(
         (v_out - expected).abs() < 1e-5,
@@ -297,7 +307,9 @@ Cout out 0 1u
         \x20   println!(\"{:.9}\", y[0]);\n\
         }\n";
     let out = compile_and_run(&code, main, "params");
-    let v_out: f64 = out.parse().unwrap_or_else(|_| panic!("bad output: {out:?}"));
+    let v_out: f64 = out
+        .parse()
+        .unwrap_or_else(|_| panic!("bad output: {out:?}"));
     let expected = -(0.5 * 2.0 * 1.0);
     assert!(
         (v_out - expected).abs() < 1e-4,
@@ -330,7 +342,8 @@ Rl out 0 100k
         "current_sample_rate field must be declared when an op-amp has finite SR"
     );
     // A trivial main that constructs state and runs one sample proves it compiles.
-    let main = "fn main() { let mut s = CircuitState::default(); let _ = process_sample(0.0, &mut s); }\n";
+    let main =
+        "fn main() { let mut s = CircuitState::default(); let _ = process_sample(0.0, &mut s); }\n";
     let _ = compile_and_run(&code, main, "slew_nopots");
 }
 
@@ -497,15 +510,14 @@ Cout out 0 1u
     // Nodes (0-based): a=0, out=1.
     let code = generate_nodal(spice, 0, 1);
     let out = compile_and_run(&code, &settle_main(64), "abs_zero");
-    let v_out: f64 = out.parse().unwrap_or_else(|_| panic!("bad output: {out:?}"));
+    let v_out: f64 = out
+        .parse()
+        .unwrap_or_else(|_| panic!("bad output: {out:?}"));
     assert!(
         v_out.is_finite(),
         "abs(V=0) must not NaN the solver, got {v_out}"
     );
-    assert!(
-        v_out.abs() < 1e-6,
-        "abs(V=0): expected ~0, got {v_out}"
-    );
+    assert!(v_out.abs() < 1e-6, "abs(V=0): expected ~0, got {v_out}");
 }
 
 #[test]
@@ -520,7 +532,9 @@ Cout out 0 1u
 ";
     let code = generate_nodal(spice, 0, 1);
     let out = compile_and_run(&code, &settle_main(64), "abs_neg");
-    let v_out: f64 = out.parse().unwrap_or_else(|_| panic!("bad output: {out:?}"));
+    let v_out: f64 = out
+        .parse()
+        .unwrap_or_else(|_| panic!("bad output: {out:?}"));
     assert!(
         (v_out - (-0.75)).abs() < 1e-5,
         "abs(-0.75): got {v_out}, expected -0.75"
@@ -546,7 +560,9 @@ Cout out 0 1u
         "generated code must not reference the undefined bsrc_safe_exp helper"
     );
     let out = compile_and_run(&code, &settle_main(64), "exp_src");
-    let v_out: f64 = out.parse().unwrap_or_else(|_| panic!("bad output: {out:?}"));
+    let v_out: f64 = out
+        .parse()
+        .unwrap_or_else(|_| panic!("bad output: {out:?}"));
     let expected = -(0.6f64.exp());
     assert!(
         (v_out - expected).abs() < 1e-5,
@@ -569,7 +585,9 @@ Cout out 0 1u
 ";
     let code = generate_nodal(spice, 0, 1);
     let out = compile_and_run(&code, &settle_main(64), "pow_negbase");
-    let v_out: f64 = out.parse().unwrap_or_else(|_| panic!("bad output: {out:?}"));
+    let v_out: f64 = out
+        .parse()
+        .unwrap_or_else(|_| panic!("bad output: {out:?}"));
     let expected = -(0.5f64.powf(1.5));
     assert!(
         v_out.is_finite() && (v_out - expected).abs() < 1e-5,

@@ -2267,9 +2267,7 @@ fn opamp_en_g_diag_refreshes_on_pot_touching_in_plus() {
     );
     assert!(
         code.contains("NOISE_OPAMP_EN_G_BASE")
-            && code.contains(
-                "self.noise_opamp_en_g_diag[0] = NOISE_OPAMP_EN_G_BASE[0]"
-            )
+            && code.contains("self.noise_opamp_en_g_diag[0] = NOISE_OPAMP_EN_G_BASE[0]")
             && code.contains("+ 1.0 / self.pot_0_resistance"),
         "refresh body must recompute en_g_diag[0] = BASE[0] + 1/pot_0_resistance"
     );
@@ -2582,7 +2580,11 @@ D1 a 0 D1N4148
         "BE flicker scale {emitted} != sqrt(0.5/K_pink) = {be_flicker_scale}"
     );
     let out = support::compile_and_run(&code, smoke_main, "be_full_diode_kf");
-    assert!(out.stdout.contains("VAR:ok"), "diode KF BE smoke run failed:\n{}", out.stderr);
+    assert!(
+        out.stdout.contains("VAR:ok"),
+        "diode KF BE smoke run failed:\n{}",
+        out.stderr
+    );
 
     // Resistor flicker.
     const R_FLICKER_SPICE: &str = r#"* R1 with KF — BE Full smoke
@@ -2616,7 +2618,11 @@ C1 a 0 100n
          ×4-relative-error split is the bug this pins)"
     );
     let out = support::compile_and_run(&code, smoke_main, "be_full_r_flicker");
-    assert!(out.stdout.contains("VAR:ok"), "r-flicker BE smoke run failed:\n{}", out.stderr);
+    assert!(
+        out.stdout.contains("VAR:ok"),
+        "r-flicker BE smoke run failed:\n{}",
+        out.stderr
+    );
 
     // Pentode partition (single-draw, no ×0.5, no w_prev pair).
     let code = gen_be(PENTODE_PARTITION_SPICE, "be_full_partition");
@@ -2631,7 +2637,11 @@ C1 a 0 100n
         "BE partition stamp must be single-draw (no pair sum)"
     );
     let out = support::compile_and_run(&code, smoke_main, "be_full_partition");
-    assert!(out.stdout.contains("VAR:ok"), "partition BE smoke run failed:\n{}", out.stderr);
+    assert!(
+        out.stdout.contains("VAR:ok"),
+        "partition BE smoke run failed:\n{}",
+        out.stderr
+    );
 
     // Op-amp en/in (single-draw at sqrt(0.5·fs)).
     let code = gen_be(OPAMP_NE5534_SPICE, "be_full_opamp");
@@ -2645,7 +2655,11 @@ C1 a 0 100n
         "BE op-amp en/in stamps must be single-draw (no pair sum)"
     );
     let out = support::compile_and_run(&code, smoke_main, "be_full_opamp");
-    assert!(out.stdout.contains("VAR:ok"), "op-amp BE smoke run failed:\n{}", out.stderr);
+    assert!(
+        out.stdout.contains("VAR:ok"),
+        "op-amp BE smoke run failed:\n{}",
+        out.stderr
+    );
 }
 
 // ======================================================================
@@ -3113,7 +3127,9 @@ fn main() {{
         "variance",
     );
 
-    println!("rbb variances: A(parasitic)={var_a:.6e} B(explicit)={var_b:.6e} C(control)={var_c:.6e}");
+    println!(
+        "rbb variances: A(parasitic)={var_a:.6e} B(explicit)={var_b:.6e} C(control)={var_c:.6e}"
+    );
     let ab = var_a / var_b;
     assert!(
         (0.85..=1.15).contains(&ab),
@@ -3299,7 +3315,10 @@ fn main() {{
         &support::compile_and_run(&code_full, &main, "triode_shot_full").stdout,
         "variance",
     );
-    assert!(var_full > 0.0, "full-shot variance is zero — shot not wired");
+    assert!(
+        var_full > 0.0,
+        "full-shot variance is zero — shot not wired"
+    );
     let ratio = var_smoothed / var_full;
     assert!(
         (ratio / gamma2 - 1.0).abs() < 0.05,
@@ -3476,6 +3495,3 @@ fn kellett_normalized_gain_constant_is_stable() {
          (|H(ν)|²·ν averaged over ν ∈ [1e-3, 1e-1])"
     );
 }
-
-
-

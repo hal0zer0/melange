@@ -1151,7 +1151,10 @@ mod tests {
         );
         // Monotonicity: more negative grid → less current
         let ip_m1 = t.plate_current(-1.0, 250.0);
-        assert!(ip_m1 < ip0 && ip_m2 < ip_m1, "12AX7: Ip must decrease with Vgk");
+        assert!(
+            ip_m1 < ip0 && ip_m2 < ip_m1,
+            "12AX7: Ip must decrease with Vgk"
+        );
         // Cutoff: Vgk=-4V → Ip ≈ 0 (model 3.6µA)
         assert!(
             t.plate_current(-4.0, 250.0) < 0.01e-3,
@@ -1181,7 +1184,10 @@ mod tests {
         // Monotonicity and cutoff
         let ip0 = t.plate_current(0.0, 250.0);
         let ip_m1 = t.plate_current(-1.0, 250.0);
-        assert!(ip0 > ip_m1 && ip_m1 > ip_m2, "12AX7F: Ip must decrease with Vgk");
+        assert!(
+            ip0 > ip_m1 && ip_m1 > ip_m2,
+            "12AX7F: Ip must decrease with Vgk"
+        );
         assert!(
             t.plate_current(-4.0, 250.0) < 0.01e-3,
             "12AX7F should be near cutoff at Vgk=-4"
@@ -1336,7 +1342,11 @@ mod tests {
         // ~213mA (sanity band only; see provenance flag on the entry —
         // this card is unsourced and its mu disagrees with Philips data).
         let ip = t.plate_current(0.0, 250.0);
-        assert!(ip > 50e-3 && ip < 300e-3, "EL84 Vgk=0: Ip={:.1}mA", ip * 1e3);
+        assert!(
+            ip > 50e-3 && ip < 300e-3,
+            "EL84 Vgk=0: Ip={:.1}mA",
+            ip * 1e3
+        );
     }
 
     #[test]
@@ -1362,7 +1372,11 @@ mod tests {
         assert_ip_approx(ip_typ, 40e-3, 12e-3, "6L6 Vgk=-20 (datasheet 40mA)");
         // Vgk=0 extrapolation sanity band (model ~209mA).
         let ip = t.plate_current(0.0, 250.0);
-        assert!(ip > 100e-3 && ip < 300e-3, "6L6 Vgk=0: Ip={:.1}mA", ip * 1e3);
+        assert!(
+            ip > 100e-3 && ip < 300e-3,
+            "6L6 Vgk=0: Ip={:.1}mA",
+            ip * 1e3
+        );
     }
 
     // --- Tier 3: Jacobian consistency for each tube entry ---

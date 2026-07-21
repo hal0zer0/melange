@@ -114,11 +114,8 @@ pub mod coefficients {
     /// tbw follows the hiir cascade rule `TBW[stage] = (TBW[stage-1]+0.5)/2`
     /// (= (0.04+0.5)/2 = 0.27): the inner stage only needs to protect the
     /// spectrum the outer (steep) stage will keep.
-    pub const HB_WIDE_3SECTION: [f64; 3] = [
-        0.06687030230470327,
-        0.2756202830232181,
-        0.6763597685457587,
-    ];
+    pub const HB_WIDE_3SECTION: [f64; 3] =
+        [0.06687030230470327, 0.2756202830232181, 0.6763597685457587];
 }
 
 /// Half-band filter using allpass decomposition.
@@ -665,9 +662,9 @@ mod tests {
         let k_a = 820; // ~0.2 * fs_out after double fold
         let nu_out = k_a as f64 / N_FFT as f64;
         let nu_2x = (1.0 - nu_out / 2.0) / 1.0; // apparent at 2x before outer? derive below
-        // Derivation: output bin nu_out came through outer WITHOUT folding
-        // (nu_out/2 < 0.25 at 2x rate), from inner fold of u:
-        //   2*u mod 1 = 1 - nu_out/2  =>  u = (1 - nu_out/2)/2
+                                                // Derivation: output bin nu_out came through outer WITHOUT folding
+                                                // (nu_out/2 < 0.25 at 2x rate), from inner fold of u:
+                                                //   2*u mod 1 = 1 - nu_out/2  =>  u = (1 - nu_out/2)/2
         let _ = nu_2x;
         let u = (1.0 - nu_out / 2.0) / 2.0; // ~0.44995 cycles/4x-sample
         let out = run_decimation_tone_4x(u);

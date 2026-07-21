@@ -225,9 +225,7 @@ fn tokenize(s: &str) -> Result<Vec<Tok>, ExprError> {
             }
             _ if c.is_ascii_alphabetic() || c == '_' => {
                 let start = i;
-                while i < chars.len()
-                    && (chars[i].is_ascii_alphanumeric() || chars[i] == '_')
-                {
+                while i < chars.len() && (chars[i].is_ascii_alphanumeric() || chars[i] == '_') {
                     i += 1;
                 }
                 let ident: String = chars[start..i].iter().collect();
@@ -402,7 +400,9 @@ impl Parser {
         match lname.as_str() {
             "ddt" => one_arg(lname.as_str(), args).map(|a| Expr::Ddt(usize::MAX, Box::new(a))),
             "idt" => one_arg(lname.as_str(), args).map(|a| Expr::Idt(usize::MAX, Box::new(a))),
-            "sqrt" => one_arg(lname.as_str(), args).map(|a| Expr::Func1(UnaryFn::Sqrt, Box::new(a))),
+            "sqrt" => {
+                one_arg(lname.as_str(), args).map(|a| Expr::Func1(UnaryFn::Sqrt, Box::new(a)))
+            }
             "abs" => one_arg(lname.as_str(), args).map(|a| Expr::Func1(UnaryFn::Abs, Box::new(a))),
             "exp" => one_arg(lname.as_str(), args).map(|a| Expr::Func1(UnaryFn::Exp, Box::new(a))),
             "ln" | "log" => {
@@ -410,22 +410,19 @@ impl Parser {
             }
             "sin" => one_arg(lname.as_str(), args).map(|a| Expr::Func1(UnaryFn::Sin, Box::new(a))),
             "cos" => one_arg(lname.as_str(), args).map(|a| Expr::Func1(UnaryFn::Cos, Box::new(a))),
-            "tanh" => one_arg(lname.as_str(), args).map(|a| Expr::Func1(UnaryFn::Tanh, Box::new(a))),
-            "atan2" => {
-                two_args(lname.as_str(), args).map(|(a, b)| Expr::Func2(BinFn::Atan2, Box::new(a), Box::new(b)))
+            "tanh" => {
+                one_arg(lname.as_str(), args).map(|a| Expr::Func1(UnaryFn::Tanh, Box::new(a)))
             }
-            "min" => {
-                two_args(lname.as_str(), args).map(|(a, b)| Expr::Func2(BinFn::Min, Box::new(a), Box::new(b)))
-            }
-            "max" => {
-                two_args(lname.as_str(), args).map(|(a, b)| Expr::Func2(BinFn::Max, Box::new(a), Box::new(b)))
-            }
-            "pow" => {
-                two_args(lname.as_str(), args).map(|(a, b)| Expr::Func2(BinFn::Pow, Box::new(a), Box::new(b)))
-            }
-            "pwr" => {
-                two_args(lname.as_str(), args).map(|(a, b)| Expr::Func2(BinFn::Pwr, Box::new(a), Box::new(b)))
-            }
+            "atan2" => two_args(lname.as_str(), args)
+                .map(|(a, b)| Expr::Func2(BinFn::Atan2, Box::new(a), Box::new(b))),
+            "min" => two_args(lname.as_str(), args)
+                .map(|(a, b)| Expr::Func2(BinFn::Min, Box::new(a), Box::new(b))),
+            "max" => two_args(lname.as_str(), args)
+                .map(|(a, b)| Expr::Func2(BinFn::Max, Box::new(a), Box::new(b))),
+            "pow" => two_args(lname.as_str(), args)
+                .map(|(a, b)| Expr::Func2(BinFn::Pow, Box::new(a), Box::new(b))),
+            "pwr" => two_args(lname.as_str(), args)
+                .map(|(a, b)| Expr::Func2(BinFn::Pwr, Box::new(a), Box::new(b))),
             other => Err(ExprError(format!("unknown function `{other}`"))),
         }
     }
@@ -725,11 +722,7 @@ impl Expr {
 
     /// The set of differentiation variables this expression depends on.
     pub fn variables(&self) -> Vec<Var> {
-        let mut vars: Vec<Var> = self
-            .referenced_nodes()
-            .into_iter()
-            .map(Var::Node)
-            .collect();
+        let mut vars: Vec<Var> = self.referenced_nodes().into_iter().map(Var::Node).collect();
         vars.extend(self.referenced_branches().into_iter().map(Var::Branch));
         vars
     }
@@ -807,10 +800,7 @@ impl Expr {
                     Box::new(Mul(Box::new(a.diff_impl(var, lag_ddt)), b.clone())),
                     Box::new(Mul(a.clone(), Box::new(b.diff_impl(var, lag_ddt)))),
                 );
-                let den = Add(
-                    Box::new(Mul(b.clone(), b.clone())),
-                    Box::new(Const(1e-300)),
-                );
+                let den = Add(Box::new(Mul(b.clone(), b.clone())), Box::new(Const(1e-300)));
                 Div(Box::new(num), Box::new(den))
             }
             Func1(f, a) => {
@@ -938,7 +928,10 @@ fn func2_derivative(f: BinFn, a: &Expr, b: &Expr, var: &Var, lag_ddt: bool) -> E
             let sign = sign_subgradient(&diff_ab);
             let inner = Sub(
                 Box::new(Add(Box::new(da.clone()), Box::new(db.clone()))),
-                Box::new(Mul(Box::new(sign), Box::new(Sub(Box::new(da), Box::new(db))))),
+                Box::new(Mul(
+                    Box::new(sign),
+                    Box::new(Sub(Box::new(da), Box::new(db))),
+                )),
             );
             Mul(Box::new(Const(0.5)), Box::new(inner))
         }
@@ -948,7 +941,10 @@ fn func2_derivative(f: BinFn, a: &Expr, b: &Expr, var: &Var, lag_ddt: bool) -> E
             let sign = sign_subgradient(&diff_ab);
             let inner = Add(
                 Box::new(Add(Box::new(da.clone()), Box::new(db.clone()))),
-                Box::new(Mul(Box::new(sign), Box::new(Sub(Box::new(da), Box::new(db))))),
+                Box::new(Mul(
+                    Box::new(sign),
+                    Box::new(Sub(Box::new(da), Box::new(db))),
+                )),
             );
             Mul(Box::new(Const(0.5)), Box::new(inner))
         }
@@ -1014,7 +1010,10 @@ fn func2_derivative(f: BinFn, a: &Expr, b: &Expr, var: &Var, lag_ddt: bool) -> E
                     )),
                 );
                 let outer = Func2(BinFn::Pow, Box::new(a.clone()), Box::new(b.clone()));
-                Mul(Box::new(outer), Box::new(Add(Box::new(term1), Box::new(term2))))
+                Mul(
+                    Box::new(outer),
+                    Box::new(Add(Box::new(term1), Box::new(term2))),
+                )
             }
         }
         // pwr(a,b) = sign(a)·|a|^b:
@@ -1590,7 +1589,11 @@ mod tests {
         let analytic = d.eval(&ctx);
 
         let h = 1e-6;
-        let base = *vals.iter().find(|(n, _)| n == &node).map(|(_, v)| v).unwrap_or(&0.0);
+        let base = *vals
+            .iter()
+            .find(|(n, _)| n == &node)
+            .map(|(_, v)| v)
+            .unwrap_or(&0.0);
         let mut ctx_p = MapCtx::new();
         let mut ctx_m = MapCtx::new();
         for (n, v) in vals {
@@ -1614,7 +1617,11 @@ mod tests {
         check_diff("exp(V(a))", "a", &[("a", 1.2)]);
         check_diff("V(a) / V(b)", "a", &[("a", 2.0), ("b", 4.0)]);
         check_diff("V(a) / V(b)", "b", &[("a", 2.0), ("b", 4.0)]);
-        check_diff("sqrt(V(a)*V(a) + V(b)*V(b))", "a", &[("a", 3.0), ("b", 4.0)]);
+        check_diff(
+            "sqrt(V(a)*V(a) + V(b)*V(b))",
+            "a",
+            &[("a", 3.0), ("b", 4.0)],
+        );
         check_diff("atan2(V(q), V(i))", "i", &[("i", 0.8), ("q", 0.3)]);
         check_diff("atan2(V(q), V(i))", "q", &[("i", 0.8), ("q", 0.3)]);
         check_diff("V(a)^3", "a", &[("a", 1.7)]);
@@ -1793,12 +1800,13 @@ mod tests {
         let mut ctx = MapCtx::new().with("a", 1.0);
         ctx.inv_dt = 9999.0;
         assert!(e.diff(&Var::Node("a".into())).simplify().eval(&ctx) != 0.0);
-        assert!(e
-            .diff_jacobian(&Var::Node("a".into()))
-            .simplify()
-            .eval(&ctx)
-            .abs()
-            < 1e-12);
+        assert!(
+            e.diff_jacobian(&Var::Node("a".into()))
+                .simplify()
+                .eval(&ctx)
+                .abs()
+                < 1e-12
+        );
 
         // In a product, ddt acts as a constant FACTOR: ∂/∂a [V(a)*ddt(V(b))] =
         // ddt(V(b)) (the value is kept), not 0.
@@ -1807,7 +1815,11 @@ mod tests {
         ctx2.inv_dt = 100.0;
         ctx2.x_prev.insert(0, 1.0); // ddt(V(b)) = (3 - 1)*100 = 200
         let jac = p.diff_jacobian(&Var::Node("a".into())).simplify();
-        assert!((jac.eval(&ctx2) - 200.0).abs() < 1e-9, "got {}", jac.eval(&ctx2));
+        assert!(
+            (jac.eval(&ctx2) - 200.0).abs() < 1e-9,
+            "got {}",
+            jac.eval(&ctx2)
+        );
     }
 
     #[test]
@@ -1882,7 +1894,10 @@ mod tests {
         // exp: inline clamp, NOT the never-emitted bsrc_safe_exp helper.
         let s = parse("exp(V(a))").to_rust(&r);
         assert!(s.contains(".clamp(-40.0, 40.0).exp()"), "exp emission: {s}");
-        assert!(!s.contains("bsrc_safe_exp"), "exp must not call an undefined helper: {s}");
+        assert!(
+            !s.contains("bsrc_safe_exp"),
+            "exp must not call an undefined helper: {s}"
+        );
 
         // exp derivative: clamp-gated (0 outside the window), same window.
         let d = parse("exp(V(a))")
@@ -1899,34 +1914,55 @@ mod tests {
             .diff(&Var::Node("a".into()))
             .simplify()
             .to_rust(&r);
-        assert!(d.contains("1e-300"), "abs' emission must carry the sign guard: {d}");
+        assert!(
+            d.contains("1e-300"),
+            "abs' emission must carry the sign guard: {d}"
+        );
 
         // sqrt derivative: guarded denominator.
         let d = parse("sqrt(V(a))")
             .diff(&Var::Node("a".into()))
             .simplify()
             .to_rust(&r);
-        assert!(d.contains("1e-150"), "sqrt' emission must carry the 1e-150 guard: {d}");
+        assert!(
+            d.contains("1e-150"),
+            "sqrt' emission must carry the 1e-150 guard: {d}"
+        );
 
         // ln derivative: guarded 1/max(x, 1e-300).
         let d = parse("ln(V(a))")
             .diff(&Var::Node("a".into()))
             .simplify()
             .to_rust(&r);
-        assert!(d.contains(".max(1e-300)"), "ln' emission must be guarded: {d}");
+        assert!(
+            d.contains(".max(1e-300)"),
+            "ln' emission must be guarded: {d}"
+        );
 
         // pow with constant integer exponent → sign-correct powi.
         let s = parse("V(a)^3").to_rust(&r);
-        assert!(s.contains(".powi(3)"), "integer-const pow should emit powi: {s}");
+        assert!(
+            s.contains(".powi(3)"),
+            "integer-const pow should emit powi: {s}"
+        );
         // pow with constant fractional exponent → |a|^p.
         let s = parse("pow(V(a), 1.5)").to_rust(&r);
-        assert!(s.contains(".abs().powf(1.5"), "fractional-const pow should emit |a|^p: {s}");
+        assert!(
+            s.contains(".abs().powf(1.5"),
+            "fractional-const pow should emit |a|^p: {s}"
+        );
         // pow with a variable exponent → inline PTpower block.
         let s = parse("pow(V(a), V(b))").to_rust(&r);
-        assert!(s.contains("bsa < 0.0"), "variable-exp pow should emit the PTpower block: {s}");
+        assert!(
+            s.contains("bsa < 0.0"),
+            "variable-exp pow should emit the PTpower block: {s}"
+        );
         // pwr → inline PTpwr block.
         let s = parse("pwr(V(a), 1.5)").to_rust(&r);
-        assert!(s.contains("-((-bsa).powf(bsb))"), "pwr should emit the PTpwr block: {s}");
+        assert!(
+            s.contains("-((-bsa).powf(bsb))"),
+            "pwr should emit the PTpwr block: {s}"
+        );
     }
 
     /// `fmt_f64` must never emit the bare `inf`/`NaN` tokens (`{:e}` output),
@@ -1935,7 +1971,10 @@ mod tests {
     fn const_emission_handles_non_finite() {
         let r = TestResolver;
         assert_eq!(Expr::Const(f64::INFINITY).to_rust(&r), "f64::INFINITY");
-        assert_eq!(Expr::Const(f64::NEG_INFINITY).to_rust(&r), "f64::NEG_INFINITY");
+        assert_eq!(
+            Expr::Const(f64::NEG_INFINITY).to_rust(&r),
+            "f64::NEG_INFINITY"
+        );
         assert_eq!(Expr::Const(f64::NAN).to_rust(&r), "f64::NAN");
         // Finite formatting unchanged.
         assert_eq!(Expr::Const(2.0).to_rust(&r), "2.0");
