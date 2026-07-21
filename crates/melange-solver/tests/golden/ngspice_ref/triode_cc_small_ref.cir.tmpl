@@ -1,0 +1,28 @@
+* 12AX7 CC small-signal golden ngspice reference — B-source Koren twin of
+* .model 12AX7 TUBE(MU=100 EX=1.4 KG1=1060 KP=600 KVB=300)
+*   E1 = (Vpk/KP)*ln(1+exp(KP*(1/MU + Vgk/sqrt(KVB+Vpk^2))))
+*   Ip = 2*E1^EX/KG1  for E1 > 0   -> 2*pwr(uramp(E1),EX)/KG1
+* 10p Cgk/Cpk mirror DkKernel::from_mna parasitics. Grid current omitted:
+* melange dc-op reports i_nl(grid)=0 A at Vgk=-1.2 V; the 40 mV drive keeps
+* Vgk below -1.1 V throughout. DC OP cross-check: plate 170.1017 V both engines.
+.OPTIONS INTERP reltol=1e-4
+VMLG in_mlg 0 PWL({PWL})
+RMLG in_mlg in 1
+Rin in 0 1Meg
+Cin in grid 100n
+Rg grid 0 1Meg
+BP plate cathode I=2*pwr(uramp((V(plate,cathode)/600)*ln(1+exp(600*(1/100+V(grid,cathode)/sqrt(300+V(plate,cathode)*V(plate,cathode)))))),1.4)/1060
+Cgk grid cathode 10p
+Cpk plate cathode 10p
+Rk cathode 0 1.5k
+Ck cathode 0 25u
+Rp vcc plate 100k
+Cout plate out 100n
+Rout out 0 1Meg
+Vcc vcc 0 DC 250
+{TRAN}
+.control
+run
+wrdata {DAT} v(out)
+.endc
+.END

@@ -1,0 +1,16 @@
+* Opamp inverting golden ngspice reference (VCCS twin of .model OA(AOL=200000 ROUT=1))
+* Correct polarity: G element I(n+ -> n-) = gm*V(nc+,nc-), so
+* `G1 out 0 vminus 0 200000` injects Gm*(0 - V(vminus)) INTO out (V+ = ground).
+.OPTIONS INTERP reltol=1e-4
+VMLG in_mlg 0 PWL({PWL})
+RMLG in_mlg in 1
+R1 in vminus 1k
+R2 vminus out 10k
+G1 out 0 vminus 0 200000
+Rout out 0 1
+{TRAN}
+.control
+run
+wrdata {DAT} v(out)
+.endc
+.END
