@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# Pre-push guard: run the exact CI style gates locally so a push can't turn
+# CI red on formatting or clippy. Mirrors .github CI jobs "Format" + "Clippy".
+#
+# Bypass (use sparingly): git push --no-verify
+#
+# Installed via:  git config core.hooksPath .githooks
+set -u
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root" || exit 1
+
+fail=0
+
+echo "pre-push: cargo fmt --all -- --check"
+if ! cargo fmt --all -- --check; then
+    echo ""
+    echo "  ✗ Format check failed. Fix with:  cargo fmt --all"
+    fail=1
+fi
+
+echo "pre-push: cargo clippy --workspace -- -D warnings"
+if ! cargo clippy --workspace -- -D warnings; then
+    echo ""
+    echo "  ✗ Clippy failed under -D warnings. Fix the lints above (many auto-fix"
+    echo "    with:  cargo clippy --workspace --fix --allow-dirty)"
+    fail=1
+fi
+
+if [ "$fail" -ne 0 ]; then
+    echo ""
+    echo "pre-push blocked: the CI style gates would fail on this push."
+    echo "Fix the issues above, or bypass with 'git push --no-verify' if intentional."
+    exit 1
+fi
+
+echo "pre-push: style gates green ✓"
+exit 0
