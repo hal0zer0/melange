@@ -21,6 +21,9 @@ peaks/
 # ngspice source distribution
 ngspice*/
 ngspice_*
+# ...but keep the checked-in ngspice golden-reference regen kit (the ngspice_*
+# rule above would otherwise eat this directory and break golden reproducibility).
+!crates/melange-solver/tests/golden/ngspice_ref/
 
 # Package archives
 *.tar.gz
@@ -33,3 +36,4 @@ ngspice_*
 # Archived/disabled files (git history preserves them)
 *.archived
 *.disabled
+golden-baselines/
