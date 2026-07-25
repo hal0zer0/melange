@@ -2762,6 +2762,7 @@ fn simulate_circuit_source(
         1000.0, // test tone freq
         opts.duration,
         &probe_names,
+        opts.noise_mode != melange_solver::codegen::NoiseMode::Off,
     );
     let full_source = format!("{}\n{}", generated.code, simulate_main);
 
@@ -3937,6 +3938,7 @@ fn analyze_freq_response(
         &[], // pot calls (already baked into netlist)
         &switch_calls,
         harmonics,
+        noise_mode != melange_solver::codegen::NoiseMode::Off,
     );
     let full_source = format!("{}\n{}", generated.code, analyze_main);
 

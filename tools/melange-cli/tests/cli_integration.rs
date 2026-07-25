@@ -270,6 +270,91 @@ fn test_analyze_integral_amplitude() {
     let _ = std::fs::remove_file(&cir);
 }
 
+/// Read the raw PCM payload (bytes after the `data` chunk header) of a WAV
+/// file written by melange's embedded writer. Byte-level compare is enough —
+/// this test only needs "did the output change," not decoded sample values.
+fn wav_pcm_bytes(path: &std::path::Path) -> Vec<u8> {
+    let data = std::fs::read(path).expect("read wav");
+    let idx = data
+        .windows(4)
+        .position(|w| w == b"data")
+        .expect("wav data chunk");
+    data[idx + 8..].to_vec()
+}
+
+#[test]
+fn test_simulate_noise_full_actually_injects_noise() {
+    // Regression: `simulate --noise <mode>` used to compile in the full
+    // noise machinery but leave the runtime `noise_enabled` master switch at
+    // its default (false), so output was byte-identical and seed-invariant
+    // to `--noise off` — a silent no-op with no warning. Reported by
+    // melange-circuits 2026-07-25
+    // (local-docs/melange-bug-simulate-noise-noop-2026-07-25.md in their
+    // repo). Fixed by emitting `state.set_noise_enabled(true)` in the
+    // generated `main()` when the caller passed `--noise <mode>` — passing
+    // the flag IS the opt-in for `simulate`/`analyze`, unlike the plugin
+    // seam where noise defaults off until the host UI enables it.
+    let cir = write_test_circuit(TEST_RC_LOWPASS, "noise_noop");
+    let wav_off = std::env::temp_dir().join("melange_cli_test_noise_off.wav");
+    let wav_full_a = std::env::temp_dir().join("melange_cli_test_noise_full_a.wav");
+    let wav_full_b = std::env::temp_dir().join("melange_cli_test_noise_full_b.wav");
+
+    let base_args = |out: &std::path::Path, extra: &[&str]| -> Vec<String> {
+        let mut args = vec![
+            "simulate".to_string(),
+            cir.to_str().unwrap().to_string(),
+            "--input-node".to_string(),
+            "in".to_string(),
+            "--output-node".to_string(),
+            "out".to_string(),
+            "--amplitude".to_string(),
+            "0.0".to_string(),
+            "--duration".to_string(),
+            "0.1".to_string(),
+            "--output".to_string(),
+            out.to_str().unwrap().to_string(),
+        ];
+        args.extend(extra.iter().map(|s| s.to_string()));
+        args
+    };
+
+    run_melange(&base_args(&wav_off, &["--noise", "off"])
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>());
+    run_melange(
+        &base_args(&wav_full_a, &["--noise", "full", "--noise-seed", "12345"])
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+    );
+    run_melange(
+        &base_args(&wav_full_b, &["--noise", "full", "--noise-seed", "999"])
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+    );
+
+    let off = wav_pcm_bytes(&wav_off);
+    let full_a = wav_pcm_bytes(&wav_full_a);
+    let full_b = wav_pcm_bytes(&wav_full_b);
+
+    assert_ne!(
+        off, full_a,
+        "--noise full must differ from --noise off (silent no-op regression)"
+    );
+    assert_ne!(
+        full_a, full_b,
+        "different --noise-seed values must produce different output \
+         (seed-invariance means the RNG master switch is still off)"
+    );
+
+    let _ = std::fs::remove_file(&cir);
+    let _ = std::fs::remove_file(&wav_off);
+    let _ = std::fs::remove_file(&wav_full_a);
+    let _ = std::fs::remove_file(&wav_full_b);
+}
+
 #[test]
 fn test_analyze_linear_circuit_harmonics_at_numerical_floor() {
     // Regression for the DFT leakage bug: the measurement window rounded to N

@@ -182,9 +182,24 @@ pub fn generate_simulate_main(
     freq: f64,
     duration_secs: f64,
     probe_names: &[&str],
+    noise_enabled: bool,
 ) -> String {
     let pot_lines: String = pot_calls.iter().map(|c| format!("    {c};\n")).collect();
     let switch_lines: String = switch_calls.iter().map(|c| format!("    {c};\n")).collect();
+    // `--noise <mode>` bakes the noise machinery into codegen (state fields,
+    // RNG seeding, per-sample injection, `set_noise_enabled` method — see
+    // `noise.enabled` gating in dk_emitter.rs/nodal_emitter.rs), but the
+    // runtime master switch defaults OFF (`noise_enabled: false` in
+    // `CircuitState::default()`) so a shipped plugin starts silent until the
+    // host UI opts in. For `simulate`/`analyze`, passing `--noise <mode>` IS
+    // the opt-in — without this call the CLI compiles in the full noise
+    // machinery and then runs it switched off, producing output that is
+    // byte-identical and seed-invariant to `--noise off` with no warning.
+    let noise_enable_line = if noise_enabled {
+        "    state.set_noise_enabled(true);\n"
+    } else {
+        ""
+    };
 
     // Embed minimal WAV reader/writer
     let wav_code = include_str!("wav_embed.rs.inc");
@@ -256,7 +271,7 @@ fn main() {{
     let args: Vec<String> = std::env::args().collect();
 
     let mut state = CircuitState::default();
-{pot_lines}{switch_lines}
+{noise_enable_line}{pot_lines}{switch_lines}
     // Determine input source
     let (samples, sr) = if let Some(input_path) = args.get(1) {{
         if input_path == "--tone" {{
@@ -360,9 +375,19 @@ pub fn generate_analyze_main(
     pot_calls: &[String],
     switch_calls: &[String],
     harmonics: usize,
+    noise_enabled: bool,
 ) -> String {
     let pot_lines: String = pot_calls.iter().map(|c| format!("    {c};\n")).collect();
     let switch_lines: String = switch_calls.iter().map(|c| format!("    {c};\n")).collect();
+    // See `generate_simulate_main`'s comment: `--noise <mode>` bakes in the
+    // noise machinery, but the runtime master switch defaults OFF. Without
+    // this call, `analyze --noise <mode>` silently measures a noise-free
+    // circuit and reports success.
+    let noise_enable_line = if noise_enabled {
+        "    state.set_noise_enabled(true);\n"
+    } else {
+        ""
+    };
 
     let freq_list: String = frequencies
         .iter()
@@ -395,7 +420,7 @@ fn main() {{
     const HARMONICS: usize = {harmonics};
 
     let mut state = CircuitState::default();
-{pot_lines}{switch_lines}    state.set_sample_rate({sample_rate:.1});
+{noise_enable_line}{pot_lines}{switch_lines}    state.set_sample_rate({sample_rate:.1});
 
     let freqs: &[f64] = &[{freq_list}];
     let amplitude: f64 = {amplitude:.17e};
