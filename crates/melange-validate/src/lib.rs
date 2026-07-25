@@ -606,6 +606,8 @@ fn run_melange_solver_from_str(
         output_nodes: vec![output_node],
         input_resistance: 1.0,
         dc_block: true,
+        router_dk_unstable: decision.dk_unstable,
+        router_dk_spectral_radius: decision.spectral_radius,
         ..CodegenConfig::default()
     };
     let generator = CodeGenerator::new(config);

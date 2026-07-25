@@ -1660,6 +1660,8 @@ fn compile_circuit_source(
         noise_mode,
         noise_master_seed: noise_seed,
         emit_dc_op_recompute,
+        router_dk_unstable: routing.dk_unstable,
+        router_dk_spectral_radius: routing.spectral_radius,
         ..CodegenConfig::default()
     };
 
@@ -2728,6 +2730,8 @@ fn simulate_circuit_source(
         noise_mode: opts.noise_mode,
         noise_master_seed: opts.noise_seed,
         emit_dc_op_recompute: false,
+        router_dk_unstable: decision.dk_unstable,
+        router_dk_spectral_radius: decision.spectral_radius,
     };
     let generator = CodeGenerator::new(config);
     let generated = if use_nodal {
@@ -3889,6 +3893,8 @@ fn analyze_freq_response(
         noise_mode,
         noise_master_seed: noise_seed,
         emit_dc_op_recompute: false,
+        router_dk_unstable: decision.dk_unstable,
+        router_dk_spectral_radius: decision.spectral_radius,
     };
     let generator = CodeGenerator::new(config);
     let generated = if use_nodal {

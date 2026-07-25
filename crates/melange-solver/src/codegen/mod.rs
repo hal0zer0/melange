@@ -310,6 +310,36 @@ pub struct CodegenConfig {
     /// MVP scope: Direct-NR only, no source/Gmin stepping, no basin-trap handling.
     /// Not supported for DK circuits with parasitic-R BJTs (use nodal path).
     pub emit_dc_op_recompute: bool,
+    /// Whether `routing::auto_route` selected the nodal path because the
+    /// DK-kernel spectral radius exceeded the trap-instability threshold
+    /// (`RoutingDecision::dk_unstable`). Threaded in by the caller
+    /// (CLI/library routing call sites) so the nodal auto-BE promotion gate
+    /// can use it as a corroborating (not unconditional) signal — see
+    /// `stability::router_corroborates_marginal_instability`.
+    ///
+    /// The router measures spectral radius on the un-reduced DK-kernel
+    /// `S·A_neg` via a fixed-iteration-count, non-deflected power iteration;
+    /// the nodal IR build recomputes a more accurate (converged,
+    /// input-deflated) estimate on its own matrices. The two can straddle
+    /// the 1.002 promotion threshold on the same circuit (observed on
+    /// `wurli-power-amp`: DK-kernel rho = 1.0040 vs nodal-deflated
+    /// rho = 1.0005) — but the router's raw number is also demonstrably
+    /// inaccurate on some circuits (verified on tungsten-thunder-horse:
+    /// 1.1163 raw vs 0.8157 converged+deflated, comfortably trap-stable), so
+    /// it is NOT trusted unconditionally. It only tips the balance when the
+    /// nodal-local estimate independently corroborates a marginal
+    /// (rho > 0.999, negative dominant eigenvalue) mode that the local
+    /// gain-gate alone would otherwise decline to promote. Default `false`
+    /// (nodal auto-BE promotion unchanged) when unset — e.g. library callers
+    /// that construct `CodegenConfig` without running `routing::auto_route`
+    /// first.
+    pub router_dk_unstable: bool,
+    /// Diagnostic companion to `router_dk_unstable`: the DK-kernel spectral
+    /// radius that produced it (0.0 when `router_dk_unstable` is false).
+    /// Used only for log messages when the router signal is the deciding
+    /// factor (the nodal-local estimate alone did not cross the promotion
+    /// threshold).
+    pub router_dk_spectral_radius: f64,
 }
 
 #[cfg(feature = "codegen")]
@@ -393,6 +423,8 @@ impl Default for CodegenConfig {
             noise_mode: NoiseMode::Off,
             noise_master_seed: 0,
             emit_dc_op_recompute: false,
+            router_dk_unstable: false,
+            router_dk_spectral_radius: 0.0,
         }
     }
 }

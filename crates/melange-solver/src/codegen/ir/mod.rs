@@ -2699,10 +2699,12 @@ impl CircuitIR {
         let trap_discriminator_rho = trap_stability.rho;
         if spectral_radius_s_aneg > 0.99 {
             log::info!(
-                "Nodal: spectral_radius(S*A_neg) = {:.4}, dominant_sign = {:+.0} \
+                "Nodal: spectral_radius(S*A_neg) = {:.4}, dominant_sign = {:+.0}, \
+                 max_abs_s = {:.4e} \
                  (marginally stable; Schur used when K well-conditioned)",
                 spectral_radius_s_aneg,
-                trap_stability.dominant_sign
+                trap_stability.dominant_sign,
+                trap_stability.max_abs_s
             );
         }
 
@@ -2737,22 +2739,71 @@ impl CircuitIR {
         // input-row dynamics are arbitrary). Without the gate, an RC lowpass
         // false-fires the discriminator. See augmented_mna_tests::
         // test_no_inductors_exact_match.
-        if !be
-            && !config.force_trap
-            && m > 0
-            && crate::codegen::stability::trap_needs_be(trap_stability)
-        {
+        //
+        // `config.router_dk_unstable` OR-branch: `routing::auto_route`
+        // already measured spectral radius on the un-reduced DK-kernel
+        // `S·A_neg` (no input-node deflation, fixed-iteration-count power
+        // method) and selected this nodal path BECAUSE it found trap
+        // unstable there. The nodal-local estimate above is the shared,
+        // converged, input-deflated analyzer (`stability::
+        // analyze_trap_stability_deflated`) on the nodal matrices, which
+        // can straddle the 1.002 threshold on the same circuit
+        // (wurli-power-amp: DK-kernel rho=1.0040, nodal-deflated
+        // rho=1.0005) because the router's own estimator is measurably
+        // less accurate (verified 2026-07-25: the router's raw number can
+        // be off by several percent from the converged/deflated value on
+        // the SAME kernel matrices — e.g. tungsten-thunder-horse measures
+        // 1.1163 raw vs 0.8157 converged+deflated, comfortably trap-stable).
+        // So the router's flag alone is NOT trustworthy as an unconditional
+        // override — verified with the golden-audio harness, blindly OR-ing
+        // it in reproduces wurli's fix but also force-promotes circuits
+        // whose nodal-local estimate shows they are NOT anywhere near
+        // marginal (severe, non-benign output deltas on
+        // tungsten-thunder-horse).
+        //
+        // Instead, require the nodal-local estimate to INDEPENDENTLY
+        // corroborate that this circuit is at least in the marginal
+        // Nyquist zone (`rho > TRAP_BE_SIGN_FLIP_RHO` with a negative
+        // dominant eigenvalue) before letting the router's finding lift the
+        // `max_abs_s` gain-gate exclusion. This still fixes wurli-power-amp
+        // (nodal-local rho=1.0005 > 0.999, sign=-1, gain=9.4e3 too low to
+        // pass the gain gate on its own — the router's corroborating
+        // "trap-unstable" finding is what tips a genuinely marginal,
+        // already-suspect case into promotion) while refusing to promote a
+        // circuit the nodal-local analysis reports as comfortably stable
+        // (rho=0.8157, nowhere near the marginal window) no matter what the
+        // less-accurate router number claims.
+        let local_needs_be = crate::codegen::stability::trap_needs_be(trap_stability);
+        let router_corroborated_marginal =
+            crate::codegen::stability::router_corroborates_marginal_instability(
+                config.router_dk_unstable,
+                trap_stability,
+            );
+        if !be && !config.force_trap && m > 0 && (local_needs_be || router_corroborated_marginal) {
             log::warn!(
                 "Nodal: auto-enabling backward Euler — spectral_radius(S*A_neg) = \
-                 {:.4}, dominant_sign = {:+.0} ({}). BE is L-stable. \
+                 {:.4} (nodal, input-deflated), dominant_sign = {:+.0}{}. BE is L-stable. \
                  Override with --force-trap only to reproduce legacy trap output.",
                 trap_stability.rho,
                 trap_stability.dominant_sign,
-                if trap_stability.rho > crate::codegen::stability::TRAP_BE_PROMOTION_RHO {
-                    "trap unstable, mode would grow unboundedly"
+                if local_needs_be {
+                    format!(
+                        " ({})",
+                        if trap_stability.rho > crate::codegen::stability::TRAP_BE_PROMOTION_RHO {
+                            "trap unstable, mode would grow unboundedly"
+                        } else {
+                            "Nyquist-marginal trap mode that trap cannot damp \
+                             — fs/2 limit cycle in v_prev for high-gain cap-coupled cascades"
+                        }
+                    )
                 } else {
-                    "Nyquist-marginal trap mode that trap cannot damp \
-                     — fs/2 limit cycle in v_prev for high-gain cap-coupled cascades"
+                    format!(
+                        " (nodal-local estimate is in the marginal Nyquist zone but below the \
+                         gain-gated threshold; routing::auto_route independently flagged \
+                         trap-unstable via DK-kernel spectral radius {:.4} on the un-reduced \
+                         circuit — corroborated marginal case, honoring the router's finding)",
+                        config.router_dk_spectral_radius
+                    )
                 }
             );
             alpha = alpha_be;

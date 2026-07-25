@@ -301,6 +301,38 @@ pub fn trap_needs_be(stability: TrapStability) -> bool {
             && stability.max_abs_s > NYQUIST_GATE_MAX_ABS_S)
 }
 
+/// Whether an independent, less-precise "trap unstable" finding (e.g. the
+/// DK-vs-nodal router's fixed-iteration-count, non-deflected spectral-radius
+/// estimate — `routing::RoutingDecision::dk_unstable`) should be allowed to
+/// lift the gain-gate exclusion in [`trap_needs_be`]'s Nyquist-marginal
+/// clause for the nodal auto-BE promotion.
+///
+/// The router's own estimator is measurably less accurate than the shared,
+/// converged, input-deflated analyzer used here (verified 2026-07-25: on the
+/// same DK-kernel matrices, the router's raw fixed-20-iteration number can
+/// disagree with the converged+deflated value by several tens of percent —
+/// e.g. tungsten-thunder-horse measures 1.1163 raw vs 0.8157
+/// converged+deflated, comfortably trap-stable). Trusting the router's flag
+/// unconditionally reproduces the wurli-power-amp fix but also force-promotes
+/// circuits the accurate local analysis reports as nowhere near marginal,
+/// which showed up as a severe (non-benign, near-zero-correlation)
+/// golden-audio regression on tungsten-thunder-horse.
+///
+/// So the router's finding is only trusted as a tie-breaker: it may lift the
+/// `max_abs_s` gain-gate requirement, but only when the LOCAL, accurate
+/// estimate independently corroborates that this circuit is at least in the
+/// marginal Nyquist zone (`rho > TRAP_BE_SIGN_FLIP_RHO` with a negative
+/// dominant eigenvalue). A circuit the local analysis reports as comfortably
+/// stable is never promoted no matter what the router claims.
+pub fn router_corroborates_marginal_instability(
+    router_flagged_unstable: bool,
+    stability: TrapStability,
+) -> bool {
+    router_flagged_unstable
+        && stability.rho > TRAP_BE_SIGN_FLIP_RHO
+        && stability.dominant_sign < 0.0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -485,5 +517,85 @@ mod tests {
         assert_eq!(r.rho, 0.0);
         assert_eq!(r.dominant_sign, 0.0);
         assert!(!trap_needs_be(r));
+    }
+
+    // -- router_corroborates_marginal_instability (2026-07-25 fix) --------
+
+    #[test]
+    fn router_hint_corroborated_by_marginal_local_rho_trips() {
+        // wurli-power-amp's actual measured values: nodal-local (converged,
+        // deflated) rho=1.0005, dominant_sign=-1, max_abs_s=9.4e3 (below the
+        // 1e5 gain gate, so `trap_needs_be` alone declines). The router
+        // independently measured DK-kernel rho=1.0040 (> 1.002) on the
+        // un-reduced circuit. The local estimate IS in the marginal window
+        // (>0.999, sign<0), so the router's finding should be trusted here.
+        let stability = TrapStability {
+            rho: 1.0005,
+            dominant_sign: -1.0,
+            max_abs_s: 9.4e3,
+        };
+        assert!(
+            !trap_needs_be(stability),
+            "gain gate should decline promotion on its own for this low max_abs_s"
+        );
+        assert!(
+            router_corroborates_marginal_instability(true, stability),
+            "router's trap-unstable finding must be honored when the local estimate \
+             independently corroborates a marginal (rho>0.999, sign<0) mode"
+        );
+    }
+
+    #[test]
+    fn router_hint_not_corroborated_by_comfortably_stable_local_rho_does_not_trip() {
+        // tungsten-thunder-horse's actual measured values: nodal-local
+        // (converged, deflated) rho=0.8157 — comfortably trap-stable,
+        // nowhere near the marginal window. The router's raw (fixed-20-
+        // iteration, non-deflected) estimate on the same DK-kernel matrices
+        // was 1.1163 (> 1.002) — but that number is demonstrably inaccurate
+        // (verified 2026-07-25 against the converged+deflated recompute on
+        // the identical kernel matrices), so it must NOT force promotion
+        // when the local estimate flatly disagrees. Blindly trusting the
+        // router's flag here caused a severe, non-benign golden-audio
+        // regression (correlation collapsing to ~0.006-0.6 on some test
+        // programs) before this corroboration gate was added.
+        let stability = TrapStability {
+            rho: 0.8157,
+            dominant_sign: -1.0,
+            max_abs_s: 5.87e5,
+        };
+        assert!(!trap_needs_be(stability));
+        assert!(
+            !router_corroborates_marginal_instability(true, stability),
+            "router's flag must NOT force promotion when the local estimate is \
+             comfortably stable (rho=0.8157, far from the marginal window)"
+        );
+    }
+
+    #[test]
+    fn router_hint_ignored_when_not_flagged() {
+        // Even a marginal local rho must not trip the corroboration gate
+        // when the router itself never flagged trap-unstable (e.g. routed
+        // nodal for an unrelated reason, or dk_unstable's own gates never
+        // fired). This mirrors `trap_needs_be`'s existing gain-gate decline.
+        let stability = TrapStability {
+            rho: 1.0005,
+            dominant_sign: -1.0,
+            max_abs_s: 9.4e3,
+        };
+        assert!(!router_corroborates_marginal_instability(false, stability));
+    }
+
+    #[test]
+    fn router_hint_ignored_on_positive_dominant_sign() {
+        // Marginal magnitude but positive dominant eigenvalue (slow LF mode,
+        // e.g. a passive-LC tank) must not be promoted even with the router
+        // flag set — positive-sign marginal modes are handled exactly by
+        // the bilinear transform (2026-04-22 passive-LC precedent).
+        let stability = TrapStability {
+            rho: 1.0005,
+            dominant_sign: 1.0,
+            max_abs_s: 9.4e3,
+        };
+        assert!(!router_corroborates_marginal_instability(true, stability));
     }
 }
