@@ -220,11 +220,21 @@ fn compile_and_run_with_stdin(
         .spawn()
         .expect("failed to spawn binary");
 
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(stdin_data.as_bytes()).expect("write stdin");
-    }
+    // Write stdin on a separate thread so `wait_with_output()` drains stdout
+    // concurrently. Otherwise, when input AND output both exceed the ~64 KB OS
+    // pipe buffer, the parent blocks writing stdin while the child blocks
+    // writing a full, unread stdout — a deadlock (flaky, triggered near the
+    // buffer boundary). Mirrors the fix in melange-validate's runner.
+    let stdin = child.stdin.take();
+    let stdin_bytes = stdin_data.as_bytes().to_vec();
+    let writer = std::thread::spawn(move || {
+        if let Some(mut s) = stdin {
+            let _ = s.write_all(&stdin_bytes);
+        }
+    });
 
     let output = child.wait_with_output().expect("wait for binary");
+    let _ = writer.join();
     let _ = std::fs::remove_file(&bin_path);
 
     if !output.status.success() {
@@ -563,11 +573,18 @@ pub fn run_signal(circuit: &CompiledCircuit, input: &[f64], sample_rate: f64) ->
         .spawn()
         .expect("failed to spawn circuit binary");
 
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(stdin_data.as_bytes()).expect("write stdin");
-    }
+    // Thread the stdin writer so wait_with_output() drains stdout concurrently
+    // — otherwise a long input+output pair (e.g. the 2000-sample RLC impulse
+    // response) can straddle the ~64 KB pipe buffer and deadlock (flaky hang).
+    let stdin = child.stdin.take();
+    let writer = std::thread::spawn(move || {
+        if let Some(mut s) = stdin {
+            let _ = s.write_all(stdin_data.as_bytes());
+        }
+    });
 
     let output = child.wait_with_output().expect("wait for binary");
+    let _ = writer.join();
 
     if !output.status.success() {
         panic!(
