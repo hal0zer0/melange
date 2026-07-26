@@ -318,10 +318,12 @@ fn test_simulate_noise_full_actually_injects_noise() {
         args
     };
 
-    run_melange(&base_args(&wav_off, &["--noise", "off"])
-        .iter()
-        .map(String::as_str)
-        .collect::<Vec<_>>());
+    run_melange(
+        &base_args(&wav_off, &["--noise", "off"])
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+    );
     run_melange(
         &base_args(&wav_full_a, &["--noise", "full", "--noise-seed", "12345"])
             .iter()
