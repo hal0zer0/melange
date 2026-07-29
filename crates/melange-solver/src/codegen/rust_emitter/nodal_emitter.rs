@@ -640,17 +640,27 @@ impl RustEmitter {
         //   2. spectral radius (rho > 1.0 means linear prediction unstable)
         let has_linearized = ir.topology.num_linearized_devices > 0;
         let linearized_bypass = has_linearized && !k_degenerate;
+        // `spectral_radius_s_aneg` is measured on the pair that ships: the
+        // BE S·A_neg on a backward-Euler build, the trap pair otherwise.
+        // Label it so a pinned-BE compile log isn't mistaken for the trap
+        // discriminator's quiescent rho.
+        let rho_pair = if ir.solver_config.backward_euler {
+            "BE pair"
+        } else {
+            "trap pair"
+        };
         if linearized_bypass {
             log::warn!(
                 "Nodal: {} linearized devices — suppressing magnitude guards \
                  (max|K|={:.2e}, max|S|={:.2e}, K_diag_min={:.2e}, \
-                 pos_K_with_I={}). Spectral radius = {:.4}.",
+                 pos_K_with_I={}). Spectral radius = {:.4} ({}).",
                 ir.topology.num_linearized_devices,
                 k_max_abs,
                 s_max_abs,
                 k_diag_min,
                 has_positive_k_with_current,
-                ir.matrices.spectral_radius_s_aneg
+                ir.matrices.spectral_radius_s_aneg,
+                rho_pair
             );
         }
 
@@ -776,8 +786,9 @@ impl RustEmitter {
                 );
             } else if schur_unstable {
                 log::warn!(
-                    "Nodal: using full N×N LU NR (spectral_radius(S*A_neg) = {:.4}, Schur feedback unstable)",
-                    ir.matrices.spectral_radius_s_aneg
+                    "Nodal: using full N×N LU NR (spectral_radius(S*A_neg) = {:.4} ({}), Schur feedback unstable)",
+                    ir.matrices.spectral_radius_s_aneg,
+                    rho_pair
                 );
             } else if k_large_magnitude_with_linearization {
                 log::warn!(
@@ -802,10 +813,11 @@ impl RustEmitter {
         } else {
             if linearized_bypass {
                 log::warn!(
-                    "Nodal: using Schur NR (M={}, {} linearized devices, rho={:.4})",
+                    "Nodal: using Schur NR (M={}, {} linearized devices, rho={:.4} ({}))",
                     m,
                     ir.topology.num_linearized_devices,
-                    ir.matrices.spectral_radius_s_aneg
+                    ir.matrices.spectral_radius_s_aneg,
+                    rho_pair
                 );
             }
             // Schur path doesn't emit lu_solve by default, but active-set

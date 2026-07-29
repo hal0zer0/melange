@@ -146,6 +146,50 @@ pub struct CircuitIR {
     /// the value that actually triggered auto-BE.
     #[serde(default)]
     pub trap_discriminator_rho: f64,
+    /// How the shipped integration scheme was selected. Recorded at the
+    /// decision site in the IR builders so downstream reporting (CLI summary,
+    /// `CodegenMeta`) states the actual reason instead of re-deriving it from
+    /// config flags — a directive-pinned BE build is NOT "auto-selected".
+    #[serde(default)]
+    pub integrator_selection: IntegratorSelection,
+}
+
+/// Why the shipped integration scheme is what it is.
+///
+/// Precedence mirrors `resolve_integrator_pref` + the per-path forcing rules:
+/// CLI flag > `.integrator` directive > behavioral-source forcing (nodal) >
+/// auto-promotion > default trapezoidal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum IntegratorSelection {
+    /// Trapezoidal, nothing overrode it (the default scheme).
+    #[default]
+    TrapDefault,
+    /// Trapezoidal pinned by `--force-trap` (also opts out of auto-promotion
+    /// and the runtime BE-latch net).
+    TrapCliFlag,
+    /// Trapezoidal pinned by `.integrator trap` in the netlist.
+    TrapDirective,
+    /// Backward Euler requested by `--backward-euler`.
+    BeCliFlag,
+    /// Backward Euler pinned by `.integrator be` in the netlist.
+    BeDirective,
+    /// Backward Euler forced because behavioral `B` sources are stamped
+    /// current-only, which is exact under BE (nodal path only).
+    BeBehavioral,
+    /// Backward Euler auto-promoted by the trap-stability discriminator
+    /// (spectral radius over threshold / Nyquist-marginal).
+    BeAuto,
+}
+
+impl IntegratorSelection {
+    /// `true` for every backward-Euler variant.
+    #[must_use]
+    pub fn is_backward_euler(self) -> bool {
+        matches!(
+            self,
+            Self::BeCliFlag | Self::BeDirective | Self::BeBehavioral | Self::BeAuto
+        )
+    }
 }
 
 /// A plugin-driven scalar param in IR form (mirrors
@@ -1336,26 +1380,58 @@ fn build_dk_be_matrices_at_rate(
     Ok((s, a_neg_flat, rhs_const_be))
 }
 
-/// Resolve the effective `(backward_euler, force_trap)` pair from the CLI
-/// config and an optional `.integrator` netlist directive.
+/// Resolve the effective `(backward_euler, force_trap, selection)` triple
+/// from the CLI flags and an optional `.integrator` netlist directive.
 ///
 /// Precedence: an explicit CLI flag (`--backward-euler` / `--force-trap`)
 /// always wins over the directive; the directive wins over the automatic
 /// spectral-radius promotion. `.integrator be` ⇒ `backward_euler = true`;
 /// `.integrator trap` ⇒ `force_trap = true` (suppresses auto-promotion and,
 /// downstream, the runtime BE-latch safety net).
+///
+/// The returned `IntegratorSelection` records WHY, so reporting can
+/// distinguish "directive honored" from "auto-promotion fired". It is
+/// provisional: the IR builders overwrite it with `BeAuto`/`BeBehavioral`
+/// when those forcings apply. Public because the CLI shares it (single
+/// source of truth for the precedence rules — e.g. the max-iter auto-tuner
+/// must budget for the integrator that actually ships).
+pub fn resolve_integrator_flags(
+    cli_backward_euler: bool,
+    cli_force_trap: bool,
+    pref: Option<crate::parser::IntegratorPref>,
+) -> (bool, bool, IntegratorSelection) {
+    let mut be = cli_backward_euler;
+    let mut force_trap = cli_force_trap;
+    let mut selection = if be {
+        IntegratorSelection::BeCliFlag
+    } else if force_trap {
+        IntegratorSelection::TrapCliFlag
+    } else {
+        IntegratorSelection::TrapDefault
+    };
+    match pref {
+        Some(crate::parser::IntegratorPref::Be) if !force_trap => {
+            if !be {
+                selection = IntegratorSelection::BeDirective;
+            }
+            be = true;
+        }
+        Some(crate::parser::IntegratorPref::Trap) if !be => {
+            if !force_trap {
+                selection = IntegratorSelection::TrapDirective;
+            }
+            force_trap = true;
+        }
+        _ => {}
+    }
+    (be, force_trap, selection)
+}
+
 fn resolve_integrator_pref(
     config: &CodegenConfig,
     pref: Option<crate::parser::IntegratorPref>,
-) -> (bool, bool) {
-    let mut be = config.backward_euler;
-    let mut force_trap = config.force_trap;
-    match pref {
-        Some(crate::parser::IntegratorPref::Be) if !force_trap => be = true,
-        Some(crate::parser::IntegratorPref::Trap) if !be => force_trap = true,
-        _ => {}
-    }
-    (be, force_trap)
+) -> (bool, bool, IntegratorSelection) {
+    resolve_integrator_flags(config.backward_euler, config.force_trap, pref)
 }
 
 impl CircuitIR {
@@ -1391,7 +1467,7 @@ impl CircuitIR {
 
         // Resolve the effective integration scheme: CLI flags override the
         // `.integrator` netlist directive, which overrides auto-promotion.
-        let (cfg_backward_euler, cfg_force_trap) =
+        let (cfg_backward_euler, cfg_force_trap, mut integrator_selection) =
             resolve_integrator_pref(config, netlist.integrator);
 
         if m > crate::dk::MAX_M {
@@ -1537,6 +1613,9 @@ impl CircuitIR {
             false
         };
         let be = cfg_backward_euler || auto_be;
+        if auto_be {
+            integrator_selection = IntegratorSelection::BeAuto;
+        }
         let alpha = if be {
             internal_rate
         } else {
@@ -2280,6 +2359,7 @@ impl CircuitIR {
             behavioral_param_consts,
             behavioral_scalar_runtimes,
             trap_discriminator_rho,
+            integrator_selection,
         })
     }
 
@@ -2298,7 +2378,7 @@ impl CircuitIR {
 
         // Resolve the effective integration scheme: CLI flags override the
         // `.integrator` netlist directive, which overrides auto-promotion.
-        let (cfg_backward_euler, cfg_force_trap) =
+        let (cfg_backward_euler, cfg_force_trap, mut integrator_selection) =
             resolve_integrator_pref(config, netlist.integrator);
 
         if m > dk::MAX_M {
@@ -2360,6 +2440,12 @@ impl CircuitIR {
         // (Trapezoidal + a behavioral i_prev history term is a future refinement
         // — see docs/aidocs/BEHAVIORAL_SOURCES.md.)
         let be = cfg_backward_euler || !mna.behavioral_sources.is_empty();
+        if be && !cfg_backward_euler {
+            // Behavioral forcing outranks a `.integrator trap` pin (the
+            // current-only stamp is simply wrong under trap), so it also
+            // overwrites a provisional trap selection.
+            integrator_selection = IntegratorSelection::BeBehavioral;
+        }
         let mut a_flat = vec![0.0f64; n * n];
         let mut a_neg_flat = vec![0.0f64; n * n];
         for i in 0..n {
@@ -2747,13 +2833,17 @@ impl CircuitIR {
         // Diagnostic copy of the trap-side rho: `spectral_radius_s_aneg` is
         // overwritten with the post-promotion BE rho when auto-BE fires, but
         // CodegenMeta must report the value that TRIGGERED the promotion.
-        let trap_discriminator_rho = trap_stability.rho;
+        // When the build is already BE (flag/directive/behavioral), the pair
+        // analyzed above IS the BE pair — no trap discriminator ran, so the
+        // field stays 0.0 (matching the DK path and the field contract).
+        let trap_discriminator_rho = if be { 0.0 } else { trap_stability.rho };
         if spectral_radius_s_aneg > 0.99 {
             log::info!(
-                "Nodal: spectral_radius(S*A_neg) = {:.4}, dominant_sign = {:+.0}, \
+                "Nodal: spectral_radius(S*A_neg) = {:.4} ({} pair), dominant_sign = {:+.0}, \
                  max_abs_s = {:.4e} \
                  (marginally stable; Schur used when K well-conditioned)",
                 spectral_radius_s_aneg,
+                if be { "BE" } else { "trap" },
                 trap_stability.dominant_sign,
                 trap_stability.max_abs_s
             );
@@ -2865,6 +2955,7 @@ impl CircuitIR {
             k_flat = k_be_flat.clone();
             solver_config.backward_euler = true;
             solver_config.alpha = alpha;
+            integrator_selection = IntegratorSelection::BeAuto;
             // Recompute rho on BE matrices. BE is L-stable so this must be
             // ≤ 1; a violation would mean the BE matrix builder has a bug,
             // which we flag loudly rather than silently pushing into the
@@ -3413,6 +3504,7 @@ impl CircuitIR {
             behavioral_param_consts,
             behavioral_scalar_runtimes,
             trap_discriminator_rho,
+            integrator_selection,
         })
     }
 

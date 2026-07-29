@@ -525,8 +525,15 @@ pub struct GeneratedCode {
 #[non_exhaustive]
 pub struct CodegenMeta {
     /// Whether backward Euler was auto-selected (spectral radius > threshold).
-    /// `false` if the user explicitly requested it via `--backward-euler`.
+    /// `false` for every explicit selection (`--backward-euler`, `.integrator
+    /// be`, behavioral-source forcing) — equivalent to
+    /// `integrator_selection == IntegratorSelection::BeAuto`.
     pub backward_euler_auto: bool,
+    /// Full record of how the shipped integrator was selected (CLI flag,
+    /// `.integrator` directive, behavioral forcing, auto-promotion, or
+    /// default trap). The CLI summary prints from this so a directive-pinned
+    /// build is never reported as auto-promoted.
+    pub integrator_selection: ir::IntegratorSelection,
     /// Spectral radius measured by the trap-stability discriminator that
     /// triggered auto-BE (0.0 when auto-BE did not fire). Evaluated on the
     /// trap `S·A_neg` pair at the rate the solver actually ships — under
@@ -696,13 +703,14 @@ impl CodeGenerator {
         let ir = CircuitIR::from_kernel_with_dc_op(kernel, mna, netlist, &self.config, dc_op)?;
         let code = RustEmitter::new()?.emit(&ir)?;
 
-        let backward_euler_auto = ir.solver_config.backward_euler && !self.config.backward_euler;
+        let backward_euler_auto = ir.integrator_selection == ir::IntegratorSelection::BeAuto;
         Ok(GeneratedCode {
             code,
             n: ir.topology.n,
             m: ir.topology.m,
             meta: CodegenMeta {
                 backward_euler_auto,
+                integrator_selection: ir.integrator_selection,
                 // The bake stores the trap rho the discriminator evaluated
                 // (internal-rate matrices under oversampling). Report it
                 // only when auto-BE fired, matching the field contract.
@@ -900,13 +908,14 @@ impl CodeGenerator {
         let ir = CircuitIR::from_mna(mna, netlist, &self.config)?;
         let code = RustEmitter::new()?.emit(&ir)?;
 
-        let backward_euler_auto = ir.solver_config.backward_euler && !self.config.backward_euler;
+        let backward_euler_auto = ir.integrator_selection == ir::IntegratorSelection::BeAuto;
         Ok(GeneratedCode {
             code,
             n: ir.topology.n,
             m: ir.topology.m,
             meta: CodegenMeta {
                 backward_euler_auto,
+                integrator_selection: ir.integrator_selection,
                 backward_euler_spectral_radius: if backward_euler_auto {
                     ir.trap_discriminator_rho
                 } else {

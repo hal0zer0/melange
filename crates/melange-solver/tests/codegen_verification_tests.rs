@@ -9306,6 +9306,11 @@ VCC vcc 0 250
         "cap-coupled 3× 12AX7 cascade must auto-promote to BE \
          (dominant eigenvalue near z=-1, Nyquist-marginal trap mode)"
     );
+    assert_eq!(
+        auto_result.meta.integrator_selection,
+        melange_solver::codegen::ir::IntegratorSelection::BeAuto,
+        "auto-promotion must be recorded as BeAuto in the selection record"
+    );
 
     // Force trap: meta.backward_euler_auto must stay false (escape hatch).
     let force_trap_config = CodegenConfig {
@@ -9323,6 +9328,11 @@ VCC vcc 0 250
     assert!(
         !trap_result.meta.backward_euler_auto,
         "force_trap must override auto-BE (escape hatch for bisecting regressions)"
+    );
+    assert_eq!(
+        trap_result.meta.integrator_selection,
+        melange_solver::codegen::ir::IntegratorSelection::TrapCliFlag,
+        "force_trap must be recorded as a CLI pin in the selection record"
     );
 }
 

@@ -14,7 +14,8 @@
 //! The end-to-end audio no-latch proof lives in oomox's jeffreys-tube latch
 //! corpus (36 corners on speech); these tests pin the codegen surface.
 
-use melange_solver::codegen::{CodeGenerator, CodegenConfig};
+use melange_solver::codegen::ir::IntegratorSelection;
+use melange_solver::codegen::{CodeGenerator, CodegenConfig, GeneratedCode};
 use melange_solver::mna::MnaSystem;
 use melange_solver::parser::{IntegratorPref, Netlist};
 
@@ -54,14 +55,17 @@ fn nodal_config(in_name: &str, out_name: &str, mna: &MnaSystem) -> CodegenConfig
     }
 }
 
-fn generate_nodal_with(spice: &str, mut tweak: impl FnMut(&mut CodegenConfig)) -> String {
+fn generate_nodal_full(spice: &str, mut tweak: impl FnMut(&mut CodegenConfig)) -> GeneratedCode {
     let (netlist, mna) = build_mna_with_input(spice, "in", 1.0);
     let mut config = nodal_config("in", "out", &mna);
     tweak(&mut config);
     CodeGenerator::new(config)
         .generate_nodal(&mna, &netlist)
         .expect("nodal codegen")
-        .code
+}
+
+fn generate_nodal_with(spice: &str, tweak: impl FnMut(&mut CodegenConfig)) -> String {
+    generate_nodal_full(spice, tweak).code
 }
 
 // ---------------------------------------------------------------------------
@@ -187,4 +191,90 @@ fn cli_backward_euler_flag_overrides_integrator_trap_directive() {
         !code.contains("BE_LATCH_R1_ENTER"),
         "a BE build (CLI flag overriding .integrator trap) emits no detector"
     );
+}
+
+// ---------------------------------------------------------------------------
+// `CodegenMeta.integrator_selection` — the reported reason must be the actual
+// one. Regression: melange-circuits 2026-07-29 — a `.integrator be` pinned
+// build compiled flagless printed "Backward Euler (auto-selected — trap
+// unstable or Nyquist-marginal)", making the mandated "Integration:" line
+// check unable to distinguish "directive honored" from "auto-promotion fired".
+// ---------------------------------------------------------------------------
+
+#[test]
+fn integrator_be_directive_reports_directive_not_auto() {
+    let spice = format!("{DIODE_CLIPPER}.integrator be\n");
+    let g = generate_nodal_full(&spice, |_| {});
+    assert_eq!(
+        g.meta.integrator_selection,
+        IntegratorSelection::BeDirective,
+        ".integrator be must be reported as a directive pin, not auto-promotion"
+    );
+    assert!(
+        !g.meta.backward_euler_auto,
+        "a directive-pinned BE build did not auto-promote"
+    );
+    assert_eq!(
+        g.meta.backward_euler_spectral_radius, 0.0,
+        "no trap discriminator ran on a pinned-BE build, so no trigger rho to report"
+    );
+}
+
+#[test]
+fn integrator_trap_directive_reports_directive() {
+    let spice = format!("{DIODE_CLIPPER}.integrator trap\n");
+    let g = generate_nodal_full(&spice, |_| {});
+    assert_eq!(
+        g.meta.integrator_selection,
+        IntegratorSelection::TrapDirective
+    );
+    assert!(!g.meta.backward_euler_auto);
+}
+
+#[test]
+fn integrator_selection_reports_cli_flags() {
+    let g = generate_nodal_full(DIODE_CLIPPER, |c| c.backward_euler = true);
+    assert_eq!(g.meta.integrator_selection, IntegratorSelection::BeCliFlag);
+    assert!(g.meta.integrator_selection.is_backward_euler());
+
+    let g = generate_nodal_full(DIODE_CLIPPER, |c| c.force_trap = true);
+    assert_eq!(
+        g.meta.integrator_selection,
+        IntegratorSelection::TrapCliFlag
+    );
+    assert!(!g.meta.integrator_selection.is_backward_euler());
+
+    // CLI flag outranks a conflicting directive.
+    let spice = format!("{DIODE_CLIPPER}.integrator trap\n");
+    let g = generate_nodal_full(&spice, |c| c.backward_euler = true);
+    assert_eq!(g.meta.integrator_selection, IntegratorSelection::BeCliFlag);
+}
+
+#[test]
+fn integrator_selection_default_trap() {
+    let g = generate_nodal_full(DIODE_CLIPPER, |_| {});
+    assert_eq!(
+        g.meta.integrator_selection,
+        IntegratorSelection::TrapDefault
+    );
+    assert!(!g.meta.backward_euler_auto);
+}
+
+#[test]
+fn integrator_selection_reports_behavioral_forcing() {
+    // Behavioral B-sources force BE (current-only stamp is exact under BE).
+    // That forcing must be reported as such — not as auto-promotion.
+    const BEHAVIORAL: &str = "\
+Behavioral fixture
+Rin in a 1k
+B1 out 0 I={ tanh(V(a)) }
+Rout out 0 1
+Cout out 0 1u
+";
+    let g = generate_nodal_full(BEHAVIORAL, |_| {});
+    assert_eq!(
+        g.meta.integrator_selection,
+        IntegratorSelection::BeBehavioral
+    );
+    assert!(!g.meta.backward_euler_auto);
 }

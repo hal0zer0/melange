@@ -1629,12 +1629,23 @@ fn compile_circuit_source(
     // simulate/analyze — see `auto_tune_max_iter`). `--max-iter 50` (the
     // default value) is treated as "not explicitly set", preserving the
     // historical detect-via-default behavior of this flag.
+    //
+    // Resolve the `.integrator` directive with the same precedence codegen
+    // uses so the iteration budget matches the integrator that ships. The
+    // simulate/analyze call sites intentionally pass the raw CLI flags —
+    // the runtime solvers do not honor the directive (compile-time pin).
+    let (effective_backward_euler, effective_force_trap, _) =
+        melange_solver::codegen::ir::resolve_integrator_flags(
+            backward_euler,
+            force_trap,
+            netlist.integrator,
+        );
     let max_iter = auto_tune_max_iter(
         if max_iter == 50 { None } else { Some(max_iter) },
         &kernel,
         &routing,
-        backward_euler,
-        force_trap,
+        effective_backward_euler,
+        effective_force_trap,
         input_node_idx,
     );
 
@@ -1739,20 +1750,28 @@ fn compile_circuit_source(
     if routing.spectral_radius > 0.0 {
         println!("    Spectral radius: {:.4}", routing.spectral_radius);
     }
-    // Integration line: suppressed here when auto-BE will fire, since the
-    // DC-OP block below prints the definitive "Backward Euler (auto-selected…)"
-    // line once it knows `meta.backward_euler_auto`. Without this, both lines
-    // would print and contradict each other on nodal circuits where auto-BE
-    // swaps in BE matrices under the initial `backward_euler == false` config.
-    if !generated.meta.backward_euler_auto {
-        println!(
-            "    Integration: {}",
-            if backward_euler {
-                "Backward Euler"
-            } else {
-                "Trapezoidal"
+    // Integration line: printed from the codegen-recorded selection so the
+    // stated reason is the actual one (a `.integrator be` pin is NOT
+    // "auto-selected"). The BeAuto case is suppressed here — the DC-OP block
+    // below prints the definitive "Backward Euler (auto-selected…)" line —
+    // so the two lines never print together and contradict each other.
+    {
+        use melange_solver::codegen::ir::IntegratorSelection as Sel;
+        match generated.meta.integrator_selection {
+            Sel::BeAuto => {}
+            Sel::TrapDefault => println!("    Integration: Trapezoidal"),
+            Sel::TrapCliFlag => println!("    Integration: Trapezoidal (pinned by --force-trap)"),
+            Sel::TrapDirective => {
+                println!("    Integration: Trapezoidal (pinned by .integrator directive)");
             }
-        );
+            Sel::BeCliFlag => println!("    Integration: Backward Euler (--backward-euler)"),
+            Sel::BeDirective => {
+                println!("    Integration: Backward Euler (pinned by .integrator directive)");
+            }
+            Sel::BeBehavioral => {
+                println!("    Integration: Backward Euler (required by behavioral B-sources)");
+            }
+        }
     }
     if max_iter != 50 {
         println!(
