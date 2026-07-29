@@ -2,7 +2,7 @@
 //!
 //! Parses a subset of SPICE sufficient for audio circuits:
 //! - Components: R, C, L, V (DC/AC), I, D, Q, J, M, U (op-amp), E (VCVS), G (VCCS), Y (VCA), X
-//! - Directives: .model, .subckt, .param, .pot, .wiper, .switch, .gang, .linearize, .runtime, .input_impedance, .end
+//! - Directives: .model, .subckt, .param, .pot, .wiper, .switch, .gang, .linearize, .runtime, .input_impedance, .integrator, .end
 //!
 //! The parser builds an AST (Abstract Syntax Tree) representation
 //! of the circuit that can be processed by the MNA assembler.
@@ -127,6 +127,27 @@ pub struct Netlist {
     /// winding independently — which happens to match real transformer
     /// turn-count variation.
     pub tolerance_l: f64,
+    /// Integration-scheme preference (`.integrator trap` / `.integrator be`).
+    /// `None` (default) leaves the choice to the CLI flags and the automatic
+    /// spectral-radius promotion. `Some(Be)` pins backward Euler at compile
+    /// time (like `--backward-euler`); `Some(Trap)` pins trapezoidal and
+    /// suppresses auto-promotion AND the runtime BE-latch safety net (like
+    /// `--force-trap`). An explicit CLI flag always overrides the directive.
+    ///
+    /// This lets a netlist author deterministically pin the integrator a
+    /// circuit was validated with, so a routine fleet regen can't silently
+    /// change it out from under a shipped plugin.
+    pub integrator: Option<IntegratorPref>,
+}
+
+/// Compile-time integration-scheme pin set by the `.integrator` directive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntegratorPref {
+    /// `.integrator trap` — force trapezoidal (also suppresses the runtime
+    /// BE-latch safety net; equivalent to `--force-trap`).
+    Trap,
+    /// `.integrator be` — force backward Euler (equivalent to `--backward-euler`).
+    Be,
 }
 
 /// Deterministic uniform `[-1, 1]` draw from `(seed, class_tag, name)`.
@@ -349,6 +370,7 @@ impl Netlist {
             tolerance_r: 0.0,
             tolerance_c: 0.0,
             tolerance_l: 0.0,
+            integrator: None,
         }
     }
 
@@ -2411,6 +2433,27 @@ impl Parser {
             }
             ".tolerance" => {
                 self.parse_tolerance_directive(&parts, netlist)?;
+            }
+            ".integrator" => {
+                // .integrator trap | .integrator be — pin the integration scheme.
+                self.require_parts(&parts, 2, "trap or be")?;
+                let pref = match parts[1].to_lowercase().as_str() {
+                    "trap" | "trapezoidal" => IntegratorPref::Trap,
+                    "be" | "backward-euler" | "backward_euler" | "euler" => IntegratorPref::Be,
+                    other => {
+                        return Err(self.error(format!(
+                            ".integrator value '{other}' must be 'trap' or 'be'"
+                        )));
+                    }
+                };
+                if let Some(prev) = netlist.integrator {
+                    if prev != pref {
+                        return Err(self.error(
+                            "conflicting .integrator directives (both trap and be specified)",
+                        ));
+                    }
+                }
+                netlist.integrator = Some(pref);
             }
             ".end" | ".ends" => {
                 // End of netlist or subcircuit

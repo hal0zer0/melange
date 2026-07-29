@@ -227,6 +227,8 @@ Source: Sowter DWG E-72,658-2 + Peerless/Triad winding data.
 - Full-LU optimizations stacked: chord method + cross-timestep Jacobian persistence + compile-time sparse LU (AMD ordering, symbolic factorization)
 - Oversampling 2x/4x: self-contained polyphase half-band IIR, no runtime dependencies
 - `--solver {auto|dk|nodal}`, `--backward-euler`, `--oversampling {1,2,4}`, `--opamp-rail-mode`
+- **Runtime BE-latch (2026-07-28)**: nodal trapezoidal builds carry a cheap input-aware lag-1 anti-correlation detector; if the solver falls into a self-sustaining Nyquist `(-1)^n` limit cycle at a large-signal operating point (which the compile-time quiescent-OP auto-BE promotion can't see — jeffreys-tube V2 class), it latches that instance to the L-stable BE path for the rest of the stream (cleared by `reset()`, exposed via `diag_be_latch_count`). Not emitted for BE/force-trap/passive/saturating-inductor builds. Golden-audio verified zero-change across all 42 shipped circuits.
+- **`.integrator {trap|be}` netlist directive (2026-07-28)**: deterministic compile-time integrator pin so a fleet regen can't silently change it. `be` ⇒ backward Euler; `trap` ⇒ trapezoidal + opt out of auto-promotion AND the runtime BE-latch net (same as `--force-trap`). Explicit CLI flags override the directive.
 
 ### CLI
 - `melange compile` → Rust code or plugin project

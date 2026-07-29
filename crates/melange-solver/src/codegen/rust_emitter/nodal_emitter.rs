@@ -873,6 +873,38 @@ impl RustEmitter {
             fmt_f64(ir.solver_config.tolerance)
         ));
 
+        // Runtime BE-latch detector constants (trapezoidal builds only).
+        if ir.solver_config.runtime_be_latch {
+            code.push_str(
+                "/// Runtime BE-latch detector: EMA time constant (s) for the lag-1\n\
+                 /// autocorrelation estimator. ~0.5 ms — long enough to ignore isolated\n\
+                 /// bright transients, short enough to catch a sustained Nyquist limit\n\
+                 /// cycle within ~1 ms (fs-invariant: coefficient = 1/(τ·fs)).\n",
+            );
+            code.push_str("pub const BE_LATCH_TAU_S: f64 = 5.0e-4;\n\n");
+            code.push_str(
+                "/// Runtime BE-latch detector: entry threshold on the OUTPUT normalized\n\
+                 /// lag-1 autocorrelation r1. A pure Nyquist (-1)^n cycle gives r1 = −1;\n\
+                 /// the input-awareness gate (below) rejects legitimate near-Nyquist input\n\
+                 /// tones, so this only has to clear the empty gap above musical HF content.\n",
+            );
+            code.push_str("pub const BE_LATCH_R1_ENTER: f64 = -0.6;\n\n");
+            code.push_str(
+                "/// Runtime BE-latch detector: the drive is deemed to \"explain\" an anti-\n\
+                 /// correlated output when the INPUT's own lag-1 autocorrelation is below\n\
+                 /// this (i.e. the input is itself near Nyquist / bright). In that case the\n\
+                 /// output Nyquist content is input-driven, not a self-generated limit\n\
+                 /// cycle, so we must NOT latch.\n",
+            );
+            code.push_str("pub const BE_LATCH_IN_R1_MAX: f64 = -0.3;\n\n");
+            code.push_str(
+                "/// Runtime BE-latch detector: power floor below which an r1 estimate is\n\
+                 /// not trusted (avoids a divide-by-near-zero verdict on silence). Applied\n\
+                 /// to both the output and input power EMAs.\n",
+            );
+            code.push_str("pub const BE_LATCH_POWER_FLOOR: f64 = 1.0e-12;\n\n");
+        }
+
         // Sample rate
         code.push_str(&format!(
             "/// Default sample rate (Hz) used at code generation time.\npub const SAMPLE_RATE: f64 = {:.1};\n\n",
@@ -1488,8 +1520,13 @@ impl RustEmitter {
             _ => false,
         });
         let needs_rebuild_state = has_pots || has_switches || has_sat_ind || has_sat_coupled;
-        let needs_current_sr =
-            needs_rebuild_state || has_opamp_slew || has_full_lu_substep || has_thermal_sr_consumer;
+        // The runtime BE-latch detector derives its EMA coefficient from the
+        // live sample rate (fs-invariant time constant), so it needs the field.
+        let needs_current_sr = needs_rebuild_state
+            || has_opamp_slew
+            || has_full_lu_substep
+            || has_thermal_sr_consumer
+            || ir.solver_config.runtime_be_latch;
         let has_any_saturation = has_sat_ind || has_sat_coupled;
 
         let mut code = section_banner("STATE STRUCTURE (Nodal solver)");
@@ -1645,6 +1682,15 @@ impl RustEmitter {
         code.push_str("    pub diag_nr_max_iter_count: u64,\n");
         code.push_str("    /// Diagnostic: number of backward Euler fallback activations\n");
         code.push_str("    pub diag_be_fallback_count: u64,\n");
+        code.push_str(
+            "    /// Diagnostic: number of times the runtime BE-latch engaged (rising\n\
+             \x20   /// edges). Nonzero means the solver detected a self-sustaining Nyquist\n\
+             \x20   /// limit cycle on this stream and permanently switched that instance to\n\
+             \x20   /// the L-stable backward-Euler path (cleared by reset()). A plugin can\n\
+             \x20   /// surface this as \"solver degraded\". Always 0 on backward-Euler and\n\
+             \x20   /// force-trap builds.\n",
+        );
+        code.push_str("    pub diag_be_latch_count: u64,\n");
         code.push_str("    /// Diagnostic: number of samples where the active-set rail resolve\n");
         code.push_str("    /// pinned at least one op-amp output (ActiveSet/ActiveSetBe only)\n");
         code.push_str("    pub diag_active_set_pin_count: u64,\n");
@@ -1665,6 +1711,38 @@ impl RustEmitter {
         );
         code.push_str("    /// investigation, not as an acceptable steady-state.\n");
         code.push_str("    pub diag_voltage_damp_count: u64,\n\n");
+
+        // Runtime BE-latch detector working state (trapezoidal builds only).
+        if ir.solver_config.runtime_be_latch {
+            code.push_str("    /// Runtime BE-latch: previous primary-output sample (detector).\n");
+            code.push_str("    pub be_x_prev: f64,\n");
+            code.push_str(
+                "    /// Runtime BE-latch: EMA of x·x₋₁ (output lag-1 autocovariance numerator).\n",
+            );
+            code.push_str("    pub be_r1_num: f64,\n");
+            code.push_str(
+                "    /// Runtime BE-latch: EMA of x² (output power, autocorr denominator).\n",
+            );
+            code.push_str("    pub be_pow: f64,\n");
+            code.push_str(
+                "    /// Runtime BE-latch: previous input sample (input-awareness gate).\n",
+            );
+            code.push_str("    pub be_in_x_prev: f64,\n");
+            code.push_str(
+                "    /// Runtime BE-latch: EMA of u·u₋₁ (input lag-1 autocovariance numerator).\n",
+            );
+            code.push_str("    pub be_in_r1_num: f64,\n");
+            code.push_str(
+                "    /// Runtime BE-latch: EMA of u² (input power, autocorr denominator).\n",
+            );
+            code.push_str("    pub be_in_pow: f64,\n");
+            code.push_str(
+                "    /// Runtime BE-latch: true once a Nyquist limit cycle was detected;\n\
+                 \x20   /// forces the L-stable BE path for the rest of the stream (cleared by\n\
+                 \x20   /// reset()).\n",
+            );
+            code.push_str("    pub be_latched: bool,\n\n");
+        }
 
         // DC settling state: when DC OP didn't converge at codegen time, the warmup
         // fast-forwards at low sample rate to charge coupling caps. The settled state
@@ -2046,11 +2124,21 @@ impl RustEmitter {
         code.push_str("            diag_clamp_count: 0,\n");
         code.push_str("            diag_nr_max_iter_count: 0,\n");
         code.push_str("            diag_be_fallback_count: 0,\n");
+        code.push_str("            diag_be_latch_count: 0,\n");
         code.push_str("            diag_active_set_pin_count: 0,\n");
         code.push_str("            diag_nan_reset_count: 0,\n");
         code.push_str("            diag_substep_count: 0,\n");
         code.push_str("            diag_refactor_count: 0,\n");
         code.push_str("            diag_voltage_damp_count: 0,\n");
+        if ir.solver_config.runtime_be_latch {
+            code.push_str("            be_x_prev: 0.0,\n");
+            code.push_str("            be_r1_num: 0.0,\n");
+            code.push_str("            be_pow: 0.0,\n");
+            code.push_str("            be_in_x_prev: 0.0,\n");
+            code.push_str("            be_in_r1_num: 0.0,\n");
+            code.push_str("            be_in_pow: 0.0,\n");
+            code.push_str("            be_latched: false,\n");
+        }
         if m > 0 || !ir.behavioral_sources.is_empty() {
             code.push_str("            chord_lu: [[0.0; N]; N],\n");
             code.push_str("            chord_dr: [1.0; N],\n");
@@ -2318,11 +2406,21 @@ impl RustEmitter {
         code.push_str("        self.diag_clamp_count = 0;\n");
         code.push_str("        self.diag_nr_max_iter_count = 0;\n");
         code.push_str("        self.diag_be_fallback_count = 0;\n");
+        code.push_str("        self.diag_be_latch_count = 0;\n");
         code.push_str("        self.diag_active_set_pin_count = 0;\n");
         code.push_str("        self.diag_nan_reset_count = 0;\n");
         code.push_str("        self.diag_voltage_damp_count = 0;\n");
         code.push_str("        self.diag_substep_count = 0;\n");
         code.push_str("        self.diag_refactor_count = 0;\n");
+        if ir.solver_config.runtime_be_latch {
+            code.push_str("        self.be_x_prev = 0.0;\n");
+            code.push_str("        self.be_r1_num = 0.0;\n");
+            code.push_str("        self.be_pow = 0.0;\n");
+            code.push_str("        self.be_in_x_prev = 0.0;\n");
+            code.push_str("        self.be_in_r1_num = 0.0;\n");
+            code.push_str("        self.be_in_pow = 0.0;\n");
+            code.push_str("        self.be_latched = false;\n");
+        }
         // Reset Schur complement matrices to defaults
         let cp = if use_full_nodal {
             "self.cold."
@@ -3501,6 +3599,70 @@ impl RustEmitter {
     /// 3. Extract device voltages: p = N_v * v_pred (O(M*N))
     /// 4. M-dim NR (same as DK: O(M^3) per iteration)
     /// 5. Recover full v = v_pred + S_NI * i_nl (O(M*N))
+    /// Emit the runtime BE-latch Nyquist-cycle detector (shared by the Schur
+    /// and full-LU nodal process loops).
+    ///
+    /// Maintains a normalized lag-1 autocorrelation of both the primary output
+    /// and the drive input via EMAs (`*_r1_num` ≈ E[x·x₋₁], `*_pow` ≈ E[x²]).
+    /// A self-sustaining Nyquist `(-1)^n` limit cycle — the trapezoidal artifact
+    /// a *large-signal* operating point can reach even when the compile-time
+    /// quiescent-OP spectral-radius analysis found trap stable — drives the
+    /// output `r1 = num/pow → −1`.
+    ///
+    /// The load-bearing discriminator is **input-awareness**: a limit cycle is
+    /// self-generated, so it persists regardless of the drive, whereas
+    /// near-Nyquist output that merely tracks a *bright input* (a legitimate
+    /// high-frequency sine has `r1 = cos(ω)`, e.g. −0.87 at 20 kHz / 48 k) is
+    /// not a pathology. We latch only when the output is strongly anti-
+    /// correlated AND the input is not (or the input is silent). Without this
+    /// gate a bright sweep tone near Nyquist would false-trip the net and
+    /// needlessly derate the circuit to backward Euler (observed on
+    /// sus-bus/sweep at 15.8 kHz during golden-audio regression).
+    ///
+    /// On latch, the process loop forces the L-stable BE fallback for the rest
+    /// of the stream (sticky until `reset()`); BE damps the cycle and the
+    /// circuit's own bias/servo state then relaxes on its RC.
+    ///
+    /// Emitted only when `runtime_be_latch` (a genuine trapezoidal build, not
+    /// force-trap). The EMA coefficient is derived from the live sample rate so
+    /// the detector time constant is fs-invariant.
+    fn emit_be_latch_detector(code: &mut String, ir: &CircuitIR, indent: &str) {
+        if !ir.solver_config.runtime_be_latch {
+            return;
+        }
+        code.push_str(&format!(
+            "{indent}// Runtime BE-latch detector (self-sustaining Nyquist (-1)^n cycle).\n\
+             {indent}// Latch iff the OUTPUT is strongly lag-1 anti-correlated AND the INPUT\n\
+             {indent}// does not explain it (input silent or not itself near Nyquist) — a\n\
+             {indent}// true limit cycle is self-generated; a bright input tone near Nyquist\n\
+             {indent}// is not. On latch the L-stable BE path takes over for the rest of the\n\
+             {indent}// stream (cleared by reset()).\n\
+             {indent}if !state.be_latched {{\n\
+             {indent}    let be_x = v[OUTPUT_NODES[0]];\n\
+             {indent}    let be_x = if be_x.is_finite() {{ be_x }} else {{ 0.0 }};\n\
+             {indent}    let be_u = if input.is_finite() {{ input }} else {{ 0.0 }};\n\
+             {indent}    let be_ema = (1.0 / (BE_LATCH_TAU_S * state.current_sample_rate)).clamp(1e-4, 0.5);\n\
+             {indent}    state.be_r1_num += be_ema * (be_x * state.be_x_prev - state.be_r1_num);\n\
+             {indent}    state.be_pow += be_ema * (be_x * be_x - state.be_pow);\n\
+             {indent}    state.be_x_prev = be_x;\n\
+             {indent}    state.be_in_r1_num += be_ema * (be_u * state.be_in_x_prev - state.be_in_r1_num);\n\
+             {indent}    state.be_in_pow += be_ema * (be_u * be_u - state.be_in_pow);\n\
+             {indent}    state.be_in_x_prev = be_u;\n\
+             {indent}    // Cross-multiplied comparisons (be_pow, be_in_pow ≥ 0):\n\
+             {indent}    //   output anti-correlated: out_r1 < BE_LATCH_R1_ENTER\n\
+             {indent}    //   input explains it:      in_pow significant AND in_r1 < BE_LATCH_IN_R1_MAX\n\
+             {indent}    let out_nyquist = state.be_pow > BE_LATCH_POWER_FLOOR\n\
+             {indent}        && state.be_r1_num < BE_LATCH_R1_ENTER * state.be_pow;\n\
+             {indent}    let input_explains = state.be_in_pow > BE_LATCH_POWER_FLOOR\n\
+             {indent}        && state.be_in_r1_num < BE_LATCH_IN_R1_MAX * state.be_in_pow;\n\
+             {indent}    if out_nyquist && !input_explains {{\n\
+             {indent}        state.be_latched = true;\n\
+             {indent}        state.diag_be_latch_count += 1;\n\
+             {indent}    }}\n\
+             {indent}}}\n"
+        ));
+    }
+
     pub(super) fn emit_nodal_schur_process_sample(
         ir: &CircuitIR,
         noise: &NoiseEmission,
@@ -3515,6 +3677,14 @@ impl RustEmitter {
         let num_outputs = ir.solver_config.output_nodes.len();
         let os_factor = ir.solver_config.oversampling_factor;
         let has_pots = !ir.pots.is_empty();
+        // Runtime BE-latch: when the Nyquist-cycle detector has latched, force
+        // the L-stable BE fallback path (skip both the trap-accept and the
+        // ActiveSetBe sub-step accept). Empty string on non-latch builds.
+        let be_latch_and = if ir.solver_config.runtime_be_latch {
+            " && !state.be_latched"
+        } else {
+            ""
+        };
 
         let mut code = section_banner(
             "PROCESS SAMPLE (Schur complement: M-dim NR via precomputed S = A^{-1})",
@@ -4194,14 +4364,14 @@ impl RustEmitter {
             // mode, no op-amp output may have engaged its rail. The latter
             // triggers the BE fallback so the cap history stays consistent.
             if active_set_be_mode {
-                code.push_str(
+                code.push_str(&format!(
                     "    let mut converged = state.last_nr_iterations < MAX_ITER as u32 \
-                     && !active_set_engaged;\n\n",
-                );
+                     && !active_set_engaged{be_latch_and};\n\n",
+                ));
             } else {
-                code.push_str(
-                    "    let converged = state.last_nr_iterations < MAX_ITER as u32;\n\n",
-                );
+                code.push_str(&format!(
+                    "    let converged = state.last_nr_iterations < MAX_ITER as u32{be_latch_and};\n\n",
+                ));
             }
 
             // ActiveSetBe sub-stepping: when trap NR converged but the op-amp
@@ -4226,7 +4396,7 @@ impl RustEmitter {
             // corrupt state and suppress the fallback.
             // Cost: 2 × O(N²) matvec + O(M) Picard per rail-engaged sample.
             if active_set_be_mode && !ir.matrices.s_sub.is_empty() {
-                code.push_str("    if !converged && active_set_engaged && state.last_nr_iterations < MAX_ITER as u32 {\n");
+                code.push_str(&format!("    if !converged{be_latch_and} && active_set_engaged && state.last_nr_iterations < MAX_ITER as u32 {{\n"));
                 code.push_str("        // Sub-step at 2× rate using precomputed Schur matrices.\n");
                 code.push_str(
                     "        // At the finer timestep the discrete-time LC resonator from\n",
@@ -4637,6 +4807,9 @@ impl RustEmitter {
         // caps `|i_in| ≤ SR*C_dom`. Emitted only for op-amps with finite
         // SR; circuits without `SR=` in the .model generate identical code.
         Self::emit_opamp_slew_limit(&mut code, ir, "    ", "v");
+
+        // Runtime BE-latch detector (updates state.be_latched for next sample).
+        Self::emit_be_latch_detector(&mut code, ir, "    ");
 
         // State update
         code.push_str("    // State update\n");
@@ -5502,6 +5675,18 @@ impl RustEmitter {
         let os_factor = ir.solver_config.oversampling_factor;
         let has_behavioral = !ir.behavioral_sources.is_empty();
         let has_bsrc_time = ir.behavioral_sources.iter().any(|b| b.time_dependent);
+        // Runtime BE-latch: skip sub-step recovery and force the BE fallback
+        // once the Nyquist-cycle detector has latched. Empty on non-latch builds.
+        let be_latch_and = if ir.solver_config.runtime_be_latch {
+            " && !state.be_latched"
+        } else {
+            ""
+        };
+        let be_latch_or = if ir.solver_config.runtime_be_latch {
+            " || state.be_latched"
+        } else {
+            ""
+        };
 
         let mut code = section_banner("PROCESS SAMPLE (Full-nodal NR with LU solve)");
 
@@ -6285,7 +6470,7 @@ impl RustEmitter {
             // and retry with tighter capacitor conductances. This is how ngspice handles
             // positive-feedback circuits (compressor sidechains, oscillators, etc.).
             code.push_str("    // Adaptive sub-stepping: retry with subdivided timestep\n");
-            code.push_str("    if !converged {\n");
+            code.push_str(&format!("    if !converged{be_latch_and} {{\n"));
             code.push_str("        'substep: for subdiv_power in 1..=3u32 {\n");
             code.push_str("            let subdiv = 1u32 << subdiv_power; // 2, 4, 8\n");
             // alpha_sub tracks the RUNTIME host rate (× oversampling), not
@@ -6565,9 +6750,11 @@ impl RustEmitter {
                 "    // or if ActiveSetBe detected a rail engagement on the trap result.\n",
             );
             if active_set_be_mode_full_lu {
-                code.push_str("    if !converged || active_set_engaged {\n");
+                code.push_str(&format!(
+                    "    if !converged || active_set_engaged{be_latch_or} {{\n"
+                ));
             } else {
-                code.push_str("    if !converged {\n");
+                code.push_str(&format!("    if !converged{be_latch_or} {{\n"));
             }
             // Diag contract (matches Schur/DK): be_fallback counts every
             // ENTRY into the fallback (success or not). Genuine trap
@@ -6943,6 +7130,9 @@ impl RustEmitter {
             code.push_str("        chord_valid = false;\n");
             code.push_str("    }\n\n");
         }
+
+        // Runtime BE-latch detector (updates state.be_latched for next sample).
+        Self::emit_be_latch_detector(&mut code, ir, "    ");
 
         // Step 3: Update state
         code.push_str("    // Step 3: Update state\n");

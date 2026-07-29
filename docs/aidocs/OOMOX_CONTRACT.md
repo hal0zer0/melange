@@ -191,6 +191,25 @@ file:line, oomox-relative):
   ActiveSetBe circuits (sus-bus), nr_max_iter counts can drop, and
   velvet-elvis's `last_nr_iterations` runtime-health read changes meaning on
   failed samples.
+- **`diag_be_latch_count` (new 2026-07, runtime BE-latch)** — rising-edge
+  count of runtime backward-Euler latch engagements. On a trapezoidal nodal
+  build, a cheap per-sample detector watches for a self-sustaining Nyquist
+  `(-1)^n` limit cycle (the trap artifact a large-signal operating point can
+  reach even when the compile-time quiescent-OP analysis found trap stable —
+  jeffreys-tube V2 class); on detection the instance switches itself to the
+  L-stable BE path for the rest of the stream (cleared by `reset()`).
+  **Nonzero = "solver degraded, ran on BE"** — a plugin may surface that.
+  Always `0` on backward-Euler builds, `--force-trap` / `.integrator trap`
+  builds, passive (`m==0`) circuits, and **saturating-inductor circuits**
+  (the net is not emitted there). Verified `== 0` across all 42 golden
+  circuits (no shipped circuit latches). When it *is* nonzero,
+  `diag_be_fallback_count` also climbs every subsequent sample (BE runs each
+  sample while latched) — do not read that as per-sample NR failure.
+- **New solver-owned detector fields on trap nodal builds** (`be_x_prev`,
+  `be_r1_num`, `be_pow`, `be_in_x_prev`, `be_in_r1_num`, `be_in_pow`,
+  `be_latched`) — additive, **do not poke**. Absent on BE/force-trap/passive/
+  saturating-inductor builds. Construct via `::default()` (never a struct
+  literal) so field additions like these stay non-breaking.
 - `i_nl_prev` / `input_prev` / `dc_block_*` are **not** written by wrappers
   (solver-owned); they appear in wrapper comments (NR-predictor rationale)
   only.

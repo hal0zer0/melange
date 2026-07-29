@@ -311,6 +311,20 @@ pub struct SolverConfig {
     /// Use backward Euler integration (unconditionally stable, first-order).
     #[serde(default)]
     pub backward_euler: bool,
+    /// Emit the runtime BE-latch safety net on a trapezoidal build.
+    ///
+    /// When `true`, the generated per-sample loop carries a cheap lag-1
+    /// anti-correlation detector on the output; if the solver falls into a
+    /// self-sustaining Nyquist (`(-1)^n`) limit cycle — the trapezoidal
+    /// artifact that a *large-signal* operating point can reach even though
+    /// the compile-time quiescent-OP spectral-radius analysis found trap
+    /// stable — it latches to the L-stable backward-Euler path for the rest
+    /// of the stream (cleared by `reset()`). Set `false` for backward-Euler
+    /// builds (nothing to catch) and whenever trap is force-pinned
+    /// (`--force-trap` / `.integrator trap`), which opts out of the net.
+    /// Only the nodal codegen path emits it today.
+    #[serde(default)]
+    pub runtime_be_latch: bool,
     /// Resolved op-amp supply rail saturation strategy.
     ///
     /// If the user's [`CodegenConfig::opamp_rail_mode`] was [`OpampRailMode::Auto`],
@@ -1322,6 +1336,28 @@ fn build_dk_be_matrices_at_rate(
     Ok((s, a_neg_flat, rhs_const_be))
 }
 
+/// Resolve the effective `(backward_euler, force_trap)` pair from the CLI
+/// config and an optional `.integrator` netlist directive.
+///
+/// Precedence: an explicit CLI flag (`--backward-euler` / `--force-trap`)
+/// always wins over the directive; the directive wins over the automatic
+/// spectral-radius promotion. `.integrator be` ⇒ `backward_euler = true`;
+/// `.integrator trap` ⇒ `force_trap = true` (suppresses auto-promotion and,
+/// downstream, the runtime BE-latch safety net).
+fn resolve_integrator_pref(
+    config: &CodegenConfig,
+    pref: Option<crate::parser::IntegratorPref>,
+) -> (bool, bool) {
+    let mut be = config.backward_euler;
+    let mut force_trap = config.force_trap;
+    match pref {
+        Some(crate::parser::IntegratorPref::Be) if !force_trap => be = true,
+        Some(crate::parser::IntegratorPref::Trap) if !be => force_trap = true,
+        _ => {}
+    }
+    (be, force_trap)
+}
+
 impl CircuitIR {
     /// Build a `CircuitIR` from the compiled kernel, MNA system, netlist, and config.
     ///
@@ -1352,6 +1388,11 @@ impl CircuitIR {
         let n = kernel.n; // = n_aug (system dimension)
         let n_nodes = kernel.n_nodes; // original circuit node count
         let m = kernel.m;
+
+        // Resolve the effective integration scheme: CLI flags override the
+        // `.integrator` netlist directive, which overrides auto-promotion.
+        let (cfg_backward_euler, cfg_force_trap) =
+            resolve_integrator_pref(config, netlist.integrator);
 
         if m > crate::dk::MAX_M {
             return Err(CodegenError::UnsupportedTopology(format!(
@@ -1409,7 +1450,7 @@ impl CircuitIR {
         // internal-rate matrices mis-gates the promotion in both directions.
         // Skipped when the user forced BE explicitly — no trap pair is
         // shipped or discriminated in that case.
-        let os_trap_pair = if os_factor > 1 && !config.backward_euler {
+        let os_trap_pair = if os_factor > 1 && !cfg_backward_euler {
             let (a_flat, a_neg_flat) = build_dk_trap_matrices_at_rate(
                 &g_matrix,
                 &c_matrix,
@@ -1446,7 +1487,7 @@ impl CircuitIR {
         // while adjacent rates sampled rho < 1.002 and produced the correct
         // +0.9 dB @ 10 kHz peak.
         let mut trap_discriminator_rho = 0.0f64;
-        let auto_be = if !config.backward_euler && !config.force_trap && n > 0 && m > 0 {
+        let auto_be = if !cfg_backward_euler && !cfg_force_trap && n > 0 && m > 0 {
             // Trap-rule stability via shared analyzer: returns rho =
             // max|eigenvalue(S·A_neg)| AND the sign of the dominant
             // eigenvalue (positive → near +1, slow LF mode trap handles
@@ -1495,7 +1536,7 @@ impl CircuitIR {
         } else {
             false
         };
-        let be = config.backward_euler || auto_be;
+        let be = cfg_backward_euler || auto_be;
         let alpha = if be {
             internal_rate
         } else {
@@ -1536,6 +1577,8 @@ impl CircuitIR {
             output_clamp_v: config.output_clamp_v,
             pot_settle_samples: config.pot_settle_samples,
             backward_euler: be,
+            // DK codegen path does not emit the runtime BE-latch net yet.
+            runtime_be_latch: false,
             opamp_rail_mode: rail_mode.mode,
             emit_dc_op_recompute: config.emit_dc_op_recompute,
         };
@@ -2253,6 +2296,11 @@ impl CircuitIR {
         let n_aug = mna.n_aug;
         let m = mna.m;
 
+        // Resolve the effective integration scheme: CLI flags override the
+        // `.integrator` netlist directive, which overrides auto-promotion.
+        let (cfg_backward_euler, cfg_force_trap) =
+            resolve_integrator_pref(config, netlist.integrator);
+
         if m > dk::MAX_M {
             return Err(CodegenError::InvalidConfig(format!(
                 "Nonlinear dimension M={} exceeds MAX_M={}",
@@ -2278,7 +2326,7 @@ impl CircuitIR {
         // matching the `schur_unstable` gate in `nodal_emitter.rs`), the
         // promotion block below swaps in the BE matrices already built as the
         // transient fallback and flips `be`/`alpha`/`solver_config` in place.
-        let mut alpha = if config.backward_euler {
+        let mut alpha = if cfg_backward_euler {
             internal_rate
         } else {
             2.0 * internal_rate
@@ -2311,7 +2359,7 @@ impl CircuitIR {
         // strongly-nonlinear sources (atan2 discriminators). Force it on.
         // (Trapezoidal + a behavioral i_prev history term is a future refinement
         // — see docs/aidocs/BEHAVIORAL_SOURCES.md.)
-        let be = config.backward_euler || !mna.behavioral_sources.is_empty();
+        let be = cfg_backward_euler || !mna.behavioral_sources.is_empty();
         let mut a_flat = vec![0.0f64; n * n];
         let mut a_neg_flat = vec![0.0f64; n * n];
         for i in 0..n {
@@ -2619,6 +2667,9 @@ impl CircuitIR {
             output_clamp_v: config.output_clamp_v,
             pot_settle_samples: config.pot_settle_samples,
             backward_euler: be,
+            // Resolved after the auto-BE promotion block below (needs the
+            // final `solver_config.backward_euler`).
+            runtime_be_latch: false,
             opamp_rail_mode: rail_mode.mode,
             emit_dc_op_recompute: config.emit_dc_op_recompute,
         };
@@ -2779,7 +2830,7 @@ impl CircuitIR {
                 config.router_dk_unstable,
                 trap_stability,
             );
-        if !be && !config.force_trap && m > 0 && (local_needs_be || router_corroborated_marginal) {
+        if !be && !cfg_force_trap && m > 0 && (local_needs_be || router_corroborated_marginal) {
             log::warn!(
                 "Nodal: auto-enabling backward Euler — spectral_radius(S*A_neg) = \
                  {:.4} (nodal, input-deflated), dominant_sign = {:+.0}{}. BE is L-stable. \
@@ -2859,6 +2910,37 @@ impl CircuitIR {
             spectral_radius_s_aneg = new_rho;
         }
         let _ = alpha_be;
+
+        // Emit the runtime BE-latch safety net for genuine trapezoidal builds
+        // with a nonlinear system only: nothing to catch once we are already on
+        // backward Euler (by flag, `.integrator be`, behavioral sources, or the
+        // promotion above), and `--force-trap` / `.integrator trap` opt out
+        // entirely. The `m > 0` gate matches the auto-BE promotion: a passive
+        // linear circuit has no `N_i·i_nl_prev` stamp to seed a Nyquist cycle,
+        // so it stays byte-identical (no detector emitted).
+        //
+        // Saturating-inductor circuits are excluded: the runtime latch forces
+        // the *transient BE fallback* path continuously, but that path reuses
+        // the BE matrices (`s_be`/`k_be`) which do NOT receive the per-sample
+        // Sherman-Morrison rank-1 saturation update the trap matrices get. A
+        // single-sample fallback tolerates the staleness; forcing it every
+        // sample accumulates the inconsistency and diverges (observed on
+        // the-kicker — 4 saturating inductors — golden-audio regression, output
+        // ran to the ±clamp on silence, while a *pure* `--backward-euler` build
+        // of the same circuit is stable). Such circuits should pin BE with
+        // `.integrator be` if they need it. A general fix (SM-update the BE
+        // matrices too) is left as future work.
+        let has_saturating = mna.inductors.iter().any(|l| l.isat.is_some())
+            || mna
+                .coupled_inductors
+                .iter()
+                .any(|c| c.l1_isat.is_some() || c.l2_isat.is_some())
+            || mna
+                .transformer_groups
+                .iter()
+                .any(|g| g.winding_isats.iter().any(|isat| isat.is_some()));
+        solver_config.runtime_be_latch =
+            !solver_config.backward_euler && !cfg_force_trap && m > 0 && !has_saturating;
 
         let matrices = Matrices {
             s: s_flat,
