@@ -654,6 +654,24 @@ impl RustEmitter {
             );
         }
 
+        // #1 Step-6c damping: cache the damping threshold in state instead of
+        // recomputing max|dc_operating_point| every sample. `damp_thresh_init`
+        // is the has_dc_op-branch value (dc_operating_point == DC_OP at Default/
+        // reset); the has_dc_op-false branch is a literal 2.0 (max of zeros).
+        // Computed with the exact same fold + mul_add(0.05, 2.0) as the old
+        // per-sample loop so the cached value is byte-identical. n_nodes is also
+        // needed by the refresh_damp_thresh() helper's loop bound.
+        let n_nodes = ir.topology.n_nodes;
+        ctx.insert("n_nodes", &n_nodes);
+        let damp_thresh_init = ir
+            .dc_operating_point
+            .iter()
+            .take(n_nodes)
+            .map(|v| v.abs())
+            .fold(0.0_f64, f64::max)
+            .mul_add(0.05, 2.0);
+        ctx.insert("damp_thresh_init", &format!("{:.17e}", damp_thresh_init));
+
         self.render("state", &ctx)
     }
 
@@ -4752,7 +4770,22 @@ impl RustEmitter {
             rhs_stamp.push_str("                if i_abs < 1e-15 { continue; }\n");
             rhs_stamp.push_str("                let white = gaussian(&mut state.noise_flicker_rng[k], &mut state.noise_flicker_gaussian_cache[k]);\n");
             rhs_stamp.push_str("                let pink = kellett_pink(white, &mut state.noise_flicker_state[k]);\n");
-            rhs_stamp.push_str("                let amp = flicker_scale * NOISE_FLICKER_SQRT_KF[k] * i_abs.powf(NOISE_FLICKER_HALF_AF[k]);\n");
+            // #3: specialize the flicker exponent AF/2 when it is uniform.
+            // AF/2 == 1.0 (resistor-style AF=2) is identity; AF/2 == 0.5
+            // (junction AF=1) is sqrt — both far cheaper than a general powf.
+            // Uniform in every shipped circuit; mixed/other exponents keep powf.
+            // Stays branch-free (the choice is baked at codegen).
+            {
+                let hf: Vec<f64> = ir.noise.flicker_sources.iter().map(|s| 0.5 * s.af).collect();
+                let base = if !hf.is_empty() && hf.iter().all(|&h| h == 1.0) {
+                    "i_abs"
+                } else if !hf.is_empty() && hf.iter().all(|&h| h == 0.5) {
+                    "i_abs.sqrt()"
+                } else {
+                    "i_abs.powf(NOISE_FLICKER_HALF_AF[k])"
+                };
+                rhs_stamp.push_str(&format!("                let amp = flicker_scale * NOISE_FLICKER_SQRT_KF[k] * {base};\n"));
+            }
             if be_primary {
                 rhs_stamp.push_str(
                     "                let i_n = amp * pink; // BE-primary: single-draw (BE damps z=-1)\n",
@@ -4979,7 +5012,24 @@ impl RustEmitter {
             rhs_stamp.push_str("                if i_abs < 1e-15 { continue; }\n");
             rhs_stamp.push_str("                let white = gaussian(&mut state.noise_r_flicker_rng[k], &mut state.noise_r_flicker_gaussian_cache[k]);\n");
             rhs_stamp.push_str("                let pink = kellett_pink(white, &mut state.noise_r_flicker_state[k]);\n");
-            rhs_stamp.push_str("                let amp = r_fl_scale * NOISE_R_FLICKER_SQRT_KF[k] * i_abs.powf(NOISE_R_FLICKER_HALF_AF[k]);\n");
+            // #3: specialize the resistor-flicker exponent AF/2 when uniform
+            // (see junction-flicker note above). Byte-exact for AF/2 == 1.0.
+            {
+                let hf: Vec<f64> = ir
+                    .noise
+                    .resistor_flicker_sources
+                    .iter()
+                    .map(|s| 0.5 * s.af)
+                    .collect();
+                let base = if !hf.is_empty() && hf.iter().all(|&h| h == 1.0) {
+                    "i_abs"
+                } else if !hf.is_empty() && hf.iter().all(|&h| h == 0.5) {
+                    "i_abs.sqrt()"
+                } else {
+                    "i_abs.powf(NOISE_R_FLICKER_HALF_AF[k])"
+                };
+                rhs_stamp.push_str(&format!("                let amp = r_fl_scale * NOISE_R_FLICKER_SQRT_KF[k] * {base};\n"));
+            }
             if be_primary {
                 rhs_stamp.push_str(
                     "                let i_n = amp * pink; // BE-primary: single-draw (BE damps z=-1)\n",

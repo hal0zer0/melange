@@ -6423,6 +6423,10 @@ impl RustEmitter {
                     "        // combine to produce false convergence (voltage step small,\n",
                 );
                 code.push_str("        // but device KCL residual huge).\n");
+                // #2: hold the residual-check device currents so the converged
+                // branch can reuse them (same v ⇒ identical i_nl) instead of a
+                // second device evaluation.
+                code.push_str("        let mut i_nl_resid = [0.0f64; M];\n");
                 code.push_str("        if !max_step_exceeded {\n");
                 code.push_str("            let i_nl_chord = i_nl;\n");
                 code.push_str("            let mut v_nl = [0.0f64; M];\n");
@@ -6430,6 +6434,7 @@ impl RustEmitter {
                 code.push_str("            let mut i_nl = [0.0f64; M];\n");
                 code.push_str("            let mut j_dev = [0.0f64; M * M];\n");
                 Self::emit_nodal_device_evaluation_body(&mut code, ir, "            ");
+                code.push_str("            i_nl_resid = i_nl;\n");
                 code.push_str(
                     "            // Tolerance matches DK Schur path: ABSTOL=1e-12, RELTOL=1e-3,\n",
                 );
@@ -6457,16 +6462,22 @@ impl RustEmitter {
             code.push_str("            converged = true;\n");
             code.push_str("            state.last_nr_iterations = iter as u32;\n");
 
-            // Final device evaluation at converged point
-            code.push_str("            // Final device evaluation at converged point\n");
-            code.push_str("            let mut v_nl_final = [0.0f64; M];\n");
-            code.push_str(&emit_sparse_nv_matvec(
-                ir,
-                "v_nl_final",
-                "v",
-                "            ",
-            ));
-            Self::emit_nodal_device_evaluation_final(&mut code, ir, "            ");
+            // Final device currents at the converged point. For m > 0 the
+            // residual check above already evaluated i_nl at this exact v (v is
+            // unchanged since), so reuse it instead of a second device
+            // evaluation. Byte-identical: emit_nodal_device_evaluation_body and
+            // _final apply the same current expressions to v_nl = N_v·v.
+            if m > 0 {
+                code.push_str(
+                    "            // Final device currents: reuse the residual-check eval (same v)\n",
+                );
+                code.push_str("            i_nl = i_nl_resid;\n");
+            } else {
+                code.push_str("            // Final device evaluation at converged point\n");
+                code.push_str("            let mut v_nl_final = [0.0f64; M];\n");
+                code.push_str(&emit_sparse_nv_matvec(ir, "v_nl_final", "v", "            "));
+                Self::emit_nodal_device_evaluation_final(&mut code, ir, "            ");
+            }
 
             // ActiveSet (plain): the pin-and-resolve used to be emitted right
             // here, inside the trap NR convergence block — which silently

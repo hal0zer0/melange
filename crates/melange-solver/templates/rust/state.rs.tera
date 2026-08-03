@@ -27,6 +27,13 @@ pub struct CircuitState {
     /// DC operating point (for reset/sleep/wake)
     pub dc_operating_point: [f64; N],
 
+    /// Cached Step-6c damping threshold = max|dc_operating_point[0..n_nodes]|
+    /// .mul_add(0.05, 2.0). Loop-invariant between DC-OP changes, so it is
+    /// refreshed only when dc_operating_point is mutated (Default, reset,
+    /// set_dc_operating_point, recompute_dc_op) rather than recomputed every
+    /// sample in the process_sample safety net.
+    pub damp_thresh: f64,
+
     /// Previous input sample for trapezoidal integration
     pub input_prev: f64,
 
@@ -213,12 +220,14 @@ static OPAMP_RAIL_DEGRADE_WARN_ONCE: std::sync::Once = std::sync::Once::new();
 {% else %}            i_nl_prev: [0.0; M],
             i_nl_prev_prev: [0.0; M],
 {% endif %}            dc_operating_point: DC_OP,
+            damp_thresh: {{ damp_thresh_init }},
 {% else %}            v_prev: [0.0; N],
 {% if has_dc_nl %}            i_nl_prev: DC_NL_I,
             i_nl_prev_prev: DC_NL_I,
 {% else %}            i_nl_prev: [0.0; M],
             i_nl_prev_prev: [0.0; M],
 {% endif %}            dc_operating_point: [0.0; N],
+            damp_thresh: 2.0,
 {% endif %}            input_prev: 0.0,
             last_nr_iterations: 0,
 {% if dc_block %}            dc_block_x_prev: {% if has_dc_op %}dc_block_x_seed{% else %}[0.0; NUM_OUTPUTS]{% endif %},
@@ -320,7 +329,9 @@ impl CircuitState {
         // and the nominal pot/switch values restored below (a recomputed OP
         // at moved pots paired with the baked bias would be incoherent).
         self.dc_operating_point = DC_OP;
+        self.damp_thresh = {{ damp_thresh_init }};
 {% else %}        self.dc_operating_point = [0.0; N];
+        self.damp_thresh = 2.0;
 {% endif %}        self.v_prev = self.dc_operating_point;
 {% if has_dc_nl %}        self.i_nl_prev = DC_NL_I;
         self.i_nl_prev_prev = DC_NL_I;
@@ -407,6 +418,21 @@ impl CircuitState {
     pub fn set_dc_operating_point(&mut self, v_dc: [f64; N]) {
         self.dc_operating_point = v_dc;
         self.v_prev = v_dc;
+        self.refresh_damp_thresh();
+    }
+
+    /// Recompute the cached Step-6c damping threshold from the current DC
+    /// operating point. Called wherever `dc_operating_point` is mutated so the
+    /// per-sample safety net can read `self.damp_thresh` directly. Mirrors the
+    /// former per-sample loop exactly (fold of |·| then `.mul_add(0.05, 2.0)`).
+    #[inline]
+    fn refresh_damp_thresh(&mut self) {
+        let mut max_dc = 0.0_f64;
+        for i in 0..{{ n_nodes }} {
+            let a = self.dc_operating_point[i].abs();
+            if a > max_dc { max_dc = a; }
+        }
+        self.damp_thresh = max_dc.mul_add(0.05, 2.0);
     }
 
     /// Read the baked DC operating point for this circuit.
@@ -446,7 +472,11 @@ impl CircuitState {
     /// See `docs/aidocs/DC_OP.md` "Runtime DC OP recompute" for the full
     /// surface and semantic contract.
     pub fn recompute_dc_op(&mut self) {
-{{ recompute_dc_op_body }}    }
+{{ recompute_dc_op_body }}        // Cache refreshed on the converged fall-through path; the non-converged
+        // branch returns early with dc_operating_point unchanged (cache stays
+        // valid). Kept in sync with the Step-6c per-sample read.
+        self.refresh_damp_thresh();
+    }
 
     /// Settle to the DC operating point at current pot / switch / device
     /// values — the "recompute with warmup fallback" convenience wrapper.

@@ -148,13 +148,10 @@ pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS
             let d = (v[i] - state.v_prev[i]).abs();
             if d > max_delta { max_delta = d; }
         }
-        // Adaptive threshold: max(2V, 5% of max DC OP node voltage)
-        let mut max_dc = 0.0_f64;
-        for i in 0..{{ n_nodes }} {
-            let a = state.dc_operating_point[i].abs();
-            if a > max_dc { max_dc = a; }
-        }
-        let damp_thresh = max_dc.mul_add(0.05, 2.0);
+        // Adaptive threshold: max(2V, 5% of max DC OP node voltage). Cached in
+        // state.damp_thresh (refreshed only when dc_operating_point changes)
+        // instead of recomputing the max over all nodes every sample.
+        let damp_thresh = state.damp_thresh;
         if max_delta > damp_thresh {
             // This is a last-ditch safety net that should only fire when the
             // solver has produced a pathological step. A nonzero value here is
