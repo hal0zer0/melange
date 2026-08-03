@@ -131,6 +131,148 @@ fn tellegen_power(v_ss: &[f64], r: &[f64]) -> f64 {
     v_ss.iter().zip(r).map(|(&v, &ri)| v * ri).sum()
 }
 
+// ── Dynamic (transient) Tellegen ────────────────────────────────────────
+//
+// DC steady state is the easy case (reactive currents vanish). The dynamic
+// check drives a time-varying input and verifies power balance at *every*
+// sample, including the companion capacitor currents
+//   i_cap[n] = α·C·(v[n]−v[n−1]) − i_cap[n−1],   α = 2/T,
+// a vector recursion seeded from the DC operating point (i_cap[−1]=0,
+// v[−1]=v_dc). The instantaneous nodal residual is
+//   r[n] = G·v[n] + i_cap[n] − N_i·i_nl[n] − rhs_src(u[n]).
+
+/// One captured transient sample: (input u[n], full state v[n], nonlinear i_nl[n]).
+type Sample = (f64, Vec<f64>, Vec<f64>);
+
+/// Drive the generated circuit with an internally-generated sine and capture,
+/// per sample, (u, v_prev, i_nl_prev), plus the initial DC-OP baseline v[−1].
+fn dump_transient(
+    spice: &str,
+    freq: f64,
+    amp: f64,
+    steps: usize,
+    tag: &str,
+    nodal: bool,
+) -> (Vec<f64>, Vec<Sample>) {
+    let config = CodegenConfig {
+        sample_rate: SR,
+        ..support::config_for_spice(spice, SR)
+    };
+    let (code, _n, _m) = if nodal {
+        support::generate_circuit_code_nodal(spice, &config)
+    } else {
+        support::generate_circuit_code(spice, &config)
+    };
+
+    let main_code = format!(
+        r#"
+fn main() {{
+    let mut state = CircuitState::default();
+    state.set_sample_rate({sr:?});
+    // DC-OP baseline v[-1]
+    let mut b = String::from("B");
+    for x in state.v_prev.iter() {{ b.push_str(&format!(" {{:.17e}}", x)); }}
+    println!("{{b}}");
+    let sr: f64 = {sr:?};
+    for n in 0..{steps} {{
+        let t = n as f64 / sr;
+        let u: f64 = {amp:?} * (2.0 * std::f64::consts::PI * {freq:?} * t).sin();
+        let _ = process_sample(u, &mut state);
+        let mut sline = format!("S {{:.17e}}", u);
+        for x in state.v_prev.iter() {{ sline.push_str(&format!(" {{:.17e}}", x)); }}
+        println!("{{sline}}");
+        let mut nline = String::from("N");
+        for x in state.i_nl_prev.iter() {{ nline.push_str(&format!(" {{:.17e}}", x)); }}
+        println!("{{nline}}");
+    }}
+}}
+"#,
+        sr = SR,
+        amp = amp,
+        freq = freq,
+        steps = steps,
+    );
+
+    let out = support::compile_and_run(&code, &main_code, tag);
+    let nums = |l: &str| -> Vec<f64> {
+        l.split_whitespace()
+            .skip(1)
+            .map(|t| t.parse::<f64>().unwrap())
+            .collect()
+    };
+    let mut baseline = Vec::new();
+    let mut samples: Vec<Sample> = Vec::new();
+    let mut lines = out.stdout.lines();
+    while let Some(l) = lines.next() {
+        if let Some(rest) = l.strip_prefix("B ") {
+            baseline = nums(&format!("B {rest}"));
+        } else if l.starts_with("S ") {
+            let sv = nums(l);
+            let (u, v) = sv.split_first().unwrap();
+            let nline = lines.next().expect("N line follows S line");
+            let i_nl = nums(nline);
+            samples.push((*u, v.to_vec(), i_nl));
+        }
+    }
+    (baseline, samples)
+}
+
+/// Matrix·vector over the augmented dimension.
+fn matvec(m: &[Vec<f64>], x: &[f64]) -> Vec<f64> {
+    m.iter()
+        .map(|row| row.iter().zip(x).map(|(&a, &b)| a * b).sum())
+        .collect()
+}
+
+/// Return (max|r[n]|, max|r[n]+r[n−1]|) over the transient — the instantaneous
+/// and trapezoidal-pairwise power-balance residuals.
+fn dynamic_residual(spice: &str, baseline: &[f64], samples: &[Sample]) -> (f64, f64) {
+    let netlist = Netlist::parse(spice).expect("parse");
+    let mut mna = MnaSystem::from_netlist(&netlist).expect("mna");
+    let input_node = mna.node_map["in"] - 1;
+    mna.g[input_node][input_node] += G_IN;
+    let n_aug = mna.n_aug;
+    let alpha = 2.0 * SR;
+
+    let mut v_prev = baseline.to_vec();
+    let mut i_cap_prev = vec![0.0_f64; n_aug];
+    let mut r_prev = vec![0.0_f64; n_aug];
+    let mut max_r = 0.0_f64;
+    let mut max_pair = 0.0_f64;
+
+    for (u, v, i_nl) in samples {
+        let dv: Vec<f64> = v.iter().zip(&v_prev).map(|(&a, &b)| a - b).collect();
+        let cdv = matvec(&mna.c, &dv);
+        let i_cap: Vec<f64> = cdv
+            .iter()
+            .zip(&i_cap_prev)
+            .map(|(&c, &ip)| alpha * c - ip)
+            .collect();
+
+        let gv = matvec(&mna.g, v);
+        let ni = matvec(&mna.n_i, i_nl); // n_aug × m · m → n_aug
+        let mut rhs = vec![0.0_f64; n_aug];
+        rhs[input_node] = G_IN * u;
+        for vs in &mna.voltage_sources {
+            rhs[mna.n + vs.ext_idx] = vs.dc_value;
+        }
+
+        let r: Vec<f64> = (0..n_aug)
+            .map(|k| gv[k] + i_cap[k] - ni.get(k).copied().unwrap_or(0.0) - rhs[k])
+            .collect();
+
+        max_r = max_r.max(max_abs(&r));
+        for k in 0..n_aug {
+            max_pair = max_pair.max((r[k] + r_prev[k]).abs());
+        }
+
+        v_prev = v.clone();
+        i_cap_prev = i_cap;
+        r_prev = r;
+    }
+    (max_r, max_pair)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn check(
     spice: &str,
@@ -235,6 +377,44 @@ fn tellegen_diode_clipper_nonlinear() {
         KCL_TOL,
         PWR_TOL,
     );
+}
+
+/// Drive a transient sine and assert instantaneous power balance at *every*
+/// sample. `tol` is on max|r[n]| (the instantaneous residual), which the
+/// trapezoidal solve holds exactly when seeded from a DC-steady start.
+#[allow(clippy::too_many_arguments)]
+fn check_dynamic(spice: &str, freq: f64, amp: f64, steps: usize, tag: &str, nodal: bool, tol: f64) {
+    let (baseline, samples) = dump_transient(spice, freq, amp, steps, tag, nodal);
+    let (max_r, max_pair) = dynamic_residual(spice, &baseline, &samples);
+    eprintln!(
+        "[{tag}] instantaneous max|r[n]| = {max_r:.3e},  pairwise max|r[n]+r[n-1]| = {max_pair:.3e}"
+    );
+    assert!(
+        max_r < tol,
+        "[{tag}] dynamic instantaneous power balance {max_r:.3e} exceeds {tol:.3e} — \
+         node currents do not balance during the transient"
+    );
+}
+
+#[test]
+fn tellegen_dynamic_rc() {
+    // Transient sine into the RC lowpass: the cap carries real current every
+    // sample, so this exercises the companion i_cap term dynamic_residual adds.
+    check_dynamic(RC_LOWPASS, 1000.0, 1.0, 400, "dyn_rc", false, 1e-11);
+}
+
+#[test]
+fn tellegen_dynamic_diode_clipper() {
+    // 2V sine drives the diodes into conduction on each half-cycle; the balance
+    // holds at every point of the clipping waveform (diode + cap + node V).
+    check_dynamic(DIODE_CLIPPER, 1000.0, 2.0, 400, "dyn_clip", false, 1e-11);
+}
+
+#[test]
+fn tellegen_dynamic_bjt_common_emitter() {
+    // Small-signal sine on the biased BJT: 2D device current + VS branch + cap
+    // currents all balance every sample (floor = DC-OP/NR convergence residual).
+    check_dynamic(BJT_CE, 1000.0, 0.01, 400, "dyn_bjt", true, 1e-8);
 }
 
 #[test]
