@@ -20,7 +20,8 @@
 //!   Shockley, "The theory of p-n junctions in semiconductors," BSTJ 28, 1949.
 
 use melange_devices::{
-    DiodeShockley, Jfet, JfetChannel, Mosfet, MosfetChannelType as ChannelType, VT_ROOM,
+    BjtEbersMoll, BjtGummelPoon, BjtPolarity, DiodeShockley, Jfet, JfetChannel, Mosfet,
+    MosfetChannelType as ChannelType, VT_ROOM,
 };
 
 const REL: f64 = 1e-12; // machine-precision agreement with the closed form
@@ -217,4 +218,124 @@ fn diode_exponential_ratio_is_canonical() {
     let v1 = v0 + n * VT_ROOM;
     let ratio = (d.current_at(v1) + is) / (d.current_at(v0) + is);
     assert_rel(ratio, std::f64::consts::E, "Shockley ΔV=N·VT ⇒ ×e");
+}
+
+// ── BJT — SPICE Gummel-Poon ─────────────────────────────────────────────
+//
+// Canonical SGP (Gummel & Poon 1970; SPICE Gummel-Poon as documented in
+// Antognetti & Massobrio, "Semiconductor Device Modeling with SPICE"):
+//   q1 = 1/(1 − Vbe/VAR − Vbc/VAF)
+//   cbe = IS·(exp(Vbe/NF·Vt) − 1),  cbc = IS·(exp(Vbc/NR·Vt) − 1)
+//   q2 = cbe/IKF + cbc/IKR
+//   qb = q1·(1 + √(1+4·q2))/2
+//   Ic = IS·(exp(Vbe/NF·Vt) − exp(Vbc/NR·Vt))/qb − IS/BR·(exp(Vbc/NR·Vt) − 1)
+//   Ib = IS/BF·(exp(Vbe/NF·Vt) − 1) + IS/BR·(exp(Vbc/NR·Vt) − 1)   [ISE=ISC=0]
+// The base-charge qb modulates the transport (collector) current only — the
+// base current is pure Ebers-Moll. All tests below use NPN, ISE=ISC=0.
+
+const IS: f64 = 1e-14;
+const BF: f64 = 200.0;
+const BR: f64 = 5.0;
+
+/// Clamped exp mirroring the device crate's safe_exp (exact within ±40).
+fn ce(x: f64) -> f64 {
+    x.clamp(-40.0, 40.0).exp()
+}
+
+fn qb_ref(vaf: f64, var: f64, ikf: f64, ikr: f64, vbe: f64, vbc: f64) -> f64 {
+    let vt = VT_ROOM;
+    let q1_denom = 1.0 - vbe / var - vbc / vaf;
+    let q1 = if q1_denom <= 0.0 || q1_denom.abs() < 1e-30 {
+        1.0
+    } else {
+        1.0 / q1_denom
+    };
+    let cbe = IS * (ce(vbe / vt) - 1.0);
+    let cbc = IS * (ce(vbc / vt) - 1.0);
+    let q2 = cbe / ikf + cbc / ikr;
+    q1 * (1.0 + (1.0 + 4.0 * q2).max(0.0).sqrt()) / 2.0
+}
+
+fn ic_ref(vaf: f64, var: f64, ikf: f64, ikr: f64, vbe: f64, vbc: f64) -> f64 {
+    let vt = VT_ROOM;
+    let icc = IS * (ce(vbe / vt) - ce(vbc / vt));
+    icc / qb_ref(vaf, var, ikf, ikr, vbe, vbc) - IS / BR * (ce(vbc / vt) - 1.0)
+}
+
+fn ib_ref(vbe: f64, vbc: f64) -> f64 {
+    let vt = VT_ROOM;
+    IS / BF * (ce(vbe / vt) - 1.0) + IS / BR * (ce(vbc / vt) - 1.0)
+}
+
+fn npn(vaf: f64, var: f64, ikf: f64, ikr: f64) -> BjtGummelPoon {
+    let em = BjtEbersMoll::new_room_temp(IS, BF, BR, BjtPolarity::Npn);
+    BjtGummelPoon::new(em, vaf, var, ikf, ikr)
+}
+
+#[test]
+fn bjt_gp_reduces_to_ebers_moll() {
+    // All GP params infinite ⇒ qb ≡ 1 ⇒ pure Ebers-Moll transport model.
+    let inf = f64::INFINITY;
+    let gp = npn(inf, inf, inf, inf);
+    // Forward active, Vbc=0: Ic = IS·(exp(Vbe/Vt) − 1), Ib = Ic/BF ⇒ β = BF.
+    let (vbe, vbc) = (0.65, 0.0);
+    let ic = gp.collector_current(vbe, vbc);
+    let ib = gp.base_current(vbe, vbc);
+    assert_rel(ic, IS * (ce(vbe / VT_ROOM) - 1.0), "GP→EM Ic");
+    assert_rel(ib, ic / BF, "GP→EM Ib = Ic/BF");
+    assert_rel(ic / ib, BF, "GP→EM β = BF");
+}
+
+#[test]
+fn bjt_gp_matches_canonical_at_operating_points() {
+    // 2N2222A-like GP params; verify Ic and Ib against the SGP equations across
+    // forward-active and into high injection.
+    let (vaf, var, ikf, ikr) = (100.0, 10.0, 0.3, 6e-3);
+    let gp = npn(vaf, var, ikf, ikr);
+    for &(vbe, vbc) in &[
+        (0.55, 0.0),
+        (0.6, -2.0),
+        (0.65, -5.0),
+        (0.7, 0.0),
+        (0.72, -3.0),
+    ] {
+        assert_rel(
+            gp.collector_current(vbe, vbc),
+            ic_ref(vaf, var, ikf, ikr, vbe, vbc),
+            &format!("GP Ic({vbe},{vbc})"),
+        );
+        assert_rel(
+            gp.base_current(vbe, vbc),
+            ib_ref(vbe, vbc),
+            &format!("GP Ib({vbe},{vbc})"),
+        );
+    }
+}
+
+#[test]
+fn bjt_gp_early_and_high_injection_are_canonical() {
+    // Early effect: at fixed Vbe, more reverse Vbc (higher Vce) raises Ic.
+    let gp = npn(100.0, 10.0, f64::INFINITY, f64::INFINITY);
+    assert!(
+        gp.collector_current(0.6, -5.0) > gp.collector_current(0.6, 0.0),
+        "Early effect: Ic must rise with Vce"
+    );
+
+    // High injection: with only IKF finite (no Early), β = Ic/Ib = BF/qb exactly
+    // — qb modulates Ic but not Ib. Verify β·qb = BF to machine precision, and
+    // that β rolls off (qb > 1) as Ic approaches the IKF knee.
+    let inf = f64::INFINITY;
+    let ikf = 0.3;
+    let gp = npn(inf, inf, ikf, inf);
+    for &vbe in &[0.5, 0.65, 0.75] {
+        let beta = gp.collector_current(vbe, 0.0) / gp.base_current(vbe, 0.0);
+        let qb = qb_ref(inf, inf, ikf, inf, vbe, 0.0);
+        assert_rel(beta * qb, BF, &format!("GP β·qb = BF at Vbe={vbe}"));
+    }
+    let beta_lo = gp.collector_current(0.5, 0.0) / gp.base_current(0.5, 0.0);
+    let beta_hi = gp.collector_current(0.75, 0.0) / gp.base_current(0.75, 0.0);
+    assert!(
+        beta_hi < 0.9 * beta_lo,
+        "high-injection β rolloff: β(0.75V)={beta_hi:.1} should be well below β(0.5V)={beta_lo:.1}"
+    );
 }
