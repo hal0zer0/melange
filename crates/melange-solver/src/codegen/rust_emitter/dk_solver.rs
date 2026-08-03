@@ -196,7 +196,11 @@ impl RustEmitter {
     }
 
     /// Generate inline Gaussian elimination for M=3..=24.
-    pub(super) fn generate_gauss_elim(code: &mut String, ir: &CircuitIR, dim: usize) {
+    /// Shared Gauss-elimination body: augmented-matrix build + forward
+    /// elimination + back substitution. The two NR-solve emitters differ only
+    /// in the singularity-threshold token, the two explanatory comments, and
+    /// the clamp/converge tail (emitted by each caller after this returns).
+    fn emit_gauss_elim_body(code: &mut String, dim: usize, thresh: &str, comments: bool) {
         code.push_str(&format!(
             "        // Solve {dim}x{dim} system via inline Gaussian elimination\n"
         ));
@@ -218,11 +222,12 @@ impl RustEmitter {
             .join(", ");
         code.push_str(&format!("        let mut b = [{b_init}];\n"));
 
-        // Forward elimination with partial pivoting
+        code.push_str("        let mut singular = false;\n");
+        if comments {
+            code.push_str("        // Forward elimination with partial pivoting\n");
+        }
         code.push_str(&format!(
-            "        let mut singular = false;\n\
-             \x20       // Forward elimination with partial pivoting\n\
-             \x20       for col in 0..{dim} {{\n\
+            "        for col in 0..{dim} {{\n\
              \x20           let mut max_row = col;\n\
              \x20           let mut max_val = a[col][col].abs();\n\
              \x20           for row in (col+1)..{dim} {{\n\
@@ -231,7 +236,7 @@ impl RustEmitter {
              \x20                   max_row = row;\n\
              \x20               }}\n\
              \x20           }}\n\
-             \x20           if max_val < SINGULARITY_THRESHOLD {{ singular = true; break; }}\n\
+             \x20           if max_val < {thresh} {{ singular = true; break; }}\n\
              \x20           if max_row != col {{ a.swap(col, max_row); b.swap(col, max_row); }}\n\
              \x20           let pivot = a[col][col];\n\
              \x20           for row in (col+1)..{dim} {{\n\
@@ -242,18 +247,23 @@ impl RustEmitter {
              \x20       }}\n"
         ));
 
-        // Back substitution
+        code.push_str("        if !singular {\n");
+        if comments {
+            code.push_str("            // Back substitution\n");
+        }
         code.push_str(&format!(
-            "        if !singular {{\n\
-             \x20           // Back substitution\n\
-             \x20           for i in (0..{dim}).rev() {{\n\
+            "            for i in (0..{dim}).rev() {{\n\
              \x20               let mut sum = b[i];\n\
              \x20               for j in (i+1)..{dim} {{ sum -= a[i][j] * b[j]; }}\n\
-             \x20               if a[i][i].abs() < SINGULARITY_THRESHOLD {{ singular = true; break; }}\n\
+             \x20               if a[i][i].abs() < {thresh} {{ singular = true; break; }}\n\
              \x20               b[i] = sum / a[i][i];\n\
              \x20           }}\n\
              \x20       }}\n"
         ));
+    }
+
+    pub(super) fn generate_gauss_elim(code: &mut String, ir: &CircuitIR, dim: usize) {
+        Self::emit_gauss_elim_body(code, dim, "SINGULARITY_THRESHOLD", true);
 
         // Clamp and converge (alias b[i] as delta{i} for the shared helper)
         code.push_str("        if !singular {\n");
@@ -268,58 +278,7 @@ impl RustEmitter {
 
     /// Generate Gauss elimination for Schur NR (uses `break` not `return`).
     pub(super) fn generate_schur_gauss_elim(code: &mut String, ir: &CircuitIR, dim: usize) {
-        code.push_str(&format!(
-            "        // Solve {dim}x{dim} system via inline Gaussian elimination\n"
-        ));
-
-        code.push_str("        let mut a = [\n");
-        for i in 0..dim {
-            let row = (0..dim)
-                .map(|j| format!("j{i}_{j}"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            code.push_str(&format!("            [{row}],\n"));
-        }
-        code.push_str("        ];\n");
-
-        let b_init = (0..dim)
-            .map(|i| format!("f{i}"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        code.push_str(&format!("        let mut b = [{b_init}];\n"));
-
-        code.push_str(&format!(
-            "        let mut singular = false;\n\
-             \x20       for col in 0..{dim} {{\n\
-             \x20           let mut max_row = col;\n\
-             \x20           let mut max_val = a[col][col].abs();\n\
-             \x20           for row in (col+1)..{dim} {{\n\
-             \x20               if a[row][col].abs() > max_val {{\n\
-             \x20                   max_val = a[row][col].abs();\n\
-             \x20                   max_row = row;\n\
-             \x20               }}\n\
-             \x20           }}\n\
-             \x20           if max_val < 1e-15 {{ singular = true; break; }}\n\
-             \x20           if max_row != col {{ a.swap(col, max_row); b.swap(col, max_row); }}\n\
-             \x20           let pivot = a[col][col];\n\
-             \x20           for row in (col+1)..{dim} {{\n\
-             \x20               let factor = a[row][col] / pivot;\n\
-             \x20               for j in (col+1)..{dim} {{ a[row][j] -= factor * a[col][j]; }}\n\
-             \x20               b[row] -= factor * b[col];\n\
-             \x20           }}\n\
-             \x20       }}\n"
-        ));
-
-        code.push_str(&format!(
-            "        if !singular {{\n\
-             \x20           for i in (0..{dim}).rev() {{\n\
-             \x20               let mut sum = b[i];\n\
-             \x20               for j in (i+1)..{dim} {{ sum -= a[i][j] * b[j]; }}\n\
-             \x20               if a[i][i].abs() < 1e-15 {{ singular = true; break; }}\n\
-             \x20               b[i] = sum / a[i][i];\n\
-             \x20           }}\n\
-             \x20       }}\n"
-        ));
+        Self::emit_gauss_elim_body(code, dim, "1e-15", false);
 
         code.push_str("        if !singular {\n");
         for i in 0..dim {

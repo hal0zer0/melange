@@ -2444,63 +2444,14 @@ impl CircuitIR {
             // overwrites a provisional trap selection.
             integrator_selection = IntegratorSelection::BeBehavioral;
         }
+        // A/A_neg/A_be/A_neg_be are built ONCE below, after the IIR-op-amp Gm
+        // strip + selective Gm cap have (possibly) modified aug.g. A former
+        // pre-strip build here was immediately overwritten by that rebuild and
+        // never read in between, so only the declarations remain.
         let mut a_flat = vec![0.0f64; n * n];
         let mut a_neg_flat = vec![0.0f64; n * n];
-        for i in 0..n {
-            for j in 0..n {
-                let g = aug.g[i][j];
-                let c = aug.c[i][j];
-                a_flat[i * n + j] = g + alpha * c;
-                a_neg_flat[i * n + j] = if be { alpha * c } else { alpha * c - g };
-            }
-        }
-        // Zero ALL augmented rows in A_neg (n_nodes..n_aug).
-        // This matches the runtime NodalSolver (solver.rs line ~3199) which
-        // zeros all rows from n_nodes..n_aug, not just VS/VCVS rows.
-        //
-        // For augmented variables that are algebraic (VS, VCVS), this is
-        // mandatory — they have no dynamics (no C), so A_neg = -G and the
-        // trapezoidal history term A_neg*v_prev would inject unstable feedback.
-        //
-        // For Boyle op-amp internal nodes, zeroing A_neg effectively uses
-        // backward Euler instead of trapezoidal for the dominant pole. This is
-        // unconditionally stable and avoids the Gm-induced spectral radius > 1
-        // instability that trapezoidal creates for high-gain VCCS elements
-        // (AOL>10000 → Gm>1000 → A_neg has ±1000 entries → unstable feedback).
-        //
-        // Inductor branch rows (n_aug..n_nodal) are NOT zeroed — they have
-        // real L dynamics in C that need trapezoidal integration.
-        if n_aug > n_nodes {
-            for i in n_nodes..n_aug {
-                if i < n {
-                    for j in 0..n {
-                        a_neg_flat[i * n + j] = 0.0;
-                    }
-                }
-            }
-        }
-
-        // Build backward Euler: A_be = G + (1/T)*C, A_neg_be = (1/T)*C
         let mut a_be_flat = vec![0.0f64; n * n];
         let mut a_neg_be_flat = vec![0.0f64; n * n];
-        for i in 0..n {
-            for j in 0..n {
-                let g = aug.g[i][j];
-                let c = aug.c[i][j];
-                a_be_flat[i * n + j] = g + alpha_be * c;
-                a_neg_be_flat[i * n + j] = alpha_be * c;
-            }
-        }
-        // Zero all augmented rows in A_neg_be (matching A_neg treatment)
-        if n_aug > n_nodes {
-            for i in n_nodes..n_aug {
-                if i < n {
-                    for j in 0..n {
-                        a_neg_be_flat[i * n + j] = 0.0;
-                    }
-                }
-            }
-        }
 
         // Expand N_v (m × n_aug → m × n_nodal) and N_i (n_aug × m → n_nodal × m)
         let mut n_v_flat = vec![0.0f64; m * n];
