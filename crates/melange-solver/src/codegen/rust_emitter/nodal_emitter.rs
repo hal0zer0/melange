@@ -77,6 +77,78 @@ fn ni_nonzeros_by_dev(ir: &CircuitIR, m: usize) -> Vec<Vec<usize>> {
     out
 }
 
+/// Emit the block-diagonal NR Jacobian stamp `MAT[a][b] -= N_I[a][i]·j_dev[i,j]
+/// ·N_V[j][b]` over every device slot's nonzero N_i/N_v entries. Shared by the
+/// trap (chord_lu), sub-step (g_s) and BE (g_aug) paths — they differ only in
+/// the target matrix variable and indentation.
+fn emit_nodal_jacobian_stamp(code: &mut String, ir: &CircuitIR, m: usize, mat: &str, indent: &str) {
+    let ni_nz_by_dev = ni_nonzeros_by_dev(ir, m);
+    for slot in &ir.device_slots {
+        let s = slot.start_idx;
+        let dim = slot.dimension;
+        for di in 0..dim {
+            let i = s + di;
+            let ni_nodes = &ni_nz_by_dev[i];
+            for dj in 0..dim {
+                let j = s + dj;
+                let nv_nodes = &ir.sparsity.n_v.nz_by_row[j];
+                if ni_nodes.is_empty() || nv_nodes.is_empty() {
+                    continue;
+                }
+                let jd_ij = i * m + j;
+                for &a in ni_nodes {
+                    for &b in nv_nodes {
+                        code.push_str(&format!(
+                            "{indent}{mat}[{}][{}] -= N_I[{}][{}] * j_dev[{}] * N_V[{}][{}];\n",
+                            a, b, a, i, jd_ij, j, b
+                        ));
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Emit the companion-RHS stamp `RHS[a] += N_I[a][i]·(i_nl[i] − Σ_j
+/// jdev[i,j]·v_nl[j])` over every device slot. Shared by the trap, sub-step and
+/// BE paths — they differ in the RHS variable, the j_dev source (chord_j_dev on
+/// the trap path to match the persisted LU factorization, j_dev otherwise) and
+/// indentation (inner stamps are indented two spaces past `indent`).
+fn emit_nodal_companion_rhs(
+    code: &mut String,
+    ir: &CircuitIR,
+    m: usize,
+    rhs: &str,
+    jdev: &str,
+    indent: &str,
+) {
+    let inner = format!("{indent}  ");
+    let ni_nz_by_dev = ni_nonzeros_by_dev(ir, m);
+    for slot in &ir.device_slots {
+        let s = slot.start_idx;
+        let dim = slot.dimension;
+        for di in 0..dim {
+            let i = s + di;
+            let jdv_terms: Vec<String> = (0..dim)
+                .map(|dj| {
+                    let j = s + dj;
+                    let jd_ij = i * m + j;
+                    format!("{jdev}[{}] * v_nl[{}]", jd_ij, j)
+                })
+                .collect();
+            code.push_str(&format!(
+                "{indent}{{ let i_comp = i_nl[{}] - ({});\n",
+                i,
+                jdv_terms.join(" + ")
+            ));
+            for &a in &ni_nz_by_dev[i] {
+                code.push_str(&format!("{inner}{rhs}[{}] += N_I[{}][{}] * i_comp;\n", a, a, i));
+            }
+            code.push_str(&format!("{indent}}}\n"));
+        }
+    }
+}
+
 fn bsrc_param_map(ir: &CircuitIR) -> std::collections::BTreeMap<String, String> {
     let mut m = std::collections::BTreeMap::new();
     for (name, val) in &ir.behavioral_param_consts {
@@ -6034,33 +6106,7 @@ impl RustEmitter {
             code.push_str("            for i in 0..N_NODES { chord_lu[i][i] += 1e-12; }\n");
             {
                 // Build transpose of N_i sparsity: for each device dim i, which nodes a are nonzero
-                let ni_nz_by_dev = ni_nonzeros_by_dev(ir, m);
-
-                // For each device, stamp N_i[:,i] * j_dev[i,j] * N_v[j,:] for all nonzero entries
-                for slot in &ir.device_slots {
-                    let s = slot.start_idx;
-                    let dim = slot.dimension;
-                    for di in 0..dim {
-                        let i = s + di;
-                        let ni_nodes = &ni_nz_by_dev[i];
-                        for dj in 0..dim {
-                            let j = s + dj;
-                            let nv_nodes = &ir.sparsity.n_v.nz_by_row[j];
-                            if ni_nodes.is_empty() || nv_nodes.is_empty() {
-                                continue;
-                            }
-                            let jd_ij = i * m + j;
-                            for &a in ni_nodes {
-                                for &b in nv_nodes {
-                                    code.push_str(&format!(
-                                        "            chord_lu[{}][{}] -= N_I[{}][{}] * j_dev[{}] * N_V[{}][{}];\n",
-                                        a, b, a, i, jd_ij, j, b
-                                    ));
-                                }
-                            }
-                        }
-                    }
-                }
+                emit_nodal_jacobian_stamp(&mut code, ir, m, "chord_lu", "            ");
             }
             // Behavioral B-source Jacobian: stamp ∂f/∂V directly into G_aug.
             if has_behavioral {
@@ -6109,39 +6155,7 @@ impl RustEmitter {
                 "        // 2d. Build companion RHS: rhs + N_i * (i_nl - chord_J_dev * v_nl) (sparse)\n",
             );
             code.push_str("        let mut rhs_work = rhs;\n");
-            {
-                // Build transpose of N_i sparsity
-                let ni_nz_by_dev = ni_nonzeros_by_dev(ir, m);
-
-                for slot in &ir.device_slots {
-                    let s = slot.start_idx;
-                    let dim = slot.dimension;
-                    for di in 0..dim {
-                        let i = s + di;
-                        // Compute chord_jdev_vnl = sum_j chord_j_dev[i*M+j] * v_nl[j] (only within block)
-                        let jdv_terms: Vec<String> = (0..dim)
-                            .map(|dj| {
-                                let j = s + dj;
-                                let jd_ij = i * m + j;
-                                format!("chord_j_dev[{}] * v_nl[{}]", jd_ij, j)
-                            })
-                            .collect();
-                        code.push_str(&format!(
-                            "        {{ let i_comp = i_nl[{}] - ({});\n",
-                            i,
-                            jdv_terms.join(" + ")
-                        ));
-                        // Stamp N_i * i_comp at nonzero nodes (N_I is N×M)
-                        for &a in &ni_nz_by_dev[i] {
-                            code.push_str(&format!(
-                                "          rhs_work[{}] += N_I[{}][{}] * i_comp;\n",
-                                a, a, i
-                            ));
-                        }
-                        code.push_str("        }\n");
-                    }
-                }
-            }
+            emit_nodal_companion_rhs(&mut code, ir, m, "rhs_work", "chord_j_dev", "        ");
             // Behavioral B-source companion current: f(v) - Σ (∂f/∂V)·v.
             if has_behavioral {
                 emit_behavioral_rhs(&mut code, ir, "        ");
@@ -6587,64 +6601,10 @@ impl RustEmitter {
             code.push('\n');
             // Build G_aug from a_sub
             code.push_str("                    let mut g_s = a_sub;\n");
-            {
-                let ni_nz_by_dev = ni_nonzeros_by_dev(ir, m);
-                for slot in &ir.device_slots {
-                    let s = slot.start_idx;
-                    let dim = slot.dimension;
-                    for di in 0..dim {
-                        let i = s + di;
-                        let ni_nodes = &ni_nz_by_dev[i];
-                        for dj in 0..dim {
-                            let j = s + dj;
-                            let jd_ij = i * m + j;
-                            let nv_nodes = &ir.sparsity.n_v.nz_by_row[j];
-                            if ni_nodes.is_empty() || nv_nodes.is_empty() {
-                                continue;
-                            }
-                            for &a in ni_nodes {
-                                for &b in nv_nodes {
-                                    code.push_str(&format!(
-                                        "                    g_s[{}][{}] -= N_I[{}][{}] * j_dev[{}] * N_V[{}][{}];\n",
-                                        a, b, a, i, jd_ij, j, b
-                                    ));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            emit_nodal_jacobian_stamp(&mut code, ir, m, "g_s", "                    ");
             // Build companion RHS
             code.push_str("                    let mut rhs_w = rhs_s;\n");
-            {
-                let ni_nz_by_dev = ni_nonzeros_by_dev(ir, m);
-                for slot in &ir.device_slots {
-                    let s = slot.start_idx;
-                    let dim = slot.dimension;
-                    for di in 0..dim {
-                        let i = s + di;
-                        let jdv_terms: Vec<String> = (0..dim)
-                            .map(|dj| {
-                                let j = s + dj;
-                                let jd_ij = i * m + j;
-                                format!("j_dev[{}] * v_nl[{}]", jd_ij, j)
-                            })
-                            .collect();
-                        code.push_str(&format!(
-                            "                    {{ let i_comp = i_nl[{}] - ({});\n",
-                            i,
-                            jdv_terms.join(" + ")
-                        ));
-                        for &a in &ni_nz_by_dev[i] {
-                            code.push_str(&format!(
-                                "                      rhs_w[{}] += N_I[{}][{}] * i_comp;\n",
-                                a, a, i
-                            ));
-                        }
-                        code.push_str("                    }\n");
-                    }
-                }
-            }
+            emit_nodal_companion_rhs(&mut code, ir, m, "rhs_w", "j_dev", "                    ");
             // LU solve
             code.push_str("                    let mut v_new_s = rhs_w;\n");
             code.push_str("                    if !lu_solve(&mut g_s, &mut v_new_s) { break; }\n");
@@ -6845,62 +6805,12 @@ impl RustEmitter {
             code.push_str("            let mut g_aug = state.a_be;\n");
             code.push_str("            // Gmin regularization\n");
             code.push_str("            for i in 0..N_NODES { g_aug[i][i] += 1e-12; }\n");
-            {
-                let ni_nz_by_dev = ni_nonzeros_by_dev(ir, m);
-                for slot in &ir.device_slots {
-                    let s = slot.start_idx;
-                    let dim = slot.dimension;
-                    for di in 0..dim {
-                        let i = s + di;
-                        for dj in 0..dim {
-                            let j = s + dj;
-                            let jd_ij = i * m + j;
-                            let nv_nodes = &ir.sparsity.n_v.nz_by_row[j];
-                            for &a in &ni_nz_by_dev[i] {
-                                for &b in nv_nodes {
-                                    code.push_str(&format!(
-                                        "            g_aug[{}][{}] -= N_I[{}][{}] * j_dev[{}] * N_V[{}][{}];\n",
-                                        a, b, a, i, jd_ij, j, b
-                                    ));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            emit_nodal_jacobian_stamp(&mut code, ir, m, "g_aug", "            ");
             code.push('\n');
 
             // Companion RHS for BE (sparse)
             code.push_str("            let mut rhs_work = rhs_be;\n");
-            {
-                let ni_nz_by_dev = ni_nonzeros_by_dev(ir, m);
-                for slot in &ir.device_slots {
-                    let s = slot.start_idx;
-                    let dim = slot.dimension;
-                    for di in 0..dim {
-                        let i = s + di;
-                        let jdv_terms: Vec<String> = (0..dim)
-                            .map(|dj| {
-                                let j = s + dj;
-                                let jd_ij = i * m + j;
-                                format!("j_dev[{}] * v_nl[{}]", jd_ij, j)
-                            })
-                            .collect();
-                        code.push_str(&format!(
-                            "            {{ let i_comp = i_nl[{}] - ({});\n",
-                            i,
-                            jdv_terms.join(" + ")
-                        ));
-                        for &a in &ni_nz_by_dev[i] {
-                            code.push_str(&format!(
-                                "              rhs_work[{}] += N_I[{}][{}] * i_comp;\n",
-                                a, a, i
-                            ));
-                        }
-                        code.push_str("            }\n");
-                    }
-                }
-            }
+            emit_nodal_companion_rhs(&mut code, ir, m, "rhs_work", "j_dev", "            ");
             code.push('\n');
 
             // LU solve for BE
