@@ -11,6 +11,13 @@
 use crate::dk::DkKernel;
 use crate::mna::MnaSystem;
 
+/// max|K| above which the DK Schur NR operates in a numerically hostile space;
+/// route to nodal full-LU (which avoids K entirely).
+const K_ILL_COND_MAX: f64 = 1e8;
+/// max|S| above which cap-only nodes lack resistive paths and Schur prediction
+/// is unreliable; route to nodal.
+const S_ILL_COND_MAX: f64 = 1e6;
+
 /// Which codegen solver path to use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SolverRoute {
@@ -88,7 +95,7 @@ pub fn auto_route(kernel: &DkKernel, mna: &MnaSystem, dk_failed: bool) -> Routin
         let k_max_abs = (0..m * m)
             .map(|i| kernel.k[i].abs())
             .fold(0.0_f64, f64::max);
-        k_max_abs > 1e8
+        k_max_abs > K_ILL_COND_MAX
     } else {
         false
     };
@@ -115,7 +122,7 @@ pub fn auto_route(kernel: &DkKernel, mna: &MnaSystem, dk_failed: bool) -> Routin
         let s_max_abs = (0..n * n)
             .map(|i| kernel.s[i].abs())
             .fold(0.0_f64, f64::max);
-        s_max_abs > 1e6
+        s_max_abs > S_ILL_COND_MAX
     } else {
         false
     };
@@ -224,7 +231,7 @@ fn compute_spectral_radius(s: &[f64], a_neg: &[f64], n: usize) -> (bool, f64) {
         }
     }
 
-    (rho > 1.002, rho)
+    (rho > crate::codegen::stability::TRAP_BE_PROMOTION_RHO, rho)
 }
 
 #[cfg(test)]
@@ -262,7 +269,7 @@ C1 out 0 1u
         let kernel = DkKernel::from_mna(&mna, 44100.0).unwrap();
         let decision = auto_route(&kernel, &mna, false);
         assert_eq!(decision.route, SolverRoute::DkSchur);
-        assert!(decision.spectral_radius < 1.002);
+        assert!(decision.spectral_radius < crate::codegen::stability::TRAP_BE_PROMOTION_RHO);
     }
 
     /// Two independent 2-winding K-pairs must count as two transformer

@@ -63,6 +63,20 @@ impl ExprResolver for NodalBsrcResolver<'_> {
 
 /// Resolve behavioral param names to generated-Rust strings: `.param` constants
 /// to a baked literal, plugin scalars to their `state.<field>`.
+/// Transpose of the N_i sparsity pattern: `out[i]` lists the node rows `a`
+/// where `N_i[a][i]` is nonzero, for each device dim `i`. Every nodal
+/// device-stamp site needs this same transpose; built once here instead of
+/// inline at each call site.
+fn ni_nonzeros_by_dev(ir: &CircuitIR, m: usize) -> Vec<Vec<usize>> {
+    let mut out = vec![Vec::new(); m];
+    for (a, cols) in ir.sparsity.n_i.nz_by_row.iter().enumerate() {
+        for &i in cols {
+            out[i].push(a);
+        }
+    }
+    out
+}
+
 fn bsrc_param_map(ir: &CircuitIR) -> std::collections::BTreeMap<String, String> {
     let mut m = std::collections::BTreeMap::new();
     for (name, val) in &ir.behavioral_param_consts {
@@ -6020,12 +6034,7 @@ impl RustEmitter {
             code.push_str("            for i in 0..N_NODES { chord_lu[i][i] += 1e-12; }\n");
             {
                 // Build transpose of N_i sparsity: for each device dim i, which nodes a are nonzero
-                let mut ni_nz_by_dev = vec![Vec::new(); m];
-                for (a, cols) in ir.sparsity.n_i.nz_by_row.iter().enumerate() {
-                    for &i in cols {
-                        ni_nz_by_dev[i].push(a);
-                    }
-                }
+                let ni_nz_by_dev = ni_nonzeros_by_dev(ir, m);
 
                 // For each device, stamp N_i[:,i] * j_dev[i,j] * N_v[j,:] for all nonzero entries
                 for slot in &ir.device_slots {
@@ -6102,12 +6111,7 @@ impl RustEmitter {
             code.push_str("        let mut rhs_work = rhs;\n");
             {
                 // Build transpose of N_i sparsity
-                let mut ni_nz_by_dev = vec![Vec::new(); m];
-                for (a, cols) in ir.sparsity.n_i.nz_by_row.iter().enumerate() {
-                    for &i in cols {
-                        ni_nz_by_dev[i].push(a);
-                    }
-                }
+                let ni_nz_by_dev = ni_nonzeros_by_dev(ir, m);
 
                 for slot in &ir.device_slots {
                     let s = slot.start_idx;
@@ -6584,12 +6588,7 @@ impl RustEmitter {
             // Build G_aug from a_sub
             code.push_str("                    let mut g_s = a_sub;\n");
             {
-                let mut ni_nz_by_dev = vec![Vec::new(); m];
-                for (a, cols) in ir.sparsity.n_i.nz_by_row.iter().enumerate() {
-                    for &i in cols {
-                        ni_nz_by_dev[i].push(a);
-                    }
-                }
+                let ni_nz_by_dev = ni_nonzeros_by_dev(ir, m);
                 for slot in &ir.device_slots {
                     let s = slot.start_idx;
                     let dim = slot.dimension;
@@ -6618,12 +6617,7 @@ impl RustEmitter {
             // Build companion RHS
             code.push_str("                    let mut rhs_w = rhs_s;\n");
             {
-                let mut ni_nz_by_dev = vec![Vec::new(); m];
-                for (a, cols) in ir.sparsity.n_i.nz_by_row.iter().enumerate() {
-                    for &i in cols {
-                        ni_nz_by_dev[i].push(a);
-                    }
-                }
+                let ni_nz_by_dev = ni_nonzeros_by_dev(ir, m);
                 for slot in &ir.device_slots {
                     let s = slot.start_idx;
                     let dim = slot.dimension;
@@ -6852,12 +6846,7 @@ impl RustEmitter {
             code.push_str("            // Gmin regularization\n");
             code.push_str("            for i in 0..N_NODES { g_aug[i][i] += 1e-12; }\n");
             {
-                let mut ni_nz_by_dev = vec![Vec::new(); m];
-                for (a, cols) in ir.sparsity.n_i.nz_by_row.iter().enumerate() {
-                    for &i in cols {
-                        ni_nz_by_dev[i].push(a);
-                    }
-                }
+                let ni_nz_by_dev = ni_nonzeros_by_dev(ir, m);
                 for slot in &ir.device_slots {
                     let s = slot.start_idx;
                     let dim = slot.dimension;
@@ -6884,12 +6873,7 @@ impl RustEmitter {
             // Companion RHS for BE (sparse)
             code.push_str("            let mut rhs_work = rhs_be;\n");
             {
-                let mut ni_nz_by_dev = vec![Vec::new(); m];
-                for (a, cols) in ir.sparsity.n_i.nz_by_row.iter().enumerate() {
-                    for &i in cols {
-                        ni_nz_by_dev[i].push(a);
-                    }
-                }
+                let ni_nz_by_dev = ni_nonzeros_by_dev(ir, m);
                 for slot in &ir.device_slots {
                     let s = slot.start_idx;
                     let dim = slot.dimension;
@@ -7516,12 +7500,7 @@ impl RustEmitter {
         ));
         code.push_str(&format!("{indent}        let mut rhs_as = {rhs_name};\n"));
         if m > 0 {
-            let mut ni_nz_by_dev = vec![Vec::new(); m];
-            for (a, cols) in ir.sparsity.n_i.nz_by_row.iter().enumerate() {
-                for &i in cols {
-                    ni_nz_by_dev[i].push(a);
-                }
-            }
+            let ni_nz_by_dev = ni_nonzeros_by_dev(ir, m);
             for i in 0..m {
                 for &a in &ni_nz_by_dev[i] {
                     code.push_str(&format!(
