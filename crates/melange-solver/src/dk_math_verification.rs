@@ -12,7 +12,7 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::dk::{invert_matrix, mat_mul, mat_vec_mul, DkKernel};
+    use crate::dk::{DkKernel, invert_matrix, mat_mul, mat_vec_mul};
     use crate::mna::MnaSystem;
     use crate::parser::Netlist;
 
@@ -1009,6 +1009,202 @@ K1 L1 L2 0.9\nK2 L1 L3 0.9\nK3 L2 L3 0.9\nR2 s1 0 1k\nR3 s2 0 2.2k\n";
             max_err < 1e-12,
             "Transformer-group companion march deviates from exact trapezoidal reference: \
              max_err = {max_err:.3e}"
+        );
+    }
+
+    // ── Convergence-order verification ──────────────────────────────────
+    //
+    // The companion closed-form tests above compare the kernel against the
+    // exact *discrete* trapezoidal recurrence, so they pass to 1e-12 no
+    // matter what order the integrator actually is — they cannot see the
+    // integration order. These tests instead compare against the
+    // *continuous-time* analytical solution and check how the error scales
+    // as the timestep is halved. Trapezoidal integration is 2nd-order, so
+    // halving dt must quarter the global error (ratio → 4). A ratio near 2
+    // would betray a 1st-order (backward-Euler-like) integrator or a
+    // half-sample time-alignment error; a ratio near 1 a broken integrator.
+
+    /// Continuous-time response of the RC lowpass `R1 in out 1k / C1 out 0 1u`
+    /// with a Thevenin source (G_in = 1 ⇒ R_src = 1Ω) driven by A·sin(ωt),
+    /// with initial condition V_out(0) = 0.
+    ///
+    /// The single storage node obeys  V' = -(1/τ)(V - A·sin(ωt))  with
+    /// τ = R_tot·C, R_tot = R_src + R1. Forced first-order response:
+    ///   V(t) = A·H·sin(ωt + φ) - A·H·sin(φ)·e^{-t/τ}
+    /// with H = 1/√(1+(ωτ)²), φ = -atan(ωτ).
+    fn rc_lowpass_continuous(t: f64, amp: f64, omega: f64, tau: f64) -> f64 {
+        let h = 1.0 / (1.0 + (omega * tau).powi(2)).sqrt();
+        let phi = -(omega * tau).atan();
+        amp * h * (omega * t + phi).sin() - amp * h * phi.sin() * (-t / tau).exp()
+    }
+
+    #[test]
+    fn test_trapezoidal_integrator_is_second_order_rc() {
+        let spice = "RC Lowpass Order\nR1 in out 1k\nC1 out 0 1u\n";
+        let netlist = Netlist::parse(spice).unwrap();
+        let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
+        let in_idx = mna.node_map["in"] - 1;
+        let out_idx = mna.node_map["out"] - 1;
+        mna.g[in_idx][in_idx] += 1.0;
+
+        // τ = R_tot·C, R_tot = R_src(1Ω) + R1(1kΩ) = 1001Ω.
+        let r_tot = 1001.0;
+        let cap = 1e-6;
+        let tau = r_tot * cap;
+        let amp = 1.0;
+        let freq = 1000.0;
+        let omega = 2.0 * std::f64::consts::PI * freq;
+
+        // Fixed physical window (~4 time constants: transient + steady state).
+        let duration = 4e-3;
+
+        // Refine the timestep by 2× each time; measure max error vs the
+        // continuous solution over the whole window.
+        let sample_rates: [f64; 3] = [48_000.0, 96_000.0, 192_000.0];
+        let mut errors = Vec::new();
+        for &fs in &sample_rates {
+            let dt = 1.0 / fs;
+            let steps = (duration * fs).round() as usize;
+            let input: Vec<f64> = (0..steps)
+                .map(|k| amp * (omega * k as f64 * dt).sin())
+                .collect();
+            let mut kernel = DkKernel::from_mna(&mna, fs).unwrap();
+            let v_hist = march_companion_kernel(&mut kernel, &input, in_idx);
+
+            let mut max_err = 0.0_f64;
+            // Skip k=0 (trivially the IC); compare v_hist[k] to V(k·dt).
+            for k in 1..steps {
+                let t = k as f64 * dt;
+                let v_ref = rc_lowpass_continuous(t, amp, omega, tau);
+                max_err = max_err.max((v_hist[k][out_idx] - v_ref).abs());
+            }
+            errors.push(max_err);
+        }
+
+        let ratio_lo = errors[0] / errors[1];
+        let ratio_hi = errors[1] / errors[2];
+        // 2nd order ⇒ each halving of dt quarters the error (ratio → 4).
+        // Generous window absorbs the finite-dt approach to the asymptote.
+        assert!(
+            (3.3..=4.7).contains(&ratio_lo) && (3.3..=4.7).contains(&ratio_hi),
+            "trapezoidal integrator is not 2nd-order: errors = {errors:?}, \
+             ratios = {ratio_lo:.3}, {ratio_hi:.3} (expected ~4.0 each). \
+             A ratio ~2 indicates 1st-order or a half-sample time misalignment."
+        );
+        // Sanity: the errors must actually be small and strictly shrinking.
+        assert!(
+            errors[0] < 1e-3 && errors[1] < errors[0] && errors[2] < errors[1],
+            "RC convergence errors not shrinking as expected: {errors:?}"
+        );
+    }
+
+    /// Continuous-time capacitor voltage of the series RLC
+    /// `R1 in a 100 / L1 a b 10m / C1 b 0 100n` with a Thevenin source
+    /// (G_in = 1 ⇒ R_src = 1Ω), driven by A·sin(ωt), ICs v_c(0)=0, i(0)=0.
+    ///
+    /// Governing ODE (series loop, output = v_c across C):
+    ///   v_c'' + (R_tot/L)·v_c' + (1/LC)·v_c = u/(LC),  R_tot = R_src + R1.
+    /// Underdamped forced response = steady state + decaying homogeneous:
+    ///   v_c(t) = M·sin(ωt+ψ) + e^{-σt}(C1·cos ωd t + C2·sin ωd t)
+    /// with ω0=1/√(LC), σ=R_tot/2L, ζ=σ/ω0, ωd=ω0√(1-ζ²),
+    ///   M = A·ω0²/√((ω0²-ω²)² + (2σω)²),  ψ = -atan2(2σω, ω0²-ω²),
+    /// and C1, C2 fixed by the zero initial conditions.
+    fn rlc_series_vc_continuous(t: f64, amp: f64, omega: f64, r_tot: f64, l: f64, cap: f64) -> f64 {
+        let w0 = 1.0 / (l * cap).sqrt();
+        let sigma = r_tot / (2.0 * l);
+        let zeta = sigma / w0;
+        let wd = w0 * (1.0 - zeta * zeta).sqrt();
+        let mag = amp * w0 * w0
+            / ((w0 * w0 - omega * omega).powi(2) + (2.0 * sigma * omega).powi(2)).sqrt();
+        let psi = -(2.0 * sigma * omega).atan2(w0 * w0 - omega * omega);
+        // Steady-state value and derivative at t=0, from v_ss = M sin(ωt+ψ).
+        let vss0 = mag * psi.sin();
+        let vss_dot0 = mag * omega * psi.cos();
+        // ICs v_c(0)=0, v_c'(0)=0 ⇒ solve for homogeneous constants.
+        let c1 = -vss0;
+        let c2 = (sigma * c1 - vss_dot0) / wd;
+        let vss = mag * (omega * t + psi).sin();
+        vss + (-sigma * t).exp() * (c1 * (wd * t).cos() + c2 * (wd * t).sin())
+    }
+
+    #[test]
+    fn test_trapezoidal_integrator_is_second_order_rlc() {
+        let spice = "RLC Order\nR1 in a 100\nL1 a b 10m\nC1 b 0 100n\n";
+        let netlist = Netlist::parse(spice).unwrap();
+        let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
+        let in_idx = mna.node_map["in"] - 1;
+        let b_idx = mna.node_map["b"] - 1;
+        mna.g[in_idx][in_idx] += 1.0;
+
+        let r_tot = 101.0; // R_src(1Ω) + R1(100Ω)
+        let l = 10e-3;
+        let cap = 100e-9;
+        let amp = 1.0;
+        let freq = 2000.0; // below the ~5.03 kHz resonance
+        let omega = 2.0 * std::f64::consts::PI * freq;
+        let duration = 2e-3;
+
+        let sample_rates: [f64; 3] = [96_000.0, 192_000.0, 384_000.0];
+        let mut errors = Vec::new();
+        for &fs in &sample_rates {
+            let dt = 1.0 / fs;
+            let steps = (duration * fs).round() as usize;
+            let input: Vec<f64> = (0..steps)
+                .map(|k| amp * (omega * k as f64 * dt).sin())
+                .collect();
+            let mut kernel = DkKernel::from_mna(&mna, fs).unwrap();
+            let v_hist = march_companion_kernel(&mut kernel, &input, in_idx);
+
+            let mut max_err = 0.0_f64;
+            for k in 1..steps {
+                let t = k as f64 * dt;
+                let v_ref = rlc_series_vc_continuous(t, amp, omega, r_tot, l, cap);
+                max_err = max_err.max((v_hist[k][b_idx] - v_ref).abs());
+            }
+            errors.push(max_err);
+        }
+
+        let ratio_lo = errors[0] / errors[1];
+        let ratio_hi = errors[1] / errors[2];
+        assert!(
+            (3.3..=4.7).contains(&ratio_lo) && (3.3..=4.7).contains(&ratio_hi),
+            "trapezoidal integrator is not 2nd-order on RLC: errors = {errors:?}, \
+             ratios = {ratio_lo:.3}, {ratio_hi:.3} (expected ~4.0 each)"
+        );
+        assert!(
+            errors[0] < 2e-2 && errors[1] < errors[0] && errors[2] < errors[1],
+            "RLC convergence errors not shrinking as expected: {errors:?}"
+        );
+    }
+
+    /// Ideal resistive divider: the settled DC output must equal the exact
+    /// series-divider ratio to machine precision. `R1 in mid 1k / R2 mid 0
+    /// 1k`, output at `mid`, with the Thevenin source (G_in=1 ⇒ R_src=1Ω)
+    /// in series. A tiny cap at `mid` gives a settling path; at DC the cap
+    /// is open, so V_mid → V_src·R2/(R_src+R1+R2).
+    #[test]
+    fn test_ideal_voltage_divider_dc_ratio() {
+        let spice = "Divider\nR1 in mid 1k\nR2 mid 0 1k\nC1 mid 0 100n\n";
+        let netlist = Netlist::parse(spice).unwrap();
+        let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
+        let in_idx = mna.node_map["in"] - 1;
+        let mid_idx = mna.node_map["mid"] - 1;
+        mna.g[in_idx][in_idx] += 1.0;
+
+        let fs = 48_000.0;
+        let mut kernel = DkKernel::from_mna(&mna, fs).unwrap();
+        // Hold a 1V DC input long enough to settle far past machine epsilon
+        // (τ ≈ (R_src+R1)‖R2 · C ≈ 50µs; 0.2s ≈ 4000τ).
+        let v_src = 1.0;
+        let steps = (0.2 * fs) as usize;
+        let input = vec![v_src; steps];
+        let v_hist = march_companion_kernel(&mut kernel, &input, in_idx);
+
+        let expected = v_src * 1000.0 / (1.0 + 1000.0 + 1000.0); // R2/(R_src+R1+R2)
+        let settled = v_hist.last().unwrap()[mid_idx];
+        assert!(
+            (settled - expected).abs() < 1e-12,
+            "divider settled to {settled:.15} but exact ratio is {expected:.15}"
         );
     }
 
