@@ -511,7 +511,6 @@ fn emit_dc_block_history_reseed(code: &mut String, ir: &CircuitIR, indent: &str,
 /// - `dc_block_x_prev` ← DC OP at the output nodes, `dc_block_y_prev` ← 0
 ///   (when `ir.dc_block`)
 /// - BJT self-heating thermal state (per device with `RTH < ∞`)
-/// - Op-amp IIR dominant-pole state (`oaN_x_prev` / `oaN_y_prev`)
 /// - Pot fields are NOT touched (matrices already match them; a nominal
 ///   snap without a rebuild would desync fields from matrices)
 /// - Oversampler filter state (inner + outer 4× when applicable)
@@ -1142,8 +1141,8 @@ impl RustEmitter {
             }
         }
 
-        // G and C matrices (sample-rate independent, Gm-stripped for IIR op-amps)
-        code.push_str("/// G matrix: conductance matrix (sample-rate independent, Gm stripped for IIR op-amps)\nconst G: [[f64; N]; N] = [\n");
+        // G and C matrices (sample-rate independent)
+        code.push_str("/// G matrix: conductance matrix (sample-rate independent)\nconst G: [[f64; N]; N] = [\n");
         for row in format_matrix_rows(n, n, |i, j| ir.g(i, j)) {
             code.push_str(&format!("    [{}],\n", row));
         }
@@ -2953,7 +2952,7 @@ impl RustEmitter {
         // Build A = G + alpha*C and A_neg:
         //   trapezoidal: A_neg = alpha*C - G
         //   backward Euler: A_neg = alpha*C  (no G term — history has only capacitor)
-        // No Boyle elimination — IIR op-amp model keeps Gm out of the MNA matrix.
+        // No Boyle elimination here — the op-amp Gm is stamped directly in G (ideal model).
         let a_neg_formula = if ir.solver_config.backward_euler {
             format!("alpha * {}[i][j]", c_src)
         } else {
@@ -5695,7 +5694,6 @@ impl RustEmitter {
                 }
             }
         }
-        // IIR op-amp RHS injection (PURE EXPLICIT — Gm is NOT in G):
         code.push('\n');
 
         // Input source (Thevenin)

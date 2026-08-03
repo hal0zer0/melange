@@ -568,7 +568,8 @@ pub struct Matrices {
     pub rhs_const: Vec<f64>,
     /// Raw conductance matrix G, N×N row-major (sample-rate independent).
     /// Includes input conductance but NOT inductor companion conductances.
-    /// For IIR op-amp circuits, Gm is stripped (only Go remains at output nodes).
+    /// High-AOL op-amp Gm may be reduced by the selective Rule-D' cap (sidechain
+    /// rectifiers); other op-amps keep full Gm stamped (ideal model).
     #[serde(default)]
     pub g_matrix: Vec<f64>,
     /// Raw capacitance matrix C, N×N row-major (sample-rate independent, at reduced dimension).
@@ -2392,9 +2393,9 @@ impl CircuitIR {
             generator_version: env!("CARGO_PKG_VERSION").to_string(),
         };
 
-        // Build A = G + alpha*C, A_neg = alpha*C - G (trapezoidal) or alpha*C (BE)
-        // NOTE: These initial matrices include Gm stamps. After DC OP, we strip Gm
-        // from aug.g and rebuild A/A_neg for transient (IIR filter handles VCCS externally).
+        // Build A = G + alpha*C, A_neg = alpha*C - G (trapezoidal) or alpha*C (BE).
+        // A/A_neg/A_be/A_neg_be are built once below, after the selective Rule-D'
+        // Gm cap (sidechain rectifiers) has possibly modified aug.g.
         //
         // Behavioral B-sources are stamped current-only (no trapezoidal history
         // term yet), which is exact under backward Euler (steady state G·v = i)
@@ -2409,10 +2410,10 @@ impl CircuitIR {
             // overwrites a provisional trap selection.
             integrator_selection = IntegratorSelection::BeBehavioral;
         }
-        // A/A_neg/A_be/A_neg_be are built ONCE below, after the IIR-op-amp Gm
-        // strip + selective Gm cap have (possibly) modified aug.g. A former
-        // pre-strip build here was immediately overwritten by that rebuild and
-        // never read in between, so only the declarations remain.
+        // A/A_neg/A_be/A_neg_be are built ONCE below, after the selective
+        // Rule-D' Gm cap has (possibly) modified aug.g. A former pre-cap build
+        // here was immediately overwritten by that rebuild and never read in
+        // between, so only the declarations remain.
         let mut a_flat = vec![0.0f64; n * n];
         let mut a_neg_flat = vec![0.0f64; n * n];
         let mut a_be_flat = vec![0.0f64; n * n];
@@ -2469,36 +2470,6 @@ impl CircuitIR {
             }
         }
 
-        // === IIR op-amp: PURE EXPLICIT bilinear-transformed dominant pole ===
-        //
-        // Goal: avoid stamping Gm (~1000 S) in G (causes catastrophic conditioning)
-        // while still getting correct DC gain AOL.
-        //
-        // Continuous-time: V_int = Gm*(V+ - V-) / (Go + s*C_dom), I_out = Go*V_int.
-        // Bilinear transform with a 1-sample input delay (x[n] → x[n-1]) gives a
-        // pure explicit update:
-        //   y[n] = a1*y[n-1] + 2*b0*x[n-1]
-        //   a1 = (alpha*C_dom - Go) / (alpha*C_dom + Go)
-        //   b0 = Gm / (alpha*C_dom + Go)
-        //
-        // Output current injected via RHS (trapezoidal):
-        //   I_inject = Go*(y[n] + y[n-1])
-        //
-        // Both y[n] and y[n-1] depend only on PREVIOUS state, so NOTHING related to
-        // Gm or x[n] appears in the matrix. The Gm stamps from mna.rs are stripped
-        // from G entirely — only Go (output resistance) remains at G[o][o].
-        //
-        // DC gain check: y_ss*(1-a1) = 2*b0*x_ss  ⇒  y_ss = (Gm/Go)*x_ss = AOL*x_ss ✓
-        //
-        // Tradeoff: 1-sample phase delay at high frequencies — negligible for audio
-        // at typical oversampled rates (48-192 kHz), and the win is that the matrix
-        // stays well-conditioned regardless of AOL.
-        // IIR op-amp path selection:
-        // - No VCAs (simple op-amp circuits): use pure explicit IIR — strip Gm from G,
-        //   inject via RHS. Matrix conditioning is excellent (max|A| ~ Go).
-        // - With VCAs: the VCA feedback loop needs tight implicit coupling to the op-amp.
-        //   Leave Gm in G (ideal op-amp, no GBW rolloff in solver). Accept the ill-
-        //   conditioning — for VCR-ALC-class circuits it's tolerable at N~18.
         // Selective op-amp VCCS Gm cap.
         //
         // High-AOL op-amps (Gm ≈ AOL/r_out, often 200,000 S) make the LU back-
@@ -2575,7 +2546,7 @@ impl CircuitIR {
             }
         }
 
-        // Flatten G and C (with Gm stripped from IIR op-amp outputs) for codegen constants
+        // Flatten G and C (with the selective Rule-D' Gm cap applied) for codegen constants
         let g_matrix = dk::flatten_matrix(&aug.g, n, n);
         let c_matrix = dk::flatten_matrix(&aug.c, n, n);
 
