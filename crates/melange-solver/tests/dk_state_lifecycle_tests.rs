@@ -396,7 +396,11 @@ fn rhs_const_be_guard_symmetry() {
     // Fix 8 guard alignment: whenever the BE RHS references RHS_CONST_BE,
     // the constant must be emitted (both keyed on has_dc_sources).
     let code = generate_code(RUNTIME_V_DIODE);
-    let referenced = code.contains("RHS_CONST_BE[i]");
+    // The BE RHS is now emitted as sparse per-row lines (`RHS_CONST_BE[0]`,
+    // `[1]`, …) rather than the old `RHS_CONST_BE[i]` loop form; match any
+    // indexing reference. The const decl is `RHS_CONST_BE:` (colon), so this
+    // matches only usages, not the definition.
+    let referenced = code.contains("RHS_CONST_BE[");
     let emitted = code.contains("pub const RHS_CONST_BE");
     assert_eq!(
         referenced, emitted,

@@ -2160,6 +2160,48 @@ impl RustEmitter {
         let has_be_fallback =
             !ir.matrices.s_be.is_empty() && ir.topology.m > 0 && !ir.solver_config.backward_euler;
         ctx.insert("has_be_fallback", &has_be_fallback);
+        // #P1: sparse-prune the BE-fallback matvecs. rhs_be = A_neg_be·v_prev +
+        // N_I·i_nl_prev and p_be = N_V·v_pred_be are all structurally sparse;
+        // S_be / S_ni_be are dense inverses and stay looped in the template.
+        // Byte-identical — skipped entries are exactly zero (A_neg_be uses its
+        // OWN pattern, not a_neg's, to avoid the αC−G near-cancellation trap).
+        let (be_rhs_lines, be_p_lines) = if has_be_fallback {
+            let mut rhs = String::new();
+            for i in 0..ir.topology.n {
+                let mut terms: Vec<String> = Vec::new();
+                if ir.has_dc_sources {
+                    terms.push(format!("RHS_CONST_BE[{i}]"));
+                }
+                for &j in &ir.sparsity.a_neg_be.nz_by_row[i] {
+                    terms.push(format!("state.a_neg_be[{i}][{j}] * state.v_prev[{j}]"));
+                }
+                for &j in &ir.sparsity.n_i.nz_by_row[i] {
+                    terms.push(format!("N_I[{j}][{i}] * state.i_nl_prev[{j}]"));
+                }
+                if terms.is_empty() {
+                    rhs.push_str(&format!("        rhs_be[{i}] = 0.0;\n"));
+                } else {
+                    rhs.push_str(&format!("        rhs_be[{i}] = {};\n", terms.join(" + ")));
+                }
+            }
+            let mut p = String::new();
+            for i in 0..ir.topology.m {
+                let terms: Vec<String> = ir.sparsity.n_v.nz_by_row[i]
+                    .iter()
+                    .map(|&j| format!("N_V[{i}][{j}] * v_pred_be[{j}]"))
+                    .collect();
+                if terms.is_empty() {
+                    p.push_str(&format!("        p_be[{i}] = 0.0;\n"));
+                } else {
+                    p.push_str(&format!("        p_be[{i}] = {};\n", terms.join(" + ")));
+                }
+            }
+            (rhs, p)
+        } else {
+            (String::new(), String::new())
+        };
+        ctx.insert("be_rhs_lines", &be_rhs_lines);
+        ctx.insert("be_p_lines", &be_p_lines);
         ctx.insert("has_dc_sources", &ir.has_dc_sources);
         ctx.insert("max_iter", &ir.solver_config.max_iterations);
         // V_MAX_DC: maximum physically reasonable node voltage (supply rails + margin).

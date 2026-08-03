@@ -91,14 +91,10 @@ pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS
         // N_I*i_nl_prev" rule applies only to BE-*primary* codegen (every sample
         // BE, i_nl_prev never trap-split), gated separately in
         // dk_emitter::emit_build_rhs.
+        // Sparse-pruned A_neg_be·v_prev + N_I·i_nl_prev (+ RHS_CONST_BE when DC
+        // sources present). Generated per-row from the A_neg_be / N_i patterns.
         let mut rhs_be = [0.0f64; N];
-        for i in 0..N {
-{% if has_dc_sources %}            let mut sum = RHS_CONST_BE[i];
-{% else %}            let mut sum = 0.0;
-{% endif %}            for j in 0..N { sum += state.a_neg_be[i][j] * state.v_prev[j]; }
-            for j in 0..M { sum += N_I[j][i] * state.i_nl_prev[j]; }
-            rhs_be[i] = sum;
-        }
+{{ be_rhs_lines }}
         rhs_be[INPUT_NODE] += input / INPUT_RESISTANCE;
 {% if runtime_sources | length > 0 %}        // Runtime voltage sources (.runtime directive): same rows/values as
         // build_rhs — VS algebraic rows are integration-scheme-independent
@@ -113,12 +109,9 @@ pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS
             v_pred_be[i] = sum;
         }
         // BE controlling voltages
+        // Sparse-pruned N_V·v_pred_be (BE controlling voltages).
         let mut p_be = [0.0f64; M];
-        for i in 0..M {
-            let mut sum = 0.0;
-            for j in 0..N { sum += N_V[i][j] * v_pred_be[j]; }
-            p_be[i] = sum;
-        }
+{{ be_p_lines }}
         // BE NR solve: swap k/k_be so solve_nonlinear uses BE kernel
         std::mem::swap(&mut state.k, &mut state.k_be);
         std::mem::swap(&mut state.s_ni, &mut state.s_ni_be);

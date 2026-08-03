@@ -1139,6 +1139,11 @@ pub struct SparseInfo {
     pub n_v: MatrixSparsity,
     /// N_i matrix (N×M) — current injection
     pub n_i: MatrixSparsity,
+    /// A_neg_be matrix (N×N) — backward-Euler history. Empty pattern when the
+    /// circuit has no BE fallback. Kept distinct from `a_neg`: a near-cancellation
+    /// in `alpha*C - G` can zero an `a_neg` entry that is nonzero in the BE
+    /// `alpha_be*C`, so `a_neg`'s pattern cannot be reused to prune A_neg_be.
+    pub a_neg_be: MatrixSparsity,
     /// K matrix (M×M) — nonlinear kernel
     pub k: MatrixSparsity,
     /// Sparse LU elimination schedule for G_aug (full LU path only)
@@ -2202,6 +2207,11 @@ impl CircuitIR {
             a_neg: analyze_matrix_sparsity(&matrices.a_neg, n, n),
             n_v: analyze_matrix_sparsity(&matrices.n_v, m, n),
             n_i: analyze_matrix_sparsity(&matrices.n_i, n, m),
+            a_neg_be: if matrices.a_neg_be.is_empty() {
+                MatrixSparsity { rows: n, cols: n, nnz: 0, nz_by_row: vec![Vec::new(); n] }
+            } else {
+                analyze_matrix_sparsity(&matrices.a_neg_be, n, n)
+            },
             k: analyze_matrix_sparsity(&matrices.k, m, m),
             lu: None, // DK path doesn't use full LU
             g_aug_density: 0.0,
@@ -3138,6 +3148,11 @@ impl CircuitIR {
             a_neg: analyze_matrix_sparsity(&matrices.a_neg, n, n),
             n_v: analyze_matrix_sparsity(&matrices.n_v, m, n),
             n_i: analyze_matrix_sparsity(&matrices.n_i, n, m),
+            a_neg_be: if matrices.a_neg_be.is_empty() {
+                MatrixSparsity { rows: n, cols: n, nnz: 0, nz_by_row: vec![Vec::new(); n] }
+            } else {
+                analyze_matrix_sparsity(&matrices.a_neg_be, n, n)
+            },
             k: analyze_matrix_sparsity(&matrices.k, m, m),
             lu: lu_sparsity,
             g_aug_density,
