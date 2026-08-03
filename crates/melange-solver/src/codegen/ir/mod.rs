@@ -2633,7 +2633,7 @@ impl CircuitIR {
         // High-AOL op-amps (Gm ≈ AOL/r_out, often 200,000 S) make the LU back-
         // substitution produce 400 kV+ values at the op-amp output row, which
         // contaminate neighboring nodes via fill-in BEFORE the post-solve rail
-        // clamp fires. Capping Gm to AOL_SUB_MAK / r_out at G-matrix build time
+        // clamp fires. Capping Gm to AOL_SUB_MAX / r_out at G-matrix build time
         // bounds the back-sub voltage and eliminates the contamination at zero
         // runtime cost (the cap is baked into the constant G/A/A_neg matrices).
         //

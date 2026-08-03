@@ -621,12 +621,12 @@ in `crates/melange-solver/src/linear_solver.rs`.
 | Capability | How it's emitted |
 |------------|-----------------|
 | NR Jacobian | Block-diagonal `jdev_` entries, `J[i][j] = δ_ij - Σ_k jdev_{ik} * K[k][j]` |
-| Linear solve | M=1 direct, M=2 Cramer's, M=3..16 unrolled Gauss; full LU for nodal full-LU path |
+| Linear solve | M=1 direct, M=2 Cramer's, M=3..24 unrolled Gauss; full LU for nodal full-LU path |
 | Device coverage | Diode (1D), BJT (1D forward-active or 2D), JFET (2D), MOSFET (2D), Tube (2D), VCA (2D), Op-amp (linear) |
 | DC OP init | `DC_NL_I` constant automatically initializes `i_nl_prev` |
 | Oversampling | 2× / 4× cascaded polyphase half-band IIR |
 | Sparsity | Zero entries skipped in emission (per-matrix `SparseInfo`) |
 | Sample rate | `set_sample_rate()` recomputes S, A_neg, K, S_NI from emitted G+C |
 | Multi-output | Stereo / multi-output supported via multiple output nodes |
-| Potentiometers | Sherman-Morrison rank-1 updates in `process_sample` |
+| Potentiometers | Per-block matrix rebuild on `set_pot` (Sherman-Morrison removed) |
 | Switches | Per-position matrix rebuild on `set_switch` |

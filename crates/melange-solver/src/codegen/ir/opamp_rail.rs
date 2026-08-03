@@ -499,30 +499,31 @@ pub const BOYLE_CATCH_DIODE_MODEL: &str = "D_BOYLE_CATCH";
 /// a two-stage Boyle macromodel:
 ///
 /// ```text
-///   V+ ─┐                                          ┌─→ V_out
-///       │                                          │
-///   V- ─┴── Gm ──→ [_oa_int_{name}] ── buffer ─────┘
-///                       │  ▲                      │
-///              R_int ───┘  │                      R_out (shunt)
-///              (1 MΩ,       │                      ↓
-///              stamped by   │                      0
-///              MNA, not     │
-///              in netlist)  │
-///                           │
+///   V+ ─┐                                  [buf_out] ─R_ro─→ V_out
+///       │                                      │
+///   V- ─┴── Gm ──→ [_oa_int_{name}] ─VCVS(×1)──┘
+///                       │  ▲
+///              R_int ───┘  │
+///              (1 MΩ,      │
+///              stamped by  │
+///              MNA, not    │
+///              in netlist) │
+///                          │
 ///                catch diodes pin
 ///                this node to ±rail
 /// ```
 ///
 /// **Per clamped op-amp**, the function adds:
 ///
-/// - A unity-gain output buffer VCCS `G_oa_buf_{name}` from
-///   `_oa_int_{name}` (control) → original output node (output) with
-///   `gm = 1 / r_out`. Combined with the output shunt resistor below, this
-///   gives `V_out = V_int` at DC and source impedance `≈ r_out`.
-///
-/// - An output shunt resistor `R_oa_buf_out_{name}` from the original
-///   output node to ground with `R = r_out`. Provides the KCL ground path
-///   the buffer needs and sets the closed-loop output impedance.
+/// - A unity-gain output buffer VCVS `E_oa_buf_{name}` forcing
+///   `V(_oa_buf_out_{name}) = V(_oa_int_{name})` regardless of load, followed
+///   by a series output resistor `R_oa_ro_{name}` (`R = r_out`: Boyle's 75 Ω
+///   default, or `.model OA(ROUT=…)`) from the buffer output to the original
+///   output node. The series-R form — NOT a VCCS + shunt-to-ground — is
+///   essential: a shunt to ground would fight the op-amp's DC bias on any
+///   circuit lacking a hard pull-up (e.g. a high-Z vbias divider). Gives
+///   `V_out = V_int` under feedback and source impedance `≈ r_out`, with no DC
+///   sink to ground.
 ///
 /// - For each finite rail, a reference node `_boyle_hi_{name}` /
 ///   `_boyle_lo_{name}` pinned to `VCC − VOH_DROP` / `VEE + VOL_DROP` by a
