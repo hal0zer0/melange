@@ -136,6 +136,31 @@ A scalar damping factor `alpha` bridges the two:
 NR consistency — the step direction is maintained, only the magnitude is reduced.
 The 0.01 floor prevents pathological backward steps.
 
+## Global Node-Step Damping (nodal full-LU, Layer 2)
+
+Beyond the per-device alpha above, the nodal full-LU emitter applies a second,
+global limit on the maximum *node-voltage* change per NR iteration — in both the
+primary loop and the Backward Euler fallback (`nodal_emitter.rs`):
+
+```
+if max_node_dv > damp_thresh {          // damp_thresh = 10.0.max(0.05 * max_v)
+    alpha *= damp_thresh / max_node_dv; // uncapped — bounds the step to damp_thresh
+}
+```
+
+**There is deliberately NO floor on this ratio.** A `.max(0.01)` floor lived here
+until 2026-08-03 and was a bug: unlike the per-device ratio above, `damp_thresh /
+max_node_dv` is always strictly positive, so a backward step is impossible and a
+floor serves no anti-stall purpose — it only *defeats* the ceiling. A floored
+ratio still lets a fixed fraction (≥1%) of an arbitrarily large raw delta through,
+so a pathological LU delta (observed 3.8e7 V at a device-state transition on
+wurli-power-amp) sailed past the ≤`damp_thresh` cap as a multi-kV jump and
+false-converged on a nonphysical operating point. Uncapped division bounds every
+iteration's worst-case node step at exactly `damp_thresh` regardless of the raw
+delta's magnitude. See DEBUGGING.md (2026-08-03) and
+`nodal_be_fallback_alpha_floor_tests.rs`. **Do not reintroduce a floor here** —
+if NR stalls, the fix is elsewhere (limiter/vcrit), not a bigger minimum step.
+
 ## Codegen Implementation
 
 Generated code emits self-contained `pnjlim()` and `fetlim()` functions via
@@ -162,6 +187,7 @@ This means convergence tracks the effective step, not the raw Newton step.
 | Symptom | Cause | Fix |
 |---------|-------|-----|
 | NR oscillation (period-2) | No voltage limiting | Add pnjlim/fetlim |
-| NR converges but wrong point | Alpha floor too high | Check 0.01 minimum |
+| NR converges but wrong point (per-device) | Alpha floor too high | Check 0.01 minimum |
+| Internal nodes diverge to kV, then false-converge | Node-step damping floored (`.max(0.01)`) | Bound the step, not the ratio — divide uncapped (fixed 2026-08-03) |
 | Slow convergence (>50 iters) | Limiting too aggressive | Check vcrit computation |
 | Explosion after removing a device | Missing limiter dispatch | Add case to `limit_voltage()` |

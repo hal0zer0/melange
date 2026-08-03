@@ -6055,7 +6055,19 @@ impl RustEmitter {
             ));
             code.push_str("            let damp_thresh = 10.0_f64.max(max_v * 0.05);\n");
             code.push_str("            if max_node_dv > damp_thresh {\n");
-            code.push_str("                alpha *= (damp_thresh / max_node_dv).max(0.01);\n");
+            // No `.max(0.01)` floor here (removed 2026-08-03): flooring the
+            // ratio bounds how much the RAW step gets shrunk BY, not what
+            // the resulting damped step IS. When a companion-model LU solve
+            // produces a pathologically large raw delta (observed: 3.8e7 V
+            // at a device-state transition on wurli-power-amp), a 1% floor
+            // still lets a catastrophic multiple of `damp_thresh` through
+            // (0.01 * 3.8e7 =~ 380,000 V, not <=10 V), launching the
+            // trajectory into a nonphysical regime the remaining NR
+            // iterations can't recover from. Uncapped division keeps the
+            // worst-case per-iteration node step at exactly `damp_thresh`
+            // regardless of the raw delta's magnitude. Regression:
+            // nodal_be_fallback_alpha_floor_tests.rs.
+            code.push_str("                alpha *= damp_thresh / max_node_dv;\n");
             code.push_str("            }\n");
             code.push_str("        }\n\n");
 
@@ -6212,11 +6224,24 @@ impl RustEmitter {
                 code.push_str("        let mut i_nl_resid = [0.0f64; M];\n");
                 code.push_str("        if !max_step_exceeded {\n");
                 code.push_str("            let i_nl_chord = i_nl;\n");
-                code.push_str("            let mut v_nl = [0.0f64; M];\n");
-                code.push_str(&emit_sparse_nv_matvec(ir, "v_nl", "v", "            "));
+                // `_final` (i_nl-only, no `j_dev`) rather than the full
+                // per-iteration evaluation body: this residual check only
+                // ever consumes `i_nl_resid` below, never a Jacobian. The
+                // full body unconditionally emits `j_dev[...] = jac[...]`
+                // writes for every device; declaring `j_dev` here just to
+                // discard it produced a genuine dead store (rustc's
+                // `unused_assignments` flagged the last device's last
+                // entry — e.g. `j_dev[195] = jac[3];` on wurli-power-amp,
+                // M=14 — under `-D warnings`).
+                code.push_str("            let mut v_nl_final = [0.0f64; M];\n");
+                code.push_str(&emit_sparse_nv_matvec(
+                    ir,
+                    "v_nl_final",
+                    "v",
+                    "            ",
+                ));
                 code.push_str("            let mut i_nl = [0.0f64; M];\n");
-                code.push_str("            let mut j_dev = [0.0f64; M * M];\n");
-                Self::emit_nodal_device_evaluation_body(&mut code, ir, "            ");
+                Self::emit_nodal_device_evaluation_final(&mut code, ir, "            ");
                 code.push_str("            i_nl_resid = i_nl;\n");
                 code.push_str(
                     "            // Tolerance matches DK Schur path: ABSTOL=1e-12, RELTOL=1e-3,\n",
@@ -6602,7 +6627,21 @@ impl RustEmitter {
                  \x20               }}\n",
                 n_nodes
             ));
-            code.push_str("                if max_node_dv > 10.0 { alpha *= (10.0 / max_node_dv).max(0.01); }\n");
+            // No `.max(0.01)` floor (removed 2026-08-03) — same rationale
+            // as the primary-loop damping above: a floored ratio still lets
+            // through a fixed fraction (>=1%) of an arbitrarily large raw
+            // delta, defeating the intended node-step ceiling exactly when
+            // a catastrophic LU solve most needs it contained. Root-caused
+            // on wurli-power-amp's BE fallback: a 3.8e7 V raw delta at a
+            // class-AB crossover transition survived the 1% floor as a
+            // ~3.8 kV single-iteration jump, launching the trajectory into
+            // a KCL-satisfying-but-nonphysical fixed point (~-16 kV) that
+            // the voltage-step-only convergence check couldn't detect,
+            // since the relative tolerance scales with the already-diverged
+            // voltage. Regression: nodal_be_fallback_alpha_floor_tests.rs.
+            code.push_str(
+                "                if max_node_dv > 10.0 { alpha *= 10.0 / max_node_dv; }\n",
+            );
             code.push_str("            }\n\n");
 
             // Apply damped step and check convergence (compute delta before updating).
