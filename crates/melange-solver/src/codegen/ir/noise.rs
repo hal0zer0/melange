@@ -402,6 +402,37 @@ pub struct NoiseIR {
 /// the source is **skipped honestly** with a `log::warn!` — see
 /// `docs/aidocs/NOISE.md` "BJT parasitic-R thermal noise" for the gap and
 /// the planned base-side equivalent-injection follow-up.
+/// Device-name (upper-cased) → model-name map over all model-bearing element
+/// types (Diode/BJT/JFET/MOSFET/Triode/Pentode). Shared by the per-device
+/// noise-parameter resolvers; each resolver queries only its own device type,
+/// so the combined map yields the same lookups the former per-type maps did.
+fn device_model_map(netlist: &Netlist) -> std::collections::HashMap<String, String> {
+    let mut map = std::collections::HashMap::new();
+    for el in &netlist.elements {
+        match el {
+            Element::Diode { name, model, .. }
+            | Element::Bjt { name, model, .. }
+            | Element::Jfet { name, model, .. }
+            | Element::Mosfet { name, model, .. }
+            | Element::Triode { name, model, .. }
+            | Element::Pentode { name, model, .. } => {
+                map.insert(name.to_ascii_uppercase(), model.clone());
+            }
+            _ => {}
+        }
+    }
+    map
+}
+
+/// Find a `.model` card by name (case-insensitive). Shared by the noise
+/// collectors' per-device parameter resolvers.
+fn find_model<'a>(netlist: &'a Netlist, model_name: &str) -> Option<&'a crate::parser::Model> {
+    netlist
+        .models
+        .iter()
+        .find(|m| m.name.eq_ignore_ascii_case(model_name))
+}
+
 /// Upper-cased-name → pot index and → (switch_idx, R-comp_idx) maps. Both
 /// resistor-noise collectors resolve a resistor's dynamic backing (`.pot` /
 /// `.runtime R` / wiper-derived pots, and R-type switch components) through
@@ -499,22 +530,12 @@ pub fn collect_thermal_noise_sources(
     // Model params are read raw from the netlist (same pattern as the
     // pentode PARTITION_F resolver) — RB/RC/RE default to 0 when absent.
     {
-        use std::collections::HashMap;
-        let mut bjt_model_for: HashMap<String, String> = HashMap::new();
-        for el in &netlist.elements {
-            if let Element::Bjt { name, model, .. } = el {
-                bjt_model_for.insert(name.to_ascii_uppercase(), model.clone());
-            }
-        }
+        let bjt_model_for = device_model_map(netlist);
         let parasitic_r_for = |dev_name: &str| -> (f64, f64, f64) {
             let Some(model) = bjt_model_for.get(&dev_name.to_ascii_uppercase()) else {
                 return (0.0, 0.0, 0.0);
             };
-            let Some(m) = netlist
-                .models
-                .iter()
-                .find(|m| m.name.eq_ignore_ascii_case(model))
-            else {
+            let Some(m) = find_model(netlist, model) else {
                 return (0.0, 0.0, 0.0);
             };
             let (mut rb, mut rc, mut re) = (0.0_f64, 0.0_f64, 0.0_f64);
@@ -623,22 +644,13 @@ pub fn collect_thermal_noise_sources(
 /// through the collector. (Parasitic-R *thermal* noise is handled by
 /// `collect_thermal_noise_sources`.)
 pub fn collect_shot_noise_sources(netlist: &Netlist, mna: &MnaSystem) -> Vec<ShotNoiseSource> {
-    use std::collections::HashMap;
 
     // Tube-device → model map for the SHOT_GAMMA2 override (triodes only in
     // v1; same raw-model-param pattern as the PARTITION_F resolver).
-    let mut tube_model_for: HashMap<String, String> = HashMap::new();
-    for el in &netlist.elements {
-        if let Element::Triode { name, model, .. } | Element::Pentode { name, model, .. } = el {
-            tube_model_for.insert(name.to_ascii_uppercase(), model.clone());
-        }
-    }
+    let tube_model_for = device_model_map(netlist);
     let shot_gamma2_for = |dev_name: &str| -> Option<f64> {
         let model = tube_model_for.get(&dev_name.to_ascii_uppercase())?;
-        let m = netlist
-            .models
-            .iter()
-            .find(|m| m.name.eq_ignore_ascii_case(model))?;
+        let m = find_model(netlist, model)?;
         for (k, v) in &m.params {
             if k.eq_ignore_ascii_case("SHOT_GAMMA2") && v.is_finite() && *v > 0.0 {
                 return Some(*v);
@@ -731,14 +743,8 @@ pub fn collect_pentode_partition_sources(
     netlist: &Netlist,
     mna: &MnaSystem,
 ) -> Vec<PentodePartitionSource> {
-    use std::collections::HashMap;
 
-    let mut model_for: HashMap<String, String> = HashMap::new();
-    for el in &netlist.elements {
-        if let Element::Pentode { name, model, .. } = el {
-            model_for.insert(name.to_ascii_uppercase(), model.clone());
-        }
-    }
+    let model_for = device_model_map(netlist);
 
     // PARTITION_F resolver: explicit `.model TUBE(PARTITION_F=…)` wins; default
     // 1.0 (textbook). Validated `> 0 && finite` by `TubeParams::validate()`,
@@ -748,11 +754,7 @@ pub fn collect_pentode_partition_sources(
         let Some(model) = model_for.get(&dev_name.to_ascii_uppercase()) else {
             return 1.0;
         };
-        let Some(m) = netlist
-            .models
-            .iter()
-            .find(|m| m.name.eq_ignore_ascii_case(model))
-        else {
+        let Some(m) = find_model(netlist, model) else {
             return 1.0;
         };
         for (k, v) in &m.params {
@@ -861,32 +863,15 @@ pub fn collect_flicker_noise_sources(
     netlist: &Netlist,
     mna: &MnaSystem,
 ) -> Vec<FlickerNoiseSource> {
-    use std::collections::HashMap;
 
     // Build device-name → model-name map once.
-    let mut model_for: HashMap<String, String> = HashMap::new();
-    for el in &netlist.elements {
-        match el {
-            Element::Diode { name, model, .. }
-            | Element::Bjt { name, model, .. }
-            | Element::Jfet { name, model, .. }
-            | Element::Mosfet { name, model, .. }
-            | Element::Triode { name, model, .. }
-            | Element::Pentode { name, model, .. } => {
-                model_for.insert(name.to_ascii_uppercase(), model.clone());
-            }
-            _ => {}
-        }
-    }
+    let model_for = device_model_map(netlist);
 
     // Resolve (KF, AF) for a given device by its name, returning `None` when
     // the device is not modeled (shouldn't happen — defensive) or KF <= 0.
     let kf_af = |dev_name: &str| -> Option<(f64, f64)> {
         let model = model_for.get(&dev_name.to_ascii_uppercase())?;
-        let m = netlist
-            .models
-            .iter()
-            .find(|m| m.name.eq_ignore_ascii_case(model))?;
+        let m = find_model(netlist, model)?;
         let mut kf = 0.0_f64;
         let mut af = 1.0_f64;
         for (k, v) in &m.params {
