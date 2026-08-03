@@ -19,9 +19,10 @@
 //!     JFET model (IDSS/Vp parameterization).
 //!   Shockley, "The theory of p-n junctions in semiconductors," BSTJ 28, 1949.
 
+use melange_devices::tube::KorenPentode;
 use melange_devices::{
     BjtEbersMoll, BjtGummelPoon, BjtPolarity, DiodeShockley, Jfet, JfetChannel, Mosfet,
-    MosfetChannelType as ChannelType, VT_ROOM,
+    MosfetChannelType as ChannelType, VT_ROOM, Vca,
 };
 
 const REL: f64 = 1e-12; // machine-precision agreement with the closed form
@@ -337,5 +338,131 @@ fn bjt_gp_early_and_high_injection_are_canonical() {
     assert!(
         beta_hi < 0.9 * beta_lo,
         "high-injection β rolloff: β(0.75V)={beta_hi:.1} should be well below β(0.5V)={beta_lo:.1}"
+    );
+}
+
+// ── VCA — Blackmer current-mode exponential (THAT 2180 / DBX 2150) ───────
+//   gain(Vc) = G0 · exp(−Vc / VSCALE),   I = gain · V_sig
+// The exponential control law is the defining property of a Blackmer VCA: the
+// control port is dB-linear. THAT 2180A spec is 6.1 mV/dB, encoded as
+// VSCALE = 0.05298 V.
+
+#[test]
+fn vca_gain_law_is_canonical_blackmer() {
+    let vscale = 0.05298;
+    let g0 = 1.0;
+    let vca = Vca::new(vscale, g0);
+    assert_rel(vca.gain(0.0), g0, "VCA gain(0) = G0");
+    // VSCALE is the e-folding control voltage.
+    assert_rel(
+        vca.gain(vscale),
+        g0 / std::f64::consts::E,
+        "VCA gain(VSCALE) = G0/e",
+    );
+    assert_rel(
+        vca.gain(-vscale),
+        g0 * std::f64::consts::E,
+        "VCA gain(−VSCALE) = G0·e",
+    );
+    // Exact exponential form.
+    for &vc in &[-0.2, -0.1, 0.0, 0.05, 0.1, 0.2] {
+        assert_rel(
+            vca.gain(vc),
+            g0 * (-vc / vscale).exp(),
+            &format!("VCA gain law @ {vc}"),
+        );
+    }
+}
+
+#[test]
+fn vca_control_is_db_linear() {
+    // THAT 2180A: a 6.1 mV control step changes gain by exactly −1.0 dB.
+    let vca = Vca::new(0.05298, 1.0);
+    let db = |v: f64| 20.0 * (vca.gain(v) / vca.gain(0.0)).log10();
+    assert!(
+        (db(6.1e-3) - (-1.0)).abs() < 1e-3,
+        "6.1 mV ⇒ −1 dB, got {:.5} dB",
+        db(6.1e-3)
+    );
+    // dB-linearity: equal control-voltage steps ⇒ equal dB steps (the log-antilog
+    // law makes gain multiplicative in equal Vc increments).
+    let step = 0.02;
+    assert_rel(
+        db(2.0 * step) - db(step),
+        db(step) - db(0.0),
+        "VCA dB-linear steps",
+    );
+}
+
+#[test]
+fn vca_current_is_gain_times_signal() {
+    let vca = Vca::new(0.05298, 1.0); // new() ⇒ thd = 0
+    for &(vs, vc) in &[(0.1, 0.0), (0.5, 0.1), (-0.3, -0.05)] {
+        assert_rel(
+            vca.current(vs, vc),
+            vca.gain(vc) * vs,
+            &format!("VCA I = gain·Vsig @ ({vs},{vc})"),
+        );
+    }
+}
+
+// ── Pentode — Reefman "Derk" structural invariants ──────────────────────
+//
+// The Derk plate and screen currents share one Koren current Ip0(Vgk,Vg2k):
+//   Ip  = Ip0 · F(Vpk),   Ig2 = Ip0 · H(Vpk)
+// So Ip/Ig2 = F(Vpk)/H(Vpk) depends ONLY on Vpk — independent of Vgk. That
+// exact cancellation is a strong structural check of the shared-Ip0 model.
+// Plus the defining pentode physics: plate-current flatness above the knee,
+// monotonic grid control, and grid cutoff.
+
+#[test]
+fn pentode_screen_plate_ratio_is_vgk_independent() {
+    // Ip/Ig2 = F(Vpk)/H(Vpk): the shared Ip0(Vgk,Vg2k) cancels exactly, so the
+    // ratio must be identical across Vgk at fixed (Vpk, Vg2k) — even into deep
+    // cutoff, since the cancellation is algebraic, not magnitude-dependent.
+    let p = KorenPentode::el84();
+    let ratio = |vgk: f64| p.plate_current(vgk, 250.0, 250.0) / p.screen_current(vgk, 250.0, 250.0);
+    let r0 = ratio(-5.0);
+    for &vgk in &[-8.0, -12.0, -40.0] {
+        assert_rel(
+            ratio(vgk),
+            r0,
+            &format!("Ip/Ig2 Vgk-independent @ Vgk={vgk}"),
+        );
+    }
+    // …but it DOES vary with Vpk (F/H are functions of Vpk) — the model is not
+    // trivially constant.
+    let r_150 = p.plate_current(-7.0, 150.0, 300.0) / p.screen_current(-7.0, 150.0, 300.0);
+    let r_300 = p.plate_current(-7.0, 300.0, 300.0) / p.screen_current(-7.0, 300.0, 300.0);
+    assert!((r_150 - r_300).abs() > 0.1, "Ip/Ig2 must depend on Vpk");
+}
+
+#[test]
+fn pentode_defining_physics() {
+    let p = KorenPentode::el84();
+    let ip = |vgk: f64, vpk: f64| p.plate_current(vgk, vpk, 300.0);
+
+    // Plate-current flatness: doubling Vpk (150→300 V) changes Ip by <15% — the
+    // defining pentode trait (high plate resistance), unlike a triode.
+    let flat = ip(-7.0, 300.0) / ip(-7.0, 150.0);
+    assert!(
+        (1.0..1.15).contains(&flat),
+        "pentode plate flatness: Ip(300)/Ip(150) = {flat:.3}"
+    );
+
+    // Monotonic grid control: less-negative Vgk ⇒ more plate current.
+    assert!(
+        ip(-5.0, 250.0) > ip(-8.0, 250.0),
+        "grid control monotonic (−5 > −8)"
+    );
+    assert!(
+        ip(-8.0, 250.0) > ip(-12.0, 250.0),
+        "grid control monotonic (−8 > −12)"
+    );
+
+    // Grid cutoff: deep negative Vgk drives Ip to a negligible fraction.
+    assert!(
+        ip(-40.0, 250.0) < 1e-6 * ip(-5.0, 250.0),
+        "grid cutoff at Vgk = −40 V"
     );
 }
