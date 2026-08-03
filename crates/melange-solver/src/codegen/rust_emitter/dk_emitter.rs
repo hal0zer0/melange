@@ -39,7 +39,7 @@ impl RustEmitter {
         self.generate_solve_nonlinear(&mut code, ir)?;
         code.push_str(&self.emit_final_voltages(ir)?);
         code.push_str(&self.emit_update_history()?);
-        code.push_str(&self.emit_process_sample(ir)?);
+        code.push_str(&self.emit_process_sample(ir, &noise)?);
 
         if ir.solver_config.oversampling_factor > 1 {
             code.push_str(&Self::emit_oversampler(ir));
@@ -2134,10 +2134,14 @@ impl RustEmitter {
         self.render("update_history", &Context::new())
     }
 
-    fn emit_process_sample(&self, ir: &CircuitIR) -> Result<String, CodegenError> {
-        // Rebuild noise fragment — caller (emit_dk) already built one, but
-        // re-deriving is free and keeps this method's signature stable.
-        let noise = self.build_noise_emission(ir);
+    fn emit_process_sample(
+        &self,
+        ir: &CircuitIR,
+        noise: &NoiseEmission,
+    ) -> Result<String, CodegenError> {
+        // Noise fragment is built once by the caller (emit_dk) and threaded in
+        // — build_noise_emission resolves every noise source and assembles ~500
+        // lines of strings, so re-deriving it here doubled that codegen work.
         let mut ctx = Context::new();
         ctx.insert("noise_enabled_emit", &noise.enabled);
         ctx.insert("noise_rhs_stamp", &noise.rhs_stamp);
@@ -2358,6 +2362,18 @@ impl RustEmitter {
         // and advances Tj by one exact-exponential step of the RC thermal
         // ODE (see `emit_thermal_tj_advance`).
         let mut thermal_update = String::new();
+        // #P4: extract_controlling_voltages(&v) (= N_v·v) is identical for every
+        // self-heating device — a function of the converged v only. Emit it once
+        // here rather than re-extracting inside each device's thermal block.
+        let has_self_heating = ir.device_slots.iter().any(|slot| match &slot.params {
+            DeviceParams::Bjt(bp) => bp.has_self_heating() && slot.device_type == DeviceType::Bjt,
+            DeviceParams::Diode(dp) => dp.has_self_heating(),
+            DeviceParams::Tube(tp) => tp.has_self_heating(),
+            _ => false,
+        });
+        if has_self_heating {
+            thermal_update.push_str("    let v_nl_th = extract_controlling_voltages(&v);\n");
+        }
         for (dev_num, slot) in ir.device_slots.iter().enumerate() {
             match &slot.params {
                 // The `device_type == Bjt` guard (not BjtForwardActive) is
@@ -2379,7 +2395,6 @@ impl RustEmitter {
                             "    {{ // BJT {dev_num} self-heating thermal update\n\
                              \x20       let ic = i_nl[{s}];\n\
                              \x20       let ib = i_nl[{s1}];\n\
-                             \x20       let v_nl_th = extract_controlling_voltages(&v);\n\
                              \x20       let vbe = v_nl_th[{s}];\n\
                              \x20       let vbc = v_nl_th[{s1}];\n\
                              \x20       let vce = vbe - vbc;\n\
@@ -2408,7 +2423,6 @@ impl RustEmitter {
                     thermal_update.push_str(&format!(
                             "    {{ // Diode {dev_num} self-heating thermal update\n\
                              \x20       let id = i_nl[{s}];\n\
-                             \x20       let v_nl_th = extract_controlling_voltages(&v);\n\
                              \x20       let vd = v_nl_th[{s}];\n\
                              \x20       let p = vd * id;\n\
                              {tj_advance}\
@@ -2436,7 +2450,6 @@ impl RustEmitter {
                         "    {{ // Triode {dev_num} self-heating thermal update\n\
                              \x20       let ip = i_nl[{s}];\n\
                              \x20       let ig = i_nl[{s1}];\n\
-                             \x20       let v_nl_th = extract_controlling_voltages(&v);\n\
                              \x20       let vgk = v_nl_th[{s}];\n\
                              \x20       let vpk = v_nl_th[{s1}];\n\
                              \x20       let p = ip * vpk + ig * vgk;\n\
@@ -2651,7 +2664,7 @@ impl RustEmitter {
             "/// Half-band interpolator step: (even, odd) = (out[2n], out[2n+1]).\n\
              /// Each allpass branch is clocked once per low-rate input sample.\n\
              #[inline(always)]\n\
-             fn {name}(input: f64, coeffs: &[f64], state: &mut [f64; {state_size}]) -> (f64, f64) {{\n"
+             fn {name}(input: f64, coeffs: &[f64; {num_sections}], state: &mut [f64; {state_size}]) -> (f64, f64) {{\n"
         ));
 
         // Even chain: coefficients at indices 0, 2, 4, ...
@@ -2703,7 +2716,7 @@ impl RustEmitter {
             "/// Half-band decimator step: y[n] = (A_even(x[2n+1]) + A_odd(x[2n])) / 2.\n\
              /// Each allpass branch is clocked once per low-rate output sample.\n\
              #[inline(always)]\n\
-             fn {name}(x0: f64, x1: f64, coeffs: &[f64], state: &mut [f64; {state_size}]) -> f64 {{\n"
+             fn {name}(x0: f64, x1: f64, coeffs: &[f64; {num_sections}], state: &mut [f64; {state_size}]) -> f64 {{\n"
         ));
 
         // Even chain (coefficients 0, 2, 4, ...) consumes the LATER sample.
