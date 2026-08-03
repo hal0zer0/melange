@@ -1269,6 +1269,46 @@ fn stamp_dk_companion_inductors(
 /// BJT internal nodes (expand_bjt_internal_nodes) also land inside
 /// n_nodes..n_aug, but only on the nodal route — the DK path never expands
 /// them (see melange-cli routing).
+/// Build the NoiseIR from the config's noise mode. Shared by `from_mna` and
+/// `from_kernel_with_dc_op`, which constructed it identically — each source
+/// collector runs only when the mode includes its noise class.
+fn build_noise_ir(config: &CodegenConfig, netlist: &Netlist, mna: &MnaSystem) -> NoiseIR {
+    NoiseIR {
+        mode: config.noise_mode,
+        master_seed: config.noise_master_seed,
+        thermal_sources: if config.noise_mode.includes_thermal() {
+            collect_thermal_noise_sources(netlist, mna)
+        } else {
+            Vec::new()
+        },
+        shot_sources: if config.noise_mode.includes_shot() {
+            collect_shot_noise_sources(netlist, mna)
+        } else {
+            Vec::new()
+        },
+        flicker_sources: if config.noise_mode.includes_full() {
+            collect_flicker_noise_sources(netlist, mna)
+        } else {
+            Vec::new()
+        },
+        resistor_flicker_sources: if config.noise_mode.includes_full() {
+            collect_resistor_flicker_noise_sources(netlist, mna)
+        } else {
+            Vec::new()
+        },
+        partition_sources: if config.noise_mode.includes_full() {
+            collect_pentode_partition_sources(netlist, mna)
+        } else {
+            Vec::new()
+        },
+        opamp_noise_sources: if config.noise_mode.includes_full() {
+            collect_opamp_noise_sources(mna)
+        } else {
+            Vec::new()
+        },
+    }
+}
+
 fn zero_augmented_history_rows(a_neg_flat: &mut [f64], n: usize, n_nodes: usize, mna_n_aug: usize) {
     for row in n_nodes..mna_n_aug.min(n) {
         for j in 0..n {
@@ -2310,40 +2350,7 @@ impl CircuitIR {
                 .collect(),
             sparsity,
             opamp_iir: Vec::new(), // IIR op-amp handled in nodal path only
-            noise: NoiseIR {
-                mode: config.noise_mode,
-                master_seed: config.noise_master_seed,
-                thermal_sources: if config.noise_mode.includes_thermal() {
-                    collect_thermal_noise_sources(netlist, mna)
-                } else {
-                    Vec::new()
-                },
-                shot_sources: if config.noise_mode.includes_shot() {
-                    collect_shot_noise_sources(netlist, mna)
-                } else {
-                    Vec::new()
-                },
-                flicker_sources: if config.noise_mode.includes_full() {
-                    collect_flicker_noise_sources(netlist, mna)
-                } else {
-                    Vec::new()
-                },
-                resistor_flicker_sources: if config.noise_mode.includes_full() {
-                    collect_resistor_flicker_noise_sources(netlist, mna)
-                } else {
-                    Vec::new()
-                },
-                partition_sources: if config.noise_mode.includes_full() {
-                    collect_pentode_partition_sources(netlist, mna)
-                } else {
-                    Vec::new()
-                },
-                opamp_noise_sources: if config.noise_mode.includes_full() {
-                    collect_opamp_noise_sources(mna)
-                } else {
-                    Vec::new()
-                },
-            },
+            noise: build_noise_ir(config, netlist, mna),
             named_constants,
             runtime_sources,
             behavioral_sources,
@@ -3460,40 +3467,7 @@ impl CircuitIR {
                 .collect(),
             sparsity,
             opamp_iir: opamp_iir_data,
-            noise: NoiseIR {
-                mode: config.noise_mode,
-                master_seed: config.noise_master_seed,
-                thermal_sources: if config.noise_mode.includes_thermal() {
-                    collect_thermal_noise_sources(netlist, mna)
-                } else {
-                    Vec::new()
-                },
-                shot_sources: if config.noise_mode.includes_shot() {
-                    collect_shot_noise_sources(netlist, mna)
-                } else {
-                    Vec::new()
-                },
-                flicker_sources: if config.noise_mode.includes_full() {
-                    collect_flicker_noise_sources(netlist, mna)
-                } else {
-                    Vec::new()
-                },
-                resistor_flicker_sources: if config.noise_mode.includes_full() {
-                    collect_resistor_flicker_noise_sources(netlist, mna)
-                } else {
-                    Vec::new()
-                },
-                partition_sources: if config.noise_mode.includes_full() {
-                    collect_pentode_partition_sources(netlist, mna)
-                } else {
-                    Vec::new()
-                },
-                opamp_noise_sources: if config.noise_mode.includes_full() {
-                    collect_opamp_noise_sources(mna)
-                } else {
-                    Vec::new()
-                },
-            },
+            noise: build_noise_ir(config, netlist, mna),
             named_constants,
             runtime_sources,
             behavioral_sources,

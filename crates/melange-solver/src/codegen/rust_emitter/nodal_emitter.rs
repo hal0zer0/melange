@@ -149,6 +149,50 @@ fn emit_nodal_companion_rhs(
     }
 }
 
+/// Emit the per-iteration Hard-mode op-amp output rail clamp
+/// (`if T[o] > hi { T[o] = hi }` / `< lo`) over every clampable op-amp. Shared
+/// by the trap, sub-step and BE NR loops, which differ only in the target array,
+/// indent, an optional leading comment and whether a trailing blank line
+/// follows. Emits nothing when no op-amp has a finite rail.
+fn emit_hard_rail_clamp(
+    code: &mut String,
+    ir: &CircuitIR,
+    target: &str,
+    indent: &str,
+    comment: Option<&str>,
+    trailing_nl: bool,
+) {
+    let clampable: Vec<&crate::codegen::ir::OpampIR> = ir
+        .opamps
+        .iter()
+        .filter(|oa| oa.vclamp_hi.is_finite() || oa.vclamp_lo.is_finite())
+        .collect();
+    if clampable.is_empty() {
+        return;
+    }
+    if let Some(c) = comment {
+        code.push_str(c);
+    }
+    for oa in &clampable {
+        let o = oa.n_out_idx;
+        if oa.vclamp_hi.is_finite() {
+            code.push_str(&format!(
+                "{indent}if {target}[{o}] > {hi:.17e} {{ {target}[{o}] = {hi:.17e}; }}\n",
+                hi = oa.vclamp_hi
+            ));
+        }
+        if oa.vclamp_lo.is_finite() {
+            code.push_str(&format!(
+                "{indent}if {target}[{o}] < {lo:.17e} {{ {target}[{o}] = {lo:.17e}; }}\n",
+                lo = oa.vclamp_lo
+            ));
+        }
+    }
+    if trailing_nl {
+        code.push('\n');
+    }
+}
+
 fn bsrc_param_map(ir: &CircuitIR) -> std::collections::BTreeMap<String, String> {
     let mut m = std::collections::BTreeMap::new();
     for (name, val) in &ir.behavioral_param_consts {
@@ -6222,34 +6266,14 @@ impl RustEmitter {
                 ir.solver_config.opamp_rail_mode,
                 crate::codegen::OpampRailMode::Hard
             ) {
-                let clampable: Vec<&crate::codegen::ir::OpampIR> = ir
-                    .opamps
-                    .iter()
-                    .filter(|oa| oa.vclamp_hi.is_finite() || oa.vclamp_lo.is_finite())
-                    .collect();
-                if !clampable.is_empty() {
-                    code.push_str(
-                        "        // Per-iteration op-amp output rail clamp (Hard mode)\n",
-                    );
-                    for oa in &clampable {
-                        let o = oa.n_out_idx;
-                        if oa.vclamp_hi.is_finite() {
-                            code.push_str(&format!(
-                                "        if v_new[{o}] > {hi:.17e} {{ v_new[{o}] = {hi:.17e}; }}\n",
-                                o = o,
-                                hi = oa.vclamp_hi,
-                            ));
-                        }
-                        if oa.vclamp_lo.is_finite() {
-                            code.push_str(&format!(
-                                "        if v_new[{o}] < {lo:.17e} {{ v_new[{o}] = {lo:.17e}; }}\n",
-                                o = o,
-                                lo = oa.vclamp_lo,
-                            ));
-                        }
-                    }
-                    code.push('\n');
-                }
+                emit_hard_rail_clamp(
+                    &mut code,
+                    ir,
+                    "v_new",
+                    "        ",
+                    Some("        // Per-iteration op-amp output rail clamp (Hard mode)\n"),
+                    true,
+                );
             }
 
             // 2f. SPICE-style voltage limiting + global node damping
@@ -6618,30 +6642,7 @@ impl RustEmitter {
                 ir.solver_config.opamp_rail_mode,
                 crate::codegen::OpampRailMode::Hard
             ) {
-                let clampable: Vec<&crate::codegen::ir::OpampIR> = ir
-                    .opamps
-                    .iter()
-                    .filter(|oa| oa.vclamp_hi.is_finite() || oa.vclamp_lo.is_finite())
-                    .collect();
-                if !clampable.is_empty() {
-                    for oa in &clampable {
-                        let o = oa.n_out_idx;
-                        if oa.vclamp_hi.is_finite() {
-                            code.push_str(&format!(
-                                "                    if v_new_s[{o}] > {hi:.17e} {{ v_new_s[{o}] = {hi:.17e}; }}\n",
-                                o = o,
-                                hi = oa.vclamp_hi,
-                            ));
-                        }
-                        if oa.vclamp_lo.is_finite() {
-                            code.push_str(&format!(
-                                "                    if v_new_s[{o}] < {lo:.17e} {{ v_new_s[{o}] = {lo:.17e}; }}\n",
-                                o = o,
-                                lo = oa.vclamp_lo,
-                            ));
-                        }
-                    }
-                }
+                emit_hard_rail_clamp(&mut code, ir, "v_new_s", "                    ", None, false);
             }
             // Convergence check + update
             code.push_str("                    let mut max_step = 0.0f64;\n");
@@ -6826,32 +6827,14 @@ impl RustEmitter {
                 ir.solver_config.opamp_rail_mode,
                 crate::codegen::OpampRailMode::Hard
             ) {
-                let clampable: Vec<&crate::codegen::ir::OpampIR> = ir
-                    .opamps
-                    .iter()
-                    .filter(|oa| oa.vclamp_hi.is_finite() || oa.vclamp_lo.is_finite())
-                    .collect();
-                if !clampable.is_empty() {
-                    code.push_str(
-                        "            // Per-iteration op-amp output rail clamp (BE, Hard mode)\n",
-                    );
-                    for oa in &clampable {
-                        let o = oa.n_out_idx;
-                        if oa.vclamp_hi.is_finite() {
-                            code.push_str(&format!(
-                                "            if v_new[{o}] > {hi:.17e} {{ v_new[{o}] = {hi:.17e}; }}\n",
-                                o = o, hi = oa.vclamp_hi,
-                            ));
-                        }
-                        if oa.vclamp_lo.is_finite() {
-                            code.push_str(&format!(
-                                "            if v_new[{o}] < {lo:.17e} {{ v_new[{o}] = {lo:.17e}; }}\n",
-                                o = o, lo = oa.vclamp_lo,
-                            ));
-                        }
-                    }
-                    code.push('\n');
-                }
+                emit_hard_rail_clamp(
+                    &mut code,
+                    ir,
+                    "v_new",
+                    "            ",
+                    Some("            // Per-iteration op-amp output rail clamp (BE, Hard mode)\n"),
+                    true,
+                );
             }
 
             // Limiting and damping for BE (same structure)
