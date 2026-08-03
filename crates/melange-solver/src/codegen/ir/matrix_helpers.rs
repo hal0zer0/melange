@@ -310,33 +310,13 @@ pub(super) fn compute_dk_be_fallback(
         }
     }
 
-    // Zero VS/VCVS/ideal-transformer algebraic rows in A_neg_be
-    for vs in &mna.voltage_sources {
-        let row = n_nodes + vs.ext_idx;
-        if row < n {
-            for j in 0..n {
-                a_neg_be[row * n + j] = 0.0;
-            }
-        }
-    }
-    let num_vs = mna.voltage_sources.len();
-    for (idx, _) in mna.vcvs_sources.iter().enumerate() {
-        let row = n_nodes + num_vs + idx;
-        if row < n {
-            for j in 0..n {
-                a_neg_be[row * n + j] = 0.0;
-            }
-        }
-    }
-    let num_vcvs = mna.vcvs_sources.len();
-    for (idx, _) in mna.ideal_transformers.iter().enumerate() {
-        let row = n_nodes + num_vs + num_vcvs + idx;
-        if row < n {
-            for j in 0..n {
-                a_neg_be[row * n + j] = 0.0;
-            }
-        }
-    }
+    // #5: Blanket-zero ALL augmented algebraic rows (n_nodes..n_aug) in
+    // A_neg_be — including the Boyle op-amp internal / current-mode VCA /
+    // behavioral-V rows the former per-type (VS/VCVS/xfmr) enumeration missed,
+    // which left stale trapezoidal history on those BE constraints. Shared with
+    // the trap-path and os>1 builders via super::zero_augmented_history_rows.
+    // Inductor branch rows (n_aug..n) keep their history and are untouched.
+    super::zero_augmented_history_rows(&mut a_neg_be, n, n_nodes, mna.n_aug);
 
     // S_be = A_be^{-1}
     let s_be = invert_flat_matrix(&a_be, n)?;
@@ -362,4 +342,56 @@ pub(super) fn compute_dk_be_fallback(
     }
 
     Ok((s_be, k_be, a_neg_be, rhs_const_be))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mna::MnaSystem;
+
+    /// #5 regression: `compute_dk_be_fallback` must zero EVERY augmented
+    /// algebraic row (`n_nodes..n_aug`) in `A_neg_be`, not just the
+    /// VS/VCVS/ideal-transformer rows the old per-type enumeration handled.
+    /// A current-mode VCA (internal + sense branch), a behavioral `V={}`
+    /// source, or a Boyle op-amp adds an augmented row beyond those three
+    /// types; leaving stale trapezoidal history there feeds a spurious z=-1
+    /// term into an algebraic constraint on the BE path.
+    ///
+    /// The MNA here has one such extra augmented row (`n_aug = n_nodes + 1`)
+    /// with NO voltage sources / VCVS / transformers — so the pre-fix code
+    /// would have zeroed nothing and left `alpha*C = 48000` on that row.
+    #[test]
+    fn be_fallback_zeros_all_augmented_rows_not_just_vs_vcvs() {
+        let n_nodes = 2usize;
+        let n = 3usize; // index 2 is a VCA/behavioral-style augmented row
+        let mut mna = MnaSystem::new(n_nodes, 0, 0, 0);
+        mna.n_aug = n; // augmented row present, but not a VS/VCVS/xfmr
+        assert!(mna.voltage_sources.is_empty());
+        assert!(mna.vcvs_sources.is_empty());
+        assert!(mna.ideal_transformers.is_empty());
+
+        // G = I so A_be = G + alpha*C is invertible; C nonzero only on the
+        // augmented row, so its A_neg_be entry is nonzero before zeroing.
+        let mut g = vec![0.0f64; n * n];
+        let mut c = vec![0.0f64; n * n];
+        for d in 0..n {
+            g[d * n + d] = 1.0;
+        }
+        c[2 * n + 2] = 1.0;
+
+        let internal_rate = 48_000.0;
+        let (_s_be, _k_be, a_neg_be, _rhs) =
+            compute_dk_be_fallback(&g, &c, n, 0, n_nodes, &[], &[], internal_rate, &mna)
+                .expect("BE fallback build");
+
+        // The augmented row (2) must be fully zeroed despite not being a
+        // VS/VCVS/xfmr row. Pre-#5, a_neg_be[2*n + 2] would be 48000.0.
+        for j in 0..n {
+            assert_eq!(
+                a_neg_be[2 * n + j],
+                0.0,
+                "augmented row 2 not zeroed at col {j}"
+            );
+        }
+    }
 }

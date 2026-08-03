@@ -1807,33 +1807,14 @@ impl CircuitIR {
                     a_neg_flat[i * n + j] = alpha * c; // BE: no -G term
                 }
             }
-            // Zero VS/VCVS algebraic rows in A_neg
-            for vs in &mna.voltage_sources {
-                let row = mna.n + vs.ext_idx;
-                if row < n {
-                    for j in 0..n {
-                        a_neg_flat[row * n + j] = 0.0;
-                    }
-                }
-            }
-            let num_vs = mna.voltage_sources.len();
-            for (idx, _) in mna.vcvs_sources.iter().enumerate() {
-                let row = mna.n + num_vs + idx;
-                if row < n {
-                    for j in 0..n {
-                        a_neg_flat[row * n + j] = 0.0;
-                    }
-                }
-            }
-            let num_vcvs = mna.vcvs_sources.len();
-            for (idx, _) in mna.ideal_transformers.iter().enumerate() {
-                let row = mna.n + num_vs + num_vcvs + idx;
-                if row < n {
-                    for j in 0..n {
-                        a_neg_flat[row * n + j] = 0.0;
-                    }
-                }
-            }
+            // #5: Blanket-zero ALL augmented algebraic rows (n_nodes..n_aug) —
+            // VS/VCVS/ideal-transformer AND Boyle op-amp internal / current-mode
+            // VCA / behavioral-V rows. The former per-type enumeration
+            // (VS/VCVS/xfmr only) left stale trapezoidal history on the latter
+            // three constraints. Routed through the shared helper, matching the
+            // os>1 build_dk_be_matrices_at_rate path. Inductor branch rows
+            // (n_aug..n) keep their history and are untouched.
+            zero_augmented_history_rows(&mut a_neg_flat, n, mna.n, mna.n_aug);
             let s_flat = invert_flat_matrix(&a_flat, n)?;
             let k_flat = if m > 0 {
                 compute_k_from_s(&s_flat, &kernel.n_v, &kernel.n_i, n, m)
