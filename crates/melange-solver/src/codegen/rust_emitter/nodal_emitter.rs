@@ -6688,47 +6688,43 @@ impl RustEmitter {
                 }
             }
 
-            // BoyleDiodes residual check (BE fallback path).
+            // Residual-based convergence safety net for the BE fallback —
+            // emitted UNCONDITIONALLY (was BoyleDiodes-only until 2026-08-03).
             //
-            // BE rebuilds `j_dev` fresh each iteration (no chord
-            // persistence), so the staleness mode that causes the
-            // trapezoidal NR loop to false-converge doesn't apply here.
-            // But the BE convergence criterion is still voltage-step
-            // only (`be_step_exceeded`), which can declare a small
-            // damped step "converged" while the actual i_nl mismatch
-            // (between the i_nl that fed the LU and i_nl re-evaluated
-            // at the post-step v) is large — exactly the same false
-            // convergence on a non-physical state. We mirror the
-            // residual check from the main NR loop here, gated on
-            // BoyleDiodes for the same reason: every other validated
-            // mode passes the voltage-step check as a sufficient
-            // criterion.
-            // BE does true Newton (fresh LU each iteration), so the residual
-            // check is less critical here than in the chord-based trap path.
-            // Only emit for BoyleDiodes where catch diodes have extreme knees.
-            if matches!(
-                ir.solver_config.opamp_rail_mode,
-                crate::codegen::OpampRailMode::BoyleDiodes
-            ) {
-                code.push_str("            // BoyleDiodes residual check (BE path)\n");
-                code.push_str("            if !be_step_exceeded {\n");
-                code.push_str("                let i_nl_be_chord = i_nl;\n");
-                code.push_str("                let mut v_nl = [0.0f64; M];\n");
-                code.push_str(&emit_sparse_nv_matvec(ir, "v_nl", "v", "                "));
-                code.push_str("                let mut i_nl = [0.0f64; M];\n");
-                code.push_str("                let mut j_dev = [0.0f64; M * M];\n");
-                Self::emit_nodal_device_evaluation_body(&mut code, ir, "                ");
-                code.push_str("                for i in 0..M {\n");
-                code.push_str("                    let r = (i_nl[i] - i_nl_be_chord[i]).abs();\n");
-                code.push_str("                    let tol = 1e-3 * i_nl[i].abs().max(i_nl_be_chord[i].abs()).max(1e-9) + 1e-12;\n");
-                // Negated form: a NaN residual must read as NOT converged.
-                code.push_str("                    if !(r <= tol) {\n");
-                code.push_str("                        be_step_exceeded = true;\n");
-                code.push_str("                        break;\n");
-                code.push_str("                    }\n");
-                code.push_str("                }\n");
-                code.push_str("            }\n\n");
-            }
+            // The BE convergence criterion above is voltage-step-only
+            // (`be_step_exceeded`), whose relative tolerance scales with the
+            // node voltage — so once a node has diverged it can declare a small
+            // damped step "converged" on a KCL-satisfying-but-nonphysical state
+            // (the wurli-power-amp ~-16 kV false convergence). This was formerly
+            // gated to BoyleDiodes on the assumption that every other mode's BE
+            // fallback does true Newton and lands on a real root; the
+            // wurli-power-amp blowup disproved that assumption, so the guard now
+            // matches the primary NR loop and the DK path. A converged BE step
+            // must ALSO have a small device-KCL residual: the i_nl that fed the
+            // LU vs i_nl re-evaluated at the post-step v. Uses the i_nl-only
+            // device eval (`_final`) so it declares no discarded `j_dev`.
+            code.push_str("            // Residual convergence safety net (BE path)\n");
+            code.push_str("            if !be_step_exceeded {\n");
+            code.push_str("                let i_nl_be_chord = i_nl;\n");
+            code.push_str("                let mut v_nl_final = [0.0f64; M];\n");
+            code.push_str(&emit_sparse_nv_matvec(
+                ir,
+                "v_nl_final",
+                "v",
+                "                ",
+            ));
+            code.push_str("                let mut i_nl = [0.0f64; M];\n");
+            Self::emit_nodal_device_evaluation_final(&mut code, ir, "                ");
+            code.push_str("                for i in 0..M {\n");
+            code.push_str("                    let r = (i_nl[i] - i_nl_be_chord[i]).abs();\n");
+            code.push_str("                    let tol = 1e-3 * i_nl[i].abs().max(i_nl_be_chord[i].abs()).max(1e-9) + 1e-12;\n");
+            // Negated form: a NaN residual must read as NOT converged.
+            code.push_str("                    if !(r <= tol) {\n");
+            code.push_str("                        be_step_exceeded = true;\n");
+            code.push_str("                        break;\n");
+            code.push_str("                    }\n");
+            code.push_str("                }\n");
+            code.push_str("            }\n\n");
 
             code.push_str("            let be_converged = !be_step_exceeded;\n\n");
 
