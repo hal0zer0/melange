@@ -556,6 +556,56 @@ pub struct CodegenMeta {
     pub parasitic_caps_inserted: bool,
 }
 
+/// Build the codegen metadata block from the finished IR. Shared by the
+/// DK-with-DC-OP and nodal generate paths, which built it identically.
+#[cfg(feature = "codegen")]
+fn build_codegen_meta(ir: &CircuitIR, parasitic_caps_inserted: bool) -> CodegenMeta {
+    let backward_euler_auto = ir.integrator_selection == ir::IntegratorSelection::BeAuto;
+    CodegenMeta {
+        backward_euler_auto,
+        integrator_selection: ir.integrator_selection,
+        // Report the discriminator's trap rho (internal-rate matrices under
+        // oversampling) only when auto-BE fired, matching the field contract.
+        backward_euler_spectral_radius: if backward_euler_auto {
+            ir.trap_discriminator_rho
+        } else {
+            0.0
+        },
+        dc_op_method: ir.dc_op_method.clone(),
+        dc_op_iterations: ir.dc_op_iterations,
+        dc_op_converged: ir.dc_op_converged,
+        sparse_lu_enabled: ir.sparsity.lu.is_some(),
+        sparse_lu_density: ir.sparsity.g_aug_density,
+        parasitic_caps_inserted,
+    }
+}
+
+/// Auto-insert parasitic caps when the C matrix is all zeros but the circuit
+/// has nonlinear devices (A = G otherwise degenerates the trapezoidal
+/// integrator — no energy storage, no dynamics). The caller owns `patched`
+/// storage so the returned borrow can outlive this call. Returns the MNA to
+/// use and whether caps were inserted.
+#[cfg(feature = "codegen")]
+fn maybe_insert_parasitic_caps<'a>(
+    mna: &'a MnaSystem,
+    patched: &'a mut Option<MnaSystem>,
+    ctx: &str,
+) -> (&'a MnaSystem, bool) {
+    let inserted = mna.m > 0 && !mna.c.iter().any(|row| row.iter().any(|&v| v != 0.0));
+    if inserted {
+        log::info!(
+            "{ctx}: C matrix is all zeros with M={} nonlinear devices; auto-inserting parasitic caps",
+            mna.m
+        );
+        let mut m = mna.clone();
+        m.add_parasitic_caps();
+        *patched = Some(m);
+        (patched.as_ref().unwrap(), true)
+    } else {
+        (mna, false)
+    }
+}
+
 /// Code generator for circuit solvers
 #[cfg(feature = "codegen")]
 pub struct CodeGenerator {
@@ -681,51 +731,18 @@ impl CodeGenerator {
         // nonlinear devices. The IR stores G/C for runtime sample rate recomputation,
         // so these must include the parasitic caps (matching the kernel, which also
         // auto-inserts them in from_mna/from_mna_augmented).
-        let patched_mna;
-        let parasitic_caps_inserted =
-            mna.m > 0 && !mna.c.iter().any(|row| row.iter().any(|&v| v != 0.0));
-        let mna = if parasitic_caps_inserted {
-            log::info!(
-                "Codegen: C matrix is all zeros with M={} nonlinear devices; \
-                 auto-inserting parasitic caps for IR",
-                mna.m
-            );
-            patched_mna = {
-                let mut m = mna.clone();
-                m.add_parasitic_caps();
-                m
-            };
-            &patched_mna
-        } else {
-            mna
-        };
+        let mut patched_mna = None;
+        let (mna, parasitic_caps_inserted) =
+            maybe_insert_parasitic_caps(mna, &mut patched_mna, "Codegen");
 
         let ir = CircuitIR::from_kernel_with_dc_op(kernel, mna, netlist, &self.config, dc_op)?;
         let code = RustEmitter::new()?.emit(&ir)?;
 
-        let backward_euler_auto = ir.integrator_selection == ir::IntegratorSelection::BeAuto;
         Ok(GeneratedCode {
             code,
             n: ir.topology.n,
             m: ir.topology.m,
-            meta: CodegenMeta {
-                backward_euler_auto,
-                integrator_selection: ir.integrator_selection,
-                // The bake stores the trap rho the discriminator evaluated
-                // (internal-rate matrices under oversampling). Report it
-                // only when auto-BE fired, matching the field contract.
-                backward_euler_spectral_radius: if backward_euler_auto {
-                    ir.trap_discriminator_rho
-                } else {
-                    0.0
-                },
-                dc_op_method: ir.dc_op_method.clone(),
-                dc_op_iterations: ir.dc_op_iterations,
-                dc_op_converged: ir.dc_op_converged,
-                sparse_lu_enabled: ir.sparsity.lu.is_some(),
-                sparse_lu_density: ir.sparsity.g_aug_density,
-                parasitic_caps_inserted,
-            },
+            meta: build_codegen_meta(&ir, parasitic_caps_inserted),
         })
     }
 
@@ -886,48 +903,18 @@ impl CodeGenerator {
         // Auto-insert parasitic caps if C matrix is all zeros and circuit has
         // nonlinear devices. Without capacitors, A = G and the trapezoidal
         // integrator degenerates (no energy storage → no dynamics).
-        let patched_mna;
-        let parasitic_caps_inserted =
-            mna.m > 0 && !mna.c.iter().any(|row| row.iter().any(|&v| v != 0.0));
-        let mna = if parasitic_caps_inserted {
-            log::info!(
-                "Codegen nodal: C matrix is all zeros with M={} nonlinear devices; \
-                 auto-inserting parasitic caps",
-                mna.m
-            );
-            patched_mna = {
-                let mut m = mna.clone();
-                m.add_parasitic_caps();
-                m
-            };
-            &patched_mna
-        } else {
-            mna
-        };
+        let mut patched_mna = None;
+        let (mna, parasitic_caps_inserted) =
+            maybe_insert_parasitic_caps(mna, &mut patched_mna, "Codegen nodal");
 
         let ir = CircuitIR::from_mna(mna, netlist, &self.config)?;
         let code = RustEmitter::new()?.emit(&ir)?;
 
-        let backward_euler_auto = ir.integrator_selection == ir::IntegratorSelection::BeAuto;
         Ok(GeneratedCode {
             code,
             n: ir.topology.n,
             m: ir.topology.m,
-            meta: CodegenMeta {
-                backward_euler_auto,
-                integrator_selection: ir.integrator_selection,
-                backward_euler_spectral_radius: if backward_euler_auto {
-                    ir.trap_discriminator_rho
-                } else {
-                    0.0
-                },
-                dc_op_method: ir.dc_op_method.clone(),
-                dc_op_iterations: ir.dc_op_iterations,
-                dc_op_converged: ir.dc_op_converged,
-                sparse_lu_enabled: ir.sparsity.lu.is_some(),
-                sparse_lu_density: ir.sparsity.g_aug_density,
-                parasitic_caps_inserted,
-            },
+            meta: build_codegen_meta(&ir, parasitic_caps_inserted),
         })
     }
 }

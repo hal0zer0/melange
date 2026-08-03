@@ -402,25 +402,21 @@ pub struct NoiseIR {
 /// the source is **skipped honestly** with a `log::warn!` — see
 /// `docs/aidocs/NOISE.md` "BJT parasitic-R thermal noise" for the gap and
 /// the planned base-side equivalent-injection follow-up.
-pub fn collect_thermal_noise_sources(
-    netlist: &Netlist,
+/// Upper-cased-name → pot index and → (switch_idx, R-comp_idx) maps. Both
+/// resistor-noise collectors resolve a resistor's dynamic backing (`.pot` /
+/// `.runtime R` / wiper-derived pots, and R-type switch components) through
+/// these. C/L switch components generate no resistor noise and are skipped.
+fn build_pot_switch_slot_maps(
     mna: &MnaSystem,
-) -> Vec<ThermalNoiseSource> {
-    use std::collections::HashMap;
-
-    // Upper-cased name → pot index in mna.pots. Covers .pot, .runtime R,
-    // and wiper-derived pot entries (wipers decompose into cw/ccw pots
-    // that both live in mna.pots).
-    let mut pot_slot: HashMap<String, usize> = HashMap::new();
+) -> (
+    std::collections::HashMap<String, usize>,
+    std::collections::HashMap<String, (usize, usize)>,
+) {
+    let mut pot_slot = std::collections::HashMap::new();
     for (i, p) in mna.pots.iter().enumerate() {
         pot_slot.insert(p.name.to_ascii_uppercase(), i);
     }
-
-    // Upper-cased name → (switch_idx, comp_idx) for R-type switch
-    // components. C and L components don't generate thermal noise and are
-    // skipped here — they also aren't Element::Resistor at the netlist
-    // level, so the loop below never sees them.
-    let mut switch_slot_map: HashMap<String, (usize, usize)> = HashMap::new();
+    let mut switch_slot_map = std::collections::HashMap::new();
     for (sw_idx, sw) in mna.switches.iter().enumerate() {
         for (ci, c) in sw.components.iter().enumerate() {
             if c.component_type == 'R' {
@@ -428,6 +424,43 @@ pub fn collect_thermal_noise_sources(
             }
         }
     }
+    (pot_slot, switch_slot_map)
+}
+
+/// Resolve a resistor's codegen-time resistance from its dynamic backing:
+/// pot → `1/g_nominal`, R-switch → position-0 value, neither → netlist literal.
+/// At most one of `pot_idx`/`sw_idx` is `Some` (the directives are mutually
+/// exclusive in the parser).
+fn resolve_initial_resistance(
+    mna: &MnaSystem,
+    pot_idx: Option<usize>,
+    sw_idx: Option<(usize, usize)>,
+    value: f64,
+) -> f64 {
+    if let Some(i) = pot_idx {
+        let g = mna.pots[i].g_nominal;
+        if g > 0.0 && g.is_finite() {
+            1.0 / g
+        } else {
+            value
+        }
+    } else if let Some((sw, comp)) = sw_idx {
+        let positions = &mna.switches[sw].positions;
+        let r0 = positions.first().and_then(|row| row.get(comp)).copied();
+        match r0 {
+            Some(v) if v.is_finite() && v > 0.0 => v,
+            _ => value,
+        }
+    } else {
+        value
+    }
+}
+
+pub fn collect_thermal_noise_sources(
+    netlist: &Netlist,
+    mna: &MnaSystem,
+) -> Vec<ThermalNoiseSource> {
+    let (pot_slot, switch_slot_map) = build_pot_switch_slot_maps(mna);
 
     let mut sources = Vec::new();
     for el in &netlist.elements {
@@ -450,30 +483,7 @@ pub fn collect_thermal_noise_sources(
             }
             let pot_idx = pot_slot.get(&upper).copied();
             let sw_idx = switch_slot_map.get(&upper).copied();
-            // A single R cannot be under both `.pot` and `.switch` in the
-            // parser (those directives validate mutually exclusive
-            // membership), so at most one of pot_idx / sw_idx is Some.
-            // Resolve initial resistance from the backing structure:
-            //   - pot: use `1/g_nominal` (MNA-canonical value)
-            //   - switch: use position-0 value (matches Default::default)
-            //   - neither: use the netlist literal value
-            let resistance = if let Some(i) = pot_idx {
-                let g = mna.pots[i].g_nominal;
-                if g > 0.0 && g.is_finite() {
-                    1.0 / g
-                } else {
-                    *value
-                }
-            } else if let Some((sw, comp)) = sw_idx {
-                let positions = &mna.switches[sw].positions;
-                let r0 = positions.first().and_then(|row| row.get(comp)).copied();
-                match r0 {
-                    Some(v) if v.is_finite() && v > 0.0 => v,
-                    _ => *value,
-                }
-            } else {
-                *value
-            };
+            let resistance = resolve_initial_resistance(mna, pot_idx, sw_idx, *value);
             sources.push(ThermalNoiseSource {
                 name: name.clone(),
                 node_i,
@@ -940,21 +950,7 @@ pub fn collect_resistor_flicker_noise_sources(
     netlist: &Netlist,
     mna: &MnaSystem,
 ) -> Vec<ResistorFlickerNoiseSource> {
-    use std::collections::HashMap;
-
-    let mut pot_slot: HashMap<String, usize> = HashMap::new();
-    for (i, p) in mna.pots.iter().enumerate() {
-        pot_slot.insert(p.name.to_ascii_uppercase(), i);
-    }
-
-    let mut switch_slot_map: HashMap<String, (usize, usize)> = HashMap::new();
-    for (sw_idx, sw) in mna.switches.iter().enumerate() {
-        for (ci, c) in sw.components.iter().enumerate() {
-            if c.component_type == 'R' {
-                switch_slot_map.insert(c.name.to_ascii_uppercase(), (sw_idx, ci));
-            }
-        }
-    }
+    let (pot_slot, switch_slot_map) = build_pot_switch_slot_maps(mna);
 
     let mut sources = Vec::new();
     for el in &netlist.elements {
@@ -991,23 +987,7 @@ pub fn collect_resistor_flicker_noise_sources(
         let sw_idx = switch_slot_map.get(&upper).copied();
         // Resolve initial resistance the same way the thermal collector does
         // so the dynamic-R refresh path agrees on the codegen-time default.
-        let resistance = if let Some(i) = pot_idx {
-            let g = mna.pots[i].g_nominal;
-            if g > 0.0 && g.is_finite() {
-                1.0 / g
-            } else {
-                *value
-            }
-        } else if let Some((sw, comp)) = sw_idx {
-            let positions = &mna.switches[sw].positions;
-            let r0 = positions.first().and_then(|row| row.get(comp)).copied();
-            match r0 {
-                Some(v) if v.is_finite() && v > 0.0 => v,
-                _ => *value,
-            }
-        } else {
-            *value
-        };
+        let resistance = resolve_initial_resistance(mna, pot_idx, sw_idx, *value);
         // AF default applied here, not in the parser, so an `Element::Resistor`
         // round-trips through serde without the parser's defaulting being
         // baked into the netlist representation.
