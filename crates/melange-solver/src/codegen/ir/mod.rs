@@ -2215,7 +2215,12 @@ impl CircuitIR {
             n_v: analyze_matrix_sparsity(&matrices.n_v, m, n),
             n_i: analyze_matrix_sparsity(&matrices.n_i, n, m),
             a_neg_be: if matrices.a_neg_be.is_empty() {
-                MatrixSparsity { rows: n, cols: n, nnz: 0, nz_by_row: vec![Vec::new(); n] }
+                MatrixSparsity {
+                    rows: n,
+                    cols: n,
+                    nnz: 0,
+                    nz_by_row: vec![Vec::new(); n],
+                }
             } else {
                 analyze_matrix_sparsity(&matrices.a_neg_be, n, n)
             },
@@ -2990,7 +2995,12 @@ impl CircuitIR {
             n_v: analyze_matrix_sparsity(&matrices.n_v, m, n),
             n_i: analyze_matrix_sparsity(&matrices.n_i, n, m),
             a_neg_be: if matrices.a_neg_be.is_empty() {
-                MatrixSparsity { rows: n, cols: n, nnz: 0, nz_by_row: vec![Vec::new(); n] }
+                MatrixSparsity {
+                    rows: n,
+                    cols: n,
+                    nnz: 0,
+                    nz_by_row: vec![Vec::new(); n],
+                }
             } else {
                 analyze_matrix_sparsity(&matrices.a_neg_be, n, n)
             },

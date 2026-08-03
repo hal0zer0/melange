@@ -142,7 +142,10 @@ fn emit_nodal_companion_rhs(
                 jdv_terms.join(" + ")
             ));
             for &a in &ni_nz_by_dev[i] {
-                code.push_str(&format!("{inner}{rhs}[{}] += N_I[{}][{}] * i_comp;\n", a, a, i));
+                code.push_str(&format!(
+                    "{inner}{rhs}[{}] += N_I[{}][{}] * i_comp;\n",
+                    a, a, i
+                ));
             }
             code.push_str(&format!("{indent}}}\n"));
         }
@@ -3472,7 +3475,6 @@ impl RustEmitter {
 
         code.push_str("}\n\n");
 
-
         code
     }
 
@@ -4800,7 +4802,6 @@ impl RustEmitter {
         code.push_str("    }\n");
         code.push_str("    output\n");
         code.push_str("}\n\n");
-
 
         Ok(code)
     }
@@ -6257,7 +6258,12 @@ impl RustEmitter {
             } else {
                 code.push_str("            // Final device evaluation at converged point\n");
                 code.push_str("            let mut v_nl_final = [0.0f64; M];\n");
-                code.push_str(&emit_sparse_nv_matvec(ir, "v_nl_final", "v", "            "));
+                code.push_str(&emit_sparse_nv_matvec(
+                    ir,
+                    "v_nl_final",
+                    "v",
+                    "            ",
+                ));
                 Self::emit_nodal_device_evaluation_final(&mut code, ir, "            ");
             }
 
@@ -6382,7 +6388,14 @@ impl RustEmitter {
                 ir.solver_config.opamp_rail_mode,
                 crate::codegen::OpampRailMode::Hard
             ) {
-                emit_hard_rail_clamp(&mut code, ir, "v_new_s", "                    ", None, false);
+                emit_hard_rail_clamp(
+                    &mut code,
+                    ir,
+                    "v_new_s",
+                    "                    ",
+                    None,
+                    false,
+                );
             }
             // Convergence check + update
             code.push_str("                    let mut max_step = 0.0f64;\n");
@@ -6860,7 +6873,6 @@ impl RustEmitter {
         code.push_str("    }\n");
         code.push_str("    output\n");
         code.push_str("}\n\n");
-
 
         code
     }
@@ -7969,7 +7981,6 @@ impl RustEmitter {
         ir: &CircuitIR,
         indent: &str,
     ) {
-
         for (dev_num, slot) in ir.device_slots.iter().enumerate() {
             for d in 0..slot.dimension {
                 let i = slot.start_idx + d;
@@ -8053,6 +8064,5 @@ impl RustEmitter {
                 ));
             }
         }
-
     }
 }

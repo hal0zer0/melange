@@ -644,7 +644,6 @@ pub fn collect_thermal_noise_sources(
 /// through the collector. (Parasitic-R *thermal* noise is handled by
 /// `collect_thermal_noise_sources`.)
 pub fn collect_shot_noise_sources(netlist: &Netlist, mna: &MnaSystem) -> Vec<ShotNoiseSource> {
-
     // Tube-device → model map for the SHOT_GAMMA2 override (triodes only in
     // v1; same raw-model-param pattern as the PARTITION_F resolver).
     let tube_model_for = device_model_map(netlist);
@@ -743,7 +742,6 @@ pub fn collect_pentode_partition_sources(
     netlist: &Netlist,
     mna: &MnaSystem,
 ) -> Vec<PentodePartitionSource> {
-
     let model_for = device_model_map(netlist);
 
     // PARTITION_F resolver: explicit `.model TUBE(PARTITION_F=…)` wins; default
@@ -863,7 +861,6 @@ pub fn collect_flicker_noise_sources(
     netlist: &Netlist,
     mna: &MnaSystem,
 ) -> Vec<FlickerNoiseSource> {
-
     // Build device-name → model-name map once.
     let model_for = device_model_map(netlist);
 

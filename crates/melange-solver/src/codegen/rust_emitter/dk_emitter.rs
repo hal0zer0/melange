@@ -4828,7 +4828,12 @@ impl RustEmitter {
             // Uniform in every shipped circuit; mixed/other exponents keep powf.
             // Stays branch-free (the choice is baked at codegen).
             {
-                let hf: Vec<f64> = ir.noise.flicker_sources.iter().map(|s| 0.5 * s.af).collect();
+                let hf: Vec<f64> = ir
+                    .noise
+                    .flicker_sources
+                    .iter()
+                    .map(|s| 0.5 * s.af)
+                    .collect();
                 let base = if !hf.is_empty() && hf.iter().all(|&h| h == 1.0) {
                     "i_abs"
                 } else if !hf.is_empty() && hf.iter().all(|&h| h == 0.5) {
@@ -5080,7 +5085,9 @@ impl RustEmitter {
                 } else {
                     "i_abs.powf(NOISE_R_FLICKER_HALF_AF[k])"
                 };
-                rhs_stamp.push_str(&format!("                let amp = r_fl_scale * NOISE_R_FLICKER_SQRT_KF[k] * {base};\n"));
+                rhs_stamp.push_str(&format!(
+                    "                let amp = r_fl_scale * NOISE_R_FLICKER_SQRT_KF[k] * {base};\n"
+                ));
             }
             if be_primary {
                 rhs_stamp.push_str(
