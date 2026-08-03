@@ -231,38 +231,44 @@ fn dynamic_residual(spice: &str, baseline: &[f64], samples: &[Sample]) -> (f64, 
     let mut mna = MnaSystem::from_netlist(&netlist).expect("mna");
     let input_node = mna.node_map["in"] - 1;
     mna.g[input_node][input_node] += G_IN;
-    let n_aug = mna.n_aug;
+
+    // Use the fully augmented n_nodal matrices so inductor branch-current rows
+    // and L-in-C are included. With no inductors, n_nodal = n_aug and these are
+    // exactly mna.g/mna.c. The inductor branch rows carry the trapezoidal v-L
+    // relation, so the same i_cap = α·C·Δx − i_cap_prev recursion checks them.
+    let aug = mna.build_augmented_matrices();
+    let dim = aug.n_nodal;
     let alpha = 2.0 * SR;
 
     let mut v_prev = baseline.to_vec();
-    let mut i_cap_prev = vec![0.0_f64; n_aug];
-    let mut r_prev = vec![0.0_f64; n_aug];
+    let mut i_cap_prev = vec![0.0_f64; dim];
+    let mut r_prev = vec![0.0_f64; dim];
     let mut max_r = 0.0_f64;
     let mut max_pair = 0.0_f64;
 
     for (u, v, i_nl) in samples {
         let dv: Vec<f64> = v.iter().zip(&v_prev).map(|(&a, &b)| a - b).collect();
-        let cdv = matvec(&mna.c, &dv);
+        let cdv = matvec(&aug.c, &dv);
         let i_cap: Vec<f64> = cdv
             .iter()
             .zip(&i_cap_prev)
             .map(|(&c, &ip)| alpha * c - ip)
             .collect();
 
-        let gv = matvec(&mna.g, v);
-        let ni = matvec(&mna.n_i, i_nl); // n_aug × m · m → n_aug
-        let mut rhs = vec![0.0_f64; n_aug];
+        let gv = matvec(&aug.g, v);
+        let ni = matvec(&mna.n_i, i_nl); // (n or n_aug) × m · m
+        let mut rhs = vec![0.0_f64; dim];
         rhs[input_node] = G_IN * u;
         for vs in &mna.voltage_sources {
             rhs[mna.n + vs.ext_idx] = vs.dc_value;
         }
 
-        let r: Vec<f64> = (0..n_aug)
+        let r: Vec<f64> = (0..dim)
             .map(|k| gv[k] + i_cap[k] - ni.get(k).copied().unwrap_or(0.0) - rhs[k])
             .collect();
 
         max_r = max_r.max(max_abs(&r));
-        for k in 0..n_aug {
+        for k in 0..dim {
             max_pair = max_pair.max((r[k] + r_prev[k]).abs());
         }
 
@@ -408,6 +414,18 @@ fn tellegen_dynamic_diode_clipper() {
     // 2V sine drives the diodes into conduction on each half-cycle; the balance
     // holds at every point of the clipping waveform (diode + cap + node V).
     check_dynamic(DIODE_CLIPPER, 1000.0, 2.0, 400, "dyn_clip", false, 1e-11);
+}
+
+// Series RLC — output across the cap. Inductor forces the augmented
+// branch-current path (nodal). Cap node named `out` for config resolution.
+const RLC_SERIES: &str = "RLC Series\nR1 in a 100\nL1 a out 10m\nC1 out 0 100n\n";
+
+#[test]
+fn tellegen_dynamic_rlc_series() {
+    // Inductor circuit (augmented branch-current + L-in-C, nodal path): power
+    // balance holds every sample including the inductor branch row. Floor is
+    // the nodal solve residual (~2e-12), not machine eps.
+    check_dynamic(RLC_SERIES, 2000.0, 1.0, 400, "dyn_rlc", true, 1e-9);
 }
 
 #[test]
