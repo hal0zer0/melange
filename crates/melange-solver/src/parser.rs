@@ -2030,12 +2030,26 @@ impl Parser {
 
             // Parameters that must be strictly positive
             match key_upper.as_str() {
-                "IS" | "ISE" | "ISC" | "IDSS" | "G0" => {
+                "IS" | "IDSS" | "G0" => {
                     if *value <= 0.0 {
                         return Err(ParseError {
                             line: 0,
                             message: format!(
                                 ".model '{}': {} must be > 0, got {}",
+                                model.name, key, value
+                            ),
+                        });
+                    }
+                }
+                // B-E / B-C leakage saturation currents: 0 disables the leakage
+                // term (the SPICE default, and melange's own default), so it is
+                // valid — only negative is unphysical.
+                "ISE" | "ISC" => {
+                    if *value < 0.0 {
+                        return Err(ParseError {
+                            line: 0,
+                            message: format!(
+                                ".model '{}': {} must be >= 0, got {}",
                                 model.name, key, value
                             ),
                         });
@@ -3481,7 +3495,7 @@ impl Parser {
                 return Err(self.error(format!(
                     "Behavioral source '{}': expected V or I before '=', got '{}'",
                     name, other
-                )))
+                )));
             }
         };
         self.check_self_connection(n_plus, n_minus, name)?;
@@ -6302,8 +6316,7 @@ U1 0 inv out opamp
 
     #[test]
     fn test_tolerance_directive_parses() {
-        let spice =
-            "Tol\n.seed 7\n.tolerance R=0.01 C=0.02 L=0.005\nR1 a b 1k\nC1 b 0 1u\nL1 a 0 1m\n.end\n";
+        let spice = "Tol\n.seed 7\n.tolerance R=0.01 C=0.02 L=0.005\nR1 a b 1k\nC1 b 0 1u\nL1 a 0 1m\n.end\n";
         let n = Netlist::parse(spice).expect("parse");
         // Values have already been jittered at parse end — read the
         // directive fields directly instead.

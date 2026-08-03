@@ -5,6 +5,7 @@
 //! Schur and full-LU process_sample, active-set resolve, device evaluation,
 //! and voltage limiting.
 
+use super::RustEmitter;
 use super::dk_emitter::NoiseEmission;
 use super::helpers::{
     device_param_template_data, emit_pentode_nr_dk_stamp, fmt_f64, format_matrix_rows,
@@ -12,9 +13,8 @@ use super::helpers::{
     self_heating_device_data,
 };
 use super::nr_helpers::{emit_nr_singular_fallback, emit_schur_nr_limit_and_converge};
-use super::RustEmitter;
-use crate::codegen::ir::{BehavioralSourceIR, CircuitIR, DeviceParams, DeviceType, LuOp};
 use crate::codegen::CodegenError;
+use crate::codegen::ir::{BehavioralSourceIR, CircuitIR, DeviceParams, DeviceType, LuOp};
 use crate::expr::{ExprResolver, Var};
 
 /// Resolves behavioral-expression leaves to generated-Rust strings against the
@@ -4936,7 +4936,9 @@ impl RustEmitter {
                 } else {
                     // Self-heating Vgk drift: see `nr_helpers.rs` for rationale.
                     let vgk_expr = if tp.has_self_heating() {
-                        format!("(v_d{s} + DEVICE_{d}_VBIAS_ALPHA * (state.device_{d}_tj - DEVICE_{d}_TAMB))")
+                        format!(
+                            "(v_d{s} + DEVICE_{d}_VBIAS_ALPHA * (state.device_{d}_tj - DEVICE_{d}_TAMB))"
+                        )
                     } else {
                         format!("v_d{s}")
                     };
@@ -5524,9 +5526,7 @@ impl RustEmitter {
         if !lu.row_swaps.is_empty() {
             code.push_str("    // Static row swaps (matching factorization)\n");
             for &(r1, r2) in &lu.row_swaps {
-                code.push_str(&format!(
-                    "    {{ let tmp = x[{r1}]; x[{r1}] = x[{r2}]; x[{r2}] = tmp; }}\n"
-                ));
+                code.push_str(&format!("    x.swap({r1}, {r2});\n"));
             }
         }
         code.push('\n');
@@ -7769,7 +7769,9 @@ impl RustEmitter {
                     } else if tp.has_rgi() {
                         // Self-heating Vgk drift: see `nr_helpers.rs`.
                         let vgk_init = if tp.has_self_heating() {
-                            format!("v_nl[{s}] + DEVICE_{dev_num}_VBIAS_ALPHA * (state.device_{dev_num}_tj - DEVICE_{dev_num}_TAMB)")
+                            format!(
+                                "v_nl[{s}] + DEVICE_{dev_num}_VBIAS_ALPHA * (state.device_{dev_num}_tj - DEVICE_{dev_num}_TAMB)"
+                            )
                         } else {
                             format!("v_nl[{s}]")
                         };
@@ -7787,7 +7789,9 @@ impl RustEmitter {
                         ));
                     } else {
                         let vgk_init = if tp.has_self_heating() {
-                            format!("v_nl[{s}] + DEVICE_{dev_num}_VBIAS_ALPHA * (state.device_{dev_num}_tj - DEVICE_{dev_num}_TAMB)")
+                            format!(
+                                "v_nl[{s}] + DEVICE_{dev_num}_VBIAS_ALPHA * (state.device_{dev_num}_tj - DEVICE_{dev_num}_TAMB)"
+                            )
                         } else {
                             format!("v_nl[{s}]")
                         };
@@ -7935,7 +7939,9 @@ impl RustEmitter {
                         // `tube_ig_with_rgi` also sees the shifted Vgk for
                         // contact-potential consistency.
                         let vgk_fe = if tp.has_self_heating() {
-                            format!("(v_nl_final[{s}] + DEVICE_{dev_num}_VBIAS_ALPHA * (state.device_{dev_num}_tj - DEVICE_{dev_num}_TAMB))")
+                            format!(
+                                "(v_nl_final[{s}] + DEVICE_{dev_num}_VBIAS_ALPHA * (state.device_{dev_num}_tj - DEVICE_{dev_num}_TAMB))"
+                            )
                         } else {
                             format!("v_nl_final[{s}]")
                         };
@@ -7945,7 +7951,9 @@ impl RustEmitter {
                         ));
                     } else {
                         let vgk_fe = if tp.has_self_heating() {
-                            format!("(v_nl_final[{s}] + DEVICE_{dev_num}_VBIAS_ALPHA * (state.device_{dev_num}_tj - DEVICE_{dev_num}_TAMB))")
+                            format!(
+                                "(v_nl_final[{s}] + DEVICE_{dev_num}_VBIAS_ALPHA * (state.device_{dev_num}_tj - DEVICE_{dev_num}_TAMB))"
+                            )
                         } else {
                             format!("v_nl_final[{s}]")
                         };
