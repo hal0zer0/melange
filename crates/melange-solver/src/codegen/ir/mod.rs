@@ -2833,7 +2833,6 @@ impl CircuitIR {
             }
             spectral_radius_s_aneg = new_rho;
         }
-        let _ = alpha_be;
 
         // Emit the runtime BE-latch safety net for genuine trapezoidal builds
         // with a nonlinear system only: nothing to catch once we are already on
@@ -3261,7 +3260,7 @@ impl CircuitIR {
                 let xfmr_base = n_aug + mna.inductors.len() + mna.coupled_inductors.len() * 2;
                 let mut sat_xfmr = Vec::new();
                 let mut xfmr_offset = 0usize;
-                for (i, group) in mna.transformer_groups.iter().enumerate() {
+                for group in mna.transformer_groups.iter() {
                     if group.winding_isats.iter().any(|isat| isat.is_some()) {
                         let w = group.num_windings;
                         let aug_rows: Vec<usize> =
@@ -3286,7 +3285,6 @@ impl CircuitIR {
                             aug_rows,
                         });
                     }
-                    let _ = i;
                     xfmr_offset += group.num_windings;
                 }
                 sat_xfmr
@@ -3833,7 +3831,6 @@ impl CircuitIR {
     /// Called after `build_device_info` to populate `source_node` and `bulk_node`
     /// fields in MosfetParams, which are needed for body effect (GAMMA/PHI).
     fn resolve_mosfet_nodes(slots: &mut [DeviceSlot], mna: &MnaSystem) {
-        let mut mosfet_idx = 0;
         for slot in slots.iter_mut() {
             if let DeviceParams::Mosfet(ref mut mp) = slot.params {
                 if mp.has_body_effect() {
@@ -3851,10 +3848,8 @@ impl CircuitIR {
                         }
                     }
                 }
-                mosfet_idx += 1;
             }
         }
-        let _ = mosfet_idx; // suppress unused warning
     }
 
     /// Resolve diode model parameters from the netlist, with validation.

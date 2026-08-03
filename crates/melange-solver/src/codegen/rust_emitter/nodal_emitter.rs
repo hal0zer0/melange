@@ -1552,7 +1552,6 @@ impl RustEmitter {
             n
         };
         let n_aug = ir.topology.n_aug;
-        let num_outputs = ir.solver_config.output_nodes.len();
         let has_pots = !ir.pots.is_empty();
         let has_switches = !ir.switches.is_empty();
         let has_sat_ind = !ir.saturating_inductors.is_empty();
@@ -3473,7 +3472,6 @@ impl RustEmitter {
 
         code.push_str("}\n\n");
 
-        let _ = (n, m, n_nodes, n_aug, num_outputs);
 
         code
     }
@@ -3631,12 +3629,6 @@ impl RustEmitter {
     ) -> Result<String, CodegenError> {
         let n = ir.topology.n;
         let m = ir.topology.m;
-        let n_nodes = if ir.topology.n_nodes > 0 {
-            ir.topology.n_nodes
-        } else {
-            n
-        };
-        let num_outputs = ir.solver_config.output_nodes.len();
         let os_factor = ir.solver_config.oversampling_factor;
         let has_pots = !ir.pots.is_empty();
         // Runtime BE-latch: when the Nyquist-cycle detector has latched, force
@@ -4809,7 +4801,6 @@ impl RustEmitter {
         code.push_str("    output\n");
         code.push_str("}\n\n");
 
-        let _ = (num_outputs, n_nodes, has_pots);
 
         Ok(code)
     }
@@ -5589,7 +5580,6 @@ impl RustEmitter {
         } else {
             n
         };
-        let num_outputs = ir.solver_config.output_nodes.len();
         let os_factor = ir.solver_config.oversampling_factor;
         let has_behavioral = !ir.behavioral_sources.is_empty();
         let has_bsrc_time = ir.behavioral_sources.iter().any(|b| b.time_dependent);
@@ -6871,7 +6861,6 @@ impl RustEmitter {
         code.push_str("    output\n");
         code.push_str("}\n\n");
 
-        let _ = (num_outputs, n_nodes);
 
         code
     }
@@ -7980,7 +7969,6 @@ impl RustEmitter {
         ir: &CircuitIR,
         indent: &str,
     ) {
-        let n = ir.topology.n;
 
         for (dev_num, slot) in ir.device_slots.iter().enumerate() {
             for d in 0..slot.dimension {
@@ -8066,6 +8054,5 @@ impl RustEmitter {
             }
         }
 
-        let _ = n;
     }
 }

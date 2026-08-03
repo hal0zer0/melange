@@ -1499,7 +1499,7 @@ impl RustEmitter {
                 code.push_str("        let t = 1.0 / internal_rate;\n");
             }
             code.push_str("\n        // Add coupled inductor companion model conductances\n");
-            for (ci_idx, ci) in ir.coupled_inductors.iter().enumerate() {
+            for (ci_idx, _ci) in ir.coupled_inductors.iter().enumerate() {
                 // Check if either winding is switch-controlled
                 let mut l1_switch: Option<(usize, usize)> = None; // (sw_index, comp_index)
                 let mut l2_switch: Option<(usize, usize)> = None;
@@ -1558,7 +1558,6 @@ impl RustEmitter {
                     l2 = l2_expr,
                     ci = ci_idx,
                 ));
-                let _ = ci; // suppress unused warning
             }
             code.push_str(&format!(
                 "        // Preserve coupled-inductor transient state across rebuilds\n\
@@ -2790,7 +2789,7 @@ impl RustEmitter {
     /// Emit the 2x oversampling wrapper body.
     pub(super) fn emit_2x_wrapper(
         code: &mut String,
-        num_outputs: usize,
+        _num_outputs: usize,
         dc_block: bool,
         clamp_v: f64,
     ) {
@@ -2821,13 +2820,12 @@ impl RustEmitter {
         }
         code.push_str("    }\n");
         code.push_str("    result\n");
-        let _ = num_outputs; // used for signature type
     }
 
     /// Emit the 4x oversampling wrapper body (cascaded 2x stages).
     pub(super) fn emit_4x_wrapper(
         code: &mut String,
-        num_outputs: usize,
+        _num_outputs: usize,
         dc_block: bool,
         clamp_v: f64,
     ) {
@@ -2882,7 +2880,6 @@ impl RustEmitter {
         }
         code.push_str("    }\n");
         code.push_str("    result\n");
-        let _ = num_outputs; // used for signature type
     }
 }
 
