@@ -590,14 +590,6 @@ fn emit_nodal_nan_reset(
         }
     }
 
-    // Op-amp IIR dominant-pole filter state
-    for (idx, _) in ir.opamp_iir.iter().enumerate() {
-        code.push_str(&format!(
-            "{body}state.oa{idx}_x_prev = 0.0;\n\
-             {body}state.oa{idx}_y_prev = 0.0;\n"
-        ));
-    }
-
     // Pots are deliberately NOT reset here. The matrices already reflect the
     // current pot fields; snapping the fields to nominal without setting
     // matrices_dirty would leave fields and matrices disagreeing until the
@@ -1132,80 +1124,6 @@ impl RustEmitter {
             "pub const WARMUP_SAMPLES_RECOMMENDED: usize = {};\n\n",
             recommended_warmup_samples(ir)
         ));
-
-        // IIR op-amp constants (per-op-amp with GBW dominant pole)
-        //
-        // Bilinear-transformed dominant pole (PURE EXPLICIT formulation):
-        //   y[n] = a1*y[n-1] + b0*(x[n-1] + x[n-1]) = a1*y[n-1] + 2*b0*x[n-1]
-        //   a1 = (alpha*C_dom - Go) / (alpha*C_dom + Go)
-        //   b0 = Gm / (alpha*C_dom + Go)   (alpha = 2/T)
-        //
-        // Backward Euler discretisation of the same ODE:
-        //   (alpha_be*C_dom + Go) * y[n] = alpha_be*C_dom * y[n-1] + Gm * x[n]
-        //   a1_be = alpha_be*C_dom / (alpha_be*C_dom + Go)
-        //   b0_be = Gm / (alpha_be*C_dom + Go)   (alpha_be = 1/T)
-        // With explicit 1-sample-lag approximation (x[n] ≈ x[n-1]):
-        //   y_new = a1_be*y_prev + b0_be*x_prev      (no ×2 factor — BE uses a
-        //                                            single sample, not trap's
-        //                                            midpoint sum)
-        //   rhs[o] += Go * y_new                    (BE stamps current ×1, not
-        //                                            trap's ×2 average)
-        //
-        // Gm is NOT in G — it has been stripped in ir.rs. The entire VCCS current
-        // is injected in RHS using only previous-sample state (y_prev, x_prev):
-        //   y_new = a1*y_prev + 2*b0*x_prev          (trap; computed BEFORE solve)
-        //   rhs[o] += Go*(y_new + y_prev)            (trap VCCS injection, ×2 avg)
-        //
-        // DC gain checks:
-        //   trap: y_ss*(1 - a1_trap) = 2*b0*x_ss  ⇒  y_ss = AOL*x_ss ✓
-        //   BE:   y_ss*(1 - a1_be)   = b0_be*x_ss ⇒  y_ss = AOL*x_ss ✓
-        //
-        // After solve, save x_new = v[np] - v[nm] from the converged solution and
-        // advance y_prev = y_new (pre-computed value, before it was consumed by RHS).
-        //
-        // The MNA primary integrator's choice drives which discretisation fires.
-        // Mixing a trap IIR with a BE MNA step (or vice versa) puts the op-amp's
-        // internal dominant-pole state on a different time grid than v_prev — NR
-        // diverges from DC_OP on stiff op-amp circuits (pipe-shouter at default
-        // pots: v[21] drifts 186 V in 50 warmup samples under a BE MNA mixed
-        // with a trap IIR).
-        let be = ir.solver_config.backward_euler;
-        let internal_rate =
-            ir.solver_config.sample_rate * ir.solver_config.oversampling_factor as f64;
-        for (idx, oa_iir) in ir.opamp_iir.iter().enumerate() {
-            let alpha_oa = if be {
-                internal_rate
-            } else {
-                2.0 * internal_rate
-            };
-            let denom = alpha_oa * oa_iir.c_dom + oa_iir.go;
-            let a1 = if be {
-                alpha_oa * oa_iir.c_dom / denom
-            } else {
-                (alpha_oa * oa_iir.c_dom - oa_iir.go) / denom
-            };
-            let b0 = oa_iir.gm / denom;
-            code.push_str(&format!(
-                "/// IIR op-amp {idx}: Gm={:.4}, Go={:.4}, C_dom={:.4e} (pure explicit)\n",
-                oa_iir.gm, oa_iir.go, oa_iir.c_dom
-            ));
-            code.push_str(&format!("const OA{idx}_GM: f64 = {:.17e};\n", oa_iir.gm));
-            code.push_str(&format!("const OA{idx}_GO: f64 = {:.17e};\n", oa_iir.go));
-            code.push_str(&format!(
-                "const OA{idx}_C_DOM: f64 = {:.17e};\n",
-                oa_iir.c_dom
-            ));
-            code.push_str(&format!("const OA{idx}_A1_DEFAULT: f64 = {:.17e};\n", a1));
-            code.push_str(&format!("const OA{idx}_B0_DEFAULT: f64 = {:.17e};\n", b0));
-            code.push_str(&format!("const OA{idx}_OUT: usize = {};\n", oa_iir.out_idx));
-            if let Some(vhi) = Some(oa_iir.vclamp_hi).filter(|v| v.is_finite()) {
-                code.push_str(&format!("const OA{idx}_VCC: f64 = {:.17e};\n", vhi));
-            }
-            if let Some(vlo) = Some(oa_iir.vclamp_lo).filter(|v| v.is_finite()) {
-                code.push_str(&format!("const OA{idx}_VEE: f64 = {:.17e};\n", vlo));
-            }
-            code.push('\n');
-        }
 
         // Op-amp slew-rate constants (V/s). Emitted for every op-amp in
         // `ir.opamps` whose `.model OA(SR=…)` was finite. The SR constant
@@ -2103,20 +2021,6 @@ impl RustEmitter {
             code.push('\n');
         }
 
-        // IIR op-amp state fields
-        if !ir.opamp_iir.is_empty() {
-            code.push_str("    // --- IIR op-amp dominant pole filter state ---\n");
-            for (idx, _oa_iir) in ir.opamp_iir.iter().enumerate() {
-                code.push_str(&format!(
-                    "    pub oa{idx}_y_prev: f64,\n\
-                     \x20   pub oa{idx}_x_prev: f64,\n\
-                     \x20   pub oa{idx}_a1: f64,\n\
-                     \x20   pub oa{idx}_b0: f64,\n"
-                ));
-            }
-            code.push('\n');
-        }
-
         // Device parameter state fields (runtime-adjustable)
         let device_params = device_param_template_data(ir);
         if !device_params.is_empty() {
@@ -2396,35 +2300,6 @@ impl RustEmitter {
             ));
         }
 
-        // IIR op-amp state initialization: initialize to DC steady state.
-        // At DC, v+ - v- = Go/Gm * v_out ≈ 22µV (for AOL=200K), and the Boyle
-        // internal node y_ss = AOL*(v+-v-) = v_out level. This is physically correct
-        // — NOT a rounding error. Initializing to zero makes the op-amps think they
-        // have to drive a huge imbalance on startup and causes oscillation.
-        for (idx, oa_iir) in ir.opamp_iir.iter().enumerate() {
-            let np_val = match oa_iir.np_idx {
-                Some(i) if i < ir.dc_operating_point.len() => ir.dc_operating_point[i],
-                _ => 0.0,
-            };
-            let nm_val = match oa_iir.nm_idx {
-                Some(i) if i < ir.dc_operating_point.len() => ir.dc_operating_point[i],
-                _ => 0.0,
-            };
-            let x0 = np_val - nm_val;
-            let y0 = if oa_iir.go > 0.0 {
-                (oa_iir.gm / oa_iir.go) * x0
-            } else {
-                0.0
-            };
-            code.push_str(&format!(
-                "            oa{idx}_y_prev: {:.17e},\n\
-                 \x20           oa{idx}_x_prev: {:.17e},\n\
-                 \x20           oa{idx}_a1: OA{idx}_A1_DEFAULT,\n\
-                 \x20           oa{idx}_b0: OA{idx}_B0_DEFAULT,\n",
-                y0, x0
-            ));
-        }
-
         for (idx, pot) in ir.pots.iter().enumerate() {
             let r_nom = 1.0 / pot.g_nominal;
             code.push_str(&format!(
@@ -2628,30 +2503,6 @@ impl RustEmitter {
             code.push_str(&format!(
                 "        self.sat_xg_{idx}_m_eff = [{}];\n",
                 m_vals.join(", "),
-            ));
-        }
-        // Reset IIR op-amp state — to DC steady state (see default() comment).
-        for (idx, oa_iir) in ir.opamp_iir.iter().enumerate() {
-            let np_val = match oa_iir.np_idx {
-                Some(i) if i < ir.dc_operating_point.len() => ir.dc_operating_point[i],
-                _ => 0.0,
-            };
-            let nm_val = match oa_iir.nm_idx {
-                Some(i) if i < ir.dc_operating_point.len() => ir.dc_operating_point[i],
-                _ => 0.0,
-            };
-            let x0 = np_val - nm_val;
-            let y0 = if oa_iir.go > 0.0 {
-                (oa_iir.gm / oa_iir.go) * x0
-            } else {
-                0.0
-            };
-            code.push_str(&format!(
-                "        self.oa{idx}_y_prev = {:.17e};\n\
-                 \x20       self.oa{idx}_x_prev = {:.17e};\n\
-                 \x20       self.oa{idx}_a1 = OA{idx}_A1_DEFAULT;\n\
-                 \x20       self.oa{idx}_b0 = OA{idx}_B0_DEFAULT;\n",
-                y0, x0
             ));
         }
         for (idx, pot) in ir.pots.iter().enumerate() {
@@ -3148,36 +2999,6 @@ impl RustEmitter {
                 code.push_str(&format!(
                     "        for i in {}..{} {{ for j in 0..N {{ {}a_neg_sub[i][j] = 0.0; }} }}\n",
                     n_nodes, n_aug, cp
-                ));
-            }
-        }
-
-        // Recompute IIR op-amp filter coefficients for the new sample rate.
-        // Discretisation must match the MNA primary integrator (see
-        // `emit_opamp_iir_constants` for derivation). Under trap the IIR
-        // uses midpoint-rule coefficients and a ×2 input multiplier at the
-        // injection site; under BE the IIR uses a first-order explicit
-        // coefficient set and a single (non-averaged) injection.
-        for (idx, _oa_iir) in ir.opamp_iir.iter().enumerate() {
-            if ir.solver_config.backward_euler {
-                code.push_str(&format!(
-                    "        {{\n\
-                     \x20           // BE: alpha_oa = 1/T\n\
-                     \x20           let alpha_oa = internal_rate;\n\
-                     \x20           let denom = alpha_oa * OA{idx}_C_DOM + OA{idx}_GO;\n\
-                     \x20           self.oa{idx}_a1 = (alpha_oa * OA{idx}_C_DOM) / denom;\n\
-                     \x20           self.oa{idx}_b0 = OA{idx}_GM / denom;\n\
-                     \x20       }}\n"
-                ));
-            } else {
-                code.push_str(&format!(
-                    "        {{\n\
-                     \x20           // Trap: alpha_oa = 2/T\n\
-                     \x20           let alpha_oa = 2.0 * internal_rate;\n\
-                     \x20           let denom = alpha_oa * OA{idx}_C_DOM + OA{idx}_GO;\n\
-                     \x20           self.oa{idx}_a1 = (alpha_oa * OA{idx}_C_DOM - OA{idx}_GO) / denom;\n\
-                     \x20           self.oa{idx}_b0 = OA{idx}_GM / denom;\n\
-                     \x20       }}\n"
                 ));
             }
         }
@@ -4141,32 +3962,6 @@ impl RustEmitter {
                 }
             }
         }
-        // IIR op-amp RHS injection (PURE EXPLICIT — Gm is NOT in G):
-        //   trap: y_new = a1*y_prev + 2*b0*x_prev
-        //         rhs[o] += Go*(y_new + y_prev)      (trap: midpoint + ×2 stamp)
-        //   BE:   y_new = a1*y_prev + b0*x_prev      (no ×2 — single sample)
-        //         rhs[o] += Go*y_new                  (BE stamps current ×1)
-        // At DC (both schemes): y_ss = AOL*x_ss ✓ — see
-        // `emit_opamp_iir_constants` for the full derivation.
-        for (idx, oa_iir) in ir.opamp_iir.iter().enumerate() {
-            if ir.solver_config.backward_euler {
-                code.push_str(&format!(
-                    "    let oa{idx}_y_new = state.oa{idx}_a1 * state.oa{idx}_y_prev + state.oa{idx}_b0 * state.oa{idx}_x_prev;\n"
-                ));
-                code.push_str(&format!(
-                    "    rhs[{out}] += OA{idx}_GO * oa{idx}_y_new;\n",
-                    out = oa_iir.out_idx
-                ));
-            } else {
-                code.push_str(&format!(
-                    "    let oa{idx}_y_new = state.oa{idx}_a1 * state.oa{idx}_y_prev + 2.0 * state.oa{idx}_b0 * state.oa{idx}_x_prev;\n"
-                ));
-                code.push_str(&format!(
-                    "    rhs[{out}] += OA{idx}_GO * (oa{idx}_y_new + state.oa{idx}_y_prev);\n",
-                    out = oa_iir.out_idx
-                ));
-            }
-        }
         code.push('\n');
 
         // Input source (Thevenin).
@@ -4962,24 +4757,6 @@ impl RustEmitter {
         if m > 0 {
             code.push_str("    state.i_nl_prev_prev = state.i_nl_prev;\n");
             code.push_str("    state.i_nl_prev = i_nl;\n");
-        }
-        // IIR op-amp state update (PURE EXPLICIT):
-        //   x_prev ← x_new (from converged v, for next sample's explicit injection)
-        //   y_prev ← y_new (pre-computed before solve)
-        for (idx, oa_iir) in ir.opamp_iir.iter().enumerate() {
-            let x_expr = match (oa_iir.np_idx, oa_iir.nm_idx) {
-                (Some(np), Some(nm)) => format!("v[{np}] - v[{nm}]"),
-                (Some(np), None) => format!("v[{np}]"),
-                (None, Some(nm)) => format!("-v[{nm}]"),
-                (None, None) => "0.0".to_string(),
-            };
-            code.push_str(&format!(
-                "    {{\n\
-                 \x20       let x_new = {x_expr};\n\
-                 \x20       state.oa{idx}_x_prev = x_new;\n\
-                 \x20       state.oa{idx}_y_prev = oa{idx}_y_new;\n\
-                 \x20   }}\n"
-            ));
         }
         for (idx, _pot) in ir.pots.iter().enumerate() {
             code.push_str(&format!(
@@ -5919,31 +5696,6 @@ impl RustEmitter {
             }
         }
         // IIR op-amp RHS injection (PURE EXPLICIT — Gm is NOT in G):
-        //   trap: y_new = a1*y_prev + 2*b0*x_prev
-        //         rhs[o] += Go*(y_new + y_prev)      (trap: midpoint + ×2 stamp)
-        //   BE:   y_new = a1*y_prev + b0*x_prev      (no ×2 — single sample)
-        //         rhs[o] += Go*y_new                  (BE stamps current ×1)
-        // At DC (both schemes): y_ss = AOL*x_ss ✓ — see
-        // `emit_opamp_iir_constants` for the full derivation.
-        for (idx, oa_iir) in ir.opamp_iir.iter().enumerate() {
-            if ir.solver_config.backward_euler {
-                code.push_str(&format!(
-                    "    let oa{idx}_y_new = state.oa{idx}_a1 * state.oa{idx}_y_prev + state.oa{idx}_b0 * state.oa{idx}_x_prev;\n"
-                ));
-                code.push_str(&format!(
-                    "    rhs[{out}] += OA{idx}_GO * oa{idx}_y_new;\n",
-                    out = oa_iir.out_idx
-                ));
-            } else {
-                code.push_str(&format!(
-                    "    let oa{idx}_y_new = state.oa{idx}_a1 * state.oa{idx}_y_prev + 2.0 * state.oa{idx}_b0 * state.oa{idx}_x_prev;\n"
-                ));
-                code.push_str(&format!(
-                    "    rhs[{out}] += OA{idx}_GO * (oa{idx}_y_new + state.oa{idx}_y_prev);\n",
-                    out = oa_iir.out_idx
-                ));
-            }
-        }
         code.push('\n');
 
         // Input source (Thevenin)
@@ -7057,24 +6809,6 @@ impl RustEmitter {
             if ir.sparsity.lu.is_some() {
                 code.push_str("    state.chord_dense = chord_dense;\n");
             }
-        }
-        // IIR op-amp state update (PURE EXPLICIT):
-        //   x_prev ← x_new (from converged v, for next sample's explicit injection)
-        //   y_prev ← y_new (pre-computed before solve)
-        for (idx, oa_iir) in ir.opamp_iir.iter().enumerate() {
-            let x_expr = match (oa_iir.np_idx, oa_iir.nm_idx) {
-                (Some(np), Some(nm)) => format!("v[{np}] - v[{nm}]"),
-                (Some(np), None) => format!("v[{np}]"),
-                (None, Some(nm)) => format!("-v[{nm}]"),
-                (None, None) => "0.0".to_string(),
-            };
-            code.push_str(&format!(
-                "    {{\n\
-                 \x20       let x_new = {x_expr};\n\
-                 \x20       state.oa{idx}_x_prev = x_new;\n\
-                 \x20       state.oa{idx}_y_prev = oa{idx}_y_new;\n\
-                 \x20   }}\n"
-            ));
         }
         for (idx, _pot) in ir.pots.iter().enumerate() {
             code.push_str(&format!(

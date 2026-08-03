@@ -106,10 +106,6 @@ pub struct CircuitIR {
     /// Pre-analyzed sparsity patterns for compile-time matrices.
     #[serde(default)]
     pub sparsity: SparseInfo,
-    /// IIR op-amp filters: per-op-amp discrete-time dominant pole data.
-    /// Populated for each op-amp with finite GBW > 0.
-    #[serde(default)]
-    pub opamp_iir: Vec<OpampIirData>,
     /// Authentic circuit noise configuration + source lists. See `NoiseIR`.
     #[serde(default)]
     pub noise: NoiseIR,
@@ -614,36 +610,6 @@ pub struct Matrices {
     /// A_neg_sub = (4/T)*C - G, N×N row-major (sub-step history)
     #[serde(default)]
     pub a_neg_sub: Vec<f64>,
-}
-
-/// IIR op-amp dominant pole filter data for codegen.
-///
-/// Instead of stamping Gm (~4000 S) into the MNA matrix (which causes catastrophic
-/// conditioning), the GBW dominant pole is modeled as a per-sample discrete-time
-/// IIR filter. The filter computes the VCCS current externally and injects it
-/// into the RHS vector, keeping the MNA matrix well-conditioned.
-///
-/// The continuous-time transfer function is: H(s) = Gm / (1 + s*C_dom/Go)
-/// Discretized via bilinear transform: y[n] = a1*y[n-1] + b0*(x[n] + x[n-1])
-/// where x = V+ - V-, and the output current injected at the output node is Go*y.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OpampIirData {
-    /// Transconductance Gm = AOL/ROUT
-    pub gm: f64,
-    /// Output conductance Go = 1/ROUT
-    pub go: f64,
-    /// Dominant pole capacitance C_dom = AOL/(2*pi*GBW*ROUT)
-    pub c_dom: f64,
-    /// 0-indexed non-inverting input node (None if grounded)
-    pub np_idx: Option<usize>,
-    /// 0-indexed inverting input node (None if grounded)
-    pub nm_idx: Option<usize>,
-    /// 0-indexed output node
-    pub out_idx: usize,
-    /// Upper voltage clamp (VCC)
-    pub vclamp_hi: f64,
-    /// Lower voltage clamp (VEE)
-    pub vclamp_lo: f64,
 }
 
 /// Op-amp output voltage clamping for code generation.
@@ -2349,7 +2315,6 @@ impl CircuitIR {
                 .map(|oa| opamp_ir_from_info(oa, netlist, mna))
                 .collect(),
             sparsity,
-            opamp_iir: Vec::new(), // IIR op-amp handled in nodal path only
             noise: build_noise_ir(config, netlist, mna),
             named_constants,
             runtime_sources,
@@ -2534,58 +2499,6 @@ impl CircuitIR {
         // - With VCAs: the VCA feedback loop needs tight implicit coupling to the op-amp.
         //   Leave Gm in G (ideal op-amp, no GBW rolloff in solver). Accept the ill-
         //   conditioning — for VCR-ALC-class circuits it's tolerable at N~18.
-        let has_vca = !mna.vcas.is_empty();
-        let mut opamp_iir_data: Vec<OpampIirData> = Vec::new();
-        // IIR op-amp path is currently disabled: the explicit 1-sample-delay
-        // feedback causes main-NR divergence on circuits like the Klon Centaur
-        // (sub-step fallback runs every sample, drops us to 0.25x realtime, and
-        // itself omits the IIR RHS stamp so the op-amps don't function).
-        // Falling through to the ideal op-amp path (Gm in G) works for all
-        // currently validated circuits. Re-enable when IIR math is fixed.
-        #[allow(clippy::overly_complex_bool_expr)]
-        if !has_vca && false {
-            for oa in &mna.opamps {
-                if oa.gbw.is_finite() && oa.gbw > 0.0 && oa.n_out_idx > 0 {
-                    let o = oa.n_out_idx - 1;
-                    let gm = oa.aol / oa.r_out;
-                    let go = 1.0 / oa.r_out;
-                    let np = oa.n_plus_idx;
-                    let nm = oa.n_minus_idx;
-                    let c_dom = oa.iir_c_dom;
-
-                    // Pure-explicit IIR: strip Gm from G entirely.
-                    // Mirror of the (corrected) VCCS stamp polarity: the stamp
-                    // is np -= gm / nm += gm, so removing it is np += gm /
-                    // nm -= gm (same direction as the selective Gm cap below).
-                    if np > 0 && o < n {
-                        aug.g[o][np - 1] += gm;
-                    }
-                    if nm > 0 && o < n {
-                        aug.g[o][nm - 1] -= gm;
-                    }
-
-                    let np_idx = if np > 0 { Some(np - 1) } else { None };
-                    let nm_idx = if nm > 0 { Some(nm - 1) } else { None };
-
-                    opamp_iir_data.push(OpampIirData {
-                        gm,
-                        go,
-                        c_dom,
-                        np_idx,
-                        nm_idx,
-                        out_idx: o,
-                        vclamp_hi: oa.vcc,
-                        vclamp_lo: oa.vee,
-                    });
-
-                    log::info!(
-                    "IIR op-amp {} (pure explicit): Gm={:.2} stripped from G[{}], Go={:.4}, C_dom={:.3e}",
-                    oa.name, gm, o, go, c_dom,
-                );
-                }
-            }
-        } // end if !has_vca
-
         // Selective op-amp VCCS Gm cap.
         //
         // High-AOL op-amps (Gm ≈ AOL/r_out, often 200,000 S) make the LU back-
@@ -3417,7 +3330,6 @@ impl CircuitIR {
                 .map(|oa| opamp_ir_from_info(oa, netlist, mna))
                 .collect(),
             sparsity,
-            opamp_iir: opamp_iir_data,
             noise: build_noise_ir(config, netlist, mna),
             named_constants,
             runtime_sources,
