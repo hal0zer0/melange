@@ -5,7 +5,6 @@
 //! Schur and full-LU process_sample, active-set resolve, device evaluation,
 //! and voltage limiting.
 
-use super::RustEmitter;
 use super::dk_emitter::NoiseEmission;
 use super::helpers::{
     device_param_template_data, emit_pentode_nr_dk_stamp, fmt_f64, format_matrix_rows,
@@ -13,8 +12,9 @@ use super::helpers::{
     self_heating_device_data,
 };
 use super::nr_helpers::{emit_nr_singular_fallback, emit_schur_nr_limit_and_converge};
-use crate::codegen::CodegenError;
+use super::RustEmitter;
 use crate::codegen::ir::{BehavioralSourceIR, CircuitIR, DeviceParams, DeviceType, LuOp};
+use crate::codegen::CodegenError;
 use crate::expr::{ExprResolver, Var};
 
 /// Resolves behavioral-expression leaves to generated-Rust strings against the

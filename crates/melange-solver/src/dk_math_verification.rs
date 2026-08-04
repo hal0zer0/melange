@@ -12,7 +12,7 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::dk::{DkKernel, invert_matrix, mat_mul, mat_vec_mul};
+    use crate::dk::{invert_matrix, mat_mul, mat_vec_mul, DkKernel};
     use crate::mna::MnaSystem;
     use crate::parser::Netlist;
 

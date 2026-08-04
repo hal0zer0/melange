@@ -22,7 +22,7 @@
 use melange_devices::tube::KorenPentode;
 use melange_devices::{
     BjtEbersMoll, BjtGummelPoon, BjtPolarity, DiodeShockley, Jfet, JfetChannel, Mosfet,
-    MosfetChannelType as ChannelType, VT_ROOM, Vca,
+    MosfetChannelType as ChannelType, Vca, VT_ROOM,
 };
 
 const REL: f64 = 1e-12; // machine-precision agreement with the closed form
