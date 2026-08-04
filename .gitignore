@@ -37,3 +37,6 @@ ngspice_*
 *.archived
 *.disabled
 golden-baselines/
+
+# Local, machine-specific melange context (ecosystem, inter-agent mail) — not public
+CLAUDE.local.md
