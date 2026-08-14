@@ -600,6 +600,31 @@ fn run_melange_solver_from_str(
         }
     }
 
+    // Post-DC-block output ceiling (default 10 V, see docs/aidocs/SIGNAL_LEVELS.md
+    // "Signal Level Contract"). Sized for line-level circuits; a circuit whose DC
+    // operating point carries a high-voltage rail (e.g. a 250 V tube B+) can
+    // legitimately swing its output node tens of volts under large-signal drive.
+    // A fixed 10 V ceiling silently hard-clips that into a square wave, which
+    // then reads as a large melange-vs-ngspice divergence that is actually a
+    // harness/config gap, not a solver bug (see triode_cc overdrive
+    // investigation, 2026-08). Auto-scale from the DC operating point's node
+    // voltage headroom (`dc_preflight`, already computed above) so any
+    // high-rail circuit validated through this path gets a ceiling that won't
+    // clip a legitimate large-signal swing; never lower it below the existing
+    // 10 V default so line-level circuits keep their historical clamp
+    // behavior byte-for-byte.
+    let auto_clamp_v = dc_preflight
+        .as_ref()
+        .map(|dc| {
+            dc.v_node
+                .iter()
+                .cloned()
+                .fold(0.0_f64, |acc, v| acc.max(v.abs()))
+                * 3.0
+        })
+        .unwrap_or(0.0)
+        .max(CodegenConfig::default().output_clamp_v);
+
     let config = CodegenConfig {
         circuit_name: "validate".to_string(),
         sample_rate,
@@ -609,6 +634,7 @@ fn run_melange_solver_from_str(
         dc_block: true,
         router_dk_unstable: decision.dk_unstable,
         router_dk_spectral_radius: decision.spectral_radius,
+        output_clamp_v: auto_clamp_v,
         ..CodegenConfig::default()
     };
     let generator = CodeGenerator::new(config);

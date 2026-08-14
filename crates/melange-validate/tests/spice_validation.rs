@@ -517,6 +517,32 @@ fn run_melange_codegen_with_main(
         }
     }
 
+    // Post-DC-block output ceiling (CodegenConfig::output_clamp_v, default 10 V
+    // per docs/aidocs/SIGNAL_LEVELS.md's "Signal Level Contract"). The default
+    // is sized for line-level circuits; a circuit whose DC operating point
+    // carries a high-voltage rail (e.g. a 250 V tube B+) can legitimately swing
+    // its output node tens of volts under normal large-signal drive, and a
+    // fixed 10 V ceiling silently hard-clips that into a square wave — which
+    // then reads as a huge melange-vs-ngspice divergence that is actually a
+    // harness/config gap, not a solver bug (see triode_cc overdrive
+    // investigation). Auto-scale the ceiling from the DC operating point's
+    // node-voltage headroom (already computed above as `dc_preflight`) so any
+    // future high-rail circuit validated through this harness gets a ceiling
+    // that won't clip a legitimate large-signal swing; never lower it below
+    // the existing 10 V default so all line-level circuits keep their
+    // historical clamp behavior byte-for-byte.
+    let auto_clamp_v = dc_preflight
+        .as_ref()
+        .map(|dc| {
+            dc.v_node
+                .iter()
+                .cloned()
+                .fold(0.0_f64, |acc, v| acc.max(v.abs()))
+                * 3.0
+        })
+        .unwrap_or(0.0)
+        .max(CodegenConfig::default().output_clamp_v);
+
     // Generate code — dc_block: true to match runtime solver's built-in DC blocker
     let config = CodegenConfig {
         circuit_name: "spice_val".to_string(),
@@ -525,6 +551,7 @@ fn run_melange_codegen_with_main(
         output_nodes: vec![output_node],
         input_resistance: 1.0,
         dc_block: true,
+        output_clamp_v: auto_clamp_v,
         ..CodegenConfig::default()
     };
     let generator = CodeGenerator::new(config);
@@ -2114,6 +2141,83 @@ fn test_triode_cc_vs_spice() {
     assert!(
         result.report.passed,
         "Triode CC validation failed:\n{}",
+        result.report.summary()
+    );
+}
+
+/// Test: 12AX7 common-cathode triode gain stage vs ngspice, PLATE OVERDRIVE.
+///
+/// Drives the same fixture as `test_triode_cc_vs_spice` at 1.0V/500Hz (25x
+/// the small-signal amplitude): the grid swings roughly -2.2V..-0.2V (stays
+/// below cutoff, no grid conduction) but the plate node swings tens of volts
+/// as the triode is driven hard into its nonlinear knee. This previously
+/// diverged ~78% RMS / ~50V peak / corr 0.933 from ngspice.
+///
+/// Root cause (investigated 2026-08, dr-debuggenshmirtz): NOT a solver/NR/
+/// device-model bug. Per-sample dumps of melange's raw (pre-DC-block,
+/// pre-clamp) node voltages against ngspice's raw node voltages agree to
+/// within ~0.1V even at 200+V swings (diag_nr_max_iter_count/be_fallback/
+/// voltage_damp/nan_reset all stayed 0 throughout) — the physics and the NR
+/// solve are correct. The divergence was entirely the harness's hardcoded
+/// `output_clamp_v` default of 10V (a line-level-circuit safety ceiling,
+/// see docs/aidocs/SIGNAL_LEVELS.md) silently hard-clipping this circuit's
+/// legitimate ~50-60V raw output swing (this fixture taps the triode plate
+/// directly through a coupling cap, with the B+ rail at 250V) into a flat
+/// +/-10V square wave every sample. Fixed by auto-scaling the ceiling from
+/// the DC operating point's node-voltage headroom in
+/// `run_melange_solver_from_str` (src/lib.rs) — never lowers below the
+/// historical 10V default, so line-level circuits are unaffected.
+#[test]
+#[ignore] // requires ngspice
+fn test_triode_cc_overdrive_vs_spice() {
+    assert!(is_ngspice_available(), "ngspice not found");
+
+    println!("\n=== 12AX7 Common-Cathode Triode Overdrive Validation ===");
+
+    // 500 Hz, 1.0V drive: grid swings well below cutoff (no grid conduction)
+    // but the plate is driven hard into overdrive.
+    let n = (SAMPLE_RATE * 0.5) as usize;
+    let input: Vec<f64> = (0..n)
+        .map(|i| 1.0 * (2.0 * std::f64::consts::PI * 500.0 * i as f64 / SAMPLE_RATE).sin())
+        .collect();
+
+    let netlist_path = test_data_dir().join("triode_cc").join("circuit.cir");
+
+    // Gates measured 2026-08 after the output_clamp_v auto-scale fix: RMS
+    // 0.0935%, peak err 6.06e-2 V, max rel err 1.01e-3, corr 0.99999957 —
+    // matching the small-signal test's precision (0.1025% / 0.99999948).
+    // Tolerances sit ~5x over measured, same headroom convention as the
+    // small-signal test above.
+    let config = ComparisonConfig {
+        rms_error_tolerance: 0.005,
+        peak_error_tolerance: 0.15,
+        max_relative_tolerance: 0.02,
+        correlation_min: 0.999,
+        thd_error_tolerance_db: 5.0,
+        full_scale: 1.0,
+        skip_thd: true, // overdriven triode: solver-parity test, not distortion
+        settle_time_s: 0.1,
+    };
+
+    let result = validate_circuit(&netlist_path, &input, SAMPLE_RATE, "out", &config)
+        .expect("triode CC overdrive validation failed to run");
+
+    println!("  Samples:     {}", result.report.sample_count);
+    println!(
+        "  RMS Error:   {:.6e} ({:.4}%)",
+        result.report.rms_error,
+        result.report.normalized_rms_error * 100.0
+    );
+    println!("  Peak Error:  {:.6e}", result.report.peak_error);
+    println!("  Max Rel Err: {:.6e}", result.report.max_relative_error);
+    println!(
+        "  Correlation: {:.8}",
+        result.report.correlation_coefficient
+    );
+
+    assert!(
+        result.report.passed,
+        "Triode CC overdrive validation failed:\n{}",
         result.report.summary()
     );
 }
