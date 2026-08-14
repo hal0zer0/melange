@@ -274,6 +274,27 @@ enum Commands {
         /// Use relaxed tolerances (1% RMS, 0.999 correlation)
         #[arg(long)]
         relaxed: bool,
+
+        /// Override RMS-error tolerance, in percent (e.g. 2 = 2%). Overrides the
+        /// --relaxed/strict profile value for a node-class gate.
+        #[arg(long, value_name = "PCT")]
+        rms_tolerance: Option<f64>,
+
+        /// Override peak-error tolerance, in volts (absolute).
+        #[arg(long, value_name = "V")]
+        peak_tolerance: Option<f64>,
+
+        /// Override max-relative-error tolerance, in percent (e.g. 5 = 5%).
+        #[arg(long, value_name = "PCT")]
+        max_rel_tolerance: Option<f64>,
+
+        /// Override minimum correlation coefficient (0.0–1.0).
+        #[arg(long, value_name = "X")]
+        corr_min: Option<f64>,
+
+        /// Override THD-error tolerance, in dB.
+        #[arg(long, value_name = "DB")]
+        thd_tolerance: Option<f64>,
     },
 
     /// Simulate circuit with input signal
@@ -764,6 +785,11 @@ fn main() -> Result<()> {
             input_node,
             csv,
             relaxed,
+            rms_tolerance,
+            peak_tolerance,
+            max_rel_tolerance,
+            corr_min,
+            thd_tolerance,
         } => {
             // Validate numeric CLI parameters
             if sample_rate <= 0.0 || !sample_rate.is_finite() {
@@ -787,6 +813,13 @@ fn main() -> Result<()> {
                 &input_node,
                 csv.as_ref(),
                 relaxed,
+                ToleranceOverrides {
+                    rms_pct: rms_tolerance,
+                    peak_v: peak_tolerance,
+                    max_rel_pct: max_rel_tolerance,
+                    corr_min,
+                    thd_db: thd_tolerance,
+                },
             )
         }
         Commands::Simulate {
@@ -2090,6 +2123,22 @@ fn compile_circuit_source(
     Ok(())
 }
 
+/// Optional per-metric tolerance overrides from the CLI, applied on top of the
+/// --relaxed/strict base profile. `None` fields keep the profile value.
+#[derive(Default)]
+struct ToleranceOverrides {
+    /// RMS error tolerance, percent (2.0 = 2%).
+    rms_pct: Option<f64>,
+    /// Peak error tolerance, volts (absolute).
+    peak_v: Option<f64>,
+    /// Max relative error tolerance, percent (5.0 = 5%).
+    max_rel_pct: Option<f64>,
+    /// Minimum correlation coefficient (0.0–1.0).
+    corr_min: Option<f64>,
+    /// THD error tolerance, dB.
+    thd_db: Option<f64>,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn validate_circuit_source(
     circuit_source: &circuits::CircuitSource,
@@ -2100,6 +2149,7 @@ fn validate_circuit_source(
     input_node: &str,
     csv_output: Option<&PathBuf>,
     relaxed: bool,
+    tol: ToleranceOverrides,
 ) -> Result<()> {
     // Match parse-time node normalization (lowercase, gnd→0).
     let input_node_owned = melange_solver::parser::normalize_node_name(input_node);
@@ -2194,11 +2244,29 @@ fn validate_circuit_source(
     println!("  {} samples", input_signal.len());
 
     // Step 4: Configure comparison
-    let config = if relaxed {
+    let mut config = if relaxed {
         ComparisonConfig::relaxed()
     } else {
         ComparisonConfig::strict()
     };
+    // Apply per-metric overrides on top of the base profile. Percent inputs
+    // (RMS, max-rel) are converted to the fractional form the comparator uses;
+    // peak (V), correlation (0–1), and THD (dB) pass through directly.
+    if let Some(pct) = tol.rms_pct {
+        config.rms_error_tolerance = pct / 100.0;
+    }
+    if let Some(v) = tol.peak_v {
+        config.peak_error_tolerance = v;
+    }
+    if let Some(pct) = tol.max_rel_pct {
+        config.max_relative_tolerance = pct / 100.0;
+    }
+    if let Some(x) = tol.corr_min {
+        config.correlation_min = x;
+    }
+    if let Some(db) = tol.thd_db {
+        config.thd_error_tolerance_db = db;
+    }
 
     let options = ValidationOptions {
         generate_html_on_failure: false,
