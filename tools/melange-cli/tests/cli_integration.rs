@@ -501,3 +501,123 @@ fn test_compile_missing_node() {
         stderr
     );
 }
+
+// ============================================================================
+// Routing-rate regression (2026-08-14): trap-unstable-only-at-internal-rate
+// circuit must route to nodal under DEFAULT (auto) flags, not silently
+// diverge on DK Schur.
+// ============================================================================
+
+/// Verbatim copy of `melange-circuits/local-docs/g10-osc-sq2-repro.cir`
+/// (2026-08-14) — a Farfisa Compact G10 master LC oscillator (Ge PNP,
+/// transformer-coupled regenerative feedback). Embedded so this test does
+/// not depend on the sibling `melange-circuits` checkout being present.
+///
+/// This circuit is trap-stable-looking at the 48 kHz host rate but
+/// genuinely trap-unstable at the 192 kHz internal rate `--oversampling 4`
+/// ships (spectral_radius(S*A_neg) = 1.315, a real growing mode — the
+/// circuit is a regenerative oscillator, unstable at its DC-OP
+/// linearization by design). Before the routing-rate fix, `auto_route`
+/// built its kernel at the host rate, missed the instability, and shipped
+/// this on DK Schur — which has no full-LU NR fallback for the resulting
+/// device-state-transition NR failure. It diverged to a nonphysical peak of
+/// ~40 kV (`nr_max_iter_count` in the thousands). Routing to nodal (which
+/// has the full-LU NR fallback) converges cleanly to a bounded, physical
+/// oscillation.
+const G10_OSCILLATOR: &str = "\
+Farfisa Compact G10 reference chain (master osc + squarer + divider + keying)
+Vrail rail 0 DC 8
+Vvib vterm 0 DC 8
+.runtime Vvib as v_g10_vterm
+C_kick in b1 1n
+R_e18 rail node_a 1.8k
+C_e25 rail node_a 25u
+L_fb node_b node_a 8.35m
+R_180 node_b e1 180
+Q_TN1G c1 b1 e1 SFT307
+L_tank c1 tanklo 1.36
+K1 L_tank L_fb 0.3
+C_tank c1 tanklo 13.5n
+R_47k tanklo b1 47k
+R_27k2 tanklo 0 2.7k
+R_10k rail b1 10k
+R_27k vterm b1 27k
+C_sq c1 sq_n 10n
+R_sqb sq_n b2 47k
+R_470k b2 0 470k
+Q_TN2G c2 b2 rail SFT307
+R_c2 c2 0 10k
+C_fout c2 term_f 1u
+R_fbleed term_f 0 100k
+.model SFT307 PNP(IS=2e-7 BF=110 VAF=60 RB=50 RC=5 RE=1 CJE=60p CJC=25p TF=1n)
+.model SFT352 PNP(IS=3e-7 BF=90 VAF=50 RB=40 RC=4 RE=1 CJE=80p CJC=30p TF=1n)
+";
+
+/// Parse `"  <key>: <value>"` out of `melange simulate`'s stdout summary.
+fn parse_summary_value(stdout: &str, key: &str) -> f64 {
+    for line in stdout.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix(&format!("{key}:")) {
+            return rest
+                .trim()
+                .parse()
+                .unwrap_or_else(|_| panic!("could not parse '{key}' value from line: {line:?}"));
+        }
+    }
+    panic!("'{key}:' not found in simulate output:\n{stdout}");
+}
+
+#[test]
+fn test_g10_oscillator_default_routing_is_bounded() {
+    let cir = write_test_circuit(G10_OSCILLATOR, "g10_osc_default");
+    let tmp_wav = std::env::temp_dir().join("melange_cli_test_g10_osc_default.wav");
+
+    // Deliberately NO --solver / --backward-euler / --force-trap override —
+    // this is exactly what a plugin build with default flags ships.
+    let stdout = run_melange(&[
+        "simulate",
+        cir.to_str().unwrap(),
+        "--input-node",
+        "in",
+        "--output-node",
+        "term_f",
+        "--amplitude",
+        "1e-9",
+        "--duration",
+        "0.05",
+        "--oversampling",
+        "4",
+        "--output",
+        tmp_wav.to_str().unwrap(),
+    ]);
+
+    let _ = std::fs::remove_file(&tmp_wav);
+    let _ = std::fs::remove_file(&cir);
+
+    assert!(
+        stdout.contains("Solver: nodal"),
+        "default routing must select nodal for this circuit (trap-unstable at the \
+         192 kHz internal rate) — DK Schur has no full-LU NR rescue for the ensuing \
+         divergence. Full stdout:\n{stdout}"
+    );
+
+    let peak = parse_summary_value(&stdout, "peak");
+    let nr_max_iter_count = parse_summary_value(&stdout, "nr_max_iter_count");
+
+    // Pre-fix: peak ~39965 (a nonphysical ~-36 kV drift), nr_max_iter_count
+    // ~4953 (NR hit its cap on nearly every internal sample). Post-fix:
+    // peak ~8.3 V (a physical tank swing), nr_max_iter_count in single
+    // digits. Generous bounds here — this pins "bounded and physical", not
+    // an exact byte-for-byte oscillation amplitude.
+    assert!(
+        peak.is_finite() && peak.abs() < 100.0,
+        "peak must be a bounded, physical voltage under default routing, got {peak} \
+         (pre-fix this diverged to ~39965)"
+    );
+    assert!(
+        nr_max_iter_count < 100.0,
+        "NR must not be hitting its iteration cap on a large fraction of samples \
+         under default routing, got nr_max_iter_count={nr_max_iter_count} \
+         (pre-fix this was ~4953 over 2400 samples)"
+    );
+}

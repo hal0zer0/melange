@@ -1733,6 +1733,18 @@ impl CircuitIR {
                 internal_rate,
                 mna,
             )?;
+            // Diagnostic parity with the nodal path's post-promotion check
+            // (previously DK had none at all — a genuinely mis-stamped BE
+            // build here would have shipped silently). See
+            // `log_be_post_promotion_check` for the accurate/deflated
+            // methodology and the "growing pole vs matrix defect" rationale.
+            crate::codegen::stability::log_be_post_promotion_check(
+                "DK",
+                &s,
+                &a_neg_flat,
+                n,
+                config.input_node,
+            );
             let k = compute_k_from_s(&s, &kernel.n_v, &kernel.n_i, n, m);
             Matrices {
                 s,
@@ -1845,6 +1857,15 @@ impl CircuitIR {
                     rhs_const_be[k_row] = vs.dc_value;
                 }
             }
+            // Diagnostic parity with the nodal path's post-promotion check —
+            // see `log_be_post_promotion_check` doc comment.
+            crate::codegen::stability::log_be_post_promotion_check(
+                "DK",
+                &s_flat,
+                &a_neg_flat,
+                n,
+                config.input_node,
+            );
             Matrices {
                 s: s_flat,
                 a_neg: a_neg_flat,
@@ -2794,10 +2815,15 @@ impl CircuitIR {
             solver_config.backward_euler = true;
             solver_config.alpha = alpha;
             integrator_selection = IntegratorSelection::BeAuto;
-            // Recompute rho on BE matrices. BE is L-stable so this must be
-            // ≤ 1; a violation would mean the BE matrix builder has a bug,
-            // which we flag loudly rather than silently pushing into the
-            // emitter.
+            // Recompute rho on BE matrices for the emitter's Schur-vs-full-LU
+            // gate (`spectral_radius_s_aneg`, consumed by
+            // `nodal_emitter.rs`'s `schur_unstable`). This power iteration is
+            // intentionally the coarse, un-deflected, fixed-100-iteration
+            // form — it is the historically-calibrated value the emitter
+            // gate thresholds (1.002/1.05/1.0) were tuned against (see
+            // wurli-power-amp notes below); do not swap it for the shared
+            // `analyze_trap_stability_deflated` without re-validating every
+            // threshold against the golden-audio suite.
             let new_rho = if n > 0 && !s_flat.is_empty() {
                 let mut x = vec![1.0 / (n as f64).sqrt(); n];
                 let mut rho = 0.0f64;
@@ -2828,12 +2854,19 @@ impl CircuitIR {
             } else {
                 0.0
             };
+            // `new_rho` (above) is the coarse un-deflected metric that drives
+            // the emitter's Schur-vs-full-LU gate. Separately, cross-check
+            // with the accurate/deflated analyzer and log a diagnostic that
+            // correctly distinguishes "genuinely unstable circuit" from "BE
+            // matrix-builder defect" — see `log_be_post_promotion_check` doc
+            // comment for the full rationale and verification.
             if new_rho > crate::codegen::stability::BE_POST_PROMOTION_LIMIT {
-                log::error!(
-                    "Nodal: BE matrices still have spectral_radius(S_be*A_neg_be) = \
-                     {:.4} > 1 after auto-promotion. BE is L-stable by construction \
-                     — matrix builder has a stamping bug.",
-                    new_rho
+                crate::codegen::stability::log_be_post_promotion_check(
+                    "Nodal",
+                    &s_flat,
+                    &a_neg_flat,
+                    n,
+                    config.input_node,
                 );
             }
             spectral_radius_s_aneg = new_rho;

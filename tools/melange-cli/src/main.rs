@@ -1399,7 +1399,8 @@ fn compile_circuit_source(
     // equilibrium on push-pull topologies (see memory/wurli_power_amp_...).
     // Since Nodal handles full-dim BJTs natively, FA is unnecessary there.
     let forward_active = if solver_override == "nodal"
-        || (solver_override == "auto" && should_skip_fa_for_nodal_reroute(&mna, sample_rate))
+        || (solver_override == "auto"
+            && should_skip_fa_for_nodal_reroute(&mna, sample_rate, oversampling))
     {
         std::collections::HashSet::new()
     } else {
@@ -1485,11 +1486,18 @@ fn compile_circuit_source(
         || !mna.coupled_inductors.is_empty()
         || !mna.transformer_groups.is_empty();
     println!("Step 3: Creating DK kernel...");
+    // Build at the INTERNAL (oversampled) rate — the routing decision below
+    // must see the same S/A_neg the generated solver will actually ship.
+    // Building at the base host rate can miss trap/BE instability that only
+    // appears once oversampling raises alpha (see
+    // memory/dk_backward_euler_ignored_trap_unstable.md). For os=1 this is
+    // identical to `sample_rate` (no behavior change).
+    let routing_rate = sample_rate * oversampling as f64;
     let kernel_result = if has_inductors_compile {
         println!("  Using augmented MNA for inductors");
-        DkKernel::from_mna_augmented(&mna, sample_rate)
+        DkKernel::from_mna_augmented(&mna, routing_rate)
     } else {
-        DkKernel::from_mna(&mna, sample_rate)
+        DkKernel::from_mna(&mna, routing_rate)
     };
     // If DK kernel fails (e.g., positive feedback / oscillator circuit),
     // auto-fall back to nodal solver which has no K diagonal constraint.
@@ -2575,7 +2583,8 @@ fn simulate_circuit_source(
     };
     // See compile path for rationale — mirrors the same gate.
     let forward_active = if opts.solver == "nodal"
-        || (opts.solver == "auto" && should_skip_fa_for_nodal_reroute(&mna, opts.sample_rate))
+        || (opts.solver == "auto"
+            && should_skip_fa_for_nodal_reroute(&mna, opts.sample_rate, opts.oversampling))
     {
         std::collections::HashSet::new()
     } else {
@@ -2649,12 +2658,16 @@ fn simulate_circuit_source(
 
     println!("Step 3: Building DK kernel...");
     let mut dk_failed = false;
+    // Build at the INTERNAL (oversampled) rate so the routing decision below
+    // sees the same S/A_neg the generated solver ships — see the compile
+    // path's `routing_rate` comment. For os=1 this equals `opts.sample_rate`.
+    let routing_rate = opts.sample_rate * opts.oversampling as f64;
     // Inductor circuits always use the augmented-MNA kernel — including under
     // `--solver dk`. The previous `opts.solver != "dk"` gate sent dk-forced
     // inductor circuits through the non-augmented companion-model path,
     // diverging from compile/analyze.
     let kernel = if has_inductors {
-        match DkKernel::from_mna_augmented(&mna, opts.sample_rate) {
+        match DkKernel::from_mna_augmented(&mna, routing_rate) {
             Ok(k) => k,
             Err(e) => {
                 if opts.solver == "dk" {
@@ -2686,7 +2699,7 @@ fn simulate_circuit_source(
             }
         }
     } else {
-        match DkKernel::from_mna(&mna, opts.sample_rate) {
+        match DkKernel::from_mna(&mna, routing_rate) {
             Ok(k) => k,
             Err(e) => {
                 if opts.solver == "dk" {
@@ -2695,7 +2708,7 @@ fn simulate_circuit_source(
                 println!("  DK kernel failed: {e}, auto-selecting nodal");
                 dk_failed = true;
                 // Try augmented; if that also fails, build dummy kernel
-                match DkKernel::from_mna_augmented(&mna, opts.sample_rate) {
+                match DkKernel::from_mna_augmented(&mna, routing_rate) {
                     Ok(k) => k,
                     Err(_) => {
                         let m = mna.m;
@@ -2986,9 +2999,14 @@ struct LinearizeOutcome {
 /// also imply "don't bother with FA". Circuits currently relying on
 /// FA+DK *under* the `large_m` threshold are unaffected because their
 /// un-reduced route is DK in the first place.
+/// `sample_rate` is the host rate; `oversampling` is the codegen
+/// oversampling factor. The pre-route kernel is built at the internal
+/// (oversampled) rate — see the routing-rate fix below `should_skip_fa_for_nodal_reroute`'s
+/// caller for why this matters.
 fn should_skip_fa_for_nodal_reroute(
     mna: &melange_solver::mna::MnaSystem,
     sample_rate: f64,
+    oversampling: usize,
 ) -> bool {
     use melange_solver::codegen::routing::{self, SolverRoute};
     use melange_solver::dk::DkKernel;
@@ -2996,10 +3014,19 @@ fn should_skip_fa_for_nodal_reroute(
     let has_inductors = !mna.inductors.is_empty()
         || !mna.coupled_inductors.is_empty()
         || !mna.transformer_groups.is_empty();
+    // Route at the INTERNAL (oversampled) rate, matching what codegen ships
+    // via `internal_rate = sample_rate * oversampling_factor`. Routing at
+    // the base host rate can miss trap/BE instability that only appears at
+    // the oversampled rate the generated solver actually runs (see
+    // memory/dk_backward_euler_ignored_trap_unstable.md: a circuit measured
+    // rho=1.315 at 192 kHz but the un-oversampled 48 kHz kernel used for
+    // routing read comfortably stable, so the router never rerouted a
+    // genuinely DK-Schur-unstable circuit to nodal).
+    let routing_rate = sample_rate * oversampling.max(1) as f64;
     let kernel_result = if has_inductors {
-        DkKernel::from_mna_augmented(mna, sample_rate)
+        DkKernel::from_mna_augmented(mna, routing_rate)
     } else {
-        DkKernel::from_mna(mna, sample_rate)
+        DkKernel::from_mna(mna, routing_rate)
     };
     let (kernel, dk_failed) = match kernel_result {
         Ok(k) => (k, false),
@@ -3774,7 +3801,7 @@ fn analyze_freq_response(
     };
     // See compile path for rationale — mirrors the same gate.
     let forward_active = if solver == "nodal"
-        || (solver == "auto" && should_skip_fa_for_nodal_reroute(&mna, sample_rate))
+        || (solver == "auto" && should_skip_fa_for_nodal_reroute(&mna, sample_rate, oversampling))
     {
         std::collections::HashSet::new()
     } else {
@@ -3848,8 +3875,12 @@ fn analyze_freq_response(
         || !mna.transformer_groups.is_empty();
 
     let mut dk_failed = false;
+    // Build at the INTERNAL (oversampled) rate so the routing decision below
+    // sees the same S/A_neg the generated solver ships — see the compile
+    // path's `routing_rate` comment. For os=1 this equals `sample_rate`.
+    let routing_rate = sample_rate * oversampling as f64;
     let kernel = if has_inductors {
-        match DkKernel::from_mna_augmented(&mna, sample_rate) {
+        match DkKernel::from_mna_augmented(&mna, routing_rate) {
             Ok(k) => k,
             Err(e) => {
                 if solver == "dk" {
@@ -3881,7 +3912,7 @@ fn analyze_freq_response(
             }
         }
     } else {
-        match DkKernel::from_mna(&mna, sample_rate) {
+        match DkKernel::from_mna(&mna, routing_rate) {
             Ok(k) => k,
             Err(e) => {
                 if solver == "dk" {
@@ -3889,7 +3920,7 @@ fn analyze_freq_response(
                 }
                 eprintln!("  DK kernel failed: {e}, using nodal");
                 dk_failed = true;
-                match DkKernel::from_mna_augmented(&mna, sample_rate) {
+                match DkKernel::from_mna_augmented(&mna, routing_rate) {
                     Ok(k) => k,
                     Err(_) => {
                         let m = mna.m;

@@ -301,6 +301,70 @@ pub fn trap_needs_be(stability: TrapStability) -> bool {
             && stability.max_abs_s > NYQUIST_GATE_MAX_ABS_S)
 }
 
+/// Post-promotion sanity check on newly-built backward-Euler matrices,
+/// shared by the DK and nodal BE builders.
+///
+/// L-stability guarantees `rho(S_be*A_neg_be) <= 1` ONLY for a circuit whose
+/// linearization is itself continuum-stable (every mode has `Re(lambda) <=
+/// 0`). A circuit that is genuinely unstable at its DC operating point (a
+/// regenerative oscillator sitting on an unstable bias point by design) has
+/// a real growing mode that no consistent integrator — BE included — can
+/// make appear as `rho <= 1` without falsifying the circuit's own physics.
+/// The accurate, converged, input-deflated analyzer's `dominant_sign` lets
+/// us tell the two cases apart: `dominant_sign > 0` is the signature of a
+/// real growing pole (expected, benign — logged as a warning), while
+/// `dominant_sign < 0` has no known physical mechanism at this construction
+/// and more likely indicates a genuine matrix-builder defect (logged as an
+/// error).
+///
+/// Verified 2026-08-14 on a Ge regenerative-LC-oscillator repro
+/// (`memory/dk_backward_euler_ignored_trap_unstable.md`): two independently
+/// coded BE builders (DK's `build_dk_be_matrices_at_rate` and nodal's inline
+/// build in `CircuitIR::from_mna`) agree on the deflated rho to 6
+/// significant figures (1.347488, dominant_sign +1) on the identical
+/// circuit, and the resulting transient (full-LU NR on the nodal path)
+/// converges to a bounded, physical oscillation — conclusive evidence the
+/// matrices are correct and the growth is real, not a stamping defect.
+///
+/// `label` identifies the caller in the log line (e.g. `"DK"`, `"Nodal"`).
+pub fn log_be_post_promotion_check(
+    label: &str,
+    s: &[f64],
+    a_neg: &[f64],
+    n: usize,
+    input_node: usize,
+) {
+    if n == 0 || s.is_empty() || a_neg.is_empty() {
+        return;
+    }
+    let stability = analyze_trap_stability_deflated(s, a_neg, n, input_node);
+    if stability.rho <= BE_POST_PROMOTION_LIMIT {
+        return;
+    }
+    if stability.dominant_sign < 0.0 {
+        log::error!(
+            "{label}: BE matrices have spectral_radius(S_be*A_neg_be) = {:.4} \
+             (dominant_sign {:+.0}) after promotion. BE is L-stable for a \
+             continuum-stable circuit; a NEGATIVE dominant sign here has no known \
+             physical explanation (unlike a real growing pole) and likely indicates \
+             a BE matrix-builder defect — investigate.",
+            stability.rho,
+            stability.dominant_sign
+        );
+    } else {
+        log::warn!(
+            "{label}: BE matrices have spectral_radius(S_be*A_neg_be) = {:.4} \
+             (dominant_sign {:+.0}) after promotion. This typically means the circuit \
+             is genuinely unstable at its DC operating point (e.g. a regenerative \
+             oscillator — a positive dominant sign is the expected signature of a real \
+             growing pole, not a matrix defect). If this circuit is expected to be \
+             passively stable, investigate the BE matrix builder.",
+            stability.rho,
+            stability.dominant_sign
+        );
+    }
+}
+
 /// Whether an independent, less-precise "trap unstable" finding (e.g. the
 /// DK-vs-nodal router's fixed-iteration-count, non-deflected spectral-radius
 /// estimate — `routing::RoutingDecision::dk_unstable`) should be allowed to
