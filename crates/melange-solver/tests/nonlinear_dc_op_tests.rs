@@ -1715,3 +1715,144 @@ fn test_bjt_ce_fixed_point_unchanged_by_nr_fixes() {
         "V(coll) inconsistent with Ic·RC: got {v_coll}, expected ≈{v_coll_expected}"
     );
 }
+
+// =============================================================================
+// Germanium PNP common-emitter: Direct-NR degeneracy-threshold regression
+// =============================================================================
+//
+// Bug: `solution_has_active_junction` used a hardcoded 0.3V "is this
+// junction on" threshold, tuned for silicon (Vf ~ 0.6-0.7V). Germanium
+// devices (IS ~ 1e-7 to 1e-6) turn on at a much lower forward voltage
+// (~0.15-0.3V), so Direct NR's correct, converged answer was misclassified
+// as "degenerate" for EVERY R_E in this circuit and discarded in favor of
+// source/Gmin stepping. Gmin stepping then diverged outright (raw internal
+// junction voltage overshoots the exponential knee with no pnjlim
+// protection for internal-node BJTs, driving i_nl to ~1e11 mA) for R_E in
+// roughly [1.4k, 2.5k], while happening to land back on the correct answer
+// via Gmin stepping outside that band — a convergence "window" that fails
+// with success on both sides, the classic homotopy-branch-loss signature.
+//
+// Fix: scale the threshold by the device's own `pn_vcrit` (same quantity
+// pnjlim uses) instead of a fixed silicon-typical voltage.
+const GE_PNP_STAGE_TEMPLATE: &str = "TN2-clone minimal stage
+C_dummy in b1 1n
+Vrail rail 0 DC 8
+R_e rail e1 {RE}
+Q1 c1 b1 e1 OC74
+R_b_up rail b1 5.8k
+R_b_dn b1 0 47k
+R_c c1 0 1k
+R_out c1 out 100k
+R_outref out 0 1Meg
+.model OC74 PNP(IS=3e-7 BF=90 VAF=50 RB=40 RC=4 RE=1 CJE=80p CJC=30p TF=2n)
+.end
+";
+
+fn solve_ge_pnp_stage(re_ohms: f64) -> (MnaSystem, melange_solver::dc_op::DcOpResult) {
+    let spice = GE_PNP_STAGE_TEMPLATE.replace("{RE}", &format!("{re_ohms}"));
+    let netlist = Netlist::parse(&spice).expect("parse failed");
+    let mut mna = MnaSystem::from_netlist(&netlist).expect("MNA failed");
+    let input_node = mna
+        .node_map
+        .get("in")
+        .copied()
+        .unwrap_or(1)
+        .saturating_sub(1);
+    if input_node < mna.n {
+        mna.g[input_node][input_node] += 1.0;
+    }
+    let device_slots =
+        CircuitIR::build_device_info_with_mna(&netlist, Some(&mna)).unwrap_or_default();
+    let config = DcOpConfig {
+        input_node,
+        input_resistance: 1.0,
+        ..DcOpConfig::default()
+    };
+    let result = solve_dc_operating_point(&mna, &device_slots, &config);
+    (mna, result)
+}
+
+/// Direct repro of the confirmed bug: R_E = 1.5k sat squarely in the
+/// pre-fix failure window (raw v(e1) pinned to the 8V rail, i_nl runaway
+/// to ~1e11 mA). This must converge to the textbook Ge bias point.
+#[test]
+fn test_ge_pnp_common_emitter_re_1500_converges() {
+    let (mna, result) = solve_ge_pnp_stage(1500.0);
+    assert!(
+        result.converged,
+        "DC OP failed to converge at R_E=1500 ohms (method={:?}, iters={})",
+        result.method, result.iterations
+    );
+    let e1_idx = mna.node_map["e1"] - 1;
+    let v_e1 = result.v_node[e1_idx];
+    // Pre-fix failure state: v(e1) pinned to the 8V rail (passive network
+    // solution with the transistor electrically absent).
+    assert!(
+        v_e1 < 7.9,
+        "v(e1)={v_e1:.4} — looks like the pre-fix rail-pinned failure state"
+    );
+    let i_e = (8.0 - v_e1) / 1500.0;
+    // Textbook Ge PNP bias at this R_E: Ie in the few-hundred-uA range.
+    assert!(
+        i_e > 1e-5 && i_e < 1e-2,
+        "I_E={i_e:.3e} A implausible (pre-fix runaway gave i_nl ~ 1e11 mA)"
+    );
+    assert!(
+        result.i_nl.iter().all(|x| x.abs() < 1.0),
+        "device current runaway: i_nl={:?}",
+        result.i_nl
+    );
+}
+
+/// Full R_E sweep spanning (and centered inside) the pre-fix failure window
+/// [1.4k, 2.5k], confirming convergence to a physically consistent,
+/// monotonically decreasing emitter voltage as R_E increases (more emitter
+/// degeneration -> less bias current -> v(e1) closer to the rail is WRONG;
+/// more R_E -> less current -> smaller (rail - v(e1)) drop -> v(e1) closer
+/// to the rail is actually correct, so v(e1) should monotonically increase
+/// toward 8V... but the dominant effect here is the reduced Vbe forced by
+/// lower current, so verify monotonic behavior empirically rather than
+/// asserting a direction, and pin the known-good textbook point).
+#[test]
+fn test_ge_pnp_common_emitter_re_sweep_converges() {
+    let re_values = [
+        1000.0, 1200.0, 1300.0, 1400.0, 1500.0, 1600.0, 1800.0, 1980.0, 2000.0, 2500.0, 2600.0,
+        2700.0, 3000.0, 4700.0, 10000.0,
+    ];
+
+    let mut prev_i_e: Option<f64> = None;
+    for &re in &re_values {
+        let (mna, result) = solve_ge_pnp_stage(re);
+        assert!(
+            result.converged,
+            "DC OP failed to converge at R_E={re} ohms (method={:?}, iters={})",
+            result.method, result.iterations
+        );
+        let e1_idx = mna.node_map["e1"] - 1;
+        let v_e1 = result.v_node[e1_idx];
+        let i_e = (8.0 - v_e1) / re;
+        assert!(
+            i_e > 0.0 && i_e < 1e-2,
+            "R_E={re}: I_E={i_e:.3e} A implausible"
+        );
+        if let Some(prev) = prev_i_e {
+            assert!(
+                i_e < prev,
+                "R_E={re}: I_E={i_e:.3e} A not monotonically decreasing \
+                 (prev={prev:.3e} A) — solver landed on a different branch"
+            );
+        }
+        prev_i_e = Some(i_e);
+    }
+
+    // Textbook reference point cited for this stage: at R_E ~ 1.98k, Ie is
+    // in the few-hundred-uA range (~0.3-0.4 mA).
+    let (mna, result) = solve_ge_pnp_stage(1980.0);
+    let e1_idx = mna.node_map["e1"] - 1;
+    let v_e1 = result.v_node[e1_idx];
+    let i_e = (8.0 - v_e1) / 1980.0;
+    assert!(
+        (i_e - 3.45e-4).abs() < 1e-4,
+        "R_E=1980: I_E={i_e:.3e} A, expected ~0.345 mA (textbook ~0.3-0.4 mA)"
+    );
+}

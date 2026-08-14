@@ -2103,15 +2103,44 @@ fn solution_has_active_junction(
             DeviceParams::Bjt(bp) => {
                 if slot.start_idx < v_nl.len() {
                     let sign = if bp.is_pnp { -1.0 } else { 1.0 };
-                    // Forward-biased B-E junction: sign·Vbe > 0.3V
-                    if sign * v_nl[slot.start_idx] > 0.3 {
+                    // Forward-biased B-E junction: sign·Vbe > threshold.
+                    //
+                    // The threshold used to be a hardcoded 0.3V, which assumes
+                    // a silicon-typical turn-on (Vf ~ 0.6-0.7V). Low-IS devices
+                    // — germanium (IS ~ 1e-7 to 1e-6), Schottky — turn on at a
+                    // much lower forward voltage (Ge Vbe ~ 0.15-0.3V), so a
+                    // fixed 0.3V cutoff misclassifies their correct, converged
+                    // forward-active Direct-NR solution as "degenerate" and
+                    // discards it in favor of source/Gmin stepping — which is
+                    // markedly less robust (see the OC74 PNP common-emitter
+                    // repro: Direct NR lands on the textbook OP at every
+                    // tested R_E, but the fixed 0.3V check rejected all of
+                    // them because Vbe ≈ 0.17-0.20V for this Ge device, and
+                    // Gmin stepping then diverges outright for R_E in
+                    // [1.4k, 2.5k]).
+                    //
+                    // Scale the threshold with the device's own turn-on
+                    // voltage instead: half of `pn_vcrit` (the same quantity
+                    // NR's own pnjlim uses to decide "this step crossed the
+                    // exponential knee"). For silicon (IS ~ 1e-14, vcrit ~
+                    // 0.6-0.65V) this reproduces the old ~0.3V behavior almost
+                    // exactly; for germanium (IS ~ 3e-7, vcrit ~ 0.29V) it
+                    // drops to ~0.14V, correctly accepting Ge's lower Vf.
+                    let nf_vt = bp.nf * bp.vt;
+                    let vcrit = pn_vcrit(nf_vt, bp.is);
+                    let threshold = 0.5 * vcrit;
+                    if sign * v_nl[slot.start_idx] > threshold {
                         return true;
                     }
                 }
             }
-            DeviceParams::Diode(_) => {
-                if slot.start_idx < v_nl.len() && v_nl[slot.start_idx].abs() > 0.3 {
-                    return true;
+            DeviceParams::Diode(dp) => {
+                if slot.start_idx < v_nl.len() {
+                    // Same device-scaled threshold as the BJT case above.
+                    let vcrit = pn_vcrit(dp.n_vt, dp.is);
+                    if v_nl[slot.start_idx].abs() > 0.5 * vcrit {
+                        return true;
+                    }
                 }
             }
             // Non-junction devices: trust the converged result.
