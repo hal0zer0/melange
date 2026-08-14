@@ -2212,6 +2212,42 @@ fn test_generated_code_state_has_matrix_fields() {
         code.contains("pub diag_nan_reset_count: u64"),
         "CircuitState must have diag_nan_reset_count field."
     );
+    assert!(
+        code.contains("pub diag_magnitude_reset_count: u64"),
+        "CircuitState must have diag_magnitude_reset_count field."
+    );
+}
+
+/// Finite-but-implausible ("huge-finite runaway") state guard on the DK
+/// path: a diverged solve can saturate at an astronomically large yet
+/// technically finite value (codegen exp() clamp, near-singular LU) that
+/// bypasses `is_finite()` and would otherwise propagate via `v_prev`
+/// forever. Same family as the NaN/Inf reset, extended to a magnitude
+/// bound. See docs/aidocs/DEBUGGING.md "finite runaway" entry.
+#[test]
+fn test_dk_state_reset_bounds_finite_runaway() {
+    let (code, _netlist, _mna, _kernel) = generate_code(DIODE_CLIPPER_SPICE);
+
+    assert!(
+        code.contains("pub const STATE_MAX_PLAUSIBLE_MAGNITUDE: f64 = 1e6;"),
+        "STATE_MAX_PLAUSIBLE_MAGNITUDE constant must be emitted"
+    );
+    assert!(
+        code.contains("let v_is_finite = v.iter().all(|x| x.is_finite());"),
+        "Step 7 reset guard must separately track finiteness for counter attribution"
+    );
+    assert!(
+        code.contains(
+            "if !v_is_finite || v.iter().any(|x| x.abs() > STATE_MAX_PLAUSIBLE_MAGNITUDE) {"
+        ),
+        "Step 7 reset guard must trip on implausible magnitude in addition to NaN/Inf"
+    );
+    assert!(
+        code.contains(
+            "if v_is_finite { state.diag_magnitude_reset_count += 1; } else { state.diag_nan_reset_count += 1; }"
+        ),
+        "magnitude-triggered resets must increment diag_magnitude_reset_count, not diag_nan_reset_count"
+    );
 }
 
 /// Verify that S_DEFAULT, A_NEG_DEFAULT, K_DEFAULT, S_NI_DEFAULT are emitted.

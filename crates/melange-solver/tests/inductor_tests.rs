@@ -553,9 +553,12 @@ fn test_inductor_codegen_sanitization() {
     let code = generate_code(RL_LOWPASS_SPICE);
 
     // NaN sanitization should reset inductor state
-    // NaN check now happens before state write: checks local `v` not `state.v_prev`
+    // NaN/magnitude check now happens before state write: checks local `v`
+    // not `state.v_prev`. The predicate also bounds finite-but-implausible
+    // magnitude (see docs/aidocs/DEBUGGING.md "finite runaway" entry).
     let sanitize_idx = code
-        .find("if !v.iter().all(|x| x.is_finite())")
+        .find("if !v_is_finite || v.iter().any(|x| x.abs() > STATE_MAX_PLAUSIBLE_MAGNITUDE)")
+        .or_else(|| code.find("if !v.iter().all(|x| x.is_finite())"))
         .or_else(|| code.find("if !state.v_prev.iter().all(|x| x.is_finite())"));
     assert!(sanitize_idx.is_some(), "Should have NaN sanitization block");
 

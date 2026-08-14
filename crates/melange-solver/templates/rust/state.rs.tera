@@ -63,6 +63,14 @@ pub struct CircuitState {
     pub diag_nr_max_iter_count: u64,
     /// Diagnostic: number of times NaN triggered state reset
     pub diag_nan_reset_count: u64,
+    /// Diagnostic: number of times a finite-but-implausible iterate (state
+    /// magnitude beyond any physically-realizable circuit value) triggered
+    /// state reset. NaN/Inf is caught by `diag_nan_reset_count`; this counts
+    /// the "diverged but still `is_finite()`" gap (e.g. a codegen exp()-clamp
+    /// saturation or a near-singular NR solve producing an astronomically
+    /// large finite value that would otherwise bypass every NaN guard and
+    /// propagate). See docs/aidocs/DEBUGGING.md "finite runaway" entry.
+    pub diag_magnitude_reset_count: u64,
     /// Diagnostic: number of times matrix inversion detected a singular matrix
     pub diag_singular_matrix_count: u64,
     /// Diagnostic: number of samples hit by the global voltage-damping safety
@@ -252,6 +260,7 @@ static OPAMP_RAIL_DEGRADE_WARN_ONCE: std::sync::Once = std::sync::Once::new();
             diag_clamp_count: 0,
             diag_nr_max_iter_count: 0,
             diag_nan_reset_count: 0,
+            diag_magnitude_reset_count: 0,
             diag_singular_matrix_count: 0,
             diag_voltage_damp_count: 0,
             diag_substep_count: 0,
@@ -366,6 +375,7 @@ impl CircuitState {
         self.diag_clamp_count = 0;
         self.diag_nr_max_iter_count = 0;
         self.diag_nan_reset_count = 0;
+        self.diag_magnitude_reset_count = 0;
         self.diag_singular_matrix_count = 0;
         self.diag_voltage_damp_count = 0;
         self.diag_substep_count = 0;

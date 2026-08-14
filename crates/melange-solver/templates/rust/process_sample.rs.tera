@@ -191,8 +191,13 @@ pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS
     }
 {% endfor %}{% endif %}
 
-    // Step 7: Check for NaN/inf BEFORE updating state (prevents corruption of v_prev/i_nl_prev)
-    if !v.iter().all(|x| x.is_finite()) {
+    // Step 7: Check for NaN/Inf and finite-but-implausible magnitude BEFORE
+    // updating state (prevents corruption of v_prev/i_nl_prev). A saturated
+    // solve (e.g. codegen exp() clamp, near-singular LU) can produce a
+    // huge-but-finite value that bypasses `is_finite()` and would otherwise
+    // propagate into v_prev forever. See STATE_MAX_PLAUSIBLE_MAGNITUDE doc.
+    let v_is_finite = v.iter().all(|x| x.is_finite());
+    if !v_is_finite || v.iter().any(|x| x.abs() > STATE_MAX_PLAUSIBLE_MAGNITUDE) {
         state.v_prev = state.dc_operating_point;
 {% if has_dc_nl %}        state.i_nl_prev = DC_NL_I;
         state.i_nl_prev_prev = DC_NL_I;
@@ -221,7 +226,7 @@ pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS
         state.os_dn_state = [[0.0; {{ os_state_size }}]; NUM_OUTPUTS];
 {% endif %}{% if oversampling_4x %}        state.os_up_state_outer = [0.0; {{ os_state_size_outer }}];
         state.os_dn_state_outer = [[0.0; {{ os_state_size_outer }}]; NUM_OUTPUTS];
-{% endif %}{% if noise_enabled_emit %}{{ noise_nan_recovery }}{% endif %}        state.diag_nan_reset_count += 1;
+{% endif %}{% if noise_enabled_emit %}{{ noise_nan_recovery }}{% endif %}        if v_is_finite { state.diag_magnitude_reset_count += 1; } else { state.diag_nan_reset_count += 1; }
         // Return DC operating point output instead of zero to avoid discontinuity
         let mut dc_output = [0.0f64; NUM_OUTPUTS];
         for out_idx in 0..NUM_OUTPUTS {

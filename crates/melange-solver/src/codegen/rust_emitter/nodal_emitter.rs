@@ -565,12 +565,18 @@ fn emit_nodal_nan_reset(
     let m = ir.topology.m;
 
     code.push_str(&format!(
-        "{indent}// NaN/Inf check BEFORE state update — prevents corruption of v_prev/i_nl_prev.\n"
+        "{indent}// NaN/Inf AND finite-but-implausible-magnitude check BEFORE state\n\
+         {indent}// update — prevents corruption of v_prev/i_nl_prev. A saturated solve\n\
+         {indent}// (exp() clamp, near-singular LU) can produce a huge-but-finite value\n\
+         {indent}// that bypasses is_finite() and would otherwise propagate forever.\n"
     ));
     code.push_str(&format!(
         "{indent}// Mirrors the DK-path reset in templates/rust/process_sample.rs.tera (Step 7).\n"
     ));
-    code.push_str(&format!("{indent}if !v.iter().all(|x| x.is_finite()) {{\n"));
+    code.push_str(&format!(
+        "{indent}let v_is_finite = v.iter().all(|x| x.is_finite());\n\
+         {indent}if !v_is_finite || v.iter().any(|x| x.abs() > STATE_MAX_PLAUSIBLE_MAGNITUDE) {{\n"
+    ));
 
     // Core NR state
     code.push_str(&format!("{body}state.v_prev = state.dc_operating_point;\n"));
@@ -665,7 +671,9 @@ fn emit_nodal_nan_reset(
         }
     }
 
-    code.push_str(&format!("{body}state.diag_nan_reset_count += 1;\n"));
+    code.push_str(&format!(
+        "{body}if v_is_finite {{ state.diag_magnitude_reset_count += 1; }} else {{ state.diag_nan_reset_count += 1; }}\n"
+    ));
 
     // Return DC-OP output (clamped to ±10 V) instead of zero, to minimize the
     // discontinuity at the recovery edge. Values baked at codegen time.
@@ -1014,6 +1022,17 @@ impl RustEmitter {
         code.push_str(&format!("pub const N_AUG: usize = {};\n\n", n_aug));
         code.push_str("/// Total nonlinear dimension (sum of device dimensions)\n");
         code.push_str(&format!("pub const M: usize = {};\n\n", m));
+        code.push_str(
+            "/// Implausibility bound for a *finite* per-sample NR state. A NaN/Inf\n\
+             /// iterate is caught unconditionally; this catches the gap where a solve\n\
+             /// saturates (exp() clamp, near-singular LU) and produces an\n\
+             /// astronomically large but technically finite value that would\n\
+             /// otherwise bypass every NaN guard and get written into `v_prev`/\n\
+             /// `i_nl_prev` for every subsequent sample. ~2000x above the highest\n\
+             /// real supply rail in the melange-circuits corpus (480 V tube plate\n\
+             /// supplies) — see docs/aidocs/DEBUGGING.md \"finite runaway\" entry.\n",
+        );
+        code.push_str("pub const STATE_MAX_PLAUSIBLE_MAGNITUDE: f64 = 1e6;\n\n");
         code.push_str("/// Maximum NR iterations per sample\n");
         code.push_str(&format!(
             "pub const MAX_ITER: usize = {};\n\n",
@@ -1806,6 +1825,13 @@ impl RustEmitter {
         code.push_str("    pub diag_active_set_pin_count: u64,\n");
         code.push_str("    /// Diagnostic: number of times NaN triggered state reset\n");
         code.push_str("    pub diag_nan_reset_count: u64,\n");
+        code.push_str(
+            "    /// Diagnostic: number of times a finite-but-implausible iterate\n\
+             \x20   /// (state magnitude beyond any physically-realizable circuit value)\n\
+             \x20   /// triggered state reset. NaN/Inf is caught by diag_nan_reset_count;\n\
+             \x20   /// this counts the \"diverged but still is_finite()\" gap.\n",
+        );
+        code.push_str("    pub diag_magnitude_reset_count: u64,\n");
         code.push_str("    /// Diagnostic: number of samples that needed adaptive sub-stepping\n");
         code.push_str("    pub diag_substep_count: u64,\n");
         code.push_str("    /// Diagnostic: number of LU refactorizations performed\n");
@@ -2232,6 +2258,7 @@ impl RustEmitter {
         code.push_str("            diag_be_latch_count: 0,\n");
         code.push_str("            diag_active_set_pin_count: 0,\n");
         code.push_str("            diag_nan_reset_count: 0,\n");
+        code.push_str("            diag_magnitude_reset_count: 0,\n");
         code.push_str("            diag_substep_count: 0,\n");
         code.push_str("            diag_refactor_count: 0,\n");
         code.push_str("            diag_voltage_damp_count: 0,\n");
@@ -2490,6 +2517,7 @@ impl RustEmitter {
         code.push_str("        self.diag_be_latch_count = 0;\n");
         code.push_str("        self.diag_active_set_pin_count = 0;\n");
         code.push_str("        self.diag_nan_reset_count = 0;\n");
+        code.push_str("        self.diag_magnitude_reset_count = 0;\n");
         code.push_str("        self.diag_voltage_damp_count = 0;\n");
         code.push_str("        self.diag_substep_count = 0;\n");
         code.push_str("        self.diag_refactor_count = 0;\n");

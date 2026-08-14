@@ -620,10 +620,15 @@ fn emit_dc_op_nr_loop_dk(ir: &CircuitIR) -> Result<String, CodegenError> {
          {inner}}}\n\n"
     ));
 
-    // Guard against NaN/Inf — if any entry is non-finite, bail.
+    // Guard against NaN/Inf and finite-but-implausible magnitude — a
+    // saturated solve can produce a huge-but-finite value that bypasses
+    // is_finite() (see STATE_MAX_PLAUSIBLE_MAGNITUDE doc in
+    // constants.rs.tera). Bail either way; `nr_converged` stays false so
+    // the max-iter fallback below returns WITHOUT writing state back.
     out.push_str(&format!(
-        "{inner}if !v_new.iter().all(|x| x.is_finite()) {{\n\
-         {inner}    self.diag_nan_reset_count += 1;\n\
+        "{inner}let v_new_finite = v_new.iter().all(|x| x.is_finite());\n\
+         {inner}if !v_new_finite || v_new.iter().any(|x| x.abs() > STATE_MAX_PLAUSIBLE_MAGNITUDE) {{\n\
+         {inner}    if v_new_finite {{ self.diag_magnitude_reset_count += 1; }} else {{ self.diag_nan_reset_count += 1; }}\n\
          {inner}    break;\n\
          {inner}}}\n\n"
     ));

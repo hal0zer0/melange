@@ -321,6 +321,7 @@ fn main() {
     }
     eprintln!("DIAG:nr_max_iter_count={}", state.diag_nr_max_iter_count);
     eprintln!("DIAG:nan_reset_count={}", state.diag_nan_reset_count);
+    eprintln!("DIAG:magnitude_reset_count={}", state.diag_magnitude_reset_count);
 }
 "#;
 

@@ -491,3 +491,51 @@ fn test_nodal_nan_reset_includes_extended_state() {
         "nodal NaN reset must NOT fall back to zero return — causes click at recovery"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Finite-but-implausible ("huge-finite runaway") state guard.
+//
+// melange guards NaN/Inf but a diverged solve can saturate at an
+// astronomically large yet technically finite value (codegen exp() clamp,
+// near-singular LU) that bypasses is_finite() and propagates via v_prev
+// forever. This is the same family as the NaN reset above, extended to a
+// magnitude bound. See docs/aidocs/DEBUGGING.md "finite runaway" entry.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_nodal_state_reset_bounds_finite_runaway() {
+    let code = generate_nodal(TUBE_TRANSFORMER_WITH_POT, "in", "out");
+
+    // The plausibility bound constant must be emitted and match the value
+    // justified in constants.rs.tera / nodal_emitter.rs (~2000x the highest
+    // real supply rail in the melange-circuits corpus, 480 V).
+    assert!(
+        code.contains("pub const STATE_MAX_PLAUSIBLE_MAGNITUDE: f64 = 1e6;"),
+        "STATE_MAX_PLAUSIBLE_MAGNITUDE constant must be emitted"
+    );
+
+    // The reset guard must trip on magnitude, not just non-finiteness.
+    assert!(
+        code.contains("let v_is_finite = v.iter().all(|x| x.is_finite());"),
+        "reset guard must separately track finiteness for counter attribution"
+    );
+    assert!(
+        code.contains(
+            "if !v_is_finite || v.iter().any(|x| x.abs() > STATE_MAX_PLAUSIBLE_MAGNITUDE) {"
+        ),
+        "reset guard must trip on implausible magnitude in addition to NaN/Inf"
+    );
+
+    // A finite-but-huge trip must increment a distinct counter from a
+    // genuine NaN/Inf trip, so the two failure modes stay diagnosable.
+    assert!(
+        code.contains("pub diag_magnitude_reset_count: u64,"),
+        "diag_magnitude_reset_count field must be declared on CircuitState"
+    );
+    assert!(
+        code.contains(
+            "if v_is_finite { state.diag_magnitude_reset_count += 1; } else { state.diag_nan_reset_count += 1; }"
+        ),
+        "magnitude-triggered resets must increment diag_magnitude_reset_count, not diag_nan_reset_count"
+    );
+}

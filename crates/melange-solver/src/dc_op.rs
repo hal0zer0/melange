@@ -99,6 +99,28 @@ pub enum DcOpMethod {
     SingularLinear,
 }
 
+/// Implausibility bounds for a *finite* DC OP result. A NaN/Inf iterate is
+/// already caught by the `is_finite()` guards throughout this module; these
+/// bounds catch the gap where a solve saturates (e.g. the codegen exp()
+/// clamp at ±40, or a near-singular — not exactly singular — linear solve)
+/// and returns an astronomically large but technically finite value.
+///
+/// Justified against the melange-circuits corpus (`grep -rhoE 'DC [0-9.]+'`
+/// on shipped decks): the highest real supply rail is 480 V (EL34/6L6
+/// plate supplies); the smallest series resistor is 1 mΩ. A dead short
+/// across the highest rail through the smallest resistor — a fault
+/// condition, not anything melange's solver should produce as a *bias
+/// point* — is ~4.8e5 A. `DC_OP_MAX_PLAUSIBLE_VOLTAGE` (1e6 V) and
+/// `DC_OP_MAX_PLAUSIBLE_CURRENT` (1e7 A) sit ~2000x and ~20x above those
+/// extremes respectively: comfortably clear of any legitimate circuit
+/// (including 250 V+ tube plate supplies) while still orders of magnitude
+/// below an observed runaway (~1e8 A / 1e11 mA on a real Ge PNP repro; up
+/// to ~1e300 on a trap-unstable BJT divider — see
+/// dc_op_ge_active_junction_threshold.md and
+/// dk_backward_euler_ignored_trap_unstable.md memory notes).
+const DC_OP_MAX_PLAUSIBLE_VOLTAGE: f64 = 1e6;
+const DC_OP_MAX_PLAUSIBLE_CURRENT: f64 = 1e7;
+
 /// Evaluate all nonlinear device currents and Jacobian entries.
 ///
 /// # Arguments
@@ -3023,7 +3045,22 @@ pub fn solve_dc_operating_point(
     // The linear solution doesn't account for nonlinear devices, but seeding
     // op-amp outputs to the correct rail prevents precision rectifier circuits
     // from starting at the wrong equilibrium.
-    let mut v_fallback = v_linear;
+    //
+    // CRITICAL: run the RAW linear guess through the same junction-voltage
+    // clamp used to seed every other strategy (`clamp_junction_voltages`,
+    // used above for Direct NR / Gmin seeding). Without this, an unclamped
+    // linear guess can put a BJT/diode junction volts away from its knee;
+    // `evaluate_devices_inner` below saturates its exp() at the codegen
+    // [-40,40] clamp and returns a *finite* current that scales with the
+    // device's IS (observed ~1e11 mA on a real Ge PNP repro — see
+    // dc_op_ge_active_junction_threshold memory note). That runaway-but-
+    // finite current bypasses every `is_finite()` guard downstream and gets
+    // baked straight into `DC_NL_I`, detonating the transient on sample 1.
+    // Clamping here is not a symptom mask: it is the exact seed every
+    // convergent strategy already uses, applied consistently to the one
+    // path that skipped it.
+    let mut v_fallback = clamp_junction_voltages(mna, device_slots, &v_linear);
+    v_fallback.resize(n_dc, 0.0);
     seed_opamp_outputs(&mut v_fallback, mna);
 
     // Precision rectifier diode consistency fixup:
@@ -3181,6 +3218,41 @@ pub fn solve_dc_operating_point(
         has_internal_nodes,
         Some(&v_out),
     );
+
+    // Final safety net: reject a finite-but-implausible result before it can
+    // be baked into `DC_NL_I` / `dc_operating_point` and propagate into the
+    // transient. Every strategy above already guards its own NR loop with
+    // `is_finite()` checks (`nr_dc_solve`, line ~1629); this catches the
+    // residual case where a *finite* value is nonetheless physically
+    // impossible (see `DC_OP_MAX_PLAUSIBLE_VOLTAGE`/`_CURRENT` doc comment).
+    // Falls back to the all-zero bias point — the same "structurally could
+    // not determine a bias point" state already returned by the
+    // `SingularLinear` path above — rather than propagate a value that
+    // would detonate the transient on sample 1.
+    let v_implausible = v_out
+        .iter()
+        .any(|x| !x.is_finite() || x.abs() > DC_OP_MAX_PLAUSIBLE_VOLTAGE);
+    let i_implausible = i_nl_fb
+        .iter()
+        .any(|x| !x.is_finite() || x.abs() > DC_OP_MAX_PLAUSIBLE_CURRENT);
+    if v_implausible || i_implausible {
+        log::warn!(
+            "DC OP: fallback result exceeds plausibility bounds (max|v|={:.3e}, max|i_nl|={:.3e}) \
+             — rejecting and returning zero bias point instead of propagating a runaway-but-finite \
+             iterate into DC_NL_I",
+            v_out.iter().fold(0.0_f64, |m, x| m.max(x.abs())),
+            i_nl_fb.iter().fold(0.0_f64, |m, x| m.max(x.abs())),
+        );
+        return DcOpResult {
+            v_node: vec![0.0; n_dc],
+            v_nl: vec![0.0; m],
+            i_nl: vec![0.0; m],
+            converged: false,
+            method: DcOpMethod::Failed,
+            iterations: total_iters,
+        };
+    }
+
     DcOpResult {
         v_node: v_out,
         v_nl: v_nl_fb,
@@ -3196,6 +3268,69 @@ mod tests {
     use super::*;
     use crate::device_types::{BjtParams, DiodeParams};
     use crate::parser::Netlist;
+
+    // ── Finite-but-implausible fallback guard ────────────────────────
+    //
+    // Regression coverage for the "finite runaway" gap: a diverged DC OP
+    // iterate that is astronomically large but `is_finite()` bypasses every
+    // NaN/Inf guard and gets baked into `DC_NL_I`. See
+    // dc_op_ge_active_junction_threshold.md memory note ("STILL OPEN").
+
+    #[test]
+    fn dc_op_failed_fallback_rejects_runaway_finite_iterate() {
+        // D1's two terminals are each tied to ONE resistor and nothing
+        // else. Diodes are never stamped into the LINEAR g_dc system (only
+        // R/L/V are), so the pure-linear guess ignores D1 entirely: anode
+        // settles near VCC (50 V) through R1, cathode settles near 0 V
+        // through R2. The unclamped linear guess therefore puts D1 at
+        // ~50 V forward bias — the exact kind of pathological seed that
+        // detonates through the codegen exp()-clamp-at-40 if it reaches
+        // `evaluate_devices_inner` unclamped.
+        //
+        // `max_iterations = 0` makes every NR strategy (Direct/Source/Gmin)
+        // fail on its very first call (the iteration loop body never runs),
+        // deterministically and cheaply forcing the "all strategies failed"
+        // fallback path without needing a circuit that genuinely fails to
+        // converge.
+        let spice = "Diode runaway repro\n\
+V1 vcc 0 DC 50\n\
+R1 vcc anode 1\n\
+D1 anode cat DMOD\n\
+R2 cat 0 1meg\n\
+.model DMOD D(IS=1e-12 N=1)\n";
+        let netlist = Netlist::parse(spice).unwrap();
+        let mna = MnaSystem::from_netlist(&netlist).unwrap();
+        let device_slots = crate::codegen::ir::CircuitIR::build_device_info(&netlist)
+            .expect("device info build failed");
+        assert_eq!(device_slots.len(), 1, "expected exactly one diode slot");
+
+        let config = DcOpConfig {
+            max_iterations: 0,
+            ..DcOpConfig::default()
+        };
+        let result = solve_dc_operating_point(&mna, &device_slots, &config);
+
+        assert_eq!(result.method, DcOpMethod::Failed);
+        assert!(!result.converged);
+
+        for (i, &i_nl) in result.i_nl.iter().enumerate() {
+            assert!(i_nl.is_finite(), "i_nl[{i}] must be finite, got {i_nl}");
+            // A junction-clamped fallback (~0.6 V) gives a milliamp-scale
+            // diode current. 1 A is already generous headroom; the
+            // pre-fix runaway measures in the hundreds of kiloamps
+            // (IS * exp(40) with IS=1e-12 ~ 2.35e5 A).
+            assert!(
+                i_nl.abs() < 1.0,
+                "i_nl[{i}] = {i_nl} — runaway iterate leaked into the DC_NL_I seed"
+            );
+        }
+        for (i, &v) in result.v_node.iter().enumerate() {
+            assert!(
+                v.is_finite() && v.abs() < 1e3,
+                "v_node[{i}] = {v} implausible for a 50 V-rail circuit"
+            );
+        }
+    }
 
     // ── IC= initial-state solve ──────────────────────────────────────
 

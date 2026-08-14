@@ -878,9 +878,14 @@ fn test_codegen_process_sample_update() {
 fn test_codegen_nan_sanitization() {
     let code = generate_code(SIMPLE_COUPLED);
 
-    // NaN check now happens before state write: checks local `v` not `state.v_prev`
+    // NaN/magnitude check now happens before state write: checks local `v`
+    // not `state.v_prev`. The predicate also bounds finite-but-implausible
+    // magnitude (see docs/aidocs/DEBUGGING.md "finite runaway" entry), so
+    // match the extended form; fall back to the older exact forms for
+    // pre-fix compatibility.
     let sanitize_idx = code
-        .find("if !v.iter().all(|x| x.is_finite())")
+        .find("if !v_is_finite || v.iter().any(|x| x.abs() > STATE_MAX_PLAUSIBLE_MAGNITUDE)")
+        .or_else(|| code.find("if !v.iter().all(|x| x.is_finite())"))
         .or_else(|| code.find("if !state.v_prev.iter().all(|x| x.is_finite())"));
     assert!(sanitize_idx.is_some(), "Should have NaN sanitization block");
 

@@ -36,6 +36,18 @@ pub const OUTPUT_NODES: [usize; NUM_OUTPUTS] = [{{ output_nodes_values }}];
 /// Input resistance (Thevenin equivalent)
 pub const INPUT_RESISTANCE: f64 = {{ input_resistance }};
 
+/// Implausibility bound for a *finite* per-sample NR state (Step 7 in
+/// process_sample). A NaN/Inf iterate is caught unconditionally; this
+/// catches the gap where a solve saturates (e.g. the exp() clamp at ±40
+/// below, or a near-singular NR solve) and produces an astronomically
+/// large but technically finite value that would otherwise bypass every
+/// NaN guard and get written into `state.v_prev`/`i_nl_prev` for every
+/// subsequent sample. Justified against the melange-circuits corpus: the
+/// highest real supply rail is 480 V (tube plate supplies); this is
+/// ~2000x above that, so no legitimate high-voltage circuit is at risk of
+/// being clipped. See docs/aidocs/DEBUGGING.md "finite runaway" entry.
+pub const STATE_MAX_PLAUSIBLE_MAGNITUDE: f64 = 1e6;
+
 /// Recommended silent-warmup sample count (≥1), in HOST-rate samples.
 ///
 /// Computed from the slowest node RC time constant in the circuit:

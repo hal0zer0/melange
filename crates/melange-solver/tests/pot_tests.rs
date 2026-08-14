@@ -698,9 +698,12 @@ fn test_codegen_sanitization_preserves_pot() {
     // (`< 1e-12`) can then lock in forever.
     let code = generate_code(RC_POT_SPICE);
 
-    // NaN check happens before state write: checks local `v` not `state.v_prev`
+    // NaN/magnitude check happens before state write: checks local `v` not
+    // `state.v_prev`. The predicate also bounds finite-but-implausible
+    // magnitude (see docs/aidocs/DEBUGGING.md "finite runaway" entry).
     let sanitize_idx = code
-        .find("if !v.iter().all(|x| x.is_finite())")
+        .find("if !v_is_finite || v.iter().any(|x| x.abs() > STATE_MAX_PLAUSIBLE_MAGNITUDE)")
+        .or_else(|| code.find("if !v.iter().all(|x| x.is_finite())"))
         .or_else(|| code.find("if !state.v_prev.iter().all(|x| x.is_finite())"))
         .expect("Missing sanitization block");
     let after_sanitize = &code[sanitize_idx..];
